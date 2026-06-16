@@ -1,0 +1,32 @@
+# ESP-IDF build output
+build/
+sdkconfig
+sdkconfig.old
+
+# IDF Component Manager
+managed_components/
+dependencies.lock
+
+# Flash artifacts
+*.bin
+*.elf
+*.map
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+
+# Editor
+.vscode/settings.json
+.idea/
+*.swp
+*~
+
+# macOS
+.DS_Store
+
+# Sensitive — never commit real credentials
+sdkconfig.local
+secrets.env

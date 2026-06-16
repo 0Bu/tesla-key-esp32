@@ -1,0 +1,30 @@
+menu "Tesla Key Configuration"
+
+    config TESLA_WIFI_SSID
+        string "WiFi SSID"
+        default "MyHomeNetwork"
+        help
+            SSID of the WiFi network to connect to.
+
+    config TESLA_WIFI_PASSWORD
+        string "WiFi Password"
+        default ""
+        help
+            Password for the WiFi network.
+
+    config TESLA_VIN
+        string "Tesla Vehicle VIN"
+        default ""
+        help
+            17-character VIN of your Tesla vehicle.
+            Can also be set at runtime via NVS.
+
+    config TESLA_BLE_MAC
+        string "Tesla BLE MAC address (optional)"
+        default ""
+        help
+            BLE MAC address of the vehicle (AA:BB:CC:DD:EE:FF).
+            If empty, the device scans for any Tesla BLE beacon.
+            After first scan, the discovered MAC is saved to NVS.
+
+endmenu
