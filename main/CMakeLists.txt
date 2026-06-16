@@ -1,0 +1,19 @@
+idf_component_register(
+    SRCS
+        "main.cpp"
+        "ble_client.cpp"
+        "nvs_storage.cpp"
+        "vehicle_ctrl.cpp"
+        "http_server.cpp"
+    INCLUDE_DIRS
+        "."
+    REQUIRES
+        nvs_flash
+        esp_wifi
+        esp_event
+        esp_netif
+        esp_http_server
+        bt
+        json
+        lwip
+)
