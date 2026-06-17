@@ -36,3 +36,6 @@ secrets.env
 
 # Mock build variant
 /build_mock/
+
+# GitHub Pages site assembled by scripts/build-pages.sh
+/_site/
