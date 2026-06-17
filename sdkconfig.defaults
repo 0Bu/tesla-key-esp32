@@ -29,9 +29,11 @@ CONFIG_ESP_WIFI_TX_BUFFER_TYPE_DYNAMIC=y
 CONFIG_HTTPD_MAX_REQ_HDR_LEN=1024
 CONFIG_HTTPD_MAX_URI_LEN=512
 
-# Stack sizes
+# Stack sizes — the NimBLE host task runs our notify-RX callback, which does
+# tesla-ble protobuf parsing + mbedtls crypto (ECDH/AES-GCM). The 4K default
+# overflows during the session handshake, so give the host task a larger stack.
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
-CONFIG_NIMBLE_STACK_SIZE=8192
+CONFIG_BT_NIMBLE_HOST_TASK_STACK_SIZE=8192
 
 # Logging
 CONFIG_LOG_DEFAULT_LEVEL_INFO=y

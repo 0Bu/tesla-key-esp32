@@ -5,6 +5,8 @@ idf_component_register(
         "nvs_storage.cpp"
         "vehicle_ctrl.cpp"
         "http_server.cpp"
+        "provisioning.cpp"
+        "diag_log.cpp"
     INCLUDE_DIRS
         "."
     REQUIRES
@@ -13,7 +15,9 @@ idf_component_register(
         esp_event
         esp_netif
         esp_http_server
+        esp_app_format
         bt
         json
         lwip
+        driver
 )

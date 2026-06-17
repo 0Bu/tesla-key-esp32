@@ -1,12 +1,16 @@
 #include "ble_client.hpp"
+#include "diag_log.hpp"
 #include <esp_log.h>
+#include <esp_timer.h>
 #include <cstring>
+#include <cstdio>
 #include <algorithm>
 
 #include "host/ble_hs.h"
 #include "host/ble_uuid.h"
 #include "services/gap/ble_svc_gap.h"
 #include "services/gatt/ble_svc_gatt.h"
+#include <vin_utils.h>
 
 static const char* TAG = "ble_client";
 
@@ -54,9 +58,41 @@ static int notify_cb(uint16_t conn_handle, const ble_gatt_error* error,
 
 // ─── BleClient ───────────────────────────────────────────────────────────────
 
+static void scan_timeout_cb(void* arg) {
+    static_cast<BleClient*>(arg)->on_scan_timeout();
+}
+
 BleClient::BleClient() {
     g_instance = this;
-    write_mutex_ = xSemaphoreCreateMutex();
+    write_mutex_  = xSemaphoreCreateMutex();
+    scan_mutex_   = xSemaphoreCreateMutex();
+    client_mutex_ = xSemaphoreCreateMutex();
+    esp_timer_create_args_t ta{};
+    ta.callback = scan_timeout_cb;
+    ta.arg      = this;
+    ta.name     = "ble_scan";
+    esp_timer_create(&ta, &scan_timer_);
+}
+
+// Start a time-limited discovery scan (lists nearby Teslas, does not connect).
+void BleClient::start_discovery(int ms) {
+    if (is_connected() || connecting_) return;
+    want_connect_ = false;
+    if (!scanning_) start_scan_();
+    if (scan_timer_) {
+        esp_timer_stop(scan_timer_);
+        esp_timer_start_once(scan_timer_, (int64_t)ms * 1000);
+    }
+    ESP_LOGI(TAG, "discovery scan started for %d ms", ms);
+}
+
+void BleClient::on_scan_timeout() {
+    // Only end a pure discovery scan — never abort an in-flight connect attempt.
+    if (scanning_ && !want_connect_ && !connecting_ && !is_connected()) {
+        ble_gap_disc_cancel();
+        scanning_ = false;
+        ESP_LOGI(TAG, "discovery scan window ended");
+    }
 }
 
 bool BleClient::start() {
@@ -71,7 +107,7 @@ bool BleClient::start() {
     // Prefer larger MTU to reduce fragmentation
     ble_att_set_preferred_mtu(247);
 
-    int rc = ble_svc_gap_device_name_set("esp32-tesla-key");
+    int rc = ble_svc_gap_device_name_set("tesla-key-esp32");
     if (rc != 0) {
         ESP_LOGW(TAG, "device name set failed: %d", rc);
     }
@@ -82,20 +118,15 @@ bool BleClient::start() {
 
 void BleClient::on_sync() {
     ESP_LOGI(TAG, "NimBLE synced");
-    // Automatically start scanning if we have a configured address
-    // (set by connect() call before sync). Otherwise wait for connect().
-    if (has_target_) {
-        ble_gap_connect(BLE_OWN_ADDR_PUBLIC, &target_addr_,
-                        30000, nullptr, gap_event_cb, this);
-    } else {
-        start_scan_();
-    }
+    // Idle: radio quiet. Discovery scanning is started manually for a limited window
+    // (start_discovery), and a connect scan is started on demand by connect().
 }
 
 void BleClient::start_scan_() {
     ble_gap_disc_params params{};
     params.passive         = 0;
-    params.filter_duplicates = 1;
+    // No duplicate filtering: we want repeated adverts so the listed RSSI stays fresh.
+    params.filter_duplicates = 0;
     params.itvl            = 0x0010; // 10ms
     params.window          = 0x0010;
 
@@ -103,31 +134,102 @@ void BleClient::start_scan_() {
                            &params, gap_event_cb, this);
     if (rc != 0) {
         ESP_LOGE(TAG, "scan start failed: %d", rc);
+        scanning_ = false;
     } else {
+        scanning_ = true;
         ESP_LOGI(TAG, "scanning for Tesla BLE...");
     }
 }
 
-// BleAdapter::connect — called by Vehicle when it wants us to connect
-void BleClient::connect(const std::string& address) {
-    if (is_connected()) return;
+// Start a discovery scan if we are idle (not connected and not mid-connect).
+void BleClient::ensure_scanning_() {
+    if (is_connected() || connecting_ || scanning_) return;
+    start_scan_();
+}
 
-    if (!address.empty()) {
-        // Parse "AA:BB:CC:DD:EE:FF" string into ble_addr_t
-        unsigned int b[6];
-        if (sscanf(address.c_str(), "%02x:%02x:%02x:%02x:%02x:%02x",
-                   &b[5], &b[4], &b[3], &b[2], &b[1], &b[0]) == 6) {
-            target_addr_.type = BLE_ADDR_PUBLIC;
-            for (int i = 0; i < 6; i++) target_addr_.val[i] = (uint8_t)b[i];
-            has_target_ = true;
-            ble_gap_disc_cancel();
-            ble_gap_connect(BLE_OWN_ADDR_PUBLIC, &target_addr_,
-                            30000, nullptr, gap_event_cb, this);
-            return;
+// Upsert a discovered Tesla into the nearby list (called from the host task).
+void BleClient::note_scan_(const ble_gap_disc_desc& d, const ble_hs_adv_fields& f) {
+    if (!scan_mutex_) return;
+    if (xSemaphoreTake(scan_mutex_, 0) != pdTRUE) return;  // never block the host task
+    ScanEntry* e = nullptr;
+    for (auto& s : scan_) {
+        if (memcmp(s.addr, d.addr.val, 6) == 0) { e = &s; break; }
+    }
+    if (!e) {
+        if (scan_.size() < 12) {
+            scan_.push_back(ScanEntry{});
+            e = &scan_.back();
+            memcpy(e->addr, d.addr.val, 6);
+            e->name[0] = '\0';
+        } else {
+            // Replace the stalest entry.
+            e = &scan_[0];
+            for (auto& s : scan_) if (s.last_us < e->last_us) e = &s;
+            memcpy(e->addr, d.addr.val, 6);
+            e->name[0] = '\0';
         }
     }
-    // No address — scan and connect to first Tesla found
-    start_scan_();
+    e->rssi    = d.rssi;
+    e->last_us = esp_timer_get_time();
+    if (f.name != nullptr && f.name_len > 0) {
+        size_t n = f.name_len < sizeof(e->name) - 1 ? f.name_len : sizeof(e->name) - 1;
+        memcpy(e->name, f.name, n);
+        e->name[n] = '\0';
+    }
+    xSemaphoreGive(scan_mutex_);
+}
+
+std::vector<TeslaScan> BleClient::nearby() const {
+    std::vector<TeslaScan> out;
+    if (!scan_mutex_) return out;
+    const int64_t now = esp_timer_get_time();
+    if (xSemaphoreTake(scan_mutex_, pdMS_TO_TICKS(50)) != pdTRUE) return out;
+    for (const auto& s : scan_) {
+        if (now - s.last_us > 15LL * 1000 * 1000) continue;  // drop entries older than 15s
+        char addr[18];
+        snprintf(addr, sizeof(addr), "%02x:%02x:%02x:%02x:%02x:%02x",
+                 s.addr[5], s.addr[4], s.addr[3], s.addr[2], s.addr[1], s.addr[0]);
+        out.push_back(TeslaScan{addr, s.name, s.rssi});
+    }
+    xSemaphoreGive(scan_mutex_);
+    std::sort(out.begin(), out.end(),
+              [](const TeslaScan& a, const TeslaScan& b) { return a.rssi > b.rssi; });
+    return out;
+}
+
+std::string BleClient::peer_addr_str() const {
+    if (!client_mutex_) return "";
+    xSemaphoreTake(client_mutex_, portMAX_DELAY);
+    std::string s = peer_addr_str_;
+    xSemaphoreGive(client_mutex_);
+    return s;
+}
+
+bool BleClient::connected_rssi(int8_t& out) const {
+    if (!is_connected()) return false;
+    return ble_gap_conn_rssi(conn_handle_, &out) == 0;
+}
+
+// BleAdapter::connect — called by Vehicle when it wants us to connect.
+// Sets a connect intent; the running discovery scan connects to the next Tesla
+// advert it sees. (The address argument is unused: we connect to the first Tesla
+// found, robust to Tesla's rotating BLE addresses; correctness is enforced by the
+// VIN/session layer.)
+void BleClient::connect(const std::string& address) {
+    (void)address;
+    if (is_connected()) return;
+    want_connect_ = true;
+    ensure_scanning_();
+}
+
+// Drop a pending connect intent and return to idle scanning/listing.
+void BleClient::stop_connecting() {
+    want_connect_ = false;
+    // No idle scanning: cancel the connect scan if it is still running.
+    if (scanning_ && !is_connected()) {
+        ble_gap_disc_cancel();
+        scanning_ = false;
+    }
 }
 
 void BleClient::disconnect() {
@@ -171,25 +273,40 @@ int BleClient::on_gap_event(ble_gap_event* event) {
                                           event->disc.length_data);
         if (rc != 0) break;
 
-        bool found = false;
-        for (int i = 0; i < fields.num_uuids128; i++) {
-            if (ble_uuid_cmp(&fields.uuids128[i].u, &TESLA_SVC_UUID.u) == 0) {
-                found = true;
-                break;
-            }
-        }
-        if (!found) break;
+        // Tesla vehicles advertise by NAME ("S<hex>C", derived from the VIN) — the
+        // 128-bit service UUID is NOT in the advertisement/scan-response, so we match
+        // on the name (carried in the scan response). The service UUID is only used
+        // later for GATT discovery once connected.
+        if (fields.name == nullptr || fields.name_len == 0) break;
+        std::string adv_name((const char*)fields.name, fields.name_len);
+        if (!TeslaBLE::is_tesla_vehicle_name(adv_name)) break;
 
-        // Found a Tesla vehicle — stop scan and connect
+        // Always record the Tesla in the nearby list (with RSSI) for the web UI.
+        note_scan_(event->disc, fields);
+
+        // Only connect when a command set a connect intent — otherwise keep scanning
+        // and listing.
+        if (!want_connect_ || connecting_) break;
+
+        // Connect to the configured VIN's vehicle (or any Tesla if no VIN is set).
+        if (!target_vin_.empty() && !TeslaBLE::matches_vin(adv_name, target_vin_)) break;
+
         char addr_str[18];
         snprintf(addr_str, sizeof(addr_str),
                  "%02x:%02x:%02x:%02x:%02x:%02x",
                  event->disc.addr.val[5], event->disc.addr.val[4],
                  event->disc.addr.val[3], event->disc.addr.val[2],
                  event->disc.addr.val[1], event->disc.addr.val[0]);
-        ESP_LOGI(TAG, "Tesla BLE found: %s", addr_str);
-        peer_addr_str_ = addr_str;
+        ESP_LOGI(TAG, "Tesla '%s' found: %s — connecting", adv_name.c_str(), addr_str);
+        if (client_mutex_) {
+            xSemaphoreTake(client_mutex_, portMAX_DELAY);
+            peer_addr_str_ = addr_str;
+            xSemaphoreGive(client_mutex_);
+        }
 
+        connecting_   = true;
+        want_connect_ = false;
+        scanning_     = false;
         ble_gap_disc_cancel();
         rc = ble_gap_connect(BLE_OWN_ADDR_PUBLIC,
                              &event->disc.addr,
@@ -197,19 +314,32 @@ int BleClient::on_gap_event(ble_gap_event* event) {
                              gap_event_cb, this);
         if (rc != 0) {
             ESP_LOGE(TAG, "connect failed: %d", rc);
+            connecting_ = false;
+            ensure_scanning_();
         }
         break;
     }
 
     case BLE_GAP_EVENT_CONNECT: {
+        connecting_ = false;
         if (event->connect.status != 0) {
             ESP_LOGE(TAG, "connect error: %d", event->connect.status);
             if (on_connected_) on_connected_(false);
-            start_scan_();
+            // Keep the intent so an in-flight command retries within its timeout
+            // window; ensure_connected_() clears it via stop_connecting() on timeout.
+            want_connect_ = true;
+            ensure_scanning_();
             break;
         }
-        conn_handle_ = event->connect.conn_handle;
+        conn_handle_  = event->connect.conn_handle;
+        want_connect_ = false;
         ESP_LOGI(TAG, "connected, handle=%d", conn_handle_);
+
+        // Reset discovery state for this fresh connection.
+        svc_start_handle_  = 0;
+        svc_end_handle_    = 0;
+        write_handle_      = 0;
+        notify_val_handle_ = 0;
 
         // Discover Tesla service
         int rc = ble_gattc_disc_svc_by_uuid(conn_handle_,
@@ -227,7 +357,16 @@ int BleClient::on_gap_event(ble_gap_event* event) {
         write_handle_      = 0;
         notify_handle_     = 0;
         notify_val_handle_ = 0;
+        connecting_        = false;
+        want_connect_      = false;
+        scanning_          = false;
+        if (client_mutex_) {
+            xSemaphoreTake(client_mutex_, portMAX_DELAY);
+            peer_addr_str_.clear();
+            xSemaphoreGive(client_mutex_);
+        }
         if (on_connected_) on_connected_(false);
+        // Stay idle (no auto-scan); discovery is manual, connect is on demand.
         break;
 
     case BLE_GAP_EVENT_NOTIFY_RX: {
@@ -237,8 +376,13 @@ int BleClient::on_gap_event(ble_gap_event* event) {
         uint16_t pkt_len = OS_MBUF_PKTLEN(om);
         std::vector<uint8_t> buf(pkt_len);
         int rc = os_mbuf_copydata(om, 0, pkt_len, buf.data());
-        if (rc == 0 && on_rx_data_) {
-            on_rx_data_(buf);
+        if (rc == 0) {
+            if (diag_verbose()) {
+                char hex[3*64+1]; size_t n = std::min<size_t>(pkt_len, 64); size_t p = 0;
+                for (size_t i = 0; i < n; i++) p += snprintf(hex+p, sizeof(hex)-p, "%02x ", buf[i]);
+                ESP_LOGI(TAG, "RX notify len=%u: %s", pkt_len, hex);
+            }
+            if (on_rx_data_) on_rx_data_(buf);
         }
         break;
     }
@@ -274,7 +418,13 @@ int BleClient::on_svc_disc(uint16_t conn_handle,
         ESP_LOGE(TAG, "svc disc error: %d", error->status);
         return 0;
     }
-    if (svc && ble_uuid_cmp(&svc->uuid.u, &TESLA_SVC_UUID.u) == 0) {
+    // Keep the FIRST valid Tesla service match. NimBLE may invoke this callback an
+    // extra time with a sentinel range (0xFFFF-0xFFFF); ignore invalid ranges so they
+    // don't clobber the real handles and leave char discovery searching an empty range.
+    if (svc && svc_start_handle_ == 0 &&
+        svc->start_handle != 0 && svc->start_handle != 0xFFFF &&
+        svc->start_handle <= svc->end_handle &&
+        ble_uuid_cmp(&svc->uuid.u, &TESLA_SVC_UUID.u) == 0) {
         svc_start_handle_ = svc->start_handle;
         svc_end_handle_   = svc->end_handle;
         ESP_LOGD(TAG, "Tesla service: %d-%d", svc_start_handle_, svc_end_handle_);

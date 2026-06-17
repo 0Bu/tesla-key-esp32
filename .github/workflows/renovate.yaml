@@ -1,0 +1,35 @@
+name: Renovate
+on:
+  schedule:
+    - cron: '0 5 * * *'
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+  pull-requests: write
+jobs:
+  renovate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: renovatebot/github-action@693b9ef15eec82123529a37c782242f091365961 # v46.1.14
+        with:
+          token: ${{ secrets.RENOVATE_TOKEN }}
+        env:
+          RENOVATE_PLATFORM: github
+          RENOVATE_PLATFORM_COMMIT: true
+          RENOVATE_EXTENDS: config:best-practices,helpers:pinGitHubActionDigests
+          RENOVATE_AUTODISCOVER: true
+          RENOVATE_AUTODISCOVER_FILTER: ${{ github.repository }}
+          RENOVATE_CONFIG_MIGRATION: true
+          RENOVATE_AUTOMERGE: true
+          # Wait for required status checks (the build workflow) before automerging
+          # so a failing dependency bump is never merged automatically.
+          RENOVATE_IGNORE_TESTS: false
+          # 'auto' lets Renovate refresh/rebase its PR branches so they pick up
+          # the latest target version and re-run required checks. 'never' froze
+          # PRs (no version bump, no check re-run), which blocked automerge.
+          RENOVATE_REBASE_WHEN: auto
+          RENOVATE_SEMANTIC_COMMITS: disabled
+#         LOG_LEVEL: debug
+#         RENOVATE_DRY_RUN: full

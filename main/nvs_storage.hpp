@@ -26,5 +26,5 @@ private:
     bool initialized_{false};
 
     // NVS keys are max 15 chars — map long library keys to short ones
-    const char* map_key(const std::string& key) const;
+    std::string map_key(const std::string& key) const;
 };
