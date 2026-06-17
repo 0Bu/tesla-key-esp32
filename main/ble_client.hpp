@@ -16,6 +16,16 @@
 #include "freertos/semphr.h"
 #include "freertos/queue.h"
 
+// NimBLE's <nimble/ble.h> → <os/os.h> leaks function-like min()/max() macros
+// that clobber libstdc++ <chrono>/<algorithm> and std::min/std::max. Undefine
+// them here so every translation unit that pulls in this header stays clean.
+#ifdef min
+#undef min
+#endif
+#ifdef max
+#undef max
+#endif
+
 // Tesla BLE GATT UUIDs
 // Service:  00000211-b2d1-43f0-9b88-960cebf8b91e
 // Write:    00000212-b2d1-43f0-9b88-960cebf8b91e

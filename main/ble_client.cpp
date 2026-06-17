@@ -12,6 +12,15 @@
 #include "services/gatt/ble_svc_gatt.h"
 #include <vin_utils.h>
 
+// These BLE headers re-introduce NimBLE's min()/max() macros (see ble_client.hpp);
+// drop them again before the std::min use further down.
+#ifdef min
+#undef min
+#endif
+#ifdef max
+#undef max
+#endif
+
 static const char* TAG = "ble_client";
 
 // Singleton storage
