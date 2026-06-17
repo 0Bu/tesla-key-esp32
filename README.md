@@ -61,19 +61,22 @@ per car (manage in Tesla app → Security → Keys).
 
 ## Step 5 — Add to evcc
 
+In the evcc UI go to **Settings → Vehicles → Add → Custom device** and paste the
+flat config below (no `vehicles:` wrapper, no list dash — the editor handles that):
+
 ```yaml
-vehicles:
-  - name: tesla
-    type: template
-    template: tesla-ble
-    title: Tesla Key ESP32              # optional, shown in evcc UI
-    vin: YOUR-17-CHAR-VIN
-    capacity: 60                        # optional, battery kWh
-    url: http://tesla-key-esp32.local   # or http://<device-ip>
-    port: 80                            # this device uses port 80 (template default is 8080)
+name: tesla
+type: template
+template: tesla-ble
+title: Tesla Key ESP32              # optional, shown in evcc UI
+vin: YOUR-17-CHAR-VIN
+capacity: 60                        # optional, battery kWh
+url: http://tesla-key-esp32.local   # or http://<device-ip>
+port: 80                            # this device uses port 80 (template default is 8080)
 ```
 
-Restart evcc.
+If you edit `evcc.yaml` by hand instead, nest the same fields under `vehicles:`
+as a list item (`  - name: tesla` …). Restart evcc.
 
 ---
 
