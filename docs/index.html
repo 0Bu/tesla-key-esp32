@@ -62,15 +62,6 @@
     button.flash:hover{filter:brightness(1.05)}
     button.flash:active{transform:translateY(1px)}
     .hint{color:var(--muted);font-size:.85rem;text-align:center;margin:.4rem 0 0}
-    .version{
-      display:inline-flex;align-items:center;gap:.4rem;
-      font-size:.82rem;font-weight:600;
-      color:var(--muted);background:var(--code-bg);
-      padding:.3rem .7rem;border-radius:999px;margin:.9rem 0 0;
-      font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
-    }
-    .version[hidden]{display:none}
-    .version b{color:var(--fg)}
     .card{
       background:var(--card);border:1px solid var(--border);
       border-radius:var(--radius);box-shadow:var(--shadow);
@@ -124,12 +115,11 @@
 
     <div class="cta">
       <esp-web-install-button manifest="manifest.json">
-        <button class="flash" slot="activate">Install firmware</button>
+        <button class="flash" slot="activate">Install firmware<span id="fwver"></span></button>
         <span slot="unsupported">Your browser does not support Web Serial — use desktop Chrome or Edge.</span>
         <span slot="not-allowed">Serial access was not granted.</span>
       </esp-web-install-button>
       <p class="hint">Plug in the ESP32-S3 over USB first.</p>
-      <div><span class="version" id="fwver" hidden></span></div>
     </div>
 
     <section class="card">
@@ -164,19 +154,18 @@
   </main>
 
   <script>
-    // Surface the firmware version that will actually be flashed. The version is
-    // the single source of truth in manifest.json (written by build-pages.sh in
-    // CI), which ESP Web Tools also reads — so the badge can never drift from the
-    // bins the installer writes.
+    // Append the firmware version that will actually be flashed to the button
+    // label. The version is the single source of truth in manifest.json (written
+    // by build-pages.sh in CI), which ESP Web Tools also reads — so the label can
+    // never drift from the bins the installer writes.
     fetch("manifest.json", { cache: "no-store" })
       .then(function (r) { return r.ok ? r.json() : null; })
       .then(function (m) {
         if (!m || !m.version) return;
-        var el = document.getElementById("fwver");
-        el.innerHTML = "Firmware version <b>" + String(m.version).replace(/[<>&]/g, "") + "</b>";
-        el.hidden = false;
+        document.getElementById("fwver").textContent =
+          " " + String(m.version).replace(/[<>&]/g, "");
       })
-      .catch(function () { /* no manifest (e.g. local preview) → stay hidden */ });
+      .catch(function () { /* no manifest (e.g. local preview) → label stays plain */ });
   </script>
 </body>
 </html>
