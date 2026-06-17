@@ -8,8 +8,6 @@
 
 #include "host/ble_hs.h"
 #include "host/ble_uuid.h"
-#include "services/gap/ble_svc_gap.h"
-#include "services/gatt/ble_svc_gatt.h"
 #include <vin_utils.h>
 
 // These BLE headers re-introduce NimBLE's min()/max() macros (see ble_client.hpp);
@@ -110,16 +108,15 @@ bool BleClient::start() {
     ble_hs_cfg.sync_cb  = on_sync_cb;
     ble_hs_cfg.reset_cb = on_reset_cb;
 
-    ble_svc_gap_init();
-    ble_svc_gatt_init();
-
     // Prefer larger MTU to reduce fragmentation
     ble_att_set_preferred_mtu(247);
 
-    int rc = ble_svc_gap_device_name_set("tesla-key-esp32");
-    if (rc != 0) {
-        ESP_LOGW(TAG, "device name set failed: %d", rc);
-    }
+    // This device is BLE *central only* (it scans, connects, writes, subscribes).
+    // It never advertises or exposes a GATT server, so the GAP/GATT *server*
+    // services (ble_svc_gap/ble_svc_gatt) and the local device name are
+    // intentionally not initialised. ESP-IDF 5.5 no longer compiles those
+    // service sources when the peripheral role is disabled, so referencing them
+    // would fail to link.
 
     nimble_port_freertos_init(nimble_host_task);
     return true;
