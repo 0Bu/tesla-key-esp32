@@ -1,4 +1,4 @@
-# esp32-tesla-key
+# tesla-key-esp32
 
 ESP-IDF 5.x project for ESP32-S3. Acts as a BLE↔HTTP proxy for Tesla vehicles,
 API-compatible with TeslaBleHttpProxy (works as evcc BLE vehicle integration).
@@ -53,10 +53,16 @@ All commands: `charge_start`, `charge_stop`, `set_charging_amps`, `set_charge_li
 POST /api/1/vehicles/{VIN}/command/{command}   # execute command
 GET  /api/1/vehicles/{VIN}/vehicle_data        # charge state
 GET  /api/1/vehicles/{VIN}/body_controller_state
-POST /gen_keys                                 # generate ECDSA P-256 key
-POST /send_key[?role=owner]                    # pair with vehicle
+GET  /status                                   # web-UI JSON (wifi, ble, vehicle cache)
+POST /scan                                     # start a time-limited BLE discovery scan
+GET  /diag                                     # plain-text in-memory diag log (?verbose=1 raw RX, ?clear=1 reset)
+POST /gen_keys[?force=1]                       # generate key (refuses overwrite w/o force)
+POST /send_key                                 # pair with vehicle (Charging Manager only)
+POST /set_vin                                  # persist VIN + reboot
 GET  /api/proxy/1/version
 ```
+
+No HTTP auth / TLS by design (evcc cannot send credentials) — trusted LAN only. See docs/SECURITY.md.
 
 ## evcc Integration
 
@@ -71,7 +77,7 @@ vehicles:
 ## Important Notes
 
 - Private key stored in NVS unencrypted — secure physical access to the device
-- `charged_manager` role (default) limits commands to charging + wake; use `?role=owner` for full access
+- Keys are enrolled as **Charging Manager only** (charging + wake); owner role is not exposed (`?role=owner` → `403`). Sole purpose is the evcc BLE integration.
 - BLE connection is on-demand; first command after idle takes ~3-5s for scan+connect
 - Tesla allows max 3 simultaneous BLE keys per vehicle
 - Fragment size: 20 bytes per BLE write chunk (safe for all ESP32 BLE MTU configs)

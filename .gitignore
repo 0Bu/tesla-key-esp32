@@ -12,6 +12,9 @@ dependencies.lock
 *.elf
 *.map
 
+# …but DO ship the web-installer firmware served by GitHub Pages
+!docs/*.bin
+
 # Python
 __pycache__/
 *.pyc
@@ -30,3 +33,6 @@ __pycache__/
 # Sensitive — never commit real credentials
 sdkconfig.local
 secrets.env
+
+# Mock build variant
+/build_mock/

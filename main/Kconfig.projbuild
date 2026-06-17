@@ -2,9 +2,11 @@ menu "Tesla Key Configuration"
 
     config TESLA_WIFI_SSID
         string "WiFi SSID"
-        default "MyHomeNetwork"
+        default ""
         help
             SSID of the WiFi network to connect to.
+            Leave empty to boot into the SoftAP setup portal ("tesla-key-esp32-setup")
+            on first start, where WiFi + VIN can be entered from a phone.
 
     config TESLA_WIFI_PASSWORD
         string "WiFi Password"

@@ -10,11 +10,17 @@
 #include "nvs_flash.h"
 #include "lwip/err.h"
 #include "lwip/sys.h"
+#include "mdns.h"
+#include "esp_sntp.h"
 
 #include "ble_client.hpp"
 #include "nvs_storage.hpp"
 #include "vehicle_ctrl.hpp"
 #include "http_server.hpp"
+#include "provisioning.hpp"
+#include "diag_log.hpp"
+
+static const char* MDNS_HOSTNAME = "tesla-key-esp32";  // → http://tesla-key-esp32.local
 
 static const char* TAG = "main";
 
@@ -86,6 +92,9 @@ static bool wifi_connect(const char* ssid, const char* password) {
 // ─── app_main ─────────────────────────────────────────────────────────────────
 
 extern "C" void app_main() {
+    // Capture console output into the in-memory diagnostic ring (GET /diag).
+    diag_log_init();
+
     // Initialize NVS
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
@@ -105,8 +114,9 @@ extern "C" void app_main() {
     config_store.load_str("wifi_pass", password);
 
     if (ssid.empty()) {
-        ESP_LOGE(TAG, "WiFi SSID not configured. Set CONFIG_TESLA_WIFI_SSID via menuconfig.");
-        while (true) vTaskDelay(pdMS_TO_TICKS(5000));
+        ESP_LOGW(TAG, "No WiFi configured — starting setup portal (join WiFi '%s')",
+                 "tesla-key-esp32-setup");
+        provisioning_run(config_store);  // never returns; reboots on save
     }
 
     // Resolve VIN
@@ -124,12 +134,31 @@ extern "C" void app_main() {
     ESP_LOGI(TAG, "VIN: %s  BLE MAC: %s", vin.c_str(),
              ble_mac.empty() ? "(scan)" : ble_mac.c_str());
 
-    // Connect to WiFi
+    // Connect to WiFi. With stored credentials, a failure is usually a transient
+    // outage (e.g. router rebooting), but if it persists (e.g. wrong password),
+    // fallback to the setup portal so the user can reconfigure it.
     if (!wifi_connect(ssid.c_str(), password.c_str())) {
-        ESP_LOGE(TAG, "WiFi failed — rebooting in 10s");
-        vTaskDelay(pdMS_TO_TICKS(10000));
-        esp_restart();
+        ESP_LOGW(TAG, "WiFi connection failed — starting setup portal");
+        provisioning_run(config_store); // never returns; reboots on save
     }
+
+    // mDNS: advertise http://tesla-key-esp32.local so users need not find the IP
+    if (mdns_init() == ESP_OK) {
+        mdns_hostname_set(MDNS_HOSTNAME);
+        mdns_instance_name_set("tesla-key-esp32");
+        mdns_service_add(nullptr, "_http", "_tcp", 80, nullptr, 0);
+        ESP_LOGI(TAG, "mDNS: http://%s.local", MDNS_HOSTNAME);
+    } else {
+        ESP_LOGW(TAG, "mDNS init failed");
+    }
+
+    // SNTP: the tesla-ble session-freshness checks compare the vehicle's session
+    // clock against wall-clock time. Without a real clock the comparison underflows
+    // and stored sessions are rejected on every boot ("session too old"), forcing a
+    // re-auth on the first command. Start SNTP so the device has real UTC.
+    esp_sntp_setoperatingmode(ESP_SNTP_OPMODE_POLL);
+    esp_sntp_setservername(0, "pool.ntp.org");
+    esp_sntp_init();
 
     // BLE + NVS storage for Tesla sessions/key
     static NvsStorageAdapter tesla_store("tesla_ble");
@@ -142,15 +171,31 @@ extern "C" void app_main() {
     // It also passes the config_store so it can save the discovered MAC.
     vehicle.init(vin, ble_client, tesla_store, config_store, ble_mac);
 
-    // Start NimBLE host; if MAC is known it connects directly, else scans.
-    if (!ble_mac.empty()) {
-        ble_client.connect(ble_mac);
+    // Create the ECDSA key on first boot so a key always exists (and a fingerprint is
+    // shown). Regeneration is an explicit, confirmed action in the web UI. This never
+    // overwrites an existing key — only generates when none is present.
+    if (!vehicle.has_key()) {
+        ESP_LOGI(TAG, "no key in storage — generating initial key");
+        if (vehicle.generate_key()) {
+            ESP_LOGI(TAG, "initial key generated, fingerprint %s",
+                     vehicle.key_fingerprint().c_str());
+        } else {
+            ESP_LOGE(TAG, "initial key generation failed");
+        }
+    } else {
+        ESP_LOGI(TAG, "key present, fingerprint %s", vehicle.key_fingerprint().c_str());
     }
+
+    // Match the vehicle by its VIN-derived BLE name during scan/connect.
+    ble_client.set_target_vin(vin);
+
+    // Start NimBLE host. Discovery scanning is manual/time-limited; the client
+    // connects on demand when a command is issued.
     ble_client.start();
 
     http_server_start(vehicle);
 
-    ESP_LOGI(TAG, "esp32-tesla-key running. API on port 80.");
+    ESP_LOGI(TAG, "tesla-key-esp32 running. API on port 80.");
     // Main task is no longer needed; Vehicle loop + HTTP server run in their own tasks.
     vTaskDelete(nullptr);
 }
