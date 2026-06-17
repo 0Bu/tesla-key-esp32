@@ -11,8 +11,10 @@ USB data cable for flashing.
 
 ## Flash prebuilt artifacts
 
-Browser flasher + WiFi/VIN setup: [../README.md](../README.md). The flasher is served from
-`docs/` (GitHub Pages, ESP Web Tools / Web Serial).
+Browser flasher + WiFi/VIN setup: [../README.md](../README.md). The flasher is served on
+GitHub Pages (ESP Web Tools / Web Serial), rebuilt and deployed automatically by CI on every
+firmware change; each change also publishes a
+[GitHub release](https://github.com/0Bu/tesla-key-esp32/releases/latest) with the same bins.
 
 Flash by hand (preserves `nvs`):
 ```bash
