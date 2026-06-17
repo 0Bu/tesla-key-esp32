@@ -143,13 +143,14 @@
         WiFi <i>and</i> the VIN there. The device then reboots and joins your network.</p>
     </div>
 
-    <p class="foot">The flasher reads the parts listed in <code>manifest.json</code> —
-      <code>bootloader.bin</code>, <code>partition-table.bin</code> and the app
-      (<code>tesla-key-esp32-&lt;version&gt;.bin</code>) — next to this page. Drop them
-      in from the GitHub release / CI artifact (or run
-      <code>scripts/stage-web-installer.sh</code> after a local build). Flashing the
-      app/bootloader/partition table separately keeps the <code>nvs</code> partition
-      intact, so updates preserve WiFi, VIN and key.</p>
+    <p class="foot">This page always serves the latest CI build — it is rebuilt and
+      deployed automatically on every firmware change, and each change also publishes a
+      <a href="https://github.com/0Bu/tesla-key-esp32/releases/latest">GitHub release</a>
+      for manual flashing. The flasher reads <code>bootloader.bin</code>,
+      <code>partition-table.bin</code> and the app (<code>tesla-key-esp32.bin</code>)
+      listed in <code>manifest.json</code>. Flashing the app/bootloader/partition table
+      separately keeps the <code>nvs</code> partition intact, so updates preserve WiFi,
+      VIN and key.</p>
   </main>
 </body>
 </html>
