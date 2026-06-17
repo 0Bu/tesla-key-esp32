@@ -52,7 +52,7 @@ jobs:
       - name: Build firmware (ESP-IDF v5.5.4)
         uses: espressif/esp-idf-ci-action@v1
         with:
-          esp_idf_version: v5.5.4
+          esp_idf_version: v6.0.1
           target: esp32s3
           # Build, then export the flashable parts SEPARATELY (bootloader @0x0,
           # partition table @0x8000, app @0x10000). ESP Web Tools writes these at
