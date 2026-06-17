@@ -43,11 +43,14 @@ Shows WiFi, Bluetooth and pairing status.
 
 ## Step 4 — Pair with the car
 
-One-time. The key is generated automatically, and pairing starts automatically when the
-device is near the car — there is no button to press.
+One-time. The key is generated automatically, and the device starts sending its enrolment
+request automatically when it is near the car — there is no button to press. The car only
+shows the pairing dialog while a Tesla NFC keycard is lying on the center-console card reader.
 
 1. Park within Bluetooth range (~10 m). The web UI status goes *searching… → connecting…*.
-2. The car's touchscreen shows a pairing request (*"Add new key"* / *"Bestätigen"*).
+2. Place an existing Tesla NFC keycard on the center console (the card reader behind the
+   cup holders). Only then does the car's touchscreen show a pairing request
+   (*"Add new key"* → *"Confirm"*).
 3. Confirm on the touchscreen. The web UI then shows **paired**.
 
 The new key appears as *"Unknown key"* in the car's key list. It pairs as a Charging Manager
@@ -61,10 +64,13 @@ per car (manage in Tesla app → Security → Keys).
 ```yaml
 vehicles:
   - name: tesla
+    type: template
     template: tesla-ble
+    title: Tesla Key ESP32              # optional, shown in evcc UI
     vin: YOUR-17-CHAR-VIN
+    capacity: 60                        # optional, battery kWh
     url: http://tesla-key-esp32.local   # or http://<device-ip>
-    port: 80                            # this device uses port 80
+    port: 80                            # this device uses port 80 (template default is 8080)
 ```
 
 Restart evcc.
@@ -86,7 +92,7 @@ Restart evcc.
 | Installer shows no serial port | Chrome/Edge desktop, data cable, hold **BOOT** while plugging in. |
 | `tesla-key-esp32.local` won't load | Use the device IP from the router. |
 | Need to change WiFi | The `tesla-key-esp32-setup` network reappears whenever no WiFi is configured — rejoin it. |
-| No pairing prompt on the car | Bring the device closer; car must be awake; wait for *connecting…* in the web UI. |
+| No pairing prompt on the car | Place a Tesla NFC keycard on the center-console reader — the dialog only appears while a card is present; also bring the device closer, car must be awake, wait for *connecting…* in the web UI. |
 | evcc shows no battery / current | Set `port: 80`; car must be in Bluetooth range. |
 
 Full reference: [docs/README.md](docs/README.md).
