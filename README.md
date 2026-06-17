@@ -93,6 +93,20 @@ Full reference: [docs/README.md](docs/README.md).
 
 ---
 
+## Relation to TeslaBleHttpProxy
+
+This firmware implements the same HTTP API as
+[TeslaBleHttpProxy](https://github.com/wimaha/TeslaBleHttpProxy), a mature and well-maintained
+project that this one builds on. TeslaBleHttpProxy runs as a Docker container or host service
+and is a good fit when a server, NAS or Raspberry Pi is already running near the car. Because
+the API is shared, evcc talks to either one without changes.
+
+The difference is the hardware. This project runs the proxy directly on an ESP32-S3 board on a
+USB charger, with no separate computer and lower power draw. Both reach the same result;
+choose by whichever hardware you already have.
+
+---
+
 ## Notes on scope
 
 - Local network only — keep it on a trusted LAN, never expose it to the internet ([security](docs/SECURITY.md)).
