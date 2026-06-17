@@ -76,10 +76,12 @@ WiFi, VIN, private key and BLE sessions live in the `nvs` partition (`0x9000`, n
 
 ## Pairing
 
-Fully automatic. On first boot the device generates an ECDSA P-256 key (stored in NVS, never
-leaves the device). While unpaired and the car is in BLE range, the auto-pair task probes the
-car and sends a whitelist-add; the car shows a pairing dialog on the **touchscreen**. Confirm
-on screen within ~45 s. No Pair button, no NFC card.
+Mostly automatic, with one manual step at the car. On first boot the device generates an
+ECDSA P-256 key (stored in NVS, never leaves the device). While unpaired and the car is in BLE
+range, the auto-pair task probes the car and sends a whitelist-add. The car only shows the
+pairing dialog on the **touchscreen** while a Tesla NFC keycard is resting on the
+center-console card reader — place a card there, then confirm on screen within ~45 s. No Pair
+button in the web UI, but the NFC card is required to authorise the enrolment.
 
 - Key fingerprint = `SHA-1(pubkey)[:4]` (e.g. `0E:8A:1D:BE`); shown in the web UI.
 - Regenerate: tap the fingerprint in the UI, or `POST /gen_keys?force=1`. Without `force`,
@@ -165,10 +167,13 @@ GET  /api/proxy/1/version  Firmware version
 ```yaml
 vehicles:
   - name: tesla
+    type: template                      # required when using template:
     template: tesla-ble
+    title: Tesla Key ESP32              # optional
     vin: 5YJ3E1EA1JF000001
+    capacity: 60                        # optional, battery kWh
     url: http://tesla-key-esp32.local   # or http://<ESP32-IP>
-    port: 80                            # device serves on 80 (evcc default 8080)
+    port: 80                            # device serves on 80 (template default 8080)
 ```
 
 evcc calls: `GET …/vehicle_data?endpoints=charge_state`,
@@ -186,7 +191,8 @@ Log: `scanning for Tesla BLE...` → `Tesla '<name>' found: … — connecting`.
 **Command times out** (`'charge_start' timed out`) — car in deep sleep; `wake_up` first,
 wait 5 s, retry. Stale session: `idf.py erase-flash && idf.py flash`.
 
-**No pairing prompt** — car awake + in range; `key_present: true` in `/status` (else
+**No pairing prompt** — a Tesla NFC keycard must be on the center-console reader for the
+dialog to appear; car awake + in range; `key_present: true` in `/status` (else
 `/gen_keys?force=1`); watch for `auto-pair: requesting key enrolment` in `/diag`; confirm on
 touchscreen within ~45 s, or `POST /send_key` to retrigger.
 
