@@ -164,16 +164,19 @@ GET  /api/proxy/1/version  Firmware version
 
 ## evcc Integration
 
+In the evcc UI (**Settings → Vehicles → Add → Custom device**) the fields are flat —
+no `vehicles:` wrapper, no list dash; the editor adds those. For hand-edited
+`evcc.yaml`, nest the same fields under `vehicles:` as a list item.
+
 ```yaml
-vehicles:
-  - name: tesla
-    type: template                      # required when using template:
-    template: tesla-ble
-    title: Tesla Key ESP32              # optional
-    vin: 5YJ3E1EA1JF000001
-    capacity: 60                        # optional, battery kWh
-    url: http://tesla-key-esp32.local   # or http://<ESP32-IP>
-    port: 80                            # device serves on 80 (template default 8080)
+name: tesla
+type: template                      # required when using template:
+template: tesla-ble
+title: Tesla Key ESP32              # optional
+vin: 5YJ3E1EA1JF000001
+capacity: 60                        # optional, battery kWh
+url: http://tesla-key-esp32.local   # or http://<ESP32-IP>
+port: 80                            # device serves on 80 (template default 8080)
 ```
 
 evcc calls: `GET …/vehicle_data?endpoints=charge_state`,
