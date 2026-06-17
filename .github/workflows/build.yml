@@ -17,7 +17,7 @@ jobs:
         id: version
         run: echo "version=$(tr -d '[:space:]' < version.txt)" >> "$GITHUB_OUTPUT"
 
-      - name: Build firmware (ESP-IDF v5.3.2)
+      - name: Build firmware (ESP-IDF v5.5.4)
         uses: espressif/esp-idf-ci-action@v1
         with:
           esp_idf_version: v5.5.4
