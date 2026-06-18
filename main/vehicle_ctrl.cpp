@@ -165,17 +165,20 @@ void VehicleController::auto_pair_task_fn_(void* arg) {
         if (self->has_session()) {
             // A live session means (re-)pairing succeeded; drop the re-auth notice.
             self->repair_notice_ = false;
-            // Paired — on-demand connect serves commands. Periodically run a signed
-            // health poll so a key deleted on the car side is noticed even when no
-            // commands are flowing (otherwise the UI would keep showing "paired").
-            // make_result_cb_ trips pairing_lost_ when the car rejects our key.
+            // Paired — on-demand connect serves commands. Run a signed VCSEC health poll
+            // on a short cadence so a key deleted on the car side is noticed quickly even
+            // when no evcc traffic is flowing (otherwise the UI keeps showing "paired").
+            // make_result_cb_ trips pairing_lost_ when the car rejects our key. The poll
+            // hits the always-on body controller (VCSEC), which does NOT wake the car's
+            // main computer (wake sequences are infotainment-only), so a 5 s cadence is
+            // safe — no battery drain — and bounds detection latency to ~5 s + 2 s confirm.
             self->health_probe_();
             // The probe just detected the key is gone → re-key now (handled at the loop
-            // top) instead of sitting "paired" for another 30 s.
+            // top) instead of sitting "paired" any longer.
             if (self->pairing_lost_) continue;
-            // After a first (unconfirmed) auth rejection, re-probe in 3 s to confirm-and-
-            // react fast; otherwise the normal 30 s cadence keeps the car undisturbed.
-            vTaskDelay(pdMS_TO_TICKS(self->auth_fail_streak_ > 0 ? 3000 : 30000));
+            // After a first (unconfirmed) auth rejection, re-probe in 2 s to confirm-and-
+            // react fast; otherwise the steady 5 s cadence.
+            vTaskDelay(pdMS_TO_TICKS(self->auth_fail_streak_ > 0 ? 2000 : 5000));
             continue;
         }
 
