@@ -168,8 +168,14 @@ void VehicleController::auto_pair_task_fn_(void* arg) {
             // Paired — on-demand connect serves commands. Periodically run a signed
             // health poll so a key deleted on the car side is noticed even when no
             // commands are flowing (otherwise the UI would keep showing "paired").
+            // make_result_cb_ trips pairing_lost_ when the car rejects our key.
             self->health_probe_();
-            vTaskDelay(pdMS_TO_TICKS(30000));
+            // The probe just detected the key is gone → re-key now (handled at the loop
+            // top) instead of sitting "paired" for another 30 s.
+            if (self->pairing_lost_) continue;
+            // After a first (unconfirmed) auth rejection, re-probe in 3 s to confirm-and-
+            // react fast; otherwise the normal 30 s cadence keeps the car undisturbed.
+            vTaskDelay(pdMS_TO_TICKS(self->auth_fail_streak_ > 0 ? 3000 : 30000));
             continue;
         }
 
@@ -272,15 +278,35 @@ bool VehicleController::ensure_connected_(int timeout_ms) {
 VehicleController::ResultCb VehicleController::make_result_cb_() {
     return [this](TeslaBLE::OperationResult result) {
         last_result_ = result.compatible_success();
+        if (last_result_) {
+            // A good response proves the car still trusts our key — clear any pending
+            // "key might be gone" streak so a later one-off glitch starts from zero.
+            auth_fail_streak_ = 0;
+        }
         if (result.is_failure() && result.error()) {
             const std::string& msg = result.error()->message();
             ESP_LOGW(TAG, "command failed: %s", msg.c_str());
-            // KEY_NOT_ON_WHITELIST ("… key not on whitelist - pairing required") means
-            // the vehicle no longer trusts our key (it was deleted on the car side).
-            // Flag it so the auto-pair supervisor re-keys and restarts pairing, and so
-            // the UI/evcc stop reporting a pairing that is actually gone.
+            // Two distinct ways a Tesla signals "your key is no longer whitelisted"
+            // (it was deleted on the car side); both must invalidate the pairing so the
+            // supervisor re-keys + re-pairs and the UI/evcc stop showing a dead pairing:
+            //
+            //  a) KEY_NOT_ON_WHITELIST → "… key not on whitelist - pairing required".
+            //     Definitive, act immediately.
+            //  b) The car answers a signed command with a session-info reply that has no
+            //     HMAC tag (it can't authenticate a key it no longer holds) → the library
+            //     reports "auth response authentication failed". Observed in the field as
+            //     the actual response to key deletion. This message is also used for one-
+            //     off auth glitches, so require two in a row before declaring the pairing
+            //     lost (the supervisor re-probes ~3 s after the first, so confirmation
+            //     takes seconds). Counter resets on any success above.
             if (msg.find("whitelist") != std::string::npos) {
-                pairing_lost_ = true;
+                pairing_lost_      = true;
+                auth_fail_streak_  = 0;
+            } else if (msg.find("authentication failed") != std::string::npos) {
+                if (++auth_fail_streak_ >= 2) {
+                    pairing_lost_     = true;
+                    auth_fail_streak_ = 0;
+                }
             }
         }
         xSemaphoreGive(cmd_sem_);
@@ -532,7 +558,8 @@ bool VehicleController::generate_key() {
     // Wipe the session and cached data so has_session() flips to false (the UI shows
     // "not paired" and hides the controls/SOC) and the auto-pair loop re-enrolls.
     clear_session_and_cache_();
-    pairing_lost_ = false;  // re-keying is the resolution; clear any pending flag
+    pairing_lost_     = false;  // re-keying is the resolution; clear any pending flag
+    auth_fail_streak_ = 0;      // and the streak that may have led here
     ESP_LOGI(TAG, "new key generated");
     return true;
 }
