@@ -20,38 +20,8 @@ static NvsStorageAdapter* g_cfg = nullptr;
 
 // ─── HTML form ──────────────────────────────────────────────────────────────
 
-static const char FORM_HTML[] =
-"<!doctype html><html lang=en><meta charset=utf-8>"
-"<meta name=viewport content='width=device-width,initial-scale=1'>"
-"<meta name=theme-color content=#e82127>"
-"<title>Tesla Key Setup</title>"
-"<style>"
-":root{--bg:#f6f7f9;--card:#fff;--fg:#1a1d21;--muted:#5b626b;--border:#e6e8ec;--accent:#e82127;--radius:16px;--shadow:0 1px 2px rgba(0,0,0,.04),0 8px 24px rgba(0,0,0,.05)}"
-"@media(prefers-color-scheme:dark){:root{--bg:#0f1115;--card:#171a20;--fg:#f2f3f5;--muted:#9aa1ab;--border:#262a31;--shadow:0 1px 2px rgba(0,0,0,.4),0 8px 24px rgba(0,0,0,.3)}}"
-"*{box-sizing:border-box}body{font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;background:var(--bg);color:var(--fg);line-height:1.55;margin:0;padding:1.5rem 1.1rem}"
-"main{max-width:26rem;margin:0 auto}.hero{text-align:center;padding:1rem 0 .25rem}"
-".badge{display:inline-flex;align-items:center;gap:.4rem;font-size:.8rem;font-weight:600;letter-spacing:.02em;color:var(--accent);background:color-mix(in srgb,var(--accent) 12%,transparent);padding:.35rem .7rem;border-radius:999px;margin-bottom:.9rem}"
-"h1{font-size:1.5rem;line-height:1.2;margin:0 0 .5rem;letter-spacing:-.02em}.lead{color:var(--muted);margin:0 auto;max-width:22rem;font-size:.95rem}"
-".card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);box-shadow:var(--shadow);padding:1.25rem;margin-top:1.25rem}"
-"label{display:block;font-size:.85rem;color:var(--muted);margin:.85rem 0 .3rem}form label:first-of-type{margin-top:0}"
-"input{width:100%;padding:.7rem .8rem;font:inherit;font-size:1rem;color:var(--fg);background:var(--bg);border:1px solid var(--border);border-radius:10px}"
-"input:focus{outline:none;border-color:var(--accent)}"
-"button{margin-top:1.4rem;width:100%;font:inherit;font-weight:650;font-size:1.05rem;background:var(--accent);color:#fff;border:0;border-radius:999px;padding:.9rem;cursor:pointer;box-shadow:var(--shadow)}"
-"button:active{transform:translateY(1px)}"
-".foot{color:var(--muted);font-size:.82rem;text-align:center;margin-top:1.25rem}b{font-weight:650}"
-"</style>"
-"<main>"
-"<div class=hero><span class=badge>&#9889; device setup</span><h1>Connect to WiFi</h1>"
-"<p class=lead>Enter your network and Tesla VIN to finish setup.</p></div>"
-"<form class=card method=POST action=/save>"
-"<label>WiFi network (SSID)</label><input name=ssid required autofocus>"
-"<label>WiFi password</label><input name=pass type=password>"
-"<label>Tesla VIN (17 characters)</label><input name=vin maxlength=17 minlength=17 placeholder='5YJ...'>"
-"<button>Save &amp; connect</button>"
-"</form>"
-"<p class=foot>The device reboots, joins your WiFi and is then reachable at "
-"<b>http://tesla-key-esp32.local</b>.</p>"
-"</main></html>";
+// Captive-portal setup page — embedded from main/www/setup.html (EMBED_TXTFILES)
+extern const char setup_html_start[] asm("_binary_setup_html_start");
 
 // ─── x-www-form-urlencoded parsing ───────────────────────────────────────────
 
@@ -97,7 +67,7 @@ static std::string form_field(const std::string& body, const std::string& key) {
 
 static esp_err_t form_get(httpd_req_t* req) {
     httpd_resp_set_type(req, "text/html");
-    return httpd_resp_send(req, FORM_HTML, HTTPD_RESP_USE_STRLEN);
+    return httpd_resp_send(req, setup_html_start, HTTPD_RESP_USE_STRLEN);
 }
 
 static esp_err_t save_post(httpd_req_t* req) {

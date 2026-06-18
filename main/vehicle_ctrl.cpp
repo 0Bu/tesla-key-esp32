@@ -501,6 +501,7 @@ VehicleController::ResultCb VehicleController::make_result_cb_() {
         }
         if (result.is_failure() && result.error()) {
             const std::string& msg = result.error()->message();
+            last_error_ = msg;   // surfaced to the HTTP layer / UI as the real reason
             ESP_LOGW(TAG, "command failed: %s", msg.c_str());
             // Two distinct ways a Tesla signals "your key is no longer whitelisted"
             // (it was deleted on the car side); both must invalidate the pairing so the
@@ -537,6 +538,7 @@ bool VehicleController::send_vcsec_(const std::string& name, Builder builder,
     if (!ensure_connected_()) return false;
     xSemaphoreTake(cmd_sem_, 0); // drain in case leftover signal
     last_result_ = false;
+    last_error_.clear();
 
     xSemaphoreTake(vehicle_mutex_, portMAX_DELAY);
     vehicle_->send_command_result(
@@ -555,6 +557,7 @@ bool VehicleController::send_infotainment_(const std::string& name, Builder buil
     if (!ensure_connected_()) return false;
     xSemaphoreTake(cmd_sem_, 0);
     last_result_ = false;
+    last_error_.clear();
 
     xSemaphoreTake(vehicle_mutex_, portMAX_DELAY);
     // WAKE_IF_NEEDED so charge commands also work when the car is asleep
@@ -814,6 +817,7 @@ void VehicleController::clear_session_and_cache_() {
     if (storage_) {
         storage_->remove("session_vcsec");
         storage_->remove("session_infotainment");
+        storage_->remove("paired_at");   // re-pair re-stamps the pairing date
     }
 
     // Drop cached readings so /status and vehicle_data never serve old SOC/charge data
@@ -852,6 +856,24 @@ time_t VehicleController::key_created_at() {
     std::string s;
     if (!storage_->load_str("key_created", s)) return 0;
     return (time_t)atoll(s.c_str());
+}
+
+time_t VehicleController::paired_at() {
+    if (!storage_ || !has_session()) return 0;
+    std::string s;
+    if (storage_->load_str("paired_at", s)) {
+        time_t t = (time_t)atoll(s.c_str());
+        if (t > 1600000000) return t;
+    }
+    // First time we observe a session with a valid wall clock: stamp it now. For a
+    // fresh handshake this is within seconds of pairing; a pairing that predates this
+    // tracking (or whose clock was unsynced) gets stamped at first sync instead.
+    time_t now = time(nullptr);
+    if (now > 1600000000) {
+        storage_->save_str("paired_at", std::to_string((long long)now));
+        return now;
+    }
+    return 0;
 }
 
 bool VehicleController::has_key() {
@@ -914,6 +936,7 @@ bool VehicleController::pair(int timeout_ms) {
     if (!ensure_connected_()) return false;
     xSemaphoreTake(cmd_sem_, 0);
     last_result_ = false;
+    last_error_.clear();
 
     // This firmware only ever enrolls a Charging Manager key (charging + wake),
     // never an owner key — its sole purpose is the evcc BLE integration. Limiting

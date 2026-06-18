@@ -191,9 +191,13 @@ static esp_err_t handle_command(httpd_req_t* req) {
     }
 
     cJSON_Delete(json);
-    return send_json(req, 200,
-        make_response(ok, cmd, vin, ok ? "command executed successfully"
-                                       : "command failed or timed out"));
+    // On failure, distinguish "the car rejected it" (we got an error reply, e.g.
+    // "complete") from "the car was unreachable" (no reply / timed out). The former
+    // carries the real Tesla reason; only the latter is an in-range problem.
+    std::string err = g_vehicle->last_command_error();
+    const char* reason = ok ? "command executed successfully"
+                            : (!err.empty() ? err.c_str() : "vehicle not reachable");
+    return send_json(req, 200, make_response(ok, cmd, vin, reason));
 }
 
 // ─── GET /api/1/vehicles/{VIN}/vehicle_data ───────────────────────────────────
@@ -428,6 +432,10 @@ static esp_err_t handle_status(httpd_req_t* req) {
     time_t key_created = g_vehicle->key_created_at();
     if (key_created > 1600000000) cJSON_AddNumberToObject(root, "key_created", (double)key_created);
     cJSON_AddBoolToObject(root,   "paired",        g_vehicle->has_session());
+    // Pairing date (epoch seconds), shown under "Paired" in the UI. Same post-2020
+    // plausibility guard as key_created.
+    time_t paired_at = g_vehicle->paired_at();
+    if (paired_at > 1600000000) cJSON_AddNumberToObject(root, "paired_at", (double)paired_at);
     // True when the previous pairing was lost (key removed on the car side) and a
     // re-pair is pending — lets the UI explain why it's prompting to pair again.
     cJSON_AddBoolToObject(root,   "reauth",        g_vehicle->reauth_required());
@@ -456,8 +464,11 @@ static esp_err_t handle_status(httpd_req_t* req) {
         ChargeStateResult cs = g_vehicle->get_cached_charge();
         if (cs.valid) {
             cJSON* veh = cJSON_CreateObject();
-            cJSON_AddNumberToObject(veh, "soc", cs.battery_level);
+            cJSON_AddNumberToObject(veh, "soc",    cs.battery_level);
             cJSON_AddStringToObject(veh, "status", cs.charging_state.c_str());
+            // Charging detail for the web UI: live power (kW) and current (A).
+            cJSON_AddNumberToObject(veh, "power",  cs.charger_power);
+            cJSON_AddNumberToObject(veh, "amps",   cs.charging_amps);
             cJSON_AddItemToObject(root, "vehicle", veh);
         }
 
@@ -612,157 +623,13 @@ static esp_err_t handle_set_vin(httpd_req_t* req) {
     return r;
 }
 
-// ─── GET / — minimal web UI ────────────────────────────────────────────────────
+// ─── GET / — web UI (embedded from main/www/index.html) ─────────────────────────
 
-static const char INDEX_HTML[] =
-"<!doctype html><html lang=en><meta charset=utf-8>"
-"<meta name=viewport content='width=device-width,initial-scale=1'>"
-"<title>tesla-key-esp32</title>"
-"<meta name=theme-color content=#e82127>"
-"<style>"
-":root{--bg:#f6f7f9;--card:#fff;--fg:#1a1d21;--muted:#5b626b;--border:#e6e8ec;--accent:#e82127;--code-bg:#f0f1f3;--ok:#16a34a;--warn:#d97706;--radius:16px;--shadow:0 1px 2px rgba(0,0,0,.04),0 8px 24px rgba(0,0,0,.05)}"
-"@media(prefers-color-scheme:dark){:root{--bg:#0f1115;--card:#171a20;--fg:#f2f3f5;--muted:#9aa1ab;--border:#262a31;--code-bg:#22262e;--ok:#34d399;--warn:#fbbf24;--shadow:0 1px 2px rgba(0,0,0,.4),0 8px 24px rgba(0,0,0,.3)}}"
-"*{box-sizing:border-box}body{font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;background:var(--bg);color:var(--fg);line-height:1.55;margin:0;padding:1.25rem 1.1rem}"
-"main{max-width:34rem;margin:0 auto}"
-"header{display:flex;align-items:center;gap:.7rem;margin-bottom:.25rem}"
-".logo{width:2.4rem;height:2.4rem;border-radius:.7rem;background:var(--accent);color:#fff;display:grid;place-items:center;font-size:1.3rem;box-shadow:var(--shadow)}"
-".ttl{font-size:1.15rem;font-weight:650;letter-spacing:-.01em}.meta{font-size:.78rem;color:var(--muted)}"
-".pill{margin-left:auto;font-size:.75rem;padding:.25rem .65rem;border-radius:999px;background:var(--border);color:var(--muted)}.pill.good{background:color-mix(in srgb,var(--ok) 16%,transparent);color:var(--ok)}"
-".card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);box-shadow:var(--shadow);padding:1.25rem;margin-top:1.25rem}"
-".card h2{font-size:.78rem;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin:0 0 1.1rem}"
-"ol.steps{list-style:none;counter-reset:s;margin:0;padding:0}"
-"ol.steps li{counter-increment:s;position:relative;padding:0 0 1.4rem 2.6rem}ol.steps li:last-child{padding-bottom:0}"
-"ol.steps li::before{content:counter(s);position:absolute;left:0;top:-.1rem;width:1.8rem;height:1.8rem;border-radius:50%;display:grid;place-items:center;background:color-mix(in srgb,var(--accent) 14%,transparent);color:var(--accent);font-weight:700;font-size:.9rem}"
-"ol.steps li:not(:last-child)::after{content:'';position:absolute;left:.875rem;top:1.9rem;bottom:.4rem;width:2px;background:var(--border)}"
-/* When step 4 (Vehicle status) is hidden (not paired), step 3 is visually last — drop its dangling connector. */
-"ol.steps.s3end li:nth-child(3)::after{display:none}"
-".h{font-size:1rem;font-weight:600;display:flex;align-items:center;gap:.5rem}.sub{color:var(--muted);font-size:.85rem;margin:.1rem 0 .55rem}"
-".mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.95rem}"
-"code{background:var(--code-bg);padding:.12rem .4rem;border-radius:6px;font-size:.92rem;letter-spacing:.5px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}"
-".tag{font-size:.72rem;padding:.15rem .55rem;border-radius:999px;background:var(--border);color:var(--muted)}.tag.good{background:color-mix(in srgb,var(--ok) 16%,transparent);color:var(--ok)}"
-".clk{cursor:pointer;border-bottom:1px dashed var(--muted)}.clk:hover{color:var(--accent);border-color:var(--accent)}"
-".dev{display:flex;align-items:center;gap:.5rem;width:100%;margin:.2rem 0}.dbm{margin-left:auto;font-weight:600;font-size:.85rem}.muted{color:var(--muted)}"
-".bars{display:inline-flex;align-items:flex-end;gap:2px;height:16px}.b{width:4px;background:var(--border);border-radius:1px}.b.g{background:var(--ok)}.b.a{background:var(--warn)}.b.b{background:var(--accent)}"
-"button{font:inherit;font-weight:600;font-size:.95rem;padding:.7rem 1.1rem;border:1px solid var(--border);border-radius:999px;background:var(--card);color:var(--fg);cursor:pointer}button:active{transform:translateY(1px)}button:disabled{opacity:.55}"
-".primary{background:var(--accent);color:#fff;border:0;width:100%;padding:.85rem;font-size:1rem;box-shadow:var(--shadow)}"
-".scan{padding:.5rem 1.1rem;font-size:.85rem}"
-"#bleslot{margin-top:.6rem}"
-"#log{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.82rem;color:var(--muted);white-space:pre-wrap;word-break:break-word;margin:0;max-height:55vh;overflow:auto}"
-".teleg{margin-top:.85rem}.teleh{font-size:.72rem;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);margin-bottom:.4rem}"
-".grid{display:grid;grid-template-columns:1fr 1fr;gap:.3rem .9rem}"
-".kv{display:flex;justify-content:space-between;gap:.5rem;font-size:.85rem;border-bottom:1px solid var(--border);padding-bottom:.2rem}"
-".kv .k{color:var(--muted)}.kv .v{font-weight:600}"
-".schedrow{display:flex;align-items:center;gap:.5rem;margin-top:.25rem}"
-".schedrow input[type=time]{font:inherit;padding:.45rem .6rem;border:1px solid var(--border);border-radius:10px;background:var(--card);color:var(--fg)}"
-"</style>"
-"<main>"
-"<header><div class=logo>&#9889;</div><div style='flex:1'><div class=ttl>tesla-key-esp32</div><div class=meta id=meta>&#8230;</div></div><span class=pill id=net>&#8230;</span></header>"
-"<section class=card><h2>Setup &amp; control</h2><ol class=steps id=flow>"
-"<li><div class=h>Vehicle <span class=tag id=pair>&#8230;</span></div><div class=sub>Tap the VIN to change it</div><div id=vinslot></div></li>"
-"<li><div class=h>Security key</div><div class=sub>Tap the fingerprint to regenerate the key</div><div id=keyslot></div></li>"
-"<li><div class=h>Connection <span class=tag id=findtag></span></div><div class=sub id=pairmsg></div><div id=bleslot></div></li>"
-"<li id=step4 style='display:none'><div class=h>Vehicle status</div><div class=sub>Live readings \\u00b7 charging control is via evcc</div><div id=ctrlslot style='margin-top:.4rem'></div></li>"
-"</ol></section>"
-"<section class=card><h2>LOGS</h2>"
-"<div id=log>Ready.</div></section>"
-"</main>"
-"<script>"
-"let V='';let otaActive=false;"
-"function log(t){document.getElementById('log').textContent=t}"
-"function esc(s){return (s||'').replace(/[<&>]/g,c=>({'<':'&lt;','&':'&amp;','>':'&gt;'}[c]))}"
-"function bleBody(e){"
-"if(e.connected){let r=e.rssi;"
-"return `<div class=dev><span class=mono>${esc(e.addr||'connected')} ${r!=null?r+'dBm':''}</span></div>`}"
-"let d=e.devices||[];"
-"if(e.scanning&&!d.length)return `<div class=sub>scanning\\u2026</div>`;"
-"if(!d.length)return `<div class=sub>no Teslas found yet</div>`;"
-"return d.map(x=>`<div class=dev><span class=mono>${esc(x.addr)} ${x.rssi}dBm ${x.name?`\\u00b7 ${esc(x.name)}`:''}</span></div>`).join('')}"
-"function kv(k,v){return `<div class=kv><span class=k>${esc(k)}</span><span class=v>${esc(''+v)}</span></div>`}"
-"function grp(t,r){return r.length?`<div class=teleg><div class=teleh>${esc(t)}</div><div class=grid>${r.join('')}</div></div>`:''}"
-"function tmp(x){return (Math.round(x*10)/10).toString().replace(/\\.0$/,'')+'\\u00b0C'}"
-"function teleBody(t){if(!t)return '';let g='';"
-"let c=t.climate;if(c){let r=[];"
-"if(c.inside!=null)r.push(kv('Inside',tmp(c.inside)));if(c.outside!=null)r.push(kv('Outside',tmp(c.outside)));"
-"if(c.setpoint!=null)r.push(kv('Set to',tmp(c.setpoint)));r.push(kv('Climate',c.on?'On':'Off'));"
-"if(c.preconditioning)r.push(kv('Precond.','active'));g+=grp('Climate',r);}"
-"let d=t.drive;if(d){let r=[];if(d.shift)r.push(kv('Gear',d.shift));"
-"if(d.odometer_km!=null)r.push(kv('Odometer',Math.round(d.odometer_km).toLocaleString()+' km'));g+=grp('Drive',r);}"
-"let p=t.tires;if(p){let r=[];['fl','fr','rl','rr'].forEach(k=>{if(p[k]!=null)r.push(kv(k.toUpperCase(),p[k].toFixed(1)+' bar'))});"
-"g+=grp('Tire pressure'+(p.warn?' \\u26a0':''),r);}"
-"let z=t.closures;if(z){let o=[];if(z.door)o.push('door');if(z.frunk)o.push('frunk');if(z.trunk)o.push('trunk');if(z.window)o.push('window');"
-"let r=[];if(z.locked!=null)r.push(kv('Lock',z.locked?'Locked':'Unlocked'));r.push(kv('Open',o.length?o.join(', '):'nothing'));"
-"if(z.user)r.push(kv('Occupant','present'));g+=grp('Body',r);}"
-"return g;}"
-"function schedBody(){return `<div class=teleg><div class=teleh>Scheduled charging</div>"
-"<div class=schedrow><input type=time id=schedt value='23:00'>"
-"<button class=scan onclick='sched(true)'>On</button><button class=scan onclick='sched(false)'>Off</button></div>"
-"<div class=sub style='margin-top:.3rem'>Sets the car\\u2019s daily charge start time (local).</div></div>`}"
-"function ctrlBody(j){let v=j.vehicle;"
-"let head=v?`<span class=mono style='font-size:.9rem'>SOC ${Math.round(v.soc)}% \\u00b7 ${esc(v.status)}</span>`:`<div class=sub>vehicle asleep \\u00b7 last known readings</div>`;"
-"return head+teleBody(j.tele)+schedBody();}"
-"async function sched(en){let t=(document.getElementById('schedt')||{}).value||'23:00';let p=t.split(':');let mins=((+p[0]||0)*60+(+p[1]||0))|0;"
-"log(en?('Scheduling charge at '+t+'\\u2026'):'Disabling scheduled charging\\u2026');"
-"try{let r=await fetch('/api/1/vehicles/'+V+'/command/set_scheduled_charging',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({enable:en,start_minutes:mins})});"
-"let j=await r.json();log(j.response?j.response.reason:'done')}catch(e){log('Command failed')}}"
-"async function st(){let j;try{j=await (await fetch('/status')).json()}catch(e){return}V=j.vin;"
-"let w=j.wifi||{};let parts=[];if(w.ssid!=null)parts.push(esc(w.ssid)+' '+w.rssi+' dBm');if(j.ip)parts.push(esc(j.ip));"
-"if(j.version)parts.push(`<span class=clk title='Tap to check for firmware updates' onclick=ota()>${esc(j.version)}</span>`);"
-"document.getElementById('meta').innerHTML=parts.join(' \\u00b7 ');"
-"let e=j.ble||{};let net=document.getElementById('net');net.textContent=e.connected?'linked':'online';net.className='pill '+(e.connected?'good':'');"
-"let pg=document.getElementById('pair');pg.textContent=j.paired?'paired':'not paired';pg.className='tag'+(j.paired?' good':'');"
-"document.getElementById('vinslot').innerHTML=`<span class='mono clk' title='Tap to change VIN' onclick=ev()>${esc(j.vin)}</span>`;"
-"let fp=j.key_fingerprint||'\\u2014';"
-"let kc=(j.key_present&&j.key_created)?`<div class=sub style='margin-top:.35rem'>Created ${new Date(j.key_created*1000).toLocaleString()}</div>`:'';"
-"document.getElementById('keyslot').innerHTML=(j.key_present?`<code class=clk title='Tap to regenerate key' onclick=rk()>${fp}</code>`:`<code>${fp}</code>`)+kc;"
-"let ft=document.getElementById('findtag'),pm=document.getElementById('pairmsg');"
-"if(j.paired){ft.textContent='paired';ft.className='tag good';pm.textContent='Vehicle is linked and authorized.'}"
-"else{let cn=e.connected;ft.textContent=cn?'connecting\\u2026':'searching\\u2026';ft.className='tag';"
-"let m=cn?'Confirm the pairing request on your Tesla\\u2019s screen.':'Bring the device near your Tesla.';"
-"if(j.reauth)m='The key was removed from the vehicle \\u2014 a new key was generated. '+m;"
-"pm.textContent=m}"
-"document.getElementById('bleslot').innerHTML=bleBody(e);"
-"let s4=document.getElementById('step4');"
-"document.getElementById('flow').classList.toggle('s3end',!j.paired);"
-"if(j.paired){s4.style.display='list-item';document.getElementById('ctrlslot').innerHTML=ctrlBody(j);}"
-"else{s4.style.display='none';}}"
-"async function ev(){let v=prompt('New VIN (17 characters):',V&&V!='UNKNOWN'?V:'');if(v===null)return;v=v.trim();"
-"if(v.length!=17){log('VIN must be 17 characters');return}"
-"log('Saving VIN & rebooting...');"
-"try{let r=await fetch('/set_vin',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({vin:v})});"
-"let j=await r.json();log((j.response?j.response.reason:j.reason))}catch(e){log('Saved \\u2014 device rebooting')}}"
-"async function rk(){if(!confirm('Regenerate key?\\n\\nThe existing key will be DELETED and the car will be UN-PAIRED \\u2014 you must pair again at the vehicle.'))return;"
-"log('Regenerating key...');let r=await fetch('/gen_keys?force=1',{method:'POST'});log((await r.json()).reason);st()}"
-"async function setTime(){try{await fetch('/set_time',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ms:Date.now()})})}catch(e){}}"
-"async function ota(){log('Checking for updates\\u2026');let j;"
-"try{j=await (await fetch('/ota/check?ms='+Date.now())).json()}catch(e){log('Update check failed');return}"
-"if(!j.started){log('Busy \\u2014 try again in a moment');return}checkPoll();}"
-"async function checkPoll(){let j;try{j=await (await fetch('/ota/status')).json()}catch(e){setTimeout(checkPoll,1000);return}"
-"if(j.state=='checking'){setTimeout(checkPoll,1000);return}"
-"if(j.state=='error'){log('Update check failed: '+(j.message||''));return}"
-"if(!j.update_available){log('Firmware is up to date ('+(j.current||'')+')');return}"
-"if(!confirm('New version '+j.available+' available \\u2014 update now?\\n\\nThe device will download the firmware and reboot when done.'))return;"
-"log('Starting update\\u2026');try{await fetch('/ota/update',{method:'POST'})}catch(e){}startOtaPoll();}"
-"function startOtaPoll(){if(otaActive)return;otaActive=true;otaPoll();}"
-"async function otaPoll(){let j;try{j=await (await fetch('/ota/status')).json()}catch(e){j=null}"
-"if(j){if(j.state=='downloading'){log('Updating\\u2026 '+j.progress+'%')}"
-"else if(j.state=='done'){otaActive=false;log('Update complete \\u2014 device rebooting\\u2026');setTimeout(function(){waitReboot(false)},5000);return}"
-"else if(j.state=='error'){otaActive=false;log('Update failed: '+(j.message||''));return}"
-"else{otaActive=false;return}}"
-"setTimeout(otaPoll,1000);}"
-"async function resumeOta(){let j;try{j=await (await fetch('/ota/status')).json()}catch(e){return}"
-"if(j&&(j.state=='downloading'||j.state=='done'))startOtaPoll();}"
-"async function waitReboot(wentDown){"
-"try{let r=await fetch('/status?ms='+Date.now(),{cache:'no-store'});"
-"if(!r.ok)throw 0;"
-"if(wentDown){log('Back online \\u2014 reloading\\u2026');location.reload();return}"
-"setTimeout(function(){waitReboot(wentDown)},1000);}"
-"catch(e){log('Waiting for device to come back online\\u2026');setTimeout(function(){waitReboot(true)},1000);}}"
-"setTime();st();setInterval(st,4000);resumeOta();"
-"</script></html>";
+extern const char index_html_start[] asm("_binary_index_html_start");
 
 static esp_err_t handle_index(httpd_req_t* req) {
     httpd_resp_set_type(req, "text/html");
-    return httpd_resp_send(req, INDEX_HTML, HTTPD_RESP_USE_STRLEN);
+    return httpd_resp_send(req, index_html_start, HTTPD_RESP_USE_STRLEN);
 }
 
 // ─── Wildcard handler dispatching ─────────────────────────────────────────────
