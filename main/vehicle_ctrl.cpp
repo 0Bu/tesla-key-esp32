@@ -116,10 +116,34 @@ bool VehicleController::init(const std::string& vin,
     });
 
     // Persistent charge-state callback: refreshes the cache on *every* ChargeState
-    // (the 30 s background refresh in loop_task). Installed once, never cleared; HTTP
+    // (the background refresh in loop_task). Installed once, never cleared; HTTP
     // reads serve last_known_charge_ from this cache without blocking.
     vehicle_->set_charge_state_callback([this](const CarServer_ChargeState& cs) {
         parse_charge_state(cs, last_known_charge_);
+    });
+
+    // Reliable key-revocation detector. When the key is deleted on the car side, the
+    // VCSEC health poll keeps succeeding from its cached session (the whitelist is not
+    // re-checked per command), so it can miss the deletion entirely. But the car rejects
+    // every signed command on the *infotainment* domain immediately with a signed-message
+    // fault naming the key (ERROR_UNKNOWN_KEY_ID) — the background charge poll triggers
+    // exactly that. Observe every incoming message and, while we believe we're paired,
+    // treat such a fault as a lost pairing. Runs in the BLE RX task; only cheap atomic
+    // ops here. Gated on believed_paired_ so enrolment-time rejections are ignored.
+    vehicle_->set_message_callback([this](const UniversalMessage_RoutableMessage& msg) {
+        if (!believed_paired_ || !msg.has_signedMessageStatus) return;
+        switch (msg.signedMessageStatus.signed_message_fault) {
+            case UniversalMessage_MessageFault_E_MESSAGEFAULT_ERROR_UNKNOWN_KEY_ID:
+            case UniversalMessage_MessageFault_E_MESSAGEFAULT_ERROR_INACTIVE_KEY:
+            case UniversalMessage_MessageFault_E_MESSAGEFAULT_ERROR_INVALID_KEY_HANDLE:
+                if (!pairing_lost_.exchange(true)) {
+                    ESP_LOGW(TAG, "auto-pair: car rejected our key (fault %d) — key deleted on the car side, pairing lost",
+                             (int)msg.signedMessageStatus.signed_message_fault);
+                }
+                break;
+            default:
+                break;
+        }
     });
 
     xTaskCreate(loop_task_fn_, "vehicle_loop", 8192, this, 5, &loop_task_);
@@ -156,6 +180,7 @@ void VehicleController::auto_pair_task_fn_(void* arg) {
         // signed command or the health poll below). The stored key is now useless, so
         // re-key — which also clears the session + cache — and fall through to re-pair.
         if (self->pairing_lost_) {
+            self->believed_paired_ = false;  // stop the observer acting during re-enrol
             ESP_LOGW(TAG, "auto-pair: KEY DELETED on the car — clearing pairing, generating a new key, restarting enrolment");
             self->repair_notice_ = true;  // tell the UI why it's asking to pair again
             self->generate_key();   // clears pairing_lost_, session and cached data
@@ -166,6 +191,10 @@ void VehicleController::auto_pair_task_fn_(void* arg) {
         if (self->has_session()) {
             // A live session means (re-)pairing succeeded; drop the re-auth notice.
             self->repair_notice_ = false;
+            // We're paired: arm the message observer so a key-rejection fault on any
+            // signed command (e.g. the background charge poll → ERROR_UNKNOWN_KEY_ID)
+            // trips pairing_lost_ even while the cached VCSEC session keeps succeeding.
+            self->believed_paired_ = true;
             // Paired — periodically run a signed VCSEC health poll so a key deleted on the
             // car side is noticed even with no evcc traffic. The poll hits the always-on
             // body controller (VCSEC), which does NOT wake the car's main computer (wake
@@ -180,7 +209,9 @@ void VehicleController::auto_pair_task_fn_(void* arg) {
 
             if (ok) {
                 ESP_LOGD(TAG, "auto-pair: health check OK — key still valid");
-                vTaskDelay(pdMS_TO_TICKS(5000));
+                // Idle ~5 s, but bail out fast if the message observer flags a deletion
+                // (a faulting charge poll mid-wait) so we re-key promptly, not 5 s later.
+                for (int w = 0; w < 10 && !self->pairing_lost_; w++) vTaskDelay(pdMS_TO_TICKS(500));
             } else if (self->auth_fail_streak_ > streak_before) {
                 // The car answered but REFUSED our key → almost certainly deleted on the
                 // car side. Confirm immediately (don't wait a whole cycle) so we react in
@@ -195,10 +226,14 @@ void VehicleController::auto_pair_task_fn_(void* arg) {
                 // keep the pairing and retry. Logged so it's clear the key simply could not
                 // be verified (connectivity), rather than a deletion being silently missed.
                 ESP_LOGW(TAG, "auto-pair: car not reachable over BLE — can't verify key right now, will retry");
-                vTaskDelay(pdMS_TO_TICKS(5000));
+                for (int w = 0; w < 10 && !self->pairing_lost_; w++) vTaskDelay(pdMS_TO_TICKS(500));
             }
             continue;
         }
+
+        // Not paired (enrolling): disarm the observer — key-rejection faults are expected
+        // here and must not be mistaken for a revocation.
+        self->believed_paired_ = false;
 
         // 1. Probe for an existing whitelist entry. A key enrolled by EITHER method —
         //    tapping a keycard on the console (enrolls instantly, no on-screen step) or
@@ -271,8 +306,13 @@ void VehicleController::loop_task_fn_(void* arg) {
             self->ble_->connect("");
         }
 
-        // Background charge-state refresh (paired + connected only), every 30 seconds.
-        if (paired && self->ble_connected() && (xTaskGetTickCount() - last_poll_ticks > pdMS_TO_TICKS(30000))) {
+        // Background charge-state refresh (paired + connected only), every 10 seconds.
+        // This infotainment poll doubles as the reliable key-revocation canary: a deleted
+        // key makes it fault with ERROR_UNKNOWN_KEY_ID, which the message observer turns
+        // into pairing_lost_ (the VCSEC health poll alone can miss it — it keeps succeeding
+        // from a cached session). NO_WAKE_SKIP, so once the car sleeps this stops firing
+        // and does not keep it awake; while awake it bounds revocation detection to ~10 s.
+        if (paired && self->ble_connected() && (xTaskGetTickCount() - last_poll_ticks > pdMS_TO_TICKS(10000))) {
             last_poll_ticks = xTaskGetTickCount();
             ESP_LOGD(TAG, "background charge-state refresh…");
             // Fire-and-forget poll. We must NOT block here: this task also pumps
