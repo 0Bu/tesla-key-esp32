@@ -49,7 +49,7 @@ jobs:
           echo "firmware=$changed" >> "$GITHUB_OUTPUT"
           echo "firmware-relevant change: $changed"
 
-      - name: Build firmware (ESP-IDF v5.5.4)
+      - name: Build firmware (ESP-IDF v6.0.1)
         uses: espressif/esp-idf-ci-action@v1
         with:
           esp_idf_version: v6.0.1

@@ -1,6 +1,7 @@
 dependencies:
   idf: ">=5.0.1"
   espressif/mdns: "^1.2.0"
+  espressif/cjson: "^1.7.19"
   yoziru/tesla-ble:
     git: "https://github.com/yoziru/tesla-ble.git"
     version: "v5.1.1"
