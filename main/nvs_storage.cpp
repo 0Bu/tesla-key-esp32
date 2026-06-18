@@ -24,7 +24,7 @@ bool NvsStorageAdapter::initialize() {
 
 // NVS keys are max 15 chars. Map known long library keys to short ones.
 std::string NvsStorageAdapter::map_key(const std::string& key) const {
-    if (key == "session_infotainment") return "sess_infotainmnt";
+    if (key == "session_infotainment") return "sess_info";  // ≤15 chars; "sess_infotainmnt" was 16 → KEY_TOO_LONG
     if (key == "session_vcsec")        return "sess_vcsec";
     if (key == "private_key")          return "private_key";
     // Truncate to 15 chars as last resort (should not happen)
