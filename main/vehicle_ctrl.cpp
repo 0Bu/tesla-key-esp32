@@ -140,9 +140,12 @@ bool VehicleController::init(const std::string& vin,
 //   1. Probe with a signed VCSEC poll. If the key is already authorised this
 //      establishes + persists the session (done). If not, it fails *cleanly* with
 //      KEY_NOT_ON_WHITELIST and is popped — no clog.
-//   2. Send the whitelist-add and wait for the user to confirm the pairing request
-//      on the car's screen. The confirmation completes this command.
-//   3. Probe once more — now authorised, this establishes the session.
+//   2. Send the whitelist-add. The car whitelists the key when the user confirms on
+//      screen but sends NO completing commandStatus, so this command never finishes
+//      cleanly — it just exhausts ~180 s of library retries while sitting at the head
+//      of the single FIFO queue, starving everything behind it. So after pair() we
+//      drop the link to flush that stuck command from the queue.
+//   3. Probe once more on a clean link — now authorised, this establishes the session.
 // On any failure the BLE link is dropped, which flushes the library's command
 // queue and RX buffer (set_connected(false)) so the next round starts clean.
 void VehicleController::auto_pair_task_fn_(void* arg) {
@@ -179,12 +182,22 @@ void VehicleController::auto_pair_task_fn_(void* arg) {
         }
 
         // 2. Request enrolment; the car shows a pairing dialog to confirm on screen.
-        //    The link is held open while we wait so the car's response can complete
-        //    the command without the queue churn of disconnect/reconnect.
         ESP_LOGI(TAG, "auto-pair: requesting key enrolment — confirm on the car's screen");
         self->pair(45000);
 
-        // 3. After confirmation a fresh probe establishes the session.
+        // The "Whitelist Add Key" never completes cleanly (the car whitelists on
+        // screen-tap but sends no completing commandStatus), so it lingers at the head
+        // of the library's single FIFO queue and is retried for ~180 s. Any probe
+        // queued behind it is starved — observed in the field as the car re-prompting
+        // repeatedly while the firmware took minutes to notice the key was accepted.
+        // Drop the link to flush the queue + RX buffer so the confirmation probe below
+        // runs on a clean queue and a fresh session-info handshake.
+        if (self->ble_ && self->ble_->is_connected()) self->ble_->disconnect();
+        xSemaphoreTake(self->vehicle_mutex_, portMAX_DELAY);
+        self->vehicle_->set_connected(false);
+        xSemaphoreGive(self->vehicle_mutex_);
+
+        // 3. After confirmation a fresh probe establishes + persists the session.
         self->get_vehicle_status(st, 10000);
         if (self->has_session()) {
             ESP_LOGI(TAG, "auto-pair: pairing complete — session established");
