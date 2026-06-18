@@ -7,6 +7,7 @@ idf_component_register(
         "http_server.cpp"
         "provisioning.cpp"
         "diag_log.cpp"
+        "ota_update.cpp"
     INCLUDE_DIRS
         "."
     REQUIRES
@@ -16,6 +17,10 @@ idf_component_register(
         esp_netif
         esp_http_server
         esp_app_format
+        esp_https_ota
+        app_update
+        esp_http_client
+        esp-tls
         bt
         json
         lwip
