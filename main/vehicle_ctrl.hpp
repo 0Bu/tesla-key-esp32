@@ -103,6 +103,16 @@ public:
         return config_store_ ? config_store_->save_str("vin", vin) : false;
     }
 
+    // Cache the last-known wall clock (epoch seconds). The device has no
+    // battery-backed RTC and deliberately makes no NTP call; the browser sets the
+    // clock via POST /set_time and we persist it so a headless reboot (evcc only,
+    // no browser visit) still comes up with a plausible time for TLS certificate
+    // validation (OTA) and tesla-ble session-freshness checks. main.cpp restores
+    // it on boot by reading the same "last_time" key from the config store.
+    bool save_config_time(long long epoch) {
+        return config_store_ ? config_store_->save_str("last_time", std::to_string(epoch)) : false;
+    }
+
 private:
     // Builder function type used by send_command_result
     using Builder = std::function<int(TeslaBLE::Client*, uint8_t*, size_t*)>;
