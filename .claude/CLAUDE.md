@@ -61,7 +61,7 @@ POST /send_key                                 # pair with vehicle (Charging Man
 POST /set_time                                 # set wall clock from the browser ({"ms":<epoch>}); fallback when NTP unreachable
 POST /set_vin                                  # persist VIN + reboot
 GET  /api/proxy/1/version
-GET  /ota/check                                # fetch manifest, compare to running version
+GET  /ota/check[?ms=<epoch>]                   # start background manifest check (non-blocking); poll /ota/status. ms = browser-clock NTP fallback
 POST /ota/update                               # start background self-update (pull, then reboot)
 GET  /ota/status                               # poll OTA progress {state,progress,message,available}
 ```
