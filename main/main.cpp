@@ -1,5 +1,8 @@
 #include <cstring>
+#include <cstdlib>
+#include <ctime>
 #include <string>
+#include <sys/time.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -24,6 +27,26 @@
 static const char* MDNS_HOSTNAME = "tesla-key-esp32";  // → http://tesla-key-esp32.local
 
 static const char* TAG = "main";
+
+// ─── Wall clock ───────────────────────────────────────────────────────────────
+// NTP (esp_sntp) is the primary time source; the browser (POST /set_time) is only a
+// fallback for networks that block NTP. on_time_sync() flips s_ntp_synced and, on the
+// first sync, refreshes the NVS cache so a later offline reboot restores a recent
+// accurate time instead of sitting at 1970.
+static volatile bool      s_ntp_synced = false;
+static NvsStorageAdapter* s_cfg_store  = nullptr;
+
+static void on_time_sync(struct timeval*) {
+    if (!s_ntp_synced && s_cfg_store) {
+        s_cfg_store->save_str("last_time", std::to_string((long long)time(nullptr)));
+    }
+    s_ntp_synced = true;
+    ESP_LOGI(TAG, "NTP time synced");
+}
+
+// Queried by the HTTP /set_time handler so the browser clock is applied only as a
+// fallback while NTP has not synced this boot.
+bool clock_synced_via_ntp() { return s_ntp_synced; }
 
 // ─── WiFi ─────────────────────────────────────────────────────────────────────
 
@@ -153,12 +176,25 @@ extern "C" void app_main() {
         ESP_LOGW(TAG, "mDNS init failed");
     }
 
-    // SNTP: the tesla-ble session-freshness checks compare the vehicle's session
-    // clock against wall-clock time. Without a real clock the comparison underflows
-    // and stored sessions are rejected on every boot ("session too old"), forcing a
-    // re-auth on the first command. Start SNTP so the device has real UTC.
+    // Wall clock: the tesla-ble session-freshness checks (and TLS cert validation for
+    // OTA) need real UTC. NTP is the primary source; the browser (POST /set_time) is a
+    // fallback for networks that block NTP. First restore the last cached time from NVS
+    // so we never sit at 1970 while NTP syncs (or if it never does) — this also covers
+    // a headless reboot (evcc only, no browser visit). Then start SNTP; on sync it
+    // refreshes the cache and takes over from any restored/fallback value.
+    {
+        std::string last_time;
+        if (config_store.load_str("last_time", last_time) && !last_time.empty()) {
+            struct timeval tv = { (time_t)atoll(last_time.c_str()), 0 };
+            settimeofday(&tv, nullptr);
+            ESP_LOGI(TAG, "clock restored from NVS: %s (NTP will refine it)",
+                     last_time.c_str());
+        }
+    }
+    s_cfg_store = &config_store;
     esp_sntp_setoperatingmode(ESP_SNTP_OPMODE_POLL);
     esp_sntp_setservername(0, "pool.ntp.org");
+    sntp_set_time_sync_notification_cb(on_time_sync);
     esp_sntp_init();
 
     // BLE + NVS storage for Tesla sessions/key
