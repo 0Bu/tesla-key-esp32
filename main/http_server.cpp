@@ -173,6 +173,18 @@ static esp_err_t handle_command(httpd_req_t* req) {
         }
         ok = g_vehicle->set_sentry_mode(on);
     }
+    else if (strcmp(cmd, "set_scheduled_charging") == 0) {
+        // Body: {"enable":bool, "start_minutes":int}  (minutes after local midnight)
+        bool enable = false;
+        int  start  = 0;
+        if (json) {
+            cJSON* je = cJSON_GetObjectItemCaseSensitive(json, "enable");
+            if (je) enable = cJSON_IsTrue(je);
+            cJSON* jm = cJSON_GetObjectItemCaseSensitive(json, "start_minutes");
+            if (jm) start = (int)(cJSON_IsNumber(jm) ? jm->valuedouble : atof(jm->valuestring));
+        }
+        ok = g_vehicle->set_scheduled_charging(enable, start);
+    }
     else {
         cJSON_Delete(json);
         return send_json(req, 404, make_response(false, cmd, vin, "unknown command"));
@@ -448,6 +460,50 @@ static esp_err_t handle_status(httpd_req_t* req) {
             cJSON_AddStringToObject(veh, "status", cs.charging_state.c_str());
             cJSON_AddItemToObject(root, "vehicle", veh);
         }
+
+        // Read-only telemetry caches, refreshed by the rotating background poll. Each
+        // numeric field is emitted only when the car actually reported it (presence
+        // flag) so the UI can show "—" for anything not yet seen. Grouped under "tele".
+        cJSON* tele = cJSON_CreateObject();
+        ClimateStateResult cl = g_vehicle->get_cached_climate();
+        if (cl.valid) {
+            cJSON* o = cJSON_CreateObject();
+            if (cl.has_inside)   cJSON_AddNumberToObject(o, "inside",   cl.inside_temp);
+            if (cl.has_outside)  cJSON_AddNumberToObject(o, "outside",  cl.outside_temp);
+            if (cl.has_setpoint) cJSON_AddNumberToObject(o, "setpoint", cl.driver_setpoint);
+            cJSON_AddBoolToObject(o, "on",            cl.is_climate_on);
+            cJSON_AddBoolToObject(o, "preconditioning", cl.is_preconditioning);
+            cJSON_AddItemToObject(tele, "climate", o);
+        }
+        DriveStateResult dr = g_vehicle->get_cached_drive();
+        if (dr.valid) {
+            cJSON* o = cJSON_CreateObject();
+            if (!dr.shift_state.empty()) cJSON_AddStringToObject(o, "shift", dr.shift_state.c_str());
+            if (dr.has_odometer)         cJSON_AddNumberToObject(o, "odometer_km", dr.odometer_km);
+            cJSON_AddItemToObject(tele, "drive", o);
+        }
+        TirePressureResult tp = g_vehicle->get_cached_tires();
+        if (tp.valid) {
+            cJSON* o = cJSON_CreateObject();
+            if (tp.has_fl) cJSON_AddNumberToObject(o, "fl", tp.fl);
+            if (tp.has_fr) cJSON_AddNumberToObject(o, "fr", tp.fr);
+            if (tp.has_rl) cJSON_AddNumberToObject(o, "rl", tp.rl);
+            if (tp.has_rr) cJSON_AddNumberToObject(o, "rr", tp.rr);
+            cJSON_AddBoolToObject(o, "warn", tp.warn);
+            cJSON_AddItemToObject(tele, "tires", o);
+        }
+        ClosuresStateResult cz = g_vehicle->get_cached_closures();
+        if (cz.valid) {
+            cJSON* o = cJSON_CreateObject();
+            if (cz.has_locked)       cJSON_AddBoolToObject(o, "locked", cz.locked);
+            cJSON_AddBoolToObject(o, "door",   cz.any_door_open);
+            cJSON_AddBoolToObject(o, "frunk",  cz.frunk_open);
+            cJSON_AddBoolToObject(o, "trunk",  cz.trunk_open);
+            cJSON_AddBoolToObject(o, "window", cz.any_window_open);
+            if (cz.has_user_present) cJSON_AddBoolToObject(o, "user", cz.user_present);
+            cJSON_AddItemToObject(tele, "closures", o);
+        }
+        cJSON_AddItemToObject(root, "tele", tele);
     } else {
         cJSON* devices = cJSON_CreateArray();
         for (const auto& d : g_vehicle->ble_nearby()) {
@@ -592,6 +648,12 @@ static const char INDEX_HTML[] =
 ".scan{padding:.5rem 1.1rem;font-size:.85rem}"
 "#bleslot{margin-top:.6rem}"
 "#log{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.82rem;color:var(--muted);white-space:pre-wrap;word-break:break-word;margin:0;max-height:55vh;overflow:auto}"
+".teleg{margin-top:.85rem}.teleh{font-size:.72rem;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);margin-bottom:.4rem}"
+".grid{display:grid;grid-template-columns:1fr 1fr;gap:.3rem .9rem}"
+".kv{display:flex;justify-content:space-between;gap:.5rem;font-size:.85rem;border-bottom:1px solid var(--border);padding-bottom:.2rem}"
+".kv .k{color:var(--muted)}.kv .v{font-weight:600}"
+".schedrow{display:flex;align-items:center;gap:.5rem;margin-top:.25rem}"
+".schedrow input[type=time]{font:inherit;padding:.45rem .6rem;border:1px solid var(--border);border-radius:10px;background:var(--card);color:var(--fg)}"
 "</style>"
 "<main>"
 "<header><div class=logo>&#9889;</div><div style='flex:1'><div class=ttl>tesla-key-esp32</div><div class=meta id=meta>&#8230;</div></div><span class=pill id=net>&#8230;</span></header>"
@@ -599,7 +661,7 @@ static const char INDEX_HTML[] =
 "<li><div class=h>Vehicle <span class=tag id=pair>&#8230;</span></div><div class=sub>Tap the VIN to change it</div><div id=vinslot></div></li>"
 "<li><div class=h>Security key</div><div class=sub>Tap the fingerprint to regenerate the key</div><div id=keyslot></div></li>"
 "<li><div class=h>Connection <span class=tag id=findtag></span></div><div class=sub id=pairmsg></div><div id=bleslot></div></li>"
-"<li id=step4 style='display:none'><div class=h>Vehicle status</div><div class=sub>Control is via evcc only</div><div id=ctrlslot style='margin-top:.4rem'></div></li>"
+"<li id=step4 style='display:none'><div class=h>Vehicle status</div><div class=sub>Live readings \\u00b7 charging control is via evcc</div><div id=ctrlslot style='margin-top:.4rem'></div></li>"
 "</ol></section>"
 "<section class=card><h2>LOGS</h2>"
 "<div id=log>Ready.</div></section>"
@@ -615,10 +677,33 @@ static const char INDEX_HTML[] =
 "if(e.scanning&&!d.length)return `<div class=sub>scanning\\u2026</div>`;"
 "if(!d.length)return `<div class=sub>no Teslas found yet</div>`;"
 "return d.map(x=>`<div class=dev><span class=mono>${esc(x.addr)} ${x.rssi}dBm ${x.name?`\\u00b7 ${esc(x.name)}`:''}</span></div>`).join('')}"
-"function ctrlBody(v){"
-"if(!v) return `<div class=sub>vehicle asleep</div>`;"
-"return `<span class=mono style='font-size:.9rem'>SOC ${Math.round(v.soc)}% \\u00b7 ${esc(v.status)}</span>`;"
-"}"
+"function kv(k,v){return `<div class=kv><span class=k>${esc(k)}</span><span class=v>${esc(''+v)}</span></div>`}"
+"function grp(t,r){return r.length?`<div class=teleg><div class=teleh>${esc(t)}</div><div class=grid>${r.join('')}</div></div>`:''}"
+"function tmp(x){return (Math.round(x*10)/10).toString().replace(/\\.0$/,'')+'\\u00b0C'}"
+"function teleBody(t){if(!t)return '';let g='';"
+"let c=t.climate;if(c){let r=[];"
+"if(c.inside!=null)r.push(kv('Inside',tmp(c.inside)));if(c.outside!=null)r.push(kv('Outside',tmp(c.outside)));"
+"if(c.setpoint!=null)r.push(kv('Set to',tmp(c.setpoint)));r.push(kv('Climate',c.on?'On':'Off'));"
+"if(c.preconditioning)r.push(kv('Precond.','active'));g+=grp('Climate',r);}"
+"let d=t.drive;if(d){let r=[];if(d.shift)r.push(kv('Gear',d.shift));"
+"if(d.odometer_km!=null)r.push(kv('Odometer',Math.round(d.odometer_km).toLocaleString()+' km'));g+=grp('Drive',r);}"
+"let p=t.tires;if(p){let r=[];['fl','fr','rl','rr'].forEach(k=>{if(p[k]!=null)r.push(kv(k.toUpperCase(),p[k].toFixed(1)+' bar'))});"
+"g+=grp('Tire pressure'+(p.warn?' \\u26a0':''),r);}"
+"let z=t.closures;if(z){let o=[];if(z.door)o.push('door');if(z.frunk)o.push('frunk');if(z.trunk)o.push('trunk');if(z.window)o.push('window');"
+"let r=[];if(z.locked!=null)r.push(kv('Lock',z.locked?'Locked':'Unlocked'));r.push(kv('Open',o.length?o.join(', '):'nothing'));"
+"if(z.user)r.push(kv('Occupant','present'));g+=grp('Body',r);}"
+"return g;}"
+"function schedBody(){return `<div class=teleg><div class=teleh>Scheduled charging</div>"
+"<div class=schedrow><input type=time id=schedt value='23:00'>"
+"<button class=scan onclick='sched(true)'>On</button><button class=scan onclick='sched(false)'>Off</button></div>"
+"<div class=sub style='margin-top:.3rem'>Sets the car\\u2019s daily charge start time (local).</div></div>`}"
+"function ctrlBody(j){let v=j.vehicle;"
+"let head=v?`<span class=mono style='font-size:.9rem'>SOC ${Math.round(v.soc)}% \\u00b7 ${esc(v.status)}</span>`:`<div class=sub>vehicle asleep \\u00b7 last known readings</div>`;"
+"return head+teleBody(j.tele)+schedBody();}"
+"async function sched(en){let t=(document.getElementById('schedt')||{}).value||'23:00';let p=t.split(':');let mins=((+p[0]||0)*60+(+p[1]||0))|0;"
+"log(en?('Scheduling charge at '+t+'\\u2026'):'Disabling scheduled charging\\u2026');"
+"try{let r=await fetch('/api/1/vehicles/'+V+'/command/set_scheduled_charging',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({enable:en,start_minutes:mins})});"
+"let j=await r.json();log(j.response?j.response.reason:'done')}catch(e){log('Command failed')}}"
 "async function st(){let j;try{j=await (await fetch('/status')).json()}catch(e){return}V=j.vin;"
 "let w=j.wifi||{};let parts=[];if(w.ssid!=null)parts.push(esc(w.ssid)+' '+w.rssi+' dBm');if(j.ip)parts.push(esc(j.ip));"
 "if(j.version)parts.push(`<span class=clk title='Tap to check for firmware updates' onclick=ota()>${esc(j.version)}</span>`);"
@@ -638,7 +723,7 @@ static const char INDEX_HTML[] =
 "document.getElementById('bleslot').innerHTML=bleBody(e);"
 "let s4=document.getElementById('step4');"
 "document.getElementById('flow').classList.toggle('s3end',!j.paired);"
-"if(j.paired){s4.style.display='list-item';document.getElementById('ctrlslot').innerHTML=ctrlBody(j.vehicle);}"
+"if(j.paired){s4.style.display='list-item';document.getElementById('ctrlslot').innerHTML=ctrlBody(j);}"
 "else{s4.style.display='none';}}"
 "async function ev(){let v=prompt('New VIN (17 characters):',V&&V!='UNKNOWN'?V:'');if(v===null)return;v=v.trim();"
 "if(v.length!=17){log('VIN must be 17 characters');return}"
