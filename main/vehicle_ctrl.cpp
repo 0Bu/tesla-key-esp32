@@ -816,9 +816,14 @@ void VehicleController::clear_session_and_cache_() {
         storage_->remove("session_infotainment");
     }
 
-    // Drop cached readings so /status and vehicle_data never serve old SOC/charge data.
-    last_known_charge_ = {};
-    last_known_status_ = {};
+    // Drop cached readings so /status and vehicle_data never serve old SOC/charge data
+    // (or stale telemetry) from a defunct pairing.
+    last_known_charge_   = {};
+    last_known_status_   = {};
+    last_known_climate_  = {};
+    last_known_drive_    = {};
+    last_known_tires_    = {};
+    last_known_closures_ = {};
     ESP_LOGI(TAG, "pairing/session cleared");
 }
 

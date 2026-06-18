@@ -45,7 +45,21 @@ Never edit files in `managed_components/` — they are regenerated.
 
 All commands: `charge_start`, `charge_stop`, `set_charging_amps`, `set_charge_limit`,
 `wake_up`, `charge_port_door_open/close`, `door_lock/unlock`, `flash_lights`,
-`honk_horn`, `set_sentry_mode`, `auto_conditioning_start/stop`.
+`honk_horn`, `set_sentry_mode`, `auto_conditioning_start/stop`,
+`set_scheduled_charging` (`{"enable":bool,"start_minutes":int}` — minutes after local
+midnight; daily charge start time. Scheduled *departure* is not exposed: the tesla-ble
+version in use registers no builder for `scheduledDepartureAction`).
+
+## Read-only telemetry
+
+A rotating background poll in `loop_task_fn_` (one domain per ~12 s cycle: climate →
+drive → tires → closures, full set ~48 s) refreshes per-domain caches via the
+`set_*_state_callback` hooks in `vehicle_ctrl.cpp`. All polls are `NO_WAKE_SKIP`
+(read-only, never wake the car) and feed the web UI only — evcc/pairing are unaffected.
+Exposed under `tele` in `/status`: `climate` (inside/outside/setpoint °C, on,
+preconditioning), `drive` (shift, odometer_km), `tires` (fl/fr/rl/rr bar + warn),
+`closures` (locked, door/frunk/trunk/window open, occupant). Numeric fields are emitted
+only when the car reported them (proto3 optional) so the UI renders "—" otherwise.
 
 ## HTTP API
 
@@ -53,7 +67,7 @@ All commands: `charge_start`, `charge_stop`, `set_charging_amps`, `set_charge_li
 POST /api/1/vehicles/{VIN}/command/{command}   # execute command
 GET  /api/1/vehicles/{VIN}/vehicle_data        # charge state
 GET  /api/1/vehicles/{VIN}/body_controller_state
-GET  /status                                   # web-UI JSON (wifi, ble, vehicle cache)
+GET  /status                                   # web-UI JSON (wifi, ble, vehicle cache, read-only telemetry under "tele")
 POST /scan                                     # start a time-limited BLE discovery scan
 GET  /diag                                     # plain-text in-memory diag log (?verbose=1 raw RX, ?clear=1 reset)
 POST /gen_keys[?force=1]                       # generate key (refuses overwrite w/o force)
