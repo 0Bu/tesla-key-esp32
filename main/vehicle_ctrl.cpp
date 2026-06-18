@@ -507,8 +507,9 @@ bool VehicleController::generate_key() {
     vehicle_->regenerate_key();
     xSemaphoreGive(vehicle_mutex_);
     // Record when the key was generated so the UI can show the key's creation
-    // date next to its fingerprint. Wall-clock comes from SNTP; if the clock
-    // hasn't synced yet this stamps a near-zero value, which the UI ignores.
+    // date next to its fingerprint. Wall-clock comes from the browser (POST
+    // /set_time) or the NVS-cached time; if neither is set yet this stamps a
+    // near-zero value, which the UI ignores.
     if (storage_) {
         time_t now = time(nullptr);
         storage_->save_str("key_created", std::to_string((long long)now));
