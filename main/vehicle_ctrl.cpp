@@ -116,10 +116,34 @@ bool VehicleController::init(const std::string& vin,
     });
 
     // Persistent charge-state callback: refreshes the cache on *every* ChargeState
-    // (the 30 s background refresh in loop_task). Installed once, never cleared; HTTP
+    // (the background refresh in loop_task). Installed once, never cleared; HTTP
     // reads serve last_known_charge_ from this cache without blocking.
     vehicle_->set_charge_state_callback([this](const CarServer_ChargeState& cs) {
         parse_charge_state(cs, last_known_charge_);
+    });
+
+    // Reliable key-revocation detector. When the key is deleted on the car side, the
+    // VCSEC health poll keeps succeeding from its cached session (the whitelist is not
+    // re-checked per command), so it can miss the deletion entirely. But the car rejects
+    // every signed command on the *infotainment* domain immediately with a signed-message
+    // fault naming the key (ERROR_UNKNOWN_KEY_ID) — the background charge poll triggers
+    // exactly that. Observe every incoming message and, while we believe we're paired,
+    // treat such a fault as a lost pairing. Runs in the BLE RX task; only cheap atomic
+    // ops here. Gated on believed_paired_ so enrolment-time rejections are ignored.
+    vehicle_->set_message_callback([this](const UniversalMessage_RoutableMessage& msg) {
+        if (!believed_paired_ || !msg.has_signedMessageStatus) return;
+        switch (msg.signedMessageStatus.signed_message_fault) {
+            case UniversalMessage_MessageFault_E_MESSAGEFAULT_ERROR_UNKNOWN_KEY_ID:
+            case UniversalMessage_MessageFault_E_MESSAGEFAULT_ERROR_INACTIVE_KEY:
+            case UniversalMessage_MessageFault_E_MESSAGEFAULT_ERROR_INVALID_KEY_HANDLE:
+                if (!pairing_lost_.exchange(true)) {
+                    ESP_LOGW(TAG, "auto-pair: car rejected our key (fault %d) — key deleted on the car side, pairing lost",
+                             (int)msg.signedMessageStatus.signed_message_fault);
+                }
+                break;
+            default:
+                break;
+        }
     });
 
     xTaskCreate(loop_task_fn_, "vehicle_loop", 8192, this, 5, &loop_task_);
@@ -140,9 +164,12 @@ bool VehicleController::init(const std::string& vin,
 //   1. Probe with a signed VCSEC poll. If the key is already authorised this
 //      establishes + persists the session (done). If not, it fails *cleanly* with
 //      KEY_NOT_ON_WHITELIST and is popped — no clog.
-//   2. Send the whitelist-add and wait for the user to confirm the pairing request
-//      on the car's screen. The confirmation completes this command.
-//   3. Probe once more — now authorised, this establishes the session.
+//   2. Send the whitelist-add. The car whitelists the key when the user confirms on
+//      screen but sends NO completing commandStatus, so this command never finishes
+//      cleanly — it just exhausts ~180 s of library retries while sitting at the head
+//      of the single FIFO queue, starving everything behind it. So after pair() we
+//      drop the link to flush that stuck command from the queue.
+//   3. Probe once more on a clean link — now authorised, this establishes the session.
 // On any failure the BLE link is dropped, which flushes the library's command
 // queue and RX buffer (set_connected(false)) so the next round starts clean.
 void VehicleController::auto_pair_task_fn_(void* arg) {
@@ -153,45 +180,105 @@ void VehicleController::auto_pair_task_fn_(void* arg) {
         // signed command or the health poll below). The stored key is now useless, so
         // re-key — which also clears the session + cache — and fall through to re-pair.
         if (self->pairing_lost_) {
-            ESP_LOGW(TAG, "auto-pair: key no longer on the vehicle — regenerating key and re-pairing");
+            self->believed_paired_ = false;  // stop the observer acting during re-enrol
+            ESP_LOGW(TAG, "auto-pair: KEY DELETED on the car — clearing pairing, generating a new key, restarting enrolment");
             self->repair_notice_ = true;  // tell the UI why it's asking to pair again
             self->generate_key();   // clears pairing_lost_, session and cached data
+            ESP_LOGI(TAG, "auto-pair: new key generated (%s) — re-enrol it on the car", self->key_fingerprint().c_str());
             continue;
         }
 
         if (self->has_session()) {
             // A live session means (re-)pairing succeeded; drop the re-auth notice.
             self->repair_notice_ = false;
-            // Paired — on-demand connect serves commands. Periodically run a signed
-            // health poll so a key deleted on the car side is noticed even when no
-            // commands are flowing (otherwise the UI would keep showing "paired").
-            self->health_probe_();
-            vTaskDelay(pdMS_TO_TICKS(30000));
+            // We're paired: arm the message observer so a key-rejection fault on any
+            // signed command (e.g. the background charge poll → ERROR_UNKNOWN_KEY_ID)
+            // trips pairing_lost_ even while the cached VCSEC session keeps succeeding.
+            self->believed_paired_ = true;
+            // Paired — periodically run a signed VCSEC health poll so a key deleted on the
+            // car side is noticed even with no evcc traffic. The poll hits the always-on
+            // body controller (VCSEC), which does NOT wake the car's main computer (wake
+            // sequences are infotainment-only), so a 5 s cadence is safe. Three outcomes,
+            // distinguished so /diag clearly says what happened:
+            //   • success            → key still valid
+            //   • auth rejection     → car refused our key (likely deleted) — confirm now
+            //   • neither (no reply) → car unreachable (asleep / out of range / weak link)
+            int  streak_before = self->auth_fail_streak_;
+            bool ok            = self->health_probe_();
+            if (self->pairing_lost_) continue;  // 2nd strike already → revoked (top of loop)
+
+            if (ok) {
+                ESP_LOGD(TAG, "auto-pair: health check OK — key still valid");
+                // Idle ~5 s, but bail out fast if the message observer flags a deletion
+                // (a faulting charge poll mid-wait) so we re-key promptly, not 5 s later.
+                for (int w = 0; w < 10 && !self->pairing_lost_; w++) vTaskDelay(pdMS_TO_TICKS(500));
+            } else if (self->auth_fail_streak_ > streak_before) {
+                // The car answered but REFUSED our key → almost certainly deleted on the
+                // car side. Confirm immediately (don't wait a whole cycle) so we react in
+                // ~1-2 s; a second auth rejection trips pairing_lost_ in make_result_cb_.
+                ESP_LOGW(TAG, "auto-pair: car refused our key (auth fail %d/2) — re-checking to confirm…",
+                         (int)self->auth_fail_streak_);
+                self->health_probe_();
+                if (self->pairing_lost_) continue;
+                vTaskDelay(pdMS_TO_TICKS(1000));
+            } else {
+                // No auth answer at all → could not reach/talk to the car. NOT a revocation;
+                // keep the pairing and retry. Logged so it's clear the key simply could not
+                // be verified (connectivity), rather than a deletion being silently missed.
+                ESP_LOGW(TAG, "auto-pair: car not reachable over BLE — can't verify key right now, will retry");
+                for (int w = 0; w < 10 && !self->pairing_lost_; w++) vTaskDelay(pdMS_TO_TICKS(500));
+            }
             continue;
         }
 
-        // 1. Probe for an existing whitelist entry (clean-fails if not authorised).
+        // Not paired (enrolling): disarm the observer — key-rejection faults are expected
+        // here and must not be mistaken for a revocation.
+        self->believed_paired_ = false;
+
+        // 1. Probe for an existing whitelist entry. A key enrolled by EITHER method —
+        //    tapping a keycard on the console (enrolls instantly, no on-screen step) or
+        //    confirming the on-screen "phone key pairing" dialog — shows up here as a
+        //    usable session.
         VehicleStatusResult st;
-        self->get_vehicle_status(st, 8000);
+        self->get_vehicle_status(st, 6000);
         if (self->has_session()) {
             ESP_LOGI(TAG, "auto-pair: session established");
             continue;
         }
 
-        // 2. Request enrolment; the car shows a pairing dialog to confirm on screen.
-        //    The link is held open while we wait so the car's response can complete
-        //    the command without the queue churn of disconnect/reconnect.
-        ESP_LOGI(TAG, "auto-pair: requesting key enrolment — confirm on the car's screen");
-        self->pair(45000);
+        // 2. Offer on-screen enrolment ONCE (the car shows a "phone key pairing" dialog),
+        //    then flush the queue. We do NOT block waiting on it: the "Whitelist Add Key"
+        //    never completes cleanly on this car (no completing commandStatus) and the
+        //    keycard method ignores it entirely — success is detected by probing (step 3),
+        //    not by pair()'s return. The short wait just lets the message reach the car;
+        //    flushing (set_connected(false)) then clears the lingering whitelist-add from
+        //    the single FIFO queue so the probes below run clean. Sending it only once per
+        //    round (instead of every ~45 s block) also stops the car re-prompting after
+        //    the key is already registered.
+        ESP_LOGI(TAG, "auto-pair: not paired — requesting key enrolment from the car…");
+        self->pair(5000);
+        if (self->ble_ && self->ble_->is_connected()) self->ble_->disconnect();
+        xSemaphoreTake(self->vehicle_mutex_, portMAX_DELAY);
+        self->vehicle_->set_connected(false);
+        xSemaphoreGive(self->vehicle_mutex_);
+        ESP_LOGI(TAG, "auto-pair: enrolment request sent — TAP YOUR KEYCARD on the console (or confirm the on-screen dialog); waiting for the key to register…");
 
-        // 3. After confirmation a fresh probe establishes the session.
-        self->get_vehicle_status(st, 10000);
-        if (self->has_session()) {
-            ESP_LOGI(TAG, "auto-pair: pairing complete — session established");
+        // 3. Poll for the resulting session at a short cadence so an enrolment that lands
+        //    mid-round — the instant a keycard is tapped — is noticed within a few seconds
+        //    instead of after a full slow round. A failed probe (not yet enrolled) returns
+        //    on its timeout; a successful one (now enrolled) returns in ~1 s and persists
+        //    the session, so has_session() flips and we stop here.
+        bool established = false;
+        for (int i = 0; i < 8; i++) {
+            self->get_vehicle_status(st, 3000);
+            if (self->has_session()) { established = true; break; }
+            vTaskDelay(pdMS_TO_TICKS(400));
+        }
+        if (established) {
+            ESP_LOGI(TAG, "auto-pair: key registered on the car — session established, now PAIRED");
             continue;
         }
-        ESP_LOGI(TAG, "auto-pair: not confirmed yet — confirm the request on the car's screen");
-        vTaskDelay(pdMS_TO_TICKS(2000));
+        ESP_LOGI(TAG, "auto-pair: not registered yet — tap your keycard / confirm on screen (or move closer if the car is out of BLE range)");
     }
 }
 
@@ -219,8 +306,13 @@ void VehicleController::loop_task_fn_(void* arg) {
             self->ble_->connect("");
         }
 
-        // Background charge-state refresh (paired + connected only), every 30 seconds.
-        if (paired && self->ble_connected() && (xTaskGetTickCount() - last_poll_ticks > pdMS_TO_TICKS(30000))) {
+        // Background charge-state refresh (paired + connected only), every 10 seconds.
+        // This infotainment poll doubles as the reliable key-revocation canary: a deleted
+        // key makes it fault with ERROR_UNKNOWN_KEY_ID, which the message observer turns
+        // into pairing_lost_ (the VCSEC health poll alone can miss it — it keeps succeeding
+        // from a cached session). NO_WAKE_SKIP, so once the car sleeps this stops firing
+        // and does not keep it awake; while awake it bounds revocation detection to ~10 s.
+        if (paired && self->ble_connected() && (xTaskGetTickCount() - last_poll_ticks > pdMS_TO_TICKS(10000))) {
             last_poll_ticks = xTaskGetTickCount();
             ESP_LOGD(TAG, "background charge-state refresh…");
             // Fire-and-forget poll. We must NOT block here: this task also pumps
@@ -259,15 +351,35 @@ bool VehicleController::ensure_connected_(int timeout_ms) {
 VehicleController::ResultCb VehicleController::make_result_cb_() {
     return [this](TeslaBLE::OperationResult result) {
         last_result_ = result.compatible_success();
+        if (last_result_) {
+            // A good response proves the car still trusts our key — clear any pending
+            // "key might be gone" streak so a later one-off glitch starts from zero.
+            auth_fail_streak_ = 0;
+        }
         if (result.is_failure() && result.error()) {
             const std::string& msg = result.error()->message();
             ESP_LOGW(TAG, "command failed: %s", msg.c_str());
-            // KEY_NOT_ON_WHITELIST ("… key not on whitelist - pairing required") means
-            // the vehicle no longer trusts our key (it was deleted on the car side).
-            // Flag it so the auto-pair supervisor re-keys and restarts pairing, and so
-            // the UI/evcc stop reporting a pairing that is actually gone.
+            // Two distinct ways a Tesla signals "your key is no longer whitelisted"
+            // (it was deleted on the car side); both must invalidate the pairing so the
+            // supervisor re-keys + re-pairs and the UI/evcc stop showing a dead pairing:
+            //
+            //  a) KEY_NOT_ON_WHITELIST → "… key not on whitelist - pairing required".
+            //     Definitive, act immediately.
+            //  b) The car answers a signed command with a session-info reply that has no
+            //     HMAC tag (it can't authenticate a key it no longer holds) → the library
+            //     reports "auth response authentication failed". Observed in the field as
+            //     the actual response to key deletion. This message is also used for one-
+            //     off auth glitches, so require two in a row before declaring the pairing
+            //     lost (the supervisor re-probes ~3 s after the first, so confirmation
+            //     takes seconds). Counter resets on any success above.
             if (msg.find("whitelist") != std::string::npos) {
-                pairing_lost_ = true;
+                pairing_lost_      = true;
+                auth_fail_streak_  = 0;
+            } else if (msg.find("authentication failed") != std::string::npos) {
+                if (++auth_fail_streak_ >= 2) {
+                    pairing_lost_     = true;
+                    auth_fail_streak_ = 0;
+                }
             }
         }
         xSemaphoreGive(cmd_sem_);
@@ -519,7 +631,8 @@ bool VehicleController::generate_key() {
     // Wipe the session and cached data so has_session() flips to false (the UI shows
     // "not paired" and hides the controls/SOC) and the auto-pair loop re-enrolls.
     clear_session_and_cache_();
-    pairing_lost_ = false;  // re-keying is the resolution; clear any pending flag
+    pairing_lost_     = false;  // re-keying is the resolution; clear any pending flag
+    auth_fail_streak_ = 0;      // and the streak that may have led here
     ESP_LOGI(TAG, "new key generated");
     return true;
 }
