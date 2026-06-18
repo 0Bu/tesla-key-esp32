@@ -31,5 +31,12 @@
       "datasourceTemplate": "npm",
       "depNameTemplate": "esp-web-tools"
     }
+  ],
+  "packageRules": [
+    {
+      "description": "Hold ESP-IDF at 5.x: 6.0 ships mbedTLS 4 (PSA Crypto) and removes the legacy ECDH/PK headers that yoziru/tesla-ble (#include <mbedtls/ecdh.h>) still uses, so the firmware cannot build on 6.x. Revisit once tesla-ble migrates to PSA Crypto.",
+      "matchDepNames": ["espressif/esp-idf"],
+      "allowedVersions": "<6"
+    }
   ]
 }
