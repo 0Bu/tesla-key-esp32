@@ -31,6 +31,44 @@ struct VehicleStatusResult {
     std::string user_presence;
 };
 
+// ─── Read-only telemetry (refreshed in the background, shown in the web UI) ──────
+// Each carries presence flags for the numeric fields because the car omits values
+// it has no reading for (proto3 optional); a missing field must render as "—",
+// not as 0.
+struct ClimateStateResult {
+    bool valid{false};
+    bool is_climate_on{false};
+    bool is_preconditioning{false};
+    bool  has_inside{false};   float inside_temp{0};      // °C
+    bool  has_outside{false};  float outside_temp{0};     // °C
+    bool  has_setpoint{false}; float driver_setpoint{0};  // °C
+};
+
+struct DriveStateResult {
+    bool valid{false};
+    std::string shift_state;          // "P"/"R"/"N"/"D" or "" if unknown
+    bool  has_odometer{false}; float odometer_km{0};
+};
+
+struct TirePressureResult {
+    bool valid{false};
+    bool  has_fl{false}; float fl{0};   // bar
+    bool  has_fr{false}; float fr{0};
+    bool  has_rl{false}; float rl{0};
+    bool  has_rr{false}; float rr{0};
+    bool  warn{false};                  // any soft/hard TPMS warning set
+};
+
+struct ClosuresStateResult {
+    bool valid{false};
+    bool has_locked{false};       bool locked{false};
+    bool any_door_open{false};
+    bool frunk_open{false};
+    bool trunk_open{false};
+    bool any_window_open{false};
+    bool has_user_present{false}; bool user_present{false};
+};
+
 class VehicleController {
 public:
     VehicleController() = default;
@@ -54,13 +92,22 @@ public:
     bool set_sentry_mode(bool enable, int timeout_ms = 20000);
     bool climate_start(int timeout_ms = 20000);
     bool climate_stop(int timeout_ms = 20000);
+    // Scheduled charging: enable/disable a daily start time. start_minutes is minutes
+    // after local midnight (0–1439; e.g. 23:00 → 1380), ignored when enable is false.
+    // (Scheduled *departure* is not exposed: the tesla-ble version in use registers no
+    // builder for scheduledDepartureAction, so it cannot be sent.)
+    bool set_scheduled_charging(bool enable, int start_minutes, int timeout_ms = 20000);
 
     bool get_charge_state(ChargeStateResult& out, int timeout_ms = 20000);
     bool get_vehicle_status(VehicleStatusResult& out, int timeout_ms = 20000);
 
     // Non-blocking accessors for cached state (refreshed in background)
-    ChargeStateResult   get_cached_charge() { return last_known_charge_; }
-    VehicleStatusResult get_cached_status() { return last_known_status_; }
+    ChargeStateResult   get_cached_charge()   { return last_known_charge_; }
+    VehicleStatusResult get_cached_status()   { return last_known_status_; }
+    ClimateStateResult  get_cached_climate()  { return last_known_climate_; }
+    DriveStateResult    get_cached_drive()    { return last_known_drive_; }
+    TirePressureResult  get_cached_tires()    { return last_known_tires_; }
+    ClosuresStateResult get_cached_closures() { return last_known_closures_; }
 
     bool generate_key();
     // Always enrolls a Charging Manager key (charging + wake only); never an owner key.
@@ -180,6 +227,10 @@ private:
     // Cached results for non-blocking UI access
     ChargeStateResult   last_known_charge_{};
     VehicleStatusResult last_known_status_{};
+    ClimateStateResult  last_known_climate_{};
+    DriveStateResult    last_known_drive_{};
+    TirePressureResult  last_known_tires_{};
+    ClosuresStateResult last_known_closures_{};
 
     // Pending status result stored as a member to avoid lambda capturing stack refs
     VehicleStatusResult pending_status_{};
