@@ -60,9 +60,28 @@ POST /gen_keys[?force=1]                       # generate key (refuses overwrite
 POST /send_key                                 # pair with vehicle (Charging Manager only)
 POST /set_vin                                  # persist VIN + reboot
 GET  /api/proxy/1/version
+GET  /ota/check                                # fetch manifest, compare to running version
+POST /ota/update                               # start background self-update (pull, then reboot)
+GET  /ota/status                               # poll OTA progress {state,progress,message,available}
 ```
 
 No HTTP auth / TLS by design (evcc cannot send credentials) — trusted LAN only. See docs/SECURITY.md.
+
+## OTA (self-update)
+
+Pull-based: the device fetches `manifest.json` from a fixed HTTPS URL
+(`CONFIG_TESLA_OTA_MANIFEST_URL`, default GitHub Pages), compares its `version` to the
+running firmware, and on confirmation downloads the app image
+(`CONFIG_TESLA_OTA_FIRMWARE_URL`) via `esp_https_ota` into the inactive OTA slot, then
+reboots. Triggered from the web UI by tapping the firmware version in the top meta line.
+Implemented in `main/ota_update.cpp`. Rollback is enabled
+(`CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE`); `main.cpp` calls
+`esp_ota_mark_app_valid_cancel_rollback()` after a healthy startup.
+
+Partition layout (`partitions.csv`) is dual-OTA (`otadata` + `ota_0`/`ota_1`, 3 MB each;
+app now at `0x20000`). **Migration:** a device on the old single-`factory` layout must be
+USB-reflashed once via the web installer (full erase → WiFi/VIN/key reset, re-pair). After
+that, all updates are OTA and preserve NVS.
 
 ## evcc Integration
 
