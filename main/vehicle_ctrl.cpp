@@ -67,6 +67,112 @@ void parse_charge_state(const CarServer_ChargeState& cs, ChargeStateResult& out)
         out.charging_state = "Unknown";
     }
 }
+
+// ─── Telemetry parsers (same proto3-optional → single-member-oneof pattern) ──────
+
+void parse_climate_state(const CarServer_ClimateState& cs, ClimateStateResult& out) {
+    out.valid = true;
+    if (cs.which_optional_inside_temp_celsius == CarServer_ClimateState_inside_temp_celsius_tag) {
+        out.inside_temp = cs.optional_inside_temp_celsius.inside_temp_celsius; out.has_inside = true;
+    }
+    if (cs.which_optional_outside_temp_celsius == CarServer_ClimateState_outside_temp_celsius_tag) {
+        out.outside_temp = cs.optional_outside_temp_celsius.outside_temp_celsius; out.has_outside = true;
+    }
+    if (cs.which_optional_driver_temp_setting == CarServer_ClimateState_driver_temp_setting_tag) {
+        out.driver_setpoint = cs.optional_driver_temp_setting.driver_temp_setting; out.has_setpoint = true;
+    }
+    if (cs.which_optional_is_climate_on == CarServer_ClimateState_is_climate_on_tag)
+        out.is_climate_on = cs.optional_is_climate_on.is_climate_on;
+    if (cs.which_optional_is_preconditioning == CarServer_ClimateState_is_preconditioning_tag)
+        out.is_preconditioning = cs.optional_is_preconditioning.is_preconditioning;
+}
+
+void parse_drive_state(const CarServer_DriveState& ds, DriveStateResult& out) {
+    out.valid = true;
+    if (ds.has_shift_state) {
+        switch (ds.shift_state.which_type) {
+            case CarServer_ShiftState_P_tag: out.shift_state = "P"; break;
+            case CarServer_ShiftState_R_tag: out.shift_state = "R"; break;
+            case CarServer_ShiftState_N_tag: out.shift_state = "N"; break;
+            case CarServer_ShiftState_D_tag: out.shift_state = "D"; break;
+            default: out.shift_state = ""; break;
+        }
+    }
+    if (ds.which_optional_odometer_in_hundredths_of_a_mile ==
+        CarServer_DriveState_odometer_in_hundredths_of_a_mile_tag) {
+        // hundredths of a mile → km
+        out.odometer_km = ds.optional_odometer_in_hundredths_of_a_mile.odometer_in_hundredths_of_a_mile
+                          * 0.01f * 1.609344f;
+        out.has_odometer = true;
+    }
+}
+
+void parse_tire_pressure(const CarServer_TirePressureState& t, TirePressureResult& out) {
+    out.valid = true;
+    if (t.which_optional_tpms_pressure_fl == CarServer_TirePressureState_tpms_pressure_fl_tag) {
+        out.fl = t.optional_tpms_pressure_fl.tpms_pressure_fl; out.has_fl = true;
+    }
+    if (t.which_optional_tpms_pressure_fr == CarServer_TirePressureState_tpms_pressure_fr_tag) {
+        out.fr = t.optional_tpms_pressure_fr.tpms_pressure_fr; out.has_fr = true;
+    }
+    if (t.which_optional_tpms_pressure_rl == CarServer_TirePressureState_tpms_pressure_rl_tag) {
+        out.rl = t.optional_tpms_pressure_rl.tpms_pressure_rl; out.has_rl = true;
+    }
+    if (t.which_optional_tpms_pressure_rr == CarServer_TirePressureState_tpms_pressure_rr_tag) {
+        out.rr = t.optional_tpms_pressure_rr.tpms_pressure_rr; out.has_rr = true;
+    }
+    auto warn = [](pb_size_t w, pb_size_t tag, bool v) { return w == tag && v; };
+    out.warn =
+        warn(t.which_optional_tpms_soft_warning_fl, CarServer_TirePressureState_tpms_soft_warning_fl_tag,
+             t.optional_tpms_soft_warning_fl.tpms_soft_warning_fl) ||
+        warn(t.which_optional_tpms_soft_warning_fr, CarServer_TirePressureState_tpms_soft_warning_fr_tag,
+             t.optional_tpms_soft_warning_fr.tpms_soft_warning_fr) ||
+        warn(t.which_optional_tpms_soft_warning_rl, CarServer_TirePressureState_tpms_soft_warning_rl_tag,
+             t.optional_tpms_soft_warning_rl.tpms_soft_warning_rl) ||
+        warn(t.which_optional_tpms_soft_warning_rr, CarServer_TirePressureState_tpms_soft_warning_rr_tag,
+             t.optional_tpms_soft_warning_rr.tpms_soft_warning_rr) ||
+        warn(t.which_optional_tpms_hard_warning_fl, CarServer_TirePressureState_tpms_hard_warning_fl_tag,
+             t.optional_tpms_hard_warning_fl.tpms_hard_warning_fl) ||
+        warn(t.which_optional_tpms_hard_warning_fr, CarServer_TirePressureState_tpms_hard_warning_fr_tag,
+             t.optional_tpms_hard_warning_fr.tpms_hard_warning_fr) ||
+        warn(t.which_optional_tpms_hard_warning_rl, CarServer_TirePressureState_tpms_hard_warning_rl_tag,
+             t.optional_tpms_hard_warning_rl.tpms_hard_warning_rl) ||
+        warn(t.which_optional_tpms_hard_warning_rr, CarServer_TirePressureState_tpms_hard_warning_rr_tag,
+             t.optional_tpms_hard_warning_rr.tpms_hard_warning_rr);
+}
+
+void parse_closures_state(const CarServer_ClosuresState& c, ClosuresStateResult& out) {
+    out.valid = true;
+    auto on = [](pb_size_t w, pb_size_t tag, bool v) { return w == tag && v; };
+    if (c.which_optional_locked == CarServer_ClosuresState_locked_tag) {
+        out.locked = c.optional_locked.locked; out.has_locked = true;
+    }
+    out.any_door_open =
+        on(c.which_optional_door_open_driver_front, CarServer_ClosuresState_door_open_driver_front_tag,
+           c.optional_door_open_driver_front.door_open_driver_front) ||
+        on(c.which_optional_door_open_driver_rear, CarServer_ClosuresState_door_open_driver_rear_tag,
+           c.optional_door_open_driver_rear.door_open_driver_rear) ||
+        on(c.which_optional_door_open_passenger_front, CarServer_ClosuresState_door_open_passenger_front_tag,
+           c.optional_door_open_passenger_front.door_open_passenger_front) ||
+        on(c.which_optional_door_open_passenger_rear, CarServer_ClosuresState_door_open_passenger_rear_tag,
+           c.optional_door_open_passenger_rear.door_open_passenger_rear);
+    out.frunk_open = on(c.which_optional_door_open_trunk_front, CarServer_ClosuresState_door_open_trunk_front_tag,
+                        c.optional_door_open_trunk_front.door_open_trunk_front);
+    out.trunk_open = on(c.which_optional_door_open_trunk_rear, CarServer_ClosuresState_door_open_trunk_rear_tag,
+                        c.optional_door_open_trunk_rear.door_open_trunk_rear);
+    out.any_window_open =
+        on(c.which_optional_window_open_driver_front, CarServer_ClosuresState_window_open_driver_front_tag,
+           c.optional_window_open_driver_front.window_open_driver_front) ||
+        on(c.which_optional_window_open_passenger_front, CarServer_ClosuresState_window_open_passenger_front_tag,
+           c.optional_window_open_passenger_front.window_open_passenger_front) ||
+        on(c.which_optional_window_open_driver_rear, CarServer_ClosuresState_window_open_driver_rear_tag,
+           c.optional_window_open_driver_rear.window_open_driver_rear) ||
+        on(c.which_optional_window_open_passenger_rear, CarServer_ClosuresState_window_open_passenger_rear_tag,
+           c.optional_window_open_passenger_rear.window_open_passenger_rear);
+    if (c.which_optional_is_user_present == CarServer_ClosuresState_is_user_present_tag) {
+        out.user_present = c.optional_is_user_present.is_user_present; out.has_user_present = true;
+    }
+}
 } // namespace
 
 // ─── init ────────────────────────────────────────────────────────────────────
@@ -120,6 +226,22 @@ bool VehicleController::init(const std::string& vin,
     // reads serve last_known_charge_ from this cache without blocking.
     vehicle_->set_charge_state_callback([this](const CarServer_ChargeState& cs) {
         parse_charge_state(cs, last_known_charge_);
+    });
+
+    // Read-only telemetry callbacks. Fed by the rotating background poll in loop_task_fn_
+    // (one telemetry domain per cycle). Each refreshes its own cache for the web UI; none
+    // affect pairing or evcc. Installed once, never cleared.
+    vehicle_->set_climate_state_callback([this](const CarServer_ClimateState& cs) {
+        parse_climate_state(cs, last_known_climate_);
+    });
+    vehicle_->set_drive_state_callback([this](const CarServer_DriveState& ds) {
+        parse_drive_state(ds, last_known_drive_);
+    });
+    vehicle_->set_tire_pressure_state_callback([this](const CarServer_TirePressureState& t) {
+        parse_tire_pressure(t, last_known_tires_);
+    });
+    vehicle_->set_closures_state_callback([this](const CarServer_ClosuresState& c) {
+        parse_closures_state(c, last_known_closures_);
     });
 
     // Reliable key-revocation detector. When the key is deleted on the car side, the
@@ -286,6 +408,8 @@ void VehicleController::loop_task_fn_(void* arg) {
     auto* self = static_cast<VehicleController*>(arg);
     uint32_t last_poll_ticks    = 0;
     uint32_t last_connect_ticks = 0;
+    uint32_t last_tele_ticks    = 0;
+    int      tele_idx           = 0;  // rotates the telemetry domain polled each cycle
     while (true) {
         xSemaphoreTake(self->vehicle_mutex_, portMAX_DELAY);
         self->vehicle_->loop();
@@ -322,6 +446,25 @@ void VehicleController::loop_task_fn_(void* arg) {
             xSemaphoreTake(self->vehicle_mutex_, portMAX_DELAY);
             self->vehicle_->charge_state_poll(TeslaBLE::WakePolicy::NO_WAKE_SKIP);
             xSemaphoreGive(self->vehicle_mutex_);
+        }
+
+        // Background telemetry refresh (paired + connected): one domain per cycle, rotating
+        // climate → drive → tires → closures so the full set refreshes every ~48 s without
+        // flooding the single FIFO command queue. Offset from the charge poll (12 s vs 10 s)
+        // so the two rarely fire in the same iteration. All NO_WAKE_SKIP: read-only and a
+        // sleeping car is left undisturbed (the polls are simply skipped). These feed the
+        // web-UI caches only; evcc and pairing are unaffected.
+        if (paired && self->ble_connected() && (xTaskGetTickCount() - last_tele_ticks > pdMS_TO_TICKS(12000))) {
+            last_tele_ticks = xTaskGetTickCount();
+            xSemaphoreTake(self->vehicle_mutex_, portMAX_DELAY);
+            switch (tele_idx % 4) {
+                case 0: self->vehicle_->climate_state_poll(TeslaBLE::WakePolicy::NO_WAKE_SKIP);  break;
+                case 1: self->vehicle_->drive_state_poll(TeslaBLE::WakePolicy::NO_WAKE_SKIP);    break;
+                case 2: self->vehicle_->tire_pressure_poll(TeslaBLE::WakePolicy::NO_WAKE_SKIP);  break;
+                case 3: self->vehicle_->closures_state_poll(TeslaBLE::WakePolicy::NO_WAKE_SKIP); break;
+            }
+            xSemaphoreGive(self->vehicle_mutex_);
+            tele_idx++;
         }
 
         vTaskDelay(pdMS_TO_TICKS(50));
@@ -553,6 +696,19 @@ bool VehicleController::climate_stop(int timeout_ms) {
     }, timeout_ms);
 }
 
+bool VehicleController::set_scheduled_charging(bool enable, int start_minutes, int timeout_ms) {
+    if (start_minutes < 0)    start_minutes = 0;
+    if (start_minutes > 1439) start_minutes = 1439;
+    return send_infotainment_(enable ? "Scheduled Charging On" : "Scheduled Charging Off",
+        [enable, start_minutes](TeslaBLE::Client* c, uint8_t* b, size_t* l) {
+            CarServer_ScheduledChargingAction act = CarServer_ScheduledChargingAction_init_zero;
+            act.enabled       = enable;
+            act.charging_time = start_minutes;  // minutes after local midnight
+            return c->build_car_server_vehicle_action_message(
+                b, l, CarServer_VehicleAction_scheduledChargingAction_tag, &act);
+        }, timeout_ms);
+}
+
 // ─── Data queries ─────────────────────────────────────────────────────────────
 
 bool VehicleController::get_charge_state(ChargeStateResult& out, int /*timeout_ms*/) {
@@ -660,9 +816,14 @@ void VehicleController::clear_session_and_cache_() {
         storage_->remove("session_infotainment");
     }
 
-    // Drop cached readings so /status and vehicle_data never serve old SOC/charge data.
-    last_known_charge_ = {};
-    last_known_status_ = {};
+    // Drop cached readings so /status and vehicle_data never serve old SOC/charge data
+    // (or stale telemetry) from a defunct pairing.
+    last_known_charge_   = {};
+    last_known_status_   = {};
+    last_known_climate_  = {};
+    last_known_drive_    = {};
+    last_known_tires_    = {};
+    last_known_closures_ = {};
     ESP_LOGI(TAG, "pairing/session cleared");
 }
 
