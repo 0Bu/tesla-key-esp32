@@ -58,6 +58,7 @@ POST /scan                                     # start a time-limited BLE discov
 GET  /diag                                     # plain-text in-memory diag log (?verbose=1 raw RX, ?clear=1 reset)
 POST /gen_keys[?force=1]                       # generate key (refuses overwrite w/o force)
 POST /send_key                                 # pair with vehicle (Charging Manager only)
+POST /set_time                                 # set wall clock from the browser ({"ms":<epoch>}); fallback when NTP unreachable
 POST /set_vin                                  # persist VIN + reboot
 GET  /api/proxy/1/version
 GET  /ota/check                                # fetch manifest, compare to running version
