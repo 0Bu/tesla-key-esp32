@@ -389,6 +389,9 @@ static esp_err_t handle_status(httpd_req_t* req) {
     time_t key_created = g_vehicle->key_created_at();
     if (key_created > 1600000000) cJSON_AddNumberToObject(root, "key_created", (double)key_created);
     cJSON_AddBoolToObject(root,   "paired",        g_vehicle->has_session());
+    // True when the previous pairing was lost (key removed on the car side) and a
+    // re-pair is pending — lets the UI explain why it's prompting to pair again.
+    cJSON_AddBoolToObject(root,   "reauth",        g_vehicle->reauth_required());
 
     // WiFi: SSID + live signal strength (dBm) of the station link.
     cJSON* wifi = cJSON_CreateObject();
@@ -465,7 +468,14 @@ static esp_err_t handle_set_vin(httpd_req_t* req) {
         return send_json(req, 400, make_response(false, "set_vin", vin.c_str(),
                                                  "VIN must be 17 characters"));
     }
+    // A changed VIN points the device at a *different* vehicle, so the current key's
+    // pairing, session, cached data and discovered BLE MAC all belong to the old car.
+    // Wipe them (regenerate the key + clear the session/cache/MAC) before rebooting so
+    // the device pairs cleanly with the new vehicle and shows no stale data. Re-saving
+    // the same VIN leaves the existing pairing untouched.
+    bool changed = (vin != g_vehicle->vin());
     bool ok = g_vehicle->save_config_vin(vin);
+    if (ok && changed) g_vehicle->reset_for_new_vehicle();
     esp_err_t r = send_json(req, ok ? 200 : 500,
         make_response(ok, "set_vin", vin.c_str(),
                       ok ? "VIN saved — rebooting" : "failed to save VIN"));
@@ -552,8 +562,10 @@ static const char INDEX_HTML[] =
 "document.getElementById('keyslot').innerHTML=(j.key_present?`<code class=clk title='Tap to regenerate key' onclick=rk()>${fp}</code>`:`<code>${fp}</code>`)+kc;"
 "let ft=document.getElementById('findtag'),pm=document.getElementById('pairmsg');"
 "if(j.paired){ft.textContent='paired';ft.className='tag good';pm.textContent='Vehicle is linked and authorized.'}"
-"else if(e.connected){ft.textContent='connecting\\u2026';ft.className='tag';pm.textContent='Confirm the pairing request on your Tesla\\u2019s screen.'}"
-"else{ft.textContent='searching\\u2026';ft.className='tag';pm.textContent='Bring the device near your Tesla.'}"
+"else{let cn=e.connected;ft.textContent=cn?'connecting\\u2026':'searching\\u2026';ft.className='tag';"
+"let m=cn?'Confirm the pairing request on your Tesla\\u2019s screen.':'Bring the device near your Tesla.';"
+"if(j.reauth)m='The key was removed from the vehicle \\u2014 a new key was generated. '+m;"
+"pm.textContent=m}"
 "document.getElementById('bleslot').innerHTML=bleBody(e);"
 "let s4=document.getElementById('step4');"
 "document.getElementById('flow').classList.toggle('s3end',!j.paired);"
