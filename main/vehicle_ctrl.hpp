@@ -160,6 +160,18 @@ private:
     // supervisor consumes it to re-key and restart pairing. atomic: cross-task flag.
     std::atomic<bool> pairing_lost_{false};
 
+    // Consecutive "authentication failed" responses from signed commands. A car whose
+    // whitelist no longer holds our key replies to a signed command with an untagged
+    // session-info → "auth response authentication failed" (not KEY_NOT_ON_WHITELIST).
+    // Since that message is also used for one-off glitches, two in a row are required
+    // before pairing_lost_ is set. Reset on any successful response. atomic: cross-task.
+    std::atomic<int> auth_fail_streak_{0};
+
+    // True only while the supervisor believes we are paired (in the health-check phase).
+    // Gates the message observer so a key-rejection fault seen during *enrolment* (when
+    // rejections are expected) can't trip a re-key, while one seen while paired does.
+    std::atomic<bool> believed_paired_{false};
+
     // Sticky "re-pairing needed" notice for the UI: set when a lost pairing is handled,
     // cleared when a new session is established. Distinguishes a re-pair-after-revocation
     // from a never-paired device. atomic: written/read across tasks.
