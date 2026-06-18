@@ -149,9 +149,24 @@ void VehicleController::auto_pair_task_fn_(void* arg) {
     auto* self = static_cast<VehicleController*>(arg);
     vTaskDelay(pdMS_TO_TICKS(4000));  // let WiFi/BLE come up first
     while (true) {
+        // The car deleted our key (detected via a KEY_NOT_ON_WHITELIST response to any
+        // signed command or the health poll below). The stored key is now useless, so
+        // re-key — which also clears the session + cache — and fall through to re-pair.
+        if (self->pairing_lost_) {
+            ESP_LOGW(TAG, "auto-pair: key no longer on the vehicle — regenerating key and re-pairing");
+            self->repair_notice_ = true;  // tell the UI why it's asking to pair again
+            self->generate_key();   // clears pairing_lost_, session and cached data
+            continue;
+        }
+
         if (self->has_session()) {
-            // Paired — on-demand connect serves commands; nothing to do here.
-            vTaskDelay(pdMS_TO_TICKS(20000));
+            // A live session means (re-)pairing succeeded; drop the re-auth notice.
+            self->repair_notice_ = false;
+            // Paired — on-demand connect serves commands. Periodically run a signed
+            // health poll so a key deleted on the car side is noticed even when no
+            // commands are flowing (otherwise the UI would keep showing "paired").
+            self->health_probe_();
+            vTaskDelay(pdMS_TO_TICKS(30000));
             continue;
         }
 
@@ -245,7 +260,15 @@ VehicleController::ResultCb VehicleController::make_result_cb_() {
     return [this](TeslaBLE::OperationResult result) {
         last_result_ = result.compatible_success();
         if (result.is_failure() && result.error()) {
-            ESP_LOGW(TAG, "command failed: %s", result.error()->message().c_str());
+            const std::string& msg = result.error()->message();
+            ESP_LOGW(TAG, "command failed: %s", msg.c_str());
+            // KEY_NOT_ON_WHITELIST ("… key not on whitelist - pairing required") means
+            // the vehicle no longer trusts our key (it was deleted on the car side).
+            // Flag it so the auto-pair supervisor re-keys and restarts pairing, and so
+            // the UI/evcc stop reporting a pairing that is actually gone.
+            if (msg.find("whitelist") != std::string::npos) {
+                pairing_lost_ = true;
+            }
         }
         xSemaphoreGive(cmd_sem_);
     };
@@ -490,8 +513,63 @@ bool VehicleController::generate_key() {
         time_t now = time(nullptr);
         storage_->save_str("key_created", std::to_string((long long)now));
     }
+    // A new key invalidates any existing pairing: the stored session belonged to the
+    // previous key/whitelist entry, so a fresh enrolment + handshake is required.
+    // Wipe the session and cached data so has_session() flips to false (the UI shows
+    // "not paired" and hides the controls/SOC) and the auto-pair loop re-enrolls.
+    clear_session_and_cache_();
+    pairing_lost_ = false;  // re-keying is the resolution; clear any pending flag
     ESP_LOGI(TAG, "new key generated");
     return true;
+}
+
+// Tear down the current pairing without touching the private key. Used by
+// generate_key() (re-key) and reset_for_new_vehicle() (VIN change). Must NOT be
+// called while holding vehicle_mutex_ (it takes it to reset the in-memory peers).
+void VehicleController::clear_session_and_cache_() {
+    // Reset the library's in-memory peer sessions (and flush its command queue / RX
+    // buffer) so a stale session key cannot be reused. set_connected(false) does this;
+    // only bother when something is actually established to avoid a spurious log on a
+    // first-boot key generation.
+    bool had_link    = ble_ && ble_->is_connected();
+    bool had_session = has_session();
+    if (had_link) ble_->disconnect();
+    if ((had_link || had_session) && vehicle_) {
+        xSemaphoreTake(vehicle_mutex_, portMAX_DELAY);
+        vehicle_->set_connected(false);
+        xSemaphoreGive(vehicle_mutex_);
+    }
+
+    // Erase the persisted sessions so has_session() is false until a fresh handshake.
+    if (storage_) {
+        storage_->remove("session_vcsec");
+        storage_->remove("session_infotainment");
+    }
+
+    // Drop cached readings so /status and vehicle_data never serve old SOC/charge data.
+    last_known_charge_ = {};
+    last_known_status_ = {};
+    ESP_LOGI(TAG, "pairing/session cleared");
+}
+
+bool VehicleController::reset_for_new_vehicle() {
+    // Regenerating the key already clears the session + cache (see generate_key()).
+    generate_key();
+    // The discovered BLE MAC belongs to the previous car; drop it so the next boot
+    // rediscovers the new vehicle by its VIN-derived advertising name.
+    if (config_store_) config_store_->remove("ble_mac");
+    ESP_LOGI(TAG, "reset for new vehicle complete");
+    return true;
+}
+
+bool VehicleController::health_probe_(int timeout_ms) {
+    // A signed VCSEC status request. If our key is still whitelisted the car answers
+    // with a status (success); if it was deleted the session-info exchange returns
+    // KEY_NOT_ON_WHITELIST, which make_result_cb_ turns into pairing_lost_.
+    return send_vcsec_("VCSEC Health Poll", [](TeslaBLE::Client* c, uint8_t* b, size_t* l) {
+        return c->build_vcsec_information_request_message(
+            VCSEC_InformationRequestType_INFORMATION_REQUEST_TYPE_GET_STATUS, b, l);
+    }, TeslaBLE::WakePolicy::WAKE_IF_NEEDED, timeout_ms);
 }
 
 time_t VehicleController::key_created_at() {
