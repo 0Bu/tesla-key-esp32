@@ -10,6 +10,9 @@ idf_component_register(
         "ota_update.cpp"
     INCLUDE_DIRS
         "."
+    EMBED_TXTFILES
+        "www/index.html"
+        "www/setup.html"
     REQUIRES
         nvs_flash
         esp_wifi

@@ -1,0 +1,501 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#e82127">
+<title>tesla-key-esp32</title>
+<style>
+:root{
+  --bg:#f6f7f9; --card:#fff; --fg:#1a1d21; --muted:#5b626b; --border:#e6e8ec;
+  --soft:#f1f3f5; --accent:#e82127; --ok:#16a34a; --warn:#d97706; --radius:18px;
+  --shadow:0 1px 2px rgba(16,20,28,.04), 0 6px 20px rgba(16,20,28,.06);
+}
+@media (prefers-color-scheme:dark){
+  :root{
+    --bg:#0f1115; --card:#171a20; --fg:#f2f3f5; --muted:#9aa1ab; --border:#262a31;
+    --soft:#1f242c; --shadow:0 1px 2px rgba(0,0,0,.4), 0 8px 24px rgba(0,0,0,.35);
+  }
+}
+*{box-sizing:border-box}
+html,body{margin:0}
+body{
+  font:15px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  background:var(--bg); color:var(--fg); -webkit-font-smoothing:antialiased;
+  padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+}
+.wrap{max-width:540px; margin:0 auto; padding:18px 16px 36px}
+button{font:inherit; cursor:pointer; color:inherit}
+code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+
+/* header */
+.top{display:flex; align-items:center; gap:12px; padding:4px 2px 16px}
+.logo{width:36px; height:36px; border-radius:11px; background:var(--accent); flex:none;
+  display:grid; place-items:center; box-shadow:0 2px 8px rgba(232,33,39,.35)}
+.logo svg{width:19px; height:19px; fill:#fff}
+.ttl{flex:1; min-width:0}
+.ttl h1{margin:0; font-size:17px; font-weight:650; letter-spacing:-.2px}
+.ttl .sub{font-size:12.5px; color:var(--muted); font-variant-numeric:tabular-nums}
+.verlink{cursor:pointer; white-space:nowrap}
+.verlink:hover{color:var(--fg); text-decoration:underline}
+.verlink.acc{color:var(--accent); font-weight:600}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.25}}
+
+/* banners */
+.banner{display:none; align-items:flex-start; gap:11px; padding:13px 15px; border-radius:14px;
+  margin-bottom:12px; font-size:13px; line-height:1.45; box-shadow:var(--shadow)}
+.banner.show{display:flex}
+.banner .bi{flex:none; width:20px; height:20px; border-radius:50%; display:grid; place-items:center;
+  color:#fff; font-size:12px; font-weight:700; margin-top:1px}
+.banner b{font-weight:650}
+.banner.warn{background:rgba(217,119,6,.1); border:1px solid rgba(217,119,6,.28); color:var(--fg)}
+.banner.warn .bi{background:var(--warn)}
+
+/* hero */
+.hero{background:var(--card); border:1px solid var(--border); border-radius:var(--radius);
+  box-shadow:var(--shadow); padding:20px; margin-bottom:12px; display:flex; align-items:center; gap:20px}
+.hicon{position:relative; flex:none; width:104px; height:104px; line-height:0}
+.hicon .pct{position:absolute; inset:0; display:grid; place-items:center; text-align:center; line-height:1; pointer-events:none}
+.hicon .pct b{font-size:30px; font-weight:650; letter-spacing:-.5px}
+.hicon .pct b small{font-size:14px; font-weight:600; opacity:.55}
+.hicon .glyph{position:absolute; inset:0; display:grid; place-items:center; font-size:34px}
+.hicon .wakebtn{position:absolute; inset:0; padding:0; border:0; border-radius:50%; background:transparent; color:inherit;
+  cursor:pointer; -webkit-tap-highlight-color:transparent; line-height:0;
+  transition:transform .1s ease, background .15s ease, box-shadow .1s ease}
+.hicon .wakebtn:hover{background:color-mix(in srgb,var(--fg) 6%,transparent)}
+.hicon .wakebtn:active{transform:scale(.93); background:color-mix(in srgb,var(--fg) 10%,transparent); box-shadow:inset 0 2px 9px rgba(0,0,0,.20)}
+.hicon .wakebtn:disabled{cursor:default}
+.hicon svg.spin,.hicon svg.ringrot{animation:ringpulse 2.4s ease-in-out infinite}
+.hicon svg.ringrot.zzz{animation-duration:3.2s}
+@keyframes ringpulse{0%,100%{opacity:1}50%{opacity:.35}}
+.hicon .wakebtn .glyph{pointer-events:none}
+.hbody{flex:1; min-width:0}
+.hlabel{font-size:23px; font-weight:650; letter-spacing:-.4px; display:flex; align-items:center; gap:9px}
+.hlabel svg{width:20px; height:20px; fill:var(--accent); flex:none}
+.ldot{width:9px; height:9px; border-radius:50%; background:var(--accent); flex:none; animation:pulse 1.2s infinite}
+.hsub{font-size:13.5px; color:var(--muted); margin-top:6px; line-height:1.45}
+.hstats{display:flex; flex-wrap:wrap; gap:7px; margin-top:12px}
+.hstats:empty{display:none}
+.stat{display:flex; flex-direction:column; gap:1px; background:var(--soft); border-radius:10px; padding:6px 11px}
+.stat .k{font-size:10px; font-weight:600; letter-spacing:.4px; text-transform:uppercase; color:var(--muted)}
+.stat .v{font-size:15.5px; font-weight:650; font-variant-numeric:tabular-nums; letter-spacing:-.2px}
+.stat .v small{font-size:11px; font-weight:500; color:var(--muted); margin-left:2px}
+.stat.acc .v{color:var(--ok)}
+@media (max-width:430px){
+  .hero{gap:16px; padding:18px}
+  .hicon{width:88px; height:88px}
+  .hicon .pct b{font-size:25px}
+  .hlabel{font-size:20px}
+  .stat{padding:5px 9px}
+  .stat .v{font-size:14px}
+}
+
+/* status grid */
+.grid{display:grid; grid-template-columns:1fr 1fr; gap:10px}
+.tile{position:relative; background:var(--card); border:1px solid var(--border); border-radius:14px;
+  box-shadow:var(--shadow); padding:14px 15px; text-align:left; font:inherit; color:inherit; min-width:0; width:100%;
+  display:flex; flex-direction:column; align-items:stretch; justify-content:flex-start}
+.tile.wide{grid-column:1 / -1}
+.tile.tap{cursor:pointer; -webkit-tap-highlight-color:transparent}
+.tile.tap:active{background:var(--soft)}
+.tlabel{font-size:11px; font-weight:600; letter-spacing:.5px; text-transform:uppercase; color:var(--muted)}
+.tval{font-size:16px; font-weight:600; margin-top:6px; word-break:break-all}
+.tval.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:13.5px; letter-spacing:.2px}
+.tval .ph{color:var(--muted); font-weight:400}
+.tsub{font-size:12.5px; color:var(--muted); margin-top:3px; display:flex; align-items:center; gap:7px; min-height:18px}
+.tsub.ok{color:var(--ok)} .tsub.warn{color:var(--warn)} .tsub.acc{color:var(--accent)}
+.tsub .mac{font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:11.5px; letter-spacing:.2px}
+.tsub .mac+span{color:var(--muted)}
+.tedit{position:absolute; top:13px; right:13px; width:14px; height:14px; color:var(--muted); opacity:.38;
+  fill:none; stroke:currentColor; stroke-width:2; stroke-linecap:round; stroke-linejoin:round}
+.tile.tap:active .tedit{opacity:.7}
+.bars{vertical-align:-2px}
+.hbars{color:var(--ok)}
+
+/* toasts */
+.toasts{position:fixed; left:0; right:0; bottom:calc(16px + env(safe-area-inset-bottom)); z-index:60;
+  display:flex; flex-direction:column; align-items:center; gap:8px; padding:0 14px; pointer-events:none}
+.toast{pointer-events:auto; max-width:480px; width:100%; display:flex; align-items:center; gap:11px;
+  background:var(--card); border:1px solid var(--border); border-radius:13px; padding:12px 15px;
+  box-shadow:var(--shadow); font-size:14px; font-weight:500; animation:tin .24s cubic-bezier(.2,.7,.3,1)}
+.toast .ic{width:20px; height:20px; flex:none; border-radius:50%; display:grid; place-items:center; color:#fff; font-size:12px; font-weight:700}
+.toast.ok .ic{background:var(--ok)} .toast.err .ic{background:var(--accent)} .toast.info .ic{background:var(--muted)}
+.toast.leaving{animation:tout .22s ease forwards}
+@keyframes tin{from{opacity:0; transform:translateY(12px)}to{opacity:1; transform:none}}
+@keyframes tout{to{opacity:0; transform:translateY(12px)}}
+
+.hide{display:none!important}
+</style>
+</head>
+<body>
+
+<div class="wrap">
+
+  <header class="top">
+    <div class="logo"><svg viewBox="0 0 24 24"><path d="M13 2 4 14h6l-1 8 9-12h-6l1-8z"/></svg></div>
+    <div class="ttl">
+      <h1>tesla-key-esp32</h1>
+      <div class="sub"><span id="ipline">&mdash;</span><span id="metasep"></span><span class="verlink" id="verLink" onclick="otaCheck()" title="Tap to check for updates"></span></div>
+    </div>
+  </header>
+
+  <!-- re-pair notice -->
+  <div class="banner warn" id="reauthBanner">
+    <div class="bi">!</div>
+    <div class="bt"></div>
+  </div>
+
+  <!-- hero -->
+  <div class="hero">
+    <div class="hicon" id="hicon"></div>
+    <div class="hbody">
+      <div class="hlabel" id="hlabel">&mdash;</div>
+      <div class="hsub" id="hsub"></div>
+      <div class="hstats" id="hstats"></div>
+    </div>
+  </div>
+
+  <!-- status grid -->
+  <div class="grid">
+    <button class="tile tap" onclick="editVin()">
+      <svg class="tedit" viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>
+      <div class="tlabel">Vehicle</div>
+      <div class="tval mono" id="vehVal">&mdash;</div>
+      <div class="tsub" id="vehSub"></div>
+    </button>
+
+    <button class="tile tap" onclick="genKey()">
+      <svg class="tedit" viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>
+      <div class="tlabel">Security key</div>
+      <div class="tval mono" id="keyVal">&mdash;</div>
+      <div class="tsub" id="keySub"></div>
+    </button>
+
+    <div class="tile wide">
+      <div class="tlabel">Connection</div>
+      <div class="tval" id="bleVal">&mdash;</div>
+      <div class="tsub" id="bleSub"></div>
+    </div>
+  </div>
+
+</div>
+
+<div class="toasts" id="toasts"></div>
+
+<script>
+"use strict";
+var $=function(id){return document.getElementById(id)};
+var state=null, otaTimer=null, otaAvail=null, waking=false, wakeTimeout=null, chgBusy=false;
+
+function esc(s){return String(s).replace(/[&<>]/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;'}[c]})}
+
+/* ---------- toasts ---------- */
+function toast(msg,type){
+  type=type||'info'; var c=$("toasts"); if(!c)return;
+  while(c.children.length>2) c.removeChild(c.firstChild);
+  var t=document.createElement('div'); t.className='toast '+type;
+  t.innerHTML='<span class="ic">'+(type==='ok'?'✓':type==='err'?'!':'i')+'</span><span>'+esc(msg)+'</span>';
+  c.appendChild(t);
+  setTimeout(function(){ t.classList.add('leaving'); setTimeout(function(){if(t.parentNode)t.parentNode.removeChild(t)},230); }, type==='err'?5200:3000);
+}
+
+/* ---------- net ---------- */
+function poll(){
+  fetch('/status').then(function(r){return r.json()}).then(render).catch(function(){});
+}
+
+/* ---------- signal glyph ---------- */
+function barsHTML(rssi){
+  var n = rssi>=-55?4 : rssi>=-67?3 : rssi>=-78?2 : rssi>=-90?1:0;
+  var H=[4,7,10,13], s='<svg class="bars" width="21" height="13" viewBox="0 0 21 13" fill="currentColor"><title>'+rssi+' dBm</title>';
+  for(var i=0;i<4;i++) s+='<rect x="'+(i*5.3)+'" y="'+(13-H[i])+'" width="3.3" height="'+H[i]+'" rx="1" opacity="'+(i<n?1:0.25)+'"/>';
+  return s+'</svg>';
+}
+function socColor(p){
+  if(p>=100) return '#15803d';      // green
+  if(p>=50)  return '#65c466';      // light green
+  if(p>=10)  return '#d9a406';      // amber
+  return 'var(--accent)';           // red
+}
+function ringSVG(pct,dim,col,sz){
+  sz=sz||104; col=col||'var(--accent)';
+  var c2=sz/2, r=c2-7, circ=2*Math.PI*r, off=circ*(1-pct/100), sw=8;
+  return '<svg width="'+sz+'" height="'+sz+'" viewBox="0 0 '+sz+' '+sz+'" style="transform:rotate(-90deg)">'+
+    '<circle cx="'+c2+'" cy="'+c2+'" r="'+r+'" fill="none" stroke="var(--soft)" stroke-width="'+sw+'"/>'+
+    (dim?'':'<circle cx="'+c2+'" cy="'+c2+'" r="'+r+'" fill="none" stroke="'+col+'" stroke-width="'+sw+'" stroke-linecap="round" stroke-dasharray="'+circ.toFixed(1)+'" stroke-dashoffset="'+off.toFixed(1)+'" style="transition:stroke-dashoffset .6s ease"/>')+
+    '</svg>';
+}
+// rotating arc spinner — shown while the car is waking up
+function ringSpinner(sz){
+  sz=sz||104; var c2=sz/2, r=c2-7, sw=8;
+  return '<svg class="spin" width="'+sz+'" height="'+sz+'" viewBox="0 0 '+sz+' '+sz+'">'+
+    '<circle cx="'+c2+'" cy="'+c2+'" r="'+r+'" fill="none" stroke="var(--accent)" stroke-width="'+sw+'"/>'+
+    '</svg>';
+}
+// charging — SOC arc with a slowly rotating colour-fade gradient
+function ringCharge(pct,col,sz){
+  sz=sz||104; var c2=sz/2, r=c2-7, circ=2*Math.PI*r, sw=8, off=circ*(1-Math.max(0,Math.min(100,pct))/100);
+  return '<svg class="ringrot" width="'+sz+'" height="'+sz+'" viewBox="0 0 '+sz+' '+sz+'">'+
+    '<defs><linearGradient id="cg" x1="0" y1="0" x2="1" y2="1">'+
+      '<stop offset="0%" style="stop-color:'+col+';stop-opacity:1"/>'+
+      '<stop offset="100%" style="stop-color:'+col+';stop-opacity:.28"/>'+
+    '</linearGradient></defs>'+
+    '<circle cx="'+c2+'" cy="'+c2+'" r="'+r+'" fill="none" stroke="var(--soft)" stroke-width="'+sw+'"/>'+
+    '<circle cx="'+c2+'" cy="'+c2+'" r="'+r+'" fill="none" stroke="url(#cg)" stroke-width="'+sw+'" stroke-linecap="round" stroke-dasharray="'+circ.toFixed(1)+'" stroke-dashoffset="'+off.toFixed(1)+'" transform="rotate(-90 '+c2+' '+c2+')"/>'+
+    '</svg>';
+}
+// asleep — slowly rotating grey gradient sweep
+function ringSleep(sz){
+  sz=sz||104; var c2=sz/2, r=c2-7, sw=8;
+  return '<svg class="ringrot zzz" width="'+sz+'" height="'+sz+'" viewBox="0 0 '+sz+' '+sz+'">'+
+    '<defs><linearGradient id="sg" x1="0" y1="0" x2="1" y2="1">'+
+      '<stop offset="0%" style="stop-color:var(--muted);stop-opacity:.5"/>'+
+      '<stop offset="100%" style="stop-color:var(--muted);stop-opacity:.18"/>'+
+    '</linearGradient></defs>'+
+    '<circle cx="'+c2+'" cy="'+c2+'" r="'+r+'" fill="none" stroke="url(#sg)" stroke-width="'+sw+'"/>'+
+    '</svg>';
+}
+var BOLT='<svg viewBox="0 0 24 24" width="34" height="34" style="fill:var(--muted);opacity:.4"><path d="M13 2 4 14h6l-1 8 9-12h-6l1-8z"/></svg>';
+
+/* charging detail chips under the hero label — power + current, shown only
+   while the car is actively charging (both read 0 otherwise). */
+function stat(k,val,unit,acc){
+  return '<div class="stat'+(acc?' acc':'')+'"><div class="k">'+k+'</div><div class="v">'+val+
+         (unit?'<small>'+unit+'</small>':'')+'</div></div>';
+}
+function chargeStats(v,charging){
+  if(!v||!charging) return '';
+  var c=[];
+  if(v.power>0) c.push(stat('Power',   Math.round(v.power*10)/10, 'kW', true));
+  if(v.amps>0)  c.push(stat('Current', Math.round(v.amps),        'A',  true));
+  return c.join('');
+}
+
+/* ---------- render ---------- */
+function render(s){
+  state=s;
+  var linked=!!(s.ble&&s.ble.connected), paired=!!s.paired;
+  var hasVin=s.vin&&s.vin!=='UNKNOWN', configured=hasVin&&s.key_present;
+  var v=s.vehicle, charging=v&&/charg/i.test(v.status||'');
+
+  var w=s.wifi||{};
+  var wbars=(w.rssi!=null)?'<span class="hbars">'+barsHTML(w.rssi)+'</span> ':'';
+  var wifiTxt = s.wifi ? esc(w.ssid||'—')+(w.rssi!=null?'  '+w.rssi+' dBm':'') : '';
+  $("ipline").innerHTML = wbars + [wifiTxt, esc(s.ip||'')].filter(Boolean).join('  ·  ');
+
+  // re-pair notice — key was removed by the car and regenerated
+  var rb=$("reauthBanner");
+  if(s.reauth && !paired){
+    rb.classList.add('show');
+    rb.querySelector('.bt').innerHTML='<b>Key was reset.</b> The vehicle removed this device’s key, so a fresh one was generated automatically. Approve the new pairing on your Tesla’s touchscreen.';
+  } else rb.classList.remove('show');
+
+  // hero — single source of overall status
+  var hic=$("hicon"), hl=$("hlabel"), hs=$("hsub"), hst=$("hstats");
+  hst.innerHTML='';   // cleared here; only the paired+reporting branch populates it
+  if(paired&&v){
+    if(waking){ waking=false; clearTimeout(wakeTimeout); }   // car is awake & reporting — stop the spinner
+    var soc=v.soc!=null?v.soc:0, col=socColor(soc);
+    var ringHTML=charging?ringCharge(soc,col):ringSVG(soc,false,col);   // spin while charging, static when complete
+    var ctitle=charging?'Tap to stop charging':'Tap to start charging';
+    hic.innerHTML='<button class="wakebtn" onclick="toggleCharge()" title="'+ctitle+'" aria-label="'+ctitle+'"'+(chgBusy?' disabled':'')+'>'+ringHTML+'<div class="pct"><b style="color:'+col+'">'+soc+'<small>%</small></b></div></button>';
+    hl.innerHTML=(charging?'<svg viewBox="0 0 24 24"><path d="M13 3 5 13h6l-1 8 8-10h-6l1-8z"/></svg>':'')+'<span>'+esc(v.status||'Idle')+'</span>';
+    hs.textContent='';
+    hst.innerHTML=chargeStats(v,charging);
+  } else if(paired){
+    if(waking){
+      hic.innerHTML='<button class="wakebtn" disabled aria-label="Waking the car">'+ringSpinner()+'<span class="glyph">💤</span></button>';
+      hl.innerHTML='<span>Waking up…</span>';
+      hs.textContent='Reaching your Tesla over Bluetooth…';
+    } else {
+      hic.innerHTML='<button class="wakebtn" onclick="wakeCar()" title="Tap to wake the car" aria-label="Wake the car">'+ringSleep()+'<span class="glyph">💤</span></button>';
+      hl.innerHTML='<span>Vehicle asleep</span>';
+      hs.textContent='Tap the icon to wake the car.';
+    }
+  } else if(!configured){
+    hic.innerHTML=ringSVG(0,true)+'<div class="glyph">'+BOLT+'</div>';
+    hl.innerHTML='<span>Set up needed</span>';
+    hs.textContent=hasVin?'Generate a security key below.':'Add the vehicle VIN below to begin.';
+  } else if(linked){
+    hic.innerHTML=ringSVG(0,true)+'<div class="glyph">'+BOLT+'</div>';
+    hl.innerHTML='<span class="ldot"></span><span>Pairing</span>';
+    hs.textContent='Approve the request on your Tesla’s touchscreen.';
+  } else {
+    hic.innerHTML=ringSVG(0,true)+'<div class="glyph">'+BOLT+'</div>';
+    hl.innerHTML='<span class="ldot"></span><span>Looking for your car</span>';
+    hs.textContent='Bring the device within Bluetooth range.';
+  }
+  hs.style.display=hs.textContent?'':'none';
+
+  // tiles ---------------------------------------------------------
+  // vehicle
+  $("vehVal").innerHTML=hasVin?esc(s.vin):'<span class="ph">Not set</span>';
+  var pairedTxt=s.paired_at?('Paired '+new Date(s.paired_at*1000).toLocaleDateString(undefined,{year:'numeric',month:'short',day:'numeric'})):'paired';
+  setSub("vehSub", paired?pairedTxt:(hasVin?'not paired':'tap to add VIN'), paired?'ok':'');
+
+  // bluetooth — link to the car
+  var ble=s.ble||{};
+  $("bleVal").textContent=linked?'Connected':(ble.scanning?'Searching…':'Idle');
+  if(linked&&ble.rssi!=null){ $("bleSub").className='tsub ok'; $("bleSub").innerHTML=barsHTML(ble.rssi)+(ble.addr?'<span class="mac">'+esc(ble.addr)+'</span>':'')+'<span>'+ble.rssi+' dBm</span>'; }
+  else setSub("bleSub", paired?'out of range':(ble.scanning?'looking for car':'idle'), '');
+
+  // firmware version (header, tap to check)
+  var vl=$("verLink");
+  $("metasep").textContent=$("ipline").textContent?'  ·  ':'';
+  vl.textContent='v'+(s.version||'?');
+  vl.className='verlink'+(otaAvail?' acc':'');
+  vl.title=otaAvail?('Update '+otaAvail+' available — tap to install'):'Tap to check for updates';
+
+  // key
+  if(s.key_present){
+    $("keyVal").innerHTML='<code>'+esc(s.key_fingerprint||'')+'</code>';
+    setSub("keySub", s.key_created?('Created '+new Date(s.key_created*1000).toLocaleDateString(undefined,{year:'numeric',month:'short',day:'numeric'})):'','');
+  } else {
+    $("keyVal").innerHTML='<span class="ph">Not generated</span>';
+    setSub("keySub",'tap to generate','');
+  }
+}
+function setSub(id,txt,cls){ var e=$(id); e.className='tsub'+(cls?' '+cls:''); e.textContent=txt; }
+
+// tap the SOC ring to start/stop charging
+function toggleCharge(){
+  if(chgBusy) return;
+  var vin=state&&state.vin; if(!vin||vin==='UNKNOWN'){ toast('No VIN configured','err'); return; }
+  var v=state&&state.vehicle, isCharging=!!(v&&/charg/i.test(v.status||''));
+  var cmd=isCharging?'charge_stop':'charge_start';
+  chgBusy=true; if(state)render(state);
+  toast(isCharging?'Stopping charge…':'Starting charge…','info');
+  fetch('/api/1/vehicles/'+encodeURIComponent(vin)+'/command/'+cmd,{method:'POST'})
+    .then(function(r){return r.json()})
+    .then(function(j){
+      var ok=!!(j&&j.response&&j.response.result);
+      if(ok){ toast(isCharging?'Charging stopped':'Charging started','ok'); return; }
+      var f=chargeFailMsg((j&&j.response&&j.response.reason)||'', isCharging);
+      toast(f.msg, f.type);
+    })
+    .catch(function(){ toast('Command failed — is the car in range?','err'); })
+    .then(function(){ chgBusy=false; poll(); });
+}
+// turn the device's failure reason into a clear message; the car rejecting a command
+// (e.g. "complete") is not a connectivity problem, so don't blame the BLE range.
+function chargeFailMsg(reason,isCharging){
+  var r=String(reason).toLowerCase();
+  if(r.indexOf('not reachable')>=0||r.indexOf('timed out')>=0||r.indexOf('unreachable')>=0)
+    return {msg:'Car not reachable — is it in range?', type:'err'};
+  if(r.indexOf('complete')>=0)        return {msg:'Charging is already complete', type:'info'};
+  if(r.indexOf('not_charging')>=0||r.indexOf('not charging')>=0)
+                                      return {msg:'The car isn’t charging', type:'info'};
+  if(r.indexOf('is_charging')>=0)     return {msg:'The car is already charging', type:'info'};
+  if(r.indexOf('disconnected')>=0||r.indexOf('cable')>=0||r.indexOf('unplug')>=0)
+                                      return {msg:'No charge cable connected', type:'info'};
+  var bare=String(reason).replace(/^.*action failed:\s*/i,'').trim();
+  return {msg:(isCharging?'Couldn’t stop charging':'Couldn’t start charging')+(bare?' — '+bare:''), type:'err'};
+}
+
+/* ---------- config actions ---------- */
+function vinValid(v){return /^[A-HJ-NPR-Z0-9]{17}$/i.test(v)}
+function editVin(){
+  var cur=(state&&state.vin&&state.vin!=='UNKNOWN')?state.vin:'';
+  var v=prompt('Tesla VIN (17 characters):',cur); if(v==null)return;
+  v=v.trim().toUpperCase();
+  if(!vinValid(v)){ toast('Invalid VIN — must be 17 characters','err'); return; }
+  toast('Saving VIN — device will reboot…','info');
+  fetch('/set_vin',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({vin:v})})
+    .then(function(){toast('VIN saved · rebooting','ok')})
+    .catch(function(){toast('Saved — device rebooting','info')});
+}
+function wakeStop(){ waking=false; clearTimeout(wakeTimeout); }
+function wakeCar(){
+  if(waking) return;
+  var vin=state&&state.vin;
+  if(!vin||vin==='UNKNOWN'){ toast('No VIN configured','err'); return; }
+  waking=true; if(state)render(state);                       // ring starts spinning immediately
+  clearTimeout(wakeTimeout);
+  // safety net: stop spinning if no charge data shows up in time
+  wakeTimeout=setTimeout(function(){ if(waking){ wakeStop(); toast('Still asleep — try again','info'); poll(); } }, 90000);
+  toast('Waking the car…','info');
+  fetch('/api/1/vehicles/'+encodeURIComponent(vin)+'/command/wake_up',{method:'POST'})
+    .then(function(r){return r.json()})
+    .then(function(j){
+      var ok=!!(j&&j.response&&j.response.result);
+      if(ok){ toast('Wake sent · waiting for the car…','ok'); poll(); }   // keep spinning until SOC arrives
+      else { wakeStop(); toast('Wake failed — is the car in range?','err'); poll(); }
+    })
+    .catch(function(){ wakeStop(); toast('Wake failed — is the car in range?','err'); poll(); });
+}
+function genKey(){
+  if(state&&state.key_present && !confirm('Regenerate the security key?\n\nThe current key is invalidated and you must re-pair with the vehicle.')) return;
+  toast('Generating new key…','info');
+  fetch('/gen_keys?force=1',{method:'POST'})
+    .then(function(){toast('New key generated · re-pair with the vehicle','ok'); poll();})
+    .catch(function(){toast('Key generation failed','err')});
+}
+
+/* ---------- OTA ---------- */
+// One persistent toast we update in place (check + download progress).
+var otaToastEl=null;
+function otaToast(msg,type){
+  type=type||'info'; var c=$("toasts"); if(!c)return;
+  if(!otaToastEl||!otaToastEl.parentNode){ otaToastEl=document.createElement('div'); c.appendChild(otaToastEl); }
+  otaToastEl.className='toast '+type;
+  otaToastEl.innerHTML='<span class="ic">'+(type==='ok'?'✓':type==='err'?'!':'i')+'</span><span>'+esc(msg)+'</span>';
+}
+function otaToastClose(delay){
+  var t=otaToastEl; otaToastEl=null; if(!t)return;
+  setTimeout(function(){ t.classList.add('leaving'); setTimeout(function(){if(t.parentNode)t.parentNode.removeChild(t)},230); }, delay||3000);
+}
+function otaCheck(){
+  if(otaToastEl) return;           // a check/update is already showing
+  otaToast('Checking for updates…','info');
+  fetch('/ota/check?ms='+Date.now()).then(otaCheckPoll).catch(function(){ otaToast('Update check failed','err'); otaToastClose(); });
+}
+function otaCheckPoll(){
+  clearTimeout(otaTimer);
+  fetch('/ota/status').then(function(r){return r.json()}).then(function(o){
+    if(o.state==='checking'){ otaTimer=setTimeout(otaCheckPoll,1200); return; }
+    if(o.state==='downloading'||o.state==='done'){ otaProgress(o); return; }   // already updating
+    if(o.state==='error'){ otaToast('Update check failed','err'); otaToastClose(); return; }
+    if(o.update_available){
+      otaAvail=o.available||''; if(state)render(state); otaToastClose(0);
+      if(confirm('New version '+(o.available||'')+' available — update now?\n\nYou’re on v'+(o.current||'')+'. The device downloads the firmware and reboots when done.')){
+        otaToast('Starting update…','info');
+        fetch('/ota/update',{method:'POST'}).then(otaPoll).catch(function(){otaPoll()});
+      }
+    } else {
+      otaAvail=null; if(state)render(state);
+      otaToast('You’re up to date — v'+(o.current||'')+' is the latest.','ok'); otaToastClose();
+    }
+  }).catch(function(){ otaToast('Update check failed','err'); otaToastClose(); });
+}
+function otaPoll(){
+  clearTimeout(otaTimer);
+  fetch('/ota/status').then(function(r){return r.json()}).then(otaProgress).catch(function(){ otaTimer=setTimeout(otaPoll,1500); });
+}
+function otaProgress(o){
+  if(o.state==='downloading'){ otaToast('Updating… '+(o.progress||0)+'% · keep the device powered','info'); otaTimer=setTimeout(otaPoll,800); }
+  else if(o.state==='done'){ otaToast('Update complete — rebooting…','ok'); setTimeout(function(){waitReboot(false)},5000); }
+  else if(o.state==='error'){ otaToast('Update failed'+(o.message?': '+o.message:''),'err'); otaToastClose(); }
+  else { otaTimer=setTimeout(otaPoll,1000); }
+}
+function resumeOta(){
+  fetch('/ota/status').then(function(r){return r.json()}).then(function(o){
+    if(o&&(o.state==='downloading'||o.state==='done')) otaProgress(o);
+  }).catch(function(){});
+}
+function waitReboot(wentDown){
+  fetch('/status?ms='+Date.now(),{cache:'no-store'}).then(function(r){
+    if(!r.ok)throw 0;
+    if(wentDown){ location.reload(); return; }
+    setTimeout(function(){waitReboot(false)},1000);
+  }).catch(function(){ setTimeout(function(){waitReboot(true)},1000); });
+}
+
+/* ---------- boot ---------- */
+function boot(){
+  fetch('/set_time',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ms:Date.now()})}).catch(function(){});
+  poll(); setInterval(poll,4000); resumeOta();
+}
+boot();
+</script>
+</body>
+</html>
