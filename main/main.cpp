@@ -119,6 +119,12 @@ extern "C" void app_main() {
     // Capture console output into the in-memory diagnostic ring (GET /diag).
     diag_log_init();
 
+    // NimBLE logs every GAP/GATT procedure at INFO — tens of lines per connect.
+    // That noise buries the pairing/key-lifecycle messages in /diag (and fills the
+    // ring fast). Raise its threshold to WARN so /diag reads as a clean lifecycle log;
+    // our own components (vehicle_ctrl, ble_client, …) keep logging at INFO.
+    esp_log_level_set("NimBLE", ESP_LOG_WARN);
+
     // Initialize NVS
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
