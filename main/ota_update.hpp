@@ -11,9 +11,11 @@ enum class OtaState { Idle, Checking, Downloading, Done, Error };
 
 struct OtaStatus {
     OtaState    state;
-    int         progress;   // 0–100 during download
+    int         progress;          // 0–100 during download
     std::string message;
-    std::string available;  // latest version seen by the last check (if any)
+    std::string available;         // latest version seen by the last check (if any)
+    bool        update_available;  // last check found a newer version
+    std::string current;           // running version at the last check
 };
 
 struct OtaCheckResult {
@@ -24,8 +26,15 @@ struct OtaCheckResult {
     std::string reason;
 };
 
-// Fetch the manifest and compare versions. Blocking (HTTPS GET, a few seconds).
+// Fetch the manifest and compare versions. Blocking (HTTPS GET, a few seconds) —
+// runs inside the background task spawned by ota_check_start(), not on the HTTP task.
 OtaCheckResult ota_check();
+
+// Kick off a background version check (HTTPS manifest fetch). Returns false if a
+// check or update is already running. Poll ota_get_status(): state goes Checking →
+// Idle (then read update_available/available/current) or Error. Keeps the slow TLS
+// fetch off the HTTP server task so the UI and evcc stay responsive.
+bool ota_check_start();
 
 // Kick off a background download+install task. Returns false if one is already
 // running. On success the device reboots into the new image.

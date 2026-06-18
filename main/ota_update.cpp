@@ -21,8 +21,8 @@ static const char* TAG = "ota";
 // ─── Shared status (written by the OTA task, read by HTTP handlers) ────────────
 
 static SemaphoreHandle_t s_lock = nullptr;
-static OtaStatus         s_status = { OtaState::Idle, 0, "idle", "" };
-static volatile bool     s_running = false;   // a download task is active
+static OtaStatus         s_status = { OtaState::Idle, 0, "idle", "", false, "" };
+static volatile bool     s_running = false;   // a check or download task is active
 
 static void ensure_lock() {
     if (!s_lock) s_lock = xSemaphoreCreateMutex();
@@ -116,12 +116,6 @@ OtaCheckResult ota_check() {
     OtaCheckResult res{};
     res.current = running_version();
 
-    if (s_running) {
-        res.ok     = false;
-        res.reason = "update already in progress";
-        return res;
-    }
-
     set_state(OtaState::Checking, 0, "checking for updates");
     ESP_LOGI(TAG, "checking %s (running %s)", CONFIG_TESLA_OTA_MANIFEST_URL, res.current.c_str());
 
@@ -152,6 +146,40 @@ OtaCheckResult ota_check() {
     set_state(OtaState::Idle, 0, res.reason.c_str());
     ESP_LOGI(TAG, "available %s — %s", res.available.c_str(), res.reason.c_str());
     return res;
+}
+
+// Publish a finished check into the shared status for /ota/status polling.
+static void set_check_done(const OtaCheckResult& r) {
+    ensure_lock();
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    s_status.state            = r.ok ? OtaState::Idle : OtaState::Error;
+    s_status.progress         = 0;
+    s_status.message          = r.reason;
+    s_status.available        = r.available;
+    s_status.update_available = r.update_available;
+    s_status.current          = r.current;
+    xSemaphoreGive(s_lock);
+}
+
+static void ota_check_task(void*) {
+    OtaCheckResult r = ota_check();   // blocking HTTPS GET, runs off the HTTP task
+    set_check_done(r);
+    s_running = false;
+    vTaskDelete(nullptr);
+}
+
+bool ota_check_start() {
+    if (s_running) return false;
+    s_running = true;
+    set_state(OtaState::Checking, 0, "checking for updates");
+
+    // mbedTLS handshake + manifest fetch run here; same generous stack as ota_task.
+    if (xTaskCreate(ota_check_task, "ota_chk", 8192, nullptr, 5, nullptr) != pdPASS) {
+        s_running = false;
+        set_state(OtaState::Error, 0, "could not start check task");
+        return false;
+    }
+    return true;
 }
 
 // ─── Background download + install ──────────────────────────────────────────────

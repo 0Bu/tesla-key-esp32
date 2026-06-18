@@ -323,16 +323,36 @@ static const char* ota_state_str(OtaState s) {
     }
 }
 
-// GET /ota/check — fetch the manifest and compare versions (blocking, ~seconds).
+// Apply ?ms=<epoch> as the wall clock (the NTP fallback, see /set_time) when NTP
+// hasn't synced. Lets a single /ota/check request both set the browser time and
+// start the check — no extra blocking round-trip on the (serialized) HTTP server.
+static void apply_browser_time_query_(httpd_req_t* req) {
+    if (clock_synced_via_ntp()) return;
+    char q[48];
+    if (httpd_req_get_url_query_str(req, q, sizeof(q)) != ESP_OK) return;
+    char ms[24];
+    if (httpd_query_key_value(q, "ms", ms, sizeof(ms)) != ESP_OK) return;
+    double epoch_ms = atof(ms);
+    if (epoch_ms < 1700000000000.0) return;
+    long long sec = (long long)(epoch_ms / 1000.0);
+    struct timeval tv = {};
+    tv.tv_sec = (time_t)sec;
+    settimeofday(&tv, nullptr);
+    g_vehicle->save_config_time(sec);
+    ESP_LOGI(TAG, "clock set from browser (ota query): %lld", sec);
+}
+
+// GET /ota/check[?ms=<epoch>] — start a background version check, return at once.
+// The slow HTTPS manifest fetch runs in its own task (see ota_check_start) so it
+// never ties up the HTTP server; the UI polls /ota/status for the result.
 static esp_err_t handle_ota_check(httpd_req_t* req) {
-    OtaCheckResult r = ota_check();
+    apply_browser_time_query_(req);
+    bool started = ota_check_start();
     cJSON* root = cJSON_CreateObject();
-    cJSON_AddBoolToObject(root,   "ok",               r.ok);
-    cJSON_AddBoolToObject(root,   "update_available", r.update_available);
-    cJSON_AddStringToObject(root, "current",          r.current.c_str());
-    cJSON_AddStringToObject(root, "available",        r.available.c_str());
-    cJSON_AddStringToObject(root, "reason",           r.reason.c_str());
-    return send_json(req, 200, root);
+    cJSON_AddBoolToObject(root, "started", started);
+    if (!started)
+        cJSON_AddStringToObject(root, "reason", "a check or update is already in progress");
+    return send_json(req, started ? 200 : 409, root);
 }
 
 // POST /ota/update — start the background download+install, return immediately.
@@ -350,10 +370,12 @@ static esp_err_t handle_ota_update(httpd_req_t* req) {
 static esp_err_t handle_ota_status(httpd_req_t* req) {
     OtaStatus s = ota_get_status();
     cJSON* root = cJSON_CreateObject();
-    cJSON_AddStringToObject(root, "state",     ota_state_str(s.state));
-    cJSON_AddNumberToObject(root, "progress",  s.progress);
-    cJSON_AddStringToObject(root, "message",   s.message.c_str());
-    cJSON_AddStringToObject(root, "available", s.available.c_str());
+    cJSON_AddStringToObject(root, "state",            ota_state_str(s.state));
+    cJSON_AddNumberToObject(root, "progress",         s.progress);
+    cJSON_AddStringToObject(root, "message",          s.message.c_str());
+    cJSON_AddStringToObject(root, "available",        s.available.c_str());
+    cJSON_AddBoolToObject(root,   "update_available", s.update_available);
+    cJSON_AddStringToObject(root, "current",          s.current.c_str());
     return send_json(req, 200, root);
 }
 
@@ -629,17 +651,26 @@ static const char INDEX_HTML[] =
 "async function cmd(c){log(c+'...');let r=await fetch('/api/1/vehicles/'+V+'/command/'+c,{method:'POST'});"
 "let j=await r.json();log(c+': '+(j.response?j.response.reason:JSON.stringify(j)));st()}"
 "async function setTime(){try{await fetch('/set_time',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ms:Date.now()})})}catch(e){}}"
-"async function ota(){log('Checking for updates\\u2026');await setTime();let j;"
-"try{j=await (await fetch('/ota/check')).json()}catch(e){log('Update check failed');return}"
-"if(!j.ok){log('Update check failed: '+(j.reason||''));return}"
-"if(!j.update_available){log('Firmware is up to date ('+j.current+')');return}"
+"async function ota(){log('Checking for updates\\u2026');let j;"
+"try{j=await (await fetch('/ota/check?ms='+Date.now())).json()}catch(e){log('Update check failed');return}"
+"if(!j.started){log('Busy \\u2014 try again in a moment');return}checkPoll();}"
+"async function checkPoll(){let j;try{j=await (await fetch('/ota/status')).json()}catch(e){setTimeout(checkPoll,1000);return}"
+"if(j.state=='checking'){setTimeout(checkPoll,1000);return}"
+"if(j.state=='error'){log('Update check failed: '+(j.message||''));return}"
+"if(!j.update_available){log('Firmware is up to date ('+(j.current||'')+')');return}"
 "if(!confirm('New version '+j.available+' available \\u2014 update now?\\n\\nThe device will download the firmware and reboot when done.'))return;"
 "log('Starting update\\u2026');try{await fetch('/ota/update',{method:'POST'})}catch(e){}otaPoll();}"
 "async function otaPoll(){let j;try{j=await (await fetch('/ota/status')).json()}catch(e){j=null}"
 "if(j){if(j.state=='downloading'){log('Updating\\u2026 '+j.progress+'%')}"
-"else if(j.state=='done'){log('Update complete \\u2014 device rebooting\\u2026');return}"
+"else if(j.state=='done'){log('Update complete \\u2014 device rebooting\\u2026');setTimeout(function(){waitReboot(false)},5000);return}"
 "else if(j.state=='error'){log('Update failed: '+(j.message||''));return}}"
 "setTimeout(otaPoll,1000);}"
+"async function waitReboot(wentDown){"
+"try{let r=await fetch('/status?ms='+Date.now(),{cache:'no-store'});"
+"if(!r.ok)throw 0;"
+"if(wentDown){log('Back online \\u2014 reloading\\u2026');location.reload();return}"
+"setTimeout(function(){waitReboot(wentDown)},1000);}"
+"catch(e){log('Waiting for device to come back online\\u2026');setTimeout(function(){waitReboot(true)},1000);}}"
 "setTime();st();setInterval(st,4000);"
 "</script></html>";
 

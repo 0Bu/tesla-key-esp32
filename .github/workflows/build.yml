@@ -49,6 +49,26 @@ jobs:
           echo "firmware=$changed" >> "$GITHUB_OUTPUT"
           echo "firmware-relevant change: $changed"
 
+      # Stamp the embedded firmware version so esp_app_get_description()->version
+      # (what running_version()/the OTA check compares) matches the release +
+      # manifest version. version.txt is the git-committed FLOOR; here we overwrite
+      # it in the workspace (NOT committed) with the version we are actually
+      # publishing. Without this the binary is frozen at the version.txt floor while
+      # the manifest auto-bumps, so OTA installs an image that still reports the old
+      # version → endless "update available" and an apparent no-op.
+      - name: Stamp firmware version
+        id: stamp
+        run: |
+          if [ "${{ steps.changes.outputs.firmware }}" = "yes" ]; then
+            disp="${{ steps.version.outputs.version }}"
+          else
+            disp="${{ steps.version.outputs.latest }}"
+            [ -z "$disp" ] && disp="${{ steps.version.outputs.version }}"
+          fi
+          echo "$disp" > version.txt
+          echo "disp=$disp" >> "$GITHUB_OUTPUT"
+          echo "stamped firmware version: $disp"
+
       - name: Build firmware (ESP-IDF v5.5.4)
         uses: espressif/esp-idf-ci-action@v1
         with:
@@ -104,15 +124,9 @@ jobs:
       - name: Assemble Pages site
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: |
-          # Label the installer with the release that matches the served firmware:
-          # the new version when releasing, otherwise the latest existing release.
-          if [ "${{ steps.changes.outputs.firmware }}" = "yes" ]; then
-            disp="${{ steps.version.outputs.version }}"
-          else
-            disp="${{ steps.version.outputs.latest }}"
-            [ -z "$disp" ] && disp="${{ steps.version.outputs.version }}"
-          fi
-          ./scripts/build-pages.sh ./_site "$disp"
+          # Same version stamped into the binary (steps.stamp) → installer label,
+          # served firmware and manifest can never drift apart.
+          ./scripts/build-pages.sh ./_site "${{ steps.stamp.outputs.disp }}"
 
       - name: Upload Pages artifact
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
