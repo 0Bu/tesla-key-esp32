@@ -6,6 +6,11 @@ CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 
+# OTA: roll back automatically if a freshly-flashed image fails to boot/run.
+# The new app must call esp_ota_mark_app_valid_cancel_rollback() once healthy
+# (see main.cpp), otherwise the bootloader reverts to the previous slot.
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+
 # BLE - use NimBLE (lighter than Bluedroid)
 CONFIG_BT_ENABLED=y
 CONFIG_BT_NIMBLE_ENABLED=y

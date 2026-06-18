@@ -1,5 +1,6 @@
 #include "http_server.hpp"
 #include "diag_log.hpp"
+#include "ota_update.hpp"
 #include <esp_http_server.h>
 #include <esp_log.h>
 #include <esp_netif.h>
@@ -305,6 +306,52 @@ static esp_err_t handle_version(httpd_req_t* req) {
     return send_json(req, 200, root);
 }
 
+// ─── OTA self-update ──────────────────────────────────────────────────────────
+
+static const char* ota_state_str(OtaState s) {
+    switch (s) {
+        case OtaState::Checking:    return "checking";
+        case OtaState::Downloading: return "downloading";
+        case OtaState::Done:        return "done";
+        case OtaState::Error:       return "error";
+        default:                    return "idle";
+    }
+}
+
+// GET /ota/check — fetch the manifest and compare versions (blocking, ~seconds).
+static esp_err_t handle_ota_check(httpd_req_t* req) {
+    OtaCheckResult r = ota_check();
+    cJSON* root = cJSON_CreateObject();
+    cJSON_AddBoolToObject(root,   "ok",               r.ok);
+    cJSON_AddBoolToObject(root,   "update_available", r.update_available);
+    cJSON_AddStringToObject(root, "current",          r.current.c_str());
+    cJSON_AddStringToObject(root, "available",        r.available.c_str());
+    cJSON_AddStringToObject(root, "reason",           r.reason.c_str());
+    return send_json(req, 200, root);
+}
+
+// POST /ota/update — start the background download+install, return immediately.
+static esp_err_t handle_ota_update(httpd_req_t* req) {
+    bool started = ota_start();
+    cJSON* root = cJSON_CreateObject();
+    cJSON_AddBoolToObject(root,   "result", started);
+    cJSON_AddStringToObject(root, "reason",
+        started ? "update started — the device will reboot when done"
+                : "an update is already in progress");
+    return send_json(req, started ? 200 : 409, root);
+}
+
+// GET /ota/status — poll download progress.
+static esp_err_t handle_ota_status(httpd_req_t* req) {
+    OtaStatus s = ota_get_status();
+    cJSON* root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "state",     ota_state_str(s.state));
+    cJSON_AddNumberToObject(root, "progress",  s.progress);
+    cJSON_AddStringToObject(root, "message",   s.message.c_str());
+    cJSON_AddStringToObject(root, "available", s.available.c_str());
+    return send_json(req, 200, root);
+}
+
 // ─── POST /scan — start a time-limited BLE discovery scan ─────────────────────
 
 static esp_err_t handle_scan(httpd_req_t* req) {
@@ -494,8 +541,9 @@ static const char INDEX_HTML[] =
 "return `<span class=mono style='font-size:.9rem'>SOC ${Math.round(v.soc)}% \\u00b7 ${esc(v.status)}</span>`;"
 "}"
 "async function st(){let j;try{j=await (await fetch('/status')).json()}catch(e){return}V=j.vin;"
-"let w=j.wifi||{};let parts=[];if(w.ssid!=null)parts.push(w.ssid+' '+w.rssi+' dBm');if(j.ip)parts.push(j.ip);if(j.version)parts.push(j.version);"
-"document.getElementById('meta').textContent=parts.join(' \\u00b7 ');"
+"let w=j.wifi||{};let parts=[];if(w.ssid!=null)parts.push(esc(w.ssid)+' '+w.rssi+' dBm');if(j.ip)parts.push(esc(j.ip));"
+"if(j.version)parts.push(`<span class=clk title='Tap to check for firmware updates' onclick=ota()>${esc(j.version)}</span>`);"
+"document.getElementById('meta').innerHTML=parts.join(' \\u00b7 ');"
 "let e=j.ble||{};let net=document.getElementById('net');net.textContent=e.connected?'linked':'online';net.className='pill '+(e.connected?'good':'');"
 "let pg=document.getElementById('pair');pg.textContent=j.paired?'paired':'not paired';pg.className='tag'+(j.paired?' good':'');"
 "document.getElementById('vinslot').innerHTML=`<span class='mono clk' title='Tap to change VIN' onclick=ev()>${esc(j.vin)}</span>`;"
@@ -520,6 +568,17 @@ static const char INDEX_HTML[] =
 "log('Regenerating key...');let r=await fetch('/gen_keys?force=1',{method:'POST'});log((await r.json()).reason);st()}"
 "async function cmd(c){log(c+'...');let r=await fetch('/api/1/vehicles/'+V+'/command/'+c,{method:'POST'});"
 "let j=await r.json();log(c+': '+(j.response?j.response.reason:JSON.stringify(j)));st()}"
+"async function ota(){log('Checking for updates\\u2026');let j;"
+"try{j=await (await fetch('/ota/check')).json()}catch(e){log('Update check failed');return}"
+"if(!j.ok){log('Update check failed: '+(j.reason||''));return}"
+"if(!j.update_available){log('Firmware is up to date ('+j.current+')');return}"
+"if(!confirm('New version '+j.available+' available \\u2014 update now?\\n\\nThe device will download the firmware and reboot when done.'))return;"
+"log('Starting update\\u2026');try{await fetch('/ota/update',{method:'POST'})}catch(e){}otaPoll();}"
+"async function otaPoll(){let j;try{j=await (await fetch('/ota/status')).json()}catch(e){j=null}"
+"if(j){if(j.state=='downloading'){log('Updating\\u2026 '+j.progress+'%')}"
+"else if(j.state=='done'){log('Update complete \\u2014 device rebooting\\u2026');return}"
+"else if(j.state=='error'){log('Update failed: '+(j.message||''));return}}"
+"setTimeout(otaPoll,1000);}"
 "st();setInterval(st,4000);"
 "</script></html>";
 
@@ -543,6 +602,18 @@ static esp_err_t handle_all(httpd_req_t* req) {
     }
     if (httpd_req_get_hdr_value_str(req, "Accept", header_val, sizeof(header_val)) == ESP_OK) {
         ESP_LOGI(TAG, "  Accept: %s", header_val);
+    }
+
+    // OTA routes first: "/ota/status" must not fall through to the generic
+    // "/status" handler below (substring match).
+    if (req->method == HTTP_GET && strstr(uri, "/ota/check")) {
+        return handle_ota_check(req);
+    }
+    if (req->method == HTTP_POST && strstr(uri, "/ota/update")) {
+        return handle_ota_update(req);
+    }
+    if (req->method == HTTP_GET && strstr(uri, "/ota/status")) {
+        return handle_ota_status(req);
     }
 
     if (req->method == HTTP_POST && strstr(uri, "/command/")) {

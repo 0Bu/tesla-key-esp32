@@ -10,8 +10,11 @@
 # NOT committed to git.
 #
 # bootloader / partition-table / app are flashed as SEPARATE parts at their own
-# offsets (0x0 / 0x8000 / 0x10000), so an UPDATE never overwrites the nvs
-# partition (0x9000) → WiFi / VIN / key survive upgrades.
+# offsets (0x0 / 0x8000 / 0x20000 = ota_0), so a USB (re)flash never overwrites the
+# nvs partition (0x9000) → WiFi / VIN / key survive a same-layout reflash. Note the
+# app now lives at 0x20000 (the ota_0 slot) — the dual-OTA partition table moved it
+# from the old single 0x10000 factory partition. A full-erase install is required
+# once to migrate a device onto this layout (after that, updates happen over OTA).
 #
 # Usage:  ./scripts/build-pages.sh <out_dir> <version>
 set -euo pipefail
@@ -55,7 +58,7 @@ cat > "$out/manifest.json" <<JSON
       "parts": [
         { "path": "bootloader.bin", "offset": 0 },
         { "path": "partition-table.bin", "offset": 32768 },
-        { "path": "tesla-key-esp32.bin", "offset": 65536 }
+        { "path": "tesla-key-esp32.bin", "offset": 131072 }
       ]
     }
   ]

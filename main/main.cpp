@@ -12,6 +12,7 @@
 #include "lwip/sys.h"
 #include "mdns.h"
 #include "esp_sntp.h"
+#include "esp_ota_ops.h"
 
 #include "ble_client.hpp"
 #include "nvs_storage.hpp"
@@ -194,6 +195,20 @@ extern "C" void app_main() {
     ble_client.start();
 
     http_server_start(vehicle);
+
+    // We reached a healthy steady state (WiFi up, server running). If we just
+    // booted a freshly OTA-flashed image in the "pending verify" state, mark it
+    // valid so the bootloader keeps it; otherwise an early crash would auto-roll
+    // back to the previous slot. A no-op for images that aren't pending verify.
+    {
+        const esp_partition_t* running = esp_ota_get_running_partition();
+        esp_ota_img_states_t st;
+        if (esp_ota_get_state_partition(running, &st) == ESP_OK &&
+            st == ESP_OTA_IMG_PENDING_VERIFY) {
+            if (esp_ota_mark_app_valid_cancel_rollback() == ESP_OK)
+                ESP_LOGI(TAG, "OTA image marked valid (rollback cancelled)");
+        }
+    }
 
     ESP_LOGI(TAG, "tesla-key-esp32 running. API on port 80.");
     // Main task is no longer needed; Vehicle loop + HTTP server run in their own tasks.

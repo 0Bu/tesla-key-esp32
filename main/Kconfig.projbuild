@@ -29,4 +29,19 @@ menu "Tesla Key Configuration"
             If empty, the device scans for any Tesla BLE beacon.
             After first scan, the discovered MAC is saved to NVS.
 
+    config TESLA_OTA_MANIFEST_URL
+        string "OTA manifest URL"
+        default "https://0bu.github.io/tesla-key-esp32/manifest.json"
+        help
+            HTTPS URL of the manifest.json published by CI. Its "version" field is
+            compared against the running firmware to decide whether an update is
+            available. Must be HTTPS (verified against the bundled CA roots).
+
+    config TESLA_OTA_FIRMWARE_URL
+        string "OTA firmware (app .bin) URL"
+        default "https://0bu.github.io/tesla-key-esp32/tesla-key-esp32.bin"
+        help
+            HTTPS URL of the app image (tesla-key-esp32.bin) downloaded and flashed
+            to the inactive OTA slot by esp_https_ota. Must be HTTPS.
+
 endmenu
