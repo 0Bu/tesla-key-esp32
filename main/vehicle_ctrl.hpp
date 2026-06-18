@@ -144,6 +144,14 @@ public:
     // Epoch seconds when the stored key was generated, or 0 if unknown (no key,
     // or the clock had not yet synced at generation time).
     time_t key_created_at();
+    // Epoch seconds when the current pairing (VCSEC session) was first established,
+    // or 0 if not paired / unknown (paired before this was tracked, or clock unsynced).
+    // Lazily stamped the first time we hold a session and the wall clock is valid.
+    time_t paired_at();
+    // Reason the most recent command failed (e.g. "complete", "not_charging"), or empty
+    // if it succeeded or got no response at all (car unreachable / timed out). Lets the
+    // UI tell "the car rejected this" apart from "the car couldn't be reached".
+    std::string last_command_error() const { return last_error_; }
 
     // Persist a new VIN to the config store (takes effect after reboot).
     bool save_config_vin(const std::string& vin) {
@@ -201,6 +209,12 @@ private:
     // (e.g. evcc poll + a manual command) cannot share cmd_sem_/last_result_.
     SemaphoreHandle_t command_mutex_{nullptr};
     bool              last_result_{false};
+    // Failure text from the most recent signed command (the Tesla "...action failed:
+    // <reason>" message), or empty after a success / when no response came back. Lets
+    // the HTTP layer report the real reason (e.g. "complete") instead of a generic one.
+    // Written in make_result_cb_ (BLE RX task) before cmd_sem_ is given; read by the
+    // HTTP task only after it takes cmd_sem_, so the semaphore orders the access.
+    std::string       last_error_;
 
     // Set from a command callback (possibly the BLE RX task) when the vehicle reports
     // KEY_NOT_ON_WHITELIST — i.e. our key was removed on the car side. The auto-pair

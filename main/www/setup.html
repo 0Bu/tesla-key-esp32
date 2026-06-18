@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#e82127">
+<title>tesla-key-esp32 · setup</title>
+<style>
+:root{
+  --bg:#f6f7f9; --card:#fff; --fg:#1a1d21; --muted:#5b626b; --border:#e6e8ec;
+  --soft:#f1f3f5; --accent:#e82127; --ok:#16a34a; --radius:16px;
+  --shadow:0 1px 2px rgba(16,20,28,.04), 0 6px 20px rgba(16,20,28,.06);
+}
+@media (prefers-color-scheme:dark){
+  :root{ --bg:#0f1115; --card:#171a20; --fg:#f2f3f5; --muted:#9aa1ab; --border:#262a31;
+    --soft:#1f242c; --shadow:0 1px 2px rgba(0,0,0,.4), 0 8px 24px rgba(0,0,0,.35); }
+}
+*{box-sizing:border-box}
+html,body{margin:0}
+body{font:15px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; background:var(--bg); color:var(--fg);
+  -webkit-font-smoothing:antialiased; min-height:100vh; display:flex; align-items:center; justify-content:center;
+  padding:24px env(safe-area-inset-right) max(24px,env(safe-area-inset-bottom)) env(safe-area-inset-left)}
+.card{width:100%; max-width:400px; background:var(--card); border:1px solid var(--border);
+  border-radius:var(--radius); box-shadow:var(--shadow); padding:24px 22px}
+.top{display:flex; align-items:center; gap:12px; margin-bottom:4px}
+.logo{width:38px; height:38px; border-radius:11px; background:var(--accent); display:grid; place-items:center;
+  flex:none; box-shadow:0 2px 8px rgba(232,33,39,.35)}
+.logo svg{width:20px; height:20px; fill:#fff}
+h1{margin:0; font-size:18px; font-weight:650; letter-spacing:-.2px}
+.sub{font-size:13px; color:var(--muted); margin:7px 0 22px; line-height:1.45}
+label{display:block; font-size:12px; font-weight:600; letter-spacing:.3px; text-transform:uppercase;
+  color:var(--muted); margin:0 0 7px 2px}
+.field{margin-bottom:16px}
+.opt{font-weight:400; text-transform:none; letter-spacing:0; color:var(--muted); opacity:.8}
+input{width:100%; font:inherit; padding:13px 14px; border-radius:12px; border:1px solid var(--border);
+  background:var(--soft); color:var(--fg); -webkit-appearance:none}
+input::placeholder{color:var(--muted); opacity:.7}
+input:focus{outline:none; border-color:var(--accent); background:var(--card); box-shadow:0 0 0 3px rgba(232,33,39,.14)}
+input.bad{border-color:var(--accent)}
+.pwrap{position:relative}
+.eye{position:absolute; right:6px; top:50%; transform:translateY(-50%); background:none; border:0;
+  padding:9px; color:var(--muted); cursor:pointer; font-size:12.5px; font-weight:600}
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace; letter-spacing:1.5px; text-transform:uppercase}
+.cnt{font-size:11.5px; color:var(--muted); margin:6px 2px 0; text-align:right}
+.save{width:100%; font:inherit; font-weight:650; font-size:15px; padding:14px; border:0; border-radius:13px;
+  background:var(--accent); color:#fff; cursor:pointer; margin-top:6px; box-shadow:0 3px 12px rgba(232,33,39,.3);
+  transition:transform .08s}
+.save:active{transform:scale(.985)}
+.foot{text-align:center; font-size:11.5px; color:var(--muted); margin-top:16px; opacity:.8}
+/* confirmation */
+.done{display:none; text-align:center; padding:8px 0 4px}
+.done.show{display:block}
+.check{width:54px; height:54px; border-radius:50%; background:rgba(22,163,74,.13); color:var(--ok);
+  display:grid; place-items:center; margin:0 auto 16px; font-size:26px}
+.done h1{margin-bottom:8px}
+.spin{display:inline-block; width:15px; height:15px; vertical-align:-2px; margin-right:7px;
+  border:2px solid var(--border); border-top-color:var(--accent); border-radius:50%; animation:rot .7s linear infinite}
+@keyframes rot{to{transform:rotate(360deg)}}
+.form.hide{display:none}
+</style>
+</head>
+<body>
+<div class="card">
+
+  <div class="form" id="form">
+    <div class="top">
+      <div class="logo"><svg viewBox="0 0 24 24"><path d="M13 2 4 14h6l-1 8 9-12h-6l1-8z"/></svg></div>
+      <h1>Wi-Fi setup</h1>
+    </div>
+    <p class="sub">Connect your <b>tesla-key-esp32</b> to your home network. It will reboot and join your Wi-Fi automatically.</p>
+
+    <form id="f" action="/save" method="POST" autocomplete="off">
+      <div class="field">
+        <label for="ssid">Wi-Fi network (SSID)</label>
+        <input id="ssid" name="ssid" required placeholder="MyHomeNetwork" autocapitalize="off" autocorrect="off">
+      </div>
+
+      <div class="field">
+        <label for="pass">Wi-Fi password</label>
+        <div class="pwrap">
+          <input id="pass" name="pass" type="password" placeholder="••••••••">
+          <button type="button" class="eye" id="eye" onclick="tog()">Show</button>
+        </div>
+      </div>
+
+      <div class="field">
+        <label for="vin">Tesla VIN <span class="opt">· optional</span></label>
+        <input id="vin" name="vin" class="mono" maxlength="17" placeholder="5YJ3E1EA…" autocapitalize="characters" autocorrect="off" oninput="cnt()">
+        <div class="cnt" id="cnt">0 / 17</div>
+      </div>
+
+      <button class="save" type="submit" id="save">Save &amp; connect</button>
+    </form>
+  </div>
+
+  <div class="done" id="done">
+    <div class="check">✓</div>
+    <h1>Settings saved</h1>
+    <p class="sub" style="margin-bottom:0"><span class="spin"></span>The device is restarting and joining <b id="net">your network</b>. Reconnect your phone to that Wi-Fi, then open the device’s local address.</p>
+  </div>
+
+</div>
+
+<script>
+"use strict";
+function $(id){return document.getElementById(id)}
+function tog(){ var p=$("pass"); var s=p.type==='password'; p.type=s?'text':'password'; $("eye").textContent=s?'Hide':'Show'; }
+function cnt(){
+  var v=$("vin"); v.value=v.value.toUpperCase().replace(/[^A-HJ-NPR-Z0-9]/g,'');
+  $("cnt").textContent=v.value.length+' / 17';
+  v.classList.toggle('bad', v.value.length>0 && v.value.length<17);
+}
+$("f").addEventListener('submit',function(e){
+  var vin=$("vin").value;
+  if(vin.length>0 && vin.length!==17){ e.preventDefault(); $("vin").classList.add('bad'); $("vin").focus(); return; }
+  $("save").textContent='Saving…'; $("save").disabled=true;
+  $("net").textContent=$("ssid").value||'your network';
+  // On the device the POST navigates to a confirmation page; show our own optimistic one too.
+  setTimeout(function(){ $("form").classList.add('hide'); $("done").classList.add('show'); }, 250);
+});
+</script>
+</body>
+</html>
