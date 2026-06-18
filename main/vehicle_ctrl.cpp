@@ -182,38 +182,49 @@ void VehicleController::auto_pair_task_fn_(void* arg) {
             continue;
         }
 
-        // 1. Probe for an existing whitelist entry (clean-fails if not authorised).
+        // 1. Probe for an existing whitelist entry. A key enrolled by EITHER method —
+        //    tapping a keycard on the console (enrolls instantly, no on-screen step) or
+        //    confirming the on-screen "phone key pairing" dialog — shows up here as a
+        //    usable session.
         VehicleStatusResult st;
-        self->get_vehicle_status(st, 8000);
+        self->get_vehicle_status(st, 6000);
         if (self->has_session()) {
             ESP_LOGI(TAG, "auto-pair: session established");
             continue;
         }
 
-        // 2. Request enrolment; the car shows a pairing dialog to confirm on screen.
-        ESP_LOGI(TAG, "auto-pair: requesting key enrolment — confirm on the car's screen");
-        self->pair(45000);
-
-        // The "Whitelist Add Key" never completes cleanly (the car whitelists on
-        // screen-tap but sends no completing commandStatus), so it lingers at the head
-        // of the library's single FIFO queue and is retried for ~180 s. Any probe
-        // queued behind it is starved — observed in the field as the car re-prompting
-        // repeatedly while the firmware took minutes to notice the key was accepted.
-        // Drop the link to flush the queue + RX buffer so the confirmation probe below
-        // runs on a clean queue and a fresh session-info handshake.
+        // 2. Offer on-screen enrolment ONCE (the car shows a "phone key pairing" dialog),
+        //    then flush the queue. We do NOT block waiting on it: the "Whitelist Add Key"
+        //    never completes cleanly on this car (no completing commandStatus) and the
+        //    keycard method ignores it entirely — success is detected by probing (step 3),
+        //    not by pair()'s return. The short wait just lets the message reach the car;
+        //    flushing (set_connected(false)) then clears the lingering whitelist-add from
+        //    the single FIFO queue so the probes below run clean. Sending it only once per
+        //    round (instead of every ~45 s block) also stops the car re-prompting after
+        //    the key is already registered.
+        ESP_LOGI(TAG, "auto-pair: requesting key enrolment — tap your keycard on the console or confirm on the car's screen");
+        self->pair(6000);
         if (self->ble_ && self->ble_->is_connected()) self->ble_->disconnect();
         xSemaphoreTake(self->vehicle_mutex_, portMAX_DELAY);
         self->vehicle_->set_connected(false);
         xSemaphoreGive(self->vehicle_mutex_);
 
-        // 3. After confirmation a fresh probe establishes + persists the session.
-        self->get_vehicle_status(st, 10000);
-        if (self->has_session()) {
+        // 3. Poll for the resulting session at a short cadence so an enrolment that lands
+        //    mid-round — the instant a keycard is tapped — is noticed within a few seconds
+        //    instead of after a full slow round. A failed probe (not yet enrolled) returns
+        //    on its timeout; a successful one (now enrolled) returns in ~1 s and persists
+        //    the session, so has_session() flips and we stop here.
+        bool established = false;
+        for (int i = 0; i < 6; i++) {
+            self->get_vehicle_status(st, 4000);
+            if (self->has_session()) { established = true; break; }
+            vTaskDelay(pdMS_TO_TICKS(500));
+        }
+        if (established) {
             ESP_LOGI(TAG, "auto-pair: pairing complete — session established");
             continue;
         }
-        ESP_LOGI(TAG, "auto-pair: not confirmed yet — confirm the request on the car's screen");
-        vTaskDelay(pdMS_TO_TICKS(2000));
+        ESP_LOGI(TAG, "auto-pair: not paired yet — tap your keycard or confirm on the car's screen");
     }
 }
 
