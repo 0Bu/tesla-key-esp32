@@ -58,6 +58,7 @@ POST /scan                                     # start a time-limited BLE discov
 GET  /diag                                     # plain-text in-memory diag log (?verbose=1 raw RX, ?clear=1 reset)
 POST /gen_keys[?force=1]                       # generate key (refuses overwrite w/o force)
 POST /send_key                                 # pair with vehicle (Charging Manager only)
+POST /set_time                                 # set wall clock from the browser ({"ms":<epoch>}); fallback when NTP unreachable
 POST /set_vin                                  # persist VIN + reboot
 GET  /api/proxy/1/version
 GET  /ota/check                                # fetch manifest, compare to running version
@@ -92,6 +93,25 @@ vehicles:
     url: http://<ESP32-IP>
     vin: <VIN>
 ```
+
+## Pairing lifecycle / invalidation
+
+The web UI keys everything (control buttons, SOC) off `paired` (= `has_session()`, the
+stored VCSEC session in NVS). Three events invalidate a pairing and force a clean re-pair
+so no stale data is shown (`clear_session_and_cache_()` in `vehicle_ctrl.cpp`):
+
+1. **Key deleted on the car side** — auto-detected. Any signed command failing with
+   `KEY_NOT_ON_WHITELIST` (substring `"whitelist"` in `make_result_cb_`) sets
+   `pairing_lost_`; `auto_pair_task` also runs a periodic signed VCSEC `health_probe_`
+   (~30 s) so it's caught even with no evcc traffic. On detection the key is regenerated
+   (the old one is useless), session + cache cleared, and pairing restarts.
+2. **Key regenerated** (`/gen_keys?force=1`) — `generate_key()` now also clears the
+   session + cache and drops the BLE link.
+3. **VIN changed** (`/set_vin`) — `reset_for_new_vehicle()` regenerates the key, clears
+   session + cache, and forgets the stored `ble_mac` (old car), then reboots. Re-saving
+   the same VIN is a no-op for the pairing.
+
+After any of these `has_session()` is false → UI shows "not paired", hides controls/SOC.
 
 ## Important Notes
 

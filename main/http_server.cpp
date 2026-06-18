@@ -13,6 +13,7 @@
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
+#include <sys/time.h>
 
 // Derived from PROJECT_VER (project root version.txt) so the reported version,
 // the built firmware filename, and the web-installer manifest never drift apart.
@@ -28,6 +29,10 @@ static const char* TAG = "http_server";
 
 // Global vehicle reference (set once at start)
 static VehicleController* g_vehicle = nullptr;
+
+// Defined in main.cpp: true once SNTP has synced this boot. The browser /set_time
+// fallback only applies the client clock while this is false (NTP is authoritative).
+bool clock_synced_via_ntp();
 
 // Largest POST body we accept, to bound the malloc in read_body() against a
 // hostile/oversized Content-Length. All real requests here are tiny JSON objects.
@@ -389,6 +394,9 @@ static esp_err_t handle_status(httpd_req_t* req) {
     time_t key_created = g_vehicle->key_created_at();
     if (key_created > 1600000000) cJSON_AddNumberToObject(root, "key_created", (double)key_created);
     cJSON_AddBoolToObject(root,   "paired",        g_vehicle->has_session());
+    // True when the previous pairing was lost (key removed on the car side) and a
+    // re-pair is pending — lets the UI explain why it's prompting to pair again.
+    cJSON_AddBoolToObject(root,   "reauth",        g_vehicle->reauth_required());
 
     // WiFi: SSID + live signal strength (dBm) of the station link.
     cJSON* wifi = cJSON_CreateObject();
@@ -447,6 +455,49 @@ static esp_err_t handle_diag(httpd_req_t* req) {
     return httpd_resp_send(req, body.c_str(), body.size());
 }
 
+// ─── POST /set_time — set the wall clock from the browser (NTP fallback) ───────
+// TLS certificate validation (OTA) and the tesla-ble session-freshness checks need a
+// real UTC clock. NTP is the primary source; this endpoint is the fallback for
+// networks that block NTP. The web UI posts the browser's clock ({"ms": <epoch ms>})
+// on load and before an OTA check, but we only apply it while SNTP has not synced —
+// otherwise NTP (which is more trustworthy than a possibly-skewed browser) wins. The
+// applied fallback time is persisted so a later offline reboot starts plausibly.
+static esp_err_t handle_set_time(httpd_req_t* req) {
+    // NTP already synced → it's authoritative; drain the body and accept as a no-op.
+    if (clock_synced_via_ntp()) {
+        free(read_body(req));
+        return send_json(req, 200, make_response(true, "set_time", "", "clock set via NTP"));
+    }
+
+    char* body = read_body(req);
+    cJSON* json = body ? cJSON_Parse(body) : nullptr;
+    free(body);
+
+    double epoch_ms = 0;
+    if (json) {
+        cJSON* j = cJSON_GetObjectItemCaseSensitive(json, "ms");
+        if (cJSON_IsNumber(j)) epoch_ms = j->valuedouble;
+    }
+    cJSON_Delete(json);
+
+    // Floor at ~2023-11 (1.7e12 ms): reject a missing/implausible browser clock so
+    // we never set the device clock backwards into the cert-invalid range.
+    if (epoch_ms < 1700000000000.0) {
+        return send_json(req, 400, make_response(false, "set_time", "",
+                                                 "implausible timestamp"));
+    }
+
+    long long sec = (long long)(epoch_ms / 1000.0);
+    struct timeval tv = {};
+    tv.tv_sec  = (time_t)sec;
+    tv.tv_usec = (suseconds_t)((long long)epoch_ms % 1000) * 1000;
+    settimeofday(&tv, nullptr);
+    g_vehicle->save_config_time(sec);
+    ESP_LOGI(TAG, "clock set from browser: %lld", sec);
+
+    return send_json(req, 200, make_response(true, "set_time", "", "clock set"));
+}
+
 // ─── POST /set_vin — persist VIN, then reboot ─────────────────────────────────
 
 static esp_err_t handle_set_vin(httpd_req_t* req) {
@@ -465,7 +516,14 @@ static esp_err_t handle_set_vin(httpd_req_t* req) {
         return send_json(req, 400, make_response(false, "set_vin", vin.c_str(),
                                                  "VIN must be 17 characters"));
     }
+    // A changed VIN points the device at a *different* vehicle, so the current key's
+    // pairing, session, cached data and discovered BLE MAC all belong to the old car.
+    // Wipe them (regenerate the key + clear the session/cache/MAC) before rebooting so
+    // the device pairs cleanly with the new vehicle and shows no stale data. Re-saving
+    // the same VIN leaves the existing pairing untouched.
+    bool changed = (vin != g_vehicle->vin());
     bool ok = g_vehicle->save_config_vin(vin);
+    if (ok && changed) g_vehicle->reset_for_new_vehicle();
     esp_err_t r = send_json(req, ok ? 200 : 500,
         make_response(ok, "set_vin", vin.c_str(),
                       ok ? "VIN saved — rebooting" : "failed to save VIN"));
@@ -552,8 +610,10 @@ static const char INDEX_HTML[] =
 "document.getElementById('keyslot').innerHTML=(j.key_present?`<code class=clk title='Tap to regenerate key' onclick=rk()>${fp}</code>`:`<code>${fp}</code>`)+kc;"
 "let ft=document.getElementById('findtag'),pm=document.getElementById('pairmsg');"
 "if(j.paired){ft.textContent='paired';ft.className='tag good';pm.textContent='Vehicle is linked and authorized.'}"
-"else if(e.connected){ft.textContent='connecting\\u2026';ft.className='tag';pm.textContent='Confirm the pairing request on your Tesla\\u2019s screen.'}"
-"else{ft.textContent='searching\\u2026';ft.className='tag';pm.textContent='Bring the device near your Tesla.'}"
+"else{let cn=e.connected;ft.textContent=cn?'connecting\\u2026':'searching\\u2026';ft.className='tag';"
+"let m=cn?'Confirm the pairing request on your Tesla\\u2019s screen.':'Bring the device near your Tesla.';"
+"if(j.reauth)m='The key was removed from the vehicle \\u2014 a new key was generated. '+m;"
+"pm.textContent=m}"
 "document.getElementById('bleslot').innerHTML=bleBody(e);"
 "let s4=document.getElementById('step4');"
 "document.getElementById('flow').classList.toggle('s3end',!j.paired);"
@@ -568,7 +628,8 @@ static const char INDEX_HTML[] =
 "log('Regenerating key...');let r=await fetch('/gen_keys?force=1',{method:'POST'});log((await r.json()).reason);st()}"
 "async function cmd(c){log(c+'...');let r=await fetch('/api/1/vehicles/'+V+'/command/'+c,{method:'POST'});"
 "let j=await r.json();log(c+': '+(j.response?j.response.reason:JSON.stringify(j)));st()}"
-"async function ota(){log('Checking for updates\\u2026');let j;"
+"async function setTime(){try{await fetch('/set_time',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ms:Date.now()})})}catch(e){}}"
+"async function ota(){log('Checking for updates\\u2026');await setTime();let j;"
 "try{j=await (await fetch('/ota/check')).json()}catch(e){log('Update check failed');return}"
 "if(!j.ok){log('Update check failed: '+(j.reason||''));return}"
 "if(!j.update_available){log('Firmware is up to date ('+j.current+')');return}"
@@ -579,7 +640,7 @@ static const char INDEX_HTML[] =
 "else if(j.state=='done'){log('Update complete \\u2014 device rebooting\\u2026');return}"
 "else if(j.state=='error'){log('Update failed: '+(j.message||''));return}}"
 "setTimeout(otaPoll,1000);}"
-"st();setInterval(st,4000);"
+"setTime();st();setInterval(st,4000);"
 "</script></html>";
 
 static esp_err_t handle_index(httpd_req_t* req) {
@@ -630,6 +691,9 @@ static esp_err_t handle_all(httpd_req_t* req) {
     }
     if (req->method == HTTP_POST && strstr(uri, "/send_key")) {
         return handle_send_key(req);
+    }
+    if (req->method == HTTP_POST && strstr(uri, "/set_time")) {
+        return handle_set_time(req);
     }
     if (req->method == HTTP_POST && strstr(uri, "/set_vin")) {
         return handle_set_vin(req);
