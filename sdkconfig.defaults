@@ -34,6 +34,13 @@ CONFIG_ESP_WIFI_TX_BUFFER_TYPE_DYNAMIC=y
 CONFIG_HTTPD_MAX_REQ_HDR_LEN=1024
 CONFIG_HTTPD_MAX_URI_LEN=512
 
+# LWIP sockets — the default of 10 is too tight: the http server (up to 7 open
+# sockets), its listener, mDNS, SNTP and evcc's polling can leave no BSD socket
+# free for the OTA client, which then fails with "Failed to create socket". The
+# TCP PCB pools already allow 16 (LWIP_MAX_ACTIVE/LISTENING_TCP), so lift the BSD
+# socket cap to match and give the background OTA check/download room to connect.
+CONFIG_LWIP_MAX_SOCKETS=16
+
 # Stack sizes — the NimBLE host task runs our notify-RX callback, which does
 # tesla-ble protobuf parsing + mbedtls crypto (ECDH/AES-GCM). The 4K default
 # overflows during the session handshake, so give the host task a larger stack.
