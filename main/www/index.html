@@ -20,7 +20,7 @@
 *{box-sizing:border-box}
 html,body{margin:0}
 body{
-  font:16px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  font:17px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
   background:var(--bg); color:var(--fg); -webkit-font-smoothing:antialiased;
   padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
 }
@@ -30,14 +30,14 @@ code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
 
 /* header */
 .top{display:flex; align-items:center; gap:12px; padding:4px 2px 16px}
-.logo{width:36px; height:36px; border-radius:11px; background:var(--accent); flex:none;
+.logo{width:40px; height:40px; border-radius:12px; background:var(--accent); flex:none;
   display:grid; place-items:center; box-shadow:0 2px 8px rgba(232,33,39,.35)}
-.logo svg{width:19px; height:19px; fill:#fff}
+.logo svg{width:21px; height:21px; fill:#fff}
 .ttl{flex:1; min-width:0}
-.ttl h1{margin:0; font-size:19px; font-weight:650; letter-spacing:-.2px}
+.ttl h1{margin:0; font-size:21px; font-weight:650; letter-spacing:-.2px}
 /* flex (not inline text) so the OTA ring centers within the text line-box and never
    grows the line height — keeps the cards below from shifting when the ring appears */
-.ttl .sub{font-size:13.5px; color:var(--muted); font-variant-numeric:tabular-nums; display:flex; align-items:center; min-width:0; overflow:hidden; white-space:nowrap}
+.ttl .sub{font-size:15px; color:var(--muted); font-variant-numeric:tabular-nums; display:flex; align-items:center; min-width:0; overflow:hidden; white-space:nowrap}
 .ttl .sub #ipline{overflow:hidden; text-overflow:ellipsis; min-width:0}
 .ttl .sub .verlink,.ttl .sub .otastat{flex:none}
 .verlink{cursor:pointer; white-space:nowrap}
@@ -54,10 +54,10 @@ code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
 
 /* banners */
 .banner{display:none; align-items:flex-start; gap:11px; padding:13px 15px; border-radius:14px;
-  margin-bottom:12px; font-size:14px; line-height:1.45; box-shadow:var(--shadow)}
+  margin-bottom:12px; font-size:15px; line-height:1.45; box-shadow:var(--shadow)}
 .banner.show{display:flex}
-.banner .bi{flex:none; width:20px; height:20px; border-radius:50%; display:grid; place-items:center;
-  color:#fff; font-size:12px; font-weight:700; margin-top:1px}
+.banner .bi{flex:none; width:22px; height:22px; border-radius:50%; display:grid; place-items:center;
+  color:#fff; font-size:13px; font-weight:700; margin-top:1px}
 .banner b{font-weight:650}
 .banner.warn{background:rgba(217,119,6,.1); border:1px solid rgba(217,119,6,.28); color:var(--fg)}
 .banner.warn .bi{background:var(--warn)}
@@ -67,9 +67,9 @@ code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
   box-shadow:var(--shadow); padding:20px; margin-top:10px; display:flex; align-items:center; gap:20px}
 .hicon{position:relative; flex:none; width:104px; height:104px; line-height:0}
 .hicon .pct{position:absolute; inset:0; display:grid; place-items:center; text-align:center; line-height:1; pointer-events:none}
-.hicon .pct b{font-size:33px; font-weight:650; letter-spacing:-.5px}
-.hicon .pct b small{font-size:15px; font-weight:600; opacity:.55}
-.hicon .glyph{position:absolute; inset:0; display:grid; place-items:center; font-size:34px}
+.hicon .pct b{font-size:36px; font-weight:650; letter-spacing:-.5px}
+.hicon .pct b small{font-size:16px; font-weight:600; opacity:.55}
+.hicon .glyph{position:absolute; inset:0; display:grid; place-items:center; font-size:38px}
 .hicon .wakebtn{position:absolute; inset:0; padding:0; border:0; border-radius:50%; background:transparent; color:inherit;
   cursor:pointer; -webkit-tap-highlight-color:transparent; line-height:0;
   transition:transform .1s ease, background .15s ease, box-shadow .1s ease}
@@ -84,59 +84,102 @@ code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
 @keyframes ringpulse{0%,100%{opacity:1}50%{opacity:.35}}
 .hicon .wakebtn .glyph{pointer-events:none}
 .hbody{flex:1; min-width:0}
-.hlabel{font-size:26px; font-weight:650; letter-spacing:-.4px; display:flex; align-items:center; gap:9px}
-.hlabel svg{width:20px; height:20px; fill:var(--accent); flex:none}
-.ldot{width:9px; height:9px; border-radius:50%; background:var(--accent); flex:none; animation:pulse 1.2s infinite}
-.hsub{font-size:15px; color:var(--muted); margin-top:6px; line-height:1.45}
+.hlabel{font-size:28px; font-weight:650; letter-spacing:-.4px; display:flex; align-items:center; gap:9px}
+.hlabel svg{width:22px; height:22px; fill:var(--accent); flex:none}
+.ldot{width:10px; height:10px; border-radius:50%; background:var(--accent); flex:none; animation:pulse 1.2s infinite}
+.hsub{font-size:16px; color:var(--muted); margin-top:6px; line-height:1.45}
 .hstats{display:flex; flex-wrap:wrap; gap:7px; margin-top:12px}
 .hstats:empty{display:none}
 .stat{display:flex; flex-direction:column; gap:1px; background:var(--soft); border-radius:10px; padding:6px 11px}
-.stat .k{font-size:11px; font-weight:600; letter-spacing:.4px; text-transform:uppercase; color:var(--muted)}
-.stat .v{font-size:17px; font-weight:650; font-variant-numeric:tabular-nums; letter-spacing:-.2px}
-.stat .v small{font-size:12px; font-weight:500; color:var(--muted); margin-left:2px}
+.stat .k{font-size:12px; font-weight:600; letter-spacing:.4px; text-transform:uppercase; color:var(--muted)}
+.stat .v{font-size:19px; font-weight:650; font-variant-numeric:tabular-nums; letter-spacing:-.2px}
+.stat .v small{font-size:13px; font-weight:500; color:var(--muted); margin-left:2px}
 .stat.acc .v{color:var(--ok)}
 @media (max-width:430px){
-  body{font-size:17px}
+  body{font-size:18px}
   .wrap{padding:16px 14px 40px}
-  .ttl h1{font-size:20px}
-  .ttl .sub{font-size:14px}
-  .hero{gap:18px; padding:20px}
+  .ttl h1{font-size:22px}
+  .ttl .sub{font-size:15.5px}
+  /* tighter hero padding + gap buys the wider label enough room to stay on one
+     line beside the 104px ring (no wrap down to ~375px viewports) */
+  .hero{gap:14px; padding:18px 14px}
   .hicon{width:104px; height:104px}
-  .hicon .pct b{font-size:33px}
-  .hlabel{font-size:25px}
-  .hsub{font-size:15.5px}
+  .hicon .pct b{font-size:36px}
+  .hlabel{font-size:27px}
+  .hsub{font-size:16.5px}
   .stat{padding:6px 11px}
-  .stat .v{font-size:17.5px}
-  .tlabel{font-size:12.5px}
-  .tval{font-size:18.5px}
-  .tval.mono{font-size:15.5px}
-  .tsub{font-size:14.5px}
+  .stat .v{font-size:19.5px}
+  .tlabel{font-size:13.5px}
+  .tval{font-size:20.5px}
+  .tval.mono{font-size:17px}
+  .tsub{font-size:15.5px}
 }
-/* very narrow phones (iPhone SE / mini, ~375px) — keep the ring + body side by
-   side without overflow */
+/* very narrow phones (iPhone SE / mini, ~360px) — shrink the ring a touch and
+   ease the label down so it still stays on one line without overflow */
 @media (max-width:360px){
-  .hicon{width:88px; height:88px}
-  .hicon .pct b{font-size:28px}
-  .hlabel{font-size:22px}
+  .hicon{width:90px; height:90px}
+  .hicon .pct b{font-size:31px}
+  .hlabel{font-size:24px}
+}
+/* tablet / desktop — on a big screen (iPad) the phone-width column wastes most of
+   the display, so widen the container and scale the type, hero and symbols up to
+   fill it. Same single-column stack, just larger. */
+@media (min-width:680px){
+  body{font-size:19px}
+  .wrap{max-width:860px; width:92%; padding:30px 26px 64px}
+  .top{gap:14px; padding:6px 2px 22px}
+  .logo{width:46px; height:46px; border-radius:14px}
+  .logo svg{width:24px; height:24px}
+  .ttl h1{font-size:26px}
+  .ttl .sub{font-size:17px}
+
+  .grid{gap:14px}
+  .tile{padding:20px 22px; border-radius:18px}
+  .tlabel{font-size:14px}
+  .tval{font-size:23px}
+  .tval.mono{font-size:19px}
+  .tsub{font-size:16.5px}
+  .tsub .mac{font-size:15px}
+  .tedit{width:17px; height:17px; top:16px; right:16px}
+  .crow{padding:12px 0}
+  .crow .ck{width:100px; font-size:13px}
+  .crow .cv{font-size:18px}
+  .crow .cv .mac{font-size:15px}
+  .crow.tap{padding-right:28px}
+  .bars{width:28px; height:18px}
+
+  .hero{gap:30px; padding:30px 32px; margin-top:14px}
+  .hicon{width:132px; height:132px}
+  .hicon .pct b{font-size:46px}
+  .hicon .pct b small{font-size:20px}
+  .hicon .glyph{font-size:48px}
+  .hicon .glyph svg{width:46px; height:46px}
+  .hlabel{font-size:33px}
+  .hlabel svg{width:26px; height:26px}
+  .hsub{font-size:18px}
+  .stat{padding:8px 14px; border-radius:12px}
+  .stat .k{font-size:13px}
+  .stat .v{font-size:23px}
+  .stat .v small{font-size:14px}
 }
 
 /* status grid */
 .grid{display:grid; grid-template-columns:1fr; gap:10px}
 .tile{position:relative; background:var(--card); border:1px solid var(--border); border-radius:14px;
-  box-shadow:var(--shadow); padding:14px 15px; text-align:left; font:inherit; color:inherit; min-width:0; width:100%;
+  box-shadow:var(--shadow); padding:15px 16px; text-align:left; font:inherit; color:inherit; min-width:0; width:100%;
   display:flex; flex-direction:column; align-items:stretch; justify-content:flex-start}
 .tile.wide{grid-column:1 / -1}
 .tile.tap{cursor:pointer; -webkit-tap-highlight-color:transparent}
 .tile.tap:active{background:var(--soft)}
-.tlabel{font-size:12px; font-weight:600; letter-spacing:.5px; text-transform:uppercase; color:var(--muted)}
-.tval{font-size:18px; font-weight:600; margin-top:6px; word-break:break-all}
-.tval.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:15px; letter-spacing:.2px}
+.tlabel{font-size:13px; font-weight:600; letter-spacing:.5px; text-transform:uppercase; color:var(--muted)}
+.tval{font-size:20px; font-weight:600; margin-top:6px; word-break:break-all}
+.tval.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:16.5px; letter-spacing:.2px}
 .tval .ph{color:var(--muted); font-weight:400}
-.tsub{font-size:13.5px; color:var(--muted); margin-top:3px; display:flex; align-items:center; gap:7px; min-height:18px}
+.tsub{font-size:15px; color:var(--muted); margin-top:3px; display:flex; align-items:center; gap:7px; min-height:18px}
 .tsub.ok{color:var(--ok)} .tsub.warn{color:var(--warn)} .tsub.acc{color:var(--accent)}
-.tsub .mac{font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12.5px; letter-spacing:.2px}
+.tsub .mac{font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:13.5px; letter-spacing:.2px}
 .tsub .mac+span{color:var(--muted)}
-.tedit{position:absolute; top:13px; right:13px; width:14px; height:14px; color:var(--muted); opacity:.38;
+.tedit{position:absolute; top:13px; right:13px; width:15px; height:15px; color:var(--muted); opacity:.38;
   fill:none; stroke:currentColor; stroke-width:2; stroke-linecap:round; stroke-linejoin:round}
 .tile.tap:active .tedit{opacity:.7}
 .bars{vertical-align:-2px}
@@ -147,15 +190,15 @@ code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
 .crow{display:flex; align-items:center; gap:10px; width:100%; padding:9px 0; text-align:left;
   background:none; border:0; border-top:1px solid var(--border); font:inherit; color:inherit; position:relative}
 .crow:first-child{border-top:0; padding-top:2px}
-.crow .ck{flex:none; width:74px; font-size:11px; font-weight:600; letter-spacing:.5px; text-transform:uppercase; color:var(--muted)}
-.crow .cv{flex:1; min-width:0; font-size:14.5px; display:flex; align-items:center; gap:7px; flex-wrap:wrap;
+.crow .ck{flex:none; width:80px; font-size:12px; font-weight:600; letter-spacing:.5px; text-transform:uppercase; color:var(--muted)}
+.crow .cv{flex:1; min-width:0; font-size:16px; display:flex; align-items:center; gap:7px; flex-wrap:wrap;
   font-variant-numeric:tabular-nums}
 .crow .cv.ok{color:var(--ok)} .crow .cv.warn{color:var(--warn)}
-.crow .cv .mac{font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12.5px; letter-spacing:.2px}
+.crow .cv .mac{font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:13.5px; letter-spacing:.2px}
 .crow .cv .ph{color:var(--muted); font-weight:400}
 .crow.tap{cursor:pointer; -webkit-tap-highlight-color:transparent; padding-right:24px}
 .crow.tap:active{background:var(--soft)}
-.crow .cedit{position:absolute; right:2px; top:50%; transform:translateY(-50%); width:14px; height:14px;
+.crow .cedit{position:absolute; right:2px; top:50%; transform:translateY(-50%); width:15px; height:15px;
   color:var(--muted); opacity:.4; fill:none; stroke:currentColor; stroke-width:2; stroke-linecap:round; stroke-linejoin:round}
 .crow.tap:active .cedit{opacity:.75}
 
@@ -164,8 +207,8 @@ code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
   display:flex; flex-direction:column; align-items:center; gap:8px; padding:0 14px; pointer-events:none}
 .toast{pointer-events:auto; max-width:480px; width:100%; display:flex; align-items:center; gap:11px;
   background:var(--card); border:1px solid var(--border); border-radius:13px; padding:12px 15px;
-  box-shadow:var(--shadow); font-size:14px; font-weight:500; animation:tin .24s cubic-bezier(.2,.7,.3,1)}
-.toast .ic{width:20px; height:20px; flex:none; border-radius:50%; display:grid; place-items:center; color:#fff; font-size:12px; font-weight:700}
+  box-shadow:var(--shadow); font-size:15px; font-weight:500; animation:tin .24s cubic-bezier(.2,.7,.3,1)}
+.toast .ic{width:22px; height:22px; flex:none; border-radius:50%; display:grid; place-items:center; color:#fff; font-size:13px; font-weight:700}
 .toast.ok .ic{background:var(--ok)} .toast.err .ic{background:var(--accent)} .toast.info .ic{background:var(--muted)}
 .toast.leaving{animation:tout .22s ease forwards}
 @keyframes tin{from{opacity:0; transform:translateY(12px)}to{opacity:1; transform:none}}
@@ -260,7 +303,7 @@ function poll(){
 /* ---------- signal glyph ---------- */
 function barsHTML(rssi){
   var n = rssi>=-55?4 : rssi>=-67?3 : rssi>=-78?2 : rssi>=-90?1:0;
-  var H=[4,7,10,13], s='<svg class="bars" width="21" height="13" viewBox="0 0 21 13" fill="currentColor"><title>'+rssi+' dBm</title>';
+  var H=[4,7,10,13], s='<svg class="bars" width="24" height="15" viewBox="0 0 21 13" fill="currentColor"><title>'+rssi+' dBm</title>';
   for(var i=0;i<4;i++) s+='<rect x="'+(i*5.3)+'" y="'+(13-H[i])+'" width="3.3" height="'+H[i]+'" rx="1" opacity="'+(i<n?1:0.25)+'"/>';
   return s+'</svg>';
 }
@@ -311,7 +354,7 @@ function ringSleep(sz){
     '<circle cx="'+c2+'" cy="'+c2+'" r="'+r+'" fill="none" stroke="url(#sg)" stroke-width="'+sw+'"/>'+
     '</svg>';
 }
-var BOLT='<svg viewBox="0 0 24 24" width="34" height="34" style="fill:var(--muted);opacity:.4"><path d="M13 2 4 14h6l-1 8 9-12h-6l1-8z"/></svg>';
+var BOLT='<svg viewBox="0 0 24 24" width="38" height="38" style="fill:var(--muted);opacity:.4"><path d="M13 2 4 14h6l-1 8 9-12h-6l1-8z"/></svg>';
 
 /* charging detail chips under the hero label — power + current, shown only
    while the car is actively charging (both read 0 otherwise). */
@@ -535,7 +578,7 @@ function genKey(){
 // version — no bottom popup. A tiny ring sized for the 13.5px meta line.
 var otaBusy=false;
 function otaMiniRing(pct,indet){
-  var sz=14,c=sz/2,r=5,sw=2.4,circ=2*Math.PI*r;
+  var sz=16,c=sz/2,r=6,sw=2.6,circ=2*Math.PI*r;
   if(indet){
     return '<svg class="otaspin" width="'+sz+'" height="'+sz+'" viewBox="0 0 '+sz+' '+sz+'">'+
       '<circle cx="'+c+'" cy="'+c+'" r="'+r+'" fill="none" stroke="var(--border)" stroke-width="'+sw+'"/>'+
