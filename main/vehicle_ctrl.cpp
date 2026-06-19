@@ -274,6 +274,10 @@ bool VehicleController::init(const std::string& vin,
         }
     });
 
+    // Seed the active window open at boot so evcc gets a warm cache for the first few
+    // minutes after start; it then backs off if the car stays idle (no command, not charging).
+    last_cmd_ticks_.store(xTaskGetTickCount());
+
     xTaskCreate(loop_task_fn_, "vehicle_loop", 8192, this, 5, &loop_task_);
     xTaskCreate(auto_pair_task_fn_, "auto_pair", 8192, this, 4, &auto_pair_task_);
     ESP_LOGI(TAG, "VehicleController ready for VIN %s", vin.c_str());
@@ -323,11 +327,11 @@ void VehicleController::auto_pair_task_fn_(void* arg) {
             // signed command (e.g. the background charge poll → ERROR_UNKNOWN_KEY_ID)
             // trips pairing_lost_ even while the cached VCSEC session keeps succeeding.
             self->believed_paired_ = true;
-            // Paired — periodically run a signed VCSEC health poll so a key deleted on the
-            // car side is noticed even with no evcc traffic. The poll hits the always-on
-            // body controller (VCSEC), which does NOT wake the car's main computer (wake
-            // sequences are infotainment-only), so a 5 s cadence is safe. Three outcomes,
-            // distinguished so /diag clearly says what happened:
+            // Paired — periodically run a signed VCSEC health poll (~30 s) so a key deleted
+            // on the car side is noticed even with no evcc traffic. The poll hits the always-
+            // on body controller (VCSEC), which does NOT wake the car's main computer (wake
+            // sequences are infotainment-only), so it never keeps a parked car awake. Three
+            // outcomes, distinguished so /diag clearly says what happened:
             //   • success            → key still valid
             //   • auth rejection     → car refused our key (likely deleted) — confirm now
             //   • neither (no reply) → car unreachable (asleep / out of range / weak link)
@@ -337,9 +341,9 @@ void VehicleController::auto_pair_task_fn_(void* arg) {
 
             if (ok) {
                 ESP_LOGD(TAG, "auto-pair: health check OK — key still valid");
-                // Idle ~5 s, but bail out fast if the message observer flags a deletion
-                // (a faulting charge poll mid-wait) so we re-key promptly, not 5 s later.
-                for (int w = 0; w < 10 && !self->pairing_lost_; w++) vTaskDelay(pdMS_TO_TICKS(500));
+                // Idle ~30 s, but bail out fast if the message observer flags a deletion
+                // (a faulting charge poll mid-wait) so we re-key promptly, not 30 s later.
+                for (int w = 0; w < 60 && !self->pairing_lost_; w++) vTaskDelay(pdMS_TO_TICKS(500));
             } else if (self->auth_fail_streak_ > streak_before) {
                 // The car answered but REFUSED our key → almost certainly deleted on the
                 // car side. Confirm immediately (don't wait a whole cycle) so we react in
@@ -354,7 +358,7 @@ void VehicleController::auto_pair_task_fn_(void* arg) {
                 // keep the pairing and retry. Logged so it's clear the key simply could not
                 // be verified (connectivity), rather than a deletion being silently missed.
                 ESP_LOGW(TAG, "auto-pair: car not reachable over BLE — can't verify key right now, will retry");
-                for (int w = 0; w < 10 && !self->pairing_lost_; w++) vTaskDelay(pdMS_TO_TICKS(500));
+                for (int w = 0; w < 60 && !self->pairing_lost_; w++) vTaskDelay(pdMS_TO_TICKS(500));
             }
             continue;
         }
@@ -417,34 +421,70 @@ void VehicleController::loop_task_fn_(void* arg) {
     uint32_t last_connect_ticks = 0;
     uint32_t last_tele_ticks    = 0;
     int      tele_idx           = 0;  // rotates the telemetry domain polled each cycle
+    bool     prev_window        = false;  // edge-detect the active window
     while (true) {
         xSemaphoreTake(self->vehicle_mutex_, portMAX_DELAY);
         self->vehicle_->loop();
         xSemaphoreGive(self->vehicle_mutex_);
 
-        // Once paired, keep the link warm and refresh the cache so HTTP reads (evcc) are
-        // served instantly from cache instead of blocking on an on-demand connect (which
-        // would risk an HTTP 502 timeout). While NOT paired we stay completely out of the
-        // way: the auto-pair task owns the connection and the single command queue, and a
-        // stray charge poll injected into that queue mid-handshake corrupts the pairing
-        // exchange (overlapping responses → RX reassembly errors → pairing never completes).
+        // While NOT paired we stay completely out of the way: the auto-pair task owns the
+        // connection and the single command queue, and a stray charge poll injected into
+        // that queue mid-handshake corrupts the pairing exchange (overlapping responses →
+        // RX reassembly errors → pairing never completes).
         bool paired = self->has_session();
 
-        // Warm-up connect (paired only): non-blocking, idempotent, throttled.
-        if (paired && !self->ble_connected()
-            && (xTaskGetTickCount() - last_connect_ticks > pdMS_TO_TICKS(15000))) {
-            last_connect_ticks = xTaskGetTickCount();
+        // ── Active-window gate ──────────────────────────────────────────────────────────
+        // The three background blocks below open an INFOTAINMENT session, which keeps the
+        // car's main computer awake. Run them ONLY while the car has a reason to be awake,
+        // so a parked, idle car can actually reach sleep (no vampire drain). The window is
+        // open when EITHER holds:
+        //   • an evcc/manual command in the last kActiveWindowMs (last_cmd_ticks_), OR
+        //   • the car is charging (cached charging_state — a charging car is awake anyway).
+        // We deliberately do NOT open the window merely because the car is observed awake:
+        // that is self-perpetuating — our own infotainment polling keeps the MCU awake, which
+        // would re-open the window, so the car could never finish its idle→sleep transition.
+        // evcc starts charging via a command (→ window opens → charging_state then holds it
+        // open for the session), so signals 1+2 cover the cases evcc cares about. When the
+        // window closes we stop polling and drop the link once so the MCU idles into sleep.
+        // The auto-pair VCSEC health poll keeps running (it never wakes the MCU) as the
+        // revocation canary, and evcc reads stay served from cache (stale by design).
+        uint32_t now_ticks = xTaskGetTickCount();
+        bool charging;
+        {
+            ChargeStateResult cs = self->copy_locked_(self->last_known_charge_);
+            charging = cs.valid && (cs.charging_state == "Charging" ||
+                                    cs.charging_state == "Starting");
+        }
+        uint32_t lc = self->last_cmd_ticks_.load();
+        bool recent_cmd = (lc != 0) && ((now_ticks - lc) < pdMS_TO_TICKS(kActiveWindowMs));
+        bool window = recent_cmd || charging;
+
+        // Falling edge: window just closed → drop the link once so the car can sleep.
+        if (paired && prev_window && !window && self->ble_connected()) {
+            ESP_LOGI(TAG, "idle: no command/charging/awake — dropping BLE link so the car can sleep");
+            self->ble_->disconnect();
+        }
+        // Rising edge: window just opened → refresh the cache promptly (reset throttles).
+        if (paired && !prev_window && window) {
+            last_poll_ticks = last_tele_ticks = last_connect_ticks = 0;
+        }
+        prev_window = window;
+
+        // Warm-up connect (paired + window): non-blocking, idempotent, throttled.
+        if (paired && window && !self->ble_connected()
+            && (now_ticks - last_connect_ticks > pdMS_TO_TICKS(15000))) {
+            last_connect_ticks = now_ticks;
             self->ble_->connect("");
         }
 
-        // Background charge-state refresh (paired + connected only), every 10 seconds.
-        // This infotainment poll doubles as the reliable key-revocation canary: a deleted
-        // key makes it fault with ERROR_UNKNOWN_KEY_ID, which the message observer turns
-        // into pairing_lost_ (the VCSEC health poll alone can miss it — it keeps succeeding
-        // from a cached session). NO_WAKE_SKIP, so once the car sleeps this stops firing
-        // and does not keep it awake; while awake it bounds revocation detection to ~10 s.
-        if (paired && self->ble_connected() && (xTaskGetTickCount() - last_poll_ticks > pdMS_TO_TICKS(10000))) {
-            last_poll_ticks = xTaskGetTickCount();
+        // Background charge-state refresh (paired + window + connected), every 10 s. This
+        // infotainment poll doubles as the reliable key-revocation canary: a deleted key
+        // makes it fault with ERROR_UNKNOWN_KEY_ID, which the message observer turns into
+        // pairing_lost_. Gated on the active window so an idle car is left to sleep; the
+        // VCSEC health poll still catches a deletion while idle.
+        if (paired && window && self->ble_connected()
+            && (now_ticks - last_poll_ticks > pdMS_TO_TICKS(10000))) {
+            last_poll_ticks = now_ticks;
             ESP_LOGD(TAG, "background charge-state refresh…");
             // Fire-and-forget poll. We must NOT block here: this task also pumps
             // vehicle_->loop(), which drives the command's transmission/retries. The
@@ -455,14 +495,13 @@ void VehicleController::loop_task_fn_(void* arg) {
             xSemaphoreGive(self->vehicle_mutex_);
         }
 
-        // Background telemetry refresh (paired + connected): one domain per cycle, rotating
-        // climate → drive → tires → closures so the full set refreshes every ~48 s without
-        // flooding the single FIFO command queue. Offset from the charge poll (12 s vs 10 s)
-        // so the two rarely fire in the same iteration. All NO_WAKE_SKIP: read-only and a
-        // sleeping car is left undisturbed (the polls are simply skipped). These feed the
-        // web-UI caches only; evcc and pairing are unaffected.
-        if (paired && self->ble_connected() && (xTaskGetTickCount() - last_tele_ticks > pdMS_TO_TICKS(12000))) {
-            last_tele_ticks = xTaskGetTickCount();
+        // Background telemetry refresh (paired + window + connected): one domain per cycle,
+        // rotating climate → drive → tires → closures so the full set refreshes every ~48 s
+        // without flooding the single FIFO command queue. Offset from the charge poll (12 s
+        // vs 10 s). All NO_WAKE_SKIP; web-UI caches only; evcc and pairing are unaffected.
+        if (paired && window && self->ble_connected()
+            && (now_ticks - last_tele_ticks > pdMS_TO_TICKS(12000))) {
+            last_tele_ticks = now_ticks;
             xSemaphoreTake(self->vehicle_mutex_, portMAX_DELAY);
             switch (tele_idx % 4) {
                 case 0: self->vehicle_->climate_state_poll(TeslaBLE::WakePolicy::NO_WAKE_SKIP);  break;
@@ -540,8 +579,13 @@ VehicleController::ResultCb VehicleController::make_result_cb_() {
 // ─── Generic command runners ──────────────────────────────────────────────────
 
 bool VehicleController::send_vcsec_(const std::string& name, Builder builder,
-                                     TeslaBLE::WakePolicy wp, int timeout_ms) {
+                                     TeslaBLE::WakePolicy wp, int timeout_ms,
+                                     bool count_as_activity) {
     MutexGuard cmd_guard(command_mutex_);
+    // Real commands open the active window so loop_task resumes polling; the background
+    // health poll passes count_as_activity=false (else the window never expires and the
+    // car never gets to idle/sleep).
+    if (count_as_activity) last_cmd_ticks_.store(xTaskGetTickCount());
     if (!ensure_connected_()) return false;
     xSemaphoreTake(cmd_sem_, 0); // drain in case leftover signal
     last_result_ = false;
@@ -561,6 +605,8 @@ bool VehicleController::send_vcsec_(const std::string& name, Builder builder,
 bool VehicleController::send_infotainment_(const std::string& name, Builder builder,
                                             int timeout_ms, TeslaBLE::WakePolicy wp) {
     MutexGuard cmd_guard(command_mutex_);
+    // Every infotainment command is a real evcc/manual action → open the active window.
+    last_cmd_ticks_.store(xTaskGetTickCount());
     if (!ensure_connected_()) return false;
     xSemaphoreTake(cmd_sem_, 0);
     last_result_ = false;
@@ -724,10 +770,11 @@ bool VehicleController::set_scheduled_charging(bool enable, int start_minutes, i
 bool VehicleController::get_charge_state(ChargeStateResult& out, int /*timeout_ms*/) {
     // Serve the cached reading instantly and never block. evcc polls vehicle_data
     // frequently and times out quickly, so an on-demand connect + poll here would risk a
-    // gateway timeout (HTTP 502). Freshness is maintained out of band: loop_task keeps the
-    // BLE link warm while paired and refreshes the cache every 10 s while connected. A
-    // sleeping car simply leaves the last value in place. If we have never gotten a reading
-    // yet, the caller emits a zeroed-but-well-formed charge_state.
+    // gateway timeout (HTTP 502). Freshness is maintained out of band by loop_task, but ONLY
+    // while the active window is open (a recent command, charging, or the car observed
+    // awake) — see loop_task_fn_. A parked, idle car is deliberately left to sleep, so this
+    // serves the last value (which heals within seconds of any evcc command or the car
+    // waking). If we have never gotten a reading yet, the caller emits a zeroed charge_state.
     MutexGuard g(cache_mutex_);
     if (last_known_charge_.valid) {
         out = last_known_charge_;
@@ -863,7 +910,7 @@ bool VehicleController::health_probe_(int timeout_ms) {
     return send_vcsec_("VCSEC Health Poll", [](TeslaBLE::Client* c, uint8_t* b, size_t* l) {
         return c->build_vcsec_information_request_message(
             VCSEC_InformationRequestType_INFORMATION_REQUEST_TYPE_GET_STATUS, b, l);
-    }, TeslaBLE::WakePolicy::WAKE_IF_NEEDED, timeout_ms);
+    }, TeslaBLE::WakePolicy::WAKE_IF_NEEDED, timeout_ms, /*count_as_activity=*/false);
 }
 
 time_t VehicleController::key_created_at() {
