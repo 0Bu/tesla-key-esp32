@@ -134,6 +134,18 @@ static const char* reset_reason_str(esp_reset_reason_t r) {
     }
 }
 
+// Heap-attribution probe: logs free + largest contiguous block at each init milestone.
+// The LARGEST free block (not total free) is what bounds big allocations (OTA TLS record
+// buffers, the tesla-ble session), so it's the number that decides whether the device
+// OOM-crashes. Measured budget on this board: WiFi −57 KB, NimBLE −86 KB (dominant),
+// HTTP −12 KB, MQTT −20 KB of largest-block — handy when tuning the footprint further.
+static void log_heap(const char* where) {
+    ESP_LOGW(TAG, "HEAP @%-9s free=%u largest=%u min=%u", where,
+             (unsigned) heap_caps_get_free_size(MALLOC_CAP_8BIT),
+             (unsigned) heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
+             (unsigned) heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT));
+}
+
 extern "C" void app_main() {
     // Capture console output into the in-memory diagnostic ring (GET /diag).
     diag_log_init();
@@ -195,10 +207,12 @@ extern "C" void app_main() {
     // Connect to WiFi. With stored credentials, a failure is usually a transient
     // outage (e.g. router rebooting), but if it persists (e.g. wrong password),
     // fallback to the setup portal so the user can reconfigure it.
+    log_heap("preinit");
     if (!wifi_connect(ssid.c_str(), password.c_str())) {
         ESP_LOGW(TAG, "WiFi connection failed — starting setup portal");
         provisioning_run(config_store); // never returns; reboots on save
     }
+    log_heap("wifi");
 
     // mDNS: advertise http://tesla-key-esp32.local so users need not find the IP
     if (mdns_init() == ESP_OK) {
@@ -263,13 +277,16 @@ extern "C" void app_main() {
     // Start NimBLE host. Discovery scanning is manual/time-limited; the client
     // connects on demand when a command is issued.
     ble_client.start();
+    log_heap("ble");
 
     http_server_start(vehicle);
+    log_heap("http");
 
     // Home Assistant MQTT bridge: publishes all telemetry + device status (read-only)
     // if a broker is configured (NVS "mqtt_uri" / CONFIG_TESLA_MQTT_BROKER_URI); a
     // no-op otherwise. Runs in its own task, independent of evcc/BLE/pairing.
     mqtt_ha_start(vehicle, config_store);
+    log_heap("mqtt");
 
     // We reached a healthy steady state (WiFi up, server running). If we just
     // booted a freshly OTA-flashed image in the "pending verify" state, mark it
