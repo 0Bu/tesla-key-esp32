@@ -203,8 +203,9 @@ static esp_err_t handle_command(httpd_req_t* req) {
 // ─── GET /api/1/vehicles/{VIN}/vehicle_data ───────────────────────────────────
 
 static esp_err_t handle_vehicle_data(httpd_req_t* req) {
-    char vin[64];
-    parse_vin_only(req->uri, vin, sizeof(vin));
+    char vin[64] = {0};
+    if (!parse_vin_only(req->uri, vin, sizeof(vin)))
+        return send_json(req, 400, make_response(false, "vehicle_data", "?", "invalid URI"));
 
     ChargeStateResult cs{};
     bool ok = g_vehicle->get_charge_state(cs);
@@ -244,8 +245,9 @@ static esp_err_t handle_vehicle_data(httpd_req_t* req) {
 // ─── GET /api/1/vehicles/{VIN}/body_controller_state ─────────────────────────
 
 static esp_err_t handle_body_controller(httpd_req_t* req) {
-    char vin[64];
-    parse_vin_only(req->uri, vin, sizeof(vin));
+    char vin[64] = {0};
+    if (!parse_vin_only(req->uri, vin, sizeof(vin)))
+        return send_json(req, 400, make_response(false, "body_controller_state", "?", "invalid URI"));
 
     VehicleStatusResult vs{};
     bool ok = g_vehicle->get_vehicle_status(vs);

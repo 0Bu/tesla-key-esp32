@@ -13,6 +13,7 @@
 #include <esp_crt_bundle.h>
 #include <cJSON.h>
 
+#include <atomic>
 #include <cstdio>
 #include <cstring>
 
@@ -22,7 +23,7 @@ static const char* TAG = "ota";
 
 static SemaphoreHandle_t s_lock = nullptr;
 static OtaStatus         s_status = { OtaState::Idle, 0, "idle", "", false, "" };
-static volatile bool     s_running = false;   // a check or download task is active
+static std::atomic<bool> s_running{false};    // a check or download task is active
 
 static void ensure_lock() {
     if (!s_lock) s_lock = xSemaphoreCreateMutex();
@@ -169,8 +170,9 @@ static void ota_check_task(void*) {
 }
 
 bool ota_check_start() {
-    if (s_running) return false;
-    s_running = true;
+    // Atomic test-and-set: bail if a check/update is already running. Don't rely on the
+    // httpd being single-threaded to serialize the guard.
+    if (s_running.exchange(true)) return false;
     set_state(OtaState::Checking, 0, "checking for updates");
 
     // mbedTLS handshake + manifest fetch run here; same generous stack as ota_task.
@@ -240,8 +242,8 @@ static void ota_task(void*) {
 }
 
 bool ota_start() {
-    if (s_running) return false;
-    s_running = true;
+    // Atomic test-and-set so two concurrent /ota/update calls can't both launch a task.
+    if (s_running.exchange(true)) return false;
     set_state(OtaState::Downloading, 0, "starting download");
 
     // A generous stack: mbedTLS record processing + esp_https_ota run here.

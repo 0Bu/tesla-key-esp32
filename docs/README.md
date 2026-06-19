@@ -6,7 +6,8 @@ with [TeslaBleHttpProxy](https://github.com/wimaha/TeslaBleHttpProxy); drop-in f
 
 ## Hardware
 
-ESP32-S3 (BLE 5.0), ≥ 4 MB flash. No PSRAM required. ESP32 / S2 / C3 not supported.
+ESP32-S3 (BLE 5.0), ≥ 8 MB flash (dual-OTA layout: two 3 MB app slots). No PSRAM
+required. ESP32 / S2 / C3 not supported.
 USB data cable for flashing.
 
 ## Flash prebuilt artifacts
@@ -19,7 +20,7 @@ firmware change; each change also publishes a
 Flash by hand (preserves `nvs`):
 ```bash
 esptool.py --chip esp32s3 write_flash 0x0 bootloader.bin 0x8000 partition-table.bin \
-  0x10000 tesla-key-esp32-<version>.bin
+  0x20000 tesla-key-esp32-<version>.bin
 ```
 Clean full flash (erases `nvs`): write `tesla-key-esp32-<version>-merged.bin` at `0x0`.
 
@@ -114,6 +115,7 @@ POST /api/1/vehicles/{VIN}/command/{command}   Content-Type: application/json
 | `flash_lights` / `honk_horn` | — |
 | `set_sentry_mode` | `{"on": true}` |
 | `auto_conditioning_start` / `auto_conditioning_stop` | — |
+| `set_scheduled_charging` | `{"enable": true, "start_minutes": 1380}` (minutes after local midnight; 1380 = 23:00) |
 
 ```json
 { "response": { "result": true, "command": "charge_start",
@@ -151,14 +153,21 @@ GET /api/1/vehicles/{VIN}/body_controller_state
 GET  /                     Web UI (status, pairing, quick commands)
 GET  /status               { vin, ip, version, key_present, key_fingerprint,
                              key_created (epoch, omitted if clock unsynced), paired,
+                             paired_at (epoch, omitted if unknown), reauth,
                              wifi:{ssid,rssi},
                              ble:{connected,scanning,rssi,addr | devices:[{addr,name,rssi}]},
-                             vehicle:{soc,status} (when connected, cached) }
+                             vehicle:{soc,status,power,amps} (when connected, cached),
+                             tele:{climate,drive,tires,closures} (read-only telemetry) }
 POST /scan                 Time-limited BLE discovery scan (populates ble.devices)
 GET  /diag[?verbose=1][?clear=1]   Plain-text in-memory diag log
 POST /gen_keys[?force=1]   Generate ECDSA P-256 key (refuses overwrite without force)
 POST /send_key             Manually trigger pairing (charging_manager only; normally automatic)
 POST /set_vin              Persist VIN and reboot
+POST /set_time             Set the wall clock from the browser ({"ms":<epoch>}) — NTP fallback
+GET  /ota/check[?ms=<epoch>]   Start a background update check (then poll /ota/status)
+POST /ota/update           Start the background self-update (downloads, then reboots)
+GET  /ota/status           Poll OTA progress { state, progress, message, available,
+                             update_available, current }
 GET  /api/proxy/1/version  Firmware version
 ```
 
