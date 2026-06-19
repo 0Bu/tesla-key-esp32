@@ -16,6 +16,7 @@
 #include "mdns.h"
 #include "esp_sntp.h"
 #include "esp_ota_ops.h"
+#include "esp_system.h"
 
 #include "ble_client.hpp"
 #include "nvs_storage.hpp"
@@ -116,9 +117,33 @@ static bool wifi_connect(const char* ssid, const char* password) {
 
 // ─── app_main ─────────────────────────────────────────────────────────────────
 
+static const char* reset_reason_str(esp_reset_reason_t r) {
+    switch (r) {
+        case ESP_RST_POWERON:   return "POWERON";
+        case ESP_RST_EXT:       return "EXT";
+        case ESP_RST_SW:        return "SW(ota/restart)";
+        case ESP_RST_PANIC:     return "PANIC(abort/exception)";
+        case ESP_RST_INT_WDT:   return "INT_WDT";
+        case ESP_RST_TASK_WDT:  return "TASK_WDT";
+        case ESP_RST_WDT:       return "OTHER_WDT";
+        case ESP_RST_DEEPSLEEP: return "DEEPSLEEP";
+        case ESP_RST_BROWNOUT:  return "BROWNOUT";
+        case ESP_RST_SDIO:      return "SDIO";
+        default:                return "UNKNOWN";
+    }
+}
+
 extern "C" void app_main() {
     // Capture console output into the in-memory diagnostic ring (GET /diag).
     diag_log_init();
+
+    // Log why we (re)booted — survives in /diag across reboots, so a crash cause is visible
+    // without a serial console. PANIC = abort()/uncaught C++ exception, BROWNOUT = power dip,
+    // *_WDT = a stuck task. Pair with the free-heap baseline to spot OOM-driven aborts.
+    ESP_LOGW(TAG, "BOOT reset_reason=%s free_heap=%u min_free=%u",
+             reset_reason_str(esp_reset_reason()),
+             (unsigned) esp_get_free_heap_size(),
+             (unsigned) esp_get_minimum_free_heap_size());
 
     // NimBLE logs every GAP/GATT procedure at INFO — tens of lines per connect.
     // That noise buries the pairing/key-lifecycle messages in /diag (and fills the
