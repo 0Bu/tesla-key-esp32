@@ -7,12 +7,18 @@
 #include "freertos/semphr.h"
 
 // Ring buffer of console output. It WRAPS: once full, the oldest bytes are
-// overwritten so the log always holds the MOST RECENT ~48 KB. This is what you
+// overwritten so the log always holds the MOST RECENT ~16 KB. This is what you
 // want for live debugging (watching a pairing or key-deletion happen now) — the
 // earlier non-wrapping design kept the boot prologue but then stopped capturing,
 // so a long-running device showed stale output and missed the event of interest.
-// reboot or /diag?clear=1 to reset. (The device has ~250 KB free heap.)
-static constexpr size_t DIAG_CAP = 48 * 1024;
+// reboot or /diag?clear=1 to reset.
+//
+// Sized at 16 KB, not 48 KB: this is a STATIC .bss buffer, so its size comes
+// straight off the DRAM heap budget. At 48 KB it was the single largest static
+// consumer in our code and pushed the heap start up, leaving the largest free block
+// at only ~31 KB — too small for e.g. the OTA TLS record buffers. 16 KB still holds a
+// solid burst of recent lifecycle output and frees 32 KB back to the heap.
+static constexpr size_t DIAG_CAP = 16 * 1024;
 static char              s_buf[DIAG_CAP];
 static size_t            s_head    = 0;      // next write position
 static bool              s_wrapped = false;  // buffer has wrapped at least once
@@ -62,6 +68,21 @@ std::string diag_log_dump() {
     }
     xSemaphoreGive(s_mtx);
     return out;
+}
+
+void diag_log_dump_chunks(const std::function<bool(const char*, size_t)>& sink) {
+    if (!s_mtx) return;
+    // Hold the mutex for the whole send so a concurrent writer can't shift s_head
+    // mid-dump. The spans point straight into the static buffer — no large heap
+    // allocation, which is the whole point (a 48 KB std::string can throw bad_alloc
+    // on a fragmented heap, whose largest free block can fall to ~31 KB → crash).
+    xSemaphoreTake(s_mtx, portMAX_DELAY);
+    if (s_wrapped) {
+        if (sink(s_buf + s_head, DIAG_CAP - s_head)) sink(s_buf, s_head);
+    } else {
+        sink(s_buf, s_head);
+    }
+    xSemaphoreGive(s_mtx);
 }
 
 void diag_log_clear() {

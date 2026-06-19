@@ -15,6 +15,7 @@
 #include <cstring>
 #include <cstdlib>
 #include <sys/time.h>
+#include <exception>
 
 // Derived from PROJECT_VER (project root version.txt) so the reported version,
 // the built firmware filename, and the web-installer manifest never drift apart.
@@ -594,11 +595,17 @@ static esp_err_t handle_diag(httpd_req_t* req) {
     if (strstr(req->uri, "verbose=1"))      diag_set_verbose(true);
     else if (strstr(req->uri, "verbose=0")) diag_set_verbose(false);
 
-    std::string body = diag_log_dump();
     httpd_resp_set_type(req, "text/plain; charset=utf-8");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     httpd_resp_set_hdr(req, "X-Diag-Verbose", diag_verbose() ? "1" : "0");
-    return httpd_resp_send(req, body.c_str(), body.size());
+    // Stream the ~48 KB log straight from its static buffer in (at most) two chunks.
+    // Building one big std::string here used to throw std::bad_alloc on a fragmented
+    // heap (largest free block ~31 KB < 48 KB) → uncaught in the httpd task → abort()
+    // → reboot. Chunked send needs no large contiguous allocation.
+    diag_log_dump_chunks([req](const char* p, size_t n) {
+        return n == 0 || httpd_resp_send_chunk(req, p, n) == ESP_OK;
+    });
+    return httpd_resp_send_chunk(req, nullptr, 0);  // terminate the chunked response
 }
 
 // ─── POST /set_time — set the wall clock from the browser (NTP fallback) ───────
@@ -737,7 +744,7 @@ static esp_err_t handle_index(httpd_req_t* req) {
 // ─── Wildcard handler dispatching ─────────────────────────────────────────────
 
 // Single catch-all handler registered for /*
-static esp_err_t handle_all(httpd_req_t* req) {
+static esp_err_t handle_all_dispatch(httpd_req_t* req) {
     const char* uri = req->uri;
     const char* method = (req->method == HTTP_GET ? "GET" : (req->method == HTTP_POST ? "POST" : "OTHER"));
     ESP_LOGI(TAG, "REQ: %s %s", method, uri);
@@ -806,6 +813,25 @@ static esp_err_t handle_all(httpd_req_t* req) {
     cJSON* root = cJSON_CreateObject();
     cJSON_AddStringToObject(root, "error", "not found");
     return send_json(req, 404, root);
+}
+
+// Catch-all wrapper: a handler that runs out of memory throws std::bad_alloc (e.g. a
+// large response built on a fragmented heap). This task is invoked from the C httpd
+// loop, so an escaping C++ exception unwinds into C frames → std::terminate → abort()
+// → reboot. Contain it here and return 503 instead, keeping the device alive. (Root
+// cause is the low largest-free-block; this is the safety net so no request can crash
+// the box.)
+static esp_err_t handle_all(httpd_req_t* req) {
+    try {
+        return handle_all_dispatch(req);
+    } catch (const std::exception& e) {
+        ESP_LOGE(TAG, "handler for %s threw (%s) — likely OOM; returning 503", req->uri, e.what());
+    } catch (...) {
+        ESP_LOGE(TAG, "handler for %s threw (unknown) — returning 503", req->uri);
+    }
+    httpd_resp_set_status(req, "503 Service Unavailable");
+    httpd_resp_set_type(req, "text/plain");
+    return httpd_resp_sendstr(req, "out of memory");
 }
 
 // ─── Start ────────────────────────────────────────────────────────────────────
