@@ -336,9 +336,8 @@ function render(s){
   var w=s.wifi||{}, wc=$("wifiConn");
   $("wifiLbl").textContent = w.std || 'Wi-Fi';   // standard sits in the label, e.g. "Wi-Fi 4"
   if(w.ssid||s.ip){
-    var wbars=(w.rssi!=null)?barsHTML(w.rssi)+' ':'';
+    var wbars=(w.rssi!=null)?barsHTML(w.rssi)+' ':'';   // bars convey signal; dBm hidden (tooltip only)
     var wtxt=w.ssid?esc(w.ssid):'';
-    if(w.rssi!=null) wtxt+=(wtxt?' ':'')+w.rssi+' dBm';   // plain space before dBm, no "·"
     wc.className='cv ok';
     wc.innerHTML='<span>'+wbars+wtxt+'</span>';
   } else { wc.className='cv'; wc.innerHTML='<span class="ph">disconnected</span>'; }
@@ -402,8 +401,7 @@ function render(s){
   // bluetooth — link to the car
   var ble=s.ble||{}, bc=$("bleConn");
   if(linked){
-    var btxt=ble.addr?'<span class="mac">'+esc(ble.addr)+'</span>':'';
-    if(ble.rssi!=null) btxt+=(btxt?' ':'')+ble.rssi+' dBm';   // plain space before dBm, no "·"
+    var btxt=ble.addr?'<span class="mac">'+esc(ble.addr)+'</span>':'';   // bars convey signal; dBm hidden (tooltip only)
     bc.className='cv ok';
     bc.innerHTML='<span>'+(ble.rssi!=null?barsHTML(ble.rssi)+' ':'')+btxt+'</span>';
   } else if(ble.scanning){
