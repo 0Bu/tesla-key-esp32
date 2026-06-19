@@ -265,6 +265,15 @@ private:
     std::atomic<uint32_t> last_cmd_ticks_{0};  // ticks of the last real command (0 = never)
     static constexpr uint32_t kActiveWindowMs = 300000;  // 5 min command-recency window
 
+    // Set when a library call (BLE rx parse or loop()) throws an uncaught C++ exception on
+    // corrupt RX. The tesla-ble framer parses Tesla's length-prefixed messages out of the
+    // BLE stream; a lossy link desyncs the framing and some corrupt inputs make it throw
+    // (out_of_range / bad_alloc). Exceptions are enabled but the library never catches, so an
+    // escaping throw → std::terminate → abort() → reboot (observed on a parked, awake car).
+    // We catch at our call boundary and set this; loop_task then drops the BLE link once to
+    // clear the library's rx_buffer and re-sync, turning the reboot into a brief reconnect.
+    std::atomic<bool> ble_fault_{false};
+
     // Cached results for non-blocking UI access
     ChargeStateResult   last_known_charge_{};
     VehicleStatusResult last_known_status_{};

@@ -218,7 +218,22 @@ bool VehicleController::init(const std::string& vin,
     });
     ble_->set_rx_data_cb([this](const std::vector<uint8_t>& data) {
         xSemaphoreTake(vehicle_mutex_, portMAX_DELAY);
-        vehicle_->on_rx_data(data);
+        // on_rx_data parses Tesla's length-prefixed frames out of these bytes synchronously.
+        // A weak/lossy BLE link desyncs the framing ("Invalid message length …") and some
+        // corrupt inputs make the parser throw (out_of_range / bad_alloc). This callback runs
+        // in NimBLE's host task, so an escaping throw unwinds through C dispatch frames →
+        // std::terminate → abort() → reboot. Catch it at this nearest C++ boundary and flag a
+        // link reset (handled in loop_task). The give still runs (catch never rethrows), so
+        // the mutex can't be left locked.
+        try {
+            vehicle_->on_rx_data(data);
+        } catch (const std::exception& e) {
+            ESP_LOGE(TAG, "on_rx_data threw (%s) — corrupt BLE RX; resetting link", e.what());
+            ble_fault_.store(true);
+        } catch (...) {
+            ESP_LOGE(TAG, "on_rx_data threw (unknown) — corrupt BLE RX; resetting link");
+            ble_fault_.store(true);
+        }
         xSemaphoreGive(vehicle_mutex_);
     });
 
@@ -424,8 +439,28 @@ void VehicleController::loop_task_fn_(void* arg) {
     bool     prev_window        = false;  // edge-detect the active window
     while (true) {
         xSemaphoreTake(self->vehicle_mutex_, portMAX_DELAY);
-        self->vehicle_->loop();
+        // loop() pumps the command/wake state machine and processes inbound messages, so it
+        // can throw on corrupt RX the same way on_rx_data does. Same containment: catch here,
+        // flag a link reset below.
+        try {
+            self->vehicle_->loop();
+        } catch (const std::exception& e) {
+            ESP_LOGE(TAG, "vehicle loop() threw (%s) — resetting BLE link", e.what());
+            self->ble_fault_.store(true);
+        } catch (...) {
+            ESP_LOGE(TAG, "vehicle loop() threw (unknown) — resetting BLE link");
+            self->ble_fault_.store(true);
+        }
         xSemaphoreGive(self->vehicle_mutex_);
+
+        // A parse fault flagged from loop() or the BLE rx callback: drop the link once,
+        // outside the vehicle mutex. Disconnect drives set_connected(false), which clears the
+        // library's rx_buffer and resets sessions so the next connect re-syncs cleanly —
+        // turning a would-be abort()/reboot into a brief reconnect.
+        if (self->ble_fault_.exchange(false)) {
+            ESP_LOGW(TAG, "BLE parse fault — dropping link to clear corrupt RX state");
+            if (self->ble_connected()) self->ble_->disconnect();
+        }
 
         // While NOT paired we stay completely out of the way: the auto-pair task owns the
         // connection and the single command queue, and a stray charge poll injected into
