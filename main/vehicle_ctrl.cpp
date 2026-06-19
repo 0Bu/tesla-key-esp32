@@ -1,5 +1,6 @@
 #include "vehicle_ctrl.hpp"
 #include <esp_log.h>
+#include <esp_heap_caps.h>
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
@@ -465,6 +466,20 @@ void VehicleController::loop_task_fn_(void* arg) {
         if (self->ble_fault_.exchange(false)) {
             ESP_LOGW(TAG, "BLE parse fault — dropping link to clear corrupt RX state");
             if (self->ble_connected()) self->ble_->disconnect();
+        }
+
+        // Heap watch (temporary, for the crash hunt): log free heap + LARGEST contiguous
+        // block every ~30 s. The /diag dump allocates a ~48 KB std::string in one shot; if the
+        // largest block trends below that (fragmentation from BLE rx-buffer churn) a later big
+        // alloc throws std::bad_alloc → uncaught → abort(). This makes the trend visible.
+        static uint32_t last_heap_log = 0;
+        uint32_t hb_now = xTaskGetTickCount();
+        if (hb_now - last_heap_log > pdMS_TO_TICKS(30000)) {
+            last_heap_log = hb_now;
+            ESP_LOGW(TAG, "HEAP free=%u largest_block=%u min_free=%u",
+                     (unsigned) heap_caps_get_free_size(MALLOC_CAP_8BIT),
+                     (unsigned) heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
+                     (unsigned) heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT));
         }
 
         // While NOT paired we stay completely out of the way: the auto-pair task owns the
