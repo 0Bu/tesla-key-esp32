@@ -35,10 +35,21 @@ code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
 .logo svg{width:19px; height:19px; fill:#fff}
 .ttl{flex:1; min-width:0}
 .ttl h1{margin:0; font-size:19px; font-weight:650; letter-spacing:-.2px}
-.ttl .sub{font-size:13.5px; color:var(--muted); font-variant-numeric:tabular-nums; white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+/* flex (not inline text) so the OTA ring centers within the text line-box and never
+   grows the line height — keeps the cards below from shifting when the ring appears */
+.ttl .sub{font-size:13.5px; color:var(--muted); font-variant-numeric:tabular-nums; display:flex; align-items:center; min-width:0; overflow:hidden; white-space:nowrap}
+.ttl .sub #ipline{overflow:hidden; text-overflow:ellipsis; min-width:0}
+.ttl .sub .verlink,.ttl .sub .otastat{flex:none}
 .verlink{cursor:pointer; white-space:nowrap}
 .verlink:hover{color:var(--fg); text-decoration:underline}
 .verlink.acc{color:var(--accent); font-weight:600}
+/* inline OTA progress in the meta line (ring + status text), replaces the bottom popup */
+.otastat{display:inline-flex; align-items:center; gap:5px; margin-left:9px; white-space:nowrap; color:var(--muted)}
+.otastat:empty{display:none}
+.otastat svg{display:block; flex:none}
+.otastat.acc{color:var(--accent); font-weight:600}
+.otaspin{animation:otaspin .9s linear infinite; transform-origin:50% 50%}
+@keyframes otaspin{to{transform:rotate(360deg)}}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.25}}
 
 /* banners */
@@ -171,7 +182,7 @@ code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
     <div class="logo"><svg viewBox="0 0 24 24"><path d="M13 2 4 14h6l-1 8 9-12h-6l1-8z"/></svg></div>
     <div class="ttl">
       <h1>tesla-key-esp32</h1>
-      <div class="sub"><span id="ipline"></span><span class="verlink" id="verLink" onclick="otaCheck()" title="Tap to check for updates">&mdash;</span></div>
+      <div class="sub"><span id="ipline"></span><span class="verlink" id="verLink" onclick="otaCheck()" title="Tap to check for updates">&mdash;</span><span class="otastat" id="otaStat"></span></div>
     </div>
   </header>
 
@@ -520,54 +531,66 @@ function genKey(){
 }
 
 /* ---------- OTA ---------- */
-// One persistent toast we update in place (check + download progress).
-var otaToastEl=null;
-function otaToast(msg,type){
-  type=type||'info'; var c=$("toasts"); if(!c)return;
-  if(!otaToastEl||!otaToastEl.parentNode){ otaToastEl=document.createElement('div'); c.appendChild(otaToastEl); }
-  otaToastEl.className='toast '+type;
-  otaToastEl.innerHTML='<span class="ic">'+(type==='ok'?'✓':type==='err'?'!':'i')+'</span><span>'+esc(msg)+'</span>';
+// Status shows inline in the header meta line (progress ring + text), next to the
+// version — no bottom popup. A tiny ring sized for the 13.5px meta line.
+var otaBusy=false;
+function otaMiniRing(pct,indet){
+  var sz=14,c=sz/2,r=5,sw=2.4,circ=2*Math.PI*r;
+  if(indet){
+    return '<svg class="otaspin" width="'+sz+'" height="'+sz+'" viewBox="0 0 '+sz+' '+sz+'">'+
+      '<circle cx="'+c+'" cy="'+c+'" r="'+r+'" fill="none" stroke="var(--border)" stroke-width="'+sw+'"/>'+
+      '<circle cx="'+c+'" cy="'+c+'" r="'+r+'" fill="none" stroke="var(--accent)" stroke-width="'+sw+'" stroke-linecap="round" stroke-dasharray="'+(circ*0.3).toFixed(1)+' '+circ.toFixed(1)+'"/>'+
+      '</svg>';
+  }
+  var off=circ*(1-Math.max(0,Math.min(100,pct))/100);
+  return '<svg width="'+sz+'" height="'+sz+'" viewBox="0 0 '+sz+' '+sz+'" style="transform:rotate(-90deg)">'+
+    '<circle cx="'+c+'" cy="'+c+'" r="'+r+'" fill="none" stroke="var(--border)" stroke-width="'+sw+'"/>'+
+    '<circle cx="'+c+'" cy="'+c+'" r="'+r+'" fill="none" stroke="var(--accent)" stroke-width="'+sw+'" stroke-linecap="round" stroke-dasharray="'+circ.toFixed(1)+'" stroke-dashoffset="'+off.toFixed(1)+'" style="transition:stroke-dashoffset .5s ease"/>'+
+    '</svg>';
 }
-function otaToastClose(delay){
-  var t=otaToastEl; otaToastEl=null; if(!t)return;
-  setTimeout(function(){ t.classList.add('leaving'); setTimeout(function(){if(t.parentNode)t.parentNode.removeChild(t)},230); }, delay||3000);
+function otaInline(html,cls){
+  var el=$("otaStat"); if(!el)return;
+  el.innerHTML=html||''; el.className='otastat'+(cls?' '+cls:'');
 }
+function otaInlineClear(delay){ setTimeout(function(){ otaInline(''); }, delay||3000); }
 function otaCheck(){
-  if(otaToastEl) return;           // a check/update is already showing
-  otaToast('Checking for updates…','info');
-  fetch('/ota/check?ms='+Date.now()).then(otaCheckPoll).catch(function(){ otaToast('Update check failed','err'); otaToastClose(); });
+  if(otaBusy) return;              // a check/update is already running
+  otaBusy=true;
+  otaInline(otaMiniRing(0,true)+'<span>checking…</span>','acc');
+  fetch('/ota/check?ms='+Date.now()).then(otaCheckPoll).catch(function(){ otaBusy=false; otaInline('<span>check failed</span>','err'); otaInlineClear(4000); });
 }
 function otaCheckPoll(){
   clearTimeout(otaTimer);
   fetch('/ota/status').then(function(r){return r.json()}).then(function(o){
     if(o.state==='checking'){ otaTimer=setTimeout(otaCheckPoll,1200); return; }
     if(o.state==='downloading'||o.state==='done'){ otaProgress(o); return; }   // already updating
-    if(o.state==='error'){ otaToast('Update check failed','err'); otaToastClose(); return; }
+    if(o.state==='error'){ otaBusy=false; otaInline('<span>check failed</span>','err'); otaInlineClear(4000); return; }
     if(o.update_available){
-      otaAvail=o.available||''; if(state)render(state); otaToastClose(0);
+      otaAvail=o.available||''; if(state)render(state); otaInline('');         // clear while the dialog is up
       if(confirm('New version '+(o.available||'')+' available — update now?\n\nYou’re on v'+(o.current||'')+'. The device downloads the firmware and reboots when done.')){
-        otaToast('Starting update…','info');
+        otaInline(otaMiniRing(0,true)+'<span>starting…</span>','acc');
         fetch('/ota/update',{method:'POST'}).then(otaPoll).catch(function(){otaPoll()});
-      }
+      } else { otaBusy=false; }
     } else {
-      otaAvail=null; if(state)render(state);
-      otaToast('You’re up to date — v'+(o.current||'')+' is the latest.','ok'); otaToastClose();
+      otaAvail=null; if(state)render(state); otaBusy=false;
+      otaInline('<span>up to date</span>','acc'); otaInlineClear(3500);
     }
-  }).catch(function(){ otaToast('Update check failed','err'); otaToastClose(); });
+  }).catch(function(){ otaBusy=false; otaInline('<span>check failed</span>','err'); otaInlineClear(4000); });
 }
 function otaPoll(){
   clearTimeout(otaTimer);
   fetch('/ota/status').then(function(r){return r.json()}).then(otaProgress).catch(function(){ otaTimer=setTimeout(otaPoll,1500); });
 }
 function otaProgress(o){
-  if(o.state==='downloading'){ otaToast('Updating… '+(o.progress||0)+'% · keep the device powered','info'); otaTimer=setTimeout(otaPoll,800); }
-  else if(o.state==='done'){ otaToast('Update complete — rebooting…','ok'); setTimeout(function(){waitReboot(state&&state.version)},2000); }
-  else if(o.state==='error'){ otaToast('Update failed'+(o.message?': '+o.message:''),'err'); otaToastClose(); }
+  otaBusy=true;
+  if(o.state==='downloading'){ var p=o.progress||0; otaInline(otaMiniRing(p,false)+'<span>'+p+'% updating</span>','acc'); otaTimer=setTimeout(otaPoll,800); }
+  else if(o.state==='done'){ otaInline(otaMiniRing(100,false)+'<span>rebooting…</span>','acc'); setTimeout(function(){waitReboot(state&&state.version)},2000); }
+  else if(o.state==='error'){ otaBusy=false; otaInline('<span>update failed'+(o.message?' — '+esc(o.message):'')+'</span>','err'); otaInlineClear(6000); }
   else { otaTimer=setTimeout(otaPoll,1000); }
 }
 function resumeOta(){
   fetch('/ota/status').then(function(r){return r.json()}).then(function(o){
-    if(o&&(o.state==='downloading'||o.state==='done')) otaProgress(o);
+    if(o&&(o.state==='downloading'||o.state==='done')){ otaBusy=true; otaProgress(o); }
   }).catch(function(){});
 }
 // After "done" the device reboots ~1.2s later. Poll /status in the background and
