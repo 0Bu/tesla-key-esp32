@@ -727,6 +727,10 @@ extern const char index_html_start[] asm("_binary_index_html_start");
 
 static esp_err_t handle_index(httpd_req_t* req) {
     httpd_resp_set_type(req, "text/html");
+    // The UI is embedded in the firmware and changes with every flash/OTA. Without
+    // this, browsers cache index.html and keep rendering the OLD layout (with live
+    // /status data) after an update — so tell them never to cache the page.
+    httpd_resp_set_hdr(req, "Cache-Control", "no-cache, no-store, must-revalidate");
     return httpd_resp_send(req, index_html_start, HTTPD_RESP_USE_STRLEN);
 }
 
