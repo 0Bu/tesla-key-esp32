@@ -243,6 +243,7 @@ bool VehicleController::init(const std::string& vin,
     vehicle_->set_charge_state_callback([this](const CarServer_ChargeState& cs) {
         MutexGuard g(cache_mutex_);
         parse_charge_state(cs, last_known_charge_);
+        note_contact_();
     });
 
     // Read-only telemetry callbacks. Fed by the rotating background poll in loop_task_fn_
@@ -251,18 +252,22 @@ bool VehicleController::init(const std::string& vin,
     vehicle_->set_climate_state_callback([this](const CarServer_ClimateState& cs) {
         MutexGuard g(cache_mutex_);
         parse_climate_state(cs, last_known_climate_);
+        note_contact_();
     });
     vehicle_->set_drive_state_callback([this](const CarServer_DriveState& ds) {
         MutexGuard g(cache_mutex_);
         parse_drive_state(ds, last_known_drive_);
+        note_contact_();
     });
     vehicle_->set_tire_pressure_state_callback([this](const CarServer_TirePressureState& t) {
         MutexGuard g(cache_mutex_);
         parse_tire_pressure(t, last_known_tires_);
+        note_contact_();
     });
     vehicle_->set_closures_state_callback([this](const CarServer_ClosuresState& c) {
         MutexGuard g(cache_mutex_);
         parse_closures_state(c, last_known_closures_);
+        note_contact_();
     });
 
     // Reliable key-revocation detector. When the key is deleted on the car side, the
@@ -925,6 +930,7 @@ void VehicleController::clear_session_and_cache_() {
         last_known_tires_    = {};
         last_known_closures_ = {};
     }
+    last_contact_ticks_.store(0);  // no live data anymore → "asleep" card has nothing to show
     ESP_LOGI(TAG, "pairing/session cleared");
 }
 

@@ -110,6 +110,20 @@ public:
     TirePressureResult  get_cached_tires()    { return copy_locked_(last_known_tires_); }
     ClosuresStateResult get_cached_closures() { return copy_locked_(last_known_closures_); }
 
+    // Seconds since the last *live* infotainment data (charge/climate/drive/tires/
+    // closures) was received, written to `out`. Returns false if nothing has been
+    // received since boot / re-pair (nothing to show yet). Monotonic (uptime-based,
+    // so independent of wall-clock sync). The background infotainment polls are all
+    // NO_WAKE_SKIP, so a sleeping car stops answering them and this value freezes at
+    // the moment the car last responded — i.e. it reads as how long the car has been
+    // asleep (more precisely: unreachable for live data). Drives the "asleep" card.
+    bool seconds_since_contact(uint32_t& out) const {
+        uint32_t t = last_contact_ticks_.load();
+        if (t == 0) return false;
+        out = (xTaskGetTickCount() - t) / configTICK_RATE_HZ;  // ticks → seconds; uint wrap is fine
+        return true;
+    }
+
     bool generate_key();
     // Always enrolls a Charging Manager key (charging + wake only); never an owner key.
     bool pair(int timeout_ms = 30000);
@@ -280,6 +294,12 @@ private:
     // We catch at our call boundary and set this; loop_task then drops the BLE link once to
     // clear the library's rx_buffer and re-sync, turning the reboot into a brief reconnect.
     std::atomic<bool> ble_fault_{false};
+
+    // Uptime tick of the last live infotainment data received (see seconds_since_contact).
+    // Stamped from the cache callbacks (BLE RX task); read by the HTTP task. atomic so no
+    // lock is needed. 0 = nothing received yet. Cleared on a pairing reset.
+    std::atomic<uint32_t> last_contact_ticks_{0};
+    void note_contact_() { last_contact_ticks_.store(xTaskGetTickCount()); }
 
     // Cached results for non-blocking UI access
     ChargeStateResult   last_known_charge_{};
