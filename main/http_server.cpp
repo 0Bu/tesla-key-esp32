@@ -457,6 +457,15 @@ static esp_err_t handle_status(httpd_req_t* req) {
     if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) {
         cJSON_AddStringToObject(wifi, "ssid", (const char*)ap.ssid);
         cJSON_AddNumberToObject(wifi, "rssi", ap.rssi);
+        // Highest 802.11 generation the AP advertises → friendly Wi-Fi name. The
+        // ESP32-S3 radio itself tops out at 802.11n, but the flags reflect the AP's
+        // capability, so a Wi-Fi 6 router still reads "Wi-Fi 6".
+        const char* std_ = ap.phy_11ax ? "Wi-Fi 6"
+                         : ap.phy_11ac ? "Wi-Fi 5"
+                         : ap.phy_11n  ? "Wi-Fi 4"
+                         : ap.phy_11g  ? "802.11g"
+                         : ap.phy_11b  ? "802.11b" : nullptr;
+        if (std_) cJSON_AddStringToObject(wifi, "std", std_);
     }
     cJSON_AddItemToObject(root, "wifi", wifi);
 
@@ -725,6 +734,10 @@ extern const char index_html_start[] asm("_binary_index_html_start");
 
 static esp_err_t handle_index(httpd_req_t* req) {
     httpd_resp_set_type(req, "text/html");
+    // The UI is embedded in the firmware and changes with every flash/OTA. Without
+    // this, browsers cache index.html and keep rendering the OLD layout (with live
+    // /status data) after an update — so tell them never to cache the page.
+    httpd_resp_set_hdr(req, "Cache-Control", "no-cache, no-store, must-revalidate");
     return httpd_resp_send(req, index_html_start, HTTPD_RESP_USE_STRLEN);
 }
 
