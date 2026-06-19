@@ -23,6 +23,7 @@
 #include "http_server.hpp"
 #include "provisioning.hpp"
 #include "diag_log.hpp"
+#include "mqtt_ha.hpp"
 
 static const char* MDNS_HOSTNAME = "tesla-key-esp32";  // → http://tesla-key-esp32.local
 
@@ -237,6 +238,11 @@ extern "C" void app_main() {
     ble_client.start();
 
     http_server_start(vehicle);
+
+    // Home Assistant MQTT bridge: publishes all telemetry + device status (read-only)
+    // if a broker is configured (NVS "mqtt_uri" / CONFIG_TESLA_MQTT_BROKER_URI); a
+    // no-op otherwise. Runs in its own task, independent of evcc/BLE/pairing.
+    mqtt_ha_start(vehicle, config_store);
 
     // We reached a healthy steady state (WiFi up, server running). If we just
     // booted a freshly OTA-flashed image in the "pending verify" state, mark it
