@@ -1,6 +1,7 @@
 #include "http_server.hpp"
 #include "diag_log.hpp"
 #include "ota_update.hpp"
+#include "mqtt_ha.hpp"
 #include <esp_http_server.h>
 #include <esp_log.h>
 #include <esp_netif.h>
@@ -451,6 +452,15 @@ static esp_err_t handle_status(httpd_req_t* req) {
     }
     cJSON_AddItemToObject(root, "wifi", wifi);
 
+    // MQTT (Home Assistant bridge): whether a broker is configured, whether the
+    // session is live, and the host:port for display. Drives the Connection block.
+    cJSON* mqtt = cJSON_CreateObject();
+    cJSON_AddBoolToObject(mqtt, "configured", mqtt_ha_configured());
+    cJSON_AddBoolToObject(mqtt, "connected",  mqtt_ha_connected());
+    std::string broker = mqtt_ha_broker();
+    if (!broker.empty()) cJSON_AddStringToObject(mqtt, "broker", broker.c_str());
+    cJSON_AddItemToObject(root, "mqtt", mqtt);
+
     // BLE: when connected report the live signal strength; otherwise list nearby
     // Teslas seen while scanning, with their RSSI.
     cJSON* ble = cJSON_CreateObject();
@@ -626,6 +636,47 @@ static esp_err_t handle_set_vin(httpd_req_t* req) {
     return r;
 }
 
+// ─── POST /set_mqtt — persist the MQTT broker, then reboot ────────────────────
+// Body: {"broker":"host:port"} (a full "mqtt://host:port" URI is also accepted; an
+// empty string disables MQTT). Stored in NVS ("mqtt_uri") and applied on reboot —
+// the bridge reads it once at start, so a reboot is the clean way to (re)init it.
+static esp_err_t handle_set_mqtt(httpd_req_t* req) {
+    char* body = read_body(req);
+    cJSON* json = body ? cJSON_Parse(body) : nullptr;
+    free(body);
+
+    std::string broker;
+    if (json) {
+        cJSON* j = cJSON_GetObjectItemCaseSensitive(json, "broker");
+        if (cJSON_IsString(j) && j->valuestring) broker = j->valuestring;
+    }
+    cJSON_Delete(json);
+
+    // Trim surrounding whitespace.
+    size_t s = broker.find_first_not_of(" \t\r\n");
+    size_t e = broker.find_last_not_of(" \t\r\n");
+    broker = (s == std::string::npos) ? std::string{} : broker.substr(s, e - s + 1);
+
+    // Light validation: bound the length and reject embedded whitespace. An empty
+    // value is allowed (it disables MQTT).
+    if (broker.size() > 120 || broker.find(' ') != std::string::npos) {
+        return send_json(req, 400, make_response(false, "set_mqtt", "",
+                                                 "invalid broker (use host:port)"));
+    }
+
+    bool ok = g_vehicle->save_config_str("mqtt_uri", broker);
+    esp_err_t r = send_json(req, ok ? 200 : 500,
+        make_response(ok, "set_mqtt", "",
+                      ok ? (broker.empty() ? "MQTT disabled — rebooting"
+                                           : "MQTT broker saved — rebooting")
+                         : "failed to save MQTT broker"));
+    if (ok) {
+        vTaskDelay(pdMS_TO_TICKS(800));
+        esp_restart();
+    }
+    return r;
+}
+
 // ─── GET / — web UI (embedded from main/www/index.html) ─────────────────────────
 
 extern const char index_html_start[] asm("_binary_index_html_start");
@@ -684,6 +735,9 @@ static esp_err_t handle_all(httpd_req_t* req) {
     }
     if (req->method == HTTP_POST && strstr(uri, "/set_vin")) {
         return handle_set_vin(req);
+    }
+    if (req->method == HTTP_POST && strstr(uri, "/set_mqtt")) {
+        return handle_set_mqtt(req);
     }
     if (req->method == HTTP_POST && strstr(uri, "/scan")) {
         return handle_scan(req);

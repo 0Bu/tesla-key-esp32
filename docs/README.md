@@ -157,12 +157,15 @@ GET  /status               { vin, ip, version, key_present, key_fingerprint,
                              wifi:{ssid,rssi},
                              ble:{connected,scanning,rssi,addr | devices:[{addr,name,rssi}]},
                              vehicle:{soc,status,power,amps} (when connected, cached),
+                             mqtt:{configured,connected,broker} (HA bridge),
                              tele:{climate,drive,tires,closures} (read-only telemetry) }
 POST /scan                 Time-limited BLE discovery scan (populates ble.devices)
 GET  /diag[?verbose=1][?clear=1]   Plain-text in-memory diag log
 POST /gen_keys[?force=1]   Generate ECDSA P-256 key (refuses overwrite without force)
 POST /send_key             Manually trigger pairing (charging_manager only; normally automatic)
 POST /set_vin              Persist VIN and reboot
+POST /set_mqtt             Persist the MQTT broker for the HA bridge and reboot
+                             ({"broker":"host:port"} or full "mqtt://…"; "" disables MQTT)
 POST /set_time             Set the wall clock from the browser ({"ms":<epoch>}) — NTP fallback
 GET  /ota/check[?ms=<epoch>]   Start a background update check (then poll /ota/status)
 POST /ota/update           Start the background self-update (downloads, then reboots)
@@ -191,6 +194,45 @@ port: 80                            # device serves on 80 (template default 8080
 evcc calls: `GET …/vehicle_data?endpoints=charge_state`,
 `POST …/command/{charge_start,charge_stop,set_charging_amps,wake_up}`.
 SOC read from `.response.response.charge_state.battery_level`, current from `…charge_amps`.
+
+## Home Assistant (MQTT)
+
+`main/mqtt_ha.cpp` mirrors every cached reading to MQTT using Home Assistant's
+[MQTT Discovery](https://www.home-assistant.io/integrations/mqtt/#mqtt-discovery), so a
+**Tesla Key** device with all entities appears in HA automatically — no YAML. **Read-only:**
+no command topics are subscribed; HA cannot control or wake the car. The bridge runs in its
+own task and is independent of evcc, BLE and pairing.
+
+**Enable:** set the broker in the web UI (Connection → MQTT, `IP:PORT`) — stored in NVS
+(`mqtt_uri`) and applied after the reboot it triggers. Compile-time defaults / credentials
+live in `idf.py menuconfig` → *Tesla Key Configuration*:
+
+| Option | Default | Purpose |
+|--------|---------|---------|
+| `CONFIG_TESLA_MQTT_BROKER_URI` | `""` | Broker (`mqtt://host:port`; empty = disabled). NVS `mqtt_uri` overrides it. |
+| `CONFIG_TESLA_MQTT_USERNAME` / `_PASSWORD` | `""` | Broker auth (optional). |
+| `CONFIG_TESLA_MQTT_DISCOVERY_PREFIX` | `homeassistant` | HA discovery prefix. |
+| `CONFIG_TESLA_MQTT_BASE_TOPIC` | `tesla-key` | State-topic prefix. |
+| `CONFIG_TESLA_MQTT_PUBLISH_INTERVAL_S` | `15` | Republish cadence (also publishes on every reconnect). |
+
+**Topics** (node id `teslakey_<mac3>` from the WiFi MAC, stable across VIN changes):
+
+```
+tesla-key/<node>/availability                 online | offline   (LWT, retained)
+tesla-key/<node>/charge      {soc,charge_limit,power,amps,range,rate,charging_state}
+tesla-key/<node>/climate     {inside,outside,setpoint,on,preconditioning}
+tesla-key/<node>/drive       {shift,odometer}
+tesla-key/<node>/tires       {fl,fr,rl,rr,warn}
+tesla-key/<node>/closures    {locked,door,frunk,trunk,window,user}
+tesla-key/<node>/vehicle     {sleep_status}
+tesla-key/<node>/device      {wifi_rssi,ble_rssi,ble_connected,paired,uptime,free_heap,version}
+homeassistant/<sensor|binary_sensor>/<node>/<object>/config   (discovery, retained)
+```
+
+All state topics are retained JSON. Numeric fields are emitted only when the car reported
+them (proto3 optional), so an unseen value shows as *unknown* in HA, not a phantom `0`.
+While a parked car sleeps the source polls pause (so it can sleep), and MQTT keeps serving
+the last-known retained values until the next active window.
 
 ## Troubleshooting
 

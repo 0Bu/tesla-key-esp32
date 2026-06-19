@@ -159,6 +159,13 @@ public:
         return config_store_ ? config_store_->save_str("vin", vin) : false;
     }
 
+    // Persist an arbitrary runtime-config string (tesla_cfg namespace). Used by the
+    // web UI to store the MQTT broker ("mqtt_uri"); applied on the next boot. Keys
+    // must be ≤15 chars (NVS limit). An empty value disables the feature it gates.
+    bool save_config_str(const char* key, const std::string& value) {
+        return config_store_ ? config_store_->save_str(key, value) : false;
+    }
+
     // Cache the last-known wall clock (epoch seconds). The device has no
     // battery-backed RTC and deliberately makes no NTP call; the browser sets the
     // clock via POST /set_time and we persist it so a headless reboot (evcc only,
