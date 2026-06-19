@@ -119,6 +119,17 @@ static void pub_json(const std::string& topic, cJSON* obj) {
 }
 
 // ─── HA discovery ─────────────────────────────────────────────────────────────
+// Origin info: identifies the integration behind these entities. HA treats it as
+// mandatory whenever a `device` block is present (a config that carries `dev` but no
+// `o` is dropped — silently, at debug level — by HA 2026.x), so every entity gets it.
+static void add_origin_block(cJSON* root) {
+    cJSON* o = cJSON_CreateObject();
+    cJSON_AddStringToObject(o, "name", "tesla-key-esp32");
+    cJSON_AddStringToObject(o, "sw",   esp_app_get_description()->version);
+    cJSON_AddStringToObject(o, "url",  "https://github.com/0Bu/tesla-key-esp32");
+    cJSON_AddItemToObject(root, "o", o);
+}
+
 static void add_device_block(cJSON* root) {
     cJSON* dev = cJSON_CreateObject();
     cJSON* ids = cJSON_CreateArray();
@@ -161,6 +172,7 @@ static void publish_discovery() {
         if (e.unit)     cJSON_AddStringToObject(c, "unit_of_meas", e.unit);
         if (e.stat_cla) cJSON_AddStringToObject(c, "stat_cla",     e.stat_cla);
         if (e.ent_cat)  cJSON_AddStringToObject(c, "ent_cat",      e.ent_cat);
+        add_origin_block(c);
         add_device_block(c);
 
         std::string ct = s_prefix + "/" + e.comp + "/" + s_node + "/" + e.obj + "/config";

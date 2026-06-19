@@ -154,7 +154,7 @@ GET  /                     Web UI (status, pairing, quick commands)
 GET  /status               { vin, ip, version, key_present, key_fingerprint,
                              key_created (epoch, omitted if clock unsynced), paired,
                              paired_at (epoch, omitted if unknown), reauth,
-                             wifi:{ssid,rssi},
+                             wifi:{ssid,rssi,std},
                              ble:{connected,scanning,rssi,addr | devices:[{addr,name,rssi}]},
                              vehicle:{soc,status,power,amps} (when connected, cached),
                              mqtt:{configured,connected,broker} (HA bridge),
