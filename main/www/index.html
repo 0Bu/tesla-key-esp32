@@ -336,13 +336,13 @@ function render(s){
   var w=s.wifi||{}, wc=$("wifiConn");
   $("wifiLbl").textContent = w.std || 'Wi-Fi';   // standard sits in the label, e.g. "Wi-Fi 4"
   if(w.ssid||s.ip){
-    var wbars=(w.rssi!=null)?'<span class="hbars">'+barsHTML(w.rssi)+'</span>':'';
+    var wbars=(w.rssi!=null)?barsHTML(w.rssi)+' ':'';
     var wparts=[];
     if(w.ssid) wparts.push(esc(w.ssid));
     if(s.ip)   wparts.push(esc(s.ip));
     if(w.rssi!=null) wparts.push(w.rssi+' dBm');
     wc.className='cv ok';
-    wc.innerHTML=wbars+'<span>'+wparts.join('  ·  ')+'</span>';
+    wc.innerHTML='<span>'+wbars+wparts.join(' · ')+'</span>';
   } else { wc.className='cv'; wc.innerHTML='<span class="ph">disconnected</span>'; }
 
   // re-pair notice — key was removed by the car and regenerated
@@ -408,7 +408,7 @@ function render(s){
     if(ble.addr) seg.push('<span class="mac">'+esc(ble.addr)+'</span>');
     if(ble.rssi!=null) seg.push(ble.rssi+' dBm');
     bc.className='cv ok';
-    bc.innerHTML=(ble.rssi!=null?barsHTML(ble.rssi):'')+(seg.length?'<span>'+seg.join(' · ')+'</span>':'');
+    bc.innerHTML='<span>'+(ble.rssi!=null?barsHTML(ble.rssi)+' ':'')+seg.join(' · ')+'</span>';
   } else if(ble.scanning){
     bc.className='cv'; bc.innerHTML='<span>Searching…</span>';
   } else {
