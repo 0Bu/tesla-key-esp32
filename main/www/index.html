@@ -200,7 +200,7 @@ code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
     <div class="tile wide">
       <div class="tlabel">Connections</div>
       <div class="conn">
-        <div class="crow"><span class="ck">Wi-Fi</span><span class="cv" id="wifiConn"><span class="ph">&mdash;</span></span></div>
+        <div class="crow"><span class="ck" id="wifiLbl">Wi-Fi</span><span class="cv" id="wifiConn"><span class="ph">&mdash;</span></span></div>
         <div class="crow"><span class="ck">BLE</span><span class="cv" id="bleConn"><span class="ph">&mdash;</span></span></div>
         <button class="crow tap" onclick="editMqtt()" title="Tap to set the MQTT broker">
           <span class="ck">MQTT</span><span class="cv" id="mqttConn"><span class="ph">&mdash;</span></span>
@@ -334,16 +334,16 @@ function render(s){
 
   // connection — Wi-Fi (signal + SSID + IP), moved here from the header
   var w=s.wifi||{}, wc=$("wifiConn");
+  $("wifiLbl").textContent = w.std || 'Wi-Fi';   // standard sits in the label, e.g. "Wi-Fi 4"
   if(w.ssid||s.ip){
     var wbars=(w.rssi!=null)?'<span class="hbars">'+barsHTML(w.rssi)+'</span>':'';
     var wparts=[];
     if(w.ssid) wparts.push(esc(w.ssid));
-    if(w.std)  wparts.push(esc(w.std));
     if(s.ip)   wparts.push(esc(s.ip));
     if(w.rssi!=null) wparts.push(w.rssi+' dBm');
     wc.className='cv ok';
     wc.innerHTML=wbars+'<span>'+wparts.join('  ·  ')+'</span>';
-  } else { wc.className='cv'; wc.innerHTML='<span class="ph">offline</span>'; }
+  } else { wc.className='cv'; wc.innerHTML='<span class="ph">disconnected</span>'; }
 
   // re-pair notice — key was removed by the car and regenerated
   var rb=$("reauthBanner");
@@ -418,8 +418,8 @@ function render(s){
   // MQTT — Home Assistant bridge (tap to set/change the broker)
   var mq=s.mqtt||{}, mc=$("mqttConn");
   if(!mq.configured){ mc.className='cv'; mc.innerHTML='<span class="ph">Not configured</span>'; }
-  else if(mq.connected){ mc.className='cv ok'; mc.innerHTML='<span>Connected · '+esc(mq.broker||'')+'</span>'; }
-  else { mc.className='cv warn'; mc.innerHTML='<span>'+esc(mq.broker||'')+' · offline</span>'; }
+  else if(mq.connected){ mc.className='cv ok'; mc.innerHTML='<span>'+esc(mq.broker||'')+'</span>'; }
+  else { mc.className='cv warn'; mc.innerHTML='<span>'+esc(mq.broker||'')+' · disconnected</span>'; }
 
   // firmware version (header, tap to check)
   var vl=$("verLink");
