@@ -398,7 +398,7 @@ function render(s){
   // vehicle
   $("vehVal").innerHTML=hasVin?esc(s.vin):'<span class="ph">Not set</span>';
   var pairedTxt=s.paired_at?('Paired '+new Date(s.paired_at*1000).toLocaleDateString(undefined,{year:'numeric',month:'short',day:'numeric'})):'paired';
-  setSub("vehSub", paired?pairedTxt:(hasVin?'not paired':'tap to add VIN'), paired?'ok':'');
+  setSub("vehSub", paired?pairedTxt:(hasVin?'not paired':'tap to add VIN'), '');
 
   // bluetooth — link to the car
   var ble=s.ble||{}, bc=$("bleConn");
