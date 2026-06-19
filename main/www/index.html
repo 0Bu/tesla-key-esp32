@@ -315,6 +315,15 @@ function chargeStats(v,charging){
   if(v.amps>0)  c.push(stat('Current', Math.round(v.amps),        'A',  true));
   return c.join('');
 }
+// Compact "time ago" for the asleep card (seconds → "<1 min" / "5 min" / "2 h" / "3 d").
+function fmtAgo(sec){
+  if(sec==null||sec<0) return '';
+  sec=Math.floor(sec);
+  if(sec<60) return '<1 min';
+  var m=Math.round(sec/60); if(m<60) return m+' min';
+  var h=Math.floor(m/60);   if(h<48) return h+' h';
+  return Math.floor(h/24)+' d';
+}
 
 /* ---------- render ---------- */
 function render(s){
@@ -363,6 +372,12 @@ function render(s){
       hic.innerHTML='<button class="wakebtn" onclick="wakeCar()" title="Tap to wake the car" aria-label="Wake the car">'+ringSleep()+'<span class="glyph">💤</span></button>';
       hl.innerHTML='<span>Vehicle asleep</span>';
       hs.textContent='Tap the icon to wake the car.';
+      // Last-known battery + how long the car has been asleep, from the retained cache —
+      // shown without waking the car (last reading; a parked car barely drains).
+      var ls=s.last||{}, lsoc=(ls.soc!=null)?Math.round(ls.soc):null, ago=fmtAgo(s.last_seen_s), chips=[];
+      if(lsoc!=null) chips.push(stat('Battery','<span style="color:'+socColor(lsoc)+'">'+lsoc+'</span>','%'));
+      if(ago)        chips.push(stat('Idle', ago, ''));
+      hst.innerHTML=chips.join('');
     }
   } else if(!configured){
     hic.innerHTML=ringSVG(0,true)+'<div class="glyph">'+BOLT+'</div>';

@@ -419,6 +419,13 @@ static void current_ip(char* out, size_t sz) {
     }
 }
 
+// Max age (seconds) of the cached charge reading for it to still count as "live" in the
+// web UI. The background charge poll refreshes every ~10 s while the car answers, so any
+// awake car stays well under this; a sleeping car (unanswered NO_WAKE_SKIP polls) crosses
+// it and the UI switches to the "asleep" card. Comfortably above the poll cadence so a
+// single slow/dropped poll round-trip doesn't flap the view.
+static constexpr uint32_t kLiveDataMaxAgeS = 60;
+
 static esp_err_t handle_status(httpd_req_t* req) {
     char ip[16];
     current_ip(ip, sizeof(ip));
@@ -472,9 +479,19 @@ static esp_err_t handle_status(httpd_req_t* req) {
         if (g_vehicle->ble_rssi(rssi)) cJSON_AddNumberToObject(ble, "rssi", rssi);
         cJSON_AddStringToObject(ble, "addr", g_vehicle->ble_peer().c_str());
 
-        // Use cached data for the UI status to keep it responsive (non-blocking)
+        // Use cached data for the UI status to keep it responsive (non-blocking).
+        // Emit the live "vehicle" object (which drives the UI's awake/SOC view) ONLY when
+        // the cache is FRESH — not merely when the BLE link is up. The auto-pair VCSEC
+        // health poll keeps the link connected even while the car sleeps, so gating on
+        // ble_connected() alone would keep showing a stale SOC as if live and the "asleep"
+        // card would never appear. Background charge polls refresh the cache every ~10 s
+        // while the car answers; once it sleeps (NO_WAKE_SKIP polls go unanswered) the age
+        // climbs past the threshold, the live object is withheld, and the UI falls through
+        // to the asleep card (last-known SOC + idle duration below).
         ChargeStateResult cs = g_vehicle->get_cached_charge();
-        if (cs.valid) {
+        uint32_t cs_age = 0;
+        bool fresh = g_vehicle->seconds_since_contact(cs_age) && cs_age < kLiveDataMaxAgeS;
+        if (cs.valid && fresh) {
             cJSON* veh = cJSON_CreateObject();
             cJSON_AddNumberToObject(veh, "soc",    cs.battery_level);
             cJSON_AddStringToObject(veh, "status", cs.charging_state.c_str());
@@ -540,6 +557,24 @@ static esp_err_t handle_status(httpd_req_t* req) {
         cJSON_AddItemToObject(ble, "devices", devices);
     }
     cJSON_AddItemToObject(root, "ble", ble);
+
+    // Last-known vehicle snapshot for the "Vehicle asleep" card. The charge cache is
+    // retained in RAM across BLE disconnects, so the UI can show the last battery level
+    // (a sleeping car barely drains, so it stays a good estimate) and — via last_seen_s —
+    // how long the car has been asleep, all without waking it. Emitted regardless of the
+    // BLE link state; when connected the UI uses the live "vehicle" object instead.
+    {
+        ChargeStateResult last = g_vehicle->get_cached_charge();
+        if (last.valid) {
+            cJSON* lo = cJSON_CreateObject();
+            cJSON_AddNumberToObject(lo, "soc",    last.battery_level);
+            cJSON_AddStringToObject(lo, "status", last.charging_state.c_str());
+            cJSON_AddItemToObject(root, "last", lo);
+        }
+        uint32_t ago = 0;
+        if (g_vehicle->seconds_since_contact(ago))
+            cJSON_AddNumberToObject(root, "last_seen_s", (double)ago);
+    }
     return send_json(req, 200, root);
 }
 
