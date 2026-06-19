@@ -75,7 +75,7 @@ jobs:
           esp_idf_version: v5.5.4
           target: esp32s3
           # Build, then export the flashable parts SEPARATELY (bootloader @0x0,
-          # partition table @0x8000, app @0x10000). ESP Web Tools writes these at
+          # partition table @0x8000, app @0x20000). ESP Web Tools writes these at
           # their own offsets, so an UPDATE never touches the nvs partition (0x9000)
           # → WiFi / VIN / key survive upgrades. tesla-key-esp32.bin is the stable
           # name the web installer reads; the versioned + merged copies are release

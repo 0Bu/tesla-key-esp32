@@ -191,6 +191,7 @@ bool VehicleController::init(const std::string& vin,
     cmd_sem_       = xSemaphoreCreateBinary();
     vehicle_mutex_ = xSemaphoreCreateMutex();
     command_mutex_ = xSemaphoreCreateMutex();
+    cache_mutex_   = xSemaphoreCreateMutex();
 
     auto ble_sp     = std::shared_ptr<TeslaBLE::BleAdapter>(&ble, NoDelete{});
     auto storage_sp = std::shared_ptr<TeslaBLE::StorageAdapter>(&storage, NoDelete{});
@@ -225,6 +226,7 @@ bool VehicleController::init(const std::string& vin,
     // (the background refresh in loop_task). Installed once, never cleared; HTTP
     // reads serve last_known_charge_ from this cache without blocking.
     vehicle_->set_charge_state_callback([this](const CarServer_ChargeState& cs) {
+        MutexGuard g(cache_mutex_);
         parse_charge_state(cs, last_known_charge_);
     });
 
@@ -232,15 +234,19 @@ bool VehicleController::init(const std::string& vin,
     // (one telemetry domain per cycle). Each refreshes its own cache for the web UI; none
     // affect pairing or evcc. Installed once, never cleared.
     vehicle_->set_climate_state_callback([this](const CarServer_ClimateState& cs) {
+        MutexGuard g(cache_mutex_);
         parse_climate_state(cs, last_known_climate_);
     });
     vehicle_->set_drive_state_callback([this](const CarServer_DriveState& ds) {
+        MutexGuard g(cache_mutex_);
         parse_drive_state(ds, last_known_drive_);
     });
     vehicle_->set_tire_pressure_state_callback([this](const CarServer_TirePressureState& t) {
+        MutexGuard g(cache_mutex_);
         parse_tire_pressure(t, last_known_tires_);
     });
     vehicle_->set_closures_state_callback([this](const CarServer_ClosuresState& c) {
+        MutexGuard g(cache_mutex_);
         parse_closures_state(c, last_known_closures_);
     });
 
@@ -357,10 +363,10 @@ void VehicleController::auto_pair_task_fn_(void* arg) {
         // here and must not be mistaken for a revocation.
         self->believed_paired_ = false;
 
-        // 1. Probe for an existing whitelist entry. A key enrolled by EITHER method —
-        //    tapping a keycard on the console (enrolls instantly, no on-screen step) or
-        //    confirming the on-screen "phone key pairing" dialog — shows up here as a
-        //    usable session.
+        // 1. Probe for an existing whitelist entry. Once the key is enrolled — by resting a
+        //    Tesla NFC keycard on the center-console reader and confirming the "Add key"
+        //    dialog the car then shows on its touchscreen (the dialog only appears while a
+        //    card is present) — it shows up here as a usable session.
         VehicleStatusResult st;
         self->get_vehicle_status(st, 6000);
         if (self->has_session()) {
@@ -368,22 +374,23 @@ void VehicleController::auto_pair_task_fn_(void* arg) {
             continue;
         }
 
-        // 2. Offer on-screen enrolment ONCE (the car shows a "phone key pairing" dialog),
-        //    then flush the queue. We do NOT block waiting on it: the "Whitelist Add Key"
-        //    never completes cleanly on this car (no completing commandStatus) and the
-        //    keycard method ignores it entirely — success is detected by probing (step 3),
-        //    not by pair()'s return. The short wait just lets the message reach the car;
-        //    flushing (set_connected(false)) then clears the lingering whitelist-add from
-        //    the single FIFO queue so the probes below run clean. Sending it only once per
-        //    round (instead of every ~45 s block) also stops the car re-prompting after
-        //    the key is already registered.
+        // 2. Send the whitelist-add ONCE, then flush the queue. This is what makes the car
+        //    show the "Add key" dialog on its touchscreen — but the car only shows it while
+        //    a Tesla NFC keycard is resting on the center-console reader. We do NOT block
+        //    waiting on it: the "Whitelist Add Key" never completes cleanly on this car (no
+        //    completing commandStatus) — success is detected by probing (step 3), not by
+        //    pair()'s return. The short wait just lets the message reach the car; flushing
+        //    (set_connected(false)) then clears the lingering whitelist-add from the single
+        //    FIFO queue so the probes below run clean. Sending it only once per round
+        //    (instead of every ~45 s block) also stops the car re-prompting after the key
+        //    is already registered.
         ESP_LOGI(TAG, "auto-pair: not paired — requesting key enrolment from the car…");
         self->pair(5000);
         if (self->ble_ && self->ble_->is_connected()) self->ble_->disconnect();
         xSemaphoreTake(self->vehicle_mutex_, portMAX_DELAY);
         self->vehicle_->set_connected(false);
         xSemaphoreGive(self->vehicle_mutex_);
-        ESP_LOGI(TAG, "auto-pair: enrolment request sent — TAP YOUR KEYCARD on the console (or confirm the on-screen dialog); waiting for the key to register…");
+        ESP_LOGI(TAG, "auto-pair: enrolment request sent — place a Tesla NFC keycard on the center-console reader, then confirm 'Add key' on the touchscreen; waiting for the key to register…");
 
         // 3. Poll for the resulting session at a short cadence so an enrolment that lands
         //    mid-round — the instant a keycard is tapped — is noticed within a few seconds
@@ -400,7 +407,7 @@ void VehicleController::auto_pair_task_fn_(void* arg) {
             ESP_LOGI(TAG, "auto-pair: key registered on the car — session established, now PAIRED");
             continue;
         }
-        ESP_LOGI(TAG, "auto-pair: not registered yet — tap your keycard / confirm on screen (or move closer if the car is out of BLE range)");
+        ESP_LOGI(TAG, "auto-pair: not registered yet — place a Tesla NFC keycard on the console reader and confirm 'Add key' on screen (or move closer if the car is out of BLE range)");
     }
 }
 
@@ -718,9 +725,10 @@ bool VehicleController::get_charge_state(ChargeStateResult& out, int /*timeout_m
     // Serve the cached reading instantly and never block. evcc polls vehicle_data
     // frequently and times out quickly, so an on-demand connect + poll here would risk a
     // gateway timeout (HTTP 502). Freshness is maintained out of band: loop_task keeps the
-    // BLE link warm while paired and refreshes the cache every 30 s (and immediately after
-    // a fresh connect). A sleeping car simply leaves the last value in place. If we have
-    // never gotten a reading yet, the caller emits a zeroed-but-well-formed charge_state.
+    // BLE link warm while paired and refreshes the cache every 10 s while connected. A
+    // sleeping car simply leaves the last value in place. If we have never gotten a reading
+    // yet, the caller emits a zeroed-but-well-formed charge_state.
+    MutexGuard g(cache_mutex_);
     if (last_known_charge_.valid) {
         out = last_known_charge_;
         return true;
@@ -766,7 +774,10 @@ bool VehicleController::get_vehicle_status(VehicleStatusResult& out, int timeout
     vehicle_->set_vehicle_status_callback(nullptr);
     xSemaphoreGive(vehicle_mutex_);
     out = pending_status_;
-    if (ok && out.valid) last_known_status_ = out;
+    if (ok && out.valid) {
+        MutexGuard cache_guard(cache_mutex_);
+        last_known_status_ = out;
+    }
     return ok && out.valid;
 }
 
@@ -821,13 +832,17 @@ void VehicleController::clear_session_and_cache_() {
     }
 
     // Drop cached readings so /status and vehicle_data never serve old SOC/charge data
-    // (or stale telemetry) from a defunct pairing.
-    last_known_charge_   = {};
-    last_known_status_   = {};
-    last_known_climate_  = {};
-    last_known_drive_    = {};
-    last_known_tires_    = {};
-    last_known_closures_ = {};
+    // (or stale telemetry) from a defunct pairing. Under cache_mutex_ since the HTTP task
+    // may be copying these concurrently.
+    {
+        MutexGuard cache_guard(cache_mutex_);
+        last_known_charge_   = {};
+        last_known_status_   = {};
+        last_known_climate_  = {};
+        last_known_drive_    = {};
+        last_known_tires_    = {};
+        last_known_closures_ = {};
+    }
     ESP_LOGI(TAG, "pairing/session cleared");
 }
 

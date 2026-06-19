@@ -101,13 +101,14 @@ public:
     bool get_charge_state(ChargeStateResult& out, int timeout_ms = 20000);
     bool get_vehicle_status(VehicleStatusResult& out, int timeout_ms = 20000);
 
-    // Non-blocking accessors for cached state (refreshed in background)
-    ChargeStateResult   get_cached_charge()   { return last_known_charge_; }
-    VehicleStatusResult get_cached_status()   { return last_known_status_; }
-    ClimateStateResult  get_cached_climate()  { return last_known_climate_; }
-    DriveStateResult    get_cached_drive()    { return last_known_drive_; }
-    TirePressureResult  get_cached_tires()    { return last_known_tires_; }
-    ClosuresStateResult get_cached_closures() { return last_known_closures_; }
+    // Non-blocking accessors for cached state (refreshed in background; copied under
+    // cache_mutex_ because the BLE RX task writes these concurrently — see cache_mutex_).
+    ChargeStateResult   get_cached_charge()   { return copy_locked_(last_known_charge_); }
+    VehicleStatusResult get_cached_status()   { return copy_locked_(last_known_status_); }
+    ClimateStateResult  get_cached_climate()  { return copy_locked_(last_known_climate_); }
+    DriveStateResult    get_cached_drive()    { return copy_locked_(last_known_drive_); }
+    TirePressureResult  get_cached_tires()    { return copy_locked_(last_known_tires_); }
+    ClosuresStateResult get_cached_closures() { return copy_locked_(last_known_closures_); }
 
     bool generate_key();
     // Always enrolls a Charging Manager key (charging + wake only); never an owner key.
@@ -195,6 +196,17 @@ private:
     // RAII helper: takes cmd_sem_ when done
     ResultCb make_result_cb_();
 
+    // Copy a background-refreshed cache under cache_mutex_ (see cache_mutex_ below). The
+    // caches hold std::string members written from the BLE RX task; an unlocked by-value
+    // read races the writer (torn string → UB), so all reads/writes take this mutex.
+    template <typename T> T copy_locked_(const T& src) {
+        if (!cache_mutex_) return src;
+        xSemaphoreTake(cache_mutex_, portMAX_DELAY);
+        T copy = src;
+        xSemaphoreGive(cache_mutex_);
+        return copy;
+    }
+
     BleClient*         ble_{nullptr};
     NvsStorageAdapter* storage_{nullptr};
     NvsStorageAdapter* config_store_{nullptr};
@@ -208,6 +220,10 @@ private:
     // Serializes a whole command/query cycle so concurrent HTTP requests
     // (e.g. evcc poll + a manual command) cannot share cmd_sem_/last_result_.
     SemaphoreHandle_t command_mutex_{nullptr};
+    // Guards the last_known_* caches below: they hold std::string members written from
+    // the BLE RX task (parse_* callbacks) and read by the HTTP task, so an unlocked
+    // by-value copy would race the writer (torn string → UB).
+    SemaphoreHandle_t cache_mutex_{nullptr};
     bool              last_result_{false};
     // Failure text from the most recent signed command (the Tesla "...action failed:
     // <reason>" message), or empty after a success / when no response came back. Lets
