@@ -189,7 +189,8 @@ private:
 
     // Enqueue an Infotainment or VCSEC command and wait for the callback.
     bool send_vcsec_(const std::string& name, Builder builder,
-                     TeslaBLE::WakePolicy wp, int timeout_ms);
+                     TeslaBLE::WakePolicy wp, int timeout_ms,
+                     bool count_as_activity = true);
     bool send_infotainment_(const std::string& name, Builder builder, int timeout_ms,
                             TeslaBLE::WakePolicy wp = TeslaBLE::WakePolicy::WAKE_IF_NEEDED);
 
@@ -253,6 +254,16 @@ private:
     // cleared when a new session is established. Distinguishes a re-pair-after-revocation
     // from a never-paired device. atomic: written/read across tasks.
     std::atomic<bool> repair_notice_{false};
+
+    // ── Sleep / active-window gating ────────────────────────────────────────────────
+    // The background infotainment polls (charge + telemetry) and the warm-up connect open
+    // an infotainment session, which keeps the car's main computer awake. To let a parked
+    // car sleep, loop_task runs them ONLY while the "active window" is open: a real command
+    // in the last kActiveWindowMs (last_cmd_ticks_), OR the car is charging. (We do NOT open
+    // the window merely because the car is awake — that would be self-perpetuating; the car
+    // could never finish its idle→sleep transition. See loop_task_fn_.)
+    std::atomic<uint32_t> last_cmd_ticks_{0};  // ticks of the last real command (0 = never)
+    static constexpr uint32_t kActiveWindowMs = 300000;  // 5 min command-recency window
 
     // Cached results for non-blocking UI access
     ChargeStateResult   last_known_charge_{};
