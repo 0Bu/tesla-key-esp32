@@ -8,6 +8,7 @@ idf_component_register(
         "provisioning.cpp"
         "diag_log.cpp"
         "ota_update.cpp"
+        "mqtt_ha.cpp"
     INCLUDE_DIRS
         "."
     EMBED_TXTFILES
@@ -28,4 +29,6 @@ idf_component_register(
         json
         lwip
         driver
+        mqtt
+        esp_timer
 )

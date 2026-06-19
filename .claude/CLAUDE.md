@@ -67,13 +67,14 @@ only when the car reported them (proto3 optional) so the UI renders "—" otherw
 POST /api/1/vehicles/{VIN}/command/{command}   # execute command
 GET  /api/1/vehicles/{VIN}/vehicle_data        # charge state
 GET  /api/1/vehicles/{VIN}/body_controller_state
-GET  /status                                   # web-UI JSON (wifi, ble, vehicle cache, read-only telemetry under "tele")
+GET  /status                                   # web-UI JSON (wifi, ble, mqtt, vehicle cache, read-only telemetry under "tele")
 POST /scan                                     # start a time-limited BLE discovery scan
 GET  /diag                                     # plain-text in-memory diag log (?verbose=1 raw RX, ?clear=1 reset)
 POST /gen_keys[?force=1]                       # generate key (refuses overwrite w/o force)
 POST /send_key                                 # pair with vehicle (Charging Manager only)
 POST /set_time                                 # set wall clock from the browser ({"ms":<epoch>}); fallback when NTP unreachable
 POST /set_vin                                  # persist VIN + reboot
+POST /set_mqtt                                 # persist MQTT broker (HA bridge) + reboot ({"broker":"host:port"}; "" disables)
 GET  /api/proxy/1/version
 GET  /ota/check[?ms=<epoch>]                   # start background manifest check (non-blocking); poll /ota/status. ms = browser-clock NTP fallback
 POST /ota/update                               # start background self-update (pull, then reboot)
@@ -107,6 +108,33 @@ vehicles:
     url: http://<ESP32-IP>
     vin: <VIN>
 ```
+
+## Home Assistant MQTT bridge
+
+`main/mqtt_ha.cpp` publishes **all** cached telemetry + device status to an MQTT broker
+using HA's MQTT-Discovery convention, so every entity auto-appears in Home Assistant
+grouped under one device. **Read-only by design** — no command topics are subscribed
+(the car is never controlled or woken from HA). Independent of evcc/BLE/pairing.
+
+- **Config:** broker URI from NVS `mqtt_uri` (web UI: Connection → MQTT, stores `host:port`)
+  overriding `CONFIG_TESLA_MQTT_BROKER_URI`; empty = disabled (bridge is a no-op).
+  Optional `CONFIG_TESLA_MQTT_USERNAME`/`PASSWORD`, `CONFIG_TESLA_MQTT_DISCOVERY_PREFIX`
+  (default `homeassistant`), `CONFIG_TESLA_MQTT_BASE_TOPIC` (default `tesla-key`),
+  `CONFIG_TESLA_MQTT_PUBLISH_INTERVAL_S` (default 15). `/set_mqtt` reboots to re-init.
+- **Node id:** `teslakey_<mac3>` from the WiFi STA MAC (stable across VIN changes).
+- **Topics:** `<base>/<node>/{charge,climate,drive,tires,closures,vehicle,device}` (retained
+  JSON), availability/LWT `<base>/<node>/availability` (`online`/`offline`). Discovery
+  configs under `<prefix>/<sensor|binary_sensor>/<node>/<object>/config` (retained).
+- **Entities:** charge (soc, charge_limit, power, amps, range, rate, charging_state),
+  climate (inside/outside/setpoint °C, on, preconditioning), drive (shift, odometer),
+  tires (fl/fr/rl/rr bar + warn), closures (locked/door/frunk/trunk/window/occupant),
+  sleep_state, and device diagnostics (wifi/ble RSSI, ble_link, paired, uptime, free_heap,
+  firmware). Numeric fields are emitted only when the car reported them (proto3 optional),
+  so an unseen value reads "unknown" in HA rather than a phantom 0.
+- **Publishing:** a dedicated `mqtt_pub` task reads the thread-safe caches; on every
+  (re)connect it (re)sends discovery + `online` + an immediate snapshot, then republishes
+  state every interval. The same active-window gating that lets the car sleep applies to
+  the *source* polls, so MQTT keeps serving the last-known (retained) values while asleep.
 
 ## Pairing lifecycle / invalidation
 

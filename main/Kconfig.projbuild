@@ -44,4 +44,48 @@ menu "Tesla Key Configuration"
             HTTPS URL of the app image (tesla-key-esp32.bin) downloaded and flashed
             to the inactive OTA slot by esp_https_ota. Must be HTTPS.
 
+    config TESLA_MQTT_BROKER_URI
+        string "MQTT broker URI (Home Assistant)"
+        default ""
+        help
+            MQTT broker for the Home Assistant telemetry bridge, e.g.
+            "mqtt://192.168.1.10:1883". A bare "host:port" is also accepted.
+            Leave empty to disable MQTT. Can be set/changed at runtime in the web
+            UI (Connection → MQTT), which stores it in NVS and overrides this.
+
+    config TESLA_MQTT_USERNAME
+        string "MQTT username (optional)"
+        default ""
+        help
+            Username for the MQTT broker. Leave empty for an anonymous broker.
+
+    config TESLA_MQTT_PASSWORD
+        string "MQTT password (optional)"
+        default ""
+        help
+            Password for the MQTT broker. Leave empty for an anonymous broker.
+
+    config TESLA_MQTT_DISCOVERY_PREFIX
+        string "Home Assistant MQTT discovery prefix"
+        default "homeassistant"
+        help
+            Discovery topic prefix HA listens on. Default "homeassistant" matches
+            the stock Home Assistant MQTT integration.
+
+    config TESLA_MQTT_BASE_TOPIC
+        string "MQTT base topic prefix"
+        default "tesla-key"
+        help
+            Prefix for state topics. The per-device node id is appended, e.g.
+            "tesla-key/teslakey_a1b2c3/charge".
+
+    config TESLA_MQTT_PUBLISH_INTERVAL_S
+        int "MQTT publish interval (seconds)"
+        default 15
+        range 5 600
+        help
+            How often the full set of cached telemetry + device status is
+            republished to MQTT (retained). Discovery + an immediate snapshot are
+            also sent on every (re)connect.
+
 endmenu

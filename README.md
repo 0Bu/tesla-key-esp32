@@ -2,7 +2,8 @@
 
 Turns an ESP32-S3 into a Bluetooth key for a Tesla, so charging software such as
 [evcc](https://evcc.io) can wake the car, read the battery level and start/stop charging
-over the local network. No cloud, no Tesla API, no fees.
+over the local network. No cloud, no Tesla API, no fees. It can also stream all vehicle
+telemetry to [Home Assistant over MQTT](#step-6--home-assistant-optional).
 
 Build from source, full API and security model: [docs/README.md](docs/README.md).
 
@@ -77,6 +78,23 @@ port: 80                            # this device uses port 80 (template default
 
 If you edit `evcc.yaml` by hand instead, nest the same fields under `vehicles:`
 as a list item (`  - name: tesla` …). Restart evcc.
+
+---
+
+## Step 6 — Home Assistant (optional)
+
+The device can publish everything it reads — battery, charge, climate, tyre pressures,
+doors/locks, odometer, and its own WiFi/Bluetooth health — straight into Home Assistant
+over MQTT. It's read-only (HA only *sees* the data; it never sends commands or wakes the car).
+
+1. In the web UI, open the **Connection** panel and tap the **MQTT** row.
+2. Enter your broker as `IP:PORT` (e.g. `192.168.1.10:1883`) and save. The device reboots.
+3. With the [Home Assistant MQTT integration](https://www.home-assistant.io/integrations/mqtt/)
+   enabled, a **Tesla Key** device appears automatically with all sensors — no YAML needed
+   (Home Assistant MQTT Discovery). Leave the field empty to turn MQTT off again.
+
+If the broker needs a username/password, set them once via `idf.py menuconfig`
+(*Tesla Key Configuration → MQTT*) — the web UI only edits the broker address.
 
 ---
 
