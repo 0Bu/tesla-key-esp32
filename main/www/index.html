@@ -35,12 +35,16 @@ code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
 .logo svg{width:19px; height:19px; fill:#fff}
 .ttl{flex:1; min-width:0}
 .ttl h1{margin:0; font-size:19px; font-weight:650; letter-spacing:-.2px}
-.ttl .sub{font-size:13.5px; color:var(--muted); font-variant-numeric:tabular-nums; white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+/* flex (not inline text) so the OTA ring centers within the text line-box and never
+   grows the line height — keeps the cards below from shifting when the ring appears */
+.ttl .sub{font-size:13.5px; color:var(--muted); font-variant-numeric:tabular-nums; display:flex; align-items:center; min-width:0; overflow:hidden; white-space:nowrap}
+.ttl .sub #ipline{overflow:hidden; text-overflow:ellipsis; min-width:0}
+.ttl .sub .verlink,.ttl .sub .otastat{flex:none}
 .verlink{cursor:pointer; white-space:nowrap}
 .verlink:hover{color:var(--fg); text-decoration:underline}
 .verlink.acc{color:var(--accent); font-weight:600}
 /* inline OTA progress in the meta line (ring + status text), replaces the bottom popup */
-.otastat{display:inline-flex; align-items:center; gap:5px; margin-left:9px; vertical-align:middle; white-space:nowrap; color:var(--muted)}
+.otastat{display:inline-flex; align-items:center; gap:5px; margin-left:9px; white-space:nowrap; color:var(--muted)}
 .otastat:empty{display:none}
 .otastat svg{display:block; flex:none}
 .otastat.acc{color:var(--accent); font-weight:600}
