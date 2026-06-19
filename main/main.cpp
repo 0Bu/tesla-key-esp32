@@ -17,6 +17,7 @@
 #include "esp_sntp.h"
 #include "esp_ota_ops.h"
 #include "esp_system.h"
+#include "esp_heap_caps.h"
 
 #include "ble_client.hpp"
 #include "nvs_storage.hpp"
@@ -140,10 +141,11 @@ extern "C" void app_main() {
     // Log why we (re)booted — survives in /diag across reboots, so a crash cause is visible
     // without a serial console. PANIC = abort()/uncaught C++ exception, BROWNOUT = power dip,
     // *_WDT = a stuck task. Pair with the free-heap baseline to spot OOM-driven aborts.
-    ESP_LOGW(TAG, "BOOT reset_reason=%s free_heap=%u min_free=%u",
+    ESP_LOGW(TAG, "BOOT reset_reason=%s free_heap=%u min_free=%u largest_block=%u",
              reset_reason_str(esp_reset_reason()),
              (unsigned) esp_get_free_heap_size(),
-             (unsigned) esp_get_minimum_free_heap_size());
+             (unsigned) esp_get_minimum_free_heap_size(),
+             (unsigned) heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
 
     // NimBLE logs every GAP/GATT procedure at INFO — tens of lines per connect.
     // That noise buries the pairing/key-lifecycle messages in /diag (and fills the

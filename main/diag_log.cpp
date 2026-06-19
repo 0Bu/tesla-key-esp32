@@ -64,6 +64,21 @@ std::string diag_log_dump() {
     return out;
 }
 
+void diag_log_dump_chunks(const std::function<bool(const char*, size_t)>& sink) {
+    if (!s_mtx) return;
+    // Hold the mutex for the whole send so a concurrent writer can't shift s_head
+    // mid-dump. The spans point straight into the static buffer — no large heap
+    // allocation, which is the whole point (a 48 KB std::string can throw bad_alloc
+    // on a fragmented heap, whose largest free block can fall to ~31 KB → crash).
+    xSemaphoreTake(s_mtx, portMAX_DELAY);
+    if (s_wrapped) {
+        if (sink(s_buf + s_head, DIAG_CAP - s_head)) sink(s_buf, s_head);
+    } else {
+        sink(s_buf, s_head);
+    }
+    xSemaphoreGive(s_mtx);
+}
+
 void diag_log_clear() {
     if (!s_mtx) return;
     xSemaphoreTake(s_mtx, portMAX_DELAY);
