@@ -467,7 +467,10 @@ static esp_err_t handle_status(httpd_req_t* req) {
             cJSON_AddNumberToObject(veh, "soc",    cs.battery_level);
             cJSON_AddStringToObject(veh, "status", cs.charging_state.c_str());
             // Charging detail for the web UI: live power (kW) and current (A).
-            cJSON_AddNumberToObject(veh, "power",  cs.charger_power);
+            // Force one decimal place (cJSON would otherwise drop ".0" for whole kW).
+            char power_buf[16];
+            snprintf(power_buf, sizeof(power_buf), "%.1f", cs.charger_power);
+            cJSON_AddRawToObject(veh, "power", power_buf);
             cJSON_AddNumberToObject(veh, "amps",   cs.charging_amps);
             cJSON_AddItemToObject(root, "vehicle", veh);
         }
