@@ -456,6 +456,15 @@ static esp_err_t handle_status(httpd_req_t* req) {
     if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) {
         cJSON_AddStringToObject(wifi, "ssid", (const char*)ap.ssid);
         cJSON_AddNumberToObject(wifi, "rssi", ap.rssi);
+        // Highest 802.11 generation the AP advertises → friendly Wi-Fi name. The
+        // ESP32-S3 radio itself tops out at 802.11n, but the flags reflect the AP's
+        // capability, so a Wi-Fi 6 router still reads "Wi-Fi 6".
+        const char* std_ = ap.phy_11ax ? "Wi-Fi 6"
+                         : ap.phy_11ac ? "Wi-Fi 5"
+                         : ap.phy_11n  ? "Wi-Fi 4"
+                         : ap.phy_11g  ? "802.11g"
+                         : ap.phy_11b  ? "802.11b" : nullptr;
+        if (std_) cJSON_AddStringToObject(wifi, "std", std_);
     }
     cJSON_AddItemToObject(root, "wifi", wifi);
 
