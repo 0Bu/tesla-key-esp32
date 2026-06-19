@@ -561,7 +561,7 @@ function otaPoll(){
 }
 function otaProgress(o){
   if(o.state==='downloading'){ otaToast('Updating… '+(o.progress||0)+'% · keep the device powered','info'); otaTimer=setTimeout(otaPoll,800); }
-  else if(o.state==='done'){ otaToast('Update complete — rebooting…','ok'); setTimeout(function(){waitReboot(false)},5000); }
+  else if(o.state==='done'){ otaToast('Update complete — rebooting…','ok'); setTimeout(function(){waitReboot(state&&state.version)},2000); }
   else if(o.state==='error'){ otaToast('Update failed'+(o.message?': '+o.message:''),'err'); otaToastClose(); }
   else { otaTimer=setTimeout(otaPoll,1000); }
 }
@@ -570,12 +570,29 @@ function resumeOta(){
     if(o&&(o.state==='downloading'||o.state==='done')) otaProgress(o);
   }).catch(function(){});
 }
-function waitReboot(wentDown){
-  fetch('/status?ms='+Date.now(),{cache:'no-store'}).then(function(r){
-    if(!r.ok)throw 0;
-    if(wentDown){ location.reload(); return; }
-    setTimeout(function(){waitReboot(false)},1000);
-  }).catch(function(){ setTimeout(function(){waitReboot(true)},1000); });
+// After "done" the device reboots ~1.2s later. Poll /status in the background and
+// reload once it's back on the NEW image. We can't rely only on seeing it go *down*
+// — by the time we start polling it may already be back online — so a firmware
+// version change is the primary "rebooted" signal, with a down→up transition and an
+// overall timeout as fallbacks. The per-request abort keeps polling responsive while
+// the device is unreachable instead of hanging on a dead socket.
+function waitReboot(preVer){
+  var sawDown=false, started=Date.now();
+  (function probe(){
+    var ctl=('AbortController' in window)?new AbortController():null;
+    var to=ctl?setTimeout(function(){ctl.abort()},3000):null;
+    fetch('/status?ms='+Date.now(),{cache:'no-store',signal:ctl?ctl.signal:undefined})
+      .then(function(r){ if(!r.ok)throw 0; return r.json(); })
+      .then(function(o){ if(to)clearTimeout(to);
+        if((preVer&&o&&o.version&&o.version!==preVer)||sawDown){ location.reload(); return; }
+        next();
+      })
+      .catch(function(){ if(to)clearTimeout(to); sawDown=true; next(); });
+    function next(){
+      if(Date.now()-started>90000){ location.reload(); return; }   // safety net
+      setTimeout(probe,1000);
+    }
+  })();
 }
 
 /* ---------- boot ---------- */
