@@ -171,7 +171,7 @@ code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
     <div class="logo"><svg viewBox="0 0 24 24"><path d="M13 2 4 14h6l-1 8 9-12h-6l1-8z"/></svg></div>
     <div class="ttl">
       <h1>tesla-key-esp32</h1>
-      <div class="sub"><span class="verlink" id="verLink" onclick="otaCheck()" title="Tap to check for updates">&mdash;</span></div>
+      <div class="sub"><span id="ipline"></span><span class="verlink" id="verLink" onclick="otaCheck()" title="Tap to check for updates">&mdash;</span></div>
     </div>
   </header>
 
@@ -339,7 +339,6 @@ function render(s){
     var wbars=(w.rssi!=null)?barsHTML(w.rssi)+' ':'';
     var wparts=[];
     if(w.ssid) wparts.push(esc(w.ssid));
-    if(s.ip)   wparts.push(esc(s.ip));
     if(w.rssi!=null) wparts.push(w.rssi+' dBm');
     wc.className='cv ok';
     wc.innerHTML='<span>'+wbars+wparts.join(' · ')+'</span>';
@@ -421,7 +420,8 @@ function render(s){
   else if(mq.connected){ mc.className='cv ok'; mc.innerHTML='<span>'+esc(mq.broker||'')+'</span>'; }
   else { mc.className='cv warn'; mc.innerHTML='<span>'+esc(mq.broker||'')+' · disconnected</span>'; }
 
-  // firmware version (header, tap to check)
+  // header meta line: IP · version (IP first)
+  $("ipline").innerHTML = s.ip ? esc(s.ip)+'  ·  ' : '';
   var vl=$("verLink");
   vl.textContent='v'+(s.version||'?');
   vl.className='verlink'+(otaAvail?' acc':'');
