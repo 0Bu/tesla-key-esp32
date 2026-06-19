@@ -288,7 +288,7 @@ function stat(k,val,unit,acc){
 function chargeStats(v,charging){
   if(!v||!charging) return '';
   var c=[];
-  if(v.power>0) c.push(stat('Power',   Number(v.power).toFixed(1), 'kW', true));
+  if(v.power>0) c.push(stat('Power',   Math.round(v.power), 'kW', true));
   if(v.amps>0)  c.push(stat('Current', Math.round(v.amps),        'A',  true));
   return c.join('');
 }
