@@ -1,6 +1,6 @@
 ---
 name: project-review
-description: Comprehensive, whole-project coherence review of the tesla-key-esp32 firmware — finds bugs, inconsistencies (Ungereimtheiten), doc/code drift, config/build mismatches, and cross-cutting incoherence so docs, code, config and the build all agree and the project is correct. Use whenever the user asks to "review the project", "Projektreview", audit the repo, "prüfe Doku/Code auf Fehler/Ungereimtheiten", check that everything is consistent/coherent, or after a batch of changes to make sure nothing drifted. Reach for this even when they don't say "review" — any "is the whole thing still right/stimmig?" request fits.
+description: Comprehensive, whole-project coherence review of the tesla-key-esp32 firmware — finds bugs, inconsistencies, doc/code drift, config/build mismatches, and cross-cutting incoherence so docs, code, config and the build all agree and the project is correct. Use whenever the user asks to "review the project", "project review", audit the repo, "check docs/code for errors/inconsistencies", check that everything is consistent/coherent, or after a batch of changes to make sure nothing drifted. Reach for this even when they don't say "review" — any "is the whole thing still right/coherent?" request fits.
 ---
 
 # project-review — holistic coherence audit of tesla-key-esp32
@@ -127,7 +127,7 @@ Treat a violation of any of these as a real finding.
 
 ## Cross-cutting consistency (add X → also update Y)
 
-The most common "Ungereimtheit" is a feature that exists in code but not in all the places
+The most common inconsistency is a feature that exists in code but not in all the places
 that describe it. When reviewing a change (or the repo as a whole), check these links:
 
 - **New/changed HTTP endpoint** → `handle_all` dispatch **and** the API list in
