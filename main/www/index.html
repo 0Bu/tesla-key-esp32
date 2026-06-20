@@ -145,6 +145,7 @@ code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
   .crow .ck{width:100px; font-size:13px}
   .crow .cv{font-size:18px}
   .crow .cv .mac{font-size:15px}
+  .crow .cv .dbm{font-size:15px}
   .crow.tap{padding-right:28px}
   .bars{width:28px; height:18px}
 
@@ -191,11 +192,18 @@ code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
   background:none; border:0; border-top:1px solid var(--border); font:inherit; color:inherit; position:relative}
 .crow:first-child{border-top:0; padding-top:2px}
 .crow .ck{flex:none; width:80px; font-size:12px; font-weight:600; letter-spacing:.5px; text-transform:uppercase; color:var(--muted)}
-.crow .cv{flex:1; min-width:0; font-size:16px; display:flex; align-items:center; gap:7px; flex-wrap:wrap;
+.crow .cv{flex:1; min-width:0; font-size:16px; display:flex; align-items:center; gap:6px; flex-wrap:nowrap;
   font-variant-numeric:tabular-nums}
 .crow .cv.ok{color:var(--ok)} .crow .cv.warn{color:var(--warn)}
-.crow .cv .mac{font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:13.5px; letter-spacing:.2px}
+/* connection-row MAC is a touch smaller than the tile MAC so bars + dBm + the full
+   17-char address all fit one line on a phone (desktop bumps it back up to 15px) */
+.crow .cv .mac{font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12.5px; letter-spacing:.2px}
 .crow .cv .ph{color:var(--muted); font-weight:400}
+.crow .cv .bars{flex:none}
+/* signal reading (e.g. "-67 dBm") — compact, muted, never breaks internally */
+.crow .cv .dbm{flex:none; font-size:13px; font-weight:500; color:var(--muted); white-space:nowrap}
+/* SSID / MAC takes the rest; ellipsis (not wrap) is the narrow-phone fallback */
+.crow .cv .nm{flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
 .crow.tap{cursor:pointer; -webkit-tap-highlight-color:transparent; padding-right:24px}
 .crow.tap:active{background:var(--soft)}
 .crow .cedit{position:absolute; right:2px; top:50%; transform:translateY(-50%); width:15px; height:15px;
@@ -390,10 +398,11 @@ function render(s){
   var w=s.wifi||{}, wc=$("wifiConn");
   $("wifiLbl").textContent = w.std || 'Wi-Fi';   // standard sits in the label, e.g. "Wi-Fi 4"
   if(w.ssid||s.ip){
-    var wbars=(w.rssi!=null)?barsHTML(w.rssi)+' ':'';   // bars convey signal; dBm hidden (tooltip only)
-    var wtxt=w.ssid?esc(w.ssid):'';
+    var wbars=(w.rssi!=null)?barsHTML(w.rssi):'';                              // bars (signal glyph)
+    var wdbm=(w.rssi!=null)?'<span class="dbm">'+w.rssi+' dBm</span>':'';      // numeric reading
+    var wtxt=w.ssid?'<span class="nm">'+esc(w.ssid)+'</span>':'';
     wc.className='cv ok';
-    wc.innerHTML='<span>'+wbars+wtxt+'</span>';
+    wc.innerHTML=wbars+wdbm+wtxt;
   } else { wc.className='cv'; wc.innerHTML='<span class="ph">disconnected</span>'; }
 
   // re-pair notice — key was removed by the car and regenerated
@@ -455,9 +464,11 @@ function render(s){
   // bluetooth — link to the car
   var ble=s.ble||{}, bc=$("bleConn");
   if(linked){
-    var btxt=ble.addr?'<span class="mac">'+esc(ble.addr)+'</span>':'';   // bars convey signal; dBm hidden (tooltip only)
+    var bbars=(ble.rssi!=null)?barsHTML(ble.rssi):'';                          // bars (signal glyph)
+    var bdbm=(ble.rssi!=null)?'<span class="dbm">'+ble.rssi+' dBm</span>':'';  // numeric reading
+    var btxt=ble.addr?'<span class="nm mac">'+esc(ble.addr)+'</span>':'';
     bc.className='cv ok';
-    bc.innerHTML='<span>'+(ble.rssi!=null?barsHTML(ble.rssi)+' ':'')+btxt+'</span>';
+    bc.innerHTML=bbars+bdbm+btxt;
   } else if(ble.scanning){
     bc.className='cv'; bc.innerHTML='<span>Searching…</span>';
   } else {
