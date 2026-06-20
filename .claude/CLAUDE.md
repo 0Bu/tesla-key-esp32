@@ -125,12 +125,20 @@ grouped under one device. **Read-only by design** — no command topics are subs
 - **Topics:** `<base>/<node>/{charge,climate,drive,tires,closures,vehicle,device}` (retained
   JSON), availability/LWT `<base>/<node>/availability` (`online`/`offline`). Discovery
   configs under `<prefix>/<sensor|binary_sensor>/<node>/<object>/config` (retained).
-- **Entities:** charge (soc, charge_limit, power, amps, range, rate, charging_state),
-  climate (inside/outside/setpoint °C, on, preconditioning), drive (shift, odometer),
-  tires (fl/fr/rl/rr bar + warn), closures (locked/door/frunk/trunk/window/occupant),
-  sleep_state, and device diagnostics (wifi/ble RSSI, ble_link, paired, uptime, free_heap,
-  firmware). Numeric fields are emitted only when the car reported them (proto3 optional),
-  so an unseen value reads "unknown" in HA rather than a phantom 0.
+- **Entities:** charge (soc, charge_limit, power, amps, range **km**, rate **km/h**,
+  charging_state), climate (inside/outside/setpoint °C, on, preconditioning), drive (shift,
+  odometer km), tires (fl/fr/rl/rr bar + warn), closures (locked/door/frunk/trunk/window/
+  occupant), sleep_state, and device diagnostics (wifi/ble RSSI, ble_link, paired, **last
+  boot** (boot-time timestamp), free_heap, firmware). Numeric fields are emitted only when
+  the car reported them (proto3 optional), so an unseen value reads "unknown" in HA rather
+  than a phantom 0. **Units:** Tesla reports range/rate/odometer imperial; the MQTT bridge
+  converts to metric (km, km/h) — only the Tesla-compatible `/api` path keeps miles (evcc).
+- **sleep_state** is derived from telemetry *freshness* (last live contact < 60 s ⇒
+  `AWAKE`, else `ASLEEP`), mirroring the web UI — NOT the raw cached VCSEC string, which
+  only updates on a window-gated poll and would otherwise pin the entity on `AWAKE` forever
+  once the car sleeps. **last boot** is published as an ISO-8601 timestamp (device_class
+  `timestamp`) so HA shows an auto-scaling relative "x minutes/days ago" instead of a raw
+  seconds counter; only emitted once the wall clock is NTP-synced.
 - **Publishing:** a dedicated `mqtt_pub` task reads the thread-safe caches; on every
   (re)connect it (re)sends discovery + `online` + an immediate snapshot, then republishes
   state every interval. The same active-window gating that lets the car sleep applies to
