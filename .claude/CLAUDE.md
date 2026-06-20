@@ -136,10 +136,17 @@ grouped under one device. **Read-only by design** — no command topics are subs
   the car reported them (proto3 optional), so an unseen value reads "unknown" in HA rather
   than a phantom 0. **Units:** Tesla reports range/rate/odometer imperial; the MQTT bridge
   converts to metric (km, km/h) — only the Tesla-compatible `/api` path keeps miles (evcc).
-- **sleep_state** is derived from telemetry *freshness* (last live contact < 60 s ⇒
-  `AWAKE`, else `ASLEEP`), mirroring the web UI — NOT the raw cached VCSEC string, which
-  only updates on a window-gated poll and would otherwise pin the entity on `AWAKE` forever
-  once the car sleeps. **last boot** is published as an ISO-8601 timestamp (device_class
+- **sleep_state** comes from `VehicleController::link_state()` — the *single* source of truth
+  shared with the web UI so the two never drift — NOT the raw cached VCSEC string (which only
+  updates on a window-gated poll and would pin on `AWAKE` once the car sleeps). Three values:
+  `AWAKE` (fresh live telemetry, < 60 s), `ASLEEP` (no live data but the always-on VCSEC
+  health poll still answers ⇒ parked & sleeping nearby), and `UNREACHABLE` (the car answers
+  *nothing* over BLE ⇒ driven off / out of range / deep sleep — published explicitly instead
+  of a phantom `ASLEEP`; nothing heard since boot/re-pair ⇒ omitted so HA shows "unknown").
+  The web UI mirrors this exactly: it hides the hero card entirely when `UNREACHABLE` (no
+  honest status to show) rather than claiming the car is asleep. Reachability is tracked by a
+  `last_reachable_ticks_` clock stamped on every successful signed round-trip, incl. the idle
+  health poll. **last boot** is published as an ISO-8601 timestamp (device_class
   `timestamp`) so HA shows an auto-scaling relative "x minutes/days ago" instead of a raw
   seconds counter; only emitted once the wall clock is NTP-synced.
 - **Publishing:** a dedicated `mqtt_pub` task reads the thread-safe caches; on every

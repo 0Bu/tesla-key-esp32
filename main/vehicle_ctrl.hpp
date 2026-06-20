@@ -124,6 +124,28 @@ public:
         return true;
     }
 
+    // Seconds since the car was last REACHABLE over BLE (any successful signed round-trip,
+    // incl. the idle VCSEC health poll). Returns false if never reached since boot / re-pair.
+    // Unlike seconds_since_contact this keeps refreshing while the car only sleeps nearby
+    // (the health poll still answers), so a stale value means genuinely unreachable.
+    bool seconds_since_reachable(uint32_t& out) const {
+        uint32_t t = last_reachable_ticks_.load();
+        if (t == 0) return false;
+        out = (xTaskGetTickCount() - t) / configTICK_RATE_HZ;
+        return true;
+    }
+
+    // Single source of truth for the car's high-level connectivity, shared by the web UI
+    // and the MQTT/HA bridge so the two never drift:
+    //   Awake       — fresh live infotainment telemetry (we have current data).
+    //   Asleep      — no live data, but the car still answers the VCSEC health poll →
+    //                 parked & sleeping nearby (body controller reachable).
+    //   Unreachable — the car answers nothing over BLE → driven off / out of range /
+    //                 deep sleep. We genuinely do not know its state.
+    //   Unknown     — nothing heard at all since boot / re-pair (nothing to show yet).
+    enum class LinkState { Unknown, Awake, Asleep, Unreachable };
+    LinkState link_state() const;
+
     bool generate_key();
     // Always enrolls a Charging Manager key (charging + wake only); never an owner key.
     bool pair(int timeout_ms = 30000);
@@ -308,7 +330,17 @@ private:
     // Stamped from the cache callbacks (BLE RX task); read by the HTTP task. atomic so no
     // lock is needed. 0 = nothing received yet. Cleared on a pairing reset.
     std::atomic<uint32_t> last_contact_ticks_{0};
-    void note_contact_() { last_contact_ticks_.store(xTaskGetTickCount()); }
+    // Uptime tick of the last time the car was confirmed REACHABLE over BLE — any successful
+    // signed round-trip, including the idle VCSEC health poll that keeps answering while the
+    // car merely sleeps nearby (the body controller is always on). This is what tells a
+    // parked, sleeping car (reachable) apart from one that has driven off / is out of range
+    // (unreachable) — telemetry freshness alone cannot, since both stop the live polls.
+    // See link_state(). 0 = never reached yet; cleared on a pairing reset.
+    std::atomic<uint32_t> last_reachable_ticks_{0};
+    // Live data implies the car is reachable, so stamp both clocks together.
+    void note_contact_()   { uint32_t t = xTaskGetTickCount(); last_contact_ticks_.store(t);
+                                                               last_reachable_ticks_.store(t); }
+    void note_reachable_() { last_reachable_ticks_.store(xTaskGetTickCount()); }
 
     // Cached results for non-blocking UI access
     ChargeStateResult   last_known_charge_{};
