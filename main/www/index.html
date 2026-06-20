@@ -631,7 +631,7 @@ function otaInlineClear(delay){ setTimeout(function(){ otaInline(''); }, delay||
 function otaCheck(){
   if(otaBusy) return;              // a check/update is already running
   otaBusy=true;
-  otaInline(otaMiniRing(0,true,'currentColor')+'<span>checking…</span>');
+  otaInline(otaMiniRing(0,true,'currentColor'));   // checking — spinning ring only, no label
   fetch('/ota/check?ms='+Date.now()).then(otaCheckPoll).catch(function(){ otaBusy=false; otaInline('<span>check failed</span>','err'); otaInlineClear(4000); });
 }
 function otaCheckPoll(){
@@ -645,7 +645,7 @@ function otaCheckPoll(){
       if(confirm('New version '+(o.available||'')+' available — update now?\n\nYou’re on v'+(o.current||'')+'. The device downloads the firmware and reboots when done.')){
         otaInline(otaMiniRing(0,true,'currentColor')+'<span>starting…</span>');
         fetch('/ota/update',{method:'POST'}).then(otaPoll).catch(function(){otaPoll()});
-      } else { otaBusy=false; }
+      } else { otaAvail=null; if(state)render(state); otaBusy=false; }   // cancelled → version back to grey
     } else {
       otaAvail=null; if(state)render(state); otaBusy=false;
       otaInline('<span>up to date</span>','acc'); otaInlineClear(3500);
