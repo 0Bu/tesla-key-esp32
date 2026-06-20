@@ -9,7 +9,6 @@
 // WRAPS: once full, the oldest bytes are overwritten, so it always holds the most
 // recent output — best for watching an event happen live. Reboot or ?clear=1 resets it.
 void        diag_log_init();          // install the esp_log capture hook (call early)
-std::string diag_log_dump();          // boot→newest captured output (allocates the whole log)
 
 // Stream the captured log to a sink WITHOUT building one big std::string. Dumping the
 // whole buffer as a single contiguous allocation could throw std::bad_alloc when it

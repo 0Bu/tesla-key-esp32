@@ -517,7 +517,7 @@ void VehicleController::loop_task_fn_(void* arg) {
 
         // Falling edge: window just closed → drop the link once so the car can sleep.
         if (paired && prev_window && !window && self->ble_connected()) {
-            ESP_LOGI(TAG, "idle: no command/charging/awake — dropping BLE link so the car can sleep");
+            ESP_LOGI(TAG, "idle: no command and not charging — dropping BLE link so the car can sleep");
             self->ble_->disconnect();
         }
         // Rising edge: window just opened → refresh the cache promptly (reset throttles).
@@ -827,10 +827,12 @@ bool VehicleController::get_charge_state(ChargeStateResult& out, int /*timeout_m
     // Serve the cached reading instantly and never block. evcc polls vehicle_data
     // frequently and times out quickly, so an on-demand connect + poll here would risk a
     // gateway timeout (HTTP 502). Freshness is maintained out of band by loop_task, but ONLY
-    // while the active window is open (a recent command, charging, or the car observed
-    // awake) — see loop_task_fn_. A parked, idle car is deliberately left to sleep, so this
-    // serves the last value (which heals within seconds of any evcc command or the car
-    // waking). If we have never gotten a reading yet, the caller emits a zeroed charge_state.
+    // while the active window is open (a recent command OR the car charging) — see
+    // loop_task_fn_. We deliberately do NOT open the window merely because the car is observed
+    // awake: that is self-perpetuating (our polling would keep the MCU awake), so a parked,
+    // idle car is left to sleep and this serves the last value (which heals within seconds of
+    // any evcc command). If we have never gotten a reading yet, the caller emits a zeroed
+    // charge_state.
     MutexGuard g(cache_mutex_);
     if (last_known_charge_.valid) {
         out = last_known_charge_;
