@@ -180,6 +180,15 @@ public:
         return config_store_ ? config_store_->save_str(key, value) : false;
     }
 
+    // Read a runtime-config string back from the config store (empty if unset). Used by
+    // the web UI to compare a submitted value against what is already persisted, so an
+    // unchanged setting is neither rewritten to NVS nor allowed to trigger a reboot.
+    std::string load_config_str(const char* key) const {
+        std::string out;
+        if (config_store_) config_store_->load_str(key, out);
+        return out;
+    }
+
     // Cache the last-known wall clock (epoch seconds). The device has no
     // battery-backed RTC and deliberately makes no NTP call; the browser sets the
     // clock via POST /set_time and we persist it so a headless reboot (evcc only,
