@@ -600,6 +600,10 @@ VehicleController::ResultCb VehicleController::make_result_cb_() {
             // A good response proves the car still trusts our key — clear any pending
             // "key might be gone" streak so a later one-off glitch starts from zero.
             auth_fail_streak_ = 0;
+            // It also proves the car is reachable over BLE right now (this fires for the
+            // idle VCSEC health poll too), which keeps link_state() out of "Unreachable"
+            // while the car merely sleeps nearby. NO_WAKE polls don't update note_contact_.
+            note_reachable_();
         }
         if (result.is_failure() && result.error()) {
             const std::string& msg = result.error()->message();
@@ -880,6 +884,7 @@ bool VehicleController::get_vehicle_status(VehicleStatusResult& out, int timeout
     xSemaphoreGive(vehicle_mutex_);
     out = pending_status_;
     if (ok && out.valid) {
+        note_reachable_();  // car answered a VCSEC status read ⇒ reachable over BLE right now
         MutexGuard cache_guard(cache_mutex_);
         last_known_status_ = out;
     }
@@ -948,8 +953,34 @@ void VehicleController::clear_session_and_cache_() {
         last_known_tires_    = {};
         last_known_closures_ = {};
     }
-    last_contact_ticks_.store(0);  // no live data anymore → "asleep" card has nothing to show
+    last_contact_ticks_.store(0);    // no live data anymore → "asleep" card has nothing to show
+    last_reachable_ticks_.store(0);  // and no proven reachability → link_state() back to Unknown
     ESP_LOGI(TAG, "pairing/session cleared");
+}
+
+// Derived connectivity state — see the enum doc in vehicle_ctrl.hpp. Centralised here so
+// the web UI (/status) and the MQTT/HA bridge consume one consistent answer.
+//   kAwakeMaxAgeS     mirrors the old per-file thresholds (charge polls refresh contact
+//                     every ~10 s while the window is open, so 60 s won't flap).
+//   kReachableMaxAgeS must span TWO full idle health-probe cycles incl. one missed probe so a
+//                     transient miss never flaps a sleeping-NEARBY car to Unreachable (which
+//                     would wrongly hide the web-UI hero / publish a phantom "UNREACHABLE").
+//                     The idle reachability stamp comes only from auto_pair_task's health
+//                     probe, whose cycle is its 30 s post-probe wait + a VCSEC scan/connect
+//                     (≤10 s, ensure_connected_) + round-trip (≤8 s, health_probe_) ≈ 40-48 s;
+//                     a failed probe on the flaky link to a sleeping car adds another ~30 s
+//                     wait + timeout. 150 s clears two such cycles with margin while a
+//                     genuinely-gone car still flips to Unreachable in ~2.5 min.
+VehicleController::LinkState VehicleController::link_state() const {
+    static constexpr uint32_t kAwakeMaxAgeS     = 60;
+    static constexpr uint32_t kReachableMaxAgeS = 150;
+    uint32_t age = 0;
+    if (seconds_since_contact(age)   && age < kAwakeMaxAgeS)     return LinkState::Awake;
+    if (seconds_since_reachable(age) && age < kReachableMaxAgeS) return LinkState::Asleep;
+    // Heard something at some point but it's now stale ⇒ unreachable; never heard ⇒ unknown.
+    if (last_reachable_ticks_.load() != 0 || last_contact_ticks_.load() != 0)
+        return LinkState::Unreachable;
+    return LinkState::Unknown;
 }
 
 bool VehicleController::reset_for_new_vehicle() {
