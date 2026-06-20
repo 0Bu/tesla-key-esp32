@@ -5,6 +5,7 @@
 #include <atomic>
 #include <string>
 #include <cstring>
+#include <ctime>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -64,7 +65,7 @@ static const Entry ENTRIES[] = {
     { D_CHARGE,  "sensor",        "charger_power",  "Charger power",        "power",          "power",     "kW",  "measurement", nullptr,      false },
     { D_CHARGE,  "sensor",        "charging_amps",  "Charging current",    "amps",           "current",   "A",   "measurement", nullptr,      false },
     { D_CHARGE,  "sensor",        "range",          "Range",               "range",          "distance",  "km",  "measurement", nullptr,      false },
-    { D_CHARGE,  "sensor",        "charge_rate",    "Charge rate",         "rate",           nullptr,     nullptr,"measurement",nullptr,      false },
+    { D_CHARGE,  "sensor",        "charge_rate",    "Charge rate",         "rate",           nullptr,     "km/h","measurement",nullptr,      false },
     { D_CHARGE,  "sensor",        "charging_state", "Charging state",      "charging_state", nullptr,     nullptr,nullptr,      nullptr,      false },
 
     // ── Climate (climate_state cache) ────────────────────────────────────────
@@ -101,7 +102,7 @@ static const Entry ENTRIES[] = {
     { D_DEVICE,  "sensor",        "ble_rssi",       "BLE signal",          "ble_rssi",       "signal_strength","dBm","measurement","diagnostic", false },
     { D_DEVICE,  "binary_sensor", "ble_link",       "BLE link",            "ble_connected",  "connectivity",nullptr,nullptr,    "diagnostic", true  },
     { D_DEVICE,  "binary_sensor", "paired",         "Paired",              "paired",         "connectivity",nullptr,nullptr,    "diagnostic", true  },
-    { D_DEVICE,  "sensor",        "uptime",         "Uptime",              "uptime",         "duration",  "s",   "total_increasing","diagnostic", false },
+    { D_DEVICE,  "sensor",        "uptime",         "Last boot",           "boot_time",      "timestamp", nullptr,nullptr,      "diagnostic", false },
     { D_DEVICE,  "sensor",        "free_heap",      "Free heap",           "free_heap",      "data_size", "B",   "measurement", "diagnostic", false },
     { D_DEVICE,  "sensor",        "firmware",       "Firmware",            "version",        nullptr,     nullptr,nullptr,      "diagnostic", false },
 };
@@ -181,6 +182,11 @@ static void publish_discovery() {
     ESP_LOGI(TAG, "published %d HA-discovery configs under %s/", (int)(sizeof(ENTRIES)/sizeof(ENTRIES[0])), s_prefix.c_str());
 }
 
+// Max age (s) of the last live telemetry for the car to still count as AWAKE — mirrors
+// the web UI's kLiveDataMaxAgeS (http_server.cpp). Charge polls refresh contact every
+// ~10 s while the window is open, so 60 s is well clear of the cadence and won't flap.
+static constexpr uint32_t kAwakeMaxAgeS = 60;
+
 // ─── State publish ────────────────────────────────────────────────────────────
 // Each domain is published only when its cache is valid, and each numeric field
 // only when the car actually reported it (proto3-optional presence flags) — so a
@@ -197,8 +203,10 @@ static void publish_state() {
             cJSON_AddNumberToObject(o, "charge_limit", cs.charge_limit_soc);
             cJSON_AddNumberToObject(o, "power",        cs.charger_power);
             cJSON_AddNumberToObject(o, "amps",         cs.charging_amps);
-            cJSON_AddNumberToObject(o, "range",        cs.battery_range);
-            cJSON_AddNumberToObject(o, "rate",         cs.charge_rate);
+            // Tesla reports these imperial; convert to metric for HA (the Tesla-compatible
+            // /api path keeps miles for evcc). range: miles → km, rate: mph → km/h.
+            cJSON_AddNumberToObject(o, "range",        cs.battery_range * 1.609344);
+            cJSON_AddNumberToObject(o, "rate",         cs.charge_rate   * 1.609344);
             if (!cs.charging_state.empty())
                 cJSON_AddStringToObject(o, "charging_state", cs.charging_state.c_str());
             pub_json(s_topic[D_CHARGE], o);
@@ -254,12 +262,16 @@ static void publish_state() {
             pub_json(s_topic[D_CLOSURES], o);
         }
     }
-    // Vehicle status (best-effort: refreshed by evcc body_controller_state polls)
+    // Vehicle sleep state — derived from telemetry FRESHNESS, not the raw cached VCSEC
+    // string. The VCSEC sleep_status only updates on a successful (active-window-gated)
+    // poll, so a sleeping car — which we deliberately stop polling — would pin it on the
+    // last "AWAKE" forever. Mirror the web UI: live data within the window ⇒ AWAKE, else
+    // ASLEEP. No contact since boot ⇒ omit (HA shows "unknown").
     {
-        VehicleStatusResult vs = s_vehicle->get_cached_status();
-        if (vs.valid && !vs.sleep_status.empty()) {
+        uint32_t age = 0;
+        if (s_vehicle->seconds_since_contact(age)) {
             cJSON* o = cJSON_CreateObject();
-            cJSON_AddStringToObject(o, "sleep_status", vs.sleep_status.c_str());
+            cJSON_AddStringToObject(o, "sleep_status", age < kAwakeMaxAgeS ? "AWAKE" : "ASLEEP");
             pub_json(s_topic[D_VEHICLE], o);
         }
     }
@@ -273,7 +285,19 @@ static void publish_state() {
         int8_t r = 0;
         if (s_vehicle->ble_rssi(r)) cJSON_AddNumberToObject(o, "ble_rssi", r);
         cJSON_AddBoolToObject(o,   "paired",    s_vehicle->has_session());
-        cJSON_AddNumberToObject(o, "uptime",    (double)(esp_timer_get_time() / 1000000));
+        // Boot time as an ISO-8601 timestamp → HA renders it as auto-scaling relative
+        // time ("8 minutes ago" → "2 days ago"), so it's human-readable and each reboot
+        // shows as a step change. Only emit once the wall clock is plausibly NTP-synced
+        // (else the absolute time would be wrong); cached so it stays stable per boot.
+        static time_t s_boot_epoch = 0;
+        time_t now_ = time(nullptr);
+        if (s_boot_epoch == 0 && now_ > 1600000000)
+            s_boot_epoch = now_ - (time_t)(esp_timer_get_time() / 1000000);
+        if (s_boot_epoch > 0) {
+            struct tm tmv; gmtime_r(&s_boot_epoch, &tmv);
+            char ts[32]; strftime(ts, sizeof(ts), "%Y-%m-%dT%H:%M:%S+00:00", &tmv);
+            cJSON_AddStringToObject(o, "boot_time", ts);
+        }
         cJSON_AddNumberToObject(o, "free_heap", (double)esp_get_free_heap_size());
         cJSON_AddStringToObject(o, "version",   esp_app_get_description()->version);
         pub_json(s_topic[D_DEVICE], o);
