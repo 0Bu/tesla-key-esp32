@@ -600,10 +600,11 @@ static esp_err_t handle_diag(httpd_req_t* req) {
     httpd_resp_set_type(req, "text/plain; charset=utf-8");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     httpd_resp_set_hdr(req, "X-Diag-Verbose", diag_verbose() ? "1" : "0");
-    // Stream the ~48 KB log straight from its static buffer in (at most) two chunks.
-    // Building one big std::string here used to throw std::bad_alloc on a fragmented
-    // heap (largest free block ~31 KB < 48 KB) → uncaught in the httpd task → abort()
-    // → reboot. Chunked send needs no large contiguous allocation.
+    // Stream the log straight from its static buffer in (at most) two chunks. Building one
+    // big std::string here used to throw std::bad_alloc when the whole buffer exceeded the
+    // largest contiguous free block on a fragmented heap → uncaught in the httpd task →
+    // abort() → reboot. Chunked send needs no large contiguous allocation, so /diag is safe
+    // regardless of buffer size or fragmentation.
     diag_log_dump_chunks([req](const char* p, size_t n) {
         return n == 0 || httpd_resp_send_chunk(req, p, n) == ESP_OK;
     });
