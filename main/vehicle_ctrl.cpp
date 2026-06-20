@@ -468,10 +468,11 @@ void VehicleController::loop_task_fn_(void* arg) {
             if (self->ble_connected()) self->ble_->disconnect();
         }
 
-        // Heap watch (temporary, for the crash hunt): log free heap + LARGEST contiguous
-        // block every ~30 s. The /diag dump allocates a ~48 KB std::string in one shot; if the
-        // largest block trends below that (fragmentation from BLE rx-buffer churn) a later big
-        // alloc throws std::bad_alloc → uncaught → abort(). This makes the trend visible.
+        // Heap watch: log free heap + LARGEST contiguous free block every ~30 s. The largest
+        // block (not total free) is what bounds big allocations; it can fall to a few tens of KB
+        // under BLE rx-buffer churn, so a large contiguous alloc would throw std::bad_alloc →
+        // uncaught → abort(). This keeps the trend visible. (/diag itself streams and no longer
+        // allocates the whole log; the HTTP handler guard catches anything else.)
         static uint32_t last_heap_log = 0;
         uint32_t hb_now = xTaskGetTickCount();
         if (hb_now - last_heap_log > pdMS_TO_TICKS(30000)) {
