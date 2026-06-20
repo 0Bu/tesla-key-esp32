@@ -42,7 +42,6 @@ code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
 .ttl .sub .verlink,.ttl .sub .otastat{flex:none}
 .verlink{cursor:pointer; white-space:nowrap}
 .verlink:hover{color:var(--fg); text-decoration:underline}
-.verlink.acc{color:var(--accent); font-weight:600}
 /* inline OTA progress in the meta line (ring + status text), replaces the bottom popup */
 .otastat{display:inline-flex; align-items:center; gap:5px; margin-left:9px; white-space:nowrap; color:var(--muted)}
 .otastat:empty{display:none}
@@ -491,10 +490,10 @@ function render(s){
   else { mc.className='cv warn'; mc.innerHTML='<span>'+esc(mq.broker||'')+' · disconnected</span>'; }
 
   // header meta line: IP · version (IP first)
-  $("ipline").innerHTML = s.ip ? esc(s.ip)+'  ·  ' : '';
+  $("ipline").innerHTML = s.ip ? esc(s.ip)+'&nbsp;·&nbsp;' : '';   // nbsp: overflow:hidden trims plain trailing spaces
   var vl=$("verLink");
   vl.textContent='v'+(s.version||'?');
-  vl.className='verlink'+(otaAvail?' acc':'');
+  vl.className='verlink';   // always grey — never the accent-red highlight
   vl.title=otaAvail?('Update '+otaAvail+' available — tap to install'):'Tap to check for updates';
 
   // key
