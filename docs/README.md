@@ -32,7 +32,7 @@ ESP-IDF 5.0.1+.
 # Toolchain (once)
 mkdir -p ~/esp && cd ~/esp
 git clone --recursive https://github.com/espressif/esp-idf.git
-cd esp-idf && git checkout v5.3.2 && ./install.sh esp32s3
+cd esp-idf && git checkout v5.5.4 && ./install.sh esp32s3   # the version CI builds with
 echo 'alias get_idf=". ~/esp/esp-idf/export.sh"' >> ~/.zshrc
 
 # Per shell
@@ -117,6 +117,10 @@ POST /api/1/vehicles/{VIN}/command/{command}   Content-Type: application/json
 | `auto_conditioning_start` / `auto_conditioning_stop` | — |
 | `set_scheduled_charging` | `{"enable": true, "start_minutes": 1380}` (minutes after local midnight; 1380 = 23:00) |
 
+> `door_lock` / `door_unlock` are accepted by the API but **rejected by the car for the
+> Charging-Manager role** — they exist for API completeness; the enrolled key cannot actually
+> (un)lock the car (see [Security](#security)).
+
 ```json
 { "response": { "result": true, "command": "charge_start",
   "vin": "5YJ3E1EA1JF000001", "reason": "command executed successfully" } }
@@ -158,9 +162,11 @@ GET  /status               { vin, ip, version, key_present, key_fingerprint,
                              ble:{connected,scanning,rssi,addr | devices:[{addr,name,rssi}]},
                              vehicle:{soc,status,power,amps} (when connected, cached),
                              mqtt:{configured,connected,broker} (HA bridge),
-                             tele:{climate,drive,tires,closures} (read-only telemetry) }
+                             tele:{climate,drive,tires,closures} (read-only telemetry),
+                             last:{soc,status} (last-known snapshot for the asleep card),
+                             last_seen_s (seconds since last contact) }
 POST /scan                 Time-limited BLE discovery scan (populates ble.devices)
-GET  /diag[?verbose=1][?clear=1]   Plain-text in-memory diag log
+GET  /diag[?verbose=0|1][?clear=1]   Plain-text in-memory diag log (verbose=0 turns raw-RX logging back off)
 POST /gen_keys[?force=1]   Generate ECDSA P-256 key (refuses overwrite without force)
 POST /send_key             Manually trigger pairing (charging_manager only; normally automatic)
 POST /set_vin              Persist VIN and reboot
@@ -171,7 +177,7 @@ GET  /ota/check[?ms=<epoch>]   Start a background update check (then poll /ota/s
 POST /ota/update           Start the background self-update (downloads, then reboots)
 GET  /ota/status           Poll OTA progress { state, progress, message, available,
                              update_available, current }
-GET  /api/proxy/1/version  Firmware version
+GET  /api/proxy/1/version  { version, platform } (firmware version + "ESP32-S3")
 ```
 
 ## evcc Integration

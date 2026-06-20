@@ -41,7 +41,7 @@ jobs:
           if [ -z "$before" ] || ! git cat-file -e "${before}^{commit}" 2>/dev/null; then
             changed=yes   # first push / unknown base → release to be safe
           elif git diff --name-only "$before" "${{ github.sha }}" \
-               | grep -qE '^(main/|CMakeLists\.txt$|sdkconfig$|sdkconfig\.defaults$|partitions\.csv$|dependencies\.lock$|version\.txt$|\.github/workflows/build\.yml$)'; then
+               | grep -qE '^(main/|CMakeLists\.txt$|sdkconfig\.defaults$|partitions\.csv$|version\.txt$|\.github/workflows/build\.yml$)'; then
             changed=yes
           else
             changed=no

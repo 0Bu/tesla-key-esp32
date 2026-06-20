@@ -155,8 +155,8 @@ static esp_err_t handle_command(httpd_req_t* req) {
         int amps = 0;
         if (json) {
             cJSON* j = cJSON_GetObjectItemCaseSensitive(json, "charging_amps");
-            if (j) amps = (int)(cJSON_IsNumber(j) ? j->valuedouble
-                                                   : atof(j->valuestring));
+            if (cJSON_IsNumber(j))                        amps = (int)j->valuedouble;
+            else if (cJSON_IsString(j) && j->valuestring) amps = atoi(j->valuestring);
         }
         ok = g_vehicle->set_charging_amps(amps);
     }
@@ -164,8 +164,8 @@ static esp_err_t handle_command(httpd_req_t* req) {
         int pct = 80;
         if (json) {
             cJSON* j = cJSON_GetObjectItemCaseSensitive(json, "percent");
-            if (j) pct = (int)(cJSON_IsNumber(j) ? j->valuedouble
-                                                  : atof(j->valuestring));
+            if (cJSON_IsNumber(j))                        pct = (int)j->valuedouble;
+            else if (cJSON_IsString(j) && j->valuestring) pct = atoi(j->valuestring);
         }
         ok = g_vehicle->set_charge_limit(pct);
     }
@@ -185,7 +185,8 @@ static esp_err_t handle_command(httpd_req_t* req) {
             cJSON* je = cJSON_GetObjectItemCaseSensitive(json, "enable");
             if (je) enable = cJSON_IsTrue(je);
             cJSON* jm = cJSON_GetObjectItemCaseSensitive(json, "start_minutes");
-            if (jm) start = (int)(cJSON_IsNumber(jm) ? jm->valuedouble : atof(jm->valuestring));
+            if (cJSON_IsNumber(jm))                         start = (int)jm->valuedouble;
+            else if (cJSON_IsString(jm) && jm->valuestring) start = atoi(jm->valuestring);
         }
         ok = g_vehicle->set_scheduled_charging(enable, start);
     }

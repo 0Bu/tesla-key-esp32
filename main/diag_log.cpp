@@ -54,22 +54,6 @@ void diag_log_init() {
     s_prev = esp_log_set_vprintf(diag_vprintf_);
 }
 
-std::string diag_log_dump() {
-    std::string out;
-    if (!s_mtx) return out;
-    xSemaphoreTake(s_mtx, portMAX_DELAY);
-    if (s_wrapped) {
-        // Oldest bytes first (from the write head to the end), then the wrapped tail.
-        // The line straddling the wrap point may be split; acceptable for a debug log.
-        out.append(s_buf + s_head, DIAG_CAP - s_head);
-        out.append(s_buf, s_head);
-    } else {
-        out.append(s_buf, s_head);
-    }
-    xSemaphoreGive(s_mtx);
-    return out;
-}
-
 void diag_log_dump_chunks(const std::function<bool(const char*, size_t)>& sink) {
     if (!s_mtx) return;
     // Hold the mutex for the whole send so a concurrent writer can't shift s_head

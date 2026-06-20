@@ -378,8 +378,8 @@ void mqtt_ha_start(VehicleController& vehicle, NvsStorageAdapter& config_store) 
     s_broker_disp = broker_display(s_uri);
     s_configured = true;
 
-    s_user   = CONFIG_TESLA_MQTT_USERNAME;   config_store.load_str("mqtt_user", s_user);
-    s_pass   = CONFIG_TESLA_MQTT_PASSWORD;   config_store.load_str("mqtt_pass", s_pass);
+    s_user   = CONFIG_TESLA_MQTT_USERNAME;
+    s_pass   = CONFIG_TESLA_MQTT_PASSWORD;
     s_prefix = CONFIG_TESLA_MQTT_DISCOVERY_PREFIX;
     s_interval_s = CONFIG_TESLA_MQTT_PUBLISH_INTERVAL_S;
     if (s_interval_s < 5) s_interval_s = 5;

@@ -38,13 +38,14 @@ Never edit files in `managed_components/` — they are regenerated.
 
 | Namespace   | Content                                     |
 |-------------|---------------------------------------------|
-| `tesla_cfg` | WiFi SSID/pass, VIN, BLE MAC (runtime cfg)  |
-| `tesla_ble` | Private key, VCSEC session, Info session    |
+| `tesla_cfg` | WiFi SSID/pass, VIN, BLE MAC, `mqtt_uri`, `last_time` (runtime cfg) |
+| `tesla_ble` | Private key, VCSEC session, Info session, `key_created`, `paired_at` |
 
 ## Commands Implemented
 
 All commands: `charge_start`, `charge_stop`, `set_charging_amps`, `set_charge_limit`,
-`wake_up`, `charge_port_door_open/close`, `door_lock/unlock`, `flash_lights`,
+`wake_up`, `charge_port_door_open/close`, `door_lock/unlock` (sent but rejected by the car
+for the Charging-Manager role — present for API completeness), `flash_lights`,
 `honk_horn`, `set_sentry_mode`, `auto_conditioning_start/stop`,
 `set_scheduled_charging` (`{"enable":bool,"start_minutes":int}` — minutes after local
 midnight; daily charge start time. Scheduled *departure* is not exposed: the tesla-ble
@@ -55,11 +56,13 @@ version in use registers no builder for `scheduledDepartureAction`).
 A rotating background poll in `loop_task_fn_` (one domain per ~12 s cycle: climate →
 drive → tires → closures, full set ~48 s) refreshes per-domain caches via the
 `set_*_state_callback` hooks in `vehicle_ctrl.cpp`. All polls are `NO_WAKE_SKIP`
-(read-only, never wake the car) and feed the web UI only — evcc/pairing are unaffected.
-Exposed under `tele` in `/status`: `climate` (inside/outside/setpoint °C, on,
+(read-only, never wake the car) and feed the MQTT/HA bridge — evcc/pairing are unaffected.
+Exposed under `tele` in `/status` (for the HA bridge and diagnostics; the device's own web
+UI is charge/SOC-only and does not render these): `climate` (inside/outside/setpoint °C, on,
 preconditioning), `drive` (shift, odometer_km), `tires` (fl/fr/rl/rr bar + warn),
 `closures` (locked, door/frunk/trunk/window open, occupant). Numeric fields are emitted
-only when the car reported them (proto3 optional) so the UI renders "—" otherwise.
+only when the car reported them (proto3 optional) so Home Assistant shows "—"/unknown
+otherwise.
 
 ## HTTP API
 
@@ -69,16 +72,16 @@ GET  /api/1/vehicles/{VIN}/vehicle_data        # charge state
 GET  /api/1/vehicles/{VIN}/body_controller_state
 GET  /status                                   # web-UI JSON (wifi, ble, mqtt, vehicle cache, read-only telemetry under "tele")
 POST /scan                                     # start a time-limited BLE discovery scan
-GET  /diag                                     # plain-text in-memory diag log (?verbose=1 raw RX, ?clear=1 reset)
+GET  /diag                                     # plain-text in-memory diag log (?verbose=1 raw RX / ?verbose=0 off, ?clear=1 reset)
 POST /gen_keys[?force=1]                       # generate key (refuses overwrite w/o force)
 POST /send_key                                 # pair with vehicle (Charging Manager only)
 POST /set_time                                 # set wall clock from the browser ({"ms":<epoch>}); fallback when NTP unreachable
 POST /set_vin                                  # persist VIN + reboot
 POST /set_mqtt                                 # persist MQTT broker (HA bridge) + reboot ({"broker":"host:port"}; "" disables)
-GET  /api/proxy/1/version
+GET  /api/proxy/1/version                      # {version, platform:"ESP32-S3"}
 GET  /ota/check[?ms=<epoch>]                   # start background manifest check (non-blocking); poll /ota/status. ms = browser-clock NTP fallback
 POST /ota/update                               # start background self-update (pull, then reboot)
-GET  /ota/status                               # poll OTA progress {state,progress,message,available}
+GET  /ota/status                               # poll OTA progress {state,progress,message,available,update_available,current}
 ```
 
 No HTTP auth / TLS by design (evcc cannot send credentials) — trusted LAN only. See docs/SECURITY.md.
