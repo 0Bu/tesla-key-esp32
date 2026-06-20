@@ -530,9 +530,14 @@ function editVin(){
   var v=prompt('Tesla VIN (17 characters):',cur); if(v==null)return;
   v=v.trim().toUpperCase();
   if(!vinValid(v)){ toast('Invalid VIN — must be 17 characters','err'); return; }
-  toast('Saving VIN — device will reboot…','info');
+  if(v===(state&&state.vin)){ toast('VIN unchanged','info'); return; }
+  toast('Saving VIN…','info');
   fetch('/set_vin',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({vin:v})})
-    .then(function(){toast('VIN saved · rebooting','ok')})
+    .then(function(r){return r.json()})
+    .then(function(j){var o=(j&&j.response)||{};
+      if(!o.result){ toast(o.reason||'Failed to save VIN','err'); return; }
+      if(/no reboot|unchanged/i.test(o.reason||'')){ toast('VIN unchanged','info'); return; }
+      toast('VIN saved · rebooting','ok');})
     .catch(function(){toast('Saved — device rebooting','info')});
 }
 function editMqtt(){
@@ -541,9 +546,14 @@ function editMqtt(){
   if(v==null) return;
   v=v.trim();
   if(v && v.indexOf(' ')>=0){ toast('Invalid broker — use IP:PORT','err'); return; }
-  toast((v?'Saving MQTT broker':'Disabling MQTT')+' — device will reboot…','info');
+  if(v===cur){ toast(v?'MQTT broker unchanged':'MQTT already disabled','info'); return; }
+  toast(v?'Saving MQTT broker…':'Disabling MQTT…','info');
   fetch('/set_mqtt',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({broker:v})})
-    .then(function(){toast('Saved · rebooting','ok')})
+    .then(function(r){return r.json()})
+    .then(function(j){var o=(j&&j.response)||{};
+      if(!o.result){ toast(o.reason||'Failed to save MQTT broker','err'); return; }
+      if(/no reboot|unchanged|already/i.test(o.reason||'')){ toast(v?'MQTT broker unchanged':'MQTT already disabled','info'); return; }
+      toast('Saved · rebooting','ok');})
     .catch(function(){toast('Saved — device rebooting','info')});
 }
 function wakeStop(){ waking=false; clearTimeout(wakeTimeout); }

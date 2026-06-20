@@ -14,6 +14,8 @@
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
+#include <cctype>
+#include <string>
 #include <sys/time.h>
 #include <exception>
 
@@ -598,10 +600,11 @@ static esp_err_t handle_diag(httpd_req_t* req) {
     httpd_resp_set_type(req, "text/plain; charset=utf-8");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     httpd_resp_set_hdr(req, "X-Diag-Verbose", diag_verbose() ? "1" : "0");
-    // Stream the ~48 KB log straight from its static buffer in (at most) two chunks.
-    // Building one big std::string here used to throw std::bad_alloc on a fragmented
-    // heap (largest free block ~31 KB < 48 KB) → uncaught in the httpd task → abort()
-    // → reboot. Chunked send needs no large contiguous allocation.
+    // Stream the log straight from its static buffer in (at most) two chunks. Building one
+    // big std::string here used to throw std::bad_alloc when the whole buffer exceeded the
+    // largest contiguous free block on a fragmented heap → uncaught in the httpd task →
+    // abort() → reboot. Chunked send needs no large contiguous allocation, so /diag is safe
+    // regardless of buffer size or fragmentation.
     diag_log_dump_chunks([req](const char* p, size_t n) {
         return n == 0 || httpd_resp_send_chunk(req, p, n) == ESP_OK;
     });
@@ -653,6 +656,19 @@ static esp_err_t handle_set_time(httpd_req_t* req) {
 
 // ─── POST /set_vin — persist VIN, then reboot ─────────────────────────────────
 
+// A plausible Tesla VIN is exactly 17 characters, uppercase alphanumeric with the
+// letters I, O and Q excluded (the VIN standard reserves them to avoid confusion with
+// 1/0). Mirrors the client-side check in index.html so a bad value never reaches NVS.
+static bool vin_is_plausible(const std::string& vin) {
+    if (vin.size() != 17) return false;
+    for (char c : vin) {
+        bool ok = (c >= '0' && c <= '9') ||
+                  ((c >= 'A' && c <= 'Z') && c != 'I' && c != 'O' && c != 'Q');
+        if (!ok) return false;
+    }
+    return true;
+}
+
 static esp_err_t handle_set_vin(httpd_req_t* req) {
     char* body = read_body(req);
     cJSON* json = body ? cJSON_Parse(body) : nullptr;
@@ -665,18 +681,31 @@ static esp_err_t handle_set_vin(httpd_req_t* req) {
     }
     cJSON_Delete(json);
 
-    if (vin.size() != 17) {
-        return send_json(req, 400, make_response(false, "set_vin", vin.c_str(),
-                                                 "VIN must be 17 characters"));
+    // Normalise to the canonical stored form (trim, uppercase) before validating or
+    // comparing, so "unchanged" is judged on the stored representation, not on casing.
+    size_t s = vin.find_first_not_of(" \t\r\n");
+    size_t e = vin.find_last_not_of(" \t\r\n");
+    vin = (s == std::string::npos) ? std::string{} : vin.substr(s, e - s + 1);
+    for (char& c : vin) c = (char)std::toupper((unsigned char)c);
+
+    // Unchanged → nothing to apply: skip the NVS write and the reboot entirely.
+    if (vin == g_vehicle->vin()) {
+        return send_json(req, 200, make_response(true, "set_vin", vin.c_str(),
+                                                 "VIN unchanged — no reboot"));
     }
+
+    // Validate plausibility before applying a *changed* value.
+    if (!vin_is_plausible(vin)) {
+        return send_json(req, 400, make_response(false, "set_vin", vin.c_str(),
+                                                 "VIN must be 17 valid characters"));
+    }
+
     // A changed VIN points the device at a *different* vehicle, so the current key's
     // pairing, session, cached data and discovered BLE MAC all belong to the old car.
     // Wipe them (regenerate the key + clear the session/cache/MAC) before rebooting so
-    // the device pairs cleanly with the new vehicle and shows no stale data. Re-saving
-    // the same VIN leaves the existing pairing untouched.
-    bool changed = (vin != g_vehicle->vin());
+    // the device pairs cleanly with the new vehicle and shows no stale data.
     bool ok = g_vehicle->save_config_vin(vin);
-    if (ok && changed) g_vehicle->reset_for_new_vehicle();
+    if (ok) g_vehicle->reset_for_new_vehicle();
     esp_err_t r = send_json(req, ok ? 200 : 500,
         make_response(ok, "set_vin", vin.c_str(),
                       ok ? "VIN saved — rebooting" : "failed to save VIN"));
@@ -691,6 +720,29 @@ static esp_err_t handle_set_vin(httpd_req_t* req) {
 // Body: {"broker":"host:port"} (a full "mqtt://host:port" URI is also accepted; an
 // empty string disables MQTT). Stored in NVS ("mqtt_uri") and applied on reboot —
 // the bridge reads it once at start, so a reboot is the clean way to (re)init it.
+
+// Plausibility check for a broker value: empty is fine (disables MQTT); otherwise it
+// must be host:port — a non-empty host, a ':' separator, and a numeric port in 1..65535.
+// An optional "scheme://" prefix is tolerated (mqtt_ha prepends mqtt:// for bare hosts).
+static bool mqtt_broker_is_plausible(const std::string& broker) {
+    if (broker.empty()) return true;                  // empty = disable
+    if (broker.size() > 120) return false;
+    if (broker.find_first_of(" \t\r\n") != std::string::npos) return false;
+
+    std::string authority = broker;
+    size_t scheme = authority.find("://");
+    if (scheme != std::string::npos) authority = authority.substr(scheme + 3);
+
+    size_t colon = authority.rfind(':');
+    if (colon == std::string::npos || colon == 0) return false;   // need host:port
+    std::string host = authority.substr(0, colon);
+    std::string port = authority.substr(colon + 1);
+    if (host.empty() || port.empty() || port.size() > 5) return false;
+    for (char c : port) if (c < '0' || c > '9') return false;
+    int p = atoi(port.c_str());
+    return p >= 1 && p <= 65535;
+}
+
 static esp_err_t handle_set_mqtt(httpd_req_t* req) {
     char* body = read_body(req);
     cJSON* json = body ? cJSON_Parse(body) : nullptr;
@@ -708,9 +760,16 @@ static esp_err_t handle_set_mqtt(httpd_req_t* req) {
     size_t e = broker.find_last_not_of(" \t\r\n");
     broker = (s == std::string::npos) ? std::string{} : broker.substr(s, e - s + 1);
 
-    // Light validation: bound the length and reject embedded whitespace. An empty
-    // value is allowed (it disables MQTT).
-    if (broker.size() > 120 || broker.find(' ') != std::string::npos) {
+    // Unchanged → nothing to apply: skip the NVS write and the reboot entirely. The
+    // stored value is the bare broker string as last saved (mqtt_ha adds the scheme).
+    if (broker == g_vehicle->load_config_str("mqtt_uri")) {
+        return send_json(req, 200, make_response(true, "set_mqtt", "",
+            broker.empty() ? "MQTT already disabled — no reboot"
+                           : "MQTT broker unchanged — no reboot"));
+    }
+
+    // Validate plausibility before applying a *changed* value.
+    if (!mqtt_broker_is_plausible(broker)) {
         return send_json(req, 400, make_response(false, "set_mqtt", "",
                                                  "invalid broker (use host:port)"));
     }

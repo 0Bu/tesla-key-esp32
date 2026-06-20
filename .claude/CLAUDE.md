@@ -162,6 +162,14 @@ After any of these `has_session()` is false → UI shows "not paired", hides con
 - BLE connection is on-demand; first command after idle takes ~3-5s for scan+connect
 - Tesla allows max 3 simultaneous BLE keys per vehicle
 - Fragment size: 20 bytes per BLE write chunk (safe for all ESP32 BLE MTU configs)
+- **Memory is tight — the binding limit is the largest *contiguous* free block, not total
+  free heap.** Steady-state it is only a few tens of KB (WiFi + NimBLE + MQTT dominate; see
+  the boot heap-attribution log in `main.cpp`). C++ exceptions are enabled, but an *uncaught*
+  `std::bad_alloc` (or any throw) unwinds through C frames → `std::terminate` → `abort()` →
+  reboot. So: keep HTTP handlers under the `handle_all` try/catch (returns 503 on OOM), never
+  build a whole buffer into one big `std::string` (`/diag` streams instead), and treat any new
+  large *contiguous* allocation (big JSON, TLS for OTA) as a crash risk to size-check. A reboot
+  loop is doubly bad: each boot re-opens the polling window, so a parked car never sleeps.
 
 ## Typical Debugging
 
