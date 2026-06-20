@@ -160,7 +160,8 @@ GET  /status               { vin, ip, version, key_present, key_fingerprint,
                              paired_at (epoch, omitted if unknown), reauth,
                              wifi:{ssid,rssi,std},
                              ble:{connected,scanning,rssi,addr | devices:[{addr,name,rssi}]},
-                             vehicle:{soc,status,power,amps} (when connected, cached),
+                             link: "awake"|"asleep"|"unreachable"|"unknown" (drives the hero),
+                             vehicle:{soc,status,power,amps} (only when link=="awake", cached),
                              mqtt:{configured,connected,broker} (HA bridge),
                              tele:{climate,drive,tires,closures} (read-only telemetry),
                              last:{soc,status} (last-known snapshot for the asleep card),
@@ -230,7 +231,7 @@ tesla-key/<node>/climate     {inside,outside,setpoint,on,preconditioning}
 tesla-key/<node>/drive       {shift,odometer}
 tesla-key/<node>/tires       {fl,fr,rl,rr,warn}
 tesla-key/<node>/closures    {locked,door,frunk,trunk,window,user}
-tesla-key/<node>/vehicle     {sleep_status}
+tesla-key/<node>/vehicle     {sleep_status: AWAKE | ASLEEP | UNREACHABLE}
 tesla-key/<node>/device      {wifi_rssi,ble_rssi,ble_connected,paired,uptime,free_heap,version}
 homeassistant/<sensor|binary_sensor>/<node>/<object>/config   (discovery, retained)
 ```

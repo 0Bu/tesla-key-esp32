@@ -200,6 +200,8 @@ code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
 .crow .cv .mac{font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12.5px; letter-spacing:.2px}
 .crow .cv .ph{color:var(--muted); font-weight:400}
 .crow .cv .bars{flex:none}
+/* indeterminate "searching…" ring on the BLE row — left of the value, only while scanning */
+.crow .cv .otaspin{flex:none}
 /* signal reading (e.g. "-67 dBm") — compact, muted, never breaks internally */
 .crow .cv .dbm{flex:none; font-size:13px; font-weight:500; color:var(--muted); white-space:nowrap}
 /* SSID / MAC takes the rest; ellipsis (not wrap) is the narrow-phone fallback */
@@ -273,7 +275,7 @@ code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
   </div>
 
   <!-- hero -->
-  <div class="hero">
+  <div class="hero" id="hero">
     <div class="hicon" id="hicon"></div>
     <div class="hbody">
       <div class="hlabel" id="hlabel">&mdash;</div>
@@ -414,6 +416,7 @@ function render(s){
 
   // hero — single source of overall status
   var hic=$("hicon"), hl=$("hlabel"), hs=$("hsub"), hst=$("hstats");
+  $("hero").classList.remove('hide');   // shown by default; the unreachable branch hides it
   hst.innerHTML='';   // cleared here; only the paired+reporting branch populates it
   if(paired&&v){
     if(waking){ waking=false; clearTimeout(wakeTimeout); }   // car is awake & reporting — stop the spinner
@@ -429,6 +432,10 @@ function render(s){
       hic.innerHTML='<button class="wakebtn" disabled aria-label="Waking the car">'+ringSpinner()+'<span class="glyph">💤</span></button>';
       hl.innerHTML='<span>Waking up…</span>';
       hs.textContent='Reaching your Tesla over Bluetooth…';
+    } else if(s.link==='unreachable'){
+      // Car answers nothing over BLE (driven off / out of range / deep sleep). We genuinely
+      // don't know its state, so claiming "asleep" would be wrong — hide the hero entirely.
+      $("hero").classList.add('hide');
     } else {
       hic.innerHTML='<button class="wakebtn" onclick="wakeCar()" title="Tap to wake the car" aria-label="Wake the car">'+ringSleep()+'<span class="glyph">💤</span></button>';
       hl.innerHTML='<span>Vehicle asleep</span>';
@@ -470,9 +477,11 @@ function render(s){
     bc.className='cv ok';
     bc.innerHTML=bbars+bdbm+btxt;
   } else if(ble.scanning){
-    bc.className='cv'; bc.innerHTML='<span>Searching…</span>';
+    // searching for the car — a spinning status ring sits at the left of the value (where the
+    // signal bars go when connected); it appears only while scanning and clears otherwise.
+    bc.className='cv'; bc.innerHTML=otaMiniRing(0,true,'var(--ok)')+'<span>Searching…</span>';
   } else {
-    bc.className='cv'; bc.innerHTML='<span class="ph">disconnected</span>';
+    bc.className='cv'; bc.innerHTML='<span class="ph">Disconnected</span>';
   }
 
   // MQTT — Home Assistant bridge (tap to set/change the broker)
@@ -598,18 +607,20 @@ function genKey(){
 // Status shows inline in the header meta line (progress ring + text), next to the
 // version — no bottom popup. A tiny ring sized for the 13.5px meta line.
 var otaBusy=false;
-function otaMiniRing(pct,indet){
-  var sz=16,c=sz/2,r=6,sw=2.6,circ=2*Math.PI*r;
+// col = arc colour (default the brand accent, used by OTA). The BLE "searching" ring passes
+// var(--ok) so it matches the green signal bars while keeping the exact OTA ring geometry.
+function otaMiniRing(pct,indet,col){
+  var sz=16,c=sz/2,r=6,sw=2.6,circ=2*Math.PI*r; col=col||'var(--accent)';
   if(indet){
     return '<svg class="otaspin" width="'+sz+'" height="'+sz+'" viewBox="0 0 '+sz+' '+sz+'">'+
       '<circle cx="'+c+'" cy="'+c+'" r="'+r+'" fill="none" stroke="var(--border)" stroke-width="'+sw+'"/>'+
-      '<circle cx="'+c+'" cy="'+c+'" r="'+r+'" fill="none" stroke="var(--accent)" stroke-width="'+sw+'" stroke-linecap="round" stroke-dasharray="'+(circ*0.3).toFixed(1)+' '+circ.toFixed(1)+'"/>'+
+      '<circle cx="'+c+'" cy="'+c+'" r="'+r+'" fill="none" stroke="'+col+'" stroke-width="'+sw+'" stroke-linecap="round" stroke-dasharray="'+(circ*0.3).toFixed(1)+' '+circ.toFixed(1)+'"/>'+
       '</svg>';
   }
   var off=circ*(1-Math.max(0,Math.min(100,pct))/100);
   return '<svg width="'+sz+'" height="'+sz+'" viewBox="0 0 '+sz+' '+sz+'" style="transform:rotate(-90deg)">'+
     '<circle cx="'+c+'" cy="'+c+'" r="'+r+'" fill="none" stroke="var(--border)" stroke-width="'+sw+'"/>'+
-    '<circle cx="'+c+'" cy="'+c+'" r="'+r+'" fill="none" stroke="var(--accent)" stroke-width="'+sw+'" stroke-linecap="round" stroke-dasharray="'+circ.toFixed(1)+'" stroke-dashoffset="'+off.toFixed(1)+'" style="transition:stroke-dashoffset .5s ease"/>'+
+    '<circle cx="'+c+'" cy="'+c+'" r="'+r+'" fill="none" stroke="'+col+'" stroke-width="'+sw+'" stroke-linecap="round" stroke-dasharray="'+circ.toFixed(1)+'" stroke-dashoffset="'+off.toFixed(1)+'" style="transition:stroke-dashoffset .5s ease"/>'+
     '</svg>';
 }
 function otaInline(html,cls){
@@ -620,7 +631,7 @@ function otaInlineClear(delay){ setTimeout(function(){ otaInline(''); }, delay||
 function otaCheck(){
   if(otaBusy) return;              // a check/update is already running
   otaBusy=true;
-  otaInline(otaMiniRing(0,true)+'<span>checking…</span>','acc');
+  otaInline(otaMiniRing(0,true,'currentColor')+'<span>checking…</span>');
   fetch('/ota/check?ms='+Date.now()).then(otaCheckPoll).catch(function(){ otaBusy=false; otaInline('<span>check failed</span>','err'); otaInlineClear(4000); });
 }
 function otaCheckPoll(){
@@ -632,7 +643,7 @@ function otaCheckPoll(){
     if(o.update_available){
       otaAvail=o.available||''; if(state)render(state); otaInline('');         // clear while the dialog is up
       if(confirm('New version '+(o.available||'')+' available — update now?\n\nYou’re on v'+(o.current||'')+'. The device downloads the firmware and reboots when done.')){
-        otaInline(otaMiniRing(0,true)+'<span>starting…</span>','acc');
+        otaInline(otaMiniRing(0,true,'currentColor')+'<span>starting…</span>');
         fetch('/ota/update',{method:'POST'}).then(otaPoll).catch(function(){otaPoll()});
       } else { otaBusy=false; }
     } else {
@@ -647,8 +658,8 @@ function otaPoll(){
 }
 function otaProgress(o){
   otaBusy=true;
-  if(o.state==='downloading'){ var p=o.progress||0; otaInline(otaMiniRing(p,false)+'<span>'+p+'% updating</span>','acc'); otaTimer=setTimeout(otaPoll,800); }
-  else if(o.state==='done'){ otaInline(otaMiniRing(100,false)+'<span>rebooting…</span>','acc'); setTimeout(function(){waitReboot(state&&state.version)},2000); }
+  if(o.state==='downloading'){ var p=o.progress||0; otaInline(otaMiniRing(p,false,'currentColor')+'<span>'+p+'%</span>'); otaTimer=setTimeout(otaPoll,800); }
+  else if(o.state==='done'){ otaInline(otaMiniRing(100,false,'currentColor')+'<span>rebooting…</span>'); setTimeout(function(){waitReboot(state&&state.version)},2000); }
   else if(o.state==='error'){ otaBusy=false; otaInline('<span>update failed'+(o.message?' — '+esc(o.message):'')+'</span>','err'); otaInlineClear(6000); }
   else { otaTimer=setTimeout(otaPoll,1000); }
 }

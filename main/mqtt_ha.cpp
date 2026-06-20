@@ -182,11 +182,6 @@ static void publish_discovery() {
     ESP_LOGI(TAG, "published %d HA-discovery configs under %s/", (int)(sizeof(ENTRIES)/sizeof(ENTRIES[0])), s_prefix.c_str());
 }
 
-// Max age (s) of the last live telemetry for the car to still count as AWAKE — mirrors
-// the web UI's kLiveDataMaxAgeS (http_server.cpp). Charge polls refresh contact every
-// ~10 s while the window is open, so 60 s is well clear of the cadence and won't flap.
-static constexpr uint32_t kAwakeMaxAgeS = 60;
-
 // ─── State publish ────────────────────────────────────────────────────────────
 // Each domain is published only when its cache is valid, and each numeric field
 // only when the car actually reported it (proto3-optional presence flags) — so a
@@ -262,16 +257,24 @@ static void publish_state() {
             pub_json(s_topic[D_CLOSURES], o);
         }
     }
-    // Vehicle sleep state — derived from telemetry FRESHNESS, not the raw cached VCSEC
-    // string. The VCSEC sleep_status only updates on a successful (active-window-gated)
-    // poll, so a sleeping car — which we deliberately stop polling — would pin it on the
-    // last "AWAKE" forever. Mirror the web UI: live data within the window ⇒ AWAKE, else
-    // ASLEEP. No contact since boot ⇒ omit (HA shows "unknown").
+    // Vehicle reachability / sleep state — taken straight from VehicleController::link_state(),
+    // the same source the web UI uses, so the two never drift. NOT the raw cached VCSEC string
+    // (it only updates on an active-window-gated poll and would pin on "AWAKE" once the car
+    // sleeps). AWAKE = fresh live telemetry; ASLEEP = no live data but the VCSEC health poll
+    // still answers (parked & sleeping nearby); UNREACHABLE = the car answers nothing over BLE
+    // (driven off / out of range / deep sleep) — published explicitly instead of a phantom
+    // "ASLEEP". Nothing heard since boot/re-pair ⇒ omit (HA shows "unknown").
     {
-        uint32_t age = 0;
-        if (s_vehicle->seconds_since_contact(age)) {
+        const char* ss = nullptr;
+        switch (s_vehicle->link_state()) {
+            case VehicleController::LinkState::Awake:       ss = "AWAKE";       break;
+            case VehicleController::LinkState::Asleep:      ss = "ASLEEP";      break;
+            case VehicleController::LinkState::Unreachable: ss = "UNREACHABLE"; break;
+            default: break;  // Unknown ⇒ omit
+        }
+        if (ss) {
             cJSON* o = cJSON_CreateObject();
-            cJSON_AddStringToObject(o, "sleep_status", age < kAwakeMaxAgeS ? "AWAKE" : "ASLEEP");
+            cJSON_AddStringToObject(o, "sleep_status", ss);
             pub_json(s_topic[D_VEHICLE], o);
         }
     }
