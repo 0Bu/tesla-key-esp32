@@ -57,6 +57,9 @@ A rotating background poll in `loop_task_fn_` (one domain per ~12 s cycle: clima
 drive → tires → closures, full set ~48 s) refreshes per-domain caches via the
 `set_*_state_callback` hooks in `vehicle_ctrl.cpp`. All polls are `NO_WAKE_SKIP`
 (read-only, never wake the car) and feed the MQTT/HA bridge — evcc/pairing are unaffected.
+These background polls are **paused while a foreground evcc/manual command is in flight**
+(`cmd_in_flight_`), so a command is never queued behind a slow/failing poll in the single
+BLE FIFO — keeps command latency low on an awake, busy link.
 Exposed under `tele` in `/status` (for the HA bridge and diagnostics; the device's own web
 UI is charge/SOC-only and does not render these): `climate` (inside/outside/setpoint °C, on,
 preconditioning), `drive` (shift, odometer_km), `tires` (fl/fr/rl/rr bar + warn),
