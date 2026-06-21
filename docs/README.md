@@ -23,15 +23,21 @@ idf.py set-target esp32c5 build      # picks up sdkconfig.defaults.esp32c5
 
 `sdkconfig.defaults.esp32c5` enables the 8 MB PSRAM (Quad), the native
 USB-Serial/JTAG console, and the onboard **0.96" ST7735 status display**
-(`CONFIG_TESLA_DISPLAY_ENABLED`, `main/display.cpp`). The display renders the
-same charge/connection values as the web UI (SOC ring, charging state, power,
-current, WiFi/BLE/MQTT) from cache-only state — it never wakes the car and does
-not require MQTT. The offline layout validation render is
+(`CONFIG_TESLA_DISPLAY_ENABLED`, `main/display.cpp`). The display shows **WiFi**
+(bars + RSSI + SSID), **BLE** (bars + RSSI + peer) and the **vehicle status
+block** — the SOC ring with charging / asleep / unreachable state, plus power
+and current when charging. All from cache-only state — it never wakes the car
+and does not depend on MQTT. The offline layout validation render is
 `tools/display_sim.py` (also the 5×7 font source for `main/display_font.h`).
 
-> **Status:** firmware compiles for C5 in CI but is **not yet validated on
-> hardware**. The ST7735 RAM offsets / MADCTL / colour inversion
-> (`CONFIG_TESLA_DISPLAY_*`) may need tuning on first flash. The ESP32-S3
+> **Status:** **not yet building or validated for C5.** The pinned dependency
+> `yoziru/tesla-ble` v5.1.1 lists `targets: [esp32, esp32s3, esp32c3, esp32c6]`
+> in its component manifest — **`esp32c5` is missing**, so the ESP-IDF component
+> manager refuses the target before compilation (CI job `build-c5`). The crypto
+> is portable C/mbedTLS (the near-identical `esp32c6` is supported), so the fix
+> is a manifest-only change: a `tesla-ble` release/fork that adds `esp32c5` to
+> `targets`. Once that lands, the ST7735 RAM offsets / MADCTL / colour inversion
+> (`CONFIG_TESLA_DISPLAY_*`) may still need tuning on first flash. The ESP32-S3
 > remains the released, hardware-proven target.
 
 ## Flash prebuilt artifacts

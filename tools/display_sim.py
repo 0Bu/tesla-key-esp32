@@ -178,33 +178,30 @@ def ring(cx, cy, rad, frac, col, bg):
             lit = (a/360.0) <= frac
             px(xx, yy, col if lit else bg)
 
-# ── compose: mirror the screenshot's two cards ────────────────────────────────
-# CARD 1 — CONNECTIONS (WiFi / BLE / MQTT, each value + a wrapped detail line)
-rrect(3, 3, W-3, 96, CARD)
-text(6, 5, "CONNECTIONS", GREY)
+# ── compose: WiFi + BLE, then the status block (no MQTT) ──────────────────────
+# CARD 1 — CONNECTIONS (WiFi + BLE only)
+rrect(3, 3, W-3, 66, CARD)
+text(6, 6, "CONNECTIONS", GREY)
 
-wifi_bars(6, 16, 3)
-text(24, 16, "-64dBm", INK)
-text(8, 26, fit("Jupiter", W-14), GREEN)            # SSID
+wifi_bars(6, 20, 3)
+text(24, 20, "-64dBm", INK)
+text(8, 31, fit("Jupiter", W-14), GREEN)            # SSID
 
-wifi_bars(6, 38, 2)
-text(24, 38, "-83dBm", INK)
-text(8, 48, fit("..72:ac:0d", W-14), GREEN)         # peer MAC, abbreviated for 80px
+wifi_bars(6, 47, 2)
+text(24, 47, "-83dBm", INK)
+text(8, 58, fit("..72:ac:0d", W-14), GREEN)         # peer MAC, abbreviated for 80px
 
-text(6, 61, "MQTT", GREY)
-text(4, 71, fit("192.168.1.27", W-6), GREEN)        # broker host (full IPv4 ~ width limit)
-text(4, 81, ":1883", GREEN)                         # broker port (wrapped — host:port too wide for 1 line)
-
-# CARD 2 — CHARGING hero
-rrect(3, 100, W-3, H-4, CARD)
-text(center("`Charging"), 103, "`Charging", INK)    # ` = bolt glyph
-ring(W//2, 130, 23, 0.96, GREEN, GREENL)
+# CARD 2 — STATUS (the bottom UI block: asleep / charging / unreachable).
+# Shown here in the awake+charging state to match the screenshot.
+rrect(3, 72, W-3, H-4, CARD)
+text(center("`Charging"), 78, "`Charging", INK)     # ` = bolt glyph
+ring(W//2, 116, 26, 0.96, GREEN, GREENL)
 soc = "96"
-sw = textw(soc, 2) + 6                               # "96" @2x + "%" @1x
+sw = textw(soc, 3) + textw("%", 2)                  # "96" @3x + "%" @2x
 x0 = (W - sw) // 2
-text(x0, 124, soc, GREEN, 2)
-text(x0 + textw(soc, 2), 131, "%", GREEN, 1)
-text(center("4kW   6A"), 150, "4kW   6A", INK)
+text(x0, 104, soc, GREEN, 3)
+text(x0 + textw(soc, 3), 111, "%", GREEN, 2)
+text(center("4kW   6A"), 148, "4kW   6A", INK)
 
 def cmd_png(out="tools/display_preview.png"):
     S = 6
