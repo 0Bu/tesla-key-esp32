@@ -37,7 +37,7 @@
       "description": "Remind to re-check yoziru/tesla-ble compatibility on every ESP-IDF update (does not block the update).",
       "matchDepNames": ["espressif/esp-idf"],
       "prBodyNotes": [
-        "⚠️ **Before merging — verify `yoziru/tesla-ble` compatibility.** ESP-IDF 6.0 ships mbedTLS 4 (PSA Crypto) and removed the legacy `<mbedtls/ecdh.h>` / PK headers that tesla-ble (<= v5.1.1) still uses, so 6.x builds fail. Check that the CI `build` job is green; if this is a 6.x update, confirm a tesla-ble release with PSA-Crypto support exists and bump it too (`main/idf_component.yml`). Also migrate `json` -> `espressif/cjson` for IDF 6. See #17."
+        "⚠️ **Before merging — verify `yoziru/tesla-ble` compatibility.** ESP-IDF 6.0 bundles Mbed TLS 4.x (PSA Crypto is primary; most legacy crypto APIs removed). tesla-ble (<= v5.1.1) does its P-256 ECDH via `mbedtls_ecp_mul` + `MBEDTLS_PRIVATE` opaque-field access, key handling via `mbedtls_pk_*`, and AES-GCM via legacy `mbedtls_gcm_*` — all removed/disallowed under Mbed TLS 4, so 6.x builds fail. Check that the CI `build` job is green; if this is a 6.x update, confirm a tesla-ble release with PSA-Crypto support exists and bump it too (`main/idf_component.yml`). Also migrate `json` -> `espressif/cjson` for IDF 6. See #61."
       ]
     }
   ]
