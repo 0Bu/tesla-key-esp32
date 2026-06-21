@@ -538,7 +538,7 @@ void VehicleController::loop_task_fn_(void* arg) {
         // makes it fault with ERROR_UNKNOWN_KEY_ID, which the message observer turns into
         // pairing_lost_. Gated on the active window so an idle car is left to sleep; the
         // VCSEC health poll still catches a deletion while idle.
-        if (paired && window && self->ble_connected()
+        if (paired && window && self->ble_connected() && !self->cmd_in_flight_.load()
             && (now_ticks - last_poll_ticks > pdMS_TO_TICKS(10000))) {
             last_poll_ticks = now_ticks;
             ESP_LOGD(TAG, "background charge-state refresh…");
@@ -555,7 +555,7 @@ void VehicleController::loop_task_fn_(void* arg) {
         // rotating climate → drive → tires → closures so the full set refreshes every ~48 s
         // without flooding the single FIFO command queue. Offset from the charge poll (12 s
         // vs 10 s). All NO_WAKE_SKIP; web-UI caches only; evcc and pairing are unaffected.
-        if (paired && window && self->ble_connected()
+        if (paired && window && self->ble_connected() && !self->cmd_in_flight_.load()
             && (now_ticks - last_tele_ticks > pdMS_TO_TICKS(12000))) {
             last_tele_ticks = now_ticks;
             xSemaphoreTake(self->vehicle_mutex_, portMAX_DELAY);
@@ -600,6 +600,7 @@ VehicleController::ResultCb VehicleController::make_result_cb_() {
             // A good response proves the car still trusts our key — clear any pending
             // "key might be gone" streak so a later one-off glitch starts from zero.
             auth_fail_streak_ = 0;
+            cmd_fail_streak_.store(0);  // link is answering cleanly → reset the desync backstop
             // It also proves the car is reachable over BLE right now (this fires for the
             // idle VCSEC health poll too), which keeps link_state() out of "Unreachable"
             // while the car merely sleeps nearby. NO_WAKE polls don't update note_contact_.
@@ -609,6 +610,17 @@ VehicleController::ResultCb VehicleController::make_result_cb_() {
             const std::string& msg = result.error()->message();
             last_error_ = msg;   // surfaced to the HTTP layer / UI as the real reason
             ESP_LOGW(TAG, "command failed: %s", msg.c_str());
+            // Soft-desync backstop: when the link is churning (buffer-recovery storm) the
+            // library reports failures here but recovers internally without throwing, so
+            // ble_fault_ never fires. After kCmdFailDropStreak failures in a row, drop the
+            // link once (only while paired) to force the same clean rx-buffer/session resync.
+            if (cmd_fail_streak_.fetch_add(1) + 1 >= kCmdFailDropStreak) {
+                cmd_fail_streak_.store(0);
+                if (believed_paired_.load() && !ble_fault_.exchange(true)) {
+                    ESP_LOGW(TAG, "telemetry desync: %d consecutive BLE failures — dropping link to resync",
+                             kCmdFailDropStreak);
+                }
+            }
             // Two distinct ways a Tesla signals "your key is no longer whitelisted"
             // (it was deleted on the car side); both must invalidate the pairing so the
             // supervisor re-keys + re-pairs and the UI/evcc stop showing a dead pairing:
@@ -638,10 +650,22 @@ VehicleController::ResultCb VehicleController::make_result_cb_() {
 
 // ─── Generic command runners ──────────────────────────────────────────────────
 
+// RAII: marks a foreground command "in flight" (cmd_in_flight_) for as long as it is being
+// sent + awaited, so loop_task pauses injecting background telemetry polls behind it. Clears
+// on every exit path — early return or a throw from the library call.
+namespace {
+struct InFlightGuard {
+    std::atomic<bool>& flag;
+    explicit InFlightGuard(std::atomic<bool>& f) : flag(f) { flag.store(true); }
+    ~InFlightGuard() { flag.store(false); }
+};
+}  // namespace
+
 bool VehicleController::send_vcsec_(const std::string& name, Builder builder,
                                      TeslaBLE::WakePolicy wp, int timeout_ms,
                                      bool count_as_activity) {
     MutexGuard cmd_guard(command_mutex_);
+    InFlightGuard inflight(cmd_in_flight_);
     // Real commands open the active window so loop_task resumes polling; the background
     // health poll passes count_as_activity=false (else the window never expires and the
     // car never gets to idle/sleep).
@@ -665,6 +689,7 @@ bool VehicleController::send_vcsec_(const std::string& name, Builder builder,
 bool VehicleController::send_infotainment_(const std::string& name, Builder builder,
                                             int timeout_ms, TeslaBLE::WakePolicy wp) {
     MutexGuard cmd_guard(command_mutex_);
+    InFlightGuard inflight(cmd_in_flight_);
     // Every infotainment command is a real evcc/manual action → open the active window.
     last_cmd_ticks_.store(xTaskGetTickCount());
     if (!ensure_connected_()) return false;
@@ -885,6 +910,7 @@ bool VehicleController::get_vehicle_status(VehicleStatusResult& out, int timeout
     out = pending_status_;
     if (ok && out.valid) {
         note_reachable_();  // car answered a VCSEC status read ⇒ reachable over BLE right now
+        cmd_fail_streak_.store(0);  // a clean round-trip ⇒ link healthy, reset desync backstop
         MutexGuard cache_guard(cache_mutex_);
         last_known_status_ = out;
     }

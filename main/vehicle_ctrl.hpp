@@ -326,6 +326,29 @@ private:
     // clear the library's rx_buffer and re-sync, turning the reboot into a brief reconnect.
     std::atomic<bool> ble_fault_{false};
 
+    // True while a foreground command (evcc/manual, via send_vcsec_/send_infotainment_) is
+    // enqueued and awaiting its result. loop_task reads it and SKIPS injecting background
+    // telemetry polls (charge/climate/drive/tires/closures) for the duration, so a command
+    // isn't stuck behind freshly-queued, 7-s-failing polls in the library's single FIFO
+    // (the cause of 15-19 s command latency on an awake, busy link). The ~30 s VCSEC health
+    // poll is already serialized via command_mutex_ and can't pile up, so it needs no gating.
+    // Atomic: set by the HTTP task, read by loop_task. Managed by an RAII guard so it always
+    // clears, even if the library call throws.
+    std::atomic<bool> cmd_in_flight_{false};
+
+    // Consecutive failed signed round-trips seen in make_result_cb_ (foreground commands +
+    // the VCSEC health poll). On an awake, busy link the tesla-ble framer's single rx buffer
+    // can desync ("buffer recovery failed") and most ops time out, but the library RECOVERS
+    // internally WITHOUT throwing — so ble_fault_ above never fires and the storm can persist
+    // for minutes (stale telemetry + multi-second command latency). After kCmdFailDropStreak
+    // failures in a row, while paired, we proactively raise ble_fault_ to drop the link once:
+    // the same clean rx-buffer/session resync, just driven by soft failures instead of a
+    // throw. Reset on any success. Paired-gated so it can't disturb the enrolment handshake
+    // (where command failures are expected). Background telemetry-poll failures do NOT reach
+    // make_result_cb_, so this counts commands + health poll only — a deliberate backstop.
+    std::atomic<int> cmd_fail_streak_{0};
+    static constexpr int kCmdFailDropStreak = 3;
+
     // Uptime tick of the last live infotainment data received (see seconds_since_contact).
     // Stamped from the cache callbacks (BLE RX task); read by the HTTP task. atomic so no
     // lock is needed. 0 = nothing received yet. Cleared on a pairing reset.
