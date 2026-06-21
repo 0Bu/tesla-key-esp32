@@ -36,9 +36,13 @@ and does not depend on MQTT. The offline layout validation render is
 > manager refuses the target before compilation (CI job `build-c5`). The crypto
 > is portable C/mbedTLS (the near-identical `esp32c6` is supported), so the fix
 > is a manifest-only change: a `tesla-ble` release/fork that adds `esp32c5` to
-> `targets`. Once that lands, the ST7735 RAM offsets / MADCTL / colour inversion
-> (`CONFIG_TESLA_DISPLAY_*`) may still need tuning on first flash. The ESP32-S3
-> remains the released, hardware-proven target.
+> `targets`. The ESP32-S3 remains the released, hardware-proven target.
+>
+> The ST7735 driver (pins, offsets 26/1, MADCTL `0x08`, INVON, COLMOD `0x05`,
+> gamma/power) is **cross-verified byte-for-byte against LilyGo's official driver**
+> ([`lib/lcd_st7735/st7735.cpp`](https://github.com/Xinyuan-LilyGO/T-Dongle-C5)),
+> so it should render correctly first-flash — but this has not yet been run on
+> physical hardware.
 
 ## Flash prebuilt artifacts
 

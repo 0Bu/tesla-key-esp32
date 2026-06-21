@@ -35,9 +35,10 @@ static constexpr int H = 160;
 #define PIN_DC    CONFIG_TESLA_DISPLAY_DC
 #define PIN_RST   CONFIG_TESLA_DISPLAY_RST
 #define PIN_BL    CONFIG_TESLA_DISPLAY_BL
-// ST7735S 0.96" panels are offset within the controller's 132x162 RAM. These
-// match the common LilyGo/Adafruit 0.96" module; tune on first flash if the image
-// is shifted or the colours are inverted (see CONFIG_TESLA_DISPLAY_*_OFFSET).
+// ST7735S 0.96" panels are offset within the controller's 132x162 RAM.
+// Cross-verified against LilyGo's official driver for this exact board
+// (Xinyuan-LilyGO/T-Dongle-C5 lib/lcd_st7735/st7735.cpp): portrait mode 0 uses
+// COLSTART 26 / ROWSTART 1. Override only if a panel revision differs.
 #define X_OFF     CONFIG_TESLA_DISPLAY_X_OFFSET
 #define Y_OFF     CONFIG_TESLA_DISPLAY_Y_OFFSET
 
@@ -79,6 +80,9 @@ static void set_window(int x0, int y0, int x1, int y1) {
     wr_cmd(0x2C);                      // RAMWR
 }
 
+// Init sequence (commands, delays, gamma/power tables, MADCTL 0x08, INVON,
+// COLMOD 0x05) is byte-for-byte the one LilyGo ships for this panel —
+// Xinyuan-LilyGO/T-Dongle-C5 lib/lcd_st7735/st7735.cpp sendInitCommands().
 static void panel_init() {
     // Reset pulse
     gpio_set_level((gpio_num_t)PIN_RST, 0); vTaskDelay(pdMS_TO_TICKS(20));
