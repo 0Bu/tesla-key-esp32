@@ -10,6 +10,31 @@ ESP32-S3 (BLE 5.0), ≥ 8 MB flash (dual-OTA layout: two 3 MB app slots). No PSR
 required. ESP32 / S2 / C3 not supported.
 USB data cable for flashing.
 
+### Experimental: LilyGo T-Dongle-S3 (onboard display)
+
+A board variant for the [LilyGo T-Dongle-S3](https://github.com/Xinyuan-LilyGO/T-Dongle-S3)
+(ESP32-S3, 16 MB flash, **no PSRAM**, native USB-A, 0.96" ST7735 80×160 LCD). Built via an
+SDKCONFIG overlay (the plain ESP32-S3 build is unchanged):
+
+```bash
+idf.py -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;boards/t-dongle-s3.defaults" \
+       set-target esp32s3 build flash monitor
+```
+
+The overlay (`boards/t-dongle-s3.defaults`) enables the onboard **ST7735 status display**
+(`main/display.cpp`), the native USB-Serial/JTAG console, and the full 16 MB flash. The
+display shows **WiFi**, **BLE** and the **vehicle status block** (SOC ring + charging /
+asleep / unreachable + power/current) from cache-only state — it never wakes the car and
+does not depend on MQTT. Offline layout/font validation: `tools/display_sim.py`.
+
+> **Status:** builds in CI (job `build-tdongle-s3`, ESP-IDF v5.5.4); pending validation on
+> physical hardware. Two caveats: (1) **no PSRAM** → the ~25 KB framebuffer lands in internal
+> SRAM (watch the `display` heap-attribution line in the boot log on this RAM-tight build);
+> (2) **OTA** on this variant still pulls the generic (display-less) ESP32-S3 image —
+> per-board OTA/installer builds are a follow-up. Flash over USB for now. The ST7735 driver
+> (offsets 26/1, MADCTL 0x08, INVON) is cross-verified against LilyGo's; the backlight pin
+> (GPIO38, or 37 in their MicroPython config) may need flipping if it stays dark.
+
 ## Flash prebuilt artifacts
 
 Browser flasher + WiFi/VIN setup: [../README.md](../README.md). The flasher is served on

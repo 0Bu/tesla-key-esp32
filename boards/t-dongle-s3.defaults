@@ -1,0 +1,35 @@
+# ─── LilyGo T-Dongle-S3 overlay (ESP32-S3, 16 MB flash, NO PSRAM) ──────────────
+# An SDKCONFIG_DEFAULTS overlay on top of sdkconfig.defaults. The base file targets
+# a plain ESP32-S3 with no panel; this turns the board into a T-Dongle-S3 build
+# (onboard 0.96" ST7735 display, native USB console, full 16 MB flash).
+#
+# Build / flash:
+#   idf.py -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;boards/t-dongle-s3.defaults" \
+#          set-target esp32s3 build flash monitor
+#
+# NOTE: the T-Dongle-S3 has NO PSRAM, so the display's ~25 KB framebuffer lands in
+# internal SRAM. This project is RAM-tight — check the `display` heap-attribution
+# line in the boot log after flashing.
+
+# Full flash (T-Dongle-S3 carries 16 MB; base default is 8 MB).
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+
+# Console over the S3's native USB-Serial/JTAG: the dongle has no UART-bridge chip,
+# so without this `idf.py monitor` sees nothing over the USB-A plug.
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+
+# Onboard 0.96" ST7735 status display, wired to the T-Dongle-S3 GPIOs.
+CONFIG_TESLA_DISPLAY_ENABLED=y
+CONFIG_TESLA_DISPLAY_SPI_MOSI=3
+CONFIG_TESLA_DISPLAY_SPI_SCK=5
+CONFIG_TESLA_DISPLAY_CS=4
+CONFIG_TESLA_DISPLAY_DC=2
+CONFIG_TESLA_DISPLAY_RST=1
+CONFIG_TESLA_DISPLAY_BL=38
+CONFIG_TESLA_DISPLAY_X_OFFSET=26
+CONFIG_TESLA_DISPLAY_Y_OFFSET=1
+
+# OTA is intentionally left on the default (generic-S3) firmware URL: per-board OTA
+# images are a follow-up (the T-Dongle-S3 shares the esp32s3 chip-id with the
+# generic build, so only a per-board URL would keep them apart). Flash this variant
+# over USB for now; tapping "update" would pull the display-less generic image.

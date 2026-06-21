@@ -9,6 +9,7 @@ idf_component_register(
         "diag_log.cpp"
         "ota_update.cpp"
         "mqtt_ha.cpp"
+        "display.cpp"
     INCLUDE_DIRS
         "."
     EMBED_TXTFILES
