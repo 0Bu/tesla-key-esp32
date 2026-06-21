@@ -1,4 +1,5 @@
 #include "http_server.hpp"
+#include "sdkconfig.h"
 #include "diag_log.hpp"
 #include "ota_update.hpp"
 #include "mqtt_ha.hpp"
@@ -330,7 +331,11 @@ static esp_err_t handle_send_key(httpd_req_t* req) {
 static esp_err_t handle_version(httpd_req_t* req) {
     cJSON* root = cJSON_CreateObject();
     cJSON_AddStringToObject(root, "version", fw_version());
+#if CONFIG_IDF_TARGET_ESP32C5
+    cJSON_AddStringToObject(root, "platform", "ESP32-C5");
+#else
     cJSON_AddStringToObject(root, "platform", "ESP32-S3");
+#endif
     return send_json(req, 200, root);
 }
 

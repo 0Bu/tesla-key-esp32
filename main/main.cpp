@@ -26,6 +26,7 @@
 #include "provisioning.hpp"
 #include "diag_log.hpp"
 #include "mqtt_ha.hpp"
+#include "display.hpp"
 
 static const char* MDNS_HOSTNAME = "tesla-key-esp32";  // → http://tesla-key-esp32.local
 
@@ -287,6 +288,12 @@ extern "C" void app_main() {
     // no-op otherwise. Runs in its own task, independent of evcc/BLE/pairing.
     mqtt_ha_start(vehicle, config_store);
     log_heap("mqtt");
+
+    // On-device status display (LilyGo T-Dongle-C5). No-op unless the board build
+    // selects CONFIG_TESLA_DISPLAY_ENABLED; reads only cached state (never wakes
+    // the car) and is independent of MQTT.
+    display_start(vehicle);
+    log_heap("display");
 
     // We reached a healthy steady state (WiFi up, server running). If we just
     // booted a freshly OTA-flashed image in the "pending verify" state, mark it

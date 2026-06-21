@@ -134,6 +134,28 @@ jobs:
         with:
           path: ./_site
 
+  # Compile gate for the LilyGo T-Dongle-C5 (ESP32-C5) target. Build-only — does
+  # not publish a release or Pages (the ESP32-S3 remains the released firmware).
+  # This is the actual build verification for the C5 port; it needs no hardware.
+  build-c5:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Build firmware for ESP32-C5 (ESP-IDF v5.5.4)
+        uses: espressif/esp-idf-ci-action@v1
+        with:
+          esp_idf_version: v5.5.4
+          target: esp32c5
+          command: idf.py set-target esp32c5 build
+
+      - name: Upload C5 firmware artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: tesla-key-esp32-c5-dev
+          path: build/tesla-key-esp32.bin
+          if-no-files-found: warn
+
   deploy:
     needs: build
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'

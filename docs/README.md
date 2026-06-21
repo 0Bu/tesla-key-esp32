@@ -10,6 +10,30 @@ ESP32-S3 (BLE 5.0), ≥ 8 MB flash (dual-OTA layout: two 3 MB app slots). No PSR
 required. ESP32 / S2 / C3 not supported.
 USB data cable for flashing.
 
+### Experimental: ESP32-C5 / LilyGo T-Dongle-C5
+
+A second target, `esp32c5`, is build-verified in CI (job `build-c5`, ESP-IDF
+v5.5.4 — the first line with stable C5 support is v5.5.2). It targets the
+[LilyGo T-Dongle-C5](https://lilygo.cc/products/t-dongle-c5) (ESP32-C5HR8: 16 MB
+flash, 8 MB in-package PSRAM, native USB-A). Build it with:
+
+```bash
+idf.py set-target esp32c5 build      # picks up sdkconfig.defaults.esp32c5
+```
+
+`sdkconfig.defaults.esp32c5` enables the 8 MB PSRAM (Quad), the native
+USB-Serial/JTAG console, and the onboard **0.96" ST7735 status display**
+(`CONFIG_TESLA_DISPLAY_ENABLED`, `main/display.cpp`). The display renders the
+same charge/connection values as the web UI (SOC ring, charging state, power,
+current, WiFi/BLE/MQTT) from cache-only state — it never wakes the car and does
+not require MQTT. The offline layout validation render is
+`tools/display_sim.py` (also the 5×7 font source for `main/display_font.h`).
+
+> **Status:** firmware compiles for C5 in CI but is **not yet validated on
+> hardware**. The ST7735 RAM offsets / MADCTL / colour inversion
+> (`CONFIG_TESLA_DISPLAY_*`) may need tuning on first flash. The ESP32-S3
+> remains the released, hardware-proven target.
+
 ## Flash prebuilt artifacts
 
 Browser flasher + WiFi/VIN setup: [../README.md](../README.md). The flasher is served on
