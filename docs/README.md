@@ -14,11 +14,15 @@ USB data cable for flashing.
 
 The [LilyGo T-Dongle-S3](https://github.com/Xinyuan-LilyGO/T-Dongle-S3) (ESP32-S3, 16 MB
 flash, **no PSRAM**, native USB-A, 0.96" ST7735 LCD, driven landscape at 160×80) runs the
-**same firmware image** as a plain ESP32-S3 — there is no separate build. The on-device
-display is selected at **runtime**: flash the normal image, then in the web UI tap
-**Connection → Board** and choose **t-dongle-s3** (stored in NVS, survives OTA). A plain
-ESP32-S3 stays on **generic** (the default) and the display code is a no-op (costs no SRAM).
-One image, one OTA channel for every board.
+**same firmware image** as a plain ESP32-S3 — there is no separate build. **Just flash and
+go: the display turns on automatically.** The board is **auto-detected** at boot — the
+T-Dongle-S3's onboard TF-card slot puts external pull-ups on the S3's SDMMC lines, which a
+bare ESP32-S3 lacks, so the firmware probes them (`display_detect_board()`) and enables the
+panel only on the dongle. The ST7735 itself can't be probed (its SDA is write-only — no
+MISO), hence the indirect signature. To override the guess, tap **Connection → Board** in
+the web UI (`auto` / `generic` / `t-dongle-s3`; stored in NVS, survives OTA). On a
+panel-less board the display code is a no-op (costs no SRAM). One image, one OTA channel,
+zero per-board setup.
 
 ```bash
 # Same build as any ESP32-S3 — no overlay:

@@ -20,6 +20,8 @@
 #include "esp_heap_caps.h"
 #include "esp_app_desc.h"
 #include "esp_netif.h"
+#include "esp_attr.h"      // RTC_NOINIT_ATTR — display crash-loop guard counter
+#include "esp_timer.h"     // one-shot to clear the guard after a healthy run
 
 #include "ble_client.hpp"
 #include "nvs_storage.hpp"
@@ -33,6 +35,41 @@
 static const char* MDNS_HOSTNAME = "tesla-key-esp32";  // → http://tesla-key-esp32.local
 
 static const char* TAG = "main";
+
+// ─── On-device display crash-loop guard ───────────────────────────────────────
+// The display driver writes SPI to fixed GPIOs (display_board_preset()). If the NVS
+// `board` is wrong for the hardware (or a future board wires those pins to something
+// else), bringing the panel up could hang/panic early — and a reboot loop is doubly
+// bad here: each boot re-opens the BLE poll window, so a parked car never sleeps.
+// The display can't be auto-detected (same SoC on every board; the ST7735 has no
+// readable ID — MISO isn't wired), so instead we count consecutive early panics that
+// happened with the display ON and, after a few, force it OFF to break the loop.
+// Counter lives in RTC memory: it survives a panic→reboot (a CPU reset, not a power
+// reset) but a power-cycle clears it (magic mismatch) → the panel gets a fresh try.
+RTC_NOINIT_ATTR static uint32_t s_disp_guard_magic;
+RTC_NOINIT_ATTR static uint32_t s_disp_attempts;
+static const uint32_t DISP_GUARD_MAGIC = 0xD15B0070;
+static const uint32_t DISP_MAX_ATTEMPTS = 3;     // strikes before the panel is forced off
+static const uint64_t DISP_HEALTHY_US   = 30ULL * 1000 * 1000;   // survive this → clear
+
+static bool s_display_forced_off = false;        // reflected in /status for diagnostics
+bool display_forced_off() { return s_display_forced_off; }
+
+// Clear the strike count so the panel is retried on the next boot. Called when the user
+// explicitly (re)selects a board in the web UI — a deliberate "use this, try again".
+void display_crashguard_reset() { s_disp_attempts = 0; s_disp_guard_magic = DISP_GUARD_MAGIC; }
+
+// The board resolved at boot (NVS override / build default / auto-detect) — the EFFECTIVE
+// value, which /status reports (the raw NVS key may be empty in auto mode). s_board_auto
+// is true when it came from hardware auto-detect rather than an explicit pin.
+static std::string s_active_board = "generic";
+static bool        s_board_auto   = false;
+const char* active_board() { return s_active_board.c_str(); }
+bool        board_is_auto() { return s_board_auto; }
+
+// Fired ~30 s after a boot that brought the panel up without crash-looping: the
+// display isn't the cause of any early instability, so reset the strike count.
+static void disp_guard_clear_cb(void*) { s_disp_attempts = 0; }
 
 // ─── Wall clock ───────────────────────────────────────────────────────────────
 // NTP (esp_sntp) is the primary time source; the browser (POST /set_time) is only a
@@ -278,10 +315,48 @@ extern "C" void app_main() {
     // boot shows the WiFi search instead of a black screen. The ~25 KB framebuffer
     // (no-PSRAM board) allocates from the still-fresh heap here, and only when a
     // display is actually selected — see the log_heap below.
-    static std::string board = CONFIG_TESLA_DEFAULT_BOARD;
-    config_store.load_str("board", board);
+    // Resolve the board (on-device display wiring), in priority order:
+    //   1. NVS `board` — an explicit web-UI override (Connection → Board).
+    //   2. CONFIG_TESLA_DEFAULT_BOARD — a build-time forced board (default "auto").
+    //   3. auto-detect from the hardware (T-Dongle-S3 SDMMC pull-ups vs a bare S3).
+    // So a T-Dongle lights its panel with zero setup, a plain S3 stays dark, and either
+    // can be pinned manually if the guess is ever wrong.
+    static std::string board;
+    if (!config_store.load_str("board", board) || board.empty()) {
+        board = CONFIG_TESLA_DEFAULT_BOARD;
+        if (board.empty() || board == "auto") { board = display_detect_board(); s_board_auto = true; }
+    }
+    s_active_board = board;
     DisplayConfig display_cfg = display_board_preset(board.c_str());
-    ESP_LOGI(TAG, "board: %s (display %s)", board.c_str(), display_cfg.enabled ? "on" : "off");
+
+    // Crash-loop guard (see the RTC counter above). On a power-on the RTC value is
+    // garbage → the magic re-seeds a fresh count. If the panel was selected but the
+    // last few boots panicked early with it on, force it off this boot; otherwise
+    // record this attempt and schedule a one-shot to clear the count once we've run
+    // healthily for a while (a crash before then leaves the count standing → trips).
+    if (s_disp_guard_magic != DISP_GUARD_MAGIC) {
+        s_disp_guard_magic = DISP_GUARD_MAGIC;
+        s_disp_attempts = 0;
+    }
+    if (display_cfg.enabled) {
+        if (s_disp_attempts >= DISP_MAX_ATTEMPTS) {
+            ESP_LOGE(TAG, "display crash-guard: %u consecutive early panics with the panel "
+                          "on — forcing it OFF (fix `board` or power-cycle to retry)",
+                     (unsigned)s_disp_attempts);
+            display_cfg.enabled  = false;
+            s_display_forced_off = true;
+        } else {
+            s_disp_attempts++;
+            esp_timer_create_args_t ta = {};
+            ta.callback = &disp_guard_clear_cb;
+            ta.name     = "disp_guard";
+            esp_timer_handle_t th = nullptr;
+            if (esp_timer_create(&ta, &th) == ESP_OK) esp_timer_start_once(th, DISP_HEALTHY_US);
+        }
+    }
+
+    ESP_LOGI(TAG, "board: %s (display %s)", board.c_str(),
+             display_cfg.enabled ? "on" : (s_display_forced_off ? "OFF — crash-guard" : "off"));
     display_start(vehicle, display_cfg);
     log_heap("display");
 

@@ -18,6 +18,11 @@ struct DisplayConfig {
 // Preset wiring for a known board ("t-dongle-s3"); unknown/"generic" → {enabled=false}.
 DisplayConfig display_board_preset(const char* board);
 
+// Auto-detect the board from a hardware signature when the NVS `board` key isn't set:
+// returns "t-dongle-s3" if the LilyGo TF-card SDMMC pull-ups are present, else
+// "generic". See the implementation for the probe. Safe to call once at boot.
+const char* display_detect_board();
+
 // ─── On-device status display (LilyGo T-Dongle-S3 / -C5, 0.96" ST7735, 160x80) ─
 // Renders the charge/connection state directly on the panel, in landscape:
 //   • header: WiFi signal bars + SSID (left, scrolls horizontally if too long),

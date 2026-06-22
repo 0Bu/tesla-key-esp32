@@ -81,7 +81,7 @@ POST /send_key                                 # pair with vehicle (Charging Man
 POST /set_time                                 # set wall clock from the browser ({"ms":<epoch>}); fallback when NTP unreachable
 POST /set_vin                                  # persist VIN + reboot
 POST /set_mqtt                                 # persist MQTT broker (HA bridge) + reboot ({"broker":"host:port"}; "" disables)
-POST /set_board                                # persist board (on-device display) + reboot ({"board":"generic"|"t-dongle-s3"})
+POST /set_board                                # persist board (on-device display) + reboot ({"board":"auto"|"generic"|"t-dongle-s3"}; auto = re-enable hardware detection)
 GET  /api/proxy/1/version                      # {version, platform:"ESP32-S3"}
 GET  /ota/check[?ms=<epoch>]                   # start background manifest check (non-blocking); poll /ota/status. ms = browser-clock NTP fallback
 POST /ota/update                               # start background self-update (pull, then reboot)
@@ -107,14 +107,22 @@ USB-reflashed once via the web installer (full erase → WiFi/VIN/key reset, re-
 that, all updates are OTA and preserve NVS.
 
 **One image, one OTA channel for every board (1.3.0+).** The on-device display is NOT a
-build-time option — it is selected at **runtime** from the NVS `board` key, so the same
-firmware drives the panel on a LilyGo **T-Dongle-S3** (`board = "t-dongle-s3"`) and is a
-no-op on a panel-less ESP32-S3 (`board = "generic"`, the default — no SRAM cost). The
-panel wiring (pins/MADCTL/offsets/backlight polarity) is a preset in
-`display_board_preset()` (`main/display.cpp`); add a board there, no per-board build. Set
-the board live in the web UI (Connection → Board, `POST /set_board`, persisted in NVS,
-survives OTA) or via the `CONFIG_TESLA_DEFAULT_BOARD` factory default. So OTA is a single
-generic channel for all boards and a self-update never changes the display behaviour.
+build-time option — it is resolved at **runtime**, priority: NVS `board` (web-UI override)
+→ `CONFIG_TESLA_DEFAULT_BOARD` (build default, `"auto"`) → **hardware auto-detect**. So the
+same firmware drives the panel on a LilyGo **T-Dongle-S3** and is a no-op on a panel-less
+ESP32-S3 (no SRAM cost), with **zero setup** in the common case. Auto-detect
+(`display_detect_board()` in `main/display.cpp`): the ST7735 can't be probed (SDA is
+write-only, no MISO), but the T-Dongle-S3's onboard TF-card socket puts **external pull-ups
+on all six SDMMC lines** (GPIO 16/14/17/21/18/12) that a bare S3 lacks — read them with an
+internal pull-down, ≥4 HIGH ⇒ `t-dongle-s3`. **HW-verified: 6/6 HIGH on a T-Dongle-S3, 0/6
+on a generic ESP32-S3.** The panel wiring (pins/MADCTL/offsets/backlight) is a preset in
+`display_board_preset()`; add a board there, no per-board build. Override live in the web UI
+(Connection → Board: `auto`/`generic`/`t-dongle-s3`, `POST /set_board`, NVS, survives OTA).
+A **crash-loop guard** (RTC strike counter in `main.cpp`) force-disables the panel after 3
+consecutive early panics with it on — so a wrong board pick can't crash-loop (which would
+defeat car-sleep); reflected as `display_crashguard` in `/status`, cleared by a power-cycle
+or re-selecting the board. So OTA is a single generic channel for all boards and a
+self-update never changes the display behaviour.
 The console is the S3's native USB-Serial/JTAG (`CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG`,
 universal on every S3), and the 8 MB flash-size config runs fine on the T-Dongle-S3's
 16 MB chip. (History: 1.2.24 briefly used per-board OTA *channels* via a

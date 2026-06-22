@@ -90,18 +90,19 @@ menu "Tesla Key Configuration"
 
     config TESLA_DEFAULT_BOARD
         string "Default board (on-device display wiring)"
-        default "generic"
+        default "auto"
         help
             ONE firmware image serves every ESP32-S3 board — the on-device ST7735
-            display is selected at RUNTIME, not compile time. This is only the
-            FACTORY default that seeds the NVS `board` key on first boot; change it
-            live in the web UI (Connection → Board), where it persists in NVS and
-            survives OTA. Known values:
-              "generic"     — plain ESP32-S3, no panel (display is a no-op, no SRAM cost)
-              "t-dongle-s3" — LilyGo T-Dongle-S3 (onboard 0.96" ST7735, landscape 160x80)
-            Pin/MADCTL/backlight presets live in display_board_preset()
-            (main/display.cpp) — add a board there, no per-board build needed. Keep
-            "generic" here so a flash to an unknown board stays panel-less and safe;
-            switch a T-Dongle-S3 to its mode once via the web UI.
+            display is selected at RUNTIME, not compile time. Resolution order:
+            NVS `board` (web-UI override) → this build-time default → hardware
+            auto-detect. Values:
+              "auto"        — auto-detect (default): probe the LilyGo TF-card SDMMC
+                              pull-ups (display_detect_board()) → t-dongle-s3 if present,
+                              else generic. A T-Dongle lights its panel with no setup.
+              "generic"     — force no panel (display is a no-op, no SRAM cost)
+              "t-dongle-s3" — force the LilyGo T-Dongle-S3 (0.96" ST7735, landscape)
+            Override live in the web UI (Connection → Board); it persists in NVS and
+            survives OTA. Presets live in display_board_preset() (main/display.cpp) —
+            add a board there, no per-board build needed.
 
 endmenu

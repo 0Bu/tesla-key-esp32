@@ -525,7 +525,8 @@ function render(s){
 
   // Board — on-device display wiring (tap to switch; one firmware, runtime-selected)
   var bd=s.board||'generic', bdc=$("boardConn");
-  bdc.className='cv'; bdc.innerHTML='<span>'+esc(bd)+'</span>';
+  var blbl=esc(bd)+(s.board_auto?' · auto':'')+(s.display_crashguard?' · display off (crash-guard)':'');
+  bdc.className='cv'+(s.display_crashguard?' warn':''); bdc.innerHTML='<span>'+blbl+'</span>';
 
   // header meta line: IP · version (IP first)
   $("ipline").innerHTML = s.ip ? esc(s.ip)+'&nbsp;·&nbsp;' : '';   // nbsp: overflow:hidden trims plain trailing spaces
@@ -614,11 +615,11 @@ function editMqtt(){
     .catch(function(){toast('Saved — device rebooting','info')});
 }
 function editBoard(){
-  var cur=(state&&state.board)?state.board:'generic';
-  var v=prompt('Board / on-device display:\n  generic     — no display\n  t-dongle-s3 — LilyGo T-Dongle-S3 (0.96" ST7735)',cur);
+  var cur=(state&&state.board_auto)?'auto':((state&&state.board)?state.board:'auto');
+  var v=prompt('Board / on-device display:\n  auto        — detect automatically (default)\n  generic     — force no display\n  t-dongle-s3 — force LilyGo T-Dongle-S3 (0.96" ST7735)',cur);
   if(v==null) return;
   v=v.trim();
-  if(v!=='generic'&&v!=='t-dongle-s3'){ toast('Unknown board — use generic or t-dongle-s3','err'); return; }
+  if(v!=='auto'&&v!=='generic'&&v!=='t-dongle-s3'){ toast('Unknown — use auto, generic or t-dongle-s3','err'); return; }
   if(v===cur){ toast('Board unchanged','info'); return; }
   toast('Saving board…','info');
   fetch('/set_board',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({board:v})})
