@@ -18,6 +18,8 @@
 #include "esp_ota_ops.h"
 #include "esp_system.h"
 #include "esp_heap_caps.h"
+#include "esp_app_desc.h"
+#include "esp_netif.h"
 
 #include "ble_client.hpp"
 #include "nvs_storage.hpp"
@@ -84,7 +86,14 @@ static bool wifi_connect(const char* ssid, const char* password) {
 
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
-    esp_netif_create_default_wifi_sta();
+    esp_netif_t* sta_netif = esp_netif_create_default_wifi_sta();
+
+    // DHCP client hostname: set BEFORE the lease is requested so the router can
+    // register it in its local DNS (e.g. http://tesla-key-esp32.fritz.box). Setting
+    // it later (at mDNS init, after WiFi is up) is too late — the DHCP DISCOVER has
+    // already gone out. Same name as the mDNS hostname so both agree.
+    if (esp_netif_set_hostname(sta_netif, MDNS_HOSTNAME) != ESP_OK)
+        ESP_LOGW(TAG, "could not set DHCP hostname '%s'", MDNS_HOSTNAME);
 
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&cfg));
@@ -218,7 +227,14 @@ extern "C" void app_main() {
     if (mdns_init() == ESP_OK) {
         mdns_hostname_set(MDNS_HOSTNAME);
         mdns_instance_name_set("tesla-key-esp32");
-        mdns_service_add(nullptr, "_http", "_tcp", 80, nullptr, 0);
+        // TXT records so discovery tools (dns-sd -B / avahi-browse / our own /scan)
+        // can tell multiple devices apart without first resolving each .local host.
+        // mdns copies these internally, so the pointers need only outlive the call.
+        mdns_txt_item_t txt[] = {
+            { "vin", vin.c_str() },
+            { "ver", esp_app_get_description()->version },
+        };
+        mdns_service_add(nullptr, "_http", "_tcp", 80, txt, 2);
         ESP_LOGI(TAG, "mDNS: http://%s.local", MDNS_HOSTNAME);
     } else {
         ESP_LOGW(TAG, "mDNS init failed");
