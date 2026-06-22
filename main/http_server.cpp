@@ -48,6 +48,14 @@ static esp_err_t send_json(httpd_req_t* req, int status, cJSON* root) {
     char* body = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
     httpd_resp_set_type(req, "application/json");
+    // On a fragmented heap cJSON_PrintUnformatted returns NULL rather than throwing, so this
+    // path bypasses the handle_all try/catch. Guard it: httpd_resp_sendstr(NULL) would
+    // strlen(NULL) and crash the C httpd task → reboot (which re-opens the poll window and
+    // defeats car sleep). Degrade to a 503 like handle_all's own OOM fallback.
+    if (!body) {
+        httpd_resp_set_status(req, "503 Service Unavailable");
+        return httpd_resp_sendstr(req, "{\"result\":false,\"reason\":\"out of memory\"}");
+    }
     if (status != 200) {
         httpd_resp_set_status(req, status == 400 ? "400 Bad Request"
                                 : status == 403 ? "403 Forbidden"
@@ -569,10 +577,13 @@ static esp_err_t handle_status(httpd_req_t* req) {
             cJSON* veh = cJSON_CreateObject();
             cJSON_AddNumberToObject(veh, "soc",    cs.battery_level);
             cJSON_AddStringToObject(veh, "status", cs.charging_state.c_str());
-            // Charging detail for the web UI: live power (kW) and current (A).
-            // Power is reported as a whole number (no decimals).
-            cJSON_AddNumberToObject(veh, "power",  (int)(cs.charger_power + 0.5f));
-            cJSON_AddNumberToObject(veh, "amps",   cs.charging_amps);
+            // Charging detail for the web UI: live power (kW) and current (A). Emitted only
+            // when the car actually reported them (proto3 optional) so the UI omits the chip
+            // rather than rendering a phantom 0. Power is a whole number (no decimals).
+            if (cs.has_charger_power)
+                cJSON_AddNumberToObject(veh, "power",  (int)(cs.charger_power + 0.5f));
+            if (cs.has_charging_amps)
+                cJSON_AddNumberToObject(veh, "amps",   cs.charging_amps);
             cJSON_AddItemToObject(root, "vehicle", veh);
         }
     }

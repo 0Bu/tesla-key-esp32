@@ -194,14 +194,16 @@ static void publish_state() {
         ChargeStateResult cs = s_vehicle->get_cached_charge();
         if (cs.valid) {
             cJSON* o = cJSON_CreateObject();
-            cJSON_AddNumberToObject(o, "soc",          cs.battery_level);
-            cJSON_AddNumberToObject(o, "charge_limit", cs.charge_limit_soc);
-            cJSON_AddNumberToObject(o, "power",        cs.charger_power);
-            cJSON_AddNumberToObject(o, "amps",         cs.charging_amps);
+            // Emit each numeric field only when the car reported it (proto3 optional), so an
+            // unseen value reads "unknown" in HA rather than a phantom 0.
+            if (cs.has_battery_level)    cJSON_AddNumberToObject(o, "soc",          cs.battery_level);
+            if (cs.has_charge_limit_soc) cJSON_AddNumberToObject(o, "charge_limit", cs.charge_limit_soc);
+            if (cs.has_charger_power)    cJSON_AddNumberToObject(o, "power",        cs.charger_power);
+            if (cs.has_charging_amps)    cJSON_AddNumberToObject(o, "amps",         cs.charging_amps);
             // Tesla reports these imperial; convert to metric for HA (the Tesla-compatible
             // /api path keeps miles for evcc). range: miles → km, rate: mph → km/h.
-            cJSON_AddNumberToObject(o, "range",        cs.battery_range * 1.609344);
-            cJSON_AddNumberToObject(o, "rate",         cs.charge_rate   * 1.609344);
+            if (cs.has_battery_range)    cJSON_AddNumberToObject(o, "range",        cs.battery_range * 1.609344);
+            if (cs.has_charge_rate)      cJSON_AddNumberToObject(o, "rate",         cs.charge_rate   * 1.609344);
             if (!cs.charging_state.empty())
                 cJSON_AddStringToObject(o, "charging_state", cs.charging_state.c_str());
             pub_json(s_topic[D_CHARGE], o);

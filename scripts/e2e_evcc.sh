@@ -56,23 +56,33 @@ FW="$(echo "$STATUS" | sed -n 's/.*"version":"\([^"]*\)".*/\1/p')"; echo "  firm
 hdr "2. GET vehicle_data?endpoints=charge_state  (${ITER}× — evcc's poll)"
 RES="$(kex '
 VIN='"$ESC_VIN"'; BASE='"$ESC_BASE"'; N='"$ITER"'; TO='"$TIMEOUT"'
-f=0; mx=0; sum=0
+f=0; stale=0; mx=0; sum=0
 for i in $(seq 1 $N); do
   s=$(date +%s%3N)
   b=$(wget -qO- --timeout=$TO "$BASE/api/1/vehicles/$VIN/vehicle_data?endpoints=charge_state" 2>/dev/null); rc=$?
   e=$(date +%s%3N); d=$((e-s)); sum=$((sum+d)); [ $d -gt $mx ] && mx=$d
-  echo "$b" | grep -q "\"result\":true" || rc=99
-  [ $rc -ne 0 ] && f=$((f+1))
+  # A real failure is a transport error/timeout OR a body missing the charge_state evcc
+  # parses. A well-formed body with "result":false is NOT a failure: it is the honest
+  # stale-cache response while the car is asleep (served in ~0ms; evcc reads
+  # .response.response.charge_state.* and never checks .response.result), so count it
+  # separately as "stale" rather than conflating it with a timeout.
+  if [ $rc -ne 0 ] || ! echo "$b" | grep -q "\"charge_state\""; then
+    f=$((f+1))
+  elif ! echo "$b" | grep -q "\"result\":true"; then
+    stale=$((stale+1))
+  fi
 done
-echo "FAILS=$f MAX=$mx AVG=$((sum/N))"
+echo "FAILS=$f STALE=$stale MAX=$mx AVG=$((sum/N))"
 echo "SAMPLE=$b"
 ')"
 FAILS=$(echo "$RES" | sed -n 's/.*FAILS=\([0-9]*\).*/\1/p')
+STALE=$(echo "$RES" | sed -n 's/.*STALE=\([0-9]*\).*/\1/p')
 MAXMS=$(echo "$RES" | sed -n 's/.*MAX=\([0-9]*\).*/\1/p')
 AVGMS=$(echo "$RES" | sed -n 's/.*AVG=\([0-9]*\).*/\1/p')
 SAMPLE=$(echo "$RES" | sed -n 's/^SAMPLE=//p')
-echo "  latency: avg=${AVGMS}ms max=${MAXMS}ms   timeouts/failures: ${FAILS}/${ITER}"
-[ "${FAILS:-1}" = 0 ] && ok "0 timeouts over ${ITER} polls" || bad "${FAILS} timeout(s)/failure(s)"
+echo "  latency: avg=${AVGMS}ms max=${MAXMS}ms   transport failures: ${FAILS}/${ITER}   stale (car asleep): ${STALE:-0}/${ITER}"
+[ "${FAILS:-1}" = 0 ] && ok "0 timeouts/transport failures over ${ITER} polls" || bad "${FAILS} timeout(s)/transport failure(s)"
+[ "${STALE:-0}" != 0 ] && echo "  NOTE  ${STALE}/${ITER} returned result:false (stale cache — car asleep); well-formed & ~0ms, evcc-safe (it reads charge_state, not result)"
 # evcc parses these fields; all must be present and numeric (battery_range as float)
 for fld in charging_state battery_level charge_limit_soc charger_power charge_rate charge_amps battery_range; do
   echo "$SAMPLE" | grep -q "\"$fld\"" && ok "field present: $fld" || bad "field MISSING: $fld"

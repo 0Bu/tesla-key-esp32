@@ -15,13 +15,17 @@
 
 struct ChargeStateResult {
     bool valid{false};
-    float       battery_level{0};
-    float       charge_limit_soc{0};
+    // Numeric fields carry presence flags like the telemetry structs below: the car omits
+    // values it has no reading for (proto3 optional). The display paths (MQTT/HA, /status)
+    // emit a field only when present so it renders "unknown"/omitted, not a phantom 0. The
+    // evcc-facing /api path is the deliberate exception — it always emits every field.
+    float       battery_level{0};       bool has_battery_level{false};
+    float       charge_limit_soc{0};    bool has_charge_limit_soc{false};
     std::string charging_state;
-    float       charger_power{0};
-    float       charge_rate{0};
-    int         charging_amps{0};
-    float       battery_range{0};
+    float       charger_power{0};       bool has_charger_power{false};
+    float       charge_rate{0};         bool has_charge_rate{false};
+    int         charging_amps{0};       bool has_charging_amps{false};
+    float       battery_range{0};       bool has_battery_range{false};
 };
 
 struct VehicleStatusResult {
