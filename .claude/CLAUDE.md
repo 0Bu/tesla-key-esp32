@@ -123,8 +123,8 @@ The console is the S3's native USB-Serial/JTAG (`CONFIG_ESP_CONSOLE_USB_SERIAL_J
 universal on every S3), and the 8 MB flash-size config runs fine on the T-Dongle-S3's
 16 MB chip. (History: 1.2.24 briefly used per-board OTA *channels* via a
 `boards/t-dongle-s3.defaults` overlay + a `t-dongle-s3/` Pages subdir; 1.3.0 replaced that
-with this runtime selection — a T-Dongle-S3 migrates with one USB reflash of the unified
-image, then pick "t-dongle-s3" once in the web UI.)
+with this single auto-detected image — a T-Dongle-S3 migrates with one USB reflash, then
+auto-detects on every boot.)
 
 ## evcc Integration
 
