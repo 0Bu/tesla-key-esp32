@@ -20,33 +20,50 @@ bash scripts/e2e_evcc.sh
 The write path issues real signed-BLE commands to the car — only run it when the user has asked to test commands, and confirm scope first (see below):
 
 ```bash
-# wake_up, set_charging_amps (re-set current), set_charge_limit (change −10 then restore)
+# wake_up, set_charging_amps (re-set current), set_charge_limit (change −10 then restore),
+# door_lock/door_unlock (negative role test — must be REFUSED, see below)
 RUN_COMMANDS=1 TIMEOUT=25 bash scripts/e2e_evcc.sh
 
 # additionally charge_start / charge_stop — PHYSICALLY commands the car to start/stop charging
 RUN_COMMANDS=1 ALLOW_CHARGE_TOGGLE=1 TIMEOUT=25 bash scripts/e2e_evcc.sh
+
+# full command smoke test — additionally exercises EVERY remaining firmware command
+# (charge_port open/close, flash_lights, honk_horn, climate start/stop, sentry on/off,
+# scheduled_charging on/off). PHYSICALLY actuates the car; NOT part of the evcc path.
+RUN_COMMANDS=1 RUN_ALL_COMMANDS=1 TIMEOUT=25 bash scripts/e2e_evcc.sh
 ```
 
 Useful overrides (auto-discovered from the evcc DB if unset): `ESP32_URL`, `VIN`, `EVCC_NS` (default `default`), `ITER` (vehicle_data burst size), `TIMEOUT` (per-request seconds).
 
 ## Before running the write path — ask first
 
-`charge_start` / `charge_stop` are outward-facing physical actions on a real vehicle. Do **not** enable `ALLOW_CHARGE_TOGGLE=1` unless the user explicitly opted in. `set_charge_limit` changes the car's limit but the script restores it; report the baseline it captured.
+`charge_start` / `charge_stop` are outward-facing physical actions on a real vehicle. Do **not** enable `ALLOW_CHARGE_TOGGLE=1` unless the user explicitly opted in. The same goes for `RUN_ALL_COMMANDS=1`, which additionally flashes the lights, honks the horn, opens the charge-port flap, toggles climate/sentry, etc. — only run it when the user explicitly wants a full command smoke test (e.g. just after a flash). `set_charge_limit` changes the car's limit but the script restores it; report the baseline it captured. `door_lock`/`door_unlock` are safe — the car refuses them for the Charging-Manager role (that's exactly what the test asserts).
 
 ## What the script checks
 
-1. `GET /status` — device up, `paired:true`, BLE connected, firmware version.
-2. `GET vehicle_data?endpoints=charge_state` × `ITER` — **the critical no-timeout check.** Reports avg/max latency and a timeout count, and asserts every field evcc parses is present (`charging_state`, `battery_level`, `charge_limit_soc`, `charger_power`, `charge_rate`, `charge_amps`, `battery_range`).
+1. `GET /status` + `GET /api/proxy/1/version` — device up, `paired:true`, BLE connected, firmware version, the read-only `tele` telemetry block present (background poll alive), the `/api/proxy/1/version` endpoint (part of the proxy API surface — the firmware web UI/OTA read it; **evcc itself does not call it**), and that the two version sources agree (`/status` = `X`, proxy = `X-esp32` — catches a half-applied OTA).
+2. `GET vehicle_data?endpoints=charge_state` × `ITER` — **the critical no-timeout check.** Reports avg/max latency, a transport-failure count, and a separate *stale* count (well-formed `result:false` while the car sleeps — evcc-safe), and asserts every field evcc parses is present (`charging_state`, `battery_level`, `charge_limit_soc`, `charger_power`, `charge_rate`, `charge_amps`, `battery_range`).
 3. `GET body_controller_state` — live VCSEC BLE read (lock/sleep/presence).
-4. Commands (gated) — `wake_up`, `set_charging_amps`, `set_charge_limit` (change+restore), and optionally `charge_start`/`charge_stop`.
+4. Commands (gated by `RUN_COMMANDS=1`) — `wake_up`, `set_charging_amps`, `set_charge_limit` (change+restore), `door_lock`/`door_unlock` (**inverted** assertion: must be refused → confirms the Charging-Manager role boundary), and optionally `charge_start`/`charge_stop` (`ALLOW_CHARGE_TOGGLE=1`).
+4b. Extended sweep (gated by `RUN_ALL_COMMANDS=1`) — every remaining firmware command: `charge_port_door_open/close`, `flash_lights`, `honk_horn`, `auto_conditioning_start/stop`, `set_sentry_mode`, `set_scheduled_charging`. Each is "soft" (car-side `false` is a NOTE, not a FAIL) — the point is that the whole command surface dispatches and round-trips without faulting the proxy.
 5. evcc's own logs (last 30 min) — scanned for Tesla timeout/`deadline`/`canceled`/`refused`/`i/o` errors.
 
 Exit 0 + `✅ e2e OK` means evcc can drive the ESP32 with no timeouts.
+
+## Coverage map (test ↔ firmware surface)
+
+What this test deliberately does **not** touch, and why — so "e2e OK" is not mistaken for "every endpoint verified":
+
+- **Management / destructive endpoints are out of scope:** `/scan`, `/gen_keys`, `/send_key`, `/set_time`, `/set_vin`, `/set_mqtt`, `/ota/check`, `/ota/update`, `/ota/status`, and the `/` web UI. They re-pair, reboot, or wipe NVS — not part of the evcc runtime path. Verify those manually or via the flash/OTA skills. (`/set_mqtt` *is* a real route — `handle_set_mqtt` in `http_server.cpp`, POST `{"broker":"host:port"}` → persist + reboot; it's excluded here because it reboots, not because it's missing.)
+- **`/diag`** is used reactively (see *Diagnosing a real failure*), not asserted.
+- Everything the firmware *dispatches* — all 15 commands, `vehicle_data`, `body_controller_state`, `/status`, `/api/proxy/1/version` — is reachable by the test once the right gate is set (`RUN_COMMANDS` / `ALLOW_CHARGE_TOGGLE` / `RUN_ALL_COMMANDS`).
 
 ## Interpreting results
 
 - **Reads must never time out.** `vehicle_data` is served from the firmware's `last_known_charge_` cache (refreshed out-of-band while the BLE link is warm), so latency is ~0–3 ms even while a real BLE poll runs concurrently. A timeout here is a genuine problem — check device reachability and that BLE is connected (`/status`), and look at `GET /diag?verbose=1` on the device.
 - **`charge_start`/`charge_stop` returning `false` is usually NOT a bug.** The car rejects them based on live charging state — e.g. a vehicle at its limit / "Complete" refuses `charge_start` (`/diag` shows `Infotainment action failed: complete`). The script flags these as `NOTE`, not `FAIL`. They only truly pass when the car is plugged in and below its limit.
+- **`door_lock`/`door_unlock` are an *inverted* test — a car-side refusal is the PASS.** The key is enrolled Charging-Manager-only, so the car must reject them; `result:true` is a hard FAIL (the key would carry owner privileges — a security regression). Subtlety: the firmware answers `result:false` *even when the car is unreachable* (reason `"vehicle not reachable"`), so the test only treats a `result:false` with a **non-reachability** reason as the PASS; a reachability reason (or a transport timeout) is a FAIL "can't confirm — re-run with the car awake". So this assertion is only meaningful when the car is awake and signing (the `wake_up` issued first in `RUN_COMMANDS` nudges it).
+- **Extended-sweep (`RUN_ALL_COMMANDS`) commands returning `false` is usually NOT a bug** — same reasoning as charge_start/stop: acceptance depends on live state. The sweep proves the command path round-trips, not that the car acted.
 - evcc polls **only** `vehicle_data` on a loop (never `body_controller_state`), so routine operation never hits the blocking BLE read path.
 
 ## Diagnosing a real failure
