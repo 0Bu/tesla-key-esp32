@@ -184,6 +184,19 @@ code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
 .tile.tap:active .tedit{opacity:.7}
 .bars{vertical-align:-2px}
 .hbars{color:var(--ok)}
+/* BLE "searching…" glyph — the four signal bars fill up green one after another
+   (smallest first), bars not yet reached stay light green, then all reset and it
+   loops until the link is up. Replaces the old spinner ring. */
+.bars.search{color:var(--ok)}
+.bars.search rect{opacity:.25}
+.bars.search .sb1{animation:sb1 1.6s ease-in-out infinite}
+.bars.search .sb2{animation:sb2 1.6s ease-in-out infinite}
+.bars.search .sb3{animation:sb3 1.6s ease-in-out infinite}
+.bars.search .sb4{animation:sb4 1.6s ease-in-out infinite}
+@keyframes sb1{0%{opacity:.25} 10%,88%{opacity:1} 100%{opacity:.25}}
+@keyframes sb2{0%,18%{opacity:.25} 32%,88%{opacity:1} 100%{opacity:.25}}
+@keyframes sb3{0%,40%{opacity:.25} 54%,88%{opacity:1} 100%{opacity:.25}}
+@keyframes sb4{0%,62%{opacity:.25} 76%,88%{opacity:1} 100%{opacity:.25}}
 
 /* connection rows (Wi-Fi / Bluetooth / MQTT) */
 .conn{display:flex; flex-direction:column; margin-top:8px}
@@ -311,9 +324,19 @@ function poll(){
 
 /* ---------- signal glyph ---------- */
 function barsHTML(rssi){
-  var n = rssi>=-55?4 : rssi>=-67?3 : rssi>=-78?2 : rssi>=-90?1:0;
-  var H=[4,7,10,13], s='<svg class="bars" width="24" height="15" viewBox="0 0 21 13" fill="currentColor"><title>'+rssi+' dBm</title>';
+  // rssi==null → no link (e.g. BLE disconnected): draw the glyph with every bar faded so
+  // the row still shows a signal placeholder instead of jumping to text-only.
+  var n = rssi==null ? 0 : (rssi>=-55?4 : rssi>=-67?3 : rssi>=-78?2 : rssi>=-90?1:0);
+  var H=[4,7,10,13], s='<svg class="bars" width="24" height="15" viewBox="0 0 21 13" fill="currentColor"><title>'+(rssi==null?'No signal':rssi+' dBm')+'</title>';
   for(var i=0;i<4;i++) s+='<rect x="'+(i*5.3)+'" y="'+(13-H[i])+'" width="3.3" height="'+H[i]+'" rx="1" opacity="'+(i<n?1:0.25)+'"/>';
+  return s+'</svg>';
+}
+// animated "searching…" glyph — same geometry as barsHTML, but each bar carries an
+// .sbN class whose @keyframes light it green in turn (cumulative fill), looping until
+// the BLE link is up. Opacity is driven entirely by CSS, so no opacity attr here.
+function searchBarsHTML(){
+  var H=[4,7,10,13], s='<svg class="bars search" width="24" height="15" viewBox="0 0 21 13" fill="currentColor"><title>Searching…</title>';
+  for(var i=0;i<4;i++) s+='<rect class="sb'+(i+1)+'" x="'+(i*5.3)+'" y="'+(13-H[i])+'" width="3.3" height="'+H[i]+'" rx="1"/>';
   return s+'</svg>';
 }
 // continuous SOC colour: red → amber → light green → dark green, interpolated
@@ -404,7 +427,11 @@ function render(s){
     var wtxt=w.ssid?'<span class="nm">'+esc(w.ssid)+'</span>':'';
     wc.className='cv ok';
     wc.innerHTML=wbars+wdbm+wtxt;
-  } else { wc.className='cv'; wc.innerHTML='<span class="ph">disconnected</span>'; }
+  } else {
+    // not connected — the bars fill up green one after another (same animation as the BLE
+    // "searching" row) instead of a plain text label, while the device keeps reconnecting.
+    wc.className='cv'; wc.innerHTML=searchBarsHTML()+'<span>Searching…</span>';
+  }
 
   // re-pair notice — key was removed by the car and regenerated
   var rb=$("reauthBanner");
@@ -476,11 +503,14 @@ function render(s){
     bc.className='cv ok';
     bc.innerHTML=bbars+bdbm+btxt;
   } else if(ble.scanning){
-    // searching for the car — a spinning status ring sits at the left of the value (where the
-    // signal bars go when connected); it appears only while scanning and clears otherwise.
-    bc.className='cv'; bc.innerHTML=otaMiniRing(0,true,'var(--ok)')+'<span>Searching…</span>';
+    // searching for the car — the signal bars sit where they do when connected, but fill up
+    // green one after another (CSS .bars.search animation) instead of a spinner; it appears
+    // only while scanning and clears otherwise.
+    bc.className='cv'; bc.innerHTML=searchBarsHTML()+'<span>Searching…</span>';
   } else {
-    bc.className='cv'; bc.innerHTML='<span class="ph">Disconnected</span>';
+    // disconnected — still show the (faded, empty) bar glyph so the row keeps the same
+    // shape as Wi-Fi rather than collapsing to text only.
+    bc.className='cv'; bc.innerHTML=barsHTML(null)+'<span class="ph">Disconnected</span>';
   }
 
   // MQTT — Home Assistant bridge (tap to set/change the broker)
