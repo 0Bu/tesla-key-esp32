@@ -226,6 +226,27 @@ static void draw_text_outline(int x, int y, const char* s, uint16_t col, int sca
     draw_text(x, y - 1, s, oc, scale); draw_text(x, y + 1, s, oc, scale);
     draw_text(x, y, s, col, scale);
 }
+// Like draw_text but only sets pixels with cx0 <= px < cx1 (the SSID scroll window).
+static void draw_text_clip(int x, int y, const char* s, uint16_t col, int scale,
+                           int cx0, int cx1) {
+    for (; *s; ++s) {
+        char ch = (*s >= 0x20 && *s <= 0x7E) ? *s : ' ';
+        const uint8_t* g = DISPLAY_FONT5X7[ch - 0x20];
+        for (int c = 0; c < 5; ++c) {
+            uint8_t colbits = g[c];
+            for (int r = 0; r < 7; ++r) {
+                if (colbits & (1 << r)) {
+                    for (int dy = 0; dy < scale; ++dy)
+                        for (int dx = 0; dx < scale; ++dx) {
+                            int px = x + c * scale + dx;
+                            if (px >= cx0 && px < cx1) put(px, y + r * scale + dy, col);
+                        }
+                }
+            }
+        }
+        x += 6 * scale;
+    }
+}
 
 // Row-major bitmap: bit (w-1-c) of rows[r] = pixel (col c, row r). Template so the
 // 8-bit BT glyph and the 16-bit bolt share one routine.
@@ -317,21 +338,32 @@ static void draw_pairing(int frame) {
     draw_text((W - text_w("Pairing...", 2)) / 2, 42, buf, C_INK, 2);
 }
 
-// Truncate s in place with a trailing '.' if it would exceed maxpx at scale 1.
-static void fit(char* s, int maxpx) {
-    int n = (int)strlen(s);
-    if (n * 6 <= maxpx) return;
-    int keep = maxpx / 6;
-    if (keep < 1) { s[0] = '\0'; return; }
-    s[keep - 1] = '.';
-    s[keep]     = '\0';
+// Horizontal marquee for an over-long SSID: ping-pong (pause, scroll out to reveal
+// the end, pause, scroll back) so the whole name is readable. Returns the left
+// offset 0..span. Mirrors scroll_offset() in tools/display_sim.py.
+static constexpr int SCROLL_PAUSE = 8;   // ticks paused at each end
+static constexpr int SCROLL_SPEED = 2;   // px per tick
+static int scroll_offset(int tick, int span) {
+    if (span <= 0) return 0;
+    int travel = (span + SCROLL_SPEED - 1) / SCROLL_SPEED;   // ticks to cover the span
+    int period = 2 * SCROLL_PAUSE + 2 * travel;
+    int p = tick % period;
+    if (p < SCROLL_PAUSE) return 0;                          // pause at start
+    if (p < SCROLL_PAUSE + travel) {                         // scroll out
+        int o = (p - SCROLL_PAUSE) * SCROLL_SPEED;
+        return o < span ? o : span;
+    }
+    if (p < 2 * SCROLL_PAUSE + travel) return span;          // pause at end
+    int o = span - (p - 2 * SCROLL_PAUSE - travel) * SCROLL_SPEED;  // scroll back
+    return o > 0 ? o : 0;
 }
 
 // ─── compose one frame from cached state (mirrors tools/display_sim.py) ────────
-// Returns true when it drew an animated state (the task then animates fast).
+// Returns true when it drew something animated (search/pairing, or a scrolling
+// SSID) so the task keeps refreshing fast. `tick` is a monotonic frame counter;
 // `paired` = VehicleController::has_session(), sampled by the task (it hits NVS,
 // so it's not called every frame).
-static bool compose(VehicleController& v, int frame, bool paired) {
+static bool compose(VehicleController& v, int tick, bool paired) {
     fill(C_BG);
 
     ChargeStateResult cs = v.get_cached_charge();
@@ -349,15 +381,23 @@ static bool compose(VehicleController& v, int frame, bool paired) {
     bool battery_ok = !unreachable && have_soc;
     // BLE search bars appear ONLY when the car is out of range (no link, no data).
     bool ble_bars = !(wifi_searching || pairing || battery_ok);
+    bool scrolling = false;
 
     // ── header (taller, more legible): WiFi bars + SSID (scale 2) | BT + bars ─
     // Hide whichever small indicator is the active search hero; the big centre
-    // animation represents it instead.
+    // animation represents it instead. An over-long SSID scrolls (clipped marquee).
     if (!wifi_searching) {
         signal_bars(4, 4, rssi_bars(ap.rssi), C_BAR_ON);
         snprintf(buf, sizeof(buf), "%s", (const char*)ap.ssid);
-        fit(buf, (ble_bars ? (158 - 28) : (158 - 28 - 32)) / 2);  // /2 → scale-2 width
-        draw_text(28, 4, buf, C_INK, 2);
+        int avail = ble_bars ? (158 - 28) : (158 - 28 - 32);
+        int tw = text_w(buf, 2);
+        if (tw <= avail) {
+            draw_text(28, 4, buf, C_INK, 2);
+        } else {                                  // too long → horizontal marquee
+            int off = scroll_offset(tick, tw - avail);
+            draw_text_clip(28 - off, 4, buf, C_INK, 2, 28, 28 + avail);
+            scrolling = true;
+        }
     }
     if (!ble_bars) {
         int8_t brssi = 0;
@@ -372,12 +412,12 @@ static bool compose(VehicleController& v, int frame, bool paired) {
 
     // ── centre: WiFi search > pairing > battery > BLE search bars ────────────
     if (wifi_searching) {
-        draw_searching_text(frame, "WiFi", 2, 14, 42);   // "WiFi" word, not a glyph
+        draw_searching_text(tick, "WiFi", 2, 14, 42);   // "WiFi" word, not a glyph
         return true;
     }
-    if (pairing) { draw_pairing(frame); return true; }
+    if (pairing) { draw_pairing(tick); return true; }
     if (!battery_ok) {
-        draw_searching_icon(frame, DISPLAY_BT_ROWS, DISPLAY_BT_W, DISPLAY_BT_H,
+        draw_searching_icon(tick, DISPLAY_BT_ROWS, DISPLAY_BT_W, DISPLAY_BT_H,
                             SRCH_BT_X, SRCH_BT_Y);
         return true;
     }
@@ -422,25 +462,25 @@ static bool compose(VehicleController& v, int frame, bool paired) {
 
     if (asleep)
         draw_text((W - text_w("ASLEEP", 1)) / 2, 64, "ASLEEP", C_GREY, 1);
-    return false;
+    return scrolling;   // battery view still needs fast refresh while the SSID scrolls
 }
 
 // ─── refresh task ──────────────────────────────────────────────────────────--
-// Steady states refresh once a second; the BLE "searching" animation refreshes
-// fast (~8 fps) and advances a frame counter so the highlight sweeps smoothly.
+// `tick` is monotonic so animations (search sweep, pairing dots) and the SSID
+// marquee advance smoothly. When compose() reports nothing animating we idle at
+// 1 Hz; while something animates (incl. a scrolling SSID) we refresh fast (~8 fps).
 static void display_task(void* arg) {
     VehicleController& v = *static_cast<VehicleController*>(arg);
-    int frame = 0;
+    int tick = 0;
     bool paired = v.has_session();        // has_session() hits NVS — sample at ~1 Hz
     for (;;) {
-        bool animating = compose(v, frame, paired);
+        bool animating = compose(v, tick, paired);
         flush();
+        ++tick;
         if (animating) {
-            ++frame;
-            if (frame % 8 == 0) paired = v.has_session();   // ~1 Hz while animating
+            if (tick % 8 == 0) paired = v.has_session();    // ~1 Hz while animating
             vTaskDelay(pdMS_TO_TICKS(120));
         } else {
-            frame = 0;
             paired = v.has_session();                       // 1 Hz on the slow tick
             vTaskDelay(pdMS_TO_TICKS(1000));
         }

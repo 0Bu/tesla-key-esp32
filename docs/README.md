@@ -23,8 +23,9 @@ idf.py -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;boards/t-dongle-s3.defaults" \
 
 The overlay (`boards/t-dongle-s3.defaults`) enables the onboard **ST7735 status display**
 (`main/display.cpp`), the native USB-Serial/JTAG console, and the full 16 MB flash. The
-display shows a **header** (WiFi signal bars + SSID on the left, a Bluetooth symbol + BLE
-bars on the right) and a **gradient battery** filled to the SoC (red → amber → green), with a
+display shows a **header** (WiFi signal bars + SSID on the left — scrolling horizontally if the
+name is too long — and a Bluetooth symbol + BLE bars on the right) and a **gradient battery**
+filled to the SoC (red → amber → green), with a
 **charging bolt** while charging (hidden at 100 %) and an **ASLEEP** (dimmed) state. When a
 link isn't ready the battery is replaced, by priority — **WiFi search > pairing > battery >
 BLE search**. A search is a link label (the word **WiFi**, or a Bluetooth glyph for BLE) plus a

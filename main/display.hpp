@@ -4,7 +4,8 @@ class VehicleController;
 
 // ─── On-device status display (LilyGo T-Dongle-S3 / -C5, 0.96" ST7735, 160x80) ─
 // Renders the charge/connection state directly on the panel, in landscape:
-//   • header: WiFi signal bars + SSID (left), Bluetooth symbol + BLE bars (right)
+//   • header: WiFi signal bars + SSID (left, scrolls horizontally if too long),
+//             Bluetooth symbol + BLE bars (right)
 //   • body:   a battery filled to the SoC with a red→amber→green gradient; a
 //             charging bolt overlays while charging (hidden at 100%); the asleep
 //             state dims the fill ("ASLEEP").

@@ -228,6 +228,21 @@ class Canvas:
             self.char(cx, y, ch, col, scale)
             cx += 6 * scale
         return cx
+    def text_clip(self, x, y, s, col, scale, cx0, cx1):
+        # like text() but only sets pixels with cx0 <= px < cx1 (for the scroll box)
+        cx = x
+        for ch in s:
+            gl = glyph(ch)
+            for r in range(7):
+                row = gl[r]
+                for c in range(5):
+                    if c < len(row) and row[c] == '#':
+                        for dy in range(scale):
+                            for dx in range(scale):
+                                px = cx + c*scale + dx
+                                if cx0 <= px < cx1:
+                                    self.px(px, y + r*scale + dy, col)
+            cx += 6 * scale
     def text_outline(self, x, y, s, col, scale, oc):
         for ox, oy in [(-1,0),(1,0),(0,-1),(0,1)]:
             self.text(x+ox, y+oy, s, oc, scale)
@@ -250,11 +265,24 @@ class Canvas:
 def textw(s, scale=1):
     return len(s) * 6 * scale
 
-def fit(s, maxpx, scale=1):
-    if textw(s, scale) <= maxpx:
-        return s
-    n = max(0, maxpx // (6*scale))
-    return (s[:max(0, n-1)] + ".") if n >= 1 else ""
+# Horizontal marquee for an over-long SSID: ping-pong (pause, scroll out to reveal
+# the end, pause, scroll back) so the whole name is readable. Returns the left
+# offset 0..span. Mirrors scroll_offset() in display.cpp.
+SCROLL_PAUSE = 8     # ticks paused at each end
+SCROLL_SPEED = 2     # px per tick
+def scroll_offset(tick, span):
+    if span <= 0:
+        return 0
+    travel = (span + SCROLL_SPEED - 1) // SCROLL_SPEED      # ticks to cover the span
+    period = 2 * SCROLL_PAUSE + 2 * travel
+    p = tick % period
+    if p < SCROLL_PAUSE:
+        return 0
+    if p < SCROLL_PAUSE + travel:
+        return min((p - SCROLL_PAUSE) * SCROLL_SPEED, span)
+    if p < 2 * SCROLL_PAUSE + travel:
+        return span
+    return max(span - (p - 2 * SCROLL_PAUSE - travel) * SCROLL_SPEED, 0)
 
 def signal_bars(cv, x, y, level, on_col=BAR_ON):
     """4 ascending bars, bottom-aligned at y+14; lit green, unlit dark."""
@@ -327,6 +355,7 @@ def compose(cv, st):
     battery_ok = (link != "unreachable") and (soc is not None)
     # BLE search bars appear ONLY when the car is out of range (no link, no data).
     ble_bars = not (wifi_searching or pairing or battery_ok)
+    scrolling = False
 
     # ── header: WiFi bars + SSID (left) | BLE symbol + bars (right) ──────────
     # Hide whichever small indicator is the active search hero; the big centre
@@ -334,8 +363,14 @@ def compose(cv, st):
     # Taller, more legible status bar: scale-2 SSID, taller bars, divider at y22.
     if not wifi_searching:
         signal_bars(cv, 4, 4, st.get("wifi", 0))
-        name_max = (158 - 28) if ble_bars else (158 - 28 - 32)
-        cv.text(28, 4, fit(st.get("ssid") or "-", name_max, 2), INK, 2)
+        avail = (158 - 28) if ble_bars else (158 - 28 - 32)
+        ssid = st.get("ssid") or "-"
+        if textw(ssid, 2) <= avail:
+            cv.text(28, 4, ssid, INK, 2)
+        else:                                   # too long → horizontal marquee
+            off = scroll_offset(st.get("frame", 0), textw(ssid, 2) - avail)
+            cv.text_clip(28 - off, 4, ssid, INK, 2, 28, 28 + avail)
+            scrolling = True
 
     if not ble_bars:
         bx = 158 - 16                  # 4 bars * 4px
@@ -388,7 +423,7 @@ def compose(cv, st):
 
     if asleep:
         cv.text((W - textw("ASLEEP", 1))//2, 64, "ASLEEP", GREY, 1)
-    return False
+    return scrolling   # battery view still needs fast refresh while the SSID scrolls
 
 # ── render helpers ────────────────────────────────────────────────────────────
 def upscale(cv, S):
@@ -481,6 +516,41 @@ def cmd_search(out="tools/display_search.png"):
     write_png(out, bw, bh, big)
     print("wrote", out, f"({bw}x{bh})")
 
+def cmd_scroll(out="tools/display_scroll.png"):
+    """Render a too-long SSID at several marquee offsets to verify scroll + clipping."""
+    st = dict(wifi=3, ssid="MyHomeNetwork5GHz", ble=3, ble_on=True, soc=64,
+              charging=True, link="awake")
+    # pick frames across one full ping-pong period for this SSID
+    avail = 158 - 28 - 32
+    span = textw(st["ssid"], 2) - avail
+    travel = (span + SCROLL_SPEED - 1) // SCROLL_SPEED
+    period = 2 * SCROLL_PAUSE + 2 * travel
+    frames = [int(period * k / 8) for k in range(8)]
+    S = 4
+    pad, cap = 10, 16
+    cellw, cellh = W*S, H*S + cap
+    cols = 2
+    rows = (len(frames) + cols - 1)//cols
+    bw = cols*cellw + (cols+1)*pad
+    bh = rows*cellh + (rows+1)*pad
+    big = [[(8,9,12) for _ in range(bw)] for _ in range(bh)]
+    for idx, f in enumerate(frames):
+        cv = Canvas()
+        compose(cv, dict(st, frame=f))
+        up = upscale(cv, S)
+        r, cc = idx//cols, idx % cols
+        ox, oy = pad + cc*(cellw + pad), pad + r*(cellh + pad)
+        for y in range(H*S):
+            for x in range(W*S):
+                big[oy+y][ox+x] = up[y][x]
+        capcv = Canvas(); capcv.text(2, 4, "frame %d" % f, INK, 1)
+        capup = upscale(capcv, 2)
+        for y in range(cap):
+            for x in range(min(cellw, W*2)):
+                big[oy + H*S + y][ox + x] = capup[y][x]
+    write_png(out, bw, bh, big)
+    print("wrote", out, f"({bw}x{bh})")
+
 def cmd_cheader(out="main/display_font.h"):
     def cols_of(gl):
         cols = []
@@ -546,7 +616,9 @@ if __name__ == "__main__":
         cmd_states(arg or "tools/display_states.png")
     elif mode == "search":
         cmd_search(arg or "tools/display_search.png")
+    elif mode == "scroll":
+        cmd_scroll(arg or "tools/display_scroll.png")
     elif mode == "cheader":
         cmd_cheader(arg or "main/display_font.h")
     else:
-        print("usage: display_sim.py [png|states|search|cheader] [outfile]")
+        print("usage: display_sim.py [png|states|search|scroll|cheader] [outfile]")
