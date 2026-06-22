@@ -89,6 +89,12 @@ input.bad{border-color:var(--accent)}
         <div class="cnt" id="cnt">0 / 17</div>
       </div>
 
+      <div class="field">
+        <label for="host">Device name <span class="opt">· optional</span></label>
+        <input id="host" name="host" maxlength="32" placeholder="tesla-key-esp32-…" autocapitalize="off" autocorrect="off" oninput="hsan()">
+        <div class="cnt" id="hostHint" style="text-align:left">→ http://<i id="hpv">name</i>.local · leave blank for a unique per-device default. Set one each if you run more than one device.</div>
+      </div>
+
       <button class="save" type="submit" id="save">Save &amp; connect</button>
     </form>
   </div>
@@ -109,6 +115,12 @@ function cnt(){
   var v=$("vin"); v.value=v.value.toUpperCase().replace(/[^A-HJ-NPR-Z0-9]/g,'');
   $("cnt").textContent=v.value.length+' / 17';
   v.classList.toggle('bad', v.value.length>0 && v.value.length<17);
+}
+// Mirrors sanitize_hostname() on the device: lowercase, [a-z0-9-], space/_/. → '-'.
+function hsan(){
+  var h=$("host");
+  h.value=h.value.toLowerCase().replace(/[ _.]+/g,'-').replace(/[^a-z0-9-]/g,'').replace(/-+/g,'-').slice(0,32);
+  $("hpv").textContent=h.value.replace(/^-+|-+$/g,'')||'name';
 }
 $("f").addEventListener('submit',function(e){
   var vin=$("vin").value;

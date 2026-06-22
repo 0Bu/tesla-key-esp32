@@ -35,6 +35,12 @@ code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
 .logo svg{width:21px; height:21px; fill:#fff}
 .ttl{flex:1; min-width:0}
 .ttl h1{margin:0; font-size:21px; font-weight:650; letter-spacing:-.2px}
+/* the device name (mDNS .local) is tap-to-rename, with a pencil like the tiles */
+.htap{display:inline-flex; align-items:center; gap:7px; max-width:100%; cursor:pointer; -webkit-tap-highlight-color:transparent}
+.htap #devName{overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0}
+.hedit{flex:none; width:15px; height:15px; color:var(--muted); opacity:.4; fill:none;
+  stroke:currentColor; stroke-width:2; stroke-linecap:round; stroke-linejoin:round}
+.htap:active .hedit{opacity:.75}
 /* flex (not inline text) so the OTA ring centers within the text line-box and never
    grows the line height — keeps the cards below from shifting when the ring appears */
 .ttl .sub{font-size:15px; color:var(--muted); font-variant-numeric:tabular-nums; display:flex; align-items:center; min-width:0; overflow:hidden; white-space:nowrap}
@@ -233,7 +239,10 @@ code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
   <header class="top">
     <div class="logo"><svg viewBox="0 0 24 24"><path d="M13 2 4 14h6l-1 8 9-12h-6l1-8z"/></svg></div>
     <div class="ttl">
-      <h1>tesla-key-esp32</h1>
+      <h1><span class="htap" onclick="editHostname()" title="Tap to rename — its http://NAME.local address">
+        <span id="devName">tesla-key-esp32</span>
+        <svg class="hedit" viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>
+      </span></h1>
       <div class="sub"><span id="ipline"></span><span class="verlink" id="verLink" onclick="otaCheck()" title="Tap to check for updates">&mdash;</span><span class="otastat" id="otaStat"></span></div>
     </div>
   </header>
@@ -489,6 +498,10 @@ function render(s){
   else if(mq.connected){ mc.className='cv ok'; mc.innerHTML='<span>'+esc(mq.broker||'')+'</span>'; }
   else { mc.className='cv warn'; mc.innerHTML='<span>'+esc(mq.broker||'')+' · disconnected</span>'; }
 
+  // header title = the device's mDNS .local name (tap-to-rename); falls back to the
+  // product name until /status answers.
+  $("devName").textContent = s.hostname || 'tesla-key-esp32';
+
   // header meta line: IP · version (IP first)
   $("ipline").innerHTML = s.ip ? esc(s.ip)+'&nbsp;·&nbsp;' : '';   // nbsp: overflow:hidden trims plain trailing spaces
   var vl=$("verLink");
@@ -573,6 +586,24 @@ function editMqtt(){
       if(!o.result){ toast(o.reason||'Failed to save MQTT broker','err'); return; }
       if(/no reboot|unchanged|already/i.test(o.reason||'')){ toast(v?'MQTT broker unchanged':'MQTT already disabled','info'); return; }
       toast('Saved · rebooting','ok');})
+    .catch(function(){toast('Saved — device rebooting','info')});
+}
+// Mirrors sanitize_hostname() on the device: lowercase, [a-z0-9-], space/_/. → '-',
+// no leading/trailing/doubled '-', ≤32 chars.
+function hsan(v){return String(v).trim().toLowerCase().replace(/[ _.]+/g,'-').replace(/[^a-z0-9-]/g,'').replace(/-+/g,'-').replace(/^-+|-+$/g,'').slice(0,32);}
+function editHostname(){
+  var cur=(state&&state.hostname)?state.hostname:'';
+  var v=prompt('Device name for its http://NAME.local address (letters, digits, hyphen).\nLeave empty to reset to the unique per-device default.',cur);
+  if(v==null) return;
+  v=hsan(v);
+  if(v===cur){ toast('Device name unchanged','info'); return; }
+  toast(v?'Saving device name…':'Resetting to default…','info');
+  fetch('/set_hostname',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({hostname:v})})
+    .then(function(r){return r.json()})
+    .then(function(j){var o=(j&&j.response)||{};
+      if(!o.result){ toast(o.reason||'Failed to save device name','err'); return; }
+      if(/no reboot|unchanged/i.test(o.reason||'')){ toast('Device name unchanged','info'); return; }
+      toast(v?('Saved · http://'+v+'.local after reboot'):'Reset to default · rebooting','ok');})
     .catch(function(){toast('Saved — device rebooting','info')});
 }
 function wakeStop(){ waking=false; clearTimeout(wakeTimeout); }

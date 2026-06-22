@@ -16,6 +16,12 @@
 static const char* TAG = "provisioning";
 static const char* AP_SSID = "tesla-key-esp32-setup";
 
+// Defined in main.cpp (single authority). sanitize_hostname() reduces the optional
+// setup field to a valid DNS label; default_hostname() is the per-device .local name
+// used when the field is left blank — shown on the confirmation page.
+std::string sanitize_hostname(const std::string& in);
+std::string default_hostname();
+
 static NvsStorageAdapter* g_cfg = nullptr;
 
 // ─── HTML form ──────────────────────────────────────────────────────────────
@@ -87,6 +93,9 @@ static esp_err_t save_post(httpd_req_t* req) {
     std::string ssid = form_field(body, "ssid");
     std::string pass = form_field(body, "pass");
     std::string vin  = form_field(body, "vin");
+    // Optional custom mDNS hostname; blank → the per-device default. Sanitized to a
+    // valid DNS label by the same authority the runtime uses, so it can't break mDNS.
+    std::string host = sanitize_hostname(form_field(body, "host"));
 
     if (ssid.empty()) {
         httpd_resp_set_type(req, "text/html");
@@ -97,13 +106,19 @@ static esp_err_t save_post(httpd_req_t* req) {
     g_cfg->save_str("wifi_ssid", ssid);
     g_cfg->save_str("wifi_pass", pass);
     if (vin.size() == 17) g_cfg->save_str("vin", vin);
-    ESP_LOGI(TAG, "saved config: ssid='%s' vin='%s' — rebooting", ssid.c_str(), vin.c_str());
+    if (!host.empty()) g_cfg->save_str("hostname", host);
+    ESP_LOGI(TAG, "saved config: ssid='%s' vin='%s' host='%s' — rebooting",
+             ssid.c_str(), vin.c_str(), host.empty() ? "(default)" : host.c_str());
 
-    httpd_resp_set_type(req, "text/html");
-    httpd_resp_sendstr(req,
+    // Show the exact .local address the device will answer on (custom name if given,
+    // else the per-device default) so the user knows where to reach it after reboot.
+    std::string hostname = host.empty() ? default_hostname() : host;
+    std::string page =
         "<!doctype html><meta charset=utf-8><body style='font-family:system-ui'>"
         "<h2>Saved &#9989;</h2><p>Rebooting and connecting to your WiFi. "
-        "The device will be reachable at <b>http://tesla-key-esp32.local</b>.</p>");
+        "The device will be reachable at <b>http://" + hostname + ".local</b>.</p>";
+    httpd_resp_set_type(req, "text/html");
+    httpd_resp_sendstr(req, page.c_str());
 
     vTaskDelay(pdMS_TO_TICKS(1000));
     esp_restart();

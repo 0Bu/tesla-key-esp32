@@ -38,7 +38,7 @@ Never edit files in `managed_components/` — they are regenerated.
 
 | Namespace   | Content                                     |
 |-------------|---------------------------------------------|
-| `tesla_cfg` | WiFi SSID/pass, VIN, BLE MAC, `mqtt_uri`, `last_time` (runtime cfg) |
+| `tesla_cfg` | WiFi SSID/pass, VIN, BLE MAC, `mqtt_uri`, `hostname`, `hn_migrated`, `last_time` (runtime cfg) |
 | `tesla_ble` | Private key, VCSEC session, Info session, `key_created`, `paired_at` |
 
 ## Commands Implemented
@@ -73,7 +73,7 @@ otherwise.
 POST /api/1/vehicles/{VIN}/command/{command}   # execute command
 GET  /api/1/vehicles/{VIN}/vehicle_data        # charge state
 GET  /api/1/vehicles/{VIN}/body_controller_state
-GET  /status                                   # web-UI JSON (wifi, ble, mqtt, vehicle cache, read-only telemetry under "tele")
+GET  /status                                   # web-UI JSON (hostname, wifi, ble, mqtt, vehicle cache, read-only telemetry under "tele")
 POST /scan                                     # start a time-limited BLE discovery scan
 GET  /diag                                     # plain-text in-memory diag log (?verbose=1 raw RX / ?verbose=0 off, ?clear=1 reset)
 POST /gen_keys[?force=1]                       # generate key (refuses overwrite w/o force)
@@ -81,6 +81,7 @@ POST /send_key                                 # pair with vehicle (Charging Man
 POST /set_time                                 # set wall clock from the browser ({"ms":<epoch>}); fallback when NTP unreachable
 POST /set_vin                                  # persist VIN + reboot
 POST /set_mqtt                                 # persist MQTT broker (HA bridge) + reboot ({"broker":"host:port"}; "" disables)
+POST /set_hostname                             # persist mDNS/DHCP hostname + reboot ({"hostname":"tesla-garage"}; "" resets to per-device default)
 GET  /api/proxy/1/version                      # {version, platform:"ESP32-S3"}
 GET  /ota/check[?ms=<epoch>]                   # start background manifest check (non-blocking); poll /ota/status. ms = browser-clock NTP fallback
 POST /ota/update                               # start background self-update (pull, then reboot)
@@ -88,6 +89,36 @@ GET  /ota/status                               # poll OTA progress {state,progre
 ```
 
 No HTTP auth / TLS by design (evcc cannot send credentials) — trusted LAN only. See docs/SECURITY.md.
+
+## mDNS / hostname
+
+The device advertises `http://<hostname>.local` (mDNS) and registers the same name as its
+DHCP client hostname (so routers expose e.g. `<hostname>.fritz.box`). Set in `main.cpp`:
+`mdns_*` + `esp_netif_set_hostname()` (the latter **before** DHCP, inside `wifi_connect`).
+
+- **Default is unique per board:** `tesla-key-esp32-<mac3>` (last 3 bytes of the WiFi STA
+  MAC) — the SAME `<mac3>` the MQTT node id `teslakey_<mac3>` uses, so a board's names all
+  agree. This is deterministic (no boot-order race, unlike a runtime "is the name taken?"
+  probe) so **2+ devices on one LAN never collide on `.local`**.
+- **Override:** NVS `hostname` (set in the setup portal field, `POST /set_hostname`, or by
+  tapping the device name in the web-UI header; empty resets to the default).
+  `device_hostname()`/`default_hostname()` in `main.cpp` resolve it once at boot and expose
+  it via `device_hostname_current()` (used by `/status`; the header `#devName` renders it).
+- **OTA migration (`hn_migrated` marker):** a device upgraded from the old fixed-name
+  firmware already has WiFi creds but no `hostname` key. On the first boot of the new
+  firmware `main.cpp` *preserves* its legacy name by writing `hostname = "tesla-key-esp32"`,
+  so a routine OTA never silently renames it (which would break `tesla-key-esp32.local`
+  bookmarks and strand the post-update reconnect). Factory-fresh devices (no creds yet) skip
+  this and get the unique per-device default; the marker is set either way so a freshly
+  configured device's blank hostname isn't later mistaken for an upgrade.
+- **Sanitization:** `sanitize_hostname()` (one authority in `main.cpp`, used by the write
+  paths and re-applied on read) → lowercase, `[a-z0-9-]`, no leading/trailing/doubled `-`,
+  ≤32 chars. Mirrored as a client-side hint in `setup.html` / `index.html`.
+- **Discovery:** the `_http._tcp` service carries TXT records `vin` + `ver`, so
+  `dns-sd -B` / `avahi-browse` / `/scan` tell multiple devices apart without resolving each.
+- **Caveat (evcc):** containerized evcc (k3s pod) usually can't resolve `.local` (no mDNS in
+  the container) — use a DHCP reservation / static IP for the evcc `url:`. `.local` is the
+  browser convenience.
 
 ## OTA (self-update)
 
