@@ -213,7 +213,19 @@ std::string BleClient::peer_addr_str() const {
 
 bool BleClient::connected_rssi(int8_t& out) const {
     if (!is_connected()) return false;
-    return ble_gap_conn_rssi(conn_handle_, &out) == 0;
+    // Prefer a fresh live read; refresh the cache when it succeeds. 127 is NimBLE's
+    // "RSSI unknown" sentinel, so treat it as a failed read.
+    int8_t live = 0;
+    if (ble_gap_conn_rssi(conn_handle_, &live) == 0 && live != 127) {
+        conn_rssi_       = live;
+        conn_rssi_valid_ = true;
+        out = live;
+        return true;
+    }
+    // Live read failed (common while the controller is busy pairing) — fall back to the
+    // last-known value (seeded from the connect-time advert) so the UI still shows signal.
+    if (conn_rssi_valid_) { out = conn_rssi_; return true; }
+    return false;
 }
 
 // BleAdapter::connect — called by Vehicle when it wants us to connect.
@@ -309,6 +321,10 @@ int BleClient::on_gap_event(ble_gap_event* event) {
             peer_addr_str_ = addr_str;
             xSemaphoreGive(client_mutex_);
         }
+        // Seed the link RSSI from this advert so the UI has a real value to show from the
+        // moment we connect (incl. while pairing), before the first live read succeeds.
+        conn_rssi_       = event->disc.rssi;
+        conn_rssi_valid_ = true;
 
         connecting_   = true;
         want_connect_ = false;
@@ -366,6 +382,7 @@ int BleClient::on_gap_event(ble_gap_event* event) {
         connecting_        = false;
         want_connect_      = false;
         scanning_          = false;
+        conn_rssi_valid_   = false;   // stale once the link is gone
         if (client_mutex_) {
             xSemaphoreTake(client_mutex_, portMAX_DELAY);
             peer_addr_str_.clear();

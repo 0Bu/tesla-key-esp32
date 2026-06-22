@@ -124,6 +124,14 @@ private:
     uint16_t notify_handle_{0};
     uint16_t notify_val_handle_{0};
 
+    // Last-known link RSSI: seeded from the advert we connected to, then refreshed by
+    // every successful live read in connected_rssi(). The live HCI "Read RSSI" can fail
+    // transiently (e.g. while the controller is busy pairing), so this fallback keeps the
+    // web UI showing real signal strength during pairing instead of nothing. mutable: the
+    // refresh happens inside the const connected_rssi() accessor.
+    mutable int8_t conn_rssi_{0};
+    mutable bool   conn_rssi_valid_{false};
+
     uint16_t svc_start_handle_{0};
     uint16_t svc_end_handle_{0};
 
