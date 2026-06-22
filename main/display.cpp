@@ -299,6 +299,15 @@ static void draw_searching(int frame, const uint8_t* icon, int iw, int ih, int i
     }
 }
 
+// Shown (instead of the search bars) once a BLE link is up but pairing isn't done:
+// big "Pairing" with an animated 0–3 dot ellipsis (fixed left so it doesn't jiggle).
+static void draw_pairing(int frame) {
+    int nd = (frame / 4) % 4;
+    char buf[12];
+    snprintf(buf, sizeof(buf), "Pairing%.*s", nd, "...");
+    draw_text((W - text_w("Pairing...", 2)) / 2, 42, buf, C_INK, 2);
+}
+
 // Truncate s in place with a trailing '.' if it would exceed maxpx at scale 1.
 static void fit(char* s, int maxpx) {
     int n = (int)strlen(s);
@@ -310,50 +319,56 @@ static void fit(char* s, int maxpx) {
 }
 
 // ─── compose one frame from cached state (mirrors tools/display_sim.py) ────────
-// Returns true when it drew the searching animation (the task then animates fast).
-static bool compose(VehicleController& v, int frame) {
+// Returns true when it drew an animated state (the task then animates fast).
+// `paired` = VehicleController::has_session(), sampled by the task (it hits NVS,
+// so it's not called every frame).
+static bool compose(VehicleController& v, int frame, bool paired) {
     fill(C_BG);
 
     ChargeStateResult cs = v.get_cached_charge();
     bool have_soc = cs.valid && cs.has_battery_level;
     VehicleController::LinkState ls = v.link_state();
     bool unreachable = (ls == VehicleController::LinkState::Unreachable);
+    bool ble_connected = v.ble_connected();
 
     char buf[48];
     wifi_ap_record_t ap = {};
     bool wifi_on = (esp_wifi_sta_get_ap_info(&ap) == ESP_OK);
-    // What's being searched. WiFi has priority when both are down.
+    // Centre state, by priority: WiFi search > pairing > battery > BLE search bars.
     bool wifi_searching = !wifi_on;
-    bool ble_searching = unreachable || !have_soc;
-    bool ble_is_hero = ble_searching && !wifi_searching;   // BLE shown as the hero search
+    bool pairing = ble_connected && !paired;              // BLE link up but not yet paired
+    bool battery_ok = !unreachable && have_soc;
+    // BLE search bars appear ONLY when the car is out of range (no link, no data).
+    bool ble_bars = !(wifi_searching || pairing || battery_ok);
 
     // ── header: WiFi bars + SSID (left) | BLE symbol + bars (right) ──────────
-    // Each side is hidden while it is the active (hero) search — the big centre
+    // Hide whichever small indicator is the active search hero; the big centre
     // animation represents it instead.
     if (!wifi_searching) {
         signal_bars(4, 3, rssi_bars(ap.rssi), C_BAR_ON);
         snprintf(buf, sizeof(buf), "%s", (const char*)ap.ssid);
-        fit(buf, ble_is_hero ? (158 - 26) : (158 - 26 - 36));
+        fit(buf, ble_bars ? (158 - 26) : (158 - 26 - 36));
         draw_text(26, 4, buf, C_INK, 1);
     }
-    if (!ble_is_hero) {
+    if (!ble_bars) {
         int8_t brssi = 0;
-        bool ble_on = v.ble_connected() && v.ble_rssi(brssi);
+        bool rssi_ok = ble_connected && v.ble_rssi(brssi);
         int bx = 158 - 16;                    // 4 bars * 4px
-        signal_bars(bx, 3, ble_on ? rssi_bars(brssi) : 0, C_BAR_ON);
+        signal_bars(bx, 3, rssi_ok ? rssi_bars(brssi) : 0, C_BAR_ON);
         blit_rows(bx - 9, 2, DISPLAY_BT_ROWS, DISPLAY_BT_W, DISPLAY_BT_H, 1,
-                  ble_on ? C_INK : C_GREY);
+                  ble_connected ? C_INK : C_GREY);
     }
 
     rect(3, 17, W - 3, 18, C_DIV);            // divider under the header
 
-    // ── searching: big animated bars instead of the battery (WiFi > BLE) ────
+    // ── centre: WiFi search > pairing > battery > BLE search bars ────────────
     if (wifi_searching) {
         draw_searching(frame, DISPLAY_WIFI_ROWS, DISPLAY_WIFI_W, DISPLAY_WIFI_H,
                        SRCH_WIFI_X, SRCH_WIFI_Y);
         return true;
     }
-    if (ble_searching) {
+    if (pairing) { draw_pairing(frame); return true; }
+    if (!battery_ok) {
         draw_searching(frame, DISPLAY_BT_ROWS, DISPLAY_BT_W, DISPLAY_BT_H,
                        SRCH_BT_X, SRCH_BT_Y);
         return true;
@@ -408,14 +423,17 @@ static bool compose(VehicleController& v, int frame) {
 static void display_task(void* arg) {
     VehicleController& v = *static_cast<VehicleController*>(arg);
     int frame = 0;
+    bool paired = v.has_session();        // has_session() hits NVS — sample at ~1 Hz
     for (;;) {
-        bool animating = compose(v, frame);
+        bool animating = compose(v, frame, paired);
         flush();
         if (animating) {
             ++frame;
+            if (frame % 8 == 0) paired = v.has_session();   // ~1 Hz while animating
             vTaskDelay(pdMS_TO_TICKS(120));
         } else {
             frame = 0;
+            paired = v.has_session();                       // 1 Hz on the slow tick
             vTaskDelay(pdMS_TO_TICKS(1000));
         }
     }

@@ -26,13 +26,14 @@ The overlay (`boards/t-dongle-s3.defaults`) enables the onboard **ST7735 status 
 display shows a **header** (WiFi signal bars + SSID on the left, a Bluetooth symbol + BLE
 bars on the right) and a **gradient battery** filled to the SoC (red → amber → green), with a
 **charging bolt** while charging (hidden at 100 %) and an **ASLEEP** (dimmed) state. When a
-link is down the battery is replaced by an animated **searching** indicator — a link icon
-(WiFi or Bluetooth) plus a compact bar cluster whose dark-green highlight sweeps across
-light-green bars; **WiFi-down takes priority** over car-unreachable, and the header hides
-whichever small indicator is the active search. All from cache-only state, so it never wakes
-the car and does not depend on MQTT. Offline pixel-exact validation: `python3
-tools/display_sim.py states` (every state) and `python3 tools/display_sim.py search` (the WiFi
-and BLE searching animations).
+link isn't ready the battery is replaced, by priority — **WiFi search > pairing > battery >
+BLE search**. A search is a link icon (WiFi or Bluetooth) plus a compact bar cluster whose
+dark-green highlight ping-pongs across light-green bars; the **BLE search bars show only when
+the car is out of range**, and once a BLE link is up but not yet paired it shows a big animated
+**"Pairing…"** instead. The header hides whichever small indicator is the active search. All
+from cache-only state, so it never wakes the car and does not depend on MQTT. Offline
+pixel-exact validation: `python3 tools/display_sim.py states` (every state) and `python3
+tools/display_sim.py search` (the WiFi and BLE searching animations).
 
 > **Status:** builds in CI (job `build-tdongle-s3`, ESP-IDF v5.5.4); pending validation on
 > physical hardware. Two caveats: (1) **no PSRAM** → the ~25 KB framebuffer lands in internal

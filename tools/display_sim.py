@@ -305,6 +305,13 @@ def draw_searching(cv, frame, icon):
 SRCH_ICON_BLE  = (BT_ROWS,   SRCH_BT_X,   SRCH_BT_Y)
 SRCH_ICON_WIFI = (WIFI_ROWS, SRCH_WIFI_X, SRCH_WIFI_Y)
 
+# Shown (instead of the search bars) once a BLE link is up but pairing isn't done:
+# big "Pairing" with an animated 0–3 dot ellipsis (fixed left so it doesn't jiggle).
+def draw_pairing(cv, frame):
+    nd = (frame // 4) % 4
+    x0 = (W - textw("Pairing...", 2)) // 2
+    cv.text(x0, 42, "Pairing" + "." * nd, INK, 2)
+
 # ── compose one frame from a state dict ───────────────────────────────────────
 # state = { wifi:0..4, ssid:str, ble:0..4, ble_on:bool, frame:int,
 #           soc:int|None, charging:bool, link:"awake"|"asleep"|"unreachable" }
@@ -316,33 +323,40 @@ def compose(cv, st):
     link = st.get("link", "awake")
     charging = st.get("charging", False)
     wifi_on = st.get("wifi", 0) > 0
-    # What's being searched. WiFi has priority when both are down.
+    paired = st.get("paired", True)
+    ble_conn = st.get("ble_on", False)
+    # Centre state, by priority: WiFi search > pairing > battery > BLE search bars.
     wifi_searching = not wifi_on
-    ble_searching = (link == "unreachable") or (soc is None)
-    ble_is_hero = ble_searching and not wifi_searching      # BLE shown as the hero search
+    pairing = ble_conn and not paired                 # BLE link up but not yet paired
+    battery_ok = (link != "unreachable") and (soc is not None)
+    # BLE search bars appear ONLY when the car is out of range (no link, no data).
+    ble_bars = not (wifi_searching or pairing or battery_ok)
 
     # ── header: WiFi bars + SSID (left) | BLE symbol + bars (right) ──────────
-    # Each side is hidden while it is the active (hero) search — the big centre
+    # Hide whichever small indicator is the active search hero; the big centre
     # animation represents it instead.
     if not wifi_searching:
         signal_bars(cv, 4, 3, st.get("wifi", 0))
-        name_max = (158 - 26) if ble_is_hero else (158 - 26 - 36)
+        name_max = (158 - 26) if ble_bars else (158 - 26 - 36)
         cv.text(26, 4, fit(st.get("ssid") or "-", name_max), INK)
 
-    if not ble_is_hero:
-        ble_on = st.get("ble_on", False)
+    if not ble_bars:
         bx = 158 - 16                  # 4 bars * 4px
-        signal_bars(cv, bx, 3, st.get("ble", 0) if ble_on else 0)
-        cv.bitmap(bx - 9, 2, BT_ROWS, INK if ble_on else GREY)
+        signal_bars(cv, bx, 3, st.get("ble", 0) if ble_conn else 0)
+        cv.bitmap(bx - 9, 2, BT_ROWS, INK if ble_conn else GREY)
 
     cv.rect(3, 17, W - 3, 18, DIV)     # divider under the header
 
-    # ── searching: big animated bars instead of the battery (WiFi > BLE) ────
+    # ── centre: WiFi search > pairing > battery > BLE search bars ────────────
+    f = st.get("frame", 0)
     if wifi_searching:
-        draw_searching(cv, st.get("frame", 0), SRCH_ICON_WIFI)
+        draw_searching(cv, f, SRCH_ICON_WIFI)
         return True
-    if ble_searching:
-        draw_searching(cv, st.get("frame", 0), SRCH_ICON_BLE)
+    if pairing:
+        draw_pairing(cv, f)
+        return True
+    if not battery_ok:
+        draw_searching(cv, f, SRCH_ICON_BLE)
         return True
 
     # ── battery shell ───────────────────────────────────────────────────────
@@ -403,10 +417,11 @@ def cmd_states(out="tools/display_states.png"):
         dict(wifi=2, ssid="Jupiter", ble=2, ble_on=True,  soc=72,  charging=False, link="asleep"),
         dict(wifi=3, ssid="Jupiter", ble=0, ble_on=False, soc=None,charging=False, link="unreachable", frame=6),
         dict(wifi=0, ssid="Jupiter", ble=0, ble_on=False, soc=None,charging=False, link="unreachable", frame=6),
+        dict(wifi=3, ssid="Jupiter", ble=4, ble_on=True,  paired=False, soc=None, charging=False, link="unreachable", frame=8),
     ]
     labels = ["awake / charging 64%", "5% (red)", "20% (amber)", "45% (green)",
               "charging 80%", "100% (no bolt)", "asleep (dim)", "searching BLE (car unreachable)",
-              "searching WiFi (priority)"]
+              "searching WiFi (priority)", "pairing (BLE up, not paired)"]
     S = 4
     pad = 10
     cap = 16
