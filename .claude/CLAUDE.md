@@ -158,8 +158,13 @@ grouped under one device. **Read-only by design** — no command topics are subs
   health poll still answers ⇒ parked & sleeping nearby), and `UNREACHABLE` (the car answers
   *nothing* over BLE ⇒ driven off / out of range / deep sleep — published explicitly instead
   of a phantom `ASLEEP`; nothing heard since boot/re-pair ⇒ omitted so HA shows "unknown").
-  The web UI mirrors this exactly: it hides the hero card entirely when `UNREACHABLE` (no
-  honest status to show) rather than claiming the car is asleep. Reachability is tracked by a
+  The web UI mirrors this exactly: it shows the "Vehicle asleep" hero (with the wake button)
+  **only** when `ASLEEP` is a proven fact, and hides the hero entirely for both `UNREACHABLE`
+  *and* the unknown state (nothing heard since boot — the on-demand BLE link hasn't reached the
+  car yet) — in neither case is there an honest status to show, so it never claims the car is
+  asleep on a guess. The momentary BLE row reading "Disconnected" is normal (the link is
+  dropped between polls by design) and is not used to drive the hero — only `link` is.
+  Reachability is tracked by a
   `last_reachable_ticks_` clock stamped on every successful signed round-trip, incl. the idle
   health poll. **last boot** is published as an ISO-8601 timestamp (device_class
   `timestamp`) so HA shows an auto-scaling relative "x minutes/days ago" instead of a raw
