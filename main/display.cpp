@@ -226,6 +226,27 @@ static void draw_text_outline(int x, int y, const char* s, uint16_t col, int sca
     draw_text(x, y - 1, s, oc, scale); draw_text(x, y + 1, s, oc, scale);
     draw_text(x, y, s, col, scale);
 }
+// Like draw_text but only sets pixels with cx0 <= px < cx1 (the SSID scroll window).
+static void draw_text_clip(int x, int y, const char* s, uint16_t col, int scale,
+                           int cx0, int cx1) {
+    for (; *s; ++s) {
+        char ch = (*s >= 0x20 && *s <= 0x7E) ? *s : ' ';
+        const uint8_t* g = DISPLAY_FONT5X7[ch - 0x20];
+        for (int c = 0; c < 5; ++c) {
+            uint8_t colbits = g[c];
+            for (int r = 0; r < 7; ++r) {
+                if (colbits & (1 << r)) {
+                    for (int dy = 0; dy < scale; ++dy)
+                        for (int dx = 0; dx < scale; ++dx) {
+                            int px = x + c * scale + dx;
+                            if (px >= cx0 && px < cx1) put(px, y + r * scale + dy, col);
+                        }
+                }
+            }
+        }
+        x += 6 * scale;
+    }
+}
 
 // Row-major bitmap: bit (w-1-c) of rows[r] = pixel (col c, row r). Template so the
 // 8-bit BT glyph and the 16-bit bolt share one routine.
@@ -250,12 +271,12 @@ static void blit_rows_outline(int x, int y, const T* rows, int w, int h, int sca
     blit_rows(x, y, rows, w, h, scale, col);
 }
 
-// 4 ascending bars, bottom-aligned at y+10; lit in `on`, unlit dark.
+// 4 ascending bars, bottom-aligned at y+14; lit in `on`, unlit dark.
 static void signal_bars(int x, int y, int level, uint16_t on) {
     for (int i = 0; i < 4; ++i) {
-        int bh = 3 + i * 2;
+        int bh = 4 + i * 3;
         uint16_t col = (i < level) ? on : C_BAR_OFF;
-        rect(x + i * 4, y + (10 - bh), x + i * 4 + 3, y + 10, col);
+        rect(x + i * 4, y + (14 - bh), x + i * 4 + 3, y + 14, col);
     }
 }
 
@@ -268,23 +289,22 @@ static int rssi_bars(int rssi) {
 }
 
 // "Searching for a connection" animation, drawn where the battery would be (no
-// battery while disconnected): a link icon (Bluetooth or WiFi) on the left and a
-// compact, right-flush cluster of 5 ascending bars; a dark-green highlight sweeps
-// across light-green bars (a flowing colour gradient) to read as "scanning". The
-// swept bars are identical for WiFi and BLE — only the icon differs.
-// Mirrors draw_searching() in tools/display_sim.py.
+// battery while disconnected): a link label on the left — a Bluetooth glyph for BLE,
+// or the word "WiFi" for WiFi — and a compact, right-flush cluster of 5 ascending
+// bars whose dark-green highlight sweeps across light-green bars to read as
+// "scanning". The swept bars are identical for WiFi and BLE; only the label differs.
+// Mirrors draw_search_bars()/draw_searching_* in tools/display_sim.py.
 static constexpr int   SRCH_N = 5, SRCH_BW = 10, SRCH_GAP = 6, SRCH_X0 = 80, SRCH_BASE = 70;  // compact, right-flush
 static constexpr int   SRCH_ICON_SCALE = 3;
 static constexpr int   SRCH_BT_X = 24, SRCH_BT_Y = 36;      // Bluetooth glyph, off the left edge
-static constexpr int   SRCH_WIFI_X = 16, SRCH_WIFI_Y = 38;  // WiFi glyph (wider), off the left edge
 static constexpr int   SRCH_STEPS = 3;                       // animation sub-frames per bar
 static constexpr float SRCH_FALLOFF = 1.5f;                  // highlight width, in bars
 static constexpr int   SRCH_HALF = (SRCH_N - 1) * SRCH_STEPS;   // one direction (small↔large)
 static constexpr int   SRCH_CYCLE = 2 * SRCH_HALF;           // full ping-pong period
 
-static void draw_searching(int frame, const uint8_t* icon, int iw, int ih, int ix, int iy) {
-    blit_rows(ix, iy, icon, iw, ih, SRCH_ICON_SCALE, C_INK);  // which link is being searched
-    // The highlight ping-pongs smallest↔largest bar (a triangle wave): out and back.
+// The swept bars are identical for WiFi and BLE searches; the highlight ping-pongs
+// (a triangle wave) out and back across them — not a one-way scan.
+static void draw_search_bars(int frame) {
     int p = frame % SRCH_CYCLE;
     float hp = (p <= SRCH_HALF ? p : (SRCH_CYCLE - p)) / (float)SRCH_STEPS;
     for (int i = 0; i < SRCH_N; ++i) {
@@ -298,6 +318,16 @@ static void draw_searching(int frame, const uint8_t* icon, int iw, int ih, int i
         rect(x, SRCH_BASE - h, x + SRCH_BW, SRCH_BASE, col);
     }
 }
+// BLE search: a Bluetooth glyph left of the bars.
+static void draw_searching_icon(int frame, const uint8_t* icon, int iw, int ih, int ix, int iy) {
+    blit_rows(ix, iy, icon, iw, ih, SRCH_ICON_SCALE, C_INK);
+    draw_search_bars(frame);
+}
+// WiFi search: the word "WiFi" left of the bars (clearer than a glyph here).
+static void draw_searching_text(int frame, const char* s, int scale, int x, int y) {
+    draw_text(x, y, s, C_INK, scale);
+    draw_search_bars(frame);
+}
 
 // Shown (instead of the search bars) once a BLE link is up but pairing isn't done:
 // big "Pairing" with an animated 0–3 dot ellipsis (fixed left so it doesn't jiggle).
@@ -308,21 +338,32 @@ static void draw_pairing(int frame) {
     draw_text((W - text_w("Pairing...", 2)) / 2, 42, buf, C_INK, 2);
 }
 
-// Truncate s in place with a trailing '.' if it would exceed maxpx at scale 1.
-static void fit(char* s, int maxpx) {
-    int n = (int)strlen(s);
-    if (n * 6 <= maxpx) return;
-    int keep = maxpx / 6;
-    if (keep < 1) { s[0] = '\0'; return; }
-    s[keep - 1] = '.';
-    s[keep]     = '\0';
+// Horizontal marquee for an over-long SSID: ping-pong (pause, scroll out to reveal
+// the end, pause, scroll back) so the whole name is readable. Returns the left
+// offset 0..span. Mirrors scroll_offset() in tools/display_sim.py.
+static constexpr int SCROLL_PAUSE = 8;   // ticks paused at each end
+static constexpr int SCROLL_SPEED = 2;   // px per tick
+static int scroll_offset(int tick, int span) {
+    if (span <= 0) return 0;
+    int travel = (span + SCROLL_SPEED - 1) / SCROLL_SPEED;   // ticks to cover the span
+    int period = 2 * SCROLL_PAUSE + 2 * travel;
+    int p = tick % period;
+    if (p < SCROLL_PAUSE) return 0;                          // pause at start
+    if (p < SCROLL_PAUSE + travel) {                         // scroll out
+        int o = (p - SCROLL_PAUSE) * SCROLL_SPEED;
+        return o < span ? o : span;
+    }
+    if (p < 2 * SCROLL_PAUSE + travel) return span;          // pause at end
+    int o = span - (p - 2 * SCROLL_PAUSE - travel) * SCROLL_SPEED;  // scroll back
+    return o > 0 ? o : 0;
 }
 
 // ─── compose one frame from cached state (mirrors tools/display_sim.py) ────────
-// Returns true when it drew an animated state (the task then animates fast).
+// Returns true when it drew something animated (search/pairing, or a scrolling
+// SSID) so the task keeps refreshing fast. `tick` is a monotonic frame counter;
 // `paired` = VehicleController::has_session(), sampled by the task (it hits NVS,
 // so it's not called every frame).
-static bool compose(VehicleController& v, int frame, bool paired) {
+static bool compose(VehicleController& v, int tick, bool paired) {
     fill(C_BG);
 
     ChargeStateResult cs = v.get_cached_charge();
@@ -340,37 +381,44 @@ static bool compose(VehicleController& v, int frame, bool paired) {
     bool battery_ok = !unreachable && have_soc;
     // BLE search bars appear ONLY when the car is out of range (no link, no data).
     bool ble_bars = !(wifi_searching || pairing || battery_ok);
+    bool scrolling = false;
 
-    // ── header: WiFi bars + SSID (left) | BLE symbol + bars (right) ──────────
+    // ── header (taller, more legible): WiFi bars + SSID (scale 2) | BT + bars ─
     // Hide whichever small indicator is the active search hero; the big centre
-    // animation represents it instead.
+    // animation represents it instead. An over-long SSID scrolls (clipped marquee).
     if (!wifi_searching) {
-        signal_bars(4, 3, rssi_bars(ap.rssi), C_BAR_ON);
+        signal_bars(4, 4, rssi_bars(ap.rssi), C_BAR_ON);
         snprintf(buf, sizeof(buf), "%s", (const char*)ap.ssid);
-        fit(buf, ble_bars ? (158 - 26) : (158 - 26 - 36));
-        draw_text(26, 4, buf, C_INK, 1);
+        int avail = ble_bars ? (158 - 28) : (158 - 28 - 32);
+        int tw = text_w(buf, 2);
+        if (tw <= avail) {
+            draw_text(28, 4, buf, C_INK, 2);
+        } else {                                  // too long → horizontal marquee
+            int off = scroll_offset(tick, tw - avail);
+            draw_text_clip(28 - off, 4, buf, C_INK, 2, 28, 28 + avail);
+            scrolling = true;
+        }
     }
     if (!ble_bars) {
         int8_t brssi = 0;
         bool rssi_ok = ble_connected && v.ble_rssi(brssi);
         int bx = 158 - 16;                    // 4 bars * 4px
-        signal_bars(bx, 3, rssi_ok ? rssi_bars(brssi) : 0, C_BAR_ON);
-        blit_rows(bx - 9, 2, DISPLAY_BT_ROWS, DISPLAY_BT_W, DISPLAY_BT_H, 1,
-                  ble_connected ? C_INK : C_GREY);
+        signal_bars(bx, 4, rssi_ok ? rssi_bars(brssi) : 0, C_BAR_ON);
+        blit_rows(bx - 13, 1, DISPLAY_BT_ROWS, DISPLAY_BT_W, DISPLAY_BT_H, 2,
+                  ble_connected ? C_INK : C_GREY);    // BT glyph, scale 2
     }
 
-    rect(3, 17, W - 3, 18, C_DIV);            // divider under the header
+    rect(3, 22, W - 3, 23, C_DIV);            // divider under the (taller) header
 
     // ── centre: WiFi search > pairing > battery > BLE search bars ────────────
     if (wifi_searching) {
-        draw_searching(frame, DISPLAY_WIFI_ROWS, DISPLAY_WIFI_W, DISPLAY_WIFI_H,
-                       SRCH_WIFI_X, SRCH_WIFI_Y);
+        draw_searching_text(tick, "WiFi", 2, 14, 42);   // "WiFi" word, not a glyph
         return true;
     }
-    if (pairing) { draw_pairing(frame); return true; }
+    if (pairing) { draw_pairing(tick); return true; }
     if (!battery_ok) {
-        draw_searching(frame, DISPLAY_BT_ROWS, DISPLAY_BT_W, DISPLAY_BT_H,
-                       SRCH_BT_X, SRCH_BT_Y);
+        draw_searching_icon(tick, DISPLAY_BT_ROWS, DISPLAY_BT_W, DISPLAY_BT_H,
+                            SRCH_BT_X, SRCH_BT_Y);
         return true;
     }
 
@@ -414,25 +462,25 @@ static bool compose(VehicleController& v, int frame, bool paired) {
 
     if (asleep)
         draw_text((W - text_w("ASLEEP", 1)) / 2, 64, "ASLEEP", C_GREY, 1);
-    return false;
+    return scrolling;   // battery view still needs fast refresh while the SSID scrolls
 }
 
 // ─── refresh task ──────────────────────────────────────────────────────────--
-// Steady states refresh once a second; the BLE "searching" animation refreshes
-// fast (~8 fps) and advances a frame counter so the highlight sweeps smoothly.
+// `tick` is monotonic so animations (search sweep, pairing dots) and the SSID
+// marquee advance smoothly. When compose() reports nothing animating we idle at
+// 1 Hz; while something animates (incl. a scrolling SSID) we refresh fast (~8 fps).
 static void display_task(void* arg) {
     VehicleController& v = *static_cast<VehicleController*>(arg);
-    int frame = 0;
+    int tick = 0;
     bool paired = v.has_session();        // has_session() hits NVS — sample at ~1 Hz
     for (;;) {
-        bool animating = compose(v, frame, paired);
+        bool animating = compose(v, tick, paired);
         flush();
+        ++tick;
         if (animating) {
-            ++frame;
-            if (frame % 8 == 0) paired = v.has_session();   // ~1 Hz while animating
+            if (tick % 8 == 0) paired = v.has_session();    // ~1 Hz while animating
             vTaskDelay(pdMS_TO_TICKS(120));
         } else {
-            frame = 0;
             paired = v.has_session();                       // 1 Hz on the slow tick
             vTaskDelay(pdMS_TO_TICKS(1000));
         }

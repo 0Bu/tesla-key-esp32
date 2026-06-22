@@ -19,7 +19,8 @@ CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
 CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
 
 # Onboard 0.96" ST7735 status display, wired to the T-Dongle-S3 GPIOs.
-# Driven in landscape (160x80): MADCTL 0x68 (MX|MV|BGR), offsets column 1 / row 26.
+# Driven in landscape (160x80), rotated 180°: MADCTL 0xA8 (MY|MV|BGR), offsets
+# column 1 / row 26 (centred panel → same offsets as the 0x68 orientation).
 CONFIG_TESLA_DISPLAY_ENABLED=y
 CONFIG_TESLA_DISPLAY_SPI_MOSI=3
 CONFIG_TESLA_DISPLAY_SPI_SCK=5
@@ -30,7 +31,7 @@ CONFIG_TESLA_DISPLAY_BL=38
 CONFIG_TESLA_DISPLAY_BL_ACTIVE_LOW=y
 CONFIG_TESLA_DISPLAY_X_OFFSET=1
 CONFIG_TESLA_DISPLAY_Y_OFFSET=26
-CONFIG_TESLA_DISPLAY_MADCTL=0x68
+CONFIG_TESLA_DISPLAY_MADCTL=0xA8
 
 # OTA is intentionally left on the default (generic-S3) firmware URL: per-board OTA
 # images are a follow-up (the T-Dongle-S3 shares the esp32s3 chip-id with the
