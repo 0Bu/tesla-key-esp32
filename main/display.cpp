@@ -30,6 +30,14 @@
 
 static const char* TAG = "display";
 
+// Defined in main.cpp — true only while the STA holds an IP. The display task is
+// created (display_start) BEFORE wifi_connect() and at higher priority than
+// app_main, so without this guard it would call esp_wifi_sta_get_ap_info() while
+// esp_wifi is still initialising / churning through association — a concurrent read
+// of the half-built AP record faults (LoadProhibited, EXCVADDR=0x1). Not connected →
+// the centre WiFi-search animation is shown instead (the correct state anyway).
+bool wifi_is_connected();
+
 // ─── panel geometry & pins (per-board via Kconfig; see boards/*.defaults) ──────
 // Landscape orientation: 160 wide x 80 tall.
 static constexpr int W = 160;
@@ -374,7 +382,9 @@ static bool compose(VehicleController& v, int tick, bool paired) {
 
     char buf[48];
     wifi_ap_record_t ap = {};
-    bool wifi_on = (esp_wifi_sta_get_ap_info(&ap) == ESP_OK);
+    // Only query esp_wifi once the STA holds an IP — never during init/association
+    // churn (see wifi_is_connected() note above): avoids the concurrent-read fault.
+    bool wifi_on = wifi_is_connected() && (esp_wifi_sta_get_ap_info(&ap) == ESP_OK);
     // Centre state, by priority: WiFi search > pairing > battery > BLE search bars.
     bool wifi_searching = !wifi_on;
     bool pairing = ble_connected && !paired;              // BLE link up but not yet paired
