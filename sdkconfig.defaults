@@ -1,10 +1,17 @@
 # Target
 CONFIG_IDF_TARGET="esp32s3"
 
-# Flash
+# Flash. 8 MB sizes the partition table (fits dual-OTA + nvs); a larger chip (the
+# T-Dongle-S3's 16 MB) just leaves the top unused, so ONE image flashes on both.
 CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# Console over the S3's native USB-Serial/JTAG (fixed GPIO19/20, present on every
+# ESP32-S3). Universal so the SINGLE image is monitorable on the T-Dongle-S3 (which
+# has no UART-bridge chip); on a generic devkit, attach to the native-USB port for
+# logs (a separate USB-UART bridge port won't carry them).
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
 
 # OTA: roll back automatically if a freshly-flashed image fails to boot/run.
 # The new app must call esp_ota_mark_app_valid_cancel_rollback() once healthy
