@@ -88,4 +88,68 @@ menu "Tesla Key Configuration"
             republished to MQTT (retained). Discovery + an immediate snapshot are
             also sent on every (re)connect.
 
+    config TESLA_DISPLAY_ENABLED
+        bool "On-device ST7735 status display (LilyGo T-Dongle-S3 / -C5)"
+        default n
+        help
+            Drive a 0.96" ST7735 SPI TFT (160x80, landscape) and render the
+            charge/connection status (header: WiFi bars + SSID and BLE symbol +
+            bars; body: a red→amber→green gradient battery with a charging bolt,
+            plus asleep/unreachable states) on it. Reads only cached state — never
+            wakes the car — and is independent of MQTT. Enable via a board overlay
+            (boards/*.defaults); leave off for a plain ESP32-S3 with no panel. Pin
+            defaults below match the LilyGo T-Dongle-S3; the T-Dongle-C5 overlay
+            overrides them.
+
+    if TESLA_DISPLAY_ENABLED
+    config TESLA_DISPLAY_SPI_MOSI
+        int "Display SPI MOSI (SDA) GPIO"
+        default 3
+    config TESLA_DISPLAY_SPI_SCK
+        int "Display SPI SCK (SCL) GPIO"
+        default 5
+    config TESLA_DISPLAY_CS
+        int "Display CS GPIO"
+        default 4
+    config TESLA_DISPLAY_DC
+        int "Display DC (RS) GPIO"
+        default 2
+    config TESLA_DISPLAY_RST
+        int "Display RST GPIO"
+        default 1
+    config TESLA_DISPLAY_BL
+        int "Display backlight GPIO"
+        default 38
+        help
+            T-Dongle-S3 backlight is GPIO38 in LilyGo's C/Arduino examples and the
+            ESPHome board profile (GPIO37 in some MicroPython configs — change this,
+            and clear TESLA_DISPLAY_BL_ACTIVE_LOW, if the backlight stays dark).
+    config TESLA_DISPLAY_BL_ACTIVE_LOW
+        bool "Backlight is active-low (drive GPIO low to turn it on)"
+        default n
+        help
+            The T-Dongle-S3 backlight on GPIO38 is active-low (the ESPHome profile
+            drives it inverted): the firmware drives the pin LOW to light it. Leave
+            off for an active-high backlight. If the panel is dark, toggling this is
+            the first thing to try.
+    config TESLA_DISPLAY_X_OFFSET
+        int "Panel column offset (ST7735 RAM offset)"
+        default 1
+        help
+            Landscape (160x80) column start. The 0.96" GREENTAB panel is offset
+            within the controller's 132x162 RAM; landscape uses column 1 / row 26
+            (the swap of the portrait 26 / 1). Tune if a panel revision is shifted.
+    config TESLA_DISPLAY_Y_OFFSET
+        int "Panel row offset (ST7735 RAM offset)"
+        default 26
+    config TESLA_DISPLAY_MADCTL
+        hex "Panel MADCTL (memory access / rotation byte)"
+        default 0x68
+        help
+            ST7735 MADCTL: bit0x80 MY, 0x40 MX, 0x20 MV (row/col exchange), 0x08
+            BGR. Landscape = MV set: 0x68 (MX|MV|BGR) or 0xA8 (MY|MV|BGR) for the
+            opposite 180° flip — switch these if the image is upside-down. Portrait
+            would be 0x08. Flip if text reads mirrored or rotated on first flash.
+    endif
+
 endmenu

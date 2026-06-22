@@ -28,6 +28,7 @@
 #include "provisioning.hpp"
 #include "diag_log.hpp"
 #include "mqtt_ha.hpp"
+#include "display.hpp"
 
 static const char* MDNS_HOSTNAME = "tesla-key-esp32";  // → http://tesla-key-esp32.local
 
@@ -213,10 +214,51 @@ extern "C" void app_main() {
     ESP_LOGI(TAG, "VIN: %s  BLE MAC: %s", vin.c_str(),
              ble_mac.empty() ? "(scan)" : ble_mac.c_str());
 
+    log_heap("preinit");
+
+    // ── Tesla BLE controller + on-device display ─────────────────────────────
+    // Set these up BEFORE WiFi so the on-device display comes up immediately and
+    // shows the "searching" animation while WiFi connects (or even if it never
+    // does). Otherwise a no-WiFi boot sits on a black screen: the WiFi wait below —
+    // and its setup-portal fallback, which never returns — would run before a later
+    // display_start(). The display reads cached state only; NimBLE itself
+    // (ble_client.start) still starts after WiFi, but the controller's accessors
+    // are safe to call before it (they report "not connected" → searching).
+    static NvsStorageAdapter tesla_store("tesla_ble");
+    tesla_store.initialize();
+    static BleClient ble_client;
+    static VehicleController vehicle;
+    // init() wires the connected + rx callbacks onto ble_client and passes the
+    // config_store so it can save the discovered MAC.
+    vehicle.init(vin, ble_client, tesla_store, config_store, ble_mac);
+
+    // Create the ECDSA key on first boot so a key always exists (and a fingerprint
+    // is shown). Regeneration is an explicit, confirmed action in the web UI; this
+    // never overwrites an existing key — only generates when none is present.
+    if (!vehicle.has_key()) {
+        ESP_LOGI(TAG, "no key in storage — generating initial key");
+        if (vehicle.generate_key()) {
+            ESP_LOGI(TAG, "initial key generated, fingerprint %s",
+                     vehicle.key_fingerprint().c_str());
+        } else {
+            ESP_LOGE(TAG, "initial key generation failed");
+        }
+    } else {
+        ESP_LOGI(TAG, "key present, fingerprint %s", vehicle.key_fingerprint().c_str());
+    }
+    ble_client.set_target_vin(vin);   // match by the VIN-derived BLE name on scan
+
+    // On-device status display (LilyGo T-Dongle-S3 / -C5). No-op unless the board
+    // overlay selects CONFIG_TESLA_DISPLAY_ENABLED; reads only cached state (never
+    // wakes the car). Started pre-WiFi so a no-WiFi boot shows the WiFi search
+    // instead of a black screen. The ~25 KB framebuffer (no-PSRAM board) allocates
+    // from the still-fresh heap here — see the log_heap below.
+    display_start(vehicle);
+    log_heap("display");
+
     // Connect to WiFi. With stored credentials, a failure is usually a transient
     // outage (e.g. router rebooting), but if it persists (e.g. wrong password),
     // fallback to the setup portal so the user can reconfigure it.
-    log_heap("preinit");
     if (!wifi_connect(ssid.c_str(), password.c_str())) {
         ESP_LOGW(TAG, "WiFi connection failed — starting setup portal");
         provisioning_run(config_store); // never returns; reboots on save
@@ -261,37 +303,9 @@ extern "C" void app_main() {
     sntp_set_time_sync_notification_cb(on_time_sync);
     esp_sntp_init();
 
-    // BLE + NVS storage for Tesla sessions/key
-    static NvsStorageAdapter tesla_store("tesla_ble");
-    tesla_store.initialize();
-
-    static BleClient ble_client;
-
-    static VehicleController vehicle;
-    // init() wires the connected + rx callbacks onto ble_client.
-    // It also passes the config_store so it can save the discovered MAC.
-    vehicle.init(vin, ble_client, tesla_store, config_store, ble_mac);
-
-    // Create the ECDSA key on first boot so a key always exists (and a fingerprint is
-    // shown). Regeneration is an explicit, confirmed action in the web UI. This never
-    // overwrites an existing key — only generates when none is present.
-    if (!vehicle.has_key()) {
-        ESP_LOGI(TAG, "no key in storage — generating initial key");
-        if (vehicle.generate_key()) {
-            ESP_LOGI(TAG, "initial key generated, fingerprint %s",
-                     vehicle.key_fingerprint().c_str());
-        } else {
-            ESP_LOGE(TAG, "initial key generation failed");
-        }
-    } else {
-        ESP_LOGI(TAG, "key present, fingerprint %s", vehicle.key_fingerprint().c_str());
-    }
-
-    // Match the vehicle by its VIN-derived BLE name during scan/connect.
-    ble_client.set_target_vin(vin);
-
     // Start NimBLE host. Discovery scanning is manual/time-limited; the client
-    // connects on demand when a command is issued.
+    // connects on demand when a command is issued. (The controller + display were
+    // set up before WiFi, above, so the panel renders the search animations.)
     ble_client.start();
     log_heap("ble");
 
