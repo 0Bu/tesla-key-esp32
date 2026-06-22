@@ -38,6 +38,11 @@ static VehicleController* g_vehicle = nullptr;
 // fallback only applies the client clock while this is false (NTP is authoritative).
 bool clock_synced_via_ntp();
 
+// Defined in main.cpp: true only while the STA holds an IP. Gate esp_wifi_sta_get_ap_info()
+// so it's never read during association churn (concurrent read of the half-built AP
+// record faults — LoadProhibited/EXCVADDR=0x1).
+bool wifi_is_connected();
+
 // Largest POST body we accept, to bound the malloc in read_body() against a
 // hostile/oversized Content-Length. All real requests here are tiny JSON objects.
 static constexpr size_t MAX_BODY_LEN = 2048;
@@ -461,7 +466,7 @@ static esp_err_t handle_status(httpd_req_t* req) {
     // WiFi: SSID + live signal strength (dBm) of the station link.
     cJSON* wifi = cJSON_CreateObject();
     wifi_ap_record_t ap{};
-    if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) {
+    if (wifi_is_connected() && esp_wifi_sta_get_ap_info(&ap) == ESP_OK) {
         cJSON_AddStringToObject(wifi, "ssid", (const char*)ap.ssid);
         cJSON_AddNumberToObject(wifi, "rssi", ap.rssi);
         // Highest 802.11 generation the AP advertises → friendly Wi-Fi name. The
