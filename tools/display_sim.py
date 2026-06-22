@@ -1,21 +1,32 @@
 #!/usr/bin/env python3
 """
-T-Dongle-C5 display layout simulator + 5x7 font source of truth.
+T-Dongle-S3 / -C5 display layout simulator + 5x7 font source of truth.
 
-Renders the 0.96" ST7735 (80x160 px) screen exactly as the firmware will,
-using the SAME 5x7 bitmap font, so we can validate offline that the values
-from the web-UI screenshot (SOC, charging, power, current, WiFi/BLE/MQTT)
-fit and stay legible at 80 px width — BEFORE we have hardware to flash.
+Renders the 0.96" ST7735 screen in LANDSCAPE (160x80 px) exactly as the
+firmware will, using the SAME 5x7 bitmap font and the SAME drawing primitives,
+so we can validate the layout offline — BEFORE flashing hardware.
 
-Two outputs (stdlib only, no Pillow):
-  python3 tools/display_sim.py png  [out.png]   -> upscaled preview PNG
-  python3 tools/display_sim.py cheader [out.h]  -> main/display_font.h
+Layout (matches main/display.cpp compose()):
+  ┌──────────────────────────────────────────┐
+  │ ▂▄▆█  Jupiter                  *  ▂▄▆█    │  header: WiFi bars+SSID | BLE sym+bars
+  ├──────────────────────────────────────────┤
+  │  ███████████░░░░░░░░░░░░░░░░░░░░░░░░  ▐    │  battery: gradient fill to SoC,
+  │  ███████████░░░░░⚡ 64%░░░░░░░░░░░░░  ▐    │           bolt while charging (<100%)
+  └──────────────────────────────────────────┘
+Battery fill colour is a red→amber→green gradient over the SoC. States:
+  charging (<100%) → bolt; 100% → no bolt; asleep → dimmed; unreachable → empty.
 
-The font dict below is authored as 7-row x 5-col ASCII art ('#'=on). The
-C-header generator packs each glyph into 5 column bytes (bit r = row r,
-0=top), which is what display.cpp consumes.
+Three outputs (stdlib only, no Pillow):
+  python3 tools/display_sim.py png  [out.png]   -> the charging hero frame (preview)
+  python3 tools/display_sim.py states [out.png] -> a montage of all states
+  python3 tools/display_sim.py cheader [out.h]  -> main/display_font.h (font + glyphs)
+
+The font dict below is authored as 7-row x 5-col ASCII art ('#'=on). The C-header
+generator packs each glyph into 5 column bytes (bit r = row r, 0=top), and also
+emits the Bluetooth glyph and the big charging bolt as row-major bitmaps — which
+is what display.cpp consumes. Keep BT/BOLT here in sync with display.cpp.
 """
-import sys, zlib, struct
+import sys, zlib, struct, math
 
 # ── 5x7 font, authored as 7 rows of 5 chars ('#'=lit, '.'=off) ────────────────
 G = {
@@ -92,11 +103,44 @@ G = {
 ')': [".##..","...#.","....#","....#","....#","...#.",".##.."],
 '~': [".....",".....","....."]+[".....",".....",".....","....."],  # placeholder
 }
-# lightning bolt, addressed as key '`'
+# small lightning bolt, addressed as key '`' (kept for back-compat / inline text)
 G['`'] = ["..##.",".##..","#####","..##.",".##..","#....","#...."]
 
 def glyph(ch):
     return G.get(ch, ["#####","#...#","#...#","#...#","#...#","#...#","#####"] if ch != ' ' else G[' '])
+
+# ── Bluetooth glyph (5 wide x 9 tall) and big charging bolt (10 wide x 16 tall)
+# Authored row-major ('#'=lit). The cheader generator emits these as bitmaps
+# (DISPLAY_BT_ROWS / DISPLAY_BOLT_ROWS) consumed by display.cpp — keep in sync.
+BT_ROWS = [
+    "..#..",
+    "..##.",
+    "#.#.#",
+    ".###.",
+    "..#..",
+    ".###.",
+    "#.#.#",
+    "..##.",
+    "..#..",
+]
+BOLT_ROWS = [
+    "......###.",
+    ".....###..",
+    "....###...",
+    "...###....",
+    "..###.....",
+    ".#########",
+    ".########.",
+    "..######..",
+    "....###...",
+    "...###....",
+    "..###.....",
+    ".###......",
+    "###.......",
+    "##........",
+    "#.........",
+    "#.........",
+]
 
 # ── tiny stdlib PNG writer ────────────────────────────────────────────────────
 def write_png(path, w, h, rgb):
@@ -114,29 +158,61 @@ def write_png(path, w, h, rgb):
     png += chunk(b"IEND", b"")
     open(path, "wb").write(png)
 
-# ── logical 80x160 canvas ─────────────────────────────────────────────────────
-W, H = 80, 160
-BG    = (244, 245, 247)
-CARD  = (255, 255, 255)
-INK   = (27, 27, 27)
-GREY  = (140, 146, 154)
-GREEN = (47, 158, 68)
-GREENL= (200, 230, 208)
+# ── logical 160x80 landscape canvas (DARK theme to match the device mockup) ───
+W, H = 160, 80
+BG      = (13, 16, 22)       # near-black screen background
+PANEL   = (26, 32, 45)       # battery interior / empty cells
+BORDER  = (236, 238, 242)    # battery shell + terminal (white)
+INK     = (240, 242, 245)    # primary text (white)
+GREY    = (128, 138, 152)    # muted labels / disconnected
+DIV     = (38, 46, 60)       # header divider
+BAR_ON  = (74, 175, 80)      # lit signal bar (green)
+BAR_OFF = (40, 50, 64)       # unlit signal bar
+AMBER   = (235, 170, 40)     # unreachable accent
 
-canvas = [[BG for _ in range(W)] for _ in range(H)]
+# red → amber → light-green → green → deep-green over SoC 0..100
+GRAD = [
+    (0.00, (231,  76,  60)),   # 0%   red
+    (0.18, (240, 190,  40)),   # ~18% amber/yellow
+    (0.45, (120, 200,  90)),   # light green
+    (0.80, ( 60, 175,  80)),   # green
+    (1.00, ( 30, 140,  60)),   # 100% deep green
+]
 
-def px(x, y, col):
-    if 0 <= x < W and 0 <= y < H:
-        canvas[y][x] = col
+def lerp(a, b, t):
+    return tuple(int(round(a[i] + (b[i] - a[i]) * t)) for i in range(3))
 
-def rrect(x0, y0, x1, y1, col):
-    for y in range(y0, y1):
-        for x in range(x0, x1):
-            px(x, y, col)
+def soc_color(soc):
+    p = max(0.0, min(1.0, soc / 100.0))
+    for i in range(len(GRAD) - 1):
+        p0, c0 = GRAD[i]
+        p1, c1 = GRAD[i + 1]
+        if p <= p1:
+            t = 0 if p1 == p0 else (p - p0) / (p1 - p0)
+            return lerp(c0, c1, t)
+    return GRAD[-1][1]
 
-def text(x, y, s, col, scale=1):
-    cx = x
-    for ch in s:
+def dim(col, t=0.5):   # blend a colour toward the panel (for the asleep state)
+    return lerp(col, PANEL, t)
+
+class Canvas:
+    def __init__(self):
+        self.c = [[BG for _ in range(W)] for _ in range(H)]
+    def px(self, x, y, col):
+        if 0 <= x < W and 0 <= y < H:
+            self.c[y][x] = col
+    def rect(self, x0, y0, x1, y1, col):
+        for y in range(y0, y1):
+            for x in range(x0, x1):
+                self.px(x, y, col)
+    def frame(self, x0, y0, x1, y1, t, col):   # hollow rounded-ish border of thickness t
+        self.rect(x0, y0, x1, y0 + t, col)
+        self.rect(x0, y1 - t, x1, y1, col)
+        self.rect(x0, y0, x0 + t, y1, col)
+        self.rect(x1 - t, y0, x1, y1, col)
+        for (cx, cy) in [(x0, y0), (x1 - 1, y0), (x0, y1 - 1), (x1 - 1, y1 - 1)]:
+            self.px(cx, cy, BG)   # nibble the hard corners for a softer look
+    def char(self, x, y, ch, col, scale):
         gl = glyph(ch)
         for r in range(7):
             row = gl[r]
@@ -144,83 +220,174 @@ def text(x, y, s, col, scale=1):
                 if c < len(row) and row[c] == '#':
                     for dy in range(scale):
                         for dx in range(scale):
-                            px(cx + c*scale + dx, y + r*scale + dy, col)
-        cx += (5 + 1) * scale          # 1 px inter-glyph gap
-    return cx
+                            self.px(x + c*scale + dx, y + r*scale + dy, col)
+    def text(self, x, y, s, col, scale=1):
+        cx = x
+        for ch in s:
+            self.char(cx, y, ch, col, scale)
+            cx += 6 * scale
+        return cx
+    def text_outline(self, x, y, s, col, scale, oc):
+        for ox, oy in [(-1,0),(1,0),(0,-1),(0,1)]:
+            self.text(x+ox, y+oy, s, oc, scale)
+        self.text(x, y, s, col, scale)
+    def bitmap(self, x, y, rows, col, scale=1, outline=None):
+        h, w = len(rows), max(len(r) for r in rows)
+        if outline is not None:
+            for ox, oy in [(-1,0),(1,0),(0,-1),(0,1),(-1,-1),(1,1),(-1,1),(1,-1)]:
+                self._blit(x+ox, y+oy, rows, outline, scale)
+        self._blit(x, y, rows, col, scale)
+        return w * scale, h * scale
+    def _blit(self, x, y, rows, col, scale):
+        for r, row in enumerate(rows):
+            for c, ch in enumerate(row):
+                if ch == '#':
+                    for dy in range(scale):
+                        for dx in range(scale):
+                            self.px(x + c*scale + dx, y + r*scale + dy, col)
 
 def textw(s, scale=1):
     return len(s) * 6 * scale
 
-def center(s, scale=1):
-    return max(0, (W - textw(s, scale)) // 2)
-
 def fit(s, maxpx, scale=1):
-    """Truncate with a trailing '.' marker if too wide for maxpx."""
     if textw(s, scale) <= maxpx:
         return s
     n = max(0, maxpx // (6*scale))
     return (s[:max(0, n-1)] + ".") if n >= 1 else ""
 
-def wifi_bars(x, y, level):  # level 0..4, green lit + grey unlit, like the UI
+def signal_bars(cv, x, y, level, on_col=BAR_ON):
+    """4 ascending bars, bottom-aligned at y+10; lit green, unlit dark."""
     for i in range(4):
-        bh = 2 + i*2
-        col = GREEN if i < level else GREENL
-        rrect(x + i*4, y + (8-bh), x + i*4 + 3, y + 8, col)
+        bh = 3 + i*2
+        col = on_col if i < level else BAR_OFF
+        cv.rect(x + i*4, y + (10 - bh), x + i*4 + 3, y + 10, col)
 
-def ring(cx, cy, rad, frac, col, bg):
-    # light full ring + green arc covering `frac` of the circle (top, clockwise)
-    import math
-    for a in range(0, 360):
-        for w in range(3):
-            rr = rad - w
-            xx = int(round(cx + rr*math.sin(math.radians(a))))
-            yy = int(round(cy - rr*math.cos(math.radians(a))))
-            lit = (a/360.0) <= frac
-            px(xx, yy, col if lit else bg)
+# ── compose one frame from a state dict ───────────────────────────────────────
+# state = { wifi:0..4, ssid:str, ble:0..4, ble_on:bool,
+#           soc:int|None, charging:bool, link:"awake"|"asleep"|"unreachable" }
+def compose(cv, st):
+    cv.rect(0, 0, W, H, BG)
 
-# ── compose: WiFi + BLE, then the status block (no MQTT) ──────────────────────
-# CARD 1 — CONNECTIONS (WiFi + BLE only)
-rrect(3, 3, W-3, 66, CARD)
-text(6, 6, "CONNECTIONS", GREY)
+    # ── header: WiFi bars + SSID (left) | BLE symbol + bars (right) ──────────
+    wifi_on = st.get("wifi", 0) > 0
+    signal_bars(cv, 4, 3, st.get("wifi", 0))
+    ssid = st.get("ssid") or "-"
+    name_max = 158 - 26 - 36          # leave room for the BLE cluster on the right
+    cv.text(26, 4, fit(ssid if wifi_on else "-", name_max),
+            INK if wifi_on else GREY)
 
-wifi_bars(6, 20, 3)
-text(24, 20, "-64dBm", INK)
-text(8, 31, fit("Jupiter", W-14), GREEN)            # SSID
+    ble_on = st.get("ble_on", False)
+    # BLE cluster hugs the right edge: bars then symbol to their left
+    bx = 158 - 16                      # 4 bars * 4px
+    signal_bars(cv, bx, 3, st.get("ble", 0) if ble_on else 0)
+    cv.bitmap(bx - 9, 2, BT_ROWS, INK if ble_on else GREY)
 
-wifi_bars(6, 47, 2)
-text(24, 47, "-83dBm", INK)
-text(8, 58, fit("..72:ac:0d", W-14), GREEN)         # peer MAC, abbreviated for 80px
+    cv.rect(3, 17, W - 3, 18, DIV)     # divider under the header
 
-# CARD 2 — STATUS (the bottom UI block: asleep / charging / unreachable).
-# Shown here in the awake+charging state to match the screenshot.
-rrect(3, 72, W-3, H-4, CARD)
-text(center("`Charging"), 78, "`Charging", INK)     # ` = bolt glyph
-ring(W//2, 116, 26, 0.96, GREEN, GREENL)
-soc = "96"
-sw = textw(soc, 3) + textw("%", 2)                  # "96" @3x + "%" @2x
-x0 = (W - sw) // 2
-text(x0, 104, soc, GREEN, 3)
-text(x0 + textw(soc, 3), 111, "%", GREEN, 2)
-text(center("4kW   6A"), 148, "4kW   6A", INK)
+    # ── battery shell ───────────────────────────────────────────────────────
+    bx0, by0, bx1, by1 = 6, 24, 146, 74
+    cv.rect(bx0+2, by0+2, bx1-2, by1-2, PANEL)        # interior
+    cv.frame(bx0, by0, bx1, by1, 3, BORDER)           # shell
+    cv.rect(bx1, 40, bx1 + 6, 58, BORDER)             # + terminal nub
+    ix0, iy0, ix1, iy1 = bx0+3, by0+3, bx1-3, by1-3   # interior bounds
+    iw = ix1 - ix0
+
+    soc = st.get("soc")
+    link = st.get("link", "awake")
+    charging = st.get("charging", False)
+
+    # unreachable / no data → empty shell, honest "offline" marker
+    if link == "unreachable" or soc is None:
+        label = "OFFLINE" if link == "unreachable" else "NO DATA"
+        col = AMBER if link == "unreachable" else GREY
+        cv.text_outline((W - textw("--", 4))//2, 33, "--", col, 4, BG)
+        cv.text((W - textw(label, 1))//2, 64, label, GREY, 1)
+        return
+
+    soc = max(0, min(100, int(soc)))
+    asleep = link == "asleep"
+    fill_col = dim(soc_color(soc)) if asleep else soc_color(soc)
+    fw = int(round(iw * soc / 100.0))
+    if fw > 0:
+        cv.rect(ix0, iy0, ix0 + fw, iy1, fill_col)
+
+    txt_col = GREY if asleep else INK
+    num = "%d%%" % soc
+    show_bolt = charging and soc < 100 and not asleep
+
+    if show_bolt:
+        # centred group: [bolt][gap][NN%]
+        bw = max(len(r) for r in BOLT_ROWS) * 2
+        gap = 6
+        grp = bw + gap + textw(num, 3)
+        gx = (W - grp)//2
+        cv.bitmap(gx, (H + 18 - len(BOLT_ROWS)*2)//2 - 2, BOLT_ROWS, (255, 235, 120), 2, outline=BG)
+        cv.text_outline(gx + bw + gap, 41, num, INK, 3, BG)
+    else:
+        cv.text_outline((W - textw(num, 3))//2, 41, num, txt_col, 3, BG)
+
+    if asleep:
+        cv.text((W - textw("ASLEEP", 1))//2, 64, "ASLEEP", GREY, 1)
+
+# ── render helpers ────────────────────────────────────────────────────────────
+def upscale(cv, S):
+    bw, bh = W*S, H*S
+    return [[cv.c[y//S][x//S] for x in range(bw)] for y in range(bh)]
 
 def cmd_png(out="tools/display_preview.png"):
+    cv = Canvas()
+    compose(cv, dict(wifi=4, ssid="Jupiter", ble=3, ble_on=True,
+                     soc=64, charging=True, link="awake"))
     S = 6
-    bw, bh = W*S, H*S
-    big = [[canvas[y//S][x//S] for x in range(bw)] for y in range(bh)]
+    write_png(out, W*S, H*S, upscale(cv, S))
+    print("wrote", out, f"({W*S}x{H*S}, logical {W}x{H})")
+
+def cmd_states(out="tools/display_states.png"):
+    states = [
+        dict(wifi=4, ssid="Jupiter", ble=3, ble_on=True,  soc=64,  charging=True,  link="awake"),
+        dict(wifi=3, ssid="Jupiter", ble=2, ble_on=True,  soc=5,   charging=False, link="awake"),
+        dict(wifi=3, ssid="Jupiter", ble=3, ble_on=True,  soc=20,  charging=False, link="awake"),
+        dict(wifi=4, ssid="Jupiter", ble=3, ble_on=True,  soc=45,  charging=False, link="awake"),
+        dict(wifi=4, ssid="Jupiter", ble=4, ble_on=True,  soc=80,  charging=True,  link="awake"),
+        dict(wifi=4, ssid="Jupiter", ble=4, ble_on=True,  soc=100, charging=True,  link="awake"),
+        dict(wifi=2, ssid="Jupiter", ble=2, ble_on=True,  soc=72,  charging=False, link="asleep"),
+        dict(wifi=3, ssid="Jupiter", ble=0, ble_on=False, soc=None,charging=False, link="unreachable"),
+    ]
+    labels = ["awake / charging 64%", "5% (red)", "20% (amber)", "45% (green)",
+              "charging 80%", "100% (no bolt)", "asleep (dim)", "unreachable / no BLE"]
+    S = 4
+    pad = 10
+    cap = 16
+    cellw, cellh = W*S, H*S + cap
+    cols = 2
+    rows = (len(states) + cols - 1)//cols
+    bw = cols*cellw + (cols+1)*pad
+    bh = rows*cellh + (rows+1)*pad
+    big = [[(8,9,12) for _ in range(bw)] for _ in range(bh)]
+    # tiny label font via a throwaway canvas region is overkill; draw caption text
+    # by rendering each frame and stamping a 1x caption with the Canvas font.
+    for idx, st in enumerate(states):
+        cv = Canvas()
+        compose(cv, st)
+        up = upscale(cv, S)
+        r, cc = idx//cols, idx % cols
+        ox = pad + cc*(cellw + pad)
+        oy = pad + r*(cellh + pad)
+        for y in range(H*S):
+            for x in range(W*S):
+                big[oy+y][ox+x] = up[y][x]
+        # caption strip
+        capcv = Canvas()
+        capcv.text(2, 4, labels[idx][:26], INK, 1)
+        capup = upscale(capcv, 2)
+        for y in range(cap):
+            for x in range(min(cellw, W*2)):
+                big[oy + H*S + y][ox + x] = capup[y][x]
     write_png(out, bw, bh, big)
-    print("wrote", out, f"({bw}x{bh}, logical {W}x{H})")
+    print("wrote", out, f"({bw}x{bh})")
 
 def cmd_cheader(out="main/display_font.h"):
-    lines = []
-    lines.append("// Auto-generated by tools/display_sim.py — do not edit by hand.")
-    lines.append("// 5x7 column-major font: glyph[c] bit r (0=top) = pixel (col c, row r).")
-    lines.append("#pragma once")
-    lines.append("#include <stdint.h>")
-    lines.append("// Printable ASCII 0x20..0x7E; index = ch - 0x20.")
-    lines.append("static const uint8_t DISPLAY_FONT5X7[][5] = {")
-    for code in range(0x20, 0x7F):
-        ch = chr(code)
-        gl = glyph(ch)
+    def cols_of(gl):
         cols = []
         for c in range(5):
             b = 0
@@ -228,24 +395,51 @@ def cmd_cheader(out="main/display_font.h"):
                 if c < len(gl[r]) and gl[r][c] == '#':
                     b |= (1 << r)
             cols.append(b)
+        return cols
+    def rows_bits(rows):       # row-major, bit (W-1-c) = leftmost column
+        w = max(len(r) for r in rows)
+        out = []
+        for row in rows:
+            b = 0
+            for c in range(w):
+                if c < len(row) and row[c] == '#':
+                    b |= (1 << (w - 1 - c))
+            out.append(b)
+        return w, out
+
+    L = []
+    L.append("// Auto-generated by tools/display_sim.py — do not edit by hand.")
+    L.append("// 5x7 column-major font: glyph[c] bit r (0=top) = pixel (col c, row r).")
+    L.append("#pragma once")
+    L.append("#include <stdint.h>")
+    L.append("// Printable ASCII 0x20..0x7E; index = ch - 0x20.")
+    L.append("static const uint8_t DISPLAY_FONT5X7[][5] = {")
+    for code in range(0x20, 0x7F):
+        ch = chr(code)
+        cols = cols_of(glyph(ch))
         # Sanitize the label char: space and backslash would otherwise produce an
         # empty/line-continuation comment (-Werror=comment on the trailing '\').
         label = {' ': 'SP', '\\': 'BSL'}.get(ch, ch)
-        lines.append("  {%s}, // 0x%02X %s" % (
-            ",".join("0x%02x" % v for v in cols), code, label))
-    lines.append("};")
-    # bolt glyph (not in printable range)
-    gl = glyph('`')
-    cols = []
-    for c in range(5):
-        b = 0
-        for r in range(7):
-            if c < len(gl[r]) and gl[r][c] == '#':
-                b |= (1 << r)
-        cols.append(b)
-    lines.append("static const uint8_t DISPLAY_GLYPH_BOLT[5] = {%s};" %
-                 ",".join("0x%02x" % v for v in cols))
-    open(out, "w").write("\n".join(lines) + "\n")
+        L.append("  {%s}, // 0x%02X %s" % (",".join("0x%02x" % v for v in cols), code, label))
+    L.append("};")
+    # small inline bolt glyph (back-compat; '`' is outside the printable range used above)
+    L.append("static const uint8_t DISPLAY_GLYPH_BOLT[5] = {%s};" %
+             ",".join("0x%02x" % v for v in cols_of(glyph('`'))))
+    # Bluetooth glyph (row-major bitmap)
+    bw, brows = rows_bits(BT_ROWS)
+    L.append("// Bluetooth glyph, row-major: bit (W-1-c) of row r = pixel (col c, row r).")
+    L.append("#define DISPLAY_BT_W %d" % bw)
+    L.append("#define DISPLAY_BT_H %d" % len(brows))
+    L.append("static const uint8_t DISPLAY_BT_ROWS[%d] = {%s};" %
+             (len(brows), ",".join("0x%02x" % v for v in brows)))
+    # Big charging bolt (row-major bitmap)
+    lw, lrows = rows_bits(BOLT_ROWS)
+    L.append("// Big charging bolt, row-major (same bit convention as the BT glyph).")
+    L.append("#define DISPLAY_BOLT_W %d" % lw)
+    L.append("#define DISPLAY_BOLT_H %d" % len(lrows))
+    L.append("static const uint16_t DISPLAY_BOLT_ROWS[%d] = {%s};" %
+             (len(lrows), ",".join("0x%04x" % v for v in lrows)))
+    open(out, "w").write("\n".join(L) + "\n")
     print("wrote", out)
 
 if __name__ == "__main__":
@@ -253,7 +447,9 @@ if __name__ == "__main__":
     arg  = sys.argv[2] if len(sys.argv) > 2 else None
     if mode == "png":
         cmd_png(arg or "tools/display_preview.png")
+    elif mode == "states":
+        cmd_states(arg or "tools/display_states.png")
     elif mode == "cheader":
         cmd_cheader(arg or "main/display_font.h")
     else:
-        print("usage: display_sim.py [png|cheader] [outfile]")
+        print("usage: display_sim.py [png|states|cheader] [outfile]")

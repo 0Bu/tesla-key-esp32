@@ -13,8 +13,8 @@ USB data cable for flashing.
 ### Experimental: LilyGo T-Dongle-S3 (onboard display)
 
 A board variant for the [LilyGo T-Dongle-S3](https://github.com/Xinyuan-LilyGO/T-Dongle-S3)
-(ESP32-S3, 16 MB flash, **no PSRAM**, native USB-A, 0.96" ST7735 80×160 LCD). Built via an
-SDKCONFIG overlay (the plain ESP32-S3 build is unchanged):
+(ESP32-S3, 16 MB flash, **no PSRAM**, native USB-A, 0.96" ST7735 LCD, driven landscape at
+160×80). Built via an SDKCONFIG overlay (the plain ESP32-S3 build is unchanged):
 
 ```bash
 idf.py -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;boards/t-dongle-s3.defaults" \
@@ -23,17 +23,23 @@ idf.py -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;boards/t-dongle-s3.defaults" \
 
 The overlay (`boards/t-dongle-s3.defaults`) enables the onboard **ST7735 status display**
 (`main/display.cpp`), the native USB-Serial/JTAG console, and the full 16 MB flash. The
-display shows **WiFi**, **BLE** and the **vehicle status block** (SOC ring + charging /
-asleep / unreachable + power/current) from cache-only state — it never wakes the car and
-does not depend on MQTT. Offline layout/font validation: `tools/display_sim.py`.
+display shows a **header** (WiFi signal bars + SSID on the left, a Bluetooth symbol + BLE
+bars on the right) and a **gradient battery** filled to the SoC (red → amber → green), with a
+**charging bolt** while charging (hidden at 100 %), an **ASLEEP** (dimmed) state and an
+**OFFLINE** (empty) state when the car is unreachable — all from cache-only state, so it
+never wakes the car and does not depend on MQTT. Offline pixel-exact layout/font validation:
+`python3 tools/display_sim.py states` (renders every state to a PNG).
 
 > **Status:** builds in CI (job `build-tdongle-s3`, ESP-IDF v5.5.4); pending validation on
 > physical hardware. Two caveats: (1) **no PSRAM** → the ~25 KB framebuffer lands in internal
 > SRAM (watch the `display` heap-attribution line in the boot log on this RAM-tight build);
 > (2) **OTA** on this variant still pulls the generic (display-less) ESP32-S3 image —
 > per-board OTA/installer builds are a follow-up. Flash over USB for now. The ST7735 driver
-> (offsets 26/1, MADCTL 0x08, INVON) is cross-verified against LilyGo's; the backlight pin
-> (GPIO38, or 37 in their MicroPython config) may need flipping if it stays dark.
+> (landscape: MADCTL `0x68`, offsets column 1 / row 26, INVON) is cross-verified against
+> LilyGo's; if the image is rotated/mirrored flip `CONFIG_TESLA_DISPLAY_MADCTL` (try `0xA8`).
+> The GPIO38 backlight is **active-low** (`CONFIG_TESLA_DISPLAY_BL_ACTIVE_LOW=y`, matching the
+> ESPHome board profile); if the panel stays dark, clear that and/or try pin 37 (some
+> MicroPython configs use GPIO37 active-high).
 
 ## Flash prebuilt artifacts
 
