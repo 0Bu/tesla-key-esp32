@@ -33,7 +33,14 @@ CONFIG_TESLA_DISPLAY_X_OFFSET=1
 CONFIG_TESLA_DISPLAY_Y_OFFSET=26
 CONFIG_TESLA_DISPLAY_MADCTL=0xA8
 
-# OTA is intentionally left on the default (generic-S3) firmware URL: per-board OTA
-# images are a follow-up (the T-Dongle-S3 shares the esp32s3 chip-id with the
-# generic build, so only a per-board URL would keep them apart). Flash this variant
-# over USB for now; tapping "update" would pull the display-less generic image.
+# ─── Per-board OTA channel ────────────────────────────────────────────────────
+# The generic ESP32-S3 OTA image is built WITHOUT the display (CONFIG_TESLA_DISPLAY_
+# ENABLED defaults n) and shares the esp32s3 chip-id with this build, so the only way
+# to keep the two apart for OTA is the URL. Point this variant at its OWN published
+# subdir so a self-update pulls the DISPLAY build, not the display-less generic one
+# (otherwise tapping "update" goes dark). CI mirrors this overlay to
+# _site/t-dongle-s3/{manifest.json,tesla-key-esp32.bin} from the SAME commit/version
+# as the generic image — see scripts/build-pages.sh and .github/workflows/build.yml.
+# Both URLs must stay same-origin with the manifest (Pages serves the .bin beside it).
+CONFIG_TESLA_OTA_MANIFEST_URL="https://0bu.github.io/tesla-key-esp32/t-dongle-s3/manifest.json"
+CONFIG_TESLA_OTA_FIRMWARE_URL="https://0bu.github.io/tesla-key-esp32/t-dongle-s3/tesla-key-esp32.bin"
