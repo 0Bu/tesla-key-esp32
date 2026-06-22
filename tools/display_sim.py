@@ -141,17 +141,6 @@ BOLT_ROWS = [
     "#.........",
     "#.........",
 ]
-# WiFi glyph (7 wide x 6 tall): two broadcast arcs over a dot. Used as the icon for
-# the WiFi searching animation (emitted as DISPLAY_WIFI_ROWS; keep in sync).
-WIFI_ROWS = [
-    ".#####.",
-    "#.....#",
-    "..###..",
-    ".#...#.",
-    ".......",
-    "...#...",
-]
-
 # ── tiny stdlib PNG writer ────────────────────────────────────────────────────
 def write_png(path, w, h, rgb):
     def chunk(tag, data):
@@ -268,11 +257,11 @@ def fit(s, maxpx, scale=1):
     return (s[:max(0, n-1)] + ".") if n >= 1 else ""
 
 def signal_bars(cv, x, y, level, on_col=BAR_ON):
-    """4 ascending bars, bottom-aligned at y+10; lit green, unlit dark."""
+    """4 ascending bars, bottom-aligned at y+14; lit green, unlit dark."""
     for i in range(4):
-        bh = 3 + i*2
+        bh = 4 + i*3
         col = on_col if i < level else BAR_OFF
-        cv.rect(x + i*4, y + (10 - bh), x + i*4 + 3, y + 10, col)
+        cv.rect(x + i*4, y + (14 - bh), x + i*4 + 3, y + 14, col)
 
 # Big BLE "searching for a connection" animation, drawn where the battery would
 # be (no battery while disconnected): a Bluetooth symbol on the left and a compact
@@ -281,18 +270,14 @@ def signal_bars(cv, x, y, level, on_col=BAR_ON):
 SRCH_N, SRCH_BW, SRCH_GAP, SRCH_X0, SRCH_BASE = 5, 10, 6, 80, 70   # compact, right-flush
 SRCH_ICON_SCALE = 3
 SRCH_BT_X, SRCH_BT_Y = 24, 36                     # Bluetooth glyph, off the left edge
-SRCH_WIFI_X, SRCH_WIFI_Y = 16, 38                 # WiFi glyph (wider), off the left edge
 SRCH_STEPS = 3                                    # animation sub-frames per bar
 SRCH_FALLOFF = 1.5                                # highlight width, in bars
 SRCH_HALF = (SRCH_N - 1) * SRCH_STEPS             # frames for one direction (small↔large)
 SRCH_CYCLE = 2 * SRCH_HALF                        # full ping-pong period
 
-# icon = (rows, x, y); the swept bars are identical for WiFi and BLE searches.
-# The highlight ping-pongs: smallest→largest bar, then largest→smallest, repeating
-# (a triangle wave) — a wave that runs out and back, not a one-way scan.
-def draw_searching(cv, frame, icon):
-    rows, ix, iy = icon
-    cv.bitmap(ix, iy, rows, INK, SRCH_ICON_SCALE)           # which link is being searched
+# The swept bars are identical for WiFi and BLE searches; the highlight ping-pongs
+# (a triangle wave) out and back across them — not a one-way scan.
+def draw_search_bars(cv, frame):
     p = frame % SRCH_CYCLE
     hp = (p / SRCH_STEPS) if p <= SRCH_HALF else ((SRCH_CYCLE - p) / SRCH_STEPS)  # bounce
     for i in range(SRCH_N):
@@ -302,8 +287,19 @@ def draw_searching(cv, frame, icon):
         x = SRCH_X0 + i * (SRCH_BW + SRCH_GAP)
         cv.rect(x, SRCH_BASE - h, x + SRCH_BW, SRCH_BASE, col)
 
-SRCH_ICON_BLE  = (BT_ROWS,   SRCH_BT_X,   SRCH_BT_Y)
-SRCH_ICON_WIFI = (WIFI_ROWS, SRCH_WIFI_X, SRCH_WIFI_Y)
+# label = ("icon", rows, x, y) draws a bitmap glyph; ("text", str, scale, x, y)
+# draws a word — used so the WiFi search reads "WiFi" while BLE keeps its symbol.
+def draw_searching(cv, frame, label):
+    if label[0] == "icon":
+        _, rows, ix, iy = label
+        cv.bitmap(ix, iy, rows, INK, SRCH_ICON_SCALE)
+    else:
+        _, s, scale, ix, iy = label
+        cv.text(ix, iy, s, INK, scale)
+    draw_search_bars(cv, frame)
+
+SRCH_ICON_BLE  = ("icon", BT_ROWS, SRCH_BT_X, SRCH_BT_Y)
+SRCH_ICON_WIFI = ("text", "WiFi", 2, 14, 42)   # "WiFi" word instead of the glyph
 
 # Shown (instead of the search bars) once a BLE link is up but pairing isn't done:
 # big "Pairing" with an animated 0–3 dot ellipsis (fixed left so it doesn't jiggle).
@@ -335,17 +331,18 @@ def compose(cv, st):
     # ── header: WiFi bars + SSID (left) | BLE symbol + bars (right) ──────────
     # Hide whichever small indicator is the active search hero; the big centre
     # animation represents it instead.
+    # Taller, more legible status bar: scale-2 SSID, taller bars, divider at y22.
     if not wifi_searching:
-        signal_bars(cv, 4, 3, st.get("wifi", 0))
-        name_max = (158 - 26) if ble_bars else (158 - 26 - 36)
-        cv.text(26, 4, fit(st.get("ssid") or "-", name_max), INK)
+        signal_bars(cv, 4, 4, st.get("wifi", 0))
+        name_max = (158 - 28) if ble_bars else (158 - 28 - 32)
+        cv.text(28, 4, fit(st.get("ssid") or "-", name_max, 2), INK, 2)
 
     if not ble_bars:
         bx = 158 - 16                  # 4 bars * 4px
-        signal_bars(cv, bx, 3, st.get("ble", 0) if ble_conn else 0)
-        cv.bitmap(bx - 9, 2, BT_ROWS, INK if ble_conn else GREY)
+        signal_bars(cv, bx, 4, st.get("ble", 0) if ble_conn else 0)
+        cv.bitmap(bx - 13, 1, BT_ROWS, INK if ble_conn else GREY, 2)  # BT glyph, scale 2
 
-    cv.rect(3, 17, W - 3, 18, DIV)     # divider under the header
+    cv.rect(3, 22, W - 3, 23, DIV)     # divider under the (taller) header
 
     # ── centre: WiFi search > pairing > battery > BLE search bars ────────────
     f = st.get("frame", 0)
@@ -537,13 +534,6 @@ def cmd_cheader(out="main/display_font.h"):
     L.append("#define DISPLAY_BOLT_H %d" % len(lrows))
     L.append("static const uint16_t DISPLAY_BOLT_ROWS[%d] = {%s};" %
              (len(lrows), ",".join("0x%04x" % v for v in lrows)))
-    # WiFi glyph (row-major bitmap) — icon for the WiFi searching animation
-    ww, wrows = rows_bits(WIFI_ROWS)
-    L.append("// WiFi glyph (broadcast arcs + dot), row-major (same bit convention as BT).")
-    L.append("#define DISPLAY_WIFI_W %d" % ww)
-    L.append("#define DISPLAY_WIFI_H %d" % len(wrows))
-    L.append("static const uint8_t DISPLAY_WIFI_ROWS[%d] = {%s};" %
-             (len(wrows), ",".join("0x%02x" % v for v in wrows)))
     open(out, "w").write("\n".join(L) + "\n")
     print("wrote", out)
 

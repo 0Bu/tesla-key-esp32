@@ -10,11 +10,12 @@ class VehicleController;
 //             state dims the fill ("ASLEEP").
 //   • searching/pairing: when a link isn't ready the battery is replaced, by
 //             priority — WiFi search > pairing > battery > BLE search. A "search"
-//             is a link icon (WiFi or Bluetooth) plus a compact bar cluster whose
-//             dark-green highlight ping-pongs across light-green bars. The BLE
-//             search bars show ONLY when the car is out of range; once a BLE link
-//             is up but not yet paired it shows a big animated "Pairing…" instead.
-//             The header hides whichever small indicator is the active search.
+//             is a link label (the word "WiFi", or a Bluetooth glyph for BLE) plus
+//             a compact bar cluster whose dark-green highlight ping-pongs across
+//             light-green bars. The BLE search bars show ONLY when the car is out
+//             of range; once a BLE link is up but not yet paired it shows a big
+//             animated "Pairing…" instead. The header hides whichever small
+//             indicator is the active search.
 // Mirrors tools/display_sim.py one-to-one (the offline pixel-exact renderer and
 // font source of truth — regenerate display_font.h from it).
 //
