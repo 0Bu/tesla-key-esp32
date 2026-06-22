@@ -282,6 +282,10 @@ code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
           <span class="ck">MQTT</span><span class="cv" id="mqttConn"><span class="ph">&mdash;</span></span>
           <svg class="cedit" viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>
         </button>
+        <button class="crow tap" onclick="editBoard()" title="Tap to set the board (on-device display)">
+          <span class="ck">Board</span><span class="cv" id="boardConn"><span class="ph">&mdash;</span></span>
+          <svg class="cedit" viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>
+        </button>
       </div>
     </div>
   </div>
@@ -519,6 +523,10 @@ function render(s){
   else if(mq.connected){ mc.className='cv ok'; mc.innerHTML='<span>'+esc(mq.broker||'')+'</span>'; }
   else { mc.className='cv warn'; mc.innerHTML='<span>'+esc(mq.broker||'')+' · disconnected</span>'; }
 
+  // Board — on-device display wiring (tap to switch; one firmware, runtime-selected)
+  var bd=s.board||'generic', bdc=$("boardConn");
+  bdc.className='cv'; bdc.innerHTML='<span>'+esc(bd)+'</span>';
+
   // header meta line: IP · version (IP first)
   $("ipline").innerHTML = s.ip ? esc(s.ip)+'&nbsp;·&nbsp;' : '';   // nbsp: overflow:hidden trims plain trailing spaces
   var vl=$("verLink");
@@ -602,6 +610,22 @@ function editMqtt(){
     .then(function(j){var o=(j&&j.response)||{};
       if(!o.result){ toast(o.reason||'Failed to save MQTT broker','err'); return; }
       if(/no reboot|unchanged|already/i.test(o.reason||'')){ toast(v?'MQTT broker unchanged':'MQTT already disabled','info'); return; }
+      toast('Saved · rebooting','ok');})
+    .catch(function(){toast('Saved — device rebooting','info')});
+}
+function editBoard(){
+  var cur=(state&&state.board)?state.board:'generic';
+  var v=prompt('Board / on-device display:\n  generic     — no display\n  t-dongle-s3 — LilyGo T-Dongle-S3 (0.96" ST7735)',cur);
+  if(v==null) return;
+  v=v.trim();
+  if(v!=='generic'&&v!=='t-dongle-s3'){ toast('Unknown board — use generic or t-dongle-s3','err'); return; }
+  if(v===cur){ toast('Board unchanged','info'); return; }
+  toast('Saving board…','info');
+  fetch('/set_board',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({board:v})})
+    .then(function(r){return r.json()})
+    .then(function(j){var o=(j&&j.response)||{};
+      if(!o.result){ toast(o.reason||'Failed to save board','err'); return; }
+      if(/no reboot|unchanged/i.test(o.reason||'')){ toast('Board unchanged','info'); return; }
       toast('Saved · rebooting','ok');})
     .catch(function(){toast('Saved — device rebooting','info')});
 }

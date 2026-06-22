@@ -270,12 +270,19 @@ extern "C" void app_main() {
     }
     ble_client.set_target_vin(vin);   // match by the VIN-derived BLE name on scan
 
-    // On-device status display (LilyGo T-Dongle-S3 / -C5). No-op unless the board
-    // overlay selects CONFIG_TESLA_DISPLAY_ENABLED; reads only cached state (never
-    // wakes the car). Started pre-WiFi so a no-WiFi boot shows the WiFi search
-    // instead of a black screen. The ~25 KB framebuffer (no-PSRAM board) allocates
-    // from the still-fresh heap here — see the log_heap below.
-    display_start(vehicle);
+    // On-device status display. ONE firmware image serves every board: the panel
+    // wiring is chosen at RUNTIME from the NVS `board` key (web UI: Connection →
+    // Board), so a panel-less ESP32-S3 (board "generic", the default) gets a no-op
+    // while a "t-dongle-s3" drives its ST7735 — no per-board build or OTA channel.
+    // Reads only cached state (never wakes the car). Started pre-WiFi so a no-WiFi
+    // boot shows the WiFi search instead of a black screen. The ~25 KB framebuffer
+    // (no-PSRAM board) allocates from the still-fresh heap here, and only when a
+    // display is actually selected — see the log_heap below.
+    static std::string board = CONFIG_TESLA_DEFAULT_BOARD;
+    config_store.load_str("board", board);
+    DisplayConfig display_cfg = display_board_preset(board.c_str());
+    ESP_LOGI(TAG, "board: %s (display %s)", board.c_str(), display_cfg.enabled ? "on" : "off");
+    display_start(vehicle, display_cfg);
     log_heap("display");
 
     // Connect to WiFi. With stored credentials, a failure is usually a transient

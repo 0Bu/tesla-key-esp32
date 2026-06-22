@@ -10,20 +10,22 @@ ESP32-S3 (BLE 5.0), ≥ 8 MB flash (dual-OTA layout: two 3 MB app slots). No PSR
 required. ESP32 / S2 / C3 not supported.
 USB data cable for flashing.
 
-### Experimental: LilyGo T-Dongle-S3 (onboard display)
+### LilyGo T-Dongle-S3 (onboard display)
 
-A board variant for the [LilyGo T-Dongle-S3](https://github.com/Xinyuan-LilyGO/T-Dongle-S3)
-(ESP32-S3, 16 MB flash, **no PSRAM**, native USB-A, 0.96" ST7735 LCD, driven landscape at
-160×80). Built via an SDKCONFIG overlay (the plain ESP32-S3 build is unchanged):
+The [LilyGo T-Dongle-S3](https://github.com/Xinyuan-LilyGO/T-Dongle-S3) (ESP32-S3, 16 MB
+flash, **no PSRAM**, native USB-A, 0.96" ST7735 LCD, driven landscape at 160×80) runs the
+**same firmware image** as a plain ESP32-S3 — there is no separate build. The on-device
+display is selected at **runtime**: flash the normal image, then in the web UI tap
+**Connection → Board** and choose **t-dongle-s3** (stored in NVS, survives OTA). A plain
+ESP32-S3 stays on **generic** (the default) and the display code is a no-op (costs no SRAM).
+One image, one OTA channel for every board.
 
 ```bash
-idf.py -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;boards/t-dongle-s3.defaults" \
-       set-target esp32s3 build flash monitor
+# Same build as any ESP32-S3 — no overlay:
+idf.py set-target esp32s3 build flash monitor
 ```
 
-The overlay (`boards/t-dongle-s3.defaults`) enables the onboard **ST7735 status display**
-(`main/display.cpp`), the native USB-Serial/JTAG console, and the full 16 MB flash. The
-display shows a **header** (WiFi signal bars + SSID on the left — scrolling horizontally if the
+The display shows a **header** (WiFi signal bars + SSID on the left — scrolling horizontally if the
 name is too long — and a Bluetooth symbol + BLE bars on the right) and a **gradient battery**
 filled to the SoC (red → amber → green), with a
 **charging bolt** while charging (hidden at 100 %) and an **ASLEEP** (dimmed) state. When a
@@ -37,16 +39,13 @@ from cache-only state, so it never wakes the car and does not depend on MQTT. Of
 pixel-exact validation: `python3 tools/display_sim.py states` (every state) and `python3
 tools/display_sim.py search` (the WiFi and BLE searching animations).
 
-> **Status:** builds in CI (job `build-tdongle-s3`, ESP-IDF v5.5.4); pending validation on
-> physical hardware. Two caveats: (1) **no PSRAM** → the ~25 KB framebuffer lands in internal
-> SRAM (watch the `display` heap-attribution line in the boot log on this RAM-tight build);
-> (2) **OTA** on this variant still pulls the generic (display-less) ESP32-S3 image —
-> per-board OTA/installer builds are a follow-up. Flash over USB for now. The ST7735 driver
-> (landscape: MADCTL `0x68`, offsets column 1 / row 26, INVON) is cross-verified against
-> LilyGo's; if the image is rotated/mirrored flip `CONFIG_TESLA_DISPLAY_MADCTL` (try `0xA8`).
-> The GPIO38 backlight is **active-low** (`CONFIG_TESLA_DISPLAY_BL_ACTIVE_LOW=y`, matching the
-> ESPHome board profile); if the panel stays dark, clear that and/or try pin 37 (some
-> MicroPython configs use GPIO37 active-high).
+> **Note:** **no PSRAM** → the ~25 KB framebuffer lands in internal SRAM, allocated only when
+> the board is set to `t-dongle-s3` (watch the `display` heap-attribution line in the boot log
+> on this RAM-tight build). OTA uses the single shared channel — a self-update keeps the panel,
+> because the wiring comes from the NVS `board` key, not the image. The panel wiring is a preset
+> in `display_board_preset()` (`main/display.cpp`): landscape MADCTL `0xA8`, offsets column 1 /
+> row 26, INVON, GPIO38 backlight **active-low** — all HW-verified. To add another board (e.g.
+> the T-Dongle-C5), add a preset there; no per-board firmware needed.
 
 ## Flash prebuilt artifacts
 

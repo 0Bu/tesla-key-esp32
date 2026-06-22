@@ -38,7 +38,7 @@ Never edit files in `managed_components/` — they are regenerated.
 
 | Namespace   | Content                                     |
 |-------------|---------------------------------------------|
-| `tesla_cfg` | WiFi SSID/pass, VIN, BLE MAC, `mqtt_uri`, `last_time` (runtime cfg) |
+| `tesla_cfg` | WiFi SSID/pass, VIN, BLE MAC, `mqtt_uri`, `board`, `last_time` (runtime cfg) |
 | `tesla_ble` | Private key, VCSEC session, Info session, `key_created`, `paired_at` |
 
 ## Commands Implemented
@@ -81,6 +81,7 @@ POST /send_key                                 # pair with vehicle (Charging Man
 POST /set_time                                 # set wall clock from the browser ({"ms":<epoch>}); fallback when NTP unreachable
 POST /set_vin                                  # persist VIN + reboot
 POST /set_mqtt                                 # persist MQTT broker (HA bridge) + reboot ({"broker":"host:port"}; "" disables)
+POST /set_board                                # persist board (on-device display) + reboot ({"board":"generic"|"t-dongle-s3"})
 GET  /api/proxy/1/version                      # {version, platform:"ESP32-S3"}
 GET  /ota/check[?ms=<epoch>]                   # start background manifest check (non-blocking); poll /ota/status. ms = browser-clock NTP fallback
 POST /ota/update                               # start background self-update (pull, then reboot)
@@ -105,17 +106,21 @@ app now at `0x20000`). **Migration:** a device on the old single-`factory` layou
 USB-reflashed once via the web installer (full erase → WiFi/VIN/key reset, re-pair). After
 that, all updates are OTA and preserve NVS.
 
-**Per-board OTA channels:** the manifest/firmware URLs are Kconfig, so a board whose
-binary differs from the generic ESP32-S3 image (display, flash size, console) gets its
-own OTA channel instead of being overwritten by the feature-less generic image. The
-LilyGo **T-Dongle-S3** overlay (`boards/t-dongle-s3.defaults`) overrides
-`CONFIG_TESLA_OTA_MANIFEST_URL`/`_FIRMWARE_URL` to a `t-dongle-s3/` subdir, and CI builds
-that variant in the same job as the generic one (shared, stamped version) and publishes
-`_site/t-dongle-s3/{manifest.json,tesla-key-esp32.bin}` via `scripts/build-pages.sh`. So a
-T-Dongle-S3 self-update pulls the **display** build, not the generic one. (Earlier
-firmware ≤ 1.2.23 shipped no per-board channel, so OTA there pulled the display-less
-generic image and the panel went dark — fixed in 1.2.24; such a device just needs one USB
-reflash of the overlay build to get back onto its own channel.)
+**One image, one OTA channel for every board (1.3.0+).** The on-device display is NOT a
+build-time option — it is selected at **runtime** from the NVS `board` key, so the same
+firmware drives the panel on a LilyGo **T-Dongle-S3** (`board = "t-dongle-s3"`) and is a
+no-op on a panel-less ESP32-S3 (`board = "generic"`, the default — no SRAM cost). The
+panel wiring (pins/MADCTL/offsets/backlight polarity) is a preset in
+`display_board_preset()` (`main/display.cpp`); add a board there, no per-board build. Set
+the board live in the web UI (Connection → Board, `POST /set_board`, persisted in NVS,
+survives OTA) or via the `CONFIG_TESLA_DEFAULT_BOARD` factory default. So OTA is a single
+generic channel for all boards and a self-update never changes the display behaviour.
+The console is the S3's native USB-Serial/JTAG (`CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG`,
+universal on every S3), and the 8 MB flash-size config runs fine on the T-Dongle-S3's
+16 MB chip. (History: 1.2.24 briefly used per-board OTA *channels* via a
+`boards/t-dongle-s3.defaults` overlay + a `t-dongle-s3/` Pages subdir; 1.3.0 replaced that
+with this runtime selection — a T-Dongle-S3 migrates with one USB reflash of the unified
+image, then pick "t-dongle-s3" once in the web UI.)
 
 ## evcc Integration
 

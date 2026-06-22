@@ -41,7 +41,7 @@ jobs:
           if [ -z "$before" ] || ! git cat-file -e "${before}^{commit}" 2>/dev/null; then
             changed=yes   # first push / unknown base → release to be safe
           elif git diff --name-only "$before" "${{ github.sha }}" \
-               | grep -qE '^(main/|boards/|CMakeLists\.txt$|sdkconfig\.defaults$|partitions\.csv$|version\.txt$|\.github/workflows/build\.yml$)'; then
+               | grep -qE '^(main/|CMakeLists\.txt$|sdkconfig\.defaults$|partitions\.csv$|version\.txt$|\.github/workflows/build\.yml$)'; then
             changed=yes
           else
             changed=no
@@ -79,13 +79,9 @@ jobs:
           # their own offsets, so an UPDATE never touches the nvs partition (0x9000)
           # → WiFi / VIN / key survive upgrades. tesla-key-esp32.bin is the stable
           # name the web installer reads; the versioned + merged copies are release
-          # downloads for manual / full flashing.
-          #
-          # Then build the LilyGo T-Dongle-S3 variant (onboard ST7735 display, 16 MB
-          # flash, native USB console) in an ISOLATED build dir + sdkconfig so it can't
-          # clash with the generic config. Same job → shares the one stamped version,
-          # so the generic and per-board OTA channels never report different versions.
-          # build-pages.sh publishes build_td/ into _site/t-dongle-s3/ (push only).
+          # downloads for manual / full flashing. ONE image serves every ESP32-S3
+          # board (display selected at runtime via the NVS `board` key) → a single
+          # build, a single OTA channel.
           command: >-
             idf.py set-target esp32s3 build &&
             cd build &&
@@ -93,13 +89,7 @@ jobs:
             cp partition_table/partition-table.bin ../partition-table.bin &&
             cp tesla-key-esp32.bin ../tesla-key-esp32.bin &&
             cp tesla-key-esp32.bin ../tesla-key-esp32-${{ steps.version.outputs.version }}.bin &&
-            esptool.py --chip esp32s3 merge_bin -o ../tesla-key-esp32-${{ steps.version.outputs.version }}-merged.bin "@flash_args" &&
-            cd .. &&
-            idf.py -B build_td -DSDKCONFIG=sdkconfig.tdongle
-            -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;boards/t-dongle-s3.defaults"
-            set-target esp32s3 build &&
-            cd build_td &&
-            esptool.py --chip esp32s3 merge_bin -o ../tesla-key-esp32-${{ steps.version.outputs.version }}-tdongle-s3-merged.bin "@flash_args"
+            esptool.py --chip esp32s3 merge_bin -o ../tesla-key-esp32-${{ steps.version.outputs.version }}-merged.bin "@flash_args"
 
       - name: Upload firmware artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -111,7 +101,6 @@ jobs:
             tesla-key-esp32.bin
             tesla-key-esp32-${{ steps.version.outputs.version }}.bin
             tesla-key-esp32-${{ steps.version.outputs.version }}-merged.bin
-            tesla-key-esp32-${{ steps.version.outputs.version }}-tdongle-s3-merged.bin
 
       # Cut a release only when firmware-relevant files changed (source / deps /
       # esp-idf version / version.txt) — docs-only pushes redeploy Pages but don't
@@ -129,7 +118,6 @@ jobs:
             tesla-key-esp32.bin
             tesla-key-esp32-${{ steps.version.outputs.version }}.bin
             tesla-key-esp32-${{ steps.version.outputs.version }}-merged.bin
-            tesla-key-esp32-${{ steps.version.outputs.version }}-tdongle-s3-merged.bin
 
       - name: Configure Pages
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
@@ -139,9 +127,8 @@ jobs:
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: |
           # Same version stamped into the binary (steps.stamp) → installer label,
-          # served firmware and manifest can never drift apart. The 3rd/4th args
-          # mirror the T-Dongle-S3 build into _site/t-dongle-s3/ as its own OTA channel.
-          ./scripts/build-pages.sh ./_site "${{ steps.stamp.outputs.disp }}" ./build_td t-dongle-s3
+          # served firmware and manifest can never drift apart.
+          ./scripts/build-pages.sh ./_site "${{ steps.stamp.outputs.disp }}"
 
       - name: Upload Pages artifact
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'

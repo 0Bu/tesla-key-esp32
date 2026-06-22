@@ -447,6 +447,9 @@ static esp_err_t handle_status(httpd_req_t* req) {
     cJSON_AddStringToObject(root, "vin",           g_vehicle->vin().c_str());
     cJSON_AddStringToObject(root, "ip",            ip);
     cJSON_AddStringToObject(root, "version",       esp_app_get_description()->version);
+    // Selected board (on-device display wiring); unset NVS key → "generic" default.
+    { std::string bd = g_vehicle->load_config_str("board");
+      cJSON_AddStringToObject(root, "board", bd.empty() ? "generic" : bd.c_str()); }
     cJSON_AddBoolToObject(root,   "key_present",   g_vehicle->has_key());
     cJSON_AddStringToObject(root, "key_fingerprint", g_vehicle->key_fingerprint().c_str());
     // Key creation date (epoch seconds), shown under the fingerprint in the UI.
@@ -810,6 +813,45 @@ static esp_err_t handle_set_mqtt(httpd_req_t* req) {
     return r;
 }
 
+// ─── POST /set_board — persist the board (on-device display wiring), then reboot ─
+// Body: {"board":"generic"|"t-dongle-s3"}. ONE firmware image serves every board;
+// the display is selected at runtime from this NVS key (display_board_preset()), so
+// turning a T-Dongle-S3's panel on (or back to a panel-less generic) is a web-UI
+// action, not a reflash. Reboots so display_start() re-runs with the new wiring.
+static esp_err_t handle_set_board(httpd_req_t* req) {
+    char* body = read_body(req);
+    cJSON* json = body ? cJSON_Parse(body) : nullptr;
+    free(body);
+
+    std::string board;
+    if (json) {
+        cJSON* j = cJSON_GetObjectItemCaseSensitive(json, "board");
+        if (cJSON_IsString(j) && j->valuestring) board = j->valuestring;
+    }
+    cJSON_Delete(json);
+
+    if (board != "generic" && board != "t-dongle-s3") {
+        return send_json(req, 400, make_response(false, "set_board", board.c_str(),
+                                                 "unknown board (generic | t-dongle-s3)"));
+    }
+    // Unchanged (treat an unset NVS key as the "generic" default) → no write, no reboot.
+    std::string current = g_vehicle->load_config_str("board");
+    if (current.empty()) current = "generic";
+    if (board == current) {
+        return send_json(req, 200, make_response(true, "set_board", board.c_str(),
+                                                 "board unchanged — no reboot"));
+    }
+    bool ok = g_vehicle->save_config_str("board", board);
+    esp_err_t r = send_json(req, ok ? 200 : 500,
+        make_response(ok, "set_board", board.c_str(),
+                      ok ? "board saved — rebooting" : "failed to save board"));
+    if (ok) {
+        vTaskDelay(pdMS_TO_TICKS(800));
+        esp_restart();
+    }
+    return r;
+}
+
 // ─── GET / — web UI (embedded from main/www/index.html) ─────────────────────────
 
 extern const char index_html_start[] asm("_binary_index_html_start");
@@ -875,6 +917,9 @@ static esp_err_t handle_all_dispatch(httpd_req_t* req) {
     }
     if (req->method == HTTP_POST && strstr(uri, "/set_mqtt")) {
         return handle_set_mqtt(req);
+    }
+    if (req->method == HTTP_POST && strstr(uri, "/set_board")) {
+        return handle_set_board(req);
     }
     if (req->method == HTTP_POST && strstr(uri, "/scan")) {
         return handle_scan(req);
