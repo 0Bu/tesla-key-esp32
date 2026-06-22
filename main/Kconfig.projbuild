@@ -88,4 +88,46 @@ menu "Tesla Key Configuration"
             republished to MQTT (retained). Discovery + an immediate snapshot are
             also sent on every (re)connect.
 
+    config TESLA_DISPLAY_ENABLED
+        bool "On-device ST7735 status display (LilyGo T-Dongle-S3 / -C5)"
+        default n
+        help
+            Drive a 0.96" ST7735 80x160 SPI TFT and render the charge/connection
+            status (SOC ring, charging/asleep/unreachable, power/current, WiFi/BLE)
+            on it. Reads only cached state — never wakes the car — and is
+            independent of MQTT. Enable via a board overlay (boards/*.defaults);
+            leave off for a plain ESP32-S3 with no panel. Pin defaults below match
+            the LilyGo T-Dongle-S3; the T-Dongle-C5 overlay overrides them.
+
+    if TESLA_DISPLAY_ENABLED
+    config TESLA_DISPLAY_SPI_MOSI
+        int "Display SPI MOSI (SDA) GPIO"
+        default 3
+    config TESLA_DISPLAY_SPI_SCK
+        int "Display SPI SCK (SCL) GPIO"
+        default 5
+    config TESLA_DISPLAY_CS
+        int "Display CS GPIO"
+        default 4
+    config TESLA_DISPLAY_DC
+        int "Display DC (RS) GPIO"
+        default 2
+    config TESLA_DISPLAY_RST
+        int "Display RST GPIO"
+        default 1
+    config TESLA_DISPLAY_BL
+        int "Display backlight GPIO"
+        default 38
+        help
+            T-Dongle-S3 backlight is GPIO38 in LilyGo's C/Arduino examples
+            (GPIO37 in their MicroPython config — flip this if the backlight
+            stays dark on first flash).
+    config TESLA_DISPLAY_X_OFFSET
+        int "Panel column offset (ST7735 RAM offset)"
+        default 26
+    config TESLA_DISPLAY_Y_OFFSET
+        int "Panel row offset (ST7735 RAM offset)"
+        default 1
+    endif
+
 endmenu
