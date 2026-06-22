@@ -141,6 +141,16 @@ BOLT_ROWS = [
     "#.........",
     "#.........",
 ]
+# WiFi glyph (7 wide x 6 tall): two broadcast arcs over a dot. Used as the icon for
+# the WiFi searching animation (emitted as DISPLAY_WIFI_ROWS; keep in sync).
+WIFI_ROWS = [
+    ".#####.",
+    "#.....#",
+    "..###..",
+    ".#...#.",
+    ".......",
+    "...#...",
+]
 
 # ── tiny stdlib PNG writer ────────────────────────────────────────────────────
 def write_png(path, w, h, rgb):
@@ -269,20 +279,31 @@ def signal_bars(cv, x, y, level, on_col=BAR_ON):
 # cluster of 5 ascending bars on the right; a dark-green highlight sweeps across
 # light-green bars (a flowing colour gradient) to read as "scanning for the BLE link".
 SRCH_N, SRCH_BW, SRCH_GAP, SRCH_X0, SRCH_BASE = 5, 10, 6, 80, 70   # compact, right-flush
-SRCH_BT_SCALE, SRCH_BT_X, SRCH_BT_Y = 3, 24, 36   # Bluetooth glyph, off the left edge
+SRCH_ICON_SCALE = 3
+SRCH_BT_X, SRCH_BT_Y = 24, 36                     # Bluetooth glyph, off the left edge
+SRCH_WIFI_X, SRCH_WIFI_Y = 16, 38                 # WiFi glyph (wider), off the left edge
 SRCH_STEPS = 3                                    # animation sub-frames per bar
 SRCH_FALLOFF = 1.5                                # highlight width, in bars
-SRCH_CYCLE = (SRCH_N + 2) * SRCH_STEPS            # frames for one full sweep
+SRCH_HALF = (SRCH_N - 1) * SRCH_STEPS             # frames for one direction (small↔large)
+SRCH_CYCLE = 2 * SRCH_HALF                        # full ping-pong period
 
-def draw_searching(cv, frame):
-    cv.bitmap(SRCH_BT_X, SRCH_BT_Y, BT_ROWS, INK, SRCH_BT_SCALE)   # "it's a BLE search"
-    hp = -SRCH_FALLOFF + (frame % SRCH_CYCLE) / SRCH_STEPS   # highlight position
+# icon = (rows, x, y); the swept bars are identical for WiFi and BLE searches.
+# The highlight ping-pongs: smallest→largest bar, then largest→smallest, repeating
+# (a triangle wave) — a wave that runs out and back, not a one-way scan.
+def draw_searching(cv, frame, icon):
+    rows, ix, iy = icon
+    cv.bitmap(ix, iy, rows, INK, SRCH_ICON_SCALE)           # which link is being searched
+    p = frame % SRCH_CYCLE
+    hp = (p / SRCH_STEPS) if p <= SRCH_HALF else ((SRCH_CYCLE - p) / SRCH_STEPS)  # bounce
     for i in range(SRCH_N):
         h = 12 + i * 7
         t = max(0.0, 1.0 - abs(i - hp) / SRCH_FALLOFF)
         col = lerp(BLE_LIGHT, BLE_GREEN, t)
         x = SRCH_X0 + i * (SRCH_BW + SRCH_GAP)
         cv.rect(x, SRCH_BASE - h, x + SRCH_BW, SRCH_BASE, col)
+
+SRCH_ICON_BLE  = (BT_ROWS,   SRCH_BT_X,   SRCH_BT_Y)
+SRCH_ICON_WIFI = (WIFI_ROWS, SRCH_WIFI_X, SRCH_WIFI_Y)
 
 # ── compose one frame from a state dict ───────────────────────────────────────
 # state = { wifi:0..4, ssid:str, ble:0..4, ble_on:bool, frame:int,
@@ -294,18 +315,21 @@ def compose(cv, st):
     soc = st.get("soc")
     link = st.get("link", "awake")
     charging = st.get("charging", False)
-    # No usable link to the car (unreachable, or no cached SoC yet) → "searching".
-    searching = (link == "unreachable") or (soc is None)
+    wifi_on = st.get("wifi", 0) > 0
+    # What's being searched. WiFi has priority when both are down.
+    wifi_searching = not wifi_on
+    ble_searching = (link == "unreachable") or (soc is None)
+    ble_is_hero = ble_searching and not wifi_searching      # BLE shown as the hero search
 
     # ── header: WiFi bars + SSID (left) | BLE symbol + bars (right) ──────────
-    wifi_on = st.get("wifi", 0) > 0
-    signal_bars(cv, 4, 3, st.get("wifi", 0))
-    name_max = (158 - 26) if searching else (158 - 26 - 36)   # full width if no BLE cluster
-    cv.text(26, 4, fit((st.get("ssid") or "-") if wifi_on else "-", name_max),
-            INK if wifi_on else GREY)
+    # Each side is hidden while it is the active (hero) search — the big centre
+    # animation represents it instead.
+    if not wifi_searching:
+        signal_bars(cv, 4, 3, st.get("wifi", 0))
+        name_max = (158 - 26) if ble_is_hero else (158 - 26 - 36)
+        cv.text(26, 4, fit(st.get("ssid") or "-", name_max), INK)
 
-    # BLE cluster hugs the right edge — hidden entirely while searching.
-    if not searching:
+    if not ble_is_hero:
         ble_on = st.get("ble_on", False)
         bx = 158 - 16                  # 4 bars * 4px
         signal_bars(cv, bx, 3, st.get("ble", 0) if ble_on else 0)
@@ -313,9 +337,12 @@ def compose(cv, st):
 
     cv.rect(3, 17, W - 3, 18, DIV)     # divider under the header
 
-    # ── searching: big animated BLE bars instead of the battery ─────────────
-    if searching:
-        draw_searching(cv, st.get("frame", 0))
+    # ── searching: big animated bars instead of the battery (WiFi > BLE) ────
+    if wifi_searching:
+        draw_searching(cv, st.get("frame", 0), SRCH_ICON_WIFI)
+        return True
+    if ble_searching:
+        draw_searching(cv, st.get("frame", 0), SRCH_ICON_BLE)
         return True
 
     # ── battery shell ───────────────────────────────────────────────────────
@@ -375,9 +402,11 @@ def cmd_states(out="tools/display_states.png"):
         dict(wifi=4, ssid="Jupiter", ble=4, ble_on=True,  soc=100, charging=True,  link="awake"),
         dict(wifi=2, ssid="Jupiter", ble=2, ble_on=True,  soc=72,  charging=False, link="asleep"),
         dict(wifi=3, ssid="Jupiter", ble=0, ble_on=False, soc=None,charging=False, link="unreachable", frame=6),
+        dict(wifi=0, ssid="Jupiter", ble=0, ble_on=False, soc=None,charging=False, link="unreachable", frame=6),
     ]
     labels = ["awake / charging 64%", "5% (red)", "20% (amber)", "45% (green)",
-              "charging 80%", "100% (no bolt)", "asleep (dim)", "searching (no BLE / unreachable)"]
+              "charging 80%", "100% (no bolt)", "asleep (dim)", "searching BLE (car unreachable)",
+              "searching WiFi (priority)"]
     S = 4
     pad = 10
     cap = 16
@@ -410,31 +439,33 @@ def cmd_states(out="tools/display_states.png"):
     print("wrote", out, f"({bw}x{bh})")
 
 def cmd_search(out="tools/display_search.png"):
-    """Render successive frames of the BLE searching sweep to show the animation."""
+    """Render the WiFi (left col) and BLE (right col) searching sweeps frame-by-frame."""
     frames = list(range(0, SRCH_CYCLE, 2))     # every other frame across one sweep
-    st = dict(wifi=3, ssid="Jupiter", soc=None, charging=False, link="unreachable")
+    # col 0 = WiFi search (wifi down → priority); col 1 = BLE search (wifi up, car gone)
+    wifi_st = dict(wifi=0, ssid="Jupiter", soc=None, charging=False, link="unreachable", ble_on=False)
+    ble_st  = dict(wifi=3, ssid="Jupiter", soc=None, charging=False, link="unreachable", ble_on=False)
     S = 4
     pad, cap = 10, 16
     cellw, cellh = W*S, H*S + cap
     cols = 2
-    rows = (len(frames) + cols - 1)//cols
+    rows = len(frames)
     bw = cols*cellw + (cols+1)*pad
     bh = rows*cellh + (rows+1)*pad
     big = [[(8,9,12) for _ in range(bw)] for _ in range(bh)]
-    for idx, f in enumerate(frames):
-        cv = Canvas()
-        compose(cv, dict(st, frame=f))
-        up = upscale(cv, S)
-        r, cc = idx//cols, idx % cols
-        ox, oy = pad + cc*(cellw + pad), pad + r*(cellh + pad)
-        for y in range(H*S):
-            for x in range(W*S):
-                big[oy+y][ox+x] = up[y][x]
-        capcv = Canvas(); capcv.text(2, 4, "frame %d" % f, INK, 1)
-        capup = upscale(capcv, 2)
-        for y in range(cap):
-            for x in range(min(cellw, W*2)):
-                big[oy + H*S + y][ox + x] = capup[y][x]
+    for r, f in enumerate(frames):
+        for cc, (st, tag) in enumerate([(wifi_st, "WiFi"), (ble_st, "BLE")]):
+            cv = Canvas()
+            compose(cv, dict(st, frame=f))
+            up = upscale(cv, S)
+            ox, oy = pad + cc*(cellw + pad), pad + r*(cellh + pad)
+            for y in range(H*S):
+                for x in range(W*S):
+                    big[oy+y][ox+x] = up[y][x]
+            capcv = Canvas(); capcv.text(2, 4, "%s f%d" % (tag, f), INK, 1)
+            capup = upscale(capcv, 2)
+            for y in range(cap):
+                for x in range(min(cellw, W*2)):
+                    big[oy + H*S + y][ox + x] = capup[y][x]
     write_png(out, bw, bh, big)
     print("wrote", out, f"({bw}x{bh})")
 
@@ -491,6 +522,13 @@ def cmd_cheader(out="main/display_font.h"):
     L.append("#define DISPLAY_BOLT_H %d" % len(lrows))
     L.append("static const uint16_t DISPLAY_BOLT_ROWS[%d] = {%s};" %
              (len(lrows), ",".join("0x%04x" % v for v in lrows)))
+    # WiFi glyph (row-major bitmap) — icon for the WiFi searching animation
+    ww, wrows = rows_bits(WIFI_ROWS)
+    L.append("// WiFi glyph (broadcast arcs + dot), row-major (same bit convention as BT).")
+    L.append("#define DISPLAY_WIFI_W %d" % ww)
+    L.append("#define DISPLAY_WIFI_H %d" % len(wrows))
+    L.append("static const uint8_t DISPLAY_WIFI_ROWS[%d] = {%s};" %
+             (len(wrows), ",".join("0x%02x" % v for v in wrows)))
     open(out, "w").write("\n".join(L) + "\n")
     print("wrote", out)
 

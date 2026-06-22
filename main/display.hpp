@@ -8,10 +8,11 @@ class VehicleController;
 //   • body:   a battery filled to the SoC with a red→amber→green gradient; a
 //             charging bolt overlays while charging (hidden at 100%); the asleep
 //             state dims the fill ("ASLEEP").
-//   • searching: with no usable link to the car (unreachable, or no cached SoC
-//             yet) the battery is replaced by big animated BLE bars — a green
-//             highlight sweeps across light-green bars ("SEARCHING") — and the
-//             header's BLE symbol/bars are hidden.
+//   • searching: when a link is down the battery is replaced by an animated search
+//             — a link icon (WiFi or Bluetooth) plus a compact bar cluster whose
+//             dark-green highlight sweeps across light-green bars. WiFi-down takes
+//             priority over car-unreachable/no-SoC. The header hides whichever
+//             small indicator is the active search.
 // Mirrors tools/display_sim.py one-to-one (the offline pixel-exact renderer and
 // font source of truth — regenerate display_font.h from it).
 //

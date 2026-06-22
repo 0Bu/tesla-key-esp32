@@ -267,21 +267,26 @@ static int rssi_bars(int rssi) {
     return 0;
 }
 
-// Big BLE "searching for a connection" animation, drawn where the battery would
-// be (no battery while disconnected): a Bluetooth symbol on the left and a compact
-// cluster of 5 ascending bars on the right; a dark-green highlight sweeps across
-// light-green bars (a flowing colour gradient) to read as "scanning for the BLE link".
+// "Searching for a connection" animation, drawn where the battery would be (no
+// battery while disconnected): a link icon (Bluetooth or WiFi) on the left and a
+// compact, right-flush cluster of 5 ascending bars; a dark-green highlight sweeps
+// across light-green bars (a flowing colour gradient) to read as "scanning". The
+// swept bars are identical for WiFi and BLE — only the icon differs.
 // Mirrors draw_searching() in tools/display_sim.py.
 static constexpr int   SRCH_N = 5, SRCH_BW = 10, SRCH_GAP = 6, SRCH_X0 = 80, SRCH_BASE = 70;  // compact, right-flush
-static constexpr int   SRCH_BT_SCALE = 3, SRCH_BT_X = 24, SRCH_BT_Y = 36;  // BT glyph, off the left edge
+static constexpr int   SRCH_ICON_SCALE = 3;
+static constexpr int   SRCH_BT_X = 24, SRCH_BT_Y = 36;      // Bluetooth glyph, off the left edge
+static constexpr int   SRCH_WIFI_X = 16, SRCH_WIFI_Y = 38;  // WiFi glyph (wider), off the left edge
 static constexpr int   SRCH_STEPS = 3;                       // animation sub-frames per bar
 static constexpr float SRCH_FALLOFF = 1.5f;                  // highlight width, in bars
-static constexpr int   SRCH_CYCLE = (SRCH_N + 2) * SRCH_STEPS;  // frames per full sweep
+static constexpr int   SRCH_HALF = (SRCH_N - 1) * SRCH_STEPS;   // one direction (small↔large)
+static constexpr int   SRCH_CYCLE = 2 * SRCH_HALF;           // full ping-pong period
 
-static void draw_searching(int frame) {
-    blit_rows(SRCH_BT_X, SRCH_BT_Y, DISPLAY_BT_ROWS, DISPLAY_BT_W, DISPLAY_BT_H,
-              SRCH_BT_SCALE, C_INK);                          // "it's a BLE search"
-    float hp = -SRCH_FALLOFF + (float)(frame % SRCH_CYCLE) / SRCH_STEPS;  // highlight pos
+static void draw_searching(int frame, const uint8_t* icon, int iw, int ih, int ix, int iy) {
+    blit_rows(ix, iy, icon, iw, ih, SRCH_ICON_SCALE, C_INK);  // which link is being searched
+    // The highlight ping-pongs smallest↔largest bar (a triangle wave): out and back.
+    int p = frame % SRCH_CYCLE;
+    float hp = (p <= SRCH_HALF ? p : (SRCH_CYCLE - p)) / (float)SRCH_STEPS;
     for (int i = 0; i < SRCH_N; ++i) {
         int   h = 12 + i * 7;
         float d = fabsf(i - hp);
@@ -313,20 +318,25 @@ static bool compose(VehicleController& v, int frame) {
     bool have_soc = cs.valid && cs.has_battery_level;
     VehicleController::LinkState ls = v.link_state();
     bool unreachable = (ls == VehicleController::LinkState::Unreachable);
-    // No usable link to the car (unreachable, or no cached SoC yet) → "searching".
-    bool searching = unreachable || !have_soc;
 
-    // ── header: WiFi bars + SSID (left) | BLE symbol + bars (right) ──────────
     char buf[48];
     wifi_ap_record_t ap = {};
     bool wifi_on = (esp_wifi_sta_get_ap_info(&ap) == ESP_OK);
-    signal_bars(4, 3, wifi_on ? rssi_bars(ap.rssi) : 0, C_BAR_ON);
-    snprintf(buf, sizeof(buf), "%s", wifi_on ? (const char*)ap.ssid : "-");
-    fit(buf, searching ? (158 - 26) : (158 - 26 - 36));   // full width if no BLE cluster
-    draw_text(26, 4, buf, wifi_on ? C_INK : C_GREY, 1);
+    // What's being searched. WiFi has priority when both are down.
+    bool wifi_searching = !wifi_on;
+    bool ble_searching = unreachable || !have_soc;
+    bool ble_is_hero = ble_searching && !wifi_searching;   // BLE shown as the hero search
 
-    // BLE cluster hugs the right edge — hidden entirely while searching.
-    if (!searching) {
+    // ── header: WiFi bars + SSID (left) | BLE symbol + bars (right) ──────────
+    // Each side is hidden while it is the active (hero) search — the big centre
+    // animation represents it instead.
+    if (!wifi_searching) {
+        signal_bars(4, 3, rssi_bars(ap.rssi), C_BAR_ON);
+        snprintf(buf, sizeof(buf), "%s", (const char*)ap.ssid);
+        fit(buf, ble_is_hero ? (158 - 26) : (158 - 26 - 36));
+        draw_text(26, 4, buf, C_INK, 1);
+    }
+    if (!ble_is_hero) {
         int8_t brssi = 0;
         bool ble_on = v.ble_connected() && v.ble_rssi(brssi);
         int bx = 158 - 16;                    // 4 bars * 4px
@@ -337,8 +347,17 @@ static bool compose(VehicleController& v, int frame) {
 
     rect(3, 17, W - 3, 18, C_DIV);            // divider under the header
 
-    // ── searching: big animated BLE bars instead of the battery ─────────────
-    if (searching) { draw_searching(frame); return true; }
+    // ── searching: big animated bars instead of the battery (WiFi > BLE) ────
+    if (wifi_searching) {
+        draw_searching(frame, DISPLAY_WIFI_ROWS, DISPLAY_WIFI_W, DISPLAY_WIFI_H,
+                       SRCH_WIFI_X, SRCH_WIFI_Y);
+        return true;
+    }
+    if (ble_searching) {
+        draw_searching(frame, DISPLAY_BT_ROWS, DISPLAY_BT_W, DISPLAY_BT_H,
+                       SRCH_BT_X, SRCH_BT_Y);
+        return true;
+    }
 
     // ── battery shell ───────────────────────────────────────────────────────
     const int bx0 = 6, by0 = 24, bx1 = 146, by1 = 74;
