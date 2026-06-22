@@ -1,6 +1,27 @@
 #pragma once
 
+#include <cstdint>
+
 class VehicleController;
+
+// Runtime panel wiring for one board. Chosen at boot from the NVS `board` key via
+// display_board_preset(), so a SINGLE firmware image drives the panel on a board that
+// has one and is a no-op on a board that doesn't — no per-board build or OTA channel.
+struct DisplayConfig {
+    bool    enabled       = false;        // false → display_start() is a no-op
+    int     mosi = -1, sck = -1, cs = -1, dc = -1, rst = -1, bl = -1;   // SPI + control GPIOs
+    bool    bl_active_low = false;        // drive backlight LOW to light it
+    int     x_off = 0, y_off = 0;         // ST7735 RAM offsets (landscape col/row start)
+    uint8_t madctl = 0x00;                // memory-access / rotation byte
+};
+
+// Preset wiring for a known board ("t-dongle-s3"); unknown/"generic" → {enabled=false}.
+DisplayConfig display_board_preset(const char* board);
+
+// Auto-detect the board from a hardware signature: returns "t-dongle-s3" if the LilyGo
+// TF-card SDMMC pull-ups are present, else "generic". The only board selector — there is
+// no manual override. See the implementation for the probe. Safe to call once at boot.
+const char* display_detect_board();
 
 // ─── On-device status display (LilyGo T-Dongle-S3 / -C5, 0.96" ST7735, 160x80) ─
 // Renders the charge/connection state directly on the panel, in landscape:
@@ -30,6 +51,7 @@ class VehicleController;
 //     no-PSRAM board (T-Dongle-S3) it falls back to ~25 KB of internal SRAM — a
 //     real cost on a RAM-tight build, so watch the post-init heap-attribution log.
 //
-// No-op unless CONFIG_TESLA_DISPLAY_ENABLED — so the default ESP32-S3 build (no
-// panel) is completely unaffected.
-void display_start(VehicleController& vehicle);
+// Always compiled. With cfg.enabled == false (a panel-less board, e.g. "generic")
+// this is a no-op and costs no SRAM — so one image serves every ESP32-S3 board. Pass
+// display_board_preset(<nvs board>).
+void display_start(VehicleController& vehicle, const DisplayConfig& cfg);

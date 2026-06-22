@@ -105,17 +105,26 @@ app now at `0x20000`). **Migration:** a device on the old single-`factory` layou
 USB-reflashed once via the web installer (full erase → WiFi/VIN/key reset, re-pair). After
 that, all updates are OTA and preserve NVS.
 
-**Per-board OTA channels:** the manifest/firmware URLs are Kconfig, so a board whose
-binary differs from the generic ESP32-S3 image (display, flash size, console) gets its
-own OTA channel instead of being overwritten by the feature-less generic image. The
-LilyGo **T-Dongle-S3** overlay (`boards/t-dongle-s3.defaults`) overrides
-`CONFIG_TESLA_OTA_MANIFEST_URL`/`_FIRMWARE_URL` to a `t-dongle-s3/` subdir, and CI builds
-that variant in the same job as the generic one (shared, stamped version) and publishes
-`_site/t-dongle-s3/{manifest.json,tesla-key-esp32.bin}` via `scripts/build-pages.sh`. So a
-T-Dongle-S3 self-update pulls the **display** build, not the generic one. (Earlier
-firmware ≤ 1.2.23 shipped no per-board channel, so OTA there pulled the display-less
-generic image and the panel went dark — fixed in 1.2.24; such a device just needs one USB
-reflash of the overlay build to get back onto its own channel.)
+**One image, one OTA channel for every board (1.3.0+).** The on-device display is NOT a
+build-time option and there is **no manual board selection** — it is **auto-detected** at
+runtime, so the same firmware drives the panel on a LilyGo **T-Dongle-S3** and is a no-op on
+a panel-less ESP32-S3 (no SRAM cost), with **zero setup**. `display_detect_board()`
+(`main/display.cpp`): the ST7735 can't be probed (SDA is write-only, no MISO), but the
+T-Dongle-S3's onboard TF-card socket puts **external pull-ups on all six SDMMC lines** (GPIO
+16/14/17/21/18/12) that a bare S3 lacks — read them with an internal pull-down, ≥4 HIGH ⇒
+`t-dongle-s3`. **HW-verified: 6/6 HIGH on a T-Dongle-S3, 0/6 on a generic ESP32-S3.** The
+panel wiring (pins/MADCTL/offsets/backlight) is a preset in `display_board_preset()`; add a
+board there, no per-board build. A **crash-loop guard** (RTC strike counter in `main.cpp`)
+force-disables the panel after 3 consecutive early panics with it on — so a wrong auto-detect
+can't crash-loop (which would defeat car-sleep); cleared by a 30 s healthy run or a
+power-cycle, logged on serial. So OTA is a single generic channel for all boards and a
+self-update never changes the display behaviour.
+The console is the S3's native USB-Serial/JTAG (`CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG`,
+universal on every S3), and the 8 MB flash-size config runs fine on the T-Dongle-S3's
+16 MB chip. (History: 1.2.24 briefly used per-board OTA *channels* via a
+`boards/t-dongle-s3.defaults` overlay + a `t-dongle-s3/` Pages subdir; 1.3.0 replaced that
+with this single auto-detected image — a T-Dongle-S3 migrates with one USB reflash, then
+auto-detects on every boot.)
 
 ## evcc Integration
 
