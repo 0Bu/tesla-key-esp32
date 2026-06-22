@@ -140,6 +140,8 @@ jobs:
   # firmware). Uploads a merged bin for USB/web flashing onto a T-Dongle-S3.
   build-tdongle-s3:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read   # build-only: checkout + build + upload-artifact, no release/Pages
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
