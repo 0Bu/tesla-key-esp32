@@ -141,17 +141,6 @@ BOLT_ROWS = [
     "#.........",
     "#.........",
 ]
-# WiFi glyph (7 wide x 6 tall): two broadcast arcs over a dot. Used as the icon for
-# the WiFi searching animation (emitted as DISPLAY_WIFI_ROWS; keep in sync).
-WIFI_ROWS = [
-    ".#####.",
-    "#.....#",
-    "..###..",
-    ".#...#.",
-    ".......",
-    "...#...",
-]
-
 # ── tiny stdlib PNG writer ────────────────────────────────────────────────────
 def write_png(path, w, h, rgb):
     def chunk(tag, data):
@@ -239,6 +228,21 @@ class Canvas:
             self.char(cx, y, ch, col, scale)
             cx += 6 * scale
         return cx
+    def text_clip(self, x, y, s, col, scale, cx0, cx1):
+        # like text() but only sets pixels with cx0 <= px < cx1 (for the scroll box)
+        cx = x
+        for ch in s:
+            gl = glyph(ch)
+            for r in range(7):
+                row = gl[r]
+                for c in range(5):
+                    if c < len(row) and row[c] == '#':
+                        for dy in range(scale):
+                            for dx in range(scale):
+                                px = cx + c*scale + dx
+                                if cx0 <= px < cx1:
+                                    self.px(px, y + r*scale + dy, col)
+            cx += 6 * scale
     def text_outline(self, x, y, s, col, scale, oc):
         for ox, oy in [(-1,0),(1,0),(0,-1),(0,1)]:
             self.text(x+ox, y+oy, s, oc, scale)
@@ -261,18 +265,31 @@ class Canvas:
 def textw(s, scale=1):
     return len(s) * 6 * scale
 
-def fit(s, maxpx, scale=1):
-    if textw(s, scale) <= maxpx:
-        return s
-    n = max(0, maxpx // (6*scale))
-    return (s[:max(0, n-1)] + ".") if n >= 1 else ""
+# Horizontal marquee for an over-long SSID: ping-pong (pause, scroll out to reveal
+# the end, pause, scroll back) so the whole name is readable. Returns the left
+# offset 0..span. Mirrors scroll_offset() in display.cpp.
+SCROLL_PAUSE = 8     # ticks paused at each end
+SCROLL_SPEED = 2     # px per tick
+def scroll_offset(tick, span):
+    if span <= 0:
+        return 0
+    travel = (span + SCROLL_SPEED - 1) // SCROLL_SPEED      # ticks to cover the span
+    period = 2 * SCROLL_PAUSE + 2 * travel
+    p = tick % period
+    if p < SCROLL_PAUSE:
+        return 0
+    if p < SCROLL_PAUSE + travel:
+        return min((p - SCROLL_PAUSE) * SCROLL_SPEED, span)
+    if p < 2 * SCROLL_PAUSE + travel:
+        return span
+    return max(span - (p - 2 * SCROLL_PAUSE - travel) * SCROLL_SPEED, 0)
 
 def signal_bars(cv, x, y, level, on_col=BAR_ON):
-    """4 ascending bars, bottom-aligned at y+10; lit green, unlit dark."""
+    """4 ascending bars, bottom-aligned at y+14; lit green, unlit dark."""
     for i in range(4):
-        bh = 3 + i*2
+        bh = 4 + i*3
         col = on_col if i < level else BAR_OFF
-        cv.rect(x + i*4, y + (10 - bh), x + i*4 + 3, y + 10, col)
+        cv.rect(x + i*4, y + (14 - bh), x + i*4 + 3, y + 14, col)
 
 # Big BLE "searching for a connection" animation, drawn where the battery would
 # be (no battery while disconnected): a Bluetooth symbol on the left and a compact
@@ -281,18 +298,14 @@ def signal_bars(cv, x, y, level, on_col=BAR_ON):
 SRCH_N, SRCH_BW, SRCH_GAP, SRCH_X0, SRCH_BASE = 5, 10, 6, 80, 70   # compact, right-flush
 SRCH_ICON_SCALE = 3
 SRCH_BT_X, SRCH_BT_Y = 24, 36                     # Bluetooth glyph, off the left edge
-SRCH_WIFI_X, SRCH_WIFI_Y = 16, 38                 # WiFi glyph (wider), off the left edge
 SRCH_STEPS = 3                                    # animation sub-frames per bar
 SRCH_FALLOFF = 1.5                                # highlight width, in bars
 SRCH_HALF = (SRCH_N - 1) * SRCH_STEPS             # frames for one direction (small↔large)
 SRCH_CYCLE = 2 * SRCH_HALF                        # full ping-pong period
 
-# icon = (rows, x, y); the swept bars are identical for WiFi and BLE searches.
-# The highlight ping-pongs: smallest→largest bar, then largest→smallest, repeating
-# (a triangle wave) — a wave that runs out and back, not a one-way scan.
-def draw_searching(cv, frame, icon):
-    rows, ix, iy = icon
-    cv.bitmap(ix, iy, rows, INK, SRCH_ICON_SCALE)           # which link is being searched
+# The swept bars are identical for WiFi and BLE searches; the highlight ping-pongs
+# (a triangle wave) out and back across them — not a one-way scan.
+def draw_search_bars(cv, frame):
     p = frame % SRCH_CYCLE
     hp = (p / SRCH_STEPS) if p <= SRCH_HALF else ((SRCH_CYCLE - p) / SRCH_STEPS)  # bounce
     for i in range(SRCH_N):
@@ -302,8 +315,19 @@ def draw_searching(cv, frame, icon):
         x = SRCH_X0 + i * (SRCH_BW + SRCH_GAP)
         cv.rect(x, SRCH_BASE - h, x + SRCH_BW, SRCH_BASE, col)
 
-SRCH_ICON_BLE  = (BT_ROWS,   SRCH_BT_X,   SRCH_BT_Y)
-SRCH_ICON_WIFI = (WIFI_ROWS, SRCH_WIFI_X, SRCH_WIFI_Y)
+# label = ("icon", rows, x, y) draws a bitmap glyph; ("text", str, scale, x, y)
+# draws a word — used so the WiFi search reads "WiFi" while BLE keeps its symbol.
+def draw_searching(cv, frame, label):
+    if label[0] == "icon":
+        _, rows, ix, iy = label
+        cv.bitmap(ix, iy, rows, INK, SRCH_ICON_SCALE)
+    else:
+        _, s, scale, ix, iy = label
+        cv.text(ix, iy, s, INK, scale)
+    draw_search_bars(cv, frame)
+
+SRCH_ICON_BLE  = ("icon", BT_ROWS, SRCH_BT_X, SRCH_BT_Y)
+SRCH_ICON_WIFI = ("text", "WiFi", 2, 14, 42)   # "WiFi" word instead of the glyph
 
 # Shown (instead of the search bars) once a BLE link is up but pairing isn't done:
 # big "Pairing" with an animated 0–3 dot ellipsis (fixed left so it doesn't jiggle).
@@ -331,21 +355,29 @@ def compose(cv, st):
     battery_ok = (link != "unreachable") and (soc is not None)
     # BLE search bars appear ONLY when the car is out of range (no link, no data).
     ble_bars = not (wifi_searching or pairing or battery_ok)
+    scrolling = False
 
     # ── header: WiFi bars + SSID (left) | BLE symbol + bars (right) ──────────
     # Hide whichever small indicator is the active search hero; the big centre
     # animation represents it instead.
+    # Taller, more legible status bar: scale-2 SSID, taller bars, divider at y22.
     if not wifi_searching:
-        signal_bars(cv, 4, 3, st.get("wifi", 0))
-        name_max = (158 - 26) if ble_bars else (158 - 26 - 36)
-        cv.text(26, 4, fit(st.get("ssid") or "-", name_max), INK)
+        signal_bars(cv, 4, 4, st.get("wifi", 0))
+        avail = (158 - 28) if ble_bars else (158 - 28 - 32)
+        ssid = st.get("ssid") or "-"
+        if textw(ssid, 2) <= avail:
+            cv.text(28, 4, ssid, INK, 2)
+        else:                                   # too long → horizontal marquee
+            off = scroll_offset(st.get("frame", 0), textw(ssid, 2) - avail)
+            cv.text_clip(28 - off, 4, ssid, INK, 2, 28, 28 + avail)
+            scrolling = True
 
     if not ble_bars:
         bx = 158 - 16                  # 4 bars * 4px
-        signal_bars(cv, bx, 3, st.get("ble", 0) if ble_conn else 0)
-        cv.bitmap(bx - 9, 2, BT_ROWS, INK if ble_conn else GREY)
+        signal_bars(cv, bx, 4, st.get("ble", 0) if ble_conn else 0)
+        cv.bitmap(bx - 13, 1, BT_ROWS, INK if ble_conn else GREY, 2)  # BT glyph, scale 2
 
-    cv.rect(3, 17, W - 3, 18, DIV)     # divider under the header
+    cv.rect(3, 22, W - 3, 23, DIV)     # divider under the (taller) header
 
     # ── centre: WiFi search > pairing > battery > BLE search bars ────────────
     f = st.get("frame", 0)
@@ -391,7 +423,7 @@ def compose(cv, st):
 
     if asleep:
         cv.text((W - textw("ASLEEP", 1))//2, 64, "ASLEEP", GREY, 1)
-    return False
+    return scrolling   # battery view still needs fast refresh while the SSID scrolls
 
 # ── render helpers ────────────────────────────────────────────────────────────
 def upscale(cv, S):
@@ -484,6 +516,41 @@ def cmd_search(out="tools/display_search.png"):
     write_png(out, bw, bh, big)
     print("wrote", out, f"({bw}x{bh})")
 
+def cmd_scroll(out="tools/display_scroll.png"):
+    """Render a too-long SSID at several marquee offsets to verify scroll + clipping."""
+    st = dict(wifi=3, ssid="MyHomeNetwork5GHz", ble=3, ble_on=True, soc=64,
+              charging=True, link="awake")
+    # pick frames across one full ping-pong period for this SSID
+    avail = 158 - 28 - 32
+    span = textw(st["ssid"], 2) - avail
+    travel = (span + SCROLL_SPEED - 1) // SCROLL_SPEED
+    period = 2 * SCROLL_PAUSE + 2 * travel
+    frames = [int(period * k / 8) for k in range(8)]
+    S = 4
+    pad, cap = 10, 16
+    cellw, cellh = W*S, H*S + cap
+    cols = 2
+    rows = (len(frames) + cols - 1)//cols
+    bw = cols*cellw + (cols+1)*pad
+    bh = rows*cellh + (rows+1)*pad
+    big = [[(8,9,12) for _ in range(bw)] for _ in range(bh)]
+    for idx, f in enumerate(frames):
+        cv = Canvas()
+        compose(cv, dict(st, frame=f))
+        up = upscale(cv, S)
+        r, cc = idx//cols, idx % cols
+        ox, oy = pad + cc*(cellw + pad), pad + r*(cellh + pad)
+        for y in range(H*S):
+            for x in range(W*S):
+                big[oy+y][ox+x] = up[y][x]
+        capcv = Canvas(); capcv.text(2, 4, "frame %d" % f, INK, 1)
+        capup = upscale(capcv, 2)
+        for y in range(cap):
+            for x in range(min(cellw, W*2)):
+                big[oy + H*S + y][ox + x] = capup[y][x]
+    write_png(out, bw, bh, big)
+    print("wrote", out, f"({bw}x{bh})")
+
 def cmd_cheader(out="main/display_font.h"):
     def cols_of(gl):
         cols = []
@@ -537,13 +604,6 @@ def cmd_cheader(out="main/display_font.h"):
     L.append("#define DISPLAY_BOLT_H %d" % len(lrows))
     L.append("static const uint16_t DISPLAY_BOLT_ROWS[%d] = {%s};" %
              (len(lrows), ",".join("0x%04x" % v for v in lrows)))
-    # WiFi glyph (row-major bitmap) — icon for the WiFi searching animation
-    ww, wrows = rows_bits(WIFI_ROWS)
-    L.append("// WiFi glyph (broadcast arcs + dot), row-major (same bit convention as BT).")
-    L.append("#define DISPLAY_WIFI_W %d" % ww)
-    L.append("#define DISPLAY_WIFI_H %d" % len(wrows))
-    L.append("static const uint8_t DISPLAY_WIFI_ROWS[%d] = {%s};" %
-             (len(wrows), ",".join("0x%02x" % v for v in wrows)))
     open(out, "w").write("\n".join(L) + "\n")
     print("wrote", out)
 
@@ -556,7 +616,9 @@ if __name__ == "__main__":
         cmd_states(arg or "tools/display_states.png")
     elif mode == "search":
         cmd_search(arg or "tools/display_search.png")
+    elif mode == "scroll":
+        cmd_scroll(arg or "tools/display_scroll.png")
     elif mode == "cheader":
         cmd_cheader(arg or "main/display_font.h")
     else:
-        print("usage: display_sim.py [png|states|search|cheader] [outfile]")
+        print("usage: display_sim.py [png|states|search|scroll|cheader] [outfile]")
