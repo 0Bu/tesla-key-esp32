@@ -134,6 +134,36 @@ jobs:
         with:
           path: ./_site
 
+  # Build the LilyGo T-Dongle-S3 variant (onboard ST7735 display, 16 MB flash,
+  # native USB console) via the boards/t-dongle-s3.defaults overlay. Build-only:
+  # does not publish a release or Pages (the generic ESP32-S3 stays the released
+  # firmware). Uploads a merged bin for USB/web flashing onto a T-Dongle-S3.
+  build-tdongle-s3:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Build T-Dongle-S3 firmware (ESP-IDF v5.5.4)
+        uses: espressif/esp-idf-ci-action@v1
+        with:
+          esp_idf_version: v5.5.4
+          target: esp32s3
+          command: >-
+            idf.py -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;boards/t-dongle-s3.defaults"
+            set-target esp32s3 build &&
+            cd build &&
+            esptool.py --chip esp32s3 merge_bin -o ../tesla-key-esp32-tdongle-s3-merged.bin "@flash_args"
+
+      - name: Upload T-Dongle-S3 artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: tesla-key-esp32-tdongle-s3
+          path: |
+            tesla-key-esp32-tdongle-s3-merged.bin
+            build/tesla-key-esp32.bin
+            build/bootloader/bootloader.bin
+            build/partition_table/partition-table.bin
+
   deploy:
     needs: build
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'

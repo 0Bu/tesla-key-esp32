@@ -10,6 +10,42 @@ ESP32-S3 (BLE 5.0), ≥ 8 MB flash (dual-OTA layout: two 3 MB app slots). No PSR
 required. ESP32 / S2 / C3 not supported.
 USB data cable for flashing.
 
+### Experimental: LilyGo T-Dongle-S3 (onboard display)
+
+A board variant for the [LilyGo T-Dongle-S3](https://github.com/Xinyuan-LilyGO/T-Dongle-S3)
+(ESP32-S3, 16 MB flash, **no PSRAM**, native USB-A, 0.96" ST7735 LCD, driven landscape at
+160×80). Built via an SDKCONFIG overlay (the plain ESP32-S3 build is unchanged):
+
+```bash
+idf.py -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;boards/t-dongle-s3.defaults" \
+       set-target esp32s3 build flash monitor
+```
+
+The overlay (`boards/t-dongle-s3.defaults`) enables the onboard **ST7735 status display**
+(`main/display.cpp`), the native USB-Serial/JTAG console, and the full 16 MB flash. The
+display shows a **header** (WiFi signal bars + SSID on the left, a Bluetooth symbol + BLE
+bars on the right) and a **gradient battery** filled to the SoC (red → amber → green), with a
+**charging bolt** while charging (hidden at 100 %) and an **ASLEEP** (dimmed) state. When a
+link isn't ready the battery is replaced, by priority — **WiFi search > pairing > battery >
+BLE search**. A search is a link icon (WiFi or Bluetooth) plus a compact bar cluster whose
+dark-green highlight ping-pongs across light-green bars; the **BLE search bars show only when
+the car is out of range**, and once a BLE link is up but not yet paired it shows a big animated
+**"Pairing…"** instead. The header hides whichever small indicator is the active search. All
+from cache-only state, so it never wakes the car and does not depend on MQTT. Offline
+pixel-exact validation: `python3 tools/display_sim.py states` (every state) and `python3
+tools/display_sim.py search` (the WiFi and BLE searching animations).
+
+> **Status:** builds in CI (job `build-tdongle-s3`, ESP-IDF v5.5.4); pending validation on
+> physical hardware. Two caveats: (1) **no PSRAM** → the ~25 KB framebuffer lands in internal
+> SRAM (watch the `display` heap-attribution line in the boot log on this RAM-tight build);
+> (2) **OTA** on this variant still pulls the generic (display-less) ESP32-S3 image —
+> per-board OTA/installer builds are a follow-up. Flash over USB for now. The ST7735 driver
+> (landscape: MADCTL `0x68`, offsets column 1 / row 26, INVON) is cross-verified against
+> LilyGo's; if the image is rotated/mirrored flip `CONFIG_TESLA_DISPLAY_MADCTL` (try `0xA8`).
+> The GPIO38 backlight is **active-low** (`CONFIG_TESLA_DISPLAY_BL_ACTIVE_LOW=y`, matching the
+> ESPHome board profile); if the panel stays dark, clear that and/or try pin 37 (some
+> MicroPython configs use GPIO37 active-high).
+
 ## Flash prebuilt artifacts
 
 Browser flasher + WiFi/VIN setup: [../README.md](../README.md). The flasher is served on
