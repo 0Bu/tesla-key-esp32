@@ -12,7 +12,8 @@ Relevant attackers:
 - **Physical USB/serial access** — can dump flash and (without Secure Boot) replace firmware.
 - **LAN peer** — the HTTP API is plaintext on port 80 with no TLS.
 - **BLE/RF range** — pairing/commands; mitigated by the Tesla session crypto.
-- **Supply chain** — unsigned firmware artifacts.
+- **Supply chain** — OTA pulls *unsigned* firmware images; integrity rests on TLS to the
+  configured HTTPS host, not on an image signature (see [OTA self-update](#ota-self-update)).
 
 ## Current device state (factory ESP32-S3)
 
@@ -40,8 +41,11 @@ esptool --port /dev/cu.usbmodemXXXX read_flash 0x9000 0x6000 nvs_dump.bin
 
 The HTTP API has **no authentication and no TLS** — by design. The primary consumer is
 evcc, which talks to the device over plain HTTP and cannot send credentials, so locking
-the API would break the main use case. Anyone on the LAN can therefore call the endpoints
-(wake, charging control, key regeneration, pairing). This is acceptable only because:
+the API would break the main use case. Anyone on the LAN can therefore call **every**
+endpoint — including ones that go beyond charging: wake, charging control, key
+regeneration (`/gen_keys`) and pairing (`/send_key`), BLE scan (`/scan`), VIN change
+(`/set_vin`, un-pairs + reboots), MQTT broker change (`/set_mqtt`, reboots) and the OTA
+self-update / reboot trigger (`/ota/update`, see below). This is acceptable only because:
 
 - the enrolled key is **Charging Manager only** — it cannot unlock or drive the car, just
   control charging and wake (see the role restriction in `vehicle_ctrl.cpp`); and
@@ -55,6 +59,35 @@ Two non-auth hardening measures remain in place:
 - **`/gen_keys` overwrite guard** — refuses to regenerate when a key already exists
   (returns `409`); regenerating un-pairs the vehicle. Use `/gen_keys?force=1` to replace.
 - **Body size cap** — POST bodies over 2 KB are rejected (bounds the receive buffer).
+
+## OTA self-update
+
+The device can update itself **pull-based**: it fetches `manifest.json` and the app image
+from two **fixed, compile-time HTTPS URLs** (`CONFIG_TESLA_OTA_MANIFEST_URL` /
+`CONFIG_TESLA_OTA_FIRMWARE_URL`, default GitHub Pages), compares the manifest `version`
+to the running firmware, and on confirmation flashes the inactive OTA slot via
+`esp_https_ota`, then reboots. Implemented in `main/ota_update.cpp`.
+
+Trust model of the **current (pre-hardening) build**:
+
+- **Transport is verified, the image is not.** TLS server certificates are checked against
+  the bundled CA roots (`esp_crt_bundle_attach`), so the connection to the configured host
+  is authenticated — but the downloaded image carries **no application signature** (image
+  signing only takes effect once Secure Boot v2 is enabled, see below). Integrity therefore
+  rests entirely on TLS to the configured HTTPS host. Whoever controls that host (or its
+  GitHub Pages source) can serve arbitrary firmware to every device.
+- **The trigger is unauthenticated.** `POST /ota/update` (and `GET /ota/check`) are open on
+  the LAN like the rest of the API. Because the download URL is **compile-time fixed**, a
+  LAN peer cannot point the device at attacker-controlled firmware — but it *can* force a
+  fetch + reboot (a nuisance/DoS, and each reboot re-opens the BLE polling window so a
+  parked car stops sleeping).
+- **Rollback is enabled** (`CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE`); `main.cpp` calls
+  `esp_ota_mark_app_valid_cancel_rollback()` only after a healthy startup, so a bad image
+  is reverted on the next boot.
+
+To raise the bar, enable Secure Boot v2 (below): `esp_https_ota` then additionally requires
+a validly **signed** image, closing the unsigned-artifact gap. Restricting who can reach
+`/ota/update` needs the same reverse-proxy / VLAN segmentation as the rest of the API.
 
 ## Enabling Flash Encryption + Secure Boot (recommended, IRREVERSIBLE)
 
