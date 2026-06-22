@@ -43,17 +43,6 @@ bool clock_synced_via_ntp();
 // record faults — LoadProhibited/EXCVADDR=0x1).
 bool wifi_is_connected();
 
-// Defined in main.cpp: true when the on-device display was force-disabled this boot by
-// the crash-loop guard (repeated early panics with the panel on) despite `board`
-// selecting one — surfaced in /status so a dark panel isn't a silent mystery.
-bool display_forced_off();
-// Defined in main.cpp: clear the crash-guard strike count (retry the panel next boot).
-void display_crashguard_reset();
-// Defined in main.cpp: the EFFECTIVE board resolved at boot, and whether it came from
-// hardware auto-detect (true) rather than an explicit NVS/build pin (false).
-const char* active_board();
-bool        board_is_auto();
-
 // Largest POST body we accept, to bound the malloc in read_body() against a
 // hostile/oversized Content-Length. All real requests here are tiny JSON objects.
 static constexpr size_t MAX_BODY_LEN = 2048;
@@ -458,12 +447,6 @@ static esp_err_t handle_status(httpd_req_t* req) {
     cJSON_AddStringToObject(root, "vin",           g_vehicle->vin().c_str());
     cJSON_AddStringToObject(root, "ip",            ip);
     cJSON_AddStringToObject(root, "version",       esp_app_get_description()->version);
-    // Effective board (on-device display wiring) resolved at boot, and whether it was
-    // hardware-auto-detected (vs an explicit web-UI/build pin).
-    cJSON_AddStringToObject(root, "board", active_board());
-    cJSON_AddBoolToObject(root,   "board_auto", board_is_auto());
-    // True when the crash-loop guard force-disabled the panel this boot despite `board`.
-    if (display_forced_off()) cJSON_AddBoolToObject(root, "display_crashguard", true);
     cJSON_AddBoolToObject(root,   "key_present",   g_vehicle->has_key());
     cJSON_AddStringToObject(root, "key_fingerprint", g_vehicle->key_fingerprint().c_str());
     // Key creation date (epoch seconds), shown under the fingerprint in the UI.
@@ -827,48 +810,6 @@ static esp_err_t handle_set_mqtt(httpd_req_t* req) {
     return r;
 }
 
-// ─── POST /set_board — persist the board (on-device display wiring), then reboot ─
-// Body: {"board":"generic"|"t-dongle-s3"}. ONE firmware image serves every board;
-// the display is selected at runtime from this NVS key (display_board_preset()), so
-// turning a T-Dongle-S3's panel on (or back to a panel-less generic) is a web-UI
-// action, not a reflash. Reboots so display_start() re-runs with the new wiring.
-static esp_err_t handle_set_board(httpd_req_t* req) {
-    char* body = read_body(req);
-    cJSON* json = body ? cJSON_Parse(body) : nullptr;
-    free(body);
-
-    std::string board;
-    if (json) {
-        cJSON* j = cJSON_GetObjectItemCaseSensitive(json, "board");
-        if (cJSON_IsString(j) && j->valuestring) board = j->valuestring;
-    }
-    cJSON_Delete(json);
-
-    if (board != "auto" && board != "generic" && board != "t-dongle-s3") {
-        return send_json(req, 400, make_response(false, "set_board", board.c_str(),
-                                                 "unknown board (auto | generic | t-dongle-s3)"));
-    }
-    // "auto" stores an empty key so the next boot hardware-detects the board.
-    std::string store_val = (board == "auto") ? std::string{} : board;
-    // A deliberate selection clears the crash-guard strikes → the panel is retried.
-    display_crashguard_reset();
-    // Unchanged (vs the stored value) AND not currently force-disabled → nothing to do.
-    std::string current = g_vehicle->load_config_str("board");
-    if (store_val == current && !display_forced_off()) {
-        return send_json(req, 200, make_response(true, "set_board", board.c_str(),
-                                                 "board unchanged — no reboot"));
-    }
-    bool ok = (store_val == current) ? true : g_vehicle->save_config_str("board", store_val);
-    esp_err_t r = send_json(req, ok ? 200 : 500,
-        make_response(ok, "set_board", board.c_str(),
-                      ok ? "board saved — rebooting" : "failed to save board"));
-    if (ok) {
-        vTaskDelay(pdMS_TO_TICKS(800));
-        esp_restart();
-    }
-    return r;
-}
-
 // ─── GET / — web UI (embedded from main/www/index.html) ─────────────────────────
 
 extern const char index_html_start[] asm("_binary_index_html_start");
@@ -934,9 +875,6 @@ static esp_err_t handle_all_dispatch(httpd_req_t* req) {
     }
     if (req->method == HTTP_POST && strstr(uri, "/set_mqtt")) {
         return handle_set_mqtt(req);
-    }
-    if (req->method == HTTP_POST && strstr(uri, "/set_board")) {
-        return handle_set_board(req);
     }
     if (req->method == HTTP_POST && strstr(uri, "/scan")) {
         return handle_scan(req);

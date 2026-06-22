@@ -496,8 +496,8 @@ DisplayConfig display_board_preset(const char* board) {
     return c;
 }
 
-// Auto-detect the board when NVS hasn't pinned one. The ST7735 itself can't be probed
-// (its SDA is write-only — no MISO), but the LilyGo T-Dongle-S3 carries a TF-card socket
+// Auto-detect the board (the only selector — no manual override). The ST7735 itself can't
+// be probed (its SDA is write-only — no MISO), but the LilyGo T-Dongle-S3 carries a TF-card socket
 // wired to the S3's SDMMC bus with EXTERNAL pull-ups on all six lines (CMD=16, D0-D3 =
 // 14/17/21/18, CLK=12); a bare ESP32-S3 leaves those GPIOs floating. So read each with an
 // internal pull-DOWN: a pin still HIGH ⇒ an external pull-up holds it ⇒ the dongle. A

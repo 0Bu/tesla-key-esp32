@@ -37,35 +37,21 @@ static const char* MDNS_HOSTNAME = "tesla-key-esp32";  // → http://tesla-key-e
 static const char* TAG = "main";
 
 // ─── On-device display crash-loop guard ───────────────────────────────────────
-// The display driver writes SPI to fixed GPIOs (display_board_preset()). If the NVS
-// `board` is wrong for the hardware (or a future board wires those pins to something
-// else), bringing the panel up could hang/panic early — and a reboot loop is doubly
-// bad here: each boot re-opens the BLE poll window, so a parked car never sleeps.
-// The display can't be auto-detected (same SoC on every board; the ST7735 has no
-// readable ID — MISO isn't wired), so instead we count consecutive early panics that
-// happened with the display ON and, after a few, force it OFF to break the loop.
-// Counter lives in RTC memory: it survives a panic→reboot (a CPU reset, not a power
-// reset) but a power-cycle clears it (magic mismatch) → the panel gets a fresh try.
+// The display driver writes SPI to fixed GPIOs (display_board_preset()). If the board
+// auto-detect ever guesses wrong (or a future board wires those pins to something else),
+// bringing the panel up could hang/panic early — and a reboot loop is doubly bad here:
+// each boot re-opens the BLE poll window, so a parked car never sleeps. So we count
+// consecutive early panics that happened with the display ON and, after a few, force it
+// OFF to break the loop. The counter lives in RTC memory: it survives a panic→reboot (a
+// CPU reset, not a power reset) but a power-cycle clears it (magic mismatch) → the panel
+// gets a fresh try.
 RTC_NOINIT_ATTR static uint32_t s_disp_guard_magic;
 RTC_NOINIT_ATTR static uint32_t s_disp_attempts;
 static const uint32_t DISP_GUARD_MAGIC = 0xD15B0070;
 static const uint32_t DISP_MAX_ATTEMPTS = 3;     // strikes before the panel is forced off
 static const uint64_t DISP_HEALTHY_US   = 30ULL * 1000 * 1000;   // survive this → clear
 
-static bool s_display_forced_off = false;        // reflected in /status for diagnostics
-bool display_forced_off() { return s_display_forced_off; }
-
-// Clear the strike count so the panel is retried on the next boot. Called when the user
-// explicitly (re)selects a board in the web UI — a deliberate "use this, try again".
-void display_crashguard_reset() { s_disp_attempts = 0; s_disp_guard_magic = DISP_GUARD_MAGIC; }
-
-// The board resolved at boot (NVS override / build default / auto-detect) — the EFFECTIVE
-// value, which /status reports (the raw NVS key may be empty in auto mode). s_board_auto
-// is true when it came from hardware auto-detect rather than an explicit pin.
-static std::string s_active_board = "generic";
-static bool        s_board_auto   = false;
-const char* active_board() { return s_active_board.c_str(); }
-bool        board_is_auto() { return s_board_auto; }
+static bool s_display_forced_off = false;        // for the boot log line only
 
 // Fired ~30 s after a boot that brought the panel up without crash-looping: the
 // display isn't the cause of any early instability, so reset the strike count.
@@ -315,18 +301,11 @@ extern "C" void app_main() {
     // boot shows the WiFi search instead of a black screen. The ~25 KB framebuffer
     // (no-PSRAM board) allocates from the still-fresh heap here, and only when a
     // display is actually selected — see the log_heap below.
-    // Resolve the board (on-device display wiring), in priority order:
-    //   1. NVS `board` — an explicit web-UI override (Connection → Board).
-    //   2. CONFIG_TESLA_DEFAULT_BOARD — a build-time forced board (default "auto").
-    //   3. auto-detect from the hardware (T-Dongle-S3 SDMMC pull-ups vs a bare S3).
-    // So a T-Dongle lights its panel with zero setup, a plain S3 stays dark, and either
-    // can be pinned manually if the guess is ever wrong.
-    static std::string board;
-    if (!config_store.load_str("board", board) || board.empty()) {
-        board = CONFIG_TESLA_DEFAULT_BOARD;
-        if (board.empty() || board == "auto") { board = display_detect_board(); s_board_auto = true; }
-    }
-    s_active_board = board;
+    // Resolve the board (on-device display wiring) entirely from the hardware: the
+    // T-Dongle-S3's SDMMC pull-ups vs a bare S3 (display_detect_board()). So a T-Dongle
+    // lights its panel with zero setup and a plain S3 stays dark — no config, no manual
+    // selection. The crash-guard below is the backstop if the detection is ever wrong.
+    std::string board = display_detect_board();
     DisplayConfig display_cfg = display_board_preset(board.c_str());
 
     // Crash-loop guard (see the RTC counter above). On a power-on the RTC value is

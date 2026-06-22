@@ -19,10 +19,10 @@ go: the display turns on automatically.** The board is **auto-detected** at boot
 T-Dongle-S3's onboard TF-card slot puts external pull-ups on the S3's SDMMC lines, which a
 bare ESP32-S3 lacks, so the firmware probes them (`display_detect_board()`) and enables the
 panel only on the dongle. The ST7735 itself can't be probed (its SDA is write-only — no
-MISO), hence the indirect signature. To override the guess, tap **Connection → Board** in
-the web UI (`auto` / `generic` / `t-dongle-s3`; stored in NVS, survives OTA). On a
-panel-less board the display code is a no-op (costs no SRAM). One image, one OTA channel,
-zero per-board setup.
+MISO), hence the indirect signature. There is no manual board setting — it's fully
+automatic. On a panel-less board the display code is a no-op (costs no SRAM). One image, one
+OTA channel, zero per-board setup. (A crash-loop guard force-disables the panel if enabling
+it ever panics repeatedly at boot — the backstop if the detection is ever wrong.)
 
 ```bash
 # Same build as any ESP32-S3 — no overlay:

@@ -88,21 +88,4 @@ menu "Tesla Key Configuration"
             republished to MQTT (retained). Discovery + an immediate snapshot are
             also sent on every (re)connect.
 
-    config TESLA_DEFAULT_BOARD
-        string "Default board (on-device display wiring)"
-        default "auto"
-        help
-            ONE firmware image serves every ESP32-S3 board — the on-device ST7735
-            display is selected at RUNTIME, not compile time. Resolution order:
-            NVS `board` (web-UI override) → this build-time default → hardware
-            auto-detect. Values:
-              "auto"        — auto-detect (default): probe the LilyGo TF-card SDMMC
-                              pull-ups (display_detect_board()) → t-dongle-s3 if present,
-                              else generic. A T-Dongle lights its panel with no setup.
-              "generic"     — force no panel (display is a no-op, no SRAM cost)
-              "t-dongle-s3" — force the LilyGo T-Dongle-S3 (0.96" ST7735, landscape)
-            Override live in the web UI (Connection → Board); it persists in NVS and
-            survives OTA. Presets live in display_board_preset() (main/display.cpp) —
-            add a board there, no per-board build needed.
-
 endmenu
