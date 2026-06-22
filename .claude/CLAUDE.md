@@ -105,6 +105,18 @@ app now at `0x20000`). **Migration:** a device on the old single-`factory` layou
 USB-reflashed once via the web installer (full erase → WiFi/VIN/key reset, re-pair). After
 that, all updates are OTA and preserve NVS.
 
+**Per-board OTA channels:** the manifest/firmware URLs are Kconfig, so a board whose
+binary differs from the generic ESP32-S3 image (display, flash size, console) gets its
+own OTA channel instead of being overwritten by the feature-less generic image. The
+LilyGo **T-Dongle-S3** overlay (`boards/t-dongle-s3.defaults`) overrides
+`CONFIG_TESLA_OTA_MANIFEST_URL`/`_FIRMWARE_URL` to a `t-dongle-s3/` subdir, and CI builds
+that variant in the same job as the generic one (shared, stamped version) and publishes
+`_site/t-dongle-s3/{manifest.json,tesla-key-esp32.bin}` via `scripts/build-pages.sh`. So a
+T-Dongle-S3 self-update pulls the **display** build, not the generic one. (Earlier
+firmware ≤ 1.2.23 shipped no per-board channel, so OTA there pulled the display-less
+generic image and the panel went dark — fixed in 1.2.24; such a device just needs one USB
+reflash of the overlay build to get back onto its own channel.)
+
 ## evcc Integration
 
 ```yaml

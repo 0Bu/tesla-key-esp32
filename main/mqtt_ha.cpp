@@ -20,6 +20,11 @@
 
 static const char* TAG = "mqtt_ha";
 
+// Defined in main.cpp: true only while the STA holds an IP. Gate esp_wifi_sta_get_ap_info()
+// so it's never read mid-association (concurrent read of the half-built AP record faults —
+// LoadProhibited/EXCVADDR=0x1).
+bool wifi_is_connected();
+
 // ─── Module state ─────────────────────────────────────────────────────────────
 static esp_mqtt_client_handle_t s_client = nullptr;
 static VehicleController*        s_vehicle = nullptr;
@@ -284,7 +289,7 @@ static void publish_state() {
     {
         cJSON* o = cJSON_CreateObject();
         wifi_ap_record_t ap{};
-        if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK)
+        if (wifi_is_connected() && esp_wifi_sta_get_ap_info(&ap) == ESP_OK)
             cJSON_AddNumberToObject(o, "wifi_rssi", ap.rssi);
         cJSON_AddBoolToObject(o, "ble_connected", s_vehicle->ble_connected());
         int8_t r = 0;

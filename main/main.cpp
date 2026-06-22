@@ -62,11 +62,23 @@ static const int WIFI_FAIL_BIT      = BIT1;
 static int s_retry_num              = 0;
 static const int MAX_RETRY          = 10;
 
+// True only while the STA holds an IP. Gates esp_wifi_sta_get_ap_info() callers
+// (display task, /status, MQTT) so none reads the AP/station record WHILE WiFi is
+// initialising or churning through a disconnect→reconnect — that record has
+// transiently-null fields mid-association and a concurrent read faults
+// (LoadProhibited, EXCVADDR=0x1). The display task runs at higher priority than
+// app_main and starts BEFORE wifi_connect(), so without this it polls esp_wifi
+// straight through bring-up. volatile: written from the event-loop task, read from
+// the display/http/mqtt tasks.
+static volatile bool s_wifi_connected = false;
+bool wifi_is_connected() { return s_wifi_connected; }
+
 static void wifi_event_handler(void*, esp_event_base_t base,
                                 int32_t event_id, void* data) {
     if (base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
         esp_wifi_connect();
     } else if (base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
+        s_wifi_connected = false;
         if (s_retry_num < MAX_RETRY) {
             esp_wifi_connect();
             s_retry_num++;
@@ -78,6 +90,7 @@ static void wifi_event_handler(void*, esp_event_base_t base,
         ip_event_got_ip_t* ev = (ip_event_got_ip_t*)data;
         ESP_LOGI(TAG, "IP: " IPSTR, IP2STR(&ev->ip_info.ip));
         s_retry_num = 0;
+        s_wifi_connected = true;
         xEventGroupSetBits(s_wifi_events, WIFI_CONNECTED_BIT);
     }
 }
@@ -109,6 +122,15 @@ static bool wifi_connect(const char* ssid, const char* password) {
     strncpy((char*)wifi_cfg.sta.ssid,     ssid,     sizeof(wifi_cfg.sta.ssid) - 1);
     strncpy((char*)wifi_cfg.sta.password, password, sizeof(wifi_cfg.sta.password) - 1);
     wifi_cfg.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
+    // Pick the STRONGEST AP for the SSID, not the first one heard. The default
+    // WIFI_FAST_SCAN stops at the first matching BSSID (channel-order/timing
+    // dependent), so on a multi-AP network (mesh / several APs, same SSID) this
+    // device — which is stationary near the car — would latch onto whatever
+    // answers first, often a far/weak AP, and the ESP32 STA never roams off it.
+    // ALL_CHANNEL_SCAN scans every channel; BY_SIGNAL then connects to the highest
+    // RSSI. Costs ~1-2 s more at connect; applies on every (re)connect too.
+    wifi_cfg.sta.scan_method = WIFI_ALL_CHANNEL_SCAN;
+    wifi_cfg.sta.sort_method = WIFI_CONNECT_AP_BY_SIGNAL;
 
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_cfg));
