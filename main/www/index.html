@@ -458,11 +458,9 @@ function render(s){
       hic.innerHTML='<button class="wakebtn" disabled aria-label="Waking the car">'+ringSpinner()+'<span class="glyph">💤</span></button>';
       hl.innerHTML='<span>Waking up…</span>';
       hs.textContent='Reaching your Tesla over Bluetooth…';
-    } else if(s.link==='unreachable'){
-      // Car answers nothing over BLE (driven off / out of range / deep sleep). We genuinely
-      // don't know its state, so claiming "asleep" would be wrong — hide the hero entirely.
-      $("hero").classList.add('hide');
-    } else {
+    } else if(s.link==='asleep'){
+      // Proven reachable-but-sleeping: the always-on VCSEC health poll answered recently, so
+      // "asleep" is a fact and the wake button is meaningful. Show the card.
       hic.innerHTML='<button class="wakebtn" onclick="wakeCar()" title="Tap to wake the car" aria-label="Wake the car">'+ringSleep()+'<span class="glyph">💤</span></button>';
       hl.innerHTML='<span>Vehicle asleep</span>';
       hs.textContent='Tap the icon to wake the car.';
@@ -472,6 +470,13 @@ function render(s){
       if(lsoc!=null) chips.push(stat('Battery','<span style="color:'+socColor(lsoc)+'">'+lsoc+'</span>','%'));
       if(ago)        chips.push(stat('Idle', ago, ''));
       hst.innerHTML=chips.join('');
+    } else {
+      // 'unreachable' (drove off / out of range / deep sleep) OR 'unknown' (nothing heard
+      // since boot — the on-demand BLE link hasn't reached the car yet). In neither case do
+      // we actually know the car's state, so claiming "asleep" would be false. The momentary
+      // BLE row reading "Disconnected" is normal (the link is dropped between polls by design)
+      // and is NOT evidence either way — only `link` is. Hide the hero entirely.
+      $("hero").classList.add('hide');
     }
   } else if(!configured){
     hic.innerHTML=ringSVG(0,true)+'<div class="glyph">'+BOLT+'</div>';
