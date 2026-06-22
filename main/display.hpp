@@ -7,8 +7,11 @@ class VehicleController;
 //   • header: WiFi signal bars + SSID (left), Bluetooth symbol + BLE bars (right)
 //   • body:   a battery filled to the SoC with a red→amber→green gradient; a
 //             charging bolt overlays while charging (hidden at 100%); the asleep
-//             state dims the fill ("ASLEEP") and the unreachable state shows an
-//             empty shell ("OFFLINE").
+//             state dims the fill ("ASLEEP").
+//   • searching: with no usable link to the car (unreachable, or no cached SoC
+//             yet) the battery is replaced by big animated BLE bars — a green
+//             highlight sweeps across light-green bars ("SEARCHING") — and the
+//             header's BLE symbol/bars are hidden.
 // Mirrors tools/display_sim.py one-to-one (the offline pixel-exact renderer and
 // font source of truth — regenerate display_font.h from it).
 //

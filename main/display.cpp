@@ -68,8 +68,11 @@ static const uint16_t C_GREY    = rgb565(128, 138, 152);   // muted / disconnect
 static const uint16_t C_DIV     = rgb565( 38,  46,  60);   // header divider
 static const uint16_t C_BAR_ON  = rgb565( 74, 175,  80);   // lit signal bar (green)
 static const uint16_t C_BAR_OFF = rgb565( 40,  50,  64);   // unlit signal bar
-static const uint16_t C_AMBER   = rgb565(235, 170,  40);   // unreachable accent
 static const uint16_t C_BOLT    = rgb565(255, 235, 120);   // charging bolt (yellow)
+// BLE "searching" bars sweep from light-green (resting) to a deep/dark green
+// (highlight) — high contrast so the moving bar is obvious.
+static const int C_BLE_LIGHT_RGB[3] = {170, 232, 158};
+static const int C_BLE_GREEN_RGB[3] = { 16,  78,  36};
 
 // red → amber → light-green → green → deep-green over SoC 0..100 (mirrors the sim)
 struct GradStop { float p; uint8_t r, g, b; };
@@ -188,7 +191,7 @@ static void rect(int x0, int y0, int x1, int y1, uint16_t c) {
     for (int y = y0; y < y1; ++y) for (int x = x0; x < x1; ++x) put(x, y, c);
 }
 // Hollow border of thickness t with the 4 hard corners nibbled to bg (softer look).
-static void frame(int x0, int y0, int x1, int y1, int t, uint16_t c) {
+static void border(int x0, int y0, int x1, int y1, int t, uint16_t c) {
     rect(x0, y0, x1, y0 + t, c);
     rect(x0, y1 - t, x1, y1, c);
     rect(x0, y0, x0 + t, y1, c);
@@ -264,6 +267,33 @@ static int rssi_bars(int rssi) {
     return 0;
 }
 
+// Big BLE "searching for a connection" animation, drawn where the battery would
+// be (no battery while disconnected): a Bluetooth symbol on the left and a compact
+// cluster of 5 ascending bars on the right; a dark-green highlight sweeps across
+// light-green bars (a flowing colour gradient) to read as "scanning for the BLE link".
+// Mirrors draw_searching() in tools/display_sim.py.
+static constexpr int   SRCH_N = 5, SRCH_BW = 10, SRCH_GAP = 6, SRCH_X0 = 80, SRCH_BASE = 70;  // compact, right-flush
+static constexpr int   SRCH_BT_SCALE = 3, SRCH_BT_X = 24, SRCH_BT_Y = 36;  // BT glyph, off the left edge
+static constexpr int   SRCH_STEPS = 3;                       // animation sub-frames per bar
+static constexpr float SRCH_FALLOFF = 1.5f;                  // highlight width, in bars
+static constexpr int   SRCH_CYCLE = (SRCH_N + 2) * SRCH_STEPS;  // frames per full sweep
+
+static void draw_searching(int frame) {
+    blit_rows(SRCH_BT_X, SRCH_BT_Y, DISPLAY_BT_ROWS, DISPLAY_BT_W, DISPLAY_BT_H,
+              SRCH_BT_SCALE, C_INK);                          // "it's a BLE search"
+    float hp = -SRCH_FALLOFF + (float)(frame % SRCH_CYCLE) / SRCH_STEPS;  // highlight pos
+    for (int i = 0; i < SRCH_N; ++i) {
+        int   h = 12 + i * 7;
+        float d = fabsf(i - hp);
+        float t = d >= SRCH_FALLOFF ? 0.0f : (1.0f - d / SRCH_FALLOFF);
+        uint16_t col = rgb565(lerp8(C_BLE_LIGHT_RGB[0], C_BLE_GREEN_RGB[0], t),
+                              lerp8(C_BLE_LIGHT_RGB[1], C_BLE_GREEN_RGB[1], t),
+                              lerp8(C_BLE_LIGHT_RGB[2], C_BLE_GREEN_RGB[2], t));
+        int x = SRCH_X0 + i * (SRCH_BW + SRCH_GAP);
+        rect(x, SRCH_BASE - h, x + SRCH_BW, SRCH_BASE, col);
+    }
+}
+
 // Truncate s in place with a trailing '.' if it would exceed maxpx at scale 1.
 static void fit(char* s, int maxpx) {
     int n = (int)strlen(s);
@@ -275,8 +305,16 @@ static void fit(char* s, int maxpx) {
 }
 
 // ─── compose one frame from cached state (mirrors tools/display_sim.py) ────────
-static void compose(VehicleController& v) {
+// Returns true when it drew the searching animation (the task then animates fast).
+static bool compose(VehicleController& v, int frame) {
     fill(C_BG);
+
+    ChargeStateResult cs = v.get_cached_charge();
+    bool have_soc = cs.valid && cs.has_battery_level;
+    VehicleController::LinkState ls = v.link_state();
+    bool unreachable = (ls == VehicleController::LinkState::Unreachable);
+    // No usable link to the car (unreachable, or no cached SoC yet) → "searching".
+    bool searching = unreachable || !have_soc;
 
     // ── header: WiFi bars + SSID (left) | BLE symbol + bars (right) ──────────
     char buf[48];
@@ -284,39 +322,31 @@ static void compose(VehicleController& v) {
     bool wifi_on = (esp_wifi_sta_get_ap_info(&ap) == ESP_OK);
     signal_bars(4, 3, wifi_on ? rssi_bars(ap.rssi) : 0, C_BAR_ON);
     snprintf(buf, sizeof(buf), "%s", wifi_on ? (const char*)ap.ssid : "-");
-    fit(buf, 158 - 26 - 36);                 // leave room for the BLE cluster
+    fit(buf, searching ? (158 - 26) : (158 - 26 - 36));   // full width if no BLE cluster
     draw_text(26, 4, buf, wifi_on ? C_INK : C_GREY, 1);
 
-    int8_t brssi = 0;
-    bool ble_on = v.ble_connected() && v.ble_rssi(brssi);
-    int bx = 158 - 16;                        // 4 bars * 4px, hug the right edge
-    signal_bars(bx, 3, ble_on ? rssi_bars(brssi) : 0, C_BAR_ON);
-    blit_rows(bx - 9, 2, DISPLAY_BT_ROWS, DISPLAY_BT_W, DISPLAY_BT_H, 1,
-              ble_on ? C_INK : C_GREY);
+    // BLE cluster hugs the right edge — hidden entirely while searching.
+    if (!searching) {
+        int8_t brssi = 0;
+        bool ble_on = v.ble_connected() && v.ble_rssi(brssi);
+        int bx = 158 - 16;                    // 4 bars * 4px
+        signal_bars(bx, 3, ble_on ? rssi_bars(brssi) : 0, C_BAR_ON);
+        blit_rows(bx - 9, 2, DISPLAY_BT_ROWS, DISPLAY_BT_W, DISPLAY_BT_H, 1,
+                  ble_on ? C_INK : C_GREY);
+    }
 
     rect(3, 17, W - 3, 18, C_DIV);            // divider under the header
+
+    // ── searching: big animated BLE bars instead of the battery ─────────────
+    if (searching) { draw_searching(frame); return true; }
 
     // ── battery shell ───────────────────────────────────────────────────────
     const int bx0 = 6, by0 = 24, bx1 = 146, by1 = 74;
     rect(bx0 + 2, by0 + 2, bx1 - 2, by1 - 2, C_PANEL);   // interior
-    frame(bx0, by0, bx1, by1, 3, C_BORDER);              // shell
+    border(bx0, by0, bx1, by1, 3, C_BORDER);             // shell
     rect(bx1, 40, bx1 + 6, 58, C_BORDER);                // + terminal nub
     const int ix0 = bx0 + 3, iy0 = by0 + 3, ix1 = bx1 - 3, iy1 = by1 - 3;
     const int iw = ix1 - ix0;
-
-    ChargeStateResult cs = v.get_cached_charge();
-    bool have_soc = cs.valid && cs.has_battery_level;
-    VehicleController::LinkState ls = v.link_state();
-    bool unreachable = (ls == VehicleController::LinkState::Unreachable);
-
-    // no honest data → empty shell with an explicit offline / no-data marker
-    if (unreachable || !have_soc) {
-        const char* label = unreachable ? "OFFLINE" : "NO DATA";
-        uint16_t col = unreachable ? C_AMBER : C_GREY;
-        draw_text_outline((W - text_w("--", 4)) / 2, 33, "--", col, 4, C_BG);
-        draw_text((W - text_w(label, 1)) / 2, 64, label, C_GREY, 1);
-        return;
-    }
 
     int soc = (int)lroundf(cs.battery_level);
     if (soc < 0) soc = 0;
@@ -350,15 +380,25 @@ static void compose(VehicleController& v) {
 
     if (asleep)
         draw_text((W - text_w("ASLEEP", 1)) / 2, 64, "ASLEEP", C_GREY, 1);
+    return false;
 }
 
 // ─── refresh task ──────────────────────────────────────────────────────────--
+// Steady states refresh once a second; the BLE "searching" animation refreshes
+// fast (~8 fps) and advances a frame counter so the highlight sweeps smoothly.
 static void display_task(void* arg) {
     VehicleController& v = *static_cast<VehicleController*>(arg);
+    int frame = 0;
     for (;;) {
-        compose(v);
+        bool animating = compose(v, frame);
         flush();
-        vTaskDelay(pdMS_TO_TICKS(1000));
+        if (animating) {
+            ++frame;
+            vTaskDelay(pdMS_TO_TICKS(120));
+        } else {
+            frame = 0;
+            vTaskDelay(pdMS_TO_TICKS(1000));
+        }
     }
 }
 

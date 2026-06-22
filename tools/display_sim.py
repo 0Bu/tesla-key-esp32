@@ -169,6 +169,8 @@ DIV     = (38, 46, 60)       # header divider
 BAR_ON  = (74, 175, 80)      # lit signal bar (green)
 BAR_OFF = (40, 50, 64)       # unlit signal bar
 AMBER   = (235, 170, 40)     # unreachable accent
+BLE_LIGHT = (170, 232, 158)  # searching bars: resting (light green)
+BLE_GREEN = ( 16,  78,  36)  # searching bars: highlighted (deep/dark green) — high contrast
 
 # red → amber → light-green → green → deep-green over SoC 0..100
 GRAD = [
@@ -262,27 +264,59 @@ def signal_bars(cv, x, y, level, on_col=BAR_ON):
         col = on_col if i < level else BAR_OFF
         cv.rect(x + i*4, y + (10 - bh), x + i*4 + 3, y + 10, col)
 
+# Big BLE "searching for a connection" animation, drawn where the battery would
+# be (no battery while disconnected): a Bluetooth symbol on the left and a compact
+# cluster of 5 ascending bars on the right; a dark-green highlight sweeps across
+# light-green bars (a flowing colour gradient) to read as "scanning for the BLE link".
+SRCH_N, SRCH_BW, SRCH_GAP, SRCH_X0, SRCH_BASE = 5, 10, 6, 80, 70   # compact, right-flush
+SRCH_BT_SCALE, SRCH_BT_X, SRCH_BT_Y = 3, 24, 36   # Bluetooth glyph, off the left edge
+SRCH_STEPS = 3                                    # animation sub-frames per bar
+SRCH_FALLOFF = 1.5                                # highlight width, in bars
+SRCH_CYCLE = (SRCH_N + 2) * SRCH_STEPS            # frames for one full sweep
+
+def draw_searching(cv, frame):
+    cv.bitmap(SRCH_BT_X, SRCH_BT_Y, BT_ROWS, INK, SRCH_BT_SCALE)   # "it's a BLE search"
+    hp = -SRCH_FALLOFF + (frame % SRCH_CYCLE) / SRCH_STEPS   # highlight position
+    for i in range(SRCH_N):
+        h = 12 + i * 7
+        t = max(0.0, 1.0 - abs(i - hp) / SRCH_FALLOFF)
+        col = lerp(BLE_LIGHT, BLE_GREEN, t)
+        x = SRCH_X0 + i * (SRCH_BW + SRCH_GAP)
+        cv.rect(x, SRCH_BASE - h, x + SRCH_BW, SRCH_BASE, col)
+
 # ── compose one frame from a state dict ───────────────────────────────────────
-# state = { wifi:0..4, ssid:str, ble:0..4, ble_on:bool,
+# state = { wifi:0..4, ssid:str, ble:0..4, ble_on:bool, frame:int,
 #           soc:int|None, charging:bool, link:"awake"|"asleep"|"unreachable" }
+# Returns True when it drew the searching animation (the caller animates faster).
 def compose(cv, st):
     cv.rect(0, 0, W, H, BG)
+
+    soc = st.get("soc")
+    link = st.get("link", "awake")
+    charging = st.get("charging", False)
+    # No usable link to the car (unreachable, or no cached SoC yet) → "searching".
+    searching = (link == "unreachable") or (soc is None)
 
     # ── header: WiFi bars + SSID (left) | BLE symbol + bars (right) ──────────
     wifi_on = st.get("wifi", 0) > 0
     signal_bars(cv, 4, 3, st.get("wifi", 0))
-    ssid = st.get("ssid") or "-"
-    name_max = 158 - 26 - 36          # leave room for the BLE cluster on the right
-    cv.text(26, 4, fit(ssid if wifi_on else "-", name_max),
+    name_max = (158 - 26) if searching else (158 - 26 - 36)   # full width if no BLE cluster
+    cv.text(26, 4, fit((st.get("ssid") or "-") if wifi_on else "-", name_max),
             INK if wifi_on else GREY)
 
-    ble_on = st.get("ble_on", False)
-    # BLE cluster hugs the right edge: bars then symbol to their left
-    bx = 158 - 16                      # 4 bars * 4px
-    signal_bars(cv, bx, 3, st.get("ble", 0) if ble_on else 0)
-    cv.bitmap(bx - 9, 2, BT_ROWS, INK if ble_on else GREY)
+    # BLE cluster hugs the right edge — hidden entirely while searching.
+    if not searching:
+        ble_on = st.get("ble_on", False)
+        bx = 158 - 16                  # 4 bars * 4px
+        signal_bars(cv, bx, 3, st.get("ble", 0) if ble_on else 0)
+        cv.bitmap(bx - 9, 2, BT_ROWS, INK if ble_on else GREY)
 
     cv.rect(3, 17, W - 3, 18, DIV)     # divider under the header
+
+    # ── searching: big animated BLE bars instead of the battery ─────────────
+    if searching:
+        draw_searching(cv, st.get("frame", 0))
+        return True
 
     # ── battery shell ───────────────────────────────────────────────────────
     bx0, by0, bx1, by1 = 6, 24, 146, 74
@@ -291,18 +325,6 @@ def compose(cv, st):
     cv.rect(bx1, 40, bx1 + 6, 58, BORDER)             # + terminal nub
     ix0, iy0, ix1, iy1 = bx0+3, by0+3, bx1-3, by1-3   # interior bounds
     iw = ix1 - ix0
-
-    soc = st.get("soc")
-    link = st.get("link", "awake")
-    charging = st.get("charging", False)
-
-    # unreachable / no data → empty shell, honest "offline" marker
-    if link == "unreachable" or soc is None:
-        label = "OFFLINE" if link == "unreachable" else "NO DATA"
-        col = AMBER if link == "unreachable" else GREY
-        cv.text_outline((W - textw("--", 4))//2, 33, "--", col, 4, BG)
-        cv.text((W - textw(label, 1))//2, 64, label, GREY, 1)
-        return
 
     soc = max(0, min(100, int(soc)))
     asleep = link == "asleep"
@@ -328,6 +350,7 @@ def compose(cv, st):
 
     if asleep:
         cv.text((W - textw("ASLEEP", 1))//2, 64, "ASLEEP", GREY, 1)
+    return False
 
 # ── render helpers ────────────────────────────────────────────────────────────
 def upscale(cv, S):
@@ -351,10 +374,10 @@ def cmd_states(out="tools/display_states.png"):
         dict(wifi=4, ssid="Jupiter", ble=4, ble_on=True,  soc=80,  charging=True,  link="awake"),
         dict(wifi=4, ssid="Jupiter", ble=4, ble_on=True,  soc=100, charging=True,  link="awake"),
         dict(wifi=2, ssid="Jupiter", ble=2, ble_on=True,  soc=72,  charging=False, link="asleep"),
-        dict(wifi=3, ssid="Jupiter", ble=0, ble_on=False, soc=None,charging=False, link="unreachable"),
+        dict(wifi=3, ssid="Jupiter", ble=0, ble_on=False, soc=None,charging=False, link="unreachable", frame=6),
     ]
     labels = ["awake / charging 64%", "5% (red)", "20% (amber)", "45% (green)",
-              "charging 80%", "100% (no bolt)", "asleep (dim)", "unreachable / no BLE"]
+              "charging 80%", "100% (no bolt)", "asleep (dim)", "searching (no BLE / unreachable)"]
     S = 4
     pad = 10
     cap = 16
@@ -379,6 +402,35 @@ def cmd_states(out="tools/display_states.png"):
         # caption strip
         capcv = Canvas()
         capcv.text(2, 4, labels[idx][:26], INK, 1)
+        capup = upscale(capcv, 2)
+        for y in range(cap):
+            for x in range(min(cellw, W*2)):
+                big[oy + H*S + y][ox + x] = capup[y][x]
+    write_png(out, bw, bh, big)
+    print("wrote", out, f"({bw}x{bh})")
+
+def cmd_search(out="tools/display_search.png"):
+    """Render successive frames of the BLE searching sweep to show the animation."""
+    frames = list(range(0, SRCH_CYCLE, 2))     # every other frame across one sweep
+    st = dict(wifi=3, ssid="Jupiter", soc=None, charging=False, link="unreachable")
+    S = 4
+    pad, cap = 10, 16
+    cellw, cellh = W*S, H*S + cap
+    cols = 2
+    rows = (len(frames) + cols - 1)//cols
+    bw = cols*cellw + (cols+1)*pad
+    bh = rows*cellh + (rows+1)*pad
+    big = [[(8,9,12) for _ in range(bw)] for _ in range(bh)]
+    for idx, f in enumerate(frames):
+        cv = Canvas()
+        compose(cv, dict(st, frame=f))
+        up = upscale(cv, S)
+        r, cc = idx//cols, idx % cols
+        ox, oy = pad + cc*(cellw + pad), pad + r*(cellh + pad)
+        for y in range(H*S):
+            for x in range(W*S):
+                big[oy+y][ox+x] = up[y][x]
+        capcv = Canvas(); capcv.text(2, 4, "frame %d" % f, INK, 1)
         capup = upscale(capcv, 2)
         for y in range(cap):
             for x in range(min(cellw, W*2)):
@@ -449,7 +501,9 @@ if __name__ == "__main__":
         cmd_png(arg or "tools/display_preview.png")
     elif mode == "states":
         cmd_states(arg or "tools/display_states.png")
+    elif mode == "search":
+        cmd_search(arg or "tools/display_search.png")
     elif mode == "cheader":
         cmd_cheader(arg or "main/display_font.h")
     else:
-        print("usage: display_sim.py [png|states|cheader] [outfile]")
+        print("usage: display_sim.py [png|states|search|cheader] [outfile]")
