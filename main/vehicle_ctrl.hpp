@@ -298,7 +298,9 @@ private:
     // whitelist no longer holds our key replies to a signed command with an untagged
     // session-info → "auth response authentication failed" (not KEY_NOT_ON_WHITELIST).
     // Since that message is also used for one-off glitches, two in a row are required
-    // before pairing_lost_ is set. Reset on any successful response. atomic: cross-task.
+    // before pairing_lost_ is set — and they must be consecutive on ONE continuous link, so
+    // the streak is reset on any successful response AND on a BLE disconnect (a flaky link
+    // dropping between two glitches is not a revocation). atomic: cross-task.
     std::atomic<int> auth_fail_streak_{0};
 
     // True only while the supervisor believes we are paired (in the health-check phase).

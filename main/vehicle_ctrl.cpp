@@ -212,6 +212,21 @@ bool VehicleController::init(const std::string& vin,
         vehicle_->set_connected(connected);
         xSemaphoreGive(vehicle_mutex_);
 
+        if (!connected) {
+            // The BLE link just dropped. The "auth response authentication failed" →
+            // pairing_lost_ heuristic in make_result_cb_ requires TWO such replies in a row,
+            // on the premise that a genuinely de-whitelisted key keeps failing on a healthy,
+            // continuously-connected link. A lossy/recovering link, by contrast, emits the
+            // same message as transient corruption and then drops — so two failures that
+            // straddle a disconnect are NOT evidence of a deleted key. Reset the streak here
+            // so a reconnect starts clean and a flaky link can't be mistaken for a revocation
+            // (which would clear the session and wrongly prompt "approve on the touchscreen"
+            // on an already-paired car). The definitive signals — a "whitelist" message and
+            // the ERROR_UNKNOWN_KEY_ID/INACTIVE_KEY/INVALID_KEY_HANDLE faults — are immediate
+            // and unaffected, so a real key deletion is still caught.
+            auth_fail_streak_.store(0);
+        }
+
         // Persist discovered MAC on first connection so we skip scanning next boot
         if (connected && known_mac_ && known_mac_->empty() && config_store_) {
             std::string addr = ble_client_instance()
