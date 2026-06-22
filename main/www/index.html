@@ -46,7 +46,6 @@ code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
 .otastat{display:inline-flex; align-items:center; gap:5px; margin-left:9px; white-space:nowrap; color:var(--muted)}
 .otastat:empty{display:none}
 .otastat svg{display:block; flex:none}
-.otastat.acc{color:var(--accent); font-weight:600}
 .otaspin{animation:otaspin .9s linear infinite; transform-origin:50% 50%}
 @keyframes otaspin{to{transform:rotate(360deg)}}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.25}}
@@ -682,7 +681,7 @@ function otaCheckPoll(){
       } else { otaAvail=null; if(state)render(state); otaBusy=false; }   // cancelled → version back to grey
     } else {
       otaAvail=null; if(state)render(state); otaBusy=false;
-      otaInline('<span>up to date</span>','acc'); otaInlineClear(3500);
+      otaInline('<span>up to date</span>'); otaInlineClear(3500);
     }
   }).catch(function(){ otaBusy=false; otaInline('<span>check failed</span>','err'); otaInlineClear(4000); });
 }
