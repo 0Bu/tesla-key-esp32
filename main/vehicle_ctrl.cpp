@@ -40,18 +40,24 @@ struct MutexGuard {
 // proto3 optional → a single-member oneof in nanopb: present iff which_optional_<f> matches.
 void parse_charge_state(const CarServer_ChargeState& cs, ChargeStateResult& out) {
     out.valid = true;
-    if (cs.which_optional_battery_level == CarServer_ChargeState_battery_level_tag)
-        out.battery_level = (float)cs.optional_battery_level.battery_level;
-    if (cs.which_optional_charge_limit_soc == CarServer_ChargeState_charge_limit_soc_tag)
-        out.charge_limit_soc = (float)cs.optional_charge_limit_soc.charge_limit_soc;
-    if (cs.which_optional_charger_power == CarServer_ChargeState_charger_power_tag)
-        out.charger_power = (float)cs.optional_charger_power.charger_power;
-    if (cs.which_optional_charge_rate_mph_float == CarServer_ChargeState_charge_rate_mph_float_tag)
-        out.charge_rate = cs.optional_charge_rate_mph_float.charge_rate_mph_float;
-    if (cs.which_optional_charging_amps == CarServer_ChargeState_charging_amps_tag)
-        out.charging_amps = cs.optional_charging_amps.charging_amps;
-    if (cs.which_optional_battery_range == CarServer_ChargeState_battery_range_tag)
-        out.battery_range = cs.optional_battery_range.battery_range;
+    if (cs.which_optional_battery_level == CarServer_ChargeState_battery_level_tag) {
+        out.battery_level = (float)cs.optional_battery_level.battery_level; out.has_battery_level = true;
+    }
+    if (cs.which_optional_charge_limit_soc == CarServer_ChargeState_charge_limit_soc_tag) {
+        out.charge_limit_soc = (float)cs.optional_charge_limit_soc.charge_limit_soc; out.has_charge_limit_soc = true;
+    }
+    if (cs.which_optional_charger_power == CarServer_ChargeState_charger_power_tag) {
+        out.charger_power = (float)cs.optional_charger_power.charger_power; out.has_charger_power = true;
+    }
+    if (cs.which_optional_charge_rate_mph_float == CarServer_ChargeState_charge_rate_mph_float_tag) {
+        out.charge_rate = cs.optional_charge_rate_mph_float.charge_rate_mph_float; out.has_charge_rate = true;
+    }
+    if (cs.which_optional_charging_amps == CarServer_ChargeState_charging_amps_tag) {
+        out.charging_amps = cs.optional_charging_amps.charging_amps; out.has_charging_amps = true;
+    }
+    if (cs.which_optional_battery_range == CarServer_ChargeState_battery_range_tag) {
+        out.battery_range = cs.optional_battery_range.battery_range; out.has_battery_range = true;
+    }
 
     // charging_state is itself a oneof message (which_type holds the variant tag).
     if (cs.has_charging_state) {
