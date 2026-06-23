@@ -812,7 +812,12 @@ static esp_err_t handle_set_mqtt(httpd_req_t* req) {
 
 // ─── GET / — web UI (embedded from main/www/index.html) ─────────────────────────
 
-extern const char index_html_start[] asm("_binary_index_html_start");
+// The web UI is embedded pre-gzipped (see main/CMakeLists.txt) — ~13 KB vs 41 KB raw,
+// the biggest first-paint win over a high-latency WiFi link. Browsers always accept
+// gzip; the only consumer of "/" is a browser (evcc/curl hit /api and /status), so the
+// encoding is sent unconditionally. Length is end-start (binary blob, not a C string).
+extern const uint8_t index_html_gz_start[] asm("_binary_index_html_gz_start");
+extern const uint8_t index_html_gz_end[]   asm("_binary_index_html_gz_end");
 
 static esp_err_t handle_index(httpd_req_t* req) {
     httpd_resp_set_type(req, "text/html");
@@ -820,7 +825,9 @@ static esp_err_t handle_index(httpd_req_t* req) {
     // this, browsers cache index.html and keep rendering the OLD layout (with live
     // /status data) after an update — so tell them never to cache the page.
     httpd_resp_set_hdr(req, "Cache-Control", "no-cache, no-store, must-revalidate");
-    return httpd_resp_send(req, index_html_start, HTTPD_RESP_USE_STRLEN);
+    httpd_resp_set_hdr(req, "Content-Encoding", "gzip");
+    const size_t len = index_html_gz_end - index_html_gz_start;
+    return httpd_resp_send(req, (const char*)index_html_gz_start, len);
 }
 
 // ─── Wildcard handler dispatching ─────────────────────────────────────────────

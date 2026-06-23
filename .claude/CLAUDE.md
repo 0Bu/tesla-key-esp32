@@ -60,8 +60,8 @@ version in use registers no builder for `scheduledDepartureAction`).
 
 ## Read-only telemetry
 
-A rotating background poll in `loop_task_fn_` (one domain per ~12 s cycle: climate →
-drive → tires → closures, full set ~48 s) refreshes per-domain caches via the
+A rotating background poll in `loop_task_fn_` (one domain per ~30 s cycle: climate →
+drive → tires → closures, full set ~120 s) refreshes per-domain caches via the
 `set_*_state_callback` hooks in `vehicle_ctrl.cpp`. All polls are `NO_WAKE_SKIP`
 (read-only, never wake the car) and feed the MQTT/HA bridge — evcc/pairing are unaffected.
 These background polls are **paused while a foreground evcc/manual command is in flight**
