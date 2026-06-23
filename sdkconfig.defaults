@@ -48,6 +48,14 @@ CONFIG_HTTPD_MAX_URI_LEN=512
 # socket cap to match and give the background OTA check/download room to connect.
 CONFIG_LWIP_MAX_SOCKETS=16
 
+# LWIP TCP windows — the default send/receive windows (~5.7 KB = 4×MSS) force a
+# multi-packet response through many round trips, which on a higher-latency WiFi link
+# serialises into seconds. Double them (8×MSS) so the gzipped web UI (~13 KB) clears in
+# ~1–2 windows instead of three. Modest extra RAM per active socket; heap is tight, so
+# we don't go larger (and gzip already shrank the only large response).
+CONFIG_LWIP_TCP_SND_BUF_DEFAULT=11520
+CONFIG_LWIP_TCP_WND_DEFAULT=11520
+
 # Stack sizes — the NimBLE host task runs our notify-RX callback, which does
 # tesla-ble protobuf parsing + mbedtls crypto (ECDH/AES-GCM). The 4K default
 # overflows during the session handshake, so give the host task a larger stack.
