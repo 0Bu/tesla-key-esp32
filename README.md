@@ -93,8 +93,9 @@ over MQTT. It's read-only (HA only *sees* the data; it never sends commands or w
    enabled, a **Tesla Key** device appears automatically with all sensors — no YAML needed
    (Home Assistant MQTT Discovery). Leave the field empty to turn MQTT off again.
 
-If the broker needs a username/password, set them once via `idf.py menuconfig`
-(*Tesla Key Configuration → MQTT*) — the web UI only edits the broker address.
+If the broker needs a username/password, set them once at build time via
+`scripts/idf-docker.sh idf.py menuconfig` (*Tesla Key Configuration → MQTT*) — the web UI
+only edits the broker address.
 
 ---
 

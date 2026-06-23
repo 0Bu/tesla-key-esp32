@@ -4,9 +4,10 @@
 
 class VehicleController;
 
-// Runtime panel wiring for one board. Chosen at boot from the NVS `board` key via
-// display_board_preset(), so a SINGLE firmware image drives the panel on a board that
-// has one and is a no-op on a board that doesn't — no per-board build or OTA channel.
+// Runtime panel wiring for one board. Selected at boot from the auto-detected board
+// (display_detect_board()) via display_board_preset(), so a SINGLE firmware image drives the
+// panel on a board that has one and is a no-op on a board that doesn't — no NVS key, no manual
+// selection, no per-board build or OTA channel.
 struct DisplayConfig {
     bool    enabled       = false;        // false → display_start() is a no-op
     int     mosi = -1, sck = -1, cs = -1, dc = -1, rst = -1, bl = -1;   // SPI + control GPIOs
@@ -53,5 +54,5 @@ const char* display_detect_board();
 //
 // Always compiled. With cfg.enabled == false (a panel-less board, e.g. "generic")
 // this is a no-op and costs no SRAM — so one image serves every ESP32-S3 board. Pass
-// display_board_preset(<nvs board>).
+// display_board_preset(display_detect_board()).
 void display_start(VehicleController& vehicle, const DisplayConfig& cfg);

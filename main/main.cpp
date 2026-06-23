@@ -293,18 +293,16 @@ extern "C" void app_main() {
     }
     ble_client.set_target_vin(vin);   // match by the VIN-derived BLE name on scan
 
-    // On-device status display. ONE firmware image serves every board: the panel
-    // wiring is chosen at RUNTIME from the NVS `board` key (web UI: Connection →
-    // Board), so a panel-less ESP32-S3 (board "generic", the default) gets a no-op
-    // while a "t-dongle-s3" drives its ST7735 — no per-board build or OTA channel.
-    // Reads only cached state (never wakes the car). Started pre-WiFi so a no-WiFi
-    // boot shows the WiFi search instead of a black screen. The ~25 KB framebuffer
-    // (no-PSRAM board) allocates from the still-fresh heap here, and only when a
-    // display is actually selected — see the log_heap below.
-    // Resolve the board (on-device display wiring) entirely from the hardware: the
-    // T-Dongle-S3's SDMMC pull-ups vs a bare S3 (display_detect_board()). So a T-Dongle
-    // lights its panel with zero setup and a plain S3 stays dark — no config, no manual
-    // selection. The crash-guard below is the backstop if the detection is ever wrong.
+    // On-device status display. ONE firmware image serves every board: the panel wiring is
+    // auto-detected at RUNTIME from the hardware (display_detect_board() — the T-Dongle-S3's
+    // SDMMC pull-ups vs a bare S3), so a panel-less ESP32-S3 (board "generic") gets a no-op
+    // while a "t-dongle-s3" drives its ST7735 — no NVS key, no manual/web-UI selection, no
+    // per-board build or OTA channel. A T-Dongle lights its panel with zero setup and a plain
+    // S3 stays dark. Reads only cached state (never wakes the car). Started pre-WiFi so a
+    // no-WiFi boot shows the WiFi search instead of a black screen. The ~25 KB framebuffer
+    // (no-PSRAM board) allocates from the still-fresh heap here, and only when a display is
+    // actually selected — see the log_heap below. The crash-guard below is the backstop if
+    // the detection is ever wrong.
     std::string board = display_detect_board();
     DisplayConfig display_cfg = display_board_preset(board.c_str());
 

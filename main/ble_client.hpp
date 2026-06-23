@@ -98,8 +98,6 @@ public:
     int  on_gap_event(ble_gap_event* event);
     int  on_svc_disc(uint16_t conn_handle, const ble_gatt_error* error, const ble_gatt_svc* svc);
     int  on_chr_disc(uint16_t conn_handle, const ble_gatt_error* error, const ble_gatt_chr* chr);
-    int  on_notify(uint16_t conn_handle, const ble_gatt_error* error,
-                   ble_gatt_attr* attr);
 
 private:
     void start_scan_();
