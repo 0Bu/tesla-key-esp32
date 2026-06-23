@@ -574,11 +574,16 @@ void VehicleController::loop_task_fn_(void* arg) {
         }
 
         // Background telemetry refresh (paired + window + connected): one domain per cycle,
-        // rotating climate → drive → tires → closures so the full set refreshes every ~48 s
-        // without flooding the single FIFO command queue. Offset from the charge poll (12 s
-        // vs 10 s). All NO_WAKE_SKIP; web-UI caches only; evcc and pairing are unaffected.
+        // rotating climate → drive → tires → closures so the full set refreshes every ~120 s
+        // without flooding the single FIFO command queue. These feed only the web UI / MQTT
+        // (slow-changing: cabin temp, tyre pressure, odometer), so a relaxed 30 s cadence
+        // costs nothing visible while cutting how often the BLE radio is active — each poll
+        // on a weak link can desync into a multi-second retry burst that, via WiFi/BT radio
+        // coexistence, steals airtime from the HTTP server. The evcc-critical charge poll
+        // above stays at 10 s. All NO_WAKE_SKIP; web-UI caches only; evcc and pairing are
+        // unaffected.
         if (paired && window && self->ble_connected() && !self->cmd_in_flight_.load()
-            && (now_ticks - last_tele_ticks > pdMS_TO_TICKS(12000))) {
+            && (now_ticks - last_tele_ticks > pdMS_TO_TICKS(30000))) {
             last_tele_ticks = now_ticks;
             xSemaphoreTake(self->vehicle_mutex_, portMAX_DELAY);
             switch (tele_idx % 4) {

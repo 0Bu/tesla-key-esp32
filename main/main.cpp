@@ -159,6 +159,17 @@ static bool wifi_connect(const char* ssid, const char* password) {
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_cfg));
     ESP_ERROR_CHECK(esp_wifi_start());
 
+    // Keep WiFi modem-sleep at MIN_MODEM (the IDF default). Modem-sleep parks the radio
+    // between DTIM beacons, which DOES add ~100 ms per round-trip (the original cause of
+    // the sluggish web UI) — but WIFI_PS_NONE is NOT an option here: on the ESP32-S3 WiFi
+    // and BLE share ONE radio, and ESP-IDF WiFi/BT coexistence relies on WiFi modem-sleep
+    // to hand the radio to BLE. Setting WIFI_PS_NONE starves BLE so badly that GATT
+    // connections to the car time out (live-verified: every connect failed with NimBLE
+    // "connect error: 13"), breaking evcc and pairing. So we MUST leave power-save on and
+    // tackle web-UI latency elsewhere — the page is gzipped (~13 KB vs 41 KB) and the TCP
+    // window is enlarged (sdkconfig.defaults), which together clear it in ~1–2 RTTs.
+    ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_MIN_MODEM));
+
     EventBits_t bits = xEventGroupWaitBits(s_wifi_events,
         WIFI_CONNECTED_BIT | WIFI_FAIL_BIT, pdFALSE, pdFALSE,
         pdMS_TO_TICKS(30000));
