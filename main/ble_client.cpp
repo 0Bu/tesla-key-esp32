@@ -38,6 +38,7 @@ static void on_sync_cb() {
 
 static void on_reset_cb(int reason) {
     ESP_LOGW(TAG, "NimBLE host reset, reason=%d", reason);
+    if (g_instance) g_instance->on_reset();
 }
 
 static int gap_event_cb(ble_gap_event* event, void* arg) {
@@ -123,12 +124,24 @@ bool BleClient::start() {
 }
 
 void BleClient::on_sync() {
+    host_synced_ = true;
     ESP_LOGI(TAG, "NimBLE synced");
     // Idle: radio quiet. Discovery scanning is started manually for a limited window
     // (start_discovery), and a connect scan is started on demand by connect().
 }
 
+void BleClient::on_reset() {
+    // Host went down; ble_gap_* calls are unsafe again until it re-syncs.
+    host_synced_ = false;
+    scanning_    = false;
+}
+
 void BleClient::start_scan_() {
+    // The NimBLE host must have synced before any ble_gap_* call; before that the call
+    // dereferences uninitialised host state — a benign error on ESP-IDF 5.4 but a
+    // LoadProhibited crash on 5.5. Skip silently: ensure_scanning_() is retried by
+    // auto_pair / loop / connect, so the scan starts as soon as the host is up.
+    if (!host_synced_) return;
     ble_gap_disc_params params{};
     params.passive         = 0;
     // No duplicate filtering: we want repeated adverts so the listed RSSI stays fresh.
