@@ -238,20 +238,28 @@ private:
     // and evcc stop serving stale "paired"/SOC data from a defunct pairing.
     void clear_session_and_cache_();
 
-    // Signed VCSEC GET_STATUS poll used purely to detect that our key was deleted on
-    // the car side (the response then carries KEY_NOT_ON_WHITELIST, which trips
-    // pairing_lost_ via make_result_cb_). Benign/read-only; does not wake the car.
+    // Signed VCSEC GET_STATUS poll used purely to detect that our key was deleted on the
+    // car side (the response then carries KEY_NOT_ON_WHITELIST, or a tagless session-info →
+    // "authentication failed", which trips pairing_lost_ via make_result_cb_). It is the
+    // ONLY caller that passes auth_fail_is_revocation, because GET_STATUS is the one signed
+    // command every key role may run — so an auth failure here cannot be a role refusal.
+    // Benign/read-only; does not wake the car.
     bool health_probe_(int timeout_ms = 8000);
 
-    // Enqueue an Infotainment or VCSEC command and wait for the callback.
+    // Enqueue an Infotainment or VCSEC command and wait for the callback. auth_fail_is_revocation
+    // forwards to make_result_cb_: set ONLY for the health probe, so a role-denied user command
+    // (door/flash/honk/climate/sentry on a Charging-Manager key — all answered "authentication
+    // failed") cannot be mistaken for a revocation and destroy the pairing.
     bool send_vcsec_(const std::string& name, Builder builder,
                      TeslaBLE::WakePolicy wp, int timeout_ms,
-                     bool count_as_activity = true);
+                     bool count_as_activity = true, bool auth_fail_is_revocation = false);
     bool send_infotainment_(const std::string& name, Builder builder, int timeout_ms,
                             TeslaBLE::WakePolicy wp = TeslaBLE::WakePolicy::WAKE_IF_NEEDED);
 
-    // RAII helper: takes cmd_sem_ when done
-    ResultCb make_result_cb_();
+    // Build the per-command result callback. auth_fail_is_revocation gates whether an
+    // "authentication failed" reply may count toward the two-strike pairing_lost_ heuristic
+    // (true only for the authorised health probe); an explicit "whitelist" fault always trips.
+    ResultCb make_result_cb_(bool auth_fail_is_revocation = false);
 
     // Copy a background-refreshed cache under cache_mutex_ (see cache_mutex_ below). The
     // caches hold std::string members written from the BLE RX task; an unlocked by-value
@@ -294,13 +302,15 @@ private:
     // supervisor consumes it to re-key and restart pairing. atomic: cross-task flag.
     std::atomic<bool> pairing_lost_{false};
 
-    // Consecutive "authentication failed" responses from signed commands. A car whose
-    // whitelist no longer holds our key replies to a signed command with an untagged
-    // session-info → "auth response authentication failed" (not KEY_NOT_ON_WHITELIST).
-    // Since that message is also used for one-off glitches, two in a row are required
-    // before pairing_lost_ is set — and they must be consecutive on ONE continuous link, so
-    // the streak is reset on any successful response AND on a BLE disconnect (a flaky link
-    // dropping between two glitches is not a revocation). atomic: cross-task.
+    // Consecutive "authentication failed" responses from the signed VCSEC health probe ONLY.
+    // A car whose whitelist no longer holds our key replies to a signed command with an
+    // untagged session-info → "auth response authentication failed" (not KEY_NOT_ON_WHITELIST).
+    // That same message, however, is also the car's answer to a command the key's role is not
+    // allowed to run, so it is counted ONLY for the health probe (auth_fail_is_revocation) — a
+    // GET_STATUS every role may issue — never for role-deniable user commands. Two in a row are
+    // required before pairing_lost_ is set (one-off glitch guard) — and they must be consecutive
+    // on ONE continuous link, so the streak is reset on any successful response AND on a BLE
+    // disconnect (a flaky link dropping between two glitches is not a revocation). atomic: cross-task.
     std::atomic<int> auth_fail_streak_{0};
 
     // True only while the supervisor believes we are paired (in the health-check phase).

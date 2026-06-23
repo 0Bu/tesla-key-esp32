@@ -214,7 +214,8 @@ bool VehicleController::init(const std::string& vin,
 
         if (!connected) {
             // The BLE link just dropped. The "auth response authentication failed" →
-            // pairing_lost_ heuristic in make_result_cb_ requires TWO such replies in a row,
+            // pairing_lost_ heuristic in make_result_cb_ (now fed only by the signed health
+            // probe) requires TWO such replies in a row,
             // on the premise that a genuinely de-whitelisted key keeps failing on a healthy,
             // continuously-connected link. A lossy/recovering link, by contrast, emits the
             // same message as transient corruption and then drops — so two failures that
@@ -614,8 +615,8 @@ bool VehicleController::ensure_connected_(int timeout_ms) {
 
 // ─── Callback factory ─────────────────────────────────────────────────────────
 
-VehicleController::ResultCb VehicleController::make_result_cb_() {
-    return [this](TeslaBLE::OperationResult result) {
+VehicleController::ResultCb VehicleController::make_result_cb_(bool auth_fail_is_revocation) {
+    return [this, auth_fail_is_revocation](TeslaBLE::OperationResult result) {
         last_result_ = result.compatible_success();
         if (last_result_) {
             // A good response proves the car still trusts our key — clear any pending
@@ -647,18 +648,29 @@ VehicleController::ResultCb VehicleController::make_result_cb_() {
             // supervisor re-keys + re-pairs and the UI/evcc stop showing a dead pairing:
             //
             //  a) KEY_NOT_ON_WHITELIST → "… key not on whitelist - pairing required".
-            //     Definitive, act immediately.
+            //     Definitive, act immediately — honoured for EVERY command.
             //  b) The car answers a signed command with a session-info reply that has no
             //     HMAC tag (it can't authenticate a key it no longer holds) → the library
             //     reports "auth response authentication failed". Observed in the field as
-            //     the actual response to key deletion. This message is also used for one-
-            //     off auth glitches, so require two in a row before declaring the pairing
-            //     lost (the supervisor re-probes ~3 s after the first, so confirmation
-            //     takes seconds). Counter resets on any success above.
+            //     the actual response to key deletion. BUT the car returns the *same*
+            //     message when it authenticates the key fine yet REFUSES the operation for
+            //     the key's role — a Charging-Manager key sending door_lock/door_unlock/
+            //     flash_lights/honk_horn/climate/sentry/etc. gets "authentication failed"
+            //     too. A role refusal is therefore indistinguishable from a revocation at
+            //     this layer, so counting (b) on arbitrary user commands would let two
+            //     role-denied calls in a row destroy a perfectly good pairing (forcing a
+            //     physical NFC re-enrol). Hence (b) is honoured ONLY for the dedicated
+            //     health probe (auth_fail_is_revocation), which sends a GET_STATUS the
+            //     Charging-Manager key is always authorised for — there an auth failure
+            //     genuinely means revocation. The supervisor runs that probe ~30 s, so a
+            //     real deletion is still caught even with no evcc traffic. Two in a row are
+            //     required (one-off glitch guard); the counter resets on any success above
+            //     and on a BLE disconnect.
             if (msg.find("whitelist") != std::string::npos) {
                 pairing_lost_      = true;
                 auth_fail_streak_  = 0;
-            } else if (msg.find("authentication failed") != std::string::npos) {
+            } else if (auth_fail_is_revocation &&
+                       msg.find("authentication failed") != std::string::npos) {
                 if (++auth_fail_streak_ >= 2) {
                     pairing_lost_     = true;
                     auth_fail_streak_ = 0;
@@ -684,7 +696,7 @@ struct InFlightGuard {
 
 bool VehicleController::send_vcsec_(const std::string& name, Builder builder,
                                      TeslaBLE::WakePolicy wp, int timeout_ms,
-                                     bool count_as_activity) {
+                                     bool count_as_activity, bool auth_fail_is_revocation) {
     MutexGuard cmd_guard(command_mutex_);
     InFlightGuard inflight(cmd_in_flight_);
     // Real commands open the active window so loop_task resumes polling; the background
@@ -699,7 +711,7 @@ bool VehicleController::send_vcsec_(const std::string& name, Builder builder,
     xSemaphoreTake(vehicle_mutex_, portMAX_DELAY);
     vehicle_->send_command_result(
         UniversalMessage_Domain_DOMAIN_VEHICLE_SECURITY,
-        name, builder, make_result_cb_(), wp);
+        name, builder, make_result_cb_(auth_fail_is_revocation), wp);
     xSemaphoreGive(vehicle_mutex_);
 
     bool ok = xSemaphoreTake(cmd_sem_, pdMS_TO_TICKS(timeout_ms)) == pdTRUE;
@@ -1041,13 +1053,17 @@ bool VehicleController::reset_for_new_vehicle() {
 }
 
 bool VehicleController::health_probe_(int timeout_ms) {
-    // A signed VCSEC status request. If our key is still whitelisted the car answers
-    // with a status (success); if it was deleted the session-info exchange returns
-    // KEY_NOT_ON_WHITELIST, which make_result_cb_ turns into pairing_lost_.
+    // A signed VCSEC GET_STATUS — the one signed command a Charging-Manager key is ALWAYS
+    // authorised for, so its outcome unambiguously reflects whitelist state: success ⇒ key
+    // still valid; KEY_NOT_ON_WHITELIST or a tagless session-info ("authentication failed")
+    // ⇒ key deleted. Because role refusal cannot masquerade as revocation here (there is no
+    // role that can't read status), this is the ONE caller that passes auth_fail_is_revocation
+    // so make_result_cb_ lets an "authentication failed" feed the two-strike pairing_lost_.
     return send_vcsec_("VCSEC Health Poll", [](TeslaBLE::Client* c, uint8_t* b, size_t* l) {
         return c->build_vcsec_information_request_message(
             VCSEC_InformationRequestType_INFORMATION_REQUEST_TYPE_GET_STATUS, b, l);
-    }, TeslaBLE::WakePolicy::WAKE_IF_NEEDED, timeout_ms, /*count_as_activity=*/false);
+    }, TeslaBLE::WakePolicy::WAKE_IF_NEEDED, timeout_ms, /*count_as_activity=*/false,
+       /*auth_fail_is_revocation=*/true);
 }
 
 time_t VehicleController::key_created_at() {

@@ -16,9 +16,9 @@
 # from the old single 0x10000 factory partition. A full-erase install is required
 # once to migrate a device onto this layout (after that, updates happen over OTA).
 #
-# ONE firmware image serves every ESP32-S3 board — the on-device display is selected
-# at runtime from the NVS `board` key — so there is a single manifest + bin and a
-# single OTA channel for all boards (no per-board subdir).
+# ONE firmware image serves every ESP32-S3 board — the on-device display is auto-detected
+# at runtime from the hardware (display_detect_board()) — so there is a single manifest + bin
+# and a single OTA channel for all boards (no per-board subdir).
 #
 # Usage:  ./scripts/build-pages.sh <out_dir> <version>
 set -euo pipefail

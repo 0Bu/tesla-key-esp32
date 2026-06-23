@@ -80,7 +80,7 @@ jobs:
           # → WiFi / VIN / key survive upgrades. tesla-key-esp32.bin is the stable
           # name the web installer reads; the versioned + merged copies are release
           # downloads for manual / full flashing. ONE image serves every ESP32-S3
-          # board (display selected at runtime via the NVS `board` key) → a single
+          # board (display auto-detected at runtime from the hardware) → a single
           # build, a single OTA channel.
           command: >-
             idf.py set-target esp32s3 build &&

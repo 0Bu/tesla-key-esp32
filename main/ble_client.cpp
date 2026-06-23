@@ -5,6 +5,7 @@
 #include <cstring>
 #include <cstdio>
 #include <algorithm>
+#include <exception>
 
 #include "host/ble_hs.h"
 #include "host/ble_uuid.h"
@@ -56,12 +57,6 @@ static int chr_disc_cb(uint16_t conn_handle, const ble_gatt_error* error,
                        const ble_gatt_chr* chr, void* arg) {
     auto* client = static_cast<BleClient*>(arg);
     return client->on_chr_disc(conn_handle, error, chr);
-}
-
-static int notify_cb(uint16_t conn_handle, const ble_gatt_error* error,
-                     ble_gatt_attr* attr, void* arg) {
-    auto* client = static_cast<BleClient*>(arg);
-    return client->on_notify(conn_handle, error, attr);
 }
 
 // ─── BleClient ───────────────────────────────────────────────────────────────
@@ -295,6 +290,12 @@ void BleClient::write_chunk_(const uint8_t* data, size_t len) {
 // ─── GAP event handler ────────────────────────────────────────────────────────
 
 int BleClient::on_gap_event(ble_gap_event* event) {
+    // Runs on the NimBLE host task (dispatched from the C gap_event_cb, no try/catch in the
+    // chain). The NOTIFY_RX and DISC cases allocate from the heap, so an OOM std::bad_alloc on
+    // a fragmented heap would unwind into C frames → std::terminate → abort → reboot (and a
+    // reboot loop also re-opens the poll window, defeating car-sleep). Contain it here — drop
+    // the event — mirroring the guards in vehicle_ctrl (on_rx_data) and the HTTP handler.
+    try {
     switch (event->type) {
     case BLE_GAP_EVENT_DISC: {
         // Check if this device advertises Tesla service UUID
@@ -430,6 +431,12 @@ int BleClient::on_gap_event(ble_gap_event* event) {
     default:
         break;
     }
+    } catch (const std::exception& e) {
+        ESP_LOGE(TAG, "on_gap_event exception (dropping event type=%d): %s",
+                 event->type, e.what());
+    } catch (...) {
+        ESP_LOGE(TAG, "on_gap_event unknown exception (dropping event type=%d)", event->type);
+    }
     return 0;
 }
 
@@ -511,8 +518,4 @@ void BleClient::subscribe_notify_() {
     }
     ESP_LOGI(TAG, "subscribed to Tesla notifications");
     if (on_connected_) on_connected_(true);
-}
-
-int BleClient::on_notify(uint16_t, const ble_gatt_error*, ble_gatt_attr*) {
-    return 0; // handled via BLE_GAP_EVENT_NOTIFY_RX
 }
