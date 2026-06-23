@@ -317,10 +317,22 @@ extern "C" void app_main() {
         s_disp_guard_magic = DISP_GUARD_MAGIC;
         s_disp_attempts = 0;
     }
+    // A "strike" is an EARLY CRASH with the panel on — so only a panic/watchdog reboot
+    // counts. A benign reboot (power-on, SW/OTA restart, USB-Serial/JTAG DTR/RTS reset,
+    // brownout, external reset) is NOT the display's fault, so it clears the strike count.
+    // Without this gate the guard counted ANY reboot inside the 30 s window as a strike, so
+    // the several quick resets of a USB-flash migration (flash hard-reset + a port-open
+    // DTR/RTS reset each time a console attaches) false-tripped it and force-disabled a
+    // perfectly working panel until a power-cycle. A real display crash-loop still trips:
+    // each of its reboots is a PANIC, so the count survives and climbs to the limit.
+    esp_reset_reason_t disp_rr = esp_reset_reason();
+    bool disp_crash_reset = (disp_rr == ESP_RST_PANIC   || disp_rr == ESP_RST_INT_WDT ||
+                             disp_rr == ESP_RST_TASK_WDT || disp_rr == ESP_RST_WDT);
+    if (!disp_crash_reset) s_disp_attempts = 0;
     if (display_cfg.enabled) {
         if (s_disp_attempts >= DISP_MAX_ATTEMPTS) {
             ESP_LOGE(TAG, "display crash-guard: %u consecutive early panics with the panel "
-                          "on — forcing it OFF (fix `board` or power-cycle to retry)",
+                          "on — forcing it OFF (power-cycle to retry)",
                      (unsigned)s_disp_attempts);
             display_cfg.enabled  = false;
             s_display_forced_off = true;
