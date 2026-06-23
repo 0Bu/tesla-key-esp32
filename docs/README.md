@@ -25,8 +25,9 @@ OTA channel, zero per-board setup. (A crash-loop guard force-disables the panel 
 it ever panics repeatedly at boot — the backstop if the detection is ever wrong.)
 
 ```bash
-# Same build as any ESP32-S3 — no overlay:
-idf.py set-target esp32s3 build flash monitor
+# Same build as any ESP32-S3 — no overlay (build via the Docker wrapper, flash from the host):
+scripts/idf-docker.sh idf.py set-target esp32s3 build
+cd build && esptool --chip esp32s3 -p <port> write_flash "@flash_args"
 ```
 
 The display shows a **header** (WiFi signal bars + SSID on the left — scrolling horizontally if the
@@ -44,9 +45,10 @@ pixel-exact validation: `python3 tools/display_sim.py states` (every state) and 
 tools/display_sim.py search` (the WiFi and BLE searching animations).
 
 > **Note:** **no PSRAM** → the ~25 KB framebuffer lands in internal SRAM, allocated only when
-> the board is set to `t-dongle-s3` (watch the `display` heap-attribution line in the boot log
+> the T-Dongle-S3 is auto-detected (watch the `display` heap-attribution line in the boot log
 > on this RAM-tight build). OTA uses the single shared channel — a self-update keeps the panel,
-> because the wiring comes from the NVS `board` key, not the image. The panel wiring is a preset
+> because the wiring is auto-detected from the hardware on every boot (`display_detect_board()`),
+> not baked into the image. The panel wiring is a preset
 > in `display_board_preset()` (`main/display.cpp`): landscape MADCTL `0xA8`, offsets column 1 /
 > row 26, INVON, GPIO38 backlight **active-low** — all HW-verified. To add another board (e.g.
 > the T-Dongle-C5), add a preset there; no per-board firmware needed.
@@ -111,8 +113,8 @@ python provision.py --port <port> --ssid MyNet --password secret --vin 5YJ3E1EA1
 WiFi, VIN, private key and BLE sessions live in the `nvs` partition (`0x9000`, namespaces
 `tesla_cfg` + `tesla_ble`).
 
-- Web flasher / `idf.py flash` / `idf.py app-flash`: `nvs` untouched → data kept.
-- `write_flash 0x0 …-merged.bin`, `idf.py erase-flash`: erase whole flash → data lost.
+- Web flasher / host `esptool … write_flash "@flash_args"`: `nvs` untouched → data kept.
+- `esptool … write_flash 0x0 …-merged.bin`, `esptool … erase_flash`: erase whole flash → data lost.
 
 `nvs` offset/size must not change across versions, or old data is stranded.
 
@@ -253,7 +255,7 @@ own task and is independent of evcc, BLE and pairing.
 
 **Enable:** set the broker in the web UI (Connection → MQTT, `IP:PORT`) — stored in NVS
 (`mqtt_uri`) and applied after the reboot it triggers. Compile-time defaults / credentials
-live in `idf.py menuconfig` → *Tesla Key Configuration*:
+live in `scripts/idf-docker.sh idf.py menuconfig` → *Tesla Key Configuration*:
 
 | Option | Default | Purpose |
 |--------|---------|---------|
@@ -273,7 +275,7 @@ tesla-key/<node>/drive       {shift,odometer}
 tesla-key/<node>/tires       {fl,fr,rl,rr,warn}
 tesla-key/<node>/closures    {locked,door,frunk,trunk,window,user}
 tesla-key/<node>/vehicle     {sleep_status: AWAKE | ASLEEP | UNREACHABLE}
-tesla-key/<node>/device      {wifi_rssi,ble_rssi,ble_connected,paired,uptime,free_heap,version}
+tesla-key/<node>/device      {wifi_rssi,ble_rssi,ble_connected,paired,boot_time,free_heap,version}
 homeassistant/<sensor|binary_sensor>/<node>/<object>/config   (discovery, retained)
 ```
 
@@ -291,7 +293,7 @@ the last-known retained values until the next active window.
 Log: `scanning for Tesla BLE...` → `Tesla '<name>' found: … — connecting`.
 
 **Command times out** (`'charge_start' timed out`) — car in deep sleep; `wake_up` first,
-wait 5 s, retry. Stale session: `idf.py erase-flash && idf.py flash`.
+wait 5 s, retry. Stale session: `esptool --chip esp32s3 -p <port> erase_flash`.
 
 **No pairing prompt** — a Tesla NFC keycard must be on the center-console reader for the
 dialog to appear; car awake + in range; `key_present: true` in `/status` (else
@@ -299,7 +301,7 @@ dialog to appear; car awake + in range; `key_present: true` in `/status` (else
 touchscreen within ~45 s, or `POST /send_key` to retrigger.
 
 **Key rejected** — Tesla app → Security → Keys → delete *"Unknown key"*;
-`idf.py erase-flash && idf.py flash`; let it re-pair (confirm on screen).
+`esptool --chip esp32s3 -p <port> erase_flash`; let it re-pair (confirm on screen).
 
 **Serial permission denied (Linux)** — `sudo usermod -aG dialout $USER && newgrp dialout`.
 

@@ -1,9 +1,9 @@
 // On-device ST7735 status display for the LilyGo T-Dongle-S3 / -C5 (0.96" IPS,
 // driven in LANDSCAPE: 160x80). Both boards drive the same ST7735 panel (same
 // init/gamma/INVON); only the SPI GPIOs, the MADCTL rotation byte, the RAM offsets
-// and the backlight polarity differ — and those now come at RUNTIME from a board
-// preset (display_board_preset() at the bottom of this file), chosen by the NVS
-// `board` key. So ONE firmware image serves both a panel-less ESP32-S3 (board
+// and the backlight polarity differ — and those come at RUNTIME from a board preset
+// (display_board_preset() at the bottom of this file), selected from the auto-detected
+// board (display_detect_board()). So ONE firmware image serves both a panel-less ESP32-S3 (board
 // "generic" → display_start() is a no-op) and the T-Dongle-S3 (board "t-dongle-s3"),
 // and there is a SINGLE OTA channel for every board. See display.hpp for the design
 // contract; the layout mirrors tools/display_sim.py (the pixel-exact renderer) 1:1.
@@ -481,7 +481,7 @@ static void display_task(void* arg) {
     }
 }
 
-// Board presets: map the NVS `board` string to its panel wiring. A board with no
+// Board presets: map the auto-detected board string to its panel wiring. A board with no
 // display (or an unknown value) returns {enabled=false}. Add a new board here — no
 // per-board firmware/OTA needed. Geometry/MADCTL/polarity were HW-verified on the
 // T-Dongle-S3 (see boards history / display_sim.py); the C5 differs only in pins.
