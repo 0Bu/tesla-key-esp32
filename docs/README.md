@@ -58,37 +58,37 @@ GitHub Pages (ESP Web Tools / Web Serial), rebuilt and deployed automatically by
 firmware change; each change also publishes a
 [GitHub release](https://github.com/0Bu/tesla-key-esp32/releases/latest) with the same bins.
 
-Flash by hand (preserves `nvs`):
+Flash by hand (preserves `nvs`; needs `brew install esptool`):
 ```bash
-esptool.py --chip esp32s3 write_flash 0x0 bootloader.bin 0x8000 partition-table.bin \
+esptool --chip esp32s3 write_flash 0x0 bootloader.bin 0x8000 partition-table.bin \
   0x20000 tesla-key-esp32-<version>.bin
 ```
 Clean full flash (erases `nvs`): write `tesla-key-esp32-<version>-merged.bin` at `0x0`.
 
 ## Build from source
 
-ESP-IDF 5.0.1+.
+Builds run in the official **ESP-IDF Docker image, pinned to the version CI uses**
+(`scripts/idf-docker.sh` reads it from `.github/workflows/build.yml`, so it never drifts) —
+no local toolchain to install. Flashing is done from the host with `esptool`, because Docker
+Desktop has no USB passthrough.
 
 ```bash
-# Toolchain (once)
-mkdir -p ~/esp && cd ~/esp
-git clone --recursive https://github.com/espressif/esp-idf.git
-cd esp-idf && git checkout v5.5.4 && ./install.sh esp32s3   # the version CI builds with
-echo 'alias get_idf=". ~/esp/esp-idf/export.sh"' >> ~/.zshrc
-
-# Per shell
-get_idf
-
-# Build
+brew install esptool                                          # host flasher (once)
 git clone https://github.com/0Bu/tesla-key-esp32.git && cd tesla-key-esp32
-idf.py set-target esp32s3
-idf.py menuconfig          # Tesla Key Configuration: WiFi SSID/pass, VIN (BLE MAC auto)
-idf.py build               # first build fetches yoziru/tesla-ble (2–4 min)
-idf.py -p <port> flash monitor
+
+# Build via the CI-pinned ESP-IDF image (first run pulls it, then fetches
+# yoziru/tesla-ble — 2–4 min). The wrapper keeps build/ host-owned.
+./scripts/idf-docker.sh idf.py set-target esp32s3 build
+
+# Optional: WiFi SSID/pass + VIN (BLE MAC auto) — interactive
+./scripts/idf-docker.sh idf.py menuconfig
+
+# Flash from the host (preserves nvs — @flash_args skips nvs@0x9000)
+cd build && esptool --chip esp32s3 -p <port> write_flash "@flash_args"
 ```
 
-WiFi/VIN may be left blank in menuconfig and set later via the setup AP. Flash-mode fallback:
-hold `BOOT`, tap `RESET`, release `BOOT`, then flash. Exit monitor: `Ctrl+]`.
+WiFi/VIN may be left blank and set later via the setup AP. Flash-mode fallback: hold `BOOT`,
+tap `RESET`, release `BOOT`, then flash. Serial log: `screen <port> 115200` (exit `Ctrl-A` `K`).
 
 Boot log:
 ```
