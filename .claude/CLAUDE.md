@@ -5,15 +5,22 @@ API-compatible with TeslaBleHttpProxy (works as evcc BLE vehicle integration).
 
 ## Build & Flash
 
+No local ESP-IDF — builds run via `scripts/idf-docker.sh`, which uses the `espressif/idf`
+Docker image **pinned to the version CI builds with** (read at runtime from
+`.github/workflows/build.yml`, so build/debug never drifts from CI). Flash from the host with
+`esptool` (`brew install esptool`), since Docker on macOS has no USB passthrough. The
+`flash-esp32` skill wraps both steps.
+
 ```bash
-# Prerequisites: ESP-IDF 5.0.1+ sourced
-idf.py set-target esp32s3
+# Build (first run: set-target; afterwards plain `build` stays incremental).
+# The wrapper keeps build/ host-owned and pins the ESP-IDF version to CI.
+scripts/idf-docker.sh idf.py set-target esp32s3 build
 
-# Configure WiFi, VIN (required before first build)
-idf.py menuconfig   # → Tesla Key Configuration
+# Configure WiFi, VIN (interactive; can also be set later via the setup AP)
+scripts/idf-docker.sh idf.py menuconfig   # → Tesla Key Configuration
 
-# Build + Flash + Monitor
-idf.py build flash monitor -p /dev/tty.usbserial-*
+# Flash from the host (preserves nvs — @flash_args skips nvs@0x9000)
+cd build && esptool --chip esp32s3 -p <port> write_flash "@flash_args"
 ```
 
 ## Architecture
@@ -221,8 +228,8 @@ After any of these `has_session()` is false → UI shows "not paired", hides con
 ## Typical Debugging
 
 ```bash
-# Monitor with timestamps
-idf.py monitor -p /dev/tty.usbserial-*
+# Serial monitor (host; no local idf.py) — exit Ctrl-A then K
+screen /dev/cu.usbmodemXXXX 115200
 
 # Test command via curl
 curl -X POST http://<ESP32-IP>/api/1/vehicles/<VIN>/command/wake_up
@@ -230,6 +237,6 @@ curl -X POST http://<ESP32-IP>/api/1/vehicles/<VIN>/command/wake_up
 # Check vehicle data
 curl http://<ESP32-IP>/api/1/vehicles/<VIN>/vehicle_data
 
-# Erase NVS (reset key + sessions)
-idf.py erase-flash -p /dev/tty.usbserial-*
+# Erase NVS (reset key + sessions) — host esptool
+esptool --chip esp32s3 -p <port> erase_flash
 ```

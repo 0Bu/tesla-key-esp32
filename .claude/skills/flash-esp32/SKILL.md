@@ -5,30 +5,43 @@ description: Build and USB-flash the tesla-key-esp32 firmware (ESP32-S3) over th
 
 # flash-esp32 — build & USB-flash the firmware
 
-Builds the ESP-IDF project and flashes it to the connected **ESP32-S3** over USB. NVS
-is left untouched, so the stored pairing, private key, VIN and WiFi survive the flash
-(no re-pair needed). Use this after editing anything under `main/` — including the
-embedded web UI (`main/www/index.html`), which is compiled into the app binary.
+Builds the ESP-IDF project (in Docker) and flashes it to the connected **ESP32-S3** over
+USB (from the host). NVS is left untouched, so the stored pairing, private key, VIN and
+WiFi survive the flash (no re-pair needed). Use this after editing anything under `main/` —
+including the embedded web UI (`main/www/index.html`), which is compiled into the app binary.
 
 > This flashes over **USB**. For a remote, no-cable update use OTA (tap the firmware
 > version in the web UI). USB flashing requires physical access and the board plugged in.
 
+## Why two halves (Docker build, host flash)
+
+There is **no local ESP-IDF install** — builds run via `scripts/idf-docker.sh`, which runs
+the official `espressif/idf` Docker image **pinned to the exact version CI uses** (read at
+runtime from `.github/workflows/build.yml`, so it never drifts; a new version auto-pulls on
+first use). But **Docker Desktop on macOS has no USB passthrough**, so the *flash* step runs
+on the **host** with `esptool` (`brew install esptool`). Build → produces `build/`, then
+flash `build/` from the host.
+
 ## One-shot command
 
-ESP-IDF is **not** on `PATH` by default — it must be sourced in the *same* shell as
-`idf.py` (shell state doesn't persist between separate tool calls). Detect the port and
-flash in a single command:
+Run from the **repo root** (where `CMakeLists.txt` lives). Builds in Docker, then — only if
+the build succeeded (`pipefail` + the `||` guard) — auto-detects the port and flashes:
 
 ```bash
-source ~/esp/esp-idf/export.sh >/dev/null 2>&1 && \
+set -o pipefail
+# 1) Build via the CI-pinned ESP-IDF Docker image (build/ stays host-owned).
+#    First build only: set-target; afterwards plain `build` keeps it incremental & fast.
+scripts/idf-docker.sh \
+  sh -c 'if [ -f sdkconfig ]; then idf.py build; else idf.py set-target esp32s3 build; fi' \
+  2>&1 | tail -15 || { echo "BUILD FAILED — not flashing"; exit 1; }
+# 2) Flash from the HOST (Docker can't reach USB). @flash_args writes bootloader@0x0,
+#    partition-table@0x8000, otadata@0xf000, app@0x20000 — NOT nvs@0x9000, so pairing survives.
 PORT=$(ioreg -l -w 0 2>/dev/null | grep -iE '"USB Product Name"|"IOCalloutDevice"' \
-       | grep -iA1 '"USB Single Serial"' | grep -m1 -o '/dev/cu\.usbmodem[^"]*') && \
-echo "Flashing via $PORT" && \
-idf.py -p "$PORT" flash 2>&1 | tail -20
+       | grep -iA1 '"USB Single Serial"' | grep -m1 -o '/dev/cu\.usbmodem[^"]*') \
+  && echo "Flashing via $PORT" \
+  && ( cd build && esptool --chip esp32s3 -p "$PORT" -b 460800 \
+        --before default_reset --after hard_reset write_flash "@flash_args" ) 2>&1 | tail -20
 ```
-
-`idf.py flash` builds first if anything changed (incremental — a web-UI-only edit is a
-quick recompile, not a full clean build), then writes the app image.
 
 **Success looks like:** `Hash of data verified.` for each region, then
 `Hard resetting via RTS pin...` → `Done`. The app image lands at `0x20000` (dual-OTA
@@ -55,22 +68,27 @@ ioreg -l -w 0 2>/dev/null | grep -iE '"USB Product Name"|"IOCalloutDevice"' \
 Both interfaces can flash an S3. The one-shot command above targets the **WCH UART
 bridge** ("USB Single Serial"), which is the conventional choice. If only the native
 JTAG unit is present, target that node instead. If the `grep` finds nothing, the board
-isn't connected (or is asleep) — check the cable, or just run `idf.py flash` with no
-`-p` to let esptool auto-detect.
+isn't connected (or is asleep) — check the cable, or drop `-p "$PORT"` to let esptool
+auto-detect.
 
 ## Notes & gotchas
 
-- **Don't run `monitor` in an automated session** — it never returns and hangs the turn.
-  Flash without it. If serial logs are needed, run `idf.py -p <PORT> monitor` separately
-  and stop it with `Ctrl-]`.
+- **No local IDF** — every `idf.py` step goes through `scripts/idf-docker.sh`, which uses the
+  `espressif/idf` image **pinned to the CI version** (from `.github/workflows/build.yml`); a
+  new version auto-pulls on first use. The mounted `build/` dir persists on the host, so
+  Docker builds stay incremental. Run `idf.py` ad-hoc the same way, e.g.
+  `scripts/idf-docker.sh idf.py size`.
+- **Don't run a serial monitor in an automated session** — it never returns and hangs the
+  turn. Flash without it. `idf.py monitor` isn't available on the host; for serial logs use a
+  host terminal: `screen /dev/cu.usbmodemXXXX 115200` (exit `Ctrl-A` then `K`), or
+  `pipx install esp-idf-monitor` → `esp-idf-monitor -p <PORT>`.
 - **First build only** is slow (managed_components fetch + full compile). A `build/` dir
   already present means subsequent flashes are incremental and fast.
-- **Target** is `esp32s3` (already set in `sdkconfig`). If `sdkconfig` is missing, run
-  `idf.py set-target esp32s3` first.
-- **NVS is preserved** by a normal `flash`. To wipe pairing/key/VIN/WiFi instead, use
-  `idf.py -p <PORT> erase-flash` (forces a full re-pair afterwards).
-- ESP-IDF install path here is `~/esp/esp-idf`. If it lives elsewhere, source that
-  copy's `export.sh`.
+- **NVS is preserved** by `@flash_args` (it never touches `nvs@0x9000`). To wipe
+  pairing/key/VIN/WiFi instead, run `esptool --chip esp32s3 -p <PORT> erase_flash` (forces a
+  full re-pair afterwards).
+- **Artifacts are host-owned** thanks to `-u $(id -u):$(id -g)` — no root-owned files in the
+  worktree. `build/`, `managed_components/`, `sdkconfig` are all gitignored.
 
 ## After flashing
 
