@@ -22,6 +22,11 @@
 
 static const char* TAG = "ble_client";
 
+// Directed-connect window (T-Dongle fast path, see connect()). Kept below
+// ensure_connected_'s 10 s budget so a failed/stale directed attempt still leaves
+// time for the name-scan fallback to run (and re-learn a changed MAC) in the same call.
+static constexpr int32_t DIRECTED_CONNECT_MS = 6000;
+
 // Singleton storage
 static BleClient* g_instance = nullptr;
 BleClient* ble_client_instance() { return g_instance; }
@@ -237,15 +242,57 @@ bool BleClient::connected_rssi(int8_t& out) const {
 }
 
 // BleAdapter::connect — called by Vehicle when it wants us to connect.
-// Sets a connect intent; the running discovery scan connects to the next Tesla
-// advert it sees. (The address argument is unused: we connect to the first Tesla
-// found, robust to Tesla's rotating BLE addresses; correctness is enforced by the
-// VIN/session layer.)
+// Two paths, same outcome (an established link to the configured Tesla):
+//
+//  • Name-scan (default / generic board): set a connect intent and start an active
+//    discovery scan; the GAP handler connects to the first advert whose name matches
+//    the VIN. (The string argument is unused — we match by name, robust to which
+//    specific Tesla answers first; correctness is enforced by the VIN/session layer.)
+//
+//  • Directed connect (T-Dongle-S3 fast path): if we have a cached target address,
+//    ask the controller to connect to it directly. This collapses the fragile
+//    ADV_IND→SCAN_REQ→SCAN_RSP→name-decode→connect exchange (several RX/TX round-trips
+//    that each have to survive a weak link) down to a single ADV_IND→CONNECT_IND, which
+//    materially raises connect SUCCESS on the dongle's marginal RX. It does NOT raise raw
+//    RX sensitivity — a Tesla whose advert is never heard at all still can't be reached;
+//    that ceiling is physical (antenna / USB near-field noise). On any failure the
+//    BLE_GAP_EVENT_CONNECT(status!=0) handler below falls back to the name-scan, which
+//    also self-heals a stale cached MAC (swapped BLE module / changed car) by re-learning
+//    it. Tesla uses a static public BD_ADDR, so the cached address stays valid across
+//    boots (seeded from NVS via set_target_mac, refreshed on every matched advert).
 void BleClient::connect(const std::string& address) {
     (void)address;
-    if (is_connected()) return;
+    if (is_connected() || connecting_) return;
+
+    if (is_tdongle_ && has_target_ && host_synced_) {
+        if (scanning_) { ble_gap_disc_cancel(); scanning_ = false; }  // can't scan + connect
+        want_connect_ = false;
+        connecting_   = true;
+        // nullptr conn params → NimBLE defaults, whose scan_itvl==scan_window==0x0010
+        // means a 100%-duty listen during establishment (same as our discovery scan),
+        // so a weak advert is no harder to catch than on the scan path.
+        int rc = ble_gap_connect(BLE_OWN_ADDR_PUBLIC, &target_addr_,
+                                 DIRECTED_CONNECT_MS, nullptr, gap_event_cb, this);
+        if (rc == 0) return;                  // directed attempt in flight
+        ESP_LOGW(TAG, "directed connect start failed: %d — name-scan fallback", rc);
+        connecting_ = false;                  // fall through to the scan path
+    }
+
     want_connect_ = true;
     ensure_scanning_();
+}
+
+// Parse a "aa:bb:cc:dd:ee:ff" MAC (as produced by peer_addr_str(), which prints the
+// 6 address bytes in REVERSE) back into target_addr_ for a directed connect.
+void BleClient::set_target_mac(const std::string& mac) {
+    unsigned b[6];
+    if (sscanf(mac.c_str(), "%02x:%02x:%02x:%02x:%02x:%02x",
+               &b[0], &b[1], &b[2], &b[3], &b[4], &b[5]) != 6)
+        return;
+    for (int i = 0; i < 6; i++) target_addr_.val[i] = (uint8_t)b[5 - i];  // undo the reverse
+    target_addr_.type = BLE_ADDR_PUBLIC;      // Tesla advertises a static public address
+    has_target_       = true;
+    ESP_LOGI(TAG, "directed-connect target seeded from stored MAC %s", mac.c_str());
 }
 
 // Drop a pending connect intent and return to idle scanning/listing.
@@ -315,6 +362,15 @@ int BleClient::on_gap_event(ble_gap_event* event) {
 
         // Always record the Tesla in the nearby list (with RSSI) for the web UI.
         note_scan_(event->disc, fields);
+
+        // Cache the matched car's address for a future directed connect (T-Dongle fast
+        // path). Match the configured VIN so we cache the RIGHT car on a multi-Tesla
+        // street; refreshing here also self-heals a stale NVS seed (changed MAC/type).
+        if (target_vin_.empty() || TeslaBLE::matches_vin(adv_name, target_vin_)) {
+            memcpy(target_addr_.val, event->disc.addr.val, 6);
+            target_addr_.type = event->disc.addr.type;
+            has_target_       = true;
+        }
 
         // Only connect when a command set a connect intent — otherwise keep scanning
         // and listing.

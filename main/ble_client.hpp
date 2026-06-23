@@ -68,6 +68,15 @@ public:
     // VIN of the vehicle to connect to; the scanner matches the Tesla BLE name
     // derived from it. Empty = connect to any Tesla in range.
     void set_target_vin(const std::string& vin) { target_vin_ = vin; }
+    // Mark this board as a LilyGo T-Dongle-S3 (auto-detected at boot). Enables the
+    // directed-connect-by-cached-MAC fast path in connect() — see connect() for why it
+    // only helps that board's weak/marginal RX link and is a no-op elsewhere.
+    void set_tdongle(bool v) { is_tdongle_ = v; }
+    // Seed the directed-connect target from the MAC persisted in NVS (so even the FIRST
+    // connect after a reboot can skip the name-scan). String form "aa:bb:cc:dd:ee:ff" as
+    // produced by peer_addr_str(); Tesla uses a static public BD_ADDR. Refined in-RAM
+    // whenever a live advert is matched, so a stale seed self-corrects.
+    void set_target_mac(const std::string& mac);
 
     // Start NimBLE host + scanning task
     bool start();
@@ -120,6 +129,9 @@ private:
     // association (~4 s), which can lose the race with auto_pair's fixed 4 s warm-up, so
     // gate the scan on the real host state rather than on timing.
     volatile bool          host_synced_{false};
+    // True when the auto-detect found a T-Dongle-S3 (set once at boot). Gates the
+    // directed-connect fast path so the generic board keeps its proven name-scan flow.
+    bool                   is_tdongle_{false};
 
     ConnectedCb on_connected_;
     RxDataCb    on_rx_data_;

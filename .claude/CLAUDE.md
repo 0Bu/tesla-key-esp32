@@ -30,6 +30,11 @@ main.cpp          → WiFi init, NVS init, start all components
 ble_client.cpp    → NimBLE GATT client (BleAdapter impl)
                     Scans for UUID 00000211-b2d1-43f0-9b88-960cebf8b91e
                     Write chr: 0212, Notify chr: 0213
+                    T-Dongle-S3 (auto-detected) uses a directed connect to the cached
+                    Tesla MAC (set_tdongle/set_target_mac) — skips the fragile
+                    scan/SCAN_RSP/name-decode dance to raise connect SUCCESS on its weak
+                    RX link; falls back to the name-scan on failure. Reliability only —
+                    it does NOT raise RX sensitivity (deafness is physical: antenna/noise).
 nvs_storage.cpp   → NVS StorageAdapter (maps library keys ≤15 chars)
 vehicle_ctrl.cpp  → TeslaBLE::Vehicle wrapper, sync command API via semaphores
 http_server.cpp   → esp_http_server on port 80

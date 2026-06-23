@@ -407,6 +407,16 @@ extern "C" void app_main() {
     sntp_set_time_sync_notification_cb(on_time_sync);
     esp_sntp_init();
 
+    // BLE link tuning for the T-Dongle-S3 (auto-detected above). On that board the
+    // on-board antenna in the host USB port has a weak/marginal RX link to the car, so
+    // enable the directed-connect-by-cached-MAC fast path: it removes the fragile
+    // scan/SCAN_RSP/name-decode round-trips from each link bring-up (a reliability win on
+    // a lossy link; it does NOT raise RX sensitivity — that ceiling is physical). Seed the
+    // target from the MAC persisted on the first-ever connect so even a cold boot can skip
+    // the name-scan; a no-op on the generic board, which keeps its proven scan path.
+    ble_client.set_tdongle(board == "t-dongle-s3");
+    if (!ble_mac.empty()) ble_client.set_target_mac(ble_mac);
+
     // Start NimBLE host. Discovery scanning is manual/time-limited; the client
     // connects on demand when a command is issued. (The controller + display were
     // set up before WiFi, above, so the panel renders the search animations.)
