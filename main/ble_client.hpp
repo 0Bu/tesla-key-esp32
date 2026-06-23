@@ -94,6 +94,7 @@ public:
 
     // Called from NimBLE host task callbacks — not for external use
     void on_sync();
+    void on_reset();
     int  on_gap_event(ble_gap_event* event);
     int  on_svc_disc(uint16_t conn_handle, const ble_gatt_error* error, const ble_gatt_svc* svc);
     int  on_chr_disc(uint16_t conn_handle, const ble_gatt_error* error, const ble_gatt_chr* chr);
@@ -115,6 +116,12 @@ private:
     volatile bool          want_connect_{false};
     volatile bool          connecting_{false};
     volatile bool          scanning_{false};
+    // True only after the NimBLE host has signalled sync (on_sync). Until then ANY
+    // ble_gap_* call hits an uninitialised host — a benign error on ESP-IDF 5.4 but a
+    // null-deref crash (LoadProhibited) on 5.5. ble_client.start() runs only after WiFi
+    // association (~4 s), which can lose the race with auto_pair's fixed 4 s warm-up, so
+    // gate the scan on the real host state rather than on timing.
+    volatile bool          host_synced_{false};
 
     ConnectedCb on_connected_;
     RxDataCb    on_rx_data_;
