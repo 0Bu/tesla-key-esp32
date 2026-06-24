@@ -132,4 +132,4 @@ Full reference: [docs/README.md](docs/README.md).
 
 - Local network only — keep it on a trusted LAN, never expose it to the internet ([security](docs/SECURITY.md)).
 - Inspired by and API-compatible with [TeslaBleHttpProxy](https://github.com/wimaha/TeslaBleHttpProxy) — evcc talks to either without changes.
-- MIT licensed. Built on [yoziru/tesla-ble](https://github.com/yoziru/tesla-ble).
+- Licensed under **AGPL-3.0** ([LICENSE](LICENSE)). The firmware statically links the AGPL-3.0 [yoziru/tesla-ble](https://github.com/yoziru/tesla-ble) library, so the combined work is itself AGPL-3.0 — see [docs](docs/README.md#license).
