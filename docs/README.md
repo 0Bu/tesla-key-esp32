@@ -161,7 +161,8 @@ GET  /status               { vin, ip, version, key_present, key_fingerprint,
                              wifi:{ssid,rssi,std},
                              ble:{connected,scanning,rssi,addr | devices:[{addr,name,rssi}]},
                              link: "awake"|"asleep"|"unreachable"|"unknown" (drives the hero),
-                             vehicle:{soc,status,power,amps} (only when link=="awake", cached),
+                             vehicle:{soc,status,charge_limit,power,amps,actual_amps,volts}
+                               (only when link=="awake", cached; each field only when reported),
                              mqtt:{configured,connected,broker} (HA bridge),
                              tele:{climate,drive,tires,closures} (read-only telemetry),
                              last:{soc,status} (last-known snapshot for the asleep card),
@@ -226,8 +227,12 @@ live in `scripts/idf-docker.sh idf.py menuconfig` → *Tesla Key Configuration*:
 
 ```
 tesla-key/<node>/availability                 online | offline   (LWT, retained)
-tesla-key/<node>/charge      {soc,charge_limit,power,amps,range,rate,charging_state}
-tesla-key/<node>/climate     {inside,outside,setpoint,on,preconditioning}
+tesla-key/<node>/charge      {soc,charge_limit,power,amps,range,rate,charging_state,
+                              actual_current,current_request,volts,phases,energy_added,
+                              minutes_to_full,limit_reason}
+tesla-key/<node>/climate     {inside,outside,setpoint,on,preconditioning,
+                              cop,cop_cooling,cop_temp,cop_reason,
+                              front_defrost,rear_defrost,defrost_mode}
 tesla-key/<node>/drive       {shift,odometer}
 tesla-key/<node>/tires       {fl,fr,rl,rr,warn}
 tesla-key/<node>/closures    {locked,door,frunk,trunk,window,user}
