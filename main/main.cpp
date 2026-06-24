@@ -20,8 +20,6 @@
 #include "esp_heap_caps.h"
 #include "esp_app_desc.h"
 #include "esp_netif.h"
-#include "esp_attr.h"      // RTC_NOINIT_ATTR — display crash-loop guard counter
-#include "esp_timer.h"     // one-shot to clear the guard after a healthy run
 
 #include "ble_client.hpp"
 #include "nvs_storage.hpp"
@@ -30,32 +28,10 @@
 #include "provisioning.hpp"
 #include "diag_log.hpp"
 #include "mqtt_ha.hpp"
-#include "display.hpp"
 
 static const char* MDNS_HOSTNAME = "tesla-key-esp32";  // → http://tesla-key-esp32.local
 
 static const char* TAG = "main";
-
-// ─── On-device display crash-loop guard ───────────────────────────────────────
-// The display driver writes SPI to fixed GPIOs (display_board_preset()). If the board
-// auto-detect ever guesses wrong (or a future board wires those pins to something else),
-// bringing the panel up could hang/panic early — and a reboot loop is doubly bad here:
-// each boot re-opens the BLE poll window, so a parked car never sleeps. So we count
-// consecutive early panics that happened with the display ON and, after a few, force it
-// OFF to break the loop. The counter lives in RTC memory: it survives a panic→reboot (a
-// CPU reset, not a power reset) but a power-cycle clears it (magic mismatch) → the panel
-// gets a fresh try.
-RTC_NOINIT_ATTR static uint32_t s_disp_guard_magic;
-RTC_NOINIT_ATTR static uint32_t s_disp_attempts;
-static const uint32_t DISP_GUARD_MAGIC = 0xD15B0070;
-static const uint32_t DISP_MAX_ATTEMPTS = 3;     // strikes before the panel is forced off
-static const uint64_t DISP_HEALTHY_US   = 30ULL * 1000 * 1000;   // survive this → clear
-
-static bool s_display_forced_off = false;        // for the boot log line only
-
-// Fired ~30 s after a boot that brought the panel up without crash-looping: the
-// display isn't the cause of any early instability, so reset the strike count.
-static void disp_guard_clear_cb(void*) { s_disp_attempts = 0; }
 
 // ─── Wall clock ───────────────────────────────────────────────────────────────
 // NTP (esp_sntp) is the primary time source; the browser (POST /set_time) is only a
@@ -86,13 +62,10 @@ static int s_retry_num              = 0;
 static const int MAX_RETRY          = 10;
 
 // True only while the STA holds an IP. Gates esp_wifi_sta_get_ap_info() callers
-// (display task, /status, MQTT) so none reads the AP/station record WHILE WiFi is
-// initialising or churning through a disconnect→reconnect — that record has
-// transiently-null fields mid-association and a concurrent read faults
-// (LoadProhibited, EXCVADDR=0x1). The display task runs at higher priority than
-// app_main and starts BEFORE wifi_connect(), so without this it polls esp_wifi
-// straight through bring-up. volatile: written from the event-loop task, read from
-// the display/http/mqtt tasks.
+// (/status, MQTT) so none reads the AP/station record WHILE WiFi is initialising or
+// churning through a disconnect→reconnect — that record has transiently-null fields
+// mid-association and a concurrent read faults (LoadProhibited, EXCVADDR=0x1).
+// volatile: written from the event-loop task, read from the http/mqtt tasks.
 static volatile bool s_wifi_connected = false;
 bool wifi_is_connected() { return s_wifi_connected; }
 
@@ -272,14 +245,10 @@ extern "C" void app_main() {
 
     log_heap("preinit");
 
-    // ── Tesla BLE controller + on-device display ─────────────────────────────
-    // Set these up BEFORE WiFi so the on-device display comes up immediately and
-    // shows the "searching" animation while WiFi connects (or even if it never
-    // does). Otherwise a no-WiFi boot sits on a black screen: the WiFi wait below —
-    // and its setup-portal fallback, which never returns — would run before a later
-    // display_start(). The display reads cached state only; NimBLE itself
-    // (ble_client.start) still starts after WiFi, but the controller's accessors
-    // are safe to call before it (they report "not connected" → searching).
+    // ── Tesla BLE controller ─────────────────────────────────────────────────
+    // Construct the controller (NVS + key) here; NimBLE itself (ble_client.start)
+    // is started after WiFi is up. The controller's accessors are safe to call
+    // before that — they report "not connected" until the link comes up.
     static NvsStorageAdapter tesla_store("tesla_ble");
     tesla_store.initialize();
     static BleClient ble_client;
@@ -303,62 +272,6 @@ extern "C" void app_main() {
         ESP_LOGI(TAG, "key present, fingerprint %s", vehicle.key_fingerprint().c_str());
     }
     ble_client.set_target_vin(vin);   // match by the VIN-derived BLE name on scan
-
-    // On-device status display. ONE firmware image serves every board: the panel wiring is
-    // auto-detected at RUNTIME from the hardware (display_detect_board() — the T-Dongle-S3's
-    // SDMMC pull-ups vs a bare S3), so a panel-less ESP32-S3 (board "generic") gets a no-op
-    // while a "t-dongle-s3" drives its ST7735 — no NVS key, no manual/web-UI selection, no
-    // per-board build or OTA channel. A T-Dongle lights its panel with zero setup and a plain
-    // S3 stays dark. Reads only cached state (never wakes the car). Started pre-WiFi so a
-    // no-WiFi boot shows the WiFi search instead of a black screen. The ~25 KB framebuffer
-    // (no-PSRAM board) allocates from the still-fresh heap here, and only when a display is
-    // actually selected — see the log_heap below. The crash-guard below is the backstop if
-    // the detection is ever wrong.
-    std::string board = display_detect_board();
-    DisplayConfig display_cfg = display_board_preset(board.c_str());
-
-    // Crash-loop guard (see the RTC counter above). On a power-on the RTC value is
-    // garbage → the magic re-seeds a fresh count. If the panel was selected but the
-    // last few boots panicked early with it on, force it off this boot; otherwise
-    // record this attempt and schedule a one-shot to clear the count once we've run
-    // healthily for a while (a crash before then leaves the count standing → trips).
-    if (s_disp_guard_magic != DISP_GUARD_MAGIC) {
-        s_disp_guard_magic = DISP_GUARD_MAGIC;
-        s_disp_attempts = 0;
-    }
-    // A "strike" is an EARLY CRASH with the panel on — so only a panic/watchdog reboot
-    // counts. A benign reboot (power-on, SW/OTA restart, USB-Serial/JTAG DTR/RTS reset,
-    // brownout, external reset) is NOT the display's fault, so it clears the strike count.
-    // Without this gate the guard counted ANY reboot inside the 30 s window as a strike, so
-    // the several quick resets of a USB-flash migration (flash hard-reset + a port-open
-    // DTR/RTS reset each time a console attaches) false-tripped it and force-disabled a
-    // perfectly working panel until a power-cycle. A real display crash-loop still trips:
-    // each of its reboots is a PANIC, so the count survives and climbs to the limit.
-    esp_reset_reason_t disp_rr = esp_reset_reason();
-    bool disp_crash_reset = (disp_rr == ESP_RST_PANIC   || disp_rr == ESP_RST_INT_WDT ||
-                             disp_rr == ESP_RST_TASK_WDT || disp_rr == ESP_RST_WDT);
-    if (!disp_crash_reset) s_disp_attempts = 0;
-    if (display_cfg.enabled) {
-        if (s_disp_attempts >= DISP_MAX_ATTEMPTS) {
-            ESP_LOGE(TAG, "display crash-guard: %u consecutive early panics with the panel "
-                          "on — forcing it OFF (power-cycle to retry)",
-                     (unsigned)s_disp_attempts);
-            display_cfg.enabled  = false;
-            s_display_forced_off = true;
-        } else {
-            s_disp_attempts++;
-            esp_timer_create_args_t ta = {};
-            ta.callback = &disp_guard_clear_cb;
-            ta.name     = "disp_guard";
-            esp_timer_handle_t th = nullptr;
-            if (esp_timer_create(&ta, &th) == ESP_OK) esp_timer_start_once(th, DISP_HEALTHY_US);
-        }
-    }
-
-    ESP_LOGI(TAG, "board: %s (display %s)", board.c_str(),
-             display_cfg.enabled ? "on" : (s_display_forced_off ? "OFF — crash-guard" : "off"));
-    display_start(vehicle, display_cfg);
-    log_heap("display");
 
     // Connect to WiFi. With stored credentials, a failure is usually a transient
     // outage (e.g. router rebooting), but if it persists (e.g. wrong password),
@@ -408,8 +321,8 @@ extern "C" void app_main() {
     esp_sntp_init();
 
     // Start NimBLE host. Discovery scanning is manual/time-limited; the client
-    // connects on demand when a command is issued. (The controller + display were
-    // set up before WiFi, above, so the panel renders the search animations.)
+    // connects on demand when a command is issued. (The controller was set up
+    // before WiFi, above.)
     ble_client.start();
     log_heap("ble");
 

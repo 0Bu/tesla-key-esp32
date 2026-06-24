@@ -10,49 +10,6 @@ ESP32-S3 (BLE 5.0), ≥ 8 MB flash (dual-OTA layout: two 3 MB app slots). No PSR
 required. ESP32 / S2 / C3 not supported.
 USB data cable for flashing.
 
-### LilyGo T-Dongle-S3 (onboard display)
-
-The [LilyGo T-Dongle-S3](https://github.com/Xinyuan-LilyGO/T-Dongle-S3) (ESP32-S3, 16 MB
-flash, **no PSRAM**, native USB-A, 0.96" ST7735 LCD, driven landscape at 160×80) runs the
-**same firmware image** as a plain ESP32-S3 — there is no separate build. **Just flash and
-go: the display turns on automatically.** The board is **auto-detected** at boot — the
-T-Dongle-S3's onboard TF-card slot puts external pull-ups on the S3's SDMMC lines, which a
-bare ESP32-S3 lacks, so the firmware probes them (`display_detect_board()`) and enables the
-panel only on the dongle. The ST7735 itself can't be probed (its SDA is write-only — no
-MISO), hence the indirect signature. There is no manual board setting — it's fully
-automatic. On a panel-less board the display code is a no-op (costs no SRAM). One image, one
-OTA channel, zero per-board setup. (A crash-loop guard force-disables the panel if enabling
-it ever panics repeatedly at boot — the backstop if the detection is ever wrong.)
-
-```bash
-# Same build as any ESP32-S3 — no overlay (build via the Docker wrapper, flash from the host):
-scripts/idf-docker.sh idf.py set-target esp32s3 build
-cd build && esptool --chip esp32s3 -p <port> write_flash "@flash_args"
-```
-
-The display shows a **header** (WiFi signal bars + SSID on the left — scrolling horizontally if the
-name is too long — and a Bluetooth symbol + BLE bars on the right) and a **gradient battery**
-filled to the SoC (red → amber → green), with a
-**charging bolt** while charging (hidden at 100 %) and an **ASLEEP** (dimmed) state. When a
-link isn't ready the battery is replaced, by priority — **WiFi search > pairing > battery >
-BLE search**. A search is a link label (the word **WiFi**, or a Bluetooth glyph for BLE) plus a
-compact bar cluster whose dark-green highlight ping-pongs across light-green bars; the **BLE
-search bars show only when the car is out of range**, and once a BLE link is up but not yet
-paired it shows a big animated **"Pairing…"** instead. The header hides whichever small
-indicator is the active search. All
-from cache-only state, so it never wakes the car and does not depend on MQTT. Offline
-pixel-exact validation: `python3 tools/display_sim.py states` (every state) and `python3
-tools/display_sim.py search` (the WiFi and BLE searching animations).
-
-> **Note:** **no PSRAM** → the ~25 KB framebuffer lands in internal SRAM, allocated only when
-> the T-Dongle-S3 is auto-detected (watch the `display` heap-attribution line in the boot log
-> on this RAM-tight build). OTA uses the single shared channel — a self-update keeps the panel,
-> because the wiring is auto-detected from the hardware on every boot (`display_detect_board()`),
-> not baked into the image. The panel wiring is a preset
-> in `display_board_preset()` (`main/display.cpp`): landscape MADCTL `0xA8`, offsets column 1 /
-> row 26, INVON, GPIO38 backlight **active-low** — all HW-verified. To add another board (e.g.
-> the T-Dongle-C5), add a preset there; no per-board firmware needed.
-
 ## Flash prebuilt artifacts
 
 Browser flasher + WiFi/VIN setup: [../README.md](../README.md). The flasher is served on

@@ -22,4 +22,4 @@ void mqtt_ha_start(VehicleController& vehicle, NvsStorageAdapter& config_store);
 // Status accessors for GET /status (the web-UI "Connection" block).
 bool        mqtt_ha_configured();  // a broker URI is set (bridge enabled)
 bool        mqtt_ha_connected();   // a live MQTT session is up
-std::string mqtt_ha_broker();      // "host:port" for display ("" if unconfigured)
+std::string mqtt_ha_broker();      // "host:port" shown in /status ("" if unconfigured)
