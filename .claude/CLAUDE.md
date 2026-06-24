@@ -145,7 +145,10 @@ grouped under one device. **Read-only by design** — no command topics are subs
   JSON), availability/LWT `<base>/<node>/availability` (`online`/`offline`). Discovery
   configs under `<prefix>/<sensor|binary_sensor>/<node>/<object>/config` (retained).
 - **Entities:** charge (soc, charge_limit, power, amps, range **km**, rate **km/h**,
-  charging_state), climate (inside/outside/setpoint °C, on, preconditioning), drive (shift,
+  charging_state, plus extended read-only enrichment: actual_current/current_request **A**
+  (delivered vs requested), charger phases, energy_added **kWh** session, minutes_to_full,
+  charge limit_reason — HA bridge only, never on the `/api` evcc path), climate
+  (inside/outside/setpoint °C, on, preconditioning), drive (shift,
   odometer km), tires (fl/fr/rl/rr bar + warn), closures (locked/door/frunk/trunk/window/
   occupant), sleep_state, and device diagnostics (wifi/ble RSSI, ble_link, paired, **last
   boot** (boot-time timestamp), free_heap, firmware). Numeric fields are emitted only when

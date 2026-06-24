@@ -72,6 +72,12 @@ static const Entry ENTRIES[] = {
     { D_CHARGE,  "sensor",        "range",          "Range",               "range",          "distance",  "km",  "measurement", nullptr,      false },
     { D_CHARGE,  "sensor",        "charge_rate",    "Charge rate",         "rate",           nullptr,     "km/h","measurement",nullptr,      false },
     { D_CHARGE,  "sensor",        "charging_state", "Charging state",      "charging_state", nullptr,     nullptr,nullptr,      nullptr,      false },
+    { D_CHARGE,  "sensor",        "actual_current", "Charging current (actual)",   "actual_current", "current",  "A",   "measurement",      nullptr,      false },
+    { D_CHARGE,  "sensor",        "current_request","Charging current (requested)","current_request","current",  "A",   "measurement",      nullptr,      false },
+    { D_CHARGE,  "sensor",        "phases",         "Charger phases",      "phases",         nullptr,     nullptr,"measurement",       nullptr,      false },
+    { D_CHARGE,  "sensor",        "energy_added",   "Energy added",        "energy_added",   "energy",    "kWh", "total_increasing",  nullptr,      false },
+    { D_CHARGE,  "sensor",        "minutes_to_full","Time to full",        "minutes_to_full","duration",  "min", "measurement",       nullptr,      false },
+    { D_CHARGE,  "sensor",        "limit_reason",   "Charge limit reason", "limit_reason",   nullptr,     nullptr,nullptr,            "diagnostic", false },
 
     // ── Climate (climate_state cache) ────────────────────────────────────────
     { D_CLIMATE, "sensor",        "inside_temp",    "Inside temperature",  "inside",         "temperature","°C", "measurement", nullptr,      false },
@@ -211,6 +217,15 @@ static void publish_state() {
             if (cs.has_charge_rate)      cJSON_AddNumberToObject(o, "rate",         cs.charge_rate   * 1.609344);
             if (!cs.charging_state.empty())
                 cJSON_AddStringToObject(o, "charging_state", cs.charging_state.c_str());
+            // Extended charge telemetry (read-only enrichment for HA; currents in A, energy in
+            // kWh, time in minutes — all native units, no imperial conversion needed).
+            if (cs.has_actual_current)   cJSON_AddNumberToObject(o, "actual_current",  cs.charger_actual_current);
+            if (cs.has_current_request)  cJSON_AddNumberToObject(o, "current_request", cs.charge_current_request);
+            if (cs.has_charger_phases)   cJSON_AddNumberToObject(o, "phases",          cs.charger_phases);
+            if (cs.has_energy_added)     cJSON_AddNumberToObject(o, "energy_added",     cs.charge_energy_added);
+            if (cs.has_minutes_to_full)  cJSON_AddNumberToObject(o, "minutes_to_full",  cs.minutes_to_full_charge);
+            if (!cs.charge_limit_reason.empty())
+                cJSON_AddStringToObject(o, "limit_reason", cs.charge_limit_reason.c_str());
             pub_json(s_topic[D_CHARGE], o);
         }
     }
