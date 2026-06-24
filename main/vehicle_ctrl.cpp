@@ -59,6 +59,38 @@ void parse_charge_state(const CarServer_ChargeState& cs, ChargeStateResult& out)
         out.battery_range = cs.optional_battery_range.battery_range; out.has_battery_range = true;
     }
 
+    // Extended read-only charge telemetry (HA bridge only). Same single-member-oneof pattern;
+    // each costs nothing extra — it rides the charge_state poll the fields above already need.
+    if (cs.which_optional_charger_actual_current == CarServer_ChargeState_charger_actual_current_tag) {
+        out.charger_actual_current = cs.optional_charger_actual_current.charger_actual_current;
+        out.has_actual_current = true;
+    }
+    if (cs.which_optional_charge_current_request == CarServer_ChargeState_charge_current_request_tag) {
+        out.charge_current_request = cs.optional_charge_current_request.charge_current_request;
+        out.has_current_request = true;
+    }
+    if (cs.which_optional_charger_phases == CarServer_ChargeState_charger_phases_tag) {
+        out.charger_phases = cs.optional_charger_phases.charger_phases; out.has_charger_phases = true;
+    }
+    if (cs.which_optional_charge_energy_added == CarServer_ChargeState_charge_energy_added_tag) {
+        out.charge_energy_added = cs.optional_charge_energy_added.charge_energy_added;
+        out.has_energy_added = true;
+    }
+    if (cs.which_optional_minutes_to_full_charge == CarServer_ChargeState_minutes_to_full_charge_tag) {
+        out.minutes_to_full_charge = cs.optional_minutes_to_full_charge.minutes_to_full_charge;
+        out.has_minutes_to_full = true;
+    }
+    if (cs.which_optional_charge_limit_reason == CarServer_ChargeState_charge_limit_reason_tag) {
+        switch (cs.optional_charge_limit_reason.charge_limit_reason) {
+            case CarServer_ChargeState_ChargeLimitReason_ChargeLimitReasonNone:        out.charge_limit_reason = "None";        break;
+            case CarServer_ChargeState_ChargeLimitReason_ChargeLimitReasonEvse:        out.charge_limit_reason = "EVSE";        break;
+            case CarServer_ChargeState_ChargeLimitReason_ChargeLimitReasonBattTempLow: out.charge_limit_reason = "BattTempLow"; break;
+            case CarServer_ChargeState_ChargeLimitReason_ChargeLimitReasonHighSoc:     out.charge_limit_reason = "HighSoc";     break;
+            case CarServer_ChargeState_ChargeLimitReason_ChargeLimitReasonCabin:       out.charge_limit_reason = "Cabin";       break;
+            default:                                                                    out.charge_limit_reason = "";            break;  // Unknown → omit
+        }
+    }
+
     // charging_state is itself a oneof message (which_type holds the variant tag).
     if (cs.has_charging_state) {
         switch (cs.charging_state.which_type) {
