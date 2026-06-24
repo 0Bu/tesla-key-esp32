@@ -482,7 +482,7 @@ static esp_err_t handle_status(httpd_req_t* req) {
     cJSON_AddItemToObject(root, "wifi", wifi);
 
     // MQTT (Home Assistant bridge): whether a broker is configured, whether the
-    // session is live, and the host:port for display. Drives the Connection block.
+    // session is live, and the host:port. Drives the web-UI Connection block.
     cJSON* mqtt = cJSON_CreateObject();
     cJSON_AddBoolToObject(mqtt, "configured", mqtt_ha_configured());
     cJSON_AddBoolToObject(mqtt, "connected",  mqtt_ha_connected());
