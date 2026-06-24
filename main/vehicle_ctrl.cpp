@@ -892,6 +892,12 @@ bool VehicleController::charge_stop(int timeout_ms) {
 }
 
 bool VehicleController::set_charging_amps(int amps, int timeout_ms) {
+    // Guard against garbage input. Lower bound 0; upper bound 48 A — the maximum any Tesla
+    // onboard charger accepts, deliberately ABOVE the docs' conservative "0–32" typical range
+    // so a legitimate high-current request (e.g. a 48 A-capable Model 3/Y) is never capped.
+    // The car still enforces its own per-model maximum.
+    if (amps < 0)  amps = 0;
+    if (amps > 48) amps = 48;
     int32_t amps32 = (int32_t)amps;
     return send_infotainment_("Set Charging Amps", [amps32](TeslaBLE::Client* c, uint8_t* b, size_t* l) {
         return c->build_car_server_vehicle_action_message(
@@ -900,6 +906,9 @@ bool VehicleController::set_charging_amps(int amps, int timeout_ms) {
 }
 
 bool VehicleController::set_charge_limit(int percent, int timeout_ms) {
+    // Clamp to the documented 50–100 % range (below 50 the car refuses; above 100 is invalid).
+    if (percent < 50)  percent = 50;
+    if (percent > 100) percent = 100;
     int32_t pct32 = (int32_t)percent;
     return send_infotainment_("Set Charge Limit", [pct32](TeslaBLE::Client* c, uint8_t* b, size_t* l) {
         return c->build_car_server_vehicle_action_message(
