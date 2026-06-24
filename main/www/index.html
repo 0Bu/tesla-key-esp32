@@ -422,48 +422,49 @@ function climateChip(s){
   if(!c||!(c.on||c.preconditioning)) return '';
   return stat('Climate', (c.preconditioning&&!c.on)?'Precond.':'On', '', true);
 }
-/* Live AC draw the car pulls from the wall = actual_current × charger_voltage, in kW (one
-   decimal, trailing ".0" dropped → "1 kW" not "1.0 kW"). charger_power is the battery DC
-   charge power (0 when "Complete") so it is NOT used. "—" when the car didn't report the
-   fields (e.g. the asleep card, no vehicle/charge cache). Shared by overheat + defrost. */
-function drawKw(s){
+/* Live AC wall draw (charger actual_current × voltage) in kW — but ONLY when the awake car
+   reports a POSITIVE draw. Returns null when the car is asleep (no live charge object), didn't
+   report the fields, or the draw is 0/negative. charger_power (battery DC, 0 at "Complete") is
+   deliberately not used. One decimal, trailing ".0" dropped → "1 kW". A null result means
+   "nothing is actually being pulled right now", so callers show no active chip. */
+function liveKw(s){
   var v=(s&&s.vehicle)||{};
-  if(v.actual_amps==null||v.volts==null) return '—';
-  return (v.actual_amps*v.volts/1000).toFixed(1).replace(/\.0$/,'')+' kW';
+  if(v.actual_amps==null||v.volts==null) return null;
+  var w=v.actual_amps*v.volts;
+  if(w<=0) return null;
+  return (w/1000).toFixed(1).replace(/\.0$/,'')+' kW';
 }
-/* Is the climate telemetry fresh enough to trust a FAST-CHANGING state (active cooling,
-   defrosting)? It is refreshed only while the active poll window is open (a recent
-   evcc/manual command, or charging); the moment the car parks and the window closes the
-   climate cache FREEZES, so past this age we must not assert a live "cooling/defrosting now".
-   last_seen_s is the age of the most recent telemetry of any kind (the 10 s charge poll keeps
-   it near 0 while the window is open); the per-domain climate lag is bounded by the ~120 s
-   rotation, so 180 s clears one full rotation with margin. NOTE: this gates only the volatile
-   states — the stable COP *armed* setting (cop=On/FanOnly) is still shown from the retained
-   cache while parked, since it does not change on a sleeping car. */
+/* Is the climate telemetry fresh enough to trust a FAST-CHANGING state (defrosting)? It is
+   refreshed only while the active poll window is open (a recent evcc/manual command, or
+   charging); the moment the car parks and the window closes the climate cache FREEZES, so past
+   this age we must not assert a live "defrosting now". last_seen_s is the age of the most recent
+   telemetry of any kind (the 10 s charge poll keeps it near 0 while the window is open); the
+   per-domain climate lag is bounded by the ~120 s rotation, so 180 s clears one full rotation
+   with margin. */
 function climateFresh(s){ return !!s && (s.last_seen_s==null || s.last_seen_s<=180); }
-/* Overheat (COP) chip. Cabin Overheat Protection is a parked-car feature, so the chip shows
-   whenever it is ARMED — the reliable `cop` setting is "On" or "FanOnly" (Off/absent/unknown →
-   no chip). The VALUE is the #99 requirement: the live AC wall draw (charger actual_current ×
-   voltage) the car pulls while COP runs on a full battery, in kW. That is a direct measurement,
-   not the unreliable cop_cooling flag, so we show it whenever the car reports it — regardless of
-   cop_reason. It requires the car AWAKE: the live `vehicle` charge object that carries
-   actual_amps/volts is only emitted at link==awake. While the car SLEEPS there is simply no live
-   draw to read (polling for one would wake the car and defeat sleep), so we fall back to the
-   armed label "On"/"Fan" from the retained cache. Amber while a live draw is shown, calm grey
-   when only the armed setting is known. Never a bare "—" (the original asleep-card bug). */
+/* Overheat (COP) chip — shows the live AC wall draw the car pulls FOR Cabin Overheat
+   Protection, in kW (the #99 requirement), and ONLY while that is actually happening:
+     • COP is armed (reliable `cop` setting = "On"/"FanOnly"; Off/absent → no chip),
+     • the car is awake AND pulling a POSITIVE draw (liveKw — a real measurement), and
+     • it is NOT charging (a charging car's wall draw is the charger, shown by the charge chips).
+   An armed-but-idle COP draws nothing, so we show NO chip rather than a meaningless
+   "OVERHEAT 0 kW" / "On" — being armed (a persistent setting) is not the same as running.
+   cop_cooling is intentionally not used: it reads true even below the activation threshold;
+   the real wall draw is the honest "COP is running now" signal. */
 function copChip(s){
-  var c=s&&s.tele&&s.tele.climate;
-  if(!c||!c.cop||c.cop==='Off'||c.cop==='Unknown') return '';   // chip only while COP is armed
-  var kw=drawKw(s), live=(kw!=='—');
-  var val=live?kw:(c.cop==='FanOnly'?'Fan':'On');
-  var tip='Cabin overheat protection'+(c.cop_temp?' · '+c.cop_temp:'')+(live?' · '+kw+' AC draw':' · armed');
-  return '<div class="stat cop'+(live?' on':'')+'" title="'+tip+'"><div class="k">Overheat</div>'+
-         '<div class="v">'+val+'</div></div>';
+  var c=s&&s.tele&&s.tele.climate, v=s&&s.vehicle;
+  if(!c||!c.cop||c.cop==='Off'||c.cop==='Unknown') return '';   // COP must be armed
+  if(v&&/charg/i.test(v.status||'')) return '';                 // charging → wall draw is the charger
+  var kw=liveKw(s);
+  if(!kw) return '';                                            // no positive draw → COP idle → no chip
+  var tip='Cabin overheat protection'+(c.cop_temp?' · '+c.cop_temp:'')+' · '+kw+' AC draw';
+  return '<div class="stat cop on" title="'+tip+'"><div class="k">Overheat</div>'+
+         '<div class="v">'+kw+'</div></div>';
 }
 /* Defrost chip — shown when the car is defrosting: front or rear defroster on, or the
-   Max-defrost mode engaged (defrost_mode != Off). Separate from is_climate_on. Same freshness
-   gate and live-kW-or-label fallback as the overheat chip; only appears when the car reports
-   the fields. */
+   Max-defrost mode engaged (defrost_mode != Off). Separate from is_climate_on. Unlike COP,
+   defrost has a real on/off trigger, so we keep showing it while engaged and label the value
+   with the live draw when positive, else "On" — never a bare "0 kW". */
 function defrostChip(s){
   var c=s&&s.tele&&s.tele.climate;
   if(!c||!climateFresh(s)) return '';
@@ -471,7 +472,7 @@ function defrostChip(s){
   var p=[]; if(c.front_defrost===true)p.push('front'); if(c.rear_defrost===true)p.push('rear');
   if(c.defrost_mode&&c.defrost_mode!=='Off')p.push(c.defrost_mode.toLowerCase());
   var tip='Defrost'+(p.length?' · '+p.join(', '):'');
-  var kw=drawKw(s), val=(kw==='—')?'On':kw;
+  var val=liveKw(s)||'On';
   return '<div class="stat defrost on" title="'+tip+'"><div class="k">Defrost</div>'+
          '<div class="v">'+val+'</div></div>';
 }
