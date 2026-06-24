@@ -441,23 +441,23 @@ function drawKw(s){
    states — the stable COP *armed* setting (cop=On/FanOnly) is still shown from the retained
    cache while parked, since it does not change on a sleeping car. */
 function climateFresh(s){ return !!s && (s.last_seen_s==null || s.last_seen_s<=180); }
-/* Overheat (COP) chip. Cabin Overheat Protection is a parked-car feature, so we show it
-   whenever it is ARMED — the reliable `cop` setting is "On" or "FanOnly" (Off/absent/unknown
-   → no chip). Shown on the asleep card too, from the retained cache: COP is a stable setting,
-   so last-known is fine there (like the SOC shown alongside it). The chip ESCALATES to
-   "actively cooling" — amber, with the live AC wall draw — only when the car is RELIABLY
-   cooling: cop_cooling alone reads true even below the activation threshold, so we also
-   require a non-"BelowThreshold" reason AND fresh telemetry (climateFresh). Otherwise it stays
-   a calm "On"/"Fan" armed indicator. Never a bare "—" (which read as "off" — the original
-   asleep-card bug). */
+/* Overheat (COP) chip. Cabin Overheat Protection is a parked-car feature, so the chip shows
+   whenever it is ARMED — the reliable `cop` setting is "On" or "FanOnly" (Off/absent/unknown →
+   no chip). The VALUE is the #99 requirement: the live AC wall draw (charger actual_current ×
+   voltage) the car pulls while COP runs on a full battery, in kW. That is a direct measurement,
+   not the unreliable cop_cooling flag, so we show it whenever the car reports it — regardless of
+   cop_reason. It requires the car AWAKE: the live `vehicle` charge object that carries
+   actual_amps/volts is only emitted at link==awake. While the car SLEEPS there is simply no live
+   draw to read (polling for one would wake the car and defeat sleep), so we fall back to the
+   armed label "On"/"Fan" from the retained cache. Amber while a live draw is shown, calm grey
+   when only the armed setting is known. Never a bare "—" (the original asleep-card bug). */
 function copChip(s){
   var c=s&&s.tele&&s.tele.climate;
-  if(!c||!c.cop||c.cop==='Off'||c.cop==='Unknown') return '';   // only when COP is armed
-  var cooling=c.cop_cooling===true&&c.cop_reason!=='BelowThreshold'&&climateFresh(s);
-  var kw=drawKw(s);
-  var val=cooling?(kw==='—'?(c.cop_temp||'On'):kw):(c.cop==='FanOnly'?'Fan':'On');
-  var tip='Cabin overheat protection'+(c.cop_temp?' · '+c.cop_temp:'')+(cooling?' · cooling':' · armed');
-  return '<div class="stat cop'+(cooling?' on':'')+'" title="'+tip+'"><div class="k">Overheat</div>'+
+  if(!c||!c.cop||c.cop==='Off'||c.cop==='Unknown') return '';   // chip only while COP is armed
+  var kw=drawKw(s), live=(kw!=='—');
+  var val=live?kw:(c.cop==='FanOnly'?'Fan':'On');
+  var tip='Cabin overheat protection'+(c.cop_temp?' · '+c.cop_temp:'')+(live?' · '+kw+' AC draw':' · armed');
+  return '<div class="stat cop'+(live?' on':'')+'" title="'+tip+'"><div class="k">Overheat</div>'+
          '<div class="v">'+val+'</div></div>';
 }
 /* Defrost chip — shown when the car is defrosting: front or rear defroster on, or the
