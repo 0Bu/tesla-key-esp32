@@ -67,12 +67,14 @@ drive → tires → closures, full set ~120 s) refreshes per-domain caches via t
 These background polls are **paused while a foreground evcc/manual command is in flight**
 (`cmd_in_flight_`), so a command is never queued behind a slow/failing poll in the single
 BLE FIFO — keeps command latency low on an awake, busy link.
-Exposed under `tele` in `/status` (for the HA bridge and diagnostics; the device's own web
-UI is charge/SOC-only and does not render these): `climate` (inside/outside/setpoint °C, on,
-preconditioning), `drive` (shift, odometer_km), `tires` (fl/fr/rl/rr bar + warn),
-`closures` (locked, door/frunk/trunk/window open, occupant). Numeric fields are emitted
-only when the car reported them (proto3 optional) so Home Assistant shows "—"/unknown
-otherwise.
+Exposed under `tele` in `/status` (for the HA bridge and diagnostics; the device's web UI
+renders the Climate / Overheat / Defrost chips from `tele.climate`, but the rest of `tele`
+is HA/diagnostics-only): `climate` (inside/outside/setpoint °C, on, preconditioning, plus
+Cabin-Overheat-Protection `cop`/`cop_cooling`/`cop_temp`/`cop_reason` and defrost
+`front_defrost`/`rear_defrost`/`defrost_mode` — separate from `is_climate_on`), `drive`
+(shift, odometer_km), `tires` (fl/fr/rl/rr bar + warn), `closures` (locked,
+door/frunk/trunk/window open, occupant). Numeric fields are emitted only when the car
+reported them (proto3 optional) so Home Assistant shows "—"/unknown otherwise.
 
 ## HTTP API
 
@@ -122,10 +124,12 @@ config runs fine on chips with more flash.
 
 ```yaml
 vehicles:
-  - name: Tesla
-    type: tesla-ble-http
-    url: http://<ESP32-IP>
+  - name: tesla
+    type: template            # required when using template:
+    template: tesla-ble       # evcc's TeslaBleHttpProxy-compatible template (this device emulates it)
     vin: <VIN>
+    url: http://<ESP32-IP>    # or http://tesla-key-esp32.local
+    port: 80                  # this device serves on 80 (template default is 8080)
 ```
 
 ## Home Assistant MQTT bridge
@@ -148,7 +152,9 @@ grouped under one device. **Read-only by design** — no command topics are subs
   charging_state, plus extended read-only enrichment: actual_current/current_request **A**
   (delivered vs requested), charger phases, energy_added **kWh** session, minutes_to_full,
   charge limit_reason — HA bridge only, never on the `/api` evcc path), climate
-  (inside/outside/setpoint °C, on, preconditioning), drive (shift,
+  (inside/outside/setpoint °C, on, preconditioning, plus Cabin-Overheat-Protection
+  cop/cop_cooling/cop_temp/cop_reason and defrost front_defrost/rear_defrost/defrost_mode),
+  drive (shift,
   odometer km), tires (fl/fr/rl/rr bar + warn), closures (locked/door/frunk/trunk/window/
   occupant), sleep_state, and device diagnostics (wifi/ble RSSI, ble_link, paired, **last
   boot** (boot-time timestamp), free_heap, firmware). Numeric fields are emitted only when
