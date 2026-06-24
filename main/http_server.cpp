@@ -582,6 +582,12 @@ static esp_err_t handle_status(httpd_req_t* req) {
             cJSON* veh = cJSON_CreateObject();
             cJSON_AddNumberToObject(veh, "soc",    cs.battery_level);
             cJSON_AddStringToObject(veh, "status", cs.charging_state.c_str());
+            // Charge target — lets the UI mark "charge complete" (SOC >= limit) and gate the
+            // start-charge tap, which the car would only reject as "complete" anyway. Emitted
+            // only when the car reported it (proto3 optional); a missing limit means the UI
+            // keeps the button live rather than blocking on unknown data.
+            if (cs.has_charge_limit_soc)
+                cJSON_AddNumberToObject(veh, "charge_limit", cs.charge_limit_soc);
             // Charging detail for the web UI: live power (kW) and current (A). Emitted only
             // when the car actually reported them (proto3 optional) so the UI omits the chip
             // rather than rendering a phantom 0. Power is a whole number (no decimals).

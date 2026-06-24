@@ -398,6 +398,9 @@ var BOLT='<svg viewBox="0 0 24 24" width="38" height="38" style="fill:var(--mute
 var MOON='<svg class="glyphbig" viewBox="0 0 24 24" width="52" height="52" style="fill:var(--muted);opacity:.72"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>';
 // alarm clock — waking hero glyph (grey outline, gently trembling via .wecker)
 var ALARM='<svg class="wecker glyphbig" viewBox="0 0 24 24" width="52" height="52" fill="none" stroke="var(--muted)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="opacity:.82"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l2 2"/><path d="M5 3 2 6"/><path d="m22 6-3-3"/><path d="M6.38 18.7 4 21"/><path d="M17.64 18.67 20 21"/></svg>';
+// charge complete — green check shown in the hero label when the battery has reached its
+// target (SOC >= charge limit). Inline fill overrides the label's default red (--accent).
+var CHECK='<svg viewBox="0 0 24 24" style="fill:var(--ok)"><path d="M9 16.2 4.8 12l-1.4 1.4L9 19 21 7l-1.4-1.4z"/></svg>';
 
 /* charging detail chips under the hero label — power + current, shown only
    while the car is actively charging (both read 0 otherwise). */
@@ -411,6 +414,12 @@ function chargeStats(v,charging){
   if(v.power>0) c.push(stat('Power',   Math.round(v.power), 'kW', true));
   if(v.amps>0)  c.push(stat('Current', Math.round(v.amps),        'A',  true));
   return c.join('');
+}
+// battery at/above its target and not charging → starting a charge is a no-op the car only
+// rejects as "complete". charge_limit is emitted by /status only when the car reported it, so
+// an unknown limit (field absent) leaves the start button live rather than blocking on a guess.
+function chargeComplete(v,charging){
+  return !charging && !!v && v.charge_limit!=null && (v.soc!=null?v.soc:0)>=v.charge_limit;
 }
 // Compact "time ago" for the asleep card (seconds → "<1 min" / "5 min" / "2 h" / "3 d").
 function fmtAgo(sec){
@@ -463,10 +472,14 @@ function render(s){
   if(paired&&v){
     if(waking){ waking=false; clearTimeout(wakeTimeout); }   // car is awake & reporting — stop the spinner
     var soc=v.soc!=null?v.soc:0, col=socColor(soc);
+    // "Charge complete" = battery reached its target and not charging; the start tap is gated
+    // (the car would only reject a charge_start here as "complete"). See chargeComplete().
+    var complete=chargeComplete(v,charging);
     var ringHTML=charging?ringCharge(soc,col):ringSVG(soc,false,col);   // spin while charging, static when complete
-    var ctitle=charging?'Tap to stop charging':'Tap to start charging';
-    hicHTML='<button class="wakebtn" onclick="toggleCharge()" title="'+ctitle+'" aria-label="'+ctitle+'"'+(chgBusy?' disabled':'')+'>'+ringHTML+'<div class="pct"><b style="color:'+col+'">'+soc+'<small>%</small></b></div></button>';
-    setHTML(hl,(charging?'<svg viewBox="0 0 24 24"><path d="M13 3 5 13h6l-1 8 8-10h-6l1-8z"/></svg>':'')+'<span>'+esc(v.status||'Idle')+'</span>');
+    var ctitle=charging?'Tap to stop charging':(complete?'Battery full — already charged':'Tap to start charging');
+    hicHTML='<button class="wakebtn" onclick="toggleCharge()" title="'+ctitle+'" aria-label="'+ctitle+'"'+((chgBusy||complete)?' disabled':'')+'>'+ringHTML+'<div class="pct"><b style="color:'+col+'">'+soc+'<small>%</small></b></div></button>';
+    var lblIcon=charging?'<svg viewBox="0 0 24 24"><path d="M13 3 5 13h6l-1 8 8-10h-6l1-8z"/></svg>':(complete?CHECK:'');
+    setHTML(hl,lblIcon+'<span>'+(complete?'Charge complete':esc(v.status||'Idle'))+'</span>');
     hs.textContent='';
     hst.innerHTML=chargeStats(v,charging);
   } else if(paired){
@@ -567,6 +580,9 @@ function toggleCharge(){
   if(chgBusy) return;
   var vin=state&&state.vin; if(!vin||vin==='UNKNOWN'){ toast('No VIN configured','err'); return; }
   var v=state&&state.vehicle, isCharging=!!(v&&/charg/i.test(v.status||''));
+  // belt-and-suspenders: the start button is already disabled when complete, but never fire a
+  // pointless charge_start at/above the charge limit even if this is reached another way.
+  if(chargeComplete(v,isCharging)){ toast('Battery is already fully charged','info'); return; }
   var cmd=isCharging?'charge_stop':'charge_start';
   chgBusy=true; if(state)render(state);
   toast(isCharging?'Stopping charge…':'Starting charge…','info');
