@@ -431,25 +431,49 @@ function drawKw(s){
   if(v.actual_amps==null||v.volts==null) return '—';
   return (v.actual_amps*v.volts/1000).toFixed(1).replace(/\.0$/,'')+' kW';
 }
+/* Is the climate telemetry fresh enough to trust a FAST-CHANGING state (active cooling,
+   defrosting)? It is refreshed only while the active poll window is open (a recent
+   evcc/manual command, or charging); the moment the car parks and the window closes the
+   climate cache FREEZES, so past this age we must not assert a live "cooling/defrosting now".
+   last_seen_s is the age of the most recent telemetry of any kind (the 10 s charge poll keeps
+   it near 0 while the window is open); the per-domain climate lag is bounded by the ~120 s
+   rotation, so 180 s clears one full rotation with margin. NOTE: this gates only the volatile
+   states — the stable COP *armed* setting (cop=On/FanOnly) is still shown from the retained
+   cache while parked, since it does not change on a sleeping car. */
+function climateFresh(s){ return !!s && (s.last_seen_s==null || s.last_seen_s<=180); }
+/* Overheat (COP) chip. Cabin Overheat Protection is a parked-car feature, so we show it
+   whenever it is ARMED — the reliable `cop` setting is "On" or "FanOnly" (Off/absent/unknown
+   → no chip). Shown on the asleep card too, from the retained cache: COP is a stable setting,
+   so last-known is fine there (like the SOC shown alongside it). The chip ESCALATES to
+   "actively cooling" — amber, with the live AC wall draw — only when the car is RELIABLY
+   cooling: cop_cooling alone reads true even below the activation threshold, so we also
+   require a non-"BelowThreshold" reason AND fresh telemetry (climateFresh). Otherwise it stays
+   a calm "On"/"Fan" armed indicator. Never a bare "—" (which read as "off" — the original
+   asleep-card bug). */
 function copChip(s){
   var c=s&&s.tele&&s.tele.climate;
-  if(!c||c.cop_cooling!==true) return '';
-  var tip='Cabin overheat protection'+(c.cop_temp?' · '+c.cop_temp:'')+' · cooling';
-  return '<div class="stat cop on" title="'+tip+'"><div class="k">Overheat</div>'+
-         '<div class="v">'+drawKw(s)+'</div></div>';
+  if(!c||!c.cop||c.cop==='Off'||c.cop==='Unknown') return '';   // only when COP is armed
+  var cooling=c.cop_cooling===true&&c.cop_reason!=='BelowThreshold'&&climateFresh(s);
+  var kw=drawKw(s);
+  var val=cooling?(kw==='—'?(c.cop_temp||'On'):kw):(c.cop==='FanOnly'?'Fan':'On');
+  var tip='Cabin overheat protection'+(c.cop_temp?' · '+c.cop_temp:'')+(cooling?' · cooling':' · armed');
+  return '<div class="stat cop'+(cooling?' on':'')+'" title="'+tip+'"><div class="k">Overheat</div>'+
+         '<div class="v">'+val+'</div></div>';
 }
 /* Defrost chip — shown when the car is defrosting: front or rear defroster on, or the
-   Max-defrost mode engaged (defrost_mode != Off). Same live kW draw as the overheat chip;
-   separate from is_climate_on. Only appears when the car actually reports the fields. */
+   Max-defrost mode engaged (defrost_mode != Off). Separate from is_climate_on. Same freshness
+   gate and live-kW-or-label fallback as the overheat chip; only appears when the car reports
+   the fields. */
 function defrostChip(s){
   var c=s&&s.tele&&s.tele.climate;
-  if(!c) return '';
+  if(!c||!climateFresh(s)) return '';
   if(!(c.front_defrost===true||c.rear_defrost===true||(c.defrost_mode&&c.defrost_mode!=='Off'))) return '';
   var p=[]; if(c.front_defrost===true)p.push('front'); if(c.rear_defrost===true)p.push('rear');
   if(c.defrost_mode&&c.defrost_mode!=='Off')p.push(c.defrost_mode.toLowerCase());
   var tip='Defrost'+(p.length?' · '+p.join(', '):'');
+  var kw=drawKw(s), val=(kw==='—')?'On':kw;
   return '<div class="stat defrost on" title="'+tip+'"><div class="k">Defrost</div>'+
-         '<div class="v">'+drawKw(s)+'</div></div>';
+         '<div class="v">'+val+'</div></div>';
 }
 /* Make every chip in a row the same width — the widest one's content width (so they line
    up tidily without stretching to fill the hero). Reset, measure the max, then pin all. */
