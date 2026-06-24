@@ -307,6 +307,12 @@ code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
 <script>
 "use strict";
 var $=function(id){return document.getElementById(id)};
+// Write html into el only when it actually changed (cached on el.__h). The status
+// poll re-renders every 4 s; blindly reassigning innerHTML would destroy and recreate
+// the child nodes, restarting any CSS animation on them from 0% — making looping
+// animations (hero ring, "searching" signal bars, pulsing dot) visibly jump. Skipping
+// the write when nothing changed keeps the same nodes alive so the animation runs on.
+function setHTML(el,html){ if(el && el.__h!==html){ el.__h=html; el.innerHTML=html; } }
 var state=null, otaTimer=null, otaAvail=null, waking=false, wakeTimeout=null, chgBusy=false;
 
 function esc(s){return String(s).replace(/[&<>]/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;'}[c]})}
@@ -428,11 +434,12 @@ function render(s){
     var wdbm=(w.rssi!=null)?'<span class="dbm">'+w.rssi+' dBm</span>':'';      // numeric reading
     var wtxt=w.ssid?'<span class="nm">'+esc(w.ssid)+'</span>':'';
     wc.className='cv ok';
-    wc.innerHTML=wbars+wdbm+wtxt;
+    setHTML(wc,wbars+wdbm+wtxt);
   } else {
     // not connected — the bars fill up green one after another (same animation as the BLE
     // "searching" row) instead of a plain text label, while the device keeps reconnecting.
-    wc.className='cv'; wc.innerHTML=searchBarsHTML()+'<span>Searching…</span>';
+    // setHTML keeps the same bar nodes between polls so the fill animation doesn't restart.
+    wc.className='cv'; setHTML(wc,searchBarsHTML()+'<span>Searching…</span>');
   }
 
   // re-pair notice — key was removed by the car and regenerated
@@ -442,8 +449,12 @@ function render(s){
     rb.querySelector('.bt').innerHTML='<b>Key was reset.</b> The vehicle removed this device’s key, so a fresh one was generated automatically. Approve the new pairing on your Tesla’s touchscreen.';
   } else rb.classList.remove('show');
 
-  // hero — single source of overall status
-  var hic=$("hicon"), hl=$("hlabel"), hs=$("hsub"), hst=$("hstats");
+  // hero — single source of overall status.
+  // hicHTML holds the icon markup; it is written to the DOM only when it actually
+  // changes (see the guarded assignment below). Rebuilding the icon every poll would
+  // insert a fresh <svg> and restart its CSS animation from 0% — making the pulsing
+  // sleep/charge/wake ring visibly jump every 4 s instead of fading smoothly.
+  var hic=$("hicon"), hl=$("hlabel"), hs=$("hsub"), hst=$("hstats"), hicHTML=null;
   $("hero").classList.remove('hide');   // shown by default; the unreachable branch hides it
   hst.innerHTML='';   // cleared here; only the paired+reporting branch populates it
   if(paired&&v){
@@ -451,20 +462,20 @@ function render(s){
     var soc=v.soc!=null?v.soc:0, col=socColor(soc);
     var ringHTML=charging?ringCharge(soc,col):ringSVG(soc,false,col);   // spin while charging, static when complete
     var ctitle=charging?'Tap to stop charging':'Tap to start charging';
-    hic.innerHTML='<button class="wakebtn" onclick="toggleCharge()" title="'+ctitle+'" aria-label="'+ctitle+'"'+(chgBusy?' disabled':'')+'>'+ringHTML+'<div class="pct"><b style="color:'+col+'">'+soc+'<small>%</small></b></div></button>';
-    hl.innerHTML=(charging?'<svg viewBox="0 0 24 24"><path d="M13 3 5 13h6l-1 8 8-10h-6l1-8z"/></svg>':'')+'<span>'+esc(v.status||'Idle')+'</span>';
+    hicHTML='<button class="wakebtn" onclick="toggleCharge()" title="'+ctitle+'" aria-label="'+ctitle+'"'+(chgBusy?' disabled':'')+'>'+ringHTML+'<div class="pct"><b style="color:'+col+'">'+soc+'<small>%</small></b></div></button>';
+    setHTML(hl,(charging?'<svg viewBox="0 0 24 24"><path d="M13 3 5 13h6l-1 8 8-10h-6l1-8z"/></svg>':'')+'<span>'+esc(v.status||'Idle')+'</span>');
     hs.textContent='';
     hst.innerHTML=chargeStats(v,charging);
   } else if(paired){
     if(waking){
-      hic.innerHTML='<button class="wakebtn" disabled aria-label="Waking the car">'+ringSleep(104,true)+'<span class="glyph">'+ALARM+'</span></button>';
-      hl.innerHTML='<span>Waking up…</span>';
+      hicHTML='<button class="wakebtn" disabled aria-label="Waking the car">'+ringSleep(104,true)+'<span class="glyph">'+ALARM+'</span></button>';
+      setHTML(hl,'<span>Waking up…</span>');
       hs.textContent='Reaching your Tesla over Bluetooth…';
     } else if(s.link==='asleep'){
       // Proven reachable-but-sleeping: the always-on VCSEC health poll answered recently, so
       // "asleep" is a fact and the wake button is meaningful. Show the card.
-      hic.innerHTML='<button class="wakebtn" onclick="wakeCar()" title="Tap to wake the car" aria-label="Wake the car">'+ringSleep()+'<span class="glyph">'+MOON+'</span></button>';
-      hl.innerHTML='<span>Vehicle asleep</span>';
+      hicHTML='<button class="wakebtn" onclick="wakeCar()" title="Tap to wake the car" aria-label="Wake the car">'+ringSleep()+'<span class="glyph">'+MOON+'</span></button>';
+      setHTML(hl,'<span>Vehicle asleep</span>');
       hs.textContent='Tap the icon to wake the car.';
       // Last-known battery + how long the car has been asleep, from the retained cache —
       // shown without waking the car (last reading; a parked car barely drains).
@@ -481,18 +492,21 @@ function render(s){
       $("hero").classList.add('hide');
     }
   } else if(!configured){
-    hic.innerHTML=ringSVG(0,true)+'<div class="glyph">'+BOLT+'</div>';
-    hl.innerHTML='<span>Set up needed</span>';
+    hicHTML=ringSVG(0,true)+'<div class="glyph">'+BOLT+'</div>';
+    setHTML(hl,'<span>Set up needed</span>');
     hs.textContent=hasVin?'Generate a security key below.':'Add the vehicle VIN below to begin.';
   } else if(linked){
-    hic.innerHTML=ringSVG(0,true)+'<div class="glyph">'+BOLT+'</div>';
-    hl.innerHTML='<span class="ldot"></span><span>Pairing</span>';
+    hicHTML=ringSVG(0,true)+'<div class="glyph">'+BOLT+'</div>';
+    setHTML(hl,'<span class="ldot"></span><span>Pairing</span>');
     hs.textContent='Approve the request on your Tesla’s touchscreen.';
   } else {
-    hic.innerHTML=ringSVG(0,true)+'<div class="glyph">'+BOLT+'</div>';
-    hl.innerHTML='<span class="ldot"></span><span>Looking for your car</span>';
+    hicHTML=ringSVG(0,true)+'<div class="glyph">'+BOLT+'</div>';
+    setHTML(hl,'<span class="ldot"></span><span>Looking for your car</span>');
     hs.textContent='Bring the device within Bluetooth range.';
   }
+  // Only touch the DOM when the icon markup changed — otherwise the running ring
+  // animation keeps its phase and fades smoothly instead of restarting each poll.
+  if(hicHTML!==null) setHTML(hic,hicHTML);
   hs.style.display=hs.textContent?'':'none';
 
   // tiles ---------------------------------------------------------
@@ -508,16 +522,17 @@ function render(s){
     var bdbm=(ble.rssi!=null)?'<span class="dbm">'+ble.rssi+' dBm</span>':'';  // numeric reading
     var btxt=ble.addr?'<span class="nm mac">'+esc(ble.addr)+'</span>':'';
     bc.className='cv ok';
-    bc.innerHTML=bbars+bdbm+btxt;
+    setHTML(bc,bbars+bdbm+btxt);
   } else if(ble.scanning){
     // searching for the car — the signal bars sit where they do when connected, but fill up
     // green one after another (CSS .bars.search animation) instead of a spinner; it appears
-    // only while scanning and clears otherwise.
-    bc.className='cv'; bc.innerHTML=searchBarsHTML()+'<span>Searching…</span>';
+    // only while scanning and clears otherwise. setHTML keeps the bar nodes alive across
+    // polls so the fill animation runs continuously instead of restarting every 4 s.
+    bc.className='cv'; setHTML(bc,searchBarsHTML()+'<span>Searching…</span>');
   } else {
     // disconnected — still show the (faded, empty) bar glyph so the row keeps the same
     // shape as Wi-Fi rather than collapsing to text only.
-    bc.className='cv'; bc.innerHTML=barsHTML(null)+'<span class="ph">Disconnected</span>';
+    bc.className='cv'; setHTML(bc,barsHTML(null)+'<span class="ph">Disconnected</span>');
   }
 
   // MQTT — Home Assistant bridge (tap to set/change the broker)
