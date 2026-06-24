@@ -299,4 +299,11 @@ Full threat model + Flash Encryption / Secure Boot: [SECURITY.md](SECURITY.md).
 
 ## License
 
-MIT. [yoziru/tesla-ble](https://github.com/yoziru/tesla-ble) is also MIT.
+[GNU Affero General Public License v3.0](../LICENSE) (AGPL-3.0).
+
+The firmware compiles in [yoziru/tesla-ble](https://github.com/yoziru/tesla-ble), which is
+licensed under **AGPL-3.0**. Because that library is statically linked into a single firmware
+image, the resulting binary is a combined/derivative work and must be distributed under the
+AGPL-3.0 as a whole — its copyleft propagates to this project, including the §13 network-use
+clause (this device runs an HTTP API / web UI, so operators who let others interact with it
+over the network must offer them the corresponding source for that firmware version).
