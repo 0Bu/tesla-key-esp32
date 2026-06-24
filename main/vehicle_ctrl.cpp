@@ -843,28 +843,34 @@ bool VehicleController::send_infotainment_(const std::string& name, Builder buil
 // ─── Commands ─────────────────────────────────────────────────────────────────
 
 bool VehicleController::wake_up(int timeout_ms) {
-    // Tesla acknowledges a VCSEC wake with an *authenticated but empty* response
-    // (valid AES-GCM tag, no commandStatus sub-message). The tesla-ble library only
-    // completes a "Wake" command on a commandStatus, so the queued Wake exhausts its
-    // retries and reports failure even though the car actually woke. Work around it:
-    // confirm success with a VCSEC status poll instead of the wake command's result.
-    VehicleStatusResult st;
-    if (get_vehicle_status(st, 6000) && st.sleep_status == "AWAKE") {
-        return true;  // already awake
-    }
+    // "Awake" that matters here is the INFOTAINMENT computer — it serves SOC/charge/climate —
+    // NOT the always-on VCSEC body controller. A parked, reachable car answers a VCSEC status
+    // poll with sleep_status="AWAKE" even while its infotainment sleeps; that is exactly why
+    // link_state() ignores the raw VCSEC string (see its doc / CLAUDE.md). The previous code
+    // used that VCSEC "AWAKE" BOTH to short-circuit ("already awake") AND to confirm the wake,
+    // so on a nearby-sleeping car it returned success in ~0.4 s WITHOUT ever sending the wake:
+    // the car never woke and the web-UI spinner just timed out. Trust live telemetry instead.
+    if (link_state() == LinkState::Awake) return true;  // fresh infotainment data (<60 s) ⇒ awake
 
-    // Fire the wake. The car wakes on the first message, but the library keeps
-    // retrying (~7s) until it gives up; we wait that out so the command queue clears
-    // before polling (a poll queued behind the retrying Wake would never run).
+    // Fire the wake. The car wakes on the first message; the library retries ~7 s then reports
+    // failure even on success (Tesla acks a wake with an authenticated-but-empty response that
+    // carries no commandStatus for the library to complete on), so we ignore send_vcsec_'s
+    // result and confirm out-of-band below. Sending it also opens the active window
+    // (last_cmd_ticks_), so loop_task starts refreshing the charge cache as soon as the car is up.
     send_vcsec_("Wake", [](TeslaBLE::Client* c, uint8_t* b, size_t* l) {
         return c->build_vcsec_action_message(VCSEC_RKEAction_E_RKE_ACTION_WAKE_VEHICLE, b, l);
     }, TeslaBLE::WakePolicy::NO_WAKE_FAIL, 9000);
 
-    // Confirm the vehicle is now awake (this also updates the library's observed
-    // sleep-state so subsequent charge commands proceed without re-waking).
-    for (int i = 0; i < 4; i++) {
-        if (get_vehicle_status(st, 6000) && st.sleep_status == "AWAKE") return true;
-        vTaskDelay(pdMS_TO_TICKS(800));
+    // Confirm the infotainment actually woke by waiting for live charge telemetry: loop_task
+    // polls the now-open window (NO_WAKE_SKIP) and the first response stamps note_contact_,
+    // flipping link_state() to Awake. That — not VCSEC — is the honest signal, and it is the
+    // very state the web UI's wake spinner waits on, so the two agree. timeout_ms budgets a
+    // cold infotainment boot; even a false "not yet" self-heals (the window stays open, so the
+    // browser's /status poll picks up Awake moments later).
+    const TickType_t start = xTaskGetTickCount();
+    while ((xTaskGetTickCount() - start) < pdMS_TO_TICKS(timeout_ms)) {
+        vTaskDelay(pdMS_TO_TICKS(500));
+        if (link_state() == LinkState::Awake) return true;
     }
     return false;
 }
