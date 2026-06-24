@@ -78,9 +78,14 @@ code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
    percentage / glyph stays aligned regardless of the .hicon size. The bolt
    glyph lives inside .glyph and is intentionally not matched here. */
 .hicon>svg,.hicon .wakebtn>svg{width:100%; height:100%; display:block}
-.hicon svg.spin,.hicon svg.ringrot{animation:ringpulse 3.2s ease-in-out infinite}
+.hicon svg.ringrot{animation:ringpulse 3.2s ease-in-out infinite}
 @keyframes ringpulse{0%,100%{opacity:1}50%{opacity:.35}}
+/* while waking, only the (still grey) ring pulses a little faster — no colour change */
+.hicon svg.ringrot.waking{animation-duration:2s}
 .hicon .wakebtn .glyph{pointer-events:none}
+/* alarm-clock waking glyph: a gentle, continuous tremble — stays grey */
+.hicon .glyph .wecker{transform-origin:50% 50%; animation:wecker .42s ease-in-out infinite}
+@keyframes wecker{0%,100%{transform:translateY(0) rotate(-3deg)}50%{transform:translateY(-.5px) rotate(3deg)}}
 .hbody{flex:1; min-width:0}
 .hlabel{font-size:28px; font-weight:650; letter-spacing:-.4px; display:flex; align-items:center; gap:9px}
 .hlabel svg{width:22px; height:22px; fill:var(--accent); flex:none}
@@ -153,6 +158,7 @@ code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
   .hicon .pct b small{font-size:20px}
   .hicon .glyph{font-size:48px}
   .hicon .glyph svg{width:46px; height:46px}
+  .hicon .glyph svg.glyphbig{width:62px; height:62px}   /* moon / alarm sit larger in the ring than the setup bolt */
   .hlabel{font-size:33px}
   .hlabel svg{width:26px; height:26px}
   .hsub{font-size:18px}
@@ -344,11 +350,13 @@ function searchBarsHTML(){
   for(var i=0;i<4;i++) s+='<rect class="sb'+(i+1)+'" x="'+(i*5.3)+'" y="'+(13-H[i])+'" width="3.3" height="'+H[i]+'" rx="1"/>';
   return s+'</svg>';
 }
-// continuous SOC colour: red → amber → light green → dark green, interpolated
-// so the ring fades smoothly as it charges instead of jumping between bands.
+// continuous SOC colour: red → amber → light green → signal-bar green, interpolated
+// so the ring fades smoothly as it charges instead of jumping between bands. The top
+// stop is --ok (#16a34a = rgb(22,163,74)), the same green as the Wi-Fi/BLE signal bars,
+// so a full battery reads as a lighter, less-intense green rather than a dark forest green.
 function socColor(p){
   p=Math.max(0,Math.min(100,p));
-  var stops=[[0,232,33,39],[10,217,164,6],[50,101,196,102],[100,21,128,61]];
+  var stops=[[0,232,33,39],[10,217,164,6],[50,101,196,102],[100,22,163,74]];
   var a=stops[0],b=stops[stops.length-1];
   for(var i=0;i<stops.length-1;i++){ if(p>=stops[i][0] && p<=stops[i+1][0]){ a=stops[i]; b=stops[i+1]; break; } }
   var t=(p-a[0])/((b[0]-a[0])||1);
@@ -363,13 +371,6 @@ function ringSVG(pct,dim,col,sz){
     (dim?'':'<circle cx="'+c2+'" cy="'+c2+'" r="'+r+'" fill="none" stroke="'+col+'" stroke-width="'+sw+'" stroke-linecap="round" stroke-dasharray="'+circ.toFixed(1)+'" stroke-dashoffset="'+off.toFixed(1)+'" style="transition:stroke-dashoffset .6s ease"/>')+
     '</svg>';
 }
-// rotating arc spinner — shown while the car is waking up
-function ringSpinner(sz){
-  sz=sz||104; var c2=sz/2, r=c2-7, sw=8;
-  return '<svg class="spin" width="'+sz+'" height="'+sz+'" viewBox="0 0 '+sz+' '+sz+'">'+
-    '<circle cx="'+c2+'" cy="'+c2+'" r="'+r+'" fill="none" stroke="var(--accent)" stroke-width="'+sw+'"/>'+
-    '</svg>';
-}
 // charging — SOC arc in a solid colour with an even pulsing glow.
 // (A linearGradient stroke colours by geometric position, not along the arc,
 //  so on a near-full ring it shows a hard light→dark seam — avoided here.)
@@ -380,10 +381,11 @@ function ringCharge(pct,col,sz){
     '<circle cx="'+c2+'" cy="'+c2+'" r="'+r+'" fill="none" stroke="'+col+'" stroke-width="'+sw+'" stroke-linecap="round" stroke-dasharray="'+circ.toFixed(1)+'" stroke-dashoffset="'+off.toFixed(1)+'" style="transition:stroke-dashoffset .6s ease;filter:drop-shadow(0 0 3px '+col+')"/>'+
     '</svg>';
 }
-// asleep — slowly rotating grey gradient sweep
-function ringSleep(sz){
+// asleep — grey gradient ring with a slow opacity pulse. `fast` (waking) keeps the same
+// grey but pulses a little faster via the .waking class — never turns red.
+function ringSleep(sz,fast){
   sz=sz||104; var c2=sz/2, r=c2-7, sw=8;
-  return '<svg class="ringrot zzz" width="'+sz+'" height="'+sz+'" viewBox="0 0 '+sz+' '+sz+'">'+
+  return '<svg class="ringrot zzz'+(fast?' waking':'')+'" width="'+sz+'" height="'+sz+'" viewBox="0 0 '+sz+' '+sz+'">'+
     '<defs><linearGradient id="sg" x1="0" y1="0" x2="1" y2="1">'+
       '<stop offset="0%" style="stop-color:var(--muted);stop-opacity:.5"/>'+
       '<stop offset="100%" style="stop-color:var(--muted);stop-opacity:.18"/>'+
@@ -392,6 +394,10 @@ function ringSleep(sz){
     '</svg>';
 }
 var BOLT='<svg viewBox="0 0 24 24" width="38" height="38" style="fill:var(--muted);opacity:.4"><path d="M13 2 4 14h6l-1 8 9-12h-6l1-8z"/></svg>';
+// crescent moon — asleep hero glyph (grey, soft; pairs with the muted ring)
+var MOON='<svg class="glyphbig" viewBox="0 0 24 24" width="52" height="52" style="fill:var(--muted);opacity:.72"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>';
+// alarm clock — waking hero glyph (grey outline, gently trembling via .wecker)
+var ALARM='<svg class="wecker glyphbig" viewBox="0 0 24 24" width="52" height="52" fill="none" stroke="var(--muted)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="opacity:.82"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l2 2"/><path d="M5 3 2 6"/><path d="m22 6-3-3"/><path d="M6.38 18.7 4 21"/><path d="M17.64 18.67 20 21"/></svg>';
 
 /* charging detail chips under the hero label — power + current, shown only
    while the car is actively charging (both read 0 otherwise). */
@@ -465,13 +471,13 @@ function render(s){
     hst.innerHTML=chargeStats(v,charging);
   } else if(paired){
     if(waking){
-      hicHTML='<button class="wakebtn" disabled aria-label="Waking the car">'+ringSpinner()+'<span class="glyph">💤</span></button>';
+      hicHTML='<button class="wakebtn" disabled aria-label="Waking the car">'+ringSleep(104,true)+'<span class="glyph">'+ALARM+'</span></button>';
       setHTML(hl,'<span>Waking up…</span>');
       hs.textContent='Reaching your Tesla over Bluetooth…';
     } else if(s.link==='asleep'){
       // Proven reachable-but-sleeping: the always-on VCSEC health poll answered recently, so
       // "asleep" is a fact and the wake button is meaningful. Show the card.
-      hicHTML='<button class="wakebtn" onclick="wakeCar()" title="Tap to wake the car" aria-label="Wake the car">'+ringSleep()+'<span class="glyph">💤</span></button>';
+      hicHTML='<button class="wakebtn" onclick="wakeCar()" title="Tap to wake the car" aria-label="Wake the car">'+ringSleep()+'<span class="glyph">'+MOON+'</span></button>';
       setHTML(hl,'<span>Vehicle asleep</span>');
       hs.textContent='Tap the icon to wake the car.';
       // Last-known battery + how long the car has been asleep, from the retained cache —
