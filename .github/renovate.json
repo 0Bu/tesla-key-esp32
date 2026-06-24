@@ -34,6 +34,15 @@
   ],
   "packageRules": [
     {
+      "description": "Never auto-merge a tracked firmware dependency, even when CI is green. A green `build` job only proves the firmware compiles — it does NOT prove the Tesla BLE crypto/pairing/signed-command path still works (yoziru/tesla-ble), nor that WiFi/BLE coexistence and runtime behaviour survive an ESP-IDF bump, nor that the browser installer still flashes (esp-web-tools, which the build doesn't exercise at all). These are only validated by a human running the live e2e against a real paired car. Renovate still opens, rebases and rebuilds the PR; a human reviews, runs e2e, and merges manually. (GitHub Action digest bumps are unaffected and keep auto-merging.)",
+      "matchDepNames": [
+        "yoziru/tesla-ble",
+        "espressif/esp-idf",
+        "esp-web-tools"
+      ],
+      "automerge": false
+    },
+    {
       "description": "Remind to re-check yoziru/tesla-ble compatibility on every ESP-IDF update (does not block the update).",
       "matchDepNames": ["espressif/esp-idf"],
       "prBodyNotes": [
