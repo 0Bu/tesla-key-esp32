@@ -30,6 +30,7 @@ struct ChargeStateResult {
     // path). Already decoded for free in the same CarServer_ChargeState the fields above
     // come from, so parsing them adds no BLE round-trip. Presence-flagged like the rest.
     int         charger_actual_current{0}; bool has_actual_current{false};   // A delivered now
+    int         charger_voltage{0};        bool has_voltage{false};          // V at the charger
     int         charge_current_request{0}; bool has_current_request{false};  // A the car asked for
     int         charger_phases{0};         bool has_charger_phases{false};   // 1 / 2 / 3
     float       charge_energy_added{0};    bool has_energy_added{false};     // kWh this session
@@ -55,6 +56,17 @@ struct ClimateStateResult {
     bool  has_inside{false};   float inside_temp{0};      // °C
     bool  has_outside{false};  float outside_temp{0};     // °C
     bool  has_setpoint{false}; float driver_setpoint{0};  // °C
+    // Cabin Overheat Protection — a parked anti-overheat subsystem separate from
+    // the main HVAC, so is_climate_on does NOT reflect it. Short (≤15 char) label
+    // strings keep SSO so the per-poll struct copy never heap-allocs.
+    bool has_cop{false};         std::string cop;          // "Off"/"On"/"FanOnly"
+    bool has_cop_cooling{false}; bool        cop_cooling{false}; // actively cooling now
+    bool has_cop_temp{false};    std::string cop_temp;     // "Low"/"Medium"/"High"
+    bool has_cop_reason{false};  std::string cop_reason;   // why COP isn't cooling
+    // Defrost — front/rear defroster + Max-defrost mode (part of the HVAC, not COP).
+    bool has_front_defrost{false}; bool front_defrost{false};
+    bool has_rear_defrost{false};  bool rear_defrost{false};
+    bool has_defrost_mode{false};  std::string defrost_mode;  // "Off"/"Normal"/"Max"
 };
 
 struct DriveStateResult {

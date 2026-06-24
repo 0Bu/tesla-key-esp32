@@ -74,6 +74,7 @@ static const Entry ENTRIES[] = {
     { D_CHARGE,  "sensor",        "charging_state", "Charging state",      "charging_state", nullptr,     nullptr,nullptr,      nullptr,      false },
     { D_CHARGE,  "sensor",        "actual_current", "Charging current (actual)",   "actual_current", "current",  "A",   "measurement",      nullptr,      false },
     { D_CHARGE,  "sensor",        "current_request","Charging current (requested)","current_request","current",  "A",   "measurement",      nullptr,      false },
+    { D_CHARGE,  "sensor",        "charger_voltage","Charger voltage",     "volts",          "voltage",   "V",   "measurement",      nullptr,      false },
     { D_CHARGE,  "sensor",        "phases",         "Charger phases",      "phases",         nullptr,     nullptr,"measurement",       nullptr,      false },
     { D_CHARGE,  "sensor",        "energy_added",   "Energy added",        "energy_added",   "energy",    "kWh", "total_increasing",  nullptr,      false },
     { D_CHARGE,  "sensor",        "minutes_to_full","Time to full",        "minutes_to_full","duration",  "min", "measurement",       nullptr,      false },
@@ -85,6 +86,15 @@ static const Entry ENTRIES[] = {
     { D_CLIMATE, "sensor",        "setpoint",       "Climate setpoint",    "setpoint",       "temperature","°C", "measurement", nullptr,      false },
     { D_CLIMATE, "binary_sensor", "climate_on",     "Climate",             "on",             "running",   nullptr,nullptr,      nullptr,      true  },
     { D_CLIMATE, "binary_sensor", "preconditioning","Preconditioning",     "preconditioning","running",   nullptr,nullptr,      nullptr,      true  },
+    // Cabin Overheat Protection — separate from is_climate_on; runs while parked.
+    { D_CLIMATE, "binary_sensor", "cop_cooling",    "Overheat protection cooling","cop_cooling","running",nullptr,nullptr,      nullptr,      true  },
+    { D_CLIMATE, "sensor",        "cop",            "Overheat protection", "cop",            nullptr,     nullptr,nullptr,      "diagnostic", false },
+    { D_CLIMATE, "sensor",        "cop_temp",       "Overheat threshold",  "cop_temp",       nullptr,     nullptr,nullptr,      "diagnostic", false },
+    { D_CLIMATE, "sensor",        "cop_reason",     "Overheat protection reason","cop_reason",nullptr,    nullptr,nullptr,      "diagnostic", false },
+    // Defrost — front/rear defroster + Max-defrost mode.
+    { D_CLIMATE, "binary_sensor", "front_defrost",  "Front defroster",     "front_defrost",  "running",   nullptr,nullptr,      nullptr,      true  },
+    { D_CLIMATE, "binary_sensor", "rear_defrost",   "Rear defroster",      "rear_defrost",   "running",   nullptr,nullptr,      nullptr,      true  },
+    { D_CLIMATE, "sensor",        "defrost_mode",   "Defrost mode",        "defrost_mode",   nullptr,     nullptr,nullptr,      "diagnostic", false },
 
     // ── Drive (drive_state cache) ────────────────────────────────────────────
     { D_DRIVE,   "sensor",        "shift_state",    "Shift state",         "shift",          nullptr,     nullptr,nullptr,      nullptr,      false },
@@ -220,6 +230,7 @@ static void publish_state() {
             // Extended charge telemetry (read-only enrichment for HA; currents in A, energy in
             // kWh, time in minutes — all native units, no imperial conversion needed).
             if (cs.has_actual_current)   cJSON_AddNumberToObject(o, "actual_current",  cs.charger_actual_current);
+            if (cs.has_voltage)          cJSON_AddNumberToObject(o, "volts",           cs.charger_voltage);
             if (cs.has_current_request)  cJSON_AddNumberToObject(o, "current_request", cs.charge_current_request);
             if (cs.has_charger_phases)   cJSON_AddNumberToObject(o, "phases",          cs.charger_phases);
             if (cs.has_energy_added)     cJSON_AddNumberToObject(o, "energy_added",     cs.charge_energy_added);
@@ -239,6 +250,13 @@ static void publish_state() {
             if (cl.has_setpoint) cJSON_AddNumberToObject(o, "setpoint", cl.driver_setpoint);
             cJSON_AddBoolToObject(o, "on",             cl.is_climate_on);
             cJSON_AddBoolToObject(o, "preconditioning", cl.is_preconditioning);
+            if (cl.has_cop)         cJSON_AddStringToObject(o, "cop",         cl.cop.c_str());
+            if (cl.has_cop_cooling) cJSON_AddBoolToObject(o,   "cop_cooling", cl.cop_cooling);
+            if (cl.has_cop_temp)    cJSON_AddStringToObject(o, "cop_temp",    cl.cop_temp.c_str());
+            if (cl.has_cop_reason)  cJSON_AddStringToObject(o, "cop_reason",  cl.cop_reason.c_str());
+            if (cl.has_front_defrost) cJSON_AddBoolToObject(o,   "front_defrost", cl.front_defrost);
+            if (cl.has_rear_defrost)  cJSON_AddBoolToObject(o,   "rear_defrost",  cl.rear_defrost);
+            if (cl.has_defrost_mode)  cJSON_AddStringToObject(o, "defrost_mode",  cl.defrost_mode.c_str());
             pub_json(s_topic[D_CLIMATE], o);
         }
     }

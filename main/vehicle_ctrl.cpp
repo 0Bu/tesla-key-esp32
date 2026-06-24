@@ -65,6 +65,9 @@ void parse_charge_state(const CarServer_ChargeState& cs, ChargeStateResult& out)
         out.charger_actual_current = cs.optional_charger_actual_current.charger_actual_current;
         out.has_actual_current = true;
     }
+    if (cs.which_optional_charger_voltage == CarServer_ChargeState_charger_voltage_tag) {
+        out.charger_voltage = cs.optional_charger_voltage.charger_voltage; out.has_voltage = true;
+    }
     if (cs.which_optional_charge_current_request == CarServer_ChargeState_charge_current_request_tag) {
         out.charge_current_request = cs.optional_charge_current_request.charge_current_request;
         out.has_current_request = true;
@@ -124,6 +127,63 @@ void parse_climate_state(const CarServer_ClimateState& cs, ClimateStateResult& o
         out.is_climate_on = cs.optional_is_climate_on.is_climate_on;
     if (cs.which_optional_is_preconditioning == CarServer_ClimateState_is_preconditioning_tag)
         out.is_preconditioning = cs.optional_is_preconditioning.is_preconditioning;
+
+    // Cabin Overheat Protection — separate from the main HVAC (see ClimateStateResult).
+    if (cs.which_optional_cabin_overheat_protection == CarServer_ClimateState_cabin_overheat_protection_tag) {
+        out.has_cop = true;
+        switch (cs.optional_cabin_overheat_protection.cabin_overheat_protection) {
+            case CarServer_ClimateState_CabinOverheatProtection_E_CabinOverheatProtectionOff:     out.cop = "Off";     break;
+            case CarServer_ClimateState_CabinOverheatProtection_E_CabinOverheatProtectionOn:      out.cop = "On";      break;
+            case CarServer_ClimateState_CabinOverheatProtection_E_CabinOverheatProtectionFanOnly: out.cop = "FanOnly"; break;
+            default:                                                                              out.cop = "Unknown"; break;
+        }
+    }
+    if (cs.which_optional_cabin_overheat_protection_actively_cooling ==
+        CarServer_ClimateState_cabin_overheat_protection_actively_cooling_tag) {
+        out.has_cop_cooling = true;
+        out.cop_cooling = cs.optional_cabin_overheat_protection_actively_cooling.cabin_overheat_protection_actively_cooling;
+    }
+    if (cs.which_optional_cop_activation_temperature == CarServer_ClimateState_cop_activation_temperature_tag) {
+        out.has_cop_temp = true;
+        switch (cs.optional_cop_activation_temperature.cop_activation_temperature) {
+            case CarServer_ClimateState_CopActivationTemp_CopActivationTempLow:    out.cop_temp = "Low";         break;
+            case CarServer_ClimateState_CopActivationTemp_CopActivationTempMedium: out.cop_temp = "Medium";      break;
+            case CarServer_ClimateState_CopActivationTemp_CopActivationTempHigh:   out.cop_temp = "High";        break;
+            default:                                                               out.cop_temp = "Unspecified"; break;
+        }
+    }
+    if (cs.which_optional_cop_not_running_reason == CarServer_ClimateState_cop_not_running_reason_tag) {
+        out.has_cop_reason = true;
+        switch (cs.optional_cop_not_running_reason.cop_not_running_reason) {
+            case CarServer_ClimateState_COPNotRunningReason_COPNotRunningReasonNoReason:                 out.cop_reason = "None";           break;
+            case CarServer_ClimateState_COPNotRunningReason_COPNotRunningReasonUserInteraction:          out.cop_reason = "UserInteract";   break;
+            case CarServer_ClimateState_COPNotRunningReason_COPNotRunningReasonEnergyConsumptionReached: out.cop_reason = "EnergyReached";  break;
+            case CarServer_ClimateState_COPNotRunningReason_COPNotRunningReasonTimeout:                  out.cop_reason = "Timeout";        break;
+            case CarServer_ClimateState_COPNotRunningReason_COPNotRunningReasonLowSolarLoad:             out.cop_reason = "LowSolarLoad";   break;
+            case CarServer_ClimateState_COPNotRunningReason_COPNotRunningReasonFault:                    out.cop_reason = "Fault";          break;
+            case CarServer_ClimateState_COPNotRunningReason_COPNotRunningReasonCabinBelowThreshold:      out.cop_reason = "BelowThreshold"; break;
+            default:                                                                                     out.cop_reason = "Unknown";        break;
+        }
+    }
+
+    // Defrost — front/rear defroster booleans + the Max-defrost mode (Off/Normal/Max).
+    if (cs.which_optional_is_front_defroster_on == CarServer_ClimateState_is_front_defroster_on_tag) {
+        out.has_front_defrost = true;
+        out.front_defrost = cs.optional_is_front_defroster_on.is_front_defroster_on;
+    }
+    if (cs.which_optional_is_rear_defroster_on == CarServer_ClimateState_is_rear_defroster_on_tag) {
+        out.has_rear_defrost = true;
+        out.rear_defrost = cs.optional_is_rear_defroster_on.is_rear_defroster_on;
+    }
+    if (cs.has_defrost_mode) {
+        out.has_defrost_mode = true;
+        switch (cs.defrost_mode.which_type) {
+            case CarServer_ClimateState_DefrostMode_Off_tag:    out.defrost_mode = "Off";    break;
+            case CarServer_ClimateState_DefrostMode_Normal_tag: out.defrost_mode = "Normal"; break;
+            case CarServer_ClimateState_DefrostMode_Max_tag:    out.defrost_mode = "Max";    break;
+            default:                                            out.defrost_mode = "";       break;
+        }
+    }
 }
 
 void parse_drive_state(const CarServer_DriveState& ds, DriveStateResult& out) {
