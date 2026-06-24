@@ -513,6 +513,16 @@ static esp_err_t handle_status(httpd_req_t* req) {
             if (cl.has_setpoint) cJSON_AddNumberToObject(o, "setpoint", cl.driver_setpoint);
             cJSON_AddBoolToObject(o, "on",            cl.is_climate_on);
             cJSON_AddBoolToObject(o, "preconditioning", cl.is_preconditioning);
+            // Cabin Overheat Protection (separate subsystem; emitted only when the
+            // car actually reported each field, so an absent one means "not sent").
+            if (cl.has_cop)         cJSON_AddStringToObject(o, "cop",         cl.cop.c_str());
+            if (cl.has_cop_cooling) cJSON_AddBoolToObject(o,   "cop_cooling", cl.cop_cooling);
+            if (cl.has_cop_temp)    cJSON_AddStringToObject(o, "cop_temp",    cl.cop_temp.c_str());
+            if (cl.has_cop_reason)  cJSON_AddStringToObject(o, "cop_reason",  cl.cop_reason.c_str());
+            // Defrost (front/rear defroster + Max-defrost mode), emitted only when reported.
+            if (cl.has_front_defrost) cJSON_AddBoolToObject(o,   "front_defrost", cl.front_defrost);
+            if (cl.has_rear_defrost)  cJSON_AddBoolToObject(o,   "rear_defrost",  cl.rear_defrost);
+            if (cl.has_defrost_mode)  cJSON_AddStringToObject(o, "defrost_mode",  cl.defrost_mode.c_str());
             cJSON_AddItemToObject(tele, "climate", o);
         }
         DriveStateResult dr = g_vehicle->get_cached_drive();
@@ -595,6 +605,13 @@ static esp_err_t handle_status(httpd_req_t* req) {
                 cJSON_AddNumberToObject(veh, "power",  (int)(cs.charger_power + 0.5f));
             if (cs.has_charging_amps)
                 cJSON_AddNumberToObject(veh, "amps",   cs.charging_amps);
+            // Actual AC draw (current × voltage) — distinct from charger_power (DC to the
+            // battery, 0 when "Complete"). Lets us see what the car pulls from the wall while
+            // e.g. cabin-overheat-protection runs with a full battery. Emitted only if reported.
+            if (cs.has_actual_current)
+                cJSON_AddNumberToObject(veh, "actual_amps", cs.charger_actual_current);
+            if (cs.has_voltage)
+                cJSON_AddNumberToObject(veh, "volts", cs.charger_voltage);
             cJSON_AddItemToObject(root, "vehicle", veh);
         }
     }
