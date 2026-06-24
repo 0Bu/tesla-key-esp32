@@ -87,7 +87,6 @@ code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
 @keyframes wecker{0%,100%{transform:translateY(0) rotate(-3deg)}50%{transform:translateY(-.5px) rotate(3deg)}}
 .hbody{flex:1; min-width:0}
 .hlabel{font-size:28px; font-weight:650; letter-spacing:-.4px; display:flex; align-items:center; gap:9px}
-.hlabel svg{width:22px; height:22px; fill:var(--accent); flex:none}
 .hsub{font-size:16px; color:var(--muted); margin-top:6px; line-height:1.45}
 .hstats{display:flex; flex-wrap:wrap; gap:7px; margin-top:12px}  /* chips are content-sized; equalizeChips() then sets them all to the widest one's width */
 .hstats:empty{display:none}
@@ -398,6 +397,8 @@ var BOLT='<svg viewBox="0 0 24 24" width="38" height="38" style="fill:var(--mute
 var MOON='<svg class="glyphbig" viewBox="0 0 24 24" width="52" height="52" style="fill:var(--muted);opacity:.72"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>';
 // alarm clock — waking hero glyph (grey outline, gently trembling via .wecker)
 var ALARM='<svg class="wecker glyphbig" viewBox="0 0 24 24" width="52" height="52" fill="none" stroke="var(--muted)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="opacity:.82"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l2 2"/><path d="M5 3 2 6"/><path d="m22 6-3-3"/><path d="M6.38 18.7 4 21"/><path d="M17.64 18.67 20 21"/></svg>';
+// charge complete — green check shown in the hero label when the battery has reached its
+// target (SOC >= charge limit). Inline fill overrides the label's default red (--accent).
 
 /* charging detail chips under the hero label — power + current, shown only
    while the car is actively charging (both read 0 otherwise). */
@@ -421,12 +422,6 @@ function climateChip(s){
   if(!c||!(c.on||c.preconditioning)) return '';
   return stat('Climate', (c.preconditioning&&!c.on)?'Precond.':'On', '', true);
 }
-/* cabin-overheat-protection chip — an amber icon glyph (front car + heat waves)
-   shown next to the Battery/Idle chips, incl. on the "asleep" card (COP runs while
-   the car is parked). Separate from is_climate_on, which never reflects COP. Reads
-   the retained tele.climate cache so it persists into the asleep view.
-   Trigger: only while COP is actively cooling (cop_cooling) — i.e. when it is doing
-   work / drawing power; a merely-armed COP setting is not shown. */
 /* Live AC draw the car pulls from the wall = actual_current × charger_voltage, in kW (one
    decimal, trailing ".0" dropped → "1 kW" not "1.0 kW"). charger_power is the battery DC
    charge power (0 when "Complete") so it is NOT used. "—" when the car didn't report the
@@ -464,6 +459,12 @@ function equalizeChips(box){
   for(i=0;i<ch.length;i++) ch[i].style.width='';
   for(i=0;i<ch.length;i++) w=Math.max(w, ch[i].offsetWidth);
   for(i=0;i<ch.length;i++) ch[i].style.width=w+'px';
+}
+// battery at/above its target and not charging → starting a charge is a no-op the car only
+// rejects as "complete". charge_limit is emitted by /status only when the car reported it, so
+// an unknown limit (field absent) leaves the start button live rather than blocking on a guess.
+function chargeComplete(v,charging){
+  return !charging && !!v && v.charge_limit!=null && (v.soc!=null?v.soc:0)>=v.charge_limit;
 }
 // Compact "time ago" for the asleep card (seconds → "<1 min" / "5 min" / "2 h" / "3 d").
 function fmtAgo(sec){
@@ -516,10 +517,13 @@ function render(s){
   if(paired&&v){
     if(waking){ waking=false; clearTimeout(wakeTimeout); }   // car is awake & reporting — stop the spinner
     var soc=v.soc!=null?v.soc:0, col=socColor(soc);
+    // "Charge complete" = battery reached its target and not charging; the start tap is gated
+    // (the car would only reject a charge_start here as "complete"). See chargeComplete().
+    var complete=chargeComplete(v,charging);
     var ringHTML=charging?ringCharge(soc,col):ringSVG(soc,false,col);   // spin while charging, static when complete
-    var ctitle=charging?'Tap to stop charging':'Tap to start charging';
-    hicHTML='<button class="wakebtn" onclick="toggleCharge()" title="'+ctitle+'" aria-label="'+ctitle+'"'+(chgBusy?' disabled':'')+'>'+ringHTML+'<div class="pct"><b style="color:'+col+'">'+soc+'<small>%</small></b></div></button>';
-    setHTML(hl,'<span>'+esc(v.status||'Idle')+'</span>');
+    var ctitle=charging?'Tap to stop charging':(complete?'Battery full — already charged':'Tap to start charging');
+    hicHTML='<button class="wakebtn" onclick="toggleCharge()" title="'+ctitle+'" aria-label="'+ctitle+'"'+((chgBusy||complete)?' disabled':'')+'>'+ringHTML+'<div class="pct"><b style="color:'+col+'">'+soc+'<small>%</small></b></div></button>';
+    setHTML(hl,'<span>'+(complete?'Charge complete':esc(v.status||'Idle'))+'</span>');
     hs.textContent='';
     hst.innerHTML=chargeStats(v,charging)+climateChip(s)+copChip(s)+defrostChip(s);
   } else if(paired){
@@ -623,6 +627,9 @@ function toggleCharge(){
   if(chgBusy) return;
   var vin=state&&state.vin; if(!vin||vin==='UNKNOWN'){ toast('No VIN configured','err'); return; }
   var v=state&&state.vehicle, isCharging=!!(v&&/charg/i.test(v.status||''));
+  // belt-and-suspenders: the start button is already disabled when complete, but never fire a
+  // pointless charge_start at/above the charge limit even if this is reached another way.
+  if(chargeComplete(v,isCharging)){ toast('Battery is already fully charged','info'); return; }
   var cmd=isCharging?'charge_stop':'charge_start';
   chgBusy=true; if(state)render(state);
   toast(isCharging?'Stopping charge…':'Starting charge…','info');
