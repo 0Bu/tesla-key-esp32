@@ -219,6 +219,17 @@ so no stale data is shown (`clear_session_and_cache_()` in `vehicle_ctrl.cpp`):
 
 After any of these `has_session()` is false → UI shows "not paired", hides controls/SOC.
 
+**A configured VIN gates pairing entirely.** The device targets the car by its VIN-derived
+BLE name (`S<hex>C`), so `auto_pair_task` first checks `has_plausible_vin()` (17-char VIN;
+`VehicleController::vin_is_plausible`, the same validator the web UI / `POST /set_vin` use).
+With no VIN it logs once (`auto-pair: no VIN configured — pairing disabled`) and idles — it
+does **not** spin connect attempts, and `set_target_vin` is given an empty target so the
+scanner lists nearby Teslas (`/scan`) but never connects or enrols on one. This is the *design*
+that stops the device whitelisting its Charging-Manager key onto an arbitrary nearby Tesla — it
+no longer depends on the `"UNKNOWN"` placeholder hashing to a name that happens never to
+collide (the placeholder is kept out of the matching path). The web UI already shows "Add the
+vehicle VIN below to begin." when no VIN is set, so it never implies pairing without one.
+
 ## Important Notes
 
 - Private key stored in NVS unencrypted — secure physical access to the device

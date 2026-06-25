@@ -85,11 +85,16 @@ WiFi, VIN, private key and BLE sessions live in the `nvs` partition (`0x9000`, n
 ## Pairing
 
 Mostly automatic, with one manual step at the car. On first boot the device generates an
-ECDSA P-256 key (stored in NVS, never leaves the device). While unpaired and the car is in BLE
-range, the auto-pair task probes the car and sends a whitelist-add. The car only shows the
-pairing dialog on the **touchscreen** while a Tesla NFC keycard is resting on the
-center-console card reader — place a card there, then confirm on screen within ~45 s. No Pair
-button in the web UI, but the NFC card is required to authorise the enrolment.
+ECDSA P-256 key (stored in NVS, never leaves the device). **A VIN must be configured first** —
+the device targets your car by its VIN-derived BLE name, so without a VIN the auto-pair task
+stays idle (it logs `no VIN configured — pairing disabled` and does **not** connect or enrol;
+this is by design, so it can never whitelist a key onto an arbitrary nearby Tesla). Nearby
+Teslas are still listed by `/scan`. Set the VIN via the setup AP or `POST /set_vin`. Once a
+plausible 17-char VIN is set, while unpaired and the car is in BLE range, the auto-pair task
+probes the car and sends a whitelist-add. The car only shows the pairing dialog on the
+**touchscreen** while a Tesla NFC keycard is resting on the center-console card reader — place
+a card there, then confirm on screen within ~45 s. No Pair button in the web UI, but the NFC
+card is required to authorise the enrolment.
 
 - Key fingerprint = `SHA-1(pubkey)[:4]` (e.g. `0E:8A:1D:BE`); shown in the web UI.
 - Regenerate: tap the fingerprint in the UI, or `POST /gen_keys?force=1`. Without `force`,
@@ -264,10 +269,12 @@ Log: `scanning for Tesla BLE...` → `Tesla '<name>' found: … — connecting`.
 **Command times out** (`'charge_start' timed out`) — car in deep sleep; `wake_up` first,
 wait 5 s, retry. Stale session: `esptool --chip <target> -p <port> erase_flash`.
 
-**No pairing prompt** — a Tesla NFC keycard must be on the center-console reader for the
-dialog to appear; car awake + in range; `key_present: true` in `/status` (else
-`/gen_keys?force=1`); watch for `auto-pair: requesting key enrolment` in `/diag`; confirm on
-touchscreen within ~45 s, or `POST /send_key` to retrigger.
+**No pairing prompt** — a VIN must be configured (else `/diag` shows `auto-pair: no VIN
+configured — pairing disabled` and the device never connects; set it via the setup AP or
+`POST /set_vin`); a Tesla NFC keycard must be on the center-console reader for the dialog to
+appear; car awake + in range; `key_present: true` in `/status` (else `/gen_keys?force=1`);
+watch for `auto-pair: requesting key enrolment` in `/diag`; confirm on touchscreen within
+~45 s, or `POST /send_key` to retrigger.
 
 **Key rejected** — Tesla app → Security → Keys → delete *"Unknown key"*;
 `esptool --chip <target> -p <port> erase_flash`; let it re-pair (confirm on screen).
