@@ -109,8 +109,10 @@ No HTTP auth / TLS by design (evcc cannot send credentials) — trusted LAN only
 Pull-based: the device fetches `manifest.json` from a fixed HTTPS URL
 (`CONFIG_TESLA_OTA_MANIFEST_URL`, default GitHub Pages), compares its `version` to the
 running firmware, and on confirmation downloads ITS per-target app image
-(`CONFIG_TESLA_OTA_FIRMWARE_BASE_URL` + `tesla-key-esp32-<target>.bin`, target =
-`CONFIG_IDF_TARGET`) via `esp_https_ota` into the inactive OTA slot, then reboots.
+(`CONFIG_TESLA_OTA_FIRMWARE_BASE_URL` + `tesla-key-esp32<suffix>.bin`, where `<suffix>` is
+the chip's short tag so "esp32" appears once — `""`/`-s3`/`-c3`/`-c6` for
+esp32/esp32s3/esp32c3/esp32c6, picked at compile time by `TESLA_OTA_IMG_SUFFIX` from
+`CONFIG_IDF_TARGET_*`) via `esp_https_ota` into the inactive OTA slot, then reboots.
 `esp_https_ota` verifies the image chip-id, so a wrong-target image is refused (never
 flashed); one manifest `version` covers all targets (CI builds them from one commit).
 Triggered from the web UI by tapping the firmware version in the top meta line.
@@ -133,7 +135,8 @@ tesla-ble's `targets:`). The build deltas are config-only: target set per build
 auto-falls-back to UART0 (no per-target sdkconfig needed). The web installer is a single
 page whose `manifest.json` carries one build per chipFamily (esp-web-tools auto-selects by
 detected chip); OTA is a single channel where each device pulls its own
-`tesla-key-esp32-<target>.bin`. The per-target bootloader offset (0x1000 on the classic
+`tesla-key-esp32<suffix>.bin` (`tesla-key-esp32.bin` for the classic esp32, `-s3`/`-c3`/`-c6`
+otherwise). The per-target bootloader offset (0x1000 on the classic
 esp32, 0x0 elsewhere) is handled automatically by `@flash_args` and the manifest.
 
 ## evcc Integration

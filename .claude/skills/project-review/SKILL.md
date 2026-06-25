@@ -100,7 +100,9 @@ Treat a violation of any of these as a real finding.
   (`0x1f0000`), **4 MB** flash (smallest supported part; a larger flash leaves the top
   unused). NVS is never in the flashed set, so pairing/key/VIN survive OTA. One source tree
   builds for esp32 / esp32s3 / esp32c3 / esp32c6 (the tesla-ble targets); each device pulls
-  its own `tesla-key-esp32-<target>.bin` and the web installer auto-selects by chipFamily.
+  its own `tesla-key-esp32<suffix>.bin` (`""`/`-s3`/`-c3`/`-c6`, so "esp32" appears once —
+  must match across `ota_update.cpp`, `ci-build-all.sh`, `build-pages.sh`) and the web
+  installer auto-selects by chipFamily.
 - Rollback is enabled — `main.cpp` must call `esp_ota_mark_app_valid_cancel_rollback()` after
   a healthy boot, **else a crash within the verify window rolls back to the old slot.**
 - `version.txt` is the committed **version floor**; CI (`scripts/next-version.sh`, see
