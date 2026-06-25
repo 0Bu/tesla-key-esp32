@@ -1,14 +1,17 @@
 # tesla-key-esp32 — Technical Reference
 
-ESP32-S3 BLE↔HTTP proxy for Tesla vehicles. Exposes a REST API on the LAN, API-compatible
-with [TeslaBleHttpProxy](https://github.com/wimaha/TeslaBleHttpProxy); drop-in for the
+ESP32 BLE↔HTTP proxy for Tesla vehicles (runs on esp32 / esp32s3 / esp32c3 / esp32c6).
+Exposes a REST API on the LAN, API-compatible with
+[TeslaBleHttpProxy](https://github.com/wimaha/TeslaBleHttpProxy); drop-in for the
 [evcc](https://evcc.io) `tesla-ble` integration. User guide: [../README.md](../README.md).
 
 ## Hardware
 
-ESP32-S3 (BLE 5.0), ≥ 8 MB flash (dual-OTA layout: two 3 MB app slots). No PSRAM
-required. ESP32 / S2 / C3 not supported.
-USB data cable for flashing.
+Any of the four chips yoziru/tesla-ble supports — **esp32, esp32s3, esp32c3, esp32c6**
+(all WiFi 2.4 GHz + BLE; the ESP-IDF Component Manager refuses any other target). **≥ 4 MB
+flash** (dual-OTA layout: two ~2 MB app slots; a larger flash just leaves the top unused). No
+PSRAM required. ESP32-S2 (no Bluetooth) and ESP32-H2 / P4 (no WiFi) cannot run this firmware;
+ESP32-C5 / C61 work only once tesla-ble declares them. USB data cable for flashing.
 
 ## Flash prebuilt artifacts
 
@@ -17,12 +20,15 @@ GitHub Pages (ESP Web Tools / Web Serial), rebuilt and deployed automatically by
 firmware change; each change also publishes a
 [GitHub release](https://github.com/0Bu/tesla-key-esp32/releases/latest) with the same bins.
 
-Flash by hand (preserves `nvs`; needs `brew install esptool`):
+Flash by hand (needs `brew install esptool`). Use the per-target **merged** image — it bakes
+in the correct bootloader offset (0x1000 on the classic esp32, 0x0 elsewhere), so one command
+works for any chip. This erases `nvs` (re-enter WiFi/VIN, re-pair once):
 ```bash
-esptool --chip esp32s3 write_flash 0x0 bootloader.bin 0x8000 partition-table.bin \
-  0x20000 tesla-key-esp32-<version>.bin
+esptool --chip <esp32|esp32s3|esp32c3|esp32c6> write_flash 0x0 \
+  tesla-key-esp32-<target>-<version>-merged.bin
 ```
-Clean full flash (erases `nvs`): write `tesla-key-esp32-<version>-merged.bin` at `0x0`.
+To preserve `nvs`, flash the separate parts from a local `build/` instead:
+`cd build && esptool --chip <target> write_flash "@flash_args"`.
 
 ## Build from source
 
@@ -36,14 +42,15 @@ brew install esptool                                          # host flasher (on
 git clone https://github.com/0Bu/tesla-key-esp32.git && cd tesla-key-esp32
 
 # Build via the CI-pinned ESP-IDF image (first run pulls it, then fetches
-# yoziru/tesla-ble — 2–4 min). The wrapper keeps build/ host-owned.
-./scripts/idf-docker.sh idf.py set-target esp32s3 build
+# yoziru/tesla-ble — 2–4 min). The wrapper keeps build/ host-owned. Pick your chip:
+./scripts/idf-docker.sh idf.py set-target esp32s3 build   # or esp32 / esp32c3 / esp32c6
 
 # Optional: WiFi SSID/pass + VIN (BLE MAC auto) — interactive
 ./scripts/idf-docker.sh idf.py menuconfig
 
-# Flash from the host (preserves nvs — @flash_args skips nvs@0x9000)
-cd build && esptool --chip esp32s3 -p <port> write_flash "@flash_args"
+# Flash from the host (preserves nvs — @flash_args skips nvs@0x9000). Use the same
+# --chip you built for; @flash_args already has the right bootloader offset.
+cd build && esptool --chip esp32s3 -p <port> write_flash "@flash_args"   # or esp32 / esp32c3 / esp32c6
 ```
 
 WiFi/VIN may be left blank and set later via the setup AP. Flash-mode fallback: hold `BOOT`,
@@ -184,7 +191,7 @@ GET  /ota/check[?ms=<epoch>]   Start a background update check (then poll /ota/s
 POST /ota/update           Start the background self-update (downloads, then reboots)
 GET  /ota/status           Poll OTA progress { state, progress, message, available,
                              update_available, current }
-GET  /api/proxy/1/version  { version, platform } (firmware version + "ESP32-S3")
+GET  /api/proxy/1/version  { version, platform } (firmware version + running chip: "ESP32"/"ESP32-S3"/"ESP32-C3"/"ESP32-C6")
 ```
 
 ## evcc Integration
@@ -260,7 +267,7 @@ the last-known retained values until the next active window.
 Log: `scanning for Tesla BLE...` → `Tesla '<name>' found: … — connecting`.
 
 **Command times out** (`'charge_start' timed out`) — car in deep sleep; `wake_up` first,
-wait 5 s, retry. Stale session: `esptool --chip esp32s3 -p <port> erase_flash`.
+wait 5 s, retry. Stale session: `esptool --chip <target> -p <port> erase_flash`.
 
 **No pairing prompt** — a VIN must be configured (else `/diag` shows `auto-pair: no VIN
 configured — pairing disabled` and the device never connects; set it via the setup AP or
@@ -270,7 +277,7 @@ watch for `auto-pair: requesting key enrolment` in `/diag`; confirm on touchscre
 ~45 s, or `POST /send_key` to retrigger.
 
 **Key rejected** — Tesla app → Security → Keys → delete *"Unknown key"*;
-`esptool --chip esp32s3 -p <port> erase_flash`; let it re-pair (confirm on screen).
+`esptool --chip <target> -p <port> erase_flash`; let it re-pair (confirm on screen).
 
 **Serial permission denied (Linux)** — `sudo usermod -aG dialout $USER && newgrp dialout`.
 
