@@ -1,10 +1,16 @@
 # Name,    Type, SubType, Offset,   Size,     Flags
-# Dual-OTA layout (8 MB flash). The app is ~1.25 MB; each OTA slot is 3 MB with
-# ample headroom. esp_https_ota writes the INACTIVE slot, so OTA updates never
-# touch nvs (0x9000) → WiFi / VIN / key survive upgrades. otadata tracks the
-# active slot; a blank otadata (after a full erase) boots ota_0.
+# Dual-OTA layout sized to fill 4 MB flash exactly — 4 MB is the smallest part across
+# the supported targets (esp32 / esp32s3 / esp32c3 / esp32c6), so it sizes the table.
+# Each OTA slot is 0x1f0000 (~2.03 MB); the app ranges ~1.5 MB (esp32) to ~1.83 MB
+# (esp32c6, the largest — c6 pulls in extra radio stack), so even the biggest target
+# keeps ~190 KB headroom. A larger flash (e.g. 8 MB S3) just leaves the top unused, so
+# ONE table serves every board. esp_https_ota writes the INACTIVE slot, so OTA updates
+# never touch nvs (0x9000) → WiFi / VIN / key survive upgrades. otadata tracks the active
+# slot; a blank otadata (after a full erase) boots ota_0. ota_0 stays at 0x20000 so a
+# device already on the old 8 MB table keeps OTA-updating without a reflash (the INSTALLED
+# table governs OTA writes; new full-flashes get this 4 MB table).
 nvs,       data, nvs,     0x9000,   0x6000,
 otadata,   data, ota,     0xf000,   0x2000,
 phy_init,  data, phy,     0x11000,  0x1000,
-ota_0,     app,  ota_0,   0x20000,  0x300000,
-ota_1,     app,  ota_1,   0x320000, 0x300000,
+ota_0,     app,  ota_0,   0x20000,  0x1f0000,
+ota_1,     app,  ota_1,   0x210000, 0x1f0000,

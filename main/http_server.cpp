@@ -2,6 +2,7 @@
 #include "diag_log.hpp"
 #include "ota_update.hpp"
 #include "mqtt_ha.hpp"
+#include "platform.hpp"
 #include <esp_http_server.h>
 #include <esp_log.h>
 #include <esp_netif.h>
@@ -343,7 +344,7 @@ static esp_err_t handle_send_key(httpd_req_t* req) {
 static esp_err_t handle_version(httpd_req_t* req) {
     cJSON* root = cJSON_CreateObject();
     cJSON_AddStringToObject(root, "version", fw_version());
-    cJSON_AddStringToObject(root, "platform", "ESP32-S3");
+    cJSON_AddStringToObject(root, "platform", TK_PLATFORM);
     return send_json(req, 200, root);
 }
 

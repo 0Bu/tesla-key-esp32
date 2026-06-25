@@ -1,7 +1,11 @@
 # tesla-key-esp32
 
-ESP-IDF 5.x project for ESP32-S3. Acts as a BLE↔HTTP proxy for Tesla vehicles,
-API-compatible with TeslaBleHttpProxy (works as evcc BLE vehicle integration).
+ESP-IDF 5.x project for the ESP32 family. Acts as a BLE↔HTTP proxy for Tesla vehicles,
+API-compatible with TeslaBleHttpProxy (works as evcc BLE vehicle integration). Builds for
+the four targets yoziru/tesla-ble supports — **esp32, esp32s3, esp32c3, esp32c6** — from
+ONE source tree; CI builds all four. The supported set is bounded by tesla-ble's
+`idf_component.yml` `targets:` (the Component Manager refuses any other chip), not by our
+code, which is target-agnostic.
 
 ## Build & Flash
 
@@ -14,13 +18,15 @@ Docker image **pinned to the version CI builds with** (read at runtime from
 ```bash
 # Build (first run: set-target; afterwards plain `build` stays incremental).
 # The wrapper keeps build/ host-owned and pins the ESP-IDF version to CI.
-scripts/idf-docker.sh idf.py set-target esp32s3 build
+# Pick your chip; CI builds all four via scripts/ci-build-all.sh.
+scripts/idf-docker.sh idf.py set-target esp32s3 build   # or esp32 / esp32c3 / esp32c6
 
 # Configure WiFi, VIN (interactive; can also be set later via the setup AP)
 scripts/idf-docker.sh idf.py menuconfig   # → Tesla Key Configuration
 
-# Flash from the host (preserves nvs — @flash_args skips nvs@0x9000)
-cd build && esptool --chip esp32s3 -p <port> write_flash "@flash_args"
+# Flash from the host (preserves nvs — @flash_args skips nvs@0x9000). Match --chip to
+# the target you built; @flash_args already carries the right bootloader offset.
+cd build && esptool --chip esp32s3 -p <port> write_flash "@flash_args"   # or esp32 / esp32c3 / esp32c6
 ```
 
 ## Architecture
@@ -90,7 +96,7 @@ POST /send_key                                 # pair with vehicle (Charging Man
 POST /set_time                                 # set wall clock from the browser ({"ms":<epoch>}); fallback when NTP unreachable
 POST /set_vin                                  # persist VIN + reboot
 POST /set_mqtt                                 # persist MQTT broker (HA bridge) + reboot ({"broker":"host:port"}; "" disables)
-GET  /api/proxy/1/version                      # {version, platform:"ESP32-S3"}
+GET  /api/proxy/1/version                      # {version, platform: running chip — "ESP32"/"ESP32-S3"/"ESP32-C3"/"ESP32-C6"}
 GET  /ota/check[?ms=<epoch>]                   # start background manifest check (non-blocking); poll /ota/status. ms = browser-clock NTP fallback
 POST /ota/update                               # start background self-update (pull, then reboot)
 GET  /ota/status                               # poll OTA progress {state,progress,message,available,update_available,current}
@@ -102,23 +108,33 @@ No HTTP auth / TLS by design (evcc cannot send credentials) — trusted LAN only
 
 Pull-based: the device fetches `manifest.json` from a fixed HTTPS URL
 (`CONFIG_TESLA_OTA_MANIFEST_URL`, default GitHub Pages), compares its `version` to the
-running firmware, and on confirmation downloads the app image
-(`CONFIG_TESLA_OTA_FIRMWARE_URL`) via `esp_https_ota` into the inactive OTA slot, then
-reboots. Triggered from the web UI by tapping the firmware version in the top meta line.
+running firmware, and on confirmation downloads ITS per-target app image
+(`CONFIG_TESLA_OTA_FIRMWARE_BASE_URL` + `tesla-key-esp32-<target>.bin`, target =
+`CONFIG_IDF_TARGET`) via `esp_https_ota` into the inactive OTA slot, then reboots.
+`esp_https_ota` verifies the image chip-id, so a wrong-target image is refused (never
+flashed); one manifest `version` covers all targets (CI builds them from one commit).
+Triggered from the web UI by tapping the firmware version in the top meta line.
 Implemented in `main/ota_update.cpp`. Rollback is enabled
 (`CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE`); `main.cpp` calls
 `esp_ota_mark_app_valid_cancel_rollback()` after a healthy startup.
 
-Partition layout (`partitions.csv`) is dual-OTA (`otadata` + `ota_0`/`ota_1`, 3 MB each;
-app now at `0x20000`). **Migration:** a device on the old single-`factory` layout must be
-USB-reflashed once via the web installer (full erase → WiFi/VIN/key reset, re-pair). After
-that, all updates are OTA and preserve NVS.
+Partition layout (`partitions.csv`) is dual-OTA (`otadata` + `ota_0`/`ota_1`, ~2 MB each),
+sized to fill 4 MB (the smallest supported flash) so ONE table serves every target; app at
+`0x20000`. **Migration:** a device on the old single-`factory` layout must be USB-reflashed
+once via the web installer (full erase → WiFi/VIN/key reset, re-pair). After that, all
+updates are OTA and preserve NVS. (Existing 8 MB-table S3 devices keep OTA-updating without
+a reflash — OTA writes follow the INSTALLED table, and `ota_0` stays at `0x20000`.)
 
-**One image, one OTA channel for every ESP32-S3.** There is no per-board build and no
-board selection — a single generic firmware image serves every board and OTA is a single
-channel for all of them. The console is the S3's native USB-Serial/JTAG
-(`CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG`, universal on every S3), and the 8 MB flash-size
-config runs fine on chips with more flash.
+**One source tree, per-target images.** No per-board source forks — one codebase builds for
+esp32 / esp32s3 / esp32c3 / esp32c6 (`scripts/ci-build-all.sh`; the set is bounded by
+tesla-ble's `targets:`). The build deltas are config-only: target set per build
+(`idf.py set-target`), flash 4 MB, and the console is native USB-Serial/JTAG
+(`CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG`) on s3/c3/c6 — absent on the classic esp32, where it
+auto-falls-back to UART0 (no per-target sdkconfig needed). The web installer is a single
+page whose `manifest.json` carries one build per chipFamily (esp-web-tools auto-selects by
+detected chip); OTA is a single channel where each device pulls its own
+`tesla-key-esp32-<target>.bin`. The per-target bootloader offset (0x1000 on the classic
+esp32, 0x0 elsewhere) is handled automatically by `@flash_args` and the manifest.
 
 ## evcc Integration
 
@@ -232,5 +248,5 @@ curl -X POST http://<ESP32-IP>/api/1/vehicles/<VIN>/command/wake_up
 curl http://<ESP32-IP>/api/1/vehicles/<VIN>/vehicle_data
 
 # Erase NVS (reset key + sessions) — host esptool
-esptool --chip esp32s3 -p <port> erase_flash
+esptool --chip esp32s3 -p <port> erase_flash   # or esp32 / esp32c3 / esp32c6
 ```

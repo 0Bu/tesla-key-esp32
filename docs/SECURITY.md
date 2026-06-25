@@ -62,11 +62,12 @@ Two non-auth hardening measures remain in place:
 
 ## OTA self-update
 
-The device can update itself **pull-based**: it fetches `manifest.json` and the app image
-from two **fixed, compile-time HTTPS URLs** (`CONFIG_TESLA_OTA_MANIFEST_URL` /
-`CONFIG_TESLA_OTA_FIRMWARE_URL`, default GitHub Pages), compares the manifest `version`
-to the running firmware, and on confirmation flashes the inactive OTA slot via
-`esp_https_ota`, then reboots. Implemented in `main/ota_update.cpp`.
+The device can update itself **pull-based**: it fetches `manifest.json` and its per-target
+app image from **fixed, compile-time HTTPS URLs** (`CONFIG_TESLA_OTA_MANIFEST_URL` and
+`CONFIG_TESLA_OTA_FIRMWARE_BASE_URL` + `tesla-key-esp32-<target>.bin`, default GitHub
+Pages), compares the manifest `version` to the running firmware, and on confirmation flashes
+the inactive OTA slot via `esp_https_ota`, then reboots. `esp_https_ota` verifies the image
+chip-id, so a wrong-target image is refused. Implemented in `main/ota_update.cpp`.
 
 Trust model of the **current (pre-hardening) build**:
 
