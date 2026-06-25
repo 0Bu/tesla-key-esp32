@@ -419,6 +419,20 @@ bool VehicleController::init(const std::string& vin,
     return true;
 }
 
+// A plausible Tesla VIN: exactly 17 chars, uppercase alphanumeric excluding I/O/Q (reserved by
+// the VIN standard). Mirrors index.html's client-side check and /set_vin's server validation.
+// Used to gate pairing so the device never connects/enrols without a real VIN — the boot
+// placeholder "UNKNOWN" (7 chars) is not plausible, so it can never reach the matching path.
+bool VehicleController::vin_is_plausible(const std::string& vin) {
+    if (vin.size() != 17) return false;
+    for (char c : vin) {
+        bool ok = (c >= '0' && c <= '9') ||
+                  ((c >= 'A' && c <= 'Z') && c != 'I' && c != 'O' && c != 'Q');
+        if (!ok) return false;
+    }
+    return true;
+}
+
 // Automatic pairing supervisor. The hard constraint is the tesla-ble library's
 // single FIFO command queue: an unsigned "Whitelist Add Key" lingers in that
 // queue until the car confirms it (or ~180 s pass), so anything queued behind it
@@ -442,7 +456,24 @@ bool VehicleController::init(const std::string& vin,
 void VehicleController::auto_pair_task_fn_(void* arg) {
     auto* self = static_cast<VehicleController*>(arg);
     vTaskDelay(pdMS_TO_TICKS(4000));  // let WiFi/BLE come up first
+    bool warned_no_vin = false;
     while (true) {
+        // No vehicle to target: without a plausible 17-char VIN we must not connect or enrol —
+        // that risks whitelisting our key onto an arbitrary nearby Tesla. Idle quietly instead
+        // of spinning a connect→10 s-timeout loop; /scan still lists nearby cars. Logged once.
+        // Re-checked each cycle so enrolment starts automatically once a VIN is saved (the web
+        // UI's POST /set_vin reboots into a configured state, but this stays robust regardless).
+        if (!self->has_plausible_vin()) {
+            if (!warned_no_vin) {
+                ESP_LOGW(TAG, "auto-pair: no VIN configured — pairing disabled. Set a VIN via the "
+                              "setup AP or POST /set_vin, then enrolment starts automatically.");
+                warned_no_vin = true;
+            }
+            vTaskDelay(pdMS_TO_TICKS(5000));
+            continue;
+        }
+        warned_no_vin = false;  // a VIN is present again — re-arm the one-shot log
+
         // The car deleted our key (detected via a KEY_NOT_ON_WHITELIST response to any
         // signed command or the health poll below). The stored key is now useless, so
         // re-key — which also clears the session + cache — and fall through to re-pair.
