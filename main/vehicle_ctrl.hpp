@@ -182,6 +182,12 @@ public:
     bool reset_for_new_vehicle();
 
     const std::string& vin() const { return vin_; }
+    // A plausible Tesla VIN is exactly 17 chars, uppercase alphanumeric with I/O/Q excluded
+    // (the VIN standard reserves them). Mirrors the client-side check in index.html and the
+    // /set_vin validation. Pairing is gated on this: the device never connects/enrols on a
+    // vehicle without a real configured VIN (the boot placeholder "UNKNOWN" is not plausible).
+    static bool vin_is_plausible(const std::string& vin);
+    bool has_plausible_vin() const { return vin_is_plausible(vin_); }
     TeslaBLE::Vehicle* vehicle() { return vehicle_.get(); }
 
     // Status accessors (for /status and the web UI)

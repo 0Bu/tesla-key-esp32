@@ -65,15 +65,17 @@ public:
 
     void set_connected_cb(ConnectedCb cb)  { on_connected_ = std::move(cb); }
     void set_rx_data_cb(RxDataCb cb)       { on_rx_data_   = std::move(cb); }
-    // VIN of the vehicle to connect to; the scanner matches the Tesla BLE name
-    // derived from it. Empty = connect to any Tesla in range.
+    // VIN of the vehicle to connect to; the scanner matches the Tesla BLE name derived from
+    // it. Empty = no target ⇒ nearby Teslas are still listed (/scan) but the scanner never
+    // connects or enrols on one (the device must not pair onto an arbitrary nearby Tesla).
     void set_target_vin(const std::string& vin) { target_vin_ = vin; }
 
     // Start NimBLE host + scanning task
     bool start();
 
-    // Trigger scan → connect for the given MAC (stored in NVS config).
-    // If mac is empty, scan for any Tesla device.
+    // Set a connect intent; the running scan connects to the next advert matching the
+    // configured target VIN (the address argument is unused — see the .cpp). With no target
+    // VIN configured no connection is made.
     void connect(const std::string& address) override;
     void disconnect() override;
     bool write(const std::vector<uint8_t>& data) override;
