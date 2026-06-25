@@ -77,10 +77,10 @@ jobs:
           # Build EVERY target yoziru/tesla-ble supports (esp32 / esp32s3 / esp32c3 /
           # esp32c6 — the Component Manager refuses any other chip) and stage per-target
           # bins. ci-build-all.sh set-targets each in turn, writes _fw/<target>/ for the
-          # installer manifest and tesla-key-esp32-<target>.bin (+ versioned + merged) for
+          # installer manifest and tesla-key-esp32[-<s3|c3|c6>].bin (+ versioned + merged) for
           # release / OTA. The `target:` input above is just the action's default; the
           # script overrides it per target. ONE source tree → N per-target images; the web
-          # installer auto-selects by chip and OTA pulls tesla-key-esp32-<target>.bin.
+          # installer auto-selects by chip and OTA pulls tesla-key-esp32[-<s3|c3|c6>].bin.
           command: ./scripts/ci-build-all.sh "${{ steps.version.outputs.version }}"
 
       - name: Upload firmware artifacts
@@ -88,8 +88,10 @@ jobs:
         with:
           name: tesla-key-esp32-${{ steps.version.outputs.version }}
           # Per-target app images: stable (also the OTA filename), versioned, and merged.
+          # Glob without the dash so the suffix-less classic-esp32 image (tesla-key-esp32.bin)
+          # is captured alongside tesla-key-esp32-s3/-c3/-c6.bin.
           path: |
-            tesla-key-esp32-*.bin
+            tesla-key-esp32*.bin
 
       # Cut a release only when firmware-relevant files changed (source / deps /
       # esp-idf version / version.txt) — docs-only pushes redeploy Pages but don't
@@ -102,9 +104,10 @@ jobs:
           name: v${{ steps.version.outputs.version }}
           generate_release_notes: true
           # Per-target app images (stable + versioned) and a single-file merged image per
-          # target for manual full flashing — one set per supported chip.
+          # target for manual full flashing — one set per supported chip. Glob without the
+          # dash so the suffix-less classic-esp32 image (tesla-key-esp32.bin) is included.
           files: |
-            tesla-key-esp32-*.bin
+            tesla-key-esp32*.bin
 
       - name: Configure Pages
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'

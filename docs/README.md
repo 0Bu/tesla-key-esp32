@@ -24,8 +24,9 @@ Flash by hand (needs `brew install esptool`). Use the per-target **merged** imag
 in the correct bootloader offset (0x1000 on the classic esp32, 0x0 elsewhere), so one command
 works for any chip. This erases `nvs` (re-enter WiFi/VIN, re-pair once):
 ```bash
+# <suffix>: "" for esp32, else -s3 / -c3 / -c6 (so "esp32" appears once in the name)
 esptool --chip <esp32|esp32s3|esp32c3|esp32c6> write_flash 0x0 \
-  tesla-key-esp32-<target>-<version>-merged.bin
+  tesla-key-esp32<suffix>-<version>-merged.bin
 ```
 To preserve `nvs`, flash the separate parts from a local `build/` instead:
 `cd build && esptool --chip <target> write_flash "@flash_args"`.

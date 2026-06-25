@@ -159,7 +159,8 @@
       <a href="https://github.com/0Bu/tesla-key-esp32/releases/latest">GitHub release</a>
       for manual flashing. The flasher reads the per-target parts for the detected chip —
       <code>bootloader-&lt;target&gt;.bin</code>, <code>partition-table-&lt;target&gt;.bin</code> and
-      the app (<code>tesla-key-esp32-&lt;target&gt;.bin</code>) — listed per chipFamily in
+      the app (<code>tesla-key-esp32.bin</code>, or <code>-s3</code>/<code>-c3</code>/<code>-c6</code>
+      for the other chips) — listed per chipFamily in
       <code>manifest.json</code>. Flashing the app/bootloader/partition table
       separately keeps the <code>nvs</code> partition intact, so updates preserve WiFi,
       VIN and key.</p>
