@@ -232,8 +232,10 @@ extern "C" void app_main() {
     static std::string vin = CONFIG_TESLA_VIN;
     config_store.load_str("vin", vin);
     if (vin.empty()) {
-        ESP_LOGW(TAG, "VIN not configured — using 'UNKNOWN'. Set CONFIG_TESLA_VIN or NVS key 'vin'.");
-        vin = "UNKNOWN";
+        ESP_LOGW(TAG, "VIN not configured — pairing disabled until a VIN is set "
+                      "(setup AP or POST /set_vin / CONFIG_TESLA_VIN / NVS key 'vin'). "
+                      "Nearby Teslas are still listed by /scan, but none is connected/enrolled.");
+        vin = "UNKNOWN";  // placeholder for display/logging only — kept out of the BLE matching path
     }
 
     // Resolve BLE MAC (persisted after first successful scan)
@@ -271,7 +273,12 @@ extern "C" void app_main() {
     } else {
         ESP_LOGI(TAG, "key present, fingerprint %s", vehicle.key_fingerprint().c_str());
     }
-    ble_client.set_target_vin(vin);   // match by the VIN-derived BLE name on scan
+    // Match by the VIN-derived BLE name on scan. Pass the real VIN only when it is a plausible
+    // 17-char VIN; with none configured we pass an EMPTY target so the scanner lists nearby
+    // Teslas but never connects/enrols on one. The "UNKNOWN" placeholder must stay out of the
+    // matching path — it would hash to a name that just happens never to collide, making the
+    // safe outcome accidental rather than designed. Pairing is gated on a real VIN.
+    ble_client.set_target_vin(vehicle.has_plausible_vin() ? vin : std::string{});
 
     // Connect to WiFi. With stored credentials, a failure is usually a transient
     // outage (e.g. router rebooting), but if it persists (e.g. wrong password),

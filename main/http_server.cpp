@@ -702,19 +702,6 @@ static esp_err_t handle_set_time(httpd_req_t* req) {
 
 // ─── POST /set_vin — persist VIN, then reboot ─────────────────────────────────
 
-// A plausible Tesla VIN is exactly 17 characters, uppercase alphanumeric with the
-// letters I, O and Q excluded (the VIN standard reserves them to avoid confusion with
-// 1/0). Mirrors the client-side check in index.html so a bad value never reaches NVS.
-static bool vin_is_plausible(const std::string& vin) {
-    if (vin.size() != 17) return false;
-    for (char c : vin) {
-        bool ok = (c >= '0' && c <= '9') ||
-                  ((c >= 'A' && c <= 'Z') && c != 'I' && c != 'O' && c != 'Q');
-        if (!ok) return false;
-    }
-    return true;
-}
-
 static esp_err_t handle_set_vin(httpd_req_t* req) {
     char* body = read_body(req);
     cJSON* json = body ? cJSON_Parse(body) : nullptr;
@@ -740,8 +727,9 @@ static esp_err_t handle_set_vin(httpd_req_t* req) {
                                                  "VIN unchanged — no reboot"));
     }
 
-    // Validate plausibility before applying a *changed* value.
-    if (!vin_is_plausible(vin)) {
+    // Validate plausibility before applying a *changed* value. Shared with the BLE pairing
+    // gate (VehicleController::vin_is_plausible) so the web check and the pairing check agree.
+    if (!VehicleController::vin_is_plausible(vin)) {
         return send_json(req, 400, make_response(false, "set_vin", vin.c_str(),
                                                  "VIN must be 17 valid characters"));
     }

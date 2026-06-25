@@ -237,10 +237,10 @@ bool BleClient::connected_rssi(int8_t& out) const {
 }
 
 // BleAdapter::connect — called by Vehicle when it wants us to connect.
-// Sets a connect intent; the running discovery scan connects to the next Tesla
-// advert it sees. (The address argument is unused: we connect to the first Tesla
-// found, robust to Tesla's rotating BLE addresses; correctness is enforced by the
-// VIN/session layer.)
+// Sets a connect intent; the running discovery scan connects to the next advert matching the
+// configured target VIN. (The address argument is unused: we match by the VIN-derived name,
+// robust to Tesla's rotating BLE addresses; correctness is enforced by the VIN/session layer.
+// With no target VIN configured the scan still lists but never connects — see on_gap_event.)
 void BleClient::connect(const std::string& address) {
     (void)address;
     if (is_connected()) return;
@@ -320,8 +320,10 @@ int BleClient::on_gap_event(ble_gap_event* event) {
         // and listing.
         if (!want_connect_ || connecting_) break;
 
-        // Connect to the configured VIN's vehicle (or any Tesla if no VIN is set).
-        if (!target_vin_.empty() && !TeslaBLE::matches_vin(adv_name, target_vin_)) break;
+        // Connect ONLY to the configured VIN's vehicle. With no VIN configured the target is
+        // empty and we never connect/enrol — the device enrols a Charging-Manager key and must
+        // not pair onto an arbitrary nearby Tesla. (Listing via note_scan_ above still works.)
+        if (target_vin_.empty() || !TeslaBLE::matches_vin(adv_name, target_vin_)) break;
 
         char addr_str[18];
         snprintf(addr_str, sizeof(addr_str),
