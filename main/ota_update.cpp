@@ -19,6 +19,22 @@
 
 static const char* TAG = "ota";
 
+// Short per-target image suffix so "esp32" appears only once in the OTA filename:
+// esp32 -> "" (tesla-key-esp32.bin), esp32s3 -> "-s3", esp32c3 -> "-c3", esp32c6 -> "-c6".
+// Must stay in lockstep with image_suffix() in scripts/ci-build-all.sh + build-pages.sh
+// (which name the published asset the device pulls) — a mismatch 404s every OTA download.
+#if   defined(CONFIG_IDF_TARGET_ESP32)
+#  define TESLA_OTA_IMG_SUFFIX ""
+#elif defined(CONFIG_IDF_TARGET_ESP32S3)
+#  define TESLA_OTA_IMG_SUFFIX "-s3"
+#elif defined(CONFIG_IDF_TARGET_ESP32C3)
+#  define TESLA_OTA_IMG_SUFFIX "-c3"
+#elif defined(CONFIG_IDF_TARGET_ESP32C6)
+#  define TESLA_OTA_IMG_SUFFIX "-c6"
+#else
+#  error "Unsupported CONFIG_IDF_TARGET for OTA image naming"
+#endif
+
 // ─── Shared status (written by the OTA task, read by HTTP handlers) ────────────
 
 static SemaphoreHandle_t s_lock = nullptr;
@@ -187,12 +203,12 @@ bool ota_check_start() {
 // ─── Background download + install ──────────────────────────────────────────────
 
 static void ota_task(void*) {
-    // One channel, per-target image: base URL + this chip's target name. The literals
-    // concatenate at compile time (CONFIG_IDF_TARGET is a string), so this is a fixed
-    // string with no allocation. esp_https_ota also verifies the image chip-id, so a
+    // One channel, per-target image: base URL + this chip's short image suffix. The literals
+    // concatenate at compile time (TESLA_OTA_IMG_SUFFIX is a string literal), so this is a
+    // fixed string with no allocation. esp_https_ota also verifies the image chip-id, so a
     // wrong-target image (e.g. an esp32s3 build pulled by an esp32) is refused, not flashed.
     static constexpr const char* kFwUrl =
-        CONFIG_TESLA_OTA_FIRMWARE_BASE_URL "tesla-key-esp32-" CONFIG_IDF_TARGET ".bin";
+        CONFIG_TESLA_OTA_FIRMWARE_BASE_URL "tesla-key-esp32" TESLA_OTA_IMG_SUFFIX ".bin";
     ESP_LOGI(TAG, "OTA starting from %s (free heap %u)",
              kFwUrl, (unsigned)esp_get_free_heap_size());
 

@@ -64,7 +64,8 @@ Two non-auth hardening measures remain in place:
 
 The device can update itself **pull-based**: it fetches `manifest.json` and its per-target
 app image from **fixed, compile-time HTTPS URLs** (`CONFIG_TESLA_OTA_MANIFEST_URL` and
-`CONFIG_TESLA_OTA_FIRMWARE_BASE_URL` + `tesla-key-esp32-<target>.bin`, default GitHub
+`CONFIG_TESLA_OTA_FIRMWARE_BASE_URL` + `tesla-key-esp32<suffix>.bin`, where `<suffix>` is the
+chip's short tag — `""`/`-s3`/`-c3`/`-c6` — so "esp32" appears once, default GitHub
 Pages), compares the manifest `version` to the running firmware, and on confirmation flashes
 the inactive OTA slot via `esp_https_ota`, then reboots. `esp_https_ota` verifies the image
 chip-id, so a wrong-target image is refused. Implemented in `main/ota_update.cpp`.

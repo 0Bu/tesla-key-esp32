@@ -16,7 +16,7 @@
 # classic esp32, 0x0 on esp32s3 / esp32c3 / esp32c6.
 #
 # ONE manifest + per-target image serves every supported chip — a single installer page
-# and a single OTA channel (the device pulls tesla-key-esp32-<target>.bin for its chip).
+# and a single OTA channel (the device pulls tesla-key-esp32[-<s3|c3|c6>].bin for its chip).
 #
 # Usage:  ./scripts/build-pages.sh <out_dir> <version>
 set -euo pipefail
@@ -40,6 +40,19 @@ chip_family() {
 }
 # target -> 2nd-stage bootloader flash offset (bytes). Classic esp32 = 0x1000, else 0x0.
 boot_offset() { case "$1" in esp32) echo 4096 ;; *) echo 0 ;; esac; }
+# target -> short app-image suffix so "esp32" appears once: esp32 -> "" (tesla-key-esp32.bin),
+# esp32s3 -> "-s3", esp32c3 -> "-c3", esp32c6 -> "-c6". This names the OTA-served Pages copy,
+# so it MUST match TESLA_OTA_IMG_SUFFIX in main/ota_update.cpp and image_suffix() in
+# ci-build-all.sh — the device builds the same filename to pull its image.
+image_suffix() {
+  case "$1" in
+    esp32)   echo "" ;;
+    esp32s3) echo "-s3" ;;
+    esp32c3) echo "-c3" ;;
+    esp32c6) echo "-c6" ;;
+    *)       echo "-$1" ;;
+  esac
+}
 
 TARGETS="esp32 esp32s3 esp32c3 esp32c6"
 
@@ -61,16 +74,17 @@ for t in $TARGETS; do
   fi
   cf="$(chip_family "$t")"
   bo="$(boot_offset "$t")"
+  sfx="$(image_suffix "$t")"
   cp "$d/bootloader.bin"      "$out/bootloader-$t.bin"
   cp "$d/partition-table.bin" "$out/partition-table-$t.bin"
-  cp "$d/tesla-key-esp32.bin" "$out/tesla-key-esp32-$t.bin"
+  cp "$d/tesla-key-esp32.bin" "$out/tesla-key-esp32$sfx.bin"
   entry=$(cat <<JSON
     {
       "chipFamily": "$cf",
       "parts": [
         { "path": "bootloader-$t.bin", "offset": $bo },
         { "path": "partition-table-$t.bin", "offset": 32768 },
-        { "path": "tesla-key-esp32-$t.bin", "offset": 131072 }
+        { "path": "tesla-key-esp32$sfx.bin", "offset": 131072 }
       ]
     }
 JSON

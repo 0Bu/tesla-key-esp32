@@ -9,7 +9,7 @@
 # installer needs (bootloader / partition-table / app), and writes the release
 # downloads to the repo root: a stable + a versioned per-target app image, plus a
 # single-file merged image. scripts/build-pages.sh then assembles one multi-build
-# manifest.json from _fw/, and the device OTA pulls tesla-key-esp32-<target>.bin.
+# manifest.json from _fw/, and the device OTA pulls its own tesla-key-esp32[-<s3|c3|c6>].bin.
 #
 # One sequential job (not a matrix) so build-pages.sh sees every target's bins in the
 # same workspace without an artifact round-trip. Run INSIDE the espressif/esp-idf
@@ -31,6 +31,20 @@ unset IDF_TARGET
 # Keep in sync with tesla-ble's idf_component.yml `targets:` (the Component Manager
 # enforces it — an unsupported target fails at dependency resolution, before compile).
 TARGETS="esp32 esp32s3 esp32c3 esp32c6"
+
+# target -> short image suffix so "esp32" appears once in the release/OTA filename:
+# esp32 -> "" (tesla-key-esp32.bin), esp32s3 -> "-s3", esp32c3 -> "-c3", esp32c6 -> "-c6".
+# Must match TESLA_OTA_IMG_SUFFIX in main/ota_update.cpp (the device builds the same name
+# to pull its image) and image_suffix() in build-pages.sh (the OTA-served Pages copy).
+image_suffix() {
+  case "$1" in
+    esp32)   echo "" ;;
+    esp32s3) echo "-s3" ;;
+    esp32c3) echo "-c3" ;;
+    esp32c6) echo "-c6" ;;
+    *)       echo "-$1" ;;
+  esac
+}
 
 rm -rf _fw
 for t in $TARGETS; do
@@ -59,12 +73,14 @@ for t in $TARGETS; do
   # Release downloads (repo root): stable name (also the OTA filename), versioned copy,
   # and a single-file merged image for manual full flashing. merge_bin reads @flash_args,
   # so the per-target bootloader offset (0x1000 on esp32, 0x0 elsewhere) is baked in.
-  cp build/tesla-key-esp32.bin "tesla-key-esp32-$t.bin"
-  cp build/tesla-key-esp32.bin "tesla-key-esp32-$t-$version.bin"
+  sfx="$(image_suffix "$t")"
+  cp build/tesla-key-esp32.bin "tesla-key-esp32$sfx.bin"
+  cp build/tesla-key-esp32.bin "tesla-key-esp32$sfx-$version.bin"
   ( cd build && esptool.py --chip "$t" merge_bin \
-      -o "../tesla-key-esp32-$t-$version-merged.bin" "@flash_args" )
+      -o "../tesla-key-esp32$sfx-$version-merged.bin" "@flash_args" )
   echo "::endgroup::"
 done
 
 echo "Built + staged targets: $TARGETS"
-ls -1 _fw/*/ tesla-key-esp32-*.bin
+# Glob without the dash so the suffix-less classic-esp32 image (tesla-key-esp32.bin) is listed too.
+ls -1 _fw/*/ tesla-key-esp32*.bin
