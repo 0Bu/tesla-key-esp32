@@ -1,6 +1,7 @@
 #include "mqtt_ha.hpp"
 #include "vehicle_ctrl.hpp"
 #include "nvs_storage.hpp"
+#include "platform.hpp"
 
 #include <atomic>
 #include <string>
@@ -159,7 +160,7 @@ static void add_device_block(cJSON* root) {
     cJSON_AddItemToObject(dev, "ids", ids);
     cJSON_AddStringToObject(dev, "name", s_devname.c_str());
     cJSON_AddStringToObject(dev, "mf",   "tesla-key-esp32");
-    cJSON_AddStringToObject(dev, "mdl",  "ESP32-S3");
+    cJSON_AddStringToObject(dev, "mdl",  TK_PLATFORM);
     cJSON_AddStringToObject(dev, "sw",   esp_app_get_description()->version);
     if (!s_cfgurl.empty()) cJSON_AddStringToObject(dev, "cu", s_cfgurl.c_str());
     cJSON_AddItemToObject(root, "dev", dev);

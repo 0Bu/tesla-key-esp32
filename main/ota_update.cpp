@@ -187,11 +187,17 @@ bool ota_check_start() {
 // ─── Background download + install ──────────────────────────────────────────────
 
 static void ota_task(void*) {
+    // One channel, per-target image: base URL + this chip's target name. The literals
+    // concatenate at compile time (CONFIG_IDF_TARGET is a string), so this is a fixed
+    // string with no allocation. esp_https_ota also verifies the image chip-id, so a
+    // wrong-target image (e.g. an esp32s3 build pulled by an esp32) is refused, not flashed.
+    static constexpr const char* kFwUrl =
+        CONFIG_TESLA_OTA_FIRMWARE_BASE_URL "tesla-key-esp32-" CONFIG_IDF_TARGET ".bin";
     ESP_LOGI(TAG, "OTA starting from %s (free heap %u)",
-             CONFIG_TESLA_OTA_FIRMWARE_URL, (unsigned)esp_get_free_heap_size());
+             kFwUrl, (unsigned)esp_get_free_heap_size());
 
     esp_http_client_config_t http_cfg = {};
-    http_cfg.url               = CONFIG_TESLA_OTA_FIRMWARE_URL;
+    http_cfg.url               = kFwUrl;
     http_cfg.crt_bundle_attach = esp_crt_bundle_attach;
     http_cfg.timeout_ms        = 20000;
     http_cfg.keep_alive_enable = true;

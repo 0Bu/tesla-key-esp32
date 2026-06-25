@@ -1,11 +1,12 @@
 ---
 name: flash-esp32
-description: Build and USB-flash the tesla-key-esp32 firmware (ESP32-S3) over the serial port. Use when asked to "flash", "flashe", "flash the device", deploy firmware/web-UI changes to the physical board over USB, or reflash after editing main/. Auto-detects the serial port and preserves NVS (pairing/key/VIN). For pull-based OTA updates instead, see docs / the web UI version tap.
+description: Build and USB-flash the tesla-key-esp32 firmware (ESP32 / S3 / C3 / C6) over the serial port. Use when asked to "flash", "flashe", "flash the device", deploy firmware/web-UI changes to the physical board over USB, or reflash after editing main/. Defaults to esp32s3; set TARGET for other chips. Auto-detects the serial port and preserves NVS (pairing/key/VIN). For pull-based OTA updates instead, see docs / the web UI version tap.
 ---
 
 # flash-esp32 — build & USB-flash the firmware
 
-Builds the ESP-IDF project (in Docker) and flashes it to the connected **ESP32-S3** over
+Builds the ESP-IDF project (in Docker) and flashes it to a connected **ESP32 board**
+(esp32 / esp32s3 / esp32c3 / esp32c6 — set `TARGET`, default esp32s3) over
 USB (from the host). NVS is left untouched, so the stored pairing, private key, VIN and
 WiFi survive the flash (no re-pair needed). Use this after editing anything under `main/` —
 including the embedded web UI (`main/www/index.html`), which is compiled into the app binary.
@@ -29,19 +30,25 @@ the build succeeded (`pipefail` + the `||` guard) — auto-detects the port and 
 
 ```bash
 set -o pipefail
+TARGET=esp32s3   # chip being flashed: esp32s3 (default) | esp32 | esp32c3 | esp32c6
 # 1) Build via the CI-pinned ESP-IDF Docker image (build/ stays host-owned).
 #    First build only: set-target; afterwards plain `build` keeps it incremental & fast.
 scripts/idf-docker.sh \
-  sh -c 'if [ -f sdkconfig ]; then idf.py build; else idf.py set-target esp32s3 build; fi' \
+  sh -c "if [ -f sdkconfig ]; then idf.py build; else idf.py set-target $TARGET build; fi" \
   2>&1 | tail -15 || { echo "BUILD FAILED — not flashing"; exit 1; }
-# 2) Flash from the HOST (Docker can't reach USB). @flash_args writes bootloader@0x0,
-#    partition-table@0x8000, otadata@0xf000, app@0x20000 — NOT nvs@0x9000, so pairing survives.
+# 2) Flash from the HOST (Docker can't reach USB). @flash_args writes the bootloader (at the
+#    target's own offset — 0x1000 on the classic esp32, 0x0 on s3/c3/c6), partition-table@0x8000,
+#    otadata@0xf000, app@0x20000 — NOT nvs@0x9000, so pairing survives.
 PORT=$(ioreg -l -w 0 2>/dev/null | grep -iE '"USB Product Name"|"IOCalloutDevice"' \
        | grep -iA1 '"USB Single Serial"' | grep -m1 -o '/dev/cu\.usbmodem[^"]*') \
   && echo "Flashing via $PORT" \
-  && ( cd build && esptool --chip esp32s3 -p "$PORT" -b 460800 \
+  && ( cd build && esptool --chip "$TARGET" -p "$PORT" -b 460800 \
         --before default_reset --after hard_reset write_flash "@flash_args" ) 2>&1 | tail -20
 ```
+
+> **Port detection above targets S3/C3/C6 boards** (native USB = `/dev/cu.usbmodem*`). The
+> **classic esp32** has no native USB — it appears as a USB-UART bridge `/dev/cu.usbserial-*`
+> (CP210x/CH340), so for `TARGET=esp32` set `PORT=$(ls /dev/cu.usbserial-* | head -1)` instead.
 
 **Success looks like:** `Hash of data verified.` for each region, then
 `Hard resetting via RTS pin...` → `Done`. The app image lands at `0x20000` (dual-OTA
@@ -55,7 +62,7 @@ This board exposes **two** USB serial interfaces — confirm before flashing:
 | `/dev` node (example)        | USB product name              | What it is                     |
 |------------------------------|-------------------------------|--------------------------------|
 | `/dev/cu.usbmodem<SERIAL>`   | **USB Single Serial** (WCH)   | UART bridge — **use this one** |
-| `/dev/cu.usbmodem<NNNN>`     | USB JTAG/serial debug unit    | ESP32-S3 native USB (also works) |
+| `/dev/cu.usbmodem<NNNN>`     | USB JTAG/serial debug unit    | S3/C3/C6 native USB (also works) |
 
 The exact node name is device/cable-specific — **never hardcode it**; detect at runtime.
 List both with their product names:
@@ -85,7 +92,7 @@ auto-detect.
 - **First build only** is slow (managed_components fetch + full compile). A `build/` dir
   already present means subsequent flashes are incremental and fast.
 - **NVS is preserved** by `@flash_args` (it never touches `nvs@0x9000`). To wipe
-  pairing/key/VIN/WiFi instead, run `esptool --chip esp32s3 -p <PORT> erase_flash` (forces a
+  pairing/key/VIN/WiFi instead, run `esptool --chip "$TARGET" -p <PORT> erase_flash` (forces a
   full re-pair afterwards).
 - **Artifacts are host-owned** thanks to `-u $(id -u):$(id -g)` — no root-owned files in the
   worktree. `build/`, `managed_components/`, `sdkconfig` are all gitignored.

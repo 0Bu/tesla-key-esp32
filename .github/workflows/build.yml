@@ -41,7 +41,7 @@ jobs:
           if [ -z "$before" ] || ! git cat-file -e "${before}^{commit}" 2>/dev/null; then
             changed=yes   # first push / unknown base → release to be safe
           elif git diff --name-only "$before" "${{ github.sha }}" \
-               | grep -qE '^(main/|CMakeLists\.txt$|sdkconfig\.defaults$|partitions\.csv$|version\.txt$|\.github/workflows/build\.yml$)'; then
+               | grep -qE '^(main/|CMakeLists\.txt$|sdkconfig\.defaults$|partitions\.csv$|version\.txt$|\.github/workflows/build\.yml$|scripts/ci-build-all\.sh$|scripts/build-pages\.sh$)'; then
             changed=yes
           else
             changed=no
@@ -69,37 +69,27 @@ jobs:
           echo "disp=$disp" >> "$GITHUB_OUTPUT"
           echo "stamped firmware version: $disp"
 
-      - name: Build firmware (ESP-IDF v5.5.4)
+      - name: Build firmware for all supported targets (ESP-IDF v5.5.4)
         uses: espressif/esp-idf-ci-action@v1
         with:
           esp_idf_version: v5.5.4
-          target: esp32s3
-          # Build, then export the flashable parts SEPARATELY (bootloader @0x0,
-          # partition table @0x8000, app @0x20000). ESP Web Tools writes these at
-          # their own offsets, so an UPDATE never touches the nvs partition (0x9000)
-          # → WiFi / VIN / key survive upgrades. tesla-key-esp32.bin is the stable
-          # name the web installer reads; the versioned + merged copies are release
-          # downloads for manual / full flashing. ONE image serves every ESP32-S3
-          # board → a single build, a single OTA channel.
-          command: >-
-            idf.py set-target esp32s3 build &&
-            cd build &&
-            cp bootloader/bootloader.bin ../bootloader.bin &&
-            cp partition_table/partition-table.bin ../partition-table.bin &&
-            cp tesla-key-esp32.bin ../tesla-key-esp32.bin &&
-            cp tesla-key-esp32.bin ../tesla-key-esp32-${{ steps.version.outputs.version }}.bin &&
-            esptool.py --chip esp32s3 merge_bin -o ../tesla-key-esp32-${{ steps.version.outputs.version }}-merged.bin "@flash_args"
+          target: esp32
+          # Build EVERY target yoziru/tesla-ble supports (esp32 / esp32s3 / esp32c3 /
+          # esp32c6 — the Component Manager refuses any other chip) and stage per-target
+          # bins. ci-build-all.sh set-targets each in turn, writes _fw/<target>/ for the
+          # installer manifest and tesla-key-esp32-<target>.bin (+ versioned + merged) for
+          # release / OTA. The `target:` input above is just the action's default; the
+          # script overrides it per target. ONE source tree → N per-target images; the web
+          # installer auto-selects by chip and OTA pulls tesla-key-esp32-<target>.bin.
+          command: ./scripts/ci-build-all.sh "${{ steps.version.outputs.version }}"
 
       - name: Upload firmware artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: tesla-key-esp32-${{ steps.version.outputs.version }}
+          # Per-target app images: stable (also the OTA filename), versioned, and merged.
           path: |
-            bootloader.bin
-            partition-table.bin
-            tesla-key-esp32.bin
-            tesla-key-esp32-${{ steps.version.outputs.version }}.bin
-            tesla-key-esp32-${{ steps.version.outputs.version }}-merged.bin
+            tesla-key-esp32-*.bin
 
       # Cut a release only when firmware-relevant files changed (source / deps /
       # esp-idf version / version.txt) — docs-only pushes redeploy Pages but don't
@@ -111,12 +101,10 @@ jobs:
           tag_name: v${{ steps.version.outputs.version }}
           name: v${{ steps.version.outputs.version }}
           generate_release_notes: true
+          # Per-target app images (stable + versioned) and a single-file merged image per
+          # target for manual full flashing — one set per supported chip.
           files: |
-            bootloader.bin
-            partition-table.bin
-            tesla-key-esp32.bin
-            tesla-key-esp32-${{ steps.version.outputs.version }}.bin
-            tesla-key-esp32-${{ steps.version.outputs.version }}-merged.bin
+            tesla-key-esp32-*.bin
 
       - name: Configure Pages
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'

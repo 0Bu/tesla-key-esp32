@@ -96,8 +96,11 @@ Treat a violation of any of these as a real finding.
   bug. An **empty** config value disables the feature it gates (e.g. `mqtt_uri`).
 
 ### OTA / versioning
-- Dual-OTA layout (`partitions.csv`): `nvs@0x9000`, app at **`0x20000`**, two 3 MB slots,
-  **8 MB** flash. NVS is never in the flashed set, so pairing/key/VIN survive OTA.
+- Dual-OTA layout (`partitions.csv`): `nvs@0x9000`, app at **`0x20000`**, two ~2 MB slots
+  (`0x1f0000`), **4 MB** flash (smallest supported part; a larger flash leaves the top
+  unused). NVS is never in the flashed set, so pairing/key/VIN survive OTA. One source tree
+  builds for esp32 / esp32s3 / esp32c3 / esp32c6 (the tesla-ble targets); each device pulls
+  its own `tesla-key-esp32-<target>.bin` and the web installer auto-selects by chipFamily.
 - Rollback is enabled — `main.cpp` must call `esp_ota_mark_app_valid_cancel_rollback()` after
   a healthy boot, **else a crash within the verify window rolls back to the old slot.**
 - `version.txt` is the committed **version floor**; CI (`scripts/next-version.sh`, see
@@ -138,7 +141,8 @@ that describe it. When reviewing a change (or the repo as a whole), check these 
 - **New Kconfig option** → `main/Kconfig.projbuild` **and** any doc that references defaults
   **and** `sdkconfig.defaults` if a non-default value is required.
 - **Partition / offset / flash-size change** → `partitions.csv` **and** every doc that states
-  the offset (`0x20000`), size (`8 MB`), or dual-OTA layout **and** the migration note.
+  the offset (`0x20000`), flash size (`4 MB`), slot size (`~2 MB` / `0x1f0000`), or dual-OTA
+  layout **and** the migration note.
 - **Version change** → `version.txt` only; hunt for any other hardcoded version.
 - **New telemetry field** → parser (with presence flag) **and** `/status` JSON **and** MQTT
   discovery **and** the web UI **and** docs.

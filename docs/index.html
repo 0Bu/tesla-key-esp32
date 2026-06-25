@@ -107,7 +107,7 @@
 <body>
   <main>
     <header class="hero">
-      <span class="badge">⚡ ESP32-S3 Firmware</span>
+      <span class="badge">⚡ ESP32 · S3 · C3 · C6 Firmware</span>
       <h1>Flash tesla-key-esp32</h1>
       <p class="lead">Install the firmware straight from your browser — no toolchain,
         no command line. Use <b>Chrome</b> or <b>Edge</b> on desktop.</p>
@@ -119,13 +119,14 @@
         <span slot="unsupported">Your browser does not support Web Serial — use desktop Chrome or Edge.</span>
         <span slot="not-allowed">Serial access was not granted.</span>
       </esp-web-install-button>
-      <p class="hint">Plug in the ESP32-S3 over USB first.</p>
+      <p class="hint">Plug in your ESP32 board over USB first — the installer auto-detects the
+        chip (ESP32, ESP32-S3, ESP32-C3 or ESP32-C6).</p>
     </div>
 
     <section class="card">
       <h2>How it works</h2>
       <ol class="steps">
-        <li>Plug the ESP32-S3 into a USB port.</li>
+        <li>Plug your ESP32 board into a USB port.</li>
         <li>Tap <b>Install firmware</b> and select the serial port, then close the
           dialog when flashing finishes.</li>
         <li>The device reboots and opens a <code>tesla-key-esp32-setup</code> WiFi network.
@@ -156,9 +157,10 @@
     <p class="foot">This page always serves the latest CI build — it is rebuilt and
       deployed automatically on every firmware change, and each change also publishes a
       <a href="https://github.com/0Bu/tesla-key-esp32/releases/latest">GitHub release</a>
-      for manual flashing. The flasher reads <code>bootloader.bin</code>,
-      <code>partition-table.bin</code> and the app (<code>tesla-key-esp32.bin</code>)
-      listed in <code>manifest.json</code>. Flashing the app/bootloader/partition table
+      for manual flashing. The flasher reads the per-target parts for the detected chip —
+      <code>bootloader-&lt;target&gt;.bin</code>, <code>partition-table-&lt;target&gt;.bin</code> and
+      the app (<code>tesla-key-esp32-&lt;target&gt;.bin</code>) — listed per chipFamily in
+      <code>manifest.json</code>. Flashing the app/bootloader/partition table
       separately keeps the <code>nvs</code> partition intact, so updates preserve WiFi,
       VIN and key.</p>
   </main>

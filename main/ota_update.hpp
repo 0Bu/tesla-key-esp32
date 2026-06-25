@@ -4,8 +4,10 @@
 
 // Pull-based OTA self-update. The device fetches manifest.json from a fixed HTTPS
 // URL (CONFIG_TESLA_OTA_MANIFEST_URL), compares its "version" to the running
-// firmware, and — when asked — downloads the app image (CONFIG_TESLA_OTA_FIRMWARE_URL)
-// straight into the inactive OTA slot via esp_https_ota, then reboots.
+// firmware, and — when asked — downloads its per-target app image
+// (CONFIG_TESLA_OTA_FIRMWARE_BASE_URL + "tesla-key-esp32-<target>.bin") straight into
+// the inactive OTA slot via esp_https_ota, then reboots. esp_https_ota verifies the
+// image chip-id, so a wrong-target image is refused rather than flashed.
 
 enum class OtaState { Idle, Checking, Downloading, Done, Error };
 
