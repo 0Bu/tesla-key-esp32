@@ -22,6 +22,12 @@ version="${1:?usage: ci-build-all.sh <version>}"
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
+# The esp-idf-ci-action exports IDF_TARGET (from its `target:` input) into the environment;
+# `idf.py set-target <other>` then aborts with "Target '<x>' specified on command line is not
+# consistent with target '<env>' in the environment." Clear it so set-target alone governs the
+# target on each loop iteration (harmless when IDF_TARGET is already unset, e.g. local runs).
+unset IDF_TARGET
+
 # Keep in sync with tesla-ble's idf_component.yml `targets:` (the Component Manager
 # enforces it — an unsupported target fails at dependency resolution, before compile).
 TARGETS="esp32 esp32s3 esp32c3 esp32c6"
