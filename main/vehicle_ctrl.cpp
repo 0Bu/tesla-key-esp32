@@ -469,6 +469,11 @@ void VehicleController::auto_pair_task_fn_(void* arg) {
                               "setup AP or POST /set_vin, then enrolment starts automatically.");
                 warned_no_vin = true;
             }
+            // Keep a fresh, LISTING-ONLY view of nearby Teslas for the web UI (nearby() sorts
+            // by RSSI). start_discovery never connects/enrols — want_connect_ stays false — so
+            // this only populates /status ble.devices and can't whitelist our key onto an
+            // arbitrary car. Re-armed each cycle once the ~12 s scan window lapses.
+            if (self->ble_ && !self->ble_->is_scanning()) self->ble_scan(12000);
             vTaskDelay(pdMS_TO_TICKS(5000));
             continue;
         }

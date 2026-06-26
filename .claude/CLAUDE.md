@@ -204,6 +204,21 @@ grouped under one device. **Read-only by design** — no command topics are subs
   the on-demand BLE link hasn't reached the car yet). The momentary BLE row reading
   "Disconnected" is normal (the link is dropped between polls by design) and is not used to
   drive the hero — only `link` is.
+  **Connection-failure detection (web-UI hero "Connection failed").** When the target car's
+  advert is heard but the BLE link won't come up after repeated tries, `/status.ble` carries
+  `connect_fail` (consecutive recent failures; only while actively failing) and `car_connectable`
+  (the target advert's connectable flag). `car_connectable=false` ⇒ the car advertises
+  **non-connectable** ⇒ it is at its ~3-device BLE-connection limit — mirroring tesla-ble's
+  upstream `vehicle-command`, whose BLE transport raises `ErrMaxConnectionsExceeded` off the same
+  `Connectable` flag (the *connect timeout itself* carries no reason). The web UI shows a
+  "Connection failed" hero (orange Bluetooth glyph) — "too many Bluetooth devices connected" when
+  `car_connectable=false`, else "move closer / disconnect other devices" — in **both** the setup
+  flow *and* the paired state (a paired device that can't get a slot says so instead of hiding the
+  hero). The signal windows are 90 s so they stay stable across a paired device's ~30-40 s
+  health-probe cadence. `/status.ble.devices[]` also carries per-device `connectable`, and the
+  no-VIN screen lists nearby Teslas (bars · dBm · MAC, sorted by signal) from the periodic
+  listing-only scan. Hero glyphs: grey Bluetooth = "Set up needed", grey NFC-card = "Pairing",
+  orange Bluetooth = "Connection failed".
   Reachability is tracked by a
   `last_reachable_ticks_` clock stamped on every successful signed round-trip, incl. the idle
   health poll. **last boot** is published as an ISO-8601 timestamp (device_class
@@ -237,8 +252,10 @@ After any of these `has_session()` is false → UI shows "not paired", hides con
 BLE name (`S<hex>C`), so `auto_pair_task` first checks `has_plausible_vin()` (17-char VIN;
 `VehicleController::vin_is_plausible`, the same validator the web UI / `POST /set_vin` use).
 With no VIN it logs once (`auto-pair: no VIN configured — pairing disabled`) and idles — it
-does **not** spin connect attempts, and `set_target_vin` is given an empty target so the
-scanner lists nearby Teslas (`/scan`) but never connects or enrols on one. This is the *design*
+does **not** spin connect attempts, but it *does* run a periodic listing-only discovery scan so
+the web UI shows nearby Teslas (sorted by signal) live without a manual `/scan`. `set_target_vin`
+is given an empty target so the scanner lists nearby Teslas but never connects or enrols on one.
+This is the *design*
 that stops the device whitelisting its Charging-Manager key onto an arbitrary nearby Tesla — it
 no longer depends on the `"UNKNOWN"` placeholder hashing to a name that happens never to
 collide (the placeholder is kept out of the matching path). The web UI already shows "Add the

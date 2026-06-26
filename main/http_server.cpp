@@ -562,9 +562,29 @@ static esp_err_t handle_status(httpd_req_t* req) {
             cJSON_AddStringToObject(dev, "addr", d.addr.c_str());
             cJSON_AddStringToObject(dev, "name", d.name.c_str());
             cJSON_AddNumberToObject(dev, "rssi", d.rssi);
+            cJSON_AddBoolToObject(dev, "connectable", d.connectable);
             cJSON_AddItemToArray(devices, dev);
         }
         cJSON_AddItemToObject(ble, "devices", devices);
+        // The target car was found (advert heard, VIN-name matched) but the link keeps
+        // failing to come up — e.g. another device is holding the car's single BLE
+        // connection. Emitted only while actively failing so the UI can say "found but
+        // can't connect" instead of blaming Bluetooth range. Absent ⇒ nothing to report.
+        uint32_t cf = g_vehicle->ble_connect_fail();
+        if (cf > 0) {
+            cJSON_AddNumberToObject(ble, "connect_fail", cf);
+            // Last-seen advert RSSI so the UI shows real bars + dBm in the "can't connect"
+            // state (the devices[] list goes empty during the 10 s connect attempt, so it's
+            // not a reliable source there). Same `rssi` key the connected branch uses.
+            int8_t srssi;
+            if (g_vehicle->ble_seen_rssi(srssi)) cJSON_AddNumberToObject(ble, "rssi", srssi);
+            // Why it's failing, mirroring vehicle-command's ErrMaxConnectionsExceeded: the
+            // target's advert connectability. false ⇒ the car is non-connectable (≈ at its
+            // ~3-device BLE limit); true ⇒ it accepts connections but the link still fails
+            // (weak signal / another proxy contending). Omitted when not yet known.
+            int tc = g_vehicle->ble_target_connectable();
+            if (tc >= 0) cJSON_AddBoolToObject(ble, "car_connectable", tc == 1);
+        }
     }
     cJSON_AddItemToObject(root, "ble", ble);
 

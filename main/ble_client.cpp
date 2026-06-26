@@ -175,16 +175,27 @@ void BleClient::note_scan_(const ble_gap_disc_desc& d, const ble_hs_adv_fields& 
             e = &scan_.back();
             memcpy(e->addr, d.addr.val, 6);
             e->name[0] = '\0';
+            e->connectable = true;   // optimistic until a primary advert proves otherwise
         } else {
             // Replace the stalest entry.
             e = &scan_[0];
             for (auto& s : scan_) if (s.last_us < e->last_us) e = &s;
             memcpy(e->addr, d.addr.val, 6);
             e->name[0] = '\0';
+            e->connectable = true;
         }
     }
     e->rssi    = d.rssi;
     e->last_us = esp_timer_get_time();
+    // If THIS report is a primary advert (not a scan response), it tells us the connectability
+    // directly. SCAN_RSP carries no connectability, so leave the prior value untouched.
+    switch (d.event_type) {
+        case BLE_HCI_ADV_RPT_EVTYPE_ADV_IND:
+        case BLE_HCI_ADV_RPT_EVTYPE_DIR_IND:     e->connectable = true;  break;
+        case BLE_HCI_ADV_RPT_EVTYPE_SCAN_IND:
+        case BLE_HCI_ADV_RPT_EVTYPE_NONCONN_IND: e->connectable = false; break;
+        default: break;  // SCAN_RSP — connectability unknown from this PDU
+    }
     if (f.name != nullptr && f.name_len > 0) {
         size_t n = f.name_len < sizeof(e->name) - 1 ? f.name_len : sizeof(e->name) - 1;
         memcpy(e->name, f.name, n);
@@ -203,12 +214,44 @@ std::vector<TeslaScan> BleClient::nearby() const {
         char addr[18];
         snprintf(addr, sizeof(addr), "%02x:%02x:%02x:%02x:%02x:%02x",
                  s.addr[5], s.addr[4], s.addr[3], s.addr[2], s.addr[1], s.addr[0]);
-        out.push_back(TeslaScan{addr, s.name, s.rssi});
+        out.push_back(TeslaScan{addr, s.name, s.rssi, s.connectable});
     }
     xSemaphoreGive(scan_mutex_);
     std::sort(out.begin(), out.end(),
               [](const TeslaScan& a, const TeslaScan& b) { return a.rssi > b.rssi; });
     return out;
+}
+
+void BleClient::note_connectable_(const ble_addr_t& addr, bool connectable) {
+    if (!scan_mutex_) return;
+    if (xSemaphoreTake(scan_mutex_, 0) != pdTRUE) return;  // never block the host task
+    // Only updates entries we already know are Teslas (created by note_scan_ on a name match);
+    // a nameless primary advert for an unknown address is ignored.
+    for (auto& s : scan_) {
+        if (memcmp(s.addr, addr.val, 6) == 0) { s.connectable = connectable; break; }
+    }
+    xSemaphoreGive(scan_mutex_);
+}
+
+int BleClient::target_connectable() const {
+    if (!scan_mutex_ || target_vin_.empty()) return -1;
+    const int64_t now = esp_timer_get_time();
+    int result = -1;
+    if (xSemaphoreTake(scan_mutex_, pdMS_TO_TICKS(50)) != pdTRUE) return -1;
+    for (const auto& s : scan_) {
+        // 90 s window: a PAIRED device only scans briefly around each ~30-40 s health probe, so
+        // a 15 s freshness would flap to "unknown" between probes; 90 s keeps the at-limit signal
+        // stable across the gap. ("at its BLE limit" is a persistent condition, so a slightly
+        // older observation is still meaningful.)
+        if (now - s.last_us > 90LL * 1000 * 1000) continue;  // stale
+        if (s.name[0] == '\0') continue;
+        if (TeslaBLE::matches_vin(std::string(s.name), target_vin_)) {
+            result = s.connectable ? 1 : 0;
+            break;
+        }
+    }
+    xSemaphoreGive(scan_mutex_);
+    return result;
 }
 
 std::string BleClient::peer_addr_str() const {
@@ -217,6 +260,18 @@ std::string BleClient::peer_addr_str() const {
     std::string s = peer_addr_str_;
     xSemaphoreGive(client_mutex_);
     return s;
+}
+
+uint32_t BleClient::connect_fail_recent() const {
+    int64_t last = last_connect_attempt_us_;
+    if (last == 0) return 0;
+    // Stale: no attempt in the last 90 s ⇒ the car is no longer in range / we stopped trying,
+    // so this is "out of range", not "failing to connect". 90 s spans the slowest attempt cadence
+    // — a PAIRED device retries only ~every 30-40 s via the health probe (vs ~10 s while bringing
+    // up an unpaired one), so the signal stays stable across that gap. Resets the moment a
+    // connect succeeds (connect_fail_count_ → 0).
+    if (esp_timer_get_time() - last > 90LL * 1000 * 1000) return 0;
+    return connect_fail_count_;
 }
 
 bool BleClient::connected_rssi(int8_t& out) const {
@@ -305,6 +360,20 @@ int BleClient::on_gap_event(ble_gap_event* event) {
                                           event->disc.length_data);
         if (rc != 0) break;
 
+        // Record connectability from the PRIMARY advert. Tesla carries the vehicle name only
+        // in the SCAN_RSP (handled by note_scan_ below), but connectability lives on the
+        // primary advert — which often arrives nameless and would otherwise break out here. A
+        // car at its BLE connection limit advertises non-connectable (this is exactly the
+        // signal vehicle-command's ErrMaxConnectionsExceeded keys off). note_connectable_ only
+        // touches addresses already known to be Teslas, so it's a no-op for everything else.
+        switch (event->disc.event_type) {
+            case BLE_HCI_ADV_RPT_EVTYPE_ADV_IND:
+            case BLE_HCI_ADV_RPT_EVTYPE_DIR_IND:     note_connectable_(event->disc.addr, true);  break;
+            case BLE_HCI_ADV_RPT_EVTYPE_SCAN_IND:
+            case BLE_HCI_ADV_RPT_EVTYPE_NONCONN_IND: note_connectable_(event->disc.addr, false); break;
+            default: break;  // SCAN_RSP
+        }
+
         // Tesla vehicles advertise by NAME ("S<hex>C", derived from the VIN) — the
         // 128-bit service UUID is NOT in the advertisement/scan-response, so we match
         // on the name (carried in the scan response). The service UUID is only used
@@ -346,12 +415,14 @@ int BleClient::on_gap_event(ble_gap_event* event) {
         want_connect_ = false;
         scanning_     = false;
         ble_gap_disc_cancel();
+        last_connect_attempt_us_ = esp_timer_get_time();   // marks the link as "actively trying"
         rc = ble_gap_connect(BLE_OWN_ADDR_PUBLIC,
                              &event->disc.addr,
                              10000, nullptr,
                              gap_event_cb, this);
         if (rc != 0) {
             ESP_LOGE(TAG, "connect failed: %d", rc);
+            connect_fail_count_++;
             connecting_ = false;
             ensure_scanning_();
         }
@@ -362,6 +433,7 @@ int BleClient::on_gap_event(ble_gap_event* event) {
         connecting_ = false;
         if (event->connect.status != 0) {
             ESP_LOGE(TAG, "connect error: %d", event->connect.status);
+            connect_fail_count_++;   // advert was heard but the link never came up
             if (on_connected_) on_connected_(false);
             // Keep the intent so an in-flight command retries within its timeout
             // window; ensure_connected_() clears it via stop_connecting() on timeout.
@@ -371,6 +443,7 @@ int BleClient::on_gap_event(ble_gap_event* event) {
         }
         conn_handle_  = event->connect.conn_handle;
         want_connect_ = false;
+        connect_fail_count_ = 0;   // link is up — clear the "can't connect" signal
         ESP_LOGI(TAG, "connected, handle=%d", conn_handle_);
 
         // Reset discovery state for this fresh connection.

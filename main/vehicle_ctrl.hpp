@@ -223,9 +223,18 @@ public:
         return ble_ ? ble_->nearby() : std::vector<TeslaScan>{};
     }
     bool ble_rssi(int8_t& out) const { return ble_ && ble_->connected_rssi(out); }
+    // Last-seen target advert RSSI, valid even while not connected (for the "can't connect"
+    // signal-strength display). false if nothing seen.
+    bool ble_seen_rssi(int8_t& out) const { return ble_ && ble_->last_advert_rssi(out); }
     std::string ble_peer() const { return ble_ ? ble_->peer_addr_str() : std::string{}; }
     void ble_scan(int ms = 12000) { if (ble_) ble_->start_discovery(ms); }
     bool ble_scanning() const { return ble_ && ble_->is_scanning(); }
+    // Consecutive recent connect failures to the target car (0 = none / out of range). Lets
+    // the web UI show "found the car but can't connect" instead of blaming BLE range.
+    uint32_t ble_connect_fail() const { return ble_ ? ble_->connect_fail_recent() : 0; }
+    // Target car's advert connectability: -1 unknown, 0 non-connectable (≈ at its BLE
+    // connection limit), 1 connectable. Tells "car at its ~3-device limit" from "link failing".
+    int ble_target_connectable() const { return ble_ ? ble_->target_connectable() : -1; }
     bool has_key();      // a private key exists in NVS
     bool has_session();  // a VCSEC session exists in NVS (i.e. paired & handshaked)
     // True after a pairing was *lost* (key deleted on the car side) and a re-pair is

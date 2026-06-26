@@ -222,6 +222,9 @@ code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
 .crow .cv .dbm{flex:none; font-size:13px; font-weight:500; color:var(--muted); white-space:nowrap}
 /* SSID / MAC takes the rest; ellipsis (not wrap) is the narrow-phone fallback */
 .crow .cv .nm{flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+/* no-VIN nearby-Tesla list under the BLE row: one line per car, sorted by signal */
+.crow .cv .btlist{display:flex; flex-direction:column; gap:7px; width:100%}
+.crow .cv .btrow{display:flex; align-items:center; gap:6px; width:100%}
 .crow.tap{cursor:pointer; -webkit-tap-highlight-color:transparent; padding-right:24px}
 .crow.tap:active{background:var(--soft)}
 .crow .cedit{position:absolute; right:2px; top:50%; transform:translateY(-50%); width:15px; height:15px;
@@ -393,6 +396,16 @@ function ringSleep(sz,fast){
     '</svg>';
 }
 var BOLT='<svg viewBox="0 0 24 24" width="38" height="38" style="fill:var(--muted);opacity:.4"><path d="M13 2 4 14h6l-1 8 9-12h-6l1-8z"/></svg>';
+// Bluetooth rune — "can't connect" hero glyph, in warn-orange (same --warn as the "At
+// connection limit" row); the ring stays grey via ringSVG(0,true).
+var BT='<svg class="glyphbig" viewBox="0 0 24 24" width="40" height="40" fill="none" stroke="var(--warn)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m7 7 10 10-5 5V2l5 5L7 17"/></svg>';
+// Bluetooth rune in grey — neutral hero glyph for the pre-paired setup steps ("Set up needed"
+// and "Pairing"): the flow is about the BLE link, not an error (the orange BT above is the
+// failure state).
+var BTG='<svg class="glyphbig" viewBox="0 0 24 24" width="40" height="40" fill="none" stroke="var(--muted)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="opacity:.5"><path d="m7 7 10 10-5 5V2l5 5L7 17"/></svg>';
+// NFC keycard (card + contactless waves), grey — "Pairing" hero glyph: rest a Tesla NFC
+// keycard on the console reader, then approve on the touchscreen (mirrors the hero text).
+var CARD='<svg class="glyphbig" viewBox="0 0 24 24" width="44" height="44" fill="none" stroke="var(--muted)" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" style="opacity:.6"><rect x="2" y="7" width="13" height="10" rx="2"/><path d="M2 10.4H15"/><path d="M17.6 9.3a4 4 0 0 1 0 5.4"/><path d="M20 7.6a7 7 0 0 1 0 8.8"/></svg>';
 // crescent moon — asleep hero glyph (grey, soft; pairs with the muted ring)
 var MOON='<svg class="glyphbig" viewBox="0 0 24 24" width="52" height="52" style="fill:var(--muted);opacity:.72"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>';
 // parking "P" — "idle" hero glyph: car is parked & reachable but not provably asleep, so we
@@ -585,6 +598,16 @@ function render(s){
       ichips.push(copChip(s));
       ichips.push(defrostChip(s));
       hst.innerHTML=ichips.join('');
+    } else if((s.ble&&s.ble.connect_fail)>=2){
+      // Paired, but the BLE link won't come up despite repeated attempts. Surface WHY — exactly
+      // like the setup flow — instead of hiding the hero (which looks like the car is off/away).
+      // car_connectable===false ⇒ the car is at its ~3-device BLE limit (no slot for us).
+      var pcc=s.ble.car_connectable;
+      hicHTML=ringSVG(0,true)+'<div class="glyph">'+BT+'</div>';
+      setHTML(hl,'<span>Connection failed</span>');
+      hs.textContent=(pcc===false)
+        ? 'The car has too many Bluetooth devices connected.'
+        : 'Move the device closer, or disconnect other devices using the car.';
     } else {
       // 'unreachable' (drove off / out of range / deep sleep) OR 'unknown' (nothing heard
       // since boot — the on-demand BLE link hasn't reached the car yet). In neither case do
@@ -594,13 +617,27 @@ function render(s){
       $("hero").classList.add('hide');
     }
   } else if(!configured){
-    hicHTML=ringSVG(0,true)+'<div class="glyph">'+BOLT+'</div>';
+    hicHTML=ringSVG(0,true)+'<div class="glyph">'+BTG+'</div>';
     setHTML(hl,'<span>Set up needed</span>');
     hs.textContent=hasVin?'Generate a security key below.':'Add the vehicle VIN below to begin.';
   } else if(linked){
-    hicHTML=ringSVG(0,true)+'<div class="glyph">'+BOLT+'</div>';
+    hicHTML=ringSVG(0,true)+'<div class="glyph">'+CARD+'</div>';
     setHTML(hl,'<span>Pairing</span>');
     hs.textContent='Approve the request on your Tesla’s touchscreen.';
+  } else if((s.ble&&s.ble.connect_fail)>=2){
+    // The car WAS found (advert heard, name matches the VIN) but every connection attempt
+    // times out. Don't blame range — the signal is fine. Distinguish the two real causes the
+    // same way Tesla's own vehicle-command does, via the advert's connectable flag:
+    //   car_connectable===false → the car advertises non-connectable ⇒ it's at its BLE
+    //     connection limit (~3 keys/devices), so no slot is free.
+    //   otherwise → it accepts connections but the link still fails ⇒ weak signal or another
+    //     proxy contending for the link.
+    var cc=s.ble.car_connectable;
+    hicHTML=ringSVG(0,true)+'<div class="glyph">'+BT+'</div>';
+    setHTML(hl,'<span>Connection failed</span>');
+    hs.textContent=(cc===false)
+      ? 'The car has too many Bluetooth devices connected.'
+      : 'Move the device closer, or disconnect other devices using the car.';
   } else {
     hicHTML=ringSVG(0,true)+'<div class="glyph">'+BOLT+'</div>';
     setHTML(hl,'<span>Looking for your car</span>');
@@ -620,12 +657,38 @@ function render(s){
 
   // bluetooth — link to the car
   var ble=s.ble||{}, bc=$("bleConn");
-  if(linked){
+  if(!hasVin){
+    // No VIN configured: the device never connects/enrols (pairing is gated off), it only
+    // discovers. List every nearby Tesla, sorted by signal strength, in the SAME layout as the
+    // connected row: bars, dBm, then MAC. While the first scan is still running with nothing
+    // seen yet, fall back to the "Searching…" animation.
+    var nd=ble.devices||[];
+    if(nd.length){
+      bc.className='cv';
+      bc.innerHTML='<div class="btlist">'+nd.map(function(d){
+        return '<div class="btrow">'+barsHTML(d.rssi)+
+               '<span class="dbm">'+d.rssi+' dBm</span>'+
+               '<span class="nm mac">'+esc(d.addr)+'</span></div>';
+      }).join('')+'</div>';
+    } else {
+      bc.className='cv'; setHTML(bc,searchBarsHTML()+'<span>Searching…</span>');
+    }
+  } else if(linked){
     var bbars=(ble.rssi!=null)?barsHTML(ble.rssi):'';                          // bars (signal glyph)
     var bdbm=(ble.rssi!=null)?'<span class="dbm">'+ble.rssi+' dBm</span>':'';  // numeric reading
     var btxt=ble.addr?'<span class="nm mac">'+esc(ble.addr)+'</span>':'';
     bc.className='cv ok';
     setHTML(bc,bbars+bdbm+btxt);
+  } else if(ble.connect_fail>=2){
+    // Car found but the link keeps timing out (see the hero) — show it as a warning on the
+    // Bluetooth row rather than the neutral "Searching…", which would imply it can't find the
+    // car. Show real signal bars + dBm (the signal itself is fine — the link slot is the
+    // problem), and name the reason (non-connectable ⇒ at the car's BLE-connection limit).
+    // ble.rssi is the last-seen advert RSSI; fall back to the strongest entry in devices[].
+    var sr=(ble.rssi!=null)?ble.rssi:(ble.devices||[]).reduce(function(a,d){return d.rssi>a?d.rssi:a;},null);
+    var sdbm=(sr!=null)?'<span class="dbm">'+sr+' dBm</span>':'';
+    var rt=(ble.car_connectable===false)?'At connection limit':'Connection failed';
+    bc.className='cv warn'; setHTML(bc,barsHTML(sr)+sdbm+'<span>'+rt+'</span>');
   } else if(ble.scanning){
     // searching for the car — the signal bars sit where they do when connected, but fill up
     // green one after another (CSS .bars.search animation) instead of a spinner; it appears

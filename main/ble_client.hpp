@@ -51,9 +51,11 @@ static constexpr size_t BLE_CHUNK_SIZE = 20;
 
 // A nearby Tesla vehicle seen while scanning (not connected).
 struct TeslaScan {
-    std::string addr;   // "aa:bb:cc:dd:ee:ff"
-    std::string name;   // advertised local name, if any
-    int8_t      rssi;   // dBm
+    std::string addr;        // "aa:bb:cc:dd:ee:ff"
+    std::string name;        // advertised local name, if any
+    int8_t      rssi;        // dBm
+    bool        connectable; // last-seen advert was connectable (false ⇒ car at its BLE
+                             // connection limit — mirrors vehicle-command's Connectable check)
 };
 
 class BleClient : public TeslaBLE::BleAdapter {
@@ -85,6 +87,16 @@ public:
 
     // RSSI (dBm) of the active connection; false if not connected / unavailable.
     bool connected_rssi(int8_t& out) const;
+
+    // Best-known advert RSSI of the target, valid even while NOT connected: it's seeded from
+    // the advert on every connect attempt and the failed-connect path doesn't clear it (only a
+    // real link-drop does). Lets the web UI show real bars + dBm in the "can't connect" state
+    // instead of empty bars. false if nothing seen / the link genuinely dropped.
+    bool last_advert_rssi(int8_t& out) const {
+        if (!conn_rssi_valid_) return false;
+        out = conn_rssi_;
+        return true;
+    }
     // Snapshot of nearby Tesla vehicles seen while scanning (recent only).
     std::vector<TeslaScan> nearby() const;
     // Drop a pending connect intent (called when a command's connect attempt ends).
@@ -93,6 +105,21 @@ public:
     void start_discovery(int ms);
     void on_scan_timeout();   // internal (timer callback)
     bool is_scanning() const { return scanning_; }
+
+    // Consecutive failed connects to the *target* car — its advert was heard and the
+    // VIN-derived name matched, but ble_gap_connect timed out/errored so the link never came
+    // up (e.g. another device is already holding the car's BLE connection). Reset on a
+    // successful connect. Returns 0 once attempts stop (>30 s since the last one) so a car
+    // that simply drove off reads as "out of range", not "failing". The web UI uses this to
+    // tell "found the car but can't connect" apart from "looking for the car".
+    uint32_t connect_fail_recent() const;
+
+    // Connectability of the *target* car's most recent advert, mirroring how Tesla's official
+    // vehicle-command derives ErrMaxConnectionsExceeded (it keys off the scan result's
+    // Connectable flag, NOT the connect error — a vehicle at its BLE connection limit
+    // advertises non-connectable). -1 = target not seen recently / not yet known,
+    // 0 = advertising NON-connectable (≈ at its ~3-device BLE limit), 1 = connectable.
+    int target_connectable() const;
 
     // Called from NimBLE host task callbacks — not for external use
     void on_sync();
@@ -105,11 +132,17 @@ private:
     void start_scan_();
     void ensure_scanning_();
     void note_scan_(const ble_gap_disc_desc& d, const ble_hs_adv_fields& f);
+    // Update a known scan entry's connectability by address — for primary adverts that carry
+    // no name (Tesla puts the name in the SCAN_RSP, but connectability only on the primary
+    // advert), so we record it by address and read it back once the name has matched.
+    void note_connectable_(const ble_addr_t& addr, bool connectable);
     void subscribe_notify_();
     void write_chunk_(const uint8_t* data, size_t len);
 
     // Discovery: nearby Teslas seen while not connected, and the connect intent.
-    struct ScanEntry { uint8_t addr[6]; char name[24]; int8_t rssi; int64_t last_us; };
+    struct ScanEntry { uint8_t addr[6]; char name[24]; int8_t rssi; int64_t last_us;
+                       bool connectable; };  // connectable defaults true; flipped only on an
+                                             // observed non-connectable primary advert
     std::vector<ScanEntry> scan_;
     SemaphoreHandle_t      scan_mutex_{nullptr};
     esp_timer_handle_t     scan_timer_{nullptr};
@@ -127,6 +160,11 @@ private:
     RxDataCb    on_rx_data_;
 
     uint16_t conn_handle_{BLE_HS_CONN_HANDLE_NONE};
+    // Connect-failure tracking for the target car (see connect_fail_recent()). Stamped on
+    // every connect attempt; the count climbs on each GAP connect error and resets on a
+    // successful link. Both are touched only from the NimBLE host task / status reader.
+    volatile uint32_t connect_fail_count_{0};
+    volatile int64_t  last_connect_attempt_us_{0};
     uint16_t write_handle_{0};
     uint16_t notify_handle_{0};
     uint16_t notify_val_handle_{0};
