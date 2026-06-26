@@ -1,4 +1,6 @@
 #include "vehicle_ctrl.hpp"
+#include "logic/vin.hpp"
+#include "logic/units.hpp"
 #include <esp_log.h>
 #include <esp_heap_caps.h>
 #include <cstdio>
@@ -199,9 +201,9 @@ void parse_drive_state(const CarServer_DriveState& ds, DriveStateResult& out) {
     }
     if (ds.which_optional_odometer_in_hundredths_of_a_mile ==
         CarServer_DriveState_odometer_in_hundredths_of_a_mile_tag) {
-        // hundredths of a mile → km
-        out.odometer_km = ds.optional_odometer_in_hundredths_of_a_mile.odometer_in_hundredths_of_a_mile
-                          * 0.01f * 1.609344f;
+        // hundredths of a mile → km (logic/units.hpp, host-tested)
+        out.odometer_km = (float)tk::odo_hundredths_mi_to_km(
+            ds.optional_odometer_in_hundredths_of_a_mile.odometer_in_hundredths_of_a_mile);
         out.has_odometer = true;
     }
 }
@@ -424,13 +426,7 @@ bool VehicleController::init(const std::string& vin,
 // Used to gate pairing so the device never connects/enrols without a real VIN — the boot
 // placeholder "UNKNOWN" (7 chars) is not plausible, so it can never reach the matching path.
 bool VehicleController::vin_is_plausible(const std::string& vin) {
-    if (vin.size() != 17) return false;
-    for (char c : vin) {
-        bool ok = (c >= '0' && c <= '9') ||
-                  ((c >= 'A' && c <= 'Z') && c != 'I' && c != 'O' && c != 'Q');
-        if (!ok) return false;
-    }
-    return true;
+    return tk::vin_is_plausible(vin);  // single source of truth (logic/vin.hpp, host-tested)
 }
 
 // Automatic pairing supervisor. The hard constraint is the tesla-ble library's
@@ -1189,8 +1185,10 @@ void VehicleController::clear_session_and_cache_() {
     ESP_LOGI(TAG, "pairing/session cleared");
 }
 
-// Derived connectivity state — see the enum doc in vehicle_ctrl.hpp. Centralised here so
-// the web UI (/status) and the MQTT/HA bridge consume one consistent answer.
+// Derived connectivity state — see the enum doc in vehicle_ctrl.hpp and the pure decision in
+// logic/link_state.hpp. Centralised so the web UI (/status) and the MQTT/HA bridge consume one
+// consistent answer. The k* thresholds below are defined in logic/link_state.hpp; their
+// rationale:
 //   kAwakeMaxAgeS     mirrors the old per-file thresholds (charge polls refresh contact
 //                     every ~10 s while the window is open, so 60 s won't flap).
 //   kReachableMaxAgeS must span TWO full idle health-probe cycles incl. one missed probe so a
@@ -1206,27 +1204,16 @@ void VehicleController::clear_session_and_cache_() {
 //                     a momentary ASLEEP blip can't flip the UI to "Vehicle asleep"; 120 s
 //                     needs the flag to stay ASLEEP across at least two idle health probes.
 VehicleController::LinkState VehicleController::link_state() const {
-    static constexpr uint32_t kAwakeMaxAgeS     = 60;
-    static constexpr uint32_t kReachableMaxAgeS = 150;
-    static constexpr uint32_t kAsleepDebounceS  = 120;  // VCSEC must hold ASLEEP this long
-    uint32_t age = 0;
-    if (seconds_since_contact(age) && age < kAwakeMaxAgeS) return LinkState::Awake;
-    if (seconds_since_reachable(age) && age < kReachableMaxAgeS) {
-        // Reachable over VCSEC but no fresh infotainment data. Do NOT assert "asleep" the
-        // instant we stop polling — that mislabelled an awake-but-idle car as sleeping (the
-        // very bug this fixes: the car answers the VCSEC health poll the whole time, so the
-        // old `reachable && !awake ⇒ Asleep` flipped to "Vehicle asleep" ~60 s after the
-        // last command even while the car was wide awake). Require positive, debounced proof
-        // instead: the car's own VCSEC sleep flag must have held ASLEEP for kAsleepDebounceS
-        // (so a Cabin-Overheat-Protection AWAKE↔ASLEEP flap, ~60 s, never flips the UI).
-        // Without that proof we honestly do not know ⇒ Idle (neutral standby, never "asleep").
-        if (vcsec_stably_asleep_(kAsleepDebounceS)) return LinkState::Asleep;
-        return LinkState::Idle;
-    }
-    // Heard something at some point but it's now stale ⇒ unreachable; never heard ⇒ unknown.
-    if (last_reachable_ticks_.load() != 0 || last_contact_ticks_.load() != 0)
-        return LinkState::Unreachable;
-    return LinkState::Unknown;
+    // Snapshot the atomic member state and hand it to the pure, host-tested decision in
+    // logic/link_state.hpp. The rationale for each state (and the Asleep-debounce that
+    // stops an awake-but-idle car being mislabelled "asleep" the instant polling stops,
+    // surviving the ~60 s Cabin-Overheat-Protection AWAKE↔ASLEEP flap) lives there and on
+    // the member declaration in vehicle_ctrl.hpp.
+    tk::LinkInputs in;
+    in.have_contact        = seconds_since_contact(in.contact_age_s);
+    in.have_reachable      = seconds_since_reachable(in.reachable_age_s);
+    in.vcsec_stably_asleep = vcsec_stably_asleep_(tk::kAsleepDebounceS);
+    return tk::compute_link_state(in);
 }
 
 bool VehicleController::reset_for_new_vehicle() {

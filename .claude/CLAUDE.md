@@ -22,6 +22,21 @@ The `report-capabilities.sh` SessionStart hook prints what the current environme
 Real builds/flashes run on a host with Docker + the board attached (see the `flash-esp32`
 skill) or in CI (`.github/workflows/build.yml`).
 
+**But there IS a real local verification loop** — the host-side mock build runs the project's
+pure logic with the plain system toolchain (no ESP-IDF/Docker/board), so logic changes can be
+*verified*, not just reasoned about, even in a cloud session:
+
+```bash
+scripts/run-mock-tests.sh   # compile + run host logic tests in seconds (cmake + g++/clang++)
+```
+
+It covers VIN validation, imperial→metric conversion, the `link_state()` four-state machine
+(incl. the debounced-ASLEEP asymmetry) and its `/status`/MQTT strings, and the per-target
+platform/OTA-suffix mapping — all delegated to IDF-free headers in `main/logic/` so the device
+runs the same code the test does. CI gates the firmware build on it (`logic-test` job). Add new
+hardware-free logic to `main/logic/` and a `CHECK` in `test/test_logic.cpp`. Full detail:
+[`test/README.md`](../test/README.md).
+
 ## Build & Flash
 
 No local ESP-IDF — builds run via `scripts/idf-docker.sh`, which uses the `espressif/idf`
