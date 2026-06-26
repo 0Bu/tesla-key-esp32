@@ -588,6 +588,7 @@ void VehicleController::loop_task_fn_(void* arg) {
     uint32_t last_tele_ticks    = 0;
     int      tele_idx           = 0;  // rotates the telemetry domain polled each cycle
     bool     prev_window        = false;  // edge-detect the active window
+    auto     prev_sleep         = TeslaBLE::SleepState::UNKNOWN;  // edge-detect VCSEC sleep flag
     while (true) {
         xSemaphoreTake(self->vehicle_mutex_, portMAX_DELAY);
         // loop() pumps the command/wake state machine and processes inbound messages, so it
@@ -633,6 +634,27 @@ void VehicleController::loop_task_fn_(void* arg) {
         // that queue mid-handshake corrupts the pairing exchange (overlapping responses →
         // RX reassembly errors → pairing never completes).
         bool paired = self->has_session();
+
+        // ── VCSEC sleep-flag sampler (feeds link_state()'s asleep debounce) ───────────────
+        // The library updates Vehicle::sleep_state() from the car's vehicleSleepStatus on
+        // every VCSEC poll, including auto_pair_task's idle health probe — the only BLE
+        // traffic while parked. Sample it here (cheap word-sized read; the RX task writes it,
+        // a benign race) and fold it into the debounce clock so link_state() can require a
+        // STABLE ASLEEP run before showing "Vehicle asleep". UNKNOWN leaves the clock alone.
+        // Log only on a transition so the serial console reveals what the car actually reports
+        // (e.g. whether VCSEC ever asserts ASLEEP, or just flaps for COP) without spamming.
+        if (paired) {
+            TeslaBLE::SleepState st = self->vehicle_->sleep_state();
+            if (st != prev_sleep) {
+                ESP_LOGI(TAG, "VCSEC sleep flag: %s",
+                         st == TeslaBLE::SleepState::ASLEEP ? "ASLEEP"
+                       : st == TeslaBLE::SleepState::AWAKE  ? "AWAKE" : "UNKNOWN");
+                prev_sleep = st;
+            }
+            if (st == TeslaBLE::SleepState::ASLEEP)     self->note_vcsec_sleep_(true);
+            else if (st == TeslaBLE::SleepState::AWAKE)  self->note_vcsec_sleep_(false);
+            // UNKNOWN: leave the run untouched.
+        }
 
         // ── Active-window gate ──────────────────────────────────────────────────────────
         // The three background blocks below open an INFOTAINMENT session, which keeps the
@@ -877,7 +899,8 @@ bool VehicleController::wake_up(int timeout_ms) {
     // "Awake" that matters here is the INFOTAINMENT computer — it serves SOC/charge/climate —
     // NOT the always-on VCSEC body controller. A parked, reachable car answers a VCSEC status
     // poll with sleep_status="AWAKE" even while its infotainment sleeps; that is exactly why
-    // link_state() ignores the raw VCSEC string (see its doc / CLAUDE.md). The previous code
+    // link_state()==Awake never trusts the VCSEC AWAKE flag (only the debounced ASLEEP one —
+    // see its doc / CLAUDE.md) and requires live infotainment telemetry. The previous code
     // used that VCSEC "AWAKE" BOTH to short-circuit ("already awake") AND to confirm the wake,
     // so on a nearby-sleeping car it returned success in ~0.4 s WITHOUT ever sending the wake:
     // the car never woke and the web-UI spinner just timed out. Trust live telemetry instead.
@@ -1157,6 +1180,7 @@ void VehicleController::clear_session_and_cache_() {
     }
     last_contact_ticks_.store(0);    // no live data anymore → "asleep" card has nothing to show
     last_reachable_ticks_.store(0);  // and no proven reachability → link_state() back to Unknown
+    vcsec_asleep_since_ticks_.store(0);  // forget any debounced sleep run from the old pairing
     ESP_LOGI(TAG, "pairing/session cleared");
 }
 
@@ -1173,12 +1197,27 @@ void VehicleController::clear_session_and_cache_() {
 //                     a failed probe on the flaky link to a sleeping car adds another ~30 s
 //                     wait + timeout. 150 s clears two such cycles with margin while a
 //                     genuinely-gone car still flips to Unreachable in ~2.5 min.
+//   kAsleepDebounceS  must outlast the COP-driven VCSEC AWAKE↔ASLEEP flap (~60 s observed) so
+//                     a momentary ASLEEP blip can't flip the UI to "Vehicle asleep"; 120 s
+//                     needs the flag to stay ASLEEP across at least two idle health probes.
 VehicleController::LinkState VehicleController::link_state() const {
     static constexpr uint32_t kAwakeMaxAgeS     = 60;
     static constexpr uint32_t kReachableMaxAgeS = 150;
+    static constexpr uint32_t kAsleepDebounceS  = 120;  // VCSEC must hold ASLEEP this long
     uint32_t age = 0;
-    if (seconds_since_contact(age)   && age < kAwakeMaxAgeS)     return LinkState::Awake;
-    if (seconds_since_reachable(age) && age < kReachableMaxAgeS) return LinkState::Asleep;
+    if (seconds_since_contact(age) && age < kAwakeMaxAgeS) return LinkState::Awake;
+    if (seconds_since_reachable(age) && age < kReachableMaxAgeS) {
+        // Reachable over VCSEC but no fresh infotainment data. Do NOT assert "asleep" the
+        // instant we stop polling — that mislabelled an awake-but-idle car as sleeping (the
+        // very bug this fixes: the car answers the VCSEC health poll the whole time, so the
+        // old `reachable && !awake ⇒ Asleep` flipped to "Vehicle asleep" ~60 s after the
+        // last command even while the car was wide awake). Require positive, debounced proof
+        // instead: the car's own VCSEC sleep flag must have held ASLEEP for kAsleepDebounceS
+        // (so a Cabin-Overheat-Protection AWAKE↔ASLEEP flap, ~60 s, never flips the UI).
+        // Without that proof we honestly do not know ⇒ Idle (neutral standby, never "asleep").
+        if (vcsec_stably_asleep_(kAsleepDebounceS)) return LinkState::Asleep;
+        return LinkState::Idle;
+    }
     // Heard something at some point but it's now stale ⇒ unreachable; never heard ⇒ unknown.
     if (last_reachable_ticks_.load() != 0 || last_contact_ticks_.load() != 0)
         return LinkState::Unreachable;

@@ -182,18 +182,28 @@ grouped under one device. **Read-only by design** — no command topics are subs
   than a phantom 0. **Units:** Tesla reports range/rate/odometer imperial; the MQTT bridge
   converts to metric (km, km/h) — only the Tesla-compatible `/api` path keeps miles (evcc).
 - **sleep_state** comes from `VehicleController::link_state()` — the *single* source of truth
-  shared with the web UI so the two never drift — NOT the raw cached VCSEC string (which only
-  updates on a window-gated poll and would pin on `AWAKE` once the car sleeps). Three values:
-  `AWAKE` (fresh live telemetry, < 60 s), `ASLEEP` (no live data but the always-on VCSEC
-  health poll still answers ⇒ parked & sleeping nearby), and `UNREACHABLE` (the car answers
-  *nothing* over BLE ⇒ driven off / out of range / deep sleep — published explicitly instead
-  of a phantom `ASLEEP`; nothing heard since boot/re-pair ⇒ omitted so HA shows "unknown").
+  shared with the web UI so the two never drift. Four published values:
+  `AWAKE` (fresh live infotainment telemetry, < 60 s), `ASLEEP` (no live data AND **proven,
+  debounced** sleep — the car's own VCSEC sleep flag, read from the library's
+  `Vehicle::sleep_state()` and sampled in `loop_task`, has held `ASLEEP` for ≥ `kAsleepDebounceS`
+  ≈ 120 s while still reachable, so a Cabin-Overheat-Protection `AWAKE↔ASLEEP` flap (~60 s)
+  can't trip it), `IDLE` (reachable over BLE but **not provably asleep** — we stopped polling
+  the infotainment domain to let the car sleep and the VCSEC flag hasn't confirmed; we honestly
+  don't know, so we never claim sleep), and `UNREACHABLE` (the car answers *nothing* over BLE ⇒
+  driven off / out of range / deep sleep). Nothing heard since boot/re-pair ⇒ omitted so HA
+  shows "unknown". **Asymmetry (important):** `link_state()` trusts the VCSEC flag's *debounced
+  `ASLEEP`* as positive proof of sleep, but **never** trusts its `AWAKE` reading to claim
+  `AWAKE` (a parked car reports VCSEC `AWAKE` while its infotainment sleeps — the old
+  `wake_up()` trap); `AWAKE` still requires live infotainment telemetry, so a wrong VCSEC
+  `AWAKE` can only leave us in `IDLE`, never falsely `AWAKE`. The raw (un-debounced) flag is
+  also surfaced as `vcsec_sleep` in `/status` for diagnostics.
   The web UI mirrors this exactly: it shows the "Vehicle asleep" hero (with the wake button)
-  **only** when `ASLEEP` is a proven fact, and hides the hero entirely for both `UNREACHABLE`
-  *and* the unknown state (nothing heard since boot — the on-demand BLE link hasn't reached the
-  car yet) — in neither case is there an honest status to show, so it never claims the car is
-  asleep on a guess. The momentary BLE row reading "Disconnected" is normal (the link is
-  dropped between polls by design) and is not used to drive the hero — only `link` is.
+  **only** when `ASLEEP` is a proven fact; for `IDLE` it shows a neutral **"Geparkt"** (parked)
+  card (last-known SOC + idle time + the same wake button) that makes no sleep claim; and it hides
+  the hero entirely for both `UNREACHABLE` *and* the unknown state (nothing heard since boot —
+  the on-demand BLE link hasn't reached the car yet). The momentary BLE row reading
+  "Disconnected" is normal (the link is dropped between polls by design) and is not used to
+  drive the hero — only `link` is.
   Reachability is tracked by a
   `last_reachable_ticks_` clock stamped on every successful signed round-trip, incl. the idle
   health poll. **last boot** is published as an ISO-8601 timestamp (device_class
