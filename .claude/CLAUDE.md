@@ -56,13 +56,17 @@ Never edit files in `managed_components/` — they are regenerated.
 
 ## Commands Implemented
 
-All commands: `charge_start`, `charge_stop`, `set_charging_amps`, `set_charge_limit`,
-`wake_up`, `charge_port_door_open/close`, `door_lock/unlock` (sent but rejected by the car
-for the Charging-Manager role — present for API completeness), `flash_lights`,
-`honk_horn`, `set_sentry_mode`, `auto_conditioning_start/stop`,
-`set_scheduled_charging` (`{"enable":bool,"start_minutes":int}` — minutes after local
-midnight; daily charge start time. Scheduled *departure* is not exposed: the tesla-ble
-version in use registers no builder for `scheduledDepartureAction`).
+**Run on the Charging-Manager key (actually execute):** `charge_start`, `charge_stop`,
+`set_charging_amps`, `set_charge_limit`, `set_scheduled_charging`
+(`{"enable":bool,"start_minutes":int}` — minutes after local midnight; daily charge start time.
+Scheduled *departure* is not exposed: the tesla-ble version in use registers no builder for
+`scheduledDepartureAction`), `charge_port_door_open/close`, `wake_up`.
+
+**Accepted by the API but rejected by the car for the Charging-Manager role** (sent for API
+completeness, never execute — the key has no door/body/climate privilege): `door_lock/unlock`,
+`flash_lights`, `honk_horn`, `set_sentry_mode`, `auto_conditioning_start/stop`. The firmware
+already treats these as role-refused ("authentication failed") and does **not** let that count
+toward a pairing revocation (only the health probe / an explicit "whitelist" fault does).
 
 ## Read-only telemetry
 
@@ -235,11 +239,16 @@ The web UI keys everything (control buttons, SOC) off `paired` (= `has_session()
 stored VCSEC session in NVS). Three events invalidate a pairing and force a clean re-pair
 so no stale data is shown (`clear_session_and_cache_()` in `vehicle_ctrl.cpp`):
 
-1. **Key deleted on the car side** — auto-detected. Any signed command failing with
-   `KEY_NOT_ON_WHITELIST` (substring `"whitelist"` in `make_result_cb_`) sets
-   `pairing_lost_`; `auto_pair_task` also runs a periodic signed VCSEC `health_probe_`
-   (~30 s) so it's caught even with no evcc traffic. On detection the key is regenerated
-   (the old one is useless), session + cache cleared, and pairing restarts.
+1. **Key deleted on the car side** — auto-detected three ways: (a) the **primary** detector,
+   the `set_message_callback` observer in `vehicle_ctrl.cpp`, matches a signed-message fault
+   (`UNKNOWN_KEY_ID`/`INACTIVE_KEY`/`INVALID_KEY_HANDLE`) — the path that actually fires on an
+   already-established (cached) session, e.g. the background charge poll; (b) any reply whose
+   message contains `"whitelist"` (`KEY_NOT_ON_WHITELIST`, only during a session-info handshake)
+   in `make_result_cb_`; (c) a two-strike `"authentication failed"` honoured **only** for the
+   periodic signed VCSEC `health_probe_` (~30 s), so a deletion is caught even with no evcc
+   traffic while a role-denied user command can never trip it. Each sets `pairing_lost_`; on
+   detection the key is regenerated (the old one is useless), session + cache cleared, and
+   pairing restarts.
 2. **Key regenerated** (`/gen_keys?force=1`) — `generate_key()` now also clears the
    session + cache and drops the BLE link.
 3. **VIN changed** (`/set_vin`) — `reset_for_new_vehicle()` regenerates the key, clears
@@ -266,7 +275,9 @@ vehicle VIN below to begin." when no VIN is set, so it never implies pairing wit
 - Private key stored in NVS unencrypted — secure physical access to the device
 - Keys are enrolled as **Charging Manager only** (charging + wake); owner role is not exposed (`?role=owner` → `403`). Sole purpose is the evcc BLE integration.
 - BLE connection is on-demand; first command after idle takes ~3-5s for scan+connect
-- Tesla allows max 3 simultaneous BLE keys per vehicle
+- Tesla keeps max ~3 *simultaneous* BLE connections per vehicle (shared by phone keys + fobs);
+  that connection limit — not a stored-key count — is what blocks pairing when full (matches the
+  `car_connectable`/`ErrMaxConnectionsExceeded` reasoning above)
 - Fragment size: 20 bytes per BLE write chunk (safe for all ESP32 BLE MTU configs)
 - **Memory is tight — the binding limit is the largest *contiguous* free block, not total
   free heap.** Steady-state it is only a few tens of KB (WiFi + NimBLE + MQTT dominate; see
