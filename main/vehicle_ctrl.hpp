@@ -163,13 +163,39 @@ public:
     // Single source of truth for the car's high-level connectivity, shared by the web UI
     // and the MQTT/HA bridge so the two never drift:
     //   Awake       — fresh live infotainment telemetry (we have current data).
-    //   Asleep      — no live data, but the car still answers the VCSEC health poll →
-    //                 parked & sleeping nearby (body controller reachable).
+    //   Asleep      — no live data AND positive, debounced proof the car is sleeping: its
+    //                 own VCSEC sleep flag has held ASLEEP for kAsleepDebounceS while the
+    //                 car stays reachable over BLE (parked & sleeping nearby).
+    //   Idle        — reachable over BLE but no live data and NOT provably asleep yet (we
+    //                 stopped polling the infotainment domain to let the car sleep, and the
+    //                 VCSEC flag has not confirmed sleep). We honestly do not know whether
+    //                 it is awake or asleep, so the UI must not claim either — it shows a
+    //                 neutral "Geparkt" (parked) card (last-known SOC + a wake button), never
+    //                 the confident "Vehicle asleep" hero. This is the state that fixes the bug
+    //                 where an awake-but-idle car was mislabelled asleep the instant polling
+    //                 stopped.
     //   Unreachable — the car answers nothing over BLE → driven off / out of range /
     //                 deep sleep. We genuinely do not know its state.
     //   Unknown     — nothing heard at all since boot / re-pair (nothing to show yet).
-    enum class LinkState { Unknown, Awake, Asleep, Unreachable };
+    // NOTE on VCSEC asymmetry: we trust the VCSEC flag's ASLEEP reading (debounced) as
+    // POSITIVE proof of sleep, but we never trust its AWAKE reading to claim Awake — that
+    // still requires live infotainment telemetry (a parked car reports VCSEC "AWAKE" while
+    // its infotainment sleeps; see wake_up()). So a wrong VCSEC AWAKE can only ever leave us
+    // in Idle, never falsely Awake.
+    enum class LinkState { Unknown, Awake, Asleep, Unreachable, Idle };
     LinkState link_state() const;
+
+    // Current RAW VCSEC sleep belief from the library (updated on every VCSEC poll, incl. the
+    // idle health probe): "AWAKE" / "ASLEEP" / "UNKNOWN". Diagnostic/transparency only — the
+    // hero uses link_state(), which DEBOUNCES this (a single ASLEEP blip is not yet "asleep").
+    const char* vcsec_sleep_raw() const {
+        if (!vehicle_) return "UNKNOWN";
+        switch (vehicle_->sleep_state()) {
+            case TeslaBLE::SleepState::ASLEEP: return "ASLEEP";
+            case TeslaBLE::SleepState::AWAKE:  return "AWAKE";
+            default:                           return "UNKNOWN";
+        }
+    }
 
     bool generate_key();
     // Always enrolls a Charging Manager key (charging + wake only); never an owner key.
@@ -407,6 +433,29 @@ private:
     void note_contact_()   { uint32_t t = xTaskGetTickCount(); last_contact_ticks_.store(t);
                                                                last_reachable_ticks_.store(t); }
     void note_reachable_() { last_reachable_ticks_.store(xTaskGetTickCount()); }
+
+    // VCSEC sleep-flag debounce (see link_state()). The car's body controller reports a
+    // vehicleSleepStatus on every VCSEC poll — including the idle health probe — which the
+    // tesla-ble library tracks in Vehicle::sleep_state(). We sample it in loop_task and mark
+    // here the START tick of an uninterrupted ASLEEP run (0 = not currently ASLEEP). The flag
+    // can flap AWAKE↔ASLEEP (~60 s) while Cabin-Overheat-Protection cycles the A/C, so a
+    // single ASLEEP reading is NOT proof of sleep; link_state() only treats it as asleep once
+    // the run has held for kAsleepDebounceS, which filters those blips. Cleared on a pairing
+    // reset (clear_session_and_cache_).
+    std::atomic<uint32_t> vcsec_asleep_since_ticks_{0};
+    // Fold one sampled VCSEC sleep reading into the debounce clock. ASLEEP starts/continues
+    // the run (keeping its original start tick); AWAKE breaks it. UNKNOWN is not passed here
+    // (the caller leaves the clock untouched so a transient unknown can't reset a real run).
+    void note_vcsec_sleep_(bool asleep) {
+        if (asleep) { uint32_t z = 0; vcsec_asleep_since_ticks_.compare_exchange_strong(z, xTaskGetTickCount()); }
+        else        { vcsec_asleep_since_ticks_.store(0); }
+    }
+    // True once the VCSEC ASLEEP run has held uninterrupted for at least debounce_s seconds.
+    bool vcsec_stably_asleep_(uint32_t debounce_s) const {
+        uint32_t t = vcsec_asleep_since_ticks_.load();
+        if (t == 0) return false;
+        return ((xTaskGetTickCount() - t) / configTICK_RATE_HZ) >= debounce_s;
+    }
 
     // Cached results for non-blocking UI access
     ChargeStateResult   last_known_charge_{};

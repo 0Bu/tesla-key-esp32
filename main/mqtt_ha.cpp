@@ -299,17 +299,19 @@ static void publish_state() {
         }
     }
     // Vehicle reachability / sleep state — taken straight from VehicleController::link_state(),
-    // the same source the web UI uses, so the two never drift. NOT the raw cached VCSEC string
-    // (it only updates on an active-window-gated poll and would pin on "AWAKE" once the car
-    // sleeps). AWAKE = fresh live telemetry; ASLEEP = no live data but the VCSEC health poll
-    // still answers (parked & sleeping nearby); UNREACHABLE = the car answers nothing over BLE
-    // (driven off / out of range / deep sleep) — published explicitly instead of a phantom
-    // "ASLEEP". Nothing heard since boot/re-pair ⇒ omit (HA shows "unknown").
+    // the same source the web UI uses, so the two never drift. AWAKE = fresh live telemetry;
+    // ASLEEP = no live data AND the car's VCSEC sleep flag has held ASLEEP long enough to be
+    // proven (debounced past the COP flap); IDLE = reachable but not provably asleep yet (we
+    // stopped polling to let the car sleep and the flag hasn't confirmed) — published as a
+    // distinct value, never a phantom "ASLEEP"; UNREACHABLE = the car answers nothing over BLE
+    // (driven off / out of range / deep sleep). Nothing heard since boot/re-pair ⇒ omit (HA
+    // shows "unknown").
     {
         const char* ss = nullptr;
         switch (s_vehicle->link_state()) {
             case VehicleController::LinkState::Awake:       ss = "AWAKE";       break;
             case VehicleController::LinkState::Asleep:      ss = "ASLEEP";      break;
+            case VehicleController::LinkState::Idle:        ss = "IDLE";        break;
             case VehicleController::LinkState::Unreachable: ss = "UNREACHABLE"; break;
             default: break;  // Unknown ⇒ omit
         }

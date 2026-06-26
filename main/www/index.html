@@ -395,6 +395,9 @@ function ringSleep(sz,fast){
 var BOLT='<svg viewBox="0 0 24 24" width="38" height="38" style="fill:var(--muted);opacity:.4"><path d="M13 2 4 14h6l-1 8 9-12h-6l1-8z"/></svg>';
 // crescent moon — asleep hero glyph (grey, soft; pairs with the muted ring)
 var MOON='<svg class="glyphbig" viewBox="0 0 24 24" width="52" height="52" style="fill:var(--muted);opacity:.72"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>';
+// parking "P" — "idle" hero glyph: car is parked & reachable but not provably asleep, so we
+// show a neutral "Geparkt" (parked) card (no sleep claim). Matches the Tesla app's wording.
+var PARKED='<svg class="glyphbig" viewBox="0 0 24 24" width="48" height="48" fill="none" stroke="var(--muted)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="opacity:.7"><rect x="4" y="4" width="16" height="16" rx="4"/><path d="M9.5 16V8h3.2a2.4 2.4 0 0 1 0 4.8H9.5"/></svg>';
 // alarm clock — waking hero glyph (grey outline, gently trembling via .wecker)
 var ALARM='<svg class="wecker glyphbig" viewBox="0 0 24 24" width="52" height="52" fill="none" stroke="var(--muted)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="opacity:.82"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l2 2"/><path d="M5 3 2 6"/><path d="m22 6-3-3"/><path d="M6.38 18.7 4 21"/><path d="M17.64 18.67 20 21"/></svg>';
 // charge complete — green check shown in the hero label when the battery has reached its
@@ -567,6 +570,21 @@ function render(s){
       // the car is awake and reporting. Asleep there is nothing to show, and we never wake the
       // car to obtain it.
       hst.innerHTML=chips.join('');
+    } else if(s.link==='idle'){
+      // Reachable over BLE but NOT provably asleep: we stopped polling the infotainment domain
+      // to let the car sleep, and the car's VCSEC sleep flag hasn't held ASLEEP long enough to
+      // confirm. We honestly don't know if it's awake or asleep, so we must NOT claim "asleep".
+      // Show a neutral standby card (last-known battery + idle time) that still offers the wake
+      // button — tapping it fetches a fresh reading (and flips to the live SOC card if awake).
+      hicHTML='<button class="wakebtn" onclick="wakeCar()" title="Tap to wake the car" aria-label="Wake the car">'+ringSleep()+'<span class="glyph">'+PARKED+'</span></button>';
+      setHTML(hl,'<span>Geparkt</span>');
+      hs.textContent='No live reading — tap the icon to wake the car.';
+      var ils=s.last||{}, ilsoc=(ils.soc!=null)?Math.round(ils.soc):null, iago=fmtAgo(s.last_seen_s), ichips=[];
+      if(ilsoc!=null) ichips.push(stat('Battery','<span style="color:'+socColor(ilsoc)+'">'+ilsoc+'</span>','%'));
+      if(iago)        ichips.push(stat('Idle', iago, ''));
+      ichips.push(copChip(s));
+      ichips.push(defrostChip(s));
+      hst.innerHTML=ichips.join('');
     } else {
       // 'unreachable' (drove off / out of range / deep sleep) OR 'unknown' (nothing heard
       // since boot — the on-demand BLE link hasn't reached the car yet). In neither case do
