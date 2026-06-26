@@ -51,12 +51,13 @@ shows the pairing dialog while a Tesla NFC keycard is lying on the center-consol
 1. Park within Bluetooth range (~10 m). The web UI status goes *searching… → connecting…*.
 2. Place an existing Tesla NFC keycard on the center console (the card reader behind the
    cup holders). Only then does the car's touchscreen show a pairing request
-   (*"Add new key"* → *"Confirm"*).
+   (*"Add key"* → *"Confirm"*).
 3. Confirm on the touchscreen. The web UI then shows **paired**.
 
 The new key appears as *"Unknown key"* in the car's key list. It pairs as a Charging Manager
-key only: charging and wake, no door or drive access. A Tesla allows at most 3 Bluetooth keys
-per car (manage in Tesla app → Security → Keys).
+key only: charging and wake, no door or drive access. A Tesla keeps at most ~3 *simultaneous*
+Bluetooth connections (shared across phone keys and fobs); if pairing fails at that limit,
+disconnect another BLE device or remove an unused key (Tesla app → Security → Keys).
 
 ---
 

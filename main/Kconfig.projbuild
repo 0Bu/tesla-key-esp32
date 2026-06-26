@@ -42,8 +42,9 @@ menu "Tesla Key Configuration"
         default "https://0bu.github.io/tesla-key-esp32/"
         help
             HTTPS base URL (a directory, with trailing slash) where the per-target app
-            images are published. The device appends "tesla-key-esp32-<target>.bin" for
-            its own chip (CONFIG_IDF_TARGET) — one channel serves every supported target.
+            images are published. The device appends "tesla-key-esp32<suffix>.bin" for
+            its own chip — <suffix> is "" / -s3 / -c3 / -c6 (so "esp32" appears once),
+            picked at compile time — one channel serves every supported target.
             The image is downloaded and flashed to the inactive OTA slot by esp_https_ota,
             which also verifies the image chip-id and refuses a wrong-target image. Must
             be HTTPS (verified against the bundled CA roots).

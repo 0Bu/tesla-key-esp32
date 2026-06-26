@@ -306,9 +306,11 @@ extern "C" void app_main() {
         ESP_LOGW(TAG, "mDNS init failed");
     }
 
-    // Wall clock: the tesla-ble session-freshness checks (and TLS cert validation for
-    // OTA) need real UTC. NTP is the primary source; the browser (POST /set_time) is a
-    // fallback for networks that block NTP. First restore the last cached time from NVS
+    // Wall clock: TLS cert validation (OTA) and the human-readable key_created/paired_at
+    // timestamps need real UTC. (tesla-ble signed-command freshness does NOT — expires_at
+    // is the vehicle's SessionInfo.ClockTime plus a monotonic delta, see peer.cpp.) NTP is
+    // the primary source; the browser (POST /set_time) is a fallback for networks that
+    // block NTP. First restore the last cached time from NVS
     // so we never sit at 1970 while NTP syncs (or if it never does) — this also covers
     // a headless reboot (evcc only, no browser visit). Then start SNTP; on sync it
     // refreshes the cache and takes over from any restored/fallback value.

@@ -689,9 +689,10 @@ static esp_err_t handle_diag(httpd_req_t* req) {
 }
 
 // ─── POST /set_time — set the wall clock from the browser (NTP fallback) ───────
-// TLS certificate validation (OTA) and the tesla-ble session-freshness checks need a
-// real UTC clock. NTP is the primary source; this endpoint is the fallback for
-// networks that block NTP. The web UI posts the browser's clock ({"ms": <epoch ms>})
+// TLS certificate validation (OTA) and the human-readable key_created/paired_at
+// timestamps need a real UTC clock. (tesla-ble signed-command freshness does NOT —
+// expires_at is the vehicle's clock plus a monotonic delta.) NTP is the primary
+// source; this endpoint is the fallback for networks that block NTP. The web UI posts the browser's clock ({"ms": <epoch ms>})
 // on load and before an OTA check, but we only apply it while SNTP has not synced —
 // otherwise NTP (which is more trustworthy than a possibly-skewed browser) wins. The
 // applied fallback time is persisted so a later offline reboot starts plausibly.
