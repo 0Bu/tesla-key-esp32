@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# PreToolUse(Bash) gate: refuse `gh pr create` / `gh pr merge` until a project review
-# has been run against the *current* working tree. Plain `git commit` is NOT gated —
-# the review runs only when opening a PR and before merging it into main.
+# PreToolUse(Bash) gate: refuse `gh pr merge` until a project review has been run
+# against the *current* working tree. Plain `git commit` and `gh pr create` are NOT
+# gated — the review runs only before merging a PR into main.
 #
 # Mechanism: after running /project-review and confirming it passes with no blocking
 # findings, record the pass by touching:
@@ -19,13 +19,11 @@
 input="$(cat 2>/dev/null)"
 cmd="$(printf '%s' "$input" | jq -r '.tool_input.command // ""' 2>/dev/null)"
 
-# Is this one of the gated commands? Flexible whitespace; tolerant of flags and of
-# compound `... && gh pr create ...` lines. Anything else (incl. `git commit`) falls
-# through and is allowed.
+# Is this the gated command? Flexible whitespace; tolerant of flags and of compound
+# `... && gh pr merge ...` lines. Anything else (incl. `git commit` and `gh pr create`)
+# falls through and is allowed.
 action=""
-if printf '%s' "$cmd" | grep -Eq '(^|[^[:alnum:]_/.-])gh[[:space:]]+pr[[:space:]]+create([[:space:]]|$)'; then
-  action="gh pr create"
-elif printf '%s' "$cmd" | grep -Eq '(^|[^[:alnum:]_/.-])gh[[:space:]]+pr[[:space:]]+merge([[:space:]]|$)'; then
+if printf '%s' "$cmd" | grep -Eq '(^|[^[:alnum:]_/.-])gh[[:space:]]+pr[[:space:]]+merge([[:space:]]|$)'; then
   action="gh pr merge"
 fi
 [ -n "$action" ] || exit 0
@@ -61,7 +59,7 @@ fi
     echo "No project review has been recorded for the current working tree."
   fi
   echo
-  echo "Do this before opening / merging the PR:"
+  echo "Do this before merging the PR:"
   echo "  1. Run the project-review skill:        /project-review"
   echo "  2. Once it passes with no blocking findings, record the pass:"
   echo "         touch \"$marker\""
