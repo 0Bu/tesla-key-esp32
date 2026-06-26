@@ -33,7 +33,7 @@ RUN_COMMANDS=1 ALLOW_CHARGE_TOGGLE=1 TIMEOUT=25 bash scripts/e2e_evcc.sh
 RUN_COMMANDS=1 RUN_ALL_COMMANDS=1 TIMEOUT=25 bash scripts/e2e_evcc.sh
 ```
 
-Useful overrides (auto-discovered from the evcc DB if unset): `ESP32_URL`, `VIN`, `EVCC_NS` (default `default`), `ITER` (vehicle_data burst size), `TIMEOUT` (per-request seconds).
+Useful overrides (env vars; fall back to built-in defaults if unset — `ESP32_URL=http://192.168.1.194`, `VIN=LRW3E7FS4TC656735`): `ESP32_URL`, `VIN`, `EVCC_NS` (default `default`), `ITER` (vehicle_data burst size), `TIMEOUT` (per-request seconds). The test is **target-agnostic** — set `ESP32_URL`/`VIN` to point it at whichever esp32 / esp32s3 / esp32c3 / esp32c6 board you want to verify.
 
 ## Before running the write path — ask first
 
@@ -41,7 +41,7 @@ Useful overrides (auto-discovered from the evcc DB if unset): `ESP32_URL`, `VIN`
 
 ## What the script checks
 
-1. `GET /status` + `GET /api/proxy/1/version` — device up, `paired:true`, BLE connected, firmware version, the read-only `tele` telemetry block present (background poll alive), the `/api/proxy/1/version` endpoint (part of the proxy API surface — the firmware web UI/OTA read it; **evcc itself does not call it**), and that the two version sources agree (`/status` = `X`, proxy = `X-esp32` — catches a half-applied OTA).
+1. `GET /status` + `GET /api/proxy/1/version` — device up, `paired:true`, BLE connected, firmware version, the read-only `tele` telemetry block present (background poll alive), the `/api/proxy/1/version` endpoint (part of the proxy API surface — the firmware web UI/OTA read it; **evcc itself does not call it**), and that the two version sources agree (`/status` = `X`, proxy = `X-esp32` — catches a half-applied OTA). The `-esp32` suffix in the proxy `version` is **fixed for all four targets**; the actual chip is reported separately in `platform` (`ESP32` / `ESP32-S3` / `ESP32-C3` / `ESP32-C6` since the multi-target build), so don't expect e.g. `X-esp32c6` here — the script checks `platform` for presence only.
 2. `GET vehicle_data?endpoints=charge_state` × `ITER` — **the critical no-timeout check.** Reports avg/max latency, a transport-failure count, and a separate *stale* count (well-formed `result:false` while the car sleeps — evcc-safe), and asserts every field evcc parses is present (`charging_state`, `battery_level`, `charge_limit_soc`, `charger_power`, `charge_rate`, `charge_amps`, `battery_range`).
 3. `GET body_controller_state` — live VCSEC BLE read (lock/sleep/presence).
 4. Commands (gated by `RUN_COMMANDS=1`) — `wake_up`, `set_charging_amps`, `set_charge_limit` (change+restore), `door_lock`/`door_unlock` (**inverted** assertion: must be refused → confirms the Charging-Manager role boundary), and optionally `charge_start`/`charge_stop` (`ALLOW_CHARGE_TOGGLE=1`).
