@@ -606,13 +606,18 @@ static esp_err_t handle_status(httpd_req_t* req) {
                 cJSON_AddNumberToObject(veh, "power",  (int)(cs.charger_power + 0.5f));
             if (cs.has_charging_amps)
                 cJSON_AddNumberToObject(veh, "amps",   cs.charging_amps);
-            // Actual AC draw (current × voltage) — distinct from charger_power (DC to the
-            // battery, 0 when "Complete"). Lets us see what the car pulls from the wall while
-            // e.g. cabin-overheat-protection runs with a full battery. Emitted only if reported.
+            // Actual AC draw — the UI computes current × voltage × phases (see liveKw). current
+            // and voltage are PER PHASE and phases is the count, so all three are required: an EU
+            // 3-phase car reports phases=2 and omitting it halves the kW. Distinct from
+            // charger_power (DC to the battery, 0 when "Complete"). Lets us see what the car pulls
+            // from the wall while e.g. cabin-overheat-protection runs with a full battery. Emitted
+            // only if reported (phases falls back to 1 in the UI when the car didn't send it).
             if (cs.has_actual_current)
                 cJSON_AddNumberToObject(veh, "actual_amps", cs.charger_actual_current);
             if (cs.has_voltage)
                 cJSON_AddNumberToObject(veh, "volts", cs.charger_voltage);
+            if (cs.has_charger_phases)
+                cJSON_AddNumberToObject(veh, "phases", cs.charger_phases);
             cJSON_AddItemToObject(root, "vehicle", veh);
         }
     }
