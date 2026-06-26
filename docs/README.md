@@ -90,7 +90,9 @@ ECDSA P-256 key (stored in NVS, never leaves the device). **A VIN must be config
 the device targets your car by its VIN-derived BLE name, so without a VIN the auto-pair task
 stays idle (it logs `no VIN configured — pairing disabled` and does **not** connect or enrol;
 this is by design, so it can never whitelist a key onto an arbitrary nearby Tesla). Nearby
-Teslas are still listed by `/scan`. Set the VIN via the setup AP or `POST /set_vin`. Once a
+Teslas are still listed — the device runs a periodic listing-only scan, so the web UI shows them
+sorted by signal without a manual `/scan` (which also still works). Set the VIN via the setup AP
+or `POST /set_vin`. Once a
 plausible 17-char VIN is set, while unpaired and the car is in BLE range, the auto-pair task
 probes the car and sends a whitelist-add. The car only shows the pairing dialog on the
 **touchscreen** while a Tesla NFC keycard is resting on the center-console card reader — place

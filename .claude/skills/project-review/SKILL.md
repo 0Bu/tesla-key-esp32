@@ -5,9 +5,10 @@ description: Comprehensive, whole-project coherence review of the tesla-key-esp3
 
 # project-review — holistic coherence audit of tesla-key-esp32
 
-This project is an **ESP-IDF 5.x C++ firmware** for the ESP32-S3 that acts as a
-**BLE↔HTTP proxy for a Tesla vehicle**, API-compatible with TeslaBleHttpProxy so it
-works as an **evcc** BLE vehicle. It is small but dense with **non-local invariants**:
+This project is an **ESP-IDF 5.x C++ firmware** for the **ESP32 family** — one source tree
+builds for esp32 / esp32s3 / esp32c3 / esp32c6 (the four targets yoziru/tesla-ble supports) —
+that acts as a **BLE↔HTTP proxy for a Tesla vehicle**, API-compatible with TeslaBleHttpProxy
+so it works as an **evcc** BLE vehicle. It is small but dense with **non-local invariants**:
 a one-line change in code often has to be mirrored in three docs, a Kconfig option, the
 partition table, and the web UI — and several rules only bite at *runtime* (BLE wake
 semantics, heap fragmentation, OTA rollback) where a static read won't catch them.
@@ -36,7 +37,11 @@ Work in this order — it's what makes the review catch *drift* rather than just
    — these are listed below and are the easiest things to silently break.
 5. **Verify before you assert** (see *Verification discipline*). Separate confirmed bugs
    from hypotheses. Do not over-claim.
-6. **Write the report** in the structure at the end.
+6. **Audit the skills against the project** (see *Reviewing the skills*). The skills (this one
+   **and** every sibling under `.claude/skills/`) are part of what drifts — confirm each still
+   maps the project that exists before you trust it, and report any gap as a `SKILL-DRIFT`
+   finding (correcting the skill in the same pass).
+7. **Write the report** in the structure at the end.
 
 Use parallel reads/`Explore` to cover the tree quickly, but reason about the cross-cutting
 links yourself — that's where the value is.
@@ -46,6 +51,7 @@ links yourself — that's where the value is.
 | Area | Files | Responsibility |
 |---|---|---|
 | Boot / wiring | `main/main.cpp` | WiFi, NVS, SNTP, mDNS, starts every component; boot heap log; OTA mark-valid |
+| Target identity | `main/platform.hpp` | `TK_PLATFORM` string per `CONFIG_IDF_TARGET_*`; must agree with `/api/proxy/1/version`, the HA device model, and esp-web-tools `chipFamily` |
 | BLE GATT client | `main/ble_client.{cpp,hpp}` | NimBLE central; scans Tesla UUID; RX notify → `on_rx_data` (runs on the **NimBLE host task**) |
 | Vehicle control | `main/vehicle_ctrl.{cpp,hpp}` | `TeslaBLE::Vehicle` wrapper; command API; **loop_task** (active-window polling + sleep gating); caches |
 | HTTP API | `main/http_server.{cpp,hpp}` | `esp_http_server` on :80; single catch-all `handle_all` dispatch (wrapped in try/catch) |
@@ -75,6 +81,23 @@ Treat a violation of any of these as a real finding.
   the MCU awake → window never closes → the car can never sleep). A parked, idle car must be
   left to reach sleep. Anything that re-opens the window on a loop (e.g. a reboot loop) is a
   bug because it defeats this.
+
+### Link state (single source of truth)
+- `VehicleController::link_state()` is the **single source of truth**, shared by the web UI
+  and the MQTT bridge so the two can never disagree. **Four states:** **AWAKE** (fresh live
+  infotainment telemetry < 60 s), **ASLEEP** (no live data **and** the car's VCSEC sleep flag
+  has held ASLEEP for ≥ ~120 s — *debounced*, sampled in `loop_task`, so a Cabin-Overheat
+  `AWAKE↔ASLEEP` flap (~60 s) can't trip it), **IDLE** (reachable over BLE but **not provably
+  asleep** — we stopped polling infotainment to let it sleep and VCSEC hasn't confirmed →
+  web UI shows the neutral **"Geparkt"** card, which makes **no** sleep claim), **UNREACHABLE**
+  (answers nothing over BLE). Nothing heard since boot/re-pair ⇒ state **omitted** (UI/HA show
+  "unknown"); the hero is hidden for both UNREACHABLE and unknown.
+- **Asymmetry — do not break it:** trust the *debounced ASLEEP* VCSEC flag as proof of sleep,
+  but **never** trust VCSEC `AWAKE` to claim AWAKE. A parked car reports VCSEC `AWAKE` while
+  its infotainment sleeps (the old `wake_up()` trap); AWAKE always requires live infotainment
+  telemetry, so a wrong VCSEC `AWAKE` can only land in IDLE, never falsely AWAKE. The
+  momentary BLE "Disconnected" row is normal (link dropped between polls by design) and must
+  **not** drive the hero — only `link` does.
 
 ### Memory / heap (this device is RAM-constrained)
 - The binding constraint is the **largest *contiguous* free block**, not total free heap.
@@ -129,6 +152,10 @@ Treat a violation of any of these as a real finding.
 - proto3-optional fields are emitted **only when the car reported them** (presence flags) so
   the UI/HA show "—"/unknown, never a phantom 0. The MQTT bridge is **read-only** (no command
   topics subscribed — the car is never controlled or woken from HA).
+- `sleep_state` (MQTT) and the web-UI hero **both** derive from `link_state()` — see *Link
+  state* above. The MQTT switch over the four values must stay **exhaustive** (no catch-all
+  `else` defaulting to "asleep") and the web UI must handle every state, including the omitted
+  "unknown" — the historic bug was `unknown` falling through to a false "asleep".
 
 ## Cross-cutting consistency (add X → also update Y)
 
@@ -148,8 +175,91 @@ that describe it. When reviewing a change (or the repo as a whole), check these 
 - **Version change** → `version.txt` only; hunt for any other hardcoded version.
 - **New telemetry field** → parser (with presence flag) **and** `/status` JSON **and** MQTT
   discovery **and** the web UI **and** docs.
+- **Sleep / link-state change** → `link_state()` is the single source of truth feeding **both**
+  the web-UI hero (`main/www/index.html`) **and** MQTT `sleep_state` (`mqtt_ha.cpp`). Touch one
+  sink → keep the other in sync (exhaustive MQTT switch, every web-UI state incl. unknown)
+  **and** update the four-state semantics in `.claude/CLAUDE.md`.
+- **New chip / target** → tesla-ble `targets:` (`main/idf_component.yml`) bounds the set
+  **and** `platform.hpp` (`TK_PLATFORM`) **and** the OTA `<suffix>` map **and** the web
+  installer manifest (`build-pages.sh`) **and** every doc that lists the four targets.
 - **tesla-ble library bump** → `main/idf_component.yml` pin; never patch
   `managed_components/`.
+
+## Reviewing the skills (meta-coherence)
+
+The skills under `.claude/skills/` are themselves documents that drift — each lags the code by
+exactly the changes landed since it was last touched. A review is **not complete** until you
+have checked that **every** skill still describes the project that exists; otherwise future
+runs inherit a stale map. Treat a gap as a real finding (`SKILL-DRIFT`), reported alongside the
+code/doc ones, and propose the specific `SKILL.md` edits in the same report (correct the map in
+the pass that found the drift).
+
+### Termination — the audit converges, it does not loop
+
+This self-audit cannot become an endless review → edit → review cycle, by design. Hold to all
+four rules — together they guarantee a fixpoint:
+
+- **A review is a single pass.** It is a one-shot instruction set — read → check → report (→
+  optionally apply the proposed edits) → **stop**. Nothing here re-invokes the review, and no
+  hook watches `SKILL.md` to re-trigger one. Editing a skill never starts another run; only the
+  user does. So there is no mechanical loop to break.
+- **Drift is measured against the *code*, never against the skill's own wording.** A
+  `SKILL-DRIFT` finding exists only where a skill **contradicts** a fact in the code / config /
+  script (a wrong number, a removed feature, a renamed path). The fix *removes* that
+  contradiction without creating a new one, so a re-run converges: skill == code → zero
+  findings → zero edits. The stable state is "skill matches code", and every legitimate edit
+  moves toward it.
+- **Only correct contradictions — never reword, restyle, or "improve".** Prose preferences have
+  no ground truth, so polishing them never converges. The test for a legitimate edit: *name the
+  code fact it now matches.* If you can't — or if the edit wouldn't survive the next review
+  unchanged — it is churn; don't make it.
+- **Don't re-audit within a pass.** Once you've corrected a skill in this run, you're done with
+  it — you do not re-open it to check your own edit. The next *user-initiated* review verifies
+  it against the code, like any other change.
+
+### This skill (`project-review`)
+
+Run these checks against the current tree:
+
+- **Project map covers every source file.** `ls main/*.{cpp,hpp}` and confirm each lands in the
+  *Project map* table (or is deliberately out of scope). A `main/*.cpp` the map never mentions
+  is the signal that a whole subsystem appeared without the skill noticing.
+- **Invariants match the code's *current* model**, not a superseded one. For each subsystem
+  with an invariant (wake/sleep, **link state**, heap, OTA, NVS, evcc, pairing, telemetry),
+  re-read the code and confirm the invariant still states what the code does. Sleep/link state
+  is the historically fast-moving one — re-derive it every time.
+- **Cross-cutting list is complete.** Every "add X → also update Y" link should map a real
+  multi-place feature; a feature that spans code + docs + config + UI but isn't listed is
+  exactly the drift a coherence review is meant to catch.
+- **API / command lists are current.** Diff the routes in `http_server.cpp` and the command
+  switch against the references the skill and `.claude/CLAUDE.md` lean on.
+- **No stale specifics in the skill text** — hardcoded chip names (e.g. a lone "ESP32-S3" where
+  it is now multi-target), file paths, partition offsets, sizes, or version assumptions.
+- **Recency cross-check.** `git log --oneline -10 -- main/` vs. the skill's last change
+  (`git log -1 -- .claude/skills/project-review/SKILL.md`): every commit in between is a
+  candidate for an invariant or cross-cutting link the skill hasn't absorbed yet.
+
+### The other skills (audit and correct each)
+
+The same drift hits the sibling skills. **Discover them, don't hardcode the list:**
+`ls .claude/skills/*/SKILL.md`. For each, the test is the same — does its `description` +
+steps + concrete numbers (offsets, counts, flags, paths, target set) still match the script,
+code, and config it drives? Correct a stale one in place (same kind of fix as any doc) and
+report it as `SKILL-DRIFT`. The current siblings and what each must stay true to:
+
+- **`flash-esp32`** wraps the build + USB-flash path. Re-verify against `scripts/idf-docker.sh`
+  (Docker-pinned, no local IDF), `partitions.csv` (offsets `nvs@0x9000`, `otadata@0xf000`,
+  app `@0x20000`), the target set (esp32/s3/c3/c6) and per-target bootloader offset, and that
+  `@flash_args` preserves NVS (never writes `nvs@0x9000`).
+- **`e2e-evcc`** wraps `scripts/e2e_evcc.sh`. Re-verify the command count (must equal the
+  `handle_command` switch — currently **15**), the version-coherence claim (`/status` = `X`,
+  `/api/proxy/1/version` = `X-esp32` via `fw_version()`), the `vehicle_data` fields it asserts,
+  the out-of-scope endpoint list, and the env-var gates (`RUN_COMMANDS` / `ALLOW_CHARGE_TOGGLE`
+  / `RUN_ALL_COMMANDS`).
+- **Any skill added since this was written** must be audited too — and added to this list.
+
+A skill that drives a script is only as current as the script: when the script changes,
+re-read the skill that documents it.
 
 ## Verification discipline (avoid confident-but-wrong findings)
 
@@ -180,7 +290,7 @@ Produce a single report in this shape:
 
 ## Findings
 For each, in priority order:
-### [SEV] <short title>   (SEV = BUG | INCONSISTENCY | DOC-DRIFT | RISK | NIT)
+### [SEV] <short title>   (SEV = BUG | INCONSISTENCY | DOC-DRIFT | SKILL-DRIFT | RISK | NIT)
 - **Where:** `path:line` (and the other side of the link, if cross-cutting)
 - **What:** what is wrong / what disagrees with what
 - **Why it matters:** concrete consequence
@@ -188,7 +298,8 @@ For each, in priority order:
 - **Fix:** the specific change(s), in every place that must move together
 
 ## Coherence check
-<Doc↔code, config↔code, version, and each cross-cutting link: ✓ consistent / ✗ drifted.>
+<Doc↔code, config↔code, version, each cross-cutting link, and skills↔project (does every
+SKILL.md under .claude/skills/ still cover the tree?): ✓ consistent / ✗ drifted.>
 
 ## Prioritized actions
 1. <must-fix> … 2. <should-fix> … 3. <nice-to-have> …
