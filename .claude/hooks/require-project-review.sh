@@ -1,14 +1,20 @@
 #!/usr/bin/env bash
-# PreToolUse(Bash) gate: refuse `gh pr merge` until a project review has been run
-# against the *current* working tree. Plain `git commit` and `gh pr create` are NOT
-# gated — the review runs only before merging a PR into main.
+# PreToolUse gate: refuse a PR *merge* until a project review has been run against
+# the *current* working tree. Plain `git commit` and `gh pr create` are NOT gated —
+# the review runs only before merging a PR into main.
+#
+# Two merge paths are gated, so the gate holds in BOTH environments:
+#   • Bash `gh pr merge ...`              — local terminal sessions
+#   • mcp__github__merge_pull_request     — Claude Code on the web / remote (no `gh`
+#                                           CLI; merges go through the GitHub MCP server)
+# Matched via the `matcher` entries in .claude/settings.json that both invoke this script.
 #
 # Mechanism: after running /project-review and confirming it passes with no blocking
 # findings, record the pass by touching:
 #     .claude/.project-review-passed
-# This hook allows the PR action only while that marker is newer than every source
-# file — i.e. the review still reflects the code being shipped. Edit any file
-# afterwards and the marker goes stale, forcing a fresh review before the next PR.
+# This hook allows the merge only while that marker is newer than every source file —
+# i.e. the review still reflects the code being shipped. Edit any file afterwards and
+# the marker goes stale, forcing a fresh review before the next merge.
 #
 # Only Claude Code sessions are gated; a human running `gh` in a plain terminal
 # (or CI) is unaffected, since hooks run only inside Claude Code.
@@ -17,15 +23,24 @@
 
 # Read the tool-call payload from stdin (PreToolUse JSON).
 input="$(cat 2>/dev/null)"
+tool="$(printf '%s' "$input" | jq -r '.tool_name // ""' 2>/dev/null)"
 cmd="$(printf '%s' "$input" | jq -r '.tool_input.command // ""' 2>/dev/null)"
 
-# Is this the gated command? Flexible whitespace; tolerant of flags and of compound
-# `... && gh pr merge ...` lines. Anything else (incl. `git commit` and `gh pr create`)
-# falls through and is allowed.
+# Is this a gated merge? The MCP merge tool is gated unconditionally; a Bash call is
+# gated only when it actually runs `gh pr merge` (flexible whitespace; tolerant of
+# flags and of compound `... && gh pr merge ...` lines). Anything else (incl.
+# `git commit` and `gh pr create`) falls through and is allowed.
 action=""
-if printf '%s' "$cmd" | grep -Eq '(^|[^[:alnum:]_/.-])gh[[:space:]]+pr[[:space:]]+merge([[:space:]]|$)'; then
-  action="gh pr merge"
-fi
+case "$tool" in
+  mcp__github__merge_pull_request)
+    action="merge_pull_request (GitHub MCP)"
+    ;;
+  Bash)
+    if printf '%s' "$cmd" | grep -Eq '(^|[^[:alnum:]_/.-])gh[[:space:]]+pr[[:space:]]+merge([[:space:]]|$)'; then
+      action="gh pr merge"
+    fi
+    ;;
+esac
 [ -n "$action" ] || exit 0
 
 proj="${CLAUDE_PROJECT_DIR:-$PWD}"

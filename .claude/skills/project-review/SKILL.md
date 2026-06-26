@@ -22,8 +22,13 @@ should, do the config/build/version all agree, and do the runtime invariants sti
 Work in this order — it's what makes the review catch *drift* rather than just style:
 
 1. **Build the intended model from the docs first.** Read [`.claude/CLAUDE.md`](../../../.claude/CLAUDE.md)
-   (the architecture + API + invariants overview), [`README.md`](../../../README.md),
+   (the always-needed essentials: API, command list, NVS table, partition offsets, link-state
+   summary, invariants) **and** [`docs/ARCHITECTURE.md`](../../../docs/ARCHITECTURE.md) (the deep
+   reference CLAUDE.md points to — telemetry fields, MQTT entities, full sleep/link-state +
+   connection-failure semantics, pairing, OTA detail), [`README.md`](../../../README.md),
    [`docs/README.md`](../../../docs/README.md), [`docs/SECURITY.md`](../../../docs/SECURITY.md).
+   CLAUDE.md and `docs/ARCHITECTURE.md` must agree with each other and with the code — drift
+   between the slim summary and the deep reference is itself a finding.
    Note every concrete claim: endpoints, commands, NVS keys, partition offsets, flash
    size, version, defaults. These are your assertions to check.
 2. **Read the code and find where reality diverges.** Walk the components below. For each
@@ -174,11 +179,12 @@ that describe it. When reviewing a change (or the repo as a whole), check these 
   layout **and** the migration note.
 - **Version change** → `version.txt` only; hunt for any other hardcoded version.
 - **New telemetry field** → parser (with presence flag) **and** `/status` JSON **and** MQTT
-  discovery **and** the web UI **and** docs.
+  discovery **and** the web UI **and** docs (the field list in `docs/ARCHITECTURE.md`).
 - **Sleep / link-state change** → `link_state()` is the single source of truth feeding **both**
   the web-UI hero (`main/www/index.html`) **and** MQTT `sleep_state` (`mqtt_ha.cpp`). Touch one
   sink → keep the other in sync (exhaustive MQTT switch, every web-UI state incl. unknown)
-  **and** update the four-state semantics in `.claude/CLAUDE.md`.
+  **and** update the four-state summary in `.claude/CLAUDE.md` **and** the full semantics in
+  `docs/ARCHITECTURE.md`.
 - **New chip / target** → tesla-ble `targets:` (`main/idf_component.yml`) bounds the set
   **and** `platform.hpp` (`TK_PLATFORM`) **and** the OTA `<suffix>` map **and** the web
   installer manifest (`build-pages.sh`) **and** every doc that lists the four targets.
