@@ -18,7 +18,7 @@
 #                                       #   scheduled_charging) — PHYSICALLY actuates the car, NOT part
 #                                       #   of the evcc path; for a full post-flash command smoke test.
 #
-# Overrides (auto-discovered from the evcc DB if unset):
+# Overrides (env vars; fall back to the built-in defaults shown below if unset):
 #   ESP32_URL=http://192.168.1.194   VIN=LRW3E7FS4TC656735
 #   EVCC_NS=default                  ITER=15  (vehicle_data burst size)
 #   TIMEOUT=15                       (per-request seconds; evcc itself uses a short client timeout)
