@@ -413,15 +413,6 @@ function chargeStats(v,charging){
   if(v.amps>0)  c.push(stat('Current', Math.round(v.amps),        'A',  true));
   return c.join('');
 }
-/* climate chip — shown whenever the car's HVAC is running, independent of
-   charging. Explains the grid draw (~900 W) when the car is plugged in and
-   conditioning the cabin but not actually charging the battery. Heating vs.
-   cooling is intentionally not distinguished — just on/off. */
-function climateChip(s){
-  var c=s&&s.tele&&s.tele.climate;
-  if(!c||!(c.on||c.preconditioning)) return '';
-  return stat('Climate', (c.preconditioning&&!c.on)?'Precond.':'On', '', true);
-}
 /* Live AC wall draw (charger actual_current × voltage × phases) in kW — but ONLY when the
    awake car reports a POSITIVE draw. Returns null when the car is asleep (no live charge
    object), didn't report the fields, or the draw is 0/negative. charger_power (battery DC, 0 at
@@ -465,20 +456,21 @@ function copChip(s){
   return '<div class="stat cop on" title="'+tip+'"><div class="k">Overheat</div>'+
          '<div class="v">'+kw+'</div></div>';
 }
-/* Defrost chip — shown when the car is defrosting: front or rear defroster on, or the
-   Max-defrost mode engaged (defrost_mode != Off). Separate from is_climate_on. Unlike COP,
-   defrost has a real on/off trigger, so we keep showing it while engaged and label the value
-   with the live draw when positive, else "On" — never a bare "0 kW". */
+/* Defrost chip — shown when the car is defrosting (front or rear defroster on, or Max-defrost
+   mode engaged) AND a live AC draw is available, since the only thing we surface is the power
+   the car pulls for it. No live draw — car asleep or the figure not reported — means no chip;
+   the car is never woken to obtain one. Separate from is_climate_on. */
 function defrostChip(s){
   var c=s&&s.tele&&s.tele.climate;
   if(!c||!climateFresh(s)) return '';
   if(!(c.front_defrost===true||c.rear_defrost===true||(c.defrost_mode&&c.defrost_mode!=='Off'))) return '';
+  var kw=liveKw(s);
+  if(!kw) return '';                                           // no live draw → nothing to show
   var p=[]; if(c.front_defrost===true)p.push('front'); if(c.rear_defrost===true)p.push('rear');
   if(c.defrost_mode&&c.defrost_mode!=='Off')p.push(c.defrost_mode.toLowerCase());
   var tip='Defrost'+(p.length?' · '+p.join(', '):'');
-  var val=liveKw(s)||'On';
   return '<div class="stat defrost on" title="'+tip+'"><div class="k">Defrost</div>'+
-         '<div class="v">'+val+'</div></div>';
+         '<div class="v">'+kw+'</div></div>';
 }
 /* Make every chip in a row the same width — the widest one's content width (so they line
    up tidily without stretching to fill the hero). Reset, measure the max, then pin all. */
@@ -554,7 +546,7 @@ function render(s){
     hicHTML='<button class="wakebtn" onclick="toggleCharge()" title="'+ctitle+'" aria-label="'+ctitle+'"'+((chgBusy||complete)?' disabled':'')+'>'+ringHTML+'<div class="pct"><b style="color:'+col+'">'+soc+'<small>%</small></b></div></button>';
     setHTML(hl,'<span>'+(complete?'Charge complete':esc(v.status||'Idle'))+'</span>');
     hs.textContent='';
-    hst.innerHTML=chargeStats(v,charging)+climateChip(s)+copChip(s)+defrostChip(s);
+    hst.innerHTML=chargeStats(v,charging)+copChip(s)+defrostChip(s);
   } else if(paired){
     if(waking){
       hicHTML='<button class="wakebtn" disabled aria-label="Waking the car">'+ringSleep(104,true)+'<span class="glyph">'+ALARM+'</span></button>';
@@ -571,8 +563,9 @@ function render(s){
       var ls=s.last||{}, lsoc=(ls.soc!=null)?Math.round(ls.soc):null, ago=fmtAgo(s.last_seen_s), chips=[];
       if(lsoc!=null) chips.push(stat('Battery','<span style="color:'+socColor(lsoc)+'">'+lsoc+'</span>','%'));
       if(ago)        chips.push(stat('Idle', ago, ''));
-      chips.push(copChip(s));      // overheat-protection draw (from the retained cache) — '' when COP off
-      chips.push(defrostChip(s));  // defrost draw — '' when not defrosting
+      // No Overheat/Defrost chips here: their value is the live AC draw, which exists only while
+      // the car is awake and reporting. Asleep there is nothing to show, and we never wake the
+      // car to obtain it.
       hst.innerHTML=chips.join('');
     } else {
       // 'unreachable' (drove off / out of range / deep sleep) OR 'unknown' (nothing heard
