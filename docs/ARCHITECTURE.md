@@ -151,11 +151,16 @@ The web UI keys everything (control buttons, SOC) off `paired` (= `has_session()
 stored VCSEC session in NVS). Three events invalidate a pairing and force a clean re-pair
 so no stale data is shown (`clear_session_and_cache_()` in `vehicle_ctrl.cpp`):
 
-1. **Key deleted on the car side** — auto-detected. Any signed command failing with
-   `KEY_NOT_ON_WHITELIST` (substring `"whitelist"` in `make_result_cb_`) sets
-   `pairing_lost_`; `auto_pair_task` also runs a periodic signed VCSEC `health_probe_`
-   (~30 s) so it's caught even with no evcc traffic. On detection the key is regenerated
-   (the old one is useless), session + cache cleared, and pairing restarts.
+1. **Key deleted on the car side** — auto-detected three ways: (a) the **primary** detector,
+   the `set_message_callback` observer in `vehicle_ctrl.cpp`, matches a signed-message fault
+   (`UNKNOWN_KEY_ID`/`INACTIVE_KEY`/`INVALID_KEY_HANDLE`) — the path that actually fires on an
+   already-established (cached) session, e.g. the background charge poll; (b) any reply whose
+   message contains `"whitelist"` (`KEY_NOT_ON_WHITELIST`, only during a session-info handshake)
+   in `make_result_cb_`; (c) a two-strike `"authentication failed"` honoured **only** for the
+   periodic signed VCSEC `health_probe_` (~30 s), so a deletion is caught even with no evcc
+   traffic while a role-denied user command can never trip it. Each sets `pairing_lost_`; on
+   detection the key is regenerated (the old one is useless), session + cache cleared, and
+   pairing restarts.
 2. **Key regenerated** (`/gen_keys?force=1`) — `generate_key()` now also clears the
    session + cache and drops the BLE link.
 3. **VIN changed** (`/set_vin`) — `reset_for_new_vehicle()` regenerates the key, clears

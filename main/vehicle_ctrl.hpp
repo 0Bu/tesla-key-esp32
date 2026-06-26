@@ -278,11 +278,14 @@ public:
     }
 
     // Cache the last-known wall clock (epoch seconds). The device has no
-    // battery-backed RTC and deliberately makes no NTP call; the browser sets the
-    // clock via POST /set_time and we persist it so a headless reboot (evcc only,
-    // no browser visit) still comes up with a plausible time for TLS certificate
-    // validation (OTA) and tesla-ble session-freshness checks. main.cpp restores
-    // it on boot by reading the same "last_time" key from the config store.
+    // battery-backed RTC. NTP (esp_sntp) is the primary time source; the browser
+    // (POST /set_time) is a fallback for networks that block NTP. We persist the
+    // last-known time so a headless reboot (evcc only, no browser visit, NTP not yet
+    // synced) still comes up with a plausible clock for TLS certificate validation
+    // (OTA) and the human-readable key_created/paired_at timestamps. (It is NOT needed
+    // for tesla-ble signed-command freshness: expires_at is derived from the vehicle's
+    // SessionInfo.ClockTime plus a monotonic steady_clock delta, not this wall clock.)
+    // main.cpp restores it on boot by reading the same "last_time" key from the store.
     bool save_config_time(long long epoch) {
         return config_store_ ? config_store_->save_str("last_time", std::to_string(epoch)) : false;
     }

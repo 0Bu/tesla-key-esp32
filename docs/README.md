@@ -107,7 +107,9 @@ card is required to authorise the enrolment.
 - New key appears as *"Unknown key"* in the car's key list.
 
 Enrolls **Charging Manager** only (charging + wake + read). Owner role disabled
-(`/send_key?role=owner` → `403`). Max 3 BLE keys per vehicle.
+(`/send_key?role=owner` → `403`). A Tesla keeps at most ~3 *simultaneous* BLE connections
+(shared across phone keys and fobs) — that connection limit, not a key count, is what blocks
+pairing when full.
 
 ## HTTP API
 
@@ -123,7 +125,7 @@ POST /api/1/vehicles/{VIN}/command/{command}   Content-Type: application/json
 |---------|------|
 | `wake_up` | — |
 | `charge_start` / `charge_stop` | — |
-| `set_charging_amps` | `{"charging_amps": 11}` (0–32) |
+| `set_charging_amps` | `{"charging_amps": 11}` (0–48; the car enforces its per-model max) |
 | `set_charge_limit` | `{"percent": 80}` (50–100) |
 | `charge_port_door_open` / `charge_port_door_close` | — |
 | `door_lock` / `door_unlock` | — |
@@ -132,9 +134,12 @@ POST /api/1/vehicles/{VIN}/command/{command}   Content-Type: application/json
 | `auto_conditioning_start` / `auto_conditioning_stop` | — |
 | `set_scheduled_charging` | `{"enable": true, "start_minutes": 1380}` (minutes after local midnight; 1380 = 23:00) |
 
-> `door_lock` / `door_unlock` are accepted by the API but **rejected by the car for the
-> Charging-Manager role** — they exist for API completeness; the enrolled key cannot actually
-> (un)lock the car (see [Security](#security)).
+> A **Charging-Manager** key may only run charging actions + wake. The car therefore **rejects**
+> `door_lock` / `door_unlock`, `flash_lights` / `honk_horn`, `set_sentry_mode`, and
+> `auto_conditioning_start` / `auto_conditioning_stop` with an authentication failure — these are
+> accepted by the API for completeness but never execute. Only `charge_start` / `charge_stop`,
+> `set_charging_amps`, `set_charge_limit`, `set_scheduled_charging`, `charge_port_door_open` /
+> `charge_port_door_close` and `wake_up` actually run (see [Security](#security)).
 
 ```json
 { "response": { "result": true, "command": "charge_start",
@@ -175,7 +180,8 @@ GET  /status               { vin, ip, version, key_present, key_fingerprint,
                              paired_at (epoch, omitted if unknown), reauth,
                              wifi:{ssid,rssi,std},
                              ble:{connected,scanning,rssi,addr | devices:[{addr,name,rssi}]},
-                             link: "awake"|"asleep"|"unreachable"|"unknown" (drives the hero),
+                             link: "awake"|"idle"|"asleep"|"unreachable"|"unknown" (drives the
+                               hero; "idle" = reachable but not provably asleep — the "Geparkt" card),
                              vehicle:{soc,status,charge_limit,power,amps,actual_amps,volts}
                                (only when link=="awake", cached; each field only when reported),
                              mqtt:{configured,connected,broker} (HA bridge),
@@ -251,7 +257,7 @@ tesla-key/<node>/climate     {inside,outside,setpoint,on,preconditioning,
 tesla-key/<node>/drive       {shift,odometer}
 tesla-key/<node>/tires       {fl,fr,rl,rr,warn}
 tesla-key/<node>/closures    {locked,door,frunk,trunk,window,user}
-tesla-key/<node>/vehicle     {sleep_status: AWAKE | ASLEEP | UNREACHABLE}
+tesla-key/<node>/vehicle     {sleep_status: AWAKE | ASLEEP | IDLE | UNREACHABLE}
 tesla-key/<node>/device      {wifi_rssi,ble_rssi,ble_connected,paired,boot_time,free_heap,version}
 homeassistant/<sensor|binary_sensor>/<node>/<object>/config   (discovery, retained)
 ```

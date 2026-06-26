@@ -71,13 +71,17 @@ Never edit files in `managed_components/` — they are regenerated.
 
 ## Commands Implemented
 
-`charge_start`, `charge_stop`, `set_charging_amps`, `set_charge_limit`, `wake_up`,
-`charge_port_door_open/close`, `door_lock/unlock` (sent but rejected by the car for the
-Charging-Manager role — present for API completeness), `flash_lights`, `honk_horn`,
-`set_sentry_mode`, `auto_conditioning_start/stop`, `set_scheduled_charging`
-(`{"enable":bool,"start_minutes":int}` — minutes after local midnight; daily charge start
-time. Scheduled *departure* is not exposed: the tesla-ble version in use registers no builder
-for `scheduledDepartureAction`).
+**Run on the Charging-Manager key (actually execute):** `charge_start`, `charge_stop`,
+`set_charging_amps`, `set_charge_limit`, `set_scheduled_charging`
+(`{"enable":bool,"start_minutes":int}` — minutes after local midnight; daily charge start time.
+Scheduled *departure* is not exposed: the tesla-ble version in use registers no builder for
+`scheduledDepartureAction`), `charge_port_door_open/close`, `wake_up`.
+
+**Accepted by the API but rejected by the car for the Charging-Manager role** (sent for API
+completeness, never execute — the key has no door/body/climate privilege): `door_lock/unlock`,
+`flash_lights`, `honk_horn`, `set_sentry_mode`, `auto_conditioning_start/stop`. The firmware
+already treats these as role-refused ("authentication failed") and does **not** let that count
+toward a pairing revocation (only the health probe / an explicit "whitelist" fault does).
 
 ## Read-only telemetry
 
@@ -166,18 +170,23 @@ connection-failure ("Connection failed") detection: [`docs/ARCHITECTURE.md`](../
 ## Pairing lifecycle / invalidation
 
 The web UI keys everything off `paired` (= `has_session()`). Three events clear the session +
-cache (`clear_session_and_cache_()`) and force a clean re-pair: **(1)** key deleted on the car
-(auto-detected via `KEY_NOT_ON_WHITELIST` + periodic `health_probe_`), **(2)** `/gen_keys?force=1`,
-**(3)** `/set_vin` (also forgets old `ble_mac`, reboots). **A plausible 17-char VIN gates pairing
-entirely** — with no VIN, `auto_pair_task` only runs a listing-only scan and never connects/enrols.
-**Full detail: [`docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md).**
+cache (`clear_session_and_cache_()`) and force a clean re-pair: **(1)** key deleted on the car —
+auto-detected three ways: the **primary** `set_message_callback` observer matching a signed-message
+fault (`UNKNOWN_KEY_ID`/`INACTIVE_KEY`/`INVALID_KEY_HANDLE`, fires on a cached session), a
+`"whitelist"` reply (`KEY_NOT_ON_WHITELIST`, handshake only) in `make_result_cb_`, and a two-strike
+`"authentication failed"` honoured **only** for the periodic VCSEC `health_probe_` (~30 s);
+**(2)** `/gen_keys?force=1`; **(3)** `/set_vin` (also forgets old `ble_mac`, reboots). **A plausible
+17-char VIN gates pairing entirely** — with no VIN, `auto_pair_task` only runs a listing-only scan
+and never connects/enrols. **Full detail: [`docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md).**
 
 ## Important Notes
 
 - Private key stored in NVS unencrypted — secure physical access to the device
 - Keys are enrolled as **Charging Manager only** (charging + wake); owner role is not exposed (`?role=owner` → `403`). Sole purpose is the evcc BLE integration.
 - BLE connection is on-demand; first command after idle takes ~3-5s for scan+connect
-- Tesla allows max 3 simultaneous BLE keys per vehicle
+- Tesla keeps max ~3 *simultaneous* BLE connections per vehicle (shared by phone keys + fobs);
+  that connection limit — not a stored-key count — is what blocks pairing when full (matches the
+  `car_connectable`/`ErrMaxConnectionsExceeded` reasoning above)
 - Fragment size: 20 bytes per BLE write chunk (safe for all ESP32 BLE MTU configs)
 - **Memory is tight — the binding limit is the largest *contiguous* free block, not total
   free heap.** Steady-state it is only a few tens of KB (WiFi + NimBLE + MQTT dominate; see

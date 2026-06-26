@@ -262,6 +262,12 @@ report it as `SKILL-DRIFT`. The current siblings and what each must stay true to
   `/api/proxy/1/version` = `X-esp32` via `fw_version()`), the `vehicle_data` fields it asserts,
   the out-of-scope endpoint list, and the env-var gates (`RUN_COMMANDS` / `ALLOW_CHARGE_TOGGLE`
   / `RUN_ALL_COMMANDS`).
+- **`vehicle-command-audit`** compares the firmware against upstream `teslamotors/vehicle-command`,
+  gated by what `yoziru/tesla-ble` (pin in `main/idf_component.yml`) can actually do. Re-verify the
+  tesla-ble **pin** in its source map (`v5.1.1`) still matches `idf_component.yml`, that its upstream
+  file paths still resolve (e.g. `pkg/vehicle/charge.go`), and that its "worked findings" table is
+  not asserting drift already fixed in the tree. It is the *upstream-conformance* counterpart to this
+  skill — keep the two complementary, not overlapping.
 - **Any skill added since this was written** must be audited too — and added to this list.
 
 A skill that drives a script is only as current as the script: when the script changes,
