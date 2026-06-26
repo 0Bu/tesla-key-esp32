@@ -422,15 +422,19 @@ function climateChip(s){
   if(!c||!(c.on||c.preconditioning)) return '';
   return stat('Climate', (c.preconditioning&&!c.on)?'Precond.':'On', '', true);
 }
-/* Live AC wall draw (charger actual_current × voltage) in kW — but ONLY when the awake car
-   reports a POSITIVE draw. Returns null when the car is asleep (no live charge object), didn't
-   report the fields, or the draw is 0/negative. charger_power (battery DC, 0 at "Complete") is
-   deliberately not used. One decimal, trailing ".0" dropped → "1 kW". A null result means
+/* Live AC wall draw (charger actual_current × voltage × phases) in kW — but ONLY when the
+   awake car reports a POSITIVE draw. Returns null when the car is asleep (no live charge
+   object), didn't report the fields, or the draw is 0/negative. charger_power (battery DC, 0 at
+   "Complete") is deliberately not used. The car reports current and voltage PER PHASE, so the
+   total wall draw is current × voltage × phases — dropping the phase count undercounts a
+   multi-phase charge (an EU 3-phase car reports phases=2, so omitting it halves the kW: a real
+   228 V × 3 A × 2 = 1.4 kW reads as 0.7). phases falls back to 1 when the car didn't report it
+   (single-phase / unknown). One decimal, trailing ".0" dropped → "1 kW". A null result means
    "nothing is actually being pulled right now", so callers show no active chip. */
 function liveKw(s){
   var v=(s&&s.vehicle)||{};
   if(v.actual_amps==null||v.volts==null) return null;
-  var w=v.actual_amps*v.volts;
+  var w=v.actual_amps*v.volts*(v.phases||1);
   if(w<=0) return null;
   return (w/1000).toFixed(1).replace(/\.0$/,'')+' kW';
 }
