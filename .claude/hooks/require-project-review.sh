@@ -1,15 +1,16 @@
 #!/usr/bin/env bash
-# PreToolUse(Bash) gate: refuse `git commit` / `gh pr create` until a project review
-# has been run against the *current* working tree.
+# PreToolUse(Bash) gate: refuse `gh pr create` / `gh pr merge` until a project review
+# has been run against the *current* working tree. Plain `git commit` is NOT gated —
+# the review runs only when opening a PR and before merging it into main.
 #
 # Mechanism: after running /project-review and confirming it passes with no blocking
 # findings, record the pass by touching:
 #     .claude/.project-review-passed
-# This hook allows the commit/PR only while that marker is newer than every source
-# file — i.e. the review still reflects the code being committed. Edit any file
-# afterwards and the marker goes stale, forcing a fresh review before the next commit.
+# This hook allows the PR action only while that marker is newer than every source
+# file — i.e. the review still reflects the code being shipped. Edit any file
+# afterwards and the marker goes stale, forcing a fresh review before the next PR.
 #
-# Only Claude Code sessions are gated; a human running `git`/`gh` in a plain terminal
+# Only Claude Code sessions are gated; a human running `gh` in a plain terminal
 # (or CI) is unaffected, since hooks run only inside Claude Code.
 #
 # Exit codes: 0 = allow the tool call, 2 = block it (stderr is fed back to Claude).
@@ -19,12 +20,13 @@ input="$(cat 2>/dev/null)"
 cmd="$(printf '%s' "$input" | jq -r '.tool_input.command // ""' 2>/dev/null)"
 
 # Is this one of the gated commands? Flexible whitespace; tolerant of flags and of
-# compound `... && git commit ...` lines. Anything else falls through and is allowed.
+# compound `... && gh pr create ...` lines. Anything else (incl. `git commit`) falls
+# through and is allowed.
 action=""
-if printf '%s' "$cmd" | grep -Eq '(^|[^[:alnum:]_/.-])git[[:space:]]+commit([[:space:]]|$)'; then
-  action="git commit"
-elif printf '%s' "$cmd" | grep -Eq '(^|[^[:alnum:]_/.-])gh[[:space:]]+pr[[:space:]]+create([[:space:]]|$)'; then
+if printf '%s' "$cmd" | grep -Eq '(^|[^[:alnum:]_/.-])gh[[:space:]]+pr[[:space:]]+create([[:space:]]|$)'; then
   action="gh pr create"
+elif printf '%s' "$cmd" | grep -Eq '(^|[^[:alnum:]_/.-])gh[[:space:]]+pr[[:space:]]+merge([[:space:]]|$)'; then
+  action="gh pr merge"
 fi
 [ -n "$action" ] || exit 0
 
@@ -59,7 +61,7 @@ fi
     echo "No project review has been recorded for the current working tree."
   fi
   echo
-  echo "Do this before committing / opening a PR:"
+  echo "Do this before opening / merging the PR:"
   echo "  1. Run the project-review skill:        /project-review"
   echo "  2. Once it passes with no blocking findings, record the pass:"
   echo "         touch \"$marker\""
