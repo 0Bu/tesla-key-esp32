@@ -9,6 +9,7 @@
 #include <ctime>
 #include "ble_client.hpp"
 #include "nvs_storage.hpp"
+#include "logic/link_state.hpp"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
@@ -182,7 +183,11 @@ public:
     // still requires live infotainment telemetry (a parked car reports VCSEC "AWAKE" while
     // its infotainment sleeps; see wake_up()). So a wrong VCSEC AWAKE can only ever leave us
     // in Idle, never falsely Awake.
-    enum class LinkState { Unknown, Awake, Asleep, Unreachable, Idle };
+    // The four-state machine lives in logic/link_state.hpp (host-tested, IDF-free);
+    // link_state() snapshots the atomic member state into tk::LinkInputs and calls
+    // tk::compute_link_state(). Alias keeps the existing VehicleController::LinkState::*
+    // call sites (web UI, MQTT bridge) working unchanged.
+    using LinkState = tk::LinkState;
     LinkState link_state() const;
 
     // Current RAW VCSEC sleep belief from the library (updated on every VCSEC poll, incl. the

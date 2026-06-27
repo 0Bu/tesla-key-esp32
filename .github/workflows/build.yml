@@ -12,7 +12,18 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Fast, hardware-free gate: compile + run the host-side mock build (pure logic in
+  # main/logic/) before the slow per-target firmware builds, so a logic regression
+  # fails in seconds instead of after four ESP-IDF builds. See test/README.md.
+  logic-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Run host-side logic tests
+        run: ./scripts/run-mock-tests.sh
+
   build:
+    needs: logic-test
     runs-on: ubuntu-latest
     permissions:
       contents: write   # create tags + releases

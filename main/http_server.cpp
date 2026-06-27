@@ -594,15 +594,9 @@ static esp_err_t handle_status(httpd_req_t* req) {
     // idle ⇒ reachable but not provably asleep ⇒ neutral "Geparkt" (parked) card (last-known
     // SOC + wake), never a sleep claim; unreachable ⇒ the car drove off / out of range and the UI
     // hides the hero; unknown ⇒ nothing heard yet. Decoupled from the momentary BLE link.
-    const char* link;
-    switch (g_vehicle->link_state()) {
-        case VehicleController::LinkState::Awake:       link = "awake";       break;
-        case VehicleController::LinkState::Asleep:      link = "asleep";      break;
-        case VehicleController::LinkState::Idle:        link = "idle";        break;
-        case VehicleController::LinkState::Unreachable: link = "unreachable"; break;
-        default:                                        link = "unknown";     break;
-    }
-    cJSON_AddStringToObject(root, "link", link);
+    // Mapping lives in logic/link_state.hpp (host-tested) — the MQTT bridge shares it so
+    // the hero and the published sleep_status can never drift.
+    cJSON_AddStringToObject(root, "link", tk::link_state_web_str(g_vehicle->link_state()));
     // Raw VCSEC sleep flag (un-debounced) for transparency/diagnostics — lets the UI/operator
     // see what the car actually reports vs. the debounced `link` above. Not used for the hero.
     cJSON_AddStringToObject(root, "vcsec_sleep", g_vehicle->vcsec_sleep_raw());

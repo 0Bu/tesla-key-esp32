@@ -13,9 +13,12 @@
 #include <esp_crt_bundle.h>
 #include <cJSON.h>
 
+#include "platform.hpp"
+
 #include <atomic>
 #include <cstdio>
 #include <cstring>
+#include <string_view>
 
 static const char* TAG = "ota";
 
@@ -23,6 +26,9 @@ static const char* TAG = "ota";
 // esp32 -> "" (tesla-key-esp32.bin), esp32s3 -> "-s3", esp32c3 -> "-c3", esp32c6 -> "-c6".
 // Must stay in lockstep with image_suffix() in scripts/ci-build-all.sh + build-pages.sh
 // (which name the published asset the device pulls) — a mismatch 404s every OTA download.
+// Kept as a string-literal macro because the download URL is assembled by compile-time
+// concatenation below; the static_assert ties it to the host-tested tk::image_suffix()
+// so the macro and the pure mapping can never drift.
 #if   defined(CONFIG_IDF_TARGET_ESP32)
 #  define TESLA_OTA_IMG_SUFFIX ""
 #elif defined(CONFIG_IDF_TARGET_ESP32S3)
@@ -34,6 +40,8 @@ static const char* TAG = "ota";
 #else
 #  error "Unsupported CONFIG_IDF_TARGET for OTA image naming"
 #endif
+static_assert(std::string_view{TESLA_OTA_IMG_SUFFIX} == tk::image_suffix(TK_TARGET),
+              "OTA image suffix macro drifted from tk::image_suffix()");
 
 // ─── Shared status (written by the OTA task, read by HTTP handlers) ────────────
 
