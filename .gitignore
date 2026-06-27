@@ -40,6 +40,9 @@ __pycache__/
 # Logic-tests Stop-gate marker (per-tree, transient — never commit)
 .claude/.logic-tests-blocked
 
+# Build-efficiency SessionStart-hook dedup marker (last audited run id — never commit)
+.claude/.build-efficiency-audited
+
 # macOS
 .DS_Store
 

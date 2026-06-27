@@ -20,7 +20,10 @@ A cloud session **cannot build** (no working Docker daemon for `scripts/idf-dock
 **cannot USB-flash** (no USB passthrough) — it is for editing, review and CI-driven builds.
 The `report-capabilities.sh` SessionStart hook prints what the current environment supports.
 Real builds/flashes run on a host with Docker + the board attached (see the `flash-esp32`
-skill) or in CI (`.github/workflows/build.yml`).
+skill) or in CI (`.github/workflows/build.yml`). The `build-efficiency-check.sh` SessionStart
+hook audits the latest post-merge `build` run on main for efficiency regressions (ccache hit
+rate, cache hygiene, build-duration/total-run regression, binary-size headroom) and, on a
+problem, has the session open an Issue / draft Fix-PR — deduped per run id, never auto-commits.
 
 **But there IS a real local verification loop** — the host-side mock build runs the project's
 pure logic with the plain system toolchain (no ESP-IDF/Docker/board), so logic changes can be

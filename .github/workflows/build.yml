@@ -7,9 +7,11 @@ on:
     branches: [main]
 
 # Serialize main so the auto-incremented release version can't race between runs.
+# PR branches don't release/version, so cancel superseded runs there to save CI time on
+# rapid push sequences — the per-ref group keeps main (refs/heads/main) serialized as before.
 concurrency:
   group: build-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 # Least-privilege default for every job's GITHUB_TOKEN (logic-test only needs to
 # read the checkout). The build/deploy jobs override this with the narrower set of
@@ -39,6 +41,21 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0   # need full history + tags for versioning and change detection
+
+      # Persist the ccache dir that ci-build-all.sh writes (.ccache, inside the workspace
+      # so it survives the container mount) across CI runs. The four cold ESP-IDF builds —
+      # framework + tesla-ble + our sources, once per target — dominate wall-clock; a warm
+      # ccache turns most of that into cache hits. Key per-commit (cache keys are immutable,
+      # so a fresh entry is saved each run); restore-keys falls back to the newest prior
+      # cache for a warm start. Bump the idf5.5.4 tag in lockstep with the ESP-IDF version
+      # below so a toolchain change starts from a clean cache.
+      - name: Cache ccache (ESP-IDF compiler cache)
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: .ccache
+          key: ccache-idf5.5.4-${{ github.sha }}
+          restore-keys: |
+            ccache-idf5.5.4-
 
       - name: Compute release version
         id: version
