@@ -149,12 +149,17 @@ espsecure.py generate_signing_key --version 2 --scheme rsa3072 ota_signing_key.p
 CI signs every image with this key, supplied via an encrypted repository secret:
 
 1. Store the PEM as the **`OTA_SIGNING_KEY`** Actions secret (ideally scoped to a protected
-   GitHub *Environment*). Consider a base64 round-trip if your paste mangles newlines.
-2. `.github/workflows/build.yml` writes it to `ota_signing_key.pem` for the run (gitignored,
-   shredded afterwards), and `scripts/ci-build-all.sh` signs each built image in place with
-   `espsecure.py sign_data --version 2`.
-3. A push to `main` that changes firmware **fails** if the secret is missing (refuses to
-   publish an unsigned release); PR/fork builds without the secret build unsigned (warning).
+   GitHub *Environment*). Paste the **full, unencrypted** RSA-3072 PEM — `BEGIN/END` lines
+   included, with real newlines (not base64-wrapped, not single-line).
+2. Signing runs **only on a push to `main`** — the only path that publishes bins (a GitHub
+   release and/or the GitHub Pages OTA channel, which is redeployed on every main push), so it
+   is the only path that must be signed and the only place the key is exposed.
+   `.github/workflows/build.yml` writes the secret to `ota_signing_key.pem` for the run
+   (gitignored, shredded afterwards), and `scripts/ci-build-all.sh` signs each built image in
+   place with `espsecure.py sign_data --version 2`.
+3. A push to `main` **fails** if the secret is missing (refuses to publish unsigned firmware
+   to the OTA channel). **PR builds skip signing entirely** — a compile-only check that needs
+   no key (the size gate absorbs the ~4 KB the published, signed build will add).
 
 For higher assurance, keep the key fully offline and sign on a trusted machine / KMS instead
 of in CI (no workflow change to the device is needed — only where `sign_data` runs).

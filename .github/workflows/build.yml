@@ -87,29 +87,30 @@ jobs:
           echo "stamped firmware version: $disp"
 
       # Materialize the offline OTA signing key (RSA-3072, Secure Boot v2 scheme) from the
-      # OTA_SIGNING_KEY secret into the workspace so ci-build-all.sh can sign each image (it
-      # reads ota_signing_key.pem from the repo root by default). The file is gitignored and
-      # shredded in the always() cleanup step below; the artifact/Pages globs never match it.
-      # A real release (push to main with firmware changes) MUST be signed — fail loudly if the
-      # secret is missing, rather than publishing an image that signed devices will reject. PR /
-      # fork builds have no secret and intentionally build UNSIGNED (just a warning).
+      # OTA_SIGNING_KEY secret so ci-build-all.sh can sign each image (it reads
+      # ota_signing_key.pem from the repo root by default). The file is gitignored and shredded
+      # in the always() cleanup step below; the artifact/Pages globs never match it.
+      #
+      # ONLY on a push to main — that is the only path that PUBLISHES bins (a GitHub release
+      # and/or the GitHub Pages OTA channel that build-pages.sh redeploys on every main push),
+      # so it is the only path that must be signed, and the key is exposed nowhere else. A main
+      # push without the secret is a hard error (refuse to publish unsigned firmware to the OTA
+      # channel). PR builds skip this step and intentionally build UNSIGNED — a compile-only
+      # check that needs no key (the size gate's 64 KB headroom absorbs the ~4 KB signature
+      # block that the published build will add).
       - name: Provision OTA signing key
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         env:
           OTA_SIGNING_KEY: ${{ secrets.OTA_SIGNING_KEY }}
         run: |
-          if [ -n "$OTA_SIGNING_KEY" ]; then
-            printf '%s\n' "$OTA_SIGNING_KEY" > ota_signing_key.pem
-            chmod 600 ota_signing_key.pem
-            echo "OTA signing key provisioned from secret."
-          elif [ "${{ github.event_name }}" = "push" ] \
-            && [ "${{ github.ref }}" = "refs/heads/main" ] \
-            && [ "${{ steps.changes.outputs.firmware }}" = "yes" ]; then
-            echo "::error::Refusing to publish an UNSIGNED release — set the OTA_SIGNING_KEY" \
-                 "repository secret (RSA-3072 PEM, see docs/SECURITY.md)." >&2
+          if [ -z "$OTA_SIGNING_KEY" ]; then
+            echo "::error::Refusing to publish UNSIGNED firmware to the OTA channel — set the" \
+                 "OTA_SIGNING_KEY repository secret (RSA-3072 PEM, see docs/SECURITY.md)." >&2
             exit 1
-          else
-            echo "::warning::No OTA_SIGNING_KEY secret — building UNSIGNED (PR/fork build)."
           fi
+          printf '%s\n' "$OTA_SIGNING_KEY" > ota_signing_key.pem
+          chmod 600 ota_signing_key.pem
+          echo "OTA signing key provisioned from secret."
 
       - name: Build firmware for all supported targets (ESP-IDF v5.5.4)
         uses: espressif/esp-idf-ci-action@v1

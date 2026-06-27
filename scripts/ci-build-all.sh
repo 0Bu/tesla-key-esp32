@@ -60,7 +60,17 @@ signing_key="${OTA_SIGNING_KEY_FILE:-$repo_root/ota_signing_key.pem}"
 sign_image() {
   local bin="$1"
   if [ -n "$signing_key" ] && [ -f "$signing_key" ]; then
-    espsecure.py sign_data --version 2 --keyfile "$signing_key" --output "$bin.signed" "$bin"
+    # espsecure prints only diagnostics (never key bytes); surface a clear, actionable hint if
+    # the key can't be loaded (wrong scheme/EC, encrypted PEM, or mangled-newline secret) so a
+    # bad OTA_SIGNING_KEY fails with guidance instead of a raw Python traceback.
+    if ! espsecure.py sign_data --version 2 --keyfile "$signing_key" --output "$bin.signed" "$bin"; then
+      rm -f "$bin.signed"
+      echo "ERROR: signing $bin failed. OTA_SIGNING_KEY must be an UNENCRYPTED RSA-3072" \
+           "Secure Boot v2 key. Regenerate with:" \
+           "  espsecure.py generate_signing_key --version 2 --scheme rsa3072 ota_signing_key.pem" \
+           "and store the FULL PEM (incl. BEGIN/END lines and real newlines) as the secret." >&2
+      exit 1
+    fi
     mv "$bin.signed" "$bin"
     echo "signed $bin (Secure Boot v2 RSA-3072 app signature)"
   else
