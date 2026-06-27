@@ -103,6 +103,32 @@ jobs:
           echo "disp=$disp" >> "$GITHUB_OUTPUT"
           echo "stamped firmware version: $disp"
 
+      # Materialize the offline OTA signing key (RSA-3072, Secure Boot v2 scheme) from the
+      # OTA_SIGNING_KEY secret so ci-build-all.sh can sign each image (it reads
+      # ota_signing_key.pem from the repo root by default). The file is gitignored and shredded
+      # in the always() cleanup step below; the artifact/Pages globs never match it.
+      #
+      # ONLY on a push to main — that is the only path that PUBLISHES bins (a GitHub release
+      # and/or the GitHub Pages OTA channel that build-pages.sh redeploys on every main push),
+      # so it is the only path that must be signed, and the key is exposed nowhere else. A main
+      # push without the secret is a hard error (refuse to publish unsigned firmware to the OTA
+      # channel). PR builds skip this step and intentionally build UNSIGNED — a compile-only
+      # check that needs no key (the size gate's 64 KB headroom absorbs the ~4 KB signature
+      # block that the published build will add).
+      - name: Provision OTA signing key
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          OTA_SIGNING_KEY: ${{ secrets.OTA_SIGNING_KEY }}
+        run: |
+          if [ -z "$OTA_SIGNING_KEY" ]; then
+            echo "::error::Refusing to publish UNSIGNED firmware to the OTA channel — set the" \
+                 "OTA_SIGNING_KEY repository secret (RSA-3072 PEM, see docs/SECURITY.md)." >&2
+            exit 1
+          fi
+          printf '%s\n' "$OTA_SIGNING_KEY" > ota_signing_key.pem
+          chmod 600 ota_signing_key.pem
+          echo "OTA signing key provisioned from secret."
+
       - name: Build firmware for all supported targets (ESP-IDF v5.5.4)
         uses: espressif/esp-idf-ci-action@v1
         with:
@@ -116,6 +142,12 @@ jobs:
           # script overrides it per target. ONE source tree → N per-target images; the web
           # installer auto-selects by chip and OTA pulls tesla-key-esp32[-<s3|c3|c6>].bin.
           command: ./scripts/ci-build-all.sh "${{ steps.version.outputs.version }}"
+
+      # Shred the signing key immediately after the build, even on failure, so it never
+      # lingers in the workspace for later steps (artifact upload / Pages) to pick up.
+      - name: Shred OTA signing key
+        if: always()
+        run: rm -f ota_signing_key.pem
 
       - name: Upload firmware artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7

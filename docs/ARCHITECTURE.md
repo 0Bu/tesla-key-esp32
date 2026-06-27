@@ -43,6 +43,17 @@ Implemented in `main/ota_update.cpp`. Rollback is enabled
 (`CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE`); `main.cpp` calls
 `esp_ota_mark_app_valid_cancel_rollback()` after a healthy startup.
 
+**Image signature.** Builds use the Secure Boot v2 RSA-3072 signature scheme *without*
+hardware Secure Boot (`CONFIG_SECURE_SIGNED_APPS_NO_SECURE_BOOT` + `..._RSA_SCHEME` +
+`CONFIG_SECURE_SIGNED_ON_UPDATE_NO_SECURE_BOOT`): every OTA image is signed and the running
+app verifies the signature before installing, so a compromised update host can't push
+unsigned firmware. No eFuses are burned (reversible, no brick risk, web installer still
+works); trust is bootstrapped from the running app's signature block (TOFU). The build is
+unsigned (`CONFIG_SECURE_BOOT_BUILD_SIGNED_BINARIES=n`) — `scripts/ci-build-all.sh` signs
+each image with the offline key (CI secret `OTA_SIGNING_KEY`). Classic esp32 needs chip rev
+v3.0+ (`CONFIG_ESP32_REV_MIN_3` in `sdkconfig.defaults.esp32`). **Full key lifecycle +
+rotation: [`SECURITY.md`](SECURITY.md).**
+
 Partition layout (`partitions.csv`) is dual-OTA (`otadata` + `ota_0`/`ota_1`, ~2 MB each),
 sized to fill 4 MB (the smallest supported flash) so ONE table serves every target; app at
 `0x20000`. **Migration:** a device on the old single-`factory` layout must be USB-reflashed

@@ -21,6 +21,26 @@ CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
 # (see main.cpp), otherwise the bootloader reverts to the previous slot.
 CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
 
+# ── Signed OTA images (Secure Boot v2 signature scheme, WITHOUT hardware Secure Boot) ──
+# Require a valid RSA-3072 app signature on every OTA update, so a compromised update host
+# (or its GitHub Pages source) can no longer push UNSIGNED firmware — closing the supply-
+# chain gap documented in docs/SECURITY.md. No eFuses are burned: this is reversible, has
+# no brick risk, and the web-installer / USB-flash path keeps working (with RSA the bootloader
+# does NOT verify on boot — SECURE_SIGNED_ON_BOOT_NO_SECURE_BOOT is ECDSA-only — only the
+# running app verifies the next OTA image). Trust is bootstrapped from the running app's own
+# signature block (trust-on-first-use): the FIRST signed image reaches a device from the
+# current UNSIGNED build (which doesn't verify) or via USB; from then on every OTA image must
+# be signed with the same offline key. Classic esp32 needs chip rev v3.0+ (ECO3) for the V2
+# RSA scheme — enforced in sdkconfig.defaults.esp32. Full key lifecycle: docs/SECURITY.md.
+CONFIG_SECURE_SIGNED_APPS_NO_SECURE_BOOT=y
+CONFIG_SECURE_SIGNED_APPS_RSA_SCHEME=y
+CONFIG_SECURE_SIGNED_ON_UPDATE_NO_SECURE_BOOT=y
+# Do NOT sign during the build: CI signs the finished image in a separate step
+# (scripts/ci-build-all.sh) with the offline key, so the private key never has to be present
+# at compile time and fork/PR builds (no secret) still compile. Leaving this on (its default)
+# would force CONFIG_SECURE_BOOT_SIGNING_KEY to exist at build time.
+CONFIG_SECURE_BOOT_BUILD_SIGNED_BINARIES=n
+
 # BLE - use NimBLE (lighter than Bluedroid)
 CONFIG_BT_ENABLED=y
 CONFIG_BT_NIMBLE_ENABLED=y

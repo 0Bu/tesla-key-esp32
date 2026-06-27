@@ -1,0 +1,11 @@
+# Classic-ESP32-only overrides, merged on top of sdkconfig.defaults when
+# `idf.py set-target esp32` is run (ESP-IDF auto-applies sdkconfig.defaults.<target>).
+#
+# The Secure Boot v2 RSA-3072 signature scheme used for signed OTA
+# (CONFIG_SECURE_SIGNED_APPS_RSA_SCHEME, see sdkconfig.defaults) is only available on the
+# classic ESP32 from chip revision v3.0 (ECO3) onward. Require it so the one signing scheme +
+# one signing key serves every target uniformly. Trade-off: signed firmware will refuse to
+# boot on pre-ECO3 (rev v0/v1) ESP32 silicon — those boards must use an ECO3 chip (standard
+# since ~2020). The other targets (s3/c3/c6) support V2 RSA at their default min revision, so
+# they need no equivalent override. Documented in docs/SECURITY.md.
+CONFIG_ESP32_REV_MIN_3=y
