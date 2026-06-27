@@ -2,6 +2,8 @@
 #include "vehicle_ctrl.hpp"
 #include "nvs_storage.hpp"
 #include "platform.hpp"
+#include "logic/units.hpp"
+#include "logic/link_state.hpp"
 
 #include <atomic>
 #include <string>
@@ -224,8 +226,8 @@ static void publish_state() {
             if (cs.has_charging_amps)    cJSON_AddNumberToObject(o, "amps",         cs.charging_amps);
             // Tesla reports these imperial; convert to metric for HA (the Tesla-compatible
             // /api path keeps miles for evcc). range: miles → km, rate: mph → km/h.
-            if (cs.has_battery_range)    cJSON_AddNumberToObject(o, "range",        cs.battery_range * 1.609344);
-            if (cs.has_charge_rate)      cJSON_AddNumberToObject(o, "rate",         cs.charge_rate   * 1.609344);
+            if (cs.has_battery_range)    cJSON_AddNumberToObject(o, "range", tk::mi_to_km(cs.battery_range));
+            if (cs.has_charge_rate)      cJSON_AddNumberToObject(o, "rate",  tk::mph_to_kmh(cs.charge_rate));
             if (!cs.charging_state.empty())
                 cJSON_AddStringToObject(o, "charging_state", cs.charging_state.c_str());
             // Extended charge telemetry (read-only enrichment for HA; currents in A, energy in
@@ -307,14 +309,9 @@ static void publish_state() {
     // (driven off / out of range / deep sleep). Nothing heard since boot/re-pair ⇒ omit (HA
     // shows "unknown").
     {
-        const char* ss = nullptr;
-        switch (s_vehicle->link_state()) {
-            case VehicleController::LinkState::Awake:       ss = "AWAKE";       break;
-            case VehicleController::LinkState::Asleep:      ss = "ASLEEP";      break;
-            case VehicleController::LinkState::Idle:        ss = "IDLE";        break;
-            case VehicleController::LinkState::Unreachable: ss = "UNREACHABLE"; break;
-            default: break;  // Unknown ⇒ omit
-        }
+        // Same mapping the web UI uses, from logic/link_state.hpp (host-tested) so the two
+        // never drift. nullptr (Unknown) ⇒ omit the field (HA shows "unknown").
+        const char* ss = tk::link_state_mqtt_str(s_vehicle->link_state());
         if (ss) {
             cJSON* o = cJSON_CreateObject();
             cJSON_AddStringToObject(o, "sleep_status", ss);
