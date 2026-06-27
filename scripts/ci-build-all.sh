@@ -28,6 +28,21 @@ cd "$repo_root"
 # target on each loop iteration (harmless when IDF_TARGET is already unset, e.g. local runs).
 unset IDF_TARGET
 
+# Speed up the four cold per-target compiles with ccache. The espressif/idf image ships
+# ccache, and ESP-IDF's build system uses it as the compiler launcher when IDF_CCACHE_ENABLE
+# is set. Most of what each target rebuilds is the rarely-changing ESP-IDF framework +
+# tesla-ble, identical run-to-run, so a warm cache turns four full rebuilds into mostly
+# cache-hit passes. CCACHE_DIR lives under the repo (= the container-mounted GITHUB_WORKSPACE)
+# so CI can persist it across runs via actions/cache; absolute paths are stable run-to-run
+# (fixed mount point + pinned IDF image), so cache entries stay valid. Guarded on ccache being
+# present so a plain local toolchain without it still builds normally.
+if command -v ccache >/dev/null 2>&1; then
+  export IDF_CCACHE_ENABLE=1
+  export CCACHE_DIR="$repo_root/.ccache"
+  export CCACHE_MAXSIZE="${CCACHE_MAXSIZE:-2G}"
+  echo "ccache enabled (CCACHE_DIR=$CCACHE_DIR, max $CCACHE_MAXSIZE)"
+fi
+
 # Keep in sync with tesla-ble's idf_component.yml `targets:` (the Component Manager
 # enforces it — an unsupported target fails at dependency resolution, before compile).
 TARGETS="esp32 esp32s3 esp32c3 esp32c6"
@@ -84,3 +99,6 @@ done
 echo "Built + staged targets: $TARGETS"
 # Glob without the dash so the suffix-less classic-esp32 image (tesla-key-esp32.bin) is listed too.
 ls -1 _fw/*/ tesla-key-esp32*.bin
+
+# Surface the ccache hit rate so a cold/poisoned cache is visible in the CI log.
+command -v ccache >/dev/null 2>&1 && { echo "::group::ccache stats"; ccache -s; echo "::endgroup::"; } || true
