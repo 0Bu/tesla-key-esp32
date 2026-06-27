@@ -129,18 +129,46 @@ consequences:
   deliberate trade-off to keep one signing scheme + one key across all four targets;
   `esp32s3`/`c3`/`c6` need no such override.
 
-### Create the signing key (offline, back it up)
+### Create the signing key (if you don't have one yet)
 
-Generate a **dedicated** key offline — do **not** reuse the GPG key that signs git commits
-(wrong format/algorithm, and it conflates two separate trust domains):
+Generate a **dedicated** key **offline**, on a trusted machine — do **not** reuse the GPG key
+that signs git commits (wrong format/algorithm, and it conflates two separate trust domains),
+and do **not** generate it in CI.
+
+**1. Get the tooling** (`espsecure.py` ships with ESP-IDF; standalone it comes with esptool):
+
+```bash
+pip install esptool          # provides espsecure.py
+```
+
+**2. Generate the key** — RSA-3072, Secure Boot v2 scheme, the exact type CI expects:
 
 ```bash
 espsecure.py generate_signing_key --version 2 --scheme rsa3072 ota_signing_key.pem
 ```
 
+This writes an **unencrypted** PEM private key. (`--version 2 --scheme rsa3072` is mandatory:
+a v1/ECDSA or EC key, an encrypted PEM, or a different RSA size is rejected by `sign_data`
+with `Could not deserialize key data … unsupported key type`.)
+
+**3. Verify it before trusting it** — the same two checks CI does, run locally:
+
+```bash
+# (a) valid, UNENCRYPTED RSA-3072 key? expect "Private-Key: (3072 bit, 2 primes)", no prompt
+openssl rsa -in ota_signing_key.pem -noout -text | head -1
+
+# (b) does espsecure accept it exactly like CI? sign a throwaway file (expect "Signed … bytes")
+head -c 4096 /dev/zero > /tmp/dummy.bin
+espsecure.py sign_data --version 2 --keyfile ota_signing_key.pem --output /tmp/dummy.signed /tmp/dummy.bin
+```
+
+**4. Store & protect it:**
+
 - **Losing it ⇒ no more OTA updates** (devices must be USB-reflashed). **Leaking it ⇒ signed
   OTA is worthless.** Treat it like a root key: keep it offline (password manager / hardware
-  token / air-gapped), backed up in ≥2 separate locations.
+  token / air-gapped), backed up in **≥2 separate locations**.
+- Add it to CI as described under [Signing in CI](#signing-in-ci) below (the `OTA_SIGNING_KEY`
+  secret). The repo already gitignores `*.pem` / `ota_signing_key.pem`, but never commit it.
 - The same key later doubles as the hardware **Secure Boot v2** signing key (next section),
   so enabling full Secure Boot needs no key migration.
 
