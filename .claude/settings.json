@@ -11,6 +11,17 @@
           }
         ]
       }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/run-logic-tests.sh\"",
+            "statusMessage": "Running host logic tests…"
+          }
+        ]
+      }
     ]
   }
 }
