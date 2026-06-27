@@ -171,7 +171,7 @@ public:
     //                 stopped polling the infotainment domain to let the car sleep, and the
     //                 VCSEC flag has not confirmed sleep). We honestly do not know whether
     //                 it is awake or asleep, so the UI must not claim either — it shows a
-    //                 neutral "Geparkt" (parked) card (last-known SOC + a wake button), never
+    //                 neutral "Parked" card (last-known SOC + a wake button), never
     //                 the confident "Vehicle asleep" hero. This is the state that fixes the bug
     //                 where an awake-but-idle car was mislabelled asleep the instant polling
     //                 stopped.
