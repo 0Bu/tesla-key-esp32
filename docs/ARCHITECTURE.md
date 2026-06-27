@@ -117,11 +117,16 @@ also surfaced as `vcsec_sleep` in `/status` for diagnostics.
 
 The web UI mirrors this exactly: it shows the "Vehicle asleep" hero (with the wake button)
 **only** when `ASLEEP` is a proven fact; for `IDLE` it shows a neutral **"Geparkt"** (parked)
-card (last-known SOC + idle time + the same wake button) that makes no sleep claim; and it hides
-the hero entirely for both `UNREACHABLE` *and* the unknown state (nothing heard since boot —
-the on-demand BLE link hasn't reached the car yet). The momentary BLE row reading
-"Disconnected" is normal (the link is dropped between polls by design) and is not used to
-drive the hero — only `link` is.
+card (last-known SOC + idle time + the same wake button) that makes no sleep claim; and for both
+`UNREACHABLE` *and* the unknown state (nothing heard since boot — the on-demand BLE link hasn't
+reached the car yet) it shows a neutral grey hero with the orange Bluetooth glyph rather than a
+blank area: **"Unreachable"** (no recent answer over BLE, with last-known SOC + idle time) or
+**"Connecting…"** (link up, status still being fetched) — never a sleep claim. In that same
+unknown/unreachable state the BLE connection row drops its green and animates an orange
+ping-pong across the signal bars (a darker-orange crest bouncing edge→edge over a light-orange
+base) with an orange MAC, flagging "connected but stateless" at a glance. The momentary BLE row
+reading "Disconnected" is normal (the link is dropped between polls by design) and is not used
+to drive the hero — only `link` is.
 
 **Connection-failure detection (web-UI hero "Connection failed").** When the target car's
 advert is heard but the BLE link won't come up after repeated tries, `/status.ble` carries

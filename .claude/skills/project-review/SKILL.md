@@ -95,8 +95,9 @@ Treat a violation of any of these as a real finding.
   `AWAKE↔ASLEEP` flap (~60 s) can't trip it), **IDLE** (reachable over BLE but **not provably
   asleep** — we stopped polling infotainment to let it sleep and VCSEC hasn't confirmed →
   web UI shows the neutral **"Geparkt"** card, which makes **no** sleep claim), **UNREACHABLE**
-  (answers nothing over BLE). Nothing heard since boot/re-pair ⇒ state **omitted** (UI/HA show
-  "unknown"); the hero is hidden for both UNREACHABLE and unknown.
+  (answers nothing over BLE). Nothing heard since boot/re-pair ⇒ MQTT sleep_state **omitted**
+  (HA shows "unknown"); the web UI shows a grey **"Unreachable"** hero (or **"Connecting…"** for
+  the unknown cold-start state) with the orange ping-pong BLE bars — not hidden, never a sleep claim.
 - **Asymmetry — do not break it:** trust the *debounced ASLEEP* VCSEC flag as proof of sleep,
   but **never** trust VCSEC `AWAKE` to claim AWAKE. A parked car reports VCSEC `AWAKE` while
   its infotainment sleeps (the old `wake_up()` trap); AWAKE always requires live infotainment
