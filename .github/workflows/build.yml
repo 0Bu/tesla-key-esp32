@@ -11,6 +11,12 @@ concurrency:
   group: build-${{ github.ref }}
   cancel-in-progress: false
 
+# Least-privilege default for every job's GITHUB_TOKEN (logic-test only needs to
+# read the checkout). The build/deploy jobs override this with the narrower set of
+# write scopes they actually need (releases + Pages). See docs/SECURITY.md.
+permissions:
+  contents: read
+
 jobs:
   # Fast, hardware-free gate: compile + run the host-side mock build (pure logic in
   # main/logic/) before the slow per-target firmware builds, so a logic regression
