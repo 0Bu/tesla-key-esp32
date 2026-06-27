@@ -94,7 +94,7 @@ Treat a violation of any of these as a real finding.
   has held ASLEEP for ≥ ~120 s — *debounced*, sampled in `loop_task`, so a Cabin-Overheat
   `AWAKE↔ASLEEP` flap (~60 s) can't trip it), **IDLE** (reachable over BLE but **not provably
   asleep** — we stopped polling infotainment to let it sleep and VCSEC hasn't confirmed →
-  web UI shows the neutral **"Geparkt"** card, which makes **no** sleep claim), **UNREACHABLE**
+  web UI shows the neutral **"Parked"** card, which makes **no** sleep claim), **UNREACHABLE**
   (answers nothing over BLE). Nothing heard since boot/re-pair ⇒ MQTT sleep_state **omitted**
   (HA shows "unknown"); the web UI shows a grey **"Unreachable"** hero (or **"Connecting…"** for
   the unknown cold-start state) with the orange ping-pong BLE bars — not hidden, never a sleep claim.

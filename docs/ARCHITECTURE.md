@@ -116,7 +116,7 @@ shows "unknown". **Asymmetry (important):** `link_state()` trusts the VCSEC flag
 also surfaced as `vcsec_sleep` in `/status` for diagnostics.
 
 The web UI mirrors this exactly: it shows the "Vehicle asleep" hero (with the wake button)
-**only** when `ASLEEP` is a proven fact; for `IDLE` it shows a neutral **"Geparkt"** (parked)
+**only** when `ASLEEP` is a proven fact; for `IDLE` it shows a neutral **"Parked"**
 card (last-known SOC + idle time + the same wake button) that makes no sleep claim; and for both
 `UNREACHABLE` *and* the unknown state (nothing heard since boot — the on-demand BLE link hasn't
 reached the car yet) it shows a neutral grey hero with the orange Bluetooth glyph rather than a

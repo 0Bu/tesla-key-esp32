@@ -174,7 +174,7 @@ hero and MQTT `sleep_state`. Four values:
 
 - `AWAKE` — fresh live infotainment telemetry (< 60 s).
 - `ASLEEP` — no live data AND debounced VCSEC sleep proven (≥ `kAsleepDebounceS` ≈ 120 s).
-- `IDLE` — reachable over BLE but **not provably asleep** (web UI shows neutral "Geparkt").
+- `IDLE` — reachable over BLE but **not provably asleep** (web UI shows neutral "Parked").
 - `UNREACHABLE` — answers nothing over BLE; web UI shows a grey **"Unreachable"** hero + orange
   ping-pong BLE bars (cold-start, nothing heard since boot ⇒ **"Connecting…"**; MQTT omitted/"unknown").
 

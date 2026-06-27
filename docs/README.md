@@ -181,7 +181,7 @@ GET  /status               { vin, ip, version, key_present, key_fingerprint,
                              wifi:{ssid,rssi,std},
                              ble:{connected,scanning,rssi,addr | devices:[{addr,name,rssi}]},
                              link: "awake"|"idle"|"asleep"|"unreachable"|"unknown" (drives the
-                               hero; "idle" = reachable but not provably asleep — the "Geparkt" card),
+                               hero; "idle" = reachable but not provably asleep — the "Parked" card),
                              vehicle:{soc,status,charge_limit,power,amps,actual_amps,volts}
                                (only when link=="awake", cached; each field only when reported),
                              mqtt:{configured,connected,broker} (HA bridge),

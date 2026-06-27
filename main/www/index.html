@@ -349,7 +349,10 @@ function toast(msg,type){
 
 /* ---------- net ---------- */
 function poll(){
-  fetch('/status').then(function(r){return r.json()}).then(render).catch(function(){});
+  // Cache-bust + no-store: the live page polls forever, so a stale/cached /status would
+  // freeze the hero on an old state (e.g. a transient orange "Unreachable") until a manual
+  // reload — the very bug a fresh document hides. Same guard waitReboot() already uses.
+  fetch('/status?ms='+Date.now(),{cache:'no-store'}).then(function(r){return r.json()}).then(render).catch(function(){});
 }
 
 /* ---------- signal glyph ---------- */
@@ -436,7 +439,7 @@ var CARD='<svg class="glyphbig" viewBox="0 0 24 24" width="44" height="44" fill=
 // crescent moon — asleep hero glyph (grey, soft; pairs with the muted ring)
 var MOON='<svg class="glyphbig" viewBox="0 0 24 24" width="52" height="52" style="fill:var(--muted);opacity:.72"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>';
 // parking "P" — "idle" hero glyph: car is parked & reachable but not provably asleep, so we
-// show a neutral "Geparkt" (parked) card (no sleep claim). Matches the Tesla app's wording.
+// show a neutral "Parked" card (no sleep claim). Matches the Tesla app's wording.
 var PARKED='<svg class="glyphbig" viewBox="0 0 24 24" width="48" height="48" fill="none" stroke="var(--muted)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="opacity:.7"><rect x="4" y="4" width="16" height="16" rx="4"/><path d="M9.5 16V8h3.2a2.4 2.4 0 0 1 0 4.8H9.5"/></svg>';
 // alarm clock — waking hero glyph (grey outline, gently trembling via .wecker)
 var ALARM='<svg class="wecker glyphbig" viewBox="0 0 24 24" width="52" height="52" fill="none" stroke="var(--muted)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="opacity:.82"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l2 2"/><path d="M5 3 2 6"/><path d="m22 6-3-3"/><path d="M6.38 18.7 4 21"/><path d="M17.64 18.67 20 21"/></svg>';
@@ -617,7 +620,7 @@ function render(s){
       // Show a neutral standby card (last-known battery + idle time) that still offers the wake
       // button — tapping it fetches a fresh reading (and flips to the live SOC card if awake).
       hicHTML='<button class="wakebtn" onclick="wakeCar()" title="Tap to wake the car" aria-label="Wake the car">'+ringSleep()+'<span class="glyph">'+PARKED+'</span></button>';
-      setHTML(hl,'<span>Geparkt</span>');
+      setHTML(hl,'<span>Parked</span>');
       hs.textContent='No live reading — tap the icon to wake the car.';
       var ils=s.last||{}, ilsoc=(ils.soc!=null)?Math.round(ils.soc):null, iago=fmtAgo(s.last_seen_s), ichips=[];
       if(ilsoc!=null) ichips.push(stat('Battery','<span style="color:'+socColor(ilsoc)+'">'+ilsoc+'</span>','%'));
