@@ -441,6 +441,11 @@ static void current_ip(char* out, size_t sz) {
 // in VehicleController::link_state(), shared with the MQTT bridge so the two never drift.
 
 static esp_err_t handle_status(httpd_req_t* req) {
+    // Live device state — the web UI polls this every 4 s. Never let a browser/proxy serve a
+    // cached copy, or the hero sticks on a stale state (e.g. a transient "Unreachable") until a
+    // manual reload. Matches the no-store on "/" and "/diag"; the poll also cache-busts the URL.
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+
     char ip[16];
     current_ip(ip, sizeof(ip));
 
@@ -591,7 +596,7 @@ static esp_err_t handle_status(httpd_req_t* req) {
     // Overall connectivity, the single source of truth the UI keys the hero off (and the
     // same enum the MQTT bridge publishes) — so "asleep", "idle" and "unreachable" can never
     // be confused. awake ⇒ live SOC card; asleep ⇒ "Vehicle asleep" card (proven, debounced);
-    // idle ⇒ reachable but not provably asleep ⇒ neutral "Geparkt" (parked) card (last-known
+    // idle ⇒ reachable but not provably asleep ⇒ neutral "Parked" card (last-known
     // SOC + wake), never a sleep claim; unreachable ⇒ the car drove off / out of range ⇒ a neutral
     // grey "Unreachable" hero (last-known SOC); unknown ⇒ nothing heard yet ⇒ a grey "Connecting…"
     // hero. Decoupled from the momentary BLE link.
@@ -605,7 +610,7 @@ static esp_err_t handle_status(httpd_req_t* req) {
     // Live "vehicle" object — drives the UI's awake/SOC view. Emitted only when the car is
     // AWAKE (fresh infotainment telemetry per link_state()), independent of the momentary
     // BLE link: the link is dropped between polls so the car can sleep, but data inside the
-    // freshness window is still live. When not awake the UI falls through to the asleep/"Geparkt"
+    // freshness window is still live. When not awake the UI falls through to the asleep/"Parked"
     // card (reachable) or a neutral grey "Unreachable"/"Connecting…" hero (unreachable/unknown),
     // using `link` above.
     if (g_vehicle->link_state() == VehicleController::LinkState::Awake) {
