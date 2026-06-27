@@ -648,9 +648,14 @@ function render(s){
       var ureach=s.link==='unreachable';
       hicHTML=ringSVG(0,true)+'<div class="glyph">'+BT+'</div>';
       setHTML(hl,'<span>'+(ureach?'Unreachable':'Connecting…')+'</span>');
+      // Only claim "Bluetooth connected" when the momentary GATT link is actually up
+      // (linked). The on-demand link is dropped between polls, so link==='unknown'
+      // routinely coexists with ble.connected===false — in which case the BLE row reads
+      // "Disconnected" and a "Bluetooth connected" subtitle would contradict it.
       hs.textContent=ureach
         ? 'No recent response from the vehicle over Bluetooth.'
-        : 'Bluetooth connected — checking status…';
+        : (linked ? 'Bluetooth connected — checking status…'
+                  : 'Reaching your Tesla over Bluetooth…');
       var uls=s.last||{}, ulsoc=(uls.soc!=null)?Math.round(uls.soc):null, uago=fmtAgo(s.last_seen_s), uchips=[];
       if(ulsoc!=null) uchips.push(stat('Battery','<span style="color:'+socColor(ulsoc)+'">'+ulsoc+'</span>','%'));
       if(uago)        uchips.push(stat('Idle', uago, ''));
