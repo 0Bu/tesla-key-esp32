@@ -8,7 +8,8 @@
 <style>
 :root{
   --bg:#f6f7f9; --card:#fff; --fg:#1a1d21; --muted:#5b626b; --border:#e6e8ec;
-  --soft:#f1f3f5; --accent:#e82127; --ok:#16a34a; --warn:#d97706; --radius:18px;
+  --soft:#f1f3f5; --accent:#e82127; --ok:#16a34a; --warn:#d97706;
+  --warn-base:#f59e0b; --warn-lite:#fdba74; --radius:18px;  /* BLE "status unknown" ping-pong: less-dark base + light crest */
   --shadow:0 1px 2px rgba(16,20,28,.04), 0 6px 20px rgba(16,20,28,.06);
 }
 @media (prefers-color-scheme:dark){
@@ -201,6 +202,22 @@ code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
 @keyframes sb2{0%,18%{opacity:.25} 32%,88%{opacity:1} 100%{opacity:.25}}
 @keyframes sb3{0%,40%{opacity:.25} 54%,88%{opacity:1} 100%{opacity:.25}}
 @keyframes sb4{0%,62%{opacity:.25} 76%,88%{opacity:1} 100%{opacity:.25}}
+/* BLE "vehicle status unknown" glyph — the link is up but we have no fresh telemetry
+   (link_state unknown/unreachable; the hero shows a neutral grey card). All four bars are
+   orange — the same amber family as the setup/connection states — and over a light-orange
+   base a DARKER-orange crest ping-pongs edge→edge (bar1→4→1), so a connected-but-stateless
+   link reads as "checking" rather than a healthy green link. Each bar's own keyframe bakes
+   in the phase(s) it carries the dark crest over the 6-step bounce period (1,2,3,4,3,2): the
+   two edge bars darken once, the two middle bars twice. No stagger — the phase is in the %s. */
+.bars.wave rect{fill:var(--warn-lite)}
+.bars.wave .wb1{animation:wbp1 2.4s ease-in-out infinite}
+.bars.wave .wb2{animation:wbp2 2.4s ease-in-out infinite}
+.bars.wave .wb3{animation:wbp3 2.4s ease-in-out infinite}
+.bars.wave .wb4{animation:wbp4 2.4s ease-in-out infinite}
+@keyframes wbp1{0%,100%{fill:var(--warn-base)} 16.7%,83.3%{fill:var(--warn-lite)}}
+@keyframes wbp2{0%,33.3%,66.7%,100%{fill:var(--warn-lite)} 16.7%,83.3%{fill:var(--warn-base)}}
+@keyframes wbp3{0%,16.7%,50%,83.3%,100%{fill:var(--warn-lite)} 33.3%,66.7%{fill:var(--warn-base)}}
+@keyframes wbp4{0%,33.3%,66.7%,100%{fill:var(--warn-lite)} 50%{fill:var(--warn-base)}}
 
 /* connection rows (Wi-Fi / Bluetooth / MQTT) */
 .conn{display:flex; flex-direction:column; margin-top:8px}
@@ -210,7 +227,7 @@ code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
 .crow .ck{flex:none; width:80px; font-size:12px; font-weight:600; letter-spacing:.5px; text-transform:uppercase; color:var(--muted)}
 .crow .cv{flex:1; min-width:0; font-size:16px; display:flex; align-items:center; gap:6px; flex-wrap:nowrap;
   font-variant-numeric:tabular-nums}
-.crow .cv.ok{color:var(--ok)} .crow .cv.warn{color:var(--warn)}
+.crow .cv.ok{color:var(--ok)} .crow .cv.warn{color:var(--warn)} .crow .cv.unkn{color:var(--warn-base)}
 /* connection-row MAC is a touch smaller than the tile MAC so bars + dBm + the full
    17-char address all fit one line on a phone (desktop bumps it back up to 15px) */
 .crow .cv .mac{font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12.5px; letter-spacing:.2px}
@@ -350,6 +367,16 @@ function barsHTML(rssi){
 function searchBarsHTML(){
   var H=[4,7,10,13], s='<svg class="bars search" width="24" height="15" viewBox="0 0 21 13" fill="currentColor"><title>Searching…</title>';
   for(var i=0;i<4;i++) s+='<rect class="sb'+(i+1)+'" x="'+(i*5.3)+'" y="'+(13-H[i])+'" width="3.3" height="'+H[i]+'" rx="1"/>';
+  return s+'</svg>';
+}
+// "status unknown" glyph — same geometry as barsHTML, all four bars fully lit (the link
+// is up; signal strength is real and shown as dBm next to it). Each bar carries a .wbN
+// class; its own @keyframes (wbpN) fades it between dark and light orange so a light crest
+// ping-pongs edge→edge across the bars. The markup is rssi-independent so it stays
+// byte-identical across polls — setHTML keeps the nodes, so the animation never restarts.
+function waveBarsHTML(){
+  var H=[4,7,10,13], s='<svg class="bars wave" width="24" height="15" viewBox="0 0 21 13"><title>Vehicle status unknown</title>';
+  for(var i=0;i<4;i++) s+='<rect class="wb'+(i+1)+'" x="'+(i*5.3)+'" y="'+(13-H[i])+'" width="3.3" height="'+H[i]+'" rx="1"/>';
   return s+'</svg>';
 }
 // continuous SOC colour: red → amber → light green → signal-bar green, interpolated
@@ -609,12 +636,22 @@ function render(s){
         ? 'The car has too many Bluetooth devices connected.'
         : 'Move the device closer, or disconnect other devices using the car.';
     } else {
-      // 'unreachable' (drove off / out of range / deep sleep) OR 'unknown' (nothing heard
-      // since boot — the on-demand BLE link hasn't reached the car yet). In neither case do
-      // we actually know the car's state, so claiming "asleep" would be false. The momentary
-      // BLE row reading "Disconnected" is normal (the link is dropped between polls by design)
-      // and is NOT evidence either way — only `link` is. Hide the hero entirely.
-      $("hero").classList.add('hide');
+      // paired, BLE may be up, but link_state is 'unknown' (nothing heard since boot — the
+      // on-demand link hasn't completed a signed round-trip yet) or 'unreachable' (heard
+      // before, now stale: drove off / out of range / deep sleep). We never claim "asleep"
+      // when we don't know — but instead of a blank area we show a neutral grey hero with the
+      // orange BLE glyph (matching the orange BLE bars) and the honest state, plus the
+      // last-known battery + idle time from the retained cache so the card still informs.
+      var ureach=s.link==='unreachable';
+      hicHTML=ringSVG(0,true)+'<div class="glyph">'+BT+'</div>';
+      setHTML(hl,'<span>'+(ureach?'Unreachable':'Connecting…')+'</span>');
+      hs.textContent=ureach
+        ? 'No recent response from the vehicle over Bluetooth.'
+        : 'Bluetooth connected — checking status…';
+      var uls=s.last||{}, ulsoc=(uls.soc!=null)?Math.round(uls.soc):null, uago=fmtAgo(s.last_seen_s), uchips=[];
+      if(ulsoc!=null) uchips.push(stat('Battery','<span style="color:'+socColor(ulsoc)+'">'+ulsoc+'</span>','%'));
+      if(uago)        uchips.push(stat('Idle', uago, ''));
+      hst.innerHTML=uchips.join('');
     }
   } else if(!configured){
     hicHTML=ringSVG(0,true)+'<div class="glyph">'+BTG+'</div>';
@@ -674,10 +711,17 @@ function render(s){
       bc.className='cv'; setHTML(bc,searchBarsHTML()+'<span>Searching…</span>');
     }
   } else if(linked){
-    var bbars=(ble.rssi!=null)?barsHTML(ble.rssi):'';                          // bars (signal glyph)
+    // The GATT link is up. If we're paired but have no fresh telemetry — link_state
+    // unknown/unreachable, the exact case where the hero is hidden — the link is
+    // connected yet stateless: drive the bars with the orange wave (waveBarsHTML) to
+    // signal "status unknown" instead of a healthy green. Awake/idle/asleep (and the
+    // pre-pair "Pairing" state) are known states → plain green bars as before.
+    var unknownStatus=paired&&(s.link==='unknown'||s.link==='unreachable');
+    var bbars=unknownStatus?waveBarsHTML()
+             :(ble.rssi!=null)?barsHTML(ble.rssi):'';                          // bars (signal glyph)
     var bdbm=(ble.rssi!=null)?'<span class="dbm">'+ble.rssi+' dBm</span>':'';  // numeric reading
     var btxt=ble.addr?'<span class="nm mac">'+esc(ble.addr)+'</span>':'';
-    bc.className='cv ok';
+    bc.className=unknownStatus?'cv unkn':'cv ok';   // orange MAC under the ping-pong; green when known
     setHTML(bc,bbars+bdbm+btxt);
   } else if(ble.connect_fail>=2){
     // Car found but the link keeps timing out (see the hero) — show it as a warning on the
