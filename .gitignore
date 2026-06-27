@@ -47,6 +47,11 @@ __pycache__/
 sdkconfig.local
 secrets.env
 
+# OTA / Secure Boot signing keys — the private key lives OFFLINE and, in CI, only ever
+# as a transient file written from the OTA_SIGNING_KEY secret. NEVER commit a real key.
+*.pem
+ota_signing_key.pem
+
 # Mock build variant
 /build_mock/
 

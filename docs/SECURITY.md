@@ -12,8 +12,9 @@ Relevant attackers:
 - **Physical USB/serial access** — can dump flash and (without Secure Boot) replace firmware.
 - **LAN peer** — the HTTP API is plaintext on port 80 with no TLS.
 - **BLE/RF range** — pairing/commands; mitigated by the Tesla session crypto.
-- **Supply chain** — OTA pulls *unsigned* firmware images; integrity rests on TLS to the
-  configured HTTPS host, not on an image signature (see [OTA self-update](#ota-self-update)).
+- **Supply chain** — OTA images are **signed** (RSA-3072, Secure Boot v2 scheme) and the
+  signature is verified on every update, so integrity no longer rests on TLS alone (see
+  [OTA self-update](#ota-self-update) and [Signed OTA](#signed-ota-images)).
 
 ## Current device state (factory ESP32-S3)
 
@@ -70,26 +71,96 @@ Pages), compares the manifest `version` to the running firmware, and on confirma
 the inactive OTA slot via `esp_https_ota`, then reboots. `esp_https_ota` verifies the image
 chip-id, so a wrong-target image is refused. Implemented in `main/ota_update.cpp`.
 
-Trust model of the **current (pre-hardening) build**:
+Trust model:
 
-- **Transport is verified, the image is not.** TLS server certificates are checked against
-  the bundled CA roots (`esp_crt_bundle_attach`), so the connection to the configured host
-  is authenticated — but the downloaded image carries **no application signature** (image
-  signing only takes effect once Secure Boot v2 is enabled, see below). Integrity therefore
-  rests entirely on TLS to the configured HTTPS host. Whoever controls that host (or its
-  GitHub Pages source) can serve arbitrary firmware to every device.
+- **Transport AND image are verified.** TLS server certificates are checked against the
+  bundled CA roots (`esp_crt_bundle_attach`), so the connection to the configured host is
+  authenticated — and, in addition, the downloaded image carries an **RSA-3072 application
+  signature** that the running firmware verifies before accepting the update
+  (`CONFIG_SECURE_SIGNED_ON_UPDATE_NO_SECURE_BOOT`, see [Signed OTA](#signed-ota-images)).
+  Whoever controls the update host can therefore no longer serve arbitrary firmware: an
+  unsigned or wrongly-signed image is rejected at `esp_https_ota_finish()`.
 - **The trigger is unauthenticated.** `POST /ota/update` (and `GET /ota/check`) are open on
-  the LAN like the rest of the API. Because the download URL is **compile-time fixed**, a
-  LAN peer cannot point the device at attacker-controlled firmware — but it *can* force a
-  fetch + reboot (a nuisance/DoS, and each reboot re-opens the BLE polling window so a
-  parked car stops sleeping).
+  the LAN like the rest of the API. Because the download URL is **compile-time fixed** *and*
+  the image must be signed, a LAN peer cannot point the device at attacker-controlled
+  firmware — but it *can* force a fetch + reboot (a nuisance/DoS, and each reboot re-opens
+  the BLE polling window so a parked car stops sleeping). Restricting who can reach
+  `/ota/update` needs the same reverse-proxy / VLAN segmentation as the rest of the API.
 - **Rollback is enabled** (`CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE`); `main.cpp` calls
   `esp_ota_mark_app_valid_cancel_rollback()` only after a healthy startup, so a bad image
   is reverted on the next boot.
 
-To raise the bar, enable Secure Boot v2 (below): `esp_https_ota` then additionally requires
-a validly **signed** image, closing the unsigned-artifact gap. Restricting who can reach
-`/ota/update` needs the same reverse-proxy / VLAN segmentation as the rest of the API.
+Signed OTA closes the *unsigned-artifact* gap without burning any eFuses. It does **not**
+protect against a physical attacker reflashing over USB (no boot-time enforcement) — that
+still requires full hardware Secure Boot v2 + Flash Encryption (below), which reuses the
+**same signing key**.
+
+## Signed OTA images
+
+The firmware is built with the **Secure Boot v2 signature scheme but WITHOUT hardware
+Secure Boot** (`CONFIG_SECURE_SIGNED_APPS_NO_SECURE_BOOT` + `..._RSA_SCHEME` +
+`CONFIG_SECURE_SIGNED_ON_UPDATE_NO_SECURE_BOOT`, in `sdkconfig.defaults`). Every OTA image
+must carry a valid **RSA-3072** signature, which the running app verifies before installing.
+No eFuses are burned, so this is **reversible, cannot brick the device, and the web installer
+keeps working** (with the RSA scheme the bootloader does not verify on boot — only the OTA
+path does). `CONFIG_SECURE_BOOT_BUILD_SIGNED_BINARIES=n`, so the build emits an *unsigned*
+binary and CI signs it in a separate step — the private key never has to be present at
+compile time.
+
+### Trust anchor (trust-on-first-use)
+
+With no eFuse digest, the trusted public key is taken from the **signature block of the
+currently running app** (`esp_secure_boot_get_signature_blocks_for_running_app`). Practical
+consequences:
+
+- The **first** signed image is accepted by a device still on the *old, unsigned* firmware
+  (which performs no verification), or can be USB-flashed. From then on, that device only
+  accepts OTA images signed with the **same key**.
+- This is a deliberate **one-way transition**: once a device runs a signed build it will
+  **refuse an unsigned (or differently-signed) OTA**. A bad signed image still auto-rolls
+  back via `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE`; a downgrade to unsigned firmware needs a
+  USB reflash.
+- **Classic ESP32 requires chip rev v3.0+ (ECO3)** for the V2 RSA scheme — enforced by
+  `CONFIG_ESP32_REV_MIN_3` in `sdkconfig.defaults.esp32`. Signed firmware will not boot on
+  pre-ECO3 ESP32 silicon (ECO3 has been standard since ~2020). `esp32s3`/`c3`/`c6` need no
+  such override.
+
+### Create the signing key (offline, back it up)
+
+Generate a **dedicated** key offline — do **not** reuse the GPG key that signs git commits
+(wrong format/algorithm, and it conflates two separate trust domains):
+
+```bash
+espsecure.py generate_signing_key --version 2 --scheme rsa3072 ota_signing_key.pem
+```
+
+- **Losing it ⇒ no more OTA updates** (devices must be USB-reflashed). **Leaking it ⇒ signed
+  OTA is worthless.** Treat it like a root key: keep it offline (password manager / hardware
+  token / air-gapped), backed up in ≥2 separate locations.
+- The same key later doubles as the hardware **Secure Boot v2** signing key (next section),
+  so enabling full Secure Boot needs no key migration.
+
+### Signing in CI
+
+CI signs every image with this key, supplied via an encrypted repository secret:
+
+1. Store the PEM as the **`OTA_SIGNING_KEY`** Actions secret (ideally scoped to a protected
+   GitHub *Environment*). Consider a base64 round-trip if your paste mangles newlines.
+2. `.github/workflows/build.yml` writes it to `ota_signing_key.pem` for the run (gitignored,
+   shredded afterwards), and `scripts/ci-build-all.sh` signs each built image in place with
+   `espsecure.py sign_data --version 2`.
+3. A push to `main` that changes firmware **fails** if the secret is missing (refuses to
+   publish an unsigned release); PR/fork builds without the secret build unsigned (warning).
+
+For higher assurance, keep the key fully offline and sign on a trusted machine / KMS instead
+of in CI (no workflow change to the device is needed — only where `sign_data` runs).
+
+### Key rotation
+
+The v2 scheme allows up to **3 trusted public keys** at once. To rotate: ship a release
+signed with both old+new keys (so currently-deployed devices, anchored on the old key, still
+accept it and pick up the new one), update all devices, then drop the old key from later
+releases.
 
 ## Enabling Flash Encryption + Secure Boot (recommended, IRREVERSIBLE)
 
@@ -99,10 +170,15 @@ after testing the firmware. Read the Espressif guides first:
 - <https://docs.espressif.com/projects/esp-idf/en/latest/esp32s3/security/flash-encryption.html>
 - <https://docs.espressif.com/projects/esp-idf/en/latest/esp32s3/security/secure-boot-v2.html>
 
-### 1. Generate a Secure Boot signing key (keep OFFLINE, back it up)
+### 1. Secure Boot signing key (keep OFFLINE, back it up)
+
+**Reuse the OTA signing key** from [Signed OTA](#signed-ota-images) — it is already the right
+type (RSA-3072, v2). Hardware Secure Boot just additionally burns its public-key digest into
+eFuse, so no second key and no re-signing of the existing release stream is needed. If you do
+not have one yet:
 
 ```bash
-espsecure generate_signing_key --version 2 secure_boot_signing_key.pem
+espsecure.py generate_signing_key --version 2 --scheme rsa3072 ota_signing_key.pem
 ```
 
 Losing this key means you can never sign an update again; leaking it defeats Secure Boot.
@@ -114,7 +190,7 @@ Security features →
   [*] Enable flash encryption on boot
         Flash encryption mode = Release        # Development mode is NOT secure
   [*] Enable hardware Secure Boot in bootloader (v2)
-        Secure boot private signing key = secure_boot_signing_key.pem
+        Secure boot private signing key = ota_signing_key.pem   # the same key as Signed OTA
   [*] Enable NVS Encryption
 ```
 
