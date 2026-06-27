@@ -37,6 +37,9 @@ __pycache__/
 # Project-review gate marker (per-tree, transient — never commit)
 .claude/.project-review-passed
 
+# Logic-tests Stop-gate marker (per-tree, transient — never commit)
+.claude/.logic-tests-blocked
+
 # macOS
 .DS_Store
 
