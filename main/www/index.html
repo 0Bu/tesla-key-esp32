@@ -576,7 +576,7 @@ function render(s){
   // insert a fresh <svg> and restart its CSS animation from 0% — making the pulsing
   // sleep/charge/wake ring visibly jump every 4 s instead of fading smoothly.
   var hic=$("hicon"), hl=$("hlabel"), hs=$("hsub"), hst=$("hstats"), hicHTML=null;
-  $("hero").classList.remove('hide');   // shown by default; the unreachable branch hides it
+  $("hero").classList.remove('hide');   // shown for every paired state; unknown/unreachable now show a grey status hero (not hidden)
   hst.innerHTML='';   // cleared here; only the paired+reporting branch populates it
   if(paired&&v){
     if(waking){ waking=false; clearTimeout(wakeTimeout); }   // car is awake & reporting — stop the spinner
@@ -712,7 +712,7 @@ function render(s){
     }
   } else if(linked){
     // The GATT link is up. If we're paired but have no fresh telemetry — link_state
-    // unknown/unreachable, the exact case where the hero is hidden — the link is
+    // unknown/unreachable, the case where the hero shows a grey status card — the link is
     // connected yet stateless: drive the bars with the orange wave (waveBarsHTML) to
     // signal "status unknown" instead of a healthy green. Awake/idle/asleep (and the
     // pre-pair "Pairing" state) are known states → plain green bars as before.

@@ -1193,7 +1193,7 @@ void VehicleController::clear_session_and_cache_() {
 //                     every ~10 s while the window is open, so 60 s won't flap).
 //   kReachableMaxAgeS must span TWO full idle health-probe cycles incl. one missed probe so a
 //                     transient miss never flaps a sleeping-NEARBY car to Unreachable (which
-//                     would wrongly hide the web-UI hero / publish a phantom "UNREACHABLE").
+//                     would wrongly show the web-UI "Unreachable" hero / publish a phantom "UNREACHABLE").
 //                     The idle reachability stamp comes only from auto_pair_task's health
 //                     probe, whose cycle is its 30 s post-probe wait + a VCSEC scan/connect
 //                     (≤10 s, ensure_connected_) + round-trip (≤8 s, health_probe_) ≈ 40-48 s;

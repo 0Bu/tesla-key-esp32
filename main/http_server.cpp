@@ -592,8 +592,9 @@ static esp_err_t handle_status(httpd_req_t* req) {
     // same enum the MQTT bridge publishes) — so "asleep", "idle" and "unreachable" can never
     // be confused. awake ⇒ live SOC card; asleep ⇒ "Vehicle asleep" card (proven, debounced);
     // idle ⇒ reachable but not provably asleep ⇒ neutral "Geparkt" (parked) card (last-known
-    // SOC + wake), never a sleep claim; unreachable ⇒ the car drove off / out of range and the UI
-    // hides the hero; unknown ⇒ nothing heard yet. Decoupled from the momentary BLE link.
+    // SOC + wake), never a sleep claim; unreachable ⇒ the car drove off / out of range ⇒ a neutral
+    // grey "Unreachable" hero (last-known SOC); unknown ⇒ nothing heard yet ⇒ a grey "Connecting…"
+    // hero. Decoupled from the momentary BLE link.
     // Mapping lives in logic/link_state.hpp (host-tested) — the MQTT bridge shares it so
     // the hero and the published sleep_status can never drift.
     cJSON_AddStringToObject(root, "link", tk::link_state_web_str(g_vehicle->link_state()));
@@ -604,8 +605,9 @@ static esp_err_t handle_status(httpd_req_t* req) {
     // Live "vehicle" object — drives the UI's awake/SOC view. Emitted only when the car is
     // AWAKE (fresh infotainment telemetry per link_state()), independent of the momentary
     // BLE link: the link is dropped between polls so the car can sleep, but data inside the
-    // freshness window is still live. When not awake the UI falls through to the asleep card
-    // (reachable) or hides the hero (unreachable) using `link` above.
+    // freshness window is still live. When not awake the UI falls through to the asleep/"Geparkt"
+    // card (reachable) or a neutral grey "Unreachable"/"Connecting…" hero (unreachable/unknown),
+    // using `link` above.
     if (g_vehicle->link_state() == VehicleController::LinkState::Awake) {
         ChargeStateResult cs = g_vehicle->get_cached_charge();
         if (cs.valid) {
