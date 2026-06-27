@@ -121,9 +121,13 @@ consequences:
   back via `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE`; a downgrade to unsigned firmware needs a
   USB reflash.
 - **Classic ESP32 requires chip rev v3.0+ (ECO3)** for the V2 RSA scheme — enforced by
-  `CONFIG_ESP32_REV_MIN_3` in `sdkconfig.defaults.esp32`. Signed firmware will not boot on
-  pre-ECO3 ESP32 silicon (ECO3 has been standard since ~2020). `esp32s3`/`c3`/`c6` need no
-  such override.
+  `CONFIG_ESP32_REV_MIN_3` in `sdkconfig.defaults.esp32`. ECO3 has been standard since ~2020.
+  On pre-ECO3 ESP32 silicon the image's min-rev is checked during OTA validation, so the
+  update is **rejected cleanly** (`esp_https_ota_finish` → "downloaded image is invalid") and
+  the device keeps running its current firmware — it does not boot-loop, but it also can no
+  longer OTA forward (a USB reflash with a rev-compatible image is the only path). This is a
+  deliberate trade-off to keep one signing scheme + one key across all four targets;
+  `esp32s3`/`c3`/`c6` need no such override.
 
 ### Create the signing key (offline, back it up)
 
