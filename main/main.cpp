@@ -20,6 +20,9 @@
 #include "esp_heap_caps.h"
 #include "esp_app_desc.h"
 #include "esp_netif.h"
+#include "ping/ping_sock.h"
+#include "lwip/ip_addr.h"
+#include "freertos/semphr.h"
 
 #include "ble_client.hpp"
 #include "nvs_storage.hpp"
@@ -69,24 +72,39 @@ static const int MAX_RETRY          = 10;
 static volatile bool s_wifi_connected = false;
 bool wifi_is_connected() { return s_wifi_connected; }
 
+// Set true on the first IP_EVENT_STA_GOT_IP, never cleared. Distinguishes a boot-time
+// connect (exhausting the retry budget here means the stored credentials are wrong →
+// fall back to the setup portal) from a runtime drop (credentials known-good →
+// reconnect forever, never surrender to the setup portal).
+static volatile bool s_wifi_ever_connected = false;
+
 static void wifi_event_handler(void*, esp_event_base_t base,
                                 int32_t event_id, void* data) {
     if (base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
         esp_wifi_connect();
     } else if (base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
         s_wifi_connected = false;
-        if (s_retry_num < MAX_RETRY) {
+        if (!s_wifi_ever_connected && s_retry_num >= MAX_RETRY) {
+            // Never been online AND the boot retry budget is spent → credentials are
+            // almost certainly wrong. Stop so wifi_connect() times out and falls back
+            // to the setup portal.
+            xEventGroupSetBits(s_wifi_events, WIFI_FAIL_BIT);
+        } else {
+            // Still within the boot budget, OR we have been online before (a runtime
+            // drop: router reboot, roaming, a delivered deauth). Credentials are
+            // known-good → reconnect FOREVER. Surrendering here is what previously
+            // stranded the device off-WiFi until a manual reset.
             esp_wifi_connect();
             s_retry_num++;
-            ESP_LOGI(TAG, "WiFi retry %d/%d", s_retry_num, MAX_RETRY);
-        } else {
-            xEventGroupSetBits(s_wifi_events, WIFI_FAIL_BIT);
+            if (s_retry_num <= MAX_RETRY || s_retry_num % 20 == 0)
+                ESP_LOGI(TAG, "WiFi (re)connect attempt %d", s_retry_num);
         }
     } else if (base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t* ev = (ip_event_got_ip_t*)data;
         ESP_LOGI(TAG, "IP: " IPSTR, IP2STR(&ev->ip_info.ip));
         s_retry_num = 0;
         s_wifi_connected = true;
+        s_wifi_ever_connected = true;
         xEventGroupSetBits(s_wifi_events, WIFI_CONNECTED_BIT);
     }
 }
@@ -153,6 +171,138 @@ static bool wifi_connect(const char* ssid, const char* password) {
     }
     ESP_LOGE(TAG, "WiFi connection failed");
     return false;
+}
+
+// ─── WiFi connectivity watchdog ───────────────────────────────────────────────
+// Two failure modes strand the device off the LAN while the firmware otherwise runs
+// fine (BLE stays up, heap healthy, no reboot — exactly the state we debugged live):
+//   (A) the STA exhausted its reconnect attempts and gave up, or
+//   (B) a *missed deauth* leaves a "ghost" association — the stack still believes it
+//       is connected (keeps the IP, keeps emitting TCP that times out) but the AP
+//       forwards nothing and NO WIFI_EVENT_STA_DISCONNECTED ever fires, so the
+//       reconnect handler never runs.
+// (A) is handled by the endless-retry handler above, which owns recovery whenever the
+// link already knows it is down. (B) has NO event to react to, so this task closes the
+// gap: it probes real L3 connectivity (ICMP echo to the default gateway) every
+// kWdPeriodS and, only for the ghost case (link believes it is up yet a gateway that
+// HAS answered before now doesn't), forces a single re-association — esp_wifi_disconnect()
+// drops the stale link and the handler reconnects with the known-good credentials. It
+// deliberately NEVER reboots: a reboot during an AP outage would hit wifi_connect()'s
+// 30 s boot timeout and drop into the setup portal, abandoning good credentials.
+
+static const int kWdPeriodS       = 30;   // connectivity-check cadence
+static const int kWdFailToReassoc = 2;    // consecutive failed checks (~60 s) → re-associate
+static const int kWdPingTimeoutMs = 1000; // per-echo timeout
+static const int kWdPingCount     = 3;    // echoes per check; healthy if ≥1 replies
+
+// Persistent across probes (the single watchdog task calls gateway_reachable() serially).
+// The control block and its semaphore MUST outlive any in-flight esp_ping session: the
+// ping's internal thread is NOT joined by esp_ping_delete_session() and calls
+// wd_on_ping_end() unconditionally once started. If that callback ran against a per-call
+// stack frame after a take() timeout it would write freed memory / give a deleted
+// semaphore (use-after-free). File-scope storage removes the window entirely; a stale give
+// from a late completion is harmlessly drained at the next probe.
+struct WdPing { SemaphoreHandle_t done; uint32_t received; };
+static WdPing s_wd = { nullptr, 0 };
+
+// Set true the first time the gateway answers ICMP, never cleared. Until a baseline exists
+// we have NO evidence this gateway answers echo at all, so a never-replying gateway (a
+// router/firewall that drops LAN ICMP) must NOT be read as "link dead" — that would
+// re-associate a perfectly healthy link every ~60 s forever. A genuine ghost association,
+// by contrast, replied before and then stops, so it still trips the watchdog.
+static volatile bool s_gw_ever_reachable = false;
+
+static void wd_on_ping_end(esp_ping_handle_t hdl, void* args) {
+    auto* p = (WdPing*) args;
+    uint32_t recv = 0;
+    esp_ping_get_profile(hdl, ESP_PING_PROF_REPLY, &recv, sizeof(recv));
+    p->received = recv;
+    xSemaphoreGive(p->done);
+}
+
+// Blocking ICMP echo to the current default gateway. True if ≥1 reply came back. Returns
+// true (no false alarm) when the probe can't even be set up — the watchdog must act only on
+// a *proven* failure to reach a gateway that DOES answer ICMP, never on its own inability to
+// measure. The per-cycle esp_ping session is a deliberate, accepted minor cost (a transient
+// ~2.5 KB ping task ~1.5 s out of every 30 s; same-size alloc/free, no monotonic growth).
+static bool gateway_reachable() {
+    if (!s_wd.done) return true;  // watchdog not fully initialised yet
+
+    esp_netif_t* netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+    esp_netif_ip_info_t ip{};
+    if (!netif || esp_netif_get_ip_info(netif, &ip) != ESP_OK || ip.gw.addr == 0)
+        return false;  // no gateway/lease → not reachable
+
+    char gw[16];
+    esp_ip4addr_ntoa(&ip.gw, gw, sizeof(gw));
+    ip_addr_t target{};
+    if (!ipaddr_aton(gw, &target))
+        return true;  // unparseable → don't false-alarm
+
+    esp_ping_config_t cfg = ESP_PING_DEFAULT_CONFIG();
+    cfg.target_addr = target;
+    cfg.count       = kWdPingCount;
+    cfg.timeout_ms  = kWdPingTimeoutMs;
+    cfg.interval_ms = 250;
+
+    esp_ping_callbacks_t cbs = {};
+    cbs.cb_args     = &s_wd;
+    cbs.on_ping_end = wd_on_ping_end;
+
+    esp_ping_handle_t hdl = nullptr;
+    if (esp_ping_new_session(&cfg, &cbs, &hdl) != ESP_OK || !hdl)
+        return true;  // probe setup failed → don't false-alarm
+
+    xSemaphoreTake(s_wd.done, 0);  // drain any stale give from a prior timed-out probe
+    s_wd.received = 0;
+    esp_ping_start(hdl);
+    // Wait out the whole sequence (count × (timeout + interval)) plus generous margin. A
+    // take() timeout is harmless here because s_wd is persistent (see above).
+    xSemaphoreTake(s_wd.done,
+        pdMS_TO_TICKS(kWdPingCount * (kWdPingTimeoutMs + 250) + 2000));
+    esp_ping_stop(hdl);
+    esp_ping_delete_session(hdl);
+
+    bool ok = s_wd.received > 0;
+    if (ok) s_gw_ever_reachable = true;
+    return ok;
+}
+
+static void wifi_watchdog_task(void*) {
+    s_wd.done = xSemaphoreCreateBinary();
+    int fails = 0;
+    for (;;) {
+        vTaskDelay(pdMS_TO_TICKS(kWdPeriodS * 1000));
+
+        // Only probe while the link believes it is up; when it knows it is down the
+        // endless-retry handler already owns recovery.
+        if (s_wifi_connected && gateway_reachable()) {
+            fails = 0;
+            continue;
+        }
+
+        fails++;
+        ESP_LOGW(TAG, "watchdog: no LAN connectivity (%d/%d, link=%s)",
+                 fails, kWdFailToReassoc, s_wifi_connected ? "up" : "down");
+        if (fails < kWdFailToReassoc)
+            continue;
+        fails = 0;
+
+        // Act ONLY on a true ghost association: the link still believes it is up AND this
+        // gateway has answered ICMP before (so its silence is real, not a firewall). When
+        // the link already knows it is down, the handler owns recovery — forcing a
+        // disconnect here would only churn the shared WiFi/BLE radio. One disconnect is
+        // enough: the handler's else-branch reconnects (s_wifi_ever_connected is true), so
+        // we don't call esp_wifi_connect() ourselves and avoid a cross-task double-connect.
+        if (!s_wifi_connected || !s_gw_ever_reachable) {
+            if (s_wifi_connected && !s_gw_ever_reachable)
+                ESP_LOGW(TAG, "watchdog: gateway has never answered ICMP — not forcing re-assoc");
+            continue;
+        }
+
+        ESP_LOGW(TAG, "watchdog: ghost association — forcing WiFi re-association");
+        esp_wifi_disconnect();   // drops the ghost link → handler reconnects (known-good creds)
+    }
 }
 
 // ─── app_main ─────────────────────────────────────────────────────────────────
@@ -343,6 +493,12 @@ extern "C" void app_main() {
     // no-op otherwise. Runs in its own task, independent of evcc/BLE/pairing.
     mqtt_ha_start(vehicle, config_store);
     log_heap("mqtt");
+
+    // WiFi connectivity watchdog: re-associates if the LAN link silently dies,
+    // including the "ghost association" case that fires no disconnect event (see the
+    // task definition above). Without it the device can sit reachable-over-BLE but
+    // off the LAN indefinitely, recoverable only by a manual reset.
+    xTaskCreate(wifi_watchdog_task, "wifi_wd", 3072, nullptr, 4, nullptr);
 
     // We reached a healthy steady state (WiFi up, server running). If we just
     // booted a freshly OTA-flashed image in the "pending verify" state, mark it
