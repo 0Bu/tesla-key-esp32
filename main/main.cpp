@@ -335,6 +335,36 @@ static void log_heap(const char* where) {
              (unsigned) heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT));
 }
 
+// OTA rollback health gate. CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE leaves a freshly-flashed
+// image in ESP_OTA_IMG_PENDING_VERIFY until the app calls
+// esp_ota_mark_app_valid_cancel_rollback(); if the device reboots before that call, the
+// bootloader reverts to the previous slot. We defer the call to this task so the new image
+// has to RUN healthily for a window first — catching a "boots fine, then crashes/OOM-reboots
+// under load" image, which the old mark-at-startup placement would have already committed.
+// A clean survival of the window (during which polling/HTTP/MQTT/BLE exercise the image) is
+// the health signal; a crash inside it reboots still-PENDING and rolls back. No-op otherwise.
+static constexpr int kOtaHealthGateS = 90;
+
+static void ota_health_gate_task(void*) {
+    const esp_partition_t* running = esp_ota_get_running_partition();
+    esp_ota_img_states_t st;
+    if (esp_ota_get_state_partition(running, &st) != ESP_OK ||
+        st != ESP_OTA_IMG_PENDING_VERIFY) {
+        vTaskDelete(nullptr);   // normal boot — nothing pending to confirm
+        return;
+    }
+
+    ESP_LOGI(TAG, "OTA image pending verify — holding rollback armed for %ds health window",
+             kOtaHealthGateS);
+    vTaskDelay(pdMS_TO_TICKS(kOtaHealthGateS * 1000));
+
+    if (esp_ota_mark_app_valid_cancel_rollback() == ESP_OK)
+        ESP_LOGI(TAG, "OTA image healthy for %ds — marked valid (rollback cancelled, largest block %u)",
+                 kOtaHealthGateS,
+                 (unsigned) heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+    vTaskDelete(nullptr);
+}
+
 extern "C" void app_main() {
     // Capture console output into the in-memory diagnostic ring (GET /diag).
     diag_log_init();
@@ -500,19 +530,14 @@ extern "C" void app_main() {
     // off the LAN indefinitely, recoverable only by a manual reset.
     xTaskCreate(wifi_watchdog_task, "wifi_wd", 3072, nullptr, 4, nullptr);
 
-    // We reached a healthy steady state (WiFi up, server running). If we just
-    // booted a freshly OTA-flashed image in the "pending verify" state, mark it
-    // valid so the bootloader keeps it; otherwise an early crash would auto-roll
-    // back to the previous slot. A no-op for images that aren't pending verify.
-    {
-        const esp_partition_t* running = esp_ota_get_running_partition();
-        esp_ota_img_states_t st;
-        if (esp_ota_get_state_partition(running, &st) == ESP_OK &&
-            st == ESP_OTA_IMG_PENDING_VERIFY) {
-            if (esp_ota_mark_app_valid_cancel_rollback() == ESP_OK)
-                ESP_LOGI(TAG, "OTA image marked valid (rollback cancelled)");
-        }
-    }
+    // Confirm a freshly OTA-flashed image only after it has proven it can RUN — not merely
+    // reach this line. Marking it valid here (the old behaviour) would disarm rollback the
+    // instant the tasks start, so an image that boots but then crashes/OOM-reboots only under
+    // load would already have cancelled its safety net. The health-gate task instead holds
+    // rollback armed for a window of healthy uptime; if the image dies first it reboots while
+    // still PENDING_VERIFY and the bootloader reverts to the previous slot. A no-op on a normal
+    // (non-pending-verify) boot.
+    xTaskCreate(ota_health_gate_task, "ota_gate", 3072, nullptr, 3, nullptr);
 
     ESP_LOGI(TAG, "tesla-key-esp32 running. API on port 80.");
     // Main task is no longer needed; Vehicle loop + HTTP server run in their own tasks.

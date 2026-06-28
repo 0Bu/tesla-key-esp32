@@ -138,6 +138,26 @@ static bool parse_vin_only(const char* uri, char* vin_out, size_t vin_sz) {
     return true;
 }
 
+// Read an integer command parameter from the JSON body, clamped to [lo,hi]. The double is
+// clamped BEFORE the int cast — casting an out-of-range double to int is undefined behaviour,
+// so a hostile `{"percent": 1e300}` must never reach `(int)valuedouble`. The string path is
+// bounded too. The car is the real backstop; this just keeps a malformed/hostile LAN request
+// in range (amps 0–80, percent 50–100, start_minutes 0–1439). `obj` may be null (no body) →
+// returns the clamped default.
+static int json_int_clamped(const cJSON* obj, const char* key, int dflt, int lo, int hi) {
+    int v = dflt;
+    const cJSON* j = cJSON_GetObjectItemCaseSensitive(obj, key);
+    if (cJSON_IsNumber(j)) {
+        double d = j->valuedouble;
+        if (d < (double)lo) d = lo; else if (d > (double)hi) d = hi;
+        v = (int)d;
+    } else if (cJSON_IsString(j) && j->valuestring) {
+        v = atoi(j->valuestring);
+    }
+    if (v < lo) v = lo; else if (v > hi) v = hi;
+    return v;
+}
+
 // ─── POST /api/1/vehicles/{VIN}/command/{CMD} ─────────────────────────────────
 
 static esp_err_t handle_command(httpd_req_t* req) {
@@ -166,21 +186,11 @@ static esp_err_t handle_command(httpd_req_t* req) {
     else if (strcmp(cmd, "auto_conditioning_start") == 0) ok = g_vehicle->climate_start();
     else if (strcmp(cmd, "auto_conditioning_stop")  == 0) ok = g_vehicle->climate_stop();
     else if (strcmp(cmd, "set_charging_amps") == 0) {
-        int amps = 0;
-        if (json) {
-            cJSON* j = cJSON_GetObjectItemCaseSensitive(json, "charging_amps");
-            if (cJSON_IsNumber(j))                        amps = (int)j->valuedouble;
-            else if (cJSON_IsString(j) && j->valuestring) amps = atoi(j->valuestring);
-        }
+        int amps = json_int_clamped(json, "charging_amps", 0, 0, 80);
         ok = g_vehicle->set_charging_amps(amps);
     }
     else if (strcmp(cmd, "set_charge_limit")  == 0) {
-        int pct = 80;
-        if (json) {
-            cJSON* j = cJSON_GetObjectItemCaseSensitive(json, "percent");
-            if (cJSON_IsNumber(j))                        pct = (int)j->valuedouble;
-            else if (cJSON_IsString(j) && j->valuestring) pct = atoi(j->valuestring);
-        }
+        int pct = json_int_clamped(json, "percent", 80, 50, 100);
         ok = g_vehicle->set_charge_limit(pct);
     }
     else if (strcmp(cmd, "set_sentry_mode")   == 0) {
@@ -194,14 +204,11 @@ static esp_err_t handle_command(httpd_req_t* req) {
     else if (strcmp(cmd, "set_scheduled_charging") == 0) {
         // Body: {"enable":bool, "start_minutes":int}  (minutes after local midnight)
         bool enable = false;
-        int  start  = 0;
         if (json) {
             cJSON* je = cJSON_GetObjectItemCaseSensitive(json, "enable");
             if (je) enable = cJSON_IsTrue(je);
-            cJSON* jm = cJSON_GetObjectItemCaseSensitive(json, "start_minutes");
-            if (cJSON_IsNumber(jm))                         start = (int)jm->valuedouble;
-            else if (cJSON_IsString(jm) && jm->valuestring) start = atoi(jm->valuestring);
         }
+        int start = json_int_clamped(json, "start_minutes", 0, 0, 1439);
         ok = g_vehicle->set_scheduled_charging(enable, start);
     }
     else {
@@ -360,6 +367,40 @@ static const char* ota_state_str(OtaState s) {
     }
 }
 
+// Plausibility window for a browser-supplied wall clock (the NTP fallback). The clock gates
+// OTA TLS certificate validation, so an unauthenticated LAN client must not be able to push it
+// arbitrarily far in EITHER direction: too far back makes valid certs look not-yet-valid; too
+// far forward makes them look expired (and not-yet-valid certs look valid). The lower floor is
+// fixed at ~2023-11; the upper bound is BUILD-RELATIVE (build year + 10) so it never goes stale
+// as real time advances — a fixed ceiling would eventually reject a correct clock on a
+// long-lived device.
+static constexpr double kClockFloorMs = 1700000000000.0;   // ~2023-11-14
+
+// Epoch ms at 00:00 UTC on Jan 1 of `year` (proleptic Gregorian, year ≥ 1970). Pure integer
+// arithmetic — the leap-day terms count Feb 29s strictly before Jan 1 of `year`.
+static double jan1_epoch_ms(int year) {
+    long long days = 365LL * (year - 1970)
+                   + (year - 1969) / 4
+                   - (year - 1901) / 100
+                   + (year - 1601) / 400;
+    return (double)days * 86400.0 * 1000.0;
+}
+
+// Upper plausibility bound = (build year + 10) as epoch ms. esp_app_get_description()->date is
+// the compiler __DATE__ string "Mmm dd yyyy", so the 4-digit year is its last token.
+static double clock_ceiling_ms() {
+    const char* d = esp_app_get_description()->date;
+    size_t n = d ? strlen(d) : 0;
+    int year = (n >= 4) ? atoi(d + n - 4) : 0;
+    if (year < 2023) year = 2023;   // unparseable → conservative base
+    return jan1_epoch_ms(year + 10);
+}
+
+// True if a browser epoch (ms) is inside the floor..ceiling plausibility window.
+static bool browser_time_plausible(double epoch_ms) {
+    return epoch_ms >= kClockFloorMs && epoch_ms < clock_ceiling_ms();
+}
+
 // Apply ?ms=<epoch> as the wall clock (the NTP fallback, see /set_time) when NTP
 // hasn't synced. Lets a single /ota/check request both set the browser time and
 // start the check — no extra blocking round-trip on the (serialized) HTTP server.
@@ -370,7 +411,7 @@ static void apply_browser_time_query_(httpd_req_t* req) {
     char ms[24];
     if (httpd_query_key_value(q, "ms", ms, sizeof(ms)) != ESP_OK) return;
     double epoch_ms = atof(ms);
-    if (epoch_ms < 1700000000000.0) return;
+    if (!browser_time_plausible(epoch_ms)) return;
     long long sec = (long long)(epoch_ms / 1000.0);
     struct timeval tv = {};
     tv.tv_sec = (time_t)sec;
@@ -715,9 +756,9 @@ static esp_err_t handle_set_time(httpd_req_t* req) {
     }
     cJSON_Delete(json);
 
-    // Floor at ~2023-11 (1.7e12 ms): reject a missing/implausible browser clock so
-    // we never set the device clock backwards into the cert-invalid range.
-    if (epoch_ms < 1700000000000.0) {
+    // Reject a missing/implausible browser clock so we never push the device clock into the
+    // cert-invalid range — floor ~2023-11, ceiling build year + 10 (see browser_time_plausible).
+    if (!browser_time_plausible(epoch_ms)) {
         return send_json(req, 400, make_response(false, "set_time", "",
                                                  "implausible timestamp"));
     }

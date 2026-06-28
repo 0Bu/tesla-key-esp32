@@ -241,6 +241,36 @@ static void ota_task(void*) {
 
     int image_size = esp_https_ota_get_image_size(handle);
 
+    // Downgrade defense (software anti-rollback, no eFuses burned by design). The image is
+    // RSA-signed and esp_https_ota verifies that, but a signature only proves AUTHENTICITY,
+    // not FRESHNESS: an attacker controlling the update host could serve an OLD, legitimately
+    // signed image carrying a since-patched vulnerability. Read the version straight from the
+    // downloaded image's own app descriptor (esp_https_ota_get_img_desc parses only the header,
+    // before the bulk download) and refuse anything not strictly newer than what is running.
+    // Checking the image itself — not the manifest — also closes the gap where a hostile host
+    // advertises a new version in manifest.json but serves an old .bin under the image URL.
+    esp_app_desc_t new_app{};
+    err = esp_https_ota_get_img_desc(handle, &new_app);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "esp_https_ota_get_img_desc failed: %s", esp_err_to_name(err));
+        esp_https_ota_abort(handle);
+        set_state(OtaState::Error, 0, "could not read image header");
+        s_running = false;
+        vTaskDelete(nullptr);
+        return;
+    }
+    if (!ver_newer(new_app.version, running_version())) {
+        ESP_LOGW(TAG, "OTA refused: image %s not newer than running %s (downgrade blocked)",
+                 new_app.version, running_version());
+        esp_https_ota_abort(handle);
+        set_state(OtaState::Error, 0, "no newer version available");
+        s_running = false;
+        vTaskDelete(nullptr);
+        return;
+    }
+    ESP_LOGI(TAG, "OTA image %s newer than running %s — proceeding",
+             new_app.version, running_version());
+
     while (true) {
         err = esp_https_ota_perform(handle);
         if (err != ESP_ERR_HTTPS_OTA_IN_PROGRESS) break;
