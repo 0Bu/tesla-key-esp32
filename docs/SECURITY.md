@@ -151,6 +151,21 @@ This writes an **unencrypted** PEM private key. (`--version 2 --scheme rsa3072` 
 a v1/ECDSA or EC key, an encrypted PEM, or a different RSA size is rejected by `sign_data`
 with `Could not deserialize key data … unsupported key type`.)
 
+**Alternative — plain OpenSSL.** The key is just a standard RSA-3072 keypair (nothing
+ESP-specific lives in the key — only the *signature block* written later by `sign_data` is),
+so OpenSSL produces an equivalent key if you'd rather not install esptool just for this:
+
+```bash
+openssl genrsa -out ota_signing_key.pem 3072       # PKCS#1 PEM; or use genpkey for PKCS#8:
+# openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 -out ota_signing_key.pem
+```
+
+Constraints for Secure Boot v2 compatibility (all satisfied by the commands above):
+**exactly 3072 bits**, **public exponent 65537** (OpenSSL's default), and **unencrypted** (do
+**not** add `-aes256`/`-des3` — CI loads the key non-interactively and cannot supply a
+passphrase). `espsecure.py sign_data` reads both PKCS#1 (`BEGIN RSA PRIVATE KEY`) and PKCS#8
+(`BEGIN PRIVATE KEY`) unencrypted PEMs, so either form works. Verify it with step 3 below.
+
 **3. Verify it before trusting it** — the same two checks CI does, run locally:
 
 ```bash
