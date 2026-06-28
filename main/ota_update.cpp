@@ -208,6 +208,17 @@ bool ota_check_start() {
     return true;
 }
 
+// Fetch + parse the manifest's "version" field. Returns "" on any failure.
+static std::string fetch_manifest_version() {
+    std::string body;
+    if (!http_get_to_buffer(CONFIG_TESLA_OTA_MANIFEST_URL, body)) return "";
+    cJSON* j = cJSON_Parse(body.c_str());
+    cJSON* v = j ? cJSON_GetObjectItemCaseSensitive(j, "version") : nullptr;
+    std::string out = (cJSON_IsString(v) && v->valuestring) ? v->valuestring : "";
+    cJSON_Delete(j);
+    return out;
+}
+
 // ─── Background download + install ──────────────────────────────────────────────
 
 static void ota_task(void*) {
@@ -217,8 +228,34 @@ static void ota_task(void*) {
     // wrong-target image (e.g. an esp32s3 build pulled by an esp32) is refused, not flashed.
     static constexpr const char* kFwUrl =
         CONFIG_TESLA_OTA_FIRMWARE_BASE_URL "tesla-key-esp32" TESLA_OTA_IMG_SUFFIX ".bin";
-    ESP_LOGI(TAG, "OTA starting from %s (free heap %u)",
-             kFwUrl, (unsigned)esp_get_free_heap_size());
+
+    // Re-fetch the manifest and refuse to flash anything that is not strictly newer than
+    // what is running. The image is RSA-signed (esp_https_ota verifies it), but a signature
+    // only proves authenticity, NOT freshness: an attacker who controls the manifest/image
+    // host could otherwise serve an OLD, legitimately-signed image carrying a since-patched
+    // vulnerability (a downgrade attack). There is no eFuse anti-rollback (none are burned by
+    // design), so this software version gate is the downgrade defense. /ota/check is advisory
+    // (UI only); the authoritative check happens here, right before the flash.
+    const char* running = running_version();
+    std::string avail   = fetch_manifest_version();
+    if (avail.empty()) {
+        ESP_LOGE(TAG, "OTA refused: could not read manifest version");
+        set_state(OtaState::Error, 0, "could not read update manifest");
+        s_running = false;
+        vTaskDelete(nullptr);
+        return;
+    }
+    if (!ver_newer(avail.c_str(), running)) {
+        ESP_LOGW(TAG, "OTA refused: manifest %s not newer than running %s",
+                 avail.c_str(), running);
+        set_state(OtaState::Error, 0, "no newer version available");
+        s_running = false;
+        vTaskDelete(nullptr);
+        return;
+    }
+
+    ESP_LOGI(TAG, "OTA starting from %s (running %s → %s, free heap %u)",
+             kFwUrl, running, avail.c_str(), (unsigned)esp_get_free_heap_size());
 
     esp_http_client_config_t http_cfg = {};
     http_cfg.url               = kFwUrl;
