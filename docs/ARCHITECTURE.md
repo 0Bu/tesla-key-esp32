@@ -39,9 +39,22 @@ esp32/esp32s3/esp32c3/esp32c6, picked at compile time by `TESLA_OTA_IMG_SUFFIX` 
 `esp_https_ota` verifies the image chip-id, so a wrong-target image is refused (never
 flashed); one manifest `version` covers all targets (CI builds them from one commit).
 Triggered from the web UI by tapping the firmware version in the top meta line.
-Implemented in `main/ota_update.cpp`. Rollback is enabled
-(`CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE`); `main.cpp` calls
-`esp_ota_mark_app_valid_cancel_rollback()` after a healthy startup.
+Implemented in `main/ota_update.cpp`.
+
+**Downgrade gate (software anti-rollback).** Just after `esp_https_ota_begin` — before the
+bulk download — `ota_task` reads the version from the downloaded image's own app descriptor
+(`esp_https_ota_get_img_desc`) and refuses anything not strictly newer than the running
+firmware. A valid RSA signature proves *authenticity* but not *freshness*, so without this a
+hostile update host could serve an old, legitimately-signed image carrying a since-patched
+bug. Reading the **image's** version (not the manifest's) also defeats a host that advertises
+a new `version` in `manifest.json` but serves an old `.bin`. No eFuses burned.
+
+**Rollback** is enabled (`CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE`); `main.cpp` defers
+`esp_ota_mark_app_valid_cancel_rollback()` to a health gate (`ota_health_gate_task`) that
+holds rollback armed until a freshly-flashed image has run healthily for a window
+(`kOtaHealthGateS` ≈ 90 s). An image that boots but then crashes/OOM-reboots under load dies
+while still `PENDING_VERIFY`, so the bootloader reverts to the previous slot rather than
+having committed it at startup.
 
 **Image signature.** Builds use the Secure Boot v2 RSA-3072 signature scheme *without*
 hardware Secure Boot (`CONFIG_SECURE_SIGNED_APPS_NO_SECURE_BOOT` + `..._RSA_SCHEME` +
