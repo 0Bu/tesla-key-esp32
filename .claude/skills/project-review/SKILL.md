@@ -66,6 +66,7 @@ links yourself — that's where the value is.
 | OTA | `main/ota_update.{cpp,hpp}` | pull-based self-update; dual-slot |
 | Provisioning | `main/provisioning.{cpp,hpp}` | captive setup portal when no WiFi |
 | Web UI | `main/www/index.html` | compiled into the app binary; polls `/status` every 4 s |
+| Pure logic (host-tested) | `main/logic/*.hpp` (`vin`, `units`, `link_state`, `target`) + `test/test_logic.cpp` | **IDF-free** logic the device and the host test share: VIN validation, imperial→metric units, the `link_state()` four-state machine + its `/status`/MQTT strings, per-target platform/OTA-suffix map. Host-built + run by `scripts/run-mock-tests.sh` (CI `logic-test` gate) — the real local verification loop |
 | Library | `managed_components/yoziru__tesla-ble/` | **fetched, regenerated — NEVER edit** (pin in `main/idf_component.yml`) |
 
 ## Project invariants (the high-value checks)
@@ -236,9 +237,10 @@ four rules — together they guarantee a fixpoint:
 
 Run these checks against the current tree:
 
-- **Project map covers every source file.** `ls main/*.{cpp,hpp}` and confirm each lands in the
-  *Project map* table (or is deliberately out of scope). A `main/*.cpp` the map never mentions
-  is the signal that a whole subsystem appeared without the skill noticing.
+- **Project map covers every source file.** `ls main/*.{cpp,hpp} main/logic/*.hpp` and confirm
+  each lands in the *Project map* table (or is deliberately out of scope). A `main/*.cpp` (or a
+  `main/logic/*.hpp`) the map never mentions is the signal that a whole subsystem appeared
+  without the skill noticing.
 - **Invariants match the code's *current* model**, not a superseded one. For each subsystem
   with an invariant (wake/sleep, **link state**, heap, OTA, NVS, evcc, pairing, telemetry),
   re-read the code and confirm the invariant still states what the code does. Sleep/link state
@@ -296,8 +298,11 @@ Firmware bugs are easy to mis-diagnose. Hold findings to evidence:
   is a stable-but-low largest block.
 - Don't propose editing `managed_components/`. A real library bug is fixed in our wrapper
   (catch/guard at the call boundary) or by bumping the pin.
-- A `git`/build check beats a guess: `idf.py build` for compile/warnings, `grep` for the
-  other half of a cross-cutting link.
+- A `git`/build check beats a guess: `idf.py build` for compile/warnings, the host **mock
+  tests** (`scripts/run-mock-tests.sh` — seconds, no Docker/board) to actually *run* a
+  pure-logic change (VIN/units/`link_state`/target — the same `main/logic/` headers the
+  firmware uses; CI gates the build on the `logic-test` job), `grep` for the other half of a
+  cross-cutting link.
 
 ## Report structure
 
