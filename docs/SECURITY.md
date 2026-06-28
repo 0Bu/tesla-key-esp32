@@ -86,9 +86,18 @@ Trust model:
   firmware — but it *can* force a fetch + reboot (a nuisance/DoS, and each reboot re-opens
   the BLE polling window so a parked car stops sleeping). Restricting who can reach
   `/ota/update` needs the same reverse-proxy / VLAN segmentation as the rest of the API.
-- **Rollback is enabled** (`CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE`); `main.cpp` calls
-  `esp_ota_mark_app_valid_cancel_rollback()` only after a healthy startup, so a bad image
-  is reverted on the next boot.
+- **Downgrade is blocked in software.** A signature proves authenticity, not freshness, so a
+  hostile (or compromised) update host could otherwise serve an *old, legitimately-signed*
+  image that re-introduces a patched vulnerability. Before flashing, `ota_task` reads the
+  version from the downloaded image's app descriptor (`esp_https_ota_get_img_desc`) and refuses
+  anything not strictly newer than what is running. Checking the image itself (not the
+  manifest) also defeats a host that advertises a new version but serves an old binary. No
+  eFuse anti-rollback is burned (by design), so this is the downgrade defense.
+- **Rollback is enabled** (`CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE`); `main.cpp` defers
+  `esp_ota_mark_app_valid_cancel_rollback()` to a health gate that keeps rollback armed until a
+  freshly-flashed image has run healthily for a window (≈ 90 s). An image that boots but then
+  crashes/OOM-reboots under load is reverted on the next boot — the old startup-time mark would
+  have committed it before it proved itself.
 
 Signed OTA closes the *unsigned-artifact* gap without burning any eFuses. It does **not**
 protect against a physical attacker reflashing over USB (no boot-time enforcement) — that

@@ -139,9 +139,13 @@ Pull-based: the device fetches `manifest.json` from `CONFIG_TESLA_OTA_MANIFEST_U
 GitHub Pages), compares `version` to the running firmware, and on confirmation downloads its
 per-target image `tesla-key-esp32<suffix>.bin` (`""`/`-s3`/`-c3`/`-c6`) via `esp_https_ota`
 into the inactive slot, then reboots. `esp_https_ota` verifies the chip-id (wrong-target image
-refused). Rollback enabled (`CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE`); `main.cpp` calls
-`esp_ota_mark_app_valid_cancel_rollback()` after a healthy start. Implemented in
-`main/ota_update.cpp`.
+refused). **Downgrade gate:** before the bulk download `ota_task` reads the image's own version
+(`esp_https_ota_get_img_desc`) and refuses anything not strictly newer than the running firmware
+— a signature proves authenticity, not freshness, so this is the software anti-rollback (no
+eFuses). Rollback enabled (`CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE`); `main.cpp` defers
+`esp_ota_mark_app_valid_cancel_rollback()` to `ota_health_gate_task` — rollback stays armed until
+the new image has run healthily for ≈90 s, so a boots-but-crashes-under-load image is reverted.
+Implemented in `main/ota_update.cpp`.
 
 **Images are signed** — Secure Boot v2 RSA-3072 scheme *without* hardware Secure Boot
 (`CONFIG_SECURE_SIGNED_APPS_NO_SECURE_BOOT` + `..._RSA_SCHEME` +
