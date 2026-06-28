@@ -137,8 +137,9 @@ The STA→LAN link (distinct from the car BLE link-state below) is kept up by tw
   (`s_gw_ever_reachable`) — a gateway that never replies (a router/firewall dropping LAN ICMP)
   is treated as "ICMP not a usable signal here", never as "link dead", so it cannot trigger a
   perpetual ~60 s re-association loop. The probe **fails open only on its own setup failure**
-  (no lease, no semaphore, session-create error → "reachable"); a gateway that is up but does
-  not answer echo is treated as unreachable, which is why the baseline guard matters. It
+  (watchdog not yet initialised, unparseable gateway, or `esp_ping` session-create error →
+  "reachable"); a *missing* DHCP lease/gateway, or a gateway that is up but does not answer
+  echo, is treated as unreachable — which is why the baseline guard matters. It
   **never reboots** — a reboot during an AP outage would hit the 30 s boot timeout and drop
   into the setup portal, abandoning good credentials. (Implementation note: the ICMP probe's
   control block + semaphore are file-scope persistent because `esp_ping`'s worker thread is not
