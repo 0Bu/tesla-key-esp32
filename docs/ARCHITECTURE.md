@@ -4,7 +4,7 @@ Deep internal reference for tesla-key-esp32. This is the **on-demand** companion
 [`.claude/CLAUDE.md`](../.claude/CLAUDE.md): CLAUDE.md carries the always-needed essentials
 (build/flash, component map, NVS table, command list, HTTP API, memory constraints); the
 full narrative lives here so it isn't reloaded into every session. Read this when working on
-telemetry, the MQTT bridge, sleep/link-state, pairing, or OTA. Keep both in sync — the
+telemetry, the MQTT bridge, WiFi/LAN connectivity, sleep/link-state, pairing, or OTA. Keep both in sync — the
 `project-review` skill checks for drift between them.
 
 ## Read-only telemetry (detail)
@@ -106,6 +106,45 @@ grouped under one device. **Read-only by design** — no command topics are subs
   (re)connect it (re)sends discovery + `online` + an immediate snapshot, then republishes
   state every interval. The same active-window gating that lets the car sleep applies to
   the *source* polls, so MQTT keeps serving the last-known (retained) values while asleep.
+
+## WiFi / LAN connectivity (reconnect + watchdog)
+
+The STA→LAN link (distinct from the car BLE link-state below) is kept up by two layers in
+`main.cpp`:
+
+- **Event-driven reconnect.** `wifi_event_handler` reconnects on every
+  `WIFI_EVENT_STA_DISCONNECTED`. The boot-time path keeps the original budget: if the device
+  has **never** held an IP (`s_wifi_ever_connected == false`) and the `MAX_RETRY` (10) fast
+  attempts are spent, it sets `WIFI_FAIL_BIT` so `wifi_connect()` times out and falls back to
+  the **setup portal** (the credentials are presumed wrong). But once the device has been
+  online at least once, a later drop reconnects **forever** — the credentials are known-good,
+  so surrendering would only strand the device. (The old code gave up after 10 retries in
+  *all* cases, which is exactly how a 3.5 h router outage left the board reachable-over-BLE
+  but off the LAN, recoverable only by a manual USB reset.)
+
+- **Connectivity watchdog** (`wifi_watchdog_task`, ~30 s cadence). The event path cannot catch
+  a **missed-deauth "ghost" association**: the stack still believes it is connected (holds the
+  IP, keeps emitting TCP that times out — e.g. MQTT `esp-tls select() timeout`) but the AP
+  forwards nothing and **no disconnect event ever fires**, so the handler never runs. The
+  watchdog ICMP-echoes the **default gateway** only while the link believes it is up; after
+  `kWdFailToReassoc` (2) consecutive failures (~60 s) it forces **one** `esp_wifi_disconnect()`
+  — the endless-retry handler then reconnects with the known-good credentials (so the watchdog
+  never calls `esp_wifi_connect()` itself, avoiding a cross-task double-connect). A stack that
+  *gave up* needs no help here — that path is owned by the handler. Two guards keep it from
+  ever harming a healthy link: it acts **only** when the link still believes it is up (a known-
+  down link is the handler's job, and forcing a disconnect there would only churn the shared
+  WiFi/BLE radio), and **only** if the gateway has answered ICMP **at least once**
+  (`s_gw_ever_reachable`) — a gateway that never replies (a router/firewall dropping LAN ICMP)
+  is treated as "ICMP not a usable signal here", never as "link dead", so it cannot trigger a
+  perpetual ~60 s re-association loop. The probe **fails open only on its own setup failure**
+  (watchdog not yet initialised, unparseable gateway, or `esp_ping` session-create error →
+  "reachable"); a *missing* DHCP lease/gateway, or a gateway that is up but does not answer
+  echo, is treated as unreachable — which is why the baseline guard matters. It
+  **never reboots** — a reboot during an AP outage would hit the 30 s boot timeout and drop
+  into the setup portal, abandoning good credentials. (Implementation note: the ICMP probe's
+  control block + semaphore are file-scope persistent because `esp_ping`'s worker thread is not
+  joined on teardown and its completion callback always runs — a per-call stack frame would be
+  a use-after-free if a probe timed out while that thread was still alive.)
 
 ## Sleep / link-state (the single source of truth)
 

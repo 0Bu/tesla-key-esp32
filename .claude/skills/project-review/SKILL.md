@@ -189,6 +189,14 @@ that describe it. When reviewing a change (or the repo as a whole), check these 
 - **New chip / target** → tesla-ble `targets:` (`main/idf_component.yml`) bounds the set
   **and** `platform.hpp` (`TK_PLATFORM`) **and** the OTA `<suffix>` map **and** the web
   installer manifest (`build-pages.sh`) **and** every doc that lists the four targets.
+- **WiFi/LAN reconnect or watchdog change** → the STA→LAN reconnect policy + connectivity-
+  watchdog constants live ONLY in `main/main.cpp` (`MAX_RETRY`, `s_wifi_ever_connected`,
+  `kWdPeriodS`/`kWdFailToReassoc`/`kWdPingCount`, the ghost-only + `s_gw_ever_reachable`
+  guards) **and** are mirrored in the **"WiFi / LAN connectivity"** section of
+  `docs/ARCHITECTURE.md` (which quotes those numbers) **and** the deep-reference topic index in
+  `.claude/CLAUDE.md`. This is the STA→LAN link, **distinct** from the car-BLE `link_state()`.
+  Invariant: the watchdog must **never reboot** (a reboot mid-outage hits `wifi_connect()`'s
+  boot timeout → setup portal, abandoning good credentials).
 - **tesla-ble library bump** → `main/idf_component.yml` pin; never patch
   `managed_components/`.
 
