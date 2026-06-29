@@ -59,6 +59,12 @@ static int chr_disc_cb(uint16_t conn_handle, const ble_gatt_error* error,
     return client->on_chr_disc(conn_handle, error, chr);
 }
 
+static int dsc_disc_cb(uint16_t conn_handle, const ble_gatt_error* error,
+                       uint16_t chr_val_handle, const ble_gatt_dsc* dsc, void* arg) {
+    auto* client = static_cast<BleClient*>(arg);
+    return client->on_dsc_disc(conn_handle, error, chr_val_handle, dsc);
+}
+
 // ─── BleClient ───────────────────────────────────────────────────────────────
 
 static void scan_timeout_cb(void* arg) {
@@ -451,6 +457,7 @@ int BleClient::on_gap_event(ble_gap_event* event) {
         svc_end_handle_    = 0;
         write_handle_      = 0;
         notify_val_handle_ = 0;
+        cccd_handle_       = 0;
 
         // Discover Tesla service
         int rc = ble_gattc_disc_svc_by_uuid(conn_handle_,
@@ -468,6 +475,7 @@ int BleClient::on_gap_event(ble_gap_event* event) {
         write_handle_      = 0;
         notify_handle_     = 0;
         notify_val_handle_ = 0;
+        cccd_handle_       = 0;
         connecting_        = false;
         want_connect_      = false;
         scanning_          = false;
@@ -580,17 +588,47 @@ int BleClient::on_chr_disc(uint16_t conn_handle,
 }
 
 void BleClient::subscribe_notify_() {
-    // Write 0x0001 to the CCCD (descriptor at notify_val_handle + 1) to enable notifications
-    uint16_t cccd_handle = notify_val_handle_ + 1;
-    uint8_t  value[2]    = {0x01, 0x00}; // BLE_GATT_SUB_NOTIFY
-
-    int rc = ble_gattc_write_flat(conn_handle_, cccd_handle,
-                                   value, sizeof(value),
-                                   nullptr, nullptr);
+    // Discover the CCCD (Client Characteristic Configuration Descriptor, 0x2902) for the notify
+    // characteristic instead of assuming it sits at notify_val_handle_ + 1. GATT does not
+    // guarantee that layout — an extra descriptor (e.g. a Characteristic User Description) placed
+    // between the value and the CCCD, which a future Tesla vehicle-firmware GATT revision could
+    // introduce, would shift it. Writing the enable word to the wrong handle would silently break
+    // the device's ONLY receive channel: notifications never arrive, so every command then times
+    // out as "vehicle not reachable" with no other symptom. Discover, then enable in on_dsc_disc().
+    cccd_handle_ = 0;
+    int rc = ble_gattc_disc_all_dscs(conn_handle_, notify_val_handle_, svc_end_handle_,
+                                     dsc_disc_cb, this);
     if (rc != 0) {
-        ESP_LOGE(TAG, "subscribe notify failed: %d", rc);
-        return;
+        ESP_LOGE(TAG, "CCCD discovery start failed: %d", rc);
+        disconnect();
     }
-    ESP_LOGI(TAG, "subscribed to Tesla notifications");
-    if (on_connected_) on_connected_(true);
+}
+
+int BleClient::on_dsc_disc(uint16_t /*conn_handle*/, const ble_gatt_error* error,
+                           uint16_t /*chr_val_handle*/, const ble_gatt_dsc* dsc) {
+    if (error->status == BLE_HS_EDONE) {
+        if (cccd_handle_ == 0) {
+            ESP_LOGE(TAG, "CCCD (0x2902) not found for notify chr — cannot subscribe");
+            disconnect();
+            return 0;
+        }
+        uint8_t value[2] = {0x01, 0x00};   // 0x0001 = enable notifications (BLE_GATT_SUB_NOTIFY)
+        int rc = ble_gattc_write_flat(conn_handle_, cccd_handle_,
+                                       value, sizeof(value), nullptr, nullptr);
+        if (rc != 0) {
+            ESP_LOGE(TAG, "subscribe notify failed: %d", rc);
+            disconnect();
+            return 0;
+        }
+        ESP_LOGI(TAG, "subscribed to Tesla notifications (CCCD handle %d)", cccd_handle_);
+        if (on_connected_) on_connected_(true);
+        return 0;
+    }
+    if (error->status != 0 || !dsc) return 0;
+    // First 0x2902 at/after the notify value handle is that characteristic's CCCD.
+    if (cccd_handle_ == 0 && ble_uuid_cmp(&dsc->uuid.u, &CCCD_UUID.u) == 0) {
+        cccd_handle_ = dsc->handle;
+        ESP_LOGD(TAG, "found CCCD at handle %d", cccd_handle_);
+    }
+    return 0;
 }

@@ -45,6 +45,9 @@ static const ble_uuid128_t TESLA_NOTIFY_UUID = {
     .value = {0x1e, 0xb9, 0xf8, 0xeb, 0x0c, 0x96, 0x88, 0x9b,
               0xf0, 0x43, 0xd1, 0xb2, 0x13, 0x02, 0x00, 0x00}
 };
+// Client Characteristic Configuration Descriptor — the standard 0x2902 descriptor written to
+// enable notifications. Discovered at runtime rather than assumed at notify_val_handle_+1.
+static const ble_uuid16_t CCCD_UUID = BLE_UUID16_INIT(0x2902);
 
 // Max BLE write chunk (ATT MTU 247 - 3 header = 244, but 20 is safest default)
 static constexpr size_t BLE_CHUNK_SIZE = 20;
@@ -127,6 +130,8 @@ public:
     int  on_gap_event(ble_gap_event* event);
     int  on_svc_disc(uint16_t conn_handle, const ble_gatt_error* error, const ble_gatt_svc* svc);
     int  on_chr_disc(uint16_t conn_handle, const ble_gatt_error* error, const ble_gatt_chr* chr);
+    int  on_dsc_disc(uint16_t conn_handle, const ble_gatt_error* error,
+                     uint16_t chr_val_handle, const ble_gatt_dsc* dsc);
 
 private:
     void start_scan_();
@@ -168,6 +173,7 @@ private:
     uint16_t write_handle_{0};
     uint16_t notify_handle_{0};
     uint16_t notify_val_handle_{0};
+    uint16_t cccd_handle_{0};   // discovered CCCD (0x2902) for the notify chr; 0 until found
 
     // Last-known link RSSI: seeded from the advert we connected to, then refreshed by
     // every successful live read in connected_rssi(). The live HCI "Read RSSI" can fail

@@ -13,6 +13,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "mqtt_client.h"
+#include "esp_crt_bundle.h"
 #include "esp_log.h"
 #include "esp_wifi.h"
 #include "esp_mac.h"
@@ -34,6 +35,13 @@ static VehicleController*        s_vehicle = nullptr;
 static std::atomic<bool>         s_connected{false};
 static std::atomic<bool>         s_need_discovery{false};
 static bool                      s_configured = false;
+static bool                      s_tls        = false;   // connection uses mqtts:// (TLS)
+
+// Last connection error, surfaced in /status so the web UI can explain a stuck connection
+// (especially a TLS handshake failure, since we never silently fall back to plaintext mqtt).
+// An atomic code (mapped to text in mqtt_ha_last_error) avoids locking a string across tasks.
+enum MqttErr { ME_NONE = 0, ME_TRANSPORT, ME_REFUSED, ME_OTHER };
+static std::atomic<int>          s_last_err{ME_NONE};
 
 // Resolved config + derived topics (built once in mqtt_ha_start).
 static std::string s_uri, s_user, s_pass;     // broker connection
@@ -348,17 +356,35 @@ static void publish_state() {
 }
 
 // ─── MQTT event handler ───────────────────────────────────────────────────────
-static void mqtt_event_handler(void*, esp_event_base_t, int32_t event_id, void*) {
+static void mqtt_event_handler(void*, esp_event_base_t, int32_t event_id, void* event_data) {
     switch ((esp_mqtt_event_id_t)event_id) {
     case MQTT_EVENT_CONNECTED:
-        ESP_LOGI(TAG, "connected to broker");
+        ESP_LOGI(TAG, "connected to broker%s", s_tls ? " (TLS)" : "");
         s_connected = true;
+        s_last_err  = ME_NONE;    // clear any prior failure now that we're up
         s_need_discovery = true;  // (re)announce discovery + state from the publisher task
         break;
     case MQTT_EVENT_DISCONNECTED:
         ESP_LOGW(TAG, "disconnected from broker");
         s_connected = false;
         break;
+    case MQTT_EVENT_ERROR: {
+        // Record why the connection failed so /status can explain it. The common case for a
+        // credentialed broker is a TLS handshake failure (untrusted cert / wrong port) — we do
+        // NOT retry over plaintext, so the user needs to see the reason rather than a silent stall.
+        auto* ev = static_cast<esp_mqtt_event_handle_t>(event_data);
+        int code = ME_OTHER;
+        if (ev && ev->error_handle) {
+            switch (ev->error_handle->error_type) {
+            case MQTT_ERROR_TYPE_TCP_TRANSPORT:     code = ME_TRANSPORT; break;
+            case MQTT_ERROR_TYPE_CONNECTION_REFUSED: code = ME_REFUSED;  break;
+            default: break;
+            }
+        }
+        s_last_err = code;
+        ESP_LOGE(TAG, "MQTT error (type %d)", ev && ev->error_handle ? ev->error_handle->error_type : -1);
+        break;
+    }
     default:
         break;
     }
@@ -416,14 +442,24 @@ void mqtt_ha_start(VehicleController& vehicle, NvsStorageAdapter& config_store) 
         s_configured = false;
         return;
     }
-    // Accept a bare "host:port" by prepending the scheme.
-    if (s_uri.find("://") == std::string::npos) s_uri = "mqtt://" + s_uri;
-    s_broker_disp = broker_display(s_uri);
-    s_configured = true;
-
     s_user   = CONFIG_TESLA_MQTT_USERNAME;
     s_pass   = CONFIG_TESLA_MQTT_PASSWORD;
     s_prefix = CONFIG_TESLA_MQTT_DISCOVERY_PREFIX;
+
+    // Scheme. The web UI keeps the simple "host:port" form, so most entries arrive without a
+    // scheme. When credentials are present we default to TLS (mqtts://) rather than plaintext
+    // mqtt://: the MQTT CONNECT carries username + password in the clear on plain mqtt, so a
+    // credentialed broker that lives off the trusted LAN (a common HA setup: cloud/VLAN/VPN
+    // broker) would otherwise leak them to any sniffer. Credentials are "present" if a username
+    // is configured (Kconfig) or the authority embeds userinfo ("user:pass@host"). A bare,
+    // credential-free local broker stays on plaintext mqtt. An explicit scheme is always honored.
+    if (s_uri.find("://") == std::string::npos) {
+        bool has_creds = !s_user.empty() || s_uri.find('@') != std::string::npos;
+        s_uri = (has_creds ? "mqtts://" : "mqtt://") + s_uri;
+    }
+    s_tls = s_uri.rfind("mqtts://", 0) == 0;   // starts with mqtts://
+    s_broker_disp = broker_display(s_uri);
+    s_configured = true;
     s_interval_s = CONFIG_TESLA_MQTT_PUBLISH_INTERVAL_S;
     if (s_interval_s < 5) s_interval_s = 5;
 
@@ -460,6 +496,10 @@ void mqtt_ha_start(VehicleController& vehicle, NvsStorageAdapter& config_store) 
     // esp-mqtt v5 nested config struct. LWT marks us "offline" if the link drops.
     esp_mqtt_client_config_t cfg = {};
     cfg.broker.address.uri          = s_uri.c_str();
+    // For mqtts:// verify the broker certificate against the bundled CA roots (same trust store
+    // as OTA). A broker presenting an untrusted/self-signed cert fails the handshake and the
+    // bridge stays disconnected with an error in /status — we never downgrade to plaintext.
+    if (s_tls) cfg.broker.verification.crt_bundle_attach = esp_crt_bundle_attach;
     if (!s_user.empty()) cfg.credentials.username = s_user.c_str();
     if (!s_pass.empty()) cfg.credentials.authentication.password = s_pass.c_str();
     cfg.session.last_will.topic     = s_avail.c_str();
@@ -484,4 +524,17 @@ void mqtt_ha_start(VehicleController& vehicle, NvsStorageAdapter& config_store) 
 
 bool mqtt_ha_configured() { return s_configured; }
 bool mqtt_ha_connected()  { return s_configured && s_connected.load(); }
+bool mqtt_ha_tls()        { return s_configured && s_tls; }
 std::string mqtt_ha_broker() { return s_configured ? s_broker_disp : std::string{}; }
+
+// Human-readable last connection error ("" when none / connected). Surfaced in /status.
+std::string mqtt_ha_last_error() {
+    if (!s_configured || s_connected.load()) return {};
+    switch (s_last_err.load()) {
+    case ME_TRANSPORT: return s_tls ? "TLS handshake failed (untrusted cert or wrong port?)"
+                                    : "transport error (host/port?)";
+    case ME_REFUSED:   return "broker refused connection (credentials?)";
+    case ME_OTHER:     return "connection error";
+    default:           return {};
+    }
+}
