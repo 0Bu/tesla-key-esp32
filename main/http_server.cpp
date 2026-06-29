@@ -138,6 +138,37 @@ static bool parse_vin_only(const char* uri, char* vin_out, size_t vin_sz) {
     return true;
 }
 
+// Copy the PATH part of the request URI (everything before '?') into buf. Routing must look
+// only at the path: matching against the raw req->uri (which includes the query string) lets a
+// query value like "?next=/status" be mistaken for a route, and a substring like "force=1" be
+// found anywhere. Truncation only changes a route into a 404, never the reverse, so it's safe.
+static const char* uri_path(httpd_req_t* req, char* buf, size_t n) {
+    const char* uri = req->uri;
+    size_t i = 0;
+    for (; uri[i] && uri[i] != '?' && i + 1 < n; ++i) buf[i] = uri[i];
+    buf[i] = '\0';
+    return buf;
+}
+
+// True if `path` ends with `suffix` (exact tail match) — used for the parameterized API routes
+// whose path carries the VIN, e.g. ".../{VIN}/vehicle_data".
+static bool path_ends_with(const char* path, const char* suffix) {
+    size_t lp = strlen(path), ls = strlen(suffix);
+    return lp >= ls && strcmp(path + lp - ls, suffix) == 0;
+}
+
+// True only if query parameter `key` is present AND equals `want` exactly. Replaces
+// strstr(uri,"force=1")-style checks, which also fire on "force=10", "xforce=1", or the same
+// string buried in an unrelated parameter value — a real hazard for /gen_keys?force=1, whose
+// whole job is to gate the destructive key-overwrite that un-pairs the car.
+static bool query_param_is(httpd_req_t* req, const char* key, const char* want) {
+    char q[96];
+    if (httpd_req_get_url_query_str(req, q, sizeof(q)) != ESP_OK) return false;
+    char val[24];
+    if (httpd_query_key_value(q, key, val, sizeof(val)) != ESP_OK) return false;
+    return strcmp(val, want) == 0;
+}
+
 // Read an integer command parameter from the JSON body, clamped to [lo,hi]. The double is
 // clamped BEFORE the int cast — casting an out-of-range double to int is undefined behaviour,
 // so a hostile `{"percent": 1e300}` must never reach `(int)valuedouble`. The string path is
@@ -919,37 +950,6 @@ static esp_err_t handle_index(httpd_req_t* req) {
 }
 
 // ─── Wildcard handler dispatching ─────────────────────────────────────────────
-
-// Copy the PATH part of the request URI (everything before '?') into buf. Routing must look
-// only at the path: matching against the raw req->uri (which includes the query string) lets a
-// query value like "?next=/status" be mistaken for a route, and a substring like "force=1" be
-// found anywhere. Truncation only changes a route into a 404, never the reverse, so it's safe.
-static const char* uri_path(httpd_req_t* req, char* buf, size_t n) {
-    const char* uri = req->uri;
-    size_t i = 0;
-    for (; uri[i] && uri[i] != '?' && i + 1 < n; ++i) buf[i] = uri[i];
-    buf[i] = '\0';
-    return buf;
-}
-
-// True if `path` ends with `suffix` (exact tail match) — used for the parameterized API routes
-// whose path carries the VIN, e.g. ".../{VIN}/vehicle_data".
-static bool path_ends_with(const char* path, const char* suffix) {
-    size_t lp = strlen(path), ls = strlen(suffix);
-    return lp >= ls && strcmp(path + lp - ls, suffix) == 0;
-}
-
-// True only if query parameter `key` is present AND equals `want` exactly. Replaces
-// strstr(uri,"force=1")-style checks, which also fire on "force=10", "xforce=1", or the same
-// string buried in an unrelated parameter value — a real hazard for /gen_keys?force=1, whose
-// whole job is to gate the destructive key-overwrite that un-pairs the car.
-static bool query_param_is(httpd_req_t* req, const char* key, const char* want) {
-    char q[96];
-    if (httpd_req_get_url_query_str(req, q, sizeof(q)) != ESP_OK) return false;
-    char val[24];
-    if (httpd_query_key_value(q, key, val, sizeof(val)) != ESP_OK) return false;
-    return strcmp(val, want) == 0;
-}
 
 // Single catch-all handler registered for /*
 static esp_err_t handle_all_dispatch(httpd_req_t* req) {
