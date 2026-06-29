@@ -182,8 +182,11 @@ vehicles:
 MQTT-Discovery convention. **Read-only by design** — no command topics subscribed (the car is
 never controlled or woken from HA). Broker URI from NVS `mqtt_uri` (web UI: Connection → MQTT);
 empty = disabled. Units are converted to metric (km, km/h) — only the `/api` evcc path keeps
-miles. **Topics, entity list, units and publishing detail:
-[`docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md).**
+miles. A schemeless broker defaults to plaintext `mqtt://`, but **defaults to `mqtts://` (TLS,
+CA-bundle-verified) when credentials are present** (username configured or `user:pass@host`) so
+the password isn't sniffable off-LAN; a failed TLS handshake stays disconnected with the reason
+in `/status` (`mqtt.error`/`mqtt.tls`) — **no silent plaintext fallback**. **Topics, entity list,
+units and publishing detail: [`docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md).**
 
 ## Sleep / link-state
 

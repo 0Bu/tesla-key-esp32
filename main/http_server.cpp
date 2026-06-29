@@ -138,6 +138,37 @@ static bool parse_vin_only(const char* uri, char* vin_out, size_t vin_sz) {
     return true;
 }
 
+// Copy the PATH part of the request URI (everything before '?') into buf. Routing must look
+// only at the path: matching against the raw req->uri (which includes the query string) lets a
+// query value like "?next=/status" be mistaken for a route, and a substring like "force=1" be
+// found anywhere. Truncation only changes a route into a 404, never the reverse, so it's safe.
+static const char* uri_path(httpd_req_t* req, char* buf, size_t n) {
+    const char* uri = req->uri;
+    size_t i = 0;
+    for (; uri[i] && uri[i] != '?' && i + 1 < n; ++i) buf[i] = uri[i];
+    buf[i] = '\0';
+    return buf;
+}
+
+// True if `path` ends with `suffix` (exact tail match) — used for the parameterized API routes
+// whose path carries the VIN, e.g. ".../{VIN}/vehicle_data".
+static bool path_ends_with(const char* path, const char* suffix) {
+    size_t lp = strlen(path), ls = strlen(suffix);
+    return lp >= ls && strcmp(path + lp - ls, suffix) == 0;
+}
+
+// True only if query parameter `key` is present AND equals `want` exactly. Replaces
+// strstr(uri,"force=1")-style checks, which also fire on "force=10", "xforce=1", or the same
+// string buried in an unrelated parameter value — a real hazard for /gen_keys?force=1, whose
+// whole job is to gate the destructive key-overwrite that un-pairs the car.
+static bool query_param_is(httpd_req_t* req, const char* key, const char* want) {
+    char q[96];
+    if (httpd_req_get_url_query_str(req, q, sizeof(q)) != ESP_OK) return false;
+    char val[24];
+    if (httpd_query_key_value(q, key, val, sizeof(val)) != ESP_OK) return false;
+    return strcmp(val, want) == 0;
+}
+
 // Read an integer command parameter from the JSON body, clamped to [lo,hi]. The double is
 // clamped BEFORE the int cast — casting an out-of-range double to int is undefined behaviour,
 // so a hostile `{"percent": 1e300}` must never reach `(int)valuedouble`. The string path is
@@ -304,7 +335,7 @@ static esp_err_t handle_gen_keys(httpd_req_t* req) {
     // Refuse to silently overwrite an existing key: regenerating un-pairs the device
     // from the vehicle (the old whitelisted key stops working) and breaks charging
     // until a physical re-pair. Require explicit ?force=1 to replace a present key.
-    if (g_vehicle->has_key() && !strstr(req->uri, "force=1")) {
+    if (g_vehicle->has_key() && !query_param_is(req, "force", "1")) {
         cJSON* root = cJSON_CreateObject();
         cJSON_AddBoolToObject(root, "result", false);
         cJSON_AddStringToObject(root, "reason",
@@ -327,7 +358,7 @@ static esp_err_t handle_send_key(httpd_req_t* req) {
     // This firmware only enrolls a Charging Manager key (charging + wake), never an
     // owner key — its sole purpose is the evcc BLE integration. Reject an explicit
     // owner request rather than silently enrolling a different role than asked for.
-    if (strstr(req->uri, "role=owner")) {
+    if (query_param_is(req, "role", "owner")) {
         cJSON* root = cJSON_CreateObject();
         cJSON_AddBoolToObject(root, "result", false);
         cJSON_AddStringToObject(root, "role",   "owner");
@@ -533,8 +564,11 @@ static esp_err_t handle_status(httpd_req_t* req) {
     cJSON* mqtt = cJSON_CreateObject();
     cJSON_AddBoolToObject(mqtt, "configured", mqtt_ha_configured());
     cJSON_AddBoolToObject(mqtt, "connected",  mqtt_ha_connected());
+    cJSON_AddBoolToObject(mqtt, "tls",        mqtt_ha_tls());
     std::string broker = mqtt_ha_broker();
     if (!broker.empty()) cJSON_AddStringToObject(mqtt, "broker", broker.c_str());
+    std::string mqtt_err = mqtt_ha_last_error();
+    if (!mqtt_err.empty()) cJSON_AddStringToObject(mqtt, "error", mqtt_err.c_str());
     cJSON_AddItemToObject(root, "mqtt", mqtt);
 
     // BLE: when connected report the live signal strength; otherwise list nearby
@@ -712,9 +746,9 @@ static esp_err_t handle_status(httpd_req_t* req) {
 // ─── GET /diag — in-memory diagnostic log (for on-demand analysis) ────────────
 
 static esp_err_t handle_diag(httpd_req_t* req) {
-    if (strstr(req->uri, "clear=1"))        diag_log_clear();
-    if (strstr(req->uri, "verbose=1"))      diag_set_verbose(true);
-    else if (strstr(req->uri, "verbose=0")) diag_set_verbose(false);
+    if (query_param_is(req, "clear", "1"))        diag_log_clear();
+    if (query_param_is(req, "verbose", "1"))      diag_set_verbose(true);
+    else if (query_param_is(req, "verbose", "0")) diag_set_verbose(false);
 
     httpd_resp_set_type(req, "text/plain; charset=utf-8");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
@@ -919,9 +953,11 @@ static esp_err_t handle_index(httpd_req_t* req) {
 
 // Single catch-all handler registered for /*
 static esp_err_t handle_all_dispatch(httpd_req_t* req) {
-    const char* uri = req->uri;
-    const char* method = (req->method == HTTP_GET ? "GET" : (req->method == HTTP_POST ? "POST" : "OTHER"));
-    ESP_LOGI(TAG, "REQ: %s %s", method, uri);
+    char path[128];
+    uri_path(req, path, sizeof(path));
+    const bool GET  = req->method == HTTP_GET;
+    const bool POST = req->method == HTTP_POST;
+    ESP_LOGI(TAG, "REQ: %s %s", GET ? "GET" : (POST ? "POST" : "OTHER"), req->uri);
 
     // Log all headers to see what evcc is sending
     char header_val[128];
@@ -932,57 +968,26 @@ static esp_err_t handle_all_dispatch(httpd_req_t* req) {
         ESP_LOGI(TAG, "  Accept: %s", header_val);
     }
 
-    // OTA routes first: "/ota/status" must not fall through to the generic
-    // "/status" handler below (substring match).
-    if (req->method == HTTP_GET && strstr(uri, "/ota/check")) {
-        return handle_ota_check(req);
-    }
-    if (req->method == HTTP_POST && strstr(uri, "/ota/update")) {
-        return handle_ota_update(req);
-    }
-    if (req->method == HTTP_GET && strstr(uri, "/ota/status")) {
-        return handle_ota_status(req);
-    }
+    // Parameterized API routes (the VIN is embedded in the path): match the trailing segment of
+    // the query-stripped path. /command/ is matched as an interior segment since {CMD} follows.
+    if (POST && strstr(path, "/command/"))                      return handle_command(req);
+    if (GET  && path_ends_with(path, "/vehicle_data"))          return handle_vehicle_data(req);
+    if (GET  && path_ends_with(path, "/body_controller_state")) return handle_body_controller(req);
 
-    if (req->method == HTTP_POST && strstr(uri, "/command/")) {
-        return handle_command(req);
-    }
-    if (req->method == HTTP_GET && strstr(uri, "/vehicle_data")) {
-        return handle_vehicle_data(req);
-    }
-    if (req->method == HTTP_GET && strstr(uri, "/body_controller_state")) {
-        return handle_body_controller(req);
-    }
-    if (req->method == HTTP_POST && strstr(uri, "/gen_keys")) {
-        return handle_gen_keys(req);
-    }
-    if (req->method == HTTP_POST && strstr(uri, "/send_key")) {
-        return handle_send_key(req);
-    }
-    if (req->method == HTTP_POST && strstr(uri, "/set_time")) {
-        return handle_set_time(req);
-    }
-    if (req->method == HTTP_POST && strstr(uri, "/set_vin")) {
-        return handle_set_vin(req);
-    }
-    if (req->method == HTTP_POST && strstr(uri, "/set_mqtt")) {
-        return handle_set_mqtt(req);
-    }
-    if (req->method == HTTP_POST && strstr(uri, "/scan")) {
-        return handle_scan(req);
-    }
-    if (req->method == HTTP_GET && strstr(uri, "/version")) {
-        return handle_version(req);
-    }
-    if (req->method == HTTP_GET && strstr(uri, "/status")) {
-        return handle_status(req);
-    }
-    if (req->method == HTTP_GET && strstr(uri, "/diag")) {
-        return handle_diag(req);
-    }
-    if (req->method == HTTP_GET && (strcmp(uri, "/") == 0 || strcmp(uri, "/index.html") == 0)) {
-        return handle_index(req);
-    }
+    // Fixed routes — exact path match. "/ota/status" can no longer fall through to "/status".
+    if (GET  && strcmp(path, "/ota/check")  == 0)               return handle_ota_check(req);
+    if (POST && strcmp(path, "/ota/update") == 0)               return handle_ota_update(req);
+    if (GET  && strcmp(path, "/ota/status") == 0)               return handle_ota_status(req);
+    if (POST && strcmp(path, "/gen_keys")   == 0)               return handle_gen_keys(req);
+    if (POST && strcmp(path, "/send_key")   == 0)               return handle_send_key(req);
+    if (POST && strcmp(path, "/set_time")   == 0)               return handle_set_time(req);
+    if (POST && strcmp(path, "/set_vin")    == 0)               return handle_set_vin(req);
+    if (POST && strcmp(path, "/set_mqtt")   == 0)               return handle_set_mqtt(req);
+    if (POST && strcmp(path, "/scan")       == 0)               return handle_scan(req);
+    if (GET  && strcmp(path, "/api/proxy/1/version") == 0)      return handle_version(req);
+    if (GET  && strcmp(path, "/status")     == 0)               return handle_status(req);
+    if (GET  && strcmp(path, "/diag")       == 0)               return handle_diag(req);
+    if (GET  && (strcmp(path, "/") == 0 || strcmp(path, "/index.html") == 0)) return handle_index(req);
 
     cJSON* root = cJSON_CreateObject();
     cJSON_AddStringToObject(root, "error", "not found");
