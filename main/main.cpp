@@ -20,6 +20,7 @@
 #include "esp_heap_caps.h"
 #include "esp_app_desc.h"
 #include "esp_netif.h"
+#include "bootloader_random.h"
 #include "ping/ping_sock.h"
 #include "lwip/ip_addr.h"
 #include "freertos/semphr.h"
@@ -444,7 +445,18 @@ extern "C" void app_main() {
     // never overwrites an existing key — only generates when none is present.
     if (!vehicle.has_key()) {
         ESP_LOGI(TAG, "no key in storage — generating initial key");
-        if (vehicle.generate_key()) {
+        // The ESP32 hardware RNG only returns TRUE random numbers while an entropy source is
+        // active: RF (WiFi/BT) enabled, the bootloader running, or bootloader_random_enable()
+        // (SAR-ADC entropy). Neither WiFi (wifi_connect) nor BLE (ble_client.start) is up yet,
+        // so without this the EC private key — the device's sole authenticator to the car and
+        // the OTA trust root — would be seeded from PSEUDO-random data (tesla-ble seeds its DRBG
+        // once and reuses it, so same-boot re-keys inherit the weak seed). Enable the SAR-ADC
+        // entropy source for the key generation, then disable it again before WiFi/ADC start
+        // (Espressif's documented pattern for "true random before RF is up").
+        bootloader_random_enable();
+        bool key_ok = vehicle.generate_key();
+        bootloader_random_disable();
+        if (key_ok) {
             ESP_LOGI(TAG, "initial key generated, fingerprint %s",
                      vehicle.key_fingerprint().c_str());
         } else {

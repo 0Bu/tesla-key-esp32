@@ -16,6 +16,14 @@ Relevant attackers:
   signature is verified on every update, so integrity no longer rests on TLS alone (see
   [OTA self-update](#ota-self-update) and [Signed OTA](#signed-ota-images)).
 
+**First-boot key entropy:** the P-256 key is generated under `bootloader_random_enable()`
+(SAR-ADC hardware entropy) *before* WiFi/BLE start, so it draws from a true entropy source
+rather than the RF-off pseudo-random RNG. A full-codebase review is recorded in the
+[2026-06 security audit](security-audit-2026-06.md) (this is finding **H1**); that report also
+tracks the remaining hardening backlog (open: M2 setup-AP, M3 BLE peer pinning, M4 reboot-on-POST,
+L2 VIN/SSID logging). Devices first-keyed before the entropy fix should re-key + re-pair
+(`/gen_keys?force=1`, then re-enrol).
+
 ## Current device state (factory ESP32-S3)
 
 `espefuse summary` on the connected unit (read-only check, 2026-06-16):
