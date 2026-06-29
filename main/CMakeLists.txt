@@ -32,6 +32,7 @@ idf_component_register(
         driver
         mqtt
         esp_timer
+        bootloader_support
 )
 
 # Pre-compress the web UI at build time. Browsers always accept gzip, so shipping the
