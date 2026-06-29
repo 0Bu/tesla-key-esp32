@@ -756,8 +756,8 @@ function render(s){
   // MQTT — Home Assistant bridge (tap to set/change the broker)
   var mq=s.mqtt||{}, mc=$("mqttConn");
   if(!mq.configured){ mc.className='cv'; mc.innerHTML='<span class="ph">Not configured</span>'; }
-  else if(mq.connected){ mc.className='cv ok'; mc.innerHTML='<span>'+esc(mq.broker||'')+'</span>'; }
-  else { mc.className='cv warn'; mc.innerHTML='<span>'+esc(mq.broker||'')+' · disconnected</span>'; }
+  else if(mq.connected){ mc.className='cv ok'; mc.innerHTML='<span>'+esc(mq.broker||'')+(mq.tls?' · secured':'')+'</span>'; }
+  else { mc.className='cv warn'; mc.innerHTML='<span>'+esc(mq.broker||'')+' · '+esc(mq.error||'disconnected')+'</span>'; }
 
   // header meta line: IP · version (IP first)
   $("ipline").innerHTML = s.ip ? esc(s.ip)+'&nbsp;·&nbsp;' : '';   // nbsp: overflow:hidden trims plain trailing spaces

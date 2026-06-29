@@ -98,6 +98,14 @@ grouped under one device. **Read-only by design** — no command topics are subs
   Optional `CONFIG_TESLA_MQTT_USERNAME`/`PASSWORD`, `CONFIG_TESLA_MQTT_DISCOVERY_PREFIX`
   (default `homeassistant`), `CONFIG_TESLA_MQTT_BASE_TOPIC` (default `tesla-key`),
   `CONFIG_TESLA_MQTT_PUBLISH_INTERVAL_S` (default 15). `/set_mqtt` reboots to re-init.
+- **Transport / TLS:** a schemeless entry defaults to plaintext `mqtt://` **unless credentials
+  are present** (a configured username, or `user:pass@host` userinfo), in which case it defaults
+  to **`mqtts://`** so the password (sent in the clear in the MQTT CONNECT on plain mqtt) is not
+  exposed to a sniffer on a broker that lives off the trusted LAN. For `mqtts://` the broker
+  certificate is verified against the bundled CA roots (same trust store as OTA); an untrusted
+  cert fails the handshake and the bridge stays disconnected — there is **no silent fallback to
+  plaintext**. The failure reason surfaces in `/status` (`mqtt.error`) and the web UI. An explicit
+  scheme (`mqtt://`/`mqtts://`) is always honored. `/status` also exposes `mqtt.tls`.
 - **Node id:** `teslakey_<mac3>` from the WiFi STA MAC (stable across VIN changes).
 - **Topics:** `<base>/<node>/{charge,climate,drive,tires,closures,vehicle,device}` (retained
   JSON), availability/LWT `<base>/<node>/availability` (`online`/`offline`). Discovery
