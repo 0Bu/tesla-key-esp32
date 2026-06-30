@@ -1,8 +1,44 @@
 {
+  "permissions": {
+    "allow": [
+      "Bash(ls:*)",
+      "Bash(cat:*)",
+      "Bash(find:*)",
+      "Bash(grep:*)",
+      "Bash(rg:*)",
+      "Bash(jq:*)",
+      "Bash(wc:*)",
+      "Bash(head:*)",
+      "Bash(tail:*)",
+      "Bash(file:*)",
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git show:*)",
+      "Bash(git branch:*)",
+      "Bash(gh pr view:*)",
+      "Bash(gh pr list:*)",
+      "Bash(gh pr diff:*)",
+      "Bash(gh run view:*)",
+      "Bash(gh run list:*)",
+      "Bash(gh run download:*)",
+      "Bash(scripts/run-mock-tests.sh:*)",
+      "Bash(scripts/idf-docker.sh:*)",
+      "Bash(scripts/next-version.sh:*)",
+      "Bash(scripts/build-pages.sh:*)",
+      "Bash(cmake:*)",
+      "Bash(ctest:*)"
+    ]
+  },
   "hooks": {
     "SessionStart": [
       {
         "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/report-capabilities.sh\"",
+            "statusMessage": "Detecting toolchain capabilities…"
+          },
           {
             "type": "command",
             "command": "bash \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/build-efficiency-check.sh\"",
@@ -19,6 +55,28 @@
             "type": "command",
             "command": "bash \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/require-project-review.sh\"",
             "statusMessage": "Checking project-review gate…"
+          }
+        ]
+      },
+      {
+        "matcher": "mcp__github__merge_pull_request",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/require-project-review.sh\"",
+            "statusMessage": "Checking project-review gate…"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|MultiEdit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/clang-format-edit.sh\"",
+            "statusMessage": "Formatting edited C/C++…"
           }
         ]
       }
