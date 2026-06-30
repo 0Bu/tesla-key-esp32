@@ -1,0 +1,46 @@
+# Style spec for tesla-key-esp32 first-party C/C++ (main/, test/). It does NOT apply to
+# managed_components/ (vendored, regenerated — never reformat).
+#
+# Reverse-engineered from the existing hand-formatted sources to MINIMIZE churn:
+# 4-space indent, attached braces, left-aligned pointers, no namespace indent, aligned
+# assignments/declarations/trailing comments, short funcs kept on one line.
+#
+# clang-format is NOT installed on the dev box or in CI, so this is currently a spec on
+# paper that the .claude/hooks/clang-format-edit.sh hook honours only where the tool
+# exists. VERIFY CHURN ONCE before relying on auto-format:
+#     clang-format --dry-run -Werror main/*.cpp main/*.hpp main/logic/*.hpp test/*.cpp
+# and tune below (esp. AllowShortFunctionsOnASingleLine) until that dry-run is quiet.
+#
+# SortIncludes is OFF on purpose: ble_client's NimBLE headers must precede the min/max
+# #undef dance, so reordering includes would break the build.
+---
+Language:        Cpp
+BasedOnStyle:    LLVM
+IndentWidth:     4
+TabWidth:        4
+UseTab:          Never
+ColumnLimit:     100
+
+PointerAlignment:       Left
+DerivePointerAlignment: false
+NamespaceIndentation:   None
+AccessModifierOffset:   -4
+BreakBeforeBraces:      Attached
+IndentCaseLabels:       false
+Cpp11BracedListStyle:   true
+SpaceBeforeParens:      ControlStatements
+
+AllowShortFunctionsOnASingleLine:   All
+AllowShortIfStatementsOnASingleLine: WithoutElse
+AllowShortLoopsOnASingleLine:        true
+AllowShortBlocksOnASingleLine:       Empty
+
+AlignAfterOpenBracket:        Align
+AlignTrailingComments:        true
+AlignConsecutiveAssignments:  true
+AlignConsecutiveDeclarations: true
+
+SortIncludes:                 false
+FixNamespaceComments:         true
+KeepEmptyLinesAtTheStartOfBlocks: false
+MaxEmptyLinesToKeep:          1
