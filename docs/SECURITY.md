@@ -53,8 +53,10 @@ evcc, which talks to the device over plain HTTP and cannot send credentials, so 
 the API would break the main use case. Anyone on the LAN can therefore call **every**
 endpoint — including ones that go beyond charging: wake, charging control, key
 regeneration (`/gen_keys`) and pairing (`/send_key`), BLE scan (`/scan`), VIN change
-(`/set_vin`, un-pairs + reboots), MQTT broker change (`/set_mqtt`, reboots) and the OTA
-self-update / reboot trigger (`/ota/update`, see below). This is acceptable only because:
+(`/set_vin`, un-pairs + reboots), MQTT broker change (`/set_mqtt`, reboots), the OTA
+self-update / reboot trigger (`/ota/update`, see below) and the MCP endpoint (`/mcp`,
+which exposes the same charging command set to AI agents — nothing beyond what the open
+REST routes already allow). This is acceptable only because:
 
 - the enrolled key is **Charging Manager only** — it cannot unlock or drive the car, just
   control charging and wake (see the role restriction in `vehicle_ctrl.cpp`); and

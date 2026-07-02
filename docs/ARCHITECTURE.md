@@ -260,3 +260,66 @@ that stops the device whitelisting its Charging-Manager key onto an arbitrary ne
 no longer depends on the `"UNKNOWN"` placeholder hashing to a name that happens never to
 collide (the placeholder is kept out of the matching path). The web UI already shows "Add the
 vehicle VIN below to begin." when no VIN is set, so it never implies pairing without one.
+
+## MCP endpoint (/mcp)
+
+`main/mcp_server.cpp` exposes the device to MCP (Model Context Protocol) clients — Claude
+Desktop/Code, VS Code, or any agent framework — over the existing `esp_http_server` on
+port 80, so an LLM agent can read state and drive charging without an extra proxy process.
+
+**Transport — Streamable HTTP, stateless profile.** `POST /mcp` carries exactly one
+JSON-RPC 2.0 message and is answered with `application/json`:
+
+- No SSE stream and no server-initiated requests — `GET /mcp` returns `405` with
+  `Allow: POST`. A long-lived stream would pin one of the few httpd sockets and the
+  device has no server-push use case.
+- No `Mcp-Session-Id` — every request is self-contained; the `MCP-Protocol-Version`
+  header is ignored (nothing version-dependent happens after `initialize`).
+- Notifications (`notifications/*`) and stray client responses (a message without an
+  `id`) are acknowledged with `202 Accepted` and no body, per the transport spec.
+- JSON-RPC **batches are rejected** (`-32600`) — protocol `2025-06-18` removed them, and
+  the single-message parse keeps the heap cost bounded (2 KB body cap, same as the REST
+  endpoints).
+
+**Version negotiation** (`tk::mcp_negotiate_version`, `main/logic/mcp.hpp`): supported
+revisions are `2025-06-18` and `2025-03-26`; a request for anything else is answered with
+our latest supported revision, per the MCP lifecycle spec (the client disconnects if it
+can't proceed). The negotiation table, method routing (`mcp_method_from`), tool registry
+(`kMcpTools` / `mcp_tool_from`) and the integer clamp are IDF-free and covered by the
+host mock build (`test/test_logic.cpp`, `test_mcp`).
+
+**Methods:** `initialize` (capabilities: `tools` only — no resources/prompts), `ping`,
+`tools/list`, `tools/call`; everything else → `-32601`.
+
+**Tools — exactly the run-on-key command set, plus one read-only tool:**
+
+| Tool | Maps to | Notes |
+|------|---------|-------|
+| `get_vehicle_state` | caches only | VIN, `paired`, `link` (shared `link_state()` mapping), `last_seen_s`, cached SOC/charging fields (presence-gated). **Never touches BLE** — no scan/connect/wake, so an agent polling it cannot keep the car awake. |
+| `wake_up`, `charge_start`, `charge_stop`, `charge_port_open`, `charge_port_close` | `VehicleController` 1:1 | Synchronous; first command after idle takes ~3–5 s (BLE scan+connect). |
+| `set_charging_amps {amps}` | `set_charging_amps` | Clamped 0–48 (schema advertises the same bounds). |
+| `set_charge_limit {percent}` | `set_charge_limit` | Clamped 50–100. |
+| `set_scheduled_charging {enable, start_minutes}` | `set_scheduled_charging` | `start_minutes` clamped 0–1439. |
+
+The role-refused commands (`door_lock/unlock`, climate, horn, sentry …) are **not**
+exposed as tools: the Charging-Manager key cannot execute them, and advertising tools
+that always fail only misleads the calling model. Command failures come back as
+`tools/call` results with `isError: true` carrying the same reason split as the REST
+path (real Tesla refusal text vs. "vehicle not reachable") — JSON-RPC errors are
+reserved for malformed requests, per the MCP tools spec.
+
+**Heap safety:** `tools/list` is the endpoint's largest response (~3 KB) and
+`cJSON_PrintUnformatted` builds it in one contiguous block — the crash-risk currency on
+this heap — so tool descriptions stay terse and the tool set small. The send path carries
+the same NULL-print → 503 guard as `send_json`, and both handlers are dispatched inside
+`http_server.cpp`'s `handle_all` try/catch.
+
+**Security posture:** identical to the rest of the HTTP API — no auth, no TLS, trusted
+LAN only (see [`SECURITY.md`](SECURITY.md)). The endpoint grants nothing the open REST
+API doesn't already expose; the enrolled key stays Charging Manager only.
+
+Client config example (Claude Code):
+
+```bash
+claude mcp add --transport http tesla-key http://<ESP32-IP>/mcp
+```

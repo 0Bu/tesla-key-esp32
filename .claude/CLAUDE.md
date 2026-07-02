@@ -120,6 +120,9 @@ GET  /api/1/vehicles/{VIN}/vehicle_data        # charge state
 GET  /api/1/vehicles/{VIN}/body_controller_state
 GET  /status                                   # web-UI JSON (wifi, ble, mqtt, vehicle cache, read-only telemetry under "tele")
 POST /scan                                     # start a time-limited BLE discovery scan
+POST /mcp                                      # MCP server (Streamable HTTP, stateless JSON-RPC 2.0; GET → 405, no SSE).
+                                               # Tools = the run-on-key charging command set + read-only get_vehicle_state
+                                               # (cache-only, never wakes the car). Core logic in main/logic/mcp.hpp (host-tested).
 GET  /diag                                     # plain-text in-memory diag log (?verbose=1 raw RX / ?verbose=0 off, ?clear=1 reset)
 POST /gen_keys[?force=1]                       # generate key (refuses overwrite w/o force)
 POST /send_key                                 # pair with vehicle (Charging Manager only)

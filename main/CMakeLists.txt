@@ -5,6 +5,7 @@ idf_component_register(
         "nvs_storage.cpp"
         "vehicle_ctrl.cpp"
         "http_server.cpp"
+        "mcp_server.cpp"
         "provisioning.cpp"
         "diag_log.cpp"
         "ota_update.cpp"

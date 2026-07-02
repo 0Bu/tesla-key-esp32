@@ -1,5 +1,6 @@
 #include "http_server.hpp"
 #include "diag_log.hpp"
+#include "mcp_server.hpp"
 #include "ota_update.hpp"
 #include "mqtt_ha.hpp"
 #include "platform.hpp"
@@ -984,6 +985,8 @@ static esp_err_t handle_all_dispatch(httpd_req_t* req) {
     if (POST && strcmp(path, "/set_vin")    == 0)               return handle_set_vin(req);
     if (POST && strcmp(path, "/set_mqtt")   == 0)               return handle_set_mqtt(req);
     if (POST && strcmp(path, "/scan")       == 0)               return handle_scan(req);
+    if (POST && strcmp(path, "/mcp")        == 0)               return mcp_handle_post(req, *g_vehicle);
+    if (GET  && strcmp(path, "/mcp")        == 0)               return mcp_handle_get(req);
     if (GET  && strcmp(path, "/api/proxy/1/version") == 0)      return handle_version(req);
     if (GET  && strcmp(path, "/status")     == 0)               return handle_status(req);
     if (GET  && strcmp(path, "/diag")       == 0)               return handle_diag(req);

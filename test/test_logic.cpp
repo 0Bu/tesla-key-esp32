@@ -18,6 +18,7 @@
 #include "logic/units.hpp"
 #include "logic/link_state.hpp"
 #include "logic/target.hpp"
+#include "logic/mcp.hpp"
 
 #include <cmath>
 #include <cstdio>
@@ -174,12 +175,55 @@ static void test_target() {
     CHECK(base + tk::image_suffix(tk::Target::Esp32S3) + ".bin" == "tesla-key-esp32-s3.bin");
 }
 
+// ─── MCP endpoint core (version negotiation, routing, tool registry, clamp) ──────
+static void test_mcp() {
+    using MM = tk::McpMethod;
+
+    // Version negotiation: echo a supported revision; anything else (or absent) answers
+    // with our latest supported version, per the MCP lifecycle spec.
+    CHECK_STR(tk::mcp_negotiate_version("2025-06-18"), "2025-06-18");
+    CHECK_STR(tk::mcp_negotiate_version("2025-03-26"), "2025-03-26");
+    CHECK_STR(tk::mcp_negotiate_version("2024-11-05"), "2025-06-18");
+    CHECK_STR(tk::mcp_negotiate_version("bogus"),      "2025-06-18");
+    CHECK_STR(tk::mcp_negotiate_version(nullptr),      "2025-06-18");
+
+    // JSON-RPC method routing.
+    CHECK(tk::mcp_method_from("initialize") == MM::Initialize);
+    CHECK(tk::mcp_method_from("tools/list") == MM::ToolsList);
+    CHECK(tk::mcp_method_from("tools/call") == MM::ToolsCall);
+    CHECK(tk::mcp_method_from("ping")       == MM::Ping);
+    // Any notifications/* is a notification (202, no body) — never "method not found".
+    CHECK(tk::mcp_method_from("notifications/initialized") == MM::Notification);
+    CHECK(tk::mcp_method_from("notifications/cancelled")   == MM::Notification);
+    // Unimplemented capabilities and garbage stay Unknown (→ -32601).
+    CHECK(tk::mcp_method_from("resources/list") == MM::Unknown);
+    CHECK(tk::mcp_method_from("Initialize")     == MM::Unknown);  // case-sensitive
+    CHECK(tk::mcp_method_from(nullptr)          == MM::Unknown);
+
+    // Tool registry: every entry round-trips by name; role-refused commands (which the
+    // Charging-Manager key can't execute) are deliberately not tools.
+    for (const auto& t : tk::kMcpTools) CHECK(tk::mcp_tool_from(t.name) == t.tool);
+    CHECK(tk::mcp_tool_from("door_unlock")    == tk::McpTool::Unknown);
+    CHECK(tk::mcp_tool_from("set_sentry_mode") == tk::McpTool::Unknown);
+    CHECK(tk::mcp_tool_from(nullptr)           == tk::McpTool::Unknown);
+
+    // Clamp: an out-of-range double must never reach the int cast (UB), matching the
+    // bounds advertised in the tool schemas (amps 0–48, percent 50–100, minutes 0–1439).
+    CHECK(tk::clamped_int(16.0,   0, 48)    == 16);
+    CHECK(tk::clamped_int(-5.0,   0, 48)    == 0);
+    CHECK(tk::clamped_int(1e300,  0, 48)    == 48);
+    CHECK(tk::clamped_int(-1e300, 50, 100)  == 50);
+    CHECK(tk::clamped_int(99.9,   50, 100)  == 99);
+    CHECK(tk::clamped_int(1440.0, 0, 1439)  == 1439);
+}
+
 int main() {
     test_vin();
     test_units();
     test_link_state();
     test_link_state_strings();
     test_target();
+    test_mcp();
 
     if (g_failures == 0) {
         std::printf("OK  %d checks passed\n", g_checks);
