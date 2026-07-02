@@ -84,7 +84,8 @@ static int json_int_clamped(const cJSON* obj, const char* key, int dflt, int lo,
 
 // ─── POST /api/1/vehicles/{VIN}/command/{CMD} ─────────────────────────────────
 
-esp_err_t handle_command(httpd_req_t* req) {
+esp_err_t handle_command(GuardedReq rq) {
+    httpd_req_t* req = rq.req;
     char vin[64], cmd[64];
     if (!parse_uri(req->uri, vin, sizeof(vin), cmd, sizeof(cmd))) {
         return send_json(req, 400, make_response(false, "unknown", "?", "invalid URI"));
@@ -152,7 +153,8 @@ esp_err_t handle_command(httpd_req_t* req) {
 
 // ─── GET /api/1/vehicles/{VIN}/vehicle_data ───────────────────────────────────
 
-esp_err_t handle_vehicle_data(httpd_req_t* req) {
+esp_err_t handle_vehicle_data(GuardedReq rq) {
+    httpd_req_t* req = rq.req;
     char vin[64] = {0};
     if (!parse_vin_only(req->uri, vin, sizeof(vin)))
         return send_json(req, 400, make_response(false, "vehicle_data", "?", "invalid URI"));
@@ -194,7 +196,8 @@ esp_err_t handle_vehicle_data(httpd_req_t* req) {
 
 // ─── GET /api/1/vehicles/{VIN}/body_controller_state ─────────────────────────
 
-esp_err_t handle_body_controller(httpd_req_t* req) {
+esp_err_t handle_body_controller(GuardedReq rq) {
+    httpd_req_t* req = rq.req;
     char vin[64] = {0};
     if (!parse_vin_only(req->uri, vin, sizeof(vin)))
         return send_json(req, 400, make_response(false, "body_controller_state", "?", "invalid URI"));
@@ -224,7 +227,8 @@ esp_err_t handle_body_controller(httpd_req_t* req) {
 
 // ─── GET /api/proxy/1/version ─────────────────────────────────────────────────
 
-esp_err_t handle_version(httpd_req_t* req) {
+esp_err_t handle_version(GuardedReq rq) {
+    httpd_req_t* req = rq.req;
     cJSON* root = cJSON_CreateObject();
     cJSON_AddStringToObject(root, "version", fw_version());
     cJSON_AddStringToObject(root, "platform", TK_PLATFORM);

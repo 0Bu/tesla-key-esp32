@@ -4,9 +4,9 @@
 #include "http_handlers.hpp"
 #include <esp_log.h>
 #include <esp_app_desc.h>
-#include <cstdio>
 #include <cstring>
 #include <cstdlib>
+#include <sys/time.h>
 
 static const char* TAG = "http_server";
 
@@ -105,4 +105,14 @@ static double clock_ceiling_ms() {
 
 bool browser_time_plausible(double epoch_ms) {
     return epoch_ms >= kClockFloorMs && epoch_ms < clock_ceiling_ms();
+}
+
+long long apply_browser_clock(double epoch_ms) {
+    long long sec = (long long)(epoch_ms / 1000.0);
+    struct timeval tv = {};
+    tv.tv_sec  = (time_t)sec;
+    tv.tv_usec = (suseconds_t)((long long)epoch_ms % 1000) * 1000;
+    settimeofday(&tv, nullptr);
+    g_vehicle->save_config_time(sec);
+    return sec;
 }

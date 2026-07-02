@@ -261,7 +261,7 @@ void VehicleController::install_state_callbacks_() {
     // (the background refresh in loop_task). Installed once, never cleared; HTTP
     // reads serve last_known_charge_ from this cache without blocking.
     vehicle_->set_charge_state_callback([this](const CarServer_ChargeState& cs) {
-        MutexGuard g(cache_mutex_);
+        tk::MutexGuard g(cache_mutex_);
         parse_charge_state(cs, last_known_charge_);
         note_contact_();
     });
@@ -270,22 +270,22 @@ void VehicleController::install_state_callbacks_() {
     // (one telemetry domain per cycle). Each refreshes its own cache for the web UI; none
     // affect pairing or evcc. Installed once, never cleared.
     vehicle_->set_climate_state_callback([this](const CarServer_ClimateState& cs) {
-        MutexGuard g(cache_mutex_);
+        tk::MutexGuard g(cache_mutex_);
         parse_climate_state(cs, last_known_climate_);
         note_contact_();
     });
     vehicle_->set_drive_state_callback([this](const CarServer_DriveState& ds) {
-        MutexGuard g(cache_mutex_);
+        tk::MutexGuard g(cache_mutex_);
         parse_drive_state(ds, last_known_drive_);
         note_contact_();
     });
     vehicle_->set_tire_pressure_state_callback([this](const CarServer_TirePressureState& t) {
-        MutexGuard g(cache_mutex_);
+        tk::MutexGuard g(cache_mutex_);
         parse_tire_pressure(t, last_known_tires_);
         note_contact_();
     });
     vehicle_->set_closures_state_callback([this](const CarServer_ClosuresState& c) {
-        MutexGuard g(cache_mutex_);
+        tk::MutexGuard g(cache_mutex_);
         parse_closures_state(c, last_known_closures_);
         note_contact_();
     });
@@ -469,7 +469,7 @@ bool VehicleController::get_charge_state(ChargeStateResult& out, int /*timeout_m
     // idle car is left to sleep and this serves the last value (which heals within seconds of
     // any evcc command). If we have never gotten a reading yet, the caller emits a zeroed
     // charge_state.
-    MutexGuard g(cache_mutex_);
+    tk::MutexGuard g(cache_mutex_);
     if (last_known_charge_.valid) {
         out = last_known_charge_;
         return true;
@@ -478,7 +478,7 @@ bool VehicleController::get_charge_state(ChargeStateResult& out, int /*timeout_m
 }
 
 bool VehicleController::get_vehicle_status(VehicleStatusResult& out, int timeout_ms) {
-    MutexGuard cmd_guard(command_mutex_);
+    tk::MutexGuard cmd_guard(command_mutex_);
     // A VCSEC status poll is the auto-pair / wake probe as well as an HTTP read, so it
     // must be able to bring the BLE link up. With a NO-wake policy it reads status
     // (including ASLEEP) without actually waking the car.
@@ -518,7 +518,7 @@ bool VehicleController::get_vehicle_status(VehicleStatusResult& out, int timeout
     if (ok && out.valid) {
         note_reachable_();  // car answered a VCSEC status read ⇒ reachable over BLE right now
         cmd_fail_streak_.store(0);  // a clean round-trip ⇒ link healthy, reset desync backstop
-        MutexGuard cache_guard(cache_mutex_);
+        tk::MutexGuard cache_guard(cache_mutex_);
         last_known_status_ = out;
     }
     return ok && out.valid;

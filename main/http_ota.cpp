@@ -8,7 +8,6 @@
 #include "ota_update.hpp"
 #include <esp_log.h>
 #include <cstdlib>
-#include <sys/time.h>
 
 static const char* TAG = "http_server";
 
@@ -33,18 +32,15 @@ static void apply_browser_time_query_(httpd_req_t* req) {
     if (httpd_query_key_value(q, "ms", ms, sizeof(ms)) != ESP_OK) return;
     double epoch_ms = atof(ms);
     if (!browser_time_plausible(epoch_ms)) return;
-    long long sec = (long long)(epoch_ms / 1000.0);
-    struct timeval tv = {};
-    tv.tv_sec = (time_t)sec;
-    settimeofday(&tv, nullptr);
-    g_vehicle->save_config_time(sec);
+    long long sec = apply_browser_clock(epoch_ms);
     ESP_LOGI(TAG, "clock set from browser (ota query): %lld", sec);
 }
 
 // GET /ota/check[?ms=<epoch>] — start a background version check, return at once.
 // The slow HTTPS manifest fetch runs in its own task (see ota_check_start) so it
 // never ties up the HTTP server; the UI polls /ota/status for the result.
-esp_err_t handle_ota_check(httpd_req_t* req) {
+esp_err_t handle_ota_check(GuardedReq rq) {
+    httpd_req_t* req = rq.req;
     apply_browser_time_query_(req);
     bool started = ota_check_start();
     cJSON* root = cJSON_CreateObject();
@@ -55,7 +51,8 @@ esp_err_t handle_ota_check(httpd_req_t* req) {
 }
 
 // POST /ota/update — start the background download+install, return immediately.
-esp_err_t handle_ota_update(httpd_req_t* req) {
+esp_err_t handle_ota_update(GuardedReq rq) {
+    httpd_req_t* req = rq.req;
     bool started = ota_start();
     cJSON* root = cJSON_CreateObject();
     cJSON_AddBoolToObject(root,   "result", started);
@@ -66,7 +63,8 @@ esp_err_t handle_ota_update(httpd_req_t* req) {
 }
 
 // GET /ota/status — poll download progress.
-esp_err_t handle_ota_status(httpd_req_t* req) {
+esp_err_t handle_ota_status(GuardedReq rq) {
+    httpd_req_t* req = rq.req;
     OtaStatus s = ota_get_status();
     cJSON* root = cJSON_CreateObject();
     cJSON_AddStringToObject(root, "state",            ota_state_str(s.state));

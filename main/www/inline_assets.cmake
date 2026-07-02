@@ -18,16 +18,33 @@ file(READ "${HTML}" page)
 file(READ "${CSS}" css)
 file(READ "${JS}" js)
 
-# Fail loudly if a marker went missing (e.g. edited away): silently serving the raw
-# template would ship a page without its CSS/JS.
-string(FIND "${page}" "/*@@INLINE:style.css@@*/\n" css_at)
-if(css_at EQUAL -1)
-    message(FATAL_ERROR "inline_assets.cmake: CSS marker not found in ${HTML}")
-endif()
-string(FIND "${page}" "//@@INLINE:app.js@@\n" js_at)
-if(js_at EQUAL -1)
-    message(FATAL_ERROR "inline_assets.cmake: JS marker not found in ${HTML}")
-endif()
+# Each marker must appear EXACTLY once: string(REPLACE) below replaces every
+# occurrence, so a missing marker would silently ship a page without its CSS/JS and a
+# duplicated one (e.g. the literal marker text quoted in a comment, or an asset
+# containing the other asset's marker) would splice content twice / into the wrong
+# block. Both are silent-wrong-output failures — turn them into hard build errors.
+foreach(pair "/*@@INLINE:style.css@@*/\n;CSS" "//@@INLINE:app.js@@\n;JS")
+    list(GET pair 0 marker)
+    list(GET pair 1 label)
+    string(FIND "${page}" "${marker}" first_at)
+    string(FIND "${page}" "${marker}" last_at REVERSE)
+    if(first_at EQUAL -1)
+        message(FATAL_ERROR "inline_assets.cmake: ${label} marker not found in ${HTML}")
+    endif()
+    if(NOT first_at EQUAL last_at)
+        message(FATAL_ERROR "inline_assets.cmake: ${label} marker appears more than once in ${HTML}")
+    endif()
+endforeach()
+# The assets themselves must not contain a marker either — the CSS is spliced first,
+# so a marker smuggled in via style.css would corrupt the JS replace that follows.
+foreach(asset css js)
+    foreach(marker "/*@@INLINE:style.css@@*/" "//@@INLINE:app.js@@")
+        string(FIND "${${asset}}" "${marker}" hit)
+        if(NOT hit EQUAL -1)
+            message(FATAL_ERROR "inline_assets.cmake: marker text '${marker}' found inside the ${asset} asset")
+        endif()
+    endforeach()
+endforeach()
 
 # Replace the whole marker line (incl. its newline) with the asset content, so the
 # output matches the pre-split monolithic file byte for byte.

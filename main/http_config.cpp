@@ -14,13 +14,13 @@
 #include <cstdlib>
 #include <cctype>
 #include <string>
-#include <sys/time.h>
 
 static const char* TAG = "http_server";
 
 // ─── POST /gen_keys ───────────────────────────────────────────────────────────
 
-esp_err_t handle_gen_keys(httpd_req_t* req) {
+esp_err_t handle_gen_keys(GuardedReq rq) {
+    httpd_req_t* req = rq.req;
     // Refuse to silently overwrite an existing key: regenerating un-pairs the device
     // from the vehicle (the old whitelisted key stops working) and breaks charging
     // until a physical re-pair. Require explicit ?force=1 to replace a present key.
@@ -43,7 +43,8 @@ esp_err_t handle_gen_keys(httpd_req_t* req) {
 
 // ─── POST /send_key ───────────────────────────────────────────────────────────
 
-esp_err_t handle_send_key(httpd_req_t* req) {
+esp_err_t handle_send_key(GuardedReq rq) {
+    httpd_req_t* req = rq.req;
     // This firmware only enrolls a Charging Manager key (charging + wake), never an
     // owner key — its sole purpose is the evcc BLE integration. Reject an explicit
     // owner request rather than silently enrolling a different role than asked for.
@@ -74,7 +75,8 @@ esp_err_t handle_send_key(httpd_req_t* req) {
 // on load and before an OTA check, but we only apply it while SNTP has not synced —
 // otherwise NTP (which is more trustworthy than a possibly-skewed browser) wins. The
 // applied fallback time is persisted so a later offline reboot starts plausibly.
-esp_err_t handle_set_time(httpd_req_t* req) {
+esp_err_t handle_set_time(GuardedReq rq) {
+    httpd_req_t* req = rq.req;
     // NTP already synced → it's authoritative; drain the body and accept as a no-op.
     if (clock_synced_via_ntp()) {
         free(read_body(req));
@@ -99,12 +101,7 @@ esp_err_t handle_set_time(httpd_req_t* req) {
                                                  "implausible timestamp"));
     }
 
-    long long sec = (long long)(epoch_ms / 1000.0);
-    struct timeval tv = {};
-    tv.tv_sec  = (time_t)sec;
-    tv.tv_usec = (suseconds_t)((long long)epoch_ms % 1000) * 1000;
-    settimeofday(&tv, nullptr);
-    g_vehicle->save_config_time(sec);
+    long long sec = apply_browser_clock(epoch_ms);
     ESP_LOGI(TAG, "clock set from browser: %lld", sec);
 
     return send_json(req, 200, make_response(true, "set_time", "", "clock set"));
@@ -112,7 +109,8 @@ esp_err_t handle_set_time(httpd_req_t* req) {
 
 // ─── POST /set_vin — persist VIN, then reboot ─────────────────────────────────
 
-esp_err_t handle_set_vin(httpd_req_t* req) {
+esp_err_t handle_set_vin(GuardedReq rq) {
+    httpd_req_t* req = rq.req;
     char* body = read_body(req);
     cJSON* json = body ? cJSON_Parse(body) : nullptr;
     free(body);
@@ -187,7 +185,8 @@ static bool mqtt_broker_is_plausible(const std::string& broker) {
     return p >= 1 && p <= 65535;
 }
 
-esp_err_t handle_set_mqtt(httpd_req_t* req) {
+esp_err_t handle_set_mqtt(GuardedReq rq) {
+    httpd_req_t* req = rq.req;
     char* body = read_body(req);
     cJSON* json = body ? cJSON_Parse(body) : nullptr;
     free(body);

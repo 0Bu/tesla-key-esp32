@@ -54,24 +54,24 @@ static esp_err_t handle_all_dispatch(httpd_req_t* req) {
 
     // Parameterized API routes (the VIN is embedded in the path): match the trailing segment of
     // the query-stripped path. /command/ is matched as an interior segment since {CMD} follows.
-    if (POST && strstr(path, "/command/"))                      return handle_command(req);
-    if (GET  && path_ends_with(path, "/vehicle_data"))          return handle_vehicle_data(req);
-    if (GET  && path_ends_with(path, "/body_controller_state")) return handle_body_controller(req);
+    if (POST && strstr(path, "/command/"))                      return handle_command({req});
+    if (GET  && path_ends_with(path, "/vehicle_data"))          return handle_vehicle_data({req});
+    if (GET  && path_ends_with(path, "/body_controller_state")) return handle_body_controller({req});
 
     // Fixed routes — exact path match. "/ota/status" can no longer fall through to "/status".
-    if (GET  && strcmp(path, "/ota/check")  == 0)               return handle_ota_check(req);
-    if (POST && strcmp(path, "/ota/update") == 0)               return handle_ota_update(req);
-    if (GET  && strcmp(path, "/ota/status") == 0)               return handle_ota_status(req);
-    if (POST && strcmp(path, "/gen_keys")   == 0)               return handle_gen_keys(req);
-    if (POST && strcmp(path, "/send_key")   == 0)               return handle_send_key(req);
-    if (POST && strcmp(path, "/set_time")   == 0)               return handle_set_time(req);
-    if (POST && strcmp(path, "/set_vin")    == 0)               return handle_set_vin(req);
-    if (POST && strcmp(path, "/set_mqtt")   == 0)               return handle_set_mqtt(req);
-    if (POST && strcmp(path, "/scan")       == 0)               return handle_scan(req);
-    if (GET  && strcmp(path, "/api/proxy/1/version") == 0)      return handle_version(req);
-    if (GET  && strcmp(path, "/status")     == 0)               return handle_status(req);
-    if (GET  && strcmp(path, "/diag")       == 0)               return handle_diag(req);
-    if (GET  && (strcmp(path, "/") == 0 || strcmp(path, "/index.html") == 0)) return handle_index(req);
+    if (GET  && strcmp(path, "/ota/check")  == 0)               return handle_ota_check({req});
+    if (POST && strcmp(path, "/ota/update") == 0)               return handle_ota_update({req});
+    if (GET  && strcmp(path, "/ota/status") == 0)               return handle_ota_status({req});
+    if (POST && strcmp(path, "/gen_keys")   == 0)               return handle_gen_keys({req});
+    if (POST && strcmp(path, "/send_key")   == 0)               return handle_send_key({req});
+    if (POST && strcmp(path, "/set_time")   == 0)               return handle_set_time({req});
+    if (POST && strcmp(path, "/set_vin")    == 0)               return handle_set_vin({req});
+    if (POST && strcmp(path, "/set_mqtt")   == 0)               return handle_set_mqtt({req});
+    if (POST && strcmp(path, "/scan")       == 0)               return handle_scan({req});
+    if (GET  && strcmp(path, "/api/proxy/1/version") == 0)      return handle_version({req});
+    if (GET  && strcmp(path, "/status")     == 0)               return handle_status({req});
+    if (GET  && strcmp(path, "/diag")       == 0)               return handle_diag({req});
+    if (GET  && (strcmp(path, "/") == 0 || strcmp(path, "/index.html") == 0)) return handle_index({req});
 
     cJSON* root = cJSON_CreateObject();
     cJSON_AddStringToObject(root, "error", "not found");

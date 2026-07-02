@@ -115,7 +115,7 @@ struct InFlightGuard {
 bool VehicleController::send_vcsec_(const std::string& name, Builder builder,
                                      TeslaBLE::WakePolicy wp, int timeout_ms,
                                      bool count_as_activity, bool auth_fail_is_revocation) {
-    MutexGuard cmd_guard(command_mutex_);
+    tk::MutexGuard cmd_guard(command_mutex_);
     InFlightGuard inflight(cmd_in_flight_);
     // Real commands open the active window so loop_task resumes polling; the background
     // health poll passes count_as_activity=false (else the window never expires and the
@@ -139,7 +139,7 @@ bool VehicleController::send_vcsec_(const std::string& name, Builder builder,
 
 bool VehicleController::send_infotainment_(const std::string& name, Builder builder,
                                             int timeout_ms, TeslaBLE::WakePolicy wp) {
-    MutexGuard cmd_guard(command_mutex_);
+    tk::MutexGuard cmd_guard(command_mutex_);
     InFlightGuard inflight(cmd_in_flight_);
     // Every infotainment command is a real evcc/manual action → open the active window.
     last_cmd_ticks_.store(xTaskGetTickCount());

@@ -10,9 +10,9 @@
 #include <cstdlib>
 #include <ctime>
 
-// protobuf generated headers (from tesla-ble)
+// protobuf generated headers (from tesla-ble) — VCSEC only: this TU never builds
+// infotainment (CarServer) messages; Keys_Role comes via <vehicle.h> → keys.pb.h.
 #include <vcsec.pb.h>
-#include <car_server.pb.h>
 
 // mbedtls for deriving the public-key fingerprint from the stored PEM key
 #include <mbedtls/pk.h>
@@ -179,7 +179,7 @@ void VehicleController::auto_pair_task_fn_(void* arg) {
 // ─── Key management ───────────────────────────────────────────────────────────
 
 bool VehicleController::generate_key() {
-    MutexGuard cmd_guard(command_mutex_);
+    tk::MutexGuard cmd_guard(command_mutex_);
     xSemaphoreTake(vehicle_mutex_, portMAX_DELAY);
     vehicle_->regenerate_key();
     xSemaphoreGive(vehicle_mutex_);
@@ -230,7 +230,7 @@ void VehicleController::clear_session_and_cache_() {
     // (or stale telemetry) from a defunct pairing. Under cache_mutex_ since the HTTP task
     // may be copying these concurrently.
     {
-        MutexGuard cache_guard(cache_mutex_);
+        tk::MutexGuard cache_guard(cache_mutex_);
         last_known_charge_   = {};
         last_known_status_   = {};
         last_known_climate_  = {};
@@ -349,7 +349,7 @@ std::string VehicleController::key_fingerprint() {
 }
 
 bool VehicleController::pair(int timeout_ms) {
-    MutexGuard cmd_guard(command_mutex_);
+    tk::MutexGuard cmd_guard(command_mutex_);
     if (!ensure_connected_()) return false;
     xSemaphoreTake(cmd_sem_, 0);
     last_result_ = false;

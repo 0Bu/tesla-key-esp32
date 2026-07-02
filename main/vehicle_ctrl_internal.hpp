@@ -10,8 +10,10 @@
 #include "freertos/semphr.h"
 
 // RAII guard that serializes a full command/query cycle (command_mutex_) or a cache
-// copy (cache_mutex_). Plain struct (not anonymous-namespaced) so every implementation
-// file shares one ODR-clean definition.
+// copy (cache_mutex_). Lives in the project's tk:: namespace: a stock utility name like
+// MutexGuard in the global namespace would be one same-named struct in any linked
+// component away from an IFNDR ODR clash with no diagnostic.
+namespace tk {
 struct MutexGuard {
     SemaphoreHandle_t m;
     explicit MutexGuard(SemaphoreHandle_t mtx) : m(mtx) { xSemaphoreTake(m, portMAX_DELAY); }
@@ -19,3 +21,4 @@ struct MutexGuard {
     MutexGuard(const MutexGuard&) = delete;
     MutexGuard& operator=(const MutexGuard&) = delete;
 };
+}  // namespace tk

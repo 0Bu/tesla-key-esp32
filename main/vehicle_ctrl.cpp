@@ -5,13 +5,11 @@
 // vehicle_pairing.cpp (pairing lifecycle/keys); shared RAII in vehicle_ctrl_internal.hpp.
 
 #include "vehicle_ctrl.hpp"
-#include "vehicle_ctrl_internal.hpp"
 #include "logic/vin.hpp"
 #include <esp_log.h>
 
-// protobuf generated headers (from tesla-ble)
-#include <vcsec.pb.h>
-#include <car_server.pb.h>
+// No protobuf includes needed here: the only generated types this TU touches are the
+// UniversalMessage_* ones, which vehicle_ctrl.hpp already provides via <vehicle.h>.
 
 static const char* TAG = "vehicle_ctrl";
 

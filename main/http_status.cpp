@@ -11,13 +11,13 @@
 #include <esp_netif.h>
 #include <esp_app_desc.h>
 #include <esp_wifi.h>
-#include <cstring>
 #include <ctime>
 #include <string>
 
 // ─── POST /scan — start a time-limited BLE discovery scan ─────────────────────
 
-esp_err_t handle_scan(httpd_req_t* req) {
+esp_err_t handle_scan(GuardedReq rq) {
+    httpd_req_t* req = rq.req;
     g_vehicle->ble_scan();
     cJSON* root = cJSON_CreateObject();
     cJSON_AddBoolToObject(root, "result", true);
@@ -39,7 +39,8 @@ static void current_ip(char* out, size_t sz) {
 // Whether the car is "live" (awake) vs merely sleeping vs unreachable is decided centrally
 // in VehicleController::link_state(), shared with the MQTT bridge so the two never drift.
 
-esp_err_t handle_status(httpd_req_t* req) {
+esp_err_t handle_status(GuardedReq rq) {
+    httpd_req_t* req = rq.req;
     // Live device state — the web UI polls this every 4 s. Never let a browser/proxy serve a
     // cached copy, or the hero sticks on a stale state (e.g. a transient "Unreachable") until a
     // manual reload. Matches the no-store on "/" and "/diag"; the poll also cache-busts the URL.
@@ -272,7 +273,8 @@ esp_err_t handle_status(httpd_req_t* req) {
 
 // ─── GET /diag — in-memory diagnostic log (for on-demand analysis) ────────────
 
-esp_err_t handle_diag(httpd_req_t* req) {
+esp_err_t handle_diag(GuardedReq rq) {
+    httpd_req_t* req = rq.req;
     if (query_param_is(req, "clear", "1"))        diag_log_clear();
     if (query_param_is(req, "verbose", "1"))      diag_set_verbose(true);
     else if (query_param_is(req, "verbose", "0")) diag_set_verbose(false);
@@ -301,7 +303,8 @@ esp_err_t handle_diag(httpd_req_t* req) {
 extern const uint8_t index_html_gz_start[] asm("_binary_index_html_gz_start");
 extern const uint8_t index_html_gz_end[]   asm("_binary_index_html_gz_end");
 
-esp_err_t handle_index(httpd_req_t* req) {
+esp_err_t handle_index(GuardedReq rq) {
+    httpd_req_t* req = rq.req;
     httpd_resp_set_type(req, "text/html");
     // The UI is embedded in the firmware and changes with every flash/OTA. Without
     // this, browsers cache index.html and keep rendering the OLD layout (with live
