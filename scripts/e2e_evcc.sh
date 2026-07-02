@@ -153,7 +153,7 @@ cmd() {
     fi
   elif [ "$mode" = reject ]; then
     # The firmware answers (HTTP 200) even when the car is unreachable, with result:false
-    # reason="vehicle not reachable" (http_server.cpp). So result:false alone is ambiguous:
+    # reason="vehicle not reachable" (http_api.cpp). So result:false alone is ambiguous:
     # treat a reachability reason (or an empty body) as "can't confirm" (FAIL), and any other
     # car-side reason as a genuine refusal (PASS) — so an asleep car can't false-PASS.
     if ! echo "$r" | grep -q '"result":false'; then

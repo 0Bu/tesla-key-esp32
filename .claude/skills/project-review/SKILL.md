@@ -58,14 +58,14 @@ links yourself — that's where the value is.
 | Boot / wiring | `main/main.cpp` | WiFi, NVS, SNTP, mDNS, starts every component; boot heap log; OTA mark-valid |
 | Target identity | `main/platform.hpp` | `TK_PLATFORM` string per `CONFIG_IDF_TARGET_*`; must agree with `/api/proxy/1/version`, the HA device model, and esp-web-tools `chipFamily` |
 | BLE GATT client | `main/ble_client.{cpp,hpp}` | NimBLE central; scans Tesla UUID; RX notify → `on_rx_data` (runs on the **NimBLE host task**) |
-| Vehicle control | `main/vehicle_ctrl.{cpp,hpp}` | `TeslaBLE::Vehicle` wrapper; command API; **loop_task** (active-window polling + sleep gating); caches |
-| HTTP API | `main/http_server.{cpp,hpp}` | `esp_http_server` on :80; single catch-all `handle_all` dispatch (wrapped in try/catch) |
+| Vehicle control | `main/vehicle_ctrl.{cpp,hpp}` + `vehicle_commands.cpp` + `vehicle_telemetry.cpp` + `vehicle_pairing.cpp` (+ `vehicle_ctrl_internal.hpp`) | one `VehicleController`, split by concern: core wiring/`link_state()` glue; command API; **loop_task** (active-window polling + sleep gating) + caches; pairing lifecycle/keys |
+| HTTP API | `main/http_server.{cpp,hpp}` + `http_api.cpp` + `http_status.cpp` + `http_ota.cpp` + `http_config.cpp` + `http_common.cpp` (+ `http_handlers.hpp`) | `esp_http_server` on :80; single catch-all `handle_all` dispatch (wrapped in try/catch) in `http_server.cpp`; handlers split by route group |
 | HA bridge | `main/mqtt_ha.{cpp,hpp}` | read-only MQTT discovery publish; its own tasks |
 | Storage | `main/nvs_storage.{cpp,hpp}` | NVS adapter; **maps library keys ≤15 chars** |
 | Diag log | `main/diag_log.{cpp,hpp}` | in-RAM console ring (`GET /diag`); **static `.bss` buffer** (heap budget!) |
 | OTA | `main/ota_update.{cpp,hpp}` | pull-based self-update; dual-slot |
 | Provisioning | `main/provisioning.{cpp,hpp}` | captive setup portal when no WiFi |
-| Web UI | `main/www/index.html` | compiled into the app binary; polls `/status` every 4 s |
+| Web UI | `main/www/` (`index.html` markup + `style.css` + `app.js`, spliced by `inline_assets.cmake`) | compiled into the app binary as ONE self-contained page; polls `/status` every 4 s |
 | Pure logic (host-tested) | `main/logic/*.hpp` (`vin`, `units`, `link_state`, `target`) + `test/test_logic.cpp` | **IDF-free** logic the device and the host test share: VIN validation, imperial→metric units, the `link_state()` four-state machine + its `/status`/MQTT strings, per-target platform/OTA-suffix map. Host-built + run by `scripts/run-mock-tests.sh` (CI `logic-test` gate) — the real local verification loop |
 | Library | `managed_components/yoziru__tesla-ble/` | **fetched, regenerated — NEVER edit** (pin in `main/idf_component.yml`) |
 
@@ -197,7 +197,7 @@ that describe it. When reviewing a change (or the repo as a whole), check these 
 - **New telemetry field** → parser (with presence flag) **and** `/status` JSON **and** MQTT
   discovery **and** the web UI **and** docs (the field list in `docs/ARCHITECTURE.md`).
 - **Sleep / link-state change** → `link_state()` is the single source of truth feeding **both**
-  the web-UI hero (`main/www/index.html`) **and** MQTT `sleep_state` (`mqtt_ha.cpp`). Touch one
+  the web-UI hero (`main/www/app.js`) **and** MQTT `sleep_state` (`mqtt_ha.cpp`). Touch one
   sink → keep the other in sync (exhaustive MQTT switch, every web-UI state incl. unknown)
   **and** update the four-state summary in `.claude/CLAUDE.md` **and** the full semantics in
   `docs/ARCHITECTURE.md`.
@@ -215,7 +215,7 @@ that describe it. When reviewing a change (or the repo as a whole), check these 
 - **MQTT transport / TLS-default change** → the scheme-defaulting rule lives in
   `mqtt_ha.cpp` (`mqtt_ha_start`: schemeless broker ⇒ `mqtt://`, but ⇒ `mqtts://` when
   credentials are present, CA-bundle-verified, **no plaintext fallback**) **and** surfaces in
-  `/status` (`mqtt.tls`/`mqtt.error`, `http_server.cpp`) **and** the web UI's "· secured" MQTT
+  `/status` (`mqtt.tls`/`mqtt.error`, `http_status.cpp`) **and** the web UI's "· secured" MQTT
   row **and** the MQTT sections of `.claude/CLAUDE.md` + `docs/ARCHITECTURE.md`.
 - **tesla-ble library bump** → `main/idf_component.yml` pin; never patch
   `managed_components/`.
@@ -267,7 +267,7 @@ Run these checks against the current tree:
 - **Cross-cutting list is complete.** Every "add X → also update Y" link should map a real
   multi-place feature; a feature that spans code + docs + config + UI but isn't listed is
   exactly the drift a coherence review is meant to catch.
-- **API / command lists are current.** Diff the routes in `http_server.cpp` and the command
+- **API / command lists are current.** Diff the routes in `http_server.cpp` (dispatch; handlers in `http_api/status/ota/config.cpp`) and the command
   switch against the references the skill and `.claude/CLAUDE.md` lean on.
 - **No stale specifics in the skill text** — hardcoded chip names (e.g. a lone "ESP32-S3" where
   it is now multi-target), file paths, partition offsets, sizes, or version assumptions.
