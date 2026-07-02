@@ -65,13 +65,30 @@ cd build && esptool --chip esp32s3 -p <port> write_flash "@flash_args"   # or es
 ## Architecture
 
 ```
-main.cpp          → WiFi init, NVS init, start all components
-ble_client.cpp    → NimBLE GATT client (BleAdapter impl)
-                    Scans for UUID 00000211-b2d1-43f0-9b88-960cebf8b91e
-                    Write chr: 0212, Notify chr: 0213
-nvs_storage.cpp   → NVS StorageAdapter (maps library keys ≤15 chars)
-vehicle_ctrl.cpp  → TeslaBLE::Vehicle wrapper, sync command API via semaphores
-http_server.cpp   → esp_http_server on port 80
+main.cpp               → WiFi init, NVS init, start all components
+ble_client.cpp         → NimBLE GATT client (BleAdapter impl)
+                         Scans for UUID 00000211-b2d1-43f0-9b88-960cebf8b91e
+                         Write chr: 0212, Notify chr: 0213
+nvs_storage.cpp        → NVS StorageAdapter (maps library keys ≤15 chars)
+vehicle_ctrl.cpp       → VehicleController core: init/wiring, VIN gate, link_state() glue
+vehicle_commands.cpp   → sync command API via semaphores (send_vcsec_/send_infotainment_,
+                         make_result_cb_, all user commands)
+vehicle_telemetry.cpp  → protobuf parsers, cache callbacks, loop_task (background poll +
+                         sleep gating), data queries
+vehicle_pairing.cpp    → auto_pair_task, key mgmt/fingerprint, session invalidation,
+                         health probe   (split map: vehicle_ctrl_internal.hpp)
+http_server.cpp        → esp_http_server on port 80: wildcard dispatch + the handle_all
+                         try/catch OOM guard (503) EVERY handler runs under
+http_api.cpp           → evcc routes (/api/1/…, /api/proxy/1/version)
+http_status.cpp        → web UI (/), /status, /diag, /scan
+http_ota.cpp           → /ota/check|update|status
+http_config.cpp        → /gen_keys, /send_key, /set_time, /set_vin, /set_mqtt
+mcp_server.cpp         → /mcp — MCP server for AI agents (stateless JSON-RPC 2.0;
+                         core logic in logic/mcp.hpp, guide in docs/MCP.md)
+                         (shared helpers: http_common.cpp; split map: http_handlers.hpp)
+www/                   → web UI sources: index.html (markup) + style.css + app.js, spliced
+                         into ONE self-contained page at build time (inline_assets.cmake,
+                         byte-equivalent to the former monolith) and served pre-gzipped
 ```
 
 ## Key Dependency
@@ -104,7 +121,7 @@ toward a pairing revocation (only the health probe / an explicit "whitelist" fau
 ## Read-only telemetry
 
 A rotating background poll (`loop_task_fn_`, one domain per ~30 s: climate → drive → tires →
-closures) refreshes per-domain caches via `set_*_state_callback` in `vehicle_ctrl.cpp`. All
+closures) refreshes per-domain caches via `set_*_state_callback` in `vehicle_telemetry.cpp`. All
 polls are `NO_WAKE_SKIP` (never wake the car), feed the MQTT/HA bridge, and are **paused while
 a foreground command is in flight** (`cmd_in_flight_`). Exposed under `tele` in `/status`
 (`climate`/`drive`/`tires`/`closures`; emitted only while the BLE link is up — the MQTT bridge

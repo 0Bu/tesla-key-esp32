@@ -77,8 +77,10 @@ and `src/{vehicle.cpp, client.cpp, peer.cpp, message_builders.cpp, message_proce
 - **VIN→BLE-name / matching** → `include/vin_utils.h`, `src/vin_utils.cpp` (the firmware delegates here; it does **not** build the name itself).
 
 ### Local — the firmware + its four docs
-Code: `main/ble_client.{cpp,hpp}`, `main/vehicle_ctrl.{cpp,hpp}`, `main/http_server.cpp`,
-`main/mqtt_ha.cpp`, `main/ota_update.cpp`, `main/Kconfig.projbuild`, `partitions.csv`.
+Code: `main/ble_client.{cpp,hpp}`, `main/vehicle_ctrl.{cpp,hpp}` (+ `vehicle_commands.cpp`,
+`vehicle_telemetry.cpp`, `vehicle_pairing.cpp`), `main/http_server.cpp` (+ `http_api.cpp`,
+`http_status.cpp`, `http_ota.cpp`, `http_config.cpp`), `main/mqtt_ha.cpp`,
+`main/ota_update.cpp`, `main/Kconfig.projbuild`, `partitions.csv`.
 Docs to hold accountable: [`README.md`](../../../README.md),
 [`docs/README.md`](../../../docs/README.md), [`docs/SECURITY.md`](../../../docs/SECURITY.md),
 [`.claude/CLAUDE.md`](../../../.claude/CLAUDE.md).
@@ -104,7 +106,7 @@ re-confirm it against the *current* tree and catch anything that drifted since. 
    write chunk vs upstream's MTU-derived block — slower but safe; OK as long as docs say so.)
 2. **Roles / Charging-Manager scope** — charging commands + wake only; everything else
    (lights/horn/sentry/**climate**/locks) is role-rejected. *Baseline: code correct
-   (`vehicle_ctrl.cpp` role-refusal comment), **docs understated** — see worked example.*
+   (`vehicle_commands.cpp` role-refusal comment), **docs understated** — see worked example.*
 3. **Session / signing / clock** — `expires_at` = **vehicle's `SessionInfo.ClockTime` + a
    monotonic `steady_clock` delta** (`src/peer.cpp` `generate_expires_at`), per-domain counter +
    16-byte epoch, separate VCSEC/Infotainment sessions. **The device wall clock does NOT enter
@@ -147,7 +149,7 @@ code is right. **Verify each is still present before editing** — some may alre
 
 > **Status (re-verified 2026-07-02, project-review pass): findings 1–8 are FIXED** in the
 > current tree — the docs/comments now state the code facts each row cites. Only **#9** (the
-> silent `set_charge_limit` `<50→50` clamp reporting success, `vehicle_ctrl.cpp`) remains, and
+> silent `set_charge_limit` `<50→50` clamp reporting success, `vehicle_commands.cpp`) remains, and
 > it is the optional, low-severity row. The table stays as institutional memory for the *shape*
 > of findings; re-verify a row against the tree before acting on it.
 

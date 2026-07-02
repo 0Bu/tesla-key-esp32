@@ -1,11 +1,11 @@
-#include "mcp_server.hpp"
+#include "http_handlers.hpp"
 #include "logic/mcp.hpp"
 #include "logic/link_state.hpp"
 #include <esp_log.h>
 #include <esp_app_desc.h>
-#include <cJSON.h>
 #include <cstdlib>
 #include <cstring>
+#include <string>
 
 // MCP endpoint (POST /mcp) — Streamable HTTP transport, STATELESS profile:
 // one JSON-RPC 2.0 message per POST, answered with application/json. No SSE stream, no
@@ -15,30 +15,11 @@
 // Batches are rejected: protocol 2025-06-18 removed them, and a bounded single-message
 // parse keeps the heap cost predictable. Method/tool routing, version negotiation and the
 // argument clamps live in logic/mcp.hpp (host-tested); this file is the cJSON/httpd shell.
+// User/integrator guide (wire + client examples): docs/MCP.md.
 
 static const char* TAG = "mcp_server";
 
-// Same bound as http_server.cpp's read_body: all real MCP requests here (initialize with
-// clientInfo, tools/call with a couple of ints) are well under this; the cap bounds the
-// malloc against a hostile Content-Length.
-static constexpr size_t kMaxBodyLen = 2048;
-
-static char* read_body_(httpd_req_t* req) {
-    if (req->content_len == 0 || req->content_len > kMaxBodyLen) {
-        if (req->content_len > kMaxBodyLen)
-            ESP_LOGW(TAG, "rejecting oversized body: %u bytes", (unsigned)req->content_len);
-        return nullptr;
-    }
-    size_t len = req->content_len;
-    char* buf  = (char*)malloc(len + 1);
-    if (!buf) return nullptr;
-    int received = httpd_req_recv(req, buf, len);
-    if (received <= 0) { free(buf); return nullptr; }
-    buf[received] = '\0';
-    return buf;
-}
-
-// Serialize + send a JSON-RPC envelope. Mirrors http_server.cpp's send_json: on a
+// Serialize + send a JSON-RPC envelope. Mirrors send_json (http_common.cpp): on a
 // fragmented heap cJSON_PrintUnformatted returns NULL (it does not throw), which would
 // bypass the handle_all try/catch — degrade to a 503 instead of strlen(NULL)-crashing
 // the httpd task.
@@ -177,8 +158,8 @@ static esp_err_t handle_tools_list_(httpd_req_t* req, cJSON* id) {
 
 // ─── tools/call ───────────────────────────────────────────────────────────────
 
-// Wrap `text` as a tools/call result: {content:[{type:"text",text}], isError}. Adopts
-// nothing; the string is copied by cJSON.
+// Wrap `text` as a tools/call result: {content:[{type:"text",text}], isError}. The
+// string is copied by cJSON.
 static cJSON* tool_result_(const char* text, bool is_error) {
     cJSON* result  = cJSON_CreateObject();
     cJSON* content = cJSON_CreateArray();
@@ -194,15 +175,15 @@ static cJSON* tool_result_(const char* text, bool is_error) {
 // Read-only state snapshot from the caches — by design this NEVER touches BLE (no scan,
 // no connect, no wake), so an agent polling it cannot keep a parked car awake. Same
 // no-wake rule as the background telemetry poll.
-static cJSON* vehicle_state_result_(VehicleController& vehicle) {
+static cJSON* vehicle_state_result_() {
     cJSON* o = cJSON_CreateObject();
-    cJSON_AddStringToObject(o, "vin",    vehicle.vin().c_str());
-    cJSON_AddBoolToObject(o,   "paired", vehicle.has_session());
-    cJSON_AddStringToObject(o, "link",   tk::link_state_web_str(vehicle.link_state()));
+    cJSON_AddStringToObject(o, "vin",    g_vehicle->vin().c_str());
+    cJSON_AddBoolToObject(o,   "paired", g_vehicle->has_session());
+    cJSON_AddStringToObject(o, "link",   tk::link_state_web_str(g_vehicle->link_state()));
     uint32_t ago = 0;
-    if (vehicle.seconds_since_contact(ago))
+    if (g_vehicle->seconds_since_contact(ago))
         cJSON_AddNumberToObject(o, "last_seen_s", (double)ago);
-    ChargeStateResult cs = vehicle.get_cached_charge();
+    ChargeStateResult cs = g_vehicle->get_cached_charge();
     if (cs.valid) {
         if (cs.has_battery_level)    cJSON_AddNumberToObject(o, "soc", cs.battery_level);
         if (!cs.charging_state.empty())
@@ -220,8 +201,7 @@ static cJSON* vehicle_state_result_(VehicleController& vehicle) {
     return result;
 }
 
-static esp_err_t handle_tools_call_(httpd_req_t* req, cJSON* id, const cJSON* params,
-                                    VehicleController& vehicle) {
+static esp_err_t handle_tools_call_(httpd_req_t* req, cJSON* id, const cJSON* params) {
     const cJSON* jname = cJSON_GetObjectItemCaseSensitive(params, "name");
     const char* name   = cJSON_IsString(jname) ? jname->valuestring : nullptr;
     tk::McpTool tool   = tk::mcp_tool_from(name);
@@ -243,26 +223,26 @@ static esp_err_t handle_tools_call_(httpd_req_t* req, cJSON* id, const cJSON* pa
     };
 
     if (tool == tk::McpTool::GetVehicleState) {
-        return send_rpc_result_(req, id, vehicle_state_result_(vehicle));
+        return send_rpc_result_(req, id, vehicle_state_result_());
     }
 
     ESP_LOGI(TAG, "tools/call %s", name);
     bool ok = false;
     switch (tool) {
-        case tk::McpTool::WakeUp:          ok = vehicle.wake_up();           break;
-        case tk::McpTool::ChargeStart:     ok = vehicle.charge_start();      break;
-        case tk::McpTool::ChargeStop:      ok = vehicle.charge_stop();       break;
-        case tk::McpTool::ChargePortOpen:  ok = vehicle.charge_port_open();  break;
-        case tk::McpTool::ChargePortClose: ok = vehicle.charge_port_close(); break;
+        case tk::McpTool::WakeUp:          ok = g_vehicle->wake_up();           break;
+        case tk::McpTool::ChargeStart:     ok = g_vehicle->charge_start();      break;
+        case tk::McpTool::ChargeStop:      ok = g_vehicle->charge_stop();       break;
+        case tk::McpTool::ChargePortOpen:  ok = g_vehicle->charge_port_open();  break;
+        case tk::McpTool::ChargePortClose: ok = g_vehicle->charge_port_close(); break;
         case tk::McpTool::SetChargingAmps:
-            ok = vehicle.set_charging_amps(arg_int("amps", 0, 0, 48));
+            ok = g_vehicle->set_charging_amps(arg_int("amps", 0, 0, 48));
             break;
         case tk::McpTool::SetChargeLimit:
-            ok = vehicle.set_charge_limit(arg_int("percent", 80, 50, 100));
+            ok = g_vehicle->set_charge_limit(arg_int("percent", 80, 50, 100));
             break;
         case tk::McpTool::SetScheduledCharging:
-            ok = vehicle.set_scheduled_charging(arg_bool("enable"),
-                                                arg_int("start_minutes", 0, 0, 1439));
+            ok = g_vehicle->set_scheduled_charging(arg_bool("enable"),
+                                                   arg_int("start_minutes", 0, 0, 1439));
             break;
         default: break;  // GetVehicleState/Unknown handled above
     }
@@ -270,16 +250,19 @@ static esp_err_t handle_tools_call_(httpd_req_t* req, cJSON* id, const cJSON* pa
     // Same failure split as the REST path: a car-rejected command carries the real Tesla
     // reason; no reply at all means unreachable. Tool-level failures are isError results,
     // not JSON-RPC errors (the protocol reserves those for malformed calls).
-    std::string err = vehicle.last_command_error();
+    std::string err = g_vehicle->last_command_error();
     const char* text = ok ? "command executed successfully"
                           : (!err.empty() ? err.c_str() : "vehicle not reachable");
     return send_rpc_result_(req, id, tool_result_(text, !ok));
 }
 
-// ─── entry points (dispatched from http_server.cpp) ───────────────────────────
+// ─── entry points (dispatched from http_server.cpp's handle_all) ──────────────
 
-esp_err_t mcp_handle_post(httpd_req_t* req, VehicleController& vehicle) {
-    char* body = read_body_(req);
+esp_err_t mcp_handle_post(GuardedReq rq) {
+    httpd_req_t* req = rq.req;
+
+    // Shared bounded body read (http_common.cpp): NULL on empty/oversized (>2 KB)/failed.
+    char* body = read_body(req);
     cJSON* msg = body ? cJSON_Parse(body) : nullptr;
     free(body);
 
@@ -318,7 +301,7 @@ esp_err_t mcp_handle_post(httpd_req_t* req, VehicleController& vehicle) {
             ret = handle_tools_list_(req, id);
             break;
         case tk::McpMethod::ToolsCall:
-            ret = handle_tools_call_(req, id, params, vehicle);
+            ret = handle_tools_call_(req, id, params);
             break;
         case tk::McpMethod::Ping:
             ret = send_rpc_result_(req, id, cJSON_CreateObject());
@@ -334,8 +317,9 @@ esp_err_t mcp_handle_post(httpd_req_t* req, VehicleController& vehicle) {
     return ret;
 }
 
-esp_err_t mcp_handle_get(httpd_req_t* req) {
+esp_err_t mcp_handle_get(GuardedReq rq) {
     // Stateless profile: no server-initiated SSE stream is offered.
+    httpd_req_t* req = rq.req;
     httpd_resp_set_status(req, "405 Method Not Allowed");
     httpd_resp_set_hdr(req, "Allow", "POST");
     httpd_resp_set_type(req, "application/json");
