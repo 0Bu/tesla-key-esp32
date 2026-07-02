@@ -116,7 +116,7 @@ only edits the broker address.
   directly via the [Model Context Protocol](https://modelcontextprotocol.io/) at
   `http://<ESP32-IP>/mcp` (Streamable HTTP). The exposed tools mirror the charging command
   set plus a read-only state tool that never wakes the car — same trusted-LAN-only caveat
-  as the rest of the API ([details](docs/ARCHITECTURE.md#mcp-endpoint-mcp)).
+  as the rest of the API ([integration guide](docs/MCP.md)).
 
 ---
 

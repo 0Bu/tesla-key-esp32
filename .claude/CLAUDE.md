@@ -11,8 +11,8 @@ code, which is target-agnostic.
 > telemetry, the MQTT/HA bridge, WiFi/LAN reconnect, sleep/link-state, pairing and OTA lives in
 > [`docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md) — read it on demand when touching those
 > areas. User-facing docs: [`README.md`](../README.md), [`docs/README.md`](../docs/README.md),
-> [`docs/SECURITY.md`](../docs/SECURITY.md). Keep all of these in sync (the `project-review`
-> skill checks for drift).
+> [`docs/SECURITY.md`](../docs/SECURITY.md), [`docs/MCP.md`](../docs/MCP.md) (MCP integration
+> guide). Keep all of these in sync (the `project-review` skill checks for drift).
 
 ## Environment note (Claude Code on the web / remote sandbox)
 

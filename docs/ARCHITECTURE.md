@@ -266,6 +266,8 @@ vehicle VIN below to begin." when no VIN is set, so it never implies pairing wit
 `main/mcp_server.cpp` exposes the device to MCP (Model Context Protocol) clients — Claude
 Desktop/Code, VS Code, or any agent framework — over the existing `esp_http_server` on
 port 80, so an LLM agent can read state and drive charging without an extra proxy process.
+This section covers the firmware-internal design; the **user-facing integration guide**
+(wire examples, client configs, troubleshooting) is [`MCP.md`](MCP.md).
 
 **Transport — Streamable HTTP, stateless profile.** `POST /mcp` carries exactly one
 JSON-RPC 2.0 message and is answered with `application/json`:
