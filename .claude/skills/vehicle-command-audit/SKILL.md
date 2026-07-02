@@ -145,6 +145,12 @@ These are **confirmed** and adversarially verified. Treat them as the known drif
 present) and as the *shape* of finding this skill produces. Nearly all are **documentation**; the
 code is right. **Verify each is still present before editing** — some may already be fixed.
 
+> **Status (re-verified 2026-07-02, project-review pass): findings 1–8 are FIXED** in the
+> current tree — the docs/comments now state the code facts each row cites. Only **#9** (the
+> silent `set_charge_limit` `<50→50` clamp reporting success, `vehicle_ctrl.cpp`) remains, and
+> it is the optional, low-severity row. The table stays as institutional memory for the *shape*
+> of findings; re-verify a row against the tree before acting on it.
+
 | # | Cat | Where (doc) | Drift | Fix |
 |---|---|---|---|---|
 | 1 | doc (crux) | `docs/README.md:130-137`, `.claude/CLAUDE.md` "Commands Implemented" | Claims **only** `door_lock/unlock` are role-rejected. Also rejected: `flash_lights`, `honk_horn`, `set_sentry_mode`, `auto_conditioning_start/stop`. Code already names them at `vehicle_ctrl.cpp` role-refusal comment. | Widen the "sent but rejected for the Charging-Manager role" note to the full set; only charging + charge-port + wake actually execute. |

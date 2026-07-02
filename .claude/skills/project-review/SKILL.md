@@ -133,8 +133,22 @@ Treat a violation of any of these as a real finding.
   its own `tesla-key-esp32<suffix>.bin` (`""`/`-s3`/`-c3`/`-c6`, so "esp32" appears once —
   must match across `ota_update.cpp`, `ci-build-all.sh`, `build-pages.sh`) and the web
   installer auto-selects by chipFamily.
-- Rollback is enabled — `main.cpp` must call `esp_ota_mark_app_valid_cancel_rollback()` after
-  a healthy boot, **else a crash within the verify window rolls back to the old slot.**
+- Rollback is enabled and **deliberately deferred**: `main.cpp` does NOT mark the image valid
+  at startup — `ota_health_gate_task` calls `esp_ota_mark_app_valid_cancel_rollback()` only
+  after the new image has run healthily for `kOtaHealthGateS` ≈ 90 s. A crash inside that
+  window reboots still-`PENDING_VERIFY` and the bootloader reverts — that rollback IS the
+  designed safety net (re-introducing a mark-valid at startup would be the regression to flag).
+- **OTA images are signed** (Secure Boot v2 RSA-3072 scheme *without* hardware Secure Boot, no
+  eFuses): `CONFIG_SECURE_SIGNED_APPS_NO_SECURE_BOOT` + `..._RSA_SCHEME` +
+  `CONFIG_SECURE_SIGNED_ON_UPDATE_NO_SECURE_BOOT` in `sdkconfig.defaults`; the build stays
+  unsigned (`CONFIG_SECURE_BOOT_BUILD_SIGNED_BINARIES=n`) and `scripts/ci-build-all.sh` signs
+  each image with the `OTA_SIGNING_KEY` secret (main pushes only; PR builds compile unsigned).
+  Trust is TOFU from the running app's signature block. Classic esp32 needs
+  `CONFIG_ESP32_REV_MIN_3` (`sdkconfig.defaults.esp32`).
+- **Downgrade gate (software anti-rollback):** before the bulk download, `ota_task` reads the
+  downloaded image's own app-descriptor version (`esp_https_ota_get_img_desc`) and refuses
+  anything not strictly newer than the running firmware — a signature proves authenticity, not
+  freshness. Weakening it re-opens the old-but-validly-signed-image attack.
 - `version.txt` is the committed **version floor**; CI (`scripts/next-version.sh`, see
   `.github/workflows/build.yml`) auto-computes the actual release version and **stamps it into
   the build**, so the reported version, firmware filename, and OTA manifest agree for a release.
@@ -198,6 +212,11 @@ that describe it. When reviewing a change (or the repo as a whole), check these 
   `.claude/CLAUDE.md`. This is the STA→LAN link, **distinct** from the car-BLE `link_state()`.
   Invariant: the watchdog must **never reboot** (a reboot mid-outage hits `wifi_connect()`'s
   boot timeout → setup portal, abandoning good credentials).
+- **MQTT transport / TLS-default change** → the scheme-defaulting rule lives in
+  `mqtt_ha.cpp` (`mqtt_ha_start`: schemeless broker ⇒ `mqtt://`, but ⇒ `mqtts://` when
+  credentials are present, CA-bundle-verified, **no plaintext fallback**) **and** surfaces in
+  `/status` (`mqtt.tls`/`mqtt.error`, `http_server.cpp`) **and** the web UI's "· secured" MQTT
+  row **and** the MQTT sections of `.claude/CLAUDE.md` + `docs/ARCHITECTURE.md`.
 - **tesla-ble library bump** → `main/idf_component.yml` pin; never patch
   `managed_components/`.
 
@@ -279,6 +298,12 @@ report it as `SKILL-DRIFT`. The current siblings and what each must stay true to
   file paths still resolve (e.g. `pkg/vehicle/charge.go`), and that its "worked findings" table is
   not asserting drift already fixed in the tree. It is the *upstream-conformance* counterpart to this
   skill — keep the two complementary, not overlapping.
+- **`add-logic-test`** scaffolds a new pure-logic unit in `main/logic/` + its `CHECK` cases in
+  `test/test_logic.cpp`. Re-verify its claims against `scripts/run-mock-tests.sh`, the CI
+  `logic-test` job (`.github/workflows/build.yml`), the `run-logic-tests.sh` **Stop hook**
+  (`.claude/settings.json`), the `CHECK`/`CHECK_STR`/`CHECK_NEAR` macro set in
+  `test/test_logic.cpp`, and the `static_assert` lock pattern (`main/ota_update.cpp` /
+  `main/logic/target.hpp`).
 - **Any skill added since this was written** must be audited too — and added to this list.
 
 A skill that drives a script is only as current as the script: when the script changes,

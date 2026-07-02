@@ -179,13 +179,17 @@ GET  /status               { vin, ip, version, key_present, key_fingerprint,
                              key_created (epoch, omitted if clock unsynced), paired,
                              paired_at (epoch, omitted if unknown), reauth,
                              wifi:{ssid,rssi,std},
-                             ble:{connected,scanning,rssi,addr | devices:[{addr,name,rssi}]},
+                             ble:{connected,scanning,rssi,addr
+                                  | devices:[{addr,name,rssi,connectable}],
+                                  connect_fail?,car_connectable? (only while actively failing)},
                              link: "awake"|"idle"|"asleep"|"unreachable"|"unknown" (drives the
                                hero; "idle" = reachable but not provably asleep — the "Parked" card),
-                             vehicle:{soc,status,charge_limit,power,amps,actual_amps,volts}
+                             vcsec_sleep: "AWAKE"|"ASLEEP"|"UNKNOWN" (raw un-debounced flag, diagnostics),
+                             vehicle:{soc,status,charge_limit,power,amps,actual_amps,volts,phases}
                                (only when link=="awake", cached; each field only when reported),
-                             mqtt:{configured,connected,broker} (HA bridge),
-                             tele:{climate,drive,tires,closures} (read-only telemetry),
+                             mqtt:{configured,connected,tls,broker,error?} (HA bridge),
+                             tele:{climate,drive,tires,closures} (read-only telemetry;
+                               emitted only while the BLE link is up),
                              last:{soc,status} (last-known snapshot for the asleep card),
                              last_seen_s (seconds since last contact) }
 POST /scan                 Time-limited BLE discovery scan (populates ble.devices)
