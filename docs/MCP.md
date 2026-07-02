@@ -174,7 +174,7 @@ curl -s http://tesla-key-esp32.local/mcp \
 ```json
 {"jsonrpc":"2.0","id":3,"result":{
   "content":[{"type":"text","text":
-    "{\"vin\":\"5YJ3E1EA7KF000316\",\"paired\":true,\"link\":\"asleep\",\"last_seen_s\":4210,\"soc\":72,\"charging_state\":\"Disconnected\",\"charge_limit\":80,\"charge_amps\":16}"}],
+    "{\"vin\":\"5YJ3E1EA7KF000316\",\"paired\":true,\"link\":\"asleep\",\"last_seen_s\":4210,\"soc\":72,\"charging_state\":\"Disconnected\",\"charge_limit\":80,\"charge_amps\":16,\"charger_power_kw\":0}"}],
   "isError":false}}
 ```
 

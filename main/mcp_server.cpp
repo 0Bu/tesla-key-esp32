@@ -66,6 +66,9 @@ static esp_err_t send_rpc_error_(httpd_req_t* req, cJSON* id, int code, const ch
     cJSON* root = rpc_envelope_(id);
     if (!root) return send_oom_503_(req);
     cJSON* err  = cJSON_CreateObject();
+    // Without this a heap-exhausted err alloc would serialize an envelope carrying
+    // neither result nor error (cJSON_AddItemToObject(root, ..., NULL) adds nothing).
+    if (!err) { cJSON_Delete(root); return send_oom_503_(req); }
     cJSON_AddNumberToObject(err, "code", code);
     cJSON_AddStringToObject(err, "message", message);
     cJSON_AddItemToObject(root, "error", err);

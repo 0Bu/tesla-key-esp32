@@ -34,9 +34,10 @@ scripts/run-mock-tests.sh   # compile + run host logic tests in seconds (cmake +
 ```
 
 It covers VIN validation, imperial→metric conversion, the `link_state()` four-state machine
-(incl. the debounced-ASLEEP asymmetry) and its `/status`/MQTT strings, and the per-target
-platform/OTA-suffix mapping — all delegated to IDF-free headers in `main/logic/` so the device
-runs the same code the test does. CI gates the firmware build on it (`logic-test` job). Add new
+(incl. the debounced-ASLEEP asymmetry) and its `/status`/MQTT strings, the per-target
+platform/OTA-suffix mapping, the MCP protocol core (version negotiation, method routing,
+tool/arg-spec registry, int clamp) and the shared command-outcome text — all delegated to
+IDF-free headers in `main/logic/` so the device runs the same code the test does. CI gates the firmware build on it (`logic-test` job). Add new
 hardware-free logic to `main/logic/` and a `CHECK` in `test/test_logic.cpp`. Full detail:
 [`test/README.md`](../test/README.md).
 
@@ -86,6 +87,8 @@ http_config.cpp        → /gen_keys, /send_key, /set_time, /set_vin, /set_mqtt
 mcp_server.cpp         → /mcp — MCP server for AI agents (stateless JSON-RPC 2.0;
                          core logic in logic/mcp.hpp, guide in docs/MCP.md)
                          (shared helpers: http_common.cpp; split map: http_handlers.hpp)
+diag_log.cpp           → in-RAM console ring served by GET /diag (static .bss buffer)
+provisioning.cpp       → captive setup portal (setup AP) when no WiFi is configured
 www/                   → web UI sources: index.html (markup) + style.css + app.js, spliced
                          into ONE self-contained page at build time (inline_assets.cmake,
                          byte-equivalent to the former monolith) and served pre-gzipped
