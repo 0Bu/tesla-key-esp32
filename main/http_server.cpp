@@ -173,8 +173,8 @@ static bool query_param_is(httpd_req_t* req, const char* key, const char* want) 
 // clamped BEFORE the int cast — casting an out-of-range double to int is undefined behaviour,
 // so a hostile `{"percent": 1e300}` must never reach `(int)valuedouble`. The string path is
 // bounded too. The car is the real backstop; this just keeps a malformed/hostile LAN request
-// in range (amps 0–80, percent 50–100, start_minutes 0–1439). `obj` may be null (no body) →
-// returns the clamped default.
+// in range (amps 0–48, percent 50–100, start_minutes 0–1439 — matching the controller's own
+// clamps in vehicle_ctrl.cpp). `obj` may be null (no body) → returns the clamped default.
 static int json_int_clamped(const cJSON* obj, const char* key, int dflt, int lo, int hi) {
     int v = dflt;
     const cJSON* j = cJSON_GetObjectItemCaseSensitive(obj, key);
@@ -217,7 +217,7 @@ static esp_err_t handle_command(httpd_req_t* req) {
     else if (strcmp(cmd, "auto_conditioning_start") == 0) ok = g_vehicle->climate_start();
     else if (strcmp(cmd, "auto_conditioning_stop")  == 0) ok = g_vehicle->climate_stop();
     else if (strcmp(cmd, "set_charging_amps") == 0) {
-        int amps = json_int_clamped(json, "charging_amps", 0, 0, 80);
+        int amps = json_int_clamped(json, "charging_amps", 0, 0, 48);
         ok = g_vehicle->set_charging_amps(amps);
     }
     else if (strcmp(cmd, "set_charge_limit")  == 0) {

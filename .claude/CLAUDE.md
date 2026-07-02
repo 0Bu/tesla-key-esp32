@@ -107,8 +107,9 @@ A rotating background poll (`loop_task_fn_`, one domain per ~30 s: climate → d
 closures) refreshes per-domain caches via `set_*_state_callback` in `vehicle_ctrl.cpp`. All
 polls are `NO_WAKE_SKIP` (never wake the car), feed the MQTT/HA bridge, and are **paused while
 a foreground command is in flight** (`cmd_in_flight_`). Exposed under `tele` in `/status`
-(`climate`/`drive`/`tires`/`closures`); numeric fields are emitted only when the car reported
-them (proto3 optional). **Full field list + Overheat/Defrost chip rules:
+(`climate`/`drive`/`tires`/`closures`; emitted only while the BLE link is up — the MQTT bridge
+reads the caches directly and is unaffected); numeric fields are emitted only when the car
+reported them (proto3 optional). **Full field list + Overheat/Defrost chip rules:
 [`docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md).**
 
 ## HTTP API

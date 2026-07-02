@@ -17,7 +17,8 @@ These background polls are **paused while a foreground evcc/manual command is in
 (`cmd_in_flight_`), so a command is never queued behind a slow/failing poll in the single
 BLE FIFO — keeps command latency low on an awake, busy link.
 
-Exposed under `tele` in `/status` (for the HA bridge and diagnostics; the device's web UI
+Exposed under `tele` in `/status`, emitted only while the BLE link is up — the MQTT bridge
+reads the caches directly, so it keeps publishing regardless (the device's web UI
 renders the Overheat / Defrost chips from `tele.climate` — each shown only when a live AC draw
 is available, i.e. while the car is awake and reporting; the car is never woken to populate
 them — but the rest of `tele` is HA/diagnostics-only): `climate` (inside/outside/setpoint °C, on, preconditioning, plus
