@@ -1,8 +1,9 @@
 #pragma once
 
 // Internal header for the HTTP server implementation files ONLY (http_server.cpp,
-// http_api.cpp, http_status.cpp, http_ota.cpp, http_config.cpp — split by route group;
-// see .claude/CLAUDE.md "Architecture"). The public API stays http_server.hpp.
+// http_api.cpp, http_status.cpp, http_ota.cpp, http_config.cpp, mcp_server.cpp — split
+// by route group; see .claude/CLAUDE.md "Architecture"). The public API stays
+// http_server.hpp.
 //
 // Memory-model invariant (CLAUDE.md): EVERY handler declared here is invoked exclusively
 // through handle_all's try/catch in http_server.cpp (503 on OOM). This is enforced
@@ -86,3 +87,7 @@ esp_err_t handle_send_key(GuardedReq rq);         // POST /send_key
 esp_err_t handle_set_time(GuardedReq rq);         // POST /set_time
 esp_err_t handle_set_vin(GuardedReq rq);          // POST /set_vin
 esp_err_t handle_set_mqtt(GuardedReq rq);         // POST /set_mqtt
+
+// mcp_server.cpp — MCP endpoint (Streamable HTTP, stateless JSON-RPC 2.0; docs/MCP.md)
+esp_err_t mcp_handle_post(GuardedReq rq);         // POST /mcp
+esp_err_t mcp_handle_get(GuardedReq rq);          // GET  /mcp → 405 (no SSE stream)

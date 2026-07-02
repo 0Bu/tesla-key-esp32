@@ -18,6 +18,8 @@
 #include "logic/units.hpp"
 #include "logic/link_state.hpp"
 #include "logic/target.hpp"
+#include "logic/mcp.hpp"
+#include "logic/command_result.hpp"
 
 #include <cmath>
 #include <cstdio>
@@ -174,12 +176,101 @@ static void test_target() {
     CHECK(base + tk::image_suffix(tk::Target::Esp32S3) + ".bin" == "tesla-key-esp32-s3.bin");
 }
 
+// ─── MCP endpoint core (version negotiation, routing, tool registry, clamp) ──────
+static void test_mcp() {
+    using MM = tk::McpMethod;
+
+    // Version negotiation: echo a supported revision; anything else (or absent) answers
+    // with our latest supported version, per the MCP lifecycle spec.
+    CHECK_STR(tk::mcp_negotiate_version("2025-06-18"), "2025-06-18");
+    CHECK_STR(tk::mcp_negotiate_version("2025-03-26"), "2025-03-26");
+    CHECK_STR(tk::mcp_negotiate_version("2024-11-05"), "2025-06-18");
+    CHECK_STR(tk::mcp_negotiate_version("bogus"),      "2025-06-18");
+    CHECK_STR(tk::mcp_negotiate_version(nullptr),      "2025-06-18");
+
+    // JSON-RPC method routing.
+    CHECK(tk::mcp_method_from("initialize") == MM::Initialize);
+    CHECK(tk::mcp_method_from("tools/list") == MM::ToolsList);
+    CHECK(tk::mcp_method_from("tools/call") == MM::ToolsCall);
+    CHECK(tk::mcp_method_from("ping")       == MM::Ping);
+    // Any notifications/* is a notification (202, no body) — never "method not found".
+    CHECK(tk::mcp_method_from("notifications/initialized") == MM::Notification);
+    CHECK(tk::mcp_method_from("notifications/cancelled")   == MM::Notification);
+    // Unimplemented capabilities and garbage stay Unknown (→ -32601).
+    CHECK(tk::mcp_method_from("resources/list") == MM::Unknown);
+    CHECK(tk::mcp_method_from("Initialize")     == MM::Unknown);  // case-sensitive
+    CHECK(tk::mcp_method_from(nullptr)          == MM::Unknown);
+
+    // Tool registry: every entry round-trips by name and by enum; role-refused commands
+    // (which the Charging-Manager key can't execute) are deliberately not tools.
+    for (const auto& t : tk::kMcpTools) {
+        CHECK(tk::mcp_tool_from(t.name) == t.tool);
+        CHECK(tk::mcp_tool_info(t.tool) == &t);
+    }
+    CHECK(tk::mcp_tool_from("door_unlock")     == tk::McpTool::Unknown);
+    CHECK(tk::mcp_tool_from("set_sentry_mode") == tk::McpTool::Unknown);
+    CHECK(tk::mcp_tool_from(nullptr)           == tk::McpTool::Unknown);
+    CHECK(tk::mcp_tool_info(tk::McpTool::Unknown) == nullptr);
+
+    // Arg-spec table — the single source of truth the advertised schema AND the executor
+    // clamp both read (schema-vs-clamp drift is impossible by construction; this pins the
+    // values themselves). Every non-None arg has a key and sane bounds; an absent
+    // OPTIONAL Int defaults to 0 in the executor, so an optional spec's range must
+    // contain 0.
+    for (const auto& t : tk::kMcpTools) {
+        for (const auto& a : t.args) {
+            if (a.type == tk::McpArgType::None) continue;
+            CHECK(a.key != nullptr);
+            if (a.type == tk::McpArgType::Int) {
+                CHECK(a.lo <= a.hi);
+                // Optional Int args default to 0 when absent — the spec range must
+                // contain 0 or the default would be out of the advertised bounds.
+                if (!a.required) CHECK(a.lo <= 0 && 0 <= a.hi);
+            }
+        }
+    }
+    const tk::McpToolInfo* amps = tk::mcp_tool_info(tk::McpTool::SetChargingAmps);
+    CHECK_STR(amps->args[0].key, "amps");
+    CHECK(amps->args[0].type == tk::McpArgType::Int && amps->args[0].required);
+    CHECK(amps->args[0].lo == 0 && amps->args[0].hi == 48);
+    const tk::McpToolInfo* lim = tk::mcp_tool_info(tk::McpTool::SetChargeLimit);
+    CHECK_STR(lim->args[0].key, "percent");
+    CHECK(lim->args[0].required && lim->args[0].lo == 50 && lim->args[0].hi == 100);
+    const tk::McpToolInfo* sched = tk::mcp_tool_info(tk::McpTool::SetScheduledCharging);
+    CHECK_STR(sched->args[0].key, "enable");
+    CHECK(sched->args[0].type == tk::McpArgType::Bool && sched->args[0].required);
+    CHECK_STR(sched->args[1].key, "start_minutes");
+    CHECK(sched->args[1].type == tk::McpArgType::Int && !sched->args[1].required);
+    CHECK(sched->args[1].lo == 0 && sched->args[1].hi == 1439);
+    // Read-only + no-arg tools carry no args.
+    CHECK(tk::mcp_tool_info(tk::McpTool::GetVehicleState)->args[0].type == tk::McpArgType::None);
+    CHECK(tk::mcp_tool_info(tk::McpTool::WakeUp)->args[0].type          == tk::McpArgType::None);
+
+    // Clamp: an out-of-range double must never reach the int cast (UB guard).
+    CHECK(tk::clamped_int(16.0,   0, 48)    == 16);
+    CHECK(tk::clamped_int(-5.0,   0, 48)    == 0);
+    CHECK(tk::clamped_int(1e300,  0, 48)    == 48);
+    CHECK(tk::clamped_int(-1e300, 50, 100)  == 50);
+    CHECK(tk::clamped_int(99.9,   50, 100)  == 99);
+    CHECK(tk::clamped_int(1440.0, 0, 1439)  == 1439);
+
+    // Command outcome text — shared by the REST /command reason and the MCP tools/call
+    // result, so both paths report identical outcomes.
+    const std::string tesla_reason = "complete";
+    const std::string no_reason;
+    CHECK_STR(tk::command_result_text(true,  no_reason),    "command executed successfully");
+    CHECK_STR(tk::command_result_text(true,  tesla_reason), "command executed successfully");
+    CHECK_STR(tk::command_result_text(false, tesla_reason), "complete");
+    CHECK_STR(tk::command_result_text(false, no_reason),    "vehicle not reachable");
+}
+
 int main() {
     test_vin();
     test_units();
     test_link_state();
     test_link_state_strings();
     test_target();
+    test_mcp();
 
     if (g_failures == 0) {
         std::printf("OK  %d checks passed\n", g_checks);

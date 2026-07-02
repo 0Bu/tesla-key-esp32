@@ -38,6 +38,8 @@ The firmware delegates these decision/conversion cores to IDF-free headers under
 | `link_state()` four-state machine + the debounced-ASLEEP asymmetry | `logic/link_state.hpp` | `VehicleController::link_state()` |
 | `/status` `link` + MQTT `sleep_status` strings | `logic/link_state.hpp` | `http_status.cpp`, `mqtt_ha.cpp` |
 | Per-target platform name + OTA image suffix | `logic/target.hpp` | `platform.hpp` (`TK_PLATFORM`), `ota_update.cpp` |
+| MCP protocol core (version negotiation, JSON-RPC method routing, tool/arg-spec registry, int clamp) | `logic/mcp.hpp` | `mcp_server.cpp` (`/mcp` schema + executor) |
+| Shared command-outcome text (success / Tesla reason / unreachable) | `logic/command_result.hpp` | `http_api.cpp` `/command` reason, `mcp_server.cpp` tools/call result |
 
 The target mapping is double-locked: `ota_update.cpp` `static_assert`s its compile-time
 image-suffix literal against `tk::image_suffix()`, so the macro and the host-tested

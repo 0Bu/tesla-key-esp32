@@ -260,3 +260,62 @@ that stops the device whitelisting its Charging-Manager key onto an arbitrary ne
 no longer depends on the `"UNKNOWN"` placeholder hashing to a name that happens never to
 collide (the placeholder is kept out of the matching path). The web UI already shows "Add the
 vehicle VIN below to begin." when no VIN is set, so it never implies pairing without one.
+
+## MCP endpoint (/mcp)
+
+`main/mcp_server.cpp` exposes the device to MCP (Model Context Protocol) clients — Claude
+Desktop/Code, VS Code, or any agent framework — over the existing `esp_http_server` on
+port 80, so an LLM agent can read state and drive charging without an extra proxy process.
+This section covers the firmware-internal design; the **user-facing integration guide**
+(wire examples, client configs, troubleshooting) is [`MCP.md`](MCP.md).
+
+**Transport — Streamable HTTP, stateless profile.** `POST /mcp` carries exactly one
+JSON-RPC 2.0 message and is answered with `application/json`:
+
+- No SSE stream and no server-initiated requests — `GET /mcp` returns `405` with
+  `Allow: POST`. A long-lived stream would pin one of the few httpd sockets and the
+  device has no server-push use case.
+- No `Mcp-Session-Id` — every request is self-contained; the `MCP-Protocol-Version`
+  header is ignored (nothing version-dependent happens after `initialize`).
+- Notifications (`notifications/*`) and stray client responses (a message without an
+  `id`) are acknowledged with `202 Accepted` and no body, per the transport spec. A
+  method-less, id-less message (`{}`) is NOT a notification — it gets `-32600` so a
+  broken client isn't left waiting for a reply that never comes.
+- JSON-RPC **batches are rejected** (`-32600`) — protocol `2025-06-18` removed them, and
+  the single-message parse keeps the heap cost bounded (2 KB body cap, same as the REST
+  endpoints).
+
+**Version negotiation** (`tk::mcp_negotiate_version`, `main/logic/mcp.hpp`): supported
+revisions are `2025-06-18` and `2025-03-26`; a request for anything else is answered with
+our latest supported revision, per the MCP lifecycle spec (the client disconnects if it
+can't proceed). **Methods:** `initialize` (capabilities: `tools` only), `ping`,
+`tools/list`, `tools/call`; everything else → `-32601`.
+
+**One spec table drives everything.** The tool registry in `logic/mcp.hpp` (`kMcpTools`)
+carries name, description AND each argument's key/type/required/bounds (`McpArg`,
+`kMcpMaxArgs`). The advertised `tools/list` JSON schema and the executor's validation are
+both generated from that table, so schema-vs-enforcement drift is impossible by
+construction: an absent required argument OR a present-but-unparseable one is a `-32602`
+protocol error (silently defaulting `set_scheduled_charging`'s `enable` would *disable*
+the schedule and report success); loose-but-unambiguous encodings are coerced (numeric
+strings for ints, 0/1 for bools); parsed integers are clamped to the spec bounds before
+the int cast (UB guard). The registry, method routing, version table, clamp and the
+shared command-outcome text (`logic/command_result.hpp`, also used by the REST
+`/command` reason so the two paths can never diverge) are IDF-free and covered by the
+host mock build (`test/test_logic.cpp`, `test_mcp`). The tool set itself — exactly the
+run-on-key charging commands plus cache-only `get_vehicle_state`, role-refused commands
+deliberately absent — is documented with the full per-tool table in
+[`MCP.md`](MCP.md#tools).
+
+**Heap safety:** `tools/list` is the endpoint's largest response (~1.5 KB serialized) and
+`cJSON_PrintUnformatted` builds it in one contiguous block — the crash-risk currency on
+this heap — so tool descriptions stay terse and the tool set small; the static registry
+strings are attached via `cJSON_CreateStringReference` (no per-request strdup of
+`.rodata`). The send path carries the same NULL-print → 503 guard as `send_json` (plus an
+envelope-OOM guard that frees the orphaned payload), and both handlers are dispatched
+inside `http_server.cpp`'s `handle_all` try/catch.
+
+**Security posture:** identical to the rest of the HTTP API — no auth, no TLS, trusted
+LAN only (see [`SECURITY.md`](SECURITY.md)). The endpoint grants nothing the open REST
+API doesn't already expose; the enrolled key stays Charging Manager only. Client
+configuration lives in [`MCP.md`](MCP.md#client-integration).
