@@ -1,7 +1,6 @@
 #pragma once
 
 #include <cstring>
-#include <string>
 
 // Pure, hardware-free core of the MCP endpoint (POST /mcp — see main/mcp_server.cpp):
 // protocol-version negotiation, JSON-RPC method routing, the tool registry, and the
@@ -74,7 +73,9 @@ enum class McpTool {
 // Argument specification — the SINGLE source of truth for each tool's parameters. The
 // advertised JSON schema (tool_schema_ in mcp_server.cpp), the executor's presence check
 // and clamp, and the host tests all read this table, so the advertised bounds and the
-// enforced bounds can never drift apart.
+// enforced bounds can never drift apart. An absent OPTIONAL Int arg defaults to 0; a
+// present-but-unparseable arg of either kind is a -32602 protocol error (never silently
+// defaulted — that would execute a wrong command and report success).
 enum class McpArgType { None, Int, Bool };
 
 struct McpArg {
@@ -82,16 +83,19 @@ struct McpArg {
     McpArgType  type;
     bool        required;
     int         lo, hi;   // Int only: inclusive clamp/schema bounds
-    int         dflt;     // Int only: value when an optional arg is absent
 };
 
-inline constexpr McpArg kNoArg{ nullptr, McpArgType::None, false, 0, 0, 0 };
+inline constexpr McpArg kNoArg{ nullptr, McpArgType::None, false, 0, 0 };
+
+// Maximum parameters per tool — sizes the spec array AND the executor's value arrays
+// (mcp_server.cpp), so widening it in one place widens the whole pipeline.
+inline constexpr int kMcpMaxArgs = 2;
 
 struct McpToolInfo {
     McpTool     tool;
     const char* name;
     const char* description;
-    McpArg      args[2];   // up to two parameters per tool; kNoArg-padded
+    McpArg      args[kMcpMaxArgs];   // kNoArg-padded
 };
 
 inline constexpr McpToolInfo kMcpTools[] = {
@@ -110,17 +114,26 @@ inline constexpr McpToolInfo kMcpTools[] = {
       { kNoArg, kNoArg } },
     { McpTool::SetChargingAmps,  "set_charging_amps",
       "Set the charging current in amps.",
-      { { "amps", McpArgType::Int, true, 0, 48, 0 }, kNoArg } },
+      { { "amps", McpArgType::Int, true, 0, 48 }, kNoArg } },
     { McpTool::SetChargeLimit,   "set_charge_limit",
       "Set the charge limit in percent.",
-      { { "percent", McpArgType::Int, true, 50, 100, 80 }, kNoArg } },
+      { { "percent", McpArgType::Int, true, 50, 100 }, kNoArg } },
     { McpTool::SetScheduledCharging, "set_scheduled_charging",
       "Enable/disable daily scheduled charging; start_minutes = minutes after local midnight.",
-      { { "enable",        McpArgType::Bool, true, 0, 0,    0 },
-        { "start_minutes", McpArgType::Int,  false, 0, 1439, 0 } } },
+      { { "enable",        McpArgType::Bool, true,  0, 0 },
+        { "start_minutes", McpArgType::Int,  false, 0, 1439 } } },
 };
 
-// Registry lookup by tool enum (for the executor after mcp_tool_from resolved the name).
+// Registry row by tool name — the executor's single lookup (enum is info->tool).
+inline const McpToolInfo* mcp_tool_info_from_name(const char* name) {
+    if (name) {
+        for (const auto& t : kMcpTools)
+            if (std::strcmp(name, t.name) == 0) return &t;
+    }
+    return nullptr;
+}
+
+// Registry row by enum (schema builder, tests).
 inline const McpToolInfo* mcp_tool_info(McpTool t) {
     for (const auto& ti : kMcpTools)
         if (ti.tool == t) return &ti;
@@ -128,11 +141,8 @@ inline const McpToolInfo* mcp_tool_info(McpTool t) {
 }
 
 inline McpTool mcp_tool_from(const char* name) {
-    if (name) {
-        for (const auto& t : kMcpTools)
-            if (std::strcmp(name, t.name) == 0) return t.tool;
-    }
-    return McpTool::Unknown;
+    const McpToolInfo* ti = mcp_tool_info_from_name(name);
+    return ti ? ti->tool : McpTool::Unknown;
 }
 
 // Clamp a JSON number to an int range BEFORE the int cast — casting an out-of-range
@@ -143,15 +153,6 @@ inline int clamped_int(double d, int lo, int hi) {
     if (d < (double)lo) return lo;
     if (d > (double)hi) return hi;
     return (int)d;
-}
-
-// Command-outcome text, shared verbatim by the MCP tools/call result and the REST
-// /command reason so the two paths can never report the same outcome differently:
-// success → fixed string; failure with a reply → the car's own reason; no reply →
-// "vehicle not reachable".
-inline const char* command_result_text(bool ok, const std::string& err) {
-    if (ok) return "command executed successfully";
-    return err.empty() ? "vehicle not reachable" : err.c_str();
 }
 
 }  // namespace tk

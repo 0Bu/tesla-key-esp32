@@ -292,18 +292,20 @@ can't proceed). **Methods:** `initialize` (capabilities: `tools` only), `ping`,
 `tools/list`, `tools/call`; everything else → `-32601`.
 
 **One spec table drives everything.** The tool registry in `logic/mcp.hpp` (`kMcpTools`)
-carries name, description AND each argument's key/type/required/bounds/default
-(`McpArg`). The advertised `tools/list` JSON schema and the executor's validation are
+carries name, description AND each argument's key/type/required/bounds (`McpArg`,
+`kMcpMaxArgs`). The advertised `tools/list` JSON schema and the executor's validation are
 both generated from that table, so schema-vs-enforcement drift is impossible by
-construction: a missing required argument is a `-32602` protocol error (silently
-defaulting `set_scheduled_charging`'s `enable` would *disable* the schedule and report
-success), present integers are clamped to the spec bounds before the int cast (UB
-guard). The registry, method routing, version table, clamp and the shared
-command-outcome text (`command_result_text`, also used by the REST `/command` reason so
-the two paths can never diverge) are IDF-free and covered by the host mock build
-(`test/test_logic.cpp`, `test_mcp`). The tool set itself — exactly the run-on-key
-charging commands plus cache-only `get_vehicle_state`, role-refused commands deliberately
-absent — is documented with the full per-tool table in [`MCP.md`](MCP.md#tools).
+construction: an absent required argument OR a present-but-unparseable one is a `-32602`
+protocol error (silently defaulting `set_scheduled_charging`'s `enable` would *disable*
+the schedule and report success); loose-but-unambiguous encodings are coerced (numeric
+strings for ints, 0/1 for bools); parsed integers are clamped to the spec bounds before
+the int cast (UB guard). The registry, method routing, version table, clamp and the
+shared command-outcome text (`logic/command_result.hpp`, also used by the REST
+`/command` reason so the two paths can never diverge) are IDF-free and covered by the
+host mock build (`test/test_logic.cpp`, `test_mcp`). The tool set itself — exactly the
+run-on-key charging commands plus cache-only `get_vehicle_state`, role-refused commands
+deliberately absent — is documented with the full per-tool table in
+[`MCP.md`](MCP.md#tools).
 
 **Heap safety:** `tools/list` is the endpoint's largest response (~1.5 KB serialized) and
 `cJSON_PrintUnformatted` builds it in one contiguous block — the crash-risk currency on

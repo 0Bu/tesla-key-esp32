@@ -1,5 +1,6 @@
 #include "http_handlers.hpp"
 #include "logic/mcp.hpp"
+#include "logic/command_result.hpp"
 #include "logic/link_state.hpp"
 #include <esp_log.h>
 #include <esp_app_desc.h>
@@ -199,38 +200,55 @@ static cJSON* vehicle_state_result_() {
 static esp_err_t handle_tools_call_(httpd_req_t* req, cJSON* id, const cJSON* params) {
     const cJSON* jname = cJSON_GetObjectItemCaseSensitive(params, "name");
     const char* name   = cJSON_IsString(jname) ? jname->valuestring : nullptr;
-    tk::McpTool tool   = tk::mcp_tool_from(name);
-    const tk::McpToolInfo* info = tk::mcp_tool_info(tool);
-    if (tool == tk::McpTool::Unknown || !info) {
+    const tk::McpToolInfo* info = tk::mcp_tool_info_from_name(name);
+    if (!info) {
         return send_rpc_error_(req, id, tk::kJsonRpcInvalidParams, "unknown tool");
     }
+    const tk::McpTool tool = info->tool;
     ESP_LOGI(TAG, "tools/call %s", name);
     const cJSON* args = cJSON_GetObjectItemCaseSensitive(params, "arguments");
 
-    // Validate + extract the arguments against the spec table (logic/mcp.hpp). A missing
-    // or wrong-typed REQUIRED argument is a protocol error (-32602) — silently defaulting
-    // it would execute the wrong command (e.g. set_scheduled_charging without "enable"
-    // would DISABLE the schedule and report success). Optional ints fall back to their
-    // spec default; present numbers are clamped to the spec bounds (UB guard).
-    int  ival[2] = { 0, 0 };
-    bool bval[2] = { false, false };
-    for (int i = 0; i < 2; ++i) {
+    // Validate + extract the arguments against the spec table (logic/mcp.hpp), keeping
+    // "absent" and "invalid" apart: an ABSENT required arg or a PRESENT-but-unparseable
+    // arg of either kind is a protocol error (-32602) — silently defaulting either would
+    // execute a wrong command and report success (set_scheduled_charging without
+    // "enable" would DISABLE the schedule; start_minutes:"08:00" would schedule
+    // midnight). Absent optional Int args default to 0. LLM clients routinely encode
+    // loosely, so numeric strings are accepted for Int args ("16" → 16) and 0/1 numbers
+    // for Bool args; parsed numbers are clamped to the spec bounds (UB guard).
+    int  ival[tk::kMcpMaxArgs] = {};
+    bool bval[tk::kMcpMaxArgs] = {};
+    for (int i = 0; i < tk::kMcpMaxArgs; ++i) {
         const tk::McpArg& a = info->args[i];
         if (a.type == tk::McpArgType::None) continue;
         const cJSON* j = cJSON_GetObjectItemCaseSensitive(args, a.key);
-        const bool typed_ok = (a.type == tk::McpArgType::Int) ? cJSON_IsNumber(j)
-                                                              : cJSON_IsBool(j);
-        if (!typed_ok) {
-            if (a.required) {
-                char m[64];
-                snprintf(m, sizeof(m), "missing required argument: %s", a.key);
-                return send_rpc_error_(req, id, tk::kJsonRpcInvalidParams, m);
+        const char* problem = nullptr;
+        if (!j) {
+            if (a.required) problem = "missing required argument";
+            // absent optional → keep the zero default
+        } else if (a.type == tk::McpArgType::Int) {
+            if (cJSON_IsNumber(j)) {
+                ival[i] = tk::clamped_int(j->valuedouble, a.lo, a.hi);
+            } else if (cJSON_IsString(j) && j->valuestring) {
+                char* end = nullptr;
+                double d = strtod(j->valuestring, &end);
+                if (end != j->valuestring && end && *end == '\0')
+                    ival[i] = tk::clamped_int(d, a.lo, a.hi);
+                else
+                    problem = "invalid argument";
+            } else {
+                problem = "invalid argument";
             }
-            ival[i] = a.dflt;
-            continue;
+        } else {  // Bool
+            if      (cJSON_IsBool(j))   bval[i] = cJSON_IsTrue(j);
+            else if (cJSON_IsNumber(j)) bval[i] = (j->valuedouble != 0);
+            else                        problem = "invalid argument";
         }
-        if (a.type == tk::McpArgType::Int) ival[i] = tk::clamped_int(j->valuedouble, a.lo, a.hi);
-        else                               bval[i] = cJSON_IsTrue(j);
+        if (problem) {
+            char m[64];
+            snprintf(m, sizeof(m), "%s: %s", problem, a.key);
+            return send_rpc_error_(req, id, tk::kJsonRpcInvalidParams, m);
+        }
     }
 
     if (tool == tk::McpTool::GetVehicleState) {
@@ -252,9 +270,9 @@ static esp_err_t handle_tools_call_(httpd_req_t* req, cJSON* id, const cJSON* pa
         default: break;  // GetVehicleState/Unknown handled above
     }
 
-    // Command outcome text is shared with the REST /command path (logic/mcp.hpp) so the
-    // two can never report the same outcome differently. Tool-level failures are isError
-    // results, not JSON-RPC errors (the protocol reserves those for malformed calls).
+    // Command outcome text is shared with the REST /command path (logic/command_result.hpp)
+    // so the two can never report the same outcome differently. Tool-level failures are
+    // isError results, not JSON-RPC errors (the protocol reserves those for malformed calls).
     std::string err = g_vehicle->last_command_error();
     const char* text = tk::command_result_text(ok, err);
     return send_rpc_result_(req, id, tool_result_(text, !ok));

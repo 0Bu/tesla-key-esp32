@@ -6,7 +6,7 @@
 // Dispatched from handle_all in http_server.cpp (inside its try/catch OOM guard).
 
 #include "http_handlers.hpp"
-#include "logic/mcp.hpp"   // tk::command_result_text — shared with the MCP tools/call path
+#include "logic/command_result.hpp"   // outcome text shared with the MCP tools/call path
 #include "platform.hpp"
 #include <esp_log.h>
 #include <esp_app_desc.h>

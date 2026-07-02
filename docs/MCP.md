@@ -34,7 +34,7 @@ The server implements the **Streamable HTTP transport in its stateless profile**
 | `GET /mcp` | `405 Method Not Allowed` (+ `Allow: POST`) — no server-initiated stream is offered |
 | Sessions | None. No `Mcp-Session-Id` header is issued or expected; every request is self-contained |
 | `MCP-Protocol-Version` header | Ignored (nothing version-dependent happens after `initialize`) |
-| Notifications (`notifications/*`, any message without `id`) | `202 Accepted`, empty body |
+| Notifications (`notifications/*` — any message with a `method` but no `id`) | `202 Accepted`, empty body. A message with neither `method` nor `id` (`{}`) is malformed, not a notification → `-32600` |
 | JSON-RPC batches (arrays) | Rejected with `-32600` (batching was removed in protocol `2025-06-18`) |
 | Protocol revisions | `2025-06-18` and `2025-03-26`. Requesting anything else returns the server's latest (`2025-06-18`); the client may then disconnect per the spec |
 
@@ -81,9 +81,12 @@ Notes that matter to a calling agent:
   the `isError` result comes back. Give your MCP client a request timeout of at least 30 s.
 - **Missing required arguments are rejected** with JSON-RPC `-32602`
   (`missing required argument: <key>`) — a call like `set_scheduled_charging` without
-  `enable` errors instead of guessing. **Out-of-range integers are clamped** server-side
-  to the bounds above (the schemas advertise the same bounds — both are generated from
-  one spec table, so they cannot drift).
+  `enable` errors instead of guessing. A **present but unparseable** argument (e.g.
+  `start_minutes: "08:00"`) is likewise `-32602` (`invalid argument: <key>`), never
+  silently defaulted. Loose-but-unambiguous encodings are accepted: numeric strings for
+  integers (`"16"` → 16) and `0`/`1` for booleans. **Out-of-range integers are clamped**
+  server-side to the bounds above (the schemas advertise the same bounds — both are
+  generated from one spec table, so they cannot drift).
 - **Failures are tool results, not protocol errors:** a refused or undeliverable command
   comes back as a normal `tools/call` result with `isError: true` and the reason as text —
   the real Tesla refusal (e.g. `complete` when the battery is already at its limit) when
@@ -121,6 +124,8 @@ curl -s http://tesla-key-esp32.local/mcp \
   "serverInfo":{"name":"tesla-key-esp32","version":"1.4.25"},
   "instructions":"BLE-to-HTTP bridge for one Tesla, paired as Charging Manager: charging commands and cached read-only state only. get_vehicle_state never wakes the car; commands block for the BLE round-trip — typically 3-5s after idle, up to 20s when the car is unreachable."}}
 ```
+
+(`serverInfo.version` is illustrative — the device reports its running firmware version.)
 
 The client then sends the initialized notification — answered with `202` and no body:
 
@@ -227,7 +232,7 @@ curl -si http://tesla-key-esp32.local/mcp | head -1
 | `-32700` | Body is not valid JSON, empty, or over the 2 KB cap |
 | `-32600` | Batch array or non-object body, a request whose `method` field is missing, or a `notifications/*` message that (wrongly) carries an `id` |
 | `-32601` | Method not implemented (`resources/*`, `prompts/*`, …) |
-| `-32602` | `tools/call` with an unknown tool name, or a missing/wrong-typed required argument (`missing required argument: <key>`) |
+| `-32602` | `tools/call` with an unknown tool name, an absent required argument (`missing required argument: <key>`), or a present-but-unparseable argument (`invalid argument: <key>`) |
 
 ---
 

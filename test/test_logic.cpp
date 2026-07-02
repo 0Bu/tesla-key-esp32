@@ -19,6 +19,7 @@
 #include "logic/link_state.hpp"
 #include "logic/target.hpp"
 #include "logic/mcp.hpp"
+#include "logic/command_result.hpp"
 
 #include <cmath>
 #include <cstdio>
@@ -213,15 +214,18 @@ static void test_mcp() {
 
     // Arg-spec table — the single source of truth the advertised schema AND the executor
     // clamp both read (schema-vs-clamp drift is impossible by construction; this pins the
-    // values themselves). Every non-None arg has a key; Int args have sane bounds with
-    // the default inside them.
+    // values themselves). Every non-None arg has a key and sane bounds; an absent
+    // OPTIONAL Int defaults to 0 in the executor, so an optional spec's range must
+    // contain 0.
     for (const auto& t : tk::kMcpTools) {
         for (const auto& a : t.args) {
             if (a.type == tk::McpArgType::None) continue;
             CHECK(a.key != nullptr);
             if (a.type == tk::McpArgType::Int) {
                 CHECK(a.lo <= a.hi);
-                CHECK(a.dflt >= a.lo && a.dflt <= a.hi);
+                // Optional Int args default to 0 when absent — the spec range must
+                // contain 0 or the default would be out of the advertised bounds.
+                if (!a.required) CHECK(a.lo <= 0 && 0 <= a.hi);
             }
         }
     }
