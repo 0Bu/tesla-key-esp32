@@ -57,7 +57,7 @@ regeneration (`/gen_keys`) and pairing (`/send_key`), BLE scan (`/scan`), VIN ch
 self-update / reboot trigger (`/ota/update`, see below). This is acceptable only because:
 
 - the enrolled key is **Charging Manager only** — it cannot unlock or drive the car, just
-  control charging and wake (see the role restriction in `vehicle_ctrl.cpp`); and
+  control charging and wake (see the role restriction in `vehicle_pairing.cpp`); and
 - the device is meant to live on a **trusted home LAN**, never exposed to the internet.
 
 If you need access control, put the device behind a reverse proxy with TLS + auth, or

@@ -4,7 +4,15 @@ idf_component_register(
         "ble_client.cpp"
         "nvs_storage.cpp"
         "vehicle_ctrl.cpp"
+        "vehicle_commands.cpp"
+        "vehicle_telemetry.cpp"
+        "vehicle_pairing.cpp"
         "http_server.cpp"
+        "http_common.cpp"
+        "http_api.cpp"
+        "http_status.cpp"
+        "http_ota.cpp"
+        "http_config.cpp"
         "provisioning.cpp"
         "diag_log.cpp"
         "ota_update.cpp"
@@ -35,18 +43,36 @@ idf_component_register(
         bootloader_support
 )
 
-# Pre-compress the web UI at build time. Browsers always accept gzip, so shipping the
-# page pre-gzipped (~13 KB vs 41 KB) cuts the bytes on the wire ~3× — the single biggest
-# lever for first-paint over a high-latency WiFi link. Regenerated on every build from the
-# source HTML, so the served page never goes stale (the UI changes with each flash/OTA).
-# The EMBED_FILES path above points at this generated artifact; the symbols are
-# _binary_index_html_gz_{start,end} (see handle_index in http_server.cpp).
+# Assemble + pre-compress the web UI at build time. The sources are split for edit
+# locality — www/index.html (markup with inline markers), www/style.css, www/app.js —
+# and inline_assets.cmake splices them back into the ONE self-contained page the device
+# serves (byte-identical to the former monolithic index.html). Browsers always accept
+# gzip, so shipping the page pre-gzipped (~13 KB vs 41 KB) cuts the bytes on the wire
+# ~3× — the single biggest lever for first-paint over a high-latency WiFi link.
+# Regenerated on every build from the source files, so the served page never goes stale
+# (the UI changes with each flash/OTA). The EMBED_FILES path above points at the final
+# artifact; the symbols are _binary_index_html_gz_{start,end} (see handle_index in
+# http_status.cpp).
+add_custom_command(
+    OUTPUT  "${CMAKE_CURRENT_BINARY_DIR}/index_inlined.html"
+    COMMAND ${CMAKE_COMMAND}
+            -DHTML=${CMAKE_CURRENT_SOURCE_DIR}/www/index.html
+            -DCSS=${CMAKE_CURRENT_SOURCE_DIR}/www/style.css
+            -DJS=${CMAKE_CURRENT_SOURCE_DIR}/www/app.js
+            -DOUT=${CMAKE_CURRENT_BINARY_DIR}/index_inlined.html
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/www/inline_assets.cmake
+    DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/www/index.html"
+            "${CMAKE_CURRENT_SOURCE_DIR}/www/style.css"
+            "${CMAKE_CURRENT_SOURCE_DIR}/www/app.js"
+            "${CMAKE_CURRENT_SOURCE_DIR}/www/inline_assets.cmake"
+    COMMENT "Inlining web UI assets (index.html + style.css + app.js)"
+    VERBATIM)
 add_custom_command(
     OUTPUT  "${CMAKE_CURRENT_BINARY_DIR}/index.html.gz"
-    COMMAND gzip -9 -n -c "${CMAKE_CURRENT_SOURCE_DIR}/www/index.html"
+    COMMAND gzip -9 -n -c "${CMAKE_CURRENT_BINARY_DIR}/index_inlined.html"
             > "${CMAKE_CURRENT_BINARY_DIR}/index.html.gz"
-    DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/www/index.html"
-    COMMENT "Gzipping web UI (index.html -> index.html.gz)"
+    DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/index_inlined.html"
+    COMMENT "Gzipping web UI (index_inlined.html -> index.html.gz)"
     VERBATIM)
 add_custom_target(gen_index_gz DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/index.html.gz")
 add_dependencies(${COMPONENT_LIB} gen_index_gz)

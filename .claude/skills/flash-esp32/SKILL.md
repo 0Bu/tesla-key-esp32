@@ -9,7 +9,8 @@ Builds the ESP-IDF project (in Docker) and flashes it to a connected **ESP32 boa
 (esp32 / esp32s3 / esp32c3 / esp32c6 — set `TARGET`, default esp32s3) over
 USB (from the host). NVS is left untouched, so the stored pairing, private key, VIN and
 WiFi survive the flash (no re-pair needed). Use this after editing anything under `main/` —
-including the embedded web UI (`main/www/index.html`), which is compiled into the app binary.
+including the embedded web UI (`main/www/` — `index.html` + `style.css` + `app.js`, spliced
+into one page at build time), which is compiled into the app binary.
 
 > This flashes over **USB**. For a remote, no-cable update use OTA (tap the firmware
 > version in the web UI). USB flashing requires physical access and the board plugged in.
