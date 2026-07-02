@@ -1,0 +1,74 @@
+#pragma once
+
+// Internal header for the HTTP server implementation files ONLY (http_server.cpp,
+// http_api.cpp, http_status.cpp, http_ota.cpp, http_config.cpp — split by route group;
+// see .claude/CLAUDE.md "Architecture"). The public API stays http_server.hpp.
+//
+// Memory-model invariant (CLAUDE.md): EVERY handler declared here is invoked exclusively
+// through handle_all's try/catch in http_server.cpp (503 on OOM) — never register one
+// directly with esp_http_server.
+
+#include "http_server.hpp"
+#include <esp_http_server.h>
+#include <cJSON.h>
+
+// Global vehicle reference (set once in http_server_start).
+extern VehicleController* g_vehicle;
+
+// Defined in main.cpp: true once SNTP has synced this boot. The browser /set_time
+// fallback only applies the client clock while this is false (NTP is authoritative).
+bool clock_synced_via_ntp();
+
+// Defined in main.cpp: true only while the STA holds an IP. Gate esp_wifi_sta_get_ap_info()
+// so it's never read during association churn (concurrent read of the half-built AP
+// record faults — LoadProhibited/EXCVADDR=0x1).
+bool wifi_is_connected();
+
+// ─── Shared helpers (http_common.cpp) ─────────────────────────────────────────
+
+// Serialize `root` (consumed) as the response with the given status. Degrades to a
+// 503 when cJSON_PrintUnformatted returns NULL on a fragmented heap (that path returns
+// NULL rather than throwing, so it bypasses the handle_all try/catch).
+esp_err_t send_json(httpd_req_t* req, int status, cJSON* root);
+
+cJSON* make_response(bool result, const char* command, const char* vin, const char* reason);
+
+// Read POST body into a string (caller must free). NULL on empty/oversized/failed read.
+char* read_body(httpd_req_t* req);
+
+// True only if query parameter `key` is present AND equals `want` exactly. Replaces
+// strstr(uri,"force=1")-style checks, which also fire on "force=10", "xforce=1", or the
+// same string buried in an unrelated parameter value — a real hazard for /gen_keys?force=1,
+// whose whole job is to gate the destructive key-overwrite that un-pairs the car.
+bool query_param_is(httpd_req_t* req, const char* key, const char* want);
+
+// True if a browser epoch (ms) is inside the floor..ceiling plausibility window
+// (floor ~2023-11, ceiling build year + 10). The clock gates OTA TLS certificate
+// validation, so an unauthenticated LAN client must not push it far in either direction.
+bool browser_time_plausible(double epoch_ms);
+
+// ─── Route handlers ───────────────────────────────────────────────────────────
+
+// http_api.cpp — evcc-facing TeslaBleHttpProxy-compatible API
+esp_err_t handle_command(httpd_req_t* req);          // POST /api/1/vehicles/{VIN}/command/{CMD}
+esp_err_t handle_vehicle_data(httpd_req_t* req);     // GET  /api/1/vehicles/{VIN}/vehicle_data
+esp_err_t handle_body_controller(httpd_req_t* req);  // GET  /api/1/vehicles/{VIN}/body_controller_state
+esp_err_t handle_version(httpd_req_t* req);          // GET  /api/proxy/1/version
+
+// http_status.cpp — web UI + device status/diagnostics
+esp_err_t handle_index(httpd_req_t* req);            // GET  /  (embedded, pre-gzipped web UI)
+esp_err_t handle_status(httpd_req_t* req);           // GET  /status
+esp_err_t handle_diag(httpd_req_t* req);             // GET  /diag
+esp_err_t handle_scan(httpd_req_t* req);             // POST /scan
+
+// http_ota.cpp — OTA self-update endpoints
+esp_err_t handle_ota_check(httpd_req_t* req);        // GET  /ota/check[?ms=<epoch>]
+esp_err_t handle_ota_update(httpd_req_t* req);       // POST /ota/update
+esp_err_t handle_ota_status(httpd_req_t* req);       // GET  /ota/status
+
+// http_config.cpp — setup / pairing / persisted-config endpoints
+esp_err_t handle_gen_keys(httpd_req_t* req);         // POST /gen_keys[?force=1]
+esp_err_t handle_send_key(httpd_req_t* req);         // POST /send_key
+esp_err_t handle_set_time(httpd_req_t* req);         // POST /set_time
+esp_err_t handle_set_vin(httpd_req_t* req);          // POST /set_vin
+esp_err_t handle_set_mqtt(httpd_req_t* req);         // POST /set_mqtt

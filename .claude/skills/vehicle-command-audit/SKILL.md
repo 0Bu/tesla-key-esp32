@@ -77,8 +77,10 @@ and `src/{vehicle.cpp, client.cpp, peer.cpp, message_builders.cpp, message_proce
 - **VIN→BLE-name / matching** → `include/vin_utils.h`, `src/vin_utils.cpp` (the firmware delegates here; it does **not** build the name itself).
 
 ### Local — the firmware + its four docs
-Code: `main/ble_client.{cpp,hpp}`, `main/vehicle_ctrl.{cpp,hpp}`, `main/http_server.cpp`,
-`main/mqtt_ha.cpp`, `main/ota_update.cpp`, `main/Kconfig.projbuild`, `partitions.csv`.
+Code: `main/ble_client.{cpp,hpp}`, `main/vehicle_ctrl.{cpp,hpp}` (+ `vehicle_commands.cpp`,
+`vehicle_telemetry.cpp`, `vehicle_pairing.cpp`), `main/http_server.cpp` (+ `http_api.cpp`,
+`http_status.cpp`, `http_ota.cpp`, `http_config.cpp`), `main/mqtt_ha.cpp`,
+`main/ota_update.cpp`, `main/Kconfig.projbuild`, `partitions.csv`.
 Docs to hold accountable: [`README.md`](../../../README.md),
 [`docs/README.md`](../../../docs/README.md), [`docs/SECURITY.md`](../../../docs/SECURITY.md),
 [`.claude/CLAUDE.md`](../../../.claude/CLAUDE.md).

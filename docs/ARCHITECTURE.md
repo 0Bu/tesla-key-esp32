@@ -11,7 +11,7 @@ telemetry, the MQTT bridge, WiFi/LAN connectivity, sleep/link-state, pairing, or
 
 A rotating background poll in `loop_task_fn_` (one domain per ~30 s cycle: climate →
 drive → tires → closures, full set ~120 s) refreshes per-domain caches via the
-`set_*_state_callback` hooks in `vehicle_ctrl.cpp`. All polls are `NO_WAKE_SKIP`
+`set_*_state_callback` hooks in `vehicle_telemetry.cpp`. All polls are `NO_WAKE_SKIP`
 (read-only, never wake the car) and feed the MQTT/HA bridge — evcc/pairing are unaffected.
 These background polls are **paused while a foreground evcc/manual command is in flight**
 (`cmd_in_flight_`), so a command is never queued behind a slow/failing poll in the single
@@ -228,7 +228,7 @@ seconds counter; only emitted once the wall clock is NTP-synced.
 
 The web UI keys everything (control buttons, SOC) off `paired` (= `has_session()`, the
 stored VCSEC session in NVS). Three events invalidate a pairing and force a clean re-pair
-so no stale data is shown (`clear_session_and_cache_()` in `vehicle_ctrl.cpp`):
+so no stale data is shown (`clear_session_and_cache_()` in `vehicle_pairing.cpp`):
 
 1. **Key deleted on the car side** — auto-detected three ways: (a) the **primary** detector,
    the `set_message_callback` observer in `vehicle_ctrl.cpp`, matches a signed-message fault

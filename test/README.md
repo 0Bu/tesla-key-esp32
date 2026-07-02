@@ -36,7 +36,7 @@ The firmware delegates these decision/conversion cores to IDF-free headers under
 | VIN plausibility (17-char, A–Z0–9 ∖ I/O/Q) | `logic/vin.hpp` | `VehicleController::vin_is_plausible`, `/set_vin`, pairing gate |
 | Imperial → metric (km, km/h, odometer) | `logic/units.hpp` | MQTT/HA bridge, drive-state telemetry |
 | `link_state()` four-state machine + the debounced-ASLEEP asymmetry | `logic/link_state.hpp` | `VehicleController::link_state()` |
-| `/status` `link` + MQTT `sleep_status` strings | `logic/link_state.hpp` | `http_server.cpp`, `mqtt_ha.cpp` |
+| `/status` `link` + MQTT `sleep_status` strings | `logic/link_state.hpp` | `http_status.cpp`, `mqtt_ha.cpp` |
 | Per-target platform name + OTA image suffix | `logic/target.hpp` | `platform.hpp` (`TK_PLATFORM`), `ota_update.cpp` |
 
 The target mapping is double-locked: `ota_update.cpp` `static_assert`s its compile-time

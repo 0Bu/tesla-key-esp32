@@ -214,7 +214,7 @@ public:
 
     const std::string& vin() const { return vin_; }
     // A plausible Tesla VIN is exactly 17 chars, uppercase alphanumeric with I/O/Q excluded
-    // (the VIN standard reserves them). Mirrors the client-side check in index.html and the
+    // (the VIN standard reserves them). Mirrors the client-side check in www/app.js and the
     // /set_vin validation. Pairing is gated on this: the device never connects/enrols on a
     // vehicle without a real configured VIN (the boot placeholder "UNKNOWN" is not plausible).
     static bool vin_is_plausible(const std::string& vin);
@@ -299,6 +299,11 @@ private:
     // Builder function type used by send_command_result
     using Builder = std::function<int(TeslaBLE::Client*, uint8_t*, size_t*)>;
     using ResultCb = TeslaBLE::Command::OperationResultCallback;
+
+    // Install the persistent set_*_state_callback hooks that keep the last_known_*
+    // caches fresh (charge + the read-only telemetry domains). Called once from init();
+    // lives in vehicle_telemetry.cpp next to the protobuf→struct parsers it uses.
+    void install_state_callbacks_();
 
     bool ensure_connected_(int timeout_ms = 10000);
 
