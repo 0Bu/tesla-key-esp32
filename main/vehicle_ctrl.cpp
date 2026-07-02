@@ -948,8 +948,8 @@ bool VehicleController::charge_stop(int timeout_ms) {
 
 bool VehicleController::set_charging_amps(int amps, int timeout_ms) {
     // Guard against garbage input. Lower bound 0; upper bound 48 A — the maximum any Tesla
-    // onboard charger accepts, deliberately ABOVE the docs' conservative "0–32" typical range
-    // so a legitimate high-current request (e.g. a 48 A-capable Model 3/Y) is never capped.
+    // onboard charger accepts (docs/README.md documents the same 0–48 range), so a legitimate
+    // high-current request (e.g. a 48 A-capable Model 3/Y) is never capped.
     // The car still enforces its own per-model maximum.
     if (amps < 0)  amps = 0;
     if (amps > 48) amps = 48;
