@@ -6,6 +6,7 @@
 // Dispatched from handle_all in http_server.cpp (inside its try/catch OOM guard).
 
 #include "http_handlers.hpp"
+#include "logic/mcp.hpp"   // tk::command_result_text — shared with the MCP tools/call path
 #include "platform.hpp"
 #include <esp_log.h>
 #include <esp_app_desc.h>
@@ -144,11 +145,11 @@ esp_err_t handle_command(GuardedReq rq) {
     cJSON_Delete(json);
     // On failure, distinguish "the car rejected it" (we got an error reply, e.g.
     // "complete") from "the car was unreachable" (no reply / timed out). The former
-    // carries the real Tesla reason; only the latter is an in-range problem.
+    // carries the real Tesla reason; only the latter is an in-range problem. The text
+    // selection is shared with the MCP tools/call result (logic/mcp.hpp) so the two
+    // paths can never report the same outcome differently.
     std::string err = g_vehicle->last_command_error();
-    const char* reason = ok ? "command executed successfully"
-                            : (!err.empty() ? err.c_str() : "vehicle not reachable");
-    return send_json(req, 200, make_response(ok, cmd, vin, reason));
+    return send_json(req, 200, make_response(ok, cmd, vin, tk::command_result_text(ok, err)));
 }
 
 // ─── GET /api/1/vehicles/{VIN}/vehicle_data ───────────────────────────────────

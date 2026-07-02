@@ -75,21 +75,27 @@ only misleads the calling model.
 
 Notes that matter to a calling agent:
 
-- **Command latency:** commands are synchronous. The first command after idle takes
-  **~3–5 s** (BLE scan + connect); subsequent ones on a warm link are fast. Give your MCP
-  client a request timeout of at least 30 s.
-- **Out-of-range integers are clamped** server-side to the bounds above (the schemas
-  advertise the same bounds, so a well-behaved client never triggers the clamp).
+- **Command latency:** commands are synchronous and block for the BLE round-trip. The
+  first command after idle typically takes **~3–5 s** (BLE scan + connect); an
+  unreachable car holds the request for the full command timeout (**up to 20 s**) before
+  the `isError` result comes back. Give your MCP client a request timeout of at least 30 s.
+- **Missing required arguments are rejected** with JSON-RPC `-32602`
+  (`missing required argument: <key>`) — a call like `set_scheduled_charging` without
+  `enable` errors instead of guessing. **Out-of-range integers are clamped** server-side
+  to the bounds above (the schemas advertise the same bounds — both are generated from
+  one spec table, so they cannot drift).
 - **Failures are tool results, not protocol errors:** a refused or undeliverable command
   comes back as a normal `tools/call` result with `isError: true` and the reason as text —
   the real Tesla refusal (e.g. `complete` when the battery is already at its limit) when
   the car answered, or `vehicle not reachable` when it didn't. JSON-RPC errors are
-  reserved for malformed requests (unknown tool/method, parse errors).
+  reserved for malformed requests (unknown tool/method, missing required args, parse
+  errors).
 - **`get_vehicle_state` is cache-fed.** Fields appear only when known: after a reboot
-  with the car asleep, expect just `vin`, `paired` and `link`. `link` is the same
-  four-state value the web UI hero uses (`awake` / `asleep` / `idle` / `unreachable` /
-  `unknown` — see [`ARCHITECTURE.md`](ARCHITECTURE.md#sleep--link-state-the-single-source-of-truth)),
-  `last_seen_s` is seconds since the last live contact.
+  with the car asleep, expect just `vin`, `paired` and `link`. `link` is the same value
+  the web UI hero uses — one of `awake` / `asleep` / `idle` / `unreachable`, plus
+  `unknown` before first contact (see
+  [`ARCHITECTURE.md`](ARCHITECTURE.md#sleep--link-state-the-single-source-of-truth)) —
+  and `last_seen_s` is seconds since the last live contact.
 
 ---
 
@@ -113,7 +119,7 @@ curl -s http://tesla-key-esp32.local/mcp \
   "protocolVersion":"2025-06-18",
   "capabilities":{"tools":{}},
   "serverInfo":{"name":"tesla-key-esp32","version":"1.4.25"},
-  "instructions":"BLE-to-HTTP bridge for one Tesla, paired as Charging Manager: charging commands and cached read-only state only. get_vehicle_state never wakes the car; commands may take ~5s (BLE scan+connect)."}}
+  "instructions":"BLE-to-HTTP bridge for one Tesla, paired as Charging Manager: charging commands and cached read-only state only. get_vehicle_state never wakes the car; commands block for the BLE round-trip — typically 3-5s after idle, up to 20s when the car is unreachable."}}
 ```
 
 The client then sends the initialized notification — answered with `202` and no body:
@@ -144,7 +150,7 @@ curl -s http://tesla-key-esp32.local/mcp \
   {"name":"wake_up","description":"Wake the vehicle over BLE.",
    "inputSchema":{"type":"object","properties":{}}},
   ...
-  {"name":"set_charging_amps","description":"Set the charging current in amps (0-48).",
+  {"name":"set_charging_amps","description":"Set the charging current in amps.",
    "inputSchema":{"type":"object",
      "properties":{"amps":{"type":"integer","minimum":0,"maximum":48}},
      "required":["amps"]}},
@@ -219,9 +225,9 @@ curl -si http://tesla-key-esp32.local/mcp | head -1
 | Code | Meaning here |
 |------|--------------|
 | `-32700` | Body is not valid JSON, empty, or over the 2 KB cap |
-| `-32600` | Batch array, or a request whose `method` field is missing |
+| `-32600` | Batch array or non-object body, a request whose `method` field is missing, or a `notifications/*` message that (wrongly) carries an `id` |
 | `-32601` | Method not implemented (`resources/*`, `prompts/*`, …) |
-| `-32602` | `tools/call` with an unknown tool name |
+| `-32602` | `tools/call` with an unknown tool name, or a missing/wrong-typed required argument (`missing required argument: <key>`) |
 
 ---
 

@@ -200,21 +200,64 @@ static void test_mcp() {
     CHECK(tk::mcp_method_from("Initialize")     == MM::Unknown);  // case-sensitive
     CHECK(tk::mcp_method_from(nullptr)          == MM::Unknown);
 
-    // Tool registry: every entry round-trips by name; role-refused commands (which the
-    // Charging-Manager key can't execute) are deliberately not tools.
-    for (const auto& t : tk::kMcpTools) CHECK(tk::mcp_tool_from(t.name) == t.tool);
-    CHECK(tk::mcp_tool_from("door_unlock")    == tk::McpTool::Unknown);
+    // Tool registry: every entry round-trips by name and by enum; role-refused commands
+    // (which the Charging-Manager key can't execute) are deliberately not tools.
+    for (const auto& t : tk::kMcpTools) {
+        CHECK(tk::mcp_tool_from(t.name) == t.tool);
+        CHECK(tk::mcp_tool_info(t.tool) == &t);
+    }
+    CHECK(tk::mcp_tool_from("door_unlock")     == tk::McpTool::Unknown);
     CHECK(tk::mcp_tool_from("set_sentry_mode") == tk::McpTool::Unknown);
     CHECK(tk::mcp_tool_from(nullptr)           == tk::McpTool::Unknown);
+    CHECK(tk::mcp_tool_info(tk::McpTool::Unknown) == nullptr);
 
-    // Clamp: an out-of-range double must never reach the int cast (UB), matching the
-    // bounds advertised in the tool schemas (amps 0–48, percent 50–100, minutes 0–1439).
+    // Arg-spec table — the single source of truth the advertised schema AND the executor
+    // clamp both read (schema-vs-clamp drift is impossible by construction; this pins the
+    // values themselves). Every non-None arg has a key; Int args have sane bounds with
+    // the default inside them.
+    for (const auto& t : tk::kMcpTools) {
+        for (const auto& a : t.args) {
+            if (a.type == tk::McpArgType::None) continue;
+            CHECK(a.key != nullptr);
+            if (a.type == tk::McpArgType::Int) {
+                CHECK(a.lo <= a.hi);
+                CHECK(a.dflt >= a.lo && a.dflt <= a.hi);
+            }
+        }
+    }
+    const tk::McpToolInfo* amps = tk::mcp_tool_info(tk::McpTool::SetChargingAmps);
+    CHECK_STR(amps->args[0].key, "amps");
+    CHECK(amps->args[0].type == tk::McpArgType::Int && amps->args[0].required);
+    CHECK(amps->args[0].lo == 0 && amps->args[0].hi == 48);
+    const tk::McpToolInfo* lim = tk::mcp_tool_info(tk::McpTool::SetChargeLimit);
+    CHECK_STR(lim->args[0].key, "percent");
+    CHECK(lim->args[0].required && lim->args[0].lo == 50 && lim->args[0].hi == 100);
+    const tk::McpToolInfo* sched = tk::mcp_tool_info(tk::McpTool::SetScheduledCharging);
+    CHECK_STR(sched->args[0].key, "enable");
+    CHECK(sched->args[0].type == tk::McpArgType::Bool && sched->args[0].required);
+    CHECK_STR(sched->args[1].key, "start_minutes");
+    CHECK(sched->args[1].type == tk::McpArgType::Int && !sched->args[1].required);
+    CHECK(sched->args[1].lo == 0 && sched->args[1].hi == 1439);
+    // Read-only + no-arg tools carry no args.
+    CHECK(tk::mcp_tool_info(tk::McpTool::GetVehicleState)->args[0].type == tk::McpArgType::None);
+    CHECK(tk::mcp_tool_info(tk::McpTool::WakeUp)->args[0].type          == tk::McpArgType::None);
+
+    // Clamp: an out-of-range double must never reach the int cast (UB guard).
     CHECK(tk::clamped_int(16.0,   0, 48)    == 16);
     CHECK(tk::clamped_int(-5.0,   0, 48)    == 0);
     CHECK(tk::clamped_int(1e300,  0, 48)    == 48);
     CHECK(tk::clamped_int(-1e300, 50, 100)  == 50);
     CHECK(tk::clamped_int(99.9,   50, 100)  == 99);
     CHECK(tk::clamped_int(1440.0, 0, 1439)  == 1439);
+
+    // Command outcome text — shared by the REST /command reason and the MCP tools/call
+    // result, so both paths report identical outcomes.
+    const std::string tesla_reason = "complete";
+    const std::string no_reason;
+    CHECK_STR(tk::command_result_text(true,  no_reason),    "command executed successfully");
+    CHECK_STR(tk::command_result_text(true,  tesla_reason), "command executed successfully");
+    CHECK_STR(tk::command_result_text(false, tesla_reason), "complete");
+    CHECK_STR(tk::command_result_text(false, no_reason),    "vehicle not reachable");
 }
 
 int main() {

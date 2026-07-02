@@ -3,6 +3,7 @@
 #include "logic/link_state.hpp"
 #include <esp_log.h>
 #include <esp_app_desc.h>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <string>
@@ -19,27 +20,34 @@
 
 static const char* TAG = "mcp_server";
 
-// Serialize + send a JSON-RPC envelope. Mirrors send_json (http_common.cpp): on a
-// fragmented heap cJSON_PrintUnformatted returns NULL (it does not throw), which would
-// bypass the handle_all try/catch — degrade to a 503 instead of strlen(NULL)-crashing
-// the httpd task.
+// Fixed 503 fallback for the paths a fragmented heap can starve: cJSON returns NULL on
+// alloc failure (it does not throw), so these bypass the handle_all try/catch. Mirrors
+// send_json's guard (http_common.cpp) — never strlen(NULL)-crash the httpd task.
+static esp_err_t send_oom_503_(httpd_req_t* req) {
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_status(req, "503 Service Unavailable");
+    return httpd_resp_sendstr(req, "{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":"
+                                   "{\"code\":-32603,\"message\":\"out of memory\"}}");
+}
+
+// Serialize + send a JSON-RPC envelope (consumes root).
 static esp_err_t send_rpc_(httpd_req_t* req, cJSON* root) {
     char* body = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
+    if (!body) return send_oom_503_(req);
     httpd_resp_set_type(req, "application/json");
-    if (!body) {
-        httpd_resp_set_status(req, "503 Service Unavailable");
-        return httpd_resp_sendstr(req, "{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":"
-                                       "{\"code\":-32603,\"message\":\"out of memory\"}}");
-    }
     esp_err_t ret = httpd_resp_sendstr(req, body);
     free(body);
     return ret;
 }
 
 // Envelope helpers. `id` is adopted (ownership transferred); pass nullptr for a null id.
+// On envelope-allocation failure the adopted payloads are freed here — under heap
+// pressure an orphaned tools/list tree would otherwise leak exactly when memory is
+// scarcest (cJSON_AddItemToObject on a NULL object adopts nothing).
 static cJSON* rpc_envelope_(cJSON* id) {
     cJSON* root = cJSON_CreateObject();
+    if (!root) { cJSON_Delete(id); return nullptr; }
     cJSON_AddStringToObject(root, "jsonrpc", "2.0");
     if (id) cJSON_AddItemToObject(root, "id", id);
     else    cJSON_AddNullToObject(root, "id");
@@ -48,12 +56,14 @@ static cJSON* rpc_envelope_(cJSON* id) {
 
 static esp_err_t send_rpc_result_(httpd_req_t* req, cJSON* id, cJSON* result) {
     cJSON* root = rpc_envelope_(id);
+    if (!root) { cJSON_Delete(result); return send_oom_503_(req); }
     cJSON_AddItemToObject(root, "result", result);
     return send_rpc_(req, root);
 }
 
 static esp_err_t send_rpc_error_(httpd_req_t* req, cJSON* id, int code, const char* message) {
     cJSON* root = rpc_envelope_(id);
+    if (!root) return send_oom_503_(req);
     cJSON* err  = cJSON_CreateObject();
     cJSON_AddNumberToObject(err, "code", code);
     cJSON_AddStringToObject(err, "message", message);
@@ -85,72 +95,57 @@ static esp_err_t handle_initialize_(httpd_req_t* req, cJSON* id, const cJSON* pa
     cJSON_AddStringToObject(result, "instructions",
         "BLE-to-HTTP bridge for one Tesla, paired as Charging Manager: charging commands "
         "and cached read-only state only. get_vehicle_state never wakes the car; commands "
-        "may take ~5s (BLE scan+connect).");
+        "block for the BLE round-trip — typically 3-5s after idle, up to 20s when the car "
+        "is unreachable.");
     return send_rpc_result_(req, id, result);
 }
 
 // ─── tools/list ───────────────────────────────────────────────────────────────
 
-// Build one tool's inputSchema. All schemas are tiny; the parameterized commands carry
-// the same bounds the executor clamps to, so a well-behaved client never sends an
-// out-of-range value in the first place.
-static cJSON* tool_schema_(tk::McpTool t) {
+// Build one tool's inputSchema from the arg-spec table in logic/mcp.hpp — the ONE place
+// bounds and required-ness live, so the advertised schema and the executor's checks can
+// never disagree.
+static cJSON* tool_schema_(const tk::McpToolInfo& info) {
     cJSON* schema = cJSON_CreateObject();
     cJSON_AddStringToObject(schema, "type", "object");
     cJSON* props = cJSON_CreateObject();
     cJSON_AddItemToObject(schema, "properties", props);
 
-    auto add_int = [&](const char* key, int lo, int hi) {
+    cJSON* reqd = nullptr;
+    for (const auto& a : info.args) {
+        if (a.type == tk::McpArgType::None) continue;
         cJSON* p = cJSON_CreateObject();
-        cJSON_AddStringToObject(p, "type", "integer");
-        cJSON_AddNumberToObject(p, "minimum", lo);
-        cJSON_AddNumberToObject(p, "maximum", hi);
-        cJSON_AddItemToObject(props, key, p);
-    };
-
-    switch (t) {
-        case tk::McpTool::SetChargingAmps: {
-            add_int("amps", 0, 48);
-            cJSON* reqd = cJSON_CreateArray();
-            cJSON_AddItemToArray(reqd, cJSON_CreateString("amps"));
-            cJSON_AddItemToObject(schema, "required", reqd);
-            break;
-        }
-        case tk::McpTool::SetChargeLimit: {
-            add_int("percent", 50, 100);
-            cJSON* reqd = cJSON_CreateArray();
-            cJSON_AddItemToArray(reqd, cJSON_CreateString("percent"));
-            cJSON_AddItemToObject(schema, "required", reqd);
-            break;
-        }
-        case tk::McpTool::SetScheduledCharging: {
-            cJSON* p = cJSON_CreateObject();
+        if (a.type == tk::McpArgType::Int) {
+            cJSON_AddStringToObject(p, "type", "integer");
+            cJSON_AddNumberToObject(p, "minimum", a.lo);
+            cJSON_AddNumberToObject(p, "maximum", a.hi);
+        } else {
             cJSON_AddStringToObject(p, "type", "boolean");
-            cJSON_AddItemToObject(props, "enable", p);
-            add_int("start_minutes", 0, 1439);
-            cJSON* reqd = cJSON_CreateArray();
-            cJSON_AddItemToArray(reqd, cJSON_CreateString("enable"));
-            cJSON_AddItemToObject(schema, "required", reqd);
-            break;
         }
-        default:  // no-arg tools keep the empty properties object
-            break;
+        cJSON_AddItemToObject(props, a.key, p);
+        if (a.required) {
+            if (!reqd) reqd = cJSON_CreateArray();
+            // Registry strings are immortal .rodata — reference them instead of strdup.
+            cJSON_AddItemToArray(reqd, cJSON_CreateStringReference(a.key));
+        }
     }
+    if (reqd) cJSON_AddItemToObject(schema, "required", reqd);
     return schema;
 }
 
-// tools/list is this endpoint's LARGEST response (~3 KB) and cJSON prints it into one
-// contiguous block — that is the crash-risk currency on this heap (see CLAUDE.md), so
-// tool descriptions in logic/mcp.hpp stay terse and the tool set stays small.
+// tools/list is this endpoint's LARGEST response (~1.5 KB serialized) and cJSON prints it
+// into one contiguous block — the crash-risk currency on this heap (see CLAUDE.md), so
+// tool descriptions in logic/mcp.hpp stay terse and the tool set stays small. The static
+// registry strings are attached as references (no per-request strdup of .rodata).
 static esp_err_t handle_tools_list_(httpd_req_t* req, cJSON* id) {
     cJSON* result = cJSON_CreateObject();
     cJSON* tools  = cJSON_CreateArray();
     cJSON_AddItemToObject(result, "tools", tools);
     for (const auto& t : tk::kMcpTools) {
         cJSON* tool = cJSON_CreateObject();
-        cJSON_AddStringToObject(tool, "name",        t.name);
-        cJSON_AddStringToObject(tool, "description", t.description);
-        cJSON_AddItemToObject(tool, "inputSchema", tool_schema_(t.tool));
+        cJSON_AddItemToObject(tool, "name",        cJSON_CreateStringReference(t.name));
+        cJSON_AddItemToObject(tool, "description", cJSON_CreateStringReference(t.description));
+        cJSON_AddItemToObject(tool, "inputSchema", tool_schema_(t));
         cJSON_AddItemToArray(tools, tool);
     }
     return send_rpc_result_(req, id, result);
@@ -205,28 +200,43 @@ static esp_err_t handle_tools_call_(httpd_req_t* req, cJSON* id, const cJSON* pa
     const cJSON* jname = cJSON_GetObjectItemCaseSensitive(params, "name");
     const char* name   = cJSON_IsString(jname) ? jname->valuestring : nullptr;
     tk::McpTool tool   = tk::mcp_tool_from(name);
-    if (tool == tk::McpTool::Unknown) {
+    const tk::McpToolInfo* info = tk::mcp_tool_info(tool);
+    if (tool == tk::McpTool::Unknown || !info) {
         return send_rpc_error_(req, id, tk::kJsonRpcInvalidParams, "unknown tool");
     }
+    ESP_LOGI(TAG, "tools/call %s", name);
     const cJSON* args = cJSON_GetObjectItemCaseSensitive(params, "arguments");
 
-    // Clamped integer argument (missing/non-numeric → clamped default). The car is the
-    // real backstop; this keeps a malformed value in range and out of UB (logic/mcp.hpp).
-    auto arg_int = [&](const char* key, int dflt, int lo, int hi) {
-        const cJSON* j = cJSON_GetObjectItemCaseSensitive(args, key);
-        double d = cJSON_IsNumber(j) ? j->valuedouble : (double)dflt;
-        return tk::clamped_int(d, lo, hi);
-    };
-    auto arg_bool = [&](const char* key) {
-        const cJSON* j = cJSON_GetObjectItemCaseSensitive(args, key);
-        return cJSON_IsTrue(j);
-    };
+    // Validate + extract the arguments against the spec table (logic/mcp.hpp). A missing
+    // or wrong-typed REQUIRED argument is a protocol error (-32602) — silently defaulting
+    // it would execute the wrong command (e.g. set_scheduled_charging without "enable"
+    // would DISABLE the schedule and report success). Optional ints fall back to their
+    // spec default; present numbers are clamped to the spec bounds (UB guard).
+    int  ival[2] = { 0, 0 };
+    bool bval[2] = { false, false };
+    for (int i = 0; i < 2; ++i) {
+        const tk::McpArg& a = info->args[i];
+        if (a.type == tk::McpArgType::None) continue;
+        const cJSON* j = cJSON_GetObjectItemCaseSensitive(args, a.key);
+        const bool typed_ok = (a.type == tk::McpArgType::Int) ? cJSON_IsNumber(j)
+                                                              : cJSON_IsBool(j);
+        if (!typed_ok) {
+            if (a.required) {
+                char m[64];
+                snprintf(m, sizeof(m), "missing required argument: %s", a.key);
+                return send_rpc_error_(req, id, tk::kJsonRpcInvalidParams, m);
+            }
+            ival[i] = a.dflt;
+            continue;
+        }
+        if (a.type == tk::McpArgType::Int) ival[i] = tk::clamped_int(j->valuedouble, a.lo, a.hi);
+        else                               bval[i] = cJSON_IsTrue(j);
+    }
 
     if (tool == tk::McpTool::GetVehicleState) {
         return send_rpc_result_(req, id, vehicle_state_result_());
     }
 
-    ESP_LOGI(TAG, "tools/call %s", name);
     bool ok = false;
     switch (tool) {
         case tk::McpTool::WakeUp:          ok = g_vehicle->wake_up();           break;
@@ -234,25 +244,19 @@ static esp_err_t handle_tools_call_(httpd_req_t* req, cJSON* id, const cJSON* pa
         case tk::McpTool::ChargeStop:      ok = g_vehicle->charge_stop();       break;
         case tk::McpTool::ChargePortOpen:  ok = g_vehicle->charge_port_open();  break;
         case tk::McpTool::ChargePortClose: ok = g_vehicle->charge_port_close(); break;
-        case tk::McpTool::SetChargingAmps:
-            ok = g_vehicle->set_charging_amps(arg_int("amps", 0, 0, 48));
-            break;
-        case tk::McpTool::SetChargeLimit:
-            ok = g_vehicle->set_charge_limit(arg_int("percent", 80, 50, 100));
-            break;
+        case tk::McpTool::SetChargingAmps: ok = g_vehicle->set_charging_amps(ival[0]); break;
+        case tk::McpTool::SetChargeLimit:  ok = g_vehicle->set_charge_limit(ival[0]);  break;
         case tk::McpTool::SetScheduledCharging:
-            ok = g_vehicle->set_scheduled_charging(arg_bool("enable"),
-                                                   arg_int("start_minutes", 0, 0, 1439));
+            ok = g_vehicle->set_scheduled_charging(bval[0], ival[1]);
             break;
         default: break;  // GetVehicleState/Unknown handled above
     }
 
-    // Same failure split as the REST path: a car-rejected command carries the real Tesla
-    // reason; no reply at all means unreachable. Tool-level failures are isError results,
-    // not JSON-RPC errors (the protocol reserves those for malformed calls).
+    // Command outcome text is shared with the REST /command path (logic/mcp.hpp) so the
+    // two can never report the same outcome differently. Tool-level failures are isError
+    // results, not JSON-RPC errors (the protocol reserves those for malformed calls).
     std::string err = g_vehicle->last_command_error();
-    const char* text = ok ? "command executed successfully"
-                          : (!err.empty() ? err.c_str() : "vehicle not reachable");
+    const char* text = tk::command_result_text(ok, err);
     return send_rpc_result_(req, id, tool_result_(text, !ok));
 }
 
@@ -267,10 +271,13 @@ esp_err_t mcp_handle_post(GuardedReq rq) {
     free(body);
 
     if (!msg) return send_rpc_error_(req, nullptr, tk::kJsonRpcParseError, "parse error");
-    if (cJSON_IsArray(msg)) {
+    if (!cJSON_IsObject(msg)) {
+        // Arrays are JSON-RPC batches (removed in protocol 2025-06-18); a bare scalar or
+        // string is simply not a request. Both are Invalid Request, not silent 202s.
+        const bool is_batch = cJSON_IsArray(msg);
         cJSON_Delete(msg);
         return send_rpc_error_(req, nullptr, tk::kJsonRpcInvalidRequest,
-                               "batching not supported");
+                               is_batch ? "batching not supported" : "invalid request");
     }
 
     // Detach the id so it can be adopted into the response envelope. A null id is
@@ -282,12 +289,16 @@ esp_err_t mcp_handle_post(GuardedReq rq) {
     const char* method = cJSON_IsString(jm) ? jm->valuestring : nullptr;
     tk::McpMethod m    = tk::mcp_method_from(method);
 
-    // No id ⇒ notification (notifications/initialized, notifications/cancelled, …) or a
-    // client response to a server request we never send — both are acknowledged with 202
-    // and no body per the Streamable HTTP transport.
+    // No id + a method ⇒ notification (notifications/initialized, …) or a client
+    // response to a server request we never send — acknowledged with 202 and no body per
+    // the Streamable HTTP transport. No id AND no method is not a notification, it's a
+    // malformed message (e.g. "{}") — flag it instead of leaving the client waiting.
     if (!id) {
+        const bool is_notification = (method != nullptr);
         cJSON_Delete(msg);
-        return send_accepted_(req);
+        return is_notification ? send_accepted_(req)
+                               : send_rpc_error_(req, nullptr, tk::kJsonRpcInvalidRequest,
+                                                 "missing method");
     }
 
     const cJSON* params = cJSON_GetObjectItemCaseSensitive(msg, "params");
@@ -305,6 +316,12 @@ esp_err_t mcp_handle_post(GuardedReq rq) {
             break;
         case tk::McpMethod::Ping:
             ret = send_rpc_result_(req, id, cJSON_CreateObject());
+            break;
+        case tk::McpMethod::Notification:
+            // A notifications/* method MUST NOT carry an id (MCP lifecycle). Answering
+            // "method not found" would wrongly imply the namespace is unsupported.
+            ret = send_rpc_error_(req, id, tk::kJsonRpcInvalidRequest,
+                                  "notification must not have an id");
             break;
         default:
             ret = send_rpc_error_(req, id, method ? tk::kJsonRpcMethodNotFound
