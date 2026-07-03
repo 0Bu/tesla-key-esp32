@@ -112,6 +112,11 @@ only edits the broker address.
 - The [web installer](https://0bu.github.io/tesla-key-esp32/) is only needed for the very first
   install (or to recover a device). It does a full erase, so WiFi/VIN/key are reset and you
   re-pair once; after that, use OTA.
+- **MCP endpoint:** AI agents (Claude Desktop/Code, VS Code, …) can talk to the device
+  directly via the [Model Context Protocol](https://modelcontextprotocol.io/) at
+  `http://<ESP32-IP>/mcp` (Streamable HTTP). The exposed tools mirror the charging command
+  set plus a read-only state tool that never wakes the car — same trusted-LAN-only caveat
+  as the rest of the API ([integration guide](docs/MCP.md)).
 
 ---
 
