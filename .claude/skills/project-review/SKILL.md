@@ -59,14 +59,14 @@ links yourself — that's where the value is.
 | Target identity | `main/platform.hpp` | `TK_PLATFORM` string per `CONFIG_IDF_TARGET_*`; must agree with `/api/proxy/1/version`, the HA device model, and esp-web-tools `chipFamily` |
 | BLE GATT client | `main/ble_client.{cpp,hpp}` | NimBLE central; scans Tesla UUID; RX notify → `on_rx_data` (runs on the **NimBLE host task**) |
 | Vehicle control | `main/vehicle_ctrl.{cpp,hpp}` + `vehicle_commands.cpp` + `vehicle_telemetry.cpp` + `vehicle_pairing.cpp` (+ `vehicle_ctrl_internal.hpp`) | one `VehicleController`, split by concern: core wiring/`link_state()` glue; command API; **loop_task** (active-window polling + sleep gating) + caches; pairing lifecycle/keys |
-| HTTP API | `main/http_server.{cpp,hpp}` + `http_api.cpp` + `http_status.cpp` + `http_ota.cpp` + `http_config.cpp` + `http_common.cpp` (+ `http_handlers.hpp`) | `esp_http_server` on :80; single catch-all `handle_all` dispatch (wrapped in try/catch) in `http_server.cpp`; handlers split by route group |
+| HTTP API | `main/http_server.{cpp,hpp}` + `http_api.cpp` + `http_status.cpp` + `http_ota.cpp` + `http_config.cpp` + `http_common.cpp` + `mcp_server.cpp` (+ `http_handlers.hpp`) | `esp_http_server` on :80; single catch-all `handle_all` dispatch (wrapped in try/catch) in `http_server.cpp`; handlers split by route group; `mcp_server.cpp` serves `/mcp` (stateless JSON-RPC 2.0 MCP server for AI agents — registry/spec in `logic/mcp.hpp`, guide in `docs/MCP.md`) |
 | HA bridge | `main/mqtt_ha.{cpp,hpp}` | read-only MQTT discovery publish; its own tasks |
 | Storage | `main/nvs_storage.{cpp,hpp}` | NVS adapter; **maps library keys ≤15 chars** |
 | Diag log | `main/diag_log.{cpp,hpp}` | in-RAM console ring (`GET /diag`); **static `.bss` buffer** (heap budget!) |
 | OTA | `main/ota_update.{cpp,hpp}` | pull-based self-update; dual-slot |
 | Provisioning | `main/provisioning.{cpp,hpp}` | captive setup portal when no WiFi |
 | Web UI | `main/www/` (`index.html` markup + `style.css` + `app.js`, spliced by `inline_assets.cmake`) | compiled into the app binary as ONE self-contained page; polls `/status` every 4 s |
-| Pure logic (host-tested) | `main/logic/*.hpp` (`vin`, `units`, `link_state`, `target`) + `test/test_logic.cpp` | **IDF-free** logic the device and the host test share: VIN validation, imperial→metric units, the `link_state()` four-state machine + its `/status`/MQTT strings, per-target platform/OTA-suffix map. Host-built + run by `scripts/run-mock-tests.sh` (CI `logic-test` gate) — the real local verification loop |
+| Pure logic (host-tested) | `main/logic/*.hpp` (`vin`, `units`, `link_state`, `target`, `mcp`, `command_result`) + `test/test_logic.cpp` | **IDF-free** logic the device and the host test share: VIN validation, imperial→metric units, the `link_state()` four-state machine + its `/status`/MQTT strings, per-target platform/OTA-suffix map, the MCP tool/arg-spec registry + JSON-RPC routing/version negotiation, and the shared command result-string mapping. Host-built + run by `scripts/run-mock-tests.sh` (CI `logic-test` gate) — the real local verification loop |
 | Library | `managed_components/yoziru__tesla-ble/` | **fetched, regenerated — NEVER edit** (pin in `main/idf_component.yml`) |
 
 ## Project invariants (the high-value checks)
@@ -187,6 +187,12 @@ that describe it. When reviewing a change (or the repo as a whole), check these 
   `.claude/CLAUDE.md` **and** `docs/README.md` **and** the web UI if user-facing.
 - **New command** → `handle_command` switch **and** the command list in `.claude/CLAUDE.md`
   **and** docs. (Note: vehicle-control *buttons* were deliberately removed from the web UI.)
+- **New MCP tool** → the `kMcpTools` arg-spec registry (`main/logic/mcp.hpp` — the ONE
+  source the advertised schema AND the executor validation are generated from) **and** the
+  executor switch in `main/mcp_server.cpp` **and** a `CHECK` in `test/test_logic.cpp`
+  (`test_mcp`) **and** the tool table in `docs/MCP.md` **and** the `/mcp` entry in
+  `.claude/CLAUDE.md`. (Tools mirror the run-on-key charging command set + read-only
+  `get_vehicle_state` — never expose a role-refused command.)
 - **New NVS key** → ≤15 chars **and** the namespace table in `.claude/CLAUDE.md`.
 - **New Kconfig option** → `main/Kconfig.projbuild` **and** any doc that references defaults
   **and** `sdkconfig.defaults` if a non-default value is required.

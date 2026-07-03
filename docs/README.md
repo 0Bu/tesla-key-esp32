@@ -205,7 +205,15 @@ POST /ota/update           Start the background self-update (downloads, then reb
 GET  /ota/status           Poll OTA progress { state, progress, message, available,
                              update_available, current }
 GET  /api/proxy/1/version  { version, platform } (firmware version + running chip: "ESP32"/"ESP32-S3"/"ESP32-C3"/"ESP32-C6")
+POST /mcp                  MCP server for AI agents (Streamable HTTP, stateless JSON-RPC 2.0;
+                             GET → 405, no SSE). Tools = charging command set + read-only
+                             get_vehicle_state (cache-only, never wakes the car) — full
+                             integration guide with wire + client examples: MCP.md
 ```
+
+> **MCP (AI agents):** the complete integration guide — transport details, tool
+> reference, curl wire examples, and ready-to-use client configs for Claude
+> Code/Desktop, VS Code and the Python SDK — lives in [`MCP.md`](MCP.md).
 
 ## evcc Integration
 

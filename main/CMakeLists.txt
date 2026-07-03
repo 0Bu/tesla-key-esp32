@@ -13,6 +13,7 @@ idf_component_register(
         "http_status.cpp"
         "http_ota.cpp"
         "http_config.cpp"
+        "mcp_server.cpp"
         "provisioning.cpp"
         "diag_log.cpp"
         "ota_update.cpp"

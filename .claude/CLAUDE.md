@@ -11,8 +11,8 @@ code, which is target-agnostic.
 > telemetry, the MQTT/HA bridge, WiFi/LAN reconnect, sleep/link-state, pairing and OTA lives in
 > [`docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md) — read it on demand when touching those
 > areas. User-facing docs: [`README.md`](../README.md), [`docs/README.md`](../docs/README.md),
-> [`docs/SECURITY.md`](../docs/SECURITY.md). Keep all of these in sync (the `project-review`
-> skill checks for drift).
+> [`docs/SECURITY.md`](../docs/SECURITY.md), [`docs/MCP.md`](../docs/MCP.md) (MCP integration
+> guide). Keep all of these in sync (the `project-review` skill checks for drift).
 
 ## Environment note (Claude Code on the web / remote sandbox)
 
@@ -34,9 +34,10 @@ scripts/run-mock-tests.sh   # compile + run host logic tests in seconds (cmake +
 ```
 
 It covers VIN validation, imperial→metric conversion, the `link_state()` four-state machine
-(incl. the debounced-ASLEEP asymmetry) and its `/status`/MQTT strings, and the per-target
-platform/OTA-suffix mapping — all delegated to IDF-free headers in `main/logic/` so the device
-runs the same code the test does. CI gates the firmware build on it (`logic-test` job). Add new
+(incl. the debounced-ASLEEP asymmetry) and its `/status`/MQTT strings, the per-target
+platform/OTA-suffix mapping, the MCP protocol core (version negotiation, method routing,
+tool/arg-spec registry, int clamp) and the shared command-outcome text — all delegated to
+IDF-free headers in `main/logic/` so the device runs the same code the test does. CI gates the firmware build on it (`logic-test` job). Add new
 hardware-free logic to `main/logic/` and a `CHECK` in `test/test_logic.cpp`. Full detail:
 [`test/README.md`](../test/README.md).
 
@@ -83,7 +84,11 @@ http_api.cpp           → evcc routes (/api/1/…, /api/proxy/1/version)
 http_status.cpp        → web UI (/), /status, /diag, /scan
 http_ota.cpp           → /ota/check|update|status
 http_config.cpp        → /gen_keys, /send_key, /set_time, /set_vin, /set_mqtt
+mcp_server.cpp         → /mcp — MCP server for AI agents (stateless JSON-RPC 2.0;
+                         core logic in logic/mcp.hpp, guide in docs/MCP.md)
                          (shared helpers: http_common.cpp; split map: http_handlers.hpp)
+diag_log.cpp           → in-RAM console ring served by GET /diag (static .bss buffer)
+provisioning.cpp       → captive setup portal (setup AP) when no WiFi is configured
 www/                   → web UI sources: index.html (markup) + style.css + app.js, spliced
                          into ONE self-contained page at build time (inline_assets.cmake,
                          byte-equivalent to the former monolith) and served pre-gzipped
@@ -135,6 +140,9 @@ GET  /api/1/vehicles/{VIN}/vehicle_data        # charge state
 GET  /api/1/vehicles/{VIN}/body_controller_state
 GET  /status                                   # web-UI JSON (wifi, ble, mqtt, vehicle cache, read-only telemetry under "tele")
 POST /scan                                     # start a time-limited BLE discovery scan
+POST /mcp                                      # MCP server (Streamable HTTP, stateless JSON-RPC 2.0; GET → 405, no SSE).
+                                               # Tools = the run-on-key charging command set + read-only get_vehicle_state
+                                               # (cache-only, never wakes the car). Core logic in main/logic/mcp.hpp (host-tested).
 GET  /diag                                     # plain-text in-memory diag log (?verbose=1 raw RX / ?verbose=0 off, ?clear=1 reset)
 POST /gen_keys[?force=1]                       # generate key (refuses overwrite w/o force)
 POST /send_key                                 # pair with vehicle (Charging Manager only)
