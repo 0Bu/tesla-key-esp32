@@ -33,7 +33,12 @@ RUN_COMMANDS=1 ALLOW_CHARGE_TOGGLE=1 TIMEOUT=25 bash scripts/e2e_evcc.sh
 RUN_COMMANDS=1 RUN_ALL_COMMANDS=1 TIMEOUT=25 bash scripts/e2e_evcc.sh
 ```
 
-Useful overrides (env vars; fall back to built-in defaults if unset — `ESP32_URL=http://192.168.1.194`, `VIN=LRW3E7FS4TC656735`): `ESP32_URL`, `VIN`, `EVCC_NS` (default `default`), `ITER` (vehicle_data burst size), `TIMEOUT` (per-request seconds). The test is **target-agnostic** — set `ESP32_URL`/`VIN` to point it at whichever esp32 / esp32s3 / esp32c3 / esp32c6 board you want to verify.
+The script does **not** hardcode any real device address or vehicle identifier — it learns them from the firmware itself (the single source of truth), so nothing private is committed to the repo:
+
+- **`ESP32_URL`** defaults to the device's mDNS name **`http://tesla-key-esp32.local`** (advertised by the firmware in `main.cpp`), resolvable from the evcc pod on the same LAN. Override it with the board's IP if mDNS isn't reachable in your cluster.
+- **`VIN`** is left unset by default and **auto-discovered from `GET $ESP32_URL/status`** (the `"vin"` field the firmware reports). Set `VIN=…` only to pin a specific value.
+
+Other overrides (env vars; fall back to the built-in defaults if unset): `EVCC_NS` (default `default`), `ITER` (vehicle_data burst size), `TIMEOUT` (per-request seconds). The test is **target-agnostic** — point `ESP32_URL` at whichever esp32 / esp32s3 / esp32c3 / esp32c6 board you want to verify and the VIN follows automatically from that board's `/status`.
 
 ## Before running the write path — ask first
 
