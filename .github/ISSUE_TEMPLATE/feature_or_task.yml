@@ -1,0 +1,63 @@
+name: Feature / task
+description: A change to implement — framed so Claude Code (or a human) can pick it up and know when it's done.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Describe the change as an actionable spec. Clear acceptance criteria ("done when…") let an implementer verify it, not just guess at intent.
+  - type: textarea
+    id: motivation
+    attributes:
+      label: Problem / motivation
+      description: What need does this address? What prompted it?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed change & acceptance criteria
+      description: What should change, and how do we know it's done?
+      placeholder: |
+        Change: ...
+        Done when:
+        - [ ] ...
+        - [ ] ...
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Affected area
+      description: Which component (from the architecture map in .claude/CLAUDE.md)?
+      options:
+        - BLE client / connection
+        - Vehicle commands (charge / wake / etc.)
+        - Read-only telemetry
+        - Pairing / key lifecycle / session
+        - HTTP server / evcc API
+        - MCP server (/mcp)
+        - OTA / self-update
+        - MQTT / Home Assistant bridge
+        - WiFi / provisioning (setup AP)
+        - Web UI (www/)
+        - Build / CI / logic tests
+        - Docs
+        - Other / not sure
+    validations:
+      required: true
+  - type: checkboxes
+    id: constraints
+    attributes:
+      label: Constraints to honour (repo invariants)
+      description: Tick the ones the implementer must respect. See .claude/CLAUDE.md.
+      options:
+        - label: Target-agnostic — must still build for all four chips (esp32 / esp32s3 / esp32c3 / esp32c6).
+        - label: Heap-safe — no new large *contiguous* allocations; HTTP handlers stay under the handle_all try/catch.
+        - label: Doc-sync — update .claude/CLAUDE.md and docs/ (ARCHITECTURE / SECURITY / MCP / README) where behavior changes.
+        - label: New hardware-free logic goes in main/logic/ with a CHECK in test/test_logic.cpp (add-logic-test skill).
+        - label: Verify via scripts/run-mock-tests.sh and /project-review before merge.
+  - type: markdown
+    attributes:
+      value: |
+        <sub>A cloud Claude Code session can edit/review and lean on CI, but cannot build or USB-flash locally.</sub>
