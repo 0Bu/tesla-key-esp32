@@ -1,0 +1,11 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Architecture & internals
+    url: https://github.com/0Bu/tesla-key-esp32/blob/main/docs/ARCHITECTURE.md
+    about: Telemetry, MQTT/HA bridge, sleep/link-state, pairing, OTA — read before filing a "how does X work?" issue.
+  - name: Security model
+    url: https://github.com/0Bu/tesla-key-esp32/blob/main/docs/SECURITY.md
+    about: Trusted-LAN design, key storage, OTA signing / key rotation.
+  - name: MCP integration guide
+    url: https://github.com/0Bu/tesla-key-esp32/blob/main/docs/MCP.md
+    about: Using the /mcp server from AI agents.

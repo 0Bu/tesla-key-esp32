@@ -1,0 +1,92 @@
+name: Bug report
+description: Something in the firmware misbehaves. Give enough for Claude Code (or a human) to reproduce and fix.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing a bug. Fill in what you can — the more concrete the repro, the faster it gets fixed.
+        Note: a cloud Claude Code session can edit and review code and rely on CI, but **cannot build or USB-flash** (no Docker daemon / no USB). Real builds/flashes run on a host with the board or in CI.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What's wrong, in a sentence or two.
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Affected area
+      description: Which component (from the architecture map in .claude/CLAUDE.md)?
+      options:
+        - BLE client / connection
+        - Vehicle commands (charge / wake / etc.)
+        - Read-only telemetry
+        - Pairing / key lifecycle / session
+        - HTTP server / evcc API
+        - MCP server (/mcp)
+        - OTA / self-update
+        - MQTT / Home Assistant bridge
+        - WiFi / provisioning (setup AP)
+        - Web UI (www/)
+        - Build / CI / logic tests
+        - Docs
+        - Other / not sure
+    validations:
+      required: true
+  - type: dropdown
+    id: targets
+    attributes:
+      label: Target chip(s) affected
+      options:
+        - All four (esp32 / esp32s3 / esp32c3 / esp32c6)
+        - esp32
+        - esp32s3
+        - esp32c3
+        - esp32c6
+        - Unknown
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Exact steps, curl commands, or UI actions. Include the VIN-less/VIN-set state if relevant.
+      placeholder: |
+        1. ...
+        2. curl -X POST http://<ip>/api/1/vehicles/<VIN>/command/wake_up
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected_actual
+    attributes:
+      label: Expected vs actual
+      placeholder: |
+        Expected: ...
+        Actual: ...
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Firmware version / platform
+      description: From GET /api/proxy/1/version (e.g. "1.2.3 / ESP32-S3").
+    validations:
+      required: false
+  - type: textarea
+    id: diag
+    attributes:
+      label: Relevant /diag or serial log
+      description: Paste an excerpt from GET /diag (or the serial monitor). Redact your VIN/SSID.
+      render: text
+    validations:
+      required: false
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched existing issues and this isn't a duplicate.
+          required: true
