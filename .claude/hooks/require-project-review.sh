@@ -26,17 +26,25 @@ input="$(cat 2>/dev/null)"
 tool="$(printf '%s' "$input" | jq -r '.tool_name // ""' 2>/dev/null)"
 cmd="$(printf '%s' "$input" | jq -r '.tool_input.command // ""' 2>/dev/null)"
 
-# Is this a gated merge? The MCP merge tool is gated unconditionally; a Bash call is
-# gated only when it actually runs `gh pr merge` (flexible whitespace; tolerant of
-# flags and of compound `... && gh pr merge ...` lines). Anything else (incl.
-# `git commit` and `gh pr create`) falls through and is allowed.
+# Is this a gated merge? The MCP merge tool is gated unconditionally. A Bash call is gated
+# only when it *invokes* `gh pr merge` at a command position — the command starts with
+# `gh pr merge`, optionally behind a leading `cd <dir> &&`/`cd <dir>;` prefix. The phrase
+# appearing merely as DATA (inside a commit message, a heredoc body, an echo/printf
+# argument) is NOT matched — that used to cause false-positive blocks on harmless commands.
+# Trade-off: a `gh pr merge` buried mid-compound-line (e.g. `foo && gh pr merge`) is not
+# caught by this Bash matcher; in the web/remote environment the reliable gate is the MCP
+# matcher above, and a local user can always touch the marker to bypass intentionally.
+# Anything else (incl. `git commit` and `gh pr create`) falls through and is allowed.
 action=""
 case "$tool" in
   mcp__github__merge_pull_request)
     action="merge_pull_request (GitHub MCP)"
     ;;
   Bash)
-    if printf '%s' "$cmd" | grep -Eq '(^|[^[:alnum:]_/.-])gh[[:space:]]+pr[[:space:]]+merge([[:space:]]|$)'; then
+    # Strip leading whitespace and an optional `cd <dir> &&`/`cd <dir>;` prefix, then
+    # require the remainder to START with `gh pr merge` (flexible whitespace, any flags).
+    norm="$(printf '%s' "$cmd" | sed -E 's/^[[:space:]]+//; s/^cd[[:space:]]+[^;&|]+(&&|;)[[:space:]]*//')"
+    if printf '%s' "$norm" | grep -Eq '^gh[[:space:]]+pr[[:space:]]+merge([[:space:]]|$)'; then
       action="gh pr merge"
     fi
     ;;
