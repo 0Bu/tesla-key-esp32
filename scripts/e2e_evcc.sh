@@ -19,7 +19,11 @@
 #                                       #   of the evcc path; for a full post-flash command smoke test.
 #
 # Overrides (env vars; fall back to the built-in defaults shown below if unset):
-#   ESP32_URL=http://192.168.1.194   VIN=LRW3E7FS4TC656735
+#   ESP32_URL=http://tesla-key-esp32.local   (the device's mDNS name — resolvable from the
+#                                             pod on the same LAN; override with the IP if mDNS
+#                                             isn't available in your cluster)
+#   VIN=<auto>                       (unset → discovered from GET $ESP32_URL/status .vin, so the
+#                                     real vehicle identifier never has to live in this repo)
 #   EVCC_NS=default                  ITER=15  (vehicle_data burst size)
 #   TIMEOUT=15                       (per-request seconds; evcc itself uses a short client timeout)
 #
@@ -30,8 +34,8 @@ ITER="${ITER:-15}"
 # clamp to >=1 so the pod-side vehicle_data loop never divides by zero (AVG=sum/N)
 [ "$ITER" -ge 1 ] 2>/dev/null || ITER=15
 TIMEOUT="${TIMEOUT:-15}"
-ESP32_URL="${ESP32_URL:-http://192.168.1.194}"
-VIN="${VIN:-LRW3E7FS4TC656735}"
+ESP32_URL="${ESP32_URL:-http://tesla-key-esp32.local}"
+VIN="${VIN:-}"   # empty → auto-discovered from the device's own /status below
 RUN_COMMANDS="${RUN_COMMANDS:-0}"
 ALLOW_CHARGE_TOGGLE="${ALLOW_CHARGE_TOGGLE:-0}"
 RUN_ALL_COMMANDS="${RUN_ALL_COMMANDS:-0}"
@@ -44,12 +48,22 @@ hdr()  { echo; echo "── $* ────────────────�
 POD="$(kubectl get pod -n "$EVCC_NS" -l app=evcc -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)"
 [ -z "$POD" ] && { echo "FATAL: no evcc pod found in ns/$EVCC_NS"; exit 2; }
 
+# kex CMD... — run a shell snippet inside the evcc pod (defined early so VIN discovery below
+# runs over the same real pod→LAN→ESP32 path the rest of the test uses).
+kex() { kubectl exec -n "$EVCC_NS" "$POD" -- sh -c "$1"; }
+
+# Discover the VIN from the device itself unless the caller pinned one. The firmware is the
+# single source of truth (GET /status → "vin"), so no real vehicle identifier has to be
+# committed to this repo — the test learns it from whichever board ESP32_URL points at.
+if [ -z "$VIN" ]; then
+  VIN="$(kex "wget -qO- --timeout=$TIMEOUT '$ESP32_URL/status' 2>/dev/null" | sed -n 's/.*"vin":"\([^"]*\)".*/\1/p')"
+  [ -n "$VIN" ] && echo "VIN      : discovered $VIN from $ESP32_URL/status" \
+                || { echo "FATAL: could not read VIN from $ESP32_URL/status — set VIN=… or check the device is reachable from the pod"; exit 2; }
+fi
+
 echo "evcc pod : $EVCC_NS/$POD"
 echo "target   : $ESP32_URL  VIN=$VIN"
 echo "mode     : reads$( [ "$RUN_COMMANDS" = 1 ] && echo ' + commands' )$( [ "$ALLOW_CHARGE_TOGGLE" = 1 ] && echo ' + charge-toggle' )$( [ "$RUN_ALL_COMMANDS" = 1 ] && echo ' + all-commands' )"
-
-# kex CMD... — run a shell snippet inside the evcc pod
-kex() { kubectl exec -n "$EVCC_NS" "$POD" -- sh -c "$1"; }
 
 # get URL  → prints body; timed_get URL → prints "<ms> <body>"
 ESC_BASE="$ESP32_URL"; ESC_VIN="$VIN"
@@ -230,7 +244,9 @@ fi
 
 # ── 5. evcc's own recent view of this vehicle ───────────────────────────────
 hdr "5. evcc logs — recent Tesla errors/timeouts (last 30m)"
-ERRS="$(kubectl logs -n "$EVCC_NS" "$POD" --since=30m 2>/dev/null | grep -iE "$ESC_VIN|192.168.1.194|tesla" | grep -iE "timeout|deadline|canceled|refused|i/o" | tail -10)"
+# match on the VIN, the device host (from ESP32_URL, minus scheme/port/path), or "tesla"
+ESP32_HOST="${ESP32_URL#*://}"; ESP32_HOST="${ESP32_HOST%%[:/]*}"
+ERRS="$(kubectl logs -n "$EVCC_NS" "$POD" --since=30m 2>/dev/null | grep -iE "$ESC_VIN|$ESP32_HOST|tesla" | grep -iE "timeout|deadline|canceled|refused|i/o" | tail -10)"
 if [ -z "$ERRS" ]; then ok "no Tesla timeout/error log lines in the last 30m"; else
   bad "evcc reported Tesla errors:"; echo "$ERRS" | sed 's/^/      /'
 fi
