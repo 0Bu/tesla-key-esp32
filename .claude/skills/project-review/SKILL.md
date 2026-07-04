@@ -42,11 +42,17 @@ Work in this order — it's what makes the review catch *drift* rather than just
    — these are listed below and are the easiest things to silently break.
 5. **Verify before you assert** (see *Verification discipline*). Separate confirmed bugs
    from hypotheses. Do not over-claim.
-6. **Audit the skills against the project** (see *Reviewing the skills*). The skills (this one
-   **and** every sibling under `.claude/skills/`) are part of what drifts — confirm each still
-   maps the project that exists before you trust it, and report any gap as a `SKILL-DRIFT`
-   finding (correcting the skill in the same pass).
+6. **Audit the review tooling against the project** (see *Reviewing the skills*). The skills
+   (this one **and** every sibling under `.claude/skills/`) **and** the review subagents under
+   `.claude/agents/` are part of what drifts — confirm each still maps the project that exists
+   before you trust it, and report any gap as a `SKILL-DRIFT` finding (correcting it in the same
+   pass).
 7. **Write the report** in the structure at the end.
+8. **Record the pass so the merge gate clears.** A clean review (no *blocking* findings) must
+   `touch .claude/.project-review-passed` — the `require-project-review.sh` PreToolUse hook
+   refuses every PR merge (`gh pr merge` **and** `mcp__github__merge_pull_request`) until that
+   marker is newer than every source file. Any later edit re-stales it, forcing a fresh review
+   before the next merge. Don't touch it if findings block the merge — fix them first.
 
 Use parallel reads/`Explore` to cover the tree quickly, but reason about the cross-cutting
 links yourself — that's where the value is.
@@ -229,12 +235,19 @@ that describe it. When reviewing a change (or the repo as a whole), check these 
 
 ## Reviewing the skills (meta-coherence)
 
-The skills under `.claude/skills/` are themselves documents that drift — each lags the code by
-exactly the changes landed since it was last touched. A review is **not complete** until you
-have checked that **every** skill still describes the project that exists; otherwise future
-runs inherit a stale map. Treat a gap as a real finding (`SKILL-DRIFT`), reported alongside the
-code/doc ones, and propose the specific `SKILL.md` edits in the same report (correct the map in
-the pass that found the drift).
+The skills under `.claude/skills/` **and the review subagents under `.claude/agents/`** are
+themselves documents that drift — each lags the code by exactly the changes landed since it was
+last touched. A review is **not complete** until you have checked that **every** skill and
+**every** agent still describes the project that exists; otherwise future runs inherit a stale
+map. Treat a gap as a real finding (`SKILL-DRIFT`), reported alongside the code/doc ones, and
+propose the specific edits in the same report (correct the map in the pass that found the drift).
+
+The agents matter here for a second reason: two of them **duplicate content this skill owns**,
+so they are cross-cutting sinks like any other. `doc-drift-checker` restates this skill's
+*cross-cutting "add X → also update Y" list* and `heap-safety-reviewer` restates the *heap /
+contiguous-block invariant* — touch either here and the matching agent must move too, or the
+project ends up with two review maps that disagree. That drift is exactly what a coherence
+review exists to catch, so hold the agents to it.
 
 ### Termination — the audit converges, it does not loop
 
@@ -285,10 +298,11 @@ Run these checks against the current tree:
 ### The other skills (audit and correct each)
 
 The same drift hits the sibling skills. **Discover them, don't hardcode the list:**
-`ls .claude/skills/*/SKILL.md`. For each, the test is the same — does its `description` +
-steps + concrete numbers (offsets, counts, flags, paths, target set) still match the script,
-code, and config it drives? Correct a stale one in place (same kind of fix as any doc) and
-report it as `SKILL-DRIFT`. The current siblings and what each must stay true to:
+`ls .claude/skills/*/SKILL.md` (skills) **and** `ls .claude/agents/*.md` (subagents). For each,
+the test is the same — does its `description` + steps + concrete numbers (offsets, counts, flags,
+paths, target set) still match the script, code, and config it drives? Correct a stale one in
+place (same kind of fix as any doc) and report it as `SKILL-DRIFT`. The current siblings and
+what each must stay true to:
 
 - **`flash-esp32`** wraps the build + USB-flash path. Re-verify against `scripts/idf-docker.sh`
   (Docker-pinned, no local IDF), `partitions.csv` (offsets `nvs@0x9000`, `otadata@0xf000`,
@@ -311,10 +325,28 @@ report it as `SKILL-DRIFT`. The current siblings and what each must stay true to
   (`.claude/settings.json`), the `CHECK`/`CHECK_STR`/`CHECK_NEAR` macro set in
   `test/test_logic.cpp`, and the `static_assert` lock pattern (`main/ota_update.cpp` /
   `main/logic/target.hpp`).
-- **Any skill added since this was written** must be audited too — and added to this list.
+The review subagents under `.claude/agents/` — audit these the same way (they are the targeted
+lenses this skill delegates to; keep them complementary, not contradictory):
 
-A skill that drives a script is only as current as the script: when the script changes,
-re-read the skill that documents it.
+- **`doc-drift-checker`** is the fast targeted-diff lens for the *cross-cutting* links. Its
+  "add X → also update Y" enumeration must stay a subset of — and agree with — the *Cross-cutting
+  consistency* section above; a link added here that it lacks (or a stale one it still lists) is
+  `SKILL-DRIFT`.
+- **`heap-safety-reviewer`** is the allocation/throw lens. Re-verify its numbers and rules
+  against the *Memory / heap* invariant above (largest **contiguous** block is the binding limit,
+  `handle_all` try/catch → 503, streamed `/diag`) and against `main.cpp`'s heap-attribution log —
+  the two heap maps must not diverge.
+- **`claude-code-optimizer`** audits the `.claude/` setup (CLAUDE.md, `settings.json`
+  permissions + hooks, skills, subagents), **not** firmware logic. Confirm its boundary still
+  points firmware-correctness work back at this skill, and that the hook/skill/agent inventory it
+  reasons over matches what actually lives under `.claude/` (`ls .claude/hooks/ .claude/agents/`).
+- **Any skill or agent added since this was written** must be audited too — and added to this list.
+
+A skill or agent that drives a script is only as current as the script: when the script changes,
+re-read the doc that documents it. The hooks under `.claude/hooks/` (`require-project-review.sh`
+gate, `run-logic-tests.sh` Stop hook, `report-capabilities.sh`/`build-efficiency-check.sh`
+SessionStart, `clang-format-edit.sh` PostToolUse) are wired in `.claude/settings.json`; a hook
+whose behaviour a skill/agent describes must match the script that actually runs.
 
 ## Verification discipline (avoid confident-but-wrong findings)
 
