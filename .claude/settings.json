@@ -55,6 +55,11 @@
             "type": "command",
             "command": "bash \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/require-project-review.sh\"",
             "statusMessage": "Checking project-review gate…"
+          },
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/require-skill-audit.sh\"",
+            "statusMessage": "Checking skill-audit gate…"
           }
         ]
       },
@@ -65,6 +70,11 @@
             "type": "command",
             "command": "bash \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/require-project-review.sh\"",
             "statusMessage": "Checking project-review gate…"
+          },
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/require-skill-audit.sh\"",
+            "statusMessage": "Checking skill-audit gate…"
           }
         ]
       }
