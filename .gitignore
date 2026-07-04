@@ -37,6 +37,9 @@ __pycache__/
 # Project-review gate marker (per-tree, transient — never commit)
 .claude/.project-review-passed
 
+# Skill-audit gate marker (per-tree, transient — never commit)
+.claude/.skill-audit-passed
+
 # Logic-tests Stop-gate marker (per-tree, transient — never commit)
 .claude/.logic-tests-blocked
 
