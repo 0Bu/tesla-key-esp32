@@ -31,7 +31,7 @@
 # Usage:
 #   scripts/capture_wake.py [ESP32_URL]
 #   scripts/capture_wake.py http://tesla-key.local
-#   scripts/capture_wake.py http://192.168.1.194 --wake          # also fire one wake_up itself
+#   scripts/capture_wake.py http://tesla-key-esp32.local --wake  # also fire one wake_up itself
 #   scripts/capture_wake.py --interval 0.5 --duration 120        # faster poll, auto-stop after 2 min
 #
 # Then tap "Wake" in the web UI (or pass --wake) and watch. Ctrl-C to stop; the tool
@@ -122,7 +122,7 @@ def main():
         st = json.loads(http_get(base + "/status"))
     except (urllib.error.URLError, OSError, ValueError) as e:
         print(f"ERROR: cannot reach {base}/status — {e}", file=sys.stderr)
-        print("Pass the device URL/IP, e.g.:  scripts/capture_wake.py http://192.168.1.194", file=sys.stderr)
+        print("Pass the device URL/IP, e.g.:  scripts/capture_wake.py http://tesla-key-esp32.local", file=sys.stderr)
         return 2
     vin = st.get("vin", "")
     link = st.get("link", "?")
