@@ -38,7 +38,9 @@ cat <<EOF
 - esptool: ${esptool_state} | jq: ${jq_state}
 - ${build_note}
 - ${flash_note}
-- The project-review gate blocks PR merges until /project-review passes for the current tree.
+- Two merge gates block PR merges until they pass for the current tree: /project-review
+  (whole-firmware coherence) and /skill-audit (every skill+agent still matches the project).
+  A full /project-review also clears the skill-audit gate (it audits the skills too).
 EOF
 
 exit 0
