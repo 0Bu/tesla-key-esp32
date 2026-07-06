@@ -113,16 +113,20 @@ grouped under one device. **Read-only by design** — no command topics are subs
   configs under `<prefix>/<sensor|binary_sensor>/<node>/<object>/config` (retained).
 - **Entities:** charge (soc, charge_limit, power, amps, range **km**, rate **km/h**,
   charging_state, plus extended read-only enrichment: actual_current/current_request **A**
-  (delivered vs requested), charger phases, energy_added **kWh** session, minutes_to_full,
+  (delivered vs requested), volts **V** at the charger, charger phases, energy_added **kWh**
+  session, minutes_to_full,
   charge limit_reason — HA bridge only, never on the `/api` evcc path), climate
   (inside/outside/setpoint °C, on, preconditioning, plus Cabin-Overheat-Protection
   cop/cop_cooling/cop_temp/cop_reason and defrost front_defrost/rear_defrost/defrost_mode),
   drive (shift,
   odometer km), tires (fl/fr/rl/rr bar + warn), closures (locked/door/frunk/trunk/window/
   occupant), sleep_state, and device diagnostics (wifi/ble RSSI, ble_link, paired, **last
-  boot** (boot-time timestamp), free_heap, firmware). Numeric fields are emitted only when
+  boot** (boot-time timestamp), free_heap, firmware). Numeric fields — and the single
+  booleans on/preconditioning/cop_cooling/defrost/locked/occupant — are emitted only when
   the car reported them (proto3 optional), so an unseen value reads "unknown" in HA rather
-  than a phantom 0. **Units:** Tesla reports range/rate/odometer imperial; the MQTT bridge
+  than a phantom 0. The aggregates warn and door/frunk/trunk/window fold several per-wheel/
+  per-opening booleans with present-AND-true semantics (an unreported part counts as
+  no-warning/closed by design). **Units:** Tesla reports range/rate/odometer imperial; the MQTT bridge
   converts to metric (km, km/h) — only the Tesla-compatible `/api` path keeps miles (evcc).
 - **Publishing:** a dedicated `mqtt_pub` task reads the thread-safe caches; on every
   (re)connect it (re)sends discovery + `online` + an immediate snapshot, then republishes
@@ -180,7 +184,9 @@ can't trip it), `IDLE` (reachable over BLE but **not provably asleep** — we st
 the infotainment domain to let the car sleep and the VCSEC flag hasn't confirmed; we honestly
 don't know, so we never claim sleep), and `UNREACHABLE` (the car answers *nothing* over BLE ⇒
 driven off / out of range / deep sleep). Nothing heard since boot/re-pair ⇒ omitted so HA
-shows "unknown". **Asymmetry (important):** `link_state()` trusts the VCSEC flag's *debounced
+shows "unknown" (strictly: the state topics are retained, so until the first post-reboot
+publish replaces them HA may still show the pre-reboot value; a fresh install shows
+"unknown" immediately). **Asymmetry (important):** `link_state()` trusts the VCSEC flag's *debounced
 `ASLEEP`* as positive proof of sleep, but **never** trusts its `AWAKE` reading to claim
 `AWAKE` (a parked car reports VCSEC `AWAKE` while its infotainment sleeps — the old
 `wake_up()` trap); `AWAKE` still requires live infotainment telemetry, so a wrong VCSEC

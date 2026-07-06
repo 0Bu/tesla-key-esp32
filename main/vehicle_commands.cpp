@@ -66,7 +66,13 @@ VehicleController::ResultCb VehicleController::make_result_cb_(bool auth_fail_is
             // supervisor re-keys + re-pairs and the UI/evcc stop showing a dead pairing:
             //
             //  a) KEY_NOT_ON_WHITELIST → "… key not on whitelist - pairing required".
-            //     Definitive, act immediately — honoured for EVERY command.
+            //     Definitive, act immediately — honoured for EVERY command, but only
+            //     while we believe we're paired: during enrolment an incoming foreground
+            //     command (e.g. evcc traffic) legitimately fails its handshake with
+            //     KEY_NOT_ON_WHITELIST, and treating that as a revocation would rotate
+            //     the key under the user mid-enrolment (the key just confirmed on the
+            //     car would then belong to a stale keypair). Same gate as the primary
+            //     set_message_callback observer.
             //  b) The car answers a signed command with a session-info reply that has no
             //     HMAC tag (it can't authenticate a key it no longer holds) → the library
             //     reports "auth response authentication failed". Observed in the field as
@@ -85,8 +91,10 @@ VehicleController::ResultCb VehicleController::make_result_cb_(bool auth_fail_is
             //     required (one-off glitch guard); the counter resets on any success above
             //     and on a BLE disconnect.
             if (msg.find("whitelist") != std::string::npos) {
-                pairing_lost_      = true;
-                auth_fail_streak_  = 0;
+                if (believed_paired_.load()) {
+                    pairing_lost_      = true;
+                    auth_fail_streak_  = 0;
+                }
             } else if (auth_fail_is_revocation &&
                        msg.find("authentication failed") != std::string::npos) {
                 if (++auth_fail_streak_ >= 2) {
@@ -101,22 +109,11 @@ VehicleController::ResultCb VehicleController::make_result_cb_(bool auth_fail_is
 
 // ─── Generic command runners ──────────────────────────────────────────────────
 
-// RAII: marks a foreground command "in flight" (cmd_in_flight_) for as long as it is being
-// sent + awaited, so loop_task pauses injecting background telemetry polls behind it. Clears
-// on every exit path — early return or a throw from the library call.
-namespace {
-struct InFlightGuard {
-    std::atomic<bool>& flag;
-    explicit InFlightGuard(std::atomic<bool>& f) : flag(f) { flag.store(true); }
-    ~InFlightGuard() { flag.store(false); }
-};
-}  // namespace
-
 bool VehicleController::send_vcsec_(const std::string& name, Builder builder,
                                      TeslaBLE::WakePolicy wp, int timeout_ms,
                                      bool count_as_activity, bool auth_fail_is_revocation) {
     tk::MutexGuard cmd_guard(command_mutex_);
-    InFlightGuard inflight(cmd_in_flight_);
+    tk::InFlightGuard inflight(cmd_in_flight_);
     // Real commands open the active window so loop_task resumes polling; the background
     // health poll passes count_as_activity=false (else the window never expires and the
     // car never gets to idle/sleep).
@@ -140,7 +137,7 @@ bool VehicleController::send_vcsec_(const std::string& name, Builder builder,
 bool VehicleController::send_infotainment_(const std::string& name, Builder builder,
                                             int timeout_ms, TeslaBLE::WakePolicy wp) {
     tk::MutexGuard cmd_guard(command_mutex_);
-    InFlightGuard inflight(cmd_in_flight_);
+    tk::InFlightGuard inflight(cmd_in_flight_);
     // Every infotainment command is a real evcc/manual action → open the active window.
     last_cmd_ticks_.store(xTaskGetTickCount());
     if (!ensure_connected_()) return false;

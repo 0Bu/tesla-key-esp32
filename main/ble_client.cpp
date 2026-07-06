@@ -525,9 +525,18 @@ int BleClient::on_gap_event(ble_gap_event* event) {
 
 // ─── GATT service discovery ───────────────────────────────────────────────────
 
+// The three discovery callbacks below are NimBLE-host-task entry points just like
+// on_gap_event (dispatched from C, no try/catch in the chain) — on_dsc_disc in particular
+// ends in on_connected_(true), whose vehicle_ctrl lambda allocates (std::string, NVS).
+// An escaping std::bad_alloc would unwind into C frames → std::terminate → reboot, and a
+// reboot loop re-opens the poll window, defeating car-sleep. Contain it per callback; a
+// caught throw aborts this connection attempt cleanly (disconnect), the next on-demand
+// connect retries discovery from scratch.
+
 int BleClient::on_svc_disc(uint16_t conn_handle,
                             const ble_gatt_error* error,
                             const ble_gatt_svc* svc) {
+    try {
     if (error->status == BLE_HS_EDONE) {
         if (svc_start_handle_ == 0) {
             ESP_LOGE(TAG, "Tesla service not found");
@@ -555,12 +564,20 @@ int BleClient::on_svc_disc(uint16_t conn_handle,
         svc_end_handle_   = svc->end_handle;
         ESP_LOGD(TAG, "Tesla service: %d-%d", svc_start_handle_, svc_end_handle_);
     }
+    } catch (const std::exception& e) {
+        ESP_LOGE(TAG, "on_svc_disc exception (dropping connection): %s", e.what());
+        disconnect();
+    } catch (...) {
+        ESP_LOGE(TAG, "on_svc_disc unknown exception (dropping connection)");
+        disconnect();
+    }
     return 0;
 }
 
 int BleClient::on_chr_disc(uint16_t conn_handle,
                             const ble_gatt_error* error,
                             const ble_gatt_chr* chr) {
+    try {
     if (error->status == BLE_HS_EDONE) {
         if (write_handle_ == 0 || notify_val_handle_ == 0) {
             ESP_LOGE(TAG, "required characteristics not found (write=%d notify=%d)",
@@ -584,6 +601,13 @@ int BleClient::on_chr_disc(uint16_t conn_handle,
         notify_val_handle_ = chr->val_handle;
         ESP_LOGD(TAG, "notify chr: val=%d", notify_val_handle_);
     }
+    } catch (const std::exception& e) {
+        ESP_LOGE(TAG, "on_chr_disc exception (dropping connection): %s", e.what());
+        disconnect();
+    } catch (...) {
+        ESP_LOGE(TAG, "on_chr_disc unknown exception (dropping connection)");
+        disconnect();
+    }
     return 0;
 }
 
@@ -606,6 +630,7 @@ void BleClient::subscribe_notify_() {
 
 int BleClient::on_dsc_disc(uint16_t /*conn_handle*/, const ble_gatt_error* error,
                            uint16_t /*chr_val_handle*/, const ble_gatt_dsc* dsc) {
+    try {
     if (error->status == BLE_HS_EDONE) {
         if (cccd_handle_ == 0) {
             ESP_LOGE(TAG, "CCCD (0x2902) not found for notify chr — cannot subscribe");
@@ -629,6 +654,13 @@ int BleClient::on_dsc_disc(uint16_t /*conn_handle*/, const ble_gatt_error* error
     if (cccd_handle_ == 0 && ble_uuid_cmp(&dsc->uuid.u, &CCCD_UUID.u) == 0) {
         cccd_handle_ = dsc->handle;
         ESP_LOGD(TAG, "found CCCD at handle %d", cccd_handle_);
+    }
+    } catch (const std::exception& e) {
+        ESP_LOGE(TAG, "on_dsc_disc exception (dropping connection): %s", e.what());
+        disconnect();
+    } catch (...) {
+        ESP_LOGE(TAG, "on_dsc_disc unknown exception (dropping connection)");
+        disconnect();
     }
     return 0;
 }

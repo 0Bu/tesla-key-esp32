@@ -275,29 +275,33 @@ static void wifi_watchdog_task(void*) {
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(kWdPeriodS * 1000));
 
-        // Only probe while the link believes it is up; when it knows it is down the
-        // endless-retry handler already owns recovery.
-        if (s_wifi_connected && gateway_reachable()) {
+        // When the link already knows it is down, the endless-retry handler owns recovery —
+        // there is nothing for the watchdog to detect (the ghost case is link=up by
+        // definition), and counting/logging every period would only fill the 16 KB /diag
+        // ring with noise across a long router outage.
+        if (!s_wifi_connected) {
+            fails = 0;
+            continue;
+        }
+        if (gateway_reachable()) {
             fails = 0;
             continue;
         }
 
         fails++;
-        ESP_LOGW(TAG, "watchdog: no LAN connectivity (%d/%d, link=%s)",
-                 fails, kWdFailToReassoc, s_wifi_connected ? "up" : "down");
+        ESP_LOGW(TAG, "watchdog: no LAN connectivity (%d/%d, link=up)",
+                 fails, kWdFailToReassoc);
         if (fails < kWdFailToReassoc)
             continue;
         fails = 0;
 
         // Act ONLY on a true ghost association: the link still believes it is up AND this
-        // gateway has answered ICMP before (so its silence is real, not a firewall). When
-        // the link already knows it is down, the handler owns recovery — forcing a
-        // disconnect here would only churn the shared WiFi/BLE radio. One disconnect is
-        // enough: the handler's else-branch reconnects (s_wifi_ever_connected is true), so
-        // we don't call esp_wifi_connect() ourselves and avoid a cross-task double-connect.
-        if (!s_wifi_connected || !s_gw_ever_reachable) {
-            if (s_wifi_connected && !s_gw_ever_reachable)
-                ESP_LOGW(TAG, "watchdog: gateway has never answered ICMP — not forcing re-assoc");
+        // gateway has answered ICMP before (so its silence is real, not a firewall).
+        // One disconnect is enough: the handler's else-branch reconnects
+        // (s_wifi_ever_connected is true), so we don't call esp_wifi_connect() ourselves
+        // and avoid a cross-task double-connect.
+        if (!s_gw_ever_reachable) {
+            ESP_LOGW(TAG, "watchdog: gateway has never answered ICMP — not forcing re-assoc");
             continue;
         }
 

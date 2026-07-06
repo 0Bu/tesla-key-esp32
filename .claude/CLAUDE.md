@@ -105,7 +105,7 @@ Never edit files in `managed_components/` — they are regenerated.
 | Namespace   | Content                                     |
 |-------------|---------------------------------------------|
 | `tesla_cfg` | WiFi SSID/pass, VIN, BLE MAC, `mqtt_uri`, `last_time` (runtime cfg) |
-| `tesla_ble` | Private key, VCSEC session, Info session, `key_created`, `paired_at` |
+| `tesla_ble` | Private key (`private_key`), VCSEC session (`sess_vcsec`), Info session (`sess_info`), `key_created`, `paired_at` — the `sess_*` names come from the ≤15-char key mapping in `nvs_storage.cpp` |
 
 ## Commands Implemented
 
@@ -135,6 +135,7 @@ reported them (proto3 optional). **Full field list + Overheat/Defrost chip rules
 ## HTTP API
 
 ```
+GET  /  (alias /index.html)                    # embedded web UI (gzipped into the app binary)
 POST /api/1/vehicles/{VIN}/command/{command}   # execute command
 GET  /api/1/vehicles/{VIN}/vehicle_data        # charge state
 GET  /api/1/vehicles/{VIN}/body_controller_state

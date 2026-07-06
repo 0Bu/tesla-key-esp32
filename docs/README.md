@@ -152,13 +152,15 @@ POST /api/1/vehicles/{VIN}/command/{command}   Content-Type: application/json
 GET /api/1/vehicles/{VIN}/vehicle_data
 ```
 ```json
-{ "response": { "result": true, "vin": "5YJ3E1EA1JF000001", "response": {
+{ "response": { "result": true, "vin": "5YJ3E1EA1JF000001", "reason": "success",
+  "response": {
   "charge_state": { "charging_state": "Charging", "battery_level": 72,
     "charge_limit_soc": 80, "charger_power": 11, "charge_rate": 58.3,
     "charge_amps": 16, "battery_range": 280.5 } } } }
 ```
 Doubled `response` and `charge_amps` are intentional — they match the Fleet API /
-TeslaBleHttpProxy shape evcc parses.
+TeslaBleHttpProxy shape evcc parses. `reason` is `"success"` or `"stale or unavailable"`
+(cache served while the car sleeps — evcc reads `charge_state`, not `result`).
 
 ### Body controller state (no wake)
 
@@ -166,15 +168,15 @@ TeslaBleHttpProxy shape evcc parses.
 GET /api/1/vehicles/{VIN}/body_controller_state
 ```
 ```json
-{ "response": { "result": true, "data": {
+{ "response": { "result": true, "vin": "5YJ3E1EA1JF000001", "data": {
   "vehicle_lock_state": "LOCKED", "vehicle_sleep_status": "ASLEEP",
-  "user_presence": "NOT_PRESENT" } } }
+  "user_presence": "NOT_PRESENT" }, "reason": "success" } }
 ```
 
 ### Management
 
 ```
-GET  /                     Web UI (status, pairing, quick commands)
+GET  /                     Web UI (status, pairing, quick commands; alias /index.html)
 GET  /status               { vin, ip, version, key_present, key_fingerprint,
                              key_created (epoch, omitted if clock unsynced), paired,
                              paired_at (epoch, omitted if unknown), reauth,
@@ -193,7 +195,9 @@ GET  /status               { vin, ip, version, key_present, key_fingerprint,
                              last:{soc,status} (last-known snapshot for the asleep card),
                              last_seen_s (seconds since last contact) }
 POST /scan                 Time-limited BLE discovery scan (populates ble.devices)
-GET  /diag[?verbose=0|1][?clear=1]   Plain-text in-memory diag log (verbose=0 turns raw-RX logging back off)
+GET  /diag[?verbose=0|1][?clear=1]   Plain-text in-memory diag log (verbose=0 turns raw-RX
+                             logging back off; the X-Diag-Verbose response header echoes the
+                             current verbose state for the web UI)
 POST /gen_keys[?force=1]   Generate ECDSA P-256 key (refuses overwrite without force)
 POST /send_key             Manually trigger pairing (charging_manager only; normally automatic)
 POST /set_vin              Persist VIN and reboot

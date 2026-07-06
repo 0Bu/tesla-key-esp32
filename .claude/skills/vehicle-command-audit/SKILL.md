@@ -163,7 +163,7 @@ code is right. **Verify each is still present before editing** — some may alre
 | 6 | doc/comment | `Kconfig.projbuild` OTA help | Says image is `tesla-key-esp32-<target>.bin`; actual suffix scheme is `""`/`-s3`/`-c3`/`-c6`. | Correct to the real suffix map. |
 | 7 | doc/comment | `vehicle_ctrl.hpp:280-285`, `main.cpp:309-310`, `http_server.cpp:692-693` | Comments say the device "makes no NTP call" (main.cpp runs **SNTP as primary**) and that the wall clock is needed for "session-freshness" (it is **not** — vehicle-clock + monotonic). | Reword: NTP is primary, `/set_time` is fallback; wall clock is for TLS-OTA + human timestamps, not signing. |
 | 8 | doc | `.claude/CLAUDE.md` pairing-invalidation item 1 | Describes only the `"whitelist"` substring; omits the **primary** `UNKNOWN_KEY_ID` `set_message_callback` detector that fires on a cached session. | List all three detectors, primary first. |
-| 9 | logical (low) | `vehicle_ctrl.cpp:967-970` | `set_charge_limit` silently clamps `<50→50` and reports **success** (upstream passes through and lets the car answer). Harmless on the evcc path. | Optional: reject out-of-range, or pass through. |
+| 9 | logical (low) | `vehicle_commands.cpp:227-230` | `set_charge_limit` silently clamps `<50→50` and reports **success** (upstream passes through and lets the car answer). Harmless on the evcc path. | Optional: reject out-of-range, or pass through. |
 
 ## How to run
 

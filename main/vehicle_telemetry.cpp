@@ -103,10 +103,13 @@ void parse_climate_state(const CarServer_ClimateState& cs, ClimateStateResult& o
     if (cs.which_optional_driver_temp_setting == CarServer_ClimateState_driver_temp_setting_tag) {
         out.driver_setpoint = cs.optional_driver_temp_setting.driver_temp_setting; out.has_setpoint = true;
     }
-    if (cs.which_optional_is_climate_on == CarServer_ClimateState_is_climate_on_tag)
-        out.is_climate_on = cs.optional_is_climate_on.is_climate_on;
-    if (cs.which_optional_is_preconditioning == CarServer_ClimateState_is_preconditioning_tag)
+    if (cs.which_optional_is_climate_on == CarServer_ClimateState_is_climate_on_tag) {
+        out.is_climate_on = cs.optional_is_climate_on.is_climate_on; out.has_climate_on = true;
+    }
+    if (cs.which_optional_is_preconditioning == CarServer_ClimateState_is_preconditioning_tag) {
         out.is_preconditioning = cs.optional_is_preconditioning.is_preconditioning;
+        out.has_preconditioning = true;
+    }
 
     // Cabin Overheat Protection — separate from the main HVAC (see ClimateStateResult).
     if (cs.which_optional_cabin_overheat_protection == CarServer_ClimateState_cabin_overheat_protection_tag) {
@@ -479,6 +482,10 @@ bool VehicleController::get_charge_state(ChargeStateResult& out, int /*timeout_m
 
 bool VehicleController::get_vehicle_status(VehicleStatusResult& out, int timeout_ms) {
     tk::MutexGuard cmd_guard(command_mutex_);
+    // Foreground blocking query (HTTP /body_controller_state, auto-pair probes) — mark it
+    // in-flight like the other runners so loop_task doesn't inject a slow background
+    // telemetry poll ahead of it on the single BLE FIFO.
+    tk::InFlightGuard inflight(cmd_in_flight_);
     // A VCSEC status poll is the auto-pair / wake probe as well as an HTTP read, so it
     // must be able to bring the BLE link up. With a NO-wake policy it reads status
     // (including ASLEEP) without actually waking the car.

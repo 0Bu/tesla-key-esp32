@@ -148,8 +148,11 @@ inline McpTool mcp_tool_from(const char* name) {
 // Clamp a JSON number to an int range BEFORE the int cast — casting an out-of-range
 // double to int is undefined behaviour, so a hostile {"amps":1e300} must never reach
 // (int). Same rule as http_api.cpp's json_int_clamped; the cJSON unwrapping stays
-// in mcp_server.cpp.
+// in mcp_server.cpp. NaN falls through BOTH comparisons (NaN compares false), so it
+// must be caught explicitly — the string-argument path parses with strtod, which
+// accepts "nan"; without this check {"amps":"nan"} would reach the (int) cast.
 inline int clamped_int(double d, int lo, int hi) {
+    if (d != d) return lo;   // NaN → the safe bound, never the cast
     if (d < (double)lo) return lo;
     if (d > (double)hi) return hi;
     return (int)d;

@@ -48,7 +48,19 @@ bool VehicleController::init(const std::string& vin,
     // Wire BLE → Vehicle callbacks
     ble_->set_connected_cb([this](bool connected) {
         xSemaphoreTake(vehicle_mutex_, portMAX_DELAY);
-        vehicle_->set_connected(connected);
+        // Same rule as the rx-data callback below: this runs on the NimBLE host task and
+        // the callers (on_gap_event / on_dsc_disc) catch instead of rethrowing, so a throw
+        // out of the library here must not skip the give — a silently-held vehicle_mutex_
+        // would wedge every later command/poll until power-cycle.
+        try {
+            vehicle_->set_connected(connected);
+        } catch (const std::exception& e) {
+            ESP_LOGE(TAG, "set_connected threw (%s) — resetting link", e.what());
+            ble_fault_.store(true);
+        } catch (...) {
+            ESP_LOGE(TAG, "set_connected threw (unknown) — resetting link");
+            ble_fault_.store(true);
+        }
         xSemaphoreGive(vehicle_mutex_);
 
         if (!connected) {

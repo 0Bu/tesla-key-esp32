@@ -84,7 +84,9 @@ scripts/run-mock-tests.sh
 ```
 
 (Equivalent to `cmake -S test -B build_mock && cmake --build build_mock && ctest --test-dir
-build_mock --output-on-failure`.) It compiles with `-Wall -Wextra -Werror`, so warnings fail too.
+build_mock --output-on-failure`; on a host without cmake the script falls back to compiling
+`test/test_logic.cpp` directly with g++/clang++ — same flags, same result.) It compiles with
+`-Wall -Wextra -Werror`, so warnings fail too.
 A red result blocks the Stop hook — fix it before claiming done.
 
 ### 5. (If the value mirrors a compile-time constant) lock it with a `static_assert`

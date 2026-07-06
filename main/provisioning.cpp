@@ -2,6 +2,7 @@
 
 #include <cstring>
 #include <cstdlib>
+#include <cctype>
 #include <string>
 
 #include "freertos/FreeRTOS.h"
@@ -12,6 +13,7 @@
 #include "esp_log.h"
 #include "esp_http_server.h"
 #include "lwip/sockets.h"
+#include "logic/vin.hpp"
 
 static const char* TAG = "provisioning";
 static const char* AP_SSID = "tesla-key-esp32-setup";
@@ -94,9 +96,17 @@ static esp_err_t save_post(httpd_req_t* req) {
         return ESP_OK;
     }
 
+    // Normalise + validate like /set_vin (trim, uppercase, tk::vin_is_plausible) — the
+    // setup page's JS filters too, but a POST without it could otherwise persist a
+    // 17-char-but-implausible VIN that silently disables pairing at boot.
+    size_t vs = vin.find_first_not_of(" \t\r\n");
+    size_t ve = vin.find_last_not_of(" \t\r\n");
+    vin = (vs == std::string::npos) ? std::string{} : vin.substr(vs, ve - vs + 1);
+    for (char& c : vin) c = (char)std::toupper((unsigned char)c);
+
     g_cfg->save_str("wifi_ssid", ssid);
     g_cfg->save_str("wifi_pass", pass);
-    if (vin.size() == 17) g_cfg->save_str("vin", vin);
+    if (tk::vin_is_plausible(vin)) g_cfg->save_str("vin", vin);
     ESP_LOGI(TAG, "saved config: ssid='%s' vin='%s' — rebooting", ssid.c_str(), vin.c_str());
 
     httpd_resp_set_type(req, "text/html");

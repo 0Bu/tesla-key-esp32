@@ -261,10 +261,17 @@ bool VehicleController::health_probe_(int timeout_ms) {
     // ⇒ key deleted. Because role refusal cannot masquerade as revocation here (there is no
     // role that can't read status), this is the ONE caller that passes auth_fail_is_revocation
     // so make_result_cb_ lets an "authentication failed" feed the two-strike pairing_lost_.
+    // NO_WAKE_FAIL, not WAKE_IF_NEEDED: today the library ignores the wake policy on the
+    // VCSEC path entirely (the body controller is always on, no wake is ever needed), so
+    // this is behaviour-neutral — but "never wake the car from the periodic probe" is a
+    // guarantee of ours, and it must not silently invert if a future tesla-ble starts
+    // honouring the policy for VCSEC too. NO_WAKE_SKIP would be wrong here: it skips while
+    // the car is believed asleep, which would blind both revocation detection and the
+    // VCSEC sleep/wake sampling exactly when the car sleeps.
     return send_vcsec_("VCSEC Health Poll", [](TeslaBLE::Client* c, uint8_t* b, size_t* l) {
         return c->build_vcsec_information_request_message(
             VCSEC_InformationRequestType_INFORMATION_REQUEST_TYPE_GET_STATUS, b, l);
-    }, TeslaBLE::WakePolicy::WAKE_IF_NEEDED, timeout_ms, /*count_as_activity=*/false,
+    }, TeslaBLE::WakePolicy::NO_WAKE_FAIL, timeout_ms, /*count_as_activity=*/false,
        /*auth_fail_is_revocation=*/true);
 }
 
