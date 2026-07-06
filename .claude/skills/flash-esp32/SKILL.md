@@ -61,6 +61,24 @@ PORT=$(ioreg -l -w 0 2>/dev/null | grep -iE '"USB Product Name"|"IOCalloutDevice
 layout). After reset the device rejoins WiFi in a few seconds; reload
 `tesla-key-esp32.local` to see UI changes.
 
+> ⚠️ **A local (unsigned) build crash-loops at boot — flash a _signed_ image.** Since the
+> signed-OTA config landed (`CONFIG_SECURE_SIGNED_ON_UPDATE_NO_SECURE_BOOT` in
+> `sdkconfig.defaults`), the running app `abort()`s at startup when it carries no signature
+> block. So a plain `idf.py build` image still flashes fine (`Hash of data verified.`) but then
+> **reboot-loops before `app_main`** (`check_signature_on_update_check`, on every target). Get a
+> bootable image one of two ways:
+> - **Flash the signed CI artifact** (recommended): `gh run download` the app image from the
+>   latest green `build` run for your branch and flash *that* instead of the local `build/…bin`.
+> - **Sign the local build yourself**, the same step CI runs, then flash `@flash_args` as usual:
+>   ```bash
+>   # one-time: espsecure.py generate_signing_key --version 2 --scheme rsa3072 dev_key.pem
+>   espsecure.py sign_data --version 2 --keyfile dev_key.pem \
+>     --output build/tesla-key-esp32.bin.signed build/tesla-key-esp32.bin && \
+>     mv build/tesla-key-esp32.bin.signed build/tesla-key-esp32.bin
+>   ```
+>   A throwaway dev key is fine for a USB-flashed test board (it becomes that board's OTA trust
+>   anchor until you USB-flash the real CI image again). Full detail: `docs/SECURITY.md`.
+
 ## Picking the right serial port
 
 This board exposes **two** USB serial interfaces — confirm before flashing:
