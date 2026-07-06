@@ -120,8 +120,8 @@ esp_err_t handle_status(GuardedReq rq) {
             if (cl.has_inside)   cJSON_AddNumberToObject(o, "inside",   cl.inside_temp);
             if (cl.has_outside)  cJSON_AddNumberToObject(o, "outside",  cl.outside_temp);
             if (cl.has_setpoint) cJSON_AddNumberToObject(o, "setpoint", cl.driver_setpoint);
-            cJSON_AddBoolToObject(o, "on",            cl.is_climate_on);
-            cJSON_AddBoolToObject(o, "preconditioning", cl.is_preconditioning);
+            if (cl.has_climate_on)      cJSON_AddBoolToObject(o, "on",              cl.is_climate_on);
+            if (cl.has_preconditioning) cJSON_AddBoolToObject(o, "preconditioning", cl.is_preconditioning);
             // Cabin Overheat Protection (separate subsystem; emitted only when the
             // car actually reported each field, so an absent one means "not sent").
             if (cl.has_cop)         cJSON_AddStringToObject(o, "cop",         cl.cop.c_str());
@@ -220,7 +220,8 @@ esp_err_t handle_status(GuardedReq rq) {
         ChargeStateResult cs = g_vehicle->get_cached_charge();
         if (cs.valid) {
             cJSON* veh = cJSON_CreateObject();
-            cJSON_AddNumberToObject(veh, "soc",    cs.battery_level);
+            if (cs.has_battery_level)
+                cJSON_AddNumberToObject(veh, "soc", cs.battery_level);
             cJSON_AddStringToObject(veh, "status", cs.charging_state.c_str());
             // Charge target — lets the UI mark "charge complete" (SOC >= limit) and gate the
             // start-charge tap, which the car would only reject as "complete" anyway. Emitted
@@ -260,7 +261,8 @@ esp_err_t handle_status(GuardedReq rq) {
         ChargeStateResult last = g_vehicle->get_cached_charge();
         if (last.valid) {
             cJSON* lo = cJSON_CreateObject();
-            cJSON_AddNumberToObject(lo, "soc",    last.battery_level);
+            if (last.has_battery_level)
+                cJSON_AddNumberToObject(lo, "soc", last.battery_level);
             cJSON_AddStringToObject(lo, "status", last.charging_state.c_str());
             cJSON_AddItemToObject(root, "last", lo);
         }

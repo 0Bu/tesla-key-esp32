@@ -50,7 +50,9 @@ image_suffix() {
     esp32s3) echo "-s3" ;;
     esp32c3) echo "-c3" ;;
     esp32c6) echo "-c6" ;;
-    *)       echo "-$1" ;;
+    # Fail hard like the firmware's #error (ota_update.cpp) — a silently invented
+    # suffix would publish an image no device ever builds a filename for.
+    *)       echo "image_suffix: unknown target '$1'" >&2; exit 1 ;;
   esac
 }
 

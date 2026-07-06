@@ -298,8 +298,8 @@ function render(s){
       var ils=s.last||{}, ilsoc=(ils.soc!=null)?Math.round(ils.soc):null, iago=fmtAgo(s.last_seen_s), ichips=[];
       if(ilsoc!=null) ichips.push(stat('Battery','<span style="color:'+socColor(ilsoc)+'">'+ilsoc+'</span>','%'));
       if(iago)        ichips.push(stat('Idle', iago, ''));
-      ichips.push(copChip(s));
-      ichips.push(defrostChip(s));
+      // No Overheat/Defrost chips here (same as the asleep card): both key off the live AC
+      // draw (liveKw needs s.vehicle), and /status emits "vehicle" only while link==='awake'.
       hst.innerHTML=ichips.join('');
     } else if((s.ble&&s.ble.connect_fail)>=2){
       // Paired, but the BLE link won't come up despite repeated attempts. Surface WHY — exactly
@@ -320,7 +320,10 @@ function render(s){
       // last-known battery + idle time from the retained cache so the card still informs.
       var ureach=s.link==='unreachable';
       hicHTML=ringSVG(0,true)+'<div class="glyph">'+BT+'</div>';
-      setHTML(hl,'<span>'+(ureach?'Unreachable':'Connecting…')+'</span>');
+      // link==='awake' can land here transiently when the freshness stamp arrived from a
+      // non-charge poll before the first charge poll filled the cache (no s.vehicle yet) —
+      // say "Checking status…" then, not "Connecting…" (the link is clearly up).
+      setHTML(hl,'<span>'+(ureach?'Unreachable':(s.link==='awake'?'Checking status…':'Connecting…'))+'</span>');
       // Only claim "Bluetooth connected" when the momentary GATT link is actually up
       // (linked). The on-demand link is dropped between polls, so link==='unknown'
       // routinely coexists with ble.connected===false — in which case the BLE row reads

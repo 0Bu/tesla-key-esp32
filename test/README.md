@@ -19,8 +19,17 @@ cmake --build build_mock
 ctest --test-dir build_mock --output-on-failure
 ```
 
-Requires only `cmake` and a C++17 compiler (`g++`/`clang++`). The test binary is
-dependency-free (no gtest) and returns non-zero on the first failed check.
+Requires only a C++17 compiler (`g++`/`clang++`); `cmake` is used when present, and
+`scripts/run-mock-tests.sh` falls back to invoking the compiler directly otherwise —
+the suite is a single translation unit, so on a cmake-less host this is equivalent:
+
+```bash
+g++ -std=c++17 -Wall -Wextra -Werror -Imain -o build_mock/logic_tests test/test_logic.cpp
+./build_mock/logic_tests
+```
+
+The test binary is dependency-free (no gtest) and returns non-zero on the first
+failed check.
 
 CI runs this as the `logic-test` job, a **fast gate the per-target firmware build
 depends on** (`.github/workflows/build.yml`) — a logic regression fails in seconds
