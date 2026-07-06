@@ -50,7 +50,10 @@ CONFIG_BT_NIMBLE_ROLE_PERIPHERAL=n
 CONFIG_BT_NIMBLE_ROLE_BROADCASTER=n
 CONFIG_BT_NIMBLE_ROLE_OBSERVER=y
 CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1
-CONFIG_BT_NIMBLE_NVS_PERSIST=y
+# No NimBLE bond persistence: authentication is app-layer (tesla-ble session keys live in
+# our own `tesla_ble` NVS namespace via nvs_storage.cpp), and we never use the BLE Security
+# Manager / SMP bonding — so the bond-NVS store is dead weight. Off saves ~2.8 KB flash.
+CONFIG_BT_NIMBLE_NVS_PERSIST=n
 
 # BLE MTU - request larger MTU for fewer fragments
 CONFIG_BT_NIMBLE_ATT_PREFERRED_MTU=247
@@ -87,6 +90,33 @@ CONFIG_BT_NIMBLE_HOST_TASK_STACK_SIZE=8192
 
 # Logging
 CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+
+# ── Firmware size reduction (Issue #106 — "Package A", zero-risk / no behaviour change) ──
+# These trim flash (and a little rodata) by dropping code paths this firmware never uses.
+# None touch the coex-/timing-sensitive NimBLE/WiFi hot paths, so no live re-validation is
+# required beyond a normal boot + BLE handshake. The big timing-sensitive lever (`-Os`) and
+# the DRAM/feature levers are deliberately kept OUT of this set (their own PRs). Combined ≈21 KB.
+
+# Drop mbedTLS human-readable error-string tables — we only ever log the numeric codes
+# (e.g. the MQTTS/OTA TLS handshake reason in /status), never mbedtls_strerror(). ~6 KB.
+CONFIG_MBEDTLS_ERROR_STRINGS=n
+
+# No TLS session-ticket resumption: our TLS clients (OTA fetch, MQTTS bridge) open few,
+# long-lived connections where resumption buys nothing. ~1.8 KB.
+CONFIG_MBEDTLS_CLIENT_SSL_SESSION_TICKETS=n
+CONFIG_MBEDTLS_SERVER_SSL_SESSION_TICKETS=n
+
+# No filesystem: certs/keys come from the CA bundle and NVS, never a VFS path. ~1.2 KB.
+CONFIG_MBEDTLS_FS_IO=n
+
+# Silent asserts — keep the abort()/reboot on a failed assertion (so a bad state still
+# reverts via the rollback gate) but drop the "assert failed: <expr> <file>:<line>" string
+# tables. Serial/diag logging is unaffected. ~5 KB.
+CONFIG_COMPILER_OPTIMIZATION_ASSERTIONS_SILENT=y
+
+# No WPA3-OWE (Opportunistic Wireless Encryption / open-enhanced) STA support — we join a
+# WPA2-PSK home network. ~0.8 KB. (WPA3-SAE is a separate, heavier lever left for later.)
+CONFIG_ESP_WIFI_ENABLE_WPA3_OWE_STA=n
 
 # C++ exceptions needed by tesla-ble
 CONFIG_COMPILER_CXX_EXCEPTIONS=y
