@@ -20,10 +20,9 @@ idf_component_register(
         "mqtt_ha.cpp"
     INCLUDE_DIRS
         "."
-    EMBED_TXTFILES
-        "www/setup.html"
     EMBED_FILES
         "${CMAKE_CURRENT_BINARY_DIR}/index.html.gz"
+        "${CMAKE_CURRENT_BINARY_DIR}/setup.html.gz"
     REQUIRES
         nvs_flash
         esp_wifi
@@ -77,3 +76,17 @@ add_custom_command(
     VERBATIM)
 add_custom_target(gen_index_gz DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/index.html.gz")
 add_dependencies(${COMPONENT_LIB} gen_index_gz)
+
+# Pre-compress the captive-portal setup page the same way. It's a static source (no asset
+# splicing), so just gzip main/www/setup.html at build time and serve it with
+# Content-Encoding: gzip (see form_get in provisioning.cpp). ~3.6 KB saved on the wire and
+# in flash. Symbols: _binary_setup_html_gz_{start,end}.
+add_custom_command(
+    OUTPUT  "${CMAKE_CURRENT_BINARY_DIR}/setup.html.gz"
+    COMMAND gzip -9 -n -c "${CMAKE_CURRENT_SOURCE_DIR}/www/setup.html"
+            > "${CMAKE_CURRENT_BINARY_DIR}/setup.html.gz"
+    DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/www/setup.html"
+    COMMENT "Gzipping setup portal (www/setup.html -> setup.html.gz)"
+    VERBATIM)
+add_custom_target(gen_setup_gz DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/setup.html.gz")
+add_dependencies(${COMPONENT_LIB} gen_setup_gz)
