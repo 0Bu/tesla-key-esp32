@@ -123,6 +123,17 @@ path does). `CONFIG_SECURE_BOOT_BUILD_SIGNED_BINARIES=n`, so the build emits an 
 binary and CI signs it in a separate step — the private key never has to be present at
 compile time.
 
+> ⚠️ **A locally-built binary is unsigned and will _not_ boot.** The signature is also
+> enforced *at runtime*: the running app calls `esp_secure_boot_init_checks()` at startup
+> (`check_signature_on_update_check` in `bootloader_support`), which `abort()`s in a **reboot
+> loop** whenever the app carries no signature block. This fires very early — before `app_main`,
+> on every target — so a plain `idf.py build` image (unsigned by `..._BUILD_SIGNED_BINARIES=n`)
+> **cannot be USB-flashed as-is**; it just crash-loops. To flash a development build, either use
+> the **signed CI artifact**, or sign the local image first with the offline key
+> (`espsecure.py sign_data --version 2 --keyfile <key> --output app.bin.signed app.bin` — the
+> same step CI runs) and flash the signed copy. This has been true since the signed-OTA config
+> landed — see the `flash-esp32` skill for the dev-flashing workflow.
+
 ### Trust anchor (trust-on-first-use)
 
 With no eFuse digest, the trusted public key is taken from the **signature block of the
@@ -130,8 +141,9 @@ currently running app** (`esp_secure_boot_get_signature_blocks_for_running_app`)
 consequences:
 
 - The **first** signed image is accepted by a device still on the *old, unsigned* firmware
-  (which performs no verification), or can be USB-flashed. From then on, that device only
-  accepts OTA images signed with the **same key**.
+  (firmware built **before** this signing config existed, so it performs no verification — a
+  *current* build left unsigned won't boot at all, see the warning above), or can be
+  USB-flashed. From then on, that device only accepts OTA images signed with the **same key**.
 - This is a deliberate **one-way transition**: once a device runs a signed build it will
   **refuse an unsigned (or differently-signed) OTA**. A bad signed image still auto-rolls
   back via `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE`; a downgrade to unsigned firmware needs a
