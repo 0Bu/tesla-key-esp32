@@ -289,7 +289,7 @@ Run these checks against the current tree:
 - **Cross-cutting list is complete.** Every "add X → also update Y" link should map a real
   multi-place feature; a feature that spans code + docs + config + UI but isn't listed is
   exactly the drift a coherence review is meant to catch.
-- **API / command lists are current.** Diff the routes in `http_server.cpp` (dispatch; handlers in `http_api/status/ota/config.cpp`) and the command
+- **API / command lists are current.** Diff the routes in `http_server.cpp` (dispatch; handlers in `http_api/status/ota/config.cpp` + `mcp_server.cpp`) and the command
   switch against the references the skill and `.claude/CLAUDE.md` lean on.
 - **No stale specifics in the skill text** — hardcoded chip names (e.g. a lone "ESP32-S3" where
   it is now multi-target), file paths, partition offsets, sizes, or version assumptions.
