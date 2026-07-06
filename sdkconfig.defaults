@@ -118,6 +118,16 @@ CONFIG_COMPILER_OPTIMIZATION_ASSERTIONS_SILENT=y
 # WPA2-PSK home network. ~0.8 KB. (WPA3-SAE is a separate, heavier lever left for later.)
 CONFIG_ESP_WIFI_ENABLE_WPA3_OWE_STA=n
 
+# ── Firmware size reduction (Issue #106 — "Package B", the -Os lever) ──
+# Build for size (-Os) instead of the ESP-IDF default -Og. Measured on esp32s3 (IDF v5.5.4):
+# −133 KB flash (.text −102 KB, .rodata −22 KB) AND −8.5 KB contiguous DIRAM — the latter is the
+# real win, since the binding constraint on this device is the largest *contiguous* free block,
+# not total heap. IRAM unchanged (residency is section placement, not opt level).
+# TIMING-SENSITIVE: -Os changes inlining on the WiFi/BLE coexistence hot paths, so this MUST be
+# live-validated (boot + full BLE handshake + sustained run, watching for NEW reboots / RX desync)
+# before relying on it — hence its own PR, separate from Package A, so any regression bisects here.
+CONFIG_COMPILER_OPTIMIZATION_SIZE=y
+
 # C++ exceptions needed by tesla-ble
 CONFIG_COMPILER_CXX_EXCEPTIONS=y
 
