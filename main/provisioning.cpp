@@ -3,6 +3,7 @@
 #include <cstring>
 #include <cstdlib>
 #include <cctype>
+#include <cstdint>
 #include <string>
 
 #include "freertos/FreeRTOS.h"
@@ -22,8 +23,11 @@ static NvsStorageAdapter* g_cfg = nullptr;
 
 // ─── HTML form ──────────────────────────────────────────────────────────────
 
-// Captive-portal setup page — embedded from main/www/setup.html (EMBED_TXTFILES)
-extern const char setup_html_start[] asm("_binary_setup_html_start");
+// Captive-portal setup page — embedded pre-gzipped (main/www/setup.html → setup.html.gz at
+// build time, EMBED_FILES; see main/CMakeLists.txt). Served with Content-Encoding: gzip;
+// length is end-start (a binary blob, not a NUL-terminated C string).
+extern const uint8_t setup_html_gz_start[] asm("_binary_setup_html_gz_start");
+extern const uint8_t setup_html_gz_end[]   asm("_binary_setup_html_gz_end");
 
 // ─── x-www-form-urlencoded parsing ───────────────────────────────────────────
 
@@ -69,7 +73,9 @@ static std::string form_field(const std::string& body, const std::string& key) {
 
 static esp_err_t form_get(httpd_req_t* req) {
     httpd_resp_set_type(req, "text/html");
-    return httpd_resp_send(req, setup_html_start, HTTPD_RESP_USE_STRLEN);
+    httpd_resp_set_hdr(req, "Content-Encoding", "gzip");
+    const size_t len = setup_html_gz_end - setup_html_gz_start;
+    return httpd_resp_send(req, (const char*)setup_html_gz_start, len);
 }
 
 static esp_err_t save_post(httpd_req_t* req) {
