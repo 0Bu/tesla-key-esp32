@@ -75,23 +75,37 @@ bool NvsStorageAdapter::remove(const std::string& key) {
     return true;
 }
 
+// The string API goes through map_key too — today every string key is ≤15 chars so the
+// mapping is an identity, but a future long key would otherwise fail silently with
+// ESP_ERR_NVS_KEY_TOO_LONG (load_str previously didn't even log).
 bool NvsStorageAdapter::load_str(const char* key, std::string& out) {
     if (!initialized_) return false;
+    std::string nvskey = map_key(key);
     size_t len = 0;
-    esp_err_t err = nvs_get_str(handle_, key, nullptr, &len);
+    esp_err_t err = nvs_get_str(handle_, nvskey.c_str(), nullptr, &len);
     if (err == ESP_ERR_NVS_NOT_FOUND || len == 0) return false;
-    if (err != ESP_OK) return false;
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "load_str failed '%s': %s", nvskey.c_str(), esp_err_to_name(err));
+        return false;
+    }
     std::vector<char> buf(len);
-    err = nvs_get_str(handle_, key, buf.data(), &len);
-    if (err != ESP_OK) return false;
+    err = nvs_get_str(handle_, nvskey.c_str(), buf.data(), &len);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "load_str failed '%s': %s", nvskey.c_str(), esp_err_to_name(err));
+        return false;
+    }
     out.assign(buf.data());
     return true;
 }
 
 bool NvsStorageAdapter::save_str(const char* key, const std::string& value) {
     if (!initialized_) return false;
-    esp_err_t err = nvs_set_str(handle_, key, value.c_str());
-    if (err != ESP_OK) return false;
+    std::string nvskey = map_key(key);
+    esp_err_t err = nvs_set_str(handle_, nvskey.c_str(), value.c_str());
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "save_str failed '%s': %s", nvskey.c_str(), esp_err_to_name(err));
+        return false;
+    }
     nvs_commit(handle_);
     return true;
 }

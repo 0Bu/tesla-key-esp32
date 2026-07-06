@@ -52,8 +52,8 @@ struct VehicleStatusResult {
 // not as 0.
 struct ClimateStateResult {
     bool valid{false};
-    bool is_climate_on{false};
-    bool is_preconditioning{false};
+    bool has_climate_on{false};      bool is_climate_on{false};
+    bool has_preconditioning{false}; bool is_preconditioning{false};
     bool  has_inside{false};   float inside_temp{0};      // °C
     bool  has_outside{false};  float outside_temp{0};     // °C
     bool  has_setpoint{false}; float driver_setpoint{0};  // °C
@@ -82,12 +82,18 @@ struct TirePressureResult {
     bool  has_fr{false}; float fr{0};
     bool  has_rl{false}; float rl{0};
     bool  has_rr{false}; float rr{0};
-    bool  warn{false};                  // any soft/hard TPMS warning set
+    // Aggregate over all eight soft/hard per-wheel warnings with present-AND-true
+    // semantics — an unreported wheel counts as "no warning" BY DESIGN (no presence
+    // flag; the alternative would alarm on every partial report).
+    bool  warn{false};
 };
 
 struct ClosuresStateResult {
     bool valid{false};
     bool has_locked{false};       bool locked{false};
+    // The four *_open fields aggregate per-opening booleans with present-AND-true
+    // semantics — an unreported opening counts as "closed" BY DESIGN (no presence
+    // flags; Tesla sends closures as a full set, and "open" is the actionable state).
     bool any_door_open{false};
     bool frunk_open{false};
     bool trunk_open{false};

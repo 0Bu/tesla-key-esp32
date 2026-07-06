@@ -259,8 +259,8 @@ static void publish_state() {
             if (cl.has_inside)   cJSON_AddNumberToObject(o, "inside",   cl.inside_temp);
             if (cl.has_outside)  cJSON_AddNumberToObject(o, "outside",  cl.outside_temp);
             if (cl.has_setpoint) cJSON_AddNumberToObject(o, "setpoint", cl.driver_setpoint);
-            cJSON_AddBoolToObject(o, "on",             cl.is_climate_on);
-            cJSON_AddBoolToObject(o, "preconditioning", cl.is_preconditioning);
+            if (cl.has_climate_on)      cJSON_AddBoolToObject(o, "on",              cl.is_climate_on);
+            if (cl.has_preconditioning) cJSON_AddBoolToObject(o, "preconditioning", cl.is_preconditioning);
             if (cl.has_cop)         cJSON_AddStringToObject(o, "cop",         cl.cop.c_str());
             if (cl.has_cop_cooling) cJSON_AddBoolToObject(o,   "cop_cooling", cl.cop_cooling);
             if (cl.has_cop_temp)    cJSON_AddStringToObject(o, "cop_temp",    cl.cop_temp.c_str());

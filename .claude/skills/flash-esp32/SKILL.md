@@ -51,6 +51,11 @@ PORT=$(ioreg -l -w 0 2>/dev/null | grep -iE '"USB Product Name"|"IOCalloutDevice
 > **classic esp32** has no native USB — it appears as a USB-UART bridge `/dev/cu.usbserial-*`
 > (CP210x/CH340), so for `TARGET=esp32` set `PORT=$(ls /dev/cu.usbserial-* | head -1)` instead.
 
+> **Linux host** (e.g. Raspberry Pi): `ioreg` and `/dev/cu.*` are macOS-only. Ports appear as
+> `/dev/ttyACM*` (native USB / WCH bridge) or `/dev/ttyUSB*` (CP210x/CH340) — use
+> `PORT=$(ls /dev/ttyACM* /dev/ttyUSB* 2>/dev/null | head -1)`, and install esptool via
+> `pipx install esptool` (no brew).
+
 **Success looks like:** `Hash of data verified.` for each region, then
 `Hard resetting via RTS pin...` → `Done`. The app image lands at `0x20000` (dual-OTA
 layout). After reset the device rejoins WiFi in a few seconds; reload
