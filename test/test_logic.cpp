@@ -253,6 +253,11 @@ static void test_mcp() {
     CHECK(tk::clamped_int(-1e300, 50, 100)  == 50);
     CHECK(tk::clamped_int(99.9,   50, 100)  == 99);
     CHECK(tk::clamped_int(1440.0, 0, 1439)  == 1439);
+    // NaN compares false against BOTH bounds, so without its explicit check it would
+    // fall through to the (int) cast — the exact UB this guard exists to prevent
+    // (reachable via the string-argument path: strtod accepts "nan").
+    CHECK(tk::clamped_int(std::nan(""), 0, 48) == 0);
+    CHECK(tk::clamped_int(std::nan(""), 50, 100) == 50);
 
     // Command outcome text — shared by the REST /command reason and the MCP tools/call
     // result, so both paths report identical outcomes.

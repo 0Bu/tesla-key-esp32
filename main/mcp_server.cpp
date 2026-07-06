@@ -56,6 +56,10 @@ static cJSON* rpc_envelope_(cJSON* id) {
 }
 
 static esp_err_t send_rpc_result_(httpd_req_t* req, cJSON* id, cJSON* result) {
+    // Same guard as send_rpc_error_'s err alloc: a heap-exhausted result build hands in
+    // NULL, and cJSON_AddItemToObject(root, ..., NULL) adds nothing — the envelope would
+    // serialize with neither result nor error (invalid JSON-RPC). 503 instead.
+    if (!result) { cJSON_Delete(id); return send_oom_503_(req); }
     cJSON* root = rpc_envelope_(id);
     if (!root) { cJSON_Delete(result); return send_oom_503_(req); }
     cJSON_AddItemToObject(root, "result", result);
