@@ -293,23 +293,26 @@ def signal_bars(cv, x, y, level, on_col=BAR_ON):
 
 # Big BLE "searching for a connection" animation, drawn where the battery would
 # be (no battery while disconnected): a Bluetooth symbol on the left and a compact
-# cluster of 5 ascending bars on the right; a SINGLE bright light-green bar hops
-# across the dark-green resting bars to read as "scanning for the BLE link".
+# cluster of 5 ascending bars on the right; a bright light-green highlight sweeps
+# across the dark-green resting bars, with the bars near the peak lit half-bright
+# (a soft colour gradient) to read as "scanning for the BLE link".
 SRCH_N, SRCH_BW, SRCH_GAP, SRCH_X0, SRCH_BASE = 5, 10, 6, 80, 70   # compact, right-flush
 SRCH_ICON_SCALE = 3
 SRCH_BT_X, SRCH_BT_Y = 24, 36                     # Bluetooth glyph, off the left edge
-SRCH_STEPS = 3                                    # frames each bar stays lit
+SRCH_STEPS = 3                                    # animation sub-frames per bar
+SRCH_FALLOFF = 1.5                                # highlight width, in bars
 SRCH_HALF = (SRCH_N - 1) * SRCH_STEPS             # frames for one direction (small↔large)
 SRCH_CYCLE = 2 * SRCH_HALF                        # full ping-pong period
 
-# The swept bars are identical for WiFi and BLE searches; the single lit bar
-# ping-pongs (a triangle wave) out and back across them — not a one-way scan.
+# The swept bars are identical for WiFi and BLE searches; the highlight ping-pongs
+# (a triangle wave) out and back across them — not a one-way scan.
 def draw_search_bars(cv, frame):
     p = frame % SRCH_CYCLE
-    hi = (p if p <= SRCH_HALF else (SRCH_CYCLE - p)) // SRCH_STEPS  # index of the one lit bar
+    hp = (p / SRCH_STEPS) if p <= SRCH_HALF else ((SRCH_CYCLE - p) / SRCH_STEPS)  # bounce
     for i in range(SRCH_N):
         h = 12 + i * 7
-        col = BLE_LIGHT if i == hi else BLE_GREEN
+        t = max(0.0, 1.0 - abs(i - hp) / SRCH_FALLOFF)
+        col = lerp(BLE_GREEN, BLE_LIGHT, t)
         x = SRCH_X0 + i * (SRCH_BW + SRCH_GAP)
         cv.rect(x, SRCH_BASE - h, x + SRCH_BW, SRCH_BASE, col)
 

@@ -66,8 +66,8 @@ static const uint16_t C_DIV     = rgb565( 38,  46,  60);   // header divider
 static const uint16_t C_BAR_ON  = rgb565( 74, 175,  80);   // lit signal bar (green)
 static const uint16_t C_BAR_OFF = rgb565( 40,  50,  64);   // unlit signal bar
 static const uint16_t C_BOLT    = rgb565(255, 235, 120);   // charging bolt (yellow)
-// BLE "searching" bars: deep/dark green at rest, ONE bar lit bright light-green as
-// it hops across — high contrast so the single moving bar is obvious.
+// BLE "searching" bars sweep from a deep/dark green (resting) to a bright light-green
+// (highlight), with a soft gradient around the peak — high contrast so the wave is obvious.
 static const int C_BLE_LIGHT_RGB[3] = {170, 232, 158};
 static const int C_BLE_GREEN_RGB[3] = { 16,  78,  36};
 
@@ -290,27 +290,33 @@ static int rssi_bars(int rssi) {
 // "Searching for a connection" animation, drawn where the battery would be (no
 // battery while disconnected): a link label on the left — a Bluetooth glyph for BLE,
 // or the word "WiFi" for WiFi — and a compact, right-flush cluster of 5 ascending
-// bars where a SINGLE bright light-green bar hops across the dark-green resting
-// bars to read as "scanning". The swept bars are identical for WiFi and BLE; only
-// the label differs. Mirrors draw_search_bars()/draw_searching_* in tools/display_sim.py.
+// bars whose bright light-green highlight sweeps across the dark-green resting
+// bars to read as "scanning" — the bars near the peak are lit half-bright so the
+// wave has a soft gradient, not a single hard bar. The swept bars are identical for
+// WiFi and BLE; only the label differs.
+// Mirrors draw_search_bars()/draw_searching_* in tools/display_sim.py.
 static constexpr int   SRCH_N = 5, SRCH_BW = 10, SRCH_GAP = 6, SRCH_X0 = 80, SRCH_BASE = 70;  // compact, right-flush
 static constexpr int   SRCH_ICON_SCALE = 3;
 static constexpr int   SRCH_BT_X = 24, SRCH_BT_Y = 36;      // Bluetooth glyph, off the left edge
-static constexpr int   SRCH_STEPS = 3;                       // frames each bar stays lit
+static constexpr int   SRCH_STEPS = 3;                       // animation sub-frames per bar
+static constexpr float SRCH_FALLOFF = 1.5f;                  // highlight width, in bars
 static constexpr int   SRCH_HALF = (SRCH_N - 1) * SRCH_STEPS;   // one direction (small↔large)
 static constexpr int   SRCH_CYCLE = 2 * SRCH_HALF;           // full ping-pong period
 
-// The swept bars are identical for WiFi and BLE searches; the single lit bar
-// ping-pongs (a triangle wave) out and back across them — not a one-way scan.
+// The swept bars are identical for WiFi and BLE searches; the highlight ping-pongs
+// (a triangle wave) out and back across them — not a one-way scan.
 static void draw_search_bars(int frame) {
     int p = frame % SRCH_CYCLE;
-    int hi = (p <= SRCH_HALF ? p : (SRCH_CYCLE - p)) / SRCH_STEPS;   // index of the one lit bar
-    uint16_t rest = rgb565(C_BLE_GREEN_RGB[0], C_BLE_GREEN_RGB[1], C_BLE_GREEN_RGB[2]);
-    uint16_t lit  = rgb565(C_BLE_LIGHT_RGB[0], C_BLE_LIGHT_RGB[1], C_BLE_LIGHT_RGB[2]);
+    float hp = (p <= SRCH_HALF ? p : (SRCH_CYCLE - p)) / (float)SRCH_STEPS;
     for (int i = 0; i < SRCH_N; ++i) {
-        int h = 12 + i * 7;
+        int   h = 12 + i * 7;
+        float d = fabsf(i - hp);
+        float t = d >= SRCH_FALLOFF ? 0.0f : (1.0f - d / SRCH_FALLOFF);
+        uint16_t col = rgb565(lerp8(C_BLE_GREEN_RGB[0], C_BLE_LIGHT_RGB[0], t),
+                              lerp8(C_BLE_GREEN_RGB[1], C_BLE_LIGHT_RGB[1], t),
+                              lerp8(C_BLE_GREEN_RGB[2], C_BLE_LIGHT_RGB[2], t));
         int x = SRCH_X0 + i * (SRCH_BW + SRCH_GAP);
-        rect(x, SRCH_BASE - h, x + SRCH_BW, SRCH_BASE, i == hi ? lit : rest);
+        rect(x, SRCH_BASE - h, x + SRCH_BW, SRCH_BASE, col);
     }
 }
 // BLE search: a Bluetooth glyph left of the bars.
