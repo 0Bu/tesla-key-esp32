@@ -147,12 +147,6 @@ menu "Tesla Key Configuration"
     config TESLA_DISPLAY_BL
         int "Display backlight GPIO"
         default 0
-    config TESLA_DISPLAY_X_OFFSET
-        int "Panel column offset (ST7735 RAM offset)"
-        default 26
-    config TESLA_DISPLAY_Y_OFFSET
-        int "Panel row offset (ST7735 RAM offset)"
-        default 1
     endif
 
 endmenu

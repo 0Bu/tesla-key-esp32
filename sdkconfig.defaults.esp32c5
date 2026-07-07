@@ -24,9 +24,9 @@ CONFIG_SPIRAM_IGNORE_NOTFOUND=y
 # wiring in main/Kconfig.projbuild: MOSI2 / SCK6 / CS10 / DC3 / RST1 / BL0).
 CONFIG_TESLA_DISPLAY_ENABLED=y
 
-# Optimize the C5 build for SIZE (-Os). Only the C5 carries the display + PSRAM
-# support, which at the default -Og push the image past the 64 KB Secure-Boot
-# boundary and fill the OTA app slot (0x1f0000) with no room for the signature.
-# -Os recovers ~100 KB+ of flash at no functional cost, restoring comfortable
-# headroom under the slot; the other four targets keep the base optimization.
-CONFIG_COMPILER_OPTIMIZATION_SIZE=y
+# NOTE: this build stays on the base -Og (NO -Os). Whole-build -Os was measured to
+# HARD-FREEZE this firmware under evcc+BLE load (rejected "Package B", Issue #106) —
+# a physical power-cycle is the only recovery, which is unacceptable. The display +
+# PSRAM fit under the OTA slot at -Og because the Package A size levers (merged, #154)
+# freed ~64 KB. If future growth pushes the C5 image past the slot again, shave flash
+# with more zero-risk levers — do NOT reach for -Os.
