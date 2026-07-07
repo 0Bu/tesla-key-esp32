@@ -1,7 +1,7 @@
 [
   {
     "pr": 157,
-    "title": "feat(c5): ESP32-C5 (T-Dongle-C5) target + on-device ST7735 display",
+    "title": "feat(display): ESP32-C5 target + on-device ST7735 display (T-Dongle-C5 & T-Dongle-S3)",
     "version": "1.4.32-PR-157",
     "path": "PR/157/"
   }
