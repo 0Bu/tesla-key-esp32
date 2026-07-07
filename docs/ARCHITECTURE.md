@@ -91,9 +91,10 @@ esp32, 0x0 elsewhere) is handled automatically by `@flash_args` and the manifest
 browser-flashed and tried *before* merge. CI writes **only the flashable assets** for the PR
 (`build-pages.sh` with `PAGES_ASSETS_ONLY=1` → a per-PR `manifest.json` + same-origin bins, **no
 page of its own**) to `PR/<N>/` on the **`gh-pages` branch**. The single root installer is the
-only page: a **firmware picker** (a dropdown next to the Install button — "main" plus every open
-PR preview) selects the source, and `…/#<N>` is a deep-link that **preselects** that PR in the
-picker. The picker reads `previews.json` (a gh-pages-root index of `{pr,title,version,path}`,
+only page: a **caret on the Install button** opens a version menu (`1.4.30` for main on top,
+then `1.4.30-PR-<N>` per open PR, newest first) — picking one sets the button label
+(e.g. "Install firmware 1.4.30-PR-112") and the flash source; `…/#<N>` is a deep-link that
+**preselects** that PR. The menu reads `previews.json` (a gh-pages-root index of `{pr,title,version,path}`,
 maintained by `publish-pages-branch.sh` on each PR publish/close) and, on selection, just
 repoints the install button's `manifest` attribute at that `PR/<N>/manifest.json` (ESP Web Tools
 reads it at click; parts are relative so each stays same-origin). A `gh-pages` branch (not the Actions
