@@ -41,7 +41,7 @@ scripts/idf-docker.sh \
   sh -c "if [ -f sdkconfig ]; then idf.py build; else idf.py set-target $TARGET build; fi" \
   2>&1 | tail -15 || { echo "BUILD FAILED — not flashing"; exit 1; }
 # 2) Flash from the HOST (Docker can't reach USB). @flash_args writes the bootloader (at the
-#    target's own offset — 0x1000 on the classic esp32, 0x0 on s3/c3/c6/c5), partition-table@0x8000,
+#    target's own offset — 0x1000 on classic esp32, 0x2000 on esp32c5, 0x0 on s3/c3/c6), partition-table@0x8000,
 #    otadata@0xf000, app@0x20000 — NOT nvs@0x9000, so pairing survives.
 PORT=$(ioreg -l -w 0 2>/dev/null | grep -iE '"USB Product Name"|"IOCalloutDevice"' \
        | grep -iA1 '"USB Single Serial"' | grep -m1 -o '/dev/cu\.usbmodem[^"]*') \

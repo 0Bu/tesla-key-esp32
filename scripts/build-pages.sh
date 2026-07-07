@@ -13,7 +13,7 @@
 # bootloader / partition-table / app are flashed as SEPARATE parts at their own
 # offsets, so a USB (re)flash never overwrites the nvs partition (0x9000) → WiFi / VIN /
 # key survive a same-layout reflash. The bootloader offset is per-target: 0x1000 on the
-# classic esp32, 0x0 on esp32s3 / esp32c3 / esp32c6 / esp32c5.
+# classic esp32, 0x2000 on esp32c5 (its newer flash layout), 0x0 on esp32s3 / esp32c3 / esp32c6.
 #
 # ONE manifest + per-target image serves every supported chip — a single installer page
 # and a single OTA channel (the device pulls tesla-key-esp32[-<s3|c3|c6|c5>].bin for its chip).
@@ -39,8 +39,11 @@ chip_family() {
     *)       echo "" ;;
   esac
 }
-# target -> 2nd-stage bootloader flash offset (bytes). Classic esp32 = 0x1000, else 0x0.
-boot_offset() { case "$1" in esp32) echo 4096 ;; *) echo 0 ;; esac; }
+# target -> 2nd-stage bootloader flash offset (bytes). Classic esp32 = 0x1000, esp32c5 =
+# 0x2000 (its newer flash layout), s3/c3/c6 = 0x0. MUST match the per-target offset the host
+# @flash_args uses (ci-build-all.sh) — a wrong offset here makes the web installer (esp-web-tools
+# flashes each part at the offset in this manifest) write an UNBOOTABLE bootloader.
+boot_offset() { case "$1" in esp32) echo 4096 ;; esp32c5) echo 8192 ;; *) echo 0 ;; esac; }
 # target -> short app-image suffix so "esp32" appears once: esp32 -> "" (tesla-key-esp32.bin),
 # esp32s3 -> "-s3", esp32c3 -> "-c3", esp32c6 -> "-c6", esp32c5 -> "-c5". This names the
 # OTA-served Pages copy, so it MUST match TESLA_OTA_IMG_SUFFIX in main/ota_update.cpp and
