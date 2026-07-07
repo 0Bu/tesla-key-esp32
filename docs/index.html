@@ -112,15 +112,6 @@
           src="https://unpkg.com/esp-web-tools@10/dist/web/install-button.js"></script>
 </head>
 <body>
-  <script>
-    // #<N> on the root installer → jump to that PR's preview installer at PR/<N>/ (published
-    // to the gh-pages branch by CI). Only whole-number hashes, and never when already inside a
-    // /PR/<N>/ preview page. Runs before render so a shared link lands on the right page fast.
-    (function () {
-      var m = location.hash.match(/^#(\d+)$/);
-      if (m && !/\/PR\/\d+\//.test(location.pathname)) location.replace("PR/" + m[1] + "/");
-    })();
-  </script>
   <main>
     <div id="prbanner" class="prbanner" hidden></div>
     <header class="hero">
@@ -196,7 +187,6 @@
       var fwver = document.getElementById("fwver");
       var banner = document.getElementById("prbanner");
       var pick = document.getElementById("fwpick");
-      var onPR = location.pathname.match(/\/PR\/(\d+)\//);
 
       function clean(v) { return String(v).replace(/[<>&]/g, ""); }
       // The version is the single source of truth in each manifest.json (written by
@@ -217,17 +207,18 @@
           .catch(function () { return null; });
       }
 
-      // Per-PR preview page (/PR/<N>/): fixed single firmware — show the banner, no picker.
-      if (onPR) {
-        setBanner(onPR[1]);
-        getJson("manifest.json").then(function (m) { if (m && m.version) setLabel(m.version); });
-        return;
+      // The installer is a single root page; a PR preview (PR/<N>/) is just a manifest + bins,
+      // reached by picking it here or via a #<N> deep-link that preselects it. Selecting a
+      // source only repoints the install button's manifest (ESP Web Tools reads it at click;
+      // parts are relative so each PR/<N>/ stays same-origin).
+      var mainVer = null;
+      function apply() {
+        var o = pick.options[pick.selectedIndex];
+        if (btn) btn.setAttribute("manifest", o.value || "manifest.json");
+        setLabel(o.value ? o.dataset.ver : mainVer);
+        setBanner(o.value ? o.dataset.pr : null);
       }
 
-      // Root page: build the firmware picker — "main" plus every open PR that has a preview
-      // (listed in previews.json, maintained by CI). Selecting one just repoints the install
-      // button's manifest (ESP Web Tools reads it at click) at that PR/<N>/manifest.json.
-      var mainVer = null;
       getJson("manifest.json").then(function (m) {
         mainVer = m && m.version ? m.version : null;
         setLabel(mainVer);
@@ -239,6 +230,7 @@
         return getJson("previews.json");
       }).then(function (list) {
         if (!pick || !Array.isArray(list) || !list.length) return;
+        var byPr = {};
         list.forEach(function (p) {
           var o = document.createElement("option");
           o.value = p.path + "manifest.json";
@@ -247,14 +239,13 @@
           var t = p.title ? " — " + p.title : "";
           o.textContent = "PR #" + p.pr + (t.length > 60 ? t.slice(0, 60) + "…" : t);
           pick.appendChild(o);
+          byPr[p.pr] = pick.options.length - 1;
         });
         pick.hidden = false;   // reveal only when there is at least one PR preview
-        pick.addEventListener("change", function () {
-          var o = pick.options[pick.selectedIndex];
-          if (btn) btn.setAttribute("manifest", o.value || "manifest.json");
-          setLabel(o.value ? o.dataset.ver : mainVer);
-          setBanner(o.value ? o.dataset.pr : null);
-        });
+        pick.addEventListener("change", apply);
+        // #<N> deep-link → preselect that PR (when it has a live preview).
+        var h = location.hash.match(/^#(\d+)$/);
+        if (h && byPr[h[1]] != null) { pick.selectedIndex = byPr[h[1]]; apply(); }
       });
     })();
   </script>
