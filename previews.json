@@ -1,8 +1,1 @@
-[
-  {
-    "pr": 158,
-    "title": "feat(ci): sign PR builds + per-PR web preview installer (#<N> → gh-pages)",
-    "version": "1.4.30-PR-158",
-    "path": "PR/158/"
-  }
-]
+[]
