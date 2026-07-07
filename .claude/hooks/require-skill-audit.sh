@@ -64,11 +64,16 @@ newer=""
 if [ -f "$marker" ]; then
   # First source file newer than the marker (if any) => audit is stale.
   # macOS/BSD-find safe: no -quit; prune generated/vendored trees.
+  # EXCLUDE BOTH gate markers — this one AND the sibling .project-review-passed. They are gate
+  # state, not source, and a clean /project-review touches both (in some order). Counting the
+  # sibling as a "source file" would leave whichever was touched a hair earlier permanently
+  # newer-than → this gate forever stale: a mutual chicken-and-egg that blocks every merge.
   newer="$(find "$proj" \
       \( -path '*/.git' -o -path '*/build' -o -path '*/build_mock' \
          -o -path '*/managed_components' -o -path '*/_site' \
          -o -path '*/.claude/worktrees' \) -prune -o \
-      -type f ! -name '.skill-audit-passed' -newer "$marker" -print 2>/dev/null \
+      -type f ! -name '.skill-audit-passed' ! -name '.project-review-passed' \
+      -newer "$marker" -print 2>/dev/null \
       | head -n 1)"
   if [ -z "$newer" ]; then
     exit 0   # marker is newer than every source file -> audit is current -> allow
