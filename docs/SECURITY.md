@@ -222,16 +222,20 @@ CI signs every image with this key, supplied via an encrypted repository secret:
 1. Store the PEM as the **`OTA_SIGNING_KEY`** Actions secret (ideally scoped to a protected
    GitHub *Environment*). Paste the **full, unencrypted** RSA-3072 PEM — `BEGIN/END` lines
    included, with real newlines (not base64-wrapped, not single-line).
-2. Signing runs **only on a push or manual `workflow_dispatch` on `main`** — the only paths
-   that publish bins (a GitHub release and/or the GitHub Pages OTA channel, which is redeployed
-   on every main push and on a manual re-publish dispatch), so these are the only paths that
-   must be signed and the only place the key is exposed. `.github/workflows/build.yml` writes
-   the secret to `ota_signing_key.pem` for the run (gitignored, shredded afterwards), and
-   `scripts/ci-build-all.sh` signs each built image in place with
-   `espsecure.py sign_data --version 2`.
+2. Signing runs on a push or manual `workflow_dispatch` on `main` (the paths that publish bins
+   — a GitHub release and/or the GitHub Pages OTA channel, redeployed on every main push and on
+   a manual re-publish dispatch) **and on `pull_request`**, so a PR uploads a *signed*,
+   boot-able firmware artifact you can flash to try the change before merge. (An unsigned image
+   `abort()`s in a reboot loop on a signed-build device — see the warning above — so an unsigned
+   PR artifact would not be testable.) `.github/workflows/build.yml` writes the secret to
+   `ota_signing_key.pem` for the run (gitignored, shredded afterwards), and
+   `scripts/ci-build-all.sh` signs each built image in place with `espsecure.py sign_data
+   --version 2`. **Trade-off:** the key is therefore exposed to same-repo (branch) PR CI too,
+   not only main — acceptable for a single-maintainer repo where PRs come from trusted branches.
 3. A publish run on `main` **fails** if the secret is missing (refuses to publish unsigned
-   firmware to the OTA channel). **PR builds skip signing entirely** — a compile-only check
-   that needs no key (the size gate absorbs the ~4 KB the published, signed build will add).
+   firmware to the OTA channel). A **fork** PR gets no repository secrets, so it builds
+   **unsigned** (a compile-only check — that artifact won't boot on a signed-build device); the
+   size gate still absorbs the ~4 KB a signed build adds.
 
 For higher assurance, keep the key fully offline and sign on a trusted machine / KMS instead
 of in CI (no workflow change to the device is needed — only where `sign_data` runs).
