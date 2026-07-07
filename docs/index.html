@@ -112,6 +112,9 @@
       border:0;border-left:1px solid rgba(255,255,255,.4);border-radius:0 999px 999px 0;
       padding:0 1.05rem;cursor:pointer;display:flex;align-items:center;box-shadow:var(--shadow);
       transition:filter .15s ease}
+    /* display:flex above beats the UA [hidden]{display:none}, so re-assert it or the caret
+       shows even with no PR previews (dead arrow + a gap before the pill). */
+    .flash-caret[hidden]{display:none}
     .flash-caret:hover{filter:brightness(1.06)}
     .flash-caret .caret{display:inline-block;transition:transform .15s ease}
     .flash-caret[aria-expanded="true"] .caret{transform:rotate(180deg)}
