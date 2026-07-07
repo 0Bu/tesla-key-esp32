@@ -1,5 +1,11 @@
 [
   {
+    "pr": 159,
+    "title": "fix(installer): caret honors [hidden] — no dead arrow when there are no PR previews",
+    "version": "1.4.31-PR-159",
+    "path": "PR/159/"
+  },
+  {
     "pr": 157,
     "title": "feat(c5): ESP32-C5 (T-Dongle-C5) target + on-device ST7735 display",
     "version": "1.4.31-PR-157",
