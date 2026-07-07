@@ -216,13 +216,21 @@
       function setLabel(v) { if (fwver) fwver.textContent = v ? " " + clean(v) : ""; }
       function setBanner(n) {
         if (!banner) return;
-        if (!n) { banner.hidden = true; banner.innerHTML = ""; return; }
+        banner.textContent = "";
+        if (!n) { banner.hidden = true; return; }
         banner.hidden = false;
-        banner.innerHTML =
-          "🔬 <b>Preview build for PR #" + clean(n) + "</b> — not a release. Flashing installs " +
-          "this PR&rsquo;s firmware; the device still checks for OTA updates from <b>main</b>. " +
-          "<a href=\"https://github.com/0Bu/tesla-key-esp32/pull/" + clean(n) + "\">View PR #" +
-          clean(n) + "</a>.";
+        // Build via DOM (no innerHTML sink); reduce the PR ref to digits only, so it is safe in
+        // both text and the href — never HTML/quote metacharacters.
+        var num = String(n).replace(/\D/g, "");
+        function bold(t) { var e = document.createElement("b"); e.textContent = t; return e; }
+        var link = document.createElement("a");
+        link.href = "https://github.com/0Bu/tesla-key-esp32/pull/" + num;
+        link.textContent = "View PR #" + num;
+        banner.append(
+          "🔬 ", bold("Preview build for PR #" + num),
+          " — not a release. Flashing installs this PR's firmware; the device still checks for " +
+          "OTA updates from ", bold("main"), ". ", link, "."
+        );
       }
       function getJson(url) {
         return fetch(url, { cache: "no-store" }).then(function (r) { return r.ok ? r.json() : null; })
