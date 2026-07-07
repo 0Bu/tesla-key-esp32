@@ -114,10 +114,10 @@ only edits the broker address.
   re-pair once; after that, use OTA.
 - **Try a PR before merge:** every same-repo pull request publishes a signed preview build you
   can browser-flash like the release — open its own installer page at
-  `https://0bu.github.io/tesla-key-esp32/PR/<PR-number>/` (e.g. `…/PR/157/`), or pick the version
-  from the **caret menu on the Install button** on the main page (main + every open PR). It
-  reports version `<latest>-PR-<N>` and still checks for OTA updates from `main`, so a later
-  release moves the device forward. Removed automatically when the PR closes.
+  `https://0bu.github.io/tesla-key-esp32/PR/<PR-number>/` (e.g. `…/PR/157/`). The main installer
+  page always flashes `main`. A PR preview reports version `<latest>-PR-<N>` and still checks for
+  OTA updates from `main`, so a later release moves the device forward. Removed automatically when
+  the PR closes.
 - **MCP endpoint:** AI agents (Claude Desktop/Code, VS Code, …) can talk to the device
   directly via the [Model Context Protocol](https://modelcontextprotocol.io/) at
   `http://<ESP32-IP>/mcp` (Streamable HTTP). The exposed tools mirror the charging command
