@@ -1,5 +1,11 @@
 [
   {
+    "pr": 160,
+    "title": "feat(installer): full browsable preview page per PR at PR/<N>/",
+    "version": "1.4.31-PR-160",
+    "path": "PR/160/"
+  },
+  {
     "pr": 157,
     "title": "feat(c5): ESP32-C5 (T-Dongle-C5) target + on-device ST7735 display",
     "version": "1.4.31-PR-157",
