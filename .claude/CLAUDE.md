@@ -40,7 +40,9 @@ scripts/run-mock-tests.sh   # compile + run host logic tests in seconds (cmake +
 It covers VIN validation, imperial→metric conversion, the `link_state()` four-state machine
 (incl. the debounced-ASLEEP asymmetry) and its `/status`/MQTT strings, the per-target
 platform/OTA-suffix mapping, the MCP protocol core (version negotiation, method routing,
-tool/arg-spec registry, int clamp) and the shared command-outcome text — all delegated to
+tool/arg-spec registry, int clamp), the shared command-outcome text and the on-device display
+presenter (the priority ladder / SoC gradient / RSSI→bars / SSID-scroll decisions the ST7735
+renderer draws) — all delegated to
 IDF-free headers in `main/logic/` so the device runs the same code the test does. CI gates the firmware build on it (`logic-test` job). Add new
 hardware-free logic to `main/logic/` and a `CHECK` in `test/test_logic.cpp`. Full detail:
 [`test/README.md`](../test/README.md).

@@ -49,6 +49,7 @@ The firmware delegates these decision/conversion cores to IDF-free headers under
 | Per-target platform name + OTA image suffix | `logic/target.hpp` | `platform.hpp` (`TK_PLATFORM`), `ota_update.cpp` |
 | MCP protocol core (version negotiation, JSON-RPC method routing, tool/arg-spec registry, int clamp) | `logic/mcp.hpp` | `mcp_server.cpp` (`/mcp` schema + executor) |
 | Shared command-outcome text (success / Tesla reason / unreachable) | `logic/command_result.hpp` | `http_api.cpp` `/command` reason, `mcp_server.cpp` tools/call result |
+| On-device display presenter (hero priority ladder, SoC gradient, RSSI→bars, SSID scroll) reading the shared UI snapshot | `logic/display_model.hpp`, `logic/ui_state.hpp` | `display.cpp` renderer (via `VehicleController::ui_snapshot()`) |
 
 The target mapping is double-locked: `ota_update.cpp` `static_assert`s its compile-time
 image-suffix literal against `tk::image_suffix()`, so the macro and the host-tested

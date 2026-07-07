@@ -10,6 +10,7 @@
 #include "ble_client.hpp"
 #include "nvs_storage.hpp"
 #include "logic/link_state.hpp"
+#include "logic/ui_state.hpp"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
@@ -141,6 +142,12 @@ public:
     DriveStateResult    get_cached_drive()    { return copy_locked_(last_known_drive_); }
     TirePressureResult  get_cached_tires()    { return copy_locked_(last_known_tires_); }
     ClosuresStateResult get_cached_closures() { return copy_locked_(last_known_closures_); }
+
+    // Vehicle-owned half of the on-device status-indicator input (the ST7735 display and the
+    // APA102 LED) — see logic/ui_state.hpp. Collects link_state / ble_* / cached charge in ONE
+    // pass so a presenter never mixes state from different instants across a frame. The caller
+    // fills the WiFi fields (esp_wifi) and `paired` (its own ≤1 Hz has_session() sample — NVS).
+    tk::UiSnapshot ui_snapshot();
 
     // Seconds since the last *live* infotainment data (charge/climate/drive/tires/
     // closures) was received, written to `out`. Returns false if nothing has been

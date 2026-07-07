@@ -20,6 +20,8 @@
 #include "logic/target.hpp"
 #include "logic/mcp.hpp"
 #include "logic/command_result.hpp"
+#include "logic/ui_state.hpp"
+#include "logic/display_model.hpp"
 
 #include <cmath>
 #include <cstdio>
@@ -272,6 +274,119 @@ static void test_mcp() {
     CHECK_STR(tk::command_result_text(false, no_reason),    "vehicle not reachable");
 }
 
+// ─── on-device display presenter (logic/display_model.hpp <- display.cpp compose()) ──────
+namespace dm = tk::display;
+
+// Build a UiSnapshot tersely for the presenter tests.
+static tk::UiSnapshot us(tk::LinkState ls, bool wifi_on, bool ble_conn, bool paired,
+                         bool have_soc, int soc, bool charging) {
+    tk::UiSnapshot s;
+    s.link_state     = ls;
+    s.wifi_on        = wifi_on;
+    s.ble_connected  = ble_conn;
+    s.paired         = paired;
+    s.have_soc       = have_soc;
+    s.soc            = soc;
+    s.charging       = charging;
+    return s;
+}
+
+static void test_display_helpers() {
+    // RSSI → 0..4 bars, at and around every threshold.
+    CHECK(dm::rssi_bars(-50) == 4);  CHECK(dm::rssi_bars(-55) == 4);  CHECK(dm::rssi_bars(-56) == 3);
+    CHECK(dm::rssi_bars(-65) == 3);  CHECK(dm::rssi_bars(-66) == 2);
+    CHECK(dm::rssi_bars(-75) == 2);  CHECK(dm::rssi_bars(-76) == 1);
+    CHECK(dm::rssi_bars(-85) == 1);  CHECK(dm::rssi_bars(-86) == 0);  CHECK(dm::rssi_bars(-99) == 0);
+
+    // Text width: 5px glyph + 1px gap = 6 px/char, times the scale.
+    CHECK(dm::text_w("",     2) == 0);
+    CHECK(dm::text_w("A",    2) == 12);
+    CHECK(dm::text_w("WiFi", 2) == 48);
+
+    // SoC gradient: the five stops land on exact colours (mirrors soc_rgb()).
+    int r, g, b;
+    dm::soc_rgb(0,   r, g, b); CHECK(r == 231 && g ==  76 && b == 60);
+    dm::soc_rgb(18,  r, g, b); CHECK(r == 240 && g == 190 && b == 40);
+    dm::soc_rgb(45,  r, g, b); CHECK(r == 120 && g == 200 && b == 90);
+    dm::soc_rgb(80,  r, g, b); CHECK(r ==  60 && g == 175 && b == 80);
+    dm::soc_rgb(100, r, g, b); CHECK(r ==  30 && g == 140 && b == 60);
+    // Out-of-range clamps to the endpoints, not past them.
+    dm::soc_rgb(-5,  r, g, b); CHECK(r == 231 && g ==  76 && b == 60);
+    dm::soc_rgb(150, r, g, b); CHECK(r ==  30 && g == 140 && b == 60);
+
+    // SSID marquee ping-pong (span 10, pause 8, speed 2 → travel 5, period 26).
+    CHECK(dm::scroll_offset(0,  10) == 0);    // paused at the start
+    CHECK(dm::scroll_offset(7,  10) == 0);    // still in the start pause
+    CHECK(dm::scroll_offset(10, 10) == 4);    // scrolling out
+    CHECK(dm::scroll_offset(15, 10) == 10);   // paused at the end (fully revealed)
+    CHECK(dm::scroll_offset(200, 0) == 0);    // nothing to scroll
+}
+
+static void test_display_model() {
+    using LS = tk::LinkState;
+
+    // ── priority ladder: WiFi search > pairing > BLE search > battery ──
+    // WiFi down ⇒ WifiSearch, whatever else is true.
+    CHECK(dm::compose(us(LS::Awake, /*wifi*/false, /*ble*/true, /*paired*/true,
+                         /*soc?*/true, 50, false), 0).hero == dm::Hero::WifiSearch);
+    // WiFi up, BLE link up but not yet paired ⇒ Pairing.
+    CHECK(dm::compose(us(LS::Idle, true, /*ble*/true, /*paired*/false,
+                         false, 0, false), 0).hero == dm::Hero::Pairing);
+    // WiFi up, no BLE link, no usable SoC ⇒ BLE search.
+    CHECK(dm::compose(us(LS::Unknown, true, /*ble*/false, false,
+                         /*soc?*/false, 0, false), 0).hero == dm::Hero::BleSearch);
+    // Unreachable overrides a stale cached SoC ⇒ still BLE search, never battery.
+    CHECK(dm::compose(us(LS::Unreachable, true, false, true,
+                         /*soc?*/true, 50, false), 0).hero == dm::Hero::BleSearch);
+    // WiFi up, reachable, have SoC ⇒ Battery.
+    CHECK(dm::compose(us(LS::Idle, true, true, true, true, 50, false), 0).hero == dm::Hero::Battery);
+
+    // ── header indicator visibility (a search hero hides its own small indicator) ──
+    dm::Model wifi_s = dm::compose(us(LS::Unknown, false, false, false, false, 0, false), 0);
+    CHECK(!wifi_s.show_wifi && wifi_s.show_ble);          // WiFi hero: wifi hidden, ble shown
+    dm::Model ble_s = dm::compose(us(LS::Unknown, true, false, false, false, 0, false), 0);
+    CHECK(ble_s.show_wifi && !ble_s.show_ble);            // BLE hero: ble hidden, wifi shown
+    dm::Model batt = dm::compose(us(LS::Idle, true, true, true, true, 50, false), 0);
+    CHECK(batt.show_wifi && batt.show_ble);               // battery: both shown
+
+    // ── SSID available width: wider when the BLE header is absent (BLE-search hero) ──
+    CHECK(ble_s.ssid_avail == 130);                       // 158 - 28
+    CHECK(batt.ssid_avail  ==  98);                       // 158 - 28 - 32
+
+    // ── BLE header bars: 0 without a live RSSI, mapped when present ──
+    tk::UiSnapshot rssi_snap = us(LS::Idle, true, true, true, true, 50, false);
+    rssi_snap.ble_rssi_valid = true; rssi_snap.ble_rssi = -60;
+    dm::Model rssi_m = dm::compose(rssi_snap, 0);
+    CHECK(rssi_m.ble_bars == 3 && rssi_m.ble_glyph_on);
+    CHECK(dm::compose(us(LS::Idle, true, true, true, true, 50, false), 0).ble_bars == 0);  // no RSSI
+
+    // ── battery fill colour, SoC clamp, and the charging bolt ──
+    dm::Model full = dm::compose(us(LS::Idle, true, true, true, true, 150, /*charging*/true), 0);
+    CHECK(full.soc == 100);                               // clamped
+    CHECK(!full.show_bolt);                               // no bolt at 100%
+    dm::Model chg = dm::compose(us(LS::Idle, true, true, true, true, 80, /*charging*/true), 0);
+    CHECK(chg.show_bolt);                                 // charging below 100% ⇒ bolt
+    CHECK(chg.fill_r == 60 && chg.fill_g == 175 && chg.fill_b == 80);   // soc 80 → the 0.80 gradient stop
+
+    // Asleep dims the fill toward the panel colour AND suppresses the bolt even when charging.
+    dm::Model slp = dm::compose(us(LS::Asleep, true, true, true, true, 80, /*charging*/true), 0);
+    CHECK(slp.asleep && !slp.show_bolt);
+    int br, bg, bb; dm::soc_rgb(80, br, bg, bb);
+    CHECK(slp.fill_r == dm::lerp8(br, dm::kAsleepDimR, 0.5f));
+    CHECK(slp.fill_g == dm::lerp8(bg, dm::kAsleepDimG, 0.5f));
+    CHECK(slp.fill_b == dm::lerp8(bb, dm::kAsleepDimB, 0.5f));
+
+    // ── animating: search/pairing heroes always; battery only while the SSID scrolls ──
+    CHECK(wifi_s.animating);
+    CHECK(dm::compose(us(LS::Idle, true, true, false, false, 0, false), 0).animating);  // pairing
+    CHECK(ble_s.animating);
+    CHECK(!batt.animating);                               // short SSID ("") ⇒ static battery
+    tk::UiSnapshot long_ssid = us(LS::Idle, true, true, true, true, 50, false);
+    std::strcpy(long_ssid.ssid, "AVeryLongNetworkNameXYZ");   // > 98 px at scale 2 ⇒ marquee
+    dm::Model scr = dm::compose(long_ssid, 10);
+    CHECK(scr.ssid_scrolling && scr.animating);
+}
+
 int main() {
     test_vin();
     test_units();
@@ -279,6 +394,8 @@ int main() {
     test_link_state_strings();
     test_target();
     test_mcp();
+    test_display_helpers();
+    test_display_model();
 
     if (g_failures == 0) {
         std::printf("OK  %d checks passed\n", g_checks);
