@@ -87,6 +87,34 @@ detected chip); OTA is a single channel where each device pulls its own
 otherwise). The per-target bootloader offset (0x1000 on the classic
 esp32, 0x0 elsewhere) is handled automatically by `@flash_args` and the manifest.
 
+**PR preview installer.** Every same-repo PR publishes its **signed** build to a per-PR
+installer so a change can be browser-flashed and tried *before* merge. CI writes the PR's
+self-contained site (`build-pages.sh`, same page + a per-PR `manifest.json` + same-origin
+bins) to `PR/<N>/` on the **`gh-pages` branch**, and the root installer treats
+`…/#<N>` as a shortcut that redirects to `PR/<N>/`. A `gh-pages` branch (not the Actions
+Pages artifact) is required because the browser flasher fetches every part in-page and GitHub
+release assets carry no CORS headers, so the bins must be same-origin — and the atomic Actions
+deploy (main-only, whole-site) can't host per-PR subpaths. Main owns the gh-pages **root**;
+each PR owns `PR/<N>/`; both are synced by `scripts/publish-pages-branch.sh` (root sync
+preserves the `PR/` tree). Constraints:
+
+- **Signed-only.** Fork PRs get no `OTA_SIGNING_KEY` → build unsigned → **no** preview
+  published (an unsigned image crash-loops at boot — see [`SECURITY.md`](SECURITY.md)).
+- **Versioning `<latest-tag>-PR-<N>`** (e.g. `1.4.30-PR-157`), stamped from the newest
+  released tag. `ver_newer()` parses only `x.y.z` and ignores the suffix, so basing on the
+  *latest release* (not `next`) guarantees a later main release compares strictly-newer → the
+  PR-flashed device OTA-updates forward to main; a `next` base would collide with the number
+  the merge cuts and stall OTA.
+- **OTA stays on main.** `CONFIG_TESLA_OTA_MANIFEST_URL` is compile-time and unchanged in PR
+  builds, so a PR-flashed device checks OTA against the **main** manifest, never its own
+  preview. The real-key signature anchors trust so the main release is accepted.
+- **Cleanup.** `.github/workflows/pr-preview-cleanup.yml` removes `PR/<N>/` when the PR closes
+  (merged or not).
+
+*(Rollout note: this hosting only goes live once GitHub Pages' source is switched from "GitHub
+Actions" to "Deploy from branch: `gh-pages`"; until then the gh-pages branch is populated but
+inert and the Actions artifact remains the live site — a zero-downtime migration.)*
+
 ## Home Assistant MQTT bridge
 
 `main/mqtt_ha.cpp` publishes **all** cached telemetry + device status to an MQTT broker

@@ -100,12 +100,25 @@
     .foot{color:var(--muted);font-size:.8rem;text-align:center;margin-top:1.75rem;line-height:1.5}
     a{color:var(--accent)}
     b{font-weight:650}
+    .prbanner{background:#3a2a00;border:1px solid #7a5c00;color:#ffd479;
+      padding:.8rem 1rem;border-radius:.6rem;margin-bottom:1.25rem;font-size:.9rem;line-height:1.5}
+    .prbanner a{color:#ffd479;text-decoration:underline}
   </style>
   <script type="module"
           src="https://unpkg.com/esp-web-tools@10/dist/web/install-button.js"></script>
 </head>
 <body>
+  <script>
+    // #<N> on the root installer → jump to that PR's preview installer at PR/<N>/ (published
+    // to the gh-pages branch by CI). Only whole-number hashes, and never when already inside a
+    // /PR/<N>/ preview page. Runs before render so a shared link lands on the right page fast.
+    (function () {
+      var m = location.hash.match(/^#(\d+)$/);
+      if (m && !/\/PR\/\d+\//.test(location.pathname)) location.replace("PR/" + m[1] + "/");
+    })();
+  </script>
   <main>
+    <div id="prbanner" class="prbanner" hidden></div>
     <header class="hero">
       <span class="badge">⚡ ESP32 · S3 · C3 · C6 Firmware</span>
       <h1>Flash tesla-key-esp32</h1>
@@ -167,6 +180,21 @@
   </main>
 
   <script>
+    // On a PR preview page (/PR/<N>/) show an amber banner: this is a pre-merge build, and
+    // the device still checks OTA against main — see docs/ARCHITECTURE.md (PR preview installer).
+    (function () {
+      var pm = location.pathname.match(/\/PR\/(\d+)\//);
+      if (!pm) return;
+      var b = document.getElementById("prbanner");
+      if (!b) return;
+      var n = pm[1];
+      b.hidden = false;
+      b.innerHTML =
+        "🔬 <b>Preview build for PR #" + n + "</b> — not a release. Flashing installs " +
+        "this PR&rsquo;s firmware; the device still checks for OTA updates from <b>main</b>. " +
+        "<a href=\"https://github.com/0Bu/tesla-key-esp32/pull/" + n + "\">View PR #" + n + "</a>.";
+    })();
+
     // Append the firmware version that will actually be flashed to the button
     // label. The version is the single source of truth in manifest.json (written
     // by build-pages.sh in CI), which ESP Web Tools also reads — so the label can

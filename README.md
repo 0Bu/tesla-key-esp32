@@ -112,6 +112,10 @@ only edits the broker address.
 - The [web installer](https://0bu.github.io/tesla-key-esp32/) is only needed for the very first
   install (or to recover a device). It does a full erase, so WiFi/VIN/key are reset and you
   re-pair once; after that, use OTA.
+- **Try a PR before merge:** every same-repo pull request publishes a signed preview build at
+  `https://0bu.github.io/tesla-key-esp32/#<PR-number>` (e.g. `…/#157`) that you can browser-flash
+  like the release. It reports version `<latest>-PR-<N>` and still checks for OTA updates from
+  `main`, so a later release moves the device forward. Removed automatically when the PR closes.
 - **MCP endpoint:** AI agents (Claude Desktop/Code, VS Code, …) can talk to the device
   directly via the [Model Context Protocol](https://modelcontextprotocol.io/) at
   `http://<ESP32-IP>/mcp` (Streamable HTTP). The exposed tools mirror the charging command
