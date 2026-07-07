@@ -113,8 +113,19 @@ five images are the same tesla-ble revision.
 **On-device ST7735 display (LilyGO T-Dongle-C5 and T-Dongle-S3).** Both dongles carry the same
 0.96" ST7735 LCD and it IS driven — see `main/display.cpp` (landscape 160x80 status panel:
 WiFi/BLE header + a SoC battery, or a WiFi/BLE-search / "Pairing…" animation; cache-only, never
-wakes the car). The rendering is identical on both boards (the layout mirrors
-`tools/display_sim.py` 1:1); only the hardware wiring differs, from Kconfig/`sdkconfig.defaults.*`:
+wakes the car). **What to show** — the priority ladder (WiFi-search > pairing > BLE-search >
+battery), the SoC gradient, the RSSI→bars mapping and the SSID-scroll offset — is decided by a
+pure, host-tested presenter (`main/logic/display_model.hpp`) reading a shared, IDF-free
+`UiSnapshot` (`main/logic/ui_state.hpp`, assembled once under the cache lock via
+`VehicleController::ui_snapshot()`); `display.cpp` is a thin renderer that only DRAWS the
+resulting `Model` — so those decisions are unit-tested in `test/` without a board (`logic-test`
+job), the layout constants have one home, and a future status LED can consume the same snapshot.
+The rendering is identical on both boards (the layout mirrors
+`tools/display_sim.py`, the pixel-exact offline renderer and font source of truth — and that
+mirror is no longer by hand: `scripts/check-display-sim-parity.sh`, run by
+`scripts/run-mock-tests.sh`, diffs the sim's `decide()` against golden vectors the C++ presenter
+emits, so a drift between firmware and sim fails the `logic-test` gate). Only the hardware wiring
+differs, from Kconfig/`sdkconfig.defaults.*`:
 
 - **T-Dongle-C5** (ESP32-C5HR8, 16 MB flash, 8 MB PSRAM): framebuffer in PSRAM; SPI 20 MHz; BOOT
   button on GPIO28. Compiled for esp32c5 via `CONFIG_TESLA_DISPLAY_ENABLED` in
@@ -129,6 +140,19 @@ wakes the car). The rendering is identical on both boards (the layout mirrors
 On both boards the backlight is active-low, and a tap on the BOOT button flips the panel 180°
 (MADCTL 0xA8↔0x68, persisted in NVS `tesla_cfg/disp_flip`). Compiled to a no-op stub on the other
 targets (`#else` in `display.cpp`), so one source tree still serves every board.
+
+**On-device status LED (T-Dongle underside APA102).** A second, independent indicator: the single
+addressable RGB pixel on the dongle underside (`main/led_status.cpp`), driven as a colour +
+animation status light — WiFi/BLE search (breathing), pairing (pulse), charging (green swell),
+a dimmed SoC colour when parked, blue for an OTA in flight, amber/red for warnings/errors. Its
+priority ladder lives in the pure, host-tested `logic/led_status.hpp` and reads the **same shared
+`UiSnapshot`** the ST7735 presenter consumes (so the panel, the LED, the web-UI hero and MQTT never
+disagree about the car's state), plus a tiny LED-only `LedAlerts` for the latched error/warn/OTA
+tiers (those hold a transient fault visible for 10–15 s). The SoC colour comes from the shared
+`logic/soc_gradient.hpp` ramp — the same table the battery fill uses. Cache-only (never wakes the
+car), needs no MQTT and no panel (works on a display-less board), an ~12-byte bit-banged APA102
+frame with no heap. Opt-in: a no-op stub unless `CONFIG_TESLA_LED_ENABLED` (default off — not every
+board carries this LED); pins/brightness from Kconfig (C5 DI=5/CI=4, T-Dongle-S3 40/39).
 
 **ESP32-C5, 5 GHz WiFi and BLE coexistence.** The C5 is Espressif's dual-band Wi-Fi 6 (2.4 + 5
 GHz) RISC-V part, so a natural question is whether running WiFi on 5 GHz reduces the WiFi↔BLE
@@ -153,19 +177,14 @@ browser-flashed and tried *before* merge. CI writes the PR's **full self-contain
 (`build-pages.sh` → the installer page + a per-PR `manifest.json` + same-origin bins) to
 `PR/<N>/` on the **`gh-pages` branch**, so `https://0bu.github.io/tesla-key-esp32/PR/<N>/` is a
 directly browsable installer for that PR — it detects it is under `/PR/<N>/`, shows a preview
-banner, and flashes that PR's own firmware. The **root** page additionally offers a **caret on
-the Install button** that opens a version menu (`1.4.31` for main on top, then `1.4.31-PR-<N>`
-per open PR, newest first) — picking one sets the button label (e.g. "Install firmware
-1.4.31-PR-157") and the flash source; `…/#<N>` deep-links preselect that PR. The menu reads
-`previews.json` (a gh-pages-root index of `{pr,title,version,path}`, maintained by
-`publish-pages-branch.sh` on each PR publish/close) and, on selection, just repoints the install
-button's `manifest` attribute at that `PR/<N>/manifest.json` (ESP Web Tools reads it at click;
-parts are relative so each stays same-origin). A `gh-pages` branch (not the Actions
+banner, and flashes that PR's own firmware. The **root** page has **no version picker**: it
+always flashes **main**. A PR's firmware is reached only by its own `PR/<N>/` page — open the URL
+directly, or follow the link posted on the PR. A `gh-pages` branch (not the Actions
 Pages artifact) is required because the browser flasher fetches every part in-page and GitHub
 release assets carry no CORS headers, so the bins must be same-origin — and the atomic Actions
 deploy (main-only, whole-site) can't host per-PR subpaths. Main owns the gh-pages **root**;
 each PR owns `PR/<N>/`; both are synced by `scripts/publish-pages-branch.sh` (root sync
-preserves the `PR/` tree **and** `previews.json`). Constraints:
+preserves the `PR/` tree). Constraints:
 
 - **Signed-only.** Fork PRs get no `OTA_SIGNING_KEY` → build unsigned → **no** preview
   published (an unsigned image crash-loops at boot — see [`SECURITY.md`](SECURITY.md)).
