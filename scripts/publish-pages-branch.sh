@@ -8,9 +8,15 @@
 # and only from main, so it can't host per-PR subpaths. A gh-pages branch lets main own the root
 # and each PR own PR/<N>/ independently. See docs/ARCHITECTURE.md (PR preview installer).
 #
-#   root <srcdir>       sync <srcdir> into the gh-pages ROOT, preserving the PR/ preview tree
-#   pr   <srcdir> <N>   replace gh-pages PR/<N>/ with <srcdir> (N = PR number, digits)
-#   rm   <N>            remove gh-pages PR/<N>/  (called on PR close)
+#   root <srcdir>                    sync <srcdir> into the gh-pages ROOT, preserving the
+#                                    PR/ preview tree and previews.json
+#   pr   <srcdir> <N> [title] [ver]  replace gh-pages PR/<N>/ with <srcdir>, and add/replace
+#                                    the PR's entry in previews.json (N = PR number, digits)
+#   rm   <N>                         remove gh-pages PR/<N>/ and its previews.json entry
+#
+# previews.json (gh-pages root) is the index the installer's firmware picker reads: one entry
+# {pr,title,version,path} per open PR that currently has a preview. Needs `jq` (present on the
+# GitHub runner).
 #
 # Idempotent and concurrency-safe: main, PR and cleanup runs can all push gh-pages at once, so
 # each attempt re-clones the LATEST gh-pages and re-applies the change on top → always a
@@ -27,10 +33,10 @@ server="${GITHUB_SERVER_URL:-https://github.com}"
 remote="https://x-access-token:${GITHUB_TOKEN}@${server#https://}/${GITHUB_REPOSITORY}.git"
 
 # Parse + validate args per mode up front (fail fast, before touching the remote).
-src=""; num=""
+src=""; num=""; title=""; version=""
 case "$mode" in
   root) src="${2:?root needs <srcdir>}" ;;
-  pr)   src="${2:?pr needs <srcdir>}"; num="${3:?pr needs <N>}" ;;
+  pr)   src="${2:?pr needs <srcdir>}"; num="${3:?pr needs <N>}"; title="${4:-}"; version="${5:-}" ;;
   rm)   num="${2:?rm needs <N>}" ;;
   *)    echo "unknown mode '$mode'" >&2; exit 1 ;;
 esac
@@ -39,21 +45,39 @@ if [ -n "$num" ] && ! [[ "$num" =~ ^[0-9]+$ ]]; then
 fi
 [ -n "$src" ] && [ ! -d "$src" ] && { echo "source dir '$src' not found" >&2; exit 1; }
 
+# Add/replace this PR's entry in the root previews.json (the installer's picker index). Each run
+# touches only its OWN entry, so concurrent PRs merge under the re-clone-and-reapply loop below.
+update_index() {
+  local idx="$1/previews.json" cur='[]'
+  [ -f "$idx" ] && cur="$(cat "$idx")"
+  jq -n --argjson cur "$cur" --argjson pr "$num" --arg title "$title" --arg version "$version" \
+    '$cur | map(select(.pr != $pr))
+          + [{pr:$pr, title:$title, version:$version, path:"PR/\($pr)/"}]
+          | sort_by(.pr) | reverse' > "$idx"
+}
+remove_from_index() {
+  local idx="$1/previews.json"
+  [ -f "$idx" ] || return 0
+  jq --argjson pr "$num" 'map(select(.pr != $pr))' "$idx" > "$idx.tmp" && mv "$idx.tmp" "$idx"
+}
+
 # Apply the requested change to a fresh gh-pages checkout at $1 (idempotent).
 apply_changes() {
   local work="$1"
   case "$mode" in
     root)
-      # Root files only — NEVER delete the PR/ preview tree owned by PR runs.
-      rsync -a --delete --exclude='.git/' --exclude='PR/' "$src"/ "$work"/
+      # Root files only — NEVER delete the PR/ preview tree or previews.json (PR-owned).
+      rsync -a --delete --exclude='.git/' --exclude='PR/' --exclude='previews.json' "$src"/ "$work"/
       ;;
     pr)
       rm -rf "${work:?}/PR/$num"
       mkdir -p "$work/PR/$num"
       rsync -a --delete --exclude='.git/' "$src"/ "$work/PR/$num"/
+      update_index "$work"
       ;;
     rm)
       rm -rf "${work:?}/PR/$num"
+      remove_from_index "$work"
       ;;
   esac
 }

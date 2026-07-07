@@ -210,7 +210,12 @@ jobs:
         if: github.event_name == 'pull_request' && steps.signkey.outputs.signed == 'true'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: ./scripts/publish-pages-branch.sh pr ./_pr_site "${{ github.event.pull_request.number }}"
+          # Title via env, NOT inline ${{ }}, so an attacker-controlled PR title can't inject
+          # into the run script. Number + version are integer/CI-controlled and safe inline.
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: >-
+          ./scripts/publish-pages-branch.sh pr ./_pr_site
+          "${{ github.event.pull_request.number }}" "$PR_TITLE" "${{ steps.stamp.outputs.disp }}"
 
       # Cut a release only when firmware-relevant files changed (source / deps /
       # esp-idf version / version.txt) — docs-only pushes redeploy Pages but don't

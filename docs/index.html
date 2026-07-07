@@ -103,6 +103,10 @@
     .prbanner{background:#3a2a00;border:1px solid #7a5c00;color:#ffd479;
       padding:.8rem 1rem;border-radius:.6rem;margin-bottom:1.25rem;font-size:.9rem;line-height:1.5}
     .prbanner a{color:#ffd479;text-decoration:underline}
+    .pickrow{display:flex;gap:.6rem;align-items:center;justify-content:center;flex-wrap:wrap}
+    .fwpick{font:inherit;font-size:.92rem;background:var(--card);color:var(--fg);
+      border:1px solid var(--border);border-radius:10px;padding:.6rem .7rem;
+      max-width:min(80vw,20rem);cursor:pointer;box-shadow:var(--shadow)}
   </style>
   <script type="module"
           src="https://unpkg.com/esp-web-tools@10/dist/web/install-button.js"></script>
@@ -127,11 +131,16 @@
     </header>
 
     <div class="cta">
-      <esp-web-install-button manifest="manifest.json">
-        <button class="flash" slot="activate">Install firmware<span id="fwver"></span></button>
-        <span slot="unsupported">Your browser does not support Web Serial — use desktop Chrome or Edge.</span>
-        <span slot="not-allowed">Serial access was not granted.</span>
-      </esp-web-install-button>
+      <div class="pickrow">
+        <esp-web-install-button manifest="manifest.json">
+          <button class="flash" slot="activate">Install firmware<span id="fwver"></span></button>
+          <span slot="unsupported">Your browser does not support Web Serial — use desktop Chrome or Edge.</span>
+          <span slot="not-allowed">Serial access was not granted.</span>
+        </esp-web-install-button>
+        <!-- Firmware source picker (main + every open PR preview). Revealed by JS only on the
+             root page and only when previews.json lists at least one PR. -->
+        <select id="fwpick" class="fwpick" hidden aria-label="Firmware source — main or a PR preview"></select>
+      </div>
       <p class="hint">Plug in your ESP32 board over USB first — the installer auto-detects the
         chip (ESP32, ESP32-S3, ESP32-C3 or ESP32-C6).</p>
     </div>
@@ -183,30 +192,71 @@
     // On a PR preview page (/PR/<N>/) show an amber banner: this is a pre-merge build, and
     // the device still checks OTA against main — see docs/ARCHITECTURE.md (PR preview installer).
     (function () {
-      var pm = location.pathname.match(/\/PR\/(\d+)\//);
-      if (!pm) return;
-      var b = document.getElementById("prbanner");
-      if (!b) return;
-      var n = pm[1];
-      b.hidden = false;
-      b.innerHTML =
-        "🔬 <b>Preview build for PR #" + n + "</b> — not a release. Flashing installs " +
-        "this PR&rsquo;s firmware; the device still checks for OTA updates from <b>main</b>. " +
-        "<a href=\"https://github.com/0Bu/tesla-key-esp32/pull/" + n + "\">View PR #" + n + "</a>.";
-    })();
+      var btn = document.querySelector("esp-web-install-button");
+      var fwver = document.getElementById("fwver");
+      var banner = document.getElementById("prbanner");
+      var pick = document.getElementById("fwpick");
+      var onPR = location.pathname.match(/\/PR\/(\d+)\//);
 
-    // Append the firmware version that will actually be flashed to the button
-    // label. The version is the single source of truth in manifest.json (written
-    // by build-pages.sh in CI), which ESP Web Tools also reads — so the label can
-    // never drift from the bins the installer writes.
-    fetch("manifest.json", { cache: "no-store" })
-      .then(function (r) { return r.ok ? r.json() : null; })
-      .then(function (m) {
-        if (!m || !m.version) return;
-        document.getElementById("fwver").textContent =
-          " " + String(m.version).replace(/[<>&]/g, "");
-      })
-      .catch(function () { /* no manifest (e.g. local preview) → label stays plain */ });
+      function clean(v) { return String(v).replace(/[<>&]/g, ""); }
+      // The version is the single source of truth in each manifest.json (written by
+      // build-pages.sh in CI) — reading it keeps the button label from drifting from the bins.
+      function setLabel(v) { if (fwver) fwver.textContent = v ? " " + clean(v) : ""; }
+      function setBanner(n) {
+        if (!banner) return;
+        if (!n) { banner.hidden = true; banner.innerHTML = ""; return; }
+        banner.hidden = false;
+        banner.innerHTML =
+          "🔬 <b>Preview build for PR #" + clean(n) + "</b> — not a release. Flashing installs " +
+          "this PR&rsquo;s firmware; the device still checks for OTA updates from <b>main</b>. " +
+          "<a href=\"https://github.com/0Bu/tesla-key-esp32/pull/" + clean(n) + "\">View PR #" +
+          clean(n) + "</a>.";
+      }
+      function getJson(url) {
+        return fetch(url, { cache: "no-store" }).then(function (r) { return r.ok ? r.json() : null; })
+          .catch(function () { return null; });
+      }
+
+      // Per-PR preview page (/PR/<N>/): fixed single firmware — show the banner, no picker.
+      if (onPR) {
+        setBanner(onPR[1]);
+        getJson("manifest.json").then(function (m) { if (m && m.version) setLabel(m.version); });
+        return;
+      }
+
+      // Root page: build the firmware picker — "main" plus every open PR that has a preview
+      // (listed in previews.json, maintained by CI). Selecting one just repoints the install
+      // button's manifest (ESP Web Tools reads it at click) at that PR/<N>/manifest.json.
+      var mainVer = null;
+      getJson("manifest.json").then(function (m) {
+        mainVer = m && m.version ? m.version : null;
+        setLabel(mainVer);
+        if (pick) {
+          var o = document.createElement("option");
+          o.value = ""; o.textContent = "main" + (mainVer ? " — v" + clean(mainVer) : "");
+          pick.appendChild(o);
+        }
+        return getJson("previews.json");
+      }).then(function (list) {
+        if (!pick || !Array.isArray(list) || !list.length) return;
+        list.forEach(function (p) {
+          var o = document.createElement("option");
+          o.value = p.path + "manifest.json";
+          o.dataset.ver = p.version || "";
+          o.dataset.pr = p.pr;
+          var t = p.title ? " — " + p.title : "";
+          o.textContent = "PR #" + p.pr + (t.length > 60 ? t.slice(0, 60) + "…" : t);
+          pick.appendChild(o);
+        });
+        pick.hidden = false;   // reveal only when there is at least one PR preview
+        pick.addEventListener("change", function () {
+          var o = pick.options[pick.selectedIndex];
+          if (btn) btn.setAttribute("manifest", o.value || "manifest.json");
+          setLabel(o.value ? o.dataset.ver : mainVer);
+          setBanner(o.value ? o.dataset.pr : null);
+        });
+      });
+    })();
   </script>
 </body>
 </html>
