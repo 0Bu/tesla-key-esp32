@@ -177,19 +177,14 @@ browser-flashed and tried *before* merge. CI writes the PR's **full self-contain
 (`build-pages.sh` → the installer page + a per-PR `manifest.json` + same-origin bins) to
 `PR/<N>/` on the **`gh-pages` branch**, so `https://0bu.github.io/tesla-key-esp32/PR/<N>/` is a
 directly browsable installer for that PR — it detects it is under `/PR/<N>/`, shows a preview
-banner, and flashes that PR's own firmware. The **root** page additionally offers a **caret on
-the Install button** that opens a version menu (`1.4.31` for main on top, then `1.4.31-PR-<N>`
-per open PR, newest first) — picking one sets the button label (e.g. "Install firmware
-1.4.31-PR-157") and the flash source; `…/#<N>` deep-links preselect that PR. The menu reads
-`previews.json` (a gh-pages-root index of `{pr,title,version,path}`, maintained by
-`publish-pages-branch.sh` on each PR publish/close) and, on selection, just repoints the install
-button's `manifest` attribute at that `PR/<N>/manifest.json` (ESP Web Tools reads it at click;
-parts are relative so each stays same-origin). A `gh-pages` branch (not the Actions
+banner, and flashes that PR's own firmware. The **root** page has **no version picker**: it
+always flashes **main**. A PR's firmware is reached only by its own `PR/<N>/` page — open the URL
+directly, or follow the link posted on the PR. A `gh-pages` branch (not the Actions
 Pages artifact) is required because the browser flasher fetches every part in-page and GitHub
 release assets carry no CORS headers, so the bins must be same-origin — and the atomic Actions
 deploy (main-only, whole-site) can't host per-PR subpaths. Main owns the gh-pages **root**;
 each PR owns `PR/<N>/`; both are synced by `scripts/publish-pages-branch.sh` (root sync
-preserves the `PR/` tree **and** `previews.json`). Constraints:
+preserves the `PR/` tree). Constraints:
 
 - **Signed-only.** Fork PRs get no `OTA_SIGNING_KEY` → build unsigned → **no** preview
   published (an unsigned image crash-loops at boot — see [`SECURITY.md`](SECURITY.md)).
