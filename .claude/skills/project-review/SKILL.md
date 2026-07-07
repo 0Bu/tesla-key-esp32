@@ -153,9 +153,11 @@ Treat a violation of any of these as a real finding.
   eFuses): `CONFIG_SECURE_SIGNED_APPS_NO_SECURE_BOOT` + `..._RSA_SCHEME` +
   `CONFIG_SECURE_SIGNED_ON_UPDATE_NO_SECURE_BOOT` in `sdkconfig.defaults`; the build stays
   unsigned (`CONFIG_SECURE_BOOT_BUILD_SIGNED_BINARIES=n`) and `scripts/ci-build-all.sh` signs
-  each image with the `OTA_SIGNING_KEY` secret (main push or manual `workflow_dispatch` on main;
-  PR builds compile unsigned).
-  Trust is TOFU from the running app's signature block. Classic esp32 needs
+  each image with the `OTA_SIGNING_KEY` secret on a main push / manual `workflow_dispatch` on
+  main **and on a same-repo `pull_request`** — the latter so a PR publishes a signed, boot-able
+  per-PR preview installer (`gh-pages` `PR/<N>/`, version `<latest-tag>-PR-<N>`; OTA URL
+  unchanged → device still updates from main). Fork PRs get no secret → build unsigned → no
+  preview. Trust is TOFU from the running app's signature block. Classic esp32 needs
   `CONFIG_ESP32_REV_MIN_3` (`sdkconfig.defaults.esp32`).
 - **Downgrade gate (software anti-rollback):** before the bulk download, `ota_task` reads the
   downloaded image's own app-descriptor version (`esp_https_ota_get_img_desc`) and refuses

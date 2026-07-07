@@ -100,12 +100,35 @@
     .foot{color:var(--muted);font-size:.8rem;text-align:center;margin-top:1.75rem;line-height:1.5}
     a{color:var(--accent)}
     b{font-weight:650}
+    .prbanner{background:#3a2a00;border:1px solid #7a5c00;color:#ffd479;
+      padding:.8rem 1rem;border-radius:.6rem;margin-bottom:1.25rem;font-size:.9rem;line-height:1.5}
+    .prbanner a{color:#ffd479;text-decoration:underline}
+    /* Split button: the Install button + a caret segment on its right that opens the version
+       menu. Only wired up when there is at least one PR preview (JS adds .has-menu). */
+    .splitbtn{position:relative;display:inline-flex;align-items:stretch;max-width:100%;text-align:left}
+    .splitbtn.has-menu button.flash{border-radius:999px 0 0 999px;width:auto;max-width:none;white-space:nowrap}
+    .flash-caret{font:inherit;font-weight:650;font-size:1.05rem;
+      background:var(--accent);color:var(--accent-fg);
+      border:0;border-left:1px solid rgba(255,255,255,.4);border-radius:0 999px 999px 0;
+      padding:0 1.05rem;cursor:pointer;display:flex;align-items:center;box-shadow:var(--shadow);
+      transition:filter .15s ease}
+    .flash-caret:hover{filter:brightness(1.06)}
+    .flash-caret .caret{display:inline-block;transition:transform .15s ease}
+    .flash-caret[aria-expanded="true"] .caret{transform:rotate(180deg)}
+    .fwmenu{position:absolute;top:calc(100% + .45rem);left:0;min-width:100%;z-index:20;
+      margin:0;padding:.3rem;list-style:none;text-align:left;
+      background:var(--card);color:var(--fg);border:1px solid var(--border);
+      border-radius:12px;box-shadow:var(--shadow);max-height:15rem;overflow:auto}
+    .fwmenu li{padding:.55rem .8rem;border-radius:8px;cursor:pointer;font-size:.95rem;white-space:nowrap}
+    .fwmenu li:hover{background:var(--code-bg)}
+    .fwmenu li[aria-selected="true"]{background:color-mix(in srgb,var(--accent) 14%,transparent);font-weight:650}
   </style>
   <script type="module"
           src="https://unpkg.com/esp-web-tools@10/dist/web/install-button.js"></script>
 </head>
 <body>
   <main>
+    <div id="prbanner" class="prbanner" hidden></div>
     <header class="hero">
       <span class="badge">⚡ ESP32 · S3 · C3 · C6 Firmware</span>
       <h1>Flash tesla-key-esp32</h1>
@@ -114,11 +137,18 @@
     </header>
 
     <div class="cta">
-      <esp-web-install-button manifest="manifest.json">
-        <button class="flash" slot="activate">Install firmware<span id="fwver"></span></button>
-        <span slot="unsupported">Your browser does not support Web Serial — use desktop Chrome or Edge.</span>
-        <span slot="not-allowed">Serial access was not granted.</span>
-      </esp-web-install-button>
+      <div class="splitbtn" id="splitbtn">
+        <esp-web-install-button manifest="manifest.json">
+          <button class="flash" slot="activate">Install firmware<span id="fwver"></span></button>
+          <span slot="unsupported">Your browser does not support Web Serial — use desktop Chrome or Edge.</span>
+          <span slot="not-allowed">Serial access was not granted.</span>
+        </esp-web-install-button>
+        <!-- Caret + version menu (main + every open PR preview). Revealed by JS only when
+             previews.json lists at least one PR; otherwise the Install button is a plain pill. -->
+        <button class="flash-caret" id="fwcaret" type="button" aria-haspopup="listbox"
+                aria-expanded="false" aria-label="Choose firmware version" hidden><span class="caret">▾</span></button>
+        <ul class="fwmenu" id="fwmenu" role="listbox" aria-label="Firmware version" hidden></ul>
+      </div>
       <p class="hint">Plug in your ESP32 board over USB first — the installer auto-detects the
         chip (ESP32, ESP32-S3, ESP32-C3, ESP32-C6 or ESP32-C5).</p>
     </div>
@@ -167,18 +197,83 @@
   </main>
 
   <script>
-    // Append the firmware version that will actually be flashed to the button
-    // label. The version is the single source of truth in manifest.json (written
-    // by build-pages.sh in CI), which ESP Web Tools also reads — so the label can
-    // never drift from the bins the installer writes.
-    fetch("manifest.json", { cache: "no-store" })
-      .then(function (r) { return r.ok ? r.json() : null; })
-      .then(function (m) {
-        if (!m || !m.version) return;
-        document.getElementById("fwver").textContent =
-          " " + String(m.version).replace(/[<>&]/g, "");
-      })
-      .catch(function () { /* no manifest (e.g. local preview) → label stays plain */ });
+    // On a PR preview page (/PR/<N>/) show an amber banner: this is a pre-merge build, and
+    // the device still checks OTA against main — see docs/ARCHITECTURE.md (PR preview installer).
+    (function () {
+      var btn = document.querySelector("esp-web-install-button");
+      var fwver = document.getElementById("fwver");
+      var banner = document.getElementById("prbanner");
+      var split = document.getElementById("splitbtn");
+      var caret = document.getElementById("fwcaret");
+      var menu = document.getElementById("fwmenu");
+
+      function clean(v) { return String(v).replace(/[<>&]/g, ""); }
+      // Each manifest.json carries the version (written by build-pages.sh in CI); showing it in
+      // the button label keeps the label from drifting from the bins the installer writes.
+      function setLabel(v) { if (fwver) fwver.textContent = v ? " " + clean(v) : ""; }
+      function setBanner(n) {
+        if (!banner) return;
+        if (!n) { banner.hidden = true; banner.innerHTML = ""; return; }
+        banner.hidden = false;
+        banner.innerHTML =
+          "🔬 <b>Preview build for PR #" + clean(n) + "</b> — not a release. Flashing installs " +
+          "this PR&rsquo;s firmware; the device still checks for OTA updates from <b>main</b>. " +
+          "<a href=\"https://github.com/0Bu/tesla-key-esp32/pull/" + clean(n) + "\">View PR #" +
+          clean(n) + "</a>.";
+      }
+      function getJson(url) {
+        return fetch(url, { cache: "no-store" }).then(function (r) { return r.ok ? r.json() : null; })
+          .catch(function () { return null; });
+      }
+      function openMenu(o) { if (menu) { menu.hidden = !o; caret.setAttribute("aria-expanded", o ? "true" : "false"); } }
+
+      // The installer is a single root page. A PR preview (PR/<N>/) is just a manifest + bins;
+      // selecting one repoints the install button's manifest (ESP Web Tools reads it at click,
+      // parts are relative so each stays same-origin) and updates the button label + banner.
+      // items[0] = main (latest release), then one per open PR preview, newest first.
+      var items = [];
+      function select(i) {
+        var it = items[i];
+        if (!it) return;
+        if (btn) btn.setAttribute("manifest", it.manifest);
+        setLabel(it.version);
+        setBanner(it.pr);
+        if (menu) [].forEach.call(menu.children, function (li, idx) {
+          li.setAttribute("aria-selected", idx === i ? "true" : "false");
+        });
+      }
+
+      getJson("manifest.json").then(function (m) {
+        var mainVer = m && m.version ? m.version : null;
+        items.push({ version: mainVer, manifest: "manifest.json", pr: null });
+        setLabel(mainVer);
+        return getJson("previews.json");
+      }).then(function (list) {
+        if (Array.isArray(list)) list.forEach(function (p) {
+          items.push({ version: p.version || ("PR-" + p.pr), manifest: p.path + "manifest.json", pr: String(p.pr) });
+        });
+        if (items.length < 2 || !caret || !menu) return;   // no previews → plain Install pill
+
+        items.forEach(function (it, i) {
+          var li = document.createElement("li");
+          li.setAttribute("role", "option");
+          li.setAttribute("aria-selected", i === 0 ? "true" : "false");
+          li.textContent = clean(it.version || "main");
+          li.addEventListener("click", function () { select(i); openMenu(false); });
+          menu.appendChild(li);
+        });
+        caret.hidden = false;
+        split.classList.add("has-menu");
+        caret.addEventListener("click", function (e) { e.stopPropagation(); openMenu(menu.hidden); });
+        menu.addEventListener("click", function (e) { e.stopPropagation(); });
+        document.addEventListener("click", function () { openMenu(false); });
+        document.addEventListener("keydown", function (e) { if (e.key === "Escape") openMenu(false); });
+
+        // #<N> deep-link → preselect that PR's version (when it has a live preview).
+        var h = location.hash.match(/^#(\d+)$/);
+        if (h) for (var i = 0; i < items.length; i++) if (items[i].pr === h[1]) { select(i); break; }
+      });
+    })();
   </script>
 </body>
 </html>
