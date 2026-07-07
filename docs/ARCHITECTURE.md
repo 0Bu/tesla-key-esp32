@@ -88,16 +88,18 @@ otherwise). The per-target bootloader offset (0x1000 on the classic
 esp32, 0x0 elsewhere) is handled automatically by `@flash_args` and the manifest.
 
 **PR preview installer.** Every same-repo PR publishes its **signed** build so a change can be
-browser-flashed and tried *before* merge. CI writes **only the flashable assets** for the PR
-(`build-pages.sh` with `PAGES_ASSETS_ONLY=1` → a per-PR `manifest.json` + same-origin bins, **no
-page of its own**) to `PR/<N>/` on the **`gh-pages` branch**. The single root installer is the
-only page: a **caret on the Install button** opens a version menu (`1.4.30` for main on top,
-then `1.4.30-PR-<N>` per open PR, newest first) — picking one sets the button label
-(e.g. "Install firmware 1.4.30-PR-112") and the flash source; `…/#<N>` is a deep-link that
-**preselects** that PR. The menu reads `previews.json` (a gh-pages-root index of `{pr,title,version,path}`,
-maintained by `publish-pages-branch.sh` on each PR publish/close) and, on selection, just
-repoints the install button's `manifest` attribute at that `PR/<N>/manifest.json` (ESP Web Tools
-reads it at click; parts are relative so each stays same-origin). A `gh-pages` branch (not the Actions
+browser-flashed and tried *before* merge. CI writes the PR's **full self-contained site**
+(`build-pages.sh` → the installer page + a per-PR `manifest.json` + same-origin bins) to
+`PR/<N>/` on the **`gh-pages` branch**, so `https://0bu.github.io/tesla-key-esp32/PR/<N>/` is a
+directly browsable installer for that PR — it detects it is under `/PR/<N>/`, shows a preview
+banner, and flashes that PR's own firmware. The **root** page additionally offers a **caret on
+the Install button** that opens a version menu (`1.4.31` for main on top, then `1.4.31-PR-<N>`
+per open PR, newest first) — picking one sets the button label (e.g. "Install firmware
+1.4.31-PR-157") and the flash source; `…/#<N>` deep-links preselect that PR. The menu reads
+`previews.json` (a gh-pages-root index of `{pr,title,version,path}`, maintained by
+`publish-pages-branch.sh` on each PR publish/close) and, on selection, just repoints the install
+button's `manifest` attribute at that `PR/<N>/manifest.json` (ESP Web Tools reads it at click;
+parts are relative so each stays same-origin). A `gh-pages` branch (not the Actions
 Pages artifact) is required because the browser flasher fetches every part in-page and GitHub
 release assets carry no CORS headers, so the bins must be same-origin — and the atomic Actions
 deploy (main-only, whole-site) can't host per-PR subpaths. Main owns the gh-pages **root**;
