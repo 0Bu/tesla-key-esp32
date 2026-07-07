@@ -95,14 +95,16 @@ mcp_server.cpp         → /mcp — MCP server for AI agents (stateless JSON-RPC
                          (shared helpers: http_common.cpp; split map: http_handlers.hpp)
 diag_log.cpp           → in-RAM console ring served by GET /diag (static .bss buffer)
 provisioning.cpp       → captive setup portal (setup AP) when no WiFi is configured
-display.cpp            → on-device ST7735 status panel (LilyGo T-Dongle-C5 only), LANDSCAPE
-                         160x80: header (WiFi bars+SSID | BT+BLE bars) + a SoC battery with a
-                         red→green gradient / charging bolt / "ASLEEP", or a WiFi/BLE search +
-                         "Pairing…" animation. Cache-only (never wakes the car). BOOT (IO28) tap
-                         flips 180° (MADCTL 0xA8↔0x68, persisted NVS tesla_cfg/disp_flip). Framebuffer
-                         in PSRAM (backlight active-LOW, 20 MHz SPI — HW facts of this board).
-                         Compiles to a no-op unless CONFIG_TESLA_DISPLAY_ENABLED (sdkconfig.defaults.esp32c5);
-                         font from tools/display_sim.py → main/display_font.h
+display.cpp            → on-device ST7735 status panel (LilyGo T-Dongle-C5 + T-Dongle-S3),
+                         LANDSCAPE 160x80: header (WiFi bars+SSID | BT+BLE bars) + a SoC battery
+                         with a red→green gradient / charging bolt / "ASLEEP", or a WiFi/BLE search
+                         + "Pairing…" animation. Cache-only (never wakes the car). BOOT tap (C5 IO28,
+                         S3 IO0) flips 180° (MADCTL 0xA8↔0x68, persisted NVS tesla_cfg/disp_flip).
+                         Backlight active-LOW; SPI 20 MHz (C5) / 40 MHz (S3); framebuffer in PSRAM on
+                         the C5, internal SRAM on the S3. Compiles to a no-op unless
+                         CONFIG_TESLA_DISPLAY_ENABLED (sdkconfig.defaults.esp32c5 + .esp32s3); the ONE
+                         esp32s3 image auto-detects the T-Dongle-S3 (SD pull-ups) so a generic
+                         ESP32-S3 stays panel-less. Font from tools/display_sim.py → main/display_font.h
 www/                   → web UI sources: index.html (markup) + style.css + app.js, spliced
                          into ONE self-contained page at build time (inline_assets.cmake,
                          byte-equivalent to the former monolith) and served pre-gzipped
@@ -202,9 +204,10 @@ sized to fill **4 MB** (smallest supported flash — the T-Dongle-C5's 16 MB jus
 unused) so ONE table serves every target; **app at `0x20000`**. Per-target **bootloader offset**
 is handled by `@flash_args` and the manifest — 0x1000 on the classic esp32, **0x2000 on esp32c5**
 (its newer flash layout), 0x0 on s3/c3/c6. The `ci-build-all.sh` size gate sits at `slot − 32 KB`
-(0x1e8000, below the 0x1f0000 = 2031616 B slot). **esp32c5 carries the on-device display + PSRAM**,
-so it is the largest image (signed ~0x1d1000, alongside esp32c6) — but it stays on the base **`-Og`**
-like every target: the Package A size levers (#154) freed the ~64 KB the display needs, so no `-Os`
+(0x1e8000, below the 0x1f0000 = 2031616 B slot). **esp32c5 carries the on-device display + PSRAM**
+(largest image, signed ~0x1d1000 alongside esp32c6) and **esp32s3 carries the display code too**
+(no PSRAM), but both stay on the base **`-Og`** like every target: the Package A size levers (#154)
+freed the ~64 KB the display needs, so no `-Os`
 is required. (`-Os` is banned here — whole-build `-Os` hard-freezes under evcc+BLE load, rejected
 Package B.) **Migration + multi-target image details:
 [`docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md).**

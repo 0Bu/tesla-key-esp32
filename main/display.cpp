@@ -1,10 +1,13 @@
-// On-device ST7735 status display for the LilyGo T-Dongle-C5 (0.96" IPS 80x160 panel
-// driven in LANDSCAPE 160x80). Renders the charge/connection state — see display.hpp
-// for the design contract; the layout mirrors tools/display_sim.py (the pixel-exact
-// renderer) 1:1. Compiled only when CONFIG_TESLA_DISPLAY_ENABLED (set for esp32c5 in
-// sdkconfig.defaults.esp32c5); a no-op stub otherwise, so the other four targets are
-// unaffected. The panel wiring (pins, RAM offsets, MADCTL rotation, backlight polarity)
-// is fixed for the T-Dongle-C5 in display_start().
+// On-device ST7735 status display for the LilyGo T-Dongle-C5 and T-Dongle-S3 (both a
+// 0.96" IPS 80x160 panel driven in LANDSCAPE 160x80, same ST7735 init/gamma/INVON).
+// Renders the charge/connection state — see display.hpp for the design contract; the
+// layout mirrors tools/display_sim.py (the pixel-exact renderer) 1:1. Compiled only when
+// CONFIG_TESLA_DISPLAY_ENABLED (set for esp32c5 AND esp32s3 in their sdkconfig.defaults.*);
+// a no-op stub on the other targets. The panel pins come from Kconfig (per-board
+// sdkconfig.defaults.*); the C5-vs-S3 deltas (SPI clock, BOOT-button GPIO) are selected by
+// CONFIG_IDF_TARGET_* in display_start(). The single esp32s3 image serves both the
+// T-Dongle-S3 and a generic ESP32-S3: display_start() auto-detects the dongle and stays a
+// complete no-op on a generic board.
 
 #include "display.hpp"
 #include "sdkconfig.h"
@@ -24,6 +27,7 @@
 #include "esp_heap_caps.h"
 #include "esp_wifi.h"
 #include "esp_log.h"
+#include "esp_rom_sys.h"   // esp_rom_delay_us for the T-Dongle-S3 board probe
 #include "nvs.h"           // persist the BOOT-button 180° flip across reboots
 
 #include "vehicle_ctrl.hpp"
@@ -472,13 +476,20 @@ static bool compose(VehicleController& v, int tick, bool paired) {
 // `tick` is monotonic so animations (search sweep, pairing dots) and the SSID
 // marquee advance smoothly. When compose() reports nothing animating we idle at
 // 1 Hz; while something animates (incl. a scrolling SSID) we refresh fast (~8 fps).
-// ─── BOOT button (IO28): a single tap flips the panel 180° (persisted) ─────────
-// The T-Dongle-C5's only button is BOOT on GPIO28. After boot it's a normal input
-// (external pull-up; pressed = LOW). A press toggles MADCTL between the two landscape
-// rotations 0xA8 <-> 0x68 (a 180° flip; the RAM offsets are identical for both), letting
-// the user correct the panel orientation with one tap. The choice is stored in NVS
-// (tesla_cfg/disp_flip) so it survives reboots.
-static constexpr int BOOT_BTN = 28;
+// ─── BOOT button: a single tap flips the panel 180° (persisted) ────────────────
+// The dongle's BOOT button (T-Dongle-C5: GPIO28, its only button; T-Dongle-S3: GPIO0) is a
+// normal input after boot (external pull-up; pressed = LOW). A press toggles MADCTL between
+// the two landscape rotations 0xA8 <-> 0x68 (a 180° flip; the RAM offsets are identical for
+// both), letting the user correct the panel orientation with one tap. The choice is stored
+// in NVS (tesla_cfg/disp_flip) so it survives reboots. The SPI clock also differs per board
+// (both drive the same panel): LilyGo's tested C5 rate is 20 MHz, the S3 is HW-verified at 40.
+#if CONFIG_IDF_TARGET_ESP32C5
+static constexpr int BOOT_BTN     = 28;                 // T-Dongle-C5: BOOT on GPIO28
+static constexpr int SPI_CLOCK_HZ = 20 * 1000 * 1000;   // LilyGo's tested C5 rate (40 MHz over-spec → blank panel)
+#else  // esp32s3 (T-Dongle-S3)
+static constexpr int BOOT_BTN     = 0;                  // T-Dongle-S3: BOOT on GPIO0
+static constexpr int SPI_CLOCK_HZ = 40 * 1000 * 1000;   // HW-verified on the T-Dongle-S3
+#endif
 
 static bool load_disp_flip() {
     nvs_handle_t h; uint8_t v = 0;
@@ -508,7 +519,7 @@ static void toggle_flip() {
 static void display_task(void* arg) {
     VehicleController& v = *static_cast<VehicleController*>(arg);
 
-    // BOOT button (IO28): input with pull-up; a press pulls it LOW.
+    // BOOT button (BOOT_BTN: C5 IO28 / S3 IO0): input with pull-up; a press pulls it LOW.
     gpio_config_t btn = {};
     btn.pin_bit_mask = 1ULL << BOOT_BTN;
     btn.mode         = GPIO_MODE_INPUT;
@@ -537,11 +548,44 @@ static void display_task(void* arg) {
     }
 }
 
+#if CONFIG_IDF_TARGET_ESP32S3
+// Detect the LilyGo T-Dongle-S3 by its TF-card socket's external SD pull-ups. The single
+// esp32s3 image also runs on a generic ESP32-S3 (no panel); the ST7735 itself can't be
+// probed (its SDA is write-only — no MISO), but the dongle wires the S3's SDMMC bus (CMD=16,
+// D0-D3=14/17/21/18, CLK=12) with EXTERNAL pull-ups, while a bare ESP32-S3 leaves those
+// GPIOs floating. Read each with an internal pull-DOWN: still HIGH ⇒ an external pull-up
+// holds it ⇒ the dongle. A majority vote (≥4/6) tolerates a stray. HW-verified: 6/6 HIGH on
+// a T-Dongle-S3, 0/6 on a generic ESP32-S3. These GPIOs are otherwise unused; each is reset
+// and left floating after the probe.
+static bool is_t_dongle_s3() {
+    static const gpio_num_t sd_pins[] = { GPIO_NUM_16, GPIO_NUM_14, GPIO_NUM_17,
+                                          GPIO_NUM_21, GPIO_NUM_18, GPIO_NUM_12 };
+    int pulled = 0;
+    for (gpio_num_t p : sd_pins) {
+        gpio_reset_pin(p);
+        gpio_set_direction(p, GPIO_MODE_INPUT);
+        gpio_set_pull_mode(p, GPIO_PULLDOWN_ONLY);
+        esp_rom_delay_us(1000);            // let the weak internal pull settle
+        if (gpio_get_level(p)) ++pulled;
+        gpio_set_pull_mode(p, GPIO_FLOATING);
+    }
+    ESP_LOGI(TAG, "T-Dongle-S3 SD pull-up probe: %d/6 held HIGH", pulled);
+    return pulled >= 4;
+}
+#endif
+
 void display_start(VehicleController& vehicle) {
-    // Fixed wiring for the LilyGo T-Dongle-C5 (the only board this is compiled for). Pins
-    // from Kconfig. The 0.96" GREENTAB panel is mounted portrait (80x160) on the dongle but
-    // driven in LANDSCAPE (160x80): MADCTL 0xA8 (MY|MV|BGR, 180°) with the col/row offsets
-    // swapped to 1/26. Backlight (GPIO0) is ACTIVE-LOW on this board (LilyGo Factory.ino).
+#if CONFIG_IDF_TARGET_ESP32S3
+    // The single esp32s3 OTA image serves BOTH the LilyGo T-Dongle-S3 (onboard panel) and a
+    // generic ESP32-S3 (no panel). Auto-detect the dongle BEFORE touching any GPIO/heap so a
+    // generic board stays a complete no-op (no framebuffer alloc, no SPI, no backlight driven).
+    if (!is_t_dongle_s3()) { ESP_LOGI(TAG, "no T-Dongle-S3 detected — display disabled"); return; }
+#endif
+    // Panel wiring — pins from Kconfig (per-board sdkconfig.defaults.*). The 0.96" GREENTAB
+    // panel is mounted portrait (80x160) but driven in LANDSCAPE (160x80): MADCTL 0xA8
+    // (MY|MV|BGR, 180°) with the col/row offsets swapped to 1/26 and an ACTIVE-LOW backlight
+    // — identical on the T-Dongle-C5 and T-Dongle-S3 (only the pins/SPI-clock/BOOT-button GPIO
+    // differ). C5 backlight GPIO0, S3 backlight GPIO38, both active-low (LilyGo drivers).
     s_cfg = DisplayConfig{
         .mosi = CONFIG_TESLA_DISPLAY_SPI_MOSI, .sck = CONFIG_TESLA_DISPLAY_SPI_SCK,
         .cs = CONFIG_TESLA_DISPLAY_CS, .dc = CONFIG_TESLA_DISPLAY_DC,
@@ -550,11 +594,16 @@ void display_start(VehicleController& vehicle) {
     };
     if (load_disp_flip()) s_cfg.madctl = 0x68;   // restore the saved BOOT-button 180° flip
 
-    // Framebuffer in PSRAM (the T-Dongle-C5's 8 MB). NO internal-RAM fallback: 25 KB of
-    // contiguous internal SRAM is the scarce resource here, and grabbing it can OOM-reboot
-    // a memory-tight board — and a reboot loop also keeps a parked car from ever sleeping.
+    // Framebuffer: PSRAM first. On the C5 (8 MB in-package PSRAM) that always wins and there
+    // is deliberately NO fallback — grabbing 25 KB of its scarce contiguous internal SRAM
+    // could OOM-reboot that memory-tight board (and a reboot loop keeps a parked car from ever
+    // sleeping). The T-Dongle-S3 build has no PSRAM, so it falls back to internal SRAM (~25 KB,
+    // allocated once here at boot before WiFi/BLE fragment the heap — the proven pre-#98 path).
     s_fb = (uint16_t*)heap_caps_malloc(W * H * sizeof(uint16_t), MALLOC_CAP_SPIRAM);
-    if (!s_fb) { ESP_LOGE(TAG, "no PSRAM for framebuffer — display disabled"); return; }
+#if !CONFIG_IDF_TARGET_ESP32C5
+    if (!s_fb) s_fb = (uint16_t*)heap_caps_malloc(W * H * sizeof(uint16_t), MALLOC_CAP_8BIT);
+#endif
+    if (!s_fb) { ESP_LOGE(TAG, "no memory for framebuffer — display disabled"); return; }
 
     gpio_config_t io = {};
     io.mode = GPIO_MODE_OUTPUT;
@@ -574,7 +623,7 @@ void display_start(VehicleController& vehicle) {
         heap_caps_free(s_fb); s_fb = nullptr; return;
     }
     spi_device_interface_config_t dev = {};
-    dev.clock_speed_hz = 20 * 1000 * 1000;   // 20 MHz — LilyGo's tested rate (40 MHz is over-spec)
+    dev.clock_speed_hz = SPI_CLOCK_HZ;       // 20 MHz on the C5 (LilyGo's tested rate), 40 MHz on the S3
     dev.mode           = 0;
     dev.spics_io_num   = s_cfg.cs;
     dev.queue_size     = 7;

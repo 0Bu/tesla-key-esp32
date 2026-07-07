@@ -117,18 +117,22 @@ menu "Tesla Key Configuration"
             also sent on every (re)connect.
 
     config TESLA_DISPLAY_ENABLED
-        bool "On-device ST7735 status display (LilyGo T-Dongle-C5)"
+        bool "On-device ST7735 status display (LilyGo T-Dongle-C5 / T-Dongle-S3)"
         default n
         help
             Drive a 0.96" ST7735 80x160 SPI TFT and render the charge/connection
-            status (SOC ring, charging state, power/current, WiFi/BLE) directly on
-            the panel — mirroring the web UI. Reads ONLY cached state, so it never
-            triggers a BLE round-trip (can't wake the car) and does not depend on
-            MQTT. Off by default; enabled for the LilyGo T-Dongle-C5 via
-            sdkconfig.defaults.esp32c5, where the pins below default to that board's
-            wiring. The framebuffer lives in PSRAM, so this board needs SPIRAM on.
+            status (SoC battery, charging state, WiFi/BLE) directly on the panel —
+            mirroring the web UI. Reads ONLY cached state, so it never triggers a BLE
+            round-trip (can't wake the car) and does not depend on MQTT. Off by default;
+            enabled for the LilyGo T-Dongle-C5 (sdkconfig.defaults.esp32c5) and the
+            T-Dongle-S3 (sdkconfig.defaults.esp32s3), which override the pins below with
+            each board's wiring. The C5's framebuffer lives in PSRAM (SPIRAM on); the
+            T-Dongle-S3 build has no PSRAM and uses internal SRAM. The single esp32s3
+            image auto-detects the dongle, so a generic ESP32-S3 keeps the panel disabled.
 
     if TESLA_DISPLAY_ENABLED
+    # Pin defaults below are the T-Dongle-C5 wiring; sdkconfig.defaults.esp32s3 overrides
+    # them with the T-Dongle-S3 pins (MOSI3 / SCK5 / CS4 / DC2 / RST1 / BL38).
     config TESLA_DISPLAY_SPI_MOSI
         int "Display SPI MOSI (SDA) GPIO"
         default 2

@@ -73,9 +73,10 @@ sized to fill 4 MB (the smallest supported flash — the T-Dongle-C5's 16 MB lea
 unused) so ONE table serves every target; app at `0x20000`. The `ci-build-all.sh` **app-size gate**
 sits at `slot − 32 KB` (0x1e8000): each image's code rounds up to a 64 KB Secure-Boot boundary + a
 4 KB signature, and the largest — esp32c6 and esp32c5, ~0x1d1000 signed — clear it comfortably.
-**esp32c5 carries the extra on-device display + PSRAM code but still fits at the base `-Og`** like
-every target: the Package A size levers (#154) freed the ~64 KB it needs, so no `-Os` (which
-hard-freezes under load — rejected Package B) is required. **Migration:** a device on the old single-`factory` layout must be USB-reflashed
+**esp32c5 carries the extra on-device display + PSRAM code, and esp32s3 the display code too
+(no PSRAM), but both still fit at the base `-Og`** like every target: the Package A size levers
+(#154) freed the ~64 KB the display needs, so no `-Os` (which hard-freezes under load — rejected
+Package B) is required. **Migration:** a device on the old single-`factory` layout must be USB-reflashed
 once via the web installer (full erase → WiFi/VIN/key reset, re-pair). After that, all
 updates are OTA and preserve NVS. (Existing 8 MB-table S3 devices keep OTA-updating without
 a reflash — OTA writes follow the INSTALLED table, and `ota_0` stays at `0x20000`.)
@@ -85,8 +86,10 @@ esp32 / esp32s3 / esp32c3 / esp32c6 / esp32c5 (`scripts/ci-build-all.sh`). The b
 config-only: target set per build (`idf.py set-target`), flash 4 MB, and the console is native
 USB-Serial/JTAG (`CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG`) on s3/c3/c6/c5 — absent on the classic
 esp32, where it auto-falls-back to UART0. The only per-target sdkconfig files are
-`sdkconfig.defaults.esp32` (Secure-Boot chip-rev floor) and `sdkconfig.defaults.esp32c5`
-(on-device ST7735 display + 8 MB PSRAM; still `-Og`). The web installer is a
+`sdkconfig.defaults.esp32` (Secure-Boot chip-rev floor), `sdkconfig.defaults.esp32c5`
+(on-device ST7735 display + 8 MB PSRAM; still `-Og`) and `sdkconfig.defaults.esp32s3`
+(on-device ST7735 display, no PSRAM — the display auto-enables only on a detected T-Dongle-S3).
+The web installer is a
 single page whose `manifest.json` carries one build per chipFamily (esp-web-tools auto-selects by
 detected chip); OTA is a single channel where each device pulls its own
 `tesla-key-esp32<suffix>.bin` (`tesla-key-esp32.bin` for the classic esp32, `-s3`/`-c3`/`-c6`/`-c5`
@@ -105,14 +108,27 @@ into `third_party/tesla-ble` (gitignored) and appends `esp32c5` to its `targets:
 the git dep applies when `target != esp32c5`, a local `path:` dep (the patched checkout) when
 `target == esp32c5`. So only C5 routes through the local copy; the other four resolve
 byte-identically from git, and CI (`ci-build-all.sh`) runs the prepare step automatically. All
-five images are the same tesla-ble revision. The LilyGO T-Dongle-C5 (ESP32-C5HR8, 16 MB flash,
-8 MB PSRAM, USB-C native USB-Serial/JTAG) is the reference C5 board, and its 0.96" ST7735 LCD
-IS driven — see `main/display.cpp` (landscape 160x80 status panel: WiFi/BLE header + a SoC
-battery, or a WiFi/BLE-search / "Pairing…" animation; cache-only, never wakes the car). The
-framebuffer lives in the C5's PSRAM; the backlight (GPIO0) is active-low and the SPI runs at
-20 MHz (both HW facts of this board); a tap on the BOOT button (IO28) flips the panel 180°
-(persisted in NVS). Compiled only for esp32c5 (`CONFIG_TESLA_DISPLAY_ENABLED`); a no-op stub on
-the other four targets, so one source tree still serves every board.
+five images are the same tesla-ble revision.
+
+**On-device ST7735 display (LilyGO T-Dongle-C5 and T-Dongle-S3).** Both dongles carry the same
+0.96" ST7735 LCD and it IS driven — see `main/display.cpp` (landscape 160x80 status panel:
+WiFi/BLE header + a SoC battery, or a WiFi/BLE-search / "Pairing…" animation; cache-only, never
+wakes the car). The rendering is identical on both boards (the layout mirrors
+`tools/display_sim.py` 1:1); only the hardware wiring differs, from Kconfig/`sdkconfig.defaults.*`:
+
+- **T-Dongle-C5** (ESP32-C5HR8, 16 MB flash, 8 MB PSRAM): framebuffer in PSRAM; SPI 20 MHz; BOOT
+  button on GPIO28. Compiled for esp32c5 via `CONFIG_TESLA_DISPLAY_ENABLED` in
+  `sdkconfig.defaults.esp32c5`. The C5 has exactly one board, so the display is always on.
+- **T-Dongle-S3** (ESP32-S3): framebuffer in ~25 KB internal SRAM (no PSRAM enabled); SPI 40 MHz;
+  BOOT button on GPIO0. Compiled for esp32s3 via `sdkconfig.defaults.esp32s3`. Because the single
+  esp32s3 image also runs on a **generic ESP32-S3** (no panel), `display_start()` first
+  **auto-detects the T-Dongle-S3** by its TF-card socket's external SD pull-ups (a generic S3
+  leaves those GPIOs floating) — a majority ≥4/6 HIGH means the dongle; otherwise the display is a
+  complete no-op (no framebuffer, no GPIO driven), so a generic S3 boots exactly as before.
+
+On both boards the backlight is active-low, and a tap on the BOOT button flips the panel 180°
+(MADCTL 0xA8↔0x68, persisted in NVS `tesla_cfg/disp_flip`). Compiled to a no-op stub on the other
+targets (`#else` in `display.cpp`), so one source tree still serves every board.
 
 **ESP32-C5, 5 GHz WiFi and BLE coexistence.** The C5 is Espressif's dual-band Wi-Fi 6 (2.4 + 5
 GHz) RISC-V part, so a natural question is whether running WiFi on 5 GHz reduces the WiFi↔BLE

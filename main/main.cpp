@@ -554,9 +554,10 @@ extern "C" void app_main() {
     mqtt_ha_start(vehicle, config_store);
     log_heap("mqtt");
 
-    // On-device status display (LilyGo T-Dongle-C5). No-op unless the board build
-    // selects CONFIG_TESLA_DISPLAY_ENABLED; reads only cached state (never wakes the
-    // car) in its own task, so it can't queue behind a BLE poll.
+    // On-device status display (LilyGo T-Dongle-C5 / T-Dongle-S3). No-op unless the board
+    // build selects CONFIG_TESLA_DISPLAY_ENABLED — and on esp32s3 also a no-op unless the
+    // T-Dongle-S3 is auto-detected (a generic ESP32-S3 has no panel). Reads only cached
+    // state (never wakes the car) in its own task, so it can't queue behind a BLE poll.
     display_start(vehicle);
     log_heap("display");
 

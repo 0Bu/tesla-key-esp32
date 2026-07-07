@@ -10,8 +10,9 @@
 # PSRAM: the ESP32-C5HR8 carries 8 MB in-package Quad-SPI PSRAM. Put the display
 # framebuffer there and move WiFi/LWIP buffers off the smaller internal SRAM
 # (384 KB), relieving the largest-contiguous-block pressure this firmware is
-# sensitive to. IGNORE_NOTFOUND keeps a PSRAM-less board booting — the framebuffer
-# then falls back to internal RAM (display.cpp handles the SPIRAM-alloc failure).
+# sensitive to. IGNORE_NOTFOUND keeps a PSRAM-less C5 booting; the display then simply
+# disables itself (display.cpp does NOT fall back to internal SRAM on the C5 — grabbing
+# 25 KB of its scarce contiguous SRAM could OOM this memory-tight board).
 CONFIG_SPIRAM=y
 CONFIG_SPIRAM_MODE_QUAD=y
 CONFIG_SPIRAM_SPEED_80M=y
