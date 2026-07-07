@@ -22,6 +22,8 @@
 #include "logic/command_result.hpp"
 #include "logic/ui_state.hpp"
 #include "logic/display_model.hpp"
+#include "logic/soc_gradient.hpp"
+#include "logic/led_status.hpp"
 
 #include <cmath>
 #include <cstdio>
@@ -305,14 +307,14 @@ static void test_display_helpers() {
 
     // SoC gradient: the five stops land on exact colours (mirrors soc_rgb()).
     int r, g, b;
-    dm::soc_rgb(0,   r, g, b); CHECK(r == 231 && g ==  76 && b == 60);
-    dm::soc_rgb(18,  r, g, b); CHECK(r == 240 && g == 190 && b == 40);
-    dm::soc_rgb(45,  r, g, b); CHECK(r == 120 && g == 200 && b == 90);
-    dm::soc_rgb(80,  r, g, b); CHECK(r ==  60 && g == 175 && b == 80);
-    dm::soc_rgb(100, r, g, b); CHECK(r ==  30 && g == 140 && b == 60);
+    tk::soc_rgb(0,   r, g, b); CHECK(r == 231 && g ==  76 && b == 60);
+    tk::soc_rgb(18,  r, g, b); CHECK(r == 240 && g == 190 && b == 40);
+    tk::soc_rgb(45,  r, g, b); CHECK(r == 120 && g == 200 && b == 90);
+    tk::soc_rgb(80,  r, g, b); CHECK(r ==  60 && g == 175 && b == 80);
+    tk::soc_rgb(100, r, g, b); CHECK(r ==  30 && g == 140 && b == 60);
     // Out-of-range clamps to the endpoints, not past them.
-    dm::soc_rgb(-5,  r, g, b); CHECK(r == 231 && g ==  76 && b == 60);
-    dm::soc_rgb(150, r, g, b); CHECK(r ==  30 && g == 140 && b == 60);
+    tk::soc_rgb(-5,  r, g, b); CHECK(r == 231 && g ==  76 && b == 60);
+    tk::soc_rgb(150, r, g, b); CHECK(r ==  30 && g == 140 && b == 60);
 
     // SSID marquee ping-pong (span 10, pause 8, speed 2 → travel 5, period 26).
     CHECK(dm::scroll_offset(0,  10) == 0);    // paused at the start
@@ -371,7 +373,7 @@ static void test_display_model() {
     // Asleep dims the fill toward the panel colour AND suppresses the bolt even when charging.
     dm::Model slp = dm::compose(us(LS::Asleep, true, true, true, true, 80, /*charging*/true), 0);
     CHECK(slp.asleep && !slp.show_bolt);
-    int br, bg, bb; dm::soc_rgb(80, br, bg, bb);
+    int br, bg, bb; tk::soc_rgb(80, br, bg, bb);
     CHECK(slp.fill_r == dm::lerp8(br, dm::kAsleepDimR, 0.5f));
     CHECK(slp.fill_g == dm::lerp8(bg, dm::kAsleepDimG, 0.5f));
     CHECK(slp.fill_b == dm::lerp8(bb, dm::kAsleepDimB, 0.5f));
@@ -387,6 +389,66 @@ static void test_display_model() {
     CHECK(scr.ssid_scrolling && scr.animating);
 }
 
+// ─── status LED priority ladder (logic/led_status.hpp <- shared UiSnapshot + LedAlerts) ──
+// The LED reads the SAME tk::UiSnapshot the display presenter does (one input contract), plus
+// a tiny LED-only LedAlerts for its latched error/warn/OTA tiers. Base = healthy, parked
+// (Idle), paired, 55 % SoC, WiFi up, no alerts; each case flips one field to prove the ladder
+// picks the right colour/animation and that a higher tier wins.
+static tk::UiSnapshot led_snap() {
+    tk::UiSnapshot s;
+    s.wifi_on    = true;
+    s.link_state = tk::LinkState::Idle;
+    s.paired     = true;
+    s.have_soc   = true;
+    s.soc        = 55;
+    return s;
+}
+static void test_led() {
+    using C = tk::LedColor;
+    using A = tk::LedAnim;
+    const tk::LedAlerts none;   // no latched alerts
+
+    // Parked with a known SoC → dimmed gradient, steady.
+    CHECK(tk::led_pattern(led_snap(), none) == (tk::LedPattern{C::SocGradient, A::Solid, true}));
+    // Full charge reads as steady green (still dim/resting).
+    { auto s = led_snap(); s.soc = 100; CHECK(tk::led_pattern(s, none) == (tk::LedPattern{C::Green, A::Solid, true})); }
+    // Awake is also a "have live reading" state → gradient, not search.
+    { auto s = led_snap(); s.link_state = tk::LinkState::Awake; CHECK(tk::led_pattern(s, none).color == C::SocGradient); }
+
+    // Charging outranks the static SoC display (green swell).
+    { auto s = led_snap(); s.charging = true; CHECK(tk::led_pattern(s, none) == (tk::LedPattern{C::Green, A::Breathe, false})); }
+
+    // Asleep → LED off entirely.
+    { auto s = led_snap(); s.link_state = tk::LinkState::Asleep; s.have_soc = false;
+      CHECK(tk::led_pattern(s, none) == (tk::LedPattern{C::Off, A::Off, false})); }
+
+    // Pairing: BLE up but no session → magenta pulse. Outranks charging/SoC.
+    { auto s = led_snap(); s.paired = false; s.ble_connected = true; s.charging = true;
+      CHECK(tk::led_pattern(s, none) == (tk::LedPattern{C::Magenta, A::Pulse, false})); }
+
+    // WiFi search: no LAN → blue breathe, and it outranks pairing/charging below it.
+    { auto s = led_snap(); s.wifi_on = false; s.ble_connected = true; s.paired = false;
+      CHECK(tk::led_pattern(s, none) == (tk::LedPattern{C::Blue, A::Breathe, false})); }
+
+    // Searching for the car: reachable readings absent → teal breathe.
+    { auto s = led_snap(); s.link_state = tk::LinkState::Unreachable;
+      CHECK(tk::led_pattern(s, none) == (tk::LedPattern{C::Teal, A::Breathe, false})); }
+    // A stale SoC while Unreachable must NOT show as a live gradient — still searching.
+    { auto s = led_snap(); s.link_state = tk::LinkState::Unreachable; s.have_soc = true; s.soc = 80;
+      CHECK(tk::led_pattern(s, none).color == C::Teal); }
+
+    // ── LED-only latched alerts (top of the ladder), passed via LedAlerts ──
+    // Warning (repeated connect failures) → amber blink, above WiFi/pairing.
+    { auto s = led_snap(); s.wifi_on = false; tk::LedAlerts a; a.warn = true;
+      CHECK(tk::led_pattern(s, a) == (tk::LedPattern{C::Amber, A::Blink, false})); }
+    // OTA download → blue pulse, above the warning.
+    { tk::LedAlerts a; a.ota_downloading = true; a.warn = true;
+      CHECK(tk::led_pattern(led_snap(), a) == (tk::LedPattern{C::Blue, A::Pulse, false})); }
+    // Error is the top of the ladder — beats OTA, warn, charging, everything.
+    { auto s = led_snap(); s.charging = true; tk::LedAlerts a; a.error = true; a.ota_downloading = true; a.warn = true;
+      CHECK(tk::led_pattern(s, a) == (tk::LedPattern{C::Red, A::Blink, false})); }
+}
+
 int main() {
     test_vin();
     test_units();
@@ -396,6 +458,7 @@ int main() {
     test_mcp();
     test_display_helpers();
     test_display_model();
+    test_led();
 
     if (g_failures == 0) {
         std::printf("OK  %d checks passed\n", g_checks);

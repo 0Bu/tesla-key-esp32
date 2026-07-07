@@ -137,6 +137,19 @@ On both boards the backlight is active-low, and a tap on the BOOT button flips t
 (MADCTL 0xA8↔0x68, persisted in NVS `tesla_cfg/disp_flip`). Compiled to a no-op stub on the other
 targets (`#else` in `display.cpp`), so one source tree still serves every board.
 
+**On-device status LED (T-Dongle underside APA102).** A second, independent indicator: the single
+addressable RGB pixel on the dongle underside (`main/led_status.cpp`), driven as a colour +
+animation status light — WiFi/BLE search (breathing), pairing (pulse), charging (green swell),
+a dimmed SoC colour when parked, blue for an OTA in flight, amber/red for warnings/errors. Its
+priority ladder lives in the pure, host-tested `logic/led_status.hpp` and reads the **same shared
+`UiSnapshot`** the ST7735 presenter consumes (so the panel, the LED, the web-UI hero and MQTT never
+disagree about the car's state), plus a tiny LED-only `LedAlerts` for the latched error/warn/OTA
+tiers (those hold a transient fault visible for 10–15 s). The SoC colour comes from the shared
+`logic/soc_gradient.hpp` ramp — the same table the battery fill uses. Cache-only (never wakes the
+car), needs no MQTT and no panel (works on a display-less board), an ~12-byte bit-banged APA102
+frame with no heap. Opt-in: a no-op stub unless `CONFIG_TESLA_LED_ENABLED` (default off — not every
+board carries this LED); pins/brightness from Kconfig (C5 DI=5/CI=4, T-Dongle-S3 40/39).
+
 **ESP32-C5, 5 GHz WiFi and BLE coexistence.** The C5 is Espressif's dual-band Wi-Fi 6 (2.4 + 5
 GHz) RISC-V part, so a natural question is whether running WiFi on 5 GHz reduces the WiFi↔BLE
 interference that historically forced `WIFI_PS_MIN_MODEM` on this project (a `WIFI_PS_NONE`

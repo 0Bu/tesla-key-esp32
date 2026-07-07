@@ -33,6 +33,7 @@
 #include "diag_log.hpp"
 #include "mqtt_ha.hpp"
 #include "display.hpp"
+#include "led_status.hpp"
 
 static const char* MDNS_HOSTNAME = "tesla-key-esp32";  // → http://tesla-key-esp32.local
 
@@ -560,6 +561,12 @@ extern "C" void app_main() {
     // state (never wakes the car) in its own task, so it can't queue behind a BLE poll.
     display_start(vehicle);
     log_heap("display");
+
+    // On-device status LED (LilyGo T-Dongle underside APA102). No-op unless the board build
+    // selects CONFIG_TESLA_LED_ENABLED; reads only cached state via the same UiSnapshot the
+    // display uses (never wakes the car), independent of the display / MQTT.
+    led_status_start(vehicle);
+    log_heap("led");
 
     // WiFi connectivity watchdog: re-associates if the LAN link silently dies,
     // including the "ghost association" case that fires no disconnect event (see the

@@ -40,9 +40,10 @@ scripts/run-mock-tests.sh   # compile + run host logic tests in seconds (cmake +
 It covers VIN validation, imperial→metric conversion, the `link_state()` four-state machine
 (incl. the debounced-ASLEEP asymmetry) and its `/status`/MQTT strings, the per-target
 platform/OTA-suffix mapping, the MCP protocol core (version negotiation, method routing,
-tool/arg-spec registry, int clamp), the shared command-outcome text and the on-device display
+tool/arg-spec registry, int clamp), the shared command-outcome text, the on-device display
 presenter (the priority ladder / SoC gradient / RSSI→bars / SSID-scroll decisions the ST7735
-renderer draws) — all delegated to
+renderer draws) and the status-LED ladder (`logic/led_status.hpp`, reading the same shared
+`UiSnapshot` + the shared SoC gradient) — all delegated to
 IDF-free headers in `main/logic/` so the device runs the same code the test does. CI gates the firmware build on it (`logic-test` job). Add new
 hardware-free logic to `main/logic/` and a `CHECK` in `test/test_logic.cpp`. Full detail:
 [`test/README.md`](../test/README.md).
@@ -111,6 +112,13 @@ display.cpp            → on-device ST7735 status panel (LilyGo T-Dongle-C5 + T
                          CONFIG_TESLA_DISPLAY_ENABLED (sdkconfig.defaults.esp32c5 + .esp32s3); the ONE
                          esp32s3 image auto-detects the T-Dongle-S3 (SD pull-ups) so a generic
                          ESP32-S3 stays panel-less. Font from tools/display_sim.py → main/display_font.h
+led_status.cpp         → on-device status LED: the single underside APA102 pixel (T-Dongle-C5/S3)
+                         as a colour+animation indicator (WiFi/BLE search, pairing, charging, SoC,
+                         OTA, warn/error). Reads the SAME shared logic/ui_state.hpp the display does
+                         (one input contract) + a tiny LedAlerts for its latched tiers; ladder +
+                         colours host-tested in logic/led_status.hpp. Cache-only (never wakes the
+                         car), no MQTT, works without a panel. APA102 bit-bang, no heap. Compiles to
+                         a no-op unless CONFIG_TESLA_LED_ENABLED (opt-in, default off; pins from Kconfig)
 www/                   → web UI sources: index.html (markup) + style.css + app.js, spliced
                          into ONE self-contained page at build time (inline_assets.cmake,
                          byte-equivalent to the former monolith) and served pre-gzipped

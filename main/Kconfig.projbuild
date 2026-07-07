@@ -153,4 +153,34 @@ menu "Tesla Key Configuration"
         default 0
     endif
 
+    config TESLA_LED_ENABLED
+        bool "On-device status LED (LilyGo T-Dongle underside APA102)"
+        default n
+        help
+            Drive the single APA102 RGB pixel on the underside of a LilyGo T-Dongle
+            (C5 / S3) as a status indicator — WiFi/BLE search (breathing), pairing
+            (pulse), charging (green swell), state-of-charge colour when parked, OTA
+            in flight, and amber/red for warnings/errors. Reads ONLY cached state, so
+            it never triggers a BLE round-trip (can't wake the car) and needs no MQTT;
+            it also works on a board with no display. Off by default — not every
+            ESP32-S3 board carries this LED, so enable it per board. The pins below
+            default to the T-Dongle-C5 wiring (DI=5, CI=4); a T-Dongle-S3 uses 40/39.
+
+    if TESLA_LED_ENABLED
+    config TESLA_LED_DI_GPIO
+        int "APA102 data (DI) GPIO"
+        default 5
+    config TESLA_LED_CI_GPIO
+        int "APA102 clock (CI) GPIO"
+        default 4
+    config TESLA_LED_BRIGHTNESS
+        int "APA102 global brightness (1-31)"
+        default 8
+        range 1 31
+        help
+            APA102 5-bit global brightness. Kept low by default so the indicator isn't
+            a glaring dot on a desk and draws little current; resting states (parked
+            SoC) dim further in firmware.
+    endif
+
 endmenu

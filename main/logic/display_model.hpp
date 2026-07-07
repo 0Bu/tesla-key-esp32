@@ -5,6 +5,7 @@
 #include <cmath>
 #include "logic/ui_state.hpp"
 #include "logic/link_state.hpp"
+#include "logic/soc_gradient.hpp"   // shared SoC colour ramp (also used by the status LED)
 
 // Pure, hardware-free PRESENTER for the ST7735 status display — the decision half of the
 // former display.cpp compose(): from a UiSnapshot it produces a Model that says WHAT to
@@ -47,29 +48,9 @@ inline int rssi_bars(int rssi) {
     return 0;
 }
 
+// The SoC fill colour comes from the shared ramp in logic/soc_gradient.hpp (tk::soc_rgb) —
+// one table for the panel AND the status LED. lerp8 stays here for the asleep-dim blend below.
 inline int lerp8(int a, int b, float t) { return a + static_cast<int>(std::lroundf((b - a) * t)); }
-
-// SoC 0..100 → red→amber→light-green→green→deep-green (mirrors soc_rgb() in display.cpp).
-struct GradStop { float p; uint8_t r, g, b; };
-inline constexpr GradStop kGrad[] = {
-    {0.00f, 231,  76,  60}, {0.18f, 240, 190,  40}, {0.45f, 120, 200,  90},
-    {0.80f,  60, 175,  80}, {1.00f,  30, 140,  60},
-};
-inline void soc_rgb(int soc, int& r, int& g, int& b) {
-    float p = soc <= 0 ? 0.0f : (soc >= 100 ? 1.0f : soc / 100.0f);
-    const int n = static_cast<int>(sizeof(kGrad) / sizeof(kGrad[0]));
-    for (int i = 0; i < n - 1; ++i) {
-        if (p <= kGrad[i + 1].p) {
-            float span = kGrad[i + 1].p - kGrad[i].p;
-            float t = span <= 0 ? 0.0f : (p - kGrad[i].p) / span;
-            r = lerp8(kGrad[i].r, kGrad[i + 1].r, t);
-            g = lerp8(kGrad[i].g, kGrad[i + 1].g, t);
-            b = lerp8(kGrad[i].b, kGrad[i + 1].b, t);
-            return;
-        }
-    }
-    r = kGrad[n - 1].r; g = kGrad[n - 1].g; b = kGrad[n - 1].b;
-}
 
 // Horizontal marquee offset (0..span) for an over-long SSID: ping-pong pause / scroll-out /
 // pause / scroll-back so the whole name is readable. Verbatim from display.cpp scroll_offset().
@@ -163,7 +144,7 @@ inline Model compose(const UiSnapshot& s, uint32_t tick) {
         m.soc    = soc;
         m.asleep = (s.link_state == LinkState::Asleep);
         int r, g, b;
-        soc_rgb(soc, r, g, b);
+        tk::soc_rgb(soc, r, g, b);                 // shared logic/soc_gradient.hpp
         if (m.asleep) {                            // blend 50% toward the panel colour
             r = lerp8(r, kAsleepDimR, 0.5f);
             g = lerp8(g, kAsleepDimG, 0.5f);
