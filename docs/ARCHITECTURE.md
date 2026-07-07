@@ -113,7 +113,14 @@ five images are the same tesla-ble revision.
 **On-device ST7735 display (LilyGO T-Dongle-C5 and T-Dongle-S3).** Both dongles carry the same
 0.96" ST7735 LCD and it IS driven — see `main/display.cpp` (landscape 160x80 status panel:
 WiFi/BLE header + a SoC battery, or a WiFi/BLE-search / "Pairing…" animation; cache-only, never
-wakes the car). The rendering is identical on both boards (the layout mirrors
+wakes the car). **What to show** — the priority ladder (WiFi-search > pairing > BLE-search >
+battery), the SoC gradient, the RSSI→bars mapping and the SSID-scroll offset — is decided by a
+pure, host-tested presenter (`main/logic/display_model.hpp`) reading a shared, IDF-free
+`UiSnapshot` (`main/logic/ui_state.hpp`, assembled once under the cache lock via
+`VehicleController::ui_snapshot()`); `display.cpp` is a thin renderer that only DRAWS the
+resulting `Model` — so those decisions are unit-tested in `test/` without a board (`logic-test`
+job), the layout constants have one home, and a future status LED can consume the same snapshot.
+The rendering is identical on both boards (the layout mirrors
 `tools/display_sim.py` 1:1); only the hardware wiring differs, from Kconfig/`sdkconfig.defaults.*`:
 
 - **T-Dongle-C5** (ESP32-C5HR8, 16 MB flash, 8 MB PSRAM): framebuffer in PSRAM; SPI 20 MHz; BOOT

@@ -100,7 +100,11 @@ provisioning.cpp       → captive setup portal (setup AP) when no WiFi is confi
 display.cpp            → on-device ST7735 status panel (LilyGo T-Dongle-C5 + T-Dongle-S3),
                          LANDSCAPE 160x80: header (WiFi bars+SSID | BT+BLE bars) + a SoC battery
                          with a red→green gradient / charging bolt / "ASLEEP", or a WiFi/BLE search
-                         + "Pairing…" animation. Cache-only (never wakes the car). BOOT tap (C5 IO28,
+                         + "Pairing…" animation. Cache-only (never wakes the car). "What to show"
+                         (priority ladder / gradient / bars / SSID scroll) is decided by the pure,
+                         host-tested presenter logic/display_model.hpp reading the shared
+                         logic/ui_state.hpp (VehicleController::ui_snapshot()); this file is the thin
+                         renderer. BOOT tap (C5 IO28,
                          S3 IO0) flips 180° (MADCTL 0xA8↔0x68, persisted NVS tesla_cfg/disp_flip).
                          Backlight active-LOW; SPI 20 MHz (C5) / 40 MHz (S3); framebuffer in PSRAM on
                          the C5, internal SRAM on the S3. Compiles to a no-op unless
