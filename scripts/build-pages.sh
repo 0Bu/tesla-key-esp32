@@ -63,16 +63,12 @@ TARGETS="esp32 esp32s3 esp32c3 esp32c6 esp32c5"
 rm -rf "$out"
 mkdir -p "$out"
 
-# The page itself + any served docs (README / SECURITY), but never a stale manifest.
-# PAGES_ASSETS_ONLY=1 emits ONLY the flashable assets (manifest.json + per-target bins) and
-# skips the page + docs — used for a per-PR preview (PR/<N>/), which is reached through the root
-# page's firmware picker / #<N> deep-link and so needs no standalone page of its own.
-if [[ -z "${PAGES_ASSETS_ONLY:-}" ]]; then
-  cp "$docs/index.html" "$out/"
-  for md in "$docs"/*.md; do
-    [[ -e "$md" ]] && cp "$md" "$out/"
-  done
-fi
+# The page itself + any served docs (README / SECURITY), but never a stale manifest. The full
+# site is emitted for both the root and each PR/<N>/ preview, so a PR is directly browsable.
+cp "$docs/index.html" "$out/"
+for md in "$docs"/*.md; do
+  [[ -e "$md" ]] && cp "$md" "$out/"
+done
 
 builds=""
 for t in $TARGETS; do

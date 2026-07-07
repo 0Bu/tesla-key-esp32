@@ -112,6 +112,9 @@
       border:0;border-left:1px solid rgba(255,255,255,.4);border-radius:0 999px 999px 0;
       padding:0 1.05rem;cursor:pointer;display:flex;align-items:center;box-shadow:var(--shadow);
       transition:filter .15s ease}
+    /* display:flex above beats the UA [hidden]{display:none}, so re-assert it or the caret
+       shows even with no PR previews (dead arrow + a gap before the pill). */
+    .flash-caret[hidden]{display:none}
     .flash-caret:hover{filter:brightness(1.06)}
     .flash-caret .caret{display:inline-block;transition:transform .15s ease}
     .flash-caret[aria-expanded="true"] .caret{transform:rotate(180deg)}
@@ -213,13 +216,21 @@
       function setLabel(v) { if (fwver) fwver.textContent = v ? " " + clean(v) : ""; }
       function setBanner(n) {
         if (!banner) return;
-        if (!n) { banner.hidden = true; banner.innerHTML = ""; return; }
+        banner.textContent = "";
+        if (!n) { banner.hidden = true; return; }
         banner.hidden = false;
-        banner.innerHTML =
-          "🔬 <b>Preview build for PR #" + clean(n) + "</b> — not a release. Flashing installs " +
-          "this PR&rsquo;s firmware; the device still checks for OTA updates from <b>main</b>. " +
-          "<a href=\"https://github.com/0Bu/tesla-key-esp32/pull/" + clean(n) + "\">View PR #" +
-          clean(n) + "</a>.";
+        // Build via DOM (no innerHTML sink); reduce the PR ref to digits only, so it is safe in
+        // both text and the href — never HTML/quote metacharacters.
+        var num = String(n).replace(/\D/g, "");
+        function bold(t) { var e = document.createElement("b"); e.textContent = t; return e; }
+        var link = document.createElement("a");
+        link.href = "https://github.com/0Bu/tesla-key-esp32/pull/" + num;
+        link.textContent = "View PR #" + num;
+        banner.append(
+          "🔬 ", bold("Preview build for PR #" + num),
+          " — not a release. Flashing installs this PR's firmware; the device still checks for " +
+          "OTA updates from ", bold("main"), ". ", link, "."
+        );
       }
       function getJson(url) {
         return fetch(url, { cache: "no-store" }).then(function (r) { return r.ok ? r.json() : null; })
@@ -227,10 +238,21 @@
       }
       function openMenu(o) { if (menu) { menu.hidden = !o; caret.setAttribute("aria-expanded", o ? "true" : "false"); } }
 
-      // The installer is a single root page. A PR preview (PR/<N>/) is just a manifest + bins;
-      // selecting one repoints the install button's manifest (ESP Web Tools reads it at click,
-      // parts are relative so each stays same-origin) and updates the button label + banner.
-      // items[0] = main (latest release), then one per open PR preview, newest first.
+      // Standalone per-PR preview page (/PR/<N>/): a full copy of this page is shipped next to the
+      // PR's own manifest + bins, so you can open it directly and test the change before merge.
+      // Show the banner + the PR's version and skip the picker (this page flashes only this PR;
+      // its manifest="manifest.json" resolves to PR/<N>/manifest.json, same-origin).
+      var onPR = location.pathname.match(/\/PR\/(\d+)\//);
+      if (onPR) {
+        setBanner(onPR[1]);
+        getJson("manifest.json").then(function (m) { if (m && m.version) setLabel(m.version); });
+        return;
+      }
+
+      // Root installer page: build the version picker. items[0] = main (latest release), then one
+      // per open PR preview (from previews.json), newest first. Selecting one repoints the install
+      // button's manifest (ESP Web Tools reads it at click, parts are relative so each stays
+      // same-origin) and updates the button label + banner.
       var items = [];
       function select(i) {
         var it = items[i];
