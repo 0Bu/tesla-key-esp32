@@ -204,10 +204,8 @@ jobs:
       # not from its own preview. Cleaned up on PR close by pr-preview-cleanup.yml.
       - name: Assemble PR preview site
         if: github.event_name == 'pull_request' && steps.signkey.outputs.signed == 'true'
-        # Assets only (manifest + bins) — a PR preview is reached via the root page's picker /
-        # #<N> deep-link, so it needs no index.html or docs of its own.
-        env:
-          PAGES_ASSETS_ONLY: "1"
+        # Full self-contained site (page + manifest + bins) so PR/<N>/ is directly browsable at
+        # https://0bu.github.io/tesla-key-esp32/PR/<N>/ — you can open and test a PR before merge.
         run: ./scripts/build-pages.sh ./_pr_site "${{ steps.stamp.outputs.disp }}"
 
       - name: Publish PR preview to gh-pages (PR/<N>/)
