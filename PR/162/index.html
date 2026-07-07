@@ -1,0 +1,220 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#e82127">
+  <title>Flash tesla-key-esp32</title>
+  <style>
+    :root{
+      --bg:#f6f7f9;
+      --card:#ffffff;
+      --fg:#1a1d21;
+      --muted:#5b626b;
+      --border:#e6e8ec;
+      --accent:#e82127;
+      --accent-fg:#ffffff;
+      --code-bg:#f0f1f3;
+      --radius:16px;
+      --shadow:0 1px 2px rgba(0,0,0,.04),0 8px 24px rgba(0,0,0,.05);
+    }
+    @media (prefers-color-scheme:dark){
+      :root{
+        --bg:#0f1115;
+        --card:#171a20;
+        --fg:#f2f3f5;
+        --muted:#9aa1ab;
+        --border:#262a31;
+        --code-bg:#22262e;
+        --shadow:0 1px 2px rgba(0,0,0,.4),0 8px 24px rgba(0,0,0,.3);
+      }
+    }
+    *{box-sizing:border-box}
+    html{-webkit-text-size-adjust:100%}
+    body{
+      font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+      background:var(--bg);
+      color:var(--fg);
+      line-height:1.55;
+      margin:0;
+      padding:1.25rem 1.1rem calc(2.5rem + env(safe-area-inset-bottom));
+      -webkit-font-smoothing:antialiased;
+    }
+    main{max-width:34rem;margin:0 auto}
+    .hero{text-align:center;padding:1.5rem 0 .5rem}
+    .badge{
+      display:inline-flex;align-items:center;gap:.4rem;
+      font-size:.8rem;font-weight:600;letter-spacing:.02em;
+      color:var(--accent);background:color-mix(in srgb,var(--accent) 12%,transparent);
+      padding:.35rem .7rem;border-radius:999px;margin-bottom:1rem;
+    }
+    h1{font-size:1.6rem;line-height:1.2;margin:0 0 .6rem;letter-spacing:-.02em}
+    .lead{color:var(--muted);margin:0 auto;max-width:28rem}
+    .cta{margin:1.5rem 0 .75rem;text-align:center}
+    button.flash{
+      font:inherit;font-weight:650;font-size:1.05rem;
+      background:var(--accent);color:var(--accent-fg);
+      border:0;border-radius:999px;
+      padding:.95rem 2.2rem;width:100%;max-width:20rem;
+      cursor:pointer;transition:transform .08s ease,filter .15s ease;
+      box-shadow:var(--shadow);
+    }
+    button.flash:hover{filter:brightness(1.05)}
+    button.flash:active{transform:translateY(1px)}
+    .hint{color:var(--muted);font-size:.85rem;text-align:center;margin:.4rem 0 0}
+    .card{
+      background:var(--card);border:1px solid var(--border);
+      border-radius:var(--radius);box-shadow:var(--shadow);
+      padding:1.25rem 1.25rem;margin-top:1.25rem;
+    }
+    .card h2{font-size:.78rem;text-transform:uppercase;letter-spacing:.06em;
+      color:var(--muted);margin:0 0 1rem}
+    ol.steps{list-style:none;counter-reset:s;margin:0;padding:0}
+    ol.steps li{
+      counter-increment:s;position:relative;
+      padding:0 0 1.1rem 2.6rem;
+    }
+    ol.steps li:last-child{padding-bottom:0}
+    ol.steps li::before{
+      content:counter(s);position:absolute;left:0;top:-.1rem;
+      width:1.8rem;height:1.8rem;border-radius:50%;
+      display:grid;place-items:center;
+      background:color-mix(in srgb,var(--accent) 14%,transparent);
+      color:var(--accent);font-weight:700;font-size:.9rem;
+    }
+    ol.steps li:not(:last-child)::after{
+      content:"";position:absolute;left:.875rem;top:1.9rem;bottom:.3rem;
+      width:2px;background:var(--border);
+    }
+    .callout{
+      display:flex;gap:.7rem;align-items:flex-start;
+      background:color-mix(in srgb,var(--accent) 7%,transparent);
+      border:1px solid color-mix(in srgb,var(--accent) 18%,transparent);
+      border-radius:12px;padding:.85rem 1rem;margin-top:1.25rem;
+      font-size:.9rem;
+    }
+    .callout .ico{flex:0 0 auto;font-size:1.1rem;line-height:1.4}
+    .callout p{margin:0;color:var(--fg)}
+    code{background:var(--code-bg);padding:.12rem .4rem;border-radius:6px;
+      font-size:.88em;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+    .foot{color:var(--muted);font-size:.8rem;text-align:center;margin-top:1.75rem;line-height:1.5}
+    a{color:var(--accent)}
+    b{font-weight:650}
+    .prbanner{background:#3a2a00;border:1px solid #7a5c00;color:#ffd479;
+      padding:.8rem 1rem;border-radius:.6rem;margin-bottom:1.25rem;font-size:.9rem;line-height:1.5}
+    .prbanner a{color:#ffd479;text-decoration:underline}
+  </style>
+  <script type="module"
+          src="https://unpkg.com/esp-web-tools@10/dist/web/install-button.js"></script>
+</head>
+<body>
+  <main>
+    <div id="prbanner" class="prbanner" hidden></div>
+    <header class="hero">
+      <span class="badge">⚡ ESP32 · S3 · C3 · C6 Firmware</span>
+      <h1>Flash tesla-key-esp32</h1>
+      <p class="lead">Install the firmware straight from your browser — no toolchain,
+        no command line. Use <b>Chrome</b> or <b>Edge</b> on desktop.</p>
+    </header>
+
+    <div class="cta">
+      <esp-web-install-button manifest="manifest.json">
+        <button class="flash" slot="activate">Install firmware<span id="fwver"></span></button>
+        <span slot="unsupported">Your browser does not support Web Serial — use desktop Chrome or Edge.</span>
+        <span slot="not-allowed">Serial access was not granted.</span>
+      </esp-web-install-button>
+      <p class="hint">Plug in your ESP32 board over USB first — the installer auto-detects the
+        chip (ESP32, ESP32-S3, ESP32-C3 or ESP32-C6).</p>
+    </div>
+
+    <section class="card">
+      <h2>How it works</h2>
+      <ol class="steps">
+        <li>Plug your ESP32 board into a USB port.</li>
+        <li>Tap <b>Install firmware</b> and select the serial port, then close the
+          dialog when flashing finishes.</li>
+        <li>The device reboots and opens a <code>tesla-key-esp32-setup</code> WiFi network.
+          Configure WiFi there (see below) — the browser does <b>not</b> set WiFi.</li>
+        <li>After it joins your WiFi, reach it at <code>http://tesla-key-esp32.local</code>
+          to pair with your car.</li>
+      </ol>
+    </section>
+
+    <div class="callout">
+      <span class="ico">⬆️</span>
+      <p><b>Future updates are over-the-air — no USB needed.</b> On
+        <code>http://tesla-key-esp32.local</code>, tap the firmware version (top line) to
+        check for a new release; if one is available, confirm and the device updates itself
+        and reboots, preserving WiFi, VIN and key. <b>This USB install is only needed once</b>
+        to move a device onto the OTA-capable partition layout — it does a full erase, so you
+        re-enter WiFi/VIN and re-pair this one time.</p>
+    </div>
+
+    <div class="callout">
+      <span class="ico">📱</span>
+      <p><b>WiFi setup via captive portal (the only WiFi path — also sets the VIN):</b>
+        after flashing, the device opens a <code>tesla-key-esp32-setup</code> network. Join it
+        from a phone (incl. iPhone) and the setup form pops up automatically — enter your
+        WiFi <i>and</i> the VIN there. The device then reboots and joins your network.</p>
+    </div>
+
+    <p class="foot">This page always serves the latest CI build — it is rebuilt and
+      deployed automatically on every firmware change, and each change also publishes a
+      <a href="https://github.com/0Bu/tesla-key-esp32/releases/latest">GitHub release</a>
+      for manual flashing. The flasher reads the per-target parts for the detected chip —
+      <code>bootloader-&lt;target&gt;.bin</code>, <code>partition-table-&lt;target&gt;.bin</code> and
+      the app (<code>tesla-key-esp32.bin</code>, or <code>-s3</code>/<code>-c3</code>/<code>-c6</code>
+      for the other chips) — listed per chipFamily in
+      <code>manifest.json</code>. Flashing the app/bootloader/partition table
+      separately keeps the <code>nvs</code> partition intact, so updates preserve WiFi,
+      VIN and key.</p>
+  </main>
+
+  <script>
+    // The root page has no version picker: it always flashes main. A PR's firmware is reached by
+    // its own page at /PR/<N>/ (open the URL directly, or from the link on the PR), which shows an
+    // amber preview banner — a pre-merge build; the device still checks OTA against main. See
+    // docs/ARCHITECTURE.md (PR preview installer).
+    (function () {
+      var fwver = document.getElementById("fwver");
+      var banner = document.getElementById("prbanner");
+
+      function clean(v) { return String(v).replace(/[<>&]/g, ""); }
+      // manifest.json (written next to the page by build-pages.sh in CI) carries the version;
+      // showing it in the button label keeps the label from drifting from the bins we flash.
+      function setLabel(v) { if (fwver) fwver.textContent = v ? " " + clean(v) : ""; }
+      function setBanner(n) {
+        if (!banner) return;
+        banner.textContent = "";
+        if (!n) { banner.hidden = true; return; }
+        banner.hidden = false;
+        // Build via DOM (no innerHTML sink); reduce the PR ref to digits only, so it is safe in
+        // both text and the href — never HTML/quote metacharacters.
+        var num = String(n).replace(/\D/g, "");
+        function bold(t) { var e = document.createElement("b"); e.textContent = t; return e; }
+        var link = document.createElement("a");
+        link.href = "https://github.com/0Bu/tesla-key-esp32/pull/" + num;
+        link.textContent = "View PR #" + num;
+        banner.append(
+          "🔬 ", bold("Preview build for PR #" + num),
+          " — not a release. Flashing installs this PR's firmware; the device still checks for " +
+          "OTA updates from ", bold("main"), ". ", link, "."
+        );
+      }
+
+      // Standalone per-PR preview page (/PR/<N>/): a full copy of this page ships next to the PR's
+      // own manifest + bins, so you can open it directly and test the change before merge. Show the
+      // preview banner; the install button's manifest="manifest.json" resolves to
+      // PR/<N>/manifest.json (same-origin), so it flashes only this PR.
+      var onPR = location.pathname.match(/\/PR\/(\d+)\//);
+      if (onPR) setBanner(onPR[1]);
+
+      // Both root and PR pages: label the button with the version from the adjacent manifest.json.
+      fetch("manifest.json", { cache: "no-store" })
+        .then(function (r) { return r.ok ? r.json() : null; })
+        .catch(function () { return null; })
+        .then(function (m) { if (m && m.version) setLabel(m.version); });
+    })();
+  </script>
+</body>
+</html>
