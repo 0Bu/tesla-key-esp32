@@ -238,10 +238,21 @@
       }
       function openMenu(o) { if (menu) { menu.hidden = !o; caret.setAttribute("aria-expanded", o ? "true" : "false"); } }
 
-      // The installer is a single root page. A PR preview (PR/<N>/) is just a manifest + bins;
-      // selecting one repoints the install button's manifest (ESP Web Tools reads it at click,
-      // parts are relative so each stays same-origin) and updates the button label + banner.
-      // items[0] = main (latest release), then one per open PR preview, newest first.
+      // Standalone per-PR preview page (/PR/<N>/): a full copy of this page is shipped next to the
+      // PR's own manifest + bins, so you can open it directly and test the change before merge.
+      // Show the banner + the PR's version and skip the picker (this page flashes only this PR;
+      // its manifest="manifest.json" resolves to PR/<N>/manifest.json, same-origin).
+      var onPR = location.pathname.match(/\/PR\/(\d+)\//);
+      if (onPR) {
+        setBanner(onPR[1]);
+        getJson("manifest.json").then(function (m) { if (m && m.version) setLabel(m.version); });
+        return;
+      }
+
+      // Root installer page: build the version picker. items[0] = main (latest release), then one
+      // per open PR preview (from previews.json), newest first. Selecting one repoints the install
+      // button's manifest (ESP Web Tools reads it at click, parts are relative so each stays
+      // same-origin) and updates the button label + banner.
       var items = [];
       function select(i) {
         var it = items[i];
