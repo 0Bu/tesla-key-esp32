@@ -90,13 +90,18 @@ esp32, 0x0 elsewhere) is handled automatically by `@flash_args` and the manifest
 **PR preview installer.** Every same-repo PR publishes its **signed** build to a per-PR
 installer so a change can be browser-flashed and tried *before* merge. CI writes the PR's
 self-contained site (`build-pages.sh`, same page + a per-PR `manifest.json` + same-origin
-bins) to `PR/<N>/` on the **`gh-pages` branch**, and the root installer treats
-`…/#<N>` as a shortcut that redirects to `PR/<N>/`. A `gh-pages` branch (not the Actions
+bins) to `PR/<N>/` on the **`gh-pages` branch**. The root installer offers two ways in: a
+**firmware picker** (a dropdown next to the Install button — "main" plus every open PR preview)
+and `…/#<N>` as a deep-link shortcut that redirects to `PR/<N>/`. The picker reads
+`previews.json` (a gh-pages-root index of `{pr,title,version,path}`, maintained by
+`publish-pages-branch.sh` on each PR publish/close) and, on selection, just repoints the
+install button's `manifest` attribute at that `PR/<N>/manifest.json` (ESP Web Tools reads it at
+click; parts are relative so each stays same-origin). A `gh-pages` branch (not the Actions
 Pages artifact) is required because the browser flasher fetches every part in-page and GitHub
 release assets carry no CORS headers, so the bins must be same-origin — and the atomic Actions
 deploy (main-only, whole-site) can't host per-PR subpaths. Main owns the gh-pages **root**;
 each PR owns `PR/<N>/`; both are synced by `scripts/publish-pages-branch.sh` (root sync
-preserves the `PR/` tree). Constraints:
+preserves the `PR/` tree **and** `previews.json`). Constraints:
 
 - **Signed-only.** Fork PRs get no `OTA_SIGNING_KEY` → build unsigned → **no** preview
   published (an unsigned image crash-loops at boot — see [`SECURITY.md`](SECURITY.md)).
