@@ -180,8 +180,15 @@ GRAD = [
     (1.00, ( 30, 140,  60)),   # 100% deep green
 ]
 
+def _iround(x):
+    # Round half away from zero, matching C++ lroundf — and round the DELTA (b-a)*t, exactly
+    # like display.cpp/soc_gradient.hpp lerp8 (a + lroundf((b-a)*t)). Python's built-in round()
+    # is banker's rounding on the SUM, which disagrees by 1 where a delta lands on a clean .5
+    # (e.g. the asleep-dim blend); this keeps the sim pixel-exact to the firmware.
+    return int(x + 0.5) if x >= 0 else -int(-x + 0.5)
+
 def lerp(a, b, t):
-    return tuple(int(round(a[i] + (b[i] - a[i]) * t)) for i in range(3))
+    return tuple(a[i] + _iround((b[i] - a[i]) * t) for i in range(3))
 
 def soc_color(soc):
     p = max(0.0, min(1.0, soc / 100.0))
@@ -341,56 +348,98 @@ def draw_pairing(cv, frame):
 # state = { wifi:0..4, ssid:str, ble:0..4, ble_on:bool, frame:int,
 #           soc:int|None, charging:bool, link:"awake"|"asleep"|"unreachable" }
 # Returns True when it drew the searching animation (the caller animates faster).
+# ── pure decision ("what to show") — MUST mirror tk::display::compose() in
+# main/logic/display_model.hpp. scripts/check-display-sim-parity.sh diffs this against golden
+# vectors the C++ presenter emits, so a drift between the firmware and this pixel sim fails CI
+# instead of going unnoticed by hand. compose() below draws exactly this model — the same
+# presenter/renderer split the firmware uses. Bars (rssi→level) are not decided here (the sim
+# is fed levels directly); everything else is.
+def decide(inp):
+    link     = inp["link"]
+    wifi_on  = inp["wifi_on"]
+    ssid     = inp["ssid"]
+    ble_conn = inp["ble_connected"]
+    have_soc = inp["have_soc"]
+    charging = inp["charging"]
+    paired   = inp["paired"]
+    tick     = inp["tick"]
+
+    unreachable    = link == "unreachable"
+    wifi_searching = not wifi_on
+    pairing        = ble_conn and not paired          # BLE link up but not yet paired
+    battery_ok     = (not unreachable) and have_soc
+    # BLE search bars appear ONLY when nothing else claims the centre (car out of range).
+    ble_bars       = not (wifi_searching or pairing or battery_ok)
+
+    if   wifi_searching: hero = "wifi_search"
+    elif pairing:        hero = "pairing"
+    elif not battery_ok: hero = "ble_search"
+    else:                hero = "battery"
+
+    m = {"hero": hero, "show_wifi": not wifi_searching, "show_ble": not ble_bars,
+         "ssid_avail": 0, "ssid_scrolling": False, "ssid_off": 0, "soc": 0,
+         "fill_r": 0, "fill_g": 0, "fill_b": 0, "asleep": False, "show_bolt": False,
+         "animating": False}
+
+    if m["show_wifi"]:
+        avail = (158 - 28) if ble_bars else (158 - 28 - 32)
+        m["ssid_avail"] = avail
+        if textw(ssid, 2) > avail:                    # too long → horizontal marquee
+            m["ssid_scrolling"] = True
+            m["ssid_off"] = scroll_offset(tick, textw(ssid, 2) - avail)
+
+    if hero == "battery":
+        s = max(0, min(100, int(inp["soc"])))
+        m["soc"] = s
+        m["asleep"] = (link == "asleep")
+        col = dim(soc_color(s)) if m["asleep"] else soc_color(s)
+        m["fill_r"], m["fill_g"], m["fill_b"] = col
+        m["show_bolt"] = charging and s < 100 and not m["asleep"]
+
+    m["animating"] = (hero != "battery") or m["ssid_scrolling"]
+    return m
+
 def compose(cv, st):
     cv.rect(0, 0, W, H, BG)
-
-    soc = st.get("soc")
-    link = st.get("link", "awake")
-    charging = st.get("charging", False)
-    wifi_on = st.get("wifi", 0) > 0
-    paired = st.get("paired", True)
-    ble_conn = st.get("ble_on", False)
-    # Centre state, by priority: WiFi search > pairing > battery > BLE search bars.
-    wifi_searching = not wifi_on
-    pairing = ble_conn and not paired                 # BLE link up but not yet paired
-    battery_ok = (link != "unreachable") and (soc is not None)
-    # BLE search bars appear ONLY when the car is out of range (no link, no data).
-    ble_bars = not (wifi_searching or pairing or battery_ok)
-    scrolling = False
+    inp = {
+        "link":          st.get("link", "awake"),
+        "wifi_on":       st.get("wifi", 0) > 0,
+        "ssid":          st.get("ssid") or "-",
+        "ble_connected": st.get("ble_on", False),
+        "have_soc":      st.get("soc") is not None,
+        "soc":           st.get("soc") or 0,
+        "charging":      st.get("charging", False),
+        "paired":        st.get("paired", True),
+        "tick":          st.get("frame", 0),
+    }
+    m = decide(inp)
+    f = inp["tick"]
 
     # ── header: WiFi bars + SSID (left) | BLE symbol + bars (right) ──────────
-    # Hide whichever small indicator is the active search hero; the big centre
-    # animation represents it instead.
-    # Taller, more legible status bar: scale-2 SSID, taller bars, divider at y22.
-    if not wifi_searching:
+    # Hide whichever small indicator is the active search hero. Taller, more legible status
+    # bar: scale-2 SSID, taller bars, divider at y22. Bars are the sim's direct level inputs.
+    if m["show_wifi"]:
         signal_bars(cv, 4, 4, st.get("wifi", 0))
-        avail = (158 - 28) if ble_bars else (158 - 28 - 32)
-        ssid = st.get("ssid") or "-"
-        if textw(ssid, 2) <= avail:
+        ssid = inp["ssid"]
+        if not m["ssid_scrolling"]:
             cv.text(28, 4, ssid, INK, 2)
-        else:                                   # too long → horizontal marquee
-            off = scroll_offset(st.get("frame", 0), textw(ssid, 2) - avail)
-            cv.text_clip(28 - off, 4, ssid, INK, 2, 28, 28 + avail)
-            scrolling = True
+        else:
+            cv.text_clip(28 - m["ssid_off"], 4, ssid, INK, 2, 28, 28 + m["ssid_avail"])
 
-    if not ble_bars:
+    if m["show_ble"]:
         bx = 158 - 16                  # 4 bars * 4px
-        signal_bars(cv, bx, 4, st.get("ble", 0) if ble_conn else 0)
-        cv.bitmap(bx - 13, 1, BT_ROWS, INK if ble_conn else GREY, 2)  # BT glyph, scale 2
+        signal_bars(cv, bx, 4, st.get("ble", 0) if inp["ble_connected"] else 0)
+        cv.bitmap(bx - 13, 1, BT_ROWS, INK if inp["ble_connected"] else GREY, 2)  # BT glyph, scale 2
 
     cv.rect(3, 22, W - 3, 23, DIV)     # divider under the (taller) header
 
-    # ── centre: WiFi search > pairing > battery > BLE search bars ────────────
-    f = st.get("frame", 0)
-    if wifi_searching:
-        draw_searching(cv, f, SRCH_ICON_WIFI)
-        return True
-    if pairing:
-        draw_pairing(cv, f)
-        return True
-    if not battery_ok:
-        draw_searching(cv, f, SRCH_ICON_BLE)
-        return True
+    # ── centre hero: WiFi search > pairing > BLE search > battery ────────────
+    if m["hero"] == "wifi_search":
+        draw_searching(cv, f, SRCH_ICON_WIFI); return True
+    if m["hero"] == "pairing":
+        draw_pairing(cv, f); return True
+    if m["hero"] == "ble_search":
+        draw_searching(cv, f, SRCH_ICON_BLE); return True
 
     # ── battery shell ───────────────────────────────────────────────────────
     bx0, by0, bx1, by1 = 6, 24, 146, 74
@@ -400,18 +449,13 @@ def compose(cv, st):
     ix0, iy0, ix1, iy1 = bx0+3, by0+3, bx1-3, by1-3   # interior bounds
     iw = ix1 - ix0
 
-    soc = max(0, min(100, int(soc)))
-    asleep = link == "asleep"
-    fill_col = dim(soc_color(soc)) if asleep else soc_color(soc)
+    soc = m["soc"]
     fw = int(round(iw * soc / 100.0))
     if fw > 0:
-        cv.rect(ix0, iy0, ix0 + fw, iy1, fill_col)
+        cv.rect(ix0, iy0, ix0 + fw, iy1, (m["fill_r"], m["fill_g"], m["fill_b"]))
 
-    txt_col = GREY if asleep else INK
     num = "%d%%" % soc
-    show_bolt = charging and soc < 100 and not asleep
-
-    if show_bolt:
+    if m["show_bolt"]:
         # centred group: [bolt][gap][NN%]
         bw = max(len(r) for r in BOLT_ROWS) * 2
         gap = 6
@@ -420,11 +464,11 @@ def compose(cv, st):
         cv.bitmap(gx, (H + 18 - len(BOLT_ROWS)*2)//2 - 2, BOLT_ROWS, (255, 235, 120), 2, outline=BG)
         cv.text_outline(gx + bw + gap, 41, num, INK, 3, BG)
     else:
-        cv.text_outline((W - textw(num, 3))//2, 41, num, txt_col, 3, BG)
+        cv.text_outline((W - textw(num, 3))//2, 41, num, GREY if m["asleep"] else INK, 3, BG)
 
-    if asleep:
+    if m["asleep"]:
         cv.text((W - textw("ASLEEP", 1))//2, 64, "ASLEEP", GREY, 1)
-    return scrolling   # battery view still needs fast refresh while the SSID scrolls
+    return m["animating"]   # battery view still needs fast refresh while the SSID scrolls
 
 # ── render helpers ────────────────────────────────────────────────────────────
 def upscale(cv, S):
@@ -608,6 +652,44 @@ def cmd_cheader(out="main/display_font.h"):
     open(out, "w").write("\n".join(L) + "\n")
     print("wrote", out)
 
+# ── parity: verify decide() against the C++ presenter's golden vectors ──────────
+# Reads the TSV emitted by test/display_golden_dump.cpp (input columns + the C++
+# tk::display::compose() decision), re-runs decide() on each input here, and diffs the
+# decisions. Exit non-zero on any mismatch. Wired via scripts/check-display-sim-parity.sh.
+OUT_FIELDS = ["hero", "show_wifi", "show_ble", "ssid_avail", "ssid_scrolling", "ssid_off",
+              "out_soc", "fill_r", "fill_g", "fill_b", "asleep", "show_bolt", "animating"]
+def _b01(x):
+    return "1" if x else "0"
+def cmd_parity(golden):
+    rows = [ln.rstrip("\n") for ln in open(golden) if ln.strip() and not ln.startswith("#")]
+    header = rows[0].split("\t")
+    fails = n = 0
+    for ln in rows[1:]:
+        rec = dict(zip(header, ln.split("\t")))
+        inp = {"link": rec["link"], "wifi_on": rec["wifi_on"] == "1", "ssid": rec["ssid"],
+               "ble_connected": rec["ble_connected"] == "1", "have_soc": rec["have_soc"] == "1",
+               "soc": int(rec["soc"]), "charging": rec["charging"] == "1",
+               "paired": rec["paired"] == "1", "tick": int(rec["tick"])}
+        m = decide(inp)
+        got = {"hero": m["hero"], "show_wifi": _b01(m["show_wifi"]), "show_ble": _b01(m["show_ble"]),
+               "ssid_avail": str(m["ssid_avail"]), "ssid_scrolling": _b01(m["ssid_scrolling"]),
+               "ssid_off": str(m["ssid_off"]), "out_soc": str(m["soc"]),
+               "fill_r": str(m["fill_r"]), "fill_g": str(m["fill_g"]), "fill_b": str(m["fill_b"]),
+               "asleep": _b01(m["asleep"]), "show_bolt": _b01(m["show_bolt"]), "animating": _b01(m["animating"])}
+        n += 1
+        for k in OUT_FIELDS:
+            if rec.get(k) != got[k]:
+                fails += 1
+                print("  MISMATCH case %d field %s: C++=%r sim=%r  (link=%s wifi_on=%s ssid=%r "
+                      "ble=%s soc=%s chg=%s paired=%s tick=%s)" % (
+                          n, k, rec.get(k), got[k], inp["link"], inp["wifi_on"], inp["ssid"],
+                          inp["ble_connected"], inp["soc"], inp["charging"], inp["paired"], inp["tick"]))
+    if fails == 0:
+        print("OK  sim decide() matches the C++ presenter on %d golden cases" % n)
+        return 0
+    print("FAILED  %d field mismatch(es) across %d cases" % (fails, n))
+    return 1
+
 if __name__ == "__main__":
     mode = sys.argv[1] if len(sys.argv) > 1 else "png"
     arg  = sys.argv[2] if len(sys.argv) > 2 else None
@@ -621,5 +703,7 @@ if __name__ == "__main__":
         cmd_scroll(arg or "tools/display_scroll.png")
     elif mode == "cheader":
         cmd_cheader(arg or "main/display_font.h")
+    elif mode == "parity":
+        sys.exit(cmd_parity(arg or "build_mock/display_golden.tsv"))
     else:
-        print("usage: display_sim.py [png|states|search|scroll|cheader] [outfile]")
+        print("usage: display_sim.py [png|states|search|scroll|cheader|parity] [outfile]")

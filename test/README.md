@@ -57,6 +57,13 @@ The target mapping is double-locked: `ota_update.cpp` `static_assert`s its compi
 image-suffix literal against `tk::image_suffix()`, so the macro and the host-tested
 mapping cannot drift.
 
+The display presenter is triple-locked: besides the `CHECK`s above, `run-mock-tests.sh` runs
+`scripts/check-display-sim-parity.sh`, which compiles `test/display_golden_dump.cpp` to emit the
+C++ presenter's decisions for a set of cases and has `tools/display_sim.py parity` re-decide the
+same inputs in Python and diff them — so the pixel-exact offline sim (`display_sim.py`) can't
+silently drift from the firmware's `tk::display::compose()`. (Skipped only where `python3` is
+absent; the C++ `CHECK`s remain the hard gate.)
+
 ## What's *not* covered (by design)
 
 The cJSON envelope builders for `/status` and the MQTT discovery/state payloads stay

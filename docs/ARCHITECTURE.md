@@ -121,7 +121,11 @@ pure, host-tested presenter (`main/logic/display_model.hpp`) reading a shared, I
 resulting `Model` — so those decisions are unit-tested in `test/` without a board (`logic-test`
 job), the layout constants have one home, and a future status LED can consume the same snapshot.
 The rendering is identical on both boards (the layout mirrors
-`tools/display_sim.py` 1:1); only the hardware wiring differs, from Kconfig/`sdkconfig.defaults.*`:
+`tools/display_sim.py`, the pixel-exact offline renderer and font source of truth — and that
+mirror is no longer by hand: `scripts/check-display-sim-parity.sh`, run by
+`scripts/run-mock-tests.sh`, diffs the sim's `decide()` against golden vectors the C++ presenter
+emits, so a drift between firmware and sim fails the `logic-test` gate). Only the hardware wiring
+differs, from Kconfig/`sdkconfig.defaults.*`:
 
 - **T-Dongle-C5** (ESP32-C5HR8, 16 MB flash, 8 MB PSRAM): framebuffer in PSRAM; SPI 20 MHz; BOOT
   button on GPIO28. Compiled for esp32c5 via `CONFIG_TESLA_DISPLAY_ENABLED` in
