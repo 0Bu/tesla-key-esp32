@@ -34,8 +34,8 @@ Pull-based: the device fetches `manifest.json` from a fixed HTTPS URL
 (`CONFIG_TESLA_OTA_MANIFEST_URL`, default GitHub Pages), compares its `version` to the
 running firmware, and on confirmation downloads ITS per-target app image
 (`CONFIG_TESLA_OTA_FIRMWARE_BASE_URL` + `tesla-key-esp32<suffix>.bin`, where `<suffix>` is
-the chip's short tag so "esp32" appears once — `""`/`-s3`/`-c3`/`-c6` for
-esp32/esp32s3/esp32c3/esp32c6, picked at compile time by `TESLA_OTA_IMG_SUFFIX` from
+the chip's short tag so "esp32" appears once — `""`/`-s3`/`-c3`/`-c6`/`-c5` for
+esp32/esp32s3/esp32c3/esp32c6/esp32c5, picked at compile time by `TESLA_OTA_IMG_SUFFIX` from
 `CONFIG_IDF_TARGET_*`) via `esp_https_ota` into the inactive OTA slot, then reboots.
 `esp_https_ota` verifies the image chip-id, so a wrong-target image is refused (never
 flashed); one manifest `version` covers all targets (CI builds them from one commit).
@@ -69,23 +69,62 @@ v3.0+ (`CONFIG_ESP32_REV_MIN_3` in `sdkconfig.defaults.esp32`). **Full key lifec
 rotation: [`SECURITY.md`](SECURITY.md).**
 
 Partition layout (`partitions.csv`) is dual-OTA (`otadata` + `ota_0`/`ota_1`, ~2 MB each),
-sized to fill 4 MB (the smallest supported flash) so ONE table serves every target; app at
-`0x20000`. **Migration:** a device on the old single-`factory` layout must be USB-reflashed
+sized to fill 4 MB (the smallest supported flash — the T-Dongle-C5's 16 MB leaves the top
+unused) so ONE table serves every target; app at `0x20000`. The `ci-build-all.sh` **app-size gate**
+sits at `slot − 32 KB` (0x1e8000): each image's code rounds up to a 64 KB Secure-Boot boundary + a
+4 KB signature, and the largest — esp32c6, ~0x1d1000 signed — clears it comfortably. **esp32c5
+carries the on-device display + PSRAM, so it is built `-Os`** (`sdkconfig.defaults.esp32c5`) to keep
+its signed image ~0x1c1000 despite the extra code. **Migration:** a device on the old single-`factory` layout must be USB-reflashed
 once via the web installer (full erase → WiFi/VIN/key reset, re-pair). After that, all
 updates are OTA and preserve NVS. (Existing 8 MB-table S3 devices keep OTA-updating without
 a reflash — OTA writes follow the INSTALLED table, and `ota_0` stays at `0x20000`.)
 
 **One source tree, per-target images.** No per-board source forks — one codebase builds for
-esp32 / esp32s3 / esp32c3 / esp32c6 (`scripts/ci-build-all.sh`; the set is bounded by
-tesla-ble's `targets:`). The build deltas are config-only: target set per build
-(`idf.py set-target`), flash 4 MB, and the console is native USB-Serial/JTAG
-(`CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG`) on s3/c3/c6 — absent on the classic esp32, where it
-auto-falls-back to UART0 (no per-target sdkconfig needed). The web installer is a single
-page whose `manifest.json` carries one build per chipFamily (esp-web-tools auto-selects by
+esp32 / esp32s3 / esp32c3 / esp32c6 / esp32c5 (`scripts/ci-build-all.sh`). The build deltas are
+config-only: target set per build (`idf.py set-target`), flash 4 MB, and the console is native
+USB-Serial/JTAG (`CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG`) on s3/c3/c6/c5 — absent on the classic
+esp32, where it auto-falls-back to UART0. The only per-target sdkconfig files are
+`sdkconfig.defaults.esp32` (Secure-Boot chip-rev floor) and `sdkconfig.defaults.esp32c5`
+(on-device ST7735 display + 8 MB PSRAM + `-Os`). The web installer is a
+single page whose `manifest.json` carries one build per chipFamily (esp-web-tools auto-selects by
 detected chip); OTA is a single channel where each device pulls its own
-`tesla-key-esp32<suffix>.bin` (`tesla-key-esp32.bin` for the classic esp32, `-s3`/`-c3`/`-c6`
+`tesla-key-esp32<suffix>.bin` (`tesla-key-esp32.bin` for the classic esp32, `-s3`/`-c3`/`-c6`/`-c5`
 otherwise). The per-target bootloader offset (0x1000 on the classic
-esp32, 0x0 elsewhere) is handled automatically by `@flash_args` and the manifest.
+esp32, 0x2000 on esp32c5, 0x0 on s3/c3/c6) is handled automatically by `@flash_args` and the manifest.
+
+**esp32c5 via a local build-time patch of tesla-ble.** esp32 / esp32s3 / esp32c3 / esp32c6 are
+exactly the targets yoziru/tesla-ble declares in its `idf_component.yml` `targets:`, and the
+ESP-IDF Component Manager enforces that list — it refuses `esp32c5` at dependency resolution,
+before compile, and stages nothing into `managed_components/` (so there is nothing to patch after
+the fact). The library's code is target-agnostic and already builds for RISC-V (c3/c6); C5 is
+RISC-V too, so the only blocker is that one manifest line. Rather than fork upstream or edit the
+regenerated `managed_components/`, `scripts/prepare-tesla-ble-c5.sh` clones the exact pinned tag
+into `third_party/tesla-ble` (gitignored) and appends `esp32c5` to its `targets:`.
+`main/idf_component.yml` then declares the dependency twice under mutually-exclusive `rules:` —
+the git dep applies when `target != esp32c5`, a local `path:` dep (the patched checkout) when
+`target == esp32c5`. So only C5 routes through the local copy; the other four resolve
+byte-identically from git, and CI (`ci-build-all.sh`) runs the prepare step automatically. All
+five images are the same tesla-ble revision. The LilyGO T-Dongle-C5 (ESP32-C5HR8, 16 MB flash,
+USB-C native USB-Serial/JTAG) is the reference C5 board; its ST7735 LCD is unused (no display
+code — generic-target only).
+
+**ESP32-C5, 5 GHz WiFi and BLE coexistence.** The C5 is Espressif's dual-band Wi-Fi 6 (2.4 + 5
+GHz) RISC-V part, so a natural question is whether running WiFi on 5 GHz reduces the WiFi↔BLE
+interference that historically forced `WIFI_PS_MIN_MODEM` on this project (a `WIFI_PS_NONE`
+station starves BLE until every GATT connect times out). The honest answer from the silicon:
+**per Espressif's C5 RF-coexistence guide the chip has "only one 2.4 GHz ISM band RF module,
+shared by" WiFi/BLE/802.15.4**, and the T-Dongle-C5 has a single antenna — so WiFi and BLE still
+**time-division multiplex one RF path even with WiFi on 5 GHz**. Moving WiFi to 5 GHz does NOT
+remove that airtime contention (the dominant cause of BLE stalls here), and `WIFI_PS_MIN_MODEM`
+must stay on regardless. What 5 GHz *can* do is take this device's WiFi off the 2.4 GHz band —
+freeing that band for BLE and dodging a congested 2.4 GHz environment (neighbour APs, microwave)
+— so BLE reliability *may* improve second-order, depending on how busy the local 2.4 GHz band is.
+That is an empirical, per-network question, so the effect is exposed behind an opt-in,
+default-off, C5-only Kconfig `CONFIG_TESLA_WIFI_PREFER_5G` (`depends on SOC_WIFI_SUPPORT_5G`):
+when set, WiFi init adds an RSSI bonus (`wifi_sta_config.threshold.rssi_5g_adjustment`) so the
+existing `BY_SIGNAL` scan prefers the 5 GHz AP of a band-steered SSID. Band mode stays automatic,
+so a device out of 5 GHz range still falls back to 2.4 GHz (no reconnect trap). Flip it on and
+compare BLE connect success / `link_state` over a few days to A/B test it on your network.
 
 ## Home Assistant MQTT bridge
 

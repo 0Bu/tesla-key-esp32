@@ -14,6 +14,27 @@ menu "Tesla Key Configuration"
         help
             Password for the WiFi network.
 
+    config TESLA_WIFI_PREFER_5G
+        bool "Prefer 5 GHz WiFi (ESP32-C5 dual-band; experimental)"
+        depends on SOC_WIFI_SUPPORT_5G
+        default n
+        help
+            ESP32-C5 only. When the same SSID is broadcast on both 2.4 GHz and 5 GHz
+            (band steering), bias AP selection toward the 5 GHz radio (adds a fixed
+            RSSI bonus to 5 GHz APs during the BY_SIGNAL scan).
+
+            Why it might help BLE: WiFi and BLE still share ONE RF path on the C5, so
+            their coexistence is time-division multiplexed even with WiFi on 5 GHz — the
+            5 GHz move does NOT remove the airtime contention that dominates BLE
+            reliability here (that is why WIFI_PS_MIN_MODEM must stay on). What it CAN do
+            is take this device's WiFi off the 2.4 GHz band, freeing that band for BLE and
+            dodging a congested 2.4 GHz environment, so BLE may stall less. The effect is
+            second-order and environment-dependent — hence this experimental, default-off
+            switch to A/B test it on your network.
+
+            Band mode stays automatic, so a device out of 5 GHz range still falls back to
+            2.4 GHz — no reconnect trap.
+
     config TESLA_VIN
         string "Tesla Vehicle VIN"
         default ""
@@ -45,7 +66,7 @@ menu "Tesla Key Configuration"
         help
             HTTPS base URL (a directory, with trailing slash) where the per-target app
             images are published. The device appends "tesla-key-esp32<suffix>.bin" for
-            its own chip — <suffix> is "" / -s3 / -c3 / -c6 (so "esp32" appears once),
+            its own chip — <suffix> is "" / -s3 / -c3 / -c6 / -c5 (so "esp32" appears once),
             picked at compile time — one channel serves every supported target.
             The image is downloaded and flashed to the inactive OTA slot by esp_https_ota,
             which also verifies the image chip-id and refuses a wrong-target image. Must
@@ -94,5 +115,44 @@ menu "Tesla Key Configuration"
             How often the full set of cached telemetry + device status is
             republished to MQTT (retained). Discovery + an immediate snapshot are
             also sent on every (re)connect.
+
+    config TESLA_DISPLAY_ENABLED
+        bool "On-device ST7735 status display (LilyGo T-Dongle-C5)"
+        default n
+        help
+            Drive a 0.96" ST7735 80x160 SPI TFT and render the charge/connection
+            status (SOC ring, charging state, power/current, WiFi/BLE) directly on
+            the panel — mirroring the web UI. Reads ONLY cached state, so it never
+            triggers a BLE round-trip (can't wake the car) and does not depend on
+            MQTT. Off by default; enabled for the LilyGo T-Dongle-C5 via
+            sdkconfig.defaults.esp32c5, where the pins below default to that board's
+            wiring. The framebuffer lives in PSRAM, so this board needs SPIRAM on.
+
+    if TESLA_DISPLAY_ENABLED
+    config TESLA_DISPLAY_SPI_MOSI
+        int "Display SPI MOSI (SDA) GPIO"
+        default 2
+    config TESLA_DISPLAY_SPI_SCK
+        int "Display SPI SCK (SCL) GPIO"
+        default 6
+    config TESLA_DISPLAY_CS
+        int "Display CS GPIO"
+        default 10
+    config TESLA_DISPLAY_DC
+        int "Display DC (RS) GPIO"
+        default 3
+    config TESLA_DISPLAY_RST
+        int "Display RST GPIO"
+        default 1
+    config TESLA_DISPLAY_BL
+        int "Display backlight GPIO"
+        default 0
+    config TESLA_DISPLAY_X_OFFSET
+        int "Panel column offset (ST7735 RAM offset)"
+        default 26
+    config TESLA_DISPLAY_Y_OFFSET
+        int "Panel row offset (ST7735 RAM offset)"
+        default 1
+    endif
 
 endmenu

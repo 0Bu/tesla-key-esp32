@@ -163,17 +163,20 @@ static void test_target() {
     CHECK_STR(tk::platform_name(tk::Target::Esp32S3), "ESP32-S3");
     CHECK_STR(tk::platform_name(tk::Target::Esp32C3), "ESP32-C3");
     CHECK_STR(tk::platform_name(tk::Target::Esp32C6), "ESP32-C6");
+    CHECK_STR(tk::platform_name(tk::Target::Esp32C5), "ESP32-C5");
 
-    // esp32 has no suffix (tesla-key-esp32.bin); the rest get -s3/-c3/-c6.
+    // esp32 has no suffix (tesla-key-esp32.bin); the rest get -s3/-c3/-c6/-c5.
     CHECK_STR(tk::image_suffix(tk::Target::Esp32),   "");
     CHECK_STR(tk::image_suffix(tk::Target::Esp32S3), "-s3");
     CHECK_STR(tk::image_suffix(tk::Target::Esp32C3), "-c3");
     CHECK_STR(tk::image_suffix(tk::Target::Esp32C6), "-c6");
+    CHECK_STR(tk::image_suffix(tk::Target::Esp32C5), "-c5");
 
     // The full OTA filename the device pulls, assembled the same way ota_update.cpp does.
     const std::string base = "tesla-key-esp32";
     CHECK(base + tk::image_suffix(tk::Target::Esp32)   + ".bin" == "tesla-key-esp32.bin");
     CHECK(base + tk::image_suffix(tk::Target::Esp32S3) + ".bin" == "tesla-key-esp32-s3.bin");
+    CHECK(base + tk::image_suffix(tk::Target::Esp32C5) + ".bin" == "tesla-key-esp32-c5.bin");
 }
 
 // ─── MCP endpoint core (version negotiation, routing, tool registry, clamp) ──────

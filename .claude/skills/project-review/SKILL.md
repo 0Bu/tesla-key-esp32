@@ -6,8 +6,10 @@ description: Comprehensive, whole-project coherence review of the tesla-key-esp3
 # project-review — holistic coherence audit of tesla-key-esp32
 
 This project is an **ESP-IDF 5.x C++ firmware** for the **ESP32 family** — one source tree
-builds for esp32 / esp32s3 / esp32c3 / esp32c6 (the four targets yoziru/tesla-ble supports) —
-that acts as a **BLE↔HTTP proxy for a Tesla vehicle**, API-compatible with TeslaBleHttpProxy
+builds for esp32 / esp32s3 / esp32c3 / esp32c6 / esp32c5 (the four targets yoziru/tesla-ble
+supports, plus esp32c5 via a local build-time patch of tesla-ble — `prepare-tesla-ble-c5.sh` +
+the conditional `main/idf_component.yml`) — that acts as a **BLE↔HTTP proxy for a Tesla
+vehicle**, API-compatible with TeslaBleHttpProxy
 so it works as an **evcc** BLE vehicle. It is small but dense with **non-local invariants**:
 a one-line change in code often has to be mirrored in three docs, a Kconfig option, the
 partition table, and the web UI — and several rules only bite at *runtime* (BLE wake
@@ -137,8 +139,9 @@ Treat a violation of any of these as a real finding.
 - Dual-OTA layout (`partitions.csv`): `nvs@0x9000`, app at **`0x20000`**, two ~2 MB slots
   (`0x1f0000`), **4 MB** flash (smallest supported part; a larger flash leaves the top
   unused). NVS is never in the flashed set, so pairing/key/VIN survive OTA. One source tree
-  builds for esp32 / esp32s3 / esp32c3 / esp32c6 (the tesla-ble targets); each device pulls
-  its own `tesla-key-esp32<suffix>.bin` (`""`/`-s3`/`-c3`/`-c6`, so "esp32" appears once —
+  builds for esp32 / esp32s3 / esp32c3 / esp32c6 (the tesla-ble targets) + esp32c5 (local
+  build-time patch); each device pulls its own `tesla-key-esp32<suffix>.bin`
+  (`""`/`-s3`/`-c3`/`-c6`/`-c5`, so "esp32" appears once —
   must match across `ota_update.cpp`, `ci-build-all.sh`, `build-pages.sh`) and the web
   installer auto-selects by chipFamily.
 - Rollback is enabled and **deliberately deferred**: `main.cpp` does NOT mark the image valid
@@ -216,9 +219,13 @@ that describe it. When reviewing a change (or the repo as a whole), check these 
   sink → keep the other in sync (exhaustive MQTT switch, every web-UI state incl. unknown)
   **and** update the four-state summary in `.claude/CLAUDE.md` **and** the full semantics in
   `docs/ARCHITECTURE.md`.
-- **New chip / target** → tesla-ble `targets:` (`main/idf_component.yml`) bounds the set
-  **and** `platform.hpp` (`TK_PLATFORM`) **and** the OTA `<suffix>` map **and** the web
-  installer manifest (`build-pages.sh`) **and** every doc that lists the four targets.
+- **New chip / target** → for a chip tesla-ble already lists, `main/idf_component.yml` git dep;
+  for one it omits (like esp32c5), the conditional `main/idf_component.yml` + a local patched
+  checkout (`prepare-tesla-ble-c5.sh` pattern) **and** `logic/target.hpp` (enum + `platform_name`
+  + `image_suffix`) **and** `platform.hpp` (`TK_TARGET`) **and** the OTA `<suffix>` map
+  (`ota_update.cpp`) **and** `ci-build-all.sh` + `build-pages.sh` (`TARGETS`/`image_suffix`/
+  `chip_family`) **and** `test/test_logic.cpp` CHECKs **and** every doc that lists the supported
+  targets. (Watch the `ci-build-all.sh` app-size gate — esp32c5 already binds it.)
 - **WiFi/LAN reconnect or watchdog change** → the STA→LAN reconnect policy + connectivity-
   watchdog constants live ONLY in `main/main.cpp` (`MAX_RETRY`, `s_wifi_ever_connected`,
   `kWdPeriodS`/`kWdFailToReassoc`/`kWdPingCount`, the ghost-only + `s_gw_ever_reachable`
@@ -308,7 +315,7 @@ what each must stay true to:
 
 - **`flash-esp32`** wraps the build + USB-flash path. Re-verify against `scripts/idf-docker.sh`
   (Docker-pinned, no local IDF), `partitions.csv` (offsets `nvs@0x9000`, `otadata@0xf000`,
-  app `@0x20000`), the target set (esp32/s3/c3/c6) and per-target bootloader offset, and that
+  app `@0x20000`), the target set (esp32/s3/c3/c6/c5) and per-target bootloader offset, and that
   `@flash_args` preserves NVS (never writes `nvs@0x9000`).
 - **`e2e-evcc`** wraps `scripts/e2e_evcc.sh`. Re-verify the command count (must equal the
   `handle_command` switch — currently **15**), the version-coherence claim (`/status` = `X`,

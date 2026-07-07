@@ -48,7 +48,7 @@ jobs:
           fetch-depth: 0   # need full history + tags for versioning and change detection
 
       # Persist the ccache dir that ci-build-all.sh writes (.ccache, inside the workspace
-      # so it survives the container mount) across CI runs. The four cold ESP-IDF builds —
+      # so it survives the container mount) across CI runs. The five cold ESP-IDF builds —
       # framework + tesla-ble + our sources, once per target — dominate wall-clock; a warm
       # ccache turns most of that into cache hits. Key per-commit (cache keys are immutable,
       # so a fresh entry is saved each run); restore-keys falls back to the newest prior
@@ -80,7 +80,7 @@ jobs:
           if [ -z "$before" ] || ! git cat-file -e "${before}^{commit}" 2>/dev/null; then
             changed=yes   # first push / unknown base → release to be safe
           elif git diff --name-only "$before" "${{ github.sha }}" \
-               | grep -qE '^(main/|CMakeLists\.txt$|sdkconfig\.defaults(\.[a-z0-9]+)?$|partitions\.csv$|version\.txt$|\.github/workflows/build\.yml$|scripts/ci-build-all\.sh$|scripts/build-pages\.sh$)'; then
+               | grep -qE '^(main/|CMakeLists\.txt$|sdkconfig\.defaults(\.[a-z0-9]+)?$|partitions\.csv$|version\.txt$|\.github/workflows/build\.yml$|scripts/ci-build-all\.sh$|scripts/build-pages\.sh$|scripts/prepare-tesla-ble-c5\.sh$)'; then
             changed=yes
           else
             changed=no
@@ -140,13 +140,14 @@ jobs:
         with:
           esp_idf_version: v5.5.4
           target: esp32
-          # Build EVERY target yoziru/tesla-ble supports (esp32 / esp32s3 / esp32c3 /
-          # esp32c6 — the Component Manager refuses any other chip) and stage per-target
-          # bins. ci-build-all.sh set-targets each in turn, writes _fw/<target>/ for the
-          # installer manifest and tesla-key-esp32[-<s3|c3|c6>].bin (+ versioned + merged) for
-          # release / OTA. The `target:` input above is just the action's default; the
-          # script overrides it per target. ONE source tree → N per-target images; the web
-          # installer auto-selects by chip and OTA pulls tesla-key-esp32[-<s3|c3|c6>].bin.
+          # Build every supported target and stage per-target bins. esp32 / esp32s3 / esp32c3 /
+          # esp32c6 are what yoziru/tesla-ble supports (the Component Manager refuses any other
+          # chip); esp32c5 is added via a local build-time patch of tesla-ble (ci-build-all.sh
+          # runs scripts/prepare-tesla-ble-c5.sh first). ci-build-all.sh set-targets each in turn,
+          # writes _fw/<target>/ for the installer manifest and tesla-key-esp32[-<s3|c3|c6|c5>].bin
+          # (+ versioned + merged) for release / OTA. The `target:` input above is just the action's
+          # default; the script overrides it per target. ONE source tree → N per-target images; the
+          # web installer auto-selects by chip and OTA pulls tesla-key-esp32[-<s3|c3|c6|c5>].bin.
           command: ./scripts/ci-build-all.sh "${{ steps.version.outputs.version }}"
 
       # Shred the signing key immediately after the build, even on failure, so it never
@@ -161,7 +162,7 @@ jobs:
           name: tesla-key-esp32-${{ steps.version.outputs.version }}
           # Per-target app images: stable (also the OTA filename), versioned, and merged.
           # Glob without the dash so the suffix-less classic-esp32 image (tesla-key-esp32.bin)
-          # is captured alongside tesla-key-esp32-s3/-c3/-c6.bin.
+          # is captured alongside tesla-key-esp32-s3/-c3/-c6/-c5.bin.
           path: |
             tesla-key-esp32*.bin
 

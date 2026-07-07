@@ -2,10 +2,14 @@
 
 ESP-IDF 5.x project for the ESP32 family. Acts as a BLE↔HTTP proxy for Tesla vehicles,
 API-compatible with TeslaBleHttpProxy (works as evcc BLE vehicle integration). Builds for
-the four targets yoziru/tesla-ble supports — **esp32, esp32s3, esp32c3, esp32c6** — from
-ONE source tree; CI builds all four. The supported set is bounded by tesla-ble's
-`idf_component.yml` `targets:` (the Component Manager refuses any other chip), not by our
-code, which is target-agnostic.
+**five targets — esp32, esp32s3, esp32c3, esp32c6, esp32c5** — from ONE source tree; CI
+builds all five. The first four are exactly what yoziru/tesla-ble declares in its
+`idf_component.yml` `targets:` (the Component Manager refuses any other chip). **esp32c5**
+(LilyGO T-Dongle-C5, dual-band Wi-Fi 6) is NOT in that upstream list, so it is added by a
+local build-time patch of tesla-ble (`scripts/prepare-tesla-ble-c5.sh` clones the pinned tag
+and appends esp32c5 to its `targets:`; `main/idf_component.yml` routes ONLY the c5 target
+through that local copy — the other four resolve byte-identically from git). Our own code is
+target-agnostic; the only C5 blocker was that one manifest line.
 
 > **Deep reference:** this file holds the always-needed essentials. The full narrative for
 > telemetry, the MQTT/HA bridge, WiFi/LAN reconnect, sleep/link-state, pairing and OTA lives in
@@ -52,15 +56,17 @@ Docker image **pinned to the version CI builds with** (read at runtime from
 ```bash
 # Build (first run: set-target; afterwards plain `build` stays incremental).
 # The wrapper keeps build/ host-owned and pins the ESP-IDF version to CI.
-# Pick your chip; CI builds all four via scripts/ci-build-all.sh.
-scripts/idf-docker.sh idf.py set-target esp32s3 build   # or esp32 / esp32c3 / esp32c6
+# Pick your chip; CI builds all five via scripts/ci-build-all.sh.
+# For esp32c5 first run `scripts/prepare-tesla-ble-c5.sh` once (clones + patches the local
+# tesla-ble copy the c5 target resolves against); ci-build-all.sh does this automatically.
+scripts/idf-docker.sh idf.py set-target esp32s3 build   # or esp32 / esp32c3 / esp32c6 / esp32c5
 
 # Configure WiFi, VIN (interactive; can also be set later via the setup AP)
 scripts/idf-docker.sh idf.py menuconfig   # → Tesla Key Configuration
 
 # Flash from the host (preserves nvs — @flash_args skips nvs@0x9000). Match --chip to
 # the target you built; @flash_args already carries the right bootloader offset.
-cd build && esptool --chip esp32s3 -p <port> write_flash "@flash_args"   # or esp32 / esp32c3 / esp32c6
+cd build && esptool --chip esp32s3 -p <port> write_flash "@flash_args"   # or esp32 / esp32c3 / esp32c6 / esp32c5
 ```
 
 ## Architecture
@@ -89,6 +95,10 @@ mcp_server.cpp         → /mcp — MCP server for AI agents (stateless JSON-RPC
                          (shared helpers: http_common.cpp; split map: http_handlers.hpp)
 diag_log.cpp           → in-RAM console ring served by GET /diag (static .bss buffer)
 provisioning.cpp       → captive setup portal (setup AP) when no WiFi is configured
+display.cpp            → on-device ST7735 status panel (LilyGo T-Dongle-C5 only): SOC ring +
+                         WiFi/BLE cards from cached state (never wakes the car). Compiles to a
+                         no-op unless CONFIG_TESLA_DISPLAY_ENABLED (set in sdkconfig.defaults.esp32c5);
+                         font from tools/display_sim.py → main/display_font.h
 www/                   → web UI sources: index.html (markup) + style.css + app.js, spliced
                          into ONE self-contained page at build time (inline_assets.cmake,
                          byte-equivalent to the former monolith) and served pre-gzipped
@@ -150,7 +160,7 @@ POST /send_key                                 # pair with vehicle (Charging Man
 POST /set_time                                 # set wall clock from the browser ({"ms":<epoch>}); fallback when NTP unreachable
 POST /set_vin                                  # persist VIN + reboot
 POST /set_mqtt                                 # persist MQTT broker (HA bridge) + reboot ({"broker":"host:port"}; "" disables)
-GET  /api/proxy/1/version                      # {version, platform: running chip — "ESP32"/"ESP32-S3"/"ESP32-C3"/"ESP32-C6"}
+GET  /api/proxy/1/version                      # {version, platform: running chip — "ESP32"/"ESP32-S3"/"ESP32-C3"/"ESP32-C6"/"ESP32-C5"}
 GET  /ota/check[?ms=<epoch>]                   # start background manifest check (non-blocking); poll /ota/status. ms = browser-clock NTP fallback
 POST /ota/update                               # start background self-update (pull, then reboot)
 GET  /ota/status                               # poll OTA progress {state,progress,message,available,update_available,current}
@@ -162,7 +172,7 @@ No HTTP auth / TLS by design (evcc cannot send credentials) — trusted LAN only
 
 Pull-based: the device fetches `manifest.json` from `CONFIG_TESLA_OTA_MANIFEST_URL` (default
 GitHub Pages), compares `version` to the running firmware, and on confirmation downloads its
-per-target image `tesla-key-esp32<suffix>.bin` (`""`/`-s3`/`-c3`/`-c6`) via `esp_https_ota`
+per-target image `tesla-key-esp32<suffix>.bin` (`""`/`-s3`/`-c3`/`-c6`/`-c5`) via `esp_https_ota`
 into the inactive slot, then reboots. `esp_https_ota` verifies the chip-id (wrong-target image
 refused). **Downgrade gate:** before the bulk download `ota_task` reads the image's own version
 (`esp_https_ota_get_img_desc`) and refuses anything not strictly newer than the running firmware
@@ -184,9 +194,14 @@ unsigned/differently-signed OTAs. Classic esp32 needs chip rev v3.0+ (`CONFIG_ES
 in `sdkconfig.defaults.esp32`). **Key lifecycle/rotation: [`docs/SECURITY.md`](../docs/SECURITY.md).**
 
 Partition layout (`partitions.csv`) is dual-OTA (`otadata` + `ota_0`/`ota_1`, ~2 MB each),
-sized to fill **4 MB** (smallest supported flash) so ONE table serves every target; **app at
-`0x20000`**. Per-target bootloader offset (0x1000 on classic esp32, 0x0 elsewhere) is handled
-by `@flash_args` and the manifest. **Migration + multi-target image details:
+sized to fill **4 MB** (smallest supported flash — the T-Dongle-C5's 16 MB just leaves the top
+unused) so ONE table serves every target; **app at `0x20000`**. Per-target **bootloader offset**
+is handled by `@flash_args` and the manifest — 0x1000 on the classic esp32, **0x2000 on esp32c5**
+(its newer flash layout), 0x0 on s3/c3/c6. The `ci-build-all.sh` size gate sits at `slot − 32 KB`
+(0x1e8000, below the 0x1f0000 = 2031616 B slot). **esp32c5 carries the on-device display + PSRAM,
+so it is built `-Os`** (`CONFIG_COMPILER_OPTIMIZATION_SIZE` in `sdkconfig.defaults.esp32c5`): at the
+default `-Og` the display pushes its image over the slot boundary, but `-Os` brings the signed
+release back to ~0x1c1000 — comfortably under the gate. **Migration + multi-target image details:
 [`docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md).**
 
 ## evcc Integration
@@ -272,5 +287,5 @@ curl -X POST http://<ESP32-IP>/api/1/vehicles/<VIN>/command/wake_up
 curl http://<ESP32-IP>/api/1/vehicles/<VIN>/vehicle_data
 
 # Erase NVS (reset key + sessions) — host esptool
-esptool --chip esp32s3 -p <port> erase_flash   # or esp32 / esp32c3 / esp32c6
+esptool --chip esp32s3 -p <port> erase_flash   # or esp32 / esp32c3 / esp32c6 / esp32c5
 ```

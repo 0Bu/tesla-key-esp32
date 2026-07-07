@@ -1,15 +1,17 @@
 #!/usr/bin/env bash
-# CI: build the firmware for every tesla-ble-supported target and stage the outputs.
+# CI: build the firmware for every supported target and stage the outputs.
 #
-# The supported set is exactly the targets yoziru/tesla-ble declares in its
-# idf_component.yml (esp32 / esp32s3 / esp32c3 / esp32c6) — the ESP-IDF Component
-# Manager refuses any other chip, so this list cannot silently drift.
+# esp32 / esp32s3 / esp32c3 / esp32c6 are exactly the targets yoziru/tesla-ble declares in its
+# idf_component.yml — the ESP-IDF Component Manager refuses any other chip, so that list cannot
+# silently drift. esp32c5 is added on top via a local build-time patch of tesla-ble (its
+# upstream manifest omits esp32c5; see prepare-tesla-ble-c5.sh + main/idf_component.yml), so
+# the T-Dongle-C5 (dual-band Wi-Fi 6) builds from the same source tree.
 #
 # For each target it stages, into _fw/<target>/, the three flashable parts the web
 # installer needs (bootloader / partition-table / app), and writes the release
 # downloads to the repo root: a stable + a versioned per-target app image, plus a
 # single-file merged image. scripts/build-pages.sh then assembles one multi-build
-# manifest.json from _fw/, and the device OTA pulls its own tesla-key-esp32[-<s3|c3|c6>].bin.
+# manifest.json from _fw/, and the device OTA pulls its own tesla-key-esp32[-<s3|c3|c6|c5>].bin.
 #
 # One sequential job (not a matrix) so build-pages.sh sees every target's bins in the
 # same workspace without an artifact round-trip. Run INSIDE the espressif/esp-idf
@@ -43,12 +45,21 @@ if command -v ccache >/dev/null 2>&1; then
   echo "ccache enabled (CCACHE_DIR=$CCACHE_DIR, max $CCACHE_MAXSIZE)"
 fi
 
-# Keep in sync with tesla-ble's idf_component.yml `targets:` (the Component Manager
-# enforces it — an unsupported target fails at dependency resolution, before compile).
-TARGETS="esp32 esp32s3 esp32c3 esp32c6"
+# esp32/s3/c3/c6 map 1:1 to tesla-ble's idf_component.yml `targets:` (the Component Manager
+# enforces it — an unsupported target fails at dependency resolution, before compile). esp32c5
+# is NOT in that upstream list; we add it via a local build-time patch (see below +
+# scripts/prepare-tesla-ble-c5.sh + main/idf_component.yml), so it builds from ONE source tree
+# alongside the other four.
+TARGETS="esp32 esp32s3 esp32c3 esp32c6 esp32c5"
+
+# esp32c5 needs the local, patched tesla-ble checkout in place before its dependency resolves
+# (the upstream manifest omits esp32c5 → the Component Manager would refuse the chip). Prepare
+# it up front; idempotent + a warm checkout is reused, and it is a no-op for the other targets
+# (they never reference third_party/tesla-ble).
+"$repo_root/scripts/prepare-tesla-ble-c5.sh"
 
 # target -> short image suffix so "esp32" appears once in the release/OTA filename:
-# esp32 -> "" (tesla-key-esp32.bin), esp32s3 -> "-s3", esp32c3 -> "-c3", esp32c6 -> "-c6".
+# esp32 -> "", esp32s3 -> "-s3", esp32c3 -> "-c3", esp32c6 -> "-c6", esp32c5 -> "-c5".
 # Must match TESLA_OTA_IMG_SUFFIX in main/ota_update.cpp (the device builds the same name
 # to pull its image) and image_suffix() in build-pages.sh (the OTA-served Pages copy).
 image_suffix() {
@@ -57,6 +68,7 @@ image_suffix() {
     esp32s3) echo "-s3" ;;
     esp32c3) echo "-c3" ;;
     esp32c6) echo "-c6" ;;
+    esp32c5) echo "-c5" ;;
     # Fail hard like the firmware's #error (ota_update.cpp) — a silently invented
     # suffix would publish an image no device ever builds a filename for.
     *)       echo "image_suffix: unknown target '$1'" >&2; exit 1 ;;
@@ -108,16 +120,21 @@ for t in $TARGETS; do
   # final, signed image that actually gets flashed/served.
   sign_image build/tesla-key-esp32.bin
 
-  # Size gate: fail loudly if the app nears the OTA slot (0x1f0000) so a future growth
-  # can't silently break OTA on the binding target (esp32c6, already ~1.83 MB) while the
-  # others keep updating. Gate 0x1e0000 = a 64 KB band below the 0x1f0000 (2031616 B) slot.
+  # Size gate: fail loudly if the SIGNED app nears the OTA slot (0x1f0000) so a future growth
+  # can't silently break OTA on whichever target grows largest while the others keep updating.
+  # The biggest images are the -Og RISC-V targets (esp32c6 leads, ~0x1d1000 signed). esp32c5
+  # carries the on-device display + PSRAM, so it is built -Os (sdkconfig.defaults.esp32c5),
+  # which keeps its signed image ~0x1c1000 — comfortably under the gate despite the extra code.
+  # Every image's code rounds UP to a 64 KB Secure-Boot-v2 boundary and gets a 4 KB signature
+  # sector appended. Gate 0x1e8000 = a 32 KB band below the 0x1f0000 (2031616 B) slot: a real
+  # early-warning margin, checked here AFTER signing so it sees the exact bytes flashed/served.
   app_size=$(wc -c < build/tesla-key-esp32.bin)
-  if [ "$app_size" -gt $((0x1e0000)) ]; then
-    echo "ERROR: $t app is $app_size B — over the $((0x1e0000)) B gate (64 KB below the" \
+  if [ "$app_size" -gt $((0x1e8000)) ]; then
+    echo "ERROR: $t app is $app_size B — over the $((0x1e8000)) B gate (32 KB below the" \
          "0x1f0000=2031616 B OTA slot). Shrink the image or enlarge the slots." >&2
     exit 1
   fi
-  echo "size-gate $t OK: $app_size B (gate $((0x1e0000)), slot 2031616)"
+  echo "size-gate $t OK: $app_size B (gate $((0x1e8000)), slot 2031616)"
 
   mkdir -p "_fw/$t"
   cp build/bootloader/bootloader.bin           "_fw/$t/bootloader.bin"
@@ -126,7 +143,8 @@ for t in $TARGETS; do
 
   # Release downloads (repo root): stable name (also the OTA filename), versioned copy,
   # and a single-file merged image for manual full flashing. merge_bin reads @flash_args,
-  # so the per-target bootloader offset (0x1000 on esp32, 0x0 elsewhere) is baked in.
+  # so the per-target bootloader offset (0x1000 on esp32, 0x2000 on esp32c5, 0x0 on s3/c3/c6)
+  # is baked in.
   sfx="$(image_suffix "$t")"
   cp build/tesla-key-esp32.bin "tesla-key-esp32$sfx.bin"
   cp build/tesla-key-esp32.bin "tesla-key-esp32$sfx-$version.bin"

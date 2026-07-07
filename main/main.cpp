@@ -32,6 +32,7 @@
 #include "provisioning.hpp"
 #include "diag_log.hpp"
 #include "mqtt_ha.hpp"
+#include "display.hpp"
 
 static const char* MDNS_HOSTNAME = "tesla-key-esp32";  // → http://tesla-key-esp32.local
 
@@ -146,6 +147,19 @@ static bool wifi_connect(const char* ssid, const char* password) {
     // RSSI. Costs ~1-2 s more at connect; applies on every (re)connect too.
     wifi_cfg.sta.scan_method = WIFI_ALL_CHANNEL_SCAN;
     wifi_cfg.sta.sort_method = WIFI_CONNECT_AP_BY_SIGNAL;
+
+#ifdef CONFIG_TESLA_WIFI_PREFER_5G
+    // ESP32-C5 (dual-band Wi-Fi 6) opt-in: when the SSID is band-steered onto both bands,
+    // give 5 GHz APs an RSSI bonus so the BY_SIGNAL sort above prefers 5 GHz. WiFi and BLE
+    // still share ONE RF path on the C5 (time-division coexistence — see the PS_MIN_MODEM note
+    // below; 5 GHz does NOT remove that airtime contention), but keeping OUR WiFi off 2.4 GHz
+    // frees the band BLE lives on. Band mode stays AUTO (default), so a device out of 5 GHz
+    // range still connects on 2.4 GHz — no reconnect trap. Gated behind CONFIG_TESLA_WIFI_PREFER_5G
+    // (Kconfig depends on SOC_WIFI_SUPPORT_5G → the field + this block exist only on the C5).
+    // 10 dB: prefer 5 GHz unless it is more than ~10 dB weaker than the 2.4 GHz AP.
+    wifi_cfg.sta.threshold.rssi_5g_adjustment = 10;
+    ESP_LOGI(TAG, "5 GHz WiFi preference enabled (rssi_5g_adjustment=10 dB)");
+#endif
 
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_cfg));
@@ -539,6 +553,12 @@ extern "C" void app_main() {
     // no-op otherwise. Runs in its own task, independent of evcc/BLE/pairing.
     mqtt_ha_start(vehicle, config_store);
     log_heap("mqtt");
+
+    // On-device status display (LilyGo T-Dongle-C5). No-op unless the board build
+    // selects CONFIG_TESLA_DISPLAY_ENABLED; reads only cached state (never wakes the
+    // car) in its own task, so it can't queue behind a BLE poll.
+    display_start(vehicle);
+    log_heap("display");
 
     // WiFi connectivity watchdog: re-associates if the LAN link silently dies,
     // including the "ghost association" case that fires no disconnect event (see the

@@ -13,10 +13,10 @@
 # bootloader / partition-table / app are flashed as SEPARATE parts at their own
 # offsets, so a USB (re)flash never overwrites the nvs partition (0x9000) → WiFi / VIN /
 # key survive a same-layout reflash. The bootloader offset is per-target: 0x1000 on the
-# classic esp32, 0x0 on esp32s3 / esp32c3 / esp32c6.
+# classic esp32, 0x0 on esp32s3 / esp32c3 / esp32c6 / esp32c5.
 #
 # ONE manifest + per-target image serves every supported chip — a single installer page
-# and a single OTA channel (the device pulls tesla-key-esp32[-<s3|c3|c6>].bin for its chip).
+# and a single OTA channel (the device pulls tesla-key-esp32[-<s3|c3|c6|c5>].bin for its chip).
 #
 # Usage:  ./scripts/build-pages.sh <out_dir> <version>
 set -euo pipefail
@@ -35,28 +35,30 @@ chip_family() {
     esp32s3) echo "ESP32-S3" ;;
     esp32c3) echo "ESP32-C3" ;;
     esp32c6) echo "ESP32-C6" ;;
+    esp32c5) echo "ESP32-C5" ;;
     *)       echo "" ;;
   esac
 }
 # target -> 2nd-stage bootloader flash offset (bytes). Classic esp32 = 0x1000, else 0x0.
 boot_offset() { case "$1" in esp32) echo 4096 ;; *) echo 0 ;; esac; }
 # target -> short app-image suffix so "esp32" appears once: esp32 -> "" (tesla-key-esp32.bin),
-# esp32s3 -> "-s3", esp32c3 -> "-c3", esp32c6 -> "-c6". This names the OTA-served Pages copy,
-# so it MUST match TESLA_OTA_IMG_SUFFIX in main/ota_update.cpp and image_suffix() in
-# ci-build-all.sh — the device builds the same filename to pull its image.
+# esp32s3 -> "-s3", esp32c3 -> "-c3", esp32c6 -> "-c6", esp32c5 -> "-c5". This names the
+# OTA-served Pages copy, so it MUST match TESLA_OTA_IMG_SUFFIX in main/ota_update.cpp and
+# image_suffix() in ci-build-all.sh — the device builds the same filename to pull its image.
 image_suffix() {
   case "$1" in
     esp32)   echo "" ;;
     esp32s3) echo "-s3" ;;
     esp32c3) echo "-c3" ;;
     esp32c6) echo "-c6" ;;
+    esp32c5) echo "-c5" ;;
     # Fail hard like the firmware's #error (ota_update.cpp) — a silently invented
     # suffix would publish an image no device ever builds a filename for.
     *)       echo "image_suffix: unknown target '$1'" >&2; exit 1 ;;
   esac
 }
 
-TARGETS="esp32 esp32s3 esp32c3 esp32c6"
+TARGETS="esp32 esp32s3 esp32c3 esp32c6 esp32c5"
 
 rm -rf "$out"
 mkdir -p "$out"
