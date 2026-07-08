@@ -76,7 +76,6 @@ links yourself — that's where the value is.
 |---|---|---|
 | Boot / wiring | `main/main.cpp` | WiFi, NVS, SNTP, mDNS, starts every component; boot heap log; OTA mark-valid |
 | Target identity | `main/platform.hpp` | `TK_PLATFORM` string per `CONFIG_IDF_TARGET_*`; must agree with `/api/proxy/1/version`, the HA device model, and esp-web-tools `chipFamily` |
-| Task priorities | `main/task_config.hpp` | `tk::kPrio*` — the ONE named-constant table every `xTaskCreate` site takes its priority from; must agree with the task inventory in `docs/ARCHITECTURE.md` ("Concurrency") |
 | BLE GATT client | `main/ble_client.{cpp,hpp}` | NimBLE central; scans Tesla UUID; RX notify → `on_rx_data` (runs on the **NimBLE host task**) |
 | Vehicle control | `main/vehicle_ctrl.{cpp,hpp}` + `vehicle_commands.cpp` + `vehicle_telemetry.cpp` + `vehicle_pairing.cpp` (+ `vehicle_ctrl_internal.hpp`) | one `VehicleController`, split by concern: core wiring/`link_state()` glue; command API; **loop_task** (active-window polling + sleep gating) + caches; pairing lifecycle/keys |
 | HTTP API | `main/http_server.{cpp,hpp}` + `http_api.cpp` + `http_status.cpp` + `http_ota.cpp` + `http_config.cpp` + `http_common.cpp` + `mcp_server.cpp` (+ `http_handlers.hpp`) | `esp_http_server` on :80; single catch-all `handle_all` dispatch (wrapped in try/catch) in `http_server.cpp`; handlers split by route group; `mcp_server.cpp` serves `/mcp` (stateless JSON-RPC 2.0 MCP server for AI agents — registry/spec in `logic/mcp.hpp`, guide in `docs/MCP.md`) |
