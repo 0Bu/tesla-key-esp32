@@ -62,6 +62,15 @@ REST routes already allow). This is acceptable only because:
 If you need access control, put the device behind a reverse proxy with TLS + auth, or
 segment it onto a trusted VLAN.
 
+**One deliberate exception: `/mcp` supports an optional bearer token** (off by default —
+unset, the endpoint is as open as the rest). The blanket no-auth rationale is evcc's
+inability to send credentials; that constraint doesn't apply to `/mcp`, whose clients (MCP
+SDKs, agent frameworks) all send headers. When `CONFIG_TESLA_MCP_TOKEN` / NVS
+`tesla_cfg/mcp_token` is set, `POST /mcp` requires `Authorization: Bearer <token>`
+(timing-safe compare, 401 otherwise); the REST API is untouched. The token travels in
+cleartext on the LAN (no TLS) — it scopes access, it does not replace segmentation. See
+[`MCP.md`](MCP.md#authentication).
+
 Two non-auth hardening measures remain in place:
 
 - **`/gen_keys` overwrite guard** — refuses to regenerate when a key already exists

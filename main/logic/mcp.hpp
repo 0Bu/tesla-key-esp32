@@ -158,4 +158,42 @@ inline int clamped_int(double d, int lo, int hi) {
     return (int)d;
 }
 
+// ── Optional bearer-token gate for POST /mcp ──────────────────────────────────
+// expected empty/null ⇒ auth is DISABLED and every request passes — the zero-config
+// default, identical to today's open behaviour. When a token is configured, the
+// Authorization header must be the Bearer scheme (case-insensitive scheme name per
+// RFC 9110 §11.1, RFC 6750 §2.1) followed by exactly the token. Scoped to /mcp only:
+// MCP clients can all send headers, while evcc cannot — the blanket no-auth rationale
+// (docs/SECURITY.md) therefore stays for /api but need not apply here.
+//
+// The token comparison is timing-safe: after the scheme check, runtime depends only on
+// the CONFIGURED token's length — never on how many leading characters of the guess
+// match — so a LAN client cannot recover the token byte-by-byte off response timing.
+inline bool mcp_token_ok(const char* authorization, const char* expected) {
+    if (!expected || !*expected) return true;    // no token configured → endpoint open
+    if (!authorization) return false;
+
+    // "Bearer" scheme, case-insensitive, then at least one space before the token.
+    static constexpr char kScheme[] = "bearer";
+    size_t i = 0;
+    for (; kScheme[i]; ++i) {
+        char c = authorization[i];
+        if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+        if (c != kScheme[i]) return false;
+    }
+    if (authorization[i] != ' ') return false;
+    while (authorization[i] == ' ') ++i;
+
+    // Constant-time equality: XOR-accumulate over the EXPECTED length; a length
+    // mismatch folds into the accumulator instead of returning early.
+    const char* got = authorization + i;
+    const size_t lg = std::strlen(got), lw = std::strlen(expected);
+    unsigned diff = (lg == lw) ? 0u : 1u;
+    for (size_t k = 0; k < lw; ++k) {
+        const unsigned char g = (k < lg) ? (unsigned char)got[k] : 0u;
+        diff |= (unsigned)(g ^ (unsigned char)expected[k]);
+    }
+    return diff == 0;
+}
+
 }  // namespace tk

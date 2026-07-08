@@ -274,6 +274,26 @@ static void test_mcp() {
     CHECK_STR(tk::command_result_text(true,  tesla_reason), "command executed successfully");
     CHECK_STR(tk::command_result_text(false, tesla_reason), "complete");
     CHECK_STR(tk::command_result_text(false, no_reason),    "vehicle not reachable");
+
+    // Optional /mcp bearer-token gate (mcp_token_ok). No token configured → open,
+    // whatever the client sends — the zero-config default must stay byte-identical
+    // to the old always-open behaviour.
+    CHECK(tk::mcp_token_ok(nullptr,            nullptr));
+    CHECK(tk::mcp_token_ok(nullptr,            ""));
+    CHECK(tk::mcp_token_ok("Bearer anything",  ""));
+    // Token configured → exact Bearer match required.
+    CHECK(tk::mcp_token_ok("Bearer s3cret",    "s3cret"));
+    CHECK(tk::mcp_token_ok("bearer s3cret",    "s3cret"));   // scheme is case-insensitive
+    CHECK(tk::mcp_token_ok("BEARER  s3cret",   "s3cret"));   // extra spaces before token OK
+    CHECK(!tk::mcp_token_ok(nullptr,           "s3cret"));   // header absent
+    CHECK(!tk::mcp_token_ok("",                "s3cret"));
+    CHECK(!tk::mcp_token_ok("Bearer wrong",    "s3cret"));
+    CHECK(!tk::mcp_token_ok("Bearer s3cre",    "s3cret"));   // prefix, shorter
+    CHECK(!tk::mcp_token_ok("Bearer s3cretX",  "s3cret"));   // prefix, longer
+    CHECK(!tk::mcp_token_ok("Bearer S3CRET",   "s3cret"));   // token itself is case-sensitive
+    CHECK(!tk::mcp_token_ok("Bearers3cret",    "s3cret"));   // no space after scheme
+    CHECK(!tk::mcp_token_ok("s3cret",          "s3cret"));   // bare token, no scheme
+    CHECK(!tk::mcp_token_ok("Basic s3cret",    "s3cret"));   // wrong scheme
 }
 
 // ─── on-device display presenter (logic/display_model.hpp <- display.cpp compose()) ──────

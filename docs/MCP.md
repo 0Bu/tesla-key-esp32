@@ -11,10 +11,12 @@ troubleshooting. For the firmware-internal design (heap budget, code layout, why
 see [`ARCHITECTURE.md`](ARCHITECTURE.md#mcp-endpoint-mcp); for the security posture see
 [`SECURITY.md`](SECURITY.md#http-api-exposure).
 
-> **Trusted LAN only.** Like every other endpoint on this device, `/mcp` has no
+> **Trusted LAN only.** By default `/mcp`, like every other endpoint on this device, has no
 > authentication and no TLS — anyone on the network can call it. The enrolled key is
 > Charging Manager only (charging + wake; it cannot unlock or drive the car), and the
 > endpoint grants nothing the open REST API doesn't already expose. Never port-forward it.
+> Unlike the REST API, `/mcp` **can** optionally require a bearer token (MCP clients can
+> send headers; evcc can't) — see [Authentication](#authentication).
 
 ---
 
@@ -40,6 +42,35 @@ The server implements the **Streamable HTTP transport in its stateless profile**
 
 Clients typically send `Accept: application/json, text/event-stream` — that is fine; the
 spec lets the server pick either representation and this one always answers plain JSON.
+
+### Authentication
+
+**Off by default** — with no token configured, `/mcp` behaves exactly as before (open on
+the trusted LAN). When a token is configured, every `POST /mcp` must carry
+
+```
+Authorization: Bearer <token>
+```
+
+or it is answered `401 Unauthorized` (+ `WWW-Authenticate: Bearer`) before any JSON-RPC
+processing. `GET /mcp` (the `405`) stays open — it reveals nothing. The check is scoped to
+`/mcp` only: the REST API stays open because evcc cannot send credentials
+([`SECURITY.md`](SECURITY.md#http-api-exposure)); MCP clients all can (see the client
+config examples below — add an `Authorization` header entry). The token comparison is
+timing-safe, and its logic is host-tested (`tk::mcp_token_ok`, `main/logic/mcp.hpp`).
+
+Configuring the token (max 128 chars, applied at boot):
+
+- **Build time:** `idf.py menuconfig` → *Tesla Key Configuration* → *MCP bearer token*
+  (`CONFIG_TESLA_MCP_TOKEN`).
+- **Runtime override:** NVS key `mcp_token` in the `tesla_cfg` namespace. Whenever the key
+  exists it wins over the Kconfig value — an existing **empty** NVS value deliberately
+  disables auth without a reflash. (No HTTP endpoint sets this on purpose: an open
+  endpoint that installs the token could also replace it.)
+
+Remember the transport is still plain HTTP: the token rides in cleartext on the LAN. It
+raises the bar from "anyone who can reach port 80" to "anyone who can sniff or knows the
+token" — a scoping control, not a substitute for network segmentation.
 
 ### Supported methods
 

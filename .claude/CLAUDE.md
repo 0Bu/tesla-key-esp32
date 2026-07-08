@@ -141,7 +141,7 @@ Never edit files in `managed_components/` — they are regenerated.
 
 | Namespace   | Content                                     |
 |-------------|---------------------------------------------|
-| `tesla_cfg` | WiFi SSID/pass, VIN, BLE MAC, `mqtt_uri`, `last_time`, `disp_rot` (on-device display BOOT-rotation index 0..3; C5/S3; migrates old `disp_flip`) (runtime cfg) |
+| `tesla_cfg` | WiFi SSID/pass, VIN, BLE MAC, `mqtt_uri`, `last_time`, `disp_rot` (on-device display BOOT-rotation index 0..3; C5/S3; migrates old `disp_flip`), `mcp_token` (optional /mcp bearer token; overrides Kconfig when the key exists, empty = auth off) (runtime cfg) |
 | `tesla_ble` | Private key (`private_key`), VCSEC session (`sess_vcsec`), Info session (`sess_info`), `key_created`, `paired_at` — the `sess_*` names come from the ≤15-char key mapping in `nvs_storage.cpp` |
 
 ## Commands Implemented
@@ -181,6 +181,8 @@ POST /scan                                     # start a time-limited BLE discov
 POST /mcp                                      # MCP server (Streamable HTTP, stateless JSON-RPC 2.0; GET → 405, no SSE).
                                                # Tools = the run-on-key charging command set + read-only get_vehicle_state
                                                # (cache-only, never wakes the car). Core logic in main/logic/mcp.hpp (host-tested).
+                                               # Optional bearer token, default OFF (CONFIG_TESLA_MCP_TOKEN / NVS mcp_token;
+                                               # 401 without it when set — /mcp only, REST stays open; docs/MCP.md#authentication).
 GET  /diag                                     # plain-text in-memory diag log (?verbose=1 raw RX / ?verbose=0 off, ?clear=1 reset)
 POST /gen_keys[?force=1]                       # generate key (refuses overwrite w/o force)
 POST /send_key                                 # pair with vehicle (Charging Manager only)
@@ -193,7 +195,8 @@ POST /ota/update                               # start background self-update (p
 GET  /ota/status                               # poll OTA progress {state,progress,message,available,update_available,current}
 ```
 
-No HTTP auth / TLS by design (evcc cannot send credentials) — trusted LAN only. See docs/SECURITY.md.
+No HTTP auth / TLS by design (evcc cannot send credentials) — trusted LAN only; the one
+opt-in exception is the /mcp bearer token above (MCP clients can send headers). See docs/SECURITY.md.
 
 ## OTA (self-update)
 

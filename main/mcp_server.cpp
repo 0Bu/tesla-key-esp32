@@ -2,8 +2,10 @@
 #include "logic/mcp.hpp"
 #include "logic/command_result.hpp"
 #include "logic/link_state.hpp"
+#include "sdkconfig.h"
 #include <esp_log.h>
 #include <esp_app_desc.h>
+#include <nvs.h>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -285,10 +287,55 @@ static esp_err_t handle_tools_call_(httpd_req_t* req, cJSON* id, const cJSON* pa
     return send_rpc_result_(req, id, tool_result_(text, !ok));
 }
 
+// ─── optional bearer-token auth (docs/MCP.md#authentication) ──────────────────
+
+// The configured /mcp token, loaded once on first request (thread-safe function-local
+// static; the httpd task is the only caller). NVS tesla_cfg/"mcp_token" overrides the
+// build-time CONFIG_TESLA_MCP_TOKEN default WHENEVER THE KEY EXISTS — so an existing
+// empty NVS value deliberately disables a Kconfig-baked token without a reflash. Empty
+// result = auth disabled (the zero-config default). Read with its own read-only NVS
+// handle (the same self-contained pattern display.cpp uses for disp_rot) rather than
+// through VehicleController — config persistence is storage behaviour, not vehicle
+// behaviour. A token change in NVS takes effect on the next boot, like mqtt_uri.
+static const char* mcp_token_() {
+    static const std::string token = [] {
+        std::string t = CONFIG_TESLA_MCP_TOKEN;
+        nvs_handle_t h;
+        if (nvs_open("tesla_cfg", NVS_READONLY, &h) == ESP_OK) {
+            char buf[129];                       // NVS strings incl. NUL; 128-char token cap
+            size_t n = sizeof(buf);
+            if (nvs_get_str(h, "mcp_token", buf, &n) == ESP_OK) t = buf;
+            nvs_close(h);
+        }
+        if (!t.empty()) ESP_LOGI(TAG, "bearer-token auth enabled for POST /mcp");
+        return t;
+    }();
+    return token.c_str();
+}
+
 // ─── entry points (dispatched from http_server.cpp's handle_all) ──────────────
 
 esp_err_t mcp_handle_post(GuardedReq rq) {
     httpd_req_t* req = rq.req;
+
+    // Optional bearer-token gate — a no-op unless a token is configured. Checked
+    // before any parse work. The body is still drained first so the keep-alive
+    // socket isn't left with unread request bytes. An over-long Authorization
+    // header truncates into `auth` and simply fails the match (fail closed). The
+    // GET /mcp 405 stays open: it reveals nothing and must keep answering
+    // "Allow: POST". JSON-RPC id is null — auth happens before the id is known.
+    if (*mcp_token_()) {
+        char auth[160] = {};
+        httpd_req_get_hdr_value_str(req, "Authorization", auth, sizeof(auth));
+        if (!tk::mcp_token_ok(auth[0] ? auth : nullptr, mcp_token_())) {
+            free(read_body(req));
+            httpd_resp_set_status(req, "401 Unauthorized");
+            httpd_resp_set_hdr(req, "WWW-Authenticate", "Bearer");
+            httpd_resp_set_type(req, "application/json");
+            return httpd_resp_sendstr(req, "{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":"
+                                           "{\"code\":-32600,\"message\":\"unauthorized\"}}");
+        }
+    }
 
     // Shared bounded body read (http_common.cpp): NULL on empty/oversized (>2 KB)/failed.
     char* body = read_body(req);

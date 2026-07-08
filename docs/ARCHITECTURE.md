@@ -446,7 +446,15 @@ strings are attached via `cJSON_CreateStringReference` (no per-request strdup of
 envelope-OOM guard that frees the orphaned payload), and both handlers are dispatched
 inside `http_server.cpp`'s `handle_all` try/catch.
 
-**Security posture:** identical to the rest of the HTTP API — no auth, no TLS, trusted
-LAN only (see [`SECURITY.md`](SECURITY.md)). The endpoint grants nothing the open REST
-API doesn't already expose; the enrolled key stays Charging Manager only. Client
-configuration lives in [`MCP.md`](MCP.md#client-integration).
+**Security posture:** by default identical to the rest of the HTTP API — no auth, no TLS,
+trusted LAN only (see [`SECURITY.md`](SECURITY.md)). The endpoint grants nothing the open
+REST API doesn't already expose; the enrolled key stays Charging Manager only. One
+opt-in extra: a bearer token for `POST /mcp` alone (`CONFIG_TESLA_MCP_TOKEN`, overridden
+by NVS `tesla_cfg/mcp_token` whenever that key exists; empty = off). The header check
+lives in `mcp_handle_post` (drains the body, answers `401` + `WWW-Authenticate: Bearer`
+before any JSON-RPC parse); the timing-safe match itself is host-tested
+(`tk::mcp_token_ok`, `logic/mcp.hpp`). The token is loaded once on first request with a
+self-contained read-only NVS handle (the `disp_rot` pattern) and applies from the next
+boot after a change. Scoped to `/mcp` because MCP clients can send headers while evcc
+cannot — the REST no-auth constraint is real and stays. Client configuration lives in
+[`MCP.md`](MCP.md#client-integration).

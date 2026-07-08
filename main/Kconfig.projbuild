@@ -116,6 +116,19 @@ menu "Tesla Key Configuration"
             republished to MQTT (retained). Discovery + an immediate snapshot are
             also sent on every (re)connect.
 
+    config TESLA_MCP_TOKEN
+        string "MCP bearer token (optional)"
+        default ""
+        help
+            Optional bearer token for the MCP endpoint (POST /mcp) ONLY. When set,
+            MCP requests must carry "Authorization: Bearer <token>" or they are
+            answered 401; every other HTTP endpoint is unaffected (evcc cannot send
+            credentials — see docs/SECURITY.md). Empty (the default) leaves /mcp as
+            open as the rest of the API. Overridden at runtime by the NVS key
+            "mcp_token" (tesla_cfg namespace) whenever that key exists — an existing
+            EMPTY NVS value disables auth even if this option is set. Applied at
+            boot. Max 128 characters. See docs/MCP.md#authentication.
+
     config TESLA_DISPLAY_ENABLED
         bool "On-device ST7735 status display (LilyGo T-Dongle-C5 / T-Dongle-S3)"
         default n
