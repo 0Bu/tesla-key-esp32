@@ -16,10 +16,14 @@ Layout (matches main/display.cpp compose()):
 Battery fill colour is a red→amber→green gradient over the SoC. States:
   charging (<100%) → bolt; 100% → no bolt; asleep → dimmed; unreachable → empty.
 
-Three outputs (stdlib only, no Pillow):
-  python3 tools/display_sim.py png  [out.png]   -> the charging hero frame (preview)
-  python3 tools/display_sim.py states [out.png] -> a montage of all states
-  python3 tools/display_sim.py cheader [out.h]  -> main/display_font.h (font + glyphs)
+The BOOT button rotates the panel 90° per press; the PORTRAIT (80x160) layout — a vertical
+battery + two-row header — is rendered by compose_portrait() (mirrors display.cpp draw_portrait).
+
+Outputs (stdlib only, no Pillow):
+  python3 tools/display_sim.py png  [out.png]             -> the charging hero frame (preview)
+  python3 tools/display_sim.py states [out.png]           -> a montage of all LANDSCAPE states
+  python3 tools/display_sim.py states-portrait [out.png]  -> a montage of all PORTRAIT states
+  python3 tools/display_sim.py cheader [out.h]            -> main/display_font.h (font + glyphs)
 
 The font dict below is authored as 7-row x 5-col ASCII art ('#'=on). The C-header
 generator packs each glyph into 5 column bytes (bit r = row r, 0=top), and also
@@ -204,10 +208,13 @@ def dim(col, t=0.5):   # blend a colour toward the panel (for the asleep state)
     return lerp(col, PANEL, t)
 
 class Canvas:
-    def __init__(self):
-        self.c = [[BG for _ in range(W)] for _ in range(H)]
+    # Default 160x80 (landscape); pass (80, 160) for the portrait layout. All primitives clip
+    # to self.w/self.h, so the same drawing code serves either orientation.
+    def __init__(self, w=W, h=H):
+        self.w, self.h = w, h
+        self.c = [[BG for _ in range(w)] for _ in range(h)]
     def px(self, x, y, col):
-        if 0 <= x < W and 0 <= y < H:
+        if 0 <= x < self.w and 0 <= y < self.h:
             self.c[y][x] = col
     def rect(self, x0, y0, x1, y1, col):
         for y in range(y0, y1):
@@ -382,11 +389,14 @@ def decide(inp):
          "animating": False}
 
     if m["show_wifi"]:
-        avail = (158 - 28) if ble_bars else (158 - 28 - 32)
+        if inp.get("orient", "landscape") == "portrait":
+            avail, scale = 72, 1                       # SSID own row, full width, scale 1
+        else:
+            avail, scale = ((158 - 28) if ble_bars else (158 - 28 - 32)), 2
         m["ssid_avail"] = avail
-        if textw(ssid, 2) > avail:                    # too long → horizontal marquee
+        if textw(ssid, scale) > avail:                # too long → horizontal marquee
             m["ssid_scrolling"] = True
-            m["ssid_off"] = scroll_offset(tick, textw(ssid, 2) - avail)
+            m["ssid_off"] = scroll_offset(tick, textw(ssid, scale) - avail)
 
     if hero == "battery":
         s = max(0, min(100, int(inp["soc"])))
@@ -470,9 +480,105 @@ def compose(cv, st):
         cv.text((W - textw("ASLEEP", 1))//2, 64, "ASLEEP", GREY, 1)
     return m["animating"]   # battery view still needs fast refresh while the SSID scrolls
 
+# ── PORTRAIT (80x160) layout — mirrors main/display.cpp draw_portrait() 1:1 ────
+# The BOOT button rotates the panel 90° per press; this is the portrait design (a VERTICAL
+# battery filling bottom→top, a two-row header). Bytes-for-bytes the same "what to show"
+# decision (decide() with orient="portrait") as the firmware; only the pixel coordinates differ.
+PW, PH = 80, 160
+PSB_N, PSB_BW, PSB_GAP, PSB_BASE = 5, 8, 5, 138       # centered searching bars
+
+def draw_portrait_search_bars(cv, frame):
+    total = PSB_N * PSB_BW + (PSB_N - 1) * PSB_GAP     # 60 px
+    x0 = (cv.w - total) // 2
+    p = frame % SRCH_CYCLE
+    hp = (p / SRCH_STEPS) if p <= SRCH_HALF else ((SRCH_CYCLE - p) / SRCH_STEPS)
+    for i in range(PSB_N):
+        h = 14 + i * 9
+        t = max(0.0, 1.0 - abs(i - hp) / SRCH_FALLOFF)
+        col = lerp(BLE_GREEN, BLE_LIGHT, t)
+        x = x0 + i * (PSB_BW + PSB_GAP)
+        cv.rect(x, PSB_BASE - h, x + PSB_BW, PSB_BASE, col)
+
+def draw_portrait_search(cv, frame, wifi):
+    if wifi:
+        cv.text((cv.w - textw("WiFi", 2)) // 2, 52, "WiFi", INK, 2)
+    else:
+        cv.bitmap((cv.w - 5 * 3) // 2, 46, BT_ROWS, INK, 3)   # BT glyph, scale 3
+    draw_portrait_search_bars(cv, frame)
+
+def draw_portrait_pairing(cv, frame):
+    nd = (frame // 4) % 4
+    cv.bitmap((cv.w - 5 * 3) // 2, 50, BT_ROWS, INK, 3)
+    cv.text((cv.w - textw("Pairing...", 1)) // 2, 96, "Pairing" + "." * nd, INK, 1)
+
+def compose_portrait(cv, st):
+    cv.rect(0, 0, cv.w, cv.h, BG)
+    inp = {
+        "link":          st.get("link", "awake"),
+        "wifi_on":       st.get("wifi", 0) > 0,
+        "ssid":          st.get("ssid") or "-",
+        "ble_connected": st.get("ble_on", False),
+        "have_soc":      st.get("soc") is not None,
+        "soc":           st.get("soc") or 0,
+        "charging":      st.get("charging", False),
+        "paired":        st.get("paired", True),
+        "tick":          st.get("frame", 0),
+        "orient":        "portrait",
+    }
+    m = decide(inp)
+    f = inp["tick"]
+
+    # header row 1: WiFi bars (left) | BT glyph + BLE bars (right); row 2: SSID; divider at y31
+    if m["show_wifi"]:
+        signal_bars(cv, 4, 4, st.get("wifi", 0))
+        ssid = inp["ssid"]
+        if not m["ssid_scrolling"]:
+            cv.text((cv.w - textw(ssid, 1)) // 2, 21, ssid, INK, 1)
+        else:
+            cv.text_clip(4 - m["ssid_off"], 21, ssid, INK, 1, 4, 4 + m["ssid_avail"])
+    if m["show_ble"]:
+        bx = cv.w - 4 - 16
+        signal_bars(cv, bx, 4, st.get("ble", 0) if inp["ble_connected"] else 0)
+        cv.bitmap(bx - 12, 1, BT_ROWS, INK if inp["ble_connected"] else GREY, 2)
+    cv.rect(4, 31, cv.w - 4, 32, DIV)
+
+    if m["hero"] == "wifi_search":
+        draw_portrait_search(cv, f, True);  return True
+    if m["hero"] == "pairing":
+        draw_portrait_pairing(cv, f);       return True
+    if m["hero"] == "ble_search":
+        draw_portrait_search(cv, f, False); return True
+
+    # vertical battery: terminal nub on top, fill grows bottom→top
+    cv.rect(30, 34, 50, 40, BORDER)
+    bx0, by0, bx1, by1 = 10, 40, 70, 152
+    cv.rect(bx0 + 2, by0 + 2, bx1 - 2, by1 - 2, PANEL)
+    cv.frame(bx0, by0, bx1, by1, 3, BORDER)
+    ix0, iy0, ix1, iy1 = bx0 + 3, by0 + 3, bx1 - 3, by1 - 3   # 13,43 .. 67,149
+    ih = iy1 - iy0
+
+    soc = m["soc"]
+    fh = int(round(ih * soc / 100.0))
+    if fh > 0:
+        cv.rect(ix0, iy1 - fh, ix1, iy1, (m["fill_r"], m["fill_g"], m["fill_b"]))
+
+    num = "%d%%" % soc
+    nscale = 3 if soc < 100 else 2                # "100%" overflows 80 px at scale 3
+    if m["show_bolt"]:
+        bw = max(len(r) for r in BOLT_ROWS) * 2
+        cv.bitmap((cv.w - bw) // 2, 60, BOLT_ROWS, (255, 235, 120), 2, outline=BG)
+        cv.text_outline((cv.w - textw(num, nscale)) // 2, 100, num, INK, nscale, BG)
+    else:
+        cv.text_outline((cv.w - textw(num, nscale)) // 2, 92, num,
+                        GREY if m["asleep"] else INK, nscale, BG)
+
+    if m["asleep"]:
+        cv.text((cv.w - textw("ASLEEP", 1)) // 2, 132, "ASLEEP", GREY, 1)
+    return m["animating"]
+
 # ── render helpers ────────────────────────────────────────────────────────────
 def upscale(cv, S):
-    bw, bh = W*S, H*S
+    bw, bh = cv.w*S, cv.h*S
     return [[cv.c[y//S][x//S] for x in range(bw)] for y in range(bh)]
 
 def cmd_png(out="tools/display_preview.png"):
@@ -527,6 +633,46 @@ def cmd_states(out="tools/display_states.png"):
         for y in range(cap):
             for x in range(min(cellw, W*2)):
                 big[oy + H*S + y][ox + x] = capup[y][x]
+    write_png(out, bw, bh, big)
+    print("wrote", out, f"({bw}x{bh})")
+
+def cmd_states_portrait(out="tools/display_states_portrait.png"):
+    """Montage of the PORTRAIT (80x160) layout — the BOOT-rotated design — in every state."""
+    states = [
+        dict(wifi=4, ssid="Jupiter", ble=3, ble_on=True,  soc=64,  charging=True,  link="awake"),
+        dict(wifi=3, ssid="Jupiter", ble=2, ble_on=True,  soc=5,   charging=False, link="awake"),
+        dict(wifi=4, ssid="Jupiter", ble=3, ble_on=True,  soc=45,  charging=False, link="awake"),
+        dict(wifi=4, ssid="Jupiter", ble=4, ble_on=True,  soc=100, charging=True,  link="awake"),
+        dict(wifi=2, ssid="Jupiter", ble=2, ble_on=True,  soc=72,  charging=False, link="asleep"),
+        dict(wifi=3, ssid="Jupiter", ble=0, ble_on=False, soc=None, charging=False, link="unreachable", frame=6),
+        dict(wifi=0, ssid="Jupiter", ble=0, ble_on=False, soc=None, charging=False, link="unreachable", frame=6),
+        dict(wifi=3, ssid="Jupiter", ble=4, ble_on=True,  paired=False, soc=None, charging=False, link="unreachable", frame=8),
+    ]
+    labels = ["charging 64%", "5% (red)", "45% (green)", "100% (full)",
+              "asleep 72% (dim)", "searching BLE", "searching WiFi", "pairing"]
+    S = 3
+    pad, cap = 14, 26
+    cellw, cellh = PW*S, PH*S + cap
+    cols = 4
+    rows = (len(states) + cols - 1)//cols
+    bw = cols*cellw + (cols+1)*pad
+    bh = rows*cellh + (rows+1)*pad
+    big = [[(8,9,12) for _ in range(bw)] for _ in range(bh)]
+    for idx, st in enumerate(states):
+        cv = Canvas(PW, PH)
+        compose_portrait(cv, st)
+        up = upscale(cv, S)
+        r, cc = idx//cols, idx % cols
+        ox, oy = pad + cc*(cellw + pad), pad + r*(cellh + pad)
+        for y in range(PH*S):
+            for x in range(PW*S):
+                big[oy+y][ox+x] = up[y][x]
+        capcv = Canvas(PW*2, cap)
+        capcv.text(2, 4, labels[idx][:18], INK, 1)
+        capup = upscale(capcv, 1)
+        for y in range(cap):
+            for x in range(min(cellw, PW*2)):
+                big[oy + PH*S + y][ox + x] = capup[y][x]
     write_png(out, bw, bh, big)
     print("wrote", out, f"({bw}x{bh})")
 
@@ -669,7 +815,8 @@ def cmd_parity(golden):
         inp = {"link": rec["link"], "wifi_on": rec["wifi_on"] == "1", "ssid": rec["ssid"],
                "ble_connected": rec["ble_connected"] == "1", "have_soc": rec["have_soc"] == "1",
                "soc": int(rec["soc"]), "charging": rec["charging"] == "1",
-               "paired": rec["paired"] == "1", "tick": int(rec["tick"])}
+               "paired": rec["paired"] == "1", "tick": int(rec["tick"]),
+               "orient": rec.get("orient", "landscape")}
         m = decide(inp)
         got = {"hero": m["hero"], "show_wifi": _b01(m["show_wifi"]), "show_ble": _b01(m["show_ble"]),
                "ssid_avail": str(m["ssid_avail"]), "ssid_scrolling": _b01(m["ssid_scrolling"]),
@@ -697,6 +844,8 @@ if __name__ == "__main__":
         cmd_png(arg or "tools/display_preview.png")
     elif mode == "states":
         cmd_states(arg or "tools/display_states.png")
+    elif mode == "states-portrait":
+        cmd_states_portrait(arg or "tools/display_states_portrait.png")
     elif mode == "search":
         cmd_search(arg or "tools/display_search.png")
     elif mode == "scroll":
@@ -706,4 +855,4 @@ if __name__ == "__main__":
     elif mode == "parity":
         sys.exit(cmd_parity(arg or "build_mock/display_golden.tsv"))
     else:
-        print("usage: display_sim.py [png|states|search|scroll|cheader|parity] [outfile]")
+        print("usage: display_sim.py [png|states|states-portrait|search|scroll|cheader|parity] [outfile]")

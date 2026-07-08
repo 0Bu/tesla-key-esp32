@@ -1,11 +1,12 @@
-// On-device ST7735 status display for the LilyGo T-Dongle-C5 and T-Dongle-S3 (both a
-// 0.96" IPS 80x160 panel driven in LANDSCAPE 160x80, same ST7735 init/gamma/INVON).
-// Renders the charge/connection state — see display.hpp for the design contract; the
-// layout mirrors tools/display_sim.py (the pixel-exact renderer) 1:1. Compiled only when
-// CONFIG_TESLA_DISPLAY_ENABLED (set for esp32c5 AND esp32s3 in their sdkconfig.defaults.*);
-// a no-op stub on the other targets. The panel pins come from Kconfig (per-board
-// sdkconfig.defaults.*); the C5-vs-S3 deltas (SPI clock, BOOT-button GPIO) are selected by
-// CONFIG_IDF_TARGET_* in display_start(). The single esp32s3 image serves both the
+// On-device ST7735 status display for the LilyGo T-Dongle-C5 and T-Dongle-S3 (both a 0.96" IPS
+// 80x160 panel, same ST7735 init/gamma/INVON). Drivable LANDSCAPE (160x80) OR PORTRAIT (80x160)
+// — the BOOT button rotates 90° per press through 4 orientations (draw_landscape / draw_portrait;
+// the choice persists in NVS tesla_cfg/disp_rot). Renders the charge/connection state — see
+// display.hpp for the design contract; the layout mirrors tools/display_sim.py (the pixel-exact
+// renderer) 1:1. Compiled only when CONFIG_TESLA_DISPLAY_ENABLED (set for esp32c5 AND esp32s3 in
+// their sdkconfig.defaults.*); a no-op stub on the other targets. The panel pins come from
+// Kconfig (per-board sdkconfig.defaults.*); the C5-vs-S3 deltas (SPI clock, BOOT-button GPIO) are
+// selected by CONFIG_IDF_TARGET_* in display_start(). The single esp32s3 image serves both the
 // T-Dongle-S3 and a generic ESP32-S3: display_start() auto-detects the dongle and stays a
 // complete no-op on a generic board.
 
@@ -28,7 +29,7 @@
 #include "esp_wifi.h"
 #include "esp_log.h"
 #include "esp_rom_sys.h"   // esp_rom_delay_us for the T-Dongle-S3 board probe
-#include "nvs.h"           // persist the BOOT-button 180° flip across reboots
+#include "nvs.h"           // persist the BOOT-button rotation index across reboots
 
 #include "vehicle_ctrl.hpp"
 #include "logic/ui_state.hpp"        // tk::UiSnapshot — the shared status-indicator input
@@ -45,17 +46,39 @@ static const char* TAG = "display";
 // the centre WiFi-search animation is shown instead (the correct state anyway).
 bool wifi_is_connected();
 
-// ─── panel geometry & fixed T-Dongle-C5 wiring ───────────────────────────────
-// Landscape orientation: 160 wide x 80 tall. The SPI pins, RAM offsets, MADCTL and
-// backlight polarity are held in s_cfg, set once in display_start() (fixed for the C5).
+// ─── panel geometry & fixed T-Dongle wiring ──────────────────────────────────
+// The SPI pins + backlight polarity are fixed per board (set once in display_start); the
+// MADCTL and RAM offsets are swapped at runtime by the BOOT-button rotation (apply_rotation).
 struct DisplayConfig {
     int     mosi, sck, cs, dc, rst, bl;   // SPI + control GPIOs
     bool    bl_active_low;                // drive backlight LOW to light it
-    int     x_off, y_off;                 // ST7735 RAM offsets (landscape col/row start)
+    int     x_off, y_off;                 // ST7735 RAM offsets (col/row start for the current rotation)
     uint8_t madctl;                       // memory-access / rotation byte
 };
-static constexpr int W = 160;
-static constexpr int H = 80;
+
+// Current framebuffer geometry — swapped by the BOOT-button rotation between landscape
+// (160x80) and portrait (80x160). Both are 160*80 = 80*160 = 12800 px, so rotating the panel
+// never reallocates the framebuffer; only the stride (W) and the flush bounds (W,H) change.
+static int W = 160;
+static int H = 80;
+static constexpr int FB_PX = 160 * 80;            // fixed framebuffer capacity (either orientation)
+
+// The 4 BOOT-rotation orientations (90° per press, cycled in array order). Two landscape + two
+// portrait; each pair's 180° variant is a pure MADCTL bit-flip of the SAME framebuffer. The
+// 0.96" panel's visible window is centered in the ST7735 RAM (col 26+80+26 = 132, row
+// 1+160+1 = 162), so the offsets are symmetric: they only SWAP between portrait (26,1) and
+// landscape (1,26) and stay identical across a 180° flip. Landscape MADCTL 0xA8 + offsets (1,26)
+// are HW-verified on the C5/S3; the portrait MADCTL/offsets follow the standard ST7735 rotation
+// set. Adjacent indices are 90° apart, so ++index rotates one way and --index the other.
+struct RotDef { uint8_t madctl; int w, h, x_off, y_off; bool portrait; };
+static constexpr RotDef ROTS[4] = {
+    { 0xC8,  80, 160, 26,  1, true  },   // 0 · portrait
+    { 0xA8, 160,  80,  1, 26, false },   // 1 · landscape (power-on default)
+    { 0x08,  80, 160, 26,  1, true  },   // 2 · portrait, 180°
+    { 0x68, 160,  80,  1, 26, false },   // 3 · landscape, 180°
+};
+static int s_rot = 1;                             // current rotation index (default: landscape)
+
 static DisplayConfig s_cfg{};                     // set once in display_start()
 static inline int BL_ON() { return s_cfg.bl_active_low ? 0 : 1; }
 
@@ -111,8 +134,8 @@ static void set_window(int x0, int y0, int x1, int y1) {
 
 // Init sequence (commands, delays, gamma/power tables, INVON, COLMOD 0x05) is the
 // one LilyGo ships for this panel — Xinyuan-LilyGO/T-Dongle-C5 st7735.cpp; the
-// T-Dongle-S3 uses the identical ST7735 panel. MADCTL comes from Kconfig so the
-// orientation can be tuned per board without a code change.
+// T-Dongle-S3 uses the identical ST7735 panel. MADCTL is s_cfg.madctl, the current
+// BOOT-rotation orientation (set from ROTS before init, re-sent by apply_rotation on a tap).
 static void panel_init() {
     // Hardware reset — match LilyGo's begin(): idle HIGH, 100 ms LOW pulse, 120 ms HIGH.
     gpio_set_level((gpio_num_t)s_cfg.rst, 1); vTaskDelay(pdMS_TO_TICKS(100));
@@ -141,7 +164,7 @@ static void panel_init() {
     wr_cmd(0xC5); wr_data(0x0E);                           // VMCTR1
 
     wr_cmd(0x21);                                          // INVON (0.96" IPS)
-    wr_cmd(0x36); wr_data(s_cfg.madctl);                  // MADCTL (landscape, per board preset)
+    wr_cmd(0x36); wr_data(s_cfg.madctl);                  // MADCTL (current BOOT-rotation orientation)
     wr_cmd(0x3A); wr_data(0x05);                           // COLMOD: 16-bit/pixel
 
     uint8_t gp[16] = { 0x02,0x1c,0x07,0x12,0x37,0x32,0x29,0x2d,
@@ -158,7 +181,7 @@ static void panel_init() {
 // Push the whole framebuffer one row at a time through a DMA-capable bounce buffer
 // — keeps the framebuffer in PSRAM (where present) and never DMAs from it.
 static void flush() {
-    static uint8_t line[W * 2];
+    static uint8_t line[160 * 2];              // sized for the wider (landscape) orientation
     for (int y = 0; y < H; ++y) {
         const uint16_t* src = &s_fb[y * W];
         for (int x = 0; x < W; ++x) {
@@ -166,7 +189,7 @@ static void flush() {
             line[x * 2 + 1] = src[x] & 0xFF;
         }
         set_window(0, y, W - 1, y);
-        wr_data_n(line, sizeof(line));
+        wr_data_n(line, W * 2);
     }
 }
 
@@ -323,32 +346,43 @@ static void draw_pairing(int frame) {
 // (The over-long-SSID marquee offset — ping-pong pause/scroll-out/pause/scroll-back — is
 // now computed by the pure presenter; this renderer receives the finished offset in Model.)
 
-// ─── render one frame from the presenter's Model (mirrors tools/display_sim.py) ────────
-// Returns true when it drew something animated (a search/pairing hero, or a scrolling
-// SSID) so the task keeps refreshing fast. `tick` is a monotonic frame counter;
-// `paired` = VehicleController::has_session(), sampled by the task (it hits NVS, so it's
-// not called every frame). All "what to show" decisions come from the pure, host-tested
-// presenter (tk::display::compose) — this function only ASSEMBLES the snapshot and DRAWS.
-static bool render_frame(VehicleController& v, int tick, bool paired) {
-    // ── assemble the UI snapshot at the presentation seam (see logic/ui_state.hpp) ──
-    // Vehicle-owned fields arrive in one lock-guarded read; `paired` is the task's ≤1 Hz
-    // sample; the WiFi fields come from esp_wifi, but only once the STA holds an IP — never
-    // during init/association churn (see wifi_is_connected()): avoids the concurrent-read fault.
-    tk::UiSnapshot s = v.ui_snapshot();
-    s.paired = paired;
-    wifi_ap_record_t ap = {};
-    s.wifi_on = wifi_is_connected() && (esp_wifi_sta_get_ap_info(&ap) == ESP_OK);
-    if (s.wifi_on) {
-        s.wifi_rssi = ap.rssi;
-        snprintf(s.ssid, sizeof(s.ssid), "%s", (const char*)ap.ssid);
+// ─── portrait (80x160) search/pairing heroes ───────────────────────────────────
+// Same colours + ping-pong animation timing as landscape, but the icon/label sits ABOVE a
+// centered, taller bar cluster to use the portrait height. Mirrors tools/display_sim.py.
+static constexpr int PSB_N = 5, PSB_BW = 8, PSB_GAP = 5, PSB_BASE = 138;   // 5 bars, centered
+static void draw_portrait_search_bars(int frame) {
+    const int total = PSB_N * PSB_BW + (PSB_N - 1) * PSB_GAP;   // 60 px
+    const int x0 = (W - total) / 2;
+    int p = frame % SRCH_CYCLE;
+    float hp = (p <= SRCH_HALF ? p : (SRCH_CYCLE - p)) / (float)SRCH_STEPS;
+    for (int i = 0; i < PSB_N; ++i) {
+        int   h = 14 + i * 9;
+        float d = fabsf(i - hp);
+        float t = d >= SRCH_FALLOFF ? 0.0f : (1.0f - d / SRCH_FALLOFF);
+        uint16_t col = rgb565(lerp8(C_BLE_GREEN_RGB[0], C_BLE_LIGHT_RGB[0], t),
+                              lerp8(C_BLE_GREEN_RGB[1], C_BLE_LIGHT_RGB[1], t),
+                              lerp8(C_BLE_GREEN_RGB[2], C_BLE_LIGHT_RGB[2], t));
+        int x = x0 + i * (PSB_BW + PSB_GAP);
+        rect(x, PSB_BASE - h, x + PSB_BW, PSB_BASE, col);
     }
+}
+// wifi=true → the word "WiFi" (scale 2); else the Bluetooth glyph (scale 3), both centered.
+static void draw_portrait_search(int frame, bool wifi) {
+    if (wifi) draw_text((W - text_w("WiFi", 2)) / 2, 52, "WiFi", C_INK, 2);
+    else      blit_rows((W - DISPLAY_BT_W * 3) / 2, 46, DISPLAY_BT_ROWS,
+                        DISPLAY_BT_W, DISPLAY_BT_H, 3, C_INK);
+    draw_portrait_search_bars(frame);
+}
+static void draw_portrait_pairing(int frame) {
+    int nd = (frame / 4) % 4;
+    char buf[12];
+    snprintf(buf, sizeof(buf), "Pairing%.*s", nd, "...");
+    blit_rows((W - DISPLAY_BT_W * 3) / 2, 50, DISPLAY_BT_ROWS, DISPLAY_BT_W, DISPLAY_BT_H, 3, C_INK);
+    draw_text((W - text_w("Pairing...", 1)) / 2, 96, buf, C_INK, 1);   // scale 1: scale 2 is too wide for 80 px
+}
 
-    // ── pure decision: what to show (priority ladder, colours, bars, scroll) ──
-    const tk::display::Model m = tk::display::compose(s, (uint32_t)tick);
-
-    // ── render the Model ──────────────────────────────────────────────────────
-    fill(C_BG);
-
+// ─── landscape (160x80) layout — the original, HW-verified design ───────────────
+static bool draw_landscape(const tk::display::Model& m, const tk::UiSnapshot& s, int tick) {
     // header: WiFi bars + SSID (scale 2); hidden while WiFi is the active search hero. An
     // over-long SSID scrolls (clipped marquee) at the presenter-computed offset.
     if (m.show_wifi) {
@@ -385,7 +419,7 @@ static bool render_frame(VehicleController& v, int tick, bool paired) {
             break;                            // fall through to the battery body below
     }
 
-    // ── battery shell ───────────────────────────────────────────────────────
+    // ── battery shell (horizontal, fills left→right) ─────────────────────────
     const int bx0 = 6, by0 = 24, bx1 = 146, by1 = 74;
     rect(bx0 + 2, by0 + 2, bx1 - 2, by1 - 2, C_PANEL);   // interior
     border(bx0, by0, bx1, by1, 3, C_BORDER);             // shell
@@ -417,17 +451,105 @@ static bool render_frame(VehicleController& v, int tick, bool paired) {
     return m.animating;   // battery view: fast refresh only while the SSID marquee moves
 }
 
+// ─── portrait (80x160) layout — a VERTICAL battery, filling bottom→top ──────────
+static bool draw_portrait(const tk::display::Model& m, const tk::UiSnapshot& s, int tick) {
+    // header row 1: WiFi bars (left) | BT glyph + BLE bars (right); row 2: SSID; divider at y31.
+    if (m.show_wifi) {
+        signal_bars(4, 4, m.wifi_bars, C_BAR_ON);
+        if (!m.ssid_scrolling) {                          // scale-1 SSID, centered when it fits
+            draw_text((W - text_w(s.ssid, 1)) / 2, 21, s.ssid, C_INK, 1);
+        } else {                                          // else clip-scroll it in its own row
+            draw_text_clip(4 - m.ssid_scroll_off, 21, s.ssid, C_INK, 1, 4, 4 + m.ssid_avail);
+        }
+    }
+    if (m.show_ble) {
+        int bx = W - 4 - 16;                              // 4 bars * 4px, right-flush
+        signal_bars(bx, 4, m.ble_bars, C_BAR_ON);
+        blit_rows(bx - 12, 1, DISPLAY_BT_ROWS, DISPLAY_BT_W, DISPLAY_BT_H, 2,
+                  m.ble_glyph_on ? C_INK : C_GREY);       // BT glyph, scale 2
+    }
+    rect(4, 31, W - 4, 32, C_DIV);                        // divider
+
+    // ── centre hero: WiFi search > pairing > BLE search > battery ────────────
+    switch (m.hero) {
+        case tk::display::Hero::WifiSearch: draw_portrait_search(tick, /*wifi*/true);  return true;
+        case tk::display::Hero::Pairing:    draw_portrait_pairing(tick);               return true;
+        case tk::display::Hero::BleSearch:  draw_portrait_search(tick, /*wifi*/false); return true;
+        case tk::display::Hero::Battery:    break;
+    }
+
+    // ── vertical battery: terminal nub on top, fill grows bottom→top ─────────
+    rect(30, 34, 50, 40, C_BORDER);                       // terminal nub
+    const int bx0 = 10, by0 = 40, bx1 = 70, by1 = 152;
+    rect(bx0 + 2, by0 + 2, bx1 - 2, by1 - 2, C_PANEL);    // interior
+    border(bx0, by0, bx1, by1, 3, C_BORDER);              // shell
+    const int ix0 = bx0 + 3, iy0 = by0 + 3, ix1 = bx1 - 3, iy1 = by1 - 3;   // 13,43 .. 67,149
+    const int ih = iy1 - iy0;
+
+    uint16_t fill_col = rgb565(m.fill_r, m.fill_g, m.fill_b);   // presenter already blended asleep-dim
+    int fh = (int)lroundf(ih * m.soc / 100.0f);
+    if (fh > 0) rect(ix0, iy1 - fh, ix1, iy1, fill_col);  // bottom-anchored
+
+    char num[8];
+    snprintf(num, sizeof(num), "%d%%", m.soc);
+    int nscale = (m.soc < 100) ? 3 : 2;                   // "100%" overflows 80 px at scale 3 → scale 2
+    if (m.show_bolt) {                                    // bolt above, number below
+        blit_rows_outline((W - DISPLAY_BOLT_W * 2) / 2, 60,
+                          DISPLAY_BOLT_ROWS, DISPLAY_BOLT_W, DISPLAY_BOLT_H, 2, C_BOLT, C_BG);
+        draw_text_outline((W - text_w(num, nscale)) / 2, 100, num, C_INK, nscale, C_BG);
+    } else {
+        draw_text_outline((W - text_w(num, nscale)) / 2, 92, num,
+                          m.asleep ? C_GREY : C_INK, nscale, C_BG);
+    }
+
+    if (m.asleep)
+        draw_text((W - text_w("ASLEEP", 1)) / 2, 132, "ASLEEP", C_GREY, 1);
+    return m.animating;   // battery view: fast refresh only while the SSID marquee moves
+}
+
+// ─── render one frame from the presenter's Model (mirrors tools/display_sim.py) ────────
+// Returns true when it drew something animated (a search/pairing hero, or a scrolling
+// SSID) so the task keeps refreshing fast. `tick` is a monotonic frame counter;
+// `paired` = VehicleController::has_session(), sampled by the task (it hits NVS, so it's
+// not called every frame). All "what to show" decisions come from the pure, host-tested
+// presenter (tk::display::compose) — this function only ASSEMBLES the snapshot and DRAWS,
+// dispatching to the landscape or portrait layout for the current BOOT-rotation.
+static bool render_frame(VehicleController& v, int tick, bool paired) {
+    // ── assemble the UI snapshot at the presentation seam (see logic/ui_state.hpp) ──
+    // Vehicle-owned fields arrive in one lock-guarded read; `paired` is the task's ≤1 Hz
+    // sample; the WiFi fields come from esp_wifi, but only once the STA holds an IP — never
+    // during init/association churn (see wifi_is_connected()): avoids the concurrent-read fault.
+    tk::UiSnapshot s = v.ui_snapshot();
+    s.paired = paired;
+    wifi_ap_record_t ap = {};
+    s.wifi_on = wifi_is_connected() && (esp_wifi_sta_get_ap_info(&ap) == ESP_OK);
+    if (s.wifi_on) {
+        s.wifi_rssi = ap.rssi;
+        snprintf(s.ssid, sizeof(s.ssid), "%s", (const char*)ap.ssid);
+    }
+
+    // ── pure decision: what to show (priority ladder, colours, bars, scroll) ──
+    const bool portrait = ROTS[s_rot].portrait;
+    const tk::display::Orient orient = portrait ? tk::display::Orient::Portrait
+                                                : tk::display::Orient::Landscape;
+    const tk::display::Model m = tk::display::compose(s, (uint32_t)tick, orient);
+
+    // ── render the Model in the current orientation ─────────────────────────
+    fill(C_BG);
+    return portrait ? draw_portrait(m, s, tick) : draw_landscape(m, s, tick);
+}
+
 // ─── refresh task ──────────────────────────────────────────────────────────--
 // `tick` is monotonic so animations (search sweep, pairing dots) and the SSID
 // marquee advance smoothly. When render_frame() reports nothing animating we idle at
 // 1 Hz; while something animates (incl. a scrolling SSID) we refresh fast (~8 fps).
-// ─── BOOT button: a single tap flips the panel 180° (persisted) ────────────────
+// ─── BOOT button: each tap rotates the panel 90° (persisted) ───────────────────
 // The dongle's BOOT button (T-Dongle-C5: GPIO28, its only button; T-Dongle-S3: GPIO0) is a
-// normal input after boot (external pull-up; pressed = LOW). A press toggles MADCTL between
-// the two landscape rotations 0xA8 <-> 0x68 (a 180° flip; the RAM offsets are identical for
-// both), letting the user correct the panel orientation with one tap. The choice is stored
-// in NVS (tesla_cfg/disp_flip) so it survives reboots. The SPI clock also differs per board
-// (both drive the same panel): LilyGo's tested C5 rate is 20 MHz, the S3 is HW-verified at 40.
+// normal input after boot (external pull-up; pressed = LOW). Each press steps the rotation
+// index (ROTS) by one, cycling landscape → portrait → landscape-180° → portrait-180° → …, so
+// the user can stand the dongle up in any of the four orientations with taps. The chosen index
+// is stored in NVS (tesla_cfg/disp_rot) so it survives reboots. The SPI clock also differs per
+// board (both drive the same panel): LilyGo's tested C5 rate is 20 MHz, the S3 HW-verified at 40.
 #if CONFIG_IDF_TARGET_ESP32C5
 static constexpr int BOOT_BTN     = 28;                 // T-Dongle-C5: BOOT on GPIO28
 static constexpr int SPI_CLOCK_HZ = 20 * 1000 * 1000;   // LilyGo's tested C5 rate (40 MHz over-spec → blank panel)
@@ -436,29 +558,44 @@ static constexpr int BOOT_BTN     = 0;                  // T-Dongle-S3: BOOT on 
 static constexpr int SPI_CLOCK_HZ = 40 * 1000 * 1000;   // HW-verified on the T-Dongle-S3
 #endif
 
-static bool load_disp_flip() {
-    nvs_handle_t h; uint8_t v = 0;
+// Load the saved rotation index (0..3). Migrates the pre-rotation NVS key `disp_flip` (a bool:
+// the old 180° landscape flip) → the equivalent index: unflipped → 1 (landscape), flipped → 3.
+static int load_disp_rot() {
+    nvs_handle_t h; uint8_t rot = 0xFF, flip = 0;
     if (nvs_open("tesla_cfg", NVS_READONLY, &h) == ESP_OK) {
-        nvs_get_u8(h, "disp_flip", &v);
+        if (nvs_get_u8(h, "disp_rot", &rot) != ESP_OK) rot = 0xFF;   // absent → migrate/default
+        nvs_get_u8(h, "disp_flip", &flip);                          // legacy key (ignored if disp_rot present)
         nvs_close(h);
     }
-    return v != 0;
+    if (rot <= 3) return rot;
+    return flip ? 3 : 1;                                             // migrate old flip; default landscape
 }
-static void save_disp_flip(bool flipped) {
+static void save_disp_rot(int rot) {
     nvs_handle_t h;
     if (nvs_open("tesla_cfg", NVS_READWRITE, &h) == ESP_OK) {
-        nvs_set_u8(h, "disp_flip", flipped ? 1 : 0);
+        nvs_set_u8(h, "disp_rot", (uint8_t)(rot & 3));
         nvs_commit(h);
         nvs_close(h);
     }
 }
-// Toggle the 180° landscape flip. Called only from the display task, which owns the
-// SPI bus, so re-sending MADCTL here is safe; the next flush() renders flipped.
-static void toggle_flip() {
-    s_cfg.madctl ^= 0xC0;                          // 0xA8 <-> 0x68
+// Apply rotation index r: swap the framebuffer geometry (W/H) + RAM offsets and re-send MADCTL.
+// The framebuffer is NOT reallocated (both orientations are FB_PX px). Called only from the
+// display task (which owns the SPI bus) and once at init, so re-sending MADCTL here is safe.
+static void apply_rotation(int r) {
+    s_rot = r & 3;
+    const RotDef& d = ROTS[s_rot];
+    s_cfg.madctl = d.madctl;
+    s_cfg.x_off  = d.x_off;
+    s_cfg.y_off  = d.y_off;
+    W = d.w;
+    H = d.h;
     wr_cmd(0x36); wr_data(s_cfg.madctl);           // MADCTL
-    save_disp_flip(s_cfg.madctl != 0xA8);
-    ESP_LOGI(TAG, "display flipped 180° → MADCTL 0x%02X", s_cfg.madctl);
+}
+// One BOOT tap → 90° step. `+1` cycles one way; use `+3` (== −1) for the opposite direction.
+static void rotate_90(void) {
+    apply_rotation((s_rot + 1) & 3);
+    save_disp_rot(s_rot);
+    ESP_LOGI(TAG, "display rotated → index %d (MADCTL 0x%02X, %dx%d)", s_rot, s_cfg.madctl, W, H);
 }
 
 static void display_task(void* arg) {
@@ -487,7 +624,7 @@ static void display_task(void* arg) {
         for (int slept = 0; slept < frame_ms; slept += 40) {
             vTaskDelay(pdMS_TO_TICKS(40));
             bool lvl = gpio_get_level((gpio_num_t)BOOT_BTN);
-            if (btn_prev && !lvl) toggle_flip();
+            if (btn_prev && !lvl) rotate_90();
             btn_prev = lvl;
         }
     }
@@ -527,26 +664,31 @@ void display_start(VehicleController& vehicle) {
     if (!is_t_dongle_s3()) { ESP_LOGI(TAG, "no T-Dongle-S3 detected — display disabled"); return; }
 #endif
     // Panel wiring — pins from Kconfig (per-board sdkconfig.defaults.*). The 0.96" GREENTAB
-    // panel is mounted portrait (80x160) but driven in LANDSCAPE (160x80): MADCTL 0xA8
-    // (MY|MV|BGR, 180°) with the col/row offsets swapped to 1/26 and an ACTIVE-LOW backlight
-    // — identical on the T-Dongle-C5 and T-Dongle-S3 (only the pins/SPI-clock/BOOT-button GPIO
-    // differ). C5 backlight GPIO0, S3 backlight GPIO38, both active-low (LilyGo drivers).
+    // panel is mounted portrait (80x160); the MADCTL / col-row offsets / framebuffer geometry
+    // come from the saved BOOT-rotation index (ROTS, default 1 = LANDSCAPE 160x80, MADCTL 0xA8
+    // MY|MV|BGR with offsets 1/26). Backlight is ACTIVE-LOW — identical on the T-Dongle-C5 and
+    // T-Dongle-S3 (only pins/SPI-clock/BOOT-button GPIO differ; C5 BL GPIO0, S3 BL GPIO38).
     s_cfg = DisplayConfig{
         .mosi = CONFIG_TESLA_DISPLAY_SPI_MOSI, .sck = CONFIG_TESLA_DISPLAY_SPI_SCK,
         .cs = CONFIG_TESLA_DISPLAY_CS, .dc = CONFIG_TESLA_DISPLAY_DC,
         .rst = CONFIG_TESLA_DISPLAY_RST, .bl = CONFIG_TESLA_DISPLAY_BL,
         .bl_active_low = true, .x_off = 1, .y_off = 26, .madctl = 0xA8,
     };
-    if (load_disp_flip()) s_cfg.madctl = 0x68;   // restore the saved BOOT-button 180° flip
+    // Restore the saved rotation (migrates the legacy disp_flip). Populate s_cfg + W/H directly
+    // here — panel_init() sends this MADCTL; the SPI bus isn't up yet, so don't re-send it.
+    s_rot = load_disp_rot();
+    const RotDef& d0 = ROTS[s_rot];
+    s_cfg.madctl = d0.madctl; s_cfg.x_off = d0.x_off; s_cfg.y_off = d0.y_off;
+    W = d0.w; H = d0.h;
 
     // Framebuffer: PSRAM first. On the C5 (8 MB in-package PSRAM) that always wins and there
     // is deliberately NO fallback — grabbing 25 KB of its scarce contiguous internal SRAM
     // could OOM-reboot that memory-tight board (and a reboot loop keeps a parked car from ever
     // sleeping). The T-Dongle-S3 build has no PSRAM, so it falls back to internal SRAM (~25 KB,
     // allocated once here at boot before WiFi/BLE fragment the heap — the proven pre-#98 path).
-    s_fb = (uint16_t*)heap_caps_malloc(W * H * sizeof(uint16_t), MALLOC_CAP_SPIRAM);
+    s_fb = (uint16_t*)heap_caps_malloc(FB_PX * sizeof(uint16_t), MALLOC_CAP_SPIRAM);
 #if !CONFIG_IDF_TARGET_ESP32C5
-    if (!s_fb) s_fb = (uint16_t*)heap_caps_malloc(W * H * sizeof(uint16_t), MALLOC_CAP_8BIT);
+    if (!s_fb) s_fb = (uint16_t*)heap_caps_malloc(FB_PX * sizeof(uint16_t), MALLOC_CAP_8BIT);
 #endif
     if (!s_fb) { ESP_LOGE(TAG, "no memory for framebuffer — display disabled"); return; }
 
@@ -562,7 +704,7 @@ void display_start(VehicleController& vehicle) {
     bus.sclk_io_num   = s_cfg.sck;
     bus.quadwp_io_num = -1;
     bus.quadhd_io_num = -1;
-    bus.max_transfer_sz = W * 2 + 8;
+    bus.max_transfer_sz = 160 * 2 + 8;   // one row at the widest (landscape) orientation
     if (spi_bus_initialize(SPI2_HOST, &bus, SPI_DMA_CH_AUTO) != ESP_OK) {
         ESP_LOGE(TAG, "spi_bus_initialize failed — display disabled");
         heap_caps_free(s_fb); s_fb = nullptr; return;
@@ -578,8 +720,9 @@ void display_start(VehicleController& vehicle) {
     }
 
     panel_init();
-    ESP_LOGI(TAG, "ST7735 %dx%d (landscape) up on SPI2 (MOSI%d SCK%d CS%d DC%d, MADCTL 0x%02X)",
-             W, H, s_cfg.mosi, s_cfg.sck, s_cfg.cs, s_cfg.dc, s_cfg.madctl);
+    ESP_LOGI(TAG, "ST7735 %dx%d (%s, rot %d) up on SPI2 (MOSI%d SCK%d CS%d DC%d, MADCTL 0x%02X)",
+             W, H, ROTS[s_rot].portrait ? "portrait" : "landscape", s_rot,
+             s_cfg.mosi, s_cfg.sck, s_cfg.cs, s_cfg.dc, s_cfg.madctl);
 
     // 6 KB stack: soft-float gradient lerp + snprintf framing — 4 KB would be tight.
     if (xTaskCreate(display_task, "display", 6144, &vehicle, 3, nullptr) != pdPASS) {

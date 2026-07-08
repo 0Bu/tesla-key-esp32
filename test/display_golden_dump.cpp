@@ -63,23 +63,32 @@ int main() {
         { mk(LinkState::Idle,        true,  "EightChr",                 true,  true,  true,  42,  false), 10 },  // 8 chars = 96px <= 98 → no scroll
         { mk(LinkState::Unknown,     true,  "TenCharSSD",               false, true,  false, 0,   false),  3 },  // BLE-search: wider avail(130), 120px → no scroll
         { mk(LinkState::Unknown,     true,  "AVeryLongNetworkNameXYZ",  false, true,  false, 0,   false),  4 },  // BLE-search: long SSID at avail(130) → scrolls
+        { mk(LinkState::Idle,        true,  "TwelveCharSSD",            true,  true,  true,  42,  false), 10 },  // portrait: 78px > avail(72) → scrolls (fits landscape)
+        { mk(LinkState::Idle,        true,  "TenCharSSD",               true,  true,  true,  42,  false), 10 },  // portrait: 60px <= 72 → no scroll
     };
 
-    std::printf("link\twifi_on\tssid\tble_connected\thave_soc\tsoc\tcharging\tpaired\ttick\t"
+    // Each case is decided for BOTH orientations (landscape + portrait) so the sim's
+    // orientation-aware decide() is checked against the C++ presenter on every layout.
+    struct Or { dm::Orient o; const char* name; };
+    const Or orients[] = { { dm::Orient::Landscape, "landscape" }, { dm::Orient::Portrait, "portrait" } };
+
+    std::printf("link\twifi_on\tssid\tble_connected\thave_soc\tsoc\tcharging\tpaired\ttick\torient\t"
                 "hero\tshow_wifi\tshow_ble\tssid_avail\tssid_scrolling\tssid_off\tout_soc\t"
                 "fill_r\tfill_g\tfill_b\tasleep\tshow_bolt\tanimating\n");
 
     for (const Case& c : cases) {
         const tk::UiSnapshot& s = c.s;
-        const dm::Model m = dm::compose(s, c.tick);
-        std::printf("%s\t%d\t%s\t%d\t%d\t%d\t%d\t%d\t%u\t",
-                    link_str(s.link_state), s.wifi_on ? 1 : 0, s.ssid, s.ble_connected ? 1 : 0,
-                    s.have_soc ? 1 : 0, s.soc, s.charging ? 1 : 0, s.paired ? 1 : 0, c.tick);
-        std::printf("%s\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\n",
-                    hero_str(m.hero), m.show_wifi ? 1 : 0, m.show_ble ? 1 : 0, m.ssid_avail,
-                    m.ssid_scrolling ? 1 : 0, m.ssid_scroll_off, m.soc,
-                    m.fill_r, m.fill_g, m.fill_b, m.asleep ? 1 : 0, m.show_bolt ? 1 : 0,
-                    m.animating ? 1 : 0);
+        for (const Or& orr : orients) {
+            const dm::Model m = dm::compose(s, c.tick, orr.o);
+            std::printf("%s\t%d\t%s\t%d\t%d\t%d\t%d\t%d\t%u\t%s\t",
+                        link_str(s.link_state), s.wifi_on ? 1 : 0, s.ssid, s.ble_connected ? 1 : 0,
+                        s.have_soc ? 1 : 0, s.soc, s.charging ? 1 : 0, s.paired ? 1 : 0, c.tick, orr.name);
+            std::printf("%s\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\n",
+                        hero_str(m.hero), m.show_wifi ? 1 : 0, m.show_ble ? 1 : 0, m.ssid_avail,
+                        m.ssid_scrolling ? 1 : 0, m.ssid_scroll_off, m.soc,
+                        m.fill_r, m.fill_g, m.fill_b, m.asleep ? 1 : 0, m.show_bolt ? 1 : 0,
+                        m.animating ? 1 : 0);
+        }
     }
     return 0;
 }

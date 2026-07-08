@@ -387,6 +387,23 @@ static void test_display_model() {
     std::strcpy(long_ssid.ssid, "AVeryLongNetworkNameXYZ");   // > 98 px at scale 2 ⇒ marquee
     dm::Model scr = dm::compose(long_ssid, 10);
     CHECK(scr.ssid_scrolling && scr.animating);
+
+    // ── portrait orientation (BOOT-rotated 80x160) — only the SSID geometry differs ──
+    // The SSID gets its own header row, full width (72px) at scale 1, independent of the BLE cluster.
+    dm::Model p_batt = dm::compose(us(LS::Idle, true, true, true, true, 50, false), 0, dm::Orient::Portrait);
+    dm::Model p_ble  = dm::compose(us(LS::Unknown, true, false, false, false, 0, false), 0, dm::Orient::Portrait);
+    CHECK(p_batt.ssid_avail == 72 && p_ble.ssid_avail == 72);   // same avail with or without BLE indicator
+    // A 12-char SSID fits portrait's dedicated row (72px at scale 1) but scrolls landscape (144px > 98 at scale 2).
+    tk::UiSnapshot mid_ssid = us(LS::Idle, true, true, true, true, 50, false);
+    std::strcpy(mid_ssid.ssid, "TwelveCharSS");                // 12 ch → 72px (portrait fits) / 144px (landscape scrolls)
+    CHECK(!dm::compose(mid_ssid, 10, dm::Orient::Portrait).ssid_scrolling);
+    CHECK( dm::compose(mid_ssid, 10, dm::Orient::Landscape).ssid_scrolling);
+    tk::UiSnapshot long_p = us(LS::Idle, true, true, true, true, 50, false);
+    std::strcpy(long_p.ssid, "ThirteenChars");                 // 13 ch → 78px > 72 ⇒ portrait marquee too
+    CHECK(dm::compose(long_p, 10, dm::Orient::Portrait).ssid_scrolling);
+    // Orientation changes ONLY the SSID geometry — the hero/battery decisions are identical.
+    CHECK(p_batt.hero == batt.hero && p_batt.soc == batt.soc);
+    CHECK(p_batt.fill_r == batt.fill_r && p_batt.fill_g == batt.fill_g && p_batt.fill_b == batt.fill_b);
 }
 
 // ─── status LED priority ladder (logic/led_status.hpp <- shared UiSnapshot + LedAlerts) ──
