@@ -50,13 +50,14 @@ Work in this order — it's what makes the review catch *drift* rather than just
    before you trust it, and report any gap as a `SKILL-DRIFT` finding (correcting it in the same
    pass).
 7. **Write the report** in the structure at the end.
-8. **Record the pass so the merge gates clear.** A clean review (no *blocking* findings) must
+8. **Record the pass so the gates clear.** A clean review (no *blocking* findings) must
    `touch .claude/.project-review-passed` — the `require-project-review.sh` PreToolUse hook
    refuses every PR merge (`gh pr merge` **and** `mcp__github__merge_pull_request`) until that
    marker is newer than every source file. A full review also audits the skills (step 6), and
    `skill-audit ⊂ project-review`, so **also** `touch .claude/.skill-audit-passed` to clear the
-   sibling `require-skill-audit.sh` gate in the same pass. Any later edit re-stales both, forcing
-   a fresh review before the next merge. Don't touch either if findings block the merge — fix first.
+   sibling `require-skill-audit.sh` gate (which blocks opening a PR and every push to it) in the
+   same pass. Any later edit re-stales both, forcing a fresh review before the next merge. Don't
+   touch either if findings block the merge — fix first.
 
 Use parallel reads/`Explore` to cover the tree quickly, but reason about the cross-cutting
 links yourself — that's where the value is.
@@ -337,8 +338,9 @@ what each must stay true to:
   (`.claude/settings.json`), the `CHECK`/`CHECK_STR`/`CHECK_NEAR` macro set in
   `test/test_logic.cpp`, and the `static_assert` lock pattern (`main/ota_update.cpp` /
   `main/logic/target.hpp`).
-- **`skill-audit`** is the dedicated, merge-gated skill that runs *this very audit* (every skill +
-  agent vs. the project) on its own, gated by `require-skill-audit.sh`. It is the **authority for
+- **`skill-audit`** is the dedicated, PR-gated skill that runs *this very audit* (every skill +
+  agent vs. the project) on its own, gated by `require-skill-audit.sh` (blocks opening a PR and
+  every push to it, not the merge). It is the **authority for
   the per-sibling drift checklist** — this section and `skill-audit`'s *Per-target checklist*
   describe the same siblings and must agree; a divergence between them is itself `SKILL-DRIFT`.
   `skill-audit ⊂ project-review`: running a full review here covers its scope (record both markers,
@@ -363,7 +365,7 @@ lenses this skill delegates to; keep them complementary, not contradictory):
 
 A skill or agent that drives a script is only as current as the script: when the script changes,
 re-read the doc that documents it. The hooks under `.claude/hooks/` (`require-project-review.sh`
-**and** `require-skill-audit.sh` merge gates, `run-logic-tests.sh` Stop hook,
+merge gate **and** `require-skill-audit.sh` PR-create/push gate, `run-logic-tests.sh` Stop hook,
 `report-capabilities.sh`/`build-efficiency-check.sh` SessionStart, `clang-format-edit.sh`
 PostToolUse) are wired in `.claude/settings.json`; a hook whose behaviour a skill/agent describes
 must match the script that actually runs.
