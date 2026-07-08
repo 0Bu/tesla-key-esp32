@@ -1,6 +1,6 @@
 ---
 name: skill-audit
-description: Dedicated drift audit of every skill AND agent under .claude/ against the tesla-key-esp32 project — confirms each still maps the code/config/scripts that exist and corrects any that contradicts them, in place. This is the merge-gated skills-coherence check (require-skill-audit.sh blocks a PR merge until it has run against the current tree). Use whenever you ask to "check the skills", "audit the skills/agents", "are the skills still in sync / complete", "did a skill drift", after changing anything under .claude/ or after a batch of code changes, or before merging. Narrower and faster than project-review (which audits the whole firmware); skill-audit is the skills/agents subset — a full /project-review also satisfies this gate.
+description: Dedicated drift audit of every skill AND agent under .claude/ against the tesla-key-esp32 project — confirms each still maps the code/config/scripts that exist and corrects any that contradicts them, in place. This is the PR-gated skills-coherence check (require-skill-audit.sh blocks opening a PR and every push to it until it has run against the current tree). Use whenever you ask to "check the skills", "audit the skills/agents", "are the skills still in sync / complete", "did a skill drift", after changing anything under .claude/ or after a batch of code changes, or before opening/pushing a PR. Narrower and faster than project-review (which audits the whole firmware and gates the merge); skill-audit is the skills/agents subset — a full /project-review also satisfies this gate.
 ---
 
 # skill-audit — keep every skill & agent in sync with the project
@@ -12,10 +12,11 @@ a renamed script, or a superseded target set silently mis-teaches every future s
 trusts it. This skill's one job is to **catch and fix that drift** so no skill/agent ships out of
 sync with the code, config, scripts and docs it describes.
 
-It is the **skills/agents subset of `project-review`**, pulled out as its own fast, merge-gated
-check: `require-skill-audit.sh` refuses a PR merge until a skill-audit has run against the current
-tree (see *The merge gate* below). `project-review` remains the deep whole-firmware audit and
-**also** covers the skills — so a full `/project-review` records this gate's marker too. Run
+It is the **skills/agents subset of `project-review`**, pulled out as its own fast, PR-gated
+check: `require-skill-audit.sh` refuses to open a PR or push to it until a skill-audit has run
+against the current tree (see *The PR gate* below). `project-review` remains the deep
+whole-firmware audit that gates the *merge*, and **also** covers the skills — so a full
+`/project-review` records this gate's marker too. Run
 `/skill-audit` when only the skills/agents need re-checking; run `/project-review` when the code,
 invariants or docs might have moved.
 
@@ -60,7 +61,7 @@ Work in this order — it is a **single pass**: enumerate → check → fix → 
    **not** reword or restyle. Do **not** re-open a file you already corrected in this pass.
 5. **Report** in the structure below — every skill/agent gets a ✓ or a `SKILL-DRIFT` line, even
    the ones you didn't change (so the pass is auditable).
-6. **Record the pass so the merge gate clears** (see *The merge gate*). Only if no contradiction
+6. **Record the pass so the PR gate clears** (see *The PR gate*). Only if no contradiction
    remains: `touch .claude/.skill-audit-passed`. If drift remains unfixed, don't record it — fix
    first.
 
@@ -127,22 +128,24 @@ owns and must stay in sync with it:
 A skill or agent that drives a script is only as current as the script: when the script changes,
 re-read the doc that documents it.
 
-## The merge gate
+## The PR gate
 
-`require-skill-audit.sh` (PreToolUse in `.claude/settings.json`, matching both `gh pr merge` and
-`mcp__github__merge_pull_request`) refuses a PR merge until `.claude/.skill-audit-passed` is newer
-than every source file — i.e. the audit still reflects the tree being merged. After a clean audit
-with no unfixed drift, record it:
+`require-skill-audit.sh` (PreToolUse in `.claude/settings.json`) refuses to **publish to a PR** —
+`gh pr create` / `git push` in a local terminal, or `mcp__github__create_pull_request` /
+`mcp__github__push_files` in the web/remote environment — until `.claude/.skill-audit-passed` is
+newer than every source file, i.e. the audit still reflects the tree being pushed. The *merge*
+into main is **not** gated here — that is the sibling `require-project-review.sh`. After a clean
+audit with no unfixed drift, record it:
 
 ```bash
 touch .claude/.skill-audit-passed
 ```
 
-Any later edit re-stales the marker, forcing a fresh audit before the next merge. The marker is
-per-tree and transient (gitignored). `skill-audit ⊂ project-review`: a full `/project-review`
-audits the skills too, so it records **both** `.claude/.project-review-passed` and this marker;
-`/skill-audit` alone records only this one (you still need a current project-review for its gate).
-To bypass intentionally, `touch` the marker yourself.
+Any later edit re-stales the marker, forcing a fresh audit before the next PR create / push. The
+marker is per-tree and transient (gitignored). `skill-audit ⊂ project-review`: a full
+`/project-review` audits the skills too, so it records **both** `.claude/.project-review-passed`
+and this marker; `/skill-audit` alone records only this one (you still need a current
+project-review for the merge gate). To bypass intentionally, `touch` the marker yourself.
 
 ## Report structure
 
