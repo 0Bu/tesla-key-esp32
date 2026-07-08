@@ -10,6 +10,7 @@ idf_component_register(
         "http_server.cpp"
         "http_common.cpp"
         "http_api.cpp"
+        "command_exec.cpp"
         "http_status.cpp"
         "http_ota.cpp"
         "http_config.cpp"

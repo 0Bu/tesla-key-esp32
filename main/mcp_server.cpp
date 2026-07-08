@@ -110,10 +110,11 @@ static esp_err_t handle_initialize_(httpd_req_t* req, cJSON* id, const cJSON* pa
 
 // ─── tools/list ───────────────────────────────────────────────────────────────
 
-// Build one tool's inputSchema from the arg-spec table in logic/mcp.hpp — the ONE place
-// bounds and required-ness live, so the advertised schema and the executor's checks can
-// never disagree.
-static cJSON* tool_schema_(const tk::McpToolInfo& info) {
+// Build one tool's inputSchema from the shared command registry
+// (logic/command_registry.hpp) — the ONE place bounds and required-ness live, read by
+// this schema, the executor's checks AND the REST /command clamp, so none of the three
+// can ever disagree.
+static cJSON* tool_schema_(const tk::CmdInfo& info) {
     cJSON* schema = cJSON_CreateObject();
     cJSON_AddStringToObject(schema, "type", "object");
     cJSON* props = cJSON_CreateObject();
@@ -121,20 +122,20 @@ static cJSON* tool_schema_(const tk::McpToolInfo& info) {
 
     cJSON* reqd = nullptr;
     for (const auto& a : info.args) {
-        if (a.type == tk::McpArgType::None) continue;
+        if (a.type == tk::CmdArgType::None || !a.mcp_key) continue;
         cJSON* p = cJSON_CreateObject();
-        if (a.type == tk::McpArgType::Int) {
+        if (a.type == tk::CmdArgType::Int) {
             cJSON_AddStringToObject(p, "type", "integer");
             cJSON_AddNumberToObject(p, "minimum", a.lo);
             cJSON_AddNumberToObject(p, "maximum", a.hi);
         } else {
             cJSON_AddStringToObject(p, "type", "boolean");
         }
-        cJSON_AddItemToObject(props, a.key, p);
-        if (a.required) {
+        cJSON_AddItemToObject(props, a.mcp_key, p);
+        if (a.mcp_required) {
             if (!reqd) reqd = cJSON_CreateArray();
             // Registry strings are immortal .rodata — reference them instead of strdup.
-            cJSON_AddItemToArray(reqd, cJSON_CreateStringReference(a.key));
+            cJSON_AddItemToArray(reqd, cJSON_CreateStringReference(a.mcp_key));
         }
     }
     if (reqd) cJSON_AddItemToObject(schema, "required", reqd);
@@ -149,10 +150,13 @@ static esp_err_t handle_tools_list_(httpd_req_t* req, cJSON* id) {
     cJSON* result = cJSON_CreateObject();
     cJSON* tools  = cJSON_CreateArray();
     cJSON_AddItemToObject(result, "tools", tools);
-    for (const auto& t : tk::kMcpTools) {
+    // MCP-visible registry rows in table order — the order is load-bearing for the
+    // wire (it reproduces the pre-registry tools/list output exactly).
+    for (const auto& t : tk::kCommands) {
+        if (!t.mcp_name) continue;   // REST-only (role-refused) commands are not tools
         cJSON* tool = cJSON_CreateObject();
-        cJSON_AddItemToObject(tool, "name",        cJSON_CreateStringReference(t.name));
-        cJSON_AddItemToObject(tool, "description", cJSON_CreateStringReference(t.description));
+        cJSON_AddItemToObject(tool, "name",        cJSON_CreateStringReference(t.mcp_name));
+        cJSON_AddItemToObject(tool, "description", cJSON_CreateStringReference(t.mcp_desc));
         cJSON_AddItemToObject(tool, "inputSchema", tool_schema_(t));
         cJSON_AddItemToArray(tools, tool);
     }
@@ -207,11 +211,10 @@ static cJSON* vehicle_state_result_() {
 static esp_err_t handle_tools_call_(httpd_req_t* req, cJSON* id, const cJSON* params) {
     const cJSON* jname = cJSON_GetObjectItemCaseSensitive(params, "name");
     const char* name   = cJSON_IsString(jname) ? jname->valuestring : nullptr;
-    const tk::McpToolInfo* info = tk::mcp_tool_info_from_name(name);
+    const tk::CmdInfo* info = tk::cmd_from_mcp_name(name);
     if (!info) {
         return send_rpc_error_(req, id, tk::kJsonRpcInvalidParams, "unknown tool");
     }
-    const tk::McpTool tool = info->tool;
     ESP_LOGI(TAG, "tools/call %s", name);
     const cJSON* args = cJSON_GetObjectItemCaseSensitive(params, "arguments");
 
@@ -223,17 +226,17 @@ static esp_err_t handle_tools_call_(httpd_req_t* req, cJSON* id, const cJSON* pa
     // midnight). Absent optional Int args default to 0. LLM clients routinely encode
     // loosely, so numeric strings are accepted for Int args ("16" → 16) and 0/1 numbers
     // for Bool args; parsed numbers are clamped to the spec bounds (UB guard).
-    int  ival[tk::kMcpMaxArgs] = {};
-    bool bval[tk::kMcpMaxArgs] = {};
-    for (int i = 0; i < tk::kMcpMaxArgs; ++i) {
-        const tk::McpArg& a = info->args[i];
-        if (a.type == tk::McpArgType::None) continue;
-        const cJSON* j = cJSON_GetObjectItemCaseSensitive(args, a.key);
+    int  ival[tk::kCmdMaxArgs] = {};
+    bool bval[tk::kCmdMaxArgs] = {};
+    for (int i = 0; i < tk::kCmdMaxArgs; ++i) {
+        const tk::CmdArg& a = info->args[i];
+        if (a.type == tk::CmdArgType::None || !a.mcp_key) continue;
+        const cJSON* j = cJSON_GetObjectItemCaseSensitive(args, a.mcp_key);
         const char* problem = nullptr;
         if (!j) {
-            if (a.required) problem = "missing required argument";
+            if (a.mcp_required) problem = "missing required argument";
             // absent optional → keep the zero default
-        } else if (a.type == tk::McpArgType::Int) {
+        } else if (a.type == tk::CmdArgType::Int) {
             if (cJSON_IsNumber(j)) {
                 ival[i] = tk::clamped_int(j->valuedouble, a.lo, a.hi);
             } else if (cJSON_IsString(j) && j->valuestring) {
@@ -253,29 +256,17 @@ static esp_err_t handle_tools_call_(httpd_req_t* req, cJSON* id, const cJSON* pa
         }
         if (problem) {
             char m[64];
-            snprintf(m, sizeof(m), "%s: %s", problem, a.key);
+            snprintf(m, sizeof(m), "%s: %s", problem, a.mcp_key);
             return send_rpc_error_(req, id, tk::kJsonRpcInvalidParams, m);
         }
     }
 
-    if (tool == tk::McpTool::GetVehicleState) {
+    if (info->kind == tk::CmdKind::GetVehicleState) {
         return send_rpc_result_(req, id, vehicle_state_result_());
     }
 
-    bool ok = false;
-    switch (tool) {
-        case tk::McpTool::WakeUp:          ok = g_vehicle->wake_up();           break;
-        case tk::McpTool::ChargeStart:     ok = g_vehicle->charge_start();      break;
-        case tk::McpTool::ChargeStop:      ok = g_vehicle->charge_stop();       break;
-        case tk::McpTool::ChargePortOpen:  ok = g_vehicle->charge_port_open();  break;
-        case tk::McpTool::ChargePortClose: ok = g_vehicle->charge_port_close(); break;
-        case tk::McpTool::SetChargingAmps: ok = g_vehicle->set_charging_amps(ival[0]); break;
-        case tk::McpTool::SetChargeLimit:  ok = g_vehicle->set_charge_limit(ival[0]);  break;
-        case tk::McpTool::SetScheduledCharging:
-            ok = g_vehicle->set_scheduled_charging(bval[0], ival[1]);
-            break;
-        default: break;  // GetVehicleState/Unknown handled above
-    }
+    // Same positional-values dispatch the REST /command path uses (command_exec.cpp).
+    bool ok = execute_vehicle_command(*g_vehicle, info->kind, ival, bval);
 
     // Command outcome text is shared with the REST /command path (logic/command_result.hpp)
     // so the two can never report the same outcome differently. Tool-level failures are
