@@ -12,9 +12,13 @@
 # Mechanism: after running /project-review and confirming it passes with no blocking
 # findings, record the pass by touching:
 #     .claude/.project-review-passed
-# This hook allows the merge only while that marker is newer than every source file —
-# i.e. the review still reflects the code being shipped. Edit any file afterwards and
-# the marker goes stale, forcing a fresh review before the next merge.
+# This hook allows the merge only while the review still reflects the code being shipped —
+# judged by GIT CONTENT, not file mtime: the tree carries no uncommitted tracked changes AND no
+# commit has landed since the marker was recorded. (An mtime scan was WRONG — a git checkout /
+# branch switch / worktree add rewrites the mtime of committed-but-unchanged files, e.g. the
+# tracked, generated tools/display_preview.png, which then falsely read as "newer than the marker"
+# and blocked a merge on an unchanged tree.) Commit new work, or leave edits uncommitted, and the
+# marker goes stale — forcing a fresh review before the next merge.
 #
 # Only Claude Code sessions are gated; a human running `gh` in a plain terminal
 # (or CI) is unaffected, since hooks run only inside Claude Code.
@@ -54,26 +58,33 @@ esac
 proj="${CLAUDE_PROJECT_DIR:-$PWD}"
 marker="$proj/.claude/.project-review-passed"
 
+# Portable file-mtime in epoch seconds. GNU coreutils first (`stat -c %Y`), then BSD/macOS
+# (`stat -f %m`) — GNU-first because GNU `stat -f` means --file-system (wrong output), so we
+# must try the GNU form before falling back to the BSD flag.
+file_mtime() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null; }
+
 stale=""
-newer=""
+reason=""
 if [ -f "$marker" ]; then
-  # First source file newer than the marker (if any) => review is stale.
-  # macOS/BSD-find safe: no -quit; prune generated/vendored trees.
-  # EXCLUDE BOTH gate markers — this one AND the sibling .skill-audit-passed. They are gate
-  # state, not source, and a clean /project-review touches both (in some order). Counting the
-  # sibling as a "source file" would leave whichever was touched a hair earlier permanently
-  # newer-than → this gate forever stale: a mutual chicken-and-egg that blocks every merge.
-  newer="$(find "$proj" \
-      \( -path '*/.git' -o -path '*/build' -o -path '*/build_mock' \
-         -o -path '*/managed_components' -o -path '*/_site' \
-         -o -path '*/.claude/worktrees' \) -prune -o \
-      -type f ! -name '.project-review-passed' ! -name '.skill-audit-passed' \
-      -newer "$marker" -print 2>/dev/null \
-      | head -n 1)"
-  if [ -z "$newer" ]; then
-    exit 0   # marker is newer than every source file -> review is current -> allow
+  # Is the review still current? Judge by GIT CONTENT, not filesystem mtime. A git checkout /
+  # branch switch / worktree add rewrites the mtime of committed-but-unchanged files (e.g. the
+  # tracked, generated tools/display_preview.png), so the old `find -newer` mtime scan falsely
+  # reported a clean tree as stale and blocked the merge. Instead the review is stale iff:
+  #   (a) there are uncommitted tracked changes right now (git diff HEAD is non-empty), OR
+  #   (b) a commit landed after the marker was recorded (HEAD committer time > marker mtime).
+  # Nothing here scans sibling files, so the old mutual-marker chicken-and-egg cannot recur.
+  if ! git -C "$proj" diff --quiet HEAD 2>/dev/null; then
+    stale=1
+    reason="uncommitted tracked changes since the review (git diff HEAD is non-empty)"
+  else
+    marker_ts="$(file_mtime "$marker")"
+    head_ts="$(git -C "$proj" log -1 --format=%ct HEAD 2>/dev/null)"
+    if [ -n "$marker_ts" ] && [ -n "$head_ts" ] && [ "$head_ts" -gt "$marker_ts" ]; then
+      stale=1
+      reason="a commit landed after the review was recorded (HEAD $(git -C "$proj" log -1 --format=%h HEAD 2>/dev/null))"
+    fi
   fi
-  stale=1
+  [ -z "$stale" ] && exit 0   # tree clean AND no newer commit -> review is current -> allow
 fi
 
 # Blocked: tell Claude exactly what to do, then exit 2 to veto the tool call.
@@ -81,8 +92,8 @@ fi
   echo "BLOCKED: \`$action\` requires a current project review first."
   echo
   if [ -n "$stale" ]; then
-    echo "A review marker exists, but a file changed after it — the review is stale:"
-    echo "    $newer"
+    echo "A review marker exists, but the tree moved on since it was recorded — the review is stale:"
+    echo "    $reason"
   else
     echo "No project review has been recorded for the current working tree."
   fi
@@ -93,7 +104,7 @@ fi
   echo "         touch \"$marker\""
   echo "  3. Re-run the $action command."
   echo
-  echo "The marker is valid only while no file changes after it, so any later edit"
-  echo "forces a fresh review. To bypass intentionally, touch the marker yourself."
+  echo "The marker stays valid while the tree is unchanged (no new commit, no uncommitted edits),"
+  echo "so any later change forces a fresh review. To bypass intentionally, touch the marker yourself."
 } >&2
 exit 2

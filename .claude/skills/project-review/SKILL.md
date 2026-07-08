@@ -52,12 +52,15 @@ Work in this order — it's what makes the review catch *drift* rather than just
 7. **Write the report** in the structure at the end.
 8. **Record the pass so the gates clear.** A clean review (no *blocking* findings) must
    `touch .claude/.project-review-passed` — the `require-project-review.sh` PreToolUse hook
-   refuses every PR merge (`gh pr merge` **and** `mcp__github__merge_pull_request`) until that
-   marker is newer than every source file. A full review also audits the skills (step 6), and
-   `skill-audit ⊂ project-review`, so **also** `touch .claude/.skill-audit-passed` to clear the
-   sibling `require-skill-audit.sh` gate (which blocks opening a PR and every push to it) in the
-   same pass. Any later edit re-stales both, forcing a fresh review before the next merge. Don't
-   touch either if findings block the merge — fix first.
+   refuses every PR merge (`gh pr merge` **and** `mcp__github__merge_pull_request`) until the
+   review is current for the tree. Currency is judged by **git content, not file mtime**: the
+   marker holds while the tree carries no uncommitted tracked changes and no commit has landed
+   since you touched it (so touch it *after* committing the review's fixes). A full review also
+   audits the skills (step 6), and `skill-audit ⊂ project-review`, so **also**
+   `touch .claude/.skill-audit-passed` to clear the sibling `require-skill-audit.sh` gate (which
+   guards the same merge) in the same pass. Both gates must be current to merge. Any later commit
+   or uncommitted edit re-stales both, forcing a fresh review before the next merge. Don't touch
+   either if findings block the merge — fix first.
 
 Use parallel reads/`Explore` to cover the tree quickly, but reason about the cross-cutting
 links yourself — that's where the value is.
@@ -338,9 +341,9 @@ what each must stay true to:
   (`.claude/settings.json`), the `CHECK`/`CHECK_STR`/`CHECK_NEAR` macro set in
   `test/test_logic.cpp`, and the `static_assert` lock pattern (`main/ota_update.cpp` /
   `main/logic/target.hpp`).
-- **`skill-audit`** is the dedicated, PR-gated skill that runs *this very audit* (every skill +
-  agent vs. the project) on its own, gated by `require-skill-audit.sh` (blocks opening a PR and
-  every push to it, not the merge). It is the **authority for
+- **`skill-audit`** is the dedicated, merge-gated skill that runs *this very audit* (every skill +
+  agent vs. the project) on its own, gated by `require-skill-audit.sh` (guards the same PR merge as
+  this project-review gate — both must be current to merge). It is the **authority for
   the per-sibling drift checklist** — this section and `skill-audit`'s *Per-target checklist*
   describe the same siblings and must agree; a divergence between them is itself `SKILL-DRIFT`.
   `skill-audit ⊂ project-review`: running a full review here covers its scope (record both markers,
