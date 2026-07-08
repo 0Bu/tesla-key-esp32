@@ -111,15 +111,20 @@ byte-identically from git, and CI (`ci-build-all.sh`) runs the prepare step auto
 five images are the same tesla-ble revision.
 
 **On-device ST7735 display (LilyGO T-Dongle-C5 and T-Dongle-S3).** Both dongles carry the same
-0.96" ST7735 LCD and it IS driven — see `main/display.cpp` (landscape 160x80 status panel:
-WiFi/BLE header + a SoC battery, or a WiFi/BLE-search / "Pairing…" animation; cache-only, never
-wakes the car). **What to show** — the priority ladder (WiFi-search > pairing > BLE-search >
+0.96" ST7735 LCD and it IS driven — see `main/display.cpp` (a status panel: WiFi/BLE header + a
+SoC battery, or a WiFi/BLE-search / "Pairing…" animation; cache-only, never wakes the car). The
+panel is drivable **LANDSCAPE (160x80, horizontal battery)** or **PORTRAIT (80x160, two-row header
+over a vertical battery filling bottom→top)** — each BOOT-button tap rotates 90° through the four
+orientations (landscape/portrait ± their 180° flips, MADCTL `{0xC8,0xA8,0x08,0x68}` over the SAME
+framebuffer with the col/row offsets swapping 1/26↔26/1); the index persists in NVS
+`tesla_cfg/disp_rot`. **What to show** — the priority ladder (WiFi-search > pairing > BLE-search >
 battery), the SoC gradient, the RSSI→bars mapping and the SSID-scroll offset — is decided by a
-pure, host-tested presenter (`main/logic/display_model.hpp`) reading a shared, IDF-free
-`UiSnapshot` (`main/logic/ui_state.hpp`, assembled once under the cache lock via
-`VehicleController::ui_snapshot()`); `display.cpp` is a thin renderer that only DRAWS the
-resulting `Model` — so those decisions are unit-tested in `test/` without a board (`logic-test`
-job), the layout constants have one home, and a future status LED can consume the same snapshot.
+pure, host-tested presenter (`main/logic/display_model.hpp`, whose `Orient` axis picks the
+per-layout SSID geometry) reading a shared, IDF-free `UiSnapshot` (`main/logic/ui_state.hpp`,
+assembled once under the cache lock via `VehicleController::ui_snapshot()`); `display.cpp` is a
+thin renderer (`draw_landscape` / `draw_portrait`) that only DRAWS the resulting `Model` — so those
+decisions are unit-tested in `test/` without a board (`logic-test` job), the layout constants have
+one home, and the status LED consumes the same snapshot.
 The rendering is identical on both boards (the layout mirrors
 `tools/display_sim.py`, the pixel-exact offline renderer and font source of truth — and that
 mirror is no longer by hand: `scripts/check-display-sim-parity.sh`, run by
@@ -137,9 +142,13 @@ differs, from Kconfig/`sdkconfig.defaults.*`:
   leaves those GPIOs floating) — a majority ≥4/6 HIGH means the dongle; otherwise the display is a
   complete no-op (no framebuffer, no GPIO driven), so a generic S3 boots exactly as before.
 
-On both boards the backlight is active-low, and a tap on the BOOT button flips the panel 180°
-(MADCTL 0xA8↔0x68, persisted in NVS `tesla_cfg/disp_flip`). Compiled to a no-op stub on the other
-targets (`#else` in `display.cpp`), so one source tree still serves every board.
+On both boards the backlight is active-low, and each tap on the BOOT button rotates the panel 90°,
+cycling landscape → portrait → landscape-180° → portrait-180° → … (rotation index in NVS
+`tesla_cfg/disp_rot`, migrated from the pre-rotation `disp_flip` bool). The two landscape MADCTLs
+(0xA8/0x68) and the (1,26) offsets are HW-verified; the portrait MADCTLs (0xC8/0x08) and (26,1)
+offsets follow the standard ST7735 rotation set and want a quick on-device confirm (the 90°
+direction is a one-line `+1`→`+3` flip in `rotate_90()` if it turns the wrong way). Compiled to a
+no-op stub on the other targets (`#else` in `display.cpp`), so one source tree still serves every board.
 
 **On-device status LED (T-Dongle underside APA102).** A second, independent indicator: the single
 addressable RGB pixel on the dongle underside (`main/led_status.cpp`), driven as a colour +
