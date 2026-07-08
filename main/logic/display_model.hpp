@@ -19,12 +19,27 @@
 namespace tk {
 namespace display {
 
-// ── layout geometry (mirrors main/display.cpp + tools/display_sim.py) ──
+// The panel can be driven LANDSCAPE (160x80, the original design) or PORTRAIT (80x160). The
+// BOOT button rotates 90° per press through 4 orientations (2 landscape + 2 portrait); the two
+// 180°-flipped variants are a free MADCTL flip of the SAME framebuffer, so only these two base
+// layouts exist. compose() decides the orientation-dependent bits (here: the SSID clip width
+// and its scale-driven marquee); the renderer/sim draw each layout with its own coordinates.
+enum class Orient : uint8_t { Landscape, Portrait };
+
+// ── landscape layout geometry (mirrors main/display.cpp + tools/display_sim.py) ──
 inline constexpr int kPanelRight   = 158;  // right edge used for the header layout
 inline constexpr int kSsidX        = 28;   // SSID text left edge
 inline constexpr int kBleReserve   = 32;   // px the BLE header steals from the SSID row
 inline constexpr int kSsidScale    = 2;    // SSID glyph scale
 inline constexpr int kGlyphAdvance = 6;    // px advanced per char at scale 1 (5px + 1 gap)
+
+// ── portrait layout geometry (80x160) ──
+// The SSID sits on its OWN header row (WiFi + BLE indicators share the row above it), so it
+// spans the full width minus a small margin regardless of the BLE indicator — and is drawn at
+// scale 1 (only ~6 chars fit at scale 2 in 80 px), centered when it fits, clip-scrolled when not.
+inline constexpr int kPortraitSsidX     = 4;    // SSID clip-window left edge
+inline constexpr int kPortraitSsidAvail = 72;   // 80 − 2·4 margin
+inline constexpr int kPortraitSsidScale = 1;    // SSID glyph scale (portrait)
 
 // ── SSID marquee tuning (mirrors scroll_offset() in display.cpp / display_sim.py) ──
 inline constexpr int kScrollPause = 8;     // ticks paused at each end
@@ -99,9 +114,11 @@ struct Model {
 };
 
 // Compose one frame from a snapshot. `tick` is a monotonic frame counter driving the search
-// sweep, the pairing dots and the SSID marquee. Pure — no side effects, no I/O — a faithful
-// extraction of display.cpp compose()'s decision half.
-inline Model compose(const UiSnapshot& s, uint32_t tick) {
+// sweep, the pairing dots and the SSID marquee. `orient` picks the layout: only the SSID clip
+// width + scale (hence its marquee) differ — every other decision (hero, battery, bars) is
+// orientation-independent. Pure — no side effects, no I/O — a faithful extraction of
+// display.cpp compose()'s decision half.
+inline Model compose(const UiSnapshot& s, uint32_t tick, Orient orient = Orient::Landscape) {
     Model m;
 
     const bool unreachable    = (s.link_state == LinkState::Unreachable);
@@ -120,10 +137,17 @@ inline Model compose(const UiSnapshot& s, uint32_t tick) {
     m.show_wifi = !wifi_searching;
     if (m.show_wifi) {
         m.wifi_bars = rssi_bars(s.wifi_rssi);
-        const int avail = ble_bars ? (kPanelRight - kSsidX)
-                                   : (kPanelRight - kSsidX - kBleReserve);
+        int avail, scale;
+        if (orient == Orient::Portrait) {          // SSID on its own row, scale 1, full width
+            avail = kPortraitSsidAvail;
+            scale = kPortraitSsidScale;
+        } else {                                   // landscape: shares its row with the BLE cluster
+            avail = ble_bars ? (kPanelRight - kSsidX)
+                             : (kPanelRight - kSsidX - kBleReserve);
+            scale = kSsidScale;
+        }
         m.ssid_avail = avail;
-        const int tw = text_w(s.ssid, kSsidScale);
+        const int tw = text_w(s.ssid, scale);
         if (tw > avail) {                          // too long → horizontal marquee
             m.ssid_scrolling  = true;
             m.ssid_scroll_off = scroll_offset(tick, tw - avail);

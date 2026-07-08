@@ -2,10 +2,14 @@
 
 class VehicleController;
 
-// ─── On-device status display (LilyGo T-Dongle-C5 / T-Dongle-S3, ST7735 160x80) ──
-// Renders the charge/connection state directly on the panel, in landscape:
-//   • header: WiFi signal bars + SSID (left, scrolls horizontally if too long),
-//             Bluetooth symbol + BLE bars (right)
+// ─── On-device status display (LilyGo T-Dongle-C5 / T-Dongle-S3, ST7735 80x160) ──
+// Renders the charge/connection state directly on the panel. The BOOT button rotates the panel
+// 90° per press through 4 orientations — LANDSCAPE (160x80) and PORTRAIT (80x160), each plus its
+// 180° flip — persisted in NVS (tesla_cfg/disp_rot). Landscape lays the header across the top and
+// a HORIZONTAL battery below; portrait stacks a two-row header over a VERTICAL battery (filling
+// bottom→top). Both draw the same content:
+//   • header: WiFi signal bars + SSID (scrolls horizontally if too long),
+//             Bluetooth symbol + BLE bars
 //   • body:   a battery filled to the SoC with a red→amber→green gradient; a
 //             charging bolt overlays while charging (hidden at 100%); the asleep
 //             state dims the fill ("ASLEEP").

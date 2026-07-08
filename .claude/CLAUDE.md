@@ -99,14 +99,18 @@ mcp_server.cpp         → /mcp — MCP server for AI agents (stateless JSON-RPC
 diag_log.cpp           → in-RAM console ring served by GET /diag (static .bss buffer)
 provisioning.cpp       → captive setup portal (setup AP) when no WiFi is configured
 display.cpp            → on-device ST7735 status panel (LilyGo T-Dongle-C5 + T-Dongle-S3),
-                         LANDSCAPE 160x80: header (WiFi bars+SSID | BT+BLE bars) + a SoC battery
-                         with a red→green gradient / charging bolt / "ASLEEP", or a WiFi/BLE search
-                         + "Pairing…" animation. Cache-only (never wakes the car). "What to show"
-                         (priority ladder / gradient / bars / SSID scroll) is decided by the pure,
-                         host-tested presenter logic/display_model.hpp reading the shared
-                         logic/ui_state.hpp (VehicleController::ui_snapshot()); this file is the thin
-                         renderer. BOOT tap (C5 IO28,
-                         S3 IO0) flips 180° (MADCTL 0xA8↔0x68, persisted NVS tesla_cfg/disp_flip).
+                         LANDSCAPE 160x80 (header WiFi bars+SSID | BT+BLE bars + a horizontal SoC
+                         battery) OR PORTRAIT 80x160 (two-row header over a VERTICAL battery filling
+                         bottom→top); both draw a red→green gradient / charging bolt / "ASLEEP", or a
+                         WiFi/BLE search + "Pairing…" animation. Cache-only (never wakes the car).
+                         "What to show" (priority ladder / gradient / bars / SSID scroll) is decided
+                         by the pure, host-tested presenter logic/display_model.hpp (an Orient axis
+                         picks the SSID geometry) reading the shared logic/ui_state.hpp
+                         (VehicleController::ui_snapshot()); this file is the thin renderer
+                         (draw_landscape / draw_portrait). Each BOOT tap (C5 IO28, S3 IO0) rotates
+                         90° through the 4 orientations — landscape/portrait ± their 180° flips
+                         (MADCTL {0xC8,0xA8,0x08,0x68}, same framebuffer, offsets swap 1/26↔26/1);
+                         the index persists in NVS tesla_cfg/disp_rot (migrates the old disp_flip).
                          Backlight active-LOW; SPI 20 MHz (C5) / 40 MHz (S3); framebuffer in PSRAM on
                          the C5, internal SRAM on the S3. Compiles to a no-op unless
                          CONFIG_TESLA_DISPLAY_ENABLED (sdkconfig.defaults.esp32c5 + .esp32s3); the ONE
@@ -134,7 +138,7 @@ Never edit files in `managed_components/` — they are regenerated.
 
 | Namespace   | Content                                     |
 |-------------|---------------------------------------------|
-| `tesla_cfg` | WiFi SSID/pass, VIN, BLE MAC, `mqtt_uri`, `last_time`, `disp_flip` (on-device display 180° flip; C5/S3) (runtime cfg) |
+| `tesla_cfg` | WiFi SSID/pass, VIN, BLE MAC, `mqtt_uri`, `last_time`, `disp_rot` (on-device display BOOT-rotation index 0..3; C5/S3; migrates old `disp_flip`) (runtime cfg) |
 | `tesla_ble` | Private key (`private_key`), VCSEC session (`sess_vcsec`), Info session (`sess_info`), `key_created`, `paired_at` — the `sess_*` names come from the ≤15-char key mapping in `nvs_storage.cpp` |
 
 ## Commands Implemented
