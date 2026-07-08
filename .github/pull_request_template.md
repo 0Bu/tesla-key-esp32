@@ -26,4 +26,4 @@ cannot build or USB-flash — see .claude/CLAUDE.md).
 - [ ] Docs kept in sync where behavior changed (`.claude/CLAUDE.md`, `docs/ARCHITECTURE.md`, `README.md`, `docs/SECURITY.md`, `docs/MCP.md`)
 - [ ] New hardware-free logic lives in `main/logic/` with a `CHECK` in `test/test_logic.cpp` (see the `add-logic-test` skill)
 - [ ] Heap safety considered — no new large *contiguous* allocations; HTTP handlers stay under the `handle_all` try/catch (`.claude/CLAUDE.md` → "Memory is tight")
-- [ ] Target-agnostic — still builds for all four chips (esp32 / esp32s3 / esp32c3 / esp32c6)
+- [ ] Target-agnostic — still builds for all five chips (esp32 / esp32s3 / esp32c3 / esp32c6 / esp32c5)

@@ -1,0 +1,23 @@
+# ─── ESP32-S3 overrides (LilyGo T-Dongle-S3 onboard display) ──────────────────
+# Loaded automatically by ESP-IDF after sdkconfig.defaults when the target is esp32s3
+# (`idf.py set-target esp32s3`). The ONE esp32s3 image serves BOTH the LilyGo T-Dongle-S3
+# (drives the onboard 0.96" ST7735) and a generic ESP32-S3 (no panel): display.cpp
+# auto-detects the dongle at runtime (its TF-card SD pull-ups) and stays a complete no-op on
+# a generic board — no framebuffer, no SPI, no backlight pin driven. So these settings are
+# safe for both.
+#
+# NO PSRAM here on purpose. A generic ESP32-S3 may have none, and the T-Dongle-S3's
+# framebuffer fits in ~25 KB of internal SRAM (allocated once at boot, before WiFi/BLE
+# fragment the heap — the proven pre-#98 path). Keeping SPIRAM off means a generic S3 boots
+# byte-for-byte as before; the display code only ever runs on a detected dongle. (The C5, by
+# contrast, has in-package PSRAM and enables it in sdkconfig.defaults.esp32c5.)
+
+# Compile in the onboard ST7735 status display. Pins override the C5 defaults in
+# main/Kconfig.projbuild with the T-Dongle-S3 wiring: MOSI3 / SCK5 / CS4 / DC2 / RST1 / BL38.
+CONFIG_TESLA_DISPLAY_ENABLED=y
+CONFIG_TESLA_DISPLAY_SPI_MOSI=3
+CONFIG_TESLA_DISPLAY_SPI_SCK=5
+CONFIG_TESLA_DISPLAY_CS=4
+CONFIG_TESLA_DISPLAY_DC=2
+CONFIG_TESLA_DISPLAY_RST=1
+CONFIG_TESLA_DISPLAY_BL=38
