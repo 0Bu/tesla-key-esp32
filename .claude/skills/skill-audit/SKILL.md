@@ -16,7 +16,7 @@ It is the **skills/agents subset of `project-review`**, pulled out as its own fa
 check: `require-skill-audit.sh` refuses to open a PR or push to it until a skill-audit has run
 against the current tree (see *The PR gate* below). `project-review` remains the deep
 whole-firmware audit that gates the *merge*, and **also** covers the skills — so a full
-`/project-review` records this gate's marker too. Run
+`/project-review` ticks this gate's PR checkbox too. Run
 `/skill-audit` when only the skills/agents need re-checking; run `/project-review` when the code,
 invariants or docs might have moved.
 
@@ -61,9 +61,9 @@ Work in this order — it is a **single pass**: enumerate → check → fix → 
    **not** reword or restyle. Do **not** re-open a file you already corrected in this pass.
 5. **Report** in the structure below — every skill/agent gets a ✓ or a `SKILL-DRIFT` line, even
    the ones you didn't change (so the pass is auditable).
-6. **Record the pass so the PR gate clears** (see *The PR gate*). Only if no contradiction
-   remains: `touch .claude/.skill-audit-passed`. If drift remains unfixed, don't record it — fix
-   first.
+6. **Record the pass in the PR so the gate clears** (see *The PR gate*). Only if no contradiction
+   remains: tick the PR's `/skill-audit` checkbox and stamp it with the audited commit — the
+   `- [x] ... @ <short-sha>` line. If drift remains unfixed, don't tick it — fix first.
 
 ### Termination — the audit converges, it does not loop
 
@@ -108,10 +108,10 @@ the authority for the per-sibling drift check; `project-review` defers the mecha
   Verify against `scripts/run-mock-tests.sh`, the CI `logic-test` job
   (`.github/workflows/build.yml`), the `run-logic-tests.sh` **Stop hook** (`.claude/settings.json`),
   the `CHECK`/`CHECK_STR`/`CHECK_NEAR` macro set, and the `static_assert` lock pattern.
-- **`skill-audit`** (this skill) — verify its own numbers/paths (marker name
-  `.claude/.skill-audit-passed`, hook `require-skill-audit.sh`, the sibling list, the command
-  count `15`, the tesla-ble pin) still match the tree, and that the skills/agents it names still
-  exist. Correct it like any other; don't re-open it after.
+- **`skill-audit`** (this skill) — verify its own numbers/paths (hook `require-skill-audit.sh`,
+  the PR-checkbox gate mechanism — no file marker, the sibling list, the command count `15`, the
+  tesla-ble pin) still match the tree, and that the skills/agents it names still exist. Correct it
+  like any other; don't re-open it after.
 
 **Agents** (`.claude/agents/`) — audit these the same way; two duplicate content `project-review`
 owns and must stay in sync with it:
@@ -139,20 +139,28 @@ re-read the doc that documents it.
 
 `require-skill-audit.sh` (PreToolUse in `.claude/settings.json`) refuses to **publish to a PR** —
 `gh pr create` / `git push` in a local terminal, or `mcp__github__create_pull_request` /
-`mcp__github__push_files` in the web/remote environment — until `.claude/.skill-audit-passed` is
-newer than every source file, i.e. the audit still reflects the tree being pushed. The *merge*
-into main is **not** gated here — that is the sibling `require-project-review.sh`. After a clean
-audit with no unfixed drift, record it:
+`mcp__github__push_files` in the web/remote environment — until the PR's `/skill-audit` checkbox
+is ticked **and** stamped with the commit being published. There is **no file marker**: the
+pass-state lives in the PR body itself (see `.claude/hooks/pr-gate-lib.sh`). The *merge* into main
+is **not** gated here — that is the sibling `require-project-review.sh`. After a clean audit with
+no unfixed drift, tick + stamp the box with the head commit:
 
-```bash
-touch .claude/.skill-audit-passed
+```
+- [x] `/skill-audit` clean — PR create/push gate @ <short-sha>    # <short-sha> = git rev-parse --short=12 HEAD
 ```
 
-Any later edit re-stales the marker, forcing a fresh audit before the next PR create / push. The
-marker is per-tree and transient (gitignored). `skill-audit ⊂ project-review`: a full
-`/project-review` audits the skills too, so it records **both** `.claude/.project-review-passed`
-and this marker; `/skill-audit` alone records only this one (you still need a current
-project-review for the merge gate). To bypass intentionally, `touch` the marker yourself.
+For a **new** PR, put that line in the body you submit (`gh pr create --body-file …` or the MCP
+`create_pull_request` body — the gate reads it directly, no network). For an **existing** PR, edit
+its body (`gh pr edit <pr> --body-file …`, or the GitHub MCP update tool) before pushing. A push to
+a branch that has **no PR yet** is allowed — that is not publishing to a PR; the create gate is the
+chokepoint. But if GitHub is **unreadable** (no `gh` and no `GH_TOKEN`/`GITHUB_TOKEN` — e.g.
+web/remote without a token), the push gate fails **closed** rather than let an unaudited push slip
+through, mirroring the merge gate: set a token or push from a `gh`-authenticated session. Any later
+commit changes the sha and re-stales the box, forcing a fresh audit before
+the next PR create / push. `skill-audit ⊂ project-review`: a full `/project-review` audits the
+skills too, so it lets you tick **both** the `/project-review` and `/skill-audit` boxes;
+`/skill-audit` alone ticks only this one (you still need a current project-review for the merge
+gate). To bypass intentionally, tick the box yourself.
 
 ## Report structure
 
@@ -173,8 +181,8 @@ For each drift, in priority order:
 <Every skill + agent, one line each: ✓ matches project / ✗ drifted (→ fixed).>
 
 ## Gate
-<recorded .claude/.skill-audit-passed | withheld — drift still open>
+<ticked the PR `/skill-audit` box @ <sha> | withheld — drift still open>
 ```
 
 Keep each finding tight and tied to a named project fact. A clean run is a valid outcome: every
-skill/agent ✓, zero edits, marker recorded.
+skill/agent ✓, zero edits, PR box ticked.
