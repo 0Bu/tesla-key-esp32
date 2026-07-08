@@ -184,8 +184,10 @@ Treat a violation of any of these as a real finding.
   is **`charge_amps`** (not `charging_amps`), and `charge_state` is **always fully populated**
   (a missing numeric field makes evcc parse `<nil>` and fail). `vehicle_data` is served from
   **cache** and never blocks (avoids gateway 502s).
-- **No HTTP auth / TLS by design** (evcc can't send credentials) — trusted LAN only; document
-  any deviation in `docs/SECURITY.md`.
+- **No HTTP auth / TLS by design** (evcc can't send credentials) — trusted LAN only; the one
+  opt-in exception is the `/mcp` bearer token (default off; `CONFIG_TESLA_MCP_TOKEN` / NVS
+  `mcp_token`, 401 when set — `/mcp` only, REST stays open); document any deviation in
+  `docs/SECURITY.md`.
 
 ### Pairing
 - Keys are enrolled **Charging Manager only**; owner role is intentionally removed
