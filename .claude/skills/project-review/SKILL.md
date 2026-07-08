@@ -341,7 +341,8 @@ what each must stay true to:
   copies), `partitions.csv` offsets, and the `/ota/*` endpoints. Complementary to `flash-esp32`
   (local-tree build+flash, no merge); it defers the merge gate to `require-project-review.sh`.
 - **`e2e-evcc`** wraps `scripts/e2e_evcc.sh`. Re-verify the command count (must equal the
-  `handle_command` switch — currently **15**), the version-coherence claim (`/status` = `X`,
+  REST rows — `api_name != nullptr` — in `logic/command_registry.hpp`'s `kCommands` —
+  currently **15**), the version-coherence claim (`/status` = `X`,
   `/api/proxy/1/version` = `X-esp32` via `fw_version()`), the `vehicle_data` fields it asserts,
   the out-of-scope endpoint list, and the env-var gates (`RUN_COMMANDS` / `ALLOW_CHARGE_TOGGLE`
   / `RUN_ALL_COMMANDS`).
