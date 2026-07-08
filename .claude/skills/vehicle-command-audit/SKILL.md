@@ -155,7 +155,7 @@ code is right. **Verify each is still present before editing** — some may alre
 
 | # | Cat | Where (doc) | Drift | Fix |
 |---|---|---|---|---|
-| 1 | doc (crux) | `docs/README.md:130-137`, `.claude/CLAUDE.md` "Commands Implemented" | Claims **only** `door_lock/unlock` are role-rejected. Also rejected: `flash_lights`, `honk_horn`, `set_sentry_mode`, `auto_conditioning_start/stop`. Code already names them at `vehicle_ctrl.cpp` role-refusal comment. | Widen the "sent but rejected for the Charging-Manager role" note to the full set; only charging + charge-port + wake actually execute. |
+| 1 | doc (crux) | `docs/README.md:130-137`, `.claude/CLAUDE.md` "Commands Implemented" | Claims **only** `door_lock/unlock` are role-rejected. Also rejected: `flash_lights`, `honk_horn`, `set_sentry_mode`, `auto_conditioning_start/stop`. Code already names them at the `vehicle_commands.cpp` role-refusal comment. | Widen the "sent but rejected for the Charging-Manager role" note to the full set; only charging + charge-port + wake actually execute. |
 | 2 | doc | `docs/README.md:178` (`/status.link`); `docs/README.md:254` (MQTT `sleep_status`) | Enum value sets omit **`idle`/`IDLE`** (code emits 5 / 4 values). | Add `idle`/`IDLE` (CLAUDE.md already lists all four). |
 | 3 | doc | `docs/README.md:126` | `set_charging_amps` "(0–32)" but code clamps **0–48**. | Document `(0–48; car enforces its per-model max)`. |
 | 4 | doc | `README.md:54` | Quotes car prompt as "Add new key"; firmware strings say **"Add key"**. | One-word fix. |
