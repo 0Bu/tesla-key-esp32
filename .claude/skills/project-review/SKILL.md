@@ -375,7 +375,7 @@ lenses this skill delegates to; keep them complementary, not contradictory):
 
 A skill or agent that drives a script is only as current as the script: when the script changes,
 re-read the doc that documents it. The hooks under `.claude/hooks/` (`require-project-review.sh`
-merge gate **and** `require-skill-audit.sh` PR-create/push gate, `run-logic-tests.sh` Stop hook,
+**and** `require-skill-audit.sh`, the two PR-merge gates, `run-logic-tests.sh` Stop hook,
 `report-capabilities.sh`/`build-efficiency-check.sh` SessionStart, `clang-format-edit.sh`
 PostToolUse) are wired in `.claude/settings.json`; a hook whose behaviour a skill/agent describes
 must match the script that actually runs.

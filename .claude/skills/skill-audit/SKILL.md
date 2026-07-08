@@ -12,10 +12,10 @@ a renamed script, or a superseded target set silently mis-teaches every future s
 trusts it. This skill's one job is to **catch and fix that drift** so no skill/agent ships out of
 sync with the code, config, scripts and docs it describes.
 
-It is the **skills/agents subset of `project-review`**, pulled out as its own fast, PR-gated
-check: `require-skill-audit.sh` refuses to open a PR or push to it until a skill-audit has run
-against the current tree (see *The PR gate* below). `project-review` remains the deep
-whole-firmware audit that gates the *merge*, and **also** covers the skills — so a full
+It is the **skills/agents subset of `project-review`**, pulled out as its own fast,
+merge-gated check: `require-skill-audit.sh` refuses a PR *merge* until a skill-audit has run
+against the current tree (see *The merge gate* below). It guards the same merge as
+`project-review`, the deep whole-firmware audit that **also** covers the skills — so a full
 `/project-review` records this gate's marker too. Run
 `/skill-audit` when only the skills/agents need re-checking; run `/project-review` when the code,
 invariants or docs might have moved.
@@ -61,7 +61,7 @@ Work in this order — it is a **single pass**: enumerate → check → fix → 
    **not** reword or restyle. Do **not** re-open a file you already corrected in this pass.
 5. **Report** in the structure below — every skill/agent gets a ✓ or a `SKILL-DRIFT` line, even
    the ones you didn't change (so the pass is auditable).
-6. **Record the pass so the PR gate clears** (see *The PR gate*). Only if no contradiction
+6. **Record the pass so the merge gate clears** (see *The merge gate*). Only if no contradiction
    remains: `touch .claude/.skill-audit-passed`. If drift remains unfixed, don't record it — fix
    first.
 
