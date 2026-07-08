@@ -57,9 +57,10 @@ case "$tool" in
     if printf '%s' "$norm" | grep -Eq '^gh[[:space:]]+pr[[:space:]]+create([[:space:]]|$)'; then
       action="gh pr create"; kind="create"
       # The inline --body "..." is embedded in the command verbatim; also fold in a --body-file.
+      # Accept `--body-file <path>` / `--body-file=<path>` / `-F <path>`, path optionally quoted.
       content="$cmd"
-      bf="$(printf '%s' "$cmd" | grep -oE -- '(--body-file|-F)[[:space:]]+[^[:space:]]+' | head -n1 \
-            | sed -E 's/^(--body-file|-F)[[:space:]]+//')"
+      bf="$(printf '%s' "$cmd" | sed -nE 's/.*(--body-file|-F)[[:space:]=]+//p' | awk '{print $1}')"
+      bf="${bf%[\"\']}"; bf="${bf#[\"\']}"
       if [ -n "$bf" ] && [ "$bf" != "-" ] && [ -f "$bf" ]; then
         content="$content"$'\n'"$(cat "$bf" 2>/dev/null)"
       fi
