@@ -27,6 +27,7 @@
 
 #include "ble_client.hpp"
 #include "nvs_storage.hpp"
+#include "task_config.hpp"
 #include "vehicle_ctrl.hpp"
 #include "http_server.hpp"
 #include "provisioning.hpp"
@@ -572,7 +573,7 @@ extern "C" void app_main() {
     // including the "ghost association" case that fires no disconnect event (see the
     // task definition above). Without it the device can sit reachable-over-BLE but
     // off the LAN indefinitely, recoverable only by a manual reset.
-    xTaskCreate(wifi_watchdog_task, "wifi_wd", 3072, nullptr, 4, nullptr);
+    xTaskCreate(wifi_watchdog_task, "wifi_wd", 3072, nullptr, tk::kPrioWifiWatchdog, nullptr);
 
     // Confirm a freshly OTA-flashed image only after it has proven it can RUN — not merely
     // reach this line. Marking it valid here (the old behaviour) would disarm rollback the
@@ -581,7 +582,7 @@ extern "C" void app_main() {
     // rollback armed for a window of healthy uptime; if the image dies first it reboots while
     // still PENDING_VERIFY and the bootloader reverts to the previous slot. A no-op on a normal
     // (non-pending-verify) boot.
-    xTaskCreate(ota_health_gate_task, "ota_gate", 3072, nullptr, 3, nullptr);
+    xTaskCreate(ota_health_gate_task, "ota_gate", 3072, nullptr, tk::kPrioOtaGate, nullptr);
 
     ESP_LOGI(TAG, "tesla-key-esp32 running. API on port 80.");
     // Main task is no longer needed; Vehicle loop + HTTP server run in their own tasks.

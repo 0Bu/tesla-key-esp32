@@ -12,9 +12,10 @@ through that local copy — the other four resolve byte-identically from git). O
 target-agnostic; the only C5 blocker was that one manifest line.
 
 > **Deep reference:** this file holds the always-needed essentials. The full narrative for
-> telemetry, the MQTT/HA bridge, WiFi/LAN reconnect, sleep/link-state, pairing and OTA lives in
-> [`docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md) — read it on demand when touching those
-> areas. User-facing docs: [`README.md`](../README.md), [`docs/README.md`](../docs/README.md),
+> telemetry, the MQTT/HA bridge, WiFi/LAN reconnect, sleep/link-state, pairing, OTA and the
+> concurrency contract (lock hierarchy + task inventory; priorities in `main/task_config.hpp`)
+> lives in [`docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md) — read it on demand when touching
+> those areas. User-facing docs: [`README.md`](../README.md), [`docs/README.md`](../docs/README.md),
 > [`docs/SECURITY.md`](../docs/SECURITY.md), [`docs/MCP.md`](../docs/MCP.md) (MCP integration
 > guide). Keep all of these in sync (the `project-review` skill checks for drift).
 

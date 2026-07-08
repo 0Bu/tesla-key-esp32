@@ -24,6 +24,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "driver/spi_master.h"
+#include "task_config.hpp"
 #include "driver/gpio.h"
 #include "esp_heap_caps.h"
 #include "esp_wifi.h"
@@ -725,7 +726,7 @@ void display_start(VehicleController& vehicle) {
              s_cfg.mosi, s_cfg.sck, s_cfg.cs, s_cfg.dc, s_cfg.madctl);
 
     // 6 KB stack: soft-float gradient lerp + snprintf framing — 4 KB would be tight.
-    if (xTaskCreate(display_task, "display", 6144, &vehicle, 3, nullptr) != pdPASS) {
+    if (xTaskCreate(display_task, "display", 6144, &vehicle, tk::kPrioDisplay, nullptr) != pdPASS) {
         ESP_LOGE(TAG, "display task create failed — display disabled");
         spi_bus_remove_device(s_spi); s_spi = nullptr;
         spi_bus_free(SPI2_HOST); heap_caps_free(s_fb); s_fb = nullptr;
