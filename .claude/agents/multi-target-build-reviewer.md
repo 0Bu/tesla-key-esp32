@@ -15,8 +15,9 @@ follow-up session apply the fix.
 
 ## The multi-target reality you are guarding (from CLAUDE.md + hard-won history)
 
-- **One source tree, five targets; CI builds all five** (`scripts/ci-build-all.sh`, matrix in
-  `.github/workflows/build.yml`). Our own code is target-agnostic — divergence lives in
+- **One source tree, five targets; CI builds all five** (`scripts/ci-build-all.sh` set-targets
+  each in turn, run by the single `build` job in `.github/workflows/build.yml` — no Actions
+  matrix). Our own code is target-agnostic — divergence lives in
   **config, build wiring, offsets, and per-chip filenames**, and that is what breaks silently
   because a single-target build looks fine.
 - **esp32c5 is special.** yoziru/tesla-ble v5.1.1 does **not** list esp32c5 in its
