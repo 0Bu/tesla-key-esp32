@@ -48,9 +48,12 @@ case "$tool" in
     norm="$(printf '%s' "$cmd" | sed -E 's/^[[:space:]]+//; s/^cd[[:space:]]+[^;&|]+(&&|;)[[:space:]]*//')"
     if printf '%s' "$norm" | grep -Eq '^gh[[:space:]]+pr[[:space:]]+merge([[:space:]]|$)'; then
       action="gh pr merge"
-      # First non-flag token after `gh pr merge` = the PR number/branch/url (may be absent -> current branch).
-      selector="$(printf '%s' "$norm" | sed -E 's/^gh[[:space:]]+pr[[:space:]]+merge[[:space:]]*//' \
-                  | tr ' ' '\n' | grep -vE '^-' | head -n1)"
+      # PR selector = first PR-number or URL token after `gh pr merge` *on that line* (a `cd <dir>`
+      # on a preceding line, or trailing shell noise like `2>&1 | head`, must not be mistaken for
+      # it). `sed -n …/p` isolates the merge line only; absent selector -> resolve the current branch.
+      selector="$(printf '%s' "$norm" \
+                  | sed -nE 's/^gh[[:space:]]+pr[[:space:]]+merge[[:space:]]*//p' | head -n1 \
+                  | tr ' ' '\n' | grep -m1 -E '^([0-9]+|https?://[^ ]+)$' || true)"
     fi
     ;;
 esac
@@ -58,16 +61,24 @@ esac
 
 key="project-review"; skill="/project-review"
 
-# Fetch the target PR (head sha + body). Fail CLOSED if it can't be read.
-if ! pr="$(gate_fetch_pr "$selector")"; then
+# Fetch the target PR (head sha + body). Fail CLOSED on anything but a clean read — a merge must
+# never proceed unverified (rc 1 = no such open PR, rc 2 = GitHub unreadable; both block).
+pr="$(gate_fetch_pr "$selector")"; fetch_rc=$?
+if [ "$fetch_rc" -ne 0 ]; then
   {
-    echo "BLOCKED: \`$action\` — could not read the pull request to verify the $skill gate."
-    echo
-    echo "This gate reads a ticked, SHA-stamped checkbox from the PR body. Reading it needs GitHub"
-    echo "access — \`gh\` (local) or \${GH_TOKEN}/\${GITHUB_TOKEN} (web/remote). Neither worked here."
-    echo
-    echo "Either run this from a session with \`gh\` authenticated, export a token, or merge via the"
-    echo "GitHub UI after confirming the $skill box is ticked (hooks don't gate the web UI)."
+    if [ "$fetch_rc" -eq 1 ]; then
+      echo "BLOCKED: \`$action\` — no open pull request found for ${selector:-the current branch}."
+      echo
+      echo "The $skill gate reads a ticked, SHA-stamped checkbox from the PR body; there is no PR to read."
+    else
+      echo "BLOCKED: \`$action\` — could not read the pull request to verify the $skill gate."
+      echo
+      echo "This gate reads a ticked, SHA-stamped checkbox from the PR body. Reading it needs GitHub"
+      echo "access — \`gh\` (local) or \${GH_TOKEN}/\${GITHUB_TOKEN} (web/remote). Neither worked here."
+      echo
+      echo "Either run this from a session with \`gh\` authenticated, export a token, or merge via the"
+      echo "GitHub UI after confirming the $skill box is ticked (hooks don't gate the web UI)."
+    fi
   } >&2
   exit 2
 fi

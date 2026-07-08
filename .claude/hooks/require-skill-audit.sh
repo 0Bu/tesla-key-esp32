@@ -74,9 +74,25 @@ esac
 key="skill-audit"; skill="/skill-audit"
 head_sha="$(gate_head_sha)"
 
-# ── PUSH: verify against the existing PR; allow if the branch has no PR yet. ───────────────
+# ── PUSH: verify against the existing PR. Distinguish "no PR yet" (allow — the create gate is the
+# chokepoint) from "PR unreadable" (fail CLOSED, mirroring the merge gate — never allow an
+# unaudited push to a branch that may already have an open PR just because GitHub is unreadable). ─
 if [ "$kind" = "push" ]; then
-  pr="$(gate_fetch_pr "")" || exit 0   # no open PR for this branch (or unreadable) -> create gate is the chokepoint
+  pr="$(gate_fetch_pr "")"; fetch_rc=$?
+  case "$fetch_rc" in
+    0) : ;;             # PR exists & read OK -> verify the checkbox below
+    1) exit 0 ;;        # confirmed NO open PR for this branch -> not publishing to a PR yet -> allow
+    *)                  # 2 = could not read GitHub -> fail CLOSED
+      {
+        echo "BLOCKED: \`$action\` — could not read the pull request to verify the $skill gate."
+        echo
+        echo "This branch may already have an open PR, but GitHub was unreadable (needs \`gh\`, or"
+        echo "\${GH_TOKEN}/\${GITHUB_TOKEN} in web/remote), so the audit state can't be confirmed. The"
+        echo "gate fails closed rather than let an unaudited push through — set a token / use \`gh\`,"
+        echo "or push from a session with GitHub access."
+      } >&2
+      exit 2 ;;
+  esac
   pr_head="$(printf '%s' "$pr" | head -n1)"
   content="$(printf '%s' "$pr" | tail -n +2)"
   anchor="${head_sha:-$pr_head}"

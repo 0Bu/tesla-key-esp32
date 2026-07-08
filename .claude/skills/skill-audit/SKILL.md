@@ -153,7 +153,10 @@ For a **new** PR, put that line in the body you submit (`gh pr create --body-fil
 `create_pull_request` body — the gate reads it directly, no network). For an **existing** PR, edit
 its body (`gh pr edit <pr> --body-file …`, or the GitHub MCP update tool) before pushing. A push to
 a branch that has **no PR yet** is allowed — that is not publishing to a PR; the create gate is the
-chokepoint. Any later commit changes the sha and re-stales the box, forcing a fresh audit before
+chokepoint. But if GitHub is **unreadable** (no `gh` and no `GH_TOKEN`/`GITHUB_TOKEN` — e.g.
+web/remote without a token), the push gate fails **closed** rather than let an unaudited push slip
+through, mirroring the merge gate: set a token or push from a `gh`-authenticated session. Any later
+commit changes the sha and re-stales the box, forcing a fresh audit before
 the next PR create / push. `skill-audit ⊂ project-review`: a full `/project-review` audits the
 skills too, so it lets you tick **both** the `/project-review` and `/skill-audit` boxes;
 `/skill-audit` alone ticks only this one (you still need a current project-review for the merge
