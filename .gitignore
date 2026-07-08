@@ -39,11 +39,9 @@ __pycache__/
 # live in the committed .claude/settings.json; this overlay stays local.
 .claude/settings.local.json
 
-# Project-review gate marker (per-tree, transient — never commit)
-.claude/.project-review-passed
-
-# Skill-audit gate marker (per-tree, transient — never commit)
-.claude/.skill-audit-passed
+# The project-review (merge) and skill-audit (PR create/push) gates no longer use on-disk
+# markers — their pass-state is a ticked, SHA-stamped checkbox in the PR body itself
+# (see .claude/hooks/pr-gate-lib.sh). Nothing to ignore for those two gates.
 
 # Logic-tests Stop-gate marker (per-tree, transient — never commit)
 .claude/.logic-tests-blocked
