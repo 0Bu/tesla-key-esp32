@@ -83,6 +83,45 @@ layout). After reset the device rejoins WiFi in a few seconds; reload
 >   A throwaway dev key is fine for a USB-flashed test board (it becomes that board's OTA trust
 >   anchor until you USB-flash the real CI image again). Full detail: `docs/SECURITY.md`.
 
+## Flashing a specific PR / branch onto a real board (use the *signed* CI artifact)
+
+To test a PR/branch on a physical board, **do not USB-flash the local `scripts/idf-docker.sh`
+build.** It comes out **unsigned** (`CONFIG_SECURE_BOOT_BUILD_SIGNED_BINARIES=n`; the RSA-3072
+`OTA_SIGNING_KEY` is a CI secret, gitignored, **not present locally**). Flashing an unsigned
+app onto a device on a signed build **destroys its TOFU OTA trust anchor** → all future OTAs
+break, and the unsigned image also boot-loops (see the warning above). The CI `build` job
+already produced the **signed** per-target images — flash those.
+
+```bash
+TARGET=esp32s3            # esp32 | esp32s3 | esp32c3 | esp32c6 | esp32c5
+RUNID=<green build run>   # gh run list --branch <branch> --workflow build.yml
+
+# 1) Discover + download the signed app image for this run (artifact name varies by version).
+gh api repos/:owner/:repo/actions/runs/$RUNID/artifacts --jq '.artifacts[].name'
+gh run download "$RUNID" -n <artifact-name> -D _ci    # contains tesla-key-esp32<sfx>-<ver>.bin
+#   image suffix <sfx>: esp32="" (suffix-less), s3=-s3, c3=-c3, c6=-c6, c5=-c5
+#   (matches image_suffix() in scripts/ci-build-all.sh and TESLA_OTA_IMG_SUFFIX in ota_update.cpp)
+
+# 2) A local `build/` of the SAME target supplies bootloader/partition-table/otadata (those
+#    regions are NEVER signature-checked, so an unsigned local build is fine for them). Build
+#    once via the one-shot above if build/ is empty. Then flash the SIGNED app over them,
+#    SKIPPING nvs@0x9000 so pairing/key/VIN survive:
+cd build && esptool --chip "$TARGET" -p "$PORT" -b 460800 write_flash \
+  0x0 bootloader/bootloader.bin \
+  0x8000 partition_table/partition-table.bin \
+  0xf000 ota_data_initial.bin \
+  0x20000 ../_ci/tesla-key-esp32<sfx>-<ver>.bin
+#   ⚠ bootloader offset is 0x0 on s3/c3/c6, but 0x1000 on classic esp32 and 0x2000 on esp32c5 —
+#     use the target's own offset for the 0x0 slot above (see @flash_args / the offsets table).
+```
+
+- **Bonus:** the CI image carries the **CI-stamped version** (e.g. `1.4.22`), whereas a local
+  build reports only the `version.txt` **floor** (e.g. `1.4.0`) — so the signed artifact makes
+  the reported version match the release/manifest.
+- **Never flash `tesla-key-esp32<sfx>-<ver>-merged.bin`** to preserve NVS — the merged image is a
+  single full-flash blob spanning `0x0` and **wipes `nvs@0x9000`** (forces a full re-pair).
+- After flashing, confirm the live device with the [`e2e-evcc`](../e2e-evcc/SKILL.md) skill.
+
 ## Picking the right serial port
 
 This board exposes **two** USB serial interfaces — confirm before flashing:
