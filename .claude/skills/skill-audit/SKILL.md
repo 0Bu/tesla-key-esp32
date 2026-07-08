@@ -124,6 +124,13 @@ owns and must stay in sync with it:
 - **`claude-code-optimizer`** — audits the `.claude/` setup, not firmware logic. Confirm its
   boundary still defers firmware correctness to `project-review`, and that the hook/skill/agent
   inventory it reasons over matches what lives under `.claude/` (`ls .claude/hooks/ .claude/agents/`).
+- **`multi-target-build-reviewer`** — the per-target build/config divergence lens. Verify its
+  facts against the build wiring: the target set (esp32/s3/c3/c6/c5), per-target bootloader
+  offsets (`0x1000`/`0x2000`/`0x0`), the image-suffix map across `scripts/ci-build-all.sh` +
+  `scripts/build-pages.sh` + `main/ota_update.cpp` (`TESLA_OTA_IMG_SUFFIX`), the app-size gate
+  (`slot − 32 KB` = `0x1e8000`), the esp32c5 patch routing (`scripts/prepare-tesla-ble-c5.sh` +
+  `main/idf_component.yml`), and the display/LED opt-in Kconfig. Complementary to
+  `project-review`, not a firmware-logic reviewer.
 
 A skill or agent that drives a script is only as current as the script: when the script changes,
 re-read the doc that documents it.

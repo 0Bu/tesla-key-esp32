@@ -364,6 +364,13 @@ lenses this skill delegates to; keep them complementary, not contradictory):
   permissions + hooks, skills, subagents), **not** firmware logic. Confirm its boundary still
   points firmware-correctness work back at this skill, and that the hook/skill/agent inventory it
   reasons over matches what actually lives under `.claude/` (`ls .claude/hooks/ .claude/agents/`).
+- **`multi-target-build-reviewer`** is the per-target build/config divergence lens (the five
+  targets built from one tree). Re-verify its facts against the *Cross-cutting consistency*
+  section and the build wiring: the target set (esp32/s3/c3/c6/c5), per-target bootloader offsets
+  (`0x1000`/`0x2000`/`0x0`), the image-suffix map (`ci-build-all.sh`/`build-pages.sh`/
+  `ota_update.cpp` `TESLA_OTA_IMG_SUFFIX`), the app-size gate (`slot − 32 KB`), and the esp32c5
+  local tesla-ble patch routing (`prepare-tesla-ble-c5.sh` + `main/idf_component.yml`). Keep it
+  complementary to this skill, not a firmware-logic reviewer.
 - **Any skill or agent added since this was written** must be audited too — and added to this list.
 
 A skill or agent that drives a script is only as current as the script: when the script changes,
