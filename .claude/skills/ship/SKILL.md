@@ -65,8 +65,8 @@ esptool --chip <target> -p <port> write_flash 0x20000 dist/tesla-key-esp32<sfx>.
   && esptool --chip <target> -p <port> erase_region 0xf000 0x2000
 ```
 
-`nvs@0x9000` is untouched → pairing/key/VIN/WiFi survive. Port autodetect and per-board
-download-mode gotchas (T-Dongle-C5 needs BOOT held + `--before no-reset`): see the
+`nvs@0x9000` is untouched → pairing/key/VIN/WiFi survive. Download-mode gotcha: the
+T-Dongle-C5 needs BOOT held + `--before no-reset`. Port autodetect: see the
 **flash-esp32** skill — same host mechanics.
 
 ### No cable? OTA instead
