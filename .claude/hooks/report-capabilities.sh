@@ -32,11 +32,22 @@ fi
 # USB flashing requires esptool AND a physically attached board — never true in the cloud.
 flash_note="USB FLASH UNAVAILABLE in a remote/cloud session (no USB passthrough); use the flash-esp32 skill on a host with the board attached"
 
+# The host-side mock build is the ONE real verify loop that works even here (no IDF/Docker/
+# board needed): it compiles + runs the pure logic in main/logic/ with the system toolchain.
+# CI gates the firmware build on it (logic-test job). A cloud session should reach for this
+# instead of assuming it can only reason about a change.
+if have cmake || have g++ || have clang++; then
+  verify_note="host LOGIC TESTS available — VERIFY pure logic in seconds: scripts/run-mock-tests.sh"
+else
+  verify_note="host logic tests UNAVAILABLE here (no cmake/g++/clang++)"
+fi
+
 cat <<EOF
 [tesla-key-esp32 capabilities]
 - docker: ${docker_state}
 - esptool: ${esptool_state} | jq: ${jq_state}
 - ${build_note}
+- ${verify_note}
 - ${flash_note}
 - Two gates block a PR until they pass for the current tree: /project-review gates the MERGE
   into main (whole-firmware coherence); /skill-audit gates OPENING a PR and every PUSH to it
