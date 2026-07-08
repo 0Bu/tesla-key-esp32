@@ -329,6 +329,14 @@ what each must stay true to:
   (Docker-pinned, no local IDF), `partitions.csv` (offsets `nvs@0x9000`, `otadata@0xf000`,
   app `@0x20000`), the target set (esp32/s3/c3/c6/c5) and per-target bootloader offset, and that
   `@flash_args` preserves NVS (never writes `nvs@0x9000`).
+- **`ship`** takes a merged PR to the board: squash-merge → `gh run watch` on the post-merge
+  `build` run → download the signed artifact (`tesla-key-esp32-<version>`; per-target
+  `tesla-key-esp32<sfx>.bin`, never `*-merged.bin`) → USB app-slot flash (`0x20000` + otadata
+  erase `0xf000/0x2000`, NVS preserved) or device OTA → verify via `/status` +
+  `/api/proxy/1/version`. Re-verify against `.github/workflows/build.yml` (artifact naming, the
+  firmware-change-gated release), `scripts/ci-build-all.sh` (suffix map, `sign_image`, merged
+  copies), `partitions.csv` offsets, and the `/ota/*` endpoints. Complementary to `flash-esp32`
+  (local-tree build+flash, no merge); it defers the merge gate to `require-project-review.sh`.
 - **`e2e-evcc`** wraps `scripts/e2e_evcc.sh`. Re-verify the command count (must equal the
   `handle_command` switch — currently **15**), the version-coherence claim (`/status` = `X`,
   `/api/proxy/1/version` = `X-esp32` via `fw_version()`), the `vehicle_data` fields it asserts,

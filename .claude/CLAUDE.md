@@ -54,7 +54,10 @@ No local ESP-IDF — builds run via `scripts/idf-docker.sh`, which uses the `esp
 Docker image **pinned to the version CI builds with** (read at runtime from
 `.github/workflows/build.yml`, so build/debug never drifts from CI). Flash from the host with
 `esptool` (`brew install esptool`), since Docker on macOS has no USB passthrough. The
-`flash-esp32` skill wraps both steps.
+`flash-esp32` skill wraps both steps (local tree, no merge); the `ship` skill runs the full
+delivery instead — squash-merge the PR, follow the post-merge CI, flash the **signed** CI
+artifact (or OTA) and verify the device version. When waiting on CI, block on
+`gh run watch <run-id> --exit-status` — never sleep-poll `gh run view` in a loop.
 
 ```bash
 # Build (first run: set-target; afterwards plain `build` stays incremental).
