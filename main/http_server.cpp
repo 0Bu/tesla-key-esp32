@@ -11,8 +11,9 @@
 
 static const char* TAG = "http_server";
 
-// Global vehicle reference (set once at start; declared in http_handlers.hpp)
+// Global vehicle + config-store references (set once at start; declared in http_handlers.hpp)
 VehicleController* g_vehicle = nullptr;
+NvsStorageAdapter* g_config  = nullptr;
 
 // Copy the PATH part of the request URI (everything before '?') into buf. Routing must look
 // only at the path: matching against the raw req->uri (which includes the query string) lets a
@@ -101,8 +102,9 @@ static esp_err_t handle_all(httpd_req_t* req) {
 
 // ─── Start ────────────────────────────────────────────────────────────────────
 
-bool http_server_start(VehicleController& vehicle) {
+bool http_server_start(VehicleController& vehicle, NvsStorageAdapter& config_store) {
     g_vehicle = &vehicle;
+    g_config  = &config_store;
 
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.uri_match_fn     = httpd_uri_match_wildcard;
