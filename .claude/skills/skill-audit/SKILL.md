@@ -96,6 +96,13 @@ the authority for the per-sibling drift check; `project-review` defers the mecha
 - **`flash-esp32`** — build + USB-flash path. Verify against `scripts/idf-docker.sh`
   (Docker-pinned, no local IDF), `partitions.csv` (`nvs@0x9000`, `otadata@0xf000`, app `@0x20000`),
   the target set + per-target bootloader offset, and that `@flash_args` never writes `nvs@0x9000`.
+- **`ship`** — the merge→CI→signed-artifact→flash pipeline. Verify against
+  `.github/workflows/build.yml` (artifact name `tesla-key-esp32-<version>`, `pr<N>-` prefix on
+  PR builds, the firmware-change-gated release step), `scripts/ci-build-all.sh` (per-target
+  suffix map + `sign_image`, the `-merged.bin` copies it must keep warning against),
+  `partitions.csv` (`app@0x20000`, `otadata@0xf000/0x2000`, `nvs@0x9000` untouched), the merge
+  gate it defers to (`require-project-review.sh`), and the verify endpoints (`/status`,
+  `/api/proxy/1/version`, `/ota/check|update|status`).
 - **`e2e-evcc`** — wraps `scripts/e2e_evcc.sh`. Verify the command count (must equal the
   `handle_command` switch — currently **15**), the version-coherence claim (`/status` = `X`,
   `/api/proxy/1/version` = `X-esp32`), the `vehicle_data` fields it asserts, the out-of-scope
