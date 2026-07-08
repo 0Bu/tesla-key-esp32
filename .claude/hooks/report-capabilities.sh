@@ -49,10 +49,11 @@ cat <<EOF
 - ${build_note}
 - ${verify_note}
 - ${flash_note}
-- Two gates block a PR until they pass for the current tree: /project-review gates the MERGE
-  into main (whole-firmware coherence); /skill-audit gates OPENING a PR and every PUSH to it
-  (every skill+agent still matches the project). A full /project-review also clears the
-  skill-audit gate (it audits the skills too).
+- Two gates block a PR until they pass: /project-review gates the MERGE into main (whole-firmware
+  coherence); /skill-audit gates OPENING a PR and every PUSH to it (every skill+agent still matches
+  the project). Each clears via a ticked, SHA-stamped checkbox in the PR body (no file marker) —
+  the stamp must match the commit being merged/pushed, so a later commit re-stales it. A full
+  /project-review also clears the skill-audit gate (it audits the skills too).
 EOF
 
 exit 0

@@ -50,14 +50,22 @@ Work in this order — it's what makes the review catch *drift* rather than just
    before you trust it, and report any gap as a `SKILL-DRIFT` finding (correcting it in the same
    pass).
 7. **Write the report** in the structure at the end.
-8. **Record the pass so the gates clear.** A clean review (no *blocking* findings) must
-   `touch .claude/.project-review-passed` — the `require-project-review.sh` PreToolUse hook
-   refuses every PR merge (`gh pr merge` **and** `mcp__github__merge_pull_request`) until that
-   marker is newer than every source file. A full review also audits the skills (step 6), and
-   `skill-audit ⊂ project-review`, so **also** `touch .claude/.skill-audit-passed` to clear the
-   sibling `require-skill-audit.sh` gate (which blocks opening a PR and every push to it) in the
-   same pass. Any later edit re-stales both, forcing a fresh review before the next merge. Don't
-   touch either if findings block the merge — fix first.
+8. **Record the pass in the PR so the gates clear (no file marker).** A clean review (no
+   *blocking* findings) must **tick the PR's `/project-review` checkbox and stamp it with the
+   reviewed commit** — the `require-project-review.sh` PreToolUse hook refuses every PR merge
+   (`gh pr merge` **and** `mcp__github__merge_pull_request`) until that box is ticked **and** its
+   stamped sha still matches the PR head:
+
+   ```
+   - [x] `/project-review` clean — merge gate @ <short-sha>    # <short-sha> = git rev-parse --short=12 HEAD
+   ```
+
+   A full review also audits the skills (step 6), and `skill-audit ⊂ project-review`, so **also**
+   tick the sibling `/skill-audit` box in the same body to clear `require-skill-audit.sh` (which
+   blocks opening a PR and every push to it). Edit the PR body with
+   `gh pr edit <pr> --body-file <file>` (or the GitHub MCP update tool in web/remote). Any later
+   commit changes the sha and re-stales both boxes, forcing a fresh review before the next merge.
+   Don't tick either if findings block the merge — fix first.
 
 Use parallel reads/`Explore` to cover the tree quickly, but reason about the cross-cutting
 links yourself — that's where the value is.
@@ -343,9 +351,10 @@ what each must stay true to:
   every push to it, not the merge). It is the **authority for
   the per-sibling drift checklist** — this section and `skill-audit`'s *Per-target checklist*
   describe the same siblings and must agree; a divergence between them is itself `SKILL-DRIFT`.
-  `skill-audit ⊂ project-review`: running a full review here covers its scope (record both markers,
-  step 8). Re-verify its own numbers (marker `.claude/.skill-audit-passed`, hook name, command
-  count `15`, tesla-ble pin) and that the sibling/agent list it carries still matches the tree.
+  `skill-audit ⊂ project-review`: running a full review here covers its scope (tick both PR
+  checkboxes, step 8). Re-verify its own numbers (hook `require-skill-audit.sh`, the PR-checkbox
+  gate mechanism — no file marker, command count `15`, tesla-ble pin) and that the sibling/agent
+  list it carries still matches the tree.
 The review subagents under `.claude/agents/` — audit these the same way (they are the targeted
 lenses this skill delegates to; keep them complementary, not contradictory):
 
