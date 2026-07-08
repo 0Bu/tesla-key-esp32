@@ -108,7 +108,11 @@ into `third_party/tesla-ble` (gitignored) and appends `esp32c5` to its `targets:
 the git dep applies when `target != esp32c5`, a local `path:` dep (the patched checkout) when
 `target == esp32c5`. So only C5 routes through the local copy; the other four resolve
 byte-identically from git, and CI (`ci-build-all.sh`) runs the prepare step automatically. All
-five images are the same tesla-ble revision.
+five images are the same tesla-ble revision. This patch is planned debt: the retirement plan
+(one-line upstream `targets:` PR, then drop the script/routing) is
+[`adr/0001-esp32c5-target-upstreaming.md`](adr/0001-esp32c5-target-upstreaming.md); the wider
+tesla-ble dependency strategy (IDF-6 / Mbed TLS 4 crypto seam, issue #61) is
+[`adr/0002-idf6-mbedtls4-crypto-seam.md`](adr/0002-idf6-mbedtls4-crypto-seam.md).
 
 **On-device ST7735 display (LilyGO T-Dongle-C5 and T-Dongle-S3).** Both dongles carry the same
 0.96" ST7735 LCD and it IS driven — see `main/display.cpp` (a status panel: WiFi/BLE header + a
