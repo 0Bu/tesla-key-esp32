@@ -22,8 +22,8 @@
 
 static const char* TAG = "ota";
 
-// Short per-target image suffix so "esp32" appears only once in the OTA filename:
-// esp32 -> "" (tesla-key-esp32.bin), esp32s3 -> "-s3", esp32c3 -> "-c3", esp32c6 -> "-c6".
+// Short per-target image suffix so "esp32" appears only once in the OTA filename: esp32 ->
+// "" (tesla-key-esp32.bin), esp32s3 -> "-s3", esp32c3 -> "-c3", esp32c6 -> "-c6", esp32c5 -> "-c5".
 // Must stay in lockstep with image_suffix() in scripts/ci-build-all.sh + build-pages.sh
 // (which name the published asset the device pulls) — a mismatch 404s every OTA download.
 // Kept as a string-literal macro because the download URL is assembled by compile-time
@@ -37,6 +37,8 @@ static const char* TAG = "ota";
 #  define TESLA_OTA_IMG_SUFFIX "-c3"
 #elif defined(CONFIG_IDF_TARGET_ESP32C6)
 #  define TESLA_OTA_IMG_SUFFIX "-c6"
+#elif defined(CONFIG_IDF_TARGET_ESP32C5)
+#  define TESLA_OTA_IMG_SUFFIX "-c5"
 #else
 #  error "Unsupported CONFIG_IDF_TARGET for OTA image naming"
 #endif

@@ -49,10 +49,20 @@ The firmware delegates these decision/conversion cores to IDF-free headers under
 | Per-target platform name + OTA image suffix | `logic/target.hpp` | `platform.hpp` (`TK_PLATFORM`), `ota_update.cpp` |
 | MCP protocol core (version negotiation, JSON-RPC method routing, tool/arg-spec registry, int clamp) | `logic/mcp.hpp` | `mcp_server.cpp` (`/mcp` schema + executor) |
 | Shared command-outcome text (success / Tesla reason / unreachable) | `logic/command_result.hpp` | `http_api.cpp` `/command` reason, `mcp_server.cpp` tools/call result |
+| On-device display presenter (hero priority ladder, SoC gradient, RSSI→bars, SSID scroll) reading the shared UI snapshot | `logic/display_model.hpp`, `logic/ui_state.hpp` | `display.cpp` renderer (via `VehicleController::ui_snapshot()`) |
+| Status-LED priority ladder (error/OTA/warn/WiFi/pairing/charging/asleep/SoC) reading the same UI snapshot + latched `LedAlerts` | `logic/led_status.hpp`, `logic/ui_state.hpp` | `led_status.cpp` APA102 task (via `VehicleController::ui_snapshot()`) |
+| Shared SoC colour ramp (red→amber→green), one table for the panel fill AND the LED | `logic/soc_gradient.hpp` | `logic/display_model.hpp`, `led_status.cpp` |
 
 The target mapping is double-locked: `ota_update.cpp` `static_assert`s its compile-time
 image-suffix literal against `tk::image_suffix()`, so the macro and the host-tested
 mapping cannot drift.
+
+The display presenter is triple-locked: besides the `CHECK`s above, `run-mock-tests.sh` runs
+`scripts/check-display-sim-parity.sh`, which compiles `test/display_golden_dump.cpp` to emit the
+C++ presenter's decisions for a set of cases and has `tools/display_sim.py parity` re-decide the
+same inputs in Python and diff them — so the pixel-exact offline sim (`display_sim.py`) can't
+silently drift from the firmware's `tk::display::compose()`. (Skipped only where `python3` is
+absent; the C++ `CHECK`s remain the hard gate.)
 
 ## What's *not* covered (by design)
 

@@ -1,17 +1,20 @@
 # tesla-key-esp32 — Technical Reference
 
-ESP32 BLE↔HTTP proxy for Tesla vehicles (runs on esp32 / esp32s3 / esp32c3 / esp32c6).
+ESP32 BLE↔HTTP proxy for Tesla vehicles (runs on esp32 / esp32s3 / esp32c3 / esp32c6 / esp32c5).
 Exposes a REST API on the LAN, API-compatible with
 [TeslaBleHttpProxy](https://github.com/wimaha/TeslaBleHttpProxy); drop-in for the
 [evcc](https://evcc.io) `tesla-ble` integration. User guide: [../README.md](../README.md).
 
 ## Hardware
 
-Any of the four chips yoziru/tesla-ble supports — **esp32, esp32s3, esp32c3, esp32c6**
-(all WiFi 2.4 GHz + BLE; the ESP-IDF Component Manager refuses any other target). **≥ 4 MB
-flash** (dual-OTA layout: two ~2 MB app slots; a larger flash just leaves the top unused). No
-PSRAM required. ESP32-S2 (no Bluetooth) and ESP32-H2 / P4 (no WiFi) cannot run this firmware;
-ESP32-C5 / C61 work only once tesla-ble declares them. USB data cable for flashing.
+The four chips yoziru/tesla-ble supports — **esp32, esp32s3, esp32c3, esp32c6** (all WiFi 2.4
+GHz + BLE) — plus **esp32c5** (dual-band Wi-Fi 6, e.g. the LilyGO T-Dongle-C5), which tesla-ble's
+`targets:` omits but which is enabled here via a local build-time patch (see
+[ARCHITECTURE.md](ARCHITECTURE.md) → "esp32c5 via a local build-time patch"). **≥ 4 MB flash**
+(dual-OTA layout: two ~2 MB app slots; a larger flash — the T-Dongle-C5 has 16 MB — just leaves
+the top unused). No PSRAM required. ESP32-S2 (no Bluetooth) and ESP32-H2 / P4 (no WiFi) cannot run
+this firmware; ESP32-C61 would need the same local-patch treatment as C5. USB data cable for
+flashing.
 
 ## Flash prebuilt artifacts
 
@@ -24,8 +27,8 @@ Flash by hand (needs `brew install esptool`). Use the per-target **merged** imag
 in the correct bootloader offset (0x1000 on the classic esp32, 0x0 elsewhere), so one command
 works for any chip. This erases `nvs` (re-enter WiFi/VIN, re-pair once):
 ```bash
-# <suffix>: "" for esp32, else -s3 / -c3 / -c6 (so "esp32" appears once in the name)
-esptool --chip <esp32|esp32s3|esp32c3|esp32c6> write_flash 0x0 \
+# <suffix>: "" for esp32, else -s3 / -c3 / -c6 / -c5 (so "esp32" appears once in the name)
+esptool --chip <esp32|esp32s3|esp32c3|esp32c6|esp32c5> write_flash 0x0 \
   tesla-key-esp32<suffix>-<version>-merged.bin
 ```
 To preserve `nvs`, flash the separate parts from a local `build/` instead:
@@ -45,13 +48,15 @@ git clone https://github.com/0Bu/tesla-key-esp32.git && cd tesla-key-esp32
 # Build via the CI-pinned ESP-IDF image (first run pulls it, then fetches
 # yoziru/tesla-ble — 2–4 min). The wrapper keeps build/ host-owned. Pick your chip:
 ./scripts/idf-docker.sh idf.py set-target esp32s3 build   # or esp32 / esp32c3 / esp32c6
+# For esp32c5, run scripts/prepare-tesla-ble-c5.sh once first (patches a local tesla-ble copy):
+#   ./scripts/prepare-tesla-ble-c5.sh && ./scripts/idf-docker.sh idf.py set-target esp32c5 build
 
 # Optional: WiFi SSID/pass + VIN (BLE MAC auto) — interactive
 ./scripts/idf-docker.sh idf.py menuconfig
 
 # Flash from the host (preserves nvs — @flash_args skips nvs@0x9000). Use the same
 # --chip you built for; @flash_args already has the right bootloader offset.
-cd build && esptool --chip esp32s3 -p <port> write_flash "@flash_args"   # or esp32 / esp32c3 / esp32c6
+cd build && esptool --chip esp32s3 -p <port> write_flash "@flash_args"   # or esp32 / esp32c3 / esp32c6 / esp32c5
 ```
 
 WiFi/VIN may be left blank and set later via the setup AP. Flash-mode fallback: hold `BOOT`,
@@ -208,7 +213,7 @@ GET  /ota/check[?ms=<epoch>]   Start a background update check (then poll /ota/s
 POST /ota/update           Start the background self-update (downloads, then reboots)
 GET  /ota/status           Poll OTA progress { state, progress, message, available,
                              update_available, current }
-GET  /api/proxy/1/version  { version, platform } (firmware version + running chip: "ESP32"/"ESP32-S3"/"ESP32-C3"/"ESP32-C6")
+GET  /api/proxy/1/version  { version, platform } (firmware version + running chip: "ESP32"/"ESP32-S3"/"ESP32-C3"/"ESP32-C6"/"ESP32-C5")
 POST /mcp                  MCP server for AI agents (Streamable HTTP, stateless JSON-RPC 2.0;
                              GET → 405, no SSE). Tools = charging command set + read-only
                              get_vehicle_state (cache-only, never wakes the car) — full

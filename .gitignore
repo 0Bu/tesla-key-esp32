@@ -7,6 +7,11 @@ sdkconfig.old
 managed_components/
 dependencies.lock
 
+# Local build-time patched tesla-ble checkout for the esp32c5 target
+# (scripts/prepare-tesla-ble-c5.sh clones + patches it; never committed — see
+# main/idf_component.yml). Regenerated on demand, like managed_components/.
+third_party/
+
 # Flash artifacts
 *.bin
 *.elf

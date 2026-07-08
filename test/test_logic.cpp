@@ -20,6 +20,10 @@
 #include "logic/target.hpp"
 #include "logic/mcp.hpp"
 #include "logic/command_result.hpp"
+#include "logic/ui_state.hpp"
+#include "logic/display_model.hpp"
+#include "logic/soc_gradient.hpp"
+#include "logic/led_status.hpp"
 
 #include <cmath>
 #include <cstdio>
@@ -163,17 +167,20 @@ static void test_target() {
     CHECK_STR(tk::platform_name(tk::Target::Esp32S3), "ESP32-S3");
     CHECK_STR(tk::platform_name(tk::Target::Esp32C3), "ESP32-C3");
     CHECK_STR(tk::platform_name(tk::Target::Esp32C6), "ESP32-C6");
+    CHECK_STR(tk::platform_name(tk::Target::Esp32C5), "ESP32-C5");
 
-    // esp32 has no suffix (tesla-key-esp32.bin); the rest get -s3/-c3/-c6.
+    // esp32 has no suffix (tesla-key-esp32.bin); the rest get -s3/-c3/-c6/-c5.
     CHECK_STR(tk::image_suffix(tk::Target::Esp32),   "");
     CHECK_STR(tk::image_suffix(tk::Target::Esp32S3), "-s3");
     CHECK_STR(tk::image_suffix(tk::Target::Esp32C3), "-c3");
     CHECK_STR(tk::image_suffix(tk::Target::Esp32C6), "-c6");
+    CHECK_STR(tk::image_suffix(tk::Target::Esp32C5), "-c5");
 
     // The full OTA filename the device pulls, assembled the same way ota_update.cpp does.
     const std::string base = "tesla-key-esp32";
     CHECK(base + tk::image_suffix(tk::Target::Esp32)   + ".bin" == "tesla-key-esp32.bin");
     CHECK(base + tk::image_suffix(tk::Target::Esp32S3) + ".bin" == "tesla-key-esp32-s3.bin");
+    CHECK(base + tk::image_suffix(tk::Target::Esp32C5) + ".bin" == "tesla-key-esp32-c5.bin");
 }
 
 // ─── MCP endpoint core (version negotiation, routing, tool registry, clamp) ──────
@@ -269,6 +276,179 @@ static void test_mcp() {
     CHECK_STR(tk::command_result_text(false, no_reason),    "vehicle not reachable");
 }
 
+// ─── on-device display presenter (logic/display_model.hpp <- display.cpp compose()) ──────
+namespace dm = tk::display;
+
+// Build a UiSnapshot tersely for the presenter tests.
+static tk::UiSnapshot us(tk::LinkState ls, bool wifi_on, bool ble_conn, bool paired,
+                         bool have_soc, int soc, bool charging) {
+    tk::UiSnapshot s;
+    s.link_state     = ls;
+    s.wifi_on        = wifi_on;
+    s.ble_connected  = ble_conn;
+    s.paired         = paired;
+    s.have_soc       = have_soc;
+    s.soc            = soc;
+    s.charging       = charging;
+    return s;
+}
+
+static void test_display_helpers() {
+    // RSSI → 0..4 bars, at and around every threshold.
+    CHECK(dm::rssi_bars(-50) == 4);  CHECK(dm::rssi_bars(-55) == 4);  CHECK(dm::rssi_bars(-56) == 3);
+    CHECK(dm::rssi_bars(-65) == 3);  CHECK(dm::rssi_bars(-66) == 2);
+    CHECK(dm::rssi_bars(-75) == 2);  CHECK(dm::rssi_bars(-76) == 1);
+    CHECK(dm::rssi_bars(-85) == 1);  CHECK(dm::rssi_bars(-86) == 0);  CHECK(dm::rssi_bars(-99) == 0);
+
+    // Text width: 5px glyph + 1px gap = 6 px/char, times the scale.
+    CHECK(dm::text_w("",     2) == 0);
+    CHECK(dm::text_w("A",    2) == 12);
+    CHECK(dm::text_w("WiFi", 2) == 48);
+
+    // SoC gradient: the five stops land on exact colours (mirrors soc_rgb()).
+    int r, g, b;
+    tk::soc_rgb(0,   r, g, b); CHECK(r == 231 && g ==  76 && b == 60);
+    tk::soc_rgb(18,  r, g, b); CHECK(r == 240 && g == 190 && b == 40);
+    tk::soc_rgb(45,  r, g, b); CHECK(r == 120 && g == 200 && b == 90);
+    tk::soc_rgb(80,  r, g, b); CHECK(r ==  60 && g == 175 && b == 80);
+    tk::soc_rgb(100, r, g, b); CHECK(r ==  30 && g == 140 && b == 60);
+    // Out-of-range clamps to the endpoints, not past them.
+    tk::soc_rgb(-5,  r, g, b); CHECK(r == 231 && g ==  76 && b == 60);
+    tk::soc_rgb(150, r, g, b); CHECK(r ==  30 && g == 140 && b == 60);
+
+    // SSID marquee ping-pong (span 10, pause 8, speed 2 → travel 5, period 26).
+    CHECK(dm::scroll_offset(0,  10) == 0);    // paused at the start
+    CHECK(dm::scroll_offset(7,  10) == 0);    // still in the start pause
+    CHECK(dm::scroll_offset(10, 10) == 4);    // scrolling out
+    CHECK(dm::scroll_offset(15, 10) == 10);   // paused at the end (fully revealed)
+    CHECK(dm::scroll_offset(200, 0) == 0);    // nothing to scroll
+}
+
+static void test_display_model() {
+    using LS = tk::LinkState;
+
+    // ── priority ladder: WiFi search > pairing > BLE search > battery ──
+    // WiFi down ⇒ WifiSearch, whatever else is true.
+    CHECK(dm::compose(us(LS::Awake, /*wifi*/false, /*ble*/true, /*paired*/true,
+                         /*soc?*/true, 50, false), 0).hero == dm::Hero::WifiSearch);
+    // WiFi up, BLE link up but not yet paired ⇒ Pairing.
+    CHECK(dm::compose(us(LS::Idle, true, /*ble*/true, /*paired*/false,
+                         false, 0, false), 0).hero == dm::Hero::Pairing);
+    // WiFi up, no BLE link, no usable SoC ⇒ BLE search.
+    CHECK(dm::compose(us(LS::Unknown, true, /*ble*/false, false,
+                         /*soc?*/false, 0, false), 0).hero == dm::Hero::BleSearch);
+    // Unreachable overrides a stale cached SoC ⇒ still BLE search, never battery.
+    CHECK(dm::compose(us(LS::Unreachable, true, false, true,
+                         /*soc?*/true, 50, false), 0).hero == dm::Hero::BleSearch);
+    // WiFi up, reachable, have SoC ⇒ Battery.
+    CHECK(dm::compose(us(LS::Idle, true, true, true, true, 50, false), 0).hero == dm::Hero::Battery);
+
+    // ── header indicator visibility (a search hero hides its own small indicator) ──
+    dm::Model wifi_s = dm::compose(us(LS::Unknown, false, false, false, false, 0, false), 0);
+    CHECK(!wifi_s.show_wifi && wifi_s.show_ble);          // WiFi hero: wifi hidden, ble shown
+    dm::Model ble_s = dm::compose(us(LS::Unknown, true, false, false, false, 0, false), 0);
+    CHECK(ble_s.show_wifi && !ble_s.show_ble);            // BLE hero: ble hidden, wifi shown
+    dm::Model batt = dm::compose(us(LS::Idle, true, true, true, true, 50, false), 0);
+    CHECK(batt.show_wifi && batt.show_ble);               // battery: both shown
+
+    // ── SSID available width: wider when the BLE header is absent (BLE-search hero) ──
+    CHECK(ble_s.ssid_avail == 130);                       // 158 - 28
+    CHECK(batt.ssid_avail  ==  98);                       // 158 - 28 - 32
+
+    // ── BLE header bars: 0 without a live RSSI, mapped when present ──
+    tk::UiSnapshot rssi_snap = us(LS::Idle, true, true, true, true, 50, false);
+    rssi_snap.ble_rssi_valid = true; rssi_snap.ble_rssi = -60;
+    dm::Model rssi_m = dm::compose(rssi_snap, 0);
+    CHECK(rssi_m.ble_bars == 3 && rssi_m.ble_glyph_on);
+    CHECK(dm::compose(us(LS::Idle, true, true, true, true, 50, false), 0).ble_bars == 0);  // no RSSI
+
+    // ── battery fill colour, SoC clamp, and the charging bolt ──
+    dm::Model full = dm::compose(us(LS::Idle, true, true, true, true, 150, /*charging*/true), 0);
+    CHECK(full.soc == 100);                               // clamped
+    CHECK(!full.show_bolt);                               // no bolt at 100%
+    dm::Model chg = dm::compose(us(LS::Idle, true, true, true, true, 80, /*charging*/true), 0);
+    CHECK(chg.show_bolt);                                 // charging below 100% ⇒ bolt
+    CHECK(chg.fill_r == 60 && chg.fill_g == 175 && chg.fill_b == 80);   // soc 80 → the 0.80 gradient stop
+
+    // Asleep dims the fill toward the panel colour AND suppresses the bolt even when charging.
+    dm::Model slp = dm::compose(us(LS::Asleep, true, true, true, true, 80, /*charging*/true), 0);
+    CHECK(slp.asleep && !slp.show_bolt);
+    int br, bg, bb; tk::soc_rgb(80, br, bg, bb);
+    CHECK(slp.fill_r == dm::lerp8(br, dm::kAsleepDimR, 0.5f));
+    CHECK(slp.fill_g == dm::lerp8(bg, dm::kAsleepDimG, 0.5f));
+    CHECK(slp.fill_b == dm::lerp8(bb, dm::kAsleepDimB, 0.5f));
+
+    // ── animating: search/pairing heroes always; battery only while the SSID scrolls ──
+    CHECK(wifi_s.animating);
+    CHECK(dm::compose(us(LS::Idle, true, true, false, false, 0, false), 0).animating);  // pairing
+    CHECK(ble_s.animating);
+    CHECK(!batt.animating);                               // short SSID ("") ⇒ static battery
+    tk::UiSnapshot long_ssid = us(LS::Idle, true, true, true, true, 50, false);
+    std::strcpy(long_ssid.ssid, "AVeryLongNetworkNameXYZ");   // > 98 px at scale 2 ⇒ marquee
+    dm::Model scr = dm::compose(long_ssid, 10);
+    CHECK(scr.ssid_scrolling && scr.animating);
+}
+
+// ─── status LED priority ladder (logic/led_status.hpp <- shared UiSnapshot + LedAlerts) ──
+// The LED reads the SAME tk::UiSnapshot the display presenter does (one input contract), plus
+// a tiny LED-only LedAlerts for its latched error/warn/OTA tiers. Base = healthy, parked
+// (Idle), paired, 55 % SoC, WiFi up, no alerts; each case flips one field to prove the ladder
+// picks the right colour/animation and that a higher tier wins.
+static tk::UiSnapshot led_snap() {
+    tk::UiSnapshot s;
+    s.wifi_on    = true;
+    s.link_state = tk::LinkState::Idle;
+    s.paired     = true;
+    s.have_soc   = true;
+    s.soc        = 55;
+    return s;
+}
+static void test_led() {
+    using C = tk::LedColor;
+    using A = tk::LedAnim;
+    const tk::LedAlerts none;   // no latched alerts
+
+    // Parked with a known SoC → dimmed gradient, steady.
+    CHECK(tk::led_pattern(led_snap(), none) == (tk::LedPattern{C::SocGradient, A::Solid, true}));
+    // Full charge reads as steady green (still dim/resting).
+    { auto s = led_snap(); s.soc = 100; CHECK(tk::led_pattern(s, none) == (tk::LedPattern{C::Green, A::Solid, true})); }
+    // Awake is also a "have live reading" state → gradient, not search.
+    { auto s = led_snap(); s.link_state = tk::LinkState::Awake; CHECK(tk::led_pattern(s, none).color == C::SocGradient); }
+
+    // Charging outranks the static SoC display (green swell).
+    { auto s = led_snap(); s.charging = true; CHECK(tk::led_pattern(s, none) == (tk::LedPattern{C::Green, A::Breathe, false})); }
+
+    // Asleep → LED off entirely.
+    { auto s = led_snap(); s.link_state = tk::LinkState::Asleep; s.have_soc = false;
+      CHECK(tk::led_pattern(s, none) == (tk::LedPattern{C::Off, A::Off, false})); }
+
+    // Pairing: BLE up but no session → magenta pulse. Outranks charging/SoC.
+    { auto s = led_snap(); s.paired = false; s.ble_connected = true; s.charging = true;
+      CHECK(tk::led_pattern(s, none) == (tk::LedPattern{C::Magenta, A::Pulse, false})); }
+
+    // WiFi search: no LAN → blue breathe, and it outranks pairing/charging below it.
+    { auto s = led_snap(); s.wifi_on = false; s.ble_connected = true; s.paired = false;
+      CHECK(tk::led_pattern(s, none) == (tk::LedPattern{C::Blue, A::Breathe, false})); }
+
+    // Searching for the car: reachable readings absent → teal breathe.
+    { auto s = led_snap(); s.link_state = tk::LinkState::Unreachable;
+      CHECK(tk::led_pattern(s, none) == (tk::LedPattern{C::Teal, A::Breathe, false})); }
+    // A stale SoC while Unreachable must NOT show as a live gradient — still searching.
+    { auto s = led_snap(); s.link_state = tk::LinkState::Unreachable; s.have_soc = true; s.soc = 80;
+      CHECK(tk::led_pattern(s, none).color == C::Teal); }
+
+    // ── LED-only latched alerts (top of the ladder), passed via LedAlerts ──
+    // Warning (repeated connect failures) → amber blink, above WiFi/pairing.
+    { auto s = led_snap(); s.wifi_on = false; tk::LedAlerts a; a.warn = true;
+      CHECK(tk::led_pattern(s, a) == (tk::LedPattern{C::Amber, A::Blink, false})); }
+    // OTA download → blue pulse, above the warning.
+    { tk::LedAlerts a; a.ota_downloading = true; a.warn = true;
+      CHECK(tk::led_pattern(led_snap(), a) == (tk::LedPattern{C::Blue, A::Pulse, false})); }
+    // Error is the top of the ladder — beats OTA, warn, charging, everything.
+    { auto s = led_snap(); s.charging = true; tk::LedAlerts a; a.error = true; a.ota_downloading = true; a.warn = true;
+      CHECK(tk::led_pattern(s, a) == (tk::LedPattern{C::Red, A::Blink, false})); }
+}
+
 int main() {
     test_vin();
     test_units();
@@ -276,6 +456,9 @@ int main() {
     test_link_state_strings();
     test_target();
     test_mcp();
+    test_display_helpers();
+    test_display_model();
+    test_led();
 
     if (g_failures == 0) {
         std::printf("OK  %d checks passed\n", g_checks);

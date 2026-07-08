@@ -1,6 +1,26 @@
 dependencies:
   idf: ">=5.0.1"
   espressif/mdns: "^1.2.0"
+
+  # esp32 / esp32s3 / esp32c3 / esp32c6: upstream yoziru/tesla-ble straight from git —
+  # the proven, unchanged path. The Component Manager enforces the library's own
+  # `targets:` list, which is exactly these four.
   yoziru/tesla-ble:
     git: "https://github.com/yoziru/tesla-ble.git"
     version: "v5.1.1"
+    rules:
+      - if: "target != esp32c5"
+
+  # esp32c5: the SAME library + commit, but v5.1.1's idf_component.yml omits esp32c5 from
+  # `targets:`, so the Component Manager refuses the chip at dependency resolution (before
+  # compile). tesla-ble's code is target-agnostic and already builds for RISC-V (c3/c6), and
+  # C5 is RISC-V too — the only blocker is that manifest line. Route C5 through a local,
+  # build-time-patched checkout: scripts/prepare-tesla-ble-c5.sh clones the pinned tag into
+  # third_party/tesla-ble (gitignored) and appends esp32c5 to its `targets:`. So ONE source
+  # tree still builds all five targets, the other four resolve byte-identically from git, and
+  # we never edit managed_components/ (regenerated). Keep the version here in lockstep with the
+  # git dep above — the prepare script reads it from this file.
+  tesla-ble:
+    path: "../third_party/tesla-ble"
+    rules:
+      - if: "target == esp32c5"

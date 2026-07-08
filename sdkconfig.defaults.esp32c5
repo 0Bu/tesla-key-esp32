@@ -1,0 +1,33 @@
+# ─── LilyGo T-Dongle-C5 (ESP32-C5HR8) overrides ───────────────────────────────
+# Loaded automatically by ESP-IDF after sdkconfig.defaults when the target is
+# esp32c5 (`idf.py set-target esp32c5`). Only the deltas the on-device display +
+# PSRAM need live here.
+#
+# Flash size stays 4 MB (from sdkconfig.defaults) on purpose: partitions.csv is
+# sized to fill 4 MB so ONE table serves every target — the T-Dongle-C5's 16 MB
+# just leaves the top unused. Console (USB-Serial/JTAG) is already set in the base.
+
+# PSRAM: the ESP32-C5HR8 carries 8 MB in-package Quad-SPI PSRAM. Put the display
+# framebuffer there and move WiFi/LWIP buffers off the smaller internal SRAM
+# (384 KB), relieving the largest-contiguous-block pressure this firmware is
+# sensitive to. IGNORE_NOTFOUND keeps a PSRAM-less C5 booting; the display then simply
+# disables itself (display.cpp does NOT fall back to internal SRAM on the C5 — grabbing
+# 25 KB of its scarce contiguous SRAM could OOM this memory-tight board).
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_QUAD=y
+CONFIG_SPIRAM_SPEED_80M=y
+CONFIG_SPIRAM_USE_MALLOC=y
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=16384
+CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
+CONFIG_SPIRAM_IGNORE_NOTFOUND=y
+
+# Drive the onboard 0.96" ST7735 status display (pins default to the T-Dongle-C5
+# wiring in main/Kconfig.projbuild: MOSI2 / SCK6 / CS10 / DC3 / RST1 / BL0).
+CONFIG_TESLA_DISPLAY_ENABLED=y
+
+# NOTE: this build stays on the base -Og (NO -Os). Whole-build -Os was measured to
+# HARD-FREEZE this firmware under evcc+BLE load (rejected "Package B", Issue #106) —
+# a physical power-cycle is the only recovery, which is unacceptable. The display +
+# PSRAM fit under the OTA slot at -Og because the Package A size levers (merged, #154)
+# freed ~64 KB. If future growth pushes the C5 image past the slot again, shave flash
+# with more zero-risk levers — do NOT reach for -Os.

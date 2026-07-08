@@ -52,7 +52,7 @@ body:
       label: Constraints to honour (repo invariants)
       description: Tick the ones the implementer must respect. See .claude/CLAUDE.md.
       options:
-        - label: Target-agnostic — must still build for all four chips (esp32 / esp32s3 / esp32c3 / esp32c6).
+        - label: Target-agnostic — must still build for all five chips (esp32 / esp32s3 / esp32c3 / esp32c6 / esp32c5).
         - label: Heap-safe — no new large *contiguous* allocations; HTTP handlers stay under the handle_all try/catch.
         - label: Doc-sync — update .claude/CLAUDE.md and docs/ (ARCHITECTURE / SECURITY / MCP / README) where behavior changes.
         - label: New hardware-free logic goes in main/logic/ with a CHECK in test/test_logic.cpp (add-logic-test skill).

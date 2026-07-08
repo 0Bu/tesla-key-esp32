@@ -32,3 +32,12 @@ else
     "$CXX" -std=c++17 -Wall -Wextra -Werror -Imain -o "$BUILD_DIR/logic_tests" test/test_logic.cpp
     "$BUILD_DIR/logic_tests"
 fi
+
+# Display sim ↔ C++ presenter parity: confirm tools/display_sim.py's decide() still matches
+# the firmware's tk::display::compose() (so the pixel sim can't silently drift from display.cpp).
+# Skipped only where python3 is unavailable — the C++ logic tests above are the hard gate.
+if command -v python3 >/dev/null 2>&1; then
+    scripts/check-display-sim-parity.sh
+else
+    echo "run-mock-tests: python3 not found — skipping display-sim parity check" >&2
+fi
