@@ -6,6 +6,7 @@
 
 #include "vehicle_ctrl.hpp"
 #include "logic/vin.hpp"
+#include <cmath>
 #include <esp_log.h>
 
 // No protobuf includes needed here: the only generated types this TU touches are the
@@ -188,4 +189,23 @@ VehicleController::LinkState VehicleController::link_state() const {
     in.have_reachable      = seconds_since_reachable(in.reachable_age_s);
     in.vcsec_stably_asleep = vcsec_stably_asleep_(tk::kAsleepDebounceS);
     return tk::compute_link_state(in);
+}
+
+// Assemble the vehicle-owned half of the on-device indicators' input snapshot (see
+// logic/ui_state.hpp). One pass over link_state / ble_* / the cached charge — the charge
+// copy is taken under cache_mutex_ by get_cached_charge() — so a presenter reads one
+// consistent view instead of racing five separate accessors across a frame. `soc` is left
+// RAW (the presenter clamps); `paired` and the wifi_* fields are filled by the caller.
+tk::UiSnapshot VehicleController::ui_snapshot() {
+    tk::UiSnapshot s;
+    ChargeStateResult cs = get_cached_charge();
+    s.have_soc  = cs.valid && cs.has_battery_level;
+    s.soc       = static_cast<int>(lroundf(cs.battery_level));
+    s.charging  = (cs.charging_state == "Charging");
+    s.link_state    = link_state();
+    s.ble_connected = ble_connected();
+    int8_t rssi = 0;
+    s.ble_rssi_valid = s.ble_connected && ble_rssi(rssi);
+    s.ble_rssi       = rssi;
+    return s;
 }

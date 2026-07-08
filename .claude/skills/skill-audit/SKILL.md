@@ -30,7 +30,7 @@ code / config / script / doc:
   timeout/debounce constant, a version or library pin;
 - a **removed or renamed** thing — an endpoint, command, MCP tool, NVS key, Kconfig option,
   file path, script name, function;
-- a **stale set** — the target list (esp32/s3/c3/c6), the OTA `<suffix>` map, the enrolled role;
+- a **stale set** — the target list (esp32/s3/c3/c6/c5), the OTA `<suffix>` map, the enrolled role;
 - a **broken pointer** — a skill that documents a script/hook whose behaviour no longer matches
   the file that actually runs, or an agent boundary that points at a skill that changed.
 

@@ -1,6 +1,6 @@
 # tesla-key-esp32
 
-Turns an ESP32 (esp32 / esp32s3 / esp32c3 / esp32c6) into a Bluetooth key for a Tesla, so charging software such as
+Turns an ESP32 (esp32 / esp32s3 / esp32c3 / esp32c6 / esp32c5) into a Bluetooth key for a Tesla, so charging software such as
 [evcc](https://evcc.io) can wake the car, read the battery level and start/stop charging
 over the local network. No cloud, no Tesla API, no fees. It can also stream all vehicle
 telemetry to [Home Assistant over MQTT](#step-6--home-assistant-optional).
@@ -11,7 +11,7 @@ Build from source, full API and security model: [docs/README.md](docs/README.md)
 
 ## Requirements
 
-- An ESP32 board — esp32, esp32s3, esp32c3 or esp32c6 (the installer auto-detects which)
+- An ESP32 board — esp32, esp32s3, esp32c3, esp32c6 or esp32c5 (e.g. the LilyGO T-Dongle-C5; the installer auto-detects which)
 - A browser with Web Serial support (Chrome / Edge, desktop)
 - The Tesla's 17-character VIN
 

@@ -1,6 +1,7 @@
-# Target is selected per build: `idf.py set-target <esp32|esp32s3|esp32c3|esp32c6>`
-# (the four chips yoziru/tesla-ble declares support for). Intentionally NOT pinned here
-# so the one source tree builds for every supported target; CI builds all of them.
+# Target is selected per build: `idf.py set-target <esp32|esp32s3|esp32c3|esp32c6|esp32c5>`
+# (the four chips yoziru/tesla-ble declares support for, plus esp32c5 via a local build-time
+# patch of tesla-ble — see main/idf_component.yml). Intentionally NOT pinned here so the one
+# source tree builds for every supported target; CI builds all of them.
 
 # Flash. 4 MB is the smallest part across the supported targets, so it sizes the
 # partition table (partitions.csv); a larger chip just leaves the top unused, so ONE
@@ -9,8 +10,9 @@ CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 
-# Console over native USB-Serial/JTAG — present on esp32s3 / esp32c3 / esp32c6. The
-# classic esp32 has no such peripheral, so this symbol is absent for that target and the
+# Console over native USB-Serial/JTAG — present on esp32s3 / esp32c3 / esp32c6 / esp32c5
+# (the T-Dongle-C5 exposes it on its USB-C port). The classic esp32 has no such peripheral,
+# so this symbol is absent for that target and the
 # console falls back to UART0 (the board's USB-UART bridge) automatically — no per-target
 # sdkconfig needed. On boards with a separate USB-UART bridge, attach to the native-USB
 # port for logs (the bridge port won't carry them).

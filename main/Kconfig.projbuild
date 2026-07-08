@@ -14,6 +14,27 @@ menu "Tesla Key Configuration"
         help
             Password for the WiFi network.
 
+    config TESLA_WIFI_PREFER_5G
+        bool "Prefer 5 GHz WiFi (ESP32-C5 dual-band; experimental)"
+        depends on SOC_WIFI_SUPPORT_5G
+        default n
+        help
+            ESP32-C5 only. When the same SSID is broadcast on both 2.4 GHz and 5 GHz
+            (band steering), bias AP selection toward the 5 GHz radio (adds a fixed
+            RSSI bonus to 5 GHz APs during the BY_SIGNAL scan).
+
+            Why it might help BLE: WiFi and BLE still share ONE RF path on the C5, so
+            their coexistence is time-division multiplexed even with WiFi on 5 GHz — the
+            5 GHz move does NOT remove the airtime contention that dominates BLE
+            reliability here (that is why WIFI_PS_MIN_MODEM must stay on). What it CAN do
+            is take this device's WiFi off the 2.4 GHz band, freeing that band for BLE and
+            dodging a congested 2.4 GHz environment, so BLE may stall less. The effect is
+            second-order and environment-dependent — hence this experimental, default-off
+            switch to A/B test it on your network.
+
+            Band mode stays automatic, so a device out of 5 GHz range still falls back to
+            2.4 GHz — no reconnect trap.
+
     config TESLA_VIN
         string "Tesla Vehicle VIN"
         default ""
@@ -45,7 +66,7 @@ menu "Tesla Key Configuration"
         help
             HTTPS base URL (a directory, with trailing slash) where the per-target app
             images are published. The device appends "tesla-key-esp32<suffix>.bin" for
-            its own chip — <suffix> is "" / -s3 / -c3 / -c6 (so "esp32" appears once),
+            its own chip — <suffix> is "" / -s3 / -c3 / -c6 / -c5 (so "esp32" appears once),
             picked at compile time — one channel serves every supported target.
             The image is downloaded and flashed to the inactive OTA slot by esp_https_ota,
             which also verifies the image chip-id and refuses a wrong-target image. Must
@@ -94,5 +115,72 @@ menu "Tesla Key Configuration"
             How often the full set of cached telemetry + device status is
             republished to MQTT (retained). Discovery + an immediate snapshot are
             also sent on every (re)connect.
+
+    config TESLA_DISPLAY_ENABLED
+        bool "On-device ST7735 status display (LilyGo T-Dongle-C5 / T-Dongle-S3)"
+        default n
+        help
+            Drive a 0.96" ST7735 80x160 SPI TFT and render the charge/connection
+            status (SoC battery, charging state, WiFi/BLE) directly on the panel —
+            mirroring the web UI. Reads ONLY cached state, so it never triggers a BLE
+            round-trip (can't wake the car) and does not depend on MQTT. Off by default;
+            enabled for the LilyGo T-Dongle-C5 (sdkconfig.defaults.esp32c5) and the
+            T-Dongle-S3 (sdkconfig.defaults.esp32s3), which override the pins below with
+            each board's wiring. The C5's framebuffer lives in PSRAM (SPIRAM on); the
+            T-Dongle-S3 build has no PSRAM and uses internal SRAM. The single esp32s3
+            image auto-detects the dongle, so a generic ESP32-S3 keeps the panel disabled.
+
+    if TESLA_DISPLAY_ENABLED
+    # Pin defaults below are the T-Dongle-C5 wiring; sdkconfig.defaults.esp32s3 overrides
+    # them with the T-Dongle-S3 pins (MOSI3 / SCK5 / CS4 / DC2 / RST1 / BL38).
+    config TESLA_DISPLAY_SPI_MOSI
+        int "Display SPI MOSI (SDA) GPIO"
+        default 2
+    config TESLA_DISPLAY_SPI_SCK
+        int "Display SPI SCK (SCL) GPIO"
+        default 6
+    config TESLA_DISPLAY_CS
+        int "Display CS GPIO"
+        default 10
+    config TESLA_DISPLAY_DC
+        int "Display DC (RS) GPIO"
+        default 3
+    config TESLA_DISPLAY_RST
+        int "Display RST GPIO"
+        default 1
+    config TESLA_DISPLAY_BL
+        int "Display backlight GPIO"
+        default 0
+    endif
+
+    config TESLA_LED_ENABLED
+        bool "On-device status LED (LilyGo T-Dongle underside APA102)"
+        default n
+        help
+            Drive the single APA102 RGB pixel on the underside of a LilyGo T-Dongle
+            (C5 / S3) as a status indicator — WiFi/BLE search (breathing), pairing
+            (pulse), charging (green swell), state-of-charge colour when parked, OTA
+            in flight, and amber/red for warnings/errors. Reads ONLY cached state, so
+            it never triggers a BLE round-trip (can't wake the car) and needs no MQTT;
+            it also works on a board with no display. Off by default — not every
+            ESP32-S3 board carries this LED, so enable it per board. The pins below
+            default to the T-Dongle-C5 wiring (DI=5, CI=4); a T-Dongle-S3 uses 40/39.
+
+    if TESLA_LED_ENABLED
+    config TESLA_LED_DI_GPIO
+        int "APA102 data (DI) GPIO"
+        default 5
+    config TESLA_LED_CI_GPIO
+        int "APA102 clock (CI) GPIO"
+        default 4
+    config TESLA_LED_BRIGHTNESS
+        int "APA102 global brightness (1-31)"
+        default 8
+        range 1 31
+        help
+            APA102 5-bit global brightness. Kept low by default so the indicator isn't
+            a glaring dot on a desk and draws little current; resting states (parked
+            SoC) dim further in firmware.
+    endif
 
 endmenu
