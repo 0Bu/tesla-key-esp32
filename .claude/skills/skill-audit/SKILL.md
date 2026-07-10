@@ -119,6 +119,30 @@ the authority for the per-sibling drift check; `project-review` defers the mecha
   the PR-checkbox gate mechanism — no file marker, the sibling list, the command count `15`, the
   tesla-ble pin) still match the tree, and that the skills/agents it names still exist. Correct it
   like any other; don't re-open it after.
+- **`device-diag`** — read-only, cache-only live-board triage from `/status` + `/diag`. Verify the
+  `/status` keys it names (`paired`/`reauth`/`link`/`vcsec_sleep`/`ble{connect_fail,car_connectable}`/
+  `mqtt{configured,connected,tls,error}`/`last_seen_s`) against `handle_status`
+  (`main/http_status.cpp`), the **lowercase** four `link_state_web_str` values
+  (`main/logic/link_state.hpp`; uppercase are the MQTT `link_state_mqtt_str` set), the `/diag`
+  params (`verbose`/`clear` in `handle_diag`), that there is still **no** heap field in `/status`
+  (heap comes from the `BOOT`/`HEAP` serial lines in `main.cpp`), and the signature sites it cites
+  (`connect error` in `ble_client.cpp`, the pairing-invalidation causes in `vehicle_ctrl.cpp`).
+- **`display-preview`** — renders `tools/display_sim.py` to PNGs for a human eyeball pass. Verify the
+  CLI modes (`png`/`states`/`states-portrait`/`search`/`scroll`/`cheader`/`parity`) + default output
+  paths still match the script's `__main__`, the `cheader`→`main/display_font.h` and `parity`→gate
+  warnings, the presenter/renderer files (`main/logic/display_model.hpp`, `main/display.cpp`), and
+  the parity gate it defers to (`scripts/check-display-sim-parity.sh`, run from `run-mock-tests.sh`).
+- **`ota-release-verify`** — verifies the already-published OTA channel (Pages manifest + per-target
+  images + version coherence). Verify the manifest/firmware-base URLs (`main/Kconfig.projbuild`), the
+  5-chipFamily set + per-part offsets (bootloader per-target, partition-table `32768`, app `131072`)
+  in `scripts/build-pages.sh`, the suffix map across `ota_update.cpp`/`ci-build-all.sh`/
+  `build-pages.sh`, the `version.txt` floor vs CI-stamped version, and the `/ota/*` +
+  `/api/proxy/1/version` endpoints. Read-only; complementary to `ship` (which cuts/flashes a release).
+- **`usb-recovery`** — no-build emergency reflash, **user-only** (`disable-model-invocation: true`).
+  Verify the partition map against `partitions.csv` (app `@0x20000`, `otadata@0xf000/0x2000` erased,
+  `nvs@0x9000/0x6000` never touched, `ota_1@0x210000`), per-target bootloader offset, the
+  signed-image requirement (`CONFIG_SECURE_BOOT_BUILD_SIGNED_BINARIES=n`), the `-merged.bin`
+  NVS-wipe warning, and the C5 no-auto-reset / `--before no-reset` / ROM-node gotchas.
 
 **Agents** (`.claude/agents/`) — audit these the same way; two duplicate content `project-review`
 owns and must stay in sync with it:
