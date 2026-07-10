@@ -363,6 +363,27 @@ what each must stay true to:
   checkboxes, step 8). Re-verify its own numbers (hook `require-skill-audit.sh`, the PR-checkbox
   gate mechanism — no file marker, command count `15`, tesla-ble pin) and that the sibling/agent
   list it carries still matches the tree.
+- **`device-diag`** is the read-only, cache-only live-board triage lens (`/status` + `/diag` →
+  symptom→cause table); it diagnoses and hands off, never flashes or commands the car. Re-verify the
+  `/status` keys it reads against `handle_status` (`main/http_status.cpp`), the lowercase
+  `link_state_web_str` strings (`main/logic/link_state.hpp`), the `/diag` params, and its
+  error-signature sites (`connect error` in `ble_client.cpp`, `BOOT`/`HEAP` in `main.cpp`). Keep it
+  complementary to `e2e-evcc` (which drives the command path) and the flash/recovery skills.
+- **`display-preview`** renders `tools/display_sim.py` to PNGs for a human eyeball pass. Re-verify its
+  CLI modes + default outputs against the script's `__main__`, the presenter/renderer it targets
+  (`main/logic/display_model.hpp`, `main/display.cpp`), and the parity gate it defers to
+  (`scripts/check-display-sim-parity.sh`). It is the visual complement to that automated gate, not a
+  replacement.
+- **`ota-release-verify`** verifies the already-published OTA channel is internally coherent (Pages
+  manifest + per-target images + version). Re-verify the manifest/firmware-base URLs
+  (`main/Kconfig.projbuild`), the 5-chipFamily set + per-part offsets (`scripts/build-pages.sh`), the
+  suffix map (`ota_update.cpp`/`ci-build-all.sh`/`build-pages.sh`), and the `/ota/*` +
+  `/api/proxy/1/version` endpoints. Complementary to `ship` (cut/flash a release), not overlapping.
+- **`usb-recovery`** is the no-build emergency reflash (user-only, `disable-model-invocation: true`):
+  USB-write the published signed image to `0x20000` + erase `otadata`, NVS preserved. Re-verify its
+  partition map against `partitions.csv` (app `@0x20000`, `otadata@0xf000/0x2000`, `nvs@0x9000`
+  untouched), the signed-image requirement, the `-merged.bin` warning, and the C5 gotchas. It is the
+  recovery counterpart to `flash-esp32`/`ship`, not a build path.
 The review subagents under `.claude/agents/` — audit these the same way (they are the targeted
 lenses this skill delegates to; keep them complementary, not contradictory):
 
