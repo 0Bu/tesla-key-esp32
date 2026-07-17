@@ -435,6 +435,15 @@ function render(s){
   else if(mq.connected){ mc.className='cv ok'; mc.innerHTML='<span>'+esc(mq.broker||'')+(mq.tls?' · secured':'')+'</span>'; }
   else { mc.className='cv warn'; mc.innerHTML='<span>'+esc(mq.broker||'')+' · '+esc(mq.error||'disconnected')+'</span>'; }
 
+  // Syslog — UDP diag-log forwarder (tap to set/change the server). Delivery is
+  // gated on DNS only (resolved); reachability is an advisory ping hint, so a
+  // resolved-but-not-answering host still shows the destination, warn-flagged.
+  var sy=s.syslog||{}, sc=$("syslogConn");
+  if(!sy.configured){ sc.className='cv'; sc.innerHTML='<span class="ph">Not configured</span>'; }
+  else if(sy.error){ sc.className='cv warn'; sc.innerHTML='<span>'+esc(sy.host?(sy.host+':'+(sy.port||514)):'')+' · '+esc(sy.error)+'</span>'; }
+  else if(sy.resolved){ sc.className='cv'+(sy.reachable?' ok':' warn'); sc.innerHTML='<span>'+esc(sy.host+':'+(sy.port||514))+(sy.reachable?'':' · not answering ping')+'</span>'; }
+  else { sc.className='cv warn'; sc.innerHTML='<span>Resolving…</span>'; }
+
   // header meta line: IP · version (IP first)
   $("ipline").innerHTML = s.ip ? esc(s.ip)+'&nbsp;·&nbsp;' : '';   // nbsp: overflow:hidden trims plain trailing spaces
   var vl=$("verLink");
@@ -521,6 +530,22 @@ function editMqtt(){
     .then(function(j){var o=(j&&j.response)||{};
       if(!o.result){ toast(o.reason||'Failed to save MQTT broker','err'); return; }
       if(/no reboot|unchanged|already/i.test(o.reason||'')){ toast(v?'MQTT broker unchanged':'MQTT already disabled','info'); return; }
+      toast('Saved · rebooting','ok');})
+    .catch(function(){toast('Saved — device rebooting','info')});
+}
+function editSyslog(){
+  var sy=state&&state.syslog, cur=(sy&&sy.host)?(sy.host+':'+(sy.port||514)):'';
+  var v=prompt('Syslog server for the diagnostic log (IP:PORT, e.g. 192.168.1.22:514).\nLeave empty to disable.',cur);
+  if(v==null) return;
+  v=v.trim();
+  if(v && v.indexOf(' ')>=0){ toast('Invalid server — use IP:PORT','err'); return; }
+  if(v===cur){ toast(v?'Syslog server unchanged':'Syslog already disabled','info'); return; }
+  toast(v?'Saving Syslog server…':'Disabling Syslog…','info');
+  fetch('/set_syslog',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({server:v})})
+    .then(function(r){return r.json()})
+    .then(function(j){var o=(j&&j.response)||{};
+      if(!o.result){ toast(o.reason||'Failed to save Syslog server','err'); return; }
+      if(/no reboot|unchanged|already/i.test(o.reason||'')){ toast(v?'Syslog server unchanged':'Syslog already disabled','info'); return; }
       toast('Saved · rebooting','ok');})
     .catch(function(){toast('Saved — device rebooting','info')});
 }

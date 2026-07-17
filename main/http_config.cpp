@@ -4,9 +4,11 @@
 //   POST /set_time            (browser wall clock — NTP fallback)
 //   POST /set_vin             (persist VIN + reboot)
 //   POST /set_mqtt            (persist MQTT broker + reboot)
+//   POST /set_syslog          (persist Syslog server + reboot)
 // Dispatched from handle_all in http_server.cpp (inside its try/catch OOM guard).
 
 #include "http_handlers.hpp"
+#include "logic/syslog_policy.hpp"
 #include <esp_log.h>
 #include <esp_system.h>
 #include "freertos/FreeRTOS.h"
@@ -223,6 +225,55 @@ esp_err_t handle_set_mqtt(GuardedReq rq) {
                       ok ? (broker.empty() ? "MQTT disabled — rebooting"
                                            : "MQTT broker saved — rebooting")
                          : "failed to save MQTT broker"));
+    if (ok) {
+        vTaskDelay(pdMS_TO_TICKS(800));
+        esp_restart();
+    }
+    return r;
+}
+
+// ─── POST /set_syslog — persist the Syslog server, then reboot ───────────────────
+// Body: {"server":"host:port"} (a bare host defaults to port 514; an empty string
+// disables Syslog). Stored in NVS ("syslog_uri") and applied on reboot — the
+// forwarder resolves it once at start (syslog.cpp), same as /set_mqtt.
+
+esp_err_t handle_set_syslog(GuardedReq rq) {
+    httpd_req_t* req = rq.req;
+    char* body = read_body(req);
+    cJSON* json = body ? cJSON_Parse(body) : nullptr;
+    free(body);
+
+    std::string server;
+    if (json) {
+        cJSON* j = cJSON_GetObjectItemCaseSensitive(json, "server");
+        if (cJSON_IsString(j) && j->valuestring) server = j->valuestring;
+    }
+    cJSON_Delete(json);
+
+    // Trim surrounding whitespace.
+    size_t s = server.find_first_not_of(" \t\r\n");
+    size_t e = server.find_last_not_of(" \t\r\n");
+    server = (s == std::string::npos) ? std::string{} : server.substr(s, e - s + 1);
+
+    // Unchanged → nothing to apply: skip the NVS write and the reboot entirely.
+    if (server == g_vehicle->load_config_str("syslog_uri")) {
+        return send_json(req, 200, make_response(true, "set_syslog", "",
+            server.empty() ? "Syslog already disabled — no reboot"
+                           : "Syslog server unchanged — no reboot"));
+    }
+
+    // Validate plausibility before applying a *changed* value.
+    if (!tk::syslog_target_is_plausible(server)) {
+        return send_json(req, 400, make_response(false, "set_syslog", "",
+                                                 "invalid server (use host:port)"));
+    }
+
+    bool ok = g_vehicle->save_config_str("syslog_uri", server);
+    esp_err_t r = send_json(req, ok ? 200 : 500,
+        make_response(ok, "set_syslog", "",
+                      ok ? (server.empty() ? "Syslog disabled — rebooting"
+                                           : "Syslog server saved — rebooting")
+                         : "failed to save Syslog server"));
     if (ok) {
         vTaskDelay(pdMS_TO_TICKS(800));
         esp_restart();

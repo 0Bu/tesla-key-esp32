@@ -67,6 +67,7 @@ static esp_err_t handle_all_dispatch(httpd_req_t* req) {
     if (POST && strcmp(path, "/set_time")   == 0)               return handle_set_time({req});
     if (POST && strcmp(path, "/set_vin")    == 0)               return handle_set_vin({req});
     if (POST && strcmp(path, "/set_mqtt")   == 0)               return handle_set_mqtt({req});
+    if (POST && strcmp(path, "/set_syslog") == 0)               return handle_set_syslog({req});
     if (POST && strcmp(path, "/scan")       == 0)               return handle_scan({req});
     if (POST && strcmp(path, "/mcp")        == 0)               return mcp_handle_post({req});
     if (GET  && strcmp(path, "/mcp")        == 0)               return mcp_handle_get({req});

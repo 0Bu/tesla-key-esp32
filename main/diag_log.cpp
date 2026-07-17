@@ -1,4 +1,5 @@
 #include "diag_log.hpp"
+#include "syslog.hpp"
 
 #include <esp_log.h>
 #include <cstdio>
@@ -44,7 +45,16 @@ static int diag_vprintf_(const char* fmt, va_list ap) {
     va_copy(ap2, ap);
     int n = vsnprintf(line, sizeof(line), fmt, ap2);
     va_end(ap2);
-    if (n > 0) diag_append_(line, (size_t)n < sizeof(line) ? (size_t)n : sizeof(line) - 1);
+    if (n > 0) {
+        size_t len = (size_t)n < sizeof(line) ? (size_t)n : sizeof(line) - 1;
+        diag_append_(line, len);
+        // Same capture point feeds the Syslog forwarder (syslog.cpp), so every line
+        // that reaches the serial console / /diag also reaches the configured
+        // collector — no separate call site to keep in sync. Non-blocking and a
+        // no-op before syslog_start() has run; syslog_send() itself filters out
+        // this module's own "syslog:"-tagged lines to avoid a feedback loop.
+        syslog_send(line, len);
+    }
     return s_prev ? s_prev(fmt, ap) : vprintf(fmt, ap);
 }
 
