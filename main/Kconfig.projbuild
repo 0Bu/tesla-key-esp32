@@ -116,6 +116,16 @@ menu "Tesla Key Configuration"
             republished to MQTT (retained). Discovery + an immediate snapshot are
             also sent on every (re)connect.
 
+    config TESLA_SYSLOG_SERVER
+        string "Syslog server (host:port)"
+        default ""
+        help
+            UDP Syslog collector for the device's diagnostic log (the same output
+            served by GET /diag and the serial console), e.g. "192.168.1.22:514". A
+            bare host defaults to port 514. Leave empty to disable. Can be
+            set/changed at runtime in the web UI (Connections -> Syslog), which
+            stores it in NVS ("syslog_uri") and overrides this.
+
     config TESLA_DISPLAY_ENABLED
         bool "On-device ST7735 status display (LilyGo T-Dongle-C5 / T-Dongle-S3)"
         default n

@@ -10,6 +10,8 @@
 //                                    (logic/link_state.hpp <- /status "link", MQTT sleep_status)
 //   * per-target platform / OTA-suffix mapping
 //                                    (logic/target.hpp     <- platform.hpp, ota_update.cpp)
+//   * Syslog target parsing + send-failure classification
+//                                    (logic/syslog_policy.hpp <- syslog.cpp, /set_syslog)
 // The cJSON envelope builders themselves stay IDF/cJSON-coupled; their pure inputs
 // (the conversions and link strings that feed /status and the MQTT payloads) are
 // what regress silently, and those are covered here.
@@ -24,6 +26,7 @@
 #include "logic/display_model.hpp"
 #include "logic/soc_gradient.hpp"
 #include "logic/led_status.hpp"
+#include "logic/syslog_policy.hpp"
 
 #include <cmath>
 #include <cstdio>
@@ -77,6 +80,52 @@ static void test_vin() {
     // Stray punctuation / spaces.
     CHECK(!tk::vin_is_plausible("5YJ3E1EA7KF00031-"));
     CHECK(!tk::vin_is_plausible("5YJ3E1EA7KF 00316"));
+}
+
+// ─── Syslog target parsing + send-failure classification ────────────────────────
+static void test_syslog_policy() {
+    std::string host; int port = 0;
+
+    // host:port.
+    CHECK(tk::syslog_target_parse("192.168.1.22:514", host, port));
+    CHECK(host == "192.168.1.22" && port == 514);
+    CHECK(tk::syslog_target_parse("syslog.lan:1514", host, port));
+    CHECK(host == "syslog.lan" && port == 1514);
+
+    // Bare host defaults to port 514.
+    CHECK(tk::syslog_target_parse("192.168.1.22", host, port));
+    CHECK(host == "192.168.1.22" && port == 514);
+
+    // Rejected: empty, empty host/port either side of ':', a non-numeric or
+    // out-of-range port.
+    CHECK(!tk::syslog_target_parse("", host, port));
+    CHECK(!tk::syslog_target_parse(":514", host, port));
+    CHECK(!tk::syslog_target_parse("192.168.1.22:", host, port));
+    CHECK(!tk::syslog_target_parse("192.168.1.22:abc", host, port));
+    CHECK(!tk::syslog_target_parse("192.168.1.22:0", host, port));
+    CHECK(!tk::syslog_target_parse("192.168.1.22:65536", host, port));
+
+    // /set_syslog validation: empty always disables; a valid target passes; a
+    // malformed one, or one carrying whitespace, is rejected.
+    CHECK(tk::syslog_target_is_plausible(""));
+    CHECK(tk::syslog_target_is_plausible("192.168.1.22:514"));
+    CHECK(!tk::syslog_target_is_plausible("192.168.1.22:abc"));
+    CHECK(!tk::syslog_target_is_plausible("192.168.1.22: 514"));
+    CHECK(!tk::syslog_target_is_plausible(std::string(200, 'a') + ":514"));
+
+    // Send-failure classification: routing/host errors are HARD (re-resolve now);
+    // resource/blocking errors are TRANSIENT (hold the destination, let the
+    // ordinary cadence re-check).
+    CHECK(tk::syslog_error_is_hard(ENETUNREACH));
+    CHECK(tk::syslog_error_is_hard(EHOSTUNREACH));
+    CHECK(tk::syslog_error_is_hard(ENETDOWN));
+    CHECK(tk::syslog_error_is_hard(EHOSTDOWN));
+    CHECK(tk::syslog_error_is_hard(EADDRNOTAVAIL));
+    CHECK(!tk::syslog_error_is_hard(ENOMEM));
+    CHECK(!tk::syslog_error_is_hard(ENOBUFS));
+    CHECK(!tk::syslog_error_is_hard(EAGAIN));
+    CHECK(!tk::syslog_error_is_hard(EINTR));
+    CHECK(!tk::syslog_error_is_hard(0));
 }
 
 // ─── Unit conversion ────────────────────────────────────────────────────────────
@@ -468,6 +517,7 @@ static void test_led() {
 
 int main() {
     test_vin();
+    test_syslog_policy();
     test_units();
     test_link_state();
     test_link_state_strings();

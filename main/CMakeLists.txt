@@ -18,6 +18,7 @@ idf_component_register(
         "diag_log.cpp"
         "ota_update.cpp"
         "mqtt_ha.cpp"
+        "syslog.cpp"
         "display.cpp"
         "led_status.cpp"
     INCLUDE_DIRS

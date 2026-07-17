@@ -87,6 +87,7 @@ esp_err_t handle_send_key(GuardedReq rq);         // POST /send_key
 esp_err_t handle_set_time(GuardedReq rq);         // POST /set_time
 esp_err_t handle_set_vin(GuardedReq rq);          // POST /set_vin
 esp_err_t handle_set_mqtt(GuardedReq rq);         // POST /set_mqtt
+esp_err_t handle_set_syslog(GuardedReq rq);       // POST /set_syslog
 
 // mcp_server.cpp — MCP endpoint (Streamable HTTP, stateless JSON-RPC 2.0; docs/MCP.md)
 esp_err_t mcp_handle_post(GuardedReq rq);         // POST /mcp
