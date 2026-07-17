@@ -95,11 +95,22 @@ http_server.cpp        → esp_http_server on port 80: wildcard dispatch + the h
 http_api.cpp           → evcc routes (/api/1/…, /api/proxy/1/version)
 http_status.cpp        → web UI (/), /status, /diag, /scan
 http_ota.cpp           → /ota/check|update|status
-http_config.cpp        → /gen_keys, /send_key, /set_time, /set_vin, /set_mqtt
+http_config.cpp        → /gen_keys, /send_key, /set_time, /set_vin, /set_mqtt, /set_syslog
 mcp_server.cpp         → /mcp — MCP server for AI agents (stateless JSON-RPC 2.0;
                          core logic in logic/mcp.hpp, guide in docs/MCP.md)
                          (shared helpers: http_common.cpp; split map: http_handlers.hpp)
-diag_log.cpp           → in-RAM console ring served by GET /diag (static .bss buffer)
+diag_log.cpp           → in-RAM console ring served by GET /diag (static .bss buffer); its
+                         esp_log capture hook also feeds syslog.cpp, so every captured line
+                         is forwarded too
+syslog.cpp              → UDP Syslog forwarder (RFC 5424, best-effort) for the diag log.
+                         Server from NVS `syslog_uri` (web UI: Connections → Syslog, POST
+                         /set_syslog) or CONFIG_TESLA_SYSLOG_SERVER, "host:port"; "" disables.
+                         Resolved once at boot (reboots on change, like /set_mqtt); a
+                         background task re-resolves DNS + advisory-probes the collector
+                         (ARP on-subnet, else ICMP) every ~10s, throttled on a persistent
+                         failure. Delivery gates on DNS resolution only, never the advisory
+                         probe. Errno-based hard/transient send-failure split in
+                         logic/syslog_policy.hpp (host-tested)
 provisioning.cpp       → captive setup portal (setup AP) when no WiFi is configured
 display.cpp            → on-device ST7735 status panel (LilyGo T-Dongle-C5 + T-Dongle-S3),
                          LANDSCAPE 160x80 (header WiFi bars+SSID | BT+BLE bars + a horizontal SoC
@@ -141,7 +152,7 @@ Never edit files in `managed_components/` — they are regenerated.
 
 | Namespace   | Content                                     |
 |-------------|---------------------------------------------|
-| `tesla_cfg` | WiFi SSID/pass, VIN, BLE MAC, `mqtt_uri`, `last_time`, `disp_rot` (on-device display BOOT-rotation index 0..3; C5/S3; migrates old `disp_flip`) (runtime cfg) |
+| `tesla_cfg` | WiFi SSID/pass, VIN, BLE MAC, `mqtt_uri`, `syslog_uri`, `last_time`, `disp_rot` (on-device display BOOT-rotation index 0..3; C5/S3; migrates old `disp_flip`) (runtime cfg) |
 | `tesla_ble` | Private key (`private_key`), VCSEC session (`sess_vcsec`), Info session (`sess_info`), `key_created`, `paired_at` — the `sess_*` names come from the ≤15-char key mapping in `nvs_storage.cpp` |
 
 ## Commands Implemented
@@ -176,7 +187,7 @@ GET  /  (alias /index.html)                    # embedded web UI (gzipped into t
 POST /api/1/vehicles/{VIN}/command/{command}   # execute command
 GET  /api/1/vehicles/{VIN}/vehicle_data        # charge state
 GET  /api/1/vehicles/{VIN}/body_controller_state
-GET  /status                                   # web-UI JSON (wifi, ble, mqtt, vehicle cache, read-only telemetry under "tele")
+GET  /status                                   # web-UI JSON (wifi, ble, mqtt, syslog, vehicle cache, read-only telemetry under "tele")
 POST /scan                                     # start a time-limited BLE discovery scan
 POST /mcp                                      # MCP server (Streamable HTTP, stateless JSON-RPC 2.0; GET → 405, no SSE).
                                                # Tools = the run-on-key charging command set + read-only get_vehicle_state
@@ -187,6 +198,7 @@ POST /send_key                                 # pair with vehicle (Charging Man
 POST /set_time                                 # set wall clock from the browser ({"ms":<epoch>}); fallback when NTP unreachable
 POST /set_vin                                  # persist VIN + reboot
 POST /set_mqtt                                 # persist MQTT broker (HA bridge) + reboot ({"broker":"host:port"}; "" disables)
+POST /set_syslog                               # persist Syslog server + reboot ({"server":"host:port"}; "" disables)
 GET  /api/proxy/1/version                      # {version, platform: running chip — "ESP32"/"ESP32-S3"/"ESP32-C3"/"ESP32-C6"/"ESP32-C5"}
 GET  /ota/check[?ms=<epoch>]                   # start background manifest check (non-blocking); poll /ota/status. ms = browser-clock NTP fallback
 POST /ota/update                               # start background self-update (pull, then reboot)

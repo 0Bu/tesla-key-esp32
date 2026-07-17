@@ -8,6 +8,7 @@
 #include "http_handlers.hpp"
 #include "diag_log.hpp"
 #include "mqtt_ha.hpp"
+#include "syslog.hpp"
 #include <esp_netif.h>
 #include <esp_app_desc.h>
 #include <esp_wifi.h>
@@ -98,6 +99,21 @@ esp_err_t handle_status(GuardedReq rq) {
     std::string mqtt_err = mqtt_ha_last_error();
     if (!mqtt_err.empty()) cJSON_AddStringToObject(mqtt, "error", mqtt_err.c_str());
     cJSON_AddItemToObject(root, "mqtt", mqtt);
+
+    // Syslog: whether a server is configured, whether DNS has resolved a destination
+    // (delivery gate), and the advisory ARP/ICMP reachability hint. Drives the
+    // web-UI Connections card.
+    cJSON* syslog = cJSON_CreateObject();
+    SyslogStatus sy = syslog_status();
+    cJSON_AddBoolToObject(syslog, "configured", sy.configured);
+    cJSON_AddBoolToObject(syslog, "resolved",   sy.resolved);
+    cJSON_AddBoolToObject(syslog, "reachable",  sy.reachable);
+    if (!sy.host.empty()) {
+        cJSON_AddStringToObject(syslog, "host", sy.host.c_str());
+        cJSON_AddNumberToObject(syslog, "port", sy.port);
+    }
+    if (!sy.error.empty()) cJSON_AddStringToObject(syslog, "error", sy.error.c_str());
+    cJSON_AddItemToObject(root, "syslog", syslog);
 
     // BLE: when connected report the live signal strength; otherwise list nearby
     // Teslas seen while scanning, with their RSSI.
