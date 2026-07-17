@@ -258,6 +258,50 @@ grouped under one device. **Read-only by design** — no command topics are subs
   state every interval. The same active-window gating that lets the car sleep applies to
   the *source* polls, so MQTT keeps serving the last-known (retained) values while asleep.
 
+## Syslog forwarder
+
+`main/syslog.cpp` forwards the same in-RAM diag log served by `GET /diag` (`main/diag_log.cpp`)
+to a UDP Syslog collector, best-effort, framed as RFC 5424 (`<14>1 - tesla-key-esp32 - - - -
+<message>`, facility `user`/priority `info` throughout — there is no per-line severity mapping).
+The capture point is `diag_log.cpp`'s `esp_log_set_vprintf` hook, which already mirrors every
+`ESP_LOG*` line (from this firmware **and** ESP-IDF/NimBLE internals — NimBLE is pre-throttled
+to `WARN` there) into the `/diag` ring; the same call also queues the line for Syslog, so there
+is exactly one capture point to keep in sync, not two.
+
+- **Config:** one NVS string, `syslog_uri` (`tesla_cfg` namespace) — a bare `"host:port"`, no
+  scheme (a bare host defaults to port 514); `""` disables forwarding. Falls back to
+  `CONFIG_TESLA_SYSLOG_SERVER` (Kconfig, default empty). Set from the web UI (Connections →
+  Syslog card, pencil icon → `POST /set_syslog`, `{"server":"host:port"}`) or NVS/Kconfig
+  directly. Resolved **once**, at `syslog_start()` (called early in `app_main`, before WiFi) —
+  like the MQTT bridge, a config change persists then reboots to apply, so there is nothing to
+  re-read at runtime.
+- **Delivery:** a background task queues lines (fixed 24-deep queue of 256-byte messages —
+  small on purpose, since the queue is one contiguous heap allocation and this device's binding
+  memory limit is the largest *contiguous* free block) and, once WiFi is up, resolves the
+  target via `getaddrinfo()` and forwards. Re-resolve + re-probe is throttled to a ~10s cadence
+  (`have_checked`, not `!resolved` — a persistently failing DNS/host must not re-run
+  `getaddrinfo()`+ping every loop). **Delivery gates on DNS resolution only** (`resolved`) —
+  never on the reachability probe below — since Syslog is inherently best-effort UDP.
+- **Reachability probe (advisory only, never a delivery gate):** ARP for an on-subnet host (L2,
+  works even when the collector firewalls ICMP), else a 2-echo ICMP ping (800 ms timeout each).
+  Surfaced in `/status.syslog.reachable` purely as a UI hint ("Enabled · not answering ping").
+- **Send-failure handling** (`logic/syslog_policy.hpp`, host-tested): an errno from
+  `sendto()`/`socket()` is classified HARD (routing/host-down errors — `ENETUNREACH`,
+  `EHOSTUNREACH`, `ENETDOWN`, `EHOSTDOWN`, `EADDRNOTAVAIL` — re-resolve + re-probe immediately)
+  or TRANSIENT (everything else, incl. `ENOMEM`/`ENOBUFS`/`EAGAIN` — hold the destination, let
+  the ordinary cadence re-check). Getting this wrong the other way — clearing the throttle on
+  every failure — turns a chatty diag stream (a busy BLE poll can log several lines a second)
+  into a `getaddrinfo()`+ping storm that runs hardest exactly when the link is worst; the
+  handler also logs the failing/recovering *transition* only, never per-line, for the same
+  reason. Mirrors an equivalent module in the sibling `daikin-altherma-esp32` project, where
+  this exact storm was diagnosed on a live board.
+- **Loop guard:** `syslog_send()` drops any captured line containing the `"syslog:"` tag this
+  module's own `ESP_LOGx(TAG, ...)` calls render (`TAG = "syslog"`) — otherwise this module's
+  own "send failed" diagnostics would themselves be queued for (failing) delivery, feeding the
+  exact storm the paragraph above avoids.
+- **Status:** `syslog_status()` → `/status.syslog` (`configured`/`resolved`/`reachable`/`host`/
+  `port`/`error`), read by the web UI's Connections card exactly like the MQTT row.
+
 ## WiFi / LAN connectivity (reconnect + watchdog)
 
 The STA→LAN link (distinct from the car BLE link-state below) is kept up by two layers in
