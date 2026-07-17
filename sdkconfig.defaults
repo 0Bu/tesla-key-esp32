@@ -68,6 +68,11 @@ CONFIG_ESP_WIFI_TX_BUFFER_TYPE_DYNAMIC=y
 # HTTP Server
 CONFIG_HTTPD_MAX_REQ_HDR_LEN=1024
 CONFIG_HTTPD_MAX_URI_LEN=512
+# WebSocket support in esp_http_server — the web UI's live status stream (/events).
+# The browser opens ONE ws:// connection and the device pushes the /status JSON on a
+# fixed cadence (http_events.cpp), replacing the old 4 s HTTP poll. Target-agnostic,
+# so it lives in the shared base defaults (all five chips inherit it).
+CONFIG_HTTPD_WS_SUPPORT=y
 
 # LWIP sockets — the default of 10 is too tight: the http server (up to 7 open
 # sockets), its listener, mDNS, SNTP and evcc's polling can leave no BSD socket

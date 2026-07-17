@@ -11,6 +11,7 @@ idf_component_register(
         "http_common.cpp"
         "http_api.cpp"
         "http_status.cpp"
+        "http_events.cpp"
         "http_ota.cpp"
         "http_config.cpp"
         "mcp_server.cpp"
