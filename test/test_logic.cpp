@@ -29,6 +29,7 @@
 #include "logic/syslog_policy.hpp"
 #include "logic/ws_policy.hpp"
 #include "logic/active_window.hpp"
+#include "logic/ha_templates.hpp"
 
 #include <cmath>
 #include <cstdio>
@@ -562,6 +563,20 @@ static void test_ws_policy() {
     CHECK(ws_frame_action(false, "sub", 3) == WsAction::Ignore);
 }
 
+// ── HA MQTT-discovery binary value_template (logic/ha_templates.hpp) — the phantom-OFF fix ─────
+static void test_ha_templates() {
+    // Every binary template MUST guard on `is defined` so an unreported optional field renders empty
+    // (HA → unknown) instead of a phantom OFF — the whole point of the fix.
+    std::string door = tk::ha_binary_value_template("door", false);
+    CHECK(door == "{% if value_json.door is defined %}{{ 'ON' if value_json.door else 'OFF' }}{% endif %}");
+    CHECK(door.find("is defined") != std::string::npos);
+
+    // The inverted `lock` class emits OFF-when-true so a locked car reads "Locked", still guarded.
+    std::string locked = tk::ha_binary_value_template("locked", true);
+    CHECK(locked == "{% if value_json.locked is defined %}{{ 'OFF' if value_json.locked else 'ON' }}{% endif %}");
+    CHECK(locked.find("is defined") != std::string::npos);
+}
+
 // ── Active-window gate (logic/active_window.hpp) — the stale-charging-window fix ───────────────
 static void test_active_window() {
     using namespace tk;
@@ -590,6 +605,7 @@ static void test_active_window() {
 int main() {
     test_vin();
     test_syslog_policy();
+    test_ha_templates();
     test_units();
     test_link_state();
     test_link_state_strings();
