@@ -1,4 +1,5 @@
 #include "provisioning.hpp"
+#include "ota_update.hpp"   // ota_confirm_pending_image() — guard OTA rollback across the setup reboot
 
 #include <cstring>
 #include <cstdlib>
@@ -121,6 +122,7 @@ static esp_err_t save_post(httpd_req_t* req) {
         "<h2>Saved &#9989;</h2><p>Rebooting and connecting to your WiFi. "
         "The device will be reachable at <b>http://tesla-key-esp32.local</b>.</p>");
 
+    ota_confirm_pending_image();   // an intentional reboot must not roll back a fresh, healthy OTA
     vTaskDelay(pdMS_TO_TICKS(1000));
     esp_restart();
     return ESP_OK;
