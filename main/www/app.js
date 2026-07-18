@@ -425,7 +425,10 @@ function render(s){
     // car. Show real signal bars + dBm (the signal itself is fine — the link slot is the
     // problem), and name the reason (non-connectable ⇒ at the car's BLE-connection limit).
     // ble.rssi is the last-seen advert RSSI; fall back to the strongest entry in devices[].
-    var sr=(ble.rssi!=null)?ble.rssi:(ble.devices||[]).reduce(function(a,d){return d.rssi>a?d.rssi:a;},null);
+    // Null-safe "strongest nearby advert" fallback: seed is null and RSSI is always negative, so a
+    // bare `d.rssi > a` coerces null→0 and never wins (−70 > 0 is false) — the max always stayed
+    // null. Take the first value, then the least-negative, so bars+dBm show; empty devices[] → null.
+    var sr=(ble.rssi!=null)?ble.rssi:(ble.devices||[]).reduce(function(a,d){return (a==null||d.rssi>a)?d.rssi:a;},null);
     var sdbm=(sr!=null)?'<span class="dbm">'+sr+' dBm</span>':'';
     var rt=(ble.car_connectable===false)?'At connection limit':'Connection failed';
     bc.className='cv warn'; setHTML(bc,barsHTML(sr)+sdbm+'<span>'+rt+'</span>');
