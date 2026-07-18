@@ -112,7 +112,7 @@ public:
     // Consecutive failed connects to the *target* car — its advert was heard and the
     // VIN-derived name matched, but ble_gap_connect timed out/errored so the link never came
     // up (e.g. another device is already holding the car's BLE connection). Reset on a
-    // successful connect. Returns 0 once attempts stop (>30 s since the last one) so a car
+    // successful connect. Returns 0 once attempts stop (>90 s since the last one) so a car
     // that simply drove off reads as "out of range", not "failing". The web UI uses this to
     // tell "found the car but can't connect" apart from "looking for the car".
     uint32_t connect_fail_recent() const;
