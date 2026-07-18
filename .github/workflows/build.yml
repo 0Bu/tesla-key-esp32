@@ -159,7 +159,7 @@ jobs:
           echo "signed=true" >> "$GITHUB_OUTPUT"
           echo "OTA signing key provisioned from secret."
 
-      - name: Build firmware for all supported targets (ESP-IDF v5.5.4)
+      - name: Build firmware for all supported targets
         uses: espressif/esp-idf-ci-action@v1
         with:
           esp_idf_version: v5.5.4

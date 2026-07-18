@@ -68,8 +68,16 @@ gate_repo_slug() {
   local s
   s="${GATE_REPO_SLUG:-}"
   [ -z "$s" ] && command -v gh >/dev/null 2>&1 && s="$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null)"
+  # Reduce the origin URL to the trailing owner/repo. Handles the SCP form
+  # (git@github.com:owner/repo.git), the https form (https://github.com/owner/repo.git), AND the
+  # Claude Code web/remote sandbox's proxy remote (http://user@host:port/git/owner/repo) — the last
+  # one has extra path segments, so strip scheme+host and any leading path and keep the final
+  # owner/repo pair. Without this the REST fallback gets the raw URL as its "slug" and every
+  # web/remote merge/push fails closed even with a valid token.
   [ -z "$s" ] && s="$(git -C "${GATE_PROJ:-$PWD}" remote get-url origin 2>/dev/null \
-        | sed -E 's#^git@github\.com:##; s#^https://github\.com/##; s#\.git$##')"
+        | sed -E 's#\.git$##' \
+        | sed -E 's#^[a-zA-Z]+://[^/]+/##; s#^git@[^:]+:##' \
+        | sed -E 's#^.*/([^/]+/[^/]+)$#\1#')"
   printf '%s' "$s"
 }
 
