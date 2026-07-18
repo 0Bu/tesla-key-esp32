@@ -5,6 +5,7 @@
 #include "logic/units.hpp"
 #include "logic/link_state.hpp"
 #include "task_config.hpp"
+#include "logic/ha_templates.hpp"
 
 #include <atomic>
 #include <string>
@@ -191,10 +192,9 @@ static void publish_discovery() {
             // true=locked, so flip the template for that one class — a locked car
             // must read "Locked", not "Unlocked".
             bool invert = e.dev_cla && strcmp(e.dev_cla, "lock") == 0;
-            const char* on  = invert ? "OFF" : "ON";
-            const char* off = invert ? "ON"  : "OFF";
-            std::string tpl = std::string("{{ '") + on + "' if value_json." + e.field +
-                              " else '" + off + "' }}";
+            // Presence-aware: an unreported optional field renders empty → HA "unknown", not a
+            // phantom OFF/"Unlocked". Template built + host-tested in logic/ha_templates.hpp.
+            std::string tpl = tk::ha_binary_value_template(e.field, invert);
             cJSON_AddStringToObject(c, "val_tpl", tpl.c_str());
             cJSON_AddStringToObject(c, "pl_on",  "ON");
             cJSON_AddStringToObject(c, "pl_off", "OFF");

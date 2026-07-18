@@ -33,6 +33,7 @@
 #include "provisioning.hpp"
 #include "diag_log.hpp"
 #include "mqtt_ha.hpp"
+#include "syslog.hpp"
 #include "display.hpp"
 #include "led_status.hpp"
 
@@ -416,6 +417,12 @@ extern "C" void app_main() {
     // Static so they outlive app_main() (which deletes itself via vTaskDelete)
     static NvsStorageAdapter config_store("tesla_cfg");
     config_store.initialize();
+
+    // UDP Syslog forwarder for the diag log (NVS "syslog_uri" / CONFIG_TESLA_SYSLOG_SERVER;
+    // "" = disabled). Started before WiFi so it captures boot-time log lines too — its own
+    // task blocks on wifi_is_connected() until the link is up, so this is safe even though
+    // esp_netif_init() itself hasn't run yet (that happens inside wifi_connect() below).
+    syslog_start(config_store);
 
     // Resolve WiFi credentials: NVS overrides Kconfig defaults
     static std::string ssid     = CONFIG_TESLA_WIFI_SSID;

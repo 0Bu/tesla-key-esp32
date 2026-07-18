@@ -122,9 +122,10 @@ for t in $TARGETS; do
 
   # Size gate: fail loudly if the SIGNED app nears the OTA slot (0x1f0000) so a future growth
   # can't silently break OTA on whichever target grows largest while the others keep updating.
-  # The biggest images are esp32c6 and esp32c5 (~0x1d1000 signed). esp32c5 carries the extra
-  # on-device display + PSRAM code, and esp32s3 the display code too (no PSRAM), but both still
-  # fit at the base -Og — the Package A size levers (#154) freed the ~64 KB the display needs.
+  # The biggest image is esp32c5 (~0x1e1000 signed — only ~28 KB under the gate; esp32c6 next).
+  # esp32c5 carries the extra on-device display + PSRAM code, and esp32s3 the display code too
+  # (no PSRAM), but both still fit at the base -Og — the Package A size levers (#154) freed the
+  # ~64 KB the display needs. (Headroom is tight: a growing feature should re-measure here.)
   # (-Os is deliberately NOT used: whole-build -Os hard-freezes
   # this firmware under evcc+BLE load, rejected Package B — see sdkconfig.defaults.esp32c5.)
   # Every image's code rounds UP to a 64 KB Secure-Boot-v2 boundary and gets a 4 KB signature

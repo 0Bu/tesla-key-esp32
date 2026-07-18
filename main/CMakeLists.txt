@@ -11,6 +11,7 @@ idf_component_register(
         "http_common.cpp"
         "http_api.cpp"
         "http_status.cpp"
+        "http_events.cpp"
         "http_ota.cpp"
         "http_config.cpp"
         "mcp_server.cpp"
@@ -18,6 +19,7 @@ idf_component_register(
         "diag_log.cpp"
         "ota_update.cpp"
         "mqtt_ha.cpp"
+        "syslog.cpp"
         "display.cpp"
         "led_status.cpp"
     INCLUDE_DIRS

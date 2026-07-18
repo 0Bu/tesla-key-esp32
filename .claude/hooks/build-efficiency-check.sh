@@ -43,10 +43,10 @@ MIN_CCACHE_HIT_PCT=30        # warm cache below this hit rate ⇒ caching is ine
 DUR_REGRESSION_FACTOR=130    # build-job duration > 1.30× the previous main run …
 DUR_REGRESSION_MIN_S=120     # … and at least this many seconds slower ⇒ regression
 TOTAL_RUN_BUDGET_S=1500      # soft budget for the whole workflow (25 min)
-SIZE_GATE=$((0x1e0000))      # hard gate in ci-build-all.sh (1966080 B)
-SIZE_WARN=$((0x1d1000))      # proactive warn band ~64 KB below the gate; re-baselined +0x1000
-                             # for the one-time Secure Boot v2 signature sector every image now
-                             # carries, so the band still flags *further* growth, not the fixed cost
+SIZE_GATE=$((0x1e8000))      # hard gate in ci-build-all.sh (1998848 B = slot 0x1f0000 − 32 KB)
+SIZE_WARN=$((0x1d8000))      # proactive warn band ~64 KB below the gate. The largest signed image
+                             # (esp32c5, ~0x1e1000) now sits inside this band — headroom is tight
+                             # (~28 KB to the gate), so a growing feature must re-measure and shrink
 
 # Portable ISO-8601 → epoch (GNU date, then BSD/macOS date). Echoes "" on failure.
 epoch() {
