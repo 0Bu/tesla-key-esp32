@@ -28,6 +28,8 @@
 #include "logic/led_status.hpp"
 #include "logic/syslog_policy.hpp"
 #include "logic/ws_policy.hpp"
+#include "logic/active_window.hpp"
+#include "logic/ha_templates.hpp"
 #include "logic/http_body.hpp"
 
 #include <cmath>
@@ -128,6 +130,20 @@ static void test_syslog_policy() {
     CHECK(!tk::syslog_error_is_hard(EAGAIN));
     CHECK(!tk::syslog_error_is_hard(EINTR));
     CHECK(!tk::syslog_error_is_hard(0));
+
+    // Send-failure actions: the once-per-outage re-probe (the probe-storm fix). The FIRST hard
+    // failure (not yet failing) pauses forwarding AND triggers one immediate re-resolve+re-probe;
+    // a LATER hard failure in the same outage (already failing) still pauses forwarding but must
+    // NOT re-probe — else getaddrinfo()+ping fires per queued line.
+    CHECK(tk::syslog_send_failure_actions(/*hard*/true,  /*already_failing*/false).stop_forwarding);
+    CHECK(tk::syslog_send_failure_actions(true,  false).reprobe_once);
+    CHECK(tk::syslog_send_failure_actions(true,  true).stop_forwarding);
+    CHECK(!tk::syslog_send_failure_actions(true, true).reprobe_once);   // the fix: no storm
+    // Transient errors never pause forwarding or touch the throttle, whatever the latch state.
+    CHECK(!tk::syslog_send_failure_actions(false, false).stop_forwarding);
+    CHECK(!tk::syslog_send_failure_actions(false, false).reprobe_once);
+    CHECK(!tk::syslog_send_failure_actions(false, true).stop_forwarding);
+    CHECK(!tk::syslog_send_failure_actions(false, true).reprobe_once);
 }
 
 // ─── Unit conversion ────────────────────────────────────────────────────────────
@@ -591,9 +607,49 @@ static void test_http_body() {
     CHECK(http_body_read(nullptr, 8, 4, [&](char*, size_t) -> BodyChunk { return { BodyRecv::Data, 0 }; }) == -1);
 }
 
+// ── HA MQTT-discovery binary value_template (logic/ha_templates.hpp) — the phantom-OFF fix ─────
+static void test_ha_templates() {
+    // Every binary template MUST guard on `is defined` so an unreported optional field renders empty
+    // (HA → unknown) instead of a phantom OFF — the whole point of the fix.
+    std::string door = tk::ha_binary_value_template("door", false);
+    CHECK(door == "{% if value_json.door is defined %}{{ 'ON' if value_json.door else 'OFF' }}{% endif %}");
+    CHECK(door.find("is defined") != std::string::npos);
+
+    // The inverted `lock` class emits OFF-when-true so a locked car reads "Locked", still guarded.
+    std::string locked = tk::ha_binary_value_template("locked", true);
+    CHECK(locked == "{% if value_json.locked is defined %}{{ 'OFF' if value_json.locked else 'ON' }}{% endif %}");
+    CHECK(locked.find("is defined") != std::string::npos);
+}
+
+// ── Active-window gate (logic/active_window.hpp) — the stale-charging-window fix ───────────────
+static void test_active_window() {
+    using namespace tk;
+    // A recent command opens the window regardless of charging/contact.
+    CHECK(active_window_open({/*recent_cmd*/true, false, false, 0}) == true);
+    CHECK(active_window_open({true, false, true, 999999}) == true);
+
+    // Charging + FRESH contact holds the window open.
+    CHECK(active_window_open({false, /*charging*/true, /*have_contact*/true, 0}) == true);
+    CHECK(active_window_open({false, true, true, kAwakeMaxAgeS - 1}) == true);
+
+    // The bug: charging cached true but contact STALE must NOT hold the window open (car departed
+    // while "Charging" → otherwise perpetual scanning). Boundary is exactly kAwakeMaxAgeS.
+    CHECK(active_window_open({false, true, true, kAwakeMaxAgeS})     == false);
+    CHECK(active_window_open({false, true, true, kAwakeMaxAgeS + 1}) == false);
+    CHECK(active_window_open({false, true, true, 999999})           == false);
+
+    // Charging cached true but we have NO contact at all (never heard) → not fresh → closed.
+    CHECK(active_window_open({false, true, /*have_contact*/false, 0}) == false);
+
+    // Not charging and no recent command → closed, whatever the contact age.
+    CHECK(active_window_open({false, false, true, 0}) == false);
+    CHECK(active_window_open({false, false, false, 0}) == false);
+}
+
 int main() {
     test_vin();
     test_syslog_policy();
+    test_ha_templates();
     test_units();
     test_link_state();
     test_link_state_strings();
@@ -603,6 +659,7 @@ int main() {
     test_display_model();
     test_led();
     test_ws_policy();
+    test_active_window();
     test_http_body();
 
     if (g_failures == 0) {
