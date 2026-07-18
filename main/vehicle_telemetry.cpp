@@ -6,6 +6,7 @@
 #include "vehicle_ctrl.hpp"
 #include "vehicle_ctrl_internal.hpp"
 #include "logic/units.hpp"
+#include "logic/active_window.hpp"
 #include <esp_log.h>
 #include <esp_heap_caps.h>
 
@@ -387,15 +388,22 @@ void VehicleController::loop_task_fn_(void* arg) {
         // The auto-pair VCSEC health poll keeps running (it never wakes the MCU) as the
         // revocation canary, and evcc reads stay served from cache (stale by design).
         uint32_t now_ticks = xTaskGetTickCount();
-        bool charging;
+        bool charging_state;
         {
             ChargeStateResult cs = self->copy_locked_(self->last_known_charge_);
-            charging = cs.valid && (cs.charging_state == "Charging" ||
-                                    cs.charging_state == "Starting");
+            charging_state = cs.valid && (cs.charging_state == "Charging" ||
+                                          cs.charging_state == "Starting");
         }
         uint32_t lc = self->last_cmd_ticks_.load();
         bool recent_cmd = (lc != 0) && ((now_ticks - lc) < pdMS_TO_TICKS(kActiveWindowMs));
-        bool window = recent_cmd || charging;
+        // Gate the charging arm on FRESH contact: charging_state is a RAM cache never invalidated on
+        // a link drop, so a car that unplugged and left (or dropped BLE) while cached "Charging"
+        // would otherwise hold the window open forever → perpetual scanning. A charging, reachable
+        // car answers the ~10 s charge poll, so its contact stays fresh (< kAwakeMaxAgeS). Decision +
+        // boundary are host-tested in logic/active_window.hpp.
+        uint32_t contact_age = 0;
+        bool have_contact = self->seconds_since_contact(contact_age);
+        bool window = tk::active_window_open({recent_cmd, charging_state, have_contact, contact_age});
 
         // Falling edge: window just closed → drop the link once so the car can sleep.
         if (paired && prev_window && !window && self->ble_connected()) {
