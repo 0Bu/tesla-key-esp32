@@ -211,11 +211,14 @@ static void handle_send_failure(int err, const char* what, bool& resolved, bool&
                                  bool& have_checked, bool& send_failing) {
     const bool hard = tk::syslog_error_is_hard(err);
     set_status(false, false, hard ? "Send failed" : "Send failed (transient)");
-    if (hard) {
-        resolved     = false;   // re-resolve + re-probe now: the route/destination is implicated
-        logged_state = false;
-        have_checked = false;
-    }
+    // Decide from (hard, already-failing) — the once-per-outage re-probe is host-tested in
+    // logic/syslog_policy.hpp. Clearing have_checked on EVERY hard failure (the old code) forced
+    // getaddrinfo()+ping to re-run per queued line — a probe storm during an outage. Now the
+    // immediate re-probe fires only on the FIRST hard failure; later ones just pause forwarding and
+    // let check_interval govern re-checks.
+    const tk::SendFailureActions act = tk::syslog_send_failure_actions(hard, send_failing);
+    if (act.stop_forwarding) resolved = false;
+    if (act.reprobe_once)  { have_checked = false; logged_state = false; }
     if (!send_failing) {
         send_failing = true;
         ESP_LOGW(TAG, "%s failed (error %d, %s) - forwarding paused",
