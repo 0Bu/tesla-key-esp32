@@ -76,6 +76,20 @@ esp_err_t handle_status(GuardedReq rq);           // GET  /status
 esp_err_t handle_diag(GuardedReq rq);             // GET  /diag
 esp_err_t handle_scan(GuardedReq rq);             // POST /scan
 
+// Build the /status object (caller owns the returned cJSON; nullptr under OOM). The ONE builder
+// shared by handle_status (GET /status) and the /events WebSocket push (http_events.cpp), so the
+// pushed frame and a manual GET can never drift.
+cJSON* build_status_object();
+
+// ─── http_events.cpp — /events WebSocket live-status push ─────────────────────
+// The web UI's live data stream: the browser holds ONE ws:// connection to /events and the device
+// pushes build_status_object() on a fixed cadence, replacing the old interval poll of GET /status
+// (WS-only, no poll fallback). The /events handler is the ONE route NOT reached through the
+// GuardedReq/handle_all trampoline — the WS handshake needs the raw esp_http_server signature, so
+// it is registered directly and guards its own allocations internally (see http_events.cpp).
+void http_events_register(httpd_handle_t server);  // register /events + start the broadcast task
+void http_events_on_close(int sockfd);             // drop a closed socket from the broadcast list
+
 // http_ota.cpp — OTA self-update endpoints
 esp_err_t handle_ota_check(GuardedReq rq);        // GET  /ota/check[?ms=<epoch>]
 esp_err_t handle_ota_update(GuardedReq rq);       // POST /ota/update
@@ -87,6 +101,7 @@ esp_err_t handle_send_key(GuardedReq rq);         // POST /send_key
 esp_err_t handle_set_time(GuardedReq rq);         // POST /set_time
 esp_err_t handle_set_vin(GuardedReq rq);          // POST /set_vin
 esp_err_t handle_set_mqtt(GuardedReq rq);         // POST /set_mqtt
+esp_err_t handle_set_syslog(GuardedReq rq);       // POST /set_syslog
 
 // mcp_server.cpp — MCP endpoint (Streamable HTTP, stateless JSON-RPC 2.0; docs/MCP.md)
 esp_err_t mcp_handle_post(GuardedReq rq);         // POST /mcp

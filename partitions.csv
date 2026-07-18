@@ -1,9 +1,9 @@
 # Name,    Type, SubType, Offset,   Size,     Flags
 # Dual-OTA layout sized to fill 4 MB flash exactly — 4 MB is the smallest part across
 # the supported targets (esp32 / esp32s3 / esp32c3 / esp32c6 / esp32c5), so it sizes the table.
-# Each OTA slot is 0x1f0000 (~2.03 MB); the app ranges ~1.5 MB (esp32) up to a signed ~0x1d1000
-# (~1.9 MB) on the largest targets (esp32c6, and esp32c5 which also carries the on-device
-# display + PSRAM) — each image's code rounds up to a 64 KB Secure-Boot boundary with a 4 KB
+# Each OTA slot is 0x1f0000 (~2.03 MB); the app ranges ~1.5 MB (esp32) up to a signed ~0x1e1000
+# (~1.97 MB) on the largest target (esp32c5, which carries the on-device display + PSRAM; esp32c6
+# is next) — each image's code rounds up to a 64 KB Secure-Boot boundary with a 4 KB
 # signature appended, still keeping healthy headroom (the ci-build-all.sh app-size gate sits
 # 32 KB below the slot). Every target builds at the base -Og. A larger flash (e.g. the T-Dongle-C5's
 # 16 MB or an 8 MB S3) just leaves the top unused, so
