@@ -24,7 +24,7 @@ firmware change; each change also publishes a
 [GitHub release](https://github.com/0Bu/tesla-key-esp32/releases/latest) with the same bins.
 
 Flash by hand (needs `brew install esptool`). Use the per-target **merged** image — it bakes
-in the correct bootloader offset (0x1000 on the classic esp32, 0x0 elsewhere), so one command
+in the correct bootloader offset (0x1000 on the classic esp32, 0x2000 on esp32c5, 0x0 on s3/c3/c6), so one command
 works for any chip. This erases `nvs` (re-enter WiFi/VIN, re-pair once):
 ```bash
 # <suffix>: "" for esp32, else -s3 / -c3 / -c6 / -c5 (so "esp32" appears once in the name)
