@@ -30,6 +30,7 @@
 #include "logic/ws_policy.hpp"
 #include "logic/active_window.hpp"
 #include "logic/ha_templates.hpp"
+#include "logic/http_body.hpp"
 
 #include <cmath>
 #include <cstdio>
@@ -563,6 +564,49 @@ static void test_ws_policy() {
     CHECK(ws_frame_action(false, "sub", 3) == WsAction::Ignore);
 }
 
+// ── request-body reassembly (logic/http_body.hpp) — the multi-segment truncation fix ──────────
+static void test_http_body() {
+    using namespace tk;
+    char buf[64];
+
+    // Whole body in one recv.
+    {
+        std::string body = "{\"amps\":16}";
+        int r = http_body_read(buf, sizeof(buf), body.size(),
+            [&](char* dst, size_t len) -> BodyChunk { std::memcpy(dst, body.data(), len); return { BodyRecv::Data, len }; });
+        CHECK(r == (int)body.size());
+        CHECK(std::string(buf) == body);
+    }
+    // Delivered ONE byte at a time (the segmentation the old single-recv truncated).
+    {
+        std::string body = "{\"broker\":\"host:1883\"}";
+        size_t off = 0;
+        int r = http_body_read(buf, sizeof(buf), body.size(),
+            [&](char* dst, size_t) -> BodyChunk { dst[0] = body[off++]; return { BodyRecv::Data, 1 }; });
+        CHECK(r == (int)body.size());
+        CHECK(std::string(buf) == body);
+    }
+    // A mid-body peer error / close → fail (no truncated result handed back).
+    {
+        int r = http_body_read(buf, sizeof(buf), 10,
+            [&](char* dst, size_t) -> BodyChunk { dst[0] = 'x'; return { BodyRecv::Error, 0 }; });
+        CHECK(r == -1);
+    }
+    // Bounded timeouts: BODY_MAX_IDLE consecutive timeouts are tolerated, one more abandons it.
+    {
+        int calls = 0;
+        int r = http_body_read(buf, sizeof(buf), 4,
+            [&](char*, size_t) -> BodyChunk { ++calls; return { BodyRecv::Timeout, 0 }; });
+        CHECK(r == -1);
+        CHECK(calls == BODY_MAX_IDLE + 1);   // gives up after one too many
+    }
+    // Body too large for the buffer (no room for the terminator) → fail, never overflow.
+    CHECK(http_body_read(buf, sizeof(buf), sizeof(buf), [&](char*, size_t) -> BodyChunk { return { BodyRecv::Data, 0 }; }) == -1);
+    // Empty / null guards.
+    CHECK(http_body_read(buf, sizeof(buf), 0, [&](char*, size_t) -> BodyChunk { return { BodyRecv::Data, 0 }; }) == -1);
+    CHECK(http_body_read(nullptr, 8, 4, [&](char*, size_t) -> BodyChunk { return { BodyRecv::Data, 0 }; }) == -1);
+}
+
 // ── HA MQTT-discovery binary value_template (logic/ha_templates.hpp) — the phantom-OFF fix ─────
 static void test_ha_templates() {
     // Every binary template MUST guard on `is defined` so an unreported optional field renders empty
@@ -616,6 +660,7 @@ int main() {
     test_led();
     test_ws_policy();
     test_active_window();
+    test_http_body();
 
     if (g_failures == 0) {
         std::printf("OK  %d checks passed\n", g_checks);

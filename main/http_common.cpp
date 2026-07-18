@@ -2,6 +2,7 @@
 // plumbing, body/query parsing, and the browser-clock plausibility window.
 
 #include "http_handlers.hpp"
+#include "logic/http_body.hpp"
 #include <esp_log.h>
 #include <esp_app_desc.h>
 #include <cstring>
@@ -59,10 +60,18 @@ char* read_body(httpd_req_t* req) {
     size_t len = req->content_len;
     char* buf  = (char*)malloc(len + 1);
     if (!buf) return nullptr;
-    int received = httpd_req_recv(req, buf, len);
-    if (received <= 0) { free(buf); return nullptr; }
-    buf[received] = '\0';
-    return buf;
+    // A POST body is a TCP stream: httpd_req_recv may return only the first segment, so loop until
+    // all content_len bytes are in (with a bounded timeout retry) — a single recv truncated a
+    // multi-segment body. Loop + NUL-terminate host-tested in logic/http_body.hpp.
+    int received = tk::http_body_read(buf, len + 1, len,
+        [req](char* dst, size_t want) -> tk::BodyChunk {
+            int r = httpd_req_recv(req, dst, want);
+            if (r == HTTPD_SOCK_ERR_TIMEOUT) return { tk::BodyRecv::Timeout, 0 };
+            if (r <= 0)                      return { tk::BodyRecv::Error,   0 };
+            return { tk::BodyRecv::Data, static_cast<size_t>(r) };
+        });
+    if (received < 0) { free(buf); return nullptr; }
+    return buf;   // already NUL-terminated by http_body_read
 }
 
 bool query_param_is(httpd_req_t* req, const char* key, const char* want) {
