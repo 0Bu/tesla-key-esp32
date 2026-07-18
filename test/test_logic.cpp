@@ -127,6 +127,20 @@ static void test_syslog_policy() {
     CHECK(!tk::syslog_error_is_hard(EAGAIN));
     CHECK(!tk::syslog_error_is_hard(EINTR));
     CHECK(!tk::syslog_error_is_hard(0));
+
+    // Send-failure actions: the once-per-outage re-probe (the probe-storm fix). The FIRST hard
+    // failure (not yet failing) pauses forwarding AND triggers one immediate re-resolve+re-probe;
+    // a LATER hard failure in the same outage (already failing) still pauses forwarding but must
+    // NOT re-probe — else getaddrinfo()+ping fires per queued line.
+    CHECK(tk::syslog_send_failure_actions(/*hard*/true,  /*already_failing*/false).stop_forwarding);
+    CHECK(tk::syslog_send_failure_actions(true,  false).reprobe_once);
+    CHECK(tk::syslog_send_failure_actions(true,  true).stop_forwarding);
+    CHECK(!tk::syslog_send_failure_actions(true, true).reprobe_once);   // the fix: no storm
+    // Transient errors never pause forwarding or touch the throttle, whatever the latch state.
+    CHECK(!tk::syslog_send_failure_actions(false, false).stop_forwarding);
+    CHECK(!tk::syslog_send_failure_actions(false, false).reprobe_once);
+    CHECK(!tk::syslog_send_failure_actions(false, true).stop_forwarding);
+    CHECK(!tk::syslog_send_failure_actions(false, true).reprobe_once);
 }
 
 // ─── Unit conversion ────────────────────────────────────────────────────────────
