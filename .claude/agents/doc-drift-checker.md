@@ -60,7 +60,7 @@ The **cross-referenced facts** that must stay in sync (change one → check all 
 6. **Version.** `version.txt` vs. any doc that pins a version, and the OTA/manifest narrative.
 7. **Platform / target strings.** `main/platform.hpp` (`TK_PLATFORM`) must agree with
    `/api/proxy/1/version` output as documented, the HA device model, the esp-web-tools
-   `chipFamily`, and the supported-target list (esp32 / s3 / c3 / c6) wherever it appears.
+   `chipFamily`, and the supported-target list (esp32 / s3 / c3 / c6 / c5) wherever it appears.
 8. **Library pin.** `main/idf_component.yml` `yoziru/tesla-ble` version vs. the pin quoted in
    CLAUDE.md's `## Key Dependency` and any doc that names it.
 9. **Status / telemetry fields & MQTT entities.** A field added/removed in `/status` (`tele.*`)
