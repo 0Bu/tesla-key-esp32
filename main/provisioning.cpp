@@ -1,4 +1,5 @@
 #include "provisioning.hpp"
+#include "logic/http_body.hpp"
 
 #include <cstring>
 #include <cstdlib>
@@ -84,9 +85,18 @@ static esp_err_t save_post(httpd_req_t* req) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "empty/oversized form");
         return ESP_FAIL;
     }
-    std::string body(len, '\0');
-    int got = httpd_req_recv(req, body.data(), len);
-    if (got <= 0) {
+    // Reassemble the whole body: httpd_req_recv may return only the first TCP segment, so a single
+    // recv could persist a truncated ssid/pass/vin. Loop until content_len (bounded timeout retry) —
+    // logic/http_body.hpp. +1 capacity for its NUL terminator.
+    std::string body(len + 1, '\0');
+    int got = tk::http_body_read(body.data(), body.size(), len,
+        [req](char* dst, size_t want) -> tk::BodyChunk {
+            int r = httpd_req_recv(req, dst, want);
+            if (r == HTTPD_SOCK_ERR_TIMEOUT) return { tk::BodyRecv::Timeout, 0 };
+            if (r <= 0)                      return { tk::BodyRecv::Error,   0 };
+            return { tk::BodyRecv::Data, static_cast<size_t>(r) };
+        });
+    if (got < 0) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "recv failed");
         return ESP_FAIL;
     }
