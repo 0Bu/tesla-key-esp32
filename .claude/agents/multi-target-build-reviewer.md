@@ -15,8 +15,9 @@ follow-up session apply the fix.
 
 ## The multi-target reality you are guarding (from CLAUDE.md + hard-won history)
 
-- **One source tree, five targets; CI builds all five** (`scripts/ci-build-all.sh`, matrix in
-  `.github/workflows/build.yml`). Our own code is target-agnostic — divergence lives in
+- **One source tree, five targets; CI builds all five** (`scripts/ci-build-all.sh` set-targets
+  each in turn, run by the single `build` job in `.github/workflows/build.yml` — no Actions
+  matrix). Our own code is target-agnostic — divergence lives in
   **config, build wiring, offsets, and per-chip filenames**, and that is what breaks silently
   because a single-target build looks fine.
 - **esp32c5 is special.** yoziru/tesla-ble v5.1.1 does **not** list esp32c5 in its
@@ -54,7 +55,7 @@ the range you're given. Then walk this checklist for anything the change touches
 1. **New/renamed/removed target.** If the target set changed, is it reflected in *every* place
    the five are enumerated: `ci-build-all.sh` (build loop + `image_suffix()`), `build-pages.sh`
    (`image_suffix()`), `ota_update.cpp` (`TESLA_OTA_IMG_SUFFIX` + platform string),
-   `main/logic/` platform/suffix tests, `sdkconfig.defaults.<target>`, the CI matrix, and the
+   `main/logic/` platform/suffix tests, `sdkconfig.defaults.<target>`, and the
    docs (CLAUDE.md, README, ARCHITECTURE, flash-esp32 skill)? A target added in one place and
    missed in another ships an image no device can pull, or a build that never runs.
 2. **esp32c5 patch integrity.** Any change to `main/idf_component.yml` — does it still route
