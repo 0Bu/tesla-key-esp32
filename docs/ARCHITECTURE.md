@@ -4,8 +4,39 @@ Deep internal reference for tesla-key-esp32. This is the **on-demand** companion
 [`.claude/CLAUDE.md`](../.claude/CLAUDE.md): CLAUDE.md carries the always-needed essentials
 (build/flash, component map, NVS table, command list, HTTP API, memory constraints); the
 full narrative lives here so it isn't reloaded into every session. Read this when working on
-telemetry, the MQTT bridge, WiFi/LAN connectivity, sleep/link-state, pairing, or OTA. Keep both in sync — the
-`project-review` skill checks for drift between them.
+telemetry, the MQTT bridge, the web UI live feed, WiFi/LAN connectivity, sleep/link-state, pairing,
+or OTA. Keep both in sync — the `project-review` skill checks for drift between them.
+
+## Web UI live feed (`/events`)
+
+The web UI's live data is **WebSocket-only** — there is no interval polling and no HTTP poll
+fallback. On load the browser (`main/www/app.js` `boot()`) opens ONE socket to `ws://<device>/events`
+and sends the text `sub`; the device answers with an immediate `/status` snapshot and thereafter a
+background task pushes a fresh `/status` frame every ~2 s. Each frame is exactly the object
+`GET /status` returns — `build_status_object()` (`http_status.cpp`) is the single builder both paths
+share, so the pushed frame and a manual `GET /status` can never drift, and the client just calls the
+existing `render()` on each frame (no envelope).
+
+- **Server** (`main/http_events.cpp`): an 8-slot fd registry (mutex-guarded), a broadcast task
+  (`ws_broadcast_task`, ~2 s cadence, self-gated on `ws_any_clients()` so it costs nothing when no
+  browser is open), and the `/events` handler. The handler is registered **raw**
+  (`httpd_register_uri_handler` with `is_websocket=true`) BEFORE the `/*` wildcards — so it is the
+  ONE route NOT reached through the `handle_all` try/catch, and it guards its own allocations
+  (a `std::bad_alloc` on this memory-tight chip must drop a frame, never unwind through httpd's C
+  frames → `std::terminate` → reboot). Needs `CONFIG_HTTPD_WS_SUPPORT=y` (base `sdkconfig.defaults`,
+  target-agnostic) and `config.close_fn` (`http_server.cpp`) to drop a closed fd from the registry.
+- **Frame policy** is the pure, host-tested `main/logic/ws_policy.hpp`: `ws_frame_plan()` decides
+  from a frame's *announced* length — before any payload is read — whether to skip an empty frame,
+  read one that fits the 16-byte command buffer, or **close** an oversized one (undrainable: httpd
+  leaves its body in the socket and offers no skip, so the stream is desynchronized and dropping the
+  connection is the only honest exit — sizing a buffer from a client-asserted 64-bit length would be
+  a one-frame OOM). `ws_frame_action()` then classifies the bytes actually read; only `sub`
+  subscribes.
+- **Client** (`app.js`): `render(JSON.parse(frame))` on each message; on close, keep the last
+  rendered state and reconnect after 3 s. `poll()` is repurposed to `ws.send("sub")` — an
+  on-demand snapshot request after a user action (charge/wake/gen-key), so the UI refreshes at once
+  instead of waiting for the next push, still purely over the socket. `waitReboot()` still does a
+  plain `GET /status` — that is post-OTA reboot detection, a different concern from the live feed.
 
 ## Read-only telemetry (detail)
 
@@ -72,7 +103,7 @@ Partition layout (`partitions.csv`) is dual-OTA (`otadata` + `ota_0`/`ota_1`, ~2
 sized to fill 4 MB (the smallest supported flash — the T-Dongle-C5's 16 MB leaves the top
 unused) so ONE table serves every target; app at `0x20000`. The `ci-build-all.sh` **app-size gate**
 sits at `slot − 32 KB` (0x1e8000): each image's code rounds up to a 64 KB Secure-Boot boundary + a
-4 KB signature, and the largest — esp32c6 and esp32c5, ~0x1d1000 signed — clear it comfortably.
+4 KB signature, and the largest — esp32c5 (the only target with display+PSRAM), ~0x1e1000 signed — clears it by ~28 KB.
 **esp32c5 carries the extra on-device display + PSRAM code, and esp32s3 the display code too
 (no PSRAM), but both still fit at the base `-Og`** like every target: the Package A size levers
 (#154) freed the ~64 KB the display needs, so no `-Os` (which hard-freezes under load — rejected

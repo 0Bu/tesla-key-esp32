@@ -42,8 +42,9 @@ It covers VIN validation, imperial→metric conversion, the `link_state()` four-
 platform/OTA-suffix mapping, the MCP protocol core (version negotiation, method routing,
 tool/arg-spec registry, int clamp), the shared command-outcome text, the on-device display
 presenter (the priority ladder / SoC gradient / RSSI→bars / SSID-scroll decisions the ST7735
-renderer draws) and the status-LED ladder (`logic/led_status.hpp`, reading the same shared
-`UiSnapshot` + the shared SoC gradient) — all delegated to
+renderer draws), the status-LED ladder (`logic/led_status.hpp`, reading the same shared
+`UiSnapshot` + the shared SoC gradient) and the `/events` WebSocket command policy
+(`logic/ws_policy.hpp` — frame-length plan / "sub" classification) — all delegated to
 IDF-free headers in `main/logic/` so the device runs the same code the test does. CI gates the firmware build on it (`logic-test` job). Add new
 hardware-free logic to `main/logic/` and a `CHECK` in `test/test_logic.cpp`. Full detail:
 [`test/README.md`](../test/README.md).
@@ -93,7 +94,14 @@ vehicle_pairing.cpp    → auto_pair_task, key mgmt/fingerprint, session invalid
 http_server.cpp        → esp_http_server on port 80: wildcard dispatch + the handle_all
                          try/catch OOM guard (503) EVERY handler runs under
 http_api.cpp           → evcc routes (/api/1/…, /api/proxy/1/version)
-http_status.cpp        → web UI (/), /status, /diag, /scan
+http_status.cpp        → web UI (/), /status, /diag, /scan. build_status_object() is the ONE
+                         /status-JSON builder shared by GET /status and the /events WS push
+http_events.cpp        → /events — WebSocket live-status push for the web UI. The browser holds
+                         ONE ws:// socket; a background task pushes build_status_object() every
+                         ~2 s (WS-only, replaces the old browser /status interval poll — no poll
+                         fallback). Registered RAW (is_websocket) OUTSIDE the handle_all guard, so
+                         it guards its own allocations; 8-client registry; "sub" command policy is
+                         host-tested logic/ws_policy.hpp
 http_ota.cpp           → /ota/check|update|status
 http_config.cpp        → /gen_keys, /send_key, /set_time, /set_vin, /set_mqtt, /set_syslog
 mcp_server.cpp         → /mcp — MCP server for AI agents (stateless JSON-RPC 2.0;
@@ -187,7 +195,8 @@ GET  /  (alias /index.html)                    # embedded web UI (gzipped into t
 POST /api/1/vehicles/{VIN}/command/{command}   # execute command
 GET  /api/1/vehicles/{VIN}/vehicle_data        # charge state
 GET  /api/1/vehicles/{VIN}/body_controller_state
-GET  /status                                   # web-UI JSON (wifi, ble, mqtt, syslog, vehicle cache, read-only telemetry under "tele")
+GET  /status                                   # web-UI JSON snapshot (wifi, ble, mqtt, syslog, vehicle cache, read-only telemetry under "tele"). Request/response form; the live UI reads /events instead
+GET  /events                                   # WebSocket live-status push. Client sends text "sub" → immediate /status snapshot, then a fresh /status frame every ~2 s. The web UI's live feed (WS-only, no interval poll). Non-WS GET → handshake only
 POST /scan                                     # start a time-limited BLE discovery scan
 POST /mcp                                      # MCP server (Streamable HTTP, stateless JSON-RPC 2.0; GET → 405, no SSE).
                                                # Tools = the run-on-key charging command set + read-only get_vehicle_state
@@ -238,7 +247,7 @@ unused) so ONE table serves every target; **app at `0x20000`**. Per-target **boo
 is handled by `@flash_args` and the manifest — 0x1000 on the classic esp32, **0x2000 on esp32c5**
 (its newer flash layout), 0x0 on s3/c3/c6. The `ci-build-all.sh` size gate sits at `slot − 32 KB`
 (0x1e8000, below the 0x1f0000 = 2031616 B slot). **esp32c5 carries the on-device display + PSRAM**
-(largest image, signed ~0x1d1000 alongside esp32c6) and **esp32s3 carries the display code too**
+(**the largest image** — it alone has display+PSRAM; signed ~0x1e1000, ≈28 KB under the gate) and **esp32s3 carries the display code too**
 (no PSRAM), but both stay on the base **`-Og`** like every target: the Package A size levers (#154)
 freed the ~64 KB the display needs, so no `-Os`
 is required. (`-Os` is banned here — whole-build `-Os` hard-freezes under evcc+BLE load, rejected
