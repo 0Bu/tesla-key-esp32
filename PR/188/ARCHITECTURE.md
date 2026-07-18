@@ -86,7 +86,12 @@ a new `version` in `manifest.json` but serves an old `.bin`. No eFuses burned.
 holds rollback armed until a freshly-flashed image has run healthily for a window
 (`kOtaHealthGateS` ≈ 90 s). An image that boots but then crashes/OOM-reboots under load dies
 while still `PENDING_VERIFY`, so the bootloader reverts to the previous slot rather than
-having committed it at startup.
+having committed it at startup. A **deliberate, user-initiated reboot** inside that window is a
+different case, though: the three config handlers that reboot (`/set_vin`, `/set_mqtt`,
+`/set_syslog`) and the setup-portal save call `ota_confirm_pending_image()` first — a user actively
+interacting is proof the image runs, so an intentional restart must not look like a failed boot and
+roll the update back. It is a no-op on a normal boot / already-valid image. (An unattended
+brownout/power-cycle in the window still reverts — that is the crash-safety net working as intended.)
 
 **Image signature.** Builds use the Secure Boot v2 RSA-3072 signature scheme *without*
 hardware Secure Boot (`CONFIG_SECURE_SIGNED_APPS_NO_SECURE_BOOT` + `..._RSA_SCHEME` +
