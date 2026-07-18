@@ -43,9 +43,12 @@ platform/OTA-suffix mapping, the MCP protocol core (version negotiation, method 
 tool/arg-spec registry, int clamp), the shared command-outcome text, the on-device display
 presenter (the priority ladder / SoC gradient / RSSI→bars / SSID-scroll decisions the ST7735
 renderer draws), the status-LED ladder (`logic/led_status.hpp`, reading the same shared
-`UiSnapshot` + the shared SoC gradient) and the `/events` WebSocket command policy
-(`logic/ws_policy.hpp` — frame-length plan / "sub" classification) — all delegated to
-IDF-free headers in `main/logic/` so the device runs the same code the test does. CI gates the firmware build on it (`logic-test` job). Add new
+`UiSnapshot` + the shared SoC gradient), the `/events` WebSocket command policy
+(`logic/ws_policy.hpp` — frame-length plan / "sub" classification), the active-window poll gate
+(`logic/active_window.hpp` — charging held open only on fresh contact), the HA binary
+`value_template` builder (`logic/ha_templates.hpp` — presence-aware `is defined` guard) and the
+POST-body reassembly loop (`logic/http_body.hpp` — multi-segment recv + bounded timeout) — all
+delegated to IDF-free headers in `main/logic/` so the device runs the same code the test does. CI gates the firmware build on it (`logic-test` job). Add new
 hardware-free logic to `main/logic/` and a `CHECK` in `test/test_logic.cpp`. Full detail:
 [`test/README.md`](../test/README.md).
 
