@@ -28,6 +28,7 @@
 #include "logic/led_status.hpp"
 #include "logic/syslog_policy.hpp"
 #include "logic/ws_policy.hpp"
+#include "logic/active_window.hpp"
 
 #include <cmath>
 #include <cstdio>
@@ -561,6 +562,31 @@ static void test_ws_policy() {
     CHECK(ws_frame_action(false, "sub", 3) == WsAction::Ignore);
 }
 
+// ── Active-window gate (logic/active_window.hpp) — the stale-charging-window fix ───────────────
+static void test_active_window() {
+    using namespace tk;
+    // A recent command opens the window regardless of charging/contact.
+    CHECK(active_window_open({/*recent_cmd*/true, false, false, 0}) == true);
+    CHECK(active_window_open({true, false, true, 999999}) == true);
+
+    // Charging + FRESH contact holds the window open.
+    CHECK(active_window_open({false, /*charging*/true, /*have_contact*/true, 0}) == true);
+    CHECK(active_window_open({false, true, true, kAwakeMaxAgeS - 1}) == true);
+
+    // The bug: charging cached true but contact STALE must NOT hold the window open (car departed
+    // while "Charging" → otherwise perpetual scanning). Boundary is exactly kAwakeMaxAgeS.
+    CHECK(active_window_open({false, true, true, kAwakeMaxAgeS})     == false);
+    CHECK(active_window_open({false, true, true, kAwakeMaxAgeS + 1}) == false);
+    CHECK(active_window_open({false, true, true, 999999})           == false);
+
+    // Charging cached true but we have NO contact at all (never heard) → not fresh → closed.
+    CHECK(active_window_open({false, true, /*have_contact*/false, 0}) == false);
+
+    // Not charging and no recent command → closed, whatever the contact age.
+    CHECK(active_window_open({false, false, true, 0}) == false);
+    CHECK(active_window_open({false, false, false, 0}) == false);
+}
+
 int main() {
     test_vin();
     test_syslog_policy();
@@ -573,6 +599,7 @@ int main() {
     test_display_model();
     test_led();
     test_ws_policy();
+    test_active_window();
 
     if (g_failures == 0) {
         std::printf("OK  %d checks passed\n", g_checks);
