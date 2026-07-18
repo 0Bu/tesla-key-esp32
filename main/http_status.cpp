@@ -1,9 +1,15 @@
 // Web-UI-facing routes: the embedded page itself and the endpoints that drive it:
 //   GET  /        (embedded, pre-gzipped web UI)
-//   GET  /status  (device + pairing state — the UI polls this every 4 s)
+//   GET  /status  (device + pairing state — a request/response snapshot of the live state)
 //   GET  /diag    (in-memory diagnostic log)
 //   POST /scan    (time-limited BLE discovery scan)
 // Dispatched from handle_all in http_server.cpp (inside its try/catch OOM guard).
+//
+// The live web UI no longer polls /status on a timer: it holds one WebSocket to /events and the
+// device pushes this same JSON (built by build_status_object() below) on a fixed cadence — see
+// http_events.cpp. /status stays as the request/response form for curl/diagnostics and the
+// post-OTA reboot probe (app.js waitReboot()); build_status_object() is the ONE builder both paths
+// share, so the pushed frame and a manual GET can never drift.
 
 #include "http_handlers.hpp"
 #include "diag_log.hpp"
@@ -40,17 +46,23 @@ static void current_ip(char* out, size_t sz) {
 // Whether the car is "live" (awake) vs merely sleeping vs unreachable is decided centrally
 // in VehicleController::link_state(), shared with the MQTT bridge so the two never drift.
 
-esp_err_t handle_status(GuardedReq rq) {
-    httpd_req_t* req = rq.req;
-    // Live device state — the web UI polls this every 4 s. Never let a browser/proxy serve a
-    // cached copy, or the hero sticks on a stale state (e.g. a transient "Unreachable") until a
-    // manual reload. Matches the no-store on "/" and "/diag"; the poll also cache-busts the URL.
-    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
-
+// Build the device + pairing + vehicle status object (caller owns the returned cJSON). This is the
+// single source for BOTH the GET /status response and the /events WebSocket push (http_events.cpp),
+// so the two can never drift. Pure state read — safe to call from the httpd task or the broadcast
+// task (it only reads caches + the esp_wifi/mqtt/syslog getters, the same reads GET /status already
+// did concurrently with the telemetry writer). May return nullptr under OOM (cJSON alloc failure);
+// every caller guards for it.
+cJSON* build_status_object() {
     char ip[16];
     current_ip(ip, sizeof(ip));
 
     cJSON* root = cJSON_CreateObject();
+    // The by-value getters below (vin(), mqtt_ha_broker(), syslog_status(), the cached-telemetry
+    // structs …) each allocate a std::string/std::vector and can throw std::bad_alloc mid-build.
+    // cJSON has no RAII, so free the partial tree if that happens before it propagates — the
+    // broadcast task (http_events.cpp) calls this every ~2 s with no guard above it, and precisely
+    // under the memory pressure that makes these throw. On the success path we hand ownership back.
+    struct RootGuard { cJSON* p; ~RootGuard() { if (p) cJSON_Delete(p); } } guard{root};
     cJSON_AddStringToObject(root, "vin",           g_vehicle->vin().c_str());
     cJSON_AddStringToObject(root, "ip",            ip);
     cJSON_AddStringToObject(root, "version",       esp_app_get_description()->version);
@@ -286,7 +298,17 @@ esp_err_t handle_status(GuardedReq rq) {
         if (g_vehicle->seconds_since_contact(ago))
             cJSON_AddNumberToObject(root, "last_seen_s", (double)ago);
     }
-    return send_json(req, 200, root);
+    guard.p = nullptr;   // built successfully — release ownership to the caller (send_json / WS push)
+    return root;
+}
+
+esp_err_t handle_status(GuardedReq rq) {
+    httpd_req_t* req = rq.req;
+    // A snapshot of live device state. Never let a browser/proxy serve a cached copy, or a manual
+    // reload sticks on a stale state. Matches the no-store on "/" and "/diag". (The live UI reads
+    // /events, not this — but waitReboot() and curl still hit /status directly.)
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    return send_json(req, 200, build_status_object());   // send_json degrades a nullptr to 503
 }
 
 // ─── GET /diag — in-memory diagnostic log (for on-demand analysis) ────────────

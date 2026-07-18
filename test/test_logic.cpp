@@ -27,6 +27,7 @@
 #include "logic/soc_gradient.hpp"
 #include "logic/led_status.hpp"
 #include "logic/syslog_policy.hpp"
+#include "logic/ws_policy.hpp"
 
 #include <cmath>
 #include <cstdio>
@@ -515,6 +516,37 @@ static void test_led() {
       CHECK(tk::led_pattern(s, a) == (tk::LedPattern{C::Red, A::Blink, false})); }
 }
 
+// ── /events WebSocket command policy (logic/ws_policy.hpp) ───────────────────────────────────
+static void test_ws_policy() {
+    using namespace tk;
+    // An empty frame carries no command and leaves no body in the stream: ignore it, keep the
+    // connection. Anything that fits the command buffer is safe to read.
+    CHECK(ws_frame_plan(0) == WsPlan::Skip);
+    CHECK(ws_frame_plan(3) == WsPlan::Read);
+
+    // The boundary. A frame of exactly WS_CMD_MAX still fits; ONE byte more is undrainable on a
+    // chip whose binding limit is the largest contiguous free block, so it must close the socket
+    // rather than be read into a buffer sized from a length the client merely asserted.
+    CHECK(ws_frame_plan(WS_CMD_MAX)     == WsPlan::Read);
+    CHECK(ws_frame_plan(WS_CMD_MAX + 1) == WsPlan::Reject);
+    CHECK(ws_frame_plan(1u << 20)       == WsPlan::Reject);
+    CHECK(ws_frame_plan(SIZE_MAX)       == WsPlan::Reject);
+
+    // The one command we speak — and a prefix still subscribes (a trailing newline / "subscribe").
+    CHECK(ws_frame_action(true, "sub", 3)       == WsAction::Subscribe);
+    CHECK(ws_frame_action(true, "sub\n", 4)     == WsAction::Subscribe);
+    CHECK(ws_frame_action(true, "subscribe", 9) == WsAction::Subscribe);
+
+    // Everything else earns nothing: no snapshot, and no slot in the broadcast list.
+    CHECK(ws_frame_action(true, "nope", 4) == WsAction::Ignore);
+    CHECK(ws_frame_action(true, "su",   2) == WsAction::Ignore);   // too short to be the command
+    CHECK(ws_frame_action(true, "",     0) == WsAction::Ignore);
+    CHECK(ws_frame_action(true, nullptr, 3) == WsAction::Ignore);  // never deref a null payload
+
+    // A binary frame is not the text protocol, whatever bytes it carries.
+    CHECK(ws_frame_action(false, "sub", 3) == WsAction::Ignore);
+}
+
 int main() {
     test_vin();
     test_syslog_policy();
@@ -526,6 +558,7 @@ int main() {
     test_display_helpers();
     test_display_model();
     test_led();
+    test_ws_policy();
 
     if (g_failures == 0) {
         std::printf("OK  %d checks passed\n", g_checks);

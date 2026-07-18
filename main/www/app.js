@@ -1,12 +1,12 @@
 "use strict";
 var $=function(id){return document.getElementById(id)};
-// Write html into el only when it actually changed (cached on el.__h). The status
-// poll re-renders every 4 s; blindly reassigning innerHTML would destroy and recreate
+// Write html into el only when it actually changed (cached on el.__h). The ~2 s WS push
+// re-renders on every frame; blindly reassigning innerHTML would destroy and recreate
 // the child nodes, restarting any CSS animation on them from 0% — making looping
 // animations (hero ring, "searching" signal bars, pulsing dot) visibly jump. Skipping
 // the write when nothing changed keeps the same nodes alive so the animation runs on.
 function setHTML(el,html){ if(el && el.__h!==html){ el.__h=html; el.innerHTML=html; } }
-var state=null, otaTimer=null, otaAvail=null, waking=false, wakeTimeout=null, chgBusy=false;
+var state=null, otaTimer=null, otaAvail=null, waking=false, wakeTimeout=null, chgBusy=false, ws=null;
 
 function esc(s){return String(s).replace(/[&<>]/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;'}[c]})}
 
@@ -20,12 +20,24 @@ function toast(msg,type){
   setTimeout(function(){ t.classList.add('leaving'); setTimeout(function(){if(t.parentNode)t.parentNode.removeChild(t)},230); }, type==='err'?5200:3000);
 }
 
-/* ---------- net ---------- */
-function poll(){
-  // Cache-bust + no-store: the live page polls forever, so a stale/cached /status would
-  // freeze the hero on an old state (e.g. a transient orange "Unreachable") until a manual
-  // reload — the very bug a fresh document hides. Same guard waitReboot() already uses.
-  fetch('/status?ms='+Date.now(),{cache:'no-store'}).then(function(r){return r.json()}).then(render).catch(function(){});
+/* ---------- net ----------
+   The live UI is WebSocket-only. boot() opens ONE socket to /events; the device pushes the /status
+   JSON — an immediate snapshot on "sub", then a fresh copy every ~2 s (http_events.cpp). There is
+   no interval polling and no HTTP fallback for the live feed. poll() just asks the open socket for
+   an immediate snapshot after a user action, so the UI refreshes now instead of on the next push;
+   if the socket is momentarily down it's a no-op and the optimistic local state carries the UI
+   until it reconnects. (waitReboot() still GETs /status directly — that's post-OTA reboot
+   detection, a different concern from the live feed.) */
+function poll(){ try{ if(ws && ws.readyState===1) ws.send('sub'); }catch(e){} }
+
+function connectWS(){
+  var proto = location.protocol==='https:' ? 'wss:' : 'ws:';
+  ws = new WebSocket(proto+'//'+location.host+'/events');
+  ws.onopen    = function(){ try{ ws.send('sub'); }catch(e){} };   // ask for the first snapshot
+  ws.onmessage = function(e){ try{ render(JSON.parse(e.data)); }catch(err){} };
+  ws.onerror   = function(){ try{ ws.close(); }catch(e){} };       // funnel errors through onclose
+  // Keep the last-rendered state on screen (matches the old failed-poll behaviour) and reconnect.
+  ws.onclose   = function(){ ws=null; setTimeout(connectWS,3000); };
 }
 
 /* ---------- signal glyph ---------- */
@@ -248,9 +260,9 @@ function render(s){
 
   // hero — single source of overall status.
   // hicHTML holds the icon markup; it is written to the DOM only when it actually
-  // changes (see the guarded assignment below). Rebuilding the icon every poll would
+  // changes (see the guarded assignment below). Rebuilding the icon on every frame would
   // insert a fresh <svg> and restart its CSS animation from 0% — making the pulsing
-  // sleep/charge/wake ring visibly jump every 4 s instead of fading smoothly.
+  // sleep/charge/wake ring visibly jump on each ~2 s WS push instead of fading smoothly.
   var hic=$("hicon"), hl=$("hlabel"), hs=$("hsub"), hst=$("hstats"), hicHTML=null;
   $("hero").classList.remove('hide');   // shown for every paired state; unknown/unreachable now show a grey status hero (not hidden)
   hst.innerHTML='';   // cleared here; only the paired+reporting branch populates it
@@ -421,7 +433,7 @@ function render(s){
     // searching for the car — the signal bars sit where they do when connected, but fill up
     // green one after another (CSS .bars.search animation) instead of a spinner; it appears
     // only while scanning and clears otherwise. setHTML keeps the bar nodes alive across
-    // polls so the fill animation runs continuously instead of restarting every 4 s.
+    // WS pushes so the fill animation runs continuously instead of restarting each ~2 s.
     bc.className='cv'; setHTML(bc,searchBarsHTML()+'<span>Searching…</span>');
   } else {
     // disconnected — still show the (faded, empty) bar glyph so the row keeps the same
@@ -669,6 +681,13 @@ function waitReboot(preVer){
 /* ---------- boot ---------- */
 function boot(){
   fetch('/set_time',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ms:Date.now()})}).catch(function(){});
-  poll(); setInterval(poll,4000); resumeOta();
+  if(window.WebSocket){
+    connectWS();                 // live feed: one socket, device pushes /status — no interval poll
+  } else {
+    // No WebSocket in this (very old) browser: fetch one snapshot so the page isn't blank, then
+    // stop. Deliberately no polling — the live UI is WebSocket-only; reload the page to refresh.
+    fetch('/status?ms='+Date.now(),{cache:'no-store'}).then(function(r){return r.json()}).then(render).catch(function(){});
+  }
+  resumeOta();
 }
 boot();

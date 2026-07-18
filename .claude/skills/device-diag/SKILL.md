@@ -34,7 +34,8 @@ This skill is the **passive health read + symptom→cause lookup** in front of a
 ## Step 1 — pull `/status` (the one JSON that has everything)
 
 `handle_status` in [`main/http_status.cpp`](../../../main/http_status.cpp) returns the same JSON
-the web UI polls every 4 s. Top-level keys: `vin`, `ip`, `version`, `paired` (=
+the web UI receives over the `/events` WebSocket (~2 s push; `build_status_object()` is the shared
+builder). Top-level keys: `vin`, `ip`, `version`, `paired` (=
 `has_session()`), `reauth`, `key_present`, `wifi{ssid,rssi,std}`, `ble{connected,scanning,rssi,
 addr,devices[],connect_fail,car_connectable}`, `mqtt{configured,connected,tls,broker,error}`,
 `tele{climate,drive,tires,closures}` (**only while the BLE link is up**), `link`, `vcsec_sleep`
