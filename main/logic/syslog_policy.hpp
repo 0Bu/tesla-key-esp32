@@ -79,4 +79,20 @@ inline bool syslog_error_is_hard(int err) {
     }
 }
 
+// What a send failure should do to the forwarding state machine (syslog.cpp handle_send_failure).
+// The subtlety this pins down: on a hard error the immediate re-resolve+re-probe (clearing the
+// throttle so getaddrinfo()+ping run NOW) must happen at most ONCE per outage — only on the first
+// failure, before `send_failing` latches. Firing it on every hard failure re-runs getaddrinfo()+ping
+// per queued line — the very probe storm syslog_error_is_hard's asymmetry exists to prevent, run
+// hardest exactly when the link is worst. Subsequent hard failures still pause forwarding, but let
+// the ordinary resolve cadence (check_interval) govern re-checks.
+struct SendFailureActions {
+    bool stop_forwarding;   // set resolved = false — the route/destination is implicated
+    bool reprobe_once;      // clear have_checked + logged_state — ONE immediate re-resolve+re-probe
+};
+
+inline constexpr SendFailureActions syslog_send_failure_actions(bool hard, bool already_failing) {
+    return { /*stop_forwarding*/ hard, /*reprobe_once*/ hard && !already_failing };
+}
+
 }  // namespace tk

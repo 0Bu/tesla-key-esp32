@@ -9,6 +9,7 @@
 
 #include "http_handlers.hpp"
 #include "logic/syslog_policy.hpp"
+#include "ota_update.hpp"   // ota_confirm_pending_image() — guard OTA rollback across config reboots
 #include <esp_log.h>
 #include <esp_system.h>
 #include "freertos/FreeRTOS.h"
@@ -154,6 +155,7 @@ esp_err_t handle_set_vin(GuardedReq rq) {
         make_response(ok, "set_vin", vin.c_str(),
                       ok ? "VIN saved — rebooting" : "failed to save VIN"));
     if (ok) {
+        ota_confirm_pending_image();   // an intentional reboot must not roll back a fresh, healthy OTA
         vTaskDelay(pdMS_TO_TICKS(800));
         esp_restart();
     }
@@ -226,6 +228,7 @@ esp_err_t handle_set_mqtt(GuardedReq rq) {
                                            : "MQTT broker saved — rebooting")
                          : "failed to save MQTT broker"));
     if (ok) {
+        ota_confirm_pending_image();   // an intentional reboot must not roll back a fresh, healthy OTA
         vTaskDelay(pdMS_TO_TICKS(800));
         esp_restart();
     }
@@ -275,6 +278,7 @@ esp_err_t handle_set_syslog(GuardedReq rq) {
                                            : "Syslog server saved — rebooting")
                          : "failed to save Syslog server"));
     if (ok) {
+        ota_confirm_pending_image();   // an intentional reboot must not roll back a fresh, healthy OTA
         vTaskDelay(pdMS_TO_TICKS(800));
         esp_restart();
     }
