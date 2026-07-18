@@ -1,6 +1,6 @@
 {
   "name": "tesla-key-esp32",
-  "version": "1.4.40",
+  "version": "1.4.41",
   "new_install_prompt_erase": true,
   "builds": [
     {
