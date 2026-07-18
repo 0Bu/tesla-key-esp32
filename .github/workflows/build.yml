@@ -162,7 +162,7 @@ jobs:
       - name: Build firmware for all supported targets
         uses: espressif/esp-idf-ci-action@v1
         with:
-          esp_idf_version: v5.5.4
+          esp_idf_version: v5.5.5
           target: esp32
           # Build every supported target and stage per-target bins. esp32 / esp32s3 / esp32c3 /
           # esp32c6 are what yoziru/tesla-ble supports (the Component Manager refuses any other
