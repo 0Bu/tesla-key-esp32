@@ -292,7 +292,7 @@ vehicles:
 
 `main/mqtt_ha.cpp` publishes all cached telemetry + device status to MQTT using HA's
 MQTT-Discovery convention. **Read-only by design** — no command topics subscribed (the car is
-never controlled or woken from HA). Broker URI from NVS `mqtt_uri` (web UI: Connection → MQTT);
+never controlled or woken from HA). Broker URI from NVS `mqtt_uri` (web UI: Connections → MQTT);
 empty = disabled. Units are converted to metric (km, km/h) — only the `/api` evcc path keeps
 miles. A schemeless broker defaults to plaintext `mqtt://`, but **defaults to `mqtts://` (TLS,
 CA-bundle-verified) when credentials are present** (username configured or `user:pass@host`) so
