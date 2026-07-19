@@ -68,8 +68,11 @@ gate_repo_slug() {
   local s
   s="${GATE_REPO_SLUG:-}"
   [ -z "$s" ] && command -v gh >/dev/null 2>&1 && s="$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null)"
+  # Extract owner/repo from the origin URL. Handles SSH (git@host:owner/repo), HTTPS
+  # (https://host/owner/repo) AND the Claude-Code-on-the-web proxy form
+  # (http://user@127.0.0.1:PORT/git/owner/repo) by strapping to the final two path segments.
   [ -z "$s" ] && s="$(git -C "${GATE_PROJ:-$PWD}" remote get-url origin 2>/dev/null \
-        | sed -E 's#^git@github\.com:##; s#^https://github\.com/##; s#\.git$##')"
+        | sed -E 's#\.git$##; s#.*[/:]([^/:]+/[^/:]+)$#\1#')"
   printf '%s' "$s"
 }
 
