@@ -102,9 +102,9 @@ holds rollback armed until a freshly-flashed image has run healthily for a windo
 while still `PENDING_VERIFY`, so the bootloader reverts to the previous slot rather than
 having committed it at startup. A **deliberate, user-initiated reboot** inside that window is a
 different case, though: the three config handlers that reboot (`/set_vin`, `/set_mqtt`,
-`/set_syslog`) and the setup-portal save call `ota_confirm_pending_image()` first — a user actively
-interacting is proof the image runs, so an intentional restart must not look like a failed boot and
-roll the update back. It is a no-op on a normal boot / already-valid image. (An unattended
+`/set_syslog`), the setup-portal save **and the heap watchdog's deliberate restart** call
+`ota_confirm_pending_image()` first — a restart we chose is proof the image runs, so it must not
+look like a failed boot and roll the update back. It is a no-op on a normal boot / already-valid image. (An unattended
 brownout/power-cycle in the window still reverts — that is the crash-safety net working as intended.)
 
 **Image signature.** Builds use the Secure Boot v2 RSA-3072 signature scheme *without*
@@ -355,6 +355,173 @@ is exactly one capture point to keep in sync, not two.
   exact storm the paragraph above avoids.
 - **Status:** `syslog_status()` → `/status.syslog` (`configured`/`resolved`/`reachable`/`host`/
   `port`/`error`), read by the web UI's Connections card exactly like the MQTT row.
+
+## Heap-exhaustion watchdog (the last-resort escalation)
+
+Every OOM guard in this firmware turns "out of memory" into **recover and continue** — the
+`handle_all` try/catch answers 503, the BLE parse guards reset the link, the `/events` broadcast
+drops a frame. That is correct for a **transient** shortage and must stay. What was missing is the
+next question: *what if it never recovers?*
+
+On **2026-07-18** a non-reading WebSocket subscriber exhausted the heap (fixed separately by the
+`/events` send backpressure). The device then sat at `free=14820`, `largest_block=768` — against a
+healthy 31744 — for **ten hours**. It never crashed and never rebooted: `vehicle_->loop()` threw
+`std::bad_alloc`, the handler reset the BLE link, the next 50 ms iteration threw again, ~20×/s all
+night. HTTP could not serve, MQTT could not reconnect, and the WiFi watchdog was itself dead
+(`ping_sock: create ping task failed` — it could no longer allocate its own task). **A hang is the
+worst failure shape available**: a crash reboots in seconds, a wedge looks like a powered-off
+device, heals never, and reports nothing.
+
+The escalation lives in the pure, host-tested `main/logic/heap_watchdog.hpp`, sampled by
+`loop_task_fn_` at the existing 30 s heap-log site:
+
+- **Trigger:** `largest_block` below **`kHeapCriticalBytes` (4 KB)** *continuously* for
+  **`kHeapCriticalHoldMs` (5 min)**. Healthy steady state is 31744 B and the wedge sat at
+  480–1536 B, so the threshold separates them without a tight estimate of either.
+- **`largest_block`, never `free`.** The binding limit on this chip is the largest contiguous
+  block. During the incident `free` held a plausible-looking ~16 KB the whole time — a total-free
+  test would never have fired.
+- **`MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL`, never plain `8BIT`.** `heap_caps_*` reports the max
+  across every heap carrying the cap, and the **esp32c5 registers 8 MB of PSRAM** into `8BIT`
+  (`CONFIG_SPIRAM_USE_MALLOC`). A C5 in the exact wedge — internal DRAM at 768 B — would read
+  ~7.8 MB and never trigger, making the watchdog a silent no-op on the one target with the extra
+  RAM. The thresholds are internal-DRAM numbers and only mean anything against an internal-DRAM
+  sample. The `HEAP` log line carries `internal_largest=` alongside the historical `8BIT` figures
+  (identical on the four PSRAM-less targets, so old captures stay comparable).
+- **An unbroken run, never a single `bad_alloc`.** One failed allocation is exactly the transient
+  the other guards absorb. A single recovered sample resets the clock. This is what keeps the
+  watchdog from becoming a reboot loop — which matters because each boot re-opens the active
+  polling window, so a rebooting device keeps a parked car awake. (That objection is weaker than
+  it looks: the wedged state defeats car sleep too, and harder — it reset the BLE link at 20 Hz
+  for ten hours.)
+- **Excused during an OTA.** `esp_https_ota` holds the largest allocations this firmware ever
+  makes, so a low reading there proves nothing, and a restart mid-install is the one reboot that
+  could leave a half-written slot. An OTA **clears** the run rather than skipping the sample —
+  skipping would let a run that began *before* the download resume its clock and fire during it.
+  Queried via `ota_is_busy()` (one atomic), never `ota_get_status()` (copies `std::string`s and
+  can throw on the very heap this is deciding about).
+- **On fire:** `ESP_LOGE`, persist `reboot_why=heap:<n>` to NVS `tesla_cfg`,
+  `ota_confirm_pending_image()` so a deliberate restart inside the ~90 s OTA health gate is not
+  mistaken for a failed boot, a **300 ms `vTaskDelay`**, then `esp_restart()`. The delay is not
+  cosmetic: `syslog_send()` only *queues*, and its task runs at priority 3 against `loop_task`'s
+  5, so without a yield the final message dies in the queue on a single-core target — and the
+  `/diag` ring does not survive the reboot either. Skipping it would throw away the one line that
+  explains the restart.
+- **Bounded:** after **`kHeapMaxConsecutiveRestarts` (5)** consecutive watchdog restarts it stops
+  restarting and says so once. Five cycles prove a restart is not fixing this one, and continuing
+  would cycle the radios every ~10 min indefinitely. Relatedly, a boot that followed a watchdog
+  restart **does not seed the active polling window** (`vehicle_ctrl.cpp` `init()`) — that seeding
+  is what would make a restart loop expensive for a parked car, and a self-healed device has no
+  user waiting on a warm cache. The count resets on any ordinary boot (power cycle, crash, OTA),
+  since those leave no breadcrumb, so this only ever bounds a genuine loop.
+- **Afterwards:** `main.cpp` takes the NVS breadcrumb once at boot (read + clear) and holds it for
+  the process; `/status` reports it as **`last_reboot`** (omitted on every ordinary boot). This
+  exists because `esp_reset_reason()` cannot tell a deliberate `esp_restart()` from a user power
+  cycle — both read SW/POWERON — so without it a device that self-heals unattended at 04:00 leaves
+  no trace, and the next investigation starts from scratch.
+
+Nothing on this path allocates **in our code** — the `"heap:<n>"` breadcrumb is at most 9 chars and
+lands in `std::string`'s inline buffer — and the one call that can allocate internally (NVS)
+returns `ESP_ERR_NO_MEM` rather than throwing and is `try`-guarded anyway. That matters because
+this code runs precisely when allocation is failing: a throw escaping here would unwind into the
+net-less loop task and turn a wedge into an `abort()`.
+
+### Why a restart, and not in-place recovery
+
+Rebooting is the crude answer, so it was only adopted after the alternatives were researched and
+found worse. The short version: **ESP-IDF offers no reliable way to reclaim a wedged heap from
+inside the running image**, and the teardown paths one would have to call are themselves among the
+least reliable code in the SDK. Evidence for each candidate:
+
+- **Subsystem teardown/reinit** (`httpd_stop`/`httpd_start`, `esp_mqtt_client_destroy`,
+  `esp_wifi_deinit`, `nimble_port_deinit`) — the obvious "smarter" fix, with the worst track
+  record. `nimble_port_deinit` leaked *twice in a row*: Espressif fixed one leak, and a second,
+  independent one survived it ([esp-idf#8136](https://github.com/espressif/esp-idf/issues/8136)).
+  `esp_wifi_deinit` leaked per cycle on IDF 5.0/5.1 (a regression absent in 4.4, fixed in 5.2 —
+  [#12014](https://github.com/espressif/esp-idf/issues/12014)), was reproducibly crash-prone in the
+  3.x era ([#2050](https://github.com/espressif/esp-idf/issues/2050)), and
+  [esp32.com t=13189](https://esp32.com/viewtopic.php?t=13189) documents a supplicant callback no
+  deinit path ever frees. `esp_http_server` leaked **~16.7 KB per stop/start cycle** on IDF 5.3
+  because `httpd_stop()` never released the with-caps task stacks — and the *first upstream fix for
+  that* crashed on an assert ([#14266](https://github.com/espressif/esp-idf/issues/14266)). The
+  pattern is not "one bad release": whether deinit returns its memory depends on the exact IDF
+  revision and is patched reactively. On top of that, deinit paths **allocate**, and this code runs
+  when allocation is already failing — a throw there unwinds into the net-less loop task and
+  `abort()`s, trading our controlled restart for an uncontrolled one *without* the breadcrumb. The
+  crash-only literature names this directly: a restart is trustworthy only when it is implemented
+  outside the failing component and does not run that component's own code, and rarely-exercised
+  cleanup paths are unreliable *because* they are rarely exercised
+  ([Candea & Fox, HotOS-IX](https://www.usenix.org/legacy/events/hotos03/tech/full_papers/candea/candea.pdf)).
+- **A ballast / rainy-day block** freed under pressure is a real pattern — libstdc++ ships one (a
+  preallocated emergency pool so `std::bad_alloc` can still be *thrown* once malloc fails, which is
+  also the most likely explanation for how the wedged device kept throwing for ten hours instead of
+  crashing). Rejected here because it costs permanent internal DRAM out of a ~31 KB steady-state
+  largest block, and this restart path needs no headroom: it is allocation-free by construction.
+- **`heap_caps_register_failed_alloc_callback()`** is official, but it runs *synchronously inside
+  the allocator*, in the context of whatever task or ISR hit the failure; it takes the size, the
+  caps and the function name, returns nothing, and cannot satisfy or retry the allocation. ESP-IDF
+  documents no constraints on what is safe inside it. That makes it a sensor, not an actor — and
+  the 30 s sample site already covers the sensing. Espressif's own built-in escalation for exactly
+  this condition is `CONFIG_HEAP_ABORT_WHEN_ALLOCATION_FAILS` → `esp_system_abort()`, i.e. a reset
+  with *less* ceremony than ours.
+- **Defragmentation** does not exist: the heap docs treat fragmentation-induced failure as expected
+  behaviour and offer no compaction, and part of the TLSF allocator lives in chip ROM, so even
+  allocator-level improvements cannot reach released branches. Espressif's only in-place lever is
+  carving dedicated regions for critical objects (`heap_caps_add_region_with_caps`), and a
+  MicroPython maintainer judged split-heap of marginal value on ESP32 once WiFi and BLE must
+  coexist ([micropython#8940](https://github.com/micropython/micropython/issues/8940)). This
+  project already does the containment half — the static `/diag` ring, the gzipped web UI, the
+  PSRAM framebuffer on the C5 — but that is *prevention*, and prevention has no answer for the
+  morning after.
+- **What shipping ESP32 firmware actually does** is bounded restarting, not in-place repair.
+  ESPHome's [safe mode](https://esphome.io/components/safe_mode/) is a restart ladder: a persisted
+  boot-failure counter (default 10), a boot that only counts as "good" after a healthy-uptime
+  window, a degraded mode keeping just logging/network/OTA — and it reboots *again* after five
+  minutes. [Tasmota](https://tasmota.github.io/docs/Device-Recovery/) counts restarts and escalates
+  to a settings wipe and finally a reflash. Neither attempts to heal a live heap.
+
+So the reboot is the *last* rung, and the parts that make it defensible are the hygiene around it,
+all of which match the same literature: a **long unbroken trigger** so transients never reach it, a
+**restart cap** (Candea & Fox prescribe a maximum retry limit precisely to prevent reboot cycles),
+and a **breadcrumb persisted before the reset**, which Memfault's watchdog guidance names as the
+thing that separates a diagnosable reset from a mystery.
+
+**What is deliberately not here:** a *load-shedding rung* before the restart — closing `/events`
+subscribers and stopping MQTT to release the heap this firmware itself owns, and only restarting if
+`largest_block` does not recover. That would have healed the 2026-07-18 incident in place, since
+the leak was in our own WS structures. It is the strongest candidate for a next rung, but it only
+helps for leaks in structures *we* know about, and it stays out of this change until a second
+incident shows the pattern is worth the complexity.
+
+### Reading it in syslog
+
+Syslog is the only post-mortem source that outlives the restart — the `/diag` ring is RAM and
+`esp_reset_reason()` cannot tell a deliberate `esp_restart()` from a power cycle. So the escalation
+narrates itself; a reader should be able to reconstruct the whole decision from these lines alone:
+
+| Line | Meaning |
+|------|---------|
+| `HEAP free=… largest_block=… min_free=… internal_largest=…` | the ordinary 30 s trend line, always present |
+| `HEAP CRITICAL: … watchdog ARMED, restarting in 300 s unless it recovers` | the countdown just opened |
+| `HEAP CRITICAL for <n> s … restarting in <m> s unless it recovers` | still critical, one line per 30 s sample — this is the proof the shortage was *sustained*, not a spike |
+| `HEAP recovered after <n> s critical … watchdog disarmed` | the run ended on its own; no restart |
+| `HEAP critical run (<n> s) cleared: an OTA is in flight …` | the run was excused, not healed |
+| `HEAP EXHAUSTED for <n> s … RESTARTING DELIBERATELY (watchdog restart <k>/5, reboot_why=heap:<k>; …)` | the restart, with the state that caused it |
+| `HEAP EXHAUSTED … but <n> consecutive watchdog restarts have not fixed it — NOT restarting again` | the cap held; the device stays up degraded |
+| `BOOT this boot was caused by the firmware itself: reason=heap:<k> …` | logged on the *next* boot, closing the loop |
+
+The elapsed times are the **measured** age of the critical run, not the configured hold, so a fired
+run legitimately reads somewhat over 300 s (it is sampled on a 30 s cadence).
+
+**Keep any line on this path under ~230 characters.** `diag_log.cpp`'s capture hook formats into a
+256-byte *stack* buffer (deliberately — it must not allocate on the heap it is reporting about),
+and anything longer reaches both `/diag` and syslog **cut off mid-sentence**. The restart line is
+the one that must never be truncated, so it carries the state and a pointer here, not the
+reasoning itself. The `BOOT` line is
+emitted *after* `syslog_start()` on purpose: `syslog_send()` is a no-op before that, so logging it
+at the point the breadcrumb is read — which is where it naturally belongs, and where it used to be
+— would confine the one line explaining an unattended 04:00 self-heal to the RAM ring that the
+restart just erased.
 
 ## WiFi / LAN connectivity (reconnect + watchdog)
 
