@@ -98,50 +98,32 @@ esp_err_t handle_command(GuardedReq rq) {
     cJSON* json = body ? cJSON_Parse(body) : nullptr;
     free(body);
 
-    bool ok = false;
-
-    if      (strcmp(cmd, "wake_up")           == 0) ok = g_vehicle->wake_up();
-    else if (strcmp(cmd, "charge_start")      == 0) ok = g_vehicle->charge_start();
-    else if (strcmp(cmd, "charge_stop")       == 0) ok = g_vehicle->charge_stop();
-    else if (strcmp(cmd, "charge_port_door_open")  == 0) ok = g_vehicle->charge_port_open();
-    else if (strcmp(cmd, "charge_port_door_close") == 0) ok = g_vehicle->charge_port_close();
-    else if (strcmp(cmd, "door_lock")         == 0) ok = g_vehicle->door_lock();
-    else if (strcmp(cmd, "door_unlock")       == 0) ok = g_vehicle->door_unlock();
-    else if (strcmp(cmd, "flash_lights")      == 0) ok = g_vehicle->flash_lights();
-    else if (strcmp(cmd, "honk_horn")         == 0) ok = g_vehicle->honk_horn();
-    else if (strcmp(cmd, "auto_conditioning_start") == 0) ok = g_vehicle->climate_start();
-    else if (strcmp(cmd, "auto_conditioning_stop")  == 0) ok = g_vehicle->climate_stop();
-    else if (strcmp(cmd, "set_charging_amps") == 0) {
-        int amps = json_int_clamped(json, "charging_amps", 0, 0, 48);
-        ok = g_vehicle->set_charging_amps(amps);
-    }
-    else if (strcmp(cmd, "set_charge_limit")  == 0) {
-        int pct = json_int_clamped(json, "percent", 80, 50, 100);
-        ok = g_vehicle->set_charge_limit(pct);
-    }
-    else if (strcmp(cmd, "set_sentry_mode")   == 0) {
-        bool on = false;
-        if (json) {
-            cJSON* j = cJSON_GetObjectItemCaseSensitive(json, "on");
-            if (j) on = cJSON_IsTrue(j);
-        }
-        ok = g_vehicle->set_sentry_mode(on);
-    }
-    else if (strcmp(cmd, "set_scheduled_charging") == 0) {
-        // Body: {"enable":bool, "start_minutes":int}  (minutes after local midnight)
-        bool enable = false;
-        if (json) {
-            cJSON* je = cJSON_GetObjectItemCaseSensitive(json, "enable");
-            if (je) enable = cJSON_IsTrue(je);
-        }
-        int start = json_int_clamped(json, "start_minutes", 0, 0, 1439);
-        ok = g_vehicle->set_scheduled_charging(enable, start);
-    }
-    else {
+    // Name → descriptor via the shared registry (logic/command_registry.hpp) — the SAME
+    // table the MCP tools read, so the two surfaces can never disagree about names or
+    // argument bounds. REST stays LENIENT by protocol compat: an absent/unparseable
+    // value falls back to the spec's api_default (e.g. set_charge_limit with no body
+    // still means 80%), unlike MCP's strict -32602. Values are positional: args[i]
+    // fills ival[i]/bval[i], which execute_vehicle_command consumes by position.
+    const tk::CmdInfo* info = tk::cmd_from_api_name(cmd);
+    if (!info) {
         cJSON_Delete(json);
         return send_json(req, 404, make_response(false, cmd, vin, "unknown command"));
     }
 
+    int  ival[tk::kCmdMaxArgs] = {};
+    bool bval[tk::kCmdMaxArgs] = {};
+    for (int i = 0; i < tk::kCmdMaxArgs; ++i) {
+        const tk::CmdArg& a = info->args[i];
+        if (a.type == tk::CmdArgType::None || !a.api_key) continue;
+        if (a.type == tk::CmdArgType::Int) {
+            ival[i] = json_int_clamped(json, a.api_key, a.api_default, a.lo, a.hi);
+        } else {  // Bool: absent → false (cJSON_GetObjectItemCaseSensitive(NULL,…) is NULL)
+            const cJSON* j = cJSON_GetObjectItemCaseSensitive(json, a.api_key);
+            bval[i] = j ? cJSON_IsTrue(j) : false;
+        }
+    }
+
+    bool ok = execute_vehicle_command(*g_vehicle, info->kind, ival, bval);
     cJSON_Delete(json);
     // On failure, distinguish "the car rejected it" (we got an error reply, e.g.
     // "complete") from "the car was unreachable" (no reply / timed out). The former
