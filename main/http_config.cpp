@@ -149,7 +149,7 @@ esp_err_t handle_set_vin(GuardedReq rq) {
     // pairing, session, cached data and discovered BLE MAC all belong to the old car.
     // Wipe them (regenerate the key + clear the session/cache/MAC) before rebooting so
     // the device pairs cleanly with the new vehicle and shows no stale data.
-    bool ok = g_vehicle->save_config_vin(vin);
+    bool ok = g_config->save_str("vin", vin);
     if (ok) g_vehicle->reset_for_new_vehicle();
     esp_err_t r = send_json(req, ok ? 200 : 500,
         make_response(ok, "set_vin", vin.c_str(),
@@ -208,8 +208,11 @@ esp_err_t handle_set_mqtt(GuardedReq rq) {
     broker = (s == std::string::npos) ? std::string{} : broker.substr(s, e - s + 1);
 
     // Unchanged → nothing to apply: skip the NVS write and the reboot entirely. The
-    // stored value is the bare broker string as last saved (mqtt_ha adds the scheme).
-    if (broker == g_vehicle->load_config_str("mqtt_uri")) {
+    // stored value is the bare broker string as last saved (mqtt_ha adds the scheme);
+    // stored empty/unset and submitted empty compare equal, so neither triggers a reboot.
+    std::string stored;
+    g_config->load_str("mqtt_uri", stored);
+    if (broker == stored) {
         return send_json(req, 200, make_response(true, "set_mqtt", "",
             broker.empty() ? "MQTT already disabled — no reboot"
                            : "MQTT broker unchanged — no reboot"));
@@ -221,7 +224,7 @@ esp_err_t handle_set_mqtt(GuardedReq rq) {
                                                  "invalid broker (use host:port)"));
     }
 
-    bool ok = g_vehicle->save_config_str("mqtt_uri", broker);
+    bool ok = g_config->save_str("mqtt_uri", broker);
     esp_err_t r = send_json(req, ok ? 200 : 500,
         make_response(ok, "set_mqtt", "",
                       ok ? (broker.empty() ? "MQTT disabled — rebooting"
@@ -259,7 +262,9 @@ esp_err_t handle_set_syslog(GuardedReq rq) {
     server = (s == std::string::npos) ? std::string{} : server.substr(s, e - s + 1);
 
     // Unchanged → nothing to apply: skip the NVS write and the reboot entirely.
-    if (server == g_vehicle->load_config_str("syslog_uri")) {
+    std::string stored;
+    g_config->load_str("syslog_uri", stored);
+    if (server == stored) {
         return send_json(req, 200, make_response(true, "set_syslog", "",
             server.empty() ? "Syslog already disabled — no reboot"
                            : "Syslog server unchanged — no reboot"));
@@ -271,7 +276,7 @@ esp_err_t handle_set_syslog(GuardedReq rq) {
                                                  "invalid server (use host:port)"));
     }
 
-    bool ok = g_vehicle->save_config_str("syslog_uri", server);
+    bool ok = g_config->save_str("syslog_uri", server);
     esp_err_t r = send_json(req, ok ? 200 : 500,
         make_response(ok, "set_syslog", "",
                       ok ? (server.empty() ? "Syslog disabled — rebooting"
