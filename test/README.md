@@ -57,6 +57,7 @@ The firmware delegates these decision/conversion cores to IDF-free headers under
 | Syslog target parse + send-failure classification (host:port split, errno hard/transient) | `logic/syslog_policy.hpp` | `syslog.cpp`, `/set_syslog` |
 | `/events` WS frame policy (length plan: skip / read ≤16 B / close; `sub` classification) + per-subscriber send backpressure (≤2 frames in flight, close after 3 consecutive failed completions, streak reset by one good send, our own OOM neither credited nor blamed) | `logic/ws_policy.hpp` | `http_events.cpp` (`h_ws_events`, `ws_send_to_all`, `ws_transfer_complete`) |
 | Active-window poll gate (charging held open only on FRESH contact) | `logic/active_window.hpp` | `vehicle_telemetry.cpp` (`loop_task_fn_`) |
+| BLE phase countdown (which of the two overlapping phases the Bluetooth row counts down; seconds round UP and 0 is a real answer, not "no countdown"; wrap-safe) | `logic/ble_phase.hpp` | `vehicle_ctrl.hpp` `ble_phase()`, `vehicle_commands.cpp` `ensure_connected_`, `vehicle_pairing.cpp` `idle_until_next_health_poll_`, `http_status.cpp` |
 | HA binary `value_template` builder (presence-aware `is defined` guard → "unknown" not phantom OFF) | `logic/ha_templates.hpp` | `mqtt_ha.cpp` (discovery) |
 | POST-body reassembly (loop `recv` to `content_len`, bounded timeout retry) | `logic/http_body.hpp` | `http_common.cpp` `read_body`, `provisioning.cpp` `save_post` |
 

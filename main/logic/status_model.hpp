@@ -83,7 +83,13 @@ struct Inputs {
     bool                   have_seen_rssi{false};
     int                    seen_rssi{0};       // last advert RSSI (the "can't connect" bars)
     int                    target_connectable{-1};  // -1 unknown / 0 no / 1 yes
-    uint32_t               ble_next_retry_in_s{0};
+    // What the Bluetooth row counts down (VehicleController::ble_phase()). Empty = no
+    // phase is running, both fields omitted. "connecting" = an attempt is running and
+    // gives up in phase_s; "waiting" = the next attempt starts in phase_s. phase_s is
+    // emitted WITH phase even at 0 ("right now"), so a countdown never vanishes on its
+    // last second and leave the row's label bare.
+    std::string            ble_phase;
+    uint32_t               ble_phase_s{0};
 
     // Link-state machine + raw VCSEC flag (diagnostics).
     LinkState   link{LinkState::Unknown};
@@ -197,8 +203,9 @@ inline void emit_status(const Inputs& in, E& e) {
     e.obj_begin("ble");
     e.boolean("connected", in.ble_connected);
     e.boolean("scanning",  in.ble_scanning);
-    if (in.ble_next_retry_in_s > 0) {
-        e.num("next_retry_in_s", (double)in.ble_next_retry_in_s);
+    if (!in.ble_phase.empty()) {
+        e.str("phase", in.ble_phase.c_str());
+        e.num("phase_s", (double)in.ble_phase_s);
     }
     if (in.ble_connected) {
         if (in.have_ble_rssi) e.num("rssi", in.ble_rssi);

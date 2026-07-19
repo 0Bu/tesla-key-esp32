@@ -50,7 +50,9 @@ renderer draws), the status-LED ladder (`logic/led_status.hpp`, reading the same
 `UiSnapshot` + the shared SoC gradient), the `/events` WebSocket command policy
 (`logic/ws_policy.hpp` — frame-length plan / "sub" classification + the per-subscriber send
 backpressure that bounds a non-reading client), the active-window poll gate
-(`logic/active_window.hpp` — charging held open only on fresh contact), the HA binary
+(`logic/active_window.hpp` — charging held open only on fresh contact), the BLE phase countdown
+(`logic/ble_phase.hpp` — which phase the Bluetooth row counts down, rounded up and never
+vanishing on its last second), the HA binary
 `value_template` builder (`logic/ha_templates.hpp` — presence-aware `is defined` guard) and the
 POST-body reassembly loop (`logic/http_body.hpp` — multi-segment recv + bounded timeout) — all
 delegated to IDF-free headers in `main/logic/` so the device runs the same code the test does. CI gates the firmware build on it (`logic-test` job). Add new

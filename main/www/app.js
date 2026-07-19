@@ -63,6 +63,40 @@ function searchBarsHTML(){
   for(var i=0;i<4;i++) s+='<rect class="sb'+(i+1)+'" x="'+(i*5.3)+'" y="'+(13-H[i])+'" width="3.3" height="'+H[i]+'" rx="1"/>';
   return s+'</svg>';
 }
+/* ---------- Bluetooth phase countdown ----------
+   The device reports which BLE phase is running and how many seconds are left in it
+   (ble.phase / ble.phase_s): "connecting" = an attempt is running and gives up then,
+   "waiting" = no attempt is running and the next one starts then. The live push only
+   arrives every ~2 s, so the remaining time is ticked down locally in between and the
+   pushed value is treated as the clock to resync against.
+
+   The text is painted with textContent into a dedicated node, NOT rebuilt through
+   setHTML with the rest of the row: rewriting the row's innerHTML every second would
+   re-create the bar <rect>s and restart their CSS fill animation on every tick. */
+var cdKind=null, cdEndMs=0;
+// Resync the local countdown clock from a push. A phase change always resyncs; within a
+// phase only a real disagreement (≥2 s) does, so the ~2 s push cadence and the 1 s local
+// tick can't fight each other into a number that jitters back up.
+function cdSync(kind,secs){
+  if(kind!=='connecting'&&kind!=='waiting'){ cdKind=null; cdEndMs=0; return; }
+  if(secs==null) secs=0;
+  if(kind!==cdKind||Math.abs(cdLeft()-secs)>=2){ cdKind=kind; cdEndMs=Date.now()+secs*1000; }
+}
+function cdLeft(){ return Math.max(0,Math.ceil((cdEndMs-Date.now())/1000)); }
+// Paint into the row's .cd node if the current row has one. Each .cd declares (data-p) the
+// ONE phase it is willing to count down, and a mismatch paints nothing: the two phases can
+// overlap — loop_task's warm-up scan runs while auto_pair is still in its idle wait — and a
+// row must never count down something other than what its own label names ("Searching…"
+// paired with "retry in 22s" is exactly the contradiction this rule prevents). At 0 the
+// phase is over but the next push hasn't landed yet, so say what is about to happen rather
+// than dropping the suffix and leaving the label bare.
+function paintCd(){
+  var el=document.querySelector('#bleConn .cd'); if(!el) return;
+  if(!cdKind||el.getAttribute('data-p')!==cdKind){ el.textContent=''; return; }
+  var n=cdLeft();
+  el.textContent = cdKind==='waiting' ? (n?' (retry in '+n+'s)':' (retrying…)')
+                                      : (n?' ('+n+'s left)'   :' (timing out…)');
+}
 // "status unknown" glyph — same geometry as barsHTML, all four bars fully lit (the link
 // is up; signal strength is real and shown as dBm next to it). Each bar carries a .wbN
 // class; its own @keyframes (wbpN) fades it between dark and light orange so a light crest
@@ -444,14 +478,24 @@ function render(s){
     // searching for the car — the signal bars sit where they do when connected, but fill up
     // green one after another (CSS .bars.search animation) instead of a spinner; it appears
     // only while scanning and clears otherwise. setHTML keeps the bar nodes alive across
-    // WS pushes so the fill animation runs continuously instead of restarting each ~2 s.
-    bc.className='cv'; setHTML(bc,searchBarsHTML()+'<span>Searching…</span>');
+    // WS pushes so the fill animation runs continuously instead of restarting each ~2 s —
+    // which is why the countdown goes into an empty .cd node here and is painted separately.
+    bc.className='cv'; setHTML(bc,searchBarsHTML()+'<span>Searching…</span><span class="cd" data-p="connecting"></span>');
+  } else if(ble.phase==='connecting'){
+    // The scan found the car and is bringing the GATT link up: scanning has already stopped
+    // but the link isn't up yet. Name that phase — it used to fall through to "Disconnected",
+    // which flashed the row's idle label for a second or two mid-connect.
+    bc.className='cv'; setHTML(bc,searchBarsHTML()+'<span>Connecting…</span><span class="cd" data-p="connecting"></span>');
   } else {
     // disconnected — still show the (faded, empty) bar glyph so the row keeps the same
     // shape as Wi-Fi rather than collapsing to text only.
-    var retry=ble.next_retry_in_s?' (in ~'+ble.next_retry_in_s+'s)':'';
-    bc.className='cv dis'; setHTML(bc,barsHTML(null)+'<span class="ph">Disconnected'+retry+'</span>');
+    bc.className='cv dis'; setHTML(bc,barsHTML(null)+'<span class="ph">Disconnected</span><span class="cd ph" data-p="waiting"></span>');
   }
+  // Countdown clock from this push, then paint immediately: setHTML may have just replaced
+  // the row (a phase change), leaving a fresh, empty .cd the 1 s ticker wouldn't fill until
+  // its next tick.
+  cdSync(ble.phase,num(ble.phase_s));
+  paintCd();
 
   // MQTT — Home Assistant bridge (tap to set/change the broker)
   var mq=s.mqtt||{}, mc=$("mqttConn");
@@ -700,6 +744,9 @@ function boot(){
     // stop. Deliberately no polling — the live UI is WebSocket-only; reload the page to refresh.
     fetch('/status?ms='+Date.now(),{cache:'no-store'}).then(function(r){return r.json()}).then(render).catch(function(){});
   }
+  // Tick the Bluetooth phase countdown between pushes so it steps every second instead of
+  // jumping in ~2 s hops. Text-only update of one node — no layout churn, no re-render.
+  setInterval(paintCd,1000);
   resumeOta();
 }
 boot();

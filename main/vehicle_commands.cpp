@@ -17,6 +17,11 @@ static const char* TAG = "vehicle_ctrl";
 
 bool VehicleController::ensure_connected_(int timeout_ms) {
     if (ble_ && ble_->is_connected()) return true;
+    // This is the ONE place a connect attempt is started and bounded, so it is also where
+    // the UI's "Searching…/Connecting…" countdown is armed: the attempt gives up exactly
+    // at this deadline. Armed for the whole attempt and cleared on every exit path, so the
+    // Bluetooth row counts this phase down instead of showing an unbounded animation.
+    connect_deadline_.store(deadline_in_((uint32_t)timeout_ms));
     ble_->connect("");
     int waited = 0;
     while (!ble_->is_connected() && waited < timeout_ms) {
@@ -25,9 +30,11 @@ bool VehicleController::ensure_connected_(int timeout_ms) {
     }
     if (!ble_->is_connected()) {
         ble_->stop_connecting();  // drop the intent so the device returns to idle scanning
+        connect_deadline_.store(0);
         ESP_LOGE(TAG, "connection timeout after %dms", timeout_ms);
         return false;
     }
+    connect_deadline_.store(0);
     return true;
 }
 

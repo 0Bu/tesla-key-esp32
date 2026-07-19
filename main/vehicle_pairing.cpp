@@ -96,7 +96,9 @@ void VehicleController::auto_pair_task_fn_(void* arg) {
             //   • success            → key still valid
             //   • auth rejection     → car refused our key (likely deleted) — confirm now
             //   • neither (no reply) → car unreachable (asleep / out of range / weak link)
-            self->next_health_poll_ticks_.store(0);
+            // An attempt is about to run, so the "next attempt in…" countdown no longer
+            // applies — ensure_connected_ arms the "gives up in…" one for the probe itself.
+            self->retry_deadline_.store(0);
             int  streak_before = self->auth_fail_streak_;
             bool ok            = self->health_probe_();
             if (self->pairing_lost_) continue;  // 2nd strike already → revoked (top of loop)
@@ -105,9 +107,7 @@ void VehicleController::auto_pair_task_fn_(void* arg) {
                 ESP_LOGD(TAG, "auto-pair: health check OK — key still valid");
                 // Idle ~30 s, but bail out fast if the message observer flags a deletion
                 // (a faulting charge poll mid-wait) so we re-key promptly, not 30 s later.
-                self->next_health_poll_ticks_.store(xTaskGetTickCount() + pdMS_TO_TICKS(30000));
-                for (int w = 0; w < 60 && !self->pairing_lost_; w++) vTaskDelay(pdMS_TO_TICKS(500));
-                self->next_health_poll_ticks_.store(0);
+                self->idle_until_next_health_poll_();
             } else if (self->auth_fail_streak_ > streak_before) {
                 // The car answered but REFUSED our key → almost certainly deleted on the
                 // car side. Confirm immediately (don't wait a whole cycle) so we react in
@@ -122,9 +122,7 @@ void VehicleController::auto_pair_task_fn_(void* arg) {
                 // keep the pairing and retry. Logged so it's clear the key simply could not
                 // be verified (connectivity), rather than a deletion being silently missed.
                 ESP_LOGW(TAG, "auto-pair: car not reachable over BLE — can't verify key right now, will retry");
-                self->next_health_poll_ticks_.store(xTaskGetTickCount() + pdMS_TO_TICKS(30000));
-                for (int w = 0; w < 60 && !self->pairing_lost_; w++) vTaskDelay(pdMS_TO_TICKS(500));
-                self->next_health_poll_ticks_.store(0);
+                self->idle_until_next_health_poll_();
             }
             continue;
         }
@@ -257,6 +255,19 @@ bool VehicleController::reset_for_new_vehicle() {
     if (config_store_) config_store_->remove("ble_mac");
     ESP_LOGI(TAG, "reset for new vehicle complete");
     return true;
+}
+
+// Idle between two VCSEC health polls. The countdown the web UI shows and the wait it
+// counts down come from the SAME constant here, so the row can never promise a retry at a
+// time the loop doesn't actually retry. Polls in short steps so a key deletion flagged by
+// the message observer mid-wait (a faulting charge poll) re-keys promptly rather than a
+// full cycle later; the deadline is cleared on the way out so the next phase owns the row.
+void VehicleController::idle_until_next_health_poll_() {
+    constexpr uint32_t kIdleMs = 30000;
+    constexpr uint32_t kStepMs = 500;
+    retry_deadline_.store(deadline_in_(kIdleMs));
+    for (uint32_t w = 0; w < kIdleMs / kStepMs && !pairing_lost_; w++) vTaskDelay(pdMS_TO_TICKS(kStepMs));
+    retry_deadline_.store(0);
 }
 
 bool VehicleController::health_probe_(int timeout_ms) {

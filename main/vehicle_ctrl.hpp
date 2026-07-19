@@ -9,6 +9,7 @@
 #include <ctime>
 #include "ble_client.hpp"
 #include "nvs_storage.hpp"
+#include "logic/ble_phase.hpp"
 #include "logic/link_state.hpp"
 #include "logic/ui_state.hpp"
 #include "freertos/FreeRTOS.h"
@@ -184,12 +185,12 @@ public:
     // or 0 if not paired / unknown (paired before this was tracked, or clock unsynced).
     // Lazily stamped the first time we hold a session and the wall clock is valid.
     time_t paired_at();
-    uint32_t next_health_poll_in_s() const {
-        uint32_t t = next_health_poll_ticks_.load();
-        if (t == 0) return 0;
-        uint32_t now = xTaskGetTickCount();
-        if (now >= t) return 0;
-        return (t - now) / configTICK_RATE_HZ;
+    // Which BLE phase the web UI's Bluetooth row counts down, and how long is left in it.
+    // Rules + rationale live in logic/ble_phase.hpp (host-tested); this only supplies the
+    // two deadlines and the clock.
+    tk::ble::PhaseView ble_phase() const {
+        return tk::ble::phase(connect_deadline_.load(), retry_deadline_.load(),
+                              xTaskGetTickCount(), configTICK_RATE_HZ);
     }
     // Reason the most recent command failed (e.g. "complete", "not_charging"), or empty
     // if it succeeded or got no response at all (car unreachable / timed out). Lets the
@@ -226,6 +227,8 @@ private:
     // command every key role may run — so an auth failure here cannot be a role refusal.
     // Benign/read-only; does not wake the car.
     bool health_probe_(int timeout_ms = 8000);
+    // Idle until the next health poll, arming the "next attempt in…" countdown for it.
+    void idle_until_next_health_poll_();
 
     // Enqueue an Infotainment or VCSEC command and wait for the callback. auth_fail_is_revocation
     // forwards to make_result_cb_: set ONLY for the health probe, so a role-denied user command
@@ -396,7 +399,21 @@ private:
     // Pending status result stored as a member to avoid lambda capturing stack refs
     VehicleStatusResult pending_status_{};
 
-    std::atomic<uint32_t> next_health_poll_ticks_{0};
+    // ── BLE phase deadlines (see ble_phase()) ─────────────────────────────────────
+    // Tick counts, 0 = not armed. Each is written only by the code that owns that
+    // phase — ensure_connected_ owns the connect attempt, auto_pair_task_fn_ owns the
+    // idle wait — so neither can clear the other's countdown. That matters when both
+    // run at once: a command's connect attempt inside auto-pair's idle wait shows its
+    // own "gives up in" countdown, and when it ends the still-running idle wait's
+    // "next attempt in" countdown reappears instead of the row going bare.
+    std::atomic<uint32_t> connect_deadline_{0};
+    std::atomic<uint32_t> retry_deadline_{0};
+    // Arm a deadline `ms` from now. Tick 0 is the "not armed" sentinel, so a deadline
+    // that lands exactly on a tick-counter wrap is nudged by one tick.
+    static uint32_t deadline_in_(uint32_t ms) {
+        uint32_t d = xTaskGetTickCount() + pdMS_TO_TICKS(ms);
+        return d ? d : 1;
+    }
 
     TaskHandle_t loop_task_{nullptr};
     static void loop_task_fn_(void* arg);

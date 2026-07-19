@@ -431,6 +431,37 @@ base) with an orange MAC, flagging "connected but stateless" at a glance. The mo
 reading "Disconnected" is normal (the link is dropped between polls by design) and is not used
 to drive the hero — only `link` is.
 
+**BLE phase countdown (the Bluetooth row's "(7s left)" / "(retry in 22s)").** The row names
+which phase the radio is in and counts it down, so an idle-looking device visibly explains
+itself instead of sitting on a static label. `/status.ble` carries `phase` + `phase_s` — always
+both or neither — decided by the pure, host-tested `main/logic/ble_phase.hpp` from two
+independently-armed deadlines:
+
+- **`connecting`** — a scan/connect attempt is running and gives up in `phase_s`. Armed by
+  `ensure_connected_` (`vehicle_commands.cpp`), the ONE place any attempt is started and
+  bounded, so every command, telemetry poll and health probe gets the countdown for free.
+- **`waiting`** — no attempt is running; the next one starts in `phase_s`. Armed by
+  `idle_until_next_health_poll_` (`vehicle_pairing.cpp`), which owns both the wait and the
+  countdown for it — they come from one constant, so the row cannot promise a retry at a time
+  the loop doesn't retry.
+
+The two phases **overlap** routinely: a command, or `loop_task`'s warm-up connect, starts an
+attempt in the middle of auto-pair's idle wait. `connecting` therefore outranks `waiting` (the
+attempt is the more specific truth), and because neither deadline clears the other, the idle
+wait's countdown reappears when the attempt ends instead of the row going bare. In the web UI
+each row's countdown node declares the one phase it will render, so "Searching…" can never be
+suffixed with the *retry* countdown.
+
+`phase_s` rounds **up** and `0` is a real value meaning "right now" — never "no countdown".
+Gating on `> 0` (or truncating) is what made the first cut of this drop its last second and
+flash a bare "Disconnected" between every cycle. `app.js` ticks the number down locally once a
+second between the ~2 s `/events` pushes, resyncing to the device only on a phase change or a
+≥2 s disagreement so the two clocks can't jitter the number back upward; it paints into a
+dedicated node with `textContent`, because rewriting the row through `setHTML` every second
+would re-create the bar `<rect>`s and restart their CSS fill animation on every tick. A scan
+with no deadline at all (`loop_task`'s warm-up connect runs until the car appears) correctly
+shows "Searching…" with **no** countdown rather than an invented one.
+
 **Connection-failure detection (web-UI hero "Connection failed").** When the target car's
 advert is heard but the BLE link won't come up after repeated tries, `/status.ble` carries
 `connect_fail` (consecutive recent failures; only while actively failing) and `car_connectable`
