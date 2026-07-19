@@ -93,6 +93,8 @@ OtaStatus ota_get_status() {
     return copy;
 }
 
+bool ota_is_busy() { return s_running.load(); }
+
 // ─── Version comparison (semver-ish "x.y.z") ───────────────────────────────────
 
 static void parse_ver(const char* s, int v[3]) {
