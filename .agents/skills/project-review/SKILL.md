@@ -23,13 +23,13 @@ should, do the config/build/version all agree, and do the runtime invariants sti
 
 Work in this order — it's what makes the review catch *drift* rather than just style:
 
-1. **Build the intended model from the docs first.** Read [`.claude/CLAUDE.md`](../../../.claude/CLAUDE.md)
+1. **Build the intended model from the docs first.** Read [`.Codex/AGENTS.md`](../../../.Codex/AGENTS.md)
    (the always-needed essentials: API, command list, NVS table, partition offsets, link-state
    summary, invariants) **and** [`docs/ARCHITECTURE.md`](../../../docs/ARCHITECTURE.md) (the deep
-   reference CLAUDE.md points to — telemetry fields, MQTT entities, full sleep/link-state +
+   reference AGENTS.md points to — telemetry fields, MQTT entities, full sleep/link-state +
    connection-failure semantics, pairing, OTA detail), [`README.md`](../../../README.md),
    [`docs/README.md`](../../../docs/README.md), [`docs/SECURITY.md`](../../../docs/SECURITY.md).
-   CLAUDE.md and `docs/ARCHITECTURE.md` must agree with each other and with the code — drift
+   AGENTS.md and `docs/ARCHITECTURE.md` must agree with each other and with the code — drift
    between the slim summary and the deep reference is itself a finding.
    Note every concrete claim: endpoints, commands, NVS keys, partition offsets, flash
    size, version, defaults. These are your assertions to check.
@@ -45,8 +45,8 @@ Work in this order — it's what makes the review catch *drift* rather than just
 5. **Verify before you assert** (see *Verification discipline*). Separate confirmed bugs
    from hypotheses. Do not over-claim.
 6. **Audit the review tooling against the project** (see *Reviewing the skills*). The skills
-   (this one **and** every sibling under `.claude/skills/`) **and** the review subagents under
-   `.claude/agents/` are part of what drifts — confirm each still maps the project that exists
+   (this one **and** every sibling under `.Codex/skills/`) **and** the review subagents under
+   `.Codex/agents/` are part of what drifts — confirm each still maps the project that exists
    before you trust it, and report any gap as a `SKILL-DRIFT` finding (correcting it in the same
    pass).
 7. **Write the report** in the structure at the end.
@@ -212,19 +212,19 @@ The most common inconsistency is a feature that exists in code but not in all th
 that describe it. When reviewing a change (or the repo as a whole), check these links:
 
 - **New/changed HTTP endpoint** → `handle_all` dispatch **and** the API list in
-  `.claude/CLAUDE.md` **and** `docs/README.md` **and** the web UI if user-facing.
+  `.Codex/AGENTS.md` **and** `docs/README.md` **and** the web UI if user-facing.
 - **New command** → a `kCommands` registry row (`main/logic/command_registry.hpp`) **and**
-  the kind dispatch in `main/command_exec.cpp` **and** the command list in `.claude/CLAUDE.md`
+  the kind dispatch in `main/command_exec.cpp` **and** the command list in `.Codex/AGENTS.md`
   **and** docs. (Note: vehicle-control *buttons* were deliberately removed from the web UI.)
 - **New MCP tool** → the same `kCommands` row gains `mcp_name`/`mcp_desc` (the ONE source
   the advertised schema, the MCP executor validation AND the REST clamp are generated
   from; `tools/list` order = table order) **and** a `CHECK` in `test/test_logic.cpp`
   (`test_mcp`) **and** the tool table in `docs/MCP.md` **and** the `/mcp` entry in
-  `.claude/CLAUDE.md`. (Tools mirror the run-on-key charging command set + read-only
+  `.Codex/AGENTS.md`. (Tools mirror the run-on-key charging command set + read-only
   `get_vehicle_state` — never expose a role-refused command: `mcp_name == nullptr`.)
 - **New/changed `/status` field** → `logic/status_model.hpp` **and** its golden emissions
   in `test/test_logic.cpp` (`test_status_model`) **and** the web UI consumer (`www/app.js`).
-- **New NVS key** → ≤15 chars **and** the namespace table in `.claude/CLAUDE.md`.
+- **New NVS key** → ≤15 chars **and** the namespace table in `.Codex/AGENTS.md`.
 - **New Kconfig option** → `main/Kconfig.projbuild` **and** any doc that references defaults
   **and** `sdkconfig.defaults` if a non-default value is required.
 - **Partition / offset / flash-size change** → `partitions.csv` **and** every doc that states
@@ -236,7 +236,7 @@ that describe it. When reviewing a change (or the repo as a whole), check these 
 - **Sleep / link-state change** → `link_state()` is the single source of truth feeding **both**
   the web-UI hero (`main/www/app.js`) **and** MQTT `sleep_state` (`mqtt_ha.cpp`). Touch one
   sink → keep the other in sync (exhaustive MQTT switch, every web-UI state incl. unknown)
-  **and** update the four-state summary in `.claude/CLAUDE.md` **and** the full semantics in
+  **and** update the four-state summary in `.Codex/AGENTS.md` **and** the full semantics in
   `docs/ARCHITECTURE.md`.
 - **New chip / target** → for a chip tesla-ble already lists, `main/idf_component.yml` git dep;
   for one it omits (like esp32c5), the conditional `main/idf_component.yml` + a local patched
@@ -250,20 +250,20 @@ that describe it. When reviewing a change (or the repo as a whole), check these 
   `kWdPeriodS`/`kWdFailToReassoc`/`kWdPingCount`, the ghost-only + `s_gw_ever_reachable`
   guards) **and** are mirrored in the **"WiFi / LAN connectivity"** section of
   `docs/ARCHITECTURE.md` (which quotes those numbers) **and** the deep-reference topic index in
-  `.claude/CLAUDE.md`. This is the STA→LAN link, **distinct** from the car-BLE `link_state()`.
+  `.Codex/AGENTS.md`. This is the STA→LAN link, **distinct** from the car-BLE `link_state()`.
   Invariant: the watchdog must **never reboot** (a reboot mid-outage hits `wifi_connect()`'s
   boot timeout → setup portal, abandoning good credentials).
 - **MQTT transport / TLS-default change** → the scheme-defaulting rule lives in
   `mqtt_ha.cpp` (`mqtt_ha_start`: schemeless broker ⇒ `mqtt://`, but ⇒ `mqtts://` when
   credentials are present, CA-bundle-verified, **no plaintext fallback**) **and** surfaces in
   `/status` (`mqtt.tls`/`mqtt.error`, `http_status.cpp`) **and** the web UI's "· secured" MQTT
-  row **and** the MQTT sections of `.claude/CLAUDE.md` + `docs/ARCHITECTURE.md`.
+  row **and** the MQTT sections of `.Codex/AGENTS.md` + `docs/ARCHITECTURE.md`.
 - **tesla-ble library bump** → `main/idf_component.yml` pin; never patch
   `managed_components/`.
 
 ## Reviewing the skills (meta-coherence)
 
-The skills under `.claude/skills/` **and the review subagents under `.claude/agents/`** are
+The skills under `.Codex/skills/` **and the review subagents under `.Codex/agents/`** are
 themselves documents that drift — each lags the code by exactly the changes landed since it was
 last touched. A review is **not complete** until you have checked that **every** skill and
 **every** agent still describes the project that exists; otherwise future runs inherit a stale
@@ -316,17 +316,17 @@ Run these checks against the current tree:
   multi-place feature; a feature that spans code + docs + config + UI but isn't listed is
   exactly the drift a coherence review is meant to catch.
 - **API / command lists are current.** Diff the routes in `http_server.cpp` (dispatch; handlers in `http_api/status/ota/config.cpp` + `http_events.cpp` (/events WS) + `mcp_server.cpp`) and the command
-  switch against the references the skill and `.claude/CLAUDE.md` lean on.
+  switch against the references the skill and `.Codex/AGENTS.md` lean on.
 - **No stale specifics in the skill text** — hardcoded chip names (e.g. a lone "ESP32-S3" where
   it is now multi-target), file paths, partition offsets, sizes, or version assumptions.
 - **Recency cross-check.** `git log --oneline -10 -- main/` vs. the skill's last change
-  (`git log -1 -- .claude/skills/project-review/SKILL.md`): every commit in between is a
+  (`git log -1 -- .Codex/skills/project-review/SKILL.md`): every commit in between is a
   candidate for an invariant or cross-cutting link the skill hasn't absorbed yet.
 
 ### The other skills (audit and correct each)
 
 The same drift hits the sibling skills. **Discover them, don't hardcode the list:**
-`ls .claude/skills/*/SKILL.md` (skills) **and** `ls .claude/agents/*.md` (subagents). For each,
+`ls .Codex/skills/*/SKILL.md` (skills) **and** `ls .Codex/agents/*.md` (subagents). For each,
 the test is the same — does its `description` + steps + concrete numbers (offsets, counts, flags,
 paths, target set) still match the script, code, and config it drives? Correct a stale one in
 place (same kind of fix as any doc) and report it as `SKILL-DRIFT`. The current siblings and
@@ -359,7 +359,7 @@ what each must stay true to:
 - **`add-logic-test`** scaffolds a new pure-logic unit in `main/logic/` + its `CHECK` cases in
   `test/test_logic.cpp`. Re-verify its claims against `scripts/run-mock-tests.sh`, the CI
   `logic-test` job (`.github/workflows/build.yml`), the `run-logic-tests.sh` **Stop hook**
-  (`.claude/settings.json`), the `CHECK`/`CHECK_STR`/`CHECK_NEAR` macro set in
+  (`.Codex/settings.json`), the `CHECK`/`CHECK_STR`/`CHECK_NEAR` macro set in
   `test/test_logic.cpp`, and the `static_assert` lock pattern (`main/ota_update.cpp` /
   `main/logic/target.hpp`).
 - **`skill-audit`** is the dedicated, PR-gated skill that runs *this very audit* (every skill +
@@ -392,7 +392,7 @@ what each must stay true to:
   partition map against `partitions.csv` (app `@0x20000`, `otadata@0xf000/0x2000`, `nvs@0x9000`
   untouched), the signed-image requirement, the `-merged.bin` warning, and the C5 gotchas. It is the
   recovery counterpart to `flash-esp32`/`ship`, not a build path.
-The review subagents under `.claude/agents/` — audit these the same way (they are the targeted
+The review subagents under `.Codex/agents/` — audit these the same way (they are the targeted
 lenses this skill delegates to; keep them complementary, not contradictory):
 
 - **`doc-drift-checker`** is the fast targeted-diff lens for the *cross-cutting* links. Its
@@ -403,10 +403,10 @@ lenses this skill delegates to; keep them complementary, not contradictory):
   against the *Memory / heap* invariant above (largest **contiguous** block is the binding limit,
   `handle_all` try/catch → 503, streamed `/diag`) and against `main.cpp`'s heap-attribution log —
   the two heap maps must not diverge.
-- **`claude-code-optimizer`** audits the `.claude/` setup (CLAUDE.md, `settings.json`
+- **`Codex-optimizer`** audits the `.Codex/` setup (AGENTS.md, `settings.json`
   permissions + hooks, skills, subagents), **not** firmware logic. Confirm its boundary still
   points firmware-correctness work back at this skill, and that the hook/skill/agent inventory it
-  reasons over matches what actually lives under `.claude/` (`ls .claude/hooks/ .claude/agents/`).
+  reasons over matches what actually lives under `.Codex/` (`ls .Codex/hooks/ .Codex/agents/`).
 - **`multi-target-build-reviewer`** is the per-target build/config divergence lens (the five
   targets built from one tree). Re-verify its facts against the *Cross-cutting consistency*
   section and the build wiring: the target set (esp32/s3/c3/c6/c5), per-target bootloader offsets
@@ -417,10 +417,10 @@ lenses this skill delegates to; keep them complementary, not contradictory):
 - **Any skill or agent added since this was written** must be audited too — and added to this list.
 
 A skill or agent that drives a script is only as current as the script: when the script changes,
-re-read the doc that documents it. The hooks under `.claude/hooks/` (`require-project-review.sh`
+re-read the doc that documents it. The hooks under `.Codex/hooks/` (`require-project-review.sh`
 merge gate **and** `require-skill-audit.sh` PR-create/push gate, `run-logic-tests.sh` Stop hook,
 `report-capabilities.sh`/`build-efficiency-check.sh` SessionStart, `clang-format-edit.sh`
-PostToolUse) are wired in `.claude/settings.json`; a hook whose behaviour a skill/agent describes
+PostToolUse) are wired in `.Codex/settings.json`; a hook whose behaviour a skill/agent describes
 must match the script that actually runs.
 
 ## Verification discipline (avoid confident-but-wrong findings)
@@ -464,7 +464,7 @@ For each, in priority order:
 
 ## Coherence check
 <Doc↔code, config↔code, version, each cross-cutting link, and skills↔project (does every
-SKILL.md under .claude/skills/ still cover the tree?): ✓ consistent / ✗ drifted.>
+SKILL.md under .Codex/skills/ still cover the tree?): ✓ consistent / ✗ drifted.>
 
 ## Prioritized actions
 1. <must-fix> … 2. <should-fix> … 3. <nice-to-have> …

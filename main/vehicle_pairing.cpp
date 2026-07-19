@@ -136,6 +136,12 @@ void VehicleController::auto_pair_task_fn_(void* arg) {
         // Not paired (enrolling): disarm the observer — key-rejection faults are expected
         // here and must not be mistaken for a revocation.
         self->believed_paired_ = false;
+        // Leaving the paired steady state also retires its retry countdown. The idle wait
+        // deliberately leaves its deadline armed-but-expired so the row reads "retrying…"
+        // across the probe that follows (see idle_until_next_health_poll_), but enrolment has
+        // no health-poll schedule at all — carrying that stale deadline in would pin the row
+        // on "retrying…" for the entire time the user is being asked to tap an NFC keycard.
+        self->retry_deadline_.store(0);
 
         // 1. Probe for an existing whitelist entry. Once the key is enrolled — by resting a
         //    Tesla NFC keycard on the center-console reader and confirming the "Add key"
@@ -267,13 +273,22 @@ bool VehicleController::reset_for_new_vehicle() {
 // counts down come from the SAME constant here, so the row can never promise a retry at a
 // time the loop doesn't actually retry. Polls in short steps so a key deletion flagged by
 // the message observer mid-wait (a faulting charge poll) re-keys promptly rather than a
-// full cycle later; the deadline is cleared on the way out so the next phase owns the row.
+// full cycle later.
+//
+// Deliberately leaves the deadline ARMED on the way out. Clearing it here (or, equivalently,
+// just before the probe) opened a phase-less window: the probe runs through send_vcsec_,
+// which takes command_mutex_ FIRST and blocks behind any in-flight evcc/manual command, and
+// the round-trip that follows is unbounded too — with nothing armed the Bluetooth row lost
+// its countdown and fell back to a bare label for all of it. An armed-but-expired deadline
+// reports 0 s, which the UI reads as "retrying… right now" — exactly what is happening — and
+// ensure_connected_ overrides it with the attempt's own countdown the moment the probe gets
+// to run (Connecting outranks Waiting). The next call re-arms it for the next cycle, so from
+// the first wait onward there is always exactly one phase to show.
 void VehicleController::idle_until_next_health_poll_() {
     constexpr uint32_t kIdleMs = 30000;
     constexpr uint32_t kStepMs = 500;
     retry_deadline_.store(deadline_in_(kIdleMs));
     for (uint32_t w = 0; w < kIdleMs / kStepMs && !pairing_lost_; w++) vTaskDelay(pdMS_TO_TICKS(kStepMs));
-    retry_deadline_.store(0);
 }
 
 bool VehicleController::health_probe_(int timeout_ms) {

@@ -8,7 +8,7 @@
 #include "vehicle_data.hpp"
 
 // Pure, hardware-free shaping of GET /status — the de-facto contract the web UI
-// (www/app.js, 4 s poll) and any LAN script consume. http_status.cpp only GATHERS the
+// (www/app.js, fed by the ~2 s /events push) and any LAN script consume. http_status.cpp only GATHERS the
 // Inputs under the existing locks and SERIALIZES what emit_status() decides; every
 // which-field/when/what-value decision lives here so the whole field contract is pinned
 // by golden CHECKs in the host mock build (test/test_logic.cpp) — a renamed field or a

@@ -463,8 +463,8 @@ mismatch shows nothing rather than a foreign number.
 The time sits at the row's **right edge** (`margin-left:auto`), in the column the tile rows put
 their edit pencil in, and stays muted in every phase so it reads as one steady right-hand column
 instead of recolouring with the label. The disconnected row draws **outlined, unfilled** signal
-bars — an empty gauge rather than a dimmed reading; the searching row uses the same amber pair
-(`--warn-base`/`--warn-lite`) the "link up, nothing known yet" bars already use, so the BLE row
+bars — an empty gauge rather than a dimmed reading; the searching row uses the same amber
+(`--warn-base`) the "link up, nothing known yet" bars already use, so the BLE row
 has one amber "in-between" language. Wi-Fi's own search stays green.
 
 `phase_s` rounds **up** and `0` is a real value meaning "right now" — never "no countdown".
@@ -473,9 +473,14 @@ flash a bare "Disconnected" between every cycle. `app.js` ticks the number down 
 second between the ~2 s `/events` pushes, resyncing to the device only on a phase change or a
 ≥2 s disagreement so the two clocks can't jitter the number back upward; it paints into a
 dedicated node with `textContent`, because rewriting the row through `setHTML` every second
-would re-create the bar `<rect>`s and restart their CSS fill animation on every tick. A scan
-with no deadline at all (`loop_task`'s warm-up connect runs until the car appears) correctly
-shows "Searching…" with **no** countdown rather than an invented one.
+would re-create the bar `<rect>`s and restart their CSS fill animation on every tick.
+
+Not every scan is a phase. `loop_task`'s warm-up connect calls `BleClient::connect()` directly
+rather than going through `ensure_connected_`, so it arms nothing and just leaves the radio
+scanning, on and off, straight through the idle wait — under the label-follows-phase rule that
+correctly reads as "Disconnected · retry in …", because the link *is* down and the next real
+attempt *is* scheduled. The one row that shows "Searching…" with no countdown is the no-VIN
+listing-only scan, which has no pairing schedule to count down at all.
 
 **Connection-failure detection (web-UI hero "Connection failed").** When the target car's
 advert is heard but the BLE link won't come up after repeated tries, `/status.ble` carries

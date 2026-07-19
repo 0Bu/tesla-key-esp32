@@ -239,8 +239,6 @@ code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
 .crow .cv .mac{font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12.5px; letter-spacing:.2px}
 .crow .cv .ph{color:var(--muted); font-weight:400}
 .crow .cv .bars{flex:none}
-/* indeterminate "searching…" ring on the BLE row — left of the value, only while scanning */
-.crow .cv .otaspin{flex:none}
 /* signal reading (e.g. "-67 dBm") — compact, muted, never breaks internally */
 .crow .cv .dbm{flex:none; font-size:13px; font-weight:500; color:var(--muted); white-space:nowrap}
 /* SSID / MAC takes the rest; ellipsis (not wrap) is the narrow-phone fallback */

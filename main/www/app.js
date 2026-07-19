@@ -323,7 +323,10 @@ function render(s){
   // insert a fresh <svg> and restart its CSS animation from 0% — making the pulsing
   // sleep/charge/wake ring visibly jump on each ~2 s WS push instead of fading smoothly.
   var hic=$("hicon"), hl=$("hlabel"), hs=$("hsub"), hst=$("hstats"), hicHTML=null;
-  $("hero").classList.remove('hide');   // shown for every paired state; unknown/unreachable now show a grey status hero (not hidden)
+  // Shown for every state this function renders — including the very first frame, since the
+  // markup ships the card hidden so the empty skeleton can't flash on load. The one branch
+  // that puts it back is unknown/unreachable below, which hides the card outright.
+  $("hero").classList.remove('hide');
   hst.innerHTML='';   // cleared here; only the paired+reporting branch populates it
   if(paired&&v){
     if(waking){ waking=false; clearTimeout(wakeTimeout); }   // car is awake & reporting — stop the spinner
@@ -391,10 +394,11 @@ function render(s){
         $("hero").classList.add('hide');
       } else {
         hicHTML=ringSVG(0,true)+'<div class="glyph">'+BT+'</div>';
-        // link==='awake' can land here transiently when the freshness stamp arrived from a
-        // non-charge poll before the first charge poll filled the cache (no s.vehicle yet) —
-        // say "Checking status…" then, not "Connecting…" (the link is clearly up).
-        setHTML(hl,'<span>'+(s.link==='awake'?'Checking status…':'Connecting…')+'</span>');
+        // Only link==='awake' reaches here: the ureach test above already took unknown and
+        // unreachable. It lands here transiently when the freshness stamp arrived from a
+        // non-charge poll before the first charge poll filled the cache (no s.vehicle yet),
+        // so the link is clearly up — "Checking status…", never "Connecting…".
+        setHTML(hl,'<span>Checking status…</span>');
         // Only claim "Bluetooth connected" when the momentary GATT link is actually up
         // (linked). The on-demand link is dropped between polls, so link==='unknown'
         // routinely coexists with ble.connected===false — in which case the BLE row reads
@@ -666,7 +670,6 @@ function genKey(){
 // Status shows inline in the header meta line (progress ring + text), next to the
 // version — no bottom popup. A tiny ring sized for the 13.5px meta line.
 var otaBusy=false;
-// col = arc colour (default the brand accent, used by OTA). The BLE "searching" ring passes
 // var(--ok) so it matches the green signal bars while keeping the exact OTA ring geometry.
 function otaMiniRing(pct,indet,col){
   var sz=16,c=sz/2,r=6,sw=2.6,circ=2*Math.PI*r; col=col||'var(--accent)';
@@ -755,16 +758,20 @@ function waitReboot(preVer){
 /* ---------- boot ---------- */
 function boot(){
   fetch('/set_time',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ms:Date.now()})}).catch(function(){});
-  if(window.WebSocket){
-    connectWS();                 // live feed: one socket, device pushes /status — no interval poll
-  } else {
-    // No WebSocket in this (very old) browser: fetch one snapshot so the page isn't blank, then
-    // stop. Deliberately no polling — the live UI is WebSocket-only; reload the page to refresh.
-    fetch('/status?ms='+Date.now(),{cache:'no-store'}).then(function(r){return r.json()}).then(render).catch(function(){});
-  }
+  // ONE snapshot on every path, before/independently of the socket. The live feed is still
+  // WebSocket-only (no polling — reload to refresh if the browser has no WebSocket), but the
+  // page must not depend on the handshake succeeding to render at all: the hero now starts
+  // hidden and only render() reveals it, and /events caps at 8 clients, so a 9th tab — or any
+  // proxy/captive portal that blocks ws:// — would otherwise sit forever on a skeleton with no
+  // hero, no status and no hint why. A later WS frame simply re-renders over this.
+  fetch('/status?ms='+Date.now(),{cache:'no-store'}).then(function(r){return r.json()}).then(render).catch(function(){});
+  if(window.WebSocket) connectWS();   // live feed: one socket, device pushes /status
   // Tick the Bluetooth phase countdown between pushes so it steps every second instead of
   // jumping in ~2 s hops. Text-only update of one node — no layout churn, no re-render.
-  setInterval(paintCd,1000);
+  // Only while the socket is up: with the feed gone the rest of the page is deliberately
+  // frozen on its last frame, and a countdown that kept running would be the one element
+  // still making claims about a device we are no longer hearing from.
+  setInterval(function(){ if(ws) paintCd(); },1000);
   resumeOta();
 }
 boot();

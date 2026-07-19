@@ -12,11 +12,18 @@
 // Two rules make the countdown trustworthy, and both exist because breaking them is what
 // made the first attempt at this feature misreport:
 //
-//   1. Connecting outranks Waiting. The two overlap routinely — a command, or loop_task's
-//      warm-up connect, starts an attempt in the middle of auto-pair's idle wait. The
-//      attempt is the more specific truth about what the radio is doing right now, and
-//      because the deadlines are stored separately (never cleared by each other), the idle
-//      wait's countdown simply reappears when the attempt ends instead of the row going bare.
+//   1. Connecting outranks Waiting. The two overlap routinely — an evcc/manual command or a
+//      telemetry poll starts an attempt in the middle of auto-pair's idle wait. The attempt
+//      is the more specific truth about what the radio is doing right now, and because the
+//      deadlines are stored separately (never cleared by each other), the idle wait's
+//      countdown simply reappears when the attempt ends instead of the row going bare.
+//
+//      NOT every scan is a phase: loop_task's warm-up connect calls BleClient::connect()
+//      directly rather than through ensure_connected_, so it has no deadline and arms
+//      nothing — it just leaves the radio scanning, on and off, straight through the idle
+//      wait. That is exactly why the web UI takes its BLE label from the phase and not from
+//      ble.scanning: keying it off the raw flag made the label flip to "Searching…" in the
+//      middle of a "retry in …" countdown, so label and number described different phases.
 //
 //   2. Seconds round UP, and 0 is a real answer, not "no countdown". A phase reads its full
 //      length the moment it starts and only reaches 0 when the deadline has actually
