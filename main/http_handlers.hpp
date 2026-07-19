@@ -12,6 +12,7 @@
 // guard) is a compile error, not a comment violation.
 
 #include "http_server.hpp"
+#include "logic/command_registry.hpp"
 #include <esp_http_server.h>
 #include <cJSON.h>
 
@@ -67,6 +68,12 @@ bool browser_time_plausible(double epoch_ms);
 // (/set_time and /ota/check?ms=) share, so the security-sensitive clock-set path can
 // never drift between them. Returns the applied epoch seconds (for logging).
 long long apply_browser_clock(double epoch_ms);
+
+// The ONE kind → VehicleController dispatch both command surfaces execute through
+// (command_exec.cpp). ival/bval are the positional value arrays each surface filled
+// against the shared arg specs in logic/command_registry.hpp (tk::kCmdMaxArgs slots).
+bool execute_vehicle_command(VehicleController& v, tk::CmdKind kind,
+                             const int* ival, const bool* bval);
 
 // ─── Route handlers ───────────────────────────────────────────────────────────
 

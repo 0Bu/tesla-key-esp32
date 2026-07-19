@@ -10,17 +10,22 @@
 //                                    (logic/link_state.hpp <- /status "link", MQTT sleep_status)
 //   * per-target platform / OTA-suffix mapping
 //                                    (logic/target.hpp     <- platform.hpp, ota_update.cpp)
+//   * the shared command registry — names/kinds/arg bounds for BOTH surfaces
+//                                    (logic/command_registry.hpp <- http_api.cpp + mcp_server.cpp)
+//   * the /status field contract, pinned by golden emissions
+//                                    (logic/status_model.hpp <- http_status.cpp)
 //   * Syslog target parsing + send-failure classification
 //                                    (logic/syslog_policy.hpp <- syslog.cpp, /set_syslog)
-// The cJSON envelope builders themselves stay IDF/cJSON-coupled; their pure inputs
-// (the conversions and link strings that feed /status and the MQTT payloads) are
-// what regress silently, and those are covered here.
+// The cJSON serializers stay IDF/cJSON-coupled, but they are one-to-one visitors now:
+// every which-field/when/what-value decision they render is host-tested here.
 
 #include "logic/vin.hpp"
 #include "logic/units.hpp"
 #include "logic/link_state.hpp"
 #include "logic/target.hpp"
 #include "logic/mcp.hpp"
+#include "logic/command_registry.hpp"
+#include "logic/status_model.hpp"
 #include "logic/command_result.hpp"
 #include "logic/ui_state.hpp"
 #include "logic/display_model.hpp"
@@ -36,6 +41,7 @@
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <vector>
 
 static int g_failures = 0;
 static int g_checks   = 0;
@@ -275,50 +281,97 @@ static void test_mcp() {
     CHECK(tk::mcp_method_from("Initialize")     == MM::Unknown);  // case-sensitive
     CHECK(tk::mcp_method_from(nullptr)          == MM::Unknown);
 
-    // Tool registry: every entry round-trips by name and by enum; role-refused commands
-    // (which the Charging-Manager key can't execute) are deliberately not tools.
-    for (const auto& t : tk::kMcpTools) {
-        CHECK(tk::mcp_tool_from(t.name) == t.tool);
-        CHECK(tk::mcp_tool_info(t.tool) == &t);
+    // Tool registry — now the MCP-visible half of the ONE shared command table
+    // (logic/command_registry.hpp): every MCP row round-trips by name and by kind;
+    // role-refused commands (which the Charging-Manager key can't execute) carry no
+    // mcp_name and must not resolve as tools.
+    for (const auto& t : tk::kCommands) {
+        if (!t.mcp_name) continue;
+        CHECK(tk::cmd_from_mcp_name(t.mcp_name) == &t);
+        CHECK(t.mcp_desc != nullptr);
+        CHECK(tk::cmd_info(t.kind) == &t);
     }
-    CHECK(tk::mcp_tool_from("door_unlock")     == tk::McpTool::Unknown);
-    CHECK(tk::mcp_tool_from("set_sentry_mode") == tk::McpTool::Unknown);
-    CHECK(tk::mcp_tool_from(nullptr)           == tk::McpTool::Unknown);
-    CHECK(tk::mcp_tool_info(tk::McpTool::Unknown) == nullptr);
+    CHECK(tk::cmd_from_mcp_name("door_unlock")     == nullptr);  // REST-only, never a tool
+    CHECK(tk::cmd_from_mcp_name("set_sentry_mode") == nullptr);
+    CHECK(tk::cmd_from_mcp_name(nullptr)           == nullptr);
+    CHECK(tk::cmd_info(tk::CmdKind::Unknown)       == nullptr);
 
-    // Arg-spec table — the single source of truth the advertised schema AND the executor
-    // clamp both read (schema-vs-clamp drift is impossible by construction; this pins the
-    // values themselves). Every non-None arg has a key and sane bounds; an absent
-    // OPTIONAL Int defaults to 0 in the executor, so an optional spec's range must
-    // contain 0.
-    for (const auto& t : tk::kMcpTools) {
+    // Arg-spec table — the single source of truth the advertised schema, the MCP
+    // executor clamp AND the REST /command clamp all read (drift between them is
+    // impossible by construction; this pins the values themselves). Every non-None arg
+    // has sane shared bounds; an absent OPTIONAL Int defaults to 0 on the MCP side and
+    // to api_default on the REST side, so both must lie inside the advertised bounds.
+    for (const auto& t : tk::kCommands) {
         for (const auto& a : t.args) {
-            if (a.type == tk::McpArgType::None) continue;
-            CHECK(a.key != nullptr);
-            if (a.type == tk::McpArgType::Int) {
+            if (a.type == tk::CmdArgType::None) continue;
+            CHECK(a.api_key != nullptr || a.mcp_key != nullptr);
+            if (a.type == tk::CmdArgType::Int) {
                 CHECK(a.lo <= a.hi);
-                // Optional Int args default to 0 when absent — the spec range must
-                // contain 0 or the default would be out of the advertised bounds.
-                if (!a.required) CHECK(a.lo <= 0 && 0 <= a.hi);
+                if (a.mcp_key && !a.mcp_required) CHECK(a.lo <= 0 && 0 <= a.hi);
+                if (a.api_key) CHECK(a.lo <= a.api_default && a.api_default <= a.hi);
             }
         }
     }
-    const tk::McpToolInfo* amps = tk::mcp_tool_info(tk::McpTool::SetChargingAmps);
-    CHECK_STR(amps->args[0].key, "amps");
-    CHECK(amps->args[0].type == tk::McpArgType::Int && amps->args[0].required);
+    const tk::CmdInfo* amps = tk::cmd_info(tk::CmdKind::SetChargingAmps);
+    CHECK_STR(amps->args[0].mcp_key, "amps");
+    CHECK_STR(amps->args[0].api_key, "charging_amps");   // TeslaBleHttpProxy compat name
+    CHECK(amps->args[0].type == tk::CmdArgType::Int && amps->args[0].mcp_required);
     CHECK(amps->args[0].lo == 0 && amps->args[0].hi == 48);
-    const tk::McpToolInfo* lim = tk::mcp_tool_info(tk::McpTool::SetChargeLimit);
-    CHECK_STR(lim->args[0].key, "percent");
-    CHECK(lim->args[0].required && lim->args[0].lo == 50 && lim->args[0].hi == 100);
-    const tk::McpToolInfo* sched = tk::mcp_tool_info(tk::McpTool::SetScheduledCharging);
-    CHECK_STR(sched->args[0].key, "enable");
-    CHECK(sched->args[0].type == tk::McpArgType::Bool && sched->args[0].required);
-    CHECK_STR(sched->args[1].key, "start_minutes");
-    CHECK(sched->args[1].type == tk::McpArgType::Int && !sched->args[1].required);
+    CHECK(amps->args[0].api_default == 0);
+    const tk::CmdInfo* lim = tk::cmd_info(tk::CmdKind::SetChargeLimit);
+    CHECK_STR(lim->args[0].mcp_key, "percent");
+    CHECK_STR(lim->args[0].api_key, "percent");
+    CHECK(lim->args[0].mcp_required && lim->args[0].lo == 50 && lim->args[0].hi == 100);
+    CHECK(lim->args[0].api_default == 80);               // REST: absent body still means 80%
+    const tk::CmdInfo* sched = tk::cmd_info(tk::CmdKind::SetScheduledCharging);
+    CHECK_STR(sched->args[0].mcp_key, "enable");
+    CHECK_STR(sched->args[0].api_key, "enable");
+    CHECK(sched->args[0].type == tk::CmdArgType::Bool && sched->args[0].mcp_required);
+    CHECK_STR(sched->args[1].mcp_key, "start_minutes");
+    CHECK(sched->args[1].type == tk::CmdArgType::Int && !sched->args[1].mcp_required);
     CHECK(sched->args[1].lo == 0 && sched->args[1].hi == 1439);
     // Read-only + no-arg tools carry no args.
-    CHECK(tk::mcp_tool_info(tk::McpTool::GetVehicleState)->args[0].type == tk::McpArgType::None);
-    CHECK(tk::mcp_tool_info(tk::McpTool::WakeUp)->args[0].type          == tk::McpArgType::None);
+    CHECK(tk::cmd_info(tk::CmdKind::GetVehicleState)->args[0].type == tk::CmdArgType::None);
+    CHECK(tk::cmd_info(tk::CmdKind::WakeUp)->args[0].type          == tk::CmdArgType::None);
+
+    // REST surface of the shared table: exactly the 15 TeslaBleHttpProxy commands
+    // resolve by API name, each to its own kind; get_vehicle_state is NOT one of them.
+    const char* api_names[] = {
+        "wake_up", "charge_start", "charge_stop", "charge_port_door_open",
+        "charge_port_door_close", "door_lock", "door_unlock", "flash_lights",
+        "honk_horn", "auto_conditioning_start", "auto_conditioning_stop",
+        "set_charging_amps", "set_charge_limit", "set_sentry_mode",
+        "set_scheduled_charging",
+    };
+    int api_count = 0;
+    for (const auto& t : tk::kCommands) if (t.api_name) ++api_count;
+    CHECK(api_count == 15);
+    for (const char* n : api_names) {
+        const tk::CmdInfo* c = tk::cmd_from_api_name(n);
+        CHECK(c != nullptr);
+        CHECK_STR(c->api_name, n);
+    }
+    CHECK(tk::cmd_from_api_name("get_vehicle_state") == nullptr);
+    CHECK(tk::cmd_from_api_name("bogus")             == nullptr);
+    CHECK(tk::cmd_from_api_name(nullptr)             == nullptr);
+    // MCP name mapping of the charge-port pair differs from the REST name on purpose.
+    CHECK_STR(tk::cmd_from_api_name("charge_port_door_open")->mcp_name, "charge_port_open");
+
+    // tools/list wire order is table order — pin the 9 MCP rows exactly (a reorder
+    // would change the serialized tools/list even with identical content).
+    const char* mcp_order[] = {
+        "get_vehicle_state", "wake_up", "charge_start", "charge_stop",
+        "charge_port_open", "charge_port_close", "set_charging_amps",
+        "set_charge_limit", "set_scheduled_charging",
+    };
+    int mi = 0;
+    for (const auto& t : tk::kCommands) {
+        if (!t.mcp_name) continue;
+        CHECK(mi < 9);
+        if (mi < 9) CHECK_STR(t.mcp_name, mcp_order[mi]);
+        ++mi;
+    }
+    CHECK(mi == 9);
 
     // Clamp: an out-of-range double must never reach the int cast (UB guard).
     CHECK(tk::clamped_int(16.0,   0, 48)    == 16);
@@ -341,6 +394,325 @@ static void test_mcp() {
     CHECK_STR(tk::command_result_text(true,  tesla_reason), "command executed successfully");
     CHECK_STR(tk::command_result_text(false, tesla_reason), "complete");
     CHECK_STR(tk::command_result_text(false, no_reason),    "vehicle not reachable");
+}
+
+// ─── /status field contract (logic/status_model.hpp <- http_status.cpp) ──────────
+// Flattening emitter for the goldens: containers print as "path{" / "path[", leaves as
+// "path=value" — one line per emitter call, so the golden pins field ORDER, key NAMES,
+// PRESENCE rules and VALUE shaping all at once (that is the /status contract app.js
+// and any LAN script consume).
+struct CollectEmitter {
+    std::string out;
+    std::vector<std::string> path;   // open containers
+    std::vector<int> arr_next;       // per-container: next array index, or -1 for objects
+
+    std::string joined(const std::string& leaf) {
+        std::string p;
+        for (const auto& s : path) { p += s; p += '.'; }
+        return p + leaf;
+    }
+    std::string elem_name(const char* key) {
+        if (key) return key;
+        return std::to_string(arr_next.back()++);   // array element: enclosing counter
+    }
+    void obj_begin(const char* key) {
+        std::string nm = elem_name(key);
+        out += joined(nm) + "{\n";
+        path.push_back(nm); arr_next.push_back(-1);
+    }
+    void obj_end() { path.pop_back(); arr_next.pop_back(); }
+    void arr_begin(const char* key) {
+        std::string nm = elem_name(key);
+        out += joined(nm) + "[\n";
+        path.push_back(nm); arr_next.push_back(0);
+    }
+    void arr_end() { obj_end(); }
+    void str(const char* k, const char* v) { out += joined(elem_name(k)) + "=\"" + v + "\"\n"; }
+    void num(const char* k, double v) {
+        char b[40];
+        if (v == (double)(long long)v) std::snprintf(b, sizeof b, "%lld", (long long)v);
+        else                           std::snprintf(b, sizeof b, "%.10g", v);
+        out += joined(elem_name(k)) + "=" + b + "\n";
+    }
+    void boolean(const char* k, bool v) { out += joined(elem_name(k)) + (v ? "=true\n" : "=false\n"); }
+};
+
+// Golden compare that prints the diff on mismatch (a bare CHECK only names the line).
+static bool golden_eq(const std::string& got, const char* want) {
+    if (got == want) return true;
+    std::printf("---- golden mismatch: got ----\n%s---- want ----\n%s----\n", got.c_str(), want);
+    return false;
+}
+
+static void test_status_model() {
+    using tk::status::Inputs;
+
+    // Scenario 1 — awake + charging, BLE link up, full telemetry with a deliberate mix
+    // of present/absent fields (float-exact values so the golden is bit-stable).
+    Inputs in;
+    in.vin = "5YJ3E1EA7KF000316"; in.ip = "192.168.1.50"; in.version = "1.4.2";
+    in.key_present = true; in.key_fingerprint = "AB:CD:EF:01";
+    in.key_created = 1750000000; in.paired = true; in.paired_at = 1750500000;
+    in.wifi_connected = true; in.wifi_ssid = "HomeNet"; in.wifi_rssi = -55; in.wifi_std = "Wi-Fi 6";
+    in.mqtt_configured = true; in.mqtt_connected = true; in.mqtt_tls = true;
+    in.mqtt_broker = "mqtt.local:8883";
+    in.syslog_configured = true; in.syslog_resolved = true; in.syslog_reachable = true;
+    in.syslog_host = "syslog.lan"; in.syslog_port = 514;   // error absent → omitted
+    in.ble_connected = true; in.have_ble_rssi = true; in.ble_rssi = -60;
+    in.ble_addr = "aa:bb:cc:dd:ee:ff";
+    in.climate.valid = true;
+    in.climate.has_inside = true;   in.climate.inside_temp = 21.5f;
+    in.climate.has_outside = true;  in.climate.outside_temp = 18.0f;
+    in.climate.has_setpoint = true; in.climate.driver_setpoint = 20.5f;
+    in.climate.has_climate_on = true;      in.climate.is_climate_on = true;
+    in.climate.has_preconditioning = true; in.climate.is_preconditioning = false;
+    in.climate.has_cop = true;         in.climate.cop = "On";
+    in.climate.has_cop_cooling = true; in.climate.cop_cooling = true;
+    in.climate.has_cop_temp = true;    in.climate.cop_temp = "Medium";
+    // cop_reason absent on purpose (presence rule)
+    in.climate.has_rear_defrost = true; in.climate.rear_defrost = false;
+    in.climate.has_defrost_mode = true; in.climate.defrost_mode = "Off";
+    in.drive.valid = true; in.drive.shift_state = "P";
+    in.drive.has_odometer = true; in.drive.odometer_km = 12345.5f;
+    in.tires.valid = true;
+    in.tires.has_fl = true; in.tires.fl = 2.75f;
+    in.tires.has_fr = true; in.tires.fr = 2.75f;
+    in.tires.has_rl = true; in.tires.rl = 3.0f;
+    // rr absent on purpose; warn always emitted
+    in.closures.valid = true;
+    in.closures.has_locked = true; in.closures.locked = true;
+    in.closures.trunk_open = true;   // door/frunk/window false, always emitted
+    // user absent on purpose
+    in.link = tk::LinkState::Awake; in.vcsec_sleep = "AWAKE";
+    in.charge.valid = true;
+    in.charge.has_battery_level = true;    in.charge.battery_level = 72.5f;
+    in.charge.charging_state = "Charging";
+    in.charge.has_charge_limit_soc = true; in.charge.charge_limit_soc = 80.0f;
+    in.charge.has_charger_power = true;    in.charge.charger_power = 11.4f;  // → rounds to 11
+    in.charge.has_charging_amps = true;    in.charge.charging_amps = 16;
+    in.charge.has_actual_current = true;   in.charge.charger_actual_current = 16;
+    in.charge.has_voltage = true;          in.charge.charger_voltage = 231;
+    in.charge.has_charger_phases = true;   in.charge.charger_phases = 2;
+    in.have_last_seen = true; in.last_seen_s = 5;
+
+    CollectEmitter e1;
+    tk::status::emit_status(in, e1);
+    CHECK(golden_eq(e1.out, 
+        "vin=\"5YJ3E1EA7KF000316\"\n"
+        "ip=\"192.168.1.50\"\n"
+        "version=\"1.4.2\"\n"
+        "key_present=true\n"
+        "key_fingerprint=\"AB:CD:EF:01\"\n"
+        "key_created=1750000000\n"
+        "paired=true\n"
+        "paired_at=1750500000\n"
+        "reauth=false\n"
+        "wifi{\n"
+        "wifi.ssid=\"HomeNet\"\n"
+        "wifi.rssi=-55\n"
+        "wifi.std=\"Wi-Fi 6\"\n"
+        "mqtt{\n"
+        "mqtt.configured=true\n"
+        "mqtt.connected=true\n"
+        "mqtt.tls=true\n"
+        "mqtt.broker=\"mqtt.local:8883\"\n"
+        "syslog{\n"
+        "syslog.configured=true\n"
+        "syslog.resolved=true\n"
+        "syslog.reachable=true\n"
+        "syslog.host=\"syslog.lan\"\n"
+        "syslog.port=514\n"
+        "tele{\n"
+        "tele.climate{\n"
+        "tele.climate.inside=21.5\n"
+        "tele.climate.outside=18\n"
+        "tele.climate.setpoint=20.5\n"
+        "tele.climate.on=true\n"
+        "tele.climate.preconditioning=false\n"
+        "tele.climate.cop=\"On\"\n"
+        "tele.climate.cop_cooling=true\n"
+        "tele.climate.cop_temp=\"Medium\"\n"
+        "tele.climate.rear_defrost=false\n"
+        "tele.climate.defrost_mode=\"Off\"\n"
+        "tele.drive{\n"
+        "tele.drive.shift=\"P\"\n"
+        "tele.drive.odometer_km=12345.5\n"
+        "tele.tires{\n"
+        "tele.tires.fl=2.75\n"
+        "tele.tires.fr=2.75\n"
+        "tele.tires.rl=3\n"
+        "tele.tires.warn=false\n"
+        "tele.closures{\n"
+        "tele.closures.locked=true\n"
+        "tele.closures.door=false\n"
+        "tele.closures.frunk=false\n"
+        "tele.closures.trunk=true\n"
+        "tele.closures.window=false\n"
+        "ble{\n"
+        "ble.connected=true\n"
+        "ble.scanning=false\n"
+        "ble.rssi=-60\n"
+        "ble.addr=\"aa:bb:cc:dd:ee:ff\"\n"
+        "link=\"awake\"\n"
+        "vcsec_sleep=\"AWAKE\"\n"
+        "vehicle{\n"
+        "vehicle.soc=72.5\n"
+        "vehicle.status=\"Charging\"\n"
+        "vehicle.charge_limit=80\n"
+        "vehicle.power=11\n"
+        "vehicle.amps=16\n"
+        "vehicle.actual_amps=16\n"
+        "vehicle.volts=231\n"
+        "vehicle.phases=2\n"
+        "last{\n"
+        "last.soc=72.5\n"
+        "last.status=\"Charging\"\n"
+        "last_seen_s=5\n"));
+
+    // Scenario 2 — asleep: BLE link down (dropped between polls), charge cache retained,
+    // debounced VCSEC sleep proven; no devices seen, no connect failures.
+    Inputs s2;
+    s2.vin = "5YJ3E1EA7KF000316"; s2.ip = "192.168.1.50"; s2.version = "1.4.2";
+    s2.key_present = true; s2.key_fingerprint = "AB:CD:EF:01";
+    s2.paired = true;   // stamps below the plausibility floor stay omitted
+    s2.wifi_connected = true; s2.wifi_ssid = "HomeNet"; s2.wifi_rssi = -58;
+    s2.mqtt_configured = true; s2.mqtt_connected = false; s2.mqtt_tls = false;
+    s2.mqtt_broker = "mqtt.local:1883"; s2.mqtt_error = "connection refused";
+    s2.link = tk::LinkState::Asleep; s2.vcsec_sleep = "ASLEEP";
+    s2.charge.valid = true;
+    s2.charge.has_battery_level = true; s2.charge.battery_level = 68.0f;
+    s2.charge.charging_state = "Stopped";
+    s2.have_last_seen = true; s2.last_seen_s = 3600;
+
+    CollectEmitter e2;
+    tk::status::emit_status(s2, e2);
+    CHECK(golden_eq(e2.out, 
+        "vin=\"5YJ3E1EA7KF000316\"\n"
+        "ip=\"192.168.1.50\"\n"
+        "version=\"1.4.2\"\n"
+        "key_present=true\n"
+        "key_fingerprint=\"AB:CD:EF:01\"\n"
+        "paired=true\n"
+        "reauth=false\n"
+        "wifi{\n"
+        "wifi.ssid=\"HomeNet\"\n"
+        "wifi.rssi=-58\n"
+        "mqtt{\n"
+        "mqtt.configured=true\n"
+        "mqtt.connected=false\n"
+        "mqtt.tls=false\n"
+        "mqtt.broker=\"mqtt.local:1883\"\n"
+        "mqtt.error=\"connection refused\"\n"
+        "syslog{\n"
+        "syslog.configured=false\n"
+        "syslog.resolved=false\n"
+        "syslog.reachable=false\n"
+        "ble{\n"
+        "ble.connected=false\n"
+        "ble.scanning=false\n"
+        "ble.devices[\n"
+        "link=\"asleep\"\n"
+        "vcsec_sleep=\"ASLEEP\"\n"
+        "last{\n"
+        "last.soc=68\n"
+        "last.status=\"Stopped\"\n"
+        "last_seen_s=3600\n"));
+
+    // Scenario 3 — unreachable, scanning, found-but-can't-connect: devices listed, a
+    // connect-fail streak with last-seen advert RSSI and a non-connectable target (the
+    // car at its ~3-device BLE limit).
+    Inputs s3;
+    s3.vin = "5YJ3E1EA7KF000316"; s3.ip = "10.0.0.7"; s3.version = "1.4.2";
+    s3.key_present = true; s3.key_fingerprint = "AB:CD:EF:01"; s3.paired = true;
+    s3.wifi_connected = true; s3.wifi_ssid = "Garage"; s3.wifi_rssi = -71; s3.wifi_std = "Wi-Fi 4";
+    s3.ble_scanning = true;
+    s3.devices.push_back({ "de:ad:be:ef:00:01", "S1a87029XXXXXXXXC", -77, true });
+    s3.devices.push_back({ "de:ad:be:ef:00:02", "Sxxxxxxxxxxxxxxxx", -90, false });
+    s3.connect_fail = 4;
+    s3.have_seen_rssi = true; s3.seen_rssi = -77;
+    s3.target_connectable = 0;
+    s3.link = tk::LinkState::Unreachable; s3.vcsec_sleep = "UNKNOWN";
+    s3.charge.valid = true;
+    s3.charge.has_battery_level = true; s3.charge.battery_level = 54.0f;
+    s3.charge.charging_state = "Disconnected";
+    s3.have_last_seen = true; s3.last_seen_s = 90000;
+
+    CollectEmitter e3;
+    tk::status::emit_status(s3, e3);
+    CHECK(golden_eq(e3.out, 
+        "vin=\"5YJ3E1EA7KF000316\"\n"
+        "ip=\"10.0.0.7\"\n"
+        "version=\"1.4.2\"\n"
+        "key_present=true\n"
+        "key_fingerprint=\"AB:CD:EF:01\"\n"
+        "paired=true\n"
+        "reauth=false\n"
+        "wifi{\n"
+        "wifi.ssid=\"Garage\"\n"
+        "wifi.rssi=-71\n"
+        "wifi.std=\"Wi-Fi 4\"\n"
+        "mqtt{\n"
+        "mqtt.configured=false\n"
+        "mqtt.connected=false\n"
+        "mqtt.tls=false\n"
+        "syslog{\n"
+        "syslog.configured=false\n"
+        "syslog.resolved=false\n"
+        "syslog.reachable=false\n"
+        "ble{\n"
+        "ble.connected=false\n"
+        "ble.scanning=true\n"
+        "ble.devices[\n"
+        "ble.devices.0{\n"
+        "ble.devices.0.addr=\"de:ad:be:ef:00:01\"\n"
+        "ble.devices.0.name=\"S1a87029XXXXXXXXC\"\n"
+        "ble.devices.0.rssi=-77\n"
+        "ble.devices.0.connectable=true\n"
+        "ble.devices.1{\n"
+        "ble.devices.1.addr=\"de:ad:be:ef:00:02\"\n"
+        "ble.devices.1.name=\"Sxxxxxxxxxxxxxxxx\"\n"
+        "ble.devices.1.rssi=-90\n"
+        "ble.devices.1.connectable=false\n"
+        "ble.connect_fail=4\n"
+        "ble.rssi=-77\n"
+        "ble.car_connectable=false\n"
+        "link=\"unreachable\"\n"
+        "vcsec_sleep=\"UNKNOWN\"\n"
+        "last{\n"
+        "last.soc=54\n"
+        "last.status=\"Disconnected\"\n"
+        "last_seen_s=90000\n"));
+
+    // Scenario 4 — factory-fresh: no key, unpaired, no WiFi yet (portal case aside),
+    // nothing cached, nothing heard. The contract still emits the empty wifi/mqtt/ble
+    // containers and the devices[] array (app.js reads them unconditionally).
+    Inputs s4;
+    s4.vin = "UNKNOWN"; s4.version = "1.4.2";
+    CollectEmitter e4;
+    tk::status::emit_status(s4, e4);
+    CHECK(golden_eq(e4.out, 
+        "vin=\"UNKNOWN\"\n"
+        "ip=\"\"\n"
+        "version=\"1.4.2\"\n"
+        "key_present=false\n"
+        "key_fingerprint=\"\"\n"
+        "paired=false\n"
+        "reauth=false\n"
+        "wifi{\n"
+        "mqtt{\n"
+        "mqtt.configured=false\n"
+        "mqtt.connected=false\n"
+        "mqtt.tls=false\n"
+        "syslog{\n"
+        "syslog.configured=false\n"
+        "syslog.resolved=false\n"
+        "syslog.reachable=false\n"
+        "ble{\n"
+        "ble.connected=false\n"
+        "ble.scanning=false\n"
+        "ble.devices[\n"
+        "link=\"unknown\"\n"
+        "vcsec_sleep=\"UNKNOWN\"\n"));
 }
 
 // ─── on-device display presenter (logic/display_model.hpp <- display.cpp compose()) ──────
@@ -655,6 +1027,7 @@ int main() {
     test_link_state_strings();
     test_target();
     test_mcp();
+    test_status_model();
     test_display_helpers();
     test_display_model();
     test_led();

@@ -28,7 +28,7 @@ are layered on purpose and **must agree with each other and with the code**:
   [`docs/SECURITY.md`](../../docs/SECURITY.md), [`docs/MCP.md`](../../docs/MCP.md) — user-facing
   and security/MCP narrative.
 - `main/www/` (`index.html` + `app.js` + `style.css`) — the web UI, which surfaces many of the
-  same facts (status fields, command buttons, version).
+  same facts (status fields, the charge-toggle/wake command calls, version).
 
 **Drift goes both ways:** an undocumented new endpoint is as much a finding as a documented one
 the code no longer serves.
@@ -44,10 +44,12 @@ The **cross-referenced facts** that must stay in sync (change one → check all 
 1. **HTTP endpoints / routes.** A route added/renamed/removed in `http_*.cpp` / `mcp_server.cpp`
    → the `## HTTP API` block in CLAUDE.md, the endpoint narrative in `docs/ARCHITECTURE.md`,
    `docs/MCP.md` (for `/mcp`), and any web-UI call site in `app.js`.
-2. **Commands.** A command added/moved between the "run-on-key" vs "role-refused" lists in
-   `vehicle_commands.cpp` → the `## Commands Implemented` split in CLAUDE.md, the command
-   narrative in `docs/ARCHITECTURE.md`, the MCP tool registry (`logic/mcp.hpp` + `docs/MCP.md`),
-   and the command buttons in the web UI.
+2. **Commands.** A command added/moved between the "run-on-key" vs "role-refused" sets — the
+   ONE table for both surfaces is `kCommands` in `logic/command_registry.hpp` (REST + MCP names,
+   shared arg bounds; `mcp_name == nullptr` = role-refused), dispatched via `command_exec.cpp` →
+   the `## Commands Implemented` split in CLAUDE.md, the command narrative in
+   `docs/ARCHITECTURE.md`, the tool table in `docs/MCP.md`, and the web-UI command call sites in
+   `app.js` (charge toggle / wake tap — dedicated command buttons were deliberately removed).
 3. **NVS keys / namespaces.** A key added/renamed in `nvs_storage.cpp` / config code → the
    `## NVS Namespaces` table in CLAUDE.md and any doc that names it. Remember the **≤15-char**
    library-key mapping rule.
@@ -64,8 +66,9 @@ The **cross-referenced facts** that must stay in sync (change one → check all 
 8. **Library pin.** `main/idf_component.yml` `yoziru/tesla-ble` version vs. the pin quoted in
    CLAUDE.md's `## Key Dependency` and any doc that names it.
 9. **Status / telemetry fields & MQTT entities.** A field added/removed in `/status` (`tele.*`)
-   or an MQTT discovery entity → the telemetry/MQTT sections of `docs/ARCHITECTURE.md`, the
-   summary in CLAUDE.md, and the web UI that renders it.
+   or an MQTT discovery entity → the `/status` field contract in `logic/status_model.hpp` **and**
+   its golden emissions in `test/test_logic.cpp` (`test_status_model`), the telemetry/MQTT
+   sections of `docs/ARCHITECTURE.md`, the summary in CLAUDE.md, and the web UI that renders it.
 10. **Architecture file map.** A file added/removed/renamed under `main/` → the file-map block
     in CLAUDE.md's `## Architecture` and the project map in the `project-review` skill.
 

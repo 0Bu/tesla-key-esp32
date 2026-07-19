@@ -47,7 +47,9 @@ The firmware delegates these decision/conversion cores to IDF-free headers under
 | `link_state()` four-state machine + the debounced-ASLEEP asymmetry | `logic/link_state.hpp` | `VehicleController::link_state()` |
 | `/status` `link` + MQTT `sleep_status` strings | `logic/link_state.hpp` | `http_status.cpp`, `mqtt_ha.cpp` |
 | Per-target platform name + OTA image suffix | `logic/target.hpp` | `platform.hpp` (`TK_PLATFORM`), `ota_update.cpp` |
-| MCP protocol core (version negotiation, JSON-RPC method routing, tool/arg-spec registry, int clamp) | `logic/mcp.hpp` | `mcp_server.cpp` (`/mcp` schema + executor) |
+| MCP protocol core (version negotiation, JSON-RPC method routing, int clamp) | `logic/mcp.hpp` | `mcp_server.cpp` (`/mcp` schema + executor) |
+| Shared command registry — REST + MCP names, kinds, per-surface arg keys with ONE bounds pair, `tools/list` row order | `logic/command_registry.hpp` | `http_api.cpp` `/command` dispatch, `mcp_server.cpp` schema + executor, `command_exec.cpp` |
+| `/status` field contract — order, key names, presence rules, value shaping (golden emissions for awake+charging / asleep / unreachable+scan / factory-fresh) | `logic/status_model.hpp` (+ `logic/vehicle_data.hpp` inputs) | `http_status.cpp` `handle_status` (gather + cJSON visitor only) |
 | Shared command-outcome text (success / Tesla reason / unreachable) | `logic/command_result.hpp` | `http_api.cpp` `/command` reason, `mcp_server.cpp` tools/call result |
 | On-device display presenter (hero priority ladder, SoC gradient, RSSI→bars, SSID scroll, landscape/portrait `Orient` geometry) reading the shared UI snapshot | `logic/display_model.hpp`, `logic/ui_state.hpp` | `display.cpp` renderer `draw_landscape`/`draw_portrait` (via `VehicleController::ui_snapshot()`) |
 | Status-LED priority ladder (error/OTA/warn/WiFi/pairing/charging/asleep/SoC) reading the same UI snapshot + latched `LedAlerts` | `logic/led_status.hpp`, `logic/ui_state.hpp` | `led_status.cpp` APA102 task (via `VehicleController::ui_snapshot()`) |

@@ -104,7 +104,8 @@ the authority for the per-sibling drift check; `project-review` defers the mecha
   gate it defers to (`require-project-review.sh`), and the verify endpoints (`/status`,
   `/api/proxy/1/version`, `/ota/check|update|status`).
 - **`e2e-evcc`** — wraps `scripts/e2e_evcc.sh`. Verify the command count (must equal the
-  `handle_command` switch — currently **15**), the version-coherence claim (`/status` = `X`,
+  REST rows — `api_name != nullptr` — in `logic/command_registry.hpp`'s `kCommands` —
+  currently **15**), the version-coherence claim (`/status` = `X`,
   `/api/proxy/1/version` = `X-esp32`), the `vehicle_data` fields it asserts, the out-of-scope
   endpoint list, and the env-var gates (`RUN_COMMANDS`/`ALLOW_CHARGE_TOGGLE`/`RUN_ALL_COMMANDS`).
 - **`vehicle-command-audit`** — compares the firmware against upstream `teslamotors/vehicle-command`,

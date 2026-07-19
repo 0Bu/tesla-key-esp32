@@ -41,7 +41,10 @@ scripts/run-mock-tests.sh   # compile + run host logic tests in seconds (cmake +
 It covers VIN validation, imperial→metric conversion, the `link_state()` four-state machine
 (incl. the debounced-ASLEEP asymmetry) and its `/status`/MQTT strings, the per-target
 platform/OTA-suffix mapping, the MCP protocol core (version negotiation, method routing,
-tool/arg-spec registry, int clamp), the shared command-outcome text, the on-device display
+int clamp), the ONE command registry both command surfaces dispatch through
+(`logic/command_registry.hpp` — REST + MCP names, kinds and shared arg bounds), the
+`/status` field contract (`logic/status_model.hpp`, golden-emission-pinned — order, key
+names, presence rules, value shaping), the shared command-outcome text, the on-device display
 presenter (the priority ladder / SoC gradient / RSSI→bars / SSID-scroll decisions the ST7735
 renderer draws), the status-LED ladder (`logic/led_status.hpp`, reading the same shared
 `UiSnapshot` + the shared SoC gradient), the `/events` WebSocket command policy
@@ -97,9 +100,16 @@ vehicle_pairing.cpp    → auto_pair_task, key mgmt/fingerprint, session invalid
                          health probe   (split map: vehicle_ctrl_internal.hpp)
 http_server.cpp        → esp_http_server on port 80: wildcard dispatch + the handle_all
                          try/catch OOM guard (503) EVERY handler runs under
-http_api.cpp           → evcc routes (/api/1/…, /api/proxy/1/version)
-http_status.cpp        → web UI (/), /status, /diag, /scan. build_status_object() is the ONE
-                         /status-JSON builder shared by GET /status and the /events WS push
+http_api.cpp           → evcc routes (/api/1/…, /api/proxy/1/version); command names/args
+                         resolve via logic/command_registry.hpp (ONE table with the MCP
+                         tools), execution via command_exec.cpp
+command_exec.cpp       → the ONE CmdKind → VehicleController dispatch both command
+                         surfaces (/api and /mcp) execute through
+http_status.cpp        → web UI (/), /status, /diag, /scan; the /status field contract
+                         is decided in logic/status_model.hpp (host-tested, golden-pinned)
+                         — build_status_object() only gathers inputs + serializes via cJSON.
+                         It is the ONE /status-JSON builder shared by GET /status and the
+                         /events WS push
 http_events.cpp        → /events — WebSocket live-status push for the web UI. The browser holds
                          ONE ws:// socket; a background task pushes build_status_object() every
                          ~2 s (WS-only, replaces the old browser /status interval poll — no poll

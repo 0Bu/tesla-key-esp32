@@ -14,6 +14,7 @@
 #include "http_handlers.hpp"
 #include "diag_log.hpp"
 #include "mqtt_ha.hpp"
+#include "logic/status_model.hpp"
 #include "syslog.hpp"
 #include <esp_netif.h>
 #include <esp_app_desc.h>
@@ -46,267 +47,131 @@ static void current_ip(char* out, size_t sz) {
 // Whether the car is "live" (awake) vs merely sleeping vs unreachable is decided centrally
 // in VehicleController::link_state(), shared with the MQTT bridge so the two never drift.
 
-// Build the device + pairing + vehicle status object (caller owns the returned cJSON). This is the
-// single source for BOTH the GET /status response and the /events WebSocket push (http_events.cpp),
-// so the two can never drift. Pure state read — safe to call from the httpd task or the broadcast
-// task (it only reads caches + the esp_wifi/mqtt/syslog getters, the same reads GET /status already
-// did concurrently with the telemetry writer). May return nullptr under OOM (cJSON alloc failure);
-// every caller guards for it.
+// cJSON visitor for tk::status::emit_status() — builds the response tree one-to-one as
+// the model walks it (no intermediate field list; the contract layer adds zero heap).
+// Under heap pressure cJSON_Create* returns NULL: attaching NULL is a cJSON no-op and
+// every later attach to a NULL parent is too, so the walk degrades to a partial-but-
+// valid document exactly like the old inline builder did; send_json's NULL-print guard
+// covers total exhaustion.
+namespace {
+struct CjsonEmitter {
+    cJSON* stack[5];
+    int    depth = 0;
+    explicit CjsonEmitter(cJSON* root) { stack[0] = root; }
+    cJSON* top() { return stack[depth]; }
+    void attach(const char* key, cJSON* node) {
+        if (cJSON_IsArray(top())) cJSON_AddItemToArray(top(), node);
+        else                      cJSON_AddItemToObject(top(), key, node);
+    }
+    void obj_begin(const char* key) { cJSON* o = cJSON_CreateObject(); attach(key, o); stack[++depth] = o; }
+    void obj_end() { --depth; }
+    void arr_begin(const char* key) { cJSON* a = cJSON_CreateArray(); attach(key, a); stack[++depth] = a; }
+    void arr_end() { --depth; }
+    void str(const char* key, const char* v) { attach(key, cJSON_CreateString(v)); }
+    void num(const char* key, double v)      { attach(key, cJSON_CreateNumber(v)); }
+    void boolean(const char* key, bool v)    { attach(key, cJSON_CreateBool(v)); }
+};
+}  // namespace
+
+// Build the device + pairing + vehicle status object (caller owns the returned cJSON). The ONE
+// source for BOTH the GET /status response and the /events WebSocket push (http_events.cpp), so the
+// two can never drift. GATHER ONLY here: every which-field/when/what-value decision lives in the
+// host-tested model (logic/status_model.hpp, golden CHECKs in test/test_logic.cpp); this collects
+// the inputs under the existing locks, then emits. The throwing by-value getters (vin(), broker,
+// syslog host, cached structs) all run in the GATHER below — BEFORE any cJSON is allocated — so a
+// std::bad_alloc can't leak a partial tree (the /events broadcast task calls this every ~2 s with
+// nothing to catch above it); the emit that follows only does cJSON allocs, which return NULL under
+// pressure rather than throw. May return nullptr under total OOM; every caller guards for it.
 cJSON* build_status_object() {
+    tk::status::Inputs in;
+
     char ip[16];
     current_ip(ip, sizeof(ip));
+    in.ip              = ip;
+    in.vin             = g_vehicle->vin();
+    in.version         = esp_app_get_description()->version;
+    in.key_present     = g_vehicle->has_key();
+    in.key_fingerprint = g_vehicle->key_fingerprint();
+    in.key_created     = (long long)g_vehicle->key_created_at();
+    in.paired          = g_vehicle->has_session();
+    in.paired_at       = (long long)g_vehicle->paired_at();
+    in.reauth          = g_vehicle->reauth_required();
 
-    cJSON* root = cJSON_CreateObject();
-    // The by-value getters below (vin(), mqtt_ha_broker(), syslog_status(), the cached-telemetry
-    // structs …) each allocate a std::string/std::vector and can throw std::bad_alloc mid-build.
-    // cJSON has no RAII, so free the partial tree if that happens before it propagates — the
-    // broadcast task (http_events.cpp) calls this every ~2 s with no guard above it, and precisely
-    // under the memory pressure that makes these throw. On the success path we hand ownership back.
-    struct RootGuard { cJSON* p; ~RootGuard() { if (p) cJSON_Delete(p); } } guard{root};
-    cJSON_AddStringToObject(root, "vin",           g_vehicle->vin().c_str());
-    cJSON_AddStringToObject(root, "ip",            ip);
-    cJSON_AddStringToObject(root, "version",       esp_app_get_description()->version);
-    cJSON_AddBoolToObject(root,   "key_present",   g_vehicle->has_key());
-    cJSON_AddStringToObject(root, "key_fingerprint", g_vehicle->key_fingerprint().c_str());
-    // Key creation date (epoch seconds), shown under the fingerprint in the UI.
-    // Only emit a plausible wall-clock value (post-2020); a near-zero stamp means
-    // the clock hadn't synced when the key was generated, so report it as unknown.
-    time_t key_created = g_vehicle->key_created_at();
-    if (key_created > 1600000000) cJSON_AddNumberToObject(root, "key_created", (double)key_created);
-    cJSON_AddBoolToObject(root,   "paired",        g_vehicle->has_session());
-    // Pairing date (epoch seconds), shown under "Paired" in the UI. Same post-2020
-    // plausibility guard as key_created.
-    time_t paired_at = g_vehicle->paired_at();
-    if (paired_at > 1600000000) cJSON_AddNumberToObject(root, "paired_at", (double)paired_at);
-    // True when the previous pairing was lost (key removed on the car side) and a
-    // re-pair is pending — lets the UI explain why it's prompting to pair again.
-    cJSON_AddBoolToObject(root,   "reauth",        g_vehicle->reauth_required());
-
-    // WiFi: SSID + live signal strength (dBm) of the station link.
-    cJSON* wifi = cJSON_CreateObject();
+    // WiFi: SSID + live signal strength (dBm) of the station link. The friendly name is
+    // the highest 802.11 generation the AP advertises — the ESP32 radio itself may top
+    // out lower, but the flags reflect the AP, so a Wi-Fi 6 router reads "Wi-Fi 6".
     wifi_ap_record_t ap{};
     if (wifi_is_connected() && esp_wifi_sta_get_ap_info(&ap) == ESP_OK) {
-        cJSON_AddStringToObject(wifi, "ssid", (const char*)ap.ssid);
-        cJSON_AddNumberToObject(wifi, "rssi", ap.rssi);
-        // Highest 802.11 generation the AP advertises → friendly Wi-Fi name. The
-        // ESP32-S3 radio itself tops out at 802.11n, but the flags reflect the AP's
-        // capability, so a Wi-Fi 6 router still reads "Wi-Fi 6".
+        in.wifi_connected = true;
+        in.wifi_ssid      = (const char*)ap.ssid;
+        in.wifi_rssi      = ap.rssi;
         const char* std_ = ap.phy_11ax ? "Wi-Fi 6"
                          : ap.phy_11ac ? "Wi-Fi 5"
                          : ap.phy_11n  ? "Wi-Fi 4"
                          : ap.phy_11g  ? "802.11g"
                          : ap.phy_11b  ? "802.11b" : nullptr;
-        if (std_) cJSON_AddStringToObject(wifi, "std", std_);
-    }
-    cJSON_AddItemToObject(root, "wifi", wifi);
-
-    // MQTT (Home Assistant bridge): whether a broker is configured, whether the
-    // session is live, and the host:port. Drives the web-UI Connection block.
-    cJSON* mqtt = cJSON_CreateObject();
-    cJSON_AddBoolToObject(mqtt, "configured", mqtt_ha_configured());
-    cJSON_AddBoolToObject(mqtt, "connected",  mqtt_ha_connected());
-    cJSON_AddBoolToObject(mqtt, "tls",        mqtt_ha_tls());
-    std::string broker = mqtt_ha_broker();
-    if (!broker.empty()) cJSON_AddStringToObject(mqtt, "broker", broker.c_str());
-    std::string mqtt_err = mqtt_ha_last_error();
-    if (!mqtt_err.empty()) cJSON_AddStringToObject(mqtt, "error", mqtt_err.c_str());
-    cJSON_AddItemToObject(root, "mqtt", mqtt);
-
-    // Syslog: whether a server is configured, whether DNS has resolved a destination
-    // (delivery gate), and the advisory ARP/ICMP reachability hint. Drives the
-    // web-UI Connections card.
-    cJSON* syslog = cJSON_CreateObject();
-    SyslogStatus sy = syslog_status();
-    cJSON_AddBoolToObject(syslog, "configured", sy.configured);
-    cJSON_AddBoolToObject(syslog, "resolved",   sy.resolved);
-    cJSON_AddBoolToObject(syslog, "reachable",  sy.reachable);
-    if (!sy.host.empty()) {
-        cJSON_AddStringToObject(syslog, "host", sy.host.c_str());
-        cJSON_AddNumberToObject(syslog, "port", sy.port);
-    }
-    if (!sy.error.empty()) cJSON_AddStringToObject(syslog, "error", sy.error.c_str());
-    cJSON_AddItemToObject(root, "syslog", syslog);
-
-    // BLE: when connected report the live signal strength; otherwise list nearby
-    // Teslas seen while scanning, with their RSSI.
-    cJSON* ble = cJSON_CreateObject();
-    bool connected = g_vehicle->ble_connected();
-    cJSON_AddBoolToObject(ble, "connected", connected);
-    cJSON_AddBoolToObject(ble, "scanning",  g_vehicle->ble_scanning());
-    if (connected) {
-        int8_t rssi = 0;
-        if (g_vehicle->ble_rssi(rssi)) cJSON_AddNumberToObject(ble, "rssi", rssi);
-        cJSON_AddStringToObject(ble, "addr", g_vehicle->ble_peer().c_str());
-
-        // Read-only telemetry caches, refreshed by the rotating background poll. Each
-        // numeric field is emitted only when the car actually reported it (presence
-        // flag) so the UI can show "—" for anything not yet seen. Grouped under "tele".
-        cJSON* tele = cJSON_CreateObject();
-        ClimateStateResult cl = g_vehicle->get_cached_climate();
-        if (cl.valid) {
-            cJSON* o = cJSON_CreateObject();
-            if (cl.has_inside)   cJSON_AddNumberToObject(o, "inside",   cl.inside_temp);
-            if (cl.has_outside)  cJSON_AddNumberToObject(o, "outside",  cl.outside_temp);
-            if (cl.has_setpoint) cJSON_AddNumberToObject(o, "setpoint", cl.driver_setpoint);
-            if (cl.has_climate_on)      cJSON_AddBoolToObject(o, "on",              cl.is_climate_on);
-            if (cl.has_preconditioning) cJSON_AddBoolToObject(o, "preconditioning", cl.is_preconditioning);
-            // Cabin Overheat Protection (separate subsystem; emitted only when the
-            // car actually reported each field, so an absent one means "not sent").
-            if (cl.has_cop)         cJSON_AddStringToObject(o, "cop",         cl.cop.c_str());
-            if (cl.has_cop_cooling) cJSON_AddBoolToObject(o,   "cop_cooling", cl.cop_cooling);
-            if (cl.has_cop_temp)    cJSON_AddStringToObject(o, "cop_temp",    cl.cop_temp.c_str());
-            if (cl.has_cop_reason)  cJSON_AddStringToObject(o, "cop_reason",  cl.cop_reason.c_str());
-            // Defrost (front/rear defroster + Max-defrost mode), emitted only when reported.
-            if (cl.has_front_defrost) cJSON_AddBoolToObject(o,   "front_defrost", cl.front_defrost);
-            if (cl.has_rear_defrost)  cJSON_AddBoolToObject(o,   "rear_defrost",  cl.rear_defrost);
-            if (cl.has_defrost_mode)  cJSON_AddStringToObject(o, "defrost_mode",  cl.defrost_mode.c_str());
-            cJSON_AddItemToObject(tele, "climate", o);
-        }
-        DriveStateResult dr = g_vehicle->get_cached_drive();
-        if (dr.valid) {
-            cJSON* o = cJSON_CreateObject();
-            if (!dr.shift_state.empty()) cJSON_AddStringToObject(o, "shift", dr.shift_state.c_str());
-            if (dr.has_odometer)         cJSON_AddNumberToObject(o, "odometer_km", dr.odometer_km);
-            cJSON_AddItemToObject(tele, "drive", o);
-        }
-        TirePressureResult tp = g_vehicle->get_cached_tires();
-        if (tp.valid) {
-            cJSON* o = cJSON_CreateObject();
-            if (tp.has_fl) cJSON_AddNumberToObject(o, "fl", tp.fl);
-            if (tp.has_fr) cJSON_AddNumberToObject(o, "fr", tp.fr);
-            if (tp.has_rl) cJSON_AddNumberToObject(o, "rl", tp.rl);
-            if (tp.has_rr) cJSON_AddNumberToObject(o, "rr", tp.rr);
-            cJSON_AddBoolToObject(o, "warn", tp.warn);
-            cJSON_AddItemToObject(tele, "tires", o);
-        }
-        ClosuresStateResult cz = g_vehicle->get_cached_closures();
-        if (cz.valid) {
-            cJSON* o = cJSON_CreateObject();
-            if (cz.has_locked)       cJSON_AddBoolToObject(o, "locked", cz.locked);
-            cJSON_AddBoolToObject(o, "door",   cz.any_door_open);
-            cJSON_AddBoolToObject(o, "frunk",  cz.frunk_open);
-            cJSON_AddBoolToObject(o, "trunk",  cz.trunk_open);
-            cJSON_AddBoolToObject(o, "window", cz.any_window_open);
-            if (cz.has_user_present) cJSON_AddBoolToObject(o, "user", cz.user_present);
-            cJSON_AddItemToObject(tele, "closures", o);
-        }
-        cJSON_AddItemToObject(root, "tele", tele);
-    } else {
-        cJSON* devices = cJSON_CreateArray();
-        for (const auto& d : g_vehicle->ble_nearby()) {
-            cJSON* dev = cJSON_CreateObject();
-            cJSON_AddStringToObject(dev, "addr", d.addr.c_str());
-            cJSON_AddStringToObject(dev, "name", d.name.c_str());
-            cJSON_AddNumberToObject(dev, "rssi", d.rssi);
-            cJSON_AddBoolToObject(dev, "connectable", d.connectable);
-            cJSON_AddItemToArray(devices, dev);
-        }
-        cJSON_AddItemToObject(ble, "devices", devices);
-        // The target car was found (advert heard, VIN-name matched) but the link keeps
-        // failing to come up — e.g. another device is holding the car's single BLE
-        // connection. Emitted only while actively failing so the UI can say "found but
-        // can't connect" instead of blaming Bluetooth range. Absent ⇒ nothing to report.
-        uint32_t cf = g_vehicle->ble_connect_fail();
-        if (cf > 0) {
-            cJSON_AddNumberToObject(ble, "connect_fail", cf);
-            // Last-seen advert RSSI so the UI shows real bars + dBm in the "can't connect"
-            // state (the devices[] list goes empty during the 10 s connect attempt, so it's
-            // not a reliable source there). Same `rssi` key the connected branch uses.
-            int8_t srssi;
-            if (g_vehicle->ble_seen_rssi(srssi)) cJSON_AddNumberToObject(ble, "rssi", srssi);
-            // Why it's failing, mirroring vehicle-command's ErrMaxConnectionsExceeded: the
-            // target's advert connectability. false ⇒ the car is non-connectable (≈ at its
-            // ~3-device BLE limit); true ⇒ it accepts connections but the link still fails
-            // (weak signal / another proxy contending). Omitted when not yet known.
-            int tc = g_vehicle->ble_target_connectable();
-            if (tc >= 0) cJSON_AddBoolToObject(ble, "car_connectable", tc == 1);
-        }
-    }
-    cJSON_AddItemToObject(root, "ble", ble);
-
-    // Overall connectivity, the single source of truth the UI keys the hero off (and the
-    // same enum the MQTT bridge publishes) — so "asleep", "idle" and "unreachable" can never
-    // be confused. awake ⇒ live SOC card; asleep ⇒ "Vehicle asleep" card (proven, debounced);
-    // idle ⇒ reachable but not provably asleep ⇒ neutral "Parked" card (last-known
-    // SOC + wake), never a sleep claim; unreachable ⇒ the car drove off / out of range ⇒ a neutral
-    // grey "Unreachable" hero (last-known SOC); unknown ⇒ nothing heard yet ⇒ a grey "Connecting…"
-    // hero. Decoupled from the momentary BLE link.
-    // Mapping lives in logic/link_state.hpp (host-tested) — the MQTT bridge shares it so
-    // the hero and the published sleep_status can never drift.
-    cJSON_AddStringToObject(root, "link", tk::link_state_web_str(g_vehicle->link_state()));
-    // Raw VCSEC sleep flag (un-debounced) for transparency/diagnostics — lets the UI/operator
-    // see what the car actually reports vs. the debounced `link` above. Not used for the hero.
-    cJSON_AddStringToObject(root, "vcsec_sleep", g_vehicle->vcsec_sleep_raw());
-
-    // Live "vehicle" object — drives the UI's awake/SOC view. Emitted only when the car is
-    // AWAKE (fresh infotainment telemetry per link_state()), independent of the momentary
-    // BLE link: the link is dropped between polls so the car can sleep, but data inside the
-    // freshness window is still live. When not awake the UI falls through to the asleep/"Parked"
-    // card (reachable) or a neutral grey "Unreachable"/"Connecting…" hero (unreachable/unknown),
-    // using `link` above.
-    if (g_vehicle->link_state() == VehicleController::LinkState::Awake) {
-        ChargeStateResult cs = g_vehicle->get_cached_charge();
-        if (cs.valid) {
-            cJSON* veh = cJSON_CreateObject();
-            if (cs.has_battery_level)
-                cJSON_AddNumberToObject(veh, "soc", cs.battery_level);
-            cJSON_AddStringToObject(veh, "status", cs.charging_state.c_str());
-            // Charge target — lets the UI mark "charge complete" (SOC >= limit) and gate the
-            // start-charge tap, which the car would only reject as "complete" anyway. Emitted
-            // only when the car reported it (proto3 optional); a missing limit means the UI
-            // keeps the button live rather than blocking on unknown data.
-            if (cs.has_charge_limit_soc)
-                cJSON_AddNumberToObject(veh, "charge_limit", cs.charge_limit_soc);
-            // Charging detail for the web UI: live power (kW) and current (A). Emitted only
-            // when the car actually reported them (proto3 optional) so the UI omits the chip
-            // rather than rendering a phantom 0. Power is a whole number (no decimals).
-            if (cs.has_charger_power)
-                cJSON_AddNumberToObject(veh, "power",  (int)(cs.charger_power + 0.5f));
-            if (cs.has_charging_amps)
-                cJSON_AddNumberToObject(veh, "amps",   cs.charging_amps);
-            // Actual AC draw — the UI computes current × voltage × phases (see liveKw). current
-            // and voltage are PER PHASE and phases is the count, so all three are required: an EU
-            // 3-phase car reports phases=2 and omitting it halves the kW. Distinct from
-            // charger_power (DC to the battery, 0 when "Complete"). Lets us see what the car pulls
-            // from the wall while e.g. cabin-overheat-protection runs with a full battery. Emitted
-            // only if reported (phases falls back to 1 in the UI when the car didn't send it).
-            if (cs.has_actual_current)
-                cJSON_AddNumberToObject(veh, "actual_amps", cs.charger_actual_current);
-            if (cs.has_voltage)
-                cJSON_AddNumberToObject(veh, "volts", cs.charger_voltage);
-            if (cs.has_charger_phases)
-                cJSON_AddNumberToObject(veh, "phases", cs.charger_phases);
-            cJSON_AddItemToObject(root, "vehicle", veh);
-        }
+        if (std_) in.wifi_std = std_;
     }
 
-    // Last-known vehicle snapshot for the "Vehicle asleep" card. The charge cache is
-    // retained in RAM across BLE disconnects, so the UI can show the last battery level
-    // (a sleeping car barely drains, so it stays a good estimate) and — via last_seen_s —
-    // how long the car has been asleep, all without waking it. Emitted regardless of the
-    // BLE link state; when awake the UI uses the live "vehicle" object instead.
+    in.mqtt_configured = mqtt_ha_configured();
+    in.mqtt_connected  = mqtt_ha_connected();
+    in.mqtt_tls        = mqtt_ha_tls();
+    in.mqtt_broker     = mqtt_ha_broker();
+    in.mqtt_error      = mqtt_ha_last_error();
+
+    // Syslog: configured / DNS-resolved (the delivery gate) / advisory ARP-ICMP
+    // reachability hint. Gathered into the model like every other field.
     {
-        ChargeStateResult last = g_vehicle->get_cached_charge();
-        if (last.valid) {
-            cJSON* lo = cJSON_CreateObject();
-            if (last.has_battery_level)
-                cJSON_AddNumberToObject(lo, "soc", last.battery_level);
-            cJSON_AddStringToObject(lo, "status", last.charging_state.c_str());
-            cJSON_AddItemToObject(root, "last", lo);
-        }
-        uint32_t ago = 0;
-        if (g_vehicle->seconds_since_contact(ago))
-            cJSON_AddNumberToObject(root, "last_seen_s", (double)ago);
+        SyslogStatus sy = syslog_status();
+        in.syslog_configured = sy.configured;
+        in.syslog_resolved   = sy.resolved;
+        in.syslog_reachable  = sy.reachable;
+        in.syslog_host       = sy.host;
+        in.syslog_port       = sy.port;
+        in.syslog_error      = sy.error;
     }
-    guard.p = nullptr;   // built successfully — release ownership to the caller (send_json / WS push)
+
+    in.ble_connected = g_vehicle->ble_connected();
+    in.ble_scanning  = g_vehicle->ble_scanning();
+    if (in.ble_connected) {
+        int8_t rssi = 0;
+        if (g_vehicle->ble_rssi(rssi)) { in.have_ble_rssi = true; in.ble_rssi = rssi; }
+        in.ble_addr = g_vehicle->ble_peer();
+        // Telemetry caches ride along only while the link is up (model rule).
+        in.climate  = g_vehicle->get_cached_climate();
+        in.drive    = g_vehicle->get_cached_drive();
+        in.tires    = g_vehicle->get_cached_tires();
+        in.closures = g_vehicle->get_cached_closures();
+    } else {
+        for (const auto& d : g_vehicle->ble_nearby())
+            in.devices.push_back({ d.addr, d.name, d.rssi, d.connectable });
+        in.connect_fail = g_vehicle->ble_connect_fail();
+        int8_t srssi;
+        if (g_vehicle->ble_seen_rssi(srssi)) { in.have_seen_rssi = true; in.seen_rssi = srssi; }
+        in.target_connectable = g_vehicle->ble_target_connectable();
+    }
+
+    in.link        = g_vehicle->link_state();
+    in.vcsec_sleep = g_vehicle->vcsec_sleep_raw();
+    in.charge      = g_vehicle->get_cached_charge();
+
+    uint32_t ago = 0;
+    if (g_vehicle->seconds_since_contact(ago)) { in.have_last_seen = true; in.last_seen_s = ago; }
+
+    // The last-known charge snapshot ("last" / "last_seen_s", shown on the asleep card
+    // regardless of link state) is emitted by the model from in.charge + in.last_seen.
+    cJSON* root = cJSON_CreateObject();
+    CjsonEmitter e(root);
+    tk::status::emit_status(in, e);
     return root;
 }
 
+// GET /status — the request/response form of the live snapshot. The web UI's live feed uses
+// /events (the WS push of this same object); this path still serves curl/diagnostics and the
+// post-OTA reboot probe (app.js waitReboot()). Never cache: a stale copy sticks the hero on a
+// transient state until a manual reload (matches "/" and "/diag").
 esp_err_t handle_status(GuardedReq rq) {
     httpd_req_t* req = rq.req;
-    // A snapshot of live device state. Never let a browser/proxy serve a cached copy, or a manual
-    // reload sticks on a stale state. Matches the no-store on "/" and "/diag". (The live UI reads
-    // /events, not this — but waitReboot() and curl still hit /status directly.)
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     return send_json(req, 200, build_status_object());   // send_json degrades a nullptr to 503
 }
