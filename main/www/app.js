@@ -334,7 +334,7 @@ function render(s){
       // paired, BLE may be up, but link_state is 'unknown' (nothing heard since boot — the
       // on-demand link hasn't completed a signed round-trip yet) or 'unreachable' (heard
       // before, now stale: drove off / out of range / deep sleep).
-      var ureach=s.link==='unreachable';
+      var ureach=s.link==='unreachable'||s.link==='unknown';
       if(ureach){
         $("hero").classList.add('hide');
       } else {
