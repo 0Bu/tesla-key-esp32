@@ -55,7 +55,7 @@ The firmware delegates these decision/conversion cores to IDF-free headers under
 | Status-LED priority ladder (error/OTA/warn/WiFi/pairing/charging/asleep/SoC) reading the same UI snapshot + latched `LedAlerts` | `logic/led_status.hpp`, `logic/ui_state.hpp` | `led_status.cpp` APA102 task (via `VehicleController::ui_snapshot()`) |
 | Shared SoC colour ramp (red→amber→green), one table for the panel fill AND the LED | `logic/soc_gradient.hpp` | `logic/display_model.hpp`, `led_status.cpp` |
 | Syslog target parse + send-failure classification (host:port split, errno hard/transient) | `logic/syslog_policy.hpp` | `syslog.cpp`, `/set_syslog` |
-| `/events` WS frame policy (length plan: skip / read ≤16 B / close; `sub` classification) | `logic/ws_policy.hpp` | `http_events.cpp` (`h_ws_events`) |
+| `/events` WS frame policy (length plan: skip / read ≤16 B / close; `sub` classification) + per-subscriber send backpressure (≤2 frames in flight, close after 3 consecutive failed completions, streak reset by one good send, our own OOM neither credited nor blamed) | `logic/ws_policy.hpp` | `http_events.cpp` (`h_ws_events`, `ws_send_to_all`, `ws_transfer_complete`) |
 | Active-window poll gate (charging held open only on FRESH contact) | `logic/active_window.hpp` | `vehicle_telemetry.cpp` (`loop_task_fn_`) |
 | HA binary `value_template` builder (presence-aware `is defined` guard → "unknown" not phantom OFF) | `logic/ha_templates.hpp` | `mqtt_ha.cpp` (discovery) |
 | POST-body reassembly (loop `recv` to `content_len`, bounded timeout retry) | `logic/http_body.hpp` | `http_common.cpp` `read_body`, `provisioning.cpp` `save_post` |
