@@ -111,7 +111,7 @@
   <main>
     <div id="prbanner" class="prbanner" hidden></div>
     <header class="hero">
-      <span class="badge">⚡ ESP32 · S3 · C3 · C6 Firmware</span>
+      <span class="badge">⚡ ESP32 · S3 · C3 · C6 · C5 Firmware</span>
       <h1>Flash tesla-key-esp32</h1>
       <p class="lead">Install the firmware straight from your browser — no toolchain,
         no command line. Use <b>Chrome</b> or <b>Edge</b> on desktop.</p>
@@ -130,15 +130,31 @@
     <section class="card">
       <h2>How it works</h2>
       <ol class="steps">
-        <li>Plug your ESP32 board into a USB port.</li>
-        <li>Tap <b>Install firmware</b> and select the serial port, then close the
-          dialog when flashing finishes.</li>
+        <li>Plug your ESP32 board into a USB port. If the board has <b>two</b> USB
+          sockets (many DevKits do — one wired to the chip, one to a UART bridge), use
+          the socket labelled <b>USB</b>/<b>native</b>, not <b>UART</b>/<b>COM</b>.</li>
+        <li>Tap <b>Install firmware</b> and pick the port that names the chip itself —
+          e.g. <code>USB JTAG_serial debug unit</code> or <code>ESP32-S3</code>. Then close
+          the dialog when flashing finishes.</li>
         <li>The device reboots and opens a <code>tesla-key-esp32-setup</code> WiFi network.
           Configure WiFi there (see below) — the browser does <b>not</b> set WiFi.</li>
         <li>After it joins your WiFi, reach it at <code>http://tesla-key-esp32.local</code>
           to pair with your car.</li>
       </ol>
     </section>
+
+    <div class="callout">
+      <span class="ico">⚠️</span>
+      <p><b>“Installation failed”? Pick the other serial port.</b> A board that exposes a
+        USB-to-UART bridge (CH340/CH343/CP210x/FTDI) alongside the chip's own USB shows up
+        as <i>two</i> ports, and the bridge is not reliably flashable from the browser —
+        it fails with <code>Failed to connect with the device</code> or
+        <code>Serial data stream stopped: Possible serial noise or corruption</code>,
+        sometimes only part-way through. Re-run the installer and choose the chip's native
+        USB port. If the board has no native USB port at all (e.g. a classic ESP32 on a
+        CH340), flash it from a host instead:
+        <code>esptool --chip &lt;target&gt; -p &lt;port&gt; write_flash "@flash_args"</code>.</p>
+    </div>
 
     <div class="callout">
       <span class="ico">⬆️</span>
