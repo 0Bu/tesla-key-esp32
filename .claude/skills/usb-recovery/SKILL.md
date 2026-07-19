@@ -49,9 +49,10 @@ Both are cured the same way: **USB-flash the published, signed image + erase `ot
 ## Host prerequisites
 
 `esptool` runs on the **host** (`brew install esptool`) — Docker on macOS has no USB
-passthrough. There is no `timeout` on macOS. Port detection is the same as
-[`flash-esp32`](../flash-esp32/SKILL.md): native-USB targets (s3/c3/c6/c5) enumerate as
-`/dev/cu.usbmodem*`, the classic esp32's UART bridge as `/dev/cu.usbserial-*`.
+passthrough. There is no `timeout` on macOS. Native-USB targets (s3/c3/c6/c5) enumerate as
+`/dev/cu.usbmodem*`, the classic esp32's UART bridge as `/dev/cu.usbserial-*` — but **don't
+just pick a node and assume the chip**; step 3 below probes for the port and the chip identity
+together, which matters more here than in a normal flash since a wrong guess writes firmware.
 
 ## Partition map (from [`partitions.csv`](../../../partitions.csv)) — what recovery touches
 
@@ -126,11 +127,48 @@ table above — **still never `nvs@0x9000`**.
 
 ## 3. Recovery flash — signed app + erase otadata (NVS preserved)
 
-Detect the port (native-USB targets; classic esp32 → `ls /dev/cu.usbserial-* | head -1`):
+Find the port **and confirm it's actually the board you mean to recover** — never take the
+first port node you see, and never trust `$TARGET` from step 1 unchecked. Probe every
+candidate node with a chip-only esptool call (no `--chip`, so esptool must detect it) and keep
+the first that answers; this settles the port *and* gives you the board's real identity to
+cross-check against `$TARGET`:
 
 ```bash
-PORT=$(ioreg -l -w 0 2>/dev/null | grep -o '/dev/cu\.usbmodem[^"]*' | head -1)
+# esptool v5 renamed chip_id → chip-id (v5 still accepts the old spelling; v4 only has it).
+esptool chip-id --help >/dev/null 2>&1 && CHIP_CMD=chip-id || CHIP_CMD=chip_id
+
+# `find` (not a glob): under zsh an unmatched glob aborts the whole command.
+PORT=""; CHIP_RAW=""
+for p in $(find /dev -maxdepth 1 \( -name 'cu.usbmodem*' -o -name 'cu.usbserial-*' \
+                                 -o -name 'ttyACM*' -o -name 'ttyUSB*' \) 2>/dev/null); do
+  for extra in "" "--before no-reset"; do
+    raw=$(esptool -p "$p" $extra "$CHIP_CMD" 2>&1 \
+          | grep -m1 -oE '(Chip is|Chip type:)[[:space:]]*[A-Za-z0-9()+/. -]+' \
+          | sed -E 's/^(Chip is|Chip type:)[[:space:]]*//')
+    if [ -n "$raw" ]; then PORT="$p"; CHIP_RAW="$raw"; break 2; fi
+  done
+done
+[ -z "$PORT" ] && { echo "No board answered on USB — check the cable/port (C5: hold BOOT)"; exit 1; }
+
+case "$CHIP_RAW" in
+  ESP32-S3*)                   DETECTED=esp32s3 ;;
+  ESP32-C3*)                   DETECTED=esp32c3 ;;
+  ESP32-C6*)                   DETECTED=esp32c6 ;;
+  ESP32-C5*)                   DETECTED=esp32c5 ;;
+  ESP32-D0WD*|ESP32|"ESP32 "*) DETECTED=esp32 ;;
+  *) echo "REFUSING: could not identify connected chip (esptool said: '$CHIP_RAW')"; exit 1 ;;
+esac
+echo "Connected: $DETECTED on $PORT (recovering as TARGET=$TARGET)"
+
+[ "$DETECTED" != "$TARGET" ] && { echo "REFUSING: connected board is $DETECTED but TARGET=$TARGET" \
+  "(set in step 1) — wrong board, or another board answered first. With more than one board on" \
+  "USB, unplug the others and re-run this probe."; exit 1; }
 ```
+
+This cross-check is not optional here: with two boards on USB, a naive "first port that shows
+up" pick has silently read the wrong board before (an S3 read as if it were the C5 target — see
+project memory `esp32c5-support-local-patch`) — a bad pick in a *recovery* flash means writing
+the wrong per-target image to the wrong board.
 
 **s3 / c3 / c6 / classic esp32** (auto-reset works):
 
@@ -139,13 +177,12 @@ esptool --chip "$TARGET" -p "$PORT" write_flash 0x20000 "_ci/tesla-key-esp32$SFX
   && esptool --chip "$TARGET" -p "$PORT" erase_region 0xf000 0x2000
 ```
 
-**T-Dongle-C5** (esp32c5) — no auto-reset, so **hold BOOT (GPIO28) continuously, plug in while
-holding, keep holding through both commands**, and pass `--before no-reset`. The ROM
-download-mode node **differs** from the app node (app ≈ `usbmodem1101`, ROM ≈ `usbmodem2101`) —
-re-detect `PORT` *after* entering download mode, never hardcode:
+**T-Dongle-C5** (esp32c5) — no auto-reset, so **hold BOOT (GPIO28) continuously through the
+probe above and both commands below**. The `--before no-reset` fallback in the probe already
+found the ROM download-mode node (it differs from the app node — app ≈ `usbmodem1101`, ROM ≈
+`usbmodem2101` — which is exactly why the probe re-detects rather than reusing an earlier port):
 
 ```bash
-PORT=$(ls -1 /dev/cu.usbmodem* | head -1)       # re-detect: ROM node ≠ app node
 esptool --chip esp32c5 -p "$PORT" --before no-reset --after no-reset \
   write_flash 0x20000 "_ci/tesla-key-esp32-c5.bin"
 esptool --chip esp32c5 -p "$PORT" --before no-reset --after no-reset \
