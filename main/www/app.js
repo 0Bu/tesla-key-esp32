@@ -333,28 +333,27 @@ function render(s){
     } else {
       // paired, BLE may be up, but link_state is 'unknown' (nothing heard since boot — the
       // on-demand link hasn't completed a signed round-trip yet) or 'unreachable' (heard
-      // before, now stale: drove off / out of range / deep sleep). We never claim "asleep"
-      // when we don't know — but instead of a blank area we show a neutral grey hero with the
-      // orange BLE glyph (matching the orange BLE bars) and the honest state, plus the
-      // last-known battery + idle time from the retained cache so the card still informs.
+      // before, now stale: drove off / out of range / deep sleep).
       var ureach=s.link==='unreachable';
-      hicHTML=ringSVG(0,true)+'<div class="glyph">'+BT+'</div>';
-      // link==='awake' can land here transiently when the freshness stamp arrived from a
-      // non-charge poll before the first charge poll filled the cache (no s.vehicle yet) —
-      // say "Checking status…" then, not "Connecting…" (the link is clearly up).
-      setHTML(hl,'<span>'+(ureach?'Unreachable':(s.link==='awake'?'Checking status…':'Connecting…'))+'</span>');
-      // Only claim "Bluetooth connected" when the momentary GATT link is actually up
-      // (linked). The on-demand link is dropped between polls, so link==='unknown'
-      // routinely coexists with ble.connected===false — in which case the BLE row reads
-      // "Disconnected" and a "Bluetooth connected" subtitle would contradict it.
-      hs.textContent=ureach
-        ? 'No recent response from the vehicle over Bluetooth.'
-        : (linked ? 'Bluetooth connected — checking status…'
-                  : 'Reaching your Tesla over Bluetooth…');
-      var uls=s.last||{}, ulsoc=(uls.soc!=null)?Math.round(uls.soc):null, uago=fmtAgo(s.last_seen_s), uchips=[];
-      if(ulsoc!=null) uchips.push(stat('Battery','<span style="color:'+socColor(ulsoc)+'">'+ulsoc+'</span>','%'));
-      if(uago)        uchips.push(stat('Idle', uago, ''));
-      hst.innerHTML=uchips.join('');
+      if(ureach){
+        $("hero").classList.add('hide');
+      } else {
+        hicHTML=ringSVG(0,true)+'<div class="glyph">'+BT+'</div>';
+        // link==='awake' can land here transiently when the freshness stamp arrived from a
+        // non-charge poll before the first charge poll filled the cache (no s.vehicle yet) —
+        // say "Checking status…" then, not "Connecting…" (the link is clearly up).
+        setHTML(hl,'<span>'+(s.link==='awake'?'Checking status…':'Connecting…')+'</span>');
+        // Only claim "Bluetooth connected" when the momentary GATT link is actually up
+        // (linked). The on-demand link is dropped between polls, so link==='unknown'
+        // routinely coexists with ble.connected===false — in which case the BLE row reads
+        // "Disconnected" and a "Bluetooth connected" subtitle would contradict it.
+        hs.textContent=linked ? 'Bluetooth connected — checking status…'
+                              : 'Reaching your Tesla over Bluetooth…';
+        var uls=s.last||{}, ulsoc=(uls.soc!=null)?Math.round(uls.soc):null, uago=fmtAgo(s.last_seen_s), uchips=[];
+        if(ulsoc!=null) uchips.push(stat('Battery','<span style="color:'+socColor(ulsoc)+'">'+ulsoc+'</span>','%'));
+        if(uago)        uchips.push(stat('Idle', uago, ''));
+        hst.innerHTML=uchips.join('');
+      }
     }
   } else if(!configured){
     hicHTML=ringSVG(0,true)+'<div class="glyph">'+BTG+'</div>';
