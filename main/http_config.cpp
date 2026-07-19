@@ -262,7 +262,9 @@ esp_err_t handle_set_syslog(GuardedReq rq) {
     server = (s == std::string::npos) ? std::string{} : server.substr(s, e - s + 1);
 
     // Unchanged → nothing to apply: skip the NVS write and the reboot entirely.
-    if (server == g_vehicle->load_config_str("syslog_uri")) {
+    std::string stored;
+    g_config->load_str("syslog_uri", stored);
+    if (server == stored) {
         return send_json(req, 200, make_response(true, "set_syslog", "",
             server.empty() ? "Syslog already disabled — no reboot"
                            : "Syslog server unchanged — no reboot"));
@@ -274,7 +276,7 @@ esp_err_t handle_set_syslog(GuardedReq rq) {
                                                  "invalid server (use host:port)"));
     }
 
-    bool ok = g_vehicle->save_config_str("syslog_uri", server);
+    bool ok = g_config->save_str("syslog_uri", server);
     esp_err_t r = send_json(req, ok ? 200 : 500,
         make_response(ok, "set_syslog", "",
                       ok ? (server.empty() ? "Syslog disabled — rebooting"
