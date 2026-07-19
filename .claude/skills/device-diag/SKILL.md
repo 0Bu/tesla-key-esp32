@@ -143,8 +143,8 @@ than a spike, and their absence before a reboot means something *else* restarted
 - `HEAP CRITICAL for <n> s … restarting in <m> s unless it recovers` — one per 30 s sample.
 - `HEAP recovered after <n> s critical … watchdog disarmed` — it healed; no restart happened.
 - `HEAP critical run (<n> s) cleared: an OTA is in flight …` — excused, *not* healed.
-- `HEAP EXHAUSTED for <n> s … RESTARTING DELIBERATELY, watchdog restart <k>/5, breadcrumb
-  reboot_why=heap:<k>` — the restart itself, with the state that caused it.
+- `HEAP EXHAUSTED for <n> s … RESTARTING DELIBERATELY (watchdog restart <k>/5,
+  reboot_why=heap:<k>; …)` — the restart itself, with the state that caused it.
 - `HEAP EXHAUSTED … but <n> consecutive watchdog restarts have not fixed it — NOT restarting
   again` — the cap held; the device is up but degraded, and this is logged once per run.
 - `BOOT this boot was caused by the firmware itself: reason=heap:<k>` — on the *next* boot,

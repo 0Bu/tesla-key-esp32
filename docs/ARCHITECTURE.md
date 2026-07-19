@@ -506,12 +506,18 @@ narrates itself; a reader should be able to reconstruct the whole decision from 
 | `HEAP CRITICAL for <n> s … restarting in <m> s unless it recovers` | still critical, one line per 30 s sample — this is the proof the shortage was *sustained*, not a spike |
 | `HEAP recovered after <n> s critical … watchdog disarmed` | the run ended on its own; no restart |
 | `HEAP critical run (<n> s) cleared: an OTA is in flight …` | the run was excused, not healed |
-| `HEAP EXHAUSTED for <n> s … RESTARTING DELIBERATELY, watchdog restart <k>/5, breadcrumb reboot_why=heap:<k>` | the restart, with the state that caused it |
+| `HEAP EXHAUSTED for <n> s … RESTARTING DELIBERATELY (watchdog restart <k>/5, reboot_why=heap:<k>; …)` | the restart, with the state that caused it |
 | `HEAP EXHAUSTED … but <n> consecutive watchdog restarts have not fixed it — NOT restarting again` | the cap held; the device stays up degraded |
 | `BOOT this boot was caused by the firmware itself: reason=heap:<k> …` | logged on the *next* boot, closing the loop |
 
 The elapsed times are the **measured** age of the critical run, not the configured hold, so a fired
-run legitimately reads somewhat over 300 s (it is sampled on a 30 s cadence). The `BOOT` line is
+run legitimately reads somewhat over 300 s (it is sampled on a 30 s cadence).
+
+**Keep any line on this path under ~230 characters.** `diag_log.cpp`'s capture hook formats into a
+256-byte *stack* buffer (deliberately — it must not allocate on the heap it is reporting about),
+and anything longer reaches both `/diag` and syslog **cut off mid-sentence**. The restart line is
+the one that must never be truncated, so it carries the state and a pointer here, not the
+reasoning itself. The `BOOT` line is
 emitted *after* `syslog_start()` on purpose: `syslog_send()` is a no-op before that, so logging it
 at the point the breadcrumb is read — which is where it naturally belongs, and where it used to be
 — would confine the one line explaining an unattended 04:00 self-heal to the RAM ring that the

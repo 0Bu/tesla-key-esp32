@@ -378,8 +378,8 @@ void VehicleController::loop_task_fn_(void* arg) {
 
             if (v.action == tk::HeapAction::Armed) {
                 ESP_LOGE(TAG, "HEAP CRITICAL: internal largest_block %u B < %u B — watchdog ARMED, "
-                              "restarting in %u s unless it recovers", (unsigned) largest,
-                         threshold, (unsigned) (tk::kHeapCriticalHoldMs / 1000));
+                              "restarting in %u s unless it recovers",
+                         (unsigned) largest, threshold, left_s);
             } else if (v.action == tk::HeapAction::Watching) {
                 ESP_LOGE(TAG, "HEAP CRITICAL for %u s (internal largest_block %u B < %u B) — "
                               "restarting in %u s unless it recovers",
@@ -408,20 +408,19 @@ void VehicleController::loop_task_fn_(void* arg) {
                         said = true;
                         ESP_LOGE(TAG, "HEAP EXHAUSTED for %u s but %u consecutive watchdog restarts "
                                       "have not fixed it — NOT restarting again, staying up "
-                                      "degraded so it can be diagnosed (a restart loop would cycle "
-                                      "the radios every ~10 min and keep a parked car awake)",
+                                      "degraded so it can be diagnosed",
                                  held_s, (unsigned) prior);
                     }
                 } else {
                     // The one line that has to survive the reboot and explain it on its own —
-                    // state, threshold, how long, which restart, and why nothing cheaper is tried.
+                    // state, threshold, how long, which restart, and where the reasoning lives.
+                    // Keep every line here well under ~230 chars: diag_log.cpp's capture hook
+                    // formats into a 256-byte stack buffer, so a longer line reaches syslog cut
+                    // off mid-sentence — and this is the one that must not be.
                     ESP_LOGE(TAG, "HEAP EXHAUSTED for %u s (internal largest_block %u B < %u B, "
-                                  "free %u B) — RESTARTING DELIBERATELY, watchdog restart %u/%u, "
-                                  "breadcrumb reboot_why=heap:%u. No in-place recovery is "
-                                  "attempted: ESP-IDF cannot defragment a live heap and its own "
-                                  "subsystem deinit paths allocate and have a history of leaking, "
-                                  "so a clean boot is the only reliable way back "
-                                  "(rationale: docs/ARCHITECTURE.md)",
+                                  "free %u B) — RESTARTING DELIBERATELY (watchdog restart %u/%u, "
+                                  "reboot_why=heap:%u; no in-place recovery exists, see "
+                                  "docs/ARCHITECTURE.md)",
                              held_s, (unsigned) largest, threshold,
                              (unsigned) heap_caps_get_free_size(MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL),
                              (unsigned) (prior + 1), (unsigned) tk::kHeapMaxConsecutiveRestarts,
