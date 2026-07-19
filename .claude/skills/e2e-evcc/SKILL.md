@@ -59,7 +59,7 @@ Exit 0 + `✅ e2e OK` means evcc can drive the ESP32 with no timeouts.
 
 What this test deliberately does **not** touch, and why — so "e2e OK" is not mistaken for "every endpoint verified":
 
-- **Management / destructive endpoints are out of scope:** `/scan`, `/gen_keys`, `/send_key`, `/set_time`, `/set_vin`, `/set_mqtt`, `/ota/check`, `/ota/update`, `/ota/status`, and the `/` web UI. They re-pair, reboot, or wipe NVS — not part of the evcc runtime path. Verify those manually or via the flash/OTA skills. (`/set_mqtt` *is* a real route — `handle_set_mqtt` in `http_config.cpp`, POST `{"broker":"host:port"}` → persist + reboot; it's excluded here because it reboots, not because it's missing.)
+- **Management / destructive endpoints are out of scope:** `/scan`, `/gen_keys`, `/send_key`, `/set_time`, `/set_vin`, `/set_mqtt`, `/set_syslog`, `/ota/check`, `/ota/update`, `/ota/status`, and the `/` web UI. They re-pair, reboot, or wipe NVS — not part of the evcc runtime path. Verify those manually or via the flash/OTA skills. (`/set_mqtt` *is* a real route — `handle_set_mqtt` in `http_config.cpp`, POST `{"broker":"host:port"}` → persist + reboot; it's excluded here because it reboots, not because it's missing.)
 - **`/mcp`** (the MCP JSON-RPC server for AI agents, `main/mcp_server.cpp`) is not part of the evcc runtime path and is not exercised here — smoke-test it separately per `docs/MCP.md`.
 - **`/diag`** is used reactively (see *Diagnosing a real failure*), not asserted.
 - Everything the firmware *dispatches* — all 15 commands, `vehicle_data`, `body_controller_state`, `/status`, `/api/proxy/1/version` — is reachable by the test once the right gate is set (`RUN_COMMANDS` / `ALLOW_CHARGE_TOGGLE` / `RUN_ALL_COMMANDS`).
