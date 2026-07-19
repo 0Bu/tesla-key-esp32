@@ -269,7 +269,7 @@ SOC read from `.response.response.charge_state.battery_level`, current from `…
 no command topics are subscribed; HA cannot control or wake the car. The bridge runs in its
 own task and is independent of evcc, BLE and pairing.
 
-**Enable:** set the broker in the web UI (Connection → MQTT, `IP:PORT`) — stored in NVS
+**Enable:** set the broker in the web UI (Connections → MQTT, `IP:PORT`) — stored in NVS
 (`mqtt_uri`) and applied after the reboot it triggers. Compile-time defaults / credentials
 live in `scripts/idf-docker.sh idf.py menuconfig` → *Tesla Key Configuration*:
 

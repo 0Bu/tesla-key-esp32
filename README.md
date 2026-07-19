@@ -1,6 +1,6 @@
 # tesla-key-esp32
 
-Turns an ESP32 (esp32 / esp32s3 / esp32c3 / esp32c6 / esp32c5) into a Bluetooth key for a Tesla, so charging software such as
+Turns an ESP32 into a Bluetooth key for a Tesla, so charging software such as
 [evcc](https://evcc.io) can wake the car, read the battery level and start/stop charging
 over the local network. No cloud, no Tesla API, no fees. It can also stream all vehicle
 telemetry to [Home Assistant over MQTT](#step-6--home-assistant-optional).
@@ -11,8 +11,8 @@ Build from source, full API and security model: [docs/README.md](docs/README.md)
 
 ## Requirements
 
-- An ESP32 board — esp32, esp32s3, esp32c3, esp32c6 or esp32c5 (e.g. the LilyGO T-Dongle-C5; the installer auto-detects which)
-- A browser with Web Serial support (Chrome / Edge, desktop)
+- An ESP32 board: esp32, esp32s3, esp32c3, esp32c6 or esp32c5
+- A browser with Web Serial support
 - The Tesla's 17-character VIN
 
 ---
@@ -88,7 +88,7 @@ The device can publish everything it reads — battery, charge, climate, tyre pr
 doors/locks, odometer, and its own WiFi/Bluetooth health — straight into Home Assistant
 over MQTT. It's read-only (HA only *sees* the data; it never sends commands or wakes the car).
 
-1. In the web UI, open the **Connection** panel and tap the **MQTT** row.
+1. In the web UI, open the **Connections** panel and tap the **MQTT** row.
 2. Enter your broker as `IP:PORT` (e.g. `192.168.1.10:1883`) and save. The device reboots.
 3. With the [Home Assistant MQTT integration](https://www.home-assistant.io/integrations/mqtt/)
    enabled, a **Tesla Key** device appears automatically with all sensors — no YAML needed
