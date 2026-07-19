@@ -418,6 +418,18 @@ extern "C" void app_main() {
     static NvsStorageAdapter config_store("tesla_cfg");
     config_store.initialize();
 
+    // Did WE end the last boot on purpose? esp_reset_reason() cannot tell a deliberate
+    // esp_restart() apart from a user power-cycle — both read SW/POWERON — so the heap watchdog
+    // leaves a breadcrumb in NVS on its way out. Take it (read + clear) before anything else can
+    // reboot, so it always describes the boot just made, and surface it in /status: a device that
+    // self-healed at 04:00 must be able to say so, or the next investigation starts from scratch
+    // exactly the way this one did.
+    VehicleController::set_boot_reboot_reason(VehicleController::take_reboot_reason(config_store));
+    if (!VehicleController::boot_reboot_reason().empty()) {
+        ESP_LOGW(TAG, "BOOT previous run ended by us: reason=%s",
+                 VehicleController::boot_reboot_reason().c_str());
+    }
+
     // UDP Syslog forwarder for the diag log (NVS "syslog_uri" / CONFIG_TESLA_SYSLOG_SERVER;
     // "" = disabled). Started before WiFi so it captures boot-time log lines too — its own
     // task blocks on wifi_is_connected() until the link is up, so this is safe even though

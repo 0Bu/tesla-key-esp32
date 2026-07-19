@@ -41,7 +41,7 @@ addr,devices[],connect_fail,car_connectable}`, `mqtt{configured,connected,tls,br
 `syslog{configured,resolved,reachable,host,port,error}`,
 `tele{climate,drive,tires,closures}` (**only while the BLE link is up**), `link`, `vcsec_sleep`
 (the raw, **un-debounced** VCSEC sleep flag, for diagnostics only — not what drives the hero),
-plus `vehicle{…}` / `last{…}` / `last_seen_s` charge snapshots.
+plus `vehicle{…}` / `last{…}` / `last_seen_s` charge snapshots, and `last_reboot` (present ONLY when the heap watchdog restarted us — see the signature table).
 
 ```bash
 curl -s http://<host>/status | jq
@@ -119,13 +119,21 @@ Query params (parsed in `handle_diag`): `?verbose=1`/`?verbose=0` toggle raw-RX 
 
 The limit on this device is the **largest *contiguous* free block, not total free heap** — a few
 tens of KB steady-state is normal; a *falling* largest block is heap pressure and a reboot risk.
-`/status` does **not** carry heap; read it from the serial console. Two log lines from
-[`main/main.cpp`](../../../main/main.cpp):
+`/status` does **not** carry heap; read it from the serial console (or **syslog**, which is the
+only copy that survives a reboot — the `/diag` ring does not). Three log lines:
 
-- Boot: `BOOT reset_reason=<r> free_heap=<n> min_free=<n> largest_block=<n>` — `reset_reason`
-  tells you *why* it last restarted (a panic/`abort` loop vs a clean power-on).
-- Per-milestone: `HEAP @<where> free=<n> largest=<n> min=<n>` — where WiFi/HTTP/MQTT each spent
-  their contiguous block.
+- Boot ([`main/main.cpp`](../../../main/main.cpp)): `BOOT reset_reason=<r> free_heap=<n>
+  min_free=<n> largest_block=<n>` — `reset_reason` tells you *why* it last restarted (a
+  panic/`abort` loop vs a clean power-on). It **cannot see a deliberate restart**, though: an
+  `esp_restart()` and a user power-cycle both read SW/POWERON — check `/status.last_reboot`.
+- Per-milestone ([`main/main.cpp`](../../../main/main.cpp)): `HEAP @<where> free=<n> largest=<n>
+  min=<n>` — where WiFi/HTTP/MQTT each spent their contiguous block.
+- Periodic ~30 s ([`main/vehicle_telemetry.cpp`](../../../main/vehicle_telemetry.cpp)
+  `loop_task_fn_`): `HEAP free=<n> largest_block=<n> min_free=<n> internal_largest=<n>` — the
+  **trend** line, and the one the heap watchdog decides on. On the **esp32c5 read
+  `internal_largest`, not `largest_block`**: the latter is the plain `MALLOC_CAP_8BIT` figure,
+  which includes the C5's 8 MB PSRAM and can read ~7.8 MB while internal DRAM is at 768 B. The
+  watchdog restarts when `internal_largest` stays under 4 KB for 5 unbroken minutes.
 
 ```bash
 # Host serial monitor (no local idf.py) — exit Ctrl-A then K.
@@ -143,6 +151,8 @@ Each row is a signature that's been root-caused before (cite the code site when 
 | Symptom (from `/status` + `/diag`/serial) | Cause | Action (this skill hands off) |
 |---|---|---|
 | **Every BLE connect times out.** `/diag`/serial shows `connect error: 13` (`BLE_HS_ETIMEOUT`); `/status` has `ble.connected:false`, `ble.connect_fail` climbing, often `ble.car_connectable:false`. Scan still *finds* the car. | A **second board** holding the car's single BLE link (Tesla allows ~3 simultaneous, and a proxy holds it continuously), **or** signal-limited RX (weak advert RSSI). **Not a firmware bug** — the connect path is unchanged and the scan matches the VIN. `connect error: %d` is logged in [`main/ble_client.cpp`](../../../main/ble_client.cpp) (`BLE_GAP_EVENT_CONNECT`, status ≠ 0). | Run **one board per car** — power off the other holder, then retry. If truly alone, treat as an antenna/range problem (physical), not a flash. |
+| **`/status` reports `last_reboot:"heap:<n>"`** — the device is healthy NOW, with a low uptime nobody triggered. `n` = consecutive watchdog restarts; ≥2 means restarting is not fixing it, and at 5 it stops restarting. | The **heap-exhaustion watchdog** restarted us: `largest_block` stayed under 4 KB for 5 unbroken minutes, i.e. the heap was gone and not coming back ([`main/logic/heap_watchdog.hpp`](../../../main/logic/heap_watchdog.hpp), sampled in `vehicle_telemetry.cpp` `loop_task_fn_`). The restart is the *symptom being handled*, not the fault — something leaked. The field is set once per boot and absent on every ordinary one. | Find the leak, don't just restart. Pull the `HEAP free=… largest_block=…` trend from **syslog** (the in-RAM `/diag` ring does not survive the reboot) and look for what ran before the decline — the known one was an unbounded `/events` WS backlog. If it recurs, that is a real leak to fix, not a watchdog to loosen. |
+| **Device unreachable for hours, then fine after a power-cycle**, with no `last_reboot` and no crash in the logs. | A **wedge**: on a firmware without the heap watchdog (pre-1.4.54) a permanently exhausted heap made every OOM guard "recover and continue" forever — `bad_alloc` out of `loop()` ~20×/s, nothing serving, no reboot. | Confirm from syslog (`largest_block` collapsed and never recovered + a `bad_alloc` storm). The escalation now restarts after 5 min; if the device is on an older image, update it. |
 | **MQTT stopped publishing** / serial shows esp-mqtt `select() timeout`, **while uptime keeps climbing and BLE polls are fine.** `/status`: `mqtt.connected:false` (and often an `mqtt.error`). | The board **fell off WiFi** (ghost association / missed deauth) — it's not a crash. `main.cpp` runs an endless runtime reconnect + gateway-ping watchdog, but it can sit disconnected. | Fastest re-associate is a **USB reset / power-cycle**. Do **not** reflash for this. If `mqtt.error`/`mqtt.tls` shows a **TLS handshake** failure it stays disconnected on purpose — **no silent plaintext fallback** ([`main/mqtt_ha.cpp`](../../../main/mqtt_ha.cpp)); fix the broker URI/CA, see [`docs/SECURITY.md`](../../../docs/SECURITY.md). |
 | **OTA reaches 100% then fails** `"downloaded image is invalid"`; serial: `image valid, signature bad` / `ESP_ERR_OTA_VALIDATE_FAILED`. | The running image's **TOFU trust anchor was signed with a different key** than the published images (e.g. a local/dev-key build), so it rejects every CI-signed OTA. Signature proves authenticity, not freshness — this is the anchor mismatch, not a corrupt download. Mapped in [`main/ota_update.cpp`](../../../main/ota_update.cpp) (`ESP_ERR_OTA_VALIDATE_FAILED`). | **USB-reflash the published CI `.bin` + erase otadata** (keeps NVS/pairing) → [`usb-recovery`](../usb-recovery/SKILL.md) / the signed-artifact section of [`flash-esp32`](../flash-esp32/SKILL.md). |
 | **Boot-loops immediately** (never reaches `app_main`); `BOOT reset_reason` shows repeated resets after flashing a **locally-built** image. | An **unsigned** app `abort()`s at startup under the signed-OTA config (`CONFIG_SECURE_SIGNED_ON_UPDATE_NO_SECURE_BOOT`, `check_signature_on_update_check`, all targets). It does **not** boot-and-TOFU. | Flash a **signed** image — the CI artifact, or sign the local build (see the ⚠️ warning in [`flash-esp32`](../flash-esp32/SKILL.md)) / [`usb-recovery`](../usb-recovery/SKILL.md). |

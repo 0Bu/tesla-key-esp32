@@ -7,8 +7,11 @@
 #include "vehicle_ctrl_internal.hpp"
 #include "logic/units.hpp"
 #include "logic/active_window.hpp"
+#include "logic/heap_watchdog.hpp"
+#include "ota_update.hpp"
 #include <esp_log.h>
 #include <esp_heap_caps.h>
+#include <esp_system.h>
 
 // protobuf generated headers (from tesla-ble)
 #include <vcsec.pb.h>
@@ -339,10 +342,67 @@ void VehicleController::loop_task_fn_(void* arg) {
         uint32_t hb_now = xTaskGetTickCount();
         if (hb_now - last_heap_log > pdMS_TO_TICKS(30000)) {
             last_heap_log = hb_now;
-            ESP_LOGW(TAG, "HEAP free=%u largest_block=%u min_free=%u",
+            // INTERNAL, not plain 8BIT: heap_caps_* reports the max across every heap with the
+            // cap, and the esp32c5 registers 8 MB of PSRAM into 8BIT. Deciding on that number
+            // would make the watchdog below a silent no-op on exactly the board that has PSRAM.
+            // Logged alongside the historical 8BIT figures (identical on the four PSRAM-less
+            // targets) so the trend stays comparable with older captures.
+            size_t largest = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL);
+            ESP_LOGW(TAG, "HEAP free=%u largest_block=%u min_free=%u internal_largest=%u",
                      (unsigned) heap_caps_get_free_size(MALLOC_CAP_8BIT),
                      (unsigned) heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
-                     (unsigned) heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT));
+                     (unsigned) heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT),
+                     (unsigned) largest);
+
+            // Last-resort escalation. Every OOM guard in this firmware turns OOM into "recover
+            // and continue", which is right for a transient and left the device WEDGED for ten
+            // hours on 2026-07-18 when the shortage was permanent. Decision logic (threshold,
+            // hold time, the OTA excusal, tick-wrap safety) is the host-tested
+            // logic/heap_watchdog.hpp; this site only samples and acts.
+            //
+            // Nothing here may allocate: we are deciding precisely because allocation is failing.
+            // ota_is_busy() reads one atomic (ota_get_status() would copy std::strings and could
+            // throw), and the persist below hands NVS a short literal.
+            static tk::HeapWatchdog heap_wd;
+            tk::HeapAction act = tk::heap_watch(
+                heap_wd, {largest, (uint32_t) pdTICKS_TO_MS(hb_now), ota_is_busy()});
+            if (act == tk::HeapAction::Restart) {
+                // How many watchdog restarts this run of exhaustion has already caused (0 unless
+                // the last boot was one of ours). Five is proof that restarting does not fix it,
+                // and continuing would cycle the radios every ~10 min forever — see
+                // kHeapMaxConsecutiveRestarts. Latch the run so we say this once, not every 30 s.
+                uint8_t prior = VehicleController::boot_heap_restarts();
+                if (!tk::heap_may_restart(prior)) {
+                    static bool said = false;
+                    if (!said) {
+                        said = true;
+                        ESP_LOGE(TAG, "HEAP EXHAUSTED after %u consecutive watchdog restarts — "
+                                      "NOT restarting again (restarting is not fixing this; "
+                                      "staying up so it can be diagnosed)", (unsigned) prior);
+                    }
+                } else {
+                    ESP_LOGE(TAG, "HEAP EXHAUSTED: internal largest_block %u B < %u B for %u s — "
+                                  "restarting (restart %u; the device cannot recover from here, "
+                                  "see logic/heap_watchdog.hpp)",
+                             (unsigned) largest, (unsigned) tk::kHeapCriticalBytes,
+                             (unsigned) (tk::kHeapCriticalHoldMs / 1000), (unsigned) (prior + 1));
+                    tk::HeapReason why = tk::heap_reason_format((uint8_t)(prior + 1));
+                    self->persist_reboot_reason_(why.text);
+                    // A restart inside the ~90 s OTA health gate would look like a failed boot and
+                    // revert a good image. This is a deliberate restart, so confirm the image
+                    // first — same reasoning as the config-save reboots.
+                    ota_confirm_pending_image();
+                    // Let the log actually LEAVE the device before we kill it. syslog_send only
+                    // queues, and its task runs at priority 3 against this task's 5, so without a
+                    // yield the final message dies in the queue on a single-core target — and the
+                    // /diag ring does not survive the reboot either. Then the one thing explaining
+                    // the restart would be gone, which is the whole point of logging it. This task
+                    // is not registered with the task WDT, and 300 ms is nothing against a 5 min
+                    // hold.
+                    vTaskDelay(pdMS_TO_TICKS(300));
+                    esp_restart();
+                }
+            }
         }
 
         // While NOT paired we stay completely out of the way: the auto-pair task owns the

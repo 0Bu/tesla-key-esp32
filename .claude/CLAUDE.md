@@ -52,7 +52,9 @@ renderer draws), the status-LED ladder (`logic/led_status.hpp`, reading the same
 backpressure that bounds a non-reading client), the active-window poll gate
 (`logic/active_window.hpp` — charging held open only on fresh contact), the HA binary
 `value_template` builder (`logic/ha_templates.hpp` — presence-aware `is defined` guard) and the
-POST-body reassembly loop (`logic/http_body.hpp` — multi-segment recv + bounded timeout) — all
+POST-body reassembly loop (`logic/http_body.hpp` — multi-segment recv + bounded timeout) and the
+heap-exhaustion watchdog (`logic/heap_watchdog.hpp` — 4 KB/5 min unbroken hold, OTA-excused,
+restart cap + `heap:<n>` breadcrumb round-trip) — all
 delegated to IDF-free headers in `main/logic/` so the device runs the same code the test does. CI gates the firmware build on it (`logic-test` job). Add new
 hardware-free logic to `main/logic/` and a `CHECK` in `test/test_logic.cpp`. Full detail:
 [`test/README.md`](../test/README.md).
@@ -178,7 +180,7 @@ Never edit files in `managed_components/` — they are regenerated.
 
 | Namespace   | Content                                     |
 |-------------|---------------------------------------------|
-| `tesla_cfg` | WiFi SSID/pass, VIN, BLE MAC, `mqtt_uri`, `syslog_uri`, `last_time`, `disp_rot` (on-device display BOOT-rotation index 0..3; C5/S3; migrates old `disp_flip`) (runtime cfg) |
+| `tesla_cfg` | WiFi SSID/pass, VIN, BLE MAC, `mqtt_uri`, `syslog_uri`, `last_time`, `reboot_why` (why WE ended the last boot — `heap:<n>` = the heap watchdog, n = consecutive such restarts; read+cleared at boot, surfaced once as `/status.last_reboot`), `disp_rot` (on-device display BOOT-rotation index 0..3; C5/S3; migrates old `disp_flip`) (runtime cfg) |
 | `tesla_ble` | Private key (`private_key`), VCSEC session (`sess_vcsec`), Info session (`sess_info`), `key_created`, `paired_at` — the `sess_*` names come from the ≤15-char key mapping in `nvs_storage.cpp` |
 
 ## Commands Implemented
@@ -341,6 +343,16 @@ and never connects/enrols. **Full detail: [`docs/ARCHITECTURE.md`](../docs/ARCHI
   build a whole buffer into one big `std::string` (`/diag` streams instead), and treat any new
   large *contiguous* allocation (big JSON, TLS for OTA) as a crash risk to size-check. A reboot
   loop is doubly bad: each boot re-opens the polling window, so a parked car never sleeps.
+- **Those guards all mean "recover and continue" — which is right for a TRANSIENT shortage and
+  hangs the device on a permanent one.** A wedge (2026-07-18: `bad_alloc` out of `loop()` every
+  50 ms for ten hours, HTTP/MQTT/BLE all dead, no reboot) is worse than a crash, because a crash
+  at least restarts. The one escalation is `logic/heap_watchdog.hpp`, sampled by `loop_task`:
+  **INTERNAL** `largest_block` (`8BIT|INTERNAL` — plain `8BIT` includes the C5's 8 MB PSRAM and
+  would make it a silent no-op there) under **4 KB continuously for 5 min** (never a single
+  `bad_alloc`; excused while an OTA holds its TLS buffers) ⇒ log loudly, persist
+  `reboot_why=heap:<n>` to NVS, restart. Capped at **5 consecutive** restarts, and such a boot
+  does NOT seed the active polling window (else a loop keeps a parked car awake). The next boot
+  reports it once in `/status` as `last_reboot`.
 
 ## Typical Debugging
 

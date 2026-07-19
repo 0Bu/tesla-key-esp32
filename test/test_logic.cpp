@@ -36,6 +36,7 @@
 #include "logic/active_window.hpp"
 #include "logic/ha_templates.hpp"
 #include "logic/http_body.hpp"
+#include "logic/heap_watchdog.hpp"
 
 #include <cmath>
 #include <cstdio>
@@ -583,6 +584,9 @@ static void test_status_model() {
     s2.charge.has_battery_level = true; s2.charge.battery_level = 68.0f;
     s2.charge.charging_state = "Stopped";
     s2.have_last_seen = true; s2.last_seen_s = 3600;
+    // This boot was ended by the heap watchdog, so /status must say so — the whole point of
+    // persisting it is that a device which self-heals unattended can still be diagnosed.
+    s2.last_reboot = "heap:2";
 
     CollectEmitter e2;
     tk::status::emit_status(s2, e2);
@@ -616,7 +620,8 @@ static void test_status_model() {
         "last{\n"
         "last.soc=68\n"
         "last.status=\"Stopped\"\n"
-        "last_seen_s=3600\n"));
+        "last_seen_s=3600\n"
+        "last_reboot=\"heap:2\"\n"));
 
     // Scenario 3 — unreachable, scanning, found-but-can't-connect: devices listed, a
     // connect-fail streak with last-seen advert RSSI and a non-connectable target (the
@@ -1013,6 +1018,90 @@ static void test_ws_backpressure() {
     CHECK(!ws_may_send(g));
 }
 
+// ── heap-exhaustion watchdog (logic/heap_watchdog.hpp) ────────────────────────────────────────
+// The escalation that was missing on 2026-07-18, when a permanently exhausted heap left the
+// device wedged for ten hours instead of restarting.
+static void test_heap_watchdog() {
+    using namespace tk;
+    const uint32_t HOLD = kHeapCriticalHoldMs;
+
+    // A healthy heap never arms anything, however long it runs.
+    HeapWatchdog h;
+    for (uint32_t t = 0; t < 3 * HOLD; t += 30000)
+        CHECK(heap_watch(h, {31744, t, false}) == HeapAction::Ok);
+
+    // Sustained exhaustion: watching until the hold elapses, then restart. The boundary is
+    // inclusive — at exactly kHeapCriticalHoldMs we act.
+    HeapWatchdog w;
+    CHECK(heap_watch(w, {768, 0,          false}) == HeapAction::Watching);
+    CHECK(heap_watch(w, {768, HOLD / 2,   false}) == HeapAction::Watching);
+    CHECK(heap_watch(w, {768, HOLD - 1,   false}) == HeapAction::Watching);
+    CHECK(heap_watch(w, {768, HOLD,       false}) == HeapAction::Restart);
+
+    // THE property that keeps this from becoming a reboot loop: the run must be UNBROKEN. A
+    // single recovered sample resets the clock, so a device that dips and recovers — the
+    // transient every other OOM guard exists to absorb — never restarts.
+    HeapWatchdog b;
+    CHECK(heap_watch(b, {768,   0,        false}) == HeapAction::Watching);
+    CHECK(heap_watch(b, {768,   HOLD - 1, false}) == HeapAction::Watching);
+    CHECK(heap_watch(b, {31744, HOLD,     false}) == HeapAction::Ok);        // recovered
+    CHECK(heap_watch(b, {768,   HOLD + 1, false}) == HeapAction::Watching);  // clock restarts here
+    CHECK(heap_watch(b, {768,   2 * HOLD, false}) == HeapAction::Watching);  // not from the first dip
+    CHECK(heap_watch(b, {768,   2 * HOLD + 1, false}) == HeapAction::Restart);
+
+    // The threshold boundary: at exactly kHeapCriticalBytes we are still healthy.
+    HeapWatchdog e;
+    CHECK(heap_watch(e, {kHeapCriticalBytes,     0, false}) == HeapAction::Ok);
+    CHECK(heap_watch(e, {kHeapCriticalBytes - 1, 0, false}) == HeapAction::Watching);
+
+    // An OTA legitimately holds the biggest allocations this firmware makes, so a low reading
+    // during one proves nothing — and a restart mid-install is the one reboot that could leave a
+    // half-written slot. It must CLEAR the run, not merely skip the sample: otherwise a critical
+    // run that began before the download would resume its clock and fire during it.
+    HeapWatchdog o;
+    CHECK(heap_watch(o, {768, 0,        false}) == HeapAction::Watching);
+    CHECK(heap_watch(o, {768, HOLD - 1, true})  == HeapAction::Ok);        // OTA starts
+    CHECK(heap_watch(o, {768, HOLD,     true})  == HeapAction::Ok);        // still installing
+    CHECK(heap_watch(o, {768, HOLD + 1, false}) == HeapAction::Watching);  // OTA done: start over
+    CHECK(heap_watch(o, {768, 2 * HOLD, false}) == HeapAction::Watching);
+
+    // A 32-bit millisecond wrap inside the hold window must measure true elapsed time, not go
+    // hugely negative and fire instantly (uptime crosses this after ~49 days).
+    HeapWatchdog p;
+    const uint32_t near_wrap = 0xFFFFFFFFu - (HOLD / 2);
+    CHECK(heap_watch(p, {768, near_wrap, false}) == HeapAction::Watching);
+    CHECK(heap_watch(p, {768, (uint32_t)(near_wrap + HOLD / 4), false}) == HeapAction::Watching);
+    CHECK(heap_watch(p, {768, (uint32_t)(near_wrap + HOLD),     false}) == HeapAction::Restart);
+
+    // ── The restart cap: a loop that isn't fixing anything must stop ──────────────────────
+    // Restarting is only worth it while it might help. Five consecutive proves it doesn't, and
+    // continuing would re-seed the polling window every ~10 min forever, so a parked car next to
+    // it could never sleep.
+    for (uint8_t n = 0; n < kHeapMaxConsecutiveRestarts; n++) CHECK(heap_may_restart(n));
+    CHECK(!heap_may_restart(kHeapMaxConsecutiveRestarts));
+    CHECK(!heap_may_restart(255));
+
+    // ── The NVS breadcrumb round-trips ───────────────────────────────────────────────────
+    for (uint8_t n : {(uint8_t)0, (uint8_t)1, (uint8_t)5, (uint8_t)9, (uint8_t)10,
+                      (uint8_t)99, (uint8_t)100, (uint8_t)255}) {
+        CHECK(heap_reason_parse(heap_reason_format(n).text) == n);
+    }
+    CHECK_STR(heap_reason_format(1).text,   "heap:1");
+    CHECK_STR(heap_reason_format(12).text,  "heap:12");
+    CHECK_STR(heap_reason_format(255).text, "heap:255");
+
+    // Anything that is not one of ours counts as zero, so an unreadable breadcrumb can only
+    // UNDER-count — it can never wrongly suppress a restart the device actually needs.
+    CHECK(heap_reason_parse(nullptr)     == 0);
+    CHECK(heap_reason_parse("")          == 0);
+    CHECK(heap_reason_parse("heap")      == 0);   // no separator/count at all
+    CHECK(heap_reason_parse("heap:")     == 0);   // separator but no digits
+    CHECK(heap_reason_parse("heap:x")    == 0);   // non-numeric
+    CHECK(heap_reason_parse("heap:1x")   == 0);   // trailing garbage
+    CHECK(heap_reason_parse("panic:3")   == 0);   // a different writer's reason
+    CHECK(heap_reason_parse("heap:9999") == 255); // saturates instead of wrapping to a small n
+}
+
 // ── request-body reassembly (logic/http_body.hpp) — the multi-segment truncation fix ──────────
 static void test_http_body() {
     using namespace tk;
@@ -1110,6 +1199,7 @@ int main() {
     test_led();
     test_ws_policy();
     test_ws_backpressure();
+    test_heap_watchdog();
     test_active_window();
     test_http_body();
 
