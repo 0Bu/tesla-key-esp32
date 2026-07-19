@@ -30,9 +30,11 @@ CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
 # no brick risk, and the web-installer / USB-flash path keeps working (with RSA the bootloader
 # does NOT verify on boot — SECURE_SIGNED_ON_BOOT_NO_SECURE_BOOT is ECDSA-only — only the
 # running app verifies the next OTA image). Trust is bootstrapped from the running app's own
-# signature block (trust-on-first-use): the FIRST signed image reaches a device from the
-# current UNSIGNED build (which doesn't verify) or via USB; from then on every OTA image must
-# be signed with the same offline key. Classic esp32 needs chip rev v3.0+ (ECO3) for the V2
+# signature block (trust-on-first-use): the FIRST signed image reaches a device still on OLD
+# pre-signed-config firmware (which performs no verification), or is USB-flashed as a signed
+# image (a current UNSIGNED build won't boot — it aborts at the runtime signature check; see
+# docs/SECURITY.md). From then on every OTA image must be signed with the same offline key.
+# Classic esp32 needs chip rev v3.0+ (ECO3) for the V2
 # RSA scheme — enforced in sdkconfig.defaults.esp32. Full key lifecycle: docs/SECURITY.md.
 CONFIG_SECURE_SIGNED_APPS_NO_SECURE_BOOT=y
 CONFIG_SECURE_SIGNED_APPS_RSA_SCHEME=y
@@ -68,6 +70,11 @@ CONFIG_ESP_WIFI_TX_BUFFER_TYPE_DYNAMIC=y
 # HTTP Server
 CONFIG_HTTPD_MAX_REQ_HDR_LEN=1024
 CONFIG_HTTPD_MAX_URI_LEN=512
+# WebSocket support in esp_http_server — the web UI's live status stream (/events).
+# The browser opens ONE ws:// connection and the device pushes the /status JSON on a
+# fixed cadence (http_events.cpp), replacing the old 4 s HTTP poll. Target-agnostic,
+# so it lives in the shared base defaults (all five chips inherit it).
+CONFIG_HTTPD_WS_SUPPORT=y
 
 # LWIP sockets — the default of 10 is too tight: the http server (up to 7 open
 # sockets), its listener, mDNS, SNTP and evcc's polling can leave no BSD socket

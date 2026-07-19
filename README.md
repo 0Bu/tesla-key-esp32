@@ -100,6 +100,18 @@ only edits the broker address.
 
 ---
 
+## Step 7 — Syslog (optional)
+
+The device can forward its console log (the same output served at `GET /diag`) to a UDP
+Syslog collector — handy for watching a pairing or reconnect live, or for keeping history
+past a reboot.
+
+1. In the web UI, open the **Connections** panel and tap the **Syslog** row.
+2. Enter your collector as `IP:PORT` (e.g. `192.168.1.22:514`) and save. The device reboots.
+3. Leave the field empty to turn Syslog off again.
+
+---
+
 ## Notes
 
 - Keep the device on permanent USB power near the parking spot.

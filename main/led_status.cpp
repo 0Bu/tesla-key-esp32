@@ -14,6 +14,7 @@
 #include "freertos/task.h"
 
 #include "logic/led_status.hpp"
+#include "task_config.hpp"
 #include "logic/soc_gradient.hpp"   // shared SoC colour ramp (same one the display uses)
 #include "logic/ui_state.hpp"
 #include "ota_update.hpp"
@@ -166,7 +167,7 @@ void led_task(void* arg) {
 
 void led_status_start(VehicleController& vehicle) {
     // Low priority, small stack — the task only reads cached state and pushes ~12 bytes/frame.
-    if (xTaskCreate(led_task, "led", 3072, &vehicle, 2, nullptr) != pdPASS)
+    if (xTaskCreate(led_task, "led", 3072, &vehicle, tk::kPrioLed, nullptr) != pdPASS)
         ESP_LOGE(TAG, "led task create failed — status LED disabled");
 }
 

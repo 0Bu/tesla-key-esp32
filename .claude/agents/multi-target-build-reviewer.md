@@ -37,8 +37,9 @@ follow-up session apply the fix.
   `ESP32-C6`/`ESP32-C5`) in `/api/proxy/1/version` and the per-target OTA-suffix map are
   host-tested in `main/logic/` — a new target or a renamed suffix must update all of them.
 - **App-size gate.** `ci-build-all.sh` fails a build whose signed image exceeds `slot − 32 KB`
-  (`0x1e8000`, below the `0x1f0000` = 2031616 B slot). esp32c5 (display + PSRAM) and esp32c6
-  are the largest images (signed ~`0x1d1000`) and bind the gate. All targets stay on **`-Og`**
+  (`0x1e8000`, below the `0x1f0000` = 2031616 B slot). esp32c5 (the only target with display +
+  PSRAM) is the largest image (signed ~`0x1e1000`, ~28 KB under the gate) and binds it; esp32c6 is
+  next. All targets stay on **`-Og`**
   (`-Os` is banned — whole-build `-Os` hard-freezes under evcc+BLE load).
 - **Display + LED are per-target opt-in.** The on-device ST7735 display compiles to a no-op
   unless `CONFIG_TESLA_DISPLAY_ENABLED` (only in `sdkconfig.defaults.esp32c5` +

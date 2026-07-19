@@ -24,7 +24,7 @@ firmware change; each change also publishes a
 [GitHub release](https://github.com/0Bu/tesla-key-esp32/releases/latest) with the same bins.
 
 Flash by hand (needs `brew install esptool`). Use the per-target **merged** image — it bakes
-in the correct bootloader offset (0x1000 on the classic esp32, 0x0 elsewhere), so one command
+in the correct bootloader offset (0x1000 on the classic esp32, 0x2000 on esp32c5, 0x0 on s3/c3/c6), so one command
 works for any chip. This erases `nvs` (re-enter WiFi/VIN, re-pair once):
 ```bash
 # <suffix>: "" for esp32, else -s3 / -c3 / -c6 / -c5 (so "esp32" appears once in the name)
@@ -195,10 +195,16 @@ GET  /status               { vin, ip, version, key_present, key_fingerprint,
                              vehicle:{soc,status,charge_limit,power,amps,actual_amps,volts,phases}
                                (only when link=="awake", cached; each field only when reported),
                              mqtt:{configured,connected,tls,broker,error?} (HA bridge),
+                             syslog:{configured,resolved,reachable,host?,port?,error?}
+                               (UDP diag-log forwarder; reachable is an advisory ping hint,
+                               never a delivery gate),
                              tele:{climate,drive,tires,closures} (read-only telemetry;
                                emitted only while the BLE link is up),
                              last:{soc,status} (last-known snapshot for the asleep card),
                              last_seen_s (seconds since last contact) }
+GET  /events               WebSocket live-status feed for the web UI: client sends "sub",
+                             device pushes the /status JSON (~2 s). WS-only, no poll fallback.
+                             A plain (non-WebSocket) GET completes the handshake only.
 POST /scan                 Time-limited BLE discovery scan (populates ble.devices)
 GET  /diag[?verbose=0|1][?clear=1]   Plain-text in-memory diag log (verbose=0 turns raw-RX
                              logging back off; the X-Diag-Verbose response header echoes the
@@ -208,6 +214,9 @@ POST /send_key             Manually trigger pairing (charging_manager only; norm
 POST /set_vin              Persist VIN and reboot
 POST /set_mqtt             Persist the MQTT broker for the HA bridge and reboot
                              ({"broker":"host:port"} or full "mqtt://…"; "" disables MQTT)
+POST /set_syslog           Persist the UDP Syslog server for the diag log and reboot
+                             ({"server":"host:port"}; a bare host defaults to port 514;
+                             "" disables Syslog)
 POST /set_time             Set the wall clock from the browser ({"ms":<epoch>}) — NTP fallback
 GET  /ota/check[?ms=<epoch>]   Start a background update check (then poll /ota/status)
 POST /ota/update           Start the background self-update (downloads, then reboots)
@@ -287,6 +296,22 @@ All state topics are retained JSON. Numeric fields are emitted only when the car
 them (proto3 optional), so an unseen value shows as *unknown* in HA, not a phantom `0`.
 While a parked car sleeps the source polls pause (so it can sleep), and MQTT keeps serving
 the last-known retained values until the next active window.
+
+## Syslog
+
+`main/syslog.cpp` forwards the same output as `GET /diag` — the device's console log — to a
+UDP Syslog collector (RFC 5424), best-effort. Useful to watch a pairing/reconnect live, or to
+keep history past the in-RAM ring's ~16 KB / a reboot.
+
+**Enable:** set the server in the web UI (Connections → Syslog, `IP:PORT`, e.g.
+`192.168.1.22:514`; a bare host defaults to port 514) — stored in NVS (`syslog_uri`) and
+applied after the reboot it triggers. Leave empty to disable. Compile-time default:
+`CONFIG_TESLA_SYSLOG_SERVER` (`""`), overridden by the NVS value.
+
+Delivery only requires the hostname/IP to resolve (best-effort UDP — there is no
+handshake/ack); `/status.syslog.reachable` is an advisory ARP/ICMP ping hint only, not a
+delivery gate, so a collector behind a firewalled-ICMP host still receives lines with
+`reachable:false` shown in the UI.
 
 ## Troubleshooting
 

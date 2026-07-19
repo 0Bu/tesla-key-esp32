@@ -14,6 +14,7 @@
 #include <cJSON.h>
 
 #include "platform.hpp"
+#include "task_config.hpp"
 
 #include <atomic>
 #include <cstdio>
@@ -21,6 +22,19 @@
 #include <string_view>
 
 static const char* TAG = "ota";
+
+// Confirm a still-unverified OTA image before a deliberate reboot — see the header. Mirrors the
+// mark-valid path in main.cpp's ota_health_gate_task, but fires immediately (the user interacting is
+// the health signal) so an intentional restart within the health window doesn't trigger a rollback.
+void ota_confirm_pending_image() {
+    const esp_partition_t* running = esp_ota_get_running_partition();
+    esp_ota_img_states_t st;
+    if (esp_ota_get_state_partition(running, &st) == ESP_OK &&
+        st == ESP_OTA_IMG_PENDING_VERIFY) {
+        if (esp_ota_mark_app_valid_cancel_rollback() == ESP_OK)
+            ESP_LOGI(TAG, "OTA image confirmed valid before a user-initiated reboot (rollback cancelled)");
+    }
+}
 
 // Short per-target image suffix so "esp32" appears only once in the OTA filename: esp32 ->
 // "" (tesla-key-esp32.bin), esp32s3 -> "-s3", esp32c3 -> "-c3", esp32c6 -> "-c6", esp32c5 -> "-c5".
@@ -202,7 +216,7 @@ bool ota_check_start() {
     set_state(OtaState::Checking, 0, "checking for updates");
 
     // mbedTLS handshake + manifest fetch run here; same generous stack as ota_task.
-    if (xTaskCreate(ota_check_task, "ota_chk", 8192, nullptr, 5, nullptr) != pdPASS) {
+    if (xTaskCreate(ota_check_task, "ota_chk", 8192, nullptr, tk::kPrioOtaCheck, nullptr) != pdPASS) {
         s_running = false;
         set_state(OtaState::Error, 0, "could not start check task");
         return false;
@@ -309,7 +323,7 @@ bool ota_start() {
     set_state(OtaState::Downloading, 0, "starting download");
 
     // A generous stack: mbedTLS record processing + esp_https_ota run here.
-    if (xTaskCreate(ota_task, "ota", 8192, nullptr, 5, nullptr) != pdPASS) {
+    if (xTaskCreate(ota_task, "ota", 8192, nullptr, tk::kPrioOta, nullptr) != pdPASS) {
         s_running = false;
         set_state(OtaState::Error, 0, "could not start OTA task");
         return false;

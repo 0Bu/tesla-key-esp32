@@ -1,12 +1,12 @@
 "use strict";
 var $=function(id){return document.getElementById(id)};
-// Write html into el only when it actually changed (cached on el.__h). The status
-// poll re-renders every 4 s; blindly reassigning innerHTML would destroy and recreate
+// Write html into el only when it actually changed (cached on el.__h). The ~2 s WS push
+// re-renders on every frame; blindly reassigning innerHTML would destroy and recreate
 // the child nodes, restarting any CSS animation on them from 0% — making looping
 // animations (hero ring, "searching" signal bars, pulsing dot) visibly jump. Skipping
 // the write when nothing changed keeps the same nodes alive so the animation runs on.
 function setHTML(el,html){ if(el && el.__h!==html){ el.__h=html; el.innerHTML=html; } }
-var state=null, otaTimer=null, otaAvail=null, waking=false, wakeTimeout=null, chgBusy=false;
+var state=null, otaTimer=null, otaAvail=null, waking=false, wakeTimeout=null, chgBusy=false, ws=null;
 
 function esc(s){return String(s).replace(/[&<>]/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;'}[c]})}
 
@@ -20,12 +20,24 @@ function toast(msg,type){
   setTimeout(function(){ t.classList.add('leaving'); setTimeout(function(){if(t.parentNode)t.parentNode.removeChild(t)},230); }, type==='err'?5200:3000);
 }
 
-/* ---------- net ---------- */
-function poll(){
-  // Cache-bust + no-store: the live page polls forever, so a stale/cached /status would
-  // freeze the hero on an old state (e.g. a transient orange "Unreachable") until a manual
-  // reload — the very bug a fresh document hides. Same guard waitReboot() already uses.
-  fetch('/status?ms='+Date.now(),{cache:'no-store'}).then(function(r){return r.json()}).then(render).catch(function(){});
+/* ---------- net ----------
+   The live UI is WebSocket-only. boot() opens ONE socket to /events; the device pushes the /status
+   JSON — an immediate snapshot on "sub", then a fresh copy every ~2 s (http_events.cpp). There is
+   no interval polling and no HTTP fallback for the live feed. poll() just asks the open socket for
+   an immediate snapshot after a user action, so the UI refreshes now instead of on the next push;
+   if the socket is momentarily down it's a no-op and the optimistic local state carries the UI
+   until it reconnects. (waitReboot() still GETs /status directly — that's post-OTA reboot
+   detection, a different concern from the live feed.) */
+function poll(){ try{ if(ws && ws.readyState===1) ws.send('sub'); }catch(e){} }
+
+function connectWS(){
+  var proto = location.protocol==='https:' ? 'wss:' : 'ws:';
+  ws = new WebSocket(proto+'//'+location.host+'/events');
+  ws.onopen    = function(){ try{ ws.send('sub'); }catch(e){} };   // ask for the first snapshot
+  ws.onmessage = function(e){ try{ render(JSON.parse(e.data)); }catch(err){} };
+  ws.onerror   = function(){ try{ ws.close(); }catch(e){} };       // funnel errors through onclose
+  // Keep the last-rendered state on screen (matches the old failed-poll behaviour) and reconnect.
+  ws.onclose   = function(){ ws=null; setTimeout(connectWS,3000); };
 }
 
 /* ---------- signal glyph ---------- */
@@ -248,9 +260,9 @@ function render(s){
 
   // hero — single source of overall status.
   // hicHTML holds the icon markup; it is written to the DOM only when it actually
-  // changes (see the guarded assignment below). Rebuilding the icon every poll would
+  // changes (see the guarded assignment below). Rebuilding the icon on every frame would
   // insert a fresh <svg> and restart its CSS animation from 0% — making the pulsing
-  // sleep/charge/wake ring visibly jump every 4 s instead of fading smoothly.
+  // sleep/charge/wake ring visibly jump on each ~2 s WS push instead of fading smoothly.
   var hic=$("hicon"), hl=$("hlabel"), hs=$("hsub"), hst=$("hstats"), hicHTML=null;
   $("hero").classList.remove('hide');   // shown for every paired state; unknown/unreachable now show a grey status hero (not hidden)
   hst.innerHTML='';   // cleared here; only the paired+reporting branch populates it
@@ -413,7 +425,10 @@ function render(s){
     // car. Show real signal bars + dBm (the signal itself is fine — the link slot is the
     // problem), and name the reason (non-connectable ⇒ at the car's BLE-connection limit).
     // ble.rssi is the last-seen advert RSSI; fall back to the strongest entry in devices[].
-    var sr=(ble.rssi!=null)?ble.rssi:(ble.devices||[]).reduce(function(a,d){return d.rssi>a?d.rssi:a;},null);
+    // Null-safe "strongest nearby advert" fallback: seed is null and RSSI is always negative, so a
+    // bare `d.rssi > a` coerces null→0 and never wins (−70 > 0 is false) — the max always stayed
+    // null. Take the first value, then the least-negative, so bars+dBm show; empty devices[] → null.
+    var sr=(ble.rssi!=null)?ble.rssi:(ble.devices||[]).reduce(function(a,d){return (a==null||d.rssi>a)?d.rssi:a;},null);
     var sdbm=(sr!=null)?'<span class="dbm">'+sr+' dBm</span>':'';
     var rt=(ble.car_connectable===false)?'At connection limit':'Connection failed';
     bc.className='cv warn'; setHTML(bc,barsHTML(sr)+sdbm+'<span>'+rt+'</span>');
@@ -421,7 +436,7 @@ function render(s){
     // searching for the car — the signal bars sit where they do when connected, but fill up
     // green one after another (CSS .bars.search animation) instead of a spinner; it appears
     // only while scanning and clears otherwise. setHTML keeps the bar nodes alive across
-    // polls so the fill animation runs continuously instead of restarting every 4 s.
+    // WS pushes so the fill animation runs continuously instead of restarting each ~2 s.
     bc.className='cv'; setHTML(bc,searchBarsHTML()+'<span>Searching…</span>');
   } else {
     // disconnected — still show the (faded, empty) bar glyph so the row keeps the same
@@ -434,6 +449,15 @@ function render(s){
   if(!mq.configured){ mc.className='cv'; mc.innerHTML='<span class="ph">Not configured</span>'; }
   else if(mq.connected){ mc.className='cv ok'; mc.innerHTML='<span>'+esc(mq.broker||'')+(mq.tls?' · secured':'')+'</span>'; }
   else { mc.className='cv warn'; mc.innerHTML='<span>'+esc(mq.broker||'')+' · '+esc(mq.error||'disconnected')+'</span>'; }
+
+  // Syslog — UDP diag-log forwarder (tap to set/change the server). Delivery is
+  // gated on DNS only (resolved); reachability is an advisory ping hint, so a
+  // resolved-but-not-answering host still shows the destination, warn-flagged.
+  var sy=s.syslog||{}, sc=$("syslogConn");
+  if(!sy.configured){ sc.className='cv'; sc.innerHTML='<span class="ph">Not configured</span>'; }
+  else if(sy.error){ sc.className='cv warn'; sc.innerHTML='<span>'+esc(sy.host?(sy.host+':'+(sy.port||514)):'')+' · '+esc(sy.error)+'</span>'; }
+  else if(sy.resolved){ sc.className='cv'+(sy.reachable?' ok':' warn'); sc.innerHTML='<span>'+esc(sy.host+':'+(sy.port||514))+(sy.reachable?'':' · not answering ping')+'</span>'; }
+  else { sc.className='cv warn'; sc.innerHTML='<span>Resolving…</span>'; }
 
   // header meta line: IP · version (IP first)
   $("ipline").innerHTML = s.ip ? esc(s.ip)+'&nbsp;·&nbsp;' : '';   // nbsp: overflow:hidden trims plain trailing spaces
@@ -521,6 +545,22 @@ function editMqtt(){
     .then(function(j){var o=(j&&j.response)||{};
       if(!o.result){ toast(o.reason||'Failed to save MQTT broker','err'); return; }
       if(/no reboot|unchanged|already/i.test(o.reason||'')){ toast(v?'MQTT broker unchanged':'MQTT already disabled','info'); return; }
+      toast('Saved · rebooting','ok');})
+    .catch(function(){toast('Saved — device rebooting','info')});
+}
+function editSyslog(){
+  var sy=state&&state.syslog, cur=(sy&&sy.host)?(sy.host+':'+(sy.port||514)):'';
+  var v=prompt('Syslog server for the diagnostic log (IP:PORT, e.g. 192.168.1.22:514).\nLeave empty to disable.',cur);
+  if(v==null) return;
+  v=v.trim();
+  if(v && v.indexOf(' ')>=0){ toast('Invalid server — use IP:PORT','err'); return; }
+  if(v===cur){ toast(v?'Syslog server unchanged':'Syslog already disabled','info'); return; }
+  toast(v?'Saving Syslog server…':'Disabling Syslog…','info');
+  fetch('/set_syslog',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({server:v})})
+    .then(function(r){return r.json()})
+    .then(function(j){var o=(j&&j.response)||{};
+      if(!o.result){ toast(o.reason||'Failed to save Syslog server','err'); return; }
+      if(/no reboot|unchanged|already/i.test(o.reason||'')){ toast(v?'Syslog server unchanged':'Syslog already disabled','info'); return; }
       toast('Saved · rebooting','ok');})
     .catch(function(){toast('Saved — device rebooting','info')});
 }
@@ -644,6 +684,13 @@ function waitReboot(preVer){
 /* ---------- boot ---------- */
 function boot(){
   fetch('/set_time',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ms:Date.now()})}).catch(function(){});
-  poll(); setInterval(poll,4000); resumeOta();
+  if(window.WebSocket){
+    connectWS();                 // live feed: one socket, device pushes /status — no interval poll
+  } else {
+    // No WebSocket in this (very old) browser: fetch one snapshot so the page isn't blank, then
+    // stop. Deliberately no polling — the live UI is WebSocket-only; reload the page to refresh.
+    fetch('/status?ms='+Date.now(),{cache:'no-store'}).then(function(r){return r.json()}).then(render).catch(function(){});
+  }
+  resumeOta();
 }
 boot();
