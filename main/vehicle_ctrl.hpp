@@ -200,7 +200,43 @@ public:
     // NOTE: generic runtime-config persistence deliberately does NOT live here. The HTTP
     // layer talks to the tesla_cfg store directly (g_config in http_handlers.hpp) — the
     // controller's config_store_ is only for facts the controller itself owns (the
-    // discovered BLE MAC, and reset_for_new_vehicle()'s cleanup of it).
+    // discovered BLE MAC, reset_for_new_vehicle()'s cleanup of it, and the reboot reason
+    // below, which loop_task is the only writer of).
+
+private:
+    // Record WHY we are about to restart ourselves, so the reason survives into the next boot
+    // (see take_reboot_reason()). Written from loop_task's heap watchdog on a heap that is by
+    // definition failing. Nothing here allocates in OUR code — "heap:<n>" is at most 9 chars and
+    // lands in std::string's inline buffer — and the one call that can allocate internally (NVS)
+    // reports ESP_ERR_NO_MEM rather than throwing. The try/catch and the ignored return are
+    // belt-and-braces: losing the breadcrumb is far better than turning the restart into an abort.
+    void persist_reboot_reason_(const char* why) {
+        if (!config_store_) return;
+        try {
+            config_store_->save_str("reboot_why", why);
+        } catch (...) {
+        }
+    }
+
+public:
+    // Why the PREVIOUS boot ended, if it ended by our own hand ("heap:<n>"); empty otherwise —
+    // including after a power cycle, a crash or a normal OTA reboot, none of which write it.
+    // Read once at startup (main.cpp) and cleared, so it always describes the boot just made.
+    static std::string take_reboot_reason(NvsStorageAdapter& cfg) {
+        std::string why;
+        cfg.load_str("reboot_why", why);
+        if (!why.empty()) cfg.save_str("reboot_why", "");
+        return why;
+    }
+
+    // The value take_reboot_reason() returned at boot, held for the life of the process so
+    // /status can report it. Set once from app_main before any handler runs; read-only after.
+    static void               set_boot_reboot_reason(const std::string& why);
+    static const std::string& boot_reboot_reason();
+
+    // How many consecutive heap-watchdog restarts led to THIS boot (0 on any ordinary boot).
+    // Parsed from the breadcrumb; feeds the restart cap and the skip below.
+    static uint8_t boot_heap_restarts();
 
 private:
     // Builder function type used by send_command_result

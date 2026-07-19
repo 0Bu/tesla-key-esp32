@@ -37,6 +37,7 @@
 #include "logic/ble_phase.hpp"
 #include "logic/ha_templates.hpp"
 #include "logic/http_body.hpp"
+#include "logic/heap_watchdog.hpp"
 
 #include <cmath>
 #include <cstdio>
@@ -584,6 +585,9 @@ static void test_status_model() {
     s2.charge.has_battery_level = true; s2.charge.battery_level = 68.0f;
     s2.charge.charging_state = "Stopped";
     s2.have_last_seen = true; s2.last_seen_s = 3600;
+    // This boot was ended by the heap watchdog, so /status must say so — the whole point of
+    // persisting it is that a device which self-heals unattended can still be diagnosed.
+    s2.last_reboot = "heap:2";
 
     CollectEmitter e2;
     tk::status::emit_status(s2, e2);
@@ -617,7 +621,8 @@ static void test_status_model() {
         "last{\n"
         "last.soc=68\n"
         "last.status=\"Stopped\"\n"
-        "last_seen_s=3600\n"));
+        "last_seen_s=3600\n"
+        "last_reboot=\"heap:2\"\n"));
 
     // Scenario 3 — unreachable, scanning, found-but-can't-connect: devices listed, a
     // connect-fail streak with last-seen advert RSSI and a non-connectable target (the
@@ -1037,6 +1042,137 @@ static void test_ws_backpressure() {
     CHECK(!ws_may_send(g));
 }
 
+// ── heap-exhaustion watchdog (logic/heap_watchdog.hpp) ────────────────────────────────────────
+// The escalation that was missing on 2026-07-18, when a permanently exhausted heap left the
+// device wedged for ten hours instead of restarting.
+static void test_heap_watchdog() {
+    using namespace tk;
+    const uint32_t HOLD = kHeapCriticalHoldMs;
+
+    // A healthy heap never arms anything, however long it runs, and says nothing while it stays
+    // healthy — Ok is the "no line in syslog" verdict.
+    HeapWatchdog h;
+    for (uint32_t t = 0; t < 3 * HOLD; t += 30000) {
+        HeapVerdict v = heap_watch(h, {31744, t, false});
+        CHECK(v.action == HeapAction::Ok);
+        CHECK(v.critical_ms == 0);
+    }
+
+    // Sustained exhaustion: the run is ARMED once (the line that opens the countdown), watched
+    // until the hold elapses, then restart. The boundary is inclusive — at exactly
+    // kHeapCriticalHoldMs we act.
+    HeapWatchdog w;
+    CHECK(heap_watch(w, {768, 0,        false}).action == HeapAction::Armed);
+    CHECK(heap_watch(w, {768, HOLD / 2, false}).action == HeapAction::Watching);
+    CHECK(heap_watch(w, {768, HOLD - 1, false}).action == HeapAction::Watching);
+    CHECK(heap_watch(w, {768, HOLD,     false}).action == HeapAction::Restart);
+
+    // Only the FIRST critical sample arms; the rest are Watching. Otherwise the log would claim
+    // a fresh countdown every 30 s and a reader could not tell a sustained run from a flapping one.
+    HeapWatchdog a;
+    CHECK(heap_watch(a, {768, 0,     false}).action == HeapAction::Armed);
+    CHECK(heap_watch(a, {768, 1000,  false}).action == HeapAction::Watching);
+    CHECK(heap_watch(a, {768, 2000,  false}).action == HeapAction::Watching);
+
+    // The elapsed time reported is the TRUE age of the run, not the configured hold — the log line
+    // must state what actually happened. Sampling on a cadence means a fired run has usually run
+    // somewhat longer than the threshold, and printing the constant would hide exactly that.
+    HeapWatchdog m;
+    heap_watch(m, {768, 1000, false});
+    CHECK(heap_watch(m, {768, 1000 + 90000, false}).critical_ms == 90000);
+    HeapVerdict late = heap_watch(m, {768, 1000 + HOLD + 27000, false});
+    CHECK(late.action == HeapAction::Restart);
+    CHECK(late.critical_ms == HOLD + 27000);          // reported, not rounded down to HOLD
+
+    // The countdown the "restarting in N s" line prints, and its saturation: a run that overshoots
+    // the hold must print 0, never wrap to ~49 days.
+    CHECK(heap_restart_in_ms(0)          == HOLD);
+    CHECK(heap_restart_in_ms(30000)      == HOLD - 30000);
+    CHECK(heap_restart_in_ms(HOLD)       == 0);
+    CHECK(heap_restart_in_ms(HOLD + 999) == 0);
+
+    // THE property that keeps this from becoming a reboot loop: the run must be UNBROKEN. A
+    // single recovered sample resets the clock, so a device that dips and recovers — the
+    // transient every other OOM guard exists to absorb — never restarts. Recovery reports how
+    // long the run lasted, so syslog can close it with a fact instead of falling silent.
+    HeapWatchdog b;
+    CHECK(heap_watch(b, {768,   0,        false}).action == HeapAction::Armed);
+    CHECK(heap_watch(b, {768,   HOLD - 1, false}).action == HeapAction::Watching);
+    HeapVerdict rec = heap_watch(b, {31744, HOLD, false});
+    CHECK(rec.action == HeapAction::Recovered);
+    CHECK(rec.critical_ms == HOLD);       // how long it had been critical
+    CHECK(!rec.ota_excused);              // the heap itself healed
+    CHECK(heap_watch(b, {31744, HOLD + 1,     false}).action == HeapAction::Ok);  // stays quiet now
+    CHECK(heap_watch(b, {768,   HOLD + 2,     false}).action == HeapAction::Armed);
+    CHECK(heap_watch(b, {768,   2 * HOLD,     false}).action == HeapAction::Watching);
+    CHECK(heap_watch(b, {768,   2 * HOLD + 2, false}).action == HeapAction::Restart);
+
+    // The threshold boundary: at exactly kHeapCriticalBytes we are still healthy.
+    HeapWatchdog e;
+    CHECK(heap_watch(e, {kHeapCriticalBytes,     0, false}).action == HeapAction::Ok);
+    CHECK(heap_watch(e, {kHeapCriticalBytes - 1, 0, false}).action == HeapAction::Armed);
+
+    // An OTA legitimately holds the biggest allocations this firmware makes, so a low reading
+    // during one proves nothing — and a restart mid-install is the one reboot that could leave a
+    // half-written slot. It must CLEAR the run, not merely skip the sample: otherwise a critical
+    // run that began before the download would resume its clock and fire during it.
+    HeapWatchdog o;
+    CHECK(heap_watch(o, {768, 0, false}).action == HeapAction::Armed);
+    HeapVerdict exc = heap_watch(o, {768, HOLD - 1, true});       // OTA starts mid-run
+    CHECK(exc.action == HeapAction::Recovered);
+    CHECK(exc.ota_excused);                    // the OTA cleared it, the heap did NOT heal
+    CHECK(exc.critical_ms == HOLD - 1);
+    CHECK(heap_watch(o, {768, HOLD,     true}).action  == HeapAction::Ok);       // still installing
+    CHECK(heap_watch(o, {768, HOLD + 1, false}).action == HeapAction::Armed);    // done: start over
+    CHECK(heap_watch(o, {768, 2 * HOLD, false}).action == HeapAction::Watching);
+
+    // An OTA running while the heap is HEALTHY again is an ordinary recovery, not an excusal —
+    // the two get different sentences in the log, so the distinction has to hold.
+    HeapWatchdog oh;
+    CHECK(heap_watch(oh, {768, 0, false}).action == HeapAction::Armed);
+    HeapVerdict healed = heap_watch(oh, {31744, 60000, true});
+    CHECK(healed.action == HeapAction::Recovered);
+    CHECK(!healed.ota_excused);
+
+    // A 32-bit millisecond wrap inside the hold window must measure true elapsed time, not go
+    // hugely negative and fire instantly (uptime crosses this after ~49 days).
+    HeapWatchdog p;
+    const uint32_t near_wrap = 0xFFFFFFFFu - (HOLD / 2);
+    CHECK(heap_watch(p, {768, near_wrap, false}).action == HeapAction::Armed);
+    HeapVerdict mid = heap_watch(p, {768, (uint32_t)(near_wrap + HOLD / 4), false});
+    CHECK(mid.action == HeapAction::Watching);
+    CHECK(mid.critical_ms == HOLD / 4);        // measured across the wrap, not a huge bogus number
+    CHECK(heap_watch(p, {768, (uint32_t)(near_wrap + HOLD), false}).action == HeapAction::Restart);
+
+    // ── The restart cap: a loop that isn't fixing anything must stop ──────────────────────
+    // Restarting is only worth it while it might help. Five consecutive proves it doesn't, and
+    // continuing would re-seed the polling window every ~10 min forever, so a parked car next to
+    // it could never sleep.
+    for (uint8_t n = 0; n < kHeapMaxConsecutiveRestarts; n++) CHECK(heap_may_restart(n));
+    CHECK(!heap_may_restart(kHeapMaxConsecutiveRestarts));
+    CHECK(!heap_may_restart(255));
+
+    // ── The NVS breadcrumb round-trips ───────────────────────────────────────────────────
+    for (uint8_t n : {(uint8_t)0, (uint8_t)1, (uint8_t)5, (uint8_t)9, (uint8_t)10,
+                      (uint8_t)99, (uint8_t)100, (uint8_t)255}) {
+        CHECK(heap_reason_parse(heap_reason_format(n).text) == n);
+    }
+    CHECK_STR(heap_reason_format(1).text,   "heap:1");
+    CHECK_STR(heap_reason_format(12).text,  "heap:12");
+    CHECK_STR(heap_reason_format(255).text, "heap:255");
+
+    // Anything that is not one of ours counts as zero, so an unreadable breadcrumb can only
+    // UNDER-count — it can never wrongly suppress a restart the device actually needs.
+    CHECK(heap_reason_parse(nullptr)     == 0);
+    CHECK(heap_reason_parse("")          == 0);
+    CHECK(heap_reason_parse("heap")      == 0);   // no separator/count at all
+    CHECK(heap_reason_parse("heap:")     == 0);   // separator but no digits
+    CHECK(heap_reason_parse("heap:x")    == 0);   // non-numeric
+    CHECK(heap_reason_parse("heap:1x")   == 0);   // trailing garbage
+    CHECK(heap_reason_parse("panic:3")   == 0);   // a different writer's reason
+    CHECK(heap_reason_parse("heap:9999") == 255); // saturates instead of wrapping to a small n
+}
+
 // ── request-body reassembly (logic/http_body.hpp) — the multi-segment truncation fix ──────────
 static void test_http_body() {
     using namespace tk;
@@ -1195,6 +1331,7 @@ int main() {
     test_led();
     test_ws_policy();
     test_ws_backpressure();
+    test_heap_watchdog();
     test_active_window();
     test_ble_phase();
     test_http_body();

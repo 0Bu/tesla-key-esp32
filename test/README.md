@@ -60,6 +60,7 @@ The firmware delegates these decision/conversion cores to IDF-free headers under
 | BLE phase countdown (which of the two overlapping phases the Bluetooth row counts down; seconds round UP and 0 is a real answer, not "no countdown"; wrap-safe) | `logic/ble_phase.hpp` | `vehicle_ctrl.hpp` `ble_phase()`, `vehicle_commands.cpp` `ensure_connected_`, `vehicle_pairing.cpp` `idle_until_next_health_poll_`, `http_status.cpp` |
 | HA binary `value_template` builder (presence-aware `is defined` guard → "unknown" not phantom OFF) | `logic/ha_templates.hpp` | `mqtt_ha.cpp` (discovery) |
 | POST-body reassembly (loop `recv` to `content_len`, bounded timeout retry) | `logic/http_body.hpp` | `http_common.cpp` `read_body`, `provisioning.cpp` `save_post` |
+| Heap-exhaustion watchdog (4 KB INTERNAL `largest_block` threshold, 5 min UNBROKEN hold, recovery resets the clock, OTA clears the run, 32-bit tick-wrap safety, 5-restart cap, `heap:<n>` breadcrumb round-trip + unparseable-input handling) — plus the escalation's **syslog narration**: armed-once-per-run, the measured (not configured) age of a run, the saturating restart countdown, and OTA-excused vs genuinely-recovered | `logic/heap_watchdog.hpp` | `vehicle_telemetry.cpp` `loop_task_fn_`, `vehicle_ctrl.cpp` `init()`, `main.cpp` (boot breadcrumb line) |
 
 The target mapping is double-locked: `ota_update.cpp` `static_assert`s its compile-time
 image-suffix literal against `tk::image_suffix()`, so the macro and the host-tested

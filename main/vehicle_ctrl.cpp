@@ -6,6 +6,7 @@
 
 #include "vehicle_ctrl.hpp"
 #include "logic/vin.hpp"
+#include "logic/heap_watchdog.hpp"
 #include "task_config.hpp"
 #include <cmath>
 #include <esp_log.h>
@@ -14,6 +15,20 @@
 // UniversalMessage_* ones, which vehicle_ctrl.hpp already provides via <vehicle.h>.
 
 static const char* TAG = "vehicle_ctrl";
+
+// ─── Boot reboot-reason (set once from app_main, read by /status) ────────────
+
+// Function-local static so it is constructed on first use, before app_main writes it — no
+// static-init-order dependency on the translation units that read it.
+static std::string& boot_reason_slot() {
+    static std::string why;
+    return why;
+}
+void               VehicleController::set_boot_reboot_reason(const std::string& w) { boot_reason_slot() = w; }
+const std::string& VehicleController::boot_reboot_reason() { return boot_reason_slot(); }
+uint8_t            VehicleController::boot_heap_restarts() {
+    return tk::heap_reason_parse(boot_reason_slot().c_str());
+}
 
 // ─── Custom no-op shared_ptr deleters ────────────────────────────────────────
 // Vehicle needs shared_ptr<BleAdapter> and shared_ptr<StorageAdapter>.
@@ -143,7 +158,18 @@ bool VehicleController::init(const std::string& vin,
 
     // Seed the active window open at boot so evcc gets a warm cache for the first few
     // minutes after start; it then backs off if the car stays idle (no command, not charging).
-    last_cmd_ticks_.store(xTaskGetTickCount());
+    //
+    // NOT after a heap-watchdog restart. That seeding is what makes a restart LOOP expensive: the
+    // window re-opens on every boot, so a device restarting every ~10 minutes would poll
+    // infotainment forever and a parked car next to it would never sleep. A device that just
+    // self-healed has no user waiting on a warm cache anyway — the first evcc command re-opens
+    // the window in the normal way.
+    if (boot_heap_restarts() == 0) {
+        last_cmd_ticks_.store(xTaskGetTickCount());
+    } else {
+        ESP_LOGW(TAG, "boot after %u heap-watchdog restart(s) — leaving the active window CLOSED "
+                      "so a parked car can still sleep", (unsigned) boot_heap_restarts());
+    }
 
     xTaskCreate(loop_task_fn_, "vehicle_loop", 8192, this, tk::kPrioVehicleLoop, &loop_task_);
     xTaskCreate(auto_pair_task_fn_, "auto_pair", 8192, this, tk::kPrioAutoPair, &auto_pair_task_);

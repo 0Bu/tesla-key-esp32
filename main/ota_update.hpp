@@ -45,6 +45,12 @@ bool ota_start();
 // Snapshot of the current OTA state (for GET /ota/status polling).
 OtaStatus ota_get_status();
 
+// Is a check or download task running right now? Deliberately separate from ota_get_status():
+// that one copies std::strings, so on an exhausted heap it can THROW — unusable for the heap
+// watchdog, whose whole job is to run when allocation is failing. This reads one atomic and
+// allocates nothing, so it is safe from any task at any heap level.
+bool ota_is_busy();
+
 // If the running image is still ESP_OTA_IMG_PENDING_VERIFY (a fresh OTA the ~90 s health gate in
 // main.cpp hasn't confirmed yet), mark it valid NOW so it can't be rolled back. Call this before
 // any DELIBERATE, user-initiated reboot (a config save that reboots, the setup-portal save): the

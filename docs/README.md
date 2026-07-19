@@ -205,7 +205,10 @@ GET  /status               { vin, ip, version, key_present, key_fingerprint,
                              tele:{climate,drive,tires,closures} (read-only telemetry;
                                emitted only while the BLE link is up),
                              last:{soc,status} (last-known snapshot for the asleep card),
-                             last_seen_s (seconds since last contact) }
+                             last_seen_s (seconds since last contact),
+                             last_reboot: "heap:<n>" (only when the heap watchdog ended the
+                                          previous boot, n = consecutive such restarts;
+                                          absent on any ordinary boot) }
 GET  /events               WebSocket live-status feed for the web UI: client sends "sub",
                              device pushes the /status JSON (~2 s). WS-only, no poll fallback.
                              A plain (non-WebSocket) GET completes the handshake only.
