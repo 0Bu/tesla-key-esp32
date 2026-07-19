@@ -33,6 +33,19 @@ existing `render()` on each frame (no envelope).
   connection is the only honest exit — sizing a buffer from a client-asserted 64-bit length would be
   a one-frame OOM). `ws_frame_action()` then classifies the bytes actually read; only `sub`
   subscribes.
+- **Send backpressure** (also `ws_policy.hpp`, host-tested) bounds what ONE non-reading subscriber
+  can cost. A client that stops reading (suspended laptop, backgrounded tab) leaves its TCP send
+  buffer full, so each async send blocks the httpd task for the full `send_wait_timeout`
+  (`HTTPD_DEFAULT_CONFIG`: **5 s**) before failing `EAGAIN` — while the broadcast task keeps
+  producing every 2 s, each frame owning a heap copy of the whole `/status` JSON. Unbounded, that
+  backlog exhausted the heap (69 KB → 8 KB free, largest block 31744 → 544 B in ~7 min) and left
+  the device **wedged, not crashed**: no reboot, just `std::bad_alloc` spinning in the vehicle loop
+  for hours, unreachable (live incident 2026-07-18). Two bounds prevent it: at most
+  `WS_MAX_INFLIGHT` (2) queued-but-uncompleted frames per client — over that the client is skipped
+  for the tick, so the backlog has a ceiling — and after `WS_MAX_FAILS` (3) consecutive failed
+  completions the subscriber is closed (`httpd_sess_trigger_close`), which also ends the 5 s httpd
+  stall it imposed every tick. Closing is cheap: `app.js` reconnects 3 s later, so a laptop that
+  merely slept resubscribes on wake.
 - **Client** (`app.js`): `render(JSON.parse(frame))` on each message; on close, keep the last
   rendered state and reconnect after 3 s. `poll()` is repurposed to `ws.send("sub")` — an
   on-demand snapshot request after a user action (charge/wake/gen-key), so the UI refreshes at once
@@ -596,6 +609,7 @@ Application-task priorities are declared **only** in [`main/task_config.hpp`](..
 | `auto_pair` | `kPrioAutoPair` = 4 | 8192 | `vehicle_ctrl.cpp` (fn: `vehicle_pairing.cpp`) | pairing supervisor: enrol / re-pair / health probe |
 | `wifi_wd` | `kPrioWifiWatchdog` = 4 | 3072 | `main.cpp` | ghost-association watchdog (re-associate, never reboot) |
 | `mqtt_pub` | `kPrioMqttPub` = 4 | 6144 | `mqtt_ha.cpp` | MQTT/HA publisher (reads the caches) |
+| `ws_bcast` | `kPrioWsBroadcast` = 4 | 6144 | `http_events.cpp` | `/events` live-status push (self-gated on `ws_any_clients()`) |
 | `display` | `kPrioDisplay` = 3 | 6144 | `display.cpp` | ST7735 renderer (`CONFIG_TESLA_DISPLAY_ENABLED` builds) |
 | `ota_gate` | `kPrioOtaGate` = 3 | 3072 | `main.cpp` | one-shot OTA rollback health gate (~90 s) |
 | `led` | `kPrioLed` = 2 | 3072 | `led_status.cpp` | APA102 status LED (`CONFIG_TESLA_LED_ENABLED` builds) |
