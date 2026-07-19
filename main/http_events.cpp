@@ -17,6 +17,7 @@
 // frame; a read that failed) are exactly the ones a browser never produces and a test can.
 #include "http_handlers.hpp"
 #include "logic/ws_policy.hpp"
+#include "task_config.hpp"
 #include <esp_log.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -88,8 +89,9 @@ static bool ws_reserve_inflight(int fd) {
     return ok;
 }
 
-// Release a slot claimed by ws_reserve_inflight. Returns true when this client has now failed
-// WS_MAX_FAILS sends in a row and should be closed.
+// Release a slot claimed by ws_reserve_inflight because the frame actually completed (or failed to
+// send). Returns true when this client has now failed WS_MAX_FAILS sends in a row and should be
+// closed. An fd already unregistered by the time its completion lands simply matches nothing.
 static bool ws_release_inflight(int fd, bool sent_ok) {
     if (!s_ws_mtx) return false;
     bool evict = false;
@@ -98,6 +100,17 @@ static bool ws_release_inflight(int fd, bool sent_ok) {
         if (s_ws_fds[i] == fd) { evict = tk::ws_note_completed(s_ws_send[i], sent_ok); break; }
     xSemaphoreGive(s_ws_mtx);
     return evict;
+}
+
+// Give back a reservation for a frame WE never managed to hand to httpd. Kept distinct from
+// ws_release_inflight(fd, true): our own OOM must not be recorded as a successful send, or it
+// would clear the client's failure streak — see ws_note_cancelled().
+static void ws_cancel_inflight(int fd) {
+    if (!s_ws_mtx) return;
+    xSemaphoreTake(s_ws_mtx, portMAX_DELAY);
+    for (int i = 0; i < WS_MAX_CLIENTS; i++)
+        if (s_ws_fds[i] == fd) { tk::ws_note_cancelled(s_ws_send[i]); break; }
+    xSemaphoreGive(s_ws_mtx);
 }
 
 static bool ws_any_clients() {
@@ -126,9 +139,14 @@ static void ws_transfer_complete(esp_err_t err, int fd, void* arg) {
     if (ws_release_inflight(fd, err == ESP_OK)) {
         ESP_LOGW(TAG, "ws: subscriber fd=%d failed %u sends in a row — closing it",
                  fd, static_cast<unsigned>(tk::WS_MAX_FAILS));
-        // close_fn (http_server.cpp) → http_events_on_close() frees the slot. Queued work, so it is
-        // safe to call from the httpd task we are running on.
-        httpd_sess_trigger_close(s_server, fd);
+        // close_fn (http_server.cpp) → http_events_on_close() frees the slot. This only ENQUEUES
+        // the close, so it is safe to call from the httpd task we are running on — and it can also
+        // be dropped when that same control queue is full, which is likeliest under exactly the
+        // congestion that condemned this client. Not a hole: ws_note_completed() leaves the failure
+        // streak latched, so the next failed completion re-triggers the close. Log the miss so a
+        // repeatedly-deferred eviction is visible in /diag rather than silent.
+        if (httpd_sess_trigger_close(s_server, fd) != ESP_OK)
+            ESP_LOGW(TAG, "ws: close of fd=%d could not be queued — retrying next failure", fd);
     }
 }
 
@@ -157,12 +175,12 @@ static void ws_send_to_all(const char* data, size_t len) {
         // broadcast task out-produced a stalled client 2.5:1 and the backlog ate the heap.
         if (!ws_reserve_inflight(fds[i])) continue;
         WsPacketContext* ctx = new (std::nothrow) WsPacketContext();
-        if (!ctx) { ws_release_inflight(fds[i], true); continue; }   // our OOM, not the client's fault
+        if (!ctx) { ws_cancel_inflight(fds[i]); continue; }   // our OOM — don't score it as the client's
         try {
             ctx->payload.assign(data, len);
         } catch (...) {
             delete ctx;
-            ws_release_inflight(fds[i], true);
+            ws_cancel_inflight(fds[i]);
             continue;
         }
         memset(&ctx->frame, 0, sizeof(httpd_ws_frame_t));
@@ -170,6 +188,14 @@ static void ws_send_to_all(const char* data, size_t len) {
         ctx->frame.len     = ctx->payload.size();
         ctx->frame.type    = HTTPD_WS_TYPE_TEXT;
         ctx->frame.final   = true;
+        // The in-flight accounting rests on this contract: a non-ESP_OK return is the ONLY case
+        // where ws_transfer_complete will not run. That holds from ESP-IDF v5.5.5 (the pinned
+        // version — .github/workflows/build.yml), whose httpd_queue_work reserves a control-queue
+        // slot up front and fails fast when the queue is full. Older IDFs (v5.4.x, v5.5) let a
+        // full lwIP UDP mbox drop the control datagram while sendto still reports success, so
+        // ESP_OK could be returned for work that never runs — leaking this ctx AND pinning
+        // in_flight at the cap forever, silencing the subscriber with no failed completion to
+        // evict it on. If the IDF pin is ever moved BACK, this needs a timeout-based reaper.
         if (httpd_ws_send_data_async(s_server, fds[i], &ctx->frame,
                                      ws_transfer_complete, ctx) != ESP_OK) {
             delete ctx;   // stale fd (client vanished before the send) — clean up
@@ -292,7 +318,7 @@ void http_events_register(httpd_handle_t server) {
     // light on stack, but this is the SAME build the httpd task runs on 8192, and an overflow in
     // this net-less task would abort() (defeating car sleep) — so 6144 keeps a real margin over the
     // measured-elsewhere path rather than halving it, without paying the full 8192 on a tight heap.
-    xTaskCreate(ws_broadcast_task, "ws_bcast", 6144, nullptr, 4, nullptr);
+    xTaskCreate(ws_broadcast_task, "ws_bcast", 6144, nullptr, tk::kPrioWsBroadcast, nullptr);
     ESP_LOGI(TAG, "/events WebSocket registered; pushing /status every %u ms",
              static_cast<unsigned>(WS_BROADCAST_INTERVAL_MS));
 }

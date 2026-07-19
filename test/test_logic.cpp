@@ -976,12 +976,34 @@ static void test_ws_backpressure() {
     ws_note_queued(e); CHECK(!ws_note_completed(e, false));
     ws_note_queued(e); CHECK(ws_note_completed(e, false));
 
+    // OUR OWN OOM is neither credited nor blamed. Settling it as a success would clear the streak,
+    // so a single fragmented tick inside any 3-failure window would let a permanently stalled
+    // client escape eviction forever — and that OOM is reachable under exactly the memory pressure
+    // this bound exists to survive.
+    WsClientSend o;
+    ws_note_queued(o); CHECK(!ws_note_completed(o, false));   // client failed once
+    ws_note_queued(o); CHECK(!ws_note_completed(o, false));   // twice
+    ws_note_queued(o); ws_note_cancelled(o);                  // we couldn't allocate — not its fault
+    CHECK(o.in_flight == 0);                                  // the reservation is given back …
+    CHECK(o.fails == 2);                                      // … but the streak is NOT reset
+    ws_note_queued(o); CHECK(ws_note_completed(o, false));    // so the third real failure evicts
+
+    // A condemned client is refused further sends while its (merely queued) close is pending,
+    // instead of costing a payload copy and a work-queue slot every tick until it lands.
+    CHECK(!ws_may_send(o));
+
     // A completion that arrives with nothing in flight must not underflow the counter — an 8-bit
     // wrap to 255 would read as "permanently at the cap" and silence a live subscriber forever.
     WsClientSend f;
     CHECK(!ws_note_completed(f, true));
     CHECK(f.in_flight == 0);
     CHECK(ws_may_send(f));
+
+    // Same for a cancellation with nothing outstanding.
+    WsClientSend n;
+    ws_note_cancelled(n);
+    CHECK(n.in_flight == 0);
+    CHECK(ws_may_send(n));
 
     // Symmetrically, the queued counter saturates instead of wrapping to 0 (which would re-open
     // the floodgate the cap exists to hold shut).

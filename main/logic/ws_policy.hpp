@@ -76,8 +76,12 @@ struct WsClientSend {
 };
 
 // May another frame be queued to this client this tick? False means "still draining" — skip it
-// rather than piling on, which is precisely the bound the incident was missing.
-inline constexpr bool ws_may_send(const WsClientSend& c) { return c.in_flight < WS_MAX_INFLIGHT; }
+// rather than piling on, which is precisely the bound the incident was missing. A client already
+// at WS_MAX_FAILS is condemned (its close is queued) and gets nothing more: without this it would
+// keep costing a payload copy and a work-queue slot every tick until the close actually lands.
+inline constexpr bool ws_may_send(const WsClientSend& c) {
+    return c.in_flight < WS_MAX_INFLIGHT && c.fails < WS_MAX_FAILS;
+}
 
 // A frame was handed to httpd for this client. Saturates rather than wrapping: an 8-bit counter
 // that wrapped to 0 would silently re-open the floodgate.
@@ -87,11 +91,25 @@ inline void ws_note_queued(WsClientSend& c) {
 
 // A send completed (or failed). Returns true when this client has now failed WS_MAX_FAILS in a
 // row and should be closed. One successful send clears the streak.
+//
+// Note it does NOT clear `fails` when it returns true: the caller's close is only *queued* and can
+// be dropped under the very congestion that got us here, so leaving the streak latched means every
+// later failed completion re-triggers it. Eviction retries rather than being lost.
 inline bool ws_note_completed(WsClientSend& c, bool sent_ok) {
     if (c.in_flight) c.in_flight--;
     if (sent_ok) { c.fails = 0; return false; }
     if (c.fails < UINT8_MAX) c.fails++;
     return c.fails >= WS_MAX_FAILS;
+}
+
+// Give back a reservation for a frame that was never handed to httpd — WE could not allocate it.
+// Deliberately neither credits nor blames the client: settling our own OOM as a *success* would
+// reset the failure streak, so a single fragmented tick inside any 3-failure window would let a
+// permanently stalled client escape eviction forever and keep stalling the httpd task 5 s per
+// tick. That OOM is reachable under exactly the memory pressure this whole feature exists to
+// survive, which is why it needs its own transition rather than a boolean.
+inline void ws_note_cancelled(WsClientSend& c) {
+    if (c.in_flight) c.in_flight--;
 }
 
 // What a frame we successfully read actually asks for.

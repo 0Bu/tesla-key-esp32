@@ -609,6 +609,7 @@ Application-task priorities are declared **only** in [`main/task_config.hpp`](..
 | `auto_pair` | `kPrioAutoPair` = 4 | 8192 | `vehicle_ctrl.cpp` (fn: `vehicle_pairing.cpp`) | pairing supervisor: enrol / re-pair / health probe |
 | `wifi_wd` | `kPrioWifiWatchdog` = 4 | 3072 | `main.cpp` | ghost-association watchdog (re-associate, never reboot) |
 | `mqtt_pub` | `kPrioMqttPub` = 4 | 6144 | `mqtt_ha.cpp` | MQTT/HA publisher (reads the caches) |
+| `ws_bcast` | `kPrioWsBroadcast` = 4 | 6144 | `http_events.cpp` | `/events` live-status push (self-gated on `ws_any_clients()`) |
 | `display` | `kPrioDisplay` = 3 | 6144 | `display.cpp` | ST7735 renderer (`CONFIG_TESLA_DISPLAY_ENABLED` builds) |
 | `ota_gate` | `kPrioOtaGate` = 3 | 3072 | `main.cpp` | one-shot OTA rollback health gate (~90 s) |
 | `led` | `kPrioLed` = 2 | 3072 | `led_status.cpp` | APA102 status LED (`CONFIG_TESLA_LED_ENABLED` builds) |
