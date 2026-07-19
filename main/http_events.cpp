@@ -41,6 +41,9 @@ static constexpr uint32_t WS_BROADCAST_INTERVAL_MS = 2000;
 static constexpr int WS_MAX_CLIENTS = 8;
 static SemaphoreHandle_t s_ws_mtx = nullptr;
 static int s_ws_fds[WS_MAX_CLIENTS] = { -1, -1, -1, -1, -1, -1, -1, -1 };
+// Send bookkeeping, one slot per s_ws_fds entry: the backpressure that stops a single non-reading
+// subscriber from queueing the heap away (logic/ws_policy.hpp carries the full incident note).
+static tk::WsClientSend s_ws_send[WS_MAX_CLIENTS] = {};
 static httpd_handle_t s_server = nullptr;
 
 // Add fd to the broadcast list (idempotent). false only when all slots are taken.
@@ -52,7 +55,12 @@ static bool ws_register_client(int fd) {
         if (s_ws_fds[i] == fd) { registered = true; break; }
     if (!registered)
         for (int i = 0; i < WS_MAX_CLIENTS; i++)
-            if (s_ws_fds[i] == -1) { s_ws_fds[i] = fd; registered = true; break; }
+            if (s_ws_fds[i] == -1) {
+                s_ws_fds[i]  = fd;
+                s_ws_send[i] = {};   // a reused fd starts with a clean in-flight/failure count
+                registered = true;
+                break;
+            }
     xSemaphoreGive(s_ws_mtx);
     return registered;
 }
@@ -61,8 +69,35 @@ void http_events_on_close(int sockfd) {
     if (!s_ws_mtx) return;
     xSemaphoreTake(s_ws_mtx, portMAX_DELAY);
     for (int i = 0; i < WS_MAX_CLIENTS; i++)
-        if (s_ws_fds[i] == sockfd) { s_ws_fds[i] = -1; break; }
+        if (s_ws_fds[i] == sockfd) { s_ws_fds[i] = -1; s_ws_send[i] = {}; break; }
     xSemaphoreGive(s_ws_mtx);
+}
+
+// Claim an in-flight slot for fd. False when the client is at WS_MAX_INFLIGHT — it is not draining,
+// so this tick is skipped for it. Also false for an fd that is no longer registered.
+static bool ws_reserve_inflight(int fd) {
+    if (!s_ws_mtx) return false;
+    bool ok = false;
+    xSemaphoreTake(s_ws_mtx, portMAX_DELAY);
+    for (int i = 0; i < WS_MAX_CLIENTS; i++)
+        if (s_ws_fds[i] == fd) {
+            if (tk::ws_may_send(s_ws_send[i])) { tk::ws_note_queued(s_ws_send[i]); ok = true; }
+            break;
+        }
+    xSemaphoreGive(s_ws_mtx);
+    return ok;
+}
+
+// Release a slot claimed by ws_reserve_inflight. Returns true when this client has now failed
+// WS_MAX_FAILS sends in a row and should be closed.
+static bool ws_release_inflight(int fd, bool sent_ok) {
+    if (!s_ws_mtx) return false;
+    bool evict = false;
+    xSemaphoreTake(s_ws_mtx, portMAX_DELAY);
+    for (int i = 0; i < WS_MAX_CLIENTS; i++)
+        if (s_ws_fds[i] == fd) { evict = tk::ws_note_completed(s_ws_send[i], sent_ok); break; }
+    xSemaphoreGive(s_ws_mtx);
+    return evict;
 }
 
 static bool ws_any_clients() {
@@ -83,8 +118,18 @@ struct WsPacketContext {
     httpd_ws_frame_t frame;
 };
 
-static void ws_transfer_complete(esp_err_t, int, void* arg) {
+// Runs on the httpd task once the frame has been written (or has failed to write). Frees the copy
+// and settles this client's backpressure state; a client that keeps failing is closed here, which
+// is the only thing that ends the 5 s send stall it imposes on the httpd task every tick.
+static void ws_transfer_complete(esp_err_t err, int fd, void* arg) {
     delete static_cast<WsPacketContext*>(arg);
+    if (ws_release_inflight(fd, err == ESP_OK)) {
+        ESP_LOGW(TAG, "ws: subscriber fd=%d failed %u sends in a row — closing it",
+                 fd, static_cast<unsigned>(tk::WS_MAX_FAILS));
+        // close_fn (http_server.cpp) → http_events_on_close() frees the slot. Queued work, so it is
+        // safe to call from the httpd task we are running on.
+        httpd_sess_trigger_close(s_server, fd);
+    }
 }
 
 // Queue an async copy of [data,len) to every registered client. Runs in the broadcast task, which
@@ -107,12 +152,17 @@ static void ws_send_to_all(const char* data, size_t len) {
     xSemaphoreGive(s_ws_mtx);
 
     for (int i = 0; i < n; i++) {
+        // Backpressure FIRST, before any allocation: a client still sitting on WS_MAX_INFLIGHT
+        // uncompleted frames is not draining, so it gets nothing this tick. Without this the
+        // broadcast task out-produced a stalled client 2.5:1 and the backlog ate the heap.
+        if (!ws_reserve_inflight(fds[i])) continue;
         WsPacketContext* ctx = new (std::nothrow) WsPacketContext();
-        if (!ctx) continue;
+        if (!ctx) { ws_release_inflight(fds[i], true); continue; }   // our OOM, not the client's fault
         try {
             ctx->payload.assign(data, len);
         } catch (...) {
             delete ctx;
+            ws_release_inflight(fds[i], true);
             continue;
         }
         memset(&ctx->frame, 0, sizeof(httpd_ws_frame_t));
@@ -121,8 +171,12 @@ static void ws_send_to_all(const char* data, size_t len) {
         ctx->frame.type    = HTTPD_WS_TYPE_TEXT;
         ctx->frame.final   = true;
         if (httpd_ws_send_data_async(s_server, fds[i], &ctx->frame,
-                                     ws_transfer_complete, ctx) != ESP_OK)
+                                     ws_transfer_complete, ctx) != ESP_OK) {
             delete ctx;   // stale fd (client vanished before the send) — clean up
+            // Counts against the client: an fd we cannot even queue for is on its way out, and the
+            // completion callback that would normally settle this will never run.
+            ws_release_inflight(fds[i], false);
+        }
     }
 }
 

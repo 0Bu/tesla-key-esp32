@@ -41,6 +41,59 @@ inline constexpr WsPlan ws_frame_plan(size_t announced_len) {
     return WsPlan::Read;
 }
 
+// ─── Per-subscriber send backpressure ────────────────────────────────────────────────────────
+//
+// Why this exists (the 2026-07-18 wedge). A subscriber that stops READING — a laptop suspended
+// with the UI open, a backgrounded tab — leaves its TCP send buffer full. esp_http_server's send
+// then blocks the httpd task for the whole send_wait_timeout (HTTPD_DEFAULT_CONFIG: 5 s) before
+// failing with EAGAIN. The broadcast task pushes every 2 s, so it queued frames 2.5x faster than
+// that one client could retire them, and each queued frame owns a heap copy of the whole /status
+// JSON. The backlog grew without bound: free heap fell 69 KB → 8 KB in ~7 minutes, the largest
+// contiguous block 31744 B → 544 B, after which every allocation threw. The device did not crash
+// and did not reboot — it wedged, spinning bad_alloc in the vehicle loop for ten hours, unreachable.
+//
+// Two bounds make that impossible, and neither depends on noticing the stall in time:
+//   • in_flight is capped, so the backlog has a ceiling no matter how slow the client is;
+//   • a client that fails WS_MAX_FAILS completions in a row is closed outright, which also ends
+//     the 5 s httpd stall it was costing every tick. Closing is cheap for a real user: app.js
+//     reconnects 3 s later, so a browser that merely slept resubscribes on wake.
+//
+// Kept as pure state + transitions (rather than inline bookkeeping) so the cases that matter —
+// the cap holding under a client that never completes, the failure streak resetting on one good
+// send — are exercised on the host instead of only on a wedged device.
+
+// At most this many frames queued-but-not-yet-completed per client. 2 lets a healthy client stay
+// pipelined across a tick boundary while bounding the backlog to two payload copies.
+inline constexpr uint8_t WS_MAX_INFLIGHT = 2;
+
+// Consecutive failed completions before the subscriber is closed. 3 rides out a transient blip
+// (~15 s at the 5 s send timeout) without tolerating a client that is simply gone.
+inline constexpr uint8_t WS_MAX_FAILS = 3;
+
+struct WsClientSend {
+    uint8_t in_flight = 0;   // queued to httpd, completion callback not yet run
+    uint8_t fails     = 0;   // consecutive failed completions
+};
+
+// May another frame be queued to this client this tick? False means "still draining" — skip it
+// rather than piling on, which is precisely the bound the incident was missing.
+inline constexpr bool ws_may_send(const WsClientSend& c) { return c.in_flight < WS_MAX_INFLIGHT; }
+
+// A frame was handed to httpd for this client. Saturates rather than wrapping: an 8-bit counter
+// that wrapped to 0 would silently re-open the floodgate.
+inline void ws_note_queued(WsClientSend& c) {
+    if (c.in_flight < UINT8_MAX) c.in_flight++;
+}
+
+// A send completed (or failed). Returns true when this client has now failed WS_MAX_FAILS in a
+// row and should be closed. One successful send clears the streak.
+inline bool ws_note_completed(WsClientSend& c, bool sent_ok) {
+    if (c.in_flight) c.in_flight--;
+    if (sent_ok) { c.fails = 0; return false; }
+    if (c.fails < UINT8_MAX) c.fails++;
+    return c.fails >= WS_MAX_FAILS;
+}
+
 // What a frame we successfully read actually asks for.
 enum class WsAction : uint8_t {
     Ignore,      // not a command we know — no snapshot, and no slot in the broadcast list

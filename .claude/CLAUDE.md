@@ -48,7 +48,8 @@ names, presence rules, value shaping), the shared command-outcome text, the on-d
 presenter (the priority ladder / SoC gradient / RSSI→bars / SSID-scroll decisions the ST7735
 renderer draws), the status-LED ladder (`logic/led_status.hpp`, reading the same shared
 `UiSnapshot` + the shared SoC gradient), the `/events` WebSocket command policy
-(`logic/ws_policy.hpp` — frame-length plan / "sub" classification), the active-window poll gate
+(`logic/ws_policy.hpp` — frame-length plan / "sub" classification + the per-subscriber send
+backpressure that bounds a non-reading client), the active-window poll gate
 (`logic/active_window.hpp` — charging held open only on fresh contact), the HA binary
 `value_template` builder (`logic/ha_templates.hpp` — presence-aware `is defined` guard) and the
 POST-body reassembly loop (`logic/http_body.hpp` — multi-segment recv + bounded timeout) — all
@@ -114,8 +115,11 @@ http_events.cpp        → /events — WebSocket live-status push for the web UI
                          ONE ws:// socket; a background task pushes build_status_object() every
                          ~2 s (WS-only, replaces the old browser /status interval poll — no poll
                          fallback). Registered RAW (is_websocket) OUTSIDE the handle_all guard, so
-                         it guards its own allocations; 8-client registry; "sub" command policy is
-                         host-tested logic/ws_policy.hpp
+                         it guards its own allocations; 8-client registry; "sub" command policy +
+                         per-subscriber send backpressure are host-tested logic/ws_policy.hpp
+                         (≤2 in-flight frames/client, close after 3 failed sends — a client that
+                         stops READING otherwise stalls httpd 5 s/tick while its queued payload
+                         copies eat the heap until the device wedges; live incident 2026-07-18)
 http_ota.cpp           → /ota/check|update|status
 http_config.cpp        → /gen_keys, /send_key, /set_time, /set_vin, /set_mqtt, /set_syslog
 mcp_server.cpp         → /mcp — MCP server for AI agents (stateless JSON-RPC 2.0;

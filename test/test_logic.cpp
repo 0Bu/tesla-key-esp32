@@ -936,6 +936,61 @@ static void test_ws_policy() {
     CHECK(ws_frame_action(false, "sub", 3) == WsAction::Ignore);
 }
 
+// ── /events per-subscriber send backpressure (logic/ws_policy.hpp) ────────────────────────────
+// Regression cover for the 2026-07-18 wedge: one subscriber that stopped reading let the 2 s
+// broadcast out-produce its 5 s send timeout until the queued payload copies exhausted the heap.
+static void test_ws_backpressure() {
+    using namespace tk;
+
+    // A fresh subscriber may be sent to; the cap is what bounds the backlog.
+    WsClientSend c;
+    CHECK(ws_may_send(c));
+    ws_note_queued(c);
+    CHECK(ws_may_send(c));            // WS_MAX_INFLIGHT == 2, so one more is still allowed
+    ws_note_queued(c);
+    CHECK(!ws_may_send(c));           // at the cap: this is the tick that used to keep allocating
+
+    // THE incident shape: a client that never completes a send is refused every subsequent tick,
+    // no matter how long the stall lasts. The backlog therefore has a ceiling, not a slope.
+    for (int tick = 0; tick < 1000; tick++) CHECK(!ws_may_send(c));
+
+    // Completions free the slot again, so a healthy client keeps streaming.
+    CHECK(!ws_note_completed(c, true));
+    CHECK(ws_may_send(c));
+
+    // A failure streak evicts — but only at WS_MAX_FAILS, so a single blip is tolerated.
+    WsClientSend d;
+    ws_note_queued(d);
+    CHECK(!ws_note_completed(d, false));   // 1
+    ws_note_queued(d);
+    CHECK(!ws_note_completed(d, false));   // 2
+    ws_note_queued(d);
+    CHECK(ws_note_completed(d, false));    // 3 → close it
+
+    // One good send clears the streak: a client that recovers is not punished for earlier failures.
+    WsClientSend e;
+    ws_note_queued(e); CHECK(!ws_note_completed(e, false));
+    ws_note_queued(e); CHECK(!ws_note_completed(e, false));
+    ws_note_queued(e); CHECK(!ws_note_completed(e, true));    // recovered → streak reset
+    ws_note_queued(e); CHECK(!ws_note_completed(e, false));   // counting starts over, not at 3
+    ws_note_queued(e); CHECK(!ws_note_completed(e, false));
+    ws_note_queued(e); CHECK(ws_note_completed(e, false));
+
+    // A completion that arrives with nothing in flight must not underflow the counter — an 8-bit
+    // wrap to 255 would read as "permanently at the cap" and silence a live subscriber forever.
+    WsClientSend f;
+    CHECK(!ws_note_completed(f, true));
+    CHECK(f.in_flight == 0);
+    CHECK(ws_may_send(f));
+
+    // Symmetrically, the queued counter saturates instead of wrapping to 0 (which would re-open
+    // the floodgate the cap exists to hold shut).
+    WsClientSend g;
+    for (int i = 0; i < 1000; i++) ws_note_queued(g);
+    CHECK(g.in_flight == UINT8_MAX);
+    CHECK(!ws_may_send(g));
+}
+
 // ── request-body reassembly (logic/http_body.hpp) — the multi-segment truncation fix ──────────
 static void test_http_body() {
     using namespace tk;
@@ -1032,6 +1087,7 @@ int main() {
     test_display_model();
     test_led();
     test_ws_policy();
+    test_ws_backpressure();
     test_active_window();
     test_http_body();
 
