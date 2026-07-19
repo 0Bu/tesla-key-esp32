@@ -433,8 +433,8 @@ to drive the hero — only `link` is.
 
 **BLE phase countdown (the Bluetooth row's "(7s left)" / "(retry in 22s)").** The row names
 which phase the radio is in and counts it down, so an idle-looking device visibly explains
-itself instead of sitting on a static label. `/status.ble` carries `phase` + `phase_s` + `phase_total_s` —
-always all three or none — decided by the pure, host-tested `main/logic/ble_phase.hpp` from two
+itself instead of sitting on a static label. `/status.ble` carries `phase` + `phase_s` — always both or
+neither — decided by the pure, host-tested `main/logic/ble_phase.hpp` from two
 independently-armed deadlines:
 
 - **`connecting`** — a scan/connect attempt is running and gives up in `phase_s`. Armed by
@@ -452,18 +452,20 @@ wait's countdown reappears when the attempt ends instead of the row going bare. 
 each row's countdown node declares the one phase it will render, so "Searching…" can never be
 suffixed with the *retry* countdown.
 
-Each row shows the countdown as text plus a **donut**: the arc is the time still to run, the
-track the time already spent, which is why `phase_total_s` is sent rather than derived from
-"the largest value seen" (a page loading mid-phase would draw a full ring at whatever second it
-joined). The disconnected row draws grey-on-light-grey with **outlined, unfilled** signal bars —
-an empty gauge rather than a dimmed reading; the car-hunt rows (`Searching…`/`Connecting…`) use
-the same amber pair (`--warn-base`/`--warn-lite`) the "link up, nothing known yet" bars already
-use, so the BLE row has one amber "in-between" language. Wi-Fi's own search stays green.
+**The label follows the phase, not `ble.scanning`.** The radio also runs a background warm-up
+scan (`loop_task`) that has no deadline of its own and lasts straight through the idle wait, so
+keying the label off the raw scanning flag flipped the row to "Searching…" in the middle of a
+"retry in …" countdown — label and number describing different phases, which read as the row
+jumping around. `phase === "connecting"` is now the ONE thing that says "Searching…"; everything
+else is "Disconnected". Each row's countdown node names the single phase it will render, so a
+mismatch shows nothing rather than a foreign number.
 
-The searching rows count down **whichever** phase is armed (`data-p="any"`), because the two
-overlap for long stretches and both wordings stay honest — "(6s left)" is this attempt giving
-up, "(retry in 22s)" is the next attempt starting. "Disconnected" takes only the retry
-countdown, so a label can never contradict the number beside it.
+The time sits at the row's **right edge** (`margin-left:auto`), in the column the tile rows put
+their edit pencil in, and stays muted in every phase so it reads as one steady right-hand column
+instead of recolouring with the label. The disconnected row draws **outlined, unfilled** signal
+bars — an empty gauge rather than a dimmed reading; the searching row uses the same amber pair
+(`--warn-base`/`--warn-lite`) the "link up, nothing known yet" bars already use, so the BLE row
+has one amber "in-between" language. Wi-Fi's own search stays green.
 
 `phase_s` rounds **up** and `0` is a real value meaning "right now" — never "no countdown".
 Gating on `> 0` (or truncating) is what made the first cut of this drop its last second and

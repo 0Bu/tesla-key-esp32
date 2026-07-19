@@ -90,7 +90,6 @@ struct Inputs {
     // last second and leave the row's label bare.
     std::string            ble_phase;
     uint32_t               ble_phase_s{0};
-    uint32_t               ble_phase_total_s{0};   // the phase's full length (progress ring)
 
     // Link-state machine + raw VCSEC flag (diagnostics).
     LinkState   link{LinkState::Unknown};
@@ -207,7 +206,6 @@ inline void emit_status(const Inputs& in, E& e) {
     if (!in.ble_phase.empty()) {
         e.str("phase", in.ble_phase.c_str());
         e.num("phase_s", (double)in.ble_phase_s);
-        e.num("phase_total_s", (double)in.ble_phase_total_s);
     }
     if (in.ble_connected) {
         if (in.have_ble_rssi) e.num("rssi", in.ble_rssi);

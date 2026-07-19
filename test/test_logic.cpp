@@ -637,7 +637,7 @@ static void test_status_model() {
     s3.charge.has_battery_level = true; s3.charge.battery_level = 54.0f;
     s3.charge.charging_state = "Disconnected";
     s3.have_last_seen = true; s3.last_seen_s = 90000;
-    s3.ble_phase = "waiting"; s3.ble_phase_s = 15; s3.ble_phase_total_s = 30;
+    s3.ble_phase = "waiting"; s3.ble_phase_s = 15;
 
     CollectEmitter e3;
     tk::status::emit_status(s3, e3);
@@ -666,7 +666,6 @@ static void test_status_model() {
         "ble.scanning=true\n"
         "ble.phase=\"waiting\"\n"
         "ble.phase_s=15\n"
-        "ble.phase_total_s=30\n"
         "ble.devices[\n"
         "ble.devices.0{\n"
         "ble.devices.0.addr=\"de:ad:be:ef:00:01\"\n"
@@ -726,12 +725,11 @@ static void test_status_model() {
     // fields exists to fix. Never emit one without the other, and never gate on > 0.
     Inputs p0;                       // phase running, zero seconds left
     p0.vin = "UNKNOWN"; p0.version = "1.4.2";
-    p0.ble_phase = "connecting"; p0.ble_phase_s = 0; p0.ble_phase_total_s = 10;
+    p0.ble_phase = "connecting"; p0.ble_phase_s = 0;
     CollectEmitter ep0;
     tk::status::emit_status(p0, ep0);
     CHECK(ep0.out.find("ble.phase=\"connecting\"\n") != std::string::npos);
     CHECK(ep0.out.find("ble.phase_s=0\n") != std::string::npos);
-    CHECK(ep0.out.find("ble.phase_total_s=10\n") != std::string::npos);
 
     Inputs pn;                       // no phase running → both fields absent
     pn.vin = "UNKNOWN"; pn.version = "1.4.2";
@@ -1127,13 +1125,13 @@ static void test_ble_phase() {
     const uint32_t HZ = 100;   // configTICK_RATE_HZ on the device; the maths is hz-agnostic
 
     // Nothing armed → no phase, and /status omits both fields.
-    CHECK(phase({}, {}, 5000, HZ).kind == Phase::None);
+    CHECK(phase(0, 0, 5000, HZ).kind == Phase::None);
     CHECK(std::string(phase_name(Phase::None)).empty());
 
     // A phase reads its FULL length the moment it is armed. The 30 s idle wait must say 30,
     // not 29 — truncating instead of rounding up is what made the countdown start a second
     // short and end a second early.
-    CHECK(phase({}, {5000 + 30 * HZ, 30}, 5000, HZ).secs == 30);
+    CHECK(phase(0, 5000 + 30 * HZ, 5000, HZ).secs == 30);
     CHECK(secs_left(5000 + 10 * HZ, 5000, HZ) == 10);
 
     // …and holds a non-zero value for every instant before the deadline, right down to the
@@ -1145,8 +1143,8 @@ static void test_ble_phase() {
 
     // 0 is a real, reportable answer — the phase is still armed, so the UI keeps its label's
     // countdown ("retrying…") instead of dropping the suffix while the next phase spins up.
-    CHECK(phase({}, {5000, 30}, 5000, HZ).kind == Phase::Waiting);
-    CHECK(phase({}, {5000, 30}, 5000, HZ).secs == 0);
+    CHECK(phase(0, 5000, 5000, HZ).kind == Phase::Waiting);
+    CHECK(phase(0, 5000, 5000, HZ).secs == 0);
 
     // An EXPIRED deadline stays armed — "armed" is the deadline being set, never it being in
     // the future. auto_pair leans on this: it no longer clears the retry deadline before a
@@ -1154,22 +1152,21 @@ static void test_ble_phase() {
     // command, and a cleared deadline left the row with no phase (bare label) for the whole
     // wait. The stale-but-armed deadline reads "retrying… right now" until the attempt's own
     // countdown takes over.
-    PhaseView stale = phase({}, {5000 - 60 * HZ, 30}, 5000, HZ);
+    PhaseView stale = phase(0, 5000 - 60 * HZ, 5000, HZ);
     CHECK(stale.kind == Phase::Waiting);
     CHECK(stale.secs == 0);
-    CHECK(stale.total_s == 30);
     // …and an attempt starting during that wait still wins, so the row shows the attempt.
-    CHECK(phase({5000 + 9 * HZ, 10}, {5000 - 60 * HZ, 30}, 5000, HZ).kind == Phase::Connecting);
+    CHECK(phase(5000 + 9 * HZ, 5000 - 60 * HZ, 5000, HZ).kind == Phase::Connecting);
 
     // Connecting outranks Waiting: an attempt started inside the idle wait (a command, or
     // loop_task's warm-up connect) is what the radio is actually doing.
-    PhaseView both = phase(/*connect*/{5000 + 8 * HZ, 10}, /*retry*/{5000 + 25 * HZ, 30}, 5000, HZ);
+    PhaseView both = phase(/*connect*/5000 + 8 * HZ, /*retry*/5000 + 25 * HZ, 5000, HZ);
     CHECK(both.kind == Phase::Connecting);
     CHECK(both.secs == 8);
     // …and because the deadlines are independent, the idle wait's countdown is still intact
     // underneath: when the attempt clears, the row resumes counting to the next one.
-    CHECK(phase({}, {5000 + 25 * HZ, 30}, 5000, HZ).kind == Phase::Waiting);
-    CHECK(phase({}, {5000 + 25 * HZ, 30}, 5000, HZ).secs == 25);
+    CHECK(phase(0, 5000 + 25 * HZ, 5000, HZ).kind == Phase::Waiting);
+    CHECK(phase(0, 5000 + 25 * HZ, 5000, HZ).secs == 25);
 
     // Tick-counter wrap: a deadline just past the wrap with `now` just before it is ~2 s out.
     // An unsigned difference would read as ~49 days here.
@@ -1177,14 +1174,6 @@ static void test_ble_phase() {
     // And a deadline just BEFORE the wrap with `now` just after it is in the past ⇒ 0.
     CHECK(secs_left(0xFFFFFFFF - 99, 100, HZ) == 0);
 
-    // Each phase carries ITS OWN full length, so the progress ring draws the right span
-    // when both are armed — the reported total must follow the reported phase, not the
-    // other one still ticking underneath.
-    CHECK(both.total_s == 10);
-    CHECK(phase({}, {5000 + 25 * HZ, 30}, 5000, HZ).total_s == 30);
-    // A total is what makes "how much is spent" drawable, and it survives to 0 seconds
-    // left — the ring is fully spent, not undrawable.
-    CHECK(phase({}, {5000, 30}, 5000, HZ).total_s == 30);
 
     // /status spellings the UI switches on.
     CHECK(std::string(phase_name(Phase::Connecting)) == "connecting");

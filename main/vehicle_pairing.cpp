@@ -271,7 +271,6 @@ bool VehicleController::reset_for_new_vehicle() {
 void VehicleController::idle_until_next_health_poll_() {
     constexpr uint32_t kIdleMs = 30000;
     constexpr uint32_t kStepMs = 500;
-    retry_total_s_.store(kIdleMs / 1000);
     retry_deadline_.store(deadline_in_(kIdleMs));
     for (uint32_t w = 0; w < kIdleMs / kStepMs && !pairing_lost_; w++) vTaskDelay(pdMS_TO_TICKS(kStepMs));
     retry_deadline_.store(0);

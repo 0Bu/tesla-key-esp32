@@ -1,6 +1,6 @@
 :root{
   --bg:#f6f7f9; --card:#fff; --fg:#1a1d21; --muted:#5b626b; --border:#e6e8ec;
-  --faint:#c3c9d2;   /* lighter than --muted: empty signal bars + a spent countdown ring */
+  --faint:#c3c9d2;   /* lighter than --muted: the outlined, empty signal bars */
   --soft:#f1f3f5; --accent:#e82127; --ok:#16a34a; --warn:#d97706;
   --warn-base:#f59e0b; --warn-lite:#fdba74; --radius:18px;  /* BLE "status unknown" ping-pong: less-dark base + light crest */
   --shadow:0 1px 2px rgba(16,20,28,.04), 0 6px 20px rgba(16,20,28,.06);
@@ -226,18 +226,14 @@ code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
    rather than a dimmed reading, and lighter than the "Disconnected" label beside it */
 .bars.empty rect{fill:var(--soft); stroke:var(--faint); stroke-width:1; vector-effect:non-scaling-stroke}
 
-/* phase countdown ("(retry in 12s)" / "(7s left)") + its donut — own nodes, so the
-   per-second update never touches the animated bars next to it */
-.crow .cv .cd{display:inline-flex; align-items:center; gap:5px; font-size:13px; white-space:nowrap}
-.crow .cv .cd.off,.crow .cv .cd.nototal .cdring{display:none}
-.crow .cv .cdring{flex:none; display:block}
-/* the ring reads like the row: the arc is the time LEFT, the track the time already spent.
-   Waiting (grey on light grey) inherits the row's muted tone; the amber car-hunt rows
-   (.unkn) recolour both to the same base/lite amber pair the "status unknown" bars use. */
-.crow .cv .cdtrack{stroke:var(--faint)}
-.crow .cv .cdarc{stroke:var(--muted); transition:stroke-dashoffset .95s linear}
-.crow .cv.unkn .cdtrack{stroke:var(--warn-lite)}
-.crow .cv.unkn .cdarc{stroke:var(--warn-base)}
+/* phase countdown ("retry in 12s" / "7s left") — pushed to the row's right edge with
+   margin-left:auto so it lands in the same column the tile rows put their edit pencil in,
+   and stays muted in every phase so it reads as one steady right-hand column rather than
+   recolouring with the label. Its own node, so the per-second text update never touches the
+   animated bars beside it. */
+.crow .cv .cd{margin-left:auto; padding-left:12px; flex:none; font-size:13px;
+  white-space:nowrap; color:var(--muted); font-variant-numeric:tabular-nums}
+.crow .cv .cd.off{display:none}
 /* connection-row MAC is a touch smaller than the tile MAC so bars + dBm + the full
    17-char address all fit one line on a phone (desktop bumps it back up to 15px) */
 .crow .cv .mac{font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12.5px; letter-spacing:.2px}

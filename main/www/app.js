@@ -84,59 +84,36 @@ function emptyBarsHTML(){
    arrives every ~2 s, so the remaining time is ticked down locally in between and the
    pushed value is treated as the clock to resync against.
 
-   The text is painted with textContent into a dedicated node, NOT rebuilt through
-   setHTML with the rest of the row: rewriting the row's innerHTML every second would
-   re-create the bar <rect>s and restart their CSS fill animation on every tick. */
-var cdKind=null, cdEndMs=0, cdTotal=0;
-var CD_C=2*Math.PI*8;   // circumference of the r=8 progress ring, for stroke-dashoffset
-// The countdown's markup: the text, then a donut whose filled arc is the time LEFT and
-// whose track is the time already spent. Constant string — the arc is animated by setting
-// stroke-dashoffset on the node, never by re-emitting this.
-function cdHTML(kind){
-  return '<span class="cd" data-p="'+kind+'"><span class="cdt"></span>'+
-         '<svg class="cdring" width="15" height="15" viewBox="0 0 20 20" aria-hidden="true">'+
-         '<circle class="cdtrack" cx="10" cy="10" r="8" fill="none" stroke-width="4"/>'+
-         '<circle class="cdarc" cx="10" cy="10" r="8" fill="none" stroke-width="4"'+
-         ' transform="rotate(-90 10 10)" stroke-dasharray="'+CD_C.toFixed(3)+'"/>'+
-         '</svg></span>';
-}
+   The time sits at the row's right edge, in the column the tiles put their edit pencil in,
+   and is painted with textContent into a dedicated node — NOT rebuilt through setHTML with
+   the rest of the row, since rewriting the row's innerHTML every second would re-create the
+   bar <rect>s and restart their CSS fill animation on every tick. */
+var cdKind=null, cdEndMs=0;
+// Constant markup — only the node's text changes per tick. data-p names the ONE phase this
+// row will count down, so a row can never show a number belonging to a different phase.
+function cdHTML(kind){ return '<span class="cd" data-p="'+kind+'"></span>'; }
 // Resync the local countdown clock from a push. A phase change always resyncs; within a
 // phase only a real disagreement (≥2 s) does, so the ~2 s push cadence and the 1 s local
 // tick can't fight each other into a number that jitters back up.
-function cdSync(kind,secs,total){
-  if(kind!=='connecting'&&kind!=='waiting'){ cdKind=null; cdEndMs=0; cdTotal=0; return; }
+function cdSync(kind,secs){
+  if(kind!=='connecting'&&kind!=='waiting'){ cdKind=null; cdEndMs=0; return; }
   if(secs==null) secs=0;
-  cdTotal=total||0;
   if(kind!==cdKind||Math.abs(cdLeft()-secs)>=2){ cdKind=kind; cdEndMs=Date.now()+secs*1000; }
 }
-// Fractional seconds left — the ring wants the smooth value, the label the rounded one, so
-// a 1 s repaint moves the arc a visible step rather than snapping only on integer changes.
-function cdLeftMs(){ return Math.max(0,cdEndMs-Date.now()); }
-function cdLeft(){ return Math.ceil(cdLeftMs()/1000); }
-// Paint into the row's .cd node if the current row has one. Each .cd declares (data-p) which
-// phase it will count down, and a mismatch paints nothing — a row must never count down
-// something its own label contradicts. "Disconnected" therefore takes only the retry
-// countdown. The searching rows take "any": the two phases overlap for long stretches
-// (loop_task's warm-up scan has no deadline of its own and runs straight through auto-pair's
-// idle wait), and the wordings stay honest either way — "(6s left)" is this attempt giving
-// up, "(retry in 22s)" is the next attempt starting — so the row keeps a live countdown
-// instead of blanking for half a minute. At 0 the phase is over but the next push hasn't
-// landed yet, so say what is about to happen rather than dropping the suffix.
+function cdLeft(){ return Math.max(0,Math.ceil((cdEndMs-Date.now())/1000)); }
+// Paint into the row's .cd node if the current row has one. The node declares (data-p) the
+// one phase it counts down and a mismatch paints nothing, so a label can never be followed
+// by a number describing a different phase. At 0 the phase is over but the next push hasn't
+// landed yet, so say what is about to happen rather than dropping the text and leaving the
+// row's right edge empty for a beat.
 function paintCd(){
   var el=document.querySelector('#bleConn .cd'); if(!el) return;
-  var want=el.getAttribute('data-p');
-  var on=cdKind&&(want==='any'||want===cdKind);
+  var on=cdKind&&el.getAttribute('data-p')===cdKind;
   el.classList.toggle('off',!on);
   if(!on) return;
   var n=cdLeft();
-  el.querySelector('.cdt').textContent =
-    cdKind==='waiting' ? (n?' (retry in '+n+'s)':' (retrying…)')
-                       : (n?' ('+n+'s left)'   :' (timing out…)');
-  // Arc = share of the phase still to run. Without a known total there is nothing
-  // truthful to draw, so the ring stays hidden rather than showing an invented fraction.
-  var arc=el.querySelector('.cdarc');
-  el.classList.toggle('nototal',!cdTotal);
-  if(cdTotal) arc.style.strokeDashoffset=(CD_C*(1-Math.min(1,cdLeftMs()/(cdTotal*1000)))).toFixed(3);
+  el.textContent = cdKind==='waiting' ? (n?'retry in '+n+'s':'retrying…')
+                                      : (n?n+'s left'      :'timing out…');
 }
 // "status unknown" glyph — same geometry as barsHTML, all four bars fully lit (the link
 // is up; signal strength is real and shown as dBm next to it). Each bar carries a .wbN
@@ -515,27 +492,27 @@ function render(s){
     var sdbm=(sr!=null)?'<span class="dbm">'+sr+' dBm</span>':'';
     var rt=(ble.car_connectable===false)?'At connection limit':'Connection failed';
     bc.className='cv warn'; setHTML(bc,barsHTML(sr)+sdbm+'<span>'+rt+'</span>');
-  } else if(ble.scanning){
-    // searching for the car — the signal bars sit where they do when connected, but fill up
-    // green one after another (CSS .bars.search animation) instead of a spinner; it appears
-    // only while scanning and clears otherwise. setHTML keeps the bar nodes alive across
-    // WS pushes so the fill animation runs continuously instead of restarting each ~2 s —
-    // which is why the countdown goes into an empty .cd node here and is painted separately.
-    bc.className='cv unkn'; setHTML(bc,searchBarsHTML(true)+'<span>Searching…</span>'+cdHTML('any'));
   } else if(ble.phase==='connecting'){
-    // The scan found the car and is bringing the GATT link up: scanning has already stopped
-    // but the link isn't up yet. Name that phase — it used to fall through to "Disconnected",
-    // which flashed the row's idle label for a second or two mid-connect.
-    bc.className='cv unkn'; setHTML(bc,searchBarsHTML(true)+'<span>Connecting…</span>'+cdHTML('any'));
+    // Looking for the car. The label follows the PHASE, not the raw ble.scanning flag: the
+    // radio also runs a background warm-up scan that has no deadline of its own and lasts
+    // straight through the idle wait, so keying the label off scanning flipped it to
+    // "Searching…" in the middle of a "retry in …" countdown — label and number describing
+    // different phases, which is what made the row look like it jumped around. One source
+    // now drives both, so the pair always agrees.
+    // setHTML keeps the bar nodes alive across WS pushes so the CSS fill animation runs
+    // continuously instead of restarting each ~2 s — which is why the countdown lives in its
+    // own node and is painted separately.
+    bc.className='cv unkn'; setHTML(bc,searchBarsHTML(true)+'<span>Searching…</span>'+cdHTML('connecting'));
   } else {
-    // disconnected — still show the (faded, empty) bar glyph so the row keeps the same
-    // shape as Wi-Fi rather than collapsing to text only.
+    // No attempt running — the link is down and the next try is scheduled. Keep the (empty,
+    // outlined) bar glyph so the row holds the same shape as Wi-Fi rather than collapsing to
+    // text only.
     bc.className='cv dis'; setHTML(bc,emptyBarsHTML()+'<span class="ph">Disconnected</span>'+cdHTML('waiting'));
   }
   // Countdown clock from this push, then paint immediately: setHTML may have just replaced
   // the row (a phase change), leaving a fresh, empty .cd the 1 s ticker wouldn't fill until
   // its next tick.
-  cdSync(ble.phase,num(ble.phase_s),num(ble.phase_total_s));
+  cdSync(ble.phase,num(ble.phase_s));
   paintCd();
 
   // MQTT — Home Assistant bridge (tap to set/change the broker)

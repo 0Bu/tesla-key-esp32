@@ -189,8 +189,7 @@ public:
     // Rules + rationale live in logic/ble_phase.hpp (host-tested); this only supplies the
     // two deadlines and the clock.
     tk::ble::PhaseView ble_phase() const {
-        return tk::ble::phase({connect_deadline_.load(), connect_total_s_.load()},
-                              {retry_deadline_.load(),   retry_total_s_.load()},
+        return tk::ble::phase(connect_deadline_.load(), retry_deadline_.load(),
                               xTaskGetTickCount(), configTICK_RATE_HZ);
     }
     // Reason the most recent command failed (e.g. "complete", "not_charging"), or empty
@@ -407,11 +406,8 @@ private:
     // run at once: a command's connect attempt inside auto-pair's idle wait shows its
     // own "gives up in" countdown, and when it ends the still-running idle wait's
     // "next attempt in" countdown reappears instead of the row going bare.
-    // Each deadline carries the phase's FULL length alongside it, so the UI can draw how
-    // much of the phase is spent without guessing at the span from the values it happens
-    // to observe.
-    std::atomic<uint32_t> connect_deadline_{0}, connect_total_s_{0};
-    std::atomic<uint32_t> retry_deadline_{0},   retry_total_s_{0};
+    std::atomic<uint32_t> connect_deadline_{0};
+    std::atomic<uint32_t> retry_deadline_{0};
     // Arm a deadline `ms` from now. Tick 0 is the "not armed" sentinel, so a deadline
     // that lands exactly on a tick-counter wrap is nudged by one tick.
     static uint32_t deadline_in_(uint32_t ms) {

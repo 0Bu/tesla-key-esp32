@@ -153,9 +153,8 @@ cJSON* build_status_object() {
 
     {
         tk::ble::PhaseView ph = g_vehicle->ble_phase();
-        in.ble_phase         = tk::ble::phase_name(ph.kind);  // "" ⇒ model omits the block
-        in.ble_phase_s       = ph.secs;
-        in.ble_phase_total_s = ph.total_s;
+        in.ble_phase   = tk::ble::phase_name(ph.kind);   // "" ⇒ model omits the block
+        in.ble_phase_s = ph.secs;
     }
     in.link        = g_vehicle->link_state();
     in.vcsec_sleep = g_vehicle->vcsec_sleep_raw();
