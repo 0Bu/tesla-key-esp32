@@ -1,0 +1,170 @@
+---
+name: flash-esp32
+description: Build and USB-flash the tesla-key-esp32 firmware (ESP32 / S3 / C3 / C6 / C5) over the serial port. Use when asked to "flash", "flashe", "flash the device", deploy firmware/web-UI changes to the physical board over USB, or reflash after editing main/. Defaults to esp32s3; set TARGET for other chips. Auto-detects the serial port and preserves NVS (pairing/key/VIN). For pull-based OTA updates instead, see docs / the web UI version tap.
+---
+
+# flash-esp32 — build & USB-flash the firmware
+
+Builds the ESP-IDF project (in Docker) and flashes it to a connected **ESP32 board**
+(esp32 / esp32s3 / esp32c3 / esp32c6 / esp32c5 — set `TARGET`, default esp32s3) over
+USB (from the host). NVS is left untouched, so the stored pairing, private key, VIN and
+WiFi survive the flash (no re-pair needed). Use this after editing anything under `main/` —
+including the embedded web UI (`main/www/` — `index.html` + `style.css` + `app.js`, spliced
+into one page at build time), which is compiled into the app binary.
+
+> This flashes over **USB**. For a remote, no-cable update use OTA (tap the firmware
+> version in the web UI). USB flashing requires physical access and the board plugged in.
+
+## Why two halves (Docker build, host flash)
+
+There is **no local ESP-IDF install** — builds run via `scripts/idf-docker.sh`, which runs
+the official `espressif/idf` Docker image **pinned to the exact version CI uses** (read at
+runtime from `.github/workflows/build.yml`, so it never drifts; a new version auto-pulls on
+first use). But **Docker Desktop on macOS has no USB passthrough**, so the *flash* step runs
+on the **host** with `esptool` (`brew install esptool`). Build → produces `build/`, then
+flash `build/` from the host.
+
+## One-shot command
+
+Run from the **repo root** (where `CMakeLists.txt` lives). Builds in Docker, then — only if
+the build succeeded (`pipefail` + the `||` guard) — auto-detects the port and flashes:
+
+```bash
+set -o pipefail
+TARGET=esp32s3   # chip being flashed: esp32s3 (default) | esp32 | esp32c3 | esp32c6 | esp32c5
+# 0) esp32c5 only: tesla-ble's upstream manifest omits esp32c5, so prepare the local patched
+#    checkout the c5 target resolves against (idempotent host git clone; no-op for other chips).
+[ "$TARGET" = esp32c5 ] && scripts/prepare-tesla-ble-c5.sh
+# 1) Build via the CI-pinned ESP-IDF Docker image (build/ stays host-owned).
+#    First build only: set-target; afterwards plain `build` keeps it incremental & fast.
+scripts/idf-docker.sh \
+  sh -c "if [ -f sdkconfig ]; then idf.py build; else idf.py set-target $TARGET build; fi" \
+  2>&1 | tail -15 || { echo "BUILD FAILED — not flashing"; exit 1; }
+# 2) Flash from the HOST (Docker can't reach USB). @flash_args writes the bootloader (at the
+#    target's own offset — 0x1000 on classic esp32, 0x2000 on esp32c5, 0x0 on s3/c3/c6), partition-table@0x8000,
+#    otadata@0xf000, app@0x20000 — NOT nvs@0x9000, so pairing survives.
+PORT=$(ioreg -l -w 0 2>/dev/null | grep -iE '"USB Product Name"|"IOCalloutDevice"' \
+       | grep -iA1 '"USB Single Serial"' | grep -m1 -o '/dev/cu\.usbmodem[^"]*') \
+  && echo "Flashing via $PORT" \
+  && ( cd build && esptool --chip "$TARGET" -p "$PORT" -b 460800 \
+        --before default_reset --after hard_reset write_flash "@flash_args" ) 2>&1 | tail -20
+```
+
+> **Port detection above targets S3/C3/C6/C5 boards** (native USB = `/dev/cu.usbmodem*`; the
+> T-Dongle-C5 enumerates on its USB-C port). The **classic esp32** has no native USB — it appears
+> as a USB-UART bridge `/dev/cu.usbserial-*` (CP210x/CH340), so for `TARGET=esp32` set
+> `PORT=$(ls /dev/cu.usbserial-* | head -1)` instead.
+
+> **Linux host** (e.g. Raspberry Pi): `ioreg` and `/dev/cu.*` are macOS-only. Ports appear as
+> `/dev/ttyACM*` (native USB / WCH bridge) or `/dev/ttyUSB*` (CP210x/CH340) — use
+> `PORT=$(ls /dev/ttyACM* /dev/ttyUSB* 2>/dev/null | head -1)`, and install esptool via
+> `pipx install esptool` (no brew).
+
+**Success looks like:** `Hash of data verified.` for each region, then
+`Hard resetting via RTS pin...` → `Done`. The app image lands at `0x20000` (dual-OTA
+layout). After reset the device rejoins WiFi in a few seconds; reload
+`tesla-key-esp32.local` to see UI changes.
+
+> ⚠️ **A local (unsigned) build crash-loops at boot — flash a _signed_ image.** Since the
+> signed-OTA config landed (`CONFIG_SECURE_SIGNED_ON_UPDATE_NO_SECURE_BOOT` in
+> `sdkconfig.defaults`), the running app `abort()`s at startup when it carries no signature
+> block. So a plain `idf.py build` image still flashes fine (`Hash of data verified.`) but then
+> **reboot-loops before `app_main`** (`check_signature_on_update_check`, on every target). Get a
+> bootable image one of two ways:
+> - **Flash the signed CI artifact** (recommended): `gh run download` the app image from the
+>   latest green `build` run for your branch and flash *that* instead of the local `build/…bin`.
+> - **Sign the local build yourself**, the same step CI runs, then flash `@flash_args` as usual:
+>   ```bash
+>   # one-time: espsecure.py generate_signing_key --version 2 --scheme rsa3072 dev_key.pem
+>   espsecure.py sign_data --version 2 --keyfile dev_key.pem \
+>     --output build/tesla-key-esp32.bin.signed build/tesla-key-esp32.bin && \
+>     mv build/tesla-key-esp32.bin.signed build/tesla-key-esp32.bin
+>   ```
+>   A throwaway dev key is fine for a USB-flashed test board (it becomes that board's OTA trust
+>   anchor until you USB-flash the real CI image again). Full detail: `docs/SECURITY.md`.
+
+## Flashing a specific PR / branch onto a real board (use the *signed* CI artifact)
+
+To test a PR/branch on a physical board, **do not USB-flash the local `scripts/idf-docker.sh`
+build.** It comes out **unsigned** (`CONFIG_SECURE_BOOT_BUILD_SIGNED_BINARIES=n`; the RSA-3072
+`OTA_SIGNING_KEY` is a CI secret, gitignored, **not present locally**). Flashing an unsigned
+app onto a device on a signed build **destroys its TOFU OTA trust anchor** → all future OTAs
+break, and the unsigned image also boot-loops (see the warning above). The CI `build` job
+already produced the **signed** per-target images — flash those.
+
+```bash
+TARGET=esp32s3            # esp32 | esp32s3 | esp32c3 | esp32c6 | esp32c5
+RUNID=<green build run>   # gh run list --branch <branch> --workflow build.yml
+
+# 1) Discover + download the signed app image for this run (artifact name varies by version).
+gh api repos/:owner/:repo/actions/runs/$RUNID/artifacts --jq '.artifacts[].name'
+gh run download "$RUNID" -n <artifact-name> -D _ci    # contains tesla-key-esp32<sfx>-<ver>.bin
+#   image suffix <sfx>: esp32="" (suffix-less), s3=-s3, c3=-c3, c6=-c6, c5=-c5
+#   (matches image_suffix() in scripts/ci-build-all.sh and TESLA_OTA_IMG_SUFFIX in ota_update.cpp)
+
+# 2) A local `build/` of the SAME target supplies bootloader/partition-table/otadata (those
+#    regions are NEVER signature-checked, so an unsigned local build is fine for them). Build
+#    once via the one-shot above if build/ is empty. Then flash the SIGNED app over them,
+#    SKIPPING nvs@0x9000 so pairing/key/VIN survive:
+cd build && esptool --chip "$TARGET" -p "$PORT" -b 460800 write_flash \
+  0x0 bootloader/bootloader.bin \
+  0x8000 partition_table/partition-table.bin \
+  0xf000 ota_data_initial.bin \
+  0x20000 ../_ci/tesla-key-esp32<sfx>-<ver>.bin
+#   ⚠ bootloader offset is 0x0 on s3/c3/c6, but 0x1000 on classic esp32 and 0x2000 on esp32c5 —
+#     use the target's own offset for the 0x0 slot above (see @flash_args / the offsets table).
+```
+
+- **Bonus:** the CI image carries the **CI-stamped version** (e.g. `1.4.22`), whereas a local
+  build reports only the `version.txt` **floor** (e.g. `1.4.0`) — so the signed artifact makes
+  the reported version match the release/manifest.
+- **Never flash `tesla-key-esp32<sfx>-<ver>-merged.bin`** to preserve NVS — the merged image is a
+  single full-flash blob spanning `0x0` and **wipes `nvs@0x9000`** (forces a full re-pair).
+- After flashing, confirm the live device with the [`e2e-evcc`](../e2e-evcc/SKILL.md) skill.
+
+## Picking the right serial port
+
+This board exposes **two** USB serial interfaces — confirm before flashing:
+
+| `/dev` node (example)        | USB product name              | What it is                     |
+|------------------------------|-------------------------------|--------------------------------|
+| `/dev/cu.usbmodem<SERIAL>`   | **USB Single Serial** (WCH)   | UART bridge — **use this one** |
+| `/dev/cu.usbmodem<NNNN>`     | USB JTAG/serial debug unit    | S3/C3/C6/C5 native USB (also works) |
+
+The exact node name is device/cable-specific — **never hardcode it**; detect at runtime.
+List both with their product names:
+
+```bash
+ioreg -l -w 0 2>/dev/null | grep -iE '"USB Product Name"|"IOCalloutDevice"' \
+  | grep -iB1 usbmodem | sed -E 's/^[ |]+//'
+```
+
+Both interfaces can flash an S3. The one-shot command above targets the **WCH UART
+bridge** ("USB Single Serial"), which is the conventional choice. If only the native
+JTAG unit is present, target that node instead. If the `grep` finds nothing, the board
+isn't connected (or is asleep) — check the cable, or drop `-p "$PORT"` to let esptool
+auto-detect.
+
+## Notes & gotchas
+
+- **No local IDF** — every `idf.py` step goes through `scripts/idf-docker.sh`, which uses the
+  `espressif/idf` image **pinned to the CI version** (from `.github/workflows/build.yml`); a
+  new version auto-pulls on first use. The mounted `build/` dir persists on the host, so
+  Docker builds stay incremental. Run `idf.py` ad-hoc the same way, e.g.
+  `scripts/idf-docker.sh idf.py size`.
+- **Don't run a serial monitor in an automated session** — it never returns and hangs the
+  turn. Flash without it. `idf.py monitor` isn't available on the host; for serial logs use a
+  host terminal: `screen /dev/cu.usbmodemXXXX 115200` (exit `Ctrl-A` then `K`), or
+  `pipx install esp-idf-monitor` → `esp-idf-monitor -p <PORT>`.
+- **First build only** is slow (managed_components fetch + full compile). A `build/` dir
+  already present means subsequent flashes are incremental and fast.
+- **NVS is preserved** by `@flash_args` (it never touches `nvs@0x9000`). To wipe
+  pairing/key/VIN/WiFi instead, run `esptool --chip "$TARGET" -p <PORT> erase_flash` (forces a
+  full re-pair afterwards).
+- **Artifacts are host-owned** thanks to `-u $(id -u):$(id -g)` — no root-owned files in the
+  worktree. `build/`, `managed_components/`, `sdkconfig` are all gitignored.
+
+## After flashing
+
+To confirm the live device is healthy (paired, BLE up, no evcc timeouts), run the
+[`e2e-evcc`](../e2e-evcc/SKILL.md) skill.

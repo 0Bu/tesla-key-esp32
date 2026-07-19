@@ -587,16 +587,66 @@ The web UI mirrors this exactly: it shows the "Vehicle asleep" hero (with the wa
 **only** when `ASLEEP` is a proven fact; for `IDLE` it shows a neutral **"Parked"**
 card (last-known SOC + idle time + the same wake button) that makes no sleep claim; and for both
 `UNREACHABLE` *and* the unknown state (nothing heard since boot — the on-demand BLE link hasn't
-reached the car yet) it shows a neutral grey hero with the orange Bluetooth glyph rather than a
-blank area: **"Unreachable"** (no recent answer over BLE, with last-known SOC + idle time) or
-**"Connecting…"** (no signed round-trip yet; the subtitle claims "Bluetooth connected" only
-when the momentary GATT link is actually up, else "Reaching your Tesla over Bluetooth…") —
-never a sleep claim. In that same
+reached the car yet) it **hides the hero card entirely**. Both states know nothing current about the
+car, and a hero filled with a retained battery percentage and an idle timer reads as live status;
+withholding the card is the honest form, and the state is still signalled — never as a sleep claim —
+on the BLE row. In that same
 unknown/unreachable state the BLE connection row drops its green and animates an orange
 ping-pong across the signal bars (a darker-orange crest bouncing edge→edge over a light-orange
 base) with an orange MAC, flagging "connected but stateless" at a glance. The momentary BLE row
 reading "Disconnected" is normal (the link is dropped between polls by design) and is not used
 to drive the hero — only `link` is.
+
+**BLE phase countdown (the Bluetooth row's "(7s left)" / "(retry in 22s)").** The row names
+which phase the radio is in and counts it down, so an idle-looking device visibly explains
+itself instead of sitting on a static label. `/status.ble` carries `phase` + `phase_s` — always both or
+neither — decided by the pure, host-tested `main/logic/ble_phase.hpp` from two
+independently-armed deadlines:
+
+- **`connecting`** — a scan/connect attempt is running and gives up in `phase_s`. Armed by
+  `ensure_connected_` (`vehicle_commands.cpp`), the ONE place any attempt is started and
+  bounded, so every command, telemetry poll and health probe gets the countdown for free.
+- **`waiting`** — no attempt is running; the next one starts in `phase_s`. Armed by
+  `idle_until_next_health_poll_` (`vehicle_pairing.cpp`), which owns both the wait and the
+  countdown for it — they come from one constant, so the row cannot promise a retry at a time
+  the loop doesn't retry.
+
+The two phases **overlap** routinely: a command, or `loop_task`'s warm-up connect, starts an
+attempt in the middle of auto-pair's idle wait. `connecting` therefore outranks `waiting` (the
+attempt is the more specific truth), and because neither deadline clears the other, the idle
+wait's countdown reappears when the attempt ends instead of the row going bare. In the web UI
+each row's countdown node declares the one phase it will render, so "Searching…" can never be
+suffixed with the *retry* countdown.
+
+**The label follows the phase, not `ble.scanning`.** The radio also runs a background warm-up
+scan (`loop_task`) that has no deadline of its own and lasts straight through the idle wait, so
+keying the label off the raw scanning flag flipped the row to "Searching…" in the middle of a
+"retry in …" countdown — label and number describing different phases, which read as the row
+jumping around. `phase === "connecting"` is now the ONE thing that says "Searching…"; everything
+else is "Disconnected". Each row's countdown node names the single phase it will render, so a
+mismatch shows nothing rather than a foreign number.
+
+The time sits at the row's **right edge** (`margin-left:auto`), in the column the tile rows put
+their edit pencil in, and stays muted in every phase so it reads as one steady right-hand column
+instead of recolouring with the label. The disconnected row draws **outlined, unfilled** signal
+bars — an empty gauge rather than a dimmed reading; the searching row uses the same amber
+(`--warn-base`) the "link up, nothing known yet" bars already use, so the BLE row
+has one amber "in-between" language. Wi-Fi's own search stays green.
+
+`phase_s` rounds **up** and `0` is a real value meaning "right now" — never "no countdown".
+Gating on `> 0` (or truncating) is what made the first cut of this drop its last second and
+flash a bare "Disconnected" between every cycle. `app.js` ticks the number down locally once a
+second between the ~2 s `/events` pushes, resyncing to the device only on a phase change or a
+≥2 s disagreement so the two clocks can't jitter the number back upward; it paints into a
+dedicated node with `textContent`, because rewriting the row through `setHTML` every second
+would re-create the bar `<rect>`s and restart their CSS fill animation on every tick.
+
+Not every scan is a phase. `loop_task`'s warm-up connect calls `BleClient::connect()` directly
+rather than going through `ensure_connected_`, so it arms nothing and just leaves the radio
+scanning, on and off, straight through the idle wait — under the label-follows-phase rule that
+correctly reads as "Disconnected · retry in …", because the link *is* down and the next real
+attempt *is* scheduled. The one row that shows "Searching…" with no countdown is the no-VIN
+listing-only scan, which has no pairing schedule to count down at all.
 
 **Connection-failure detection (web-UI hero "Connection failed").** When the target car's
 advert is heard but the BLE link won't come up after repeated tries, `/status.ble` carries

@@ -50,7 +50,9 @@ renderer draws), the status-LED ladder (`logic/led_status.hpp`, reading the same
 `UiSnapshot` + the shared SoC gradient), the `/events` WebSocket command policy
 (`logic/ws_policy.hpp` — frame-length plan / "sub" classification + the per-subscriber send
 backpressure that bounds a non-reading client), the active-window poll gate
-(`logic/active_window.hpp` — charging held open only on fresh contact), the HA binary
+(`logic/active_window.hpp` — charging held open only on fresh contact), the BLE phase countdown
+(`logic/ble_phase.hpp` — which phase the Bluetooth row counts down, rounded up and never
+vanishing on its last second), the HA binary
 `value_template` builder (`logic/ha_templates.hpp` — presence-aware `is defined` guard) and the
 POST-body reassembly loop (`logic/http_body.hpp` — multi-segment recv + bounded timeout) and the
 heap-exhaustion watchdog (`logic/heap_watchdog.hpp` — 4 KB/5 min unbroken hold, OTA-excused,
@@ -306,8 +308,9 @@ hero and MQTT `sleep_state`. Four values:
 - `AWAKE` — fresh live infotainment telemetry (< 60 s).
 - `ASLEEP` — no live data AND debounced VCSEC sleep proven (≥ `kAsleepDebounceS` ≈ 120 s).
 - `IDLE` — reachable over BLE but **not provably asleep** (web UI shows neutral "Parked").
-- `UNREACHABLE` — answers nothing over BLE; web UI shows a grey **"Unreachable"** hero + orange
-  ping-pong BLE bars (cold-start, nothing heard since boot ⇒ **"Connecting…"**; MQTT omitted/"unknown").
+- `UNREACHABLE` — answers nothing over BLE; the web UI **hides the hero card** (as it does for the
+  cold-start unknown state) and signals it on the BLE row: orange ping-pong bars + orange MAC
+  (MQTT omitted/"unknown").
 
 **Asymmetry:** debounced `ASLEEP` is trusted as proof of sleep; a VCSEC `AWAKE` reading is
 **never** trusted to claim `AWAKE` (still requires live telemetry) — a wrong VCSEC `AWAKE` can

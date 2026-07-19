@@ -96,6 +96,15 @@ void VehicleController::auto_pair_task_fn_(void* arg) {
             //   • success            → key still valid
             //   • auth rejection     → car refused our key (likely deleted) — confirm now
             //   • neither (no reply) → car unreachable (asleep / out of range / weak link)
+            // Deliberately do NOT clear retry_deadline_ here. health_probe_ runs through
+            // send_vcsec_, which first takes command_mutex_ and therefore BLOCKS until any
+            // in-flight evcc/manual command finishes — clearing first left that whole wait
+            // with no phase armed at all, so the Bluetooth row dropped its countdown and
+            // showed a bare label for as long as the mutex was held. Leaving the (by now
+            // expired) deadline in place reads as "retrying… right now", which is exactly
+            // what is happening, and ensure_connected_ overrides it with the attempt's own
+            // countdown the moment the probe actually gets to run (Connecting outranks
+            // Waiting). idle_until_next_health_poll_ re-arms it for the next cycle.
             int  streak_before = self->auth_fail_streak_;
             bool ok            = self->health_probe_();
             if (self->pairing_lost_) continue;  // 2nd strike already → revoked (top of loop)
@@ -104,7 +113,7 @@ void VehicleController::auto_pair_task_fn_(void* arg) {
                 ESP_LOGD(TAG, "auto-pair: health check OK — key still valid");
                 // Idle ~30 s, but bail out fast if the message observer flags a deletion
                 // (a faulting charge poll mid-wait) so we re-key promptly, not 30 s later.
-                for (int w = 0; w < 60 && !self->pairing_lost_; w++) vTaskDelay(pdMS_TO_TICKS(500));
+                self->idle_until_next_health_poll_();
             } else if (self->auth_fail_streak_ > streak_before) {
                 // The car answered but REFUSED our key → almost certainly deleted on the
                 // car side. Confirm immediately (don't wait a whole cycle) so we react in
@@ -119,7 +128,7 @@ void VehicleController::auto_pair_task_fn_(void* arg) {
                 // keep the pairing and retry. Logged so it's clear the key simply could not
                 // be verified (connectivity), rather than a deletion being silently missed.
                 ESP_LOGW(TAG, "auto-pair: car not reachable over BLE — can't verify key right now, will retry");
-                for (int w = 0; w < 60 && !self->pairing_lost_; w++) vTaskDelay(pdMS_TO_TICKS(500));
+                self->idle_until_next_health_poll_();
             }
             continue;
         }
@@ -127,6 +136,12 @@ void VehicleController::auto_pair_task_fn_(void* arg) {
         // Not paired (enrolling): disarm the observer — key-rejection faults are expected
         // here and must not be mistaken for a revocation.
         self->believed_paired_ = false;
+        // Leaving the paired steady state also retires its retry countdown. The idle wait
+        // deliberately leaves its deadline armed-but-expired so the row reads "retrying…"
+        // across the probe that follows (see idle_until_next_health_poll_), but enrolment has
+        // no health-poll schedule at all — carrying that stale deadline in would pin the row
+        // on "retrying…" for the entire time the user is being asked to tap an NFC keycard.
+        self->retry_deadline_.store(0);
 
         // 1. Probe for an existing whitelist entry. Once the key is enrolled — by resting a
         //    Tesla NFC keycard on the center-console reader and confirming the "Add key"
@@ -252,6 +267,28 @@ bool VehicleController::reset_for_new_vehicle() {
     if (config_store_) config_store_->remove("ble_mac");
     ESP_LOGI(TAG, "reset for new vehicle complete");
     return true;
+}
+
+// Idle between two VCSEC health polls. The countdown the web UI shows and the wait it
+// counts down come from the SAME constant here, so the row can never promise a retry at a
+// time the loop doesn't actually retry. Polls in short steps so a key deletion flagged by
+// the message observer mid-wait (a faulting charge poll) re-keys promptly rather than a
+// full cycle later.
+//
+// Deliberately leaves the deadline ARMED on the way out. Clearing it here (or, equivalently,
+// just before the probe) opened a phase-less window: the probe runs through send_vcsec_,
+// which takes command_mutex_ FIRST and blocks behind any in-flight evcc/manual command, and
+// the round-trip that follows is unbounded too — with nothing armed the Bluetooth row lost
+// its countdown and fell back to a bare label for all of it. An armed-but-expired deadline
+// reports 0 s, which the UI reads as "retrying… right now" — exactly what is happening — and
+// ensure_connected_ overrides it with the attempt's own countdown the moment the probe gets
+// to run (Connecting outranks Waiting). The next call re-arms it for the next cycle, so from
+// the first wait onward there is always exactly one phase to show.
+void VehicleController::idle_until_next_health_poll_() {
+    constexpr uint32_t kIdleMs = 30000;
+    constexpr uint32_t kStepMs = 500;
+    retry_deadline_.store(deadline_in_(kIdleMs));
+    for (uint32_t w = 0; w < kIdleMs / kStepMs && !pairing_lost_; w++) vTaskDelay(pdMS_TO_TICKS(kStepMs));
 }
 
 bool VehicleController::health_probe_(int timeout_ms) {

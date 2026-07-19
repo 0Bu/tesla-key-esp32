@@ -8,7 +8,7 @@
 #include "vehicle_data.hpp"
 
 // Pure, hardware-free shaping of GET /status — the de-facto contract the web UI
-// (www/app.js, 4 s poll) and any LAN script consume. http_status.cpp only GATHERS the
+// (www/app.js, fed by the ~2 s /events push) and any LAN script consume. http_status.cpp only GATHERS the
 // Inputs under the existing locks and SERIALIZES what emit_status() decides; every
 // which-field/when/what-value decision lives here so the whole field contract is pinned
 // by golden CHECKs in the host mock build (test/test_logic.cpp) — a renamed field or a
@@ -83,6 +83,13 @@ struct Inputs {
     bool                   have_seen_rssi{false};
     int                    seen_rssi{0};       // last advert RSSI (the "can't connect" bars)
     int                    target_connectable{-1};  // -1 unknown / 0 no / 1 yes
+    // What the Bluetooth row counts down (VehicleController::ble_phase()). Empty = no
+    // phase is running, both fields omitted. "connecting" = an attempt is running and
+    // gives up in phase_s; "waiting" = the next attempt starts in phase_s. phase_s is
+    // emitted WITH phase even at 0 ("right now"), so a countdown never vanishes on its
+    // last second and leave the row's label bare.
+    std::string            ble_phase;
+    uint32_t               ble_phase_s{0};
 
     // Link-state machine + raw VCSEC flag (diagnostics).
     LinkState   link{LinkState::Unknown};
@@ -201,6 +208,10 @@ inline void emit_status(const Inputs& in, E& e) {
     e.obj_begin("ble");
     e.boolean("connected", in.ble_connected);
     e.boolean("scanning",  in.ble_scanning);
+    if (!in.ble_phase.empty()) {
+        e.str("phase", in.ble_phase.c_str());
+        e.num("phase_s", (double)in.ble_phase_s);
+    }
     if (in.ble_connected) {
         if (in.have_ble_rssi) e.num("rssi", in.ble_rssi);
         e.str("addr", in.ble_addr.c_str());

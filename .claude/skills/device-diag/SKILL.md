@@ -36,7 +36,7 @@ This skill is the **passive health read + symptom→cause lookup** in front of a
 `handle_status` in [`main/http_status.cpp`](../../../main/http_status.cpp) returns the same JSON
 the web UI receives over the `/events` WebSocket (~2 s push; `build_status_object()` is the shared
 builder). Top-level keys: `vin`, `ip`, `version`, `paired` (=
-`has_session()`), `reauth`, `key_present`, `wifi{ssid,rssi,std}`, `ble{connected,scanning,rssi,
+`has_session()`), `reauth`, `key_present`, `wifi{ssid,rssi,std}`, `ble{connected,scanning,phase,phase_s,rssi,
 addr,devices[],connect_fail,car_connectable}`, `mqtt{configured,connected,tls,broker,error}`,
 `syslog{configured,resolved,reachable,host,port,error}`,
 `tele{climate,drive,tires,closures}` (**only while the BLE link is up**), `link`, `vcsec_sleep`
@@ -88,11 +88,11 @@ truth** shared with the MQTT bridge, so the hero and `sleep_state` can't drift:
 
 (These are the exact lowercase strings `link_state_web_str` emits — the uppercase `AWAKE`/`IDLE`/…
 you may recall are the *MQTT* `sleep_state` values from `link_state_mqtt_str`, not `/status.link`.)
-Cold-start (nothing heard since boot) is a **distinct string `unknown`** — not `unreachable` — which
-the UI renders as **"Connecting…"** (still warming up — often not a fault); `unreachable` proper
-means the car was heard once and then went silent (**"Unreachable"** — drove off / out of range /
-another device holds the link). The UI keys that split on the `link` string itself (`s.link==='unreachable'`),
-which tracks `last_seen_s` (cold-start has none). **Asymmetry to remember:** a debounced VCSEC
+Cold-start (nothing heard since boot) is a **distinct string `unknown`** — not `unreachable`, which
+means the car was heard once and then went silent (drove off / out of range / another device holds
+the link). Useful to you as a diagnosis, but the **UI treats both identically**: it hides the hero
+card and signals the state on the BLE row (orange ping-pong bars + orange MAC). Tell them apart from
+`last_seen_s` — cold-start has none. **Asymmetry to remember:** a debounced VCSEC
 `ASLEEP` is trusted; a VCSEC `AWAKE` is **never** trusted to move `link` to `awake` (that needs live
 telemetry), so a wrong `vcsec_sleep:"AWAKE"` can only ever leave `link` at `idle`.
 
