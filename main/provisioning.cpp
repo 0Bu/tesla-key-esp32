@@ -17,6 +17,7 @@
 #include "esp_http_server.h"
 #include "lwip/sockets.h"
 #include "logic/vin.hpp"
+#include "task_config.hpp"
 
 static const char* TAG = "provisioning";
 static const char* AP_SSID = "tesla-key-esp32-setup";
@@ -216,7 +217,7 @@ void provisioning_run(NvsStorageAdapter& config_store) {
     ESP_LOGI(TAG, "Setup AP up. Join WiFi '%s' and open http://192.168.4.1", AP_SSID);
 
     // Captive-portal DNS so the setup form pops up automatically on phones.
-    xTaskCreate(dns_task, "captive_dns", 4096, nullptr, 5, nullptr);
+    xTaskCreate(dns_task, "captive_dns", 4096, nullptr, tk::kPrioCaptiveDns, nullptr);
 
     httpd_config_t hcfg   = HTTPD_DEFAULT_CONFIG();
     hcfg.uri_match_fn     = httpd_uri_match_wildcard;

@@ -4,6 +4,7 @@
 #include "platform.hpp"
 #include "logic/units.hpp"
 #include "logic/link_state.hpp"
+#include "task_config.hpp"
 #include "logic/ha_templates.hpp"
 
 #include <atomic>
@@ -516,7 +517,7 @@ void mqtt_ha_start(VehicleController& vehicle, NvsStorageAdapter& config_store) 
     }
     esp_mqtt_client_register_event(s_client, MQTT_EVENT_ANY, mqtt_event_handler, nullptr);
     esp_mqtt_client_start(s_client);
-    xTaskCreate(publisher_task, "mqtt_pub", 6144, nullptr, 4, nullptr);
+    xTaskCreate(publisher_task, "mqtt_pub", 6144, nullptr, tk::kPrioMqttPub, nullptr);
 
     ESP_LOGI(TAG, "MQTT bridge started → %s (base topic %s, HA prefix %s)",
              s_broker_disp.c_str(), s_base.c_str(), s_prefix.c_str());

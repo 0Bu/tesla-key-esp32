@@ -14,6 +14,7 @@
 #include <cJSON.h>
 
 #include "platform.hpp"
+#include "task_config.hpp"
 
 #include <atomic>
 #include <cstdio>
@@ -215,7 +216,7 @@ bool ota_check_start() {
     set_state(OtaState::Checking, 0, "checking for updates");
 
     // mbedTLS handshake + manifest fetch run here; same generous stack as ota_task.
-    if (xTaskCreate(ota_check_task, "ota_chk", 8192, nullptr, 5, nullptr) != pdPASS) {
+    if (xTaskCreate(ota_check_task, "ota_chk", 8192, nullptr, tk::kPrioOtaCheck, nullptr) != pdPASS) {
         s_running = false;
         set_state(OtaState::Error, 0, "could not start check task");
         return false;
@@ -322,7 +323,7 @@ bool ota_start() {
     set_state(OtaState::Downloading, 0, "starting download");
 
     // A generous stack: mbedTLS record processing + esp_https_ota run here.
-    if (xTaskCreate(ota_task, "ota", 8192, nullptr, 5, nullptr) != pdPASS) {
+    if (xTaskCreate(ota_task, "ota", 8192, nullptr, tk::kPrioOta, nullptr) != pdPASS) {
         s_running = false;
         set_state(OtaState::Error, 0, "could not start OTA task");
         return false;

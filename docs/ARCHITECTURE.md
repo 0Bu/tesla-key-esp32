@@ -5,7 +5,8 @@ Deep internal reference for tesla-key-esp32. This is the **on-demand** companion
 (build/flash, component map, NVS table, command list, HTTP API, memory constraints); the
 full narrative lives here so it isn't reloaded into every session. Read this when working on
 telemetry, the MQTT bridge, the web UI live feed, WiFi/LAN connectivity, sleep/link-state, pairing,
-or OTA. Keep both in sync — the `project-review` skill checks for drift between them.
+OTA, or anything that touches locks/tasks (the Concurrency contract at the end). Keep both in sync —
+the `project-review` skill checks for drift between them.
 
 ## Web UI live feed (`/events`)
 
@@ -506,21 +507,27 @@ our latest supported revision, per the MCP lifecycle spec (the client disconnect
 can't proceed). **Methods:** `initialize` (capabilities: `tools` only), `ping`,
 `tools/list`, `tools/call`; everything else → `-32601`.
 
-**One spec table drives everything.** The tool registry in `logic/mcp.hpp` (`kMcpTools`)
-carries name, description AND each argument's key/type/required/bounds (`McpArg`,
-`kMcpMaxArgs`). The advertised `tools/list` JSON schema and the executor's validation are
-both generated from that table, so schema-vs-enforcement drift is impossible by
-construction: an absent required argument OR a present-but-unparseable one is a `-32602`
+**One spec table drives everything — including the REST surface.** The command registry in
+`logic/command_registry.hpp` (`kCommands`, `CmdArg`, `kCmdMaxArgs`) carries each command's
+REST name, MCP tool name + description, AND each argument's per-surface keys with ONE
+shared `{lo,hi}` bounds pair. The advertised `tools/list` JSON schema, the MCP executor's
+validation, and the REST `/command` clamp (`http_api.cpp`) are all generated from that
+table, so schema-vs-enforcement drift — and any `/api`-vs-`/mcp` disagreement about names
+or ranges — is impossible by construction. Surface semantics stay deliberately different:
+MCP is strict — an absent required argument OR a present-but-unparseable one is a `-32602`
 protocol error (silently defaulting `set_scheduled_charging`'s `enable` would *disable*
 the schedule and report success); loose-but-unambiguous encodings are coerced (numeric
 strings for ints, 0/1 for bools); parsed integers are clamped to the spec bounds before
-the int cast (UB guard). The registry, method routing, version table, clamp and the
+the int cast (UB guard) — while REST stays lenient for TeslaBleHttpProxy compat (absent →
+the spec's `api_default`). Both surfaces execute through the single kind→controller
+dispatch in `command_exec.cpp`. The registry, method routing, version table, clamp and the
 shared command-outcome text (`logic/command_result.hpp`, also used by the REST
 `/command` reason so the two paths can never diverge) are IDF-free and covered by the
-host mock build (`test/test_logic.cpp`, `test_mcp`). The tool set itself — exactly the
+host mock build (`test/test_logic.cpp`, `test_mcp` — including a pin on the `tools/list`
+row order, which is the registry's table order). The tool set itself — exactly the
 run-on-key charging commands plus cache-only `get_vehicle_state`, role-refused commands
-deliberately absent — is documented with the full per-tool table in
-[`MCP.md`](MCP.md#tools).
+deliberately absent (`mcp_name == nullptr`) — is documented with the full per-tool table
+in [`MCP.md`](MCP.md#tools).
 
 **Heap safety:** `tools/list` is the endpoint's largest response (~1.5 KB serialized) and
 `cJSON_PrintUnformatted` builds it in one contiguous block — the crash-risk currency on
@@ -534,3 +541,89 @@ inside `http_server.cpp`'s `handle_all` try/catch.
 LAN only (see [`SECURITY.md`](SECURITY.md)). The endpoint grants nothing the open REST
 API doesn't already expose; the enrolled key stays Charging Manager only. Client
 configuration lives in [`MCP.md`](MCP.md#client-integration).
+
+## Concurrency (normative contract)
+
+This section is the **rule**, not a description: new code either fits it or changes it here
+first, in the same PR. Deadlock is this device's worst failure mode — frozen but not
+rebooting (no panic, so no reboot), evcc blind, and the polling window stuck open so a
+parked car never sleeps.
+
+### Lock hierarchy (`VehicleController`)
+
+Four primitives, created in `VehicleController::init` (`vehicle_ctrl.cpp`); the RAII guards
+live in `vehicle_ctrl_internal.hpp` (`tk::MutexGuard`, `tk::InFlightGuard`):
+
+| Primitive | Kind | Protects |
+|---|---|---|
+| `command_mutex_` | mutex, RAII | one whole command/query cycle: exclusive use of `cmd_sem_`, `last_result_`, `last_error_` |
+| `vehicle_mutex_` | mutex, take/give | **every** call into the tesla-ble `vehicle_` object (send, `loop()`, `on_rx_data`, `set_connected`) |
+| `cmd_sem_` | binary semaphore | signals "result callback ran" from the BLE RX task to the waiting command |
+| `cache_mutex_` | mutex, RAII, leaf | the `last_known_*` caches (`std::string` members ⇒ an unlocked copy is torn-read UB) |
+
+**Normative order:** `command_mutex_` → `vehicle_mutex_` → `cache_mutex_`. Acquire strictly
+left-to-right; never take a lock while holding one to its right. Corollaries, each load-bearing
+today:
+
+- `vehicle_mutex_` is held only for the library call itself — **never across the `cmd_sem_`
+  wait** (the RX task needs it to deliver the very result being waited for; holding it would
+  deadlock every command into its timeout).
+- `cache_mutex_` is a **leaf**: held only for a plain struct copy/assignment, never while
+  calling out (library, BLE, NVS, logging) and never while taking another lock. It *is*
+  legitimately taken while `vehicle_mutex_` is held — the RX parse path
+  (`on_rx_data`/`loop()` under `vehicle_mutex_`) synchronously fires the `set_*_state_callback`
+  cache writers — which is exactly the vehicle→cache order above.
+- `clear_session_and_cache_()` takes `vehicle_mutex_` internally, so it must **not** be entered
+  while holding it (non-recursive mutex ⇒ self-deadlock; see the comment at its definition).
+- `last_result_`/`last_error_` need no lock of their own: the RX callback writes them **before**
+  giving `cmd_sem_`, and the command task reads them only **after** taking it — the semaphore
+  is the ordering edge. `command_mutex_` guarantees a single waiter at a time.
+- `cmd_in_flight_` (atomic, `tk::InFlightGuard`) is set only under `command_mutex_`; `loop_task`
+  reads it to pause background polls — a flag, not a lock; it orders nothing.
+
+### Task inventory
+
+Application-task priorities are declared **only** in [`main/task_config.hpp`](../main/task_config.hpp)
+(`tk::kPrio*`) so relative order is reviewable in one place; stack sizes stay at the
+`xTaskCreate` sites with their sizing rationale. Current inventory:
+
+| Task | Priority | Stack | Created in | Purpose |
+|---|---|---|---|---|
+| `vehicle_loop` | `kPrioVehicleLoop` = 5 | 8192 | `vehicle_ctrl.cpp` (fn: `vehicle_telemetry.cpp`) | pump `vehicle_->loop()`, rotating NO_WAKE telemetry poll, sleep gating, BLE-fault link reset |
+| `captive_dns` | `kPrioCaptiveDns` = 5 | 4096 | `provisioning.cpp` | captive-portal DNS (setup-AP mode only; vehicle stack not running) |
+| `ota` | `kPrioOta` = 5 | 8192 | `ota_update.cpp` | OTA download + flash (transient) |
+| `ota_chk` | `kPrioOtaCheck` = 5 | 8192 | `ota_update.cpp` | OTA manifest check (transient) |
+| `auto_pair` | `kPrioAutoPair` = 4 | 8192 | `vehicle_ctrl.cpp` (fn: `vehicle_pairing.cpp`) | pairing supervisor: enrol / re-pair / health probe |
+| `wifi_wd` | `kPrioWifiWatchdog` = 4 | 3072 | `main.cpp` | ghost-association watchdog (re-associate, never reboot) |
+| `mqtt_pub` | `kPrioMqttPub` = 4 | 6144 | `mqtt_ha.cpp` | MQTT/HA publisher (reads the caches) |
+| `display` | `kPrioDisplay` = 3 | 6144 | `display.cpp` | ST7735 renderer (`CONFIG_TESLA_DISPLAY_ENABLED` builds) |
+| `ota_gate` | `kPrioOtaGate` = 3 | 3072 | `main.cpp` | one-shot OTA rollback health gate (~90 s) |
+| `led` | `kPrioLed` = 2 | 3072 | `led_status.cpp` | APA102 status LED (`CONFIG_TESLA_LED_ENABLED` builds) |
+
+Not in the table (ESP-IDF-owned, priorities from IDF Kconfig, not `task_config.hpp`): the
+**NimBLE host task** — it runs the RX data callback, i.e. `vehicle_mutex_` → parse →
+`cache_mutex_` and every `set_*_callback` lambda; the **esp_http_server task** — it runs every
+HTTP/MCP handler, i.e. the `command_mutex_` cycles and cache copies; plus the usual esp_timer /
+WiFi / LwIP system tasks.
+
+### Atomics doctrine
+
+A member is a `std::atomic` **only** when it is a single scalar — flag, counter, or tick
+stamp — crossing tasks with no multi-field consistency requirement (`pairing_lost_`,
+`cmd_in_flight_`, `cmd_fail_streak_`, `last_contact_ticks_`, …). Anything read or written as
+a *group* — above all structs holding `std::string` — goes under a mutex (`cache_mutex_` for
+the caches). The test: if two fields must be observed consistently together, that is a mutex,
+not two atomics.
+
+### Deferred: owned BLE-ops queue
+
+The structural alternative to the flags above: one owner task serializing *all* tesla-ble
+access via message passing, replacing the `command_mutex_`/`vehicle_mutex_`/`cmd_in_flight_`
+coordination by construction and giving commands true queue priority over background polls.
+**Deliberately deferred** (architecture review 2026-07, P7): the current compensations
+(`cmd_in_flight_` poll pause, `cmd_fail_streak_` link-drop backstop) are live-tested and
+stable, the command surface is not growing, and the rework would touch the most
+incident-prone code for a structural — not behavioural — win, while costing static
+task+queue memory on the tightest targets. **Revisit triggers:** (a) a new command class
+lands (e.g. upstream tesla-ble registers `scheduledDepartureAction`), or (b) another
+queue-position incident occurs despite `cmd_in_flight_`.

@@ -12,11 +12,18 @@
 // guard) is a compile error, not a comment violation.
 
 #include "http_server.hpp"
+#include "logic/command_registry.hpp"
 #include <esp_http_server.h>
 #include <cJSON.h>
 
 // Global vehicle reference (set once in http_server_start).
 extern VehicleController* g_vehicle;
+
+// Global runtime-config store (tesla_cfg NVS namespace; set once in http_server_start,
+// same idiom as g_vehicle). The persisted-config handlers (/set_vin, /set_mqtt, /set_time)
+// read/write it directly. Keys must be ≤15 chars (NVS limit); an empty value disables the
+// feature it gates.
+extern NvsStorageAdapter* g_config;
 
 // Proof-of-guard wrapper: constructed only inside handle_all's try/catch dispatch in
 // http_server.cpp. Because every handler takes this instead of httpd_req_t*, its
@@ -61,6 +68,12 @@ bool browser_time_plausible(double epoch_ms);
 // (/set_time and /ota/check?ms=) share, so the security-sensitive clock-set path can
 // never drift between them. Returns the applied epoch seconds (for logging).
 long long apply_browser_clock(double epoch_ms);
+
+// The ONE kind → VehicleController dispatch both command surfaces execute through
+// (command_exec.cpp). ival/bval are the positional value arrays each surface filled
+// against the shared arg specs in logic/command_registry.hpp (tk::kCmdMaxArgs slots).
+bool execute_vehicle_command(VehicleController& v, tk::CmdKind kind,
+                             const int* ival, const bool* bval);
 
 // ─── Route handlers ───────────────────────────────────────────────────────────
 
