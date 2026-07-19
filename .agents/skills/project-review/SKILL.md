@@ -121,8 +121,9 @@ Treat a violation of any of these as a real finding.
   asleep** — we stopped polling infotainment to let it sleep and VCSEC hasn't confirmed →
   web UI shows the neutral **"Parked"** card, which makes **no** sleep claim), **UNREACHABLE**
   (answers nothing over BLE). Nothing heard since boot/re-pair ⇒ MQTT sleep_state **omitted**
-  (HA shows "unknown"); the web UI shows a grey **"Unreachable"** hero (or **"Connecting…"** for
-  the unknown cold-start state) with the orange ping-pong BLE bars — not hidden, never a sleep claim.
+  (HA shows "unknown"); the web UI **hides the hero card** for both `unreachable` and the
+  cold-start `unknown` — rather than fill it with stale battery/idle chips — and signals the state
+  on the BLE row instead (orange ping-pong bars + orange MAC). Never a sleep claim.
 - **Asymmetry — do not break it:** trust the *debounced ASLEEP* VCSEC flag as proof of sleep,
   but **never** trust VCSEC `AWAKE` to claim AWAKE. A parked car reports VCSEC `AWAKE` while
   its infotainment sleeps (the old `wake_up()` trap); AWAKE always requires live infotainment

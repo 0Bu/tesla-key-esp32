@@ -306,8 +306,9 @@ hero and MQTT `sleep_state`. Four values:
 - `AWAKE` — fresh live infotainment telemetry (< 60 s).
 - `ASLEEP` — no live data AND debounced VCSEC sleep proven (≥ `kAsleepDebounceS` ≈ 120 s).
 - `IDLE` — reachable over BLE but **not provably asleep** (web UI shows neutral "Parked").
-- `UNREACHABLE` — answers nothing over BLE; web UI shows a grey **"Unreachable"** hero + orange
-  ping-pong BLE bars (cold-start, nothing heard since boot ⇒ **"Connecting…"**; MQTT omitted/"unknown").
+- `UNREACHABLE` — answers nothing over BLE; the web UI **hides the hero card** (as it does for the
+  cold-start unknown state) and signals it on the BLE row: orange ping-pong bars + orange MAC
+  (MQTT omitted/"unknown").
 
 **Asymmetry:** debounced `ASLEEP` is trusted as proof of sleep; a VCSEC `AWAKE` reading is
 **never** trusted to claim `AWAKE` (still requires live telemetry) — a wrong VCSEC `AWAKE` can

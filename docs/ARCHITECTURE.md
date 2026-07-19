@@ -420,11 +420,10 @@ The web UI mirrors this exactly: it shows the "Vehicle asleep" hero (with the wa
 **only** when `ASLEEP` is a proven fact; for `IDLE` it shows a neutral **"Parked"**
 card (last-known SOC + idle time + the same wake button) that makes no sleep claim; and for both
 `UNREACHABLE` *and* the unknown state (nothing heard since boot — the on-demand BLE link hasn't
-reached the car yet) it shows a neutral grey hero with the orange Bluetooth glyph rather than a
-blank area: **"Unreachable"** (no recent answer over BLE, with last-known SOC + idle time) or
-**"Connecting…"** (no signed round-trip yet; the subtitle claims "Bluetooth connected" only
-when the momentary GATT link is actually up, else "Reaching your Tesla over Bluetooth…") —
-never a sleep claim. In that same
+reached the car yet) it **hides the hero card entirely**. Both states know nothing current about the
+car, and a hero filled with a retained battery percentage and an idle timer reads as live status;
+withholding the card is the honest form, and the state is still signalled — never as a sleep claim —
+on the BLE row. In that same
 unknown/unreachable state the BLE connection row drops its green and animates an orange
 ping-pong across the signal bars (a darker-orange crest bouncing edge→edge over a light-orange
 base) with an orange MAC, flagging "connected but stateless" at a glance. The momentary BLE row
