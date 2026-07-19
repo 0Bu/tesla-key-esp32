@@ -4,8 +4,40 @@ Deep internal reference for tesla-key-esp32. This is the **on-demand** companion
 [`.claude/CLAUDE.md`](../.claude/CLAUDE.md): CLAUDE.md carries the always-needed essentials
 (build/flash, component map, NVS table, command list, HTTP API, memory constraints); the
 full narrative lives here so it isn't reloaded into every session. Read this when working on
-telemetry, the MQTT bridge, WiFi/LAN connectivity, sleep/link-state, pairing, or OTA. Keep both in sync — the
-`project-review` skill checks for drift between them.
+telemetry, the MQTT bridge, the web UI live feed, WiFi/LAN connectivity, sleep/link-state, pairing,
+OTA, or anything that touches locks/tasks (the Concurrency contract at the end). Keep both in sync —
+the `project-review` skill checks for drift between them.
+
+## Web UI live feed (`/events`)
+
+The web UI's live data is **WebSocket-only** — there is no interval polling and no HTTP poll
+fallback. On load the browser (`main/www/app.js` `boot()`) opens ONE socket to `ws://<device>/events`
+and sends the text `sub`; the device answers with an immediate `/status` snapshot and thereafter a
+background task pushes a fresh `/status` frame every ~2 s. Each frame is exactly the object
+`GET /status` returns — `build_status_object()` (`http_status.cpp`) is the single builder both paths
+share, so the pushed frame and a manual `GET /status` can never drift, and the client just calls the
+existing `render()` on each frame (no envelope).
+
+- **Server** (`main/http_events.cpp`): an 8-slot fd registry (mutex-guarded), a broadcast task
+  (`ws_broadcast_task`, ~2 s cadence, self-gated on `ws_any_clients()` so it costs nothing when no
+  browser is open), and the `/events` handler. The handler is registered **raw**
+  (`httpd_register_uri_handler` with `is_websocket=true`) BEFORE the `/*` wildcards — so it is the
+  ONE route NOT reached through the `handle_all` try/catch, and it guards its own allocations
+  (a `std::bad_alloc` on this memory-tight chip must drop a frame, never unwind through httpd's C
+  frames → `std::terminate` → reboot). Needs `CONFIG_HTTPD_WS_SUPPORT=y` (base `sdkconfig.defaults`,
+  target-agnostic) and `config.close_fn` (`http_server.cpp`) to drop a closed fd from the registry.
+- **Frame policy** is the pure, host-tested `main/logic/ws_policy.hpp`: `ws_frame_plan()` decides
+  from a frame's *announced* length — before any payload is read — whether to skip an empty frame,
+  read one that fits the 16-byte command buffer, or **close** an oversized one (undrainable: httpd
+  leaves its body in the socket and offers no skip, so the stream is desynchronized and dropping the
+  connection is the only honest exit — sizing a buffer from a client-asserted 64-bit length would be
+  a one-frame OOM). `ws_frame_action()` then classifies the bytes actually read; only `sub`
+  subscribes.
+- **Client** (`app.js`): `render(JSON.parse(frame))` on each message; on close, keep the last
+  rendered state and reconnect after 3 s. `poll()` is repurposed to `ws.send("sub")` — an
+  on-demand snapshot request after a user action (charge/wake/gen-key), so the UI refreshes at once
+  instead of waiting for the next push, still purely over the socket. `waitReboot()` still does a
+  plain `GET /status` — that is post-OTA reboot detection, a different concern from the live feed.
 
 ## Read-only telemetry (detail)
 
@@ -55,7 +87,12 @@ a new `version` in `manifest.json` but serves an old `.bin`. No eFuses burned.
 holds rollback armed until a freshly-flashed image has run healthily for a window
 (`kOtaHealthGateS` ≈ 90 s). An image that boots but then crashes/OOM-reboots under load dies
 while still `PENDING_VERIFY`, so the bootloader reverts to the previous slot rather than
-having committed it at startup.
+having committed it at startup. A **deliberate, user-initiated reboot** inside that window is a
+different case, though: the three config handlers that reboot (`/set_vin`, `/set_mqtt`,
+`/set_syslog`) and the setup-portal save call `ota_confirm_pending_image()` first — a user actively
+interacting is proof the image runs, so an intentional restart must not look like a failed boot and
+roll the update back. It is a no-op on a normal boot / already-valid image. (An unattended
+brownout/power-cycle in the window still reverts — that is the crash-safety net working as intended.)
 
 **Image signature.** Builds use the Secure Boot v2 RSA-3072 signature scheme *without*
 hardware Secure Boot (`CONFIG_SECURE_SIGNED_APPS_NO_SECURE_BOOT` + `..._RSA_SCHEME` +
@@ -72,7 +109,7 @@ Partition layout (`partitions.csv`) is dual-OTA (`otadata` + `ota_0`/`ota_1`, ~2
 sized to fill 4 MB (the smallest supported flash — the T-Dongle-C5's 16 MB leaves the top
 unused) so ONE table serves every target; app at `0x20000`. The `ci-build-all.sh` **app-size gate**
 sits at `slot − 32 KB` (0x1e8000): each image's code rounds up to a 64 KB Secure-Boot boundary + a
-4 KB signature, and the largest — esp32c6 and esp32c5, ~0x1d1000 signed — clear it comfortably.
+4 KB signature, and the largest — esp32c5 (the only target with display+PSRAM), ~0x1e1000 signed — clears it by ~28 KB.
 **esp32c5 carries the extra on-device display + PSRAM code, and esp32s3 the display code too
 (no PSRAM), but both still fit at the base `-Og`** like every target: the Package A size levers
 (#154) freed the ~64 KB the display needs, so no `-Os` (which hard-freezes under load — rejected
@@ -108,7 +145,11 @@ into `third_party/tesla-ble` (gitignored) and appends `esp32c5` to its `targets:
 the git dep applies when `target != esp32c5`, a local `path:` dep (the patched checkout) when
 `target == esp32c5`. So only C5 routes through the local copy; the other four resolve
 byte-identically from git, and CI (`ci-build-all.sh`) runs the prepare step automatically. All
-five images are the same tesla-ble revision.
+five images are the same tesla-ble revision. This patch is planned debt: the retirement plan
+(one-line upstream `targets:` PR, then drop the script/routing) is
+[`adr/0001-esp32c5-target-upstreaming.md`](adr/0001-esp32c5-target-upstreaming.md); the wider
+tesla-ble dependency strategy (IDF-6 / Mbed TLS 4 crypto seam, issue #61) is
+[`adr/0002-idf6-mbedtls4-crypto-seam.md`](adr/0002-idf6-mbedtls4-crypto-seam.md).
 
 **On-device ST7735 display (LilyGO T-Dongle-C5 and T-Dongle-S3).** Both dongles carry the same
 0.96" ST7735 LCD and it IS driven — see `main/display.cpp` (a status panel: WiFi/BLE header + a
@@ -257,6 +298,50 @@ grouped under one device. **Read-only by design** — no command topics are subs
   (re)connect it (re)sends discovery + `online` + an immediate snapshot, then republishes
   state every interval. The same active-window gating that lets the car sleep applies to
   the *source* polls, so MQTT keeps serving the last-known (retained) values while asleep.
+
+## Syslog forwarder
+
+`main/syslog.cpp` forwards the same in-RAM diag log served by `GET /diag` (`main/diag_log.cpp`)
+to a UDP Syslog collector, best-effort, framed as RFC 5424 (`<14>1 - tesla-key-esp32 - - - -
+<message>`, facility `user`/priority `info` throughout — there is no per-line severity mapping).
+The capture point is `diag_log.cpp`'s `esp_log_set_vprintf` hook, which already mirrors every
+`ESP_LOG*` line (from this firmware **and** ESP-IDF/NimBLE internals — NimBLE is pre-throttled
+to `WARN` there) into the `/diag` ring; the same call also queues the line for Syslog, so there
+is exactly one capture point to keep in sync, not two.
+
+- **Config:** one NVS string, `syslog_uri` (`tesla_cfg` namespace) — a bare `"host:port"`, no
+  scheme (a bare host defaults to port 514); `""` disables forwarding. Falls back to
+  `CONFIG_TESLA_SYSLOG_SERVER` (Kconfig, default empty). Set from the web UI (Connections →
+  Syslog card, pencil icon → `POST /set_syslog`, `{"server":"host:port"}`) or NVS/Kconfig
+  directly. Resolved **once**, at `syslog_start()` (called early in `app_main`, before WiFi) —
+  like the MQTT bridge, a config change persists then reboots to apply, so there is nothing to
+  re-read at runtime.
+- **Delivery:** a background task queues lines (fixed 24-deep queue of 256-byte messages —
+  small on purpose, since the queue is one contiguous heap allocation and this device's binding
+  memory limit is the largest *contiguous* free block) and, once WiFi is up, resolves the
+  target via `getaddrinfo()` and forwards. Re-resolve + re-probe is throttled to a ~10s cadence
+  (`have_checked`, not `!resolved` — a persistently failing DNS/host must not re-run
+  `getaddrinfo()`+ping every loop). **Delivery gates on DNS resolution only** (`resolved`) —
+  never on the reachability probe below — since Syslog is inherently best-effort UDP.
+- **Reachability probe (advisory only, never a delivery gate):** ARP for an on-subnet host (L2,
+  works even when the collector firewalls ICMP), else a 2-echo ICMP ping (800 ms timeout each).
+  Surfaced in `/status.syslog.reachable` purely as a UI hint ("Enabled · not answering ping").
+- **Send-failure handling** (`logic/syslog_policy.hpp`, host-tested): an errno from
+  `sendto()`/`socket()` is classified HARD (routing/host-down errors — `ENETUNREACH`,
+  `EHOSTUNREACH`, `ENETDOWN`, `EHOSTDOWN`, `EADDRNOTAVAIL` — re-resolve + re-probe immediately)
+  or TRANSIENT (everything else, incl. `ENOMEM`/`ENOBUFS`/`EAGAIN` — hold the destination, let
+  the ordinary cadence re-check). Getting this wrong the other way — clearing the throttle on
+  every failure — turns a chatty diag stream (a busy BLE poll can log several lines a second)
+  into a `getaddrinfo()`+ping storm that runs hardest exactly when the link is worst; the
+  handler also logs the failing/recovering *transition* only, never per-line, for the same
+  reason. Mirrors an equivalent module in the sibling `daikin-altherma-esp32` project, where
+  this exact storm was diagnosed on a live board.
+- **Loop guard:** `syslog_send()` drops any captured line containing the `"syslog:"` tag this
+  module's own `ESP_LOGx(TAG, ...)` calls render (`TAG = "syslog"`) — otherwise this module's
+  own "send failed" diagnostics would themselves be queued for (failing) delivery, feeding the
+  exact storm the paragraph above avoids.
+- **Status:** `syslog_status()` → `/status.syslog` (`configured`/`resolved`/`reachable`/`host`/
+  `port`/`error`), read by the web UI's Connections card exactly like the MQTT row.
 
 ## WiFi / LAN connectivity (reconnect + watchdog)
 
@@ -456,3 +541,89 @@ inside `http_server.cpp`'s `handle_all` try/catch.
 LAN only (see [`SECURITY.md`](SECURITY.md)). The endpoint grants nothing the open REST
 API doesn't already expose; the enrolled key stays Charging Manager only. Client
 configuration lives in [`MCP.md`](MCP.md#client-integration).
+
+## Concurrency (normative contract)
+
+This section is the **rule**, not a description: new code either fits it or changes it here
+first, in the same PR. Deadlock is this device's worst failure mode — frozen but not
+rebooting (no panic, so no reboot), evcc blind, and the polling window stuck open so a
+parked car never sleeps.
+
+### Lock hierarchy (`VehicleController`)
+
+Four primitives, created in `VehicleController::init` (`vehicle_ctrl.cpp`); the RAII guards
+live in `vehicle_ctrl_internal.hpp` (`tk::MutexGuard`, `tk::InFlightGuard`):
+
+| Primitive | Kind | Protects |
+|---|---|---|
+| `command_mutex_` | mutex, RAII | one whole command/query cycle: exclusive use of `cmd_sem_`, `last_result_`, `last_error_` |
+| `vehicle_mutex_` | mutex, take/give | **every** call into the tesla-ble `vehicle_` object (send, `loop()`, `on_rx_data`, `set_connected`) |
+| `cmd_sem_` | binary semaphore | signals "result callback ran" from the BLE RX task to the waiting command |
+| `cache_mutex_` | mutex, RAII, leaf | the `last_known_*` caches (`std::string` members ⇒ an unlocked copy is torn-read UB) |
+
+**Normative order:** `command_mutex_` → `vehicle_mutex_` → `cache_mutex_`. Acquire strictly
+left-to-right; never take a lock while holding one to its right. Corollaries, each load-bearing
+today:
+
+- `vehicle_mutex_` is held only for the library call itself — **never across the `cmd_sem_`
+  wait** (the RX task needs it to deliver the very result being waited for; holding it would
+  deadlock every command into its timeout).
+- `cache_mutex_` is a **leaf**: held only for a plain struct copy/assignment, never while
+  calling out (library, BLE, NVS, logging) and never while taking another lock. It *is*
+  legitimately taken while `vehicle_mutex_` is held — the RX parse path
+  (`on_rx_data`/`loop()` under `vehicle_mutex_`) synchronously fires the `set_*_state_callback`
+  cache writers — which is exactly the vehicle→cache order above.
+- `clear_session_and_cache_()` takes `vehicle_mutex_` internally, so it must **not** be entered
+  while holding it (non-recursive mutex ⇒ self-deadlock; see the comment at its definition).
+- `last_result_`/`last_error_` need no lock of their own: the RX callback writes them **before**
+  giving `cmd_sem_`, and the command task reads them only **after** taking it — the semaphore
+  is the ordering edge. `command_mutex_` guarantees a single waiter at a time.
+- `cmd_in_flight_` (atomic, `tk::InFlightGuard`) is set only under `command_mutex_`; `loop_task`
+  reads it to pause background polls — a flag, not a lock; it orders nothing.
+
+### Task inventory
+
+Application-task priorities are declared **only** in [`main/task_config.hpp`](../main/task_config.hpp)
+(`tk::kPrio*`) so relative order is reviewable in one place; stack sizes stay at the
+`xTaskCreate` sites with their sizing rationale. Current inventory:
+
+| Task | Priority | Stack | Created in | Purpose |
+|---|---|---|---|---|
+| `vehicle_loop` | `kPrioVehicleLoop` = 5 | 8192 | `vehicle_ctrl.cpp` (fn: `vehicle_telemetry.cpp`) | pump `vehicle_->loop()`, rotating NO_WAKE telemetry poll, sleep gating, BLE-fault link reset |
+| `captive_dns` | `kPrioCaptiveDns` = 5 | 4096 | `provisioning.cpp` | captive-portal DNS (setup-AP mode only; vehicle stack not running) |
+| `ota` | `kPrioOta` = 5 | 8192 | `ota_update.cpp` | OTA download + flash (transient) |
+| `ota_chk` | `kPrioOtaCheck` = 5 | 8192 | `ota_update.cpp` | OTA manifest check (transient) |
+| `auto_pair` | `kPrioAutoPair` = 4 | 8192 | `vehicle_ctrl.cpp` (fn: `vehicle_pairing.cpp`) | pairing supervisor: enrol / re-pair / health probe |
+| `wifi_wd` | `kPrioWifiWatchdog` = 4 | 3072 | `main.cpp` | ghost-association watchdog (re-associate, never reboot) |
+| `mqtt_pub` | `kPrioMqttPub` = 4 | 6144 | `mqtt_ha.cpp` | MQTT/HA publisher (reads the caches) |
+| `display` | `kPrioDisplay` = 3 | 6144 | `display.cpp` | ST7735 renderer (`CONFIG_TESLA_DISPLAY_ENABLED` builds) |
+| `ota_gate` | `kPrioOtaGate` = 3 | 3072 | `main.cpp` | one-shot OTA rollback health gate (~90 s) |
+| `led` | `kPrioLed` = 2 | 3072 | `led_status.cpp` | APA102 status LED (`CONFIG_TESLA_LED_ENABLED` builds) |
+
+Not in the table (ESP-IDF-owned, priorities from IDF Kconfig, not `task_config.hpp`): the
+**NimBLE host task** — it runs the RX data callback, i.e. `vehicle_mutex_` → parse →
+`cache_mutex_` and every `set_*_callback` lambda; the **esp_http_server task** — it runs every
+HTTP/MCP handler, i.e. the `command_mutex_` cycles and cache copies; plus the usual esp_timer /
+WiFi / LwIP system tasks.
+
+### Atomics doctrine
+
+A member is a `std::atomic` **only** when it is a single scalar — flag, counter, or tick
+stamp — crossing tasks with no multi-field consistency requirement (`pairing_lost_`,
+`cmd_in_flight_`, `cmd_fail_streak_`, `last_contact_ticks_`, …). Anything read or written as
+a *group* — above all structs holding `std::string` — goes under a mutex (`cache_mutex_` for
+the caches). The test: if two fields must be observed consistently together, that is a mutex,
+not two atomics.
+
+### Deferred: owned BLE-ops queue
+
+The structural alternative to the flags above: one owner task serializing *all* tesla-ble
+access via message passing, replacing the `command_mutex_`/`vehicle_mutex_`/`cmd_in_flight_`
+coordination by construction and giving commands true queue priority over background polls.
+**Deliberately deferred** (architecture review 2026-07, P7): the current compensations
+(`cmd_in_flight_` poll pause, `cmd_fail_streak_` link-drop backstop) are live-tested and
+stable, the command surface is not growing, and the rework would touch the most
+incident-prone code for a structural — not behavioural — win, while costing static
+task+queue memory on the tightest targets. **Revisit triggers:** (a) a new command class
+lands (e.g. upstream tesla-ble registers `scheduledDepartureAction`), or (b) another
+queue-position incident occurs despite `cmd_in_flight_`.

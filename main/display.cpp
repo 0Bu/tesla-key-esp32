@@ -24,6 +24,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "driver/spi_master.h"
+#include "task_config.hpp"
 #include "driver/gpio.h"
 #include "esp_heap_caps.h"
 #include "esp_wifi.h"
@@ -624,8 +625,16 @@ static void display_task(void* arg) {
         for (int slept = 0; slept < frame_ms; slept += 40) {
             vTaskDelay(pdMS_TO_TICKS(40));
             bool lvl = gpio_get_level((gpio_num_t)BOOT_BTN);
-            if (btn_prev && !lvl) rotate_90();
+            bool pressed = btn_prev && !lvl;
             btn_prev = lvl;
+            if (pressed) {
+                rotate_90();
+                // Break the wait so the outer loop re-composes + flushes for the new orientation
+                // NOW. rotate_90() only re-sends MADCTL; without an immediate redraw the panel keeps
+                // scanning the OLD GRAM reinterpreted under the new MADCTL — a stale rotated frame
+                // for up to a full frame_ms (~1 s in the static battery view).
+                break;
+            }
         }
     }
 }
@@ -725,7 +734,7 @@ void display_start(VehicleController& vehicle) {
              s_cfg.mosi, s_cfg.sck, s_cfg.cs, s_cfg.dc, s_cfg.madctl);
 
     // 6 KB stack: soft-float gradient lerp + snprintf framing — 4 KB would be tight.
-    if (xTaskCreate(display_task, "display", 6144, &vehicle, 3, nullptr) != pdPASS) {
+    if (xTaskCreate(display_task, "display", 6144, &vehicle, tk::kPrioDisplay, nullptr) != pdPASS) {
         ESP_LOGE(TAG, "display task create failed — display disabled");
         spi_bus_remove_device(s_spi); s_spi = nullptr;
         spi_bus_free(SPI2_HOST); heap_caps_free(s_fb); s_fb = nullptr;

@@ -14,6 +14,8 @@
 //                                    (logic/command_registry.hpp <- http_api.cpp + mcp_server.cpp)
 //   * the /status field contract, pinned by golden emissions
 //                                    (logic/status_model.hpp <- http_status.cpp)
+//   * Syslog target parsing + send-failure classification
+//                                    (logic/syslog_policy.hpp <- syslog.cpp, /set_syslog)
 // The cJSON serializers stay IDF/cJSON-coupled, but they are one-to-one visitors now:
 // every which-field/when/what-value decision they render is host-tested here.
 
@@ -29,6 +31,11 @@
 #include "logic/display_model.hpp"
 #include "logic/soc_gradient.hpp"
 #include "logic/led_status.hpp"
+#include "logic/syslog_policy.hpp"
+#include "logic/ws_policy.hpp"
+#include "logic/active_window.hpp"
+#include "logic/ha_templates.hpp"
+#include "logic/http_body.hpp"
 
 #include <cmath>
 #include <cstdio>
@@ -83,6 +90,66 @@ static void test_vin() {
     // Stray punctuation / spaces.
     CHECK(!tk::vin_is_plausible("5YJ3E1EA7KF00031-"));
     CHECK(!tk::vin_is_plausible("5YJ3E1EA7KF 00316"));
+}
+
+// ─── Syslog target parsing + send-failure classification ────────────────────────
+static void test_syslog_policy() {
+    std::string host; int port = 0;
+
+    // host:port.
+    CHECK(tk::syslog_target_parse("192.168.1.22:514", host, port));
+    CHECK(host == "192.168.1.22" && port == 514);
+    CHECK(tk::syslog_target_parse("syslog.lan:1514", host, port));
+    CHECK(host == "syslog.lan" && port == 1514);
+
+    // Bare host defaults to port 514.
+    CHECK(tk::syslog_target_parse("192.168.1.22", host, port));
+    CHECK(host == "192.168.1.22" && port == 514);
+
+    // Rejected: empty, empty host/port either side of ':', a non-numeric or
+    // out-of-range port.
+    CHECK(!tk::syslog_target_parse("", host, port));
+    CHECK(!tk::syslog_target_parse(":514", host, port));
+    CHECK(!tk::syslog_target_parse("192.168.1.22:", host, port));
+    CHECK(!tk::syslog_target_parse("192.168.1.22:abc", host, port));
+    CHECK(!tk::syslog_target_parse("192.168.1.22:0", host, port));
+    CHECK(!tk::syslog_target_parse("192.168.1.22:65536", host, port));
+
+    // /set_syslog validation: empty always disables; a valid target passes; a
+    // malformed one, or one carrying whitespace, is rejected.
+    CHECK(tk::syslog_target_is_plausible(""));
+    CHECK(tk::syslog_target_is_plausible("192.168.1.22:514"));
+    CHECK(!tk::syslog_target_is_plausible("192.168.1.22:abc"));
+    CHECK(!tk::syslog_target_is_plausible("192.168.1.22: 514"));
+    CHECK(!tk::syslog_target_is_plausible(std::string(200, 'a') + ":514"));
+
+    // Send-failure classification: routing/host errors are HARD (re-resolve now);
+    // resource/blocking errors are TRANSIENT (hold the destination, let the
+    // ordinary cadence re-check).
+    CHECK(tk::syslog_error_is_hard(ENETUNREACH));
+    CHECK(tk::syslog_error_is_hard(EHOSTUNREACH));
+    CHECK(tk::syslog_error_is_hard(ENETDOWN));
+    CHECK(tk::syslog_error_is_hard(EHOSTDOWN));
+    CHECK(tk::syslog_error_is_hard(EADDRNOTAVAIL));
+    CHECK(!tk::syslog_error_is_hard(ENOMEM));
+    CHECK(!tk::syslog_error_is_hard(ENOBUFS));
+    CHECK(!tk::syslog_error_is_hard(EAGAIN));
+    CHECK(!tk::syslog_error_is_hard(EINTR));
+    CHECK(!tk::syslog_error_is_hard(0));
+
+    // Send-failure actions: the once-per-outage re-probe (the probe-storm fix). The FIRST hard
+    // failure (not yet failing) pauses forwarding AND triggers one immediate re-resolve+re-probe;
+    // a LATER hard failure in the same outage (already failing) still pauses forwarding but must
+    // NOT re-probe — else getaddrinfo()+ping fires per queued line.
+    CHECK(tk::syslog_send_failure_actions(/*hard*/true,  /*already_failing*/false).stop_forwarding);
+    CHECK(tk::syslog_send_failure_actions(true,  false).reprobe_once);
+    CHECK(tk::syslog_send_failure_actions(true,  true).stop_forwarding);
+    CHECK(!tk::syslog_send_failure_actions(true, true).reprobe_once);   // the fix: no storm
+    // Transient errors never pause forwarding or touch the throttle, whatever the latch state.
+    CHECK(!tk::syslog_send_failure_actions(false, false).stop_forwarding);
+    CHECK(!tk::syslog_send_failure_actions(false, false).reprobe_once);
+    CHECK(!tk::syslog_send_failure_actions(false, true).stop_forwarding);
+    CHECK(!tk::syslog_send_failure_actions(false, true).reprobe_once);
 }
 
 // ─── Unit conversion ────────────────────────────────────────────────────────────
@@ -389,6 +456,8 @@ static void test_status_model() {
     in.wifi_connected = true; in.wifi_ssid = "HomeNet"; in.wifi_rssi = -55; in.wifi_std = "Wi-Fi 6";
     in.mqtt_configured = true; in.mqtt_connected = true; in.mqtt_tls = true;
     in.mqtt_broker = "mqtt.local:8883";
+    in.syslog_configured = true; in.syslog_resolved = true; in.syslog_reachable = true;
+    in.syslog_host = "syslog.lan"; in.syslog_port = 514;   // error absent → omitted
     in.ble_connected = true; in.have_ble_rssi = true; in.ble_rssi = -60;
     in.ble_addr = "aa:bb:cc:dd:ee:ff";
     in.climate.valid = true;
@@ -447,6 +516,12 @@ static void test_status_model() {
         "mqtt.connected=true\n"
         "mqtt.tls=true\n"
         "mqtt.broker=\"mqtt.local:8883\"\n"
+        "syslog{\n"
+        "syslog.configured=true\n"
+        "syslog.resolved=true\n"
+        "syslog.reachable=true\n"
+        "syslog.host=\"syslog.lan\"\n"
+        "syslog.port=514\n"
         "tele{\n"
         "tele.climate{\n"
         "tele.climate.inside=21.5\n"
@@ -528,6 +603,10 @@ static void test_status_model() {
         "mqtt.tls=false\n"
         "mqtt.broker=\"mqtt.local:1883\"\n"
         "mqtt.error=\"connection refused\"\n"
+        "syslog{\n"
+        "syslog.configured=false\n"
+        "syslog.resolved=false\n"
+        "syslog.reachable=false\n"
         "ble{\n"
         "ble.connected=false\n"
         "ble.scanning=false\n"
@@ -576,6 +655,10 @@ static void test_status_model() {
         "mqtt.configured=false\n"
         "mqtt.connected=false\n"
         "mqtt.tls=false\n"
+        "syslog{\n"
+        "syslog.configured=false\n"
+        "syslog.resolved=false\n"
+        "syslog.reachable=false\n"
         "ble{\n"
         "ble.connected=false\n"
         "ble.scanning=true\n"
@@ -620,6 +703,10 @@ static void test_status_model() {
         "mqtt.configured=false\n"
         "mqtt.connected=false\n"
         "mqtt.tls=false\n"
+        "syslog{\n"
+        "syslog.configured=false\n"
+        "syslog.resolved=false\n"
+        "syslog.reachable=false\n"
         "ble{\n"
         "ble.connected=false\n"
         "ble.scanning=false\n"
@@ -818,8 +905,123 @@ static void test_led() {
       CHECK(tk::led_pattern(s, a) == (tk::LedPattern{C::Red, A::Blink, false})); }
 }
 
+// ── /events WebSocket command policy (logic/ws_policy.hpp) ───────────────────────────────────
+static void test_ws_policy() {
+    using namespace tk;
+    // An empty frame carries no command and leaves no body in the stream: ignore it, keep the
+    // connection. Anything that fits the command buffer is safe to read.
+    CHECK(ws_frame_plan(0) == WsPlan::Skip);
+    CHECK(ws_frame_plan(3) == WsPlan::Read);
+
+    // The boundary. A frame of exactly WS_CMD_MAX still fits; ONE byte more is undrainable on a
+    // chip whose binding limit is the largest contiguous free block, so it must close the socket
+    // rather than be read into a buffer sized from a length the client merely asserted.
+    CHECK(ws_frame_plan(WS_CMD_MAX)     == WsPlan::Read);
+    CHECK(ws_frame_plan(WS_CMD_MAX + 1) == WsPlan::Reject);
+    CHECK(ws_frame_plan(1u << 20)       == WsPlan::Reject);
+    CHECK(ws_frame_plan(SIZE_MAX)       == WsPlan::Reject);
+
+    // The one command we speak — and a prefix still subscribes (a trailing newline / "subscribe").
+    CHECK(ws_frame_action(true, "sub", 3)       == WsAction::Subscribe);
+    CHECK(ws_frame_action(true, "sub\n", 4)     == WsAction::Subscribe);
+    CHECK(ws_frame_action(true, "subscribe", 9) == WsAction::Subscribe);
+
+    // Everything else earns nothing: no snapshot, and no slot in the broadcast list.
+    CHECK(ws_frame_action(true, "nope", 4) == WsAction::Ignore);
+    CHECK(ws_frame_action(true, "su",   2) == WsAction::Ignore);   // too short to be the command
+    CHECK(ws_frame_action(true, "",     0) == WsAction::Ignore);
+    CHECK(ws_frame_action(true, nullptr, 3) == WsAction::Ignore);  // never deref a null payload
+
+    // A binary frame is not the text protocol, whatever bytes it carries.
+    CHECK(ws_frame_action(false, "sub", 3) == WsAction::Ignore);
+}
+
+// ── request-body reassembly (logic/http_body.hpp) — the multi-segment truncation fix ──────────
+static void test_http_body() {
+    using namespace tk;
+    char buf[64];
+
+    // Whole body in one recv.
+    {
+        std::string body = "{\"amps\":16}";
+        int r = http_body_read(buf, sizeof(buf), body.size(),
+            [&](char* dst, size_t len) -> BodyChunk { std::memcpy(dst, body.data(), len); return { BodyRecv::Data, len }; });
+        CHECK(r == (int)body.size());
+        CHECK(std::string(buf) == body);
+    }
+    // Delivered ONE byte at a time (the segmentation the old single-recv truncated).
+    {
+        std::string body = "{\"broker\":\"host:1883\"}";
+        size_t off = 0;
+        int r = http_body_read(buf, sizeof(buf), body.size(),
+            [&](char* dst, size_t) -> BodyChunk { dst[0] = body[off++]; return { BodyRecv::Data, 1 }; });
+        CHECK(r == (int)body.size());
+        CHECK(std::string(buf) == body);
+    }
+    // A mid-body peer error / close → fail (no truncated result handed back).
+    {
+        int r = http_body_read(buf, sizeof(buf), 10,
+            [&](char* dst, size_t) -> BodyChunk { dst[0] = 'x'; return { BodyRecv::Error, 0 }; });
+        CHECK(r == -1);
+    }
+    // Bounded timeouts: BODY_MAX_IDLE consecutive timeouts are tolerated, one more abandons it.
+    {
+        int calls = 0;
+        int r = http_body_read(buf, sizeof(buf), 4,
+            [&](char*, size_t) -> BodyChunk { ++calls; return { BodyRecv::Timeout, 0 }; });
+        CHECK(r == -1);
+        CHECK(calls == BODY_MAX_IDLE + 1);   // gives up after one too many
+    }
+    // Body too large for the buffer (no room for the terminator) → fail, never overflow.
+    CHECK(http_body_read(buf, sizeof(buf), sizeof(buf), [&](char*, size_t) -> BodyChunk { return { BodyRecv::Data, 0 }; }) == -1);
+    // Empty / null guards.
+    CHECK(http_body_read(buf, sizeof(buf), 0, [&](char*, size_t) -> BodyChunk { return { BodyRecv::Data, 0 }; }) == -1);
+    CHECK(http_body_read(nullptr, 8, 4, [&](char*, size_t) -> BodyChunk { return { BodyRecv::Data, 0 }; }) == -1);
+}
+
+// ── HA MQTT-discovery binary value_template (logic/ha_templates.hpp) — the phantom-OFF fix ─────
+static void test_ha_templates() {
+    // Every binary template MUST guard on `is defined` so an unreported optional field renders empty
+    // (HA → unknown) instead of a phantom OFF — the whole point of the fix.
+    std::string door = tk::ha_binary_value_template("door", false);
+    CHECK(door == "{% if value_json.door is defined %}{{ 'ON' if value_json.door else 'OFF' }}{% endif %}");
+    CHECK(door.find("is defined") != std::string::npos);
+
+    // The inverted `lock` class emits OFF-when-true so a locked car reads "Locked", still guarded.
+    std::string locked = tk::ha_binary_value_template("locked", true);
+    CHECK(locked == "{% if value_json.locked is defined %}{{ 'OFF' if value_json.locked else 'ON' }}{% endif %}");
+    CHECK(locked.find("is defined") != std::string::npos);
+}
+
+// ── Active-window gate (logic/active_window.hpp) — the stale-charging-window fix ───────────────
+static void test_active_window() {
+    using namespace tk;
+    // A recent command opens the window regardless of charging/contact.
+    CHECK(active_window_open({/*recent_cmd*/true, false, false, 0}) == true);
+    CHECK(active_window_open({true, false, true, 999999}) == true);
+
+    // Charging + FRESH contact holds the window open.
+    CHECK(active_window_open({false, /*charging*/true, /*have_contact*/true, 0}) == true);
+    CHECK(active_window_open({false, true, true, kAwakeMaxAgeS - 1}) == true);
+
+    // The bug: charging cached true but contact STALE must NOT hold the window open (car departed
+    // while "Charging" → otherwise perpetual scanning). Boundary is exactly kAwakeMaxAgeS.
+    CHECK(active_window_open({false, true, true, kAwakeMaxAgeS})     == false);
+    CHECK(active_window_open({false, true, true, kAwakeMaxAgeS + 1}) == false);
+    CHECK(active_window_open({false, true, true, 999999})           == false);
+
+    // Charging cached true but we have NO contact at all (never heard) → not fresh → closed.
+    CHECK(active_window_open({false, true, /*have_contact*/false, 0}) == false);
+
+    // Not charging and no recent command → closed, whatever the contact age.
+    CHECK(active_window_open({false, false, true, 0}) == false);
+    CHECK(active_window_open({false, false, false, 0}) == false);
+}
+
 int main() {
     test_vin();
+    test_syslog_policy();
+    test_ha_templates();
     test_units();
     test_link_state();
     test_link_state_strings();
@@ -829,6 +1031,9 @@ int main() {
     test_display_helpers();
     test_display_model();
     test_led();
+    test_ws_policy();
+    test_active_window();
+    test_http_body();
 
     if (g_failures == 0) {
         std::printf("OK  %d checks passed\n", g_checks);

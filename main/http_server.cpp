@@ -8,11 +8,13 @@
 #include <esp_log.h>
 #include <cstring>
 #include <exception>
+#include <unistd.h>   // close() — for the WebSocket close_fn
 
 static const char* TAG = "http_server";
 
-// Global vehicle reference (set once at start; declared in http_handlers.hpp)
+// Global vehicle + config-store references (set once at start; declared in http_handlers.hpp)
 VehicleController* g_vehicle = nullptr;
+NvsStorageAdapter* g_config  = nullptr;
 
 // Copy the PATH part of the request URI (everything before '?') into buf. Routing must look
 // only at the path: matching against the raw req->uri (which includes the query string) lets a
@@ -67,6 +69,7 @@ static esp_err_t handle_all_dispatch(httpd_req_t* req) {
     if (POST && strcmp(path, "/set_time")   == 0)               return handle_set_time({req});
     if (POST && strcmp(path, "/set_vin")    == 0)               return handle_set_vin({req});
     if (POST && strcmp(path, "/set_mqtt")   == 0)               return handle_set_mqtt({req});
+    if (POST && strcmp(path, "/set_syslog") == 0)               return handle_set_syslog({req});
     if (POST && strcmp(path, "/scan")       == 0)               return handle_scan({req});
     if (POST && strcmp(path, "/mcp")        == 0)               return mcp_handle_post({req});
     if (GET  && strcmp(path, "/mcp")        == 0)               return mcp_handle_get({req});
@@ -101,20 +104,37 @@ static esp_err_t handle_all(httpd_req_t* req) {
 
 // ─── Start ────────────────────────────────────────────────────────────────────
 
-bool http_server_start(VehicleController& vehicle) {
+// Called by esp_http_server when a socket closes. For a /events subscriber this drops it from the
+// broadcast list (http_events.cpp) so the pusher stops targeting a dead fd; a custom close_fn owns
+// the actual close(), which the default handler would otherwise do.
+static void ws_close_fn(httpd_handle_t, int sockfd) {
+    http_events_on_close(sockfd);
+    close(sockfd);
+}
+
+bool http_server_start(VehicleController& vehicle, NvsStorageAdapter& config_store) {
     g_vehicle = &vehicle;
+    g_config  = &config_store;
 
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.uri_match_fn     = httpd_uri_match_wildcard;
-    config.max_uri_handlers = 2;
+    // /events (WebSocket) + the two /* wildcards (GET, POST).
+    config.max_uri_handlers = 3;
     config.stack_size       = 8192;
     config.lru_purge_enable = true;
+    config.close_fn         = ws_close_fn;
 
     httpd_handle_t server = nullptr;
     if (httpd_start(&server, &config) != ESP_OK) {
         ESP_LOGE(TAG, "failed to start HTTP server");
         return false;
     }
+
+    // Register the /events WebSocket route FIRST (and start its broadcast task): esp_http_server
+    // matches handlers in registration order, so the specific /events must precede the /* wildcard
+    // to be reached at all. It is registered raw (is_websocket) and guards itself — see
+    // http_events.cpp / the note in http_handlers.hpp.
+    http_events_register(server);
 
     // Wildcard GET handler
     httpd_uri_t get_handler = {

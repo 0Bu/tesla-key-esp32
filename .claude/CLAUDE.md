@@ -12,9 +12,10 @@ through that local copy — the other four resolve byte-identically from git). O
 target-agnostic; the only C5 blocker was that one manifest line.
 
 > **Deep reference:** this file holds the always-needed essentials. The full narrative for
-> telemetry, the MQTT/HA bridge, WiFi/LAN reconnect, sleep/link-state, pairing and OTA lives in
-> [`docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md) — read it on demand when touching those
-> areas. User-facing docs: [`README.md`](../README.md), [`docs/README.md`](../docs/README.md),
+> telemetry, the MQTT/HA bridge, WiFi/LAN reconnect, sleep/link-state, pairing, OTA and the
+> concurrency contract (lock hierarchy + task inventory; priorities in `main/task_config.hpp`)
+> lives in [`docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md) — read it on demand when touching
+> those areas. User-facing docs: [`README.md`](../README.md), [`docs/README.md`](../docs/README.md),
 > [`docs/SECURITY.md`](../docs/SECURITY.md), [`docs/MCP.md`](../docs/MCP.md) (MCP integration
 > guide). Keep all of these in sync (the `project-review` skill checks for drift).
 
@@ -45,9 +46,13 @@ int clamp), the ONE command registry both command surfaces dispatch through
 `/status` field contract (`logic/status_model.hpp`, golden-emission-pinned — order, key
 names, presence rules, value shaping), the shared command-outcome text, the on-device display
 presenter (the priority ladder / SoC gradient / RSSI→bars / SSID-scroll decisions the ST7735
-renderer draws) and the status-LED ladder (`logic/led_status.hpp`, reading the same shared
-`UiSnapshot` + the shared SoC gradient) — all delegated to
-IDF-free headers in `main/logic/` so the device runs the same code the test does. CI gates the firmware build on it (`logic-test` job). Add new
+renderer draws), the status-LED ladder (`logic/led_status.hpp`, reading the same shared
+`UiSnapshot` + the shared SoC gradient), the `/events` WebSocket command policy
+(`logic/ws_policy.hpp` — frame-length plan / "sub" classification), the active-window poll gate
+(`logic/active_window.hpp` — charging held open only on fresh contact), the HA binary
+`value_template` builder (`logic/ha_templates.hpp` — presence-aware `is defined` guard) and the
+POST-body reassembly loop (`logic/http_body.hpp` — multi-segment recv + bounded timeout) — all
+delegated to IDF-free headers in `main/logic/` so the device runs the same code the test does. CI gates the firmware build on it (`logic-test` job). Add new
 hardware-free logic to `main/logic/` and a `CHECK` in `test/test_logic.cpp`. Full detail:
 [`test/README.md`](../test/README.md).
 
@@ -102,13 +107,32 @@ command_exec.cpp       → the ONE CmdKind → VehicleController dispatch both c
                          surfaces (/api and /mcp) execute through
 http_status.cpp        → web UI (/), /status, /diag, /scan; the /status field contract
                          is decided in logic/status_model.hpp (host-tested, golden-pinned)
-                         — the handler only gathers inputs + serializes via cJSON
+                         — build_status_object() only gathers inputs + serializes via cJSON.
+                         It is the ONE /status-JSON builder shared by GET /status and the
+                         /events WS push
+http_events.cpp        → /events — WebSocket live-status push for the web UI. The browser holds
+                         ONE ws:// socket; a background task pushes build_status_object() every
+                         ~2 s (WS-only, replaces the old browser /status interval poll — no poll
+                         fallback). Registered RAW (is_websocket) OUTSIDE the handle_all guard, so
+                         it guards its own allocations; 8-client registry; "sub" command policy is
+                         host-tested logic/ws_policy.hpp
 http_ota.cpp           → /ota/check|update|status
-http_config.cpp        → /gen_keys, /send_key, /set_time, /set_vin, /set_mqtt
+http_config.cpp        → /gen_keys, /send_key, /set_time, /set_vin, /set_mqtt, /set_syslog
 mcp_server.cpp         → /mcp — MCP server for AI agents (stateless JSON-RPC 2.0;
                          core logic in logic/mcp.hpp, guide in docs/MCP.md)
                          (shared helpers: http_common.cpp; split map: http_handlers.hpp)
-diag_log.cpp           → in-RAM console ring served by GET /diag (static .bss buffer)
+diag_log.cpp           → in-RAM console ring served by GET /diag (static .bss buffer); its
+                         esp_log capture hook also feeds syslog.cpp, so every captured line
+                         is forwarded too
+syslog.cpp              → UDP Syslog forwarder (RFC 5424, best-effort) for the diag log.
+                         Server from NVS `syslog_uri` (web UI: Connections → Syslog, POST
+                         /set_syslog) or CONFIG_TESLA_SYSLOG_SERVER, "host:port"; "" disables.
+                         Resolved once at boot (reboots on change, like /set_mqtt); a
+                         background task re-resolves DNS + advisory-probes the collector
+                         (ARP on-subnet, else ICMP) every ~10s, throttled on a persistent
+                         failure. Delivery gates on DNS resolution only, never the advisory
+                         probe. Errno-based hard/transient send-failure split in
+                         logic/syslog_policy.hpp (host-tested)
 provisioning.cpp       → captive setup portal (setup AP) when no WiFi is configured
 display.cpp            → on-device ST7735 status panel (LilyGo T-Dongle-C5 + T-Dongle-S3),
                          LANDSCAPE 160x80 (header WiFi bars+SSID | BT+BLE bars + a horizontal SoC
@@ -150,7 +174,7 @@ Never edit files in `managed_components/` — they are regenerated.
 
 | Namespace   | Content                                     |
 |-------------|---------------------------------------------|
-| `tesla_cfg` | WiFi SSID/pass, VIN, BLE MAC, `mqtt_uri`, `last_time`, `disp_rot` (on-device display BOOT-rotation index 0..3; C5/S3; migrates old `disp_flip`) (runtime cfg) |
+| `tesla_cfg` | WiFi SSID/pass, VIN, BLE MAC, `mqtt_uri`, `syslog_uri`, `last_time`, `disp_rot` (on-device display BOOT-rotation index 0..3; C5/S3; migrates old `disp_flip`) (runtime cfg) |
 | `tesla_ble` | Private key (`private_key`), VCSEC session (`sess_vcsec`), Info session (`sess_info`), `key_created`, `paired_at` — the `sess_*` names come from the ≤15-char key mapping in `nvs_storage.cpp` |
 
 ## Commands Implemented
@@ -185,7 +209,8 @@ GET  /  (alias /index.html)                    # embedded web UI (gzipped into t
 POST /api/1/vehicles/{VIN}/command/{command}   # execute command
 GET  /api/1/vehicles/{VIN}/vehicle_data        # charge state
 GET  /api/1/vehicles/{VIN}/body_controller_state
-GET  /status                                   # web-UI JSON (wifi, ble, mqtt, vehicle cache, read-only telemetry under "tele")
+GET  /status                                   # web-UI JSON snapshot (wifi, ble, mqtt, syslog, vehicle cache, read-only telemetry under "tele"). Request/response form; the live UI reads /events instead
+GET  /events                                   # WebSocket live-status push. Client sends text "sub" → immediate /status snapshot, then a fresh /status frame every ~2 s. The web UI's live feed (WS-only, no interval poll). Non-WS GET → handshake only
 POST /scan                                     # start a time-limited BLE discovery scan
 POST /mcp                                      # MCP server (Streamable HTTP, stateless JSON-RPC 2.0; GET → 405, no SSE).
                                                # Tools = the run-on-key charging command set + read-only get_vehicle_state
@@ -196,6 +221,7 @@ POST /send_key                                 # pair with vehicle (Charging Man
 POST /set_time                                 # set wall clock from the browser ({"ms":<epoch>}); fallback when NTP unreachable
 POST /set_vin                                  # persist VIN + reboot
 POST /set_mqtt                                 # persist MQTT broker (HA bridge) + reboot ({"broker":"host:port"}; "" disables)
+POST /set_syslog                               # persist Syslog server + reboot ({"server":"host:port"}; "" disables)
 GET  /api/proxy/1/version                      # {version, platform: running chip — "ESP32"/"ESP32-S3"/"ESP32-C3"/"ESP32-C6"/"ESP32-C5"}
 GET  /ota/check[?ms=<epoch>]                   # start background manifest check (non-blocking); poll /ota/status. ms = browser-clock NTP fallback
 POST /ota/update                               # start background self-update (pull, then reboot)
@@ -235,7 +261,7 @@ unused) so ONE table serves every target; **app at `0x20000`**. Per-target **boo
 is handled by `@flash_args` and the manifest — 0x1000 on the classic esp32, **0x2000 on esp32c5**
 (its newer flash layout), 0x0 on s3/c3/c6. The `ci-build-all.sh` size gate sits at `slot − 32 KB`
 (0x1e8000, below the 0x1f0000 = 2031616 B slot). **esp32c5 carries the on-device display + PSRAM**
-(largest image, signed ~0x1d1000 alongside esp32c6) and **esp32s3 carries the display code too**
+(**the largest image** — it alone has display+PSRAM; signed ~0x1e1000, ≈28 KB under the gate) and **esp32s3 carries the display code too**
 (no PSRAM), but both stay on the base **`-Og`** like every target: the Package A size levers (#154)
 freed the ~64 KB the display needs, so no `-Os`
 is required. (`-Os` is banned here — whole-build `-Os` hard-freezes under evcc+BLE load, rejected

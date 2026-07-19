@@ -1,14 +1,21 @@
 // Web-UI-facing routes: the embedded page itself and the endpoints that drive it:
 //   GET  /        (embedded, pre-gzipped web UI)
-//   GET  /status  (device + pairing state — the UI polls this every 4 s)
+//   GET  /status  (device + pairing state — a request/response snapshot of the live state)
 //   GET  /diag    (in-memory diagnostic log)
 //   POST /scan    (time-limited BLE discovery scan)
 // Dispatched from handle_all in http_server.cpp (inside its try/catch OOM guard).
+//
+// The live web UI no longer polls /status on a timer: it holds one WebSocket to /events and the
+// device pushes this same JSON (built by build_status_object() below) on a fixed cadence — see
+// http_events.cpp. /status stays as the request/response form for curl/diagnostics and the
+// post-OTA reboot probe (app.js waitReboot()); build_status_object() is the ONE builder both paths
+// share, so the pushed frame and a manual GET can never drift.
 
 #include "http_handlers.hpp"
 #include "diag_log.hpp"
 #include "mqtt_ha.hpp"
 #include "logic/status_model.hpp"
+#include "syslog.hpp"
 #include <esp_netif.h>
 #include <esp_app_desc.h>
 #include <esp_wifi.h>
@@ -66,16 +73,16 @@ struct CjsonEmitter {
 };
 }  // namespace
 
-esp_err_t handle_status(GuardedReq rq) {
-    httpd_req_t* req = rq.req;
-    // Live device state — the web UI polls this every 4 s. Never let a browser/proxy serve a
-    // cached copy, or the hero sticks on a stale state (e.g. a transient "Unreachable") until a
-    // manual reload. Matches the no-store on "/" and "/diag"; the poll also cache-busts the URL.
-    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
-
-    // GATHER ONLY: every which-field/when/what-value decision lives in the host-tested
-    // model (logic/status_model.hpp, golden CHECKs in test/test_logic.cpp). This
-    // function collects the inputs under the existing locks and serializes the result.
+// Build the device + pairing + vehicle status object (caller owns the returned cJSON). The ONE
+// source for BOTH the GET /status response and the /events WebSocket push (http_events.cpp), so the
+// two can never drift. GATHER ONLY here: every which-field/when/what-value decision lives in the
+// host-tested model (logic/status_model.hpp, golden CHECKs in test/test_logic.cpp); this collects
+// the inputs under the existing locks, then emits. The throwing by-value getters (vin(), broker,
+// syslog host, cached structs) all run in the GATHER below — BEFORE any cJSON is allocated — so a
+// std::bad_alloc can't leak a partial tree (the /events broadcast task calls this every ~2 s with
+// nothing to catch above it); the emit that follows only does cJSON allocs, which return NULL under
+// pressure rather than throw. May return nullptr under total OOM; every caller guards for it.
+cJSON* build_status_object() {
     tk::status::Inputs in;
 
     char ip[16];
@@ -112,6 +119,18 @@ esp_err_t handle_status(GuardedReq rq) {
     in.mqtt_broker     = mqtt_ha_broker();
     in.mqtt_error      = mqtt_ha_last_error();
 
+    // Syslog: configured / DNS-resolved (the delivery gate) / advisory ARP-ICMP
+    // reachability hint. Gathered into the model like every other field.
+    {
+        SyslogStatus sy = syslog_status();
+        in.syslog_configured = sy.configured;
+        in.syslog_resolved   = sy.resolved;
+        in.syslog_reachable  = sy.reachable;
+        in.syslog_host       = sy.host;
+        in.syslog_port       = sy.port;
+        in.syslog_error      = sy.error;
+    }
+
     in.ble_connected = g_vehicle->ble_connected();
     in.ble_scanning  = g_vehicle->ble_scanning();
     if (in.ble_connected) {
@@ -139,10 +158,22 @@ esp_err_t handle_status(GuardedReq rq) {
     uint32_t ago = 0;
     if (g_vehicle->seconds_since_contact(ago)) { in.have_last_seen = true; in.last_seen_s = ago; }
 
+    // The last-known charge snapshot ("last" / "last_seen_s", shown on the asleep card
+    // regardless of link state) is emitted by the model from in.charge + in.last_seen.
     cJSON* root = cJSON_CreateObject();
     CjsonEmitter e(root);
     tk::status::emit_status(in, e);
-    return send_json(req, 200, root);
+    return root;
+}
+
+// GET /status — the request/response form of the live snapshot. The web UI's live feed uses
+// /events (the WS push of this same object); this path still serves curl/diagnostics and the
+// post-OTA reboot probe (app.js waitReboot()). Never cache: a stale copy sticks the hero on a
+// transient state until a manual reload (matches "/" and "/diag").
+esp_err_t handle_status(GuardedReq rq) {
+    httpd_req_t* req = rq.req;
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    return send_json(req, 200, build_status_object());   // send_json degrades a nullptr to 503
 }
 
 // ─── GET /diag — in-memory diagnostic log (for on-demand analysis) ────────────

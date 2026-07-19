@@ -162,7 +162,7 @@ jobs:
       - name: Build firmware for all supported targets (ESP-IDF v5.5.4)
         uses: espressif/esp-idf-ci-action@v1
         with:
-          esp_idf_version: v5.5.4
+          esp_idf_version: v5.5.5
           target: esp32
           # Build every supported target and stage per-target bins. esp32 / esp32s3 / esp32c3 /
           # esp32c6 are what yoziru/tesla-ble supports (the Component Manager refuses any other
@@ -225,7 +225,7 @@ jobs:
       # spawn a new firmware release.
       - name: Create release
         if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.changes.outputs.firmware == 'yes'
-        uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v3
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3
         with:
           tag_name: v${{ steps.version.outputs.version }}
           name: v${{ steps.version.outputs.version }}

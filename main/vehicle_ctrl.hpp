@@ -189,39 +189,10 @@ public:
     // UI tell "the car rejected this" apart from "the car couldn't be reached".
     std::string last_command_error() const { return last_error_; }
 
-    // Persist a new VIN to the config store (takes effect after reboot).
-    bool save_config_vin(const std::string& vin) {
-        return config_store_ ? config_store_->save_str("vin", vin) : false;
-    }
-
-    // Persist an arbitrary runtime-config string (tesla_cfg namespace). Used by the
-    // web UI to store the MQTT broker ("mqtt_uri"); applied on the next boot. Keys
-    // must be ≤15 chars (NVS limit). An empty value disables the feature it gates.
-    bool save_config_str(const char* key, const std::string& value) {
-        return config_store_ ? config_store_->save_str(key, value) : false;
-    }
-
-    // Read a runtime-config string back from the config store (empty if unset). Used by
-    // the web UI to compare a submitted value against what is already persisted, so an
-    // unchanged setting is neither rewritten to NVS nor allowed to trigger a reboot.
-    std::string load_config_str(const char* key) const {
-        std::string out;
-        if (config_store_) config_store_->load_str(key, out);
-        return out;
-    }
-
-    // Cache the last-known wall clock (epoch seconds). The device has no
-    // battery-backed RTC. NTP (esp_sntp) is the primary time source; the browser
-    // (POST /set_time) is a fallback for networks that block NTP. We persist the
-    // last-known time so a headless reboot (evcc only, no browser visit, NTP not yet
-    // synced) still comes up with a plausible clock for TLS certificate validation
-    // (OTA) and the human-readable key_created/paired_at timestamps. (It is NOT needed
-    // for tesla-ble signed-command freshness: expires_at is derived from the vehicle's
-    // SessionInfo.ClockTime plus a monotonic steady_clock delta, not this wall clock.)
-    // main.cpp restores it on boot by reading the same "last_time" key from the store.
-    bool save_config_time(long long epoch) {
-        return config_store_ ? config_store_->save_str("last_time", std::to_string(epoch)) : false;
-    }
+    // NOTE: generic runtime-config persistence deliberately does NOT live here. The HTTP
+    // layer talks to the tesla_cfg store directly (g_config in http_handlers.hpp) — the
+    // controller's config_store_ is only for facts the controller itself owns (the
+    // discovered BLE MAC, and reset_for_new_vehicle()'s cleanup of it).
 
 private:
     // Builder function type used by send_command_result

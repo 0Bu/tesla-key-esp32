@@ -67,6 +67,12 @@ struct Inputs {
     std::string mqtt_broker;      // empty = omit
     std::string mqtt_error;       // empty = omit
 
+    // Syslog forwarder. host empty ⇒ host+port omitted; error empty ⇒ omit.
+    bool        syslog_configured{false}, syslog_resolved{false}, syslog_reachable{false};
+    std::string syslog_host;      // empty = omit host+port
+    int         syslog_port{0};
+    std::string syslog_error;     // empty = omit
+
     // BLE link / discovery.
     bool                   ble_connected{false}, ble_scanning{false};
     bool                   have_ble_rssi{false};
@@ -122,6 +128,18 @@ inline void emit_status(const Inputs& in, E& e) {
     e.boolean("tls",        in.mqtt_tls);
     if (!in.mqtt_broker.empty()) e.str("broker", in.mqtt_broker.c_str());
     if (!in.mqtt_error.empty())  e.str("error",  in.mqtt_error.c_str());
+    e.obj_end();
+
+    // ── syslog ────────────────────────────────────────────────────────────────
+    e.obj_begin("syslog");
+    e.boolean("configured", in.syslog_configured);
+    e.boolean("resolved",   in.syslog_resolved);
+    e.boolean("reachable",  in.syslog_reachable);
+    if (!in.syslog_host.empty()) {
+        e.str("host", in.syslog_host.c_str());
+        e.num("port", in.syslog_port);
+    }
+    if (!in.syslog_error.empty()) e.str("error", in.syslog_error.c_str());
     e.obj_end();
 
     // ── tele — read-only telemetry caches, emitted only while the BLE link is up

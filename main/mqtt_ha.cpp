@@ -4,6 +4,8 @@
 #include "platform.hpp"
 #include "logic/units.hpp"
 #include "logic/link_state.hpp"
+#include "task_config.hpp"
+#include "logic/ha_templates.hpp"
 
 #include <atomic>
 #include <string>
@@ -190,10 +192,9 @@ static void publish_discovery() {
             // true=locked, so flip the template for that one class — a locked car
             // must read "Locked", not "Unlocked".
             bool invert = e.dev_cla && strcmp(e.dev_cla, "lock") == 0;
-            const char* on  = invert ? "OFF" : "ON";
-            const char* off = invert ? "ON"  : "OFF";
-            std::string tpl = std::string("{{ '") + on + "' if value_json." + e.field +
-                              " else '" + off + "' }}";
+            // Presence-aware: an unreported optional field renders empty → HA "unknown", not a
+            // phantom OFF/"Unlocked". Template built + host-tested in logic/ha_templates.hpp.
+            std::string tpl = tk::ha_binary_value_template(e.field, invert);
             cJSON_AddStringToObject(c, "val_tpl", tpl.c_str());
             cJSON_AddStringToObject(c, "pl_on",  "ON");
             cJSON_AddStringToObject(c, "pl_off", "OFF");
@@ -516,7 +517,7 @@ void mqtt_ha_start(VehicleController& vehicle, NvsStorageAdapter& config_store) 
     }
     esp_mqtt_client_register_event(s_client, MQTT_EVENT_ANY, mqtt_event_handler, nullptr);
     esp_mqtt_client_start(s_client);
-    xTaskCreate(publisher_task, "mqtt_pub", 6144, nullptr, 4, nullptr);
+    xTaskCreate(publisher_task, "mqtt_pub", 6144, nullptr, tk::kPrioMqttPub, nullptr);
 
     ESP_LOGI(TAG, "MQTT bridge started → %s (base topic %s, HA prefix %s)",
              s_broker_disp.c_str(), s_base.c_str(), s_prefix.c_str());

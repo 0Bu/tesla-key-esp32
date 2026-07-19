@@ -27,11 +27,13 @@
 
 #include "ble_client.hpp"
 #include "nvs_storage.hpp"
+#include "task_config.hpp"
 #include "vehicle_ctrl.hpp"
 #include "http_server.hpp"
 #include "provisioning.hpp"
 #include "diag_log.hpp"
 #include "mqtt_ha.hpp"
+#include "syslog.hpp"
 #include "display.hpp"
 #include "led_status.hpp"
 
@@ -416,6 +418,12 @@ extern "C" void app_main() {
     static NvsStorageAdapter config_store("tesla_cfg");
     config_store.initialize();
 
+    // UDP Syslog forwarder for the diag log (NVS "syslog_uri" / CONFIG_TESLA_SYSLOG_SERVER;
+    // "" = disabled). Started before WiFi so it captures boot-time log lines too — its own
+    // task blocks on wifi_is_connected() until the link is up, so this is safe even though
+    // esp_netif_init() itself hasn't run yet (that happens inside wifi_connect() below).
+    syslog_start(config_store);
+
     // Resolve WiFi credentials: NVS overrides Kconfig defaults
     static std::string ssid     = CONFIG_TESLA_WIFI_SSID;
     static std::string password = CONFIG_TESLA_WIFI_PASSWORD;
@@ -546,7 +554,7 @@ extern "C" void app_main() {
     ble_client.start();
     log_heap("ble");
 
-    http_server_start(vehicle);
+    http_server_start(vehicle, config_store);
     log_heap("http");
 
     // Home Assistant MQTT bridge: publishes all telemetry + device status (read-only)
@@ -572,7 +580,7 @@ extern "C" void app_main() {
     // including the "ghost association" case that fires no disconnect event (see the
     // task definition above). Without it the device can sit reachable-over-BLE but
     // off the LAN indefinitely, recoverable only by a manual reset.
-    xTaskCreate(wifi_watchdog_task, "wifi_wd", 3072, nullptr, 4, nullptr);
+    xTaskCreate(wifi_watchdog_task, "wifi_wd", 3072, nullptr, tk::kPrioWifiWatchdog, nullptr);
 
     // Confirm a freshly OTA-flashed image only after it has proven it can RUN — not merely
     // reach this line. Marking it valid here (the old behaviour) would disarm rollback the
@@ -581,7 +589,7 @@ extern "C" void app_main() {
     // rollback armed for a window of healthy uptime; if the image dies first it reboots while
     // still PENDING_VERIFY and the bootloader reverts to the previous slot. A no-op on a normal
     // (non-pending-verify) boot.
-    xTaskCreate(ota_health_gate_task, "ota_gate", 3072, nullptr, 3, nullptr);
+    xTaskCreate(ota_health_gate_task, "ota_gate", 3072, nullptr, tk::kPrioOtaGate, nullptr);
 
     ESP_LOGI(TAG, "tesla-key-esp32 running. API on port 80.");
     // Main task is no longer needed; Vehicle loop + HTTP server run in their own tasks.
