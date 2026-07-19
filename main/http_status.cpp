@@ -157,6 +157,7 @@ cJSON* build_status_object() {
 
     uint32_t ago = 0;
     if (g_vehicle->seconds_since_contact(ago)) { in.have_last_seen = true; in.last_seen_s = ago; }
+    in.last_reboot = VehicleController::boot_reboot_reason();
 
     // The last-known charge snapshot ("last" / "last_seen_s", shown on the asleep card
     // regardless of link state) is emitted by the model from in.charge + in.last_seen.

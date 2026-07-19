@@ -126,7 +126,10 @@ the authority for the per-sibling drift check; `project-review` defers the mecha
   (`main/http_status.cpp`), the **lowercase** four `link_state_web_str` values
   (`main/logic/link_state.hpp`; uppercase are the MQTT `link_state_mqtt_str` set), the `/diag`
   params (`verbose`/`clear` in `handle_diag`), that there is still **no** heap field in `/status`
-  (heap comes from the `BOOT`/`HEAP` serial lines in `main.cpp`), and the signature sites it cites
+  (heap comes from the `BOOT`/`HEAP` lines in `main.cpp` **and** the periodic
+  `HEAP …internal_largest=` trend line in `vehicle_telemetry.cpp`'s `loop_task_fn_` — the one the
+  heap watchdog decides on, plus the `HEAP CRITICAL`/`EXHAUSTED` escalation lines beside it), that
+  `last_reboot` is emitted only when set, and the signature sites it cites
   (`connect error` in `ble_client.cpp`, the pairing-invalidation causes in `vehicle_ctrl.cpp`).
 - **`display-preview`** — renders `tools/display_sim.py` to PNGs for a human eyeball pass. Verify the
   CLI modes (`png`/`states`/`states-portrait`/`search`/`scroll`/`cheader`/`parity`) + default output

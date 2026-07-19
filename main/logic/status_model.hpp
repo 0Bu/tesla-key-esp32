@@ -97,6 +97,11 @@ struct Inputs {
 
     bool     have_last_seen{false};
     uint32_t last_seen_s{0};
+
+    // Why the PREVIOUS boot ended, when it ended by our own hand ("heap:<n>" = the heap watchdog
+    // restarted us; n = how many consecutive such restarts). Empty for every ordinary boot —
+    // power-on, crash, OTA — so the field is emitted only when there is something to report.
+    std::string last_reboot;
 };
 
 template <typename E>
@@ -249,6 +254,7 @@ inline void emit_status(const Inputs& in, E& e) {
         e.obj_end();
     }
     if (in.have_last_seen) e.num("last_seen_s", (double)in.last_seen_s);
+    if (!in.last_reboot.empty()) e.str("last_reboot", in.last_reboot.c_str());
 }
 
 }  // namespace status
