@@ -144,6 +144,17 @@ Treat a violation of any of these as a real finding.
   build the whole log into one `std::string`.
 - Static buffers (e.g. `diag_log`'s ring) come straight off the heap budget — sizing them up
   shrinks the largest free block.
+- **Those guards all mean "recover and continue", which is right for a TRANSIENT shortage and
+  wedges the device on a permanent one** (2026-07-18: `bad_alloc` out of `loop()` ~20×/s for ten
+  hours, nothing serving, no reboot — a wedge is worse than a crash, because a crash restarts).
+  The one escalation is `logic/heap_watchdog.hpp`, sampled in `vehicle_telemetry.cpp`'s
+  `loop_task_fn_`: INTERNAL `largest_block` (`8BIT|INTERNAL` — plain `8BIT` includes the C5's
+  PSRAM and would make it a silent no-op there) under 4 KB for 5 **unbroken** minutes,
+  OTA-excused, capped at 5 consecutive restarts, breadcrumb `reboot_why=heap:<n>` → `/status`
+  `last_reboot`. That path must stay **allocation-free** (it runs because allocation is failing),
+  and every log line on it must render under ~230 chars — `diag_log.cpp` formats into a 256-byte
+  stack buffer and truncates silently past it. **This is deliberate; do not review it as a reboot
+  risk.** `.claude/agents/heap-safety-reviewer.md` restates this bullet and must move with it.
 
 ### NVS / config
 - Namespaces: `tesla_cfg` (runtime cfg) and `tesla_ble` (key + sessions). NVS keys are

@@ -42,6 +42,12 @@ The existing safety pattern you are checking adherence to:
   built into one big `std::string`.
 - New large contiguous consumers (big JSON envelopes, TLS for `mqtts`/OTA, CA bundles) are
   treated as crash risks to size-check, not free wins.
+- The one **deliberate escalation**: `logic/heap_watchdog.hpp`, sampled in `vehicle_telemetry.cpp`'s
+  `loop_task_fn_`, calls `esp_restart()` **on purpose** after INTERNAL `largest_block` stays under
+  4 KB for 5 unbroken minutes (OTA-excused, capped at 5 consecutive, breadcrumb in NVS).
+  **Do not flag that path as a reboot risk** — it is the shipped answer to a *permanent* shortage,
+  which the recover-and-continue guards above cannot handle. Review it for the properties it must
+  keep (allocation-free, log lines under ~230 chars), not for the fact that it reboots.
 
 ## What to inspect
 
