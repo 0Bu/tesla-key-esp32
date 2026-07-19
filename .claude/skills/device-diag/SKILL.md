@@ -38,6 +38,7 @@ the web UI receives over the `/events` WebSocket (~2 s push; `build_status_objec
 builder). Top-level keys: `vin`, `ip`, `version`, `paired` (=
 `has_session()`), `reauth`, `key_present`, `wifi{ssid,rssi,std}`, `ble{connected,scanning,rssi,
 addr,devices[],connect_fail,car_connectable}`, `mqtt{configured,connected,tls,broker,error}`,
+`syslog{configured,resolved,reachable,host,port,error}`,
 `tele{climate,drive,tires,closures}` (**only while the BLE link is up**), `link`, `vcsec_sleep`
 (the raw, **un-debounced** VCSEC sleep flag, for diagnostics only — not what drives the hero),
 plus `vehicle{…}` / `last{…}` / `last_seen_s` charge snapshots.

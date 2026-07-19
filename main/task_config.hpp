@@ -30,6 +30,7 @@ inline constexpr UBaseType_t kPrioOtaCheck     = 5;  // ota_update.cpp      OTA 
 inline constexpr UBaseType_t kPrioAutoPair     = 4;  // vehicle_pairing.cpp auto-pair supervisor
 inline constexpr UBaseType_t kPrioWifiWatchdog = 4;  // main.cpp            ghost-association watchdog
 inline constexpr UBaseType_t kPrioMqttPub      = 4;  // mqtt_ha.cpp         MQTT/HA publisher
+inline constexpr UBaseType_t kPrioWsBroadcast  = 4;  // http_events.cpp     /events live-status push
 inline constexpr UBaseType_t kPrioDisplay      = 3;  // display.cpp         ST7735 renderer (C5/S3 only)
 inline constexpr UBaseType_t kPrioOtaGate      = 3;  // main.cpp            one-shot OTA health gate
 inline constexpr UBaseType_t kPrioLed          = 2;  // led_status.cpp      APA102 status LED (opt-in)

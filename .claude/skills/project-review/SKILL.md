@@ -84,6 +84,7 @@ links yourself — that's where the value is.
 | HA bridge | `main/mqtt_ha.{cpp,hpp}` | read-only MQTT discovery publish; its own tasks |
 | Storage | `main/nvs_storage.{cpp,hpp}` | NVS adapter; **maps library keys ≤15 chars** |
 | Diag log | `main/diag_log.{cpp,hpp}` | in-RAM console ring (`GET /diag`); **static `.bss` buffer** (heap budget!) |
+| Syslog | `main/syslog.{cpp,hpp}` | UDP RFC 5424 forwarder for the captured diag lines; server from NVS `syslog_uri` / `CONFIG_TESLA_SYSLOG_SERVER` (`POST /set_syslog`, empty = disabled); hard/transient send-failure split in the host-tested `logic/syslog_policy.hpp` |
 | OTA | `main/ota_update.{cpp,hpp}` | pull-based self-update; dual-slot |
 | Provisioning | `main/provisioning.{cpp,hpp}` | captive setup portal when no WiFi |
 | Web UI | `main/www/` (`index.html` markup + `style.css` + `app.js`, spliced by `inline_assets.cmake`) | compiled into the app binary as ONE self-contained page; live-updates from the `/events` WebSocket push (~2 s; WS-only, no interval poll — `GET /status` is retained only for curl/diagnostics + the post-OTA reboot probe) |
