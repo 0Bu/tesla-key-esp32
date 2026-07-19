@@ -425,16 +425,25 @@ extern "C" void app_main() {
     // self-healed at 04:00 must be able to say so, or the next investigation starts from scratch
     // exactly the way this one did.
     VehicleController::set_boot_reboot_reason(VehicleController::take_reboot_reason(config_store));
-    if (!VehicleController::boot_reboot_reason().empty()) {
-        ESP_LOGW(TAG, "BOOT previous run ended by us: reason=%s",
-                 VehicleController::boot_reboot_reason().c_str());
-    }
 
     // UDP Syslog forwarder for the diag log (NVS "syslog_uri" / CONFIG_TESLA_SYSLOG_SERVER;
     // "" = disabled). Started before WiFi so it captures boot-time log lines too — its own
     // task blocks on wifi_is_connected() until the link is up, so this is safe even though
     // esp_netif_init() itself hasn't run yet (that happens inside wifi_connect() below).
     syslog_start(config_store);
+
+    // Announce the breadcrumb only NOW, deliberately after syslog_start(): syslog_send() is a
+    // no-op until then (diag_log.cpp's capture hook has nowhere to forward to), so logging it
+    // above — where the value is read — would confine the one line explaining an unattended
+    // self-heal to the /diag RAM ring, which the next restart erases. Queued lines survive until
+    // WiFi is up, so this does reach the collector. The read itself stays above, before anything
+    // else can reboot, so the value always describes the boot just made.
+    if (!VehicleController::boot_reboot_reason().empty()) {
+        ESP_LOGW(TAG, "BOOT this boot was caused by the firmware itself: reason=%s — the previous "
+                      "run restarted deliberately because its heap stayed unusable (also in "
+                      "/status as last_reboot; see docs/ARCHITECTURE.md)",
+                 VehicleController::boot_reboot_reason().c_str());
+    }
 
     // Resolve WiFi credentials: NVS overrides Kconfig defaults
     static std::string ssid     = CONFIG_TESLA_WIFI_SSID;

@@ -363,10 +363,40 @@ void VehicleController::loop_task_fn_(void* arg) {
             // Nothing here may allocate: we are deciding precisely because allocation is failing.
             // ota_is_busy() reads one atomic (ota_get_status() would copy std::strings and could
             // throw), and the persist below hands NVS a short literal.
+            //
+            // Every transition is logged, not just the restart. Syslog is the ONLY post-mortem
+            // source that outlives the reboot (the /diag ring is RAM), so someone reading it must
+            // be able to answer "why did this device restart?" without any other evidence: the
+            // arming line states the trigger, the countdown lines prove the shortage was sustained
+            // rather than a spike, and a recovery line closes a run that did not fire.
             static tk::HeapWatchdog heap_wd;
-            tk::HeapAction act = tk::heap_watch(
+            tk::HeapVerdict v = tk::heap_watch(
                 heap_wd, {largest, (uint32_t) pdTICKS_TO_MS(hb_now), ota_is_busy()});
-            if (act == tk::HeapAction::Restart) {
+            const unsigned held_s    = (unsigned) (v.critical_ms / 1000);
+            const unsigned left_s    = (unsigned) (tk::heap_restart_in_ms(v.critical_ms) / 1000);
+            const unsigned threshold = (unsigned) tk::kHeapCriticalBytes;
+
+            if (v.action == tk::HeapAction::Armed) {
+                ESP_LOGE(TAG, "HEAP CRITICAL: internal largest_block %u B < %u B — watchdog ARMED, "
+                              "restarting in %u s unless it recovers", (unsigned) largest,
+                         threshold, (unsigned) (tk::kHeapCriticalHoldMs / 1000));
+            } else if (v.action == tk::HeapAction::Watching) {
+                ESP_LOGE(TAG, "HEAP CRITICAL for %u s (internal largest_block %u B < %u B) — "
+                              "restarting in %u s unless it recovers",
+                         held_s, (unsigned) largest, threshold, left_s);
+            } else if (v.action == tk::HeapAction::Recovered) {
+                if (v.ota_excused) {
+                    ESP_LOGW(TAG, "HEAP critical run (%u s) cleared: an OTA is in flight and holds "
+                                  "the largest allocations we make — not judging the heap during "
+                                  "an install", held_s);
+                } else {
+                    ESP_LOGW(TAG, "HEAP recovered after %u s critical (internal largest_block now "
+                                  "%u B) — watchdog disarmed, no restart needed",
+                             held_s, (unsigned) largest);
+                }
+            }
+
+            if (v.action == tk::HeapAction::Restart) {
                 // How many watchdog restarts this run of exhaustion has already caused (0 unless
                 // the last boot was one of ours). Five is proof that restarting does not fix it,
                 // and continuing would cycle the radios every ~10 min forever — see
@@ -376,16 +406,26 @@ void VehicleController::loop_task_fn_(void* arg) {
                     static bool said = false;
                     if (!said) {
                         said = true;
-                        ESP_LOGE(TAG, "HEAP EXHAUSTED after %u consecutive watchdog restarts — "
-                                      "NOT restarting again (restarting is not fixing this; "
-                                      "staying up so it can be diagnosed)", (unsigned) prior);
+                        ESP_LOGE(TAG, "HEAP EXHAUSTED for %u s but %u consecutive watchdog restarts "
+                                      "have not fixed it — NOT restarting again, staying up "
+                                      "degraded so it can be diagnosed (a restart loop would cycle "
+                                      "the radios every ~10 min and keep a parked car awake)",
+                                 held_s, (unsigned) prior);
                     }
                 } else {
-                    ESP_LOGE(TAG, "HEAP EXHAUSTED: internal largest_block %u B < %u B for %u s — "
-                                  "restarting (restart %u; the device cannot recover from here, "
-                                  "see logic/heap_watchdog.hpp)",
-                             (unsigned) largest, (unsigned) tk::kHeapCriticalBytes,
-                             (unsigned) (tk::kHeapCriticalHoldMs / 1000), (unsigned) (prior + 1));
+                    // The one line that has to survive the reboot and explain it on its own —
+                    // state, threshold, how long, which restart, and why nothing cheaper is tried.
+                    ESP_LOGE(TAG, "HEAP EXHAUSTED for %u s (internal largest_block %u B < %u B, "
+                                  "free %u B) — RESTARTING DELIBERATELY, watchdog restart %u/%u, "
+                                  "breadcrumb reboot_why=heap:%u. No in-place recovery is "
+                                  "attempted: ESP-IDF cannot defragment a live heap and its own "
+                                  "subsystem deinit paths allocate and have a history of leaking, "
+                                  "so a clean boot is the only reliable way back "
+                                  "(rationale: docs/ARCHITECTURE.md)",
+                             held_s, (unsigned) largest, threshold,
+                             (unsigned) heap_caps_get_free_size(MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL),
+                             (unsigned) (prior + 1), (unsigned) tk::kHeapMaxConsecutiveRestarts,
+                             (unsigned) (prior + 1));
                     tk::HeapReason why = tk::heap_reason_format((uint8_t)(prior + 1));
                     self->persist_reboot_reason_(why.text);
                     // A restart inside the ~90 s OTA health gate would look like a failed boot and

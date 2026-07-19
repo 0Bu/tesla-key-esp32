@@ -352,7 +352,11 @@ and never connects/enrols. **Full detail: [`docs/ARCHITECTURE.md`](../docs/ARCHI
   `bad_alloc`; excused while an OTA holds its TLS buffers) ⇒ log loudly, persist
   `reboot_why=heap:<n>` to NVS, restart. Capped at **5 consecutive** restarts, and such a boot
   does NOT seed the active polling window (else a loop keeps a parked car awake). The next boot
-  reports it once in `/status` as `last_reboot`.
+  reports it once in `/status` as `last_reboot`. The escalation **narrates itself to syslog**
+  (armed → per-sample countdown → recovered/excused/fired → the `BOOT` line on the way back up),
+  because syslog is the only post-mortem source that survives the restart. **Why a restart and
+  not in-place recovery — the researched rejection of subsystem deinit/reinit, ballast blocks,
+  the failed-alloc hook and defragmentation, with sources: [`docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md).**
 
 ## Typical Debugging
 

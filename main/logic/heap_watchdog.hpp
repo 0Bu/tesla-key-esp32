@@ -20,6 +20,28 @@
 // So: when the heap has been unusable CONTINUOUSLY for long enough that no transient explains
 // it, restart deliberately. Five minutes of dead device beats ten hours of dead device.
 //
+// WHY A RESTART AND NOT IN-PLACE RECOVERY. Rebooting is the crude answer, so it was adopted only
+// after the alternatives were researched (full write-up with sources in docs/ARCHITECTURE.md,
+// "Why a restart, and not in-place recovery"):
+//   - Tearing down and re-initialising subsystems is the obvious smarter fix and has the worst
+//     evidence: nimble_port_deinit leaked twice in a row (esp-idf#8136), esp_wifi_deinit leaked
+//     per cycle on IDF 5.0/5.1 (#12014) and crashed in the 3.x era (#2050), and httpd_stop() leaked
+//     ~16.7 KB per cycle on 5.3 — where the first upstream FIX for it crashed on an assert
+//     (#14266). Worse, deinit paths allocate, and we run when allocation is failing: a throw there
+//     unwinds into the net-less loop task and abort()s, i.e. an UNcontrolled restart with no
+//     breadcrumb. Crash-only literature says the same thing structurally — a restart is
+//     trustworthy only when it does not run the failing component's own code.
+//   - A ballast block freed under pressure costs permanent internal DRAM out of a ~31 KB steady
+//     state, and this path needs no headroom: it is allocation-free by construction.
+//   - heap_caps_register_failed_alloc_callback() runs inside the allocator in an arbitrary task/ISR
+//     context, cannot satisfy the allocation, and has no documented safety rules — a sensor, not an
+//     actor. Espressif's own escalation for this condition (HEAP_ABORT_WHEN_ALLOCATION_FAILS) is a
+//     bare esp_system_abort(), i.e. less ceremony than this.
+//   - There is no defragmentation to call: ESP-IDF documents fragmentation failure as expected and
+//     part of TLSF lives in ROM.
+// What shipping firmware does (ESPHome safe mode, Tasmota) is exactly this shape: a bounded restart
+// ladder with a persisted counter, not in-place repair.
+//
 // WHY IT CANNOT SIMPLY REBOOT ON bad_alloc. A reboot re-opens the active polling window
 // (vehicle_ctrl seeds it at boot), so a device that reboots in a loop keeps a parked car awake
 // and drains it. That is why the trigger is a LONG, UNBROKEN run below the threshold and not a
@@ -53,10 +75,29 @@ inline constexpr size_t kHeapCriticalBytes = 4096;
 // reach it, since all of those resolve in seconds.
 inline constexpr uint32_t kHeapCriticalHoldMs = 300000;   // 5 minutes
 
+// The action AND the transition that produced it. The transitions exist so the sample site can
+// narrate the whole escalation to syslog — armed, counting down, recovered, fired — instead of
+// only the last line. Syslog is the ONLY post-mortem source that survives the restart (the /diag
+// ring is RAM), so a reader must be able to reconstruct why the device rebooted from it alone;
+// during the 2026-07-18 incident there was nothing to read afterwards at all.
 enum class HeapAction : uint8_t {
-    Ok,        // healthy (or excused) — nothing to do
-    Watching,  // below the threshold, but the hold time has not elapsed
-    Restart,   // sustained exhaustion: restart deliberately
+    Ok,         // healthy, and healthy on the previous sample too — nothing to say
+    Recovered,  // a critical run just ENDED (the heap came back, or an OTA excused it)
+    Armed,      // this sample OPENED a critical run — the countdown to a restart starts here
+    Watching,   // still critical, the hold time has not elapsed
+    Restart,    // sustained exhaustion: restart deliberately
+};
+
+struct HeapVerdict {
+    HeapAction action;
+    // How long the run THIS verdict describes has lasted: the elapsed time so far for
+    // Watching/Restart, the total length of the run that just ended for Recovered, 0 otherwise.
+    // Logged rather than the configured hold, so the line states what actually happened — the
+    // sample cadence means a fired run has always run somewhat LONGER than kHeapCriticalHoldMs.
+    uint32_t critical_ms;
+    // Recovered because an OTA is in flight, not because the heap healed. A different sentence in
+    // the log: one says the device is fine again, the other says we declined to judge it.
+    bool ota_excused;
 };
 
 struct HeapWatchdog {
@@ -123,27 +164,41 @@ inline uint8_t heap_reason_parse(const char* s) {
     return static_cast<uint8_t>(n);
 }
 
+// How long until a restart, given how long the run has already lasted. Saturates at 0 rather than
+// wrapping, so the countdown in the log can never print a nonsense ~49-day figure.
+inline constexpr uint32_t heap_restart_in_ms(uint32_t critical_ms) {
+    return critical_ms >= kHeapCriticalHoldMs ? 0 : kHeapCriticalHoldMs - critical_ms;
+}
+
 // Feed one sample. Call it on a fixed cadence; the decision uses elapsed time, not sample count,
 // so the cadence can change without moving the threshold.
-inline HeapAction heap_watch(HeapWatchdog& w, const HeapSample& s) {
+inline HeapVerdict heap_watch(HeapWatchdog& w, const HeapSample& s) {
     // An OTA legitimately holds the largest allocations this firmware ever makes (a TLS session
     // plus the image window), so a low reading during one proves nothing. Clear the run rather
     // than merely skipping the sample: skipping would let a critical run that started BEFORE the
     // download resume its clock afterwards and fire mid-install, which is the one reboot that
     // could leave a half-written slot.
     if (s.ota_busy || s.largest_block >= kHeapCriticalBytes) {
+        if (!w.critical) return {HeapAction::Ok, 0, false};
+        // Ending a run is worth a line: it is the difference between "the device healed itself"
+        // and a silence the reader would have to interpret.
+        const uint32_t ran = static_cast<uint32_t>(s.now_ms - w.since_ms);
+        // Excused means the OTA is what saved it — the heap itself is still below the threshold.
+        // An OTA running while the heap is healthy again is an ordinary recovery, not an excusal.
+        const bool excused = s.ota_busy && s.largest_block < kHeapCriticalBytes;
         w.critical = false;
-        return HeapAction::Ok;
+        return {HeapAction::Recovered, ran, excused};
     }
     if (!w.critical) {
         w.critical = true;
         w.since_ms = s.now_ms;
-        return HeapAction::Watching;
+        return {HeapAction::Armed, 0, false};
     }
     // Unsigned subtraction, so a 32-bit millisecond wrap inside the hold window still measures
     // the true elapsed time instead of going hugely negative and firing instantly.
-    if (static_cast<uint32_t>(s.now_ms - w.since_ms) >= kHeapCriticalHoldMs) return HeapAction::Restart;
-    return HeapAction::Watching;
+    const uint32_t held = static_cast<uint32_t>(s.now_ms - w.since_ms);
+    if (held >= kHeapCriticalHoldMs) return {HeapAction::Restart, held, false};
+    return {HeapAction::Watching, held, false};
 }
 
 }  // namespace tk

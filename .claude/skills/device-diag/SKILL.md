@@ -135,6 +135,24 @@ only copy that survives a reboot — the `/diag` ring does not). Three log lines
   which includes the C5's 8 MB PSRAM and can read ~7.8 MB while internal DRAM is at 768 B. The
   watchdog restarts when `internal_largest` stays under 4 KB for 5 unbroken minutes.
 
+The watchdog also **narrates its own escalation**, so a restart can be reconstructed from syslog
+alone. Grep these in order — the countdown lines are the proof the shortage was *sustained* rather
+than a spike, and their absence before a reboot means something *else* restarted the device:
+
+- `HEAP CRITICAL: … watchdog ARMED, restarting in 300 s unless it recovers` — the run opened.
+- `HEAP CRITICAL for <n> s … restarting in <m> s unless it recovers` — one per 30 s sample.
+- `HEAP recovered after <n> s critical … watchdog disarmed` — it healed; no restart happened.
+- `HEAP critical run (<n> s) cleared: an OTA is in flight …` — excused, *not* healed.
+- `HEAP EXHAUSTED for <n> s … RESTARTING DELIBERATELY, watchdog restart <k>/5, breadcrumb
+  reboot_why=heap:<k>` — the restart itself, with the state that caused it.
+- `HEAP EXHAUSTED … but <n> consecutive watchdog restarts have not fixed it — NOT restarting
+  again` — the cap held; the device is up but degraded, and this is logged once per run.
+- `BOOT this boot was caused by the firmware itself: reason=heap:<k>` — on the *next* boot,
+  matching `/status.last_reboot`.
+
+The times are the **measured** age of the run, not the configured hold, so a fired run reads
+somewhat over 300 s (30 s sampling cadence) — that is expected, not drift.
+
 ```bash
 # Host serial monitor (no local idf.py) — exit Ctrl-A then K.
 screen /dev/cu.usbmodemXXXX 115200
