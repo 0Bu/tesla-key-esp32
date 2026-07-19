@@ -96,6 +96,7 @@ void VehicleController::auto_pair_task_fn_(void* arg) {
             //   • success            → key still valid
             //   • auth rejection     → car refused our key (likely deleted) — confirm now
             //   • neither (no reply) → car unreachable (asleep / out of range / weak link)
+            self->next_health_poll_ticks_.store(0);
             int  streak_before = self->auth_fail_streak_;
             bool ok            = self->health_probe_();
             if (self->pairing_lost_) continue;  // 2nd strike already → revoked (top of loop)
@@ -104,7 +105,9 @@ void VehicleController::auto_pair_task_fn_(void* arg) {
                 ESP_LOGD(TAG, "auto-pair: health check OK — key still valid");
                 // Idle ~30 s, but bail out fast if the message observer flags a deletion
                 // (a faulting charge poll mid-wait) so we re-key promptly, not 30 s later.
+                self->next_health_poll_ticks_.store(xTaskGetTickCount() + pdMS_TO_TICKS(30000));
                 for (int w = 0; w < 60 && !self->pairing_lost_; w++) vTaskDelay(pdMS_TO_TICKS(500));
+                self->next_health_poll_ticks_.store(0);
             } else if (self->auth_fail_streak_ > streak_before) {
                 // The car answered but REFUSED our key → almost certainly deleted on the
                 // car side. Confirm immediately (don't wait a whole cycle) so we react in
@@ -119,7 +122,9 @@ void VehicleController::auto_pair_task_fn_(void* arg) {
                 // keep the pairing and retry. Logged so it's clear the key simply could not
                 // be verified (connectivity), rather than a deletion being silently missed.
                 ESP_LOGW(TAG, "auto-pair: car not reachable over BLE — can't verify key right now, will retry");
+                self->next_health_poll_ticks_.store(xTaskGetTickCount() + pdMS_TO_TICKS(30000));
                 for (int w = 0; w < 60 && !self->pairing_lost_; w++) vTaskDelay(pdMS_TO_TICKS(500));
+                self->next_health_poll_ticks_.store(0);
             }
             continue;
         }

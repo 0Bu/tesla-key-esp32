@@ -219,7 +219,7 @@ code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
 .crow .ck{flex:none; width:80px; font-size:12px; font-weight:600; letter-spacing:.5px; text-transform:uppercase; color:var(--muted)}
 .crow .cv{flex:1; min-width:0; font-size:16px; display:flex; align-items:center; gap:6px; flex-wrap:nowrap;
   font-variant-numeric:tabular-nums}
-.crow .cv.ok{color:var(--ok)} .crow .cv.warn{color:var(--warn)} .crow .cv.unkn{color:var(--warn-base)}
+.crow .cv.ok{color:var(--ok)} .crow .cv.warn{color:var(--warn)} .crow .cv.unkn{color:var(--warn-base)} .crow .cv.dis{color:var(--muted)}
 /* connection-row MAC is a touch smaller than the tile MAC so bars + dBm + the full
    17-char address all fit one line on a phone (desktop bumps it back up to 15px) */
 .crow .cv .mac{font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12.5px; letter-spacing:.2px}

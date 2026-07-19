@@ -83,6 +83,7 @@ struct Inputs {
     bool                   have_seen_rssi{false};
     int                    seen_rssi{0};       // last advert RSSI (the "can't connect" bars)
     int                    target_connectable{-1};  // -1 unknown / 0 no / 1 yes
+    uint32_t               ble_next_retry_in_s{0};
 
     // Link-state machine + raw VCSEC flag (diagnostics).
     LinkState   link{LinkState::Unknown};
@@ -196,6 +197,9 @@ inline void emit_status(const Inputs& in, E& e) {
     e.obj_begin("ble");
     e.boolean("connected", in.ble_connected);
     e.boolean("scanning",  in.ble_scanning);
+    if (in.ble_next_retry_in_s > 0) {
+        e.num("next_retry_in_s", (double)in.ble_next_retry_in_s);
+    }
     if (in.ble_connected) {
         if (in.have_ble_rssi) e.num("rssi", in.ble_rssi);
         e.str("addr", in.ble_addr.c_str());

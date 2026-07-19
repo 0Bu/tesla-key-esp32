@@ -636,6 +636,7 @@ static void test_status_model() {
     s3.charge.has_battery_level = true; s3.charge.battery_level = 54.0f;
     s3.charge.charging_state = "Disconnected";
     s3.have_last_seen = true; s3.last_seen_s = 90000;
+    s3.ble_next_retry_in_s = 15;
 
     CollectEmitter e3;
     tk::status::emit_status(s3, e3);
@@ -662,6 +663,7 @@ static void test_status_model() {
         "ble{\n"
         "ble.connected=false\n"
         "ble.scanning=true\n"
+        "ble.next_retry_in_s=15\n"
         "ble.devices[\n"
         "ble.devices.0{\n"
         "ble.devices.0.addr=\"de:ad:be:ef:00:01\"\n"

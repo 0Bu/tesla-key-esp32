@@ -449,7 +449,8 @@ function render(s){
   } else {
     // disconnected — still show the (faded, empty) bar glyph so the row keeps the same
     // shape as Wi-Fi rather than collapsing to text only.
-    bc.className='cv'; setHTML(bc,barsHTML(null)+'<span class="ph">Disconnected</span>');
+    var retry=ble.next_retry_in_s?' (in ~'+ble.next_retry_in_s+'s)':'';
+    bc.className='cv dis'; setHTML(bc,barsHTML(null)+'<span class="ph">Disconnected'+retry+'</span>');
   }
 
   // MQTT — Home Assistant bridge (tap to set/change the broker)

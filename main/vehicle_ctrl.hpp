@@ -184,6 +184,13 @@ public:
     // or 0 if not paired / unknown (paired before this was tracked, or clock unsynced).
     // Lazily stamped the first time we hold a session and the wall clock is valid.
     time_t paired_at();
+    uint32_t next_health_poll_in_s() const {
+        uint32_t t = next_health_poll_ticks_.load();
+        if (t == 0) return 0;
+        uint32_t now = xTaskGetTickCount();
+        if (now >= t) return 0;
+        return (t - now) / configTICK_RATE_HZ;
+    }
     // Reason the most recent command failed (e.g. "complete", "not_charging"), or empty
     // if it succeeded or got no response at all (car unreachable / timed out). Lets the
     // UI tell "the car rejected this" apart from "the car couldn't be reached".
@@ -388,6 +395,8 @@ private:
 
     // Pending status result stored as a member to avoid lambda capturing stack refs
     VehicleStatusResult pending_status_{};
+
+    std::atomic<uint32_t> next_health_poll_ticks_{0};
 
     TaskHandle_t loop_task_{nullptr};
     static void loop_task_fn_(void* arg);

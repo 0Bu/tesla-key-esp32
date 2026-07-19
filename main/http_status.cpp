@@ -151,6 +151,7 @@ cJSON* build_status_object() {
         in.target_connectable = g_vehicle->ble_target_connectable();
     }
 
+    in.ble_next_retry_in_s = g_vehicle->next_health_poll_in_s();
     in.link        = g_vehicle->link_state();
     in.vcsec_sleep = g_vehicle->vcsec_sleep_raw();
     in.charge      = g_vehicle->get_cached_charge();
