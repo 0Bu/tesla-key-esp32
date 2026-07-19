@@ -6,6 +6,7 @@
 
 #include "vehicle_ctrl.hpp"
 #include "logic/vin.hpp"
+#include "task_config.hpp"
 #include <cmath>
 #include <esp_log.h>
 
@@ -144,8 +145,8 @@ bool VehicleController::init(const std::string& vin,
     // minutes after start; it then backs off if the car stays idle (no command, not charging).
     last_cmd_ticks_.store(xTaskGetTickCount());
 
-    xTaskCreate(loop_task_fn_, "vehicle_loop", 8192, this, 5, &loop_task_);
-    xTaskCreate(auto_pair_task_fn_, "auto_pair", 8192, this, 4, &auto_pair_task_);
+    xTaskCreate(loop_task_fn_, "vehicle_loop", 8192, this, tk::kPrioVehicleLoop, &loop_task_);
+    xTaskCreate(auto_pair_task_fn_, "auto_pair", 8192, this, tk::kPrioAutoPair, &auto_pair_task_);
     ESP_LOGI(TAG, "VehicleController ready for VIN %s", vin.c_str());
     return true;
 }
