@@ -507,21 +507,27 @@ our latest supported revision, per the MCP lifecycle spec (the client disconnect
 can't proceed). **Methods:** `initialize` (capabilities: `tools` only), `ping`,
 `tools/list`, `tools/call`; everything else → `-32601`.
 
-**One spec table drives everything.** The tool registry in `logic/mcp.hpp` (`kMcpTools`)
-carries name, description AND each argument's key/type/required/bounds (`McpArg`,
-`kMcpMaxArgs`). The advertised `tools/list` JSON schema and the executor's validation are
-both generated from that table, so schema-vs-enforcement drift is impossible by
-construction: an absent required argument OR a present-but-unparseable one is a `-32602`
+**One spec table drives everything — including the REST surface.** The command registry in
+`logic/command_registry.hpp` (`kCommands`, `CmdArg`, `kCmdMaxArgs`) carries each command's
+REST name, MCP tool name + description, AND each argument's per-surface keys with ONE
+shared `{lo,hi}` bounds pair. The advertised `tools/list` JSON schema, the MCP executor's
+validation, and the REST `/command` clamp (`http_api.cpp`) are all generated from that
+table, so schema-vs-enforcement drift — and any `/api`-vs-`/mcp` disagreement about names
+or ranges — is impossible by construction. Surface semantics stay deliberately different:
+MCP is strict — an absent required argument OR a present-but-unparseable one is a `-32602`
 protocol error (silently defaulting `set_scheduled_charging`'s `enable` would *disable*
 the schedule and report success); loose-but-unambiguous encodings are coerced (numeric
 strings for ints, 0/1 for bools); parsed integers are clamped to the spec bounds before
-the int cast (UB guard). The registry, method routing, version table, clamp and the
+the int cast (UB guard) — while REST stays lenient for TeslaBleHttpProxy compat (absent →
+the spec's `api_default`). Both surfaces execute through the single kind→controller
+dispatch in `command_exec.cpp`. The registry, method routing, version table, clamp and the
 shared command-outcome text (`logic/command_result.hpp`, also used by the REST
 `/command` reason so the two paths can never diverge) are IDF-free and covered by the
-host mock build (`test/test_logic.cpp`, `test_mcp`). The tool set itself — exactly the
+host mock build (`test/test_logic.cpp`, `test_mcp` — including a pin on the `tools/list`
+row order, which is the registry's table order). The tool set itself — exactly the
 run-on-key charging commands plus cache-only `get_vehicle_state`, role-refused commands
-deliberately absent — is documented with the full per-tool table in
-[`MCP.md`](MCP.md#tools).
+deliberately absent (`mcp_name == nullptr`) — is documented with the full per-tool table
+in [`MCP.md`](MCP.md#tools).
 
 **Heap safety:** `tools/list` is the endpoint's largest response (~1.5 KB serialized) and
 `cJSON_PrintUnformatted` builds it in one contiguous block — the crash-risk currency on
