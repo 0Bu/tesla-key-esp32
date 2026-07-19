@@ -19,9 +19,20 @@ follow-up session apply the fix.
 - **C++ exceptions are enabled, but an *uncaught* `std::bad_alloc` (or any throw) unwinds
   through C frames → `std::terminate()` → `abort()` → reboot.** Allocation failure here is not
   a caught error; it is a crash.
-- **A reboot loop is doubly bad:** each boot re-opens the BLE polling window, so a parked car
-  never sleeps. Boot-path and steady-loop allocation failures are therefore the highest
-  severity — they can brick sleep, not just drop one request.
+- **A reboot loop is doubly bad:** an ordinary boot re-opens the BLE polling window, so a parked
+  car never sleeps. (One exception, by design: `init()` does **not** seed the window after a
+  heap-watchdog restart — `boot_heap_restarts() != 0` — precisely so that escalation cannot
+  become the expensive loop.) Boot-path and steady-loop allocation failures are therefore the
+  highest severity — they can brick sleep, not just drop one request.
+- **A permanent shortage is no longer only "recover and continue".** Those guards are right for a
+  *transient*, and they wedged the device for ten hours on 2026-07-18 when the shortage was
+  permanent. `main/logic/heap_watchdog.hpp` (sampled in `vehicle_telemetry.cpp` `loop_task_fn_`)
+  restarts deliberately after INTERNAL `largest_block` < 4 KB for 5 unbroken minutes. Two things
+  follow for a review: the restart path itself must stay **allocation-free** (it runs because
+  allocation is failing — `ota_is_busy()` is one atomic for exactly this reason, and a throw there
+  unwinds into the net-less loop task), and any log line added on that path must render **under
+  ~230 chars**, since `diag_log.cpp` formats into a 256-byte stack buffer and silently truncates
+  past it — losing the very line that explains the restart.
 
 The existing safety pattern you are checking adherence to:
 - HTTP handlers run under the `handle_all` **try/catch that returns 503 on OOM** — a throw
