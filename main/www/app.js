@@ -8,7 +8,12 @@ var $=function(id){return document.getElementById(id)};
 function setHTML(el,html){ if(el && el.__h!==html){ el.__h=html; el.innerHTML=html; } }
 var state=null, otaTimer=null, otaAvail=null, waking=false, wakeTimeout=null, chgBusy=false, ws=null;
 
-function esc(s){return String(s).replace(/[&<>]/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;'}[c]})}
+// Quotes are escaped too so esc() is safe in attribute values (title="…"), not just element content.
+function esc(s){return String(s).replace(/[&<>"']/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]})}
+// Numeric fields from the /status JSON are coerced before they touch any HTML string —
+// a finite number in, the number out; anything else null. Keeps radio-sourced JSON
+// (RSSI, SOC, progress) from ever reaching innerHTML as text.
+function num(x){ x=+x; return isFinite(x)?x:null; }
 
 /* ---------- toasts ---------- */
 function toast(msg,type){
@@ -44,6 +49,7 @@ function connectWS(){
 function barsHTML(rssi){
   // rssi==null → no link (e.g. BLE disconnected): draw the glyph with every bar faded so
   // the row still shows a signal placeholder instead of jumping to text-only.
+  rssi=num(rssi);
   var n = rssi==null ? 0 : (rssi>=-55?4 : rssi>=-67?3 : rssi>=-78?2 : rssi>=-90?1:0);
   var H=[4,7,10,13], s='<svg class="bars" width="24" height="15" viewBox="0 0 21 13" fill="currentColor"><title>'+(rssi==null?'No signal':rssi+' dBm')+'</title>';
   for(var i=0;i<4;i++) s+='<rect x="'+(i*5.3)+'" y="'+(13-H[i])+'" width="3.3" height="'+H[i]+'" rx="1" opacity="'+(i<n?1:0.25)+'"/>';
@@ -184,7 +190,7 @@ function copChip(s){
   var kw=liveKw(s);
   if(!kw) return '';                                            // no positive draw → COP idle → no chip
   var tip='Cabin overheat protection'+(c.cop_temp?' · '+c.cop_temp:'')+' · '+kw+' AC draw';
-  return '<div class="stat cop on" title="'+tip+'"><div class="k">Overheat</div>'+
+  return '<div class="stat cop on" title="'+esc(tip)+'"><div class="k">Overheat</div>'+
          '<div class="v">'+kw+'</div></div>';
 }
 /* Defrost chip — shown when the car is defrosting (front or rear defroster on, or Max-defrost
@@ -200,7 +206,7 @@ function defrostChip(s){
   var p=[]; if(c.front_defrost===true)p.push('front'); if(c.rear_defrost===true)p.push('rear');
   if(c.defrost_mode&&c.defrost_mode!=='Off')p.push(c.defrost_mode.toLowerCase());
   var tip='Defrost'+(p.length?' · '+p.join(', '):'');
-  return '<div class="stat defrost on" title="'+tip+'"><div class="k">Defrost</div>'+
+  return '<div class="stat defrost on" title="'+esc(tip)+'"><div class="k">Defrost</div>'+
          '<div class="v">'+kw+'</div></div>';
 }
 /* Make every chip in a row the same width — the widest one's content width (so they line
@@ -239,8 +245,9 @@ function render(s){
   var w=s.wifi||{}, wc=$("wifiConn");
   $("wifiLbl").textContent = w.std || 'Wi-Fi';   // standard sits in the label, e.g. "Wi-Fi 4"
   if(w.ssid||s.ip){
-    var wbars=(w.rssi!=null)?barsHTML(w.rssi):'';                              // bars (signal glyph)
-    var wdbm=(w.rssi!=null)?'<span class="dbm">'+w.rssi+' dBm</span>':'';      // numeric reading
+    var wr=num(w.rssi);
+    var wbars=(wr!=null)?barsHTML(wr):'';                                      // bars (signal glyph)
+    var wdbm=(wr!=null)?'<span class="dbm">'+wr+' dBm</span>':'';              // numeric reading
     var wtxt=w.ssid?'<span class="nm">'+esc(w.ssid)+'</span>':'';
     wc.className='cv ok';
     setHTML(wc,wbars+wdbm+wtxt);
@@ -268,7 +275,7 @@ function render(s){
   hst.innerHTML='';   // cleared here; only the paired+reporting branch populates it
   if(paired&&v){
     if(waking){ waking=false; clearTimeout(wakeTimeout); }   // car is awake & reporting — stop the spinner
-    var soc=v.soc!=null?v.soc:0, col=socColor(soc);
+    var soc=num(v.soc)||0, col=socColor(soc);
     // "Charge complete" = battery reached its target and not charging; the start tap is gated
     // (the car would only reject a charge_start here as "complete"). See chargeComplete().
     var complete=chargeComplete(v,charging);
@@ -399,8 +406,9 @@ function render(s){
     if(nd.length){
       bc.className='cv';
       bc.innerHTML='<div class="btlist">'+nd.map(function(d){
-        return '<div class="btrow">'+barsHTML(d.rssi)+
-               '<span class="dbm">'+d.rssi+' dBm</span>'+
+        var r=num(d.rssi);
+        return '<div class="btrow">'+barsHTML(r)+
+               (r!=null?'<span class="dbm">'+r+' dBm</span>':'')+
                '<span class="nm mac">'+esc(d.addr)+'</span></div>';
       }).join('')+'</div>';
     } else {
@@ -413,9 +421,10 @@ function render(s){
     // signal "status unknown" instead of a healthy green. Awake/idle/asleep (and the
     // pre-pair "Pairing" state) are known states → plain green bars as before.
     var unknownStatus=paired&&(s.link==='unknown'||s.link==='unreachable');
+    var br=num(ble.rssi);
     var bbars=unknownStatus?waveBarsHTML()
-             :(ble.rssi!=null)?barsHTML(ble.rssi):'';                          // bars (signal glyph)
-    var bdbm=(ble.rssi!=null)?'<span class="dbm">'+ble.rssi+' dBm</span>':'';  // numeric reading
+             :(br!=null)?barsHTML(br):'';                                      // bars (signal glyph)
+    var bdbm=(br!=null)?'<span class="dbm">'+br+' dBm</span>':'';              // numeric reading
     var btxt=ble.addr?'<span class="nm mac">'+esc(ble.addr)+'</span>':'';
     bc.className=unknownStatus?'cv unkn':'cv ok';   // orange MAC under the ping-pong; green when known
     setHTML(bc,bbars+bdbm+btxt);
@@ -428,7 +437,7 @@ function render(s){
     // Null-safe "strongest nearby advert" fallback: seed is null and RSSI is always negative, so a
     // bare `d.rssi > a` coerces null→0 and never wins (−70 > 0 is false) — the max always stayed
     // null. Take the first value, then the least-negative, so bars+dBm show; empty devices[] → null.
-    var sr=(ble.rssi!=null)?ble.rssi:(ble.devices||[]).reduce(function(a,d){return (a==null||d.rssi>a)?d.rssi:a;},null);
+    var sr=num((ble.rssi!=null)?ble.rssi:(ble.devices||[]).reduce(function(a,d){return (a==null||d.rssi>a)?d.rssi:a;},null));
     var sdbm=(sr!=null)?'<span class="dbm">'+sr+' dBm</span>':'';
     var rt=(ble.car_connectable===false)?'At connection limit':'Connection failed';
     bc.className='cv warn'; setHTML(bc,barsHTML(sr)+sdbm+'<span>'+rt+'</span>');
@@ -646,7 +655,7 @@ function otaPoll(){
 }
 function otaProgress(o){
   otaBusy=true;
-  if(o.state==='downloading'){ var p=o.progress||0; otaInline(otaMiniRing(p,false,'currentColor')+'<span>'+p+'%</span>'); otaTimer=setTimeout(otaPoll,800); }
+  if(o.state==='downloading'){ var p=num(o.progress)||0; otaInline(otaMiniRing(p,false,'currentColor')+'<span>'+p+'%</span>'); otaTimer=setTimeout(otaPoll,800); }
   else if(o.state==='done'){ otaInline(otaMiniRing(100,false,'currentColor')+'<span>rebooting…</span>'); setTimeout(function(){waitReboot(state&&state.version)},2000); }
   else if(o.state==='error'){ otaBusy=false; otaInline('<span>update failed'+(o.message?' — '+esc(o.message):'')+'</span>','err'); otaInlineClear(6000); }
   else { otaTimer=setTimeout(otaPoll,1000); }
