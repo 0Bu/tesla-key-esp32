@@ -426,6 +426,103 @@ returns `ESP_ERR_NO_MEM` rather than throwing and is `try`-guarded anyway. That 
 this code runs precisely when allocation is failing: a throw escaping here would unwind into the
 net-less loop task and turn a wedge into an `abort()`.
 
+### Why a restart, and not in-place recovery
+
+Rebooting is the crude answer, so it was only adopted after the alternatives were researched and
+found worse. The short version: **ESP-IDF offers no reliable way to reclaim a wedged heap from
+inside the running image**, and the teardown paths one would have to call are themselves among the
+least reliable code in the SDK. Evidence for each candidate:
+
+- **Subsystem teardown/reinit** (`httpd_stop`/`httpd_start`, `esp_mqtt_client_destroy`,
+  `esp_wifi_deinit`, `nimble_port_deinit`) — the obvious "smarter" fix, with the worst track
+  record. `nimble_port_deinit` leaked *twice in a row*: Espressif fixed one leak, and a second,
+  independent one survived it ([esp-idf#8136](https://github.com/espressif/esp-idf/issues/8136)).
+  `esp_wifi_deinit` leaked per cycle on IDF 5.0/5.1 (a regression absent in 4.4, fixed in 5.2 —
+  [#12014](https://github.com/espressif/esp-idf/issues/12014)), was reproducibly crash-prone in the
+  3.x era ([#2050](https://github.com/espressif/esp-idf/issues/2050)), and
+  [esp32.com t=13189](https://esp32.com/viewtopic.php?t=13189) documents a supplicant callback no
+  deinit path ever frees. `esp_http_server` leaked **~16.7 KB per stop/start cycle** on IDF 5.3
+  because `httpd_stop()` never released the with-caps task stacks — and the *first upstream fix for
+  that* crashed on an assert ([#14266](https://github.com/espressif/esp-idf/issues/14266)). The
+  pattern is not "one bad release": whether deinit returns its memory depends on the exact IDF
+  revision and is patched reactively. On top of that, deinit paths **allocate**, and this code runs
+  when allocation is already failing — a throw there unwinds into the net-less loop task and
+  `abort()`s, trading our controlled restart for an uncontrolled one *without* the breadcrumb. The
+  crash-only literature names this directly: a restart is trustworthy only when it is implemented
+  outside the failing component and does not run that component's own code, and rarely-exercised
+  cleanup paths are unreliable *because* they are rarely exercised
+  ([Candea & Fox, HotOS-IX](https://www.usenix.org/legacy/events/hotos03/tech/full_papers/candea/candea.pdf)).
+- **A ballast / rainy-day block** freed under pressure is a real pattern — libstdc++ ships one (a
+  preallocated emergency pool so `std::bad_alloc` can still be *thrown* once malloc fails, which is
+  also the most likely explanation for how the wedged device kept throwing for ten hours instead of
+  crashing). Rejected here because it costs permanent internal DRAM out of a ~31 KB steady-state
+  largest block, and this restart path needs no headroom: it is allocation-free by construction.
+- **`heap_caps_register_failed_alloc_callback()`** is official, but it runs *synchronously inside
+  the allocator*, in the context of whatever task or ISR hit the failure; it takes the size, the
+  caps and the function name, returns nothing, and cannot satisfy or retry the allocation. ESP-IDF
+  documents no constraints on what is safe inside it. That makes it a sensor, not an actor — and
+  the 30 s sample site already covers the sensing. Espressif's own built-in escalation for exactly
+  this condition is `CONFIG_HEAP_ABORT_WHEN_ALLOCATION_FAILS` → `esp_system_abort()`, i.e. a reset
+  with *less* ceremony than ours.
+- **Defragmentation** does not exist: the heap docs treat fragmentation-induced failure as expected
+  behaviour and offer no compaction, and part of the TLSF allocator lives in chip ROM, so even
+  allocator-level improvements cannot reach released branches. Espressif's only in-place lever is
+  carving dedicated regions for critical objects (`heap_caps_add_region_with_caps`), and a
+  MicroPython maintainer judged split-heap of marginal value on ESP32 once WiFi and BLE must
+  coexist ([micropython#8940](https://github.com/micropython/micropython/issues/8940)). This
+  project already does the containment half — the static `/diag` ring, the gzipped web UI, the
+  PSRAM framebuffer on the C5 — but that is *prevention*, and prevention has no answer for the
+  morning after.
+- **What shipping ESP32 firmware actually does** is bounded restarting, not in-place repair.
+  ESPHome's [safe mode](https://esphome.io/components/safe_mode/) is a restart ladder: a persisted
+  boot-failure counter (default 10), a boot that only counts as "good" after a healthy-uptime
+  window, a degraded mode keeping just logging/network/OTA — and it reboots *again* after five
+  minutes. [Tasmota](https://tasmota.github.io/docs/Device-Recovery/) counts restarts and escalates
+  to a settings wipe and finally a reflash. Neither attempts to heal a live heap.
+
+So the reboot is the *last* rung, and the parts that make it defensible are the hygiene around it,
+all of which match the same literature: a **long unbroken trigger** so transients never reach it, a
+**restart cap** (Candea & Fox prescribe a maximum retry limit precisely to prevent reboot cycles),
+and a **breadcrumb persisted before the reset**, which Memfault's watchdog guidance names as the
+thing that separates a diagnosable reset from a mystery.
+
+**What is deliberately not here:** a *load-shedding rung* before the restart — closing `/events`
+subscribers and stopping MQTT to release the heap this firmware itself owns, and only restarting if
+`largest_block` does not recover. That would have healed the 2026-07-18 incident in place, since
+the leak was in our own WS structures. It is the strongest candidate for a next rung, but it only
+helps for leaks in structures *we* know about, and it stays out of this change until a second
+incident shows the pattern is worth the complexity.
+
+### Reading it in syslog
+
+Syslog is the only post-mortem source that outlives the restart — the `/diag` ring is RAM and
+`esp_reset_reason()` cannot tell a deliberate `esp_restart()` from a power cycle. So the escalation
+narrates itself; a reader should be able to reconstruct the whole decision from these lines alone:
+
+| Line | Meaning |
+|------|---------|
+| `HEAP free=… largest_block=… min_free=… internal_largest=…` | the ordinary 30 s trend line, always present |
+| `HEAP CRITICAL: … watchdog ARMED, restarting in 300 s unless it recovers` | the countdown just opened |
+| `HEAP CRITICAL for <n> s … restarting in <m> s unless it recovers` | still critical, one line per 30 s sample — this is the proof the shortage was *sustained*, not a spike |
+| `HEAP recovered after <n> s critical … watchdog disarmed` | the run ended on its own; no restart |
+| `HEAP critical run (<n> s) cleared: an OTA is in flight …` | the run was excused, not healed |
+| `HEAP EXHAUSTED for <n> s … RESTARTING DELIBERATELY (watchdog restart <k>/5, reboot_why=heap:<k>; …)` | the restart, with the state that caused it |
+| `HEAP EXHAUSTED … but <n> consecutive watchdog restarts have not fixed it — NOT restarting again` | the cap held; the device stays up degraded |
+| `BOOT this boot was caused by the firmware itself: reason=heap:<k> …` | logged on the *next* boot, closing the loop |
+
+The elapsed times are the **measured** age of the critical run, not the configured hold, so a fired
+run legitimately reads somewhat over 300 s (it is sampled on a 30 s cadence).
+
+**Keep any line on this path under ~230 characters.** `diag_log.cpp`'s capture hook formats into a
+256-byte *stack* buffer (deliberately — it must not allocate on the heap it is reporting about),
+and anything longer reaches both `/diag` and syslog **cut off mid-sentence**. The restart line is
+the one that must never be truncated, so it carries the state and a pointer here, not the
+reasoning itself. The `BOOT` line is
+emitted *after* `syslog_start()` on purpose: `syslog_send()` is a no-op before that, so logging it
+at the point the breadcrumb is read — which is where it naturally belongs, and where it used to be
+— would confine the one line explaining an unattended 04:00 self-heal to the RAM ring that the
+restart just erased.
+
 ## WiFi / LAN connectivity (reconnect + watchdog)
 
 The STA→LAN link (distinct from the car BLE link-state below) is kept up by two layers in
