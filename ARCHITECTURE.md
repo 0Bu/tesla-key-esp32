@@ -273,7 +273,7 @@ using HA's MQTT-Discovery convention, so every entity auto-appears in Home Assis
 grouped under one device. **Read-only by design** — no command topics are subscribed
 (the car is never controlled or woken from HA). Independent of evcc/BLE/pairing.
 
-- **Config:** broker URI from NVS `mqtt_uri` (web UI: Connection → MQTT, stores `host:port`)
+- **Config:** broker URI from NVS `mqtt_uri` (web UI: Connections → MQTT, stores `host:port`)
   overriding `CONFIG_TESLA_MQTT_BROKER_URI`; empty = disabled (bridge is a no-op).
   Optional `CONFIG_TESLA_MQTT_USERNAME`/`PASSWORD`, `CONFIG_TESLA_MQTT_DISCOVERY_PREFIX`
   (default `homeassistant`), `CONFIG_TESLA_MQTT_BASE_TOPIC` (default `tesla-key`),
