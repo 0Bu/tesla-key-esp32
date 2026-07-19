@@ -189,9 +189,10 @@ GET  /status               { vin, ip, version, key_present, key_fingerprint,
                              ble:{connected,scanning,rssi,addr
                                   | devices:[{addr,name,rssi,connectable}],
                                   connect_fail?,car_connectable? (only while actively failing),
-                                  phase?,phase_s? (BLE phase countdown, both or neither:
+                                  phase?,phase_s?,phase_total_s? (BLE phase countdown, all or none:
                                     "connecting" = an attempt is running and gives up in phase_s,
-                                    "waiting" = the next attempt starts in phase_s; 0 = right now)},
+                                    "waiting" = the next attempt starts in phase_s; 0 = right now.
+                                    phase_total_s = the phase's full length, for the progress ring)},
                              link: "awake"|"idle"|"asleep"|"unreachable"|"unknown" (drives the
                                hero; "idle" = reachable but not provably asleep — the "Parked" card),
                              vcsec_sleep: "AWAKE"|"ASLEEP"|"UNKNOWN" (raw un-debounced flag, diagnostics),

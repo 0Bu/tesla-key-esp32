@@ -21,6 +21,7 @@ bool VehicleController::ensure_connected_(int timeout_ms) {
     // the UI's "Searching…/Connecting…" countdown is armed: the attempt gives up exactly
     // at this deadline. Armed for the whole attempt and cleared on every exit path, so the
     // Bluetooth row counts this phase down instead of showing an unbounded animation.
+    connect_total_s_.store(((uint32_t)timeout_ms + 999) / 1000);
     connect_deadline_.store(deadline_in_((uint32_t)timeout_ms));
     ble_->connect("");
     int waited = 0;

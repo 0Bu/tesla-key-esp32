@@ -37,7 +37,17 @@ enum class Phase : uint8_t { None = 0, Connecting, Waiting };
 
 struct PhaseView {
     Phase    kind{Phase::None};
-    uint32_t secs{0};   // meaningful only when kind != None; 0 means "right now"
+    uint32_t secs{0};      // meaningful only when kind != None; 0 means "right now"
+    uint32_t total_s{0};   // the phase's full length, so the UI can draw elapsed vs remaining
+};
+
+// One armed phase: when it ends, and how long it runs in total. total_s exists because a
+// progress ring needs the whole span, and deriving it client-side from "the largest value
+// seen so far" is wrong for any page that loads mid-phase — it would draw a full ring at
+// whatever second it happened to join.
+struct Deadline {
+    uint32_t at{0};        // tick the phase ends on; 0 = not armed
+    uint32_t total_s{0};
 };
 
 // Whole seconds from `now` until `deadline`, rounded up; 0 once the deadline has passed.
@@ -47,11 +57,11 @@ inline constexpr uint32_t secs_left(uint32_t deadline, uint32_t now, uint32_t ti
     return ((uint32_t)left + tick_hz - 1) / tick_hz;
 }
 
-// The one phase to report, from the two independently-armed deadlines (0 = not armed).
-inline constexpr PhaseView phase(uint32_t connect_deadline, uint32_t retry_deadline,
+// The one phase to report, from the two independently-armed deadlines.
+inline constexpr PhaseView phase(const Deadline& connect, const Deadline& retry,
                                  uint32_t now, uint32_t tick_hz) {
-    if (connect_deadline) return { Phase::Connecting, secs_left(connect_deadline, now, tick_hz) };
-    if (retry_deadline)   return { Phase::Waiting,    secs_left(retry_deadline,   now, tick_hz) };
+    if (connect.at) return { Phase::Connecting, secs_left(connect.at, now, tick_hz), connect.total_s };
+    if (retry.at)   return { Phase::Waiting,    secs_left(retry.at,   now, tick_hz), retry.total_s };
     return {};
 }
 
