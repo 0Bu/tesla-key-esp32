@@ -1,0 +1,80 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash '/Users/oleg/Projects/tesla-key-esp32/.claude/worktrees/nvs-backup-17b369/.codex/hooks/require-project-review.sh'",
+            "statusMessage": "Checking project-review gate…"
+          },
+          {
+            "type": "command",
+            "command": "bash '/Users/oleg/Projects/tesla-key-esp32/.claude/worktrees/nvs-backup-17b369/.codex/hooks/require-skill-audit.sh'",
+            "statusMessage": "Checking skill-audit gate…"
+          }
+        ]
+      },
+      {
+        "matcher": "mcp__github__merge_pull_request",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash '/Users/oleg/Projects/tesla-key-esp32/.claude/worktrees/nvs-backup-17b369/.codex/hooks/require-project-review.sh'",
+            "statusMessage": "Checking project-review gate…"
+          }
+        ]
+      },
+      {
+        "matcher": "mcp__github__create_pull_request|mcp__github__push_files",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash '/Users/oleg/Projects/tesla-key-esp32/.claude/worktrees/nvs-backup-17b369/.codex/hooks/require-skill-audit.sh'",
+            "statusMessage": "Checking skill-audit gate…"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|MultiEdit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash '/Users/oleg/Projects/tesla-key-esp32/.claude/worktrees/nvs-backup-17b369/.codex/hooks/clang-format-edit.sh'",
+            "statusMessage": "Formatting edited C/C++…"
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash '/Users/oleg/Projects/tesla-key-esp32/.claude/worktrees/nvs-backup-17b369/.codex/hooks/report-capabilities.sh'",
+            "statusMessage": "Detecting toolchain capabilities…"
+          },
+          {
+            "type": "command",
+            "command": "bash '/Users/oleg/Projects/tesla-key-esp32/.claude/worktrees/nvs-backup-17b369/.codex/hooks/build-efficiency-check.sh'",
+            "statusMessage": "Auditing the last post-merge build for efficiency…"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash '/Users/oleg/Projects/tesla-key-esp32/.claude/worktrees/nvs-backup-17b369/.codex/hooks/run-logic-tests.sh'",
+            "statusMessage": "Running host logic tests…"
+          }
+        ]
+      }
+    ]
+  }
+}

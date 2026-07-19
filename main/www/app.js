@@ -56,12 +56,64 @@ function barsHTML(rssi){
   return s+'</svg>';
 }
 // animated "searching…" glyph — same geometry as barsHTML, but each bar carries an
-// .sbN class whose @keyframes light it green in turn (cumulative fill), looping until
-// the BLE link is up. Opacity is driven entirely by CSS, so no opacity attr here.
-function searchBarsHTML(){
-  var H=[4,7,10,13], s='<svg class="bars search" width="24" height="15" viewBox="0 0 21 13" fill="currentColor"><title>Searching…</title>';
+// .sbN class whose @keyframes light it in turn (cumulative fill), looping until the link
+// is up. Opacity is driven entirely by CSS, so no opacity attr here. `warm` switches the
+// fill to the amber the UI already uses for "link up but nothing known yet", so hunting
+// for the car reads as the same in-between state on the BLE row while Wi-Fi's own search
+// stays green.
+function searchBarsHTML(warm){
+  var H=[4,7,10,13], s='<svg class="bars search'+(warm?' warm':'')+'" width="24" height="15" viewBox="0 0 21 13" fill="currentColor"><title>Searching…</title>';
   for(var i=0;i<4;i++) s+='<rect class="sb'+(i+1)+'" x="'+(i*5.3)+'" y="'+(13-H[i])+'" width="3.3" height="'+H[i]+'" rx="1"/>';
   return s+'</svg>';
+}
+// "no link" glyph — the same four bars drawn as empty OUTLINES (light stroke, pale fill)
+// rather than faded solids, so a disconnected row reads as an unfilled gauge instead of a
+// dimmed reading, and sits visibly lighter than the "Disconnected" label next to it.
+function emptyBarsHTML(){
+  // Same envelope as barsHTML — inset by half a stroke so the outlined bar occupies exactly
+  // the footprint the filled one would, and the row doesn't visibly change size or weight
+  // when the link comes up.
+  var H=[4,7,10,13], s='<svg class="bars empty" width="24" height="15" viewBox="0 0 21 13"><title>No signal</title>';
+  for(var i=0;i<4;i++) s+='<rect x="'+(i*5.3+0.45)+'" y="'+(13-H[i]+0.45)+'" width="2.4" height="'+(H[i]-0.9)+'" rx="0.9"/>';
+  return s+'</svg>';
+}
+/* ---------- Bluetooth phase countdown ----------
+   The device reports which BLE phase is running and how many seconds are left in it
+   (ble.phase / ble.phase_s): "connecting" = an attempt is running and gives up then,
+   "waiting" = no attempt is running and the next one starts then. The live push only
+   arrives every ~2 s, so the remaining time is ticked down locally in between and the
+   pushed value is treated as the clock to resync against.
+
+   The time sits at the row's right edge, in the column the tiles put their edit pencil in,
+   and is painted with textContent into a dedicated node — NOT rebuilt through setHTML with
+   the rest of the row, since rewriting the row's innerHTML every second would re-create the
+   bar <rect>s and restart their CSS fill animation on every tick. */
+var cdKind=null, cdEndMs=0;
+// Constant markup — only the node's text changes per tick. data-p names the ONE phase this
+// row will count down, so a row can never show a number belonging to a different phase.
+function cdHTML(kind){ return '<span class="cd" data-p="'+kind+'"></span>'; }
+// Resync the local countdown clock from a push. A phase change always resyncs; within a
+// phase only a real disagreement (≥2 s) does, so the ~2 s push cadence and the 1 s local
+// tick can't fight each other into a number that jitters back up.
+function cdSync(kind,secs){
+  if(kind!=='connecting'&&kind!=='waiting'){ cdKind=null; cdEndMs=0; return; }
+  if(secs==null) secs=0;
+  if(kind!==cdKind||Math.abs(cdLeft()-secs)>=2){ cdKind=kind; cdEndMs=Date.now()+secs*1000; }
+}
+function cdLeft(){ return Math.max(0,Math.ceil((cdEndMs-Date.now())/1000)); }
+// Paint into the row's .cd node if the current row has one. The node declares (data-p) the
+// one phase it counts down and a mismatch paints nothing, so a label can never be followed
+// by a number describing a different phase. At 0 the phase is over but the next push hasn't
+// landed yet, so say what is about to happen rather than dropping the text and leaving the
+// row's right edge empty for a beat.
+function paintCd(){
+  var el=document.querySelector('#bleConn .cd'); if(!el) return;
+  var on=cdKind&&el.getAttribute('data-p')===cdKind;
+  el.classList.toggle('off',!on);
+  if(!on) return;
+  var n=cdLeft();
+  el.textContent = cdKind==='waiting' ? (n?'retry in '+n+'s':'retrying…')
+                                      : (n?n+'s left'      :'timing out…');
 }
 // "status unknown" glyph — same geometry as barsHTML, all four bars fully lit (the link
 // is up; signal strength is real and shown as dBm next to it). Each bar carries a .wbN
@@ -271,7 +323,10 @@ function render(s){
   // insert a fresh <svg> and restart its CSS animation from 0% — making the pulsing
   // sleep/charge/wake ring visibly jump on each ~2 s WS push instead of fading smoothly.
   var hic=$("hicon"), hl=$("hlabel"), hs=$("hsub"), hst=$("hstats"), hicHTML=null;
-  $("hero").classList.remove('hide');   // shown for every paired state; unknown/unreachable now show a grey status hero (not hidden)
+  // Shown for every state this function renders — including the very first frame, since the
+  // markup ships the card hidden so the empty skeleton can't flash on load. The one branch
+  // that puts it back is unknown/unreachable below, which hides the card outright.
+  $("hero").classList.remove('hide');
   hst.innerHTML='';   // cleared here; only the paired+reporting branch populates it
   if(paired&&v){
     if(waking){ waking=false; clearTimeout(wakeTimeout); }   // car is awake & reporting — stop the spinner
@@ -333,28 +388,28 @@ function render(s){
     } else {
       // paired, BLE may be up, but link_state is 'unknown' (nothing heard since boot — the
       // on-demand link hasn't completed a signed round-trip yet) or 'unreachable' (heard
-      // before, now stale: drove off / out of range / deep sleep). We never claim "asleep"
-      // when we don't know — but instead of a blank area we show a neutral grey hero with the
-      // orange BLE glyph (matching the orange BLE bars) and the honest state, plus the
-      // last-known battery + idle time from the retained cache so the card still informs.
-      var ureach=s.link==='unreachable';
-      hicHTML=ringSVG(0,true)+'<div class="glyph">'+BT+'</div>';
-      // link==='awake' can land here transiently when the freshness stamp arrived from a
-      // non-charge poll before the first charge poll filled the cache (no s.vehicle yet) —
-      // say "Checking status…" then, not "Connecting…" (the link is clearly up).
-      setHTML(hl,'<span>'+(ureach?'Unreachable':(s.link==='awake'?'Checking status…':'Connecting…'))+'</span>');
-      // Only claim "Bluetooth connected" when the momentary GATT link is actually up
-      // (linked). The on-demand link is dropped between polls, so link==='unknown'
-      // routinely coexists with ble.connected===false — in which case the BLE row reads
-      // "Disconnected" and a "Bluetooth connected" subtitle would contradict it.
-      hs.textContent=ureach
-        ? 'No recent response from the vehicle over Bluetooth.'
-        : (linked ? 'Bluetooth connected — checking status…'
-                  : 'Reaching your Tesla over Bluetooth…');
-      var uls=s.last||{}, ulsoc=(uls.soc!=null)?Math.round(uls.soc):null, uago=fmtAgo(s.last_seen_s), uchips=[];
-      if(ulsoc!=null) uchips.push(stat('Battery','<span style="color:'+socColor(ulsoc)+'">'+ulsoc+'</span>','%'));
-      if(uago)        uchips.push(stat('Idle', uago, ''));
-      hst.innerHTML=uchips.join('');
+      // before, now stale: drove off / out of range / deep sleep).
+      var ureach=s.link==='unreachable'||s.link==='unknown';
+      if(ureach){
+        $("hero").classList.add('hide');
+      } else {
+        hicHTML=ringSVG(0,true)+'<div class="glyph">'+BT+'</div>';
+        // Only link==='awake' reaches here: the ureach test above already took unknown and
+        // unreachable. It lands here transiently when the freshness stamp arrived from a
+        // non-charge poll before the first charge poll filled the cache (no s.vehicle yet),
+        // so the link is clearly up — "Checking status…", never "Connecting…".
+        setHTML(hl,'<span>Checking status…</span>');
+        // Only claim "Bluetooth connected" when the momentary GATT link is actually up
+        // (linked). The on-demand link is dropped between polls, so link==='unknown'
+        // routinely coexists with ble.connected===false — in which case the BLE row reads
+        // "Disconnected" and a "Bluetooth connected" subtitle would contradict it.
+        hs.textContent=linked ? 'Bluetooth connected — checking status…'
+                              : 'Reaching your Tesla over Bluetooth…';
+        var uls=s.last||{}, ulsoc=(uls.soc!=null)?Math.round(uls.soc):null, uago=fmtAgo(s.last_seen_s), uchips=[];
+        if(ulsoc!=null) uchips.push(stat('Battery','<span style="color:'+socColor(ulsoc)+'">'+ulsoc+'</span>','%'));
+        if(uago)        uchips.push(stat('Idle', uago, ''));
+        hst.innerHTML=uchips.join('');
+      }
     }
   } else if(!configured){
     hicHTML=ringSVG(0,true)+'<div class="glyph">'+BTG+'</div>';
@@ -441,17 +496,28 @@ function render(s){
     var sdbm=(sr!=null)?'<span class="dbm">'+sr+' dBm</span>':'';
     var rt=(ble.car_connectable===false)?'At connection limit':'Connection failed';
     bc.className='cv warn'; setHTML(bc,barsHTML(sr)+sdbm+'<span>'+rt+'</span>');
-  } else if(ble.scanning){
-    // searching for the car — the signal bars sit where they do when connected, but fill up
-    // green one after another (CSS .bars.search animation) instead of a spinner; it appears
-    // only while scanning and clears otherwise. setHTML keeps the bar nodes alive across
-    // WS pushes so the fill animation runs continuously instead of restarting each ~2 s.
-    bc.className='cv'; setHTML(bc,searchBarsHTML()+'<span>Searching…</span>');
+  } else if(ble.phase==='connecting'){
+    // Looking for the car. The label follows the PHASE, not the raw ble.scanning flag: the
+    // radio also runs a background warm-up scan that has no deadline of its own and lasts
+    // straight through the idle wait, so keying the label off scanning flipped it to
+    // "Searching…" in the middle of a "retry in …" countdown — label and number describing
+    // different phases, which is what made the row look like it jumped around. One source
+    // now drives both, so the pair always agrees.
+    // setHTML keeps the bar nodes alive across WS pushes so the CSS fill animation runs
+    // continuously instead of restarting each ~2 s — which is why the countdown lives in its
+    // own node and is painted separately.
+    bc.className='cv unkn'; setHTML(bc,searchBarsHTML(true)+'<span>Searching…</span>'+cdHTML('connecting'));
   } else {
-    // disconnected — still show the (faded, empty) bar glyph so the row keeps the same
-    // shape as Wi-Fi rather than collapsing to text only.
-    bc.className='cv'; setHTML(bc,barsHTML(null)+'<span class="ph">Disconnected</span>');
+    // No attempt running — the link is down and the next try is scheduled. Keep the (empty,
+    // outlined) bar glyph so the row holds the same shape as Wi-Fi rather than collapsing to
+    // text only.
+    bc.className='cv dis'; setHTML(bc,emptyBarsHTML()+'<span class="ph">Disconnected</span>'+cdHTML('waiting'));
   }
+  // Countdown clock from this push, then paint immediately: setHTML may have just replaced
+  // the row (a phase change), leaving a fresh, empty .cd the 1 s ticker wouldn't fill until
+  // its next tick.
+  cdSync(ble.phase,num(ble.phase_s));
+  paintCd();
 
   // MQTT — Home Assistant bridge (tap to set/change the broker)
   var mq=s.mqtt||{}, mc=$("mqttConn");
@@ -604,7 +670,6 @@ function genKey(){
 // Status shows inline in the header meta line (progress ring + text), next to the
 // version — no bottom popup. A tiny ring sized for the 13.5px meta line.
 var otaBusy=false;
-// col = arc colour (default the brand accent, used by OTA). The BLE "searching" ring passes
 // var(--ok) so it matches the green signal bars while keeping the exact OTA ring geometry.
 function otaMiniRing(pct,indet,col){
   var sz=16,c=sz/2,r=6,sw=2.6,circ=2*Math.PI*r; col=col||'var(--accent)';
@@ -693,13 +758,20 @@ function waitReboot(preVer){
 /* ---------- boot ---------- */
 function boot(){
   fetch('/set_time',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ms:Date.now()})}).catch(function(){});
-  if(window.WebSocket){
-    connectWS();                 // live feed: one socket, device pushes /status — no interval poll
-  } else {
-    // No WebSocket in this (very old) browser: fetch one snapshot so the page isn't blank, then
-    // stop. Deliberately no polling — the live UI is WebSocket-only; reload the page to refresh.
-    fetch('/status?ms='+Date.now(),{cache:'no-store'}).then(function(r){return r.json()}).then(render).catch(function(){});
-  }
+  // ONE snapshot on every path, before/independently of the socket. The live feed is still
+  // WebSocket-only (no polling — reload to refresh if the browser has no WebSocket), but the
+  // page must not depend on the handshake succeeding to render at all: the hero now starts
+  // hidden and only render() reveals it, and /events caps at 8 clients, so a 9th tab — or any
+  // proxy/captive portal that blocks ws:// — would otherwise sit forever on a skeleton with no
+  // hero, no status and no hint why. A later WS frame simply re-renders over this.
+  fetch('/status?ms='+Date.now(),{cache:'no-store'}).then(function(r){return r.json()}).then(render).catch(function(){});
+  if(window.WebSocket) connectWS();   // live feed: one socket, device pushes /status
+  // Tick the Bluetooth phase countdown between pushes so it steps every second instead of
+  // jumping in ~2 s hops. Text-only update of one node — no layout churn, no re-render.
+  // Only while the socket is up: with the feed gone the rest of the page is deliberately
+  // frozen on its last frame, and a countdown that kept running would be the one element
+  // still making claims about a device we are no longer hearing from.
+  setInterval(function(){ if(ws) paintCd(); },1000);
   resumeOta();
 }
 boot();

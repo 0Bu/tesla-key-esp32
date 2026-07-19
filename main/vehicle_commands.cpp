@@ -17,17 +17,31 @@ static const char* TAG = "vehicle_ctrl";
 
 bool VehicleController::ensure_connected_(int timeout_ms) {
     if (ble_ && ble_->is_connected()) return true;
+    // This is the ONE place a connect attempt is started and bounded, so it is also where
+    // the UI's "Searching…" countdown is armed: the attempt gives up exactly at this
+    // deadline. Armed for the whole attempt and cleared on every exit path, so the Bluetooth
+    // row counts this phase down instead of showing an unbounded animation.
+    //
+    // The loop exits on that SAME deadline rather than on an accumulated sleep count. Summing
+    // nominal 200 ms sleeps under-counts real time — each iteration costs at least its sleep
+    // plus tick rounding and preemption (WiFi/BLE coexistence readily adds more), and
+    // connect() itself was never counted at all — so the attempt used to outlive the deadline
+    // the UI was showing and park the row on "timing out…" for the difference. One clock for
+    // the wait and the countdown, the same rule idle_until_next_health_poll_ follows.
+    const uint32_t deadline = deadline_in_((uint32_t)timeout_ms);
+    connect_deadline_.store(deadline);
     ble_->connect("");
-    int waited = 0;
-    while (!ble_->is_connected() && waited < timeout_ms) {
+    while (!ble_->is_connected() &&
+           (int32_t)(deadline - xTaskGetTickCount()) > 0) {
         vTaskDelay(pdMS_TO_TICKS(200));
-        waited += 200;
     }
     if (!ble_->is_connected()) {
         ble_->stop_connecting();  // drop the intent so the device returns to idle scanning
+        connect_deadline_.store(0);
         ESP_LOGE(TAG, "connection timeout after %dms", timeout_ms);
         return false;
     }
+    connect_deadline_.store(0);
     return true;
 }
 

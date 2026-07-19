@@ -151,6 +151,11 @@ cJSON* build_status_object() {
         in.target_connectable = g_vehicle->ble_target_connectable();
     }
 
+    {
+        tk::ble::PhaseView ph = g_vehicle->ble_phase();
+        in.ble_phase   = tk::ble::phase_name(ph.kind);   // "" ⇒ model omits the block
+        in.ble_phase_s = ph.secs;
+    }
     in.link        = g_vehicle->link_state();
     in.vcsec_sleep = g_vehicle->vcsec_sleep_raw();
     in.charge      = g_vehicle->get_cached_charge();

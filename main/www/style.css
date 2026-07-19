@@ -1,12 +1,13 @@
 :root{
   --bg:#f6f7f9; --card:#fff; --fg:#1a1d21; --muted:#5b626b; --border:#e6e8ec;
+  --faint:#c3c9d2;   /* lighter than --muted: the outlined, empty signal bars */
   --soft:#f1f3f5; --accent:#e82127; --ok:#16a34a; --warn:#d97706;
   --warn-base:#f59e0b; --warn-lite:#fdba74; --radius:18px;  /* BLE "status unknown" ping-pong: less-dark base + light crest */
   --shadow:0 1px 2px rgba(16,20,28,.04), 0 6px 20px rgba(16,20,28,.06);
 }
 @media (prefers-color-scheme:dark){
   :root{
-    --bg:#0f1115; --card:#171a20; --fg:#f2f3f5; --muted:#9aa1ab; --border:#262a31;
+    --bg:#0f1115; --card:#171a20; --fg:#f2f3f5; --muted:#9aa1ab; --border:#262a31; --faint:#3c434d;
     --soft:#1f242c; --shadow:0 1px 2px rgba(0,0,0,.4), 0 8px 24px rgba(0,0,0,.35);
   }
 }
@@ -185,6 +186,7 @@ code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
    (smallest first), bars not yet reached stay light green, then all reset and it
    loops until the link is up. Replaces the old spinner ring. */
 .bars.search{color:var(--ok)}
+.bars.search.warm{color:var(--warn-base)}   /* hunting for the car — same amber as the "link up, nothing known" wave */
 .bars.search rect{opacity:.25}
 .bars.search .sb1{animation:sb1 1.6s ease-in-out infinite}
 .bars.search .sb2{animation:sb2 1.6s ease-in-out infinite}
@@ -219,14 +221,24 @@ code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
 .crow .ck{flex:none; width:80px; font-size:12px; font-weight:600; letter-spacing:.5px; text-transform:uppercase; color:var(--muted)}
 .crow .cv{flex:1; min-width:0; font-size:16px; display:flex; align-items:center; gap:6px; flex-wrap:nowrap;
   font-variant-numeric:tabular-nums}
-.crow .cv.ok{color:var(--ok)} .crow .cv.warn{color:var(--warn)} .crow .cv.unkn{color:var(--warn-base)}
+.crow .cv.ok{color:var(--ok)} .crow .cv.warn{color:var(--warn)} .crow .cv.unkn{color:var(--warn-base)} .crow .cv.dis{color:var(--muted)}
+/* empty signal glyph on a disconnected row: outlined bars, no fill — an unfilled gauge
+   rather than a dimmed reading, and lighter than the "Disconnected" label beside it */
+.bars.empty rect{fill:var(--soft); stroke:var(--faint); stroke-width:1; vector-effect:non-scaling-stroke}
+
+/* phase countdown ("retry in 12s" / "7s left") — pushed to the row's right edge with
+   margin-left:auto so it lands in the same column the tile rows put their edit pencil in,
+   and stays muted in every phase so it reads as one steady right-hand column rather than
+   recolouring with the label. Its own node, so the per-second text update never touches the
+   animated bars beside it. */
+.crow .cv .cd{margin-left:auto; padding-left:12px; flex:none; font-size:13px;
+  white-space:nowrap; color:var(--muted); font-variant-numeric:tabular-nums}
+.crow .cv .cd.off{display:none}
 /* connection-row MAC is a touch smaller than the tile MAC so bars + dBm + the full
    17-char address all fit one line on a phone (desktop bumps it back up to 15px) */
 .crow .cv .mac{font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12.5px; letter-spacing:.2px}
 .crow .cv .ph{color:var(--muted); font-weight:400}
 .crow .cv .bars{flex:none}
-/* indeterminate "searching…" ring on the BLE row — left of the value, only while scanning */
-.crow .cv .otaspin{flex:none}
 /* signal reading (e.g. "-67 dBm") — compact, muted, never breaks internally */
 .crow .cv .dbm{flex:none; font-size:13px; font-weight:500; color:var(--muted); white-space:nowrap}
 /* SSID / MAC takes the rest; ellipsis (not wrap) is the narrow-phone fallback */
