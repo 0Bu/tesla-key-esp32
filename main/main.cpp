@@ -554,7 +554,7 @@ extern "C" void app_main() {
     ble_client.start();
     log_heap("ble");
 
-    http_server_start(vehicle);
+    http_server_start(vehicle, config_store);
     log_heap("http");
 
     // Home Assistant MQTT bridge: publishes all telemetry + device status (read-only)

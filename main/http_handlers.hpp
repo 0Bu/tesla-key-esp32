@@ -18,6 +18,12 @@
 // Global vehicle reference (set once in http_server_start).
 extern VehicleController* g_vehicle;
 
+// Global runtime-config store (tesla_cfg NVS namespace; set once in http_server_start,
+// same idiom as g_vehicle). The persisted-config handlers (/set_vin, /set_mqtt, /set_time)
+// read/write it directly. Keys must be ≤15 chars (NVS limit); an empty value disables the
+// feature it gates.
+extern NvsStorageAdapter* g_config;
+
 // Proof-of-guard wrapper: constructed only inside handle_all's try/catch dispatch in
 // http_server.cpp. Because every handler takes this instead of httpd_req_t*, its
 // signature cannot match httpd_uri_t::handler, making a guard-bypassing direct
