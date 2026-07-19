@@ -1148,6 +1148,19 @@ static void test_ble_phase() {
     CHECK(phase({}, {5000, 30}, 5000, HZ).kind == Phase::Waiting);
     CHECK(phase({}, {5000, 30}, 5000, HZ).secs == 0);
 
+    // An EXPIRED deadline stays armed — "armed" is the deadline being set, never it being in
+    // the future. auto_pair leans on this: it no longer clears the retry deadline before a
+    // health probe, because that probe first blocks on command_mutex_ behind any in-flight
+    // command, and a cleared deadline left the row with no phase (bare label) for the whole
+    // wait. The stale-but-armed deadline reads "retrying… right now" until the attempt's own
+    // countdown takes over.
+    PhaseView stale = phase({}, {5000 - 60 * HZ, 30}, 5000, HZ);
+    CHECK(stale.kind == Phase::Waiting);
+    CHECK(stale.secs == 0);
+    CHECK(stale.total_s == 30);
+    // …and an attempt starting during that wait still wins, so the row shows the attempt.
+    CHECK(phase({5000 + 9 * HZ, 10}, {5000 - 60 * HZ, 30}, 5000, HZ).kind == Phase::Connecting);
+
     // Connecting outranks Waiting: an attempt started inside the idle wait (a command, or
     // loop_task's warm-up connect) is what the radio is actually doing.
     PhaseView both = phase(/*connect*/{5000 + 8 * HZ, 10}, /*retry*/{5000 + 25 * HZ, 30}, 5000, HZ);

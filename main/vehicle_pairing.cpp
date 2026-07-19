@@ -96,9 +96,15 @@ void VehicleController::auto_pair_task_fn_(void* arg) {
             //   • success            → key still valid
             //   • auth rejection     → car refused our key (likely deleted) — confirm now
             //   • neither (no reply) → car unreachable (asleep / out of range / weak link)
-            // An attempt is about to run, so the "next attempt in…" countdown no longer
-            // applies — ensure_connected_ arms the "gives up in…" one for the probe itself.
-            self->retry_deadline_.store(0);
+            // Deliberately do NOT clear retry_deadline_ here. health_probe_ runs through
+            // send_vcsec_, which first takes command_mutex_ and therefore BLOCKS until any
+            // in-flight evcc/manual command finishes — clearing first left that whole wait
+            // with no phase armed at all, so the Bluetooth row dropped its countdown and
+            // showed a bare label for as long as the mutex was held. Leaving the (by now
+            // expired) deadline in place reads as "retrying… right now", which is exactly
+            // what is happening, and ensure_connected_ overrides it with the attempt's own
+            // countdown the moment the probe actually gets to run (Connecting outranks
+            // Waiting). idle_until_next_health_poll_ re-arms it for the next cycle.
             int  streak_before = self->auth_fail_streak_;
             bool ok            = self->health_probe_();
             if (self->pairing_lost_) continue;  // 2nd strike already → revoked (top of loop)
