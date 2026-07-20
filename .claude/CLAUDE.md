@@ -52,7 +52,9 @@ renderer draws), the status-LED ladder (`logic/led_status.hpp`, reading the same
 backpressure that bounds a non-reading client), the active-window poll gate
 (`logic/active_window.hpp` — charging held open only on fresh contact), the BLE phase countdown
 (`logic/ble_phase.hpp` — which phase the Bluetooth row counts down, rounded up and never
-vanishing on its last second), the HA binary
+vanishing on its last second) and the web UI's Bluetooth-row presenter (`logic/ble_row.hpp` —
+which row state and which countdown belongs beside it, mirrored by app.js under a CI parity
+check), the HA binary
 `value_template` builder (`logic/ha_templates.hpp` — presence-aware `is defined` guard) and the
 POST-body reassembly loop (`logic/http_body.hpp` — multi-segment recv + bounded timeout) and the
 heap-exhaustion watchdog (`logic/heap_watchdog.hpp` — 4 KB/5 min unbroken hold, OTA-excused,

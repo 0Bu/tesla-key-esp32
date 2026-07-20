@@ -57,6 +57,7 @@ The firmware delegates these decision/conversion cores to IDF-free headers under
 | Syslog target parse + send-failure classification (host:port split, errno hard/transient) | `logic/syslog_policy.hpp` | `syslog.cpp`, `/set_syslog` |
 | `/events` WS frame policy (length plan: skip / read ≤16 B / close; `sub` classification) + per-subscriber send backpressure (≤2 frames in flight, close after 3 consecutive failed completions, streak reset by one good send, our own OOM neither credited nor blamed) | `logic/ws_policy.hpp` | `http_events.cpp` (`h_ws_events`, `ws_send_to_all`, `ws_transfer_complete`) |
 | Active-window poll gate (charging held open only on FRESH contact) | `logic/active_window.hpp` | `vehicle_telemetry.cpp` (`loop_task_fn_`) |
+| Web UI Bluetooth-row presenter (which of the five row states, and which countdown belongs beside it) — `ble.scanning` deliberately not an input; parity-checked against the JS that ships in the browser | `logic/ble_row.hpp` — **spec only**, no firmware TU includes it; takes raw `/status` fields and derives `has_vin`/`link_known` itself, so no untested adapter sits between JSON and verdict | `main/www/app.js` BLE_ROW region (`bleRowFromStatus`), held to it by `scripts/check-ble-row-parity.sh` |
 | BLE phase countdown (which of the two overlapping phases the Bluetooth row counts down; seconds round UP and 0 is a real answer, not "no countdown"; wrap-safe) | `logic/ble_phase.hpp` | `vehicle_ctrl.hpp` `ble_phase()`, `vehicle_commands.cpp` `ensure_connected_`, `vehicle_pairing.cpp` `idle_until_next_health_poll_`, `http_status.cpp` |
 | HA binary `value_template` builder (presence-aware `is defined` guard → "unknown" not phantom OFF) | `logic/ha_templates.hpp` | `mqtt_ha.cpp` (discovery) |
 | POST-body reassembly (loop `recv` to `content_len`, bounded timeout retry) | `logic/http_body.hpp` | `http_common.cpp` `read_body`, `provisioning.cpp` `save_post` |
@@ -72,6 +73,13 @@ C++ presenter's decisions for a set of cases and has `tools/display_sim.py parit
 same inputs in Python and diff them — so the pixel-exact offline sim (`display_sim.py`) can't
 silently drift from the firmware's `tk::display::compose()`. (Skipped only where `python3` is
 absent; the C++ `CHECK`s remain the hard gate.)
+
+A second parity harness does the same for the **web UI**: `scripts/check-ble-row-parity.sh`
+compiles `test/ble_row_golden_dump.cpp` to dump `tk::ble::decide()`'s verdict over an exhaustive
+input sweep, and has `tools/ble_row_parity.js` re-decide the same inputs with the JavaScript that
+actually ships — extracted from the `BLE_ROW` region of `main/www/app.js`, not a copy — and diff
+them. So the browser cannot silently drift from the host-tested rules for the Bluetooth row.
+(Skipped only where `node` is absent; CI's ubuntu-latest runner ships it, so it does run there.)
 
 ## What's *not* covered (by design)
 

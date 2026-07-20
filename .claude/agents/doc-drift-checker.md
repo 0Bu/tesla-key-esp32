@@ -50,26 +50,31 @@ The **cross-referenced facts** that must stay in sync (change one → check all 
    the `## Commands Implemented` split in CLAUDE.md, the command narrative in
    `docs/ARCHITECTURE.md`, the tool table in `docs/MCP.md`, and the web-UI command call sites in
    `app.js` (charge toggle / wake tap — dedicated command buttons were deliberately removed).
-3. **NVS keys / namespaces.** A key added/renamed in `nvs_storage.cpp` / config code → the
+3. **Presenter decisions with a MIRRORED consumer.** A change to the spec header
+   (`main/logic/ble_row.hpp`, `logic/display_model.hpp`) → its mirror (the `BLE_ROW` region of
+   `main/www/app.js`, resp. `tools/display_sim.py`), the `CHECK`s in `test/test_logic.cpp`, and
+   the exhaustive sweep in `test/<name>_golden_dump.cpp`. The parity scripts wired into
+   `scripts/run-mock-tests.sh` fail CI if one side moves alone — flag a diff that touches only one.
+4. **NVS keys / namespaces.** A key added/renamed in `nvs_storage.cpp` / config code → the
    `## NVS Namespaces` table in CLAUDE.md and any doc that names it. Remember the **≤15-char**
    library-key mapping rule.
-4. **Config / Kconfig options & defaults.** A `CONFIG_*` or default changed in
+5. **Config / Kconfig options & defaults.** A `CONFIG_*` or default changed in
    `sdkconfig.defaults*`, `main/Kconfig.projbuild` → whatever doc quotes it (OTA/secure-boot
    block, security doc, README setup).
-5. **Partition layout / offsets / flash size.** A change in `partitions.csv` → the partition
+6. **Partition layout / offsets / flash size.** A change in `partitions.csv` → the partition
    paragraph in CLAUDE.md **and** `docs/ARCHITECTURE.md` (app offset `0x20000`, 4 MB sizing,
    per-target bootloader offset), and the OTA manifest description.
-6. **Version.** `version.txt` vs. any doc that pins a version, and the OTA/manifest narrative.
-7. **Platform / target strings.** `main/platform.hpp` (`TK_PLATFORM`) must agree with
+7. **Version.** `version.txt` vs. any doc that pins a version, and the OTA/manifest narrative.
+8. **Platform / target strings.** `main/platform.hpp` (`TK_PLATFORM`) must agree with
    `/api/proxy/1/version` output as documented, the HA device model, the esp-web-tools
    `chipFamily`, and the supported-target list (esp32 / s3 / c3 / c6 / c5) wherever it appears.
-8. **Library pin.** `main/idf_component.yml` `yoziru/tesla-ble` version vs. the pin quoted in
+9. **Library pin.** `main/idf_component.yml` `yoziru/tesla-ble` version vs. the pin quoted in
    CLAUDE.md's `## Key Dependency` and any doc that names it.
-9. **Status / telemetry fields & MQTT entities.** A field added/removed in `/status` (`tele.*`)
+10. **Status / telemetry fields & MQTT entities.** A field added/removed in `/status` (`tele.*`)
    or an MQTT discovery entity → the `/status` field contract in `logic/status_model.hpp` **and**
    its golden emissions in `test/test_logic.cpp` (`test_status_model`), the telemetry/MQTT
    sections of `docs/ARCHITECTURE.md`, the summary in CLAUDE.md, and the web UI that renders it.
-10. **Architecture file map.** A file added/removed/renamed under `main/` → the file-map block
+11. **Architecture file map.** A file added/removed/renamed under `main/` → the file-map block
     in CLAUDE.md's `## Architecture` and the project map in the `project-review` skill.
 
 Also flag the reverse: a **doc-only** change in the diff that asserts a fact the code doesn't

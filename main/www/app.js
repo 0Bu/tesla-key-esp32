@@ -89,32 +89,61 @@ function emptyBarsHTML(){
    the rest of the row, since rewriting the row's innerHTML every second would re-create the
    bar <rect>s and restart their CSS fill animation on every tick. */
 var cdKind=null, cdEndMs=0;
-// Constant markup — only the node's text changes per tick. data-p names the ONE phase this
-// row will count down, so a row can never show a number belonging to a different phase.
+// Constant markup — only the node's text changes per tick. data-p names the ONE countdown this
+// row will render, so a row can never show a number belonging to a different one.
 function cdHTML(kind){ return '<span class="cd" data-p="'+kind+'"></span>'; }
-// Resync the local countdown clock from a push. A phase change always resyncs; within a
-// phase only a real disagreement (≥2 s) does, so the ~2 s push cadence and the 1 s local
-// tick can't fight each other into a number that jitters back up.
+// Resync the local clock from a push. A change of countdown always resyncs; within one, only a
+// real disagreement (≥2 s) does, so the ~2 s push cadence and the 1 s local tick can't fight
+// each other into a number that jitters back up.
 function cdSync(kind,secs){
-  if(kind!=='connecting'&&kind!=='waiting'){ cdKind=null; cdEndMs=0; return; }
+  if(kind!=='givesup'&&kind!=='retries'){ cdKind=null; cdEndMs=0; return; }
   if(secs==null) secs=0;
   if(kind!==cdKind||Math.abs(cdLeft()-secs)>=2){ cdKind=kind; cdEndMs=Date.now()+secs*1000; }
 }
 function cdLeft(){ return Math.max(0,Math.ceil((cdEndMs-Date.now())/1000)); }
-// Paint into the row's .cd node if the current row has one. The node declares (data-p) the
-// one phase it counts down and a mismatch paints nothing, so a label can never be followed
-// by a number describing a different phase. At 0 the phase is over but the next push hasn't
-// landed yet, so say what is about to happen rather than dropping the text and leaving the
-// row's right edge empty for a beat.
+// Paint into the row's .cd node if the current row has one. The node declares (data-p) the one
+// countdown it renders and a mismatch paints nothing. At 0 the phase is over but the next push
+// hasn't landed yet, so say what is about to happen rather than dropping the text and leaving
+// the row's right edge empty for a beat.
 function paintCd(){
   var el=document.querySelector('#bleConn .cd'); if(!el) return;
   var on=cdKind&&el.getAttribute('data-p')===cdKind;
   el.classList.toggle('off',!on);
   if(!on) return;
   var n=cdLeft();
-  el.textContent = cdKind==='waiting' ? (n?'retry in '+n+'s':'retrying…')
+  el.textContent = cdKind==='retries' ? (n?'retry in '+n+'s':'retrying…')
                                       : (n?n+'s left'      :'timing out…');
 }
+
+/* ---------- BLE row decision — PARITY-CHECKED, do not edit one side only ----------
+   This is the JavaScript half of main/logic/ble_row.hpp. scripts/check-ble-row-parity.sh
+   compiles the C++ presenter, dumps its decision for a sweep of inputs, and re-decides the
+   same inputs here — CI fails if the two ever disagree, so the browser cannot silently drift
+   from the host-tested rules. The region between the BLE_ROW markers is what that harness
+   extracts and evaluates; keep it free of DOM access and browser globals.
+
+   `ble.scanning` is deliberately absent. The radio scans for reasons that carry no deadline
+   and no schedule, and driving the label off that flag while the countdown came from the phase
+   is what made the two disagree for three rounds. Leaving it out makes that unrepresentable.  */
+/* BLE_ROW_BEGIN */
+var BLE_CONNECT_FAIL_WARN = 2;
+// Takes the /status object as it arrives and returns the row decision. The DERIVATIONS live in
+// here on purpose — "is there a VIN", "is the link known" — because an earlier cut computed them
+// at the call site, outside the fence, which is the one step no gate could see. That is exactly
+// where the `paired &&` factoring lives: drop it and an unpaired cold-start board renders the
+// linked row amber instead of green, with every golden vector still passing.
+function bleRowFromStatus(s){
+  var ble = s.ble || {};
+  var vin = s.vin;
+  var hasVin = !!(vin && vin !== 'UNKNOWN');
+  var linkKnown = !(!!s.paired && (s.link === 'unknown' || s.link === 'unreachable'));
+  if(!hasVin) return { row:((ble.devices||[]).length > 0 ? 'listing' : 'discovering'), cd:'none', stateless:false };
+  if(ble.connected) return { row:'linked', cd:'none', stateless:!linkKnown };
+  if((+ble.connect_fail || 0) >= BLE_CONNECT_FAIL_WARN) return { row:'failed', cd:'none', stateless:false };
+  if(ble.phase === 'connecting') return { row:'scanning', cd:'givesup', stateless:false };
+  return { row:'idle', cd:(ble.phase === 'waiting' ? 'retries' : 'none'), stateless:false };
+}
+/* BLE_ROW_END */
 // "status unknown" glyph — same geometry as barsHTML, all four bars fully lit (the link
 // is up; signal strength is real and shown as dBm next to it). Each bar carries a .wbN
 // class; its own @keyframes (wbpN) fades it between dark and light orange so a light crest
@@ -450,73 +479,60 @@ function render(s){
   var pairedTxt=s.paired_at?('Paired '+new Date(s.paired_at*1000).toLocaleDateString(undefined,{year:'numeric',month:'short',day:'numeric'})):'paired';
   setSub("vehSub", paired?pairedTxt:(hasVin?'not paired':'tap to add VIN'), '');
 
-  // bluetooth — link to the car
+  // bluetooth — link to the car. WHICH state to show is decided by bleRowFromStatus() above (the
+  // JS half of main/logic/ble_row.hpp, kept honest by scripts/check-ble-row-parity.sh); this
+  // block only renders the decision. Note what is NOT consulted here: ble.scanning. The radio
+  // scans for reasons with no deadline, and keying the label off that flag while the countdown
+  // came from the phase is what used to make the two disagree.
   var ble=s.ble||{}, bc=$("bleConn");
-  if(!hasVin){
-    // No VIN configured: the device never connects/enrols (pairing is gated off), it only
-    // discovers. List every nearby Tesla, sorted by signal strength, in the SAME layout as the
-    // connected row: bars, dBm, then MAC. While the first scan is still running with nothing
-    // seen yet, fall back to the "Searching…" animation.
-    var nd=ble.devices||[];
-    if(nd.length){
-      bc.className='cv';
-      bc.innerHTML='<div class="btlist">'+nd.map(function(d){
-        var r=num(d.rssi);
-        return '<div class="btrow">'+barsHTML(r)+
-               (r!=null?'<span class="dbm">'+r+' dBm</span>':'')+
-               '<span class="nm mac">'+esc(d.addr)+'</span></div>';
-      }).join('')+'</div>';
-    } else {
-      bc.className='cv'; setHTML(bc,searchBarsHTML()+'<span>Searching…</span>');
-    }
-  } else if(linked){
-    // The GATT link is up. If we're paired but have no fresh telemetry — link_state
-    // unknown/unreachable, the case where the hero shows a grey status card — the link is
-    // connected yet stateless: drive the bars with the orange wave (waveBarsHTML) to
-    // signal "status unknown" instead of a healthy green. Awake/idle/asleep (and the
-    // pre-pair "Pairing" state) are known states → plain green bars as before.
-    var unknownStatus=paired&&(s.link==='unknown'||s.link==='unreachable');
+  var d=bleRowFromStatus(s);
+  if(d.row==='listing'){
+    // No VIN: the device never connects/enrols (pairing is gated off), it only discovers.
+    // List every nearby Tesla, sorted by signal, in the SAME layout as the connected row.
+    bc.className='cv';
+    bc.innerHTML='<div class="btlist">'+(ble.devices||[]).map(function(x){
+      var r=num(x.rssi);
+      return '<div class="btrow">'+barsHTML(r)+
+             (r!=null?'<span class="dbm">'+r+' dBm</span>':'')+
+             '<span class="nm mac">'+esc(x.addr)+'</span></div>';
+    }).join('')+'</div>';
+  } else if(d.row==='discovering'){
+    // No VIN and nothing seen yet — the listing scan has no pairing schedule behind it, so
+    // this is the ONE "Searching…" with nothing to count down.
+    bc.className='cv'; setHTML(bc,searchBarsHTML()+'<span>Searching…</span>');
+  } else if(d.row==='linked'){
+    // The GATT link is up. Stateless (paired but no signed round-trip yet) drives the bars
+    // with the orange wave instead of a healthy green — the link is connected yet knows
+    // nothing. Awake/idle/asleep are known states → plain green bars.
     var br=num(ble.rssi);
-    var bbars=unknownStatus?waveBarsHTML()
-             :(br!=null)?barsHTML(br):'';                                      // bars (signal glyph)
-    var bdbm=(br!=null)?'<span class="dbm">'+br+' dBm</span>':'';              // numeric reading
+    var bbars=d.stateless?waveBarsHTML():(br!=null)?barsHTML(br):'';
+    var bdbm=(br!=null)?'<span class="dbm">'+br+' dBm</span>':'';
     var btxt=ble.addr?'<span class="nm mac">'+esc(ble.addr)+'</span>':'';
-    bc.className=unknownStatus?'cv unkn':'cv ok';   // orange MAC under the ping-pong; green when known
+    bc.className=d.stateless?'cv unkn':'cv ok';
     setHTML(bc,bbars+bdbm+btxt);
-  } else if(ble.connect_fail>=2){
-    // Car found but the link keeps timing out (see the hero) — show it as a warning on the
-    // Bluetooth row rather than the neutral "Searching…", which would imply it can't find the
-    // car. Show real signal bars + dBm (the signal itself is fine — the link slot is the
-    // problem), and name the reason (non-connectable ⇒ at the car's BLE-connection limit).
-    // ble.rssi is the last-seen advert RSSI; fall back to the strongest entry in devices[].
-    // Null-safe "strongest nearby advert" fallback: seed is null and RSSI is always negative, so a
-    // bare `d.rssi > a` coerces null→0 and never wins (−70 > 0 is false) — the max always stayed
-    // null. Take the first value, then the least-negative, so bars+dBm show; empty devices[] → null.
-    var sr=num((ble.rssi!=null)?ble.rssi:(ble.devices||[]).reduce(function(a,d){return (a==null||d.rssi>a)?d.rssi:a;},null));
+  } else if(d.row==='failed'){
+    // Car found but the link keeps timing out — say so rather than "Searching…", which would
+    // imply we can't find it. Real bars + dBm (the signal is fine, the link slot is not).
+    // Null-safe "strongest nearby advert" fallback: seed is null and RSSI is always negative,
+    // so a bare `x.rssi > a` coerces null→0 and never wins. Take the first, then the
+    // least-negative, so bars+dBm show; empty devices[] → null.
+    var sr=num((ble.rssi!=null)?ble.rssi:(ble.devices||[]).reduce(function(a,x){return (a==null||x.rssi>a)?x.rssi:a;},null));
     var sdbm=(sr!=null)?'<span class="dbm">'+sr+' dBm</span>':'';
     var rt=(ble.car_connectable===false)?'At connection limit':'Connection failed';
     bc.className='cv warn'; setHTML(bc,barsHTML(sr)+sdbm+'<span>'+rt+'</span>');
-  } else if(ble.phase==='connecting'){
-    // Looking for the car. The label follows the PHASE, not the raw ble.scanning flag: the
-    // radio also runs a background warm-up scan that has no deadline of its own and lasts
-    // straight through the idle wait, so keying the label off scanning flipped it to
-    // "Searching…" in the middle of a "retry in …" countdown — label and number describing
-    // different phases, which is what made the row look like it jumped around. One source
-    // now drives both, so the pair always agrees.
-    // setHTML keeps the bar nodes alive across WS pushes so the CSS fill animation runs
-    // continuously instead of restarting each ~2 s — which is why the countdown lives in its
-    // own node and is painted separately.
-    bc.className='cv unkn'; setHTML(bc,searchBarsHTML(true)+'<span>Searching…</span>'+cdHTML('connecting'));
+  } else if(d.row==='scanning'){
+    // A bounded connect attempt is running. setHTML keeps the bar nodes alive across WS
+    // pushes so the CSS fill animation runs continuously instead of restarting each ~2 s —
+    // which is why the countdown lives in its own node and is painted separately.
+    bc.className='cv unkn'; setHTML(bc,searchBarsHTML(true)+'<span>Searching…</span>'+cdHTML(d.cd));
   } else {
-    // No attempt running — the link is down and the next try is scheduled. Keep the (empty,
-    // outlined) bar glyph so the row holds the same shape as Wi-Fi rather than collapsing to
-    // text only.
-    bc.className='cv dis'; setHTML(bc,emptyBarsHTML()+'<span class="ph">Disconnected</span>'+cdHTML('waiting'));
+    // Link down, next attempt scheduled. Keep the (empty, outlined) bar glyph so the row
+    // holds the same shape as Wi-Fi rather than collapsing to text only.
+    bc.className='cv dis'; setHTML(bc,emptyBarsHTML()+'<span class="ph">Disconnected</span>'+cdHTML(d.cd));
   }
   // Countdown clock from this push, then paint immediately: setHTML may have just replaced
-  // the row (a phase change), leaving a fresh, empty .cd the 1 s ticker wouldn't fill until
-  // its next tick.
-  cdSync(ble.phase,num(ble.phase_s));
+  // the row, leaving a fresh, empty .cd the 1 s ticker wouldn't fill until its next tick.
+  cdSync(d.cd,num(ble.phase_s));
   paintCd();
 
   // MQTT — Home Assistant bridge (tap to set/change the broker)

@@ -12,8 +12,18 @@ in seconds — no ESP-IDF, no Docker, no board. CI's `logic-test` job gates the 
 and the `run-logic-tests.sh` Stop hook gates the end of a turn on it. This skill walks the exact
 steps to add a new unit without breaking those invariants.
 
-**Single source of truth is the whole point:** the device must run the *same* code the test runs.
-Never copy logic into a header and leave the original behind — make the firmware call `tk::…`.
+**Single source of truth is the whole point:** the *one* implementation the test pins must be the
+one that runs. Never copy logic into a header and leave the original behind.
+
+There are **two kinds of unit**, and they reach that differently:
+- **Delegated** (the usual case) — the consumer is firmware C++, so it `#include`s the header and
+  calls `tk::…`. Follow step 2.
+- **Mirrored** — the consumer is the browser or a Python tool, which cannot include a C++ header.
+  Then the header is a **spec** no firmware TU includes, the consumer carries a mirror of it, and a
+  **parity harness** compiles the C++, dumps its decisions over an exhaustive sweep, re-decides the
+  same inputs with the shipped consumer source, and diffs. Follow step 2b instead.
+  Existing examples: `logic/display_model.hpp` ↔ `tools/display_sim.py`, and
+  `logic/ble_row.hpp` ↔ the `BLE_ROW` region of `main/www/app.js`.
 
 ## When NOT to use this
 
@@ -53,9 +63,27 @@ In the relevant `.cpp`/`.hpp` (e.g. `vehicle_ctrl.cpp`, `http_server.cpp`, `mqtt
 `ota_update.cpp`), `#include "logic/<name>.hpp"` and replace the inline computation with a call to
 `tk::<fn>()`. Delete the old inline copy — no duplicated logic.
 
+### 2b. …or, for a MIRRORED unit, add a parity harness instead
+
+Only when the consumer cannot include the header (browser JS, a Python tool). Four pieces:
+
+1. Fence the mirror in the consumer with marker comments (`/* <NAME>_BEGIN */` … `/* <NAME>_END */`)
+   and keep it free of DOM/globals so a harness can evaluate it in isolation.
+2. `test/<name>_golden_dump.cpp` — a `main()` that sweeps the input space **exhaustively** and
+   prints input+decision as TSV. Compiled directly by the parity script, not via CMake.
+3. `tools/<name>_parity.<js|py>` — reads the TSV, extracts the fenced region from the **shipped**
+   source (never a copy), re-decides, diffs, and exits non-zero on any mismatch. Fail loudly if the
+   markers are missing, so a renamed fence can't make the check pass vacuously.
+4. Wire `scripts/check-<name>-parity.sh` into [`scripts/run-mock-tests.sh`](../../../scripts/run-mock-tests.sh)
+   so CI's `logic-test` job gates on it.
+
+**Then prove the gate can fail**: diverge the mirror deliberately and confirm `run-mock-tests.sh`
+exits non-zero. A parity check nobody has seen go red is not yet a gate.
+
 ### 3. Add CHECK cases to `test/test_logic.cpp`
 
-**No new files and no CMake edits** — the suite is one translation unit and the include dir
+**No new files and no CMake edits** for the unit itself (a mirrored unit's golden dumper is the one
+exception — see step 2b) — the suite is one translation unit and the include dir
 already points at `main/` ([`test/CMakeLists.txt`](../../../test/CMakeLists.txt)). Three edits in
 `test_logic.cpp`:
 
@@ -100,5 +128,7 @@ the host-tested mapping can't drift (see the image-suffix `static_assert` in
 ### 6. Keep docs in sync
 
 If the new unit is a notable core, add a row to the coverage table in
-[`test/README.md`](../../../test/README.md). If it changes how a documented subsystem behaves,
+[`test/README.md`](../../../test/README.md) — for a mirrored unit, name its parity harness in the
+"used by" column and say the header is spec-only, so nobody later "fixes" the missing firmware
+include. If it changes how a documented subsystem behaves,
 the `project-review` skill will flag any doc/code drift — run it before merging.

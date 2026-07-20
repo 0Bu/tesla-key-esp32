@@ -136,6 +136,9 @@ the authority for the per-sibling drift check; `project-review` defers the mecha
   paths still match the script's `__main__`, the `cheader`→`main/display_font.h` and `parity`→gate
   warnings, the presenter/renderer files (`main/logic/display_model.hpp`, `main/display.cpp`), and
   the parity gate it defers to (`scripts/check-display-sim-parity.sh`, run from `run-mock-tests.sh`).
+  Its sibling gate `scripts/check-ble-row-parity.sh` (also run from `run-mock-tests.sh`) does the
+  same for the web UI: `tk::ble::decide` (`main/logic/ble_row.hpp`) vs the `BLE_ROW` region of
+  `main/www/app.js`, via `test/ble_row_golden_dump.cpp` + `tools/ble_row_parity.js`.
 - **`ota-release-verify`** — verifies the already-published OTA channel (Pages manifest + per-target
   images + version coherence). Verify the manifest/firmware-base URLs (`main/Kconfig.projbuild`), the
   5-chipFamily set + per-part offsets (bootloader per-target, partition-table `32768`, app `131072`)
