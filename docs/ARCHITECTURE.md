@@ -618,7 +618,19 @@ wait's countdown reappears when the attempt ends instead of the row going bare. 
 each row's countdown node declares the one phase it will render, so "Searching…" can never be
 suffixed with the *retry* countdown.
 
-**The label follows the phase, not `ble.scanning`.** The radio also runs a background warm-up
+**The row's state is decided by a presenter, not inline in the UI.** `main/logic/ble_row.hpp`
+(`tk::ble::decide`) maps the raw `/status` fields — deriving "is there a VIN" and "is the link known"
+itself, so no untested adapter sits between the JSON and the verdict — to one of six row states plus the countdown
+that belongs beside it, and `main/www/app.js` only renders that decision. The two are kept
+identical by `scripts/check-ble-row-parity.sh`, which dumps the C++ decision over an exhaustive
+input sweep and re-decides it with the JavaScript that actually ships — the same arrangement
+`display_model.hpp` has with `tools/display_sim.py`. This row was the last UI surface still
+deciding "what to show" in untestable browser code, and it is where three rounds of user-visible
+bugs landed.
+
+**The label follows the phase, not `ble.scanning`** — enforced structurally: `scanning` is not a
+field of `RowInputs` at all, so a label driven off it is unrepresentable rather than merely
+tested-for. The radio also runs a background warm-up
 scan (`loop_task`) that has no deadline of its own and lasts straight through the idle wait, so
 keying the label off the raw scanning flag flipped the row to "Searching…" in the middle of a
 "retry in …" countdown — label and number describing different phases, which read as the row

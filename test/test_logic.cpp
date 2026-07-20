@@ -35,6 +35,7 @@
 #include "logic/ws_policy.hpp"
 #include "logic/active_window.hpp"
 #include "logic/ble_phase.hpp"
+#include "logic/ble_row.hpp"
 #include "logic/ha_templates.hpp"
 #include "logic/http_body.hpp"
 #include "logic/heap_watchdog.hpp"
@@ -1316,6 +1317,103 @@ static void test_ble_phase() {
     CHECK(std::string(phase_name(Phase::Waiting))    == "waiting");
 }
 
+// ── BLE connection row (logic/ble_row.hpp) — what the web UI's Bluetooth row shows ──────────
+static void test_ble_row() {
+    using namespace tk::ble;
+    const char* VIN = "5YJ3E1EA7KF000316";
+    auto st = [](const char* vin, bool paired, tk::LinkState link, bool conn,
+                 int devices, uint32_t cf, Phase ph) {
+        RowStatus s; s.vin=vin; s.paired=paired; s.link=link; s.ble_connected=conn;
+        s.ble_devices=devices; s.ble_connect_fail=cf; s.phase=ph; return s;
+    };
+    const tk::LinkState UNK = tk::LinkState::Unknown, UNR = tk::LinkState::Unreachable,
+                        AWK = tk::LinkState::Awake;
+
+    // ── The derivations the presenter owns (they used to sit uncovered at the call site) ──
+    CHECK(has_vin(VIN)       == true);
+    CHECK(has_vin("UNKNOWN") == false);   // the firmware's "no VIN stored" spelling
+    CHECK(has_vin("")        == false);
+    CHECK(has_vin(nullptr)   == false);
+    CHECK(has_vin("UNKNOWNX") == true);   // prefix of the sentinel is still a VIN-ish string
+    // "Known" is gated on paired: before pairing, `unknown` just means we never talked to the
+    // car, and an unpaired cold-start board must render green, not amber. Dropping `paired`
+    // here is the regression this CHECK exists to catch.
+    CHECK(link_known(/*paired*/false, UNK) == true);
+    CHECK(link_known(false, UNR)           == true);
+    CHECK(link_known(true,  UNK)           == false);
+    CHECK(link_known(true,  UNR)           == false);
+    CHECK(link_known(true,  AWK)           == true);
+
+    // ── The six row states ────────────────────────────────────────────────────────────
+    CHECK(decide(st("UNKNOWN", false, UNK, false, 0, 0, Phase::None)).row       == Row::Discovering);
+    CHECK(decide(st("UNKNOWN", false, UNK, false, 3, 0, Phase::None)).row       == Row::Listing);
+    CHECK(decide(st(VIN, true,  AWK, true,  0, 0, Phase::None)).row             == Row::Linked);
+    CHECK(decide(st(VIN, true,  UNK, false, 0, 2, Phase::Connecting)).row       == Row::Failed);
+    CHECK(decide(st(VIN, true,  UNK, false, 0, 0, Phase::Connecting)).row       == Row::Scanning);
+    CHECK(decide(st(VIN, true,  UNK, false, 0, 0, Phase::Waiting)).row          == Row::Idle);
+
+    // Linked-but-stateless reads amber; an UNPAIRED board on the same link string reads green.
+    CHECK(decide(st(VIN, true,  UNK, true, 0, 0, Phase::None)).stateless == true);
+    CHECK(decide(st(VIN, false, UNK, true, 0, 0, Phase::None)).stateless == false);
+    CHECK(decide(st(VIN, true,  AWK, true, 0, 0, Phase::None)).stateless == false);
+
+    // Failure outranks the phase; boundary is exactly kConnectFailWarn.
+    CHECK(decide(st(VIN, true, UNK, false, 0, kConnectFailWarn-1, Phase::Connecting)).row == Row::Scanning);
+    CHECK(decide(st(VIN, true, UNK, false, 0, kConnectFailWarn,   Phase::Connecting)).row == Row::Failed);
+
+    // ── The invariants, swept over every representable input ──────────────────────────
+    // Each one is a bug that shipped; the sweep is what makes them structural rather than
+    // "checked in the cases someone remembered".
+    const Phase phases[] = { Phase::None, Phase::Connecting, Phase::Waiting };
+    const tk::LinkState links[] = { UNK, UNR, AWK, tk::LinkState::Asleep, tk::LinkState::Idle };
+    for (const char* vin : { "UNKNOWN", VIN })
+    for (int paired = 0; paired < 2; paired++)
+    for (tk::LinkState link : links)
+    for (int conn = 0; conn < 2; conn++)
+    for (int dev : {0, 4})
+    for (uint32_t cf : {0u, 1u, 2u, 9u})
+    for (Phase ph : phases) {
+        RowView v = decide(st(vin, paired, link, conn, dev, cf, ph));
+
+        // 1. The label follows the PHASE, never the radio's scanning flag. Scanning is shown
+        //    if and only if a bounded attempt is actually running (and nothing outranks it).
+        if (v.row == Row::Scanning) CHECK(ph == Phase::Connecting);
+
+        // 2. A countdown belongs to exactly one state.
+        CHECK((v.cd == Countdown::GivesUp) == (v.row == Row::Scanning));
+        CHECK((v.cd == Countdown::Retries) == (v.row == Row::Idle && ph == Phase::Waiting));
+
+        // 3. While a phase is armed, a state that CAN show a countdown always does. A bare
+        //    "Disconnected"/"Searching…" with a live phase behind it is the original bug.
+        if (ph != Phase::None && (v.row == Row::Scanning || v.row == Row::Idle))
+            CHECK(v.cd != Countdown::None);
+
+        // 4. Only the no-VIN listing scan says "Searching…" with nothing to count down.
+        if (v.row == Row::Discovering) CHECK(!has_vin(vin));
+
+        // 5. Amber ("stateless") is reachable ONLY on a linked row, and only while paired.
+        if (v.stateless) { CHECK(v.row == Row::Linked); CHECK(paired == 1); }
+    }
+
+    // ── Replay: input vectors actually observed on hardware ───────────────────────────
+    // Distilled from 573 /status samples taken off a paired board whose car was out of BLE
+    // range (two runs: active window closed, then forced open with a command). The middle row
+    // is the one that mattered — 171 frames where the radio was scanning while the ARMED phase
+    // was the idle wait. Under the old "label from ble.scanning" rule that frame rendered
+    // "Searching…" next to a "retry in …" countdown; here it must resolve to Idle + Retries.
+    struct Rec { Phase phase; const char* row; const char* cd; };
+    const Rec seen[] = {
+        { Phase::Waiting,    "idle",     "retries" },   // 261 frames
+        { Phase::Waiting,    "idle",     "retries" },   // 171 frames — radio scanning, bug case
+        { Phase::Connecting, "scanning", "givesup" },   // 141 frames
+    };
+    for (const Rec& r : seen) {
+        RowView v = decide(st(VIN, true, UNK, false, 0, 0, r.phase));
+        CHECK_STR(row_name(v.row), r.row);
+        CHECK_STR(cd_name(v.cd),   r.cd);
+    }
+}
+
 int main() {
     test_vin();
     test_syslog_policy();
@@ -1334,6 +1432,7 @@ int main() {
     test_heap_watchdog();
     test_active_window();
     test_ble_phase();
+    test_ble_row();
     test_http_body();
 
     if (g_failures == 0) {
