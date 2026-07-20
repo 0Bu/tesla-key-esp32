@@ -619,7 +619,8 @@ each row's countdown node declares the one phase it will render, so "Searching�
 suffixed with the *retry* countdown.
 
 **The row's state is decided by a presenter, not inline in the UI.** `main/logic/ble_row.hpp`
-(`tk::ble::decide`) maps the `/status` `ble` block to one of five row states plus the countdown
+(`tk::ble::decide`) maps the raw `/status` fields — deriving "is there a VIN" and "is the link known"
+itself, so no untested adapter sits between the JSON and the verdict — to one of six row states plus the countdown
 that belongs beside it, and `main/www/app.js` only renders that decision. The two are kept
 identical by `scripts/check-ble-row-parity.sh`, which dumps the C++ decision over an exhaustive
 input sweep and re-decides it with the JavaScript that actually ships — the same arrangement
