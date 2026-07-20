@@ -38,7 +38,7 @@ Any time you touch the presenter or the renderer and want to confirm the pixels 
 | Tool | Job |
 |------|-----|
 | **this skill** | Render the sim to PNGs for **human visual review**. Does not replace the parity gate. |
-| [`scripts/check-display-sim-parity.sh`](../../../scripts/check-display-sim-parity.sh) | The **automated correctness gate**: compiles a golden dumper from the C++ presenter (`tk::display::compose` in `display_model.hpp`), has the sim re-`decide()` the same inputs, and diffs them. Runs at the end of [`scripts/run-mock-tests.sh`](../../../scripts/run-mock-tests.sh) and in CI's `logic-test` job. |
+| [`scripts/check-display-sim-parity.sh`](../../../scripts/check-display-sim-parity.sh) | The **automated correctness gate for the display** (one of two parity gates `run-mock-tests.sh` runs; the other pins the web UI's BLE row): compiles a golden dumper from the C++ presenter (`tk::display::compose` in `display_model.hpp`), has the sim re-`decide()` the same inputs, and diffs them. Runs at the end of [`scripts/run-mock-tests.sh`](../../../scripts/run-mock-tests.sh) and in CI's `logic-test` job. |
 | [`../add-logic-test/SKILL.md`](../add-logic-test/SKILL.md) | Adds the pure-logic units + `CHECK` cases (the presenter *decisions* are host-tested there). |
 
 ## Render the state montages
@@ -76,7 +76,7 @@ battery geometry.
 Rendering only shows what the *sim* draws. Confirm the sim still mirrors the C++ presenter 1:1:
 
 ```bash
-scripts/run-mock-tests.sh          # runs the logic units AND check-display-sim-parity.sh at the end
+scripts/run-mock-tests.sh          # runs the logic units AND both parity gates (display-sim + BLE-row)
 # …or just the parity gate on its own:
 scripts/check-display-sim-parity.sh
 ```
