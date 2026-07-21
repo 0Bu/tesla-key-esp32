@@ -134,25 +134,36 @@ bool http_server_start(VehicleController& vehicle, NvsStorageAdapter& config_sto
     // matches handlers in registration order, so the specific /events must precede the /* wildcard
     // to be reached at all. It is registered raw (is_websocket) and guards itself — see
     // http_events.cpp / the note in http_handlers.hpp.
-    http_events_register(server);
+    if (!http_events_register(server)) {
+        httpd_stop(server);
+        return false;
+    }
 
     // Wildcard GET handler
-    httpd_uri_t get_handler = {
-        .uri      = "/*",
-        .method   = HTTP_GET,
-        .handler  = handle_all,
-        .user_ctx = nullptr,
-    };
-    httpd_register_uri_handler(server, &get_handler);
+    httpd_uri_t get_handler = {};
+    get_handler.uri      = "/*";
+    get_handler.method   = HTTP_GET;
+    get_handler.handler  = handle_all;
+    get_handler.user_ctx = nullptr;
+    if (httpd_register_uri_handler(server, &get_handler) != ESP_OK) {
+        ESP_LOGE(TAG, "failed to register HTTP GET dispatcher");
+        http_events_stop();
+        httpd_stop(server);
+        return false;
+    }
 
     // Wildcard POST handler
-    httpd_uri_t post_handler = {
-        .uri      = "/*",
-        .method   = HTTP_POST,
-        .handler  = handle_all,
-        .user_ctx = nullptr,
-    };
-    httpd_register_uri_handler(server, &post_handler);
+    httpd_uri_t post_handler = {};
+    post_handler.uri      = "/*";
+    post_handler.method   = HTTP_POST;
+    post_handler.handler  = handle_all;
+    post_handler.user_ctx = nullptr;
+    if (httpd_register_uri_handler(server, &post_handler) != ESP_OK) {
+        ESP_LOGE(TAG, "failed to register HTTP POST dispatcher");
+        http_events_stop();
+        httpd_stop(server);
+        return false;
+    }
 
     ESP_LOGI(TAG, "HTTP server started on :80");
     return true;

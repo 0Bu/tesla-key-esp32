@@ -1,7 +1,9 @@
 #include "diag_log.hpp"
+#include "rtos_guard.hpp"
 #include "syslog.hpp"
 
 #include <esp_log.h>
+#include <atomic>
 #include <cstdio>
 #include <cstring>
 #include "freertos/FreeRTOS.h"
@@ -25,16 +27,17 @@ static size_t            s_head    = 0;      // next write position
 static bool              s_wrapped = false;  // buffer has wrapped at least once
 static SemaphoreHandle_t s_mtx     = nullptr;
 static vprintf_like_t    s_prev    = nullptr;
-static volatile bool     s_verbose = false;
+static std::atomic<bool> s_verbose{false};
+static const char*       TAG       = "diag_log";
 
 static void diag_append_(const char* data, size_t len) {
     if (!s_mtx || len == 0) return;
-    if (xSemaphoreTake(s_mtx, pdMS_TO_TICKS(20)) != pdTRUE) return;
+    tk::MutexGuard lock(s_mtx, pdMS_TO_TICKS(20));
+    if (!lock) return;
     for (size_t i = 0; i < len; i++) {
         s_buf[s_head++] = data[i];
         if (s_head >= DIAG_CAP) { s_head = 0; s_wrapped = true; }
     }
-    xSemaphoreGive(s_mtx);
 }
 
 // esp_log hook: capture the formatted line, then forward to the original sink so
@@ -60,7 +63,11 @@ static int diag_vprintf_(const char* fmt, va_list ap) {
 
 void diag_log_init() {
     if (s_mtx) return;
-    s_mtx  = xSemaphoreCreateMutex();
+    s_mtx = xSemaphoreCreateMutex();
+    if (!s_mtx) {
+        ESP_LOGE(TAG, "failed to allocate diagnostic-log mutex; capture disabled");
+        return;
+    }
     s_prev = esp_log_set_vprintf(diag_vprintf_);
 }
 
@@ -70,22 +77,22 @@ void diag_log_dump_chunks(const std::function<bool(const char*, size_t)>& sink) 
     // mid-dump. The spans point straight into the static buffer — no large heap
     // allocation, which is the whole point (a 48 KB std::string can throw bad_alloc
     // on a fragmented heap, whose largest free block can fall to ~31 KB → crash).
-    xSemaphoreTake(s_mtx, portMAX_DELAY);
+    tk::MutexGuard lock(s_mtx);
+    if (!lock) return;
     if (s_wrapped) {
         if (sink(s_buf + s_head, DIAG_CAP - s_head)) sink(s_buf, s_head);
     } else {
         sink(s_buf, s_head);
     }
-    xSemaphoreGive(s_mtx);
 }
 
 void diag_log_clear() {
     if (!s_mtx) return;
-    xSemaphoreTake(s_mtx, portMAX_DELAY);
+    tk::MutexGuard lock(s_mtx);
+    if (!lock) return;
     s_head    = 0;
     s_wrapped = false;
-    xSemaphoreGive(s_mtx);
 }
 
-void diag_set_verbose(bool on) { s_verbose = on; }
-bool diag_verbose() { return s_verbose; }
+void diag_set_verbose(bool on) { s_verbose.store(on); }
+bool diag_verbose() { return s_verbose.load(); }

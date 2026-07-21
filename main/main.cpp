@@ -1,6 +1,8 @@
 #include <cstring>
 #include <cstdlib>
 #include <ctime>
+#include <atomic>
+#include <exception>
 #include <string>
 #include <sys/time.h>
 
@@ -41,25 +43,52 @@ static const char* MDNS_HOSTNAME = "tesla-key-esp32";  // → http://tesla-key-e
 
 static const char* TAG = "main";
 
+[[noreturn]] static void halt_after_init_failure(const char* component) {
+    ESP_LOGE(TAG, "FATAL: %s initialization failed; refusing to run a partial firmware", component);
+
+    // A freshly OTA-installed image is still PENDING_VERIFY here. Merely parking the task would
+    // keep rollback armed but never let the bootloader perform it, leaving the device wedged on
+    // the broken image until an external reset. Fail it explicitly so the previous slot boots now.
+    const esp_partition_t* running = esp_ota_get_running_partition();
+    esp_ota_img_states_t state{};
+    if (running && esp_ota_get_state_partition(running, &state) == ESP_OK &&
+        state == ESP_OTA_IMG_PENDING_VERIFY) {
+        ESP_LOGE(TAG, "fatal initialization failure on pending OTA image — rolling back");
+        vTaskDelay(pdMS_TO_TICKS(250));
+        const esp_err_t err = esp_ota_mark_app_invalid_rollback_and_reboot();
+        ESP_LOGE(TAG, "OTA rollback could not be started: %s", esp_err_to_name(err));
+    }
+
+    // On a normal/already-valid image, avoid an automatic reboot loop: it would repeatedly open
+    // the car polling window and erase the diagnostic context without repairing a hard failure.
+    while (true) vTaskDelay(pdMS_TO_TICKS(10000));
+}
+
 // ─── Wall clock ───────────────────────────────────────────────────────────────
 // NTP (esp_sntp) is the primary time source; the browser (POST /set_time) is only a
 // fallback for networks that block NTP. on_time_sync() flips s_ntp_synced and, on the
 // first sync, refreshes the NVS cache so a later offline reboot restores a recent
 // accurate time instead of sitting at 1970.
-static volatile bool      s_ntp_synced = false;
+static std::atomic<bool>   s_ntp_synced{false};
 static NvsStorageAdapter* s_cfg_store  = nullptr;
 
 static void on_time_sync(struct timeval*) {
-    if (!s_ntp_synced && s_cfg_store) {
-        s_cfg_store->save_str("last_time", std::to_string((long long)time(nullptr)));
+    const bool first_sync = !s_ntp_synced.exchange(true);
+    if (first_sync && s_cfg_store) {
+        try {
+            s_cfg_store->save_str("last_time", std::to_string((long long)time(nullptr)));
+        } catch (const std::exception& e) {
+            ESP_LOGE(TAG, "NTP callback could not cache time (%s)", e.what());
+        } catch (...) {
+            ESP_LOGE(TAG, "NTP callback could not cache time (unknown exception)");
+        }
     }
-    s_ntp_synced = true;
     ESP_LOGI(TAG, "NTP time synced");
 }
 
 // Queried by the HTTP /set_time handler so the browser clock is applied only as a
 // fallback while NTP has not synced this boot.
-bool clock_synced_via_ntp() { return s_ntp_synced; }
+bool clock_synced_via_ntp() { return s_ntp_synced.load(); }
 
 // ─── WiFi ─────────────────────────────────────────────────────────────────────
 
@@ -73,15 +102,15 @@ static const int MAX_RETRY          = 10;
 // (/status, MQTT) so none reads the AP/station record WHILE WiFi is initialising or
 // churning through a disconnect→reconnect — that record has transiently-null fields
 // mid-association and a concurrent read faults (LoadProhibited, EXCVADDR=0x1).
-// volatile: written from the event-loop task, read from the http/mqtt tasks.
-static volatile bool s_wifi_connected = false;
-bool wifi_is_connected() { return s_wifi_connected; }
+// Written from the event-loop task, read from the HTTP/MQTT/UI tasks.
+static std::atomic<bool> s_wifi_connected{false};
+bool wifi_is_connected() { return s_wifi_connected.load(); }
 
 // Set true on the first IP_EVENT_STA_GOT_IP, never cleared. Distinguishes a boot-time
 // connect (exhausting the retry budget here means the stored credentials are wrong →
 // fall back to the setup portal) from a runtime drop (credentials known-good →
 // reconnect forever, never surrender to the setup portal).
-static volatile bool s_wifi_ever_connected = false;
+static std::atomic<bool> s_wifi_ever_connected{false};
 
 static void wifi_event_handler(void*, esp_event_base_t base,
                                 int32_t event_id, void* data) {
@@ -116,10 +145,12 @@ static void wifi_event_handler(void*, esp_event_base_t base,
 
 static bool wifi_connect(const char* ssid, const char* password) {
     s_wifi_events = xEventGroupCreate();
+    if (!s_wifi_events) halt_after_init_failure("WiFi event group");
 
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
     esp_netif_t* sta_netif = esp_netif_create_default_wifi_sta();
+    if (!sta_netif) halt_after_init_failure("WiFi station netif");
 
     // DHCP client hostname: set BEFORE the lease is requested so the router can
     // register it in its local DNS (e.g. http://tesla-key-esp32.fritz.box). Setting
@@ -228,7 +259,7 @@ static WdPing s_wd = { nullptr, 0 };
 // router/firewall that drops LAN ICMP) must NOT be read as "link dead" — that would
 // re-associate a perfectly healthy link every ~60 s forever. A genuine ghost association,
 // by contrast, replied before and then stops, so it still trips the watchdog.
-static volatile bool s_gw_ever_reachable = false;
+static std::atomic<bool> s_gw_ever_reachable{false};
 
 static void wd_on_ping_end(esp_ping_handle_t hdl, void* args) {
     auto* p = (WdPing*) args;
@@ -287,7 +318,6 @@ static bool gateway_reachable() {
 }
 
 static void wifi_watchdog_task(void*) {
-    s_wd.done = xSemaphoreCreateBinary();
     int fails = 0;
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(kWdPeriodS * 1000));
@@ -387,7 +417,7 @@ static void ota_health_gate_task(void*) {
     vTaskDelete(nullptr);
 }
 
-extern "C" void app_main() {
+static void app_main_impl() {
     // Capture console output into the in-memory diagnostic ring (GET /diag).
     diag_log_init();
 
@@ -416,7 +446,7 @@ extern "C" void app_main() {
 
     // Static so they outlive app_main() (which deletes itself via vTaskDelete)
     static NvsStorageAdapter config_store("tesla_cfg");
-    config_store.initialize();
+    if (!config_store.initialize()) halt_after_init_failure("configuration NVS");
 
     // Did WE end the last boot on purpose? esp_reset_reason() cannot tell a deliberate
     // esp_restart() apart from a user power-cycle — both read SW/POWERON — so the heap watchdog
@@ -430,7 +460,9 @@ extern "C" void app_main() {
     // "" = disabled). Started before WiFi so it captures boot-time log lines too — its own
     // task blocks on wifi_is_connected() until the link is up, so this is safe even though
     // esp_netif_init() itself hasn't run yet (that happens inside wifi_connect() below).
-    syslog_start(config_store);
+    if (!syslog_start(config_store)) {
+        ESP_LOGE(TAG, "Syslog initialization failed; continuing without remote diagnostics");
+    }
 
     // Announce the breadcrumb only NOW, deliberately after syslog_start(): syslog_send() is a
     // no-op until then (diag_log.cpp's capture hook has nowhere to forward to), so logging it
@@ -481,12 +513,20 @@ extern "C" void app_main() {
     // is started after WiFi is up. The controller's accessors are safe to call
     // before that — they report "not connected" until the link comes up.
     static NvsStorageAdapter tesla_store("tesla_ble");
-    tesla_store.initialize();
+    if (!tesla_store.initialize()) halt_after_init_failure("Tesla NVS");
     static BleClient ble_client;
     static VehicleController vehicle;
     // init() wires the connected + rx callbacks onto ble_client and passes the
     // config_store so it can save the discovered MAC.
-    vehicle.init(vin, ble_client, tesla_store, config_store, ble_mac);
+    bool vehicle_ready = false;
+    try {
+        vehicle_ready = vehicle.init(vin, ble_client, tesla_store, config_store, ble_mac);
+    } catch (const std::exception& e) {
+        ESP_LOGE(TAG, "VehicleController initialization exception: %s", e.what());
+    } catch (...) {
+        ESP_LOGE(TAG, "VehicleController initialization failed with an unknown exception");
+    }
+    if (!vehicle_ready) halt_after_init_failure("VehicleController");
 
     // Create the ECDSA key on first boot so a key always exists (and a fingerprint
     // is shown). Regeneration is an explicit, confirmed action in the web UI; this
@@ -572,16 +612,18 @@ extern "C" void app_main() {
     // Start NimBLE host. Discovery scanning is manual/time-limited; the client
     // connects on demand when a command is issued. (The controller was set up
     // before WiFi, above.)
-    ble_client.start();
+    if (!ble_client.start()) halt_after_init_failure("NimBLE");
     log_heap("ble");
 
-    http_server_start(vehicle, config_store);
+    if (!http_server_start(vehicle, config_store)) halt_after_init_failure("HTTP server");
     log_heap("http");
 
     // Home Assistant MQTT bridge: publishes all telemetry + device status (read-only)
     // if a broker is configured (NVS "mqtt_uri" / CONFIG_TESLA_MQTT_BROKER_URI); a
     // no-op otherwise. Runs in its own task, independent of evcc/BLE/pairing.
-    mqtt_ha_start(vehicle, config_store);
+    if (!mqtt_ha_start(vehicle, config_store)) {
+        ESP_LOGE(TAG, "MQTT initialization failed; continuing without the optional HA bridge");
+    }
     log_heap("mqtt");
 
     // On-device status display (LilyGo T-Dongle-C5 / T-Dongle-S3). No-op unless the board
@@ -601,7 +643,12 @@ extern "C" void app_main() {
     // including the "ghost association" case that fires no disconnect event (see the
     // task definition above). Without it the device can sit reachable-over-BLE but
     // off the LAN indefinitely, recoverable only by a manual reset.
-    xTaskCreate(wifi_watchdog_task, "wifi_wd", 3072, nullptr, tk::kPrioWifiWatchdog, nullptr);
+    s_wd.done = xSemaphoreCreateBinary();
+    if (!s_wd.done) halt_after_init_failure("WiFi watchdog semaphore");
+    if (xTaskCreate(wifi_watchdog_task, "wifi_wd", 3072, nullptr,
+                    tk::kPrioWifiWatchdog, nullptr) != pdPASS) {
+        halt_after_init_failure("WiFi watchdog task");
+    }
 
     // Confirm a freshly OTA-flashed image only after it has proven it can RUN — not merely
     // reach this line. Marking it valid here (the old behaviour) would disarm rollback the
@@ -610,9 +657,23 @@ extern "C" void app_main() {
     // rollback armed for a window of healthy uptime; if the image dies first it reboots while
     // still PENDING_VERIFY and the bootloader reverts to the previous slot. A no-op on a normal
     // (non-pending-verify) boot.
-    xTaskCreate(ota_health_gate_task, "ota_gate", 3072, nullptr, tk::kPrioOtaGate, nullptr);
+    if (xTaskCreate(ota_health_gate_task, "ota_gate", 3072, nullptr,
+                    tk::kPrioOtaGate, nullptr) != pdPASS) {
+        halt_after_init_failure("OTA health-gate task");
+    }
 
     ESP_LOGI(TAG, "tesla-key-esp32 running. API on port 80.");
     // Main task is no longer needed; Vehicle loop + HTTP server run in their own tasks.
     vTaskDelete(nullptr);
+}
+
+extern "C" void app_main() {
+    try {
+        app_main_impl();
+    } catch (const std::exception& e) {
+        ESP_LOGE(TAG, "app_main initialization threw (%s)", e.what());
+    } catch (...) {
+        ESP_LOGE(TAG, "app_main initialization threw (unknown)");
+    }
+    halt_after_init_failure("app_main exception boundary");
 }

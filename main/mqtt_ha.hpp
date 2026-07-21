@@ -15,9 +15,10 @@ class NvsStorageAdapter;
 // overrides CONFIG_TESLA_MQTT_BROKER_URI. If no broker is configured the bridge
 // stays disabled and mqtt_ha_start() is a no-op.
 
-// Start the bridge (call after WiFi is up). Spawns its own publisher task; returns
-// immediately. Safe to call when MQTT is unconfigured (logs and returns).
-void mqtt_ha_start(VehicleController& vehicle, NvsStorageAdapter& config_store);
+// Start the bridge (call after WiFi is up). Spawns its own publisher task and returns
+// true; unconfigured MQTT is a successful no-op. Returns false after cleaning up a
+// configured bridge that could not be started.
+bool mqtt_ha_start(VehicleController& vehicle, NvsStorageAdapter& config_store);
 
 // Status accessors for GET /status (the web-UI "Connection" block).
 bool        mqtt_ha_configured();  // a broker URI is set (bridge enabled)

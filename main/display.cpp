@@ -19,6 +19,7 @@
 #include <cstring>
 #include <cstdio>
 #include <cmath>
+#include <exception>
 #include <string>
 
 #include "freertos/FreeRTOS.h"
@@ -599,7 +600,7 @@ static void rotate_90(void) {
     ESP_LOGI(TAG, "display rotated → index %d (MADCTL 0x%02X, %dx%d)", s_rot, s_cfg.madctl, W, H);
 }
 
-static void display_task(void* arg) {
+static void display_task_impl(void* arg) {
     VehicleController& v = *static_cast<VehicleController*>(arg);
 
     // BOOT button (BOOT_BTN: C5 IO28 / S3 IO0): input with pull-up; a press pulls it LOW.
@@ -636,6 +637,19 @@ static void display_task(void* arg) {
                 break;
             }
         }
+    }
+}
+
+static void display_task(void* arg) {
+    for (;;) {
+        try {
+            display_task_impl(arg);
+        } catch (const std::exception& e) {
+            ESP_LOGE(TAG, "display task threw (%s); restarting renderer state", e.what());
+        } catch (...) {
+            ESP_LOGE(TAG, "display task threw (unknown); restarting renderer state");
+        }
+        vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }
 

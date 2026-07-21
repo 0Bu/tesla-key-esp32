@@ -11,6 +11,8 @@
 #include <string>
 #include <cstring>
 #include <ctime>
+#include <exception>
+#include <memory>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -36,7 +38,9 @@ static esp_mqtt_client_handle_t s_client = nullptr;
 static VehicleController*        s_vehicle = nullptr;
 static std::atomic<bool>         s_connected{false};
 static std::atomic<bool>         s_need_discovery{false};
-static bool                      s_configured = false;
+// Also publishes the immutable string/topic configuration to HTTP readers: start builds every
+// string while false, then stores true only after the client + publisher task are live.
+static std::atomic<bool>         s_configured{false};
 static bool                      s_tls        = false;   // connection uses mqtts:// (TLS)
 
 // Last connection error, surfaced in /status so the web UI can explain a stuck connection
@@ -55,6 +59,18 @@ static std::string s_devname;                  // HA device display name
 static std::string s_cfgurl;                   // device configuration_url (http://<ip>)
 static std::string s_broker_disp;              // "host:port" for the web UI
 static int         s_interval_s = 15;
+static bool        s_client_started = false;
+
+struct CJsonDeleter {
+    void operator()(cJSON* value) const noexcept { cJSON_Delete(value); }
+};
+
+struct CJsonStringDeleter {
+    void operator()(char* value) const noexcept { free(value); }
+};
+
+using CJsonPtr = std::unique_ptr<cJSON, CJsonDeleter>;
+using CJsonStringPtr = std::unique_ptr<char, CJsonStringDeleter>;
 
 // State topics, indexed by Domain.
 enum Domain { D_CHARGE, D_CLIMATE, D_DRIVE, D_TIRES, D_CLOSURES, D_VEHICLE, D_DEVICE, D_COUNT };
@@ -148,9 +164,10 @@ static void pub(const std::string& topic, const char* payload, bool retain = tru
 
 // Print + publish a cJSON object to a topic, then delete it (takes ownership).
 static void pub_json(const std::string& topic, cJSON* obj) {
-    char* s = cJSON_PrintUnformatted(obj);
-    if (s) { pub(topic, s); free(s); }
-    cJSON_Delete(obj);
+    CJsonPtr root(obj);
+    if (!root) return;
+    CJsonStringPtr json(cJSON_PrintUnformatted(root.get()));
+    if (json) pub(topic, json.get());
 }
 
 // ─── HA discovery ─────────────────────────────────────────────────────────────
@@ -399,16 +416,28 @@ static void publisher_task(void*) {
     TickType_t last = 0;
     const TickType_t interval = pdMS_TO_TICKS(s_interval_s * 1000);
     while (true) {
-        if (s_connected) {
-            if (s_need_discovery.exchange(false)) {
-                publish_discovery();
-                pub(s_avail, "online");      // retained; after configs so HA has the entities
-                publish_state();
-                last = xTaskGetTickCount();
-            } else if ((xTaskGetTickCount() - last) >= interval) {
-                publish_state();
-                last = xTaskGetTickCount();
+        bool discovery_in_progress = false;
+        try {
+            if (s_connected) {
+                if (s_need_discovery.exchange(false)) {
+                    discovery_in_progress = true;
+                    publish_discovery();
+                    pub(s_avail, "online");      // retained; after configs so HA has the entities
+                    publish_state();
+                    last = xTaskGetTickCount();
+                } else if ((xTaskGetTickCount() - last) >= interval) {
+                    publish_state();
+                    last = xTaskGetTickCount();
+                }
             }
+        } catch (const std::exception& e) {
+            if (discovery_in_progress) s_need_discovery = true;
+            ESP_LOGE(TAG, "publisher tick threw (%s); retrying", e.what());
+            vTaskDelay(pdMS_TO_TICKS(5000));
+        } catch (...) {
+            if (discovery_in_progress) s_need_discovery = true;
+            ESP_LOGE(TAG, "publisher tick threw (unknown); retrying");
+            vTaskDelay(pdMS_TO_TICKS(5000));
         }
         vTaskDelay(pdMS_TO_TICKS(500));
     }
@@ -426,7 +455,19 @@ static std::string broker_display(const std::string& uri) {
 }
 
 // ─── Public API ───────────────────────────────────────────────────────────────
-void mqtt_ha_start(VehicleController& vehicle, NvsStorageAdapter& config_store) {
+static void mqtt_ha_cleanup_start_failure() noexcept {
+    if (s_client) {
+        if (s_client_started) esp_mqtt_client_stop(s_client);
+        esp_mqtt_client_destroy(s_client);
+        s_client = nullptr;
+    }
+    s_client_started = false;
+    s_connected = false;
+    s_need_discovery = false;
+    s_configured.store(false);
+}
+
+static bool mqtt_ha_start_impl(VehicleController& vehicle, NvsStorageAdapter& config_store) {
     s_vehicle = &vehicle;
 
     // Resolve broker URI: NVS "mqtt_uri" (web UI) overrides the Kconfig default. An
@@ -440,8 +481,8 @@ void mqtt_ha_start(VehicleController& vehicle, NvsStorageAdapter& config_store) 
 
     if (s_uri.empty()) {
         ESP_LOGI(TAG, "MQTT disabled (no broker configured)");
-        s_configured = false;
-        return;
+        s_configured.store(false);
+        return true;
     }
     s_user   = CONFIG_TESLA_MQTT_USERNAME;
     s_pass   = CONFIG_TESLA_MQTT_PASSWORD;
@@ -460,7 +501,6 @@ void mqtt_ha_start(VehicleController& vehicle, NvsStorageAdapter& config_store) 
     }
     s_tls = s_uri.rfind("mqtts://", 0) == 0;   // starts with mqtts://
     s_broker_disp = broker_display(s_uri);
-    s_configured = true;
     s_interval_s = CONFIG_TESLA_MQTT_PUBLISH_INTERVAL_S;
     if (s_interval_s < 5) s_interval_s = 5;
 
@@ -512,25 +552,56 @@ void mqtt_ha_start(VehicleController& vehicle, NvsStorageAdapter& config_store) 
     s_client = esp_mqtt_client_init(&cfg);
     if (!s_client) {
         ESP_LOGE(TAG, "esp_mqtt_client_init failed");
-        s_configured = false;
-        return;
+        s_configured.store(false);
+        return false;
     }
-    esp_mqtt_client_register_event(s_client, MQTT_EVENT_ANY, mqtt_event_handler, nullptr);
-    esp_mqtt_client_start(s_client);
-    xTaskCreate(publisher_task, "mqtt_pub", 6144, nullptr, tk::kPrioMqttPub, nullptr);
+    if (esp_mqtt_client_register_event(s_client, MQTT_EVENT_ANY, mqtt_event_handler, nullptr) != ESP_OK) {
+        ESP_LOGE(TAG, "failed to register MQTT event handler");
+        mqtt_ha_cleanup_start_failure();
+        return false;
+    }
+    if (esp_mqtt_client_start(s_client) != ESP_OK) {
+        ESP_LOGE(TAG, "failed to start MQTT client");
+        mqtt_ha_cleanup_start_failure();
+        return false;
+    }
+    s_client_started = true;
+    if (xTaskCreate(publisher_task, "mqtt_pub", 6144, nullptr, tk::kPrioMqttPub,
+                    nullptr) != pdPASS) {
+        ESP_LOGE(TAG, "failed to create MQTT publisher task");
+        mqtt_ha_cleanup_start_failure();
+        return false;
+    }
 
+    // Release-publish the strings/topics above to concurrent /status readers only once the
+    // configured bridge is complete. Before this point accessors return their disabled values.
+    s_configured.store(true);
     ESP_LOGI(TAG, "MQTT bridge started → %s (base topic %s, HA prefix %s)",
              s_broker_disp.c_str(), s_base.c_str(), s_prefix.c_str());
+    return true;
 }
 
-bool mqtt_ha_configured() { return s_configured; }
-bool mqtt_ha_connected()  { return s_configured && s_connected.load(); }
-bool mqtt_ha_tls()        { return s_configured && s_tls; }
-std::string mqtt_ha_broker() { return s_configured ? s_broker_disp : std::string{}; }
+bool mqtt_ha_start(VehicleController& vehicle, NvsStorageAdapter& config_store) {
+    try {
+        return mqtt_ha_start_impl(vehicle, config_store);
+    } catch (const std::exception& e) {
+        mqtt_ha_cleanup_start_failure();
+        ESP_LOGE(TAG, "MQTT initialization threw (%s); bridge disabled", e.what());
+    } catch (...) {
+        mqtt_ha_cleanup_start_failure();
+        ESP_LOGE(TAG, "MQTT initialization threw (unknown); bridge disabled");
+    }
+    return false;
+}
+
+bool mqtt_ha_configured() { return s_configured.load(); }
+bool mqtt_ha_connected()  { return s_configured.load() && s_connected.load(); }
+bool mqtt_ha_tls()        { return s_configured.load() && s_tls; }
+std::string mqtt_ha_broker() { return s_configured.load() ? s_broker_disp : std::string{}; }
 
 // Human-readable last connection error ("" when none / connected). Surfaced in /status.
 std::string mqtt_ha_last_error() {
-    if (!s_configured || s_connected.load()) return {};
+    if (!s_configured.load() || s_connected.load()) return {};
     switch (s_last_err.load()) {
     case ME_TRANSPORT: return s_tls ? "TLS handshake failed (untrusted cert or wrong port?)"
                                     : "transport error (host/port?)";

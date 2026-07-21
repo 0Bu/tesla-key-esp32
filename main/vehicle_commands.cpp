@@ -137,11 +137,12 @@ bool VehicleController::send_vcsec_(const std::string& name, Builder builder,
     last_result_ = false;
     last_error_.clear();
 
-    xSemaphoreTake(vehicle_mutex_, portMAX_DELAY);
-    vehicle_->send_command_result(
-        UniversalMessage_Domain_DOMAIN_VEHICLE_SECURITY,
-        name, builder, make_result_cb_(auth_fail_is_revocation), wp);
-    xSemaphoreGive(vehicle_mutex_);
+    {
+        tk::MutexGuard vehicle_guard(vehicle_mutex_);
+        vehicle_->send_command_result(
+            UniversalMessage_Domain_DOMAIN_VEHICLE_SECURITY,
+            name, builder, make_result_cb_(auth_fail_is_revocation), wp);
+    }
 
     bool ok = xSemaphoreTake(cmd_sem_, pdMS_TO_TICKS(timeout_ms)) == pdTRUE;
     if (!ok) ESP_LOGW(TAG, "'%s' timed out", name.c_str());
@@ -159,13 +160,14 @@ bool VehicleController::send_infotainment_(const std::string& name, Builder buil
     last_result_ = false;
     last_error_.clear();
 
-    xSemaphoreTake(vehicle_mutex_, portMAX_DELAY);
-    // WAKE_IF_NEEDED so charge commands also work when the car is asleep
-    // (matches TeslaBleHttpProxy, which auto-wakes the vehicle).
-    vehicle_->send_command_result(
-        UniversalMessage_Domain_DOMAIN_INFOTAINMENT,
-        name, builder, make_result_cb_(), wp);
-    xSemaphoreGive(vehicle_mutex_);
+    {
+        tk::MutexGuard vehicle_guard(vehicle_mutex_);
+        // WAKE_IF_NEEDED so charge commands also work when the car is asleep
+        // (matches TeslaBleHttpProxy, which auto-wakes the vehicle).
+        vehicle_->send_command_result(
+            UniversalMessage_Domain_DOMAIN_INFOTAINMENT,
+            name, builder, make_result_cb_(), wp);
+    }
 
     bool ok = xSemaphoreTake(cmd_sem_, pdMS_TO_TICKS(timeout_ms)) == pdTRUE;
     if (!ok) ESP_LOGW(TAG, "'%s' timed out", name.c_str());

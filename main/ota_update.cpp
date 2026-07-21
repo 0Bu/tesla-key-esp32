@@ -14,11 +14,14 @@
 #include <cJSON.h>
 
 #include "platform.hpp"
+#include "rtos_guard.hpp"
 #include "task_config.hpp"
 
 #include <atomic>
 #include <cstdio>
 #include <cstring>
+#include <exception>
+#include <memory>
 #include <string_view>
 
 static const char* TAG = "ota";
@@ -65,31 +68,32 @@ static SemaphoreHandle_t s_lock = nullptr;
 static OtaStatus         s_status = { OtaState::Idle, 0, "idle", "", false, "" };
 static std::atomic<bool> s_running{false};    // a check or download task is active
 
-static void ensure_lock() {
+static bool ensure_lock() {
     if (!s_lock) s_lock = xSemaphoreCreateMutex();
+    return s_lock != nullptr;
 }
 
 static void set_state(OtaState st, int pct, const char* msg) {
-    ensure_lock();
-    xSemaphoreTake(s_lock, portMAX_DELAY);
+    if (!ensure_lock()) return;
+    tk::MutexGuard status_guard(s_lock);
+    if (!status_guard) return;
     s_status.state    = st;
     s_status.progress = pct;
     s_status.message  = msg ? msg : "";
-    xSemaphoreGive(s_lock);
 }
 
 static void set_available(const char* ver) {
-    ensure_lock();
-    xSemaphoreTake(s_lock, portMAX_DELAY);
+    if (!ensure_lock()) return;
+    tk::MutexGuard status_guard(s_lock);
+    if (!status_guard) return;
     s_status.available = ver ? ver : "";
-    xSemaphoreGive(s_lock);
 }
 
 OtaStatus ota_get_status() {
-    ensure_lock();
-    xSemaphoreTake(s_lock, portMAX_DELAY);
+    if (!ensure_lock()) return s_status;
+    tk::MutexGuard status_guard(s_lock);
+    if (!status_guard) return s_status;
     OtaStatus copy = s_status;
-    xSemaphoreGive(s_lock);
     return copy;
 }
 
@@ -127,6 +131,13 @@ static bool http_get_to_buffer(const char* url, std::string& out) {
 
     esp_http_client_handle_t c = esp_http_client_init(&cfg);
     if (!c) return false;
+    struct HttpClientGuard {
+        esp_http_client_handle_t handle;
+        ~HttpClientGuard() {
+            esp_http_client_close(handle);
+            esp_http_client_cleanup(handle);
+        }
+    } client_guard{c};
 
     bool ok = false;
     if (esp_http_client_open(c, 0) == ESP_OK) {
@@ -148,8 +159,6 @@ static bool http_get_to_buffer(const char* url, std::string& out) {
         ESP_LOGW(TAG, "manifest connection failed");
     }
 
-    esp_http_client_close(c);
-    esp_http_client_cleanup(c);
     return ok;
 }
 
@@ -170,10 +179,9 @@ OtaCheckResult ota_check() {
         return res;
     }
 
-    cJSON* j = cJSON_Parse(body.c_str());
-    cJSON* v = j ? cJSON_GetObjectItemCaseSensitive(j, "version") : nullptr;
+    std::unique_ptr<cJSON, decltype(&cJSON_Delete)> j(cJSON_Parse(body.c_str()), cJSON_Delete);
+    cJSON* v = j ? cJSON_GetObjectItemCaseSensitive(j.get(), "version") : nullptr;
     if (cJSON_IsString(v) && v->valuestring) res.available = v->valuestring;
-    cJSON_Delete(j);
 
     if (res.available.empty()) {
         res.ok     = false;
@@ -193,29 +201,43 @@ OtaCheckResult ota_check() {
 
 // Publish a finished check into the shared status for /ota/status polling.
 static void set_check_done(const OtaCheckResult& r) {
-    ensure_lock();
-    xSemaphoreTake(s_lock, portMAX_DELAY);
+    if (!ensure_lock()) return;
+    tk::MutexGuard status_guard(s_lock);
+    if (!status_guard) return;
     s_status.state            = r.ok ? OtaState::Idle : OtaState::Error;
     s_status.progress         = 0;
     s_status.message          = r.reason;
     s_status.available        = r.available;
     s_status.update_available = r.update_available;
     s_status.current          = r.current;
-    xSemaphoreGive(s_lock);
 }
 
 static void ota_check_task(void*) {
-    OtaCheckResult r = ota_check();   // blocking HTTPS GET, runs off the HTTP task
-    set_check_done(r);
+    try {
+        OtaCheckResult r = ota_check();   // blocking HTTPS GET, runs off the HTTP task
+        set_check_done(r);
+    } catch (const std::exception& e) {
+        ESP_LOGE(TAG, "OTA check task exception: %s", e.what());
+        try { set_state(OtaState::Error, 0, "update check ran out of resources"); } catch (...) {}
+    } catch (...) {
+        ESP_LOGE(TAG, "OTA check task unknown exception");
+        try { set_state(OtaState::Error, 0, "update check failed unexpectedly"); } catch (...) {}
+    }
     s_running = false;
     vTaskDelete(nullptr);
 }
 
 bool ota_check_start() {
+    if (!ensure_lock()) return false;
     // Atomic test-and-set: bail if a check/update is already running. Don't rely on the
     // httpd being single-threaded to serialize the guard.
     if (s_running.exchange(true)) return false;
-    set_state(OtaState::Checking, 0, "checking for updates");
+    try {
+        set_state(OtaState::Checking, 0, "checking for updates");
+    } catch (...) {
+        s_running = false;
+        return false;
+    }
 
     // mbedTLS handshake + manifest fetch run here; same generous stack as ota_task.
     if (xTaskCreate(ota_check_task, "ota_chk", 8192, nullptr, tk::kPrioOtaCheck, nullptr) != pdPASS) {
@@ -228,7 +250,7 @@ bool ota_check_start() {
 
 // ─── Background download + install ──────────────────────────────────────────────
 
-static void ota_task(void*) {
+static void ota_task_impl() {
     // One channel, per-target image: base URL + this chip's short image suffix. The literals
     // concatenate at compile time (TESLA_OTA_IMG_SUFFIX is a string literal), so this is a
     // fixed string with no allocation. esp_https_ota also verifies the image chip-id, so a
@@ -252,10 +274,17 @@ static void ota_task(void*) {
     if (err != ESP_OK || handle == nullptr) {
         ESP_LOGE(TAG, "esp_https_ota_begin failed: %s", esp_err_to_name(err));
         set_state(OtaState::Error, 0, "could not start download (server/TLS)");
-        s_running = false;
-        vTaskDelete(nullptr);
         return;
     }
+    struct OtaHandleGuard {
+        esp_https_ota_handle_t handle;
+        ~OtaHandleGuard() { if (handle) esp_https_ota_abort(handle); }
+        esp_https_ota_handle_t release() {
+            auto h = handle;
+            handle = nullptr;
+            return h;
+        }
+    } handle_guard{handle};
 
     int image_size = esp_https_ota_get_image_size(handle);
 
@@ -271,19 +300,13 @@ static void ota_task(void*) {
     err = esp_https_ota_get_img_desc(handle, &new_app);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "esp_https_ota_get_img_desc failed: %s", esp_err_to_name(err));
-        esp_https_ota_abort(handle);
         set_state(OtaState::Error, 0, "could not read image header");
-        s_running = false;
-        vTaskDelete(nullptr);
         return;
     }
     if (!ver_newer(new_app.version, running_version())) {
         ESP_LOGW(TAG, "OTA refused: image %s not newer than running %s (downgrade blocked)",
                  new_app.version, running_version());
-        esp_https_ota_abort(handle);
         set_state(OtaState::Error, 0, "no newer version available");
-        s_running = false;
-        vTaskDelete(nullptr);
         return;
     }
     ESP_LOGI(TAG, "OTA image %s newer than running %s — proceeding",
@@ -298,7 +321,7 @@ static void ota_task(void*) {
     }
 
     if (err == ESP_OK && esp_https_ota_is_complete_data_received(handle)) {
-        err = esp_https_ota_finish(handle);
+        err = esp_https_ota_finish(handle_guard.release());
         if (err == ESP_OK) {
             ESP_LOGI(TAG, "OTA complete — rebooting into new image");
             set_state(OtaState::Done, 100, "update complete — rebooting");
@@ -311,18 +334,34 @@ static void ota_task(void*) {
                                                      : "could not finalize update");
     } else {
         ESP_LOGE(TAG, "OTA download failed: %s", esp_err_to_name(err));
-        esp_https_ota_abort(handle);
         set_state(OtaState::Error, 0, "download failed");
     }
+}
 
+static void ota_task(void*) {
+    try {
+        ota_task_impl();
+    } catch (const std::exception& e) {
+        ESP_LOGE(TAG, "OTA task exception: %s", e.what());
+        try { set_state(OtaState::Error, 0, "update ran out of resources"); } catch (...) {}
+    } catch (...) {
+        ESP_LOGE(TAG, "OTA task unknown exception");
+        try { set_state(OtaState::Error, 0, "update failed unexpectedly"); } catch (...) {}
+    }
     s_running = false;
     vTaskDelete(nullptr);
 }
 
 bool ota_start() {
+    if (!ensure_lock()) return false;
     // Atomic test-and-set so two concurrent /ota/update calls can't both launch a task.
     if (s_running.exchange(true)) return false;
-    set_state(OtaState::Downloading, 0, "starting download");
+    try {
+        set_state(OtaState::Downloading, 0, "starting download");
+    } catch (...) {
+        s_running = false;
+        return false;
+    }
 
     // A generous stack: mbedTLS record processing + esp_https_ota run here.
     if (xTaskCreate(ota_task, "ota", 8192, nullptr, tk::kPrioOta, nullptr) != pdPASS) {

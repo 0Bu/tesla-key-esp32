@@ -12,6 +12,7 @@
 #include "logic/ble_phase.hpp"
 #include "logic/link_state.hpp"
 #include "logic/ui_state.hpp"
+#include "rtos_guard.hpp"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
@@ -286,10 +287,8 @@ private:
     // read races the writer (torn string → UB), so all reads/writes take this mutex.
     template <typename T> T copy_locked_(const T& src) {
         if (!cache_mutex_) return src;
-        xSemaphoreTake(cache_mutex_, portMAX_DELAY);
-        T copy = src;
-        xSemaphoreGive(cache_mutex_);
-        return copy;
+        tk::MutexGuard guard(cache_mutex_);
+        return src;
     }
 
     BleClient*         ble_{nullptr};
@@ -453,6 +452,7 @@ private:
 
     TaskHandle_t loop_task_{nullptr};
     static void loop_task_fn_(void* arg);
+    static void loop_task_impl_(void* arg);
 
     // Automatic pairing: while not paired, periodically connect to the configured
     // vehicle and (re)send the whitelist-add so the car keeps prompting "Add key?".
@@ -460,4 +460,5 @@ private:
     // the loop goes idle. No manual scan/pair needed.
     TaskHandle_t auto_pair_task_{nullptr};
     static void auto_pair_task_fn_(void* arg);
+    static void auto_pair_task_impl_(void* arg);
 };

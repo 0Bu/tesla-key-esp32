@@ -37,7 +37,10 @@ follow-up session apply the fix.
 The existing safety pattern you are checking adherence to:
 - HTTP handlers run under the `handle_all` **try/catch that returns 503 on OOM** — a throw
   inside a handler is caught and turned into a response, not a crash. Code reached *outside*
-  that net (background/loop tasks, NimBLE callbacks, timers, `app_main` init) has **no such net**.
+  that net (background/loop tasks, NimBLE/MQTT/SNTP callbacks, timers, `app_main` init) must own
+  a final local exception boundary; verify the boundary instead of assuming the HTTP net covers it.
+- FreeRTOS mutex/semaphore ownership around throwing code uses the shared `tk::MutexGuard` from
+  `main/rtos_guard.hpp`, so unwinding cannot strand a lock. Callback contexts use finite/zero waits.
 - Large bodies are **streamed** (`/diag` sends chunks via `httpd_resp_send_chunk`) instead of
   built into one big `std::string`.
 - New large contiguous consumers (big JSON envelopes, TLS for `mqtts`/OTA, CA bundles) are
@@ -69,10 +72,11 @@ Apply this checklist to every changed/added allocation site:
    (`std::bad_alloc` from allocation, `std::string` growth, `.at()`, `std::stoi`/`stol`,
    `cJSON`/JSON build, container ops) that is **not** under the `handle_all` try/catch.
    Verify the 503-on-OOM net actually covers the new path.
-4. **Throws on a net-less path (CRITICAL).** Allocations or throwing calls in `loop_task_fn_`
+4. **Throws on a C/RTOS path without a local boundary (CRITICAL).** Allocations or throwing calls in `loop_task_fn_`
    / background polls, NimBLE GAP/GATT callbacks, esp_timer callbacks, MQTT event handlers, or
-   `app_main`/init. No try/catch there → a throw is `std::terminate()` → reboot → defeats
-   sleep. These are the most dangerous findings.
+   `app_main`/init. A missing final try/catch there lets a throw reach `std::terminate()` → reboot
+   → defeats sleep. Also verify locks in these scopes use `tk::MutexGuard`. These are the most
+   dangerous findings.
 5. **TLS / OTA contiguous consumers.** New `esp_https_ota`, `esp-tls`, `mqtts` contexts and CA
    bundles allocate large contiguous blocks. Check the failure path degrades gracefully
    (stays disconnected / returns an error) rather than crashing, and that bundle size is bounded.
@@ -89,6 +93,6 @@ concrete fix (stream it; `reserve()` + a hard cap; wrap the net-less path; size-
 big TLS/JSON alloc; pass by const-ref).
 
 End with a one-line scope statement: what you reviewed and **explicitly state when you found
-nothing** in an area ("no net-less throwing allocations in the changed loop-task code"), so a
+nothing** in an area ("no unguarded throwing allocations in the changed loop-task code"), so a
 clean review is distinguishable from an unreviewed one. Do not invent risk where the diff is
 genuinely small-and-bounded; over-flagging trains the team to ignore you.

@@ -100,7 +100,10 @@ a new `version` in `manifest.json` but serves an old `.bin`. No eFuses burned.
 holds rollback armed until a freshly-flashed image has run healthily for a window
 (`kOtaHealthGateS` ≈ 90 s). An image that boots but then crashes/OOM-reboots under load dies
 while still `PENDING_VERIFY`, so the bootloader reverts to the previous slot rather than
-having committed it at startup. A **deliberate, user-initiated reboot** inside that window is a
+having committed it at startup. If an essential subsystem cannot initialize before the health
+gate starts, `halt_after_init_failure()` explicitly marks a still-`PENDING_VERIFY` image invalid
+and reboots into the previous slot; on a normal/already-valid image it halts instead of creating a
+car-waking reboot loop. A **deliberate, user-initiated reboot** inside that window is a
 different case, though: the three config handlers that reboot (`/set_vin`, `/set_mqtt`,
 `/set_syslog`), the setup-portal save **and the heap watchdog's deliberate restart** call
 `ota_confirm_pending_image()` first — a restart we chose is proof the image runs, so it must not
@@ -793,13 +796,14 @@ parked car never sleeps.
 
 ### Lock hierarchy (`VehicleController`)
 
-Four primitives, created in `VehicleController::init` (`vehicle_ctrl.cpp`); the RAII guards
-live in `vehicle_ctrl_internal.hpp` (`tk::MutexGuard`, `tk::InFlightGuard`):
+Four primitives, created in `VehicleController::init` (`vehicle_ctrl.cpp`); the shared mutex
+guard lives in `rtos_guard.hpp` (`tk::MutexGuard`) and the command-flight guard in
+`vehicle_ctrl_internal.hpp` (`tk::InFlightGuard`):
 
 | Primitive | Kind | Protects |
 |---|---|---|
 | `command_mutex_` | mutex, RAII | one whole command/query cycle: exclusive use of `cmd_sem_`, `last_result_`, `last_error_` |
-| `vehicle_mutex_` | mutex, take/give | **every** call into the tesla-ble `vehicle_` object (send, `loop()`, `on_rx_data`, `set_connected`) |
+| `vehicle_mutex_` | mutex, RAII | **every** call into the tesla-ble `vehicle_` object (send, `loop()`, `on_rx_data`, `set_connected`) |
 | `cmd_sem_` | binary semaphore | signals "result callback ran" from the BLE RX task to the waiting command |
 | `cache_mutex_` | mutex, RAII, leaf | the `last_known_*` caches (`std::string` members ⇒ an unlocked copy is torn-read UB) |
 
@@ -839,6 +843,7 @@ Application-task priorities are declared **only** in [`main/task_config.hpp`](..
 | `wifi_wd` | `kPrioWifiWatchdog` = 4 | 3072 | `main.cpp` | ghost-association watchdog (re-associate, never reboot) |
 | `mqtt_pub` | `kPrioMqttPub` = 4 | 6144 | `mqtt_ha.cpp` | MQTT/HA publisher (reads the caches) |
 | `ws_bcast` | `kPrioWsBroadcast` = 4 | 6144 | `http_events.cpp` | `/events` live-status push (self-gated on `ws_any_clients()`) |
+| `syslog_task` | `kPrioSyslog` = 3 | 6144 | `syslog.cpp` | UDP diagnostic forwarding + periodic DNS/reachability check |
 | `display` | `kPrioDisplay` = 3 | 6144 | `display.cpp` | ST7735 renderer (`CONFIG_TESLA_DISPLAY_ENABLED` builds) |
 | `ota_gate` | `kPrioOtaGate` = 3 | 3072 | `main.cpp` | one-shot OTA rollback health gate (~90 s) |
 | `led` | `kPrioLed` = 2 | 3072 | `led_status.cpp` | APA102 status LED (`CONFIG_TESLA_LED_ENABLED` builds) |

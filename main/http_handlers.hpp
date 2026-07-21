@@ -100,7 +100,8 @@ cJSON* build_status_object();
 // (WS-only, no poll fallback). The /events handler is the ONE route NOT reached through the
 // GuardedReq/handle_all trampoline — the WS handshake needs the raw esp_http_server signature, so
 // it is registered directly and guards its own allocations internally (see http_events.cpp).
-void http_events_register(httpd_handle_t server);  // register /events + start the broadcast task
+bool http_events_register(httpd_handle_t server);  // register /events + start the broadcast task
+void http_events_stop();                           // undo a partial HTTP-server startup
 void http_events_on_close(int sockfd);             // drop a closed socket from the broadcast list
 
 // http_ota.cpp — OTA self-update endpoints

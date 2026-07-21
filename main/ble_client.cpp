@@ -1,7 +1,9 @@
 #include "ble_client.hpp"
 #include "diag_log.hpp"
+#include "rtos_guard.hpp"
 #include <esp_log.h>
 #include <esp_timer.h>
+#include <array>
 #include <cstring>
 #include <cstdio>
 #include <algorithm>
@@ -80,7 +82,10 @@ BleClient::BleClient() {
     ta.callback = scan_timeout_cb;
     ta.arg      = this;
     ta.name     = "ble_scan";
-    esp_timer_create(&ta, &scan_timer_);
+    if (esp_timer_create(&ta, &scan_timer_) != ESP_OK) {
+        ESP_LOGE(TAG, "failed to create BLE scan timer");
+        scan_timer_ = nullptr;
+    }
 }
 
 // Start a time-limited discovery scan (lists nearby Teslas, does not connect).
@@ -105,7 +110,15 @@ void BleClient::on_scan_timeout() {
 }
 
 bool BleClient::start() {
-    nimble_port_init();
+    if (!write_mutex_ || !scan_mutex_ || !client_mutex_ || !scan_timer_) {
+        ESP_LOGE(TAG, "BLE resource allocation failed");
+        return false;
+    }
+    int rc = nimble_port_init();
+    if (rc != ESP_OK) {
+        ESP_LOGE(TAG, "NimBLE init failed: %d", rc);
+        return false;
+    }
 
     ble_hs_cfg.sync_cb  = on_sync_cb;
     ble_hs_cfg.reset_cb = on_reset_cb;
@@ -169,8 +182,8 @@ void BleClient::ensure_scanning_() {
 
 // Upsert a discovered Tesla into the nearby list (called from the host task).
 void BleClient::note_scan_(const ble_gap_disc_desc& d, const ble_hs_adv_fields& f) {
-    if (!scan_mutex_) return;
-    if (xSemaphoreTake(scan_mutex_, 0) != pdTRUE) return;  // never block the host task
+    tk::MutexGuard scan_guard(scan_mutex_, 0);
+    if (!scan_guard) return;  // never block the host task
     ScanEntry* e = nullptr;
     for (auto& s : scan_) {
         if (memcmp(s.addr, d.addr.val, 6) == 0) { e = &s; break; }
@@ -207,44 +220,56 @@ void BleClient::note_scan_(const ble_gap_disc_desc& d, const ble_hs_adv_fields& 
         memcpy(e->name, f.name, n);
         e->name[n] = '\0';
     }
-    xSemaphoreGive(scan_mutex_);
 }
 
 std::vector<TeslaScan> BleClient::nearby() const {
     std::vector<TeslaScan> out;
-    if (!scan_mutex_) return out;
     const int64_t now = esp_timer_get_time();
-    if (xSemaphoreTake(scan_mutex_, pdMS_TO_TICKS(50)) != pdTRUE) return out;
-    for (const auto& s : scan_) {
+    std::array<ScanEntry, 12> snapshot{};
+    size_t count = 0;
+    {
+        tk::MutexGuard scan_guard(scan_mutex_, pdMS_TO_TICKS(50));
+        if (!scan_guard) return out;
+        count = std::min(snapshot.size(), scan_.size());
+        std::copy_n(scan_.begin(), count, snapshot.begin());
+    }
+    for (size_t i = 0; i < count; ++i) {
+        const auto& s = snapshot[i];
         if (now - s.last_us > 15LL * 1000 * 1000) continue;  // drop entries older than 15s
         char addr[18];
         snprintf(addr, sizeof(addr), "%02x:%02x:%02x:%02x:%02x:%02x",
                  s.addr[5], s.addr[4], s.addr[3], s.addr[2], s.addr[1], s.addr[0]);
         out.push_back(TeslaScan{addr, s.name, s.rssi, s.connectable});
     }
-    xSemaphoreGive(scan_mutex_);
     std::sort(out.begin(), out.end(),
               [](const TeslaScan& a, const TeslaScan& b) { return a.rssi > b.rssi; });
     return out;
 }
 
 void BleClient::note_connectable_(const ble_addr_t& addr, bool connectable) {
-    if (!scan_mutex_) return;
-    if (xSemaphoreTake(scan_mutex_, 0) != pdTRUE) return;  // never block the host task
+    tk::MutexGuard scan_guard(scan_mutex_, 0);
+    if (!scan_guard) return;  // never block the host task
     // Only updates entries we already know are Teslas (created by note_scan_ on a name match);
     // a nameless primary advert for an unknown address is ignored.
     for (auto& s : scan_) {
         if (memcmp(s.addr, addr.val, 6) == 0) { s.connectable = connectable; break; }
     }
-    xSemaphoreGive(scan_mutex_);
 }
 
 int BleClient::target_connectable() const {
     if (!scan_mutex_ || target_vin_.empty()) return -1;
     const int64_t now = esp_timer_get_time();
     int result = -1;
-    if (xSemaphoreTake(scan_mutex_, pdMS_TO_TICKS(50)) != pdTRUE) return -1;
-    for (const auto& s : scan_) {
+    std::array<ScanEntry, 12> snapshot{};
+    size_t count = 0;
+    {
+        tk::MutexGuard scan_guard(scan_mutex_, pdMS_TO_TICKS(50));
+        if (!scan_guard) return -1;
+        count = std::min(snapshot.size(), scan_.size());
+        std::copy_n(scan_.begin(), count, snapshot.begin());
+    }
+    for (size_t i = 0; i < count; ++i) {
+        const auto& s = snapshot[i];
         // 90 s window: a PAIRED device only scans briefly around each ~30-40 s health probe, so
         // a 15 s freshness would flap to "unknown" between probes; 90 s keeps the at-limit signal
         // stable across the gap. ("at its BLE limit" is a persistent condition, so a slightly
@@ -256,20 +281,18 @@ int BleClient::target_connectable() const {
             break;
         }
     }
-    xSemaphoreGive(scan_mutex_);
     return result;
 }
 
 std::string BleClient::peer_addr_str() const {
-    if (!client_mutex_) return "";
-    xSemaphoreTake(client_mutex_, portMAX_DELAY);
+    tk::MutexGuard client_guard(client_mutex_);
+    if (!client_guard) return "";
     std::string s = peer_addr_str_;
-    xSemaphoreGive(client_mutex_);
     return s;
 }
 
 uint32_t BleClient::connect_fail_recent() const {
-    int64_t last = last_connect_attempt_us_;
+    int64_t last = last_connect_attempt_us_.load();
     if (last == 0) return 0;
     // Stale: no attempt in the last 90 s ⇒ the car is no longer in range / we stopped trying,
     // so this is "out of range", not "failing to connect". 90 s spans the slowest attempt cadence
@@ -277,7 +300,7 @@ uint32_t BleClient::connect_fail_recent() const {
     // up an unpaired one), so the signal stays stable across that gap. Resets the moment a
     // connect succeeds (connect_fail_count_ → 0).
     if (esp_timer_get_time() - last > 90LL * 1000 * 1000) return 0;
-    return connect_fail_count_;
+    return connect_fail_count_.load();
 }
 
 bool BleClient::connected_rssi(int8_t& out) const {
@@ -286,14 +309,14 @@ bool BleClient::connected_rssi(int8_t& out) const {
     // "RSSI unknown" sentinel, so treat it as a failed read.
     int8_t live = 0;
     if (ble_gap_conn_rssi(conn_handle_, &live) == 0 && live != 127) {
-        conn_rssi_       = live;
-        conn_rssi_valid_ = true;
+        conn_rssi_.store(live);
+        conn_rssi_valid_.store(true);
         out = live;
         return true;
     }
     // Live read failed (common while the controller is busy pairing) — fall back to the
     // last-known value (seeded from the connect-time advert) so the UI still shows signal.
-    if (conn_rssi_valid_) { out = conn_rssi_; return true; }
+    if (conn_rssi_valid_.load()) { out = conn_rssi_.load(); return true; }
     return false;
 }
 
@@ -327,7 +350,8 @@ void BleClient::disconnect() {
 
 bool BleClient::write(const std::vector<uint8_t>& data) {
     if (!is_connected() || write_handle_ == 0) return false;
-    if (xSemaphoreTake(write_mutex_, pdMS_TO_TICKS(500)) != pdTRUE) return false;
+    tk::MutexGuard write_guard(write_mutex_, pdMS_TO_TICKS(500));
+    if (!write_guard) return false;
 
     for (size_t offset = 0; offset < data.size(); offset += BLE_CHUNK_SIZE) {
         size_t chunk = std::min(BLE_CHUNK_SIZE, data.size() - offset);
@@ -337,7 +361,6 @@ bool BleClient::write(const std::vector<uint8_t>& data) {
         }
     }
 
-    xSemaphoreGive(write_mutex_);
     return true;
 }
 
@@ -407,10 +430,9 @@ int BleClient::on_gap_event(ble_gap_event* event) {
                  event->disc.addr.val[3], event->disc.addr.val[2],
                  event->disc.addr.val[1], event->disc.addr.val[0]);
         ESP_LOGI(TAG, "Tesla '%s' found: %s — connecting", adv_name.c_str(), addr_str);
-        if (client_mutex_) {
-            xSemaphoreTake(client_mutex_, portMAX_DELAY);
-            peer_addr_str_ = addr_str;
-            xSemaphoreGive(client_mutex_);
+        {
+            tk::MutexGuard client_guard(client_mutex_);
+            if (client_guard) peer_addr_str_ = addr_str;
         }
         // Seed the link RSSI from this advert so the UI has a real value to show from the
         // moment we connect (incl. while pairing), before the first live read succeeds.
@@ -421,14 +443,14 @@ int BleClient::on_gap_event(ble_gap_event* event) {
         want_connect_ = false;
         scanning_     = false;
         ble_gap_disc_cancel();
-        last_connect_attempt_us_ = esp_timer_get_time();   // marks the link as "actively trying"
+        last_connect_attempt_us_.store(esp_timer_get_time());   // marks the link as "actively trying"
         rc = ble_gap_connect(BLE_OWN_ADDR_PUBLIC,
                              &event->disc.addr,
                              10000, nullptr,
                              gap_event_cb, this);
         if (rc != 0) {
             ESP_LOGE(TAG, "connect failed: %d", rc);
-            connect_fail_count_++;
+            connect_fail_count_.fetch_add(1);
             connecting_ = false;
             ensure_scanning_();
         }
@@ -439,7 +461,7 @@ int BleClient::on_gap_event(ble_gap_event* event) {
         connecting_ = false;
         if (event->connect.status != 0) {
             ESP_LOGE(TAG, "connect error: %d", event->connect.status);
-            connect_fail_count_++;   // advert was heard but the link never came up
+            connect_fail_count_.fetch_add(1);   // advert was heard but the link never came up
             if (on_connected_) on_connected_(false);
             // Keep the intent so an in-flight command retries within its timeout
             // window; ensure_connected_() clears it via stop_connecting() on timeout.
@@ -449,7 +471,7 @@ int BleClient::on_gap_event(ble_gap_event* event) {
         }
         conn_handle_  = event->connect.conn_handle;
         want_connect_ = false;
-        connect_fail_count_ = 0;   // link is up — clear the "can't connect" signal
+        connect_fail_count_.store(0);   // link is up — clear the "can't connect" signal
         ESP_LOGI(TAG, "connected, handle=%d", conn_handle_);
 
         // Reset discovery state for this fresh connection.
@@ -480,10 +502,9 @@ int BleClient::on_gap_event(ble_gap_event* event) {
         want_connect_      = false;
         scanning_          = false;
         conn_rssi_valid_   = false;   // stale once the link is gone
-        if (client_mutex_) {
-            xSemaphoreTake(client_mutex_, portMAX_DELAY);
-            peer_addr_str_.clear();
-            xSemaphoreGive(client_mutex_);
+        {
+            tk::MutexGuard client_guard(client_mutex_);
+            if (client_guard) peer_addr_str_.clear();
         }
         if (on_connected_) on_connected_(false);
         // Stay idle (no auto-scan); discovery is manual, connect is on demand.
