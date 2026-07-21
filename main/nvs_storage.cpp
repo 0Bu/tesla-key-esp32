@@ -51,6 +51,34 @@ bool NvsStorageAdapter::load(const std::string& key, std::vector<uint8_t>& buffe
     return true;
 }
 
+bool NvsStorageAdapter::blob_exists(const char* key) const {
+    if (!initialized_ || !key) return false;
+
+    // Mirror map_key() without constructing a std::string: this path runs from the 20 Hz
+    // vehicle loop, precisely where recurring heap traffic is harmful. Unknown long keys
+    // keep the adapter's documented last-resort truncation behaviour in a stack buffer.
+    const char* nvskey = key;
+    char mapped[16]{};
+    if (strcmp(key, "session_infotainment") == 0) {
+        nvskey = "sess_info";
+    } else if (strcmp(key, "session_vcsec") == 0) {
+        nvskey = "sess_vcsec";
+    } else if (strlen(key) > 15) {
+        memcpy(mapped, key, 15);
+        mapped[15] = '\0';
+        nvskey = mapped;
+    }
+
+    size_t len = 0;
+    esp_err_t err = nvs_get_blob(handle_, nvskey, nullptr, &len);
+    if (err == ESP_ERR_NVS_NOT_FOUND || len == 0) return false;
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "exists probe failed '%s': %s", nvskey, esp_err_to_name(err));
+        return false;
+    }
+    return true;
+}
+
 bool NvsStorageAdapter::save(const std::string& key, const std::vector<uint8_t>& buffer) {
     if (!initialized_) return false;
     std::string nvskey = map_key(key);
@@ -59,7 +87,11 @@ bool NvsStorageAdapter::save(const std::string& key, const std::vector<uint8_t>&
         ESP_LOGE(TAG, "save failed '%s': %s", nvskey.c_str(), esp_err_to_name(err));
         return false;
     }
-    nvs_commit(handle_);
+    err = nvs_commit(handle_);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "commit failed after save '%s': %s", nvskey.c_str(), esp_err_to_name(err));
+        return false;
+    }
     return true;
 }
 
@@ -71,7 +103,11 @@ bool NvsStorageAdapter::remove(const std::string& key) {
         ESP_LOGE(TAG, "remove failed '%s': %s", nvskey.c_str(), esp_err_to_name(err));
         return false;
     }
-    nvs_commit(handle_);
+    err = nvs_commit(handle_);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "commit failed after remove '%s': %s", nvskey.c_str(), esp_err_to_name(err));
+        return false;
+    }
     return true;
 }
 
@@ -106,6 +142,10 @@ bool NvsStorageAdapter::save_str(const char* key, const std::string& value) {
         ESP_LOGE(TAG, "save_str failed '%s': %s", nvskey.c_str(), esp_err_to_name(err));
         return false;
     }
-    nvs_commit(handle_);
+    err = nvs_commit(handle_);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "commit failed after save_str '%s': %s", nvskey.c_str(), esp_err_to_name(err));
+        return false;
+    }
     return true;
 }

@@ -17,6 +17,7 @@
 // frame; a read that failed) are exactly the ones a browser never produces and a test can.
 #include "http_handlers.hpp"
 #include "logic/ws_policy.hpp"
+#include "rtos_guard.hpp"
 #include "task_config.hpp"
 #include <esp_log.h>
 #include <freertos/FreeRTOS.h>
@@ -25,6 +26,7 @@
 #include <cstring>
 #include <cstdlib>      // free() — matches cJSON_PrintUnformatted's allocator (see http_common.cpp)
 #include <new>          // std::nothrow, std::bad_alloc
+#include <memory>
 #include <string>
 
 static const char* TAG = "http_events";
@@ -46,11 +48,24 @@ static int s_ws_fds[WS_MAX_CLIENTS] = { -1, -1, -1, -1, -1, -1, -1, -1 };
 // subscriber from queueing the heap away (logic/ws_policy.hpp carries the full incident note).
 static tk::WsClientSend s_ws_send[WS_MAX_CLIENTS] = {};
 static httpd_handle_t s_server = nullptr;
+static TaskHandle_t s_ws_task = nullptr;
+
+struct CJsonDeleter {
+    void operator()(cJSON* value) const noexcept { cJSON_Delete(value); }
+};
+
+struct CJsonStringDeleter {
+    void operator()(char* value) const noexcept { free(value); }
+};
+
+using CJsonPtr = std::unique_ptr<cJSON, CJsonDeleter>;
+using CJsonStringPtr = std::unique_ptr<char, CJsonStringDeleter>;
 
 // Add fd to the broadcast list (idempotent). false only when all slots are taken.
 static bool ws_register_client(int fd) {
     if (!s_ws_mtx) return false;
-    xSemaphoreTake(s_ws_mtx, portMAX_DELAY);
+    tk::MutexGuard lock(s_ws_mtx);
+    if (!lock) return false;
     bool registered = false;
     for (int i = 0; i < WS_MAX_CLIENTS; i++)
         if (s_ws_fds[i] == fd) { registered = true; break; }
@@ -62,16 +77,15 @@ static bool ws_register_client(int fd) {
                 registered = true;
                 break;
             }
-    xSemaphoreGive(s_ws_mtx);
     return registered;
 }
 
 void http_events_on_close(int sockfd) {
     if (!s_ws_mtx) return;
-    xSemaphoreTake(s_ws_mtx, portMAX_DELAY);
+    tk::MutexGuard lock(s_ws_mtx);
+    if (!lock) return;
     for (int i = 0; i < WS_MAX_CLIENTS; i++)
         if (s_ws_fds[i] == sockfd) { s_ws_fds[i] = -1; s_ws_send[i] = {}; break; }
-    xSemaphoreGive(s_ws_mtx);
 }
 
 // Claim an in-flight slot for fd. False when the client is at WS_MAX_INFLIGHT — it is not draining,
@@ -79,13 +93,13 @@ void http_events_on_close(int sockfd) {
 static bool ws_reserve_inflight(int fd) {
     if (!s_ws_mtx) return false;
     bool ok = false;
-    xSemaphoreTake(s_ws_mtx, portMAX_DELAY);
+    tk::MutexGuard lock(s_ws_mtx);
+    if (!lock) return false;
     for (int i = 0; i < WS_MAX_CLIENTS; i++)
         if (s_ws_fds[i] == fd) {
             if (tk::ws_may_send(s_ws_send[i])) { tk::ws_note_queued(s_ws_send[i]); ok = true; }
             break;
         }
-    xSemaphoreGive(s_ws_mtx);
     return ok;
 }
 
@@ -95,10 +109,10 @@ static bool ws_reserve_inflight(int fd) {
 static bool ws_release_inflight(int fd, bool sent_ok) {
     if (!s_ws_mtx) return false;
     bool evict = false;
-    xSemaphoreTake(s_ws_mtx, portMAX_DELAY);
+    tk::MutexGuard lock(s_ws_mtx);
+    if (!lock) return false;
     for (int i = 0; i < WS_MAX_CLIENTS; i++)
         if (s_ws_fds[i] == fd) { evict = tk::ws_note_completed(s_ws_send[i], sent_ok); break; }
-    xSemaphoreGive(s_ws_mtx);
     return evict;
 }
 
@@ -107,19 +121,19 @@ static bool ws_release_inflight(int fd, bool sent_ok) {
 // would clear the client's failure streak — see ws_note_cancelled().
 static void ws_cancel_inflight(int fd) {
     if (!s_ws_mtx) return;
-    xSemaphoreTake(s_ws_mtx, portMAX_DELAY);
+    tk::MutexGuard lock(s_ws_mtx);
+    if (!lock) return;
     for (int i = 0; i < WS_MAX_CLIENTS; i++)
         if (s_ws_fds[i] == fd) { tk::ws_note_cancelled(s_ws_send[i]); break; }
-    xSemaphoreGive(s_ws_mtx);
 }
 
 static bool ws_any_clients() {
     if (!s_ws_mtx) return false;
     bool any = false;
-    xSemaphoreTake(s_ws_mtx, portMAX_DELAY);
+    tk::MutexGuard lock(s_ws_mtx);
+    if (!lock) return false;
     for (int i = 0; i < WS_MAX_CLIENTS; i++)
         if (s_ws_fds[i] != -1) { any = true; break; }
-    xSemaphoreGive(s_ws_mtx);
     return any;
 }
 
@@ -164,10 +178,12 @@ static void ws_send_to_all(const char* data, size_t len) {
     if (!s_server || !s_ws_mtx) return;
     int fds[WS_MAX_CLIENTS];
     int n = 0;
-    xSemaphoreTake(s_ws_mtx, portMAX_DELAY);
-    for (int i = 0; i < WS_MAX_CLIENTS; i++)
-        if (s_ws_fds[i] != -1) fds[n++] = s_ws_fds[i];
-    xSemaphoreGive(s_ws_mtx);
+    {
+        tk::MutexGuard lock(s_ws_mtx);
+        if (!lock) return;
+        for (int i = 0; i < WS_MAX_CLIENTS; i++)
+            if (s_ws_fds[i] != -1) fds[n++] = s_ws_fds[i];
+    }
 
     for (int i = 0; i < n; i++) {
         // Backpressure FIRST, before any allocation: a client still sitting on WS_MAX_INFLIGHT
@@ -212,24 +228,27 @@ static void ws_send_to_all(const char* data, size_t len) {
 // keeps the task (and the device) alive.
 static void ws_broadcast_status() {
     if (!s_server || !s_ws_mtx || !ws_any_clients()) return;
-    char* json = nullptr;
     try {
-        cJSON* root = build_status_object();
+        CJsonPtr root(build_status_object());
         if (!root) return;
-        json = cJSON_PrintUnformatted(root);   // NULL (not a throw) on a fragmented heap
-        cJSON_Delete(root);
+        CJsonStringPtr json(cJSON_PrintUnformatted(root.get()));
+        if (!json) return;   // NULL (not a throw) on a fragmented heap
+        ws_send_to_all(json.get(), strlen(json.get()));
     } catch (...) {
         return;
     }
-    if (!json) return;
-    ws_send_to_all(json, strlen(json));
-    free(json);
 }
 
 static void ws_broadcast_task(void*) {
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(WS_BROADCAST_INTERVAL_MS));
-        ws_broadcast_status();
+        try {
+            ws_broadcast_status();
+        } catch (const std::exception& e) {
+            ESP_LOGE(TAG, "broadcast tick threw (%s); dropping frame", e.what());
+        } catch (...) {
+            ESP_LOGE(TAG, "broadcast tick threw (unknown); dropping frame");
+        }
     }
 }
 
@@ -279,18 +298,16 @@ static esp_err_t h_ws_events(httpd_req_t* req) {
     // (not under handle_all), so guard the build here too — an OOM drops the snapshot (the periodic
     // push catches up) instead of unwinding through httpd's C dispatch → std::terminate → reboot.
     try {
-        cJSON* root = build_status_object();
+        CJsonPtr root(build_status_object());
         if (root) {
-            char* json = cJSON_PrintUnformatted(root);
-            cJSON_Delete(root);
+            CJsonStringPtr json(cJSON_PrintUnformatted(root.get()));
             if (json) {
                 httpd_ws_frame_t f = {};
-                f.payload = reinterpret_cast<uint8_t*>(json);
-                f.len     = strlen(json);
+                f.payload = reinterpret_cast<uint8_t*>(json.get());
+                f.len     = strlen(json.get());
                 f.type    = HTTPD_WS_TYPE_TEXT;
                 f.final   = true;
                 httpd_ws_send_frame(req, &f);
-                free(json);
             }
         }
     } catch (...) {
@@ -299,9 +316,14 @@ static esp_err_t h_ws_events(httpd_req_t* req) {
     return ESP_OK;
 }
 
-void http_events_register(httpd_handle_t server) {
+bool http_events_register(httpd_handle_t server) {
     s_server = server;
     if (!s_ws_mtx) s_ws_mtx = xSemaphoreCreateMutex();
+    if (!s_ws_mtx) {
+        ESP_LOGE(TAG, "failed to allocate WebSocket registry mutex");
+        s_server = nullptr;
+        return false;
+    }
 
     // Registered BEFORE the /* wildcard handlers (see http_server_start) so a GET /events matches
     // this WS route, not the catch-all — esp_http_server checks handlers in registration order.
@@ -311,14 +333,45 @@ void http_events_register(httpd_handle_t server) {
     ws.handler      = h_ws_events;
     ws.user_ctx     = nullptr;
     ws.is_websocket = true;
-    httpd_register_uri_handler(server, &ws);
+    if (httpd_register_uri_handler(server, &ws) != ESP_OK) {
+        ESP_LOGE(TAG, "failed to register /events WebSocket handler");
+        vSemaphoreDelete(s_ws_mtx);
+        s_ws_mtx = nullptr;
+        s_server = nullptr;
+        return false;
+    }
 
     // Background pusher. Priority below httpd's (5) — it's a best-effort UI feed, never ahead of
     // serving requests. Stack: build_status_object() + cJSON_PrintUnformatted are heap-backed and
     // light on stack, but this is the SAME build the httpd task runs on 8192, and an overflow in
     // this net-less task would abort() (defeating car sleep) — so 6144 keeps a real margin over the
     // measured-elsewhere path rather than halving it, without paying the full 8192 on a tight heap.
-    xTaskCreate(ws_broadcast_task, "ws_bcast", 6144, nullptr, tk::kPrioWsBroadcast, nullptr);
+    if (xTaskCreate(ws_broadcast_task, "ws_bcast", 6144, nullptr, tk::kPrioWsBroadcast,
+                    &s_ws_task) != pdPASS) {
+        ESP_LOGE(TAG, "failed to create WebSocket broadcast task");
+        httpd_unregister_uri_handler(server, "/events", HTTP_GET);
+        vSemaphoreDelete(s_ws_mtx);
+        s_ws_mtx = nullptr;
+        s_server = nullptr;
+        return false;
+    }
     ESP_LOGI(TAG, "/events WebSocket registered; pushing /status every %u ms",
              static_cast<unsigned>(WS_BROADCAST_INTERVAL_MS));
+    return true;
+}
+
+void http_events_stop() {
+    s_server = nullptr;
+    if (s_ws_task) {
+        vTaskDelete(s_ws_task);
+        s_ws_task = nullptr;
+    }
+    if (s_ws_mtx) {
+        vSemaphoreDelete(s_ws_mtx);
+        s_ws_mtx = nullptr;
+    }
+    for (int i = 0; i < WS_MAX_CLIENTS; ++i) {
+        s_ws_fds[i] = -1;
+        s_ws_send[i] = {};
+    }
 }

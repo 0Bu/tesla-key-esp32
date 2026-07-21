@@ -2,6 +2,8 @@
 #include "syslog.hpp"
 #include "nvs_storage.hpp"
 #include "logic/syslog_policy.hpp"
+#include "rtos_guard.hpp"
+#include "task_config.hpp"
 #include "lwip/sockets.h"
 #include "lwip/netdb.h"
 #include "ping/ping_sock.h"
@@ -15,6 +17,7 @@
 #include <esp_log.h>
 #include <cstring>
 #include <cstdio>
+#include <exception>
 #include <string_view>
 
 static const char* TAG = "syslog";
@@ -49,12 +52,11 @@ struct PingCtl { SemaphoreHandle_t done; uint32_t received; };
 static PingCtl s_ping = { nullptr, 0 };
 
 static void set_status(bool resolved, bool reachable, const std::string& error) {
-    if (s_status_mtx && xSemaphoreTake(s_status_mtx, portMAX_DELAY) == pdTRUE) {
-        s_status.resolved  = resolved;
-        s_status.reachable = reachable;
-        s_status.error     = error;
-        xSemaphoreGive(s_status_mtx);
-    }
+    tk::MutexGuard lock(s_status_mtx);
+    if (!lock) return;
+    s_status.resolved  = resolved;
+    s_status.reachable = reachable;
+    s_status.error     = error;
 }
 
 SyslogStatus syslog_status() {
@@ -64,11 +66,11 @@ SyslogStatus syslog_status() {
     copy.port        = s_cfg_port;
     copy.resolved    = false;
     copy.reachable   = false;
-    if (s_status_mtx && xSemaphoreTake(s_status_mtx, portMAX_DELAY) == pdTRUE) {
+    tk::MutexGuard lock(s_status_mtx);
+    if (lock) {
         copy.resolved  = s_status.resolved;
         copy.reachable = s_status.reachable;
         copy.error     = s_status.error;
-        xSemaphoreGive(s_status_mtx);
     }
     return copy;
 }
@@ -226,7 +228,7 @@ static void handle_send_failure(int err, const char* what, bool& resolved, bool&
     }
 }
 
-static void syslog_task(void*) {
+static void syslog_task_impl() {
     struct sockaddr_in dest_addr{};
     bool resolved     = false;   // DNS resolved -> dest_addr valid -> forwarding lines
     bool reachable    = false;   // advisory probe result (see syslog_ping_host)
@@ -319,7 +321,36 @@ static void syslog_task(void*) {
     }
 }
 
-void syslog_start(NvsStorageAdapter& config_store) {
+static void syslog_task(void*) {
+    for (;;) {
+        try {
+            syslog_task_impl();
+        } catch (const std::exception& e) {
+            ESP_LOGE(TAG, "forwarder task threw (%s); restarting task state", e.what());
+        } catch (...) {
+            ESP_LOGE(TAG, "forwarder task threw (unknown); restarting task state");
+        }
+        vTaskDelay(pdMS_TO_TICKS(5000));
+    }
+}
+
+static void syslog_cleanup_start_failure() noexcept {
+    if (s_queue) {
+        vQueueDelete(s_queue);
+        s_queue = nullptr;
+    }
+    if (s_ping.done) {
+        vSemaphoreDelete(s_ping.done);
+        s_ping.done = nullptr;
+    }
+    if (s_status_mtx) {
+        vSemaphoreDelete(s_status_mtx);
+        s_status_mtx = nullptr;
+    }
+    s_configured = false;
+}
+
+static bool syslog_start_impl(NvsStorageAdapter& config_store) {
     std::string uri = CONFIG_TESLA_SYSLOG_SERVER;
     config_store.load_str("syslog_uri", uri);
     // Trim surrounding whitespace (mirrors mqtt_ha_start's broker trim).
@@ -335,20 +366,43 @@ void syslog_start(NvsStorageAdapter& config_store) {
 
     if (!s_configured) {
         ESP_LOGI(TAG, "disabled (no server configured)");
-        return;
+        return true;
     }
     ESP_LOGI(TAG, "target set to %s:%d", s_cfg_host.c_str(), s_cfg_port);
 
     s_status_mtx = xSemaphoreCreateMutex();
     s_ping.done  = xSemaphoreCreateBinary();
     s_queue      = xQueueCreate(kQueueDepth, sizeof(SyslogMsg));
-    if (!s_queue) return;
+    if (!s_status_mtx || !s_ping.done || !s_queue) {
+        ESP_LOGE(TAG, "failed to allocate Syslog mutex, ping semaphore, or queue");
+        syslog_cleanup_start_failure();
+        return false;
+    }
 
     // 6144: this task runs getaddrinfo() + raw socket()/sendto() directly on its own
     // stack (unlike esp-mqtt, whose socket work lives in an internal task). 4096 is
     // too thin for that call chain — mirrors syslog.cpp in the sibling
     // daikin-altherma-esp32 project, where this was measured.
-    xTaskCreate(syslog_task, "syslog_task", 6144, nullptr, 3, nullptr);
+    if (xTaskCreate(syslog_task, "syslog_task", 6144, nullptr, tk::kPrioSyslog,
+                    nullptr) != pdPASS) {
+        ESP_LOGE(TAG, "failed to create Syslog forwarder task");
+        syslog_cleanup_start_failure();
+        return false;
+    }
+    return true;
+}
+
+bool syslog_start(NvsStorageAdapter& config_store) {
+    try {
+        return syslog_start_impl(config_store);
+    } catch (const std::exception& e) {
+        syslog_cleanup_start_failure();
+        ESP_LOGE(TAG, "Syslog initialization threw (%s); forwarding disabled", e.what());
+    } catch (...) {
+        syslog_cleanup_start_failure();
+        ESP_LOGE(TAG, "Syslog initialization threw (unknown); forwarding disabled");
+    }
+    return false;
 }
 
 void syslog_send(const char* msg, size_t len) {

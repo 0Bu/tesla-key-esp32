@@ -108,6 +108,8 @@ http_api.cpp           → evcc routes (/api/1/…, /api/proxy/1/version); comma
                          tools), execution via command_exec.cpp
 command_exec.cpp       → the ONE CmdKind → VehicleController dispatch both command
                          surfaces (/api and /mcp) execute through
+rtos_guard.hpp         → shared exception-safe FreeRTOS mutex/semaphore RAII guard; finite waits
+                         for callback paths that must never block
 http_status.cpp        → web UI (/), /status, /diag, /scan; the /status field contract
                          is decided in logic/status_model.hpp (host-tested, golden-pinned)
                          — build_status_object() only gathers inputs + serializes via cJSON.
@@ -339,10 +341,12 @@ and never connects/enrols. **Full detail: [`docs/ARCHITECTURE.md`](../docs/ARCHI
   free heap.** Steady-state it is only a few tens of KB (WiFi + NimBLE + MQTT dominate; see
   the boot heap-attribution log in `main.cpp`). C++ exceptions are enabled, but an *uncaught*
   `std::bad_alloc` (or any throw) unwinds through C frames → `std::terminate` → `abort()` →
-  reboot. So: keep HTTP handlers under the `handle_all` try/catch (returns 503 on OOM), never
-  build a whole buffer into one big `std::string` (`/diag` streams instead), and treat any new
-  large *contiguous* allocation (big JSON, TLS for OTA) as a crash risk to size-check. A reboot
-  loop is doubly bad: each boot re-opens the polling window, so a parked car never sleeps.
+  reboot. So: keep HTTP handlers under the `handle_all` try/catch (returns 503 on OOM), keep
+  every other throwing FreeRTOS task/C callback behind its local final boundary, and use
+  `tk::MutexGuard` for FreeRTOS locks in throwing scopes. Never build a whole buffer into one big
+  `std::string` (`/diag` streams instead), and treat any new large *contiguous* allocation (big
+  JSON, TLS for OTA) as a crash risk to size-check. A reboot loop is doubly bad: each boot
+  re-opens the polling window, so a parked car never sleeps.
 
 ## Typical Debugging
 

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <adapters.h>
+#include <atomic>
 #include <functional>
 #include <vector>
 #include <string>
@@ -96,8 +97,8 @@ public:
     // real link-drop does). Lets the web UI show real bars + dBm in the "can't connect" state
     // instead of empty bars. false if nothing seen / the link genuinely dropped.
     bool last_advert_rssi(int8_t& out) const {
-        if (!conn_rssi_valid_) return false;
-        out = conn_rssi_;
+        if (!conn_rssi_valid_.load()) return false;
+        out = conn_rssi_.load();
         return true;
     }
     // Snapshot of nearby Tesla vehicles seen while scanning (recent only).
@@ -151,15 +152,15 @@ private:
     std::vector<ScanEntry> scan_;
     SemaphoreHandle_t      scan_mutex_{nullptr};
     esp_timer_handle_t     scan_timer_{nullptr};
-    volatile bool          want_connect_{false};
-    volatile bool          connecting_{false};
-    volatile bool          scanning_{false};
+    std::atomic<bool>       want_connect_{false};
+    std::atomic<bool>       connecting_{false};
+    std::atomic<bool>       scanning_{false};
     // True only after the NimBLE host has signalled sync (on_sync). Until then ANY
     // ble_gap_* call hits an uninitialised host — a benign error on ESP-IDF 5.4 but a
     // null-deref crash (LoadProhibited) on 5.5. ble_client.start() runs only after WiFi
     // association (~4 s), which can lose the race with auto_pair's fixed 4 s warm-up, so
     // gate the scan on the real host state rather than on timing.
-    volatile bool          host_synced_{false};
+    std::atomic<bool>       host_synced_{false};
 
     ConnectedCb on_connected_;
     RxDataCb    on_rx_data_;
@@ -168,8 +169,8 @@ private:
     // Connect-failure tracking for the target car (see connect_fail_recent()). Stamped on
     // every connect attempt; the count climbs on each GAP connect error and resets on a
     // successful link. Both are touched only from the NimBLE host task / status reader.
-    volatile uint32_t connect_fail_count_{0};
-    volatile int64_t  last_connect_attempt_us_{0};
+    std::atomic<uint32_t> connect_fail_count_{0};
+    std::atomic<int64_t>  last_connect_attempt_us_{0};
     uint16_t write_handle_{0};
     uint16_t notify_handle_{0};
     uint16_t notify_val_handle_{0};
@@ -180,8 +181,8 @@ private:
     // transiently (e.g. while the controller is busy pairing), so this fallback keeps the
     // web UI showing real signal strength during pairing instead of nothing. mutable: the
     // refresh happens inside the const connected_rssi() accessor.
-    mutable int8_t conn_rssi_{0};
-    mutable bool   conn_rssi_valid_{false};
+    mutable std::atomic<int8_t> conn_rssi_{0};
+    mutable std::atomic<bool>   conn_rssi_valid_{false};
 
     uint16_t svc_start_handle_{0};
     uint16_t svc_end_handle_{0};

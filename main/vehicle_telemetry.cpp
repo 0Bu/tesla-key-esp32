@@ -12,6 +12,7 @@
 #include <esp_log.h>
 #include <esp_heap_caps.h>
 #include <esp_system.h>
+#include <exception>
 
 // protobuf generated headers (from tesla-ble)
 #include <vcsec.pb.h>
@@ -302,6 +303,22 @@ void VehicleController::install_state_callbacks_() {
 
 void VehicleController::loop_task_fn_(void* arg) {
     auto* self = static_cast<VehicleController*>(arg);
+    while (true) {
+        try {
+            loop_task_impl_(arg);
+        } catch (const std::exception& e) {
+            ESP_LOGE(TAG, "vehicle task escaped an exception (%s) — restarting task loop", e.what());
+            self->ble_fault_.store(true);
+        } catch (...) {
+            ESP_LOGE(TAG, "vehicle task escaped an unknown exception — restarting task loop");
+            self->ble_fault_.store(true);
+        }
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+}
+
+void VehicleController::loop_task_impl_(void* arg) {
+    auto* self = static_cast<VehicleController*>(arg);
     uint32_t last_poll_ticks    = 0;
     uint32_t last_connect_ticks = 0;
     uint32_t last_tele_ticks    = 0;
@@ -309,20 +326,21 @@ void VehicleController::loop_task_fn_(void* arg) {
     bool     prev_window        = false;  // edge-detect the active window
     auto     prev_sleep         = TeslaBLE::SleepState::UNKNOWN;  // edge-detect VCSEC sleep flag
     while (true) {
-        xSemaphoreTake(self->vehicle_mutex_, portMAX_DELAY);
-        // loop() pumps the command/wake state machine and processes inbound messages, so it
-        // can throw on corrupt RX the same way on_rx_data does. Same containment: catch here,
-        // flag a link reset below.
-        try {
-            self->vehicle_->loop();
-        } catch (const std::exception& e) {
-            ESP_LOGE(TAG, "vehicle loop() threw (%s) — resetting BLE link", e.what());
-            self->ble_fault_.store(true);
-        } catch (...) {
-            ESP_LOGE(TAG, "vehicle loop() threw (unknown) — resetting BLE link");
-            self->ble_fault_.store(true);
+        {
+            tk::MutexGuard vehicle_guard(self->vehicle_mutex_);
+            // loop() pumps the command/wake state machine and processes inbound messages, so it
+            // can throw on corrupt RX the same way on_rx_data does. Same containment: catch here,
+            // flag a link reset below.
+            try {
+                self->vehicle_->loop();
+            } catch (const std::exception& e) {
+                ESP_LOGE(TAG, "vehicle loop() threw (%s) — resetting BLE link", e.what());
+                self->ble_fault_.store(true);
+            } catch (...) {
+                ESP_LOGE(TAG, "vehicle loop() threw (unknown) — resetting BLE link");
+                self->ble_fault_.store(true);
+            }
         }
-        xSemaphoreGive(self->vehicle_mutex_);
 
         // A parse fault flagged from loop() or the BLE rx callback: drop the link once,
         // outside the vehicle mutex. Disconnect drives set_connected(false), which clears the
@@ -535,9 +553,8 @@ void VehicleController::loop_task_fn_(void* arg) {
             // vehicle_->loop(), which drives the command's transmission/retries. The
             // persistent charge-state callback updates last_known_charge_ when the
             // response arrives. NO_WAKE_SKIP so a sleeping car is left undisturbed.
-            xSemaphoreTake(self->vehicle_mutex_, portMAX_DELAY);
+            tk::MutexGuard vehicle_guard(self->vehicle_mutex_);
             self->vehicle_->charge_state_poll(TeslaBLE::WakePolicy::NO_WAKE_SKIP);
-            xSemaphoreGive(self->vehicle_mutex_);
         }
 
         // Background telemetry refresh (paired + window + connected): one domain per cycle,
@@ -552,14 +569,13 @@ void VehicleController::loop_task_fn_(void* arg) {
         if (paired && window && self->ble_connected() && !self->cmd_in_flight_.load()
             && (now_ticks - last_tele_ticks > pdMS_TO_TICKS(30000))) {
             last_tele_ticks = now_ticks;
-            xSemaphoreTake(self->vehicle_mutex_, portMAX_DELAY);
+            tk::MutexGuard vehicle_guard(self->vehicle_mutex_);
             switch (tele_idx % 4) {
                 case 0: self->vehicle_->climate_state_poll(TeslaBLE::WakePolicy::NO_WAKE_SKIP);  break;
                 case 1: self->vehicle_->drive_state_poll(TeslaBLE::WakePolicy::NO_WAKE_SKIP);    break;
                 case 2: self->vehicle_->tire_pressure_poll(TeslaBLE::WakePolicy::NO_WAKE_SKIP);  break;
                 case 3: self->vehicle_->closures_state_poll(TeslaBLE::WakePolicy::NO_WAKE_SKIP); break;
             }
-            xSemaphoreGive(self->vehicle_mutex_);
             tele_idx++;
         }
 
@@ -620,14 +636,16 @@ bool VehicleController::get_vehicle_status(VehicleStatusResult& out, int timeout
         xSemaphoreGive(cmd_sem_);
     });
 
-    xSemaphoreTake(vehicle_mutex_, portMAX_DELAY);
-    vehicle_->vcsec_poll();
-    xSemaphoreGive(vehicle_mutex_);
+    {
+        tk::MutexGuard vehicle_guard(vehicle_mutex_);
+        vehicle_->vcsec_poll();
+    }
 
     bool ok = xSemaphoreTake(cmd_sem_, pdMS_TO_TICKS(timeout_ms)) == pdTRUE;
-    xSemaphoreTake(vehicle_mutex_, portMAX_DELAY);
-    vehicle_->set_vehicle_status_callback(nullptr);
-    xSemaphoreGive(vehicle_mutex_);
+    {
+        tk::MutexGuard vehicle_guard(vehicle_mutex_);
+        vehicle_->set_vehicle_status_callback(nullptr);
+    }
     out = pending_status_;
     if (ok && out.valid) {
         note_reachable_();  // car answered a VCSEC status read ⇒ reachable over BLE right now

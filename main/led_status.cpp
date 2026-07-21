@@ -6,6 +6,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <exception>
 
 #include "driver/gpio.h"
 #include "esp_log.h"
@@ -111,7 +112,7 @@ float anim_factor(tk::LedAnim a, float t) {
     return 1.0f;
 }
 
-void led_task(void* arg) {
+void led_task_impl(void* arg) {
     auto& v = *static_cast<VehicleController*>(arg);
 
     gpio_config_t io = {};
@@ -160,6 +161,19 @@ void led_task(void* arg) {
         apa_show((uint8_t)(r * f), (uint8_t)(g * f), (uint8_t)(b * f));
 
         vTaskDelay(pdMS_TO_TICKS(kFrameMs));
+    }
+}
+
+void led_task(void* arg) {
+    for (;;) {
+        try {
+            led_task_impl(arg);
+        } catch (const std::exception& e) {
+            ESP_LOGE(TAG, "LED task threw (%s); restarting indicator state", e.what());
+        } catch (...) {
+            ESP_LOGE(TAG, "LED task threw (unknown); restarting indicator state");
+        }
+        vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }
 

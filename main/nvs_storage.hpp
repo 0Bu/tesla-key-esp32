@@ -16,6 +16,11 @@ public:
     bool save(const std::string& key, const std::vector<uint8_t>& buffer) override;
     bool remove(const std::string& key) override;
 
+    // Allocation-free blob existence probe. Intended for hot boolean checks such as
+    // VehicleController::has_session(); it asks NVS only for the stored length and never
+    // materialises the blob in a std::vector.
+    bool blob_exists(const char* key) const;
+
     // Config helpers (plain string values)
     bool load_str(const char* key, std::string& out);
     bool save_str(const char* key, const std::string& value);

@@ -77,6 +77,7 @@ links yourself — that's where the value is.
 | Boot / wiring | `main/main.cpp` | WiFi, NVS, SNTP, mDNS, starts every component; boot heap log; OTA mark-valid |
 | Target identity | `main/platform.hpp` | `TK_PLATFORM` string per `CONFIG_IDF_TARGET_*`; must agree with `/api/proxy/1/version`, the HA device model, and esp-web-tools `chipFamily` |
 | Task priorities | `main/task_config.hpp` | `tk::kPrio*` — the ONE named-constant table every `xTaskCreate` site takes its priority from; must agree with the task inventory in `docs/ARCHITECTURE.md` ("Concurrency") |
+| RTOS ownership | `main/rtos_guard.hpp` | shared, exception-safe `tk::MutexGuard` for FreeRTOS mutex/semaphore ownership; finite waits for callbacks that must not block |
 | BLE GATT client | `main/ble_client.{cpp,hpp}` | NimBLE central; scans Tesla UUID; RX notify → `on_rx_data` (runs on the **NimBLE host task**) |
 | Vehicle control | `main/vehicle_ctrl.{cpp,hpp}` + `vehicle_commands.cpp` + `vehicle_telemetry.cpp` + `vehicle_pairing.cpp` (+ `vehicle_ctrl_internal.hpp`) | one `VehicleController`, split by concern: core wiring/`link_state()` glue; command API; **loop_task** (active-window polling + sleep gating) + caches; pairing lifecycle/keys |
 | HTTP API | `main/http_server.{cpp,hpp}` + `http_api.cpp` + `http_status.cpp` + `http_events.cpp` + `http_ota.cpp` + `http_config.cpp` + `http_common.cpp` + `mcp_server.cpp` + `command_exec.cpp` (+ `http_handlers.hpp`) | `esp_http_server` on :80; single catch-all `handle_all` dispatch (wrapped in try/catch) in `http_server.cpp`; handlers split by route group; `http_events.cpp` serves the `/events` WebSocket live-status push (registered **raw**/`is_websocket`, OUTSIDE `handle_all` — self-guards); `mcp_server.cpp` serves `/mcp` (stateless JSON-RPC 2.0 MCP server for AI agents — guide in `docs/MCP.md`); both command surfaces resolve names/args via `logic/command_registry.hpp` and execute through `command_exec.cpp`; `/status` shaping decided in `logic/status_model.hpp` (build_status_object() feeds both GET /status and the /events push) |
@@ -136,12 +137,13 @@ Treat a violation of any of these as a real finding.
   Steady-state it is only tens of KB (NimBLE + WiFi + MQTT dominate; see the boot
   heap-attribution log in `main.cpp`). Any single allocation larger than that throws.
 - **C++ exceptions are enabled** (`CONFIG_COMPILER_CXX_EXCEPTIONS=y`), but an **uncaught**
-  throw that unwinds into C frames (NimBLE host task, the C httpd loop) → `std::terminate` →
-  `abort()` → reboot. So: HTTP handlers run under the `handle_all` try/catch (→ 503 on OOM);
-  library calls that parse BLE RX (`on_rx_data`, `loop()`) are wrapped; **flag any new large
-  allocation** (`std::string` of a whole buffer, TLS for OTA, big JSON) that isn't guarded or
-  could exceed the largest block. `/diag` must **stream** (`httpd_resp_send_chunk`), never
-  build the whole log into one `std::string`.
+  throw that unwinds into C frames (FreeRTOS task entry, NimBLE/MQTT/SNTP callback, the C httpd
+  loop) → `std::terminate` → `abort()` → reboot. HTTP handlers run under the `handle_all`
+  try/catch (→ 503 on OOM); every other C/task entry point that reaches throwing C++ owns a
+  final local boundary, and `tk::MutexGuard` in `rtos_guard.hpp` releases FreeRTOS locks while
+  unwinding. **Flag any new large allocation** (`std::string` of a whole buffer, TLS for OTA,
+  big JSON) that is outside those boundaries or could exceed the largest block. `/diag` must
+  **stream** (`httpd_resp_send_chunk`), never build the whole log into one `std::string`.
 - Static buffers (e.g. `diag_log`'s ring) come straight off the heap budget — sizing them up
   shrinks the largest free block.
 

@@ -45,7 +45,7 @@ defaults and [`main/ota_update.cpp`](../../../main/ota_update.cpp):
 - `CONFIG_TESLA_OTA_MANIFEST_URL` = `https://0bu.github.io/tesla-key-esp32/manifest.json`.
 - `CONFIG_TESLA_OTA_FIRMWARE_BASE_URL` = `https://0bu.github.io/tesla-key-esp32/`.
 - Image URL the device builds: `FIRMWARE_BASE_URL` + `"tesla-key-esp32"` + `<suffix>` + `".bin"`
-  (`ota_update.cpp` line ~221). **The step-3 URLs below are exactly this string** — a 404 here is
+  (`ota_update.cpp`, `ota_task_impl()`'s `kFwUrl`). **The step-3 URLs below are exactly this string** — a 404 here is
   the 404 a real device would hit.
 
 Per-target image **suffix** (must agree across three places —
@@ -80,7 +80,8 @@ overwrites `version.txt` in the workspace (**not** committed) with the version b
 `esp_app_get_description()->version`, the release tag, and the manifest `version` all agree. The
 main Pages manifest carries `steps.stamp.outputs.disp` = the release version.
 
-Device-side **downgrade gate** ([`ota_update.cpp`](../../../main/ota_update.cpp) ~250-273): before
+Device-side **downgrade gate** ([`ota_update.cpp`](../../../main/ota_update.cpp), in
+`ota_task_impl()` immediately after `esp_https_ota_begin`): before
 the bulk download, `ota_task` reads the incoming image's own version via
 `esp_https_ota_get_img_desc` and refuses anything not strictly newer than the running firmware
 (`ver_newer`) — software anti-rollback, no eFuses.
@@ -187,4 +188,3 @@ table below before retrying. (Endpoints: [`main/http_ota.cpp`](../../../main/htt
   + otadata erase, the recovery a "signature bad" device needs.
 - [`docs/SECURITY.md`](../../../docs/SECURITY.md) — signing key lifecycle, TOFU trust anchor, and
   the USB-reflash recovery for a device off the current key.
-

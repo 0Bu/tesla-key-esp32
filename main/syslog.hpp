@@ -26,8 +26,9 @@ struct SyslogStatus {
 // forwarding (the task idles, draining and dropping whatever is queued). Config is
 // resolved once here, at boot — like the MQTT bridge, /set_syslog reboots to apply
 // a change, so there is nothing to re-read at runtime. Call once, early (before
-// WiFi), from app_main; safe to call before the network stack is up.
-void syslog_start(NvsStorageAdapter& config_store);
+// WiFi), from app_main; safe to call before the network stack is up. Unconfigured
+// Syslog is a successful no-op; false means configured forwarding could not be started.
+bool syslog_start(NvsStorageAdapter& config_store);
 
 // Queue one already-formatted line for forwarding. Non-blocking (drops silently on
 // a full queue or before syslog_start() has run) so a stuck collector can never
