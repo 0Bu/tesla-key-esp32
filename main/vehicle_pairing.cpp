@@ -352,15 +352,13 @@ time_t VehicleController::paired_at() {
 }
 
 bool VehicleController::has_key() {
-    if (!storage_) return false;
-    std::vector<uint8_t> buf;
-    return storage_->load("private_key", buf);
+    // Existence probe only — never read the key blob into a vector just to test presence.
+    return storage_ && storage_->blob_exists("private_key");
 }
 
 bool VehicleController::has_session() {
-    if (!storage_) return false;
-    std::vector<uint8_t> buf;
-    return storage_->load("session_vcsec", buf);
+    // Existence probe only — see has_key(); sampled ~1 Hz from the display/LED tasks.
+    return storage_ && storage_->blob_exists("session_vcsec");
 }
 
 std::string VehicleController::key_fingerprint() {
