@@ -613,6 +613,12 @@ static void display_task(void* arg) {
     int tick = 0;
     bool paired = v.has_session();        // has_session() hits NVS — sample at ~1 Hz
     for (;;) {
+      // Iteration-boundary containment (issue #204): render_frame() reads the cached UiSnapshot
+      // and builds std::string SSID text that can throw bad_alloc under heap pressure. This is a
+      // cosmetic task with no lock held across the frame, so an escape must not unwind into the
+      // FreeRTOS C task trampoline → std::terminate → reboot (a reboot also re-opens the poll
+      // window). Contain it, pause, redraw next frame.
+      try {
         bool animating = render_frame(v, tick, paired);
         flush();
         ++tick;
@@ -636,6 +642,10 @@ static void display_task(void* arg) {
                 break;
             }
         }
+      } catch (...) {
+          ESP_LOGE(TAG, "display frame threw — skipping this frame");
+          vTaskDelay(pdMS_TO_TICKS(200));
+      }
     }
 }
 

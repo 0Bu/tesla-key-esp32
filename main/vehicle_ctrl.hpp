@@ -9,6 +9,7 @@
 #include <ctime>
 #include "ble_client.hpp"
 #include "nvs_storage.hpp"
+#include "rtos_guard.hpp"
 #include "logic/ble_phase.hpp"
 #include "logic/link_state.hpp"
 #include "logic/ui_state.hpp"
@@ -286,10 +287,11 @@ private:
     // read races the writer (torn string → UB), so all reads/writes take this mutex.
     template <typename T> T copy_locked_(const T& src) {
         if (!cache_mutex_) return src;
-        xSemaphoreTake(cache_mutex_, portMAX_DELAY);
-        T copy = src;
-        xSemaphoreGive(cache_mutex_);
-        return copy;
+        // RAII give — `T copy = src` copies structs with std::string members and can throw
+        // std::bad_alloc; a hand-rolled give would then be skipped, wedging cache_mutex_ and
+        // freezing every later cache read (issue #204, Scenario B).
+        tk::SemGuard g(cache_mutex_);
+        return src;
     }
 
     BleClient*         ble_{nullptr};

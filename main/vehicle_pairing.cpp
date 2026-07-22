@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
+#include <exception>
 
 // protobuf generated headers (from tesla-ble) — VCSEC only: this TU never builds
 // infotainment (CarServer) messages; Keys_Role comes via <vehicle.h> → keys.pb.h.
@@ -48,6 +49,11 @@ void VehicleController::auto_pair_task_fn_(void* arg) {
     vTaskDelay(pdMS_TO_TICKS(4000));  // let WiFi/BLE come up first
     bool warned_no_vin = false;
     while (true) {
+      // Iteration-boundary containment (issue #204): pair()/generate_key()/health_probe_() run
+      // tesla-ble crypto + std::string work that can throw std::bad_alloc. An escape would unwind
+      // into the FreeRTOS C task trampoline → std::terminate → reboot (and a reboot loop re-opens
+      // the poll window). Contain it, pause, and start the next supervision round.
+      try {
         // No vehicle to target: without a plausible 17-char VIN we must not connect or enrol —
         // that risks whitelisting our key onto an arbitrary nearby Tesla. Idle quietly instead
         // of spinning a connect→10 s-timeout loop; /scan still lists nearby cars. Logged once.
@@ -167,9 +173,10 @@ void VehicleController::auto_pair_task_fn_(void* arg) {
         ESP_LOGI(TAG, "auto-pair: not paired — requesting key enrolment from the car…");
         self->pair(5000);
         if (self->ble_ && self->ble_->is_connected()) self->ble_->disconnect();
-        xSemaphoreTake(self->vehicle_mutex_, portMAX_DELAY);
-        self->vehicle_->set_connected(false);
-        xSemaphoreGive(self->vehicle_mutex_);
+        {
+            tk::SemGuard g(self->vehicle_mutex_);   // RAII: set_connected() can throw
+            self->vehicle_->set_connected(false);
+        }
         ESP_LOGI(TAG, "auto-pair: enrolment request sent — place a Tesla NFC keycard on the center-console reader, then confirm 'Add key' on the touchscreen; waiting for the key to register…");
 
         // 3. Poll for the resulting session at a short cadence so an enrolment that lands
@@ -188,6 +195,13 @@ void VehicleController::auto_pair_task_fn_(void* arg) {
             continue;
         }
         ESP_LOGI(TAG, "auto-pair: not registered yet — place a Tesla NFC keycard on the console reader and confirm 'Add key' on screen (or move closer if the car is out of BLE range)");
+      } catch (const std::exception& e) {
+          ESP_LOGE(TAG, "auto-pair iteration threw (%s) — pausing, will retry", e.what());
+          vTaskDelay(pdMS_TO_TICKS(2000));
+      } catch (...) {
+          ESP_LOGE(TAG, "auto-pair iteration threw (unknown) — pausing, will retry");
+          vTaskDelay(pdMS_TO_TICKS(2000));
+      }
     }
 }
 
@@ -195,9 +209,10 @@ void VehicleController::auto_pair_task_fn_(void* arg) {
 
 bool VehicleController::generate_key() {
     tk::MutexGuard cmd_guard(command_mutex_);
-    xSemaphoreTake(vehicle_mutex_, portMAX_DELAY);
-    vehicle_->regenerate_key();
-    xSemaphoreGive(vehicle_mutex_);
+    {
+        tk::SemGuard g(vehicle_mutex_);   // RAII: regenerate_key() (crypto/NVS) can throw
+        vehicle_->regenerate_key();
+    }
     // Record when the key was generated so the UI can show the key's creation
     // date next to its fingerprint. Wall-clock comes from the browser (POST
     // /set_time) or the NVS-cached time; if neither is set yet this stamps a
@@ -229,9 +244,8 @@ void VehicleController::clear_session_and_cache_() {
     bool had_session = has_session();
     if (had_link) ble_->disconnect();
     if ((had_link || had_session) && vehicle_) {
-        xSemaphoreTake(vehicle_mutex_, portMAX_DELAY);
+        tk::SemGuard g(vehicle_mutex_);   // RAII: set_connected() can throw
         vehicle_->set_connected(false);
-        xSemaphoreGive(vehicle_mutex_);
     }
 
     // Erase the persisted sessions so has_session() is false until a fresh handshake.
@@ -404,18 +418,20 @@ bool VehicleController::pair(int timeout_ms) {
     // the role keeps the device's stored key from granting full vehicle access.
     const Keys_Role role = Keys_Role_ROLE_CHARGING_MANAGER;
 
-    xSemaphoreTake(vehicle_mutex_, portMAX_DELAY);
-    // Use send_command_result to get a callback when the whitelist message is delivered.
-    // The user still needs to confirm the pairing request shown on the car's screen.
-    vehicle_->send_command_result(
-        UniversalMessage_Domain_DOMAIN_VEHICLE_SECURITY,
-        "Whitelist Add Key",
-        [role](TeslaBLE::Client* c, uint8_t* b, size_t* l) {
-            return c->build_white_list_message(role, VCSEC_KeyFormFactor_KEY_FORM_FACTOR_CLOUD_KEY, b, l);
-        },
-        make_result_cb_(),
-        TeslaBLE::WakePolicy::NO_WAKE_FAIL);
-    xSemaphoreGive(vehicle_mutex_);
+    {
+        // RAII give — the whitelist builder inside send_command_result can throw (Scenario B).
+        tk::SemGuard g(vehicle_mutex_);
+        // Use send_command_result to get a callback when the whitelist message is delivered.
+        // The user still needs to confirm the pairing request shown on the car's screen.
+        vehicle_->send_command_result(
+            UniversalMessage_Domain_DOMAIN_VEHICLE_SECURITY,
+            "Whitelist Add Key",
+            [role](TeslaBLE::Client* c, uint8_t* b, size_t* l) {
+                return c->build_white_list_message(role, VCSEC_KeyFormFactor_KEY_FORM_FACTOR_CLOUD_KEY, b, l);
+            },
+            make_result_cb_(),
+            TeslaBLE::WakePolicy::NO_WAKE_FAIL);
+    }
 
     bool ok = xSemaphoreTake(cmd_sem_, pdMS_TO_TICKS(timeout_ms)) == pdTRUE;
     if (!ok) ESP_LOGW(TAG, "pair not confirmed — confirm the pairing request on the car's screen");

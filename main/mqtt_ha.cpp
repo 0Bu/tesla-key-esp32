@@ -11,6 +11,7 @@
 #include <string>
 #include <cstring>
 #include <ctime>
+#include <exception>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -36,8 +37,10 @@ static esp_mqtt_client_handle_t s_client = nullptr;
 static VehicleController*        s_vehicle = nullptr;
 static std::atomic<bool>         s_connected{false};
 static std::atomic<bool>         s_need_discovery{false};
-static bool                      s_configured = false;
-static bool                      s_tls        = false;   // connection uses mqtts:// (TLS)
+// atomic: written once in mqtt_ha_start (app_main task), read from the HTTP /status task and
+// the MQTT event callback — a cross-task scalar, so atomic gives it a defined value.
+static std::atomic<bool>         s_configured{false};
+static std::atomic<bool>         s_tls{false};           // connection uses mqtts:// (TLS)
 
 // Last connection error, surfaced in /status so the web UI can explain a stuck connection
 // (especially a TLS handshake failure, since we never silently fall back to plaintext mqtt).
@@ -358,9 +361,13 @@ static void publish_state() {
 
 // ─── MQTT event handler ───────────────────────────────────────────────────────
 static void mqtt_event_handler(void*, esp_event_base_t, int32_t event_id, void* event_data) {
+    // Runs on the esp-mqtt event-loop C task. Only atomic stores + logging here (no throwing
+    // ops), but keep a final boundary so a future edit that allocates cannot unwind into the C
+    // event loop → std::terminate → reboot (issue #204, C-callback boundary).
+    try {
     switch ((esp_mqtt_event_id_t)event_id) {
     case MQTT_EVENT_CONNECTED:
-        ESP_LOGI(TAG, "connected to broker%s", s_tls ? " (TLS)" : "");
+        ESP_LOGI(TAG, "connected to broker%s", s_tls.load() ? " (TLS)" : "");
         s_connected = true;
         s_last_err  = ME_NONE;    // clear any prior failure now that we're up
         s_need_discovery = true;  // (re)announce discovery + state from the publisher task
@@ -389,6 +396,9 @@ static void mqtt_event_handler(void*, esp_event_base_t, int32_t event_id, void* 
     default:
         break;
     }
+    } catch (...) {
+        ESP_LOGE(TAG, "mqtt event handler threw — ignored");
+    }
 }
 
 // ─── Publisher task ───────────────────────────────────────────────────────────
@@ -399,16 +409,26 @@ static void publisher_task(void*) {
     TickType_t last = 0;
     const TickType_t interval = pdMS_TO_TICKS(s_interval_s * 1000);
     while (true) {
-        if (s_connected) {
-            if (s_need_discovery.exchange(false)) {
-                publish_discovery();
-                pub(s_avail, "online");      // retained; after configs so HA has the entities
-                publish_state();
-                last = xTaskGetTickCount();
-            } else if ((xTaskGetTickCount() - last) >= interval) {
-                publish_state();
-                last = xTaskGetTickCount();
+        // Iteration-boundary containment (issue #204): publish_discovery()/publish_state()
+        // build cJSON + std::string discovery payloads that can throw std::bad_alloc on a
+        // fragmented heap. An escape would unwind into the FreeRTOS C task trampoline →
+        // std::terminate → reboot; contain it, skip this round, and try again next tick.
+        try {
+            if (s_connected) {
+                if (s_need_discovery.exchange(false)) {
+                    publish_discovery();
+                    pub(s_avail, "online");      // retained; after configs so HA has the entities
+                    publish_state();
+                    last = xTaskGetTickCount();
+                } else if ((xTaskGetTickCount() - last) >= interval) {
+                    publish_state();
+                    last = xTaskGetTickCount();
+                }
             }
+        } catch (const std::exception& e) {
+            ESP_LOGE(TAG, "mqtt publish iteration threw (%s) — skipping round", e.what());
+        } catch (...) {
+            ESP_LOGE(TAG, "mqtt publish iteration threw (unknown) — skipping round");
         }
         vTaskDelay(pdMS_TO_TICKS(500));
     }
@@ -426,7 +446,7 @@ static std::string broker_display(const std::string& uri) {
 }
 
 // ─── Public API ───────────────────────────────────────────────────────────────
-void mqtt_ha_start(VehicleController& vehicle, NvsStorageAdapter& config_store) {
+bool mqtt_ha_start(VehicleController& vehicle, NvsStorageAdapter& config_store) {
     s_vehicle = &vehicle;
 
     // Resolve broker URI: NVS "mqtt_uri" (web UI) overrides the Kconfig default. An
@@ -441,7 +461,7 @@ void mqtt_ha_start(VehicleController& vehicle, NvsStorageAdapter& config_store) 
     if (s_uri.empty()) {
         ESP_LOGI(TAG, "MQTT disabled (no broker configured)");
         s_configured = false;
-        return;
+        return true;   // nothing to start is a healthy outcome, not a failure
     }
     s_user   = CONFIG_TESLA_MQTT_USERNAME;
     s_pass   = CONFIG_TESLA_MQTT_PASSWORD;
@@ -509,30 +529,53 @@ void mqtt_ha_start(VehicleController& vehicle, NvsStorageAdapter& config_store) 
     cfg.session.last_will.retain    = 1;
     cfg.session.keepalive           = 30;
 
+    // Check every resource; on any failure unwind the partially-created client and fall back to
+    // the disabled state so the public status honestly reports not-configured/not-connected (an
+    // OPTIONAL subsystem must degrade visibly, never half-run).
     s_client = esp_mqtt_client_init(&cfg);
     if (!s_client) {
-        ESP_LOGE(TAG, "esp_mqtt_client_init failed");
+        ESP_LOGE(TAG, "esp_mqtt_client_init failed — MQTT bridge disabled (degraded)");
         s_configured = false;
-        return;
+        return false;
     }
-    esp_mqtt_client_register_event(s_client, MQTT_EVENT_ANY, mqtt_event_handler, nullptr);
-    esp_mqtt_client_start(s_client);
-    xTaskCreate(publisher_task, "mqtt_pub", 6144, nullptr, tk::kPrioMqttPub, nullptr);
+    if (esp_mqtt_client_register_event(s_client, MQTT_EVENT_ANY, mqtt_event_handler, nullptr) != ESP_OK) {
+        ESP_LOGE(TAG, "esp_mqtt_client_register_event failed — MQTT bridge disabled (degraded)");
+        esp_mqtt_client_destroy(s_client);
+        s_client     = nullptr;
+        s_configured = false;
+        return false;
+    }
+    if (esp_mqtt_client_start(s_client) != ESP_OK) {
+        ESP_LOGE(TAG, "esp_mqtt_client_start failed — MQTT bridge disabled (degraded)");
+        esp_mqtt_client_destroy(s_client);
+        s_client     = nullptr;
+        s_configured = false;
+        return false;
+    }
+    if (xTaskCreate(publisher_task, "mqtt_pub", 6144, nullptr, tk::kPrioMqttPub, nullptr) != pdPASS) {
+        ESP_LOGE(TAG, "publisher task creation failed — MQTT bridge disabled (degraded)");
+        esp_mqtt_client_stop(s_client);
+        esp_mqtt_client_destroy(s_client);
+        s_client     = nullptr;
+        s_configured = false;
+        return false;
+    }
 
     ESP_LOGI(TAG, "MQTT bridge started → %s (base topic %s, HA prefix %s)",
              s_broker_disp.c_str(), s_base.c_str(), s_prefix.c_str());
+    return true;
 }
 
-bool mqtt_ha_configured() { return s_configured; }
-bool mqtt_ha_connected()  { return s_configured && s_connected.load(); }
-bool mqtt_ha_tls()        { return s_configured && s_tls; }
-std::string mqtt_ha_broker() { return s_configured ? s_broker_disp : std::string{}; }
+bool mqtt_ha_configured() { return s_configured.load(); }
+bool mqtt_ha_connected()  { return s_configured.load() && s_connected.load(); }
+bool mqtt_ha_tls()        { return s_configured.load() && s_tls.load(); }
+std::string mqtt_ha_broker() { return s_configured.load() ? s_broker_disp : std::string{}; }
 
 // Human-readable last connection error ("" when none / connected). Surfaced in /status.
 std::string mqtt_ha_last_error() {
-    if (!s_configured || s_connected.load()) return {};
+    if (!s_configured.load() || s_connected.load()) return {};
     switch (s_last_err.load()) {
-    case ME_TRANSPORT: return s_tls ? "TLS handshake failed (untrusted cert or wrong port?)"
+    case ME_TRANSPORT: return s_tls.load() ? "TLS handshake failed (untrusted cert or wrong port?)"
                                     : "transport error (host/port?)";
     case ME_REFUSED:   return "broker refused connection (credentials?)";
     case ME_OTHER:     return "connection error";

@@ -309,20 +309,26 @@ void VehicleController::loop_task_fn_(void* arg) {
     bool     prev_window        = false;  // edge-detect the active window
     auto     prev_sleep         = TeslaBLE::SleepState::UNKNOWN;  // edge-detect VCSEC sleep flag
     while (true) {
-        xSemaphoreTake(self->vehicle_mutex_, portMAX_DELAY);
-        // loop() pumps the command/wake state machine and processes inbound messages, so it
-        // can throw on corrupt RX the same way on_rx_data does. Same containment: catch here,
-        // flag a link reset below.
-        try {
-            self->vehicle_->loop();
-        } catch (const std::exception& e) {
-            ESP_LOGE(TAG, "vehicle loop() threw (%s) — resetting BLE link", e.what());
-            self->ble_fault_.store(true);
-        } catch (...) {
-            ESP_LOGE(TAG, "vehicle loop() threw (unknown) — resetting BLE link");
-            self->ble_fault_.store(true);
+      // Iteration-boundary containment (issue #204): the poll injections + bookkeeping below
+      // call tesla-ble builders and touch std::string caches that can throw std::bad_alloc.
+      // An escape would unwind into the FreeRTOS C task trampoline → std::terminate → reboot,
+      // and a reboot loop also re-opens the car-poll window (defeating sleep). Contain it, then
+      // fall through to the tail delay so we never spin a tight error loop.
+      try {
+        {
+            // RAII give — vehicle_->loop() can throw on corrupt RX the same way on_rx_data does;
+            // the guard releases vehicle_mutex_ on unwind so it can't wedge every later command.
+            tk::SemGuard g(self->vehicle_mutex_);
+            try {
+                self->vehicle_->loop();
+            } catch (const std::exception& e) {
+                ESP_LOGE(TAG, "vehicle loop() threw (%s) — resetting BLE link", e.what());
+                self->ble_fault_.store(true);
+            } catch (...) {
+                ESP_LOGE(TAG, "vehicle loop() threw (unknown) — resetting BLE link");
+                self->ble_fault_.store(true);
+            }
         }
-        xSemaphoreGive(self->vehicle_mutex_);
 
         // A parse fault flagged from loop() or the BLE rx callback: drop the link once,
         // outside the vehicle mutex. Disconnect drives set_connected(false), which clears the
@@ -535,9 +541,8 @@ void VehicleController::loop_task_fn_(void* arg) {
             // vehicle_->loop(), which drives the command's transmission/retries. The
             // persistent charge-state callback updates last_known_charge_ when the
             // response arrives. NO_WAKE_SKIP so a sleeping car is left undisturbed.
-            xSemaphoreTake(self->vehicle_mutex_, portMAX_DELAY);
+            tk::SemGuard g(self->vehicle_mutex_);   // RAII: charge_state_poll can throw
             self->vehicle_->charge_state_poll(TeslaBLE::WakePolicy::NO_WAKE_SKIP);
-            xSemaphoreGive(self->vehicle_mutex_);
         }
 
         // Background telemetry refresh (paired + window + connected): one domain per cycle,
@@ -552,18 +557,24 @@ void VehicleController::loop_task_fn_(void* arg) {
         if (paired && window && self->ble_connected() && !self->cmd_in_flight_.load()
             && (now_ticks - last_tele_ticks > pdMS_TO_TICKS(30000))) {
             last_tele_ticks = now_ticks;
-            xSemaphoreTake(self->vehicle_mutex_, portMAX_DELAY);
-            switch (tele_idx % 4) {
-                case 0: self->vehicle_->climate_state_poll(TeslaBLE::WakePolicy::NO_WAKE_SKIP);  break;
-                case 1: self->vehicle_->drive_state_poll(TeslaBLE::WakePolicy::NO_WAKE_SKIP);    break;
-                case 2: self->vehicle_->tire_pressure_poll(TeslaBLE::WakePolicy::NO_WAKE_SKIP);  break;
-                case 3: self->vehicle_->closures_state_poll(TeslaBLE::WakePolicy::NO_WAKE_SKIP); break;
+            {
+                tk::SemGuard g(self->vehicle_mutex_);   // RAII: the *_poll builders can throw
+                switch (tele_idx % 4) {
+                    case 0: self->vehicle_->climate_state_poll(TeslaBLE::WakePolicy::NO_WAKE_SKIP);  break;
+                    case 1: self->vehicle_->drive_state_poll(TeslaBLE::WakePolicy::NO_WAKE_SKIP);    break;
+                    case 2: self->vehicle_->tire_pressure_poll(TeslaBLE::WakePolicy::NO_WAKE_SKIP);  break;
+                    case 3: self->vehicle_->closures_state_poll(TeslaBLE::WakePolicy::NO_WAKE_SKIP); break;
+                }
             }
-            xSemaphoreGive(self->vehicle_mutex_);
             tele_idx++;
         }
+      } catch (const std::exception& e) {
+          ESP_LOGE(TAG, "vehicle loop iteration threw (%s) — continuing", e.what());
+      } catch (...) {
+          ESP_LOGE(TAG, "vehicle loop iteration threw (unknown) — continuing");
+      }
 
-        vTaskDelay(pdMS_TO_TICKS(50));
+      vTaskDelay(pdMS_TO_TICKS(50));
     }
 }
 
@@ -620,14 +631,16 @@ bool VehicleController::get_vehicle_status(VehicleStatusResult& out, int timeout
         xSemaphoreGive(cmd_sem_);
     });
 
-    xSemaphoreTake(vehicle_mutex_, portMAX_DELAY);
-    vehicle_->vcsec_poll();
-    xSemaphoreGive(vehicle_mutex_);
+    {
+        tk::SemGuard g(vehicle_mutex_);   // RAII: vcsec_poll builds a protobuf cmd → can throw
+        vehicle_->vcsec_poll();
+    }
 
     bool ok = xSemaphoreTake(cmd_sem_, pdMS_TO_TICKS(timeout_ms)) == pdTRUE;
-    xSemaphoreTake(vehicle_mutex_, portMAX_DELAY);
-    vehicle_->set_vehicle_status_callback(nullptr);
-    xSemaphoreGive(vehicle_mutex_);
+    {
+        tk::SemGuard g(vehicle_mutex_);
+        vehicle_->set_vehicle_status_callback(nullptr);
+    }
     out = pending_status_;
     if (ok && out.valid) {
         note_reachable_();  // car answered a VCSEC status read ⇒ reachable over BLE right now

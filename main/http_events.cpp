@@ -18,6 +18,7 @@
 #include "http_handlers.hpp"
 #include "logic/ws_policy.hpp"
 #include "task_config.hpp"
+#include "rtos_guard.hpp"
 #include <esp_log.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -25,6 +26,7 @@
 #include <cstring>
 #include <cstdlib>      // free() — matches cJSON_PrintUnformatted's allocator (see http_common.cpp)
 #include <new>          // std::nothrow, std::bad_alloc
+#include <exception>    // std::exception (task-boundary catch)
 #include <string>
 
 static const char* TAG = "http_events";
@@ -46,11 +48,12 @@ static int s_ws_fds[WS_MAX_CLIENTS] = { -1, -1, -1, -1, -1, -1, -1, -1 };
 // subscriber from queueing the heap away (logic/ws_policy.hpp carries the full incident note).
 static tk::WsClientSend s_ws_send[WS_MAX_CLIENTS] = {};
 static httpd_handle_t s_server = nullptr;
+static TaskHandle_t   s_ws_task = nullptr;   // broadcast task, so a failed HTTP start can unwind it
 
 // Add fd to the broadcast list (idempotent). false only when all slots are taken.
 static bool ws_register_client(int fd) {
-    if (!s_ws_mtx) return false;
-    xSemaphoreTake(s_ws_mtx, portMAX_DELAY);
+    tk::SemGuard g(s_ws_mtx);
+    if (!g) return false;
     bool registered = false;
     for (int i = 0; i < WS_MAX_CLIENTS; i++)
         if (s_ws_fds[i] == fd) { registered = true; break; }
@@ -62,30 +65,27 @@ static bool ws_register_client(int fd) {
                 registered = true;
                 break;
             }
-    xSemaphoreGive(s_ws_mtx);
     return registered;
 }
 
 void http_events_on_close(int sockfd) {
-    if (!s_ws_mtx) return;
-    xSemaphoreTake(s_ws_mtx, portMAX_DELAY);
+    tk::SemGuard g(s_ws_mtx);
+    if (!g) return;
     for (int i = 0; i < WS_MAX_CLIENTS; i++)
         if (s_ws_fds[i] == sockfd) { s_ws_fds[i] = -1; s_ws_send[i] = {}; break; }
-    xSemaphoreGive(s_ws_mtx);
 }
 
 // Claim an in-flight slot for fd. False when the client is at WS_MAX_INFLIGHT — it is not draining,
 // so this tick is skipped for it. Also false for an fd that is no longer registered.
 static bool ws_reserve_inflight(int fd) {
-    if (!s_ws_mtx) return false;
+    tk::SemGuard g(s_ws_mtx);
+    if (!g) return false;
     bool ok = false;
-    xSemaphoreTake(s_ws_mtx, portMAX_DELAY);
     for (int i = 0; i < WS_MAX_CLIENTS; i++)
         if (s_ws_fds[i] == fd) {
             if (tk::ws_may_send(s_ws_send[i])) { tk::ws_note_queued(s_ws_send[i]); ok = true; }
             break;
         }
-    xSemaphoreGive(s_ws_mtx);
     return ok;
 }
 
@@ -93,12 +93,11 @@ static bool ws_reserve_inflight(int fd) {
 // send). Returns true when this client has now failed WS_MAX_FAILS sends in a row and should be
 // closed. An fd already unregistered by the time its completion lands simply matches nothing.
 static bool ws_release_inflight(int fd, bool sent_ok) {
-    if (!s_ws_mtx) return false;
+    tk::SemGuard g(s_ws_mtx);
+    if (!g) return false;
     bool evict = false;
-    xSemaphoreTake(s_ws_mtx, portMAX_DELAY);
     for (int i = 0; i < WS_MAX_CLIENTS; i++)
         if (s_ws_fds[i] == fd) { evict = tk::ws_note_completed(s_ws_send[i], sent_ok); break; }
-    xSemaphoreGive(s_ws_mtx);
     return evict;
 }
 
@@ -106,20 +105,18 @@ static bool ws_release_inflight(int fd, bool sent_ok) {
 // ws_release_inflight(fd, true): our own OOM must not be recorded as a successful send, or it
 // would clear the client's failure streak — see ws_note_cancelled().
 static void ws_cancel_inflight(int fd) {
-    if (!s_ws_mtx) return;
-    xSemaphoreTake(s_ws_mtx, portMAX_DELAY);
+    tk::SemGuard g(s_ws_mtx);
+    if (!g) return;
     for (int i = 0; i < WS_MAX_CLIENTS; i++)
         if (s_ws_fds[i] == fd) { tk::ws_note_cancelled(s_ws_send[i]); break; }
-    xSemaphoreGive(s_ws_mtx);
 }
 
 static bool ws_any_clients() {
-    if (!s_ws_mtx) return false;
+    tk::SemGuard g(s_ws_mtx);
+    if (!g) return false;
     bool any = false;
-    xSemaphoreTake(s_ws_mtx, portMAX_DELAY);
     for (int i = 0; i < WS_MAX_CLIENTS; i++)
         if (s_ws_fds[i] != -1) { any = true; break; }
-    xSemaphoreGive(s_ws_mtx);
     return any;
 }
 
@@ -164,10 +161,12 @@ static void ws_send_to_all(const char* data, size_t len) {
     if (!s_server || !s_ws_mtx) return;
     int fds[WS_MAX_CLIENTS];
     int n = 0;
-    xSemaphoreTake(s_ws_mtx, portMAX_DELAY);
-    for (int i = 0; i < WS_MAX_CLIENTS; i++)
-        if (s_ws_fds[i] != -1) fds[n++] = s_ws_fds[i];
-    xSemaphoreGive(s_ws_mtx);
+    {
+        tk::SemGuard g(s_ws_mtx);
+        if (!g) return;
+        for (int i = 0; i < WS_MAX_CLIENTS; i++)
+            if (s_ws_fds[i] != -1) fds[n++] = s_ws_fds[i];
+    }
 
     for (int i = 0; i < n; i++) {
         // Backpressure FIRST, before any allocation: a client still sitting on WS_MAX_INFLIGHT
@@ -229,7 +228,16 @@ static void ws_broadcast_status() {
 static void ws_broadcast_task(void*) {
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(WS_BROADCAST_INTERVAL_MS));
-        ws_broadcast_status();
+        // ws_broadcast_status() already guards its own build, but keep a belt-and-braces
+        // boundary here too (issue #204): NO exception may unwind out of a FreeRTOS task
+        // entry into the C trampoline → std::terminate → reboot.
+        try {
+            ws_broadcast_status();
+        } catch (const std::exception& e) {
+            ESP_LOGE(TAG, "ws_broadcast iteration threw (%s) — skipping tick", e.what());
+        } catch (...) {
+            ESP_LOGE(TAG, "ws_broadcast iteration threw (unknown) — skipping tick");
+        }
     }
 }
 
@@ -299,9 +307,13 @@ static esp_err_t h_ws_events(httpd_req_t* req) {
     return ESP_OK;
 }
 
-void http_events_register(httpd_handle_t server) {
+bool http_events_register(httpd_handle_t server) {
     s_server = server;
     if (!s_ws_mtx) s_ws_mtx = xSemaphoreCreateMutex();
+    if (!s_ws_mtx) {
+        ESP_LOGE(TAG, "/events mutex alloc failed");
+        return false;
+    }
 
     // Registered BEFORE the /* wildcard handlers (see http_server_start) so a GET /events matches
     // this WS route, not the catch-all — esp_http_server checks handlers in registration order.
@@ -311,14 +323,34 @@ void http_events_register(httpd_handle_t server) {
     ws.handler      = h_ws_events;
     ws.user_ctx     = nullptr;
     ws.is_websocket = true;
-    httpd_register_uri_handler(server, &ws);
+    if (httpd_register_uri_handler(server, &ws) != ESP_OK) {
+        ESP_LOGE(TAG, "/events handler registration failed");
+        return false;
+    }
 
     // Background pusher. Priority below httpd's (5) — it's a best-effort UI feed, never ahead of
     // serving requests. Stack: build_status_object() + cJSON_PrintUnformatted are heap-backed and
     // light on stack, but this is the SAME build the httpd task runs on 8192, and an overflow in
     // this net-less task would abort() (defeating car sleep) — so 6144 keeps a real margin over the
     // measured-elsewhere path rather than halving it, without paying the full 8192 on a tight heap.
-    xTaskCreate(ws_broadcast_task, "ws_bcast", 6144, nullptr, tk::kPrioWsBroadcast, nullptr);
+    if (xTaskCreate(ws_broadcast_task, "ws_bcast", 6144, nullptr,
+                    tk::kPrioWsBroadcast, &s_ws_task) != pdPASS) {
+        ESP_LOGE(TAG, "/events broadcast task creation failed");
+        s_ws_task = nullptr;
+        return false;
+    }
     ESP_LOGI(TAG, "/events WebSocket registered; pushing /status every %u ms",
              static_cast<unsigned>(WS_BROADCAST_INTERVAL_MS));
+    return true;
+}
+
+void http_events_stop() {
+    // Unwind a partially-initialised HTTP start (Scenario D). httpd_stop() (called by the
+    // caller) unregisters the /events route and closes its sockets; here we just stop the
+    // broadcast task so it isn't left pushing to a torn-down server.
+    if (s_ws_task) {
+        vTaskDelete(s_ws_task);
+        s_ws_task = nullptr;
+    }
+    s_server = nullptr;
 }
