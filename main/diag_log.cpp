@@ -4,8 +4,10 @@
 #include <esp_log.h>
 #include <cstdio>
 #include <cstring>
+#include <atomic>
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+#include "rtos_guard.hpp"
 
 // Ring buffer of console output. It WRAPS: once full, the oldest bytes are
 // overwritten so the log always holds the MOST RECENT ~16 KB. This is what you
@@ -25,16 +27,18 @@ static size_t            s_head    = 0;      // next write position
 static bool              s_wrapped = false;  // buffer has wrapped at least once
 static SemaphoreHandle_t s_mtx     = nullptr;
 static vprintf_like_t    s_prev    = nullptr;
-static volatile bool     s_verbose = false;
+// atomic (not volatile): written by the /diag HTTP handler, read by the capture hook on
+// whichever task logged the line. A cross-task scalar — atomic gives it a defined value.
+static std::atomic<bool> s_verbose{false};
 
 static void diag_append_(const char* data, size_t len) {
     if (!s_mtx || len == 0) return;
-    if (xSemaphoreTake(s_mtx, pdMS_TO_TICKS(20)) != pdTRUE) return;
+    tk::SemGuard g(s_mtx, pdMS_TO_TICKS(20));  // bounded: never stall the logging task
+    if (!g) return;
     for (size_t i = 0; i < len; i++) {
         s_buf[s_head++] = data[i];
         if (s_head >= DIAG_CAP) { s_head = 0; s_wrapped = true; }
     }
-    xSemaphoreGive(s_mtx);
 }
 
 // esp_log hook: capture the formatted line, then forward to the original sink so
@@ -70,22 +74,22 @@ void diag_log_dump_chunks(const std::function<bool(const char*, size_t)>& sink) 
     // mid-dump. The spans point straight into the static buffer — no large heap
     // allocation, which is the whole point (a 48 KB std::string can throw bad_alloc
     // on a fragmented heap, whose largest free block can fall to ~31 KB → crash).
-    xSemaphoreTake(s_mtx, portMAX_DELAY);
+    // RAII: `sink` writes to httpd and CAN throw (bad_alloc under heap pressure); the
+    // guard releases s_mtx during unwinding so a throwing sink can't wedge the ring.
+    tk::SemGuard g(s_mtx);
     if (s_wrapped) {
         if (sink(s_buf + s_head, DIAG_CAP - s_head)) sink(s_buf, s_head);
     } else {
         sink(s_buf, s_head);
     }
-    xSemaphoreGive(s_mtx);
 }
 
 void diag_log_clear() {
     if (!s_mtx) return;
-    xSemaphoreTake(s_mtx, portMAX_DELAY);
+    tk::SemGuard g(s_mtx);
     s_head    = 0;
     s_wrapped = false;
-    xSemaphoreGive(s_mtx);
 }
 
-void diag_set_verbose(bool on) { s_verbose = on; }
-bool diag_verbose() { return s_verbose; }
+void diag_set_verbose(bool on) { s_verbose.store(on); }
+bool diag_verbose() { return s_verbose.load(); }

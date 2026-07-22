@@ -27,7 +27,14 @@ struct SyslogStatus {
 // resolved once here, at boot — like the MQTT bridge, /set_syslog reboots to apply
 // a change, so there is nothing to re-read at runtime. Call once, early (before
 // WiFi), from app_main; safe to call before the network stack is up.
-void syslog_start(NvsStorageAdapter& config_store);
+//
+// Syslog is an OPTIONAL subsystem (issue #204): returns true when forwarding is either
+// disabled-by-config (nothing to start) or fully up, and false only when a configured
+// forwarder could not allocate its resources/task. On false it unwinds any partial
+// allocation and leaves forwarding disabled (syslog_send() a no-op, syslog_status()
+// reports not-forwarding) so it degrades visibly instead of half-running. A false return
+// must NOT stop boot — the primary BLE/HTTP proxy runs on regardless.
+bool syslog_start(NvsStorageAdapter& config_store);
 
 // Queue one already-formatted line for forwarding. Non-blocking (drops silently on
 // a full queue or before syslog_start() has run) so a stuck collector can never

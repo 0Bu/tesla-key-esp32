@@ -17,7 +17,13 @@ class NvsStorageAdapter;
 
 // Start the bridge (call after WiFi is up). Spawns its own publisher task; returns
 // immediately. Safe to call when MQTT is unconfigured (logs and returns).
-void mqtt_ha_start(VehicleController& vehicle, NvsStorageAdapter& config_store);
+//
+// OPTIONAL subsystem (issue #204): returns true when the bridge is either
+// disabled-by-config (nothing to start) or fully up, and false only when a configured
+// bridge could not create its client/task — in which case it unwinds the partial client
+// and leaves the bridge disabled (public status reports not-configured/not-connected). A
+// false return must NOT stop boot; the primary BLE/HTTP proxy runs on regardless.
+bool mqtt_ha_start(VehicleController& vehicle, NvsStorageAdapter& config_store);
 
 // Status accessors for GET /status (the web-UI "Connection" block).
 bool        mqtt_ha_configured();  // a broker URI is set (bridge enabled)

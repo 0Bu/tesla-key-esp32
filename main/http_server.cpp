@@ -133,8 +133,16 @@ bool http_server_start(VehicleController& vehicle, NvsStorageAdapter& config_sto
     // Register the /events WebSocket route FIRST (and start its broadcast task): esp_http_server
     // matches handlers in registration order, so the specific /events must precede the /* wildcard
     // to be reached at all. It is registered raw (is_websocket) and guards itself — see
-    // http_events.cpp / the note in http_handlers.hpp.
-    http_events_register(server);
+    // http_events.cpp / the note in http_handlers.hpp. A partial registration is worse than none
+    // (a live server missing /events or a wildcard dispatcher answers some routes and silently
+    // 404s others), so ANY registration failure unwinds the whole HTTP start: stop the broadcast
+    // task/registry, stop the server, and report failure to app_main (issue #204, Scenario D).
+    if (!http_events_register(server)) {
+        ESP_LOGE(TAG, "/events registration failed — aborting HTTP start");
+        http_events_stop();
+        httpd_stop(server);
+        return false;
+    }
 
     // Wildcard GET handler
     httpd_uri_t get_handler = {
@@ -143,8 +151,6 @@ bool http_server_start(VehicleController& vehicle, NvsStorageAdapter& config_sto
         .handler  = handle_all,
         .user_ctx = nullptr,
     };
-    httpd_register_uri_handler(server, &get_handler);
-
     // Wildcard POST handler
     httpd_uri_t post_handler = {
         .uri      = "/*",
@@ -152,7 +158,13 @@ bool http_server_start(VehicleController& vehicle, NvsStorageAdapter& config_sto
         .handler  = handle_all,
         .user_ctx = nullptr,
     };
-    httpd_register_uri_handler(server, &post_handler);
+    if (httpd_register_uri_handler(server, &get_handler)  != ESP_OK ||
+        httpd_register_uri_handler(server, &post_handler) != ESP_OK) {
+        ESP_LOGE(TAG, "wildcard handler registration failed — aborting HTTP start");
+        http_events_stop();
+        httpd_stop(server);
+        return false;
+    }
 
     ESP_LOGI(TAG, "HTTP server started on :80");
     return true;

@@ -1,6 +1,8 @@
 // UDP Syslog forwarder. See syslog.hpp.
 #include "syslog.hpp"
 #include "nvs_storage.hpp"
+#include "task_config.hpp"
+#include "rtos_guard.hpp"
 #include "logic/syslog_policy.hpp"
 #include "lwip/sockets.h"
 #include "lwip/netdb.h"
@@ -13,8 +15,10 @@
 #include "freertos/task.h"
 #include "freertos/semphr.h"
 #include <esp_log.h>
+#include <atomic>
 #include <cstring>
 #include <cstdio>
+#include <exception>
 #include <string_view>
 
 static const char* TAG = "syslog";
@@ -36,7 +40,8 @@ static constexpr UBaseType_t kQueueDepth = 24;
 static QueueHandle_t     s_queue      = nullptr;
 static SemaphoreHandle_t s_status_mtx = nullptr;
 static SyslogStatus      s_status;
-static bool              s_configured = false;
+// atomic: written in syslog_start (app_main), read by syslog_task and syslog_status (HTTP task).
+static std::atomic<bool> s_configured{false};
 static std::string       s_cfg_host;
 static int               s_cfg_port   = 514;
 
@@ -49,12 +54,12 @@ struct PingCtl { SemaphoreHandle_t done; uint32_t received; };
 static PingCtl s_ping = { nullptr, 0 };
 
 static void set_status(bool resolved, bool reachable, const std::string& error) {
-    if (s_status_mtx && xSemaphoreTake(s_status_mtx, portMAX_DELAY) == pdTRUE) {
-        s_status.resolved  = resolved;
-        s_status.reachable = reachable;
-        s_status.error     = error;
-        xSemaphoreGive(s_status_mtx);
-    }
+    // RAII give — the s_status.error = error assignment can throw bad_alloc.
+    tk::SemGuard g(s_status_mtx);
+    if (!g) return;
+    s_status.resolved  = resolved;
+    s_status.reachable = reachable;
+    s_status.error     = error;
 }
 
 SyslogStatus syslog_status() {
@@ -64,11 +69,12 @@ SyslogStatus syslog_status() {
     copy.port        = s_cfg_port;
     copy.resolved    = false;
     copy.reachable   = false;
-    if (s_status_mtx && xSemaphoreTake(s_status_mtx, portMAX_DELAY) == pdTRUE) {
+    // RAII give — the std::string copies below can throw.
+    tk::SemGuard g(s_status_mtx);
+    if (g) {
         copy.resolved  = s_status.resolved;
         copy.reachable = s_status.reachable;
         copy.error     = s_status.error;
-        xSemaphoreGive(s_status_mtx);
     }
     return copy;
 }
@@ -237,6 +243,12 @@ static void syslog_task(void*) {
     const TickType_t check_interval = pdMS_TO_TICKS(10000); // re-resolve + re-probe cadence
 
     while (true) {
+      // Iteration-boundary containment (issue #204): getaddrinfo()/set_status() and the
+      // std::string bookkeeping here can throw std::bad_alloc under heap pressure. An escape
+      // would unwind into the FreeRTOS C task-entry trampoline → std::terminate → reboot; a
+      // reboot loop also re-opens the car-poll window. Contain it, pause briefly so we don't
+      // spin a tight error loop, and take the next queued line on the following iteration.
+      try {
         if (!s_configured) {
             // Block until a line arrives, then drop it (nothing to forward) — no busy-spin.
             SyslogMsg msg;
@@ -316,10 +328,17 @@ static void syslog_task(void*) {
                 }
             }
         }
+      } catch (const std::exception& e) {
+          ESP_LOGE(TAG, "syslog task iteration threw (%s) — pausing, will retry", e.what());
+          vTaskDelay(pdMS_TO_TICKS(1000));
+      } catch (...) {
+          ESP_LOGE(TAG, "syslog task iteration threw (unknown) — pausing, will retry");
+          vTaskDelay(pdMS_TO_TICKS(1000));
+      }
     }
 }
 
-void syslog_start(NvsStorageAdapter& config_store) {
+bool syslog_start(NvsStorageAdapter& config_store) {
     std::string uri = CONFIG_TESLA_SYSLOG_SERVER;
     config_store.load_str("syslog_uri", uri);
     // Trim surrounding whitespace (mirrors mqtt_ha_start's broker trim).
@@ -335,20 +354,38 @@ void syslog_start(NvsStorageAdapter& config_store) {
 
     if (!s_configured) {
         ESP_LOGI(TAG, "disabled (no server configured)");
-        return;
+        return true;   // nothing to start is a healthy outcome, not a failure
     }
     ESP_LOGI(TAG, "target set to %s:%d", s_cfg_host.c_str(), s_cfg_port);
 
+    // Check every resource; on any failure unwind what we did allocate and fall back to the
+    // disabled state so syslog_send() is a no-op and syslog_status() honestly reports
+    // not-forwarding (an OPTIONAL subsystem must degrade visibly, never half-run).
     s_status_mtx = xSemaphoreCreateMutex();
     s_ping.done  = xSemaphoreCreateBinary();
     s_queue      = xQueueCreate(kQueueDepth, sizeof(SyslogMsg));
-    if (!s_queue) return;
+    if (!s_status_mtx || !s_ping.done || !s_queue) {
+        ESP_LOGE(TAG, "resource allocation failed — Syslog forwarding disabled (degraded)");
+        if (s_queue)      { vQueueDelete(s_queue);            s_queue = nullptr; }
+        if (s_ping.done)  { vSemaphoreDelete(s_ping.done);    s_ping.done = nullptr; }
+        if (s_status_mtx) { vSemaphoreDelete(s_status_mtx);   s_status_mtx = nullptr; }
+        s_configured = false;
+        return false;
+    }
 
     // 6144: this task runs getaddrinfo() + raw socket()/sendto() directly on its own
     // stack (unlike esp-mqtt, whose socket work lives in an internal task). 4096 is
     // too thin for that call chain — mirrors syslog.cpp in the sibling
     // daikin-altherma-esp32 project, where this was measured.
-    xTaskCreate(syslog_task, "syslog_task", 6144, nullptr, 3, nullptr);
+    if (xTaskCreate(syslog_task, "syslog_task", 6144, nullptr, tk::kPrioSyslog, nullptr) != pdPASS) {
+        ESP_LOGE(TAG, "task creation failed — Syslog forwarding disabled (degraded)");
+        vQueueDelete(s_queue);          s_queue = nullptr;   // no-op syslog_send()
+        vSemaphoreDelete(s_ping.done);  s_ping.done = nullptr;
+        vSemaphoreDelete(s_status_mtx); s_status_mtx = nullptr;
+        s_configured = false;
+        return false;
+    }
+    return true;
 }
 
 void syslog_send(const char* msg, size_t len) {

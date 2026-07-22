@@ -55,6 +55,14 @@ bool VehicleController::init(const std::string& vin,
     vehicle_mutex_ = xSemaphoreCreateMutex();
     command_mutex_ = xSemaphoreCreateMutex();
     cache_mutex_   = xSemaphoreCreateMutex();
+    // VehicleController is an ESSENTIAL component: without these primitives the command
+    // serialization and cache locking cannot hold, so refuse to report a healthy controller
+    // rather than run one that could deadlock or race (issue #204, Scenario C). app_main halts
+    // boot on a false return.
+    if (!cmd_sem_ || !vehicle_mutex_ || !command_mutex_ || !cache_mutex_) {
+        ESP_LOGE(TAG, "synchronization primitive allocation failed");
+        return false;
+    }
 
     auto ble_sp     = std::shared_ptr<TeslaBLE::BleAdapter>(&ble, NoDelete{});
     auto storage_sp = std::shared_ptr<TeslaBLE::StorageAdapter>(&storage, NoDelete{});
@@ -64,21 +72,22 @@ bool VehicleController::init(const std::string& vin,
 
     // Wire BLE → Vehicle callbacks
     ble_->set_connected_cb([this](bool connected) {
-        xSemaphoreTake(vehicle_mutex_, portMAX_DELAY);
-        // Same rule as the rx-data callback below: this runs on the NimBLE host task and
-        // the callers (on_gap_event / on_dsc_disc) catch instead of rethrowing, so a throw
-        // out of the library here must not skip the give — a silently-held vehicle_mutex_
-        // would wedge every later command/poll until power-cycle.
-        try {
-            vehicle_->set_connected(connected);
-        } catch (const std::exception& e) {
-            ESP_LOGE(TAG, "set_connected threw (%s) — resetting link", e.what());
-            ble_fault_.store(true);
-        } catch (...) {
-            ESP_LOGE(TAG, "set_connected threw (unknown) — resetting link");
-            ble_fault_.store(true);
+        {
+            // RAII give — this runs on the NimBLE host task and the callers (on_gap_event /
+            // on_dsc_disc) catch instead of rethrowing, so a throw out of the library here must
+            // not skip the give: a silently-held vehicle_mutex_ would wedge every later
+            // command/poll until power-cycle. The catch also flags a link reset (loop_task).
+            tk::SemGuard g(vehicle_mutex_);
+            try {
+                vehicle_->set_connected(connected);
+            } catch (const std::exception& e) {
+                ESP_LOGE(TAG, "set_connected threw (%s) — resetting link", e.what());
+                ble_fault_.store(true);
+            } catch (...) {
+                ESP_LOGE(TAG, "set_connected threw (unknown) — resetting link");
+                ble_fault_.store(true);
+            }
         }
-        xSemaphoreGive(vehicle_mutex_);
 
         if (!connected) {
             // The BLE link just dropped. The "auth response authentication failed" →
@@ -108,14 +117,13 @@ bool VehicleController::init(const std::string& vin,
         }
     });
     ble_->set_rx_data_cb([this](const std::vector<uint8_t>& data) {
-        xSemaphoreTake(vehicle_mutex_, portMAX_DELAY);
         // on_rx_data parses Tesla's length-prefixed frames out of these bytes synchronously.
         // A weak/lossy BLE link desyncs the framing ("Invalid message length …") and some
         // corrupt inputs make the parser throw (out_of_range / bad_alloc). This callback runs
         // in NimBLE's host task, so an escaping throw unwinds through C dispatch frames →
         // std::terminate → abort() → reboot. Catch it at this nearest C++ boundary and flag a
-        // link reset (handled in loop_task). The give still runs (catch never rethrows), so
-        // the mutex can't be left locked.
+        // link reset (handled in loop_task). RAII give — the mutex releases on unwind too.
+        tk::SemGuard g(vehicle_mutex_);
         try {
             vehicle_->on_rx_data(data);
         } catch (const std::exception& e) {
@@ -125,7 +133,6 @@ bool VehicleController::init(const std::string& vin,
             ESP_LOGE(TAG, "on_rx_data threw (unknown) — corrupt BLE RX; resetting link");
             ble_fault_.store(true);
         }
-        xSemaphoreGive(vehicle_mutex_);
     });
 
     // Persistent charge-state + read-only telemetry cache callbacks (installed once,
@@ -171,8 +178,20 @@ bool VehicleController::init(const std::string& vin,
                       "so a parked car can still sleep", (unsigned) boot_heap_restarts());
     }
 
-    xTaskCreate(loop_task_fn_, "vehicle_loop", 8192, this, tk::kPrioVehicleLoop, &loop_task_);
-    xTaskCreate(auto_pair_task_fn_, "auto_pair", 8192, this, tk::kPrioAutoPair, &auto_pair_task_);
+    if (xTaskCreate(loop_task_fn_, "vehicle_loop", 8192, this,
+                    tk::kPrioVehicleLoop, &loop_task_) != pdPASS) {
+        ESP_LOGE(TAG, "vehicle_loop task creation failed");
+        loop_task_ = nullptr;
+        return false;
+    }
+    if (xTaskCreate(auto_pair_task_fn_, "auto_pair", 8192, this,
+                    tk::kPrioAutoPair, &auto_pair_task_) != pdPASS) {
+        ESP_LOGE(TAG, "auto_pair task creation failed");
+        // Unwind the loop task we already started so no half-initialised controller is left running.
+        if (loop_task_) { vTaskDelete(loop_task_); loop_task_ = nullptr; }
+        auto_pair_task_ = nullptr;
+        return false;
+    }
     ESP_LOGI(TAG, "VehicleController ready for VIN %s", vin.c_str());
     return true;
 }

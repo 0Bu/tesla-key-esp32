@@ -6,6 +6,7 @@
 #include "vehicle_ctrl.hpp"
 #include "vehicle_ctrl_internal.hpp"
 #include <esp_log.h>
+#include <exception>
 
 // protobuf generated headers (from tesla-ble)
 #include <vcsec.pb.h>
@@ -49,6 +50,11 @@ bool VehicleController::ensure_connected_(int timeout_ms) {
 
 VehicleController::ResultCb VehicleController::make_result_cb_(bool auth_fail_is_revocation) {
     return [this, auth_fail_is_revocation](TeslaBLE::OperationResult result) {
+      // Runs on the BLE RX task (invoked from vehicle_->loop()). last_error_ = msg copies a
+      // std::string and can throw bad_alloc; contain it so the throw can't unwind through the
+      // library's C dispatch, AND — the callback invariant — always give cmd_sem_ so the
+      // foreground waiter is released on every path, not left to time out (issue #204).
+      try {
         last_result_ = result.compatible_success();
         if (last_result_) {
             // A good response proves the car still trusts our key — clear any pending
@@ -117,7 +123,12 @@ VehicleController::ResultCb VehicleController::make_result_cb_(bool auth_fail_is
                 }
             }
         }
-        xSemaphoreGive(cmd_sem_);
+      } catch (const std::exception& e) {
+          ESP_LOGE(TAG, "result callback threw (%s) — command result may be partial", e.what());
+      } catch (...) {
+          ESP_LOGE(TAG, "result callback threw (unknown) — command result may be partial");
+      }
+      xSemaphoreGive(cmd_sem_);   // ALWAYS release the foreground waiter, even on a throw
     };
 }
 
@@ -137,11 +148,14 @@ bool VehicleController::send_vcsec_(const std::string& name, Builder builder,
     last_result_ = false;
     last_error_.clear();
 
-    xSemaphoreTake(vehicle_mutex_, portMAX_DELAY);
-    vehicle_->send_command_result(
-        UniversalMessage_Domain_DOMAIN_VEHICLE_SECURITY,
-        name, builder, make_result_cb_(auth_fail_is_revocation), wp);
-    xSemaphoreGive(vehicle_mutex_);
+    {
+        // RAII give — send_command_result runs the protobuf builder, which can throw bad_alloc;
+        // a hand-rolled give would then be skipped and vehicle_mutex_ wedged forever (Scenario B).
+        tk::SemGuard g(vehicle_mutex_);
+        vehicle_->send_command_result(
+            UniversalMessage_Domain_DOMAIN_VEHICLE_SECURITY,
+            name, builder, make_result_cb_(auth_fail_is_revocation), wp);
+    }
 
     bool ok = xSemaphoreTake(cmd_sem_, pdMS_TO_TICKS(timeout_ms)) == pdTRUE;
     if (!ok) ESP_LOGW(TAG, "'%s' timed out", name.c_str());
@@ -159,13 +173,15 @@ bool VehicleController::send_infotainment_(const std::string& name, Builder buil
     last_result_ = false;
     last_error_.clear();
 
-    xSemaphoreTake(vehicle_mutex_, portMAX_DELAY);
-    // WAKE_IF_NEEDED so charge commands also work when the car is asleep
-    // (matches TeslaBleHttpProxy, which auto-wakes the vehicle).
-    vehicle_->send_command_result(
-        UniversalMessage_Domain_DOMAIN_INFOTAINMENT,
-        name, builder, make_result_cb_(), wp);
-    xSemaphoreGive(vehicle_mutex_);
+    {
+        // RAII give — the builder inside send_command_result can throw (Scenario B).
+        tk::SemGuard g(vehicle_mutex_);
+        // WAKE_IF_NEEDED so charge commands also work when the car is asleep
+        // (matches TeslaBleHttpProxy, which auto-wakes the vehicle).
+        vehicle_->send_command_result(
+            UniversalMessage_Domain_DOMAIN_INFOTAINMENT,
+            name, builder, make_result_cb_(), wp);
+    }
 
     bool ok = xSemaphoreTake(cmd_sem_, pdMS_TO_TICKS(timeout_ms)) == pdTRUE;
     if (!ok) ESP_LOGW(TAG, "'%s' timed out", name.c_str());

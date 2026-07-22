@@ -1,5 +1,6 @@
 #include "ble_client.hpp"
 #include "diag_log.hpp"
+#include "rtos_guard.hpp"
 #include <esp_log.h>
 #include <esp_timer.h>
 #include <cstring>
@@ -105,7 +106,13 @@ void BleClient::on_scan_timeout() {
 }
 
 bool BleClient::start() {
-    nimble_port_init();
+    esp_err_t err = nimble_port_init();
+    if (err != ESP_OK) {
+        // ESSENTIAL: with no NimBLE host there is no BLE proxy. Report failure so app_main can
+        // halt boot rather than run a controller that can never connect (issue #204).
+        ESP_LOGE(TAG, "nimble_port_init failed: %d", (int)err);
+        return false;
+    }
 
     ble_hs_cfg.sync_cb  = on_sync_cb;
     ble_hs_cfg.reset_cb = on_reset_cb;
@@ -170,7 +177,10 @@ void BleClient::ensure_scanning_() {
 // Upsert a discovered Tesla into the nearby list (called from the host task).
 void BleClient::note_scan_(const ble_gap_disc_desc& d, const ble_hs_adv_fields& f) {
     if (!scan_mutex_) return;
-    if (xSemaphoreTake(scan_mutex_, 0) != pdTRUE) return;  // never block the host task
+    // try-lock: never block the host task. RAII give — scan_.push_back() below can throw
+    // bad_alloc on a fragmented heap, and a hand-rolled give would then be skipped.
+    tk::SemGuard g(scan_mutex_, 0);
+    if (!g) return;
     ScanEntry* e = nullptr;
     for (auto& s : scan_) {
         if (memcmp(s.addr, d.addr.val, 6) == 0) { e = &s; break; }
@@ -207,22 +217,25 @@ void BleClient::note_scan_(const ble_gap_disc_desc& d, const ble_hs_adv_fields& 
         memcpy(e->name, f.name, n);
         e->name[n] = '\0';
     }
-    xSemaphoreGive(scan_mutex_);
 }
 
 std::vector<TeslaScan> BleClient::nearby() const {
     std::vector<TeslaScan> out;
     if (!scan_mutex_) return out;
     const int64_t now = esp_timer_get_time();
-    if (xSemaphoreTake(scan_mutex_, pdMS_TO_TICKS(50)) != pdTRUE) return out;
-    for (const auto& s : scan_) {
-        if (now - s.last_us > 15LL * 1000 * 1000) continue;  // drop entries older than 15s
-        char addr[18];
-        snprintf(addr, sizeof(addr), "%02x:%02x:%02x:%02x:%02x:%02x",
-                 s.addr[5], s.addr[4], s.addr[3], s.addr[2], s.addr[1], s.addr[0]);
-        out.push_back(TeslaScan{addr, s.name, s.rssi, s.connectable});
+    {
+        // RAII give — the out.push_back() below can throw bad_alloc; releasing scan_mutex_
+        // during unwinding keeps the host task's note_scan_ from wedging.
+        tk::SemGuard g(scan_mutex_, pdMS_TO_TICKS(50));
+        if (!g) return out;
+        for (const auto& s : scan_) {
+            if (now - s.last_us > 15LL * 1000 * 1000) continue;  // drop entries older than 15s
+            char addr[18];
+            snprintf(addr, sizeof(addr), "%02x:%02x:%02x:%02x:%02x:%02x",
+                     s.addr[5], s.addr[4], s.addr[3], s.addr[2], s.addr[1], s.addr[0]);
+            out.push_back(TeslaScan{addr, s.name, s.rssi, s.connectable});
+        }
     }
-    xSemaphoreGive(scan_mutex_);
     std::sort(out.begin(), out.end(),
               [](const TeslaScan& a, const TeslaScan& b) { return a.rssi > b.rssi; });
     return out;
@@ -230,20 +243,22 @@ std::vector<TeslaScan> BleClient::nearby() const {
 
 void BleClient::note_connectable_(const ble_addr_t& addr, bool connectable) {
     if (!scan_mutex_) return;
-    if (xSemaphoreTake(scan_mutex_, 0) != pdTRUE) return;  // never block the host task
+    tk::SemGuard g(scan_mutex_, 0);  // try-lock: never block the host task
+    if (!g) return;
     // Only updates entries we already know are Teslas (created by note_scan_ on a name match);
     // a nameless primary advert for an unknown address is ignored.
     for (auto& s : scan_) {
         if (memcmp(s.addr, addr.val, 6) == 0) { s.connectable = connectable; break; }
     }
-    xSemaphoreGive(scan_mutex_);
 }
 
 int BleClient::target_connectable() const {
     if (!scan_mutex_ || target_vin_.empty()) return -1;
     const int64_t now = esp_timer_get_time();
     int result = -1;
-    if (xSemaphoreTake(scan_mutex_, pdMS_TO_TICKS(50)) != pdTRUE) return -1;
+    // RAII give — matches_vin(std::string(s.name), …) allocates and can throw.
+    tk::SemGuard g(scan_mutex_, pdMS_TO_TICKS(50));
+    if (!g) return -1;
     for (const auto& s : scan_) {
         // 90 s window: a PAIRED device only scans briefly around each ~30-40 s health probe, so
         // a 15 s freshness would flap to "unknown" between probes; 90 s keeps the at-limit signal
@@ -256,16 +271,14 @@ int BleClient::target_connectable() const {
             break;
         }
     }
-    xSemaphoreGive(scan_mutex_);
     return result;
 }
 
 std::string BleClient::peer_addr_str() const {
     if (!client_mutex_) return "";
-    xSemaphoreTake(client_mutex_, portMAX_DELAY);
-    std::string s = peer_addr_str_;
-    xSemaphoreGive(client_mutex_);
-    return s;
+    // RAII give — the string copy can throw bad_alloc; the guard releases on unwind.
+    tk::SemGuard g(client_mutex_);
+    return peer_addr_str_;
 }
 
 uint32_t BleClient::connect_fail_recent() const {
@@ -327,7 +340,8 @@ void BleClient::disconnect() {
 
 bool BleClient::write(const std::vector<uint8_t>& data) {
     if (!is_connected() || write_handle_ == 0) return false;
-    if (xSemaphoreTake(write_mutex_, pdMS_TO_TICKS(500)) != pdTRUE) return false;
+    tk::SemGuard g(write_mutex_, pdMS_TO_TICKS(500));
+    if (!g) return false;
 
     for (size_t offset = 0; offset < data.size(); offset += BLE_CHUNK_SIZE) {
         size_t chunk = std::min(BLE_CHUNK_SIZE, data.size() - offset);
@@ -337,7 +351,6 @@ bool BleClient::write(const std::vector<uint8_t>& data) {
         }
     }
 
-    xSemaphoreGive(write_mutex_);
     return true;
 }
 
@@ -407,10 +420,9 @@ int BleClient::on_gap_event(ble_gap_event* event) {
                  event->disc.addr.val[3], event->disc.addr.val[2],
                  event->disc.addr.val[1], event->disc.addr.val[0]);
         ESP_LOGI(TAG, "Tesla '%s' found: %s — connecting", adv_name.c_str(), addr_str);
-        if (client_mutex_) {
-            xSemaphoreTake(client_mutex_, portMAX_DELAY);
-            peer_addr_str_ = addr_str;
-            xSemaphoreGive(client_mutex_);
+        {
+            tk::SemGuard g(client_mutex_);   // RAII: peer_addr_str_ = … can throw
+            if (g) peer_addr_str_ = addr_str;
         }
         // Seed the link RSSI from this advert so the UI has a real value to show from the
         // moment we connect (incl. while pairing), before the first live read succeeds.
@@ -480,10 +492,9 @@ int BleClient::on_gap_event(ble_gap_event* event) {
         want_connect_      = false;
         scanning_          = false;
         conn_rssi_valid_   = false;   // stale once the link is gone
-        if (client_mutex_) {
-            xSemaphoreTake(client_mutex_, portMAX_DELAY);
-            peer_addr_str_.clear();
-            xSemaphoreGive(client_mutex_);
+        {
+            tk::SemGuard g(client_mutex_);   // RAII give
+            if (g) peer_addr_str_.clear();
         }
         if (on_connected_) on_connected_(false);
         // Stay idle (no auto-scan); discovery is manual, connect is on demand.

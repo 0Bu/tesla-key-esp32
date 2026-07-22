@@ -122,8 +122,19 @@ static esp_err_t save_post(httpd_req_t* req) {
     vin = (vs == std::string::npos) ? std::string{} : vin.substr(vs, ve - vs + 1);
     for (char& c : vin) c = (char)std::toupper((unsigned char)c);
 
-    g_cfg->save_str("wifi_ssid", ssid);
-    g_cfg->save_str("wifi_pass", pass);
+    // Persist credentials, and only reboot if the write actually landed. A failed save that
+    // still rebooted would drop the device back into setup mode (ssid still empty) while telling
+    // the user "Saved" — so on failure we KEEP setup mode active and report the error instead.
+    // The VIN is optional (pairing simply stays disabled until one is set), so its save is not
+    // gated the same way.
+    if (!g_cfg->save_str("wifi_ssid", ssid) || !g_cfg->save_str("wifi_pass", pass)) {
+        ESP_LOGE(TAG, "could not persist WiFi config — staying in setup mode");
+        httpd_resp_set_type(req, "text/html");
+        httpd_resp_sendstr(req,
+            "<p>Could not save the configuration (storage error). "
+            "Please try again. <a href=/>Back</a>.</p>");
+        return ESP_OK;
+    }
     if (tk::vin_is_plausible(vin)) g_cfg->save_str("vin", vin);
     ESP_LOGI(TAG, "saved config: ssid='%s' vin='%s' — rebooting", ssid.c_str(), vin.c_str());
 
@@ -216,8 +227,11 @@ void provisioning_run(NvsStorageAdapter& config_store) {
 
     ESP_LOGI(TAG, "Setup AP up. Join WiFi '%s' and open http://192.168.4.1", AP_SSID);
 
-    // Captive-portal DNS so the setup form pops up automatically on phones.
-    xTaskCreate(dns_task, "captive_dns", 4096, nullptr, tk::kPrioCaptiveDns, nullptr);
+    // Captive-portal DNS so the setup form pops up automatically on phones. Best-effort: if the
+    // task can't be created the portal is still reachable by IP (http://192.168.4.1), so log and
+    // carry on rather than abort.
+    if (xTaskCreate(dns_task, "captive_dns", 4096, nullptr, tk::kPrioCaptiveDns, nullptr) != pdPASS)
+        ESP_LOGW(TAG, "captive DNS task not started — portal still reachable at 192.168.4.1");
 
     httpd_config_t hcfg   = HTTPD_DEFAULT_CONFIG();
     hcfg.uri_match_fn     = httpd_uri_match_wildcard;
@@ -225,14 +239,21 @@ void provisioning_run(NvsStorageAdapter& config_store) {
     httpd_handle_t server = nullptr;
     ESP_ERROR_CHECK(httpd_start(&server, &hcfg));
 
+    // A portal that can't serve its form or accept a save is useless — the only recovery is to
+    // retry setup from scratch, so a failed registration reboots (back into this same setup mode)
+    // rather than stranding the user on a dead page.
     httpd_uri_t save = { .uri = "/save", .method = HTTP_POST,
                          .handler = save_post, .user_ctx = nullptr };
-    httpd_register_uri_handler(server, &save);
-
     // Wildcard GET → form (also serves captive-portal probe requests)
     httpd_uri_t form = { .uri = "/*", .method = HTTP_GET,
                          .handler = form_get, .user_ctx = nullptr };
-    httpd_register_uri_handler(server, &form);
+    if (httpd_register_uri_handler(server, &save) != ESP_OK ||
+        httpd_register_uri_handler(server, &form) != ESP_OK) {
+        ESP_LOGE(TAG, "setup portal handler registration failed — restarting into setup");
+        httpd_stop(server);
+        vTaskDelay(pdMS_TO_TICKS(1000));
+        esp_restart();
+    }
 
     // Never returns — the device stays in setup mode until the form reboots it.
     while (true) vTaskDelay(pdMS_TO_TICKS(1000));
