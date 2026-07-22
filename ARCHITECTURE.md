@@ -793,14 +793,18 @@ parked car never sleeps.
 
 ### Lock hierarchy (`VehicleController`)
 
-Four primitives, created in `VehicleController::init` (`vehicle_ctrl.cpp`); the RAII guards
-live in `vehicle_ctrl_internal.hpp` (`tk::MutexGuard`, `tk::InFlightGuard`):
+Four primitives, created in `VehicleController::init` (`vehicle_ctrl.cpp`). The ONE shared,
+exception-safe RAII guard is `tk::SemGuard` in [`main/rtos_guard.hpp`](../main/rtos_guard.hpp)
+(blocking or finite/zero-wait, exposes `acquired()`); `vehicle_ctrl_internal.hpp` keeps the
+historical alias `tk::MutexGuard = tk::SemGuard` plus `tk::InFlightGuard`. Every take/give around
+code that can throw (a tesla-ble builder/parser → `std::bad_alloc`, a `std::string` copy) goes
+through the guard so the lock is released during stack unwinding, never left held (issue #204):
 
 | Primitive | Kind | Protects |
 |---|---|---|
 | `command_mutex_` | mutex, RAII | one whole command/query cycle: exclusive use of `cmd_sem_`, `last_result_`, `last_error_` |
-| `vehicle_mutex_` | mutex, take/give | **every** call into the tesla-ble `vehicle_` object (send, `loop()`, `on_rx_data`, `set_connected`) |
-| `cmd_sem_` | binary semaphore | signals "result callback ran" from the BLE RX task to the waiting command |
+| `vehicle_mutex_` | mutex, RAII (`SemGuard`) | **every** call into the tesla-ble `vehicle_` object (send, `loop()`, `on_rx_data`, `set_connected`) |
+| `cmd_sem_` | binary semaphore | signals "result callback ran" from the BLE RX task to the waiting command (the result callback **always** gives it, even if its body throws) |
 | `cache_mutex_` | mutex, RAII, leaf | the `last_known_*` caches (`std::string` members ⇒ an unlocked copy is torn-read UB) |
 
 **Normative order:** `command_mutex_` → `vehicle_mutex_` → `cache_mutex_`. Acquire strictly
@@ -841,6 +845,7 @@ Application-task priorities are declared **only** in [`main/task_config.hpp`](..
 | `ws_bcast` | `kPrioWsBroadcast` = 4 | 6144 | `http_events.cpp` | `/events` live-status push (self-gated on `ws_any_clients()`) |
 | `display` | `kPrioDisplay` = 3 | 6144 | `display.cpp` | ST7735 renderer (`CONFIG_TESLA_DISPLAY_ENABLED` builds) |
 | `ota_gate` | `kPrioOtaGate` = 3 | 3072 | `main.cpp` | one-shot OTA rollback health gate (~90 s) |
+| `syslog_task` | `kPrioSyslog` = 3 | 6144 | `syslog.cpp` | best-effort UDP Syslog forwarder (opt-in; degraded-not-fatal on a failed start) |
 | `led` | `kPrioLed` = 2 | 3072 | `led_status.cpp` | APA102 status LED (`CONFIG_TESLA_LED_ENABLED` builds) |
 
 Not in the table (ESP-IDF-owned, priorities from IDF Kconfig, not `task_config.hpp`): the
@@ -857,6 +862,51 @@ stamp — crossing tasks with no multi-field consistency requirement (`pairing_l
 a *group* — above all structs holding `std::string` — goes under a mutex (`cache_mutex_` for
 the caches). The test: if two fields must be observed consistently together, that is a mutex,
 not two atomics.
+
+Cross-task **file-scope** scalars follow the same rule outside `VehicleController`: WiFi
+connected / ever-connected / gateway-reachable / NTP-synced (`main.cpp`), diag verbosity
+(`diag_log.cpp`), BLE `want_connect_`/`connecting_`/`scanning_`/`host_synced_` + the connect-fail
+counter/stamp (`ble_client.hpp`), and MQTT `configured`/`tls`/`connected` (`mqtt_ha.cpp`) are all
+`std::atomic` (simple seq_cst) — `volatile` blocks some optimizations but is **not** a
+happens-before edge under the C++ memory model.
+
+### Exception containment (normative)
+
+C++ exceptions are enabled and the heap is tight, so `std::bad_alloc` (and library throws) are
+**reachable**, not theoretical. An exception that escapes into an ESP-IDF / FreeRTOS / NimBLE /
+esp-mqtt / esp_http_server / SNTP **C frame** unwinds through non-exception-aware code →
+`std::terminate()` → `abort()` → reboot (and a reboot loop re-opens the poll window, so a parked
+car never sleeps). The rule, by execution model:
+
+- **Long-running FreeRTOS tasks** (`vehicle_loop`, `auto_pair`, `mqtt_pub`, `ws_bcast`,
+  `syslog_task`, `display`, `led`) wrap their **iteration** in `try { … } catch (std::exception&)
+  catch (…)`, log the component, preserve invariants (RAII locks release on unwind), delay briefly
+  so no tight error loop forms, and continue with the next iteration.
+- **One-shot jobs** (`ota_chk`, `ota`) convert a throw into a terminal **error state** visible in
+  `/ota/status` — never a reboot.
+- **C callbacks** (NimBLE GAP/GATT + RX, the tesla-ble result/state callbacks, the MQTT event
+  handler, the SNTP sync cb) catch locally and return a valid API result; the tesla-ble result
+  callback additionally **always** gives `cmd_sem_` so the foreground waiter is released on a throw.
+- **Critical boot** (`app_main`) has a top-level boundary; anything that escapes it restarts
+  cleanly with a diagnostic instead of a bare `abort()`.
+- A catch-all (`catch (...)`) always follows `catch (std::exception&)` because third-party code is
+  not guaranteed to throw only standard exception types.
+
+### Startup failure policy (normative)
+
+Component start/init functions **report success/failure**; `app_main` classifies them and never
+runs a partial system that still announces itself as "running" (issue #204):
+
+- **Essential** — `config`/`tesla_ble` NVS, `VehicleController::init` (its sync primitives + tasks),
+  NimBLE (`ble_client.start`), the primary HTTP server (`http_server_start`, which unwinds a partial
+  handler registration and stops the server), the WiFi watchdog task, and the OTA health-gate task.
+  A failure calls `boot_fatal()`: log loudly, let Syslog flush, `esp_restart()`. This path is reached
+  **before** the health gate marks a pending OTA image valid — so a freshly-flashed image that cannot
+  bring up an essential component reboots still `PENDING_VERIFY` and the bootloader **rolls it back**.
+- **Optional** — the MQTT bridge (`mqtt_ha_start`), Syslog forwarding (`syslog_start`), and the
+  on-device display/LED when enabled. A failure unwinds its own partial resources, is **logged**, and
+  degrades to disabled; its public status must not claim it is operational. Boot continues — the
+  primary BLE/HTTP proxy runs regardless.
 
 ### Deferred: owned BLE-ops queue
 
