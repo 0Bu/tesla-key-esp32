@@ -129,6 +129,11 @@ void led_task(void* arg) {
     const int64_t t0 = esp_timer_get_time();
 
     for (int frame = 0;; ++frame) {
+      // Iteration-boundary containment (issue #204): ota_get_status() copies std::strings and
+      // ui_snapshot() reads the cache — both can throw bad_alloc under heap pressure. A cosmetic
+      // task with no lock held across the frame, so contain any throw rather than let it unwind
+      // into the FreeRTOS C task trampoline → std::terminate → reboot.
+      try {
         const int64_t now = esp_timer_get_time();
 
         if (frame % kSampleEveryFrames == 0) {
@@ -160,6 +165,10 @@ void led_task(void* arg) {
         apa_show((uint8_t)(r * f), (uint8_t)(g * f), (uint8_t)(b * f));
 
         vTaskDelay(pdMS_TO_TICKS(kFrameMs));
+      } catch (...) {
+          ESP_LOGE(TAG, "led frame threw — skipping this frame");
+          vTaskDelay(pdMS_TO_TICKS(200));
+      }
     }
 }
 

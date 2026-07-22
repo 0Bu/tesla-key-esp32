@@ -13,7 +13,7 @@
 //   4 — supervisors and bridge publishers: periodic, latency-tolerant, but expected to
 //       run promptly when due.
 //   3 — local reporting with relaxed deadlines (display frames, the one-shot OTA
-//       health gate).
+//       health gate, best-effort Syslog forwarding).
 //   2 — pure cosmetics (status LED), below everything.
 // The NimBLE host task and esp_http_server's task are created by ESP-IDF with their own
 // Kconfig-set priorities and are not governed by this table (see the task inventory in
@@ -33,6 +33,7 @@ inline constexpr UBaseType_t kPrioMqttPub      = 4;  // mqtt_ha.cpp         MQTT
 inline constexpr UBaseType_t kPrioWsBroadcast  = 4;  // http_events.cpp     /events live-status push
 inline constexpr UBaseType_t kPrioDisplay      = 3;  // display.cpp         ST7735 renderer (C5/S3 only)
 inline constexpr UBaseType_t kPrioOtaGate      = 3;  // main.cpp            one-shot OTA health gate
+inline constexpr UBaseType_t kPrioSyslog       = 3;  // syslog.cpp          UDP Syslog forwarder (opt-in)
 inline constexpr UBaseType_t kPrioLed          = 2;  // led_status.cpp      APA102 status LED (opt-in)
 
 }  // namespace tk

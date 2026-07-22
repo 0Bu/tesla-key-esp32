@@ -10,19 +10,17 @@
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+#include "rtos_guard.hpp"
 
 // RAII guard that serializes a full command/query cycle (command_mutex_) or a cache
-// copy (cache_mutex_). Lives in the project's tk:: namespace: a stock utility name like
-// MutexGuard in the global namespace would be one same-named struct in any linked
-// component away from an IFNDR ODR clash with no diagnostic.
+// copy (cache_mutex_). Now the ONE shared exception-safe guard, tk::SemGuard
+// (main/rtos_guard.hpp) — kept under the historical name MutexGuard so the existing call
+// sites (vehicle_commands.cpp / vehicle_telemetry.cpp / vehicle_pairing.cpp) read
+// unchanged. Unlike the old hand-rolled version, releasing now happens during stack
+// unwinding too, so a throw from a tesla-ble builder/parser while a mutex is held can no
+// longer leave it locked (Scenario B in issue #204).
 namespace tk {
-struct MutexGuard {
-    SemaphoreHandle_t m;
-    explicit MutexGuard(SemaphoreHandle_t mtx) : m(mtx) { xSemaphoreTake(m, portMAX_DELAY); }
-    ~MutexGuard() { xSemaphoreGive(m); }
-    MutexGuard(const MutexGuard&) = delete;
-    MutexGuard& operator=(const MutexGuard&) = delete;
-};
+using MutexGuard = SemGuard;
 
 // RAII: marks a foreground command/query "in flight" (cmd_in_flight_) for as long as it
 // is being sent + awaited, so loop_task pauses injecting background telemetry polls

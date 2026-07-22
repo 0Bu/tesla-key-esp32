@@ -100,8 +100,15 @@ cJSON* build_status_object();
 // (WS-only, no poll fallback). The /events handler is the ONE route NOT reached through the
 // GuardedReq/handle_all trampoline — the WS handshake needs the raw esp_http_server signature, so
 // it is registered directly and guards its own allocations internally (see http_events.cpp).
-void http_events_register(httpd_handle_t server);  // register /events + start the broadcast task
+// Register /events + start the broadcast task. Returns false if the mutex, the WS handler
+// registration, or the broadcast task could not be created — the caller (http_server_start)
+// then unwinds the whole HTTP startup (issue #204, Scenario D). Partially-acquired resources
+// are released by http_events_stop() before returning false.
+bool http_events_register(httpd_handle_t server);
 void http_events_on_close(int sockfd);             // drop a closed socket from the broadcast list
+// Tear down the broadcast task + registry (used to unwind a partially-initialised HTTP start).
+// Safe to call whether or not the task was created; httpd_stop() unregisters the /events route.
+void http_events_stop();
 
 // http_ota.cpp — OTA self-update endpoints
 esp_err_t handle_ota_check(GuardedReq rq);        // GET  /ota/check[?ms=<epoch>]

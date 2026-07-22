@@ -15,10 +15,12 @@
 
 #include "platform.hpp"
 #include "task_config.hpp"
+#include "rtos_guard.hpp"
 
 #include <atomic>
 #include <cstdio>
 #include <cstring>
+#include <exception>
 #include <string_view>
 
 static const char* TAG = "ota";
@@ -69,28 +71,30 @@ static void ensure_lock() {
     if (!s_lock) s_lock = xSemaphoreCreateMutex();
 }
 
+// The status fields are std::string, so every assignment/copy below can throw bad_alloc on a
+// fragmented heap. RAII (tk::SemGuard) releases s_lock during unwinding, so a throw here can't
+// wedge the lock and freeze /ota/status for the rest of the boot.
 static void set_state(OtaState st, int pct, const char* msg) {
     ensure_lock();
-    xSemaphoreTake(s_lock, portMAX_DELAY);
+    tk::SemGuard g(s_lock);
+    if (!g) return;
     s_status.state    = st;
     s_status.progress = pct;
     s_status.message  = msg ? msg : "";
-    xSemaphoreGive(s_lock);
 }
 
 static void set_available(const char* ver) {
     ensure_lock();
-    xSemaphoreTake(s_lock, portMAX_DELAY);
+    tk::SemGuard g(s_lock);
+    if (!g) return;
     s_status.available = ver ? ver : "";
-    xSemaphoreGive(s_lock);
 }
 
 OtaStatus ota_get_status() {
     ensure_lock();
-    xSemaphoreTake(s_lock, portMAX_DELAY);
-    OtaStatus copy = s_status;
-    xSemaphoreGive(s_lock);
-    return copy;
+    tk::SemGuard g(s_lock);
+    if (!g) return s_status;   // best-effort read if the lock never allocated
+    return s_status;
 }
 
 bool ota_is_busy() { return s_running.load(); }
@@ -194,19 +198,30 @@ OtaCheckResult ota_check() {
 // Publish a finished check into the shared status for /ota/status polling.
 static void set_check_done(const OtaCheckResult& r) {
     ensure_lock();
-    xSemaphoreTake(s_lock, portMAX_DELAY);
+    tk::SemGuard g(s_lock);   // RAII: the std::string assigns below can throw
+    if (!g) return;
     s_status.state            = r.ok ? OtaState::Idle : OtaState::Error;
     s_status.progress         = 0;
     s_status.message          = r.reason;
     s_status.available        = r.available;
     s_status.update_available = r.update_available;
     s_status.current          = r.current;
-    xSemaphoreGive(s_lock);
 }
 
 static void ota_check_task(void*) {
-    OtaCheckResult r = ota_check();   // blocking HTTPS GET, runs off the HTTP task
-    set_check_done(r);
+    // A one-shot job: contain any throw (http_get_to_buffer's std::string appends, cJSON, the
+    // status std::string ops can all bad_alloc) as a terminal Error state — NEVER let it unwind
+    // into the FreeRTOS C trampoline and reboot the device mid-check (issue #204).
+    try {
+        OtaCheckResult r = ota_check();   // blocking HTTPS GET, runs off the HTTP task
+        set_check_done(r);
+    } catch (const std::exception& e) {
+        ESP_LOGE(TAG, "OTA check threw (%s)", e.what());
+        set_state(OtaState::Error, 0, "check failed (internal error)");
+    } catch (...) {
+        ESP_LOGE(TAG, "OTA check threw (unknown)");
+        set_state(OtaState::Error, 0, "check failed (internal error)");
+    }
     s_running = false;
     vTaskDelete(nullptr);
 }
@@ -229,6 +244,11 @@ bool ota_check_start() {
 // ─── Background download + install ──────────────────────────────────────────────
 
 static void ota_task(void*) {
+  // Contain any throw as a terminal Error state (like ota_check_task): an OTA worker must
+  // reflect failure in /ota/status, never reboot the device by unwinding into C (issue #204).
+  // The early-return paths below clean up (abort + s_running=false + vTaskDelete) themselves;
+  // this boundary covers an unexpected throw from the status/string bookkeeping.
+  try {
     // One channel, per-target image: base URL + this chip's short image suffix. The literals
     // concatenate at compile time (TESLA_OTA_IMG_SUFFIX is a string literal), so this is a
     // fixed string with no allocation. esp_https_ota also verifies the image chip-id, so a
@@ -314,6 +334,13 @@ static void ota_task(void*) {
         esp_https_ota_abort(handle);
         set_state(OtaState::Error, 0, "download failed");
     }
+  } catch (const std::exception& e) {
+      ESP_LOGE(TAG, "OTA task threw (%s) — aborting update", e.what());
+      set_state(OtaState::Error, 0, "update failed (internal error)");
+  } catch (...) {
+      ESP_LOGE(TAG, "OTA task threw (unknown) — aborting update");
+      set_state(OtaState::Error, 0, "update failed (internal error)");
+  }
 
     s_running = false;
     vTaskDelete(nullptr);
