@@ -51,6 +51,22 @@ bool NvsStorageAdapter::load(const std::string& key, std::vector<uint8_t>& buffe
     return true;
 }
 
+bool NvsStorageAdapter::blob_exists(const std::string& key) const {
+    if (!initialized_) return false;
+    // map_key() returns a ≤15-char key, so it is small-string-optimised (no heap). Unlike
+    // load(), this probes only the stored length and never resizes/reads the blob into a
+    // vector — the point is a heap-free existence test on a repeatedly-sampled hot path.
+    std::string nvskey = map_key(key);
+    size_t len = 0;
+    esp_err_t err = nvs_get_blob(handle_, nvskey.c_str(), nullptr, &len);
+    if (err == ESP_ERR_NVS_NOT_FOUND || len == 0) return false;
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "exists probe failed '%s': %s", nvskey.c_str(), esp_err_to_name(err));
+        return false;
+    }
+    return true;
+}
+
 bool NvsStorageAdapter::save(const std::string& key, const std::vector<uint8_t>& buffer) {
     if (!initialized_) return false;
     std::string nvskey = map_key(key);
@@ -59,7 +75,11 @@ bool NvsStorageAdapter::save(const std::string& key, const std::vector<uint8_t>&
         ESP_LOGE(TAG, "save failed '%s': %s", nvskey.c_str(), esp_err_to_name(err));
         return false;
     }
-    nvs_commit(handle_);
+    err = nvs_commit(handle_);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "commit failed after save '%s': %s", nvskey.c_str(), esp_err_to_name(err));
+        return false;
+    }
     return true;
 }
 
@@ -71,7 +91,11 @@ bool NvsStorageAdapter::remove(const std::string& key) {
         ESP_LOGE(TAG, "remove failed '%s': %s", nvskey.c_str(), esp_err_to_name(err));
         return false;
     }
-    nvs_commit(handle_);
+    err = nvs_commit(handle_);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "commit failed after remove '%s': %s", nvskey.c_str(), esp_err_to_name(err));
+        return false;
+    }
     return true;
 }
 
@@ -106,6 +130,10 @@ bool NvsStorageAdapter::save_str(const char* key, const std::string& value) {
         ESP_LOGE(TAG, "save_str failed '%s': %s", nvskey.c_str(), esp_err_to_name(err));
         return false;
     }
-    nvs_commit(handle_);
+    err = nvs_commit(handle_);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "commit failed after save_str '%s': %s", nvskey.c_str(), esp_err_to_name(err));
+        return false;
+    }
     return true;
 }
