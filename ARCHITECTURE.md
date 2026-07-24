@@ -315,12 +315,22 @@ grouped under one device. **Read-only by design** — no command topics are subs
 ## Syslog forwarder
 
 `main/syslog.cpp` forwards the same in-RAM diag log served by `GET /diag` (`main/diag_log.cpp`)
-to a UDP Syslog collector, best-effort, framed as RFC 5424 (`<14>1 - tesla-key-esp32 - - - -
-<message>`, facility `user`/priority `info` throughout — there is no per-line severity mapping).
-The capture point is `diag_log.cpp`'s `esp_log_set_vprintf` hook, which already mirrors every
-`ESP_LOG*` line (from this firmware **and** ESP-IDF/NimBLE internals — NimBLE is pre-throttled
-to `WARN` there) into the `/diag` ring; the same call also queues the line for Syslog, so there
-is exactly one capture point to keep in sync, not two.
+to a UDP Syslog collector, best-effort, framed as RFC 5424 (`<PRI>1 - tesla-key-esp32 - - - -
+<message>`). The capture point is `diag_log.cpp`'s `esp_log_set_vprintf` hook, which already
+mirrors every `ESP_LOG*` line (from this firmware **and** ESP-IDF/NimBLE internals — NimBLE is
+pre-throttled to `WARN` there) into the `/diag` ring; the same call also queues the line for
+Syslog, so there is exactly one capture point to keep in sync, not two.
+
+- **Severity** (`tk::syslog_pri_for_line`, host-tested): facility is always `user` (1); the
+  severity comes from the line's own esp_log level, which the hook sees because it captures the
+  *formatted* line — `E`/`W`/`I`/`D`|`V` → 3/4/6/7. A leading ANSI colour escape
+  (`CONFIG_LOG_COLORS=y`, the IDF default) is skipped first, and a line without a recognised
+  `"<L> ("` prefix stays `info` — plenty of forwarded lines come from tesla-ble and NimBLE with
+  no esp_log prefix at all, and inventing a severity for those would be a false alarm.
+  *This used to be a hardcoded `<14>`.* The cost was measured: a week of device logs
+  (17.–24.07.2026, 211366 lines) arrived at the collector as uniformly `info`, including 61417
+  `ESP_LOGE` and 81708 `ESP_LOGW` lines, so `severity:error` matched nothing and finding a fault
+  meant substring-matching `_msg:"E ("`.
 
 - **Config:** one NVS string, `syslog_uri` (`tesla_cfg` namespace) — a bare `"host:port"`, no
   scheme (a bare host defaults to port 514); `""` disables forwarding. Falls back to
@@ -517,11 +527,22 @@ run legitimately reads somewhat over 300 s (it is sampled on a 30 s cadence).
 256-byte *stack* buffer (deliberately — it must not allocate on the heap it is reporting about),
 and anything longer reaches both `/diag` and syslog **cut off mid-sentence**. The restart line is
 the one that must never be truncated, so it carries the state and a pointer here, not the
-reasoning itself. The `BOOT` line is
-emitted *after* `syslog_start()` on purpose: `syslog_send()` is a no-op before that, so logging it
-at the point the breadcrumb is read — which is where it naturally belongs, and where it used to be
-— would confine the one line explaining an unattended 04:00 self-heal to the RAM ring that the
-restart just erased.
+reasoning itself.
+
+**Both `BOOT` lines are emitted *after* `syslog_start()` on purpose** — `syslog_send()` is a no-op
+before that, because the queue it writes to does not exist yet. Anything logged earlier in
+`app_main` reaches the serial console and the `/diag` RAM ring and *nothing else*, which for a
+post-mortem means nothing at all: the restart erases the ring. That applies to the `reason=heap:<k>`
+breadcrumb (which is *read* earlier, before anything else can reboot, but announced here) and to
+`BOOT reset_reason=…` — whose values are likewise **sampled at the top of `app_main`**, before NVS
+init, WiFi and the component `start()`s have allocated, so the heap figures describe the boot we
+came up in rather than the boot we already made.
+
+That second line had been left above `syslog_start()`, and the effect is worth recording because it
+is the failure mode this whole section exists to prevent: over 17.–24.07.2026 the device booted 56
+times and the collector received **zero** `BOOT reset_reason=` lines. When it went silent for 1 h
+54 min on 20.07. and came back up, there was no way to tell a panic from a brownout from a deliberate
+restart — the one line that answers it had been written to a ring that the reboot then wiped.
 
 ## WiFi / LAN connectivity (reconnect + watchdog)
 
@@ -676,6 +697,29 @@ no-VIN screen lists nearby Teslas (bars · dBm · MAC, sorted by signal) from th
 listing-only scan. Hero glyphs: grey Bluetooth = "Set up needed", grey NFC-card = "Pairing",
 orange Bluetooth = "Connection failed".
 
+**The same three-way verdict decides what a failed connect LOGS** (`logic/connect_outcome.hpp`,
+host-tested). `ensure_connected_()` used to end every unsuccessful attempt with one line —
+`E vehicle_ctrl: connection timeout after 10000ms` — and that was wrong twice over. It asserted a
+timed-out connect even when the scan never matched the car, i.e. when no connect was attempted at
+all; and, since the background health poll retries roughly every 40 s forever with no backoff, a car
+parked elsewhere emitted **7117 ERROR lines in a week** (17.–24.07.2026) describing a condition that
+was expected, unchanged and self-resolving. So:
+
+| `target_connectable()` | Cause | Background level |
+|---|---|---|
+| `-1` (no matching advert) | `OutOfRange` — car away/asleep | **warn** — the expected resting state |
+| `0` (advert non-connectable) | `AtBleLimit` — at its ~3-device limit | **error** |
+| `1` (connectable, connect failed) | `ConnectFailed` | **error** — the two-boards-on-one-car signature |
+
+Rate limit: first occurrence of a cause is logged, then only every `kConnectFailRepeatEvery` (90 ≈
+hourly at the retry cadence) until the cause **changes** or a connect succeeds. A change of cause is
+never suppressed — "the car came back but now the connect fails" is precisely the transition worth
+seeing, and folding it into a running streak would hide it for up to an hour. **Foreground attempts
+(`cmd_in_flight_` — an evcc/MCP/user request is blocked on this one) are always ERROR and never
+suppressed**, whatever the cause: a request that returned nothing must leave a line behind.
+Suppressed attempts still reach the console and `/diag` at `DEBUG`, and the condition itself is
+always readable in `/status.ble`; only the forwarded log stops repeating itself.
+
 Reachability is tracked by a
 `last_reachable_ticks_` clock stamped on every successful signed round-trip, incl. the idle
 health poll. **last boot** is published as an ISO-8601 timestamp (device_class
@@ -705,6 +749,23 @@ so no stale data is shown (`clear_session_and_cache_()` in `vehicle_pairing.cpp`
    the same VIN is a no-op for the pairing.
 
 After any of these `has_session()` is false → UI shows "not paired", hides controls/SOC.
+
+**Session reuse across a reboot needs the wall clock restored first.** The `sess_vcsec`/`sess_info`
+blobs in NVS exist so a restart does not cost a fresh handshake, but tesla-ble only accepts a
+persisted session younger than an hour, and it measures that as
+
+```c
+uint32_t session_age = (uint32_t) time(nullptr) - session.clock_time;   // vehicle.cpp
+```
+
+At 1970 that subtraction **underflows** — the age comes out as the raw stored epoch (~1.78e9), which
+is comfortably over the 3600 s limit, so *every* persisted session is rejected however fresh it is.
+`main.cpp` therefore calls `restore_clock_from_nvs()` (the `last_time` cache written on each NTP
+sync) **before** `VehicleController::init()`, not next to the SNTP setup after WiFi where it used to
+sit — the restore itself needs no network, so nothing kept it down there. Measured before the fix:
+49 boots in the 17.–24.07.2026 syslog, 49 rejections of both domains, the last of them discarding a
+VCSEC session that was 43 minutes old. NTP refines the restored clock seconds later; the ordering is
+what matters, not the precision.
 
 **A configured VIN gates pairing entirely.** The device targets the car by its VIN-derived
 BLE name (`S<hex>C`), so `auto_pair_task` first checks `has_plausible_vin()` (17-char VIN;
