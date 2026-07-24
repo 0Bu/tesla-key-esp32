@@ -34,9 +34,12 @@ enum class ConnectFail : uint8_t {
     ConnectFailed,  // advert seen and connectable, yet the GATT connect never completed
 };
 
-// Map BleClient::target_connectable() (-1 = not seen, 0 = non-connectable, 1 = connectable)
-// onto the failure kind. Kept here rather than at the call site so the test pins the mapping
-// — a silent off-by-one between "-1 unknown" and "0 at limit" would mislabel every line.
+// Map BleClient::target_connectable() (-1 = not seen OR not determinable, 0 = non-connectable,
+// 1 = connectable) onto the failure kind. Kept here rather than at the call site so the test
+// pins the mapping — a silent off-by-one between "-1 unknown" and "0 at limit" would mislabel
+// every line. Note -1 is deliberately the conservative bucket: the scanner returns it both for
+// "no advert matched" and for "couldn't determine" (scan mutex busy, or the caller's own
+// allocation failure), and OutOfRange is the reading that raises no false alarm.
 inline ConnectFail connect_fail_from_connectable(int connectable) {
     if (connectable < 0) return ConnectFail::OutOfRange;
     if (connectable == 0) return ConnectFail::AtBleLimit;

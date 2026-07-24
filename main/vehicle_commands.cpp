@@ -45,7 +45,19 @@ bool VehicleController::ensure_connected_(int timeout_ms) {
         // therefore emitted 7117 ERROR lines a week — see logic/connect_outcome.hpp for the
         // measurement and the rate-limit rule. target_connectable() is the scanner's own
         // verdict on the target: not seen / non-connectable / connectable.
-        const tk::ConnectFail kind = tk::connect_fail_from_connectable(ble_->target_connectable());
+        // target_connectable() copies each advert name into a std::string (tesla-ble's
+        // matches_vin overload), so it ALLOCATES and can throw — and this path runs when the
+        // radio is unhappy, which correlates with the heap being unhappy. Letting that escape
+        // would lose the line explaining the failure to the very condition it is reporting on,
+        // and would abort the enclosing command besides. -1 is the scanner's own "not known"
+        // value (what it returns when it can't take the scan mutex either), so the fallback
+        // classifies conservatively: warn, rate-limited, no false at-BLE-limit alarm.
+        int connectable = -1;
+        try {
+            connectable = ble_->target_connectable();
+        } catch (...) {
+        }
+        const tk::ConnectFail kind = tk::connect_fail_from_connectable(connectable);
         // Foreground = an evcc/MCP/user request is blocked on this attempt (the same flag the
         // background polls pause on). Never rate-limited: a request that got nothing back must
         // always leave a line behind.
