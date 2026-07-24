@@ -14,8 +14,11 @@
 //                                    (logic/command_registry.hpp <- http_api.cpp + mcp_server.cpp)
 //   * the /status field contract, pinned by golden emissions
 //                                    (logic/status_model.hpp <- http_status.cpp)
-//   * Syslog target parsing + send-failure classification
+//   * Syslog target parsing, send-failure classification + the RFC 5424 PRI derived from
+//     each line's esp_log level
 //                                    (logic/syslog_policy.hpp <- syslog.cpp, /set_syslog)
+//   * BLE connect-failure cause + its log level / rate limit
+//                                    (logic/connect_outcome.hpp <- ensure_connected_)
 // The cJSON serializers stay IDF/cJSON-coupled, but they are one-to-one visitors now:
 // every which-field/when/what-value decision they render is host-tested here.
 
@@ -32,6 +35,7 @@
 #include "logic/soc_gradient.hpp"
 #include "logic/led_status.hpp"
 #include "logic/syslog_policy.hpp"
+#include "logic/connect_outcome.hpp"
 #include "logic/ws_policy.hpp"
 #include "logic/active_window.hpp"
 #include "logic/ble_phase.hpp"
@@ -153,6 +157,128 @@ static void test_syslog_policy() {
     CHECK(!tk::syslog_send_failure_actions(false, false).reprobe_once);
     CHECK(!tk::syslog_send_failure_actions(false, true).stop_forwarding);
     CHECK(!tk::syslog_send_failure_actions(false, true).reprobe_once);
+
+    // PRI derivation: the whole point is that severity DISCRIMINATES. The forwarder used to
+    // stamp every line <14> (user.info), so a week of logs came back from the collector with
+    // 61417 ESP_LOGE lines indistinguishable from heartbeats. Facility stays user (1) — only
+    // the severity varies with the esp_log level letter.
+    auto pri = [](const char* s) { return tk::syslog_pri_for_line(s, std::strlen(s)); };
+    auto sev = [](const char* s) { return tk::syslog_severity_for_line(s, std::strlen(s)); };
+
+    CHECK(sev("E (206191310) vehicle_ctrl: vehicle loop() threw") == 3);   // err
+    CHECK(sev("W (79064752) vehicle_ctrl: HEAP free=71304") == 4);          // warning
+    CHECK(sev("I (79061122) http_server: REQ: POST /mcp") == 6);            // info
+    CHECK(sev("D (1234) tag: noisy detail") == 7);                          // debug
+    CHECK(sev("V (1234) tag: noisier detail") == 7);
+    CHECK(pri("E (1) t: x") == 1 * 8 + 3);      // facility stays "user", severity varies
+    CHECK(pri("I (1) t: x") == 14);             // the historical value, now only for real INFO
+
+    // With CONFIG_LOG_COLORS=y (the IDF default) esp_log prefixes an SGR escape. Keying on
+    // line[0] would classify every coloured line as unknown -> info, silently restoring the
+    // constant-severity bug on a config change nobody would connect to syslog.
+    CHECK(sev("\033[0;31mE (206191310) vehicle_ctrl: boom") == 3);
+    CHECK(sev("\033[0;33mW (1234) main: careful") == 4);
+    CHECK(sev("\033[0;32mI (1234) main: fine") == 6);
+
+    // Unprefixed lines keep INFO rather than being guessed at. These are real forwarded lines:
+    // tesla-ble and NimBLE print without an esp_log prefix, and a fabricated "error" for one of
+    // them is a false alarm someone has to chase.
+    CHECK(sev("Loaded private key from storage") == 6);
+    CHECK(sev("[VCSEC Health Poll] Command completed successfully in 270 ms") == 6);
+    CHECK(sev("Warning: this is prose, not a level") == 6);
+    CHECK(sev("Established connection") == 6);   // leading 'E', but no " (" — not a level
+    CHECK(sev("I am not a log level") == 6);     // leading 'I' + space, but no '('
+
+    // Degenerate input must not read out of bounds or crash: the level test needs 3 chars,
+    // and anything shorter falls back to info rather than indexing past the end.
+    CHECK(sev("") == 6);
+    CHECK(sev("E") == 6);
+    CHECK(sev("E ") == 6);
+    CHECK(sev("E (") == 3);      // exactly the prefix and nothing else — still a valid level
+    CHECK(tk::syslog_severity_for_line(nullptr, 0) == 6);
+    CHECK(sev("\033[") == 6);                    // truncated escape, no terminator
+    CHECK(sev("\033[0;31m") == 6);               // escape only, nothing after it
+}
+
+// ─── BLE connect-failure classification + rate limit ─────────────────────────────
+static void test_connect_outcome() {
+    // The scanner's verdict maps onto the cause. -1 (target never seen this window) is the
+    // one that used to be logged as "connection timeout" although no connect was attempted.
+    CHECK(tk::connect_fail_from_connectable(-1) == tk::ConnectFail::OutOfRange);
+    CHECK(tk::connect_fail_from_connectable(0)  == tk::ConnectFail::AtBleLimit);
+    CHECK(tk::connect_fail_from_connectable(1)  == tk::ConnectFail::ConnectFailed);
+
+    // Foreground: an evcc/MCP/user request was blocked on this attempt. ALWAYS an error and
+    // never rate-limited, whatever the cause or how long it has been failing — a request that
+    // returned nothing must leave a line behind.
+    {
+        tk::ConnectFailState st;
+        for (int i = 0; i < 300; i++) {
+            CHECK(tk::connect_fail_note(st, tk::ConnectFail::OutOfRange, /*foreground*/true)
+                  == tk::ConnectLog::Error);
+        }
+        CHECK(st.streak == 300);
+    }
+
+    // Background, car simply away: warn once, then silence until the hourly heartbeat. This is
+    // the 7117-lines-a-week case — 90 attempts (~1 h at the 40 s retry cadence) per line.
+    {
+        tk::ConnectFailState st;
+        CHECK(tk::connect_fail_note(st, tk::ConnectFail::OutOfRange, false) == tk::ConnectLog::Warn);
+        int emitted = 1;
+        for (uint32_t i = 2; i <= 270; i++) {
+            if (tk::connect_fail_note(st, tk::ConnectFail::OutOfRange, false) != tk::ConnectLog::Suppress)
+                emitted++;
+        }
+        CHECK(st.streak == 270);
+        CHECK(emitted == 4);   // first + heartbeats at 90/180/270, not 270 lines
+    }
+
+    // Background, car present but unusable: still an ERROR even unattended (this is the
+    // two-boards-on-one-car signature), and still rate-limited so it can't storm either.
+    {
+        tk::ConnectFailState st;
+        CHECK(tk::connect_fail_note(st, tk::ConnectFail::ConnectFailed, false) == tk::ConnectLog::Error);
+        CHECK(tk::connect_fail_note(st, tk::ConnectFail::ConnectFailed, false) == tk::ConnectLog::Suppress);
+        tk::ConnectFailState lim;
+        CHECK(tk::connect_fail_note(lim, tk::ConnectFail::AtBleLimit, false) == tk::ConnectLog::Error);
+        CHECK(tk::connect_fail_note(lim, tk::ConnectFail::AtBleLimit, false) == tk::ConnectLog::Suppress);
+    }
+
+    // A CHANGE of cause is reported immediately, mid-suppression. "The car came back but now
+    // the connect fails" is the transition worth waking up for; folding it into the running
+    // streak would hide it for up to an hour and defeat the rate limit's purpose.
+    {
+        tk::ConnectFailState st;
+        for (int i = 0; i < 50; i++) tk::connect_fail_note(st, tk::ConnectFail::OutOfRange, false);
+        CHECK(st.streak == 50);
+        CHECK(tk::connect_fail_note(st, tk::ConnectFail::ConnectFailed, false) == tk::ConnectLog::Error);
+        CHECK(st.streak == 1);   // the new cause starts its own run
+    }
+
+    // A successful connect closes the run, so the next failure reports as a first one rather
+    // than inheriting the old streak's suppression.
+    {
+        tk::ConnectFailState st;
+        for (int i = 0; i < 50; i++) tk::connect_fail_note(st, tk::ConnectFail::OutOfRange, false);
+        tk::connect_ok_note(st);
+        CHECK(st.streak == 0);
+        CHECK(tk::connect_fail_note(st, tk::ConnectFail::OutOfRange, false) == tk::ConnectLog::Warn);
+        CHECK(st.streak == 1);
+    }
+
+    // Saturating streak: a device left unreachable for months must not wrap its counter back
+    // through 1 and re-announce as if the condition were new.
+    {
+        tk::ConnectFailState st{tk::ConnectFail::OutOfRange, UINT32_MAX};
+        tk::connect_fail_note(st, tk::ConnectFail::OutOfRange, false);
+        CHECK(st.streak == UINT32_MAX);
+    }
+
+    // Every cause names itself; the text is what the log line carries.
+    CHECK(std::strstr(tk::connect_fail_text(tk::ConnectFail::OutOfRange), "range") != nullptr);
+    CHECK(std::strstr(tk::connect_fail_text(tk::ConnectFail::AtBleLimit), "non-connectable") != nullptr);
+    CHECK(std::strstr(tk::connect_fail_text(tk::ConnectFail::ConnectFailed), "connect") != nullptr);
 }
 
 // ─── Unit conversion ────────────────────────────────────────────────────────────
@@ -1417,6 +1543,7 @@ static void test_ble_row() {
 int main() {
     test_vin();
     test_syslog_policy();
+    test_connect_outcome();
     test_ha_templates();
     test_units();
     test_link_state();

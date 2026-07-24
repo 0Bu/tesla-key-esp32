@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cerrno>
+#include <cstddef>
 #include <cstdlib>
 #include <string>
 
@@ -93,6 +94,56 @@ struct SendFailureActions {
 
 inline constexpr SendFailureActions syslog_send_failure_actions(bool hard, bool already_failing) {
     return { /*stop_forwarding*/ hard, /*reprobe_once*/ hard && !already_failing };
+}
+
+// RFC 5424 PRI for one captured log line: facility * 8 + severity, facility 1 (user).
+//
+// Every line used to ship as a hardcoded <14> (user.info). That made the collector's own
+// severity field a constant: 211366 lines over a week in VictoriaLogs, all "info", including
+// 61417 ESP_LOGE and 81708 ESP_LOGW ones — so `severity:error` matched nothing and the only
+// way to find a fault was a substring match on `_msg:"E ("`. The level is already in hand:
+// diag_log.cpp's capture hook sees the FORMATTED line, and esp_log renders the level as the
+// first character ("E (12345) tag: message").
+//
+// Robustness rules, both load-bearing:
+//   * Skip a leading ANSI colour escape. With CONFIG_LOG_COLORS=y (the IDF default) the line
+//     starts "\033[0;31mE (…"; keying on line[0] would then classify every line as unknown
+//     and silently reproduce the constant-severity bug this function exists to fix.
+//   * Anything that is not a recognised "<L> (" prefix stays INFO. Plenty of forwarded lines
+//     come from the tesla-ble library and NimBLE, which print without an esp_log prefix at
+//     all ("Loaded private key from storage"). Guessing a severity for those would be worse
+//     than the honest default — a wrong "error" is a false alarm someone has to chase.
+inline constexpr int kSyslogFacilityUser = 1;
+
+inline int syslog_severity_for_line(const char* text, size_t len) {
+    constexpr int kInfo = 6;
+    if (text == nullptr) return kInfo;
+
+    size_t i = 0;
+    // ESC '[' … 'm' — one CSI SGR sequence, bounded so a malformed line can't run off the end.
+    if (len >= 2 && text[0] == '\033' && text[1] == '[') {
+        i = 2;
+        while (i < len && text[i] != 'm') i++;
+        if (i < len) i++;   // step past the 'm'; if none was found we fall through to no match
+    }
+
+    // The level letter is only meaningful as the esp_log prefix "<L> (" — requiring the
+    // space and paren keeps an ordinary sentence starting with "エ"/"Warning:"/"I " from
+    // being read as a level.
+    if (i + 2 >= len || text[i + 1] != ' ' || text[i + 2] != '(') return kInfo;
+
+    switch (text[i]) {
+        case 'E': return 3;   // err
+        case 'W': return 4;   // warning
+        case 'I': return kInfo;
+        case 'D':
+        case 'V': return 7;   // debug
+        default:  return kInfo;
+    }
+}
+
+inline int syslog_pri_for_line(const char* text, size_t len) {
+    return kSyslogFacilityUser * 8 + syslog_severity_for_line(text, len);
 }
 
 }  // namespace tk
