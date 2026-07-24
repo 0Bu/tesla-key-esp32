@@ -39,10 +39,51 @@ bool VehicleController::ensure_connected_(int timeout_ms) {
     if (!ble_->is_connected()) {
         ble_->stop_connecting();  // drop the intent so the device returns to idle scanning
         connect_deadline_.store(0);
-        ESP_LOGE(TAG, "connection timeout after %dms", timeout_ms);
+        // Say what actually happened, and only as often as it is worth saying. The old line
+        // ("connection timeout after 10000ms", ERROR, every attempt) asserted a timed-out
+        // connect even when the scan never matched the car at all, and a car parked elsewhere
+        // therefore emitted 7117 ERROR lines a week — see logic/connect_outcome.hpp for the
+        // measurement and the rate-limit rule. target_connectable() is the scanner's own
+        // verdict on the target: not seen / non-connectable / connectable.
+        // target_connectable() copies each advert name into a std::string (tesla-ble's
+        // matches_vin overload), so it ALLOCATES and can throw — and this path runs when the
+        // radio is unhappy, which correlates with the heap being unhappy. Letting that escape
+        // would lose the line explaining the failure to the very condition it is reporting on,
+        // and would abort the enclosing command besides. -1 is the scanner's own "not known"
+        // value (what it returns when it can't take the scan mutex either), so the fallback
+        // classifies conservatively: warn, rate-limited, no false at-BLE-limit alarm.
+        int connectable = -1;
+        try {
+            connectable = ble_->target_connectable();
+        } catch (...) {
+        }
+        const tk::ConnectFail kind = tk::connect_fail_from_connectable(connectable);
+        // Foreground = an evcc/MCP/user request is blocked on this attempt (the same flag the
+        // background polls pause on). Never rate-limited: a request that got nothing back must
+        // always leave a line behind.
+        switch (tk::connect_fail_note(connect_fail_, kind, cmd_in_flight_.load())) {
+            case tk::ConnectLog::Error:
+                ESP_LOGE(TAG, "BLE connect gave up after %dms: %s (attempt %u of this run)",
+                         timeout_ms, tk::connect_fail_text(kind), (unsigned) connect_fail_.streak);
+                break;
+            case tk::ConnectLog::Warn:
+                ESP_LOGW(TAG, "BLE connect gave up after %dms: %s (attempt %u of this run; "
+                              "repeating every %u while unchanged)",
+                         timeout_ms, tk::connect_fail_text(kind), (unsigned) connect_fail_.streak,
+                         (unsigned) tk::kConnectFailRepeatEvery);
+                break;
+            case tk::ConnectLog::Suppress:
+                // Same cause as the last attempt and not a heartbeat tick. Still visible on the
+                // console and in /diag at DEBUG, and the condition itself is always readable in
+                // /status — only the forwarded log stops repeating itself.
+                ESP_LOGD(TAG, "BLE connect gave up after %dms: %s (attempt %u)",
+                         timeout_ms, tk::connect_fail_text(kind), (unsigned) connect_fail_.streak);
+                break;
+        }
         return false;
     }
     connect_deadline_.store(0);
+    tk::connect_ok_note(connect_fail_);   // a link closes the run; the next failure reports as new
     return true;
 }
 

@@ -58,7 +58,9 @@ check), the HA binary
 `value_template` builder (`logic/ha_templates.hpp` — presence-aware `is defined` guard) and the
 POST-body reassembly loop (`logic/http_body.hpp` — multi-segment recv + bounded timeout) and the
 heap-exhaustion watchdog (`logic/heap_watchdog.hpp` — 4 KB/5 min unbroken hold, OTA-excused,
-restart cap + `heap:<n>` breadcrumb round-trip) — all
+restart cap + `heap:<n>` breadcrumb round-trip) and the BLE connect-failure classifier
+(`logic/connect_outcome.hpp` — scanner verdict → out-of-range / at-BLE-limit / connect-failed,
+its log level and the background rate limit; foreground attempts are never suppressed) — all
 delegated to IDF-free headers in `main/logic/` so the device runs the same code the test does. CI gates the firmware build on it (`logic-test` job). Add new
 hardware-free logic to `main/logic/` and a `CHECK` in `test/test_logic.cpp`. Full detail:
 [`test/README.md`](../test/README.md).
@@ -100,7 +102,10 @@ ble_client.cpp         → NimBLE GATT client (BleAdapter impl)
 nvs_storage.cpp        → NVS StorageAdapter (maps library keys ≤15 chars)
 vehicle_ctrl.cpp       → VehicleController core: init/wiring, VIN gate, link_state() glue
 vehicle_commands.cpp   → sync command API via semaphores (send_vcsec_/send_infotainment_,
-                         make_result_cb_, all user commands)
+                         make_result_cb_, all user commands). ensure_connected_ names WHY a
+                         connect failed from the scanner's own verdict and rate-limits the
+                         unattended repeats (logic/connect_outcome.hpp, host-tested) —
+                         foreground attempts are never suppressed
 vehicle_telemetry.cpp  → protobuf parsers, cache callbacks, loop_task (background poll +
                          sleep gating), data queries
 vehicle_pairing.cpp    → auto_pair_task, key mgmt/fingerprint, session invalidation,
@@ -141,8 +146,13 @@ syslog.cpp              → UDP Syslog forwarder (RFC 5424, best-effort) for the
                          background task re-resolves DNS + advisory-probes the collector
                          (ARP on-subnet, else ICMP) every ~10s, throttled on a persistent
                          failure. Delivery gates on DNS resolution only, never the advisory
-                         probe. Errno-based hard/transient send-failure split in
-                         logic/syslog_policy.hpp (host-tested)
+                         probe. Errno-based hard/transient send-failure split AND the RFC 5424
+                         PRI (facility user, severity from each line's own esp_log level —
+                         E/W/I/D → 3/4/6/7, colour-escape tolerant, unprefixed library lines
+                         stay info) in logic/syslog_policy.hpp (host-tested). Lines logged
+                         BEFORE syslog_start() cannot be forwarded (the queue does not exist
+                         yet) — main.cpp samples the boot values early but emits the `BOOT
+                         reset_reason=` line as the first line past syslog_start
 provisioning.cpp       → captive setup portal (setup AP) when no WiFi is configured
 display.cpp            → on-device ST7735 status panel (LilyGo T-Dongle-C5 + T-Dongle-S3),
                          LANDSCAPE 160x80 (header WiFi bars+SSID | BT+BLE bars + a horizontal SoC
@@ -185,7 +195,7 @@ Never edit files in `managed_components/` — they are regenerated.
 | Namespace   | Content                                     |
 |-------------|---------------------------------------------|
 | `tesla_cfg` | WiFi SSID/pass, VIN, BLE MAC, `mqtt_uri`, `syslog_uri`, `last_time`, `reboot_why` (why WE ended the last boot — `heap:<n>` = the heap watchdog, n = consecutive such restarts; read+cleared at boot, surfaced once as `/status.last_reboot`), `disp_rot` (on-device display BOOT-rotation index 0..3; C5/S3; migrates old `disp_flip`) (runtime cfg) |
-| `tesla_ble` | Private key (`private_key`), VCSEC session (`sess_vcsec`), Info session (`sess_info`), `key_created`, `paired_at` — the `sess_*` names come from the ≤15-char key mapping in `nvs_storage.cpp` |
+| `tesla_ble` | Private key (`private_key`), VCSEC session (`sess_vcsec`), Info session (`sess_info`), `key_created`, `paired_at` — the `sess_*` names come from the ≤15-char key mapping in `nvs_storage.cpp`. The `sess_*` blobs are only REUSABLE across a reboot if the wall clock is restored **before** `VehicleController::init()` (tesla-ble rejects a session older than 1 h and computes the age against `time(nullptr)`, which underflows at 1970) — hence `restore_clock_from_nvs()` early in `main.cpp`, see docs/ARCHITECTURE.md |
 
 ## Commands Implemented
 

@@ -11,6 +11,7 @@
 #include "nvs_storage.hpp"
 #include "rtos_guard.hpp"
 #include "logic/ble_phase.hpp"
+#include "logic/connect_outcome.hpp"
 #include "logic/link_state.hpp"
 #include "logic/ui_state.hpp"
 #include "freertos/FreeRTOS.h"
@@ -373,6 +374,16 @@ private:
     // Atomic: set by the HTTP task, read by loop_task. Managed by an RAII guard so it always
     // clears, even if the library call throws.
     std::atomic<bool> cmd_in_flight_{false};
+
+    // Why the last ensure_connected_() attempt failed and how many times in a row, so a car
+    // that is simply parked elsewhere states that once and then on a slow heartbeat instead of
+    // an ERROR line every 40 s forever (logic/connect_outcome.hpp holds the rule and the
+    // measurement that motivated it). NOT atomic and deliberately so: every ensure_connected_
+    // caller (send_vcsec_, send_infotainment_, get_vehicle_status, pair) holds command_mutex_
+    // for the whole attempt, so this is single-writer under that lock — the same lock that
+    // already serializes connect attempts themselves. Adding an atomic here would imply a
+    // concurrency that does not exist and hide that invariant.
+    tk::ConnectFailState connect_fail_{};
 
     // Consecutive failed signed round-trips seen in make_result_cb_ (foreground commands +
     // the VCSEC health poll). On an awake, busy link the tesla-ble framer's single rx buffer

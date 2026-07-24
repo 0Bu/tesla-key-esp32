@@ -183,10 +183,14 @@ static SendResult syslog_sendto(const struct sockaddr_in& dest, const char* text
     }
 
     char packet[320];
-    // RFC 5424: <PRI=14 user.info>1 SP TIMESTAMP HOSTNAME APP PROCID MSGID SD SP MSG.
+    // RFC 5424: <PRI>1 SP TIMESTAMP HOSTNAME APP PROCID MSGID SD SP MSG.
+    // PRI is derived from the line's own esp_log level (logic/syslog_policy.hpp) rather than
+    // hardcoded to user.info, so the collector's severity field actually discriminates —
+    // see that header for why a constant PRI made `severity:error` useless.
     // HOSTNAME mirrors main.cpp's MDNS_HOSTNAME ("tesla-key-esp32") so entries
     // correlate with the device as seen over DHCP/mDNS.
-    int pkt_len = std::snprintf(packet, sizeof(packet), "<14>1 - tesla-key-esp32 - - - - %.*s",
+    int pkt_len = std::snprintf(packet, sizeof(packet), "<%d>1 - tesla-key-esp32 - - - - %.*s",
+                                 tk::syslog_pri_for_line(text, len),
                                  static_cast<int>(len), text);
     if (pkt_len <= 0) return SendResult::Ok;
     // snprintf returns the length it WOULD have written; clamp to what fits or sendto reads OOB.

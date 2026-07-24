@@ -66,6 +66,23 @@ static void on_time_sync(struct timeval*) {
 // fallback while NTP has not synced this boot.
 bool clock_synced_via_ntp() { return s_ntp_synced; }
 
+// Seed the wall clock from the NVS cache written by on_time_sync, so we never sit at 1970
+// waiting for NTP (or forever, if the network blocks it and no browser ever visits). Called
+// early in app_main — before VehicleController::init, whose persisted-session age check is
+// wrong at 1970; see the call site for the underflow this prevents. Network-free by design:
+// it must be usable before esp_netif exists. Refined by NTP as soon as the link is up.
+static void restore_clock_from_nvs(NvsStorageAdapter& config_store) {
+    std::string last_time;
+    if (!config_store.load_str("last_time", last_time) || last_time.empty()) {
+        ESP_LOGW(TAG, "no cached clock in NVS — starting at 1970 until NTP syncs; persisted "
+                      "BLE sessions will be rejected as stale for this boot");
+        return;
+    }
+    struct timeval tv = { (time_t)atoll(last_time.c_str()), 0 };
+    settimeofday(&tv, nullptr);
+    ESP_LOGI(TAG, "clock restored from NVS: %s (NTP will refine it)", last_time.c_str());
+}
+
 // ─── WiFi ─────────────────────────────────────────────────────────────────────
 
 static EventGroupHandle_t s_wifi_events;
@@ -417,14 +434,19 @@ extern "C" void app_main() {
     // Capture console output into the in-memory diagnostic ring (GET /diag).
     diag_log_init();
 
-    // Log why we (re)booted — survives in /diag across reboots, so a crash cause is visible
-    // without a serial console. PANIC = abort()/uncaught C++ exception, BROWNOUT = power dip,
-    // *_WDT = a stuck task. Pair with the free-heap baseline to spot OOM-driven aborts.
-    ESP_LOGW(TAG, "BOOT reset_reason=%s free_heap=%u min_free=%u largest_block=%u",
-             reset_reason_str(esp_reset_reason()),
-             (unsigned) esp_get_free_heap_size(),
-             (unsigned) esp_get_minimum_free_heap_size(),
-             (unsigned) heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+    // Why we (re)booted, plus the heap baseline to pair it with. SAMPLED HERE, LOGGED LATER:
+    // the line itself is emitted after syslog_start() below, because syslog_send() is a no-op
+    // until then and this line would otherwise never leave the device. It did not, for the
+    // whole of 17.-24.07.2026: 56 boots, zero `BOOT reset_reason=` lines at the collector,
+    // which is what made the unattended 20.07. reboot (1h54m of silence, then a boot)
+    // impossible to explain afterwards — /diag is RAM and does not survive the restart.
+    // The values must still be read HERE, before NVS init, WiFi, the syslog queue and the
+    // component start()s have allocated: sampled after all that, "free heap at boot" would
+    // describe a boot that already happened rather than the state we came up in.
+    const char*    boot_reason      = reset_reason_str(esp_reset_reason());
+    const unsigned boot_free        = (unsigned) esp_get_free_heap_size();
+    const unsigned boot_min_free    = (unsigned) esp_get_minimum_free_heap_size();
+    const unsigned boot_largest     = (unsigned) heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
 
     // NimBLE logs every GAP/GATT procedure at INFO — tens of lines per connect.
     // That noise buries the pairing/key-lifecycle messages in /diag (and fills the
@@ -461,6 +483,13 @@ extern "C" void app_main() {
     // logged the specific reason.
     if (!syslog_start(config_store))
         ESP_LOGW(TAG, "Syslog forwarding is degraded/disabled (see the error above)");
+
+    // FIRST line past the forwarder, because it is the one a post-mortem starts from: syslog
+    // is the only record that outlives a restart. PANIC = abort()/uncaught C++ exception,
+    // BROWNOUT = power dip, *_WDT = a stuck task; the heap figures next to it are what
+    // distinguish an OOM-driven abort from a clean restart. Values sampled at entry (above).
+    ESP_LOGW(TAG, "BOOT reset_reason=%s free_heap=%u min_free=%u largest_block=%u",
+             boot_reason, boot_free, boot_min_free, boot_largest);
 
     // Announce the breadcrumb only NOW, deliberately after syslog_start(): syslog_send() is a
     // no-op until then (diag_log.cpp's capture hook has nowhere to forward to), so logging it
@@ -505,6 +534,29 @@ extern "C" void app_main() {
              ble_mac.empty() ? "(scan)" : ble_mac.c_str());
 
     log_heap("preinit");
+
+    // Wall clock, restored from NVS — BEFORE VehicleController::init below, which is the whole
+    // point of doing it here rather than next to the SNTP setup after WiFi (where it used to
+    // live). init() hands the persisted BLE sessions to tesla-ble, which validates their age as
+    //     session_age = (uint32_t) time(nullptr) - session.clock_time      (vehicle.cpp:1123)
+    // and rejects anything older than an hour. Run at 1970 that subtraction underflows, so the
+    // age comes out as the raw stored epoch and EVERY persisted session is discarded: 49 boots
+    // in the 17.-24.07.2026 syslog, 49 rejections of both domains. The last one threw away a
+    // VCSEC session that was 43 minutes old — comfortably inside the library's own window —
+    // and paid a fresh handshake for it, which is exactly what NVS `sess_vcsec`/`sess_info`
+    // exist to avoid.
+    //
+    // Needs no network (unlike SNTP, which stays below with the rest of the post-WiFi setup),
+    // so there is nothing keeping it down there. NTP refines this within seconds of the link
+    // coming up; until then a cached-but-slightly-stale clock beats 1970 for every consumer —
+    // session ages here, TLS cert validity for OTA, and the key_created/paired_at stamps.
+    //
+    // If you are about to move this back down: the comment that used to sit next to it said
+    // "tesla-ble signed-command freshness does NOT [need real UTC]", which is true — signing
+    // uses the vehicle's SessionInfo.ClockTime plus a monotonic delta (peer.cpp) — and is
+    // exactly the sentence that made this look safe. Session PERSISTENCE is a different
+    // consumer with a different clock, and it is the one that breaks.
+    restore_clock_from_nvs(config_store);
 
     // ── Tesla BLE controller ─────────────────────────────────────────────────
     // Construct the controller (NVS + key) here; NimBLE itself (ble_client.start)
@@ -579,23 +631,9 @@ extern "C" void app_main() {
         ESP_LOGW(TAG, "mDNS init failed");
     }
 
-    // Wall clock: TLS cert validation (OTA) and the human-readable key_created/paired_at
-    // timestamps need real UTC. (tesla-ble signed-command freshness does NOT — expires_at
-    // is the vehicle's SessionInfo.ClockTime plus a monotonic delta, see peer.cpp.) NTP is
-    // the primary source; the browser (POST /set_time) is a fallback for networks that
-    // block NTP. First restore the last cached time from NVS
-    // so we never sit at 1970 while NTP syncs (or if it never does) — this also covers
-    // a headless reboot (evcc only, no browser visit). Then start SNTP; on sync it
-    // refreshes the cache and takes over from any restored/fallback value.
-    {
-        std::string last_time;
-        if (config_store.load_str("last_time", last_time) && !last_time.empty()) {
-            struct timeval tv = { (time_t)atoll(last_time.c_str()), 0 };
-            settimeofday(&tv, nullptr);
-            ESP_LOGI(TAG, "clock restored from NVS: %s (NTP will refine it)",
-                     last_time.c_str());
-        }
-    }
+    // SNTP takes over the wall clock from here (the NVS restore already ran before
+    // VehicleController::init, see restore_clock_from_nvs above). On sync it refreshes the NVS
+    // cache and supersedes any restored or browser-supplied (POST /set_time) value.
     s_cfg_store = &config_store;
     esp_sntp_setoperatingmode(ESP_SNTP_OPMODE_POLL);
     esp_sntp_setservername(0, "pool.ntp.org");
