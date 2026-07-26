@@ -393,7 +393,8 @@ what each must stay true to:
   list it carries still matches the tree.
 - **`device-diag`** is the read-only, cache-only live-board triage lens (`/status` + `/diag` →
   symptom→cause table); it diagnoses and hands off, never flashes or commands the car. Re-verify the
-  `/status` keys it reads against `handle_status` (`main/http_status.cpp`), the lowercase
+  `/status` keys it reads against the field contract in `main/logic/status_model.hpp` (the key
+  literals live in its `emit()`, not in `http_status.cpp`, which only gathers + serves), the lowercase
   `link_state_web_str` strings (`main/logic/link_state.hpp`), the `/diag` params, and its
   error-signature sites (`connect error` in `ble_client.cpp`, `BOOT`/`HEAP` in `main.cpp`). Keep it
   complementary to `e2e-evcc` (which drives the command path) and the flash/recovery skills.
