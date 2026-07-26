@@ -122,8 +122,10 @@ the authority for the per-sibling drift check; `project-review` defers the mecha
   like any other; don't re-open it after.
 - **`device-diag`** — read-only, cache-only live-board triage from `/status` + `/diag`. Verify the
   `/status` keys it names (`paired`/`reauth`/`link`/`vcsec_sleep`/`ble{connect_fail,car_connectable}`/
-  `mqtt{configured,connected,tls,error}`/`last_seen_s`) against `handle_status`
-  (`main/http_status.cpp`), the **lowercase** four `link_state_web_str` values
+  `mqtt{configured,connected,tls,error}`/`last_seen_s`) against the field contract in
+  `main/logic/status_model.hpp` (the key literals live in its `emit()`; `handle_status` /
+  `build_status_object()` in `main/http_status.cpp` only gather the inputs and serve them),
+  the **lowercase** four `link_state_web_str` values
   (`main/logic/link_state.hpp`; uppercase are the MQTT `link_state_mqtt_str` set), the `/diag`
   params (`verbose`/`clear` in `handle_diag`), that there is still **no** heap field in `/status`
   (heap comes from the `BOOT`/`HEAP` lines in `main.cpp` **and** the periodic
