@@ -268,6 +268,9 @@ void VehicleController::clear_session_and_cache_() {
         last_known_closures_ = {};
     }
     last_contact_ticks_.store(0);    // no live data anymore → "asleep" card has nothing to show
+    last_charge_ticks_.store(0);
+    charge_state_generation_.store(0);
+    charge_cache_stale_reported_.store(false);
     last_reachable_ticks_.store(0);  // and no proven reachability → link_state() back to Unknown
     vcsec_asleep_since_ticks_.store(0);  // forget any debounced sleep run from the old pairing
     ESP_LOGI(TAG, "pairing/session cleared");

@@ -1,0 +1,16 @@
+diff --git a/src/vehicle.cpp b/src/vehicle.cpp
+index 2f7778b..f87e66a 100644
+--- a/src/vehicle.cpp
++++ b/src/vehicle.cpp
+@@ -928,6 +928,11 @@ void TeslaBLE::Vehicle::handle_carserver_message_(const UniversalMessage_RoutableMessage &msg) {
+   auto *peer = client_->get_peer(UniversalMessage_Domain_DOMAIN_INFOTAINMENT);
+   if (peer && response_counter > 0 && !peer->validate_response_counter(response_counter)) {
+     LOG_WARNING("Duplicate response counter detected: %u", response_counter);
++    // validate_response_counter() is the anti-replay decision, not only a diagnostic.
++    // Never let a replay refresh telemetry callbacks or complete the command currently
++    // at the head of the FIFO: the duplicated response may belong to an older request.
++    // In particular, an old actionStatus=OK must not acknowledge a new charging limit.
++    return;
+   }
+   if (response.which_response_msg == CarServer_Response_vehicleData_tag) {
+     auto &vd = response.response_msg.vehicleData;

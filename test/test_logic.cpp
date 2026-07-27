@@ -43,6 +43,7 @@
 #include "logic/ha_templates.hpp"
 #include "logic/http_body.hpp"
 #include "logic/heap_watchdog.hpp"
+#include "logic/charge_control.hpp"
 
 #include <cmath>
 #include <cstdio>
@@ -444,18 +445,21 @@ static void test_mcp() {
     const tk::CmdInfo* amps = tk::cmd_info(tk::CmdKind::SetChargingAmps);
     CHECK_STR(amps->args[0].mcp_key, "amps");
     CHECK_STR(amps->args[0].api_key, "charging_amps");   // TeslaBleHttpProxy compat name
-    CHECK(amps->args[0].type == tk::CmdArgType::Int && amps->args[0].mcp_required);
+    CHECK(amps->args[0].type == tk::CmdArgType::Int);
+    CHECK(amps->args[0].api_required && amps->args[0].mcp_required);
     CHECK(amps->args[0].lo == 0 && amps->args[0].hi == 48);
     CHECK(amps->args[0].api_default == 0);
     const tk::CmdInfo* lim = tk::cmd_info(tk::CmdKind::SetChargeLimit);
     CHECK_STR(lim->args[0].mcp_key, "percent");
     CHECK_STR(lim->args[0].api_key, "percent");
-    CHECK(lim->args[0].mcp_required && lim->args[0].lo == 50 && lim->args[0].hi == 100);
+    CHECK(!lim->args[0].api_required && lim->args[0].mcp_required);
+    CHECK(lim->args[0].lo == 50 && lim->args[0].hi == 100);
     CHECK(lim->args[0].api_default == 80);               // REST: absent body still means 80%
     const tk::CmdInfo* sched = tk::cmd_info(tk::CmdKind::SetScheduledCharging);
     CHECK_STR(sched->args[0].mcp_key, "enable");
     CHECK_STR(sched->args[0].api_key, "enable");
     CHECK(sched->args[0].type == tk::CmdArgType::Bool && sched->args[0].mcp_required);
+    CHECK(!sched->args[0].api_required);
     CHECK_STR(sched->args[1].mcp_key, "start_minutes");
     CHECK(sched->args[1].type == tk::CmdArgType::Int && !sched->args[1].mcp_required);
     CHECK(sched->args[1].lo == 0 && sched->args[1].hi == 1439);
@@ -523,6 +527,31 @@ static void test_mcp() {
     CHECK_STR(tk::command_result_text(true,  tesla_reason), "command executed successfully");
     CHECK_STR(tk::command_result_text(false, tesla_reason), "complete");
     CHECK_STR(tk::command_result_text(false, no_reason),    "vehicle not reachable");
+}
+
+// ─── Charging-current ACK/readback + active-cache freshness ───────────────────
+static void test_charge_control() {
+    using tk::ChargingAmpsReadback;
+
+    // A valid cached reading remains usable while the car is idle, even without a
+    // freshness timestamp: read-only evcc polling must not wake a sleeping vehicle.
+    CHECK(tk::charge_cache_usable(true, false, false, 0));
+    CHECK(tk::charge_cache_usable(true, false, true, 86400));
+
+    // During a command/charging window the 10-second background poll must have produced
+    // a recent ChargeState. The exact 30-second boundary is accepted; 31 seconds is stale.
+    CHECK(!tk::charge_cache_usable(false, true, true, 0));
+    CHECK(!tk::charge_cache_usable(true, true, false, 0));
+    CHECK(tk::charge_cache_usable(true, true, true, 0));
+    CHECK(tk::charge_cache_usable(true, true, true, tk::kActiveChargeStateMaxAgeS));
+    CHECK(!tk::charge_cache_usable(true, true, true, tk::kActiveChargeStateMaxAgeS + 1));
+
+    // Tesla's actionStatus=OK is not sufficient. Only a fresh ChargeState with the
+    // requested effective charging_amps value verifies the command.
+    CHECK(tk::verify_charging_amps(8, true, true, 8) == ChargingAmpsReadback::Verified);
+    CHECK(tk::verify_charging_amps(8, true, true, 16) == ChargingAmpsReadback::Mismatch);
+    CHECK(tk::verify_charging_amps(8, true, false, 0) == ChargingAmpsReadback::Missing);
+    CHECK(tk::verify_charging_amps(8, false, true, 8) == ChargingAmpsReadback::Missing);
 }
 
 // ─── /status field contract (logic/status_model.hpp <- http_status.cpp) ──────────
@@ -1557,6 +1586,7 @@ int main() {
     test_ws_policy();
     test_ws_backpressure();
     test_heap_watchdog();
+    test_charge_control();
     test_active_window();
     test_ble_phase();
     test_ble_row();

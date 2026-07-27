@@ -99,33 +99,42 @@ fi
 hdr "2. GET vehicle_data?endpoints=charge_state  (${ITER}× — evcc's poll)"
 RES="$(kex '
 VIN='"$ESC_VIN"'; BASE='"$ESC_BASE"'; N='"$ITER"'; TO='"$TIMEOUT"'
-f=0; stale=0; mx=0; sum=0
+HOSTPORT=${BASE#http://}; HOSTPORT=${HOSTPORT%%/*}
+HOST=${HOSTPORT%%:*}; PORT=${HOSTPORT##*:}; [ "$PORT" = "$HOST" ] && PORT=80
+f=0; unavailable=0; malformed=0; mx=0; sum=0
 for i in $(seq 1 $N); do
   s=$(date +%s%3N)
-  b=$(wget -qO- --timeout=$TO "$BASE/api/1/vehicles/$VIN/vehicle_data?endpoints=charge_state" 2>/dev/null); rc=$?
+  path="/api/1/vehicles/$VIN/vehicle_data?endpoints=charge_state"
+  resp=$(printf "GET %s HTTP/1.0\r\nHost: %s\r\nConnection: close\r\n\r\n" "$path" "$HOST" \
+    | nc -w "$TO" "$HOST" "$PORT" 2>/dev/null | tr -d "\r")
+  status=$(printf "%s\n" "$resp" | sed -n "1p")
+  b=$(printf "%s\n" "$resp" | sed "1,/^$/d")
   e=$(date +%s%3N); d=$((e-s)); sum=$((sum+d)); [ $d -gt $mx ] && mx=$d
-  # A real failure is a transport error/timeout OR a body missing the charge_state evcc
-  # parses. A well-formed body with "result":false is NOT a failure: it is the honest
-  # stale-cache response while the car is asleep (served in ~0ms; evcc reads
-  # .response.response.charge_state.* and never checks .response.result), so count it
-  # separately as "stale" rather than conflating it with a timeout.
-  if [ $rc -ne 0 ] || ! echo "$b" | grep -q "\"charge_state\""; then
+  # Idle/asleep cache remains HTTP 200 so polling never wakes the car. During an active
+  # charging/command window, stale or unavailable feedback is deliberately HTTP 503:
+  # report it separately from a transport timeout, because both are real evcc failures
+  # but only the latter means the proxy itself could not be reached.
+  if [ -z "$status" ]; then
     f=$((f+1))
-  elif ! echo "$b" | grep -q "\"result\":true"; then
-    stale=$((stale+1))
+  elif echo "$status" | grep -q " 503 "; then
+    unavailable=$((unavailable+1))
+  elif ! echo "$status" | grep -q " 200 " || ! echo "$b" | grep -q "\"charge_state\""; then
+    malformed=$((malformed+1))
   fi
 done
-echo "FAILS=$f STALE=$stale MAX=$mx AVG=$((sum/N))"
+echo "FAILS=$f UNAVAILABLE=$unavailable MALFORMED=$malformed MAX=$mx AVG=$((sum/N))"
 echo "SAMPLE=$b"
 ')"
 FAILS=$(echo "$RES" | sed -n 's/.*FAILS=\([0-9]*\).*/\1/p')
-STALE=$(echo "$RES" | sed -n 's/.*STALE=\([0-9]*\).*/\1/p')
+UNAVAILABLE=$(echo "$RES" | sed -n 's/.*UNAVAILABLE=\([0-9]*\).*/\1/p')
+MALFORMED=$(echo "$RES" | sed -n 's/.*MALFORMED=\([0-9]*\).*/\1/p')
 MAXMS=$(echo "$RES" | sed -n 's/.*MAX=\([0-9]*\).*/\1/p')
 AVGMS=$(echo "$RES" | sed -n 's/.*AVG=\([0-9]*\).*/\1/p')
 SAMPLE=$(echo "$RES" | sed -n 's/^SAMPLE=//p')
-echo "  latency: avg=${AVGMS}ms max=${MAXMS}ms   transport failures: ${FAILS}/${ITER}   stale (car asleep): ${STALE:-0}/${ITER}"
+echo "  latency: avg=${AVGMS}ms max=${MAXMS}ms   transport=${FAILS}/${ITER}   unavailable(503)=${UNAVAILABLE:-0}/${ITER}   malformed=${MALFORMED:-0}/${ITER}"
 [ "${FAILS:-1}" = 0 ] && ok "0 timeouts/transport failures over ${ITER} polls" || bad "${FAILS} timeout(s)/transport failure(s)"
-[ "${STALE:-0}" != 0 ] && echo "  NOTE  ${STALE}/${ITER} returned result:false (stale cache — car asleep); well-formed & ~0ms, evcc-safe (it reads charge_state, not result)"
+[ "${UNAVAILABLE:-1}" = 0 ] && ok "0 active-window stale/unavailable responses" || bad "${UNAVAILABLE} HTTP 503 response(s) — ChargeState feedback is stale/unavailable"
+[ "${MALFORMED:-1}" = 0 ] && ok "0 malformed/non-200 responses" || bad "${MALFORMED} malformed/non-200 response(s)"
 # evcc parses these fields; all must be present and numeric (battery_range as float)
 for fld in charging_state battery_level charge_limit_soc charger_power charge_rate charge_amps battery_range; do
   echo "$SAMPLE" | grep -q "\"$fld\"" && ok "field present: $fld" || bad "field MISSING: $fld"
@@ -140,25 +149,42 @@ echo "$BC" | grep -q '"result":true' && ok "body_controller_state ok" || echo " 
 # ── 4. Commands evcc issues (gated) ─────────────────────────────────────────
 # cmd NAME URI-SUFFIX [JSON-BODY] [MODE]
 #   Issues a command and times the full BLE round-trip *inside the pod* (one exec,
-#   so the timing is real — not three separate kubectl execs). MODE (4th arg):
+#   so the timing is real — not three separate kubectl execs). A small HTTP/1.0 request
+#   over BusyBox nc preserves both the JSON body and 502 status; BusyBox wget discards
+#   error bodies, which would hide the firmware's real Tesla/readback reason. MODE (4th arg):
 #     ""       — strict: car-side `result:false` is a FAIL.
 #     "soft"   — `result:false` is a NOTE, not a FAIL: charge_start/charge_stop (and the
 #                extended sweep) legitimately depend on live state (a "Complete"/at-limit
 #                car refuses to start — same as the official Fleet API).
-#     "reject" — inverted: the command MUST be refused. NOTE the firmware always answers
-#                HTTP 200 even when the car is unreachable (result:false, reason="vehicle not
-#                reachable"), so result:false alone does NOT prove a refusal. PASS only on a
+#     "reject" — inverted: the command MUST be refused. The firmware answers HTTP 502 with
+#                result:false for both a role refusal and an unreachable car, so result:false
+#                alone does NOT prove a refusal. PASS only on a
 #                car-side refusal (result:false with a non-reachability reason); result:true is
 #                a security regression (FAIL); a reachability/timeout reason is FAIL "can't
 #                confirm — re-run awake". This is what stops a sleeping car from false-PASSing.
 cmd() {
   local name="$1" suf="$2" body="${3:-}" mode="${4:-}"
-  local dataflag="--post-data=''"
-  [ -n "$body" ] && dataflag="--header=Content-Type:application/json --post-data='$body'"
-  local out d r
-  out="$(kex "s=\$(date +%s%3N); r=\$(wget -qO- --timeout=$TIMEOUT $dataflag '$ESC_BASE/api/1/vehicles/$ESC_VIN/command/$suf' 2>/dev/null); e=\$(date +%s%3N); echo \"\$((e-s))|\$r\"")"
-  d="${out%%|*}"; r="${out#*|}"
-  echo "  ${name}: ${d}ms  ->  $r"
+  local out d status rest r
+  out="$(kex '
+BASE='"$ESC_BASE"'; VIN='"$ESC_VIN"'; SUF='"$suf"'; BODY='"'$body'"'; TO='"$TIMEOUT"'
+HOSTPORT=${BASE#http://}; HOSTPORT=${HOSTPORT%%/*}
+HOST=${HOSTPORT%%:*}; PORT=${HOSTPORT##*:}; [ "$PORT" = "$HOST" ] && PORT=80
+PATH_REQ="/api/1/vehicles/$VIN/command/$SUF"
+s=$(date +%s%3N)
+resp=$(
+  {
+    printf "POST %s HTTP/1.0\r\nHost: %s\r\nContent-Type: application/json\r\nContent-Length: %s\r\nConnection: close\r\n\r\n" \
+      "$PATH_REQ" "$HOST" "${#BODY}"
+    printf "%s" "$BODY"
+  } | nc -w "$TO" "$HOST" "$PORT" 2>/dev/null | tr -d "\r"
+)
+e=$(date +%s%3N)
+status=$(printf "%s\n" "$resp" | sed -n "1p")
+body=$(printf "%s\n" "$resp" | sed "1,/^$/d")
+echo "$((e-s))|$status|$body"
+')"
+  d="${out%%|*}"; rest="${out#*|}"; status="${rest%%|*}"; r="${rest#*|}"
+  echo "  ${name}: ${d}ms  ${status:-NO HTTP RESPONSE}  ->  $r"
   if echo "$r" | grep -q '"result":true'; then
     if [ "$mode" = reject ]; then
       bad "$name was ACCEPTED — key has more than Charging-Manager privileges (role-boundary regression!)"
@@ -166,8 +192,8 @@ cmd() {
       ok "$name executed"
     fi
   elif [ "$mode" = reject ]; then
-    # The firmware answers (HTTP 200) even when the car is unreachable, with result:false
-    # reason="vehicle not reachable" (http_api.cpp). So result:false alone is ambiguous:
+    # The firmware answers HTTP 502 with a JSON result:false both for a Tesla role refusal
+    # and when the car is unreachable. So result:false alone is ambiguous:
     # treat a reachability reason (or an empty body) as "can't confirm" (FAIL), and any other
     # car-side reason as a genuine refusal (PASS) — so an asleep car can't false-PASS.
     if ! echo "$r" | grep -q '"result":false'; then

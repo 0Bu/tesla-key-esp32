@@ -6,7 +6,9 @@
 #include "vehicle_ctrl.hpp"
 #include "vehicle_ctrl_internal.hpp"
 #include <esp_log.h>
+#include <cstdio>
 #include <exception>
+#include <utility>
 
 // protobuf generated headers (from tesla-ble)
 #include <vcsec.pb.h>
@@ -207,9 +209,19 @@ bool VehicleController::send_infotainment_(const std::string& name, Builder buil
                                             int timeout_ms, TeslaBLE::WakePolicy wp) {
     tk::MutexGuard cmd_guard(command_mutex_);
     tk::InFlightGuard inflight(cmd_in_flight_);
+    return send_infotainment_locked_(name, std::move(builder), timeout_ms, wp);
+}
+
+bool VehicleController::send_infotainment_locked_(const std::string& name, Builder builder,
+                                                   int timeout_ms, TeslaBLE::WakePolicy wp) {
+    if (timeout_ms <= 0) {
+        last_result_ = false;
+        last_error_ = "command deadline exhausted";
+        return false;
+    }
     // Every infotainment command is a real evcc/manual action → open the active window.
     last_cmd_ticks_.store(xTaskGetTickCount());
-    if (!ensure_connected_()) return false;
+    if (!ensure_connected_(timeout_ms < 10000 ? timeout_ms : 10000)) return false;
     xSemaphoreTake(cmd_sem_, 0);
     last_result_ = false;
     last_error_.clear();
@@ -289,10 +301,97 @@ bool VehicleController::set_charging_amps(int amps, int timeout_ms) {
     if (amps < 0)  amps = 0;
     if (amps > 48) amps = 48;
     int32_t amps32 = (int32_t)amps;
-    return send_infotainment_("Set Charging Amps", [amps32](TeslaBLE::Client* c, uint8_t* b, size_t* l) {
-        return c->build_car_server_vehicle_action_message(
-            b, l, CarServer_VehicleAction_setChargingAmpsAction_tag, &amps32);
-    }, timeout_ms);
+
+    ESP_LOGI(TAG, "set charging amps requested: %d A", amps);
+
+    // Keep the action ACK and the independent ChargeState readback in one serialized
+    // transaction. cmd_in_flight_ prevents the background task from adding a telemetry
+    // poll to tesla-ble's single FIFO while we verify the safety-critical current limit.
+    tk::MutexGuard cmd_guard(command_mutex_);
+    tk::InFlightGuard inflight(cmd_in_flight_);
+    const TickType_t started = xTaskGetTickCount();
+    auto remaining_ms = [started, timeout_ms]() -> int {
+        TickType_t elapsed = xTaskGetTickCount() - started;
+        TickType_t budget  = pdMS_TO_TICKS(timeout_ms);
+        if (elapsed >= budget) return 0;
+        return (int)((budget - elapsed) * portTICK_PERIOD_MS);
+    };
+
+    if (!send_infotainment_locked_(
+            "Set Charging Amps",
+            [amps32](TeslaBLE::Client* c, uint8_t* b, size_t* l) {
+                return c->build_car_server_vehicle_action_message(
+                    b, l, CarServer_VehicleAction_setChargingAmpsAction_tag, &amps32);
+            },
+            remaining_ms(), TeslaBLE::WakePolicy::WAKE_IF_NEEDED)) {
+        return false;
+    }
+
+    tk::ChargingAmpsReadback readback = tk::ChargingAmpsReadback::Missing;
+    int observed_amps = 0;
+    for (int attempt = 1; attempt <= 2; ++attempt) {
+        int left_ms = remaining_ms();
+        if (left_ms <= 0) break;
+
+        const uint32_t generation_before = charge_state_generation_.load();
+        bool poll_ok = send_infotainment_locked_(
+            "Verify Charging Amps",
+            [](TeslaBLE::Client* c, uint8_t* b, size_t* l) {
+                return c->build_car_server_get_vehicle_data_message(
+                    b, l, CarServer_GetVehicleData_getChargeState_tag);
+            },
+            left_ms, TeslaBLE::WakePolicy::WAKE_IF_NEEDED);
+
+        const uint32_t generation_after = charge_state_generation_.load();
+        ChargeStateResult state = copy_locked_(last_known_charge_);
+        if (poll_ok && generation_after != generation_before) {
+            observed_amps = state.charging_amps;
+            readback = tk::verify_charging_amps(
+                amps, state.valid, state.has_charging_amps, state.charging_amps);
+            if (readback == tk::ChargingAmpsReadback::Verified) {
+                ESP_LOGI(TAG,
+                         "set charging amps verified: requested=%d A applied=%d A request=%d A actual=%d A",
+                         amps, state.charging_amps,
+                         state.has_current_request ? state.charge_current_request : -1,
+                         state.has_actual_current ? state.charger_actual_current : -1);
+                return true;
+            }
+            if (readback == tk::ChargingAmpsReadback::Mismatch) {
+                ESP_LOGW(TAG,
+                         "set charging amps readback mismatch (attempt %d/2): "
+                         "requested=%d A applied=%d A request=%d A actual=%d A",
+                         attempt, amps, state.charging_amps,
+                         state.has_current_request ? state.charge_current_request : -1,
+                         state.has_actual_current ? state.charger_actual_current : -1);
+            } else {
+                ESP_LOGW(TAG,
+                         "set charging amps readback missing charging_amps (attempt %d/2)",
+                         attempt);
+            }
+        } else if (poll_ok) {
+            ESP_LOGW(TAG, "set charging amps verification returned no fresh ChargeState (attempt %d/2)",
+                     attempt);
+        }
+
+        if (attempt < 2 && remaining_ms() > 250) vTaskDelay(pdMS_TO_TICKS(250));
+    }
+
+    char reason[112];
+    if (readback == tk::ChargingAmpsReadback::Mismatch) {
+        snprintf(reason, sizeof(reason),
+                 "charging amps not applied: requested %d A, vehicle reports %d A",
+                 amps, observed_amps);
+    } else if (last_error_.empty()) {
+        snprintf(reason, sizeof(reason),
+                 "charging amps not verified: no fresh vehicle readback for %d A", amps);
+    } else {
+        snprintf(reason, sizeof(reason),
+                 "charging amps not verified: %s", last_error_.c_str());
+    }
+    last_result_ = false;
+    last_error_ = reason;
+    ESP_LOGE(TAG, "%s", reason);
+    return false;
 }
 
 bool VehicleController::set_charge_limit(int percent, int timeout_ms) {
