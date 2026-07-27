@@ -80,7 +80,7 @@ jobs:
           if [ -z "$before" ] || ! git cat-file -e "${before}^{commit}" 2>/dev/null; then
             changed=yes   # first push / unknown base → release to be safe
           elif git diff --name-only "$before" "${{ github.sha }}" \
-               | grep -qE '^(main/|CMakeLists\.txt$|sdkconfig\.defaults(\.[a-z0-9]+)?$|partitions\.csv$|version\.txt$|\.github/workflows/build\.yml$|scripts/ci-build-all\.sh$|scripts/build-pages\.sh$|scripts/prepare-tesla-ble-c5\.sh$)'; then
+               | grep -qE '^(main/|patches/tesla-ble/|CMakeLists\.txt$|sdkconfig\.defaults(\.[a-z0-9]+)?$|partitions\.csv$|version\.txt$|\.github/workflows/build\.yml$|scripts/ci-build-all\.sh$|scripts/build-pages\.sh$|scripts/apply-tesla-ble-patches\.sh$|scripts/prepare-tesla-ble-c5\.sh$)'; then
             changed=yes
           else
             changed=no

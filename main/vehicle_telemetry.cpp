@@ -12,6 +12,7 @@
 #include <esp_log.h>
 #include <esp_heap_caps.h>
 #include <esp_system.h>
+#include <utility>
 
 // protobuf generated headers (from tesla-ble)
 #include <vcsec.pb.h>
@@ -23,6 +24,10 @@ namespace {
 // Translate a nanopb CarServer_ChargeState into our flat result struct. Each scalar is a
 // proto3 optional → a single-member oneof in nanopb: present iff which_optional_<f> matches.
 void parse_charge_state(const CarServer_ChargeState& cs, ChargeStateResult& out) {
+    // A ChargeState response is one snapshot, not a delta. Clear every presence bit
+    // before decoding it: otherwise an omitted field inherits the previous response's
+    // value and a new generation can falsely "verify" stale charging_amps.
+    out = {};
     out.valid = true;
     if (cs.which_optional_battery_level == CarServer_ChargeState_battery_level_tag) {
         out.battery_level = (float)cs.optional_battery_level.battery_level; out.has_battery_level = true;
@@ -270,6 +275,10 @@ void VehicleController::install_state_callbacks_() {
     vehicle_->set_charge_state_callback([this](const CarServer_ChargeState& cs) {
         tk::MutexGuard g(cache_mutex_);
         parse_charge_state(cs, last_known_charge_);
+        uint32_t now = xTaskGetTickCount();
+        last_charge_ticks_.store(now);
+        charge_state_generation_.fetch_add(1);
+        charge_cache_stale_reported_.store(false);
         note_contact_();
     });
 
@@ -491,7 +500,8 @@ void VehicleController::loop_task_fn_(void* arg) {
         // open for the session), so signals 1+2 cover the cases evcc cares about. When the
         // window closes we stop polling and drop the link once so the MCU idles into sleep.
         // The auto-pair VCSEC health poll keeps running (it never wakes the MCU) as the
-        // revocation canary, and evcc reads stay served from cache (stale by design).
+        // revocation canary. Idle evcc reads may use the last cache value; during this
+        // active window get_charge_state requires a recent ChargeState instead.
         uint32_t now_ticks = xTaskGetTickCount();
         bool charging_state;
         {
@@ -583,19 +593,50 @@ void VehicleController::loop_task_fn_(void* arg) {
 bool VehicleController::get_charge_state(ChargeStateResult& out, int /*timeout_ms*/) {
     // Serve the cached reading instantly and never block. evcc polls vehicle_data
     // frequently and times out quickly, so an on-demand connect + poll here would risk a
-    // gateway timeout (HTTP 502). Freshness is maintained out of band by loop_task, but ONLY
-    // while the active window is open (a recent command OR the car charging) — see
-    // loop_task_fn_. We deliberately do NOT open the window merely because the car is observed
-    // awake: that is self-perpetuating (our polling would keep the MCU awake), so a parked,
-    // idle car is left to sleep and this serves the last value (which heals within seconds of
-    // any evcc command). If we have never gotten a reading yet, the caller emits a zeroed
-    // charge_state.
-    tk::MutexGuard g(cache_mutex_);
-    if (last_known_charge_.valid) {
-        out = last_known_charge_;
-        return true;
+    // gateway timeout. Freshness is maintained out of band by loop_task while the active
+    // window is open (a recent command OR the car charging). In that window, a ChargeState
+    // older than kActiveChargeStateMaxAgeS is a broken feedback path and must fail instead
+    // of masquerading as live data. Outside it, serving the last value is deliberate: a
+    // parked idle car must be allowed to sleep without read-only evcc traffic waking it.
+    ChargeStateResult cached;
+    uint32_t sample = 0;
+    uint32_t generation = 0;
+    {
+        // Keep the cache and its freshness stamp coherent. The callback updates all
+        // three under this same lock; reading them in separate critical sections could
+        // pair an old value with the timestamp from a newer response.
+        tk::MutexGuard g(cache_mutex_);
+        cached = last_known_charge_;
+        sample = last_charge_ticks_.load();
+        generation = charge_state_generation_.load();
     }
-    return false;
+    if (!cached.valid) return false;
+
+    uint32_t now = xTaskGetTickCount();
+    uint32_t cmd = last_cmd_ticks_.load();
+    bool recent_cmd = cmd != 0 && (now - cmd) < pdMS_TO_TICKS(kActiveWindowMs);
+    bool charging = cached.charging_state == "Charging" ||
+                    cached.charging_state == "Starting";
+    bool active_window = recent_cmd || charging;
+
+    // generation is the "have sample" bit so a legitimate callback at FreeRTOS tick 0
+    // is not mistaken for "never received".
+    bool have_sample_age = generation != 0;
+    uint32_t sample_age_s = have_sample_age
+        ? (now - sample) / configTICK_RATE_HZ
+        : 0;
+    if (!tk::charge_cache_usable(cached.valid, active_window,
+                                 have_sample_age, sample_age_s)) {
+        if (!charge_cache_stale_reported_.exchange(true)) {
+            ESP_LOGW(TAG,
+                     "charge-state cache stale during active window (%us old) — refusing live response",
+                     (unsigned)sample_age_s);
+        }
+        return false;
+    }
+
+    out = std::move(cached);
+    return true;
 }
 
 bool VehicleController::get_vehicle_status(VehicleStatusResult& out, int timeout_ms) {

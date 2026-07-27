@@ -21,6 +21,13 @@ Relevant attackers:
 rather than the RF-off pseudo-random RNG. Devices first-keyed before the entropy fix should
 re-key + re-pair (`/gen_keys?force=1`, then re-enrol).
 
+**BLE response anti-replay:** the pinned `yoziru/tesla-ble` v5.1.1 detects an invalid
+CarServer response counter but, upstream, still dispatches that response to telemetry callbacks
+and the command FIFO. The repository applies `patches/tesla-ble/` to every target at build time
+so a rejected counter is logged and dropped before it can update state or complete a newer
+command. Charging-current writes additionally require a fresh exact `ChargeState` readback;
+an action acknowledgement alone is not reported as success.
+
 ## Current device state (factory ESP32-S3)
 
 `espefuse summary` on the connected unit (read-only check, 2026-06-16):

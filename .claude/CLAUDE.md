@@ -6,10 +6,12 @@ API-compatible with TeslaBleHttpProxy (works as evcc BLE vehicle integration). B
 builds all five. The first four are exactly what yoziru/tesla-ble declares in its
 `idf_component.yml` `targets:` (the Component Manager refuses any other chip). **esp32c5**
 (LilyGO T-Dongle-C5, dual-band Wi-Fi 6) is NOT in that upstream list, so it is added by a
-local build-time patch of tesla-ble (`scripts/prepare-tesla-ble-c5.sh` clones the pinned tag
-and appends esp32c5 to its `targets:`; `main/idf_component.yml` routes ONLY the c5 target
-through that local copy — the other four resolve byte-identically from git). Our own code is
-target-agnostic; the only C5 blocker was that one manifest line.
+local build-time target patch (`scripts/prepare-tesla-ble-c5.sh` clones the pinned tag and
+appends esp32c5 to its `targets:`; `main/idf_component.yml` routes only C5 through that copy).
+All five targets also receive the repository-owned tesla-ble anti-replay patch under
+`patches/tesla-ble/`, applied by root CMake after dependency resolution: upstream v5.1.1
+detects duplicate CarServer response counters but otherwise processes the replay. Our patch
+drops it before it can refresh a cache or complete the next FIFO command.
 
 > **Deep reference:** this file holds the always-needed essentials. The full narrative for
 > telemetry, the MQTT/HA bridge, WiFi/LAN reconnect, sleep/link-state, pairing, OTA and the
@@ -57,6 +59,9 @@ which row state and which countdown belongs beside it, mirrored by app.js under 
 check), the HA binary
 `value_template` builder (`logic/ha_templates.hpp` — presence-aware `is defined` guard) and the
 POST-body reassembly loop (`logic/http_body.hpp` — multi-segment recv + bounded timeout) and the
+charging-current ACK/readback plus active-cache freshness rules
+(`logic/charge_control.hpp` — a Tesla action ACK is not success until an independent,
+fresh ChargeState reports the requested amps; active data older than 30 s is rejected) and the
 heap-exhaustion watchdog (`logic/heap_watchdog.hpp` — 4 KB/5 min unbroken hold, OTA-excused,
 restart cap + `heap:<n>` breadcrumb round-trip) and the BLE connect-failure classifier
 (`logic/connect_outcome.hpp` — scanner verdict → out-of-range / at-BLE-limit / connect-failed,
@@ -80,8 +85,9 @@ artifact (or OTA) and verify the device version. When waiting on CI, block on
 # Build (first run: set-target; afterwards plain `build` stays incremental).
 # The wrapper keeps build/ host-owned and pins the ESP-IDF version to CI.
 # Pick your chip; CI builds all five via scripts/ci-build-all.sh.
-# For esp32c5 first run `scripts/prepare-tesla-ble-c5.sh` once (clones + patches the local
-# tesla-ble copy the c5 target resolves against); ci-build-all.sh does this automatically.
+# For esp32c5 first run `scripts/prepare-tesla-ble-c5.sh` once (clones + adds C5 to the local
+# tesla-ble copy); ci-build-all.sh does this automatically. The shared anti-replay patch is
+# applied automatically by CMake for every target.
 scripts/idf-docker.sh idf.py set-target esp32s3 build   # or esp32 / esp32c3 / esp32c6 / esp32c5
 
 # Configure WiFi, VIN (interactive; can also be set later via the setup AP)
@@ -96,6 +102,8 @@ cd build && esptool --chip esp32s3 -p <port> write_flash "@flash_args"   # or es
 
 ```
 main.cpp               → WiFi init, NVS init, start all components
+patches/tesla-ble/     → reviewed patch on pinned dependency: reject replayed CarServer
+                         responses before callbacks/FIFO completion (all five targets)
 ble_client.cpp         → NimBLE GATT client (BleAdapter impl)
                          Scans for UUID 00000211-b2d1-43f0-9b88-960cebf8b91e
                          Write chr: 0212, Notify chr: 0213
@@ -105,7 +113,9 @@ vehicle_commands.cpp   → sync command API via semaphores (send_vcsec_/send_inf
                          make_result_cb_, all user commands). ensure_connected_ names WHY a
                          connect failed from the scanner's own verdict and rate-limits the
                          unattended repeats (logic/connect_outcome.hpp, host-tested) —
-                         foreground attempts are never suppressed
+                         foreground attempts are never suppressed. set_charging_amps keeps its
+                         Tesla action + fresh exact ChargeState readback in one serialized
+                         command transaction
 vehicle_telemetry.cpp  → protobuf parsers, cache callbacks, loop_task (background poll +
                          sleep gating), data queries
 vehicle_pairing.cpp    → auto_pair_task, key mgmt/fingerprint, session invalidation,
@@ -299,6 +309,16 @@ vehicles:
     url: http://<ESP32-IP>    # or http://tesla-key-esp32.local
     port: 80                  # this device serves on 80 (template default is 8080)
 ```
+
+The Tesla-compatible response shape remains
+`.response.response.charge_state.charge_amps`. `vehicle_data` is cache-only and never blocks:
+idle/asleep values remain readable so polling does not wake the car, while charging or a command
+in the last five minutes requires a ChargeState no older than 30 s (otherwise HTTP 503).
+`set_charging_amps` requires an integer `charging_amps` body (HTTP 400 otherwise), then treats
+Tesla's action ACK as provisional: a second serialized ChargeState response must report the exact
+requested value. Rejects, timeouts, missing readback and mismatches return HTTP 502 so evcc retries
+instead of accepting false success. Every command failure keeps its JSON reason but uses HTTP 502
+rather than transport-level success.
 
 ## Home Assistant MQTT bridge
 

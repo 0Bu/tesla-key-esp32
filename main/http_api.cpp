@@ -7,9 +7,11 @@
 
 #include "http_handlers.hpp"
 #include "logic/command_result.hpp"   // outcome text shared with the MCP tools/call path
+#include "logic/mcp.hpp"              // shared bounded double → int conversion
 #include "platform.hpp"
 #include <esp_log.h>
 #include <esp_app_desc.h>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
@@ -63,24 +65,65 @@ static bool parse_vin_only(const char* uri, char* vin_out, size_t vin_sz) {
     return true;
 }
 
-// Read an integer command parameter from the JSON body, clamped to [lo,hi]. The double is
-// clamped BEFORE the int cast — casting an out-of-range double to int is undefined behaviour,
-// so a hostile `{"percent": 1e300}` must never reach `(int)valuedouble`. The string path is
-// bounded too. The car is the real backstop; this just keeps a malformed/hostile LAN request
-// in range (amps 0–48, percent 50–100, start_minutes 0–1439 — matching the controller's own
-// clamps in vehicle_commands.cpp). `obj` may be null (no body) → returns the clamped default.
-static int json_int_clamped(const cJSON* obj, const char* key, int dflt, int lo, int hi) {
-    int v = dflt;
-    const cJSON* j = cJSON_GetObjectItemCaseSensitive(obj, key);
-    if (cJSON_IsNumber(j)) {
-        double d = j->valuedouble;
-        if (d < (double)lo) d = lo; else if (d > (double)hi) d = hi;
-        v = (int)d;
-    } else if (cJSON_IsString(j) && j->valuestring) {
-        v = atoi(j->valuestring);
+// Parse one REST integer argument against the shared command registry. Optional values keep
+// the TeslaBleHttpProxy-compatible default, but an api_required value (charging_amps) must be
+// present and parseable: silently turning a truncated/malformed evcc body into 0 A made the
+// command log "success" for a different value than the controller requested.
+static bool json_int_arg(const cJSON* obj, const tk::CmdArg& arg,
+                         int& out, const char*& problem) {
+    const cJSON* j = obj ? cJSON_GetObjectItemCaseSensitive(obj, arg.api_key) : nullptr;
+    if (!j) {
+        out = arg.api_default;
+        if (arg.api_required) {
+            problem = "missing required argument";
+            return false;
+        }
+        return true;
     }
-    if (v < lo) v = lo; else if (v > hi) v = hi;
-    return v;
+
+    double d;
+    if (cJSON_IsNumber(j)) {
+        d = j->valuedouble;
+    } else if (cJSON_IsString(j) && j->valuestring) {
+        char* end = nullptr;
+        d = strtod(j->valuestring, &end);
+        if (end == j->valuestring || !end || *end != '\0') {
+            problem = "invalid argument";
+            return false;
+        }
+    } else {
+        problem = "invalid argument";
+        return false;
+    }
+    if (!std::isfinite(d)) {
+        problem = "invalid argument";
+        return false;
+    }
+    if (arg.api_required && std::trunc(d) != d) {
+        problem = "integer required";
+        return false;
+    }
+    out = tk::clamped_int(d, arg.lo, arg.hi);
+    return true;
+}
+
+static bool json_bool_arg(const cJSON* obj, const tk::CmdArg& arg,
+                          bool& out, const char*& problem) {
+    const cJSON* j = obj ? cJSON_GetObjectItemCaseSensitive(obj, arg.api_key) : nullptr;
+    if (!j) {
+        out = false;
+        if (arg.api_required) {
+            problem = "missing required argument";
+            return false;
+        }
+        return true;
+    }
+    if (!cJSON_IsBool(j)) {
+        problem = "invalid argument";
+        return false;
+    }
+    out = cJSON_IsTrue(j);
+    return true;
 }
 
 // ─── POST /api/1/vehicles/{VIN}/command/{CMD} ─────────────────────────────────
@@ -93,34 +136,49 @@ esp_err_t handle_command(GuardedReq rq) {
     }
     ESP_LOGI(TAG, "CMD %s on VIN %s", cmd, vin);
 
-    // Parse optional JSON body
-    char* body = read_body(req);
-    cJSON* json = body ? cJSON_Parse(body) : nullptr;
-    free(body);
-
-    // Name → descriptor via the shared registry (logic/command_registry.hpp) — the SAME
-    // table the MCP tools read, so the two surfaces can never disagree about names or
-    // argument bounds. REST stays LENIENT by protocol compat: an absent/unparseable
-    // value falls back to the spec's api_default (e.g. set_charge_limit with no body
-    // still means 80%), unlike MCP's strict -32602. Values are positional: args[i]
-    // fills ival[i]/bval[i], which execute_vehicle_command consumes by position.
     const tk::CmdInfo* info = tk::cmd_from_api_name(cmd);
     if (!info) {
-        cJSON_Delete(json);
         return send_json(req, 404, make_response(false, cmd, vin, "unknown command"));
+    }
+
+    // Parse the body once. Empty is valid for no-argument and legacy-optional commands;
+    // a declared body that could not be read, malformed JSON, or a non-object is never
+    // silently treated as an empty object.
+    char* body = read_body(req);
+    if (!body && req->content_len > 0) {
+        return send_json(req, 400, make_response(false, cmd, vin, "invalid request body"));
+    }
+    cJSON* json = body ? cJSON_Parse(body) : nullptr;
+    free(body);
+    if (req->content_len > 0 && (!json || !cJSON_IsObject(json))) {
+        cJSON_Delete(json);
+        return send_json(req, 400, make_response(false, cmd, vin, "invalid JSON object"));
     }
 
     int  ival[tk::kCmdMaxArgs] = {};
     bool bval[tk::kCmdMaxArgs] = {};
+    const char* problem = nullptr;
+    const char* problem_key = nullptr;
     for (int i = 0; i < tk::kCmdMaxArgs; ++i) {
         const tk::CmdArg& a = info->args[i];
         if (a.type == tk::CmdArgType::None || !a.api_key) continue;
         if (a.type == tk::CmdArgType::Int) {
-            ival[i] = json_int_clamped(json, a.api_key, a.api_default, a.lo, a.hi);
-        } else {  // Bool: absent → false (cJSON_GetObjectItemCaseSensitive(NULL,…) is NULL)
-            const cJSON* j = cJSON_GetObjectItemCaseSensitive(json, a.api_key);
-            bval[i] = j ? cJSON_IsTrue(j) : false;
+            if (!json_int_arg(json, a, ival[i], problem)) {
+                problem_key = a.api_key;
+                break;
+            }
+        } else {
+            if (!json_bool_arg(json, a, bval[i], problem)) {
+                problem_key = a.api_key;
+                break;
+            }
         }
+    }
+    if (problem) {
+        char reason[96];
+        snprintf(reason, sizeof(reason), "%s: %s", problem, problem_key);
+        cJSON_Delete(json);
+        return send_json(req, 400, make_response(false, cmd, vin, reason));
     }
 
     bool ok = execute_vehicle_command(*g_vehicle, info->kind, ival, bval);
@@ -131,7 +189,11 @@ esp_err_t handle_command(GuardedReq rq) {
     // selection is shared with the MCP tools/call result (logic/mcp.hpp) so the two
     // paths can never report the same outcome differently.
     std::string err = g_vehicle->last_command_error();
-    return send_json(req, 200, make_response(ok, cmd, vin, tk::command_result_text(ok, err)));
+    // A false command outcome is not an HTTP success: evcc otherwise accepts the request
+    // as delivered and the old current can remain active. Keep the Tesla-compatible JSON
+    // body, but make the transport status retryable/observable.
+    return send_json(req, ok ? 200 : 502,
+                     make_response(ok, cmd, vin, tk::command_result_text(ok, err)));
 }
 
 // ─── GET /api/1/vehicles/{VIN}/vehicle_data ───────────────────────────────────
@@ -174,7 +236,7 @@ esp_err_t handle_vehicle_data(GuardedReq rq) {
     cJSON_AddNumberToObject(state, "battery_range",    cs.battery_range);
     cJSON_AddStringToObject(outer, "reason", ok ? "success" : "stale or unavailable");
 
-    return send_json(req, 200, root);
+    return send_json(req, ok ? 200 : 503, root);
 }
 
 // ─── GET /api/1/vehicles/{VIN}/body_controller_state ─────────────────────────
