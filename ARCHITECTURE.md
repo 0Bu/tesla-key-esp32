@@ -62,6 +62,22 @@ These background polls are **paused while a foreground evcc/manual command is in
 (`cmd_in_flight_`), so a command is never queued behind a slow/failing poll in the single
 BLE FIFO — keeps command latency low on an awake, busy link.
 
+`set_charging_amps` uses that pause as a correctness boundary: under one
+`command_mutex_`/`cmd_in_flight_` transaction it sends the current action, waits for Tesla's
+ACK, then sends an independent `getChargeState` request. The persistent cache callback runs
+before the poll command completes and increments `charge_state_generation_`; success therefore
+clears the previous ChargeState before decoding the new snapshot, so an omitted field cannot
+inherit an old presence/value. Success requires both a new generation, a present field, and an
+exact `charging_amps` match. The ACK alone is never
+reported as success. Two mismatching/missing readbacks exhaust the original command budget and
+return an error, with requested/applied/request/actual current values written to the log.
+
+The same ChargeState callback stamps `last_charge_ticks_`. `GET vehicle_data` remains
+cache-only and non-blocking, but the cache is treated differently by state: idle values may be
+old so read-only polling never wakes a sleeping car; during the active window (charging or a
+command in the last five minutes), data older than 30 s returns HTTP 503. Thus a BLE
+parser/retry storm is visible to evcc instead of being hidden behind a valid-looking HTTP 200.
+
 Exposed under `tele` in `/status`, emitted only while the BLE link is up — the MQTT bridge
 reads the caches directly, so it keeps publishing regardless (the device's web UI
 renders the Overheat / Defrost chips from `tele.climate` — each shown only when a live AC draw
@@ -146,7 +162,7 @@ detected chip); OTA is a single channel where each device pulls its own
 otherwise). The per-target bootloader offset (0x1000 on the classic
 esp32, 0x2000 on esp32c5, 0x0 on s3/c3/c6) is handled automatically by `@flash_args` and the manifest.
 
-**esp32c5 via a local build-time patch of tesla-ble.** esp32 / esp32s3 / esp32c3 / esp32c6 are
+**Pinned tesla-ble with two build-time patches.** esp32 / esp32s3 / esp32c3 / esp32c6 are
 exactly the targets yoziru/tesla-ble declares in its `idf_component.yml` `targets:`, and the
 ESP-IDF Component Manager enforces that list — it refuses `esp32c5` at dependency resolution,
 before compile, and stages nothing into `managed_components/` (so there is nothing to patch after
@@ -156,9 +172,22 @@ regenerated `managed_components/`, `scripts/prepare-tesla-ble-c5.sh` clones the 
 into `third_party/tesla-ble` (gitignored) and appends `esp32c5` to its `targets:`.
 `main/idf_component.yml` then declares the dependency twice under mutually-exclusive `rules:` —
 the git dep applies when `target != esp32c5`, a local `path:` dep (the patched checkout) when
-`target == esp32c5`. So only C5 routes through the local copy; the other four resolve
-byte-identically from git, and CI (`ci-build-all.sh`) runs the prepare step automatically. All
-five images are the same tesla-ble revision. This patch is planned debt: the retirement plan
+`target == esp32c5`. So only C5 routes through the local copy; CI (`ci-build-all.sh`) runs the
+prepare step automatically.
+
+The second patch is a **correctness and anti-replay fix shared by all five targets**. Upstream
+v5.1.1 calls `Peer::validate_response_counter()` and logs a duplicate CarServer response, but
+then continues into state callbacks and FIFO command completion. A replay from an earlier
+request can therefore refresh `last_known_charge_` or complete whichever command is currently
+at the queue head. Root `CMakeLists.txt`, after dependency resolution, invokes
+`scripts/apply-tesla-ble-patches.sh`; it applies the committed patch under
+`patches/tesla-ble/` to either materialised source tree before compilation, is idempotent, and
+fails configuration if the pinned upstream context changes. The patch returns immediately on
+an invalid response counter, before callbacks or `mark_command_completed_`. This is tracked in
+[`adr/0003-reject-replayed-tesla-responses.md`](adr/0003-reject-replayed-tesla-responses.md).
+
+All five images use the same tesla-ble revision and anti-replay behavior. The C5 target patch
+is planned debt: its retirement plan
 (one-line upstream `targets:` PR, then drop the script/routing) is
 [`adr/0001-esp32c5-target-upstreaming.md`](adr/0001-esp32c5-target-upstreaming.md); the wider
 tesla-ble dependency strategy (IDF-6 / Mbed TLS 4 crypto seam, issue #61) is
@@ -821,8 +850,12 @@ MCP is strict — an absent required argument OR a present-but-unparseable one i
 protocol error (silently defaulting `set_scheduled_charging`'s `enable` would *disable*
 the schedule and report success); loose-but-unambiguous encodings are coerced (numeric
 strings for ints, 0/1 for bools); parsed integers are clamped to the spec bounds before
-the int cast (UB guard) — while REST stays lenient for TeslaBleHttpProxy compat (absent →
-the spec's `api_default`). Both surfaces execute through the single kind→controller
+the int cast (UB guard) — while REST generally stays lenient for TeslaBleHttpProxy compat
+(absent → the spec's `api_default`). The explicit safety exception is
+`set_charging_amps`: its registry row sets `api_required`, so missing/malformed input is HTTP
+400 rather than silently becoming 0 A; a fractional value is also rejected because the Tesla
+field is an integer amp limit. All REST command failures retain their compatible JSON result/reason
+body but return HTTP 502 instead of a misleading HTTP 200. Both surfaces execute through the single kind→controller
 dispatch in `command_exec.cpp`. The registry, method routing, version table, clamp and the
 shared command-outcome text (`logic/command_result.hpp`, also used by the REST
 `/command` reason so the two paths can never diverge) are IDF-free and covered by the
@@ -863,7 +896,7 @@ through the guard so the lock is released during stack unwinding, never left hel
 
 | Primitive | Kind | Protects |
 |---|---|---|
-| `command_mutex_` | mutex, RAII | one whole command/query cycle: exclusive use of `cmd_sem_`, `last_result_`, `last_error_` |
+| `command_mutex_` | mutex, RAII | one whole command/query transaction: exclusive use of `cmd_sem_`, `last_result_`, `last_error_`; for `set_charging_amps`, the action and verifying ChargeState poll are one transaction |
 | `vehicle_mutex_` | mutex, RAII (`SemGuard`) | **every** call into the tesla-ble `vehicle_` object (send, `loop()`, `on_rx_data`, `set_connected`) |
 | `cmd_sem_` | binary semaphore | signals "result callback ran" from the BLE RX task to the waiting command (the result callback **always** gives it, even if its body throws) |
 | `cache_mutex_` | mutex, RAII, leaf | the `last_known_*` caches (`std::string` members ⇒ an unlocked copy is torn-read UB) |
