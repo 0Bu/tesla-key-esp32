@@ -36,6 +36,7 @@ TARGET=esp32s3   # chip being flashed: esp32s3 (default) | esp32 | esp32c3 | esp
 #    checkout the c5 target resolves against (idempotent host git clone; no-op for other chips).
 [ "$TARGET" = esp32c5 ] && scripts/prepare-tesla-ble-c5.sh
 # 1) Build via the CI-pinned ESP-IDF Docker image (build/ stays host-owned).
+#    Root CMake automatically applies the committed tesla-ble anti-replay patch on every target.
 #    First build only: set-target; afterwards plain `build` keeps it incremental & fast.
 scripts/idf-docker.sh \
   sh -c "if [ -f sdkconfig ]; then idf.py build; else idf.py set-target $TARGET build; fi" \

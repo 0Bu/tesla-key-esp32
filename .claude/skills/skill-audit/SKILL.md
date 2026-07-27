@@ -110,7 +110,8 @@ the authority for the per-sibling drift check; `project-review` defers the mecha
   endpoint list, and the env-var gates (`RUN_COMMANDS`/`ALLOW_CHARGE_TOGGLE`/`RUN_ALL_COMMANDS`).
 - **`vehicle-command-audit`** — compares the firmware against upstream `teslamotors/vehicle-command`,
   gated by what `yoziru/tesla-ble` can do. Verify the tesla-ble **pin** in its source map
-  (`v5.1.1`) still matches `main/idf_component.yml`, its upstream file paths still resolve
+  (`v5.1.1`) still matches `main/idf_component.yml`, the repository anti-replay patch still
+  applies through root CMake to both dependency locations, its upstream file paths still resolve
   (e.g. `pkg/vehicle/charge.go`), and its "worked findings" don't assert drift already fixed.
 - **`add-logic-test`** — scaffolds a `main/logic/` unit + `CHECK`s in `test/test_logic.cpp`.
   Verify against `scripts/run-mock-tests.sh`, the CI `logic-test` job
@@ -168,8 +169,10 @@ owns and must stay in sync with it:
   facts against the build wiring: the target set (esp32/s3/c3/c6/c5), per-target bootloader
   offsets (`0x1000`/`0x2000`/`0x0`), the image-suffix map across `scripts/ci-build-all.sh` +
   `scripts/build-pages.sh` + `main/ota_update.cpp` (`TESLA_OTA_IMG_SUFFIX`), the app-size gate
-  (`slot − 32 KB` = `0x1e8000`), the esp32c5 patch routing (`scripts/prepare-tesla-ble-c5.sh` +
-  `main/idf_component.yml`), and the display/LED opt-in Kconfig. Complementary to
+  (`slot − 32 KB` = `0x1e8000`), the esp32c5 target routing
+  (`scripts/prepare-tesla-ble-c5.sh` + `main/idf_component.yml`), the all-target anti-replay
+  patch wiring (`patches/tesla-ble/` + `scripts/apply-tesla-ble-patches.sh` + root CMake), and
+  the display/LED opt-in Kconfig. Complementary to
   `project-review`, not a firmware-logic reviewer.
 
 A skill or agent that drives a script is only as current as the script: when the script changes,

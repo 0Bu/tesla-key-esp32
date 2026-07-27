@@ -12,6 +12,7 @@
 #include "rtos_guard.hpp"
 #include "logic/ble_phase.hpp"
 #include "logic/connect_outcome.hpp"
+#include "logic/charge_control.hpp"
 #include "logic/link_state.hpp"
 #include "logic/ui_state.hpp"
 #include "freertos/FreeRTOS.h"
@@ -277,6 +278,11 @@ private:
                      bool count_as_activity = true, bool auth_fail_is_revocation = false);
     bool send_infotainment_(const std::string& name, Builder builder, int timeout_ms,
                             TeslaBLE::WakePolicy wp = TeslaBLE::WakePolicy::WAKE_IF_NEEDED);
+    // Same runner with command_mutex_ + cmd_in_flight_ already held. Used by
+    // set_charging_amps to keep the action and its independent ChargeState readback
+    // in one serialized transaction, with no background poll inserted between them.
+    bool send_infotainment_locked_(const std::string& name, Builder builder, int timeout_ms,
+                                   TeslaBLE::WakePolicy wp);
 
     // Build the per-command result callback. auth_fail_is_revocation gates whether an
     // "authentication failed" reply may count toward the two-strike pairing_lost_ heuristic
@@ -402,6 +408,13 @@ private:
     // Stamped from the cache callbacks (BLE RX task); read by the HTTP task. atomic so no
     // lock is needed. 0 = nothing received yet. Cleared on a pairing reset.
     std::atomic<uint32_t> last_contact_ticks_{0};
+    // ChargeState-specific freshness + generation. last_contact_ticks_ also advances for
+    // climate/drive/etc., so it cannot prove that the current-limit readback is fresh.
+    // Generation changes on every decoded ChargeState and lets set_charging_amps distinguish
+    // its explicit post-command poll from an older cached value.
+    std::atomic<uint32_t> last_charge_ticks_{0};
+    std::atomic<uint32_t> charge_state_generation_{0};
+    std::atomic<bool>     charge_cache_stale_reported_{false};
     // Uptime tick of the last time the car was confirmed REACHABLE over BLE — any successful
     // signed round-trip, including the idle VCSEC health poll that keeps answering while the
     // car merely sleeps nearby (the body controller is always on). This is what tells a

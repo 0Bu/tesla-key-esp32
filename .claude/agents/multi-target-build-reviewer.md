@@ -1,6 +1,6 @@
 ---
 name: multi-target-build-reviewer
-description: Reviews a change for per-target build/config divergence across this project's FIVE targets (esp32 / esp32s3 / esp32c3 / esp32c6 / esp32c5), built from ONE source tree. Checks that a change holds for all five — per-target sdkconfig.defaults, the esp32c5 local tesla-ble patch routing, per-target bootloader offsets, the image-suffix/platform strings that must agree across CI + device + Pages, the app-size gate headroom, and the display/LED opt-in gating. Use after touching sdkconfig.defaults*, partitions.csv, main/idf_component.yml, scripts/ci-build-all.sh / prepare-tesla-ble-c5.sh / build-pages.sh, ota_update.cpp's suffix/platform, the OTA manifest, or anything whose correctness differs per chip. Returns a prioritized findings report; it does NOT edit, and does NOT review general firmware logic or memory safety (project-review + heap-safety-reviewer) or endpoint/command doc-drift (doc-drift-checker).
+description: Reviews a change for per-target build/config divergence across this project's FIVE targets (esp32 / esp32s3 / esp32c3 / esp32c6 / esp32c5), built from ONE source tree. Checks that a change holds for all five — per-target sdkconfig.defaults, the esp32c5 local tesla-ble target routing, the shared tesla-ble source-patch wiring, per-target bootloader offsets, the image-suffix/platform strings that must agree across CI + device + Pages, the app-size gate headroom, and the display/LED opt-in gating. Use after touching sdkconfig.defaults*, partitions.csv, main/idf_component.yml, patches/tesla-ble, scripts/ci-build-all.sh / apply-tesla-ble-patches.sh / prepare-tesla-ble-c5.sh / build-pages.sh, ota_update.cpp's suffix/platform, the OTA manifest, or anything whose correctness differs per chip. Returns a prioritized findings report; it does NOT edit, and does NOT review general firmware logic or memory safety (project-review + heap-safety-reviewer) or endpoint/command doc-drift (doc-drift-checker).
 tools: Read, Grep, Glob, Bash
 ---
 
@@ -22,10 +22,12 @@ follow-up session apply the fix.
   because a single-target build looks fine.
 - **esp32c5 is special.** yoziru/tesla-ble v5.1.1 does **not** list esp32c5 in its
   `idf_component.yml` `targets:`, so the Component Manager refuses it. It is added by a
-  build-time patch: `scripts/prepare-tesla-ble-c5.sh` clones+patches a local
+  build-time target patch: `scripts/prepare-tesla-ble-c5.sh` clones+patches a local
   `third_party/tesla-ble`, and `main/idf_component.yml` routes **only** the c5 target through
-  that local copy (`rules:`); the other four must resolve **byte-identically from git**.
-  `ci-build-all.sh` runs the prepare script automatically.
+  that local copy (`rules:`); the other four resolve the same pin directly from git.
+  `ci-build-all.sh` runs the prepare script automatically. Root CMake then applies the
+  committed anti-replay patch to whichever source tree each target uses, so runtime behavior
+  must remain identical across all five.
 - **Per-target bootloader offset:** `0x1000` on classic esp32, **`0x2000` on esp32c5** (newer
   flash layout), `0x0` on s3/c3/c6. Carried by `@flash_args`, the OTA manifest, `ci-build-all.sh`
   (`merge_bin`), and the `flash-esp32` skill — all four must agree. App is at `0x20000`;
@@ -62,6 +64,9 @@ the range you're given. Then walk this checklist for anything the change touches
    **only** c5 through `third_party/tesla-ble` and leave the other four resolving from git
    unchanged? Any change to the pinned tag/version must be mirrored in
    `scripts/prepare-tesla-ble-c5.sh`. Does `ci-build-all.sh` still invoke the prepare script?
+   Does root CMake still apply every committed `patches/tesla-ble/` change through
+   `scripts/apply-tesla-ble-patches.sh` to both dependency locations, so C5 cannot silently
+   diverge from the other four targets?
 3. **Bootloader-offset consistency.** Any offset/partition/flash-args change — is the per-target
    offset (`0x1000`/`0x2000`/`0x0`) still consistent across `@flash_args`, the manifest,
    `ci-build-all.sh` merge, and the `flash-esp32` skill? A wrong offset bricks flashing/OTA for

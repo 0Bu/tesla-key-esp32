@@ -12,8 +12,9 @@
 // a range again by construction. IDF-free; host-tested in test/test_logic.cpp.
 //
 // Surface semantics stay deliberately different and are encoded per-surface:
-//   REST is LENIENT (protocol compat): an absent/unparseable value falls back to
-//   api_default — evcc and existing scripts rely on today's behaviour.
+//   REST is generally LENIENT for protocol compatibility, but safety-critical
+//   arguments may set api_required (set_charging_amps does): absent or malformed
+//   input must not silently turn into a different vehicle command.
 //   MCP is STRICT: an absent REQUIRED arg or a present-but-unparseable one is a
 //   -32602 protocol error (silently defaulting set_scheduled_charging's "enable"
 //   would DISABLE the schedule and report success).
@@ -53,12 +54,13 @@ struct CmdArg {
     const char* api_key;       // REST body key; nullptr = arg not on the REST surface
     const char* mcp_key;       // MCP arguments key; nullptr = arg not on the MCP surface
     CmdArgType  type;
-    bool        mcp_required;  // MCP only; REST is always lenient (see header comment)
+    bool        api_required;  // REST: absent/malformed body is HTTP 400 when true
+    bool        mcp_required;  // MCP: absent argument is JSON-RPC -32602 when true
     int         api_default;   // REST fallback when absent (Int; must lie in [lo,hi])
     int         lo, hi;        // Int only: THE shared inclusive clamp/schema bounds
 };
 
-inline constexpr CmdArg kNoCmdArg{ nullptr, nullptr, CmdArgType::None, false, 0, 0, 0 };
+inline constexpr CmdArg kNoCmdArg{ nullptr, nullptr, CmdArgType::None, false, false, 0, 0, 0 };
 
 // Maximum arguments per command — sizes the spec array and both executors' value
 // arrays; widening it in one place widens the whole pipeline.
@@ -91,21 +93,21 @@ inline constexpr CmdInfo kCommands[] = {
       { kNoCmdArg, kNoCmdArg } },
     { CmdKind::SetChargingAmps, "set_charging_amps", "set_charging_amps",
       "Set the charging current in amps.",
-      { { "charging_amps", "amps", CmdArgType::Int, true, 0, 0, 48 }, kNoCmdArg } },
+      { { "charging_amps", "amps", CmdArgType::Int, true, true, 0, 0, 48 }, kNoCmdArg } },
     { CmdKind::SetChargeLimit,  "set_charge_limit",  "set_charge_limit",
       "Set the charge limit in percent.",
-      { { "percent", "percent", CmdArgType::Int, true, 80, 50, 100 }, kNoCmdArg } },
+      { { "percent", "percent", CmdArgType::Int, false, true, 80, 50, 100 }, kNoCmdArg } },
     { CmdKind::SetScheduledCharging, "set_scheduled_charging", "set_scheduled_charging",
       "Enable/disable daily scheduled charging; start_minutes = minutes after local midnight.",
-      { { "enable",        "enable",        CmdArgType::Bool, true,  0, 0, 0 },
-        { "start_minutes", "start_minutes", CmdArgType::Int,  false, 0, 0, 1439 } } },
+      { { "enable",        "enable",        CmdArgType::Bool, false, true,  0, 0, 0 },
+        { "start_minutes", "start_minutes", CmdArgType::Int,  false, false, 0, 0, 1439 } } },
     // ── REST-only (role-refused; kept for API compatibility, absent from tools/list) ──
     { CmdKind::DoorLock,     "door_lock",     nullptr, nullptr, { kNoCmdArg, kNoCmdArg } },
     { CmdKind::DoorUnlock,   "door_unlock",   nullptr, nullptr, { kNoCmdArg, kNoCmdArg } },
     { CmdKind::FlashLights,  "flash_lights",  nullptr, nullptr, { kNoCmdArg, kNoCmdArg } },
     { CmdKind::HonkHorn,     "honk_horn",     nullptr, nullptr, { kNoCmdArg, kNoCmdArg } },
     { CmdKind::SetSentryMode, "set_sentry_mode", nullptr, nullptr,
-      { { "on", nullptr, CmdArgType::Bool, false, 0, 0, 0 }, kNoCmdArg } },
+      { { "on", nullptr, CmdArgType::Bool, false, false, 0, 0, 0 }, kNoCmdArg } },
     { CmdKind::ClimateStart, "auto_conditioning_start", nullptr, nullptr, { kNoCmdArg, kNoCmdArg } },
     { CmdKind::ClimateStop,  "auto_conditioning_stop",  nullptr, nullptr, { kNoCmdArg, kNoCmdArg } },
 };

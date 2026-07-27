@@ -47,8 +47,10 @@ the code and the builder are perfectly fine. (Worked example: the `flash_lights`
 **Net effect for this project:** the implementation tracks the protocol *well*. In practice
 almost every real finding lands as **documentation**, and almost every code "fix" you're tempted
 to make is blocked by gate 3 (tesla-ble can't) or gate "role" (car rejects). Reach for a code
-edit only when all three gates clear. **Never edit `managed_components/`** — a genuine library
-gap is a pin bump (tracking item) or a guard at our own call boundary.
+edit only when all three gates clear. **Never hand-edit or commit `managed_components/`** — use
+a pin bump or a guard at our own call boundary. For a confirmed defect inside library dispatch
+with no fixed upstream release, the exceptional path is a minimal committed patch under
+`patches/tesla-ble/`, applied deterministically to both dependency locations and rebased on bumps.
 
 ## Sources — what to read, and how to fetch it
 
@@ -137,6 +139,10 @@ re-confirm it against the *current* tree and catch anything that drifted since. 
    `.response.response.charge_state.*` with **`charge_amps`** (not `charging_amps`), doubled
    `response`, **miles/mph on the `/api` path** (metric is MQTT-only), `charging_state` strings
    `Charging/Disconnected/Complete/Stopped/NoPower/Starting`. *Baseline: full match.*
+9a. **Response-counter anti-replay** — upstream `yoziru/tesla-ble` v5.1.1 logs a failed
+    `validate_response_counter()` but continues dispatch. Verify the repository patch under
+    `patches/tesla-ble/` still returns before state callbacks and FIFO completion, applies to
+    both managed and C5-local dependency trees, and is rebased explicitly on every pin bump.
 10. **Docs internal coherence vs code** — `/status.link` and MQTT `sleep_status` enum value sets,
     endpoint/CONFIG/partition/version drift across the four docs. *Baseline: a few enum-set
     omissions — see worked examples.*
@@ -181,7 +187,8 @@ code is right. **Verify each is still present before editing** — some may alre
 4. **Fix, smallest blast radius first.** Prefer the **doc** fix (it's where the drift almost always
    is). For a **code** fix, all three gates must clear; then propagate every cross-cutting place
    that must move together (reuse `project-review`'s "add X → also update Y" links — new command,
-   endpoint, telemetry field, enum value, target, etc.). Never edit `managed_components/`.
+   endpoint, telemetry field, enum value, target, etc.). Never hand-edit generated dependency
+   trees; use the repository patch mechanism for a confirmed in-library defect.
 5. **Write the report** (structure below). If you applied fixes, say exactly what changed and where.
 
 ## Report structure

@@ -2,9 +2,10 @@ dependencies:
   idf: ">=5.0.1"
   espressif/mdns: "^1.2.0"
 
-  # esp32 / esp32s3 / esp32c3 / esp32c6: upstream yoziru/tesla-ble straight from git —
-  # the proven, unchanged path. The Component Manager enforces the library's own
-  # `targets:` list, which is exactly these four.
+  # esp32 / esp32s3 / esp32c3 / esp32c6: pinned upstream yoziru/tesla-ble from git.
+  # After the Component Manager materialises the source, root CMake applies the
+  # repository-owned anti-replay patch from patches/tesla-ble/ before compilation.
+  # The Component Manager enforces the library's own targets list (these four).
   yoziru/tesla-ble:
     git: "https://github.com/yoziru/tesla-ble.git"
     version: "v5.1.1"
@@ -17,9 +18,10 @@ dependencies:
   # C5 is RISC-V too — the only blocker is that manifest line. Route C5 through a local,
   # build-time-patched checkout: scripts/prepare-tesla-ble-c5.sh clones the pinned tag into
   # third_party/tesla-ble (gitignored) and appends esp32c5 to its `targets:`. So ONE source
-  # tree still builds all five targets, the other four resolve byte-identically from git, and
-  # we never edit managed_components/ (regenerated). Keep the version here in lockstep with the
-  # git dep above — the prepare script reads it from this file.
+  # tree still builds all five targets. The other four resolve directly from git; all five
+  # then receive the same anti-replay patch at configure time. We never commit generated
+  # dependency checkouts. Keep the version here in lockstep with the git dep above — the
+  # prepare script reads it from this file.
   tesla-ble:
     path: "../third_party/tesla-ble"
     rules:

@@ -21,8 +21,9 @@ gh pr view --json number,state,mergeable,headRefOid,body   # from the PR branch
 - The branch is pushed (`git status -sb` shows no ahead-count).
 - **Merge gate:** `require-project-review.sh` blocks `gh pr merge` inside Claude Code unless
   the PR body's `- [x] /project-review clean — merge gate @ <sha>` box is ticked and the
-  stamp matches the head commit. If it isn't: stop and tell the user — run `/project-review`
-  or have them tick the box / merge via the GitHub UI. Do NOT tick it yourself.
+  stamp matches the head commit. If it is stale, run the full `/project-review` first. After
+  an actually clean review of that exact head, stamp both the `/project-review` and
+  `/skill-audit` boxes yourself; never tick either as a bypass.
 
 ## 1. Merge (squash — repo convention)
 

@@ -32,6 +32,8 @@ esp_err_t send_json(httpd_req_t* req, int status, cJSON* root) {
                                 : status == 403 ? "403 Forbidden"
                                 : status == 404 ? "404 Not Found"
                                 : status == 409 ? "409 Conflict"
+                                : status == 502 ? "502 Bad Gateway"
+                                : status == 503 ? "503 Service Unavailable"
                                 : "500 Internal Server Error");
     }
     esp_err_t ret = httpd_resp_sendstr(req, body);
