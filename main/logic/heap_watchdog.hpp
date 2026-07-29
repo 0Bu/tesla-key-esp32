@@ -3,12 +3,13 @@
 // host-tested (test/test_logic.cpp).
 //
 // WHY THIS EXISTS. Every OOM guard in this firmware turns "out of memory" into "recover and
-// continue" — the handle_all try/catch answers 503, the BLE parse guards reset the link, the
-// /events broadcast drops a frame. That is right for a TRANSIENT shortage and must stay. But
-// nothing ever asked the next question: what if it never recovers?
+// continue" — the handle_all try/catch answers 503, the BLE parse guards reset the link, an MQTT
+// publish is skipped. That is right for a TRANSIENT shortage and must stay. But nothing ever asked
+// the next question: what if it never recovers?
 //
-// On 2026-07-18 a non-reading WebSocket subscriber exhausted the heap (fixed separately by the
-// /events send backpressure in ws_policy.hpp). The device then sat with free=14820 and
+// On 2026-07-18 a non-reading subscriber of the then-current WebSocket status push exhausted the
+// heap (that feed has since been replaced by the web UI polling /status, which cannot queue a
+// backlog on the device at all). The device then sat with free=14820 and
 // largest_block=768 — against a healthy 31744 — for TEN HOURS. It never crashed and never
 // rebooted: vehicle_->loop() threw std::bad_alloc, the handler reset the BLE link, the next
 // 50 ms iteration threw again, ~20 times a second, all night. HTTP could not serve, MQTT could

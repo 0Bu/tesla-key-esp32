@@ -1,12 +1,12 @@
 "use strict";
 var $=function(id){return document.getElementById(id)};
-// Write html into el only when it actually changed (cached on el.__h). The ~2 s WS push
-// re-renders on every frame; blindly reassigning innerHTML would destroy and recreate
+// Write html into el only when it actually changed (cached on el.__h). The status
+// poll re-renders every 4 s; blindly reassigning innerHTML would destroy and recreate
 // the child nodes, restarting any CSS animation on them from 0% — making looping
 // animations (hero ring, "searching" signal bars, pulsing dot) visibly jump. Skipping
 // the write when nothing changed keeps the same nodes alive so the animation runs on.
 function setHTML(el,html){ if(el && el.__h!==html){ el.__h=html; el.innerHTML=html; } }
-var state=null, otaTimer=null, otaAvail=null, waking=false, wakeTimeout=null, chgBusy=false, ws=null;
+var state=null, otaTimer=null, otaAvail=null, waking=false, wakeTimeout=null, chgBusy=false, feedOk=false;
 
 // Quotes are escaped too so esc() is safe in attribute values (title="…"), not just element content.
 function esc(s){return String(s).replace(/[&<>"']/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]})}
@@ -26,23 +26,18 @@ function toast(msg,type){
 }
 
 /* ---------- net ----------
-   The live UI is WebSocket-only. boot() opens ONE socket to /events; the device pushes the /status
-   JSON — an immediate snapshot on "sub", then a fresh copy every ~2 s (http_events.cpp). There is
-   no interval polling and no HTTP fallback for the live feed. poll() just asks the open socket for
-   an immediate snapshot after a user action, so the UI refreshes now instead of on the next push;
-   if the socket is momentarily down it's a no-op and the optimistic local state carries the UI
-   until it reconnects. (waitReboot() still GETs /status directly — that's post-OTA reboot
-   detection, a different concern from the live feed.) */
-function poll(){ try{ if(ws && ws.readyState===1) ws.send('sub'); }catch(e){} }
-
-function connectWS(){
-  var proto = location.protocol==='https:' ? 'wss:' : 'ws:';
-  ws = new WebSocket(proto+'//'+location.host+'/events');
-  ws.onopen    = function(){ try{ ws.send('sub'); }catch(e){} };   // ask for the first snapshot
-  ws.onmessage = function(e){ try{ render(JSON.parse(e.data)); }catch(err){} };
-  ws.onerror   = function(){ try{ ws.close(); }catch(e){} };       // funnel errors through onclose
-  // Keep the last-rendered state on screen (matches the old failed-poll behaviour) and reconnect.
-  ws.onclose   = function(){ ws=null; setTimeout(connectWS,3000); };
+   The live feed is an interval poll of GET /status (boot() sets it up), and poll() is also called
+   directly after a user action so the UI refreshes now instead of on the next tick. A failed fetch
+   deliberately changes nothing on screen — the last frame stays and the optimistic local state
+   carries the UI — but it clears feedOk, which parks the Bluetooth countdown (see boot()).
+   waitReboot() GETs /status too; that's post-OTA reboot detection, a different concern. */
+function poll(){
+  // Cache-bust + no-store: the live page polls forever, so a stale/cached /status would
+  // freeze the hero on an old state (e.g. a transient orange "Unreachable") until a manual
+  // reload — the very bug a fresh document hides. Same guard waitReboot() already uses.
+  fetch('/status?ms='+Date.now(),{cache:'no-store'}).then(function(r){return r.json()})
+    .then(function(s){ feedOk=true; render(s); })
+    .catch(function(){ feedOk=false; });
 }
 
 /* ---------- signal glyph ---------- */
@@ -80,9 +75,9 @@ function emptyBarsHTML(){
 /* ---------- Bluetooth phase countdown ----------
    The device reports which BLE phase is running and how many seconds are left in it
    (ble.phase / ble.phase_s): "connecting" = an attempt is running and gives up then,
-   "waiting" = no attempt is running and the next one starts then. The live push only
-   arrives every ~2 s, so the remaining time is ticked down locally in between and the
-   pushed value is treated as the clock to resync against.
+   "waiting" = no attempt is running and the next one starts then. A fresh value only
+   arrives with each 4 s poll, so the remaining time is ticked down locally in between and the
+   polled value is treated as the clock to resync against.
 
    The time sits at the row's right edge, in the column the tiles put their edit pencil in,
    and is painted with textContent into a dedicated node — NOT rebuilt through setHTML with
@@ -92,8 +87,8 @@ var cdKind=null, cdEndMs=0;
 // Constant markup — only the node's text changes per tick. data-p names the ONE countdown this
 // row will render, so a row can never show a number belonging to a different one.
 function cdHTML(kind){ return '<span class="cd" data-p="'+kind+'"></span>'; }
-// Resync the local clock from a push. A change of countdown always resyncs; within one, only a
-// real disagreement (≥2 s) does, so the ~2 s push cadence and the 1 s local tick can't fight
+// Resync the local clock from a poll. A change of countdown always resyncs; within one, only a
+// real disagreement (≥2 s) does, so the 4 s poll cadence and the 1 s local tick can't fight
 // each other into a number that jitters back up.
 function cdSync(kind,secs){
   if(kind!=='givesup'&&kind!=='retries'){ cdKind=null; cdEndMs=0; return; }
@@ -348,9 +343,9 @@ function render(s){
 
   // hero — single source of overall status.
   // hicHTML holds the icon markup; it is written to the DOM only when it actually
-  // changes (see the guarded assignment below). Rebuilding the icon on every frame would
+  // changes (see the guarded assignment below). Rebuilding the icon every poll would
   // insert a fresh <svg> and restart its CSS animation from 0% — making the pulsing
-  // sleep/charge/wake ring visibly jump on each ~2 s WS push instead of fading smoothly.
+  // sleep/charge/wake ring visibly jump every 4 s instead of fading smoothly.
   var hic=$("hicon"), hl=$("hlabel"), hs=$("hsub"), hst=$("hstats"), hicHTML=null;
   // Shown for every state this function renders — including the very first frame, since the
   // markup ships the card hidden so the empty skeleton can't flash on load. The one branch
@@ -521,8 +516,8 @@ function render(s){
     var rt=(ble.car_connectable===false)?'At connection limit':'Connection failed';
     bc.className='cv warn'; setHTML(bc,barsHTML(sr)+sdbm+'<span>'+rt+'</span>');
   } else if(d.row==='scanning'){
-    // A bounded connect attempt is running. setHTML keeps the bar nodes alive across WS
-    // pushes so the CSS fill animation runs continuously instead of restarting each ~2 s —
+    // A bounded connect attempt is running. setHTML keeps the bar nodes alive across polls
+    // so the CSS fill animation runs continuously instead of restarting every 4 s —
     // which is why the countdown lives in its own node and is painted separately.
     bc.className='cv unkn'; setHTML(bc,searchBarsHTML(true)+'<span>Searching…</span>'+cdHTML(d.cd));
   } else {
@@ -774,20 +769,15 @@ function waitReboot(preVer){
 /* ---------- boot ---------- */
 function boot(){
   fetch('/set_time',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ms:Date.now()})}).catch(function(){});
-  // ONE snapshot on every path, before/independently of the socket. The live feed is still
-  // WebSocket-only (no polling — reload to refresh if the browser has no WebSocket), but the
-  // page must not depend on the handshake succeeding to render at all: the hero now starts
-  // hidden and only render() reveals it, and /events caps at 8 clients, so a 9th tab — or any
-  // proxy/captive portal that blocks ws:// — would otherwise sit forever on a skeleton with no
-  // hero, no status and no hint why. A later WS frame simply re-renders over this.
-  fetch('/status?ms='+Date.now(),{cache:'no-store'}).then(function(r){return r.json()}).then(render).catch(function(){});
-  if(window.WebSocket) connectWS();   // live feed: one socket, device pushes /status
-  // Tick the Bluetooth phase countdown between pushes so it steps every second instead of
-  // jumping in ~2 s hops. Text-only update of one node — no layout churn, no re-render.
-  // Only while the socket is up: with the feed gone the rest of the page is deliberately
+  // The live feed: one snapshot immediately — the hero ships hidden and only render() reveals it,
+  // so the page would otherwise sit on an empty skeleton for the first interval — then every 4 s.
+  poll(); setInterval(poll,4000);
+  // Tick the Bluetooth phase countdown between polls so it steps every second instead of
+  // jumping in 4 s hops. Text-only update of one node — no layout churn, no re-render.
+  // Only while the feed is healthy: once a poll fails the rest of the page is deliberately
   // frozen on its last frame, and a countdown that kept running would be the one element
   // still making claims about a device we are no longer hearing from.
-  setInterval(function(){ if(ws) paintCd(); },1000);
+  setInterval(function(){ if(feedOk) paintCd(); },1000);
   resumeOta();
 }
 boot();

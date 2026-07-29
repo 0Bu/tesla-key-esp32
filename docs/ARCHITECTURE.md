@@ -8,49 +8,42 @@ telemetry, the MQTT bridge, the web UI live feed, WiFi/LAN connectivity, sleep/l
 OTA, or anything that touches locks/tasks (the Concurrency contract at the end). Keep both in sync —
 the `project-review` skill checks for drift between them.
 
-## Web UI live feed (`/events`)
+## Web UI live feed (`GET /status`)
 
-The web UI's live data is **WebSocket-only** — there is no interval polling and no HTTP poll
-fallback. On load the browser (`main/www/app.js` `boot()`) opens ONE socket to `ws://<device>/events`
-and sends the text `sub`; the device answers with an immediate `/status` snapshot and thereafter a
-background task pushes a fresh `/status` frame every ~2 s. Each frame is exactly the object
-`GET /status` returns — `build_status_object()` (`http_status.cpp`) is the single builder both paths
-share, so the pushed frame and a manual `GET /status` can never drift, and the client just calls the
-existing `render()` on each frame (no envelope).
+The web UI's live data is a **browser-side interval poll**. `main/www/app.js` `boot()` calls `poll()`
+once for the first paint (the hero card ships hidden and only `render()` reveals it, so without that
+first call the page would sit on an empty skeleton for a whole interval) and then every **4 s** via
+`setInterval`. `poll()` fetches `/status?ms=<now>` with `cache:'no-store'` — the URL is cache-busted
+because a live page polls forever and one cached copy would freeze the hero on a stale state (e.g. a
+transient orange "Unreachable") until a manual reload. The response is exactly what
+`build_status_object()` (`http_status.cpp`) builds, and the client hands it straight to `render()`
+(no envelope).
 
-- **Server** (`main/http_events.cpp`): an 8-slot fd registry (mutex-guarded), a broadcast task
-  (`ws_broadcast_task`, ~2 s cadence, self-gated on `ws_any_clients()` so it costs nothing when no
-  browser is open), and the `/events` handler. The handler is registered **raw**
-  (`httpd_register_uri_handler` with `is_websocket=true`) BEFORE the `/*` wildcards — so it is the
-  ONE route NOT reached through the `handle_all` try/catch, and it guards its own allocations
-  (a `std::bad_alloc` on this memory-tight chip must drop a frame, never unwind through httpd's C
-  frames → `std::terminate` → reboot). Needs `CONFIG_HTTPD_WS_SUPPORT=y` (base `sdkconfig.defaults`,
-  target-agnostic) and `config.close_fn` (`http_server.cpp`) to drop a closed fd from the registry.
-- **Frame policy** is the pure, host-tested `main/logic/ws_policy.hpp`: `ws_frame_plan()` decides
-  from a frame's *announced* length — before any payload is read — whether to skip an empty frame,
-  read one that fits the 16-byte command buffer, or **close** an oversized one (undrainable: httpd
-  leaves its body in the socket and offers no skip, so the stream is desynchronized and dropping the
-  connection is the only honest exit — sizing a buffer from a client-asserted 64-bit length would be
-  a one-frame OOM). `ws_frame_action()` then classifies the bytes actually read; only `sub`
-  subscribes.
-- **Send backpressure** (also `ws_policy.hpp`, host-tested) bounds what ONE non-reading subscriber
-  can cost. A client that stops reading (suspended laptop, backgrounded tab) leaves its TCP send
-  buffer full, so each async send blocks the httpd task for the full `send_wait_timeout`
-  (`HTTPD_DEFAULT_CONFIG`: **5 s**) before failing `EAGAIN` — while the broadcast task keeps
-  producing every 2 s, each frame owning a heap copy of the whole `/status` JSON. Unbounded, that
-  backlog exhausted the heap (69 KB → 8 KB free, largest block 31744 → 544 B in ~7 min) and left
-  the device **wedged, not crashed**: no reboot, just `std::bad_alloc` spinning in the vehicle loop
-  for hours, unreachable (live incident 2026-07-18). Two bounds prevent it: at most
-  `WS_MAX_INFLIGHT` (2) queued-but-uncompleted frames per client — over that the client is skipped
-  for the tick, so the backlog has a ceiling — and after `WS_MAX_FAILS` (3) consecutive failed
-  completions the subscriber is closed (`httpd_sess_trigger_close`), which also ends the 5 s httpd
-  stall it imposed every tick. Closing is cheap: `app.js` reconnects 3 s later, so a laptop that
-  merely slept resubscribes on wake.
-- **Client** (`app.js`): `render(JSON.parse(frame))` on each message; on close, keep the last
-  rendered state and reconnect after 3 s. `poll()` is repurposed to `ws.send("sub")` — an
-  on-demand snapshot request after a user action (charge/wake/gen-key), so the UI refreshes at once
-  instead of waiting for the next push, still purely over the socket. `waitReboot()` still does a
-  plain `GET /status` — that is post-OTA reboot detection, a different concern from the live feed.
+- **Refresh-now.** `poll()` is also called directly after a user action (charge/wake/gen-key) so the
+  UI reflects it at once instead of waiting for the next tick. Every such call site therefore just
+  means "refresh now".
+- **A failed poll changes nothing on screen.** The `catch` keeps the last rendered frame and the
+  optimistic local state, so a momentary blip doesn't blank the page. It does clear the `feedOk`
+  flag, which parks the Bluetooth phase countdown: `app.js` ticks that number down locally once a
+  second between polls, and a countdown that kept running while we've stopped hearing from the
+  device would be the one element still making claims about it.
+- **`render()` diffs before it writes** (`setHTML` caches the last markup on the node). Re-assigning
+  `innerHTML` every 4 s would recreate the child nodes and restart their CSS animations from 0%,
+  making the hero ring and the "searching" signal bars visibly jump on each poll.
+- **`waitReboot()`** also does a plain `GET /status`, but that is post-OTA reboot detection on its
+  own 1 s schedule — a different concern from the live feed.
+
+**Why polling and not a push.** A WebSocket feed (`/events`) served this role for a while, and the
+device paid for it: a subscriber that stopped *reading* (suspended laptop,
+backgrounded tab) left its TCP send buffer full, so each async send blocked the httpd task for the
+full `send_wait_timeout` (`HTTPD_DEFAULT_CONFIG`: 5 s) while the broadcast task kept producing every
+2 s, each queued frame owning a heap copy of the whole `/status` JSON. That backlog exhausted the
+heap (69 KB → 8 KB free, largest block 31744 → 544 B in ~7 min) and left the device **wedged, not
+crashed** — no reboot, just `std::bad_alloc` spinning in the vehicle loop for ten hours, unreachable
+over HTTP, MQTT and BLE. Bounding it took per-subscriber in-flight accounting and an eviction rule.
+A poll needs none of that: it is request/response, the device queues nothing per client, and a
+browser that stops reading costs one socket that `lru_purge_enable` reclaims. The 4 s cadence is the
+price, and on a status panel it is not a visible one.
 
 ## Read-only telemetry (detail)
 
@@ -398,12 +391,13 @@ Syslog, so there is exactly one capture point to keep in sync, not two.
 ## Heap-exhaustion watchdog (the last-resort escalation)
 
 Every OOM guard in this firmware turns "out of memory" into **recover and continue** — the
-`handle_all` try/catch answers 503, the BLE parse guards reset the link, the `/events` broadcast
-drops a frame. That is correct for a **transient** shortage and must stay. What was missing is the
+`handle_all` try/catch answers 503, the BLE parse guards reset the link, an MQTT publish is skipped.
+That is correct for a **transient** shortage and must stay. What was missing is the
 next question: *what if it never recovers?*
 
-On **2026-07-18** a non-reading WebSocket subscriber exhausted the heap (fixed separately by the
-`/events` send backpressure). The device then sat at `free=14820`, `largest_block=768` — against a
+On **2026-07-18** a non-reading subscriber of the then-current WebSocket status push exhausted the
+heap (that feed has since been replaced by the web UI polling `/status`, which cannot queue a
+backlog on the device at all). The device then sat at `free=14820`, `largest_block=768` — against a
 healthy 31744 — for **ten hours**. It never crashed and never rebooted: `vehicle_->loop()` threw
 `std::bad_alloc`, the handler reset the BLE link, the next 50 ms iteration threw again, ~20×/s all
 night. HTTP could not serve, MQTT could not reconnect, and the WiFi watchdog was itself dead
@@ -525,12 +519,12 @@ all of which match the same literature: a **long unbroken trigger** so transient
 and a **breadcrumb persisted before the reset**, which Memfault's watchdog guidance names as the
 thing that separates a diagnosable reset from a mystery.
 
-**What is deliberately not here:** a *load-shedding rung* before the restart — closing `/events`
-subscribers and stopping MQTT to release the heap this firmware itself owns, and only restarting if
-`largest_block` does not recover. That would have healed the 2026-07-18 incident in place, since
-the leak was in our own WS structures. It is the strongest candidate for a next rung, but it only
-helps for leaks in structures *we* know about, and it stays out of this change until a second
-incident shows the pattern is worth the complexity.
+**What is deliberately not here:** a *load-shedding rung* before the restart — dropping the
+firmware's own optional consumers (stopping MQTT, closing idle sockets) to release the heap this
+firmware itself owns, and only restarting if `largest_block` does not recover. That would have
+healed the 2026-07-18 incident in place, since the leak was in structures we owned. It is the
+strongest candidate for a next rung, but it only helps for leaks in structures *we* know about, and
+it stays out of this change until a second incident shows the pattern is worth the complexity.
 
 ### Reading it in syslog
 
@@ -698,7 +692,7 @@ has one amber "in-between" language. Wi-Fi's own search stays green.
 `phase_s` rounds **up** and `0` is a real value meaning "right now" — never "no countdown".
 Gating on `> 0` (or truncating) is what made the first cut of this drop its last second and
 flash a bare "Disconnected" between every cycle. `app.js` ticks the number down locally once a
-second between the ~2 s `/events` pushes, resyncing to the device only on a phase change or a
+second between the 4 s `/status` polls, resyncing to the device only on a phase change or a
 ≥2 s disagreement so the two clocks can't jitter the number back upward; it paints into a
 dedicated node with `textContent`, because rewriting the row through `setHTML` every second
 would re-create the bar `<rect>`s and restart their CSS fill animation on every tick.
@@ -936,7 +930,6 @@ Application-task priorities are declared **only** in [`main/task_config.hpp`](..
 | `auto_pair` | `kPrioAutoPair` = 4 | 8192 | `vehicle_ctrl.cpp` (fn: `vehicle_pairing.cpp`) | pairing supervisor: enrol / re-pair / health probe |
 | `wifi_wd` | `kPrioWifiWatchdog` = 4 | 3072 | `main.cpp` | ghost-association watchdog (re-associate, never reboot) |
 | `mqtt_pub` | `kPrioMqttPub` = 4 | 6144 | `mqtt_ha.cpp` | MQTT/HA publisher (reads the caches) |
-| `ws_bcast` | `kPrioWsBroadcast` = 4 | 6144 | `http_events.cpp` | `/events` live-status push (self-gated on `ws_any_clients()`) |
 | `display` | `kPrioDisplay` = 3 | 6144 | `display.cpp` | ST7735 renderer (`CONFIG_TESLA_DISPLAY_ENABLED` builds) |
 | `ota_gate` | `kPrioOtaGate` = 3 | 3072 | `main.cpp` | one-shot OTA rollback health gate (~90 s) |
 | `syslog_task` | `kPrioSyslog` = 3 | 6144 | `syslog.cpp` | best-effort UDP Syslog forwarder (opt-in; degraded-not-fatal on a failed start) |
@@ -972,7 +965,7 @@ esp-mqtt / esp_http_server / SNTP **C frame** unwinds through non-exception-awar
 `std::terminate()` → `abort()` → reboot (and a reboot loop re-opens the poll window, so a parked
 car never sleeps). The rule, by execution model:
 
-- **Long-running FreeRTOS tasks** (`vehicle_loop`, `auto_pair`, `mqtt_pub`, `ws_bcast`,
+- **Long-running FreeRTOS tasks** (`vehicle_loop`, `auto_pair`, `mqtt_pub`,
   `syslog_task`, `display`, `led`) wrap their **iteration** in `try { … } catch (std::exception&)
   catch (…)`, log the component, preserve invariants (RAII locks release on unwind), delay briefly
   so no tight error loop forms, and continue with the next iteration.
