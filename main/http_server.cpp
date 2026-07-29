@@ -8,7 +8,6 @@
 #include <esp_log.h>
 #include <cstring>
 #include <exception>
-#include <unistd.h>   // close() — for the WebSocket close_fn
 
 static const char* TAG = "http_server";
 
@@ -104,43 +103,20 @@ static esp_err_t handle_all(httpd_req_t* req) {
 
 // ─── Start ────────────────────────────────────────────────────────────────────
 
-// Called by esp_http_server when a socket closes. For a /events subscriber this drops it from the
-// broadcast list (http_events.cpp) so the pusher stops targeting a dead fd; a custom close_fn owns
-// the actual close(), which the default handler would otherwise do.
-static void ws_close_fn(httpd_handle_t, int sockfd) {
-    http_events_on_close(sockfd);
-    close(sockfd);
-}
-
 bool http_server_start(VehicleController& vehicle, NvsStorageAdapter& config_store) {
     g_vehicle = &vehicle;
     g_config  = &config_store;
 
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.uri_match_fn     = httpd_uri_match_wildcard;
-    // /events (WebSocket) + the two /* wildcards (GET, POST).
-    config.max_uri_handlers = 3;
+    // Every route goes through the two /* wildcards (GET, POST) — see handle_all above.
+    config.max_uri_handlers = 2;
     config.stack_size       = 8192;
     config.lru_purge_enable = true;
-    config.close_fn         = ws_close_fn;
 
     httpd_handle_t server = nullptr;
     if (httpd_start(&server, &config) != ESP_OK) {
         ESP_LOGE(TAG, "failed to start HTTP server");
-        return false;
-    }
-
-    // Register the /events WebSocket route FIRST (and start its broadcast task): esp_http_server
-    // matches handlers in registration order, so the specific /events must precede the /* wildcard
-    // to be reached at all. It is registered raw (is_websocket) and guards itself — see
-    // http_events.cpp / the note in http_handlers.hpp. A partial registration is worse than none
-    // (a live server missing /events or a wildcard dispatcher answers some routes and silently
-    // 404s others), so ANY registration failure unwinds the whole HTTP start: stop the broadcast
-    // task/registry, stop the server, and report failure to app_main (issue #204, Scenario D).
-    if (!http_events_register(server)) {
-        ESP_LOGE(TAG, "/events registration failed — aborting HTTP start");
-        http_events_stop();
-        httpd_stop(server);
         return false;
     }
 
@@ -158,10 +134,12 @@ bool http_server_start(VehicleController& vehicle, NvsStorageAdapter& config_sto
         .handler  = handle_all,
         .user_ctx = nullptr,
     };
+    // A partial registration is worse than none — a wildcard dispatcher that answers some methods
+    // and silently 404s the others — so ANY registration failure unwinds the whole HTTP start: stop
+    // the server and report failure to app_main (issue #204, Scenario D).
     if (httpd_register_uri_handler(server, &get_handler)  != ESP_OK ||
         httpd_register_uri_handler(server, &post_handler) != ESP_OK) {
         ESP_LOGE(TAG, "wildcard handler registration failed — aborting HTTP start");
-        http_events_stop();
         httpd_stop(server);
         return false;
     }

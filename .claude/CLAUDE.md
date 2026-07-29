@@ -49,9 +49,7 @@ int clamp), the ONE command registry both command surfaces dispatch through
 names, presence rules, value shaping), the shared command-outcome text, the on-device display
 presenter (the priority ladder / SoC gradient / RSSI→bars / SSID-scroll decisions the ST7735
 renderer draws), the status-LED ladder (`logic/led_status.hpp`, reading the same shared
-`UiSnapshot` + the shared SoC gradient), the `/events` WebSocket command policy
-(`logic/ws_policy.hpp` — frame-length plan / "sub" classification + the per-subscriber send
-backpressure that bounds a non-reading client), the active-window poll gate
+`UiSnapshot` + the shared SoC gradient), the active-window poll gate
 (`logic/active_window.hpp` — charging held open only on fresh contact), the BLE phase countdown
 (`logic/ble_phase.hpp` — which phase the Bluetooth row counts down, rounded up and never
 vanishing on its last second) and the web UI's Bluetooth-row presenter (`logic/ble_row.hpp` —
@@ -130,17 +128,10 @@ command_exec.cpp       → the ONE CmdKind → VehicleController dispatch both c
 http_status.cpp        → web UI (/), /status, /diag, /scan; the /status field contract
                          is decided in logic/status_model.hpp (host-tested, golden-pinned)
                          — build_status_object() only gathers inputs + serializes via cJSON.
-                         It is the ONE /status-JSON builder shared by GET /status and the
-                         /events WS push
-http_events.cpp        → /events — WebSocket live-status push for the web UI. The browser holds
-                         ONE ws:// socket; a background task pushes build_status_object() every
-                         ~2 s (WS-only, replaces the old browser /status interval poll — no poll
-                         fallback). Registered RAW (is_websocket) OUTSIDE the handle_all guard, so
-                         it guards its own allocations; 8-client registry; "sub" command policy +
-                         per-subscriber send backpressure are host-tested logic/ws_policy.hpp
-                         (≤2 in-flight frames/client, close after 3 failed sends — a client that
-                         stops READING otherwise stalls httpd 5 s/tick while its queued payload
-                         copies eat the heap until the device wedges; live incident 2026-07-18)
+                         /status is the web UI's live feed: app.js polls it every 4 s
+                         (request/response — the device queues nothing per client, which is
+                         deliberate; the earlier WebSocket push wedged the device on
+                         2026-07-18 when a subscriber stopped reading)
 http_ota.cpp           → /ota/check|update|status
 http_config.cpp        → /gen_keys, /send_key, /set_time, /set_vin, /set_mqtt, /set_syslog
 mcp_server.cpp         → /mcp — MCP server for AI agents (stateless JSON-RPC 2.0;
@@ -239,8 +230,7 @@ GET  /  (alias /index.html)                    # embedded web UI (gzipped into t
 POST /api/1/vehicles/{VIN}/command/{command}   # execute command
 GET  /api/1/vehicles/{VIN}/vehicle_data        # charge state
 GET  /api/1/vehicles/{VIN}/body_controller_state
-GET  /status                                   # web-UI JSON snapshot (wifi, ble, mqtt, syslog, vehicle cache, read-only telemetry under "tele"). Request/response form; the live UI reads /events instead
-GET  /events                                   # WebSocket live-status push. Client sends text "sub" → immediate /status snapshot, then a fresh /status frame every ~2 s. The web UI's live feed (WS-only, no interval poll). Non-WS GET → handshake only
+GET  /status                                   # web-UI JSON snapshot (wifi, ble, mqtt, syslog, vehicle cache, read-only telemetry under "tele"). The web UI's live feed — app.js polls it every 4 s (cache-busted, no-store)
 POST /scan                                     # start a time-limited BLE discovery scan
 POST /mcp                                      # MCP server (Streamable HTTP, stateless JSON-RPC 2.0; GET → 405, no SSE).
                                                # Tools = the run-on-key charging command set + read-only get_vehicle_state

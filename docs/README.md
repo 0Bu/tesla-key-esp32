@@ -222,9 +222,6 @@ GET  /status               { vin, ip, version, key_present, key_fingerprint,
                              last_reboot: "heap:<n>" (only when the heap watchdog ended the
                                           previous boot, n = consecutive such restarts;
                                           absent on any ordinary boot) }
-GET  /events               WebSocket live-status feed for the web UI: client sends "sub",
-                             device pushes the /status JSON (~2 s). WS-only, no poll fallback.
-                             A plain (non-WebSocket) GET completes the handshake only.
 POST /scan                 Time-limited BLE discovery scan (populates ble.devices)
 GET  /diag[?verbose=0|1][?clear=1]   Plain-text in-memory diag log (verbose=0 turns raw-RX
                              logging back off; the X-Diag-Verbose response header echoes the

@@ -1,15 +1,9 @@
 // Web-UI-facing routes: the embedded page itself and the endpoints that drive it:
 //   GET  /        (embedded, pre-gzipped web UI)
-//   GET  /status  (device + pairing state — a request/response snapshot of the live state)
+//   GET  /status  (device + pairing state — the UI polls this every 4 s)
 //   GET  /diag    (in-memory diagnostic log)
 //   POST /scan    (time-limited BLE discovery scan)
 // Dispatched from handle_all in http_server.cpp (inside its try/catch OOM guard).
-//
-// The live web UI no longer polls /status on a timer: it holds one WebSocket to /events and the
-// device pushes this same JSON (built by build_status_object() below) on a fixed cadence — see
-// http_events.cpp. /status stays as the request/response form for curl/diagnostics and the
-// post-OTA reboot probe (app.js waitReboot()); build_status_object() is the ONE builder both paths
-// share, so the pushed frame and a manual GET can never drift.
 
 #include "http_handlers.hpp"
 #include "diag_log.hpp"
@@ -73,16 +67,15 @@ struct CjsonEmitter {
 };
 }  // namespace
 
-// Build the device + pairing + vehicle status object (caller owns the returned cJSON). The ONE
-// source for BOTH the GET /status response and the /events WebSocket push (http_events.cpp), so the
-// two can never drift. GATHER ONLY here: every which-field/when/what-value decision lives in the
-// host-tested model (logic/status_model.hpp, golden CHECKs in test/test_logic.cpp); this collects
-// the inputs under the existing locks, then emits. The throwing by-value getters (vin(), broker,
-// syslog host, cached structs) all run in the GATHER below — BEFORE any cJSON is allocated — so a
-// std::bad_alloc can't leak a partial tree (the /events broadcast task calls this every ~2 s with
-// nothing to catch above it); the emit that follows only does cJSON allocs, which return NULL under
-// pressure rather than throw. May return nullptr under total OOM; every caller guards for it.
-cJSON* build_status_object() {
+// Build the device + pairing + vehicle status object (caller owns the returned cJSON) — the body of
+// GET /status, which the web UI polls every 4 s. GATHER ONLY here: every which-field/when/what-value
+// decision lives in the host-tested model (logic/status_model.hpp, golden CHECKs in
+// test/test_logic.cpp); this collects the inputs under the existing locks, then emits. The throwing
+// by-value getters (vin(), broker, syslog host, cached structs) all run in the GATHER below — BEFORE
+// any cJSON is allocated — so a std::bad_alloc can't leak a partial tree; the emit that follows only
+// does cJSON allocs, which return NULL under pressure rather than throw. May return nullptr under
+// total OOM; the caller guards for it.
+static cJSON* build_status_object() {
     tk::status::Inputs in;
 
     char ip[16];
@@ -172,10 +165,10 @@ cJSON* build_status_object() {
     return root;
 }
 
-// GET /status — the request/response form of the live snapshot. The web UI's live feed uses
-// /events (the WS push of this same object); this path still serves curl/diagnostics and the
-// post-OTA reboot probe (app.js waitReboot()). Never cache: a stale copy sticks the hero on a
-// transient state until a manual reload (matches "/" and "/diag").
+// GET /status — the live snapshot. The web UI's feed: app.js polls this every 4 s, and it also
+// serves curl/diagnostics and the post-OTA reboot probe (app.js waitReboot()). Never cache: a stale
+// copy sticks the hero on a transient state until a manual reload (matches "/" and "/diag") — the
+// poll cache-busts the URL for the same reason.
 esp_err_t handle_status(GuardedReq rq) {
     httpd_req_t* req = rq.req;
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
