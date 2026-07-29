@@ -89,27 +89,6 @@ esp_err_t handle_status(GuardedReq rq);           // GET  /status
 esp_err_t handle_diag(GuardedReq rq);             // GET  /diag
 esp_err_t handle_scan(GuardedReq rq);             // POST /scan
 
-// Build the /status object (caller owns the returned cJSON; nullptr under OOM). The ONE builder
-// shared by handle_status (GET /status) and the /events WebSocket push (http_events.cpp), so the
-// pushed frame and a manual GET can never drift.
-cJSON* build_status_object();
-
-// ─── http_events.cpp — /events WebSocket live-status push ─────────────────────
-// The web UI's live data stream: the browser holds ONE ws:// connection to /events and the device
-// pushes build_status_object() on a fixed cadence, replacing the old interval poll of GET /status
-// (WS-only, no poll fallback). The /events handler is the ONE route NOT reached through the
-// GuardedReq/handle_all trampoline — the WS handshake needs the raw esp_http_server signature, so
-// it is registered directly and guards its own allocations internally (see http_events.cpp).
-// Register /events + start the broadcast task. Returns false if the mutex, the WS handler
-// registration, or the broadcast task could not be created — the caller (http_server_start)
-// then unwinds the whole HTTP startup (issue #204, Scenario D). Partially-acquired resources
-// are released by http_events_stop() before returning false.
-bool http_events_register(httpd_handle_t server);
-void http_events_on_close(int sockfd);             // drop a closed socket from the broadcast list
-// Tear down the broadcast task + registry (used to unwind a partially-initialised HTTP start).
-// Safe to call whether or not the task was created; httpd_stop() unregisters the /events route.
-void http_events_stop();
-
 // http_ota.cpp — OTA self-update endpoints
 esp_err_t handle_ota_check(GuardedReq rq);        // GET  /ota/check[?ms=<epoch>]
 esp_err_t handle_ota_update(GuardedReq rq);       // POST /ota/update

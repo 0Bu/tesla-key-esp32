@@ -14,8 +14,8 @@
 // This guard takes on construction and gives on destruction, so release happens on the
 // normal return path AND while a C++ exception unwinds the stack. It is the ONE reusable
 // guard the exception-capable paths (vehicle command/query, the shared tesla-ble instance,
-// BLE/scan state, the WebSocket registries, OTA status, Syslog status, the diag ring, the
-// telemetry/pairing caches) share, so semaphore ownership is never split back into a manual
+// BLE/scan state, OTA status, Syslog status, the diag ring, the telemetry/pairing caches)
+// share, so semaphore ownership is never split back into a manual
 // take/give around code that can throw or return early.
 //
 // Lives in the project's tk:: namespace on purpose: a stock name like "LockGuard" or
