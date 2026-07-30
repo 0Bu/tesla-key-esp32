@@ -10,7 +10,7 @@
 //                                    (logic/link_state.hpp <- /status "link", MQTT sleep_status)
 //   * per-target platform / OTA-suffix mapping
 //                                    (logic/target.hpp     <- platform.hpp, ota_update.cpp)
-//   * the shared command registry — names/kinds/arg bounds for BOTH surfaces
+//   * the shared command registry — names/kinds/arg bounds + REST body compatibility
 //                                    (logic/command_registry.hpp <- http_api.cpp + mcp_server.cpp)
 //   * the /status field contract, pinned by golden emissions
 //                                    (logic/status_model.hpp <- http_status.cpp)
@@ -488,6 +488,22 @@ static void test_mcp() {
     CHECK(tk::cmd_from_api_name(nullptr)             == nullptr);
     // MCP name mapping of the charge-port pair differs from the REST name on purpose.
     CHECK_STR(tk::cmd_from_api_name("charge_port_door_open")->mcp_name, "charge_port_open");
+
+    // REST body compatibility. Empty bodies and objects retain the normal
+    // TeslaBleHttpProxy contract for every command. evcc's generic boolean setter emits
+    // the scalar true for charge_start and false for charge_stop; admit only those exact
+    // command/value pairs, never a mismatched toggle or a scalar for another command.
+    using BS = tk::RestBodyShape;
+    CHECK(tk::rest_body_allowed(tk::CmdKind::ChargeStart, BS::Empty));
+    CHECK(tk::rest_body_allowed(tk::CmdKind::ChargeStart, BS::Object));
+    CHECK(tk::rest_body_allowed(tk::CmdKind::SetChargingAmps, BS::Object));
+    CHECK(tk::rest_body_allowed(tk::CmdKind::ChargeStart, BS::BoolTrue));
+    CHECK(!tk::rest_body_allowed(tk::CmdKind::ChargeStart, BS::BoolFalse));
+    CHECK(tk::rest_body_allowed(tk::CmdKind::ChargeStop, BS::BoolFalse));
+    CHECK(!tk::rest_body_allowed(tk::CmdKind::ChargeStop, BS::BoolTrue));
+    CHECK(!tk::rest_body_allowed(tk::CmdKind::WakeUp, BS::BoolTrue));
+    CHECK(!tk::rest_body_allowed(tk::CmdKind::SetChargingAmps, BS::BoolFalse));
+    CHECK(!tk::rest_body_allowed(tk::CmdKind::ChargeStart, BS::Other));
 
     // tools/list wire order is table order — pin the 9 MCP rows exactly (a reorder
     // would change the serialized tools/list even with identical content).

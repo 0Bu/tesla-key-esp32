@@ -238,8 +238,11 @@ if [ "$RUN_COMMANDS" = 1 ]; then
   cmd "door_unlock" "door_unlock" "" reject
 
   if [ "$ALLOW_CHARGE_TOGGLE" = 1 ]; then
-    cmd "charge_start" "charge_start" "" soft
-    cmd "charge_stop"  "charge_stop"  "" soft
+    # evcc's generic boolean setter serializes chargeEnable as a JSON scalar: true
+    # selects charge_start, false selects charge_stop. Exercise those exact request
+    # bodies so this test catches proxy parsers that accept only objects/empty bodies.
+    cmd "charge_start" "charge_start" "true" soft
+    cmd "charge_stop"  "charge_stop"  "false" soft
   else
     echo "  SKIP  charge_start/charge_stop (set ALLOW_CHARGE_TOGGLE=1 to test; physically toggles charging)"
   fi

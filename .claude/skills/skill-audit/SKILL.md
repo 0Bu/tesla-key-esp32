@@ -107,7 +107,9 @@ the authority for the per-sibling drift check; `project-review` defers the mecha
   REST rows — `api_name != nullptr` — in `logic/command_registry.hpp`'s `kCommands` —
   currently **15**), the version-coherence claim (`/status` = `X`,
   `/api/proxy/1/version` = `X-esp32`), the `vehicle_data` fields it asserts, the out-of-scope
-  endpoint list, and the env-var gates (`RUN_COMMANDS`/`ALLOW_CHARGE_TOGGLE`/`RUN_ALL_COMMANDS`).
+  endpoint list, the evcc-exact scalar charge-toggle bodies (`true` for `charge_start`,
+  `false` for `charge_stop`), and the env-var gates
+  (`RUN_COMMANDS`/`ALLOW_CHARGE_TOGGLE`/`RUN_ALL_COMMANDS`).
 - **`vehicle-command-audit`** — compares the firmware against upstream `teslamotors/vehicle-command`,
   gated by what `yoziru/tesla-ble` can do. Verify the tesla-ble **pin** in its source map
   (`v5.1.1`) still matches `main/idf_component.yml`, the repository anti-replay patch still

@@ -140,6 +140,10 @@ POST /api/1/vehicles/{VIN}/command/{command}   Content-Type: application/json
 | `auto_conditioning_start` / `auto_conditioning_stop` | — |
 | `set_scheduled_charging` | `{"enable": true, "start_minutes": 1380}` (minutes after local midnight; 1380 = 23:00) |
 
+For evcc compatibility, `charge_start` also accepts the JSON scalar `true` and
+`charge_stop` accepts `false`. These are the exact bodies emitted by evcc's generic
+boolean setter; mismatched booleans and all other non-object bodies remain HTTP 400.
+
 `charging_amps` is required and must be a whole number. A successful `set_charging_amps`
 response means more than a Tesla command acknowledgement: the firmware performs a new,
 serialized `ChargeState` request and verifies that the car reports the exact requested
