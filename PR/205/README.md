@@ -46,9 +46,10 @@ brew install esptool                                          # host flasher (on
 git clone https://github.com/0Bu/tesla-key-esp32.git && cd tesla-key-esp32
 
 # Build via the CI-pinned ESP-IDF image (first run pulls it, then fetches
-# yoziru/tesla-ble — 2–4 min). The wrapper keeps build/ host-owned. Pick your chip:
+# yoziru/tesla-ble — 2–4 min). CMake applies the repository's pinned anti-replay
+# patch automatically. The wrapper keeps build/ host-owned. Pick your chip:
 ./scripts/idf-docker.sh idf.py set-target esp32s3 build   # or esp32 / esp32c3 / esp32c6
-# For esp32c5, run scripts/prepare-tesla-ble-c5.sh once first (patches a local tesla-ble copy):
+# For esp32c5, run scripts/prepare-tesla-ble-c5.sh once first (adds C5 to a local copy):
 #   ./scripts/prepare-tesla-ble-c5.sh && ./scripts/idf-docker.sh idf.py set-target esp32c5 build
 
 # Optional: WiFi SSID/pass + VIN (BLE MAC auto) — interactive
@@ -139,6 +140,20 @@ POST /api/1/vehicles/{VIN}/command/{command}   Content-Type: application/json
 | `auto_conditioning_start` / `auto_conditioning_stop` | — |
 | `set_scheduled_charging` | `{"enable": true, "start_minutes": 1380}` (minutes after local midnight; 1380 = 23:00) |
 
+For evcc compatibility, `charge_start` also accepts the JSON scalar `true` and
+`charge_stop` accepts `false`. These are the exact bodies emitted by evcc's generic
+boolean setter; mismatched booleans and all other non-object bodies remain HTTP 400.
+
+`charging_amps` is required and must be a whole number. A successful `set_charging_amps`
+response means more than a Tesla command acknowledgement: the firmware performs a new,
+serialized `ChargeState` request and verifies that the car reports the exact requested
+limit. Missing/malformed input returns HTTP 400; an unreachable car, a rejected command,
+or a missing/mismatched current readback returns HTTP 502 so controllers such as evcc
+retry instead of accepting a false success.
+
+All command failures retain the Tesla-compatible JSON response (`result:false` plus the
+vehicle/proxy reason) but use HTTP 502 rather than a misleading HTTP 200.
+
 > A **Charging-Manager** key may only run charging actions + wake. The car therefore **rejects**
 > `door_lock` / `door_unlock`, `flash_lights` / `honk_horn`, `set_sentry_mode`, and
 > `auto_conditioning_start` / `auto_conditioning_stop` with an authentication failure — these are
@@ -164,8 +179,10 @@ GET /api/1/vehicles/{VIN}/vehicle_data
     "charge_amps": 16, "battery_range": 280.5 } } } }
 ```
 Doubled `response` and `charge_amps` are intentional — they match the Fleet API /
-TeslaBleHttpProxy shape evcc parses. `reason` is `"success"` or `"stale or unavailable"`
-(cache served while the car sleeps — evcc reads `charge_state`, not `result`).
+TeslaBleHttpProxy shape evcc parses. While the car is idle, the cache may remain available
+so polling does not wake it. While charging or within five minutes of a command, a
+`ChargeState` older than 30 seconds is rejected with HTTP 503 and reason
+`"stale or unavailable"` instead of being presented as live telemetry.
 
 ### Body controller state (no wake)
 
@@ -209,9 +226,6 @@ GET  /status               { vin, ip, version, key_present, key_fingerprint,
                              last_reboot: "heap:<n>" (only when the heap watchdog ended the
                                           previous boot, n = consecutive such restarts;
                                           absent on any ordinary boot) }
-GET  /events               WebSocket live-status feed for the web UI: client sends "sub",
-                             device pushes the /status JSON (~2 s). WS-only, no poll fallback.
-                             A plain (non-WebSocket) GET completes the handshake only.
 POST /scan                 Time-limited BLE discovery scan (populates ble.devices)
 GET  /diag[?verbose=0|1][?clear=1]   Plain-text in-memory diag log (verbose=0 turns raw-RX
                              logging back off; the X-Diag-Verbose response header echoes the
@@ -368,7 +382,7 @@ Full threat model + Flash Encryption / Secure Boot: [SECURITY.md](SECURITY.md).
 | Service UUID | `00000211-b2d1-43f0-9b88-960cebf8b91e` |
 | Encryption | ECDH + AES-GCM (mbedTLS) |
 | Signing | ECDSA P-256 (key in NVS) |
-| BLE library | [yoziru/tesla-ble](https://github.com/yoziru/tesla-ble) v5.1.1 |
+| BLE library | [yoziru/tesla-ble](https://github.com/yoziru/tesla-ble) v5.1.1 + repository anti-replay patch |
 | BLE stack | NimBLE |
 | Fragment size | 20 bytes / BLE write chunk |
 | HTTP server | `esp_http_server` :80 |

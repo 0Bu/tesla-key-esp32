@@ -8,49 +8,42 @@ telemetry, the MQTT bridge, the web UI live feed, WiFi/LAN connectivity, sleep/l
 OTA, or anything that touches locks/tasks (the Concurrency contract at the end). Keep both in sync —
 the `project-review` skill checks for drift between them.
 
-## Web UI live feed (`/events`)
+## Web UI live feed (`GET /status`)
 
-The web UI's live data is **WebSocket-only** — there is no interval polling and no HTTP poll
-fallback. On load the browser (`main/www/app.js` `boot()`) opens ONE socket to `ws://<device>/events`
-and sends the text `sub`; the device answers with an immediate `/status` snapshot and thereafter a
-background task pushes a fresh `/status` frame every ~2 s. Each frame is exactly the object
-`GET /status` returns — `build_status_object()` (`http_status.cpp`) is the single builder both paths
-share, so the pushed frame and a manual `GET /status` can never drift, and the client just calls the
-existing `render()` on each frame (no envelope).
+The web UI's live data is a **browser-side interval poll**. `main/www/app.js` `boot()` calls `poll()`
+once for the first paint (the hero card ships hidden and only `render()` reveals it, so without that
+first call the page would sit on an empty skeleton for a whole interval) and then every **4 s** via
+`setInterval`. `poll()` fetches `/status?ms=<now>` with `cache:'no-store'` — the URL is cache-busted
+because a live page polls forever and one cached copy would freeze the hero on a stale state (e.g. a
+transient orange "Unreachable") until a manual reload. The response is exactly what
+`build_status_object()` (`http_status.cpp`) builds, and the client hands it straight to `render()`
+(no envelope).
 
-- **Server** (`main/http_events.cpp`): an 8-slot fd registry (mutex-guarded), a broadcast task
-  (`ws_broadcast_task`, ~2 s cadence, self-gated on `ws_any_clients()` so it costs nothing when no
-  browser is open), and the `/events` handler. The handler is registered **raw**
-  (`httpd_register_uri_handler` with `is_websocket=true`) BEFORE the `/*` wildcards — so it is the
-  ONE route NOT reached through the `handle_all` try/catch, and it guards its own allocations
-  (a `std::bad_alloc` on this memory-tight chip must drop a frame, never unwind through httpd's C
-  frames → `std::terminate` → reboot). Needs `CONFIG_HTTPD_WS_SUPPORT=y` (base `sdkconfig.defaults`,
-  target-agnostic) and `config.close_fn` (`http_server.cpp`) to drop a closed fd from the registry.
-- **Frame policy** is the pure, host-tested `main/logic/ws_policy.hpp`: `ws_frame_plan()` decides
-  from a frame's *announced* length — before any payload is read — whether to skip an empty frame,
-  read one that fits the 16-byte command buffer, or **close** an oversized one (undrainable: httpd
-  leaves its body in the socket and offers no skip, so the stream is desynchronized and dropping the
-  connection is the only honest exit — sizing a buffer from a client-asserted 64-bit length would be
-  a one-frame OOM). `ws_frame_action()` then classifies the bytes actually read; only `sub`
-  subscribes.
-- **Send backpressure** (also `ws_policy.hpp`, host-tested) bounds what ONE non-reading subscriber
-  can cost. A client that stops reading (suspended laptop, backgrounded tab) leaves its TCP send
-  buffer full, so each async send blocks the httpd task for the full `send_wait_timeout`
-  (`HTTPD_DEFAULT_CONFIG`: **5 s**) before failing `EAGAIN` — while the broadcast task keeps
-  producing every 2 s, each frame owning a heap copy of the whole `/status` JSON. Unbounded, that
-  backlog exhausted the heap (69 KB → 8 KB free, largest block 31744 → 544 B in ~7 min) and left
-  the device **wedged, not crashed**: no reboot, just `std::bad_alloc` spinning in the vehicle loop
-  for hours, unreachable (live incident 2026-07-18). Two bounds prevent it: at most
-  `WS_MAX_INFLIGHT` (2) queued-but-uncompleted frames per client — over that the client is skipped
-  for the tick, so the backlog has a ceiling — and after `WS_MAX_FAILS` (3) consecutive failed
-  completions the subscriber is closed (`httpd_sess_trigger_close`), which also ends the 5 s httpd
-  stall it imposed every tick. Closing is cheap: `app.js` reconnects 3 s later, so a laptop that
-  merely slept resubscribes on wake.
-- **Client** (`app.js`): `render(JSON.parse(frame))` on each message; on close, keep the last
-  rendered state and reconnect after 3 s. `poll()` is repurposed to `ws.send("sub")` — an
-  on-demand snapshot request after a user action (charge/wake/gen-key), so the UI refreshes at once
-  instead of waiting for the next push, still purely over the socket. `waitReboot()` still does a
-  plain `GET /status` — that is post-OTA reboot detection, a different concern from the live feed.
+- **Refresh-now.** `poll()` is also called directly after a user action (charge/wake/gen-key) so the
+  UI reflects it at once instead of waiting for the next tick. Every such call site therefore just
+  means "refresh now".
+- **A failed poll changes nothing on screen.** The `catch` keeps the last rendered frame and the
+  optimistic local state, so a momentary blip doesn't blank the page. It does clear the `feedOk`
+  flag, which parks the Bluetooth phase countdown: `app.js` ticks that number down locally once a
+  second between polls, and a countdown that kept running while we've stopped hearing from the
+  device would be the one element still making claims about it.
+- **`render()` diffs before it writes** (`setHTML` caches the last markup on the node). Re-assigning
+  `innerHTML` every 4 s would recreate the child nodes and restart their CSS animations from 0%,
+  making the hero ring and the "searching" signal bars visibly jump on each poll.
+- **`waitReboot()`** also does a plain `GET /status`, but that is post-OTA reboot detection on its
+  own 1 s schedule — a different concern from the live feed.
+
+**Why polling and not a push.** A WebSocket feed (`/events`) served this role for a while, and the
+device paid for it: a subscriber that stopped *reading* (suspended laptop,
+backgrounded tab) left its TCP send buffer full, so each async send blocked the httpd task for the
+full `send_wait_timeout` (`HTTPD_DEFAULT_CONFIG`: 5 s) while the broadcast task kept producing every
+2 s, each queued frame owning a heap copy of the whole `/status` JSON. That backlog exhausted the
+heap (69 KB → 8 KB free, largest block 31744 → 544 B in ~7 min) and left the device **wedged, not
+crashed** — no reboot, just `std::bad_alloc` spinning in the vehicle loop for ten hours, unreachable
+over HTTP, MQTT and BLE. Bounding it took per-subscriber in-flight accounting and an eviction rule.
+A poll needs none of that: it is request/response, the device queues nothing per client, and a
+browser that stops reading costs one socket that `lru_purge_enable` reclaims. The 4 s cadence is the
+price, and on a status panel it is not a visible one.
 
 ## Read-only telemetry (detail)
 
@@ -61,6 +54,22 @@ drive → tires → closures, full set ~120 s) refreshes per-domain caches via t
 These background polls are **paused while a foreground evcc/manual command is in flight**
 (`cmd_in_flight_`), so a command is never queued behind a slow/failing poll in the single
 BLE FIFO — keeps command latency low on an awake, busy link.
+
+`set_charging_amps` uses that pause as a correctness boundary: under one
+`command_mutex_`/`cmd_in_flight_` transaction it sends the current action, waits for Tesla's
+ACK, then sends an independent `getChargeState` request. The persistent cache callback runs
+before the poll command completes and increments `charge_state_generation_`; success therefore
+clears the previous ChargeState before decoding the new snapshot, so an omitted field cannot
+inherit an old presence/value. Success requires both a new generation, a present field, and an
+exact `charging_amps` match. The ACK alone is never
+reported as success. Two mismatching/missing readbacks exhaust the original command budget and
+return an error, with requested/applied/request/actual current values written to the log.
+
+The same ChargeState callback stamps `last_charge_ticks_`. `GET vehicle_data` remains
+cache-only and non-blocking, but the cache is treated differently by state: idle values may be
+old so read-only polling never wakes a sleeping car; during the active window (charging or a
+command in the last five minutes), data older than 30 s returns HTTP 503. Thus a BLE
+parser/retry storm is visible to evcc instead of being hidden behind a valid-looking HTTP 200.
 
 Exposed under `tele` in `/status`, emitted only while the BLE link is up — the MQTT bridge
 reads the caches directly, so it keeps publishing regardless (the device's web UI
@@ -100,10 +109,7 @@ a new `version` in `manifest.json` but serves an old `.bin`. No eFuses burned.
 holds rollback armed until a freshly-flashed image has run healthily for a window
 (`kOtaHealthGateS` ≈ 90 s). An image that boots but then crashes/OOM-reboots under load dies
 while still `PENDING_VERIFY`, so the bootloader reverts to the previous slot rather than
-having committed it at startup. If an essential subsystem cannot initialize before the health
-gate starts, `halt_after_init_failure()` explicitly marks a still-`PENDING_VERIFY` image invalid
-and reboots into the previous slot; on a normal/already-valid image it halts instead of creating a
-car-waking reboot loop. A **deliberate, user-initiated reboot** inside that window is a
+having committed it at startup. A **deliberate, user-initiated reboot** inside that window is a
 different case, though: the three config handlers that reboot (`/set_vin`, `/set_mqtt`,
 `/set_syslog`), the setup-portal save **and the heap watchdog's deliberate restart** call
 `ota_confirm_pending_image()` first — a restart we chose is proof the image runs, so it must not
@@ -149,7 +155,7 @@ detected chip); OTA is a single channel where each device pulls its own
 otherwise). The per-target bootloader offset (0x1000 on the classic
 esp32, 0x2000 on esp32c5, 0x0 on s3/c3/c6) is handled automatically by `@flash_args` and the manifest.
 
-**esp32c5 via a local build-time patch of tesla-ble.** esp32 / esp32s3 / esp32c3 / esp32c6 are
+**Pinned tesla-ble with two build-time patches.** esp32 / esp32s3 / esp32c3 / esp32c6 are
 exactly the targets yoziru/tesla-ble declares in its `idf_component.yml` `targets:`, and the
 ESP-IDF Component Manager enforces that list — it refuses `esp32c5` at dependency resolution,
 before compile, and stages nothing into `managed_components/` (so there is nothing to patch after
@@ -159,9 +165,22 @@ regenerated `managed_components/`, `scripts/prepare-tesla-ble-c5.sh` clones the 
 into `third_party/tesla-ble` (gitignored) and appends `esp32c5` to its `targets:`.
 `main/idf_component.yml` then declares the dependency twice under mutually-exclusive `rules:` —
 the git dep applies when `target != esp32c5`, a local `path:` dep (the patched checkout) when
-`target == esp32c5`. So only C5 routes through the local copy; the other four resolve
-byte-identically from git, and CI (`ci-build-all.sh`) runs the prepare step automatically. All
-five images are the same tesla-ble revision. This patch is planned debt: the retirement plan
+`target == esp32c5`. So only C5 routes through the local copy; CI (`ci-build-all.sh`) runs the
+prepare step automatically.
+
+The second patch is a **correctness and anti-replay fix shared by all five targets**. Upstream
+v5.1.1 calls `Peer::validate_response_counter()` and logs a duplicate CarServer response, but
+then continues into state callbacks and FIFO command completion. A replay from an earlier
+request can therefore refresh `last_known_charge_` or complete whichever command is currently
+at the queue head. Root `CMakeLists.txt`, after dependency resolution, invokes
+`scripts/apply-tesla-ble-patches.sh`; it applies the committed patch under
+`patches/tesla-ble/` to either materialised source tree before compilation, is idempotent, and
+fails configuration if the pinned upstream context changes. The patch returns immediately on
+an invalid response counter, before callbacks or `mark_command_completed_`. This is tracked in
+[`adr/0003-reject-replayed-tesla-responses.md`](adr/0003-reject-replayed-tesla-responses.md).
+
+All five images use the same tesla-ble revision and anti-replay behavior. The C5 target patch
+is planned debt: its retirement plan
 (one-line upstream `targets:` PR, then drop the script/routing) is
 [`adr/0001-esp32c5-target-upstreaming.md`](adr/0001-esp32c5-target-upstreaming.md); the wider
 tesla-ble dependency strategy (IDF-6 / Mbed TLS 4 crypto seam, issue #61) is
@@ -318,12 +337,22 @@ grouped under one device. **Read-only by design** — no command topics are subs
 ## Syslog forwarder
 
 `main/syslog.cpp` forwards the same in-RAM diag log served by `GET /diag` (`main/diag_log.cpp`)
-to a UDP Syslog collector, best-effort, framed as RFC 5424 (`<14>1 - tesla-key-esp32 - - - -
-<message>`, facility `user`/priority `info` throughout — there is no per-line severity mapping).
-The capture point is `diag_log.cpp`'s `esp_log_set_vprintf` hook, which already mirrors every
-`ESP_LOG*` line (from this firmware **and** ESP-IDF/NimBLE internals — NimBLE is pre-throttled
-to `WARN` there) into the `/diag` ring; the same call also queues the line for Syslog, so there
-is exactly one capture point to keep in sync, not two.
+to a UDP Syslog collector, best-effort, framed as RFC 5424 (`<PRI>1 - tesla-key-esp32 - - - -
+<message>`). The capture point is `diag_log.cpp`'s `esp_log_set_vprintf` hook, which already
+mirrors every `ESP_LOG*` line (from this firmware **and** ESP-IDF/NimBLE internals — NimBLE is
+pre-throttled to `WARN` there) into the `/diag` ring; the same call also queues the line for
+Syslog, so there is exactly one capture point to keep in sync, not two.
+
+- **Severity** (`tk::syslog_pri_for_line`, host-tested): facility is always `user` (1); the
+  severity comes from the line's own esp_log level, which the hook sees because it captures the
+  *formatted* line — `E`/`W`/`I`/`D`|`V` → 3/4/6/7. A leading ANSI colour escape
+  (`CONFIG_LOG_COLORS=y`, the IDF default) is skipped first, and a line without a recognised
+  `"<L> ("` prefix stays `info` — plenty of forwarded lines come from tesla-ble and NimBLE with
+  no esp_log prefix at all, and inventing a severity for those would be a false alarm.
+  *This used to be a hardcoded `<14>`.* The cost was measured: a week of device logs
+  (17.–24.07.2026, 211366 lines) arrived at the collector as uniformly `info`, including 61417
+  `ESP_LOGE` and 81708 `ESP_LOGW` lines, so `severity:error` matched nothing and finding a fault
+  meant substring-matching `_msg:"E ("`.
 
 - **Config:** one NVS string, `syslog_uri` (`tesla_cfg` namespace) — a bare `"host:port"`, no
   scheme (a bare host defaults to port 514); `""` disables forwarding. Falls back to
@@ -362,12 +391,13 @@ is exactly one capture point to keep in sync, not two.
 ## Heap-exhaustion watchdog (the last-resort escalation)
 
 Every OOM guard in this firmware turns "out of memory" into **recover and continue** — the
-`handle_all` try/catch answers 503, the BLE parse guards reset the link, the `/events` broadcast
-drops a frame. That is correct for a **transient** shortage and must stay. What was missing is the
+`handle_all` try/catch answers 503, the BLE parse guards reset the link, an MQTT publish is skipped.
+That is correct for a **transient** shortage and must stay. What was missing is the
 next question: *what if it never recovers?*
 
-On **2026-07-18** a non-reading WebSocket subscriber exhausted the heap (fixed separately by the
-`/events` send backpressure). The device then sat at `free=14820`, `largest_block=768` — against a
+On **2026-07-18** a non-reading subscriber of the then-current WebSocket status push exhausted the
+heap (that feed has since been replaced by the web UI polling `/status`, which cannot queue a
+backlog on the device at all). The device then sat at `free=14820`, `largest_block=768` — against a
 healthy 31744 — for **ten hours**. It never crashed and never rebooted: `vehicle_->loop()` threw
 `std::bad_alloc`, the handler reset the BLE link, the next 50 ms iteration threw again, ~20×/s all
 night. HTTP could not serve, MQTT could not reconnect, and the WiFi watchdog was itself dead
@@ -489,12 +519,12 @@ all of which match the same literature: a **long unbroken trigger** so transient
 and a **breadcrumb persisted before the reset**, which Memfault's watchdog guidance names as the
 thing that separates a diagnosable reset from a mystery.
 
-**What is deliberately not here:** a *load-shedding rung* before the restart — closing `/events`
-subscribers and stopping MQTT to release the heap this firmware itself owns, and only restarting if
-`largest_block` does not recover. That would have healed the 2026-07-18 incident in place, since
-the leak was in our own WS structures. It is the strongest candidate for a next rung, but it only
-helps for leaks in structures *we* know about, and it stays out of this change until a second
-incident shows the pattern is worth the complexity.
+**What is deliberately not here:** a *load-shedding rung* before the restart — dropping the
+firmware's own optional consumers (stopping MQTT, closing idle sockets) to release the heap this
+firmware itself owns, and only restarting if `largest_block` does not recover. That would have
+healed the 2026-07-18 incident in place, since the leak was in structures we owned. It is the
+strongest candidate for a next rung, but it only helps for leaks in structures *we* know about, and
+it stays out of this change until a second incident shows the pattern is worth the complexity.
 
 ### Reading it in syslog
 
@@ -520,11 +550,22 @@ run legitimately reads somewhat over 300 s (it is sampled on a 30 s cadence).
 256-byte *stack* buffer (deliberately — it must not allocate on the heap it is reporting about),
 and anything longer reaches both `/diag` and syslog **cut off mid-sentence**. The restart line is
 the one that must never be truncated, so it carries the state and a pointer here, not the
-reasoning itself. The `BOOT` line is
-emitted *after* `syslog_start()` on purpose: `syslog_send()` is a no-op before that, so logging it
-at the point the breadcrumb is read — which is where it naturally belongs, and where it used to be
-— would confine the one line explaining an unattended 04:00 self-heal to the RAM ring that the
-restart just erased.
+reasoning itself.
+
+**Both `BOOT` lines are emitted *after* `syslog_start()` on purpose** — `syslog_send()` is a no-op
+before that, because the queue it writes to does not exist yet. Anything logged earlier in
+`app_main` reaches the serial console and the `/diag` RAM ring and *nothing else*, which for a
+post-mortem means nothing at all: the restart erases the ring. That applies to the `reason=heap:<k>`
+breadcrumb (which is *read* earlier, before anything else can reboot, but announced here) and to
+`BOOT reset_reason=…` — whose values are likewise **sampled at the top of `app_main`**, before NVS
+init, WiFi and the component `start()`s have allocated, so the heap figures describe the boot we
+came up in rather than the boot we already made.
+
+That second line had been left above `syslog_start()`, and the effect is worth recording because it
+is the failure mode this whole section exists to prevent: over 17.–24.07.2026 the device booted 56
+times and the collector received **zero** `BOOT reset_reason=` lines. When it went silent for 1 h
+54 min on 20.07. and came back up, there was no way to tell a panic from a brownout from a deliberate
+restart — the one line that answers it had been written to a ring that the reboot then wiped.
 
 ## WiFi / LAN connectivity (reconnect + watchdog)
 
@@ -651,7 +692,7 @@ has one amber "in-between" language. Wi-Fi's own search stays green.
 `phase_s` rounds **up** and `0` is a real value meaning "right now" — never "no countdown".
 Gating on `> 0` (or truncating) is what made the first cut of this drop its last second and
 flash a bare "Disconnected" between every cycle. `app.js` ticks the number down locally once a
-second between the ~2 s `/events` pushes, resyncing to the device only on a phase change or a
+second between the 4 s `/status` polls, resyncing to the device only on a phase change or a
 ≥2 s disagreement so the two clocks can't jitter the number back upward; it paints into a
 dedicated node with `textContent`, because rewriting the row through `setHTML` every second
 would re-create the bar `<rect>`s and restart their CSS fill animation on every tick.
@@ -678,6 +719,29 @@ health-probe cadence. `/status.ble.devices[]` also carries per-device `connectab
 no-VIN screen lists nearby Teslas (bars · dBm · MAC, sorted by signal) from the periodic
 listing-only scan. Hero glyphs: grey Bluetooth = "Set up needed", grey NFC-card = "Pairing",
 orange Bluetooth = "Connection failed".
+
+**The same three-way verdict decides what a failed connect LOGS** (`logic/connect_outcome.hpp`,
+host-tested). `ensure_connected_()` used to end every unsuccessful attempt with one line —
+`E vehicle_ctrl: connection timeout after 10000ms` — and that was wrong twice over. It asserted a
+timed-out connect even when the scan never matched the car, i.e. when no connect was attempted at
+all; and, since the background health poll retries roughly every 40 s forever with no backoff, a car
+parked elsewhere emitted **7117 ERROR lines in a week** (17.–24.07.2026) describing a condition that
+was expected, unchanged and self-resolving. So:
+
+| `target_connectable()` | Cause | Background level |
+|---|---|---|
+| `-1` (no matching advert) | `OutOfRange` — car away/asleep | **warn** — the expected resting state |
+| `0` (advert non-connectable) | `AtBleLimit` — at its ~3-device limit | **error** |
+| `1` (connectable, connect failed) | `ConnectFailed` | **error** — the two-boards-on-one-car signature |
+
+Rate limit: first occurrence of a cause is logged, then only every `kConnectFailRepeatEvery` (90 ≈
+hourly at the retry cadence) until the cause **changes** or a connect succeeds. A change of cause is
+never suppressed — "the car came back but now the connect fails" is precisely the transition worth
+seeing, and folding it into a running streak would hide it for up to an hour. **Foreground attempts
+(`cmd_in_flight_` — an evcc/MCP/user request is blocked on this one) are always ERROR and never
+suppressed**, whatever the cause: a request that returned nothing must leave a line behind.
+Suppressed attempts still reach the console and `/diag` at `DEBUG`, and the condition itself is
+always readable in `/status.ble`; only the forwarded log stops repeating itself.
 
 Reachability is tracked by a
 `last_reachable_ticks_` clock stamped on every successful signed round-trip, incl. the idle
@@ -708,6 +772,23 @@ so no stale data is shown (`clear_session_and_cache_()` in `vehicle_pairing.cpp`
    the same VIN is a no-op for the pairing.
 
 After any of these `has_session()` is false → UI shows "not paired", hides controls/SOC.
+
+**Session reuse across a reboot needs the wall clock restored first.** The `sess_vcsec`/`sess_info`
+blobs in NVS exist so a restart does not cost a fresh handshake, but tesla-ble only accepts a
+persisted session younger than an hour, and it measures that as
+
+```c
+uint32_t session_age = (uint32_t) time(nullptr) - session.clock_time;   // vehicle.cpp
+```
+
+At 1970 that subtraction **underflows** — the age comes out as the raw stored epoch (~1.78e9), which
+is comfortably over the 3600 s limit, so *every* persisted session is rejected however fresh it is.
+`main.cpp` therefore calls `restore_clock_from_nvs()` (the `last_time` cache written on each NTP
+sync) **before** `VehicleController::init()`, not next to the SNTP setup after WiFi where it used to
+sit — the restore itself needs no network, so nothing kept it down there. Measured before the fix:
+49 boots in the 17.–24.07.2026 syslog, 49 rejections of both domains, the last of them discarding a
+VCSEC session that was 43 minutes old. NTP refines the restored clock seconds later; the ordering is
+what matters, not the precision.
 
 **A configured VIN gates pairing entirely.** The device targets the car by its VIN-derived
 BLE name (`S<hex>C`), so `auto_pair_task` first checks `has_plausible_vin()` (17-char VIN;
@@ -763,8 +844,15 @@ MCP is strict — an absent required argument OR a present-but-unparseable one i
 protocol error (silently defaulting `set_scheduled_charging`'s `enable` would *disable*
 the schedule and report success); loose-but-unambiguous encodings are coerced (numeric
 strings for ints, 0/1 for bools); parsed integers are clamped to the spec bounds before
-the int cast (UB guard) — while REST stays lenient for TeslaBleHttpProxy compat (absent →
-the spec's `api_default`). Both surfaces execute through the single kind→controller
+the int cast (UB guard) — while REST generally stays lenient for TeslaBleHttpProxy compat
+(absent → the spec's `api_default`). The registry also owns the one scalar-body
+compatibility exception: evcc serializes `charge_start` as JSON `true` and `charge_stop`
+as JSON `false`; only those matching command/value pairs are accepted, while other
+non-object bodies remain HTTP 400. The explicit safety exception is
+`set_charging_amps`: its registry row sets `api_required`, so missing/malformed input is HTTP
+400 rather than silently becoming 0 A; a fractional value is also rejected because the Tesla
+field is an integer amp limit. All REST command failures retain their compatible JSON result/reason
+body but return HTTP 502 instead of a misleading HTTP 200. Both surfaces execute through the single kind→controller
 dispatch in `command_exec.cpp`. The registry, method routing, version table, clamp and the
 shared command-outcome text (`logic/command_result.hpp`, also used by the REST
 `/command` reason so the two paths can never diverge) are IDF-free and covered by the
@@ -796,15 +884,18 @@ parked car never sleeps.
 
 ### Lock hierarchy (`VehicleController`)
 
-Four primitives, created in `VehicleController::init` (`vehicle_ctrl.cpp`); the shared mutex
-guard lives in `rtos_guard.hpp` (`tk::MutexGuard`) and the command-flight guard in
-`vehicle_ctrl_internal.hpp` (`tk::InFlightGuard`):
+Four primitives, created in `VehicleController::init` (`vehicle_ctrl.cpp`). The ONE shared,
+exception-safe RAII guard is `tk::SemGuard` in [`main/rtos_guard.hpp`](../main/rtos_guard.hpp)
+(blocking or finite/zero-wait, exposes `acquired()`); `vehicle_ctrl_internal.hpp` keeps the
+historical alias `tk::MutexGuard = tk::SemGuard` plus `tk::InFlightGuard`. Every take/give around
+code that can throw (a tesla-ble builder/parser → `std::bad_alloc`, a `std::string` copy) goes
+through the guard so the lock is released during stack unwinding, never left held (issue #204):
 
 | Primitive | Kind | Protects |
 |---|---|---|
-| `command_mutex_` | mutex, RAII | one whole command/query cycle: exclusive use of `cmd_sem_`, `last_result_`, `last_error_` |
-| `vehicle_mutex_` | mutex, RAII | **every** call into the tesla-ble `vehicle_` object (send, `loop()`, `on_rx_data`, `set_connected`) |
-| `cmd_sem_` | binary semaphore | signals "result callback ran" from the BLE RX task to the waiting command |
+| `command_mutex_` | mutex, RAII | one whole command/query transaction: exclusive use of `cmd_sem_`, `last_result_`, `last_error_`; for `set_charging_amps`, the action and verifying ChargeState poll are one transaction |
+| `vehicle_mutex_` | mutex, RAII (`SemGuard`) | **every** call into the tesla-ble `vehicle_` object (send, `loop()`, `on_rx_data`, `set_connected`) |
+| `cmd_sem_` | binary semaphore | signals "result callback ran" from the BLE RX task to the waiting command (the result callback **always** gives it, even if its body throws) |
 | `cache_mutex_` | mutex, RAII, leaf | the `last_known_*` caches (`std::string` members ⇒ an unlocked copy is torn-read UB) |
 
 **Normative order:** `command_mutex_` → `vehicle_mutex_` → `cache_mutex_`. Acquire strictly
@@ -842,10 +933,9 @@ Application-task priorities are declared **only** in [`main/task_config.hpp`](..
 | `auto_pair` | `kPrioAutoPair` = 4 | 8192 | `vehicle_ctrl.cpp` (fn: `vehicle_pairing.cpp`) | pairing supervisor: enrol / re-pair / health probe |
 | `wifi_wd` | `kPrioWifiWatchdog` = 4 | 3072 | `main.cpp` | ghost-association watchdog (re-associate, never reboot) |
 | `mqtt_pub` | `kPrioMqttPub` = 4 | 6144 | `mqtt_ha.cpp` | MQTT/HA publisher (reads the caches) |
-| `ws_bcast` | `kPrioWsBroadcast` = 4 | 6144 | `http_events.cpp` | `/events` live-status push (self-gated on `ws_any_clients()`) |
-| `syslog_task` | `kPrioSyslog` = 3 | 6144 | `syslog.cpp` | UDP diagnostic forwarding + periodic DNS/reachability check |
 | `display` | `kPrioDisplay` = 3 | 6144 | `display.cpp` | ST7735 renderer (`CONFIG_TESLA_DISPLAY_ENABLED` builds) |
 | `ota_gate` | `kPrioOtaGate` = 3 | 3072 | `main.cpp` | one-shot OTA rollback health gate (~90 s) |
+| `syslog_task` | `kPrioSyslog` = 3 | 6144 | `syslog.cpp` | best-effort UDP Syslog forwarder (opt-in; degraded-not-fatal on a failed start) |
 | `led` | `kPrioLed` = 2 | 3072 | `led_status.cpp` | APA102 status LED (`CONFIG_TESLA_LED_ENABLED` builds) |
 
 Not in the table (ESP-IDF-owned, priorities from IDF Kconfig, not `task_config.hpp`): the
@@ -862,6 +952,56 @@ stamp — crossing tasks with no multi-field consistency requirement (`pairing_l
 a *group* — above all structs holding `std::string` — goes under a mutex (`cache_mutex_` for
 the caches). The test: if two fields must be observed consistently together, that is a mutex,
 not two atomics.
+
+Cross-task **file-scope** scalars follow the same rule outside `VehicleController`: WiFi
+connected / ever-connected / gateway-reachable / NTP-synced (`main.cpp`), diag verbosity
+(`diag_log.cpp`), BLE `want_connect_`/`connecting_`/`scanning_`/`host_synced_` + the connect-fail
+counter/stamp (`ble_client.hpp`), and MQTT `configured`/`tls`/`connected` (`mqtt_ha.cpp`) are all
+`std::atomic` (simple seq_cst) — `volatile` blocks some optimizations but is **not** a
+happens-before edge under the C++ memory model.
+
+### Exception containment (normative)
+
+C++ exceptions are enabled and the heap is tight, so `std::bad_alloc` (and library throws) are
+**reachable**, not theoretical. An exception that escapes into an ESP-IDF / FreeRTOS / NimBLE /
+esp-mqtt / esp_http_server / SNTP **C frame** unwinds through non-exception-aware code →
+`std::terminate()` → `abort()` → reboot (and a reboot loop re-opens the poll window, so a parked
+car never sleeps). The rule, by execution model:
+
+- **Long-running FreeRTOS tasks** (`vehicle_loop`, `auto_pair`, `mqtt_pub`,
+  `syslog_task`, `display`, `led`) wrap their **iteration** in `try { … } catch (std::exception&)
+  catch (…)`, log the component, preserve invariants (RAII locks release on unwind), delay briefly
+  so no tight error loop forms, and continue with the next iteration.
+- **One-shot jobs** (`ota_chk`, `ota`) convert a throw into a terminal **error state** visible in
+  `/ota/status` — never a reboot.
+- **C callbacks** (NimBLE GAP/GATT + RX, the tesla-ble result/state callbacks, the MQTT event
+  handler, the SNTP sync cb) catch locally and return a valid API result; the tesla-ble result
+  callback additionally **always** gives `cmd_sem_` so the foreground waiter is released on a throw.
+- **Critical boot** (`app_main`) has a top-level boundary; anything that escapes it is logged and
+  enters the same fatal-startup policy as an explicitly failed essential component instead of
+  reaching a bare `abort()`.
+- A catch-all (`catch (...)`) always follows `catch (std::exception&)` because third-party code is
+  not guaranteed to throw only standard exception types.
+
+### Startup failure policy (normative)
+
+Component start/init functions **report success/failure**; `app_main` classifies them and never
+runs a partial system that still announces itself as "running" (issue #204):
+
+- **Essential** — `config`/`tesla_ble` NVS, `VehicleController::init` (its sync primitives + tasks),
+  the WiFi event group/station netif/watchdog semaphore+task, NimBLE and its BLE mutex/timer
+  resources (`ble_client.start`), the primary HTTP server (`http_server_start`, which unwinds a
+  partial handler registration and stops the server), and the OTA health-gate task. A failure calls
+  `boot_fatal()` and follows a state-aware policy: a still-`PENDING_VERIFY` image is explicitly
+  marked invalid and rebooted into the previous slot immediately; an already-valid image **halts**
+  and preserves diagnostics until an external reset. The latter deliberately avoids a permanent
+  startup reboot loop, which would repeatedly reopen the vehicle polling window without repairing
+  a hard allocation/init failure.
+- **Optional** — the MQTT bridge (`mqtt_ha_start`), Syslog forwarding (`syslog_start`), and the
+  on-device display/LED when enabled. MQTT and Syslog contain allocation exceptions at their public
+  start boundary, unwind partially-created client/task-support resources, are **logged**, and
+  degrade to disabled; their public status must not claim they are operational. Boot continues —
+  the primary BLE/HTTP proxy runs regardless.
 
 ### Deferred: owned BLE-ops queue
 
