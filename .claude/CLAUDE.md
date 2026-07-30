@@ -44,7 +44,8 @@ It covers VIN validation, imperial→metric conversion, the `link_state()` four-
 (incl. the debounced-ASLEEP asymmetry) and its `/status`/MQTT strings, the per-target
 platform/OTA-suffix mapping, the MCP protocol core (version negotiation, method routing,
 int clamp), the ONE command registry both command surfaces dispatch through
-(`logic/command_registry.hpp` — REST + MCP names, kinds and shared arg bounds), the
+(`logic/command_registry.hpp` — REST + MCP names, kinds, shared arg bounds and the
+command-specific evcc boolean-body compatibility rule), the
 `/status` field contract (`logic/status_model.hpp`, golden-emission-pinned — order, key
 names, presence rules, value shaping), the shared command-outcome text, the on-device display
 presenter (the priority ladder / SoC gradient / RSSI→bars / SSID-scroll decisions the ST7735
@@ -122,7 +123,8 @@ http_server.cpp        → esp_http_server on port 80: wildcard dispatch + the h
                          try/catch OOM guard (503) EVERY handler runs under
 http_api.cpp           → evcc routes (/api/1/…, /api/proxy/1/version); command names/args
                          resolve via logic/command_registry.hpp (ONE table with the MCP
-                         tools), execution via command_exec.cpp
+                         tools; also owns the charge_start=true / charge_stop=false evcc
+                         scalar-body exception), execution via command_exec.cpp
 command_exec.cpp       → the ONE CmdKind → VehicleController dispatch both command
                          surfaces (/api and /mcp) execute through
 http_status.cpp        → web UI (/), /status, /diag, /scan; the /status field contract
