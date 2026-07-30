@@ -342,7 +342,23 @@ static void syslog_task(void*) {
     }
 }
 
-bool syslog_start(NvsStorageAdapter& config_store) {
+static void syslog_cleanup_start_failure() noexcept {
+    if (s_queue) {
+        vQueueDelete(s_queue);
+        s_queue = nullptr;
+    }
+    if (s_ping.done) {
+        vSemaphoreDelete(s_ping.done);
+        s_ping.done = nullptr;
+    }
+    if (s_status_mtx) {
+        vSemaphoreDelete(s_status_mtx);
+        s_status_mtx = nullptr;
+    }
+    s_configured.store(false);
+}
+
+static bool syslog_start_impl(NvsStorageAdapter& config_store) {
     std::string uri = CONFIG_TESLA_SYSLOG_SERVER;
     config_store.load_str("syslog_uri", uri);
     // Trim surrounding whitespace (mirrors mqtt_ha_start's broker trim).
@@ -352,11 +368,12 @@ bool syslog_start(NvsStorageAdapter& config_store) {
 
     std::string host;
     int port = 514;
-    s_configured = tk::syslog_target_parse(uri, host, port);
-    s_cfg_host   = s_configured ? host : "";
-    s_cfg_port   = s_configured ? port : 514;
+    const bool configured = tk::syslog_target_parse(uri, host, port);
+    s_cfg_host   = configured ? host : "";
+    s_cfg_port   = configured ? port : 514;
 
-    if (!s_configured) {
+    if (!configured) {
+        s_configured.store(false);
         ESP_LOGI(TAG, "disabled (no server configured)");
         return true;   // nothing to start is a healthy outcome, not a failure
     }
@@ -370,10 +387,7 @@ bool syslog_start(NvsStorageAdapter& config_store) {
     s_queue      = xQueueCreate(kQueueDepth, sizeof(SyslogMsg));
     if (!s_status_mtx || !s_ping.done || !s_queue) {
         ESP_LOGE(TAG, "resource allocation failed — Syslog forwarding disabled (degraded)");
-        if (s_queue)      { vQueueDelete(s_queue);            s_queue = nullptr; }
-        if (s_ping.done)  { vSemaphoreDelete(s_ping.done);    s_ping.done = nullptr; }
-        if (s_status_mtx) { vSemaphoreDelete(s_status_mtx);   s_status_mtx = nullptr; }
-        s_configured = false;
+        syslog_cleanup_start_failure();
         return false;
     }
 
@@ -381,15 +395,28 @@ bool syslog_start(NvsStorageAdapter& config_store) {
     // stack (unlike esp-mqtt, whose socket work lives in an internal task). 4096 is
     // too thin for that call chain — mirrors syslog.cpp in the sibling
     // daikin-altherma-esp32 project, where this was measured.
+    // Publish the fully-built configuration before the task can run. HTTP is not started yet;
+    // if task creation fails, cleanup immediately withdraws the configured state again.
+    s_configured.store(true);
     if (xTaskCreate(syslog_task, "syslog_task", 6144, nullptr, tk::kPrioSyslog, nullptr) != pdPASS) {
         ESP_LOGE(TAG, "task creation failed — Syslog forwarding disabled (degraded)");
-        vQueueDelete(s_queue);          s_queue = nullptr;   // no-op syslog_send()
-        vSemaphoreDelete(s_ping.done);  s_ping.done = nullptr;
-        vSemaphoreDelete(s_status_mtx); s_status_mtx = nullptr;
-        s_configured = false;
+        syslog_cleanup_start_failure();
         return false;
     }
     return true;
+}
+
+bool syslog_start(NvsStorageAdapter& config_store) {
+    try {
+        return syslog_start_impl(config_store);
+    } catch (const std::exception& e) {
+        syslog_cleanup_start_failure();
+        ESP_LOGE(TAG, "Syslog initialization threw (%s); forwarding disabled", e.what());
+    } catch (...) {
+        syslog_cleanup_start_failure();
+        ESP_LOGE(TAG, "Syslog initialization threw (unknown); forwarding disabled");
+    }
+    return false;
 }
 
 void syslog_send(const char* msg, size_t len) {
