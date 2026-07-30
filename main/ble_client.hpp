@@ -97,8 +97,8 @@ public:
     // real link-drop does). Lets the web UI show real bars + dBm in the "can't connect" state
     // instead of empty bars. false if nothing seen / the link genuinely dropped.
     bool last_advert_rssi(int8_t& out) const {
-        if (!conn_rssi_valid_) return false;
-        out = conn_rssi_;
+        if (!conn_rssi_valid_.load()) return false;
+        out = conn_rssi_.load();
         return true;
     }
     // Snapshot of nearby Tesla vehicles seen while scanning (recent only).
@@ -187,8 +187,8 @@ private:
     // transiently (e.g. while the controller is busy pairing), so this fallback keeps the
     // web UI showing real signal strength during pairing instead of nothing. mutable: the
     // refresh happens inside the const connected_rssi() accessor.
-    mutable int8_t conn_rssi_{0};
-    mutable bool   conn_rssi_valid_{false};
+    mutable std::atomic<int8_t> conn_rssi_{0};
+    mutable std::atomic<bool>   conn_rssi_valid_{false};
 
     uint16_t svc_start_handle_{0};
     uint16_t svc_end_handle_{0};

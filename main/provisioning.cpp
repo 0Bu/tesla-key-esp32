@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <cctype>
 #include <cstdint>
+#include <exception>
 #include <string>
 
 #include "freertos/FreeRTOS.h"
@@ -81,7 +82,7 @@ static esp_err_t form_get(httpd_req_t* req) {
     return httpd_resp_send(req, (const char*)setup_html_gz_start, len);
 }
 
-static esp_err_t save_post(httpd_req_t* req) {
+static esp_err_t save_post_impl(httpd_req_t* req) {
     int len = req->content_len;
     if (len <= 0 || len > 1024) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "empty/oversized form");
@@ -122,20 +123,28 @@ static esp_err_t save_post(httpd_req_t* req) {
     vin = (vs == std::string::npos) ? std::string{} : vin.substr(vs, ve - vs + 1);
     for (char& c : vin) c = (char)std::toupper((unsigned char)c);
 
-    // Persist credentials, and only reboot if the write actually landed. A failed save that
-    // still rebooted would drop the device back into setup mode (ssid still empty) while telling
-    // the user "Saved" — so on failure we KEEP setup mode active and report the error instead.
-    // The VIN is optional (pairing simply stays disabled until one is set), so its save is not
-    // gated the same way.
-    if (!g_cfg->save_str("wifi_ssid", ssid) || !g_cfg->save_str("wifi_pass", pass)) {
-        ESP_LOGE(TAG, "could not persist WiFi config — staying in setup mode");
+    if (!vin.empty() && !tk::vin_is_plausible(vin)) {
         httpd_resp_set_type(req, "text/html");
-        httpd_resp_sendstr(req,
-            "<p>Could not save the configuration (storage error). "
-            "Please try again. <a href=/>Back</a>.</p>");
+        httpd_resp_sendstr(req, "<p>VIN must be 17 valid characters. <a href=/>Back</a>.</p>");
         return ESP_OK;
     }
-    if (tk::vin_is_plausible(vin)) g_cfg->save_str("vin", vin);
+
+    // Persist every supplied field and reboot only after all writes succeed. Otherwise setup mode
+    // stays alive and reports the storage error instead of claiming success with partial state.
+    const bool ssid_saved = g_cfg->save_str("wifi_ssid", ssid);
+    const bool pass_saved = g_cfg->save_str("wifi_pass", pass);
+    const bool vin_saved  = vin.empty() || g_cfg->save_str("vin", vin);
+    if (!ssid_saved || !pass_saved || !vin_saved) {
+        ESP_LOGE(TAG, "failed to persist setup form (ssid=%s pass=%s vin=%s); staying in setup mode",
+                 ssid_saved ? "ok" : "failed", pass_saved ? "ok" : "failed",
+                 vin_saved ? "ok" : "failed");
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        httpd_resp_set_type(req, "text/html");
+        httpd_resp_sendstr(req,
+            "<p>Could not save the configuration. The device was not rebooted. "
+            "<a href=/>Try again</a>.</p>");
+        return ESP_FAIL;
+    }
     ESP_LOGI(TAG, "saved config: ssid='%s' vin='%s' — rebooting", ssid.c_str(), vin.c_str());
 
     httpd_resp_set_type(req, "text/html");
@@ -148,6 +157,19 @@ static esp_err_t save_post(httpd_req_t* req) {
     vTaskDelay(pdMS_TO_TICKS(1000));
     esp_restart();
     return ESP_OK;
+}
+
+static esp_err_t save_post(httpd_req_t* req) {
+    try {
+        return save_post_impl(req);
+    } catch (const std::exception& e) {
+        ESP_LOGE(TAG, "setup save threw (%s); returning 503", e.what());
+    } catch (...) {
+        ESP_LOGE(TAG, "setup save threw (unknown); returning 503");
+    }
+    httpd_resp_set_status(req, "503 Service Unavailable");
+    httpd_resp_set_type(req, "text/plain");
+    return httpd_resp_sendstr(req, "out of memory");
 }
 
 // ─── Captive-portal DNS ───────────────────────────────────────────────────────
@@ -227,21 +249,15 @@ void provisioning_run(NvsStorageAdapter& config_store) {
 
     ESP_LOGI(TAG, "Setup AP up. Join WiFi '%s' and open http://192.168.4.1", AP_SSID);
 
-    // Captive-portal DNS so the setup form pops up automatically on phones. Best-effort: if the
-    // task can't be created the portal is still reachable by IP (http://192.168.4.1), so log and
-    // carry on rather than abort.
-    if (xTaskCreate(dns_task, "captive_dns", 4096, nullptr, tk::kPrioCaptiveDns, nullptr) != pdPASS)
-        ESP_LOGW(TAG, "captive DNS task not started — portal still reachable at 192.168.4.1");
-
     httpd_config_t hcfg   = HTTPD_DEFAULT_CONFIG();
     hcfg.uri_match_fn     = httpd_uri_match_wildcard;
     hcfg.max_uri_handlers = 4;
     httpd_handle_t server = nullptr;
-    ESP_ERROR_CHECK(httpd_start(&server, &hcfg));
+    if (httpd_start(&server, &hcfg) != ESP_OK) {
+        ESP_LOGE(TAG, "failed to start setup HTTP server; halting setup mode");
+        for (;;) vTaskDelay(pdMS_TO_TICKS(10000));
+    }
 
-    // A portal that can't serve its form or accept a save is useless — the only recovery is to
-    // retry setup from scratch, so a failed registration reboots (back into this same setup mode)
-    // rather than stranding the user on a dead page.
     httpd_uri_t save = { .uri = "/save", .method = HTTP_POST,
                          .handler = save_post, .user_ctx = nullptr };
     // Wildcard GET → form (also serves captive-portal probe requests)
@@ -249,11 +265,15 @@ void provisioning_run(NvsStorageAdapter& config_store) {
                          .handler = form_get, .user_ctx = nullptr };
     if (httpd_register_uri_handler(server, &save) != ESP_OK ||
         httpd_register_uri_handler(server, &form) != ESP_OK) {
-        ESP_LOGE(TAG, "setup portal handler registration failed — restarting into setup");
+        ESP_LOGE(TAG, "setup portal handler registration failed; halting setup mode");
         httpd_stop(server);
-        vTaskDelay(pdMS_TO_TICKS(1000));
-        esp_restart();
+        for (;;) vTaskDelay(pdMS_TO_TICKS(10000));
     }
+
+    // Redirect phones only after the entire HTTP surface is ready. Otherwise an orphaned DNS
+    // task could keep pointing clients at a portal that failed to start.
+    if (xTaskCreate(dns_task, "captive_dns", 4096, nullptr, tk::kPrioCaptiveDns, nullptr) != pdPASS)
+        ESP_LOGW(TAG, "captive DNS task not started — portal still reachable at 192.168.4.1");
 
     // Never returns — the device stays in setup mode until the form reboots it.
     while (true) vTaskDelay(pdMS_TO_TICKS(1000));

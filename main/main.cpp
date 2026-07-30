@@ -43,6 +43,29 @@ static const char* MDNS_HOSTNAME = "tesla-key-esp32";  // → http://tesla-key-e
 
 static const char* TAG = "main";
 
+// An essential startup failure is permanent for the current boot. A pending OTA image must
+// actively roll back; merely parking the task would leave the device wedged on the unverified
+// slot until somebody resets it. An already-valid image is halted instead of automatically
+// rebooted, because a reboot loop repeatedly opens the vehicle polling window while erasing the
+// most useful in-memory diagnostic context.
+[[noreturn]] static void boot_fatal(const char* component) {
+    ESP_LOGE(TAG, "FATAL: essential component '%s' failed to initialize; refusing to run a "
+                  "partial firmware", component);
+
+    const esp_partition_t* running = esp_ota_get_running_partition();
+    esp_ota_img_states_t state{};
+    if (running && esp_ota_get_state_partition(running, &state) == ESP_OK &&
+        state == ESP_OTA_IMG_PENDING_VERIFY) {
+        ESP_LOGE(TAG, "fatal startup failure on pending OTA image — rolling back");
+        vTaskDelay(pdMS_TO_TICKS(250));
+        const esp_err_t err = esp_ota_mark_app_invalid_rollback_and_reboot();
+        ESP_LOGE(TAG, "OTA rollback could not be started: %s", esp_err_to_name(err));
+    }
+
+    ESP_LOGE(TAG, "valid image halted after fatal startup failure; external reset required");
+    for (;;) vTaskDelay(pdMS_TO_TICKS(10000));
+}
+
 // ─── Wall clock ───────────────────────────────────────────────────────────────
 // NTP (esp_sntp) is the primary time source; the browser (POST /set_time) is only a
 // fallback for networks that block NTP. on_time_sync() flips s_ntp_synced and, on the
@@ -55,16 +78,22 @@ static std::atomic<bool>  s_ntp_synced{false};
 static NvsStorageAdapter* s_cfg_store  = nullptr;
 
 static void on_time_sync(struct timeval*) {
-    if (!s_ntp_synced && s_cfg_store) {
-        s_cfg_store->save_str("last_time", std::to_string((long long)time(nullptr)));
+    const bool first_sync = !s_ntp_synced.exchange(true);
+    if (first_sync && s_cfg_store) {
+        try {
+            s_cfg_store->save_str("last_time", std::to_string((long long)time(nullptr)));
+        } catch (const std::exception& e) {
+            ESP_LOGE(TAG, "NTP callback could not cache time (%s)", e.what());
+        } catch (...) {
+            ESP_LOGE(TAG, "NTP callback could not cache time (unknown exception)");
+        }
     }
-    s_ntp_synced = true;
     ESP_LOGI(TAG, "NTP time synced");
 }
 
 // Queried by the HTTP /set_time handler so the browser clock is applied only as a
 // fallback while NTP has not synced this boot.
-bool clock_synced_via_ntp() { return s_ntp_synced; }
+bool clock_synced_via_ntp() { return s_ntp_synced.load(); }
 
 // Seed the wall clock from the NVS cache written by on_time_sync, so we never sit at 1970
 // waiting for NTP (or forever, if the network blocks it and no browser ever visits). Called
@@ -139,10 +168,12 @@ static void wifi_event_handler(void*, esp_event_base_t base,
 
 static bool wifi_connect(const char* ssid, const char* password) {
     s_wifi_events = xEventGroupCreate();
+    if (!s_wifi_events) boot_fatal("WiFi event group");
 
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
     esp_netif_t* sta_netif = esp_netif_create_default_wifi_sta();
+    if (!sta_netif) boot_fatal("WiFi station netif");
 
     // DHCP client hostname: set BEFORE the lease is requested so the router can
     // register it in its local DNS (e.g. http://tesla-key-esp32.fritz.box). Setting
@@ -310,7 +341,6 @@ static bool gateway_reachable() {
 }
 
 static void wifi_watchdog_task(void*) {
-    s_wd.done = xSemaphoreCreateBinary();
     int fails = 0;
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(kWdPeriodS * 1000));
@@ -410,26 +440,11 @@ static void ota_health_gate_task(void*) {
     vTaskDelete(nullptr);
 }
 
-// Essential-component failure policy (issue #204). An essential subsystem that did not
-// initialize means the firmware CANNOT provide its core BLE/HTTP proxy, so we refuse to run a
-// partial system that would still announce itself as "running". We log loudly, give Syslog a
-// moment to forward the reason (it survives the restart; the /diag RAM ring does not), then
-// restart. Crucially this path is reached BEFORE ota_health_gate_task is created, so a
-// freshly-flashed image that cannot bring up an essential component never marks itself valid —
-// it reboots still PENDING_VERIFY and the bootloader rolls it back to the last-good slot.
-[[noreturn]] static void boot_fatal(const char* component) {
-    ESP_LOGE(TAG, "FATAL: essential component '%s' failed to initialize — restarting. A pending "
-                  "OTA image is left unconfirmed so the bootloader rolls it back.", component);
-    vTaskDelay(pdMS_TO_TICKS(3000));   // let any queued Syslog lines flush to the collector
-    esp_restart();
-    for (;;) { vTaskDelay(portMAX_DELAY); }   // unreachable; satisfies [[noreturn]]
-}
-
 extern "C" void app_main() {
   // Top-level exception boundary (issue #204): app_main runs C++ that allocates (std::string
   // config, make_unique, the component start()s). An uncaught throw would unwind into the C
   // startup that invoked app_main → std::terminate → abort — the same reboot, but with no
-  // diagnostic. Contain it, log it, and restart cleanly instead.
+  // diagnostic. Contain it, log it, then roll back a pending image or halt a valid one.
   try {
     // Capture console output into the in-memory diagnostic ring (GET /diag).
     diag_log_init();
@@ -464,7 +479,8 @@ extern "C" void app_main() {
 
     // Static so they outlive app_main() (which deletes itself via vTaskDelete)
     static NvsStorageAdapter config_store("tesla_cfg");
-    config_store.initialize();
+    if (!config_store.initialize())
+        boot_fatal("configuration NVS");
 
     // Did WE end the last boot on purpose? esp_reset_reason() cannot tell a deliberate
     // esp_restart() apart from a user power-cycle — both read SW/POWERON — so the heap watchdog
@@ -563,7 +579,8 @@ extern "C" void app_main() {
     // is started after WiFi is up. The controller's accessors are safe to call
     // before that — they report "not connected" until the link comes up.
     static NvsStorageAdapter tesla_store("tesla_ble");
-    tesla_store.initialize();
+    if (!tesla_store.initialize())
+        boot_fatal("Tesla NVS");
     static BleClient ble_client;
     static VehicleController vehicle;
     // init() wires the connected + rx callbacks onto ble_client and passes the
@@ -682,6 +699,9 @@ extern "C" void app_main() {
     // ESSENTIAL: without the watchdog a silent LAN drop (esp. the ghost-association case) can
     // strand the device off the network with no automatic recovery — so a failure to create it
     // halts boot rather than run without the safety net.
+    s_wd.done = xSemaphoreCreateBinary();
+    if (!s_wd.done)
+        boot_fatal("WiFi watchdog semaphore");
     if (xTaskCreate(wifi_watchdog_task, "wifi_wd", 3072, nullptr,
                     tk::kPrioWifiWatchdog, nullptr) != pdPASS)
         boot_fatal("WiFi watchdog");
@@ -695,8 +715,8 @@ extern "C" void app_main() {
     // (non-pending-verify) boot.
     // ESSENTIAL for the safety of a freshly-flashed image: this is the task that eventually
     // marks a PENDING_VERIFY OTA image valid after a healthy window. If it cannot even be
-    // created, the image would sit unconfirmed forever; restarting instead makes the bootloader
-    // roll a pending image back to the last-good slot (a normal, non-pending boot just retries).
+    // created, the image would sit unconfirmed forever; boot_fatal() explicitly rolls a pending
+    // image back to the last-good slot and halts an already-valid image.
     if (xTaskCreate(ota_health_gate_task, "ota_gate", 3072, nullptr,
                     tk::kPrioOtaGate, nullptr) != pdPASS)
         boot_fatal("OTA health gate");
@@ -705,12 +725,10 @@ extern "C" void app_main() {
     // Main task is no longer needed; Vehicle loop + HTTP server run in their own tasks.
     vTaskDelete(nullptr);
   } catch (const std::exception& e) {
-      ESP_LOGE(TAG, "app_main threw (%s) — restarting", e.what());
-      vTaskDelay(pdMS_TO_TICKS(3000));
-      esp_restart();
+      ESP_LOGE(TAG, "app_main initialization threw (%s)", e.what());
+      boot_fatal("app_main exception boundary");
   } catch (...) {
-      ESP_LOGE(TAG, "app_main threw (unknown) — restarting");
-      vTaskDelay(pdMS_TO_TICKS(3000));
-      esp_restart();
+      ESP_LOGE(TAG, "app_main initialization threw (unknown)");
+      boot_fatal("app_main exception boundary");
   }
 }
