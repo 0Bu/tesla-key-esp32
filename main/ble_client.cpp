@@ -3,6 +3,7 @@
 #include "rtos_guard.hpp"
 #include <esp_log.h>
 #include <esp_timer.h>
+#include <array>
 #include <cstring>
 #include <cstdio>
 #include <algorithm>
@@ -81,7 +82,10 @@ BleClient::BleClient() {
     ta.callback = scan_timeout_cb;
     ta.arg      = this;
     ta.name     = "ble_scan";
-    esp_timer_create(&ta, &scan_timer_);
+    if (esp_timer_create(&ta, &scan_timer_) != ESP_OK) {
+        ESP_LOGE(TAG, "failed to create BLE scan timer");
+        scan_timer_ = nullptr;
+    }
 }
 
 // Start a time-limited discovery scan (lists nearby Teslas, does not connect).
@@ -106,6 +110,10 @@ void BleClient::on_scan_timeout() {
 }
 
 bool BleClient::start() {
+    if (!write_mutex_ || !scan_mutex_ || !client_mutex_ || !scan_timer_) {
+        ESP_LOGE(TAG, "BLE resource allocation failed");
+        return false;
+    }
     esp_err_t err = nimble_port_init();
     if (err != ESP_OK) {
         // ESSENTIAL: with no NimBLE host there is no BLE proxy. Report failure so app_main can
@@ -223,18 +231,23 @@ std::vector<TeslaScan> BleClient::nearby() const {
     std::vector<TeslaScan> out;
     if (!scan_mutex_) return out;
     const int64_t now = esp_timer_get_time();
+    std::array<ScanEntry, 12> snapshot{};
+    size_t count = 0;
     {
-        // RAII give — the out.push_back() below can throw bad_alloc; releasing scan_mutex_
-        // during unwinding keeps the host task's note_scan_ from wedging.
+        // Copy only the fixed-size records under the host-task mutex. String allocations and
+        // sorting happen after release, so a slow /scan response cannot starve advert updates.
         tk::SemGuard g(scan_mutex_, pdMS_TO_TICKS(50));
         if (!g) return out;
-        for (const auto& s : scan_) {
-            if (now - s.last_us > 15LL * 1000 * 1000) continue;  // drop entries older than 15s
-            char addr[18];
-            snprintf(addr, sizeof(addr), "%02x:%02x:%02x:%02x:%02x:%02x",
-                     s.addr[5], s.addr[4], s.addr[3], s.addr[2], s.addr[1], s.addr[0]);
-            out.push_back(TeslaScan{addr, s.name, s.rssi, s.connectable});
-        }
+        count = std::min(snapshot.size(), scan_.size());
+        std::copy_n(scan_.begin(), count, snapshot.begin());
+    }
+    for (size_t i = 0; i < count; ++i) {
+        const auto& s = snapshot[i];
+        if (now - s.last_us > 15LL * 1000 * 1000) continue;  // drop entries older than 15s
+        char addr[18];
+        snprintf(addr, sizeof(addr), "%02x:%02x:%02x:%02x:%02x:%02x",
+                 s.addr[5], s.addr[4], s.addr[3], s.addr[2], s.addr[1], s.addr[0]);
+        out.push_back(TeslaScan{addr, s.name, s.rssi, s.connectable});
     }
     std::sort(out.begin(), out.end(),
               [](const TeslaScan& a, const TeslaScan& b) { return a.rssi > b.rssi; });
@@ -256,10 +269,16 @@ int BleClient::target_connectable() const {
     if (!scan_mutex_ || target_vin_.empty()) return -1;
     const int64_t now = esp_timer_get_time();
     int result = -1;
-    // RAII give — matches_vin(std::string(s.name), …) allocates and can throw.
-    tk::SemGuard g(scan_mutex_, pdMS_TO_TICKS(50));
-    if (!g) return -1;
-    for (const auto& s : scan_) {
+    std::array<ScanEntry, 12> snapshot{};
+    size_t count = 0;
+    {
+        tk::SemGuard g(scan_mutex_, pdMS_TO_TICKS(50));
+        if (!g) return -1;
+        count = std::min(snapshot.size(), scan_.size());
+        std::copy_n(scan_.begin(), count, snapshot.begin());
+    }
+    for (size_t i = 0; i < count; ++i) {
+        const auto& s = snapshot[i];
         // 90 s window: a PAIRED device only scans briefly around each ~30-40 s health probe, so
         // a 15 s freshness would flap to "unknown" between probes; 90 s keeps the at-limit signal
         // stable across the gap. ("at its BLE limit" is a persistent condition, so a slightly
@@ -282,7 +301,7 @@ std::string BleClient::peer_addr_str() const {
 }
 
 uint32_t BleClient::connect_fail_recent() const {
-    int64_t last = last_connect_attempt_us_;
+    int64_t last = last_connect_attempt_us_.load();
     if (last == 0) return 0;
     // Stale: no attempt in the last 90 s ⇒ the car is no longer in range / we stopped trying,
     // so this is "out of range", not "failing to connect". 90 s spans the slowest attempt cadence
@@ -290,7 +309,7 @@ uint32_t BleClient::connect_fail_recent() const {
     // up an unpaired one), so the signal stays stable across that gap. Resets the moment a
     // connect succeeds (connect_fail_count_ → 0).
     if (esp_timer_get_time() - last > 90LL * 1000 * 1000) return 0;
-    return connect_fail_count_;
+    return connect_fail_count_.load();
 }
 
 bool BleClient::connected_rssi(int8_t& out) const {
@@ -299,14 +318,14 @@ bool BleClient::connected_rssi(int8_t& out) const {
     // "RSSI unknown" sentinel, so treat it as a failed read.
     int8_t live = 0;
     if (ble_gap_conn_rssi(conn_handle_, &live) == 0 && live != 127) {
-        conn_rssi_       = live;
-        conn_rssi_valid_ = true;
+        conn_rssi_.store(live);
+        conn_rssi_valid_.store(true);
         out = live;
         return true;
     }
     // Live read failed (common while the controller is busy pairing) — fall back to the
     // last-known value (seeded from the connect-time advert) so the UI still shows signal.
-    if (conn_rssi_valid_) { out = conn_rssi_; return true; }
+    if (conn_rssi_valid_.load()) { out = conn_rssi_.load(); return true; }
     return false;
 }
 
@@ -426,21 +445,21 @@ int BleClient::on_gap_event(ble_gap_event* event) {
         }
         // Seed the link RSSI from this advert so the UI has a real value to show from the
         // moment we connect (incl. while pairing), before the first live read succeeds.
-        conn_rssi_       = event->disc.rssi;
-        conn_rssi_valid_ = true;
+        conn_rssi_.store(event->disc.rssi);
+        conn_rssi_valid_.store(true);
 
         connecting_   = true;
         want_connect_ = false;
         scanning_     = false;
         ble_gap_disc_cancel();
-        last_connect_attempt_us_ = esp_timer_get_time();   // marks the link as "actively trying"
+        last_connect_attempt_us_.store(esp_timer_get_time()); // marks the link as "actively trying"
         rc = ble_gap_connect(BLE_OWN_ADDR_PUBLIC,
                              &event->disc.addr,
                              10000, nullptr,
                              gap_event_cb, this);
         if (rc != 0) {
             ESP_LOGE(TAG, "connect failed: %d", rc);
-            connect_fail_count_++;
+            connect_fail_count_.fetch_add(1);
             connecting_ = false;
             ensure_scanning_();
         }
@@ -451,7 +470,7 @@ int BleClient::on_gap_event(ble_gap_event* event) {
         connecting_ = false;
         if (event->connect.status != 0) {
             ESP_LOGE(TAG, "connect error: %d", event->connect.status);
-            connect_fail_count_++;   // advert was heard but the link never came up
+            connect_fail_count_.fetch_add(1);   // advert was heard but the link never came up
             if (on_connected_) on_connected_(false);
             // Keep the intent so an in-flight command retries within its timeout
             // window; ensure_connected_() clears it via stop_connecting() on timeout.
@@ -461,7 +480,7 @@ int BleClient::on_gap_event(ble_gap_event* event) {
         }
         conn_handle_  = event->connect.conn_handle;
         want_connect_ = false;
-        connect_fail_count_ = 0;   // link is up — clear the "can't connect" signal
+        connect_fail_count_.store(0);   // link is up — clear the "can't connect" signal
         ESP_LOGI(TAG, "connected, handle=%d", conn_handle_);
 
         // Reset discovery state for this fresh connection.
@@ -491,7 +510,7 @@ int BleClient::on_gap_event(ble_gap_event* event) {
         connecting_        = false;
         want_connect_      = false;
         scanning_          = false;
-        conn_rssi_valid_   = false;   // stale once the link is gone
+        conn_rssi_valid_.store(false);   // stale once the link is gone
         {
             tk::SemGuard g(client_mutex_);   // RAII give
             if (g) peer_addr_str_.clear();

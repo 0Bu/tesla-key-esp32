@@ -977,8 +977,9 @@ car never sleeps). The rule, by execution model:
 - **C callbacks** (NimBLE GAP/GATT + RX, the tesla-ble result/state callbacks, the MQTT event
   handler, the SNTP sync cb) catch locally and return a valid API result; the tesla-ble result
   callback additionally **always** gives `cmd_sem_` so the foreground waiter is released on a throw.
-- **Critical boot** (`app_main`) has a top-level boundary; anything that escapes it restarts
-  cleanly with a diagnostic instead of a bare `abort()`.
+- **Critical boot** (`app_main`) has a top-level boundary; anything that escapes it is logged and
+  enters the same fatal-startup policy as an explicitly failed essential component instead of
+  reaching a bare `abort()`.
 - A catch-all (`catch (...)`) always follows `catch (std::exception&)` because third-party code is
   not guaranteed to throw only standard exception types.
 
@@ -988,15 +989,19 @@ Component start/init functions **report success/failure**; `app_main` classifies
 runs a partial system that still announces itself as "running" (issue #204):
 
 - **Essential** — `config`/`tesla_ble` NVS, `VehicleController::init` (its sync primitives + tasks),
-  NimBLE (`ble_client.start`), the primary HTTP server (`http_server_start`, which unwinds a partial
-  handler registration and stops the server), the WiFi watchdog task, and the OTA health-gate task.
-  A failure calls `boot_fatal()`: log loudly, let Syslog flush, `esp_restart()`. This path is reached
-  **before** the health gate marks a pending OTA image valid — so a freshly-flashed image that cannot
-  bring up an essential component reboots still `PENDING_VERIFY` and the bootloader **rolls it back**.
+  the WiFi event group/station netif/watchdog semaphore+task, NimBLE and its BLE mutex/timer
+  resources (`ble_client.start`), the primary HTTP server (`http_server_start`, which unwinds a
+  partial handler registration and stops the server), and the OTA health-gate task. A failure calls
+  `boot_fatal()` and follows a state-aware policy: a still-`PENDING_VERIFY` image is explicitly
+  marked invalid and rebooted into the previous slot immediately; an already-valid image **halts**
+  and preserves diagnostics until an external reset. The latter deliberately avoids a permanent
+  startup reboot loop, which would repeatedly reopen the vehicle polling window without repairing
+  a hard allocation/init failure.
 - **Optional** — the MQTT bridge (`mqtt_ha_start`), Syslog forwarding (`syslog_start`), and the
-  on-device display/LED when enabled. A failure unwinds its own partial resources, is **logged**, and
-  degrades to disabled; its public status must not claim it is operational. Boot continues — the
-  primary BLE/HTTP proxy runs regardless.
+  on-device display/LED when enabled. MQTT and Syslog contain allocation exceptions at their public
+  start boundary, unwind partially-created client/task-support resources, are **logged**, and
+  degrade to disabled; their public status must not claim they are operational. Boot continues —
+  the primary BLE/HTTP proxy runs regardless.
 
 ### Deferred: owned BLE-ops queue
 

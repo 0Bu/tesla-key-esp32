@@ -27,6 +27,7 @@ static size_t            s_head    = 0;      // next write position
 static bool              s_wrapped = false;  // buffer has wrapped at least once
 static SemaphoreHandle_t s_mtx     = nullptr;
 static vprintf_like_t    s_prev    = nullptr;
+static const char*       TAG       = "diag_log";
 // atomic (not volatile): written by the /diag HTTP handler, read by the capture hook on
 // whichever task logged the line. A cross-task scalar — atomic gives it a defined value.
 static std::atomic<bool> s_verbose{false};
@@ -64,7 +65,11 @@ static int diag_vprintf_(const char* fmt, va_list ap) {
 
 void diag_log_init() {
     if (s_mtx) return;
-    s_mtx  = xSemaphoreCreateMutex();
+    s_mtx = xSemaphoreCreateMutex();
+    if (!s_mtx) {
+        ESP_LOGE(TAG, "failed to allocate diagnostic-log mutex; capture disabled");
+        return;
+    }
     s_prev = esp_log_set_vprintf(diag_vprintf_);
 }
 

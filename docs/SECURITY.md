@@ -111,7 +111,10 @@ Trust model:
   `esp_ota_mark_app_valid_cancel_rollback()` to a health gate that keeps rollback armed until a
   freshly-flashed image has run healthily for a window (≈ 90 s). An image that boots but then
   crashes/OOM-reboots under load is reverted on the next boot — the old startup-time mark would
-  have committed it before it proved itself.
+  have committed it before it proved itself. A fatal essential-component failure during startup
+  does not wait for another reset: while the image is still `PENDING_VERIFY`, `boot_fatal()`
+  explicitly marks it invalid and reboots into the previous slot. The same failure on an
+  already-valid image halts instead of entering an automatic reboot loop.
 
 Signed OTA closes the *unsigned-artifact* gap without burning any eFuses. It does **not**
 protect against a physical attacker reflashing over USB (no boot-time enforcement) — that

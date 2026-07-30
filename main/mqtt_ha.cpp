@@ -12,6 +12,7 @@
 #include <cstring>
 #include <ctime>
 #include <exception>
+#include <memory>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -58,6 +59,16 @@ static std::string s_devname;                  // HA device display name
 static std::string s_cfgurl;                   // device configuration_url (http://<ip>)
 static std::string s_broker_disp;              // "host:port" for the web UI
 static int         s_interval_s = 15;
+static bool        s_client_started = false;
+
+struct CJsonDeleter {
+    void operator()(cJSON* value) const noexcept { cJSON_Delete(value); }
+};
+struct CJsonStringDeleter {
+    void operator()(char* value) const noexcept { free(value); }
+};
+using CJsonPtr = std::unique_ptr<cJSON, CJsonDeleter>;
+using CJsonStringPtr = std::unique_ptr<char, CJsonStringDeleter>;
 
 // State topics, indexed by Domain.
 enum Domain { D_CHARGE, D_CLIMATE, D_DRIVE, D_TIRES, D_CLOSURES, D_VEHICLE, D_DEVICE, D_COUNT };
@@ -151,9 +162,10 @@ static void pub(const std::string& topic, const char* payload, bool retain = tru
 
 // Print + publish a cJSON object to a topic, then delete it (takes ownership).
 static void pub_json(const std::string& topic, cJSON* obj) {
-    char* s = cJSON_PrintUnformatted(obj);
-    if (s) { pub(topic, s); free(s); }
-    cJSON_Delete(obj);
+    CJsonPtr root(obj);
+    if (!root) return;
+    CJsonStringPtr json(cJSON_PrintUnformatted(root.get()));
+    if (json) pub(topic, json.get());
 }
 
 // ─── HA discovery ─────────────────────────────────────────────────────────────
@@ -183,8 +195,17 @@ static void add_device_block(cJSON* root) {
 
 static void publish_discovery() {
     for (const Entry& e : ENTRIES) {
-        cJSON* c = cJSON_CreateObject();
         std::string uid = s_node + "_" + e.obj;
+        std::string value_template;
+        if (e.is_binary) {
+            const bool invert = e.dev_cla && strcmp(e.dev_cla, "lock") == 0;
+            value_template = tk::ha_binary_value_template(e.field, invert);
+        } else {
+            value_template = std::string("{{ value_json.") + e.field + " }}";
+        }
+        std::string ct = s_prefix + "/" + e.comp + "/" + s_node + "/" + e.obj + "/config";
+
+        cJSON* c = cJSON_CreateObject();
         cJSON_AddStringToObject(c, "name",    e.name);
         cJSON_AddStringToObject(c, "uniq_id", uid.c_str());
         cJSON_AddStringToObject(c, "stat_t",  s_topic[e.dom].c_str());
@@ -194,16 +215,13 @@ static void publish_discovery() {
             // renders ON as "Unlocked" and OFF as "Locked". Our `locked` field is
             // true=locked, so flip the template for that one class — a locked car
             // must read "Locked", not "Unlocked".
-            bool invert = e.dev_cla && strcmp(e.dev_cla, "lock") == 0;
             // Presence-aware: an unreported optional field renders empty → HA "unknown", not a
             // phantom OFF/"Unlocked". Template built + host-tested in logic/ha_templates.hpp.
-            std::string tpl = tk::ha_binary_value_template(e.field, invert);
-            cJSON_AddStringToObject(c, "val_tpl", tpl.c_str());
+            cJSON_AddStringToObject(c, "val_tpl", value_template.c_str());
             cJSON_AddStringToObject(c, "pl_on",  "ON");
             cJSON_AddStringToObject(c, "pl_off", "OFF");
         } else {
-            std::string tpl = std::string("{{ value_json.") + e.field + " }}";
-            cJSON_AddStringToObject(c, "val_tpl", tpl.c_str());
+            cJSON_AddStringToObject(c, "val_tpl", value_template.c_str());
         }
         if (e.dev_cla)  cJSON_AddStringToObject(c, "dev_cla",      e.dev_cla);
         if (e.unit)     cJSON_AddStringToObject(c, "unit_of_meas", e.unit);
@@ -212,7 +230,6 @@ static void publish_discovery() {
         add_origin_block(c);
         add_device_block(c);
 
-        std::string ct = s_prefix + "/" + e.comp + "/" + s_node + "/" + e.obj + "/config";
         pub_json(ct, c);  // retained so HA recreates entities after a restart
     }
     ESP_LOGI(TAG, "published %d HA-discovery configs under %s/", (int)(sizeof(ENTRIES)/sizeof(ENTRIES[0])), s_prefix.c_str());
@@ -413,9 +430,11 @@ static void publisher_task(void*) {
         // build cJSON + std::string discovery payloads that can throw std::bad_alloc on a
         // fragmented heap. An escape would unwind into the FreeRTOS C task trampoline →
         // std::terminate → reboot; contain it, skip this round, and try again next tick.
+        bool discovery_in_progress = false;
         try {
             if (s_connected) {
                 if (s_need_discovery.exchange(false)) {
+                    discovery_in_progress = true;
                     publish_discovery();
                     pub(s_avail, "online");      // retained; after configs so HA has the entities
                     publish_state();
@@ -426,9 +445,13 @@ static void publisher_task(void*) {
                 }
             }
         } catch (const std::exception& e) {
+            if (discovery_in_progress) s_need_discovery = true;
             ESP_LOGE(TAG, "mqtt publish iteration threw (%s) — skipping round", e.what());
+            vTaskDelay(pdMS_TO_TICKS(5000));
         } catch (...) {
+            if (discovery_in_progress) s_need_discovery = true;
             ESP_LOGE(TAG, "mqtt publish iteration threw (unknown) — skipping round");
+            vTaskDelay(pdMS_TO_TICKS(5000));
         }
         vTaskDelay(pdMS_TO_TICKS(500));
     }
@@ -446,7 +469,20 @@ static std::string broker_display(const std::string& uri) {
 }
 
 // ─── Public API ───────────────────────────────────────────────────────────────
-bool mqtt_ha_start(VehicleController& vehicle, NvsStorageAdapter& config_store) {
+static void mqtt_ha_cleanup_start_failure() noexcept {
+    if (s_client) {
+        if (s_client_started) esp_mqtt_client_stop(s_client);
+        esp_mqtt_client_destroy(s_client);
+        s_client = nullptr;
+    }
+    s_client_started = false;
+    s_connected = false;
+    s_need_discovery = false;
+    s_configured.store(false);
+}
+
+static bool mqtt_ha_start_impl(VehicleController& vehicle,
+                               NvsStorageAdapter& config_store) {
     s_vehicle = &vehicle;
 
     // Resolve broker URI: NVS "mqtt_uri" (web UI) overrides the Kconfig default. An
@@ -480,7 +516,6 @@ bool mqtt_ha_start(VehicleController& vehicle, NvsStorageAdapter& config_store) 
     }
     s_tls = s_uri.rfind("mqtts://", 0) == 0;   // starts with mqtts://
     s_broker_disp = broker_display(s_uri);
-    s_configured = true;
     s_interval_s = CONFIG_TESLA_MQTT_PUBLISH_INTERVAL_S;
     if (s_interval_s < 5) s_interval_s = 5;
 
@@ -535,35 +570,45 @@ bool mqtt_ha_start(VehicleController& vehicle, NvsStorageAdapter& config_store) 
     s_client = esp_mqtt_client_init(&cfg);
     if (!s_client) {
         ESP_LOGE(TAG, "esp_mqtt_client_init failed — MQTT bridge disabled (degraded)");
-        s_configured = false;
+        s_configured.store(false);
         return false;
     }
     if (esp_mqtt_client_register_event(s_client, MQTT_EVENT_ANY, mqtt_event_handler, nullptr) != ESP_OK) {
         ESP_LOGE(TAG, "esp_mqtt_client_register_event failed — MQTT bridge disabled (degraded)");
-        esp_mqtt_client_destroy(s_client);
-        s_client     = nullptr;
-        s_configured = false;
+        mqtt_ha_cleanup_start_failure();
         return false;
     }
     if (esp_mqtt_client_start(s_client) != ESP_OK) {
         ESP_LOGE(TAG, "esp_mqtt_client_start failed — MQTT bridge disabled (degraded)");
-        esp_mqtt_client_destroy(s_client);
-        s_client     = nullptr;
-        s_configured = false;
+        mqtt_ha_cleanup_start_failure();
         return false;
     }
+    s_client_started = true;
     if (xTaskCreate(publisher_task, "mqtt_pub", 6144, nullptr, tk::kPrioMqttPub, nullptr) != pdPASS) {
         ESP_LOGE(TAG, "publisher task creation failed — MQTT bridge disabled (degraded)");
-        esp_mqtt_client_stop(s_client);
-        esp_mqtt_client_destroy(s_client);
-        s_client     = nullptr;
-        s_configured = false;
+        mqtt_ha_cleanup_start_failure();
         return false;
     }
 
+    // Release-publish the immutable topic/configuration strings only after the complete bridge
+    // is live. Concurrent HTTP readers see disabled defaults until this point.
+    s_configured.store(true);
     ESP_LOGI(TAG, "MQTT bridge started → %s (base topic %s, HA prefix %s)",
              s_broker_disp.c_str(), s_base.c_str(), s_prefix.c_str());
     return true;
+}
+
+bool mqtt_ha_start(VehicleController& vehicle, NvsStorageAdapter& config_store) {
+    try {
+        return mqtt_ha_start_impl(vehicle, config_store);
+    } catch (const std::exception& e) {
+        mqtt_ha_cleanup_start_failure();
+        ESP_LOGE(TAG, "MQTT initialization threw (%s); bridge disabled", e.what());
+    } catch (...) {
+        mqtt_ha_cleanup_start_failure();
+        ESP_LOGE(TAG, "MQTT initialization threw (unknown); bridge disabled");
+    }
+    return false;
 }
 
 bool mqtt_ha_configured() { return s_configured.load(); }
