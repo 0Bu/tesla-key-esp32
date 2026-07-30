@@ -845,7 +845,10 @@ protocol error (silently defaulting `set_scheduled_charging`'s `enable` would *d
 the schedule and report success); loose-but-unambiguous encodings are coerced (numeric
 strings for ints, 0/1 for bools); parsed integers are clamped to the spec bounds before
 the int cast (UB guard) — while REST generally stays lenient for TeslaBleHttpProxy compat
-(absent → the spec's `api_default`). The explicit safety exception is
+(absent → the spec's `api_default`). The registry also owns the one scalar-body
+compatibility exception: evcc serializes `charge_start` as JSON `true` and `charge_stop`
+as JSON `false`; only those matching command/value pairs are accepted, while other
+non-object bodies remain HTTP 400. The explicit safety exception is
 `set_charging_amps`: its registry row sets `api_required`, so missing/malformed input is HTTP
 400 rather than silently becoming 0 A; a fractional value is also rejected because the Tesla
 field is an integer amp limit. All REST command failures retain their compatible JSON result/reason

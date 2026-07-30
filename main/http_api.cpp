@@ -141,16 +141,28 @@ esp_err_t handle_command(GuardedReq rq) {
         return send_json(req, 404, make_response(false, cmd, vin, "unknown command"));
     }
 
-    // Parse the body once. Empty is valid for no-argument and legacy-optional commands;
-    // a declared body that could not be read, malformed JSON, or a non-object is never
-    // silently treated as an empty object.
+    // Parse the body once. Empty is valid for no-argument and legacy-optional commands.
+    // evcc's generic boolean setter sends the JSON scalar true for charge_start and false
+    // for charge_stop; the shared registry policy admits exactly those two compatibility
+    // forms while keeping every other non-object body invalid.
     char* body = read_body(req);
     if (!body && req->content_len > 0) {
         return send_json(req, 400, make_response(false, cmd, vin, "invalid request body"));
     }
     cJSON* json = body ? cJSON_Parse(body) : nullptr;
     free(body);
-    if (req->content_len > 0 && (!json || !cJSON_IsObject(json))) {
+    tk::RestBodyShape body_shape = tk::RestBodyShape::Empty;
+    if (req->content_len > 0) {
+        if (cJSON_IsObject(json)) {
+            body_shape = tk::RestBodyShape::Object;
+        } else if (cJSON_IsBool(json)) {
+            body_shape = cJSON_IsTrue(json) ? tk::RestBodyShape::BoolTrue
+                                           : tk::RestBodyShape::BoolFalse;
+        } else {
+            body_shape = tk::RestBodyShape::Other;
+        }
+    }
+    if (!tk::rest_body_allowed(info->kind, body_shape)) {
         cJSON_Delete(json);
         return send_json(req, 400, make_response(false, cmd, vin, "invalid JSON object"));
     }
