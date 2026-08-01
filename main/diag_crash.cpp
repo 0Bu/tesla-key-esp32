@@ -3,6 +3,8 @@
 // file is the ESP-IDF glue and the cache.
 #include "diag_crash.hpp"
 
+#include <sdkconfig.h>
+
 #include <esp_app_desc.h>
 #include <esp_core_dump.h>
 #include <esp_err.h>
@@ -76,6 +78,20 @@ void diag_crash_capture() {
             s_ci.task = sum->exc_task;
             s_ci.pc   = sum->exc_pc;
 
+            // THE BACKTRACE IS XTENSA-ONLY, and that is an IDF fact rather than a choice of ours.
+            // esp_core_dump_bt_info_t is declared per ARCHITECTURE: on Xtensa it carries an
+            // unwound PC array (bt/depth/corrupted), on RISC-V it carries a raw STACK DUMP
+            // instead, because RISC-V has no windowed registers and IDF cannot unwind on-device.
+            // Four of this project's five targets are RISC-V (c3/c6/c5), so getting this wrong is
+            // not an edge case — it is most of the fleet.
+            //
+            // On RISC-V the report is not empty, it is SHORTER: reason, task, PC and the app-ELF
+            // hash are all still captured, and the full stack is still in the dump that GET
+            // /coredump streams — where an offline decoder with the matching .elf can unwind it
+            // properly anyway. Publishing IDF's raw stack words as if they were a backtrace would
+            // be worse than publishing none: they are not return addresses, and a reader has no
+            // way to tell from /status which of the two they are holding.
+#if CONFIG_IDF_TARGET_ARCH_XTENSA
             uint32_t depth = sum->exc_bt_info.depth;
             if (depth > kCrashBacktraceMax) depth = kCrashBacktraceMax;
             s_ci.backtrace.clear();
@@ -83,6 +99,7 @@ void diag_crash_capture() {
             for (uint32_t i = 0; i < depth; i++) s_ci.backtrace.push_back(sum->exc_bt_info.bt[i]);
 
             s_ci.corrupted = sum->exc_bt_info.corrupted;
+#endif
 
             // app_elf_sha256 is a uint8_t[] holding a HEX STRING, not a C string and not raw
             // digest bytes — so it neither converts to std::string on its own nor should be
