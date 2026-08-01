@@ -104,8 +104,28 @@ inline constexpr DiagRedaction kDiagRedactions[] = {
     // http_api.cpp "CMD %s on VIN %s" — the marker starts AFTER the command name, so which
     // command ran survives. That half is the diagnostic content; the VIN is only routing.
     {" on VIN ", ""},
+    // http_server.cpp "REQ: %s %s" — the request LOG line, whose second value is the raw URI.
+    // Every evcc REST route embeds the VIN in its path (/api/1/vehicles/<VIN>/vehicle_data,
+    // /api/1/vehicles/<VIN>/command/<cmd>), and evcc polls on a loop, so on a device doing its
+    // job this is the single most FREQUENT line in the ring — measured at 31 of 286 lines on a
+    // board eleven minutes after boot. It was the one VIN sink not covered here, which made the
+    // whole `?redact=1` promise false for its primary user: the reader pastes a log they believe
+    // is scrubbed and it names their car dozens of times.
+    //
+    // The end token is "/", so only the path segment holding the VIN is replaced and the route
+    // that was called survives — which command or endpoint ran is the diagnostic content, the
+    // VIN is only addressing. A truncated line with no closing "/" fails closed to the end of
+    // the line, like every other rule here.
+    {"/api/1/vehicles/", "/"},
     // vehicle_ctrl.cpp "Tesla MAC saved: %s"
     {"Tesla MAC saved: ", ""},
+    // vehicle_ctrl.cpp "could not persist Tesla MAC %s — next boot rescans" — the SAME address on
+    // the failure branch of the very same write. A separate rule because the prefix differs, and
+    // that is the whole lesson: this table is keyed on log PHRASES, so a new phrase carrying an
+    // old value is a silent leak. The failure branch arrived with the [[nodiscard]] NVS work and
+    // no rule came with it. Rare (it needs an NVS write to fail) but the promise is all-or-nothing.
+    // A MAC has no spaces, so the end token can keep the explanatory tail.
+    {"could not persist Tesla MAC ", " — next boot"},
     // ble_client.cpp "Tesla '%s' found: %s — connecting". The FIRST value is the advert name,
     // which is derived from the VIN and is therefore as identifying as the VIN — it is not a
     // nickname. The second is the MAC. Two rules keep the "connecting" tail, which is what

@@ -58,25 +58,31 @@ The **cross-referenced facts** that must stay in sync (change one → check all 
 4. **NVS keys / namespaces.** A key added/renamed in `nvs_storage.cpp` / config code → the
    `## NVS Namespaces` table in CLAUDE.md and any doc that names it. Remember the **≤15-char**
    library-key mapping rule.
-5. **Config / Kconfig options & defaults.** A `CONFIG_*` or default changed in
+5. **Log lines carrying an IDENTIFIER.** A new/reworded `ESP_LOG*` that interpolates the VIN,
+   an SSID, the device IP, a BLE MAC, the MQTT broker or the syslog host → a matching rule in
+   `main/logic/redact.hpp`'s `kDiagRedactions` **and** a `CHECK` in `test_redact`. The table is
+   keyed on log PHRASES, so a new phrase carrying an old value leaks SILENTLY through
+   `/diag?redact=1`. It has happened twice: the `http_server.cpp` request log, and the failure
+   branch of the `ble_mac` write whose success branch was already covered.
+6. **Config / Kconfig options & defaults.** A `CONFIG_*` or default changed in
    `sdkconfig.defaults*`, `main/Kconfig.projbuild` → whatever doc quotes it (OTA/secure-boot
    block, security doc, README setup).
-6. **Partition layout / offsets / flash size.** A change in `partitions.csv` → the partition
+7. **Partition layout / offsets / flash size.** A change in `partitions.csv` → the partition
    paragraph in CLAUDE.md **and** `docs/ARCHITECTURE.md` (app offset `0x20000`, 4 MB sizing,
    per-target bootloader offset), and the OTA manifest description.
-7. **Version.** `version.txt` vs. any doc that pins a version, and the OTA/manifest narrative.
-8. **Platform / target strings.** `main/platform.hpp` (`TK_PLATFORM`) must agree with
+8. **Version.** `version.txt` vs. any doc that pins a version, and the OTA/manifest narrative.
+9. **Platform / target strings.** `main/platform.hpp` (`TK_PLATFORM`) must agree with
    `/api/proxy/1/version` output as documented, the HA device model, the esp-web-tools
    `chipFamily`, and the supported-target list (esp32 / s3 / c3 / c6) wherever it appears.
-9. **Library pin / patch set.** `main/idf_component.yml` `yoziru/tesla-ble` version vs. the pin
+10. **Library pin / patch set.** `main/idf_component.yml` `yoziru/tesla-ble` version vs. the pin
    quoted in CLAUDE.md's `## Key Dependency` and any doc that names it. A pin or dependency
    behavior change must also reconcile `patches/tesla-ble/`,
    `scripts/apply-tesla-ble-patches.sh` and root CMake.
-10. **Status / telemetry fields & MQTT entities.** A field added/removed in `/status` (`tele.*`)
+11. **Status / telemetry fields & MQTT entities.** A field added/removed in `/status` (`tele.*`)
    or an MQTT discovery entity → the `/status` field contract in `logic/status_model.hpp` **and**
    its golden emissions in `test/test_logic.cpp` (`test_status_model`), the telemetry/MQTT
    sections of `docs/ARCHITECTURE.md`, the summary in CLAUDE.md, and the web UI that renders it.
-11. **Architecture file map.** A file added/removed/renamed under `main/` → the file-map block
+12. **Architecture file map.** A file added/removed/renamed under `main/` → the file-map block
     in CLAUDE.md's `## Architecture` and the project map in the `project-review` skill.
 
 Also flag the reverse: a **doc-only** change in the diff that asserts a fact the code doesn't

@@ -1571,6 +1571,18 @@ static void test_crashinfo() {
     dismissed.dismissed = true;
     CHECK(!tk::crash_is_notable(dismissed));
 
+    // A dismissal must survive an erase that found NO coredump partition — the state of every
+    // OTA-upgraded device, since a partition table is not part of an OTA image. Confirmed live:
+    // before this, POST /crash/dismiss answered 500 with ESP_ERR_NOT_FOUND on such a board, so a
+    // fault-reset banner could never be acknowledged.
+    CHECK(tk::crash_erase_permits_dismiss(0));                     // ESP_OK — dump erased
+    CHECK(tk::crash_erase_permits_dismiss(tk::kEspErrNotFound));   // no partition — nothing to erase
+    // Every OTHER error still blocks: a dump may still be downloadable, and marking the report
+    // dismissed would assert the opposite.
+    CHECK(!tk::crash_erase_permits_dismiss(0x103));                // ESP_ERR_INVALID_STATE
+    CHECK(!tk::crash_erase_permits_dismiss(0x102));                // ESP_ERR_INVALID_ARG
+    CHECK(!tk::crash_erase_permits_dismiss(-1));
+
     // crash_has_summary is DERIVED, so it can never claim a summary the fields do not carry —
     // which would render an empty "task= pc=0x0" block reading like a crash with no information.
     CHECK(!tk::crash_has_summary(panic));
@@ -1798,6 +1810,42 @@ static void test_redact() {
     // supposed to make safe to share.
     const std::string plain = "I (1234) main: HEAP free=40000 largest_block=20000\n";
     CHECK(tk::redact_diag_line(plain) == plain);
+
+    // The REQUEST-LOG line (http_server.cpp "REQ: %s %s"). Every evcc REST route carries the VIN
+    // in its path and evcc polls on a loop, so on a working device this is the most FREQUENT VIN
+    // sink in the ring — measured at 31 of 286 lines on a live board eleven minutes after boot,
+    // and it was the one sink the table missed. The route must survive; only the VIN segment goes.
+    const std::string req = tk::redact_diag_line(
+        "I (34604) http_server: REQ: GET /api/1/vehicles/5YJ3E1EA7KF000316/vehicle_data?endpoints=charge_state\n");
+    CHECK(req.find("5YJ3E1EA7KF000316") == std::string::npos);
+    CHECK(req.find("/api/1/vehicles/")   != std::string::npos);
+    CHECK(req.find("/vehicle_data")      != std::string::npos);   // which endpoint ran is diagnostic
+    CHECK(req.back() == '\n');
+
+    // The command route has the same shape — which COMMAND ran must survive the same way.
+    const std::string cmd = tk::redact_diag_line(
+        "I (1) http_server: REQ: POST /api/1/vehicles/5YJ3E1EA7KF000316/command/charge_start\n");
+    CHECK(cmd.find("5YJ3E1EA7KF000316") == std::string::npos);
+    CHECK(cmd.find("/command/charge_start") != std::string::npos);
+
+    // Truncated mid-VIN (no closing '/') fails closed, like every other rule.
+    const std::string req_cut = tk::redact_diag_line(
+        "I (1) http_server: REQ: GET /api/1/vehicles/5YJ3E1EA7KF0003");
+    CHECK(req_cut.find("5YJ3E1EA7KF0003") == std::string::npos);
+
+    // The handler-threw line logs the SAME URI under a different prefix. It is covered for free,
+    // because the rule is keyed on the URI PATH rather than a log prefix — asserted, not assumed.
+    const std::string threw = tk::redact_diag_line(
+        "E (1) http_server: handler for /api/1/vehicles/5YJ3E1EA7KF000316/vehicle_data threw (x)\n");
+    CHECK(threw.find("5YJ3E1EA7KF000316") == std::string::npos);
+
+    // The FAILURE branch of the ble_mac write logs the same address as the success branch under a
+    // different phrase, and arrived without a rule. This table is keyed on log PHRASES, so a new
+    // phrase carrying an old value is a silent leak — that is the failure mode this CHECK pins.
+    const std::string mac_fail = tk::redact_diag_line(
+        "W (1) vehicle_ctrl: could not persist Tesla MAC aa:bb:cc:dd:ee:ff — next boot rescans\n");
+    CHECK(mac_fail.find("aa:bb:cc:dd:ee:ff") == std::string::npos);
+    CHECK(mac_fail.find("next boot rescans") != std::string::npos);   // the explanation survives
 
     CHECK(tk::kDiagRedactionCount > 0);
     CHECK(tk::kRedactedStatusFields == 6);

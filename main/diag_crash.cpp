@@ -31,6 +31,12 @@ static_assert(static_cast<int>(ResetCode::IntWdt)  == ESP_RST_INT_WDT,  "reset e
 static_assert(static_cast<int>(ResetCode::TaskWdt) == ESP_RST_TASK_WDT, "reset enum drift");
 static_assert(static_cast<int>(ResetCode::Brownout) == ESP_RST_BROWNOUT, "reset enum drift");
 
+// Same contract for the one esp_err_t logic/crashinfo.hpp has to know about: an erase that found
+// no coredump partition. Mirrored by value there to keep the header IDF-free; pinned to the real
+// macro here, so a renumbering breaks the build instead of silently turning every dismissal on an
+// OTA-upgraded device back into an HTTP 500.
+static_assert(kEspErrNotFound == ESP_ERR_NOT_FOUND, "ESP_ERR_NOT_FOUND drift");
+
 // Filled once by diag_crash_capture(); read-only afterwards EXCEPT the `dismissed` byte (see
 // diag_crash_dismiss for why that needs no lock).
 static CrashInfo s_ci;
@@ -174,18 +180,30 @@ void diag_crash_capture() {
 // other and both are self-consistent renderings of the same CrashInfo. No lock — and none of the
 // paths involved may take one anyway (an allocation under a mutex is the wedge rule in CLAUDE.md).
 bool diag_crash_dismiss() {
+    bool erased = false;
 #if defined(CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH)
-    esp_err_t err = esp_core_dump_image_erase();
-    if (err != ESP_OK) {
+    // The #if above is a COMPILE-time guard ("this build has no coredump support"). It does not
+    // cover the RUNTIME case that turns out to be the common one: a build that CAN write dumps
+    // running on a device whose installed partition table has no `coredump` partition, because a
+    // partition table is not part of an OTA image. There the erase returns ESP_ERR_NOT_FOUND, and
+    // treating that as a failure answered 500 to every dismissal on every OTA-upgraded board.
+    // crash_erase_permits_dismiss() draws that line, host-tested, and keeps every other error
+    // fatal — see logic/crashinfo.hpp.
+    const esp_err_t err = esp_core_dump_image_erase();
+    if (!crash_erase_permits_dismiss(static_cast<int>(err))) {
         ESP_LOGW(TAG, "dismiss failed — coredump erase: %s", esp_err_to_name(err));
         return false;
     }
+    erased = (err == ESP_OK);
+    if (!erased)
+        ESP_LOGI(TAG, "no coredump partition on this device — dismissing the reset report only");
 #endif
     // On a build with no dump there is nothing to erase, and dismissal still MEANS something: the
     // report it clears is the fault RESET, which is what /status.last_crash carries there. Failing
     // it would leave a crash banner that no action can dismiss.
     s_ci.dismissed = true;
-    ESP_LOGI(TAG, "crash report dismissed (reset=%s, dump erased)", reset_reason_slug(s_ci.reset_code));
+    ESP_LOGI(TAG, "crash report dismissed (reset=%s, dump %s)", reset_reason_slug(s_ci.reset_code),
+             erased ? "erased" : "none present");
     return true;
 }
 

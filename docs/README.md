@@ -256,7 +256,11 @@ GET  /coredump[?clear=1]   Stream the raw crash image (chunked octet-stream; 404
                              clear=1 erases the partition instead of streaming
 POST /crash/dismiss        Acknowledge and DELETE this boot's crash report (erase first, mark
                              second). POST, not GET: it destroys the one artifact a bug report
-                             needs, so no link or prefetch may reach it
+                             needs, so no link or prefetch may reach it. On a device with no
+                             `coredump` partition (every OTA-upgraded board — a partition table
+                             is not part of an OTA image) there is nothing to erase and the
+                             dismissal still succeeds, clearing the fault-reset report; any
+                             other erase error is a 500 and leaves the report standing
 GET  /heap                 { dt, b0, unit:"KiB", scale:10, free[], largest[] } — the board's
                              own 24 h memory trend in tenths of a KiB, oldest sample first,
                              null for a bucket with no sample. Answers what a spot value
