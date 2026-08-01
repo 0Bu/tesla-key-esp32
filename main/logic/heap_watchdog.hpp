@@ -56,7 +56,7 @@
 //
 // WHY *INTERNAL* largest_block. The caller must sample MALLOC_CAP_8BIT|MALLOC_CAP_INTERNAL, not
 // plain MALLOC_CAP_8BIT: the latter reports the max across every heap carrying the cap, and the
-// esp32c5 registers 8 MB of PSRAM there (CONFIG_SPIRAM_USE_MALLOC). A C5 in the exact wedge —
+// a board with PSRAM registers it there (CONFIG_SPIRAM_USE_MALLOC). Such a board in the exact wedge —
 // internal DRAM at 768 B — would read ~7.8 MB and never trigger, i.e. the watchdog would be a
 // silent no-op on the one target that has the extra RAM. The thresholds below are internal-DRAM
 // numbers and only mean anything against an internal-DRAM sample.
@@ -108,7 +108,7 @@ struct HeapWatchdog {
 
 struct HeapSample {
     // heap_caps_get_largest_free_block(MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL) — INTERNAL matters,
-    // see the header note: without it the esp32c5's PSRAM masks the exhaustion entirely.
+    // see the header note: without it a board's PSRAM masks the exhaustion entirely.
     size_t   largest_block;
     uint32_t now_ms;          // monotonic; wrap is handled
     bool     ota_busy;        // an OTA check/download is in flight

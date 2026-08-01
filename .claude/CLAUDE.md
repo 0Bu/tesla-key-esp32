@@ -2,13 +2,14 @@
 
 ESP-IDF 5.x project for the ESP32 family. Acts as a BLE↔HTTP proxy for Tesla vehicles,
 API-compatible with TeslaBleHttpProxy (works as evcc BLE vehicle integration). Builds for
-**five targets — esp32, esp32s3, esp32c3, esp32c6, esp32c5** — from ONE source tree; CI
-builds all five. The first four are exactly what yoziru/tesla-ble declares in its
-`idf_component.yml` `targets:` (the Component Manager refuses any other chip). **esp32c5**
-(LilyGO T-Dongle-C5, dual-band Wi-Fi 6) is NOT in that upstream list, so it is added by a
-local build-time target patch (`scripts/prepare-tesla-ble-c5.sh` clones the pinned tag and
-appends esp32c5 to its `targets:`; `main/idf_component.yml` routes only C5 through that copy).
-All five targets also receive the repository-owned tesla-ble anti-replay patch under
+**four targets — esp32, esp32s3, esp32c3, esp32c6** — from ONE source tree; CI
+builds all four. That is exactly what yoziru/tesla-ble declares in its
+`idf_component.yml` `targets:`, and the Component Manager ENFORCES it at dependency resolution —
+which is treated as the definition of "supported": adding a chip upstream omits (esp32c5,
+esp32c61) means upstreaming it there, not carrying a locally patched checkout of the crypto
+library. That was done for esp32c5 for a while and dropped
+([`docs/adr/0004-drop-esp32c5-target.md`](../docs/adr/0004-drop-esp32c5-target.md)).
+All four targets also receive the repository-owned tesla-ble anti-replay patch under
 `patches/tesla-ble/`, applied by root CMake after dependency resolution: upstream v5.1.1
 detects duplicate CarServer response counters but otherwise processes the replay. Our patch
 drops it before it can refresh a cache or complete the next FIFO command.
@@ -83,18 +84,16 @@ artifact (or OTA) and verify the device version. When waiting on CI, block on
 ```bash
 # Build (first run: set-target; afterwards plain `build` stays incremental).
 # The wrapper keeps build/ host-owned and pins the ESP-IDF version to CI.
-# Pick your chip; CI builds all five via scripts/ci-build-all.sh.
-# For esp32c5 first run `scripts/prepare-tesla-ble-c5.sh` once (clones + adds C5 to the local
-# tesla-ble copy); ci-build-all.sh does this automatically. The shared anti-replay patch is
-# applied automatically by CMake for every target.
-scripts/idf-docker.sh idf.py set-target esp32s3 build   # or esp32 / esp32c3 / esp32c6 / esp32c5
+# Pick your chip; CI builds all four via scripts/ci-build-all.sh.
+# The shared anti-replay patch is applied automatically by CMake for every target.
+scripts/idf-docker.sh idf.py set-target esp32s3 build   # or esp32 / esp32c3 / esp32c6
 
 # Configure WiFi, VIN (interactive; can also be set later via the setup AP)
 scripts/idf-docker.sh idf.py menuconfig   # → Tesla Key Configuration
 
 # Flash from the host (preserves nvs — @flash_args skips nvs@0x9000). Match --chip to
 # the target you built; @flash_args already carries the right bootloader offset.
-cd build && esptool --chip esp32s3 -p <port> write_flash "@flash_args"   # or esp32 / esp32c3 / esp32c6 / esp32c5
+cd build && esptool --chip esp32s3 -p <port> write_flash "@flash_args"   # or esp32 / esp32c3 / esp32c6
 ```
 
 ## Architecture
@@ -102,7 +101,7 @@ cd build && esptool --chip esp32s3 -p <port> write_flash "@flash_args"   # or es
 ```
 main.cpp               → WiFi init, NVS init, start all components
 patches/tesla-ble/     → reviewed patch on pinned dependency: reject replayed CarServer
-                         responses before callbacks/FIFO completion (all five targets)
+                         responses before callbacks/FIFO completion (all four targets)
 ble_client.cpp         → NimBLE GATT client (BleAdapter impl)
                          Scans for UUID 00000211-b2d1-43f0-9b88-960cebf8b91e
                          Write chr: 0212, Notify chr: 0213
@@ -157,7 +156,7 @@ syslog.cpp              → UDP Syslog forwarder (RFC 5424, best-effort) for the
                          yet) — main.cpp samples the boot values early but emits the `BOOT
                          reset_reason=` line as the first line past syslog_start
 provisioning.cpp       → captive setup portal (setup AP) when no WiFi is configured
-display.cpp            → on-device ST7735 status panel (LilyGo T-Dongle-C5 + T-Dongle-S3),
+display.cpp            → on-device ST7735 status panel (LilyGo T-Dongle-S3),
                          LANDSCAPE 160x80 (header WiFi bars+SSID | BT+BLE bars + a horizontal SoC
                          battery) OR PORTRAIT 80x160 (two-row header over a VERTICAL battery filling
                          bottom→top); both draw a red→green gradient / charging bolt / "ASLEEP", or a
@@ -166,16 +165,16 @@ display.cpp            → on-device ST7735 status panel (LilyGo T-Dongle-C5 + T
                          by the pure, host-tested presenter logic/display_model.hpp (an Orient axis
                          picks the SSID geometry) reading the shared logic/ui_state.hpp
                          (VehicleController::ui_snapshot()); this file is the thin renderer
-                         (draw_landscape / draw_portrait). Each BOOT tap (C5 IO28, S3 IO0) rotates
+                         (draw_landscape / draw_portrait). Each BOOT tap (S3 IO0) rotates
                          90° through the 4 orientations — landscape/portrait ± their 180° flips
                          (MADCTL {0xC8,0xA8,0x08,0x68}, same framebuffer, offsets swap 1/26↔26/1);
                          the index persists in NVS tesla_cfg/disp_rot (migrates the old disp_flip).
-                         Backlight active-LOW; SPI 20 MHz (C5) / 40 MHz (S3); framebuffer in PSRAM on
-                         the C5, internal SRAM on the S3. Compiles to a no-op unless
-                         CONFIG_TESLA_DISPLAY_ENABLED (sdkconfig.defaults.esp32c5 + .esp32s3); the ONE
+                         Backlight active-LOW; SPI 40 MHz; framebuffer in PSRAM where present, else
+                         ~25 KB internal SRAM. Compiles to a no-op unless
+                         CONFIG_TESLA_DISPLAY_ENABLED (sdkconfig.defaults.esp32s3); the ONE
                          esp32s3 image auto-detects the T-Dongle-S3 (SD pull-ups) so a generic
                          ESP32-S3 stays panel-less. Font from tools/display_sim.py → main/display_font.h
-led_status.cpp         → on-device status LED: the single underside APA102 pixel (T-Dongle-C5/S3)
+led_status.cpp         → on-device status LED: the single underside APA102 pixel (T-Dongle-S3)
                          as a colour+animation indicator (WiFi/BLE search, pairing, charging, SoC,
                          OTA, warn/error). Reads the SAME shared logic/ui_state.hpp the display does
                          (one input contract) + a tiny LedAlerts for its latched tiers; ladder +
@@ -197,7 +196,7 @@ Never edit files in `managed_components/` — they are regenerated.
 
 | Namespace   | Content                                     |
 |-------------|---------------------------------------------|
-| `tesla_cfg` | WiFi SSID/pass, VIN, BLE MAC, `mqtt_uri`, `syslog_uri`, `last_time`, `reboot_why` (why WE ended the last boot — `heap:<n>` = the heap watchdog, n = consecutive such restarts; read+cleared at boot, surfaced once as `/status.last_reboot`), `disp_rot` (on-device display BOOT-rotation index 0..3; C5/S3; migrates old `disp_flip`) (runtime cfg) |
+| `tesla_cfg` | WiFi SSID/pass, VIN, BLE MAC, `mqtt_uri`, `syslog_uri`, `last_time`, `reboot_why` (why WE ended the last boot — `heap:<n>` = the heap watchdog, n = consecutive such restarts; read+cleared at boot, surfaced once as `/status.last_reboot`), `disp_rot` (on-device display BOOT-rotation index 0..3; T-Dongle-S3; migrates old `disp_flip`) (runtime cfg) |
 | `tesla_ble` | Private key (`private_key`), VCSEC session (`sess_vcsec`), Info session (`sess_info`), `key_created`, `paired_at` — the `sess_*` names come from the ≤15-char key mapping in `nvs_storage.cpp`. The `sess_*` blobs are only REUSABLE across a reboot if the wall clock is restored **before** `VehicleController::init()` (tesla-ble rejects a session older than 1 h and computes the age against `time(nullptr)`, which underflows at 1970) — hence `restore_clock_from_nvs()` early in `main.cpp`, see docs/ARCHITECTURE.md |
 
 ## Commands Implemented
@@ -244,7 +243,7 @@ POST /set_time                                 # set wall clock from the browser
 POST /set_vin                                  # persist VIN + reboot
 POST /set_mqtt                                 # persist MQTT broker (HA bridge) + reboot ({"broker":"host:port"}; "" disables)
 POST /set_syslog                               # persist Syslog server + reboot ({"server":"host:port"}; "" disables)
-GET  /api/proxy/1/version                      # {version, platform: running chip — "ESP32"/"ESP32-S3"/"ESP32-C3"/"ESP32-C6"/"ESP32-C5"}
+GET  /api/proxy/1/version                      # {version, platform: running chip — "ESP32"/"ESP32-S3"/"ESP32-C3"/"ESP32-C6"}
 GET  /ota/check[?ms=<epoch>]                   # start background manifest check (non-blocking); poll /ota/status. ms = browser-clock NTP fallback
 POST /ota/update                               # start background self-update (pull, then reboot)
 GET  /ota/status                               # poll OTA progress {state,progress,message,available,update_available,current}
@@ -256,7 +255,7 @@ No HTTP auth / TLS by design (evcc cannot send credentials) — trusted LAN only
 
 Pull-based: the device fetches `manifest.json` from `CONFIG_TESLA_OTA_MANIFEST_URL` (default
 GitHub Pages), compares `version` to the running firmware, and on confirmation downloads its
-per-target image `tesla-key-esp32<suffix>.bin` (`""`/`-s3`/`-c3`/`-c6`/`-c5`) via `esp_https_ota`
+per-target image `tesla-key-esp32<suffix>.bin` (`""`/`-s3`/`-c3`/`-c6`) via `esp_https_ota`
 into the inactive slot, then reboots. `esp_https_ota` verifies the chip-id (wrong-target image
 refused). **Downgrade gate:** before the bulk download `ota_task` reads the image's own version
 (`esp_https_ota_get_img_desc`) and refuses anything not strictly newer than the running firmware
@@ -278,13 +277,16 @@ unsigned/differently-signed OTAs. Classic esp32 needs chip rev v3.0+ (`CONFIG_ES
 in `sdkconfig.defaults.esp32`). **Key lifecycle/rotation: [`docs/SECURITY.md`](../docs/SECURITY.md).**
 
 Partition layout (`partitions.csv`) is dual-OTA (`otadata` + `ota_0`/`ota_1`, ~2 MB each),
-sized to fill **4 MB** (smallest supported flash — the T-Dongle-C5's 16 MB just leaves the top
+sized to fill **4 MB** (smallest supported flash; a larger one just leaves the top
 unused) so ONE table serves every target; **app at `0x20000`**. Per-target **bootloader offset**
-is handled by `@flash_args` and the manifest — 0x1000 on the classic esp32, **0x2000 on esp32c5**
-(its newer flash layout), 0x0 on s3/c3/c6. The `ci-build-all.sh` size gate sits at `slot − 32 KB`
-(0x1e8000, below the 0x1f0000 = 2031616 B slot). **esp32c5 carries the on-device display + PSRAM**
-(**the largest image** — it alone has display+PSRAM; signed ~0x1e1000, ≈28 KB under the gate) and **esp32s3 carries the display code too**
-(no PSRAM), but both stay on the base **`-Og`** like every target: the Package A size levers (#154)
+is handled by `@flash_args` and the manifest — 0x1000 on the classic esp32, 0x0 on s3/c3/c6.
+The `ci-build-all.sh` size gate sits at `slot − 32 KB`
+(0x1e8000, below the 0x1f0000 = 2031616 B slot); it is checked on the **signed** image, whose code
+is first padded up to a 64 KB Secure-Boot boundary before a 4 KB signature sector is appended — so
+crossing a boundary costs a full 64 KB block, which is what made esp32c5 undeliverable
+([ADR-0004](../docs/adr/0004-drop-esp32c5-target.md)). **esp32c6 is the largest image**
+(signed 0x1d1000, ≈92 KB under the gate); **esp32s3 carries the display code** and sits at
+0x191000. All stay on the base **`-Og`**: the Package A size levers (#154)
 freed the ~64 KB the display needs, so no `-Os`
 is required. (`-Os` is banned here — whole-build `-Os` hard-freezes under evcc+BLE load, rejected
 Package B.) **Migration + multi-target image details:
@@ -374,8 +376,8 @@ and never connects/enrols. **Full detail: [`docs/ARCHITECTURE.md`](../docs/ARCHI
   hangs the device on a permanent one.** A wedge (2026-07-18: `bad_alloc` out of `loop()` every
   50 ms for ten hours, HTTP/MQTT/BLE all dead, no reboot) is worse than a crash, because a crash
   at least restarts. The one escalation is `logic/heap_watchdog.hpp`, sampled by `loop_task`:
-  **INTERNAL** `largest_block` (`8BIT|INTERNAL` — plain `8BIT` includes the C5's 8 MB PSRAM and
-  would make it a silent no-op there) under **4 KB continuously for 5 min** (never a single
+  **INTERNAL** `largest_block` (`8BIT|INTERNAL` — plain `8BIT` would include any PSRAM and
+  make it a silent no-op there) under **4 KB continuously for 5 min** (never a single
   `bad_alloc`; excused while an OTA holds its TLS buffers) ⇒ log loudly, persist
   `reboot_why=heap:<n>` to NVS, restart. Capped at **5 consecutive** restarts, and such a boot
   does NOT seed the active polling window (else a loop keeps a parked car awake). The next boot
@@ -398,5 +400,5 @@ curl -X POST http://<ESP32-IP>/api/1/vehicles/<VIN>/command/wake_up
 curl http://<ESP32-IP>/api/1/vehicles/<VIN>/vehicle_data
 
 # Erase NVS (reset key + sessions) — host esptool
-esptool --chip esp32s3 -p <port> erase_flash   # or esp32 / esp32c3 / esp32c6 / esp32c5
+esptool --chip esp32s3 -p <port> erase_flash   # or esp32 / esp32c3 / esp32c6
 ```

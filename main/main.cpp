@@ -205,19 +205,6 @@ static bool wifi_connect(const char* ssid, const char* password) {
     wifi_cfg.sta.scan_method = WIFI_ALL_CHANNEL_SCAN;
     wifi_cfg.sta.sort_method = WIFI_CONNECT_AP_BY_SIGNAL;
 
-#ifdef CONFIG_TESLA_WIFI_PREFER_5G
-    // ESP32-C5 (dual-band Wi-Fi 6) opt-in: when the SSID is band-steered onto both bands,
-    // give 5 GHz APs an RSSI bonus so the BY_SIGNAL sort above prefers 5 GHz. WiFi and BLE
-    // still share ONE RF path on the C5 (time-division coexistence — see the PS_MIN_MODEM note
-    // below; 5 GHz does NOT remove that airtime contention), but keeping OUR WiFi off 2.4 GHz
-    // frees the band BLE lives on. Band mode stays AUTO (default), so a device out of 5 GHz
-    // range still connects on 2.4 GHz — no reconnect trap. Gated behind CONFIG_TESLA_WIFI_PREFER_5G
-    // (Kconfig depends on SOC_WIFI_SUPPORT_5G → the field + this block exist only on the C5).
-    // 10 dB: prefer 5 GHz unless it is more than ~10 dB weaker than the 2.4 GHz AP.
-    wifi_cfg.sta.threshold.rssi_5g_adjustment = 10;
-    ESP_LOGI(TAG, "5 GHz WiFi preference enabled (rssi_5g_adjustment=10 dB)");
-#endif
-
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_cfg));
     ESP_ERROR_CHECK(esp_wifi_start());
@@ -679,7 +666,7 @@ extern "C" void app_main() {
         ESP_LOGW(TAG, "MQTT bridge is degraded/disabled (see the error above)");
     log_heap("mqtt");
 
-    // On-device status display (LilyGo T-Dongle-C5 / T-Dongle-S3). No-op unless the board
+    // On-device status display (LilyGo T-Dongle-S3). No-op unless the board
     // build selects CONFIG_TESLA_DISPLAY_ENABLED — and on esp32s3 also a no-op unless the
     // T-Dongle-S3 is auto-detected (a generic ESP32-S3 has no panel). Reads only cached
     // state (never wakes the car) in its own task, so it can't queue behind a BLE poll.
