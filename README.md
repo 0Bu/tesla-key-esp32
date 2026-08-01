@@ -11,7 +11,7 @@ Build from source, full API and security model: [docs/README.md](docs/README.md)
 
 ## Requirements
 
-- An ESP32 board: esp32, esp32s3, esp32c3, esp32c6 or esp32c5
+- An ESP32 board: esp32, esp32s3, esp32c3 or esp32c6
 - A browser with Web Serial support
 - The Tesla's 17-character VIN
 

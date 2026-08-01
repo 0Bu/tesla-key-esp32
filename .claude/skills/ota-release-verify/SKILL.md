@@ -60,10 +60,9 @@ Per-target image **suffix** (must agree across three places —
 | esp32s3 | `-s3` | `ESP32-S3` | 0                |
 | esp32c3 | `-c3` | `ESP32-C3` | 0                |
 | esp32c6 | `-c6` | `ESP32-C6` | 0                |
-| esp32c5 | `-c5` | `ESP32-C5` | 8192 (`0x2000`)  |
 
 `manifest.json` is written by [`scripts/build-pages.sh`](../../../scripts/build-pages.sh):
-`{name:"tesla-key-esp32", version, new_install_prompt_erase:true, builds:[…]}` — **five** builds,
+`{name:"tesla-key-esp32", version, new_install_prompt_erase:true, builds:[…]}` — **four** builds,
 one per chipFamily. Each `build.parts` is exactly three parts:
 `[ {bootloader-<t>.bin, offset per-target}, {partition-table-<t>.bin, offset 32768}, {tesla-key-esp32<sfx>.bin, offset 131072} ]`.
 (`131072 = 0x20000` = the app slot; `32768 = 0x8000` = partition table.)
@@ -118,13 +117,12 @@ jq -e --arg v "$REL" '.version == $v' /tmp/manifest.json \
 # b) exactly 5 builds, one per chipFamily (set match)
 jq -e '.builds | length == 5' /tmp/manifest.json && echo "5 builds OK"
 jq -r '[.builds[].chipFamily] | sort | @csv' /tmp/manifest.json
-#   expect: "ESP32","ESP32-C3","ESP32-C5","ESP32-C6","ESP32-S3"
+#   expect: "ESP32","ESP32-C3","ESP32-C6","ESP32-S3"
 
 # c) parts offsets per build — bootloader per-target, partition-table 32768, app 131072
 jq -r '.builds[] | .chipFamily + ": " + ([.parts[] | "\(.path)@\(.offset)"] | join("  "))' \
   /tmp/manifest.json
 #   ESP32:    bootloader-esp32.bin@4096      partition-table-esp32.bin@32768   tesla-key-esp32.bin@131072
-#   ESP32-C5: bootloader-esp32c5.bin@8192    partition-table-esp32c5.bin@32768 tesla-key-esp32-c5.bin@131072
 #   S3/C3/C6: bootloader-<t>.bin@0           partition-table-<t>.bin@32768     tesla-key-esp32<sfx>.bin@131072
 ```
 
@@ -138,7 +136,7 @@ migration break — a device would fail with `"could not start download"`.
 
 ```bash
 BASE=https://0bu.github.io/tesla-key-esp32
-for sfx in "" -s3 -c3 -c6 -c5; do
+for sfx in "" -s3 -c3 -c6; do
   code=$(curl -s -o /dev/null -w '%{http_code}' -I "$BASE/tesla-key-esp32$sfx.bin")
   printf 'tesla-key-esp32%s.bin -> HTTP %s\n' "$sfx" "$code"
 done
@@ -153,8 +151,8 @@ Only with the user's OK and a device on the trusted LAN (no auth). `IP` = the bo
 ```bash
 IP=tesla-key-esp32.local
 # running version + chip. proxy .version carries the fixed "-esp32" suffix for ALL targets;
-# the real chip is in .platform (ESP32/ESP32-S3/ESP32-C3/ESP32-C6/ESP32-C5).
-curl -s "http://$IP/api/proxy/1/version"           # {"version":"X.Y.Z-esp32","platform":"ESP32-C5"}
+# the real chip is in .platform (ESP32/ESP32-S3/ESP32-C3/ESP32-C6).
+curl -s "http://$IP/api/proxy/1/version"           # {"version":"X.Y.Z-esp32","platform":"ESP32-S3"}
 curl -s "http://$IP/status" | jq -r .version       # X.Y.Z  (no "-esp32"; must match the release)
 
 # non-blocking manifest check → poll status (ms = browser-clock NTP fallback for TLS)

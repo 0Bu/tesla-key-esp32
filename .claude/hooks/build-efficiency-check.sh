@@ -45,7 +45,7 @@ DUR_REGRESSION_MIN_S=120     # … and at least this many seconds slower ⇒ reg
 TOTAL_RUN_BUDGET_S=1500      # soft budget for the whole workflow (25 min)
 SIZE_GATE=$((0x1e8000))      # hard gate in ci-build-all.sh (1998848 B = slot 0x1f0000 − 32 KB)
 SIZE_WARN=$((0x1d8000))      # proactive warn band ~64 KB below the gate. The largest signed image
-                             # (esp32c5, ~0x1e1000) now sits inside this band — headroom is tight
+                             # (esp32c6, 0x1d1000) sits ~92 KB under the gate
                              # (~28 KB to the gate), so a growing feature must re-measure and shrink
 
 # Portable ISO-8601 → epoch (GNU date, then BSD/macOS date). Echoes "" on failure.

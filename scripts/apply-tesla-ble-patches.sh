@@ -2,7 +2,7 @@
 # Apply the repository-owned correctness patches to the pinned yoziru/tesla-ble
 # dependency after ESP-IDF has materialised it. The Component Manager regenerates
 # managed_components/, so the patch itself is committed while the patched checkout
-# remains ignored. ESP32-C5 resolves the same pinned source via third_party/.
+# remains ignored.
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -15,8 +15,7 @@ patch_file="$repo_root/patches/tesla-ble/0001-reject-replayed-carserver-response
 
 found=0
 for component in \
-  "$repo_root/managed_components/yoziru__tesla-ble" \
-  "$repo_root/third_party/tesla-ble"
+  "$repo_root/managed_components/yoziru__tesla-ble"
 do
   [ -f "$component/src/vehicle.cpp" ] || continue
   found=1

@@ -6,7 +6,7 @@ description: Render the on-device ST7735 display simulator to PNG state montages
 # display-preview — render the display simulator for a human eyeball pass
 
 [`tools/display_sim.py`](../../../tools/display_sim.py) is the layout **simulator** and the 5x7
-**font source of truth** for the on-device ST7735 panel (LilyGo T-Dongle-C5 + T-Dongle-S3). Its
+**font source of truth** for the on-device ST7735 panel (LilyGo T-Dongle-S3). Its
 `compose()` / `compose_portrait()` draw the screen pixel-for-pixel the way the firmware's
 `draw_landscape()` / `draw_portrait()` do in [`main/display.cpp`](../../../main/display.cpp),
 reading the same "what to show" decision from the pure presenter
@@ -98,9 +98,9 @@ trusting the PNGs, because they're then rendering a decision the device won't ma
 ## Notes
 
 - The display code only compiles in under `CONFIG_TESLA_DISPLAY_ENABLED`
-  (`sdkconfig.defaults.esp32c5` + `.esp32s3`); the sim renders the same layout with no build at all.
+  (`sdkconfig.defaults.esp32s3`); the sim renders the same layout with no build at all.
 - The presenter is **cache-only** (never wakes the car), so nothing here touches the vehicle — it's
   pure layout math over a `UiSnapshot`.
-- To see the rendered frames on an actual panel instead, build + flash a C5/S3 board with the
+- To see the rendered frames on an actual panel instead, build + flash a T-Dongle-S3 with the
   [`../flash-esp32/SKILL.md`](../flash-esp32/SKILL.md) skill (each BOOT tap rotates 90° through the
   four orientations).

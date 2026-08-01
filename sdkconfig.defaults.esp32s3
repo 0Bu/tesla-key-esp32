@@ -9,10 +9,9 @@
 # NO PSRAM here on purpose. A generic ESP32-S3 may have none, and the T-Dongle-S3's
 # framebuffer fits in ~25 KB of internal SRAM (allocated once at boot, before WiFi/BLE
 # fragment the heap — the proven pre-#98 path). Keeping SPIRAM off means a generic S3 boots
-# byte-for-byte as before; the display code only ever runs on a detected dongle. (The C5, by
-# contrast, has in-package PSRAM and enables it in sdkconfig.defaults.esp32c5.)
+# byte-for-byte as before; the display code only ever runs on a detected dongle.
 
-# Compile in the onboard ST7735 status display. Pins override the C5 defaults in
+# Compile in the onboard ST7735 status display. Pins override the generic defaults in
 # main/Kconfig.projbuild with the T-Dongle-S3 wiring: MOSI3 / SCK5 / CS4 / DC2 / RST1 / BL38.
 CONFIG_TESLA_DISPLAY_ENABLED=y
 CONFIG_TESLA_DISPLAY_SPI_MOSI=3

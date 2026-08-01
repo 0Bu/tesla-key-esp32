@@ -70,8 +70,8 @@ curl -s http://<host>/api/proxy/1/version   # {"version":"<X>-esp32","platform":
 ```
 
 `/api/proxy/1/version` (see [`main/http_api.cpp`](../../../main/http_api.cpp)) reports
-`version` with a **fixed `-esp32` suffix on all five targets**; the actual chip is the separate
-`platform` field (`ESP32` / `ESP32-S3` / `ESP32-C3` / `ESP32-C6` / `ESP32-C5`). Its `version`
+`version` with a **fixed `-esp32` suffix on all four targets**; the actual chip is the separate
+`platform` field (`ESP32` / `ESP32-S3` / `ESP32-C3` / `ESP32-C6`). Its `version`
 (minus the suffix) must equal `/status.version`.
 
 ### Reading `link` (the four-state machine)
@@ -131,9 +131,9 @@ only copy that survives a reboot — the `/diag` ring does not). Three log lines
   min=<n>` — where WiFi/HTTP/MQTT each spent their contiguous block.
 - Periodic ~30 s ([`main/vehicle_telemetry.cpp`](../../../main/vehicle_telemetry.cpp)
   `loop_task_fn_`): `HEAP free=<n> largest_block=<n> min_free=<n> internal_largest=<n>` — the
-  **trend** line, and the one the heap watchdog decides on. On the **esp32c5 read
-  `internal_largest`, not `largest_block`**: the latter is the plain `MALLOC_CAP_8BIT` figure,
-  which includes the C5's 8 MB PSRAM and can read ~7.8 MB while internal DRAM is at 768 B. The
+  **trend** line, and the one the heap watchdog decides on. Read `internal_largest`, not
+  `largest_block`: the latter is the plain `MALLOC_CAP_8BIT` figure, which on any board that
+  registers PSRAM into that cap can read megabytes while internal DRAM is at 768 B. The
   watchdog restarts when `internal_largest` stays under 4 KB for 5 unbroken minutes.
 
 The watchdog also **narrates its own escalation**, so a restart can be reconstructed from syslog

@@ -30,7 +30,7 @@ code / config / script / doc:
   timeout/debounce constant, a version or library pin;
 - a **removed or renamed** thing — an endpoint, command, MCP tool, NVS key, Kconfig option,
   file path, script name, function;
-- a **stale set** — the target list (esp32/s3/c3/c6/c5), the OTA `<suffix>` map, the enrolled role;
+- a **stale set** — the target list (esp32/s3/c3/c6), the OTA `<suffix>` map, the enrolled role;
 - a **broken pointer** — a skill that documents a script/hook whose behaviour no longer matches
   the file that actually runs, or an agent boundary that points at a skill that changed.
 
@@ -154,7 +154,7 @@ the authority for the per-sibling drift check; `project-review` defers the mecha
   Verify the partition map against `partitions.csv` (app `@0x20000`, `otadata@0xf000/0x2000` erased,
   `nvs@0x9000/0x6000` never touched, `ota_1@0x210000`), per-target bootloader offset, the
   signed-image requirement (`CONFIG_SECURE_BOOT_BUILD_SIGNED_BINARIES=n`), the `-merged.bin`
-  NVS-wipe warning, and the C5 no-auto-reset / `--before no-reset` / ROM-node gotchas.
+  NVS-wipe warning, and the no-auto-reset / `--before no-reset` / ROM-node gotchas.
 
 **Agents** (`.claude/agents/`) — audit these the same way; two duplicate content `project-review`
 owns and must stay in sync with it:
@@ -168,11 +168,11 @@ owns and must stay in sync with it:
   boundary still defers firmware correctness to `project-review`, and that the hook/skill/agent
   inventory it reasons over matches what lives under `.claude/` (`ls .claude/hooks/ .claude/agents/`).
 - **`multi-target-build-reviewer`** — the per-target build/config divergence lens. Verify its
-  facts against the build wiring: the target set (esp32/s3/c3/c6/c5), per-target bootloader
+  facts against the build wiring: the target set (esp32/s3/c3/c6), per-target bootloader
   offsets (`0x1000`/`0x2000`/`0x0`), the image-suffix map across `scripts/ci-build-all.sh` +
   `scripts/build-pages.sh` + `main/ota_update.cpp` (`TESLA_OTA_IMG_SUFFIX`), the app-size gate
-  (`slot − 32 KB` = `0x1e8000`), the esp32c5 target routing
-  (`scripts/prepare-tesla-ble-c5.sh` + `main/idf_component.yml`), the all-target anti-replay
+  (`slot − 32 KB` = `0x1e8000`), the tesla-ble target list
+  (`main/idf_component.yml`, Component-Manager-enforced), the all-target anti-replay
   patch wiring (`patches/tesla-ble/` + `scripts/apply-tesla-ble-patches.sh` + root CMake), and
   the display/LED opt-in Kconfig. Complementary to
   `project-review`, not a firmware-logic reviewer.

@@ -2,7 +2,7 @@
 
 class VehicleController;
 
-// ─── On-device status display (LilyGo T-Dongle-C5 / T-Dongle-S3, ST7735 80x160) ──
+// ─── On-device status display (LilyGo T-Dongle-S3, ST7735 80x160) ────────────────
 // Renders the charge/connection state directly on the panel. The BOOT button rotates the panel
 // 90° per press through 4 orientations — LANDSCAPE (160x80) and PORTRAIT (80x160), each plus its
 // 180° flip — persisted in NVS (tesla_cfg/disp_rot). Landscape lays the header across the top and
@@ -29,13 +29,12 @@ class VehicleController;
 //     ble_*/link_state accessors — it NEVER triggers a BLE round-trip, so it can
 //     never wake the car or queue behind a poll in the single BLE FIFO.
 //   • Independent of MQTT — needs no live MQTT session.
-//   • Framebuffer lives in PSRAM where present (the T-Dongle-C5's 8 MB), so it costs
-//     no internal SRAM; only a one-line bounce buffer is internal/DMA. The T-Dongle-S3
-//     build (no PSRAM) uses ~25 KB internal SRAM, allocated once at boot. On the C5, if
-//     PSRAM is unavailable the display disables itself rather than steal that board's
-//     scarce contiguous internal SRAM.
+//   • Framebuffer: PSRAM where present, else ~25 KB of internal SRAM allocated once at
+//     boot, before WiFi/BLE fragment the heap. The shipped esp32s3 build enables no PSRAM
+//     (a generic ESP32-S3 may have none), so in practice the internal path is what runs;
+//     only a one-line bounce buffer is internal/DMA either way.
 //
-// Compiled only when CONFIG_TESLA_DISPLAY_ENABLED (set for esp32c5 AND esp32s3 in their
+// Compiled only when CONFIG_TESLA_DISPLAY_ENABLED (set for esp32s3 in its
 // sdkconfig.defaults.*); a no-op stub on the other targets, so one source tree serves every
 // board. The per-board pins come from Kconfig; the wiring is applied in display_start(),
 // which on esp32s3 first auto-detects the T-Dongle-S3 (a generic ESP32-S3 stays a no-op).

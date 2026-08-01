@@ -52,7 +52,7 @@ Main-build artifact is named `tesla-key-esp32-<version>` (PR builds: `tesla-key-
 gh run download "$run_id" --dir dist    # single artifact → dist/tesla-key-esp32*.bin
 ```
 
-Per target use `tesla-key-esp32<sfx>.bin` — suffix `""` (esp32) / `-s3` / `-c3` / `-c6` / `-c5`.
+Per target use `tesla-key-esp32<sfx>.bin` — suffix `""` (esp32) / `-s3` / `-c3` / `-c6`.
 **Never flash `tesla-key-esp32<sfx>-<version>-merged.bin`** — the merged image rewrites the
 whole flash including `nvs@0x9000` and wipes pairing/WiFi/VIN.
 
@@ -67,7 +67,7 @@ esptool --chip <target> -p <port> write_flash 0x20000 dist/tesla-key-esp32<sfx>.
 ```
 
 `nvs@0x9000` is untouched → pairing/key/VIN/WiFi survive. Download-mode gotcha: the
-T-Dongle-C5 needs BOOT held + `--before no-reset`. Port autodetect: see the
+A board with no auto-reset needs BOOT held + `--before no-reset`. Port autodetect: see the
 **flash-esp32** skill — same host mechanics.
 
 ### No cable? OTA instead
