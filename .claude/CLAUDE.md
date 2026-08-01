@@ -162,8 +162,11 @@ safe_mode.cpp          → boot-loop safe mode (logic/boot_guard.hpp): counts CR
                          chose; a PANIC loop was entirely uncounted before this. Sharper here than
                          elsewhere: every boot re-opens the car's polling window, so a reboot loop
                          drains a parked traction battery. A clean/intentional reboot resets the
-                         count, and a boot that stays up kBootHealthyS clears it. Drives
-                         /status.sys.safe_mode
+                         count, and a NON-safe-mode boot that stays up kBootHealthyS clears it — the
+                         healthy timer is deliberately NOT armed while safe mode is latched, since
+                         surviving the window with the crashing subsystems switched off says nothing
+                         about the fault (arming it there would give a 4-crashes-then-one-quiet-boot
+                         cycle, not a latch). Drives /status.sys.safe_mode
 heap_trend.cpp         → storage + mutex for the board's own 24-hour memory trend (GET /heap), fed
                          from the SAME two samples loop_task hands the heap watchdog, so the chart a
                          human reads and the threshold the firmware acts on cannot disagree. Fixed
@@ -451,7 +454,9 @@ catalog: [`docs/FEATURES.md`](../docs/FEATURES.md).
   cadence but the vehicle mutex (20 s for a command, 30 s for `pair()`).
 - **Safe mode** (`logic/boot_guard.hpp`, `safe_mode.cpp`) — 4 consecutive CRASH boots ⇒ WiFi + web UI
   + OTA only. The heap watchdog's cap counts only restarts WE chose; a panic loop was uncounted
-  before this, and on this device every boot re-opens the car's polling window.
+  before this, and on this device every boot re-opens the car's polling window. It LATCHES: only a
+  non-fault reset (an OTA install, a `/set_*` save, a power-cycle) clears the counter, so it ends
+  when someone acts on it.
 - **Crash capture** (`diag_crash.cpp`, `logic/crashinfo.hpp`) — reset reason always; the core-dump
   summary where the partition exists. Surfaced on `/status.last_crash`, over MQTT, and replayed to
   syslog once per boot (`logic/bootlog.hpp`) because `/diag` is RAM and does not survive the reboot
