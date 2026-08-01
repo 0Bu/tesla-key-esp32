@@ -146,7 +146,7 @@ bool diag_crash_dismiss() {
         return false;
     }
     s_ci.dismissed = true;
-    ESP_LOGI(TAG, "crash report dismissed (reset=%s, dump erased)", crash_reason_slug(s_ci.reset_code));
+    ESP_LOGI(TAG, "crash report dismissed (reset=%s, dump erased)", reset_reason_slug(s_ci.reset_code));
     return true;
 }
 
