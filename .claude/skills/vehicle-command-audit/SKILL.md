@@ -142,7 +142,7 @@ re-confirm it against the *current* tree and catch anything that drifted since. 
 9a. **Response-counter anti-replay** — upstream `yoziru/tesla-ble` v5.1.1 logs a failed
     `validate_response_counter()` but continues dispatch. Verify the repository patch under
     `patches/tesla-ble/` still returns before state callbacks and FIFO completion, applies to
-    both managed and C5-local dependency trees, and is rebased explicitly on every pin bump.
+    the managed dependency tree, and is rebased explicitly on every pin bump.
 10. **Docs internal coherence vs code** — `/status.link` and MQTT `sleep_status` enum value sets,
     endpoint/CONFIG/partition/version drift across the four docs. *Baseline: a few enum-set
     omissions — see worked examples.*

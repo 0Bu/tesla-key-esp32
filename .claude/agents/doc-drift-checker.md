@@ -67,11 +67,11 @@ The **cross-referenced facts** that must stay in sync (change one → check all 
 7. **Version.** `version.txt` vs. any doc that pins a version, and the OTA/manifest narrative.
 8. **Platform / target strings.** `main/platform.hpp` (`TK_PLATFORM`) must agree with
    `/api/proxy/1/version` output as documented, the HA device model, the esp-web-tools
-   `chipFamily`, and the supported-target list (esp32 / s3 / c3 / c6 / c5) wherever it appears.
+   `chipFamily`, and the supported-target list (esp32 / s3 / c3 / c6) wherever it appears.
 9. **Library pin / patch set.** `main/idf_component.yml` `yoziru/tesla-ble` version vs. the pin
    quoted in CLAUDE.md's `## Key Dependency` and any doc that names it. A pin or dependency
    behavior change must also reconcile `patches/tesla-ble/`,
-   `scripts/apply-tesla-ble-patches.sh`, root CMake, and the C5-local source path.
+   `scripts/apply-tesla-ble-patches.sh` and root CMake.
 10. **Status / telemetry fields & MQTT entities.** A field added/removed in `/status` (`tele.*`)
    or an MQTT discovery entity → the `/status` field contract in `logic/status_model.hpp` **and**
    its golden emissions in `test/test_logic.cpp` (`test_status_model`), the telemetry/MQTT

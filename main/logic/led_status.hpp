@@ -6,7 +6,7 @@
 #include "logic/ui_state.hpp"
 
 // Pure, hardware-free model for the on-device status LED (the single APA102 RGB pixel on the
-// underside of the LilyGo T-Dongle-C5 / T-Dongle-S3). It maps the firmware's cached state to
+// underside of the LilyGo T-Dongle-S3). It maps the firmware's cached state to
 // ONE colour + animation. It reads the SAME shared UiSnapshot the ST7735 presenter consumes
 // (logic/display_model.hpp) — so the LED, the panel, the web-UI hero and MQTT never disagree
 // about the car's state — plus a small set of LED-only LATCHED alert flags. led_status.cpp

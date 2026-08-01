@@ -1,11 +1,11 @@
-// On-device ST7735 status display for the LilyGo T-Dongle-C5 and T-Dongle-S3 (both a 0.96" IPS
+// On-device ST7735 status display for the LilyGo T-Dongle-S3 (a 0.96" IPS
 // 80x160 panel, same ST7735 init/gamma/INVON). Drivable LANDSCAPE (160x80) OR PORTRAIT (80x160)
 // — the BOOT button rotates 90° per press through 4 orientations (draw_landscape / draw_portrait;
 // the choice persists in NVS tesla_cfg/disp_rot). Renders the charge/connection state — see
 // display.hpp for the design contract; the layout mirrors tools/display_sim.py (the pixel-exact
-// renderer) 1:1. Compiled only when CONFIG_TESLA_DISPLAY_ENABLED (set for esp32c5 AND esp32s3 in
+// renderer) 1:1. Compiled only when CONFIG_TESLA_DISPLAY_ENABLED (set for esp32s3 in
 // their sdkconfig.defaults.*); a no-op stub on the other targets. The panel pins come from
-// Kconfig (per-board sdkconfig.defaults.*); the C5-vs-S3 deltas (SPI clock, BOOT-button GPIO) are
+// Kconfig (per-board sdkconfig.defaults.*); the pin set is
 // selected by CONFIG_IDF_TARGET_* in display_start(). The single esp32s3 image serves both the
 // T-Dongle-S3 and a generic ESP32-S3: display_start() auto-detects the dongle and stays a
 // complete no-op on a generic board.
@@ -69,7 +69,7 @@ static constexpr int FB_PX = 160 * 80;            // fixed framebuffer capacity 
 // 0.96" panel's visible window is centered in the ST7735 RAM (col 26+80+26 = 132, row
 // 1+160+1 = 162), so the offsets are symmetric: they only SWAP between portrait (26,1) and
 // landscape (1,26) and stay identical across a 180° flip. Landscape MADCTL 0xA8 + offsets (1,26)
-// are HW-verified on the C5/S3; the portrait MADCTL/offsets follow the standard ST7735 rotation
+// are HW-verified on the S3; the portrait MADCTL/offsets follow the standard ST7735 rotation
 // set. Adjacent indices are 90° apart, so ++index rotates one way and --index the other.
 struct RotDef { uint8_t madctl; int w, h, x_off, y_off; bool portrait; };
 static constexpr RotDef ROTS[4] = {
@@ -134,7 +134,7 @@ static void set_window(int x0, int y0, int x1, int y1) {
 }
 
 // Init sequence (commands, delays, gamma/power tables, INVON, COLMOD 0x05) is the
-// one LilyGo ships for this panel — Xinyuan-LilyGO/T-Dongle-C5 st7735.cpp; the
+// one LilyGo ships for this panel — Xinyuan-LilyGO/T-Dongle-S3 st7735.cpp; the
 // T-Dongle-S3 uses the identical ST7735 panel. MADCTL is s_cfg.madctl, the current
 // BOOT-rotation orientation (set from ROTS before init, re-sent by apply_rotation on a tap).
 static void panel_init() {
@@ -545,19 +545,13 @@ static bool render_frame(VehicleController& v, int tick, bool paired) {
 // marquee advance smoothly. When render_frame() reports nothing animating we idle at
 // 1 Hz; while something animates (incl. a scrolling SSID) we refresh fast (~8 fps).
 // ─── BOOT button: each tap rotates the panel 90° (persisted) ───────────────────
-// The dongle's BOOT button (T-Dongle-C5: GPIO28, its only button; T-Dongle-S3: GPIO0) is a
-// normal input after boot (external pull-up; pressed = LOW). Each press steps the rotation
-// index (ROTS) by one, cycling landscape → portrait → landscape-180° → portrait-180° → …, so
-// the user can stand the dongle up in any of the four orientations with taps. The chosen index
-// is stored in NVS (tesla_cfg/disp_rot) so it survives reboots. The SPI clock also differs per
-// board (both drive the same panel): LilyGo's tested C5 rate is 20 MHz, the S3 HW-verified at 40.
-#if CONFIG_IDF_TARGET_ESP32C5
-static constexpr int BOOT_BTN     = 28;                 // T-Dongle-C5: BOOT on GPIO28
-static constexpr int SPI_CLOCK_HZ = 20 * 1000 * 1000;   // LilyGo's tested C5 rate (40 MHz over-spec → blank panel)
-#else  // esp32s3 (T-Dongle-S3)
+// The T-Dongle-S3's BOOT button (GPIO0) is a normal input after boot (external pull-up;
+// pressed = LOW). Each press steps the rotation index (ROTS) by one, cycling landscape →
+// portrait → landscape-180° → portrait-180° → …, so the user can stand the dongle up in any of
+// the four orientations with taps. The chosen index is stored in NVS (tesla_cfg/disp_rot) so it
+// survives reboots.
 static constexpr int BOOT_BTN     = 0;                  // T-Dongle-S3: BOOT on GPIO0
 static constexpr int SPI_CLOCK_HZ = 40 * 1000 * 1000;   // HW-verified on the T-Dongle-S3
-#endif
 
 // Load the saved rotation index (0..3). Migrates the pre-rotation NVS key `disp_flip` (a bool:
 // the old 180° landscape flip) → the equivalent index: unflipped → 1 (landscape), flipped → 3.
@@ -602,7 +596,7 @@ static void rotate_90(void) {
 static void display_task(void* arg) {
     VehicleController& v = *static_cast<VehicleController*>(arg);
 
-    // BOOT button (BOOT_BTN: C5 IO28 / S3 IO0): input with pull-up; a press pulls it LOW.
+    // BOOT button (BOOT_BTN: S3 IO0): input with pull-up; a press pulls it LOW.
     gpio_config_t btn = {};
     btn.pin_bit_mask = 1ULL << BOOT_BTN;
     btn.mode         = GPIO_MODE_INPUT;
@@ -685,8 +679,7 @@ void display_start(VehicleController& vehicle) {
     // Panel wiring — pins from Kconfig (per-board sdkconfig.defaults.*). The 0.96" GREENTAB
     // panel is mounted portrait (80x160); the MADCTL / col-row offsets / framebuffer geometry
     // come from the saved BOOT-rotation index (ROTS, default 1 = LANDSCAPE 160x80, MADCTL 0xA8
-    // MY|MV|BGR with offsets 1/26). Backlight is ACTIVE-LOW — identical on the T-Dongle-C5 and
-    // T-Dongle-S3 (only pins/SPI-clock/BOOT-button GPIO differ; C5 BL GPIO0, S3 BL GPIO38).
+    // MY|MV|BGR with offsets 1/26). Backlight is ACTIVE-LOW on the T-Dongle-S3 (BL GPIO38).
     s_cfg = DisplayConfig{
         .mosi = CONFIG_TESLA_DISPLAY_SPI_MOSI, .sck = CONFIG_TESLA_DISPLAY_SPI_SCK,
         .cs = CONFIG_TESLA_DISPLAY_CS, .dc = CONFIG_TESLA_DISPLAY_DC,
@@ -700,15 +693,14 @@ void display_start(VehicleController& vehicle) {
     s_cfg.madctl = d0.madctl; s_cfg.x_off = d0.x_off; s_cfg.y_off = d0.y_off;
     W = d0.w; H = d0.h;
 
-    // Framebuffer: PSRAM first. On the C5 (8 MB in-package PSRAM) that always wins and there
-    // is deliberately NO fallback — grabbing 25 KB of its scarce contiguous internal SRAM
-    // could OOM-reboot that memory-tight board (and a reboot loop keeps a parked car from ever
-    // sleeping). The T-Dongle-S3 build has no PSRAM, so it falls back to internal SRAM (~25 KB,
-    // allocated once here at boot before WiFi/BLE fragment the heap — the proven pre-#98 path).
+    // Framebuffer: PSRAM first, internal SRAM second. The shipped esp32s3 build enables no
+    // PSRAM (sdkconfig.defaults.esp32s3 — a generic S3 may have none), so in practice the
+    // fallback is what runs: ~25 KB of internal SRAM, allocated once here at boot before
+    // WiFi/BLE fragment the heap — the proven pre-#98 path. The SPIRAM attempt is kept ahead of
+    // it because it costs one failed allocation and is strictly better on a board that does have
+    // PSRAM, where 25 KB of contiguous internal SRAM is the scarcer resource by far.
     s_fb = (uint16_t*)heap_caps_malloc(FB_PX * sizeof(uint16_t), MALLOC_CAP_SPIRAM);
-#if !CONFIG_IDF_TARGET_ESP32C5
     if (!s_fb) s_fb = (uint16_t*)heap_caps_malloc(FB_PX * sizeof(uint16_t), MALLOC_CAP_8BIT);
-#endif
     if (!s_fb) { ESP_LOGE(TAG, "no memory for framebuffer — display disabled"); return; }
 
     gpio_config_t io = {};
@@ -729,7 +721,7 @@ void display_start(VehicleController& vehicle) {
         heap_caps_free(s_fb); s_fb = nullptr; return;
     }
     spi_device_interface_config_t dev = {};
-    dev.clock_speed_hz = SPI_CLOCK_HZ;       // 20 MHz on the C5 (LilyGo's tested rate), 40 MHz on the S3
+    dev.clock_speed_hz = SPI_CLOCK_HZ;       // 40 MHz, HW-verified on the T-Dongle-S3
     dev.mode           = 0;
     dev.spics_io_num   = s_cfg.cs;
     dev.queue_size     = 7;

@@ -40,12 +40,11 @@ body:
     attributes:
       label: Target chip(s) affected
       options:
-        - All five (esp32 / esp32s3 / esp32c3 / esp32c6 / esp32c5)
+        - All four (esp32 / esp32s3 / esp32c3 / esp32c6)
         - esp32
         - esp32s3
         - esp32c3
         - esp32c6
-        - esp32c5
         - Unknown
     validations:
       required: true

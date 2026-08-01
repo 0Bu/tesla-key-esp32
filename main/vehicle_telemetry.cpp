@@ -358,7 +358,7 @@ void VehicleController::loop_task_fn_(void* arg) {
         if (hb_now - last_heap_log > pdMS_TO_TICKS(30000)) {
             last_heap_log = hb_now;
             // INTERNAL, not plain 8BIT: heap_caps_* reports the max across every heap with the
-            // cap, and the esp32c5 registers 8 MB of PSRAM into 8BIT. Deciding on that number
+            // cap, and a board with PSRAM registers it into 8BIT. Deciding on that number
             // would make the watchdog below a silent no-op on exactly the board that has PSRAM.
             // Logged alongside the historical 8BIT figures (identical on the four PSRAM-less
             // targets) so the trend stays comparable with older captures.

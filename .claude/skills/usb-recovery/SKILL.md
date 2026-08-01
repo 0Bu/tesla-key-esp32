@@ -17,7 +17,7 @@ VIN and WiFi survive (no NFC re-enrol). Two failure modes dominate:
   (TOFU, `CONFIG_SECURE_SIGNED_ON_UPDATE_NO_SECURE_BOOT`). If the running image was signed with
   a key ≠ the current CI `OTA_SIGNING_KEY` (classic case: a **local build** whose reported
   version is the `version.txt` floor, e.g. `1.4.0`), every CI-signed OTA fails at the final
-  validate. Fixed live 2026-07-08 on the C5 `.196` → recovered to `1.4.34`, OTA "up to date".
+  validate. Fixed live 2026-07-08 on a board at `.196` → recovered to `1.4.34`, OTA "up to date".
 - **(b) A boot / reboot loop after flashing an UNSIGNED local build.** An unsigned app
   `abort()`s in ESP-IDF's `check_signature_on_update_check()` during core init, **before
   `app_main`**, on *any* target — it does not boot-and-TOFU. Local `scripts/idf-docker.sh`
@@ -49,7 +49,7 @@ Both are cured the same way: **USB-flash the published, signed image + erase `ot
 ## Host prerequisites
 
 `esptool` runs on the **host** (`brew install esptool`) — Docker on macOS has no USB
-passthrough. There is no `timeout` on macOS. Native-USB targets (s3/c3/c6/c5) enumerate as
+passthrough. There is no `timeout` on macOS. Native-USB targets (s3/c3/c6) enumerate as
 `/dev/cu.usbmodem*`, the classic esp32's UART bridge as `/dev/cu.usbserial-*` — but **don't
 just pick a node and assume the chip**; step 3 below probes for the port and the chip identity
 together, which matters more here than in a normal flash since a wrong guess writes firmware.
@@ -58,7 +58,7 @@ together, which matters more here than in a normal flash since a wrong guess wri
 
 | Region          | Offset                         | Size      | Recovery action                                   |
 |-----------------|--------------------------------|-----------|---------------------------------------------------|
-| bootloader      | `0x1000` esp32 / `0x2000` c5 / `0x0` s3·c3·c6 | —         | leave alone (never signature-checked); rewrite only if also damaged |
+| bootloader      | `0x1000` esp32 / `0x0` s3·c3·c6 | —         | leave alone (never signature-checked); rewrite only if also damaged |
 | partition-table | `0x8000`                       | —         | leave alone; rewrite only if also damaged         |
 | **nvs**         | `0x9000`                       | `0x6000`  | **NEVER touch** — holds pairing / key / VIN / WiFi |
 | **otadata**     | `0xf000`                       | `0x2000`  | **ERASE** — a blank `otadata` cleanly boots `ota_0` |
@@ -75,15 +75,15 @@ The minimal, pairing-preserving recovery is exactly two writes: **signed app →
 
 ## 1. Get the published, SIGNED image (never a local `build/*.bin`)
 
-Pick the target and its image suffix (`""` / `-s3` / `-c3` / `-c6` / `-c5`, matching
+Pick the target and its image suffix (`""` / `-s3` / `-c3` / `-c6`, matching
 `image_suffix()` in [`ci-build-all.sh`](../../../scripts/ci-build-all.sh) and
 `TESLA_OTA_IMG_SUFFIX` in [`main/ota_update.cpp`](../../../main/ota_update.cpp)):
 
 ```bash
-TARGET=esp32c5     # esp32 | esp32s3 | esp32c3 | esp32c6 | esp32c5
+TARGET=esp32s3     # esp32 | esp32s3 | esp32c3 | esp32c6
 case "$TARGET" in
   esp32)   SFX="" ;;  esp32s3) SFX=-s3 ;;  esp32c3) SFX=-c3 ;;
-  esp32c6) SFX=-c6 ;; esp32c5) SFX=-c5 ;;
+  esp32c6) SFX=-c6 ;;
 esac
 ```
 
@@ -148,13 +148,13 @@ for p in $(find /dev -maxdepth 1 \( -name 'cu.usbmodem*' -o -name 'cu.usbserial-
     if [ -n "$raw" ]; then PORT="$p"; CHIP_RAW="$raw"; break 2; fi
   done
 done
-[ -z "$PORT" ] && { echo "No board answered on USB — check the cable/port (C5: hold BOOT)"; exit 1; }
+[ -z "$PORT" ] && { echo "No board answered on USB — check the cable/port (a board with no"\
+  " auto-reset needs BOOT held)"; exit 1; }
 
 case "$CHIP_RAW" in
   ESP32-S3*)                   DETECTED=esp32s3 ;;
   ESP32-C3*)                   DETECTED=esp32c3 ;;
   ESP32-C6*)                   DETECTED=esp32c6 ;;
-  ESP32-C5*)                   DETECTED=esp32c5 ;;
   ESP32-D0WD*|ESP32|"ESP32 "*) DETECTED=esp32 ;;
   *) echo "REFUSING: could not identify connected chip (esptool said: '$CHIP_RAW')"; exit 1 ;;
 esac
@@ -166,9 +166,8 @@ echo "Connected: $DETECTED on $PORT (recovering as TARGET=$TARGET)"
 ```
 
 This cross-check is not optional here: with two boards on USB, a naive "first port that shows
-up" pick has silently read the wrong board before (an S3 read as if it were the C5 target — see
-project memory `esp32c5-support-local-patch`) — a bad pick in a *recovery* flash means writing
-the wrong per-target image to the wrong board.
+up" pick has silently read the wrong board before — and a bad pick in a *recovery* flash means
+writing the wrong per-target image to the wrong board.
 
 **s3 / c3 / c6 / classic esp32** (auto-reset works):
 
@@ -177,18 +176,10 @@ esptool --chip "$TARGET" -p "$PORT" write_flash 0x20000 "_ci/tesla-key-esp32$SFX
   && esptool --chip "$TARGET" -p "$PORT" erase_region 0xf000 0x2000
 ```
 
-**T-Dongle-C5** (esp32c5) — no auto-reset, so **hold BOOT (GPIO28) continuously through the
-probe above and both commands below**. The `--before no-reset` fallback in the probe already
-found the ROM download-mode node (it differs from the app node — app ≈ `usbmodem1101`, ROM ≈
-`usbmodem2101` — which is exactly why the probe re-detects rather than reusing an earlier port):
-
-```bash
-esptool --chip esp32c5 -p "$PORT" --before no-reset --after no-reset \
-  write_flash 0x20000 "_ci/tesla-key-esp32-c5.bin"
-esptool --chip esp32c5 -p "$PORT" --before no-reset --after no-reset \
-  erase_region 0xf000 0x2000
-# then release BOOT and replug WITHOUT holding it (RTS reset is a no-op on this board).
-```
+**A board with no auto-reset** — hold BOOT continuously through the probe above and both
+commands below, and add `--before no-reset --after no-reset` to each. The download-mode port
+node can differ from the app node, which is why the probe re-detects rather than reusing an
+earlier port. Release BOOT and replug afterwards.
 
 `Hash of data verified.` on the `write_flash` and a clean `erase_region` mean success. The blank
 `otadata` makes the bootloader fall back to the freshly written `ota_0`.
@@ -198,7 +189,7 @@ esptool --chip esp32c5 -p "$PORT" --before no-reset --after no-reset \
 After it reboots and rejoins WiFi:
 
 ```bash
-curl -s "http://<ip>/api/proxy/1/version"                 # {"version":"X.Y.Z-esp32","platform":"ESP32-C5"}
+curl -s "http://<ip>/api/proxy/1/version"                 # {"version":"X.Y.Z-esp32","platform":"ESP32-S3"}
 curl -s "http://<ip>/status" | jq '{version, paired}'      # paired:true — pairing survived (nvs untouched)
 curl -s "http://<ip>/ota/check" && sleep 2 && curl -s "http://<ip>/ota/status"
 ```
