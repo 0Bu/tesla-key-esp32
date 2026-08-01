@@ -120,13 +120,21 @@ static cJSON* build_status_object(bool redact) {
                          : ap.phy_11b  ? "802.11b" : nullptr;
         if (std_) in.wifi_std = std_;
     }
-    {
-        // Read from the CONFIG, not from any live state: the marker outlives the reboot the
-        // rollback performed, which is the whole reason it is persisted rather than kept in RAM.
+    // Read from the CONFIG, not from any live state: the marker outlives the reboot the rollback
+    // performed, which is the whole reason it is persisted rather than kept in RAM.
+    //
+    // Read ONCE per boot, not per request. The marker cannot change while this image runs — both
+    // writers (main.cpp's rollback, POST /set_wifi) reboot immediately after saving — while
+    // /status is the web UI's 4 s poll, so a read here is an NVS blob read plus its std::vector on
+    // a request path, forever, for a value that is fixed at boot. This device's binding limit is
+    // the largest CONTIGUOUS free block and the rule in CLAUDE.md is not to allocate on a request
+    // path without needing to.
+    static const bool s_rolled_back = [] {
         tk::ConfigBlob cb;
         tk::cfg_load(*g_config, cb);
-        in.wifi_rolled_back = cb.wifi_rolled_back;
-    }
+        return cb.wifi_rolled_back;
+    }();
+    in.wifi_rolled_back = s_rolled_back;
 
     in.mqtt_configured = mqtt_ha_configured();
     in.mqtt_connected  = mqtt_ha_connected();
@@ -391,8 +399,10 @@ esp_err_t handle_crash_dismiss(GuardedReq rq) {
 esp_err_t handle_heap(GuardedReq rq) {
     httpd_req_t* req = rq.req;
 
-    // Caller-owned buffers, filled under the ring's lock without allocating there. ~1.2 KB of
-    // stack — measured against the httpd task's 12288 and cheaper than the heap it reports on.
+    // Caller-owned buffers, filled under the ring's lock without allocating there. 2 × 288 ×
+    // int16_t = 1152 B of stack, against the httpd task's 8192 (http_server.cpp) — ~14 %, and
+    // cheaper than the heap it reports on. Growing kHeapHistorySamples grows this linearly, so
+    // that constant and this budget move together.
     static constexpr size_t kMax = tk::kHeapHistorySamples;
     tk::HeapTrendSample free_s[kMax];
     tk::HeapTrendSample large_s[kMax];

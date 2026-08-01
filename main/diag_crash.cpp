@@ -100,7 +100,7 @@ void diag_crash_capture() {
             // properly anyway. Publishing IDF's raw stack words as if they were a backtrace would
             // be worse than publishing none: they are not return addresses, and a reader has no
             // way to tell from /status which of the two they are holding.
-#if CONFIG_IDF_TARGET_ARCH_XTENSA
+#if defined(CONFIG_IDF_TARGET_ARCH_XTENSA)
             uint32_t depth = sum->exc_bt_info.depth;
             if (depth > kCrashBacktraceMax) depth = kCrashBacktraceMax;
             s_ci.backtrace.clear();
@@ -108,7 +108,7 @@ void diag_crash_capture() {
             for (uint32_t i = 0; i < depth; i++) s_ci.backtrace.push_back(sum->exc_bt_info.bt[i]);
 
             s_ci.corrupted = sum->exc_bt_info.corrupted;
-#endif
+#endif  // CONFIG_IDF_TARGET_ARCH_XTENSA
 
             // app_elf_sha256 is a uint8_t[] holding a HEX STRING, not a C string and not raw
             // digest bytes — so it neither converts to std::string on its own nor should be

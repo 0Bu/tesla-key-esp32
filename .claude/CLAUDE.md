@@ -456,7 +456,7 @@ catalog: [`docs/FEATURES.md`](../docs/FEATURES.md).
   summary where the partition exists. Surfaced on `/status.last_crash`, over MQTT, and replayed to
   syslog once per boot (`logic/bootlog.hpp`) because `/diag` is RAM and does not survive the reboot
   it would explain. The BACKTRACE is **Xtensa-only** (esp32/esp32s3): IDF declares
-  `esp_core_dump_bt_info_t` per ARCHITECTURE, and on RISC-V (c3/c6/c5) it is a raw stack dump rather
+  `esp_core_dump_bt_info_t` per ARCHITECTURE, and on RISC-V (c3/c6) it is a raw stack dump rather
   than an unwound PC array — so there `last_crash` carries reason/task/PC/elf_sha and leaves the
   unwinding to the offline decoder reading `GET /coredump`. Two of four targets are RISC-V, so this
   is half the fleet, not an edge case.

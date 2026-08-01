@@ -57,10 +57,11 @@ evcc, which talks to the device over plain HTTP and cannot send credentials, so 
 the API would break the main use case. Anyone on the LAN can therefore call **every**
 endpoint — including ones that go beyond charging: wake, charging control, key
 regeneration (`/gen_keys`) and pairing (`/send_key`), BLE scan (`/scan`), VIN change
-(`/set_vin`, un-pairs + reboots), MQTT broker change (`/set_mqtt`, reboots), the OTA
-self-update / reboot trigger (`/ota/update`, see below) and the MCP endpoint (`/mcp`,
-which exposes the same charging command set to AI agents — nothing beyond what the open
-REST routes already allow). This is acceptable only because:
+(`/set_vin`, un-pairs + reboots), MQTT broker change (`/set_mqtt`, reboots), **WiFi
+credential change (`/set_wifi`, reboots onto another network)**, crash-report deletion
+(`/crash/dismiss`), the OTA self-update / reboot trigger (`/ota/update`, see below) and the
+MCP endpoint (`/mcp`, which exposes the same charging command set to AI agents — nothing
+beyond what the open REST routes already allow). This is acceptable only because:
 
 - the enrolled key is **Charging Manager only** — it cannot unlock or drive the car, just
   control charging and wake (see the role restriction in `vehicle_pairing.cpp`); and
@@ -68,6 +69,18 @@ REST routes already allow). This is acceptable only because:
 
 If you need access control, put the device behind a reverse proxy with TLS + auth, or
 segment it onto a trusted VLAN.
+
+`POST /set_wifi` deserves naming explicitly, because it is the one open route whose worst
+case is *losing the device* rather than mis-charging the car: a LAN peer can point it at a
+network you do not control, and the board reboots onto it. Two things bound that. The
+credentials are only reachable from the LAN the device is already on, so this grants no
+capability an attacker with that foothold lacks (they could equally re-flash it over the
+same open API). And a change that does not work **undoes itself**: the previous SSID and
+password are stashed as a one-shot backup inside the same atomic config entry, and the boot
+that follows restores them unless the new network actually hands out a lease
+(`logic/wifi_rollback.hpp`). What that does *not* protect against is a change to a network
+the attacker genuinely controls — that association succeeds, so nothing rolls back. The
+mitigation there is the same as for every other route on this list: a trusted LAN.
 
 Two non-auth hardening measures remain in place:
 

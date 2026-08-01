@@ -8,6 +8,15 @@ telemetry, the MQTT bridge, the web UI live feed, WiFi/LAN connectivity, sleep/l
 OTA, or anything that touches locks/tasks (the Concurrency contract at the end). Keep both in sync —
 the `project-review` skill checks for drift between them.
 
+> **Scope split with [`FEATURES.md`](FEATURES.md).** This file is the *Tesla-side* narrative —
+> pairing, link state, telemetry, the MQTT entity list, the web UI feed. The *platform* mechanisms
+> that are not specific to Tesla, BLE or evcc — crash forensics (`diag_crash.cpp`, the `coredump`
+> partition, `GET /coredump`), the recovery ladder (heap watchdog → task watchdog → boot-loop safe
+> mode → OTA rollback gate), the atomic CRC config blob and the WiFi credential rollback
+> (`POST /set_wifi`), the `/heap` trend, the bug-report redaction (`?redact=1`) and the captive-portal
+> probe handling — are cataloged in `FEATURES.md`, one entry each with *what failure it prevents*.
+> Look there first for those; this file is where the vehicle-facing detail lives.
+
 ## Web UI live feed (`GET /status`)
 
 The web UI's live data is a **browser-side interval poll**. `main/www/app.js` `boot()` calls `poll()`

@@ -44,13 +44,17 @@ namespace tk {
 // being wrong in the other direction destroys what the user just typed. So absence of evidence
 // buys patience, and only the AP's own "no" is allowed to be fast.
 //
-// NO FIRMWARE CALLER YET. main.cpp's wifi_connect() has no credential backup to restore today,
-// and its WIFI_EVENT_STA_DISCONNECTED handler does not even keep the reason code — it counts
-// retries (MAX_RETRY) and falls back to the setup portal. This header states the policy up front
-// so the decision is asserted and host-tested rather than re-litigated inside an event handler
-// under time pressure, exactly the way logic/connect_outcome.hpp pins the classification the BLE
-// connect path applies. It is ported from a sibling ESP-IDF firmware where the blind-deadline
-// version it replaces did destroy valid credentials in the field.
+// THE CALLER is main.cpp's wifi_connect(), and only on the boot that follows a /set_wifi change
+// (`cfg_blob.wifi_rollback_active`): its WIFI_EVENT_STA_DISCONNECTED handler keeps the reason code,
+// and the boot window feeds one sample per kWifiBootWindowS checkpoint into rollback_step() until
+// it says RollBack — after which main.cpp restores the one-shot backup from the same atomic blob
+// (logic/config_store.hpp) and reboots. A boot with NO credential change pending never enters that
+// loop and keeps the long-standing single-window + setup-portal behaviour.
+//
+// The policy lives here rather than inside the event handler so it is asserted and host-tested
+// instead of re-litigated under time pressure, exactly the way logic/connect_outcome.hpp pins the
+// classification the BLE connect path applies. It is ported from a sibling ESP-IDF firmware where
+// the blind-deadline version it replaces did destroy valid credentials in the field.
 
 // What a WIFI_EVENT_STA_DISCONNECTED reason says about the CREDENTIALS — never about link
 // quality, signal or timing. Deliberately four values and not a bool: "we have no idea" and "the

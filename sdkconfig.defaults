@@ -115,9 +115,11 @@ CONFIG_FREERTOS_WATCHPOINT_END_OF_STACK=y
 # at the next boot (esp_core_dump_get_summary: task / PC / backtrace / app-elf-sha) and never
 # re-parses it on a request path; GET /coredump streams the raw image for offline symbolisation.
 # ENABLE_TO_FLASH is the line that does the work — it select-s ESP_COREDUMP_ENABLE. The ELF format
-# is spelled out rather than left to the default because scripts/decode-coredump.sh and
-# espcoredump's SHA-256 image match both assume it; on IDF v6 the symbol disappears (ELF becomes
-# the only format), so a future IDF bump should DELETE that line rather than carry it inert.
+# is spelled out rather than left to the default because the offline decoder
+# (`esp-coredump info_corefile -c coredump.bin build/tesla-key-esp32.elf`, shipped with ESP-IDF)
+# and espcoredump's SHA-256 image match both assume it; on IDF v6 the symbol disappears (ELF
+# becomes the only format), so a future IDF bump should DELETE that line rather than carry it
+# inert.
 # Size note: the coredump component + the summary parser cost a few KB of app flash. Re-measure on
 # the LARGEST target (esp32c6 — signed 0x1d1000, ~92 KB under the ci-build-all.sh gate) rather than
 # on esp32s3, and measure against the 64 KB Secure-Boot padding boundary rather than the gate: an

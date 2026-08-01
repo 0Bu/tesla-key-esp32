@@ -200,7 +200,8 @@ GET  /                     Web UI (status, pairing, quick commands; alias /index
 GET  /status               { vin, ip, version, key_present, key_fingerprint,
                              key_created (epoch, omitted if clock unsynced), paired,
                              paired_at (epoch, omitted if unknown), reauth,
-                             wifi:{ssid,rssi,std},
+                             wifi:{ssid,rssi,std,rolled_back? (only when the last /set_wifi was
+                               undone by the credential rollback — presence is the signal)},
                              ble:{connected,scanning,
                                   phase?,phase_s? (BLE phase countdown, both or neither:
                                     "connecting" = an attempt is running and gives up in phase_s,
@@ -223,11 +224,44 @@ GET  /status               { vin, ip, version, key_present, key_fingerprint,
                              last_seen_s (seconds since last contact),
                              last_reboot: "heap:<n>" (only when the heap watchdog ended the
                                           previous boot, n = consecutive such restarts;
-                                          absent on any ordinary boot) }
+                                          absent on any ordinary boot),
+                             sys:{free_heap,min_free_heap,largest_block,uptime_s,
+                                  wifi_reconnects,reset_reason,safe_mode} (ALWAYS present —
+                               the block a remote triage reads first; the heap figures are
+                               INTERNAL-only, so the C5's PSRAM cannot mask them, and
+                               largest_block is the number the heap watchdog acts on),
+                             last_crash:{reason,reason_code,fault,coredump,task?,pc?,
+                                         backtrace?[hex strings],corrupted?,elf_sha256?}
+                               (only when the boot is NOTABLE — a fault reset, or a dump for
+                                this build still in flash and not dismissed; its presence
+                                is the signal. backtrace/corrupted are XTENSA-ONLY —
+                                esp32 and esp32s3 — because ESP-IDF generates no on-device
+                                backtrace on RISC-V (esp32c3/c6); the downloaded dump
+                                still unwinds offline on every target) }
+GET  /status?redact=1      The BUG-REPORT form of the same payload: vin, ip, wifi.ssid,
+                             ble.addr (and every scanned neighbour's), mqtt.broker and
+                             syslog.host read "<redacted>". The KEY is always kept —
+                             omitting a field would forge an "older build" signal
 POST /scan                 Time-limited BLE discovery scan (populates ble.devices)
-GET  /diag[?verbose=0|1][?clear=1]   Plain-text in-memory diag log (verbose=0 turns raw-RX
-                             logging back off; the X-Diag-Verbose response header echoes the
-                             current verbose state for the web UI)
+GET  /diag[?verbose=0|1][?clear=1][?redact=1]   Plain-text in-memory diag log (verbose=0 turns
+                             raw-RX logging back off; the X-Diag-Verbose response header echoes
+                             the current verbose state for the web UI; redact=1 is the
+                             bug-report form — it substitutes VIN/SSID/IP/BLE-MAC/broker/
+                             syslog-host per LINE and fails closed on a truncated one)
+GET  /coredump[?clear=1]   Stream the raw crash image (chunked octet-stream; 404 when there is
+                             none, and permanently so on a device flashed before the coredump
+                             partition existed). Decode it offline against the .elf of the
+                             SAME build — /status.last_crash.elf_sha256 identifies which:
+                             `esp-coredump info_corefile -c coredump.bin <build>.elf`.
+                             clear=1 erases the partition instead of streaming
+POST /crash/dismiss        Acknowledge and DELETE this boot's crash report (erase first, mark
+                             second). POST, not GET: it destroys the one artifact a bug report
+                             needs, so no link or prefetch may reach it
+GET  /heap                 { dt, b0, unit:"KiB", scale:10, free[], largest[] } — the board's
+                             own 24 h memory trend in tenths of a KiB, oldest sample first,
+                             null for a bucket with no sample. Answers what a spot value
+                             cannot: a leak is a slope, fragmentation is the two series
+                             separating as largest[] sinks toward the 4 KB watchdog floor
 POST /gen_keys[?force=1]   Generate ECDSA P-256 key (refuses overwrite without force)
 POST /send_key             Manually trigger pairing (charging_manager only; normally automatic)
 POST /set_vin              Persist VIN and reboot
@@ -236,6 +270,16 @@ POST /set_mqtt             Persist the MQTT broker for the HA bridge and reboot
 POST /set_syslog           Persist the UDP Syslog server for the diag log and reboot
                              ({"server":"host:port"}; a bare host defaults to port 514;
                              "" disables Syslog)
+POST /set_wifi             Change the WiFi credentials over the LAN and reboot
+                             ({"ssid":"…","pass":"…"}; an empty pass means an open network).
+                             The previous pair is stashed as a ONE-SHOT rollback backup in the
+                             same atomic config entry: if the new credentials get a lease the
+                             backup is dropped, and if the AP keeps refusing them the next boot
+                             restores the old network and reboots onto it, reporting
+                             /status.wifi.rolled_back. An SSID that is merely ABSENT (a router
+                             still rebooting) is given 180 s before that happens — only a
+                             sustained authentication refusal is treated as evidence against
+                             the credentials. No web-UI control yet; this is a curl route
 POST /set_time             Set the wall clock from the browser ({"ms":<epoch>}) — NTP fallback
 GET  /ota/check[?ms=<epoch>]   Start a background update check (then poll /ota/status)
 POST /ota/update           Start the background self-update (downloads, then reboots)

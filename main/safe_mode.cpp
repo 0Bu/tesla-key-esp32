@@ -82,6 +82,24 @@ bool safe_mode_begin(NvsStorageAdapter& config_store, bool was_fault) {
 bool safe_mode_active() { return s_safe_mode.load(); }
 
 void safe_mode_arm_healthy_timer(NvsStorageAdapter& config_store) {
+    // NOT armed while safe mode is latched, and this is the difference between a latch and a
+    // 4-crashes-then-one-quiet-boot cycle. Safe mode comes up with the BLE/vehicle stack and the
+    // MQTT bridge DOWN — precisely the subsystems a start-up crash lives behind — so surviving
+    // kBootHealthyS in that state is evidence about the recovery surface, not about the fault.
+    // Clearing the counter on it would let the very next reboot start the full stack again, crash
+    // again, and re-open the car's polling window on 4 boots out of every 5: the drain this guard
+    // exists to stop, merely slowed down.
+    //
+    // Nothing strands the device here: ANY non-fault reset resets the counter to 0 in
+    // safe_mode_begin (boot_fail_next(was_fault=false)), and every intentional exit is one — an OTA
+    // install, a /set_* save, a power-cycle, the reset button. So safe mode ends the moment someone
+    // acts on it, and only then.
+    if (s_safe_mode.load()) {
+        ESP_LOGW(TAG, "SAFE MODE — the healthy-boot timer is NOT armed: with the vehicle stack and "
+                      "MQTT down, staying up says nothing about the fault. Install a newer image or "
+                      "fix the configuration; any clean reboot clears the counter.");
+        return;
+    }
     // 2560 B: the task sleeps, then does one NVS string write and one log line. Deliberately small —
     // it exists for a single write and this device counts stack in hundreds of bytes.
     if (xTaskCreate(healthy_timer_task, "safe_gate", 2560, &config_store,
