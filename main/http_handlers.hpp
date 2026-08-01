@@ -40,6 +40,12 @@ bool clock_synced_via_ntp();
 // record faults — LoadProhibited/EXCVADDR=0x1).
 bool wifi_is_connected();
 
+// Defined in main.cpp: cumulative WiFi RE-connects since boot (the first association of a boot is
+// not counted). Reported in /status.sys and over MQTT — a link that drops and recovers looks
+// identical to a healthy one in any instantaneous reading, so without a counter a flapping AP is
+// only ever caught by someone watching at the right second.
+unsigned wifi_reconnect_count();
+
 // ─── Shared helpers (http_common.cpp) ─────────────────────────────────────────
 
 // Serialize `root` (consumed) as the response with the given status. Degrades to a
@@ -86,8 +92,11 @@ esp_err_t handle_version(GuardedReq rq);          // GET  /api/proxy/1/version
 // http_status.cpp — web UI + device status/diagnostics
 esp_err_t handle_index(GuardedReq rq);            // GET  /  (embedded, pre-gzipped web UI)
 esp_err_t handle_status(GuardedReq rq);           // GET  /status
-esp_err_t handle_diag(GuardedReq rq);             // GET  /diag
+esp_err_t handle_diag(GuardedReq rq);             // GET  /diag[?redact=1]
 esp_err_t handle_scan(GuardedReq rq);             // POST /scan
+esp_err_t handle_coredump(GuardedReq rq);         // GET  /coredump[?clear=1]
+esp_err_t handle_crash_dismiss(GuardedReq rq);    // POST /crash/dismiss
+esp_err_t handle_heap(GuardedReq rq);             // GET  /heap
 
 // http_ota.cpp — OTA self-update endpoints
 esp_err_t handle_ota_check(GuardedReq rq);        // GET  /ota/check[?ms=<epoch>]
@@ -101,6 +110,7 @@ esp_err_t handle_set_time(GuardedReq rq);         // POST /set_time
 esp_err_t handle_set_vin(GuardedReq rq);          // POST /set_vin
 esp_err_t handle_set_mqtt(GuardedReq rq);         // POST /set_mqtt
 esp_err_t handle_set_syslog(GuardedReq rq);       // POST /set_syslog
+esp_err_t handle_set_wifi(GuardedReq rq);         // POST /set_wifi
 
 // mcp_server.cpp — MCP endpoint (Streamable HTTP, stateless JSON-RPC 2.0; docs/MCP.md)
 esp_err_t mcp_handle_post(GuardedReq rq);         // POST /mcp

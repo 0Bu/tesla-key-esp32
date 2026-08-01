@@ -219,7 +219,9 @@ bool VehicleController::generate_key() {
     // near-zero value, which the UI ignores.
     if (storage_) {
         time_t now = time(nullptr);
-        storage_->save_str("key_created", std::to_string((long long)now));
+        if (!storage_->save_str("key_created", std::to_string((long long)now))) {
+            ESP_LOGW(TAG, "key generated but its creation date was not persisted");
+        }
     }
     // A new key invalidates any existing pairing: the stored session belonged to the
     // previous key/whitelist entry, so a fresh enrolment + handshake is required.
@@ -250,9 +252,19 @@ void VehicleController::clear_session_and_cache_() {
 
     // Erase the persisted sessions so has_session() is false until a fresh handshake.
     if (storage_) {
-        storage_->remove("session_vcsec");
-        storage_->remove("session_infotainment");
-        storage_->remove("paired_at");   // re-pair re-stamps the pairing date
+        // A failed erase here is the one worth shouting about: the in-RAM state says
+        // "unpaired" while flash still holds a session blob, so the NEXT boot loads a session
+        // that belongs to a key the car has already forgotten — and the symptom is a device
+        // that looks paired and fails every command. has_session() reads flash, so this is a
+        // real divergence rather than a cosmetic one.
+        const bool v = storage_->remove("session_vcsec");
+        const bool i = storage_->remove("session_infotainment");
+        const bool p = storage_->remove("paired_at");   // re-pair re-stamps the pairing date
+        if (!v || !i || !p) {
+            ESP_LOGE(TAG, "session erase incomplete (vcsec=%d info=%d paired_at=%d) — "
+                          "flash may still hold a stale session across the next boot",
+                     (int)v, (int)i, (int)p);
+        }
     }
 
     // Drop cached readings so /status and vehicle_data never serve old SOC/charge data
@@ -281,7 +293,9 @@ bool VehicleController::reset_for_new_vehicle() {
     generate_key();
     // The discovered BLE MAC belongs to the previous car; drop it so the next boot
     // rediscovers the new vehicle by its VIN-derived advertising name.
-    if (config_store_) config_store_->remove("ble_mac");
+    if (config_store_ && !config_store_->remove("ble_mac")) {
+        ESP_LOGW(TAG, "old vehicle's BLE MAC not cleared — the next scan may target the old car");
+    }
     ESP_LOGI(TAG, "reset for new vehicle complete");
     return true;
 }
@@ -348,7 +362,9 @@ time_t VehicleController::paired_at() {
     // tracking (or whose clock was unsynced) gets stamped at first sync instead.
     time_t now = time(nullptr);
     if (now > 1600000000) {
-        storage_->save_str("paired_at", std::to_string((long long)now));
+        if (!storage_->save_str("paired_at", std::to_string((long long)now))) {
+            ESP_LOGW(TAG, "pairing date not persisted — the UI will re-stamp it on the next sync");
+        }
         return now;
     }
     return 0;

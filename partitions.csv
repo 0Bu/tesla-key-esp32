@@ -12,8 +12,26 @@
 # slot; a blank otadata (after a full erase) boots ota_0. ota_0 stays at 0x20000 so a
 # device already on the old 8 MB table keeps OTA-updating without a reflash (the INSTALLED
 # table governs OTA writes; new full-flashes get this 4 MB table).
+#
+# The `coredump` partition costs NOTHING that was in use: 0x12000..0x20000 was a 56 KB hole
+# between phy_init and the app, left by the app's 0x20000 start. So it takes NO OTA headroom —
+# both slots keep their full 0x1f0000, the ci-build-all.sh size gate keeps its 0x1e8000 value,
+# and the largest target (esp32c6, signed 0x1d1000) keeps the same ~92 KB it had. Shrinking a
+# slot instead would have moved ota_1's OFFSET, which is the one edit that cannot be delivered:
+# an OTA writes the slot the INSTALLED table names, so a device would flash one address and
+# boot another.
+# 48 KB (0xc000) is the dump budget, 8 KB of the hole left spare. A panic writes the crashed
+# task's stack + the task table here; main/diag_crash.cpp reads only the SUMMARY at the next
+# boot (reason, task, PC, backtrace, app-elf-sha) and GET /coredump streams the raw image out
+# for offline symbolisation against the matching .elf.
+# ALREADY-DEPLOYED DEVICES DO NOT GET THIS PARTITION — a partition table is not part of an OTA
+# image, so a device that was flashed before this change keeps its old table and simply has
+# nowhere to write a dump. That is a supported state, not a fault: esp_core_dump_image_check()
+# fails, /status.last_crash reports `coredump:false`, and the reset REASON (which needs no
+# partition) still reports the fault. Only a USB/web-installer full flash adds the partition.
 nvs,       data, nvs,     0x9000,   0x6000,
 otadata,   data, ota,     0xf000,   0x2000,
 phy_init,  data, phy,     0x11000,  0x1000,
+coredump,  data, coredump, 0x12000, 0xc000,
 ota_0,     app,  ota_0,   0x20000,  0x1f0000,
 ota_1,     app,  ota_1,   0x210000, 0x1f0000,

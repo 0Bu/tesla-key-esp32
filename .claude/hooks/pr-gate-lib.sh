@@ -129,3 +129,46 @@ gate_fetch_pr() {
   printf '%s'   "$(printf '%s' "$json" | jq -r '.body // ""')"
   return 0
 }
+
+# gate_pr_changed_files <selector>
+#   Prints the repo-relative paths a PR changes, one per line. Used by the CONDITIONAL gates (the
+#   ones that apply only when a PR reaches a particular surface) to answer "is this gate even
+#   relevant here?" without a human having to assert it.
+#
+#   Exit codes mirror gate_fetch_pr's three-state contract:
+#     0  read OK (paths printed; may legitimately be empty for an empty PR)
+#     2  could NOT read GitHub
+#   There is deliberately NO "confirmed no PR" state: a caller that cannot get a file list must
+#   treat the gate as APPLYING. An unreadable diff is not evidence that a PR is a chore, and
+#   guessing in that direction is exactly how a conditional gate silently stops gating.
+#
+#   Falls back to the local merge-base diff when GitHub is unreadable but git is not: on a normal
+#   feature branch that answers the same question, and it keeps the gate working in a session with
+#   no token at all.
+gate_pr_changed_files() {
+  local sel="$1" tok slug files base
+  if command -v gh >/dev/null 2>&1; then
+    if [ -n "$sel" ]; then
+      files="$(gh pr view "$sel" --json files -q '.files[].path' 2>/dev/null)" && \
+        { printf '%s' "$files"; return 0; }
+    else
+      files="$(gh pr view --json files -q '.files[].path' 2>/dev/null)" && \
+        { printf '%s' "$files"; return 0; }
+    fi
+  fi
+  tok="${GH_TOKEN:-${GITHUB_TOKEN:-}}"
+  slug="$(gate_repo_slug)"
+  if [ -n "$tok" ] && [ -n "$slug" ] && printf '%s' "$sel" | grep -qE '^[0-9]+$' \
+     && command -v curl >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+    files="$(curl -fsSL -H "Authorization: Bearer $tok" -H "Accept: application/vnd.github+json" \
+        "https://api.github.com/repos/$slug/pulls/$sel/files?per_page=100" 2>/dev/null \
+        | jq -r '.[].filename' 2>/dev/null)" && [ -n "$files" ] && { printf '%s' "$files"; return 0; }
+  fi
+  # Local fallback: everything this branch changed relative to where it left the default branch.
+  base="$(git -C "${GATE_PROJ:-$PWD}" merge-base HEAD origin/main 2>/dev/null)"
+  if [ -n "$base" ]; then
+    files="$(git -C "${GATE_PROJ:-$PWD}" diff --name-only "$base"...HEAD 2>/dev/null)" && \
+      { printf '%s' "$files"; return 0; }
+  fi
+  return 2
+}

@@ -47,29 +47,54 @@
           {
             "type": "command",
             "command": "bash \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/report-capabilities.sh\"",
-            "statusMessage": "Detecting toolchain capabilities…"
+            "statusMessage": "Detecting toolchain capabilities\u2026"
           },
           {
             "type": "command",
             "command": "bash \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/build-efficiency-check.sh\"",
-            "statusMessage": "Auditing the last post-merge build for efficiency…"
+            "statusMessage": "Auditing the last post-merge build for efficiency\u2026"
           }
         ]
       }
     ],
     "PreToolUse": [
       {
+        "matcher": "Read|Edit|Write|Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/guard-secrets.sh\"",
+            "statusMessage": "Checking for private key material\u2026"
+          }
+        ]
+      },
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/guard-partitions.sh\"",
+            "statusMessage": "Checking partition-table safety\u2026"
+          }
+        ]
+      },
+      {
         "matcher": "Bash",
         "hooks": [
           {
             "type": "command",
             "command": "bash \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/require-project-review.sh\"",
-            "statusMessage": "Checking project-review gate…"
+            "statusMessage": "Checking project-review gate\u2026"
           },
           {
             "type": "command",
             "command": "bash \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/require-skill-audit.sh\"",
-            "statusMessage": "Checking skill-audit gate…"
+            "statusMessage": "Checking skill-audit gate\u2026"
+          },
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/require-feature-docs.sh\"",
+            "statusMessage": "Checking feature-docs gate\u2026"
           }
         ]
       },
@@ -79,7 +104,12 @@
           {
             "type": "command",
             "command": "bash \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/require-project-review.sh\"",
-            "statusMessage": "Checking project-review gate…"
+            "statusMessage": "Checking project-review gate\u2026"
+          },
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/require-feature-docs.sh\"",
+            "statusMessage": "Checking feature-docs gate\u2026"
           }
         ]
       },
@@ -89,7 +119,7 @@
           {
             "type": "command",
             "command": "bash \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/require-skill-audit.sh\"",
-            "statusMessage": "Checking skill-audit gate…"
+            "statusMessage": "Checking skill-audit gate\u2026"
           }
         ]
       }
@@ -101,7 +131,7 @@
           {
             "type": "command",
             "command": "bash \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/clang-format-edit.sh\"",
-            "statusMessage": "Formatting edited C/C++…"
+            "statusMessage": "Formatting edited C/C++\u2026"
           }
         ]
       }
@@ -112,7 +142,7 @@
           {
             "type": "command",
             "command": "bash \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/run-logic-tests.sh\"",
-            "statusMessage": "Running host logic tests…"
+            "statusMessage": "Running host logic tests\u2026"
           }
         ]
       }

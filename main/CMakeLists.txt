@@ -17,6 +17,10 @@ idf_component_register(
         "mcp_server.cpp"
         "provisioning.cpp"
         "diag_log.cpp"
+        "diag_crash.cpp"
+        "safe_mode.cpp"
+        "heap_trend.cpp"
+        "config_blob.cpp"
         "ota_update.cpp"
         "mqtt_ha.cpp"
         "syslog.cpp"
@@ -45,6 +49,40 @@ idf_component_register(
         mqtt
         esp_timer
         bootloader_support
+        espcoredump
+)
+
+# ── Warning policy for THIS component only ──
+# main/logic/ was never the exposed half: it is compiled by the host mock build with
+# -Wall -Wextra -Werror and covered by test/test_logic.cpp. main/*.cpp was — it is where every
+# shipped crash actually happened, and it carried no warning contract of its own.
+#
+#   -Werror=return-type    a function that falls off its end returns garbage; on a bool health
+#                          check that reads as "healthy" and silently changes behaviour.
+#   -Werror=unused-result  nvs_storage.hpp's setters are [[nodiscard]]. A dropped NVS write is
+#                          SILENT (a full partition, worn flash), and this firmware persists the
+#                          things it cannot rebuild — the private key, the VIN, the safe-mode boot
+#                          counter. `save_str(...)` on its own still compiles and still lies; what
+#                          [[nodiscard]] buys is that the ignored result is a BUILD error, which it
+#                          only is if this warning class is fatal.
+#
+# NOT -Werror=format, deliberately, and this is the one that would look like an oversight: the
+# root CMakeLists.txt appends a global -Wno-error=format because yoziru/tesla-ble prints uint32_t
+# with %u (which is `unsigned long` on xtensa). A PRIVATE -Werror=format here would re-arm the
+# class for our own sources only — which is the right end state — but our format strings have
+# never been compiled under it on all four targets, int32_t is `long int` on xtensa and plain
+# `int` on riscv/host, and scripts/run-mock-tests.sh compiles NONE of main/*.cpp, so nothing
+# available in a cloud session can tell whether that turns the build red. Converting the call
+# sites to PRIu32/PRId32 first, then arming it, is a change of its own with a real build behind it.
+#
+# PRIVATE on ${COMPONENT_LIB} rather than a CONFIG_COMPILER_* key in sdkconfig.defaults, for two
+# independent reasons: a Kconfig key is global, so it would hold ESP-IDF itself and the managed
+# components (tesla-ble, mdns, mqtt) to a contract that is not ours to demand and that breaks on
+# any bump; and sdkconfig.defaults is part of CI's ccache key, so a diagnostic-only change there
+# would discard every cached object it cannot possibly invalidate.
+target_compile_options(${COMPONENT_LIB} PRIVATE
+    -Werror=return-type
+    -Werror=unused-result
 )
 
 # Assemble + pre-compress the web UI at build time. The sources are split for edit

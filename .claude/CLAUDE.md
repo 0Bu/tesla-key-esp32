@@ -20,7 +20,12 @@ drops it before it can refresh a cache or complete the next FIFO command.
 > lives in [`docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md) — read it on demand when touching
 > those areas. User-facing docs: [`README.md`](../README.md), [`docs/README.md`](../docs/README.md),
 > [`docs/SECURITY.md`](../docs/SECURITY.md), [`docs/MCP.md`](../docs/MCP.md) (MCP integration
-> guide). Keep all of these in sync (the `project-review` skill checks for drift).
+> guide). A cross-cutting catalog of the PLATFORM features this firmware implements — crash
+> forensics, the watchdog ladder, signed OTA, config storage, the diagnostic surfaces — is
+> [`docs/FEATURES.md`](../docs/FEATURES.md); keep it current with the `feature-docs` skill when a
+> technical feature lands or changes (a merge is gated on it whenever the diff reaches `main/`,
+> `test/`, `sdkconfig.defaults*`, `partitions.csv` or the CI build workflow).
+> Keep all of these in sync (the `project-review` skill checks for drift).
 
 ## Environment note (Claude Code on the web / remote sandbox)
 
@@ -138,6 +143,48 @@ http_config.cpp        → /gen_keys, /send_key, /set_time, /set_vin, /set_mqtt,
 mcp_server.cpp         → /mcp — MCP server for AI agents (stateless JSON-RPC 2.0;
                          core logic in logic/mcp.hpp, guide in docs/MCP.md)
                          (shared helpers: http_common.cpp; split map: http_handlers.hpp)
+diag_crash.cpp         → ONE-SHOT boot capture of why the last run ended: the reset reason
+                         (always — needs no partition, so it works on already-deployed devices)
+                         plus, where the `coredump` partition exists, the dump SUMMARY (crashed
+                         task / PC / backtrace / app-elf-sha, esp_core_dump_get_summary). Parsed
+                         ONCE at boot, never on a request path. An ORPHAN dump — one whose
+                         app-elf-sha does not match the running build, which the coredump partition
+                         happily keeps across an OTA — is ERASED, so `coredump` means "a dump for
+                         THIS firmware is downloadable" rather than "the partition is non-blank";
+                         declared foreign only on PROOF (logic/crashinfo.hpp), since the erase
+                         destroys the one artifact a panic left. Feeds /status.last_crash, the MQTT
+                         diagnostics and the syslog boot replay
+safe_mode.cpp          → boot-loop safe mode (logic/boot_guard.hpp): counts CRASH-ONLY boots in NVS
+                         (`boot_fails`); past kBootFailThreshold it latches → main.cpp starts WiFi +
+                         web UI + OTA ONLY and skips the BLE/vehicle stack and the MQTT bridge, so a
+                         board that crashes on the vehicle path stays fixable in a browser instead of
+                         needing a USB cable. The heap watchdog's own cap counts only restarts WE
+                         chose; a PANIC loop was entirely uncounted before this. Sharper here than
+                         elsewhere: every boot re-opens the car's polling window, so a reboot loop
+                         drains a parked traction battery. A clean/intentional reboot resets the
+                         count, and a NON-safe-mode boot that stays up kBootHealthyS clears it — the
+                         healthy timer is deliberately NOT armed while safe mode is latched, since
+                         surviving the window with the crashing subsystems switched off says nothing
+                         about the fault (arming it there would give a 4-crashes-then-one-quiet-boot
+                         cycle, not a latch). Drives /status.sys.safe_mode
+heap_trend.cpp         → storage + mutex for the board's own 24-hour memory trend (GET /heap), fed
+                         from the SAME two samples loop_task hands the heap watchdog, so the chart a
+                         human reads and the threshold the firmware acts on cannot disagree. Fixed
+                         .bss ring (~1.2 KB), never heap — a diagnostic must not compete for the
+                         largest CONTIGUOUS block it exists to measure. Answers the one question a
+                         spot value cannot: is the heap DRIFTING (a leak is a slope; fragmentation is
+                         the two lines separating). Mechanics in logic/heap_history.hpp
+config_blob.cpp        → the ONE atomic credential/service entry in NVS (logic/config_store.hpp):
+                         WiFi creds + the one-shot rollback backup + VIN + mqtt_uri + syslog_uri as
+                         a single CRC-checked nvs_set_blob, all-or-nothing across BOTH a write
+                         failure and a power cut. Replaces per-key writes whose tear was reportable
+                         but not undoable (the setup portal wrote ssid/pass/vin as three commits).
+                         READS the legacy per-key layout as a fallback when the blob is absent or
+                         fails its CRC — without that, this change would strand every deployed
+                         device's WiFi and VIN on the first OTA — and mirrors back to those keys on
+                         save so a DOWNGRADE still finds its config. Deliberately excludes ble_mac /
+                         last_time / reboot_why / disp_rot: different writers, and a whole-struct
+                         writer reverts another owner's field from a stale snapshot
 diag_log.cpp           → in-RAM console ring served by GET /diag (static .bss buffer); its
                          esp_log capture hook also feeds syslog.cpp, so every captured line
                          is forwarded too
@@ -196,7 +243,7 @@ Never edit files in `managed_components/` — they are regenerated.
 
 | Namespace   | Content                                     |
 |-------------|---------------------------------------------|
-| `tesla_cfg` | WiFi SSID/pass, VIN, BLE MAC, `mqtt_uri`, `syslog_uri`, `last_time`, `reboot_why` (why WE ended the last boot — `heap:<n>` = the heap watchdog, n = consecutive such restarts; read+cleared at boot, surfaced once as `/status.last_reboot`), `disp_rot` (on-device display BOOT-rotation index 0..3; T-Dongle-S3; migrates old `disp_flip`) (runtime cfg) |
+| `tesla_cfg` | `cfg` — the **atomic credential/service blob** (`logic/config_store.hpp`, `main/config_blob.cpp`): WiFi SSID/pass + the **one-shot rollback backup** (previous SSID/pass + the `rolled_back` outcome marker), VIN, `mqtt_uri`, `syslog_uri` — ONE CRC-checked `nvs_set_blob`, so a credential save is all-or-nothing across a write failure AND a power cut. The legacy per-key names (`wifi_ssid`/`wifi_pass`/`vin`/…) are still READ as the fallback when the blob is absent (a device that has not saved since upgrading) or fails its CRC, and are mirrored on save so a downgrade still finds its config. Plus the boot-loop **crash counter** `boot_fails` (safe_mode.cpp) and the separate-owner keys: BLE MAC, `last_time`, `reboot_why` (why WE ended the last boot — `heap:<n>` = the heap watchdog, n = consecutive such restarts; read+cleared at boot, surfaced once as `/status.last_reboot`), `disp_rot` (on-device display BOOT-rotation index 0..3; T-Dongle-S3; migrates old `disp_flip`) (runtime cfg) |
 | `tesla_ble` | Private key (`private_key`), VCSEC session (`sess_vcsec`), Info session (`sess_info`), `key_created`, `paired_at` — the `sess_*` names come from the ≤15-char key mapping in `nvs_storage.cpp`. The `sess_*` blobs are only REUSABLE across a reboot if the wall clock is restored **before** `VehicleController::init()` (tesla-ble rejects a session older than 1 h and computes the age against `time(nullptr)`, which underflows at 1970) — hence `restore_clock_from_nvs()` early in `main.cpp`, see docs/ARCHITECTURE.md |
 
 ## Commands Implemented
@@ -231,12 +278,19 @@ GET  /  (alias /index.html)                    # embedded web UI (gzipped into t
 POST /api/1/vehicles/{VIN}/command/{command}   # execute command
 GET  /api/1/vehicles/{VIN}/vehicle_data        # charge state
 GET  /api/1/vehicles/{VIN}/body_controller_state
-GET  /status                                   # web-UI JSON snapshot (wifi, ble, mqtt, syslog, vehicle cache, read-only telemetry under "tele"). The web UI's live feed — app.js polls it every 4 s (cache-busted, no-store)
+GET  /status                                   # web-UI JSON snapshot (wifi, ble, mqtt, syslog, vehicle cache, read-only telemetry under "tele"). The web UI's live feed — app.js polls it every 4 s (cache-busted, no-store).
+                                               # ALWAYS carries sys{free_heap,min_free_heap,largest_block,uptime_s,wifi_reconnects,reset_reason,safe_mode} — the block a remote triage reads first, and the one that was missing entirely on a device whose dominant failure mode is heap exhaustion.
+                                               # last_crash{reason,reason_code,fault,coredump,task,pc,backtrace[],corrupted,elf_sha256} appears ONLY when the boot is notable (a fault reset, or a dump for this build still in flash, not dismissed) — presence is the signal.
+GET  /status?redact=1                          # the BUG-REPORT form: the six reporter-identifying values (vin, ip, wifi.ssid, ble.addr + every scanned neighbour's, mqtt.broker, syslog.host) read "<redacted>". The KEY is always kept — an omitted field forges an "older build" signal. Opt-in per request; the dashboard polls the unredacted payload
 POST /scan                                     # start a time-limited BLE discovery scan
 POST /mcp                                      # MCP server (Streamable HTTP, stateless JSON-RPC 2.0; GET → 405, no SSE).
                                                # Tools = the run-on-key charging command set + read-only get_vehicle_state
                                                # (cache-only, never wakes the car). Core logic in main/logic/mcp.hpp (host-tested).
-GET  /diag                                     # plain-text in-memory diag log (?verbose=1 raw RX / ?verbose=0 off, ?clear=1 reset)
+GET  /diag                                     # plain-text in-memory diag log (?verbose=1 raw RX / ?verbose=0 off, ?clear=1 reset, ?redact=1 bug-report form)
+GET  /coredump[?clear=1]                       # stream the raw crash image (chunked octet-stream; 404 if none). Decode offline against the matching-version .elf; ?clear=1 erases the partition
+POST /crash/dismiss                            # acknowledge + DELETE this boot's crash report (erase first, mark second). POST, not GET: it destroys the one artifact a bug report needs
+GET  /heap                                     # the board's 24-hour free/largest-block trend {dt,b0,unit,scale,free[],largest[]} — tenths of a KiB, null = no sample
+POST /set_wifi                                 # change WiFi credentials over the LAN + reboot ({"ssid","pass"}); stashes the previous pair as a one-shot rollback backup
 POST /gen_keys[?force=1]                       # generate key (refuses overwrite w/o force)
 POST /send_key                                 # pair with vehicle (Charging Manager only)
 POST /set_time                                 # set wall clock from the browser ({"ms":<epoch>}); fallback when NTP unreachable
@@ -387,6 +441,35 @@ and never connects/enrols. **Full detail: [`docs/ARCHITECTURE.md`](../docs/ARCHI
   not in-place recovery — the researched rejection of subsystem deinit/reinit, ballast blocks,
   the failed-alloc hook and defragmentation, with sources: [`docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md).**
 
+## Crash forensics + the recovery ladder
+
+Four mechanisms, deliberately separate, because each is blind to what the others catch. Full
+catalog: [`docs/FEATURES.md`](../docs/FEATURES.md).
+
+- **Heap watchdog** (`logic/heap_watchdog.hpp`) — internal `largest_block` under 4 KB for 5 unbroken
+  minutes ⇒ deliberate restart, `reboot_why=heap:<n>`, capped at 5. Catches the WEDGE.
+- **Task watchdog** (60 s, `PANIC=y`; `vehicle_loop` + `mqtt_pub` subscribed) — catches a task
+  blocked forever on a semaphore, the BLE stack or a socket, with the heap looking perfectly
+  healthy. The budget is sized against the LONGEST legitimate block, which is not the 50 ms loop
+  cadence but the vehicle mutex (20 s for a command, 30 s for `pair()`).
+- **Safe mode** (`logic/boot_guard.hpp`, `safe_mode.cpp`) — 4 consecutive CRASH boots ⇒ WiFi + web UI
+  + OTA only. The heap watchdog's cap counts only restarts WE chose; a panic loop was uncounted
+  before this, and on this device every boot re-opens the car's polling window. It LATCHES: only a
+  non-fault reset (an OTA install, a `/set_*` save, a power-cycle) clears the counter, so it ends
+  when someone acts on it.
+- **Crash capture** (`diag_crash.cpp`, `logic/crashinfo.hpp`) — reset reason always; the core-dump
+  summary where the partition exists. Surfaced on `/status.last_crash`, over MQTT, and replayed to
+  syslog once per boot (`logic/bootlog.hpp`) because `/diag` is RAM and does not survive the reboot
+  it would explain. The BACKTRACE is **Xtensa-only** (esp32/esp32s3): IDF declares
+  `esp_core_dump_bt_info_t` per ARCHITECTURE, and on RISC-V (c3/c6) it is a raw stack dump rather
+  than an unwound PC array — so there `last_crash` carries reason/task/PC/elf_sha and leaves the
+  unwinding to the offline decoder reading `GET /coredump`. Two of four targets are RISC-V, so this
+  is half the fleet, not an edge case.
+
+**The coredump partition does NOT reach already-deployed devices** — a partition table is not part of
+an OTA image. Those boards keep reporting the reset REASON (which needs no partition) and simply
+report `coredump:false`; only a USB/web-installer full flash adds it. That is a supported state.
+
 ## Typical Debugging
 
 ```bash
@@ -398,6 +481,17 @@ curl -X POST http://<ESP32-IP>/api/1/vehicles/<VIN>/command/wake_up
 
 # Check vehicle data
 curl http://<ESP32-IP>/api/1/vehicles/<VIN>/vehicle_data
+
+# Pull a crash dump (if any) + decode it offline against the matching-version .elf
+curl http://<ESP32-IP>/coredump -o coredump.bin
+
+# The board's own 24-hour memory trend — is the heap DRIFTING? (a leak is a slope;
+# fragmentation is free[] holding steady while largest[] sinks toward the 4 KB floor)
+curl http://<ESP32-IP>/heap | jq
+
+# A shareable bug report: the device redacts VIN/SSID/IP/BLE-MAC/broker/syslog-host itself
+curl "http://<ESP32-IP>/status?redact=1" | jq
+curl "http://<ESP32-IP>/diag?redact=1"
 
 # Erase NVS (reset key + sessions) — host esptool
 esptool --chip esp32s3 -p <port> erase_flash   # or esp32 / esp32c3 / esp32c6

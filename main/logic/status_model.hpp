@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <cstdio>
 #include <string>
 #include <vector>
 
@@ -61,6 +62,10 @@ struct Inputs {
     std::string wifi_ssid;
     int         wifi_rssi{0};
     std::string wifi_std;         // friendly 802.11 generation; empty = omit
+    // The last POST /set_wifi was UNDONE by the credential rollback. Sticky until the next
+    // /set_wifi, and the ONLY trace of it: the rollback reboots, so the SSID on screen afterwards
+    // is simply the old one again and nothing else would say the new one was ever tried.
+    bool        wifi_rolled_back{false};
 
     // MQTT / HA bridge.
     bool        mqtt_configured{false}, mqtt_connected{false}, mqtt_tls{false};
@@ -109,13 +114,67 @@ struct Inputs {
     // restarted us; n = how many consecutive such restarts). Empty for every ordinary boot —
     // power-on, crash, OTA — so the field is emitted only when there is something to report.
     std::string last_reboot;
+
+    // ── sys — board facts that are ALWAYS present ─────────────────────────────────────────────
+    // Unlike everything above, none of this depends on a link, a pairing or a broker: it is what
+    // the device can always say about itself, which is exactly what a remote triage needs first.
+    // The heap figures were previously absent from /status ENTIRELY, on a device whose dominant
+    // failure mode is heap exhaustion — so the primary API could not report the number that causes
+    // its reboots. largest_block is the one that matters (it is what the heap watchdog gates on);
+    // free_heap beside it is what distinguishes a leak from fragmentation.
+    uint32_t    free_heap{0};
+    uint32_t    min_free_heap{0};
+    uint32_t    largest_block{0};
+    uint32_t    uptime_s{0};
+    uint32_t    wifi_reconnects{0};
+    std::string reset_reason;          // logic/reset_reason.hpp slug for THIS boot
+    bool        safe_mode{false};      // the latched boot-loop recovery state (safe_mode.cpp)
+
+    // ── last_crash — emitted only when the boot is NOTABLE ────────────────────────────────────
+    // have_crash is crash_is_notable(): a real fault reset, or a dump for this build still sitting
+    // in flash, and not dismissed. An ordinary boot emits nothing at all rather than a block full
+    // of zeroes that reads like a crash with no information in it.
+    bool                  have_crash{false};
+    std::string           crash_reason;      // slug, e.g. "panic" / "task_wdt" / "brownout"
+    int                   crash_reason_code{0};
+    bool                  crash_fault{false};
+    bool                  crash_coredump{false};   // a dump for THIS build is downloadable now
+    bool                  crash_corrupted{false};  // the unwinder flagged the backtrace unreliable
+    std::string           crash_task;
+    uint32_t              crash_pc{0};
+    std::vector<uint32_t> crash_backtrace;
+    std::string           crash_elf_sha256;        // the RUNNING build — matches a dump to its .elf
+
+    // ── redaction ─────────────────────────────────────────────────────────────────────────────
+    // GET /status?redact=1 — the bug-report form of this payload. Six values identify the reporter
+    // or their car and are substituted with "<redacted>": the VIN (the single most identifying
+    // value this device holds — it names one specific car and is an input to Tesla's own APIs), the
+    // device IP, the WiFi SSID, the vehicle's BLE MAC (and every scanned neighbour's, which are
+    // other people's devices in the reporter's home), the MQTT broker and the syslog host.
+    //
+    // The KEY is always still emitted with a placeholder VALUE. Dropping the field instead would
+    // forge an "older build that never had it" signal, and "which build produced this?" is the
+    // first question anyone reading a frozen report has to answer.
+    //
+    // Applied HERE rather than at the gather (which is where the sibling firmware does it) because
+    // here it is inside the golden-pinned contract, so the test proves which fields are covered.
+    // The sibling's reason not to — that a post-processing pass over the finished JSON needs a
+    // second full-size buffer — is about the pass, not about substituting at the point of emission.
+    bool redact{false};
 };
+
+// Substitute an identifying value when the caller asked for a redacted snapshot. One helper so
+// every redacted field reads identically at the call site and none can be missed by using the raw
+// value by accident.
+inline const char* redacted_or(const std::string& v, bool redact) {
+    return redact ? "<redacted>" : v.c_str();
+}
 
 template <typename E>
 inline void emit_status(const Inputs& in, E& e) {
     // ── Device / pairing scalars ──────────────────────────────────────────────
-    e.str("vin",     in.vin.c_str());
-    e.str("ip",      in.ip.c_str());
+    e.str("vin",     redacted_or(in.vin, in.redact));
+    e.str("ip",      redacted_or(in.ip, in.redact));
     e.str("version", in.version.c_str());
     e.boolean("key_present", in.key_present);
     e.str("key_fingerprint", in.key_fingerprint.c_str());
@@ -127,10 +186,14 @@ inline void emit_status(const Inputs& in, E& e) {
     // ── wifi ──────────────────────────────────────────────────────────────────
     e.obj_begin("wifi");
     if (in.wifi_connected) {
-        e.str("ssid", in.wifi_ssid.c_str());
+        e.str("ssid", redacted_or(in.wifi_ssid, in.redact));
         e.num("rssi", in.wifi_rssi);
         if (!in.wifi_std.empty()) e.str("std", in.wifi_std.c_str());
     }
+    // OUTSIDE the connected branch: a rollback means the device is back on its OLD network, so it
+    // is reported precisely when wifi IS connected — but it must also survive the case where it is
+    // not. Emitted only when true, so its presence is the signal.
+    if (in.wifi_rolled_back) e.boolean("rolled_back", true);
     e.obj_end();
 
     // ── mqtt ──────────────────────────────────────────────────────────────────
@@ -138,7 +201,9 @@ inline void emit_status(const Inputs& in, E& e) {
     e.boolean("configured", in.mqtt_configured);
     e.boolean("connected",  in.mqtt_connected);
     e.boolean("tls",        in.mqtt_tls);
-    if (!in.mqtt_broker.empty()) e.str("broker", in.mqtt_broker.c_str());
+    // Substituted, never omitted: these two are emitted only when non-empty, so clearing them
+    // would positively assert "not configured" — a different and wrong claim about the device.
+    if (!in.mqtt_broker.empty()) e.str("broker", redacted_or(in.mqtt_broker, in.redact));
     if (!in.mqtt_error.empty())  e.str("error",  in.mqtt_error.c_str());
     e.obj_end();
 
@@ -148,7 +213,7 @@ inline void emit_status(const Inputs& in, E& e) {
     e.boolean("resolved",   in.syslog_resolved);
     e.boolean("reachable",  in.syslog_reachable);
     if (!in.syslog_host.empty()) {
-        e.str("host", in.syslog_host.c_str());
+        e.str("host", redacted_or(in.syslog_host, in.redact));
         e.num("port", in.syslog_port);
     }
     if (!in.syslog_error.empty()) e.str("error", in.syslog_error.c_str());
@@ -214,12 +279,14 @@ inline void emit_status(const Inputs& in, E& e) {
     }
     if (in.ble_connected) {
         if (in.have_ble_rssi) e.num("rssi", in.ble_rssi);
-        e.str("addr", in.ble_addr.c_str());
+        e.str("addr", redacted_or(in.ble_addr, in.redact));
     } else {
         e.arr_begin("devices");
         for (const BleDevice& d : in.devices) {
             e.obj_begin(nullptr);
-            e.str("addr", d.addr.c_str());
+            // Scanned NEIGHBOURS, not just the car: these are other people's devices in the
+            // reporter's home, so they are redacted for the same reason the car's own MAC is.
+            e.str("addr", redacted_or(d.addr, in.redact));
             e.str("name", d.name.c_str());
             e.num("rssi", d.rssi);
             e.boolean("connectable", d.connectable);
@@ -266,6 +333,53 @@ inline void emit_status(const Inputs& in, E& e) {
     }
     if (in.have_last_seen) e.num("last_seen_s", (double)in.last_seen_s);
     if (!in.last_reboot.empty()) e.str("last_reboot", in.last_reboot.c_str());
+
+    // ── sys — always present ──────────────────────────────────────────────────
+    // Deliberately unconditional, unlike every block above it: a device with no pairing, no broker
+    // and no link still has to be able to say how it is doing. This is the block a remote triage
+    // reads first, and before it existed /status could not report the heap at all — on a device
+    // whose watchdog restarts it for running out of exactly that.
+    e.obj_begin("sys");
+    e.num("free_heap",       (double)in.free_heap);
+    e.num("min_free_heap",   (double)in.min_free_heap);
+    e.num("largest_block",   (double)in.largest_block);
+    e.num("uptime_s",        (double)in.uptime_s);
+    e.num("wifi_reconnects", (double)in.wifi_reconnects);
+    e.str("reset_reason",    in.reset_reason.c_str());
+    e.boolean("safe_mode",   in.safe_mode);
+    e.obj_end();
+
+    // ── last_crash — only when this boot is NOTABLE ───────────────────────────
+    // Absent on an ordinary boot, so its mere PRESENCE is the signal. `fault` separates the two
+    // reasons it can appear: a real crash reset, versus a dump for this build still sitting in
+    // flash from an earlier one — an orphan dump alone is not "restarted after a crash", and a UI
+    // that said so would send the reader after the wrong event.
+    if (in.have_crash) {
+        e.obj_begin("last_crash");
+        e.str("reason",      in.crash_reason.c_str());
+        e.num("reason_code", (double)in.crash_reason_code);
+        e.boolean("fault",     in.crash_fault);
+        e.boolean("coredump",  in.crash_coredump);
+        if (!in.crash_task.empty()) e.str("task", in.crash_task.c_str());
+        if (in.crash_pc != 0)       e.num("pc", (double)in.crash_pc);
+        if (!in.crash_backtrace.empty()) {
+            // Hex STRINGS, not numbers: a PC is an address, it is read and pasted as 0x…, and a
+            // JSON number would render it in decimal in every viewer that touches this payload.
+            e.arr_begin("backtrace");
+            for (uint32_t pc : in.crash_backtrace) {
+                char buf[16];
+                std::snprintf(buf, sizeof(buf), "0x%08x", (unsigned)pc);
+                e.str(nullptr, buf);
+            }
+            e.arr_end();
+            // Emitted only alongside a backtrace, because that is the only thing it qualifies: it
+            // says the frames below are unreliable, and on its own it would look like a verdict
+            // about the crash itself.
+            if (in.crash_corrupted) e.boolean("corrupted", true);
+        }
+        if (!in.crash_elf_sha256.empty()) e.str("elf_sha256", in.crash_elf_sha256.c_str());
+        e.obj_end();
+    }
 }
 
 }  // namespace status

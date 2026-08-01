@@ -34,10 +34,16 @@
 #include "http_server.hpp"
 #include "provisioning.hpp"
 #include "diag_log.hpp"
+#include "diag_crash.hpp"
+#include "safe_mode.hpp"
+#include "config_blob.hpp"
+#include "ota_update.hpp"
+#include "logic/wifi_rollback.hpp"
 #include "mqtt_ha.hpp"
 #include "syslog.hpp"
 #include "display.hpp"
 #include "led_status.hpp"
+#include "logic/bootlog.hpp"
 
 static const char* MDNS_HOSTNAME = "tesla-key-esp32";  // → http://tesla-key-esp32.local
 
@@ -81,7 +87,10 @@ static void on_time_sync(struct timeval*) {
     const bool first_sync = !s_ntp_synced.exchange(true);
     if (first_sync && s_cfg_store) {
         try {
-            s_cfg_store->save_str("last_time", std::to_string((long long)time(nullptr)));
+            if (!s_cfg_store->save_str("last_time", std::to_string((long long)time(nullptr)))) {
+                ESP_LOGW(TAG, "NTP time synced but not cached to NVS — a headless reboot with "
+                              "NTP unreachable will come up at 1970");
+            }
         } catch (const std::exception& e) {
             ESP_LOGE(TAG, "NTP callback could not cache time (%s)", e.what());
         } catch (...) {
@@ -135,12 +144,29 @@ bool wifi_is_connected() { return s_wifi_connected.load(); }
 // reconnect forever, never surrender to the setup portal).
 static std::atomic<bool> s_wifi_ever_connected{false};
 
+// Cumulative WiFi RE-connects since boot (the first association of a boot is not counted). A link
+// that drops and recovers is indistinguishable from a healthy one in any instantaneous reading, so
+// without this a flapping AP is only ever caught by someone watching at the right second. Published
+// as an MQTT diagnostic and reported on /status.
+static std::atomic<unsigned> s_wifi_reconnects{0};
+unsigned wifi_reconnect_count() { return s_wifi_reconnects.load(); }
+
+// The reason code of the most recent WIFI_EVENT_STA_DISCONNECTED. Written on the event task, read
+// by the boot window in wifi_connect() — an atomic, because the credential-rollback decision reads
+// it while associations are still churning. 0 = nothing has failed yet.
+static std::atomic<int> s_last_disco_reason{0};
+
 static void wifi_event_handler(void*, esp_event_base_t base,
                                 int32_t event_id, void* data) {
     if (base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
         esp_wifi_connect();
     } else if (base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
         s_wifi_connected = false;
+        // Keep the reason: it is the only evidence available about WHY the association failed, and
+        // the credential-rollback decision turns on the difference between "the AP refused these
+        // credentials" and "the AP was not there". Stored, never acted on here — this runs on the
+        // event task and the decision belongs to the boot window in wifi_connect().
+        if (data) s_last_disco_reason.store(((wifi_event_sta_disconnected_t*)data)->reason);
         if (!s_wifi_ever_connected && s_retry_num >= MAX_RETRY) {
             // Never been online AND the boot retry budget is spent → credentials are
             // almost certainly wrong. Stop so wifi_connect() times out and falls back
@@ -160,13 +186,24 @@ static void wifi_event_handler(void*, esp_event_base_t base,
         ip_event_got_ip_t* ev = (ip_event_got_ip_t*)data;
         ESP_LOGI(TAG, "IP: " IPSTR, IP2STR(&ev->ip_info.ip));
         s_retry_num = 0;
+        // Retire the stored disconnect reason: an earlier refusal must not outlive the association
+        // that disproved it, or a device that got on the network at attempt three still rolls its
+        // credentials back on the evidence of attempt one (logic/wifi_rollback.hpp states this as
+        // the caller's obligation).
+        s_last_disco_reason.store(0);
         s_wifi_connected = true;
+        // Count the RE-connects only: s_wifi_ever_connected is still false on the first lease of a
+        // boot, so a healthy device reports 0 rather than a permanent 1 that would hide a real flap.
+        if (s_wifi_ever_connected.load()) s_wifi_reconnects.fetch_add(1);
         s_wifi_ever_connected = true;
         xEventGroupSetBits(s_wifi_events, WIFI_CONNECTED_BIT);
     }
 }
 
-static bool wifi_connect(const char* ssid, const char* password) {
+// rollback_pending: a /set_wifi change is on trial this boot, so a failure here is not simply
+// "fall back to the setup portal" — it may mean restoring the previous credentials. That changes
+// how long we are willing to wait and why, hence the parameter rather than a second function.
+static bool wifi_connect(const char* ssid, const char* password, bool rollback_pending) {
     s_wifi_events = xEventGroupCreate();
     if (!s_wifi_events) boot_fatal("WiFi event group");
 
@@ -220,16 +257,47 @@ static bool wifi_connect(const char* ssid, const char* password) {
     // window is enlarged (sdkconfig.defaults), which together clear it in ~1–2 RTTs.
     ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_MIN_MODEM));
 
-    EventBits_t bits = xEventGroupWaitBits(s_wifi_events,
-        WIFI_CONNECTED_BIT | WIFI_FAIL_BIT, pdFALSE, pdFALSE,
-        pdMS_TO_TICKS(30000));
+    // Without a pending credential change this is the long-standing behaviour: one 30 s budget,
+    // then fall back to the setup portal.
+    if (!rollback_pending) {
+        EventBits_t bits = xEventGroupWaitBits(s_wifi_events,
+            WIFI_CONNECTED_BIT | WIFI_FAIL_BIT, pdFALSE, pdFALSE,
+            pdMS_TO_TICKS(tk::kWifiBootWindowS * 1000));
 
-    if (bits & WIFI_CONNECTED_BIT) {
-        ESP_LOGI(TAG, "WiFi connected to '%s'", ssid);
-        return true;
+        if (bits & WIFI_CONNECTED_BIT) {
+            ESP_LOGI(TAG, "WiFi connected to '%s'", ssid);
+            return true;
+        }
+        ESP_LOGE(TAG, "WiFi connection failed");
+        return false;
     }
-    ESP_LOGE(TAG, "WiFi connection failed");
-    return false;
+
+    // A /set_wifi change is on trial. The deadline is REASON-AWARE, because rolling back is
+    // destructive — it deletes credentials the user just typed. Only an AP that SUSTAINS an
+    // authentication refusal across two checkpoints spends them; anything else (an absent SSID
+    // because the router is still rebooting, a slow DHCP) is not evidence against the credentials
+    // and gets the full grace window instead. The policy is the host-tested
+    // logic/wifi_rollback.hpp; this loop only supplies the samples.
+    tk::RollbackWatch watch{};
+    for (int elapsed = 0;; elapsed += (int)tk::kWifiBootWindowS) {
+        EventBits_t bits = xEventGroupWaitBits(s_wifi_events,
+            WIFI_CONNECTED_BIT, pdFALSE, pdFALSE,
+            pdMS_TO_TICKS(tk::kWifiBootWindowS * 1000));
+        if (bits & WIFI_CONNECTED_BIT) {
+            ESP_LOGI(TAG, "WiFi connected to '%s'", ssid);
+            return true;
+        }
+        const int checked = elapsed + (int)tk::kWifiBootWindowS;
+        const tk::DiscoClass cls = tk::disco_class(s_last_disco_reason.load());
+        if (tk::rollback_step(watch, cls, checked) == tk::RollbackAction::RollBack) {
+            ESP_LOGE(TAG, "WiFi still not up %d s after a credential change (last disconnect "
+                          "reason %d) — rolling back to the previous network",
+                     checked, s_last_disco_reason.load());
+            return false;
+        }
+        ESP_LOGW(TAG, "WiFi not up yet %d s after a credential change (last disconnect reason %d) "
+                      "— still waiting before rolling back", checked, s_last_disco_reason.load());
+    }
 }
 
 // ─── WiFi connectivity watchdog ───────────────────────────────────────────────
@@ -450,6 +518,14 @@ extern "C" void app_main() {
     const unsigned boot_min_free    = (unsigned) esp_get_minimum_free_heap_size();
     const unsigned boot_largest     = (unsigned) heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
 
+    // Capture WHAT the last run left behind, immediately after the heap baseline above and before
+    // anything else allocates: the reset reason (always) plus, where the coredump partition exists,
+    // the dump SUMMARY — crashed task, PC, backtrace, the build that wrote it. Parsing it costs a
+    // ~2 KB transient allocation, which is why it belongs here rather than on a request path where
+    // the heap is already committed to WiFi + NimBLE + MQTT. Everything downstream — /status,
+    // safe mode, the syslog boot replay — reads this one cache.
+    tk::diag_crash_capture();
+
     // NimBLE logs every GAP/GATT procedure at INFO — tens of lines per connect.
     // That noise buries the pairing/key-lifecycle messages in /diag (and fills the
     // ring fast). Raise its threshold to WARN so /diag reads as a clean lifecycle log;
@@ -476,6 +552,16 @@ extern "C" void app_main() {
     // self-healed at 04:00 must be able to say so, or the next investigation starts from scratch
     // exactly the way this one did.
     VehicleController::set_boot_reboot_reason(VehicleController::take_reboot_reason(config_store));
+
+    // Boot-loop guard. The heap watchdog bounds the restarts IT chooses; this bounds the ones the
+    // SYSTEM forced — a panic, a brownout or a task-watchdog loop, none of which were counted by
+    // anything before. Past the threshold it latches safe mode and app_main below brings up WiFi +
+    // web UI + OTA ONLY, so a device that crashes on the vehicle path stays reachable in a browser
+    // instead of needing a USB cable. It also stops each boot re-opening the car's polling window,
+    // which is what turns a reboot loop into a flat traction battery.
+    // A deliberate esp_restart() (a /set_* save, an OTA) reports ESP_RST_SW and is NOT a fault, so
+    // ordinary reboots never count toward it.
+    const bool safe_mode = tk::safe_mode_begin(config_store, tk::diag_crash_info().fault);
 
     // UDP Syslog forwarder for the diag log (NVS "syslog_uri" / CONFIG_TESLA_SYSLOG_SERVER;
     // "" = disabled). Started before WiFi so it captures boot-time log lines too — its own
@@ -507,11 +593,14 @@ extern "C" void app_main() {
                  VehicleController::boot_reboot_reason().c_str());
     }
 
-    // Resolve WiFi credentials: NVS overrides Kconfig defaults
-    static std::string ssid     = CONFIG_TESLA_WIFI_SSID;
-    static std::string password = CONFIG_TESLA_WIFI_PASSWORD;
-    config_store.load_str("wifi_ssid", ssid);
-    config_store.load_str("wifi_pass", password);
+    // Resolve WiFi credentials: the atomic config blob (falling back to the legacy per-key layout
+    // on a device that has not saved since upgrading) overrides the Kconfig defaults.
+    static tk::ConfigBlob cfg_blob;
+    tk::cfg_load(config_store, cfg_blob);
+    static std::string ssid     = cfg_blob.wifi_ssid.empty() ? CONFIG_TESLA_WIFI_SSID
+                                                             : cfg_blob.wifi_ssid;
+    static std::string password = cfg_blob.wifi_ssid.empty() ? CONFIG_TESLA_WIFI_PASSWORD
+                                                             : cfg_blob.wifi_pass;
 
     if (ssid.empty()) {
         ESP_LOGW(TAG, "No WiFi configured — starting setup portal (join WiFi '%s')",
@@ -574,7 +663,11 @@ extern "C" void app_main() {
     // config_store so it can save the discovered MAC. ESSENTIAL: without the controller
     // there is no BLE proxy at all, so a failed init halts boot (and leaves any pending OTA
     // image unconfirmed → rolled back).
-    if (!vehicle.init(vin, ble_client, tesla_store, config_store, ble_mac))
+    // In safe mode the controller is still fully WIRED (so /status, the web UI and the MQTT
+    // snapshot read a coherent object) but its two background tasks are not started — see
+    // vehicle_ctrl.cpp. Skipping init() altogether is the wrong shape: the HTTP server below takes
+    // this controller by reference and would then read a half-constructed one.
+    if (!vehicle.init(vin, ble_client, tesla_store, config_store, ble_mac, /*start_tasks=*/!safe_mode))
         boot_fatal("VehicleController");
 
     // Create the ECDSA key on first boot so a key always exists (and a fingerprint
@@ -612,9 +705,42 @@ extern "C" void app_main() {
     // Connect to WiFi. With stored credentials, a failure is usually a transient
     // outage (e.g. router rebooting), but if it persists (e.g. wrong password),
     // fallback to the setup portal so the user can reconfigure it.
-    if (!wifi_connect(ssid.c_str(), password.c_str())) {
+    if (!wifi_connect(ssid.c_str(), password.c_str(), cfg_blob.wifi_rollback_active)) {
+        if (cfg_blob.wifi_rollback_active) {
+            // The credentials from the last /set_wifi did not work and the grace window is spent.
+            // Restore the pair that DID work and reboot onto it, rather than dropping into the
+            // setup portal — which would require someone to be standing next to the device, the
+            // exact situation being able to change WiFi over the LAN exists to avoid.
+            ESP_LOGE(TAG, "WiFi credential change failed — restoring the previous network and "
+                          "rebooting (reported on /status as wifi.rolled_back)");
+            cfg_blob.wifi_ssid = cfg_blob.wifi_ssid_backup;
+            cfg_blob.wifi_pass = cfg_blob.wifi_pass_backup;
+            cfg_blob.wifi_ssid_backup.clear();
+            cfg_blob.wifi_pass_backup.clear();
+            cfg_blob.wifi_rollback_active = false;
+            cfg_blob.wifi_rolled_back     = true;   // the ONLY trace: the reboot shows the old SSID
+            if (tk::cfg_save(config_store, cfg_blob)) {
+                ota_confirm_pending_image();
+                vTaskDelay(pdMS_TO_TICKS(300));
+                esp_restart();
+            }
+            // The restore lives in NVS alone, so an unpersisted one would be re-decided identically
+            // on every boot — a reboot loop we cannot write our way out of. Fall through to the
+            // portal instead, which at least leaves the device configurable.
+            ESP_LOGE(TAG, "could not persist the credential rollback — falling back to the setup "
+                          "portal rather than rebooting into a loop");
+        }
         ESP_LOGW(TAG, "WiFi connection failed — starting setup portal");
         provisioning_run(config_store); // never returns; reboots on save
+    }
+    // Associated on the new credentials: the trial is over and the backup has done its job. Drop it
+    // so a LATER, unrelated outage can never restore credentials from months ago.
+    if (cfg_blob.wifi_rollback_active) {
+        cfg_blob.wifi_ssid_backup.clear();
+        cfg_blob.wifi_pass_backup.clear();
+        cfg_blob.wifi_rollback_active = false;
+        if (!tk::cfg_save(config_store, cfg_blob))
+            ESP_LOGW(TAG, "WiFi credentials are good but the one-shot backup was not cleared");
     }
     log_heap("wifi");
 
@@ -647,9 +773,17 @@ extern "C" void app_main() {
     // Start NimBLE host. Discovery scanning is manual/time-limited; the client
     // connects on demand when a command is issued. (The controller was set up
     // before WiFi, above.) ESSENTIAL.
-    if (!ble_client.start())
-        boot_fatal("NimBLE");
-    log_heap("ble");
+    // Not in safe mode: NimBLE is the largest, most allocation-heavy subsystem here and the one
+    // every vehicle code path runs through, so a crash loop that safe mode is meant to break out of
+    // is far more likely to live behind it than in the web server. Leaving the host down also frees
+    // the heap it would hold, which is what makes the recovery surface (UI + OTA) comfortable.
+    if (!safe_mode) {
+        if (!ble_client.start())
+            boot_fatal("NimBLE");
+        log_heap("ble");
+    } else {
+        ESP_LOGW(TAG, "SAFE MODE — NimBLE not started");
+    }
 
     // Primary HTTP API (evcc + web UI + MCP). ESSENTIAL: it is the device's whole reason to
     // exist. http_server_start() unwinds a partial registration internally and returns false;
@@ -662,9 +796,16 @@ extern "C" void app_main() {
     // if a broker is configured (NVS "mqtt_uri" / CONFIG_TESLA_MQTT_BROKER_URI); a
     // no-op otherwise. Runs in its own task, independent of evcc/BLE/pairing. OPTIONAL:
     // a failed start degrades to disabled (logged) without stopping boot.
-    if (!mqtt_ha_start(vehicle, config_store))
-        ESP_LOGW(TAG, "MQTT bridge is degraded/disabled (see the error above)");
-    log_heap("mqtt");
+    // Not in safe mode: with the vehicle loop down there is nothing fresh to publish, and the
+    // bridge's TLS path is a second large allocator competing with the OTA that is the whole point
+    // of staying reachable. HA sees the LWT go offline, which is the honest signal.
+    if (!safe_mode) {
+        if (!mqtt_ha_start(vehicle, config_store))
+            ESP_LOGW(TAG, "MQTT bridge is degraded/disabled (see the error above)");
+        log_heap("mqtt");
+    } else {
+        ESP_LOGW(TAG, "SAFE MODE — MQTT bridge not started");
+    }
 
     // On-device status display (LilyGo T-Dongle-S3). No-op unless the board
     // build selects CONFIG_TESLA_DISPLAY_ENABLED — and on esp32s3 also a no-op unless the
@@ -708,7 +849,19 @@ extern "C" void app_main() {
                     tk::kPrioOtaGate, nullptr) != pdPASS)
         boot_fatal("OTA health gate");
 
-    ESP_LOGI(TAG, "tesla-key-esp32 running. API on port 80.");
+    // Clear the crash-boot counter once THIS boot has proven it can stay up under load. A timer,
+    // not a line at the end of app_main: reaching here proves the device initialised, while the
+    // crashes this guards against happen minutes in — an end-of-init clear would have declared
+    // exactly those boots healthy and the counter would never reach its threshold.
+    tk::safe_mode_arm_healthy_timer(config_store);
+
+    if (safe_mode) {
+        ESP_LOGW(TAG, "tesla-key-esp32 running in SAFE MODE on port 80 — web UI, /status and OTA "
+                      "are up; BLE, pairing, commands and MQTT are DOWN. Fix the configuration or "
+                      "install a newer build, then reboot.");
+    } else {
+        ESP_LOGI(TAG, "tesla-key-esp32 running. API on port 80.");
+    }
     // Main task is no longer needed; Vehicle loop + HTTP server run in their own tasks.
     vTaskDelete(nullptr);
   } catch (const std::exception& e) {

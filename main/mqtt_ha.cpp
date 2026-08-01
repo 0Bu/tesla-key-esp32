@@ -6,6 +6,10 @@
 #include "logic/link_state.hpp"
 #include "task_config.hpp"
 #include "logic/ha_templates.hpp"
+#include "diag_crash.hpp"
+#include "safe_mode.hpp"
+#include <esp_heap_caps.h>
+#include <esp_task_wdt.h>
 
 #include <atomic>
 #include <string>
@@ -32,6 +36,15 @@ static const char* TAG = "mqtt_ha";
 // so it's never read mid-association (concurrent read of the half-built AP record faults —
 // LoadProhibited/EXCVADDR=0x1).
 bool wifi_is_connected();
+
+// Defined in main.cpp: cumulative WiFi RE-connects since boot. A flapping AP is invisible in any
+// instantaneous "connected" reading, which is why the counter exists and why it is published.
+unsigned wifi_reconnect_count();
+
+// Cumulative broker RE-connects since boot (the first connect of a boot is not counted). Written
+// from the esp-mqtt event task, read by the publisher task — an atomic, since neither may take a
+// lock on those paths.
+static std::atomic<unsigned> s_reconnects{0};
 
 // ─── Module state ─────────────────────────────────────────────────────────────
 static esp_mqtt_client_handle_t s_client = nullptr;
@@ -153,6 +166,33 @@ static const Entry ENTRIES[] = {
     { D_DEVICE,  "sensor",        "uptime",         "Last boot",           "boot_time",      "timestamp", nullptr,nullptr,      "diagnostic", false },
     { D_DEVICE,  "sensor",        "free_heap",      "Free heap",           "free_heap",      "data_size", "B",   "measurement", "diagnostic", false },
     { D_DEVICE,  "sensor",        "firmware",       "Firmware",            "version",        nullptr,     nullptr,nullptr,      "diagnostic", false },
+
+    // ── Why the device last (re)booted, and whether it is still healthy ──────────────────────
+    // These exist because a reboot used to be completely unattributable from outside the device:
+    // esp_reset_reason() was read at boot and printed once, so a board that restarts weekly was
+    // indistinguishable from a board that restarts weekly for a REASON.
+    // The reason rides as BOTH a readable slug and a NUMBER on purpose: a metrics consumer keeps
+    // numeric fields and drops strings, so the slug alone is invisible in exactly the store where
+    // "how many panics this week" is the question worth asking.
+    { D_DEVICE,  "sensor",        "reset_reason",   "Reset reason",        "reset_reason",   nullptr,     nullptr,nullptr,      "diagnostic", false },
+    { D_DEVICE,  "sensor",        "reset_code",     "Reset reason code",   "reset_reason_code",nullptr,   nullptr,"measurement","diagnostic", false },
+    { D_DEVICE,  "binary_sensor", "safe_mode",      "Safe mode",           "safe_mode",      "problem",   nullptr,nullptr,      "diagnostic", true  },
+    { D_DEVICE,  "binary_sensor", "crash_dump",     "Crash dump waiting",  "crash_dump",     "problem",   nullptr,nullptr,      "diagnostic", true  },
+
+    // ── The two heap numbers the firmware itself acts on ─────────────────────────────────────
+    // free_heap above is the friendly one and the least useful: the binding limit on this chip is
+    // the largest CONTIGUOUS block, which is what logic/heap_watchdog.hpp gates its restart on. The
+    // two together are also what distinguishes a LEAK (both fall) from FRAGMENTATION (they
+    // separate) — a distinction no single number can carry.
+    { D_DEVICE,  "sensor",        "largest_block",  "Largest free block",  "largest_block",  "data_size", "B",   "measurement", "diagnostic", false },
+    { D_DEVICE,  "sensor",        "min_free_heap",  "Min free heap",       "min_free_heap",  "data_size", "B",   "measurement", "diagnostic", false },
+
+    // ── Link churn ───────────────────────────────────────────────────────────────────────────
+    // Cumulative RE-connects since boot. A link that drops and recovers looks identical to a
+    // healthy one in any instantaneous reading — connected is connected — so without a counter a
+    // flapping AP or broker is invisible until someone happens to watch at the wrong second.
+    { D_DEVICE,  "sensor",        "wifi_reconn",    "WiFi reconnects",     "wifi_reconnects","data_size", nullptr,"total_increasing","diagnostic", false },
+    { D_DEVICE,  "sensor",        "mqtt_reconn",    "MQTT reconnects",     "mqtt_reconnects","data_size", nullptr,"total_increasing","diagnostic", false },
 };
 
 // ─── Publish helpers ──────────────────────────────────────────────────────────
@@ -372,6 +412,25 @@ static void publish_state() {
         }
         cJSON_AddNumberToObject(o, "free_heap", (double)esp_get_free_heap_size());
         cJSON_AddStringToObject(o, "version",   esp_app_get_description()->version);
+
+        // INTERNAL caps for both, matching the heap watchdog and the /heap trend exactly: plain
+        // 8BIT would report any PSRAM too and make such a board look permanently healthy.
+        cJSON_AddNumberToObject(o, "largest_block",
+                                (double)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL));
+        cJSON_AddNumberToObject(o, "min_free_heap",
+                                (double)heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL));
+
+        const tk::CrashInfo ci = tk::diag_crash_info_live();
+        cJSON_AddStringToObject(o, "reset_reason",      tk::reset_reason_slug(ci.reset_code));
+        cJSON_AddNumberToObject(o, "reset_reason_code", (double)ci.reset_code);
+        // "a dump for THIS build is downloadable right now" — re-read from flash per publish, since
+        // GET /coredump?clear=1 can erase it mid-session and a latched `true` would leave HA
+        // reporting a crash whose evidence is gone.
+        cJSON_AddStringToObject(o, "crash_dump", ci.coredump ? "ON" : "OFF");
+        cJSON_AddStringToObject(o, "safe_mode",  tk::safe_mode_active() ? "ON" : "OFF");
+
+        cJSON_AddNumberToObject(o, "wifi_reconnects", (double)wifi_reconnect_count());
+        cJSON_AddNumberToObject(o, "mqtt_reconnects", (double)s_reconnects.load());
         pub_json(s_topic[D_DEVICE], o);
     }
 }
@@ -383,12 +442,17 @@ static void mqtt_event_handler(void*, esp_event_base_t, int32_t event_id, void* 
     // event loop → std::terminate → reboot (issue #204, C-callback boundary).
     try {
     switch ((esp_mqtt_event_id_t)event_id) {
-    case MQTT_EVENT_CONNECTED:
+    case MQTT_EVENT_CONNECTED: {
+        // Count RE-connects only: the first connect of a boot is not churn, and counting it would
+        // put a permanent 1 on every healthy device and hide the difference from a real flap.
+        static bool first = true;
+        if (first) first = false; else s_reconnects.fetch_add(1);
         ESP_LOGI(TAG, "connected to broker%s", s_tls.load() ? " (TLS)" : "");
         s_connected = true;
         s_last_err  = ME_NONE;    // clear any prior failure now that we're up
         s_need_discovery = true;  // (re)announce discovery + state from the publisher task
         break;
+    }
     case MQTT_EVENT_DISCONNECTED:
         ESP_LOGW(TAG, "disconnected from broker");
         s_connected = false;
@@ -425,7 +489,22 @@ static void mqtt_event_handler(void*, esp_event_base_t, int32_t event_id, void* 
 static void publisher_task(void*) {
     TickType_t last = 0;
     const TickType_t interval = pdMS_TO_TICKS(s_interval_s * 1000);
+
+    // Subscribe to the task watchdog: this task performs real, blocking network I/O (a publish over
+    // a TLS socket to a broker that may be gone), and a wedge here is silent — HA simply stops
+    // receiving, which looks exactly like a device that is off.
+    if (esp_task_wdt_add(nullptr) != ESP_OK) {
+        ESP_LOGW(TAG, "mqtt_pub could not subscribe to the task watchdog — a wedged publish will no "
+                      "longer reboot the device automatically");
+    }
+
     while (true) {
+        // UNCONDITIONAL, at the top: not gated on s_connected or on a successful publish, so a long
+        // broker outage — during which this task correctly does nothing — can never be mistaken for
+        // a hang. What must trip the watchdog is a publish that never returns, not a broker that
+        // never answers.
+        esp_task_wdt_reset();
+
         // Iteration-boundary containment (issue #204): publish_discovery()/publish_state()
         // build cJSON + std::string discovery payloads that can throw std::bad_alloc on a
         // fragmented heap. An escape would unwind into the FreeRTOS C task trampoline →
