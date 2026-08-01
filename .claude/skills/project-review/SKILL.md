@@ -253,6 +253,14 @@ that describe it. When reviewing a change (or the repo as a whole), check these 
   `test/test_logic.cpp` **and** the exhaustive sweep in `test/<name>_golden_dump.cpp`. The two
   sides are held together by `scripts/check-ble-row-parity.sh` / `check-display-sim-parity.sh`
   from `run-mock-tests.sh` — editing one side alone fails CI, which is the point.
+- **New log line carrying an IDENTIFIER** (VIN, SSID, device IP, a BLE MAC, the MQTT broker or
+  the syslog host) → a matching rule in `main/logic/redact.hpp`'s `kDiagRedactions` **and** a
+  `CHECK` in `test/test_logic.cpp` (`test_redact`). The table is keyed on log PHRASES, so a new
+  phrase carrying an old value is a SILENT leak — `/diag?redact=1` keeps answering 200 and the
+  reader believes the log is scrubbed. This has now happened twice: the `http_server.cpp` request
+  log (the VIN on every evcc poll — the most frequent line in the ring) and the failure branch of
+  the `ble_mac` write, whose success branch was covered and whose failure branch was not. Both
+  landed with the feature that introduced them and neither carried a rule.
 - **New NVS key** → ≤15 chars **and** the namespace table in `.claude/CLAUDE.md`.
 - **New Kconfig option** → `main/Kconfig.projbuild` **and** any doc that references defaults
   **and** `sdkconfig.defaults` if a non-default value is required.

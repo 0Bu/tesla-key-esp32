@@ -136,6 +136,29 @@ inline bool coredump_is_foreign(const std::string& running_sha, const std::strin
 // convenience field; a CrashInfo built by hand with reset_code set and fault left default would
 // otherwise silently report nothing on a genuine panic — a diagnostic failing closed in the one
 // direction it must not.
+// ESP_ERR_NOT_FOUND, mirrored BY VALUE so this header stays IDF-free; diag_crash.cpp
+// static_asserts it against the real macro, the same way reset_reason.hpp mirrors the reset enum.
+inline constexpr int kEspErrNotFound = 0x105;
+
+// Does a core-dump erase result still permit the crash report to be DISMISSED?
+//
+// A dismissal has two jobs — destroy the downloadable dump, and clear the report — and they do
+// not always both apply. On a device whose INSTALLED partition table has no `coredump` partition
+// the erase has nothing to destroy and returns ESP_ERR_NOT_FOUND. That is not an exotic corner:
+// it is EVERY device upgraded by OTA, because a partition table is not part of an OTA image, and
+// the project documents that as a supported state. Treating it as a failure made POST
+// /crash/dismiss answer 500 there forever, so a fault-reset banner could never be acknowledged —
+// precisely the outcome diag_crash.cpp's own comment says must not happen ("Failing it would
+// leave a crash banner that no action can dismiss"). Confirmed on a live board: after the
+// 1.4.64→1.4.66 OTA, dismiss returned 500 with `coredump erase: ESP_ERR_NOT_FOUND`.
+//
+// Every OTHER error still blocks, and that asymmetry is the point: any other failure means a dump
+// may STILL be downloadable, and marking the report dismissed would assert the opposite. The
+// caller's erase-first-mark-second ordering only means something while this stays narrow.
+inline constexpr bool crash_erase_permits_dismiss(int err) {
+    return err == 0 /* ESP_OK */ || err == kEspErrNotFound;
+}
+
 inline bool crash_is_notable(const CrashInfo& c) {
     if (c.dismissed) return false;
     return c.coredump || reset_is_fault(c.reset_code);
