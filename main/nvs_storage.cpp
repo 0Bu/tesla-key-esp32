@@ -137,3 +137,45 @@ bool NvsStorageAdapter::save_str(const char* key, const std::string& value) {
     }
     return true;
 }
+
+// ── Raw blob helpers for the atomic config store (logic/config_store.hpp) ──
+// Deliberately NOT routed through map_key(): that mapping exists for tesla-ble's long library
+// key names, and the config blob owns its own short, fixed key. One nvs_set_blob + one commit
+// is the whole point — the credential/service state becomes all-or-nothing across a write
+// failure AND a power cut, instead of the per-key sequence it replaces (where a cut between
+// two writes left the SSID updated and the password stale, i.e. a device that can no longer
+// join anything).
+
+bool NvsStorageAdapter::load_blob(const char* key, std::vector<uint8_t>& out) {
+    if (!initialized_) return false;
+    size_t len = 0;
+    esp_err_t err = nvs_get_blob(handle_, key, nullptr, &len);
+    if (err == ESP_ERR_NVS_NOT_FOUND || len == 0) return false;  // absent is normal (pre-blob device)
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "load_blob probe failed '%s': %s", key, esp_err_to_name(err));
+        return false;
+    }
+    out.resize(len);
+    err = nvs_get_blob(handle_, key, out.data(), &len);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "load_blob failed '%s': %s", key, esp_err_to_name(err));
+        return false;
+    }
+    out.resize(len);
+    return true;
+}
+
+bool NvsStorageAdapter::save_blob(const char* key, const uint8_t* data, size_t len) {
+    if (!initialized_ || data == nullptr || len == 0) return false;
+    esp_err_t err = nvs_set_blob(handle_, key, data, len);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "save_blob failed '%s': %s", key, esp_err_to_name(err));
+        return false;
+    }
+    err = nvs_commit(handle_);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "commit failed after save_blob '%s': %s", key, esp_err_to_name(err));
+        return false;
+    }
+    return true;
+}

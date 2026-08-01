@@ -44,7 +44,8 @@ bool VehicleController::init(const std::string& vin,
                               BleClient& ble,
                               NvsStorageAdapter& storage,
                               NvsStorageAdapter& config_store,
-                              std::string& known_mac) {
+                              std::string& known_mac,
+                              bool start_tasks) {
     ble_          = &ble;
     storage_      = &storage;
     config_store_ = &config_store;
@@ -111,7 +112,12 @@ bool VehicleController::init(const std::string& vin,
                                ? ble_client_instance()->peer_addr_str() : "";
             if (!addr.empty()) {
                 *known_mac_ = addr;
-                config_store_->save_str("ble_mac", addr);
+                // Best-effort cache (a lost MAC costs one extra scan next boot, nothing more) —
+                // but say so rather than dropping the result, or the next boot's slow reconnect
+                // looks like a BLE problem instead of a storage one.
+                if (!config_store_->save_str("ble_mac", addr)) {
+                    ESP_LOGW(TAG, "could not persist Tesla MAC %s — next boot rescans", addr.c_str());
+                }
                 ESP_LOGI(TAG, "Tesla MAC saved: %s", addr.c_str());
             }
         }
@@ -176,6 +182,16 @@ bool VehicleController::init(const std::string& vin,
     } else {
         ESP_LOGW(TAG, "boot after %u heap-watchdog restart(s) — leaving the active window CLOSED "
                       "so a parked car can still sleep", (unsigned) boot_heap_restarts());
+    }
+
+    if (!start_tasks) {
+        // Safe mode. Everything above ran, so every reader of this controller sees a coherent
+        // (empty) cache instead of a half-built object; what is skipped is the two tasks that
+        // actually reach for the car. Announced loudly because a device that answers /status while
+        // never connecting over BLE is otherwise indistinguishable from a broken BLE stack.
+        ESP_LOGW(TAG, "SAFE MODE — vehicle_loop and auto_pair NOT started; no BLE polling, no "
+                      "pairing, no commands will execute until the crash-boot counter clears");
+        return true;
     }
 
     if (xTaskCreate(loop_task_fn_, "vehicle_loop", 8192, this,

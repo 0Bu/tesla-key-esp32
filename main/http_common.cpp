@@ -129,6 +129,11 @@ long long apply_browser_clock(double epoch_ms) {
     // browser visit) still comes up with a plausible clock for OTA TLS cert validation and the
     // key_created/paired_at timestamps. NOT needed for tesla-ble signed-command freshness
     // (expires_at derives from the vehicle's SessionInfo.ClockTime + a monotonic delta).
-    g_config->save_str("last_time", std::to_string(sec));
+    if (!g_config->save_str("last_time", std::to_string(sec))) {
+        // The clock is already applied in RAM, so this request still succeeded; what is lost is
+        // only the restore across the NEXT reboot. Naming it here is what separates "NVS is
+        // failing" from "the browser never set the time" when a headless boot comes up at 1970.
+        ESP_LOGW(TAG, "wall clock applied but not persisted — a reboot will come up unset");
+    }
     return sec;
 }

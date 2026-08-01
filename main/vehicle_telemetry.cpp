@@ -9,9 +9,11 @@
 #include "logic/active_window.hpp"
 #include "logic/heap_watchdog.hpp"
 #include "ota_update.hpp"
+#include "heap_trend.hpp"
 #include <esp_log.h>
 #include <esp_heap_caps.h>
 #include <esp_system.h>
+#include <esp_task_wdt.h>
 #include <utility>
 
 // protobuf generated headers (from tesla-ble)
@@ -311,6 +313,23 @@ void VehicleController::install_state_callbacks_() {
 
 void VehicleController::loop_task_fn_(void* arg) {
     auto* self = static_cast<VehicleController*>(arg);
+
+    // Subscribe to the Task Watchdog. The heap watchdog above already covers the wedge caused by
+    // memory exhaustion; this covers the one it structurally cannot see — a task blocked forever on
+    // a semaphore, the BLE stack or a socket, with the heap looking perfectly healthy the whole
+    // time. This task is the right subscriber because it is the one that must keep ticking for the
+    // device to be doing anything at all.
+    //
+    // The budget (CONFIG_ESP_TASK_WDT_TIMEOUT_S=60) is sized against this task's LONGEST legitimate
+    // block, which is not its 50 ms cadence but the vehicle mutex: a foreground command holds it
+    // for up to 20 s, pair() for up to 30 s. Feeding once per iteration is therefore both necessary
+    // and sufficient — a slow-but-progressing command never trips it, a genuinely stuck one does.
+    // A failed subscription is logged and the loop runs on unwatched: losing the watchdog is worse
+    // than not having it, but far better than refusing to poll the car.
+    if (esp_task_wdt_add(nullptr) != ESP_OK) {
+        ESP_LOGW(TAG, "vehicle_loop could not subscribe to the task watchdog — a wedged poll will "
+                      "no longer reboot the device automatically");
+    }
     uint32_t last_poll_ticks    = 0;
     uint32_t last_connect_ticks = 0;
     uint32_t last_tele_ticks    = 0;
@@ -318,6 +337,11 @@ void VehicleController::loop_task_fn_(void* arg) {
     bool     prev_window        = false;  // edge-detect the active window
     auto     prev_sleep         = TeslaBLE::SleepState::UNKNOWN;  // edge-detect VCSEC sleep flag
     while (true) {
+      // Feed the task watchdog FIRST and UNCONDITIONALLY, before anything that can block or throw.
+      // Gating it on the work below would make a long-but-legitimate command look like a hang; put
+      // after the work, a throw would skip it and turn an already-contained OOM into a reboot.
+      esp_task_wdt_reset();
+
       // Iteration-boundary containment (issue #204): the poll injections + bookkeeping below
       // call tesla-ble builders and touch std::string caches that can throw std::bad_alloc.
       // An escape would unwind into the FreeRTOS C task trampoline → std::terminate → reboot,
@@ -368,6 +392,16 @@ void VehicleController::loop_task_fn_(void* arg) {
                      (unsigned) heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
                      (unsigned) heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT),
                      (unsigned) largest);
+
+            // Feed the 24-hour memory trend (GET /heap) from the SAME two samples the watchdog
+            // below judges — so the chart a human reads and the threshold the firmware acts on can
+            // never tell different stories. INTERNAL on both, for the PSRAM reason above: a trend
+            // drawn from plain 8BIT would show the C5's 8 MB and hide the only heap that matters.
+            // Fixed .bss ring, no allocation — a diagnostic must not compete for the contiguous
+            // block it exists to measure.
+            tk::heap_trend_record((uint32_t) pdTICKS_TO_MS(hb_now) / 1000,
+                                  (uint32_t) heap_caps_get_free_size(MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL),
+                                  (uint32_t) largest);
 
             // Last-resort escalation. Every OOM guard in this firmware turns OOM into "recover
             // and continue", which is right for a transient and left the device WEDGED for ten
@@ -450,9 +484,11 @@ void VehicleController::loop_task_fn_(void* arg) {
                     // queues, and its task runs at priority 3 against this task's 5, so without a
                     // yield the final message dies in the queue on a single-core target — and the
                     // /diag ring does not survive the reboot either. Then the one thing explaining
-                    // the restart would be gone, which is the whole point of logging it. This task
-                    // is not registered with the task WDT, and 300 ms is nothing against a 5 min
-                    // hold.
+                    // the restart would be gone, which is the whole point of logging it. 300 ms is
+                    // nothing against a 5 min hold, and nothing against the 60 s task-watchdog
+                    // budget this task is now subscribed to either — but feed it first anyway, so a
+                    // deliberate restart is never misreported as a task_wdt panic on the way out.
+                    esp_task_wdt_reset();
                     vTaskDelay(pdMS_TO_TICKS(300));
                     esp_restart();
                 }
