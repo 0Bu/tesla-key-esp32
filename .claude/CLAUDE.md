@@ -289,6 +289,7 @@ POST /mcp                                      # MCP server (Streamable HTTP, st
 GET  /diag                                     # plain-text in-memory diag log (?verbose=1 raw RX / ?verbose=0 off, ?clear=1 reset, ?redact=1 bug-report form)
 GET  /coredump[?clear=1]                       # stream the raw crash image (chunked octet-stream; 404 if none). Decode offline against the matching-version .elf; ?clear=1 erases the partition
 POST /crash/dismiss                            # acknowledge + DELETE this boot's crash report (erase first, mark second). POST, not GET: it destroys the one artifact a bug report needs
+                                               # bug report needs. An erase that finds NO coredump partition (every OTA-upgraded device) is NOT a failure — the dismissal still clears the fault-reset report; any other erase error is a 500 (logic/crashinfo.hpp crash_erase_permits_dismiss).
 GET  /heap                                     # the board's 24-hour free/largest-block trend {dt,b0,unit,scale,free[],largest[]} — tenths of a KiB, null = no sample
 POST /set_wifi                                 # change WiFi credentials over the LAN + reboot ({"ssid","pass"}); stashes the previous pair as a one-shot rollback backup
 POST /gen_keys[?force=1]                       # generate key (refuses overwrite w/o force)
