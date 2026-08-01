@@ -3,6 +3,7 @@
 #include "logic/http_body.hpp" // http_body_read() — reassemble a multi-segment POST body
 
 #include <cstring>
+#include <cstdio>
 #include <cstdlib>
 #include <cctype>
 #include <cstdint>
@@ -268,11 +269,16 @@ void provisioning_run(NvsStorageAdapter& config_store) {
     // The buffer is STATIC on purpose: esp_netif stores the POINTER it is handed, not a copy, so a
     // stack buffer here would leave the DHCP server reading freed memory for the life of the AP.
     if (ap_netif) {
-        static char portal_uri[] = tk::CAPTIVE_PORTAL_URI;
+        // Copied at runtime rather than brace-initialised: CAPTIVE_PORTAL_URI is a `const char*`
+        // (one definition shared with the DNS answer and the Location header), and a char array
+        // cannot be initialised from a pointer. The COPY is what matters anyway — esp_netif wants a
+        // mutable buffer and keeps the pointer it is given.
+        static char portal_uri[64];
+        std::snprintf(portal_uri, sizeof(portal_uri), "%s", tk::CAPTIVE_PORTAL_URI);
         esp_netif_dhcps_stop(ap_netif);
         esp_err_t opt = esp_netif_dhcps_option(ap_netif, ESP_NETIF_OP_SET,
                                                ESP_NETIF_CAPTIVEPORTAL_URI,
-                                               portal_uri, sizeof(portal_uri) - 1);
+                                               portal_uri, (int)strlen(portal_uri));
         if (opt != ESP_OK) {
             // Named rather than discarded: "the portal doesn't pop" is the report this whole path
             // exists to prevent, and a silently-dropped option is exactly the evidence that was

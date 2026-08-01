@@ -40,6 +40,12 @@ bool clock_synced_via_ntp();
 // record faults — LoadProhibited/EXCVADDR=0x1).
 bool wifi_is_connected();
 
+// Defined in main.cpp: cumulative WiFi RE-connects since boot (the first association of a boot is
+// not counted). Reported in /status.sys and over MQTT — a link that drops and recovers looks
+// identical to a healthy one in any instantaneous reading, so without a counter a flapping AP is
+// only ever caught by someone watching at the right second.
+unsigned wifi_reconnect_count();
+
 // ─── Shared helpers (http_common.cpp) ─────────────────────────────────────────
 
 // Serialize `root` (consumed) as the response with the given status. Degrades to a
