@@ -82,8 +82,16 @@ void diag_crash_capture() {
             s_ci.backtrace.reserve(depth);
             for (uint32_t i = 0; i < depth; i++) s_ci.backtrace.push_back(sum->exc_bt_info.bt[i]);
 
-            s_ci.corrupted       = sum->exc_bt_info.corrupted;
-            s_ci.dump_elf_sha256 = sum->app_elf_sha256;
+            s_ci.corrupted = sum->exc_bt_info.corrupted;
+
+            // app_elf_sha256 is a uint8_t[] holding a HEX STRING, not a C string and not raw
+            // digest bytes — so it neither converts to std::string on its own nor should be
+            // treated as binary. Copy through a bounded buffer and terminate it ourselves rather
+            // than trusting the array to carry its own NUL: this runs while decoding a crash, and
+            // reading past the end of a struct field is a poor way to report one.
+            char dump_sha[sizeof(sum->app_elf_sha256) + 1] = {0};
+            std::memcpy(dump_sha, sum->app_elf_sha256, sizeof(sum->app_elf_sha256));
+            s_ci.dump_elf_sha256 = dump_sha;
         }
         free(sum);
     }
