@@ -2,7 +2,7 @@
 
 class VehicleController;
 
-// ─── On-device status LED (LilyGo T-Dongle-C5 / T-Dongle-S3 underside APA102) ──────
+// ─── On-device status LED (LilyGo T-Dongle-S3 underside APA102) ───────────────────
 // Drives the single addressable RGB pixel on the bottom of the dongle as a status
 // indicator: WiFi/BLE search (breathing "wave"), pairing (pulse), charging (green
 // swell), state-of-charge colour when parked, OTA in flight, and amber/red for
@@ -16,12 +16,12 @@ class VehicleController;
 //     wifi_is_connected) — it NEVER triggers a BLE round-trip, so it can't wake the
 //     car or queue behind a poll in the single BLE FIFO. Same guarantee as the display.
 //   • Independent of MQTT and of the display — needs neither, so it works on a
-//     T-Dongle-S3 (no panel) as well as the C5.
+//     T-Dongle-S3 that has no panel fitted.
 //   • Tiny + coex-safe: 1 pixel, an ~8-byte bit-banged APA102 frame, no heap
 //     allocation, low update rate — no pressure on the contiguous-heap budget or on
 //     WiFi/BLE coexistence (WIFI_PS_MIN_MODEM stays untouched).
 //
 // Compiled only when CONFIG_TESLA_LED_ENABLED (a no-op stub otherwise), so one source
 // tree still serves every board. The APA102 data/clock GPIOs and brightness come from
-// Kconfig — defaults are the T-Dongle-C5 wiring (DI=5, CI=4); a T-Dongle-S3 sets 40/39.
+// Kconfig — a T-Dongle-S3 wires it to DI=40, CI=39.
 void led_status_start(VehicleController& vehicle);

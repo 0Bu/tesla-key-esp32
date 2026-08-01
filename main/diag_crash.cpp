@@ -36,10 +36,10 @@ static_assert(static_cast<int>(ResetCode::Brownout) == ESP_RST_BROWNOUT, "reset 
 static CrashInfo s_ci;
 
 // Every esp_core_dump_image_* symbol lives in IDF's core_dump_flash.c, which is compiled ONLY
-// when CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH is set — so on a target that disables core dumps these
-// are not merely no-ops, they do not LINK. esp32c5 is such a target (see sdkconfig.defaults.esp32c5:
-// the display + PSRAM build has no room for the component), which is why the guard is on the calls
-// and not only on the parsing.
+// when CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH is set — so on a build that disables core dumps these
+// are not merely no-ops, they do not LINK. Every current target enables them, but the guard sits on
+// the CALLS rather than only on the parsing so that turning the component off for a size-constrained
+// board stays a one-line sdkconfig change instead of a compile error.
 bool diag_crash_coredump_present() {
 #if defined(CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH)
     // EXACTLY what handle_coredump uses to decide it has something to stream — any extra condition
@@ -91,8 +91,8 @@ void diag_crash_capture() {
             // esp_core_dump_bt_info_t is declared per ARCHITECTURE: on Xtensa it carries an
             // unwound PC array (bt/depth/corrupted), on RISC-V it carries a raw STACK DUMP
             // instead, because RISC-V has no windowed registers and IDF cannot unwind on-device.
-            // Four of this project's five targets are RISC-V (c3/c6/c5), so getting this wrong is
-            // not an edge case — it is most of the fleet.
+            // Two of this project's four targets are RISC-V (c3/c6), so getting this wrong is
+            // not an edge case — it is half the fleet.
             //
             // On RISC-V the report is not empty, it is SHORTER: reason, task, PC and the app-ELF
             // hash are all still captured, and the full stack is still in the dump that GET

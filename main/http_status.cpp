@@ -181,8 +181,8 @@ static cJSON* build_status_object(bool redact) {
 
     // ── sys — always gathered, never conditional ──────────────────────────────────────────────
     // INTERNAL caps on all three, matching logic/heap_watchdog.hpp exactly: plain 8BIT reports the
-    // max across every heap carrying the cap, and the esp32c5 registers 8 MB of PSRAM there — so a
-    // C5 in the exact wedge this device restarts itself for would report ~7.8 MB free here.
+    // max across every heap carrying the cap, and a board that registers PSRAM there would report
+    // megabytes free while internal DRAM sat in the exact wedge this device restarts itself for.
     in.free_heap       = (uint32_t)heap_caps_get_free_size(MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL);
     in.min_free_heap   = (uint32_t)heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL);
     in.largest_block   = (uint32_t)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL);
@@ -311,8 +311,8 @@ esp_err_t handle_coredump(GuardedReq rq) {
     httpd_req_t* req = rq.req;
 
 #if !defined(CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH)
-    // This target writes no dumps (esp32c5 — the display + PSRAM build has no room for the
-    // component; see sdkconfig.defaults.esp32c5). The route still EXISTS and answers with a reason
+    // This build writes no dumps (CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH off — no current target
+    // does, but see diag_crash.cpp). The route still EXISTS and answers with a reason
     // rather than 404-ing as "not found": a tool that just read `coredump:false` off /status needs
     // to be able to tell "this board never captures dumps" from "no crash has happened yet", and
     // silence cannot carry that difference. The esp_core_dump_image_* symbols are not linked here

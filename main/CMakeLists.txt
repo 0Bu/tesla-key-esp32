@@ -70,7 +70,7 @@ idf_component_register(
 # root CMakeLists.txt appends a global -Wno-error=format because yoziru/tesla-ble prints uint32_t
 # with %u (which is `unsigned long` on xtensa). A PRIVATE -Werror=format here would re-arm the
 # class for our own sources only — which is the right end state — but our format strings have
-# never been compiled under it on all five targets, int32_t is `long int` on xtensa and plain
+# never been compiled under it on all four targets, int32_t is `long int` on xtensa and plain
 # `int` on riscv/host, and scripts/run-mock-tests.sh compiles NONE of main/*.cpp, so nothing
 # available in a cloud session can tell whether that turns the build red. Converting the call
 # sites to PRIu32/PRId32 first, then arming it, is a change of its own with a real build behind it.

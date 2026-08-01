@@ -414,7 +414,7 @@ static void publish_state() {
         cJSON_AddStringToObject(o, "version",   esp_app_get_description()->version);
 
         // INTERNAL caps for both, matching the heap watchdog and the /heap trend exactly: plain
-        // 8BIT would report the esp32c5's 8 MB of PSRAM and make every C5 look permanently healthy.
+        // 8BIT would report any PSRAM too and make such a board look permanently healthy.
         cJSON_AddNumberToObject(o, "largest_block",
                                 (double)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL));
         cJSON_AddNumberToObject(o, "min_free_heap",

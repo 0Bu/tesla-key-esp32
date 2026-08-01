@@ -382,7 +382,7 @@ void VehicleController::loop_task_fn_(void* arg) {
         if (hb_now - last_heap_log > pdMS_TO_TICKS(30000)) {
             last_heap_log = hb_now;
             // INTERNAL, not plain 8BIT: heap_caps_* reports the max across every heap with the
-            // cap, and the esp32c5 registers 8 MB of PSRAM into 8BIT. Deciding on that number
+            // cap, and a board with PSRAM registers it into 8BIT. Deciding on that number
             // would make the watchdog below a silent no-op on exactly the board that has PSRAM.
             // Logged alongside the historical 8BIT figures (identical on the four PSRAM-less
             // targets) so the trend stays comparable with older captures.
@@ -396,7 +396,7 @@ void VehicleController::loop_task_fn_(void* arg) {
             // Feed the 24-hour memory trend (GET /heap) from the SAME two samples the watchdog
             // below judges — so the chart a human reads and the threshold the firmware acts on can
             // never tell different stories. INTERNAL on both, for the PSRAM reason above: a trend
-            // drawn from plain 8BIT would show the C5's 8 MB and hide the only heap that matters.
+            // drawn from plain 8BIT would show any PSRAM and hide the only heap that matters.
             // Fixed .bss ring, no allocation — a diagnostic must not compete for the contiguous
             // block it exists to measure.
             tk::heap_trend_record((uint32_t) pdTICKS_TO_MS(hb_now) / 1000,

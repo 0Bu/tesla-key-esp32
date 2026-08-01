@@ -20,9 +20,8 @@ failure it exists to prevent*. A feature without that last part is one nobody ca
 | Feature | Where | Prevents |
 |---|---|---|
 | Reset-reason capture | `main/diag_crash.cpp`, `main/logic/reset_reason.hpp` | A reboot nobody can attribute. The reason is sampled once at boot and reported on `/status.sys.reset_reason`, over MQTT and in the syslog boot line. |
-| Core dump to flash | `sdkconfig.defaults` (`ESP_COREDUMP_ENABLE_TO_FLASH`), `partitions.csv` (`coredump`, 48 KB at `0x12000`), `main/diag_crash.cpp` — **not on esp32c5**, see below | A panic leaving no artifact. The crashed task, PC, backtrace and app-ELF hash are parsed ONCE at boot; the raw image streams from `GET /coredump` for offline symbolisation. |
-| **Core dump is off on esp32c5** | `sdkconfig.defaults.esp32c5` (`ESP_COREDUMP_ENABLE_TO_NONE`) | An image that does not fit its OTA slot. MEASURED: esp32c5 is the only build with display AND PSRAM; adding the component took it from 0x1E1000 to 0x1F1000 (2,035,712 B) against a 2,031,616 B slot — past a Secure-Boot-v2 64 KB rounding boundary, and over the SLOT, not merely the gate. That board keeps the reset reason, safe mode, the heap trend and the syslog replay; it loses the on-device dump, and `GET /coredump` answers 404 with that reason. The `coredump` partition stays in the shared table, unused there. |
-| **Backtrace is Xtensa-only** | `main/diag_crash.cpp` (`CONFIG_IDF_TARGET_ARCH_XTENSA`) | Publishing raw stack words as if they were return addresses. IDF declares `esp_core_dump_bt_info_t` per ARCHITECTURE: Xtensa carries an unwound PC array, RISC-V a raw stack dump (no windowed registers, so IDF cannot unwind on-device). On esp32/esp32s3 `/status.last_crash` carries `backtrace[]`; on esp32c3/c6/c5 it does not — reason, task, PC and the ELF hash still do, and the full stack is in the downloadable dump, where an offline decoder unwinds it properly. |
+| Core dump to flash | `sdkconfig.defaults` (`ESP_COREDUMP_ENABLE_TO_FLASH`), `partitions.csv` (`coredump`, 48 KB at `0x12000`), `main/diag_crash.cpp` | A panic leaving no artifact. The crashed task, PC, backtrace and app-ELF hash are parsed ONCE at boot; the raw image streams from `GET /coredump` for offline symbolisation. |
+| **Backtrace is Xtensa-only** | `main/diag_crash.cpp` (`CONFIG_IDF_TARGET_ARCH_XTENSA`) | Publishing raw stack words as if they were return addresses. IDF declares `esp_core_dump_bt_info_t` per ARCHITECTURE: Xtensa carries an unwound PC array, RISC-V a raw stack dump (no windowed registers, so IDF cannot unwind on-device). On esp32/esp32s3 `/status.last_crash` carries `backtrace[]`; on esp32c3/c6 it does not — reason, task, PC and the ELF hash still do, and the full stack is in the downloadable dump, where an offline decoder unwinds it properly. |
 | Orphan-dump erase | `logic/crashinfo.hpp` `coredump_is_foreign()` | Advertising a download the decoder will reject: the coredump partition survives an OTA, so a dump can belong to a previous build. Declared foreign only on PROOF, since the erase destroys the one artifact a panic left. |
 | Crash report dismissal | `POST /crash/dismiss` | A crash banner that comes back on every page reload. Erase first, mark second — a dismissal must never outlive a failed erase. |
 | Boot-loop safe mode | `main/safe_mode.cpp`, `logic/boot_guard.hpp` | A device that crashes its way out of reach. After 4 consecutive crash boots it starts WiFi + web UI + OTA only, skipping BLE/vehicle and MQTT, so recovery is a browser away instead of a USB cable. Also stops each boot re-opening the car's polling window, which is what drains a parked battery. |
@@ -85,7 +84,7 @@ trusted-LAN only. See [`SECURITY.md`](SECURITY.md).
 | Host mock build | `scripts/run-mock-tests.sh`, `test/` | Reasoning about logic instead of running it. Compiles `main/logic/` with the plain system toolchain — no ESP-IDF, no Docker, no board — so a cloud session has a real verification loop. |
 | Warning contract on `main/` | `main/CMakeLists.txt` | An unpinned guarantee: `-Werror=return-type` and `-Werror=unused-result` hold `main/*.cpp` (where every shipped crash happened) to a contract that does not depend on IDF's own defaults. |
 | Presenter parity checks | `scripts/check-display-sim-parity.sh`, `scripts/check-ble-row-parity.sh` | The Python display sim and the browser's JS drifting from the C++ presenters they mirror. |
-| Five targets, one tree | `sdkconfig.defaults.*`, `scripts/ci-build-all.sh` | Per-chip divergence. CI builds esp32 / s3 / c3 / c6 / c5 and size-gates each signed image. |
+| Four targets, one tree | `sdkconfig.defaults.*`, `scripts/ci-build-all.sh` | Per-chip divergence. CI builds esp32 / s3 / c3 / c6 and size-gates each signed image. The set is exactly what `yoziru/tesla-ble` declares; the Component Manager enforces it. |
 
 ### Why there is no static analyser (measured, not assumed)
 
@@ -113,6 +112,6 @@ policy of its own. That is now pinned in `main/CMakeLists.txt`.
 
 `-Werror=format` is deliberately **not** in that set: the root `CMakeLists.txt` appends a global
 `-Wno-error=format` because the tesla-ble dependency prints `uint32_t` with `%u`, and our own format
-strings have never been compiled under it across all five targets (`int32_t` is `long int` on xtensa
+strings have never been compiled under it across all four targets (`int32_t` is `long int` on xtensa
 and plain `int` on riscv/host). Converting the call sites to `PRIu32`/`PRId32` and then arming it is
 a change of its own, with a real build behind it.

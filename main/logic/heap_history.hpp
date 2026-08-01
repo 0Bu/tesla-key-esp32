@@ -18,7 +18,7 @@
 // hours before that: the same quantity, sampled and kept, so the approach is diagnosable instead of
 // being reconstructed from a `heap:<n>` breadcrumb after the fact. Sample the same INTERNAL
 // largest_block the watchdog samples (heap_caps_get_largest_free_block(8BIT|INTERNAL)) — a plain
-// 8BIT query on the esp32c5 reports its 8 MB of PSRAM and would draw a flat, healthy, meaningless
+// 8BIT query on a board with PSRAM reports that too and would draw a flat, healthy, meaningless
 // line on the one target with the extra RAM.
 //
 // WHY IT MUST BE A FIXED STRUCT IN STATIC STORAGE. The binding limit on this chip is the largest

@@ -30,7 +30,6 @@ Root CMake invokes `scripts/apply-tesla-ble-patches.sh` after ESP-IDF dependency
 before compilation. The script patches both possible source locations:
 
 - `managed_components/yoziru__tesla-ble` for esp32, esp32s3, esp32c3 and esp32c6;
-- `third_party/tesla-ble` for esp32c5.
 
 It is idempotent and fails closed if the patch no longer applies to the pinned source. This makes
 an upstream version bump require an explicit rebase/review instead of silently losing the fix.
@@ -44,7 +43,7 @@ readback establishes that the accepted action actually changed the car's effecti
 
 ## Consequences
 
-- All five targets compile the same anti-replay behavior.
+- All four targets compile the same anti-replay behavior.
 - A replay is visible in logs but cannot alter caches or command outcomes.
 - Dependency source is modified only in ignored, generated checkouts; the reviewable patch is
   committed.
