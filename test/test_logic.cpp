@@ -1833,6 +1833,20 @@ static void test_redact() {
         "I (1) http_server: REQ: GET /api/1/vehicles/5YJ3E1EA7KF0003");
     CHECK(req_cut.find("5YJ3E1EA7KF0003") == std::string::npos);
 
+    // The handler-threw line logs the SAME URI under a different prefix. It is covered for free,
+    // because the rule is keyed on the URI PATH rather than a log prefix — asserted, not assumed.
+    const std::string threw = tk::redact_diag_line(
+        "E (1) http_server: handler for /api/1/vehicles/5YJ3E1EA7KF000316/vehicle_data threw (x)\n");
+    CHECK(threw.find("5YJ3E1EA7KF000316") == std::string::npos);
+
+    // The FAILURE branch of the ble_mac write logs the same address as the success branch under a
+    // different phrase, and arrived without a rule. This table is keyed on log PHRASES, so a new
+    // phrase carrying an old value is a silent leak — that is the failure mode this CHECK pins.
+    const std::string mac_fail = tk::redact_diag_line(
+        "W (1) vehicle_ctrl: could not persist Tesla MAC aa:bb:cc:dd:ee:ff — next boot rescans\n");
+    CHECK(mac_fail.find("aa:bb:cc:dd:ee:ff") == std::string::npos);
+    CHECK(mac_fail.find("next boot rescans") != std::string::npos);   // the explanation survives
+
     CHECK(tk::kDiagRedactionCount > 0);
     CHECK(tk::kRedactedStatusFields == 6);
 }

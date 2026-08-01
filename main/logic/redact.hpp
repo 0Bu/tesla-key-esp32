@@ -119,6 +119,13 @@ inline constexpr DiagRedaction kDiagRedactions[] = {
     {"/api/1/vehicles/", "/"},
     // vehicle_ctrl.cpp "Tesla MAC saved: %s"
     {"Tesla MAC saved: ", ""},
+    // vehicle_ctrl.cpp "could not persist Tesla MAC %s — next boot rescans" — the SAME address on
+    // the failure branch of the very same write. A separate rule because the prefix differs, and
+    // that is the whole lesson: this table is keyed on log PHRASES, so a new phrase carrying an
+    // old value is a silent leak. The failure branch arrived with the [[nodiscard]] NVS work and
+    // no rule came with it. Rare (it needs an NVS write to fail) but the promise is all-or-nothing.
+    // A MAC has no spaces, so the end token can keep the explanatory tail.
+    {"could not persist Tesla MAC ", " — next boot"},
     // ble_client.cpp "Tesla '%s' found: %s — connecting". The FIRST value is the advert name,
     // which is derived from the VIN and is therefore as identifying as the VIN — it is not a
     // nickname. The second is the MAC. Two rules keep the "connecting" tail, which is what
