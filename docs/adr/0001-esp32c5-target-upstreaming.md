@@ -2,7 +2,8 @@
 
 **Status:** superseded by [ADR-0004](0004-drop-esp32c5-target.md) — the esp32c5 target was dropped (2026-08-01) rather than upstreamed; the local patch it describes no longer exists
 **Date:** 2026-07-08
-**Relates to:** architecture review 2026-07 (P4), [`docs/ARCHITECTURE.md`](../ARCHITECTURE.md) §"esp32c5 via a local build-time patch"
+**Relates to:** architecture review 2026-07 (P4). The `docs/ARCHITECTURE.md` section this described
+(§"esp32c5 via a local build-time patch") no longer exists — see [ADR-0004](0004-drop-esp32c5-target.md).
 
 ## Context
 

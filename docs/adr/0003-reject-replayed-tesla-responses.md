@@ -43,7 +43,7 @@ readback establishes that the accepted action actually changed the car's effecti
 
 ## Consequences
 
-- All five targets compile the same anti-replay behavior.
+- All four targets compile the same anti-replay behavior.
 - A replay is visible in logs but cannot alter caches or command outcomes.
 - Dependency source is modified only in ignored, generated checkouts; the reviewable patch is
   committed.

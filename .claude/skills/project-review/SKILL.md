@@ -419,7 +419,7 @@ what each must stay true to:
   complement to that automated gate, not a replacement.
 - **`ota-release-verify`** verifies the already-published OTA channel is internally coherent (Pages
   manifest + per-target images + version). Re-verify the manifest/firmware-base URLs
-  (`main/Kconfig.projbuild`), the 5-chipFamily set + per-part offsets (`scripts/build-pages.sh`), the
+  (`main/Kconfig.projbuild`), the 4-chipFamily set + per-part offsets (`scripts/build-pages.sh`), the
   suffix map (`ota_update.cpp`/`ci-build-all.sh`/`build-pages.sh`), and the `/ota/*` +
   `/api/proxy/1/version` endpoints. Complementary to `ship` (cut/flash a release), not overlapping.
 - **`usb-recovery`** is the no-build emergency reflash (user-only, `disable-model-invocation: true`):

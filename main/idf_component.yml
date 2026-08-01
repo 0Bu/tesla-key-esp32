@@ -11,7 +11,7 @@ dependencies:
   # before compile. That is the property worth keeping: the chip list cannot silently
   # drift from what the crypto library declares it supports, and no local checkout of a
   # third-party dependency has to be maintained to widen it. (esp32c5 was carried that
-  # way for a while — see docs/adr/0001-esp32c5-target-upstreaming.md — and dropped.)
+  # way for a while and dropped — see docs/adr/0004-drop-esp32c5-target.md.)
   yoziru/tesla-ble:
     git: "https://github.com/yoziru/tesla-ble.git"
     version: "v5.1.1"

@@ -146,7 +146,7 @@ the authority for the per-sibling drift check; `project-review` defers the mecha
   `main/www/app.js`, via `test/ble_row_golden_dump.cpp` + `tools/ble_row_parity.js`.
 - **`ota-release-verify`** — verifies the already-published OTA channel (Pages manifest + per-target
   images + version coherence). Verify the manifest/firmware-base URLs (`main/Kconfig.projbuild`), the
-  5-chipFamily set + per-part offsets (bootloader per-target, partition-table `32768`, app `131072`)
+  4-chipFamily set + per-part offsets (bootloader per-target, partition-table `32768`, app `131072`)
   in `scripts/build-pages.sh`, the suffix map across `ota_update.cpp`/`ci-build-all.sh`/
   `build-pages.sh`, the `version.txt` floor vs CI-stamped version, and the `/ota/*` +
   `/api/proxy/1/version` endpoints. Read-only; complementary to `ship` (which cuts/flashes a release).

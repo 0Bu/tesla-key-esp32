@@ -120,27 +120,27 @@ menu "Tesla Key Configuration"
             disabled.
 
     if TESLA_DISPLAY_ENABLED
-    # sdkconfig.defaults.esp32s3 sets these to the T-Dongle-S3 wiring
-    # (MOSI3 / SCK5 / CS4 / DC2 / RST1 / BL38); the defaults below only apply to a board
-    # that enables the panel by hand.
+    # Defaults ARE the T-Dongle-S3 wiring — the only board this project drives a panel on.
+    # sdkconfig.defaults.esp32s3 restates them explicitly so the shipped esp32s3 build does not
+    # depend on a default, and the two must move together.
     config TESLA_DISPLAY_SPI_MOSI
         int "Display SPI MOSI (SDA) GPIO"
-        default 2
+        default 3
     config TESLA_DISPLAY_SPI_SCK
         int "Display SPI SCK (SCL) GPIO"
-        default 6
+        default 5
     config TESLA_DISPLAY_CS
         int "Display CS GPIO"
-        default 10
+        default 4
     config TESLA_DISPLAY_DC
         int "Display DC (RS) GPIO"
-        default 3
+        default 2
     config TESLA_DISPLAY_RST
         int "Display RST GPIO"
         default 1
     config TESLA_DISPLAY_BL
         int "Display backlight GPIO"
-        default 0
+        default 38
     endif
 
     config TESLA_LED_ENABLED
@@ -153,16 +153,17 @@ menu "Tesla Key Configuration"
             in flight, and amber/red for warnings/errors. Reads ONLY cached state, so
             it never triggers a BLE round-trip (can't wake the car) and needs no MQTT;
             it also works on a board with no display. Off by default — not every
-            ESP32-S3 board carries this LED, so enable it per board. A T-Dongle-S3
-            wires it to DI=40, CI=39.
+            ESP32-S3 board carries this LED, so enable it per board. The defaults below are
+            the T-Dongle-S3 wiring (DI=40, CI=39) — nothing overrides them in a
+            sdkconfig.defaults, so on any other board set both pins by hand.
 
     if TESLA_LED_ENABLED
     config TESLA_LED_DI_GPIO
         int "APA102 data (DI) GPIO"
-        default 5
+        default 40
     config TESLA_LED_CI_GPIO
         int "APA102 clock (CI) GPIO"
-        default 4
+        default 39
     config TESLA_LED_BRIGHTNESS
         int "APA102 global brightness (1-31)"
         default 8
