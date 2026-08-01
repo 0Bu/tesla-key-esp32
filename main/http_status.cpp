@@ -1,20 +1,34 @@
 // Web-UI-facing routes: the embedded page itself and the endpoints that drive it:
 //   GET  /        (embedded, pre-gzipped web UI)
 //   GET  /status  (device + pairing state — the UI polls this every 4 s)
-//   GET  /diag    (in-memory diagnostic log)
+//   GET  /diag    (in-memory diagnostic log; ?redact=1 for a bug report)
 //   POST /scan    (time-limited BLE discovery scan)
+//   GET  /coredump (stream the raw crash image; ?clear=1 erases it)
+//   POST /crash/dismiss (acknowledge + delete this boot's crash report)
+//   GET  /heap    (the board's 24-hour free/largest-block trend)
 // Dispatched from handle_all in http_server.cpp (inside its try/catch OOM guard).
 
 #include "http_handlers.hpp"
 #include "diag_log.hpp"
+#include "diag_crash.hpp"
+#include "heap_trend.hpp"
+#include "safe_mode.hpp"
 #include "mqtt_ha.hpp"
 #include "logic/status_model.hpp"
+#include "logic/redact.hpp"
+#include "config_blob.hpp"
 #include "syslog.hpp"
 #include <esp_netif.h>
 #include <esp_app_desc.h>
 #include <esp_wifi.h>
+#include <esp_heap_caps.h>
+#include <esp_timer.h>
+#include <sdkconfig.h>
+#include <esp_core_dump.h>
+#include <esp_partition.h>
 #include <ctime>
 #include <string>
+#include <string_view>
 
 // ─── POST /scan — start a time-limited BLE discovery scan ─────────────────────
 
@@ -75,8 +89,9 @@ struct CjsonEmitter {
 // any cJSON is allocated — so a std::bad_alloc can't leak a partial tree; the emit that follows only
 // does cJSON allocs, which return NULL under pressure rather than throw. May return nullptr under
 // total OOM; the caller guards for it.
-static cJSON* build_status_object() {
+static cJSON* build_status_object(bool redact) {
     tk::status::Inputs in;
+    in.redact = redact;
 
     char ip[16];
     current_ip(ip, sizeof(ip));
@@ -105,6 +120,21 @@ static cJSON* build_status_object() {
                          : ap.phy_11b  ? "802.11b" : nullptr;
         if (std_) in.wifi_std = std_;
     }
+    // Read from the CONFIG, not from any live state: the marker outlives the reboot the rollback
+    // performed, which is the whole reason it is persisted rather than kept in RAM.
+    //
+    // Read ONCE per boot, not per request. The marker cannot change while this image runs — both
+    // writers (main.cpp's rollback, POST /set_wifi) reboot immediately after saving — while
+    // /status is the web UI's 4 s poll, so a read here is an NVS blob read plus its std::vector on
+    // a request path, forever, for a value that is fixed at boot. This device's binding limit is
+    // the largest CONTIGUOUS free block and the rule in CLAUDE.md is not to allocate on a request
+    // path without needing to.
+    static const bool s_rolled_back = [] {
+        tk::ConfigBlob cb;
+        tk::cfg_load(*g_config, cb);
+        return cb.wifi_rolled_back;
+    }();
+    in.wifi_rolled_back = s_rolled_back;
 
     in.mqtt_configured = mqtt_ha_configured();
     in.mqtt_connected  = mqtt_ha_connected();
@@ -157,6 +187,36 @@ static cJSON* build_status_object() {
     if (g_vehicle->seconds_since_contact(ago)) { in.have_last_seen = true; in.last_seen_s = ago; }
     in.last_reboot = VehicleController::boot_reboot_reason();
 
+    // ── sys — always gathered, never conditional ──────────────────────────────────────────────
+    // INTERNAL caps on all three, matching logic/heap_watchdog.hpp exactly: plain 8BIT reports the
+    // max across every heap carrying the cap, and a board that registers PSRAM there would report
+    // megabytes free while internal DRAM sat in the exact wedge this device restarts itself for.
+    in.free_heap       = (uint32_t)heap_caps_get_free_size(MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL);
+    in.min_free_heap   = (uint32_t)heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL);
+    in.largest_block   = (uint32_t)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL);
+    in.uptime_s        = (uint32_t)(esp_timer_get_time() / 1000000);
+    in.wifi_reconnects = wifi_reconnect_count();
+    in.safe_mode       = tk::safe_mode_active();
+
+    // ── last_crash ────────────────────────────────────────────────────────────────────────────
+    // diag_crash_info_live() re-reads only the "is a dump still in flash" flag (a 4-byte read), not
+    // the summary parse — GET /coredump?clear=1 can erase the image mid-session, and a cached flag
+    // would leave the UI on a crash banner offering a download that 404s.
+    const tk::CrashInfo ci = tk::diag_crash_info_live();
+    in.reset_reason = tk::reset_reason_slug(ci.reset_code);
+    if (tk::crash_is_notable(ci)) {
+        in.have_crash        = true;
+        in.crash_reason      = tk::reset_reason_slug(ci.reset_code);
+        in.crash_reason_code = ci.reset_code;
+        in.crash_fault       = ci.fault;
+        in.crash_coredump    = ci.coredump;
+        in.crash_corrupted   = ci.corrupted;
+        in.crash_task        = ci.task;
+        in.crash_pc          = ci.pc;
+        in.crash_backtrace   = ci.backtrace;
+        in.crash_elf_sha256  = ci.elf_sha256;
+    }
+
     // The last-known charge snapshot ("last" / "last_seen_s", shown on the asleep card
     // regardless of link state) is emitted by the model from in.charge + in.last_seen.
     cJSON* root = cJSON_CreateObject();
@@ -172,7 +232,11 @@ static cJSON* build_status_object() {
 esp_err_t handle_status(GuardedReq rq) {
     httpd_req_t* req = rq.req;
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
-    return send_json(req, 200, build_status_object());   // send_json degrades a nullptr to 503
+    // ?redact=1 is the BUG-REPORT form: the six reporter-identifying values read "<redacted>"
+    // (logic/status_model.hpp). Opt-in per request, never the default — the dashboard legitimately
+    // shows the SSID, the broker and the VIN, and this is the same payload it polls.
+    const bool redact = query_param_is(req, "redact", "1");
+    return send_json(req, 200, build_status_object(redact));  // send_json degrades a nullptr to 503
 }
 
 // ─── GET /diag — in-memory diagnostic log (for on-demand analysis) ────────────
@@ -191,10 +255,175 @@ esp_err_t handle_diag(GuardedReq rq) {
     // largest contiguous free block on a fragmented heap → uncaught in the httpd task →
     // abort() → reboot. Chunked send needs no large contiguous allocation, so /diag is safe
     // regardless of buffer size or fragmentation.
-    diag_log_dump_chunks([req](const char* p, size_t n) {
-        return n == 0 || httpd_resp_send_chunk(req, p, n) == ESP_OK;
+    if (!query_param_is(req, "redact", "1")) {
+        diag_log_dump_chunks([req](const char* p, size_t n) {
+            return n == 0 || httpd_resp_send_chunk(req, p, n) == ESP_OK;
+        });
+        return httpd_resp_send_chunk(req, nullptr, 0);  // terminate the chunked response
+    }
+
+    // ?redact=1 — the bug-report form. /diag leaks by LINE (unlike /status, which leaks by field):
+    // a handful of log statements interpolate the VIN, an SSID, an IP, a BLE MAC, the broker or the
+    // syslog host. The rules are the host-tested logic/redact.hpp, and they FAIL CLOSED — a line
+    // the ring truncated mid-value redacts to the end of the line rather than giving up.
+    //
+    // The ring hands us one or two spans that do NOT align to line boundaries, so lines are
+    // reassembled into a fixed stack buffer sized to the ring's own line limit. Bounded on purpose:
+    // building the redacted dump as one std::string is exactly the allocation /diag streams to
+    // avoid, and a redaction REPLACEMENT is usually longer than the value it replaces, so the
+    // redacted text can be bigger than the buffer it came from.
+    static constexpr size_t kLineMax = 288;   // diag lines are capped at 256; slack for a long one
+    char   line[kLineMax];
+    size_t len = 0;
+    bool   ok  = true;
+
+    auto flush_line = [&](bool had_newline) {
+        if (len == 0 && !had_newline) return;
+        std::string out = tk::redact_diag_line(std::string_view(line, len));
+        if (had_newline) out.push_back('\n');
+        ok = ok && httpd_resp_send_chunk(req, out.data(), out.size()) == ESP_OK;
+        len = 0;
+    };
+
+    diag_log_dump_chunks([&](const char* p, size_t n) {
+        for (size_t i = 0; i < n && ok; i++) {
+            if (p[i] == '\n') {
+                flush_line(true);
+            } else {
+                // An over-long line (the ring wrapped mid-line, or a library printed something
+                // huge) is flushed WITHOUT its newline rather than truncated: dropping bytes from a
+                // diagnostic log is worse than splitting one line in two, and the fail-closed
+                // redaction still covers the fragment it is handed.
+                if (len == kLineMax) flush_line(false);
+                line[len++] = p[i];
+            }
+        }
+        return ok;
     });
-    return httpd_resp_send_chunk(req, nullptr, 0);  // terminate the chunked response
+    flush_line(false);   // whatever the ring ended on, unterminated
+    return httpd_resp_send_chunk(req, nullptr, 0);
+}
+
+// ─── GET /coredump — stream the raw crash image for offline symbolisation ─────
+//
+// The one artifact a panic leaves behind. Streamed in fixed chunks straight from flash: the image
+// is tens of KB and this device's binding limit is the largest CONTIGUOUS free block, so reading it
+// into one buffer is precisely the allocation that would fail on the fragmented heap a crash tends
+// to leave. Decode it offline against the .elf of the SAME build (CI archives one per build);
+// /status.last_crash.elf_sha256 is what identifies which.
+//
+// ?clear=1 erases the partition, freeing the slot for the next panic. Deliberately separate from
+// POST /crash/dismiss: this frees flash and leaves the fault reset on record, while a dismissal
+// says the crash has been dealt with.
+esp_err_t handle_coredump(GuardedReq rq) {
+    httpd_req_t* req = rq.req;
+
+#if !defined(CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH)
+    // This build writes no dumps (CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH off — no current target
+    // does, but see diag_crash.cpp). The route still EXISTS and answers with a reason
+    // rather than 404-ing as "not found": a tool that just read `coredump:false` off /status needs
+    // to be able to tell "this board never captures dumps" from "no crash has happened yet", and
+    // silence cannot carry that difference. The esp_core_dump_image_* symbols are not linked here
+    // at all, so everything below has to be compiled out rather than merely skipped.
+    cJSON* root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "error", "core dumps are not enabled on this target");
+    return send_json(req, 404, root);
+#else
+    if (query_param_is(req, "clear", "1")) {
+        esp_err_t err = esp_core_dump_image_erase();
+        cJSON* root = cJSON_CreateObject();
+        cJSON_AddBoolToObject(root, "ok", err == ESP_OK);
+        if (err != ESP_OK) cJSON_AddStringToObject(root, "error", esp_err_to_name(err));
+        return send_json(req, err == ESP_OK ? 200 : 500, root);
+    }
+
+    size_t addr = 0, size = 0;
+    if (esp_core_dump_image_get(&addr, &size) != ESP_OK || size == 0) {
+        cJSON* root = cJSON_CreateObject();
+        // 404 with a reason rather than an empty body: on a device flashed before the coredump
+        // partition existed this is the PERMANENT answer, and "no coredump partition" is a very
+        // different thing for the reader to know than "no crash has happened".
+        cJSON_AddStringToObject(root, "error", "no core dump available");
+        return send_json(req, 404, root);
+    }
+
+    const esp_partition_t* part = esp_partition_find_first(ESP_PARTITION_TYPE_DATA,
+                                                           ESP_PARTITION_SUBTYPE_DATA_COREDUMP,
+                                                           nullptr);
+    if (!part) {
+        cJSON* root = cJSON_CreateObject();
+        cJSON_AddStringToObject(root, "error", "no coredump partition");
+        return send_json(req, 404, root);
+    }
+
+    httpd_resp_set_type(req, "application/octet-stream");
+    httpd_resp_set_hdr(req, "Content-Disposition", "attachment; filename=\"coredump.bin\"");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+
+    // 1 KB of stack, not heap: the read buffer must not compete for the contiguous block, and this
+    // handler runs on the httpd task whose stack budget is hand-counted (see CLAUDE.md).
+    char   buf[1024];
+    size_t off = 0;
+    while (off < size) {
+        const size_t n = (size - off) > sizeof(buf) ? sizeof(buf) : (size - off);
+        if (esp_partition_read(part, off, buf, n) != ESP_OK) break;
+        if (httpd_resp_send_chunk(req, buf, n) != ESP_OK) return ESP_FAIL;  // client went away
+        off += n;
+    }
+    return httpd_resp_send_chunk(req, nullptr, 0);
+#endif
+}
+
+// ─── POST /crash/dismiss — acknowledge and DELETE this boot's crash report ────
+//
+// POST rather than a GET beside /coredump: it destroys the one artifact a bug report needs, so it
+// must not be reachable by a link, a prefetch or a crawler.
+esp_err_t handle_crash_dismiss(GuardedReq rq) {
+    httpd_req_t* req = rq.req;
+    const bool ok = tk::diag_crash_dismiss();
+    cJSON* root = cJSON_CreateObject();
+    cJSON_AddBoolToObject(root, "ok", ok);
+    if (!ok) cJSON_AddStringToObject(root, "error", "core dump erase failed");
+    return send_json(req, ok ? 200 : 500, root);
+}
+
+// ─── GET /heap — the board's own 24-hour memory trend ─────────────────────────
+//
+// Two series, oldest sample first, in TENTHS OF A KiB (the ring's storage unit — exact, no floats
+// on the wire, and the consumer scales by 10). `null` marks a bucket with no sample.
+//
+// What this answers that /status.sys cannot: whether the heap is DRIFTING. A leak is a slope;
+// fragmentation is `free` holding steady while `largest` sinks toward the 4 KB floor at which the
+// heap watchdog restarts the device. Neither is visible in any single reading, and both are what
+// precedes the failure this firmware has a whole watchdog for.
+esp_err_t handle_heap(GuardedReq rq) {
+    httpd_req_t* req = rq.req;
+
+    // Caller-owned buffers, filled under the ring's lock without allocating there. 2 × 288 ×
+    // int16_t = 1152 B of stack, against the httpd task's 8192 (http_server.cpp) — ~14 %, and
+    // cheaper than the heap it reports on. Growing kHeapHistorySamples grows this linearly, so
+    // that constant and this budget move together.
+    static constexpr size_t kMax = tk::kHeapHistorySamples;
+    tk::HeapTrendSample free_s[kMax];
+    tk::HeapTrendSample large_s[kMax];
+    uint32_t bucket0 = 0;
+    const size_t n = tk::heap_trend_snapshot(free_s, large_s, kMax, &bucket0);
+
+    cJSON* root = cJSON_CreateObject();
+    cJSON_AddNumberToObject(root, "dt", (double)tk::heap_trend_dt_s());
+    cJSON_AddNumberToObject(root, "b0", (double)bucket0);
+    cJSON_AddStringToObject(root, "unit", "KiB");
+    cJSON_AddNumberToObject(root, "scale", 10);   // samples are tenths of the unit
+    cJSON* jf = cJSON_AddArrayToObject(root, "free");
+    cJSON* jl = cJSON_AddArrayToObject(root, "largest");
+    for (size_t i = 0; i < n; i++) {
+        cJSON_AddItemToArray(jf, tk::heap_trend_absent(free_s[i])
+                                     ? cJSON_CreateNull() : cJSON_CreateNumber(free_s[i]));
+        cJSON_AddItemToArray(jl, tk::heap_trend_absent(large_s[i])
+                                     ? cJSON_CreateNull() : cJSON_CreateNumber(large_s[i]));
+    }
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    return send_json(req, 200, root);
 }
 
 // ─── GET / — web UI (embedded from main/www/, inlined + gzipped at build time) ──

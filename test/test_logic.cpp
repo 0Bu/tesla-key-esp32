@@ -43,6 +43,15 @@
 #include "logic/http_body.hpp"
 #include "logic/heap_watchdog.hpp"
 #include "logic/charge_control.hpp"
+#include "logic/reset_reason.hpp"
+#include "logic/crashinfo.hpp"
+#include "logic/bootlog.hpp"
+#include "logic/boot_guard.hpp"
+#include "logic/heap_history.hpp"
+#include "logic/wifi_rollback.hpp"
+#include "logic/redact.hpp"
+#include "logic/captive.hpp"
+#include "logic/config_store.hpp"
 
 #include <cmath>
 #include <cstdio>
@@ -738,7 +747,15 @@ static void test_status_model() {
         "last{\n"
         "last.soc=72.5\n"
         "last.status=\"Charging\"\n"
-        "last_seen_s=5\n"));
+        "last_seen_s=5\n"
+        "sys{\n"
+        "sys.free_heap=0\n"
+        "sys.min_free_heap=0\n"
+        "sys.largest_block=0\n"
+        "sys.uptime_s=0\n"
+        "sys.wifi_reconnects=0\n"
+        "sys.reset_reason=\"\"\n"
+        "sys.safe_mode=false\n"));
 
     // Scenario 2 — asleep: BLE link down (dropped between polls), charge cache retained,
     // debounced VCSEC sleep proven; no devices seen, no connect failures.
@@ -791,7 +808,15 @@ static void test_status_model() {
         "last.soc=68\n"
         "last.status=\"Stopped\"\n"
         "last_seen_s=3600\n"
-        "last_reboot=\"heap:2\"\n"));
+        "last_reboot=\"heap:2\"\n"
+        "sys{\n"
+        "sys.free_heap=0\n"
+        "sys.min_free_heap=0\n"
+        "sys.largest_block=0\n"
+        "sys.uptime_s=0\n"
+        "sys.wifi_reconnects=0\n"
+        "sys.reset_reason=\"\"\n"
+        "sys.safe_mode=false\n"));
 
     // Scenario 3 — unreachable, scanning, found-but-can't-connect: devices listed, a
     // connect-fail streak with last-seen advert RSSI and a non-connectable target (the
@@ -859,7 +884,15 @@ static void test_status_model() {
         "last{\n"
         "last.soc=54\n"
         "last.status=\"Disconnected\"\n"
-        "last_seen_s=90000\n"));
+        "last_seen_s=90000\n"
+        "sys{\n"
+        "sys.free_heap=0\n"
+        "sys.min_free_heap=0\n"
+        "sys.largest_block=0\n"
+        "sys.uptime_s=0\n"
+        "sys.wifi_reconnects=0\n"
+        "sys.reset_reason=\"\"\n"
+        "sys.safe_mode=false\n"));
 
     // Scenario 4 — factory-fresh: no key, unpaired, no WiFi yet (portal case aside),
     // nothing cached, nothing heard. The contract still emits the empty wifi/mqtt/ble
@@ -890,7 +923,15 @@ static void test_status_model() {
         "ble.scanning=false\n"
         "ble.devices[\n"
         "link=\"unknown\"\n"
-        "vcsec_sleep=\"UNKNOWN\"\n"));
+        "vcsec_sleep=\"UNKNOWN\"\n"
+        "sys{\n"
+        "sys.free_heap=0\n"
+        "sys.min_free_heap=0\n"
+        "sys.largest_block=0\n"
+        "sys.uptime_s=0\n"
+        "sys.wifi_reconnects=0\n"
+        "sys.reset_reason=\"\"\n"
+        "sys.safe_mode=false\n"));
 
     // ── BLE phase countdown presence rules ────────────────────────────────────────────
     // phase_s rides WITH phase and is emitted even at 0. A countdown that vanished on its
@@ -1474,6 +1515,486 @@ static void test_ble_row() {
     }
 }
 
+
+// ─── Reset reason / crash reporting ───────────────────────────────────────────
+// Before this existed, a panic left no artifact a remote reader could reach: the reset reason was
+// printed once at boot and nothing else survived. These pin the vocabulary all crash reporting is
+// built on — a WRONG label is worse than no label, because it sends the next investigation
+// somewhere else entirely.
+static void test_reset_reason() {
+    // The numeric values mirror ESP-IDF's esp_reset_reason_t; diag_crash.cpp static_asserts that
+    // mapping against the real enum, so here we pin only the spelling and the classification.
+    CHECK(std::string(tk::reset_reason_slug((int)tk::ResetCode::PowerOn))  == "power_on");
+    CHECK(std::string(tk::reset_reason_slug((int)tk::ResetCode::Sw))       == "sw");
+    CHECK(std::string(tk::reset_reason_slug((int)tk::ResetCode::Panic))    == "panic");
+    CHECK(std::string(tk::reset_reason_slug((int)tk::ResetCode::TaskWdt)) == "task_wdt");
+    CHECK(std::string(tk::reset_reason_slug((int)tk::ResetCode::Brownout)) == "brownout");
+    // An unknown code must not fall through to a plausible-looking neighbour.
+    CHECK(std::string(tk::reset_reason_slug(9999)) == "unknown");
+
+    // The fault set drives BOTH the crash report and the safe-mode counter, so its boundaries are
+    // the load-bearing part. SW is NOT a fault: every /set_* save, every OTA and the heap
+    // watchdog's own restart report it, and counting those would latch safe mode on a device whose
+    // user merely changed the broker four times.
+    CHECK(tk::reset_is_fault((int)tk::ResetCode::Panic));
+    CHECK(tk::reset_is_fault((int)tk::ResetCode::IntWdt));
+    CHECK(tk::reset_is_fault((int)tk::ResetCode::TaskWdt));
+    CHECK(tk::reset_is_fault((int)tk::ResetCode::Brownout));
+    CHECK(!tk::reset_is_fault((int)tk::ResetCode::PowerOn));
+    CHECK(!tk::reset_is_fault((int)tk::ResetCode::Sw));
+    CHECK(!tk::reset_is_fault((int)tk::ResetCode::Ext));
+    CHECK(!tk::reset_is_fault((int)tk::ResetCode::DeepSleep));
+}
+
+static void test_crashinfo() {
+    // An ordinary boot reports NOTHING. That property is what keeps the report meaningful:
+    // /status.last_crash is absent on a healthy device, so its presence alone is the signal.
+    tk::CrashInfo ok;
+    tk::crash_set_reset(ok, (int)tk::ResetCode::PowerOn);
+    CHECK(!ok.fault);
+    CHECK(!tk::crash_is_notable(ok));
+
+    tk::CrashInfo panic;
+    tk::crash_set_reset(panic, (int)tk::ResetCode::Panic);
+    CHECK(panic.fault);
+    CHECK(tk::crash_is_notable(panic));
+
+    // A dump left in flash is notable even on a CLEAN boot — the crash happened, its evidence is
+    // still downloadable, and a device that has power-cycled since must not hide it.
+    tk::CrashInfo dump_only;
+    tk::crash_set_reset(dump_only, (int)tk::ResetCode::PowerOn);
+    dump_only.coredump = true;
+    CHECK(tk::crash_is_notable(dump_only));
+
+    // Dismissal is a real deletion: once acknowledged, every surface goes quiet at once.
+    tk::CrashInfo dismissed = panic;
+    dismissed.dismissed = true;
+    CHECK(!tk::crash_is_notable(dismissed));
+
+    // crash_has_summary is DERIVED, so it can never claim a summary the fields do not carry —
+    // which would render an empty "task= pc=0x0" block reading like a crash with no information.
+    CHECK(!tk::crash_has_summary(panic));
+    panic.task = "vehicle_loop";
+    CHECK(tk::crash_has_summary(panic));
+
+    // ── coredump_is_foreign: destructive, so it fires only on PROOF ─────────────────────────
+    // The erase it gates destroys the only artifact a panic left, so "unknown" must read as ours.
+    CHECK(!tk::coredump_is_foreign("", ""));
+    CHECK(!tk::coredump_is_foreign("abcdef1234", ""));
+    CHECK(!tk::coredump_is_foreign("", "abcdef1234"));
+    CHECK(!tk::coredump_is_foreign("abcdef1234", "abcdef1234"));
+    // Truncation is normal (IDF retrieves 9 hex chars by default): a shorter rendering of the SAME
+    // hash must not read as a different build.
+    CHECK(!tk::coredump_is_foreign("abcdef1234567890", "abcdef123"));
+    // A real mismatch over a meaningful length IS proof.
+    CHECK(tk::coredump_is_foreign("abcdef1234567890", "0123456789abcdef"));
+
+    // The text bundle names the crash without inventing anything.
+    tk::CrashInfo full;
+    tk::crash_set_reset(full, (int)tk::ResetCode::TaskWdt);
+    full.task = "mqtt_pub"; full.pc = 0x400d1234;
+    full.backtrace = {0x400d1234, 0x400d5678};
+    full.elf_sha256 = "deadbeef1";
+    const std::string txt = tk::build_crash_text(full);
+    CHECK(txt.find("task_wdt")  != std::string::npos);
+    CHECK(txt.find("mqtt_pub")  != std::string::npos);
+    CHECK(txt.find("400d1234")  != std::string::npos);
+    CHECK(txt.find("deadbeef1") != std::string::npos);
+}
+
+static void test_bootlog() {
+    // The build-identity line is the only way to tell WHICH firmware produced a log stream — a
+    // collector holding months of lines across several flashes has nothing else to key on.
+    const std::string b = tk::build_boot_line("1.4.2", "deadbeef1", "panic", false);
+    CHECK(b.find("1.4.2")     != std::string::npos);
+    CHECK(b.find("deadbeef1") != std::string::npos);
+    CHECK(b.find("panic")     != std::string::npos);
+    CHECK(b.find('\n')        == std::string::npos);   // ONE datagram, one line
+    CHECK(b.size() <= tk::kBootlogLineMax);
+    // Safe mode has to be visible here: a board in recovery answers /status but never touches the
+    // car, and a reader of the log stream would otherwise diagnose a broken BLE stack.
+    CHECK(tk::build_boot_line("1.4.2", "x", "panic", true).find("safe_mode=yes") != std::string::npos);
+
+    // A HEALTHY boot must add nothing. Replaying a crash record on every boot forever is how a
+    // collector gets trained to ignore the one line that mattered.
+    std::vector<std::string> out;
+    tk::CrashInfo clean;
+    tk::crash_set_reset(clean, (int)tk::ResetCode::PowerOn);
+    CHECK(tk::build_crash_log_lines(clean, out) == 0);
+    CHECK(out.empty());
+
+    tk::CrashInfo crash;
+    tk::crash_set_reset(crash, (int)tk::ResetCode::Panic);
+    crash.task = "vehicle_loop"; crash.pc = 0x400d1234;
+    crash.backtrace.assign(32, 0x400d1234);   // deliberately deeper than any sane stack
+    crash.elf_sha256 = "deadbeef1";
+    out.clear();
+    const int n = tk::build_crash_log_lines(crash, out);
+    CHECK(n > 0);
+    CHECK((size_t)n == out.size());
+    for (const std::string& l : out) {
+        // Every record must survive the transport: diag_log.cpp formats one line into a 256-byte
+        // buffer, so an over-long record reaches the collector cut off mid-sentence — and these are
+        // precisely the lines that must not be.
+        CHECK(l.size() <= tk::kBootlogLineMax);
+        CHECK(l.find('\n') == std::string::npos);
+    }
+}
+
+// ─── Boot-loop safe mode ──────────────────────────────────────────────────────
+static void test_boot_guard() {
+    // A clean boot RESETS the count. Without that, four crashes spread over a year would latch
+    // safe mode on a device that has been healthy the whole time.
+    CHECK(tk::boot_fail_next(3, false) == 0);
+    CHECK(tk::boot_fail_next(0, false) == 0);
+
+    CHECK(tk::boot_fail_next(0, true) == 1);
+    CHECK(tk::boot_fail_next(2, true) == 3);
+
+    // Saturating: the counter must never wrap around into "healthy".
+    CHECK(tk::boot_fail_next(tk::kBootFailMax, true) == tk::kBootFailMax);
+    // A garbled NVS read resolves DOWNWARD. Under-counting only delays safe mode; over-counting
+    // would cripple a device that never crashed.
+    CHECK(tk::boot_fail_next(999999u, true) <= tk::kBootFailMax);
+
+    CHECK(!tk::boot_safe_mode(0));
+    CHECK(!tk::boot_safe_mode(tk::kBootFailThreshold - 1));
+    CHECK(tk::boot_safe_mode(tk::kBootFailThreshold));
+    CHECK(tk::boot_safe_mode(tk::kBootFailThreshold + 5));
+
+    // The healthy window must mean "it RAN", not "it initialised".
+    CHECK(!tk::boot_healthy_elapsed(0));
+    CHECK(!tk::boot_healthy_elapsed(tk::kBootHealthyS - 1));
+    CHECK(tk::boot_healthy_elapsed(tk::kBootHealthyS));
+}
+
+// ─── Heap trend ring ──────────────────────────────────────────────────────────
+static void test_heap_history() {
+    // Tenths of a KiB, clamped — the encoding is what keeps a whole day in .bss without floats.
+    CHECK(tk::heap_tenths_kib(1024) == 10);
+    CHECK(tk::heap_tenths_kib(0)    == 0);
+    CHECK(tk::heap_tenths_kib(512)  == 5);
+    // A PSRAM-sized number must clamp rather than wrap into a negative reading.
+    CHECK(tk::heap_tenths_kib(8u * 1024u * 1024u) > 0);
+
+    tk::HeapRing r;
+    CHECK(r.count() == 0);
+
+    // Samples inside one bucket fold together and publish nothing yet: an open bucket is not a
+    // measurement, and emitting it would put a half-formed value on the chart's live edge.
+    r.record(0, 40u * 1024, 20u * 1024);
+    r.record(10, 30u * 1024, 10u * 1024);
+    CHECK(r.count() == 0);
+
+    // Crossing into the next bucket commits the previous one.
+    r.record(tk::kHeapHistoryDtS, 35u * 1024, 15u * 1024);
+    CHECK(r.count() == 1);
+
+    static tk::HeapTrendSample f[tk::kHeapHistorySamples];
+    static tk::HeapTrendSample l[tk::kHeapHistorySamples];
+    CHECK(r.snapshot_free(f, tk::kHeapHistorySamples) == 1);
+    CHECK(r.snapshot_largest(l, tk::kHeapHistorySamples) == 1);
+    // The MINIMUM of the bucket, not the last reading: on a resource ceiling the dip IS the signal,
+    // and keeping the last value would draw a calm curve right up to the restart.
+    CHECK(f[0] == tk::heap_tenths_kib(30u * 1024));
+    CHECK(l[0] == tk::heap_tenths_kib(10u * 1024));
+
+    // A SKIPPED bucket is FILLED, never compressed. Compressing slides every earlier sample forward
+    // in time and silently mislabels the whole curve — a chart that is wrong about WHEN.
+    tk::HeapRing g;
+    g.record(0, 40u * 1024, 20u * 1024);
+    g.record(tk::kHeapHistoryDtS * 5, 40u * 1024, 20u * 1024);
+    CHECK(g.count() == 5);
+    CHECK(g.snapshot_free(f, tk::kHeapHistorySamples) == 5);
+    CHECK(!tk::heap_trend_absent(f[0]));
+    CHECK(tk::heap_trend_absent(f[1]));   // the gap is stated, not invented
+    CHECK(tk::heap_trend_absent(f[4]));
+
+    // Wrap-around: the ring holds a fixed span and bucket0 tracks what was evicted, so a consumer
+    // can still place the series on a clock after a full day.
+    tk::HeapRing w;
+    for (size_t i = 0; i < tk::kHeapHistorySamples + 10; i++)
+        w.record((uint32_t)i * tk::kHeapHistoryDtS, 40u * 1024, 20u * 1024);
+    CHECK(w.count() == tk::kHeapHistorySamples);
+    // 298 records open buckets 0..297, and the LAST one is still open — so 297 buckets are
+    // published, of which the ring keeps the newest 288 and sample zero is bucket 9. The off-by-one
+    // is the open-bucket rule showing through, and it is exactly what a consumer must not have to
+    // guess: bucket0() is what lets it place the series on a clock after a wrap.
+    CHECK(w.bucket0() == 297 - tk::kHeapHistorySamples);
+
+    // The budget is asserted where it is spent.
+    CHECK(sizeof(tk::HeapRing) <= 1536);
+    CHECK(tk::kHeapHistorySamples * tk::kHeapHistoryDtS == 86400);
+}
+
+// ─── WiFi credential rollback ─────────────────────────────────────────────────
+static void test_wifi_rollback() {
+    // Only the AP's own refusal is evidence about the CREDENTIALS. Everything else — a router
+    // still rebooting, a slow DHCP — says nothing about them, and treating it as evidence is what
+    // destroys a perfectly good password.
+    CHECK(tk::disco_class(202) == tk::DiscoClass::Auth);       // AUTH_FAIL
+    CHECK(tk::disco_class(204) == tk::DiscoClass::Auth);       // HANDSHAKE_TIMEOUT
+    CHECK(tk::disco_class(201) == tk::DiscoClass::ApAbsent);   // NO_AP_FOUND
+    CHECK(tk::disco_class(0)   == tk::DiscoClass::None);
+    CHECK(tk::disco_class(8)   == tk::DiscoClass::Other);      // an unrelated deauth
+
+    // Nothing is decided before the ordinary boot window is even up — those auth codes double as
+    // the transient handshake failures a normal connect recovers from on its own.
+    tk::RollbackWatch w1{};
+    CHECK(tk::rollback_step(w1, tk::DiscoClass::Auth, 5) == tk::RollbackAction::Wait);
+
+    // ONE auth checkpoint is not enough: a single sample cannot tell a wrong password from a
+    // transient SAE failure. Two consecutive ones can.
+    tk::RollbackWatch w2{};
+    CHECK(tk::rollback_step(w2, tk::DiscoClass::Auth, tk::kWifiBootWindowS)
+          == tk::RollbackAction::Wait);
+    CHECK(tk::rollback_step(w2, tk::DiscoClass::Auth, tk::kWifiBootWindowS * 2)
+          == tk::RollbackAction::RollBack);
+
+    // A non-auth checkpoint BREAKS the streak, so auth samples cannot accumulate across an
+    // unrelated hour into a rollback.
+    tk::RollbackWatch w3{};
+    CHECK(tk::rollback_step(w3, tk::DiscoClass::Auth, tk::kWifiBootWindowS)
+          == tk::RollbackAction::Wait);
+    CHECK(tk::rollback_step(w3, tk::DiscoClass::ApAbsent, tk::kWifiBootWindowS * 2)
+          == tk::RollbackAction::Wait);
+    CHECK(tk::rollback_step(w3, tk::DiscoClass::Auth, tk::kWifiBootWindowS * 3)
+          == tk::RollbackAction::Wait);   // the streak restarted, it did not resume
+
+    // An ABSENT SSID gets the full grace — a rebooting router takes minutes — but the window is
+    // finite, so a genuinely wrong SSID still self-heals instead of stranding the device.
+    tk::RollbackWatch w4{};
+    CHECK(tk::rollback_step(w4, tk::DiscoClass::ApAbsent, tk::kWifiRollbackGraceS - 1)
+          == tk::RollbackAction::Wait);
+    CHECK(tk::rollback_step(w4, tk::DiscoClass::ApAbsent, tk::kWifiRollbackGraceS)
+          == tk::RollbackAction::RollBack);
+    // The fast path must genuinely be faster than the patient one, or the distinction buys nothing.
+    CHECK(tk::kWifiRollbackGraceS > tk::kWifiBootWindowS * tk::kWifiAuthToRollback);
+}
+
+// ─── Bug-report redaction ─────────────────────────────────────────────────────
+static void test_redact() {
+    CHECK(tk::redact_or("MySSID", false) == "MySSID");
+    CHECK(tk::redact_or("MySSID", true)  == tk::kRedacted);
+
+    // The VIN and the BLE MAC on one line — the worst single line this device logs.
+    const std::string boot = tk::redact_diag_line(
+        "I (1234) main: VIN: 5YJ3E1EA7KF000316  BLE MAC: aa:bb:cc:dd:ee:ff\n");
+    CHECK(boot.find("5YJ3E1EA7KF000316") == std::string::npos);
+    CHECK(boot.find("aa:bb:cc:dd:ee:ff") == std::string::npos);
+    // The KEY survives. A dropped field forges an "older build that never had it" signal, and the
+    // shape of the line is what tells a reader which log statement they are looking at.
+    CHECK(boot.find("VIN: ")     != std::string::npos);
+    CHECK(boot.find("BLE MAC: ") != std::string::npos);
+    CHECK(boot.back() == '\n');   // the ring's line structure survives
+
+    // A line the ring truncated MID-VALUE must FAIL CLOSED — redact to the end of the line rather
+    // than give up. Not exotic: that is exactly what an unterminated value at the end of a wrapped
+    // buffer looks like, which is when a value is most likely to be sitting there.
+    const std::string cut = tk::redact_diag_line("I (1) main: VIN: 5YJ3E1EA7KF0003");
+    CHECK(cut.find("5YJ3E1EA7KF0003") == std::string::npos);
+
+    // An ordinary line is untouched — a redactor that mangles the log costs the diagnosis it was
+    // supposed to make safe to share.
+    const std::string plain = "I (1234) main: HEAP free=40000 largest_block=20000\n";
+    CHECK(tk::redact_diag_line(plain) == plain);
+
+    CHECK(tk::kDiagRedactionCount > 0);
+    CHECK(tk::kRedactedStatusFields == 6);
+}
+
+// ─── Captive-portal reply policy ──────────────────────────────────────────────
+static void test_captive() {
+    using tk::CaptiveReply;
+    // The three probes each OS actually uses. A 200 + page is a heuristic Android may leave
+    // undecided; a 302 + Location is the one answer all three understand.
+    CHECK(tk::captive_reply_for("/hotspot-detect.html", true) == CaptiveReply::Redirect);
+    CHECK(tk::captive_reply_for("/generate_204", true)        == CaptiveReply::Redirect);
+    CHECK(tk::captive_reply_for("/connecttest.txt", true)     == CaptiveReply::Redirect);
+
+    // The portal page itself must still be SERVED, or the redirect target redirects forever.
+    CHECK(tk::captive_reply_for("/", true) == CaptiveReply::Page);
+
+    // Outside setup mode NOTHING redirects: a dashboard deep link that starts bouncing to
+    // 192.168.4.1 is the regression nobody reports, because it only shows up on the real device.
+    CHECK(tk::captive_reply_for("/generate_204", false) == CaptiveReply::Page);
+    CHECK(tk::captive_reply_for("/", false)             == CaptiveReply::Page);
+
+    // ONE place writes the portal address, so the DNS answer, the DHCP option and the Location
+    // header cannot drift apart.
+    CHECK(std::string(tk::CAPTIVE_PORTAL_URI).find(tk::CAPTIVE_PORTAL_IP) != std::string::npos);
+}
+
+// ─── Atomic config blob ───────────────────────────────────────────────────────
+static void test_config_store() {
+    tk::ConfigBlob in;
+    in.wifi_ssid = "HomeNet";  in.wifi_pass = "supersecret";
+    in.wifi_ssid_backup = "OldNet"; in.wifi_pass_backup = "oldsecret";
+    in.wifi_rollback_active = true; in.wifi_rolled_back = false;
+    in.vin = "5YJ3E1EA7KF000316"; in.mqtt_uri = "192.168.1.5:1883";
+    in.syslog_uri = "192.168.1.9:514";
+
+    tk::ConfigBlobBuffer buf{};
+    const size_t n = tk::config_blob_encode(in, buf.data(), buf.size());
+    CHECK(n > 0);
+    CHECK(n <= tk::kConfigBlobEncodedMax);
+
+    tk::ConfigBlob out;
+    CHECK(tk::config_blob_decode(buf.data(), n, out));
+    CHECK(out.wifi_ssid == in.wifi_ssid);
+    CHECK(out.wifi_pass == in.wifi_pass);
+    CHECK(out.wifi_ssid_backup == in.wifi_ssid_backup);
+    CHECK(out.wifi_pass_backup == in.wifi_pass_backup);
+    CHECK(out.wifi_rollback_active == in.wifi_rollback_active);
+    CHECK(out.vin == in.vin);
+    CHECK(out.mqtt_uri == in.mqtt_uri);
+    CHECK(out.syslog_uri == in.syslog_uri);
+
+    // An EMPTY value is a real value here — "" is how MQTT and syslog are DISABLED — so it must
+    // survive a round trip rather than reading back as "unset".
+    tk::ConfigBlob empty_svc = in;
+    empty_svc.mqtt_uri.clear();
+    empty_svc.syslog_uri.clear();
+    tk::ConfigBlobBuffer b2{};
+    const size_t n2 = tk::config_blob_encode(empty_svc, b2.data(), b2.size());
+    tk::ConfigBlob out2;
+    CHECK(n2 > 0);
+    CHECK(tk::config_blob_decode(b2.data(), n2, out2));
+    CHECK(out2.mqtt_uri.empty());
+    CHECK(out2.syslog_uri.empty());
+    CHECK(out2.wifi_ssid == "HomeNet");
+
+    // A single flipped bit must be REFUSED, not read as a slightly different configuration. That
+    // is the whole point of the CRC: a torn or decaying entry has to fail loudly enough for the
+    // caller to fall back to the legacy keys, instead of the device joining a network nobody set.
+    tk::ConfigBlobBuffer bad = buf;
+    bad[10] = (uint8_t)(bad[10] ^ 0x01);
+    tk::ConfigBlob nope;
+    CHECK(!tk::config_blob_decode(bad.data(), n, nope));
+
+    // Truncation is refused too — a short read is not a valid older blob.
+    CHECK(!tk::config_blob_decode(buf.data(), n / 2, nope));
+    CHECK(!tk::config_blob_decode(buf.data(), 0, nope));
+
+    // A NEWER version is refused rather than partially read: a build that guesses at a layout it
+    // does not know would publish fields it invented.
+    tk::ConfigBlobBuffer future = buf;
+    future[4] = (uint8_t)(tk::kConfigBlobVersion + 1);
+    CHECK(!tk::config_blob_decode(future.data(), n, nope));
+
+    // Decode leaves the target UNTOUCHED on failure — all-or-nothing, so a rejected blob can never
+    // half-overwrite a good in-RAM configuration.
+    tk::ConfigBlob keep;
+    keep.wifi_ssid = "Untouched";
+    CHECK(!tk::config_blob_decode(bad.data(), n, keep));
+    CHECK(keep.wifi_ssid == "Untouched");
+
+    // An over-long field is REFUSED, never truncated: silently storing a shortened SSID produces a
+    // device that connects to a network nobody configured.
+    tk::ConfigBlob too_long;
+    too_long.wifi_ssid = std::string(tk::kConfigMaxSsidLen + 1, 'x');
+    tk::ConfigBlobBuffer b3{};
+    CHECK(tk::config_blob_encode(too_long, b3.data(), b3.size()) == 0);
+
+    // An undersized output buffer writes NOTHING.
+    tk::ConfigBlobBuffer b4{};
+    CHECK(tk::config_blob_encode(in, b4.data(), 8) == 0);
+}
+
+// ─── /status: the sys block, the crash block and redaction ────────────────────
+static void test_status_sys_and_redaction() {
+    using tk::status::Inputs;
+
+    // The sys block is UNCONDITIONAL — a device with no pairing, no broker and no link still has
+    // to be able to say how it is doing, and this is the block a remote triage reads first.
+    Inputs s;
+    s.vin = "5YJ3E1EA7KF000316"; s.version = "1.4.2"; s.ip = "192.168.1.42";
+    s.free_heap = 40960; s.min_free_heap = 20480; s.largest_block = 16384;
+    s.uptime_s = 3600; s.wifi_reconnects = 2; s.reset_reason = "panic"; s.safe_mode = true;
+    CollectEmitter e;
+    tk::status::emit_status(s, e);
+    CHECK(e.out.find("sys.free_heap=40960")        != std::string::npos);
+    CHECK(e.out.find("sys.largest_block=16384")    != std::string::npos);
+    CHECK(e.out.find("sys.uptime_s=3600")          != std::string::npos);
+    CHECK(e.out.find("sys.wifi_reconnects=2")      != std::string::npos);
+    CHECK(e.out.find("sys.reset_reason=\"panic\"") != std::string::npos);
+    CHECK(e.out.find("sys.safe_mode=true")         != std::string::npos);
+    // No crash was reported, so the block is ABSENT — presence is the signal.
+    CHECK(e.out.find("last_crash") == std::string::npos);
+
+    // With a crash, every field a decoder needs is present and the PCs are hex STRINGS (a JSON
+    // number would render an address in decimal in every viewer that touches the payload).
+    Inputs c = s;
+    c.have_crash = true; c.crash_reason = "task_wdt"; c.crash_reason_code = 6;
+    c.crash_fault = true; c.crash_coredump = true; c.crash_task = "mqtt_pub";
+    c.crash_pc = 0x400d1234; c.crash_backtrace = {0x400d1234u, 0x400d5678u};
+    c.crash_corrupted = true; c.crash_elf_sha256 = "deadbeef1";
+    CollectEmitter ec;
+    tk::status::emit_status(c, ec);
+    CHECK(ec.out.find("last_crash.reason=\"task_wdt\"")      != std::string::npos);
+    CHECK(ec.out.find("last_crash.fault=true")               != std::string::npos);
+    CHECK(ec.out.find("last_crash.task=\"mqtt_pub\"")        != std::string::npos);
+    CHECK(ec.out.find("\"0x400d1234\"")                      != std::string::npos);
+    CHECK(ec.out.find("last_crash.corrupted=true")           != std::string::npos);
+    CHECK(ec.out.find("last_crash.elf_sha256=\"deadbeef1\"") != std::string::npos);
+
+    // ── ?redact=1 ──────────────────────────────────────────────────────────────────────────
+    // Six identifying values are substituted. The VIN is the sharpest: it names one specific
+    // vehicle and is an input to Tesla's own APIs.
+    Inputs r;
+    r.redact = true;
+    r.vin = "5YJ3E1EA7KF000316"; r.ip = "192.168.1.42"; r.version = "1.4.2";
+    r.wifi_connected = true; r.wifi_ssid = "MyHomeNetwork"; r.wifi_rssi = -55;
+    r.mqtt_broker = "192.168.1.5:1883";
+    r.syslog_host = "192.168.1.9"; r.syslog_port = 514;
+    r.ble_connected = true; r.ble_addr = "aa:bb:cc:dd:ee:ff";
+    CollectEmitter er;
+    tk::status::emit_status(r, er);
+    CHECK(er.out.find("5YJ3E1EA7KF000316") == std::string::npos);
+    CHECK(er.out.find("192.168.1.42")      == std::string::npos);
+    CHECK(er.out.find("MyHomeNetwork")     == std::string::npos);
+    CHECK(er.out.find("192.168.1.5")       == std::string::npos);
+    CHECK(er.out.find("192.168.1.9")       == std::string::npos);
+    CHECK(er.out.find("aa:bb:cc:dd:ee:ff") == std::string::npos);
+    // The KEYS all survive, and so does everything that is NOT identifying — a report stripped of
+    // its diagnostic content is not a safer report, it is a useless one.
+    CHECK(er.out.find("vin=")              != std::string::npos);
+    CHECK(er.out.find("wifi.ssid=")        != std::string::npos);
+    CHECK(er.out.find("mqtt.broker=")      != std::string::npos);
+    CHECK(er.out.find("syslog.host=")      != std::string::npos);
+    CHECK(er.out.find("version=\"1.4.2\"") != std::string::npos);
+    CHECK(er.out.find("wifi.rssi=-55")     != std::string::npos);
+    CHECK(er.out.find("syslog.port=514")   != std::string::npos);
+
+    // A scanned NEIGHBOUR's MAC is other people's hardware in the reporter's home, so it is
+    // redacted for the same reason the car's own is.
+    Inputs d;
+    d.redact = true;
+    tk::status::BleDevice dev;
+    dev.addr = "11:22:33:44:55:66"; dev.name = "SomeCar"; dev.rssi = -70; dev.connectable = true;
+    d.devices.push_back(dev);
+    CollectEmitter ed;
+    tk::status::emit_status(d, ed);
+    CHECK(ed.out.find("11:22:33:44:55:66") == std::string::npos);
+
+    // The UNREDACTED payload is what the dashboard polls: redaction is opt-in per request, and a
+    // default-on version would silently break the UI it shares a builder with.
+    Inputs u = r;
+    u.redact = false;
+    CollectEmitter eu;
+    tk::status::emit_status(u, eu);
+    CHECK(eu.out.find("MyHomeNetwork") != std::string::npos);
+
+    // The rollback marker is emitted ONLY when it happened — it is sticky and rare, so presence is
+    // the signal, and it is the only trace left after the reboot showed the old SSID again.
+    Inputs rb;
+    rb.wifi_rolled_back = true;
+    CollectEmitter erb;
+    tk::status::emit_status(rb, erb);
+    CHECK(erb.out.find("wifi.rolled_back=true") != std::string::npos);
+    CHECK(e.out.find("rolled_back") == std::string::npos);
+}
+
 int main() {
     test_vin();
     test_syslog_policy();
@@ -1494,6 +2015,16 @@ int main() {
     test_ble_phase();
     test_ble_row();
     test_http_body();
+    test_reset_reason();
+    test_crashinfo();
+    test_bootlog();
+    test_boot_guard();
+    test_heap_history();
+    test_wifi_rollback();
+    test_redact();
+    test_captive();
+    test_config_store();
+    test_status_sys_and_redaction();
 
     if (g_failures == 0) {
         std::printf("OK  %d checks passed\n", g_checks);

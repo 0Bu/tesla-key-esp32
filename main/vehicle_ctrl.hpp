@@ -7,6 +7,7 @@
 #include <memory>
 #include <atomic>
 #include <ctime>
+#include <esp_log.h>
 #include "ble_client.hpp"
 #include "nvs_storage.hpp"
 #include "rtos_guard.hpp"
@@ -27,8 +28,15 @@ public:
 
     // All references must remain alive for the lifetime of this object.
     // known_mac: if empty, MAC is discovered via scan and saved to config_store.
+    // start_tasks == false wires EVERYTHING (callbacks, mutexes, caches, the VIN gate) but creates
+    // neither background task, so the controller is fully safe to READ — /status, the web UI and
+    // the MQTT snapshot all work — while nothing of ours touches the car. That is safe mode
+    // (safe_mode.cpp): after enough consecutive crash boots the vehicle path is exactly what must
+    // not run, and skipping init() outright is not the alternative — it would hand the HTTP server
+    // a half-constructed controller to read from.
     bool init(const std::string& vin, BleClient& ble, NvsStorageAdapter& storage,
-              NvsStorageAdapter& config_store, std::string& known_mac);
+              NvsStorageAdapter& config_store, std::string& known_mac,
+              bool start_tasks = true);
 
     bool wake_up(int timeout_ms = 20000);
     bool charge_start(int timeout_ms = 20000);
@@ -216,7 +224,12 @@ private:
     void persist_reboot_reason_(const char* why) {
         if (!config_store_) return;
         try {
-            config_store_->save_str("reboot_why", why);
+            // Discarded ON PURPOSE, and now said so explicitly because the component compiles
+            // with -Werror=unused-result: we are already on the way to a deliberate restart on a
+            // failing heap, so there is no better outcome to escalate to. Losing the breadcrumb
+            // costs one line of the next boot's /status; turning the restart into an abort would
+            // cost the restart itself.
+            (void)config_store_->save_str("reboot_why", why);
         } catch (...) {
         }
     }
@@ -228,7 +241,11 @@ public:
     static std::string take_reboot_reason(NvsStorageAdapter& cfg) {
         std::string why;
         cfg.load_str("reboot_why", why);
-        if (!why.empty()) cfg.save_str("reboot_why", "");
+        // A failed CLEAR would replay this reason on every later boot, so it is reported rather
+        // than dropped — but it must not change what this boot reports, hence no early return.
+        if (!why.empty() && !cfg.save_str("reboot_why", "")) {
+            ESP_LOGW("vehicle_ctrl", "could not clear reboot_why — it may repeat next boot");
+        }
         return why;
     }
 

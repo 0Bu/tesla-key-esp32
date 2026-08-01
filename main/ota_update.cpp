@@ -268,6 +268,24 @@ bool ota_check_start() {
 // ─── Background download + install ──────────────────────────────────────────────
 
 static void ota_task_impl() {
+    // Re-fetch the manifest HERE rather than trusting whatever a previous /ota/check left in the
+    // shared status. Two independent reasons: POST /ota/update is reachable on its own, so gating
+    // only inside the check would mean no gate at all for a direct caller; and the manifest could
+    // have moved between the check and the confirmation. Costs one small HTTPS GET on this task —
+    // never on a request path.
+    const OtaCheckResult pre = ota_check();
+    if (!pre.ok) {
+        ESP_LOGE(TAG, "OTA refused: %s", pre.reason.c_str());
+        set_state(OtaState::Error, 0, pre.reason.c_str());
+        return;
+    }
+    if (!pre.update_available) {
+        ESP_LOGW(TAG, "OTA refused: manifest %s is not newer than running %s",
+                 pre.available.c_str(), pre.current.c_str());
+        set_state(OtaState::Error, 0, "no newer version available");
+        return;
+    }
+
     // One channel, per-target image: base URL + this chip's short image suffix. The literals
     // concatenate at compile time (TESLA_OTA_IMG_SUFFIX is a string literal), so this is a
     // fixed string with no allocation. esp_https_ota also verifies the image chip-id, so a
@@ -326,7 +344,25 @@ static void ota_task_impl() {
         set_state(OtaState::Error, 0, "no newer version available");
         return;
     }
-    ESP_LOGI(TAG, "OTA image %s newer than running %s — proceeding",
+
+    // SECOND point of the gate: the manifest and the image must name the SAME version.
+    //
+    // The freshness check above is necessary but not sufficient, and the gap is easy to miss: the
+    // manifest and the .bin are two separately-controlled artifacts. A host serving manifest 1.9.0
+    // beside a 1.8.0 image passes every check individually — the image is signed, and 1.8.0 really
+    // is newer than a device running 1.7.0 — so the device installs a build the operator never
+    // published, while the UI reports the version the manifest claimed. Requiring the two strings
+    // to match exactly turns "the newest thing the host is willing to serve" back into "the build
+    // the release actually is". Also catches the ordinary, far more likely case: a publish that
+    // wrote a new manifest beside a stale image.
+    if (pre.available != new_app.version) {
+        ESP_LOGE(TAG, "OTA refused: manifest advertises %s but the image is %s — the manifest and "
+                      "the image disagree, so neither can be trusted to be the published release",
+                 pre.available.c_str(), new_app.version);
+        set_state(OtaState::Error, 0, "manifest and image versions disagree");
+        return;
+    }
+    ESP_LOGI(TAG, "OTA image %s newer than running %s and matches the manifest — proceeding",
              new_app.version, running_version());
 
     while (true) {

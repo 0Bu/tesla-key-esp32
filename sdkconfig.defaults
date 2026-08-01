@@ -95,6 +95,63 @@ CONFIG_BT_NIMBLE_HOST_TASK_STACK_SIZE=8192
 # Logging
 CONFIG_LOG_DEFAULT_LEVEL_INFO=y
 
+# ── Stack-overflow detection: watchpoint, not canary ──
+# IDF's default is the CANARY check, which is only compared when the scheduler switches tasks.
+# A frame that writes SPARSELY below its limit can step over the canary words entirely, and the
+# task then keeps running with a corrupted neighbour — the crash surfaces later, somewhere else,
+# with a backtrace pointing at whatever innocent code happened to touch the damage. This firmware
+# is exactly the shape that hides such a write: the NimBLE host task runs tesla-ble protobuf
+# parsing plus mbedtls ECDH/AES-GCM (which is why its stack is hand-raised to 8192 above), and
+# several tasks build JSON on the stack. A watchpoint panics AT the offending instruction instead,
+# so the dump names the real culprit. Cost: one hardware debug watchpoint, which this project does
+# not otherwise use — it debugs from core dumps, not JTAG.
+CONFIG_FREERTOS_WATCHPOINT_END_OF_STACK=y
+
+# ── Core dump to flash ──
+# Until this existed a PANIC left NO artifact at all: the reset reason was logged on the way back
+# up and everything else — which task died, where, and with what call chain — was gone. The dump
+# lands in the `coredump` partition (partitions.csv, carved from the previously unused
+# 0x12000..0x20000 hole, so it costs no OTA headroom). main/diag_crash.cpp reads only the SUMMARY
+# at the next boot (esp_core_dump_get_summary: task / PC / backtrace / app-elf-sha) and never
+# re-parses it on a request path; GET /coredump streams the raw image for offline symbolisation.
+# ENABLE_TO_FLASH is the line that does the work — it select-s ESP_COREDUMP_ENABLE. The ELF format
+# is spelled out rather than left to the default because the offline decoder
+# (`esp-coredump info_corefile -c coredump.bin build/tesla-key-esp32.elf`, shipped with ESP-IDF)
+# and espcoredump's SHA-256 image match both assume it; on IDF v6 the symbol disappears (ELF
+# becomes the only format), so a future IDF bump should DELETE that line rather than carry it
+# inert.
+# Size note: the coredump component + the summary parser cost a few KB of app flash. Re-measure on
+# the LARGEST target (esp32c6 — signed 0x1d1000, ~92 KB under the ci-build-all.sh gate) rather than
+# on esp32s3, and measure against the 64 KB Secure-Boot padding boundary rather than the gate: an
+# image just over a boundary costs a full 64 KB block plus the 4 KB signature appended after it.
+# That is exactly what pushed esp32c5 past its OTA slot and got the target dropped
+# (docs/adr/0004-drop-esp32c5-target.md).
+CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y
+CONFIG_ESP_COREDUMP_DATA_FORMAT_ELF=y
+
+# ── Task Watchdog Timer (TWDT) ──
+# Turn a genuinely-wedged task into a clean, automatic reboot instead of a silent hang. The heap
+# watchdog (logic/heap_watchdog.hpp) already covers the wedge caused by memory exhaustion, but it
+# only ever looks at the heap: a task blocked forever on a semaphore, a socket or the BLE stack
+# leaves the heap looking perfect and is invisible to it. This is the other half.
+#   TIMEOUT_S=60 — the budget must exceed the LONGEST time a subscribed task can legitimately be
+#     blocked, and here that is not the loop cadence (50 ms) but the vehicle mutex: loop_task waits
+#     on vehicle_mutex_ while a foreground command holds it, which is up to 20 s for a normal
+#     command and 30 s for pair(). 60 s is 2x the worst legitimate hold, so only a real hang fires.
+#     Setting it near the cadence instead would reboot the device mid-pairing.
+#   PANIC=y — a timeout REBOOTS through the panic handler rather than only printing. That is what
+#     makes it useful here: esp_reset_reason() then reports ESP_RST_TASK_WDT, the crash pipeline
+#     classifies it as a fault (logic/crashinfo.hpp), a core dump is written, and the next boot
+#     reports it on /status.last_crash and over syslog. A warning-only timeout would leave the
+#     wedge exactly as undiagnosable as it was before.
+#   INIT=y — initialise the TWDT at startup and keep the default idle-task subscription, which
+#     catches CPU starvation; the explicit subscriptions add the blocked-but-scheduled case it
+#     cannot see.
+CONFIG_ESP_TASK_WDT_EN=y
+CONFIG_ESP_TASK_WDT_INIT=y
+CONFIG_ESP_TASK_WDT_TIMEOUT_S=60
+CONFIG_ESP_TASK_WDT_PANIC=y
+
 # ── Firmware size reduction (Issue #106 — "Package A", zero-risk / no behaviour change) ──
 # These trim flash (and a little rodata) by dropping code paths this firmware never uses.
 # None touch the coex-/timing-sensitive NimBLE/WiFi hot paths, so no live re-validation is

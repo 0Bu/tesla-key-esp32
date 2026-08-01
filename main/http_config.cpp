@@ -5,9 +5,11 @@
 //   POST /set_vin             (persist VIN + reboot)
 //   POST /set_mqtt            (persist MQTT broker + reboot)
 //   POST /set_syslog          (persist Syslog server + reboot)
+//   POST /set_wifi            (persist WiFi credentials + reboot, with a one-shot rollback backup)
 // Dispatched from handle_all in http_server.cpp (inside its try/catch OOM guard).
 
 #include "http_handlers.hpp"
+#include "config_blob.hpp"
 #include "logic/syslog_policy.hpp"
 #include "ota_update.hpp"   // ota_confirm_pending_image() — guard OTA rollback across config reboots
 #include <esp_log.h>
@@ -282,6 +284,82 @@ esp_err_t handle_set_syslog(GuardedReq rq) {
                       ok ? (server.empty() ? "Syslog disabled — rebooting"
                                            : "Syslog server saved — rebooting")
                          : "failed to save Syslog server"));
+    if (ok) {
+        ota_confirm_pending_image();   // an intentional reboot must not roll back a fresh, healthy OTA
+        vTaskDelay(pdMS_TO_TICKS(800));
+        esp_restart();
+    }
+    return r;
+}
+
+// ─── POST /set_wifi — change the WiFi credentials over the LAN, undoably ──────
+//
+// Until this route existed, WiFi credentials could ONLY be changed from the open setup AP, and only
+// by overwriting the stored pair in place. Both halves of that are bad in the same way: you had to
+// be physically near the device to move it to a different network, and a typo was unrecoverable —
+// the old credentials were gone, the new ones did not work, and the only way back was a USB cable.
+//
+// So the save is a TRANSACTION. The previous SSID/password are stashed as a one-shot backup inside
+// the SAME atomic blob as the new ones (logic/config_store.hpp — no write ordering to get wrong),
+// and the boot after this reboot decides: if the new credentials get a lease, the backup is
+// dropped; if the AP keeps refusing them, main.cpp restores the backup and reboots back onto the
+// network that worked. The decision itself is the host-tested logic/wifi_rollback.hpp, and it is
+// deliberately asymmetric — a rollback DESTROYS the new credentials, so only an AP that sustains
+// its refusal spends them, while an absent SSID (a router still rebooting) is given minutes.
+esp_err_t handle_set_wifi(GuardedReq rq) {
+    httpd_req_t* req = rq.req;
+    char* body = read_body(req);
+    if (!body) return send_json(req, 400, make_response(false, "set_wifi", "", "missing body"));
+
+    cJSON* json = cJSON_Parse(body);
+    free(body);
+    if (!json) return send_json(req, 400, make_response(false, "set_wifi", "", "invalid JSON"));
+
+    cJSON* js = cJSON_GetObjectItem(json, "ssid");
+    cJSON* jp = cJSON_GetObjectItem(json, "pass");
+    std::string ssid = (js && cJSON_IsString(js)) ? js->valuestring : "";
+    std::string pass = (jp && cJSON_IsString(jp)) ? jp->valuestring : "";
+    cJSON_Delete(json);
+
+    // 802.11 bounds, checked here rather than discovered at association time: an over-long value is
+    // silently truncated by the driver, which produces a device that connects to a network nobody
+    // configured. An EMPTY password is legal — that is an open network.
+    if (ssid.empty() || ssid.size() > 32) {
+        return send_json(req, 400, make_response(false, "set_wifi", "",
+                                                 "SSID must be 1-32 characters"));
+    }
+    if (!pass.empty() && (pass.size() < 8 || pass.size() > 63)) {
+        return send_json(req, 400, make_response(false, "set_wifi", "",
+                                                 "password must be empty (open) or 8-63 characters"));
+    }
+
+    tk::ConfigBlob cfg;
+    tk::cfg_load(*g_config, cfg);
+
+    if (cfg.wifi_ssid == ssid && cfg.wifi_pass == pass) {
+        return send_json(req, 200, make_response(true, "set_wifi", "",
+                                                 "WiFi unchanged — no reboot"));
+    }
+
+    // Arm the one-shot rollback only when there is something to roll back TO. On a device with no
+    // stored credentials there is no better previous state, and arming it would mean a failed first
+    // attempt "restores" an empty configuration — which is just the setup portal with extra steps.
+    if (!cfg.wifi_ssid.empty()) {
+        cfg.wifi_ssid_backup     = cfg.wifi_ssid;
+        cfg.wifi_pass_backup     = cfg.wifi_pass;
+        cfg.wifi_rollback_active = true;
+    }
+    // A new attempt retires the previous verdict: /status.wifi.rolled_back describes the LAST
+    // attempt, and leaving it set would report an old failure against new credentials.
+    cfg.wifi_rolled_back = false;
+    cfg.wifi_ssid = ssid;
+    cfg.wifi_pass = pass;
+
+    const bool ok = tk::cfg_save(*g_config, cfg);
+    esp_err_t r = send_json(req, ok ? 200 : 500,
+        make_response(ok, "set_wifi", "",
+                      ok ? "WiFi credentials saved — rebooting to join the new network"
+                         : "config write failed"));
     if (ok) {
         ota_confirm_pending_image();   // an intentional reboot must not roll back a fresh, healthy OTA
         vTaskDelay(pdMS_TO_TICKS(800));

@@ -3,6 +3,7 @@
 #include "logic/http_body.hpp" // http_body_read() — reassemble a multi-segment POST body
 
 #include <cstring>
+#include <cstdio>
 #include <cstdlib>
 #include <cctype>
 #include <cstdint>
@@ -18,6 +19,8 @@
 #include "esp_http_server.h"
 #include "lwip/sockets.h"
 #include "logic/vin.hpp"
+#include "logic/captive.hpp"
+#include "config_blob.hpp"
 #include "task_config.hpp"
 
 static const char* TAG = "provisioning";
@@ -76,6 +79,23 @@ static std::string form_field(const std::string& body, const std::string& key) {
 // ─── HTTP handlers ────────────────────────────────────────────────────────────
 
 static esp_err_t form_get(httpd_req_t* req) {
+    // The portal only auto-pops if the joining OS's connectivity probe gets the answer THAT OS
+    // keys on — iOS asks for captive.apple.com/hotspot-detect.html, Android for /generate_204,
+    // Windows for /connecttest.txt. Answering all of them with 200 + the page (what this did
+    // before) is a heuristic: iOS infers a portal from the unexpected body, Android may simply
+    // leave the network "no internet" and never open anything. A 302 + Location is the one answer
+    // all three understand, so the probe paths get that and the browser that follows it gets the
+    // page. The decision is the host-tested logic/captive.hpp; the portal address is written in
+    // exactly one place there, so the DNS answer, the DHCP option and this Location header cannot
+    // drift apart.
+    if (tk::captive_reply_for(req->uri, /*setup_mode=*/true) == tk::CaptiveReply::Redirect) {
+        httpd_resp_set_status(req, "302 Found");
+        httpd_resp_set_hdr(req, "Location", tk::CAPTIVE_PORTAL_URI);
+        // A redirect's body is empty, so no Content-Encoding here: these paths are walked by
+        // minimal HTTP clients rather than browsers, and handing one a gzip header with nothing to
+        // decode is how a probe ends up undecided instead of redirected.
+        return httpd_resp_send(req, nullptr, 0);
+    }
     httpd_resp_set_type(req, "text/html");
     httpd_resp_set_hdr(req, "Content-Encoding", "gzip");
     const size_t len = setup_html_gz_end - setup_html_gz_start;
@@ -129,15 +149,23 @@ static esp_err_t save_post_impl(httpd_req_t* req) {
         return ESP_OK;
     }
 
-    // Persist every supplied field and reboot only after all writes succeed. Otherwise setup mode
-    // stays alive and reports the storage error instead of claiming success with partial state.
-    const bool ssid_saved = g_cfg->save_str("wifi_ssid", ssid);
-    const bool pass_saved = g_cfg->save_str("wifi_pass", pass);
-    const bool vin_saved  = vin.empty() || g_cfg->save_str("vin", vin);
-    if (!ssid_saved || !pass_saved || !vin_saved) {
-        ESP_LOGE(TAG, "failed to persist setup form (ssid=%s pass=%s vin=%s); staying in setup mode",
-                 ssid_saved ? "ok" : "failed", pass_saved ? "ok" : "failed",
-                 vin_saved ? "ok" : "failed");
+    // Persist the whole form as ONE atomic entry, and reboot only if that write succeeds.
+    //
+    // This used to be three independent NVS writes (ssid, pass, vin). Checking each return value —
+    // which it did — reports a tear but cannot undo the writes that already landed, and a power cut
+    // between two of them reports nothing at all: the device then comes up with a new SSID beside
+    // the old password, joins nothing, and can only be fixed over USB. One CRC-checked blob is
+    // all-or-nothing across both failure modes (logic/config_store.hpp).
+    tk::ConfigBlob cfg;
+    tk::cfg_load(*g_cfg, cfg);
+    cfg.wifi_ssid = ssid;
+    cfg.wifi_pass = pass;
+    if (!vin.empty()) cfg.vin = vin;
+    // No rollback backup from HERE: the setup portal is the path taken when there is nothing that
+    // works to fall back to, and arming it would mean a failed first attempt "restores" an empty
+    // configuration — which is this same portal, one reboot later.
+    if (!tk::cfg_save(*g_cfg, cfg)) {
+        ESP_LOGE(TAG, "failed to persist setup form; staying in setup mode");
         httpd_resp_set_status(req, "500 Internal Server Error");
         httpd_resp_set_type(req, "text/html");
         httpd_resp_sendstr(req,
@@ -231,7 +259,35 @@ void provisioning_run(NvsStorageAdapter& config_store) {
     if (loop_err != ESP_OK && loop_err != ESP_ERR_INVALID_STATE) {
         ESP_ERROR_CHECK(loop_err);
     }
-    esp_netif_create_default_wifi_ap();
+    esp_netif_t* ap_netif = esp_netif_create_default_wifi_ap();
+
+    // RFC 8910 (DHCP option 114): hand the joining client the portal URI in its DHCP lease. Recent
+    // iOS and Android prefer this over probing at all, so the portal opens without depending on the
+    // probe-redirect heuristic below; a client that ignores the option still finds it that way, so
+    // the two are belt and braces rather than alternatives.
+    //
+    // The buffer is STATIC on purpose: esp_netif stores the POINTER it is handed, not a copy, so a
+    // stack buffer here would leave the DHCP server reading freed memory for the life of the AP.
+    if (ap_netif) {
+        // Copied at runtime rather than brace-initialised: CAPTIVE_PORTAL_URI is a `const char*`
+        // (one definition shared with the DNS answer and the Location header), and a char array
+        // cannot be initialised from a pointer. The COPY is what matters anyway — esp_netif wants a
+        // mutable buffer and keeps the pointer it is given.
+        static char portal_uri[64];
+        std::snprintf(portal_uri, sizeof(portal_uri), "%s", tk::CAPTIVE_PORTAL_URI);
+        esp_netif_dhcps_stop(ap_netif);
+        esp_err_t opt = esp_netif_dhcps_option(ap_netif, ESP_NETIF_OP_SET,
+                                               ESP_NETIF_CAPTIVEPORTAL_URI,
+                                               portal_uri, (int)strlen(portal_uri));
+        if (opt != ESP_OK) {
+            // Named rather than discarded: "the portal doesn't pop" is the report this whole path
+            // exists to prevent, and a silently-dropped option is exactly the evidence that was
+            // missing when it did.
+            ESP_LOGW(TAG, "captive-portal DHCP option not set (%s) — the portal will rely on the "
+                          "probe redirect only", esp_err_to_name(opt));
+        }
+        esp_netif_dhcps_start(ap_netif);
+    }
 
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&cfg));

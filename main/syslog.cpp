@@ -3,7 +3,13 @@
 #include "nvs_storage.hpp"
 #include "task_config.hpp"
 #include "rtos_guard.hpp"
+#include "diag_crash.hpp"
+#include "safe_mode.hpp"
 #include "logic/syslog_policy.hpp"
+#include "logic/bootlog.hpp"
+#include <esp_app_desc.h>
+#include <string>
+#include <vector>
 #include "lwip/sockets.h"
 #include "lwip/netdb.h"
 #include "ping/ping_sock.h"
@@ -236,12 +242,54 @@ static void handle_send_failure(int err, const char* what, bool& resolved, bool&
     }
 }
 
+// Replay the boot records ONCE per boot, the first time a destination resolves.
+//
+// WHY THIS IS NEEDED AT ALL. Everything logged before syslog_start() has nowhere to go — the queue
+// does not exist yet and diag_log.cpp's hook drops the line. main.cpp already works around that for
+// its own `BOOT reset_reason=` line by sampling early and logging late, but the CRASH record cannot
+// use that trick: diag_crash_capture() runs before WiFi, its output is a multi-line report, and the
+// in-RAM /diag ring that does hold it is erased by the very next restart. So the one record that
+// explains an unattended reboot reached nothing that outlived the reboot.
+//
+// WHY NOT THROUGH THE QUEUE. syslog_send() is non-blocking and drops on a full queue — and at the
+// moment of the first resolve the queue is full of the boot backlog, which is exactly when these
+// lines would be dropped. They go straight down the socket instead.
+//
+// WHAT IS SENT. A build-identity line (version / elf sha / reset / safe-mode), which is the only
+// way to tell WHICH firmware produced a log stream, and — only when the boot is NOTABLE — the crash
+// records. A healthy boot sends one line and never spams the collector.
+static void syslog_replay_boot(const struct sockaddr_in& dest, bool& replayed) {
+    if (replayed) return;
+    replayed = true;   // set FIRST: a throw below must not re-arm an unbounded retry every 10 s
+
+    const tk::CrashInfo& ci = tk::diag_crash_info();
+
+    std::vector<std::string> lines;
+    const esp_app_desc_t* desc = esp_app_get_description();
+    char run_sha[65] = {0};
+    esp_app_get_elf_sha256(run_sha, sizeof(run_sha));
+    lines.push_back(tk::build_boot_line(desc ? desc->version : "unknown", run_sha,
+                                        tk::reset_reason_slug(ci.reset_code),
+                                        tk::safe_mode_active()));
+    tk::build_crash_log_lines(ci, lines);
+
+    for (const std::string& l : lines) {
+        int err = 0;
+        // Best effort by design: this is UDP and the collector may not be listening yet. A failure
+        // here must not disturb the resolve state the caller just established — the ordinary
+        // forwarding path below owns that classification.
+        (void)syslog_sendto(dest, l.c_str(), l.size(), &err);
+    }
+    ESP_LOGI(TAG, "replayed %u boot record(s) to the collector", (unsigned)lines.size());
+}
+
 static void syslog_task(void*) {
     struct sockaddr_in dest_addr{};
     bool resolved     = false;   // DNS resolved -> dest_addr valid -> forwarding lines
     bool reachable    = false;   // advisory probe result (see syslog_ping_host)
     bool logged_state = false;   // one-shot log of the current resolve outcome
     bool have_checked = false;   // false -> re-resolve immediately (boot / HARD send error)
+    bool replayed     = false;   // the once-per-boot record replay (see syslog_replay_boot)
     bool send_failing = false;   // latch: forwarding is broken -> log the transition, not every line
     TickType_t last_check = 0;
     const TickType_t check_interval = pdMS_TO_TICKS(10000); // re-resolve + re-probe cadence
@@ -287,6 +335,7 @@ static void syslog_task(void*) {
                 resolved  = true;                                  // DNS ok -> forward regardless
                 reachable = syslog_ping_host(dest_addr.sin_addr);  // advisory only
                 set_status(true, reachable, "");
+                syslog_replay_boot(dest_addr, replayed);
                 if (!logged_state) {
                     char ip_str[32];
                     inet_ntop(AF_INET, &dest_addr.sin_addr, ip_str, sizeof(ip_str));
