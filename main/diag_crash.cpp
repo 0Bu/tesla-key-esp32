@@ -35,18 +35,27 @@ static_assert(static_cast<int>(ResetCode::Brownout) == ESP_RST_BROWNOUT, "reset 
 // diag_crash_dismiss for why that needs no lock).
 static CrashInfo s_ci;
 
+// Every esp_core_dump_image_* symbol lives in IDF's core_dump_flash.c, which is compiled ONLY
+// when CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH is set — so on a target that disables core dumps these
+// are not merely no-ops, they do not LINK. esp32c5 is such a target (see sdkconfig.defaults.esp32c5:
+// the display + PSRAM build has no room for the component), which is why the guard is on the calls
+// and not only on the parsing.
 bool diag_crash_coredump_present() {
-    // EXACTLY what h_coredump uses to decide it has something to stream — any extra condition here
-    // could make /status advertise a download the endpoint refuses, or hide one it would serve, and
-    // that disagreement is precisely what this path exists to prevent. An ESP_OK return already
-    // implies a sane size: esp_core_dump_partition_and_size_get rejects a blank partition (the size
-    // word reading back 0xffffffff) and anything under 4 bytes. Cost is one 4-byte flash read.
+#if defined(CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH)
+    // EXACTLY what handle_coredump uses to decide it has something to stream — any extra condition
+    // here could make /status advertise a download the endpoint refuses, or hide one it would
+    // serve, and that disagreement is precisely what this path exists to prevent. An ESP_OK return
+    // already implies a sane size: esp_core_dump_partition_and_size_get rejects a blank partition
+    // (the size word reading back 0xffffffff) and anything under 4 bytes. One 4-byte flash read.
     //
     // On a device flashed BEFORE the coredump partition existed this simply returns false forever:
     // the partition lookup fails, nothing is advertised, and the reset-reason half of the report
     // (which needs no partition) still works. That is the supported degraded state, not a bug.
     size_t addr = 0, size = 0;
     return esp_core_dump_image_get(&addr, &size) == ESP_OK;
+#else
+    return false;   // this build writes no dumps, so there is never one to offer
+#endif
 }
 
 CrashInfo diag_crash_info_live() {
@@ -68,7 +77,7 @@ void diag_crash_capture() {
     esp_app_get_elf_sha256(run_sha, sizeof(run_sha));
     s_ci.elf_sha256 = run_sha;
 
-#if defined(CONFIG_ESP_COREDUMP_DATA_FORMAT_ELF)
+#if defined(CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH) && defined(CONFIG_ESP_COREDUMP_DATA_FORMAT_ELF)
     // Parse the summary only from a VALID image (checksum ok). The struct is ~2 KB, so it goes on
     // the heap rather than this task's stack — at boot the heap is still whole (WiFi/NimBLE/MQTT
     // have not started), which is the other reason capture belongs here and not on a request path.
@@ -165,11 +174,16 @@ void diag_crash_capture() {
 // other and both are self-consistent renderings of the same CrashInfo. No lock — and none of the
 // paths involved may take one anyway (an allocation under a mutex is the wedge rule in CLAUDE.md).
 bool diag_crash_dismiss() {
+#if defined(CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH)
     esp_err_t err = esp_core_dump_image_erase();
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "dismiss failed — coredump erase: %s", esp_err_to_name(err));
         return false;
     }
+#endif
+    // On a build with no dump there is nothing to erase, and dismissal still MEANS something: the
+    // report it clears is the fault RESET, which is what /status.last_crash carries there. Failing
+    // it would leave a crash banner that no action can dismiss.
     s_ci.dismissed = true;
     ESP_LOGI(TAG, "crash report dismissed (reset=%s, dump erased)", reset_reason_slug(s_ci.reset_code));
     return true;

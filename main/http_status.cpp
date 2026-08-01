@@ -23,6 +23,7 @@
 #include <esp_wifi.h>
 #include <esp_heap_caps.h>
 #include <esp_timer.h>
+#include <sdkconfig.h>
 #include <esp_core_dump.h>
 #include <esp_partition.h>
 #include <ctime>
@@ -309,6 +310,17 @@ esp_err_t handle_diag(GuardedReq rq) {
 esp_err_t handle_coredump(GuardedReq rq) {
     httpd_req_t* req = rq.req;
 
+#if !defined(CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH)
+    // This target writes no dumps (esp32c5 — the display + PSRAM build has no room for the
+    // component; see sdkconfig.defaults.esp32c5). The route still EXISTS and answers with a reason
+    // rather than 404-ing as "not found": a tool that just read `coredump:false` off /status needs
+    // to be able to tell "this board never captures dumps" from "no crash has happened yet", and
+    // silence cannot carry that difference. The esp_core_dump_image_* symbols are not linked here
+    // at all, so everything below has to be compiled out rather than merely skipped.
+    cJSON* root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "error", "core dumps are not enabled on this target");
+    return send_json(req, 404, root);
+#else
     if (query_param_is(req, "clear", "1")) {
         esp_err_t err = esp_core_dump_image_erase();
         cJSON* root = cJSON_CreateObject();
@@ -351,6 +363,7 @@ esp_err_t handle_coredump(GuardedReq rq) {
         off += n;
     }
     return httpd_resp_send_chunk(req, nullptr, 0);
+#endif
 }
 
 // ─── POST /crash/dismiss — acknowledge and DELETE this boot's crash report ────

@@ -121,7 +121,8 @@ CONFIG_FREERTOS_WATCHPOINT_END_OF_STACK=y
 # Size note: the coredump component + the summary parser cost a few KB of app flash, and the
 # esp32c5 image is the one with the least headroom under the ci-build-all.sh gate — re-measure
 # there, not on esp32s3, if this ever gets close.
-CONFIG_ESP_COREDUMP_ENABLE=y
+# NOT enabled on esp32c5 — see sdkconfig.defaults.esp32c5. That target carries the display AND
+# PSRAM and is the largest image by a wide margin; measured, this component does not fit there.
 CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y
 CONFIG_ESP_COREDUMP_DATA_FORMAT_ELF=y
 

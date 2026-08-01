@@ -31,3 +31,25 @@ CONFIG_TESLA_DISPLAY_ENABLED=y
 # PSRAM fit under the OTA slot at -Og because the Package A size levers (merged, #154)
 # freed ~64 KB. If future growth pushes the C5 image past the slot again, shave flash
 # with more zero-risk levers — do NOT reach for -Os.
+
+# ── Core dump: OFF on this target only ──
+# MEASURED, not chosen. esp32c5 is the only build carrying BOTH the on-device display and PSRAM,
+# and it was already the largest image with ~28 KB of headroom. Adding the coredump component
+# (the flash writer plus the ELF summary parser) pushed the app across a Secure-Boot-v2 64 KB
+# rounding boundary — 0x1E1000 -> 0x1F1000, i.e. 2,035,712 B against a 2,031,616 B OTA slot. It did
+# not merely trip the early-warning gate; it no longer FIT the slot, so loosening the gate was never
+# the answer. The other four targets keep core dumps.
+#
+# What a C5 still reports after a crash: the reset REASON (esp_reset_reason needs no component and
+# no partition), the safe-mode boot counter, the heap trend, and the syslog boot replay — i.e. the
+# whole recovery ladder. What it loses is the on-device dump: no crashed-task/PC summary on
+# /status.last_crash and nothing to download from GET /coredump, which answers 404 there.
+#
+# The `coredump` partition still exists in the shared table and simply goes unused on this target —
+# one table serves every board, so it costs nothing to leave it there, and re-enabling this is a
+# one-line change the day the image has room again.
+#
+# TO REVISIT: find ~64 KB elsewhere on this target and delete this block. Whole-build -Os is NOT
+# the lever (it hard-freezes this firmware under evcc+BLE load — rejected Package B, see
+# partitions.csv / CLAUDE.md).
+CONFIG_ESP_COREDUMP_ENABLE_TO_NONE=y

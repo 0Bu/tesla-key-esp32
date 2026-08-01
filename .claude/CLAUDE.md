@@ -463,6 +463,15 @@ catalog: [`docs/FEATURES.md`](../docs/FEATURES.md).
 an OTA image. Those boards keep reporting the reset REASON (which needs no partition) and simply
 report `coredump:false`; only a USB/web-installer full flash adds it. That is a supported state.
 
+**Core dumps are OFF on esp32c5**, and that is measured rather than chosen: it is the only build
+carrying BOTH the display and PSRAM, and the component took the app from 0x1E1000 to 0x1F1000
+(2,035,712 B) against a 2,031,616 B OTA slot — past a Secure-Boot-v2 64 KB rounding boundary and
+over the SLOT, not merely the early-warning gate, so loosening the gate was never the answer. The C5
+keeps the reset reason, safe mode, the heap trend and the syslog replay; `GET /coredump` answers 404
+there with that reason (the route stays, so a client can tell "this board never captures dumps" from
+"no crash yet"). Re-enabling it is one line in `sdkconfig.defaults.esp32c5` the day ~64 KB is freed
+on that target — `-Os` is NOT the lever.
+
 ## Typical Debugging
 
 ```bash
