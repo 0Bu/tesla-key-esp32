@@ -138,8 +138,8 @@ Three sources, in the order to reach for them:
    (`{dt,b0,b_boot,unit,scale,free[],largest[]}`, tenths of a KiB, `null` = no sample), fed from
    the SAME samples the heap watchdog decides on, so the chart and the threshold cannot disagree.
    The ring is `.noinit` and SURVIVES a restart, so it still shows the slope that preceded a
-   `heap:<n>` reboot — `b_boot` is the bucket this boot started in (`b_boot == b0` means nothing
-   was retained, e.g. after a power cut), and the clock is therefore no longer `uptime/dt`.
+   `heap:<n>` reboot — `b_boot` is the bucket this boot started in, so every sample before it came
+   from an earlier run; the clock is therefore no longer `uptime/dt`.
    This is the one that answers "is it *drifting*" — a leak is a slope; fragmentation is
    `free[]` holding steady while `largest[]` sinks toward the 4 KB floor.
    ```bash

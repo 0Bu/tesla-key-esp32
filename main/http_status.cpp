@@ -415,7 +415,8 @@ esp_err_t handle_heap(GuardedReq rq) {
     cJSON_AddNumberToObject(root, "b0", (double)bucket0);
     // The bucket THIS boot started in. The ring now survives a restart (.noinit), so a reader that
     // assumed bucket == uptime/dt would misplace every retained sample — and, worse, would draw a
-    // trend that crosses a reboot as one unbroken run. b_boot == b0 means nothing was retained.
+    // trend that crosses a reboot as one unbroken run. Every sample before b_boot came from an
+    // earlier run; the restart sits exactly on that boundary.
     cJSON_AddNumberToObject(root, "b_boot", (double)boot_bucket);
     cJSON_AddStringToObject(root, "unit", "KiB");
     cJSON_AddNumberToObject(root, "scale", 10);   // samples are tenths of the unit

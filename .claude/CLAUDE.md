@@ -332,7 +332,7 @@ GET  /coredump[?clear=1]                       # stream the raw crash image (chu
 POST /crash/dismiss                            # acknowledge + DELETE this boot's crash report (erase first, mark second). POST, not GET: it destroys the one artifact a bug report needs
                                                # bug report needs. An erase that finds NO coredump partition (every OTA-upgraded device) is NOT a failure — the dismissal still clears the fault-reset report; any other erase error is a 500 (logic/crashinfo.hpp crash_erase_permits_dismiss).
 GET  /heap                                     # the board's 24-hour free/largest-block trend {dt,b0,b_boot,unit,scale,free[],largest[]} — tenths of a KiB, null = no sample.
-                                               # The ring is .noinit and SURVIVES a restart (watchdog/panic/OTA), so b_boot names the bucket THIS boot started in — b_boot == b0 means nothing was retained, and the clock is no longer uptime/dt.
+                                               # The ring is .noinit and SURVIVES a restart (watchdog/panic/OTA), so b_boot names the bucket THIS boot started in, so any sample before it came from an earlier run — and the clock is no longer uptime/dt.
 POST /set_wifi                                 # change WiFi credentials over the LAN + reboot ({"ssid","pass"}); stashes the previous pair as a one-shot rollback backup
 POST /gen_keys[?force=1]                       # generate key (refuses overwrite w/o force)
 POST /send_key                                 # pair with vehicle (Charging Manager only)
