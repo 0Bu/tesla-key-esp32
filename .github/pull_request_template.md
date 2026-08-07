@@ -30,11 +30,17 @@ cannot build or USB-flash — see .claude/CLAUDE.md).
 ## Gates
 
 <!--
-These two boxes ARE the publish/merge gates — they replace the old on-disk markers. The
-require-skill-audit.sh (create/push) and require-project-review.sh (merge) hooks read them
-straight from this PR body. After a CLEAN run, tick the box and replace <sha> with the reviewed
-commit (`git rev-parse --short=12 HEAD`). A later commit changes the sha and re-stales the gate,
-forcing a fresh run. Do NOT tick a box without actually running the check.
+These three boxes ARE the publish/merge gates — they replace the old on-disk markers. The
+require-skill-audit.sh (create/push), require-project-review.sh (merge) and
+require-feature-docs.sh (merge, conditional) hooks read them straight from this PR body, each
+matching its OWN box. After a CLEAN run, tick the box and replace <sha> with the reviewed commit
+(`git rev-parse --short=12 HEAD`). A later commit changes the sha and re-stales the gate, forcing
+a fresh run. Do NOT tick a box without actually running the check.
+
+/feature-docs only arms when the diff reaches main/, test/, sdkconfig.defaults*, partitions.csv or
+.github/workflows/build.yml — delete its line on a docs- or chore-only PR. A full /project-review
+also clears the skill-audit gate, but NOT the feature-docs one.
 -->
 - [ ] `/skill-audit` clean — PR create/push gate @ <sha>
 - [ ] `/project-review` clean — merge gate @ <sha>
+- [ ] `/feature-docs` synced — merge gate @ <sha> (delete if the diff touches no firmware surface)
