@@ -129,6 +129,10 @@ the authority for the per-sibling drift check; `project-review` defers the mecha
   the PR-checkbox gate mechanism — no file marker, the sibling list, the command count `15`, the
   tesla-ble pin) still match the tree, and that the skills/agents it names still exist. Correct it
   like any other; don't re-open it after.
+- **`feature-docs`** — keeps `docs/FEATURES.md` (the platform-feature catalog) in sync; gated by
+  `require-feature-docs.sh` whenever a diff reaches `main/`, `test/`, `sdkconfig.defaults*`,
+  `partitions.csv` or the CI build workflow. Verify that trigger set against the hook, and that
+  the catalog sections it names still exist in `docs/FEATURES.md`.
 - **`device-diag`** — read-only, cache-only live-board triage from `/status` + `/diag`. Verify the
   `/status` keys it names (`paired`/`reauth`/`link`/`vcsec_sleep`/`ble{connect_fail,car_connectable}`/
   `mqtt{configured,connected,tls,error}`/`last_seen_s`) against the field contract in

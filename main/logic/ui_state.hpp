@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include "logic/link_state.hpp"
+#include "logic/net_link.hpp"
 
 // Immutable, hardware-free snapshot of everything the on-device status indicators need
 // to decide what to show — the ST7735 status display (logic/display_model.hpp) and, in
@@ -35,10 +36,24 @@ struct UiSnapshot {
     // ── pairing (caller, sampled at ≤1 Hz — has_session() hits NVS) ──
     bool      paired         = false;
 
-    // ── WiFi (caller, from esp_wifi at the seam) ──
-    bool      wifi_on        = false;   // STA holds an IP AND the ap-info read succeeded
-    int       wifi_rssi      = 0;       // dBm
-    char      ssid[33]       = {0};     // NUL-terminated (max 32 + NUL, per 802.11)
+    // ── network (caller, from tk::net_* at the seam) ──
+    // `net` is the TRANSPORT, not a boolean: an Ethernet board (M5Stack ATOMIC PoE Base,
+    // W5500 over SPI) holds an IP with no radio, so "up" and "WiFi" stopped being the same
+    // sentence. RSSI and an SSID exist only for NetLink::Wifi and are meaningless otherwise —
+    // presenters must branch on `net`, never read the two fields unconditionally.
+    NetLink   net            = NetLink::None;  // which transport holds the lease
+    int       wifi_rssi      = 0;              // dBm,             iff net == NetLink::Wifi
+    char      ssid[33]       = {0};            // NUL-terminated,  iff net == NetLink::Wifi
+
+    // Does this board HAVE an Ethernet interface at all? Decided once at boot, not per frame.
+    // It is what lets the SEARCHING state name the right thing: with no link yet there is no
+    // transport to read, and a PoE board that displays "WiFi …" while it waits for DHCP is
+    // simply lying. False on every board without the Ethernet backend, which keeps the
+    // rendering byte-identical there.
+    bool      eth_present    = false;
+
+    // True while any transport carries the lease. The successor to the old `wifi_on`.
+    bool net_up() const { return net != NetLink::None; }
 };
 
 }  // namespace tk

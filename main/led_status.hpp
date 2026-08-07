@@ -13,7 +13,7 @@ class VehicleController;
 // Design constraints (match the rest of the firmware):
 //   • Reads ONLY cached state (link_state / ble_connected / has_session /
 //     get_cached_charge / reauth_required / ble_connect_fail / ota_get_status /
-//     wifi_is_connected) — it NEVER triggers a BLE round-trip, so it can't wake the
+//     tk::net_is_up()) — it NEVER triggers a BLE round-trip, so it can't wake the
 //     car or queue behind a poll in the single BLE FIFO. Same guarantee as the display.
 //   • Independent of MQTT and of the display — needs neither, so it works on a
 //     T-Dongle-S3 that has no panel fitted.

@@ -25,13 +25,13 @@
 #include <cstring>
 #include <cstdio>
 #include <exception>
+#include "net.hpp"
 #include <string_view>
 
 static const char* TAG = "syslog";
 
-// Defined in main.cpp: true only while the STA holds an IP. Mirrors mqtt_ha.cpp's
-// own forward declaration — gates every network call below on a live link.
-bool wifi_is_connected();
+// The network seam (net.hpp) gates every network call below on a live link, whichever
+// transport carries it.
 
 struct SyslogMsg {
     char     text[256];
@@ -308,8 +308,8 @@ static void syslog_task(void*) {
             continue;
         }
 
-        if (!wifi_is_connected()) {
-            if (resolved) { resolved = false; reachable = false; set_status(false, false, "WiFi disconnected"); }
+        if (!tk::net_is_up()) {
+            if (resolved) { resolved = false; reachable = false; set_status(false, false, "network down"); }
             vTaskDelay(pdMS_TO_TICKS(2000));
             continue;
         }

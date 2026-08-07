@@ -22,7 +22,8 @@ cloud session as well as on a host. It writes image files; it changes no source.
 Any time you touch the presenter or the renderer and want to confirm the pixels still look right:
 
 - editing [`main/logic/display_model.hpp`](../../../main/logic/display_model.hpp) — the priority
-  ladder (WiFi search > pairing > BLE search > battery), the SoC red→green gradient, RSSI→bars,
+  ladder (network search > pairing > BLE search > battery — `Hero::NetSearch` labels itself
+  "WiFi" or "LAN" from `UiSnapshot::eth_present`), the SoC red→green gradient, RSSI→bars,
   or the SSID-scroll geometry (the `Orient` axis picks landscape vs portrait);
 - editing [`main/display.cpp`](../../../main/display.cpp) — `draw_landscape` / `draw_portrait`,
   the battery shell, the charging bolt, the "ASLEEP" / search / "Pairing…" frames;

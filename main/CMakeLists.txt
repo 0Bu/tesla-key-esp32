@@ -1,6 +1,7 @@
 idf_component_register(
     SRCS
         "main.cpp"
+        "net.cpp"
         "ble_client.cpp"
         "nvs_storage.cpp"
         "vehicle_ctrl.cpp"

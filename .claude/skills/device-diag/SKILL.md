@@ -58,7 +58,9 @@ One-line vitals (heap now comes straight out of `sys{}` — see Step 3 for the t
 ```bash
 curl -s http://<host>/status | jq '{
   version, paired, reauth, link, vcsec_sleep,
+  sys, last_reboot, last_crash,
   wifi: {ssid: .wifi.ssid, rssi: .wifi.rssi},
+  eth: .eth,
   ble:  {connected: .ble.connected, rssi: .ble.rssi,
          connect_fail: .ble.connect_fail, car_connectable: .ble.car_connectable},
   mqtt: {configured: .mqtt.configured, connected: .mqtt.connected,
