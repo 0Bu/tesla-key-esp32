@@ -958,11 +958,11 @@ static void test_status_model() {
 namespace dm = tk::display;
 
 // Build a UiSnapshot tersely for the presenter tests.
-static tk::UiSnapshot us(tk::LinkState ls, bool wifi_on, bool ble_conn, bool paired,
+static tk::UiSnapshot us(tk::LinkState ls, bool net_up, bool ble_conn, bool paired,
                          bool have_soc, int soc, bool charging) {
     tk::UiSnapshot s;
     s.link_state     = ls;
-    s.wifi_on        = wifi_on;
+    s.net            = net_up ? tk::NetLink::Wifi : tk::NetLink::None;
     s.ble_connected  = ble_conn;
     s.paired         = paired;
     s.have_soc       = have_soc;
@@ -1005,10 +1005,10 @@ static void test_display_helpers() {
 static void test_display_model() {
     using LS = tk::LinkState;
 
-    // ── priority ladder: WiFi search > pairing > BLE search > battery ──
-    // WiFi down ⇒ WifiSearch, whatever else is true.
-    CHECK(dm::compose(us(LS::Awake, /*wifi*/false, /*ble*/true, /*paired*/true,
-                         /*soc?*/true, 50, false), 0).hero == dm::Hero::WifiSearch);
+    // ── priority ladder: network search > pairing > BLE search > battery ──
+    // No lease ⇒ NetSearch, whatever else is true.
+    CHECK(dm::compose(us(LS::Awake, /*net*/false, /*ble*/true, /*paired*/true,
+                         /*soc?*/true, 50, false), 0).hero == dm::Hero::NetSearch);
     // WiFi up, BLE link up but not yet paired ⇒ Pairing.
     CHECK(dm::compose(us(LS::Idle, true, /*ble*/true, /*paired*/false,
                          false, 0, false), 0).hero == dm::Hero::Pairing);
@@ -1087,11 +1087,11 @@ static void test_display_model() {
 // ─── status LED priority ladder (logic/led_status.hpp <- shared UiSnapshot + LedAlerts) ──
 // The LED reads the SAME tk::UiSnapshot the display presenter does (one input contract), plus
 // a tiny LED-only LedAlerts for its latched error/warn/OTA tiers. Base = healthy, parked
-// (Idle), paired, 55 % SoC, WiFi up, no alerts; each case flips one field to prove the ladder
+// (Idle), paired, 55 % SoC, network up, no alerts; each case flips one field to prove the ladder
 // picks the right colour/animation and that a higher tier wins.
 static tk::UiSnapshot led_snap() {
     tk::UiSnapshot s;
-    s.wifi_on    = true;
+    s.net        = tk::NetLink::Wifi;
     s.link_state = tk::LinkState::Idle;
     s.paired     = true;
     s.have_soc   = true;
@@ -1121,8 +1121,11 @@ static void test_led() {
     { auto s = led_snap(); s.paired = false; s.ble_connected = true; s.charging = true;
       CHECK(tk::led_pattern(s, none) == (tk::LedPattern{C::Magenta, A::Pulse, false})); }
 
-    // WiFi search: no LAN → blue breathe, and it outranks pairing/charging below it.
-    { auto s = led_snap(); s.wifi_on = false; s.ble_connected = true; s.paired = false;
+    // Network search: no LAN → blue breathe, and it outranks pairing/charging below it.
+    // Transport-blind by design: an Ethernet board with no lease must reach the SAME tier.
+    { auto s = led_snap(); s.net = tk::NetLink::None; s.ble_connected = true; s.paired = false;
+      CHECK(tk::led_pattern(s, none) == (tk::LedPattern{C::Blue, A::Breathe, false})); }
+    { auto s = led_snap(); s.net = tk::NetLink::None; s.eth_present = true;
       CHECK(tk::led_pattern(s, none) == (tk::LedPattern{C::Blue, A::Breathe, false})); }
 
     // Searching for the car: reachable readings absent → teal breathe.
@@ -1134,7 +1137,7 @@ static void test_led() {
 
     // ── LED-only latched alerts (top of the ladder), passed via LedAlerts ──
     // Warning (repeated connect failures) → amber blink, above WiFi/pairing.
-    { auto s = led_snap(); s.wifi_on = false; tk::LedAlerts a; a.warn = true;
+    { auto s = led_snap(); s.net = tk::NetLink::None; tk::LedAlerts a; a.warn = true;
       CHECK(tk::led_pattern(s, a) == (tk::LedPattern{C::Amber, A::Blink, false})); }
     // OTA download → blue pulse, above the warning.
     { tk::LedAlerts a; a.ota_downloading = true; a.warn = true;
@@ -1784,6 +1787,81 @@ static void test_wifi_rollback() {
     CHECK(tk::kWifiRollbackGraceS > tk::kWifiBootWindowS * tk::kWifiAuthToRollback);
 }
 
+// ─── Network transport seam (logic/net_link.hpp) ──────────────────────────────
+static void test_net_link() {
+    // The transport identity is what the presenters branch on; the strings are what /status
+    // and the logs print, so pin both.
+    CHECK(std::string(tk::net_link_str(tk::NetLink::None)) == "none");
+    CHECK(std::string(tk::net_link_str(tk::NetLink::Wifi)) == "wifi");
+    CHECK(std::string(tk::net_link_str(tk::NetLink::Eth))  == "eth");
+
+    using WA = tk::WatchAction;
+
+    // A DOWN link is not the watchdog's business: the transport's own reconnect path owns it,
+    // and the ghost case it exists for is link-up by definition.
+    { tk::LinkWatch w; CHECK(tk::watch_step(w, /*up*/false, /*gw*/false, /*ever*/true) == WA::Idle);
+      CHECK(w.fails == 0); }
+
+    // A healthy sample clears the run — only UNBROKEN failures count, so one dropped echo on a
+    // busy LAN can never accumulate into a re-association.
+    { tk::LinkWatch w;
+      CHECK(tk::watch_step(w, true, /*gw*/false, true) == WA::Wait);   // 1 of 2
+      CHECK(tk::watch_step(w, true, /*gw*/true,  true) == WA::Idle);   // recovered
+      CHECK(w.fails == 0);
+      CHECK(tk::watch_step(w, true, /*gw*/false, true) == WA::Wait); } // counting restarts, not resumes
+
+    // Two consecutive failures on a gateway that HAS answered before ⇒ a proven ghost link.
+    { tk::LinkWatch w;
+      CHECK(tk::watch_step(w, true, false, /*ever*/true) == WA::Wait);
+      CHECK(tk::watch_step(w, true, false, /*ever*/true) == WA::Recover); }
+
+    // THE guard: a gateway that has NEVER answered ICMP (a router dropping LAN echo) is not
+    // evidence of anything. Acting here would re-associate a perfectly healthy device every
+    // ~60 s forever — the failure mode this baseline rule exists to prevent.
+    { tk::LinkWatch w;
+      CHECK(tk::watch_step(w, true, false, /*ever*/false) == WA::Wait);
+      CHECK(tk::watch_step(w, true, false, /*ever*/false) == WA::NoBaseline);
+      // …and the counter is spent, so the next window reports once more rather than on EVERY
+      // subsequent sample — otherwise the /diag ring fills with one line per 30 s forever.
+      CHECK(tk::watch_step(w, true, false, /*ever*/false) == WA::Wait); }
+
+    // The gateway becoming reachable mid-run retires the suspicion outright.
+    { tk::LinkWatch w;
+      CHECK(tk::watch_step(w, true, false, true) == WA::Wait);
+      CHECK(tk::watch_step(w, /*up*/false, false, true) == WA::Idle);
+      CHECK(w.fails == 0); }
+}
+
+// ─── /status: the `eth` object is present ONLY on a wired link ────────────────
+static void test_status_eth() {
+    using tk::status::Inputs;
+
+    // A WiFi (or link-down) device must emit NO eth object at all: presence is the signal, and
+    // a false-valued object would claim the board has a wire it does not have.
+    { Inputs in; in.wifi_connected = true; in.wifi_ssid = "HomeNet";
+      CollectEmitter e; tk::status::emit_status(in, e);
+      CHECK(e.out.find("eth{") == std::string::npos);
+      CHECK(e.out.find("wifi{") != std::string::npos); }
+
+    // Wired: the object appears, and the `wifi` object stays present-but-empty exactly as it is
+    // while a radio is down — dropping it would read as an older build to any consumer.
+    { Inputs in; in.eth_link = true; in.eth_speed_mbps = 100; in.eth_full_duplex = true;
+      CollectEmitter e; tk::status::emit_status(in, e);
+      CHECK(e.out.find("eth{") != std::string::npos);
+      CHECK(e.out.find("eth.link=true") != std::string::npos);
+      CHECK(e.out.find("eth.speed=100") != std::string::npos);
+      CHECK(e.out.find("eth.full_duplex=true") != std::string::npos);
+      CHECK(e.out.find("wifi{") != std::string::npos);
+      CHECK(e.out.find("wifi.ssid") == std::string::npos); }
+
+    // Speed unknown (the PHY has not negotiated yet) is OMITTED rather than reported as 0 —
+    // "0 Mbit" is a claim about the link, not an admission that we did not read it.
+    { Inputs in; in.eth_link = true; in.eth_speed_mbps = 0;
+      CollectEmitter e; tk::status::emit_status(in, e);
+      CHECK(e.out.find("eth{") != std::string::npos);
+      CHECK(e.out.find("eth.speed") == std::string::npos); }
+}
+
 // ─── Bug-report redaction ─────────────────────────────────────────────────────
 static void test_redact() {
     CHECK(tk::redact_or("MySSID", false) == "MySSID");
@@ -2069,6 +2147,8 @@ int main() {
     test_boot_guard();
     test_heap_history();
     test_wifi_rollback();
+    test_net_link();
+    test_status_eth();
     test_redact();
     test_captive();
     test_config_store();

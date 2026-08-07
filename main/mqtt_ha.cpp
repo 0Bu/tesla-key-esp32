@@ -1,4 +1,5 @@
 #include "mqtt_ha.hpp"
+#include "net.hpp"
 #include "vehicle_ctrl.hpp"
 #include "nvs_storage.hpp"
 #include "platform.hpp"
@@ -32,14 +33,6 @@
 
 static const char* TAG = "mqtt_ha";
 
-// Defined in main.cpp: true only while the STA holds an IP. Gate esp_wifi_sta_get_ap_info()
-// so it's never read mid-association (concurrent read of the half-built AP record faults —
-// LoadProhibited/EXCVADDR=0x1).
-bool wifi_is_connected();
-
-// Defined in main.cpp: cumulative WiFi RE-connects since boot. A flapping AP is invisible in any
-// instantaneous "connected" reading, which is why the counter exists and why it is published.
-unsigned wifi_reconnect_count();
 
 // Cumulative broker RE-connects since boot (the first connect of a boot is not counted). Written
 // from the esp-mqtt event task, read by the publisher task — an atomic, since neither may take a
@@ -390,9 +383,11 @@ static void publish_state() {
     // Device diagnostics
     {
         cJSON* o = cJSON_CreateObject();
-        wifi_ap_record_t ap{};
-        if (wifi_is_connected() && esp_wifi_sta_get_ap_info(&ap) == ESP_OK)
-            cJSON_AddNumberToObject(o, "wifi_rssi", ap.rssi);
+        // WiFi signal — OMITTED, not zeroed, on a wired device: HA renders a missing value as
+        // "unavailable", whereas a published 0 dBm would be read as an implausibly perfect link.
+        int rssi = 0;
+        if (tk::net_wifi_signal(&rssi, nullptr))
+            cJSON_AddNumberToObject(o, "wifi_rssi", rssi);
         cJSON_AddBoolToObject(o, "ble_connected", s_vehicle->ble_connected());
         int8_t r = 0;
         if (s_vehicle->ble_rssi(r)) cJSON_AddNumberToObject(o, "ble_rssi", r);
@@ -429,7 +424,7 @@ static void publish_state() {
         cJSON_AddStringToObject(o, "crash_dump", ci.coredump ? "ON" : "OFF");
         cJSON_AddStringToObject(o, "safe_mode",  tk::safe_mode_active() ? "ON" : "OFF");
 
-        cJSON_AddNumberToObject(o, "wifi_reconnects", (double)wifi_reconnect_count());
+        cJSON_AddNumberToObject(o, "wifi_reconnects", (double)tk::net_reconnect_count());
         cJSON_AddNumberToObject(o, "mqtt_reconnects", (double)s_reconnects.load());
         pub_json(s_topic[D_DEVICE], o);
     }
@@ -599,6 +594,11 @@ static bool mqtt_ha_start_impl(VehicleController& vehicle,
     if (s_interval_s < 5) s_interval_s = 5;
 
     // Unique node id from the WiFi STA MAC (stable across VIN changes / reboots).
+    // DELIBERATELY the WiFi MAC even on a wired device, where no WiFi link exists: this id is
+    // baked into every Home Assistant entity id under this device. Deriving it from whichever
+    // transport happens to be active would RENAME every entity the first time a board changed
+    // transport — and ESP_MAC_WIFI_STA is an eFuse-backed base address that is readable whether
+    // or not the radio was ever started, so it stays a stable identity rather than a link fact.
     uint8_t mac[6] = {0};
     esp_read_mac(mac, ESP_MAC_WIFI_STA);
     char node[24];
@@ -621,7 +621,7 @@ static bool mqtt_ha_start_impl(VehicleController& vehicle,
     const std::string& vin = vehicle.vin();
     s_devname = "Tesla Key";
     if (vin.size() == 17) s_devname += " (" + vin + ")";
-    esp_netif_t* netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+    esp_netif_t* netif = tk::net_active_netif();
     esp_netif_ip_info_t ip{};
     if (netif && esp_netif_get_ip_info(netif, &ip) == ESP_OK) {
         char ipbuf[16]; esp_ip4addr_ntoa(&ip.ip, ipbuf, sizeof(ipbuf));

@@ -343,6 +343,7 @@ def draw_searching(cv, frame, label):
 
 SRCH_ICON_BLE  = ("icon", BT_ROWS, SRCH_BT_X, SRCH_BT_Y)
 SRCH_ICON_WIFI = ("text", "WiFi", 2, 14, 42)   # "WiFi" word instead of the glyph
+SRCH_ICON_LAN  = ("text", "LAN",  2, 20, 42)   # a PoE board waits for a wire, not a radio
 
 # Shown (instead of the search bars) once a BLE link is up but pairing isn't done:
 # big "Pairing" with an animated 0–3 dot ellipsis (fixed left so it doesn't jiggle).
@@ -363,7 +364,8 @@ def draw_pairing(cv, frame):
 # is fed levels directly); everything else is.
 def decide(inp):
     link     = inp["link"]
-    wifi_on  = inp["wifi_on"]
+    net      = inp["net"]                  # "none" | "wifi" | "eth" — the TRANSPORT, not a bool
+    eth_pres = inp["eth_present"]
     ssid     = inp["ssid"]
     ble_conn = inp["ble_connected"]
     have_soc = inp["have_soc"]
@@ -371,19 +373,22 @@ def decide(inp):
     paired   = inp["paired"]
     tick     = inp["tick"]
 
-    unreachable    = link == "unreachable"
-    wifi_searching = not wifi_on
-    pairing        = ble_conn and not paired          # BLE link up but not yet paired
-    battery_ok     = (not unreachable) and have_soc
+    unreachable   = link == "unreachable"
+    net_searching = net == "none"
+    pairing       = ble_conn and not paired          # BLE link up but not yet paired
+    battery_ok    = (not unreachable) and have_soc
     # BLE search bars appear ONLY when nothing else claims the centre (car out of range).
-    ble_bars       = not (wifi_searching or pairing or battery_ok)
+    ble_bars      = not (net_searching or pairing or battery_ok)
 
-    if   wifi_searching: hero = "wifi_search"
+    if   net_searching:  hero = "net_search"
     elif pairing:        hero = "pairing"
     elif not battery_ok: hero = "ble_search"
     else:                hero = "battery"
 
-    m = {"hero": hero, "show_wifi": not wifi_searching, "show_ble": not ble_bars,
+    # Ethernet takes the WiFi slot but draws a static "LAN" label: it has neither a signal
+    # level nor a network name, so every ssid_* below stays at its default.
+    m = {"hero": hero, "show_wifi": net == "wifi", "show_lan": net == "eth",
+         "search_is_lan": eth_pres, "show_ble": not ble_bars,
          "ssid_avail": 0, "ssid_scrolling": False, "ssid_off": 0, "soc": 0,
          "fill_r": 0, "fill_g": 0, "fill_b": 0, "asleep": False, "show_bolt": False,
          "animating": False}
@@ -413,7 +418,10 @@ def compose(cv, st):
     cv.rect(0, 0, W, H, BG)
     inp = {
         "link":          st.get("link", "awake"),
-        "wifi_on":       st.get("wifi", 0) > 0,
+        # The sim is driven by bar LEVELS, so "wifi > 0" is its stand-in for a WiFi lease;
+        # an explicit net="eth" state exercises the wired layout.
+        "net":           st.get("net") or ("wifi" if st.get("wifi", 0) > 0 else "none"),
+        "eth_present":   st.get("eth_present", False),
         "ssid":          st.get("ssid") or "-",
         "ble_connected": st.get("ble_on", False),
         "have_soc":      st.get("soc") is not None,
@@ -428,6 +436,10 @@ def compose(cv, st):
     # ── header: WiFi bars + SSID (left) | BLE symbol + bars (right) ──────────
     # Hide whichever small indicator is the active search hero. Taller, more legible status
     # bar: scale-2 SSID, taller bars, divider at y22. Bars are the sim's direct level inputs.
+    if m["show_lan"]:
+        # No bars: a wire has no signal level, and a fixed 4/4 would be a fabricated reading.
+        cv.text(4, 4, "LAN", INK, 2)
+
     if m["show_wifi"]:
         signal_bars(cv, 4, 4, st.get("wifi", 0))
         ssid = inp["ssid"]
@@ -443,9 +455,10 @@ def compose(cv, st):
 
     cv.rect(3, 22, W - 3, 23, DIV)     # divider under the (taller) header
 
-    # ── centre hero: WiFi search > pairing > BLE search > battery ────────────
-    if m["hero"] == "wifi_search":
-        draw_searching(cv, f, SRCH_ICON_WIFI); return True
+    # ── centre hero: network search > pairing > BLE search > battery ─────────
+    if m["hero"] == "net_search":
+        draw_searching(cv, f, SRCH_ICON_LAN if m["search_is_lan"] else SRCH_ICON_WIFI)
+        return True
     if m["hero"] == "pairing":
         draw_pairing(cv, f); return True
     if m["hero"] == "ble_search":
@@ -515,7 +528,8 @@ def compose_portrait(cv, st):
     cv.rect(0, 0, cv.w, cv.h, BG)
     inp = {
         "link":          st.get("link", "awake"),
-        "wifi_on":       st.get("wifi", 0) > 0,
+        "net":           st.get("net") or ("wifi" if st.get("wifi", 0) > 0 else "none"),
+        "eth_present":   st.get("eth_present", False),
         "ssid":          st.get("ssid") or "-",
         "ble_connected": st.get("ble_on", False),
         "have_soc":      st.get("soc") is not None,
@@ -529,6 +543,8 @@ def compose_portrait(cv, st):
     f = inp["tick"]
 
     # header row 1: WiFi bars (left) | BT glyph + BLE bars (right); row 2: SSID; divider at y31
+    if m["show_lan"]:
+        cv.text(4, 4, "LAN", INK, 2)     # no bars: a wire has no signal level
     if m["show_wifi"]:
         signal_bars(cv, 4, 4, st.get("wifi", 0))
         ssid = inp["ssid"]
@@ -542,7 +558,7 @@ def compose_portrait(cv, st):
         cv.bitmap(bx - 12, 1, BT_ROWS, INK if inp["ble_connected"] else GREY, 2)
     cv.rect(4, 31, cv.w - 4, 32, DIV)
 
-    if m["hero"] == "wifi_search":
+    if m["hero"] == "net_search":
         draw_portrait_search(cv, f, True);  return True
     if m["hero"] == "pairing":
         draw_portrait_pairing(cv, f);       return True
@@ -802,8 +818,9 @@ def cmd_cheader(out="main/display_font.h"):
 # Reads the TSV emitted by test/display_golden_dump.cpp (input columns + the C++
 # tk::display::compose() decision), re-runs decide() on each input here, and diffs the
 # decisions. Exit non-zero on any mismatch. Wired via scripts/check-display-sim-parity.sh.
-OUT_FIELDS = ["hero", "show_wifi", "show_ble", "ssid_avail", "ssid_scrolling", "ssid_off",
-              "out_soc", "fill_r", "fill_g", "fill_b", "asleep", "show_bolt", "animating"]
+OUT_FIELDS = ["hero", "show_wifi", "show_lan", "search_is_lan", "show_ble", "ssid_avail",
+              "ssid_scrolling", "ssid_off", "out_soc", "fill_r", "fill_g", "fill_b", "asleep",
+              "show_bolt", "animating"]
 def _b01(x):
     return "1" if x else "0"
 def cmd_parity(golden):
@@ -812,13 +829,16 @@ def cmd_parity(golden):
     fails = n = 0
     for ln in rows[1:]:
         rec = dict(zip(header, ln.split("\t")))
-        inp = {"link": rec["link"], "wifi_on": rec["wifi_on"] == "1", "ssid": rec["ssid"],
+        inp = {"link": rec["link"], "net": rec["net"],
+               "eth_present": rec["eth_present"] == "1", "ssid": rec["ssid"],
                "ble_connected": rec["ble_connected"] == "1", "have_soc": rec["have_soc"] == "1",
                "soc": int(rec["soc"]), "charging": rec["charging"] == "1",
                "paired": rec["paired"] == "1", "tick": int(rec["tick"]),
                "orient": rec.get("orient", "landscape")}
         m = decide(inp)
-        got = {"hero": m["hero"], "show_wifi": _b01(m["show_wifi"]), "show_ble": _b01(m["show_ble"]),
+        got = {"hero": m["hero"], "show_wifi": _b01(m["show_wifi"]),
+               "show_lan": _b01(m["show_lan"]), "search_is_lan": _b01(m["search_is_lan"]),
+               "show_ble": _b01(m["show_ble"]),
                "ssid_avail": str(m["ssid_avail"]), "ssid_scrolling": _b01(m["ssid_scrolling"]),
                "ssid_off": str(m["ssid_off"]), "out_soc": str(m["soc"]),
                "fill_r": str(m["fill_r"]), "fill_g": str(m["fill_g"]), "fill_b": str(m["fill_b"]),
@@ -827,9 +847,9 @@ def cmd_parity(golden):
         for k in OUT_FIELDS:
             if rec.get(k) != got[k]:
                 fails += 1
-                print("  MISMATCH case %d field %s: C++=%r sim=%r  (link=%s wifi_on=%s ssid=%r "
+                print("  MISMATCH case %d field %s: C++=%r sim=%r  (link=%s net=%s ssid=%r "
                       "ble=%s soc=%s chg=%s paired=%s tick=%s)" % (
-                          n, k, rec.get(k), got[k], inp["link"], inp["wifi_on"], inp["ssid"],
+                          n, k, rec.get(k), got[k], inp["link"], inp["net"], inp["ssid"],
                           inp["ble_connected"], inp["soc"], inp["charging"], inp["paired"], inp["tick"]))
     if fails == 0:
         print("OK  sim decide() matches the C++ presenter on %d golden cases" % n)

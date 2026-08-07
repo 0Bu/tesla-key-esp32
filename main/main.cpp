@@ -8,25 +8,19 @@
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "freertos/event_groups.h"
-#include "esp_wifi.h"
 #include "esp_event.h"
 #include "esp_log.h"
 #include "nvs_flash.h"
-#include "lwip/err.h"
-#include "lwip/sys.h"
 #include "mdns.h"
 #include "esp_sntp.h"
 #include "esp_ota_ops.h"
 #include "esp_system.h"
 #include "esp_heap_caps.h"
 #include "esp_app_desc.h"
-#include "esp_netif.h"
 #include "bootloader_random.h"
-#include "ping/ping_sock.h"
-#include "lwip/ip_addr.h"
-#include "freertos/semphr.h"
 
+#include "boot_fatal.hpp"
+#include "net.hpp"
 #include "ble_client.hpp"
 #include "nvs_storage.hpp"
 #include "task_config.hpp"
@@ -38,7 +32,6 @@
 #include "safe_mode.hpp"
 #include "config_blob.hpp"
 #include "ota_update.hpp"
-#include "logic/wifi_rollback.hpp"
 #include "mqtt_ha.hpp"
 #include "syslog.hpp"
 #include "display.hpp"
@@ -54,7 +47,7 @@ static const char* TAG = "main";
 // slot until somebody resets it. An already-valid image is halted instead of automatically
 // rebooted, because a reboot loop repeatedly opens the vehicle polling window while erasing the
 // most useful in-memory diagnostic context.
-[[noreturn]] static void boot_fatal(const char* component) {
+[[noreturn]] void boot_fatal(const char* component) {
     ESP_LOGE(TAG, "FATAL: essential component '%s' failed to initialize; refusing to run a "
                   "partial firmware", component);
 
@@ -119,320 +112,6 @@ static void restore_clock_from_nvs(NvsStorageAdapter& config_store) {
     struct timeval tv = { (time_t)atoll(last_time.c_str()), 0 };
     settimeofday(&tv, nullptr);
     ESP_LOGI(TAG, "clock restored from NVS: %s (NTP will refine it)", last_time.c_str());
-}
-
-// ─── WiFi ─────────────────────────────────────────────────────────────────────
-
-static EventGroupHandle_t s_wifi_events;
-static const int WIFI_CONNECTED_BIT = BIT0;
-static const int WIFI_FAIL_BIT      = BIT1;
-static int s_retry_num              = 0;
-static const int MAX_RETRY          = 10;
-
-// True only while the STA holds an IP. Gates esp_wifi_sta_get_ap_info() callers
-// (/status, MQTT) so none reads the AP/station record WHILE WiFi is initialising or
-// churning through a disconnect→reconnect — that record has transiently-null fields
-// mid-association and a concurrent read faults (LoadProhibited, EXCVADDR=0x1).
-// atomic: written from the event-loop task, read from the http/mqtt tasks (a happens-before
-// edge volatile cannot provide).
-static std::atomic<bool> s_wifi_connected{false};
-bool wifi_is_connected() { return s_wifi_connected.load(); }
-
-// Set true on the first IP_EVENT_STA_GOT_IP, never cleared. Distinguishes a boot-time
-// connect (exhausting the retry budget here means the stored credentials are wrong →
-// fall back to the setup portal) from a runtime drop (credentials known-good →
-// reconnect forever, never surrender to the setup portal).
-static std::atomic<bool> s_wifi_ever_connected{false};
-
-// Cumulative WiFi RE-connects since boot (the first association of a boot is not counted). A link
-// that drops and recovers is indistinguishable from a healthy one in any instantaneous reading, so
-// without this a flapping AP is only ever caught by someone watching at the right second. Published
-// as an MQTT diagnostic and reported on /status.
-static std::atomic<unsigned> s_wifi_reconnects{0};
-unsigned wifi_reconnect_count() { return s_wifi_reconnects.load(); }
-
-// The reason code of the most recent WIFI_EVENT_STA_DISCONNECTED. Written on the event task, read
-// by the boot window in wifi_connect() — an atomic, because the credential-rollback decision reads
-// it while associations are still churning. 0 = nothing has failed yet.
-static std::atomic<int> s_last_disco_reason{0};
-
-static void wifi_event_handler(void*, esp_event_base_t base,
-                                int32_t event_id, void* data) {
-    if (base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
-        esp_wifi_connect();
-    } else if (base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
-        s_wifi_connected = false;
-        // Keep the reason: it is the only evidence available about WHY the association failed, and
-        // the credential-rollback decision turns on the difference between "the AP refused these
-        // credentials" and "the AP was not there". Stored, never acted on here — this runs on the
-        // event task and the decision belongs to the boot window in wifi_connect().
-        if (data) s_last_disco_reason.store(((wifi_event_sta_disconnected_t*)data)->reason);
-        if (!s_wifi_ever_connected && s_retry_num >= MAX_RETRY) {
-            // Never been online AND the boot retry budget is spent → credentials are
-            // almost certainly wrong. Stop so wifi_connect() times out and falls back
-            // to the setup portal.
-            xEventGroupSetBits(s_wifi_events, WIFI_FAIL_BIT);
-        } else {
-            // Still within the boot budget, OR we have been online before (a runtime
-            // drop: router reboot, roaming, a delivered deauth). Credentials are
-            // known-good → reconnect FOREVER. Surrendering here is what previously
-            // stranded the device off-WiFi until a manual reset.
-            esp_wifi_connect();
-            s_retry_num++;
-            if (s_retry_num <= MAX_RETRY || s_retry_num % 20 == 0)
-                ESP_LOGI(TAG, "WiFi (re)connect attempt %d", s_retry_num);
-        }
-    } else if (base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
-        ip_event_got_ip_t* ev = (ip_event_got_ip_t*)data;
-        ESP_LOGI(TAG, "IP: " IPSTR, IP2STR(&ev->ip_info.ip));
-        s_retry_num = 0;
-        // Retire the stored disconnect reason: an earlier refusal must not outlive the association
-        // that disproved it, or a device that got on the network at attempt three still rolls its
-        // credentials back on the evidence of attempt one (logic/wifi_rollback.hpp states this as
-        // the caller's obligation).
-        s_last_disco_reason.store(0);
-        s_wifi_connected = true;
-        // Count the RE-connects only: s_wifi_ever_connected is still false on the first lease of a
-        // boot, so a healthy device reports 0 rather than a permanent 1 that would hide a real flap.
-        if (s_wifi_ever_connected.load()) s_wifi_reconnects.fetch_add(1);
-        s_wifi_ever_connected = true;
-        xEventGroupSetBits(s_wifi_events, WIFI_CONNECTED_BIT);
-    }
-}
-
-// rollback_pending: a /set_wifi change is on trial this boot, so a failure here is not simply
-// "fall back to the setup portal" — it may mean restoring the previous credentials. That changes
-// how long we are willing to wait and why, hence the parameter rather than a second function.
-static bool wifi_connect(const char* ssid, const char* password, bool rollback_pending) {
-    s_wifi_events = xEventGroupCreate();
-    if (!s_wifi_events) boot_fatal("WiFi event group");
-
-    ESP_ERROR_CHECK(esp_netif_init());
-    ESP_ERROR_CHECK(esp_event_loop_create_default());
-    esp_netif_t* sta_netif = esp_netif_create_default_wifi_sta();
-    if (!sta_netif) boot_fatal("WiFi station netif");
-
-    // DHCP client hostname: set BEFORE the lease is requested so the router can
-    // register it in its local DNS (e.g. http://tesla-key-esp32.fritz.box). Setting
-    // it later (at mDNS init, after WiFi is up) is too late — the DHCP DISCOVER has
-    // already gone out. Same name as the mDNS hostname so both agree.
-    if (esp_netif_set_hostname(sta_netif, MDNS_HOSTNAME) != ESP_OK)
-        ESP_LOGW(TAG, "could not set DHCP hostname '%s'", MDNS_HOSTNAME);
-
-    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
-
-    esp_event_handler_instance_t h1, h2;
-    ESP_ERROR_CHECK(esp_event_handler_instance_register(
-        WIFI_EVENT, ESP_EVENT_ANY_ID, wifi_event_handler, nullptr, &h1));
-    ESP_ERROR_CHECK(esp_event_handler_instance_register(
-        IP_EVENT, IP_EVENT_STA_GOT_IP, wifi_event_handler, nullptr, &h2));
-
-    wifi_config_t wifi_cfg{};
-    strncpy((char*)wifi_cfg.sta.ssid,     ssid,     sizeof(wifi_cfg.sta.ssid) - 1);
-    strncpy((char*)wifi_cfg.sta.password, password, sizeof(wifi_cfg.sta.password) - 1);
-    wifi_cfg.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
-    // Pick the STRONGEST AP for the SSID, not the first one heard. The default
-    // WIFI_FAST_SCAN stops at the first matching BSSID (channel-order/timing
-    // dependent), so on a multi-AP network (mesh / several APs, same SSID) this
-    // device — which is stationary near the car — would latch onto whatever
-    // answers first, often a far/weak AP, and the ESP32 STA never roams off it.
-    // ALL_CHANNEL_SCAN scans every channel; BY_SIGNAL then connects to the highest
-    // RSSI. Costs ~1-2 s more at connect; applies on every (re)connect too.
-    wifi_cfg.sta.scan_method = WIFI_ALL_CHANNEL_SCAN;
-    wifi_cfg.sta.sort_method = WIFI_CONNECT_AP_BY_SIGNAL;
-
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
-    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_cfg));
-    ESP_ERROR_CHECK(esp_wifi_start());
-
-    // Keep WiFi modem-sleep at MIN_MODEM (the IDF default). Modem-sleep parks the radio
-    // between DTIM beacons, which DOES add ~100 ms per round-trip (the original cause of
-    // the sluggish web UI) — but WIFI_PS_NONE is NOT an option here: on the ESP32-S3 WiFi
-    // and BLE share ONE radio, and ESP-IDF WiFi/BT coexistence relies on WiFi modem-sleep
-    // to hand the radio to BLE. Setting WIFI_PS_NONE starves BLE so badly that GATT
-    // connections to the car time out (live-verified: every connect failed with NimBLE
-    // "connect error: 13"), breaking evcc and pairing. So we MUST leave power-save on and
-    // tackle web-UI latency elsewhere — the page is gzipped (~13 KB vs 41 KB) and the TCP
-    // window is enlarged (sdkconfig.defaults), which together clear it in ~1–2 RTTs.
-    ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_MIN_MODEM));
-
-    // Without a pending credential change this is the long-standing behaviour: one 30 s budget,
-    // then fall back to the setup portal.
-    if (!rollback_pending) {
-        EventBits_t bits = xEventGroupWaitBits(s_wifi_events,
-            WIFI_CONNECTED_BIT | WIFI_FAIL_BIT, pdFALSE, pdFALSE,
-            pdMS_TO_TICKS(tk::kWifiBootWindowS * 1000));
-
-        if (bits & WIFI_CONNECTED_BIT) {
-            ESP_LOGI(TAG, "WiFi connected to '%s'", ssid);
-            return true;
-        }
-        ESP_LOGE(TAG, "WiFi connection failed");
-        return false;
-    }
-
-    // A /set_wifi change is on trial. The deadline is REASON-AWARE, because rolling back is
-    // destructive — it deletes credentials the user just typed. Only an AP that SUSTAINS an
-    // authentication refusal across two checkpoints spends them; anything else (an absent SSID
-    // because the router is still rebooting, a slow DHCP) is not evidence against the credentials
-    // and gets the full grace window instead. The policy is the host-tested
-    // logic/wifi_rollback.hpp; this loop only supplies the samples.
-    tk::RollbackWatch watch{};
-    for (int elapsed = 0;; elapsed += (int)tk::kWifiBootWindowS) {
-        EventBits_t bits = xEventGroupWaitBits(s_wifi_events,
-            WIFI_CONNECTED_BIT, pdFALSE, pdFALSE,
-            pdMS_TO_TICKS(tk::kWifiBootWindowS * 1000));
-        if (bits & WIFI_CONNECTED_BIT) {
-            ESP_LOGI(TAG, "WiFi connected to '%s'", ssid);
-            return true;
-        }
-        const int checked = elapsed + (int)tk::kWifiBootWindowS;
-        const tk::DiscoClass cls = tk::disco_class(s_last_disco_reason.load());
-        if (tk::rollback_step(watch, cls, checked) == tk::RollbackAction::RollBack) {
-            ESP_LOGE(TAG, "WiFi still not up %d s after a credential change (last disconnect "
-                          "reason %d) — rolling back to the previous network",
-                     checked, s_last_disco_reason.load());
-            return false;
-        }
-        ESP_LOGW(TAG, "WiFi not up yet %d s after a credential change (last disconnect reason %d) "
-                      "— still waiting before rolling back", checked, s_last_disco_reason.load());
-    }
-}
-
-// ─── WiFi connectivity watchdog ───────────────────────────────────────────────
-// Two failure modes strand the device off the LAN while the firmware otherwise runs
-// fine (BLE stays up, heap healthy, no reboot — exactly the state we debugged live):
-//   (A) the STA exhausted its reconnect attempts and gave up, or
-//   (B) a *missed deauth* leaves a "ghost" association — the stack still believes it
-//       is connected (keeps the IP, keeps emitting TCP that times out) but the AP
-//       forwards nothing and NO WIFI_EVENT_STA_DISCONNECTED ever fires, so the
-//       reconnect handler never runs.
-// (A) is handled by the endless-retry handler above, which owns recovery whenever the
-// link already knows it is down. (B) has NO event to react to, so this task closes the
-// gap: it probes real L3 connectivity (ICMP echo to the default gateway) every
-// kWdPeriodS and, only for the ghost case (link believes it is up yet a gateway that
-// HAS answered before now doesn't), forces a single re-association — esp_wifi_disconnect()
-// drops the stale link and the handler reconnects with the known-good credentials. It
-// deliberately NEVER reboots: a reboot during an AP outage would hit wifi_connect()'s
-// 30 s boot timeout and drop into the setup portal, abandoning good credentials.
-
-static const int kWdPeriodS       = 30;   // connectivity-check cadence
-static const int kWdFailToReassoc = 2;    // consecutive failed checks (~60 s) → re-associate
-static const int kWdPingTimeoutMs = 1000; // per-echo timeout
-static const int kWdPingCount     = 3;    // echoes per check; healthy if ≥1 replies
-
-// Persistent across probes (the single watchdog task calls gateway_reachable() serially).
-// The control block and its semaphore MUST outlive any in-flight esp_ping session: the
-// ping's internal thread is NOT joined by esp_ping_delete_session() and calls
-// wd_on_ping_end() unconditionally once started. If that callback ran against a per-call
-// stack frame after a take() timeout it would write freed memory / give a deleted
-// semaphore (use-after-free). File-scope storage removes the window entirely; a stale give
-// from a late completion is harmlessly drained at the next probe.
-struct WdPing { SemaphoreHandle_t done; uint32_t received; };
-static WdPing s_wd = { nullptr, 0 };
-
-// Set true the first time the gateway answers ICMP, never cleared. Until a baseline exists
-// we have NO evidence this gateway answers echo at all, so a never-replying gateway (a
-// router/firewall that drops LAN ICMP) must NOT be read as "link dead" — that would
-// re-associate a perfectly healthy link every ~60 s forever. A genuine ghost association,
-// by contrast, replied before and then stops, so it still trips the watchdog.
-static std::atomic<bool> s_gw_ever_reachable{false};
-
-static void wd_on_ping_end(esp_ping_handle_t hdl, void* args) {
-    auto* p = (WdPing*) args;
-    uint32_t recv = 0;
-    esp_ping_get_profile(hdl, ESP_PING_PROF_REPLY, &recv, sizeof(recv));
-    p->received = recv;
-    xSemaphoreGive(p->done);
-}
-
-// Blocking ICMP echo to the current default gateway. True if ≥1 reply came back. Returns
-// true (no false alarm) when the probe can't even be set up — the watchdog must act only on
-// a *proven* failure to reach a gateway that DOES answer ICMP, never on its own inability to
-// measure. The per-cycle esp_ping session is a deliberate, accepted minor cost (a transient
-// ~2.5 KB ping task ~1.5 s out of every 30 s; same-size alloc/free, no monotonic growth).
-static bool gateway_reachable() {
-    if (!s_wd.done) return true;  // watchdog not fully initialised yet
-
-    esp_netif_t* netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
-    esp_netif_ip_info_t ip{};
-    if (!netif || esp_netif_get_ip_info(netif, &ip) != ESP_OK || ip.gw.addr == 0)
-        return false;  // no gateway/lease → not reachable
-
-    char gw[16];
-    esp_ip4addr_ntoa(&ip.gw, gw, sizeof(gw));
-    ip_addr_t target{};
-    if (!ipaddr_aton(gw, &target))
-        return true;  // unparseable → don't false-alarm
-
-    esp_ping_config_t cfg = ESP_PING_DEFAULT_CONFIG();
-    cfg.target_addr = target;
-    cfg.count       = kWdPingCount;
-    cfg.timeout_ms  = kWdPingTimeoutMs;
-    cfg.interval_ms = 250;
-
-    esp_ping_callbacks_t cbs = {};
-    cbs.cb_args     = &s_wd;
-    cbs.on_ping_end = wd_on_ping_end;
-
-    esp_ping_handle_t hdl = nullptr;
-    if (esp_ping_new_session(&cfg, &cbs, &hdl) != ESP_OK || !hdl)
-        return true;  // probe setup failed → don't false-alarm
-
-    xSemaphoreTake(s_wd.done, 0);  // drain any stale give from a prior timed-out probe
-    s_wd.received = 0;
-    esp_ping_start(hdl);
-    // Wait out the whole sequence (count × (timeout + interval)) plus generous margin. A
-    // take() timeout is harmless here because s_wd is persistent (see above).
-    xSemaphoreTake(s_wd.done,
-        pdMS_TO_TICKS(kWdPingCount * (kWdPingTimeoutMs + 250) + 2000));
-    esp_ping_stop(hdl);
-    esp_ping_delete_session(hdl);
-
-    bool ok = s_wd.received > 0;
-    if (ok) s_gw_ever_reachable = true;
-    return ok;
-}
-
-static void wifi_watchdog_task(void*) {
-    int fails = 0;
-    for (;;) {
-        vTaskDelay(pdMS_TO_TICKS(kWdPeriodS * 1000));
-
-        // When the link already knows it is down, the endless-retry handler owns recovery —
-        // there is nothing for the watchdog to detect (the ghost case is link=up by
-        // definition), and counting/logging every period would only fill the 16 KB /diag
-        // ring with noise across a long router outage.
-        if (!s_wifi_connected) {
-            fails = 0;
-            continue;
-        }
-        if (gateway_reachable()) {
-            fails = 0;
-            continue;
-        }
-
-        fails++;
-        ESP_LOGW(TAG, "watchdog: no LAN connectivity (%d/%d, link=up)",
-                 fails, kWdFailToReassoc);
-        if (fails < kWdFailToReassoc)
-            continue;
-        fails = 0;
-
-        // Act ONLY on a true ghost association: the link still believes it is up AND this
-        // gateway has answered ICMP before (so its silence is real, not a firewall).
-        // One disconnect is enough: the handler's else-branch reconnects
-        // (s_wifi_ever_connected is true), so we don't call esp_wifi_connect() ourselves
-        // and avoid a cross-task double-connect.
-        if (!s_gw_ever_reachable) {
-            ESP_LOGW(TAG, "watchdog: gateway has never answered ICMP — not forcing re-assoc");
-            continue;
-        }
-
-        ESP_LOGW(TAG, "watchdog: ghost association — forcing WiFi re-association");
-        esp_wifi_disconnect();   // drops the ghost link → handler reconnects (known-good creds)
-    }
 }
 
 // ─── app_main ─────────────────────────────────────────────────────────────────
@@ -564,9 +243,9 @@ extern "C" void app_main() {
     const bool safe_mode = tk::safe_mode_begin(config_store, tk::diag_crash_info().fault);
 
     // UDP Syslog forwarder for the diag log (NVS "syslog_uri" / CONFIG_TESLA_SYSLOG_SERVER;
-    // "" = disabled). Started before WiFi so it captures boot-time log lines too — its own
-    // task blocks on wifi_is_connected() until the link is up, so this is safe even though
-    // esp_netif_init() itself hasn't run yet (that happens inside wifi_connect() below).
+    // "" = disabled). Started before the network so it captures boot-time log lines too — its
+    // own task blocks on tk::net_is_up() until the link is up, so this is safe even though
+    // esp_netif_init() itself hasn't run yet (that happens in tk::net_init() below).
     // OPTIONAL subsystem: a false return (resources/task couldn't be allocated) leaves
     // forwarding disabled and degraded, but never stops boot — syslog_start() has already
     // logged the specific reason.
@@ -705,7 +384,7 @@ extern "C" void app_main() {
     // Connect to WiFi. With stored credentials, a failure is usually a transient
     // outage (e.g. router rebooting), but if it persists (e.g. wrong password),
     // fallback to the setup portal so the user can reconfigure it.
-    if (!wifi_connect(ssid.c_str(), password.c_str(), cfg_blob.wifi_rollback_active)) {
+    if (!tk::net_start_wifi(ssid.c_str(), password.c_str(), cfg_blob.wifi_rollback_active)) {
         if (cfg_blob.wifi_rollback_active) {
             // The credentials from the last /set_wifi did not work and the grace window is spent.
             // Restore the pair that DID work and reboot onto it, rather than dropping into the
@@ -820,19 +499,15 @@ extern "C" void app_main() {
     led_status_start(vehicle);
     log_heap("led");
 
-    // WiFi connectivity watchdog: re-associates if the LAN link silently dies,
-    // including the "ghost association" case that fires no disconnect event (see the
-    // task definition above). Without it the device can sit reachable-over-BLE but
-    // off the LAN indefinitely, recoverable only by a manual reset.
-    // ESSENTIAL: without the watchdog a silent LAN drop (esp. the ghost-association case) can
-    // strand the device off the network with no automatic recovery — so a failure to create it
-    // halts boot rather than run without the safety net.
-    s_wd.done = xSemaphoreCreateBinary();
-    if (!s_wd.done)
-        boot_fatal("WiFi watchdog semaphore");
-    if (xTaskCreate(wifi_watchdog_task, "wifi_wd", 3072, nullptr,
-                    tk::kPrioWifiWatchdog, nullptr) != pdPASS)
-        boot_fatal("WiFi watchdog");
+    // LAN connectivity watchdog: forces the active transport to re-establish if the link
+    // silently dies, including the "ghost association" case that fires no disconnect event
+    // (net.cpp; the decision logic is logic/net_link.hpp). Without it the device can sit
+    // reachable-over-BLE but off the LAN indefinitely, recoverable only by a manual reset.
+    // ESSENTIAL: without the watchdog a silent LAN drop can strand the device off the network
+    // with no automatic recovery — so a failure to create it halts boot rather than run
+    // without the safety net.
+    if (!tk::net_watchdog_start())
+        boot_fatal("LAN watchdog");
 
     // Confirm a freshly OTA-flashed image only after it has proven it can RUN — not merely
     // reach this line. Marking it valid here (the old behaviour) would disarm rollback the

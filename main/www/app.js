@@ -317,8 +317,16 @@ function render(s){
   var hasVin=s.vin&&s.vin!=='UNKNOWN', configured=hasVin&&s.key_present;
   var v=s.vehicle, charging=v&&/charg/i.test(v.status||'');
 
-  // connection — Wi-Fi (signal + SSID + IP), moved here from the header
-  var w=s.wifi||{}, wc=$("wifiConn");
+  // connection — the network row. One row, two possible transports: a wired device reports
+  // an `eth` object (present ONLY when the wire carries the lease, see logic/status_model.hpp)
+  // and no SSID/RSSI, so bars and a dBm reading would be fabricated there — it gets the
+  // negotiated link speed instead, which is the equivalent "how good is this link" fact.
+  var w=s.wifi||{}, e=s.eth, wc=$("wifiConn");
+  if(e && e.link){
+    $("wifiLbl").textContent = 'Ethernet';
+    wc.className='cv ok';
+    setHTML(wc,'<span class="nm">'+(e.speed?esc(e.speed+' Mbit'+(e.full_duplex?' FD':' HD')):'link up')+'</span>');
+  } else {
   $("wifiLbl").textContent = w.std || 'Wi-Fi';   // standard sits in the label, e.g. "Wi-Fi 4"
   if(w.ssid||s.ip){
     var wr=num(w.rssi);
@@ -332,6 +340,7 @@ function render(s){
     // "searching" row) instead of a plain text label, while the device keeps reconnecting.
     // setHTML keeps the same bar nodes between polls so the fill animation doesn't restart.
     wc.className='cv'; setHTML(wc,searchBarsHTML()+'<span>Searching…</span>');
+  }
   }
 
   // re-pair notice — key was removed by the car and regenerated

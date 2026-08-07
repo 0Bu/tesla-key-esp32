@@ -29,6 +29,7 @@ failure it exists to prevent*. A feature without that last part is one nobody ca
 | Task watchdog (TWDT) | `sdkconfig.defaults` (60 s, `PANIC=y`), subscribed by `vehicle_loop` and `mqtt_pub` | The half the heap watchdog cannot see: a task blocked forever on a semaphore, the BLE stack or a socket, with the heap looking perfectly healthy. |
 | Stack-overflow watchpoint | `sdkconfig.defaults` (`FREERTOS_WATCHPOINT_END_OF_STACK`) | A sparsely-writing frame stepping over the canary and corrupting a neighbour, so the crash surfaces later somewhere innocent. The watchpoint panics at the offending instruction. |
 | OTA rollback health gate | `main.cpp` `ota_health_gate_task` | An image that boots and then dies under load: rollback stays armed for ~90 s of healthy uptime. |
+| Essential-startup failure | `main/boot_fatal.hpp`, defined in `main.cpp` | A half-initialised firmware pretending to run. When something essential fails to come up (NVS, the vehicle controller, the LAN watchdog, a transport's event group) a PENDING OTA image actively rolls back — merely parking the task would wedge the device on an unverified slot until someone resets it — while an already-valid image HALTS instead of rebooting, because a reboot loop re-opens the car's polling window on every boot and erases the in-memory diagnostics that would explain it. |
 
 ## 2. Configuration and storage
 
@@ -59,8 +60,9 @@ trusted-LAN only. See [`SECURITY.md`](SECURITY.md).
 | Feature | Where | Prevents |
 |---|---|---|
 | Captive portal | `main/provisioning.cpp`, `logic/captive.hpp` | A setup portal that does not pop. A DNS catch-all, a **302 redirect** on the three OS probe paths (a 200 + page is a heuristic Android may leave undecided), and the RFC 8910 DHCP option 114 — three independent ways for a client to find it. |
-| Gateway ICMP watchdog | `main.cpp` `wifi_watchdog_task` | The "ghost association" that fires no disconnect event: the stack believes it is connected, the AP forwards nothing, and no reconnect handler ever runs. |
-| Endless runtime reconnect | `main.cpp` `wifi_event_handler` | Surrendering to the setup portal on a transient outage once the credentials are known-good. |
+| Transport seam | `main/net.hpp` + `main/net.cpp`, `logic/net_link.hpp` | A network layer that can only ever be WiFi. ONE contract (`net_is_up` / `net_kind` / `net_active_netif`) replaces a predicate hand-`extern`ed in five modules and a `"WIFI_STA_DEF"` ifkey hardcoded in three — each correct only while a radio was the sole transport. |
+| Gateway ICMP watchdog | `net.cpp` `net_watchdog_task`, `logic/net_link.hpp` `watch_step()` | The "ghost association" that fires no disconnect event: the stack believes it is connected, the AP forwards nothing, and no reconnect handler ever runs. The decision — including the baseline rule that a gateway which has NEVER answered ICMP must not trigger recovery — is host-tested, not an `if` inside a task loop. |
+| Endless runtime reconnect | `net.cpp` `wifi_event_handler` | Surrendering to the setup portal on a transient outage once the credentials are known-good. |
 | mDNS + DHCP hostname | `main.cpp` | Having to find the IP. Both are set to the same name, so router DNS agrees with `tesla-key-esp32.local`. |
 | SNTP + browser-clock fallback | `main.cpp`, `POST /set_time` | A 1970 clock, which makes tesla-ble reject every persisted session and breaks OTA TLS date validation. |
 | UDP syslog (RFC 5424) | `main/syslog.cpp`, `logic/syslog_policy.hpp` | Losing the log that explains a reboot — `/diag` is RAM and does not survive one. Errno-classified send failures, PRI from each line's own log level. |

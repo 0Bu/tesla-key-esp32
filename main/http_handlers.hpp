@@ -35,16 +35,10 @@ struct GuardedReq { httpd_req_t* req; };
 // fallback only applies the client clock while this is false (NTP is authoritative).
 bool clock_synced_via_ntp();
 
-// Defined in main.cpp: true only while the STA holds an IP. Gate esp_wifi_sta_get_ap_info()
-// so it's never read during association churn (concurrent read of the half-built AP
-// record faults — LoadProhibited/EXCVADDR=0x1).
-bool wifi_is_connected();
-
-// Defined in main.cpp: cumulative WiFi RE-connects since boot (the first association of a boot is
-// not counted). Reported in /status.sys and over MQTT — a link that drops and recovers looks
-// identical to a healthy one in any instantaneous reading, so without a counter a flapping AP is
-// only ever caught by someone watching at the right second.
-unsigned wifi_reconnect_count();
+// Link state, the active netif and the WiFi-only readings all come from the transport seam
+// (net.hpp): tk::net_is_up(), tk::net_active_netif(), tk::net_wifi_signal(). Handlers must not
+// call esp_wifi_sta_get_ap_info() themselves — the station record has transiently-null fields
+// mid-association and a concurrent read there faults (LoadProhibited/EXCVADDR=0x1).
 
 // ─── Shared helpers (http_common.cpp) ─────────────────────────────────────────
 

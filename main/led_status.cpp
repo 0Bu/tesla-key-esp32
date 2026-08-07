@@ -17,12 +17,12 @@
 #include "task_config.hpp"
 #include "logic/soc_gradient.hpp"   // shared SoC colour ramp (same one the display uses)
 #include "logic/ui_state.hpp"
+#include "net.hpp"
 #include "ota_update.hpp"
 #include "vehicle_ctrl.hpp"
 
-// Defined in main.cpp — true only while the STA holds an IP (see the note on the display's
-// use of it: querying esp_wifi during association churn faults, so trust this flag instead).
-bool wifi_is_connected();
+// The network seam (net.hpp) — see the note in display.cpp on why this task must not read
+// esp_wifi itself. The LED shows only WHETHER a link exists, never which transport.
 
 namespace {
 
@@ -148,11 +148,12 @@ void led_task(void* arg) {
 
             // Shared connectivity/charge facts — the SAME snapshot the display reads, so the LED
             // and the panel can never disagree (link_state has one source). ui_snapshot() fills
-            // the vehicle-owned fields under the cache lock; the LED supplies wifi_on (bool only —
-            // it shows no SSID) and paired (its own ≤1 Hz has_session() sample; hits NVS).
+            // the vehicle-owned fields under the cache lock; the LED supplies the transport (it
+            // shows no SSID or RSSI, so `net` is all it needs) and paired (its own ≤1 Hz
+            // has_session() sample; hits NVS).
             snap = v.ui_snapshot();
-            snap.wifi_on = wifi_is_connected();
-            snap.paired  = v.has_session();
+            snap.net    = tk::net_kind();
+            snap.paired = v.has_session();
         }
 
         const tk::LedPattern p = tk::led_pattern(snap, alerts);

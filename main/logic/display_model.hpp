@@ -84,20 +84,28 @@ inline int scroll_offset(uint32_t tick, int span) {
     return o > 0 ? o : 0;
 }
 
-// Which big centre element is shown, by priority: WiFi search > pairing > BLE search >
-// battery. (WiFi/BLE "search" = the ping-pong sweep; pairing = the animated "Pairing…".)
-enum class Hero : uint8_t { WifiSearch, Pairing, BleSearch, Battery };
+// Which big centre element is shown, by priority: network search > pairing > BLE search >
+// battery. (Net/BLE "search" = the ping-pong sweep; pairing = the animated "Pairing…".)
+enum class Hero : uint8_t { NetSearch, Pairing, BleSearch, Battery };
 
 // The fully-decided frame. The renderer draws exactly this — it branches on nothing else.
 struct Model {
     Hero hero = Hero::BleSearch;
 
-    // header — WiFi side (bars + SSID). Hidden while WiFi is the active search hero.
+    // header — network side. Hidden while the network is the active search hero.
+    // Exactly one of show_wifi / show_lan is ever true: WiFi draws bars + SSID, Ethernet
+    // draws a static "LAN" label (it has neither a signal level nor a network name, and a
+    // fixed 4/4 would be a fabricated reading).
     bool show_wifi       = false;
-    int  wifi_bars       = 0;      // 0..4
+    bool show_lan        = false;
+    int  wifi_bars       = 0;      // 0..4                        (show_wifi only)
     bool ssid_scrolling  = false;  // SSID longer than its row → marquee
     int  ssid_scroll_off = 0;      // px to shift the SSID left (0 unless scrolling)
     int  ssid_avail      = 0;      // clip-window width in px
+
+    // The searching hero labels itself after what this board is actually waiting for — see
+    // UiSnapshot::eth_present. False (i.e. "WiFi") on every board without the Ethernet backend.
+    bool search_is_lan   = false;
 
     // header — BLE side (bars + BT glyph). Hidden while BLE is the active search hero.
     bool show_ble        = false;
@@ -121,20 +129,25 @@ struct Model {
 inline Model compose(const UiSnapshot& s, uint32_t tick, Orient orient = Orient::Landscape) {
     Model m;
 
-    const bool unreachable    = (s.link_state == LinkState::Unreachable);
-    const bool wifi_searching = !s.wifi_on;
-    const bool pairing        = s.ble_connected && !s.paired;   // BLE up, not yet paired
-    const bool battery_ok     = !unreachable && s.have_soc;
+    const bool unreachable   = (s.link_state == LinkState::Unreachable);
+    const bool net_searching = !s.net_up();
+    const bool pairing       = s.ble_connected && !s.paired;   // BLE up, not yet paired
+    const bool battery_ok    = !unreachable && s.have_soc;
     // BLE search bars appear ONLY when nothing else claims the centre (car out of range).
-    const bool ble_bars       = !(wifi_searching || pairing || battery_ok);
+    const bool ble_bars      = !(net_searching || pairing || battery_ok);
 
-    if      (wifi_searching) m.hero = Hero::WifiSearch;
-    else if (pairing)        m.hero = Hero::Pairing;
-    else if (!battery_ok)    m.hero = Hero::BleSearch;
-    else                     m.hero = Hero::Battery;
+    if      (net_searching) m.hero = Hero::NetSearch;
+    else if (pairing)       m.hero = Hero::Pairing;
+    else if (!battery_ok)   m.hero = Hero::BleSearch;
+    else                    m.hero = Hero::Battery;
 
-    // ── header: WiFi bars + SSID (hidden when WiFi is the search hero) ──
-    m.show_wifi = !wifi_searching;
+    m.search_is_lan = s.eth_present;
+
+    // ── header: network cluster (hidden when the network is the search hero) ──
+    // Ethernet takes the same slot but draws a label instead of bars: the SSID geometry below
+    // is WiFi-only, so an Ethernet link leaves ssid_* at their defaults.
+    m.show_lan  = (s.net == NetLink::Eth);
+    m.show_wifi = (s.net == NetLink::Wifi);
     if (m.show_wifi) {
         m.wifi_bars = rssi_bars(s.wifi_rssi);
         int avail, scale;
