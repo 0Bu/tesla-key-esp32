@@ -446,8 +446,18 @@ extern "C" void app_main() {
             ESP_LOGE(TAG, "could not persist the credential rollback — falling back to the setup "
                           "portal rather than rebooting into a loop");
         }
-        ESP_LOGW(TAG, "WiFi connection failed — starting setup portal");
-        provisioning_run(config_store); // never returns; reboots on save
+        // LAST look before surrendering the running firmware to the portal. The Ethernet
+        // driver keeps polling through the whole WiFi boot window, so a cable plugged in
+        // during those ~30 s can have taken the link while this branch was being reached —
+        // and dropping a working, reachable device into a captive AP would be the worst
+        // possible answer to "the network is up".
+        if (tk::net_is_up()) {
+            ESP_LOGW(TAG, "WiFi did not come up, but the link is carried by %s — staying up",
+                     tk::net_link_str(tk::net_kind()));
+        } else {
+            ESP_LOGW(TAG, "WiFi connection failed — starting setup portal");
+            provisioning_run(config_store); // never returns; reboots on save
+        }
     }
     // Associated on the new credentials: the trial is over and the backup has done its job. Drop it
     // so a LATER, unrelated outage can never restore credentials from months ago.

@@ -593,6 +593,17 @@ buffer. Note that ESP-IDF **6.0 moves the SPI Ethernet drivers out of the core**
 `esp-eth-drivers` component — one `idf_component.yml` line whenever the IDF-6 work
 ([ADR-0002](adr/0002-idf6-mbedtls4-crypto-seam.md)) happens.
 
+**Both transports can hold a lease at once.** A board whose W5500 found no lease at boot falls
+back to WiFi with the Ethernet driver still running, so a cable plugged in later brings the wire
+up *alongside* the radio. `tk::net_kind()` is therefore DERIVED from two per-transport lease
+flags via the host-tested `tk::net_link_active()` (Ethernet outranks WiFi — it is the transport
+that costs the BLE radio nothing, and it is what lwIP puts first), not written by whichever event
+fired last. That matters on the way back down: unplugging the cable must fall back to WiFi, not
+to "no network", or syslog stops, the display shows "searching" and MQTT drops the RSSI while a
+perfectly healthy WiFi lease is still in hand. For the same reason the WiFi-only readings
+(`net_wifi_signal`, `net_wifi_standard`) gate on the WiFi *lease*, not on which transport is
+active — the lease flag is exactly the window in which `esp_wifi_sta_get_ap_info()` is safe.
+
 **The W5500 has no MAC of its own** (no EEPROM), so one is supplied from `ESP_MAC_ETH` — the
 chip's eFuse-derived Ethernet address, distinct from the WiFi STA MAC so the two can never
 collide on one LAN. The MQTT/HA node id stays derived from `ESP_MAC_WIFI_STA` even on a wired

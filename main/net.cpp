@@ -83,23 +83,52 @@ unsigned     net_reconnect_count(){ return s_reconnects.load(); }
 // boot is not counted.
 static std::atomic<bool> s_ever_up{false};
 
-// Called by each transport backend when it gains or loses its lease. Keeping the bookkeeping
-// in one place is what guarantees the reconnect counter and the active-netif pointer cannot
-// disagree with s_kind — the exact class of drift the old five-`extern` arrangement invited.
-static void link_up(NetLink kind, esp_netif_t* netif) {
+// Per-transport lease state. BOTH can be true at once: a board whose W5500 found no lease at
+// boot falls back to WiFi with the Ethernet driver still running, so a cable plugged in later
+// brings the wire up ALONGSIDE the radio. s_kind is therefore DERIVED from these rather than
+// written directly — the earlier "last event wins" version had a real hole: unplugging that
+// cable cleared the link for everything above the seam (syslog stopped, the display showed
+// "searching", MQTT dropped the RSSI) while a perfectly healthy WiFi lease was still in hand.
+static std::atomic<bool> s_wifi_lease{false};
+static std::atomic<bool> s_eth_lease{false};
+
+// Each backend owns its netif handle; these let recompute_link() sit above both without
+// reordering the file. Both return nullptr until their transport has been started.
+static esp_netif_t* s_sta_netif_ptr();
+static esp_netif_t* s_eth_netif_ptr();
+
+// Ethernet outranks WiFi whenever both hold a lease: it is the transport that costs the BLE
+// radio nothing, and it is what lwIP itself puts first in its netif list, so reporting anything
+// else would disagree with where the packets actually go.
+static void recompute_link() {
+    const NetLink kind = net_link_active(s_eth_lease.load(), s_wifi_lease.load());
+    esp_netif_t* netif = (kind == NetLink::Eth)  ? s_eth_netif_ptr()
+                       : (kind == NetLink::Wifi) ? s_sta_netif_ptr()
+                                                 : nullptr;
+    // netif BEFORE kind: every reader that sees kind != None must find a usable handle, and
+    // net_active_netif() is called straight into esp_netif_* by /status, MQTT and the watchdog.
     s_active_netif.store(netif);
-    if (s_ever_up.load()) s_reconnects.fetch_add(1);
-    s_ever_up.store(true);
     s_kind.store(kind);
 }
 
+// Called by each transport backend when it gains or loses its lease. Keeping the bookkeeping in
+// one place is what guarantees the reconnect counter and the active-netif pointer cannot
+// disagree with s_kind — the exact class of drift the old five-`extern` arrangement invited.
+static void link_up(NetLink kind) {
+    const bool was_up = (s_kind.load() != NetLink::None);
+    if (kind == NetLink::Eth) s_eth_lease.store(true); else s_wifi_lease.store(true);
+    recompute_link();
+    // Count a RE-establishment, not a transport switch: going from one live transport to the
+    // other is not an outage anybody needs to see in the flap counter.
+    if (!was_up) {
+        if (s_ever_up.load()) s_reconnects.fetch_add(1);
+        s_ever_up.store(true);
+    }
+}
+
 static void link_down(NetLink kind) {
-    // Only the transport that OWNS the current lease may clear it. Without this guard a WiFi
-    // disconnect event arriving while Ethernet carries the route would blank the link for
-    // everything above the seam.
-    if (s_kind.load() != kind) return;
-    s_kind.store(NetLink::None);
-    s_active_netif.store(nullptr);
+    if (kind == NetLink::Eth) s_eth_lease.store(false); else s_wifi_lease.store(false);
+    recompute_link();
 }
 
 // ── shared substrate ──────────────────────────────────────────────────────────
@@ -122,6 +151,7 @@ static int s_retry_num              = 0;
 static const int MAX_RETRY          = 10;
 
 static esp_netif_t* s_sta_netif = nullptr;
+static esp_netif_t* s_sta_netif_ptr() { return s_sta_netif; }
 
 // The reason code of the most recent WIFI_EVENT_STA_DISCONNECTED. Written on the event task,
 // read by the boot window below — atomic, because the credential-rollback decision reads it
@@ -162,7 +192,7 @@ static void wifi_event_handler(void*, esp_event_base_t base, int32_t event_id, v
         // still rolls its credentials back on the evidence of attempt one
         // (logic/wifi_rollback.hpp states this as the caller's obligation).
         s_last_disco_reason.store(0);
-        link_up(NetLink::Wifi, s_sta_netif);
+        link_up(NetLink::Wifi);
         xEventGroupSetBits(s_wifi_events, WIFI_CONNECTED_BIT);
     }
 }
@@ -267,7 +297,12 @@ bool net_start_wifi(const char* ssid, const char* password, bool rollback_pendin
 // /status, MQTT and the display presenter each used to re-derive it.
 
 bool net_wifi_signal(int* rssi_dbm, char* ssid) {
-    if (s_kind.load() != NetLink::Wifi) return false;
+    // Gated on the WiFi LEASE, not on net_kind(): a board that fell back to WiFi and later had a
+    // cable plugged in reports NetLink::Eth while the radio is still associated, and hiding the
+    // SSID/RSSI there would make /status claim the WiFi link vanished when it did not. The lease
+    // flag is exactly the window in which esp_wifi_sta_get_ap_info() is safe to read (it is set
+    // on GOT_IP and cleared on DISCONNECTED), which is the guard that matters.
+    if (!s_wifi_lease.load()) return false;
     wifi_ap_record_t ap{};
     if (esp_wifi_sta_get_ap_info(&ap) != ESP_OK) return false;
     if (rssi_dbm) *rssi_dbm = ap.rssi;
@@ -281,7 +316,7 @@ bool net_wifi_signal(int* rssi_dbm, char* ssid) {
 }
 
 const char* net_wifi_standard() {
-    if (s_kind.load() != NetLink::Wifi) return nullptr;
+    if (!s_wifi_lease.load()) return nullptr;
     wifi_ap_record_t ap{};
     if (esp_wifi_sta_get_ap_info(&ap) != ESP_OK) return nullptr;
     // The highest 802.11 generation the AP advertises. The ESP32 radio itself may top out
@@ -301,6 +336,7 @@ const char* net_wifi_standard() {
 
 static esp_eth_handle_t s_eth_handle = nullptr;
 static esp_netif_t*     s_eth_netif  = nullptr;
+static esp_netif_t* s_eth_netif_ptr() { return s_eth_netif; }
 static esp_eth_netif_glue_handle_t s_eth_glue = nullptr;
 static bool s_spi_bus_up = false;
 
@@ -399,7 +435,7 @@ static void eth_event_handler(void*, esp_event_base_t base, int32_t event_id, vo
     } else if (base == IP_EVENT && event_id == IP_EVENT_ETH_GOT_IP) {
         ip_event_got_ip_t* ev = (ip_event_got_ip_t*)data;
         ESP_LOGI(TAG, "IP (eth): " IPSTR, IP2STR(&ev->ip_info.ip));
-        link_up(NetLink::Eth, s_eth_netif);
+        link_up(NetLink::Eth);
         xEventGroupSetBits(s_eth_events, ETH_GOT_IP_BIT);
     }
 }
@@ -485,7 +521,7 @@ bool net_start_eth() {
 }
 
 bool net_eth_phy(int* speed_mbps, bool* full_duplex) {
-    if (s_kind.load() != NetLink::Eth || !s_eth_handle) return false;
+    if (!s_eth_lease.load() || !s_eth_handle) return false;
     eth_speed_t   sp = ETH_SPEED_10M;
     eth_duplex_t  dx = ETH_DUPLEX_HALF;
     if (esp_eth_ioctl(s_eth_handle, ETH_CMD_G_SPEED,  &sp) == ESP_OK && speed_mbps)
@@ -497,6 +533,7 @@ bool net_eth_phy(int* speed_mbps, bool* full_duplex) {
 
 #else   // !CONFIG_TESLA_ETH_ENABLED
 
+static esp_netif_t* s_eth_netif_ptr() { return nullptr; }
 bool net_eth_probe() { return false; }
 bool net_start_eth() { return false; }
 bool net_eth_phy(int* speed_mbps, bool* full_duplex) {

@@ -85,6 +85,10 @@ links yourself — that's where the value is.
 | HTTP API | `main/http_server.{cpp,hpp}` + `http_api.cpp` + `http_status.cpp` + `http_ota.cpp` + `http_config.cpp` + `http_common.cpp` + `mcp_server.cpp` + `command_exec.cpp` (+ `http_handlers.hpp`) | `esp_http_server` on :80; single catch-all `handle_all` dispatch (wrapped in try/catch) in `http_server.cpp` — EVERY route goes through it, enforced structurally by the `GuardedReq` signature; handlers split by route group; `mcp_server.cpp` serves `/mcp` (stateless JSON-RPC 2.0 MCP server for AI agents — guide in `docs/MCP.md`); both command surfaces resolve names/args via `logic/command_registry.hpp` and execute through `command_exec.cpp`; `/status` shaping decided in `logic/status_model.hpp` (`build_status_object()` gathers + serializes only) |
 
 | HA bridge | `main/mqtt_ha.{cpp,hpp}` | read-only MQTT discovery publish; its own tasks |
+| Config blob | `main/config_blob.{cpp,hpp}` + `logic/config_store.hpp` | the ONE atomic credential/service entry in NVS (`tesla_cfg/cfg`): WiFi creds + the one-shot rollback backup + VIN + `mqtt_uri` + `syslog_uri` as a single CRC-checked `nvs_set_blob`, all-or-nothing across a write failure AND a power cut. READS the legacy per-key layout as a fallback and MIRRORS back to it on save (a downgrade must still find its config). Deliberately EXCLUDES `ble_mac`/`last_time`/`reboot_why`/`disp_rot`: different writers, and a whole-struct writer would revert another owner's field from a stale snapshot |
+| Crash forensics | `main/diag_crash.{cpp,hpp}` + `logic/crashinfo.hpp` | ONE-SHOT boot capture: reset reason (always) + the core-dump SUMMARY where the partition exists. An ORPHAN dump (app-elf-sha ≠ running build) is ERASED, but only on PROOF — the erase destroys the one artifact a panic left. Feeds `/status.last_crash`, MQTT and the syslog boot replay. BACKTRACE is Xtensa-only (esp32/esp32s3); on RISC-V the dump unwinds offline via `GET /coredump` |
+| Boot-loop guard | `main/safe_mode.{cpp,hpp}` + `logic/boot_guard.hpp` | counts CRASH-ONLY boots in NVS (`boot_fails`); past the threshold it LATCHES → `main.cpp` starts network + web UI + OTA only and skips BLE/vehicle/MQTT. Sharper here than elsewhere: every boot re-opens the car's polling window. The healthy timer is deliberately NOT armed while latched. Drives `/status.sys.safe_mode` |
+| Heap trend | `main/heap_trend.{cpp,hpp}` + `logic/heap_history.hpp` | the board's own 24-hour memory trend (`GET /heap`), fed from the SAME two samples `loop_task` hands the heap watchdog, so the chart a human reads and the threshold the firmware acts on cannot disagree. Fixed `.bss` ring (~1.2 KB), NEVER heap — a diagnostic must not compete for the largest contiguous block it exists to measure |
 | Storage | `main/nvs_storage.{cpp,hpp}` | NVS adapter; **maps library keys ≤15 chars** |
 | Diag log | `main/diag_log.{cpp,hpp}` | in-RAM console ring (`GET /diag`); **static `.bss` buffer** (heap budget!) |
 | Syslog | `main/syslog.{cpp,hpp}` | UDP RFC 5424 forwarder for the captured diag lines; server from NVS `syslog_uri` / `CONFIG_TESLA_SYSLOG_SERVER` (`POST /set_syslog`, empty = disabled); hard/transient send-failure split **and** the per-line RFC 5424 PRI (facility `user`, severity from each line's own esp_log level) in the host-tested `logic/syslog_policy.hpp` |
@@ -290,6 +294,13 @@ that describe it. When reviewing a change (or the repo as a whole), check these 
   `chip_family`) **and** `test/test_logic.cpp` CHECKs **and** every doc that lists the supported
   targets. (Watch the `ci-build-all.sh` app-size gate — esp32c6 binds it, and the gate is checked
   on the SIGNED image, whose code is first padded up to a 64 KB boundary.)
+- **New BOARD variant on an existing chip** → the runtime detector in `main/board.{cpp,hpp}`
+  (ONE cached probe — never a second copy) **and** the per-target `sdkconfig.defaults.<target>`
+  **and** `main/Kconfig.projbuild` if it adds an option **and** every doc that lists which boards
+  an image serves (`.claude/CLAUDE.md`, `docs/README.md` Hardware, `docs/FEATURES.md`). The trap
+  is SHARED GPIOs: the esp32s3 image serves a T-Dongle-S3 (ST7735 on MOSI3/SCK5/CS4) and an
+  AtomS3 Lite + ATOMIC PoE Base (W5500 on SCLK5/CS6/MISO7/MOSI8) — **GPIO5 is both** — so a new
+  peripheral probe must be gated on the detector before it drives a pin.
 - **WiFi/LAN reconnect or watchdog change** → the STA→LAN reconnect policy lives ONLY in
   `main/net.cpp` (`MAX_RETRY`, `s_ever_up`, `kWdPeriodS`/`kWdPingCount`, the
   `s_gw_ever_reachable` baseline latch) with the watchdog's DECISION — the consecutive-failure
