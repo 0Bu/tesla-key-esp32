@@ -114,11 +114,21 @@ bug. Reading the **image's** version (not the manifest's) also defeats a host th
 a new `version` in `manifest.json` but serves an old `.bin`. No eFuses burned.
 
 **Rollback** is enabled (`CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE`); `main.cpp` defers
-`esp_ota_mark_app_valid_cancel_rollback()` to a health gate (`ota_health_gate_task`) that
-holds rollback armed until a freshly-flashed image has run healthily for a window
-(`kOtaHealthGateS` ≈ 90 s). An image that boots but then crashes/OOM-reboots under load dies
-while still `PENDING_VERIFY`, so the bootloader reverts to the previous slot rather than
-having committed it at startup. A **deliberate, user-initiated reboot** inside that window is a
+`esp_ota_mark_app_valid_cancel_rollback()` to a health gate (`ota_health_gate_task`) whose verdict
+is the pure, host-tested `logic/health_gate.hpp`. Health is **a proven link plus an uptime floor**,
+not uptime alone: the image must hold a lease (`tk::net_is_up()`, either transport) *and* have run
+`kHealthGateBaseS` (90 s). An image that boots but then crashes/OOM-reboots under load dies while
+still `PENDING_VERIFY`, so the bootloader reverts to the previous slot rather than having committed
+it at startup — and so does an image that boots perfectly but never gets on the network, which a
+pure 90-second timer used to commit. That second case is the one an OTA cannot repair on its own,
+because the repair would have to arrive over the link the image broke; the remedy was a USB cable.
+Past `kHealthGateCapS` (600 s) an image with a route and no lease is judged broken and simply left
+`PENDING_VERIFY`: the next reboot from any cause rolls it back. It deliberately does **not** restart
+itself — that would turn a long router outage into a silent, unrequested downgrade of a good build —
+and any deliberate `/set_*` save commits it instead, via the `ota_confirm_pending_image()` path
+described below. A device with neither credentials nor a wire is legitimately offline (setup mode)
+and counts as healthy, so an OTA installed just before the credentials were cleared is not thrown
+away. A **deliberate, user-initiated reboot** inside that window is a
 different case, though: the three config handlers that reboot (`/set_vin`, `/set_mqtt`,
 `/set_syslog`), the setup-portal save **and the heap watchdog's deliberate restart** call
 `ota_confirm_pending_image()` first — a restart we chose is proof the image runs, so it must not
@@ -140,7 +150,9 @@ Partition layout (`partitions.csv`) is dual-OTA (`otadata` + `ota_0`/`ota_1`, ~2
 sized to fill 4 MB (the smallest supported flash; a larger one leaves the top
 unused) so ONE table serves every target; app at `0x20000`. The `ci-build-all.sh` **app-size gate**
 sits at `slot − 32 KB` (0x1e8000): each image's code rounds up to a 64 KB Secure-Boot boundary + a
-4 KB signature, and the largest — esp32c6, 0x1d1000 signed — clears it by ~92 KB.
+4 KB signature, and the largest — esp32c6, 0x1e1000 signed — clears it by ~28 KB. That block
+boundary is worth knowing about: c6 sat ~3 KB below one, so a 3 KB change crossed it and cost a
+full 64 KB. The gate is still met, but c6 is the target to size-check first.
 **esp32s3 carries the extra on-device display code and still fits at the base `-Og`** like every
 target: the Package A size levers
 (#154) freed the ~64 KB the display needs, so no `-Os` (which hard-freezes under load — rejected
@@ -1018,7 +1030,7 @@ Application-task priorities are declared **only** in [`main/task_config.hpp`](..
 | `net_wd` | `kPrioWifiWatchdog` = 4 | 3072 | `net.cpp` | ghost-link watchdog (force the active transport to re-establish, never reboot) |
 | `mqtt_pub` | `kPrioMqttPub` = 4 | 6144 | `mqtt_ha.cpp` | MQTT/HA publisher (reads the caches) |
 | `display` | `kPrioDisplay` = 3 | 6144 | `display.cpp` | ST7735 renderer (`CONFIG_TESLA_DISPLAY_ENABLED` builds) |
-| `ota_gate` | `kPrioOtaGate` = 3 | 3072 | `main.cpp` | one-shot OTA rollback health gate (~90 s) |
+| `ota_gate` | `kPrioOtaGate` = 3 | 3072 | `main.cpp` | one-shot OTA rollback health gate (polls every 5 s; commits on a proven link past 90 s, gives up at 600 s) |
 | `syslog_task` | `kPrioSyslog` = 3 | 6144 | `syslog.cpp` | best-effort UDP Syslog forwarder (opt-in; degraded-not-fatal on a failed start) |
 | `led` | `kPrioLed` = 2 | 3072 | `led_status.cpp` | APA102 status LED (`CONFIG_TESLA_LED_ENABLED` builds) |
 
