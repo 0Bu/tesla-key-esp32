@@ -46,11 +46,16 @@ follow-up session apply the fix.
   costs a full 64 KB block. That is what made esp32c5 undeliverable and got it dropped
   (`docs/adr/0004-drop-esp32c5-target.md`). All targets stay on **`-Og`**
   (`-Os` is banned — whole-build `-Os` hard-freezes under evcc+BLE load).
-- **Display + LED are per-target opt-in.** The on-device ST7735 display compiles to a no-op
-  unless `CONFIG_TESLA_DISPLAY_ENABLED` (only in `sdkconfig.defaults.esp32s3`); the ONE esp32s3
-  image auto-detects the T-Dongle-S3 at runtime (SD pull-ups) so a generic ESP32-S3 stays
-  panel-less. The status LED is `CONFIG_TESLA_LED_ENABLED` (default off). Framebuffer is PSRAM
-  where present, else ~25 KB internal SRAM; SPI 40 MHz.
+- **Display, LED and Ethernet are per-target opt-in.** The on-device ST7735 display compiles to
+  a no-op unless `CONFIG_TESLA_DISPLAY_ENABLED` (only in `sdkconfig.defaults.esp32s3`); the ONE
+  esp32s3 image auto-detects the T-Dongle-S3 at runtime (SD pull-ups, `main/board.cpp`) so a
+  generic ESP32-S3 stays panel-less. The status LED is `CONFIG_TESLA_LED_ENABLED` (default off).
+  Framebuffer is PSRAM where present, else ~25 KB internal SRAM; SPI 40 MHz.
+  **`CONFIG_TESLA_ETH_ENABLED`** (W5500 over SPI, also esp32s3 only) `select`s
+  `ETH_USE_SPI_ETHERNET` + `ETH_SPI_ETHERNET_W5500`, so turning it on for another target adds
+  flash to an image that may not have the headroom — esp32c6 binds the gate. It shares the SAME
+  esp32s3 image as the display, and the two OVERLAP ON A PIN (panel SCK = W5500 SCLK = GPIO5),
+  so `net_eth_probe()` must stay gated on `tk::board_is_t_dongle_s3()`.
 
 ## What to inspect
 
