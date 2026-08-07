@@ -335,8 +335,23 @@ const char* net_wifi_standard() {
 #if CONFIG_TESLA_ETH_ENABLED
 
 static esp_eth_handle_t s_eth_handle = nullptr;
-// Above WIFI_STA_DEF's 100 (esp_netif_defaults.h), so the wire genuinely takes the default
-// route when both transports hold a lease — see the rationale at the esp_netif_new() call.
+// Above WIFI_STA_DEF's 100 (esp_netif_defaults.h), so the wire takes the DEFAULT ROUTE when
+// both transports hold a lease. Be precise about what that does and does not buy — measured
+// against lwIP's ip4_route() (components/lwip/.../ip4.c), not assumed:
+//
+//   • OFF-LINK destinations (anything via the gateway — NTP, OTA, an MQTT broker or syslog
+//     collector outside the subnet) go to netif_default, and route_prio is exactly what
+//     esp_netif uses to choose it. Without this the WiFi station would win them.
+//   • ON-LINK destinations do NOT consult it at all. ip4_route() walks netif_list and returns
+//     the FIRST netif that is up and whose subnet matches the destination. With both interfaces
+//     on the same /24 — the normal home case — same-subnet traffic therefore leaves over
+//     whichever netif was registered first, i.e. the WiFi station.
+//
+// That asymmetry is accepted rather than fought: forcing per-packet source selection across two
+// netifs on one subnet means overriding the stack's routing, and the case it would improve is
+// the runtime hot-plug — which never delivers this transport's actual benefit anyway, because
+// WiFi is already running (coexistence paid, heap spent). The benefit lives in the boot-with-
+// cable path, where WiFi is never started and there IS no second netif.
 static constexpr int kEthRoutePrio = 128;
 
 // How much longer to wait for a lease when the PHY says the cable IS connected. A live wire with
@@ -344,6 +359,20 @@ static constexpr int kEthRoutePrio = 128;
 // of the boot), but a segment with no DHCP server at all still has to end up somewhere — hence a
 // cap rather than an unbounded wait.
 static constexpr int kEthLeaseLinkedCapFactor = 3;
+
+// How long to give the PHY to report a link before concluding there is no cable. Auto-negotiation
+// on 10/100 finishes in a second or two — measured at 2.0 s on the ATOMIC PoE Base — so 4 s is
+// generous without being a stall. This is deliberately NOT the lease deadline: "is a cable
+// connected" is answerable in seconds, "will DHCP answer" is not, and conflating them made a
+// board with no credentials sit dark for the whole lease window before its setup AP appeared —
+// precisely when somebody is standing next to it waiting for that AP.
+//
+// A switch running spanning-tree without portfast does NOT need a longer grace: STP delays
+// FORWARDING, not the PHY's auto-negotiation, so the link event still arrives on time and it is
+// the DHCP wait in phase 2 — deliberately generous — that absorbs the blocked-then-learning
+// interval.
+static constexpr int kEthLinkGraceMs = 4000;
+static constexpr int kEthLinkPollMs  = 250;
 
 static esp_netif_t*     s_eth_netif  = nullptr;
 static esp_netif_t* s_eth_netif_ptr() { return s_eth_netif; }
@@ -536,25 +565,40 @@ bool net_start_eth() {
                                                eth_event_handler, nullptr));
     ESP_ERROR_CHECK(esp_eth_start(s_eth_handle));
 
-    // Bounded wait — but the deadline means two DIFFERENT things, and treating them alike is
-    // exactly what would start the WiFi stack on a board that is in fact wired:
+    // TWO questions, two very different deadlines. Answering them with one timer is what made a
+    // credential-less board sit dark for the whole lease window before its setup AP appeared.
     //
-    //   • PHY link DOWN at the deadline — no cable, or a dead switch port. Nothing is coming;
-    //     give WiFi a turn rather than strand the board.
-    //   • PHY link UP but no lease yet — a live wire with a slow or busy DHCP server. Falling
-    //     back HERE would run WiFi for the rest of the boot, paying the BLE radio-coexistence
-    //     cost and ~57 KB of largest-block on a board that is about to be wired anyway. Keep
-    //     waiting — up to a cap, so a segment with no DHCP server at all still ends up somewhere.
+    // ── phase 1: is a cable connected at all? ──
+    // Seconds, not tens of seconds — the PHY reports link as soon as auto-negotiation completes.
+    // No link by the grace window ⇒ no cable or a dead port; nothing is coming, so hand over to
+    // WiFi (or the setup portal) NOW instead of spending a lease deadline on it.
+    EventBits_t bits = 0;
+    for (int waited = 0; waited < kEthLinkGraceMs && !s_eth_link.load(); waited += kEthLinkPollMs) {
+        bits = xEventGroupWaitBits(s_eth_events, ETH_GOT_IP_BIT, pdFALSE, pdFALSE,
+                                   pdMS_TO_TICKS(kEthLinkPollMs));
+        if (bits & ETH_GOT_IP_BIT) break;   // a very fast DHCP server can beat the link event here
+    }
+    if (!(bits & ETH_GOT_IP_BIT) && !s_eth_link.load()) {
+        ESP_LOGW(TAG, "no Ethernet link within %d ms — no cable or a dead switch port; falling "
+                      "back without spending the %d s lease deadline",
+                 kEthLinkGraceMs, CONFIG_TESLA_ETH_WAIT_S);
+        return false;
+    }
+
+    // ── phase 2: the cable IS there — wait for the lease ──
+    // Falling back here would run the WiFi stack for the rest of the boot, paying the BLE
+    // radio-coexistence cost and ~57 KB of largest-block on a board that is about to be wired
+    // anyway. So wait properly — up to a cap, so a segment with no DHCP server at all still ends
+    // up somewhere. A cable pulled mid-DHCP drops back into the no-link case and gives up.
     const int base_ms = CONFIG_TESLA_ETH_WAIT_S * 1000;
     const int cap_ms  = base_ms * kEthLeaseLinkedCapFactor;
-    EventBits_t bits = 0;
-    for (int waited = 0; waited < cap_ms; waited += base_ms) {
+    for (int waited = 0; !(bits & ETH_GOT_IP_BIT) && waited < cap_ms; waited += base_ms) {
         bits = xEventGroupWaitBits(s_eth_events, ETH_GOT_IP_BIT, pdFALSE, pdFALSE,
                                    pdMS_TO_TICKS(base_ms));
         if (bits & ETH_GOT_IP_BIT) break;
         if (!s_eth_link.load()) {
-            ESP_LOGW(TAG, "W5500 present but the PHY reports no link after %d s — no cable or a "
-                          "dead switch port; falling back to WiFi", (waited + base_ms) / 1000);
+            ESP_LOGW(TAG, "Ethernet link went away while waiting for DHCP (%d s) — falling back",
+                     (waited + base_ms) / 1000);
             break;
         }
         ESP_LOGW(TAG, "Ethernet link is UP but no DHCP lease after %d s — still waiting (a wired "

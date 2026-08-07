@@ -168,14 +168,19 @@ menu "Tesla Key Configuration"
             poll drains everything queued in the W5500's 16 KB RX buffer.
 
     config TESLA_ETH_WAIT_S
-        int "Seconds to wait for an Ethernet DHCP lease before falling back to WiFi"
+        int "Seconds to wait for a DHCP lease once the Ethernet LINK is up"
         depends on TESLA_ETH_ENABLED
         range 5 120
         default 20
         help
-            A controller was found but no lease arrived — no cable, a dead switch port, or no
-            DHCP server. Falling back to WiFi (when credentials exist) keeps an unplugged PoE
-            board reachable instead of stranding it.
+            Applies only once the PHY reports a connected cable. "Is a cable attached" is
+            answered separately and much faster (a few seconds of link grace), so a board with
+            no cable — and therefore possibly no way to be reached but the setup AP — does not
+            sit dark for this whole window before that AP appears.
+
+            When the link IS up, falling back early would run the WiFi stack for the rest of the
+            boot on a board that is about to be wired, so this deadline is generous and is
+            extended further while the link stays up.
 
     config TESLA_DISPLAY_ENABLED
         bool "On-device ST7735 status display (LilyGo T-Dongle-S3)"

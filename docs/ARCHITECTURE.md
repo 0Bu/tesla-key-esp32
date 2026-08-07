@@ -602,13 +602,26 @@ buffer. Note that ESP-IDF **6.0 moves the SPI Ethernet drivers out of the core**
 
 **The wire is made to win the default route — lwIP does not do it on its own.** ESP-IDF ships
 `WIFI_STA_DEF` at `route_prio` **100** and `ETH_DEF` at **50** (`esp_netif_defaults.h`), i.e. the
-opposite of what this feature is for. `net.cpp` therefore creates the Ethernet netif with a
-raised `route_prio` (`kEthRoutePrio`). Without it, a board that came up on WiFi and later had a
-cable plugged in would report `NetLink::Eth` while every outgoing packet — MQTT, syslog, NTP,
-OTA — still went over the radio, `/status.ip` would name an address nothing dialled out from,
-and the watchdog would ICMP the *Ethernet* gateway while the traffic path was WiFi (bouncing a
-healthy MAC every ~60 s if that segment does not answer echo). `tk::net_link_active()` and the
-routing table must state the same thing.
+opposite of what this feature is for, so `net.cpp` creates the Ethernet netif with a raised
+`route_prio` (`kEthRoutePrio`).
+
+Be precise about the scope, because lwIP's `ip4_route()` has two branches and only one of them
+consults priority (verified in `components/lwip/.../ip4.c`, not assumed):
+
+- **Off-link** destinations — anything via the gateway: NTP, OTA, an MQTT broker or syslog
+  collector outside the subnet — go to `netif_default`, which is precisely what `route_prio`
+  selects. Without the raise, the WiFi station would win them.
+- **On-link** destinations do not consult it at all: `ip4_route()` walks `netif_list` and returns
+  the **first** netif that is up and whose subnet matches. With both interfaces on the same `/24`
+  — the normal home case — same-subnet traffic leaves over whichever netif was registered first,
+  i.e. the WiFi station. Measured: with both up, syslog to an on-link collector kept the WiFi
+  source address while `/status.ip` reported the Ethernet one.
+
+That asymmetry is **accepted, not fought**. Forcing per-packet source selection across two netifs
+on one subnet means overriding the stack's routing, and the only state it would improve is the
+runtime hot-plug — which never delivers this transport's actual benefit anyway, because WiFi is
+already running (coexistence paid, heap spent). The benefit lives in the boot-with-cable path,
+where WiFi is never started and there is no second netif to disagree with.
 
 **The watchdog's ICMP baseline is PER TRANSPORT.** `s_gw_ever_reachable` is indexed by
 `NetLink`, not global. A single flag let a freshly plugged-in Ethernet segment inherit "this

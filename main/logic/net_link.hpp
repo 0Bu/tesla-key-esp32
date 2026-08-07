@@ -43,10 +43,12 @@ inline const char* net_link_str(NetLink k) {
 // still running, so a cable plugged in later brings the wire up ALONGSIDE the radio.
 //
 // Ethernet wins whenever it has a lease — it is the transport that costs the BLE radio nothing.
-// Note that lwIP does NOT agree by default: ESP-IDF ships WIFI_STA_DEF at route_prio 100 and
-// ETH_DEF at 50, so net.cpp raises the Ethernet netif's priority above the station's when it
-// creates it. This function and the routing table have to say the same thing, or /status.ip
-// names an address nothing dials out from and the watchdog probes the wrong gateway.
+// lwIP does NOT agree by default (ESP-IDF ships WIFI_STA_DEF at route_prio 100 and ETH_DEF at
+// 50), so net.cpp raises the Ethernet netif's priority when it creates it. That governs the
+// DEFAULT route, i.e. off-link traffic; on-link traffic follows netif_list order regardless —
+// see the kEthRoutePrio comment in net.cpp for what that does and does not buy. This function
+// picks what the DEVICE reports about itself (/status.ip, the watchdog's gateway, the display),
+// and those must agree with each other whatever the routing table does with same-subnet peers.
 //
 // This is a function, not two lines at a call site, because the "last event wins" version it
 // replaces had a real hole: unplugging that cable cleared the link for EVERYTHING above the
