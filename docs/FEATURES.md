@@ -29,6 +29,7 @@ failure it exists to prevent*. A feature without that last part is one nobody ca
 | Task watchdog (TWDT) | `sdkconfig.defaults` (60 s, `PANIC=y`), subscribed by `vehicle_loop` and `mqtt_pub` | The half the heap watchdog cannot see: a task blocked forever on a semaphore, the BLE stack or a socket, with the heap looking perfectly healthy. |
 | Stack-overflow watchpoint | `sdkconfig.defaults` (`FREERTOS_WATCHPOINT_END_OF_STACK`) | A sparsely-writing frame stepping over the canary and corrupting a neighbour, so the crash surfaces later somewhere innocent. The watchpoint panics at the offending instruction. |
 | OTA rollback health gate | `main.cpp` `ota_health_gate_task` | An image that boots and then dies under load: rollback stays armed for ~90 s of healthy uptime. |
+| Essential-startup failure | `main/boot_fatal.hpp`, defined in `main.cpp` | A half-initialised firmware pretending to run. When something essential fails to come up (NVS, the vehicle controller, the LAN watchdog, a transport's event group) a PENDING OTA image actively rolls back — merely parking the task would wedge the device on an unverified slot until someone resets it — while an already-valid image HALTS instead of rebooting, because a reboot loop re-opens the car's polling window on every boot and erases the in-memory diagnostics that would explain it. |
 
 ## 2. Configuration and storage
 
