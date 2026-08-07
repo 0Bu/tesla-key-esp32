@@ -49,11 +49,14 @@ cat <<EOF
 - ${build_note}
 - ${verify_note}
 - ${flash_note}
-- Two gates block a PR until they pass: /project-review gates the MERGE into main (whole-firmware
+- Three gates block a PR until they pass: /project-review gates the MERGE into main (whole-firmware
   coherence); /skill-audit gates OPENING a PR and every PUSH to it (every skill+agent still matches
-  the project). Each clears via a ticked, SHA-stamped checkbox in the PR body (no file marker) —
-  the stamp must match the commit being merged/pushed, so a later commit re-stales it. A full
-  /project-review also clears the skill-audit gate (it audits the skills too).
+  the project); /feature-docs gates the MERGE too, but only CONDITIONALLY — it arms when the diff
+  reaches main/, test/, sdkconfig.defaults*, partitions.csv or .github/workflows/build.yml, so a
+  docs- or chore-only PR clears it without ceremony. Each clears via its OWN ticked, SHA-stamped
+  checkbox in the PR body (no file marker) — the stamp must match the commit being merged/pushed,
+  so a later commit re-stales it. A full /project-review also clears the skill-audit gate (it
+  audits the skills too), but NOT the feature-docs one — that box is ticked by /feature-docs.
 EOF
 
 exit 0

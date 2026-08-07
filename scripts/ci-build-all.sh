@@ -4,7 +4,7 @@
 # esp32 / esp32s3 / esp32c3 / esp32c6 are exactly the targets yoziru/tesla-ble declares in its
 # idf_component.yml — the ESP-IDF Component Manager refuses any other chip, so that list cannot
 # silently drift, and no local checkout of the crypto library has to be maintained to widen it.
-# (esp32c5 was carried that way for a while and dropped — docs/adr/0001-esp32c5-target-upstreaming.md.)
+# (esp32c5 was carried that way for a while and dropped — docs/adr/0004-drop-esp32c5-target.md.)
 #
 # For each target it stages, into _fw/<target>/, the three flashable parts the web
 # installer needs (bootloader / partition-table / app), and writes the release
