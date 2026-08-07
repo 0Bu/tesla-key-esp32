@@ -119,6 +119,12 @@ the authority for the per-sibling drift check; `project-review` defers the mecha
   Verify against `scripts/run-mock-tests.sh`, the CI `logic-test` job
   (`.github/workflows/build.yml`), the `run-logic-tests.sh` **Stop hook** (`.claude/settings.json`),
   the `CHECK`/`CHECK_STR`/`CHECK_NEAR` macro set, and the `static_assert` lock pattern.
+- **`feature-docs`** — keeps `docs/FEATURES.md` in sync when a platform feature lands or changes.
+  Verify the gate it defers to, `.claude/hooks/require-feature-docs.sh` — the **third** PR gate
+  beside this one and `project-review`, and the only *conditional* one — and above all its
+  **relevance filter**: the paths that arm it must still match the hook's own regex, currently
+  `main/` / `test/` / `sdkconfig.defaults` / `partitions.csv` / `.github/workflows/build.yml`
+  (`require-feature-docs.sh:81`). A path that drifts out of that list stops gating silently.
 - **`skill-audit`** (this skill) — verify its own numbers/paths (hook `require-skill-audit.sh`,
   the PR-checkbox gate mechanism — no file marker, the sibling list, the command count `15`, the
   tesla-ble pin) still match the tree, and that the skills/agents it names still exist. Correct it
@@ -134,13 +140,14 @@ the authority for the per-sibling drift check; `project-review` defers the mecha
   `build_status_object()` in `main/http_status.cpp` only gather the inputs and serve them),
   the **lowercase** four `link_state_web_str` values
   (`main/logic/link_state.hpp`; uppercase are the MQTT `link_state_mqtt_str` set), the `/diag`
-  params (`verbose`/`clear` in `handle_diag`), that the heap figures it points at are the ones
-  that exist — the ALWAYS-present `/status.sys{free_heap,min_free_heap,largest_block}` and the
-  24-hour `GET /heap` trend (`logic/heap_history.hpp`), plus the `BOOT`/`HEAP` lines in `main.cpp`
-  and the periodic `HEAP …internal_largest=` trend line in `vehicle_telemetry.cpp`'s
-  `loop_task_fn_` (the one the heap watchdog decides on) with the `HEAP CRITICAL`/`EXHAUSTED`
-  escalation lines beside it, that
-  `last_reboot` is emitted only when set, and the signature sites it cites
+  params (`verbose`/`clear` in `handle_diag`), the **three** heap sources it must keep straight —
+  the always-present `sys{free_heap,min_free_heap,largest_block,…}` spot block
+  (`status_model.hpp` `emit()`), the 24-hour trend served by `GET /heap`
+  (`heap_trend.cpp`, `logic/heap_history.hpp`), and the log lines (`BOOT`/`HEAP` in `main.cpp`
+  **and** the periodic `HEAP …internal_largest=` trend line in `vehicle_telemetry.cpp`'s
+  `loop_task_fn_` — the one the heap watchdog decides on, plus the
+  `HEAP CRITICAL`/`EXHAUSTED` escalation lines beside it) — that
+  `last_reboot` and `last_crash` are emitted only when set, and the signature sites it cites
   (`connect error` in `ble_client.cpp`, the pairing-invalidation causes in `vehicle_ctrl.cpp`).
 - **`display-preview`** — renders `tools/display_sim.py` to PNGs for a human eyeball pass. Verify the
   CLI modes (`png`/`states`/`states-portrait`/`search`/`scroll`/`cheader`/`parity`) + default output
@@ -175,7 +182,8 @@ owns and must stay in sync with it:
   inventory it reasons over matches what lives under `.claude/` (`ls .claude/hooks/ .claude/agents/`).
 - **`multi-target-build-reviewer`** — the per-target build/config divergence lens. Verify its
   facts against the build wiring: the target set (esp32/s3/c3/c6), per-target bootloader
-  offsets (`0x1000`/`0x2000`/`0x0`), the image-suffix map across `scripts/ci-build-all.sh` +
+  offsets (`0x1000` classic esp32 / `0x0` s3·c3·c6 — `boot_offset()` in
+  `build-pages.sh`), the image-suffix map across `scripts/ci-build-all.sh` +
   `scripts/build-pages.sh` + `main/ota_update.cpp` (`TESLA_OTA_IMG_SUFFIX`), the app-size gate
   (`slot − 32 KB` = `0x1e8000`), the tesla-ble target list
   (`main/idf_component.yml`, Component-Manager-enforced), the all-target anti-replay

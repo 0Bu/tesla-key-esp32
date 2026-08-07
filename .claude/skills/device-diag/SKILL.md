@@ -42,15 +42,18 @@ addr,devices[],connect_fail,car_connectable}`, `mqtt{configured,connected,tls,br
 `syslog{configured,resolved,reachable,host,port,error}`,
 `tele{climate,drive,tires,closures}` (**only while the BLE link is up**), `link`, `vcsec_sleep`
 (the raw, **un-debounced** VCSEC sleep flag, for diagnostics only — not what drives the hero),
-plus `vehicle{…}` / `last{…}` / `last_seen_s` charge snapshots, and `last_reboot` (present ONLY when the heap watchdog restarted us — see the signature table).
+`sys{free_heap,min_free_heap,largest_block,uptime_s,wifi_reconnects,reset_reason,safe_mode}`
+(**always present** — the block to read first on a remote triage),
+plus `vehicle{…}` / `last{…}` / `last_seen_s` charge snapshots, `last_reboot` (present ONLY when the heap watchdog restarted us — see the signature table),
+and `last_crash{reason,reason_code,fault,coredump,task,pc,backtrace[],corrupted,elf_sha256}`
+(present ONLY when the boot is notable — a fault reset, or a dump for this build still in flash;
+its mere presence is the signal).
 
 ```bash
 curl -s http://<host>/status | jq
 ```
 
-One-line vitals (`sys{}` is ALWAYS present and is the block to read first — it carries the heap
-figures a remote triage needs, so the serial console in Step 3 is for the *trend*, not the spot
-value):
+One-line vitals (heap now comes straight out of `sys{}` — see Step 3 for the trend behind it):
 
 ```bash
 curl -s http://<host>/status | jq '{
@@ -62,7 +65,10 @@ curl -s http://<host>/status | jq '{
          connect_fail: .ble.connect_fail, car_connectable: .ble.car_connectable},
   mqtt: {configured: .mqtt.configured, connected: .mqtt.connected,
          tls: .mqtt.tls, error: .mqtt.error},
-  last_seen_s
+  sys:  {largest_block: .sys.largest_block, free_heap: .sys.free_heap,
+         uptime_s: .sys.uptime_s, reset_reason: .sys.reset_reason,
+         safe_mode: .sys.safe_mode},
+  last_seen_s, last_reboot, last_crash
 }'
 ```
 
@@ -119,17 +125,26 @@ curl -s 'http://<host>/diag?clear=1'      # reset the ring (e.g. before a clean 
 Query params (parsed in `handle_diag`): `?verbose=1`/`?verbose=0` toggle raw-RX capture,
 `?clear=1` clears the ring. The response header `X-Diag-Verbose` echoes the current mode.
 
-## Step 3 — heap (the binding constraint): spot value from `/status`, trend from the log
+## Step 3 — heap (the binding constraint)
 
 The limit on this device is the **largest *contiguous* free block, not total free heap** — a few
 tens of KB steady-state is normal; a *falling* largest block is heap pressure and a reboot risk.
 
-The **spot value is in `/status.sys`** (`free_heap`, `min_free_heap`, `largest_block`, all
-INTERNAL-capped so PSRAM cannot mask them — `logic/status_model.hpp`), and the board's own
-**24-hour trend** is `GET /heap` (`{dt,b0,unit,scale,free[],largest[]}`, tenths of a KiB) — a leak
-is a slope, fragmentation is `free[]` holding steady while `largest[]` sinks. Reach for the
-serial console (or **syslog**, the only copy that survives a reboot — the `/diag` ring does not)
-when you need the per-milestone attribution or the pre-reboot narration. Three log lines:
+Three sources, in the order to reach for them:
+
+1. **`/status.sys`** — the spot value, always present
+   (`largest_block` / `free_heap` / `min_free_heap`). Answers "how bad is it *now*".
+2. **`GET /heap`** — the board's own **24-hour trend**
+   (`{dt,b0,unit,scale,free[],largest[]}`, tenths of a KiB, `null` = no sample), fed from the
+   SAME samples the heap watchdog decides on, so the chart and the threshold cannot disagree.
+   This is the one that answers "is it *drifting*" — a leak is a slope; fragmentation is
+   `free[]` holding steady while `largest[]` sinks toward the 4 KB floor.
+   ```bash
+   curl -s http://<host>/heap | jq
+   ```
+3. **The log lines below** — the per-milestone attribution and the watchdog's own narration.
+   Read them from the serial console or **syslog**, which is the only copy that survives a
+   reboot (the `/diag` ring does not). Three log lines:
 
 - Boot ([`main/main.cpp`](../../../main/main.cpp)): `BOOT reset_reason=<r> free_heap=<n>
   min_free=<n> largest_block=<n>` — `reset_reason` tells you *why* it last restarted (a
