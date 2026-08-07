@@ -201,7 +201,13 @@ GET  /status               { vin, ip, version, key_present, key_fingerprint,
                              key_created (epoch, omitted if clock unsynced), paired,
                              paired_at (epoch, omitted if unknown), reauth,
                              wifi:{ssid,rssi,std,rolled_back? (only when the last /set_wifi was
-                               undone by the credential rollback — presence is the signal)},
+                               undone by the credential rollback — presence is the signal)}
+                               (always present, empty while no WiFi link holds the lease),
+                             eth:{link,speed? (Mbit; omitted until the PHY negotiates),
+                                  full_duplex} — present ONLY while an Ethernet link carries
+                               the lease, so its presence is the signal that this board is on a
+                               wire. Carries no MAC: nothing in it identifies the reporter,
+                               which is why it needs no ?redact=1 treatment,
                              ble:{connected,scanning,
                                   phase?,phase_s? (BLE phase countdown, both or neither:
                                     "connecting" = an attempt is running and gives up in phase_s,
