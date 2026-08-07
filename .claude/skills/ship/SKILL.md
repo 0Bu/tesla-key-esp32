@@ -80,7 +80,9 @@ curl -X POST "http://<ip>/ota/update"                                      # pul
 ```
 
 The device refuses non-newer or wrongly-signed images on its own (downgrade gate + RSA
-signature check), and rollback stays armed ~90 s after boot.
+signature check), and rollback stays armed until the image has both run 90 s and PROVEN a link
+(`logic/health_gate.hpp`) — so a flashed image that never reaches the LAN is not committed, and
+after 600 s it is left pending for the next reboot to roll back.
 
 ## 5. Verify — the loop is closed only when the device says so
 

@@ -11,11 +11,16 @@
 #include "http_handlers.hpp"
 #include "config_blob.hpp"
 #include "logic/syslog_policy.hpp"
+#include "logic/mqtt_uri.hpp"
 #include "ota_update.hpp"   // ota_confirm_pending_image() — guard OTA rollback across config reboots
 #include <esp_log.h>
 #include <esp_system.h>
+#include <esp_crt_bundle.h>
+#include <esp_heap_caps.h>
+#include <mqtt_client.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/semphr.h"
 #include <cstdlib>
 #include <cctype>
 #include <string>
@@ -164,31 +169,124 @@ esp_err_t handle_set_vin(GuardedReq rq) {
     return r;
 }
 
-// ─── POST /set_mqtt — persist the MQTT broker, then reboot ────────────────────
+// ─── POST /set_mqtt — verify the broker, persist it, then reboot ──────────────
 // Body: {"broker":"host:port"} (a full "mqtt://host:port" URI is also accepted; an
 // empty string disables MQTT). Stored in NVS ("mqtt_uri") and applied on reboot —
 // the bridge reads it once at start, so a reboot is the clean way to (re)init it.
+//
+// TEST BEFORE PERSIST. A changed broker is CONNECTED TO before it is written. Without that,
+// the only way to learn a broker is wrong is to save it, reboot, and read mqtt.error off
+// /status afterwards — and with credentials present the URI is mqtts://, where the usual
+// mistake (an untrusted certificate, or a password the broker refuses) is invisible until
+// after that reboot. The probe dials the URI logic/mqtt_uri.hpp derives, which is the same
+// one mqtt_ha.cpp will dial at boot; anything else would be a green check for a connection
+// the bridge never makes.
 
-// Plausibility check for a broker value: empty is fine (disables MQTT); otherwise it
-// must be host:port — a non-empty host, a ':' separator, and a numeric port in 1..65535.
-// An optional "scheme://" prefix is tolerated (mqtt_ha prepends mqtt:// for bare hosts).
-static bool mqtt_broker_is_plausible(const std::string& broker) {
-    if (broker.empty()) return true;                  // empty = disable
-    if (broker.size() > 120) return false;
-    if (broker.find_first_of(" \t\r\n") != std::string::npos) return false;
+// What the probe learned, handed from the mqtt task to this one. Plain data, no std::string:
+// the callback runs off the httpd worker with no try/catch above it, so an allocation there
+// could unwind through esp-mqtt's C frames into abort().
+struct MqttProbeCtx {
+    SemaphoreHandle_t   sem       = nullptr;
+    bool                connected = false;
+    tk::MqttProbeResult result    = tk::MqttProbeResult::Timeout;
+};
 
-    std::string authority = broker;
-    size_t scheme = authority.find("://");
-    if (scheme != std::string::npos) authority = authority.substr(scheme + 3);
+static void on_mqtt_probe(void* handler_args, esp_event_base_t, int32_t id, void* event_data) {
+    auto* ctx = static_cast<MqttProbeCtx*>(handler_args);
+    switch (static_cast<esp_mqtt_event_id_t>(id)) {
+    case MQTT_EVENT_CONNECTED:
+        ctx->connected = true;
+        ctx->result    = tk::MqttProbeResult::Ok;
+        xSemaphoreGive(ctx->sem);
+        break;
+    case MQTT_EVENT_DISCONNECTED:
+        if (!ctx->connected) xSemaphoreGive(ctx->sem);
+        break;
+    case MQTT_EVENT_ERROR: {
+        auto* e = static_cast<esp_mqtt_event_handle_t>(event_data);
+        if (e && e->error_handle) {
+            // A refusal and an unreachable broker are different answers to the user: one means
+            // "your credentials are wrong" (their input, 400), the other "nothing answered"
+            // (the network, 502). Collapsing them into one message is what makes a broker
+            // outage look like a typo.
+            ctx->result = (e->error_handle->error_type == MQTT_ERROR_TYPE_TCP_TRANSPORT)
+                              ? tk::MqttProbeResult::Unreachable
+                              : tk::MqttProbeResult::Refused;
+        }
+        // Wake the request thread now, with the precise cause, rather than waiting for the
+        // DISCONNECTED that usually — but not always — follows: a late one past the timeout
+        // would report a generic "did not answer" and lose the real reason. A second give on a
+        // binary semaphore is a harmless no-op.
+        if (!ctx->connected) xSemaphoreGive(ctx->sem);
+        break;
+    }
+    default: break;
+    }
+}
 
-    size_t colon = authority.rfind(':');
-    if (colon == std::string::npos || colon == 0) return false;   // need host:port
-    std::string host = authority.substr(0, colon);
-    std::string port = authority.substr(colon + 1);
-    if (host.empty() || port.empty() || port.size() > 5) return false;
-    for (char c : port) if (c < '0' || c > '9') return false;
-    int p = atoi(port.c_str());
-    return p >= 1 && p <= 65535;
+// Connect to `uri` once and report how it went. Never persists anything, never throws.
+//
+// It blocks the httpd task for up to 8 s, which also blocks every other request — evcc's poll
+// included. That is accepted rather than overlooked: this endpoint already ends in a reboot, a BLE
+// command on the same task routinely takes 3-5 s, and the alternative (answering 202 and reporting
+// the verdict somewhere else) would give the browser no way to show the user why their broker was
+// rejected at the moment they typed it.
+static tk::MqttProbeResult mqtt_probe_broker(const std::string& uri) {
+    const bool tls = tk::mqtt_uri_is_tls(uri);
+
+    // Can we afford a second client beside the live bridge's? INTERNAL largest block, for the
+    // same reason the heap watchdog samples it: mbedTLS's buffers are contiguous internal DRAM
+    // and a plain 8BIT query would report any PSRAM as if it could satisfy them. Refusing here
+    // costs the user a retry; not refusing costs a bad_alloc on the HTTP task.
+    const size_t largest = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL);
+    if (!tk::mqtt_probe_affordable(largest, tls)) {
+        ESP_LOGW(TAG, "set_mqtt: broker check skipped — largest block %u < %u needed; not saving",
+                 (unsigned) largest, (unsigned) tk::mqtt_probe_heap_need(tls));
+        return tk::MqttProbeResult::NoHeap;
+    }
+
+    MqttProbeCtx ctx{};
+    ctx.sem = xSemaphoreCreateBinary();
+    if (!ctx.sem) return tk::MqttProbeResult::Internal;
+
+    esp_mqtt_client_config_t cfg = {};
+    cfg.broker.address.uri = uri.c_str();
+    if (tls) cfg.broker.verification.crt_bundle_attach = esp_crt_bundle_attach;
+    const std::string user = CONFIG_TESLA_MQTT_USERNAME;
+    const std::string pass = CONFIG_TESLA_MQTT_PASSWORD;
+    if (!user.empty()) cfg.credentials.username = user.c_str();
+    if (!pass.empty()) cfg.credentials.authentication.password = pass.c_str();
+    cfg.credentials.client_id = "teslakey_probe";
+    cfg.session.keepalive     = 15;
+    // One attempt, not a retry loop: this is a question, and esp-mqtt's default reconnect would
+    // keep dialling a wrong broker in the background after the answer was already reported.
+    cfg.network.disable_auto_reconnect = true;
+
+    esp_mqtt_client_handle_t client = esp_mqtt_client_init(&cfg);
+    if (!client) {
+        vSemaphoreDelete(ctx.sem);
+        return tk::MqttProbeResult::Internal;
+    }
+    esp_mqtt_client_register_event(client, static_cast<esp_mqtt_event_id_t>(MQTT_EVENT_ANY),
+                                   on_mqtt_probe, &ctx);
+
+    // A failed start emits no event at all, so waiting would burn the whole window and then
+    // blame a timeout. Nothing was started, so nothing is stopped.
+    if (esp_mqtt_client_start(client) != ESP_OK) {
+        esp_mqtt_client_destroy(client);
+        vSemaphoreDelete(ctx.sem);
+        return tk::MqttProbeResult::Internal;
+    }
+
+    const bool answered = xSemaphoreTake(ctx.sem, pdMS_TO_TICKS(8000)) == pdTRUE;
+    // stop() joins the mqtt task, so the callback cannot touch ctx after this line — which is
+    // what makes a stack-local ctx safe here.
+    esp_mqtt_client_stop(client);
+    esp_mqtt_client_destroy(client);
+    vSemaphoreDelete(ctx.sem);
+
+    if (!answered) return tk::MqttProbeResult::Timeout;
+    return ctx.result;
 }
 
 esp_err_t handle_set_mqtt(GuardedReq rq) {
@@ -204,14 +302,13 @@ esp_err_t handle_set_mqtt(GuardedReq rq) {
     }
     cJSON_Delete(json);
 
-    // Trim surrounding whitespace.
-    size_t s = broker.find_first_not_of(" \t\r\n");
-    size_t e = broker.find_last_not_of(" \t\r\n");
-    broker = (s == std::string::npos) ? std::string{} : broker.substr(s, e - s + 1);
+    broker = tk::mqtt_trim(broker);
 
     // Unchanged → nothing to apply: skip the NVS write and the reboot entirely. The
     // stored value is the bare broker string as last saved (mqtt_ha adds the scheme);
     // stored empty/unset and submitted empty compare equal, so neither triggers a reboot.
+    // Also skips the probe: an unchanged broker is not a claim anyone is making now, and
+    // probing it would make an idempotent no-op fail whenever the broker is down.
     std::string stored;
     g_config->load_str("mqtt_uri", stored);
     if (broker == stored) {
@@ -221,9 +318,23 @@ esp_err_t handle_set_mqtt(GuardedReq rq) {
     }
 
     // Validate plausibility before applying a *changed* value.
-    if (!mqtt_broker_is_plausible(broker)) {
+    if (!tk::mqtt_broker_is_plausible(broker)) {
         return send_json(req, 400, make_response(false, "set_mqtt", "",
                                                  "invalid broker (use host:port)"));
+    }
+
+    // Then verify it for real. Only a non-empty broker is probed — an empty value DISABLES the
+    // bridge, and there is nothing to connect to in order to prove that.
+    if (!broker.empty()) {
+        const std::string uri =
+            tk::mqtt_effective_uri(broker, !std::string(CONFIG_TESLA_MQTT_USERNAME).empty());
+        const tk::MqttProbeResult pr = mqtt_probe_broker(uri);
+        if (pr != tk::MqttProbeResult::Ok) {
+            ESP_LOGW(TAG, "set_mqtt: broker check failed (%s) — not saving",
+                     tk::mqtt_probe_reason(pr));
+            return send_json(req, tk::mqtt_probe_http_status(pr),
+                             make_response(false, "set_mqtt", "", tk::mqtt_probe_reason(pr)));
+        }
     }
 
     bool ok = g_config->save_str("mqtt_uri", broker);
