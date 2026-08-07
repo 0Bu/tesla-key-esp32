@@ -123,6 +123,10 @@ the authority for the per-sibling drift check; `project-review` defers the mecha
   the PR-checkbox gate mechanism — no file marker, the sibling list, the command count `15`, the
   tesla-ble pin) still match the tree, and that the skills/agents it names still exist. Correct it
   like any other; don't re-open it after.
+- **`feature-docs`** — keeps `docs/FEATURES.md` (the platform-feature catalog) in sync; gated by
+  `require-feature-docs.sh` whenever a diff reaches `main/`, `test/`, `sdkconfig.defaults*`,
+  `partitions.csv` or the CI build workflow. Verify that trigger set against the hook, and that
+  the catalog sections it names still exist in `docs/FEATURES.md`.
 - **`device-diag`** — read-only, cache-only live-board triage from `/status` + `/diag`. Verify the
   `/status` keys it names (`paired`/`reauth`/`link`/`vcsec_sleep`/`ble{connect_fail,car_connectable}`/
   `mqtt{configured,connected,tls,error}`/`last_seen_s`) against the field contract in
@@ -130,10 +134,12 @@ the authority for the per-sibling drift check; `project-review` defers the mecha
   `build_status_object()` in `main/http_status.cpp` only gather the inputs and serve them),
   the **lowercase** four `link_state_web_str` values
   (`main/logic/link_state.hpp`; uppercase are the MQTT `link_state_mqtt_str` set), the `/diag`
-  params (`verbose`/`clear` in `handle_diag`), that there is still **no** heap field in `/status`
-  (heap comes from the `BOOT`/`HEAP` lines in `main.cpp` **and** the periodic
-  `HEAP …internal_largest=` trend line in `vehicle_telemetry.cpp`'s `loop_task_fn_` — the one the
-  heap watchdog decides on, plus the `HEAP CRITICAL`/`EXHAUSTED` escalation lines beside it), that
+  params (`verbose`/`clear` in `handle_diag`), that the heap figures it points at are the ones
+  that exist — the ALWAYS-present `/status.sys{free_heap,min_free_heap,largest_block}` and the
+  24-hour `GET /heap` trend (`logic/heap_history.hpp`), plus the `BOOT`/`HEAP` lines in `main.cpp`
+  and the periodic `HEAP …internal_largest=` trend line in `vehicle_telemetry.cpp`'s
+  `loop_task_fn_` (the one the heap watchdog decides on) with the `HEAP CRITICAL`/`EXHAUSTED`
+  escalation lines beside it, that
   `last_reboot` is emitted only when set, and the signature sites it cites
   (`connect error` in `ble_client.cpp`, the pairing-invalidation causes in `vehicle_ctrl.cpp`).
 - **`display-preview`** — renders `tools/display_sim.py` to PNGs for a human eyeball pass. Verify the

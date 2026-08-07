@@ -48,13 +48,16 @@ plus `vehicle{…}` / `last{…}` / `last_seen_s` charge snapshots, and `last_re
 curl -s http://<host>/status | jq
 ```
 
-One-line vitals (note: **there is no heap field in `/status`** — heap comes from the serial log,
-see Step 3):
+One-line vitals (`sys{}` is ALWAYS present and is the block to read first — it carries the heap
+figures a remote triage needs, so the serial console in Step 3 is for the *trend*, not the spot
+value):
 
 ```bash
 curl -s http://<host>/status | jq '{
   version, paired, reauth, link, vcsec_sleep,
+  sys, last_reboot, last_crash,
   wifi: {ssid: .wifi.ssid, rssi: .wifi.rssi},
+  eth: .eth,
   ble:  {connected: .ble.connected, rssi: .ble.rssi,
          connect_fail: .ble.connect_fail, car_connectable: .ble.car_connectable},
   mqtt: {configured: .mqtt.configured, connected: .mqtt.connected,
@@ -116,12 +119,17 @@ curl -s 'http://<host>/diag?clear=1'      # reset the ring (e.g. before a clean 
 Query params (parsed in `handle_diag`): `?verbose=1`/`?verbose=0` toggle raw-RX capture,
 `?clear=1` clears the ring. The response header `X-Diag-Verbose` echoes the current mode.
 
-## Step 3 — heap (the binding constraint) comes from the serial log
+## Step 3 — heap (the binding constraint): spot value from `/status`, trend from the log
 
 The limit on this device is the **largest *contiguous* free block, not total free heap** — a few
 tens of KB steady-state is normal; a *falling* largest block is heap pressure and a reboot risk.
-`/status` does **not** carry heap; read it from the serial console (or **syslog**, which is the
-only copy that survives a reboot — the `/diag` ring does not). Three log lines:
+
+The **spot value is in `/status.sys`** (`free_heap`, `min_free_heap`, `largest_block`, all
+INTERNAL-capped so PSRAM cannot mask them — `logic/status_model.hpp`), and the board's own
+**24-hour trend** is `GET /heap` (`{dt,b0,unit,scale,free[],largest[]}`, tenths of a KiB) — a leak
+is a slope, fragmentation is `free[]` holding steady while `largest[]` sinks. Reach for the
+serial console (or **syslog**, the only copy that survives a reboot — the `/diag` ring does not)
+when you need the per-milestone attribution or the pre-reboot narration. Three log lines:
 
 - Boot ([`main/main.cpp`](../../../main/main.cpp)): `BOOT reset_reason=<r> free_heap=<n>
   min_free=<n> largest_block=<n>` — `reset_reason` tells you *why* it last restarted (a
