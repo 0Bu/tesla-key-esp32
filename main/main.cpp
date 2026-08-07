@@ -281,11 +281,24 @@ extern "C" void app_main() {
     static std::string password = cfg_blob.wifi_ssid.empty() ? CONFIG_TESLA_WIFI_PASSWORD
                                                              : cfg_blob.wifi_pass;
 
-    if (ssid.empty()) {
+    // Is there a wire? Probed HERE, before the setup-portal decision and before anything else
+    // has touched a GPIO — it reads one W5500 identity register and does not wait for a link or
+    // a lease, so it costs a few hundred microseconds. On a board with no controller (or on the
+    // T-Dongle-S3, whose panel owns the SPI clock pin) it frees the bus again and reports false.
+    const bool have_wire = tk::net_eth_probe();
+
+    // The setup portal exists because a device with no credentials has no other way to be
+    // reached. A WIRED device does: DHCP gives it an address with nothing configured at all, so
+    // sending it to a captive AP would strand a perfectly reachable board — a regression created
+    // purely by adding a transport. The VIN is then set over the LAN like any other setting.
+    if (ssid.empty() && !have_wire) {
         ESP_LOGW(TAG, "No WiFi configured — starting setup portal (join WiFi '%s')",
                  "tesla-key-esp32-setup");
         provisioning_run(config_store);  // never returns; reboots on save
     }
+    if (ssid.empty())
+        ESP_LOGI(TAG, "no WiFi configured, but an Ethernet controller is present — coming up "
+                      "on the wire (set the VIN in the web UI at the DHCP address)");
 
     // Resolve VIN
     static std::string vin = CONFIG_TESLA_VIN;
@@ -381,10 +394,34 @@ extern "C" void app_main() {
     // safe outcome accidental rather than designed. Pairing is gated on a real VIN.
     ble_client.set_target_vin(vehicle.has_plausible_vin() ? vin : std::string{});
 
+    // ── network: the wire first, the radio second ────────────────────────────
+    // Ethernet is preferred whenever it can actually carry the lease, and the reason is not
+    // bandwidth — it is the radio. WiFi and BLE share ONE antenna path on every chip this
+    // firmware targets, so a running WiFi stack means time-division coexistence with NimBLE for
+    // as long as the device is powered; that is what forces WIFI_PS_MIN_MODEM and what makes
+    // every GATT round-trip to the car slower than it needs to be. Coming up on a wire does not
+    // merely avoid using WiFi, it avoids STARTING it: no coexistence arbitration at all, and the
+    // ~57 KB of largest-block the stack holds stays free on a device whose binding limit is the
+    // largest CONTIGUOUS block.
+    //
+    // A controller with no cable falls through to WiFi rather than stranding the board, and its
+    // driver keeps running, so a cable plugged in later still takes over.
+    const bool on_wire = have_wire && tk::net_start_eth();
+    if (on_wire) log_heap("eth");
+
+    if (!on_wire && ssid.empty()) {
+        // The wire was present at probe time but never got a lease, and there are no credentials
+        // to fall back to. Rebooting would just repeat this; the portal at least makes the device
+        // configurable by someone standing next to it.
+        ESP_LOGE(TAG, "Ethernet present but not usable and no WiFi configured — setup portal");
+        provisioning_run(config_store);  // never returns; reboots on save
+    }
+
     // Connect to WiFi. With stored credentials, a failure is usually a transient
     // outage (e.g. router rebooting), but if it persists (e.g. wrong password),
     // fallback to the setup portal so the user can reconfigure it.
-    if (!tk::net_start_wifi(ssid.c_str(), password.c_str(), cfg_blob.wifi_rollback_active)) {
+    if (!on_wire &&
+        !tk::net_start_wifi(ssid.c_str(), password.c_str(), cfg_blob.wifi_rollback_active)) {
         if (cfg_blob.wifi_rollback_active) {
             // The credentials from the last /set_wifi did not work and the grace window is spent.
             // Restore the pair that DID work and reboot onto it, rather than dropping into the
@@ -409,19 +446,33 @@ extern "C" void app_main() {
             ESP_LOGE(TAG, "could not persist the credential rollback — falling back to the setup "
                           "portal rather than rebooting into a loop");
         }
-        ESP_LOGW(TAG, "WiFi connection failed — starting setup portal");
-        provisioning_run(config_store); // never returns; reboots on save
+        // LAST look before surrendering the running firmware to the portal. The Ethernet
+        // driver keeps polling through the whole WiFi boot window, so a cable plugged in
+        // during those ~30 s can have taken the link while this branch was being reached —
+        // and dropping a working, reachable device into a captive AP would be the worst
+        // possible answer to "the network is up".
+        if (tk::net_is_up()) {
+            ESP_LOGW(TAG, "WiFi did not come up, but the link is carried by %s — staying up",
+                     tk::net_link_str(tk::net_kind()));
+        } else {
+            ESP_LOGW(TAG, "WiFi connection failed — starting setup portal");
+            provisioning_run(config_store); // never returns; reboots on save
+        }
     }
     // Associated on the new credentials: the trial is over and the backup has done its job. Drop it
     // so a LATER, unrelated outage can never restore credentials from months ago.
-    if (cfg_blob.wifi_rollback_active) {
+    //
+    // NOT on the wired path: coming up on Ethernet proves nothing about the credentials on
+    // trial, so consuming the backup there would silently discard the only way back to a working
+    // network the moment the cable is unplugged.
+    if (!on_wire && cfg_blob.wifi_rollback_active) {
         cfg_blob.wifi_ssid_backup.clear();
         cfg_blob.wifi_pass_backup.clear();
         cfg_blob.wifi_rollback_active = false;
         if (!tk::cfg_save(config_store, cfg_blob))
             ESP_LOGW(TAG, "WiFi credentials are good but the one-shot backup was not cleared");
     }
-    log_heap("wifi");
+    if (!on_wire) log_heap("wifi");
 
     // mDNS: advertise http://tesla-key-esp32.local so users need not find the IP
     if (mdns_init() == ESP_OK) {

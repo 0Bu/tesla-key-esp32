@@ -1795,6 +1795,16 @@ static void test_net_link() {
     CHECK(std::string(tk::net_link_str(tk::NetLink::Wifi)) == "wifi");
     CHECK(std::string(tk::net_link_str(tk::NetLink::Eth))  == "eth");
 
+    // Which transport carries the route. The case that matters is BOTH leases held: a board
+    // that fell back to WiFi and later had a cable plugged in. Losing the wire there must fall
+    // BACK to WiFi, not to "no network" — the bug this function exists to make unrepresentable.
+    CHECK(tk::net_link_active(false, false) == tk::NetLink::None);
+    CHECK(tk::net_link_active(false, true)  == tk::NetLink::Wifi);
+    CHECK(tk::net_link_active(true,  false) == tk::NetLink::Eth);
+    CHECK(tk::net_link_active(true,  true)  == tk::NetLink::Eth);   // the wire outranks the radio
+    // …and the fall-back itself, spelled out as the transition it is.
+    CHECK(tk::net_link_active(/*eth*/false, /*wifi*/true) == tk::NetLink::Wifi);
+
     using WA = tk::WatchAction;
 
     // A DOWN link is not the watchdog's business: the transport's own reconnect path owns it,

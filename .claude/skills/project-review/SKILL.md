@@ -75,7 +75,8 @@ links yourself — that's where the value is.
 | Area | Files | Responsibility |
 |---|---|---|
 | Boot / wiring | `main/main.cpp` (+ `boot_fatal.hpp`) | NVS, config/VIN resolve, clock restore, BLE + network bring-up ORDER, SNTP, mDNS, starts every component; boot heap log; OTA mark-valid |
-| Network transport | `main/net.{cpp,hpp}` + `logic/net_link.hpp` | The ONE transport seam: everything above it asks `tk::net_is_up()` / `net_kind()` / `net_active_netif()` and never touches `esp_wifi`. Owns the WiFi station, the endless-reconnect handler, the credential-rollback boot window (`logic/wifi_rollback.hpp`) and the gateway-ICMP ghost-link watchdog (`net_wd`); the transport identity `NetLink::{None,Wifi,Eth}` and the watchdog's decision (incl. the never-answered-ICMP baseline rule) are host-tested in `logic/net_link.hpp` |
+| Board identity | `main/board.{cpp,hpp}` | Runtime board detection for the ONE image per chip. The esp32s3 image serves THREE boards (T-Dongle-S3 / bare ESP32-S3 / AtomS3 Lite + ATOMIC PoE Base). ONE cached detector because display and Ethernet OVERLAP ON A PIN — the panel's SPI clock is GPIO5, the PoE base's SCLK |
+| Network transport | `main/net.{cpp,hpp}` + `logic/net_link.hpp` | The ONE transport seam: everything above it asks `tk::net_is_up()` / `net_kind()` / `net_active_netif()` and never touches `esp_wifi`. Owns the WiFi station, the endless-reconnect handler, the credential-rollback boot window (`logic/wifi_rollback.hpp`) and the gateway-ICMP ghost-link watchdog (`net_wd`); the transport identity `NetLink::{None,Wifi,Eth}` and the watchdog's decision (incl. the never-answered-ICMP baseline rule) are host-tested in `logic/net_link.hpp`. Also the OPTIONAL W5500 SPI Ethernet backend (`CONFIG_TESLA_ETH_ENABLED`, esp32s3 only): VERSIONR probe, POLLING mode (the PoE base routes no INT/RST), a TWO-PHASE bring-up (a short link grace answers "is a cable attached", then the generous lease deadline once the PHY reports link — one timer for both delayed the setup AP on a credential-less board), a raised `route_prio` (ESP-IDF defaults ETH *below* the WiFi station; it governs `netif_default`/off-link traffic only — `ip4_route()` matches on-link destinations by `netif_list` order), and — on a lease — WiFi is never started at all |
 | Target identity | `main/platform.hpp` | `TK_PLATFORM` string per `CONFIG_IDF_TARGET_*`; must agree with `/api/proxy/1/version`, the HA device model, and esp-web-tools `chipFamily` |
 | Task priorities | `main/task_config.hpp` | `tk::kPrio*` — the ONE named-constant table every `xTaskCreate` site takes its priority from; must agree with the task inventory in `docs/ARCHITECTURE.md` ("Concurrency") |
 | RTOS RAII guards | `main/rtos_guard.hpp` | `tk::SemGuard` / `MutexGuard` / `InFlightGuard` — the take/give and flag pairs that must survive a throw. Every `command_mutex_` / `scan_mutex_` acquisition goes through these, so the lock hierarchy in `docs/ARCHITECTURE.md` ("Concurrency") is only true while they are used; deliberately in `tk::` to avoid an ODR clash with a stock `MutexGuard` |
@@ -289,6 +290,13 @@ that describe it. When reviewing a change (or the repo as a whole), check these 
   `chip_family`) **and** `test/test_logic.cpp` CHECKs **and** every doc that lists the supported
   targets. (Watch the `ci-build-all.sh` app-size gate — esp32c6 binds it, and the gate is checked
   on the SIGNED image, whose code is first padded up to a 64 KB boundary.)
+- **New BOARD variant on an existing chip** → the runtime detector in `main/board.{cpp,hpp}`
+  (ONE cached probe — never a second copy) **and** the per-target `sdkconfig.defaults.<target>`
+  **and** `main/Kconfig.projbuild` if it adds an option **and** every doc that lists which boards
+  an image serves (`.claude/CLAUDE.md`, `docs/README.md` Hardware, `docs/FEATURES.md`). The trap
+  is SHARED GPIOs: the esp32s3 image serves a T-Dongle-S3 (ST7735 on MOSI3/SCK5/CS4) and an
+  AtomS3 Lite + ATOMIC PoE Base (W5500 on SCLK5/CS6/MISO7/MOSI8) — **GPIO5 is both** — so a new
+  peripheral probe must be gated on the detector before it drives a pin.
 - **WiFi/LAN reconnect or watchdog change** → the STA→LAN reconnect policy lives ONLY in
   `main/net.cpp` (`MAX_RETRY`, `s_ever_up`, `kWdPeriodS`/`kWdPingCount`, the
   `s_gw_ever_reachable` baseline latch) with the watchdog's DECISION — the consecutive-failure

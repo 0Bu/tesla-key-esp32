@@ -38,6 +38,29 @@ inline const char* net_link_str(NetLink k) {
     }
 }
 
+// Which transport carries the route when the two lease flags are known. BOTH can be held at
+// once: a board whose W5500 finds no lease at boot falls back to WiFi with the Ethernet driver
+// still running, so a cable plugged in later brings the wire up ALONGSIDE the radio.
+//
+// Ethernet wins whenever it has a lease — it is the transport that costs the BLE radio nothing.
+// lwIP does NOT agree by default (ESP-IDF ships WIFI_STA_DEF at route_prio 100 and ETH_DEF at
+// 50), so net.cpp raises the Ethernet netif's priority when it creates it. That governs the
+// DEFAULT route, i.e. off-link traffic; on-link traffic follows netif_list order regardless —
+// see the kEthRoutePrio comment in net.cpp for what that does and does not buy. This function
+// picks what the DEVICE reports about itself (/status.ip, the watchdog's gateway, the display),
+// and those must agree with each other whatever the routing table does with same-subnet peers.
+//
+// This is a function, not two lines at a call site, because the "last event wins" version it
+// replaces had a real hole: unplugging that cable cleared the link for EVERYTHING above the
+// transport seam — syslog stopped, the display showed "searching", MQTT dropped the RSSI —
+// while a perfectly healthy WiFi lease was still in hand. A rule with two inputs and three
+// outcomes belongs where it can be enumerated.
+inline NetLink net_link_active(bool eth_lease, bool wifi_lease) {
+    if (eth_lease)  return NetLink::Eth;
+    if (wifi_lease) return NetLink::Wifi;
+    return NetLink::None;
+}
+
 // ── Connectivity watchdog ────────────────────────────────────────────────────
 // The watchdog exists for ONE failure mode the event-driven reconnect path cannot see: a
 // missed deauth (WiFi) or a silently dead switch port / unplugged patch lead whose PHY still
