@@ -42,9 +42,11 @@ inline const char* net_link_str(NetLink k) {
 // once: a board whose W5500 finds no lease at boot falls back to WiFi with the Ethernet driver
 // still running, so a cable plugged in later brings the wire up ALONGSIDE the radio.
 //
-// Ethernet wins whenever it has a lease — it is the transport that costs the BLE radio nothing,
-// and it is what lwIP puts first, so reporting anything else would disagree with where the
-// packets actually go.
+// Ethernet wins whenever it has a lease — it is the transport that costs the BLE radio nothing.
+// Note that lwIP does NOT agree by default: ESP-IDF ships WIFI_STA_DEF at route_prio 100 and
+// ETH_DEF at 50, so net.cpp raises the Ethernet netif's priority above the station's when it
+// creates it. This function and the routing table have to say the same thing, or /status.ip
+// names an address nothing dials out from and the watchdog probes the wrong gateway.
 //
 // This is a function, not two lines at a call site, because the "last event wins" version it
 // replaces had a real hole: unplugging that cable cleared the link for EVERYTHING above the

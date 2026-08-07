@@ -576,9 +576,16 @@ holds stays free on a device whose binding limit is the largest *contiguous* blo
 2. A wired board with **no stored SSID does not enter the setup portal**. DHCP gives it an
    address with nothing configured, so a captive AP would strand a perfectly reachable device —
    a regression created purely by adding a transport. The VIN is then set over the LAN.
-3. `tk::net_start_eth()` waits `CONFIG_TESLA_ETH_WAIT_S` (20 s) for a lease. A controller with
-   no cable, a dead switch port or an absent DHCP server all fall back to WiFi; the Ethernet
-   driver keeps running, so a cable plugged in later still takes over.
+3. `tk::net_start_eth()` waits for a lease, and the deadline means **two different things**:
+   with the PHY reporting **no link** (no cable, dead switch port) it falls back to WiFi after
+   `CONFIG_TESLA_ETH_WAIT_S` (20 s) — nothing is coming. With the **link up but no lease yet** (a
+   slow or busy DHCP server) it keeps waiting, up to `kEthLeaseLinkedCapFactor` × that. Falling
+   back there would run the WiFi stack for the rest of the boot — paying the BLE coexistence cost
+   and ~57 KB of largest-block — on a board that is in fact wired. The Ethernet driver keeps
+   running either way, so a cable plugged in later still takes over.
+   **On the wired path `esp_wifi_init()` is never called at all:** `main.cpp` short-circuits
+   (`!on_wire && !net_start_wifi(...)`), which is what turns "prefer the wire" into "no radio
+   coexistence" rather than merely "prefer the wire for routing".
 4. On the wired path the WiFi credential-rollback backup is **not** consumed: coming up on
    Ethernet proves nothing about credentials on trial, and spending them there would discard the
    only way back to a working network the moment the cable is unplugged.
@@ -592,6 +599,23 @@ bounds RX *latency*, not throughput: each poll drains everything queued in the W
 buffer. Note that ESP-IDF **6.0 moves the SPI Ethernet drivers out of the core** into the
 `esp-eth-drivers` component — one `idf_component.yml` line whenever the IDF-6 work
 ([ADR-0002](adr/0002-idf6-mbedtls4-crypto-seam.md)) happens.
+
+**The wire is made to win the default route — lwIP does not do it on its own.** ESP-IDF ships
+`WIFI_STA_DEF` at `route_prio` **100** and `ETH_DEF` at **50** (`esp_netif_defaults.h`), i.e. the
+opposite of what this feature is for. `net.cpp` therefore creates the Ethernet netif with a
+raised `route_prio` (`kEthRoutePrio`). Without it, a board that came up on WiFi and later had a
+cable plugged in would report `NetLink::Eth` while every outgoing packet — MQTT, syslog, NTP,
+OTA — still went over the radio, `/status.ip` would name an address nothing dialled out from,
+and the watchdog would ICMP the *Ethernet* gateway while the traffic path was WiFi (bouncing a
+healthy MAC every ~60 s if that segment does not answer echo). `tk::net_link_active()` and the
+routing table must state the same thing.
+
+**The watchdog's ICMP baseline is PER TRANSPORT.** `s_gw_ever_reachable` is indexed by
+`NetLink`, not global. A single flag let a freshly plugged-in Ethernet segment inherit "this
+gateway has answered before" from the *WiFi* gateway — precisely the false evidence the baseline
+rule exists to refuse, evaporating at the moment it is needed. Same class of mistake as a
+per-transport lease held in one global: state that belongs to a transport must be kept per
+transport.
 
 **Both transports can hold a lease at once.** A board whose W5500 found no lease at boot falls
 back to WiFi with the Ethernet driver still running, so a cable plugged in later brings the wire

@@ -98,8 +98,8 @@ static esp_netif_t* s_sta_netif_ptr();
 static esp_netif_t* s_eth_netif_ptr();
 
 // Ethernet outranks WiFi whenever both hold a lease: it is the transport that costs the BLE
-// radio nothing, and it is what lwIP itself puts first in its netif list, so reporting anything
-// else would disagree with where the packets actually go.
+// radio nothing. lwIP is made to agree by raising the Ethernet netif's route_prio above the
+// station's (see kEthRoutePrio) — it does not agree on its own.
 static void recompute_link() {
     const NetLink kind = net_link_active(s_eth_lease.load(), s_wifi_lease.load());
     esp_netif_t* netif = (kind == NetLink::Eth)  ? s_eth_netif_ptr()
@@ -335,6 +335,16 @@ const char* net_wifi_standard() {
 #if CONFIG_TESLA_ETH_ENABLED
 
 static esp_eth_handle_t s_eth_handle = nullptr;
+// Above WIFI_STA_DEF's 100 (esp_netif_defaults.h), so the wire genuinely takes the default
+// route when both transports hold a lease — see the rationale at the esp_netif_new() call.
+static constexpr int kEthRoutePrio = 128;
+
+// How much longer to wait for a lease when the PHY says the cable IS connected. A live wire with
+// a slow DHCP server must not cost this board its whole point (a WiFi stack running for the rest
+// of the boot), but a segment with no DHCP server at all still has to end up somewhere — hence a
+// cap rather than an unbounded wait.
+static constexpr int kEthLeaseLinkedCapFactor = 3;
+
 static esp_netif_t*     s_eth_netif  = nullptr;
 static esp_netif_t* s_eth_netif_ptr() { return s_eth_netif; }
 static esp_eth_netif_glue_handle_t s_eth_glue = nullptr;
@@ -428,9 +438,18 @@ bool net_eth_probe() {
 static EventGroupHandle_t s_eth_events = nullptr;
 static const int ETH_GOT_IP_BIT = BIT0;
 
+// Does the PHY report a negotiated link? Distinct from holding a LEASE, and the distinction is
+// what keeps the WiFi stack switched off on a wired board: "no cable" and "cable in, DHCP still
+// thinking" call for opposite answers at the boot deadline.
+static std::atomic<bool> s_eth_link{false};
+
 static void eth_event_handler(void*, esp_event_base_t base, int32_t event_id, void* data) {
-    if (base == ETH_EVENT && event_id == ETHERNET_EVENT_DISCONNECTED) {
+    if (base == ETH_EVENT && event_id == ETHERNET_EVENT_CONNECTED) {
+        ESP_LOGI(TAG, "Ethernet link up");
+        s_eth_link.store(true);
+    } else if (base == ETH_EVENT && event_id == ETHERNET_EVENT_DISCONNECTED) {
         ESP_LOGW(TAG, "Ethernet link down");
+        s_eth_link.store(false);
         link_down(NetLink::Eth);
     } else if (base == IP_EVENT && event_id == IP_EVENT_ETH_GOT_IP) {
         ip_event_got_ip_t* ev = (ip_event_got_ip_t*)data;
@@ -447,7 +466,21 @@ bool net_start_eth() {
     if (!s_eth_events) boot_fatal("Ethernet event group");
 
     net_init();
+
+    // Give the Ethernet netif a HIGHER route priority than the WiFi station, because ESP-IDF
+    // defaults the other way round: esp_netif_defaults.h ships WIFI_STA_DEF at route_prio 100
+    // and ETH_DEF at 50. Left alone, a board that came up on WiFi and later had a cable plugged
+    // in would report NetLink::Eth while lwIP kept routing every outgoing packet — MQTT, syslog,
+    // NTP, OTA — over the radio, and /status.ip would name an address nothing dialled out from.
+    // Worse, the connectivity watchdog would ICMP the ETHERNET gateway while the traffic path
+    // was WiFi, and bounce a perfectly good MAC every ~60 s if that segment does not answer echo.
+    //
+    // The whole point of this transport is that the wire wins, so make lwIP agree rather than
+    // asserting it in a comment. `static` because esp_netif keeps a pointer to this config.
+    static esp_netif_inherent_config_t eth_base = ESP_NETIF_INHERENT_DEFAULT_ETH();
+    eth_base.route_prio = kEthRoutePrio;
     esp_netif_config_t netif_cfg = ESP_NETIF_DEFAULT_ETH();
+    netif_cfg.base = &eth_base;
     s_eth_netif = esp_netif_new(&netif_cfg);
     if (!s_eth_netif) boot_fatal("Ethernet netif");
     if (esp_netif_set_hostname(s_eth_netif, kNetHostname) != ESP_OK)
@@ -503,17 +536,39 @@ bool net_start_eth() {
                                                eth_event_handler, nullptr));
     ESP_ERROR_CHECK(esp_eth_start(s_eth_handle));
 
-    // Bounded wait. A controller with no cable, a dead switch port or an absent DHCP server all
-    // land here, and the right answer is to give WiFi a turn rather than strand the board.
-    const EventBits_t bits = xEventGroupWaitBits(s_eth_events, ETH_GOT_IP_BIT, pdFALSE, pdFALSE,
-                                                 pdMS_TO_TICKS(CONFIG_TESLA_ETH_WAIT_S * 1000));
+    // Bounded wait — but the deadline means two DIFFERENT things, and treating them alike is
+    // exactly what would start the WiFi stack on a board that is in fact wired:
+    //
+    //   • PHY link DOWN at the deadline — no cable, or a dead switch port. Nothing is coming;
+    //     give WiFi a turn rather than strand the board.
+    //   • PHY link UP but no lease yet — a live wire with a slow or busy DHCP server. Falling
+    //     back HERE would run WiFi for the rest of the boot, paying the BLE radio-coexistence
+    //     cost and ~57 KB of largest-block on a board that is about to be wired anyway. Keep
+    //     waiting — up to a cap, so a segment with no DHCP server at all still ends up somewhere.
+    const int base_ms = CONFIG_TESLA_ETH_WAIT_S * 1000;
+    const int cap_ms  = base_ms * kEthLeaseLinkedCapFactor;
+    EventBits_t bits = 0;
+    for (int waited = 0; waited < cap_ms; waited += base_ms) {
+        bits = xEventGroupWaitBits(s_eth_events, ETH_GOT_IP_BIT, pdFALSE, pdFALSE,
+                                   pdMS_TO_TICKS(base_ms));
+        if (bits & ETH_GOT_IP_BIT) break;
+        if (!s_eth_link.load()) {
+            ESP_LOGW(TAG, "W5500 present but the PHY reports no link after %d s — no cable or a "
+                          "dead switch port; falling back to WiFi", (waited + base_ms) / 1000);
+            break;
+        }
+        ESP_LOGW(TAG, "Ethernet link is UP but no DHCP lease after %d s — still waiting (a wired "
+                      "board should not have to start WiFi for a slow DHCP server)",
+                 (waited + base_ms) / 1000);
+    }
     if (bits & ETH_GOT_IP_BIT) {
         ESP_LOGI(TAG, "Ethernet up — WiFi will not be started (no radio coexistence, "
                       "and its heap stays free)");
         return true;
     }
-    ESP_LOGW(TAG, "W5500 present but no DHCP lease in %d s (cable? switch port? DHCP?) — "
-                  "falling back to WiFi", CONFIG_TESLA_ETH_WAIT_S);
+    if (s_eth_link.load())
+        ESP_LOGW(TAG, "Ethernet link up but still no DHCP lease after %d s — falling back to "
+                      "WiFi", cap_ms / 1000);
     // The driver stays running on purpose: a cable plugged in later still brings the link up and
     // the event handler still claims the lease. Leaving WiFi to run alongside is the cost of
     // that, and it is the right trade — an unreachable board is worse than a shared radio.
@@ -561,9 +616,19 @@ static const int kWdPingCount     = 3;    // echoes per check; healthy if ≥1 r
 struct WdPing { SemaphoreHandle_t done; uint32_t received; };
 static WdPing s_wd = { nullptr, 0 };
 
-// Set true the first time the gateway answers ICMP, never cleared — the baseline watch_step()
-// requires before it will act.
-static std::atomic<bool> s_gw_ever_reachable{false};
+// Set true the first time THIS TRANSPORT's gateway answers ICMP — the baseline watch_step()
+// requires before it will act. Indexed by NetLink, and that indexing is the point: a single
+// global flag let a freshly plugged-in Ethernet segment inherit "this gateway has answered
+// before" from the WiFi gateway, which is exactly the false evidence the latch exists to
+// refuse. The guard has to be per transport or it evaporates at the moment it is needed.
+static std::atomic<bool> s_gw_ever_reachable[3] = {};
+static_assert(static_cast<int>(NetLink::None) == 0 && static_cast<int>(NetLink::Wifi) == 1 &&
+              static_cast<int>(NetLink::Eth)  == 2,
+              "s_gw_ever_reachable is indexed by NetLink — keep the enum contiguous from 0");
+
+static std::atomic<bool>& gw_baseline(NetLink k) {
+    return s_gw_ever_reachable[static_cast<int>(k)];
+}
 
 static void wd_on_ping_end(esp_ping_handle_t hdl, void* args) {
     auto* p = (WdPing*) args;
@@ -616,7 +681,7 @@ static bool gateway_reachable() {
     esp_ping_delete_session(hdl);
 
     bool ok = s_wd.received > 0;
-    if (ok) s_gw_ever_reachable = true;
+    if (ok) gw_baseline(s_kind.load()).store(true);
     return ok;
 }
 
@@ -663,7 +728,10 @@ static void net_watchdog_task(void*) {
         const bool up = net_is_up();
         const bool gw = up && gateway_reachable();
 
-        switch (tk::watch_step(watch, up, gw, s_gw_ever_reachable.load())) {
+        // The baseline belongs to the transport being probed, not to the boot.
+        const bool gw_ever = gw_baseline(net_kind()).load();
+
+        switch (tk::watch_step(watch, up, gw, gw_ever)) {
             case tk::WatchAction::Idle:
                 break;
             case tk::WatchAction::Wait:
