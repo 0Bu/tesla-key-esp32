@@ -14,7 +14,7 @@ so the supported set cannot drift from what the crypto library declares. **≥ 4
 required. ESP32-S2 (no Bluetooth) and ESP32-H2 / P4 (no WiFi) cannot run this firmware. A chip
 tesla-ble does not declare — esp32c5, esp32c61 — would need upstreaming there first; carrying a
 locally patched checkout of the crypto library instead was tried for the C5 and dropped
-([adr/0001](adr/0001-esp32c5-target-upstreaming.md)). USB data cable for flashing.
+([adr/0004](adr/0004-drop-esp32c5-target.md)). USB data cable for flashing.
 
 ## Flash prebuilt artifacts
 

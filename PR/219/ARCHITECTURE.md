@@ -170,7 +170,7 @@ enforcement is treated as the definition of "supported" rather than something to
 chip list cannot silently drift from what the crypto library declares, and no local checkout of a
 third-party dependency has to be kept in sync. Adding a chip upstream omits (esp32c5, esp32c61)
 therefore means upstreaming it there first. A local patched checkout was carried for esp32c5 for a
-while and has been dropped — [`adr/0001-esp32c5-target-upstreaming.md`](adr/0001-esp32c5-target-upstreaming.md).
+while and has been dropped — [`adr/0004-drop-esp32c5-target.md`](adr/0004-drop-esp32c5-target.md).
 
 The patch that remains is a **correctness and anti-replay fix shared by all four targets**. Upstream
 v5.1.1 calls `Peer::validate_response_counter()` and logs a duplicate CarServer response, but
