@@ -135,8 +135,11 @@ Three sources, in the order to reach for them:
 1. **`/status.sys`** — the spot value, always present
    (`largest_block` / `free_heap` / `min_free_heap`). Answers "how bad is it *now*".
 2. **`GET /heap`** — the board's own **24-hour trend**
-   (`{dt,b0,unit,scale,free[],largest[]}`, tenths of a KiB, `null` = no sample), fed from the
-   SAME samples the heap watchdog decides on, so the chart and the threshold cannot disagree.
+   (`{dt,b0,b_boot,unit,scale,free[],largest[]}`, tenths of a KiB, `null` = no sample), fed from
+   the SAME samples the heap watchdog decides on, so the chart and the threshold cannot disagree.
+   The ring is `.noinit` and SURVIVES a restart, so it still shows the slope that preceded a
+   `heap:<n>` reboot — `b_boot` is the bucket this boot started in (`b_boot == b0` means nothing
+   was retained, e.g. after a power cut), and the clock is therefore no longer `uptime/dt`.
    This is the one that answers "is it *drifting*" — a leak is a slope; fragmentation is
    `free[]` holding steady while `largest[]` sinks toward the 4 KB floor.
    ```bash

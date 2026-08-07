@@ -40,7 +40,8 @@ follow-up session apply the fix.
   host-tested in `main/logic/` — a new target or a renamed suffix must update all of them.
 - **App-size gate.** `ci-build-all.sh` fails a build whose signed image exceeds `slot − 32 KB`
   (`0x1e8000`, below the `0x1f0000` = 2031616 B slot). esp32c6 is the largest image (signed
-  `0x1d1000`, ~92 KB under the gate) and binds it; esp32c3 is next, and esp32s3 — which carries the
+  `0x1e1000`, ~28 KB under the gate) and binds it — it sat ~3 KB below a 64 KB Secure-Boot
+  boundary until a 3 KB change crossed it, so c6 is the target to size-check first; esp32c3 is next, and esp32s3 — which carries the
   display — sits at `0x191000`. Note the gate is checked on the SIGNED image, and signing appends a
   4 KB sector AFTER the code has been padded up to a 64 KB boundary: an image just over a boundary
   costs a full 64 KB block. That is what made esp32c5 undeliverable and got it dropped
