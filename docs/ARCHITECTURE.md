@@ -549,20 +549,32 @@ restart — the one line that answers it had been written to a ring that the reb
 
 ## WiFi / LAN connectivity (reconnect + watchdog)
 
-The STA→LAN link (distinct from the car BLE link-state below) is kept up by two layers in
-`main.cpp`:
+**Where this lives.** All of it is `main/net.cpp`, behind the transport seam `main/net.hpp`.
+Everything above that seam — the HTTP server, MQTT, syslog, mDNS, SNTP, OTA, the display, the
+LED — asks `tk::net_is_up()` / `tk::net_kind()` / `tk::net_active_netif()` and never touches
+`esp_wifi` itself. Before the seam existed there was one predicate, `wifi_is_connected()`,
+hand-declared as an `extern` in five translation units, and `esp_netif_get_handle_from_ifkey(
+"WIFI_STA_DEF")` hardcoded in three more; each was correct while WiFi was the only transport
+and silently wrong the moment it was not. The transport identity itself
+(`tk::NetLink::{None,Wifi,Eth}`) and the watchdog's decision logic are the host-tested
+`main/logic/net_link.hpp`.
+
+The STA→LAN link (distinct from the car BLE link-state below) is kept up by two layers:
 
 - **Event-driven reconnect.** `wifi_event_handler` reconnects on every
   `WIFI_EVENT_STA_DISCONNECTED`. The boot-time path keeps the original budget: if the device
-  has **never** held an IP (`s_wifi_ever_connected == false`) and the `MAX_RETRY` (10) fast
-  attempts are spent, it sets `WIFI_FAIL_BIT` so `wifi_connect()` times out and falls back to
+  has **never** held an IP (`s_ever_up == false`) and the `MAX_RETRY` (10) fast
+  attempts are spent, it sets `WIFI_FAIL_BIT` so `net_start_wifi()` times out and falls back to
   the **setup portal** (the credentials are presumed wrong). But once the device has been
   online at least once, a later drop reconnects **forever** — the credentials are known-good,
   so surrendering would only strand the device. (The old code gave up after 10 retries in
   *all* cases, which is exactly how a 3.5 h router outage left the board reachable-over-BLE
   but off the LAN, recoverable only by a manual USB reset.)
 
-- **Connectivity watchdog** (`wifi_watchdog_task`, ~30 s cadence). The event path cannot catch
+- **Connectivity watchdog** (`net_watchdog_task`, ~30 s cadence; the verdict comes from
+  `tk::watch_step()` in `logic/net_link.hpp`, so its counting and — more importantly — its
+  never-answered-ICMP baseline rule are covered by `test/test_logic.cpp` rather than living as
+  an `if` inside a task loop). The event path cannot catch
   a **missed-deauth "ghost" association**: the stack still believes it is connected (holds the
   IP, keeps emitting TCP that times out — e.g. MQTT `esp-tls select() timeout`) but the AP
   forwards nothing and **no disconnect event ever fires**, so the handler never runs. The
@@ -911,7 +923,7 @@ Application-task priorities are declared **only** in [`main/task_config.hpp`](..
 | `ota` | `kPrioOta` = 5 | 8192 | `ota_update.cpp` | OTA download + flash (transient) |
 | `ota_chk` | `kPrioOtaCheck` = 5 | 8192 | `ota_update.cpp` | OTA manifest check (transient) |
 | `auto_pair` | `kPrioAutoPair` = 4 | 8192 | `vehicle_ctrl.cpp` (fn: `vehicle_pairing.cpp`) | pairing supervisor: enrol / re-pair / health probe |
-| `wifi_wd` | `kPrioWifiWatchdog` = 4 | 3072 | `main.cpp` | ghost-association watchdog (re-associate, never reboot) |
+| `net_wd` | `kPrioWifiWatchdog` = 4 | 3072 | `net.cpp` | ghost-link watchdog (force the active transport to re-establish, never reboot) |
 | `mqtt_pub` | `kPrioMqttPub` = 4 | 6144 | `mqtt_ha.cpp` | MQTT/HA publisher (reads the caches) |
 | `display` | `kPrioDisplay` = 3 | 6144 | `display.cpp` | ST7735 renderer (`CONFIG_TESLA_DISPLAY_ENABLED` builds) |
 | `ota_gate` | `kPrioOtaGate` = 3 | 3072 | `main.cpp` | one-shot OTA rollback health gate (~90 s) |

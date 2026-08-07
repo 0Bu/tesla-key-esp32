@@ -104,7 +104,17 @@ cd build && esptool --chip esp32s3 -p <port> write_flash "@flash_args"   # or es
 ## Architecture
 
 ```
-main.cpp               → WiFi init, NVS init, start all components
+main.cpp               → boot orchestration: NVS init, config/VIN resolve, clock restore,
+                         BLE + network bring-up order, start all components
+net.cpp / net.hpp      → the ONE network-transport seam. Everything above it (HTTP, MQTT,
+                         syslog, mDNS, SNTP, OTA, display, LED) asks tk::net_is_up() /
+                         net_kind() / net_active_netif() and never touches esp_wifi. Owns the
+                         WiFi station, the endless-reconnect handler, the credential-rollback
+                         boot window and the gateway-ICMP ghost-link watchdog (net_wd task).
+                         The transport identity (tk::NetLink::{None,Wifi,Eth}) and the
+                         watchdog's decision — incl. the rule that a gateway which has NEVER
+                         answered ICMP must not trigger recovery — are the host-tested
+                         logic/net_link.hpp
 patches/tesla-ble/     → reviewed patch on pinned dependency: reject replayed CarServer
                          responses before callbacks/FIFO completion (all four targets)
 ble_client.cpp         → NimBLE GATT client (BleAdapter impl)

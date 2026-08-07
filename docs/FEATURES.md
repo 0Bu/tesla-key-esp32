@@ -59,8 +59,9 @@ trusted-LAN only. See [`SECURITY.md`](SECURITY.md).
 | Feature | Where | Prevents |
 |---|---|---|
 | Captive portal | `main/provisioning.cpp`, `logic/captive.hpp` | A setup portal that does not pop. A DNS catch-all, a **302 redirect** on the three OS probe paths (a 200 + page is a heuristic Android may leave undecided), and the RFC 8910 DHCP option 114 — three independent ways for a client to find it. |
-| Gateway ICMP watchdog | `main.cpp` `wifi_watchdog_task` | The "ghost association" that fires no disconnect event: the stack believes it is connected, the AP forwards nothing, and no reconnect handler ever runs. |
-| Endless runtime reconnect | `main.cpp` `wifi_event_handler` | Surrendering to the setup portal on a transient outage once the credentials are known-good. |
+| Transport seam | `main/net.hpp` + `main/net.cpp`, `logic/net_link.hpp` | A network layer that can only ever be WiFi. ONE contract (`net_is_up` / `net_kind` / `net_active_netif`) replaces a predicate hand-`extern`ed in five modules and a `"WIFI_STA_DEF"` ifkey hardcoded in three — each correct only while a radio was the sole transport. |
+| Gateway ICMP watchdog | `net.cpp` `net_watchdog_task`, `logic/net_link.hpp` `watch_step()` | The "ghost association" that fires no disconnect event: the stack believes it is connected, the AP forwards nothing, and no reconnect handler ever runs. The decision — including the baseline rule that a gateway which has NEVER answered ICMP must not trigger recovery — is host-tested, not an `if` inside a task loop. |
+| Endless runtime reconnect | `net.cpp` `wifi_event_handler` | Surrendering to the setup portal on a transient outage once the credentials are known-good. |
 | mDNS + DHCP hostname | `main.cpp` | Having to find the IP. Both are set to the same name, so router DNS agrees with `tesla-key-esp32.local`. |
 | SNTP + browser-clock fallback | `main.cpp`, `POST /set_time` | A 1970 clock, which makes tesla-ble reject every persisted session and breaks OTA TLS date validation. |
 | UDP syslog (RFC 5424) | `main/syslog.cpp`, `logic/syslog_policy.hpp` | Losing the log that explains a reboot — `/diag` is RAM and does not survive one. Errno-classified send failures, PRI from each line's own log level. |
