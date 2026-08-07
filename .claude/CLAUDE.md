@@ -114,7 +114,18 @@ net.cpp / net.hpp      → the ONE network-transport seam. Everything above it (
                          The transport identity (tk::NetLink::{None,Wifi,Eth}) and the
                          watchdog's decision — incl. the rule that a gateway which has NEVER
                          answered ICMP must not trigger recovery — are the host-tested
-                         logic/net_link.hpp
+                         logic/net_link.hpp. Also carries the OPTIONAL W5500 SPI Ethernet
+                         backend (CONFIG_TESLA_ETH_ENABLED, esp32s3 only): probes the
+                         controller's VERSIONR once at boot, runs it in POLLING mode (the
+                         ATOMIC PoE Base routes no INT and no RST line) and, on a lease,
+                         never starts WiFi at all — no BLE radio coexistence, ~57 KB of
+                         largest-block unspent
+board.cpp / board.hpp  → runtime board identification for the ONE image per chip. The esp32s3
+                         image serves THREE boards: T-Dongle-S3 (ST7735), a bare ESP32-S3, and
+                         an M5Stack AtomS3 Lite on an ATOMIC PoE Base (W5500). ONE detector,
+                         because display and Ethernet OVERLAP ON A PIN — the panel's SPI clock
+                         is GPIO5, the same pin the PoE base uses for SCLK — so the W5500 probe
+                         is refused on a detected T-Dongle
 patches/tesla-ble/     → reviewed patch on pinned dependency: reject replayed CarServer
                          responses before callbacks/FIFO completion (all four targets)
 ble_client.cpp         → NimBLE GATT client (BleAdapter impl)

@@ -21,3 +21,28 @@ CONFIG_TESLA_DISPLAY_CS=4
 CONFIG_TESLA_DISPLAY_DC=2
 CONFIG_TESLA_DISPLAY_RST=1
 CONFIG_TESLA_DISPLAY_BL=38
+
+# ── Ethernet (W5500 over SPI) — the M5Stack AtomS3 Lite on an ATOMIC PoE Base ─────────────────
+# Compiled in for esp32s3 only. The ONE esp32s3 image now serves THREE boards: the T-Dongle-S3
+# (ST7735 panel), a generic ESP32-S3 (neither), and the AtomS3 Lite + PoE base (W5500). Each is
+# detected at runtime and the other two pay nothing: net.cpp reads the W5500's VERSIONR register
+# once at boot and frees the SPI bus again when nothing answers.
+#
+# The two boards OVERLAP ON A PIN — the T-Dongle's panel clock is GPIO5, which is also the PoE
+# base's SPI SCLK — so net_eth_probe() refuses to probe once tk::board_is_t_dongle_s3() says yes.
+# That shared detector is why the probe is safe to compile in unconditionally here.
+#
+# NOT enabled for esp32/esp32c3/esp32c6: no board in use has a W5500, and esp32c6 has only ~92 KB
+# under the ci-build-all.sh size gate, where growth is quantised to 64 KB Secure-Boot blocks.
+CONFIG_TESLA_ETH_ENABLED=y
+CONFIG_TESLA_ETH_SPI_SCLK=5
+CONFIG_TESLA_ETH_SPI_CS=6
+CONFIG_TESLA_ETH_SPI_MISO=7
+CONFIG_TESLA_ETH_SPI_MOSI=8
+# 20 MHz is what Espressif's own W5500 CI configuration uses; the part is specified far higher,
+# but these stack-through headers are short unshielded runs.
+CONFIG_TESLA_ETH_SPI_CLOCK_MHZ=20
+# The ATOMIC PoE Base routes only SCLK/CS/MISO/MOSI + power — no INT line — so the driver polls.
+# ESP-IDF ships a CI configuration for exactly this (sdkconfig.ci.poll_w5500, also 10 ms).
+CONFIG_TESLA_ETH_POLL_MS=10
+CONFIG_TESLA_ETH_WAIT_S=20

@@ -23,6 +23,24 @@ namespace tk {
 // created both already on the setup-AP path. Call before any net_start_*().
 void net_init();
 
+// Is a W5500 Ethernet controller actually wired to this board? Probes the SPI bus ONCE and
+// caches the answer; safe to call very early, and deliberately CHEAP — it reads one identity
+// register and does not wait for a link or a lease.
+//
+// Call it before deciding whether a device with no stored WiFi credentials should fall into the
+// setup portal: a wired board does not need credentials, and stranding it in a captive AP it
+// has no reason to run would be a regression created by adding a transport.
+//
+// Always false on a build without the Ethernet backend, and on the T-Dongle-S3 (whose ST7735
+// panel clock is the same GPIO the probe would drive as SPI SCLK).
+bool net_eth_probe();
+
+// Bring up the Ethernet interface and wait up to CONFIG_TESLA_ETH_WAIT_S for a DHCP lease.
+// Returns true only with a lease in hand — a controller with no cable, a dead switch port or an
+// absent DHCP server all return false so the caller can give WiFi a turn. The driver keeps
+// running either way, so a cable plugged in later still comes up.
+bool net_start_eth();
+
 // Bring up the WiFi station and wait for a DHCP lease.
 //
 // rollback_pending: a /set_wifi change is on trial this boot, so a failure is not simply

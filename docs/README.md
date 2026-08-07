@@ -16,6 +16,24 @@ tesla-ble does not declare — esp32c5, esp32c61 — would need upstreaming ther
 locally patched checkout of the crypto library instead was tried for the C5 and dropped
 ([adr/0004](adr/0004-drop-esp32c5-target.md)). USB data cable for flashing.
 
+### Wired networking (optional, esp32s3)
+
+The esp32s3 image also drives a **WIZnet W5500 over SPI**, so the device can run on Ethernet —
+including **PoE**, which means one cable for power and network and therefore free placement:
+this firmware's BLE range to the car is signal-limited, so being able to mount the device where
+the car is beats every radio tweak. Verified on an **M5Stack AtomS3 Lite on an ATOMIC PoE Base**
+(802.3af, 5 V/1.2 A; SCLK 5 / CS 6 / MISO 7 / MOSI 8).
+
+On a wire the WiFi stack is **never started**: WiFi and BLE share one antenna path, so this
+removes radio coexistence entirely (and frees the ~57 KB of contiguous heap the stack holds).
+A wired board needs **no WiFi credentials at all** — it comes up on DHCP and the VIN is set in
+the web UI. With a controller present but no link, it falls back to WiFi (or the setup portal)
+rather than stranding itself, and a cable plugged in later still takes over.
+
+The **same** `esp32s3` image serves a LilyGo T-Dongle-S3, a bare ESP32-S3 and this board — each
+is detected at boot. There is no separate build, and nothing to enable on the other three
+targets (where the driver is not compiled in).
+
 ## Flash prebuilt artifacts
 
 Browser flasher + WiFi/VIN setup: [../README.md](../README.md). The flasher is served on

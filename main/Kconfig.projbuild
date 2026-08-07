@@ -105,6 +105,78 @@ menu "Tesla Key Configuration"
             set/changed at runtime in the web UI (Connections -> Syslog), which
             stores it in NVS ("syslog_uri") and overrides this.
 
+    # ── Ethernet (W5500 over SPI — the M5Stack ATOMIC PoE Base) ──────────────────────────────
+    # OFF by default and enabled per target, for two independent reasons. (1) Flash: compiling
+    # in esp_eth + the W5500 driver costs tens of KB, and esp32c6 has only ~92 KB of headroom
+    # under the ci-build-all.sh size gate, where growth is quantised to 64 KB Secure-Boot blocks.
+    # (2) Pins: the probe drives SPI on real GPIOs, which is only safe on a board known not to
+    # have something else there. It is enabled for esp32s3 (sdkconfig.defaults.esp32s3), whose
+    # ONE image also serves the T-Dongle-S3 — net.cpp refuses to probe on that board because its
+    # panel clock IS the W5500's SCK pin (see tk::board_is_t_dongle_s3()).
+    config TESLA_ETH_ENABLED
+        bool "Enable Ethernet (W5500 over SPI)"
+        default n
+        select ETH_USE_SPI_ETHERNET
+        select ETH_SPI_ETHERNET_W5500
+        help
+            Compile in an SPI Ethernet transport (WIZnet W5500 in MAC-RAW mode) as an
+            alternative to WiFi. At boot the firmware probes for the controller; only a board
+            that actually answers gets an Ethernet netif, so this is safe to enable for a
+            target whose image also runs on boards without one.
+
+            When a wire carries the lease the WiFi stack is never started at all — which frees
+            its heap AND removes WiFi/BLE radio coexistence, the constraint that forces
+            WIFI_PS_MIN_MODEM and slows every BLE round-trip to the car.
+
+    # Defaults are the M5Stack AtomS3 Lite + ATOMIC PoE Base wiring (the base routes only these
+    # four signals plus power — there is no INT and no RST line, hence the polling mode below).
+    config TESLA_ETH_SPI_SCLK
+        int "W5500 SPI SCLK GPIO"
+        depends on TESLA_ETH_ENABLED
+        default 5
+    config TESLA_ETH_SPI_CS
+        int "W5500 SPI CS GPIO"
+        depends on TESLA_ETH_ENABLED
+        default 6
+    config TESLA_ETH_SPI_MISO
+        int "W5500 SPI MISO GPIO"
+        depends on TESLA_ETH_ENABLED
+        default 7
+    config TESLA_ETH_SPI_MOSI
+        int "W5500 SPI MOSI GPIO"
+        depends on TESLA_ETH_ENABLED
+        default 8
+    config TESLA_ETH_SPI_CLOCK_MHZ
+        int "W5500 SPI clock (MHz)"
+        depends on TESLA_ETH_ENABLED
+        range 4 40
+        default 20
+        help
+            20 MHz is the value Espressif's own W5500 CI configuration uses. The part is
+            specified far higher, but on the short unshielded stack-through headers these
+            bases use, faster clocks are where the intermittent RX corruption reports start.
+
+    config TESLA_ETH_POLL_MS
+        int "W5500 poll period (ms) — no INT line is routed"
+        depends on TESLA_ETH_ENABLED
+        range 1 100
+        default 10
+        help
+            The ATOMIC PoE Base brings out only SCLK/CS/MISO/MOSI + power, so the W5500's
+            interrupt line is unavailable and the driver must poll. 10 ms matches ESP-IDF's
+            own polling-mode test configuration. It bounds RX latency, not throughput: each
+            poll drains everything queued in the W5500's 16 KB RX buffer.
+
+    config TESLA_ETH_WAIT_S
+        int "Seconds to wait for an Ethernet DHCP lease before falling back to WiFi"
+        depends on TESLA_ETH_ENABLED
+        range 5 120
+        default 20
+        help
+            A controller was found but no lease arrived — no cable, a dead switch port, or no
+            DHCP server. Falling back to WiFi (when credentials exist) keeps an unplugged PoE
+            board reachable instead of stranding it.
+
     config TESLA_DISPLAY_ENABLED
         bool "On-device ST7735 status display (LilyGo T-Dongle-S3)"
         default n

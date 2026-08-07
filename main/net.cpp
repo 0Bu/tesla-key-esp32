@@ -28,9 +28,18 @@
 #include "esp_wifi.h"
 #include "esp_event.h"
 #include "esp_log.h"
+#include "esp_mac.h"
 #include "lwip/ip_addr.h"
 #include "ping/ping_sock.h"
+#include "sdkconfig.h"
 
+#if CONFIG_TESLA_ETH_ENABLED
+#include "driver/spi_master.h"
+#include "esp_eth.h"
+#include "esp_eth_mac_spi.h"
+#endif
+
+#include "board.hpp"
 #include "boot_fatal.hpp"
 #include "task_config.hpp"
 #include "logic/net_link.hpp"
@@ -271,14 +280,6 @@ bool net_wifi_signal(int* rssi_dbm, char* ssid) {
     return true;
 }
 
-// No Ethernet backend is compiled in yet — the W5500 driver lands in the next change. The
-// accessor exists now so /status, the display and the LED already read the transport through
-// ONE seam; until then it simply reports "no wire", which is the truth on every current board.
-bool net_eth_phy(int* speed_mbps, bool* full_duplex) {
-    (void)speed_mbps; (void)full_duplex;
-    return false;
-}
-
 const char* net_wifi_standard() {
     if (s_kind.load() != NetLink::Wifi) return nullptr;
     wifi_ap_record_t ap{};
@@ -291,6 +292,219 @@ const char* net_wifi_standard() {
          : ap.phy_11g  ? "802.11g"
          : ap.phy_11b  ? "802.11b" : nullptr;
 }
+
+// ── Ethernet (W5500 over SPI) ─────────────────────────────────────────────────
+// Compiled in only where CONFIG_TESLA_ETH_ENABLED is set (esp32s3 today). Everything below is
+// #if'd out otherwise, and the two accessors fall back to "no wire" — which keeps every caller
+// above the seam free of #ifdefs.
+#if CONFIG_TESLA_ETH_ENABLED
+
+static esp_eth_handle_t s_eth_handle = nullptr;
+static esp_netif_t*     s_eth_netif  = nullptr;
+static esp_eth_netif_glue_handle_t s_eth_glue = nullptr;
+static bool s_spi_bus_up = false;
+
+// The W5500's identity register. VERSIONR lives at 0x0039 of the Common Register block and
+// reads a fixed 0x04 on every part — the only positive way to tell "a W5500 is wired to these
+// pins" from "these pins are floating". A floating MISO reads 0x00 or 0xFF, so the check has no
+// realistic false positive.
+static constexpr uint16_t kW5500VersionReg = 0x0039;
+static constexpr uint8_t  kW5500VersionVal = 0x04;
+
+static spi_host_device_t eth_spi_host() { return SPI2_HOST; }
+
+// Read one byte from the W5500 Common Register block. The frame is 3 bytes of address phase
+// (16-bit offset + a control byte whose BSB/RWB/OM fields select "common block, read, variable
+// length") followed by the data byte, so a single 4-byte full-duplex transfer does it.
+static bool w5500_read_common(spi_device_handle_t dev, uint16_t reg, uint8_t* out) {
+    uint8_t tx[4] = { (uint8_t)(reg >> 8), (uint8_t)(reg & 0xFF), 0x00, 0x00 };
+    uint8_t rx[4] = { 0, 0, 0, 0 };
+    spi_transaction_t t = {};
+    t.length    = sizeof(tx) * 8;
+    t.tx_buffer = tx;
+    t.rx_buffer = rx;
+    if (spi_device_polling_transmit(dev, &t) != ESP_OK) return false;
+    *out = rx[3];
+    return true;
+}
+
+// Is a W5500 actually wired to the configured pins? Called ONCE, very early — before the setup
+// portal decision, because a wired board with no stored SSID must not be sent to a captive AP it
+// does not need.
+//
+// On success the SPI bus stays installed for net_start_eth() to reuse; on failure it is torn
+// down completely, so a board without the base leaves those GPIOs exactly as it found them.
+bool net_eth_probe() {
+    if (s_eth_present.load()) return true;
+
+    // NEVER probe on the T-Dongle-S3. Its ST7735 sits on MOSI 3 / SCK 5 / CS 4 — GPIO5 is
+    // literally the pin this probe would drive as SPI clock. The display has not claimed the bus
+    // yet at this point in boot, so the fight would not show up here; it would show up later as
+    // a panel that never initialises, which is a miserable thing to debug.
+    if (board_is_t_dongle_s3()) {
+        ESP_LOGI(TAG, "T-Dongle-S3 detected — skipping the W5500 probe (its panel owns GPIO%d)",
+                 CONFIG_TESLA_ETH_SPI_SCLK);
+        return false;
+    }
+
+    spi_bus_config_t buscfg = {};
+    buscfg.mosi_io_num = CONFIG_TESLA_ETH_SPI_MOSI;
+    buscfg.miso_io_num = CONFIG_TESLA_ETH_SPI_MISO;
+    buscfg.sclk_io_num = CONFIG_TESLA_ETH_SPI_SCLK;
+    buscfg.quadwp_io_num = -1;
+    buscfg.quadhd_io_num = -1;
+    if (spi_bus_initialize(eth_spi_host(), &buscfg, SPI_DMA_CH_AUTO) != ESP_OK) {
+        ESP_LOGW(TAG, "W5500 probe: SPI bus init failed — no Ethernet");
+        return false;
+    }
+    s_spi_bus_up = true;
+
+    spi_device_interface_config_t devcfg = {};
+    devcfg.mode           = 0;                                        // W5500 is SPI mode 0
+    devcfg.clock_speed_hz = CONFIG_TESLA_ETH_SPI_CLOCK_MHZ * 1000 * 1000;
+    devcfg.spics_io_num   = CONFIG_TESLA_ETH_SPI_CS;
+    devcfg.queue_size     = 1;
+
+    spi_device_handle_t dev = nullptr;
+    uint8_t ver = 0;
+    bool found = false;
+    if (spi_bus_add_device(eth_spi_host(), &devcfg, &dev) == ESP_OK) {
+        found = w5500_read_common(dev, kW5500VersionReg, &ver) && ver == kW5500VersionVal;
+        spi_bus_remove_device(dev);   // the driver adds its own device with its own config
+    }
+
+    if (!found) {
+        ESP_LOGI(TAG, "no W5500 on SPI (VERSIONR=0x%02x, expected 0x%02x) — WiFi only",
+                 ver, kW5500VersionVal);
+        spi_bus_free(eth_spi_host());
+        s_spi_bus_up = false;
+        return false;
+    }
+
+    ESP_LOGI(TAG, "W5500 found (VERSIONR=0x%02x) on SCLK%d/CS%d/MISO%d/MOSI%d @ %d MHz",
+             ver, CONFIG_TESLA_ETH_SPI_SCLK, CONFIG_TESLA_ETH_SPI_CS,
+             CONFIG_TESLA_ETH_SPI_MISO, CONFIG_TESLA_ETH_SPI_MOSI,
+             CONFIG_TESLA_ETH_SPI_CLOCK_MHZ);
+    s_eth_present.store(true);
+    return true;
+}
+
+static EventGroupHandle_t s_eth_events = nullptr;
+static const int ETH_GOT_IP_BIT = BIT0;
+
+static void eth_event_handler(void*, esp_event_base_t base, int32_t event_id, void* data) {
+    if (base == ETH_EVENT && event_id == ETHERNET_EVENT_DISCONNECTED) {
+        ESP_LOGW(TAG, "Ethernet link down");
+        link_down(NetLink::Eth);
+    } else if (base == IP_EVENT && event_id == IP_EVENT_ETH_GOT_IP) {
+        ip_event_got_ip_t* ev = (ip_event_got_ip_t*)data;
+        ESP_LOGI(TAG, "IP (eth): " IPSTR, IP2STR(&ev->ip_info.ip));
+        link_up(NetLink::Eth, s_eth_netif);
+        xEventGroupSetBits(s_eth_events, ETH_GOT_IP_BIT);
+    }
+}
+
+bool net_start_eth() {
+    if (!net_eth_probe()) return false;
+
+    s_eth_events = xEventGroupCreate();
+    if (!s_eth_events) boot_fatal("Ethernet event group");
+
+    net_init();
+    esp_netif_config_t netif_cfg = ESP_NETIF_DEFAULT_ETH();
+    s_eth_netif = esp_netif_new(&netif_cfg);
+    if (!s_eth_netif) boot_fatal("Ethernet netif");
+    if (esp_netif_set_hostname(s_eth_netif, kNetHostname) != ESP_OK)
+        ESP_LOGW(TAG, "could not set DHCP hostname '%s'", kNetHostname);
+
+    spi_device_interface_config_t devcfg = {};
+    devcfg.mode           = 0;
+    devcfg.clock_speed_hz = CONFIG_TESLA_ETH_SPI_CLOCK_MHZ * 1000 * 1000;
+    devcfg.spics_io_num   = CONFIG_TESLA_ETH_SPI_CS;
+    devcfg.queue_size     = 20;
+
+    eth_w5500_config_t w5500_cfg = ETH_W5500_DEFAULT_CONFIG(eth_spi_host(), &devcfg);
+    // POLLING mode. The ATOMIC PoE Base routes only SCLK/CS/MISO/MOSI + power, so there is no
+    // interrupt line to wire; -1 selects polling and poll_period_ms sets the cadence. This is a
+    // supported configuration, not a workaround — ESP-IDF ships a CI config for exactly it
+    // (components/esp_eth/test_apps/sdkconfig.ci.poll_w5500, also at 10 ms). It bounds RX
+    // LATENCY, not throughput: each poll drains everything queued in the W5500's 16 KB buffer.
+    w5500_cfg.int_gpio_num   = -1;
+    w5500_cfg.poll_period_ms = CONFIG_TESLA_ETH_POLL_MS;
+
+    eth_mac_config_t mac_cfg = ETH_MAC_DEFAULT_CONFIG();
+    eth_phy_config_t phy_cfg = ETH_PHY_DEFAULT_CONFIG();
+    // The base routes no RESET line either, so the driver must not try to strobe one; the W5500
+    // is reset over SPI (its MR register) instead, which esp_eth_phy_w5500 does at init.
+    phy_cfg.reset_gpio_num = -1;
+
+    esp_eth_mac_t* mac = esp_eth_mac_new_w5500(&w5500_cfg, &mac_cfg);
+    esp_eth_phy_t* phy = esp_eth_phy_new_w5500(&phy_cfg);
+    if (!mac || !phy) { ESP_LOGE(TAG, "W5500 mac/phy alloc failed"); return false; }
+
+    esp_eth_config_t eth_cfg = ETH_DEFAULT_CONFIG(mac, phy);
+    if (esp_eth_driver_install(&eth_cfg, &s_eth_handle) != ESP_OK) {
+        ESP_LOGE(TAG, "W5500 driver install failed");
+        return false;
+    }
+
+    // The W5500 has no MAC address of its own (no EEPROM), so one must be supplied. ESP_MAC_ETH
+    // is the chip's eFuse-derived Ethernet address — stable across reboots and distinct from the
+    // WiFi STA MAC, so the two interfaces can never collide on the same LAN.
+    uint8_t mac_addr[6] = {0};
+    if (esp_read_mac(mac_addr, ESP_MAC_ETH) == ESP_OK)
+        esp_eth_ioctl(s_eth_handle, ETH_CMD_S_MAC_ADDR, mac_addr);
+
+    s_eth_glue = esp_eth_new_netif_glue(s_eth_handle);
+    if (!s_eth_glue || esp_netif_attach(s_eth_netif, s_eth_glue) != ESP_OK) {
+        ESP_LOGE(TAG, "W5500 netif attach failed");
+        return false;
+    }
+
+    ESP_ERROR_CHECK(esp_event_handler_register(ETH_EVENT, ESP_EVENT_ANY_ID,
+                                               eth_event_handler, nullptr));
+    ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_ETH_GOT_IP,
+                                               eth_event_handler, nullptr));
+    ESP_ERROR_CHECK(esp_eth_start(s_eth_handle));
+
+    // Bounded wait. A controller with no cable, a dead switch port or an absent DHCP server all
+    // land here, and the right answer is to give WiFi a turn rather than strand the board.
+    const EventBits_t bits = xEventGroupWaitBits(s_eth_events, ETH_GOT_IP_BIT, pdFALSE, pdFALSE,
+                                                 pdMS_TO_TICKS(CONFIG_TESLA_ETH_WAIT_S * 1000));
+    if (bits & ETH_GOT_IP_BIT) {
+        ESP_LOGI(TAG, "Ethernet up — WiFi will not be started (no radio coexistence, "
+                      "and its heap stays free)");
+        return true;
+    }
+    ESP_LOGW(TAG, "W5500 present but no DHCP lease in %d s (cable? switch port? DHCP?) — "
+                  "falling back to WiFi", CONFIG_TESLA_ETH_WAIT_S);
+    // The driver stays running on purpose: a cable plugged in later still brings the link up and
+    // the event handler still claims the lease. Leaving WiFi to run alongside is the cost of
+    // that, and it is the right trade — an unreachable board is worse than a shared radio.
+    return false;
+}
+
+bool net_eth_phy(int* speed_mbps, bool* full_duplex) {
+    if (s_kind.load() != NetLink::Eth || !s_eth_handle) return false;
+    eth_speed_t   sp = ETH_SPEED_10M;
+    eth_duplex_t  dx = ETH_DUPLEX_HALF;
+    if (esp_eth_ioctl(s_eth_handle, ETH_CMD_G_SPEED,  &sp) == ESP_OK && speed_mbps)
+        *speed_mbps = (sp == ETH_SPEED_100M) ? 100 : 10;
+    if (esp_eth_ioctl(s_eth_handle, ETH_CMD_G_DUPLEX_MODE, &dx) == ESP_OK && full_duplex)
+        *full_duplex = (dx == ETH_DUPLEX_FULL);
+    return true;
+}
+
+#else   // !CONFIG_TESLA_ETH_ENABLED
+
+bool net_eth_probe() { return false; }
+bool net_start_eth() { return false; }
+bool net_eth_phy(int* speed_mbps, bool* full_duplex) {
+    (void)speed_mbps; (void)full_duplex;
+    return false;
+}
+
+#endif  // CONFIG_TESLA_ETH_ENABLED
 
 // ── connectivity watchdog ─────────────────────────────────────────────────────
 // The decision logic is logic/net_link.hpp's watch_step(); this half only supplies samples and
@@ -379,6 +593,20 @@ static void net_recover() {
             ESP_LOGW(TAG, "watchdog: ghost association — forcing WiFi re-association");
             esp_wifi_disconnect();
             break;
+#if CONFIG_TESLA_ETH_ENABLED
+        case NetLink::Eth:
+            // The wired equivalent of a ghost association: the PHY still reports link (the
+            // switch port is powered and the pair is intact) but nothing is forwarded, so no
+            // ETHERNET_EVENT_DISCONNECTED ever fires. Stop/start re-runs auto-negotiation and
+            // re-requests DHCP; the event handler re-claims the lease exactly as it does at boot.
+            ESP_LOGW(TAG, "watchdog: wired link forwards nothing — restarting the Ethernet MAC");
+            if (s_eth_handle) {
+                esp_eth_stop(s_eth_handle);
+                vTaskDelay(pdMS_TO_TICKS(200));
+                esp_eth_start(s_eth_handle);
+            }
+            break;
+#endif
         default:
             // NetLink::None cannot reach here (watch_step returns Idle on a down link), and
             // a transport with no recovery action simply keeps its lease; the next probe

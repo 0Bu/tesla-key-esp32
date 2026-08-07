@@ -559,6 +559,46 @@ and silently wrong the moment it was not. The transport identity itself
 (`tk::NetLink::{None,Wifi,Eth}`) and the watchdog's decision logic are the host-tested
 `main/logic/net_link.hpp`.
 
+### Which transport comes up
+
+Boot order is **wire first, radio second** — and the reason is the radio, not the bandwidth.
+WiFi and BLE share ONE antenna path on every chip this firmware targets, so a *running* WiFi
+stack means time-division coexistence with NimBLE for as long as the device is powered. That is
+what forces `WIFI_PS_MIN_MODEM` (see below) and what makes every GATT round-trip to the car
+slower than it needs to be. Coming up on Ethernet does not merely avoid *using* WiFi, it avoids
+**starting** it: no coexistence arbitration at all, and the ~57 KB of largest-block the stack
+holds stays free on a device whose binding limit is the largest *contiguous* block.
+
+1. `tk::net_eth_probe()` runs very early — **before** the setup-portal decision — and reads the
+   W5500's `VERSIONR` (0x0039, always 0x04). A floating MISO reads 0x00/0xFF, so there is no
+   realistic false positive. On no answer the SPI bus is freed again and those GPIOs are left as
+   they were found.
+2. A wired board with **no stored SSID does not enter the setup portal**. DHCP gives it an
+   address with nothing configured, so a captive AP would strand a perfectly reachable device —
+   a regression created purely by adding a transport. The VIN is then set over the LAN.
+3. `tk::net_start_eth()` waits `CONFIG_TESLA_ETH_WAIT_S` (20 s) for a lease. A controller with
+   no cable, a dead switch port or an absent DHCP server all fall back to WiFi; the Ethernet
+   driver keeps running, so a cable plugged in later still takes over.
+4. On the wired path the WiFi credential-rollback backup is **not** consumed: coming up on
+   Ethernet proves nothing about credentials on trial, and spending them there would discard the
+   only way back to a working network the moment the cable is unplugged.
+
+**Polling mode is deliberate, not a workaround.** The M5Stack ATOMIC PoE Base routes only
+SCLK/CS/MISO/MOSI + power — there is no INT line and no RST line to wire — so the driver polls at
+`CONFIG_TESLA_ETH_POLL_MS` (10 ms) and the PHY is reset over SPI (the W5500's `MR` register)
+instead of by a strobe. ESP-IDF ships a CI configuration for exactly this shape
+(`components/esp_eth/test_apps/sdkconfig.ci.poll_w5500`, also 10 ms at 20 MHz). The poll period
+bounds RX *latency*, not throughput: each poll drains everything queued in the W5500's 16 KB
+buffer. Note that ESP-IDF **6.0 moves the SPI Ethernet drivers out of the core** into the
+`esp-eth-drivers` component — one `idf_component.yml` line whenever the IDF-6 work
+([ADR-0002](adr/0002-idf6-mbedtls4-crypto-seam.md)) happens.
+
+**The W5500 has no MAC of its own** (no EEPROM), so one is supplied from `ESP_MAC_ETH` — the
+chip's eFuse-derived Ethernet address, distinct from the WiFi STA MAC so the two can never
+collide on one LAN. The MQTT/HA node id stays derived from `ESP_MAC_WIFI_STA` even on a wired
+device: it is baked into every Home Assistant entity id, and deriving it from the *active*
+transport would rename every entity the first time a board changed transport.
+
 The STA→LAN link (distinct from the car BLE link-state below) is kept up by two layers:
 
 - **Event-driven reconnect.** `wifi_event_handler` reconnects on every
@@ -581,7 +621,11 @@ The STA→LAN link (distinct from the car BLE link-state below) is kept up by tw
   watchdog ICMP-echoes the **default gateway** only while the link believes it is up; after
   `kWdFailToReassoc` (2) consecutive failures (~60 s) it forces **one** `esp_wifi_disconnect()`
   — the endless-retry handler then reconnects with the known-good credentials (so the watchdog
-  never calls `esp_wifi_connect()` itself, avoiding a cross-task double-connect). A stack that
+  never calls `esp_wifi_connect()` itself, avoiding a cross-task double-connect). On a wired
+  link the same verdict restarts the Ethernet MAC (`esp_eth_stop`/`esp_eth_start`), which
+  re-runs auto-negotiation and re-requests DHCP — the wired ghost is a switch port that still
+  reports link while forwarding nothing, and it fires no `ETHERNET_EVENT_DISCONNECTED` either. A
+  stack that
   *gave up* needs no help here — that path is owned by the handler. Two guards keep it from
   ever harming a healthy link: it acts **only** when the link still believes it is up (a known-
   down link is the handler's job, and forcing a disconnect there would only churn the shared

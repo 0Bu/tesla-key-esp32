@@ -2,6 +2,7 @@ idf_component_register(
     SRCS
         "main.cpp"
         "net.cpp"
+        "board.cpp"
         "ble_client.cpp"
         "nvs_storage.cpp"
         "vehicle_ctrl.cpp"
@@ -35,6 +36,7 @@ idf_component_register(
     REQUIRES
         nvs_flash
         esp_wifi
+        esp_eth
         esp_event
         esp_netif
         esp_http_server
