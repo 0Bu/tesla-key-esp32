@@ -7,6 +7,7 @@
 #include "logic/link_state.hpp"
 #include "task_config.hpp"
 #include "logic/ha_templates.hpp"
+#include "logic/mqtt_uri.hpp"
 #include "diag_crash.hpp"
 #include "safe_mode.hpp"
 #include <esp_heap_caps.h>
@@ -563,10 +564,7 @@ static bool mqtt_ha_start_impl(VehicleController& vehicle,
     // empty value (incl. an explicit "" stored to disable) leaves MQTT off.
     s_uri = CONFIG_TESLA_MQTT_BROKER_URI;
     config_store.load_str("mqtt_uri", s_uri);
-    // Trim whitespace.
-    while (!s_uri.empty() && (s_uri.back() == ' ' || s_uri.back() == '\r' || s_uri.back() == '\n')) s_uri.pop_back();
-    size_t b = s_uri.find_first_not_of(" \t");
-    if (b != std::string::npos && b > 0) s_uri = s_uri.substr(b);
+    s_uri = tk::mqtt_trim(s_uri);
 
     if (s_uri.empty()) {
         ESP_LOGI(TAG, "MQTT disabled (no broker configured)");
@@ -577,18 +575,12 @@ static bool mqtt_ha_start_impl(VehicleController& vehicle,
     s_pass   = CONFIG_TESLA_MQTT_PASSWORD;
     s_prefix = CONFIG_TESLA_MQTT_DISCOVERY_PREFIX;
 
-    // Scheme. The web UI keeps the simple "host:port" form, so most entries arrive without a
-    // scheme. When credentials are present we default to TLS (mqtts://) rather than plaintext
-    // mqtt://: the MQTT CONNECT carries username + password in the clear on plain mqtt, so a
-    // credentialed broker that lives off the trusted LAN (a common HA setup: cloud/VLAN/VPN
-    // broker) would otherwise leak them to any sniffer. Credentials are "present" if a username
-    // is configured (Kconfig) or the authority embeds userinfo ("user:pass@host"). A bare,
-    // credential-free local broker stays on plaintext mqtt. An explicit scheme is always honored.
-    if (s_uri.find("://") == std::string::npos) {
-        bool has_creds = !s_user.empty() || s_uri.find('@') != std::string::npos;
-        s_uri = (has_creds ? "mqtts://" : "mqtt://") + s_uri;
-    }
-    s_tls = s_uri.rfind("mqtts://", 0) == 0;   // starts with mqtts://
+    // Scheme (credential-aware TLS default) — the rule lives in logic/mqtt_uri.hpp, because
+    // /set_mqtt's save-time pre-flight has to dial the SAME URI this does. A probe that succeeded
+    // against a differently-derived URI would be a green check for a broker the bridge never
+    // connects to, which is worse than no check at all.
+    s_uri = tk::mqtt_effective_uri(s_uri, !s_user.empty());
+    s_tls = tk::mqtt_uri_is_tls(s_uri);
     s_broker_disp = broker_display(s_uri);
     s_interval_s = CONFIG_TESLA_MQTT_PUBLISH_INTERVAL_S;
     if (s_interval_s < 5) s_interval_s = 5;

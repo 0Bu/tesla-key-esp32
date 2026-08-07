@@ -37,6 +37,7 @@
 #include "display.hpp"
 #include "led_status.hpp"
 #include "logic/bootlog.hpp"
+#include "logic/health_gate.hpp"
 
 static const char* MDNS_HOSTNAME = "tesla-key-esp32";  // → http://tesla-key-esp32.local
 
@@ -148,11 +149,20 @@ static void log_heap(const char* where) {
 // image in ESP_OTA_IMG_PENDING_VERIFY until the app calls
 // esp_ota_mark_app_valid_cancel_rollback(); if the device reboots before that call, the
 // bootloader reverts to the previous slot. We defer the call to this task so the new image
-// has to RUN healthily for a window first — catching a "boots fine, then crashes/OOM-reboots
-// under load" image, which the old mark-at-startup placement would have already committed.
-// A clean survival of the window (during which polling/HTTP/MQTT/BLE exercise the image) is
-// the health signal; a crash inside it reboots still-PENDING and rolls back. No-op otherwise.
-static constexpr int kOtaHealthGateS = 90;
+// has to prove itself first — catching a "boots fine, then crashes/OOM-reboots under load"
+// image, which the old mark-at-startup placement would have already committed.
+//
+// What counts as proof is decided by logic/health_gate.hpp, and it is CONNECTIVITY plus a
+// minimum uptime — not uptime alone. An image that boots perfectly and never gets on the
+// network is exactly the image no OTA can fix afterwards, and it survives any pure timer
+// without difficulty; the old 90-second sleep sealed that image in as valid and spent the
+// rollback that would have undone it. No-op on a normal (non-pending) boot.
+//
+// Whether being online is even the expected state is the caller's fact, sampled once at arm
+// time: a device with no credentials and no wire is legitimately offline. On this firmware
+// that state never reaches here (the setup portal does not return), which is why the flag is
+// computed rather than assumed — it is the control flow around it that would change.
+static bool s_ota_gate_link_expected = false;
 
 static void ota_health_gate_task(void*) {
     const esp_partition_t* running = esp_ota_get_running_partition();
@@ -163,14 +173,40 @@ static void ota_health_gate_task(void*) {
         return;
     }
 
-    ESP_LOGI(TAG, "OTA image pending verify — holding rollback armed for %ds health window",
-             kOtaHealthGateS);
-    vTaskDelay(pdMS_TO_TICKS(kOtaHealthGateS * 1000));
+    ESP_LOGI(TAG, "OTA image pending verify — rollback stays armed until the link is proven "
+                  "(min %us, giving up after %us)",
+             (unsigned) tk::kHealthGateBaseS, (unsigned) tk::kHealthGateCapS);
 
-    if (esp_ota_mark_app_valid_cancel_rollback() == ESP_OK)
-        ESP_LOGI(TAG, "OTA image healthy for %ds — marked valid (rollback cancelled, largest block %u)",
-                 kOtaHealthGateS,
-                 (unsigned) heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+    // Poll rather than sleep-then-decide: the verdict is a function of elapsed time AND a link
+    // that can appear at any moment, so the commit should land shortly after the evidence does.
+    constexpr uint32_t kPollS = 5;
+    const TickType_t   start  = xTaskGetTickCount();
+    for (;;) {
+        vTaskDelay(pdMS_TO_TICKS(kPollS * 1000));
+        const uint32_t elapsed_s =
+            (uint32_t) (pdTICKS_TO_MS(xTaskGetTickCount() - start) / 1000);
+        const tk::HealthVerdict v =
+            tk::health_gate_decide(elapsed_s, tk::kHealthGateBaseS, tk::kHealthGateCapS,
+                                   s_ota_gate_link_expected, tk::net_is_up());
+        if (v == tk::HealthVerdict::Wait) continue;
+
+        if (v == tk::HealthVerdict::Commit) {
+            if (esp_ota_mark_app_valid_cancel_rollback() == ESP_OK)
+                ESP_LOGI(TAG, "OTA image healthy after %us on %s — marked valid (rollback "
+                              "cancelled, largest block %u)",
+                         (unsigned) elapsed_s, tk::net_link_str(tk::net_kind()),
+                         (unsigned) heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+        } else {
+            // Loud, and to syslog as well as /diag: this is the one outcome where the device
+            // keeps running a build that is going to disappear on the next reboot, and nothing
+            // else in the system will mention it.
+            ESP_LOGE(TAG, "OTA image never got a link within %us — NOT marking it valid; the "
+                          "next reboot rolls back to the previous firmware. Save any setting "
+                          "(e.g. POST /set_mqtt) to keep this image instead.",
+                     (unsigned) tk::kHealthGateCapS);
+        }
+        break;
+    }
     vTaskDelete(nullptr);
 }
 
@@ -571,6 +607,11 @@ extern "C" void app_main() {
     // marks a PENDING_VERIFY OTA image valid after a healthy window. If it cannot even be
     // created, the image would sit unconfirmed forever; boot_fatal() explicitly rolls a pending
     // image back to the last-good slot and halts an already-valid image.
+    //
+    // Is being online the expected state? Only if this device has a route to lose. Sampled here,
+    // where both facts are in scope, rather than re-derived inside the task from state that other
+    // code is free to change underneath it.
+    s_ota_gate_link_expected = !ssid.empty() || on_wire;
     if (xTaskCreate(ota_health_gate_task, "ota_gate", 3072, nullptr,
                     tk::kPrioOtaGate, nullptr) != pdPASS)
         boot_fatal("OTA health gate");

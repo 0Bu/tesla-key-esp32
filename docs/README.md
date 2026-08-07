@@ -285,16 +285,24 @@ POST /crash/dismiss        Acknowledge and DELETE this boot's crash report (eras
                              is not part of an OTA image) there is nothing to erase and the
                              dismissal still succeeds, clearing the fault-reset report; any
                              other erase error is a 500 and leaves the report standing
-GET  /heap                 { dt, b0, unit:"KiB", scale:10, free[], largest[] } — the board's
-                             own 24 h memory trend in tenths of a KiB, oldest sample first,
-                             null for a bucket with no sample. Answers what a spot value
+GET  /heap                 { dt, b0, b_boot, unit:"KiB", scale:10, free[], largest[] } — the
+                             board's own 24 h memory trend in tenths of a KiB, oldest sample
+                             first, null for a bucket with no sample. Answers what a spot value
                              cannot: a leak is a slope, fragmentation is the two series
-                             separating as largest[] sinks toward the 4 KB watchdog floor
+                             separating as largest[] sinks toward the 4 KB watchdog floor.
+                             The ring survives a restart (it is .noinit DRAM, cleared only by a
+                             power cut), so the slope that PRECEDED a heap-watchdog reboot is
+                             still there afterwards; b_boot is the bucket this boot began in,
+                             so any sample before it came from an earlier run
 POST /gen_keys[?force=1]   Generate ECDSA P-256 key (refuses overwrite without force)
 POST /send_key             Manually trigger pairing (charging_manager only; normally automatic)
 POST /set_vin              Persist VIN and reboot
-POST /set_mqtt             Persist the MQTT broker for the HA bridge and reboot
-                             ({"broker":"host:port"} or full "mqtt://…"; "" disables MQTT)
+POST /set_mqtt             Verify the MQTT broker, then persist it and reboot
+                             ({"broker":"host:port"} or full "mqtt://…"; "" disables MQTT).
+                             A changed, non-empty broker is CONNECTED to before it is saved:
+                             400 = the broker refused us (credentials), 502 = unreachable or
+                             no answer, 503 = too little contiguous memory to run the check.
+                             In every failing case nothing is written and nothing reboots
 POST /set_syslog           Persist the UDP Syslog server for the diag log and reboot
                              ({"server":"host:port"}; a bare host defaults to port 514;
                              "" disables Syslog)

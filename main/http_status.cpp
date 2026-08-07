@@ -407,12 +407,17 @@ esp_err_t handle_heap(GuardedReq rq) {
     static constexpr size_t kMax = tk::kHeapHistorySamples;
     tk::HeapTrendSample free_s[kMax];
     tk::HeapTrendSample large_s[kMax];
-    uint32_t bucket0 = 0;
-    const size_t n = tk::heap_trend_snapshot(free_s, large_s, kMax, &bucket0);
+    uint32_t bucket0 = 0, boot_bucket = 0;
+    const size_t n = tk::heap_trend_snapshot(free_s, large_s, kMax, &bucket0, &boot_bucket);
 
     cJSON* root = cJSON_CreateObject();
     cJSON_AddNumberToObject(root, "dt", (double)tk::heap_trend_dt_s());
     cJSON_AddNumberToObject(root, "b0", (double)bucket0);
+    // The bucket THIS boot started in. The ring now survives a restart (.noinit), so a reader that
+    // assumed bucket == uptime/dt would misplace every retained sample — and, worse, would draw a
+    // trend that crosses a reboot as one unbroken run. Every sample before b_boot came from an
+    // earlier run; the restart sits exactly on that boundary.
+    cJSON_AddNumberToObject(root, "b_boot", (double)boot_bucket);
     cJSON_AddStringToObject(root, "unit", "KiB");
     cJSON_AddNumberToObject(root, "scale", 10);   // samples are tenths of the unit
     cJSON* jf = cJSON_AddArrayToObject(root, "free");
