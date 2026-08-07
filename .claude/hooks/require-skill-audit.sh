@@ -53,7 +53,9 @@ case "$tool" in
     action="push_files (GitHub MCP)"; kind="push"
     ;;
   Bash)
-    norm="$(printf '%s' "$cmd" | sed -E 's/^[[:space:]]+//; s/^cd[[:space:]]+[^;&|]+(&&|;)[[:space:]]*//')"
+    # One shell segment per line (see gate_bash_segments): the `^` anchors below must see a
+    # CHAINED `&& git push` / `&& gh pr merge`, not just one that happens to come first.
+    norm="$(gate_bash_segments "$cmd")"
     if printf '%s' "$norm" | grep -Eq '^gh[[:space:]]+pr[[:space:]]+create([[:space:]]|$)'; then
       action="gh pr create"; kind="create"
       # The inline --body "..." is embedded in the command verbatim; also fold in a --body-file.
