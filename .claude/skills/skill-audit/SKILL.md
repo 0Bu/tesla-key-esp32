@@ -204,6 +204,14 @@ no unfixed drift, tick + stamp the box with the head commit:
 - [x] `/skill-audit` clean — PR create/push gate @ <short-sha>    # <short-sha> = git rev-parse --short=12 HEAD
 ```
 
+**What the gate recognises.** The Bash matcher splits the command into shell segments
+(`gate_bash_segments` in `pr-gate-lib.sh`) and anchors per segment, so a CHAINED
+`… ; git push` is gated exactly like a standalone one — it was not, and an unmatched command is
+not a lenient verdict but NO verdict, so the hook allowed it having checked nothing
+(`scripts/test-pr-gates.sh` pins this). The split is textual and deliberately conservative: it
+splits inside quotes too, so a command that merely MENTIONS a guarded action in an argument can
+be classified as that action. That can only cause an extra block, never a missed one.
+
 For a **new** PR, put that line in the body you submit (`gh pr create --body-file …` or the MCP
 `create_pull_request` body — the gate reads it directly, no network). For an **existing** PR, edit
 its body (`gh pr edit <pr> --body-file …`, or the GitHub MCP update tool) before pushing. A push to

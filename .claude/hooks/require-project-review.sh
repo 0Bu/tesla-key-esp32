@@ -45,7 +45,9 @@ case "$tool" in
     selector="$(printf '%s' "$input" | jq -r '.tool_input.pullNumber // .tool_input.pull_number // ""' 2>/dev/null)"
     ;;
   Bash)
-    norm="$(printf '%s' "$cmd" | sed -E 's/^[[:space:]]+//; s/^cd[[:space:]]+[^;&|]+(&&|;)[[:space:]]*//')"
+    # One shell segment per line (see gate_bash_segments): the `^` anchors below must see a
+    # CHAINED `&& git push` / `&& gh pr merge`, not just one that happens to come first.
+    norm="$(gate_bash_segments "$cmd")"
     if printf '%s' "$norm" | grep -Eq '^gh[[:space:]]+pr[[:space:]]+merge([[:space:]]|$)'; then
       action="gh pr merge"
       # PR selector = first PR-number or URL token after `gh pr merge` *on that line* (a `cd <dir>`

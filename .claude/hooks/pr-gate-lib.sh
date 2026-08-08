@@ -57,6 +57,34 @@ gate_sha_matches() {
   return 1
 }
 
+# gate_bash_segments <cmd>
+#   Prints a Bash command with one SHELL SEGMENT per line, so a matcher can anchor at `^` and
+#   still see an action that is CHAINED rather than first.
+#
+#   THIS EXISTS BECAUSE ANCHORING ALONE WAS A COMPLETE BYPASS. The gates used to run their
+#   `grep -Eq '^git[[:space:]]+push…'` against the raw command with only a leading `cd … &&`
+#   stripped. `grep` anchors `^` per PHYSICAL LINE, so:
+#       git commit -m x <newline> git push origin br   -> matched   (push starts a line)
+#       git commit -m x && git push origin br          -> matched NOTHING
+#   and an unmatched command falls through `[ -n "$action" ] || exit 0`, i.e. the hook allows
+#   the call having checked nothing at all. Not a mis-classification — no classification. Seen
+#   live: a `git push` at a commit whose PR stamp was stale went through behind
+#   `gh pr edit … &&`, minutes after a standalone push was correctly blocked. The same hole let
+#   `git checkout main && gh pr merge …` past the MERGE gate, which is the one that matters most.
+#
+#   Splitting on `;` `|` `&` covers `&&` and `||` for free (each becomes two breaks; the empty
+#   segment between them is harmless). Leading whitespace, `VAR=value` prefixes and a leading
+#   `cd <dir>` are stripped per segment so the real command starts the line.
+#
+#   Deliberately textual: it over-splits inside quotes (`git commit -m "a && b"`). That can only
+#   produce an EXTRA segment, never hide one — so the worst case is a conservative block, which
+#   is the right direction to fail for a gate.
+gate_bash_segments() {
+  printf '%s' "$1" \
+    | tr ';|&' '\n\n\n' \
+    | sed -E 's/^[[:space:]]+//; s/^([A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*[[:space:]]+)+//; s/^cd[[:space:]]+[^[:space:]]+[[:space:]]*//'
+}
+
 # gate_head_sha  -> local HEAD (short 12), empty if not a git repo.
 gate_head_sha() { git -C "${GATE_PROJ:-$PWD}" rev-parse --short=12 HEAD 2>/dev/null; }
 
