@@ -15,6 +15,10 @@ Build from source, full API and security model: [docs/README.md](docs/README.md)
 - A browser with Web Serial support
 - The Tesla's 17-character VIN
 
+An esp32s3 can run on Ethernet instead of WiFi — including PoE, so one cable powers it and you
+can mount it wherever the car is. It needs no WiFi setup (Step 2) — it comes up on DHCP and the
+VIN is set in the web UI. See [docs/README.md](docs/README.md#wired-networking-optional-esp32s3).
+
 ---
 
 ## Step 1 — Install the firmware
