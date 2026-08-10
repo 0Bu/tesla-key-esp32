@@ -48,7 +48,8 @@ scripts/run-mock-tests.sh   # compile + run host logic tests in seconds (cmake +
 
 It covers VIN validation, imperial→metric conversion, the `link_state()` four-state machine
 (incl. the debounced-ASLEEP asymmetry) and its `/status`/MQTT strings, the per-target
-platform/OTA-suffix mapping, the MCP protocol core (version negotiation, method routing,
+platform/OTA-suffix mapping, the VIN-stable Home Assistant node identifier with its board-MAC
+fallback (`logic/ha_identity.hpp`), the MCP protocol core (version negotiation, method routing,
 int clamp), the ONE command registry both command surfaces dispatch through
 (`logic/command_registry.hpp` — REST + MCP names, kinds, shared arg bounds and the
 command-specific evcc boolean-body compatibility rule), the
@@ -320,9 +321,9 @@ POST /api/1/vehicles/{VIN}/command/{command}   # execute command
 GET  /api/1/vehicles/{VIN}/vehicle_data        # charge state
 GET  /api/1/vehicles/{VIN}/body_controller_state
 GET  /status                                   # web-UI JSON snapshot (wifi, ble, mqtt, syslog, vehicle cache, read-only telemetry under "tele"). The web UI's live feed — app.js polls it every 4 s (cache-busted, no-store).
-                                               # ALWAYS carries sys{free_heap,min_free_heap,largest_block,uptime_s,wifi_reconnects,reset_reason,safe_mode} — the block a remote triage reads first, and the one that was missing entirely on a device whose dominant failure mode is heap exhaustion.
+                                               # ALWAYS carries sys{board_mac,free_heap,min_free_heap,largest_block,uptime_s,wifi_reconnects,reset_reason,safe_mode} — board_mac identifies the physical controller while the other fields expose its runtime health.
                                                # last_crash{reason,reason_code,fault,coredump,task,pc,backtrace[],corrupted,elf_sha256} appears ONLY when the boot is notable (a fault reset, or a dump for this build still in flash, not dismissed) — presence is the signal.
-GET  /status?redact=1                          # the BUG-REPORT form: the six reporter-identifying values (vin, ip, wifi.ssid, ble.addr + every scanned neighbour's, mqtt.broker, syslog.host) read "<redacted>". The KEY is always kept — an omitted field forges an "older build" signal. Opt-in per request; the dashboard polls the unredacted payload
+GET  /status?redact=1                          # the BUG-REPORT form: the reporter-identifying vehicle/network values (vin, ip, wifi.ssid, ble.addr + every scanned neighbour's, mqtt.broker, syslog.host) read "<redacted>". sys.board_mac deliberately remains visible so the physical controller can be diagnosed. The KEY is always kept — an omitted field forges an "older build" signal. Opt-in per request; the dashboard polls the unredacted payload
 POST /scan                                     # start a time-limited BLE discovery scan
 POST /mcp                                      # MCP server (Streamable HTTP, stateless JSON-RPC 2.0; GET → 405, no SSE).
                                                # Tools = the run-on-key charging command set + read-only get_vehicle_state
@@ -423,7 +424,10 @@ rather than transport-level success.
 `main/mqtt_ha.cpp` publishes all cached telemetry + device status to MQTT using HA's
 MQTT-Discovery convention. **Read-only by design** — no command topics subscribed (the car is
 never controlled or woken from HA). Broker URI from NVS `mqtt_uri` (web UI: Connections → MQTT);
-empty = disabled. Units are converted to metric (km, km/h) — only the `/api` evcc path keeps
+empty = disabled. The lowercased validated VIN is the MQTT node, discovery `unique_id` prefix and
+HA device identifier, so replacing the ESP32 preserves the same entities while the vehicle is
+unchanged. Only a missing/invalid VIN falls back to the board MAC until provisioning is complete.
+Units are converted to metric (km, km/h) — only the `/api` evcc path keeps
 miles. A schemeless broker defaults to plaintext `mqtt://`, but **defaults to `mqtts://` (TLS,
 CA-bundle-verified) when credentials are present** (username configured or `user:pass@host`) so
 the password isn't sniffable off-LAN; a failed TLS handshake stays disconnected with the reason
@@ -539,7 +543,7 @@ curl http://<ESP32-IP>/coredump -o coredump.bin
 # fragmentation is free[] holding steady while largest[] sinks toward the 4 KB floor)
 curl http://<ESP32-IP>/heap | jq
 
-# A shareable bug report: the device redacts VIN/SSID/IP/BLE-MAC/broker/syslog-host itself
+# A shareable bug report: vehicle/network identifiers are redacted; sys.board_mac stays diagnostic
 curl "http://<ESP32-IP>/status?redact=1" | jq
 curl "http://<ESP32-IP>/diag?redact=1"
 

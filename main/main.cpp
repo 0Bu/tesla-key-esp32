@@ -1,5 +1,6 @@
 #include <cstring>
 #include <cstdlib>
+#include <cstdio>
 #include <ctime>
 #include <string>
 #include <atomic>
@@ -17,6 +18,7 @@
 #include "esp_system.h"
 #include "esp_heap_caps.h"
 #include "esp_app_desc.h"
+#include "esp_mac.h"
 #include "bootloader_random.h"
 
 #include "boot_fatal.hpp"
@@ -350,8 +352,16 @@ extern "C" void app_main() {
     static std::string ble_mac = CONFIG_TESLA_BLE_MAC;
     config_store.load_str("ble_mac", ble_mac);
 
-    ESP_LOGI(TAG, "VIN: %s  BLE MAC: %s", vin.c_str(),
-             ble_mac.empty() ? "(scan)" : ble_mac.c_str());
+    // Physical board identity is diagnostic evidence, not the HA identity (which follows VIN).
+    uint8_t board_mac[6] = {0};
+    char board_mac_text[18] = "unavailable";
+    if (esp_read_mac(board_mac, ESP_MAC_WIFI_STA) == ESP_OK) {
+        std::snprintf(board_mac_text, sizeof(board_mac_text), "%02x:%02x:%02x:%02x:%02x:%02x",
+                      (unsigned)board_mac[0], (unsigned)board_mac[1], (unsigned)board_mac[2],
+                      (unsigned)board_mac[3], (unsigned)board_mac[4], (unsigned)board_mac[5]);
+    }
+    ESP_LOGI(TAG, "VIN: %s  BLE MAC: %s  Board MAC: %s", vin.c_str(),
+             ble_mac.empty() ? "(scan)" : ble_mac.c_str(), board_mac_text);
 
     log_heap("preinit");
 

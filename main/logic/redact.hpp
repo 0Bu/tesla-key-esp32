@@ -37,9 +37,9 @@ namespace tk {
 //     limit is the largest CONTIGUOUS free block (see the project CLAUDE.md), so the pass is a
 //     crash risk on exactly the request a user makes when something is already wrong.
 //
-//   * /diag leaks by LINE. A handful of log statements interpolate a VIN, an SSID, an IP, a MAC
-//     or a host into free text. That is the non-trivial half, and the table below is its
-//     allowlist.
+//   * /diag leaks by LINE. A handful of log statements interpolate a VIN, an SSID, an IP, a
+//     vehicle/nearby-device MAC or a host into free text. That is the non-trivial half, and the
+//     table below is its allowlist. The physical board MAC is intentionally retained for triage.
 //
 // THE VALUE IS REPLACED, THE KEY IS KEPT — and on this device that is stronger than a matter of
 // taste, because status_model.hpp's presence rules key on emptiness. `mqtt.broker` and
@@ -54,7 +54,9 @@ namespace tk {
 // `syslog.port`, `last_reboot` — the point of the report is that those still answer. Nor
 // `key_fingerprint`: it is a fingerprint of a PUBLIC key, it names no person, network or car,
 // and it is the primary evidence in every pairing-lifecycle report (which key is on the car,
-// whether it changed) — withholding it would cost the reports this exists to make possible.
+// whether it changed) — withholding it would cost the reports this exists to make possible. Nor
+// `sys.board_mac`: it identifies the replaceable ESP32 hardware rather than the car or home
+// network, and lets a board-swap report distinguish the old hardware from the new.
 
 // The one replacement token. Readers of a report key on this exact string to tell "the reporter
 // scrubbed it" apart from an empty/absent value (the device genuinely had nothing to say).
@@ -93,12 +95,11 @@ struct DiagRedaction {
 // carry the tag: where the message phrase alone is too generic to be safe ("IP: ", "VIN: "), the
 // tag is part of the match, and a TAG rename must be mirrored here.
 inline constexpr DiagRedaction kDiagRedactions[] = {
-    // main.cpp "VIN: %s  BLE MAC: %s" — the boot identity line, and the single worst one: the
-    // car and its radio address on one line. Two rules, because the two values are separated by
-    // a literal (note the DOUBLE space, which is how the format string spells it) and the shape
-    // of the line is itself useful to a reader.
+    // main.cpp "VIN: %s  BLE MAC: %s  Board MAC: %s" — redact the car identifiers but retain
+    // the physical board identity. Two rules preserve all three labels; if the ring truncates
+    // before the Board-MAC delimiter, the second rule still fails closed to the line end.
     {"main: VIN: ", "  BLE MAC: "},
-    {"  BLE MAC: ", ""},
+    {"  BLE MAC: ", "  Board MAC: "},
     // vehicle_ctrl.cpp "VehicleController ready for VIN %s"
     {"VehicleController ready for VIN ", ""},
     // http_api.cpp "CMD %s on VIN %s" — the marker starts AFTER the command name, so which
@@ -164,11 +165,11 @@ inline constexpr DiagRedaction kDiagRedactions[] = {
     // the redaction incoherent: scrubbed in the JSON, printed in the log a few sections below it
     // in the same report.
     //
-    // The base topic and HA prefix deliberately SURVIVE. The topic embeds the node id
-    // ("teslakey_" + three bytes of this board's WiFi MAC), which identifies the BOARD, not the
-    // reporter's network or car — and /status carries no MAC field for it to be incoherent with.
-    // If a MAC ever reaches /status, this line's tail must be redacted in the same commit.
+    // The HA prefix deliberately SURVIVES, but the base topic now embeds the vehicle-stable VIN
+    // node id. Scrub it just like the VIN itself; leaving the broker redacted but the car identity
+    // visible in the same line would make a public bug report internally inconsistent.
     {"MQTT bridge started → ", " (base topic "},
+    {" (base topic ", ", HA prefix "},
 };
 inline constexpr std::size_t kDiagRedactionCount = sizeof(kDiagRedactions) / sizeof(kDiagRedactions[0]);
 
