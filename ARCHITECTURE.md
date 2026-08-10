@@ -300,7 +300,11 @@ grouped under one device. **Read-only by design** — no command topics are subs
   cert fails the handshake and the bridge stays disconnected — there is **no silent fallback to
   plaintext**. The failure reason surfaces in `/status` (`mqtt.error`) and the web UI. An explicit
   scheme (`mqtt://`/`mqtts://`) is always honored. `/status` also exposes `mqtt.tls`.
-- **Node id:** `teslakey_<mac3>` from the WiFi STA MAC (stable across VIN changes).
+- **Node id:** `teslakey_<vin>` from the lowercase, validated VIN. Discovery topics, state
+  topics, entity `unique_id`s and the HA device identifier therefore survive replacement of the
+  ESP32 board; changing the configured vehicle intentionally creates a different HA device. The
+  physical WiFi-STA eFuse MAC remains independently visible as `sys.board_mac` and in the boot
+  diagnostics so replacement boards can still be distinguished during triage.
 - **Topics:** `<base>/<node>/{charge,climate,drive,tires,closures,vehicle,device}` (retained
   JSON), availability/LWT `<base>/<node>/availability` (`online`/`offline`). Discovery
   configs under `<prefix>/<sensor|binary_sensor>/<node>/<object>/config` (retained).
@@ -655,9 +659,10 @@ active — the lease flag is exactly the window in which `esp_wifi_sta_get_ap_in
 
 **The W5500 has no MAC of its own** (no EEPROM), so one is supplied from `ESP_MAC_ETH` — the
 chip's eFuse-derived Ethernet address, distinct from the WiFi STA MAC so the two can never
-collide on one LAN. The MQTT/HA node id stays derived from `ESP_MAC_WIFI_STA` even on a wired
-device: it is baked into every Home Assistant entity id, and deriving it from the *active*
-transport would rename every entity the first time a board changed transport.
+collide on one LAN. The MQTT/HA node id is transport- and board-independent: it is derived from
+the validated VIN, because it is baked into every Home Assistant entity id. Switching between
+WiFi and Ethernet — or replacing the entire ESP32 board — therefore cannot rename the vehicle's
+entities.
 
 The STA→LAN link (distinct from the car BLE link-state below) is kept up by two layers:
 
