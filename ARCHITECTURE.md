@@ -140,9 +140,10 @@ hardware Secure Boot (`CONFIG_SECURE_SIGNED_APPS_NO_SECURE_BOOT` + `..._RSA_SCHE
 `CONFIG_SECURE_SIGNED_ON_UPDATE_NO_SECURE_BOOT`): every OTA image is signed and the running
 app verifies the signature before installing, so a compromised update host can't push
 unsigned firmware. No eFuses are burned (reversible, no brick risk, web installer still
-works); trust is bootstrapped from the running app's signature block (TOFU). The build is
-unsigned (`CONFIG_SECURE_BOOT_BUILD_SIGNED_BINARIES=n`) — `scripts/ci-build-all.sh` signs
-each image with the offline key (CI secret `OTA_SIGNING_KEY`). Classic esp32 needs chip rev
+works); trust is bootstrapped from the running app's signature block (TOFU). Compilation stays
+unsigned (`CONFIG_SECURE_BOOT_BUILD_SIGNED_BINARIES=n`); the unprivileged build job stages only
+data, then trusted `scripts/ci-sign-artifacts.sh` signs it inside the protected
+`firmware-signing` Environment. No PR source executes with `OTA_SIGNING_KEY`. Classic esp32 needs chip rev
 v3.0+ (`CONFIG_ESP32_REV_MIN_3` in `sdkconfig.defaults.esp32`). **Full key lifecycle +
 rotation: [`SECURITY.md`](SECURITY.md).**
 
@@ -151,8 +152,8 @@ sized to fill 4 MB (the smallest supported flash; a larger one leaves the top
 unused) so ONE table serves every target; app at `0x20000`. The `ci-build-all.sh` **app-size gate**
 sits at `slot − 32 KB` (0x1e8000): each image's code rounds up to a 64 KB Secure-Boot boundary + a
 4 KB signature, and the largest — esp32c6, 0x1e1000 signed — clears it by ~28 KB. That block
-boundary is worth knowing about: c6 sat ~3 KB below one, so a 3 KB change crossed it and cost a
-full 64 KB. The gate is still met, but c6 is the target to size-check first.
+boundary is worth knowing about: c6 currently projects to 0x1e1000 signed, only 28 KiB below the
+policy gate. The gate is still met, but c6 is the target to size-check first.
 **esp32s3 carries the extra on-device display code and still fits at the base `-Og`** like every
 target: the Package A size levers
 (#154) freed the ~64 KB the display needs, so no `-Os` (which hard-freezes under load — rejected
@@ -165,9 +166,9 @@ a reflash — OTA writes follow the INSTALLED table, and `ota_0` stays at `0x200
 esp32 / esp32s3 / esp32c3 / esp32c6 (`scripts/ci-build-all.sh`). The build deltas are
 config-only: target set per build (`idf.py set-target`), flash 4 MB, and the console is native
 USB-Serial/JTAG (`CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG`) on s3/c3/c6 — absent on the classic
-esp32, where it auto-falls-back to UART0. The only per-target sdkconfig files are
-`sdkconfig.defaults.esp32` (Secure-Boot chip-rev floor) and `sdkconfig.defaults.esp32s3`
-(on-device ST7735 display, no PSRAM — the display auto-enables only on a detected T-Dongle-S3).
+esp32, where it auto-falls-back to UART0. All four targets have an explicit
+`sdkconfig.defaults.<target>`: classic ESP32 carries the Secure-Boot chip-rev floor, S3 adds the
+on-device ST7735/display configuration, and S3/C3/C6 select native USB-Serial/JTAG.
 The web installer is a
 single page whose `manifest.json` carries one build per chipFamily (esp-web-tools auto-selects by
 detected chip); OTA is a single channel where each device pulls its own
@@ -249,8 +250,13 @@ car), needs no MQTT and no panel (works on a display-less board), an ~12-byte bi
 frame with no heap. Opt-in: a no-op stub unless `CONFIG_TESLA_LED_ENABLED` (default off — not every
 board carries this LED); pins/brightness from Kconfig (a T-Dongle-S3 wires it DI=40/CI=39).
 
-**PR preview installer.** Every same-repo PR publishes its **signed** build so a change can be
-browser-flashed and tried *before* merge. CI writes the PR's **full self-contained site**
+**PR preview installer.** A maintainer can opt a reviewed same-repo PR into a **signed** build
+with the `signed-preview` label, so it can be browser-flashed and tried *before* merge. The normal
+PR build is unsigned and unprivileged. Only after it succeeds does the default-branch
+`signed-pr-preview.yml` workflow validate the current head, enter the protected
+`firmware-signing` Environment, revalidate state/head/label after the approval wait, and sign the
+artifact strictly as data — PR code is never checked out or executed with the key. CI then writes
+the PR's **full self-contained site**
 (`build-pages.sh` → the installer page + a per-PR `manifest.json` + same-origin bins) to
 `PR/<N>/` on the **`gh-pages` branch**, so `https://0bu.github.io/tesla-key-esp32/PR/<N>/` is a
 directly browsable installer for that PR — it detects it is under `/PR/<N>/`, shows a preview
@@ -263,8 +269,8 @@ deploy (main-only, whole-site) can't host per-PR subpaths. Main owns the gh-page
 each PR owns `PR/<N>/`; both are synced by `scripts/publish-pages-branch.sh` (root sync
 preserves the `PR/` tree). Constraints:
 
-- **Signed-only.** Fork PRs get no `OTA_SIGNING_KEY` → build unsigned → **no** preview
-  published (an unsigned image crash-loops at boot — see [`SECURITY.md`](SECURITY.md)).
+- **Signed-only and opt-in.** Unlabelled and fork PRs remain unsigned compile checks and publish
+  **no** preview (an unsigned image crash-loops at boot — see [`SECURITY.md`](SECURITY.md)).
 - **Versioning `<latest-tag>-PR-<N>`** (e.g. `1.4.30-PR-157`), stamped from the newest
   released tag. `ver_newer()` parses only `x.y.z` and ignores the suffix, so basing on the
   *latest release* (not `next`) guarantees a later main release compares strictly-newer → the

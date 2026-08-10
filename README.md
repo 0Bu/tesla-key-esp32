@@ -54,8 +54,9 @@ To preserve `nvs`, flash the separate parts from a local `build/` instead:
 
 ## Build from source
 
-Builds run in the official **ESP-IDF Docker image, pinned to the version CI uses**
-(`scripts/idf-docker.sh` reads it from `.github/workflows/build.yml`, so it never drifts) —
+Builds run in the official **ESP-IDF Docker image pinned by both tag and immutable digest**.
+`esp-idf-toolchain.txt` is the single toolchain contract read by local Docker, CI and Renovate;
+the four committed `dependencies.lock.<target>` files pin each Component Manager graph. There is
 no local toolchain to install. Flashing is done from the host with `esptool`, because Docker
 Desktop has no USB passthrough.
 
@@ -63,10 +64,13 @@ Desktop has no USB passthrough.
 brew install esptool                                          # host flasher (once)
 git clone https://github.com/0Bu/tesla-key-esp32.git && cd tesla-key-esp32
 
-# Build via the CI-pinned ESP-IDF image (first run pulls it, then fetches
+# Build via the CI-pinned ESP-IDF image (first run pulls it, then materialises
 # yoziru/tesla-ble — 2–4 min). CMake applies the repository's pinned anti-replay
 # patch automatically. The wrapper keeps build/ host-owned. Pick your chip:
 ./scripts/idf-docker.sh idf.py set-target esp32s3 build   # or esp32 / esp32c3 / esp32c6
+
+# Or reproduce the complete unsigned four-target CI build + ELF/map/size diagnostics:
+./scripts/idf-docker.sh ./scripts/ci-build-all.sh local
 
 # Optional: WiFi SSID/pass + VIN (BLE MAC auto) — interactive
 ./scripts/idf-docker.sh idf.py menuconfig
