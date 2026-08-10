@@ -29,8 +29,11 @@
 // sized at compile time and asserted below. Every member zero-initialises deliberately (the
 // "nothing folded yet" state is a flag, not a non-zero sentinel), so the whole object lands in
 // .bss and costs nothing in the flash image either.
+#include "logic/config_store.hpp"   // config_crc32 — the same CRC the config blob is checked with
+
 #include <cstddef>
 #include <cstdint>
+#include <type_traits>
 
 namespace tk {
 
@@ -207,5 +210,92 @@ static_assert(sizeof(HeapRing) <= 1536,
               "before raising this");
 static_assert(2 * kHeapHistorySamples * sizeof(HeapTrendSample) == 1152, "ring cost changed");
 static_assert(kHeapHistorySamples * kHeapHistoryDtS == 86400, "the trend is meant to span 24 h");
+
+// ── Surviving the reboot ────────────────────────────────────────────────────────────────────────
+// WHY. This instrument exists to explain heap exhaustion, and the way heap exhaustion ENDS on this
+// device is a restart: logic/heap_watchdog.hpp deliberately reboots after five unbroken minutes
+// under the floor. A ring that lives only in .bss is therefore erased by the one event it was
+// installed to explain — the reader gets a `heap:<n>` breadcrumb saying the slope existed, and no
+// slope. The same holds for a panic, a task-watchdog reset and an OTA install.
+//
+// The fix is NOT flash. Persisting a 1.2 KB ring every five minutes would mean ~100k writes a year
+// into the partition that also holds the WiFi credentials and the private key, to keep an artifact
+// whose whole value is the last day — that trade was rejected when this file was written and it is
+// still wrong. What changes is that there is a third option between "RAM" and "flash": DRAM that
+// the startup code does not clear. A `.noinit` object survives every reset that KEPT POWER — a
+// software restart, a panic, a watchdog, an OTA reboot — which is exactly the set of events this
+// trend needs to outlive, and it costs zero flash writes and zero extra RAM (the ring simply moves
+// section). A power cut still clears it, and must: the values would be meaningless.
+//
+// WHY A CRC AND NOT A RESET-REASON CHECK. After a power-on the section holds whatever the SRAM
+// happened to power up as, so the retained image has to prove itself rather than be inferred from
+// esp_reset_reason(). A magic word alone is a 1-in-4-billion accident away from adopting garbage as
+// a memory trend, which would be a diagnostic that lies; the CRC makes adoption evidence-based, and
+// it is the same routine (and therefore the same known-answer test) the config blob is checked
+// with. The FINGERPRINT covers the other way this goes wrong: an OTA can change the ring's geometry
+// or sample type while the bytes stay perfectly valid, and reading last week's layout with this
+// week's struct produces a plausible, wrong chart.
+struct HeapPersist {
+    uint32_t crc;           // over every byte AFTER this field — hence its position
+    uint32_t magic;
+    uint32_t fingerprint;
+    HeapRing ring;
+};
+
+inline constexpr uint32_t kHeapPersistMagic = 0x48545231u;   // "HTR1"
+
+// Everything a reader of the retained bytes must agree with us about. Derived from the geometry
+// rather than hand-bumped, so a change to the ring cannot be made without invalidating old images —
+// there is no version constant anybody can forget to raise.
+inline constexpr uint32_t heap_persist_fingerprint() {
+    return 0x9E3779B9u
+         ^ (static_cast<uint32_t>(sizeof(HeapRing)) * 2654435761u)
+         ^ (static_cast<uint32_t>(kHeapHistorySamples) * 40503u)
+         ^ (kHeapHistoryDtS * 2246822519u)
+         ^ (static_cast<uint32_t>(sizeof(HeapTrendSample)) << 24);
+}
+
+// The CRC as it should be for this content. Covers magic and fingerprint too: a corrupted magic
+// must fail as corruption rather than read as "no trend was ever stored".
+inline uint32_t heap_persist_crc(const HeapPersist& p) {
+    const uint8_t* from = reinterpret_cast<const uint8_t*>(&p.magic);
+    return config_crc32(from, sizeof(HeapPersist) - offsetof(HeapPersist, magic));
+}
+
+// May the retained image be adopted? All three must hold; any failure means start empty.
+inline bool heap_persist_valid(const HeapPersist& p) {
+    return p.magic == kHeapPersistMagic
+        && p.fingerprint == heap_persist_fingerprint()
+        && p.crc == heap_persist_crc(p);
+}
+
+// The ring's clock is `monotonic_s / kHeapHistoryDtS`, and monotonic time restarts at zero on every
+// boot — so an adopted ring would have the new boot's samples land back among the old ones. The
+// carry is the offset that keeps ONE continuous timeline across the restart: the virtual second at
+// which the bucket AFTER the retained open one begins. Feed `uptime_s + carry` and the first sample
+// of the new boot closes the bucket the old boot left open, with no gap and no overlap.
+//
+// The reboot therefore always lands ON a bucket boundary. That is a deliberate rounding: it can
+// misplace the restart by up to five minutes, and the alternative — carrying the exact second —
+// would fold pre- and post-reboot samples into one bucket and hide the boundary entirely, which is
+// the one thing a reader of this chart must be able to see. A downtime longer than one bucket is
+// not lost either: record() fills the skipped buckets with the absence sentinel, so the gap is
+// drawn as a gap.
+inline constexpr uint32_t heap_persist_next_carry(const HeapRing& r) {
+    return (r.open_bucket_ + 1u) * kHeapHistoryDtS;
+}
+
+// Standard layout is what makes offsetof() above well-defined and the byte image stable across
+// builds of the same struct; trivial destructibility is what lets the object live in a section the
+// startup code never touches, with no constructor to re-zero it on every boot.
+static_assert(sizeof(HeapPersist) <= 1536 + 16,
+              "the retained trend is static storage on a heap-tight board — justify the growth");
+static_assert(offsetof(HeapPersist, magic) == sizeof(uint32_t),
+              "the CRC must be the first field, with the covered bytes immediately after it");
+static_assert(std::is_standard_layout<HeapPersist>::value,
+              "offsetof() above and the retained byte image both require standard layout");
+static_assert(std::is_trivially_destructible<HeapPersist>::value &&
+              std::is_trivially_destructible<HeapRing>::value,
+              "the retained object lives in a section the startup code never runs code over");
 
 }  // namespace tk

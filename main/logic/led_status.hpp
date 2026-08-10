@@ -54,7 +54,8 @@ struct LedAlerts {
 // The priority ladder. Highest condition wins; see the per-line rationale. The shared facts
 // come from UiSnapshot; the top three tiers are the LED-only latched alerts. Mirrors the
 // display's centre-priority (WiFi search > pairing > battery > BLE search), extended with the
-// error/OTA/asleep tiers the LED adds on top.
+// error/OTA/asleep tiers the LED adds on top. ("Network search" was "WiFi search" until the
+// transport seam landed; the tier is unchanged, only its input stopped assuming a radio.)
 inline LedPattern led_pattern(const UiSnapshot& s, const LedAlerts& a) {
     // 1. Attention required — a re-pair is pending or an OTA install failed. Red blink is the
     //    only "you must do something" signal, so it outranks everything.
@@ -65,9 +66,11 @@ inline LedPattern led_pattern(const UiSnapshot& s, const LedAlerts& a) {
     // 3. Warning that recovers on its own — e.g. the car is visible but every connect times
     //    out (at its ~3-BLE-device limit, or another controller holds the link).
     if (a.warn)                             return {LedColor::Amber,   LedAnim::Blink,   false};
-    // 4. No LAN yet — connecting to / reconnecting WiFi (in the running app WiFi is the only
-    //    thing that can be "not connected"; the setup portal runs before this task exists).
-    if (!s.wifi_on)                         return {LedColor::Blue,    LedAnim::Breathe, false};
+    // 4. No LAN yet — the active transport (WiFi or Ethernet) has no lease. Deliberately
+    //    transport-BLIND: one pixel cannot say which link is missing, and a user watching a
+    //    PoE board does not need it to — "no network" is the actionable fact either way.
+    //    (The setup portal runs before this task exists, so it is never this state.)
+    if (!s.net_up())                        return {LedColor::Blue,    LedAnim::Breathe, false};
     // 5. BLE link up but no session — waiting for the NFC-card pairing to complete.
     if (s.ble_connected && !s.paired)       return {LedColor::Magenta, LedAnim::Pulse,   false};
     // 6. Charging — the primary evcc event; a green swell that's visible across the room.

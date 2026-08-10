@@ -121,10 +121,14 @@ Trust model:
   manifest) also defeats a host that advertises a new version but serves an old binary. No
   eFuse anti-rollback is burned (by design), so this is the downgrade defense.
 - **Rollback is enabled** (`CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE`); `main.cpp` defers
-  `esp_ota_mark_app_valid_cancel_rollback()` to a health gate that keeps rollback armed until a
-  freshly-flashed image has run healthily for a window (≈ 90 s). An image that boots but then
-  crashes/OOM-reboots under load is reverted on the next boot — the old startup-time mark would
-  have committed it before it proved itself. A fatal essential-component failure during startup
+  `esp_ota_mark_app_valid_cancel_rollback()` to a health gate (`logic/health_gate.hpp`) that keeps
+  rollback armed until a freshly-flashed image has both run ≈ 90 s **and proven it still has a
+  network link**. An image that boots but then crashes/OOM-reboots under load is reverted on the
+  next boot — the old startup-time mark would have committed it before it proved itself — and so is
+  an image that boots cleanly but never reaches the LAN, which is the one no later OTA could fix,
+  because the fix would have to arrive over the link it broke. After ≈ 600 s without a link the
+  image is simply left `PENDING_VERIFY` for the next reboot to roll back; it does not restart
+  itself, which would let a long network outage silently downgrade a good build. A fatal essential-component failure during startup
   does not wait for another reset: while the image is still `PENDING_VERIFY`, `boot_fatal()`
   explicitly marks it invalid and reboots into the previous slot. The same failure on an
   already-valid image halts instead of entering an automatic reboot loop.

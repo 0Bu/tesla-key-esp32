@@ -1,4 +1,5 @@
 #include "mqtt_ha.hpp"
+#include "net.hpp"
 #include "vehicle_ctrl.hpp"
 #include "nvs_storage.hpp"
 #include "platform.hpp"
@@ -6,6 +7,7 @@
 #include "logic/link_state.hpp"
 #include "task_config.hpp"
 #include "logic/ha_templates.hpp"
+#include "logic/mqtt_uri.hpp"
 #include "diag_crash.hpp"
 #include "safe_mode.hpp"
 #include <esp_heap_caps.h>
@@ -32,14 +34,6 @@
 
 static const char* TAG = "mqtt_ha";
 
-// Defined in main.cpp: true only while the STA holds an IP. Gate esp_wifi_sta_get_ap_info()
-// so it's never read mid-association (concurrent read of the half-built AP record faults —
-// LoadProhibited/EXCVADDR=0x1).
-bool wifi_is_connected();
-
-// Defined in main.cpp: cumulative WiFi RE-connects since boot. A flapping AP is invisible in any
-// instantaneous "connected" reading, which is why the counter exists and why it is published.
-unsigned wifi_reconnect_count();
 
 // Cumulative broker RE-connects since boot (the first connect of a boot is not counted). Written
 // from the esp-mqtt event task, read by the publisher task — an atomic, since neither may take a
@@ -390,9 +384,11 @@ static void publish_state() {
     // Device diagnostics
     {
         cJSON* o = cJSON_CreateObject();
-        wifi_ap_record_t ap{};
-        if (wifi_is_connected() && esp_wifi_sta_get_ap_info(&ap) == ESP_OK)
-            cJSON_AddNumberToObject(o, "wifi_rssi", ap.rssi);
+        // WiFi signal — OMITTED, not zeroed, on a wired device: HA renders a missing value as
+        // "unavailable", whereas a published 0 dBm would be read as an implausibly perfect link.
+        int rssi = 0;
+        if (tk::net_wifi_signal(&rssi, nullptr))
+            cJSON_AddNumberToObject(o, "wifi_rssi", rssi);
         cJSON_AddBoolToObject(o, "ble_connected", s_vehicle->ble_connected());
         int8_t r = 0;
         if (s_vehicle->ble_rssi(r)) cJSON_AddNumberToObject(o, "ble_rssi", r);
@@ -429,7 +425,7 @@ static void publish_state() {
         cJSON_AddStringToObject(o, "crash_dump", ci.coredump ? "ON" : "OFF");
         cJSON_AddStringToObject(o, "safe_mode",  tk::safe_mode_active() ? "ON" : "OFF");
 
-        cJSON_AddNumberToObject(o, "wifi_reconnects", (double)wifi_reconnect_count());
+        cJSON_AddNumberToObject(o, "wifi_reconnects", (double)tk::net_reconnect_count());
         cJSON_AddNumberToObject(o, "mqtt_reconnects", (double)s_reconnects.load());
         pub_json(s_topic[D_DEVICE], o);
     }
@@ -568,10 +564,7 @@ static bool mqtt_ha_start_impl(VehicleController& vehicle,
     // empty value (incl. an explicit "" stored to disable) leaves MQTT off.
     s_uri = CONFIG_TESLA_MQTT_BROKER_URI;
     config_store.load_str("mqtt_uri", s_uri);
-    // Trim whitespace.
-    while (!s_uri.empty() && (s_uri.back() == ' ' || s_uri.back() == '\r' || s_uri.back() == '\n')) s_uri.pop_back();
-    size_t b = s_uri.find_first_not_of(" \t");
-    if (b != std::string::npos && b > 0) s_uri = s_uri.substr(b);
+    s_uri = tk::mqtt_trim(s_uri);
 
     if (s_uri.empty()) {
         ESP_LOGI(TAG, "MQTT disabled (no broker configured)");
@@ -582,23 +575,22 @@ static bool mqtt_ha_start_impl(VehicleController& vehicle,
     s_pass   = CONFIG_TESLA_MQTT_PASSWORD;
     s_prefix = CONFIG_TESLA_MQTT_DISCOVERY_PREFIX;
 
-    // Scheme. The web UI keeps the simple "host:port" form, so most entries arrive without a
-    // scheme. When credentials are present we default to TLS (mqtts://) rather than plaintext
-    // mqtt://: the MQTT CONNECT carries username + password in the clear on plain mqtt, so a
-    // credentialed broker that lives off the trusted LAN (a common HA setup: cloud/VLAN/VPN
-    // broker) would otherwise leak them to any sniffer. Credentials are "present" if a username
-    // is configured (Kconfig) or the authority embeds userinfo ("user:pass@host"). A bare,
-    // credential-free local broker stays on plaintext mqtt. An explicit scheme is always honored.
-    if (s_uri.find("://") == std::string::npos) {
-        bool has_creds = !s_user.empty() || s_uri.find('@') != std::string::npos;
-        s_uri = (has_creds ? "mqtts://" : "mqtt://") + s_uri;
-    }
-    s_tls = s_uri.rfind("mqtts://", 0) == 0;   // starts with mqtts://
+    // Scheme (credential-aware TLS default) — the rule lives in logic/mqtt_uri.hpp, because
+    // /set_mqtt's save-time pre-flight has to dial the SAME URI this does. A probe that succeeded
+    // against a differently-derived URI would be a green check for a broker the bridge never
+    // connects to, which is worse than no check at all.
+    s_uri = tk::mqtt_effective_uri(s_uri, !s_user.empty());
+    s_tls = tk::mqtt_uri_is_tls(s_uri);
     s_broker_disp = broker_display(s_uri);
     s_interval_s = CONFIG_TESLA_MQTT_PUBLISH_INTERVAL_S;
     if (s_interval_s < 5) s_interval_s = 5;
 
     // Unique node id from the WiFi STA MAC (stable across VIN changes / reboots).
+    // DELIBERATELY the WiFi MAC even on a wired device, where no WiFi link exists: this id is
+    // baked into every Home Assistant entity id under this device. Deriving it from whichever
+    // transport happens to be active would RENAME every entity the first time a board changed
+    // transport — and ESP_MAC_WIFI_STA is an eFuse-backed base address that is readable whether
+    // or not the radio was ever started, so it stays a stable identity rather than a link fact.
     uint8_t mac[6] = {0};
     esp_read_mac(mac, ESP_MAC_WIFI_STA);
     char node[24];
@@ -621,7 +613,7 @@ static bool mqtt_ha_start_impl(VehicleController& vehicle,
     const std::string& vin = vehicle.vin();
     s_devname = "Tesla Key";
     if (vin.size() == 17) s_devname += " (" + vin + ")";
-    esp_netif_t* netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+    esp_netif_t* netif = tk::net_active_netif();
     esp_netif_ip_info_t ip{};
     if (netif && esp_netif_get_ip_info(netif, &ip) == ESP_OK) {
         char ipbuf[16]; esp_ip4addr_ntoa(&ip.ip, ipbuf, sizeof(ipbuf));

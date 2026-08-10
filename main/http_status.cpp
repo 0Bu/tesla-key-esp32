@@ -9,6 +9,7 @@
 // Dispatched from handle_all in http_server.cpp (inside its try/catch OOM guard).
 
 #include "http_handlers.hpp"
+#include "net.hpp"
 #include "diag_log.hpp"
 #include "diag_crash.hpp"
 #include "heap_trend.hpp"
@@ -20,7 +21,6 @@
 #include "syslog.hpp"
 #include <esp_netif.h>
 #include <esp_app_desc.h>
-#include <esp_wifi.h>
 #include <esp_heap_caps.h>
 #include <esp_timer.h>
 #include <sdkconfig.h>
@@ -45,7 +45,7 @@ esp_err_t handle_scan(GuardedReq rq) {
 
 static void current_ip(char* out, size_t sz) {
     out[0] = '\0';
-    esp_netif_t* netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+    esp_netif_t* netif = tk::net_active_netif();
     esp_netif_ip_info_t ip{};
     if (netif && esp_netif_get_ip_info(netif, &ip) == ESP_OK) {
         esp_ip4addr_ntoa(&ip.ip, out, sz);
@@ -105,21 +105,22 @@ static cJSON* build_status_object(bool redact) {
     in.paired_at       = (long long)g_vehicle->paired_at();
     in.reauth          = g_vehicle->reauth_required();
 
-    // WiFi: SSID + live signal strength (dBm) of the station link. The friendly name is
-    // the highest 802.11 generation the AP advertises — the ESP32 radio itself may top
-    // out lower, but the flags reflect the AP, so a Wi-Fi 6 router reads "Wi-Fi 6".
-    wifi_ap_record_t ap{};
-    if (wifi_is_connected() && esp_wifi_sta_get_ap_info(&ap) == ESP_OK) {
+    // WiFi: SSID + live signal strength (dBm) of the station link, both from the transport
+    // seam, which owns the mid-association guard. All three stay unset on a wired device, so
+    // the `wifi` object comes out empty exactly as it does while the radio is down.
+    char ssid[33] = {0};
+    int  rssi     = 0;
+    if (tk::net_wifi_signal(&rssi, ssid)) {
         in.wifi_connected = true;
-        in.wifi_ssid      = (const char*)ap.ssid;
-        in.wifi_rssi      = ap.rssi;
-        const char* std_ = ap.phy_11ax ? "Wi-Fi 6"
-                         : ap.phy_11ac ? "Wi-Fi 5"
-                         : ap.phy_11n  ? "Wi-Fi 4"
-                         : ap.phy_11g  ? "802.11g"
-                         : ap.phy_11b  ? "802.11b" : nullptr;
-        if (std_) in.wifi_std = std_;
+        in.wifi_ssid      = ssid;
+        in.wifi_rssi      = rssi;
+        if (const char* std_ = tk::net_wifi_standard()) in.wifi_std = std_;
     }
+
+    // Ethernet: emitted only while the wire carries the lease (logic/status_model.hpp explains
+    // why its presence — not a false-valued object — is the signal).
+    in.eth_link = (tk::net_kind() == tk::NetLink::Eth);
+    if (in.eth_link) tk::net_eth_phy(&in.eth_speed_mbps, &in.eth_full_duplex);
     // Read from the CONFIG, not from any live state: the marker outlives the reboot the rollback
     // performed, which is the whole reason it is persisted rather than kept in RAM.
     //
@@ -195,7 +196,7 @@ static cJSON* build_status_object(bool redact) {
     in.min_free_heap   = (uint32_t)heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL);
     in.largest_block   = (uint32_t)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL);
     in.uptime_s        = (uint32_t)(esp_timer_get_time() / 1000000);
-    in.wifi_reconnects = wifi_reconnect_count();
+    in.wifi_reconnects = tk::net_reconnect_count();
     in.safe_mode       = tk::safe_mode_active();
 
     // ── last_crash ────────────────────────────────────────────────────────────────────────────
@@ -406,12 +407,17 @@ esp_err_t handle_heap(GuardedReq rq) {
     static constexpr size_t kMax = tk::kHeapHistorySamples;
     tk::HeapTrendSample free_s[kMax];
     tk::HeapTrendSample large_s[kMax];
-    uint32_t bucket0 = 0;
-    const size_t n = tk::heap_trend_snapshot(free_s, large_s, kMax, &bucket0);
+    uint32_t bucket0 = 0, boot_bucket = 0;
+    const size_t n = tk::heap_trend_snapshot(free_s, large_s, kMax, &bucket0, &boot_bucket);
 
     cJSON* root = cJSON_CreateObject();
     cJSON_AddNumberToObject(root, "dt", (double)tk::heap_trend_dt_s());
     cJSON_AddNumberToObject(root, "b0", (double)bucket0);
+    // The bucket THIS boot started in. The ring now survives a restart (.noinit), so a reader that
+    // assumed bucket == uptime/dt would misplace every retained sample — and, worse, would draw a
+    // trend that crosses a reboot as one unbroken run. Every sample before b_boot came from an
+    // earlier run; the restart sits exactly on that boundary.
+    cJSON_AddNumberToObject(root, "b_boot", (double)boot_bucket);
     cJSON_AddStringToObject(root, "unit", "KiB");
     cJSON_AddNumberToObject(root, "scale", 10);   // samples are tenths of the unit
     cJSON* jf = cJSON_AddArrayToObject(root, "free");

@@ -78,7 +78,13 @@ The **cross-referenced facts** that must stay in sync (change one → check all 
    quoted in CLAUDE.md's `## Key Dependency` and any doc that names it. A pin or dependency
    behavior change must also reconcile `patches/tesla-ble/`,
    `scripts/apply-tesla-ble-patches.sh` and root CMake.
-11. **Status / telemetry fields & MQTT entities.** A field added/removed in `/status` (`tele.*`)
+11. **Board variants sharing one image.** A new board detected at runtime in
+   `main/board.{cpp,hpp}` → every doc that lists which boards an image serves
+   (`.claude/CLAUDE.md`, `docs/README.md` Hardware, `docs/FEATURES.md`) **and** the per-target
+   `sdkconfig.defaults.<target>`. Watch for SHARED GPIOs between the peripherals two variants
+   use — the esp32s3 image's display (SCK GPIO5) and W5500 (SCLK GPIO5) collide, so a probe
+   that is not gated on the detector is a finding.
+12. **Status / telemetry fields & MQTT entities.** A field added/removed in `/status` (`tele.*`)
    or an MQTT discovery entity → the `/status` field contract in `logic/status_model.hpp` **and**
    its golden emissions in `test/test_logic.cpp` (`test_status_model`), the telemetry/MQTT
    sections of `docs/ARCHITECTURE.md`, the summary in CLAUDE.md, and the web UI that renders it.

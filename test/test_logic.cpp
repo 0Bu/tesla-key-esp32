@@ -48,6 +48,8 @@
 #include "logic/bootlog.hpp"
 #include "logic/boot_guard.hpp"
 #include "logic/heap_history.hpp"
+#include "logic/health_gate.hpp"
+#include "logic/mqtt_uri.hpp"
 #include "logic/wifi_rollback.hpp"
 #include "logic/redact.hpp"
 #include "logic/captive.hpp"
@@ -958,11 +960,11 @@ static void test_status_model() {
 namespace dm = tk::display;
 
 // Build a UiSnapshot tersely for the presenter tests.
-static tk::UiSnapshot us(tk::LinkState ls, bool wifi_on, bool ble_conn, bool paired,
+static tk::UiSnapshot us(tk::LinkState ls, bool net_up, bool ble_conn, bool paired,
                          bool have_soc, int soc, bool charging) {
     tk::UiSnapshot s;
     s.link_state     = ls;
-    s.wifi_on        = wifi_on;
+    s.net            = net_up ? tk::NetLink::Wifi : tk::NetLink::None;
     s.ble_connected  = ble_conn;
     s.paired         = paired;
     s.have_soc       = have_soc;
@@ -1005,10 +1007,10 @@ static void test_display_helpers() {
 static void test_display_model() {
     using LS = tk::LinkState;
 
-    // ── priority ladder: WiFi search > pairing > BLE search > battery ──
-    // WiFi down ⇒ WifiSearch, whatever else is true.
-    CHECK(dm::compose(us(LS::Awake, /*wifi*/false, /*ble*/true, /*paired*/true,
-                         /*soc?*/true, 50, false), 0).hero == dm::Hero::WifiSearch);
+    // ── priority ladder: network search > pairing > BLE search > battery ──
+    // No lease ⇒ NetSearch, whatever else is true.
+    CHECK(dm::compose(us(LS::Awake, /*net*/false, /*ble*/true, /*paired*/true,
+                         /*soc?*/true, 50, false), 0).hero == dm::Hero::NetSearch);
     // WiFi up, BLE link up but not yet paired ⇒ Pairing.
     CHECK(dm::compose(us(LS::Idle, true, /*ble*/true, /*paired*/false,
                          false, 0, false), 0).hero == dm::Hero::Pairing);
@@ -1087,11 +1089,11 @@ static void test_display_model() {
 // ─── status LED priority ladder (logic/led_status.hpp <- shared UiSnapshot + LedAlerts) ──
 // The LED reads the SAME tk::UiSnapshot the display presenter does (one input contract), plus
 // a tiny LED-only LedAlerts for its latched error/warn/OTA tiers. Base = healthy, parked
-// (Idle), paired, 55 % SoC, WiFi up, no alerts; each case flips one field to prove the ladder
+// (Idle), paired, 55 % SoC, network up, no alerts; each case flips one field to prove the ladder
 // picks the right colour/animation and that a higher tier wins.
 static tk::UiSnapshot led_snap() {
     tk::UiSnapshot s;
-    s.wifi_on    = true;
+    s.net        = tk::NetLink::Wifi;
     s.link_state = tk::LinkState::Idle;
     s.paired     = true;
     s.have_soc   = true;
@@ -1121,8 +1123,11 @@ static void test_led() {
     { auto s = led_snap(); s.paired = false; s.ble_connected = true; s.charging = true;
       CHECK(tk::led_pattern(s, none) == (tk::LedPattern{C::Magenta, A::Pulse, false})); }
 
-    // WiFi search: no LAN → blue breathe, and it outranks pairing/charging below it.
-    { auto s = led_snap(); s.wifi_on = false; s.ble_connected = true; s.paired = false;
+    // Network search: no LAN → blue breathe, and it outranks pairing/charging below it.
+    // Transport-blind by design: an Ethernet board with no lease must reach the SAME tier.
+    { auto s = led_snap(); s.net = tk::NetLink::None; s.ble_connected = true; s.paired = false;
+      CHECK(tk::led_pattern(s, none) == (tk::LedPattern{C::Blue, A::Breathe, false})); }
+    { auto s = led_snap(); s.net = tk::NetLink::None; s.eth_present = true;
       CHECK(tk::led_pattern(s, none) == (tk::LedPattern{C::Blue, A::Breathe, false})); }
 
     // Searching for the car: reachable readings absent → teal breathe.
@@ -1134,7 +1139,7 @@ static void test_led() {
 
     // ── LED-only latched alerts (top of the ladder), passed via LedAlerts ──
     // Warning (repeated connect failures) → amber blink, above WiFi/pairing.
-    { auto s = led_snap(); s.wifi_on = false; tk::LedAlerts a; a.warn = true;
+    { auto s = led_snap(); s.net = tk::NetLink::None; tk::LedAlerts a; a.warn = true;
       CHECK(tk::led_pattern(s, a) == (tk::LedPattern{C::Amber, A::Blink, false})); }
     // OTA download → blue pulse, above the warning.
     { tk::LedAlerts a; a.ota_downloading = true; a.warn = true;
@@ -1739,6 +1744,166 @@ static void test_heap_history() {
     CHECK(tk::kHeapHistorySamples * tk::kHeapHistoryDtS == 86400);
 }
 
+// ─── retaining the trend across a restart (logic/heap_history.hpp, HeapPersist) ────────────────
+static void test_heap_persist() {
+    // A zeroed image is NOT valid. This is the case that matters most: .noinit holds noise after a
+    // power-on, and "all zeroes" is the single most likely accidental pattern. Adopting it would
+    // publish a fabricated day of memory readings.
+    tk::HeapPersist p{};
+    CHECK(!tk::heap_persist_valid(p));
+
+    // A sealed image is valid, and re-sealing is stable.
+    p.magic       = tk::kHeapPersistMagic;
+    p.fingerprint = tk::heap_persist_fingerprint();
+    p.crc         = tk::heap_persist_crc(p);
+    CHECK(tk::heap_persist_valid(p));
+    CHECK(tk::heap_persist_crc(p) == p.crc);
+
+    // Every guard is load-bearing on its own.
+    { auto q = p; q.magic ^= 1u;                 CHECK(!tk::heap_persist_valid(q)); }
+    { auto q = p; q.fingerprint ^= 1u;           CHECK(!tk::heap_persist_valid(q)); }
+    { auto q = p; q.crc ^= 1u;                   CHECK(!tk::heap_persist_valid(q)); }
+    // A single flipped bit anywhere in the RING must invalidate too — the CRC covers the payload,
+    // not just the header, or a corrupted trend would be adopted under a correct-looking magic.
+    { auto q = p; q.ring.free_[7] = 1234;        CHECK(!tk::heap_persist_valid(q)); }
+    { auto q = p; q.ring.open_bucket_ += 1;      CHECK(!tk::heap_persist_valid(q)); }
+
+    // The fingerprint is DERIVED, so it cannot be forgotten — it must actually depend on the
+    // geometry it claims to cover.
+    CHECK(tk::heap_persist_fingerprint() != 0);
+    CHECK(tk::heap_persist_fingerprint() == tk::heap_persist_fingerprint());
+
+    // ── continuity across the restart ──
+    // Run a "first boot": three committed buckets, the fourth left open.
+    tk::HeapPersist a{};
+    a.ring.record(0,                          40u * 1024, 20u * 1024);
+    a.ring.record(tk::kHeapHistoryDtS * 1,    38u * 1024, 18u * 1024);
+    a.ring.record(tk::kHeapHistoryDtS * 2,    36u * 1024, 16u * 1024);
+    a.ring.record(tk::kHeapHistoryDtS * 3,    34u * 1024, 14u * 1024);   // opens bucket 3
+    CHECK(a.ring.count() == 3);
+
+    // Reboot: the carry places the next boot in the bucket AFTER the one left open, so the restart
+    // lands on a bucket boundary rather than folding two runs into one sample.
+    const uint32_t carry = tk::heap_persist_next_carry(a.ring);
+    CHECK(carry == tk::kHeapHistoryDtS * 4);
+
+    // The new boot's clock starts at zero and is offset by the carry. The first sample closes the
+    // bucket the previous run left open — 4 committed, no gap invented.
+    a.ring.record(0 + carry, 32u * 1024, 12u * 1024);
+    CHECK(a.ring.count() == 4);
+    static tk::HeapTrendSample pf[tk::kHeapHistorySamples];
+    CHECK(a.ring.snapshot_free(pf, tk::kHeapHistorySamples) == 4);
+    CHECK(pf[0] == tk::heap_tenths_kib(40u * 1024));   // the pre-reboot samples are still there…
+    CHECK(pf[3] == tk::heap_tenths_kib(34u * 1024));   // …including the bucket the restart closed
+    CHECK(a.ring.bucket0() == 0);                      // and the timeline never restarted
+
+    // Downtime longer than one bucket is drawn as a GAP, not silently closed up: the device was
+    // off, and a compressed gap would slide every earlier sample forward in time.
+    tk::HeapPersist b{};
+    b.ring.record(0, 40u * 1024, 20u * 1024);
+    const uint32_t carry_b = tk::heap_persist_next_carry(b.ring);
+    b.ring.record(carry_b + tk::kHeapHistoryDtS * 3, 30u * 1024, 10u * 1024);
+    CHECK(b.ring.count() == 4);
+    CHECK(b.ring.snapshot_free(pf, tk::kHeapHistorySamples) == 4);
+    CHECK(!tk::heap_trend_absent(pf[0]));
+    CHECK(tk::heap_trend_absent(pf[1]));
+    CHECK(tk::heap_trend_absent(pf[3]));
+
+    // The retained header costs a handful of bytes on top of the ring, not a second copy of it.
+    CHECK(sizeof(tk::HeapPersist) <= sizeof(tk::HeapRing) + 16);
+}
+
+// ─── OTA rollback health gate (logic/health_gate.hpp) ──────────────────────────────────────────
+static void test_health_gate() {
+    using V = tk::HealthVerdict;
+    const uint32_t base = 90, cap = 600;
+
+    // Inside the base window nothing commits, however healthy it looks. The window is what catches
+    // the image that boots, works, and then dies under load.
+    CHECK(tk::health_gate_decide(0,      base, cap, true, true)  == V::Wait);
+    CHECK(tk::health_gate_decide(89,     base, cap, true, true)  == V::Wait);
+    CHECK(tk::health_gate_decide(base,   base, cap, true, true)  == V::Commit);
+
+    // THE REGRESSION THIS EXISTS FOR: an image that boots perfectly and never gets a link. The old
+    // gate was a 90-second sleep, so this case committed — and it is precisely the image no OTA can
+    // fix afterwards, because the fix would have to arrive over the link it broke.
+    CHECK(tk::health_gate_decide(base,   base, cap, true, false) == V::Wait);
+    CHECK(tk::health_gate_decide(cap - 1,base, cap, true, false) == V::Wait);
+    CHECK(tk::health_gate_decide(cap,    base, cap, true, false) == V::GiveUp);
+
+    // A device with no route is legitimately offline (setup mode) — that must read as healthy, not
+    // as a broken image, or an OTA installed just before the credentials were cleared would be
+    // thrown away.
+    CHECK(tk::health_gate_decide(base,   base, cap, false, false) == V::Commit);
+    CHECK(tk::health_gate_decide(base-1, base, cap, false, false) == V::Wait);
+
+    // Coming online exactly at the cap still commits: Commit is evaluated before GiveUp, so one
+    // sample of timing cannot cost a good build.
+    CHECK(tk::health_gate_decide(cap,    base, cap, true, true)  == V::Commit);
+    CHECK(tk::health_gate_decide(cap + 60, base, cap, true, true) == V::Commit);
+
+    // The shipped constants leave a real window between "earliest possible commit" and "give up".
+    CHECK(tk::kHealthGateCapS > tk::kHealthGateBaseS);
+}
+
+// ─── MQTT broker URI + save-time pre-flight (logic/mqtt_uri.hpp) ───────────────────────────────
+static void test_mqtt_uri() {
+    CHECK(tk::mqtt_trim("  host:1883 \r\n") == "host:1883");
+    CHECK(tk::mqtt_trim("   ").empty());
+
+    // Plausibility: empty DISABLES and is fine; everything else needs host:port.
+    CHECK(tk::mqtt_broker_is_plausible(""));
+    CHECK(tk::mqtt_broker_is_plausible("192.168.1.5:1883"));
+    CHECK(tk::mqtt_broker_is_plausible("mqtts://broker.example:8883"));
+    CHECK(tk::mqtt_broker_is_plausible("user:pw@broker.example:1883"));   // last colon is the port
+    CHECK(!tk::mqtt_broker_is_plausible("broker.example"));               // no port
+    CHECK(!tk::mqtt_broker_is_plausible("broker.example:"));
+    CHECK(!tk::mqtt_broker_is_plausible(":1883"));
+    CHECK(!tk::mqtt_broker_is_plausible("broker.example:0"));
+    CHECK(!tk::mqtt_broker_is_plausible("broker.example:65536"));
+    CHECK(!tk::mqtt_broker_is_plausible("broker.example:18a3"));
+    CHECK(!tk::mqtt_broker_is_plausible("broker example:1883"));          // whitespace
+
+    // THE RULE WORTH SHARING: credentials imply TLS. A plain-mqtt CONNECT carries the password in
+    // the clear, and a credentialed broker is the one that tends to live off the trusted LAN.
+    CHECK(tk::mqtt_effective_uri("host:1883", false) == "mqtt://host:1883");
+    CHECK(tk::mqtt_effective_uri("host:1883", true)  == "mqtts://host:1883");
+    CHECK(tk::mqtt_effective_uri("u:p@host:1883", false) == "mqtts://u:p@host:1883");
+    // An explicit scheme is honoured in BOTH directions — including a deliberate downgrade.
+    CHECK(tk::mqtt_effective_uri("mqtt://host:1883", true) == "mqtt://host:1883");
+    CHECK(tk::mqtt_effective_uri("mqtts://host:8883", false) == "mqtts://host:8883");
+    CHECK(tk::mqtt_effective_uri("   host:1883  ", false) == "mqtt://host:1883");
+    CHECK(tk::mqtt_effective_uri("", true).empty());   // empty stays empty: it disables the bridge
+
+    CHECK(tk::mqtt_uri_is_tls("mqtts://h:8883"));
+    CHECK(!tk::mqtt_uri_is_tls("mqtt://h:1883"));
+    CHECK(!tk::mqtt_uri_is_tls(""));
+
+    // The probe's memory gate. TLS costs far more than plaintext, and the number that binds is the
+    // LARGEST CONTIGUOUS block — refusing to probe costs a retry, probing anyway costs a bad_alloc
+    // on the HTTP task.
+    CHECK(tk::mqtt_probe_heap_need(true) > tk::mqtt_probe_heap_need(false));
+    CHECK(tk::mqtt_probe_affordable(64u * 1024, true));
+    CHECK(!tk::mqtt_probe_affordable(20u * 1024, true));    // enough for plain, not for TLS
+    CHECK(tk::mqtt_probe_affordable(20u * 1024, false));
+    CHECK(!tk::mqtt_probe_affordable(4u * 1024, false));
+
+    // The status mapping separates "your input is wrong" from "the network is not answering" from
+    // "ask again later". A save endpoint that reported failure inside a 200 is how a UI ends up
+    // showing a success toast for a broker that was never reachable.
+    using R = tk::MqttProbeResult;
+    CHECK(tk::mqtt_probe_http_status(R::Ok)          == 200);
+    CHECK(tk::mqtt_probe_http_status(R::Refused)     == 400);
+    CHECK(tk::mqtt_probe_http_status(R::Unreachable) == 502);
+    CHECK(tk::mqtt_probe_http_status(R::Timeout)     == 502);
+    CHECK(tk::mqtt_probe_http_status(R::NoHeap)      == 503);
+    CHECK(tk::mqtt_probe_http_status(R::Internal)    == 500);
+    // Every outcome says something, and only success says success.
+    for (R r : {R::Ok, R::Unreachable, R::Refused, R::Timeout, R::NoHeap, R::Internal})
+        CHECK(tk::mqtt_probe_reason(r) != nullptr && tk::mqtt_probe_reason(r)[0] != '\0');
+    CHECK(std::string(tk::mqtt_probe_reason(R::Unreachable)).find("not saved") != std::string::npos);
+}
+
 // ─── WiFi credential rollback ─────────────────────────────────────────────────
 static void test_wifi_rollback() {
     // Only the AP's own refusal is evidence about the CREDENTIALS. Everything else — a router
@@ -1782,6 +1947,91 @@ static void test_wifi_rollback() {
           == tk::RollbackAction::RollBack);
     // The fast path must genuinely be faster than the patient one, or the distinction buys nothing.
     CHECK(tk::kWifiRollbackGraceS > tk::kWifiBootWindowS * tk::kWifiAuthToRollback);
+}
+
+// ─── Network transport seam (logic/net_link.hpp) ──────────────────────────────
+static void test_net_link() {
+    // The transport identity is what the presenters branch on; the strings are what /status
+    // and the logs print, so pin both.
+    CHECK(std::string(tk::net_link_str(tk::NetLink::None)) == "none");
+    CHECK(std::string(tk::net_link_str(tk::NetLink::Wifi)) == "wifi");
+    CHECK(std::string(tk::net_link_str(tk::NetLink::Eth))  == "eth");
+
+    // Which transport carries the route. The case that matters is BOTH leases held: a board
+    // that fell back to WiFi and later had a cable plugged in. Losing the wire there must fall
+    // BACK to WiFi, not to "no network" — the bug this function exists to make unrepresentable.
+    CHECK(tk::net_link_active(false, false) == tk::NetLink::None);
+    CHECK(tk::net_link_active(false, true)  == tk::NetLink::Wifi);
+    CHECK(tk::net_link_active(true,  false) == tk::NetLink::Eth);
+    CHECK(tk::net_link_active(true,  true)  == tk::NetLink::Eth);   // the wire outranks the radio
+    // …and the fall-back itself, spelled out as the transition it is.
+    CHECK(tk::net_link_active(/*eth*/false, /*wifi*/true) == tk::NetLink::Wifi);
+
+    using WA = tk::WatchAction;
+
+    // A DOWN link is not the watchdog's business: the transport's own reconnect path owns it,
+    // and the ghost case it exists for is link-up by definition.
+    { tk::LinkWatch w; CHECK(tk::watch_step(w, /*up*/false, /*gw*/false, /*ever*/true) == WA::Idle);
+      CHECK(w.fails == 0); }
+
+    // A healthy sample clears the run — only UNBROKEN failures count, so one dropped echo on a
+    // busy LAN can never accumulate into a re-association.
+    { tk::LinkWatch w;
+      CHECK(tk::watch_step(w, true, /*gw*/false, true) == WA::Wait);   // 1 of 2
+      CHECK(tk::watch_step(w, true, /*gw*/true,  true) == WA::Idle);   // recovered
+      CHECK(w.fails == 0);
+      CHECK(tk::watch_step(w, true, /*gw*/false, true) == WA::Wait); } // counting restarts, not resumes
+
+    // Two consecutive failures on a gateway that HAS answered before ⇒ a proven ghost link.
+    { tk::LinkWatch w;
+      CHECK(tk::watch_step(w, true, false, /*ever*/true) == WA::Wait);
+      CHECK(tk::watch_step(w, true, false, /*ever*/true) == WA::Recover); }
+
+    // THE guard: a gateway that has NEVER answered ICMP (a router dropping LAN echo) is not
+    // evidence of anything. Acting here would re-associate a perfectly healthy device every
+    // ~60 s forever — the failure mode this baseline rule exists to prevent.
+    { tk::LinkWatch w;
+      CHECK(tk::watch_step(w, true, false, /*ever*/false) == WA::Wait);
+      CHECK(tk::watch_step(w, true, false, /*ever*/false) == WA::NoBaseline);
+      // …and the counter is spent, so the next window reports once more rather than on EVERY
+      // subsequent sample — otherwise the /diag ring fills with one line per 30 s forever.
+      CHECK(tk::watch_step(w, true, false, /*ever*/false) == WA::Wait); }
+
+    // The gateway becoming reachable mid-run retires the suspicion outright.
+    { tk::LinkWatch w;
+      CHECK(tk::watch_step(w, true, false, true) == WA::Wait);
+      CHECK(tk::watch_step(w, /*up*/false, false, true) == WA::Idle);
+      CHECK(w.fails == 0); }
+}
+
+// ─── /status: the `eth` object is present ONLY on a wired link ────────────────
+static void test_status_eth() {
+    using tk::status::Inputs;
+
+    // A WiFi (or link-down) device must emit NO eth object at all: presence is the signal, and
+    // a false-valued object would claim the board has a wire it does not have.
+    { Inputs in; in.wifi_connected = true; in.wifi_ssid = "HomeNet";
+      CollectEmitter e; tk::status::emit_status(in, e);
+      CHECK(e.out.find("eth{") == std::string::npos);
+      CHECK(e.out.find("wifi{") != std::string::npos); }
+
+    // Wired: the object appears, and the `wifi` object stays present-but-empty exactly as it is
+    // while a radio is down — dropping it would read as an older build to any consumer.
+    { Inputs in; in.eth_link = true; in.eth_speed_mbps = 100; in.eth_full_duplex = true;
+      CollectEmitter e; tk::status::emit_status(in, e);
+      CHECK(e.out.find("eth{") != std::string::npos);
+      CHECK(e.out.find("eth.link=true") != std::string::npos);
+      CHECK(e.out.find("eth.speed=100") != std::string::npos);
+      CHECK(e.out.find("eth.full_duplex=true") != std::string::npos);
+      CHECK(e.out.find("wifi{") != std::string::npos);
+      CHECK(e.out.find("wifi.ssid") == std::string::npos); }
+
+    // Speed unknown (the PHY has not negotiated yet) is OMITTED rather than reported as 0 —
+    // "0 Mbit" is a claim about the link, not an admission that we did not read it.
+    { Inputs in; in.eth_link = true; in.eth_speed_mbps = 0;
+      CollectEmitter e; tk::status::emit_status(in, e);
+      CHECK(e.out.find("eth{") != std::string::npos);
+      CHECK(e.out.find("eth.speed") == std::string::npos); }
 }
 
 // ─── Bug-report redaction ─────────────────────────────────────────────────────
@@ -2068,7 +2318,12 @@ int main() {
     test_bootlog();
     test_boot_guard();
     test_heap_history();
+    test_heap_persist();
+    test_health_gate();
+    test_mqtt_uri();
     test_wifi_rollback();
+    test_net_link();
+    test_status_eth();
     test_redact();
     test_captive();
     test_config_store();

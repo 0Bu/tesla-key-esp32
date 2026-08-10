@@ -14,7 +14,25 @@ so the supported set cannot drift from what the crypto library declares. **≥ 4
 required. ESP32-S2 (no Bluetooth) and ESP32-H2 / P4 (no WiFi) cannot run this firmware. A chip
 tesla-ble does not declare — esp32c5, esp32c61 — would need upstreaming there first; carrying a
 locally patched checkout of the crypto library instead was tried for the C5 and dropped
-([adr/0001](adr/0001-esp32c5-target-upstreaming.md)). USB data cable for flashing.
+([adr/0004](adr/0004-drop-esp32c5-target.md)). USB data cable for flashing.
+
+### Wired networking (optional, esp32s3)
+
+The esp32s3 image also drives a **WIZnet W5500 over SPI**, so the device can run on Ethernet —
+including **PoE**, which means one cable for power and network and therefore free placement:
+this firmware's BLE range to the car is signal-limited, so being able to mount the device where
+the car is beats every radio tweak. Verified on an **M5Stack AtomS3 Lite on an ATOMIC PoE Base**
+(802.3af, 5 V/1.2 A; SCLK 5 / CS 6 / MISO 7 / MOSI 8).
+
+On a wire the WiFi stack is **never started**: WiFi and BLE share one antenna path, so this
+removes radio coexistence entirely (and frees the ~57 KB of contiguous heap the stack holds).
+A wired board needs **no WiFi credentials at all** — it comes up on DHCP and the VIN is set in
+the web UI. With a controller present but no link, it falls back to WiFi (or the setup portal)
+rather than stranding itself, and a cable plugged in later still takes over.
+
+The **same** `esp32s3` image serves a LilyGo T-Dongle-S3, a bare ESP32-S3 and this board — each
+is detected at boot. There is no separate build, and nothing to enable on the other three
+targets (where the driver is not compiled in).
 
 ## Flash prebuilt artifacts
 
@@ -201,7 +219,13 @@ GET  /status               { vin, ip, version, key_present, key_fingerprint,
                              key_created (epoch, omitted if clock unsynced), paired,
                              paired_at (epoch, omitted if unknown), reauth,
                              wifi:{ssid,rssi,std,rolled_back? (only when the last /set_wifi was
-                               undone by the credential rollback — presence is the signal)},
+                               undone by the credential rollback — presence is the signal)}
+                               (always present, empty while no WiFi link holds the lease),
+                             eth:{link,speed? (Mbit; omitted until the PHY negotiates),
+                                  full_duplex} — present ONLY while an Ethernet link carries
+                               the lease, so its presence is the signal that this board is on a
+                               wire. Carries no MAC: nothing in it identifies the reporter,
+                               which is why it needs no ?redact=1 treatment,
                              ble:{connected,scanning,
                                   phase?,phase_s? (BLE phase countdown, both or neither:
                                     "connecting" = an attempt is running and gives up in phase_s,
@@ -261,16 +285,24 @@ POST /crash/dismiss        Acknowledge and DELETE this boot's crash report (eras
                              is not part of an OTA image) there is nothing to erase and the
                              dismissal still succeeds, clearing the fault-reset report; any
                              other erase error is a 500 and leaves the report standing
-GET  /heap                 { dt, b0, unit:"KiB", scale:10, free[], largest[] } — the board's
-                             own 24 h memory trend in tenths of a KiB, oldest sample first,
-                             null for a bucket with no sample. Answers what a spot value
+GET  /heap                 { dt, b0, b_boot, unit:"KiB", scale:10, free[], largest[] } — the
+                             board's own 24 h memory trend in tenths of a KiB, oldest sample
+                             first, null for a bucket with no sample. Answers what a spot value
                              cannot: a leak is a slope, fragmentation is the two series
-                             separating as largest[] sinks toward the 4 KB watchdog floor
+                             separating as largest[] sinks toward the 4 KB watchdog floor.
+                             The ring survives a restart (it is .noinit DRAM, cleared only by a
+                             power cut), so the slope that PRECEDED a heap-watchdog reboot is
+                             still there afterwards; b_boot is the bucket this boot began in,
+                             so any sample before it came from an earlier run
 POST /gen_keys[?force=1]   Generate ECDSA P-256 key (refuses overwrite without force)
 POST /send_key             Manually trigger pairing (charging_manager only; normally automatic)
 POST /set_vin              Persist VIN and reboot
-POST /set_mqtt             Persist the MQTT broker for the HA bridge and reboot
-                             ({"broker":"host:port"} or full "mqtt://…"; "" disables MQTT)
+POST /set_mqtt             Verify the MQTT broker, then persist it and reboot
+                             ({"broker":"host:port"} or full "mqtt://…"; "" disables MQTT).
+                             A changed, non-empty broker is CONNECTED to before it is saved:
+                             400 = the broker refused us (credentials), 502 = unreachable or
+                             no answer, 503 = too little contiguous memory to run the check.
+                             In every failing case nothing is written and nothing reboots
 POST /set_syslog           Persist the UDP Syslog server for the diag log and reboot
                              ({"server":"host:port"}; a bare host defaults to port 514;
                              "" disables Syslog)

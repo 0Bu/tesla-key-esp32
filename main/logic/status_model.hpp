@@ -67,6 +67,17 @@ struct Inputs {
     // is simply the old one again and nothing else would say the new one was ever tried.
     bool        wifi_rolled_back{false};
 
+    // Ethernet (W5500 over SPI — the M5Stack ATOMIC PoE Base). eth_link false ⇒ the whole
+    // `eth` object is OMITTED, so its PRESENCE is the signal that this device is on a wire
+    // rather than a radio. That is deliberately not symmetric with `wifi`, which is always
+    // emitted (empty when down): a WiFi board that suddenly stopped reporting `wifi` would
+    // read as an older build, whereas no board has ever reported `eth`, so absence there
+    // cannot be misread. Carries no MAC — nothing here identifies the reporter, which keeps
+    // it out of the ?redact=1 list entirely.
+    bool        eth_link{false};
+    int         eth_speed_mbps{0};      // 10 or 100; 0 = not reported
+    bool        eth_full_duplex{false};
+
     // MQTT / HA bridge.
     bool        mqtt_configured{false}, mqtt_connected{false}, mqtt_tls{false};
     std::string mqtt_broker;      // empty = omit
@@ -195,6 +206,17 @@ inline void emit_status(const Inputs& in, E& e) {
     // not. Emitted only when true, so its presence is the signal.
     if (in.wifi_rolled_back) e.boolean("rolled_back", true);
     e.obj_end();
+
+    // ── eth — present only while Ethernet carries the lease (see Inputs::eth_link) ──
+    if (in.eth_link) {
+        e.obj_begin("eth");
+        e.boolean("link", true);
+        // Omitted rather than reported as 0: the PHY may not have negotiated yet, and "0 Mbit"
+        // is a claim about the link rather than an admission that we did not read it.
+        if (in.eth_speed_mbps > 0) e.num("speed", in.eth_speed_mbps);
+        e.boolean("full_duplex", in.eth_full_duplex);
+        e.obj_end();
+    }
 
     // ── mqtt ──────────────────────────────────────────────────────────────────
     e.obj_begin("mqtt");

@@ -16,13 +16,15 @@
 #   • mcp__github__merge_pull_request     — Claude Code on the web / remote (no `gh` CLI)
 # Matched via the `matcher` entries in .claude/settings.json that both invoke this script.
 #
-# Mechanism (NO file marker — see pr-gate-lib.sh): after running /project-review and confirming
-# it passes with no blocking findings, record the pass by TICKING the PR checklist box and
-# STAMPING it with the reviewed commit:
-#     - [x] `/project-review` clean — merge gate @ <short-sha>
+# Mechanism (NO file marker — see pr-gate-lib.sh): after running /feature-docs and confirming
+# docs/FEATURES.md matches what the firmware now does, record the pass by TICKING the PR checklist
+# box and STAMPING it with the synced commit:
+#     - [x] `/feature-docs` synced — merge gate @ <short-sha>
+# This is its OWN box, separate from the /project-review one require-project-review.sh reads (the
+# gate matches on the "feature-docs" key, see gate_checkbox_status in pr-gate-lib.sh).
 # This hook allows the merge only while that box is checked AND the stamped sha still matches the
-# PR's head commit — i.e. the review reflects exactly what is being merged. Push another commit and
-# the stamp goes stale (sha mismatch), forcing a fresh review + re-tick before the next merge.
+# PR's head commit — i.e. the sync reflects exactly what is being merged. Push another commit and
+# the stamp goes stale (sha mismatch), forcing a fresh sync + re-tick before the next merge.
 #
 # Only Claude Code sessions are gated; a human merging via the GitHub UI (or `gh` in a plain
 # terminal) is unaffected, since hooks run only inside Claude Code.

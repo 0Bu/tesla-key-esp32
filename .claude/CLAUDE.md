@@ -70,7 +70,13 @@ fresh ChargeState reports the requested amps; active data older than 30 s is rej
 heap-exhaustion watchdog (`logic/heap_watchdog.hpp` — 4 KB/5 min unbroken hold, OTA-excused,
 restart cap + `heap:<n>` breadcrumb round-trip) and the BLE connect-failure classifier
 (`logic/connect_outcome.hpp` — scanner verdict → out-of-range / at-BLE-limit / connect-failed,
-its log level and the background rate limit; foreground attempts are never suppressed) — all
+its log level and the background rate limit; foreground attempts are never suppressed) and the
+OTA rollback health gate (`logic/health_gate.hpp` — commit only on a proven link plus an uptime
+floor, the setup-mode exemption, give up past the cap) and the MQTT broker contract
+(`logic/mqtt_uri.hpp` — the ONE credential-aware scheme rule both the bridge and /set_mqtt's
+save-time probe dial, plus that probe's contiguous-heap budget and status mapping) and the
+retained memory trend (`logic/heap_history.hpp` — CRC + layout fingerprint before a .noinit ring
+is adopted, and the carry that keeps one bucket clock across the restart) — all
 delegated to IDF-free headers in `main/logic/` so the device runs the same code the test does. CI gates the firmware build on it (`logic-test` job). Add new
 hardware-free logic to `main/logic/` and a `CHECK` in `test/test_logic.cpp`. Full detail:
 [`test/README.md`](../test/README.md).
@@ -104,7 +110,28 @@ cd build && esptool --chip esp32s3 -p <port> write_flash "@flash_args"   # or es
 ## Architecture
 
 ```
-main.cpp               → WiFi init, NVS init, start all components
+main.cpp               → boot orchestration: NVS init, config/VIN resolve, clock restore,
+                         BLE + network bring-up order, start all components
+net.cpp / net.hpp      → the ONE network-transport seam. Everything above it (HTTP, MQTT,
+                         syslog, mDNS, SNTP, OTA, display, LED) asks tk::net_is_up() /
+                         net_kind() / net_active_netif() and never touches esp_wifi. Owns the
+                         WiFi station, the endless-reconnect handler, the credential-rollback
+                         boot window and the gateway-ICMP ghost-link watchdog (net_wd task).
+                         The transport identity (tk::NetLink::{None,Wifi,Eth}) and the
+                         watchdog's decision — incl. the rule that a gateway which has NEVER
+                         answered ICMP must not trigger recovery — are the host-tested
+                         logic/net_link.hpp. Also carries the OPTIONAL W5500 SPI Ethernet
+                         backend (CONFIG_TESLA_ETH_ENABLED, esp32s3 only): probes the
+                         controller's VERSIONR once at boot, runs it in POLLING mode (the
+                         ATOMIC PoE Base routes no INT and no RST line) and, on a lease,
+                         never starts WiFi at all — no BLE radio coexistence, ~57 KB of
+                         largest-block unspent
+board.cpp / board.hpp  → runtime board identification for the ONE image per chip. The esp32s3
+                         image serves THREE boards: T-Dongle-S3 (ST7735), a bare ESP32-S3, and
+                         an M5Stack AtomS3 Lite on an ATOMIC PoE Base (W5500). ONE detector,
+                         because display and Ethernet OVERLAP ON A PIN — the panel's SPI clock
+                         is GPIO5, the same pin the PoE base uses for SCLK — so the W5500 probe
+                         is refused on a detected T-Dongle
 patches/tesla-ble/     → reviewed patch on pinned dependency: reject replayed CarServer
                          responses before callbacks/FIFO completion (all four targets)
 ble_client.cpp         → NimBLE GATT client (BleAdapter impl)
@@ -139,7 +166,12 @@ http_status.cpp        → web UI (/), /status, /diag, /scan; the /status field 
                          deliberate; the earlier WebSocket push wedged the device on
                          2026-07-18 when a subscriber stopped reading)
 http_ota.cpp           → /ota/check|update|status
-http_config.cpp        → /gen_keys, /send_key, /set_time, /set_vin, /set_mqtt, /set_syslog
+http_config.cpp        → /gen_keys, /send_key, /set_time, /set_vin, /set_mqtt, /set_syslog.
+                         /set_mqtt is TEST-BEFORE-PERSIST: a changed broker is dialled (same URI
+                         logic/mqtt_uri.hpp gives mqtt_ha) before the NVS write, and the probe
+                         refuses itself when the largest CONTIGUOUS internal block cannot afford a
+                         second mbedTLS session — a 503 costs a retry, attempting it costs a
+                         bad_alloc on the httpd task
 mcp_server.cpp         → /mcp — MCP server for AI agents (stateless JSON-RPC 2.0;
                          core logic in logic/mcp.hpp, guide in docs/MCP.md)
                          (shared helpers: http_common.cpp; split map: http_handlers.hpp)
@@ -170,10 +202,19 @@ safe_mode.cpp          → boot-loop safe mode (logic/boot_guard.hpp): counts CR
 heap_trend.cpp         → storage + mutex for the board's own 24-hour memory trend (GET /heap), fed
                          from the SAME two samples loop_task hands the heap watchdog, so the chart a
                          human reads and the threshold the firmware acts on cannot disagree. Fixed
-                         .bss ring (~1.2 KB), never heap — a diagnostic must not compete for the
+                         ring (~1.2 KB), never heap — a diagnostic must not compete for the
                          largest CONTIGUOUS block it exists to measure. Answers the one question a
                          spot value cannot: is the heap DRIFTING (a leak is a slope; fragmentation is
-                         the two lines separating). Mechanics in logic/heap_history.hpp
+                         the two lines separating). It lives in **.noinit**, not .bss, so it SURVIVES
+                         A RESTART: the heap watchdog's answer to exhaustion IS a restart, so a .bss
+                         ring was erased by the one event it exists to explain (same for a panic, the
+                         task watchdog and an OTA reboot). Still zero flash writes — NVS persistence
+                         stays rejected. The retained image must pass a CRC (config_crc32, so a
+                         power-on's SRAM noise is never adopted) and a derived layout fingerprint (an
+                         OTA can change the ring's geometry while the bytes stay valid); on any
+                         failure the trend starts empty. A carry offset keeps ONE continuous bucket
+                         clock across the reboot, which therefore always lands on a bucket boundary
+                         — /heap's `b_boot` names it. Mechanics in logic/heap_history.hpp
 config_blob.cpp        → the ONE atomic credential/service entry in NVS (logic/config_store.hpp):
                          WiFi creds + the one-shot rollback backup + VIN + mqtt_uri + syslog_uri as
                          a single CRC-checked nvs_set_blob, all-or-nothing across BOTH a write
@@ -290,13 +331,15 @@ GET  /diag                                     # plain-text in-memory diag log (
 GET  /coredump[?clear=1]                       # stream the raw crash image (chunked octet-stream; 404 if none). Decode offline against the matching-version .elf; ?clear=1 erases the partition
 POST /crash/dismiss                            # acknowledge + DELETE this boot's crash report (erase first, mark second). POST, not GET: it destroys the one artifact a bug report needs
                                                # bug report needs. An erase that finds NO coredump partition (every OTA-upgraded device) is NOT a failure — the dismissal still clears the fault-reset report; any other erase error is a 500 (logic/crashinfo.hpp crash_erase_permits_dismiss).
-GET  /heap                                     # the board's 24-hour free/largest-block trend {dt,b0,unit,scale,free[],largest[]} — tenths of a KiB, null = no sample
+GET  /heap                                     # the board's 24-hour free/largest-block trend {dt,b0,b_boot,unit,scale,free[],largest[]} — tenths of a KiB, null = no sample.
+                                               # The ring is .noinit and SURVIVES a restart (watchdog/panic/OTA), so b_boot names the bucket THIS boot started in, so any sample before it came from an earlier run — and the clock is no longer uptime/dt.
 POST /set_wifi                                 # change WiFi credentials over the LAN + reboot ({"ssid","pass"}); stashes the previous pair as a one-shot rollback backup
 POST /gen_keys[?force=1]                       # generate key (refuses overwrite w/o force)
 POST /send_key                                 # pair with vehicle (Charging Manager only)
 POST /set_time                                 # set wall clock from the browser ({"ms":<epoch>}); fallback when NTP unreachable
 POST /set_vin                                  # persist VIN + reboot
-POST /set_mqtt                                 # persist MQTT broker (HA bridge) + reboot ({"broker":"host:port"}; "" disables)
+POST /set_mqtt                                 # verify, then persist MQTT broker (HA bridge) + reboot ({"broker":"host:port"}; "" disables).
+                                               # TEST BEFORE PERSIST: a CHANGED non-empty broker is CONNECTED to first (the same URI mqtt_ha will dial, logic/mqtt_uri.hpp), and only a broker that accepts the CONNECT is saved. 400 = refused/bad credentials, 502 = unreachable or no answer, 503 = too little contiguous heap to afford the probe (nothing saved, retry). An unchanged value is a no-op and is never probed.
 POST /set_syslog                               # persist Syslog server + reboot ({"server":"host:port"}; "" disables)
 GET  /api/proxy/1/version                      # {version, platform: running chip — "ESP32"/"ESP32-S3"/"ESP32-C3"/"ESP32-C6"}
 GET  /ota/check[?ms=<epoch>]                   # start background manifest check (non-blocking); poll /ota/status. ms = browser-clock NTP fallback
@@ -316,9 +359,15 @@ refused). **Downgrade gate:** before the bulk download `ota_task` reads the imag
 (`esp_https_ota_get_img_desc`) and refuses anything not strictly newer than the running firmware
 — a signature proves authenticity, not freshness, so this is the software anti-rollback (no
 eFuses). Rollback enabled (`CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE`); `main.cpp` defers
-`esp_ota_mark_app_valid_cancel_rollback()` to `ota_health_gate_task` — rollback stays armed until
-the new image has run healthily for ≈90 s, so a boots-but-crashes-under-load image is reverted.
-Implemented in `main/ota_update.cpp`.
+`esp_ota_mark_app_valid_cancel_rollback()` to `ota_health_gate_task`, whose verdict is the
+host-tested `logic/health_gate.hpp`. Health is **connectivity plus a floor, not uptime**: the image
+must hold a lease (`tk::net_is_up()`, either transport) *and* have run ≥90 s, so both a
+boots-but-crashes-under-load image AND a boots-but-never-gets-online image are reverted — the second
+is the one no OTA can fix afterwards, and a pure 90 s timer committed it. Past a 600 s cap an
+unhealthy image is LEFT pending (no self-restart: that would turn a long router outage into a silent
+downgrade); the next reboot rolls it back, and any deliberate `/set_*` save commits it instead via
+`ota_confirm_pending_image()`. A device with neither credentials nor a wire is legitimately offline
+(setup mode) and counts as healthy. Implemented in `main/ota_update.cpp`.
 
 **Images are signed** — Secure Boot v2 RSA-3072 scheme *without* hardware Secure Boot
 (`CONFIG_SECURE_SIGNED_APPS_NO_SECURE_BOOT` + `..._RSA_SCHEME` +
@@ -340,7 +389,7 @@ The `ci-build-all.sh` size gate sits at `slot − 32 KB`
 is first padded up to a 64 KB Secure-Boot boundary before a 4 KB signature sector is appended — so
 crossing a boundary costs a full 64 KB block, which is what made esp32c5 undeliverable
 ([ADR-0004](../docs/adr/0004-drop-esp32c5-target.md)). **esp32c6 is the largest image**
-(signed 0x1d1000, ≈92 KB under the gate); **esp32s3 carries the display code** and sits at
+(signed 0x1e1000, ≈28 KB under the gate — it sat ~3 KB under a 64 KB Secure-Boot boundary and a 3 KB change crossed it); **esp32s3 carries the display code** and sits at
 0x191000. All stay on the base **`-Og`**: the Package A size levers (#154)
 freed the ~64 KB the display needs, so no `-Os`
 is required. (`-Os` is banned here — whole-build `-Os` hard-freezes under evcc+BLE load, rejected
