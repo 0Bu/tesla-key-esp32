@@ -58,12 +58,13 @@ The **cross-referenced facts** that must stay in sync (change one → check all 
 4. **NVS keys / namespaces.** A key added/renamed in `nvs_storage.cpp` / config code → the
    `## NVS Namespaces` table in CLAUDE.md and any doc that names it. Remember the **≤15-char**
    library-key mapping rule.
-5. **Log lines carrying an IDENTIFIER.** A new/reworded `ESP_LOG*` that interpolates the VIN,
-   an SSID, the device IP, a BLE MAC, the MQTT broker or the syslog host → a matching rule in
+5. **Log lines carrying a PRIVATE IDENTIFIER.** A new/reworded `ESP_LOG*` that interpolates the VIN,
+   an SSID, the device IP, a vehicle/nearby-device BLE MAC, the MQTT broker or the syslog host → a matching rule in
    `main/logic/redact.hpp`'s `kDiagRedactions` **and** a `CHECK` in `test_redact`. The table is
    keyed on log PHRASES, so a new phrase carrying an old value leaks SILENTLY through
    `/diag?redact=1`. It has happened twice: the `http_server.cpp` request log, and the failure
-   branch of the `ble_mac` write whose success branch was already covered.
+   branch of the `ble_mac` write whose success branch was already covered. The physical
+   controller's board MAC is intentionally diagnostic and remains visible.
 6. **Config / Kconfig options & defaults.** A `CONFIG_*` or default changed in
    `sdkconfig.defaults*`, `main/Kconfig.projbuild` → whatever doc quotes it (OTA/secure-boot
    block, security doc, README setup).

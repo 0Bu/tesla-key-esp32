@@ -133,6 +133,10 @@ struct Inputs {
     // failure mode is heap exhaustion — so the primary API could not report the number that causes
     // its reboots. largest_block is the one that matters (it is what the heap watchdog gates on);
     // free_heap beside it is what distinguishes a leak from fragmentation.
+    // WiFi-STA eFuse MAC: the physical board identity, independent of the active transport.
+    // Deliberately retained in ?redact=1 diagnostics so two replacement boards can be told apart
+    // while their HA/MQTT identity correctly stays attached to the same VIN.
+    std::string board_mac;
     uint32_t    free_heap{0};
     uint32_t    min_free_heap{0};
     uint32_t    largest_block{0};
@@ -162,6 +166,8 @@ struct Inputs {
     // value this device holds — it names one specific car and is an input to Tesla's own APIs), the
     // device IP, the WiFi SSID, the vehicle's BLE MAC (and every scanned neighbour's, which are
     // other people's devices in the reporter's home), the MQTT broker and the syslog host.
+    // `sys.board_mac` deliberately remains visible: it identifies the replaceable hardware and
+    // is the evidence that lets a board-swap diagnosis distinguish old board from new.
     //
     // The KEY is always still emitted with a placeholder VALUE. Dropping the field instead would
     // forge an "older build that never had it" signal, and "which build produced this?" is the
@@ -362,6 +368,7 @@ inline void emit_status(const Inputs& in, E& e) {
     // reads first, and before it existed /status could not report the heap at all — on a device
     // whose watchdog restarts it for running out of exactly that.
     e.obj_begin("sys");
+    e.str("board_mac",      in.board_mac.c_str());
     e.num("free_heap",       (double)in.free_heap);
     e.num("min_free_heap",   (double)in.min_free_heap);
     e.num("largest_block",   (double)in.largest_block);

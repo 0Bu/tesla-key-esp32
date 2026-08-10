@@ -83,8 +83,8 @@ menu "Tesla Key Configuration"
         string "MQTT base topic prefix"
         default "tesla-key"
         help
-            Prefix for state topics. The per-device node id is appended, e.g.
-            "tesla-key/teslakey_a1b2c3/charge".
+            Prefix for state topics. The vehicle-stable VIN node id is appended,
+            e.g. "tesla-key/teslakey_5yj3e1ea7kf000316/charge".
 
     config TESLA_MQTT_PUBLISH_INTERVAL_S
         int "MQTT publish interval (seconds)"

@@ -20,12 +20,14 @@
 #include "config_blob.hpp"
 #include "syslog.hpp"
 #include <esp_netif.h>
+#include <esp_mac.h>
 #include <esp_app_desc.h>
 #include <esp_heap_caps.h>
 #include <esp_timer.h>
 #include <sdkconfig.h>
 #include <esp_core_dump.h>
 #include <esp_partition.h>
+#include <cstdio>
 #include <ctime>
 #include <string>
 #include <string_view>
@@ -192,6 +194,18 @@ static cJSON* build_status_object(bool redact) {
     // INTERNAL caps on all three, matching logic/heap_watchdog.hpp exactly: plain 8BIT reports the
     // max across every heap carrying the cap, and a board that registers PSRAM there would report
     // megabytes free while internal DRAM sat in the exact wedge this device restarts itself for.
+    // The eFuse-derived WiFi STA MAC is the physical BOARD identity even when Ethernet is active.
+    // Cache its canonical spelling once: it cannot change during this or any later boot.
+    static const std::string s_board_mac = [] {
+        uint8_t mac[6] = {0};
+        if (esp_read_mac(mac, ESP_MAC_WIFI_STA) != ESP_OK) return std::string("unavailable");
+        char text[18];
+        std::snprintf(text, sizeof(text), "%02x:%02x:%02x:%02x:%02x:%02x",
+                      (unsigned)mac[0], (unsigned)mac[1], (unsigned)mac[2],
+                      (unsigned)mac[3], (unsigned)mac[4], (unsigned)mac[5]);
+        return std::string(text);
+    }();
+    in.board_mac       = s_board_mac;
     in.free_heap       = (uint32_t)heap_caps_get_free_size(MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL);
     in.min_free_heap   = (uint32_t)heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL);
     in.largest_block   = (uint32_t)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL);
@@ -264,8 +278,9 @@ esp_err_t handle_diag(GuardedReq rq) {
     }
 
     // ?redact=1 — the bug-report form. /diag leaks by LINE (unlike /status, which leaks by field):
-    // a handful of log statements interpolate the VIN, an SSID, an IP, a BLE MAC, the broker or the
-    // syslog host. The rules are the host-tested logic/redact.hpp, and they FAIL CLOSED — a line
+    // a handful of log statements interpolate the VIN, an SSID, an IP, a vehicle BLE MAC, the
+    // broker or the syslog host. The board MAC deliberately survives as hardware diagnosis. The
+    // rules are the host-tested logic/redact.hpp, and they FAIL CLOSED — a line
     // the ring truncated mid-value redacts to the end of the line rather than giving up.
     //
     // The ring hands us one or two spans that do NOT align to line boundaries, so lines are
