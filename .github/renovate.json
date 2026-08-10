@@ -13,13 +13,13 @@
     },
     {
       "customType": "regex",
-      "description": "Bump the ESP-IDF version used by the CI build action",
-      "managerFilePatterns": ["/^\\.github/workflows/build\\.yml$/"],
+      "description": "Bump the tag and immutable digest of the shared ESP-IDF build image",
+      "managerFilePatterns": ["/^esp-idf-toolchain\\.txt$/"],
       "matchStrings": [
-        "esp_idf_version:\\s*(?<currentValue>v[0-9]+\\.[0-9]+(\\.[0-9]+)?)"
+        "(?<currentValue>v[0-9]+\\.[0-9]+\\.[0-9]+)@(?<currentDigest>sha256:[0-9a-f]{64})"
       ],
-      "datasourceTemplate": "github-tags",
-      "depNameTemplate": "espressif/esp-idf"
+      "datasourceTemplate": "docker",
+      "depNameTemplate": "espressif/idf"
     },
     {
       "customType": "regex",
@@ -37,14 +37,14 @@
       "description": "Never auto-merge a tracked firmware dependency, even when CI is green. A green `build` job only proves the firmware compiles — it does NOT prove the Tesla BLE crypto/pairing/signed-command path still works (yoziru/tesla-ble), nor that WiFi/BLE coexistence and runtime behaviour survive an ESP-IDF bump, nor that the browser installer still flashes (esp-web-tools, which the build doesn't exercise at all). These are only validated by a human running the live e2e against a real paired car. Renovate still opens, rebases and rebuilds the PR; a human reviews, runs e2e, and merges manually. (GitHub Action digest bumps are unaffected and keep auto-merging.)",
       "matchDepNames": [
         "yoziru/tesla-ble",
-        "espressif/esp-idf",
+        "espressif/idf",
         "esp-web-tools"
       ],
       "automerge": false
     },
     {
       "description": "Remind to re-check yoziru/tesla-ble compatibility on every ESP-IDF update (does not block the update).",
-      "matchDepNames": ["espressif/esp-idf"],
+      "matchDepNames": ["espressif/idf"],
       "prBodyNotes": [
         "⚠️ **Before merging — verify `yoziru/tesla-ble` compatibility.** ESP-IDF 6.0 bundles Mbed TLS 4.x (PSA Crypto is primary; most legacy crypto APIs removed). tesla-ble (<= v5.1.1) does its P-256 ECDH via `mbedtls_ecp_mul` + `MBEDTLS_PRIVATE` opaque-field access, key handling via `mbedtls_pk_*`, and AES-GCM via legacy `mbedtls_gcm_*` — all removed/disallowed under Mbed TLS 4, so 6.x builds fail. Check that the CI `build` job is green; if this is a 6.x update, confirm a tesla-ble release with PSA-Crypto support exists and bump it too (`main/idf_component.yml`). Also migrate `json` -> `espressif/cjson` for IDF 6. See #61, and the decision record with the explicit start-the-shim trigger (final 12 months of IDF 5.x support with no upstream movement): docs/adr/0002-idf6-mbedtls4-crypto-seam.md."
       ]

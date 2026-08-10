@@ -4,7 +4,7 @@
 # The installer (index.html) fetches the firmware in the BROWSER. GitHub release
 # assets are served without CORS headers, so the manifest cannot point at release
 # URLs cross-origin — the parts must be same-origin with the page. This script
-# therefore copies the per-target bins (staged in _fw/<target>/ by ci-build-all.sh)
+# therefore copies the per-target bins (staged in _fw/<target>/ by ci-sign-artifacts.sh)
 # into the publish dir alongside the page and writes a manifest.json with one build
 # per chipFamily and relative paths. esp-web-tools auto-selects the build matching the
 # connected chip. The canonical downloads still live on the GitHub release; these are
@@ -39,14 +39,13 @@ chip_family() {
   esac
 }
 # target -> 2nd-stage bootloader flash offset (bytes). Classic esp32 = 0x1000,
-# s3/c3/c6 = 0x0. MUST match the per-target offset the host
-# @flash_args uses (ci-build-all.sh) — a wrong offset here makes the web installer (esp-web-tools
-# flashes each part at the offset in this manifest) write an UNBOOTABLE bootloader.
+# s3/c3/c6 = 0x0. MUST match the trusted explicit layout in ci-sign-artifacts.sh — a wrong offset
+# here makes esp-web-tools write an UNBOOTABLE bootloader.
 boot_offset() { case "$1" in esp32) echo 4096 ;; *) echo 0 ;; esac; }
 # target -> short app-image suffix so "esp32" appears once: esp32 -> "" (tesla-key-esp32.bin),
 # esp32s3 -> "-s3", esp32c3 -> "-c3", esp32c6 -> "-c6". This names the
 # OTA-served Pages copy, so it MUST match TESLA_OTA_IMG_SUFFIX in main/ota_update.cpp and
-# image_suffix() in ci-build-all.sh — the device builds the same filename to pull its image.
+# image_suffix() in ci-sign-artifacts.sh — the device builds the same filename to pull its image.
 image_suffix() {
   case "$1" in
     esp32)   echo "" ;;
@@ -100,7 +99,7 @@ JSON
 done
 
 if [[ -z "$builds" ]]; then
-  echo "error: no per-target bins staged in $fw — run ci-build-all.sh first" >&2
+  echo "error: no signed per-target bins staged in $fw — run ci-sign-artifacts.sh first" >&2
   exit 1
 fi
 

@@ -1,0 +1,37 @@
+dependencies:
+  espressif/mdns:
+    component_hash: e81ca7a7f53ea34e78274df054da692c272e1315572876b237b1748e267c013b
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=5.0'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 1.11.3
+  idf:
+    source:
+      type: idf
+    version: 5.5.5
+  yoziru/tesla-ble:
+    component_hash: 9c4fb0d6686d8abd3f8854fbac93767f47434e8d41b73505ee7538d81f90d250
+    dependencies:
+    - name: idf
+      version: '>=5.0.1'
+    source:
+      git: https://github.com/yoziru/tesla-ble.git
+      path: .
+      type: git
+    targets:
+    - esp32
+    - esp32s3
+    - esp32c3
+    - esp32c6
+    version: 9386f858446eccd9482b625871fe99d8decb3502
+direct_dependencies:
+- espressif/mdns
+- idf
+- yoziru/tesla-ble
+manifest_hash: 8af75b6f450609f83ee236637c8c59377c58b5fe5d24e326169ccce57857603d
+target: esp32s3
+version: 2.0.0

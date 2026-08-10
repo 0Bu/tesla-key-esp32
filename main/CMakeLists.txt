@@ -69,14 +69,10 @@ idf_component_register(
 #                          [[nodiscard]] buys is that the ignored result is a BUILD error, which it
 #                          only is if this warning class is fatal.
 #
-# NOT -Werror=format, deliberately, and this is the one that would look like an oversight: the
-# root CMakeLists.txt appends a global -Wno-error=format because yoziru/tesla-ble prints uint32_t
-# with %u (which is `unsigned long` on xtensa). A PRIVATE -Werror=format here would re-arm the
-# class for our own sources only — which is the right end state — but our format strings have
-# never been compiled under it on all four targets, int32_t is `long int` on xtensa and plain
-# `int` on riscv/host, and scripts/run-mock-tests.sh compiles NONE of main/*.cpp, so nothing
-# available in a cloud session can tell whether that turns the build red. Converting the call
-# sites to PRIu32/PRId32 first, then arming it, is a change of its own with a real build behind it.
+# The managed tesla-ble component still needs the root-level -Wno-error=format compatibility
+# downgrade. Re-arm -Werror=format privately here so new mismatches in repository-owned firmware
+# sources cannot hide behind that third-party exception. The four-target build is the proof across
+# Xtensa and RISC-V ABI differences.
 #
 # PRIVATE on ${COMPONENT_LIB} rather than a CONFIG_COMPILER_* key in sdkconfig.defaults, for two
 # independent reasons: a Kconfig key is global, so it would hold ESP-IDF itself and the managed
@@ -84,6 +80,8 @@ idf_component_register(
 # any bump; and sdkconfig.defaults is part of CI's ccache key, so a diagnostic-only change there
 # would discard every cached object it cannot possibly invalidate.
 target_compile_options(${COMPONENT_LIB} PRIVATE
+    -std=gnu++17
+    -Werror=format
     -Werror=return-type
     -Werror=unused-result
 )
