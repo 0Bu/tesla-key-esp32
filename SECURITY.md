@@ -244,28 +244,34 @@ espsecure.py sign_data --version 2 --keyfile ota_signing_key.pem --output /tmp/d
 
 ### Signing in CI
 
-CI signs every image with this key, supplied via an encrypted repository secret:
+Compilation and signing are separate trust domains:
 
-1. Store the PEM as the **`OTA_SIGNING_KEY`** Actions secret (ideally scoped to a protected
-   GitHub *Environment*). Paste the **full, unencrypted** RSA-3072 PEM — `BEGIN/END` lines
-   included, with real newlines (not base64-wrapped, not single-line).
-2. Signing runs on a push or manual `workflow_dispatch` on `main` (the paths that publish bins
-   — a GitHub release and/or the GitHub Pages OTA channel, redeployed on every main push and on
-   a manual re-publish dispatch) **and on `pull_request`**, so a PR uploads a *signed*,
-   boot-able firmware artifact you can flash to try the change before merge. (An unsigned image
-   `abort()`s in a reboot loop on a signed-build device — see the warning above — so an unsigned
-   PR artifact would not be testable.) `.github/workflows/build.yml` writes the secret to
-   `ota_signing_key.pem` for the run (gitignored, shredded afterwards), and
-   `scripts/ci-build-all.sh` signs each built image in place with `espsecure.py sign_data
-   --version 2`. **Trade-off:** the key is therefore exposed to same-repo (branch) PR CI too,
-   not only main — acceptable for a single-maintainer repo where PRs come from trusted branches.
-3. A publish run on `main` **fails** if the secret is missing (refuses to publish unsigned
-   firmware to the OTA channel). A **fork** PR gets no repository secrets, so it builds
-   **unsigned** (a compile-only check — that artifact won't boot on a signed-build device); the
-   size gate still absorbs the ~4 KB a signed build adds.
+1. Store the PEM as the **`OTA_SIGNING_KEY`** secret of a protected GitHub Environment named
+   **`firmware-signing`**. Paste the full, unencrypted RSA-3072 PEM — `BEGIN/END` lines included,
+   with real newlines. Configure required reviewers on that Environment; the workflow alone
+   cannot create this repository setting.
+2. The ordinary `build` job is deliberately **unprivileged**. It can execute PR source and the
+   compiler, but has neither the signing key nor a write-capable token. It uploads only unsigned
+   app/flash inputs plus ELF, map, generated sdkconfig, dependency lock and size/provenance data.
+   `scripts/ci-build-all.sh` also projects the 64 KiB padding plus 4 KiB signature sector, so an
+   image cannot pass compilation and then unexpectedly overflow its OTA slot when signed. Main
+   and PR builds also use separate ccache namespaces, so PR-produced compiler objects never feed
+   a build that will be signed and published.
+3. On `main`, the `publish` job enters `firmware-signing`, checks that the artifact SHA/version
+   match the run, rejects symlinks, and runs the trusted `scripts/ci-sign-artifacts.sh` from that
+   exact main commit. Only this job materialises the key; it signs the prebuilt app bytes and
+   publishes release/Pages artifacts. A missing key fails closed.
+4. A signed pre-merge hardware image is **opt-in**, not automatic. Add the `signed-preview` label
+   to a same-repository PR after reviewing it. After its unprivileged build succeeds,
+   `.github/workflows/signed-pr-preview.yml` runs from the default branch via `workflow_run`,
+   verifies that the PR head is current, then waits for the protected Environment. It repeats the
+   head/repository/state/label checks after that wait, before provisioning the key. The key job
+   treats the PR artifact only as data and never checks out or executes the PR. Fork PRs are
+   ineligible. Without this labelled approval, every PR remains compile-only and unsigned.
 
-For higher assurance, keep the key fully offline and sign on a trusted machine / KMS instead
-of in CI (no workflow change to the device is needed — only where `sign_data` runs).
+The signer uses the immutable digest-pinned ESP-IDF image from `esp-idf-toolchain.txt`; rotating
+that digest is therefore a security-sensitive review. For higher assurance, keep the key fully
+offline and sign on a trusted machine / KMS instead of in CI (no device-workflow change is needed).
 
 ### Key rotation
 
