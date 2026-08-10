@@ -3,6 +3,7 @@
 #include "vehicle_ctrl.hpp"
 #include "nvs_storage.hpp"
 #include "platform.hpp"
+#include "logic/ha_identity.hpp"
 #include "logic/units.hpp"
 #include "logic/link_state.hpp"
 #include "task_config.hpp"
@@ -59,7 +60,7 @@ static std::atomic<int>          s_last_err{ME_NONE};
 // Resolved config + derived topics (built once in mqtt_ha_start).
 static std::string s_uri, s_user, s_pass;     // broker connection
 static std::string s_prefix;                   // HA discovery prefix (e.g. "homeassistant")
-static std::string s_node;                     // unique node id (teslakey_<mac3>)
+static std::string s_node;                     // vehicle-stable node id (teslakey_<vin>)
 static std::string s_base;                     // state-topic base (<base_prefix>/<node>)
 static std::string s_avail;                    // availability (LWT) topic
 static std::string s_devname;                  // HA device display name
@@ -585,17 +586,23 @@ static bool mqtt_ha_start_impl(VehicleController& vehicle,
     s_interval_s = CONFIG_TESLA_MQTT_PUBLISH_INTERVAL_S;
     if (s_interval_s < 5) s_interval_s = 5;
 
-    // Unique node id from the WiFi STA MAC (stable across VIN changes / reboots).
-    // DELIBERATELY the WiFi MAC even on a wired device, where no WiFi link exists: this id is
-    // baked into every Home Assistant entity id under this device. Deriving it from whichever
-    // transport happens to be active would RENAME every entity the first time a board changed
-    // transport — and ESP_MAC_WIFI_STA is an eFuse-backed base address that is readable whether
-    // or not the radio was ever started, so it stays a stable identity rather than a link fact.
-    uint8_t mac[6] = {0};
-    esp_read_mac(mac, ESP_MAC_WIFI_STA);
-    char node[24];
-    snprintf(node, sizeof(node), "teslakey_%02x%02x%02x", mac[3], mac[4], mac[5]);
-    s_node = node;
+    // Every HA identity surface must survive replacement of the ESP32 board: discovery topic,
+    // state topic, unique_id and device identifier all derive from s_node. The VIN identifies the
+    // vehicle those entities describe and is already strictly validated before pairing. Using the
+    // board's eFuse MAC here created a second 55-entity device on every board replacement.
+    const std::string& vin = vehicle.vin();
+    s_node = tk::ha_node_id_from_vin(vin);
+    if (s_node.empty()) {
+        // Setup-mode fallback only. A configured vehicle always has a plausible VIN, but MQTT is
+        // optional and may have been provisioned first. Do not collapse all such devices onto one
+        // shared node while the VIN is absent; /set_vin reboots and selects the stable identity.
+        uint8_t mac[6] = {0};
+        esp_read_mac(mac, ESP_MAC_WIFI_STA);
+        char node[24];
+        snprintf(node, sizeof(node), "teslakey_%02x%02x%02x", mac[3], mac[4], mac[5]);
+        s_node = node;
+        ESP_LOGW(TAG, "plausible VIN unavailable — HA identity temporarily uses this board");
+    }
 
     std::string base_prefix = CONFIG_TESLA_MQTT_BASE_TOPIC;
     if (base_prefix.empty()) base_prefix = "tesla-key";
@@ -610,7 +617,6 @@ static bool mqtt_ha_start_impl(VehicleController& vehicle,
     s_topic[D_DEVICE]   = s_base + "/device";
 
     // Device display name + a clickable link back to this device's web UI.
-    const std::string& vin = vehicle.vin();
     s_devname = "Tesla Key";
     if (vin.size() == 17) s_devname += " (" + vin + ")";
     esp_netif_t* netif = tk::net_active_netif();

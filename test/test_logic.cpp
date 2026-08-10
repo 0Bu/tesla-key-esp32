@@ -5,6 +5,7 @@
 //
 // Scope: the IDF-free decision/conversion cores the firmware delegates to —
 //   * VIN plausibility               (logic/vin.hpp        <- VehicleController::vin_is_plausible)
+//   * vehicle-stable HA identity     (logic/ha_identity.hpp <- mqtt_ha.cpp)
 //   * imperial -> metric conversion  (logic/units.hpp      <- MQTT bridge / telemetry)
 //   * link_state() four-state machine + its web/MQTT string mappings
 //                                    (logic/link_state.hpp <- /status "link", MQTT sleep_status)
@@ -23,6 +24,7 @@
 // every which-field/when/what-value decision they render is host-tested here.
 
 #include "logic/vin.hpp"
+#include "logic/ha_identity.hpp"
 #include "logic/units.hpp"
 #include "logic/link_state.hpp"
 #include "logic/target.hpp"
@@ -108,6 +110,28 @@ static void test_vin() {
     // Stray punctuation / spaces.
     CHECK(!tk::vin_is_plausible("5YJ3E1EA7KF00031-"));
     CHECK(!tk::vin_is_plausible("5YJ3E1EA7KF 00316"));
+}
+
+// ─── Home Assistant vehicle identity ─────────────────────────────────────────
+static void test_ha_identity() {
+    // The full VIN is retained (lowercase for a canonical MQTT-safe spelling): no shortened
+    // serial and no hash collision can merge two vehicles into one HA device.
+    CHECK(tk::ha_node_id_from_vin("5YJ3E1EA7KF000316") ==
+          "teslakey_5yj3e1ea7kf000316");
+    CHECK(tk::ha_node_id_from_vin("LRWYGCEK9PC000001") ==
+          "teslakey_lrwygcek9pc000001");
+
+    // Same VIN is the same entity identity regardless of which board calls this pure function;
+    // changing the vehicle intentionally creates a different HA device.
+    const std::string node = tk::ha_node_id_from_vin("5YJ3E1EA7KF000316");
+    CHECK(node == tk::ha_node_id_from_vin("5YJ3E1EA7KF000316"));
+    CHECK(node != tk::ha_node_id_from_vin("5YJ3E1EA7KF000317"));
+
+    // MQTT can be configured before a VIN exists. The firmware detects this empty result and
+    // uses a board-local setup fallback; an invalid string must never become a stable identity.
+    CHECK(tk::ha_node_id_from_vin("").empty());
+    CHECK(tk::ha_node_id_from_vin("UNKNOWN").empty());
+    CHECK(tk::ha_node_id_from_vin("5yj3e1ea7kf000316").empty());
 }
 
 // ─── Syslog target parsing + send-failure classification ────────────────────────
@@ -633,6 +657,7 @@ static void test_status_model() {
     // of present/absent fields (float-exact values so the golden is bit-stable).
     Inputs in;
     in.vin = "5YJ3E1EA7KF000316"; in.ip = "192.168.1.50"; in.version = "1.4.2";
+    in.board_mac = "02:00:00:32:55:20";
     in.key_present = true; in.key_fingerprint = "AB:CD:EF:01";
     in.key_created = 1750000000; in.paired = true; in.paired_at = 1750500000;
     in.wifi_connected = true; in.wifi_ssid = "HomeNet"; in.wifi_rssi = -55; in.wifi_std = "Wi-Fi 6";
@@ -751,6 +776,7 @@ static void test_status_model() {
         "last.status=\"Charging\"\n"
         "last_seen_s=5\n"
         "sys{\n"
+        "sys.board_mac=\"02:00:00:32:55:20\"\n"
         "sys.free_heap=0\n"
         "sys.min_free_heap=0\n"
         "sys.largest_block=0\n"
@@ -763,6 +789,7 @@ static void test_status_model() {
     // debounced VCSEC sleep proven; no devices seen, no connect failures.
     Inputs s2;
     s2.vin = "5YJ3E1EA7KF000316"; s2.ip = "192.168.1.50"; s2.version = "1.4.2";
+    s2.board_mac = "02:00:00:32:55:20";
     s2.key_present = true; s2.key_fingerprint = "AB:CD:EF:01";
     s2.paired = true;   // stamps below the plausibility floor stay omitted
     s2.wifi_connected = true; s2.wifi_ssid = "HomeNet"; s2.wifi_rssi = -58;
@@ -812,6 +839,7 @@ static void test_status_model() {
         "last_seen_s=3600\n"
         "last_reboot=\"heap:2\"\n"
         "sys{\n"
+        "sys.board_mac=\"02:00:00:32:55:20\"\n"
         "sys.free_heap=0\n"
         "sys.min_free_heap=0\n"
         "sys.largest_block=0\n"
@@ -825,6 +853,7 @@ static void test_status_model() {
     // car at its ~3-device BLE limit).
     Inputs s3;
     s3.vin = "5YJ3E1EA7KF000316"; s3.ip = "10.0.0.7"; s3.version = "1.4.2";
+    s3.board_mac = "02:00:00:32:55:20";
     s3.key_present = true; s3.key_fingerprint = "AB:CD:EF:01"; s3.paired = true;
     s3.wifi_connected = true; s3.wifi_ssid = "Garage"; s3.wifi_rssi = -71; s3.wifi_std = "Wi-Fi 4";
     s3.ble_scanning = true;
@@ -888,6 +917,7 @@ static void test_status_model() {
         "last.status=\"Disconnected\"\n"
         "last_seen_s=90000\n"
         "sys{\n"
+        "sys.board_mac=\"02:00:00:32:55:20\"\n"
         "sys.free_heap=0\n"
         "sys.min_free_heap=0\n"
         "sys.largest_block=0\n"
@@ -901,6 +931,7 @@ static void test_status_model() {
     // containers and the devices[] array (app.js reads them unconditionally).
     Inputs s4;
     s4.vin = "UNKNOWN"; s4.version = "1.4.2";
+    s4.board_mac = "02:00:00:32:55:20";
     CollectEmitter e4;
     tk::status::emit_status(s4, e4);
     CHECK(golden_eq(e4.out, 
@@ -927,6 +958,7 @@ static void test_status_model() {
         "link=\"unknown\"\n"
         "vcsec_sleep=\"UNKNOWN\"\n"
         "sys{\n"
+        "sys.board_mac=\"02:00:00:32:55:20\"\n"
         "sys.free_heap=0\n"
         "sys.min_free_heap=0\n"
         "sys.largest_block=0\n"
@@ -2039,15 +2071,18 @@ static void test_redact() {
     CHECK(tk::redact_or("MySSID", false) == "MySSID");
     CHECK(tk::redact_or("MySSID", true)  == tk::kRedacted);
 
-    // The VIN and the BLE MAC on one line — the worst single line this device logs.
+    // Car identifiers are scrubbed, but the replaceable board identity deliberately survives.
     const std::string boot = tk::redact_diag_line(
-        "I (1234) main: VIN: 5YJ3E1EA7KF000316  BLE MAC: aa:bb:cc:dd:ee:ff\n");
+        "I (1234) main: VIN: 5YJ3E1EA7KF000316  BLE MAC: aa:bb:cc:dd:ee:ff  "
+        "Board MAC: 02:00:00:32:55:20\n");
     CHECK(boot.find("5YJ3E1EA7KF000316") == std::string::npos);
     CHECK(boot.find("aa:bb:cc:dd:ee:ff") == std::string::npos);
+    CHECK(boot.find("02:00:00:32:55:20") != std::string::npos);
     // The KEY survives. A dropped field forges an "older build that never had it" signal, and the
     // shape of the line is what tells a reader which log statement they are looking at.
     CHECK(boot.find("VIN: ")     != std::string::npos);
     CHECK(boot.find("BLE MAC: ") != std::string::npos);
+    CHECK(boot.find("Board MAC: ") != std::string::npos);
     CHECK(boot.back() == '\n');   // the ring's line structure survives
 
     // A line the ring truncated MID-VALUE must FAIL CLOSED — redact to the end of the line rather
@@ -2055,6 +2090,11 @@ static void test_redact() {
     // buffer looks like, which is when a value is most likely to be sitting there.
     const std::string cut = tk::redact_diag_line("I (1) main: VIN: 5YJ3E1EA7KF0003");
     CHECK(cut.find("5YJ3E1EA7KF0003") == std::string::npos);
+
+    const std::string cut_ble = tk::redact_diag_line(
+        "I (1) main: VIN: 5YJ3E1EA7KF000316  BLE MAC: aa:bb:cc");
+    CHECK(cut_ble.find("5YJ3E1EA7KF000316") == std::string::npos);
+    CHECK(cut_ble.find("aa:bb:cc") == std::string::npos);
 
     // An ordinary line is untouched — a redactor that mangles the log costs the diagnosis it was
     // supposed to make safe to share.
@@ -2096,6 +2136,16 @@ static void test_redact() {
         "W (1) vehicle_ctrl: could not persist Tesla MAC aa:bb:cc:dd:ee:ff — next boot rescans\n");
     CHECK(mac_fail.find("aa:bb:cc:dd:ee:ff") == std::string::npos);
     CHECK(mac_fail.find("next boot rescans") != std::string::npos);   // the explanation survives
+
+    // The MQTT base topic now carries the VIN-derived HA node id. Broker, node id and raw VIN are
+    // identifying; the generic HA prefix remains useful and safe diagnostic context.
+    const std::string mqtt = tk::redact_diag_line(
+        "I (1) mqtt_ha: MQTT bridge started → 192.168.1.5:1883 "
+        "(base topic tesla-key/teslakey_5yj3e1ea7kf000316, HA prefix homeassistant)\n");
+    CHECK(mqtt.find("192.168.1.5") == std::string::npos);
+    CHECK(mqtt.find("5yj3e1ea7kf000316") == std::string::npos);
+    CHECK(mqtt.find("base topic ") != std::string::npos);
+    CHECK(mqtt.find("HA prefix homeassistant") != std::string::npos);
 
     CHECK(tk::kDiagRedactionCount > 0);
     CHECK(tk::kRedactedStatusFields == 6);
@@ -2207,10 +2257,12 @@ static void test_status_sys_and_redaction() {
     // to be able to say how it is doing, and this is the block a remote triage reads first.
     Inputs s;
     s.vin = "5YJ3E1EA7KF000316"; s.version = "1.4.2"; s.ip = "192.168.1.42";
+    s.board_mac = "02:00:00:32:55:20";
     s.free_heap = 40960; s.min_free_heap = 20480; s.largest_block = 16384;
     s.uptime_s = 3600; s.wifi_reconnects = 2; s.reset_reason = "panic"; s.safe_mode = true;
     CollectEmitter e;
     tk::status::emit_status(s, e);
+    CHECK(e.out.find("sys.board_mac=\"02:00:00:32:55:20\"") != std::string::npos);
     CHECK(e.out.find("sys.free_heap=40960")        != std::string::npos);
     CHECK(e.out.find("sys.largest_block=16384")    != std::string::npos);
     CHECK(e.out.find("sys.uptime_s=3600")          != std::string::npos);
@@ -2242,6 +2294,7 @@ static void test_status_sys_and_redaction() {
     Inputs r;
     r.redact = true;
     r.vin = "5YJ3E1EA7KF000316"; r.ip = "192.168.1.42"; r.version = "1.4.2";
+    r.board_mac = "02:00:00:32:55:20";
     r.wifi_connected = true; r.wifi_ssid = "MyHomeNetwork"; r.wifi_rssi = -55;
     r.mqtt_broker = "192.168.1.5:1883";
     r.syslog_host = "192.168.1.9"; r.syslog_port = 514;
@@ -2263,6 +2316,7 @@ static void test_status_sys_and_redaction() {
     CHECK(er.out.find("version=\"1.4.2\"") != std::string::npos);
     CHECK(er.out.find("wifi.rssi=-55")     != std::string::npos);
     CHECK(er.out.find("syslog.port=514")   != std::string::npos);
+    CHECK(er.out.find("sys.board_mac=\"02:00:00:32:55:20\"") != std::string::npos);
 
     // A scanned NEIGHBOUR's MAC is other people's hardware in the reporter's home, so it is
     // redacted for the same reason the car's own is.
@@ -2295,6 +2349,7 @@ static void test_status_sys_and_redaction() {
 
 int main() {
     test_vin();
+    test_ha_identity();
     test_syslog_policy();
     test_connect_outcome();
     test_ha_templates();

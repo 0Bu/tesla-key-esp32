@@ -43,6 +43,7 @@ The firmware delegates these decision/conversion cores to IDF-free headers under
 | Logic | Header | Firmware call sites |
 |-------|--------|---------------------|
 | VIN plausibility (17-char, A–Z0–9 ∖ I/O/Q) | `logic/vin.hpp` | `VehicleController::vin_is_plausible`, `/set_vin`, pairing gate |
+| Vehicle-stable Home Assistant node id (`teslakey_<vin>`) | `logic/ha_identity.hpp` | `mqtt_ha.cpp` discovery topics, state topics, entity `unique_id`, device identifier |
 | Imperial → metric (km, km/h, odometer) | `logic/units.hpp` | MQTT/HA bridge, drive-state telemetry |
 | `link_state()` four-state machine + the debounced-ASLEEP asymmetry | `logic/link_state.hpp` | `VehicleController::link_state()` |
 | `/status` `link` + MQTT `sleep_status` strings | `logic/link_state.hpp` | `http_status.cpp`, `mqtt_ha.cpp` |
