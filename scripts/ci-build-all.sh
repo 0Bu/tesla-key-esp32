@@ -3,17 +3,47 @@
 # data-only: a later trusted job may sign these exact app bytes, but this job can safely execute PR
 # code and third-party build tooling without exposing a publishing token or signing secret.
 #
-# Usage: ./scripts/ci-build-all.sh <display-version>
+# Usage: ./scripts/ci-build-all.sh <display-version> [source-sha]
 set -euo pipefail
 
-version="${1:?usage: ci-build-all.sh <display-version>}"
+validate_inputs() {
+  local candidate_version="$1"
+  local candidate_sha="$2"
+
+  case "$candidate_version" in
+    *[!0-9A-Za-z.+-]*|'') echo "invalid display version: $candidate_version" >&2; return 2 ;;
+  esac
+  if [[ "$candidate_sha" != local && ! "$candidate_sha" =~ ^[0-9a-f]{40}$ ]]; then
+    echo "invalid source SHA: $candidate_sha" >&2
+    return 2
+  fi
+}
+
+if [[ "${1:-}" == --self-test ]]; then
+  valid_sha=0123456789abcdef0123456789abcdef01234567
+  validate_inputs 1.4.73-PR-228 "$valid_sha"
+  validate_inputs local local
+  if validate_inputs 1.4.73 not-a-sha >/dev/null 2>&1; then
+    echo "self-test failed: invalid SHA accepted" >&2
+    exit 1
+  fi
+  if validate_inputs 'bad version' "$valid_sha" >/dev/null 2>&1; then
+    echo "self-test failed: invalid version accepted" >&2
+    exit 1
+  fi
+  echo "ci-build-all input self-test passed"
+  exit 0
+fi
+
+version="${1:?usage: ci-build-all.sh <display-version> [source-sha]}"
+# GitHub Actions does not reliably forward step-level environment variables through container
+# actions. CI therefore passes the producing commit explicitly; local builds retain a clear,
+# non-provenance marker when the optional argument is omitted.
+source_sha="${2:-local}"
+validate_inputs "$version" "$source_sha"
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 unset IDF_TARGET
-
-case "$version" in
-  *[!0-9A-Za-z.+-]*|'') echo "invalid display version: $version" >&2; exit 2 ;;
-esac
 
 if command -v ccache >/dev/null 2>&1; then
   export IDF_CCACHE_ENABLE=1
@@ -88,12 +118,6 @@ for target in $TARGETS; do
   echo "::endgroup::"
 done
 
-source_sha="${SOURCE_SHA:-${GITHUB_SHA:-}}"
-if [[ -z "$source_sha" ]]; then
-  # Docker Desktop cannot follow a host worktree's absolute .git file. CI supplies SOURCE_SHA;
-  # local builds use an explicit non-provenance marker without emitting a misleading fatal error.
-  source_sha="local"
-fi
 {
   printf 'head_sha=%s\n' "$source_sha"
   printf 'display_version=%s\n' "$version"
