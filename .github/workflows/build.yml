@@ -27,6 +27,7 @@ jobs:
         run: ./scripts/run-mock-tests.sh
       - name: Test ESP-IDF build contracts
         run: |
+          ./scripts/ci-build-all.sh --self-test
           python3 scripts/check-sdkconfig-defaults.py --self-test
           python3 scripts/report-firmware-size.py --self-test
           test "$(./scripts/idf-version.sh)" = v5.5.5
@@ -112,12 +113,13 @@ jobs:
       # This job has neither the OTA key nor a write-capable GITHUB_TOKEN.
       - name: Build unsigned firmware for all supported targets
         uses: espressif/esp-idf-ci-action@e6f5c74232b1ccd4c97ed641f1e48553853f1fd5 # v1.2.0
-        env:
-          SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         with:
           esp_idf_version: ${{ steps.toolchain.outputs.image-version }}
           target: esp32
-          command: ./scripts/ci-build-all.sh "${{ steps.stamp.outputs.disp }}"
+          command: >-
+            ./scripts/ci-build-all.sh
+            "${{ steps.stamp.outputs.disp }}"
+            "${{ github.event.pull_request.head.sha || github.sha }}"
 
       - name: Publish firmware size summary
         if: always()
@@ -168,9 +170,20 @@ jobs:
           EXPECTED_VERSION: ${{ needs.build.outputs.display-version }}
         run: |
           set -euo pipefail
-          test ! -L dist/build-metadata.txt
-          test "$(sed -n 's/^head_sha=//p' dist/build-metadata.txt)" = "$EXPECTED_SHA"
-          test "$(sed -n 's/^display_version=//p' dist/build-metadata.txt)" = "$EXPECTED_VERSION"
+          meta=dist/build-metadata.txt
+          test -f "$meta" && test ! -L "$meta"
+          test "$(sed -n '/^head_sha=/p' "$meta" | wc -l | tr -d ' ')" -eq 1
+          test "$(sed -n '/^display_version=/p' "$meta" | wc -l | tr -d ' ')" -eq 1
+          actual_sha="$(sed -n 's/^head_sha=//p' "$meta")"
+          actual_version="$(sed -n 's/^display_version=//p' "$meta")"
+          if [ "$actual_sha" != "$EXPECTED_SHA" ]; then
+            echo "provenance SHA mismatch: expected=$EXPECTED_SHA actual=$actual_sha" >&2
+            exit 1
+          fi
+          if [ "$actual_version" != "$EXPECTED_VERSION" ]; then
+            echo "provenance version mismatch: expected=$EXPECTED_VERSION actual=$actual_version" >&2
+            exit 1
+          fi
           if find _unsigned -type l -print -quit | grep -q .; then
             echo "refusing symlinks in unsigned artifact" >&2
             exit 1

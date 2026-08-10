@@ -108,7 +108,11 @@ jobs:
           test -f "$meta" && test ! -L "$meta"
           test "$(grep -c '^head_sha=' "$meta")" -eq 1
           test "$(grep -c '^display_version=' "$meta")" -eq 1
-          test "$(sed -n 's/^head_sha=//p' "$meta")" = "$EXPECTED_SHA"
+          actual_sha="$(sed -n 's/^head_sha=//p' "$meta")"
+          if [ "$actual_sha" != "$EXPECTED_SHA" ]; then
+            echo "provenance SHA mismatch: expected=$EXPECTED_SHA actual=$actual_sha" >&2
+            exit 1
+          fi
           version="$(sed -n 's/^display_version=//p' "$meta")"
           if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+-PR-${PR_NUMBER}$ ]]; then
             echo "unexpected preview version: $version" >&2
