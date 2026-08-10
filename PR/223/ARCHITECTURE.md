@@ -114,11 +114,21 @@ bug. Reading the **image's** version (not the manifest's) also defeats a host th
 a new `version` in `manifest.json` but serves an old `.bin`. No eFuses burned.
 
 **Rollback** is enabled (`CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE`); `main.cpp` defers
-`esp_ota_mark_app_valid_cancel_rollback()` to a health gate (`ota_health_gate_task`) that
-holds rollback armed until a freshly-flashed image has run healthily for a window
-(`kOtaHealthGateS` ≈ 90 s). An image that boots but then crashes/OOM-reboots under load dies
-while still `PENDING_VERIFY`, so the bootloader reverts to the previous slot rather than
-having committed it at startup. A **deliberate, user-initiated reboot** inside that window is a
+`esp_ota_mark_app_valid_cancel_rollback()` to a health gate (`ota_health_gate_task`) whose verdict
+is the pure, host-tested `logic/health_gate.hpp`. Health is **a proven link plus an uptime floor**,
+not uptime alone: the image must hold a lease (`tk::net_is_up()`, either transport) *and* have run
+`kHealthGateBaseS` (90 s). An image that boots but then crashes/OOM-reboots under load dies while
+still `PENDING_VERIFY`, so the bootloader reverts to the previous slot rather than having committed
+it at startup — and so does an image that boots perfectly but never gets on the network, which a
+pure 90-second timer used to commit. That second case is the one an OTA cannot repair on its own,
+because the repair would have to arrive over the link the image broke; the remedy was a USB cable.
+Past `kHealthGateCapS` (600 s) an image with a route and no lease is judged broken and simply left
+`PENDING_VERIFY`: the next reboot from any cause rolls it back. It deliberately does **not** restart
+itself — that would turn a long router outage into a silent, unrequested downgrade of a good build —
+and any deliberate `/set_*` save commits it instead, via the `ota_confirm_pending_image()` path
+described below. A device with neither credentials nor a wire is legitimately offline (setup mode)
+and counts as healthy, so an OTA installed just before the credentials were cleared is not thrown
+away. A **deliberate, user-initiated reboot** inside that window is a
 different case, though: the three config handlers that reboot (`/set_vin`, `/set_mqtt`,
 `/set_syslog`), the setup-portal save **and the heap watchdog's deliberate restart** call
 `ota_confirm_pending_image()` first — a restart we chose is proof the image runs, so it must not
@@ -140,7 +150,9 @@ Partition layout (`partitions.csv`) is dual-OTA (`otadata` + `ota_0`/`ota_1`, ~2
 sized to fill 4 MB (the smallest supported flash; a larger one leaves the top
 unused) so ONE table serves every target; app at `0x20000`. The `ci-build-all.sh` **app-size gate**
 sits at `slot − 32 KB` (0x1e8000): each image's code rounds up to a 64 KB Secure-Boot boundary + a
-4 KB signature, and the largest — esp32c6, 0x1d1000 signed — clears it by ~92 KB.
+4 KB signature, and the largest — esp32c6, 0x1e1000 signed — clears it by ~28 KB. That block
+boundary is worth knowing about: c6 sat ~3 KB below one, so a 3 KB change crossed it and cost a
+full 64 KB. The gate is still met, but c6 is the target to size-check first.
 **esp32s3 carries the extra on-device display code and still fits at the base `-Og`** like every
 target: the Package A size levers
 (#154) freed the ~64 KB the display needs, so no `-Os` (which hard-freezes under load — rejected
@@ -549,27 +561,131 @@ restart — the one line that answers it had been written to a ring that the reb
 
 ## WiFi / LAN connectivity (reconnect + watchdog)
 
-The STA→LAN link (distinct from the car BLE link-state below) is kept up by two layers in
-`main.cpp`:
+**Where this lives.** All of it is `main/net.cpp`, behind the transport seam `main/net.hpp`.
+Everything above that seam — the HTTP server, MQTT, syslog, mDNS, SNTP, OTA, the display, the
+LED — asks `tk::net_is_up()` / `tk::net_kind()` / `tk::net_active_netif()` and never touches
+`esp_wifi` itself. Before the seam existed there was one predicate, `wifi_is_connected()`,
+hand-declared as an `extern` in five translation units, and `esp_netif_get_handle_from_ifkey(
+"WIFI_STA_DEF")` hardcoded in three more; each was correct while WiFi was the only transport
+and silently wrong the moment it was not. The transport identity itself
+(`tk::NetLink::{None,Wifi,Eth}`) and the watchdog's decision logic are the host-tested
+`main/logic/net_link.hpp`.
+
+### Which transport comes up
+
+Boot order is **wire first, radio second** — and the reason is the radio, not the bandwidth.
+WiFi and BLE share ONE antenna path on every chip this firmware targets, so a *running* WiFi
+stack means time-division coexistence with NimBLE for as long as the device is powered. That is
+what forces `WIFI_PS_MIN_MODEM` (see below) and what makes every GATT round-trip to the car
+slower than it needs to be. Coming up on Ethernet does not merely avoid *using* WiFi, it avoids
+**starting** it: no coexistence arbitration at all, and the ~57 KB of largest-block the stack
+holds stays free on a device whose binding limit is the largest *contiguous* block.
+
+1. `tk::net_eth_probe()` runs very early — **before** the setup-portal decision — and reads the
+   W5500's `VERSIONR` (0x0039, always 0x04). A floating MISO reads 0x00/0xFF, so there is no
+   realistic false positive. On no answer the SPI bus is freed again and those GPIOs are left as
+   they were found.
+2. A wired board with **no stored SSID does not enter the setup portal**. DHCP gives it an
+   address with nothing configured, so a captive AP would strand a perfectly reachable device —
+   a regression created purely by adding a transport. The VIN is then set over the LAN.
+3. `tk::net_start_eth()` waits for a lease, and the deadline means **two different things**:
+   with the PHY reporting **no link** (no cable, dead switch port) it falls back to WiFi after
+   `CONFIG_TESLA_ETH_WAIT_S` (20 s) — nothing is coming. With the **link up but no lease yet** (a
+   slow or busy DHCP server) it keeps waiting, up to `kEthLeaseLinkedCapFactor` × that. Falling
+   back there would run the WiFi stack for the rest of the boot — paying the BLE coexistence cost
+   and ~57 KB of largest-block — on a board that is in fact wired. The Ethernet driver keeps
+   running either way, so a cable plugged in later still takes over.
+   **On the wired path `esp_wifi_init()` is never called at all:** `main.cpp` short-circuits
+   (`!on_wire && !net_start_wifi(...)`), which is what turns "prefer the wire" into "no radio
+   coexistence" rather than merely "prefer the wire for routing".
+4. On the wired path the WiFi credential-rollback backup is **not** consumed: coming up on
+   Ethernet proves nothing about credentials on trial, and spending them there would discard the
+   only way back to a working network the moment the cable is unplugged.
+
+**Polling mode is deliberate, not a workaround.** The M5Stack ATOMIC PoE Base routes only
+SCLK/CS/MISO/MOSI + power — there is no INT line and no RST line to wire — so the driver polls at
+`CONFIG_TESLA_ETH_POLL_MS` (10 ms) and the PHY is reset over SPI (the W5500's `MR` register)
+instead of by a strobe. ESP-IDF ships a CI configuration for exactly this shape
+(`components/esp_eth/test_apps/sdkconfig.ci.poll_w5500`, also 10 ms at 20 MHz). The poll period
+bounds RX *latency*, not throughput: each poll drains everything queued in the W5500's 16 KB
+buffer. Note that ESP-IDF **6.0 moves the SPI Ethernet drivers out of the core** into the
+`esp-eth-drivers` component — one `idf_component.yml` line whenever the IDF-6 work
+([ADR-0002](adr/0002-idf6-mbedtls4-crypto-seam.md)) happens.
+
+**The wire is made to win the default route — lwIP does not do it on its own.** ESP-IDF ships
+`WIFI_STA_DEF` at `route_prio` **100** and `ETH_DEF` at **50** (`esp_netif_defaults.h`), i.e. the
+opposite of what this feature is for, so `net.cpp` creates the Ethernet netif with a raised
+`route_prio` (`kEthRoutePrio`).
+
+Be precise about the scope, because lwIP's `ip4_route()` has two branches and only one of them
+consults priority (verified in `components/lwip/.../ip4.c`, not assumed):
+
+- **Off-link** destinations — anything via the gateway: NTP, OTA, an MQTT broker or syslog
+  collector outside the subnet — go to `netif_default`, which is precisely what `route_prio`
+  selects. Without the raise, the WiFi station would win them.
+- **On-link** destinations do not consult it at all: `ip4_route()` walks `netif_list` and returns
+  the **first** netif that is up and whose subnet matches. With both interfaces on the same `/24`
+  — the normal home case — same-subnet traffic leaves over whichever netif was registered first,
+  i.e. the WiFi station. Measured: with both up, syslog to an on-link collector kept the WiFi
+  source address while `/status.ip` reported the Ethernet one.
+
+That asymmetry is **accepted, not fought**. Forcing per-packet source selection across two netifs
+on one subnet means overriding the stack's routing, and the only state it would improve is the
+runtime hot-plug — which never delivers this transport's actual benefit anyway, because WiFi is
+already running (coexistence paid, heap spent). The benefit lives in the boot-with-cable path,
+where WiFi is never started and there is no second netif to disagree with.
+
+**The watchdog's ICMP baseline is PER TRANSPORT.** `s_gw_ever_reachable` is indexed by
+`NetLink`, not global. A single flag let a freshly plugged-in Ethernet segment inherit "this
+gateway has answered before" from the *WiFi* gateway — precisely the false evidence the baseline
+rule exists to refuse, evaporating at the moment it is needed. Same class of mistake as a
+per-transport lease held in one global: state that belongs to a transport must be kept per
+transport.
+
+**Both transports can hold a lease at once.** A board whose W5500 found no lease at boot falls
+back to WiFi with the Ethernet driver still running, so a cable plugged in later brings the wire
+up *alongside* the radio. `tk::net_kind()` is therefore DERIVED from two per-transport lease
+flags via the host-tested `tk::net_link_active()` (Ethernet outranks WiFi — it is the transport
+that costs the BLE radio nothing, and it is what lwIP puts first), not written by whichever event
+fired last. That matters on the way back down: unplugging the cable must fall back to WiFi, not
+to "no network", or syslog stops, the display shows "searching" and MQTT drops the RSSI while a
+perfectly healthy WiFi lease is still in hand. For the same reason the WiFi-only readings
+(`net_wifi_signal`, `net_wifi_standard`) gate on the WiFi *lease*, not on which transport is
+active — the lease flag is exactly the window in which `esp_wifi_sta_get_ap_info()` is safe.
+
+**The W5500 has no MAC of its own** (no EEPROM), so one is supplied from `ESP_MAC_ETH` — the
+chip's eFuse-derived Ethernet address, distinct from the WiFi STA MAC so the two can never
+collide on one LAN. The MQTT/HA node id stays derived from `ESP_MAC_WIFI_STA` even on a wired
+device: it is baked into every Home Assistant entity id, and deriving it from the *active*
+transport would rename every entity the first time a board changed transport.
+
+The STA→LAN link (distinct from the car BLE link-state below) is kept up by two layers:
 
 - **Event-driven reconnect.** `wifi_event_handler` reconnects on every
   `WIFI_EVENT_STA_DISCONNECTED`. The boot-time path keeps the original budget: if the device
-  has **never** held an IP (`s_wifi_ever_connected == false`) and the `MAX_RETRY` (10) fast
-  attempts are spent, it sets `WIFI_FAIL_BIT` so `wifi_connect()` times out and falls back to
+  has **never** held an IP (`s_ever_up == false`) and the `MAX_RETRY` (10) fast
+  attempts are spent, it sets `WIFI_FAIL_BIT` so `net_start_wifi()` times out and falls back to
   the **setup portal** (the credentials are presumed wrong). But once the device has been
   online at least once, a later drop reconnects **forever** — the credentials are known-good,
   so surrendering would only strand the device. (The old code gave up after 10 retries in
   *all* cases, which is exactly how a 3.5 h router outage left the board reachable-over-BLE
   but off the LAN, recoverable only by a manual USB reset.)
 
-- **Connectivity watchdog** (`wifi_watchdog_task`, ~30 s cadence). The event path cannot catch
+- **Connectivity watchdog** (`net_watchdog_task`, ~30 s cadence; the verdict comes from
+  `tk::watch_step()` in `logic/net_link.hpp`, so its counting and — more importantly — its
+  never-answered-ICMP baseline rule are covered by `test/test_logic.cpp` rather than living as
+  an `if` inside a task loop). The event path cannot catch
   a **missed-deauth "ghost" association**: the stack still believes it is connected (holds the
   IP, keeps emitting TCP that times out — e.g. MQTT `esp-tls select() timeout`) but the AP
   forwards nothing and **no disconnect event ever fires**, so the handler never runs. The
   watchdog ICMP-echoes the **default gateway** only while the link believes it is up; after
   `kWdFailToReassoc` (2) consecutive failures (~60 s) it forces **one** `esp_wifi_disconnect()`
   — the endless-retry handler then reconnects with the known-good credentials (so the watchdog
-  never calls `esp_wifi_connect()` itself, avoiding a cross-task double-connect). A stack that
+  never calls `esp_wifi_connect()` itself, avoiding a cross-task double-connect). On a wired
+  link the same verdict restarts the Ethernet MAC (`esp_eth_stop`/`esp_eth_start`), which
+  re-runs auto-negotiation and re-requests DHCP — the wired ghost is a switch port that still
+  reports link while forwarding nothing, and it fires no `ETHERNET_EVENT_DISCONNECTED` either. A
+  stack that
   *gave up* needs no help here — that path is owned by the handler. Two guards keep it from
   ever harming a healthy link: it acts **only** when the link still believes it is up (a known-
   down link is the handler's job, and forcing a disconnect there would only churn the shared
@@ -911,10 +1027,10 @@ Application-task priorities are declared **only** in [`main/task_config.hpp`](..
 | `ota` | `kPrioOta` = 5 | 8192 | `ota_update.cpp` | OTA download + flash (transient) |
 | `ota_chk` | `kPrioOtaCheck` = 5 | 8192 | `ota_update.cpp` | OTA manifest check (transient) |
 | `auto_pair` | `kPrioAutoPair` = 4 | 8192 | `vehicle_ctrl.cpp` (fn: `vehicle_pairing.cpp`) | pairing supervisor: enrol / re-pair / health probe |
-| `wifi_wd` | `kPrioWifiWatchdog` = 4 | 3072 | `main.cpp` | ghost-association watchdog (re-associate, never reboot) |
+| `net_wd` | `kPrioWifiWatchdog` = 4 | 3072 | `net.cpp` | ghost-link watchdog (force the active transport to re-establish, never reboot) |
 | `mqtt_pub` | `kPrioMqttPub` = 4 | 6144 | `mqtt_ha.cpp` | MQTT/HA publisher (reads the caches) |
 | `display` | `kPrioDisplay` = 3 | 6144 | `display.cpp` | ST7735 renderer (`CONFIG_TESLA_DISPLAY_ENABLED` builds) |
-| `ota_gate` | `kPrioOtaGate` = 3 | 3072 | `main.cpp` | one-shot OTA rollback health gate (~90 s) |
+| `ota_gate` | `kPrioOtaGate` = 3 | 3072 | `main.cpp` | one-shot OTA rollback health gate (polls every 5 s; commits on a proven link past 90 s, gives up at 600 s) |
 | `syslog_task` | `kPrioSyslog` = 3 | 6144 | `syslog.cpp` | best-effort UDP Syslog forwarder (opt-in; degraded-not-fatal on a failed start) |
 | `led` | `kPrioLed` = 2 | 3072 | `led_status.cpp` | APA102 status LED (`CONFIG_TESLA_LED_ENABLED` builds) |
 
