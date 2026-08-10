@@ -6,7 +6,6 @@ sdkconfig.old
 
 # IDF Component Manager
 managed_components/
-dependencies.lock
 
 # Flash artifacts
 *.bin
@@ -62,3 +61,10 @@ ota_signing_key.pem
 
 # GitHub Pages site assembled by scripts/build-pages.sh
 /_site/
+
+# CI/build staging (all reproducible from committed inputs)
+/_unsigned/
+/_signed/
+/_fw/
+/_pr_site/
+/dist/

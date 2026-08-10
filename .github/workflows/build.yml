@@ -5,62 +5,67 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
-  # Manual re-publish lever: a main run can fail in its LAST step on a transient GitHub
-  # Pages error ("Deployment failed, try again later."). Dispatching on main rebuilds and
-  # republishes the Pages site (installer + OTA manifest) at the LATEST released version —
-  # it never cuts a new release (that stays push-only via the changes-detect step).
+  # Rebuild and republish the latest main firmware without cutting a release.
   workflow_dispatch:
 
-# Serialize main so the auto-incremented release version can't race between runs.
-# PR branches don't release/version, so cancel superseded runs there to save CI time on
-# rapid push sequences — the per-ref group keeps main (refs/heads/main) serialized as before.
 concurrency:
   group: build-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
-# Least-privilege default for every job's GITHUB_TOKEN (logic-test only needs to
-# read the checkout). The build/deploy jobs override this with the narrower set of
-# write scopes they actually need (releases + Pages). See docs/SECURITY.md.
+# Tests and compilation are unprivileged by default. Only the main-only publish job can access
+# the signing environment and write releases/Pages.
 permissions:
   contents: read
 
 jobs:
-  # Fast, hardware-free gate: compile + run the host-side mock build (pure logic in
-  # main/logic/) before the slow per-target firmware builds, so a logic regression
-  # fails in seconds instead of after four ESP-IDF builds. See test/README.md.
   logic-test:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Run host-side logic tests
         run: ./scripts/run-mock-tests.sh
+      - name: Test ESP-IDF build contracts
+        run: |
+          python3 scripts/check-sdkconfig-defaults.py --self-test
+          python3 scripts/report-firmware-size.py --self-test
+          test "$(./scripts/idf-version.sh)" = v5.5.5
 
   build:
     needs: logic-test
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     permissions:
-      contents: write   # create tags + releases
-      pages: write       # configure-pages / upload the Pages artifact
-      id-token: write
+      contents: read
+    outputs:
+      display-version: ${{ steps.stamp.outputs.disp }}
+      release-version: ${{ steps.version.outputs.version }}
+      firmware: ${{ steps.changes.outputs.firmware }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          fetch-depth: 0   # need full history + tags for versioning and change detection
+          fetch-depth: 0
 
-      # Persist the ccache dir that ci-build-all.sh writes (.ccache, inside the workspace
-      # so it survives the container mount) across CI runs. The five cold ESP-IDF builds —
-      # framework + tesla-ble + our sources, once per target — dominate wall-clock; a warm
-      # ccache turns most of that into cache hits. Key per-commit (cache keys are immutable,
-      # so a fresh entry is saved each run); restore-keys falls back to the newest prior
-      # cache for a warm start. Bump the idf5.5.4 tag in lockstep with the ESP-IDF version
-      # below so a toolchain change starts from a clean cache.
-      - name: Cache ccache (ESP-IDF compiler cache)
+      - name: Read pinned ESP-IDF toolchain
+        id: toolchain
+        run: |
+          echo "version=$(./scripts/idf-version.sh)" >> "$GITHUB_OUTPUT"
+          echo "image-version=$(./scripts/idf-version.sh --image-version)" >> "$GITHUB_OUTPUT"
+          h="$(sha256sum esp-idf-toolchain.txt sdkconfig.defaults sdkconfig.defaults.* \
+               dependencies.lock.* | sha256sum | cut -c1-16)"
+          echo "cache-hash=$h" >> "$GITHUB_OUTPUT"
+          if [ "${{ github.event_name }}" = pull_request ]; then scope=pr; else scope=main; fi
+          echo "cache-scope=$scope" >> "$GITHUB_OUTPUT"
+          echo "ESP-IDF image: $(./scripts/idf-version.sh --image)"
+
+      - name: Cache ccache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .ccache
-          key: ccache-idf5.5.4-${{ github.sha }}
+          # Never let a PR-populated compiler-object cache feed a main build that will be signed.
+          key: ccache-${{ steps.toolchain.outputs.cache-hash }}-${{ steps.toolchain.outputs.cache-scope }}-${{ github.sha }}
           restore-keys: |
-            ccache-idf5.5.4-
+            ccache-${{ steps.toolchain.outputs.cache-hash }}-${{ steps.toolchain.outputs.cache-scope }}-
 
       - name: Compute release version
         id: version
@@ -68,9 +73,8 @@ jobs:
           git fetch --tags --force
           next="$(./scripts/next-version.sh)"
           latest="$(git tag -l 'v*' --sort=-v:refname | head -n1 | sed 's/^v//')"
-          echo "version=$next"   >> "$GITHUB_OUTPUT"
-          echo "latest=$latest"  >> "$GITHUB_OUTPUT"
-          echo "next=$next latest=${latest:-none}"
+          echo "version=$next" >> "$GITHUB_OUTPUT"
+          echo "latest=$latest" >> "$GITHUB_OUTPUT"
 
       - name: Detect firmware-relevant changes
         id: changes
@@ -78,197 +82,173 @@ jobs:
         run: |
           before="${{ github.event.before }}"
           if [ -z "$before" ] || ! git cat-file -e "${before}^{commit}" 2>/dev/null; then
-            changed=yes   # first push / unknown base → release to be safe
-          elif git diff --name-only "$before" "${{ github.sha }}" \
-               | grep -qE '^(main/|patches/tesla-ble/|CMakeLists\.txt$|sdkconfig\.defaults(\.[a-z0-9]+)?$|partitions\.csv$|version\.txt$|\.github/workflows/build\.yml$|scripts/ci-build-all\.sh$|scripts/build-pages\.sh$|scripts/apply-tesla-ble-patches\.sh$)'; then
+            changed=yes
+          elif git diff --name-only "$before" "${{ github.sha }}" | grep -qE \
+            '^(main/|patches/tesla-ble/|CMakeLists\.txt$|sdkconfig\.defaults(\.[a-z0-9]+)?$|dependencies\.lock\.[a-z0-9]+$|esp-idf-toolchain\.txt$|partitions\.csv$|version\.txt$|\.github/workflows/(build|signed-pr-preview)\.yml$|scripts/(ci-build-all|ci-sign-artifacts|check-reproducible-build|idf-docker|idf-version|build-pages|apply-tesla-ble-patches)\.sh$|scripts/(check-sdkconfig-defaults|report-firmware-size)\.py$)'; then
             changed=yes
           else
             changed=no
           fi
           echo "firmware=$changed" >> "$GITHUB_OUTPUT"
-          echo "firmware-relevant change: $changed"
 
-      # Stamp the embedded firmware version so esp_app_get_description()->version
-      # (what running_version()/the OTA check compares) matches the release +
-      # manifest version. version.txt is the git-committed FLOOR; here we overwrite
-      # it in the workspace (NOT committed) with the version we are actually
-      # publishing. Without this the binary is frozen at the version.txt floor while
-      # the manifest auto-bumps, so OTA installs an image that still reports the old
-      # version → endless "update available" and an apparent no-op.
       - name: Stamp firmware version
         id: stamp
         run: |
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            # PR preview build: base on the newest RELEASED tag (not `next`) + a -PR-<N>
-            # prerelease suffix, e.g. 1.4.30-PR-157. ver_newer() (ota_update.cpp) parses only
-            # x.y.z and IGNORES the suffix, so the base MUST be the latest release: a future
-            # main release (1.4.31) then compares strictly-newer and the PR-flashed device
-            # OTA-updates to main, while `1.4.30` shows "up to date" during testing. A `next`
-            # base (1.4.31) would collide with the number the merge cuts → no OTA. See
-            # docs/ARCHITECTURE.md (PR preview installer).
+          if [ "${{ github.event_name }}" = pull_request ]; then
             base="${{ steps.version.outputs.latest }}"
-            [ -z "$base" ] && base="${{ steps.version.outputs.version }}"
+            [ -n "$base" ] || base="${{ steps.version.outputs.version }}"
             disp="${base}-PR-${{ github.event.pull_request.number }}"
-          elif [ "${{ steps.changes.outputs.firmware }}" = "yes" ]; then
+          elif [ "${{ steps.changes.outputs.firmware }}" = yes ]; then
             disp="${{ steps.version.outputs.version }}"
           else
             disp="${{ steps.version.outputs.latest }}"
-            [ -z "$disp" ] && disp="${{ steps.version.outputs.version }}"
+            [ -n "$disp" ] || disp="${{ steps.version.outputs.version }}"
           fi
           echo "$disp" > version.txt
           echo "disp=$disp" >> "$GITHUB_OUTPUT"
           echo "stamped firmware version: $disp"
 
-      # Materialize the offline OTA signing key (RSA-3072, Secure Boot v2 scheme) from the
-      # OTA_SIGNING_KEY secret so ci-build-all.sh can sign each image (it reads
-      # ota_signing_key.pem from the repo root by default). The file is gitignored and shredded
-      # in the always() cleanup step below; the artifact/Pages globs never match it.
-      #
-      # Runs on a push/dispatch on main (the paths that PUBLISH bins — a GitHub release and/or
-      # the GitHub Pages OTA channel that build-pages.sh redeploys on every main push and on a
-      # manual re-publish dispatch) AND on pull_request, so a PR uploads a *signed*, boot-able
-      # artifact you can flash to try the change before merge (an unsigned image abort()s in a
-      # reboot loop on a signed-build device — see docs/SECURITY.md). GitHub hands the secret
-      # to same-repo (branch) PRs but NOT to fork PRs:
-      #   - main publish, no secret  → hard error (never publish unsigned firmware to OTA).
-      #   - PR, no secret (fork)     → warn + build UNSIGNED (compile-only check, not flashable).
-      #   - otherwise                → sign in place; the size gate's 64 KB headroom absorbs the
-      #                                ~4 KB signature block.
+      # Full SHA pins both the action implementation and the digest-pinned ESP-IDF image it starts.
+      # This job has neither the OTA key nor a write-capable GITHUB_TOKEN.
+      - name: Build unsigned firmware for all supported targets
+        uses: espressif/esp-idf-ci-action@e6f5c74232b1ccd4c97ed641f1e48553853f1fd5 # v1.2.0
+        env:
+          SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        with:
+          esp_idf_version: ${{ steps.toolchain.outputs.image-version }}
+          target: esp32
+          command: ./scripts/ci-build-all.sh "${{ steps.stamp.outputs.disp }}"
+
+      - name: Publish firmware size summary
+        if: always()
+        run: |
+          for report in dist/*/size-*.md; do
+            [ -f "$report" ] && cat "$report" >> "$GITHUB_STEP_SUMMARY"
+          done
+
+      - name: Upload unsigned build and diagnostics
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: firmware-unsigned
+          if-no-files-found: error
+          retention-days: 7
+          path: |
+            _unsigned/
+            dist/
+
+  publish:
+    needs: build
+    if: >-
+      github.ref == 'refs/heads/main'
+      && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: firmware-signing
+    permissions:
+      contents: write
+      pages: write
+      id-token: write
+      actions: read
+    steps:
+      # Checkout only the exact main commit that produced the unsigned data artifact.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+
+      - name: Download unsigned build
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: firmware-unsigned
+          path: .
+
+      - name: Validate build provenance
+        env:
+          EXPECTED_SHA: ${{ github.sha }}
+          EXPECTED_VERSION: ${{ needs.build.outputs.display-version }}
+        run: |
+          set -euo pipefail
+          test ! -L dist/build-metadata.txt
+          test "$(sed -n 's/^head_sha=//p' dist/build-metadata.txt)" = "$EXPECTED_SHA"
+          test "$(sed -n 's/^display_version=//p' dist/build-metadata.txt)" = "$EXPECTED_VERSION"
+          if find _unsigned -type l -print -quit | grep -q .; then
+            echo "refusing symlinks in unsigned artifact" >&2
+            exit 1
+          fi
+
       - name: Provision OTA signing key
-        id: signkey
-        if: >-
-          ((github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main')
-          || github.event_name == 'pull_request'
         env:
           OTA_SIGNING_KEY: ${{ secrets.OTA_SIGNING_KEY }}
         run: |
           if [ -z "$OTA_SIGNING_KEY" ]; then
-            if [ "${{ github.event_name }}" = "pull_request" ]; then
-              echo "signed=false" >> "$GITHUB_OUTPUT"
-              echo "::warning::No OTA_SIGNING_KEY available (fork PR?) — building UNSIGNED." \
-                   "This PR artifact will NOT boot when flashed onto a signed-build device," \
-                   "so no PR preview will be published."
-              exit 0
-            fi
-            echo "::error::Refusing to publish UNSIGNED firmware to the OTA channel — set the" \
-                 "OTA_SIGNING_KEY repository secret (RSA-3072 PEM, see docs/SECURITY.md)." >&2
+            echo "OTA_SIGNING_KEY is required in the firmware-signing environment" >&2
             exit 1
           fi
           printf '%s\n' "$OTA_SIGNING_KEY" > ota_signing_key.pem
           chmod 600 ota_signing_key.pem
-          echo "signed=true" >> "$GITHUB_OUTPUT"
-          echo "OTA signing key provisioned from secret."
 
-      - name: Build firmware for all supported targets
-        uses: espressif/esp-idf-ci-action@v1
-        with:
-          esp_idf_version: v5.5.5
-          target: esp32
-          # Build every supported target and stage per-target bins. esp32 / esp32s3 / esp32c3 /
-          # esp32c6 is exactly what yoziru/tesla-ble supports — the Component Manager refuses any
-          # other chip, so this list cannot drift from the crypto library's own.
-          # ci-build-all.sh set-targets each in turn,
-          # writes _fw/<target>/ for the installer manifest and tesla-key-esp32[-<s3|c3|c6>].bin
-          # (+ versioned + merged) for release / OTA. The `target:` input above is just the action's
-          # default; the script overrides it per target. ONE source tree → N per-target images; the
-          # web installer auto-selects by chip and OTA pulls tesla-key-esp32[-<s3|c3|c6>].bin.
-          command: ./scripts/ci-build-all.sh "${{ steps.version.outputs.version }}"
+      # Only trusted main scripts and the digest-pinned ESP-IDF image see the key. No PR source is
+      # compiled or executed in this job; the input artifact is handled strictly as binary data.
+      - name: Sign and stage release artifacts
+        env:
+          DISPLAY_VERSION: ${{ needs.build.outputs.display-version }}
+        run: ./scripts/idf-docker.sh ./scripts/ci-sign-artifacts.sh "$DISPLAY_VERSION" _unsigned
 
-      # Shred the signing key immediately after the build, even on failure, so it never
-      # lingers in the workspace for later steps (artifact upload / Pages) to pick up.
-      - name: Shred OTA signing key
+      - name: Remove OTA signing key
         if: always()
         run: rm -f ota_signing_key.pem
 
-      - name: Upload firmware artifacts
+      - name: Upload signed firmware artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          # PR builds get a "pr<N>-" prefix so a pre-merge test artifact is self-describing
-          # (grab it with `gh run download` / from the run's Artifacts). Main builds keep the
-          # bare version name.
-          name: >-
-            ${{ github.event_name == 'pull_request'
-                && format('tesla-key-esp32-pr{0}-{1}', github.event.pull_request.number, steps.version.outputs.version)
-                || format('tesla-key-esp32-{0}', steps.version.outputs.version) }}
-          # Per-target app images: stable (also the OTA filename), versioned, and merged.
-          # Glob without the dash so the suffix-less classic-esp32 image (tesla-key-esp32.bin)
-          # is captured alongside tesla-key-esp32-s3/-c3/-c6.bin.
+          name: tesla-key-esp32-${{ needs.build.outputs.display-version }}
+          if-no-files-found: error
           path: |
             tesla-key-esp32*.bin
+            dist/
 
-      # PR preview installer: publish this PR's signed build to the gh-pages branch under
-      # PR/<N>/ so https://0bu.github.io/tesla-key-esp32/#<N> (which redirects to PR/<N>/)
-      # can browser-flash it before merge. Same-origin bins + a per-PR manifest.json, exactly
-      # like the root site (build-pages.sh is reused verbatim). Signed-only (steps.signkey):
-      # an unsigned/fork PR build would crash-loop at boot, so we never publish one. The device
-      # OTA URL is compile-time and unchanged, so a PR-flashed device still updates from MAIN,
-      # not from its own preview. Cleaned up on PR close by pr-preview-cleanup.yml.
-      - name: Assemble PR preview site
-        if: github.event_name == 'pull_request' && steps.signkey.outputs.signed == 'true'
-        # Full self-contained site (page + manifest + bins) so PR/<N>/ is directly browsable at
-        # https://0bu.github.io/tesla-key-esp32/PR/<N>/ — you can open and test a PR before merge.
-        run: ./scripts/build-pages.sh ./_pr_site "${{ steps.stamp.outputs.disp }}"
-
-      - name: Publish PR preview to gh-pages (PR/<N>/)
-        if: github.event_name == 'pull_request' && steps.signkey.outputs.signed == 'true'
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Title via env, NOT inline ${{ }}, so an attacker-controlled PR title can't inject
-          # into the run script. Number + version are integer/CI-controlled and safe inline.
-          PR_TITLE: ${{ github.event.pull_request.title }}
-        run: >-
-          ./scripts/publish-pages-branch.sh pr ./_pr_site
-          "${{ github.event.pull_request.number }}" "$PR_TITLE" "${{ steps.stamp.outputs.disp }}"
-
-      # Cut a release only when firmware-relevant files changed (source / deps /
-      # esp-idf version / version.txt) — docs-only pushes redeploy Pages but don't
-      # spawn a new firmware release.
       - name: Create release
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.changes.outputs.firmware == 'yes'
+        if: github.event_name == 'push' && needs.build.outputs.firmware == 'yes'
         uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3
         with:
-          tag_name: v${{ steps.version.outputs.version }}
-          name: v${{ steps.version.outputs.version }}
+          tag_name: v${{ needs.build.outputs.release-version }}
+          name: v${{ needs.build.outputs.release-version }}
           generate_release_notes: true
-          # Per-target app images (stable + versioned) and a single-file merged image per
-          # target for manual full flashing — one set per supported chip. Glob without the
-          # dash so the suffix-less classic-esp32 image (tesla-key-esp32.bin) is included.
           files: |
             tesla-key-esp32*.bin
+            dist/*/*.elf
+            dist/*/*.elf.sha256
+            dist/*/*.map
+            dist/*/sdkconfig.*
+            dist/*/dependencies.lock.*
+            dist/*/size-*.json
+            dist/*/size-*.md
 
       - name: Configure Pages
-        if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
         uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6
 
       - name: Assemble Pages site
-        if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
-        run: |
-          # Same version stamped into the binary (steps.stamp) → installer label,
-          # served firmware and manifest can never drift apart.
-          ./scripts/build-pages.sh ./_site "${{ steps.stamp.outputs.disp }}"
+        env:
+          DISPLAY_VERSION: ${{ needs.build.outputs.display-version }}
+        run: ./scripts/build-pages.sh ./_site "$DISPLAY_VERSION"
 
-      # Mirror the root site onto the gh-pages branch (preserving the PR/ preview tree that
-      # PR runs push). This is INERT until GitHub Pages' source is switched from "GitHub
-      # Actions" to "Deploy from branch: gh-pages" — until then the Actions artifact below is
-      # still the live site, so this migration adds zero downtime. Once switched, gh-pages
-      # serves both the root installer and the per-PR previews from one origin (required: the
-      # browser flasher fetches parts same-origin, GitHub release assets have no CORS).
-      - name: Publish site to gh-pages (root)
-        if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
+      - name: Publish site to gh-pages
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: ./scripts/publish-pages-branch.sh root ./_site
 
       - name: Upload Pages artifact
-        if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
         uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5
         with:
           path: ./_site
 
   deploy:
-    needs: build
-    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
+    needs: publish
+    if: >-
+      github.ref == 'refs/heads/main'
+      && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       pages: write
       id-token: write
@@ -276,11 +256,6 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url || steps.deployment-retry.outputs.page_url }}
     steps:
-      # GitHub Pages sometimes fails a deployment server-side seconds after creating it
-      # ("Deployment failed, try again later.") with the artifact perfectly fine — that
-      # left main red at the very last step while release + bins were already published.
-      # Absorb ONE such transient failure with a spaced second attempt; a persistent
-      # problem still fails the job on the retry.
       - name: Deploy to GitHub Pages
         id: deployment
         continue-on-error: true

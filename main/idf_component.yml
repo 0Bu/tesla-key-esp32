@@ -1,5 +1,7 @@
 dependencies:
-  idf: ">=5.0.1"
+  # IDF 6 moves the crypto surface to Mbed TLS 4 / PSA. The pinned tesla-ble v5.1.1 still uses
+  # the legacy Mbed TLS API; docs/adr/0002-idf6-mbedtls4-crypto-seam.md owns that migration gate.
+  idf: ">=5.5,<6.0"
   espressif/mdns: "^1.2.0"
 
   # Pinned upstream yoziru/tesla-ble from git, for every target this project builds.

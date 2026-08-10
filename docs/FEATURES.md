@@ -47,7 +47,7 @@ failure it exists to prevent*. A feature without that last part is one nobody ca
 
 | Feature | Where | Prevents |
 |---|---|---|
-| Signed OTA (Secure Boot v2 RSA-3072, no hardware Secure Boot) | `sdkconfig.defaults`, `scripts/ci-build-all.sh` | A compromised update host pushing unsigned firmware. Reversible, no eFuses burned. Details: [`SECURITY.md`](SECURITY.md). |
+| Signed OTA (Secure Boot v2 RSA-3072, no hardware Secure Boot) | `sdkconfig.defaults`, `scripts/ci-build-all.sh`, `scripts/ci-sign-artifacts.sh` | A compromised update host pushing unsigned firmware. Compilation is unprivileged; only the protected signing job gets the key. Reversible, no eFuses burned. Details: [`SECURITY.md`](SECURITY.md). |
 | Downgrade gate | `main/ota_update.cpp` | A signed but OLD image carrying a since-patched flaw. A signature proves authenticity, not freshness. |
 | Manifest ↔ image version match | `main/ota_update.cpp` | The manifest and the `.bin` being separately-controlled artifacts: a host advertising 1.9.0 while serving 1.8.0 would install a build nobody published. Both must name the same version, and the manifest is re-fetched on the update path so a direct caller is gated too. |
 | Bug-report redaction | `logic/redact.hpp`, `GET /status?redact=1`, `GET /diag?redact=1` | A diagnostic snapshot carrying the reporter's VIN, SSID, IP, vehicle/nearby BLE MACs, broker or syslog host into a public issue. Fails closed; substitutes the value and keeps the key. The physical controller's `sys.board_mac` deliberately remains visible for hardware diagnosis. `/status` redacts by FIELD, `/diag` by LINE — and the line table has to cover every log statement that interpolates one of those private values, including `http_server.cpp`'s request log, whose URI carries the VIN on every evcc poll and is therefore the most frequent VIN sink in the ring (measured: 31 of 286 lines on a live board eleven minutes after boot). A missed sink makes the whole promise false, so a new VIN/SSID/host-bearing log line needs a rule in the same commit. |
@@ -89,9 +89,10 @@ trusted-LAN only. See [`SECURITY.md`](SECURITY.md).
 | Feature | Where | Prevents |
 |---|---|---|
 | Host mock build | `scripts/run-mock-tests.sh`, `test/` | Reasoning about logic instead of running it. Compiles `main/logic/` with the plain system toolchain — no ESP-IDF, no Docker, no board — so a cloud session has a real verification loop. |
-| Warning contract on `main/` | `main/CMakeLists.txt` | An unpinned guarantee: `-Werror=return-type` and `-Werror=unused-result` hold `main/*.cpp` (where every shipped crash happened) to a contract that does not depend on IDF's own defaults. |
+| Warning contract on `main/` | `main/CMakeLists.txt` | An unpinned guarantee: `-Werror=return-type`, `-Werror=unused-result` and `-Werror=format` hold own code to a contract independent of IDF defaults, while unavoidable upstream `tesla-ble` format warnings stay visible without blocking builds. |
 | Presenter parity checks | `scripts/check-display-sim-parity.sh`, `scripts/check-ble-row-parity.sh` | The Python display sim and the browser's JS drifting from the C++ presenters they mirror. |
-| Four targets, one tree | `sdkconfig.defaults.*`, `scripts/ci-build-all.sh` | Per-chip divergence. CI builds esp32 / s3 / c3 / c6 and size-gates each signed image. The set is exactly what `yoziru/tesla-ble` declares; the Component Manager enforces it. |
+| Reproducible toolchain contract | `esp-idf-toolchain.txt`, `dependencies.lock.*`, `scripts/idf-version.sh`, `scripts/check-sdkconfig-defaults.py` | A tag, mutable dependency resolution or ignored Kconfig default silently changing firmware. The image tag+digest, IDF 5.x range, target locks and effective generated config all fail closed. |
+| Four targets, one tree | `sdkconfig.defaults.*`, `scripts/ci-build-all.sh` | Per-chip divergence. CI builds esp32 / s3 / c3 / c6, produces ELF/map/size diagnostics and gates each projected signed image. The set is exactly what `yoziru/tesla-ble` declares; the Component Manager enforces it. |
 
 ### Why there is no static analyser (measured, not assumed)
 

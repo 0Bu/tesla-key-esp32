@@ -1,9 +1,7 @@
 #!/usr/bin/env bash
 # Run any command in the SAME ESP-IDF Docker image the CI uses — so local
-# build/debug never drifts from CI. The version is read at runtime from the
-# single source of truth, .github/workflows/build.yml (`esp_idf_version:`,
-# kept current by Renovate). When that bumps, the next build here auto-pulls
-# the matching image; nothing else to update.
+# build/debug never drifts from CI. The tag and immutable manifest-list digest are read at runtime
+# from esp-idf-toolchain.txt. When Renovate updates that contract, both paths move together.
 #
 # There is no local ESP-IDF install on this machine (removed on purpose) — this
 # wrapper is the only build path. Flashing still happens on the HOST with
@@ -17,18 +15,8 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-ci_yml="$repo_root/.github/workflows/build.yml"
-
-[ -f "$ci_yml" ] || { echo "idf-docker: $ci_yml not found" >&2; exit 1; }
-
-# Pull the exact `esp_idf_version: vX.Y[.Z]` value CI builds with.
-idf_version="$(grep -oE 'esp_idf_version:[[:space:]]*v[0-9]+\.[0-9]+(\.[0-9]+)?' "$ci_yml" \
-  | grep -oE 'v[0-9]+\.[0-9]+(\.[0-9]+)?' | head -n1)"
-[ -n "${idf_version:-}" ] || {
-  echo "idf-docker: could not read esp_idf_version from $ci_yml" >&2; exit 1
-}
-image="espressif/idf:${idf_version}"
-echo "idf-docker: using ${image} (from .github/workflows/build.yml)" >&2
+image="$("$repo_root/scripts/idf-version.sh" --image)"
+echo "idf-docker: using ${image} (from esp-idf-toolchain.txt)" >&2
 
 # Interactive TTY only when actually attached, so `menuconfig` works from a
 # terminal but piped/automated runs (e.g. `... | tail`) don't break.

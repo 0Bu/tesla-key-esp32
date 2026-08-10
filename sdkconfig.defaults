@@ -3,20 +3,17 @@
 # Intentionally NOT pinned here so the one
 # source tree builds for every supported target; CI builds all of them.
 
+# Strip wall-clock and absolute workspace data from app metadata. With the same source, embedded
+# version, digest-pinned toolchain, target lockfile and defaults, a clean unsigned build must
+# reproduce byte-for-byte; scripts/check-reproducible-build.sh proves that contract.
+CONFIG_APP_REPRODUCIBLE_BUILD=y
+
 # Flash. 4 MB is the smallest part across the supported targets, so it sizes the
 # partition table (partitions.csv); a larger chip just leaves the top unused, so ONE
 # image + table serves every board.
 CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
-
-# Console over native USB-Serial/JTAG — present on esp32s3 / esp32c3 / esp32c6.
-# The classic esp32 has no such peripheral,
-# so this symbol is absent for that target and the
-# console falls back to UART0 (the board's USB-UART bridge) automatically — no per-target
-# sdkconfig needed. On boards with a separate USB-UART bridge, attach to the native-USB
-# port for logs (the bridge port won't carry them).
-CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
 
 # OTA: roll back automatically if a freshly-flashed image fails to boot/run.
 # The new app must call esp_ota_mark_app_valid_cancel_rollback() once healthy
@@ -39,9 +36,9 @@ CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
 CONFIG_SECURE_SIGNED_APPS_NO_SECURE_BOOT=y
 CONFIG_SECURE_SIGNED_APPS_RSA_SCHEME=y
 CONFIG_SECURE_SIGNED_ON_UPDATE_NO_SECURE_BOOT=y
-# Do NOT sign during the build: CI signs the finished image in a separate step
-# (scripts/ci-build-all.sh) with the offline key, so the private key never has to be present
-# at compile time and fork/PR builds (no secret) still compile. Leaving this on (its default)
+# Do NOT sign during the build: the unprivileged build stages data-only images and the trusted
+# scripts/ci-sign-artifacts.sh step signs them later with the offline key, so the private key is
+# never present while PR code or the compiler runs. Leaving this on (its default)
 # would force CONFIG_SECURE_BOOT_SIGNING_KEY to exist at build time.
 CONFIG_SECURE_BOOT_BUILD_SIGNED_BINARIES=n
 
@@ -65,7 +62,7 @@ CONFIG_BT_NIMBLE_ATT_PREFERRED_MTU=247
 # WiFi
 CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=10
 CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=32
-CONFIG_ESP_WIFI_TX_BUFFER_TYPE_DYNAMIC=y
+CONFIG_ESP_WIFI_DYNAMIC_TX_BUFFER=y
 
 # HTTP Server
 CONFIG_HTTPD_MAX_REQ_HDR_LEN=1024
@@ -121,7 +118,7 @@ CONFIG_FREERTOS_WATCHPOINT_END_OF_STACK=y
 # becomes the only format), so a future IDF bump should DELETE that line rather than carry it
 # inert.
 # Size note: the coredump component + the summary parser cost a few KB of app flash. Re-measure on
-# the LARGEST target (esp32c6 — signed 0x1d1000, ~92 KB under the ci-build-all.sh gate) rather than
+# the LARGEST target (currently esp32c6) rather than
 # on esp32s3, and measure against the 64 KB Secure-Boot padding boundary rather than the gate: an
 # image just over a boundary costs a full 64 KB block plus the 4 KB signature appended after it.
 # That is exactly what pushed esp32c5 past its OTA slot and got the target dropped

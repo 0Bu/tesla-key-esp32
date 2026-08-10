@@ -1,8 +1,8 @@
 name: pr-preview-cleanup
 
 # When a PR is closed (merged or not), delete its per-PR firmware preview from the gh-pages
-# branch (PR/<N>/) so stale, unsigned-to-the-world builds don't linger on the installer site.
-# Only same-repo PRs ever published a preview (fork PRs can't sign/push), so fork closes are
+# branch (PR/<N>/) so stale pre-merge builds don't linger on the installer site.
+# Only labelled same-repo PRs can publish a signed preview, so fork closes are
 # skipped — nothing to remove and the token would be read-only anyway.
 on:
   pull_request:
