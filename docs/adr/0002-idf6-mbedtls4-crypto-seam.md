@@ -31,10 +31,10 @@ Espressif's schedule whether or not upstream moves.
 
 - **Now:** stay on ESP-IDF 5.x / tesla-ble v5.1.1. Re-check upstream (`yoziru/tesla-ble`
   branches/PRs/releases for PSA / Mbed TLS 4 / IDF-6 work) on **every Renovate
-  `espressif/esp-idf` PR** — the `.github/renovate.json` `prBodyNotes` reminder on those PRs
+  `espressif/idf` image PR** — the `.github/renovate.json` `prBodyNotes` reminder on those PRs
   is the recurring checkpoint; it points at #61 and at this ADR's trigger.
-- **Trigger to start A:** ESP-IDF 5.x (the line CI builds with, currently v5.5.x per
-  `.github/workflows/build.yml`) enters its **final 12 months of Espressif support** with no
+- **Trigger to start A:** ESP-IDF 5.x (the line pinned by tag+digest in
+  `esp-idf-toolchain.txt`) enters its **final 12 months of Espressif support** with no
   usable upstream Mbed TLS 4 support released or imminent. When a Renovate check finds that
   true, open the port issue and begin the shim.
 - **Executing A** (multi-day, later): fork tesla-ble at the pinned tag; port
@@ -43,8 +43,8 @@ Espressif's schedule whether or not upstream moves.
   code untouched; route ALL targets through the fork (the ADR-0001 `path:`/`rules:` plumbing
   is the template — this time not target-gated); offer the port upstream so the fork can die.
   Also fold in the mechanical IDF-6 items from #61: `json` component → `espressif/cjson`,
-  warnings-as-errors fallout, `esp_https_ota` partial-download opt-in, then bump
-  `esp_idf_version` in CI and hardware-smoke-test pairing/commands/telemetry/OTA.
+  warnings-as-errors fallout, `esp_https_ota` partial-download opt-in, then bump the image and
+  digest in `esp-idf-toolchain.txt` and hardware-smoke-test pairing/commands/telemetry/OTA.
 
 ## Consequences
 

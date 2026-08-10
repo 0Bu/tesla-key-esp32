@@ -16,11 +16,6 @@
 #   pr   <srcdir> <N>   replace gh-pages PR/<N>/ with <srcdir>   (N = PR number, digits)
 #   rm   <N>            remove gh-pages PR/<N>/
 #
-# The CI `pr` invocation still passes a trailing PR title + version; both are now IGNORED (they
-# only fed the old previews.json index). They are left in place deliberately: editing
-# .github/workflows/build.yml would trip the firmware-relevant-change detector and cut a
-# spurious release for a docs-only change.
-#
 # Idempotent and concurrency-safe: main, PR and cleanup runs can all push gh-pages at once, so
 # each attempt re-clones the LATEST gh-pages and re-applies the change on top → always a
 # fast-forward push, no binary-merge conflicts.

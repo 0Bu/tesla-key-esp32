@@ -1,6 +1,15 @@
 cmake_minimum_required(VERSION 3.16)
 
+# This firmware has one project component. Keep optional ESP-IDF components out of the build
+# graph; everything main actually needs is pulled in through REQUIRES or idf_component.yml.
+set(COMPONENTS main)
+
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
+
+# Component Manager lockfiles encode the selected chip target. A single shared lockfile would be
+# rewritten every time CI moves from esp32 to s3/c3/c6, so each supported target owns one immutable
+# resolution. scripts/ci-build-all.sh verifies that a normal build never changes it.
+idf_build_set_property(DEPENDENCIES_LOCK "dependencies.lock.${IDF_TARGET}")
 
 # The yoziru/tesla-ble dependency uses %u for uint32_t, which on the Xtensa
 # toolchain is 'unsigned long' — GCC 14 flags this as -Werror=format. The library
