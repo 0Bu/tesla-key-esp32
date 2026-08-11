@@ -124,7 +124,8 @@ the authority for the per-sibling drift check; `project-review` defers the mecha
   beside this one and `project-review`, and the only *conditional* one — and above all its
   **relevance filter**: the paths that arm it must still match the hook's own regex, currently
   `main/` / `test/` / `sdkconfig.defaults` / `partitions.csv` / `.github/workflows/build.yml`
-  (`require-feature-docs.sh:81`). A path that drifts out of that list stops gating silently.
+  (the `changed` filter in `require-feature-docs.sh`). A path that drifts out of that list stops
+  gating silently.
 - **`skill-audit`** (this skill) — verify its own numbers/paths (hook `require-skill-audit.sh`,
   the PR-checkbox gate mechanism — no file marker, the sibling list, the command count `15`, the
   tesla-ble pin) still match the tree, and that the skills/agents it names still exist. Correct it
@@ -203,6 +204,15 @@ no unfixed drift, tick + stamp the box with the head commit:
 ```
 - [x] `/skill-audit` clean — PR create/push gate @ <short-sha>    # <short-sha> = git rev-parse --short=12 HEAD
 ```
+
+**What the gate recognises.** `gate_bash_actions` in `pr-gate-lib.sh` splits compound Bash input
+into conservative shell-like segments and recognises standalone, chained, grouped, assignment-,
+`env`-, `command`-, and common `git -C`-wrapped publish actions. An unmatched command is not a
+lenient verdict but NO verdict, so the old raw-line matcher allowed chained actions having checked
+nothing (`scripts/test-pr-gates.sh` pins this). Every guarded action is reported; a Bash call with
+more than one create/push is blocked so checking the first cannot authorize a later target. The
+split is textual and deliberately conservative: separators inside quoted data can cause an extra
+block, so unusual quoted shell syntax should keep publish actions in separate tool calls.
 
 For a **new** PR, put that line in the body you submit (`gh pr create --body-file …` or the MCP
 `create_pull_request` body — the gate reads it directly, no network). For an **existing** PR, edit
