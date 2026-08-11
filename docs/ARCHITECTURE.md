@@ -176,9 +176,10 @@ detected chip); OTA is a single channel where each device pulls its own
 otherwise). The per-target bootloader offset (0x1000 on the classic
 esp32, 0x0 on s3/c3/c6) is handled automatically by `@flash_args` and the manifest.
 The install dialog closes its active port normally. The page's separate **Release serial port**
-action uses the browser's native chooser and `SerialPort.forget()` to revoke a previously granted
-port permission, so a port marked "paired" can be explicitly released without guessing from USB
-vendor/product IDs. It refuses to interrupt a port while the installer still has it open.
+action uses `Serial.getPorts()` and `SerialPort.forget()` to revoke a previously granted port
+permission. It stays hidden when this site has no granted port, releases a single granted port
+directly, and uses the browser's native chooser only to disambiguate multiple granted ports. It
+refuses to interrupt a port while the installer still has it open.
 
 **Pinned tesla-ble with one build-time patch.** esp32 / esp32s3 / esp32c3 / esp32c6 are
 exactly the targets yoziru/tesla-ble declares in its `idf_component.yml` `targets:`, and the
