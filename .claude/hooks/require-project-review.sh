@@ -33,11 +33,10 @@ cmd="$(printf '%s'  "$input" | jq -r '.tool_input.command // ""' 2>/dev/null)"
 
 # Is this a gated merge, and which PR does it target? The MCP merge tool is gated
 # unconditionally (selector = its pullNumber). A Bash call is gated only when it *invokes*
-# `gh pr merge` at a command position — the command starts with `gh pr merge`, optionally behind a
-# leading `cd <dir> &&`/`cd <dir>;` prefix. The phrase appearing merely as DATA (a commit message,
-# a heredoc body, an echo/printf argument) is NOT matched. Anything else falls through and is
-# allowed. Trade-off: a `gh pr merge` buried mid-compound-line is not caught by this Bash matcher;
-# in the web/remote environment the reliable gate is the MCP matcher above.
+# `gh pr merge` at a command position. gate_bash_actions recognises chained/grouped/wrapped
+# actions and returns every guarded action. Multiple merge actions in one Bash call are rejected:
+# checking only the first selector would leave later merges unverified. The matcher is deliberately
+# textual and may conservatively block guarded-looking quoted data.
 action=""; selector=""
 case "$tool" in
   mcp__github__merge_pull_request)
@@ -45,17 +44,24 @@ case "$tool" in
     selector="$(printf '%s' "$input" | jq -r '.tool_input.pullNumber // .tool_input.pull_number // ""' 2>/dev/null)"
     ;;
   Bash)
-    # One shell segment per line (see gate_bash_segments): the `^` anchors below must see a
-    # CHAINED `&& git push` / `&& gh pr merge`, not just one that happens to come first.
-    norm="$(gate_bash_segments "$cmd")"
-    if printf '%s' "$norm" | grep -Eq '^gh[[:space:]]+pr[[:space:]]+merge([[:space:]]|$)'; then
+    records="$(gate_bash_actions "$cmd")"
+    merge_records="$(printf '%s\n' "$records" | grep $'^merge\t' || true)"
+    merge_count=0
+    [ -z "$merge_records" ] || merge_count="$(printf '%s\n' "$merge_records" | wc -l | tr -d ' ')"
+    if [ "$merge_count" -gt 1 ]; then
+      {
+        echo "BLOCKED: multiple \`gh pr merge\` actions in one Bash call."
+        echo
+        echo "Run each merge as a separate tool call so every PR selector and review stamp is verified."
+      } >&2
+      exit 2
+    fi
+    if [ "$merge_count" -eq 1 ]; then
       action="gh pr merge"
-      # PR selector = first PR-number or URL token after `gh pr merge` *on that line* (a `cd <dir>`
-      # on a preceding line, or trailing shell noise like `2>&1 | head`, must not be mistaken for
-      # it). `sed -n …/p` isolates the merge line only; absent selector -> resolve the current branch.
-      selector="$(printf '%s' "$norm" \
-                  | sed -nE 's/^gh[[:space:]]+pr[[:space:]]+merge[[:space:]]*//p' | head -n1 \
-                  | tr ' ' '\n' | grep -m1 -E '^([0-9]+|https?://[^ ]+)$' || true)"
+      merge_args="${merge_records#*$'\t'}"
+      # First PR-number or URL token after the sole merge action; absent means current branch.
+      selector="$(printf '%s' "$merge_args" | tr ' ' '\n' \
+                    | grep -m1 -E '^([0-9]+|https?://[^ ]+)$' || true)"
     fi
     ;;
 esac

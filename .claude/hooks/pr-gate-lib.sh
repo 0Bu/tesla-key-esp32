@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Shared logic for the two PR-checkbox gates: require-project-review.sh (merge) and
-# require-skill-audit.sh (PR create / push). Sourced, never run directly.
+# Shared logic for the three PR-checkbox gates: require-project-review.sh (merge),
+# require-skill-audit.sh (PR create / push), and require-feature-docs.sh (conditional merge).
+# Sourced, never run directly.
 #
 # THERE IS NO FILE MARKER. The pass-state of a review/audit lives as a TICKED, SHA-STAMPED
 # checkbox in the pull request's body, e.g.:
@@ -58,8 +59,8 @@ gate_sha_matches() {
 }
 
 # gate_bash_segments <cmd>
-#   Prints a Bash command with one SHELL SEGMENT per line, so a matcher can anchor at `^` and
-#   still see an action that is CHAINED rather than first.
+#   Prints a Bash command with one conservative, shell-like segment per line, so a matcher can
+#   anchor at `^` and still see an action that is CHAINED or wrapped rather than first.
 #
 #   THIS EXISTS BECAUSE ANCHORING ALONE WAS A COMPLETE BYPASS. The gates used to run their
 #   `grep -Eq '^git[[:space:]]+push…'` against the raw command with only a leading `cd … &&`
@@ -72,17 +73,59 @@ gate_sha_matches() {
 #   `gh pr edit … &&`, minutes after a standalone push was correctly blocked. The same hole let
 #   `git checkout main && gh pr merge …` past the MERGE gate, which is the one that matters most.
 #
-#   Splitting on `;` `|` `&` covers `&&` and `||` for free (each becomes two breaks; the empty
-#   segment between them is harmless). Leading whitespace, `VAR=value` prefixes and a leading
+#   Splitting on shell separators and grouping characters covers `&&`, `||`, subshells and brace
+#   groups. Leading whitespace, control words, `command`, `env`, `VAR=value` prefixes and a leading
 #   `cd <dir>` are stripped per segment so the real command starts the line.
 #
-#   Deliberately textual: it over-splits inside quotes (`git commit -m "a && b"`). That can only
-#   produce an EXTRA segment, never hide one — so the worst case is a conservative block, which
-#   is the right direction to fail for a gate.
+#   Deliberately textual: it can over-split inside quotes (`git commit -m "a && b"`) and therefore
+#   conservatively classify guarded-looking quoted data. Keep publish/merge actions in separate
+#   tool calls when a command has unusual quoted shell syntax.
 gate_bash_segments() {
   printf '%s' "$1" \
-    | tr ';|&' '\n\n\n' \
-    | sed -E 's/^[[:space:]]+//; s/^([A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*[[:space:]]+)+//; s/^cd[[:space:]]+[^[:space:]]+[[:space:]]*//'
+    | tr ';|&(){}' '\n\n\n\n\n\n\n' \
+    | sed -E '
+        s/^[[:space:]]+//
+        :again
+        s/^(then|do|else)[[:space:]]+//
+        t again
+        s/^!+[[:space:]]*//
+        t again
+        s/^command([[:space:]]+--)?[[:space:]]+//
+        t again
+        s/^env([[:space:]]+(-[i0]|--ignore-environment|--null|--|(-u|-C|-P|--unset|--chdir)[[:space:]]+[^[:space:]]+|--(unset|chdir)=[^[:space:]]+|[A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*))*[[:space:]]+//
+        t again
+        s/^([A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*[[:space:]]+)+//
+        t again
+        s/^cd[[:space:]]+[^[:space:]]+[[:space:]]*//
+      '
+}
+
+# gate_bash_actions <cmd>
+#   Prints every guarded Bash action as `<kind><TAB><payload>`, one record per segment. Kinds are
+#   `create`, `merge`, and `push`. Consumers MUST count records and fail closed on more than one:
+#   validating only the first action in `gh pr merge 1 || gh pr merge 2` would gate PR 1 while PR 2
+#   could still execute. Git's common global options are recognised so `git -C repo push` is not a
+#   bypass. The parser stays deliberately textual; conservative false positives are acceptable.
+gate_bash_actions() {
+  local segment payload
+  gate_bash_segments "$1" | while IFS= read -r segment || [ -n "$segment" ]; do
+    if printf '%s' "$segment" \
+        | grep -Eq '^gh[[:space:]]+pr[[:space:]]+create([[:space:]]|$)'; then
+      payload="$(printf '%s' "$segment" \
+        | sed -E 's/^gh[[:space:]]+pr[[:space:]]+create[[:space:]]*//')"
+      printf 'create\t%s\n' "$payload"
+    fi
+    if printf '%s' "$segment" \
+        | grep -Eq '^gh[[:space:]]+pr[[:space:]]+merge([[:space:]]|$)'; then
+      payload="$(printf '%s' "$segment" \
+        | sed -E 's/^gh[[:space:]]+pr[[:space:]]+merge[[:space:]]*//')"
+      printf 'merge\t%s\n' "$payload"
+    fi
+    if printf '%s' "$segment" | grep -Eq \
+        '^git(([[:space:]]+(-C|-c|--git-dir|--work-tree)[[:space:]]+[^[:space:]]+)|([[:space:]]+--(git-dir|work-tree)=[^[:space:]]+)|([[:space:]]+--(no-pager|paginate|no-replace-objects|literal-pathspecs|glob-pathspecs|noglob-pathspecs|icase-pathspecs)))*[[:space:]]+push([[:space:]]|$)'; then
+      printf 'push\t\n'
+    fi
+  done
 }
 
 # gate_head_sha  -> local HEAD (short 12), empty if not a git repo.
