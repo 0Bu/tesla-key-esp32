@@ -6,6 +6,10 @@
 # a generic board — no framebuffer, no SPI, no backlight pin driven. So these settings are
 # safe for both.
 #
+# Console over the chip's native USB-Serial/JTAG port. This Kconfig symbol does not exist on the
+# classic ESP32, so it belongs in target defaults rather than relying on Kconfig to ignore it.
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+
 # NO PSRAM here on purpose. A generic ESP32-S3 may have none, and the T-Dongle-S3's
 # framebuffer fits in ~25 KB of internal SRAM (allocated once at boot, before WiFi/BLE
 # fragment the heap — the proven pre-#98 path). Keeping SPIRAM off means a generic S3 boots

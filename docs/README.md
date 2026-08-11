@@ -54,8 +54,9 @@ To preserve `nvs`, flash the separate parts from a local `build/` instead:
 
 ## Build from source
 
-Builds run in the official **ESP-IDF Docker image, pinned to the version CI uses**
-(`scripts/idf-docker.sh` reads it from `.github/workflows/build.yml`, so it never drifts) —
+Builds run in the official **ESP-IDF Docker image pinned by both tag and immutable digest**.
+`esp-idf-toolchain.txt` is the single toolchain contract read by local Docker, CI and Renovate;
+the four committed `dependencies.lock.<target>` files pin each Component Manager graph. There is
 no local toolchain to install. Flashing is done from the host with `esptool`, because Docker
 Desktop has no USB passthrough.
 
@@ -63,10 +64,13 @@ Desktop has no USB passthrough.
 brew install esptool                                          # host flasher (once)
 git clone https://github.com/0Bu/tesla-key-esp32.git && cd tesla-key-esp32
 
-# Build via the CI-pinned ESP-IDF image (first run pulls it, then fetches
+# Build via the CI-pinned ESP-IDF image (first run pulls it, then materialises
 # yoziru/tesla-ble — 2–4 min). CMake applies the repository's pinned anti-replay
 # patch automatically. The wrapper keeps build/ host-owned. Pick your chip:
 ./scripts/idf-docker.sh idf.py set-target esp32s3 build   # or esp32 / esp32c3 / esp32c6
+
+# Or reproduce the complete unsigned four-target CI build + ELF/map/size diagnostics:
+./scripts/idf-docker.sh ./scripts/ci-build-all.sh local
 
 # Optional: WiFi SSID/pass + VIN (BLE MAC auto) — interactive
 ./scripts/idf-docker.sh idf.py menuconfig
@@ -249,11 +253,13 @@ GET  /status               { vin, ip, version, key_present, key_fingerprint,
                              last_reboot: "heap:<n>" (only when the heap watchdog ended the
                                           previous boot, n = consecutive such restarts;
                                           absent on any ordinary boot),
-                             sys:{free_heap,min_free_heap,largest_block,uptime_s,
+                             sys:{board_mac,free_heap,min_free_heap,largest_block,uptime_s,
                                   wifi_reconnects,reset_reason,safe_mode} (ALWAYS present —
                                the block a remote triage reads first; the heap figures are
                                INTERNAL-only, so the C5's PSRAM cannot mask them, and
-                               largest_block is the number the heap watchdog acts on),
+                               largest_block is the number the heap watchdog acts on;
+                               board_mac is the physical eFuse identity and remains visible
+                               in ?redact=1 diagnostics),
                              last_crash:{reason,reason_code,fault,coredump,task?,pc?,
                                          backtrace?[hex strings],corrupted?,elf_sha256?}
                                (only when the boot is NOTABLE — a fault reset, or a dump for
@@ -265,13 +271,15 @@ GET  /status               { vin, ip, version, key_present, key_fingerprint,
 GET  /status?redact=1      The BUG-REPORT form of the same payload: vin, ip, wifi.ssid,
                              ble.addr (and every scanned neighbour's), mqtt.broker and
                              syslog.host read "<redacted>". The KEY is always kept —
-                             omitting a field would forge an "older build" signal
+                             omitting a field would forge an "older build" signal;
+                             sys.board_mac deliberately remains visible for hardware triage
 POST /scan                 Time-limited BLE discovery scan (populates ble.devices)
 GET  /diag[?verbose=0|1][?clear=1][?redact=1]   Plain-text in-memory diag log (verbose=0 turns
                              raw-RX logging back off; the X-Diag-Verbose response header echoes
                              the current verbose state for the web UI; redact=1 is the
-                             bug-report form — it substitutes VIN/SSID/IP/BLE-MAC/broker/
-                             syslog-host per LINE and fails closed on a truncated one)
+                             bug-report form — it substitutes VIN/SSID/IP/vehicle-BLE-MAC/
+                             broker/syslog-host per LINE, retains Board MAC, and fails closed
+                             on a truncated one)
 GET  /coredump[?clear=1]   Stream the raw crash image (chunked octet-stream; 404 when there is
                              none, and permanently so on a device flashed before the coredump
                              partition existed). Decode it offline against the .elf of the
@@ -373,7 +381,8 @@ live in `scripts/idf-docker.sh idf.py menuconfig` → *Tesla Key Configuration*:
 | `CONFIG_TESLA_MQTT_BASE_TOPIC` | `tesla-key` | State-topic prefix. |
 | `CONFIG_TESLA_MQTT_PUBLISH_INTERVAL_S` | `15` | Republish cadence (also publishes on every reconnect). |
 
-**Topics** (node id `teslakey_<mac3>` from the WiFi MAC, stable across VIN changes):
+**Topics** (node id `teslakey_<vin>` from the lowercase VIN, stable across ESP32 board changes;
+changing the configured vehicle intentionally creates a different HA device):
 
 ```
 tesla-key/<node>/availability                 online | offline   (LWT, retained)

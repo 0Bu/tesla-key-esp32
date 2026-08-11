@@ -137,7 +137,7 @@ the authority for the per-sibling drift check; `project-review` defers the mecha
   the **lowercase** four `link_state_web_str` values
   (`main/logic/link_state.hpp`; uppercase are the MQTT `link_state_mqtt_str` set), the `/diag`
   params (`verbose`/`clear` in `handle_diag`), the **three** heap sources it must keep straight —
-  the always-present `sys{free_heap,min_free_heap,largest_block,…}` spot block
+  the always-present `sys{board_mac,free_heap,min_free_heap,largest_block,…}` spot block
   (`status_model.hpp` `emit()`), the 24-hour trend served by `GET /heap`
   (`heap_trend.cpp`, `logic/heap_history.hpp`), and the log lines (`BOOT`/`HEAP` in `main.cpp`
   **and** the periodic `HEAP …internal_largest=` trend line in `vehicle_telemetry.cpp`'s
