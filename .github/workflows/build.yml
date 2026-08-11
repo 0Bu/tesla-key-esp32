@@ -32,6 +32,13 @@ jobs:
           python3 scripts/report-firmware-size.py --self-test
           test "$(./scripts/idf-version.sh)" = v5.5.5
 
+      # The PR-gate command matcher (.claude/hooks/pr-gate-lib.sh). Cheap, offline, and it
+      # guards a hole that is invisible in review: an unmatched command is not a lenient
+      # verdict, it is NO verdict — the hook exits 0 having checked nothing, so a regression
+      # here silently disarms the merge gate rather than failing loudly.
+      - name: Test the PR-gate command matcher
+        run: ./scripts/test-pr-gates.sh
+
   build:
     needs: logic-test
     runs-on: ubuntu-latest

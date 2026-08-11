@@ -425,6 +425,14 @@ what each must stay true to:
   (`.claude/settings.json`), the `CHECK`/`CHECK_STR`/`CHECK_NEAR` macro set in
   `test/test_logic.cpp`, and the `static_assert` lock pattern (`main/ota_update.cpp` /
   `main/logic/target.hpp`).
+- **`feature-docs`** keeps `docs/FEATURES.md` in sync when a platform feature lands or changes.
+  Re-verify its conditional merge gate against `.claude/hooks/require-feature-docs.sh`, especially
+  that the relevance filter still covers `main/`, `test/`, `sdkconfig.defaults*`,
+  `partitions.csv`, and `.github/workflows/build.yml`. Keep its gate mechanics aligned with the
+  two unconditional PR gates and with `skill-audit`'s corresponding sibling entry. Bash matching
+  is centralized in `gate_bash_actions`: wrappers and compound commands must be recognised, every
+  guarded action must be returned, and multiple merges in one call must fail closed rather than
+  validating only the first PR selector.
 - **`skill-audit`** is the dedicated, PR-gated skill that runs *this very audit* (every skill +
   agent vs. the project) on its own, gated by `require-skill-audit.sh` (blocks opening a PR and
   every push to it, not the merge). It is the **authority for

@@ -55,9 +55,10 @@ esp32c61) means upstreaming it there first.
 - The supported chip list cannot drift from the crypto library's own, and a tesla-ble bump no
   longer carries a re-verify-the-patch step. The C5 workaround was the only reason
   `third_party/` existed.
-- The size gate is no longer the binding constraint on every feature: the largest image is now
-  esp32c6 at `0x1d1000` signed, ~92 KB under the gate, and esp32s3 — which still carries the
-  display — sits at `0x191000`, ~360 KB under. The pressure that made #215 undeliverable is gone.
+- At the time of this decision, the size gate stopped being the binding constraint on every
+  feature: the largest remaining image was esp32c6 at `0x1d1000` signed, ~92 KB under the gate,
+  and esp32s3 — which still carried the display — sat at `0x191000`, ~360 KB under. Those values
+  record the decision baseline; current headroom is reported by each build's `size-*.md` artifact.
 - **A T-Dongle-C5 already running this firmware keeps running it, and stops receiving updates.**
   No manifest entry, no `tesla-key-esp32-c5.bin`, so `/ota/check` finds nothing; the device is
   not bricked and not modified. Re-adding the target later means reverting this ADR's changes and

@@ -2,7 +2,7 @@
 # Dual-OTA layout sized to fill 4 MB flash exactly — 4 MB is the smallest part across
 # the supported targets (esp32 / esp32s3 / esp32c3 / esp32c6), so it sizes the table.
 # Each OTA slot is 0x1f0000 (~2.03 MB); the app ranges ~1.6 MB (esp32/esp32s3) up to a signed
-# 0x1d1000 (~1.90 MB) on the largest target (esp32c6; esp32c3 is next) — each image's code
+# 0x1e1000 (~1.97 MB) on the largest target (esp32c6; esp32c3 is next) — each image's code
 # rounds up to a 64 KB Secure-Boot boundary with a 4 KB
 # signature appended, still keeping healthy headroom (the ci-build-all.sh app-size gate sits
 # 32 KB below the slot). Every target builds at the base -Og. A larger flash (e.g. an 8 MB S3)
@@ -16,7 +16,8 @@
 # The `coredump` partition costs NOTHING that was in use: 0x12000..0x20000 was a 56 KB hole
 # between phy_init and the app, left by the app's 0x20000 start. So it takes NO OTA headroom —
 # both slots keep their full 0x1f0000, the ci-build-all.sh size gate keeps its 0x1e8000 value,
-# and the largest target (esp32c6, signed 0x1d1000) keeps the same ~92 KB it had. Shrinking a
+# and the largest target (esp32c6, currently signed 0x1e1000) stays 28 KB below that gate.
+# Shrinking a
 # slot instead would have moved ota_1's OFFSET, which is the one edit that cannot be delivered:
 # an OTA writes the slot the INSTALLED table names, so a device would flash one address and
 # boot another.

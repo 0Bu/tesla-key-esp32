@@ -53,9 +53,26 @@ case "$tool" in
     action="push_files (GitHub MCP)"; kind="push"
     ;;
   Bash)
-    norm="$(printf '%s' "$cmd" | sed -E 's/^[[:space:]]+//; s/^cd[[:space:]]+[^;&|]+(&&|;)[[:space:]]*//')"
-    if printf '%s' "$norm" | grep -Eq '^gh[[:space:]]+pr[[:space:]]+create([[:space:]]|$)'; then
-      action="gh pr create"; kind="create"
+    records="$(gate_bash_actions "$cmd")"
+    publish_records="$(printf '%s\n' "$records" | grep -E $'^(create|push)\t' || true)"
+    publish_count=0
+    [ -z "$publish_records" ] || publish_count="$(printf '%s\n' "$publish_records" | wc -l | tr -d ' ')"
+    if [ "$publish_count" -gt 1 ]; then
+      {
+        echo "BLOCKED: multiple PR publish actions in one Bash call."
+        echo
+        echo "Run each create/push as a separate tool call so every target and audit stamp is verified."
+      } >&2
+      exit 2
+    fi
+    if [ "$publish_count" -eq 1 ]; then
+      kind="${publish_records%%$'\t'*}"
+      case "$kind" in
+        create) action="gh pr create" ;;
+        push) action="git push" ;;
+      esac
+    fi
+    if [ "$kind" = "create" ]; then
       # The inline --body "..." is embedded in the command verbatim; also fold in a --body-file.
       # Accept `--body-file <path>` / `--body-file=<path>` / `-F <path>`, path optionally quoted.
       content="$cmd"
@@ -64,8 +81,6 @@ case "$tool" in
       if [ -n "$bf" ] && [ "$bf" != "-" ] && [ -f "$bf" ]; then
         content="$content"$'\n'"$(cat "$bf" 2>/dev/null)"
       fi
-    elif printf '%s' "$norm" | grep -Eq '^git[[:space:]]+push([[:space:]]|$)'; then
-      action="git push"; kind="push"
     fi
     ;;
 esac
