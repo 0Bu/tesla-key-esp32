@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   attachSerialPortRelease,
+  grantedSerialPorts,
   releaseFeedback,
   releaseSelectedSerialPort,
   supportsSerialForget
@@ -12,13 +13,43 @@ class ForgetCapablePort {
   forget() {}
 }
 
-test("serial forget support requires the chooser and forget API", () => {
-  assert.equal(supportsSerialForget({ requestPort() {} }, ForgetCapablePort), true);
-  assert.equal(supportsSerialForget({}, ForgetCapablePort), false);
-  assert.equal(supportsSerialForget({ requestPort() {} }, class {}), false);
+function fakeButton() {
+  return {
+    disabled: false,
+    attributes: new Map(),
+    listeners: new Map(),
+    addEventListener(name, handler) { this.listeners.set(name, handler); },
+    setAttribute(name, value) { this.attributes.set(name, value); },
+    removeAttribute(name) { this.attributes.delete(name); }
+  };
+}
+
+test("serial forget support requires permission discovery, the chooser and forget API", () => {
+  const serial = { getPorts() {}, requestPort() {} };
+  assert.equal(supportsSerialForget(serial, ForgetCapablePort), true);
+  assert.equal(supportsSerialForget({ requestPort() {} }, ForgetCapablePort), false);
+  assert.equal(supportsSerialForget({ getPorts() {} }, ForgetCapablePort), false);
+  assert.equal(supportsSerialForget(serial, class {}), false);
 });
 
-test("the explicitly selected closed port is released", async () => {
+test("granted serial ports are normalized to an array", async () => {
+  const port = {};
+  assert.deepEqual(await grantedSerialPorts({ async getPorts() { return [port]; } }), [port]);
+  assert.deepEqual(await grantedSerialPorts({ async getPorts() { return new Set([port]); } }), [port]);
+});
+
+test("no chooser opens when this site has no granted port", async () => {
+  let chooserOpened = false;
+  const serial = {
+    async getPorts() { return []; },
+    async requestPort() { chooserOpened = true; }
+  };
+
+  await assert.rejects(releaseSelectedSerialPort(serial), { name: "NotFoundError" });
+  assert.equal(chooserOpened, false);
+});
+
+test("a single granted closed port is released without opening the chooser", async () => {
   const calls = [];
   const port = {
     readable: null,
@@ -26,26 +57,43 @@ test("the explicitly selected closed port is released", async () => {
     async forget() { calls.push("forget"); }
   };
   const serial = {
+    async getPorts() {
+      calls.push("get");
+      return [port];
+    },
+    async requestPort() { calls.push("request"); }
+  };
+
+  await releaseSelectedSerialPort(serial);
+  assert.deepEqual(calls, ["get", "forget"]);
+});
+
+test("the chooser disambiguates multiple previously granted ports", async () => {
+  const calls = [];
+  const first = { readable: null, writable: null, async forget() { calls.push("first"); } };
+  const second = { readable: null, writable: null, async forget() { calls.push("second"); } };
+  const serial = {
+    async getPorts() { return [first, second]; },
     async requestPort() {
       calls.push("request");
-      return port;
+      return second;
     }
   };
 
   await releaseSelectedSerialPort(serial);
-  assert.deepEqual(calls, ["request", "forget"]);
+  assert.deepEqual(calls, ["request", "second"]);
 });
 
 test("an open port is not interrupted or released", async () => {
   let forgotten = false;
+  const port = {
+    readable: {},
+    writable: {},
+    async forget() { forgotten = true; }
+  };
   const serial = {
-    async requestPort() {
-      return {
-        readable: {},
-        writable: {},
-        async forget() { forgotten = true; }
-      };
-    }
+    async getPorts() { return [port]; },
+    async requestPort() { return port; }
   };
 
   await assert.rejects(releaseSelectedSerialPort(serial), { name: "InvalidStateError" });
@@ -59,41 +107,127 @@ test("cancelling the chooser is reported without an error state", () => {
   });
 });
 
-test("the UI exposes the control and reports a released port", async () => {
-  let click;
-  let forgotten = false;
-  const container = { hidden: true };
-  const button = {
-    disabled: false,
-    attributes: new Map(),
-    addEventListener(name, handler) { if (name === "click") click = handler; },
-    setAttribute(name, value) { this.attributes.set(name, value); },
-    removeAttribute(name) { this.attributes.delete(name); }
-  };
+test("the UI stays hidden when this site has no granted port", async () => {
+  const container = { hidden: false };
+  const button = fakeButton();
   const status = { hidden: true, dataset: {}, textContent: "" };
   const serial = {
-    async requestPort() {
-      return {
-        readable: null,
-        writable: null,
-        async forget() { forgotten = true; }
-      };
-    }
+    async getPorts() { return []; },
+    async requestPort() { throw new Error("chooser must not open"); }
   };
 
-  assert.equal(attachSerialPortRelease({
+  assert.equal(await attachSerialPortRelease({
     serial,
     SerialPortCtor: ForgetCapablePort,
     container,
     button,
-    status
+    status,
+    refreshTarget: null
+  }), true);
+  assert.equal(container.hidden, true);
+});
+
+test("the UI refreshes when a granted device connects or disconnects", async () => {
+  let ports = [];
+  const serialListeners = new Map();
+  const pageListeners = new Map();
+  const container = { hidden: false };
+  const button = fakeButton();
+  const status = { hidden: true, dataset: {}, textContent: "" };
+  const port = { readable: null, writable: null, async forget() {} };
+  const serial = {
+    async getPorts() { return ports; },
+    async requestPort() { return port; },
+    addEventListener(name, handler) { serialListeners.set(name, handler); }
+  };
+  const refreshTarget = {
+    addEventListener(name, handler) { pageListeners.set(name, handler); }
+  };
+
+  await attachSerialPortRelease({
+    serial,
+    SerialPortCtor: ForgetCapablePort,
+    container,
+    button,
+    status,
+    refreshTarget
+  });
+  assert.equal(container.hidden, true);
+
+  ports = [port];
+  await serialListeners.get("connect")();
+  assert.equal(container.hidden, false);
+
+  ports = [];
+  await serialListeners.get("disconnect")();
+  assert.equal(container.hidden, true);
+
+  ports = [port];
+  await pageListeners.get("focus")();
+  assert.equal(container.hidden, false);
+});
+
+test("the UI appears for a granted port and disappears after releasing it", async () => {
+  let granted = true;
+  const port = {
+    readable: null,
+    writable: null,
+    async forget() { granted = false; }
+  };
+  const container = { hidden: true };
+  const button = fakeButton();
+  const status = { hidden: true, dataset: {}, textContent: "" };
+  const serial = {
+    async getPorts() { return granted ? [port] : []; },
+    async requestPort() { return port; }
+  };
+
+  assert.equal(await attachSerialPortRelease({
+    serial,
+    SerialPortCtor: ForgetCapablePort,
+    container,
+    button,
+    status,
+    refreshTarget: null
   }), true);
   assert.equal(container.hidden, false);
 
-  await click();
-  assert.equal(forgotten, true);
+  await button.listeners.get("click")();
+  assert.equal(granted, false);
+  assert.equal(container.hidden, true);
   assert.equal(button.disabled, false);
   assert.equal(button.attributes.has("aria-busy"), false);
   assert.equal(status.dataset.kind, "success");
   assert.match(status.textContent, /no longer paired/);
+});
+
+test("the UI stays available when another granted port remains", async () => {
+  let grantedPorts;
+  const first = {
+    readable: null,
+    writable: null,
+    async forget() { grantedPorts = [second]; }
+  };
+  const second = { readable: null, writable: null, async forget() {} };
+  grantedPorts = [first, second];
+  const container = { hidden: true };
+  const button = fakeButton();
+  const status = { hidden: true, dataset: {}, textContent: "" };
+  const serial = {
+    async getPorts() { return grantedPorts; },
+    async requestPort() { return first; }
+  };
+
+  await attachSerialPortRelease({
+    serial,
+    SerialPortCtor: ForgetCapablePort,
+    container,
+    button,
+    status,
+    refreshTarget: null
+  });
+  await button.listeners.get("click")();
+
+  assert.deepEqual(grantedPorts, [second]);
+  assert.equal(container.hidden, false);
 });
