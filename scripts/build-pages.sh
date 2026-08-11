@@ -63,9 +63,9 @@ TARGETS="esp32 esp32s3 esp32c3 esp32c6"
 rm -rf "$out"
 mkdir -p "$out"
 
-# The page itself + any served docs (README / SECURITY), but never a stale manifest. The full
-# site is emitted for both the root and each PR/<N>/ preview, so a PR is directly browsable.
-cp "$docs/index.html" "$out/"
+# The page and its local module + any served docs (README / SECURITY), but never a stale manifest.
+# The full site is emitted for both the root and each PR/<N>/ preview, so a PR is directly browsable.
+cp "$docs/index.html" "$docs/serial-port-release.mjs" "$out/"
 for md in "$docs"/*.md; do
   [[ -e "$md" ]] && cp "$md" "$out/"
 done
