@@ -62,6 +62,25 @@
     button.flash:hover{filter:brightness(1.05)}
     button.flash:active{transform:translateY(1px)}
     .hint{color:var(--muted);font-size:.85rem;text-align:center;margin:.4rem 0 0}
+    .serial-release{margin:.8rem auto 0;max-width:28rem;text-align:center}
+    .serial-release[hidden]{display:none}
+    button.release{
+      font:inherit;font-weight:600;font-size:.88rem;
+      color:var(--muted);background:transparent;
+      border:1px solid var(--border);border-radius:999px;
+      padding:.5rem 1rem;cursor:pointer;
+      transition:color .15s ease,border-color .15s ease,background .15s ease;
+    }
+    button.release:hover{color:var(--fg);border-color:var(--muted)}
+    button.release:disabled{cursor:wait;opacity:.6}
+    .release-help,.serial-status{
+      color:var(--muted);font-size:.78rem;line-height:1.4;margin:.35rem 0 0;
+    }
+    .serial-status[data-kind="success"]{color:#18794e}
+    .serial-status[data-kind="error"]{color:var(--accent)}
+    @media (prefers-color-scheme:dark){
+      .serial-status[data-kind="success"]{color:#65c99a}
+    }
     .card{
       background:var(--card);border:1px solid var(--border);
       border-radius:var(--radius);box-shadow:var(--shadow);
@@ -125,6 +144,16 @@
       </esp-web-install-button>
       <p class="hint">Plug in your ESP32 board over USB first — the installer auto-detects the
         chip (ESP32, ESP32-S3, ESP32-C3 or ESP32-C6).</p>
+      <div id="serial-release" class="serial-release" hidden>
+        <button id="release-serial-port" class="release" type="button"
+                aria-describedby="release-port-help serial-release-status">
+          Release serial port
+        </button>
+        <p id="release-port-help" class="release-help">Already marked <b>paired</b>?
+          Select the serial port to release it and remove this site's permission.</p>
+        <p id="serial-release-status" class="serial-status" role="status"
+           aria-live="polite" hidden></p>
+      </div>
     </div>
 
     <section class="card">
@@ -231,6 +260,17 @@
         .catch(function () { return null; })
         .then(function (m) { if (m && m.version) setLabel(m.version); });
     })();
+  </script>
+  <script type="module">
+    import { attachSerialPortRelease } from "./serial-port-release.mjs";
+
+    attachSerialPortRelease({
+      serial: navigator.serial,
+      SerialPortCtor: window.SerialPort,
+      container: document.getElementById("serial-release"),
+      button: document.getElementById("release-serial-port"),
+      status: document.getElementById("serial-release-status")
+    });
   </script>
 </body>
 </html>
