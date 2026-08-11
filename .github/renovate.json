@@ -43,10 +43,11 @@
       "automerge": false
     },
     {
-      "description": "Remind to re-check yoziru/tesla-ble compatibility on every ESP-IDF update (does not block the update).",
+      "description": "Keep ESP-IDF on 5.x until the deliberate IDF 6 / Mbed TLS 4 migration is complete, and remind maintainers to re-check yoziru/tesla-ble on allowed updates.",
       "matchDepNames": ["espressif/idf"],
+      "allowedVersions": "<6.0.0",
       "prBodyNotes": [
-        "⚠️ **Before merging — verify `yoziru/tesla-ble` compatibility.** ESP-IDF 6.0 bundles Mbed TLS 4.x (PSA Crypto is primary; most legacy crypto APIs removed). tesla-ble (<= v5.1.1) does its P-256 ECDH via `mbedtls_ecp_mul` + `MBEDTLS_PRIVATE` opaque-field access, key handling via `mbedtls_pk_*`, and AES-GCM via legacy `mbedtls_gcm_*` — all removed/disallowed under Mbed TLS 4, so 6.x builds fail. Check that the CI `build` job is green; if this is a 6.x update, confirm a tesla-ble release with PSA-Crypto support exists and bump it too (`main/idf_component.yml`). Also migrate `json` -> `espressif/cjson` for IDF 6. See #61, and the decision record with the explicit start-the-shim trigger (final 12 months of IDF 5.x support with no upstream movement): docs/adr/0002-idf6-mbedtls4-crypto-seam.md."
+        "⚠️ **Before merging — verify `yoziru/tesla-ble` compatibility.** Renovate intentionally restricts ESP-IDF updates to 5.x. Do not widen `allowedVersions` as a routine dependency bump: IDF 6 requires the deliberate Mbed TLS 4 / PSA Crypto migration tracked in #61 and docs/adr/0002-idf6-mbedtls4-crypto-seam.md."
       ]
     }
   ]
