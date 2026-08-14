@@ -456,7 +456,7 @@ code{font-family:var(--font-mono);font-size:.88em;background:var(--soft);border:
     container: document.getElementById("serial-release"),
     button: document.getElementById("release-serial-port"),
     status: document.getElementById("serial-release-status"),
-    onReleased: controller.disconnect
+    onBeforeRelease: controller.disconnectPortForRelease
   });
 </script>
 </body>

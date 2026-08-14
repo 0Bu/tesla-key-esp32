@@ -23,7 +23,7 @@ export async function grantedSerialPorts(serial) {
 // A single granted port can be released directly. Only ask the browser to identify the target
 // when this site already has access to multiple ports; never open the chooser merely to discover
 // that there is no permission to revoke.
-export async function releaseSelectedSerialPort(serial) {
+export async function releaseSelectedSerialPort(serial, beforeForget = null) {
   const grantedPorts = await grantedSerialPorts(serial);
   if (grantedPorts.length === 0) {
     throw namedError("NotFoundError", "This site has no serial-port permission to remove.");
@@ -34,14 +34,17 @@ export async function releaseSelectedSerialPort(serial) {
     throw namedError("NotSupportedError", "This browser cannot forget serial ports.");
   }
 
-  // The inline installer or serial monitor owns the streams while a port is open. Do not tear
-  // those locked streams down from outside; after the operation closes them, forgetting is safe.
-  // This also avoids disrupting a flash in progress.
+  // Give the owner of this exact port a chance to close its streams before forget(). A foreign
+  // owner cannot be closed here and an active flash deliberately rejects the callback, so the
+  // open-port guard below remains the final safety boundary.
+  if (typeof beforeForget === "function") await beforeForget(port);
+
   if (port.readable != null || port.writable != null) {
     throw namedError("InvalidStateError", "The serial port is still open.");
   }
 
   await port.forget();
+  return port;
 }
 
 export function releaseFeedback(error) {
@@ -51,7 +54,7 @@ export function releaseFeedback(error) {
     case "InvalidStateError":
       return {
         kind: "error",
-        message: "Close the installer dialog first, then release the serial port."
+        message: "The serial port is busy. Finish the current operation or close it in the other tab or app, then try again."
       };
     case "NotSupportedError":
       return {
@@ -73,6 +76,7 @@ export async function attachSerialPortRelease({
   button,
   status,
   refreshTarget = globalThis,
+  onBeforeRelease = null,
   onReleased = null
 }) {
   if (!container || !button || !status) {
@@ -113,7 +117,7 @@ export async function attachSerialPortRelease({
     status.textContent = "Releasing serial port…";
 
     try {
-      await releaseSelectedSerialPort(serial);
+      await releaseSelectedSerialPort(serial, onBeforeRelease);
       if (typeof onReleased === "function") await onReleased();
       status.dataset.kind = "success";
       status.textContent = "Serial port released — it is no longer paired with this site.";
