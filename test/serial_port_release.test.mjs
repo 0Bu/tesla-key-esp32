@@ -169,6 +169,7 @@ test("the UI refreshes when a granted device connects or disconnects", async () 
 
 test("the UI appears for a granted port and disappears after releasing it", async () => {
   let granted = true;
+  let releasedCallback = false;
   const port = {
     readable: null,
     writable: null,
@@ -188,12 +189,14 @@ test("the UI appears for a granted port and disappears after releasing it", asyn
     container,
     button,
     status,
-    refreshTarget: null
+    refreshTarget: null,
+    async onReleased() { releasedCallback = true; }
   }), true);
   assert.equal(container.hidden, false);
 
   await button.listeners.get("click")();
   assert.equal(granted, false);
+  assert.equal(releasedCallback, true);
   assert.equal(container.hidden, true);
   assert.equal(button.disabled, false);
   assert.equal(button.attributes.has("aria-busy"), false);

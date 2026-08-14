@@ -344,7 +344,7 @@ espefuse --port <PORT> burn_efuse ENABLE_SECURITY_DOWNLOAD
 ### ⚠️ Consequence for the web installer
 
 With flash encryption in Release mode the device only accepts **signed, and effectively
-encrypted** images. The browser web-installer (ESP Web Tools) writes *plaintext* parts
+encrypted** images. The browser web-installer (esptool-js over Web Serial) writes *plaintext* parts
 and can no longer update such a device. After hardening, deliver updates via **signed
 OTA** or `idf.py flash` from a trusted machine. Plan the update path before burning.
 
