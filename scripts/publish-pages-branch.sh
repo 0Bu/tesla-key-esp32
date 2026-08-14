@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Publish a built site directory into the repo's `gh-pages` branch — the same-origin host
-# for the ESP Web Tools installer (root site) and the per-PR preview installers (PR/<N>/).
+# for the inline Web Serial installer (root site) and the per-PR preview installers (PR/<N>/).
 #
 # Why a branch (not the Actions Pages artifact): the browser flasher fetches the manifest and
 # every .bin in-page, and GitHub release assets carry no CORS headers, so the parts must be

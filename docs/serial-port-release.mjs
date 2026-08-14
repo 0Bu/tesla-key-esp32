@@ -34,9 +34,9 @@ export async function releaseSelectedSerialPort(serial) {
     throw namedError("NotSupportedError", "This browser cannot forget serial ports.");
   }
 
-  // ESP Web Tools owns and closes a port while its dialog is open. Do not try to tear its locked
-  // streams down from outside; after the dialog is closed both attributes are null and forgetting
-  // is safe. This also avoids disrupting a flash in progress.
+  // The inline installer or serial monitor owns the streams while a port is open. Do not tear
+  // those locked streams down from outside; after the operation closes them, forgetting is safe.
+  // This also avoids disrupting a flash in progress.
   if (port.readable != null || port.writable != null) {
     throw namedError("InvalidStateError", "The serial port is still open.");
   }
@@ -72,7 +72,8 @@ export async function attachSerialPortRelease({
   container,
   button,
   status,
-  refreshTarget = globalThis
+  refreshTarget = globalThis,
+  onReleased = null
 }) {
   if (!container || !button || !status) {
     throw new Error("Serial port release controls are incomplete.");
@@ -113,6 +114,7 @@ export async function attachSerialPortRelease({
 
     try {
       await releaseSelectedSerialPort(serial);
+      if (typeof onReleased === "function") await onReleased();
       status.dataset.kind = "success";
       status.textContent = "Serial port released — it is no longer paired with this site.";
       await refreshVisibility();

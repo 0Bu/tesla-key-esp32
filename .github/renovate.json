@@ -23,22 +23,22 @@
     },
     {
       "customType": "regex",
-      "description": "Bump the esp-web-tools version pinned in the browser installer",
+      "description": "Bump the esptool-js version pinned in the browser installer",
       "managerFilePatterns": ["/^docs/index\\.html$/"],
       "matchStrings": [
-        "esp-web-tools@(?<currentValue>[0-9]+(\\.[0-9]+){0,2})/"
+        "esptool-js@(?<currentValue>[0-9]+(\\.[0-9]+){0,2})/"
       ],
       "datasourceTemplate": "npm",
-      "depNameTemplate": "esp-web-tools"
+      "depNameTemplate": "esptool-js"
     }
   ],
   "packageRules": [
     {
-      "description": "Never auto-merge a tracked firmware dependency, even when CI is green. A green `build` job only proves the firmware compiles — it does NOT prove the Tesla BLE crypto/pairing/signed-command path still works (yoziru/tesla-ble), nor that WiFi/BLE coexistence and runtime behaviour survive an ESP-IDF bump, nor that the browser installer still flashes (esp-web-tools, which the build doesn't exercise at all). These are only validated by a human running the live e2e against a real paired car. Renovate still opens, rebases and rebuilds the PR; a human reviews, runs e2e, and merges manually. (GitHub Action digest bumps are unaffected and keep auto-merging.)",
+      "description": "Never auto-merge a tracked firmware dependency, even when CI is green. A green `build` job only proves the firmware compiles — it does NOT prove the Tesla BLE crypto/pairing/signed-command path still works (yoziru/tesla-ble), nor that WiFi/BLE coexistence and runtime behaviour survive an ESP-IDF bump, nor that the browser installer still flashes (esptool-js, which the build doesn't exercise on hardware). These are only validated by a human running the live e2e against a real paired car. Renovate still opens, rebases and rebuilds the PR; a human reviews, runs e2e, and merges manually. (GitHub Action digest bumps are unaffected and keep auto-merging.)",
       "matchDepNames": [
         "yoziru/tesla-ble",
         "espressif/idf",
-        "esp-web-tools"
+        "esptool-js"
       ],
       "automerge": false
     },
