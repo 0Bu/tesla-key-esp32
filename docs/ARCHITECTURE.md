@@ -181,7 +181,9 @@ flashing. Its separate **Remove browser permission** action uses `Serial.getPort
 `SerialPort.forget()` to revoke a previously granted port permission. It stays hidden when this
 site has no granted port, releases a single granted port directly, and uses the browser's native
 chooser only to disambiguate multiple granted ports. It refuses to interrupt a port while the
-installer or monitor still has it open.
+installer is busy; when the selected idle port belongs to this page, it disconnects that exact
+port first and then removes the browser permission. Ports open in another tab or application stay
+protected by the final open-stream guard.
 
 **Pinned tesla-ble with one build-time patch.** esp32 / esp32s3 / esp32c3 / esp32c6 are
 exactly the targets yoziru/tesla-ble declares in its `idf_component.yml` `targets:`, and the
