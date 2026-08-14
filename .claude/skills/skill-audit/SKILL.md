@@ -112,7 +112,8 @@ the authority for the per-sibling drift check; `project-review` defers the mecha
   (`RUN_COMMANDS`/`ALLOW_CHARGE_TOGGLE`/`RUN_ALL_COMMANDS`).
 - **`vehicle-command-audit`** — compares the firmware against upstream `teslamotors/vehicle-command`,
   gated by what `yoziru/tesla-ble` can do. Verify the tesla-ble **pin** in its source map
-  (`v5.1.1`) still matches `main/idf_component.yml`, the repository anti-replay patch still
+  (`v5.1.1`) still matches `main/idf_component.yml`, every repository-owned patch under
+  `patches/tesla-ble/` is applied lexically/idempotently/fail-closed, and the anti-replay patch still
   applies through root CMake to both dependency locations, its upstream file paths still resolve
   (e.g. `pkg/vehicle/charge.go`), and its "worked findings" don't assert drift already fixed.
 - **`add-logic-test`** — scaffolds a `main/logic/` unit + `CHECK`s in `test/test_logic.cpp`.

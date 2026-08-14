@@ -56,6 +56,8 @@
 #include "logic/redact.hpp"
 #include "logic/captive.hpp"
 #include "logic/config_store.hpp"
+#include "logic/wifi_credentials.hpp"
+#include "logic/vin_transition.hpp"
 
 #include <cmath>
 #include <cstdio>
@@ -110,6 +112,42 @@ static void test_vin() {
     // Stray punctuation / spaces.
     CHECK(!tk::vin_is_plausible("5YJ3E1EA7KF00031-"));
     CHECK(!tk::vin_is_plausible("5YJ3E1EA7KF 00316"));
+}
+
+static void test_wifi_credentials() {
+    using E = tk::WifiCredentialError;
+    CHECK(tk::wifi_credentials_error("open", "") == E::None);
+    CHECK(tk::wifi_credentials_error("secure", "12345678") == E::None);
+    CHECK(tk::wifi_credentials_error("secure", std::string(63, 'x')) == E::None);
+    CHECK(tk::wifi_credentials_error("raw", std::string(64, 'a')) == E::None);
+    CHECK(tk::wifi_credentials_error("", "12345678") == E::SsidLength);
+    CHECK(tk::wifi_credentials_error(std::string(33, 's'), "12345678") == E::SsidLength);
+    CHECK(tk::wifi_credentials_error("short", "1234567") == E::PasswordLength);
+    CHECK(tk::wifi_credentials_error("raw", std::string(64, 'z')) == E::RawPskNotHex);
+    std::string nul_ssid("a\0b", 3);
+    CHECK(tk::wifi_credentials_error(nul_ssid, "12345678") == E::EmbeddedNul);
+}
+
+static void test_vin_transition() {
+    using R = tk::VinTransitionRecovery;
+    const std::string encoded =
+        tk::make_vin_transition_marker("5YJ3E1EA7KF000316", "AA:BB:CC:DD");
+    tk::VinTransitionMarker marker;
+    CHECK(tk::parse_vin_transition_marker(encoded, marker));
+    CHECK(marker.previous_vin == "5YJ3E1EA7KF000316");
+    CHECK(marker.previous_key_id == "AA:BB:CC:DD");
+    CHECK(!tk::parse_vin_transition_marker("missing-separator", marker));
+    CHECK(!tk::parse_vin_transition_marker("too|many|separators", marker));
+
+    // Power loss after journal only: both durable identities are still old.
+    CHECK(tk::decide_vin_transition_recovery(marker, "5YJ3E1EA7KF000316", "AA:BB:CC:DD") ==
+          R::ClearMarker);
+    // Power loss after ConfigBlob commit but before/after a failed key write.
+    CHECK(tk::decide_vin_transition_recovery(marker, "LRWYGCEK9PC000001", "AA:BB:CC:DD") ==
+          R::RollBackPreviousVin);
+    // Power loss after the key commit: finish the new identity rather than reverting its VIN.
+    CHECK(tk::decide_vin_transition_recovery(marker, "LRWYGCEK9PC000001", "11:22:33:44") ==
+          R::CompleteNewIdentity);
 }
 
 // ─── Home Assistant vehicle identity ─────────────────────────────────────────
@@ -566,6 +604,23 @@ static void test_mcp() {
     // (reachable via the string-argument path: strtod accepts "nan").
     CHECK(tk::clamped_int(std::nan(""), 0, 48) == 0);
     CHECK(tk::clamped_int(std::nan(""), 50, 100) == 50);
+
+    // MCP's advertised integer/boolean schema is enforced after permissive JSON/string
+    // decoding: values remain bounded, but fractions and every non-finite spelling fail;
+    // numeric booleans are exactly 0/1 rather than C-style "any non-zero".
+    int parsed_int = -1;
+    CHECK(tk::mcp_integer_value(16.0, 0, 48, parsed_int) && parsed_int == 16);
+    CHECK(tk::mcp_integer_value(1e300, 0, 48, parsed_int) && parsed_int == 48);
+    CHECK(!tk::mcp_integer_value(16.5, 0, 48, parsed_int));
+    CHECK(!tk::mcp_integer_value(std::nan(""), 0, 48, parsed_int));
+    CHECK(!tk::mcp_integer_value(HUGE_VAL, 0, 48, parsed_int));
+    bool parsed_bool = false;
+    CHECK(tk::mcp_bool_value(0.0, parsed_bool) && !parsed_bool);
+    CHECK(tk::mcp_bool_value(1.0, parsed_bool) && parsed_bool);
+    CHECK(!tk::mcp_bool_value(-1.0, parsed_bool));
+    CHECK(!tk::mcp_bool_value(2.0, parsed_bool));
+    CHECK(!tk::mcp_bool_value(std::nan(""), parsed_bool));
+    CHECK(!tk::mcp_bool_value(HUGE_VAL, parsed_bool));
 
     // Command outcome text — shared by the REST /command reason and the MCP tools/call
     // result, so both paths report identical outcomes.
@@ -2349,6 +2404,8 @@ static void test_status_sys_and_redaction() {
 
 int main() {
     test_vin();
+    test_wifi_credentials();
+    test_vin_transition();
     test_ha_identity();
     test_syslog_policy();
     test_connect_outcome();

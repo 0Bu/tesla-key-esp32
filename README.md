@@ -128,12 +128,13 @@ past a reboot.
 - The [web installer](https://0bu.github.io/tesla-key-esp32/) is only needed for the very first
   install (or to recover a device). It does a full erase, so WiFi/VIN/key are reset and you
   re-pair once; after that, use OTA.
-- **Try a PR before merge:** every same-repo pull request publishes a signed preview build you
-  can browser-flash like the release — open its own installer page at
+- **Try a reviewed PR before merge:** a maintainer may add the `signed-preview` label to a
+  same-repository PR; after its unprivileged build and protected signing-Environment approval it
+  publishes a signed build you can browser-flash like the release — open its own installer page at
   `https://0bu.github.io/tesla-key-esp32/PR/<PR-number>/` (e.g. `…/PR/157/`). The main installer
   page always flashes `main`. A PR preview reports version `<latest>-PR-<N>` and still checks for
-  OTA updates from `main`, so a later release moves the device forward. Removed automatically when
-  the PR closes.
+  OTA updates from `main`, so a later release moves the device forward. The preview is removed on
+  close, force-push or label removal; a daily/manual reconciliation cleans up any missed event.
 - **MCP endpoint:** AI agents (Claude Desktop/Code, VS Code, …) can talk to the device
   directly via the [Model Context Protocol](https://modelcontextprotocol.io/) at
   `http://<ESP32-IP>/mcp` (Streamable HTTP). The exposed tools mirror the charging command

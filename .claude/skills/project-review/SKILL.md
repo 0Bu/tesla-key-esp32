@@ -191,12 +191,13 @@ Treat a violation of any of these as a real finding.
 - **OTA images are signed** (Secure Boot v2 RSA-3072 scheme *without* hardware Secure Boot, no
   eFuses): `CONFIG_SECURE_SIGNED_APPS_NO_SECURE_BOOT` + `..._RSA_SCHEME` +
   `CONFIG_SECURE_SIGNED_ON_UPDATE_NO_SECURE_BOOT` in `sdkconfig.defaults`; the build stays
-  unsigned (`CONFIG_SECURE_BOOT_BUILD_SIGNED_BINARIES=n`) and `scripts/ci-build-all.sh` signs
-  each image with the `OTA_SIGNING_KEY` secret on a main push / manual `workflow_dispatch` on
-  main **and on a same-repo `pull_request`** — the latter so a PR publishes a signed, boot-able
-  per-PR preview installer (`gh-pages` `PR/<N>/`, version `<latest-tag>-PR-<N>`; OTA URL
-  unchanged → device still updates from main). Fork PRs get no secret → build unsigned → no
-  preview. Trust is TOFU from the running app's signature block. Classic esp32 needs
+  unsigned (`CONFIG_SECURE_BOOT_BUILD_SIGNED_BINARIES=n`); `scripts/ci-build-all.sh` is
+  unprivileged and `scripts/ci-sign-artifacts.sh` receives `OTA_SIGNING_KEY` only in the protected
+  main publish job. A same-repository PR remains unsigned unless a maintainer adds
+  `signed-preview`; the default-branch `workflow_run` then validates head/repo/state/label, waits
+  for Environment approval, signs the artifact strictly as data and revalidates immediately before
+  publishing `gh-pages/PR/<N>/`. Fork PRs are never eligible. Signer and cleanup share a per-PR lock,
+  with event-driven plus scheduled reconciliation. Trust is TOFU from the running app's signature block. Classic esp32 needs
   `CONFIG_ESP32_REV_MIN_3` (`sdkconfig.defaults.esp32`).
 - **Downgrade gate (software anti-rollback):** before the bulk download, `ota_task` reads the
   downloaded image's own app-descriptor version (`esp_https_ota_get_img_desc`) and refuses
@@ -403,8 +404,9 @@ what each must stay true to:
   `tesla-key-esp32<sfx>.bin`, never `*-merged.bin`) → USB app-slot flash (`0x20000` + otadata
   erase `0xf000/0x2000`, NVS preserved) or device OTA → verify via `/status` +
   `/api/proxy/1/version`. Re-verify against `.github/workflows/build.yml` (artifact naming, the
-  firmware-change-gated release), `scripts/ci-build-all.sh` (suffix map, `sign_image`, merged
-  copies), `partitions.csv` offsets, and the `/ota/*` endpoints. Complementary to `flash-esp32`
+  firmware-change-gated release), `scripts/ci-build-all.sh` (unsigned four-target producer),
+  `scripts/ci-sign-artifacts.sh` (suffix map, signing, merged copies), `partitions.csv` offsets,
+  and the `/ota/*` endpoints. Complementary to `flash-esp32`
   (local-tree build+flash, no merge); it defers the merge gate to `require-project-review.sh`.
 - **`e2e-evcc`** wraps `scripts/e2e_evcc.sh`. Re-verify the command count (must equal the
   REST rows — `api_name != nullptr` — in `logic/command_registry.hpp`'s `kCommands` —

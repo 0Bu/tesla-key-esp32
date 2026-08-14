@@ -86,7 +86,14 @@ public:
     void disconnect() override;
     bool write(const std::vector<uint8_t>& data) override;
 
-    bool is_connected() const { return conn_handle_ != BLE_HS_CONN_HANDLE_NONE; }
+    bool is_connected() const {
+        if (disconnecting_.load()) return false;
+        const uint32_t generation = connection_generation_.load();
+        if (generation & 1U) return false;  // host task is publishing/invalidating handles
+        const uint16_t handle = conn_handle_.load();
+        return !disconnecting_.load() && connection_generation_.load() == generation &&
+               handle != BLE_HS_CONN_HANDLE_NONE;
+    }
     std::string peer_addr_str() const;
 
     // RSSI (dBm) of the active connection; false if not connected / unavailable.
@@ -129,10 +136,13 @@ public:
     void on_sync();
     void on_reset();
     int  on_gap_event(ble_gap_event* event);
-    int  on_svc_disc(uint16_t conn_handle, const ble_gatt_error* error, const ble_gatt_svc* svc);
-    int  on_chr_disc(uint16_t conn_handle, const ble_gatt_error* error, const ble_gatt_chr* chr);
+    int  on_svc_disc(uint16_t conn_handle, uint32_t generation,
+                     const ble_gatt_error* error, const ble_gatt_svc* svc);
+    int  on_chr_disc(uint16_t conn_handle, uint32_t generation,
+                     const ble_gatt_error* error, const ble_gatt_chr* chr);
     int  on_dsc_disc(uint16_t conn_handle, const ble_gatt_error* error,
-                     uint16_t chr_val_handle, const ble_gatt_dsc* dsc);
+                     uint16_t chr_val_handle, const ble_gatt_dsc* dsc,
+                     uint32_t generation);
 
 private:
     void start_scan_();
@@ -142,8 +152,10 @@ private:
     // no name (Tesla puts the name in the SCAN_RSP, but connectability only on the primary
     // advert), so we record it by address and read it back once the name has matched.
     void note_connectable_(const ble_addr_t& addr, bool connectable);
-    void subscribe_notify_();
-    void write_chunk_(const uint8_t* data, size_t len);
+    void subscribe_notify_(uint16_t conn_handle, uint32_t generation);
+    bool connection_snapshot_matches_(uint16_t conn_handle, uint32_t generation) const;
+    bool write_chunk_(uint16_t conn_handle, uint16_t write_handle,
+                      const uint8_t* data, size_t len);
 
     // Discovery: nearby Teslas seen while not connected, and the connect intent.
     struct ScanEntry { uint8_t addr[6]; char name[24]; int8_t rssi; int64_t last_us;
@@ -170,14 +182,24 @@ private:
     ConnectedCb on_connected_;
     RxDataCb    on_rx_data_;
 
-    uint16_t conn_handle_{BLE_HS_CONN_HANDLE_NONE};
+    // GAP/GATT handles are published by the NimBLE host task and consumed by command/status
+    // tasks. Plain uint16_t fields made every is_connected/disconnect/write overlap a C++ data
+    // race. Atomics make each snapshot defined; connection_generation_ is a tiny seqlock:
+    // odd while the host publishes/invalidates handles, even while stable. It additionally
+    // prevents a multi-chunk write from continuing on a replacement connection.
+    std::atomic<uint16_t> conn_handle_{BLE_HS_CONN_HANDLE_NONE};
+    std::atomic<uint32_t> connection_generation_{0};
+    // disconnect() is asynchronous: the GAP event that clears the handle arrives later. This
+    // flag closes that interval immediately, so a following command cannot enqueue on a link
+    // already being terminated. The host task clears it only after publishing a fresh link.
+    std::atomic<bool> disconnecting_{false};
     // Connect-failure tracking for the target car (see connect_fail_recent()). Stamped on
     // every connect attempt; the count climbs on each GAP connect error and resets on a
     // successful link. Written on the NimBLE host task, read by the status reader — atomic
     // so the reader sees a defined value (the counter's ++ is also naturally atomic now).
     std::atomic<uint32_t> connect_fail_count_{0};
     std::atomic<int64_t>  last_connect_attempt_us_{0};
-    uint16_t write_handle_{0};
+    std::atomic<uint16_t> write_handle_{0};
     uint16_t notify_handle_{0};
     uint16_t notify_val_handle_{0};
     uint16_t cccd_handle_{0};   // discovered CCCD (0x2902) for the notify chr; 0 until found

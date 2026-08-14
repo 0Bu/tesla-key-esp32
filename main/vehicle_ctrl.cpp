@@ -52,15 +52,15 @@ bool VehicleController::init(const std::string& vin,
     known_mac_    = &known_mac;
     vin_          = vin;
 
-    cmd_sem_       = xSemaphoreCreateBinary();
     vehicle_mutex_ = xSemaphoreCreateMutex();
     command_mutex_ = xSemaphoreCreateMutex();
     cache_mutex_   = xSemaphoreCreateMutex();
+    result_mutex_  = xSemaphoreCreateMutex();
     // VehicleController is an ESSENTIAL component: without these primitives the command
     // serialization and cache locking cannot hold, so refuse to report a healthy controller
     // rather than run one that could deadlock or race (issue #204, Scenario C). app_main halts
     // boot on a false return.
-    if (!cmd_sem_ || !vehicle_mutex_ || !command_mutex_ || !cache_mutex_) {
+    if (!vehicle_mutex_ || !command_mutex_ || !cache_mutex_ || !result_mutex_) {
         ESP_LOGE(TAG, "synchronization primitive allocation failed");
         return false;
     }
@@ -70,9 +70,20 @@ bool VehicleController::init(const std::string& vin,
     vehicle_ = std::make_unique<TeslaBLE::Vehicle>(ble_sp, storage_sp);
 
     vehicle_->set_vin(vin);
+    // A blob's mere presence does not prove that the library parsed it. Commands may use the
+    // identity only when storage contains a key AND this Vehicle instance successfully loaded it.
+    // This also keeps a corrupt/truncated key from being treated as enrolment-safe after reboot.
+    key_runtime_safe_.store(storage_->blob_exists("private_key") && vehicle_->has_private_key());
 
     // Wire BLE → Vehicle callbacks
     ble_->set_connected_cb([this](bool connected) {
+        if (!connected) {
+            // Vehicle::set_connected(false) synchronously finalises tesla-ble's queued
+            // callbacks. Some flush results are SKIPPED (compatible_success), so invalidate
+            // the active request before entering the library: a physical link loss can never
+            // masquerade as success or signal a later request.
+            command_generation_.fetch_add(1);
+        }
         {
             // RAII give — this runs on the NimBLE host task and the callers (on_gap_event /
             // on_dsc_disc) catch instead of rethrowing, so a throw out of the library here must
@@ -81,11 +92,15 @@ bool VehicleController::init(const std::string& vin,
             tk::SemGuard g(vehicle_mutex_);
             try {
                 vehicle_->set_connected(connected);
+                vcsec_sleep_state_.store(static_cast<int>(
+                    connected ? vehicle_->sleep_state() : TeslaBLE::SleepState::UNKNOWN));
             } catch (const std::exception& e) {
                 ESP_LOGE(TAG, "set_connected threw (%s) — resetting link", e.what());
+                vcsec_sleep_state_.store(static_cast<int>(TeslaBLE::SleepState::UNKNOWN));
                 ble_fault_.store(true);
             } catch (...) {
                 ESP_LOGE(TAG, "set_connected threw (unknown) — resetting link");
+                vcsec_sleep_state_.store(static_cast<int>(TeslaBLE::SleepState::UNKNOWN));
                 ble_fault_.store(true);
             }
         }
@@ -132,6 +147,7 @@ bool VehicleController::init(const std::string& vin,
         tk::SemGuard g(vehicle_mutex_);
         try {
             vehicle_->on_rx_data(data);
+            vcsec_sleep_state_.store(static_cast<int>(vehicle_->sleep_state()));
         } catch (const std::exception& e) {
             ESP_LOGE(TAG, "on_rx_data threw (%s) — corrupt BLE RX; resetting link", e.what());
             ble_fault_.store(true);

@@ -20,6 +20,7 @@
 #include "lwip/sockets.h"
 #include "logic/vin.hpp"
 #include "logic/captive.hpp"
+#include "logic/wifi_credentials.hpp"
 #include "config_blob.hpp"
 #include "task_config.hpp"
 
@@ -129,9 +130,13 @@ static esp_err_t save_post_impl(httpd_req_t* req) {
     std::string pass = form_field(body, "pass");
     std::string vin  = form_field(body, "vin");
 
-    if (ssid.empty()) {
+    const tk::WifiCredentialError wifi_error = tk::wifi_credentials_error(ssid, pass);
+    if (wifi_error != tk::WifiCredentialError::None) {
         httpd_resp_set_type(req, "text/html");
-        httpd_resp_sendstr(req, "<p>SSID is required. <a href=/>Back</a>.</p>");
+        std::string message = "<p>";
+        message += tk::wifi_credentials_reason(wifi_error);
+        message += ". <a href=/>Back</a>.</p>";
+        httpd_resp_send(req, message.c_str(), message.size());
         return ESP_OK;
     }
 
@@ -149,6 +154,22 @@ static esp_err_t save_post_impl(httpd_req_t* req) {
         return ESP_OK;
     }
 
+    tk::ConfigBlob cfg;
+    tk::cfg_load(*g_cfg, cfg);
+    // The captive portal runs before VehicleController exists, so it cannot transactionally
+    // rotate the private key and sessions. It may set the first VIN or retain the current one,
+    // but changing an established vehicle identity here would bind the old key/session to a new
+    // car. Use /set_vin on the running firmware for that destructive, confirmed transaction.
+    if (!cfg.vin.empty() && !vin.empty() && vin != cfg.vin) {
+        httpd_resp_set_status(req, "409 Conflict");
+        httpd_resp_set_type(req, "text/html");
+        httpd_resp_sendstr(req,
+            "<p>An existing VIN cannot be changed from recovery setup because key rotation is "
+            "not available yet. Reconnect using the saved VIN, then change it in the device UI. "
+            "<a href=/>Back</a>.</p>");
+        return ESP_OK;
+    }
+
     // Persist the whole form as ONE atomic entry, and reboot only if that write succeeds.
     //
     // This used to be three independent NVS writes (ssid, pass, vin). Checking each return value —
@@ -156,8 +177,6 @@ static esp_err_t save_post_impl(httpd_req_t* req) {
     // between two of them reports nothing at all: the device then comes up with a new SSID beside
     // the old password, joins nothing, and can only be fixed over USB. One CRC-checked blob is
     // all-or-nothing across both failure modes (logic/config_store.hpp).
-    tk::ConfigBlob cfg;
-    tk::cfg_load(*g_cfg, cfg);
     cfg.wifi_ssid = ssid;
     cfg.wifi_pass = pass;
     if (!vin.empty()) cfg.vin = vin;

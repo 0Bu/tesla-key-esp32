@@ -61,16 +61,19 @@ Per-target image **suffix** (must agree across three places —
 | esp32c3 | `-c3` | `ESP32-C3` | 0                |
 | esp32c6 | `-c6` | `ESP32-C6` | 0                |
 
-`manifest.json` is written by [`scripts/build-pages.sh`](../../../scripts/build-pages.sh):
-`{name:"tesla-key-esp32", version, new_install_prompt_erase:true, builds:[…]}` — **four** builds,
-one per chipFamily. Each `build.parts` is exactly three parts:
-`[ {bootloader-<t>.bin, offset per-target}, {partition-table-<t>.bin, offset 32768}, {tesla-key-esp32<sfx>.bin, offset 131072} ]`.
-(`131072 = 0x20000` = the app slot; `32768 = 0x8000` = partition table.)
+`manifest.json` is written and locally re-validated by
+[`scripts/build-pages.sh`](../../../scripts/build-pages.sh) and
+[`scripts/check-pages-manifest.py`](../../../scripts/check-pages-manifest.py). Schema
+`layoutVersion:2` binds a 40-hex `sourceSha` and **exactly four** builds, one per chipFamily. Each
+`build.parts` has exactly four `{path,offset,size,sha256}` records in role order:
+`[ bootloader@per-target, partition@32768, app@131072, ota_data_initial@61440 ]`. The browser verifies
+all bytes before writing and writes otadata last as the activation step.
 
-Images are built **and signed** by [`scripts/ci-build-all.sh`](../../../scripts/ci-build-all.sh)
-(`espsecure.py sign_data --version 2`, Secure Boot v2 RSA-3072; key from CI secret
-`OTA_SIGNING_KEY` → gitignored `ota_signing_key.pem`; unsigned only when no key). Signing is
-**authenticity (TOFU), not freshness**.
+Images are built unsigned by [`scripts/ci-build-all.sh`](../../../scripts/ci-build-all.sh), then
+signed only by trusted [`scripts/ci-sign-artifacts.sh`](../../../scripts/ci-sign-artifacts.sh)
+(`espsecure.py sign_data --version 2`, Secure Boot v2 RSA-3072; protected-Environment secret
+`OTA_SIGNING_KEY` → transient `ota_signing_key.pem`). Signing is **authenticity (TOFU), not
+freshness**; unprivileged CI uses only a disposable test key to exercise the release path.
 
 Version coherence: [`scripts/next-version.sh`](../../../scripts/next-version.sh) auto-increments
 the patch above the latest `v*` tag (floor = `version.txt`); the
@@ -114,16 +117,18 @@ curl -fsS "$BASE/manifest.json" -o /tmp/manifest.json && jq . /tmp/manifest.json
 jq -e --arg v "$REL" '.version == $v' /tmp/manifest.json \
   && echo "version OK ($REL)" || echo "MISMATCH: manifest $(jq -r .version /tmp/manifest.json) != release $REL"
 
-# b) exactly 4 builds, one per chipFamily (set match)
-jq -e '.builds | length == 4' /tmp/manifest.json && echo "4 builds OK"
+# b) schema/provenance and exactly 4 builds, one per chipFamily (set match)
+jq -e '.layoutVersion == 2 and (.sourceSha | test("^[0-9a-f]{40}$")) and (.builds | length == 4)' \
+  /tmp/manifest.json && echo "schema/source/four builds OK"
 jq -r '[.builds[].chipFamily] | sort | @csv' /tmp/manifest.json
 #   expect: "ESP32","ESP32-C3","ESP32-C6","ESP32-S3"
 
-# c) parts offsets per build — bootloader per-target, partition-table 32768, app 131072
-jq -r '.builds[] | .chipFamily + ": " + ([.parts[] | "\(.path)@\(.offset)"] | join("  "))' \
+# c) four parts with length/hash; otadata@61440 is fourth/last
+jq -e 'all(.builds[]; (.parts | length) == 4 and .parts[3].offset == 61440 and
+  all(.parts[]; (.size | type) == "number" and (.sha256 | test("^[0-9a-f]{64}$"))))' \
   /tmp/manifest.json
-#   ESP32:    bootloader-esp32.bin@4096      partition-table-esp32.bin@32768   tesla-key-esp32.bin@131072
-#   S3/C3/C6: bootloader-<t>.bin@0           partition-table-<t>.bin@32768     tesla-key-esp32<sfx>.bin@131072
+jq -r '.builds[] | .chipFamily + ": " + ([.parts[] | "\(.path)@\(.offset) \(.size)B \(.sha256)"] | join("  "))' \
+  /tmp/manifest.json
 ```
 
 `new_install_prompt_erase:true` is expected (it wipes NVS on a **fresh USB install** via
@@ -185,4 +190,3 @@ table below before retrying. (Endpoints: [`main/http_ota.cpp`](../../../main/htt
   + otadata erase, the recovery a "signature bad" device needs.
 - [`docs/SECURITY.md`](../../../docs/SECURITY.md) — signing key lifecycle, TOFU trust anchor, and
   the USB-reflash recovery for a device off the current key.
-

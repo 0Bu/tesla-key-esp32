@@ -35,7 +35,9 @@ namespace tk {
 
 // Read the current configuration. Returns true if a blob was decoded, false if the legacy per-key
 // values were used (which is the normal answer on a device that has not saved since upgrading).
-// `out` is populated either way.
+// `out` is populated either way. The legacy path starts from the compiled Kconfig defaults and
+// then applies keys that actually exist; a valid blob remains authoritative, including explicit
+// empty values used to disable a service.
 bool cfg_load(NvsStorageAdapter& cfg, ConfigBlob& out);
 
 // Persist the whole configuration atomically. Returns false without publishing anything on a failed

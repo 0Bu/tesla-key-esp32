@@ -3,10 +3,12 @@
 #include "config_blob.hpp"
 
 #include "nvs_storage.hpp"
+#include "sdkconfig.h"
 
 #include <esp_log.h>
 
 #include <vector>
+#include <utility>
 
 static const char* TAG = "config_blob";
 
@@ -25,12 +27,22 @@ bool cfg_load(NvsStorageAdapter& cfg, ConfigBlob& out) {
     }
 
     // Legacy per-key layout: a fresh device, or one that has not saved anything since upgrading to
-    // the blob. NOT an error path — it is the normal state of every already-deployed board.
-    cfg.load_str("wifi_ssid", out.wifi_ssid);
-    cfg.load_str("wifi_pass", out.wifi_pass);
-    cfg.load_str("vin",       out.vin);
-    cfg.load_str("mqtt_uri",  out.mqtt_uri);
-    cfg.load_str("syslog_uri", out.syslog_uri);
+    // the blob. Start from the build defaults and let an existing legacy key override them,
+    // including an explicitly stored empty string. Centralising this matters: callers used to seed
+    // defaults differently, so the first unrelated blob save could silently turn a Kconfig MQTT or
+    // Syslog default into an explicit disable.
+    ConfigBlob legacy;
+    legacy.wifi_ssid = CONFIG_TESLA_WIFI_SSID;
+    legacy.wifi_pass = CONFIG_TESLA_WIFI_PASSWORD;
+    legacy.vin       = CONFIG_TESLA_VIN;
+    legacy.mqtt_uri  = CONFIG_TESLA_MQTT_BROKER_URI;
+    legacy.syslog_uri = CONFIG_TESLA_SYSLOG_SERVER;
+    cfg.load_str("wifi_ssid", legacy.wifi_ssid);
+    cfg.load_str("wifi_pass", legacy.wifi_pass);
+    cfg.load_str("vin",       legacy.vin);
+    cfg.load_str("mqtt_uri",  legacy.mqtt_uri);
+    cfg.load_str("syslog_uri", legacy.syslog_uri);
+    out = std::move(legacy);
     return false;
 }
 

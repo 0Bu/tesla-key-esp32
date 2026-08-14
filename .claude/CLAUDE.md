@@ -9,8 +9,9 @@ which is treated as the definition of "supported": adding a chip upstream omits 
 esp32c61) means upstreaming it there, not carrying a locally patched checkout of the crypto
 library. That was done for esp32c5 for a while and dropped
 ([`docs/adr/0004-drop-esp32c5-target.md`](../docs/adr/0004-drop-esp32c5-target.md)).
-All four targets also receive the repository-owned tesla-ble anti-replay patch under
-`patches/tesla-ble/`, applied by root CMake after dependency resolution: upstream v5.1.1
+All four targets also receive the ordered repository-owned tesla-ble patch series under
+`patches/tesla-ble/`, applied fail-closed by root CMake after dependency resolution. Its first patch
+fixes anti-replay behavior: upstream v5.1.1
 detects duplicate CarServer response counters but otherwise processes the replay. Our patch
 drops it before it can refresh a cache or complete the next FIFO command.
 
@@ -37,6 +38,8 @@ skill) or in CI (`.github/workflows/build.yml`). The `build-efficiency-check.sh`
 hook audits the latest post-merge `build` run on main for efficiency regressions (ccache hit
 rate, cache hygiene, build-duration/total-run regression, binary-size headroom) and, on a
 problem, has the session open an Issue / draft Fix-PR — deduped per run id, never auto-commits.
+Project MCP tooling is an external trust boundary: `.mcp.json` pins Context7 to an exact version,
+but never send it secrets, NVS dumps or unredacted vehicle diagnostics; firmware/CI do not need it.
 
 **But there IS a real local verification loop** — the host-side mock build runs the project's
 pure logic with the plain system toolchain (no ESP-IDF/Docker/board), so logic changes can be
@@ -97,7 +100,7 @@ artifact (or OTA) and verify the device version. When waiting on CI, block on
 # Build (first run: set-target; afterwards plain `build` stays incremental).
 # The wrapper keeps build/ host-owned and pins the ESP-IDF version to CI.
 # Pick your chip; CI builds all four via scripts/ci-build-all.sh.
-# The shared anti-replay patch is applied automatically by CMake for every target.
+# Every patches/tesla-ble/*.patch is applied lexically and idempotently by CMake for every target.
 scripts/idf-docker.sh idf.py set-target esp32s3 build   # or esp32 / esp32c3 / esp32c6
 
 # Configure WiFi, VIN (interactive; can also be set later via the setup AP)
@@ -375,8 +378,12 @@ downgrade); the next reboot rolls it back, and any deliberate `/set_*` save comm
 `CONFIG_SECURE_SIGNED_ON_UPDATE_NO_SECURE_BOOT` in `sdkconfig.defaults`). The running app
 verifies the RSA signature before installing an OTA, so a compromised update host can't push
 unsigned firmware — no eFuses burned, reversible, web installer still works. Build stays
-unsigned (`CONFIG_SECURE_BOOT_BUILD_SIGNED_BINARIES=n`); `scripts/ci-build-all.sh` signs each
-image with the offline key (CI secret `OTA_SIGNING_KEY` → gitignored `ota_signing_key.pem`).
+unsigned (`CONFIG_SECURE_BOOT_BUILD_SIGNED_BINARIES=n`); the unprivileged
+`scripts/ci-build-all.sh` produces only data, and trusted `scripts/ci-sign-artifacts.sh` signs it
+with the protected key (CI secret `OTA_SIGNING_KEY` → transient gitignored
+`ota_signing_key.pem`). PR CI exercises that signer with a disposable RSA-3072 key, never the real
+one. Signed PR previews are opt-in via `signed-preview` plus Environment approval, with a final
+state/SHA/label check immediately before publish and event+scheduled cleanup under the same lock.
 Trust is TOFU from the running app's signature block — a device on a signed build refuses
 unsigned/differently-signed OTAs. Classic esp32 needs chip rev v3.0+ (`CONFIG_ESP32_REV_MIN_3`
 in `sdkconfig.defaults.esp32`). **Key lifecycle/rotation: [`docs/SECURITY.md`](../docs/SECURITY.md).**

@@ -38,6 +38,12 @@ fi
 # Skipped only where python3 is unavailable — the C++ logic tests above are the hard gate.
 if command -v python3 >/dev/null 2>&1; then
     scripts/check-display-sim-parity.sh
+    python3 test/test_provision.py
+    python3 test/test_capture_wake.py
+    scripts/test-build-contracts.sh
+    scripts/apply-tesla-ble-patches.sh --self-test
+    scripts/reconcile-pr-previews.sh --self-test
+    scripts/verify-vendored-esptool-js.sh
 else
     echo "run-mock-tests: python3 not found — skipping display-sim parity check" >&2
 fi
@@ -47,7 +53,7 @@ fi
 # does (so the browser can't silently drift from the host-tested rules). Skipped only where node is
 # unavailable — the C++ logic tests are the hard gate; CI's ubuntu-latest runner ships node.
 if command -v node >/dev/null 2>&1; then
-    node --test test/serial_port_release.test.mjs test/web_installer.test.mjs
+    node --test test/serial_port_release.test.mjs test/web_installer.test.mjs test/web_ui_http.test.mjs
     scripts/check-ble-row-parity.sh
 else
     echo "run-mock-tests: node not found — skipping web-installer and BLE-row checks" >&2

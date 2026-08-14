@@ -169,9 +169,14 @@ USB-Serial/JTAG (`CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG`) on s3/c3/c6 — absent on
 esp32, where it auto-falls-back to UART0. All four targets have an explicit
 `sdkconfig.defaults.<target>`: classic ESP32 carries the Secure-Boot chip-rev floor, S3 adds the
 on-device ST7735/display configuration, and S3/C3/C6 select native USB-Serial/JTAG.
-The web installer is a single page whose `manifest.json` carries one build per chipFamily. Its
-inline Web Serial controller probes the connected chip with esptool-js, selects the matching build,
-downloads the sparse parts and reports real cross-part progress in-page; OTA is a single channel
+The web installer is a single page whose schema-v2 `manifest.json` carries exactly one build per
+chipFamily plus the producing 40-hex `sourceSha`. Its local Web Serial controller uses the
+repository-vendored, hash-pinned `esptool-js@0.6.1` ESM bundle, probes the connected chip, selects the
+matching build and reports real cross-part progress in-page. Each build has exactly four
+length/SHA-256-bound parts in semantic order: bootloader, partition table, signed app and
+`ota_data_initial`. All downloads are verified before the first erase/write; the first three parts
+are written before otadata is written separately and last at `0xf000`, so activation cannot precede
+a complete verified flash. OTA is a single channel
 where each device pulls its own
 `tesla-key-esp32<suffix>.bin` (`tesla-key-esp32.bin` for the classic esp32, `-s3`/`-c3`/`-c6`
 otherwise). The per-target bootloader offset (0x1000 on the classic
@@ -185,7 +190,7 @@ installer is busy; when the selected idle port belongs to this page, it disconne
 port first and then removes the browser permission. Ports open in another tab or application stay
 protected by the final open-stream guard.
 
-**Pinned tesla-ble with one build-time patch.** esp32 / esp32s3 / esp32c3 / esp32c6 are
+**Pinned tesla-ble with an ordered build-time patch series.** esp32 / esp32s3 / esp32c3 / esp32c6 are
 exactly the targets yoziru/tesla-ble declares in its `idf_component.yml` `targets:`, and the
 ESP-IDF Component Manager **enforces** that list at dependency resolution, before compile. That
 enforcement is treated as the definition of "supported" rather than something to work around: the
@@ -194,18 +199,28 @@ third-party dependency has to be kept in sync. Adding a chip upstream omits (esp
 therefore means upstreaming it there first. A local patched checkout was carried for esp32c5 for a
 while and has been dropped — [`adr/0004-drop-esp32c5-target.md`](adr/0004-drop-esp32c5-target.md).
 
-The patch that remains is a **correctness and anti-replay fix shared by all four targets**. Upstream
+The first patch is a **correctness and anti-replay fix shared by all four targets**. Upstream
 v5.1.1 calls `Peer::validate_response_counter()` and logs a duplicate CarServer response, but
 then continues into state callbacks and FIFO command completion. A replay from an earlier
 request can therefore refresh `last_known_charge_` or complete whichever command is currently
 at the queue head. Root `CMakeLists.txt`, after dependency resolution, invokes
-`scripts/apply-tesla-ble-patches.sh`; it applies the committed patch under
-`patches/tesla-ble/` to the materialised source tree before compilation, is idempotent, and
-fails configuration if the pinned upstream context changes. The patch returns immediately on
+`scripts/apply-tesla-ble-patches.sh`; it applies every `patches/tesla-ble/*.patch` in lexical
+`NNNN-description.patch` order to the materialised source before compilation. A per-materialisation
+hash marker makes repeated CMake passes idempotent and lets a later patch be added, while a changed
+or removed already-applied patch fails closed and requires deliberate rematerialisation. The
+anti-replay patch returns immediately on
 an invalid response counter, before callbacks or `mark_command_completed_`. This is tracked in
 [`adr/0003-reject-replayed-tesla-responses.md`](adr/0003-reject-replayed-tesla-responses.md).
 
-All four images use the same tesla-ble revision and anti-replay behavior. The wider
+The second patch makes private-key regeneration transactional from the controller's point of
+view. It verifies that an existing in-memory key can be exported before mutation, reports key
+creation and NVS persistence failures, and restores the prior in-memory key if persistence of the
+replacement fails. Firmware command, pairing, and polling paths remain fail-closed until the
+persisted key identity is verified and the old sessions have been cleared. A VIN transition is
+also journalled across namespaces so power loss cannot silently combine a new VIN with the old
+key/session state.
+
+All four images use the same tesla-ble revision and ordered patch-series behavior. The wider
 tesla-ble dependency strategy (IDF-6 / Mbed TLS 4 crypto seam, issue #61) is
 [`adr/0002-idf6-mbedtls4-crypto-seam.md`](adr/0002-idf6-mbedtls4-crypto-seam.md).
 
@@ -288,8 +303,11 @@ preserves the `PR/` tree). Constraints:
 - **OTA stays on main.** `CONFIG_TESLA_OTA_MANIFEST_URL` is compile-time and unchanged in PR
   builds, so a PR-flashed device checks OTA against the **main** manifest, never its own
   preview. The real-key signature anchors trust so the main release is accepted.
-- **Cleanup.** `.github/workflows/pr-preview-cleanup.yml` removes `PR/<N>/` when the PR closes
-  (merged or not).
+- **Cleanup and reconciliation.** Signing and deletion share the same per-PR concurrency group. A
+  close, force-push or `signed-preview` label removal deletes the old tree and cancels an in-flight
+  publisher. A daily/manual matrix reconciliation revalidates each surviving directory under that
+  same lock and removes it unless the PR is open, same-repository, labelled and its current head
+  equals the schema-v2 manifest `sourceSha`.
 
 *(Rollout note: this hosting only goes live once GitHub Pages' source is switched from "GitHub
 Actions" to "Deploy from branch: `gh-pages`"; until then the gh-pages branch is populated but

@@ -17,7 +17,7 @@
     <div class="logo"><svg viewBox="0 0 24 24"><path d="M13 2 4 14h6l-1 8 9-12h-6l1-8z"/></svg></div>
     <div class="ttl">
       <h1>tesla-key-esp32</h1>
-      <div class="sub"><span id="ipline"></span><span class="verlink" id="verLink" onclick="otaCheck()" title="Tap to check for updates">&mdash;</span><span class="otastat" id="otaStat"></span></div>
+      <div class="sub"><span id="ipline"></span><button type="button" class="verlink" id="verLink" onclick="otaCheck()" title="Check for firmware updates" aria-label="Check for firmware updates" style="border:0;padding:0;background:transparent;font:inherit;color:inherit">&mdash;</button><span class="otastat" id="otaStat" role="status" aria-live="polite" aria-atomic="true"></span></div>
     </div>
   </header>
 
@@ -74,7 +74,7 @@
 
 </div>
 
-<div class="toasts" id="toasts"></div>
+<div class="toasts" id="toasts" role="status" aria-live="polite" aria-atomic="true"></div>
 
 <script>
 //@@INLINE:app.js@@

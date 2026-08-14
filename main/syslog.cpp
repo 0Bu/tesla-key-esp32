@@ -1,5 +1,6 @@
 // UDP Syslog forwarder. See syslog.hpp.
 #include "syslog.hpp"
+#include "config_blob.hpp"
 #include "nvs_storage.hpp"
 #include "task_config.hpp"
 #include "rtos_guard.hpp"
@@ -408,8 +409,9 @@ static void syslog_cleanup_start_failure() noexcept {
 }
 
 static bool syslog_start_impl(NvsStorageAdapter& config_store) {
-    std::string uri = CONFIG_TESLA_SYSLOG_SERVER;
-    config_store.load_str("syslog_uri", uri);
+    tk::ConfigBlob cfg;
+    tk::cfg_load(config_store, cfg);
+    std::string uri = cfg.syslog_uri;
     // Trim surrounding whitespace (mirrors mqtt_ha_start's broker trim).
     size_t b = uri.find_first_not_of(" \t\r\n");
     size_t e = uri.find_last_not_of(" \t\r\n");

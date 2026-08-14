@@ -104,6 +104,7 @@ void parse_charge_state(const CarServer_ChargeState& cs, ChargeStateResult& out)
 // ─── Telemetry parsers (same proto3-optional → single-member-oneof pattern) ──────
 
 void parse_climate_state(const CarServer_ClimateState& cs, ClimateStateResult& out) {
+    out = {};
     out.valid = true;
     if (cs.which_optional_inside_temp_celsius == CarServer_ClimateState_inside_temp_celsius_tag) {
         out.inside_temp = cs.optional_inside_temp_celsius.inside_temp_celsius; out.has_inside = true;
@@ -181,6 +182,7 @@ void parse_climate_state(const CarServer_ClimateState& cs, ClimateStateResult& o
 }
 
 void parse_drive_state(const CarServer_DriveState& ds, DriveStateResult& out) {
+    out = {};
     out.valid = true;
     if (ds.has_shift_state) {
         switch (ds.shift_state.which_type) {
@@ -201,6 +203,7 @@ void parse_drive_state(const CarServer_DriveState& ds, DriveStateResult& out) {
 }
 
 void parse_tire_pressure(const CarServer_TirePressureState& t, TirePressureResult& out) {
+    out = {};
     out.valid = true;
     if (t.which_optional_tpms_pressure_fl == CarServer_TirePressureState_tpms_pressure_fl_tag) {
         out.fl = t.optional_tpms_pressure_fl.tpms_pressure_fl; out.has_fl = true;
@@ -235,6 +238,7 @@ void parse_tire_pressure(const CarServer_TirePressureState& t, TirePressureResul
 }
 
 void parse_closures_state(const CarServer_ClosuresState& c, ClosuresStateResult& out) {
+    out = {};
     out.valid = true;
     auto on = [](pb_size_t w, pb_size_t tag, bool v) { return w == tag && v; };
     if (c.which_optional_locked == CarServer_ClosuresState_locked_tag) {
@@ -353,12 +357,23 @@ void VehicleController::loop_task_fn_(void* arg) {
             // the guard releases vehicle_mutex_ on unwind so it can't wedge every later command.
             tk::SemGuard g(self->vehicle_mutex_);
             try {
-                self->vehicle_->loop();
+                if (self->command_identity_ready_()) self->vehicle_->loop();
+                // on_rx_data() only queues decoded routable messages; loop() is what invokes
+                // handle_vcsec_message_ and mutates Vehicle::sleep_state(). Publish the mirror
+                // after that mutation while the same lock is still held, otherwise the atomic
+                // remains one processing cycle behind (or UNKNOWN forever on quiet links).
+                self->vcsec_sleep_state_.store(static_cast<int>(
+                    self->command_identity_ready_() ? self->vehicle_->sleep_state()
+                                                    : TeslaBLE::SleepState::UNKNOWN));
             } catch (const std::exception& e) {
                 ESP_LOGE(TAG, "vehicle loop() threw (%s) — resetting BLE link", e.what());
+                self->vcsec_sleep_state_.store(
+                    static_cast<int>(TeslaBLE::SleepState::UNKNOWN));
                 self->ble_fault_.store(true);
             } catch (...) {
                 ESP_LOGE(TAG, "vehicle loop() threw (unknown) — resetting BLE link");
+                self->vcsec_sleep_state_.store(
+                    static_cast<int>(TeslaBLE::SleepState::UNKNOWN));
                 self->ble_fault_.store(true);
             }
         }
@@ -499,18 +514,20 @@ void VehicleController::loop_task_fn_(void* arg) {
         // connection and the single command queue, and a stray charge poll injected into
         // that queue mid-handshake corrupts the pairing exchange (overlapping responses →
         // RX reassembly errors → pairing never completes).
-        bool paired = self->has_session();
+        const bool identity_ready = self->command_identity_ready_();
+        bool paired = identity_ready && self->has_session();
 
         // ── VCSEC sleep-flag sampler (feeds link_state()'s asleep debounce) ───────────────
         // The library updates Vehicle::sleep_state() from the car's vehicleSleepStatus on
         // every VCSEC poll, including auto_pair_task's idle health probe — the only BLE
-        // traffic while parked. Sample it here (cheap word-sized read; the RX task writes it,
-        // a benign race) and fold it into the debounce clock so link_state() can require a
+        // traffic while parked. The RX task publishes an atomic mirror while holding
+        // vehicle_mutex_; sample that mirror here and fold it into the debounce clock so link_state() can require a
         // STABLE ASLEEP run before showing "Vehicle asleep". UNKNOWN leaves the clock alone.
         // Log only on a transition so the serial console reveals what the car actually reports
         // (e.g. whether VCSEC ever asserts ASLEEP, or just flaps for COP) without spamming.
         if (paired) {
-            TeslaBLE::SleepState st = self->vehicle_->sleep_state();
+            TeslaBLE::SleepState st = static_cast<TeslaBLE::SleepState>(
+                self->vcsec_sleep_state_.load());
             if (st != prev_sleep) {
                 ESP_LOGI(TAG, "VCSEC sleep flag: %s",
                          st == TeslaBLE::SleepState::ASLEEP ? "ASLEEP"
@@ -676,7 +693,15 @@ bool VehicleController::get_charge_state(ChargeStateResult& out, int /*timeout_m
 }
 
 bool VehicleController::get_vehicle_status(VehicleStatusResult& out, int timeout_ms) {
-    tk::MutexGuard cmd_guard(command_mutex_);
+    out = {};
+    if (timeout_ms <= 0) return false;
+    const uint32_t deadline = deadline_in_(static_cast<uint32_t>(timeout_ms));
+    tk::SemGuard cmd_guard(command_mutex_, ticks_until_(deadline));
+    if (!cmd_guard) return false;
+    if (!command_identity_ready_()) {
+        ESP_LOGE(TAG, "vehicle-status poll refused — runtime key is not verified");
+        return false;
+    }
     // Foreground blocking query (HTTP /body_controller_state, auto-pair probes) — mark it
     // in-flight like the other runners so loop_task doesn't inject a slow background
     // telemetry poll ahead of it on the single BLE FIFO.
@@ -684,41 +709,72 @@ bool VehicleController::get_vehicle_status(VehicleStatusResult& out, int timeout
     // A VCSEC status poll is the auto-pair / wake probe as well as an HTTP read, so it
     // must be able to bring the BLE link up. With a NO-wake policy it reads status
     // (including ASLEEP) without actually waking the car.
-    if (!ensure_connected_()) return false;
-    xSemaphoreTake(cmd_sem_, 0);
-    pending_status_ = {};
+    if (!ensure_connected_until_(capped_deadline_(deadline, 10000))) return false;
+    if (remaining_ms_(deadline) <= 0) return false;
 
-    vehicle_->set_vehicle_status_callback([this](const VCSEC_VehicleStatus& vs) {
-        pending_status_.valid = true;
-        switch (vs.vehicleLockState) {
-            case VCSEC_VehicleLockState_E_VEHICLELOCKSTATE_LOCKED:   pending_status_.lock_state = "LOCKED";   break;
-            case VCSEC_VehicleLockState_E_VEHICLELOCKSTATE_UNLOCKED: pending_status_.lock_state = "UNLOCKED"; break;
-            default:                                                 pending_status_.lock_state = "UNKNOWN";  break;
-        }
-        switch (vs.vehicleSleepStatus) {
-            case VCSEC_VehicleSleepStatus_E_VEHICLE_SLEEP_STATUS_AWAKE:  pending_status_.sleep_status = "AWAKE";   break;
-            case VCSEC_VehicleSleepStatus_E_VEHICLE_SLEEP_STATUS_ASLEEP: pending_status_.sleep_status = "ASLEEP";  break;
-            default:                                                      pending_status_.sleep_status = "UNKNOWN"; break;
-        }
-        switch (vs.userPresence) {
-            case VCSEC_UserPresence_E_VEHICLE_USER_PRESENCE_PRESENT:     pending_status_.user_presence = "PRESENT";     break;
-            case VCSEC_UserPresence_E_VEHICLE_USER_PRESENCE_NOT_PRESENT: pending_status_.user_presence = "NOT_PRESENT"; break;
-            default:                                                      pending_status_.user_presence = "UNKNOWN";     break;
-        }
-        xSemaphoreGive(cmd_sem_);
-    });
-
-    {
-        tk::SemGuard g(vehicle_mutex_);   // RAII: vcsec_poll builds a protobuf cmd → can throw
-        vehicle_->vcsec_poll();
+    struct StatusCompletion {
+        SemaphoreHandle_t sem{xSemaphoreCreateBinary()};
+        VehicleStatusResult status{};
+        ~StatusCompletion() { if (sem) vSemaphoreDelete(sem); }
+    };
+    auto completion = std::make_shared<StatusCompletion>();
+    if (!completion->sem) return false;
+    uint32_t generation = command_generation_.fetch_add(1) + 1;
+    if (generation == 0) {
+        generation = 1;
+        command_generation_.store(generation);
     }
 
-    bool ok = xSemaphoreTake(cmd_sem_, pdMS_TO_TICKS(timeout_ms)) == pdTRUE;
+    auto callback = [this, completion, generation](const VCSEC_VehicleStatus& vs) {
+        if (command_generation_.load() != generation) return;
+        completion->status = {};
+        completion->status.valid = true;
+        switch (vs.vehicleLockState) {
+            case VCSEC_VehicleLockState_E_VEHICLELOCKSTATE_LOCKED:   completion->status.lock_state = "LOCKED";   break;
+            case VCSEC_VehicleLockState_E_VEHICLELOCKSTATE_UNLOCKED: completion->status.lock_state = "UNLOCKED"; break;
+            default:                                                 completion->status.lock_state = "UNKNOWN";  break;
+        }
+        switch (vs.vehicleSleepStatus) {
+            case VCSEC_VehicleSleepStatus_E_VEHICLE_SLEEP_STATUS_AWAKE:  completion->status.sleep_status = "AWAKE";   break;
+            case VCSEC_VehicleSleepStatus_E_VEHICLE_SLEEP_STATUS_ASLEEP: completion->status.sleep_status = "ASLEEP";  break;
+            default:                                                      completion->status.sleep_status = "UNKNOWN"; break;
+        }
+        switch (vs.userPresence) {
+            case VCSEC_UserPresence_E_VEHICLE_USER_PRESENCE_PRESENT:     completion->status.user_presence = "PRESENT";     break;
+            case VCSEC_UserPresence_E_VEHICLE_USER_PRESENCE_NOT_PRESENT: completion->status.user_presence = "NOT_PRESENT"; break;
+            default:                                                      completion->status.user_presence = "UNKNOWN";     break;
+        }
+        if (command_generation_.load() == generation) xSemaphoreGive(completion->sem);
+    };
+
+    try {
+        // Both setter and poll are tesla-ble calls and the setter mutates a std::function read
+        // from the RX task. Serialize them under the same mutex as on_rx_data/loop.
+        tk::SemGuard g(vehicle_mutex_);
+        vehicle_->set_vehicle_status_callback(std::move(callback));
+        vehicle_->vcsec_poll();
+    } catch (const std::exception& e) {
+        ESP_LOGE(TAG, "vehicle-status poll threw (%s) — invalidating command FIFO", e.what());
+        invalidate_and_flush_(generation);
+        tk::SemGuard g(vehicle_mutex_);
+        vehicle_->set_vehicle_status_callback(nullptr);
+        return false;
+    } catch (...) {
+        ESP_LOGE(TAG, "vehicle-status poll threw (unknown) — invalidating command FIFO");
+        invalidate_and_flush_(generation);
+        tk::SemGuard g(vehicle_mutex_);
+        vehicle_->set_vehicle_status_callback(nullptr);
+        return false;
+    }
+
+    bool ok = xSemaphoreTake(completion->sem, ticks_until_(deadline)) == pdTRUE &&
+              command_generation_.load() == generation;
+    if (!ok) invalidate_and_flush_(generation);
     {
         tk::SemGuard g(vehicle_mutex_);
         vehicle_->set_vehicle_status_callback(nullptr);
     }
-    out = pending_status_;
+    if (ok) out = completion->status;
     if (ok && out.valid) {
         note_reachable_();  // car answered a VCSEC status read ⇒ reachable over BLE right now
         cmd_fail_streak_.store(0);  // a clean round-trip ⇒ link healthy, reset desync backstop

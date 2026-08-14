@@ -12,6 +12,8 @@
 #include "config_blob.hpp"
 #include "logic/syslog_policy.hpp"
 #include "logic/mqtt_uri.hpp"
+#include "logic/wifi_credentials.hpp"
+#include "logic/vin_transition.hpp"
 #include "ota_update.hpp"   // ota_confirm_pending_image() — guard OTA rollback across config reboots
 #include <esp_log.h>
 #include <esp_system.h>
@@ -43,12 +45,32 @@ esp_err_t handle_gen_keys(GuardedReq rq) {
         return send_json(req, 409, root);
     }
 
+    const std::string previous_key_id = g_vehicle->key_fingerprint();
     bool ok = g_vehicle->generate_key();
+    const std::string current_key_id = ok ? std::string{} : g_vehicle->key_fingerprint();
+    // A failed attempt with the same durable key may still have changed tesla-ble's RAM key.
+    // Reboot after answering so the old, storage-backed identity is reconstructed. If the
+    // fingerprint changed, the NEW key committed and only cleanup failed; keep this boot alive so
+    // the supervisor can retry that idempotent cleanup instead of loading obsolete sessions.
+    const bool reboot_to_restore = !ok && !previous_key_id.empty() &&
+                                   current_key_id == previous_key_id;
     cJSON* root = cJSON_CreateObject();
     cJSON_AddBoolToObject(root, "result", ok);
-    cJSON_AddStringToObject(root, "reason", ok ? "key generated — use /send_key to pair with vehicle"
-                                               : "key generation failed");
-    return send_json(req, 200, root);
+    cJSON_AddStringToObject(
+        root, "reason",
+        ok ? "key generated — use /send_key to pair with vehicle"
+           : reboot_to_restore
+               ? "key generation failed — rebooting to restore the previous key"
+               : (!current_key_id.empty() && current_key_id != previous_key_id)
+                   ? "new key saved, but pairing cleanup failed — retrying cleanup"
+                   : "key generation failed — pairing remains disabled until a safe retry");
+    esp_err_t r = send_json(req, ok ? 200 : 500, root);
+    if (reboot_to_restore) {
+        ota_confirm_pending_image();
+        vTaskDelay(pdMS_TO_TICKS(800));
+        esp_restart();
+    }
+    return r;
 }
 
 // ─── POST /send_key ───────────────────────────────────────────────────────────
@@ -139,8 +161,11 @@ esp_err_t handle_set_vin(GuardedReq rq) {
     vin = (s == std::string::npos) ? std::string{} : vin.substr(s, e - s + 1);
     for (char& c : vin) c = (char)std::toupper((unsigned char)c);
 
+    tk::ConfigBlob current;
+    tk::cfg_load(*g_config, current);
+
     // Unchanged → nothing to apply: skip the NVS write and the reboot entirely.
-    if (vin == g_vehicle->vin()) {
+    if (vin == current.vin) {
         return send_json(req, 200, make_response(true, "set_vin", vin.c_str(),
                                                  "VIN unchanged — no reboot"));
     }
@@ -152,16 +177,83 @@ esp_err_t handle_set_vin(GuardedReq rq) {
                                                  "VIN must be 17 valid characters"));
     }
 
-    // A changed VIN points the device at a *different* vehicle, so the current key's
-    // pairing, session, cached data and discovered BLE MAC all belong to the old car.
-    // Wipe them (regenerate the key + clear the session/cache/MAC) before rebooting so
-    // the device pairs cleanly with the new vehicle and shows no stale data.
-    bool ok = g_config->save_str("vin", vin);
-    if (ok) g_vehicle->reset_for_new_vehicle();
+    // Stage the complete configuration first, then rotate the vehicle identity. If crypto/NVS
+    // rotation fails, restore the previous snapshot and keep the still-usable sessions. This is
+    // deliberately one ConfigBlob write per state, never a legacy-key update that a later WiFi
+    // save can overwrite from a stale blob.
+    tk::ConfigBlob next = current;
+    next.vin = vin;
+    // Cross-namespace journal: the ConfigBlob lives in tesla_cfg while the private key lives in
+    // tesla_ble, so no single NVS commit can cover both. The boot path compares this old key id
+    // with the actually persisted key and deterministically rolls back or completes cleanup after
+    // a power cut at any point in the transition.
+    const std::string previous_key_id = g_vehicle->key_fingerprint();
+    if (g_vehicle->has_key() && previous_key_id.empty()) {
+        return send_json(req, 500, make_response(false, "set_vin", vin.c_str(),
+                                                 "existing key identity could not be verified"));
+    }
+    const std::string vin_txn =
+        tk::make_vin_transition_marker(current.vin, previous_key_id);
+    bool recovery_pending = false;
+    bool reboot_for_recovery = false;
+    bool new_identity_committed = false;
+    bool previous_identity_restored = false;
+    bool ok = g_config->save_str("vin_txn", vin_txn);
+    if (ok) ok = tk::cfg_save(*g_config, next);
+    if (!ok) {
+        (void)g_config->remove("vin_txn");
+    }
+    if (ok && !g_vehicle->reset_for_new_vehicle()) {
+        const std::string current_key_id = g_vehicle->key_fingerprint();
+        if (current_key_id == previous_key_id) {
+            // Crypto/persistence never committed a new key. The previous VIN/key/session tuple is
+            // still usable, so restore the old config snapshot and retire the journal only after
+            // both writes succeed.
+            ESP_LOGE(TAG, "VIN change aborted before key commit; rolling config back");
+            const bool rolled_back = tk::cfg_save(*g_config, current);
+            const bool marker_removed = rolled_back && g_config->remove("vin_txn");
+            if (!rolled_back || !marker_removed) {
+                ESP_LOGE(TAG, "CRITICAL: VIN rollback/marker cleanup failed; boot recovery required");
+                recovery_pending = true;
+                reboot_for_recovery = true;
+            } else {
+                // regenerate_key() may have replaced its RAM key before a failed persistence
+                // attempt, even though the durable fingerprint is unchanged. Reboot rebuilds the
+                // Vehicle from the verified old key; continuing in this boot would leave signing
+                // disabled (or, without that gate, risk the ambiguous runtime identity).
+                previous_identity_restored = true;
+                reboot_for_recovery = true;
+            }
+        } else {
+            // The new key is already durable. Rolling the VIN back now would bind that key to the
+            // old vehicle and discard the only recovery signal. Keep the new ConfigBlob and marker;
+            // boot recovery idempotently retries session/MAC cleanup before normal operation.
+            ESP_LOGE(TAG, "VIN/key committed, but old pairing cleanup is incomplete; rebooting into recovery");
+            recovery_pending = true;
+            reboot_for_recovery = true;
+            new_identity_committed = true;
+        }
+        ok = false;
+    }
+    if (ok && !g_config->remove("vin_txn")) {
+        // Not a failed VIN change: boot recovery sees the changed fingerprint, repeats the
+        // idempotent session/MAC cleanup and removes the marker.
+        ESP_LOGW(TAG, "VIN change committed but transition marker remains for boot recovery");
+    }
+    const char* reason = ok
+        ? "VIN and new key saved — rebooting"
+        : new_identity_committed
+            ? "VIN and new key saved; cleanup incomplete — rebooting for recovery"
+            : previous_identity_restored
+                ? "VIN change failed; previous identity restored — rebooting to reload its key"
+                : reboot_for_recovery
+                    ? "VIN change incomplete — rebooting for recovery"
+                    : recovery_pending
+                        ? "VIN change failed; boot recovery is required"
+                        : "VIN change failed; previous vehicle identity kept";
     esp_err_t r = send_json(req, ok ? 200 : 500,
-        make_response(ok, "set_vin", vin.c_str(),
-                      ok ? "VIN saved — rebooting" : "failed to save VIN"));
-    if (ok) {
+                            make_response(ok, "set_vin", vin.c_str(), reason));
+    if (ok || reboot_for_recovery) {
         ota_confirm_pending_image();   // an intentional reboot must not roll back a fresh, healthy OTA
         vTaskDelay(pdMS_TO_TICKS(800));
         esp_restart();
@@ -309,9 +401,9 @@ esp_err_t handle_set_mqtt(GuardedReq rq) {
     // stored empty/unset and submitted empty compare equal, so neither triggers a reboot.
     // Also skips the probe: an unchanged broker is not a claim anyone is making now, and
     // probing it would make an idempotent no-op fail whenever the broker is down.
-    std::string stored;
-    g_config->load_str("mqtt_uri", stored);
-    if (broker == stored) {
+    tk::ConfigBlob cfg;
+    tk::cfg_load(*g_config, cfg);
+    if (broker == cfg.mqtt_uri) {
         return send_json(req, 200, make_response(true, "set_mqtt", "",
             broker.empty() ? "MQTT already disabled — no reboot"
                            : "MQTT broker unchanged — no reboot"));
@@ -337,7 +429,8 @@ esp_err_t handle_set_mqtt(GuardedReq rq) {
         }
     }
 
-    bool ok = g_config->save_str("mqtt_uri", broker);
+    cfg.mqtt_uri = broker;
+    bool ok = tk::cfg_save(*g_config, cfg);
     esp_err_t r = send_json(req, ok ? 200 : 500,
         make_response(ok, "set_mqtt", "",
                       ok ? (broker.empty() ? "MQTT disabled — rebooting"
@@ -375,9 +468,9 @@ esp_err_t handle_set_syslog(GuardedReq rq) {
     server = (s == std::string::npos) ? std::string{} : server.substr(s, e - s + 1);
 
     // Unchanged → nothing to apply: skip the NVS write and the reboot entirely.
-    std::string stored;
-    g_config->load_str("syslog_uri", stored);
-    if (server == stored) {
+    tk::ConfigBlob cfg;
+    tk::cfg_load(*g_config, cfg);
+    if (server == cfg.syslog_uri) {
         return send_json(req, 200, make_response(true, "set_syslog", "",
             server.empty() ? "Syslog already disabled — no reboot"
                            : "Syslog server unchanged — no reboot"));
@@ -389,7 +482,8 @@ esp_err_t handle_set_syslog(GuardedReq rq) {
                                                  "invalid server (use host:port)"));
     }
 
-    bool ok = g_config->save_str("syslog_uri", server);
+    cfg.syslog_uri = server;
+    bool ok = tk::cfg_save(*g_config, cfg);
     esp_err_t r = send_json(req, ok ? 200 : 500,
         make_response(ok, "set_syslog", "",
                       ok ? (server.empty() ? "Syslog disabled — rebooting"
@@ -432,16 +526,12 @@ esp_err_t handle_set_wifi(GuardedReq rq) {
     std::string pass = (jp && cJSON_IsString(jp)) ? jp->valuestring : "";
     cJSON_Delete(json);
 
-    // 802.11 bounds, checked here rather than discovered at association time: an over-long value is
-    // silently truncated by the driver, which produces a device that connects to a network nobody
-    // configured. An EMPTY password is legal — that is an open network.
-    if (ssid.empty() || ssid.size() > 32) {
+    // Exactly the same contract is enforced by the captive setup endpoint and host-tested in
+    // logic/wifi_credentials.hpp. Empty means open AP; 64 bytes are accepted only as a raw hex PSK.
+    const tk::WifiCredentialError wifi_error = tk::wifi_credentials_error(ssid, pass);
+    if (wifi_error != tk::WifiCredentialError::None) {
         return send_json(req, 400, make_response(false, "set_wifi", "",
-                                                 "SSID must be 1-32 characters"));
-    }
-    if (!pass.empty() && (pass.size() < 8 || pass.size() > 63)) {
-        return send_json(req, 400, make_response(false, "set_wifi", "",
-                                                 "password must be empty (open) or 8-63 characters"));
+                                                 tk::wifi_credentials_reason(wifi_error)));
     }
 
     tk::ConfigBlob cfg;

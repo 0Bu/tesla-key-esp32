@@ -37,13 +37,12 @@ static const char* TAG = "vehicle_ctrl";
 //      establishes + persists the session (done). If not, it fails *cleanly* with
 //      KEY_NOT_ON_WHITELIST and is popped — no clog.
 //   2. Send the whitelist-add. The car whitelists the key when the user confirms on
-//      screen but sends NO completing commandStatus, so this command never finishes
-//      cleanly — it just exhausts ~180 s of library retries while sitting at the head
-//      of the single FIFO queue, starving everything behind it. So after pair() we
-//      drop the link to flush that stuck command from the queue.
+//      screen but sends NO completing commandStatus, so this command can otherwise sit
+//      at the FIFO head through the library retries. pair() owns command_mutex_ through
+//      its absolute timeout and generation-aware flush, so nothing can queue behind it.
 //   3. Probe once more on a clean link — now authorised, this establishes the session.
-// On any failure the BLE link is dropped, which flushes the library's command
-// queue and RX buffer (set_connected(false)) so the next round starts clean.
+// Timed-out queued work is invalidated before set_connected(false) synchronously flushes
+// callbacks, so the next round starts clean and no late completion reaches another request.
 void VehicleController::auto_pair_task_fn_(void* arg) {
     auto* self = static_cast<VehicleController*>(arg);
     vTaskDelay(pdMS_TO_TICKS(4000));  // let WiFi/BLE come up first
@@ -75,6 +74,49 @@ void VehicleController::auto_pair_task_fn_(void* arg) {
         }
         warned_no_vin = false;  // a VIN is present again — re-arm the one-shot log
 
+        // A key commit succeeded but old sessions could not be erased. Retry ONLY the
+        // idempotent cleanup under the FIFO transaction lock; generating another key here
+        // would churn NVS and change the fingerprint every supervision cycle.
+        if (self->pairing_cleanup_pending_.load()) {
+            self->believed_paired_ = false;
+            bool cleaned = false;
+            {
+                tk::SemGuard cmd_guard(self->command_mutex_);
+                cleaned = self->clear_session_and_cache_();
+            }
+            if (!cleaned) {
+                ESP_LOGE(TAG, "auto-pair: persisted new key, but pairing cleanup still fails — retrying in 30 s");
+                vTaskDelay(pdMS_TO_TICKS(30000));
+                continue;
+            }
+            self->pairing_cleanup_pending_.store(false);
+            self->key_runtime_safe_.store(true);
+            self->pairing_lost_.store(false);
+            self->auth_fail_streak_.store(0);
+            ESP_LOGI(TAG, "auto-pair: deferred pairing cleanup completed");
+            continue;
+        }
+
+        // A failed key write can leave tesla-ble's RAM key different from the storage-backed
+        // key. Never probe, sign or enrol in that state. With no durable key (first boot), a
+        // throttled retry is safe. It is also safe when a car-side revocation already requires
+        // a new key: another generation attempt either durably commits (making RAM trustworthy)
+        // or remains gated. For an unrelated manual/VIN rotation failure with an old durable
+        // key, only reboot can authoritatively reconstruct RAM without changing identity again.
+        if (!self->key_runtime_safe_.load()) {
+            if (!self->has_key() || self->pairing_lost_.load()) {
+                ESP_LOGE(TAG, "auto-pair: runtime key unavailable during required generation — retrying (30 s backoff on failure)");
+                if (!self->generate_key()) {
+                    ESP_LOGE(TAG, "auto-pair: key generation still failed; pairing remains disabled");
+                    vTaskDelay(pdMS_TO_TICKS(30000));
+                }
+                continue;
+            }
+            ESP_LOGE(TAG, "auto-pair: runtime key may differ from persisted key — reboot required; pairing disabled");
+            vTaskDelay(pdMS_TO_TICKS(30000));
+            continue;
+        }
+
         // The car deleted our key (detected via a KEY_NOT_ON_WHITELIST response to any
         // signed command or the health poll below). The stored key is now useless, so
         // re-key — which also clears the session + cache — and fall through to re-pair.
@@ -82,7 +124,14 @@ void VehicleController::auto_pair_task_fn_(void* arg) {
             self->believed_paired_ = false;  // stop the observer acting during re-enrol
             ESP_LOGW(TAG, "auto-pair: KEY DELETED on the car — clearing pairing, generating a new key, restarting enrolment");
             self->repair_notice_ = true;  // tell the UI why it's asking to pair again
-            self->generate_key();   // clears pairing_lost_, session and cached data
+            if (!self->generate_key()) {
+                // generate_key() deliberately leaves pairing_lost_ asserted on every failure.
+                // If the key committed but cleanup did not, the dedicated branch above retries
+                // cleanup only; otherwise runtime identity is fail-closed until a safe retry/reboot.
+                ESP_LOGE(TAG, "auto-pair: key rotation failed or cleanup incomplete — pairing remains disabled");
+                vTaskDelay(pdMS_TO_TICKS(30000));
+                continue;
+            }
             ESP_LOGI(TAG, "auto-pair: new key generated (%s) — re-enrol it on the car", self->key_fingerprint().c_str());
             continue;
         }
@@ -160,24 +209,19 @@ void VehicleController::auto_pair_task_fn_(void* arg) {
             continue;
         }
 
-        // 2. Send the whitelist-add ONCE, then flush the queue. This is what makes the car
+        // 2. Send the whitelist-add ONCE. This is what makes the car
         //    show the "Add key" dialog on its touchscreen — but the car only shows it while
         //    a Tesla NFC keycard is resting on the center-console reader. We do NOT block
         //    waiting on it: the "Whitelist Add Key" never completes cleanly on this car (no
         //    completing commandStatus) — success is detected by probing (step 3), not by
-        //    pair()'s return. The short wait just lets the message reach the car; flushing
-        //    (set_connected(false)) then clears the lingering whitelist-add from the single
-        //    FIFO queue so the probes below run clean. Sending it only once per round
+        //    pair()'s return. The short wait just lets the message reach the car; pair()'s
+        //    generation-aware timeout path invalidates and flushes the lingering request while
+        //    it still owns command_mutex_, so the probes below run clean. Sending it only once per round
         //    (instead of every ~45 s block) also stops the car re-prompting after the key
         //    is already registered.
         ESP_LOGI(TAG, "auto-pair: not paired — requesting key enrolment from the car…");
         self->pair(5000);
-        if (self->ble_ && self->ble_->is_connected()) self->ble_->disconnect();
-        {
-            tk::SemGuard g(self->vehicle_mutex_);   // RAII: set_connected() can throw
-            self->vehicle_->set_connected(false);
-        }
-        ESP_LOGI(TAG, "auto-pair: enrolment request sent — place a Tesla NFC keycard on the center-console reader, then confirm 'Add key' on the touchscreen; waiting for the key to register…");
+        ESP_LOGI(TAG, "auto-pair: enrolment request attempted — place a Tesla NFC keycard on the center-console reader, then confirm 'Add key' on the touchscreen; waiting for the key to register…");
 
         // 3. Poll for the resulting session at a short cadence so an enrolment that lands
         //    mid-round — the instant a keycard is tapped — is noticed within a few seconds
@@ -209,9 +253,27 @@ void VehicleController::auto_pair_task_fn_(void* arg) {
 
 bool VehicleController::generate_key() {
     tk::MutexGuard cmd_guard(command_mutex_);
+    // Block every signer before tesla-ble mutates its in-memory key. Background polling reads
+    // this gate too; foreground runners are additionally serialized by command_mutex_. It is
+    // restored only after both durable key commit and obsolete-session cleanup succeed.
+    key_runtime_safe_.store(false);
+    bool generated = false;
     {
         tk::SemGuard g(vehicle_mutex_);   // RAII: regenerate_key() (crypto/NVS) can throw
-        vehicle_->regenerate_key();
+        generated = vehicle_->regenerate_key();
+    }
+    // Key rotation is a transaction boundary.  The pinned tesla-ble implementation now
+    // reports both crypto generation and the private-key NVS commit.  Do not destroy the
+    // previous key's still-usable sessions unless that commit succeeded: on NVS-full the
+    // previous firmware unpaired the device and returned HTTP success even though the new
+    // key existed only in RAM.
+    if (!generated) {
+        // tesla-ble may already have replaced its in-memory key when the NVS save fails. Its
+        // best-effort old-key restore cannot be observed through this bool API, so conservatively
+        // distrust RAM until a later successful generation or reboot reloads the durable key.
+        ESP_LOGE(TAG, "key generation/persistence failed — runtime key is untrusted; reboot required before pairing");
+        invalidate_and_flush_(command_generation_.load());
+        return false;
     }
     // Record when the key was generated so the UI can show the key's creation
     // date next to its fingerprint. Wall-clock comes from the browser (POST
@@ -227,8 +289,20 @@ bool VehicleController::generate_key() {
     // previous key/whitelist entry, so a fresh enrolment + handshake is required.
     // Wipe the session and cached data so has_session() flips to false (the UI shows
     // "not paired" and hides the controls/SOC) and the auto-pair loop re-enrolls.
-    clear_session_and_cache_();
-    pairing_lost_     = false;  // re-keying is the resolution; clear any pending flag
+    const bool cleanup_ok = clear_session_and_cache_();
+    if (!cleanup_ok) {
+        // regenerate_key() has already committed the NEW key at this point. Returning false
+        // reports only that the now-obsolete sessions were not durably erased; it must not be
+        // interpreted as permission to restore/use the previous identity. /set_vin and boot
+        // recovery distinguish those states by comparing the journaled old fingerprint with
+        // the currently persisted one.
+        pairing_cleanup_pending_.store(true);
+        ESP_LOGE(TAG, "new key persisted, but pairing cleanup is incomplete");
+        return false;
+    }
+    pairing_cleanup_pending_.store(false);
+    key_runtime_safe_.store(true);
+    pairing_lost_     = false;  // re-keying + cleanup resolved the pending revocation
     auth_fail_streak_ = 0;      // and the streak that may have led here
     ESP_LOGI(TAG, "new key generated");
     return true;
@@ -237,7 +311,8 @@ bool VehicleController::generate_key() {
 // Tear down the current pairing without touching the private key. Used by
 // generate_key() (re-key) and reset_for_new_vehicle() (VIN change). Must NOT be
 // called while holding vehicle_mutex_ (it takes it to reset the in-memory peers).
-void VehicleController::clear_session_and_cache_() {
+bool VehicleController::clear_session_and_cache_() {
+    bool cleanup_ok = true;
     // Reset the library's in-memory peer sessions (and flush its command queue / RX
     // buffer) so a stale session key cannot be reused. set_connected(false) does this;
     // only bother when something is actually established to avoid a spurious log on a
@@ -246,8 +321,20 @@ void VehicleController::clear_session_and_cache_() {
     bool had_session = has_session();
     if (had_link) ble_->disconnect();
     if ((had_link || had_session) && vehicle_) {
-        tk::SemGuard g(vehicle_mutex_);   // RAII: set_connected() can throw
-        vehicle_->set_connected(false);
+        // set_connected(false) synchronously flushes queued callbacks. Although key rotation
+        // owns command_mutex_, invalidate defensively before the flush so no compatible SKIPPED
+        // result can be observed as success by an older waiter.
+        command_generation_.fetch_add(1);
+        try {
+            tk::SemGuard g(vehicle_mutex_);   // RAII: set_connected() can throw
+            vehicle_->set_connected(false);
+        } catch (const std::exception& e) {
+            ESP_LOGE(TAG, "pairing in-memory reset threw (%s)", e.what());
+            cleanup_ok = false;
+        } catch (...) {
+            ESP_LOGE(TAG, "pairing in-memory reset threw (unknown)");
+            cleanup_ok = false;
+        }
     }
 
     // Erase the persisted sessions so has_session() is false until a fresh handshake.
@@ -264,7 +351,11 @@ void VehicleController::clear_session_and_cache_() {
             ESP_LOGE(TAG, "session erase incomplete (vcsec=%d info=%d paired_at=%d) — "
                           "flash may still hold a stale session across the next boot",
                      (int)v, (int)i, (int)p);
+            cleanup_ok = false;
         }
+    } else if (!storage_) {
+        ESP_LOGE(TAG, "session erase unavailable — no storage adapter");
+        cleanup_ok = false;
     }
 
     // Drop cached readings so /status and vehicle_data never serve old SOC/charge data
@@ -285,16 +376,26 @@ void VehicleController::clear_session_and_cache_() {
     charge_cache_stale_reported_.store(false);
     last_reachable_ticks_.store(0);  // and no proven reachability → link_state() back to Unknown
     vcsec_asleep_since_ticks_.store(0);  // forget any debounced sleep run from the old pairing
-    ESP_LOGI(TAG, "pairing/session cleared");
+    vcsec_sleep_state_.store(static_cast<int>(TeslaBLE::SleepState::UNKNOWN));
+    ESP_LOGI(TAG, "pairing/session cleanup %s", cleanup_ok ? "complete" : "incomplete");
+    return cleanup_ok;
 }
 
 bool VehicleController::reset_for_new_vehicle() {
     // Regenerating the key already clears the session + cache (see generate_key()).
-    generate_key();
+    if (!generate_key()) {
+        ESP_LOGE(TAG, "reset for new vehicle incomplete — key rotation or session cleanup failed");
+        return false;
+    }
     // The discovered BLE MAC belongs to the previous car; drop it so the next boot
     // rediscovers the new vehicle by its VIN-derived advertising name.
     if (config_store_ && !config_store_->remove("ble_mac")) {
-        ESP_LOGW(TAG, "old vehicle's BLE MAC not cleared — the next scan may target the old car");
+        ESP_LOGE(TAG, "old vehicle's BLE MAC not cleared — boot recovery must retry cleanup");
+        return false;
+    }
+    if (!config_store_) {
+        ESP_LOGE(TAG, "old vehicle's BLE MAC cleanup unavailable — no config storage");
+        return false;
     }
     ESP_LOGI(TAG, "reset for new vehicle complete");
     return true;
@@ -424,34 +525,45 @@ std::string VehicleController::key_fingerprint() {
 }
 
 bool VehicleController::pair(int timeout_ms) {
-    tk::MutexGuard cmd_guard(command_mutex_);
-    if (!ensure_connected_()) return false;
-    xSemaphoreTake(cmd_sem_, 0);
-    last_result_ = false;
-    last_error_.clear();
+    if (timeout_ms <= 0) return false;
+    const uint32_t deadline = deadline_in_(static_cast<uint32_t>(timeout_ms));
+    tk::SemGuard cmd_guard(command_mutex_, ticks_until_(deadline));
+    if (!cmd_guard) {
+        ESP_LOGW(TAG, "pair deadline exhausted waiting for another request");
+        return false;
+    }
+    // Check only after taking command_mutex_: a concurrent generate_key() may have changed the
+    // identity while this caller waited. has_key() proves storage contains a key;
+    // command_identity_ready_ proves this Vehicle uses it and cleanup is complete.
+    if (!has_key() || !command_identity_ready_()) {
+        ESP_LOGE(TAG, "pair refused — no verified storage-backed runtime key (reboot or regenerate required)");
+        return false;
+    }
+    tk::InFlightGuard inflight(cmd_in_flight_);
 
     // This firmware only ever enrolls a Charging Manager key (charging + wake),
     // never an owner key — its sole purpose is the evcc BLE integration. Limiting
     // the role keeps the device's stored key from granting full vehicle access.
     const Keys_Role role = Keys_Role_ROLE_CHARGING_MANAGER;
 
-    {
-        // RAII give — the whitelist builder inside send_command_result can throw (Scenario B).
-        tk::SemGuard g(vehicle_mutex_);
-        // Use send_command_result to get a callback when the whitelist message is delivered.
-        // The user still needs to confirm the pairing request shown on the car's screen.
-        vehicle_->send_command_result(
-            UniversalMessage_Domain_DOMAIN_VEHICLE_SECURITY,
-            "Whitelist Add Key",
-            [role](TeslaBLE::Client* c, uint8_t* b, size_t* l) {
-                return c->build_white_list_message(role, VCSEC_KeyFormFactor_KEY_FORM_FACTOR_CLOUD_KEY, b, l);
-            },
-            make_result_cb_(),
-            TeslaBLE::WakePolicy::NO_WAKE_FAIL);
-    }
+    CommandOutcome outcome = send_vcsec_locked_(
+        "Whitelist Add Key",
+        [role](TeslaBLE::Client* c, uint8_t* b, size_t* l) {
+            return c->build_white_list_message(
+                role, VCSEC_KeyFormFactor_KEY_FORM_FACTOR_CLOUD_KEY, b, l);
+        },
+        TeslaBLE::WakePolicy::NO_WAKE_FAIL, deadline,
+        /*auth_fail_is_revocation=*/false);
 
-    bool ok = xSemaphoreTake(cmd_sem_, pdMS_TO_TICKS(timeout_ms)) == pdTRUE;
-    if (!ok) ESP_LOGW(TAG, "pair not confirmed — confirm the pairing request on the car's screen");
-    else     ESP_LOGI(TAG, "pair confirmed on the car's screen");
-    return ok;
+    if (!outcome.completed && !outcome.error.empty()) {
+        ESP_LOGW(TAG, "pair request failed before confirmation: %s", outcome.error.c_str());
+    } else if (!outcome.completed) {
+        ESP_LOGW(TAG, "pair not confirmed — confirm the pairing request on the car's screen");
+    } else if (!outcome.success) {
+        ESP_LOGW(TAG, "pair rejected: %s",
+                 outcome.error.empty() ? "vehicle returned failure" : outcome.error.c_str());
+    } else {
+        ESP_LOGI(TAG, "pair confirmed on the car's screen");
+    }
+    return outcome.completed && outcome.success;
 }

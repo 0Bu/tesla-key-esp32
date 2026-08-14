@@ -30,6 +30,7 @@ jobs:
           ./scripts/ci-build-all.sh --self-test
           python3 scripts/check-sdkconfig-defaults.py --self-test
           python3 scripts/report-firmware-size.py --self-test
+          ./.claude/hooks/build-efficiency-check.sh --self-test
           test "$(./scripts/idf-version.sh)" = v5.5.5
 
       # The PR-gate command matcher (.claude/hooks/pr-gate-lib.sh). Cheap, offline, and it
@@ -92,7 +93,7 @@ jobs:
           if [ -z "$before" ] || ! git cat-file -e "${before}^{commit}" 2>/dev/null; then
             changed=yes
           elif git diff --name-only "$before" "${{ github.sha }}" | grep -qE \
-            '^(main/|patches/tesla-ble/|CMakeLists\.txt$|sdkconfig\.defaults(\.[a-z0-9]+)?$|dependencies\.lock\.[a-z0-9]+$|esp-idf-toolchain\.txt$|partitions\.csv$|version\.txt$|\.github/workflows/(build|signed-pr-preview)\.yml$|scripts/(ci-build-all|ci-sign-artifacts|check-reproducible-build|idf-docker|idf-version|build-pages|apply-tesla-ble-patches)\.sh$|scripts/(check-sdkconfig-defaults|report-firmware-size)\.py$)'; then
+            '^(main/|patches/tesla-ble/|CMakeLists\.txt$|sdkconfig\.defaults(\.[a-z0-9]+)?$|dependencies\.lock\.[a-z0-9]+$|esp-idf-toolchain\.txt$|partitions\.csv$|version\.txt$|\.github/workflows/(build|signed-pr-preview|pr-preview-cleanup)\.yml$|scripts/(ci-build-all|ci-build-verify|ci-sign-artifacts|test-release-contract|check-reproducible-build|idf-docker|idf-version|build-pages|apply-tesla-ble-patches)\.sh$|scripts/(check-pages-manifest|check-sdkconfig-defaults|report-firmware-size)\.py$)'; then
             changed=yes
           else
             changed=no
@@ -118,13 +119,13 @@ jobs:
 
       # Full SHA pins both the action implementation and the digest-pinned ESP-IDF image it starts.
       # This job has neither the OTA key nor a write-capable GITHUB_TOKEN.
-      - name: Build unsigned firmware for all supported targets
+      - name: Build all targets and exercise reproducibility plus disposable-key release contracts
         uses: espressif/esp-idf-ci-action@e6f5c74232b1ccd4c97ed641f1e48553853f1fd5 # v1.2.0
         with:
           esp_idf_version: ${{ steps.toolchain.outputs.image-version }}
           target: esp32
           command: >-
-            ./scripts/ci-build-all.sh
+            ./scripts/ci-build-verify.sh
             "${{ steps.stamp.outputs.disp }}"
             "${{ github.event.pull_request.head.sha || github.sha }}"
 
@@ -250,7 +251,8 @@ jobs:
       - name: Assemble Pages site
         env:
           DISPLAY_VERSION: ${{ needs.build.outputs.display-version }}
-        run: ./scripts/build-pages.sh ./_site "$DISPLAY_VERSION"
+          SOURCE_SHA: ${{ github.sha }}
+        run: ./scripts/build-pages.sh ./_site "$DISPLAY_VERSION" "$SOURCE_SHA"
 
       - name: Publish site to gh-pages
         env:

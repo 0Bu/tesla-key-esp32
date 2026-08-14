@@ -50,6 +50,9 @@ __pycache__/
 # Sensitive — never commit real credentials
 sdkconfig.local
 secrets.env
+# Vehicle diagnostics can contain VINs and authenticated BLE frames. capture_wake.py writes outside
+# the repository by default; keep an explicit local --output from becoming commit-ready as well.
+wake-capture-*.log
 
 # OTA / Secure Boot signing keys — the private key lives OFFLINE and, in CI, only ever
 # as a transient file written from the OTA_SIGNING_KEY secret. NEVER commit a real key.

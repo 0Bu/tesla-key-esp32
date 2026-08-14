@@ -40,6 +40,7 @@
 #include "led_status.hpp"
 #include "logic/bootlog.hpp"
 #include "logic/health_gate.hpp"
+#include "logic/vin_transition.hpp"
 
 static const char* MDNS_HOSTNAME = "tesla-key-esp32";  // → http://tesla-key-esp32.local
 
@@ -314,10 +315,8 @@ extern "C" void app_main() {
     // on a device that has not saved since upgrading) overrides the Kconfig defaults.
     static tk::ConfigBlob cfg_blob;
     tk::cfg_load(config_store, cfg_blob);
-    static std::string ssid     = cfg_blob.wifi_ssid.empty() ? CONFIG_TESLA_WIFI_SSID
-                                                             : cfg_blob.wifi_ssid;
-    static std::string password = cfg_blob.wifi_ssid.empty() ? CONFIG_TESLA_WIFI_PASSWORD
-                                                             : cfg_blob.wifi_pass;
+    static std::string ssid     = cfg_blob.wifi_ssid;
+    static std::string password = cfg_blob.wifi_pass;
 
     // Is there a wire? Probed HERE, before the setup-portal decision and before anything else
     // has touched a GPIO — it reads one W5500 identity register and does not wait for a link or
@@ -339,8 +338,7 @@ extern "C" void app_main() {
                       "on the wire (set the VIN in the web UI at the DHCP address)");
 
     // Resolve VIN
-    static std::string vin = CONFIG_TESLA_VIN;
-    config_store.load_str("vin", vin);
+    static std::string vin = cfg_blob.vin;
     if (vin.empty()) {
         ESP_LOGW(TAG, "VIN not configured — pairing disabled until a VIN is set "
                       "(setup AP or POST /set_vin / CONFIG_TESLA_VIN / NVS key 'vin'). "
@@ -397,6 +395,12 @@ extern "C" void app_main() {
         boot_fatal("Tesla NVS");
     static BleClient ble_client;
     static VehicleController vehicle;
+    // TeslaBLE constructs its crypto context while loading an existing private key. The DRBG is
+    // seeded exactly once at that point, so enabling hardware entropy only in the no-key branch
+    // is too late for every already-provisioned device. Keep SAR-ADC entropy active across BOTH
+    // controller construction/key load and a possible first-boot key generation; WiFi/BLE are not
+    // running yet and therefore cannot supply RF entropy themselves.
+    bootloader_random_enable();
     // init() wires the connected + rx callbacks onto ble_client and passes the
     // config_store so it can save the discovered MAC. ESSENTIAL: without the controller
     // there is no BLE proxy at all, so a failed init halts boot (and leaves any pending OTA
@@ -405,25 +409,83 @@ extern "C" void app_main() {
     // snapshot read a coherent object) but its two background tasks are not started — see
     // vehicle_ctrl.cpp. Skipping init() altogether is the wrong shape: the HTTP server below takes
     // this controller by reference and would then read a half-constructed one.
-    if (!vehicle.init(vin, ble_client, tesla_store, config_store, ble_mac, /*start_tasks=*/!safe_mode))
+    if (!vehicle.init(vin, ble_client, tesla_store, config_store, ble_mac, /*start_tasks=*/!safe_mode)) {
+        bootloader_random_disable();
         boot_fatal("VehicleController");
+    }
+
+    // Recover a /set_vin transaction interrupted between the tesla_cfg ConfigBlob commit and the
+    // tesla_ble private-key/session commits. The marker stores "previous VIN|previous key id".
+    // Comparing it with the key that the controller actually loaded tells us which side committed:
+    //   same key -> rotation never persisted, restore the previous VIN;
+    //   changed key -> the new identity committed, idempotently finish session/MAC cleanup.
+    // Reboot after either repair so the in-memory Vehicle cannot retain the VIN or peer sessions
+    // that were loaded before recovery.
+    std::string vin_txn;
+    if (config_store.load_str("vin_txn", vin_txn)) {
+        tk::VinTransitionMarker marker;
+        if (!tk::parse_vin_transition_marker(vin_txn, marker)) {
+            ESP_LOGE(TAG, "invalid VIN transition marker — removing it without changing identity");
+            if (!config_store.remove("vin_txn")) {
+                bootloader_random_disable();
+                boot_fatal("VIN transition marker cleanup");
+            }
+        } else {
+            const std::string current_key  = vehicle.key_fingerprint();
+            if (!marker.previous_key_id.empty() && current_key.empty()) {
+                ESP_LOGE(TAG, "cannot read persisted key id while recovering VIN transition");
+                bootloader_random_disable();
+                boot_fatal("VIN transition key verification");
+            }
+            const tk::VinTransitionRecovery recovery =
+                tk::decide_vin_transition_recovery(marker, cfg_blob.vin, current_key);
+            if (recovery != tk::VinTransitionRecovery::CompleteNewIdentity) {
+                if (recovery == tk::VinTransitionRecovery::RollBackPreviousVin) {
+                    ESP_LOGW(TAG, "interrupted VIN change detected before key commit — restoring %s",
+                             marker.previous_vin.empty() ? "unconfigured VIN"
+                                                         : marker.previous_vin.c_str());
+                    cfg_blob.vin = marker.previous_vin;
+                    if (!tk::cfg_save(config_store, cfg_blob)) {
+                        bootloader_random_disable();
+                        boot_fatal("VIN transition rollback");
+                    }
+                    if (!config_store.remove("vin_txn")) {
+                        bootloader_random_disable();
+                        boot_fatal("VIN transition marker cleanup");
+                    }
+                    bootloader_random_disable();
+                    vTaskDelay(pdMS_TO_TICKS(100));
+                    esp_restart();
+                }
+                if (!config_store.remove("vin_txn")) {
+                    bootloader_random_disable();
+                    boot_fatal("VIN transition marker cleanup");
+                }
+            } else {
+                ESP_LOGW(TAG, "interrupted VIN change detected after key commit — completing cleanup");
+                const bool vcsec_removed = tesla_store.remove("session_vcsec");
+                const bool info_removed  = tesla_store.remove("session_infotainment");
+                const bool paired_removed = tesla_store.remove("paired_at");
+                const bool mac_removed = config_store.remove("ble_mac");
+                const bool marker_removed = config_store.remove("vin_txn");
+                if (!vcsec_removed || !info_removed || !paired_removed ||
+                    !mac_removed || !marker_removed) {
+                    bootloader_random_disable();
+                    boot_fatal("VIN transition completion");
+                }
+                bootloader_random_disable();
+                vTaskDelay(pdMS_TO_TICKS(100));
+                esp_restart();
+            }
+        }
+    }
 
     // Create the ECDSA key on first boot so a key always exists (and a fingerprint
     // is shown). Regeneration is an explicit, confirmed action in the web UI; this
     // never overwrites an existing key — only generates when none is present.
     if (!vehicle.has_key()) {
         ESP_LOGI(TAG, "no key in storage — generating initial key");
-        // The ESP32 hardware RNG only returns TRUE random numbers while an entropy source is
-        // active: RF (WiFi/BT) enabled, the bootloader running, or bootloader_random_enable()
-        // (SAR-ADC entropy). Neither WiFi (wifi_connect) nor BLE (ble_client.start) is up yet,
-        // so without this the EC private key — the device's sole authenticator to the car and
-        // the OTA trust root — would be seeded from PSEUDO-random data (tesla-ble seeds its DRBG
-        // once and reuses it, so same-boot re-keys inherit the weak seed). Enable the SAR-ADC
-        // entropy source for the key generation, then disable it again before WiFi/ADC start
-        // (Espressif's documented pattern for "true random before RF is up").
-        bootloader_random_enable();
         bool key_ok = vehicle.generate_key();
-        bootloader_random_disable();
         if (key_ok) {
             ESP_LOGI(TAG, "initial key generated, fingerprint %s",
                      vehicle.key_fingerprint().c_str());
@@ -433,6 +495,7 @@ extern "C" void app_main() {
     } else {
         ESP_LOGI(TAG, "key present, fingerprint %s", vehicle.key_fingerprint().c_str());
     }
+    bootloader_random_disable();
     // Match by the VIN-derived BLE name on scan. Pass the real VIN only when it is a plausible
     // 17-char VIN; with none configured we pass an EMPTY target so the scanner lists nearby
     // Teslas but never connects/enrols on one. The "UNKNOWN" placeholder must stay out of the

@@ -33,7 +33,7 @@ the build succeeded (`pipefail` + the `||` guard) — auto-detects the port and 
 set -o pipefail
 TARGET=esp32s3   # chip being flashed: esp32s3 (default) | esp32 | esp32c3 | esp32c6
 # 1) Build via the CI-pinned ESP-IDF Docker image (build/ stays host-owned).
-#    Root CMake automatically applies the committed tesla-ble anti-replay patch on every target.
+#    Root CMake automatically applies every committed tesla-ble patch in lexical order on every target.
 #    First build only: set-target; afterwards plain `build` keeps it incremental & fast.
 scripts/idf-docker.sh \
   sh -c "if [ -f sdkconfig ]; then idf.py build; else idf.py set-target $TARGET build; fi" \
