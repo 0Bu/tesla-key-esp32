@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# Assemble the GitHub Pages site for the ESP Web Tools installer.
+# Assemble the GitHub Pages site for the inline Web Serial installer.
 #
 # The installer (index.html) fetches the firmware in the BROWSER. GitHub release
 # assets are served without CORS headers, so the manifest cannot point at release
 # URLs cross-origin — the parts must be same-origin with the page. This script
 # therefore copies the per-target bins (staged in _fw/<target>/ by ci-sign-artifacts.sh)
 # into the publish dir alongside the page and writes a manifest.json with one build
-# per chipFamily and relative paths. esp-web-tools auto-selects the build matching the
-# connected chip. The canonical downloads still live on the GitHub release; these are
+# per chipFamily and relative paths. web-installer.mjs selects the build matching the
+# detected chip. The canonical downloads still live on the GitHub release; these are
 # an in-build same-origin mirror and are NOT committed to git.
 #
 # bootloader / partition-table / app are flashed as SEPARATE parts at their own
@@ -28,7 +28,7 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 fw="$repo_root/_fw"
 docs="$repo_root/docs"
 
-# target -> esp-web-tools chipFamily string.
+# target -> manifest chipFamily string consumed by web-installer.mjs.
 chip_family() {
   case "$1" in
     esp32)   echo "ESP32" ;;
@@ -40,7 +40,7 @@ chip_family() {
 }
 # target -> 2nd-stage bootloader flash offset (bytes). Classic esp32 = 0x1000,
 # s3/c3/c6 = 0x0. MUST match the trusted explicit layout in ci-sign-artifacts.sh — a wrong offset
-# here makes esp-web-tools write an UNBOOTABLE bootloader.
+# here makes the browser installer write an UNBOOTABLE bootloader.
 boot_offset() { case "$1" in esp32) echo 4096 ;; *) echo 0 ;; esac; }
 # target -> short app-image suffix so "esp32" appears once: esp32 -> "" (tesla-key-esp32.bin),
 # esp32s3 -> "-s3", esp32c3 -> "-c3", esp32c6 -> "-c6". This names the
@@ -65,7 +65,7 @@ mkdir -p "$out"
 
 # The page and its local module + any served docs (README / SECURITY), but never a stale manifest.
 # The full site is emitted for both the root and each PR/<N>/ preview, so a PR is directly browsable.
-cp "$docs/index.html" "$docs/serial-port-release.mjs" "$out/"
+cp "$docs/index.html" "$docs/serial-port-release.mjs" "$docs/web-installer.mjs" "$out/"
 for md in "$docs"/*.md; do
   [[ -e "$md" ]] && cp "$md" "$out/"
 done

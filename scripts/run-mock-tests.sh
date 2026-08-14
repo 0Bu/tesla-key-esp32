@@ -42,12 +42,12 @@ else
     echo "run-mock-tests: python3 not found — skipping display-sim parity check" >&2
 fi
 
-# Browser checks: exercise the Web Serial port-release flow, then confirm the BLE_ROW region of
-# main/www/app.js still decides the Bluetooth row exactly as tk::ble::decide() does (so the browser
-# can't silently drift from the host-tested rules). Skipped only where node is unavailable — the
-# C++ logic tests are the hard gate; CI's ubuntu-latest runner ships node, so both checks run there.
+# Browser checks: exercise the inline Web Serial installer and port-release flow, then confirm the
+# BLE_ROW region of main/www/app.js still decides the Bluetooth row exactly as tk::ble::decide()
+# does (so the browser can't silently drift from the host-tested rules). Skipped only where node is
+# unavailable — the C++ logic tests are the hard gate; CI's ubuntu-latest runner ships node.
 if command -v node >/dev/null 2>&1; then
-    node --test test/serial_port_release.test.mjs
+    node --test test/serial_port_release.test.mjs test/web_installer.test.mjs
     scripts/check-ble-row-parity.sh
 else
     echo "run-mock-tests: node not found — skipping web-installer and BLE-row checks" >&2
