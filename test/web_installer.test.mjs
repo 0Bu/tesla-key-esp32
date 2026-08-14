@@ -270,6 +270,7 @@ test("published installer keeps Tesla styling and inline Web Serial controls", (
   assert.match(html, /<span class="installer-logo"[^>]*><svg[\s\S]*M13 2 4 14h6/);
   assert.match(html, /Keep configuration[\s\S]*WiFi, VIN, MQTT, pairing key and BLE sessions stay intact/);
   assert.match(html, /class="installer-action-row installer-device-actions"[\s\S]*id="install-button"[\s\S]*id="reset-button"[\s\S]*id="disconnect-button"[\s\S]*id="release-serial-port"/);
+  assert.match(html, /onBeforeRelease:\s*controller\.disconnectPortForRelease/);
   assert.match(html, /esptool-js@0\.6\.1\/\+esm/);
   assert.match(html, /location\.pathname\.match\(\/\\\/PR\\\/\(\\d\+\)\\\//);
   assert.doesNotMatch(html, /esp-web-install-button/);

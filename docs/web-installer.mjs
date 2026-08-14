@@ -477,6 +477,20 @@ export function attachWebInstaller({
     setPageStatus("", "info");
   };
 
+  // Permission removal identifies its target before asking the controller to disconnect. Close
+  // only the installer-owned instance of that exact port and never interrupt an operation that
+  // has deliberately disabled the regular Disconnect button.
+  const disconnectPortForRelease = async (port) => {
+    if (!selectedPort || port !== selectedPort) return false;
+    if (busy || root.dataset.flashing === "true") {
+      const error = new Error("The serial port is busy.");
+      error.name = "InvalidStateError";
+      throw error;
+    }
+    await disconnect();
+    return true;
+  };
+
   const connect = async () => {
     if (!serial || typeof serial.requestPort !== "function" || !manifest || busy) return;
     busy = true;
@@ -651,5 +665,13 @@ export function attachWebInstaller({
       setPageStatus(`Firmware metadata could not be loaded: ${errorMessage(error)}`, "error");
     });
 
-  return { connect, disconnect, install, resetDevice, startMonitor, stopMonitor };
+  return {
+    connect,
+    disconnect,
+    disconnectPortForRelease,
+    install,
+    resetDevice,
+    startMonitor,
+    stopMonitor
+  };
 }

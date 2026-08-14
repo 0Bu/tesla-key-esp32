@@ -84,7 +84,7 @@ test("the chooser disambiguates multiple previously granted ports", async () => 
   assert.deepEqual(calls, ["request", "second"]);
 });
 
-test("an open port is not interrupted or released", async () => {
+test("an open port is not released when its owner does not close it", async () => {
   let forgotten = false;
   const port = {
     readable: {},
@@ -97,6 +97,49 @@ test("an open port is not interrupted or released", async () => {
   };
 
   await assert.rejects(releaseSelectedSerialPort(serial), { name: "InvalidStateError" });
+  assert.equal(forgotten, false);
+});
+
+test("the selected installer port is disconnected before its permission is removed", async () => {
+  const calls = [];
+  const port = {
+    readable: {},
+    writable: {},
+    async forget() { calls.push("forget"); }
+  };
+  const serial = {
+    async getPorts() { calls.push("get"); return [port]; },
+    async requestPort() { throw new Error("chooser must not open"); }
+  };
+
+  const releasedPort = await releaseSelectedSerialPort(serial, async (selectedPort) => {
+    calls.push("disconnect");
+    assert.equal(selectedPort, port);
+    port.readable = null;
+    port.writable = null;
+  });
+
+  assert.equal(releasedPort, port);
+  assert.deepEqual(calls, ["get", "disconnect", "forget"]);
+});
+
+test("a failed disconnect prevents permission removal", async () => {
+  let forgotten = false;
+  const port = {
+    readable: {},
+    writable: {},
+    async forget() { forgotten = true; }
+  };
+  const serial = {
+    async getPorts() { return [port]; },
+    async requestPort() { return port; }
+  };
+  const disconnectError = Object.assign(new Error("busy"), { name: "InvalidStateError" });
+
+  await assert.rejects(
+    releaseSelectedSerialPort(serial, async () => { throw disconnectError; }),
+    disconnectError
+  );
   assert.equal(forgotten, false);
 });
 
@@ -167,13 +210,14 @@ test("the UI refreshes when a granted device connects or disconnects", async () 
   assert.equal(container.hidden, false);
 });
 
-test("the UI appears for a granted port and disappears after releasing it", async () => {
+test("the UI disconnects before release and disappears after releasing it", async () => {
   let granted = true;
   let releasedCallback = false;
+  const calls = [];
   const port = {
-    readable: null,
-    writable: null,
-    async forget() { granted = false; }
+    readable: {},
+    writable: {},
+    async forget() { calls.push("forget"); granted = false; }
   };
   const container = { hidden: true };
   const button = fakeButton();
@@ -190,7 +234,13 @@ test("the UI appears for a granted port and disappears after releasing it", asyn
     button,
     status,
     refreshTarget: null,
-    async onReleased() { releasedCallback = true; }
+    async onBeforeRelease(selectedPort) {
+      calls.push("disconnect");
+      assert.equal(selectedPort, port);
+      port.readable = null;
+      port.writable = null;
+    },
+    async onReleased() { calls.push("released"); releasedCallback = true; }
   }), true);
   assert.equal(container.hidden, false);
 
@@ -202,6 +252,7 @@ test("the UI appears for a granted port and disappears after releasing it", asyn
   assert.equal(button.attributes.has("aria-busy"), false);
   assert.equal(status.dataset.kind, "success");
   assert.match(status.textContent, /no longer paired/);
+  assert.deepEqual(calls, ["disconnect", "forget", "released"]);
 });
 
 test("the UI stays available when another granted port remains", async () => {
