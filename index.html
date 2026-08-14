@@ -1,276 +1,463 @@
 <!doctype html>
 <html lang="en">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta name="theme-color" content="#e82127">
-  <title>Flash tesla-key-esp32</title>
-  <style>
-    :root{
-      --bg:#f6f7f9;
-      --card:#ffffff;
-      --fg:#1a1d21;
-      --muted:#5b626b;
-      --border:#e6e8ec;
-      --accent:#e82127;
-      --accent-fg:#ffffff;
-      --code-bg:#f0f1f3;
-      --radius:16px;
-      --shadow:0 1px 2px rgba(0,0,0,.04),0 8px 24px rgba(0,0,0,.05);
-    }
-    @media (prefers-color-scheme:dark){
-      :root{
-        --bg:#0f1115;
-        --card:#171a20;
-        --fg:#f2f3f5;
-        --muted:#9aa1ab;
-        --border:#262a31;
-        --code-bg:#22262e;
-        --shadow:0 1px 2px rgba(0,0,0,.4),0 8px 24px rgba(0,0,0,.3);
-      }
-    }
-    *{box-sizing:border-box}
-    html{-webkit-text-size-adjust:100%}
-    body{
-      font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
-      background:var(--bg);
-      color:var(--fg);
-      line-height:1.55;
-      margin:0;
-      padding:1.25rem 1.1rem calc(2.5rem + env(safe-area-inset-bottom));
-      -webkit-font-smoothing:antialiased;
-    }
-    main{max-width:34rem;margin:0 auto}
-    .hero{text-align:center;padding:1.5rem 0 .5rem}
-    .badge{
-      display:inline-flex;align-items:center;gap:.4rem;
-      font-size:.8rem;font-weight:600;letter-spacing:.02em;
-      color:var(--accent);background:color-mix(in srgb,var(--accent) 12%,transparent);
-      padding:.35rem .7rem;border-radius:999px;margin-bottom:1rem;
-    }
-    h1{font-size:1.6rem;line-height:1.2;margin:0 0 .6rem;letter-spacing:-.02em}
-    .lead{color:var(--muted);margin:0 auto;max-width:28rem}
-    .cta{margin:1.5rem 0 .75rem;text-align:center}
-    button.flash{
-      font:inherit;font-weight:650;font-size:1.05rem;
-      background:var(--accent);color:var(--accent-fg);
-      border:0;border-radius:999px;
-      padding:.95rem 2.2rem;width:100%;max-width:20rem;
-      cursor:pointer;transition:transform .08s ease,filter .15s ease;
-      box-shadow:var(--shadow);
-    }
-    button.flash:hover{filter:brightness(1.05)}
-    button.flash:active{transform:translateY(1px)}
-    .hint{color:var(--muted);font-size:.85rem;text-align:center;margin:.4rem 0 0}
-    .serial-release{margin:.8rem auto 0;max-width:28rem;text-align:center}
-    .serial-release[hidden]{display:none}
-    button.release{
-      font:inherit;font-weight:600;font-size:.88rem;
-      color:var(--muted);background:transparent;
-      border:1px solid var(--border);border-radius:999px;
-      padding:.5rem 1rem;cursor:pointer;
-      transition:color .15s ease,border-color .15s ease,background .15s ease;
-    }
-    button.release:hover{color:var(--fg);border-color:var(--muted)}
-    button.release:disabled{cursor:wait;opacity:.6}
-    .release-help,.serial-status{
-      color:var(--muted);font-size:.78rem;line-height:1.4;margin:.35rem 0 0;
-    }
-    .serial-status[data-kind="success"]{color:#18794e}
-    .serial-status[data-kind="error"]{color:var(--accent)}
-    @media (prefers-color-scheme:dark){
-      .serial-status[data-kind="success"]{color:#65c99a}
-    }
-    .card{
-      background:var(--card);border:1px solid var(--border);
-      border-radius:var(--radius);box-shadow:var(--shadow);
-      padding:1.25rem 1.25rem;margin-top:1.25rem;
-    }
-    .card h2{font-size:.78rem;text-transform:uppercase;letter-spacing:.06em;
-      color:var(--muted);margin:0 0 1rem}
-    ol.steps{list-style:none;counter-reset:s;margin:0;padding:0}
-    ol.steps li{
-      counter-increment:s;position:relative;
-      padding:0 0 1.1rem 2.6rem;
-    }
-    ol.steps li:last-child{padding-bottom:0}
-    ol.steps li::before{
-      content:counter(s);position:absolute;left:0;top:-.1rem;
-      width:1.8rem;height:1.8rem;border-radius:50%;
-      display:grid;place-items:center;
-      background:color-mix(in srgb,var(--accent) 14%,transparent);
-      color:var(--accent);font-weight:700;font-size:.9rem;
-    }
-    ol.steps li:not(:last-child)::after{
-      content:"";position:absolute;left:.875rem;top:1.9rem;bottom:.3rem;
-      width:2px;background:var(--border);
-    }
-    .callout{
-      display:flex;gap:.7rem;align-items:flex-start;
-      background:color-mix(in srgb,var(--accent) 7%,transparent);
-      border:1px solid color-mix(in srgb,var(--accent) 18%,transparent);
-      border-radius:12px;padding:.85rem 1rem;margin-top:1.25rem;
-      font-size:.9rem;
-    }
-    .callout .ico{flex:0 0 auto;font-size:1.1rem;line-height:1.4}
-    .callout p{margin:0;color:var(--fg)}
-    code{background:var(--code-bg);padding:.12rem .4rem;border-radius:6px;
-      font-size:.88em;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
-    .foot{color:var(--muted);font-size:.8rem;text-align:center;margin-top:1.75rem;line-height:1.5}
-    a{color:var(--accent)}
-    b{font-weight:650}
-    .prbanner{background:#3a2a00;border:1px solid #7a5c00;color:#ffd479;
-      padding:.8rem 1rem;border-radius:.6rem;margin-bottom:1.25rem;font-size:.9rem;line-height:1.5}
-    .prbanner a{color:#ffd479;text-decoration:underline}
-  </style>
-  <script type="module"
-          src="https://unpkg.com/esp-web-tools@10/dist/web/install-button.js"></script>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#e82127">
+<title>Install tesla-key-esp32</title>
+<style>
+:root {
+  color-scheme:light dark;
+  --brand:#e82127; --brand-strong:#bd151b; --brand-tint:#fff0f1;
+  --bg:#f6f7f9; --card:#fff; --fg:#1a1d21; --muted:#5b626b; --line:#e6e8ec; --soft:#f1f3f5;
+  --success:#18794e; --success-bg:#eef9f2; --success-line:#b9e2c9;
+  --warn:#c9740a; --err:#d23b3b; --terminal:#111820; --terminal-head:#18212a;
+  --focus-ring:rgba(232,33,39,.22);
+  --shadow-logo:0 2px 8px rgba(232,33,39,.35); --shadow-cta:0 3px 12px rgba(232,33,39,.3);
+  --shadow-card:0 1px 2px rgba(16,20,28,.05),0 7px 22px rgba(16,20,28,.07);
+  --r-card:18px; --r-tile:12px; --r-input:12px; --r-logo:11px; --installer-rail-width:214px;
+  --font-sans:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  --font-mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme:dark) {
+  :root {
+    --brand:#ff5a5f; --brand-strong:#e82127; --brand-tint:#2d171a;
+    --bg:#0f1115; --card:#171a20; --fg:#f2f3f5; --muted:#9aa1ab; --line:#262a31; --soft:#1f242c;
+    --success:#70d5a0; --success-bg:#163326; --success-line:#2d6b49;
+    --warn:#e08a2b; --err:#ea5a5a;
+    --shadow-card:0 1px 2px rgba(0,0,0,.5),0 10px 28px rgba(0,0,0,.45);
+  }
+}
+*{box-sizing:border-box}
+html,body{margin:0}
+body{
+  min-width:320px; padding:20px; background:var(--bg); color:var(--fg);
+  font:15px/1.5 var(--font-sans); -webkit-font-smoothing:antialiased;
+}
+[hidden]{display:none!important}
+button,input{font:inherit}
+button:focus-visible,input:focus-visible+span{outline:3px solid var(--focus-ring);outline-offset:2px}
+a{color:var(--brand);text-decoration:none;font-weight:650}
+a:hover{color:var(--brand-strong)}
+
+.installer-shell{
+  width:min(100%,980px); margin:0 auto; overflow:hidden; background:var(--bg);
+  border:1px solid var(--line); border-radius:22px; box-shadow:0 18px 55px rgba(16,20,28,.13);
+}
+.installer-topbar{
+  min-height:66px; display:flex; align-items:center; justify-content:space-between; gap:18px;
+  padding:13px 22px; background:var(--card); border-bottom:1px solid var(--line);
+}
+.installer-brand{display:flex;align-items:center;gap:11px;min-width:0}
+.installer-logo{
+  width:38px; height:38px; flex:none; display:grid; place-items:center; color:#fff;
+  border-radius:var(--r-logo); background:var(--brand); box-shadow:var(--shadow-logo);
+}
+.installer-logo svg{width:21px;height:21px;fill:currentColor}
+.installer-product{
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+  font:600 14px/1.25 var(--font-mono); letter-spacing:.1px;
+}
+.installer-connection{
+  display:inline-flex; align-items:center; gap:8px; color:var(--muted);
+  font-size:13px; font-weight:650; white-space:nowrap;
+}
+.installer-connection-dot{width:9px;height:9px;border-radius:50%;background:#8b96a3;box-shadow:0 0 0 4px var(--soft)}
+.installer-shell[data-connected="true"] .installer-connection{color:var(--success)}
+.installer-shell[data-connected="true"] .installer-connection-dot{background:#29a56c;box-shadow:0 0 0 4px var(--success-bg)}
+
+.installer-layout{display:grid;grid-template-columns:var(--installer-rail-width) minmax(0,1fr);min-height:640px}
+.installer-rail{padding:28px 20px;background:var(--brand-tint);border-right:1px solid var(--line)}
+.installer-rail-title{
+  margin:0 0 20px; color:var(--muted); font-size:11px; font-weight:750;
+  letter-spacing:.09em; text-transform:uppercase;
+}
+.installer-step{
+  position:relative; display:grid; grid-template-columns:29px minmax(0,1fr); gap:10px;
+  align-items:start; padding:0 0 28px; color:var(--muted);
+}
+.installer-step:not(:last-child)::after{
+  content:"";position:absolute;left:14px;top:31px;bottom:3px;width:1px;background:var(--line);
+}
+.installer-step-index{
+  position:relative; z-index:1; width:29px; height:29px; display:grid; place-items:center;
+  border:1px solid var(--line); border-radius:50%; background:var(--card);
+  color:inherit; font-size:12px; font-weight:750;
+}
+.installer-step[data-state="active"]{color:var(--brand-strong)}
+.installer-step[data-state="active"] .installer-step-index{
+  color:#fff;border-color:var(--brand);background:var(--brand);box-shadow:0 0 0 4px var(--focus-ring);
+}
+.installer-step[data-state="done"]{color:var(--success)}
+.installer-step[data-state="done"] .installer-step-index{color:#fff;border-color:#29a56c;background:#29a56c}
+.installer-step-name{display:block;margin-top:3px;color:var(--fg);font-size:13px;font-weight:700}
+.installer-step-note{display:block;margin-top:2px;font-size:11.5px;line-height:1.35}
+
+.installer-main{min-width:0;padding:32px clamp(22px,5vw,54px) 38px}
+.installer-channel{
+  display:inline-flex; align-items:center; gap:7px; margin-bottom:13px;
+  color:var(--success); font-size:12px; font-weight:750; letter-spacing:.02em;
+}
+.installer-channel::before{content:"";width:7px;height:7px;border-radius:50%;background:currentColor}
+.installer-channel[data-kind="preview"]{color:var(--warn)}
+h1{margin:0;color:var(--fg);font-size:clamp(26px,4vw,36px);line-height:1.12;letter-spacing:-.035em;font-weight:720}
+.installer-intro{max-width:590px;margin:10px 0 25px;color:var(--muted);font-size:15px}
+
+.installer-preview{
+  display:flex; align-items:flex-start; gap:11px; margin:0 0 14px; padding:13px 14px;
+  border:1px solid var(--warn); border-left-width:4px; border-radius:14px; background:var(--card);
+  color:var(--muted); font-size:12.5px;
+}
+.installer-preview strong{color:var(--fg)}
+.installer-preview-icon{
+  flex:none; width:21px; height:21px; display:grid; place-items:center; margin-top:1px;
+  border-radius:50%; background:var(--warn); color:#fff; font-weight:750;
+}
+.installer-card{
+  padding:20px; border:1px solid var(--line); border-radius:16px;
+  background:var(--card); box-shadow:var(--shadow-card);
+}
+.installer-usb-stack,.installer-card+.installer-card,.installer-usb-stack+.installer-card{margin-top:14px}
+.installer-usb-stack{position:relative;margin-top:0}
+.installer-usb-card{position:relative;z-index:2}
+.installer-card-head{display:flex;justify-content:space-between;gap:18px;align-items:flex-start}
+.installer-card-kicker{
+  display:block;color:var(--muted);font-size:11px;font-weight:750;letter-spacing:.08em;text-transform:uppercase;
+}
+.installer-card-title{display:block;margin-top:3px;font-size:17px;font-weight:720}
+.installer-version{
+  flex:none; color:var(--fg); font:650 12px/1.3 var(--font-mono);
+  background:var(--soft); border:1px solid var(--line); border-radius:7px; padding:5px 8px;
+}
+.installer-action-row{display:flex;align-items:center;gap:14px;margin-top:20px;flex-wrap:wrap}
+.installer-primary,.installer-secondary,.installer-release{
+  min-height:44px; display:inline-flex; align-items:center; justify-content:center; gap:8px;
+  border-radius:var(--r-input); padding:10px 17px; font-weight:720; cursor:pointer;
+  transition:transform .15s ease,background .15s ease,opacity .15s ease;
+}
+.installer-primary{color:#fff;border:1px solid var(--brand);background:var(--brand);box-shadow:var(--shadow-cta)}
+.installer-primary:hover:not(:disabled){background:var(--brand-strong);transform:translateY(-1px)}
+.installer-secondary,.installer-release{color:var(--fg);border:1px solid var(--line);background:var(--card);box-shadow:none}
+.installer-secondary:hover:not(:disabled),.installer-release:hover:not(:disabled){background:var(--soft)}
+button:disabled{cursor:default;opacity:.55;transform:none}
+.installer-device-actions{
+  display:grid; grid-template-columns:minmax(0,1.25fr) minmax(0,.72fr) minmax(0,.9fr) minmax(0,1.45fr);
+  align-items:start; gap:10px;
+}
+.installer-device-actions>button,.installer-device-actions .serial-release,.installer-device-actions .installer-release{width:100%}
+.installer-device-actions button{padding-inline:12px;white-space:nowrap}
+.installer-device-actions .installer-release{min-height:44px}
+.installer-browser-note{color:var(--muted);font-size:12px}
+.installer-page-status{margin:12px 0 0;color:var(--muted);font-size:12px}
+.installer-page-status[data-kind="success"]{color:var(--success)}
+.installer-page-status[data-kind="error"],.installer-unsupported{color:var(--err)}
+
+.installer-device{
+  display:none; grid-template-columns:minmax(0,.9fr) minmax(0,1.25fr) minmax(0,.9fr);
+  gap:10px; margin-top:18px; padding-top:16px; border-top:1px solid var(--line);
+}
+.installer-shell[data-connected="true"] .installer-device{display:grid}
+.installer-device-item{min-width:0;padding:10px 11px;border:0;border-radius:10px;background:var(--soft);text-align:left}
+.installer-device-label{
+  display:block;color:var(--muted);font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;
+}
+.installer-device-value{
+  display:block; margin-top:3px; overflow:hidden; color:var(--fg); font-size:13px; font-weight:680;
+  text-overflow:ellipsis; white-space:nowrap;
+}
+.installer-device-monitor{width:100%;display:block;color:inherit;cursor:pointer;transition:background .16s ease,box-shadow .16s ease}
+.installer-device-monitor:hover:not(:disabled),.installer-shell[data-monitor="open"] .installer-device-monitor{
+  background:var(--brand-tint);box-shadow:inset 0 0 0 1px var(--brand);
+}
+.installer-device-monitor-value{
+  width:100%; display:flex; align-items:center; justify-content:space-between; gap:14px;
+  margin-top:3px; color:var(--fg); font-size:13px; font-weight:720;
+}
+.installer-device-monitor-name{min-width:0;display:inline-flex;align-items:center;gap:7px;white-space:nowrap}
+.installer-monitor-chevron{flex:none;margin-left:auto;margin-right:3px;transition:transform .18s ease}
+.installer-shell[data-monitor="open"] .installer-monitor-chevron{transform:rotate(180deg)}
+
+.installer-monitor{
+  position:relative; z-index:1; max-height:0; margin:0 18px; overflow:hidden;
+  border:0 solid var(--line); border-radius:0 0 14px 14px; background:var(--terminal);
+  opacity:0; transform:translateY(-24px); pointer-events:none;
+  transition:max-height .28s ease,opacity .18s ease,transform .28s ease,border-width .01s linear .27s,box-shadow .2s ease;
+}
+.installer-shell[data-monitor="open"] .installer-monitor{
+  max-height:270px; border-width:0 1px 1px; opacity:1; transform:translateY(0); pointer-events:auto;
+  box-shadow:0 12px 22px rgba(16,20,28,.18);
+  transition:max-height .3s ease,opacity .18s ease .05s,transform .3s ease,border-width .01s linear,box-shadow .2s ease .06s;
+}
+.installer-monitor-head{
+  display:flex; align-items:center; justify-content:space-between; gap:12px; padding:8px 11px;
+  color:#aeb9c5; border-bottom:1px solid #29333e; background:var(--terminal-head);
+  font-size:10.5px; font-weight:700; letter-spacing:.05em; text-transform:uppercase;
+}
+.installer-monitor-live{display:inline-flex;align-items:center;gap:6px;color:#95a1af}
+.installer-monitor-live::before{content:"";width:6px;height:6px;border-radius:50%;background:#75808b}
+.installer-monitor-live[data-state="live"]{color:#70d5a0}
+.installer-monitor-live[data-state="live"]::before{background:#45c57f;box-shadow:0 0 0 3px rgba(69,197,127,.12)}
+.installer-monitor-live[data-state="connecting"]{color:#f2a444}
+.installer-monitor-live[data-state="connecting"]::before{background:#f2a444}
+.installer-monitor-live[data-state="error"]{color:#f08080}
+.installer-monitor-live[data-state="error"]::before{background:#ea5a5a}
+.installer-monitor-output{
+  box-sizing:border-box; width:100%; min-width:0; min-height:150px; max-height:220px;
+  margin:0; padding:12px 13px 14px; overflow-x:auto; overflow-y:auto;
+  color:#c8d4df; font:11.5px/1.58 var(--font-mono); white-space:pre; overflow-wrap:normal;
+}
+.installer-monitor-line-warning{color:#f2a444}
+.installer-monitor-line-error{color:#ff6b6b}
+
+.installer-options{display:none}
+.installer-shell[data-connected="true"] .installer-options{display:block}
+.installer-choice-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-top:16px}
+.installer-choice{position:relative;display:block;cursor:pointer}
+.installer-choice input{position:absolute;opacity:0;pointer-events:none}
+.installer-choice-body{display:block;min-height:108px;padding:14px;border:1px solid var(--line);border-radius:12px;background:var(--soft)}
+.installer-choice input:checked+.installer-choice-body{border-color:var(--brand);background:var(--brand-tint);box-shadow:inset 0 0 0 1px var(--brand)}
+.installer-choice-name{display:flex;justify-content:space-between;gap:10px;font-size:14px;font-weight:730}
+.installer-recommended{color:var(--brand-strong);font-size:10px;font-weight:780;letter-spacing:.04em;text-transform:uppercase}
+.installer-choice-text{display:block;margin-top:6px;color:var(--muted);font-size:12px;line-height:1.4}
+.installer-progress-wrap{display:none;margin-top:22px}
+.installer-shell[data-flashing="true"] .installer-progress-wrap,.installer-shell[data-finished="true"] .installer-progress-wrap{display:block}
+.installer-progress-labels{display:flex;justify-content:space-between;gap:16px;margin-bottom:8px;font-size:12px;font-weight:700}
+.installer-progress-percent{color:var(--brand-strong);font-family:var(--font-mono)}
+.installer-progress-track{height:9px;overflow:hidden;border-radius:99px;background:var(--soft)}
+.installer-progress-fill{width:0;height:100%;border-radius:inherit;background:linear-gradient(90deg,var(--brand),#ff686d);transition:width .24s ease}
+.installer-shell[data-finished="true"] .installer-progress-fill{background:#29a56c}
+.installer-success{
+  display:none; align-items:flex-start; gap:12px; margin-top:16px; padding:13px 14px;
+  border:1px solid var(--success-line); border-radius:12px; background:var(--success-bg); color:var(--success);
+}
+.installer-shell[data-finished="true"] .installer-success{display:flex}
+.installer-success-icon{font-size:20px;line-height:1}
+.installer-success strong{display:block}
+.installer-success span span{display:block;margin-top:2px;font-size:12px}
+
+.serial-release{margin:0}
+.installer-release{min-height:36px;padding:7px 11px;color:var(--muted);font-size:12px}
+.release-help,.serial-status{margin:5px 0 0;color:var(--muted);font-size:11.5px}
+.serial-status[data-kind="success"]{color:var(--success)}
+.serial-status[data-kind="error"]{color:var(--err)}
+
+.installer-after{margin-top:14px}
+.installer-after-list{list-style:none;margin:7px 0 0;padding:0;counter-reset:after-step}
+.installer-after-list li{display:flex;gap:12px;padding:11px 0;border-top:1px solid var(--line);color:var(--muted);font-size:13px}
+.installer-after-list li::before{
+  counter-increment:after-step; content:counter(after-step); flex:none; width:22px; height:22px;
+  border-radius:50%; background:var(--brand-tint); color:var(--brand-strong); border:1px solid var(--line);
+  font-size:12px; font-weight:700; line-height:20px; text-align:center;
+}
+.installer-help{margin:7px 0 0;color:var(--muted);font-size:13px}
+code{font-family:var(--font-mono);font-size:.88em;background:var(--soft);border:1px solid var(--line);border-radius:6px;padding:1px 6px;overflow-wrap:anywhere}
+.installer-links{margin:15px 2px 0;color:var(--muted);font-size:13px}
+.installer-footer{
+  color:var(--muted); font-size:12px; text-align:center; padding:0 20px 26px;
+  background:linear-gradient(to right,
+    var(--brand-tint) 0 calc(var(--installer-rail-width) - 1px),
+    var(--line) calc(var(--installer-rail-width) - 1px) var(--installer-rail-width),
+    transparent var(--installer-rail-width));
+}
+
+@media (max-width:780px){
+  body{padding:10px}
+  .installer-layout{grid-template-columns:1fr}
+  .installer-rail{display:flex;gap:7px;padding:15px 16px;overflow-x:auto;border-right:0;border-bottom:1px solid var(--line)}
+  .installer-footer{background:transparent}
+  .installer-rail-title,.installer-step-note,.installer-step:not(:last-child)::after{display:none}
+  .installer-step{flex:none;grid-template-columns:25px auto;gap:6px;padding:0 12px 0 0}
+  .installer-step-index{width:25px;height:25px}
+  .installer-step-name{font-size:12px}
+  .installer-main{padding:25px 18px 30px}
+}
+@media (max-width:520px){
+  body{padding:0}
+  .installer-shell{border-radius:0;border-left:0;border-right:0}
+  .installer-topbar{padding:11px 14px}
+  .installer-connection span:last-child{display:none}
+  .installer-rail{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:4px;overflow:visible}
+  .installer-step{grid-template-columns:1fr;justify-items:center;gap:3px;padding:0;text-align:center}
+  .installer-step-name{margin-top:0;font-size:11px}
+  .installer-card-head{display:block}
+  .installer-version{display:inline-block;margin-top:10px}
+  .installer-action-row{align-items:stretch;flex-direction:column}
+  .installer-device-actions{grid-template-columns:1fr}
+  .installer-browser-note{text-align:center}
+  .installer-choice-grid,.installer-device{grid-template-columns:1fr}
+  .installer-device{gap:7px}
+  .installer-monitor{margin:0 12px}
+}
+</style>
 </head>
 <body>
-  <main>
-    <div id="prbanner" class="prbanner" hidden></div>
-    <header class="hero">
-      <span class="badge">⚡ ESP32 · S3 · C3 · C6 Firmware</span>
-      <h1>Flash tesla-key-esp32</h1>
-      <p class="lead">Install the firmware straight from your browser — no toolchain,
-        no command line. Use <b>Chrome</b> or <b>Edge</b> on desktop.</p>
-    </header>
+<div class="installer-shell" id="web-installer" data-connected="false" data-monitor="closed" data-flashing="false" data-finished="false">
+  <header class="installer-topbar">
+    <div class="installer-brand">
+      <span class="installer-logo" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M13 2 4 14h6l-1 8 9-12h-6l1-8z"/></svg></span>
+      <span class="installer-product">tesla-key-esp32</span>
+    </div>
+    <div class="installer-connection" aria-live="polite">
+      <span class="installer-connection-dot"></span>
+      <span id="connection-label">Not connected</span>
+    </div>
+  </header>
 
-    <div class="cta">
-      <esp-web-install-button manifest="manifest.json">
-        <button class="flash" slot="activate">Install firmware<span id="fwver"></span></button>
-        <span slot="unsupported">Your browser does not support Web Serial — use desktop Chrome or Edge.</span>
-        <span slot="not-allowed">Serial access was not granted.</span>
-      </esp-web-install-button>
-      <p class="hint">Plug in your ESP32 board over USB first — the installer auto-detects the
-        chip (ESP32, ESP32-S3, ESP32-C3 or ESP32-C6).</p>
-      <div id="serial-release" class="serial-release" hidden>
-        <button id="release-serial-port" class="release" type="button"
-                aria-describedby="release-port-help serial-release-status">
-          Release serial port
-        </button>
-        <p id="release-port-help" class="release-help">Already marked <b>paired</b>?
-          Release the paired serial port and remove this site's permission.</p>
-        <p id="serial-release-status" class="serial-status" role="status"
-           aria-live="polite" hidden></p>
+  <div class="installer-layout">
+    <aside class="installer-rail" aria-label="Installation steps">
+      <p class="installer-rail-title">Installation</p>
+      <div class="installer-step" data-state="active"><span class="installer-step-index">1</span><span><span class="installer-step-name">Connect</span><span class="installer-step-note">Select USB device</span></span></div>
+      <div class="installer-step"><span class="installer-step-index">2</span><span><span class="installer-step-name">Check</span><span class="installer-step-note">Chip and firmware</span></span></div>
+      <div class="installer-step"><span class="installer-step-index">3</span><span><span class="installer-step-name">Install</span><span class="installer-step-note">Write safely to flash</span></span></div>
+      <div class="installer-step"><span class="installer-step-index">4</span><span><span class="installer-step-name">Done</span><span class="installer-step-note">Restart and pair</span></span></div>
+    </aside>
+
+    <main class="installer-main">
+      <span class="installer-channel" id="build-channel">Main build</span>
+      <h1>Install firmware</h1>
+      <p class="installer-intro">Connect your board, verify the detected ESP target, choose what to preserve, and follow the real flash progress and boot log on this page.</p>
+
+      <div class="installer-preview" id="preview-note" hidden>
+        <span class="installer-preview-icon">!</span>
+        <span id="preview-note-text"></span>
       </div>
-    </div>
 
-    <section class="card">
-      <h2>How it works</h2>
-      <ol class="steps">
-        <li>Plug your ESP32 board into a USB port. If the board has <b>two</b> USB
-          sockets (many DevKits do — one wired to the chip, one to a UART bridge), use
-          the socket labelled <b>USB</b>/<b>native</b>, not <b>UART</b>/<b>COM</b>.</li>
-        <li>Tap <b>Install firmware</b> and pick the port that names the chip itself —
-          e.g. <code>USB JTAG_serial debug unit</code> or <code>ESP32-S3</code>. Then close
-          the dialog when flashing finishes.</li>
-        <li>The device reboots and opens a <code>tesla-key-esp32-setup</code> WiFi network.
-          Configure WiFi there (see below) — the browser does <b>not</b> set WiFi.</li>
-        <li>After it joins your WiFi, reach it at <code>http://tesla-key-esp32.local</code>
-          to pair with your car.</li>
-      </ol>
-    </section>
+      <div class="installer-usb-stack">
+        <section class="installer-card installer-usb-card" aria-labelledby="connect-title">
+          <div class="installer-card-head">
+            <div><span class="installer-card-kicker">USB connection</span><strong class="installer-card-title" id="connect-title">Connect ESP board</strong></div>
+            <span class="installer-version" id="firmware-version" hidden>Version <span id="firmware-version-value"></span></span>
+          </div>
 
-    <div class="callout">
-      <span class="ico">⚠️</span>
-      <p><b>“Installation failed”? Pick the other serial port.</b> A board that exposes a
-        USB-to-UART bridge (CH340/CH343/CP210x/FTDI) alongside the chip's own USB shows up
-        as <i>two</i> ports, and the bridge is not reliably flashable from the browser —
-        it fails with <code>Failed to connect with the device</code> or
-        <code>Serial data stream stopped: Possible serial noise or corruption</code>,
-        sometimes only part-way through. Re-run the installer and choose the chip's native
-        USB port. If the board has no native USB port at all (e.g. a classic ESP32 on a
-        CH340), flash it from a host instead:
-        <code>esptool --chip &lt;target&gt; -p &lt;port&gt; write_flash "@flash_args"</code>.</p>
-    </div>
+          <div class="installer-action-row">
+            <button class="installer-primary" type="button" id="connect-button" disabled>
+              <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M12 2v14M8 6l4-4 4 4M8 16h8a3 3 0 0 1 3 3v2H5v-2a3 3 0 0 1 3-3Z"/></svg>
+              Select USB device
+            </button>
+            <span class="installer-browser-note">Prefer the native ESP USB port; only the browser's port picker opens.</span>
+          </div>
+          <p class="installer-unsupported" id="serial-unsupported" hidden>This browser cannot use Web Serial. Use Chrome or Edge on a desktop.</p>
+          <p class="installer-page-status" id="page-status" role="status" aria-live="polite" hidden></p>
 
-    <div class="callout">
-      <span class="ico">⬆️</span>
-      <p><b>Future updates are over-the-air — no USB needed.</b> On
-        <code>http://tesla-key-esp32.local</code>, tap the firmware version (top line) to
-        check for a new release; if one is available, confirm and the device updates itself
-        and reboots, preserving WiFi, VIN and key. <b>This USB install is only needed once</b>
-        to move a device onto the OTA-capable partition layout — it does a full erase, so you
-        re-enter WiFi/VIN and re-pair this one time.</p>
-    </div>
+          <div class="installer-device" aria-live="polite">
+            <div class="installer-device-item"><span class="installer-device-label">Device</span><span class="installer-device-value" id="device-value">—</span></div>
+            <button class="installer-device-item installer-device-monitor" type="button" id="serial-monitor-button" aria-controls="serial-monitor" aria-expanded="false" disabled>
+              <span class="installer-device-label">Connection</span>
+              <span class="installer-device-monitor-value">
+                <span class="installer-device-monitor-name"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m7 8 4 4-4 4M13 16h4"/><rect x="3" y="4" width="18" height="16" rx="2"/></svg><span id="connection-value">Serial monitor</span></span>
+                <svg class="installer-monitor-chevron" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+              </span>
+            </button>
+            <div class="installer-device-item"><span class="installer-device-label">Compatibility</span><span class="installer-device-value" id="compatibility-value">—</span></div>
+          </div>
+        </section>
 
-    <div class="callout">
-      <span class="ico">📱</span>
-      <p><b>WiFi setup via captive portal (the only WiFi path — also sets the VIN):</b>
-        after flashing, the device opens a <code>tesla-key-esp32-setup</code> network. Join it
-        from a phone (incl. iPhone) and the setup form pops up automatically — enter your
-        WiFi <i>and</i> the VIN there. The device then reboots and joins your network.</p>
-    </div>
+        <div class="installer-monitor" id="serial-monitor" aria-label="Serial monitor history" aria-hidden="true">
+          <div class="installer-monitor-head"><span>USB Serial · 115200 baud</span><span class="installer-monitor-live" id="serial-monitor-live" data-state="stopped">Stopped</span></div>
+          <pre class="installer-monitor-output" id="serial-monitor-output"></pre>
+        </div>
+      </div>
 
-    <p class="foot">This page always serves the latest CI build — it is rebuilt and
-      deployed automatically on every firmware change, and each change also publishes a
-      <a href="https://github.com/0Bu/tesla-key-esp32/releases/latest">GitHub release</a>
-      for manual flashing. The flasher reads the per-target parts for the detected chip —
-      <code>bootloader-&lt;target&gt;.bin</code>, <code>partition-table-&lt;target&gt;.bin</code> and
-      the app (<code>tesla-key-esp32.bin</code>, or <code>-s3</code>/<code>-c3</code>/<code>-c6</code>
-      for the other chips) — listed per chipFamily in
-      <code>manifest.json</code>. Flashing the app/bootloader/partition table
-      separately keeps the <code>nvs</code> partition intact, so updates preserve WiFi,
-      VIN and key.</p>
-  </main>
+      <section class="installer-card installer-options" aria-labelledby="install-mode-title">
+        <span class="installer-card-kicker">Installation type</span>
+        <strong class="installer-card-title" id="install-mode-title">What should be preserved?</strong>
 
-  <script>
-    // The root page has no version picker: it always flashes main. A PR's firmware is reached by
-    // its own page at /PR/<N>/ (open the URL directly, or from the link on the PR), which shows an
-    // amber preview banner — a pre-merge build; the device still checks OTA against main. See
-    // docs/ARCHITECTURE.md (PR preview installer).
-    (function () {
-      var fwver = document.getElementById("fwver");
-      var banner = document.getElementById("prbanner");
+        <div class="installer-choice-grid">
+          <label class="installer-choice">
+            <input type="radio" name="install-mode" value="keep" checked>
+            <span class="installer-choice-body"><span class="installer-choice-name">Keep configuration <span class="installer-recommended">Recommended</span></span><span class="installer-choice-text">WiFi, VIN, MQTT, pairing key and BLE sessions stay intact.</span></span>
+          </label>
+          <label class="installer-choice">
+            <input type="radio" name="install-mode" value="erase">
+            <span class="installer-choice-body"><span class="installer-choice-name">Erase everything</span><span class="installer-choice-text">Full factory reset. WiFi setup and vehicle pairing are required again.</span></span>
+          </label>
+        </div>
 
-      function clean(v) { return String(v).replace(/[<>&]/g, ""); }
-      // manifest.json (written next to the page by build-pages.sh in CI) carries the version;
-      // showing it in the button label keeps the label from drifting from the bins we flash.
-      function setLabel(v) { if (fwver) fwver.textContent = v ? " " + clean(v) : ""; }
-      function setBanner(n) {
-        if (!banner) return;
-        banner.textContent = "";
-        if (!n) { banner.hidden = true; return; }
-        banner.hidden = false;
-        // Build via DOM (no innerHTML sink); reduce the PR ref to digits only, so it is safe in
-        // both text and the href — never HTML/quote metacharacters.
-        var num = String(n).replace(/\D/g, "");
-        function bold(t) { var e = document.createElement("b"); e.textContent = t; return e; }
-        var link = document.createElement("a");
-        link.href = "https://github.com/0Bu/tesla-key-esp32/pull/" + num;
-        link.textContent = "View PR #" + num;
-        banner.append(
-          "🔬 ", bold("Preview build for PR #" + num),
-          " — not a release. Flashing installs this PR's firmware; the device still checks for " +
-          "OTA updates from ", bold("main"), ". ", link, "."
-        );
-      }
+        <div class="installer-action-row installer-device-actions">
+          <button class="installer-primary" type="button" id="install-button" disabled>Install firmware</button>
+          <button class="installer-secondary" type="button" id="reset-button" disabled>
+            <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.34 5.66M20 4v7h-7"/></svg>
+            Reset
+          </button>
+          <button class="installer-secondary" type="button" id="disconnect-button" disabled>Disconnect</button>
+          <div class="serial-release" id="serial-release" hidden>
+            <button class="installer-release" id="release-serial-port" type="button" aria-describedby="release-port-help serial-release-status">Remove browser permission</button>
+            <p class="release-help" id="release-port-help">Removes this port's “paired” permission from the site.</p>
+            <p class="serial-status" id="serial-release-status" role="status" aria-live="polite" hidden></p>
+          </div>
+        </div>
 
-      // Standalone per-PR preview page (/PR/<N>/): a full copy of this page ships next to the PR's
-      // own manifest + bins, so you can open it directly and test the change before merge. Show the
-      // preview banner; the install button's manifest="manifest.json" resolves to
-      // PR/<N>/manifest.json (same-origin), so it flashes only this PR.
-      var onPR = location.pathname.match(/\/PR\/(\d+)\//);
-      if (onPR) setBanner(onPR[1]);
+        <div class="installer-progress-wrap" aria-live="polite">
+          <div class="installer-progress-labels"><span id="progress-stage">Preparing</span><span class="installer-progress-percent" id="progress-percent">0%</span></div>
+          <div class="installer-progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="progress-track"><div class="installer-progress-fill" id="progress-fill"></div></div>
+        </div>
 
-      // Both root and PR pages: label the button with the version from the adjacent manifest.json.
-      fetch("manifest.json", { cache: "no-store" })
-        .then(function (r) { return r.ok ? r.json() : null; })
-        .catch(function () { return null; })
-        .then(function (m) { if (m && m.version) setLabel(m.version); });
-    })();
-  </script>
-  <script type="module">
-    import { attachSerialPortRelease } from "./serial-port-release.mjs";
+        <div class="installer-success"><span class="installer-success-icon" aria-hidden="true">✓</span><span><strong>Firmware installed successfully</strong><span>The device restarted and the USB port is ready again.</span></span></div>
+      </section>
 
-    attachSerialPortRelease({
-      serial: navigator.serial,
-      SerialPortCtor: window.SerialPort,
-      container: document.getElementById("serial-release"),
-      button: document.getElementById("release-serial-port"),
-      status: document.getElementById("serial-release-status")
-    });
-  </script>
+      <section class="installer-card installer-after" aria-labelledby="after-title">
+        <span class="installer-card-kicker">After flashing</span>
+        <strong class="installer-card-title" id="after-title">Bring the key online</strong>
+        <ol class="installer-after-list">
+          <li><span>On a first install or after choosing Erase, join <code>tesla-key-esp32-setup</code>. The captive portal opens automatically; enter WiFi and the Tesla VIN. An update without Erase reconnects with the saved WiFi.</span></li>
+          <li><span>Once it joins your network, open <code>http://tesla-key-esp32.local</code>. Generate the security key there and complete the pairing request in the Tesla.</span></li>
+          <li><span>Future releases install over the air: tap the firmware version in the device page. USB is only needed for recovery or partition-layout changes.</span></li>
+        </ol>
+        <p class="installer-links"><a href="https://github.com/0Bu/tesla-key-esp32#readme">README</a> · <a href="https://github.com/0Bu/tesla-key-esp32/tree/main/docs">docs</a> · <a href="https://github.com/0Bu/tesla-key-esp32/releases/latest">latest release</a></p>
+      </section>
+
+      <section class="installer-card" aria-labelledby="usb-help-title">
+        <span class="installer-card-kicker">USB port choice</span>
+        <strong class="installer-card-title" id="usb-help-title">Two ports? Use native USB</strong>
+        <p class="installer-help">If a board exposes both a USB-to-UART bridge and the ESP chip's own USB port, select the port named <code>USB JTAG/serial debug unit</code> or <code>ESP32</code>. A CH340, CH343, CP210x or FTDI bridge may fail with <code>Failed to connect with the device</code> or stop part-way through. Retry with the socket labelled <b>USB</b>/<b>native</b>, not <b>UART</b>/<b>COM</b>.</p>
+      </section>
+    </main>
+  </div>
+  <footer class="installer-footer">MIT · not affiliated with Tesla, Inc.</footer>
+</div>
+
+<script>
+  (function () {
+    var match = location.pathname.match(/\/PR\/(\d+)\//);
+    if (!match) return;
+
+    var number = match[1].replace(/\D/g, "");
+    var channel = document.getElementById("build-channel");
+    var note = document.getElementById("preview-note");
+    var text = document.getElementById("preview-note-text");
+    var link = document.createElement("a");
+    var strong = document.createElement("strong");
+
+    channel.textContent = "Preview build · PR #" + number;
+    channel.dataset.kind = "preview";
+    strong.textContent = "Pre-merge firmware for PR #" + number + ". ";
+    link.href = "https://github.com/0Bu/tesla-key-esp32/pull/" + number;
+    link.textContent = "View pull request";
+    text.append(strong, "This page flashes that PR's signed build; the device still checks OTA against main. ", link, ".");
+    note.hidden = false;
+  })();
+</script>
+<script type="module">
+  import { ESPLoader, Transport } from "https://cdn.jsdelivr.net/npm/esptool-js@0.6.1/+esm";
+  import { attachWebInstaller } from "./web-installer.mjs";
+  import { attachSerialPortRelease } from "./serial-port-release.mjs";
+
+  const root = document.getElementById("web-installer");
+  const controller = attachWebInstaller({
+    root,
+    serial: navigator.serial,
+    ESPLoaderCtor: ESPLoader,
+    TransportCtor: Transport
+  });
+
+  attachSerialPortRelease({
+    serial: navigator.serial,
+    SerialPortCtor: window.SerialPort,
+    container: document.getElementById("serial-release"),
+    button: document.getElementById("release-serial-port"),
+    status: document.getElementById("serial-release-status"),
+    onReleased: controller.disconnect
+  });
+</script>
 </body>
 </html>
