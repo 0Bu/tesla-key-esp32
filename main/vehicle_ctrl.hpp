@@ -16,6 +16,7 @@
 #include "logic/charge_control.hpp"
 #include "logic/link_state.hpp"
 #include "logic/ui_state.hpp"
+#include "logic/vin_transition.hpp"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
@@ -37,6 +38,9 @@ public:
     bool init(const std::string& vin, BleClient& ble, NvsStorageAdapter& storage,
               NvsStorageAdapter& config_store, std::string& known_mac,
               bool start_tasks = true);
+    // Idempotently starts the two mutating background tasks after the caller has completed boot
+    // recovery and all essential initialization. Partial creation is unwound before false.
+    bool start_tasks();
 
     bool wake_up(int timeout_ms = 20000);
     bool charge_start(int timeout_ms = 20000);
@@ -141,15 +145,35 @@ public:
         }
     }
 
+    struct KeyGenerationResult {
+        tk::KeyRotationResult rotation{tk::KeyRotationResult::NotCommitted};
+        bool existing_key_refused{false};
+        bool key_probe_failed{false};
+        bool transition_blocked{false};
+    };
+    // Request-local result is produced while command_mutex_ still owns the whole rotation; HTTP
+    // uses it directly instead of re-sampling a fingerprint after unlock. The overwrite guard is
+    // checked under that same lock, so auto-pair cannot create a key between a preflight check and
+    // mutation. The bool wrapper is retained for trusted first-boot/auto-pair callers.
+    KeyGenerationResult generate_key_result(bool allow_replace);
+    // Auto-pair-only wrapper: re-samples revocation, durable-key presence and runtime safety
+    // together under command_mutex_ before it authorizes mutation.
     bool generate_key();
     // Always enrolls a Charging Manager key (charging + wake only); never an owner key.
     bool pair(int timeout_ms = 30000);
 
-    // Re-point the device at a different vehicle (VIN change): regenerate the key,
-    // drop the now-orphaned session + cached data, and forget the discovered BLE MAC
-    // (it belongs to the old car). The caller is expected to reboot afterwards so the
-    // new VIN takes effect. Safe to call regardless of current pairing state.
-    bool reset_for_new_vehicle();
+    struct NewVehicleResetResult {
+        tk::VinTransitionApply state{tk::VinTransitionApply::IdentityUnverified};
+        std::string previous_key_id;
+    };
+    using VinTransitionStager = std::function<bool(const std::string& previous_key_id)>;
+
+    // Re-point the device at a different vehicle as one command-FIFO transaction. The staging
+    // callback persists the VIN journal + complete ConfigBlob while command_mutex_ still binds
+    // `previous_key_id`; auto-rekey therefore cannot change the fingerprint between staging,
+    // rotation and result classification. Any staged attempt gates all signing until the caller
+    // reboots, because this Vehicle instance still owns the old in-memory VIN.
+    NewVehicleResetResult reset_for_new_vehicle(const VinTransitionStager& stage);
 
     const std::string& vin() const { return vin_; }
     // A plausible Tesla VIN is exactly 17 chars, uppercase alphanumeric with I/O/Q excluded
@@ -158,6 +182,9 @@ public:
     // vehicle without a real configured VIN (the boot placeholder "UNKNOWN" is not plausible).
     static bool vin_is_plausible(const std::string& vin);
     bool has_plausible_vin() const { return vin_is_plausible(vin_); }
+    bool key_rotation_recovered_at_boot() const {
+        return key_rotation_recovered_at_boot_;
+    }
     TeslaBLE::Vehicle* vehicle() { return vehicle_.get(); }
 
     // Status accessors (for /status and the web UI)
@@ -298,6 +325,12 @@ private:
     // that has already committed a new private key must then leave its cross-namespace journal
     // armed: the new identity is durable, but boot recovery still has cleanup work to finish.
     bool clear_session_and_cache_();
+    // Every key rotation first commits a marker in tesla_ble. The locked runner removes it only
+    // after old sessions are durably erased; boot recovery performs the same cleanup before a
+    // TeslaBLE::Vehicle can be constructed and load/sign with persisted peer state.
+    tk::KeyRotationResult generate_key_locked_();
+    bool finish_key_rotation_cleanup_();
+    bool recover_pending_key_rotation_at_boot_();
 
     // Signed VCSEC GET_STATUS poll used purely to detect that our key was deleted on the
     // car side (the response then carries KEY_NOT_ON_WHITELIST, or a tagless session-info →
@@ -342,7 +375,8 @@ private:
     void invalidate_and_flush_(uint32_t generation);
     void publish_command_outcome_(const CommandOutcome& outcome);
     bool command_identity_ready_() const {
-        return key_runtime_safe_.load() && !pairing_cleanup_pending_.load();
+        return key_runtime_safe_.load() && !pairing_cleanup_pending_.load() &&
+               !vin_transition_pending_.load() && !key_reload_required_.load();
     }
 
     // Copy a background-refreshed cache under cache_mutex_ (see cache_mutex_ below). The
@@ -391,9 +425,20 @@ private:
     // remains old (or absent on first boot). Until a successful persisted generation or reboot
     // reconstructs Vehicle from storage, no command may enrol that ambiguous runtime identity.
     std::atomic<bool> key_runtime_safe_{false};
+    // tesla-ble attempted a private-key write but could not confirm its NVS commit. The durable
+    // fingerprint is now unknowable from this Vehicle instance (which may have restored the old
+    // RAM key), so block signing AND all further rotations until boot reloads storage.
+    std::atomic<bool> key_reload_required_{false};
+    // Set only when this boot consumed a persisted key_rotate marker. main uses it to prevent
+    // an absent durable key from entering an automatic CommitUnknown reboot loop.
+    bool key_rotation_recovered_at_boot_{false};
     // The new key is durable, but session/cache erasure was incomplete. Auto-pair retries only
     // that idempotent cleanup; it must not generate a different key on every retry.
     std::atomic<bool> pairing_cleanup_pending_{false};
+    // Set before /set_vin stages its cross-namespace journal and held until the mandatory reboot.
+    // It closes the otherwise small unlock→HTTP-rollback/reboot window in which auto-pair or a
+    // telemetry task could sign/re-key using a request whose persisted VIN is still in flight.
+    std::atomic<bool> vin_transition_pending_{false};
 
     // Set from a command callback (possibly the BLE RX task) when the vehicle reports
     // KEY_NOT_ON_WHITELIST — i.e. our key was removed on the car side. The auto-pair

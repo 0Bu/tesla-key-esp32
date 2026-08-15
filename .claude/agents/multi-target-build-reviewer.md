@@ -1,6 +1,6 @@
 ---
 name: multi-target-build-reviewer
-description: Reviews a change for per-target build/config divergence across this project's FOUR targets (esp32 / esp32s3 / esp32c3 / esp32c6), built from ONE source tree. Checks that a change holds for all four — per-target sdkconfig.defaults, the tesla-ble dependency pin and its Component-Manager-enforced target list, the shared tesla-ble source-patch wiring, per-target bootloader offsets, the image-suffix/platform strings that must agree across CI + device + Pages, the app-size gate headroom, and the display/LED opt-in gating. Use after touching sdkconfig.defaults*, partitions.csv, main/idf_component.yml, patches/tesla-ble, scripts/ci-build-all.sh / apply-tesla-ble-patches.sh / build-pages.sh, ota_update.cpp's suffix/platform, the OTA manifest, or anything whose correctness differs per chip. Returns a prioritized findings report; it does NOT edit, and does NOT review general firmware logic or memory safety (project-review + heap-safety-reviewer) or endpoint/command doc-drift (doc-drift-checker).
+description: Reviews a change for per-target build/config divergence across this project's FOUR targets (esp32 / esp32s3 / esp32c3 / esp32c6), built from ONE source tree. Checks that a change holds for all four — per-target sdkconfig.defaults, the tesla-ble dependency pin and its Component-Manager-enforced target list, the shared tesla-ble source-patch wiring, per-target bootloader offsets, the image-suffix/platform strings that must agree across trusted signing + device + Pages + Release-byte validation, the projected and actual signed app-size gates, and the display/LED opt-in gating. Use after touching sdkconfig.defaults*, partitions.csv, main/idf_component.yml, patches/tesla-ble, scripts/ci-build-all.sh / ci-sign-artifacts.sh / apply-tesla-ble-patches.sh / build-pages.sh / check-release-pages-bytes.py, ota_update.cpp's suffix/platform, the OTA manifest, or anything whose correctness differs per chip. Returns a prioritized findings report; it does NOT edit, and does NOT review general firmware logic or memory safety (project-review + heap-safety-reviewer) or endpoint/command doc-drift (doc-drift-checker).
 tools: Read, Grep, Glob, Bash
 ---
 
@@ -26,24 +26,28 @@ follow-up session apply the fix.
   compile. That enforcement is deliberate: it is what keeps the supported list from drifting from
   what the library claims. Adding a chip it omits (esp32c5, esp32c61) means upstreaming it there
   first — a locally patched checkout was carried for esp32c5 and dropped
-  (`docs/adr/0004-drop-esp32c5-target.md`). Root CMake applies the committed anti-replay patch to
-  the materialised source tree, so runtime behavior is identical across all four.
+  (`docs/adr/0004-drop-esp32c5-target.md`). Root CMake applies every committed patch in the ordered
+  `patches/tesla-ble/` series to the materialised source tree, so anti-replay and transactional
+  key-regeneration behavior are identical across all four.
 - **Per-target bootloader offset:** `0x1000` on classic esp32, `0x0` on s3/c3/c6. Carried by
-  `@flash_args`, the OTA manifest, `ci-build-all.sh`
-  (`merge_bin`), and the `flash-esp32` skill — all four must agree. App is at `0x20000`;
+  unsigned build-layout metadata (`@flash_args`), the signed installer manifest, and trusted
+  `ci-sign-artifacts.sh` (`merge_bin`) — all three must agree. `@flash_args` is audit evidence,
+  never flash authority. The app-only `flash-esp32` path deliberately leaves the bootloader untouched. App is at `0x20000`;
   `partitions.csv` is ONE 4 MB dual-OTA table for every target.
 - **Image suffix / platform strings must agree in FOUR places.** Suffix `""`/`-s3`/`-c3`/`-c6`
-  is produced by `image_suffix()` in `ci-build-all.sh`, mirrored by `image_suffix()` in
-  `build-pages.sh`, and by `TESLA_OTA_IMG_SUFFIX` in `main/ota_update.cpp` (the device builds
-  the same filename to pull its OTA). The platform string (`ESP32`/`ESP32-S3`/`ESP32-C3`/
+  is produced by trusted `ci-sign-artifacts.sh`, mirrored by `image_suffix()` in
+  `build-pages.sh`, `tk::image_suffix()` in `main/logic/target.hpp`, and
+  `TESLA_OTA_IMG_SUFFIX` in `main/ota_update.cpp` (the device builds the same filename to pull
+  its OTA). The platform string (`ESP32`/`ESP32-S3`/`ESP32-C3`/
   `ESP32-C6`) in `/api/proxy/1/version` and the per-target OTA-suffix map are
   host-tested in `main/logic/` — a new target or a renamed suffix must update all of them.
-- **App-size gate.** `ci-build-all.sh` fails a build whose signed image exceeds `slot − 32 KB`
-  (`0x1e8000`, below the `0x1f0000` = 2031616 B slot). esp32c6 is the largest image (signed
-  `0x1e1000`, ~28 KB under the gate) and binds it — it sat ~3 KB below a 64 KB Secure-Boot
-  boundary until a 3 KB change crossed it, so c6 is the target to size-check first; esp32c3 is next, and esp32s3 — which carries the
-  display — sits at `0x191000`. Note the gate is checked on the SIGNED image, and signing appends a
-  4 KB sector AFTER the code has been padded up to a 64 KB boundary: an image just over a boundary
+- **App-size gates.** Unprivileged `ci-build-all.sh` computes and gates the deterministic projected
+  signed size; trusted `ci-sign-artifacts.sh` independently gates the actual signed bytes against
+  `slot − 32 KB` (`0x1e8000`, below the `0x1f0000` = 2031616 B slot). At audited source
+  `3d7ccc1`, projected signed sizes are esp32 `0x191000`, esp32s3 `0x1a1000`, esp32c3 `0x1b1000`,
+  esp32c6 `0x1e1000`; c6 is largest and ~28 KiB under the gate. Always re-read current size reports
+  rather than carrying these snapshot numbers forward. Signing appends a 4 KiB sector AFTER the
+  code has been padded up to a 64 KiB boundary: an image just over a boundary
   costs a full 64 KB block. That is what made esp32c5 undeliverable and got it dropped
   (`docs/adr/0004-drop-esp32c5-target.md`). All targets stay on **`-Og`**
   (`-Os` is banned — whole-build `-Os` hard-freezes under evcc+BLE load).
@@ -64,8 +68,9 @@ Get the diff first: `git diff` (unstaged) + `git diff --staged`, or `git diff ma
 the range you're given. Then walk this checklist for anything the change touches:
 
 1. **New/renamed/removed target.** If the target set changed, is it reflected in *every* place
-   the four are enumerated: `ci-build-all.sh` (build loop + `image_suffix()`), `build-pages.sh`
-   (`image_suffix()`), `ota_update.cpp` (`TESLA_OTA_IMG_SUFFIX` + platform string),
+   the four are enumerated: `ci-build-all.sh` (unsigned build loop), `ci-sign-artifacts.sh`
+   (trusted signing/merge + `image_suffix()`), `build-pages.sh` (`image_suffix()`),
+   `ota_update.cpp` (`TESLA_OTA_IMG_SUFFIX` + platform string),
    `main/logic/` platform/suffix tests, `sdkconfig.defaults.<target>`, and the
    docs (CLAUDE.md, README, ARCHITECTURE, flash-esp32 skill)? A target added in one place and
    missed in another ships an image no device can pull, or a build that never runs.
@@ -75,16 +80,18 @@ the range you're given. Then walk this checklist for anything the change touches
    locally (`docs/adr/0004-drop-esp32c5-target.md`). Does root CMake still apply every committed
    `patches/tesla-ble/` change through `scripts/apply-tesla-ble-patches.sh`?
 3. **Bootloader-offset consistency.** Any offset/partition/flash-args change — is the per-target
-   offset (`0x1000`/`0x0`) still consistent across `@flash_args`, the manifest,
-   `ci-build-all.sh` merge, and the `flash-esp32` skill? A wrong offset bricks flashing/OTA for
+   offset (`0x1000`/`0x0`) still consistent across unsigned `@flash_args` layout metadata, the signed manifest,
+   and `ci-sign-artifacts.sh` merge? Confirm app-only flash instructions still do not rewrite the
+   bootloader. A wrong offset bricks fresh flashing for
    that one chip only.
 4. **Suffix ↔ platform drift.** Any change to a filename suffix or platform string — do
-   `ci-build-all.sh`, `build-pages.sh`, `ota_update.cpp` and the `main/logic/` tests still
+   `ci-sign-artifacts.sh`, `build-pages.sh`, `ota_update.cpp` and the `main/logic/` tests still
    agree? Mismatch = the device requests a URL Pages never published (OTA 404).
 5. **Size-gate headroom.** Any change that grows the image (a feature, a lib, an `-O` level, a
    CA bundle, the display) — will the **largest** target (esp32c6) still clear `slot − 32 KB`?
-   Estimate the delta against the 64 KB padding boundary, not just the gate; call out if it eats
-   the headroom. Flag any `-Os` reintroduction.
+   Check both the projected gate in `ci-build-all.sh` and the real signed-size gate in
+   `ci-sign-artifacts.sh`; estimate the delta against the 64 KiB padding boundary, not just the
+   policy limit. Flag any `-Os` reintroduction.
 6. **Per-target sdkconfig divergence.** A `sdkconfig.defaults` change — should it be in the
    shared file or a per-target `sdkconfig.defaults.<target>`? Confirm target-specific config
    (display enable, `CONFIG_ESP32_REV_MIN_3` on classic esp32, flash size, console) sits

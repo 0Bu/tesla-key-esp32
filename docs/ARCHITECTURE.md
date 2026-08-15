@@ -180,7 +180,9 @@ a complete verified flash. OTA is a single channel
 where each device pulls its own
 `tesla-key-esp32<suffix>.bin` (`tesla-key-esp32.bin` for the classic esp32, `-s3`/`-c3`/`-c6`
 otherwise). The per-target bootloader offset (0x1000 on the classic
-esp32, 0x0 on s3/c3/c6) is handled automatically by `@flash_args` and the manifest.
+esp32, 0x0 on s3/c3/c6) is encoded in unsigned build metadata (`@flash_args`) and the signed
+factory-install manifest. `@flash_args` is audited as layout evidence, never used as authority to
+flash the unsigned local app; signed app-only delivery leaves the installed bootloader untouched.
 The same page can reset the selected board and stream its 115200-baud boot log after probing or
 flashing. Its separate **Remove browser permission** action uses `Serial.getPorts()` and
 `SerialPort.forget()` to revoke a previously granted port permission. It stays hidden when this
@@ -216,9 +218,13 @@ The second patch makes private-key regeneration transactional from the controlle
 view. It verifies that an existing in-memory key can be exported before mutation, reports key
 creation and NVS persistence failures, and restores the prior in-memory key if persistence of the
 replacement fails. Firmware command, pairing, and polling paths remain fail-closed until the
-persisted key identity is verified and the old sessions have been cleared. A VIN transition is
-also journalled across namespaces so power loss cannot silently combine a new VIN with the old
-key/session state.
+persisted key identity is verified and the old sessions have been cleared. The host-tested
+`logic/key_rotation.hpp` contract keeps `tesla_ble/key_rotate` armed across power loss and blocks
+vehicle construction/signing until that cleanup reaches its durable terminal state; an NVS probe
+error blocks too and cannot be mistaken for an absent marker. A VIN
+transition is also journalled as `tesla_cfg/vin_txn`; the host-tested recovery decision lives in
+`logic/vin_transition.hpp`, so power loss cannot silently combine a new VIN with the old key/session
+state.
 
 All four images use the same tesla-ble revision and ordered patch-series behavior. The wider
 tesla-ble dependency strategy (IDF-6 / Mbed TLS 4 crypto seam, issue #61) is
@@ -295,9 +301,10 @@ preserves the `PR/` tree). Constraints:
 
 - **Signed-only and opt-in.** Unlabelled and fork PRs remain unsigned compile checks and publish
   **no** preview (an unsigned image crash-loops at boot — see [`SECURITY.md`](SECURITY.md)).
-- **Versioning `<latest-tag>-PR-<N>`** (e.g. `1.4.30-PR-157`), stamped from the newest
-  released tag. `ver_newer()` parses only `x.y.z` and ignores the suffix, so basing on the
-  *latest release* (not `next`) guarantees a later main release compares strictly-newer → the
+- **Versioning `<latest-stable-release>-PR-<N>`** (e.g. `1.4.30-PR-157`), stamped from the newest
+  complete non-prerelease GitHub Release (its stable tag plus all four digest-bound merged assets),
+  never a raw newer RC tag. `ver_newer()` parses only `x.y.z` and ignores the suffix, so basing on
+  the *latest stable release* (not `next` or a prerelease core) guarantees a later main release compares strictly-newer → the
   PR-flashed device OTA-updates forward to main; a `next` base would collide with the number
   the merge cuts and stall OTA.
 - **OTA stays on main.** `CONFIG_TESLA_OTA_MANIFEST_URL` is compile-time and unchanged in PR
@@ -309,9 +316,11 @@ preserves the `PR/` tree). Constraints:
   same lock and removes it unless the PR is open, same-repository, labelled and its current head
   equals the schema-v2 manifest `sourceSha`.
 
-*(Rollout note: this hosting only goes live once GitHub Pages' source is switched from "GitHub
-Actions" to "Deploy from branch: `gh-pages`"; until then the gh-pages branch is populated but
-inert and the Actions artifact remains the live site — a zero-downtime migration.)*
+GitHub Pages is configured to **Deploy from branch `gh-pages` at `/`**; that branch is the serving
+authority for both the root installer and `PR/<N>/`. Release reconciliation additionally reads the
+configured live Pages URL and requires its root manifest identity to match the branch, tag and
+latest stable Release, so a branch update that has not reached the public site never counts as a
+completed publication.
 
 ## Home Assistant MQTT bridge
 

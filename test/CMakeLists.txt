@@ -22,3 +22,17 @@ add_executable(logic_tests test_logic.cpp)
 target_include_directories(logic_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../main)
 
 add_test(NAME logic_tests COMMAND logic_tests)
+
+# Compile the real NVS adapter against a deterministic host stub. This exercises the two-call
+# nvs_get_str() protocol and proves that probe/read/type/length faults never collapse to Missing.
+add_executable(nvs_storage_tests
+    test_nvs_storage.cpp
+    ../main/nvs_storage.cpp
+    ../main/config_blob.cpp
+)
+target_include_directories(nvs_storage_tests PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/stubs
+    ${CMAKE_CURRENT_SOURCE_DIR}/../main
+    ${CMAKE_CURRENT_SOURCE_DIR}/../managed_components/yoziru__tesla-ble/include
+)
+add_test(NAME nvs_storage_tests COMMAND nvs_storage_tests)

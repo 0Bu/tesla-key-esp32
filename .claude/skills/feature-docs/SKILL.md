@@ -1,6 +1,6 @@
 ---
 name: feature-docs
-description: Keep docs/FEATURES.md (this firmware's technical-feature catalog) in sync when a platform feature lands or changes — a new ESP-IDF component, an sdkconfig capability, an HTTP/OTA/security/network/diagnostic mechanism, a new main/logic/ header, a partition change, or a stub becoming real. Use after implementing or changing a technical feature, before opening the PR. Required before merging a PR whose diff reaches main/, test/, sdkconfig.defaults, partitions.csv or the CI build workflow.
+description: Keep docs/FEATURES.md (this firmware's technical-feature catalog) in sync when a platform feature lands or changes — a new ESP-IDF component, an sdkconfig capability, an HTTP/OTA/security/network/diagnostic mechanism, a new main/logic/ header, a partition change, shipped Web-Installer runtime, release-reconciliation logic, or a stub becoming real. Use after implementing or changing a technical feature, before opening the PR. Required before merging a PR whose diff reaches main/, test/, sdkconfig.defaults, partitions.csv, the shipped Pages runtime, release-relevance.sh, or the build/signed-preview/preview-cleanup release workflows.
 model: sonnet
 ---
 
@@ -8,8 +8,8 @@ model: sonnet
 
 `docs/FEATURES.md` is the cross-cutting catalog of what **tesla-key-esp32** implements at the
 *platform* level: the ESP-IDF capabilities, security mechanisms, network behaviour and diagnostic
-surfaces that are not specific to Tesla, BLE or evcc. It answers "does this device do X, and where
-does X live?" for someone who has not read the whole tree.
+surfaces, including Tesla/BLE mechanisms when they enforce a cross-cutting safety contract. It
+answers "does this device do X, and where does X live?" for someone who has not read the whole tree.
 
 It rots in a way nothing else catches. A feature lands, every test passes, every narrative doc
 stays correct about its own area — and the catalog simply does not mention the new thing. Six months
@@ -18,7 +18,12 @@ there, so the mechanism looks optional and gets deleted, or gets built a second 
 
 `.claude/hooks/require-feature-docs.sh` gates a merge on this having been run — but only when the
 PR's diff reaches `main/`, `test/`, `sdkconfig.defaults*`, `partitions.csv` or
-`.github/workflows/build.yml`. A docs-only or script-only PR clears without ceremony.
+the shipped Pages runtime (`docs/index.html`, `installer-bootstrap.mjs`,
+`serial-port-release.mjs`, `web-installer.mjs`, `docs/vendor/`) or
+`.github/workflows/{build,signed-pr-preview,pr-preview-cleanup}.yml`, or the cumulative
+Release/Pages-baseline classifier `scripts/release-relevance.sh`. Other docs-only or unrelated
+script/workflow PRs clear without ceremony. The shared gate library and every function this hook
+uses are load-checked first; missing or truncated gate code blocks the merge.
 
 ## What to do
 
@@ -29,6 +34,9 @@ PR's diff reaches `main/`, `test/`, `sdkconfig.defaults*`, `partitions.csv` or
    - adds/changes an `sdkconfig.defaults*` capability (watchdogs, coredump, security, TLS, PSRAM…)
    - adds/changes an HTTP route, an OTA rule, a security mechanism, a network behaviour or a
      diagnostic surface
+   - changes the shipped Web-Installer runtime, its local dependency bundle or its serial/manifest
+     safety contract
+   - changes how CI decides whether current main still contains Release/Pages-unpublished firmware
    - adds a new `main/logic/` header, or a new `main/*.cpp` subsystem
    - changes `partitions.csv`
    - turns a stub into something real (or the reverse)
@@ -77,7 +85,12 @@ PR's diff reaches `main/`, `test/`, `sdkconfig.defaults*`, `partitions.csv` or
    - [x] `/feature-docs` synced — merge gate @ <short-sha>
    ```
    The stamp is valid only while it matches the PR's head commit, so a later commit forces a fresh
-   sync before the next merge attempt.
+   sync before the next merge attempt. A Bash merge must use
+   `gh pr merge <number-or-local-GitHub-URL> --match-head-commit <full-PR-head> ...` with that
+   explicit selector and literal head precondition first; foreign URLs, implicit/current-branch,
+   branch/flag-first selectors, administrative/auto merges and missing/wrong/duplicate head guards
+   fail closed. Bash and structured MCP merge both require exact PR-head/local-HEAD equality; MCP
+   also requires exact github.com `owner/repo` and `expected_head_sha`.
 
 ## What this skill is not
 

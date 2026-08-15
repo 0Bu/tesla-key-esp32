@@ -263,6 +263,45 @@ extern "C" void app_main() {
     if (!config_store.initialize())
         boot_fatal("configuration NVS");
 
+    // Resolve the cross-namespace VIN journal and its ConfigBlob evidence before starting syslog,
+    // provisioning, networking or constructing Vehicle. During a staged /set_vin, a transient
+    // cfg probe/read/CRC/schema failure must not fall back to an older legacy VIN and delete the
+    // only recovery authority. Only exact blob NOT_FOUND permits the pre-blob legacy path.
+    std::string vin_txn;
+    const tk::NvsStringLoadState vin_txn_state =
+        config_store.load_str_state("vin_txn", vin_txn);
+    tk::VinTransitionMarker marker;
+    const bool vin_txn_valid = vin_txn_state == tk::NvsStringLoadState::Present &&
+                               tk::parse_vin_transition_marker(vin_txn, marker);
+    const tk::VinTransitionJournalAction vin_txn_action =
+        tk::decide_vin_transition_journal(vin_txn_state, vin_txn_valid);
+    if (vin_txn_action == tk::VinTransitionJournalAction::Halt) {
+        // Keep an unreadable/wrong-type/malformed marker armed. Deleting it would discard evidence
+        // that the ConfigBlob and private key may belong to different sides of the transaction.
+        ESP_LOGE(TAG, "VIN transition journal is unreadable or malformed — refusing recovery guess");
+        boot_fatal("VIN transition journal verification");
+    }
+
+    static tk::ConfigBlob cfg_blob;
+    if (vin_txn_action == tk::VinTransitionJournalAction::Recover) {
+        const tk::ConfigLoadState cfg_blob_state = tk::cfg_load_state(config_store, cfg_blob);
+        if (cfg_blob_state == tk::ConfigLoadState::Error) {
+            // The journal remains untouched. A retrying boot may read the authoritative blob; this
+            // boot must not start a setup portal or classify from legacy mirrors.
+            ESP_LOGE(TAG, "VIN transition ConfigBlob is unreadable or invalid — recovery remains armed");
+            boot_fatal("VIN transition configuration verification");
+        }
+        if (cfg_blob_state == tk::ConfigLoadState::Legacy) {
+            // Exact NOT_FOUND proves cfg_save never published the staged blob. The journal itself
+            // captured the previous VIN before that attempted save, so use it as the recovery
+            // identity rather than a best-effort legacy read. A changed key beside this VIN is
+            // rejected later by the explicit 2x2 recovery matrix.
+            cfg_blob.vin = marker.previous_vin;
+        }
+    } else {
+        (void)tk::cfg_load(config_store, cfg_blob);
+    }
+
     // Did WE end the last boot on purpose? esp_reset_reason() cannot tell a deliberate
     // esp_restart() apart from a user power-cycle — both read SW/POWERON — so the heap watchdog
     // leaves a breadcrumb in NVS on its way out. Take it (read + clear) before anything else can
@@ -311,10 +350,9 @@ extern "C" void app_main() {
                  VehicleController::boot_reboot_reason().c_str());
     }
 
-    // Resolve WiFi credentials: the atomic config blob (falling back to the legacy per-key layout
-    // on a device that has not saved since upgrading) overrides the Kconfig defaults.
-    static tk::ConfigBlob cfg_blob;
-    tk::cfg_load(config_store, cfg_blob);
+    // Resolve WiFi credentials from the configuration snapshot verified above. With an armed VIN
+    // journal this point is unreachable on blob probe/read/CRC/schema failure, so setup mode can
+    // never consume a stale legacy fallback before identity recovery.
     static std::string ssid     = cfg_blob.wifi_ssid;
     static std::string password = cfg_blob.wifi_pass;
 
@@ -328,14 +366,18 @@ extern "C" void app_main() {
     // reached. A WIRED device does: DHCP gives it an address with nothing configured at all, so
     // sending it to a captive AP would strand a perfectly reachable board — a regression created
     // purely by adding a transport. The VIN is then set over the LAN like any other setting.
-    if (ssid.empty() && !have_wire) {
+    const bool setup_portal_required = ssid.empty() && !have_wire;
+    if (setup_portal_required &&
+        vin_txn_action != tk::VinTransitionJournalAction::Recover) {
         ESP_LOGW(TAG, "No WiFi configured — starting setup portal (join WiFi '%s')",
                  "tesla-key-esp32-setup");
         provisioning_run(config_store);  // never returns; reboots on save
     }
-    if (ssid.empty())
+    if (ssid.empty() && have_wire)
         ESP_LOGI(TAG, "no WiFi configured, but an Ethernet controller is present — coming up "
                       "on the wire (set the VIN in the web UI at the DHCP address)");
+    else if (setup_portal_required)
+        ESP_LOGW(TAG, "setup portal deferred until the armed VIN transition is recovered");
 
     // Resolve VIN
     static std::string vin = cfg_blob.vin;
@@ -405,96 +447,149 @@ extern "C" void app_main() {
     // config_store so it can save the discovered MAC. ESSENTIAL: without the controller
     // there is no BLE proxy at all, so a failed init halts boot (and leaves any pending OTA
     // image unconfirmed → rolled back).
-    // In safe mode the controller is still fully WIRED (so /status, the web UI and the MQTT
-    // snapshot read a coherent object) but its two background tasks are not started — see
-    // vehicle_ctrl.cpp. Skipping init() altogether is the wrong shape: the HTTP server below takes
-    // this controller by reference and would then read a half-constructed one.
-    if (!vehicle.init(vin, ble_client, tesla_store, config_store, ble_mac, /*start_tasks=*/!safe_mode)) {
+    // The controller is fully WIRED here, but its mutating tasks are deliberately deferred until
+    // VIN/key recovery and every ESSENTIAL initializer have succeeded. boot_fatal parks app_main;
+    // starting auto_pair here would therefore let it rotate keys behind a recovery halt.
+    if (!vehicle.init(vin, ble_client, tesla_store, config_store, ble_mac,
+                      /*start_tasks=*/false)) {
         bootloader_random_disable();
         boot_fatal("VehicleController");
     }
+    tk::VehicleTaskStartPhase vehicle_task_phase =
+        tk::VehicleTaskStartPhase::ControllerWired;
 
     // Recover a /set_vin transaction interrupted between the tesla_cfg ConfigBlob commit and the
     // tesla_ble private-key/session commits. The marker stores "previous VIN|previous key id".
-    // Comparing it with the key that the controller actually loaded tells us which side committed:
-    //   same key -> rotation never persisted, restore the previous VIN;
-    //   changed key -> the new identity committed, idempotently finish session/MAC cleanup.
+    // Comparing it with the key that the controller actually loaded gives a strict 2x2 matrix:
+    // old key + old VIN -> clear the pre-stage marker; old key + new VIN -> roll VIN back;
+    // new key + new VIN -> complete cleanup; new key + old VIN -> contradictory, halt.
     // Reboot after either repair so the in-memory Vehicle cannot retain the VIN or peer sessions
     // that were loaded before recovery.
-    std::string vin_txn;
-    if (config_store.load_str("vin_txn", vin_txn)) {
-        tk::VinTransitionMarker marker;
-        if (!tk::parse_vin_transition_marker(vin_txn, marker)) {
-            ESP_LOGE(TAG, "invalid VIN transition marker — removing it without changing identity");
+    if (vin_txn_action == tk::VinTransitionJournalAction::Recover) {
+        bool durable_key_present = false;
+        const bool key_probe_ok =
+            tesla_store.probe_blob("private_key", durable_key_present);
+        const std::string current_key = vehicle.key_fingerprint();
+        if (!tk::vin_transition_key_evidence_verified(marker.previous_key_id, current_key,
+                                                       key_probe_ok, durable_key_present)) {
+            ESP_LOGE(TAG, "cannot verify durable key identity while recovering VIN transition");
+            bootloader_random_disable();
+            boot_fatal("VIN transition key verification");
+        }
+        const tk::VinTransitionRecovery recovery =
+            tk::decide_vin_transition_recovery(marker, cfg_blob.vin, current_key);
+        if (recovery == tk::VinTransitionRecovery::HaltInconsistent) {
+            // The staged write order is journal -> ConfigBlob -> key. A changed key beside the
+            // previous VIN is therefore not a completed transaction; it is contradictory durable
+            // evidence. Preserve vin_txn and halt rather than blessing the tuple by cleanup.
+            ESP_LOGE(TAG, "VIN transition key changed but configured VIN did not — recovery evidence is inconsistent");
+            bootloader_random_disable();
+            boot_fatal("VIN transition consistency verification");
+        }
+        if (recovery == tk::VinTransitionRecovery::RollBackPreviousVin) {
+            ESP_LOGW(TAG, "interrupted VIN change detected before key commit — restoring %s",
+                     marker.previous_vin.empty() ? "unconfigured VIN"
+                                                 : marker.previous_vin.c_str());
+            cfg_blob.vin = marker.previous_vin;
+            if (!tk::cfg_save(config_store, cfg_blob)) {
+                bootloader_random_disable();
+                boot_fatal("VIN transition rollback");
+            }
             if (!config_store.remove("vin_txn")) {
                 bootloader_random_disable();
                 boot_fatal("VIN transition marker cleanup");
             }
-        } else {
-            const std::string current_key  = vehicle.key_fingerprint();
-            if (!marker.previous_key_id.empty() && current_key.empty()) {
-                ESP_LOGE(TAG, "cannot read persisted key id while recovering VIN transition");
+            bootloader_random_disable();
+            vTaskDelay(pdMS_TO_TICKS(100));
+            esp_restart();
+        } else if (recovery == tk::VinTransitionRecovery::ClearMarker) {
+            // Only the verified old-key + old-VIN quadrant may retire the journal without a repair
+            // reboot. No other state falls through to this erase.
+            if (!config_store.remove("vin_txn")) {
                 bootloader_random_disable();
-                boot_fatal("VIN transition key verification");
+                boot_fatal("VIN transition marker cleanup");
             }
-            const tk::VinTransitionRecovery recovery =
-                tk::decide_vin_transition_recovery(marker, cfg_blob.vin, current_key);
-            if (recovery != tk::VinTransitionRecovery::CompleteNewIdentity) {
-                if (recovery == tk::VinTransitionRecovery::RollBackPreviousVin) {
-                    ESP_LOGW(TAG, "interrupted VIN change detected before key commit — restoring %s",
-                             marker.previous_vin.empty() ? "unconfigured VIN"
-                                                         : marker.previous_vin.c_str());
-                    cfg_blob.vin = marker.previous_vin;
-                    if (!tk::cfg_save(config_store, cfg_blob)) {
-                        bootloader_random_disable();
-                        boot_fatal("VIN transition rollback");
-                    }
-                    if (!config_store.remove("vin_txn")) {
-                        bootloader_random_disable();
-                        boot_fatal("VIN transition marker cleanup");
-                    }
-                    bootloader_random_disable();
-                    vTaskDelay(pdMS_TO_TICKS(100));
-                    esp_restart();
-                }
-                if (!config_store.remove("vin_txn")) {
-                    bootloader_random_disable();
-                    boot_fatal("VIN transition marker cleanup");
-                }
-            } else {
-                ESP_LOGW(TAG, "interrupted VIN change detected after key commit — completing cleanup");
-                const bool vcsec_removed = tesla_store.remove("session_vcsec");
-                const bool info_removed  = tesla_store.remove("session_infotainment");
-                const bool paired_removed = tesla_store.remove("paired_at");
-                const bool mac_removed = config_store.remove("ble_mac");
-                const bool marker_removed = config_store.remove("vin_txn");
-                if (!vcsec_removed || !info_removed || !paired_removed ||
-                    !mac_removed || !marker_removed) {
-                    bootloader_random_disable();
-                    boot_fatal("VIN transition completion");
-                }
+        } else if (recovery == tk::VinTransitionRecovery::CompleteNewIdentity) {
+            ESP_LOGW(TAG, "interrupted VIN change detected after key commit — completing cleanup");
+            const bool vcsec_removed = tesla_store.remove("session_vcsec");
+            const bool info_removed = tesla_store.remove("session_infotainment");
+            const bool paired_removed = tesla_store.remove("paired_at");
+            const bool mac_removed = config_store.remove("ble_mac");
+            const bool marker_removed = config_store.remove("vin_txn");
+            if (!vcsec_removed || !info_removed || !paired_removed || !mac_removed ||
+                !marker_removed) {
                 bootloader_random_disable();
-                vTaskDelay(pdMS_TO_TICKS(100));
-                esp_restart();
+                boot_fatal("VIN transition completion");
             }
+            bootloader_random_disable();
+            vTaskDelay(pdMS_TO_TICKS(100));
+            esp_restart();
         }
     }
 
-    // Create the ECDSA key on first boot so a key always exists (and a fingerprint
-    // is shown). Regeneration is an explicit, confirmed action in the web UI; this
-    // never overwrites an existing key — only generates when none is present.
-    if (!vehicle.has_key()) {
-        ESP_LOGI(TAG, "no key in storage — generating initial key");
-        bool key_ok = vehicle.generate_key();
-        if (key_ok) {
-            ESP_LOGI(TAG, "initial key generated, fingerprint %s",
-                     vehicle.key_fingerprint().c_str());
+    // An armed transition suppresses provisioning until its blob/key tuple is classified. The only
+    // path reaching this call is verified ClearMarker; rollback/new-identity paths reboot and all
+    // ambiguous paths halt with the marker intact.
+    if (setup_portal_required &&
+        vin_txn_action == tk::VinTransitionJournalAction::Recover) {
+        bootloader_random_disable();
+        ESP_LOGW(TAG, "VIN transition recovered — starting setup portal (join WiFi '%s')",
+                 "tesla-key-esp32-setup");
+        provisioning_run(config_store);  // never returns; reboots on save
+    }
+
+    // Create the ECDSA key on first boot so a key always exists (and a fingerprint is shown).
+    // A recovered key_rotate marker is a one-reboot classification boundary: if no durable key
+    // was loaded after that recovery, halt instead of immediately repeating the same ambiguous
+    // write/reboot forever. An external reset may make a fresh, explicitly observable attempt.
+    const tk::InitialKeyBootAction initial_key_action = tk::decide_initial_key_boot_action(
+        vehicle.has_key(), vehicle.key_rotation_recovered_at_boot());
+    if (initial_key_action == tk::InitialKeyBootAction::HaltAfterEmptyRecovery) {
+        bootloader_random_disable();
+        boot_fatal("initial key recovery found no durable key");
+    }
+    if (initial_key_action == tk::InitialKeyBootAction::Generate) {
+        OtaIdentityMutationGuard identity_guard(tk::IdentityMutationEntry::InitialKey);
+        if (!identity_guard) {
+            // A rollback reboot would hand any newly-written key/journal to the previous image.
+            // Leave first-boot identity absent during probation; the gated auto-pair supervisor
+            // may generate it only after the health task has marked this image stable. The same
+            // guard also excludes a concurrently-starting OTA worker if startup ordering changes.
+            ESP_LOGW(TAG, "initial key generation deferred during OTA verification/update");
         } else {
-            ESP_LOGE(TAG, "initial key generation failed");
+            ESP_LOGI(TAG, "no key in storage — generating initial key");
+            const VehicleController::KeyGenerationResult generated =
+                vehicle.generate_key_result(/*allow_replace=*/false);
+            if (generated.key_probe_failed || generated.transition_blocked ||
+                generated.existing_key_refused) {
+                bootloader_random_disable();
+                boot_fatal("initial key generation preflight");
+            }
+            if (generated.rotation == tk::KeyRotationResult::Complete) {
+                ESP_LOGI(TAG, "initial key generated, fingerprint %s",
+                         vehicle.key_fingerprint().c_str());
+            } else if (generated.rotation == tk::KeyRotationResult::CommitUnknown) {
+                // key_rotate remains durable. The next boot clears obsolete sessions before
+                // Vehicle construction, then either loads the committed key or takes the guarded
+                // halt above. The identity gate remains held through this recovery reboot.
+                ESP_LOGE(TAG, "initial key commit outcome is ambiguous — rebooting once to classify storage");
+                bootloader_random_disable();
+                // Do NOT confirm a pending OTA here. This is automatic fault recovery before the
+                // 90-second link-health gate, not a user-approved config reboot; rollback must
+                // remain armed if the new image cannot establish a healthy runtime.
+                static_assert(!tk::ota_reboot_confirms_pending_image(
+                    tk::OtaRebootClass::AutomaticIdentityRecovery));
+                vTaskDelay(pdMS_TO_TICKS(300));
+                esp_restart();
+            } else {
+                ESP_LOGE(TAG, "initial key generation incomplete (state=%d) — runtime remains fail-closed",
+                         static_cast<int>(generated.rotation));
+            }
         }
     } else {
         ESP_LOGI(TAG, "key present, fingerprint %s", vehicle.key_fingerprint().c_str());
     }
+    vehicle_task_phase = tk::VehicleTaskStartPhase::IdentityResolved;
     bootloader_random_disable();
     // Match by the VIN-derived BLE name on scan. Pass the real VIN only when it is a plausible
     // 17-char VIN; with none configured we pass an EMPTY target so the scanner lists nearby
@@ -545,7 +640,10 @@ extern "C" void app_main() {
             cfg_blob.wifi_rollback_active = false;
             cfg_blob.wifi_rolled_back     = true;   // the ONLY trace: the reboot shows the old SSID
             if (tk::cfg_save(config_store, cfg_blob)) {
-                ota_confirm_pending_image();
+                // This automatic policy reboot is evidence that the trial path failed, not proof
+                // that a pending image is healthy. Keep bootloader rollback armed.
+                static_assert(!tk::ota_reboot_confirms_pending_image(
+                    tk::OtaRebootClass::AutomaticWifiRollback));
                 vTaskDelay(pdMS_TO_TICKS(300));
                 esp_restart();
             }
@@ -619,6 +717,7 @@ extern "C" void app_main() {
     if (!safe_mode) {
         if (!ble_client.start())
             boot_fatal("NimBLE");
+        vehicle_task_phase = tk::VehicleTaskStartPhase::BleReady;
         log_heap("ble");
     } else {
         ESP_LOGW(TAG, "SAFE MODE — NimBLE not started");
@@ -688,6 +787,14 @@ extern "C" void app_main() {
     if (xTaskCreate(ota_health_gate_task, "ota_gate", 3072, nullptr,
                     tk::kPrioOtaGate, nullptr) != pdPASS)
         boot_fatal("OTA health gate");
+
+    vehicle_task_phase = tk::VehicleTaskStartPhase::EssentialServicesReady;
+    if (tk::vehicle_tasks_may_start(vehicle_task_phase, safe_mode) &&
+        !vehicle.start_tasks()) {
+        // start_tasks() unwinds a partially-created pair before returning false, so boot_fatal
+        // cannot leave either mutating task running in the background.
+        boot_fatal("Vehicle background tasks");
+    }
 
     // Clear the crash-boot counter once THIS boot has proven it can stay up under load. A timer,
     // not a line at the end of app_main: reaching here proves the device initialised, while the

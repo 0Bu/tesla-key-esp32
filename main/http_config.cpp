@@ -33,10 +33,28 @@ static const char* TAG = "http_server";
 
 esp_err_t handle_gen_keys(GuardedReq rq) {
     httpd_req_t* req = rq.req;
-    // Refuse to silently overwrite an existing key: regenerating un-pairs the device
-    // from the vehicle (the old whitelisted key stops working) and breaks charging
-    // until a physical re-pair. Require explicit ?force=1 to replace a present key.
-    if (g_vehicle->has_key() && !query_param_is(req, "force", "1")) {
+    OtaIdentityMutationGuard identity_guard(tk::IdentityMutationEntry::HttpGenerateKey);
+    if (!identity_guard) {
+        cJSON* root = cJSON_CreateObject();
+        cJSON_AddBoolToObject(root, "result", false);
+        cJSON_AddStringToObject(root, "reason",
+            "key generation is blocked during OTA verification/update; no key was changed");
+        return send_json(req, 503, root);
+    }
+    // Refuse to silently overwrite an existing key: regenerating un-pairs the device and breaks
+    // charging until a physical re-pair. The controller checks this under command_mutex_, not as
+    // a racy preflight that auto-pair could invalidate before mutation.
+    const bool allow_replace = query_param_is(req, "force", "1");
+    const VehicleController::KeyGenerationResult generated =
+        g_vehicle->generate_key_result(allow_replace);
+    if (generated.key_probe_failed) {
+        cJSON* root = cJSON_CreateObject();
+        cJSON_AddBoolToObject(root, "result", false);
+        cJSON_AddStringToObject(root, "reason",
+            "private-key storage could not be verified; no key was changed");
+        return send_json(req, 503, root);
+    }
+    if (generated.existing_key_refused) {
         cJSON* root = cJSON_CreateObject();
         cJSON_AddBoolToObject(root, "result", false);
         cJSON_AddStringToObject(root, "reason",
@@ -44,29 +62,37 @@ esp_err_t handle_gen_keys(GuardedReq rq) {
             "call /gen_keys?force=1 to replace it");
         return send_json(req, 409, root);
     }
+    if (generated.transition_blocked) {
+        cJSON* root = cJSON_CreateObject();
+        cJSON_AddBoolToObject(root, "result", false);
+        cJSON_AddStringToObject(root, "reason",
+            "a VIN transition is awaiting reboot; key generation is temporarily blocked");
+        return send_json(req, 409, root);
+    }
 
-    const std::string previous_key_id = g_vehicle->key_fingerprint();
-    bool ok = g_vehicle->generate_key();
-    const std::string current_key_id = ok ? std::string{} : g_vehicle->key_fingerprint();
-    // A failed attempt with the same durable key may still have changed tesla-ble's RAM key.
-    // Reboot after answering so the old, storage-backed identity is reconstructed. If the
-    // fingerprint changed, the NEW key committed and only cleanup failed; keep this boot alive so
-    // the supervisor can retry that idempotent cleanup instead of loading obsolete sessions.
-    const bool reboot_to_restore = !ok && !previous_key_id.empty() &&
-                                   current_key_id == previous_key_id;
+    const tk::KeyRotationResult rotation = generated.rotation;
+    const bool ok = rotation == tk::KeyRotationResult::Complete;
+    // CommitUnknown means the private-key NVS write was attempted but its commit result is
+    // unknowable from RAM. The persistent marker makes reboot cleanup safe, and reconstructing
+    // from storage is the only authoritative recovery. NotCommitted is a pre-mutation failure;
+    // reboot remains the conservative way to restore any gated runtime state. CleanupPending
+    // proves the new key committed, so the supervisor retries only idempotent cleanup.
+    const bool reboot_to_restore = rotation == tk::KeyRotationResult::NotCommitted ||
+                                   rotation == tk::KeyRotationResult::CommitUnknown;
     cJSON* root = cJSON_CreateObject();
     cJSON_AddBoolToObject(root, "result", ok);
     cJSON_AddStringToObject(
         root, "reason",
         ok ? "key generated — use /send_key to pair with vehicle"
+           : rotation == tk::KeyRotationResult::CommitUnknown
+               ? "key commit outcome is ambiguous — rebooting to reload durable identity"
            : reboot_to_restore
-               ? "key generation failed — rebooting to restore the previous key"
-               : (!current_key_id.empty() && current_key_id != previous_key_id)
-                   ? "new key saved, but pairing cleanup failed — retrying cleanup"
-                   : "key generation failed — pairing remains disabled until a safe retry");
+               ? "key generation did not commit — rebooting to restore durable identity"
+               : "new key saved, but pairing cleanup failed — retrying cleanup");
     esp_err_t r = send_json(req, ok ? 200 : 500, root);
     if (reboot_to_restore) {
-        ota_confirm_pending_image();
+        // NotCommitted/CommitUnknown are recovery reboots after an HTTP 500, not successful
+        // user configuration commits. Keep a pending OTA rollback-capable.
         vTaskDelay(pdMS_TO_TICKS(800));
         esp_restart();
     }
@@ -176,85 +202,94 @@ esp_err_t handle_set_vin(GuardedReq rq) {
         return send_json(req, 400, make_response(false, "set_vin", vin.c_str(),
                                                  "VIN must be 17 valid characters"));
     }
+    OtaIdentityMutationGuard identity_guard(tk::IdentityMutationEntry::HttpSetVin);
+    if (!identity_guard) {
+        return send_json(req, 503, make_response(
+            false, "set_vin", vin.c_str(),
+            "VIN changes are blocked during OTA verification/update; no identity was changed"));
+    }
 
-    // Stage the complete configuration first, then rotate the vehicle identity. If crypto/NVS
-    // rotation fails, restore the previous snapshot and keep the still-usable sessions. This is
-    // deliberately one ConfigBlob write per state, never a legacy-key update that a later WiFi
-    // save can overwrite from a stale blob.
+    // Stage the complete configuration and rotate the identity inside ONE controller transaction.
+    // The callback runs while command_mutex_ binds the previous fingerprint to this request, so
+    // auto-rekey cannot slip between fingerprint capture, journal/config persistence and reset.
     tk::ConfigBlob next = current;
     next.vin = vin;
-    // Cross-namespace journal: the ConfigBlob lives in tesla_cfg while the private key lives in
-    // tesla_ble, so no single NVS commit can cover both. The boot path compares this old key id
-    // with the actually persisted key and deterministically rolls back or completes cleanup after
-    // a power cut at any point in the transition.
-    const std::string previous_key_id = g_vehicle->key_fingerprint();
-    if (g_vehicle->has_key() && previous_key_id.empty()) {
-        return send_json(req, 500, make_response(false, "set_vin", vin.c_str(),
-                                                 "existing key identity could not be verified"));
-    }
-    const std::string vin_txn =
-        tk::make_vin_transition_marker(current.vin, previous_key_id);
-    bool recovery_pending = false;
-    bool reboot_for_recovery = false;
-    bool new_identity_committed = false;
+    bool vin_marker_written = false;
+    const VehicleController::NewVehicleResetResult reset =
+        g_vehicle->reset_for_new_vehicle([&](const std::string& previous_key_id) {
+            // Cross-namespace journal: ConfigBlob is in tesla_cfg, key/session state in
+            // tesla_ble. It is written before ConfigBlob and before key_rotate/private-key
+            // mutation, so every power cut has an unambiguous boot-recovery authority.
+            const std::string marker =
+                tk::make_vin_transition_marker(current.vin, previous_key_id);
+            if (!g_config->save_str("vin_txn", marker)) return false;
+            vin_marker_written = true;
+            return tk::cfg_save(*g_config, next);
+        });
+
+    using A = tk::VinTransitionApply;
+    const bool ok = reset.state == A::Complete;
+    const bool recovery_blocked = reset.state == A::IdentityRecoveryPending;
+    bool reboot = reset.state != A::IdentityUnverified && !recovery_blocked;
     bool previous_identity_restored = false;
-    bool ok = g_config->save_str("vin_txn", vin_txn);
-    if (ok) ok = tk::cfg_save(*g_config, next);
-    if (!ok) {
-        (void)g_config->remove("vin_txn");
-    }
-    if (ok && !g_vehicle->reset_for_new_vehicle()) {
-        const std::string current_key_id = g_vehicle->key_fingerprint();
-        if (current_key_id == previous_key_id) {
-            // Crypto/persistence never committed a new key. The previous VIN/key/session tuple is
-            // still usable, so restore the old config snapshot and retire the journal only after
-            // both writes succeed.
-            ESP_LOGE(TAG, "VIN change aborted before key commit; rolling config back");
-            const bool rolled_back = tk::cfg_save(*g_config, current);
-            const bool marker_removed = rolled_back && g_config->remove("vin_txn");
-            if (!rolled_back || !marker_removed) {
-                ESP_LOGE(TAG, "CRITICAL: VIN rollback/marker cleanup failed; boot recovery required");
-                recovery_pending = true;
-                reboot_for_recovery = true;
-            } else {
-                // regenerate_key() may have replaced its RAM key before a failed persistence
-                // attempt, even though the durable fingerprint is unchanged. Reboot rebuilds the
-                // Vehicle from the verified old key; continuing in this boot would leave signing
-                // disabled (or, without that gate, risk the ambiguous runtime identity).
-                previous_identity_restored = true;
-                reboot_for_recovery = true;
-            }
-        } else {
-            // The new key is already durable. Rolling the VIN back now would bind that key to the
-            // old vehicle and discard the only recovery signal. Keep the new ConfigBlob and marker;
-            // boot recovery idempotently retries session/MAC cleanup before normal operation.
-            ESP_LOGE(TAG, "VIN/key committed, but old pairing cleanup is incomplete; rebooting into recovery");
-            recovery_pending = true;
-            reboot_for_recovery = true;
-            new_identity_committed = true;
+    bool recovery_pending = false;
+
+    if (reset.state == A::StageFailed || reset.state == A::RollBackPreviousIdentity) {
+        // A false NVS commit is conservatively ambiguous: rewrite the complete previous snapshot,
+        // then retire the VIN journal only after that rollback commits. key_rotate (if present)
+        // remains independent and makes boot erase sessions before reconstructing the old key.
+        ESP_LOGE(TAG, "VIN change did not commit a new key; restoring previous configuration");
+        const bool rolled_back = !vin_marker_written || tk::cfg_save(*g_config, current);
+        const bool marker_removed =
+            !vin_marker_written || (rolled_back && g_config->remove("vin_txn"));
+        previous_identity_restored = rolled_back && marker_removed;
+        recovery_pending = !previous_identity_restored;
+        if (recovery_pending) {
+            ESP_LOGE(TAG, "VIN rollback/marker cleanup incomplete — boot recovery remains armed");
         }
-        ok = false;
+    } else if (reset.state == A::RecoverAmbiguousIdentity) {
+        // The upstream key write was attempted but its commit result cannot be inferred from
+        // this Vehicle's RAM key. Keep BOTH the staged ConfigBlob and vin_txn: after key_rotate
+        // cleanup, boot reloads the durable fingerprint and deterministically rolls back the old
+        // VIN or completes the new identity.
+        recovery_pending = true;
+        ESP_LOGE(TAG, "VIN staged but key commit outcome is ambiguous — boot fingerprint recovery remains armed");
+    } else if (reset.state == A::RecoverCommittedIdentity) {
+        // The request-local result proves the new key commit; never infer this from a fingerprint
+        // sampled after releasing command_mutex_. Keep the new VIN + vin_txn for boot cleanup.
+        recovery_pending = true;
+        ESP_LOGE(TAG, "VIN and new key committed, but cleanup is incomplete — boot recovery remains armed");
+    } else if (reset.state == A::Complete) {
+        if (!g_config->remove("vin_txn")) {
+            // The durable new VIN/key tuple is valid. A remaining marker only causes the boot
+            // path to repeat idempotent session/MAC cleanup before normal operation.
+            ESP_LOGW(TAG, "VIN change committed but transition marker remains for boot recovery");
+        }
     }
-    if (ok && !g_config->remove("vin_txn")) {
-        // Not a failed VIN change: boot recovery sees the changed fingerprint, repeats the
-        // idempotent session/MAC cleanup and removes the marker.
-        ESP_LOGW(TAG, "VIN change committed but transition marker remains for boot recovery");
-    }
-    const char* reason = ok
+
+    const char* reason = reset.state == A::Complete
         ? "VIN and new key saved — rebooting"
-        : new_identity_committed
-            ? "VIN and new key saved; cleanup incomplete — rebooting for recovery"
-            : previous_identity_restored
-                ? "VIN change failed; previous identity restored — rebooting to reload its key"
-                : reboot_for_recovery
-                    ? "VIN change incomplete — rebooting for recovery"
+        : reset.state == A::IdentityUnverified
+            ? "existing key identity could not be verified"
+            : recovery_blocked
+                ? "key identity recovery is pending — retry VIN change after recovery"
+            : reset.state == A::RecoverAmbiguousIdentity
+                ? "key commit outcome is ambiguous — rebooting for fingerprint recovery"
+            : reset.state == A::RecoverCommittedIdentity
+                ? "VIN and new key saved; cleanup incomplete — rebooting for recovery"
+                : previous_identity_restored
+                    ? "VIN change failed; previous identity restored — rebooting to reload its key"
                     : recovery_pending
-                        ? "VIN change failed; boot recovery is required"
-                        : "VIN change failed; previous vehicle identity kept";
-    esp_err_t r = send_json(req, ok ? 200 : 500,
+                        ? "VIN change incomplete — rebooting for recovery"
+                        : "VIN change staging failed — rebooting fail-closed";
+    esp_err_t r = send_json(req, ok ? 200 : recovery_blocked ? 409 : 500,
                             make_response(ok, "set_vin", vin.c_str(), reason));
-    if (ok || reboot_for_recovery) {
-        ota_confirm_pending_image();   // an intentional reboot must not roll back a fresh, healthy OTA
+    if (reboot) {
+        // Only the fully committed HTTP-200 transaction is a deliberate successful config save.
+        // Rollback, ambiguous-fingerprint and cleanup-recovery reboots keep OTA probation armed.
+        if (tk::vin_transition_reboot_confirms_ota(reset.state)) {
+            ota_confirm_pending_image(tk::OtaRebootClass::SuccessfulUserConfigCommit);
+        }
         vTaskDelay(pdMS_TO_TICKS(800));
         esp_restart();
     }
@@ -437,7 +472,7 @@ esp_err_t handle_set_mqtt(GuardedReq rq) {
                                            : "MQTT broker saved — rebooting")
                          : "failed to save MQTT broker"));
     if (ok) {
-        ota_confirm_pending_image();   // an intentional reboot must not roll back a fresh, healthy OTA
+        ota_confirm_pending_image(tk::OtaRebootClass::SuccessfulUserConfigCommit);
         vTaskDelay(pdMS_TO_TICKS(800));
         esp_restart();
     }
@@ -490,7 +525,7 @@ esp_err_t handle_set_syslog(GuardedReq rq) {
                                            : "Syslog server saved — rebooting")
                          : "failed to save Syslog server"));
     if (ok) {
-        ota_confirm_pending_image();   // an intentional reboot must not roll back a fresh, healthy OTA
+        ota_confirm_pending_image(tk::OtaRebootClass::SuccessfulUserConfigCommit);
         vTaskDelay(pdMS_TO_TICKS(800));
         esp_restart();
     }
@@ -562,7 +597,7 @@ esp_err_t handle_set_wifi(GuardedReq rq) {
                       ok ? "WiFi credentials saved — rebooting to join the new network"
                          : "config write failed"));
     if (ok) {
-        ota_confirm_pending_image();   // an intentional reboot must not roll back a fresh, healthy OTA
+        ota_confirm_pending_image(tk::OtaRebootClass::SuccessfulUserConfigCommit);
         vTaskDelay(pdMS_TO_TICKS(800));
         esp_restart();
     }

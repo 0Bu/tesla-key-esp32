@@ -33,6 +33,17 @@ class NvsStorageAdapter;
 
 namespace tk {
 
+enum class ConfigLoadState : uint8_t {
+    Error,
+    Legacy,
+    Blob,
+};
+
+// Authoritative tri-state read for recovery code. Legacy is returned only when NVS proves the blob
+// key is absent. A present-but-invalid blob or any probe/read failure is Error and leaves `out`
+// untouched, so an armed cross-namespace journal cannot be classified from stale legacy mirrors.
+ConfigLoadState cfg_load_state(NvsStorageAdapter& cfg, ConfigBlob& out);
+
 // Read the current configuration. Returns true if a blob was decoded, false if the legacy per-key
 // values were used (which is the normal answer on a device that has not saved since upgrading).
 // `out` is populated either way. The legacy path starts from the compiled Kconfig defaults and

@@ -491,10 +491,11 @@ void VehicleController::loop_task_fn_(void* arg) {
                              (unsigned) (prior + 1));
                     tk::HeapReason why = tk::heap_reason_format((uint8_t)(prior + 1));
                     self->persist_reboot_reason_(why.text);
-                    // A restart inside the ~90 s OTA health gate would look like a failed boot and
-                    // revert a good image. This is a deliberate restart, so confirm the image
-                    // first — same reasoning as the config-save reboots.
-                    ota_confirm_pending_image();
+                    // Heap exhaustion is an automatic fault reboot, not a user health signal.
+                    // Leaving PENDING_VERIFY armed is exactly what lets the bootloader escape a
+                    // new image whose heap regression triggers this watchdog.
+                    static_assert(!tk::ota_reboot_confirms_pending_image(
+                        tk::OtaRebootClass::AutomaticFaultRecovery));
                     // Let the log actually LEAVE the device before we kill it. syslog_send only
                     // queues, and its task runs at priority 3 against this task's 5, so without a
                     // yield the final message dies in the queue on a single-core target — and the

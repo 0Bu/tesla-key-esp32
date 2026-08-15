@@ -6,8 +6,8 @@
 #
 # Usage: scripts/run-mock-tests.sh
 # Requires: a C++17 host compiler (g++/clang++); cmake is used when present, with a
-# direct-compiler fallback otherwise (the suite is one translation unit — see
-# test/CMakeLists.txt, whose flags the fallback mirrors). See test/README.md.
+# direct-compiler fallback otherwise (see test/CMakeLists.txt, whose targets and flags the
+# fallback mirrors). See test/README.md.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -19,8 +19,8 @@ if command -v cmake >/dev/null 2>&1; then
     cmake --build "$BUILD_DIR" --parallel
     ctest --test-dir "$BUILD_DIR" --output-on-failure
 else
-    # No cmake on this host (e.g. a bare Raspberry Pi) — the suite is a single
-    # translation unit, so compile it directly. Keep flags in sync with test/CMakeLists.txt.
+    # No cmake on this host (e.g. a bare Raspberry Pi) — compile both host targets directly.
+    # Keep flags, sources and include paths in sync with test/CMakeLists.txt.
     CXX="${CXX:-}"
     if [ -z "$CXX" ]; then
         if command -v g++ >/dev/null 2>&1; then CXX=g++
@@ -31,6 +31,11 @@ else
     mkdir -p "$BUILD_DIR"
     "$CXX" -std=c++17 -Wall -Wextra -Werror -Imain -o "$BUILD_DIR/logic_tests" test/test_logic.cpp
     "$BUILD_DIR/logic_tests"
+    "$CXX" -std=c++17 -Wall -Wextra -Werror \
+        -Itest/stubs -Imain -Imanaged_components/yoziru__tesla-ble/include \
+        -o "$BUILD_DIR/nvs_storage_tests" \
+        test/test_nvs_storage.cpp main/nvs_storage.cpp main/config_blob.cpp
+    "$BUILD_DIR/nvs_storage_tests"
 fi
 
 # Display sim ↔ C++ presenter parity: confirm tools/display_sim.py's decide() still matches

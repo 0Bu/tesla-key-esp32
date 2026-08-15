@@ -49,4 +49,5 @@ done
 
 ./scripts/build-pages.sh "$site" "$version" "$source_sha" >/dev/null
 python3 scripts/check-pages-manifest.py "$site" --source-sha "$source_sha" --version "$version" >/dev/null
+python3 scripts/check-release-pages-bytes.py "$site" "$repo_root" --version "$version" >/dev/null
 echo "disposable-key signer + four-target manifest contract: PASS"

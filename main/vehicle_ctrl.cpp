@@ -38,6 +38,52 @@ struct NoDelete {
     void operator()(TeslaBLE::StorageAdapter*)const {}
 };
 
+bool VehicleController::recover_pending_key_rotation_at_boot_() {
+    key_rotation_recovered_at_boot_ = false;
+    bool marker_present = false;
+    const bool probe_ok = storage_ &&
+                          storage_->probe_blob(tk::kKeyRotationMarker, marker_present);
+    const tk::KeyRotationMarkerProbe probe =
+        tk::classify_key_rotation_marker_probe(probe_ok, marker_present);
+    if (probe == tk::KeyRotationMarkerProbe::Error) {
+        ESP_LOGE(TAG, "key-rotation marker could not be read — refusing vehicle construction");
+        return false;
+    }
+    if (tk::decide_key_rotation_boot(probe == tk::KeyRotationMarkerProbe::Present,
+                                     false, false, false) ==
+        tk::KeyRotationBootState::Ready) {
+        return true;
+    }
+
+    // Do not construct TeslaBLE::Vehicle while this marker exists: its constructor loads the
+    // private key and persisted peers, and a torn rotation makes that combination ambiguous.
+    key_runtime_safe_.store(false);
+    pairing_cleanup_pending_.store(true);
+    ESP_LOGW(TAG, "interrupted key rotation detected — cleaning persisted peer state before key load");
+
+    const bool vcsec_removed = storage_->remove("session_vcsec");
+    const bool info_removed = storage_->remove("session_infotainment");
+    const bool paired_removed = storage_->remove("paired_at");
+    const bool cleanup_ok = vcsec_removed && info_removed && paired_removed;
+    // Short-circuit deliberately: the journal is the retry authority and must remain durable
+    // after any failed peer erase. Each remove commits independently, so power loss at every
+    // boundary simply re-enters this idempotent branch on the next boot.
+    const bool marker_removed = cleanup_ok && storage_->remove(tk::kKeyRotationMarker);
+    const tk::KeyRotationBootState final_state =
+        tk::decide_key_rotation_boot(true, true, cleanup_ok, marker_removed);
+    if (final_state != tk::KeyRotationBootState::Ready) {
+        ESP_LOGE(TAG, "key-rotation boot cleanup incomplete (vcsec=%d info=%d paired_at=%d marker=%d)",
+                 static_cast<int>(vcsec_removed), static_cast<int>(info_removed),
+                 static_cast<int>(paired_removed), static_cast<int>(marker_removed));
+        return false;
+    }
+
+    pairing_cleanup_pending_.store(false);
+    key_rotation_recovered_at_boot_ = true;
+    ESP_LOGI(TAG, "interrupted key-rotation cleanup completed before vehicle construction");
+    return true;
+}
+
 // ─── init ────────────────────────────────────────────────────────────────────
 
 bool VehicleController::init(const std::string& vin,
@@ -51,6 +97,21 @@ bool VehicleController::init(const std::string& vin,
     config_store_ = &config_store;
     known_mac_    = &known_mac;
     vin_          = vin;
+
+    if (!recover_pending_key_rotation_at_boot_()) {
+        // app_main treats init failure as boot-fatal. No background task and, critically, no
+        // TeslaBLE::Vehicle exists on this path, so a pending journal can never be reported as
+        // paired or used to sign/enrol until a later boot finishes its cleanup.
+        return false;
+    }
+
+    bool stored_private_key = false;
+    if (!storage_->probe_blob("private_key", stored_private_key)) {
+        // Missing is a valid first-boot state; unreadable is not. Do not construct Vehicle or
+        // start auto-pair with an NVS error misclassified as permission to generate a new key.
+        ESP_LOGE(TAG, "private-key storage probe failed — refusing vehicle construction");
+        return false;
+    }
 
     vehicle_mutex_ = xSemaphoreCreateMutex();
     command_mutex_ = xSemaphoreCreateMutex();
@@ -73,7 +134,7 @@ bool VehicleController::init(const std::string& vin,
     // A blob's mere presence does not prove that the library parsed it. Commands may use the
     // identity only when storage contains a key AND this Vehicle instance successfully loaded it.
     // This also keeps a corrupt/truncated key from being treated as enrolment-safe after reboot.
-    key_runtime_safe_.store(storage_->blob_exists("private_key") && vehicle_->has_private_key());
+    key_runtime_safe_.store(stored_private_key && vehicle_->has_private_key());
 
     // Wire BLE → Vehicle callbacks
     ble_->set_connected_cb([this](bool connected) {
@@ -201,13 +262,26 @@ bool VehicleController::init(const std::string& vin,
     }
 
     if (!start_tasks) {
-        // Safe mode. Everything above ran, so every reader of this controller sees a coherent
-        // (empty) cache instead of a half-built object; what is skipped is the two tasks that
-        // actually reach for the car. Announced loudly because a device that answers /status while
-        // never connecting over BLE is otherwise indistinguishable from a broken BLE stack.
-        ESP_LOGW(TAG, "SAFE MODE — vehicle_loop and auto_pair NOT started; no BLE polling, no "
-                      "pairing, no commands will execute until the crash-boot counter clears");
+        // The fully wired controller is safe to read, but the caller owns the lifecycle boundary:
+        // normal boot defers these mutating tasks until recovery + essential services complete;
+        // safe mode intentionally never starts them.
+        ESP_LOGI(TAG, "vehicle_loop and auto_pair deferred");
         return true;
+    }
+
+    return this->start_tasks();
+}
+
+bool VehicleController::start_tasks() {
+    if (loop_task_ && auto_pair_task_) return true;
+    if (loop_task_ || auto_pair_task_) {
+        ESP_LOGE(TAG, "inconsistent vehicle task lifecycle — unwinding partial state");
+        if (loop_task_) { vTaskDelete(loop_task_); loop_task_ = nullptr; }
+        if (auto_pair_task_) { vTaskDelete(auto_pair_task_); auto_pair_task_ = nullptr; }
+    }
+    if (!vehicle_ || !vehicle_mutex_ || !command_mutex_ || !cache_mutex_ || !result_mutex_) {
+        ESP_LOGE(TAG, "vehicle tasks cannot start before controller initialization completes");
+        return false;
     }
 
     if (xTaskCreate(loop_task_fn_, "vehicle_loop", 8192, this,
@@ -224,7 +298,7 @@ bool VehicleController::init(const std::string& vin,
         auto_pair_task_ = nullptr;
         return false;
     }
-    ESP_LOGI(TAG, "VehicleController ready for VIN %s", vin.c_str());
+    ESP_LOGI(TAG, "VehicleController ready for VIN %s", vin_.c_str());
     return true;
 }
 

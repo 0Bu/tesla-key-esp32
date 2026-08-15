@@ -1,16 +1,17 @@
 ---
 name: flash-esp32
-description: Build and USB-flash the tesla-key-esp32 firmware (ESP32 / S3 / C3 / C6) over the serial port. Use when asked to "flash", "flashe", "flash the device", deploy firmware/web-UI changes to the physical board over USB, or reflash after editing main/. Defaults to esp32s3; set TARGET for other chips. Auto-detects the serial port and preserves NVS (pairing/key/VIN). For pull-based OTA updates instead, see docs / the web UI version tap.
+description: Build or safely USB-flash tesla-key-esp32 firmware (ESP32 / S3 / C3 / C6). Local builds are compile-only until an explicit signing key is supplied; a PR may be flashed only from its opt-in protected signed-pr-preview artifact after artifact-name and source-SHA verification. Defaults to esp32s3; set TARGET for other chips. Auto-detects the serial port and preserves NVS (pairing/key/VIN). For pull-based OTA updates instead, see docs / the web UI version tap.
 ---
 
 # flash-esp32 — build & USB-flash the firmware
 
-Builds the ESP-IDF project (in Docker) and flashes it to a connected **ESP32 board**
-(esp32 / esp32s3 / esp32c3 / esp32c6 — set `TARGET`, default esp32s3) over
-USB (from the host). NVS is left untouched, so the stored pairing, private key, VIN and
-WiFi survive the flash (no re-pair needed). Use this after editing anything under `main/` —
-including the embedded web UI (`main/www/` — `index.html` + `style.css` + `app.js`, spliced
-into one page at build time), which is compiled into the app binary.
+Builds the ESP-IDF project (in Docker) and, only from an explicitly verified **signed** app,
+flashes a connected ESP32 board (esp32 / esp32s3 / esp32c3 / esp32c6 — set `TARGET`, default
+esp32s3) over USB from the host. NVS is left untouched, so the stored pairing, private key, VIN
+and WiFi survive the flash (no re-pair needed). Use this after editing anything under `main/` —
+including the embedded web UI (`main/www/` — `index.html` + `style.css` + `app.js`, spliced into
+one page at build time), which is compiled into the app binary. A successful local compile is not
+a flashable artifact: `CONFIG_SECURE_BOOT_BUILD_SIGNED_BINARIES=n` by design.
 
 > This flashes over **USB**. For a remote, no-cable update use OTA (tap the firmware
 > version in the web UI). USB flashing requires physical access and the board plugged in.
@@ -18,45 +19,108 @@ into one page at build time), which is compiled into the app binary.
 ## Why two halves (Docker build, host flash)
 
 There is **no local ESP-IDF install** — builds run via `scripts/idf-docker.sh`, which runs
-the official `espressif/idf` Docker image **pinned to the exact version CI uses** (read at
-runtime from `.github/workflows/build.yml`, so it never drifts; a new version auto-pulls on
-first use). But **Docker Desktop on macOS has no USB passthrough**, so the *flash* step runs
+the official `espressif/idf` Docker image pinned by the immutable tag+digest in
+`esp-idf-toolchain.txt` (resolved by `scripts/idf-version.sh`, the same contract CI reads).
+But **Docker Desktop on macOS has no USB passthrough**, so the *flash* step runs
 on the **host** with `esptool` (`brew install esptool`). Build → produces `build/`, then
-flash `build/` from the host.
+sign/verify the app explicitly or download a provenance-matched signed artifact, then flash from
+the host.
 
-## One-shot command
+## Local tree: compile first; signing is an explicit flash gate
 
-Run from the **repo root** (where `CMakeLists.txt` lives). Builds in Docker, then — only if
-the build succeeded (`pipefail` + the `||` guard) — auto-detects the port and flashes:
+Run from the **repo root** (where `CMakeLists.txt` lives). This command deliberately stops after
+the compile; never append a flash of `build/tesla-key-esp32.bin`, because that file is unsigned:
 
 ```bash
-set -o pipefail
-TARGET=esp32s3   # chip being flashed: esp32s3 (default) | esp32 | esp32c3 | esp32c6
-# 1) Build via the CI-pinned ESP-IDF Docker image (build/ stays host-owned).
-#    Root CMake automatically applies every committed tesla-ble patch in lexical order on every target.
-#    First build only: set-target; afterwards plain `build` keeps it incremental & fast.
-scripts/idf-docker.sh \
-  sh -c "if [ -f sdkconfig ]; then idf.py build; else idf.py set-target $TARGET build; fi" \
-  2>&1 | tail -15 || { echo "BUILD FAILED — not flashing"; exit 1; }
-# 2) Flash from the HOST (Docker can't reach USB). @flash_args writes the bootloader (at the
-#    target's own offset — 0x1000 on classic esp32, 0x0 on s3/c3/c6), partition-table@0x8000,
-#    otadata@0xf000, app@0x20000 — NOT nvs@0x9000, so pairing survives.
-PORT=$(ioreg -l -w 0 2>/dev/null | grep -iE '"USB Product Name"|"IOCalloutDevice"' \
-       | grep -iA1 '"USB Single Serial"' | grep -m1 -o '/dev/cu\.usbmodem[^"]*') \
-  && echo "Flashing via $PORT" \
-  && ( cd build && esptool --chip "$TARGET" -p "$PORT" -b 460800 \
-        --before default_reset --after hard_reset write_flash "@flash_args" ) 2>&1 | tail -20
+set -euo pipefail
+TARGET=${TARGET:-esp32s3}   # chip being built/flashed
+case "$TARGET" in esp32|esp32s3|esp32c3|esp32c6) ;;
+  *) echo "REFUSING: unsupported TARGET=$TARGET" >&2; exit 1 ;; esac
+# Build via the digest-pinned ESP-IDF image (build/ stays host-owned). Root CMake applies every
+# committed tesla-ble patch in lexical order. Reuse sdkconfig only when it names THIS target;
+# changing TARGET must run set-target instead of silently rebuilding the previous chip.
+if [ -f sdkconfig ] && grep -qx "CONFIG_IDF_TARGET=\"$TARGET\"" sdkconfig; then
+  scripts/idf-docker.sh idf.py build 2>&1 | tail -15
+else
+  scripts/idf-docker.sh idf.py set-target "$TARGET" build 2>&1 | tail -15
+fi
+```
+
+To flash that local tree, the operator must provide an existing RSA-3072 development key. The
+skill must **not** generate one silently: changing the key changes the board's TOFU OTA trust
+anchor, so public Pages OTA will fail until a real CI-signed image is USB-flashed again.
+
+```bash
+set -euo pipefail
+: "${TARGET:?run the compile block for the intended target first}"
+: "${DEV_SIGNING_KEY_FILE:?set DEV_SIGNING_KEY_FILE to an explicit RSA-3072 development key}"
+[ -f "$DEV_SIGNING_KEY_FILE" ] && [ ! -L "$DEV_SIGNING_KEY_FILE" ] || {
+  echo "REFUSING: signing key is missing, non-regular or a symlink" >&2; exit 1;
+}
+[ -f build/tesla-key-esp32.bin ] && [ ! -L build/tesla-key-esp32.bin ] || {
+  echo "REFUSING: unsigned build input is missing or unsafe" >&2; exit 1;
+}
+SIGNED_APP=build/tesla-key-esp32.local-signed.bin
+[ ! -L "$SIGNED_APP" ] || { echo "REFUSING: signed output path is a symlink" >&2; exit 1; }
+espsecure.py sign_data --version 2 --keyfile "$DEV_SIGNING_KEY_FILE" \
+  --output "$SIGNED_APP" build/tesla-key-esp32.bin
+espsecure.py verify_signature --version 2 --keyfile "$DEV_SIGNING_KEY_FILE" "$SIGNED_APP" || exit 1
+SIGNED_SIZE=$(wc -c < "$SIGNED_APP" | tr -d ' ')
+(( SIGNED_SIZE <= 0x1e8000 )) || {
+  echo "REFUSING: signed app is $SIGNED_SIZE bytes, over policy 0x1e8000" >&2; exit 1;
+}
+case "$TARGET" in esp32) FAMILY=ESP32 ;; esp32s3) FAMILY=ESP32-S3 ;;
+  esp32c3) FAMILY=ESP32-C3 ;; esp32c6) FAMILY=ESP32-C6 ;;
+  *) echo "REFUSING: unsupported TARGET=$TARGET" >&2; exit 1 ;; esac
+SIGNED_INFO=$(esptool image-info "$SIGNED_APP")
+printf '%s\n' "$SIGNED_INFO"
+printf '%s\n' "$SIGNED_INFO" | grep -qx "Detected image type: $FAMILY" || {
+  echo "REFUSING: signed app target does not match TARGET=$TARGET" >&2; exit 1;
+}
+
+# Flash from the HOST (Docker cannot reach USB). App-only write + otadata erase preserves the
+# existing bootloader, partition table and nvs@0x9000; otadata is changed LAST as activation.
+if [ -z "${PORT:-}" ]; then
+  PORTS=$(ioreg -l -w 0 2>/dev/null | grep -iE '"USB Product Name"|"IOCalloutDevice"' \
+         | grep -iA1 '"USB Single Serial"' | grep -o '/dev/cu\.usbmodem[^"]*' \
+         | LC_ALL=C sort -u || true)
+  [ "$(printf '%s\n' "$PORTS" | awk 'NF {n++} END {print n+0}')" -eq 1 ] || {
+    echo "REFUSING: expected exactly one USB Single Serial port; set PORT explicitly after inspection" >&2
+    printf '%s\n' "$PORTS" >&2; exit 1;
+  }
+  PORT=$(printf '%s\n' "$PORTS" | awk 'NF {print}')
+fi
+: "${PORT:?set PORT to the explicitly identified serial device}"
+# Detect the chip on the chosen port and refuse a target mismatch before writing.
+esptool chip-id --help >/dev/null 2>&1 && CHIP_CMD=chip-id || CHIP_CMD=chip_id
+CHIP_RAW=$(esptool -p "$PORT" "$CHIP_CMD" 2>&1 \
+  | grep -m1 -oE '(Chip is|Chip type:)[[:space:]]*[A-Za-z0-9()+/. -]+' \
+  | sed -E 's/^(Chip is|Chip type:)[[:space:]]*//' || true)
+case "$CHIP_RAW" in ESP32-S3*) DETECTED=esp32s3 ;; ESP32-C3*) DETECTED=esp32c3 ;;
+  ESP32-C6*) DETECTED=esp32c6 ;; ESP32-D0WD*|ESP32|"ESP32 "*) DETECTED=esp32 ;;
+  *) echo "REFUSING: could not identify chip on $PORT" >&2; exit 1 ;; esac
+[ "$DETECTED" = "$TARGET" ] || {
+  echo "REFUSING: selected port is $DETECTED, requested target is $TARGET" >&2; exit 1;
+}
+if ! esptool --chip "$TARGET" -p "$PORT" -b 460800 --before default-reset --after no-reset \
+    write-flash 0x20000 "$SIGNED_APP"; then
+  echo "REFUSING: signed app write failed; otadata was not activated" >&2; exit 1
+fi
+if ! esptool --chip "$TARGET" -p "$PORT" --before no-reset --after hard-reset \
+    erase-region 0xf000 0x2000; then
+  echo "FLASH INCOMPLETE: app wrote but otadata activation erase failed" >&2; exit 1
+fi
 ```
 
 > **Port detection above targets S3/C3/C6 boards** (native USB = `/dev/cu.usbmodem*`).
 > The **classic esp32** has no native USB — it appears
-> as a USB-UART bridge `/dev/cu.usbserial-*` (CP210x/CH340), so for `TARGET=esp32` set
-> `PORT=$(ls /dev/cu.usbserial-* | head -1)` instead.
+> as a USB-UART bridge `/dev/cu.usbserial-*` (CP210x/CH340). List the candidates, identify the
+> intended board and set its exact path (`PORT=/dev/cu.usbserial-...`); never pick the first entry.
 
 > **Linux host** (e.g. Raspberry Pi): `ioreg` and `/dev/cu.*` are macOS-only. Ports appear as
-> `/dev/ttyACM*` (native USB / WCH bridge) or `/dev/ttyUSB*` (CP210x/CH340) — use
-> `PORT=$(ls /dev/ttyACM* /dev/ttyUSB* 2>/dev/null | head -1)`, and install esptool via
-> `pipx install esptool` (no brew).
+> `/dev/ttyACM*` (native USB / WCH bridge) or `/dev/ttyUSB*` (CP210x/CH340). Inspect them and set
+> exactly one `PORT=/dev/...`; ambiguity is a hard stop. Install esptool via `pipx install
+> esptool` (no brew).
 
 **Success looks like:** `Hash of data verified.` for each region, then
 `Hard resetting via RTS pin...` → `Done`. The app image lands at `0x20000` (dual-OTA
@@ -67,50 +131,106 @@ layout). After reset the device rejoins WiFi in a few seconds; reload
 > signed-OTA config landed (`CONFIG_SECURE_SIGNED_ON_UPDATE_NO_SECURE_BOOT` in
 > `sdkconfig.defaults`), the running app `abort()`s at startup when it carries no signature
 > block. So a plain `idf.py build` image still flashes fine (`Hash of data verified.`) but then
-> **reboot-loops before `app_main`** (`check_signature_on_update_check`, on every target). Get a
-> bootable image one of two ways:
-> - **Flash the signed CI artifact** (recommended): `gh run download` the app image from the
->   latest green `build` run for your branch and flash *that* instead of the local `build/…bin`.
-> - **Sign the local build yourself**, the same step CI runs, then flash `@flash_args` as usual:
->   ```bash
->   # one-time: espsecure.py generate_signing_key --version 2 --scheme rsa3072 dev_key.pem
->   espsecure.py sign_data --version 2 --keyfile dev_key.pem \
->     --output build/tesla-key-esp32.bin.signed build/tesla-key-esp32.bin && \
->     mv build/tesla-key-esp32.bin.signed build/tesla-key-esp32.bin
->   ```
->   A throwaway dev key is fine for a USB-flashed test board (it becomes that board's OTA trust
->   anchor until you USB-flash the real CI image again). Full detail: `docs/SECURITY.md`.
+> **reboot-loops before `app_main`** (`check_signature_on_update_check`, on every target).
+> A normal PR `build` job uploads only `firmware-unsigned`; it is never a flash source. Use either
+> the explicit local signing gate above or the opt-in, Environment-approved `signed-pr-preview`
+> workflow below. A disposable development key becomes that board's OTA trust anchor until a real
+> CI-signed image is USB-flashed again. Full detail: `docs/SECURITY.md`.
 
 ## Flashing a specific PR / branch onto a real board (use the *signed* CI artifact)
 
 To test a PR/branch on a physical board, **do not USB-flash the local `scripts/idf-docker.sh`
-build.** It comes out **unsigned** (`CONFIG_SECURE_BOOT_BUILD_SIGNED_BINARIES=n`; the RSA-3072
-`OTA_SIGNING_KEY` is a CI secret, gitignored, **not present locally**). Flashing an unsigned
-app onto a device on a signed build **destroys its TOFU OTA trust anchor** → all future OTAs
-break, and the unsigned image also boot-loops (see the warning above). The CI `build` job
-already produced the **signed** per-target images — flash those.
+build or the regular PR `firmware-unsigned` artifact.** The real-key path is opt-in: a maintainer
+adds `signed-preview`, the default-branch `signed-pr-preview` workflow validates the same-repo PR,
+waits for `firmware-signing` Environment approval, and uploads a signed artifact. If that workflow
+did not complete successfully, **stop**; there is no signed PR image to flash.
 
 ```bash
+set -euo pipefail
 TARGET=esp32s3            # esp32 | esp32s3 | esp32c3 | esp32c6
-RUNID=<green build run>   # gh run list --branch <branch> --workflow build.yml
+: "${PR:?set PR to the pull-request number}"
+: "${RUNID:?set RUNID to the successful signed-pr-preview run for this PR}"
+[[ "$PR" =~ ^[1-9][0-9]*$ && "$RUNID" =~ ^[1-9][0-9]*$ ]] || {
+  echo "REFUSING: PR and RUNID must be positive integers" >&2; exit 1;
+}
+PR_JSON=$(gh api "repos/:owner/:repo/pulls/$PR")
+EXPECTED_SHA=$(printf '%s' "$PR_JSON" | jq -r .head.sha)
+[[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]] || {
+  echo "REFUSING: current PR head SHA is unavailable or malformed" >&2; exit 1;
+}
+[ "$(printf '%s' "$PR_JSON" | jq -r .state)" = open ] \
+  && [ "$(printf '%s' "$PR_JSON" | jq -r .head.repo.full_name)" \
+       = "$(printf '%s' "$PR_JSON" | jq -r .base.repo.full_name)" ] \
+  && printf '%s' "$PR_JSON" | jq -e 'any(.labels[]; .name == "signed-preview")' >/dev/null || {
+  echo "REFUSING: PR is closed, forked or no longer approved for signed preview" >&2; exit 1;
+}
+[ "$(gh run view "$RUNID" --json workflowName --jq .workflowName)" = signed-pr-preview ] \
+  && [ "$(gh run view "$RUNID" --json conclusion --jq .conclusion)" = success ] || {
+  echo "REFUSING: run is not a successful signed-pr-preview" >&2; exit 1;
+}
 
-# 1) Discover + download the signed app image for this run (artifact name varies by version).
-gh api repos/:owner/:repo/actions/runs/$RUNID/artifacts --jq '.artifacts[].name'
-gh run download "$RUNID" -n <artifact-name> -D _ci    # contains tesla-key-esp32<sfx>-<ver>.bin
-#   image suffix <sfx>: esp32="" (suffix-less), s3=-s3, c3=-c3, c6=-c6
-#   (matches image_suffix() in scripts/ci-build-all.sh and TESLA_OTA_IMG_SUFFIX in ota_update.cpp)
+# Select the one exact signed-preview artifact for this PR; ambiguity or absence is a hard stop.
+ARTS=$(gh api "repos/:owner/:repo/actions/runs/$RUNID/artifacts" \
+  --jq '.artifacts[] | select(.expired == false) | .name' \
+  | grep -E "^tesla-key-esp32-pr${PR}-[0-9]+\\.[0-9]+\\.[0-9]+-PR-${PR}$" || true)
+[ "$(printf '%s\n' "$ARTS" | awk 'NF {n++} END {print n+0}')" -eq 1 ] || {
+  echo "REFUSING: expected exactly one unexpired signed artifact for PR $PR" >&2; exit 1;
+}
+ART=$(printf '%s\n' "$ARTS" | awk 'NF {print}')
+CI_DIR=$(mktemp -d "${TMPDIR:-/tmp}/tesla-pr-artifact.XXXXXX")
+gh run download "$RUNID" -n "$ART" -D "$CI_DIR"
 
-# 2) A local `build/` of the SAME target supplies bootloader/partition-table/otadata (those
-#    regions are NEVER signature-checked, so an unsigned local build is fine for them). Build
-#    once via the one-shot above if build/ is empty. Then flash the SIGNED app over them,
-#    SKIPPING nvs@0x9000 so pairing/key/VIN survive:
-cd build && esptool --chip "$TARGET" -p "$PORT" -b 460800 write_flash \
-  0x0 bootloader/bootloader.bin \
-  0x8000 partition_table/partition-table.bin \
-  0xf000 ota_data_initial.bin \
-  0x20000 ../_ci/tesla-key-esp32<sfx>-<ver>.bin
-#   ⚠ bootloader offset is 0x0 on s3/c3/c6, but 0x1000 on classic esp32 —
-#     use the target's own offset for the 0x0 slot above (see @flash_args / the offsets table).
+# Bind downloaded bytes to the current PR head, not merely to a plausible artifact name.
+META="$CI_DIR/_ci-input/dist/build-metadata.txt"
+[ -f "$META" ] && [ ! -L "$META" ] || { echo "REFUSING: metadata missing/unsafe" >&2; exit 1; }
+VERSION="${ART#tesla-key-esp32-pr${PR}-}"
+[ "$(grep -c '^head_sha=' "$META")" -eq 1 ] \
+  && [ "$(sed -n 's/^head_sha=//p' "$META")" = "$EXPECTED_SHA" ] \
+  && [ "$(grep -c '^display_version=' "$META")" -eq 1 ] \
+  && [ "$(sed -n 's/^display_version=//p' "$META")" = "$VERSION" ] || {
+  echo "REFUSING: signed artifact version/provenance is not the current PR head" >&2; exit 1;
+}
+case "$TARGET" in esp32) SFX=""; FAMILY=ESP32 ;; esp32s3) SFX=-s3; FAMILY=ESP32-S3 ;;
+  esp32c3) SFX=-c3; FAMILY=ESP32-C3 ;; esp32c6) SFX=-c6; FAMILY=ESP32-C6 ;;
+  *) echo "REFUSING: unsupported TARGET=$TARGET" >&2; exit 1 ;; esac
+APP="$CI_DIR/tesla-key-esp32$SFX.bin"
+[ -f "$APP" ] && [ ! -L "$APP" ] || { echo "REFUSING: signed target app missing/unsafe" >&2; exit 1; }
+[ "$(wc -c < "$APP" | tr -d ' ')" -le $((0x1e8000)) ] || {
+  echo "REFUSING: signed preview app exceeds the policy limit" >&2; exit 1;
+}
+APP_INFO=$(esptool image-info "$APP")
+printf '%s\n' "$APP_INFO"
+printf '%s\n' "$APP_INFO" | grep -qx "Detected image type: $FAMILY" \
+  && printf '%s\n' "$APP_INFO" | grep -qx "App version: $VERSION" || {
+  echo "REFUSING: signed preview target/version does not match metadata" >&2; exit 1;
+}
+# The suffix map is owned by scripts/ci-sign-artifacts.sh and mirrored by build-pages.sh,
+# main/ota_update.cpp and main/logic/target.hpp.
+
+# 2) Flash only the signed app, then erase otadata as the final activation step. This requires an
+#    already-installed project bootloader/partition table; use the Web Serial installer for a
+#    blank board. Bootloader, partition table and nvs@0x9000 remain untouched here.
+: "${PORT:?detect and set the intended serial PORT first}"
+# Detect the chip on the chosen port and refuse a target mismatch before writing.
+esptool chip-id --help >/dev/null 2>&1 && CHIP_CMD=chip-id || CHIP_CMD=chip_id
+CHIP_RAW=$(esptool -p "$PORT" "$CHIP_CMD" 2>&1 \
+  | grep -m1 -oE '(Chip is|Chip type:)[[:space:]]*[A-Za-z0-9()+/. -]+' \
+  | sed -E 's/^(Chip is|Chip type:)[[:space:]]*//' || true)
+case "$CHIP_RAW" in ESP32-S3*) DETECTED=esp32s3 ;; ESP32-C3*) DETECTED=esp32c3 ;;
+  ESP32-C6*) DETECTED=esp32c6 ;; ESP32-D0WD*|ESP32|"ESP32 "*) DETECTED=esp32 ;;
+  *) echo "REFUSING: could not identify chip on $PORT" >&2; exit 1 ;; esac
+[ "$DETECTED" = "$TARGET" ] || {
+  echo "REFUSING: selected port is $DETECTED, requested target is $TARGET" >&2; exit 1;
+}
+esptool image-info "$APP" || exit 1
+if ! esptool --chip "$TARGET" -p "$PORT" -b 460800 --before default-reset --after no-reset \
+    write-flash 0x20000 "$APP"; then
+  echo "REFUSING: signed preview app write failed; otadata was not activated" >&2; exit 1
+fi
+if ! esptool --chip "$TARGET" -p "$PORT" --before no-reset --after hard-reset \
+    erase-region 0xf000 0x2000; then
+  echo "FLASH INCOMPLETE: app wrote but otadata activation erase failed" >&2; exit 1
+fi
 ```
 
 - **Bonus:** the CI image carries the **CI-stamped version** (e.g. `1.4.22`), whereas a local
@@ -137,17 +257,18 @@ ioreg -l -w 0 2>/dev/null | grep -iE '"USB Product Name"|"IOCalloutDevice"' \
   | grep -iB1 usbmodem | sed -E 's/^[ |]+//'
 ```
 
-Both interfaces can flash an S3. The one-shot command above targets the **WCH UART
+Both interfaces can flash an S3. The local signed-flash command above targets the **WCH UART
 bridge** ("USB Single Serial"), which is the conventional choice. If only the native
-JTAG unit is present, target that node instead. If the `grep` finds nothing, the board
-isn't connected (or is asleep) — check the cable, or drop `-p "$PORT"` to let esptool
-auto-detect.
+JTAG unit is present, target that node instead. If the listing finds no unambiguous intended
+board, stop and identify its explicit port (check the cable/wake the board, then rerun the
+listing). **Never drop `-p "$PORT"` or accept esptool's first auto-detected responder**: with
+multiple compatible boards attached that can flash the wrong device.
 
 ## Notes & gotchas
 
 - **No local IDF** — every `idf.py` step goes through `scripts/idf-docker.sh`, which uses the
-  `espressif/idf` image **pinned to the CI version** (from `.github/workflows/build.yml`); a
-  new version auto-pulls on first use. The mounted `build/` dir persists on the host, so
+  `espressif/idf` image pinned by `esp-idf-toolchain.txt` through `scripts/idf-version.sh`; CI
+  reads that same contract. The mounted `build/` dir persists on the host, so
   Docker builds stay incremental. Run `idf.py` ad-hoc the same way, e.g.
   `scripts/idf-docker.sh idf.py size`.
 - **Don't run a serial monitor in an automated session** — it never returns and hangs the
@@ -156,7 +277,8 @@ auto-detect.
   `pipx install esp-idf-monitor` → `esp-idf-monitor -p <PORT>`.
 - **First build only** is slow (managed_components fetch + full compile). A `build/` dir
   already present means subsequent flashes are incremental and fast.
-- **NVS is preserved** by `@flash_args` (it never touches `nvs@0x9000`). To wipe
+- **NVS is preserved** because the signed app write targets only `app@0x20000` and the activation
+  step erases only `otadata@0xf000/0x2000`; neither touches `nvs@0x9000`. To wipe
   pairing/key/VIN/WiFi instead, run `esptool --chip "$TARGET" -p <PORT> erase_flash` (forces a
   full re-pair afterwards).
 - **Artifacts are host-owned** thanks to `-u $(id -u):$(id -g)` — no root-owned files in the

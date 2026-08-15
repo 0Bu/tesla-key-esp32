@@ -49,8 +49,11 @@ works for any chip. This erases `nvs` (re-enter WiFi/VIN, re-pair once):
 esptool --chip <esp32|esp32s3|esp32c3|esp32c6> write_flash 0x0 \
   tesla-key-esp32<suffix>-<version>-merged.bin
 ```
-To preserve `nvs`, flash the separate parts from a local `build/` instead:
-`cd build && esptool --chip <target> write_flash "@flash_args"`.
+To preserve `nvs`, use a provenance-matched signed app from the exact Release/main run, or the
+repository's `flash-esp32` workflow with an explicit offline `DEV_SIGNING_KEY_FILE`. That path
+verifies signature, target and size, writes only the signed app at `0x20000`, then erases
+`otadata` at `0xf000` last. Never flash a local `build/` through `@flash_args`: local build output
+is unsigned and crash-loops before `app_main`.
 
 ## Build from source
 
@@ -75,9 +78,9 @@ git clone https://github.com/0Bu/tesla-key-esp32.git && cd tesla-key-esp32
 # Optional: WiFi SSID/pass + VIN (BLE MAC auto) — interactive
 ./scripts/idf-docker.sh idf.py menuconfig
 
-# Flash from the host (preserves nvs — @flash_args skips nvs@0x9000). Use the same
-# --chip you built for; @flash_args already has the right bootloader offset.
-cd build && esptool --chip esp32s3 -p <port> write_flash "@flash_args"   # or esp32 / esp32c3 / esp32c6
+# STOP after the build: build/tesla-key-esp32.bin and @flash_args are unsigned.
+# For USB delivery, follow the flash-esp32 workflow with an explicit verified signing key,
+# or use an exact provenance-matched signed Release/main artifact.
 ```
 
 WiFi/VIN may be left blank and set later via the setup AP. Flash-mode fallback: hold `BOOT`,
@@ -124,8 +127,11 @@ ASCII hexadecimal characters for a raw PSK. Enterprise authentication is not sup
 WiFi, VIN, private key and BLE sessions live in the `nvs` partition (`0x9000`, namespaces
 `tesla_cfg` + `tesla_ble`).
 
-- Web flasher / host `esptool … write_flash "@flash_args"`: `nvs` untouched → data kept.
-- `esptool … write_flash 0x0 …-merged.bin`, `esptool … erase_flash`: erase whole flash → data lost.
+- OTA, or verified signed app-only USB at `0x20000` followed by the `otadata` activation erase:
+  `nvs` untouched → data kept.
+- Web installer **keep configuration** mode: the four bounded parts do not overlap `nvs` → data kept.
+- Web installer factory reset, `esptool … write_flash 0x0 …-merged.bin`, or
+  `esptool … erase_flash`: `nvs` erased/overwritten → data lost.
 
 `nvs` offset/size must not change across versions, or old data is stranded.
 

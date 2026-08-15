@@ -50,10 +50,18 @@ cat <<EOF
 - ${verify_note}
 - ${flash_note}
 - Three gates block a PR until they pass: /project-review gates the MERGE into main (whole-firmware
-  coherence); /skill-audit gates OPENING a PR and every PUSH to it (every skill+agent still matches
-  the project); /feature-docs gates the MERGE too, but only CONDITIONALLY — it arms when the diff
-  reaches main/, test/, sdkconfig.defaults*, partitions.csv or .github/workflows/build.yml, so a
-  docs- or chore-only PR clears it without ceremony. Each clears via its OWN ticked, SHA-stamped
+  coherence); /skill-audit gates OPENING a PR and every current-project/current-HEAD/current-branch
+  PUSH to its verified origin (guarded actions must be standalone; Git/env/cwd/repo overrides,
+  path-qualified executables and foreign/multiple refspecs fail closed; every skill+agent still
+  matches the project). Bash merge accepts only a local-repo number/URL followed by an exact
+  --match-head-commit full SHA and requires PR head = local HEAD; structured create/merge bind an
+  explicit github.com owner/repo and remote/PR head to local HEAD (merge: expected_head_sha);
+  MCP push_files fails closed because its future server commit is not auditable;
+  /feature-docs gates the MERGE too, but only CONDITIONALLY — it arms when the diff
+  reaches main/, test/, sdkconfig.defaults*, partitions.csv, the shipped Pages/installer runtime,
+  the build/signed-preview/preview-cleanup release workflows or scripts/release-relevance.sh, so
+  any other docs- or chore-only
+  PR clears it without ceremony. Each clears via its OWN ticked, SHA-stamped
   checkbox in the PR body (no file marker) — the stamp must match the commit being merged/pushed,
   so a later commit re-stales it. A full /project-review also clears the skill-audit gate (it
   audits the skills too), but NOT the feature-docs one — that box is ticked by /feature-docs.

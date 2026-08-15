@@ -39,6 +39,7 @@
 #include "logic/syslog_policy.hpp"
 #include "logic/connect_outcome.hpp"
 #include "logic/active_window.hpp"
+#include "logic/ble_readiness.hpp"
 #include "logic/ble_phase.hpp"
 #include "logic/ble_row.hpp"
 #include "logic/ha_templates.hpp"
@@ -57,6 +58,8 @@
 #include "logic/captive.hpp"
 #include "logic/config_store.hpp"
 #include "logic/wifi_credentials.hpp"
+#include "logic/key_rotation.hpp"
+#include "logic/nvs_string_load.hpp"
 #include "logic/vin_transition.hpp"
 
 #include <cmath>
@@ -130,14 +133,83 @@ static void test_wifi_credentials() {
 
 static void test_vin_transition() {
     using R = tk::VinTransitionRecovery;
+    using A = tk::VinTransitionApply;
+    using J = tk::VinTransitionJournalAction;
+    // The marker is a versioned, length-delimited record, not `vin|key`: a legacy VIN may contain
+    // the old delimiter or be empty/invalid, and POST /set_vin is precisely its migration path.
+    const std::string legacy_vin = "legacy|VIN with spaces|?";
+    const std::string legacy_encoded =
+        tk::make_vin_transition_marker(legacy_vin, "AA:BB:CC:DD");
+    tk::VinTransitionMarker marker;
+    CHECK(tk::parse_vin_transition_marker(legacy_encoded, marker));
+    CHECK(marker.previous_vin == legacy_vin);
+    CHECK(marker.previous_key_id == "AA:BB:CC:DD");
+    const std::string keyless_encoded = tk::make_vin_transition_marker("", "");
+    CHECK(tk::parse_vin_transition_marker(keyless_encoded, marker));
+    CHECK(marker.previous_vin.empty());
+    CHECK(marker.previous_key_id.empty());
+
+    // This format is not released, so accepting the ambiguous prototype buys no compatibility and
+    // would preserve its delimiter bug. Unknown versions, length overflow/mismatch, truncation,
+    // trailing bytes and malformed key ids all leave the prior output untouched.
+    marker.previous_vin = "untouched";
+    marker.previous_key_id = "AA:BB:CC:DD";
+    for (const std::string& malformed : {
+             std::string{},
+             std::string{"5YJ3E1EA7KF000316|AA:BB:CC:DD"},
+             std::string{"VT2:0:0:"},
+             std::string{"VT1::0:"},
+             std::string{"VT1:999999999999999999999999999999:0:"},
+             std::string{"VT1:5:0:abc"},
+             std::string{"VT1:0:11:AA:BB:CC:G1"},
+             std::string{"VT1:0:0:trailing"}}) {
+        CHECK(!tk::parse_vin_transition_marker(malformed, marker));
+        CHECK(marker.previous_vin == "untouched");
+        CHECK(marker.previous_key_id == "AA:BB:CC:DD");
+    }
+
     const std::string encoded =
         tk::make_vin_transition_marker("5YJ3E1EA7KF000316", "AA:BB:CC:DD");
-    tk::VinTransitionMarker marker;
     CHECK(tk::parse_vin_transition_marker(encoded, marker));
     CHECK(marker.previous_vin == "5YJ3E1EA7KF000316");
     CHECK(marker.previous_key_id == "AA:BB:CC:DD");
-    CHECK(!tk::parse_vin_transition_marker("missing-separator", marker));
-    CHECK(!tk::parse_vin_transition_marker("too|many|separators", marker));
+
+    // CommitUnknown/CleanupPending keep this exact POST-staged marker armed for boot recovery.
+    for (const auto pair : {
+             std::pair{tk::KeyRotationResult::CommitUnknown, A::RecoverAmbiguousIdentity},
+             std::pair{tk::KeyRotationResult::CleanupPending, A::RecoverCommittedIdentity}}) {
+        tk::VinTransitionMarker staged;
+        CHECK(tk::parse_vin_transition_marker(legacy_encoded, staged));
+        CHECK(staged.previous_vin == legacy_vin);
+        CHECK(tk::decide_vin_transition_apply(true, true, pair.first) == pair.second);
+    }
+
+    // A present-but-malformed cross-namespace journal still proves that identity mutation may
+    // have started. It must remain armed and halt boot; deleting it would discard the only
+    // recovery authority for a staged ConfigBlob/new VIN paired with the previous key.
+    CHECK(tk::decide_vin_transition_journal(tk::NvsStringLoadState::Missing, false) ==
+          J::Continue);
+    CHECK(tk::decide_vin_transition_journal(tk::NvsStringLoadState::Error, false) ==
+          J::Halt);
+    CHECK(tk::decide_vin_transition_journal(tk::NvsStringLoadState::Present, false) ==
+          J::Halt);
+    CHECK(tk::decide_vin_transition_journal(tk::NvsStringLoadState::Present, true) ==
+          J::Recover);
+
+    // Armed-journal fingerprint evidence is valid only when the private-key blob probe agrees
+    // with what Vehicle loaded. In particular, an empty previous id is a legitimate first-VIN
+    // transaction, but Present+empty current fingerprint is ambiguous and must halt rather than
+    // rolling the VIN back and erasing the journal.
+    CHECK(!tk::vin_transition_key_evidence_verified("", "", false, false));
+    CHECK(!tk::vin_transition_key_evidence_verified("", "", false, true));
+    CHECK(tk::vin_transition_key_evidence_verified("", "", true, false));
+    CHECK(!tk::vin_transition_key_evidence_verified("", "", true, true));
+    CHECK(!tk::vin_transition_key_evidence_verified("", "NEW", true, false));
+    CHECK(tk::vin_transition_key_evidence_verified("", "NEW", true, true));
+    CHECK(!tk::vin_transition_key_evidence_verified("OLD", "", true, false));
+    CHECK(!tk::vin_transition_key_evidence_verified("OLD", "", true, true));
+    CHECK(tk::vin_transition_key_evidence_verified("OLD", "OLD", true, true));
+    CHECK(tk::vin_transition_key_evidence_verified("OLD", "NEW", true, true));
 
     // Power loss after journal only: both durable identities are still old.
     CHECK(tk::decide_vin_transition_recovery(marker, "5YJ3E1EA7KF000316", "AA:BB:CC:DD") ==
@@ -148,6 +220,164 @@ static void test_vin_transition() {
     // Power loss after the key commit: finish the new identity rather than reverting its VIN.
     CHECK(tk::decide_vin_transition_recovery(marker, "LRWYGCEK9PC000001", "11:22:33:44") ==
           R::CompleteNewIdentity);
+    // A changed key beside the previous VIN is not a completed transaction. It contradicts the
+    // journaled write order (ConfigBlob commits before key mutation), so deleting the marker would
+    // bless a mismatched durable identity. This includes verified-Missing/rolled-back blobs.
+    CHECK(tk::decide_vin_transition_recovery(marker, "5YJ3E1EA7KF000316", "11:22:33:44") ==
+          R::HaltInconsistent);
+
+    // The request-local rotation result, captured while command_mutex_ is still held, is the
+    // only authority for the HTTP transaction. A fingerprint sampled after unlocking could
+    // belong to an auto-rekey and must never reclassify this request.
+    CHECK(tk::decide_vin_transition_apply(false, false,
+                                          tk::KeyRotationResult::NotCommitted) ==
+          A::IdentityUnverified);
+    CHECK(tk::decide_vin_transition_apply(true, false,
+                                          tk::KeyRotationResult::NotCommitted) ==
+          A::StageFailed);
+    CHECK(tk::decide_vin_transition_apply(true, true,
+                                          tk::KeyRotationResult::NotCommitted) ==
+          A::RollBackPreviousIdentity);
+    CHECK(tk::decide_vin_transition_apply(true, true,
+                                          tk::KeyRotationResult::CleanupPending) ==
+          A::RecoverCommittedIdentity);
+    CHECK(tk::decide_vin_transition_apply(true, true,
+                                          tk::KeyRotationResult::CommitUnknown) ==
+          A::RecoverAmbiguousIdentity);
+    CHECK(tk::decide_vin_transition_apply(true, true,
+                                          tk::KeyRotationResult::Complete) ==
+          A::Complete);
+    CHECK(!tk::vin_transition_reboot_confirms_ota(A::IdentityUnverified));
+    CHECK(!tk::vin_transition_reboot_confirms_ota(A::IdentityRecoveryPending));
+    CHECK(!tk::vin_transition_reboot_confirms_ota(A::StageFailed));
+    CHECK(!tk::vin_transition_reboot_confirms_ota(A::RollBackPreviousIdentity));
+    CHECK(!tk::vin_transition_reboot_confirms_ota(A::RecoverAmbiguousIdentity));
+    CHECK(!tk::vin_transition_reboot_confirms_ota(A::RecoverCommittedIdentity));
+    CHECK(tk::vin_transition_reboot_confirms_ota(A::Complete));
+
+    // A previous key rotation whose runtime identity or peer cleanup is still pending must
+    // block before /set_vin writes vin_txn or ConfigBlob. The prior CleanupPending result does
+    // not belong to this request and cannot be reclassified as its committed key mutation.
+    CHECK(!tk::vin_transition_recovery_blocks_staging(false, false));
+    CHECK(tk::vin_transition_recovery_blocks_staging(true, false));
+    CHECK(tk::vin_transition_recovery_blocks_staging(false, true));
+    CHECK(tk::vin_transition_recovery_blocks_staging(true, true));
+}
+
+static void test_key_rotation() {
+    using A = tk::AutomaticKeyAction;
+    using B = tk::KeyRotationBootState;
+    using G = tk::KeyGenerationPreflight;
+    using I = tk::InitialKeyBootAction;
+    using P = tk::KeyRotationMarkerProbe;
+    using R = tk::KeyRotationResult;
+    using S = tk::VehicleTaskStartPhase;
+
+    // NVS keys are limited to 15 bytes. This marker must stay in the tesla_ble namespace so
+    // it is committed before private-key mutation and survives power loss independently of
+    // HTTP/config state.
+    CHECK(std::strlen(tk::kKeyRotationMarker) <= 15);
+
+    // Marker absence and a failed/corrupt NVS probe are distinct safety states. Treating both
+    // as blob_exists()==false would construct Vehicle and load stale sessions on a read error.
+    CHECK(tk::classify_key_rotation_marker_probe(false, false) == P::Error);
+    CHECK(tk::classify_key_rotation_marker_probe(false, true) == P::Error);
+    CHECK(tk::classify_key_rotation_marker_probe(true, false) == P::Missing);
+    CHECK(tk::classify_key_rotation_marker_probe(true, true) == P::Present);
+
+    CHECK(tk::decide_key_rotation_boot(false, false, false, false) == B::Ready);
+    CHECK(tk::decide_key_rotation_boot(true, false, false, false) == B::CleanupRequired);
+
+    // Fault injection: any failed session erase, or a failed marker erase after otherwise
+    // successful cleanup, keeps boot blocked. Only the fully durable terminal state is Ready.
+    CHECK(tk::decide_key_rotation_boot(true, true, false, false) == B::Blocked);
+    CHECK(tk::decide_key_rotation_boot(true, true, true, false) == B::Blocked);
+    CHECK(tk::decide_key_rotation_boot(true, true, true, true) == B::Ready);
+
+    CHECK(!tk::key_rotation_committed(R::NotCommitted));
+    CHECK(!tk::key_rotation_committed(R::CommitUnknown));
+    CHECK(tk::key_rotation_committed(R::CleanupPending));
+    CHECK(tk::key_rotation_committed(R::Complete));
+    CHECK(!tk::key_rotation_runtime_safe(R::NotCommitted));
+    CHECK(!tk::key_rotation_runtime_safe(R::CommitUnknown));
+    CHECK(!tk::key_rotation_runtime_safe(R::CleanupPending));
+    CHECK(tk::key_rotation_runtime_safe(R::Complete));
+    CHECK(!tk::key_rotation_requires_reload(R::NotCommitted));
+    CHECK(tk::key_rotation_requires_reload(R::CommitUnknown));
+    CHECK(!tk::key_rotation_requires_reload(R::CleanupPending));
+    CHECK(!tk::key_rotation_requires_reload(R::Complete));
+    CHECK(!tk::key_rotation_reboot_confirms_ota(R::NotCommitted));
+    CHECK(!tk::key_rotation_reboot_confirms_ota(R::CommitUnknown));
+    CHECK(!tk::key_rotation_reboot_confirms_ota(R::CleanupPending));
+    CHECK(tk::key_rotation_reboot_confirms_ota(R::Complete));
+
+    // A failed first-boot commit gets one classification reboot. If marker recovery then finds
+    // no durable key, this boot halts instead of performing the same ambiguous mutation again.
+    CHECK(tk::decide_initial_key_boot_action(true, false) == I::UseExisting);
+    CHECK(tk::decide_initial_key_boot_action(true, true) == I::UseExisting);
+    CHECK(tk::decide_initial_key_boot_action(false, false) == I::Generate);
+    CHECK(tk::decide_initial_key_boot_action(false, true) == I::HaltAfterEmptyRecovery);
+
+    // Vehicle mutation tasks remain absent through controller wiring, VIN/key recovery and BLE
+    // startup. Only the terminal state after every essential initializer may start them; safe
+    // mode never may. HaltAfterEmptyRecovery exits while still in IdentityRecovery.
+    CHECK(!tk::vehicle_tasks_may_start(S::ControllerWired, false));
+    CHECK(!tk::vehicle_tasks_may_start(S::IdentityResolved, false));
+    CHECK(!tk::vehicle_tasks_may_start(S::BleReady, false));
+    CHECK(tk::vehicle_tasks_may_start(S::EssentialServicesReady, false));
+    CHECK(!tk::vehicle_tasks_may_start(S::EssentialServicesReady, true));
+
+    // No-force generation must distinguish an absent key from an unreadable key record.
+    CHECK(tk::decide_key_generation_preflight(true, false, true) == G::Proceed);
+    CHECK(tk::decide_key_generation_preflight(false, false, false) == G::ProbeFailed);
+    CHECK(tk::decide_key_generation_preflight(false, true, true) == G::ExistingKeyRefused);
+    CHECK(tk::decide_key_generation_preflight(false, true, false) == G::Proceed);
+
+    // VIN staging requires both a successful private-key probe and, when present, a readable
+    // fingerprint. Probe failure must never be treated like first-boot absence.
+    CHECK(!tk::private_key_identity_verified(false, false, false));
+    CHECK(tk::private_key_identity_verified(true, false, false));
+    CHECK(!tk::private_key_identity_verified(true, true, false));
+    CHECK(tk::private_key_identity_verified(true, true, true));
+
+    // Auto-pair may generate only on verified first-boot absence or explicit revocation. The
+    // decision is re-sampled under command_mutex_; this post-interleaving state (pairing_lost
+    // cleared by a concurrent successful HTTP rotation) must Continue, never honor stale true.
+    CHECK(tk::decide_automatic_key_action(false, false, false, false) ==
+          A::StorageUnavailable);
+    CHECK(tk::decide_automatic_key_action(true, false, false, false) == A::Generate);
+    CHECK(tk::decide_automatic_key_action(true, true, false, false) ==
+          A::RebootRequired);
+    // A revocation flag cannot authorize another mutation after a prior key commit became
+    // ambiguous. With a durable key present, unsafe RAM identity always requires reload first.
+    CHECK(tk::decide_automatic_key_action(true, true, false, true) ==
+          A::RebootRequired);
+    CHECK(tk::decide_automatic_key_action(true, true, true, false) == A::Continue);
+    CHECK(tk::decide_automatic_key_action(true, true, true, true) == A::Generate);
+    CHECK(tk::decide_automatic_key_action(true, false, true, false) ==
+          A::RebootRequired);
+    CHECK(tk::decide_automatic_key_action(true, false, false, true) == A::Generate);
+}
+
+static void test_nvs_string_load() {
+    using P = tk::NvsStringProbe;
+    using S = tk::NvsStringLoadState;
+
+    // Fault-injected adapter contract: ONLY ESP_ERR_NVS_NOT_FOUND maps to Missing.
+    CHECK(tk::classify_nvs_string_load(P::NotFound, 0, false, 0, false) == S::Missing);
+    CHECK(tk::classify_nvs_string_load(P::NotFound, 99, true, 7, true) == S::Missing);
+    CHECK(tk::classify_nvs_string_load(P::Error, 0, false, 0, false) == S::Error);
+    CHECK(tk::classify_nvs_string_load(P::Error, 32, true, 32, true) == S::Error);
+
+    // NVS strings include their trailing NUL. len=0 and len=1 (empty value) cannot be a valid,
+    // nonempty safety journal. A failed second read or empty returned value also fails closed.
+    CHECK(tk::classify_nvs_string_load(P::Ok, 0, true, 0, true) == S::Error);
+    CHECK(tk::classify_nvs_string_load(P::Ok, 1, true, 1, false) == S::Error);
+    CHECK(tk::classify_nvs_string_load(P::Ok, 8, false, 8, false) == S::Error);
+    CHECK(tk::classify_nvs_string_load(P::Ok, 8, true, 8, false) == S::Error);
+    CHECK(tk::classify_nvs_string_load(P::Ok, 8, true, 7, true) == S::Error);
+    CHECK(tk::classify_nvs_string_load(P::Ok, 8, true, 9, true) == S::Error);
+    CHECK(tk::classify_nvs_string_load(P::Ok, 8, true, 8, true) == S::Present);
 }
 
 // ─── Home Assistant vehicle identity ─────────────────────────────────────────
@@ -1449,6 +1679,131 @@ static void test_active_window() {
     CHECK(active_window_open({false, false, false, 0}) == false);
 }
 
+// ── BLE command readiness (logic/ble_readiness.hpp) — GAP is not GATT-ready ───────────
+static void test_ble_readiness() {
+    using namespace tk::ble;
+
+    const uint32_t generation = 2;  // stable generations are even
+
+    // Cold boot and an in-progress handle publication are never command-ready.
+    CHECK(!gap_link_available(false, 0, 0, false));
+    CHECK(!command_ready(false, 0, 0, false, false, kNoReadyGeneration));
+    CHECK(!gap_link_available(false, 1, 1, true));
+    CHECK(!command_ready(false, 1, 1, true, true, 1));
+
+    // The regression: GAP CONNECT publishes a valid handle before Tesla service,
+    // characteristics and CCCD subscription complete. Internal BLE code may use that link,
+    // but the first vehicle command must keep waiting.
+    CHECK(gap_link_available(false, generation, generation, true));
+    CHECK(!command_ready(false, generation, generation, true, false,
+                         kNoReadyGeneration));  // service discovery
+    CHECK(!command_ready(false, generation, generation, true, true,
+                         kNoReadyGeneration));  // write characteristic, no CCCD ack yet
+
+    // Only the generation published after a successful CCCD write and connected callback is
+    // usable by commands.
+    CHECK(command_ready(false, generation, generation, true, true, generation));
+
+    // Disconnect starts before the GAP event and closes readiness immediately. A delayed old
+    // GATT callback cannot bless a replacement link, even if NimBLE reuses its 16-bit handle:
+    // the ready token belongs to the previous connection generation.
+    CHECK(!command_ready(true, generation, generation, true, true, generation));
+    CHECK(!command_ready(false, generation, generation + 2, true, true, generation));
+    CHECK(!command_ready(false, generation + 2, generation + 2, true, true, generation));
+    CHECK(command_ready(false, generation + 2, generation + 2, true, true,
+                        generation + 2));
+
+    // Host reset must clear the in-flight latch while preserving the caller's explicit intent.
+    // want_connect now remains asserted until command-ready, so a concurrent stop_connecting()
+    // can still cancel cleanly instead of `connecting` accidentally resurrecting its request.
+    ConnectLifecycle reset_idle = connect_lifecycle_after_host_reset(false);
+    CHECK(!reset_idle.want_connect);
+    CHECK(!reset_idle.connecting);
+    ConnectLifecycle reset_wanted = connect_lifecycle_after_host_reset(true);
+    CHECK(reset_wanted.want_connect);
+    CHECK(!reset_wanted.connecting);
+
+    // A synchronous ble_gap_connect() rejection keeps the same bounded caller armed, while an
+    // already-canceled caller must stay canceled; neither outcome may leave `connecting` latched.
+    ConnectLifecycle sync_fail = connect_lifecycle_after_start_failure(true);
+    CHECK(sync_fail.want_connect);
+    CHECK(!sync_fail.connecting);
+    ConnectLifecycle canceled_fail = connect_lifecycle_after_start_failure(false);
+    CHECK(!canceled_fail.want_connect);
+    CHECK(!canceled_fail.connecting);
+
+    // The bounded caller's intent remains live across the whole cold path, not merely until GAP
+    // CONNECT. A host reset or link loss during service/characteristic/CCCD discovery must restart
+    // the scan; only confirmed command readiness consumes the intent.
+    ConnectLifecycle starting = connect_lifecycle_during_gap_start(true);
+    CHECK(starting.want_connect);
+    CHECK(starting.connecting);
+    ConnectLifecycle canceled_start = connect_lifecycle_during_gap_start(false);
+    CHECK(!canceled_start.want_connect);
+    CHECK(!canceled_start.connecting);
+    ConnectLifecycle discovering = connect_lifecycle_after_gap_connected(true);
+    CHECK(discovering.want_connect);
+    CHECK(!discovering.connecting);
+    ConnectLifecycle canceled_discovery = connect_lifecycle_after_gap_connected(false);
+    CHECK(!canceled_discovery.want_connect);
+    CHECK(!canceled_discovery.connecting);
+    ConnectLifecycle ready = connect_lifecycle_after_command_ready();
+    CHECK(!ready.want_connect);
+    CHECK(!ready.connecting);
+
+    CHECK(connect_scan_should_start(true, false, false, false, false));
+    CHECK(!connect_scan_should_start(false, false, false, false, false));
+    CHECK(!connect_scan_should_start(true, true, false, false, false));
+    CHECK(!connect_scan_should_start(true, false, true, false, false));
+    CHECK(!connect_scan_should_start(true, false, false, true, false));
+    CHECK(!connect_scan_should_start(true, false, false, false, true));
+
+    // Scan start/stop publication is serialized by intent_mutex_. The first concurrent starter
+    // publishes the live procedure, so the second never calls NimBLE. If the host nevertheless
+    // reports EALREADY (for a scan started before our publication), that is positive evidence of
+    // a running scan and must not be collapsed to false. A failed redundant call likewise cannot
+    // erase an already-published running procedure.
+    CHECK(scan_running_after_start(false, ScanStartResult::Started));
+    CHECK(scan_running_after_start(false, ScanStartResult::AlreadyRunning));
+    CHECK(!scan_running_after_start(false, ScanStartResult::Failed));
+    CHECK(scan_running_after_start(true, ScanStartResult::Failed));
+    const bool first_start = scan_running_after_start(false, ScanStartResult::Started);
+    CHECK(first_start);
+    CHECK(!connect_scan_should_start(true, false, false, false, first_start));
+
+    // A successful timeout/deadline cancel, or EALREADY (host proves no scan exists), publishes
+    // stopped. Unexpected cancel failures leave the prior running state visible so a later stop
+    // can retry instead of orphaning an unbounded controller scan.
+    CHECK(!scan_running_after_cancel(true, ScanCancelResult::Canceled));
+    CHECK(!scan_running_after_cancel(true, ScanCancelResult::AlreadyStopped));
+    CHECK(scan_running_after_cancel(true, ScanCancelResult::Failed));
+    CHECK(!scan_running_after_cancel(false, ScanCancelResult::Failed));
+    CHECK(manual_discovery_timeout_may_cancel(
+        scan_running_after_cancel(true, ScanCancelResult::Failed), false, false, false));
+
+    // Manual discovery owns only its listing timer, never the command intent. The lock-protected
+    // start predicate may pass before a concurrent connect arrives, but that fresh intent then
+    // prevents the listing timeout from canceling the shared scan.
+    CHECK(manual_discovery_may_start(false, false, false, false));
+    CHECK(!manual_discovery_may_start(true, false, false, false));
+    CHECK(!manual_discovery_may_start(false, true, false, false));
+    CHECK(!manual_discovery_may_start(false, false, true, false));
+    CHECK(!manual_discovery_may_start(false, false, false, true));
+    CHECK(manual_discovery_timeout_may_cancel(true, false, false, false));
+    CHECK(!manual_discovery_timeout_may_cancel(true, true, false, false));
+    CHECK(!manual_discovery_timeout_may_cancel(true, false, true, false));
+    CHECK(!manual_discovery_timeout_may_cancel(true, false, false, true));
+    CHECK(!manual_discovery_timeout_may_cancel(false, false, false, false));
+
+    // A deadline cancellation linearized before GAP success or CCCD completion invalidates that
+    // continuation. A later callback may advance only for a still-live intent and matching link;
+    // a fresh same-target command is allowed to adopt the pending link by asserting a new intent.
+    CHECK(connect_attempt_may_advance(true, true));
+    CHECK(!connect_attempt_may_advance(false, true));
+    CHECK(!connect_attempt_may_advance(true, false));
+    CHECK(!connect_attempt_may_advance(false, false));
+}
+
 // ── BLE phase countdown (logic/ble_phase.hpp) — what the Bluetooth row counts down ────────────
 static void test_ble_phase() {
     using namespace tk::ble;
@@ -1903,6 +2258,10 @@ static void test_heap_persist() {
 // ─── OTA rollback health gate (logic/health_gate.hpp) ──────────────────────────────────────────
 static void test_health_gate() {
     using V = tk::HealthVerdict;
+    using O = tk::OtaVerificationState;
+    using E = tk::IdentityMutationEntry;
+    using G = tk::OtaIdentityGateState;
+    using R = tk::OtaRebootClass;
     const uint32_t base = 90, cap = 600;
 
     // Inside the base window nothing commits, however healthy it looks. The window is what catches
@@ -1931,6 +2290,35 @@ static void test_health_gate() {
 
     // The shipped constants leave a real window between "earliest possible commit" and "give up".
     CHECK(tk::kHealthGateCapS > tk::kHealthGateBaseS);
+
+    // Identity writes create journals that only this image version may know how to recover. A
+    // PENDING_VERIFY reboot can roll back the executable, so every rotation entry point stays
+    // mutation-free until probation completes. Unknown OTA state is fail-closed as well.
+    for (const E entry : {E::HttpGenerateKey, E::HttpSetVin,
+                          E::InitialKey, E::AutomaticKey}) {
+        CHECK(tk::identity_mutation_allowed(O::Stable, entry));
+        CHECK(!tk::identity_mutation_allowed(O::PendingVerify, entry));
+        CHECK(!tk::identity_mutation_allowed(O::Unknown, entry));
+
+        // A stable running partition is not sufficient while an OTA worker owns the reboot path.
+        // The shared operation gate closes the TOCTOU window in both directions: a mutation cannot
+        // enter during OTA, and OTA cannot enter after a mutation has acquired exclusivity.
+        CHECK(tk::identity_mutation_may_start(O::Stable, G::Idle, entry));
+        CHECK(!tk::identity_mutation_may_start(O::Stable, G::Ota, entry));
+        CHECK(!tk::identity_mutation_may_start(O::Stable, G::IdentityMutation, entry));
+        CHECK(!tk::identity_mutation_may_start(O::PendingVerify, G::Idle, entry));
+        CHECK(!tk::identity_mutation_may_start(O::Unknown, G::Idle, entry));
+    }
+    CHECK(tk::ota_operation_may_start(G::Idle));
+    CHECK(!tk::ota_operation_may_start(G::Ota));
+    CHECK(!tk::ota_operation_may_start(G::IdentityMutation));
+
+    // Only a successful, explicit user configuration commit is authority to spend OTA rollback.
+    // Automatic recovery/fault reboots must leave PENDING_VERIFY armed for the bootloader.
+    CHECK(tk::ota_reboot_confirms_pending_image(R::SuccessfulUserConfigCommit));
+    CHECK(!tk::ota_reboot_confirms_pending_image(R::AutomaticIdentityRecovery));
+    CHECK(!tk::ota_reboot_confirms_pending_image(R::AutomaticWifiRollback));
+    CHECK(!tk::ota_reboot_confirms_pending_image(R::AutomaticFaultRecovery));
 }
 
 // ─── MQTT broker URI + save-time pre-flight (logic/mqtt_uri.hpp) ───────────────────────────────
@@ -2405,6 +2793,8 @@ static void test_status_sys_and_redaction() {
 int main() {
     test_vin();
     test_wifi_credentials();
+    test_key_rotation();
+    test_nvs_string_load();
     test_vin_transition();
     test_ha_identity();
     test_syslog_policy();
@@ -2422,6 +2812,7 @@ int main() {
     test_heap_watchdog();
     test_charge_control();
     test_active_window();
+    test_ble_readiness();
     test_ble_phase();
     test_ble_row();
     test_http_body();

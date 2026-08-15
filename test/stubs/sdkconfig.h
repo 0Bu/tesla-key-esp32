@@ -1,0 +1,7 @@
+#pragma once
+
+#define CONFIG_TESLA_WIFI_SSID ""
+#define CONFIG_TESLA_WIFI_PASSWORD ""
+#define CONFIG_TESLA_VIN ""
+#define CONFIG_TESLA_MQTT_BROKER_URI ""
+#define CONFIG_TESLA_SYSLOG_SERVER ""

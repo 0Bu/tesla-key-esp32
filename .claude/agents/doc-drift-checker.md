@@ -89,7 +89,7 @@ The **cross-referenced facts** that must stay in sync (change one → check all 
    or an MQTT discovery entity → the `/status` field contract in `logic/status_model.hpp` **and**
    its golden emissions in `test/test_logic.cpp` (`test_status_model`), the telemetry/MQTT
    sections of `docs/ARCHITECTURE.md`, the summary in CLAUDE.md, and the web UI that renders it.
-12. **Architecture file map.** A file added/removed/renamed under `main/` → the file-map block
+13. **Architecture file map.** A file added/removed/renamed under `main/` → the file-map block
     in CLAUDE.md's `## Architecture` and the project map in the `project-review` skill.
 
 Also flag the reverse: a **doc-only** change in the diff that asserts a fact the code doesn't
@@ -105,7 +105,7 @@ internal map/summary drift (CLAUDE.md ↔ ARCHITECTURE.md, file map, skill proje
 wording/cosmetic — and the **concrete mirror edit** to make (which line in which doc to change
 to what).
 
-End with a one-line scope statement naming which of the 10 fact-classes you checked and
+End with a one-line scope statement naming which of the 13 fact-classes you checked and
 **explicitly stating where you found no drift** ("endpoints, commands and NVS keys all mirrored;
 no version/partition changes in this diff"), so a clean pass is distinguishable from an
 unchecked one. Don't manufacture drift where the diff touches none of these facts — a change

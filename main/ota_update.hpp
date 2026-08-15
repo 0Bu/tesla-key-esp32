@@ -1,5 +1,7 @@
 #pragma once
 
+#include "logic/health_gate.hpp"
+
 #include <string>
 
 // Pull-based OTA self-update. The device fetches manifest.json from a fixed HTTPS
@@ -51,10 +53,35 @@ OtaStatus ota_get_status();
 // allocates nothing, so it is safe from any task at any heap level.
 bool ota_is_busy();
 
+// Safety gate for VIN/private-key mutations. A rollback-capable image may not write recovery
+// journals that the previous slot might interpret differently after an automatic rollback, and
+// an OTA worker must not be allowed to reboot during a half-committed identity transaction.
+// Unknown partition state fails closed just like PENDING_VERIFY. The snapshot helper is suitable
+// for UI/status decisions only; mutation paths must hold OtaIdentityMutationGuard for their full
+// transaction so OTA startup is excluded atomically in the opposite direction too.
+tk::OtaVerificationState ota_verification_state();
+bool ota_identity_mutation_allowed(tk::IdentityMutationEntry entry);
+
+class OtaIdentityMutationGuard {
+public:
+    explicit OtaIdentityMutationGuard(tk::IdentityMutationEntry entry);
+    ~OtaIdentityMutationGuard();
+
+    OtaIdentityMutationGuard(const OtaIdentityMutationGuard&) = delete;
+    OtaIdentityMutationGuard& operator=(const OtaIdentityMutationGuard&) = delete;
+    OtaIdentityMutationGuard(OtaIdentityMutationGuard&&) = delete;
+    OtaIdentityMutationGuard& operator=(OtaIdentityMutationGuard&&) = delete;
+
+    explicit operator bool() const { return held_; }
+
+private:
+    bool held_ = false;
+};
+
 // If the running image is still ESP_OTA_IMG_PENDING_VERIFY (a fresh OTA the ~90 s health gate in
 // main.cpp hasn't confirmed yet), mark it valid NOW so it can't be rolled back. Call this before
 // any DELIBERATE, user-initiated reboot (a config save that reboots, the setup-portal save): the
 // user actively interacting is proof the image runs, so an intentional restart inside the health
 // window must not look like a failed boot and revert the update. No-op on a normal boot or an
 // already-valid image, so it is always safe to call before esp_restart().
-void ota_confirm_pending_image();
+void ota_confirm_pending_image(tk::OtaRebootClass reboot_class);

@@ -3,6 +3,7 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+"$repo_root/scripts/release-relevance.sh" --self-test
 temp="$(mktemp -d)"
 trap 'rm -rf "$temp"' EXIT
 stage="$temp/fw"
@@ -47,6 +48,59 @@ d = json.load(open(sys.argv[1], encoding="utf-8"))
 assert d["layoutVersion"] == 2 and len(d["builds"]) == 4
 assert all(len(build["parts"]) == 4 and build["parts"][-1]["offset"] == 0xF000 for build in d["builds"])
 PY
+
+# Model the four exact versioned merged.bin assets attached to a GitHub Release, then prove every
+# one of the 16 Pages parts is the byte-identical slice at its declared flash offset.
+release="$temp/release"
+mkdir -p "$release"
+python3 - "$site" "$release" 1.2.3 <<'PY'
+import json, pathlib, sys
+site = pathlib.Path(sys.argv[1])
+release = pathlib.Path(sys.argv[2])
+version = sys.argv[3]
+manifest = json.loads((site / "manifest.json").read_text(encoding="utf-8"))
+names = {
+    "ESP32": f"tesla-key-esp32-{version}-merged.bin",
+    "ESP32-S3": f"tesla-key-esp32-s3-{version}-merged.bin",
+    "ESP32-C3": f"tesla-key-esp32-c3-{version}-merged.bin",
+    "ESP32-C6": f"tesla-key-esp32-c6-{version}-merged.bin",
+}
+for build in manifest["builds"]:
+    end = max(part["offset"] + part["size"] for part in build["parts"])
+    merged = bytearray(b"\xff" * end)
+    for part in build["parts"]:
+        data = (site / part["path"]).read_bytes()
+        merged[part["offset"] : part["offset"] + len(data)] = data
+    (release / names[build["chipFamily"]]).write_bytes(merged)
+PY
+python3 "$repo_root/scripts/check-release-pages-bytes.py" "$site" "$release" \
+  --version 1.2.3 >/dev/null
+
+# Adversarial case: replace a Pages app and update its manifest digest, leaving version, sourceSha,
+# family, offsets and internal manifest validation intact. Only Release byte binding catches it.
+python3 - "$site" <<'PY'
+import hashlib, json, pathlib, sys
+site = pathlib.Path(sys.argv[1])
+manifest_path = site / "manifest.json"
+manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+part = manifest["builds"][0]["parts"][2]
+path = site / part["path"]
+data = bytearray(path.read_bytes())
+data[0] ^= 0x01
+path.write_bytes(data)
+part["sha256"] = hashlib.sha256(data).hexdigest()
+manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+PY
+python3 "$repo_root/scripts/check-pages-manifest.py" "$site" \
+  --source-sha "$sha" --version 1.2.3 >/dev/null
+if python3 "$repo_root/scripts/check-release-pages-bytes.py" "$site" "$release" \
+    --version 1.2.3 >/dev/null 2>&1; then
+  echo "release/Pages byte-binding self-test failed: substituted Pages app accepted" >&2
+  exit 1
+fi
+
+# Restore the canonical snapshot for the remaining manifest integrity cases.
+FIRMWARE_STAGE_DIR="$stage" "$repo_root/scripts/build-pages.sh" "$site" 1.2.3 "$sha" >/dev/null
 
 mv "$stage/esp32c6" "$temp/esp32c6"
 if FIRMWARE_STAGE_DIR="$stage" "$repo_root/scripts/build-pages.sh" "$site" 1.2.3 "$sha" >/dev/null 2>&1; then

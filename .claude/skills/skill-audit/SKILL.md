@@ -93,16 +93,29 @@ the authority for the per-sibling drift check; `project-review` defers the mecha
   OTA, NVS, evcc, pairing, telemetry) still state what the code does, its cross-cutting
   "add X → also update Y" list has no removed/renamed target, and its hardcoded specifics
   (offsets `0x20000`, flash `4 MB`, slot `0x1f0000`, tesla-ble pin, command count) are current.
-- **`flash-esp32`** — build + USB-flash path. Verify against `scripts/idf-docker.sh`
-  (Docker-pinned, no local IDF), `partitions.csv` (`nvs@0x9000`, `otadata@0xf000`, app `@0x20000`),
-  the target set + per-target bootloader offset, and that `@flash_args` never writes `nvs@0x9000`.
+- **`flash-esp32`** — local compile + explicitly signed USB-flash / signed-preview path. Verify
+  against `scripts/idf-docker.sh` (`esp-idf-toolchain.txt` pin, no local IDF), normal PR output
+  `firmware-unsigned`, the opt-in `.github/workflows/signed-pr-preview.yml` artifact, and
+  `partitions.csv` (`nvs@0x9000`, `otadata@0xf000`, app `@0x20000`). Artifact selection must be
+  exact and source-SHA-bound; every USB write must use a verified signed app and preserve NVS.
 - **`ship`** — the merge→CI→signed-artifact→flash pipeline. Verify against
-  `.github/workflows/build.yml` (artifact name `tesla-key-esp32-<version>`, `pr<N>-` prefix on
-  PR builds, the firmware-change-gated release step), `scripts/ci-build-all.sh` (per-target
-  suffix map + `sign_image`, the `-merged.bin` copies it must keep warning against),
-  `partitions.csv` (`app@0x20000`, `otadata@0xf000/0x2000`, `nvs@0x9000` untouched), the merge
+  `.github/workflows/build.yml` (unsigned `firmware-unsigned` build artifact, protected main-only
+  artifact `tesla-key-esp32-<version>`, the firmware-change-gated release step) and
+  `.github/workflows/signed-pr-preview.yml` (separate `tesla-key-esp32-pr<N>-<version>` path).
+  `scripts/ci-build-all.sh` owns the four unsigned trees + projected-signed size gate;
+  `scripts/ci-sign-artifacts.sh` owns the suffix map, real signing, actual signed-size gate and
+  `-merged.bin` copies. The skill must select one exact signed artifact and bind the run plus
+  metadata to the merge SHA/version. Verify also `partitions.csv` (`app@0x20000`,
+  `otadata@0xf000/0x2000`, `nvs@0x9000` untouched), the merge
   gate it defers to (`require-project-review.sh`), and the verify endpoints (`/status`,
-  `/api/proxy/1/version`, `/ota/check|update|status`).
+  `/api/proxy/1/version`, `/ota/check|update|status`). OTA must require exact-version availability
+  before POST, use bounded download/reboot probing, and keep exact version/platform under
+  observation for at least 100 s from the first post-OTA live baseline, with both monotonic
+  uptime delta and wall-clock delta reaching that floor and staying within the documented small
+  tolerance, then require boot-local evidence that the mark-valid API returned success; absolute
+  device uptime is insufficient and hidden reboots or an unconfirmed rollback cancellation must
+  fail closed.
+  USB gets only a short bounded boot/reachability retry, never that OTA probation wait.
 - **`e2e-evcc`** — wraps `scripts/e2e_evcc.sh`. Verify the command count (must equal the
   REST rows — `api_name != nullptr` — in `logic/command_registry.hpp`'s `kCommands` —
   currently **15**), the version-coherence claim (`/status` = `X`,
@@ -113,8 +126,8 @@ the authority for the per-sibling drift check; `project-review` defers the mecha
 - **`vehicle-command-audit`** — compares the firmware against upstream `teslamotors/vehicle-command`,
   gated by what `yoziru/tesla-ble` can do. Verify the tesla-ble **pin** in its source map
   (`v5.1.1`) still matches `main/idf_component.yml`, every repository-owned patch under
-  `patches/tesla-ble/` is applied lexically/idempotently/fail-closed, and the anti-replay patch still
-  applies through root CMake to both dependency locations, its upstream file paths still resolve
+  `patches/tesla-ble/` is applied lexically/idempotently/fail-closed, and the complete patch series
+  applies through root CMake to the one materialised managed-component tree; its upstream paths resolve
   (e.g. `pkg/vehicle/charge.go`), and its "worked findings" don't assert drift already fixed.
 - **`add-logic-test`** — scaffolds a `main/logic/` unit + `CHECK`s in `test/test_logic.cpp`.
   Verify against `scripts/run-mock-tests.sh`, the CI `logic-test` job
@@ -124,9 +137,13 @@ the authority for the per-sibling drift check; `project-review` defers the mecha
   Verify the gate it defers to, `.claude/hooks/require-feature-docs.sh` — the **third** PR gate
   beside this one and `project-review`, and the only *conditional* one — and above all its
   **relevance filter**: the paths that arm it must still match the hook's own regex, currently
-  `main/` / `test/` / `sdkconfig.defaults` / `partitions.csv` / `.github/workflows/build.yml`
-  (the `changed` filter in `require-feature-docs.sh`). A path that drifts out of that list stops
-  gating silently.
+  `main/` / `test/` / `sdkconfig.defaults*` / `partitions.csv` /
+  shipped Pages runtime (`docs/index.html`, `installer-bootstrap.mjs`, `serial-port-release.mjs`,
+  `web-installer.mjs`, `docs/vendor/`) /
+  `.github/workflows/{build,signed-pr-preview,pr-preview-cleanup}.yml` (the shared
+  `gate_feature_docs_relevant` predicate). A path that drifts out of that list stops gating
+  silently. All three gates must block when the shared library is missing, truncated or lacks a
+  required function; `scripts/test-pr-gates.sh` pins those negative cases.
 - **`skill-audit`** (this skill) — verify its own numbers/paths (hook `require-skill-audit.sh`,
   the PR-checkbox gate mechanism — no file marker, the sibling list, the command count `15`, the
   tesla-ble pin) still match the tree, and that the skills/agents it names still exist. Correct it
@@ -155,17 +172,26 @@ the authority for the per-sibling drift check; `project-review` defers the mecha
   Its sibling gate `scripts/check-ble-row-parity.sh` (also run from `run-mock-tests.sh`) does the
   same for the web UI: `tk::ble::decide` (`main/logic/ble_row.hpp`) vs the `BLE_ROW` region of
   `main/www/app.js`, via `test/ble_row_golden_dump.cpp` + `tools/ble_row_parity.js`.
-- **`ota-release-verify`** — verifies the already-published OTA channel (Pages manifest + per-target
-  images + version coherence). Verify the manifest/firmware-base URLs (`main/Kconfig.projbuild`), the
-  4-chipFamily set + per-part offsets (bootloader per-target, partition-table `32768`, app `131072`)
-  in `scripts/build-pages.sh`, the suffix map across `ota_update.cpp`/`ci-build-all.sh`/
-  `build-pages.sh`, the `version.txt` floor vs CI-stamped version, and the `/ota/*` +
-  `/api/proxy/1/version` endpoints. Read-only; complementary to `ship` (which cuts/flashes a release).
+- **`ota-release-verify`** — verifies the already-published OTA channel byte-for-byte against the
+  latest GitHub Release: manifest `sourceSha` equals the dereferenced Release-tag commit, all 16
+  parts match manifest length/SHA-256 and their byte ranges in the four exact Release merged
+  assets, and all four apps report the exact Release version and chip family. Verify the
+  manifest/firmware-base URLs (`main/Kconfig.projbuild`), the 4-chipFamily set +
+  four ordered per-part offsets (bootloader per-target, partition-table `32768`, app `131072`,
+  otadata `61440` last) in `scripts/build-pages.sh`, the suffix map across
+  `ota_update.cpp`/`logic/target.hpp`/`ci-sign-artifacts.sh`/`build-pages.sh`, the `version.txt`
+  floor vs CI-stamped version, the build/test-only `workflow_dispatch` boundary (it must never
+  sign/release/republish Pages), same-SHA reuse only for the newest valid tag, current-main/tag and
+  latest-Release/digest-asset rechecks before signing/Release/Pages mutation and deploy, and the `/ota/*` +
+  `/api/proxy/1/version` endpoints. Read-only;
+  complementary to `ship` (which cuts/flashes a release).
 - **`usb-recovery`** — no-build emergency reflash, **user-only** (`disable-model-invocation: true`).
   Verify the partition map against `partitions.csv` (app `@0x20000`, `otadata@0xf000/0x2000` erased,
   `nvs@0x9000/0x6000` never touched, `ota_1@0x210000`), per-target bootloader offset, the
-  signed-image requirement (`CONFIG_SECURE_BOOT_BUILD_SIGNED_BINARIES=n`), the `-merged.bin`
-  NVS-wipe warning, and the no-auto-reset / `--before no-reset` / ROM-node gotchas.
+  signed-image requirement (`CONFIG_SECURE_BOOT_BUILD_SIGNED_BINARIES=n`), exact Release-byte ↔
+  source-SHA-bound main-artifact match or exact signed main artifact (never Pages), the `-merged.bin`
+  NVS-wipe warning, explicit unambiguous port / no-auto-reset / ROM-node handling, and bounded
+  post-reset verification of exact version/platform plus `paired:true`.
 
 **Agents** (`.claude/agents/`) — audit these the same way; two duplicate content `project-review`
 owns and must stay in sync with it:
@@ -181,11 +207,11 @@ owns and must stay in sync with it:
 - **`multi-target-build-reviewer`** — the per-target build/config divergence lens. Verify its
   facts against the build wiring: the target set (esp32/s3/c3/c6), per-target bootloader
   offsets (`0x1000` classic esp32 / `0x0` s3·c3·c6 — `boot_offset()` in
-  `build-pages.sh`), the image-suffix map across `scripts/ci-build-all.sh` +
+  `ci-sign-artifacts.sh`/`build-pages.sh`), the image-suffix map across `scripts/ci-sign-artifacts.sh` +
   `scripts/build-pages.sh` + `main/ota_update.cpp` (`TESLA_OTA_IMG_SUFFIX`), the app-size gate
   (`slot − 32 KB` = `0x1e8000`), the tesla-ble target list
-  (`main/idf_component.yml`, Component-Manager-enforced), the all-target anti-replay
-  patch wiring (`patches/tesla-ble/` + `scripts/apply-tesla-ble-patches.sh` + root CMake), and
+  (`main/idf_component.yml`, Component-Manager-enforced), the complete ordered all-target patch-series
+  wiring (`patches/tesla-ble/` + `scripts/apply-tesla-ble-patches.sh` + root CMake), and
   the display/LED opt-in Kconfig. Complementary to
   `project-review`, not a firmware-logic reviewer.
 
@@ -195,9 +221,11 @@ re-read the doc that documents it.
 ## The PR gate
 
 `require-skill-audit.sh` (PreToolUse in `.claude/settings.json`) refuses to **publish to a PR** —
-`gh pr create` / `git push` in a local terminal, or `mcp__github__create_pull_request` /
-`mcp__github__push_files` in the web/remote environment — until the PR's `/skill-audit` checkbox
-is ticked **and** stamped with the commit being published. There is **no file marker**: the
+`gh pr create` / `git push` locally, or an exactly repo/ref-bound
+`mcp__github__create_pull_request` remotely — until the PR's `/skill-audit` checkbox is ticked
+**and** stamped with the commit being published. `mcp__github__push_files` always fails closed:
+its commit is created server-side only after PreToolUse, so no local audit SHA can bind it. There
+is **no file marker**: the
 pass-state lives in the PR body itself (see `.claude/hooks/pr-gate-lib.sh`). The *merge* into main
 is **not** gated here — that is the sibling `require-project-review.sh`. After a clean audit with
 no unfixed drift, tick + stamp the box with the head commit:
@@ -206,17 +234,35 @@ no unfixed drift, tick + stamp the box with the head commit:
 - [x] `/skill-audit` clean — PR create/push gate @ <short-sha>    # <short-sha> = git rev-parse --short=12 HEAD
 ```
 
-**What the gate recognises.** `gate_bash_actions` in `pr-gate-lib.sh` splits compound Bash input
-into conservative shell-like segments and recognises standalone, chained, grouped, assignment-,
-`env`-, `command`-, and common `git -C`-wrapped publish actions. An unmatched command is not a
-lenient verdict but NO verdict, so the old raw-line matcher allowed chained actions having checked
-nothing (`scripts/test-pr-gates.sh` pins this). Every guarded action is reported; a Bash call with
-more than one create/push is blocked so checking the first cannot authorize a later target. The
-split is textual and deliberately conservative: separators inside quoted data can cause an extra
-block, so unusual quoted shell syntax should keep publish actions in separate tool calls.
+**What the gate recognises.** `gate_bash_actions` in `pr-gate-lib.sh` splits Bash input into
+conservative shell-like segments and recognises direct plus wrapped/path-qualified publish
+actions. A create/push/merge must be the **only shell segment** in its tool call: a preceding
+commit/config/cd/PR edit would mutate the state after PreToolUse checked it. Git-global options,
+repository/config-affecting `GIT_*`/`env` prefixes, env cwd changes, GH repo/host overrides,
+unknown/path-qualified executables and foreign repositories are recognised but fail closed;
+diagnostic `GIT_TRACE*` and unrelated single-segment assignments remain usable. An unmatched
+action used to mean NO verdict, which is why `scripts/test-pr-gates.sh` adversarially pins every
+spelling. Dynamic executable/subcommand/argv expansion, command-position globs, per-command alias
+config and configured Git/GH aliases are unsafe; parsing is deliberately conservative, so keep
+each guarded action in a separate Bash call.
 
-For a **new** PR, put that line in the body you submit (`gh pr create --body-file …` or the MCP
-`create_pull_request` body — the gate reads it directly, no network). For an **existing** PR, edit
+For Bash `git push`, the gate also resolves the refspec before trusting the stamp. Only one push
+from the current project of the current `HEAD` to the current branch is supported
+(`git push origin <current-branch>`; safe current-branch `HEAD:<branch>` is equivalent). The sole
+remote must be `origin`, whose one fetch and push URL must agree. Git global/env repo/config
+context, another remote/source/destination, multiple refspecs, tag/all/mirror/delete pushes,
+`push.followTags`, quoted/ambiguous syntax or custom multi-ref push configuration fail closed:
+otherwise a checkbox
+stamped for local HEAD could publish unaudited bytes from another repository or ref.
+
+For a **new** PR, put that line in the body you submit. In Bash, an exact `--body-file`/`-F` or
+literal single-quoted `--body`/`-b` must be the **first argument after `gh pr create`**; put all
+other options after that body pair. The structured MCP `create_pull_request` body is handled
+separately and is accepted only for an explicit github.com origin when `owner/repo`, the current
+branch and its already-pushed
+remote SHA exactly match this worktree/local HEAD. The gate reads **only that actual body**, never the title/other arguments; a body
+option after another option, multiple body sources, duplicate gate lines, dynamic expansion,
+stdin, redirection and symlink body files fail closed. For an **existing** PR, edit
 its body (`gh pr edit <pr> --body-file …`, or the GitHub MCP update tool) before pushing. A push to
 a branch that has **no PR yet** is allowed — that is not publishing to a PR; the create gate is the
 chokepoint. But if GitHub is **unreadable** (no `gh` and no `GH_TOKEN`/`GITHUB_TOKEN` — e.g.
