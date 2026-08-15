@@ -53,9 +53,10 @@ action_count() { # action_count <cmd> <create|merge|push>
 
 push_anchor_check() { # push_anchor_check <yes|no> <args-after-push> <label>
   local want="$1" args="$2" label="$3" got=no resolved
+  local project="${PUSH_ANCHOR_PROJ:-$PWD}"
   n=$((n + 1))
-  if resolved="$(gate_push_head_sha "$args" 2>/dev/null)" \
-      && [ "$resolved" = "$(git rev-parse HEAD 2>/dev/null)" ]; then
+  if resolved="$(GATE_PROJ="$project" gate_push_head_sha "$args" 2>/dev/null)" \
+      && [ "$resolved" = "$(git -C "$project" rev-parse HEAD 2>/dev/null)" ]; then
     got=yes
   fi
   if [ "$got" != "$want" ]; then
@@ -589,7 +590,22 @@ if [ "$(gate_bash_actions "$GHPR create --title x $SEP $GITP" | wc -l | tr -d ' 
 fi
 
 # ── a push audit stamp is valid only for the commit/ref actually being published ──
-current_branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null)"
+# GitHub Actions checks out a synthetic pull-request merge commit with detached HEAD. Exercise the
+# branch/ref contract in a deterministic repository fixture so the same cases cover local branches
+# and CI merge checkouts instead of silently depending on the caller's checkout mode.
+gate_tmp="$(mktemp -d "${TMPDIR:-/tmp}/tesla-pr-gates.XXXXXX")"
+trap 'rm -rf -- "$gate_tmp"' EXIT
+PUSH_ANCHOR_PROJ="$gate_tmp/push-anchor"
+current_branch=gate-test-branch
+mkdir -p "$PUSH_ANCHOR_PROJ"
+git -C "$PUSH_ANCHOR_PROJ" init -q
+git -C "$PUSH_ANCHOR_PROJ" config user.name test
+git -C "$PUSH_ANCHOR_PROJ" config user.email test@example.invalid
+git -C "$PUSH_ANCHOR_PROJ" config commit.gpgsign false
+git -C "$PUSH_ANCHOR_PROJ" commit --allow-empty -qm anchor
+git -C "$PUSH_ANCHOR_PROJ" branch -M "$current_branch"
+git -C "$PUSH_ANCHOR_PROJ" remote add origin \
+  https://github.com/fixture-owner/fixture-repo.git
 push_anchor_check yes "origin $current_branch" 'current branch push resolves to HEAD'
 push_anchor_check yes "--set-upstream origin $current_branch" 'upstream current branch resolves to HEAD'
 push_anchor_check yes "origin HEAD:$current_branch" 'explicit HEAD to current branch resolves to HEAD'
@@ -832,8 +848,6 @@ e2e() {  # e2e <expected-exit> <cmd> <label>
 
 head_sha="$(git rev-parse --short=12 HEAD 2>/dev/null)"
 if [ -n "$head_sha" ] && command -v jq >/dev/null 2>&1; then
-  gate_tmp="$(mktemp -d "${TMPDIR:-/tmp}/tesla-pr-gates.XXXXXX")"
-  trap 'rm -rf -- "$gate_tmp"' EXIT
   other_repo="$gate_tmp/other-repo"
   mkdir -p "$other_repo"
   git -C "$other_repo" init -q
