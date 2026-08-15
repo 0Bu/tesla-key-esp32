@@ -175,7 +175,7 @@ static void test_vin_transition() {
     CHECK(marker.previous_key_id == "AA:BB:CC:DD");
 
     // CommitUnknown/CleanupPending keep this exact POST-staged marker armed for boot recovery.
-    for (const auto pair : {
+    for (const auto& pair : {
              std::pair{tk::KeyRotationResult::CommitUnknown, A::RecoverAmbiguousIdentity},
              std::pair{tk::KeyRotationResult::CleanupPending, A::RecoverCommittedIdentity}}) {
         tk::VinTransitionMarker staged;

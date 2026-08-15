@@ -33,6 +33,5 @@ add_executable(nvs_storage_tests
 target_include_directories(nvs_storage_tests PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/stubs
     ${CMAKE_CURRENT_SOURCE_DIR}/../main
-    ${CMAKE_CURRENT_SOURCE_DIR}/../managed_components/yoziru__tesla-ble/include
 )
 add_test(NAME nvs_storage_tests COMMAND nvs_storage_tests)

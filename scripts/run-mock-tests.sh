@@ -32,7 +32,7 @@ else
     "$CXX" -std=c++17 -Wall -Wextra -Werror -Imain -o "$BUILD_DIR/logic_tests" test/test_logic.cpp
     "$BUILD_DIR/logic_tests"
     "$CXX" -std=c++17 -Wall -Wextra -Werror \
-        -Itest/stubs -Imain -Imanaged_components/yoziru__tesla-ble/include \
+        -Itest/stubs -Imain \
         -o "$BUILD_DIR/nvs_storage_tests" \
         test/test_nvs_storage.cpp main/nvs_storage.cpp main/config_blob.cpp
     "$BUILD_DIR/nvs_storage_tests"
