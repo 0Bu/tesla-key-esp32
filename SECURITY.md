@@ -21,6 +21,13 @@ Relevant attackers:
 rather than the RF-off pseudo-random RNG. Devices first-keyed before the entropy fix should
 re-key + re-pair (`/gen_keys?force=1`, then re-enrol).
 
+**Fail-closed key rotation:** the tesla-ble patch series reports key-generation and NVS
+persistence failures and restores the previous in-memory key when the replacement cannot be
+committed. The controller blocks signing, pairing, status polling, and background commands while
+the runtime key identity is ambiguous; it only enables them after the durable key is verified and
+the previous sessions are cleared. VIN changes use a persistent transition journal so interrupted
+cross-namespace updates are completed or rolled back on the next boot.
+
 **BLE response anti-replay:** the pinned `yoziru/tesla-ble` v5.1.1 detects an invalid
 CarServer response counter but, upstream, still dispatches that response to telemetry callbacks
 and the command FIFO. The repository applies `patches/tesla-ble/` to every target at build time
@@ -120,6 +127,20 @@ Trust model:
   anything not strictly newer than what is running. Checking the image itself (not the
   manifest) also defeats a host that advertises a new version but serves an old binary. No
   eFuse anti-rollback is burned (by design), so this is the downgrade defense.
+
+The **USB Web Serial installer** has a separate, explicit data contract. `manifest.json` schema
+`layoutVersion:2` binds the site to one 40-hex `sourceSha`, exactly four chip families and, for each
+family, bootloader/partition/app/otadata in fixed roles and offsets. Every part carries its expected
+byte length and SHA-256; the browser downloads and verifies all four before erasing/writing, writes
+the first three immutable parts, and writes `ota_data_initial@0xf000` last as the activation step.
+This detects partial/mixed Pages deployments and corrupted downloads. It does not turn a compromised
+Pages origin into a trust anchor — an explicit USB install still trusts the site selected by the
+operator — while OTA app authenticity remains protected independently by RSA verification.
+
+The installer executes no runtime CDN code. The official npm `esptool-js@0.6.1` native-ESM bundle
+and Apache-2.0 license are stored under `docs/vendor/`; `scripts/verify-vendored-esptool-js.sh` pins
+the npm tarball SRI and both extracted SHA-256 values. Pages uses `script-src 'self'` and serves that
+reviewed copy same-origin.
 - **Rollback is enabled** (`CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE`); `main.cpp` defers
   `esp_ota_mark_app_valid_cancel_rollback()` to a health gate (`logic/health_gate.hpp`) that keeps
   rollback armed until a freshly-flashed image has both run ≈ 90 s **and proven it still has a
@@ -256,7 +277,10 @@ Compilation and signing are separate trust domains:
    `scripts/ci-build-all.sh` also projects the 64 KiB padding plus 4 KiB signature sector, so an
    image cannot pass compilation and then unexpectedly overflow its OTA slot when signed. Main
    and PR builds also use separate ccache namespaces, so PR-produced compiler objects never feed
-   a build that will be signed and published.
+   a build that will be signed and published. Inside the pinned container it additionally builds
+   one target twice byte-for-byte and exercises the real signer + four-target manifest path with a
+   disposable RSA-3072 key. A PR can therefore break neither reproducibility nor release assembly
+   unnoticed; the production key remains absent.
 3. On `main`, the `publish` job enters `firmware-signing`, checks that the artifact SHA/version
    match the run, rejects symlinks, and runs the trusted `scripts/ci-sign-artifacts.sh` from that
    exact main commit. Only this job materialises the key; it signs the prebuilt app bytes and
@@ -265,9 +289,13 @@ Compilation and signing are separate trust domains:
    to a same-repository PR after reviewing it. After its unprivileged build succeeds,
    `.github/workflows/signed-pr-preview.yml` runs from the default branch via `workflow_run`,
    verifies that the PR head is current, then waits for the protected Environment. It repeats the
-   head/repository/state/label checks after that wait, before provisioning the key. The key job
+   head/repository/state/label checks after that wait, before provisioning the key **and again
+   immediately before publishing**. The key job
    treats the PR artifact only as data and never checks out or executes the PR. Fork PRs are
-   ineligible. Without this labelled approval, every PR remains compile-only and unsigned.
+   ineligible. Without this labelled approval, every PR remains compile-only and unsigned. Preview
+   signing and cleanup share one per-PR concurrency group, so close/force-push/label-removal cancels
+   an in-flight publisher. A daily and manually dispatchable reconciliation removes any gh-pages
+   preview whose PR is no longer open, same-repository, labelled and at the manifest's `sourceSha`.
 
 The signer uses the immutable digest-pinned ESP-IDF image from `esp-idf-toolchain.txt`; rotating
 that digest is therefore a security-sensitive review. For higher assurance, keep the key fully
@@ -347,6 +375,21 @@ With flash encryption in Release mode the device only accepts **signed, and effe
 encrypted** images. The browser web-installer (esptool-js over Web Serial) writes *plaintext* parts
 and can no longer update such a device. After hardening, deliver updates via **signed
 OTA** or `idf.py flash` from a trusted machine. Plan the update path before burning.
+
+## Development tooling trust boundary
+
+Repository CI actions are referenced by full commit SHA, and the firmware compiler/signing tools
+run in the tag-plus-manifest-digest image from `esp-idf-toolchain.txt`. The GitHub-hosted runner OS
+is still a managed external service, so only the digest-pinned container is the firmware-toolchain
+identity; orchestration, host tests and GitHub itself remain part of the CI trust boundary.
+
+The project MCP configuration invokes exact `@upstash/context7-mcp@4.0.2`, not a floating npm tag.
+That prevents an unnoticed `latest` upgrade, but it is not a privacy sandbox or an npm integrity
+lock: first use can download executable package code, and any prompt/code explicitly sent to the
+external Context7 service crosses the local-agent boundary. Never send signing keys, credential
+files, NVS dumps, unredacted VIN/BLE captures or CI secrets through it. Disable the project MCP
+server locally when policy forbids that external service; neither firmware builds nor CI depend on
+it.
 
 ## Other notes
 

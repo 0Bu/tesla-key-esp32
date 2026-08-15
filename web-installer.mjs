@@ -3,6 +3,15 @@ const CDC_PRODUCT_IDS = new Set([0x0002, 0x0003, 0x1001, 0x1002, 0x1003]);
 const MAX_MONITOR_CHARS = 100000;
 const DEVICE_PROBE_TIMEOUT_MS = 10000;
 const TRANSPORT_CLEANUP_TIMEOUT_MS = 2000;
+const FLASH_OPERATION_TIMEOUT_MS = 180000;
+const BOOT_VERIFICATION_TIMEOUT_MS = 20000;
+const MANIFEST_LAYOUT_VERSION = 2;
+const OTADATA_OFFSET = 0xf000;
+const OTADATA_SIZE = 0x2000;
+const PARTITION_TABLE_OFFSET = 0x8000;
+const APP_OFFSET = 0x20000;
+const APP_SLOT_SIZE = 0x1f0000;
+const SUPPORTED_CHIPS = ["ESP32", "ESP32-S3", "ESP32-C3", "ESP32-C6"];
 const ANSI_CONTROL_SEQUENCE = /\x1B\[[0-?]*[ -/]*[@-~]/g;
 const sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
@@ -54,6 +63,19 @@ async function withTimeout(operation, milliseconds, timeoutError) {
     return await Promise.race([Promise.resolve(operation), timeout]);
   } finally {
     clearTimeout(timeoutId);
+  }
+}
+
+export async function stopSerialReader(reader, loop, timeoutMs = TRANSPORT_CLEANUP_TIMEOUT_MS) {
+  if (reader && typeof reader.cancel === "function") {
+    try {
+      await withTimeout(reader.cancel(), timeoutMs, new Error("Stopping the serial reader timed out."));
+    } catch (_error) {}
+  }
+  if (loop) {
+    try {
+      await withTimeout(loop, timeoutMs, new Error("Stopping the serial read loop timed out."));
+    } catch (_error) {}
   }
 }
 
@@ -140,13 +162,92 @@ export function combinedProgress(fileArray, fileIndex, written, total) {
   return Math.min(100, Math.max(0, Math.floor(((completedBytes + currentBytes) / totalBytes) * 100)));
 }
 
-export async function fetchFirmwareParts(build, manifestUrl, fetchImpl = fetch) {
-  if (!build || !Array.isArray(build.parts) || build.parts.length === 0) {
-    throw errorWithName("InvalidManifestError", "The firmware manifest contains no flash parts.");
+function expectedPartLayout(chipFamily) {
+  return [
+    { role: "bootloader", offset: chipFamily === "ESP32" ? 0x1000 : 0, maxSize: chipFamily === "ESP32" ? 0x7000 : 0x8000 },
+    { role: "partition table", offset: PARTITION_TABLE_OFFSET, maxSize: 0x1000 },
+    { role: "application", offset: APP_OFFSET, maxSize: APP_SLOT_SIZE },
+    { role: "OTA selector", offset: OTADATA_OFFSET, exactSize: OTADATA_SIZE }
+  ];
+}
+
+function manifestError(message) {
+  return errorWithName("InvalidManifestError", message);
+}
+
+function validateBuild(build, manifestUrl) {
+  if (!build || !SUPPORTED_CHIPS.includes(build.chipFamily)) {
+    throw manifestError("The firmware manifest contains an unsupported chip family.");
+  }
+  if (!Array.isArray(build.parts) || build.parts.length !== 4) {
+    throw manifestError(`${build.chipFamily} must contain exactly four flash parts.`);
   }
 
-  return Promise.all(build.parts.map(async (part) => {
-    const url = new URL(part.path, manifestUrl).toString();
+  const base = new URL(manifestUrl);
+  const baseDirectory = new URL("./", base);
+  const layout = expectedPartLayout(build.chipFamily);
+  build.parts.forEach((part, index) => {
+    const expected = layout[index];
+    if (!part || !Number.isSafeInteger(part.offset) || part.offset !== expected.offset) {
+      throw manifestError(`${build.chipFamily} has an invalid ${expected.role} offset.`);
+    }
+    if (!Number.isSafeInteger(part.size) || part.size <= 0 ||
+        (expected.exactSize !== undefined ? part.size !== expected.exactSize : part.size > expected.maxSize)) {
+      throw manifestError(`${build.chipFamily} has an invalid ${expected.role} size.`);
+    }
+    if (typeof part.sha256 !== "string" || !/^[0-9a-f]{64}$/.test(part.sha256)) {
+      throw manifestError(`${build.chipFamily} has an invalid ${expected.role} SHA-256.`);
+    }
+    if (typeof part.path !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(part.path)) {
+      throw manifestError(`${build.chipFamily} has an unsafe ${expected.role} path.`);
+    }
+    const partUrl = new URL(part.path, baseDirectory);
+    if (partUrl.origin !== base.origin || !partUrl.href.startsWith(baseDirectory.href) || partUrl.search || partUrl.hash) {
+      throw manifestError(`${build.chipFamily} ${expected.role} must be a same-directory URL.`);
+    }
+  });
+  return build;
+}
+
+export function validateManifest(manifest, manifestUrl) {
+  if (!manifest || manifest.layoutVersion !== MANIFEST_LAYOUT_VERSION) {
+    throw manifestError(`Firmware manifest layoutVersion must be ${MANIFEST_LAYOUT_VERSION}.`);
+  }
+  if (typeof manifest.version !== "string" ||
+      !/^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?$/.test(manifest.version)) {
+    throw manifestError("The firmware manifest contains an invalid version.");
+  }
+  if (typeof manifest.sourceSha !== "string" || !/^[0-9a-f]{40}$/.test(manifest.sourceSha)) {
+    throw manifestError("The firmware manifest contains an invalid source commit.");
+  }
+  if (typeof manifest.new_install_prompt_erase !== "boolean") {
+    throw manifestError("The firmware manifest must declare its first-install erase policy.");
+  }
+  if (!Array.isArray(manifest.builds) || manifest.builds.length !== SUPPORTED_CHIPS.length) {
+    throw manifestError("The firmware manifest must contain exactly four target builds.");
+  }
+  const families = manifest.builds.map((build) => build && build.chipFamily);
+  if (SUPPORTED_CHIPS.some((family) => families.filter((item) => item === family).length !== 1)) {
+    throw manifestError("The firmware manifest target set is incomplete or duplicated.");
+  }
+  manifest.builds.forEach((build) => validateBuild(build, manifestUrl));
+  return manifest;
+}
+
+export async function sha256Hex(data, cryptoImpl = globalThis.crypto) {
+  if (!cryptoImpl || !cryptoImpl.subtle || typeof cryptoImpl.subtle.digest !== "function") {
+    throw errorWithName("IntegrityCheckError", "This browser cannot verify firmware SHA-256 hashes.");
+  }
+  const digest = new Uint8Array(await cryptoImpl.subtle.digest("SHA-256", data));
+  return Array.from(digest, (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+export async function fetchFirmwareParts(build, manifestUrl, fetchImpl = fetch, cryptoImpl = globalThis.crypto) {
+  validateBuild(build, manifestUrl);
+
+  const baseDirectory = new URL("./", manifestUrl);
+  return Promise.all(build.parts.map(async (part, index) => {
+    const url = new URL(part.path, baseDirectory).toString();
     const response = await fetchImpl(url, { cache: "no-store" });
     if (!response.ok) {
       throw errorWithName(
@@ -154,11 +255,101 @@ export async function fetchFirmwareParts(build, manifestUrl, fetchImpl = fetch) 
         `Downloading ${part.path} failed with HTTP ${response.status}.`
       );
     }
+    const data = new Uint8Array(await response.arrayBuffer());
+    if (data.byteLength !== part.size) {
+      throw errorWithName(
+        "FirmwareIntegrityError",
+        `${part.path} has ${data.byteLength} bytes; the signed manifest requires ${part.size}.`
+      );
+    }
+    const actualHash = await sha256Hex(data, cryptoImpl);
+    if (actualHash !== part.sha256) {
+      throw errorWithName("FirmwareIntegrityError", `${part.path} failed its SHA-256 integrity check.`);
+    }
     return {
       address: part.offset,
-      data: new Uint8Array(await response.arrayBuffer())
+      data,
+      role: expectedPartLayout(build.chipFamily)[index].role
     };
   }));
+}
+
+export function bootLogHasVersion(text, expectedVersion) {
+  if (typeof expectedVersion !== "string" || !expectedVersion) return false;
+  const escaped = expectedVersion.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`(?:App version:\\s*|BOOT version=)${escaped}(?:\\s|$)`).test(stripSerialAnsi(text));
+}
+
+export async function verifyBootVersion({
+  port,
+  expectedVersion,
+  onLog = () => {},
+  timeoutMs = BOOT_VERIFICATION_TIMEOUT_MS,
+  cleanupTimeoutMs = TRANSPORT_CLEANUP_TIMEOUT_MS,
+  delay = sleep
+}) {
+  if (!port) throw errorWithName("BootVerificationError", "The serial port disappeared before boot verification.");
+  if (typeof expectedVersion !== "string" || !expectedVersion) {
+    throw errorWithName("BootVerificationError", "The expected firmware version is missing.");
+  }
+
+  const deadline = Date.now() + timeoutMs;
+  let lastOpenError = null;
+  while (!port.readable && Date.now() < deadline) {
+    try {
+      await withTimeout(
+        port.open({ baudRate: 115200, bufferSize: 8192 }),
+        Math.min(2000, Math.max(1, deadline - Date.now())),
+        new Error("Opening the serial port timed out.")
+      );
+    } catch (error) {
+      lastOpenError = error;
+      await delay(Math.min(250, Math.max(0, deadline - Date.now())));
+    }
+  }
+  if (!port.readable) {
+    throw errorWithName(
+      "BootVerificationError",
+      `The flashed device did not reconnect for version verification${lastOpenError ? `: ${errorMessage(lastOpenError)}` : "."}`
+    );
+  }
+
+  const reader = port.readable.getReader();
+  const decoder = new TextDecoder();
+  let captured = "";
+  let readLoop;
+  try {
+    // Generate a fresh, observable boot after the monitor has acquired the stream. Some native USB
+    // targets re-enumerate here; a read error is still a failed verification, never silent success.
+    try { await resetToUserFirmware(port, delay); } catch (error) { onLog(`Automatic verification reset unavailable: ${errorMessage(error)}\n`); }
+    readLoop = (async () => {
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) return false;
+        const text = decoder.decode(value, { stream: true });
+        onLog(text);
+        captured = `${captured}${text}`.slice(-32768);
+        if (bootLogHasVersion(captured, expectedVersion)) return true;
+      }
+    })();
+    const verified = await withTimeout(
+      readLoop,
+      Math.max(1, deadline - Date.now()),
+      errorWithName("BootVerificationError", `Timed out waiting for firmware ${expectedVersion} to boot.`)
+    );
+    if (!verified) {
+      throw errorWithName("BootVerificationError", `The serial stream ended before firmware ${expectedVersion} was observed.`);
+    }
+    return { version: expectedVersion, log: captured };
+  } finally {
+    await stopSerialReader(reader, readLoop, cleanupTimeoutMs);
+    try { reader.releaseLock(); } catch (_error) {}
+    if (port.readable || port.writable) {
+      try {
+        await withTimeout(port.close(), cleanupTimeoutMs, new Error("Closing boot verification timed out."));
+      } catch (_error) {}
+    }
+  }
 }
 
 export async function probeDevice({
@@ -211,8 +402,11 @@ export async function flashDevice({
   TransportCtor,
   ESPLoaderCtor,
   fetchImpl = fetch,
+  cryptoImpl = globalThis.crypto,
   onState = () => {},
-  onLog = () => {}
+  onLog = () => {},
+  timeoutMs = FLASH_OPERATION_TIMEOUT_MS,
+  cleanupTimeoutMs = TRANSPORT_CLEANUP_TIMEOUT_MS
 }) {
   const transport = new TransportCtor(port);
   const loader = new ESPLoaderCtor({
@@ -225,6 +419,8 @@ export async function flashDevice({
   let completed = false;
 
   try {
+    return await withTimeout((async () => {
+    validateManifest(manifest, manifestUrl);
     onState({ stage: "connecting", percentage: 0, message: "Checking device" });
     await loader.main();
     if (typeof loader.flashId === "function") await loader.flashId();
@@ -239,36 +435,49 @@ export async function flashDevice({
     }
 
     onState({ stage: "preparing", percentage: 0, message: "Loading firmware" });
-    const fileArray = await fetchFirmwareParts(build, manifestUrl, fetchImpl);
+    const fileArray = await fetchFirmwareParts(build, manifestUrl, fetchImpl, cryptoImpl);
 
     if (eraseFirst) {
       onState({ stage: "erasing", percentage: 0, message: "Erasing flash" });
       await loader.eraseFlash();
     }
 
-    onState({ stage: "writing", percentage: 0, message: "Writing firmware" });
-    await loader.writeFlash({
-      fileArray,
-      flashSize: "keep",
-      flashMode: "keep",
-      flashFreq: "keep",
-      eraseAll: false,
-      compress: true,
-      reportProgress(fileIndex, written, total) {
-        onState({
-          stage: "writing",
-          percentage: combinedProgress(fileArray, fileIndex, written, total),
-          message: "Writing firmware"
-        });
-      }
-    });
+    const writePhase = async (phaseFiles, firstGlobalIndex, stage, message) => {
+      onState({
+        stage,
+        percentage: combinedProgress(fileArray, firstGlobalIndex, 0, phaseFiles[0].data.length),
+        message
+      });
+      await loader.writeFlash({
+        fileArray: phaseFiles,
+        flashSize: "keep",
+        flashMode: "keep",
+        flashFreq: "keep",
+        eraseAll: false,
+        compress: true,
+        reportProgress(fileIndex, written, total) {
+          onState({
+            stage,
+            percentage: combinedProgress(fileArray, firstGlobalIndex + fileIndex, written, total),
+            message
+          });
+        }
+      });
+    };
+
+    // Keep-mode may start on ota_1. Write bootloader/table/new ota_0 first; only after all of those
+    // succeeded write ota_data_initial in its own final phase, atomically selecting the new ota_0.
+    // A failure before this phase leaves the previously active image selected and bootable.
+    await writePhase(fileArray.slice(0, 3), 0, "writing", "Writing firmware");
+    await writePhase(fileArray.slice(3), 3, "activating", "Activating new firmware");
 
     onState({ stage: "restarting", percentage: 100, message: "Starting firmware" });
     await loader.after("soft_reset");
     completed = true;
     return { chipFamily, build };
+    })(), timeoutMs, errorWithName("FlashTimeoutError", "Firmware installation timed out before it completed."));
   } finally {
-    await settleTransport(transport, loader, completed ? undefined : "soft_reset");
+    await settleTransport(transport, loader, completed ? undefined : "soft_reset", cleanupTimeoutMs);
   }
 }
 
@@ -278,7 +487,8 @@ export function attachWebInstaller({
   TransportCtor,
   ESPLoaderCtor,
   fetchImpl = fetch,
-  manifestPath = "manifest.json"
+  manifestPath = "manifest.json",
+  verifyBootImpl = verifyBootVersion
 }) {
   if (!root) throw new Error("The installer root is missing.");
 
@@ -303,6 +513,9 @@ export function attachWebInstaller({
   const unsupported = element("serial-unsupported");
   const versionLine = element("firmware-version");
   const versionValue = element("firmware-version-value");
+  const sourceLink = element("firmware-source-link");
+  const sourceValue = element("firmware-source-value");
+  const previewLink = element("preview-source-link");
   const steps = Array.from(root.querySelectorAll(".installer-step"));
 
   let selectedPort = null;
@@ -393,12 +606,7 @@ export function attachWebInstaller({
     const loop = monitorLoop;
     monitorReader = null;
     monitorLoop = null;
-    if (reader) {
-      try { await reader.cancel(); } catch (_error) {}
-    }
-    if (loop) {
-      try { await loop; } catch (_error) {}
-    }
+    await stopSerialReader(reader, loop);
     await closePort();
   };
 
@@ -429,7 +637,12 @@ export function attachWebInstaller({
           if (monitorReader === reader) appendStatusLine(`Serial monitor stopped: ${errorMessage(error)}`);
         } finally {
           try { reader.releaseLock(); } catch (_error) {}
-          if (monitorReader === reader) monitorReader = null;
+          if (monitorReader === reader) {
+            monitorReader = null;
+            monitorLoop = null;
+            monitorLive.textContent = "Stopped";
+            monitorLive.dataset.state = "stopped";
+          }
         }
       })();
 
@@ -521,7 +734,12 @@ export function attachWebInstaller({
       installButton.disabled = !manifest;
       monitorButton.disabled = false;
       markSteps(2);
-      setPageStatus("Device ready. Choose how the firmware should be installed.", "success");
+      setPageStatus(
+        manifest.new_install_prompt_erase
+          ? "Device ready. Erase is selected for a first install; choose Keep only for an existing dual-OTA installation."
+          : "Device ready. Choose how the firmware should be installed.",
+        "success"
+      );
       appendStatusLine(`${result.chipFamily} detected and compatible`);
     } catch (error) {
       await closePort();
@@ -569,12 +787,19 @@ export function attachWebInstaller({
           setProgress(state.message, state.percentage);
         }
       });
+      setProgress("Verifying firmware boot", 100);
+      setPageStatus(`Firmware written. Waiting for version ${manifest.version} to boot…`);
+      await verifyBootImpl({
+        port: selectedPort,
+        expectedVersion: manifest.version,
+        onLog: appendMonitor
+      });
       root.dataset.flashing = "false";
       root.dataset.finished = "true";
       connectionLabel.textContent = "Restart complete";
       setProgress("Installation complete", 100);
-      setPageStatus("Firmware installed successfully. The ESP has restarted.", "success");
-      appendStatusLine("Firmware installed successfully; device restarted");
+      setPageStatus(`Firmware ${manifest.version} booted and was verified successfully.`, "success");
+      appendStatusLine(`Firmware ${manifest.version} booted and passed version verification`);
       markSteps(4);
     } catch (error) {
       root.dataset.flashing = "false";
@@ -648,15 +873,34 @@ export function attachWebInstaller({
 
   const manifestUrl = new URL(manifestPath, location.href).toString();
   fetchImpl(manifestUrl, { cache: "no-store" })
-    .then((response) => response.ok ? response.json() : null)
+    .then((response) => {
+      if (!response.ok) throw new Error(`Firmware manifest returned HTTP ${response.status}.`);
+      return response.json();
+    })
     .then((loadedManifest) => {
-      if (!loadedManifest || !Array.isArray(loadedManifest.builds)) {
-        throw new Error("Firmware manifest unavailable.");
-      }
-      manifest = loadedManifest;
+      manifest = validateManifest(loadedManifest, manifestUrl);
       if (typeof manifest.version === "string" && manifest.version) {
         versionValue.textContent = manifest.version;
         versionLine.hidden = false;
+      }
+      const shortSha = manifest.sourceSha.slice(0, 12);
+      if (sourceLink && sourceValue) {
+        sourceValue.textContent = shortSha;
+        sourceLink.href = `https://github.com/0Bu/tesla-key-esp32/commit/${manifest.sourceSha}`;
+        sourceLink.title = `Source commit ${manifest.sourceSha}`;
+        sourceLink.hidden = false;
+      }
+      if (previewLink && location.pathname.match(/\/PR\/\d+\//)) {
+        previewLink.href = `https://github.com/0Bu/tesla-key-esp32/commit/${manifest.sourceSha}`;
+        previewLink.textContent = `View source commit ${shortSha}`;
+      }
+      if (manifest.new_install_prompt_erase) {
+        const eraseOption = root.querySelector('input[name="install-mode"][value="erase"]');
+        const keepBadge = element("keep-recommended");
+        const eraseBadge = element("erase-recommended");
+        if (eraseOption) eraseOption.checked = true;
+        if (keepBadge) keepBadge.hidden = true;
+        if (eraseBadge) eraseBadge.hidden = false;
       }
       if (selectedPort && !busy) installButton.disabled = false;
       if (!selectedPort && !busy && serialSupported) connectButton.disabled = false;
