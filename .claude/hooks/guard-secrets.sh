@@ -17,8 +17,9 @@
 # an un-ignored path while chasing an unrelated bug. Those are the realistic leaks, and they all
 # look like ordinary work at the moment they happen.
 #
-# ASKS rather than blocks: signing IS a legitimate operation (scripts/ci-build-all.sh, the local
-# flash path), so the point is to make a key touch deliberate and visible, not impossible.
+# ASKS rather than blocks: signing IS a legitimate operation (scripts/ci-sign-artifacts.sh and the
+# explicitly documented local flash path), so the point is to make a key touch deliberate and
+# visible, not impossible.
 # Fails open. Reads the PreToolUse JSON payload on stdin (matcher: Read|Edit|Write|Bash).
 set -u
 

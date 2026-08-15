@@ -26,10 +26,93 @@
 
 static const char* TAG = "ota";
 
+// One atomic owner word closes both halves of the OTA/identity TOCTOU window. A separate
+// `s_running` boolean can answer status questions, but cannot serialize "checked false, then OTA
+// started". Every OTA worker owns Ota from before task creation until it exits/reboots; every
+// key/VIN transaction owns IdentityMutation for its complete journal + NVS mutation lifetime.
+static std::atomic<tk::OtaIdentityGateState> s_operation_gate{
+    tk::OtaIdentityGateState::Idle};
+
+static bool try_begin_ota_operation() {
+    auto expected = s_operation_gate.load(std::memory_order_acquire);
+    if (!tk::ota_operation_may_start(expected)) return false;
+    return s_operation_gate.compare_exchange_strong(
+        expected, tk::OtaIdentityGateState::Ota,
+        std::memory_order_acq_rel, std::memory_order_acquire);
+}
+
+static void finish_operation(tk::OtaIdentityGateState owner) {
+    auto expected = owner;
+    if (!s_operation_gate.compare_exchange_strong(
+            expected, tk::OtaIdentityGateState::Idle,
+            std::memory_order_acq_rel, std::memory_order_acquire)) {
+        // Never clear a different owner's gate: doing so would turn an invariant violation into
+        // permission for a real overlapping reboot/mutation. Leave it fail-closed and diagnose.
+        ESP_LOGE(TAG, "OTA/identity operation gate owner mismatch (expected=%d, actual=%d)",
+                 static_cast<int>(owner), static_cast<int>(expected));
+    }
+}
+
+tk::OtaVerificationState ota_verification_state() {
+    const esp_partition_t* running = esp_ota_get_running_partition();
+    if (!running) return tk::OtaVerificationState::Unknown;
+
+    esp_ota_img_states_t state{};
+    if (esp_ota_get_state_partition(running, &state) != ESP_OK)
+        return tk::OtaVerificationState::Unknown;
+    switch (state) {
+        case ESP_OTA_IMG_UNDEFINED:
+        case ESP_OTA_IMG_VALID:
+            return tk::OtaVerificationState::Stable;
+        case ESP_OTA_IMG_NEW:
+        case ESP_OTA_IMG_PENDING_VERIFY:
+            return tk::OtaVerificationState::PendingVerify;
+        default:
+            // INVALID/ABORTED cannot normally be the running partition. If storage reports such
+            // a state, it is not authority to begin an irreversible cross-version identity write.
+            return tk::OtaVerificationState::Unknown;
+    }
+}
+
+bool ota_identity_mutation_allowed(tk::IdentityMutationEntry entry) {
+    return tk::identity_mutation_may_start(
+        ota_verification_state(),
+        s_operation_gate.load(std::memory_order_acquire), entry);
+}
+
+OtaIdentityMutationGuard::OtaIdentityMutationGuard(tk::IdentityMutationEntry entry) {
+    const tk::OtaVerificationState before = ota_verification_state();
+    auto expected = s_operation_gate.load(std::memory_order_acquire);
+    if (!tk::identity_mutation_may_start(before, expected, entry)) return;
+    if (!s_operation_gate.compare_exchange_strong(
+            expected, tk::OtaIdentityGateState::IdentityMutation,
+            std::memory_order_acq_rel, std::memory_order_acquire)) {
+        return;
+    }
+
+    // Re-sample after acquiring exclusivity. An OTA start racing the first sample either won the
+    // CAS (so we never get here) or is now blocked. Any other state change/error remains
+    // non-authoritative and releases the gate without permitting a write.
+    if (!tk::identity_mutation_allowed(ota_verification_state(), entry)) {
+        finish_operation(tk::OtaIdentityGateState::IdentityMutation);
+        return;
+    }
+    held_ = true;
+}
+
+OtaIdentityMutationGuard::~OtaIdentityMutationGuard() {
+    if (held_) finish_operation(tk::OtaIdentityGateState::IdentityMutation);
+}
+
 // Confirm a still-unverified OTA image before a deliberate reboot — see the header. Mirrors the
 // mark-valid path in main.cpp's ota_health_gate_task, but fires immediately (the user interacting is
 // the health signal) so an intentional restart within the health window doesn't trigger a rollback.
-void ota_confirm_pending_image() {
+void ota_confirm_pending_image(tk::OtaRebootClass reboot_class) {
+    if (!tk::ota_reboot_confirms_pending_image(reboot_class)) {
+        ESP_LOGE(TAG, "refusing OTA confirmation for non-user recovery reboot class %d",
+                 static_cast<int>(reboot_class));
+        return;
+    }
     const esp_partition_t* running = esp_ota_get_running_partition();
     esp_ota_img_states_t st;
     if (esp_ota_get_state_partition(running, &st) == ESP_OK &&
@@ -110,7 +193,11 @@ OtaStatus ota_get_status() {
     return s_status;
 }
 
-bool ota_is_busy() { return s_running.load(); }
+bool ota_is_busy() {
+    return s_running.load(std::memory_order_acquire) ||
+           s_operation_gate.load(std::memory_order_acquire) ==
+               tk::OtaIdentityGateState::Ota;
+}
 
 // ─── Version comparison (semver-ish "x.y.z") ───────────────────────────────────
 
@@ -240,25 +327,32 @@ static void ota_check_task(void*) {
         ESP_LOGE(TAG, "OTA check task unknown exception");
         try { set_state(OtaState::Error, 0, "update check failed unexpectedly"); } catch (...) {}
     }
-    s_running = false;
+    s_running.store(false, std::memory_order_release);
+    finish_operation(tk::OtaIdentityGateState::Ota);
     vTaskDelete(nullptr);
 }
 
 bool ota_check_start() {
     if (!ensure_lock()) return false;
-    // Atomic test-and-set: bail if a check/update is already running. Don't rely on the
-    // httpd being single-threaded to serialize the guard.
-    if (s_running.exchange(true)) return false;
+    // Acquire the cross-domain gate before publishing/starting the worker. This atomically loses
+    // to an in-flight key/VIN transaction instead of sampling a separate busy flag and racing it.
+    if (!try_begin_ota_operation()) return false;
+    if (s_running.exchange(true, std::memory_order_acq_rel)) {
+        finish_operation(tk::OtaIdentityGateState::Ota);
+        return false;
+    }
     try {
         set_state(OtaState::Checking, 0, "checking for updates");
     } catch (...) {
-        s_running = false;
+        s_running.store(false, std::memory_order_release);
+        finish_operation(tk::OtaIdentityGateState::Ota);
         return false;
     }
 
     // mbedTLS handshake + manifest fetch run here; same generous stack as ota_task.
     if (xTaskCreate(ota_check_task, "ota_chk", 8192, nullptr, tk::kPrioOtaCheck, nullptr) != pdPASS) {
-        s_running = false;
+        s_running.store(false, std::memory_order_release);
+        finish_operation(tk::OtaIdentityGateState::Ota);
         try { set_state(OtaState::Error, 0, "could not start check task"); } catch (...) {}
         return false;
     }
@@ -401,24 +495,33 @@ static void ota_task(void*) {
         ESP_LOGE(TAG, "OTA task unknown exception");
         try { set_state(OtaState::Error, 0, "update failed unexpectedly"); } catch (...) {}
     }
-    s_running = false;
+    s_running.store(false, std::memory_order_release);
+    finish_operation(tk::OtaIdentityGateState::Ota);
     vTaskDelete(nullptr);
 }
 
 bool ota_start() {
     if (!ensure_lock()) return false;
-    // Atomic test-and-set so two concurrent /ota/update calls can't both launch a task.
-    if (s_running.exchange(true)) return false;
+    // The same owner word excludes both a second OTA and every identity transaction. On a
+    // successful install it remains owned until esp_restart(); on every returning path the task
+    // releases it below.
+    if (!try_begin_ota_operation()) return false;
+    if (s_running.exchange(true, std::memory_order_acq_rel)) {
+        finish_operation(tk::OtaIdentityGateState::Ota);
+        return false;
+    }
     try {
         set_state(OtaState::Downloading, 0, "starting download");
     } catch (...) {
-        s_running = false;
+        s_running.store(false, std::memory_order_release);
+        finish_operation(tk::OtaIdentityGateState::Ota);
         return false;
     }
 
     // A generous stack: mbedTLS record processing + esp_https_ota run here.
     if (xTaskCreate(ota_task, "ota", 8192, nullptr, tk::kPrioOta, nullptr) != pdPASS) {
-        s_running = false;
+        s_running.store(false, std::memory_order_release);
+        finish_operation(tk::OtaIdentityGateState::Ota);
         try { set_state(OtaState::Error, 0, "could not start OTA task"); } catch (...) {}
         return false;
     }

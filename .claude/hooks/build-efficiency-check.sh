@@ -29,6 +29,34 @@
 
 set -uo pipefail
 
+# Normalise the producer's exact contract
+#   size-gate <target> OK: unsigned=<N> B projected-signed=<N> B
+# to "<target> <projected-bytes>".  `gh run view --log` prefixes every physical line with job/step
+# columns, so matching must never be anchored at column zero.
+parse_projected_sizes() {
+  grep -oE 'size-gate (esp32|esp32s3|esp32c3|esp32c6) OK: unsigned=[0-9]+ B projected-signed=[0-9]+ B' \
+    | sed -E 's/^size-gate ([^ ]+) OK: unsigned=[0-9]+ B projected-signed=([0-9]+) B$/\1 \2/'
+}
+
+if [ "${1:-}" = --self-test ]; then
+  fixture='build Build unsigned 2026-01-01 size-gate esp32 OK: unsigned=100 B projected-signed=4096 B
+build Build unsigned 2026-01-01 size-gate esp32s3 OK: unsigned=200 B projected-signed=8192 B
+build Build unsigned 2026-01-01 size-gate esp32c3 OK: unsigned=300 B projected-signed=12288 B
+build Build unsigned 2026-01-01 size-gate esp32c6 OK: unsigned=400 B projected-signed=16384 B'
+  parsed="$(printf '%s\n' "$fixture" | parse_projected_sizes)"
+  [ "$parsed" = 'esp32 4096
+esp32s3 8192
+esp32c3 12288
+esp32c6 16384' ] || {
+    echo "build-efficiency size parser self-test failed" >&2; exit 1;
+  }
+  [ -z "$(printf '%s\n' 'size-gate esp32 OK: 4096 B' | parse_projected_sizes)" ] || {
+    echo "build-efficiency parser accepted obsolete producer format" >&2; exit 1;
+  }
+  echo "build-efficiency size parser self-test: PASS"
+  exit 0
+fi
+
 proj="${CLAUDE_PROJECT_DIR:-$PWD}"
 cd "$proj" 2>/dev/null || exit 0
 
@@ -87,7 +115,8 @@ No \`gh\` CLI here, so run this via the GitHub MCP tools (0Bu/tesla-key-esp32):
   2. If its run id equals the last-audited id ($last), nothing was merged since — stay
      silent and stop. Otherwise continue.
   3. get_job_logs for the build job (and the previous run for a duration baseline). The
-     log already carries the data: a "ccache stats" group, "size-gate <target> OK: <N> B"
+     log already carries the data: a "ccache stats" group and
+     "size-gate <target> OK: unsigned=<N> B projected-signed=<N> B"
      lines, the "Cache ccache" restore/save lines, and run timestamps for duration.
 $(emit_rubric)
 EOF
@@ -124,14 +153,14 @@ fi
 log="$(gh run view "$id" --log 2>/dev/null || true)"
 
 # ccache hit rate — handle ccache 4.x ("Hits: H / C (P%)") and 3.x ("cache hit rate P %").
-cc_pct="$(printf '%s' "$log" | grep -iE 'cache hit rate|^[[:space:]]*Hits:' | grep -oE '[0-9]+(\.[0-9]+)?[[:space:]]*%' | head -n1 | grep -oE '[0-9]+' | head -n1)"
+cc_pct="$(printf '%s' "$log" | grep -iE 'cache hit rate|Hits:' | grep -oE '[0-9]+(\.[0-9]+)?[[:space:]]*%' | head -n1 | grep -oE '[0-9]+' | head -n1)"
 # Was the cache restored / did it save?
 cache_restored="no"; printf '%s' "$log" | grep -qiE 'Cache restored (from|with) key' && cache_restored="yes"
 cache_saved="no";    printf '%s' "$log" | grep -qiE 'Cache saved (successfully|with key)' && cache_saved="yes"
 cache_miss="no";     printf '%s' "$log" | grep -qiE 'Cache not found for input keys'      && cache_miss="yes"
 
-# Per-target binary sizes from the size-gate echo.
-sizes="$(printf '%s' "$log" | grep -oE 'size-gate [a-z0-9]+ OK: [0-9]+ B' || true)"
+# Per-target projected signed sizes from the size-gate echo.
+sizes="$(printf '%s' "$log" | parse_projected_sizes || true)"
 
 # ── Apply the rubric. ─────────────────────────────────────────────────────────────────
 problems=()
@@ -151,10 +180,17 @@ if [ -n "$total" ] && [ -n "$prev" ] && [ "$prev" -gt 0 ]; then
     problems+=("run ${total}s vs previous ${prev}s — duration regression")
   fi
 fi
-while IFS= read -r line; do
-  [ -z "$line" ] && continue
-  b="$(printf '%s' "$line" | grep -oE '[0-9]+ B' | grep -oE '[0-9]+')"
-  t="$(printf '%s' "$line" | awk '{print $2}')"
+size_count="$(printf '%s\n' "$sizes" | awk 'NF { n++ } END { print n+0 }')"
+size_targets="$(printf '%s\n' "$sizes" | awk 'NF { print $1 }' | LC_ALL=C sort -u | wc -l | tr -d ' ')"
+if [ "$size_count" -ne 4 ] || [ "$size_targets" -ne 4 ]; then
+  problems+=("size-gate telemetry incomplete/duplicated (${size_count} lines, ${size_targets} unique targets; expected 4) — refusing an OK verdict")
+fi
+for expected_target in esp32 esp32s3 esp32c3 esp32c6; do
+  printf '%s\n' "$sizes" | grep -qE "^${expected_target} [0-9]+$" || \
+    problems+=("size-gate telemetry missing target $expected_target")
+done
+while read -r t b; do
+  [ -z "${t:-}" ] && continue
   [ -n "$b" ] && [ "$b" -gt "$SIZE_WARN" ] && \
     problems+=("$t app ${b} B inside the warn band (> $SIZE_WARN B, gate $SIZE_GATE B) — shrink before the gate trips")
 done <<< "$sizes"
@@ -166,7 +202,9 @@ done <<< "$sizes"
   echo "  conclusion: $concl    url: $url"
   echo "  total run:  ${total:-n/a}s${prev:+  (previous main run: ${prev}s)}"
   echo "  ccache:     hit ${cc_pct:-n/a}%  restored=$cache_restored saved=$cache_saved cold=$cache_miss"
-  [ -n "$sizes" ] && printf '  %s\n' "$sizes"
+  while read -r size_target size_bytes; do
+    [ -n "${size_target:-}" ] && printf '  projected-signed: %s %s B\n' "$size_target" "$size_bytes"
+  done <<< "$sizes"
   echo
   if [ "${#problems[@]}" -eq 0 ]; then
     echo "Verdict: OK — no efficiency regression. (run id recorded; will not re-audit this build)"

@@ -32,6 +32,7 @@
       "Bash(scripts/run-mock-tests.sh:*)",
       "Bash(scripts/idf-docker.sh:*)",
       "Bash(scripts/next-version.sh:*)",
+      "Bash(scripts/select-release-version.sh:*)",
       "Bash(scripts/build-pages.sh:*)",
       "Bash(cmake:*)",
       "Bash(ctest:*)",

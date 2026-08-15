@@ -10,9 +10,10 @@ unsigned_dir="${2:-_unsigned}"
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
-case "$version" in
-  *[!0-9A-Za-z.+-]*|'') echo "invalid display version: $version" >&2; exit 2 ;;
-esac
+[[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || {
+  echo "invalid display version (expected X.Y.Z or X.Y.Z-prerelease): $version" >&2
+  exit 2
+}
 [[ -d "$unsigned_dir" ]] || { echo "unsigned input directory not found: $unsigned_dir" >&2; exit 1; }
 
 signing_key="${OTA_SIGNING_KEY_FILE:-$repo_root/ota_signing_key.pem}"
@@ -38,7 +39,10 @@ rm -rf _fw _signed
 mkdir -p _fw _signed
 # Exact release output names only; never broaden this cleanup to arbitrary user files.
 rm -f tesla-key-esp32.bin tesla-key-esp32-s3.bin tesla-key-esp32-c3.bin tesla-key-esp32-c6.bin
-rm -f tesla-key-esp32-*.bin
+for suffix in "" -s3 -c3 -c6; do
+  rm -f "tesla-key-esp32${suffix}-${version}.bin" \
+    "tesla-key-esp32${suffix}-${version}-merged.bin"
+done
 
 for target in $TARGETS; do
   source_dir="$unsigned_dir/$target"
@@ -71,6 +75,11 @@ for target in $TARGETS; do
   cp "$work/bootloader/bootloader.bin" "_fw/$target/bootloader.bin"
   cp "$work/partition_table/partition-table.bin" "_fw/$target/partition-table.bin"
   cp "$work/tesla-key-esp32.bin" "_fw/$target/tesla-key-esp32.bin"
+  # The browser writes otadata LAST, after every immutable part has downloaded and passed its
+  # digest/length check.  Without this file in the trusted staging tree the installer would either
+  # boot whatever slot happened to be selected before the flash or have to activate the new slot
+  # before all other writes were known-good.
+  cp "$work/ota_data_initial.bin" "_fw/$target/ota_data_initial.bin"
 
   suffix="$(image_suffix "$target")"
   cp "$work/tesla-key-esp32.bin" "tesla-key-esp32$suffix.bin"

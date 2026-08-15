@@ -1,4 +1,5 @@
 #include "mqtt_ha.hpp"
+#include "config_blob.hpp"
 #include "net.hpp"
 #include "vehicle_ctrl.hpp"
 #include "nvs_storage.hpp"
@@ -563,8 +564,9 @@ static bool mqtt_ha_start_impl(VehicleController& vehicle,
 
     // Resolve broker URI: NVS "mqtt_uri" (web UI) overrides the Kconfig default. An
     // empty value (incl. an explicit "" stored to disable) leaves MQTT off.
-    s_uri = CONFIG_TESLA_MQTT_BROKER_URI;
-    config_store.load_str("mqtt_uri", s_uri);
+    tk::ConfigBlob stored_cfg;
+    tk::cfg_load(config_store, stored_cfg);
+    s_uri = stored_cfg.mqtt_uri;
     s_uri = tk::mqtt_trim(s_uri);
 
     if (s_uri.empty()) {

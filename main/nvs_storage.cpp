@@ -33,22 +33,42 @@ std::string NvsStorageAdapter::map_key(const std::string& key) const {
 }
 
 bool NvsStorageAdapter::load(const std::string& key, std::vector<uint8_t>& buffer) {
+    buffer.clear();
     if (!initialized_) return false;
     std::string nvskey = map_key(key);
     size_t len = 0;
     esp_err_t err = nvs_get_blob(handle_, nvskey.c_str(), nullptr, &len);
-    if (err == ESP_ERR_NVS_NOT_FOUND || len == 0) return false;
+    if (err == ESP_ERR_NVS_NOT_FOUND) return false;
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "load probe failed '%s': %s", nvskey.c_str(), esp_err_to_name(err));
         return false;
     }
-    buffer.resize(len);
-    err = nvs_get_blob(handle_, nvskey.c_str(), buffer.data(), &len);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "load failed '%s': %s", nvskey.c_str(), esp_err_to_name(err));
+    if (len == 0) {
+        ESP_LOGW(TAG, "load probe returned empty blob '%s'", nvskey.c_str());
         return false;
     }
-    return true;
+
+    const size_t probed_len = len;
+    try {
+        std::vector<uint8_t> candidate(probed_len);
+        size_t read_len = probed_len;
+        err = nvs_get_blob(handle_, nvskey.c_str(), candidate.data(), &read_len);
+        if (err != ESP_OK || read_len != probed_len) {
+            // A changing record is not a valid snapshot. In particular, accepting a shorter
+            // private-key read would expose runtime key B in a vector still sized for probed key A,
+            // while a later NVS fingerprint could classify the durable identity differently.
+            ESP_LOGE(TAG, "load failed '%s': %s (probe=%u read=%u)", nvskey.c_str(),
+                     esp_err_to_name(err), static_cast<unsigned>(probed_len),
+                     static_cast<unsigned>(read_len));
+            return false;
+        }
+        buffer = std::move(candidate);
+        return true;
+    } catch (...) {
+        buffer.clear();
+        ESP_LOGE(TAG, "load failed '%s': allocation/copy failure", nvskey.c_str());
+        return false;
+    }
 }
 
 bool NvsStorageAdapter::blob_exists(const std::string& key) const {
@@ -64,6 +84,26 @@ bool NvsStorageAdapter::blob_exists(const std::string& key) const {
         ESP_LOGW(TAG, "exists probe failed '%s': %s", nvskey.c_str(), esp_err_to_name(err));
         return false;
     }
+    return true;
+}
+
+bool NvsStorageAdapter::probe_blob(const std::string& key, bool& exists) const {
+    exists = false;
+    if (!initialized_) {
+        ESP_LOGE(TAG, "probe unavailable '%s': NVS namespace is not initialized", key.c_str());
+        return false;
+    }
+    std::string nvskey = map_key(key);
+    size_t len = 0;
+    const esp_err_t err = nvs_get_blob(handle_, nvskey.c_str(), nullptr, &len);
+    if (err == ESP_ERR_NVS_NOT_FOUND) return true;
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "safety probe failed '%s': %s", nvskey.c_str(), esp_err_to_name(err));
+        return false;
+    }
+    // Any existing record is safety-relevant. A zero-length key cannot be produced by our
+    // one-byte marker writer, so treat it as Present (cleanup required), never as Missing.
+    exists = true;
     return true;
 }
 
@@ -122,6 +162,53 @@ bool NvsStorageAdapter::load_str(const char* key, std::string& out) {
     return true;
 }
 
+tk::NvsStringLoadState NvsStorageAdapter::load_str_state(const char* key, std::string& out) {
+    out.clear();
+    if (!initialized_) {
+        ESP_LOGE(TAG, "safety string read unavailable '%s': NVS namespace is not initialized", key);
+        return tk::NvsStringLoadState::Error;
+    }
+
+    std::string nvskey = map_key(key);
+    size_t len = 0;
+    esp_err_t err = nvs_get_str(handle_, nvskey.c_str(), nullptr, &len);
+    const tk::NvsStringProbe probe =
+        err == ESP_OK ? tk::NvsStringProbe::Ok
+                      : err == ESP_ERR_NVS_NOT_FOUND ? tk::NvsStringProbe::NotFound
+                                                     : tk::NvsStringProbe::Error;
+    if (probe == tk::NvsStringProbe::NotFound) return tk::NvsStringLoadState::Missing;
+    if (probe == tk::NvsStringProbe::Error || len <= 1) {
+        ESP_LOGE(TAG, "safety string probe failed '%s': %s (len=%u)", nvskey.c_str(),
+                 esp_err_to_name(err), static_cast<unsigned>(len));
+        return tk::NvsStringLoadState::Error;
+    }
+
+    const size_t probed_len = len;
+    try {
+        std::vector<char> buf(probed_len);
+        size_t read_len = probed_len;
+        err = nvs_get_str(handle_, nvskey.c_str(), buf.data(), &read_len);
+        const bool read_ok = err == ESP_OK;
+        const bool value_well_formed = read_ok && read_len == probed_len &&
+            buf.front() != '\0' && buf.back() == '\0' &&
+            std::memchr(buf.data(), '\0', probed_len - 1) == nullptr;
+        const tk::NvsStringLoadState state = tk::classify_nvs_string_load(
+            probe, probed_len, read_ok, read_len, value_well_formed);
+        if (state != tk::NvsStringLoadState::Present) {
+            ESP_LOGE(TAG, "safety string read failed '%s': %s (probe=%u read=%u)",
+                     nvskey.c_str(), esp_err_to_name(err),
+                     static_cast<unsigned>(probed_len), static_cast<unsigned>(read_len));
+            return tk::NvsStringLoadState::Error;
+        }
+        out.assign(buf.data(), probed_len - 1);
+        return tk::NvsStringLoadState::Present;
+    } catch (...) {
+        out.clear();
+        ESP_LOGE(TAG, "safety string read failed '%s': allocation/copy failure", nvskey.c_str());
+        return tk::NvsStringLoadState::Error;
+    }
+}
+
 bool NvsStorageAdapter::save_str(const char* key, const std::string& value) {
     if (!initialized_) return false;
     std::string nvskey = map_key(key);
@@ -147,22 +234,48 @@ bool NvsStorageAdapter::save_str(const char* key, const std::string& value) {
 // join anything).
 
 bool NvsStorageAdapter::load_blob(const char* key, std::vector<uint8_t>& out) {
-    if (!initialized_) return false;
+    return load_blob_state(key, out) == tk::NvsBlobLoadState::Present;
+}
+
+tk::NvsBlobLoadState NvsStorageAdapter::load_blob_state(const char* key,
+                                                         std::vector<uint8_t>& out) {
+    out.clear();
+    if (!initialized_) {
+        ESP_LOGE(TAG, "safety blob read unavailable '%s': NVS namespace is not initialized", key);
+        return tk::NvsBlobLoadState::Error;
+    }
     size_t len = 0;
     esp_err_t err = nvs_get_blob(handle_, key, nullptr, &len);
-    if (err == ESP_ERR_NVS_NOT_FOUND || len == 0) return false;  // absent is normal (pre-blob device)
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "load_blob probe failed '%s': %s", key, esp_err_to_name(err));
-        return false;
+    const tk::NvsBlobProbe probe =
+        err == ESP_OK ? tk::NvsBlobProbe::Ok
+                      : err == ESP_ERR_NVS_NOT_FOUND ? tk::NvsBlobProbe::NotFound
+                                                     : tk::NvsBlobProbe::Error;
+    if (probe == tk::NvsBlobProbe::NotFound) return tk::NvsBlobLoadState::Missing;
+    if (probe != tk::NvsBlobProbe::Ok || len == 0) {
+        ESP_LOGE(TAG, "safety blob probe failed '%s': %s (len=%u)", key,
+                 esp_err_to_name(err), static_cast<unsigned>(len));
+        return tk::NvsBlobLoadState::Error;
     }
-    out.resize(len);
-    err = nvs_get_blob(handle_, key, out.data(), &len);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "load_blob failed '%s': %s", key, esp_err_to_name(err));
-        return false;
+
+    const size_t probed_len = len;
+    try {
+        std::vector<uint8_t> candidate(probed_len);
+        err = nvs_get_blob(handle_, key, candidate.data(), &len);
+        const tk::NvsBlobLoadState state = tk::classify_nvs_blob_load(
+            probe, probed_len, err == ESP_OK, len);
+        if (state != tk::NvsBlobLoadState::Present) {
+            ESP_LOGE(TAG, "safety blob read failed '%s': %s (probe=%u read=%u)", key,
+                     esp_err_to_name(err), static_cast<unsigned>(probed_len),
+                     static_cast<unsigned>(len));
+            return tk::NvsBlobLoadState::Error;
+        }
+        out = std::move(candidate);
+        return tk::NvsBlobLoadState::Present;
+    } catch (...) {
+        out.clear();
+        ESP_LOGE(TAG, "safety blob read failed '%s': allocation/copy failure", key);
+        return tk::NvsBlobLoadState::Error;
     }
-    out.resize(len);
-    return true;
 }
 
 bool NvsStorageAdapter::save_blob(const char* key, const uint8_t* data, size_t len) {

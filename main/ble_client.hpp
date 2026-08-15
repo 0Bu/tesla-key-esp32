@@ -8,6 +8,8 @@
 #include <atomic>
 #include <esp_timer.h>
 
+#include "logic/ble_readiness.hpp"
+
 #include "host/ble_hs.h"
 #include "host/ble_gatt.h"
 #include "host/ble_gap.h"
@@ -86,7 +88,18 @@ public:
     void disconnect() override;
     bool write(const std::vector<uint8_t>& data) override;
 
-    bool is_connected() const { return conn_handle_ != BLE_HS_CONN_HANDLE_NONE; }
+    bool is_connected() const {
+        if (disconnecting_.load()) return false;
+        const uint32_t generation_before = connection_generation_.load();
+        const uint16_t conn_handle = conn_handle_.load();
+        const uint16_t write_handle = write_handle_.load();
+        const uint32_t ready_generation = ready_generation_.load();
+        const uint32_t generation_after = connection_generation_.load();
+        return tk::ble::command_ready(disconnecting_.load(), generation_before,
+                                      generation_after,
+                                      conn_handle != BLE_HS_CONN_HANDLE_NONE,
+                                      write_handle != 0, ready_generation);
+    }
     std::string peer_addr_str() const;
 
     // RSSI (dBm) of the active connection; false if not connected / unavailable.
@@ -129,21 +142,38 @@ public:
     void on_sync();
     void on_reset();
     int  on_gap_event(ble_gap_event* event);
-    int  on_svc_disc(uint16_t conn_handle, const ble_gatt_error* error, const ble_gatt_svc* svc);
-    int  on_chr_disc(uint16_t conn_handle, const ble_gatt_error* error, const ble_gatt_chr* chr);
+    int  on_svc_disc(uint16_t conn_handle, uint32_t generation,
+                     const ble_gatt_error* error, const ble_gatt_svc* svc);
+    int  on_chr_disc(uint16_t conn_handle, uint32_t generation,
+                     const ble_gatt_error* error, const ble_gatt_chr* chr);
     int  on_dsc_disc(uint16_t conn_handle, const ble_gatt_error* error,
-                     uint16_t chr_val_handle, const ble_gatt_dsc* dsc);
+                     uint16_t chr_val_handle, const ble_gatt_dsc* dsc,
+                     uint32_t generation);
+    int  on_subscribe_write(uint16_t conn_handle, const ble_gatt_error* error,
+                            uint32_t generation);
 
 private:
-    void start_scan_();
+    // All discovery-procedure state transitions are serialized by intent_mutex_. The locked
+    // variants must only be called while holding it; the public wrapper acquires it for callers
+    // such as on_sync and GAP retry callbacks.
+    bool start_scan_locked_();
+    bool cancel_scan_locked_();
+    void ensure_scanning_locked_();
     void ensure_scanning_();
+    // Terminate the currently published GAP link after the caller has already invalidated
+    // readiness under intent_mutex_. Deliberately preserves a newer connect intent so the
+    // delayed DISCONNECT event can restart that request.
+    void terminate_published_link_();
     void note_scan_(const ble_gap_disc_desc& d, const ble_hs_adv_fields& f);
     // Update a known scan entry's connectability by address — for primary adverts that carry
     // no name (Tesla puts the name in the SCAN_RSP, but connectability only on the primary
     // advert), so we record it by address and read it back once the name has matched.
     void note_connectable_(const ble_addr_t& addr, bool connectable);
-    void subscribe_notify_();
-    void write_chunk_(const uint8_t* data, size_t len);
+    void subscribe_notify_(uint16_t conn_handle, uint32_t generation);
+    bool has_gap_link_() const;
+    bool connection_snapshot_matches_(uint16_t conn_handle, uint32_t generation) const;
+    bool write_chunk_(uint16_t conn_handle, uint16_t write_handle,
+                      const uint8_t* data, size_t len);
 
     // Discovery: nearby Teslas seen while not connected, and the connect intent.
     struct ScanEntry { uint8_t addr[6]; char name[24]; int8_t rssi; int64_t last_us;
@@ -152,6 +182,10 @@ private:
     std::vector<ScanEntry> scan_;
     SemaphoreHandle_t      scan_mutex_{nullptr};
     esp_timer_handle_t     scan_timer_{nullptr};
+    // Serializes manual discovery, connect cancellation, GAP publication and CCCD readiness.
+    // Atomics make individual fields race-free; this mutex supplies the multi-step linearization
+    // point so a stale callback cannot publish on_connected(true) after a deadline cancellation.
+    SemaphoreHandle_t      intent_mutex_{nullptr};
     // atomic (not volatile): each is written on the NimBLE host task and read from the
     // command / status / auto-pair tasks. volatile blocks some compiler optimizations but
     // is not a happens-before edge under the C++ memory model; std::atomic is (simple
@@ -170,14 +204,28 @@ private:
     ConnectedCb on_connected_;
     RxDataCb    on_rx_data_;
 
-    uint16_t conn_handle_{BLE_HS_CONN_HANDLE_NONE};
+    // GAP/GATT handles are published by the NimBLE host task and consumed by command/status
+    // tasks. Plain uint16_t fields made every is_connected/disconnect/write overlap a C++ data
+    // race. Atomics make each snapshot defined; connection_generation_ is a tiny seqlock:
+    // odd while the host publishes/invalidates handles, even while stable. It additionally
+    // prevents a multi-chunk write from continuing on a replacement connection.
+    std::atomic<uint16_t> conn_handle_{BLE_HS_CONN_HANDLE_NONE};
+    std::atomic<uint32_t> connection_generation_{0};
+    // A GAP handle is not command-ready. This token is published only after Tesla GATT
+    // discovery, a confirmed CCCD write, and on_connected_(true) for the same generation.
+    // Tying it to the generation also rejects a delayed callback after handle reuse.
+    std::atomic<uint32_t> ready_generation_{tk::ble::kNoReadyGeneration};
+    // disconnect() is asynchronous: the GAP event that clears the handle arrives later. This
+    // flag closes that interval immediately, so a following command cannot enqueue on a link
+    // already being terminated. The host task clears it only after publishing a fresh link.
+    std::atomic<bool> disconnecting_{false};
     // Connect-failure tracking for the target car (see connect_fail_recent()). Stamped on
     // every connect attempt; the count climbs on each GAP connect error and resets on a
     // successful link. Written on the NimBLE host task, read by the status reader — atomic
     // so the reader sees a defined value (the counter's ++ is also naturally atomic now).
     std::atomic<uint32_t> connect_fail_count_{0};
     std::atomic<int64_t>  last_connect_attempt_us_{0};
-    uint16_t write_handle_{0};
+    std::atomic<uint16_t> write_handle_{0};
     uint16_t notify_handle_{0};
     uint16_t notify_val_handle_{0};
     uint16_t cccd_handle_{0};   // discovered CCCD (0x2902) for the notify chr; 0 until found

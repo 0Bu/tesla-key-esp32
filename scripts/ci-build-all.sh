@@ -10,13 +10,19 @@ validate_inputs() {
   local candidate_version="$1"
   local candidate_sha="$2"
 
-  case "$candidate_version" in
-    *[!0-9A-Za-z.+-]*|'') echo "invalid display version: $candidate_version" >&2; return 2 ;;
-  esac
-  if [[ "$candidate_sha" != local && ! "$candidate_sha" =~ ^[0-9a-f]{40}$ ]]; then
-    echo "invalid source SHA: $candidate_sha" >&2
-    return 2
+  # `local/local` is the one explicit non-release development stamp.  Every artifact that could
+  # flow into Pages uses exactly the browser manifest's version and provenance grammar.
+  if [[ "$candidate_version" == local && "$candidate_sha" == local ]]; then
+    return 0
   fi
+  [[ "$candidate_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || {
+    echo "invalid display version (expected X.Y.Z or X.Y.Z-prerelease): $candidate_version" >&2
+    return 2
+  }
+  [[ "$candidate_sha" =~ ^[0-9a-f]{40}$ ]] || {
+    echo "invalid source SHA (release builds require 40 lowercase hex characters): $candidate_sha" >&2
+    return 2
+  }
 }
 
 if [[ "${1:-}" == --self-test ]]; then
@@ -29,6 +35,18 @@ if [[ "${1:-}" == --self-test ]]; then
   fi
   if validate_inputs 'bad version' "$valid_sha" >/dev/null 2>&1; then
     echo "self-test failed: invalid version accepted" >&2
+    exit 1
+  fi
+  if validate_inputs release-1 "$valid_sha" >/dev/null 2>&1; then
+    echo "self-test failed: browser-incompatible version accepted" >&2
+    exit 1
+  fi
+  if validate_inputs 1.4.73 local >/dev/null 2>&1; then
+    echo "self-test failed: release version accepted without source provenance" >&2
+    exit 1
+  fi
+  if validate_inputs local "$valid_sha" >/dev/null 2>&1; then
+    echo "self-test failed: local version accepted with release provenance" >&2
     exit 1
   fi
   echo "ci-build-all input self-test passed"

@@ -1,31 +1,90 @@
 name: pr-preview-cleanup
 
-# When a PR is closed (merged or not), delete its per-PR firmware preview from the gh-pages
-# branch (PR/<N>/) so stale pre-merge builds don't linger on the installer site.
-# Only labelled same-repo PRs can publish a signed preview, so fork closes are
-# skipped — nothing to remove and the token would be read-only anyway.
 on:
+  # Remove a preview as soon as it stops describing the current eligible PR. Restrict event cleanup
+  # to the trusted default branch and always execute the script from that branch, never base.ref.
   pull_request:
-    types: [closed]
+    branches: [main]
+    types: [closed, synchronize, unlabeled]
+  # Events are not a durable queue. Reconcile gh-pages so a cancelled/failed close run cannot leave
+  # signed firmware public forever. workflow_dispatch is also the safe one-shot repair mechanism.
+  schedule:
+    - cron: '23 4 * * *'
+  workflow_dispatch:
 
 permissions:
-  contents: write   # push the removal commit to gh-pages
-
-concurrency:
-  group: gh-pages-cleanup-${{ github.event.pull_request.number }}
-  cancel-in-progress: false
+  contents: read
+  pull-requests: read
 
 jobs:
-  cleanup:
-    if: github.event.pull_request.head.repo.full_name == github.repository
+  cleanup-event:
+    if: >-
+      github.event_name == 'pull_request'
+      && github.event.pull_request.head.repo.full_name == github.repository
+      && (github.event.action != 'unlabeled' || github.event.label.name == 'signed-preview')
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    concurrency:
+      # Same group as signed-pr-preview: close/synchronize/label removal cancels any signer that could
+      # otherwise publish after this deletion.
+      group: signed-preview-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
     steps:
-      # Check out the base branch (main), not the PR merge ref — after a merge the merge ref
-      # can be gone, and main reliably carries scripts/publish-pages-branch.sh.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event.pull_request.base.ref }}
-      - name: Remove PR preview from gh-pages
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - name: Remove ineligible or superseded PR preview
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: ./scripts/publish-pages-branch.sh rm "${{ github.event.pull_request.number }}"
+
+  discover-stale:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      stale: ${{ steps.discover.outputs.stale }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - name: Discover stale gh-pages previews
+        id: discover
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          stale="$(./scripts/reconcile-pr-previews.sh list)"
+          echo "stale=$stale" >> "$GITHUB_OUTPUT"
+          echo "stale preview PRs: $stale"
+
+  reconcile-stale:
+    needs: discover-stale
+    if: needs.discover-stale.outputs.stale != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        pr: ${{ fromJSON(needs.discover-stale.outputs.stale) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: read
+    concurrency:
+      # Each candidate is revalidated while holding the exact sign/cleanup lock for that PR.
+      group: signed-preview-${{ matrix.pr }}
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - name: Revalidate and remove stale preview
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: ./scripts/reconcile-pr-previews.sh remove-if-stale "${{ matrix.pr }}"

@@ -47,8 +47,12 @@ def expected_values(common: pathlib.Path, target: str) -> tuple[dict[str, str], 
         raise ConfigError(f"unsupported target: {target}")
     paths = [common]
     target_path = common.with_name(f"{common.name}.{target}")
-    if target_path.exists():
-        paths.append(target_path)
+    if not target_path.is_file():
+        raise ConfigError(
+            f"required target defaults are missing: {target_path} "
+            f"(every supported target owns an explicit defaults contract)"
+        )
+    paths.append(target_path)
     values: dict[str, str] = {}
     for path in paths:
         # Target defaults are applied after the common file and may intentionally override it.
@@ -88,6 +92,15 @@ def self_test() -> None:
             encoding="utf-8",
         )
         assert check(common, generated, "esp32c3") == ([], 4)
+
+        target_defaults.unlink()
+        try:
+            expected_values(common, "esp32c3")
+        except ConfigError as error:
+            assert "required target defaults are missing" in str(error)
+        else:
+            raise AssertionError("missing target defaults were accepted")
+        target_defaults.write_text("CONFIG_TARGET_ONLY=7\nCONFIG_OVERRIDE=y\n", encoding="utf-8")
 
         generated.write_text("CONFIG_IDF_TARGET_ESP32C3=y\nCONFIG_SHARED=n\n", encoding="utf-8")
         errors, _ = check(common, generated, "esp32c3")

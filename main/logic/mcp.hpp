@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cmath>
 #include <cstring>
 
 #include "command_registry.hpp"
@@ -75,6 +76,25 @@ inline int clamped_int(double d, int lo, int hi) {
     if (d < (double)lo) return lo;
     if (d > (double)hi) return hi;
     return (int)d;
+}
+
+// MCP advertises these arguments as JSON Schema `integer`. Accepting a fractional cJSON
+// number and silently truncating it executes a different command than the client requested;
+// accepting NaN/Infinity (reachable through numeric strings and permissive parsers) either
+// reaches an undefined int cast or turns a non-boolean into true. Keep the compatibility for
+// numeric strings in mcp_server.cpp, but require their decoded value to obey the same rules.
+inline bool mcp_integer_value(double d, int lo, int hi, int& out) {
+    if (!std::isfinite(d) || std::trunc(d) != d) return false;
+    out = clamped_int(d, lo, hi);
+    return true;
+}
+
+// The only numeric boolean spellings accepted by the MCP compatibility layer are exactly 0
+// and 1. Values such as -1, 2, NaN and Infinity are not booleans and must be rejected.
+inline bool mcp_bool_value(double d, bool& out) {
+    if (!std::isfinite(d) || (d != 0.0 && d != 1.0)) return false;
+    out = (d == 1.0);
+    return true;
 }
 
 }  // namespace tk

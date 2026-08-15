@@ -42,21 +42,12 @@ input.bad{border-color:var(--accent)}
   padding:9px; color:var(--muted); cursor:pointer; font-size:12.5px; font-weight:600}
 .mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace; letter-spacing:1.5px; text-transform:uppercase}
 .cnt{font-size:11.5px; color:var(--muted); margin:6px 2px 0; text-align:right}
+.cnt.help{text-align:left;line-height:1.35}
 .save{width:100%; font:inherit; font-weight:650; font-size:15px; padding:14px; border:0; border-radius:13px;
   background:var(--accent); color:#fff; cursor:pointer; margin-top:6px; box-shadow:0 3px 12px rgba(232,33,39,.3);
   transition:transform .08s}
 .save:active{transform:scale(.985)}
 .foot{text-align:center; font-size:11.5px; color:var(--muted); margin-top:16px; opacity:.8}
-/* confirmation */
-.done{display:none; text-align:center; padding:8px 0 4px}
-.done.show{display:block}
-.check{width:54px; height:54px; border-radius:50%; background:rgba(22,163,74,.13); color:var(--ok);
-  display:grid; place-items:center; margin:0 auto 16px; font-size:26px}
-.done h1{margin-bottom:8px}
-.spin{display:inline-block; width:15px; height:15px; vertical-align:-2px; margin-right:7px;
-  border:2px solid var(--border); border-top-color:var(--accent); border-radius:50%; animation:rot .7s linear infinite}
-@keyframes rot{to{transform:rotate(360deg)}}
-.form.hide{display:none}
 </style>
 </head>
 <body>
@@ -72,31 +63,27 @@ input.bad{border-color:var(--accent)}
     <form id="f" action="/save" method="POST" autocomplete="off">
       <div class="field">
         <label for="ssid">Wi-Fi network (SSID)</label>
-        <input id="ssid" name="ssid" required placeholder="MyHomeNetwork" autocapitalize="off" autocorrect="off">
+        <input id="ssid" name="ssid" required maxlength="32" placeholder="MyHomeNetwork" autocapitalize="off" autocorrect="off">
       </div>
 
       <div class="field">
         <label for="pass">Wi-Fi password</label>
         <div class="pwrap">
-          <input id="pass" name="pass" type="password" placeholder="••••••••">
+          <input id="pass" name="pass" type="password" maxlength="64" placeholder="••••••••" aria-describedby="pass-help">
           <button type="button" class="eye" id="eye" onclick="tog()">Show</button>
         </div>
+        <div class="cnt help" id="pass-help">Leave empty for an open network; otherwise use 8–63 UTF-8 bytes or a 64-digit hexadecimal PSK.</div>
       </div>
 
       <div class="field">
         <label for="vin">Tesla VIN <span class="opt">· optional</span></label>
-        <input id="vin" name="vin" class="mono" maxlength="17" placeholder="5YJ3E1EA…" autocapitalize="characters" autocorrect="off" oninput="cnt()">
+        <input id="vin" name="vin" class="mono" maxlength="17" placeholder="5YJ3E1EA…" autocapitalize="characters" autocorrect="off" aria-describedby="vin-help cnt" oninput="cnt()">
+        <div class="cnt help" id="vin-help">Recovery setup preserves an existing VIN: leave this blank or repeat the same VIN. To replace it safely, boot the firmware and use Change VIN on the device page.</div>
         <div class="cnt" id="cnt">0 / 17</div>
       </div>
 
       <button class="save" type="submit" id="save">Save &amp; connect</button>
     </form>
-  </div>
-
-  <div class="done" id="done">
-    <div class="check">✓</div>
-    <h1>Settings saved</h1>
-    <p class="sub" style="margin-bottom:0"><span class="spin"></span>The device is restarting and joining <b id="net">your network</b>. Reconnect your phone to that Wi-Fi, then open the device’s local address.</p>
   </div>
 
 </div>
@@ -110,14 +97,23 @@ function cnt(){
   $("cnt").textContent=v.value.length+' / 17';
   v.classList.toggle('bad', v.value.length>0 && v.value.length<17);
 }
+function bytes(v){ return new TextEncoder().encode(v).length; }
+function validateWifi(){
+  var ssid=$("ssid"), pass=$("pass"), sb=bytes(ssid.value), pb=bytes(pass.value);
+  ssid.setCustomValidity(sb>=1&&sb<=32?'':'SSID must be 1–32 UTF-8 bytes.');
+  var passOk=pb===0||(pb>=8&&pb<=63)||(pb===64&&/^[0-9a-f]{64}$/i.test(pass.value));
+  pass.setCustomValidity(passOk?'':'Use 8–63 UTF-8 bytes, exactly 64 hexadecimal digits, or leave empty for an open network.');
+  return ssid.reportValidity()&&pass.reportValidity();
+}
+$("ssid").addEventListener('input',function(){this.setCustomValidity('')});
+$("pass").addEventListener('input',function(){this.setCustomValidity('')});
 $("f").addEventListener('submit',function(e){
   var vin=$("vin").value;
+  if(!validateWifi()){ e.preventDefault(); return; }
   if(vin.length>0 && vin.length!==17){ e.preventDefault(); $("vin").classList.add('bad'); $("vin").focus(); return; }
   $("save").textContent='Saving…'; $("save").disabled=true;
-  $("net").textContent=$("ssid").value||'your network';
-  // On the device the POST navigates to a confirmation page; show our own optimistic one too.
-  setTimeout(function(){ $("form").classList.add('hide'); $("done").classList.add('show'); }, 250);
 });
+window.addEventListener('pageshow',function(){ $("save").textContent='Save & connect'; $("save").disabled=false; });
 </script>
 </body>
 </html>

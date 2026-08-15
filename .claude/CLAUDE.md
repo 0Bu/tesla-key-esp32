@@ -9,8 +9,9 @@ which is treated as the definition of "supported": adding a chip upstream omits 
 esp32c61) means upstreaming it there, not carrying a locally patched checkout of the crypto
 library. That was done for esp32c5 for a while and dropped
 ([`docs/adr/0004-drop-esp32c5-target.md`](../docs/adr/0004-drop-esp32c5-target.md)).
-All four targets also receive the repository-owned tesla-ble anti-replay patch under
-`patches/tesla-ble/`, applied by root CMake after dependency resolution: upstream v5.1.1
+All four targets also receive the ordered repository-owned tesla-ble patch series under
+`patches/tesla-ble/`, applied fail-closed by root CMake after dependency resolution. Its first patch
+fixes anti-replay behavior: upstream v5.1.1
 detects duplicate CarServer response counters but otherwise processes the replay. Our patch
 drops it before it can refresh a cache or complete the next FIFO command.
 
@@ -24,7 +25,8 @@ drops it before it can refresh a cache or complete the next FIFO command.
 > forensics, the watchdog ladder, signed OTA, config storage, the diagnostic surfaces — is
 > [`docs/FEATURES.md`](../docs/FEATURES.md); keep it current with the `feature-docs` skill when a
 > technical feature lands or changes (a merge is gated on it whenever the diff reaches `main/`,
-> `test/`, `sdkconfig.defaults*`, `partitions.csv` or the CI build workflow).
+> `test/`, `sdkconfig.defaults*`, `partitions.csv`, the shipped Pages/installer runtime or the
+> build/signed-preview/preview-cleanup release workflows, plus `scripts/release-relevance.sh`).
 > Keep all of these in sync (the `project-review` skill checks for drift).
 
 ## Environment note (Claude Code on the web / remote sandbox)
@@ -37,6 +39,8 @@ skill) or in CI (`.github/workflows/build.yml`). The `build-efficiency-check.sh`
 hook audits the latest post-merge `build` run on main for efficiency regressions (ccache hit
 rate, cache hygiene, build-duration/total-run regression, binary-size headroom) and, on a
 problem, has the session open an Issue / draft Fix-PR — deduped per run id, never auto-commits.
+Project MCP tooling is an external trust boundary: `.mcp.json` pins Context7 to an exact version,
+but never send it secrets, NVS dumps or unredacted vehicle diagnostics; firmware/CI do not need it.
 
 **But there IS a real local verification loop** — the host-side mock build runs the project's
 pure logic with the plain system toolchain (no ESP-IDF/Docker/board), so logic changes can be
@@ -49,7 +53,13 @@ scripts/run-mock-tests.sh   # compile + run host logic tests in seconds (cmake +
 It covers VIN validation, imperial→metric conversion, the `link_state()` four-state machine
 (incl. the debounced-ASLEEP asymmetry) and its `/status`/MQTT strings, the per-target
 platform/OTA-suffix mapping, the VIN-stable Home Assistant node identifier with its board-MAC
-fallback (`logic/ha_identity.hpp`), the MCP protocol core (version negotiation, method routing,
+fallback (`logic/ha_identity.hpp`), the shared WiFi credential contract
+(`logic/wifi_credentials.hpp` — open networks, WPA passphrases and 64-hex PSKs) and the
+generation-bound BLE command-readiness/connect-intent gate (`logic/ble_readiness.hpp` — GAP is
+not GATT-ready and a bounded cold request survives host reset/discovery until readiness),
+the transactional key-rotation result/boot-recovery gate (`logic/key_rotation.hpp`) and the
+power-loss recovery decision for a journalled VIN transition (`logic/vin_transition.hpp`),
+the MCP protocol core (version negotiation, method routing,
 int clamp), the ONE command registry both command surfaces dispatch through
 (`logic/command_registry.hpp` — REST + MCP names, kinds, shared arg bounds and the
 command-specific evcc boolean-body compatibility rule), the
@@ -85,27 +95,30 @@ hardware-free logic to `main/logic/` and a `CHECK` in `test/test_logic.cpp`. Ful
 ## Build & Flash
 
 No local ESP-IDF — builds run via `scripts/idf-docker.sh`, which uses the `espressif/idf`
-Docker image **pinned to the version CI builds with** (read at runtime from
-`.github/workflows/build.yml`, so build/debug never drifts from CI). Flash from the host with
-`esptool` (`brew install esptool`), since Docker on macOS has no USB passthrough. The
-`flash-esp32` skill wraps both steps (local tree, no merge); the `ship` skill runs the full
-delivery instead — squash-merge the PR, follow the post-merge CI, flash the **signed** CI
-artifact (or OTA) and verify the device version. When waiting on CI, block on
+Docker image **pinned by `esp-idf-toolchain.txt`**; both the wrapper (`scripts/idf-version.sh`)
+and CI read that same immutable tag+digest contract. Flash from the host with `esptool`
+(`brew install esptool`), since Docker on macOS has no USB passthrough. The `flash-esp32` skill
+can build the local tree, but it must never flash that unsigned output: a local app needs an
+explicit signing key, while a PR needs the opt-in, protected `signed-pr-preview` artifact whose
+metadata matches the current PR head. The `ship` skill runs the full delivery instead —
+squash-merge the PR, follow the post-merge CI, select the exact **signed** main artifact (never
+`firmware-unsigned`), flash it (or OTA) and verify the device version. When waiting on CI, block on
 `gh run watch <run-id> --exit-status` — never sleep-poll `gh run view` in a loop.
 
 ```bash
 # Build (first run: set-target; afterwards plain `build` stays incremental).
 # The wrapper keeps build/ host-owned and pins the ESP-IDF version to CI.
 # Pick your chip; CI builds all four via scripts/ci-build-all.sh.
-# The shared anti-replay patch is applied automatically by CMake for every target.
+# Every patches/tesla-ble/*.patch is applied lexically and idempotently by CMake for every target.
 scripts/idf-docker.sh idf.py set-target esp32s3 build   # or esp32 / esp32c3 / esp32c6
 
 # Configure WiFi, VIN (interactive; can also be set later via the setup AP)
 scripts/idf-docker.sh idf.py menuconfig   # → Tesla Key Configuration
 
-# Flash from the host (preserves nvs — @flash_args skips nvs@0x9000). Match --chip to
-# the target you built; @flash_args already carries the right bootloader offset.
-cd build && esptool --chip esp32s3 -p <port> write_flash "@flash_args"   # or esp32 / esp32c3 / esp32c6
+# STOP after the build: build/tesla-key-esp32.bin and @flash_args are unsigned build output,
+# not flash authority. For a local USB flash, use the flash-esp32 skill with an explicit,
+# verified DEV_SIGNING_KEY_FILE; it signs and verifies the app, enforces target/version/size,
+# writes app@0x20000, then erases otadata@0xf000/0x2000 last while preserving nvs@0x9000.
 ```
 
 ## Architecture
@@ -133,8 +146,9 @@ board.cpp / board.hpp  → runtime board identification for the ONE image per ch
                          because display and Ethernet OVERLAP ON A PIN — the panel's SPI clock
                          is GPIO5, the same pin the PoE base uses for SCLK — so the W5500 probe
                          is refused on a detected T-Dongle
-patches/tesla-ble/     → reviewed patch on pinned dependency: reject replayed CarServer
-                         responses before callbacks/FIFO completion (all four targets)
+patches/tesla-ble/     → ordered reviewed patch series on the pinned dependency: reject replayed
+                         CarServer responses before callbacks/FIFO completion and make private-key
+                         regeneration report/recover persistence failure (all four targets)
 ble_client.cpp         → NimBLE GATT client (BleAdapter impl)
                          Scans for UUID 00000211-b2d1-43f0-9b88-960cebf8b91e
                          Write chr: 0212, Notify chr: 0213
@@ -285,8 +299,8 @@ Never edit files in `managed_components/` — they are regenerated.
 
 | Namespace   | Content                                     |
 |-------------|---------------------------------------------|
-| `tesla_cfg` | `cfg` — the **atomic credential/service blob** (`logic/config_store.hpp`, `main/config_blob.cpp`): WiFi SSID/pass + the **one-shot rollback backup** (previous SSID/pass + the `rolled_back` outcome marker), VIN, `mqtt_uri`, `syslog_uri` — ONE CRC-checked `nvs_set_blob`, so a credential save is all-or-nothing across a write failure AND a power cut. The legacy per-key names (`wifi_ssid`/`wifi_pass`/`vin`/…) are still READ as the fallback when the blob is absent (a device that has not saved since upgrading) or fails its CRC, and are mirrored on save so a downgrade still finds its config. Plus the boot-loop **crash counter** `boot_fails` (safe_mode.cpp) and the separate-owner keys: BLE MAC, `last_time`, `reboot_why` (why WE ended the last boot — `heap:<n>` = the heap watchdog, n = consecutive such restarts; read+cleared at boot, surfaced once as `/status.last_reboot`), `disp_rot` (on-device display BOOT-rotation index 0..3; T-Dongle-S3; migrates old `disp_flip`) (runtime cfg) |
-| `tesla_ble` | Private key (`private_key`), VCSEC session (`sess_vcsec`), Info session (`sess_info`), `key_created`, `paired_at` — the `sess_*` names come from the ≤15-char key mapping in `nvs_storage.cpp`. The `sess_*` blobs are only REUSABLE across a reboot if the wall clock is restored **before** `VehicleController::init()` (tesla-ble rejects a session older than 1 h and computes the age against `time(nullptr)`, which underflows at 1970) — hence `restore_clock_from_nvs()` early in `main.cpp`, see docs/ARCHITECTURE.md |
+| `tesla_cfg` | `cfg` — the **atomic credential/service blob** (`logic/config_store.hpp`, `main/config_blob.cpp`): WiFi SSID/pass + the **one-shot rollback backup** (previous SSID/pass + the `rolled_back` outcome marker), VIN, `mqtt_uri`, `syslog_uri` — ONE CRC-checked `nvs_set_blob`, so a credential save is all-or-nothing across a write failure AND a power cut. The legacy per-key names (`wifi_ssid`/`wifi_pass`/`vin`/…) are still READ as the fallback when the blob is absent (a device that has not saved since upgrading) or fails its CRC, and are mirrored on save so a downgrade still finds its config. Plus the boot-loop **crash counter** `boot_fails` (safe_mode.cpp), the temporary `vin_txn` journal used to recover a VIN/key transition across namespaces, and the separate-owner keys: BLE MAC, `last_time`, `reboot_why` (why WE ended the last boot — `heap:<n>` = the heap watchdog, n = consecutive such restarts; read+cleared at boot, surfaced once as `/status.last_reboot`), `disp_rot` (on-device display BOOT-rotation index 0..3; T-Dongle-S3; migrates old `disp_flip`) (runtime cfg) |
+| `tesla_ble` | Private key (`private_key`), VCSEC session (`sess_vcsec`), Info session (`sess_info`), `key_created`, `paired_at`, and the temporary `key_rotate` journal that blocks vehicle construction/signing until old sessions are durably cleared; an unreadable marker probe also blocks boot rather than masquerading as “missing” — the `sess_*` names come from the ≤15-char key mapping in `nvs_storage.cpp`. The `sess_*` blobs are only REUSABLE across a reboot if the wall clock is restored **before** `VehicleController::init()` (tesla-ble rejects a session older than 1 h and computes the age against `time(nullptr)`, which underflows at 1970) — hence `restore_clock_from_nvs()` early in `main.cpp`, see docs/ARCHITECTURE.md |
 
 ## Commands Implemented
 
@@ -375,8 +389,12 @@ downgrade); the next reboot rolls it back, and any deliberate `/set_*` save comm
 `CONFIG_SECURE_SIGNED_ON_UPDATE_NO_SECURE_BOOT` in `sdkconfig.defaults`). The running app
 verifies the RSA signature before installing an OTA, so a compromised update host can't push
 unsigned firmware — no eFuses burned, reversible, web installer still works. Build stays
-unsigned (`CONFIG_SECURE_BOOT_BUILD_SIGNED_BINARIES=n`); `scripts/ci-build-all.sh` signs each
-image with the offline key (CI secret `OTA_SIGNING_KEY` → gitignored `ota_signing_key.pem`).
+unsigned (`CONFIG_SECURE_BOOT_BUILD_SIGNED_BINARIES=n`); the unprivileged
+`scripts/ci-build-all.sh` produces only data, and trusted `scripts/ci-sign-artifacts.sh` signs it
+with the protected key (CI secret `OTA_SIGNING_KEY` → transient gitignored
+`ota_signing_key.pem`). PR CI exercises that signer with a disposable RSA-3072 key, never the real
+one. Signed PR previews are opt-in via `signed-preview` plus Environment approval, with a final
+state/SHA/label check immediately before publish and event+scheduled cleanup under the same lock.
 Trust is TOFU from the running app's signature block — a device on a signed build refuses
 unsigned/differently-signed OTAs. Classic esp32 needs chip rev v3.0+ (`CONFIG_ESP32_REV_MIN_3`
 in `sdkconfig.defaults.esp32`). **Key lifecycle/rotation: [`docs/SECURITY.md`](../docs/SECURITY.md).**
@@ -384,14 +402,18 @@ in `sdkconfig.defaults.esp32`). **Key lifecycle/rotation: [`docs/SECURITY.md`](.
 Partition layout (`partitions.csv`) is dual-OTA (`otadata` + `ota_0`/`ota_1`, ~2 MB each),
 sized to fill **4 MB** (smallest supported flash; a larger one just leaves the top
 unused) so ONE table serves every target; **app at `0x20000`**. Per-target **bootloader offset**
-is handled by `@flash_args` and the manifest — 0x1000 on the classic esp32, 0x0 on s3/c3/c6.
-The `ci-build-all.sh` size gate sits at `slot − 32 KB`
-(0x1e8000, below the 0x1f0000 = 2031616 B slot); it is checked on the **signed** image, whose code
-is first padded up to a 64 KB Secure-Boot boundary before a 4 KB signature sector is appended — so
-crossing a boundary costs a full 64 KB block, which is what made esp32c5 undeliverable
-([ADR-0004](../docs/adr/0004-drop-esp32c5-target.md)). **esp32c6 is the largest image**
-(signed 0x1e1000, ≈28 KB under the gate — it sat ~3 KB under a 64 KB Secure-Boot boundary and a 3 KB change crossed it); **esp32s3 carries the display code** and sits at
-0x191000. All stay on the base **`-Og`**: the Package A size levers (#154)
+is encoded in the unsigned build metadata (`@flash_args`) and the signed factory-install
+manifest — 0x1000 on the classic esp32, 0x0 on s3/c3/c6. `@flash_args` is layout evidence,
+not permission to flash an unsigned build; signed app-only delivery leaves the bootloader intact.
+The app-size policy sits at `slot − 32 KiB` (`0x1e8000`, below the `0x1f0000` = 2031616 B
+slot). Unprivileged `ci-build-all.sh` gates the deterministic **projected signed size**;
+trusted `ci-sign-artifacts.sh` independently gates the **actual signed bytes**. At audited source
+`3d7ccc1`, projected signed sizes were esp32 `0x191000`, esp32s3 `0x1a1000`, esp32c3
+`0x1b1000`, and esp32c6 `0x1e1000` (≈28 KiB under the policy gate); always re-read the current
+size reports. Signing first pads code to a 64 KiB Secure-Boot boundary and then appends a 4 KiB
+signature sector, so crossing a boundary costs a full 64 KiB block, which is what made esp32c5
+undeliverable ([ADR-0004](../docs/adr/0004-drop-esp32c5-target.md)). **esp32s3 carries the
+display code.** All targets stay on the base **`-Og`**: the Package A size levers (#154)
 freed the ~64 KB the display needs, so no `-Os`
 is required. (`-Os` is banned here — whole-build `-Os` hard-freezes under evcc+BLE load, rejected
 Package B.) **Migration + multi-target image details:

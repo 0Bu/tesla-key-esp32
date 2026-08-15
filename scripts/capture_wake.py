@@ -16,8 +16,8 @@
 #     including the empty authenticated wake-ack that has no commandStatus.
 #   • /status link state (awake/asleep/unreachable/unknown) + charge, printed on
 #     every change — the firmware's interpretation, to correlate with the frames.
-#   Everything (full new diag text + status snapshots) is also written verbatim to a
-#   timestamped logfile for later review.
+#   New diag text + status transitions are written to a private temporary logfile for later review.
+#   VIN and long hexadecimal frame payloads are redacted unless --include-sensitive is explicit.
 #
 # Lines worth looking for (what they mean):
 #   RX notify len=… : <hex>                         raw bytes the car returned
@@ -42,9 +42,12 @@
 import argparse
 import datetime as dt
 import json
+import os
+import pathlib
 import re
 import signal
 import sys
+import tempfile
 import time
 import urllib.request
 import urllib.error
@@ -58,6 +61,14 @@ WAKE_RE = re.compile(
     r"Command (completed|failed|skipped)|"
     r"timed out|timeout|"
     r"whitelist|authentication failed|asleep|AWAKE|ASLEEP",
+)
+HEX_PAYLOAD_RE = re.compile(r"(?<![0-9A-Fa-f])[0-9A-Fa-f]{16,}(?![0-9A-Fa-f])")
+# The firmware's verbose RX formatter emits one byte at a time (``00 11 22 ...``), not one
+# contiguous hex string.  Redacting only the latter would therefore leave the normal capture
+# format untouched.  Eight or more whitespace-separated octets is a frame payload; shorter
+# values such as the four-byte key fingerprint remain useful diagnostics.
+SPACED_HEX_PAYLOAD_RE = re.compile(
+    r"(?<![0-9A-Fa-f])(?:[0-9A-Fa-f]{2}[ \t]+){7,}[0-9A-Fa-f]{2}(?![0-9A-Fa-f])"
 )
 
 stop = False
@@ -103,6 +114,43 @@ def ts():
     return dt.datetime.now().strftime("%H:%M:%S.%f")[:-3]
 
 
+def redact_capture_line(line, vin, include_sensitive=False):
+    """Remove stable vehicle identity and raw authenticated-frame bytes by default."""
+    if include_sensitive:
+        return line
+    if vin and vin != "UNKNOWN":
+        line = re.sub(re.escape(vin), "<VIN-redacted>", line, flags=re.IGNORECASE)
+    line = SPACED_HEX_PAYLOAD_RE.sub("<frame-redacted>", line)
+    return HEX_PAYLOAD_RE.sub("<frame-redacted>", line)
+
+
+def open_private_log(output=None):
+    """Create a non-overwriting 0600 logfile; default parent is a fresh 0700 temp directory."""
+    if output:
+        path = pathlib.Path(output).expanduser().resolve()
+        repo_root = pathlib.Path(__file__).resolve().parent.parent
+        try:
+            path.relative_to(repo_root)
+        except ValueError:
+            pass
+        else:
+            if not re.fullmatch(r"wake-capture-[A-Za-z0-9._-]+\.log", path.name):
+                raise OSError(
+                    "an explicit log inside the checkout must be named wake-capture-*.log "
+                    "so the repository ignore rule applies"
+                )
+    else:
+        directory = pathlib.Path(tempfile.mkdtemp(prefix="tesla-key-wake-"))
+        directory.chmod(0o700)
+        path = directory / ("wake-capture-" + dt.datetime.now().strftime("%Y%m%d-%H%M%S") + ".log")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(path, flags, 0o600)
+    os.fchmod(fd, 0o600)
+    return path, os.fdopen(fd, "w", encoding="utf-8")
+
+
 def main():
     ap = argparse.ArgumentParser(description="Capture what the Tesla returns on a wake request.")
     ap.add_argument("url", nargs="?", default="http://tesla-key.local",
@@ -111,6 +159,9 @@ def main():
                     help="actively POST one wake_up after baseline (VIN read from /status)")
     ap.add_argument("--interval", type=float, default=1.0, help="poll interval seconds (default 1.0)")
     ap.add_argument("--duration", type=float, default=0, help="auto-stop after N seconds (0 = until Ctrl-C)")
+    ap.add_argument("--output", help="explicit new logfile path (must not already exist; created mode 0600)")
+    ap.add_argument("--include-sensitive", action="store_true",
+                    help="store full VIN and raw BLE frame hex (sensitive; default is redacted)")
     args = ap.parse_args()
     base = args.url.rstrip("/")
 
@@ -128,86 +179,94 @@ def main():
     link = st.get("link", "?")
     paired = st.get("paired", False)
 
-    logname = "wake-capture-" + dt.datetime.now().strftime("%Y%m%d-%H%M%S") + ".log"
-    log = open(logname, "w", encoding="utf-8")
+    try:
+        log_path, log = open_private_log(args.output)
+    except OSError as e:
+        print(f"ERROR: cannot create private capture log — {e}", file=sys.stderr)
+        return 2
 
     def out(line):
-        print(line, flush=True)
-        log.write(line + "\n")
+        safe_line = redact_capture_line(line, vin, args.include_sensitive)
+        print(safe_line, flush=True)
+        log.write(safe_line + "\n")
         log.flush()
 
     out(f"# capture_wake {base}  vin={vin or '(unset)'}  paired={paired}  link={link}")
-    out(f"# logfile: {logname}")
+    out(f"# logfile: {log_path}  sensitive={'yes' if args.include_sensitive else 'no (VIN/frames redacted)'}")
+    if args.include_sensitive:
+        out("# WARNING: explicit sensitive capture — contains full VIN and authenticated BLE frames; do not attach publicly")
 
-    # Clear the ring + enable raw-RX logging so each frame the car sends is captured.
+    verbose_requested = False
     try:
-        http_get(base + "/diag?clear=1&verbose=1")
-        out(f"[{ts()}] verbose RX enabled, ring cleared — watching. Tap Wake in the UI (or use --wake).")
-    except (urllib.error.URLError, OSError) as e:
-        out(f"[{ts()}] WARN: could not set verbose/clear — {e}")
-
-    prev_diag = ""
-    last_link = link
-    last_charge = None
-    started = time.monotonic()
-    fired_wake = False
-
-    while not stop:
-        # Optionally fire the wake ourselves, once, after the first baseline poll.
-        if args.wake and not fired_wake:
-            fired_wake = True
-            if not vin or vin == "UNKNOWN":
-                out(f"[{ts()}] --wake requested but no VIN configured; skipping active wake.")
-            else:
-                url = f"{base}/api/1/vehicles/{vin}/command/wake_up"
-                out(f"[{ts()}] >>> POST {url}")
-                try:
-                    resp = http_post(url, timeout=30)
-                    out(f"[{ts()}] <<< wake_up response: {resp.strip()}")
-                except (urllib.error.URLError, OSError) as e:
-                    out(f"[{ts()}] <<< wake_up error: {e}")
-
-        # Pull new diag and surface the interesting lines.
+        # Clear the ring + enable raw-RX logging so each frame the car sends is captured/redacted.
         try:
-            cur = http_get(base + "/diag")
-            delta = new_suffix(prev_diag, cur)
-            prev_diag = cur
-            for line in delta.splitlines():
-                if line.strip():
-                    log.write(line + "\n")  # full delta to file
-            log.flush()
-            for line in delta.splitlines():
-                if WAKE_RE.search(line):
-                    print(f"[{ts()}] {line.rstrip()}", flush=True)
+            # The request can reach the device even if the response is lost.  Record intent first
+            # so the finally block always makes a best-effort attempt to turn verbose logging off.
+            verbose_requested = True
+            http_get(base + "/diag?clear=1&verbose=1")
+            out(f"[{ts()}] verbose RX enabled, ring cleared — watching. Tap Wake in the UI (or use --wake).")
         except (urllib.error.URLError, OSError) as e:
-            out(f"[{ts()}] WARN: /diag fetch failed — {e}")
+            out(f"[{ts()}] WARN: could not set verbose/clear — {e}")
 
-        # Status transitions (link + charge), printed only on change.
-        try:
-            st = json.loads(http_get(base + "/status"))
-            link = st.get("link", "?")
-            veh = st.get("vehicle") or st.get("last") or {}
-            charge = (veh.get("soc"), veh.get("status"))
-            if link != last_link:
-                out(f"[{ts()}] === link: {last_link} -> {link}  (paired={st.get('paired')})")
-                last_link = link
-            if charge != last_charge and any(c is not None for c in charge):
-                out(f"[{ts()}] === charge: soc={charge[0]} status={charge[1]}")
-                last_charge = charge
-        except (urllib.error.URLError, OSError, ValueError):
-            pass
+        prev_diag = ""
+        last_link = link
+        last_charge = None
+        started = time.monotonic()
+        fired_wake = False
 
-        if args.duration and (time.monotonic() - started) >= args.duration:
-            break
-        time.sleep(args.interval)
+        while not stop:
+            if args.wake and not fired_wake:
+                fired_wake = True
+                if not vin or vin == "UNKNOWN":
+                    out(f"[{ts()}] --wake requested but no VIN configured; skipping active wake.")
+                else:
+                    url = f"{base}/api/1/vehicles/{vin}/command/wake_up"
+                    out(f"[{ts()}] >>> POST {url}")
+                    try:
+                        resp = http_post(url, timeout=30)
+                        out(f"[{ts()}] <<< wake_up response: {resp.strip()}")
+                    except (urllib.error.URLError, OSError) as e:
+                        out(f"[{ts()}] <<< wake_up error: {e}")
 
-    # Be a good citizen: turn raw RX back off (it adds BLE-task chatter + log volume).
-    try:
-        http_get(base + "/diag?verbose=0")
-    except (urllib.error.URLError, OSError):
-        pass
-    out(f"[{ts()}] stopped. Full capture in {logname}")
-    log.close()
+            try:
+                cur = http_get(base + "/diag")
+                delta = new_suffix(prev_diag, cur)
+                prev_diag = cur
+                for line in delta.splitlines():
+                    if line.strip():
+                        log.write(redact_capture_line(line, vin, args.include_sensitive) + "\n")
+                log.flush()
+                for line in delta.splitlines():
+                    if WAKE_RE.search(line):
+                        print(f"[{ts()}] {redact_capture_line(line.rstrip(), vin, args.include_sensitive)}", flush=True)
+            except (urllib.error.URLError, OSError) as e:
+                out(f"[{ts()}] WARN: /diag fetch failed — {e}")
+
+            try:
+                st = json.loads(http_get(base + "/status"))
+                link = st.get("link", "?")
+                veh = st.get("vehicle") or st.get("last") or {}
+                charge = (veh.get("soc"), veh.get("status"))
+                if link != last_link:
+                    out(f"[{ts()}] === link: {last_link} -> {link}  (paired={st.get('paired')})")
+                    last_link = link
+                if charge != last_charge and any(c is not None for c in charge):
+                    out(f"[{ts()}] === charge: soc={charge[0]} status={charge[1]}")
+                    last_charge = charge
+            except (urllib.error.URLError, OSError, ValueError):
+                pass
+
+            if args.duration and (time.monotonic() - started) >= args.duration:
+                break
+            time.sleep(args.interval)
+    finally:
+        if verbose_requested:
+            try:
+                http_get(base + "/diag?verbose=0")
+            except (urllib.error.URLError, OSError):
+                pass
+        out(f"[{ts()}] stopped. Capture in {log_path}")
+        log.close()
     return 0
 
 

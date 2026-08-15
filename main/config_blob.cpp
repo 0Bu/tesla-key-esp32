@@ -3,34 +3,64 @@
 #include "config_blob.hpp"
 
 #include "nvs_storage.hpp"
+#include "sdkconfig.h"
 
 #include <esp_log.h>
 
 #include <vector>
+#include <utility>
 
 static const char* TAG = "config_blob";
 
 namespace tk {
 
-bool cfg_load(NvsStorageAdapter& cfg, ConfigBlob& out) {
-    std::vector<uint8_t> raw;
-    if (cfg.load_blob(kConfigBlobKey, raw) && !raw.empty()) {
-        if (config_blob_decode(raw.data(), raw.size(), out)) return true;
-        // Decoded nothing usable. This is the one place where being loud matters more than being
-        // tidy: a CRC failure means the stored credentials are unreadable, and the device is about
-        // to fall back to values that may be much older. Saying so on /diag (and therefore syslog)
-        // is what separates "the user changed the WiFi" from "the config partition is going bad".
-        ESP_LOGW(TAG, "config blob present but failed to decode (bad CRC or a newer format) — "
-                      "falling back to the legacy per-key values");
-    }
-
+static void load_legacy(NvsStorageAdapter& cfg, ConfigBlob& out) {
     // Legacy per-key layout: a fresh device, or one that has not saved anything since upgrading to
-    // the blob. NOT an error path — it is the normal state of every already-deployed board.
-    cfg.load_str("wifi_ssid", out.wifi_ssid);
-    cfg.load_str("wifi_pass", out.wifi_pass);
-    cfg.load_str("vin",       out.vin);
-    cfg.load_str("mqtt_uri",  out.mqtt_uri);
-    cfg.load_str("syslog_uri", out.syslog_uri);
+    // the blob. Start from the build defaults and let an existing legacy key override them,
+    // including an explicitly stored empty string. Centralising this matters: callers used to seed
+    // defaults differently, so the first unrelated blob save could silently turn a Kconfig MQTT or
+    // Syslog default into an explicit disable.
+    ConfigBlob legacy;
+    legacy.wifi_ssid = CONFIG_TESLA_WIFI_SSID;
+    legacy.wifi_pass = CONFIG_TESLA_WIFI_PASSWORD;
+    legacy.vin       = CONFIG_TESLA_VIN;
+    legacy.mqtt_uri  = CONFIG_TESLA_MQTT_BROKER_URI;
+    legacy.syslog_uri = CONFIG_TESLA_SYSLOG_SERVER;
+    cfg.load_str("wifi_ssid", legacy.wifi_ssid);
+    cfg.load_str("wifi_pass", legacy.wifi_pass);
+    cfg.load_str("vin",       legacy.vin);
+    cfg.load_str("mqtt_uri",  legacy.mqtt_uri);
+    cfg.load_str("syslog_uri", legacy.syslog_uri);
+    out = std::move(legacy);
+}
+
+ConfigLoadState cfg_load_state(NvsStorageAdapter& cfg, ConfigBlob& out) {
+    std::vector<uint8_t> raw;
+    const NvsBlobLoadState raw_state = cfg.load_blob_state(kConfigBlobKey, raw);
+    if (raw_state == NvsBlobLoadState::Error) {
+        ESP_LOGE(TAG, "config blob could not be read authoritatively");
+        return ConfigLoadState::Error;
+    }
+    if (raw_state == NvsBlobLoadState::Missing) {
+        load_legacy(cfg, out);
+        return ConfigLoadState::Legacy;
+    }
+    if (!config_blob_decode(raw.data(), raw.size(), out)) {
+        ESP_LOGE(TAG, "config blob present but failed CRC/schema decoding");
+        return ConfigLoadState::Error;
+    }
+    return ConfigLoadState::Blob;
+}
+
+bool cfg_load(NvsStorageAdapter& cfg, ConfigBlob& out) {
+    const ConfigLoadState state = cfg_load_state(cfg, out);
+    if (state == ConfigLoadState::Blob) return true;
+    if (state == ConfigLoadState::Error) {
+        // Compatibility path for ordinary, unjournaled boots/callers. Recovery code must use the
+        // tri-state API above and fail closed instead of reaching this legacy fallback.
+        ESP_LOGW(TAG, "config blob unavailable/invalid — falling back to legacy per-key values");
+        load_legacy(cfg, out);
+    }
     return false;
 }
 

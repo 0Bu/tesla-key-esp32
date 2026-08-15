@@ -19,14 +19,14 @@ idf_build_set_property(COMPILE_OPTIONS "-Wno-error=format" APPEND)
 
 project(tesla-key-esp32)
 
-# yoziru/tesla-ble v5.1.1 detects replayed CarServer response counters but continues
-# processing those frames. That lets an old response refresh a cache callback or complete
-# the next FIFO command. Apply the small, reviewable repository-owned fix after IDF's
+# yoziru/tesla-ble v5.1.1 has two correctness gaps: replayed CarServer responses continue
+# into callbacks/FIFO completion, and key regeneration cannot report or recover from a
+# persistence failure. Apply the ordered, reviewable repository-owned patch series after
 # Component Manager has materialised the pinned dependency and before any source compiles.
 execute_process(
     COMMAND "${CMAKE_SOURCE_DIR}/scripts/apply-tesla-ble-patches.sh"
     RESULT_VARIABLE TESLA_BLE_PATCH_RESULT
 )
 if(NOT TESLA_BLE_PATCH_RESULT EQUAL 0)
-    message(FATAL_ERROR "Failed to apply the tesla-ble anti-replay patch")
+    message(FATAL_ERROR "Failed to apply the tesla-ble patch series")
 endif()
