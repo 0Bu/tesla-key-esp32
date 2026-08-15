@@ -17,6 +17,7 @@
 //     typed, so only a sustained authentication refusal may spend them.
 
 #include "net.hpp"
+#include "logic/wifi_credentials.hpp"
 
 #include <atomic>
 #include <cstring>
@@ -198,6 +199,17 @@ static void wifi_event_handler(void*, esp_event_base_t base, int32_t event_id, v
 }
 
 bool net_start_wifi(const char* ssid, const char* password, bool rollback_pending) {
+    if (!ssid || !password) {
+        ESP_LOGE(TAG, "WiFi credentials missing");
+        return false;
+    }
+    const tk::WifiCredentialError credential_error =
+        tk::wifi_credentials_error(ssid, password);
+    if (credential_error != tk::WifiCredentialError::None) {
+        ESP_LOGE(TAG, "stored WiFi credentials rejected: %s",
+                 tk::wifi_credentials_reason(credential_error));
+        return false;
+    }
     s_wifi_events = xEventGroupCreate();
     if (!s_wifi_events) boot_fatal("WiFi event group");
 
@@ -221,9 +233,24 @@ bool net_start_wifi(const char* ssid, const char* password, bool rollback_pendin
         IP_EVENT, IP_EVENT_STA_GOT_IP, wifi_event_handler, nullptr, &h2));
 
     wifi_config_t wifi_cfg{};
-    strncpy((char*)wifi_cfg.sta.ssid,     ssid,     sizeof(wifi_cfg.sta.ssid) - 1);
-    strncpy((char*)wifi_cfg.sta.password, password, sizeof(wifi_cfg.sta.password) - 1);
-    wifi_cfg.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
+    const size_t ssid_len = strlen(ssid);
+    if (ssid_len == sizeof(wifi_cfg.sta.ssid)) {
+        // Like the password field, ESP-IDF stores the maximum-length value in the full fixed
+        // array without a terminator. A size-1 strncpy would silently turn a valid 32-byte SSID
+        // into a different 31-byte network name.
+        memcpy(wifi_cfg.sta.ssid, ssid, sizeof(wifi_cfg.sta.ssid));
+    } else {
+        strncpy((char*)wifi_cfg.sta.ssid, ssid, sizeof(wifi_cfg.sta.ssid) - 1);
+    }
+    const size_t password_len = strlen(password);
+    if (password_len == sizeof(wifi_cfg.sta.password)) {
+        // ESP-IDF accepts a 64-hex raw PSK in the full fixed-width field; it is intentionally
+        // not NUL-terminated. Validation before persistence guarantees all 64 bytes are hex.
+        memcpy(wifi_cfg.sta.password, password, sizeof(wifi_cfg.sta.password));
+    } else {
+        strncpy((char*)wifi_cfg.sta.password, password, sizeof(wifi_cfg.sta.password) - 1);
+    }
+    wifi_cfg.sta.threshold.authmode = password_len == 0 ? WIFI_AUTH_OPEN : WIFI_AUTH_WPA2_PSK;
     // Pick the STRONGEST AP for the SSID, not the first one heard. The default WIFI_FAST_SCAN
     // stops at the first matching BSSID (channel-order/timing dependent), so on a multi-AP
     // network this device — stationary near the car — would latch onto whatever answers first,

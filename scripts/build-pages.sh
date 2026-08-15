@@ -1,95 +1,151 @@
 #!/usr/bin/env bash
-# Assemble the GitHub Pages site for the inline Web Serial installer.
+# Assemble the GitHub Pages Web Serial installer from the four trusted signed target trees.
 #
-# The installer (index.html) fetches the firmware in the BROWSER. GitHub release
-# assets are served without CORS headers, so the manifest cannot point at release
-# URLs cross-origin — the parts must be same-origin with the page. This script
-# therefore copies the per-target bins (staged in _fw/<target>/ by ci-sign-artifacts.sh)
-# into the publish dir alongside the page and writes a manifest.json with one build
-# per chipFamily and relative paths. web-installer.mjs selects the build matching the
-# detected chip. The canonical downloads still live on the GitHub release; these are
-# an in-build same-origin mirror and are NOT committed to git.
+# Usage: ./scripts/build-pages.sh <out_dir> <version> [source-sha]
 #
-# bootloader / partition-table / app are flashed as SEPARATE parts at their own
-# offsets, so a USB (re)flash never overwrites the nvs partition (0x9000) → WiFi / VIN /
-# key survive a same-layout reflash. The bootloader offset is per-target: 0x1000 on the
-# classic esp32, 0x0 on esp32s3 / esp32c3 / esp32c6.
-#
-# ONE manifest + per-target image serves every supported chip — a single installer page
-# and a single OTA channel (the device pulls tesla-key-esp32[-<s3|c3|c6>].bin for its chip).
-#
-# Usage:  ./scripts/build-pages.sh <out_dir> <version>
+# The output directory is deliberately restricted: this script replaces it recursively, so only
+# the two repository staging names or a purpose-named direct child of RUNNER_TEMP/TMPDIR is accepted.
+# Each manifest part carries a byte length and SHA-256.  ota_data_initial is the fourth/final part;
+# the browser validates every download first, writes the immutable parts, then writes otadata as the
+# activation step.  Changing the order/offsets is a schema change, not an incidental refactor.
 set -euo pipefail
 
-out="${1:?usage: build-pages.sh <out_dir> <version>}"
-version="${2:?usage: build-pages.sh <out_dir> <version>}"
+out_arg="${1:?usage: build-pages.sh <out_dir> <version> [source-sha]}"
+version="${2:?usage: build-pages.sh <out_dir> <version> [source-sha]}"
 
-repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-fw="$repo_root/_fw"
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+fw="${FIRMWARE_STAGE_DIR:-$repo_root/_fw}"
 docs="$repo_root/docs"
+source_sha="${3:-$(git -C "$repo_root" rev-parse HEAD)}"
 
-# target -> manifest chipFamily string consumed by web-installer.mjs.
+[[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || {
+  echo "invalid Pages version (expected X.Y.Z or X.Y.Z-prerelease): $version" >&2
+  exit 2
+}
+[[ "$source_sha" =~ ^[0-9a-f]{40}$ ]] || {
+  echo "invalid source SHA (expected 40 lowercase hex characters): $source_sha" >&2
+  exit 2
+}
+
+canonical_path() {
+  python3 -c 'import os,sys; print(os.path.realpath(os.path.abspath(sys.argv[1])))' "$1"
+}
+
+out="$(canonical_path "$out_arg")"
+temp_root="$(canonical_path "${RUNNER_TEMP:-${TMPDIR:-/tmp}}")"
+case "$out" in
+  "$repo_root/_site"|"$repo_root/_pr_site"|"$temp_root"/tesla-key-pages.*) ;;
+  *)
+    echo "unsafe Pages output '$out_arg' resolves to '$out'" >&2
+    echo "allowed: $repo_root/_site, $repo_root/_pr_site, or $temp_root/tesla-key-pages.*" >&2
+    exit 2
+    ;;
+esac
+[[ "$out" != / && "$out" != "$repo_root" && "$out" != "$temp_root" ]] || {
+  echo "refusing broad Pages output path: $out" >&2; exit 2;
+}
+[[ ! -L "$out_arg" ]] || { echo "refusing symlink Pages output: $out_arg" >&2; exit 2; }
+[[ -d "$fw" && ! -L "$fw" ]] || { echo "signed firmware stage missing or unsafe: $fw" >&2; exit 1; }
+
+# A direct Pages invocation is itself a release boundary: never rely on a broader test job having
+# verified the browser runtime beforehand.  This local check is offline, exact-hash and fail-closed.
+"$repo_root/scripts/verify-vendored-esptool-js.sh"
+
+file_size() {
+  stat -c %s "$1" 2>/dev/null || stat -f %z "$1"
+}
+
+file_sha256() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  else
+    shasum -a 256 "$1" | awk '{print $1}'
+  fi
+}
+
 chip_family() {
   case "$1" in
-    esp32)   echo "ESP32" ;;
-    esp32s3) echo "ESP32-S3" ;;
-    esp32c3) echo "ESP32-C3" ;;
-    esp32c6) echo "ESP32-C6" ;;
-    *)       echo "" ;;
+    esp32) echo ESP32 ;; esp32s3) echo ESP32-S3 ;; esp32c3) echo ESP32-C3 ;; esp32c6) echo ESP32-C6 ;;
+    *) echo "unknown target: $1" >&2; exit 2 ;;
   esac
 }
-# target -> 2nd-stage bootloader flash offset (bytes). Classic esp32 = 0x1000,
-# s3/c3/c6 = 0x0. MUST match the trusted explicit layout in ci-sign-artifacts.sh — a wrong offset
-# here makes the browser installer write an UNBOOTABLE bootloader.
-boot_offset() { case "$1" in esp32) echo 4096 ;; *) echo 0 ;; esac; }
-# target -> short app-image suffix so "esp32" appears once: esp32 -> "" (tesla-key-esp32.bin),
-# esp32s3 -> "-s3", esp32c3 -> "-c3", esp32c6 -> "-c6". This names the
-# OTA-served Pages copy, so it MUST match TESLA_OTA_IMG_SUFFIX in main/ota_update.cpp and
-# image_suffix() in ci-sign-artifacts.sh — the device builds the same filename to pull its image.
+
+boot_offset() { [[ "$1" == esp32 ]] && echo 4096 || echo 0; }
+
 image_suffix() {
   case "$1" in
-    esp32)   echo "" ;;
-    esp32s3) echo "-s3" ;;
-    esp32c3) echo "-c3" ;;
-    esp32c6) echo "-c6" ;;
-    # Fail hard like the firmware's #error (ota_update.cpp) — a silently invented
-    # suffix would publish an image no device ever builds a filename for.
-    *)       echo "image_suffix: unknown target '$1'" >&2; exit 1 ;;
+    esp32) echo "" ;; esp32s3) echo -s3 ;; esp32c3) echo -c3 ;; esp32c6) echo -c6 ;;
+    *) echo "unknown target: $1" >&2; exit 2 ;;
   esac
 }
 
 TARGETS="esp32 esp32s3 esp32c3 esp32c6"
+expected_sorted="esp32 esp32c3 esp32c6 esp32s3"
+actual_sorted="$(find "$fw" -mindepth 1 -maxdepth 1 -type d -exec basename {} \; | LC_ALL=C sort | tr '\n' ' ' | sed 's/ $//')"
+[[ "$actual_sorted" == "$expected_sorted" ]] || {
+  echo "signed firmware stage must contain exactly: $expected_sorted" >&2
+  echo "found: ${actual_sorted:-<none>}" >&2
+  exit 1
+}
 
-rm -rf "$out"
+rm -rf -- "$out"
 mkdir -p "$out"
 
-# The page and its local module + any served docs (README / SECURITY), but never a stale manifest.
-# The full site is emitted for both the root and each PR/<N>/ preview, so a PR is directly browsable.
-cp "$docs/index.html" "$docs/serial-port-release.mjs" "$docs/web-installer.mjs" "$out/"
+cp "$docs/index.html" "$docs/installer-bootstrap.mjs" \
+  "$docs/serial-port-release.mjs" "$docs/web-installer.mjs" "$out/"
+mkdir -p "$out/vendor"
+cp "$docs/vendor/esptool-js-0.6.1.bundle.js" \
+  "$docs/vendor/esptool-js-0.6.1.LICENSE" "$out/vendor/"
 for md in "$docs"/*.md; do
   [[ -e "$md" ]] && cp "$md" "$out/"
 done
 
 builds=""
-for t in $TARGETS; do
-  d="$fw/$t"
-  if [[ ! -d "$d" ]]; then
-    echo "warn: no staged bins for $t in $d — skipping" >&2
-    continue
-  fi
-  cf="$(chip_family "$t")"
-  bo="$(boot_offset "$t")"
-  sfx="$(image_suffix "$t")"
-  cp "$d/bootloader.bin"      "$out/bootloader-$t.bin"
-  cp "$d/partition-table.bin" "$out/partition-table-$t.bin"
-  cp "$d/tesla-key-esp32.bin" "$out/tesla-key-esp32$sfx.bin"
+for target in $TARGETS; do
+  source_dir="$fw/$target"
+  for name in bootloader.bin partition-table.bin tesla-key-esp32.bin ota_data_initial.bin; do
+    path="$source_dir/$name"
+    [[ -f "$path" && ! -L "$path" ]] || {
+      echo "missing/unsafe signed Pages input: $path" >&2; exit 1;
+    }
+  done
+
+  bo="$(boot_offset "$target")"
+  boot_size="$(file_size "$source_dir/bootloader.bin")"
+  partition_size="$(file_size "$source_dir/partition-table.bin")"
+  app_size="$(file_size "$source_dir/tesla-key-esp32.bin")"
+  otadata_size="$(file_size "$source_dir/ota_data_initial.bin")"
+  (( boot_size > 0 && boot_size <= 32768 - bo )) || {
+    echo "$target bootloader size $boot_size overlaps partition table at 0x8000" >&2; exit 1;
+  }
+  (( partition_size > 0 && partition_size <= 0x1000 )) || {
+    echo "$target partition table size $partition_size exceeds 0x1000" >&2; exit 1;
+  }
+  (( app_size > 0 && app_size <= 0x1f0000 )) || {
+    echo "$target app size $app_size exceeds OTA slot 0x1f0000" >&2; exit 1;
+  }
+  (( otadata_size == 0x2000 )) || {
+    echo "$target ota_data_initial size must be exactly 0x2000, got $otadata_size" >&2; exit 1;
+  }
+
+  suffix="$(image_suffix "$target")"
+  boot_name="bootloader-$target.bin"
+  partition_name="partition-table-$target.bin"
+  app_name="tesla-key-esp32$suffix.bin"
+  otadata_name="ota_data_initial-$target.bin"
+  cp "$source_dir/bootloader.bin" "$out/$boot_name"
+  cp "$source_dir/partition-table.bin" "$out/$partition_name"
+  cp "$source_dir/tesla-key-esp32.bin" "$out/$app_name"
+  cp "$source_dir/ota_data_initial.bin" "$out/$otadata_name"
+
   entry=$(cat <<JSON
     {
-      "chipFamily": "$cf",
+      "chipFamily": "$(chip_family "$target")",
       "parts": [
-        { "path": "bootloader-$t.bin", "offset": $bo },
-        { "path": "partition-table-$t.bin", "offset": 32768 },
-        { "path": "tesla-key-esp32$sfx.bin", "offset": 131072 }
+        { "path": "$boot_name", "offset": $bo, "size": $boot_size, "sha256": "$(file_sha256 "$out/$boot_name")" },
+        { "path": "$partition_name", "offset": 32768, "size": $partition_size, "sha256": "$(file_sha256 "$out/$partition_name")" },
+        { "path": "$app_name", "offset": 131072, "size": $app_size, "sha256": "$(file_sha256 "$out/$app_name")" },
+        { "path": "$otadata_name", "offset": 61440, "size": $otadata_size, "sha256": "$(file_sha256 "$out/$otadata_name")" }
       ]
     }
 JSON
@@ -98,15 +154,12 @@ JSON
 }$entry"
 done
 
-if [[ -z "$builds" ]]; then
-  echo "error: no signed per-target bins staged in $fw — run ci-sign-artifacts.sh first" >&2
-  exit 1
-fi
-
 cat > "$out/manifest.json" <<JSON
 {
   "name": "tesla-key-esp32",
-  "version": "${version}",
+  "layoutVersion": 2,
+  "sourceSha": "$source_sha",
+  "version": "$version",
   "new_install_prompt_erase": true,
   "builds": [
 $builds
@@ -114,5 +167,6 @@ $builds
 }
 JSON
 
-echo "Built Pages site in '$out' for version ${version}:"
-ls -1 "$out"
+python3 "$repo_root/scripts/check-pages-manifest.py" "$out" \
+  --source-sha "$source_sha" --version "$version"
+echo "Built verified Pages site in '$out' for version $version from $source_sha"

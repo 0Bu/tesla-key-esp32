@@ -43,4 +43,4 @@ also clears the skill-audit gate, but NOT the feature-docs one.
 -->
 - [ ] `/skill-audit` clean — PR create/push gate @ <sha>
 - [ ] `/project-review` clean — merge gate @ <sha>
-- [ ] `/feature-docs` synced — merge gate @ <sha> (delete if the diff touches no firmware surface)
+- [ ] `/feature-docs` synced — merge gate @ <sha>

@@ -224,8 +224,9 @@ static esp_err_t handle_tools_call_(httpd_req_t* req, cJSON* id, const cJSON* pa
     // execute a wrong command and report success (set_scheduled_charging without
     // "enable" would DISABLE the schedule; start_minutes:"08:00" would schedule
     // midnight). Absent optional Int args default to 0. LLM clients routinely encode
-    // loosely, so numeric strings are accepted for Int args ("16" → 16) and 0/1 numbers
-    // for Bool args; parsed numbers are clamped to the spec bounds (UB guard).
+    // loosely, so numeric strings are accepted for Int args ("16" → 16) and exact 0/1
+    // numbers for Bool args. Integers must be finite and integral before they are clamped to
+    // the spec bounds; booleans reject every numeric spelling except finite 0 and 1.
     int  ival[tk::kCmdMaxArgs] = {};
     bool bval[tk::kCmdMaxArgs] = {};
     for (int i = 0; i < tk::kCmdMaxArgs; ++i) {
@@ -238,20 +239,24 @@ static esp_err_t handle_tools_call_(httpd_req_t* req, cJSON* id, const cJSON* pa
             // absent optional → keep the zero default
         } else if (a.type == tk::CmdArgType::Int) {
             if (cJSON_IsNumber(j)) {
-                ival[i] = tk::clamped_int(j->valuedouble, a.lo, a.hi);
+                if (!tk::mcp_integer_value(j->valuedouble, a.lo, a.hi, ival[i]))
+                    problem = "integer required";
             } else if (cJSON_IsString(j) && j->valuestring) {
                 char* end = nullptr;
                 double d = strtod(j->valuestring, &end);
-                if (end != j->valuestring && end && *end == '\0')
-                    ival[i] = tk::clamped_int(d, a.lo, a.hi);
-                else
-                    problem = "invalid argument";
+                const bool parsed = end != j->valuestring && end && *end == '\0' &&
+                                    tk::mcp_integer_value(d, a.lo, a.hi, ival[i]);
+                if (!parsed)
+                    problem = "integer required";
             } else {
                 problem = "invalid argument";
             }
         } else {  // Bool
             if      (cJSON_IsBool(j))   bval[i] = cJSON_IsTrue(j);
-            else if (cJSON_IsNumber(j)) bval[i] = (j->valuedouble != 0);
+            else if (cJSON_IsNumber(j)) {
+                if (!tk::mcp_bool_value(j->valuedouble, bval[i]))
+                    problem = "boolean required";
+            }
             else                        problem = "invalid argument";
         }
         if (problem) {

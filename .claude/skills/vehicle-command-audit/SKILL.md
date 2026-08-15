@@ -50,7 +50,8 @@ to make is blocked by gate 3 (tesla-ble can't) or gate "role" (car rejects). Rea
 edit only when all three gates clear. **Never hand-edit or commit `managed_components/`** — use
 a pin bump or a guard at our own call boundary. For a confirmed defect inside library dispatch
 with no fixed upstream release, the exceptional path is a minimal committed patch under
-`patches/tesla-ble/`, applied deterministically to both dependency locations and rebased on bumps.
+`patches/tesla-ble/`, applied deterministically to the materialised managed-component tree and
+rebased explicitly on pin bumps.
 
 ## Sources — what to read, and how to fetch it
 
@@ -112,8 +113,10 @@ re-confirm it against the *current* tree and catch anything that drifted since. 
 3. **Session / signing / clock** — `expires_at` = **vehicle's `SessionInfo.ClockTime` + a
    monotonic `steady_clock` delta** (`src/peer.cpp` `generate_expires_at`), per-domain counter +
    16-byte epoch, separate VCSEC/Infotainment sessions. **The device wall clock does NOT enter
-   signing** — a wrong RTC cannot make commands stale/replayable. *Baseline: code matches; a few
-   code comments wrongly cite "session-freshness" as a wall-clock consumer.*
+   per-command signing/expiry** — a wrong RTC cannot make an already-loaded command stale or
+   replayable. It **does** gate persisted-session reuse: `Vehicle::load_session()` computes
+   `system_clock - SessionInfo.ClockTime` and rejects age > 1 h, so the NVS clock restore before
+   controller init is required. *Baseline: code and current comments match this split.*
 4. **Pairing / whitelist** — add-key carries role + `KEY_FORM_FACTOR_CLOUD_KEY`, no key name (car
    shows "Unknown key"), requires an **NFC card on the console reader**, verify via a SessionInfo
    probe. *Baseline: matches.* (Note: the **"3"** is the simultaneous-BLE-**connection** limit; a
@@ -167,7 +170,7 @@ code is right. **Verify each is still present before editing** — some may alre
 | 4 | doc | `README.md:54` | Quotes car prompt as "Add new key"; firmware strings say **"Add key"**. | One-word fix. |
 | 5 | doc | `README.md:58`, `docs/README.md:110`, `.claude/CLAUDE.md:269` | "max 3 **keys** per vehicle" — really ~3 simultaneous **connections** (19 keys stored). CLAUDE.md:211 already says it right → internal contradiction. | Reframe as the ~3-connection limit. |
 | 6 | doc/comment | `Kconfig.projbuild` OTA help | Says image is `tesla-key-esp32-<target>.bin`; actual suffix scheme is `""`/`-s3`/`-c3`/`-c6`. | Correct to the real suffix map. |
-| 7 | doc/comment | `vehicle_ctrl.hpp:280-285`, `main.cpp:309-310`, `http_server.cpp:692-693` | Comments say the device "makes no NTP call" (main.cpp runs **SNTP as primary**) and that the wall clock is needed for "session-freshness" (it is **not** — vehicle-clock + monotonic). | Reword: NTP is primary, `/set_time` is fallback; wall clock is for TLS-OTA + human timestamps, not signing. |
+| 7 | doc/comment | old `vehicle_ctrl.hpp` / `main.cpp` / `http_server.cpp` comments | Historical comments said the device made no NTP call and conflated command expiry with wall time. Current contract: SNTP is primary, `/set_time` is fallback; wall time gates TLS/human timestamps **and persisted-session load age**, while command `expires_at` uses vehicle clock + monotonic delta. | Keep that distinction; do not remove the early NVS clock restore as "signing does not use RTC". |
 | 8 | doc | `.claude/CLAUDE.md` pairing-invalidation item 1 | Describes only the `"whitelist"` substring; omits the **primary** `UNKNOWN_KEY_ID` `set_message_callback` detector that fires on a cached session. | List all three detectors, primary first. |
 | 9 | logical (low) | `vehicle_commands.cpp:227-230` | `set_charge_limit` silently clamps `<50→50` and reports **success** (upstream passes through and lets the car answer). Harmless on the evcc path. | Optional: reject out-of-range, or pass through. |
 

@@ -51,20 +51,38 @@ static int gap_event_cb(ble_gap_event* event, void* arg) {
 
 static int svc_disc_cb(uint16_t conn_handle, const ble_gatt_error* error,
                        const ble_gatt_svc* svc, void* arg) {
-    auto* client = static_cast<BleClient*>(arg);
-    return client->on_svc_disc(conn_handle, error, svc);
+    // The callback argument is an opaque connection-generation token, not an object pointer.
+    // BleClient is already a singleton in this adapter; carrying the token through each async
+    // GATT procedure lets a delayed callback be rejected even when NimBLE rapidly reuses the
+    // same 16-bit connection handle for a replacement link.
+    auto* client = ble_client_instance();
+    if (!client) return 0;
+    const uint32_t generation = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(arg));
+    return client->on_svc_disc(conn_handle, generation, error, svc);
 }
 
 static int chr_disc_cb(uint16_t conn_handle, const ble_gatt_error* error,
                        const ble_gatt_chr* chr, void* arg) {
-    auto* client = static_cast<BleClient*>(arg);
-    return client->on_chr_disc(conn_handle, error, chr);
+    auto* client = ble_client_instance();
+    if (!client) return 0;
+    const uint32_t generation = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(arg));
+    return client->on_chr_disc(conn_handle, generation, error, chr);
 }
 
 static int dsc_disc_cb(uint16_t conn_handle, const ble_gatt_error* error,
                        uint16_t chr_val_handle, const ble_gatt_dsc* dsc, void* arg) {
-    auto* client = static_cast<BleClient*>(arg);
-    return client->on_dsc_disc(conn_handle, error, chr_val_handle, dsc);
+    auto* client = ble_client_instance();
+    if (!client) return 0;
+    const uint32_t generation = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(arg));
+    return client->on_dsc_disc(conn_handle, error, chr_val_handle, dsc, generation);
+}
+
+static int subscribe_write_cb(uint16_t conn_handle, const ble_gatt_error* error,
+                              ble_gatt_attr*, void* arg) {
+    auto* client = ble_client_instance();
+    if (!client) return 0;
+    const uint32_t generation = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(arg));
+    return client->on_subscribe_write(conn_handle, error, generation);
 }
 
 // ─── BleClient ───────────────────────────────────────────────────────────────
@@ -78,6 +96,7 @@ BleClient::BleClient() {
     write_mutex_  = xSemaphoreCreateMutex();
     scan_mutex_   = xSemaphoreCreateMutex();
     client_mutex_ = xSemaphoreCreateMutex();
+    intent_mutex_ = xSemaphoreCreateMutex();
     esp_timer_create_args_t ta{};
     ta.callback = scan_timeout_cb;
     ta.arg      = this;
@@ -90,9 +109,16 @@ BleClient::BleClient() {
 
 // Start a time-limited discovery scan (lists nearby Teslas, does not connect).
 void BleClient::start_discovery(int ms) {
-    if (is_connected() || connecting_) return;
-    want_connect_ = false;
-    if (!scanning_) start_scan_();
+    if (!intent_mutex_) return;
+    tk::SemGuard intent(intent_mutex_);
+    if (!intent) return;
+    // A command-owned scan keeps want_connect asserted until CCCD-ready. A manual /scan must
+    // never consume that intent or turn its unbounded connect scan into a timed listing scan.
+    if (!tk::ble::manual_discovery_may_start(disconnecting_.load(), want_connect_.load(),
+                                             has_gap_link_(), connecting_.load())) return;
+    // Manual discovery does not own want_connect_ and therefore never writes it. connect() uses
+    // the same mutex; if it arrives after this decision, its fresh intent survives the timer.
+    if (!scanning_.load() && !start_scan_locked_()) return;
     if (scan_timer_) {
         esp_timer_stop(scan_timer_);
         esp_timer_start_once(scan_timer_, (int64_t)ms * 1000);
@@ -101,16 +127,20 @@ void BleClient::start_discovery(int ms) {
 }
 
 void BleClient::on_scan_timeout() {
+    if (!intent_mutex_) return;
+    tk::SemGuard intent(intent_mutex_);
+    if (!intent) return;
     // Only end a pure discovery scan — never abort an in-flight connect attempt.
-    if (scanning_ && !want_connect_ && !connecting_ && !is_connected()) {
-        ble_gap_disc_cancel();
-        scanning_ = false;
-        ESP_LOGI(TAG, "discovery scan window ended");
+    if (tk::ble::manual_discovery_timeout_may_cancel(
+            scanning_.load(), want_connect_.load(), connecting_.load(), has_gap_link_())) {
+        if (cancel_scan_locked_()) {
+            ESP_LOGI(TAG, "discovery scan window ended");
+        }
     }
 }
 
 bool BleClient::start() {
-    if (!write_mutex_ || !scan_mutex_ || !client_mutex_ || !scan_timer_) {
+    if (!write_mutex_ || !scan_mutex_ || !client_mutex_ || !intent_mutex_ || !scan_timer_) {
         ESP_LOGE(TAG, "BLE resource allocation failed");
         return false;
     }
@@ -142,22 +172,45 @@ bool BleClient::start() {
 void BleClient::on_sync() {
     host_synced_ = true;
     ESP_LOGI(TAG, "NimBLE synced");
+    if (want_connect_.load()) ensure_scanning_();
     // Idle: radio quiet. Discovery scanning is started manually for a limited window
     // (start_discovery), and a connect scan is started on demand by connect().
 }
 
 void BleClient::on_reset() {
-    // Host went down; ble_gap_* calls are unsafe again until it re-syncs.
-    host_synced_ = false;
-    scanning_    = false;
+    {
+        tk::SemGuard intent(intent_mutex_);
+        disconnecting_.store(true);
+        const tk::ble::ConnectLifecycle lifecycle =
+            tk::ble::connect_lifecycle_after_host_reset(want_connect_.load());
+        // Odd generation means "handles changing". Publish that before any other host-reset
+        // bookkeeping so a command task cannot snapshot the old handles as a new stable link.
+        connection_generation_.fetch_add(1);
+        // Host went down; ble_gap_* calls are unsafe again until it re-syncs.
+        host_synced_ = false;
+        scanning_    = false;
+        connecting_.store(lifecycle.connecting);
+        conn_handle_.store(BLE_HS_CONN_HANDLE_NONE);
+        write_handle_.store(0);
+        ready_generation_.store(tk::ble::kNoReadyGeneration);
+        conn_rssi_valid_.store(false);
+        disconnecting_.store(false);
+        connection_generation_.fetch_add(1);  // even: disconnected snapshot is stable
+    }
+    if (on_connected_) on_connected_(false);
 }
 
-void BleClient::start_scan_() {
+bool BleClient::start_scan_locked_() {
+    // intent_mutex_ is the linearization point for both callers and cancel paths. In particular,
+    // two concurrent connect()/manual-discovery requests cannot both observe scanning=false and
+    // race two ble_gap_disc() calls.
+    const bool was_running = scanning_.load();
+    if (was_running) return true;
     // The NimBLE host must have synced before any ble_gap_* call; before that the call
     // dereferences uninitialised host state — a benign error on ESP-IDF 5.4 but a
     // LoadProhibited crash on 5.5. Skip silently: ensure_scanning_() is retried by
     // auto_pair / loop / connect, so the scan starts as soon as the host is up.
-    if (!host_synced_) return;
+    if (!host_synced_ || disconnecting_.load()) return false;
     ble_gap_disc_params params{};
     params.passive         = 0;
     // No duplicate filtering: we want repeated adverts so the listed RSSI stays fresh.
@@ -167,19 +220,56 @@ void BleClient::start_scan_() {
 
     int rc = ble_gap_disc(BLE_OWN_ADDR_PUBLIC, BLE_HS_FOREVER,
                            &params, gap_event_cb, this);
-    if (rc != 0) {
+    const tk::ble::ScanStartResult result =
+        rc == 0 ? tk::ble::ScanStartResult::Started
+                : (rc == BLE_HS_EALREADY ? tk::ble::ScanStartResult::AlreadyRunning
+                                         : tk::ble::ScanStartResult::Failed);
+    const bool running = tk::ble::scan_running_after_start(was_running, result);
+    scanning_.store(running);
+    if (result == tk::ble::ScanStartResult::Failed) {
         ESP_LOGE(TAG, "scan start failed: %d", rc);
-        scanning_ = false;
-    } else {
-        scanning_ = true;
+    } else if (result == tk::ble::ScanStartResult::Started) {
         ESP_LOGI(TAG, "scanning for Tesla BLE...");
+    } else {
+        // EALREADY is not a failure: NimBLE returns it only when discovery is already active.
+        // Publishing true repairs a stale local snapshot instead of orphaning the live scan.
+        ESP_LOGI(TAG, "Tesla BLE scan already active");
     }
+    return running;
+}
+
+bool BleClient::cancel_scan_locked_() {
+    const bool was_running = scanning_.load();
+    if (!was_running) return true;
+
+    const int rc = ble_gap_disc_cancel();
+    const tk::ble::ScanCancelResult result =
+        rc == 0 ? tk::ble::ScanCancelResult::Canceled
+                : (rc == BLE_HS_EALREADY ? tk::ble::ScanCancelResult::AlreadyStopped
+                                         : tk::ble::ScanCancelResult::Failed);
+    const bool running = tk::ble::scan_running_after_cancel(was_running, result);
+    scanning_.store(running);
+    if (result == tk::ble::ScanCancelResult::Failed) {
+        // Unexpected host errors do not prove that the controller stopped scanning. Preserve the
+        // published state so a later timeout/deadline/connect attempt can retry cancellation.
+        ESP_LOGE(TAG, "scan cancel failed: %d", rc);
+    }
+    return !running;
 }
 
 // Start a discovery scan if we are idle (not connected and not mid-connect).
 void BleClient::ensure_scanning_() {
-    if (is_connected() || connecting_ || scanning_) return;
-    start_scan_();
+    if (!intent_mutex_) return;
+    tk::SemGuard intent(intent_mutex_);
+    if (!intent) return;
+    ensure_scanning_locked_();
+}
+
+void BleClient::ensure_scanning_locked_() {
+    if (!tk::ble::connect_scan_should_start(want_connect_.load(), disconnecting_.load(),
+                                            has_gap_link_(), connecting_.load(),
+                                            scanning_.load())) return;
+    start_scan_locked_();
 }
 
 // Upsert a discovered Tesla into the nearby list (called from the host task).
@@ -312,20 +402,46 @@ uint32_t BleClient::connect_fail_recent() const {
     return connect_fail_count_.load();
 }
 
+bool BleClient::has_gap_link_() const {
+    if (disconnecting_.load()) return false;
+    const uint32_t generation_before = connection_generation_.load();
+    const uint16_t conn_handle = conn_handle_.load();
+    const uint32_t generation_after = connection_generation_.load();
+    return tk::ble::gap_link_available(disconnecting_.load(), generation_before,
+                                       generation_after,
+                                       conn_handle != BLE_HS_CONN_HANDLE_NONE);
+}
+
 bool BleClient::connected_rssi(int8_t& out) const {
-    if (!is_connected()) return false;
+    if (disconnecting_.load()) return false;
+    const uint32_t generation = connection_generation_.load();
+    if (generation & 1U) return false;
+    const uint16_t conn_handle = conn_handle_.load();
+    if (disconnecting_.load() || conn_handle == BLE_HS_CONN_HANDLE_NONE ||
+        connection_generation_.load() != generation) return false;
     // Prefer a fresh live read; refresh the cache when it succeeds. 127 is NimBLE's
     // "RSSI unknown" sentinel, so treat it as a failed read.
     int8_t live = 0;
-    if (ble_gap_conn_rssi(conn_handle_, &live) == 0 && live != 127) {
+    if (ble_gap_conn_rssi(conn_handle, &live) == 0 && live != 127) {
+        if (disconnecting_.load() || connection_generation_.load() != generation) return false;
         conn_rssi_.store(live);
         conn_rssi_valid_.store(true);
+        if (disconnecting_.load() || connection_generation_.load() != generation) {
+            // Disconnect may have cleared the cache between the check and the stores above.
+            // Never let this old-link sample resurrect as the next link's fallback RSSI.
+            conn_rssi_valid_.store(false);
+            return false;
+        }
         out = live;
         return true;
     }
     // Live read failed (common while the controller is busy pairing) — fall back to the
     // last-known value (seeded from the connect-time advert) so the UI still shows signal.
-    if (conn_rssi_valid_.load()) { out = conn_rssi_.load(); return true; }
+    if (!disconnecting_.load() && connection_generation_.load() == generation &&
+        conn_rssi_valid_.load()) {
+        out = conn_rssi_.load();
+        return true;
+    }
     return false;
 }
 
@@ -336,35 +452,114 @@ bool BleClient::connected_rssi(int8_t& out) const {
 // With no target VIN configured the scan still lists but never connects — see on_gap_event.)
 void BleClient::connect(const std::string& address) {
     (void)address;
-    if (is_connected()) return;
-    want_connect_ = true;
+    if (!intent_mutex_) return;
+    // A cold command waits through this discovery phase. Once GAP is up, GATT discovery owns
+    // the connection; assert (or refresh) the intent but do not start another scan merely because
+    // command readiness is still false. This also lets a fresh request adopt a same-target link
+    // whose previous owner canceled while GAP/GATT completion was in flight.
+    bool has_gap_link = false;
+    {
+        tk::SemGuard intent(intent_mutex_);
+        if (!intent || is_connected()) return;
+        want_connect_.store(true);
+        has_gap_link = has_gap_link_();
+    }
+    if (has_gap_link) return;
     ensure_scanning_();
 }
 
 // Drop a pending connect intent and return to idle scanning/listing.
 void BleClient::stop_connecting() {
-    want_connect_ = false;
-    // No idle scanning: cancel the connect scan if it is still running.
-    if (scanning_ && !is_connected()) {
-        ble_gap_disc_cancel();
-        scanning_ = false;
+    if (!intent_mutex_) return;
+    bool drop_gap_link = false;
+    {
+        tk::SemGuard intent(intent_mutex_);
+        if (!intent) return;
+        want_connect_.store(false);
+        drop_gap_link = has_gap_link_();
+        if (drop_gap_link) {
+            // A command deadline owns the whole GAP+GATT attempt. Invalidate immediately so its
+            // delayed callbacks cannot call on_connected(true) or publish a ready generation.
+            disconnecting_.store(true);
+            ready_generation_.store(tk::ble::kNoReadyGeneration);
+        } else if (scanning_.load()) {
+            // No idle scanning: cancel the connect scan if it is still running.
+            cancel_scan_locked_();
+        }
     }
+    if (drop_gap_link) terminate_published_link_();
 }
 
 void BleClient::disconnect() {
-    if (conn_handle_ != BLE_HS_CONN_HANDLE_NONE) {
-        ble_gap_terminate(conn_handle_, BLE_ERR_REM_USER_CONN_TERM);
+    // ble_gap_terminate is asynchronous. Make the software link unavailable before issuing it,
+    // otherwise a following request can reuse the doomed handle until GAP_DISCONNECT arrives.
+    if (intent_mutex_) {
+        tk::SemGuard intent(intent_mutex_);
+        if (intent) {
+            disconnecting_.store(true);
+            ready_generation_.store(tk::ble::kNoReadyGeneration);
+            want_connect_.store(false);
+        }
+    } else {
+        disconnecting_.store(true);
+        ready_generation_.store(tk::ble::kNoReadyGeneration);
+        want_connect_.store(false);
     }
+    terminate_published_link_();
+}
+
+void BleClient::terminate_published_link_() {
+    // A connect/disconnect host callback changes the seqlock only for a very short publish
+    // interval. If this request lands inside it, yield until a stable snapshot exists rather
+    // than losing the termination request and letting that just-published link escape.
+    for (int attempt = 0; attempt < 8; ++attempt) {
+        const uint32_t generation = connection_generation_.load();
+        if (generation & 1U) {
+            taskYIELD();
+            continue;
+        }
+        const uint16_t conn_handle = conn_handle_.load();
+        if (connection_generation_.load() != generation) continue;
+        // The connect publisher clears this flag before its final even generation. Reasserting
+        // it after the stable snapshot therefore cannot be overwritten by that same publish.
+        disconnecting_.store(true);
+        if (connection_generation_.load() != generation) continue;
+        if (conn_handle != BLE_HS_CONN_HANDLE_NONE) {
+            ble_gap_terminate(conn_handle, BLE_ERR_REM_USER_CONN_TERM);
+        } else {
+            disconnecting_.store(false);
+        }
+        return;
+    }
+    ESP_LOGW(TAG, "could not obtain stable BLE handle while disconnecting");
 }
 
 bool BleClient::write(const std::vector<uint8_t>& data) {
-    if (!is_connected() || write_handle_ == 0) return false;
     tk::SemGuard g(write_mutex_, pdMS_TO_TICKS(500));
     if (!g) return false;
 
+    const uint32_t generation = connection_generation_.load();
+    if (disconnecting_.load() || (generation & 1U)) return false;
+    const uint16_t conn_handle = conn_handle_.load();
+    const uint16_t write_handle = write_handle_.load();
+    const uint32_t ready_generation = ready_generation_.load();
+    if (disconnecting_.load() || conn_handle == BLE_HS_CONN_HANDLE_NONE || write_handle == 0 ||
+        ready_generation != generation || connection_generation_.load() != generation) {
+        return false;
+    }
+
     for (size_t offset = 0; offset < data.size(); offset += BLE_CHUNK_SIZE) {
+        if (disconnecting_.load() || ready_generation_.load() != generation ||
+            connection_generation_.load() != generation) return false;
         size_t chunk = std::min(BLE_CHUNK_SIZE, data.size() - offset);
-        write_chunk_(data.data() + offset, chunk);
+        if (!write_chunk_(conn_handle, write_handle, data.data() + offset, chunk)) {
+            return false;
+        }
+        // A GAP disconnect can race the no-response GATT call itself. Checking only before
+        // each chunk left the final chunk reporting success even though the host invalidated
+        // that connection while it was being submitted.
+        if (disconnecting_.load() || ready_generation_.load() != generation ||
+            connection_generation_.load() != generation) return false;
         if (offset + chunk < data.size()) {
             vTaskDelay(pdMS_TO_TICKS(10)); // small gap between chunks
         }
@@ -373,11 +568,14 @@ bool BleClient::write(const std::vector<uint8_t>& data) {
     return true;
 }
 
-void BleClient::write_chunk_(const uint8_t* data, size_t len) {
-    int rc = ble_gattc_write_no_rsp_flat(conn_handle_, write_handle_, data, len);
+bool BleClient::write_chunk_(uint16_t conn_handle, uint16_t write_handle,
+                             const uint8_t* data, size_t len) {
+    int rc = ble_gattc_write_no_rsp_flat(conn_handle, write_handle, data, len);
     if (rc != 0) {
         ESP_LOGW(TAG, "BLE write chunk failed: %d", rc);
+        return false;
     }
+    return true;
 }
 
 // ─── GAP event handler ────────────────────────────────────────────────────────
@@ -448,76 +646,155 @@ int BleClient::on_gap_event(ble_gap_event* event) {
         conn_rssi_.store(event->disc.rssi);
         conn_rssi_valid_.store(true);
 
-        connecting_   = true;
-        want_connect_ = false;
-        scanning_     = false;
-        ble_gap_disc_cancel();
-        last_connect_attempt_us_.store(esp_timer_get_time()); // marks the link as "actively trying"
-        rc = ble_gap_connect(BLE_OWN_ADDR_PUBLIC,
-                             &event->disc.addr,
-                             10000, nullptr,
-                             gap_event_cb, this);
-        if (rc != 0) {
-            ESP_LOGE(TAG, "connect failed: %d", rc);
-            connect_fail_count_.fetch_add(1);
-            connecting_ = false;
-            ensure_scanning_();
+        {
+            // Serialize the scan-to-connect handoff with concurrent manual starts, deadlines and
+            // timer cancellation. NimBLE application calls do not invoke GAP callbacks inline, so
+            // holding intent_mutex_ through the synchronous cancel/connect submissions is safe.
+            tk::SemGuard intent(intent_mutex_);
+            if (!intent) break;
+            const tk::ble::ConnectLifecycle starting =
+                tk::ble::connect_lifecycle_during_gap_start(want_connect_.load());
+            if (!starting.want_connect || connecting_.load()) break;
+            connecting_.store(starting.connecting);
+            // stop_connecting() owns cancellation. Do not write want_connect_ here or an advert/task
+            // race could resurrect a request that just exhausted its absolute deadline.
+            if (!want_connect_.load()) {
+                connecting_.store(false);
+                break;
+            }
+            if (!cancel_scan_locked_()) {
+                // The controller may still be scanning after an unexpected HCI error. Leave the
+                // intent armed and let the next advert/deadline retry; never publish a false idle
+                // state or attempt a connection while discovery may still own GAP.
+                connecting_.store(false);
+                break;
+            }
+            last_connect_attempt_us_.store(esp_timer_get_time()); // marks link "actively trying"
+            rc = ble_gap_connect(BLE_OWN_ADDR_PUBLIC,
+                                 &event->disc.addr,
+                                 10000, nullptr,
+                                 gap_event_cb, this);
+            if (rc != 0) {
+                ESP_LOGE(TAG, "connect failed: %d", rc);
+                ready_generation_.store(tk::ble::kNoReadyGeneration);
+                connect_fail_count_.fetch_add(1);
+                const tk::ble::ConnectLifecycle lifecycle =
+                    tk::ble::connect_lifecycle_after_start_failure(want_connect_.load());
+                connecting_.store(lifecycle.connecting);
+                if (lifecycle.want_connect) ensure_scanning_locked_();
+            }
         }
         break;
     }
 
     case BLE_GAP_EVENT_CONNECT: {
-        connecting_ = false;
         if (event->connect.status != 0) {
             ESP_LOGE(TAG, "connect error: %d", event->connect.status);
+            ready_generation_.store(tk::ble::kNoReadyGeneration);
             connect_fail_count_.fetch_add(1);   // advert was heard but the link never came up
             if (on_connected_) on_connected_(false);
             // Keep the intent so an in-flight command retries within its timeout
             // window; ensure_connected_() clears it via stop_connecting() on timeout.
-            want_connect_ = true;
-            ensure_scanning_();
+            const tk::ble::ConnectLifecycle retry =
+                tk::ble::connect_lifecycle_after_start_failure(want_connect_.load());
+            connecting_.store(retry.connecting);
+            if (retry.want_connect) ensure_scanning_();
             break;
         }
-        conn_handle_  = event->connect.conn_handle;
-        want_connect_ = false;
-        connect_fail_count_.store(0);   // link is up — clear the "can't connect" signal
-        ESP_LOGI(TAG, "connected, handle=%d", conn_handle_);
+        bool canceled = false;
+        int svc_rc = 0;
+        {
+            // Linearize GAP publication with stop_connecting()/disconnect(). If cancellation won,
+            // publish the handle only as a doomed link so it can be terminated; never start GATT.
+            tk::SemGuard intent(intent_mutex_);
+            if (!intent) {
+                ble_gap_terminate(event->connect.conn_handle, BLE_ERR_REM_USER_CONN_TERM);
+                break;
+            }
+            const tk::ble::ConnectLifecycle discovering =
+                tk::ble::connect_lifecycle_after_gap_connected(want_connect_.load());
+            connecting_.store(discovering.connecting);
+            // Publish a fresh, internally consistent handle generation. Odd means the host is
+            // changing the snapshot; command tasks reject it until the final even generation.
+            connection_generation_.fetch_add(1);
+            write_handle_.store(0);
+            ready_generation_.store(tk::ble::kNoReadyGeneration);
+            conn_handle_.store(event->connect.conn_handle);
+            disconnecting_.store(false);
+            connection_generation_.fetch_add(1);
+            connect_fail_count_.store(0);   // link is up — clear the "can't connect" signal
 
-        // Reset discovery state for this fresh connection.
-        svc_start_handle_  = 0;
-        svc_end_handle_    = 0;
-        write_handle_      = 0;
-        notify_val_handle_ = 0;
-        cccd_handle_       = 0;
+            // Reset discovery state for this fresh connection.
+            svc_start_handle_  = 0;
+            svc_end_handle_    = 0;
+            write_handle_.store(0);
+            notify_val_handle_ = 0;
+            cccd_handle_       = 0;
 
-        // Discover Tesla service
-        int rc = ble_gattc_disc_svc_by_uuid(conn_handle_,
-                                             &TESLA_SVC_UUID.u,
-                                             svc_disc_cb, this);
-        if (rc != 0) {
-            ESP_LOGE(TAG, "svc discovery failed: %d", rc);
+            const uint32_t generation = connection_generation_.load();
+            if (!tk::ble::connect_attempt_may_advance(
+                    want_connect_.load(),
+                    connection_snapshot_matches_(event->connect.conn_handle, generation))) {
+                disconnecting_.store(true);
+                ready_generation_.store(tk::ble::kNoReadyGeneration);
+                canceled = true;
+            } else {
+                // Queue service discovery while cancellation is excluded. Once queued, a later
+                // stop marks disconnecting before any callback can pass its snapshot gate.
+                void* generation_arg =
+                    reinterpret_cast<void*>(static_cast<uintptr_t>(generation));
+                svc_rc = ble_gattc_disc_svc_by_uuid(event->connect.conn_handle,
+                                                     &TESLA_SVC_UUID.u,
+                                                     svc_disc_cb, generation_arg);
+            }
+        }
+        if (canceled) {
+            ESP_LOGI(TAG, "late GAP connection after canceled intent — dropping handle=%d",
+                     event->connect.conn_handle);
+            terminate_published_link_();
+        } else if (svc_rc != 0) {
+            ESP_LOGE(TAG, "svc discovery failed: %d", svc_rc);
+            disconnect();
+        } else {
+            ESP_LOGI(TAG, "connected, handle=%d", event->connect.conn_handle);
         }
         break;
     }
 
-    case BLE_GAP_EVENT_DISCONNECT:
+    case BLE_GAP_EVENT_DISCONNECT: {
         ESP_LOGI(TAG, "disconnected, reason=%d", event->disconnect.reason);
-        conn_handle_       = BLE_HS_CONN_HANDLE_NONE;
-        write_handle_      = 0;
-        notify_handle_     = 0;
-        notify_val_handle_ = 0;
-        cccd_handle_       = 0;
-        connecting_        = false;
-        want_connect_      = false;
-        scanning_          = false;
-        conn_rssi_valid_.store(false);   // stale once the link is gone
+        bool reconnect = false;
+        {
+            tk::SemGuard intent(intent_mutex_);
+            // Invalidate first: set_connected(false) and command tasks can run synchronously from
+            // the callbacks below, and none may adopt the old handles under a fresh generation.
+            disconnecting_.store(true);
+            connection_generation_.fetch_add(1);
+            conn_handle_.store(BLE_HS_CONN_HANDLE_NONE);
+            write_handle_.store(0);
+            ready_generation_.store(tk::ble::kNoReadyGeneration);
+            notify_handle_     = 0;
+            notify_val_handle_ = 0;
+            cccd_handle_       = 0;
+            connecting_        = false;
+            // A new command may have called connect() after disconnect() initiated termination but
+            // before this delayed event arrived. Preserve that fresh intent and restart its scan
+            // after the old link snapshot has been retired.
+            reconnect = want_connect_.load();
+            scanning_ = false;
+            conn_rssi_valid_.store(false);   // stale once the link is gone
+            disconnecting_.store(false);
+            connection_generation_.fetch_add(1);  // even: disconnected snapshot is stable
+        }
         {
             tk::SemGuard g(client_mutex_);   // RAII give
             if (g) peer_addr_str_.clear();
         }
         if (on_connected_) on_connected_(false);
-        // Stay idle (no auto-scan); discovery is manual, connect is on demand.
+        if (reconnect) ensure_scanning_();
+        // Otherwise stay idle (no auto-scan); discovery is manual, connect is on demand.
         break;
+    }
 
     case BLE_GAP_EVENT_NOTIFY_RX: {
         if (event->notify_rx.attr_handle != notify_val_handle_) break;
@@ -555,17 +832,27 @@ int BleClient::on_gap_event(ble_gap_event* event) {
 
 // ─── GATT service discovery ───────────────────────────────────────────────────
 
-// The three discovery callbacks below are NimBLE-host-task entry points just like
-// on_gap_event (dispatched from C, no try/catch in the chain) — on_dsc_disc in particular
+// The discovery and subscription callbacks below are NimBLE-host-task entry points just like
+// on_gap_event (dispatched from C, no try/catch in the chain) — on_subscribe_write in particular
 // ends in on_connected_(true), whose vehicle_ctrl lambda allocates (std::string, NVS).
 // An escaping std::bad_alloc would unwind into C frames → std::terminate → reboot, and a
 // reboot loop re-opens the poll window, defeating car-sleep. Contain it per callback; a
 // caught throw aborts this connection attempt cleanly (disconnect), the next on-demand
 // connect retries discovery from scratch.
 
-int BleClient::on_svc_disc(uint16_t conn_handle,
+bool BleClient::connection_snapshot_matches_(uint16_t conn_handle,
+                                              uint32_t generation) const {
+    if ((generation & 1U) || disconnecting_.load() ||
+        connection_generation_.load() != generation) return false;
+    const uint16_t current = conn_handle_.load();
+    return current == conn_handle && !disconnecting_.load() &&
+           connection_generation_.load() == generation;
+}
+
+int BleClient::on_svc_disc(uint16_t conn_handle, uint32_t generation,
                             const ble_gatt_error* error,
                             const ble_gatt_svc* svc) {
+    if (!connection_snapshot_matches_(conn_handle, generation)) return 0;
     try {
     if (error->status == BLE_HS_EDONE) {
         if (svc_start_handle_ == 0) {
@@ -574,13 +861,19 @@ int BleClient::on_svc_disc(uint16_t conn_handle,
             return 0;
         }
         // Service found — discover characteristics
-        ble_gattc_disc_all_chrs(conn_handle,
-                                 svc_start_handle_, svc_end_handle_,
-                                 chr_disc_cb, this);
+        void* generation_arg = reinterpret_cast<void*>(static_cast<uintptr_t>(generation));
+        int rc = ble_gattc_disc_all_chrs(conn_handle,
+                                          svc_start_handle_, svc_end_handle_,
+                                          chr_disc_cb, generation_arg);
+        if (rc != 0) {
+            ESP_LOGE(TAG, "characteristic discovery start failed: %d", rc);
+            disconnect();
+        }
         return 0;
     }
     if (error->status != 0) {
         ESP_LOGE(TAG, "svc disc error: %d", error->status);
+        disconnect();
         return 0;
     }
     // Keep the FIRST valid Tesla service match. NimBLE may invoke this callback an
@@ -604,28 +897,35 @@ int BleClient::on_svc_disc(uint16_t conn_handle,
     return 0;
 }
 
-int BleClient::on_chr_disc(uint16_t conn_handle,
+int BleClient::on_chr_disc(uint16_t conn_handle, uint32_t generation,
                             const ble_gatt_error* error,
                             const ble_gatt_chr* chr) {
+    if (!connection_snapshot_matches_(conn_handle, generation)) return 0;
     try {
     if (error->status == BLE_HS_EDONE) {
-        if (write_handle_ == 0 || notify_val_handle_ == 0) {
+        const uint16_t write_handle = write_handle_.load();
+        if (write_handle == 0 || notify_val_handle_ == 0) {
             ESP_LOGE(TAG, "required characteristics not found (write=%d notify=%d)",
-                     write_handle_, notify_val_handle_);
+                     write_handle, notify_val_handle_);
             disconnect();
             return 0;
         }
-        ESP_LOGI(TAG, "BLE ready (write=%d notify=%d)",
-                 write_handle_, notify_val_handle_);
+        ESP_LOGI(TAG, "BLE characteristics ready (write=%d notify=%d)",
+                 write_handle, notify_val_handle_);
         // Subscribe to notifications
-        subscribe_notify_();
+        subscribe_notify_(conn_handle, generation);
         return 0;
     }
-    if (error->status != 0 || !chr) return 0;
+    if (error->status != 0) {
+        ESP_LOGE(TAG, "characteristic discovery error: %d", error->status);
+        disconnect();
+        return 0;
+    }
+    if (!chr) return 0;
 
     if (ble_uuid_cmp(&chr->uuid.u, &TESLA_WRITE_UUID.u) == 0) {
-        write_handle_ = chr->val_handle;
-        ESP_LOGD(TAG, "write chr: %d", write_handle_);
+        write_handle_.store(chr->val_handle);
+        ESP_LOGD(TAG, "write chr: %d", chr->val_handle);
     } else if (ble_uuid_cmp(&chr->uuid.u, &TESLA_NOTIFY_UUID.u) == 0) {
         notify_handle_     = chr->def_handle;
         notify_val_handle_ = chr->val_handle;
@@ -641,7 +941,7 @@ int BleClient::on_chr_disc(uint16_t conn_handle,
     return 0;
 }
 
-void BleClient::subscribe_notify_() {
+void BleClient::subscribe_notify_(uint16_t conn_handle, uint32_t generation) {
     // Discover the CCCD (Client Characteristic Configuration Descriptor, 0x2902) for the notify
     // characteristic instead of assuming it sits at notify_val_handle_ + 1. GATT does not
     // guarantee that layout — an extra descriptor (e.g. a Characteristic User Description) placed
@@ -649,17 +949,22 @@ void BleClient::subscribe_notify_() {
     // introduce, would shift it. Writing the enable word to the wrong handle would silently break
     // the device's ONLY receive channel: notifications never arrive, so every command then times
     // out as "vehicle not reachable" with no other symptom. Discover, then enable in on_dsc_disc().
+    if (!connection_snapshot_matches_(conn_handle, generation)) return;
     cccd_handle_ = 0;
-    int rc = ble_gattc_disc_all_dscs(conn_handle_, notify_val_handle_, svc_end_handle_,
-                                     dsc_disc_cb, this);
+    void* generation_arg = reinterpret_cast<void*>(static_cast<uintptr_t>(generation));
+    int rc = ble_gattc_disc_all_dscs(conn_handle, notify_val_handle_, svc_end_handle_,
+                                     dsc_disc_cb, generation_arg);
     if (rc != 0) {
         ESP_LOGE(TAG, "CCCD discovery start failed: %d", rc);
         disconnect();
     }
 }
 
-int BleClient::on_dsc_disc(uint16_t /*conn_handle*/, const ble_gatt_error* error,
-                           uint16_t /*chr_val_handle*/, const ble_gatt_dsc* dsc) {
+int BleClient::on_dsc_disc(uint16_t conn_handle, const ble_gatt_error* error,
+                           uint16_t chr_val_handle, const ble_gatt_dsc* dsc,
+                           uint32_t generation) {
+    if (!connection_snapshot_matches_(conn_handle, generation) ||
+        chr_val_handle != notify_val_handle_) return 0;
     try {
     if (error->status == BLE_HS_EDONE) {
         if (cccd_handle_ == 0) {
@@ -668,18 +973,24 @@ int BleClient::on_dsc_disc(uint16_t /*conn_handle*/, const ble_gatt_error* error
             return 0;
         }
         uint8_t value[2] = {0x01, 0x00};   // 0x0001 = enable notifications (BLE_GATT_SUB_NOTIFY)
-        int rc = ble_gattc_write_flat(conn_handle_, cccd_handle_,
-                                       value, sizeof(value), nullptr, nullptr);
+        void* generation_arg = reinterpret_cast<void*>(static_cast<uintptr_t>(generation));
+        int rc = ble_gattc_write_flat(conn_handle, cccd_handle_,
+                                       value, sizeof(value), subscribe_write_cb,
+                                       generation_arg);
         if (rc != 0) {
             ESP_LOGE(TAG, "subscribe notify failed: %d", rc);
             disconnect();
             return 0;
         }
-        ESP_LOGI(TAG, "subscribed to Tesla notifications (CCCD handle %d)", cccd_handle_);
-        if (on_connected_) on_connected_(true);
+        ESP_LOGD(TAG, "CCCD subscription write queued (handle %d)", cccd_handle_);
         return 0;
     }
-    if (error->status != 0 || !dsc) return 0;
+    if (error->status != 0) {
+        ESP_LOGE(TAG, "CCCD discovery error: %d", error->status);
+        disconnect();
+        return 0;
+    }
+    if (!dsc) return 0;
     // First 0x2902 at/after the notify value handle is that characteristic's CCCD.
     if (cccd_handle_ == 0 && ble_uuid_cmp(&dsc->uuid.u, &CCCD_UUID.u) == 0) {
         cccd_handle_ = dsc->handle;
@@ -690,6 +1001,73 @@ int BleClient::on_dsc_disc(uint16_t /*conn_handle*/, const ble_gatt_error* error
         disconnect();
     } catch (...) {
         ESP_LOGE(TAG, "on_dsc_disc unknown exception (dropping connection)");
+        disconnect();
+    }
+    return 0;
+}
+
+int BleClient::on_subscribe_write(uint16_t conn_handle, const ble_gatt_error* error,
+                                  uint32_t generation) {
+    if (!connection_snapshot_matches_(conn_handle, generation)) return 0;
+    try {
+        if (!error || error->status != 0) {
+            ESP_LOGE(TAG, "CCCD subscription write failed: %d", error ? error->status : -1);
+            disconnect();
+            return 0;
+        }
+        if (!on_connected_) {
+            ESP_LOGE(TAG, "CCCD subscribed but connected callback is unavailable");
+            disconnect();
+            return 0;
+        }
+
+        bool canceled = false;
+        {
+            // Linearize CCCD completion with deadline cancellation. If stop_connecting() wins,
+            // this callback never calls on_connected(true); if completion wins, a later stop sees
+            // the published GAP link and invalidates/terminates it before returning.
+            tk::SemGuard intent(intent_mutex_);
+            if (!intent || !tk::ble::connect_attempt_may_advance(
+                               want_connect_.load(),
+                               connection_snapshot_matches_(conn_handle, generation))) {
+                canceled = true;
+            } else {
+                // Vehicle::set_connected(true) must complete before a waiting first command
+                // observes readiness. If it throws, the catch below releases the mutex and
+                // disconnects; the token stays invalid.
+                on_connected_(true);
+                if (!tk::ble::connect_attempt_may_advance(
+                        want_connect_.load(),
+                        connection_snapshot_matches_(conn_handle, generation))) {
+                    canceled = true;
+                } else {
+                    ready_generation_.store(generation);
+                    if (!connection_snapshot_matches_(conn_handle, generation)) {
+                        ready_generation_.store(tk::ble::kNoReadyGeneration);
+                        canceled = true;
+                    } else {
+                        const tk::ble::ConnectLifecycle ready =
+                            tk::ble::connect_lifecycle_after_command_ready();
+                        connecting_.store(ready.connecting);
+                        want_connect_.store(ready.want_connect);
+                    }
+                }
+            }
+        }
+        if (canceled) {
+            ready_generation_.store(tk::ble::kNoReadyGeneration);
+            disconnect();
+            return 0;
+        }
+        ESP_LOGI(TAG, "BLE command-ready (CCCD handle %d, generation %lu)",
+                 cccd_handle_, static_cast<unsigned long>(generation));
+    } catch (const std::exception& e) {
+        ESP_LOGE(TAG, "subscribe completion exception (dropping connection): %s", e.what());
+        ready_generation_.store(tk::ble::kNoReadyGeneration);
+        disconnect();
+    } catch (...) {
+        ESP_LOGE(TAG, "subscribe completion exception (dropping connection)");
+        ready_generation_.store(tk::ble::kNoReadyGeneration);
         disconnect();
     }
     return 0;

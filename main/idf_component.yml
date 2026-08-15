@@ -6,7 +6,7 @@ dependencies:
 
   # Pinned upstream yoziru/tesla-ble from git, for every target this project builds.
   # After the Component Manager materialises the source, root CMake applies the
-  # repository-owned anti-replay patch from patches/tesla-ble/ before compilation.
+  # ordered repository-owned patch series from patches/tesla-ble/ before compilation.
   #
   # The supported set is exactly the library's own `targets:` list — esp32 / esp32s3 /
   # esp32c3 / esp32c6 — and the Component Manager ENFORCES it at dependency resolution,

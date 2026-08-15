@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
+import { createHash, webcrypto } from "node:crypto";
 import fs from "node:fs";
 import test from "node:test";
 
 import {
+  bootLogHasVersion,
   combinedProgress,
   describeSerialConnection,
   detectedSerialType,
@@ -13,19 +15,64 @@ import {
   resetToUserFirmware,
   serialLogLevel,
   selectManifestBuild,
+  stopSerialReader,
   splitSerialChunk,
-  stripSerialAnsi
+  stripSerialAnsi,
+  validateManifest,
+  verifyBootVersion
 } from "../docs/web-installer.mjs";
 
-const manifest = {
-  version: "1.4.75",
-  builds: [
-    { chipFamily: "ESP32", parts: [{ path: "esp32.bin", offset: 0x1000 }] },
-    { chipFamily: "ESP32-S3", parts: [{ path: "s3.bin", offset: 0 }] },
-    { chipFamily: "ESP32-C3", parts: [{ path: "c3.bin", offset: 0 }] },
-    { chipFamily: "ESP32-C6", parts: [{ path: "c6.bin", offset: 0 }] }
-  ]
+const bytesByRole = {
+  bootloader: Uint8Array.from([1, 2, 3, 4]),
+  partitions: Uint8Array.from([5, 6, 7, 8]),
+  app: Uint8Array.from([9, 10, 11, 12]),
+  otadata: new Uint8Array(0x2000).fill(0xff)
 };
+const sha256 = (bytes) => createHash("sha256").update(bytes).digest("hex");
+const suffixFor = (chipFamily) => ({
+  ESP32: "esp32",
+  "ESP32-S3": "esp32s3",
+  "ESP32-C3": "esp32c3",
+  "ESP32-C6": "esp32c6"
+})[chipFamily];
+const buildFor = (chipFamily) => {
+  const suffix = suffixFor(chipFamily);
+  return {
+    chipFamily,
+    parts: [
+      { path: `bootloader-${suffix}.bin`, offset: chipFamily === "ESP32" ? 0x1000 : 0, size: bytesByRole.bootloader.length, sha256: sha256(bytesByRole.bootloader) },
+      { path: `partition-table-${suffix}.bin`, offset: 0x8000, size: bytesByRole.partitions.length, sha256: sha256(bytesByRole.partitions) },
+      { path: `tesla-key-${suffix}.bin`, offset: 0x20000, size: bytesByRole.app.length, sha256: sha256(bytesByRole.app) },
+      { path: `ota-data-${suffix}.bin`, offset: 0xf000, size: bytesByRole.otadata.length, sha256: sha256(bytesByRole.otadata) }
+    ]
+  };
+};
+
+const manifest = {
+  layoutVersion: 2,
+  version: "1.4.75",
+  sourceSha: "a".repeat(40),
+  new_install_prompt_erase: true,
+  builds: ["ESP32", "ESP32-S3", "ESP32-C3", "ESP32-C6"].map(buildFor)
+};
+
+function bytesForPath(path) {
+  if (path.startsWith("bootloader-")) return bytesByRole.bootloader;
+  if (path.startsWith("partition-table-")) return bytesByRole.partitions;
+  if (path.startsWith("tesla-key-")) return bytesByRole.app;
+  if (path.startsWith("ota-data-")) return bytesByRole.otadata;
+  throw new Error(`unexpected firmware path ${path}`);
+}
+
+function firmwareResponse(url, override = null) {
+  const path = new URL(url).pathname.split("/").pop();
+  const bytes = override || bytesForPath(path);
+  return {
+    ok: true,
+    status: 200,
+    async arrayBuffer() { return bytes.slice().buffer; }
+  };
+}
 
 test("native Espressif USB ports and UART bridges are described without restricting multi-target builds", () => {
   const cdcInfo = { usbVendorId: 0x303a, usbProductId: 0x1001 };
@@ -35,9 +82,9 @@ test("native Espressif USB ports and UART bridges are described without restrict
   assert.equal(detectedSerialType(uartInfo), "uart");
   assert.equal(describeSerialConnection(cdcInfo), "USB Serial/JTAG");
   assert.equal(describeSerialConnection(uartInfo), "USB UART");
-  assert.equal(selectManifestBuild(manifest, "ESP32-S3", cdcInfo).parts[0].path, "s3.bin");
-  assert.equal(selectManifestBuild(manifest, "ESP32-S3", uartInfo).parts[0].path, "s3.bin");
-  assert.equal(selectManifestBuild(manifest, "ESP32-C6", cdcInfo).parts[0].path, "c6.bin");
+  assert.equal(selectManifestBuild(manifest, "ESP32-S3", cdcInfo).parts[0].path, "bootloader-esp32s3.bin");
+  assert.equal(selectManifestBuild(manifest, "ESP32-S3", uartInfo).parts[0].path, "bootloader-esp32s3.bin");
+  assert.equal(selectManifestBuild(manifest, "ESP32-C6", cdcInfo).parts[0].path, "bootloader-esp32c6.bin");
   assert.equal(selectManifestBuild(manifest, "ESP32-C5", cdcInfo), undefined);
 });
 
@@ -66,25 +113,65 @@ test("multi-part progress is weighted by each uncompressed image size", () => {
   assert.equal(combinedProgress(files, 1, 6, 6), 100);
 });
 
-test("firmware parts resolve relative to the manifest and preserve offsets", async () => {
+test("firmware parts are same-directory, size checked and SHA-256 verified", async () => {
   const seen = [];
+  const build = manifest.builds.find((item) => item.chipFamily === "ESP32-S3");
   const parts = await fetchFirmwareParts(
-    { parts: [{ path: "firmware/app.bin", offset: 0x20000 }] },
+    build,
     "https://example.test/PR/234/manifest.json",
     async (url, options) => {
       seen.push({ url, options });
-      return {
-        ok: true,
-        status: 200,
-        async arrayBuffer() { return Uint8Array.from([1, 2, 3]).buffer; }
-      };
-    }
+      return firmwareResponse(url);
+    },
+    webcrypto
   );
 
-  assert.equal(seen[0].url, "https://example.test/PR/234/firmware/app.bin");
+  assert.equal(seen[0].url, "https://example.test/PR/234/bootloader-esp32s3.bin");
   assert.equal(seen[0].options.cache, "no-store");
-  assert.equal(parts[0].address, 0x20000);
-  assert.deepEqual(Array.from(parts[0].data), [1, 2, 3]);
+  assert.deepEqual(parts.map((part) => part.address), [0, 0x8000, 0x20000, 0xf000]);
+  assert.deepEqual(Array.from(parts[0].data), Array.from(bytesByRole.bootloader));
+});
+
+test("manifest v2 rejects malicious offsets, paths and incomplete provenance", () => {
+  const badOffset = structuredClone(manifest);
+  badOffset.builds[1].parts[2].offset = 0x9000;
+  assert.throws(
+    () => validateManifest(badOffset, "https://example.test/manifest.json"),
+    (error) => error.name === "InvalidManifestError" && /application offset/.test(error.message)
+  );
+
+  const badPath = structuredClone(manifest);
+  badPath.builds[1].parts[2].path = "https://evil.example/app.bin";
+  assert.throws(
+    () => validateManifest(badPath, "https://example.test/manifest.json"),
+    (error) => error.name === "InvalidManifestError" && /unsafe application path/.test(error.message)
+  );
+
+  const badSha = structuredClone(manifest);
+  badSha.sourceSha = "main";
+  assert.throws(
+    () => validateManifest(badSha, "https://example.test/manifest.json"),
+    (error) => error.name === "InvalidManifestError" && /source commit/.test(error.message)
+  );
+});
+
+test("firmware integrity failure is detected before flashing", async () => {
+  const build = manifest.builds.find((item) => item.chipFamily === "ESP32-S3");
+  await assert.rejects(
+    fetchFirmwareParts(
+      build,
+      "https://example.test/manifest.json",
+      async (url) => {
+        const path = new URL(url).pathname.split("/").pop();
+        const expected = bytesForPath(path);
+        const corrupt = expected.slice();
+        corrupt[0] ^= 0xff;
+        return firmwareResponse(url, corrupt);
+      },
+      webcrypto
+    ),
+    (error) => error.name === "FirmwareIntegrityError" && /SHA-256/.test(error.message)
+  );
 });
 
 test("serial log parsing preserves split line endings and classifies IDF levels", () => {
@@ -123,7 +210,7 @@ function fakeEsptool(chipFamily = "ESP32-S3") {
     async flashId() { calls.push("flashId"); }
     async eraseFlash() { calls.push("erase"); }
     async writeFlash(options) {
-      calls.push("write");
+      calls.push(["write", options.fileArray.map((file) => file.address)]);
       options.reportProgress(0, options.fileArray[0].data.length, options.fileArray[0].data.length);
     }
     async after(mode) { calls.push(`reset:${mode}`); }
@@ -184,28 +271,56 @@ async function runFlash(eraseFirst) {
     eraseFirst,
     TransportCtor: fake.Transport,
     ESPLoaderCtor: fake.Loader,
-    fetchImpl: async () => ({
-      ok: true,
-      status: 200,
-      async arrayBuffer() { return Uint8Array.from([1, 2, 3, 4]).buffer; }
-    }),
+    fetchImpl: async (url) => firmwareResponse(url),
+    cryptoImpl: webcrypto,
     onState(state) { states.push(state); }
   });
   return { fake, states, result };
 }
 
-test("keep-configuration mode writes sparse parts without erasing", async () => {
+test("keep-configuration writes ota_0 first and activates it with otadata last", async () => {
   const { fake, states, result } = await runFlash(false);
   assert.equal(result.chipFamily, "ESP32-S3");
   assert.equal(fake.calls.includes("erase"), false);
-  assert.deepEqual(fake.calls.slice(-3), ["write", "reset:soft_reset", "disconnect"]);
+  assert.deepEqual(fake.calls.slice(-4), [
+    ["write", [0, 0x8000, 0x20000]],
+    ["write", [0xf000]],
+    "reset:soft_reset",
+    "disconnect"
+  ]);
+  assert.equal(states.some((item) => item.stage === "activating"), true);
   assert.equal(states.at(-1).percentage, 100);
 });
 
 test("factory-reset mode erases before writing the same manifest parts", async () => {
   const { fake } = await runFlash(true);
   assert.ok(fake.calls.indexOf("erase") > fake.calls.indexOf("flashId"));
-  assert.ok(fake.calls.indexOf("erase") < fake.calls.indexOf("write"));
+  assert.ok(fake.calls.indexOf("erase") < fake.calls.findIndex((call) => Array.isArray(call) && call[0] === "write"));
+});
+
+test("an integrity error occurs before erase or either write phase", async () => {
+  const fake = fakeEsptool();
+  await assert.rejects(
+    flashDevice({
+      port: { getInfo() { return { usbVendorId: 0x303a, usbProductId: 0x1001 }; } },
+      manifest,
+      manifestUrl: "https://example.test/manifest.json",
+      eraseFirst: true,
+      TransportCtor: fake.Transport,
+      ESPLoaderCtor: fake.Loader,
+      fetchImpl: async (url) => {
+        const path = new URL(url).pathname.split("/").pop();
+        const expected = bytesForPath(path);
+        const corrupt = expected.slice();
+        corrupt[0] ^= 1;
+        return firmwareResponse(url, corrupt);
+      },
+      cryptoImpl: webcrypto
+    }),
+    { name: "FirmwareIntegrityError" }
+  );
+  assert.equal(fake.calls.includes("erase"), false);
+  assert.equal(fake.calls.some((call) => Array.isArray(call) && call[0] === "write"), false);
 });
 
 test("serial monitor reset keeps IO0 high while EN is pulsed", async () => {
@@ -258,7 +373,49 @@ test("standalone reset opens a closed port and releases it afterwards", async ()
   ]);
 });
 
-test("published installer keeps Tesla styling and inline Web Serial controls", () => {
+test("boot verification accepts only the expected application version and closes the port", async () => {
+  const calls = [];
+  const chunks = [
+    new TextEncoder().encode("I (101) cpu_start: Project name: tesla-key-esp32\n"),
+    new TextEncoder().encode("I (105) cpu_start: App version: 1.4.75\n")
+  ];
+  const reader = {
+    async read() { return chunks.length ? { value: chunks.shift(), done: false } : { done: true }; },
+    async cancel() { calls.push("cancel"); },
+    releaseLock() { calls.push("release"); }
+  };
+  const port = {
+    readable: { getReader() { return reader; } },
+    writable: {},
+    async setSignals(signals) { calls.push(["signals", signals]); },
+    async close() { calls.push("close"); this.readable = null; this.writable = null; }
+  };
+
+  const result = await verifyBootVersion({
+    port,
+    expectedVersion: "1.4.75",
+    delay: async () => {},
+    timeoutMs: 100,
+    cleanupTimeoutMs: 20
+  });
+
+  assert.equal(result.version, "1.4.75");
+  assert.equal(bootLogHasVersion(result.log, "1.4.75"), true);
+  assert.equal(bootLogHasVersion(result.log, "1.4.74"), false);
+  assert.deepEqual(calls.slice(-3), ["cancel", "release", "close"]);
+});
+
+test("serial reader cleanup is bounded even when cancel and read never settle", async () => {
+  const started = Date.now();
+  await stopSerialReader(
+    { cancel() { return new Promise(() => {}); } },
+    new Promise(() => {}),
+    10
+  );
+  assert.ok(Date.now() - started < 200, "reader cleanup must not hang the installer");
+});
+
+test("published installer keeps Tesla styling and local Web Serial controls", () => {
   const html = fs.readFileSync(new URL("../docs/index.html", import.meta.url), "utf8");
   assert.equal((html.match(/id="serial-monitor-button"/g) || []).length, 1);
   assert.equal((html.match(/id="reset-button"/g) || []).length, 1);
@@ -269,10 +426,24 @@ test("published installer keeps Tesla styling and inline Web Serial controls", (
   assert.match(html, /@media \(max-width:780px\)[\s\S]*\.installer-footer\{background:transparent\}/);
   assert.match(html, /<span class="installer-logo"[^>]*><svg[\s\S]*M13 2 4 14h6/);
   assert.match(html, /Keep configuration[\s\S]*WiFi, VIN, MQTT, pairing key and BLE sessions stay intact/);
-  assert.match(html, /class="installer-action-row installer-device-actions"[\s\S]*id="install-button"[\s\S]*id="reset-button"[\s\S]*id="disconnect-button"[\s\S]*id="release-serial-port"/);
-  assert.match(html, /onBeforeRelease:\s*controller\.disconnectPortForRelease/);
-  assert.match(html, /esptool-js@0\.6\.1\/\+esm/);
-  assert.match(html, /location\.pathname\.match\(\/\\\/PR\\\/\(\\d\+\)\\\//);
+  assert.match(html, /id="serial-release"[\s\S]*id="release-serial-port"[\s\S]*class="installer-device"/);
+  assert.doesNotMatch(html, /class="installer-card installer-options"[\s\S]*id="release-serial-port"/);
+  assert.match(html, /id="firmware-source-link"[\s\S]*id="firmware-source-value"/);
+  assert.match(html, /<script type="module" src="\.\/installer-bootstrap\.mjs"><\/script>/);
+  assert.match(html, /Content-Security-Policy[^>]*script-src 'self'/);
+  const style = html.match(/<style>([\s\S]*?)<\/style>/)?.[1];
+  assert.ok(style, "installer stylesheet is embedded and covered by its CSP hash");
+  const styleHash = createHash("sha256").update(style).digest("base64");
+  assert.match(html, new RegExp(`style-src 'sha256-${styleHash.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}'`));
+  assert.doesNotMatch(html, /unsafe-inline|unsafe-eval/);
+  assert.doesNotMatch(html, /<script(?:\s|>)(?![^>]*\bsrc=)/);
+  assert.doesNotMatch(html, /cdn\.jsdelivr\.net|unpkg\.com/);
+
+  const bootstrap = fs.readFileSync(new URL("../docs/installer-bootstrap.mjs", import.meta.url), "utf8");
+  assert.match(bootstrap, /from "\.\/vendor\/esptool-js-0\.6\.1\.bundle\.js"/);
+  assert.match(bootstrap, /link\.id\s*=\s*"preview-source-link"/);
+  assert.match(bootstrap, /onBeforeRelease:\s*controller\.disconnectPortForRelease/);
+  assert.match(bootstrap, /locationImpl\.pathname\.match\(\/\\\/PR\\\/\(\\d\+\)\\\//);
   assert.doesNotMatch(html, /esp-web-install-button/);
   assert.doesNotMatch(html, /#0097e0|#0079bd|#33abe8|#36b8ed|#63bde7/i);
 });

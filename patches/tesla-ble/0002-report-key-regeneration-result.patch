@@ -1,0 +1,65 @@
+diff --git a/include/vehicle.h b/include/vehicle.h
+index 2372056..a4cd11d 100644
+--- a/include/vehicle.h
++++ b/include/vehicle.h
+@@ -251,7 +251,8 @@ class Vehicle {
+-
++
+   // Pairing & Auth
+   void pair(Keys_Role role = Keys_Role_ROLE_OWNER);
+-  void regenerate_key();
++  bool regenerate_key();
++  bool has_private_key() const { return client_ && client_->has_private_key(); }
+-
++
+   bool is_connected() const { return is_connected_; }
+   void set_connected(bool connected);
+diff --git a/src/vehicle.cpp b/src/vehicle.cpp
+index 2f7778b..480e9e4 100644
+--- a/src/vehicle.cpp
++++ b/src/vehicle.cpp
+@@ -1424,18 +1424,39 @@ void TeslaBLE::Vehicle::pair(Keys_Role role) {
+                });
+ }
+-
++
+-void TeslaBLE::Vehicle::regenerate_key() {
++bool TeslaBLE::Vehicle::regenerate_key() {
+   LOG_INFO("Regenerating private key...");
++  // create_private_key() replaces the in-memory key before persistence. Keep an
++  // export of the current key so a failed NVS write does not leave RAM using a
++  // different key from flash while the caller correctly keeps the old sessions.
++  std::array<uint8_t, 2048> previous_key{};
++  size_t previous_key_len = 0;
++  const bool had_previous_key = client_->has_private_key();
++  if (had_previous_key &&
++      (client_->get_private_key(previous_key.data(), previous_key.size(), &previous_key_len) != 0 ||
++       previous_key_len == 0 || previous_key_len > previous_key.size())) {
++    // Do not mutate a working runtime identity unless it can be restored if the NVS commit
++    // fails. Proceeding here would turn an export error plus a later save error into RAM using
++    // an unpersisted key while flash and the still-valid sessions retain the old one.
++    LOG_ERROR("Failed to export existing private key before regeneration");
++    return false;
++  }
++
+   if (client_->create_private_key() != 0) {
+     LOG_ERROR("Failed to create private key");
+-    return;
++    return false;
+   }
+-
++
+   if (persist_private_key_()) {
+     LOG_INFO("New private key saved to storage");
++    return true;
+   } else {
+     LOG_ERROR("Failed to save new private key");
++    if (had_previous_key && client_->load_private_key(previous_key.data(), previous_key_len) != 0) {
++      LOG_ERROR("Failed to restore previous in-memory private key after persistence failure");
++    }
++    return false;
+   }
+ }
+-
++
+ void TeslaBLE::Vehicle::handle_signed_message_error_(const UniversalMessage_RoutableMessage &msg,

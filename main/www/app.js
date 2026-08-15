@@ -7,6 +7,7 @@ var $=function(id){return document.getElementById(id)};
 // the write when nothing changed keeps the same nodes alive so the animation runs on.
 function setHTML(el,html){ if(el && el.__h!==html){ el.__h=html; el.innerHTML=html; } }
 var state=null, otaTimer=null, otaAvail=null, waking=false, wakeTimeout=null, chgBusy=false, feedOk=false;
+var otaPhase=null, otaDeadline=0, otaExpectedVersion=null;
 
 // Quotes are escaped too so esc() is safe in attribute values (title="…"), not just element content.
 function esc(s){return String(s).replace(/[&<>"']/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]})}
@@ -14,6 +15,33 @@ function esc(s){return String(s).replace(/[&<>"']/g,function(c){return{'&':'&amp
 // a finite number in, the number out; anything else null. Keeps radio-sourced JSON
 // (RSSI, SOC, progress) from ever reaching innerHTML as text.
 function num(x){ x=+x; return isFinite(x)?x:null; }
+
+function requestJson(url,options){
+  return fetch(url,options).then(function(r){
+    if(!r||!r.ok){ var e=new Error('HTTP '+(r&&r.status!=null?r.status:'error')); e.status=r&&r.status; throw e; }
+    return r.json();
+  });
+}
+function requestJsonWithTimeout(url,options,timeoutMs){
+  var ctl=typeof AbortController!=='undefined'?new AbortController():null;
+  var opts=Object.assign({},options||{}); if(ctl)opts.signal=ctl.signal;
+  return new Promise(function(resolve,reject){
+    var settled=false;
+    var timer=setTimeout(function(){
+      if(settled)return; settled=true; if(ctl)ctl.abort(); reject(new Error('request timed out'));
+    },timeoutMs);
+    requestJson(url,opts).then(function(value){
+      if(settled)return; settled=true; clearTimeout(timer); resolve(value);
+    },function(error){
+      if(settled)return; settled=true; clearTimeout(timer); reject(error);
+    });
+  });
+}
+function commandResponse(j){
+  var o=j&&j.response;
+  if(!o||typeof o.result!=='boolean'||typeof o.reason!=='string') throw new Error('invalid command response');
+  return o;
+}
 
 /* ---------- toasts ---------- */
 function toast(msg,type){
@@ -35,7 +63,7 @@ function poll(){
   // Cache-bust + no-store: the live page polls forever, so a stale/cached /status would
   // freeze the hero on an old state (e.g. a transient orange "Unreachable") until a manual
   // reload — the very bug a fresh document hides. Same guard waitReboot() already uses.
-  fetch('/status?ms='+Date.now(),{cache:'no-store'}).then(function(r){return r.json()})
+  return requestJson('/status?ms='+Date.now(),{cache:'no-store'})
     .then(function(s){ feedOk=true; render(s); })
     .catch(function(){ feedOk=false; });
 }
@@ -560,6 +588,7 @@ function render(s){
   vl.textContent='v'+(s.version||'?');
   vl.className='verlink';   // always grey — never the accent-red highlight
   vl.title=otaAvail?('Update '+otaAvail+' available — tap to install'):'Tap to check for updates';
+  vl.setAttribute('aria-label',otaAvail?('Install firmware update '+otaAvail):'Check for firmware updates');
 
   // key
   if(s.key_present){
@@ -584,9 +613,9 @@ function toggleCharge(){
   chgBusy=true; if(state)render(state);
   toast(isCharging?'Stopping charge…':'Starting charge…','info');
   fetch('/api/1/vehicles/'+encodeURIComponent(vin)+'/command/'+cmd,{method:'POST'})
-    .then(function(r){return r.json()})
+    .then(function(r){if(!r.ok)throw new Error('HTTP '+r.status);return r.json()})
     .then(function(j){
-      var ok=!!(j&&j.response&&j.response.result);
+      var ok=commandResponse(j).result;
       if(ok){ toast(isCharging?'Charging stopped':'Charging started','ok'); return; }
       var f=chargeFailMsg((j&&j.response&&j.response.reason)||'', isCharging);
       toast(f.msg, f.type);
@@ -619,13 +648,12 @@ function editVin(){
   if(!vinValid(v)){ toast('Invalid VIN — must be 17 characters','err'); return; }
   if(v===(state&&state.vin)){ toast('VIN unchanged','info'); return; }
   toast('Saving VIN…','info');
-  fetch('/set_vin',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({vin:v})})
-    .then(function(r){return r.json()})
-    .then(function(j){var o=(j&&j.response)||{};
+  return requestJson('/set_vin',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({vin:v})})
+    .then(function(j){var o=commandResponse(j);
       if(!o.result){ toast(o.reason||'Failed to save VIN','err'); return; }
       if(/no reboot|unchanged/i.test(o.reason||'')){ toast('VIN unchanged','info'); return; }
       toast('VIN saved · rebooting','ok');})
-    .catch(function(){toast('Saved — device rebooting','info')});
+    .catch(function(){toast('Failed to save VIN — no change was confirmed','err')});
 }
 function editMqtt(){
   var cur=(state&&state.mqtt&&state.mqtt.broker)?state.mqtt.broker:'';
@@ -635,13 +663,12 @@ function editMqtt(){
   if(v && v.indexOf(' ')>=0){ toast('Invalid broker — use IP:PORT','err'); return; }
   if(v===cur){ toast(v?'MQTT broker unchanged':'MQTT already disabled','info'); return; }
   toast(v?'Saving MQTT broker…':'Disabling MQTT…','info');
-  fetch('/set_mqtt',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({broker:v})})
-    .then(function(r){return r.json()})
-    .then(function(j){var o=(j&&j.response)||{};
+  return requestJson('/set_mqtt',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({broker:v})})
+    .then(function(j){var o=commandResponse(j);
       if(!o.result){ toast(o.reason||'Failed to save MQTT broker','err'); return; }
       if(/no reboot|unchanged|already/i.test(o.reason||'')){ toast(v?'MQTT broker unchanged':'MQTT already disabled','info'); return; }
       toast('Saved · rebooting','ok');})
-    .catch(function(){toast('Saved — device rebooting','info')});
+    .catch(function(){toast('Failed to save MQTT broker — no change was confirmed','err')});
 }
 function editSyslog(){
   var sy=state&&state.syslog, cur=(sy&&sy.host)?(sy.host+':'+(sy.port||514)):'';
@@ -651,13 +678,12 @@ function editSyslog(){
   if(v && v.indexOf(' ')>=0){ toast('Invalid server — use IP:PORT','err'); return; }
   if(v===cur){ toast(v?'Syslog server unchanged':'Syslog already disabled','info'); return; }
   toast(v?'Saving Syslog server…':'Disabling Syslog…','info');
-  fetch('/set_syslog',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({server:v})})
-    .then(function(r){return r.json()})
-    .then(function(j){var o=(j&&j.response)||{};
+  return requestJson('/set_syslog',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({server:v})})
+    .then(function(j){var o=commandResponse(j);
       if(!o.result){ toast(o.reason||'Failed to save Syslog server','err'); return; }
       if(/no reboot|unchanged|already/i.test(o.reason||'')){ toast(v?'Syslog server unchanged':'Syslog already disabled','info'); return; }
       toast('Saved · rebooting','ok');})
-    .catch(function(){toast('Saved — device rebooting','info')});
+    .catch(function(){toast('Failed to save Syslog server — no change was confirmed','err')});
 }
 function wakeStop(){ waking=false; clearTimeout(wakeTimeout); }
 function wakeCar(){
@@ -670,9 +696,9 @@ function wakeCar(){
   wakeTimeout=setTimeout(function(){ if(waking){ wakeStop(); toast('Still asleep — try again','info'); poll(); } }, 90000);
   toast('Waking the car…','info');
   fetch('/api/1/vehicles/'+encodeURIComponent(vin)+'/command/wake_up',{method:'POST'})
-    .then(function(r){return r.json()})
+    .then(function(r){if(!r.ok)throw new Error('HTTP '+r.status);return r.json()})
     .then(function(j){
-      var ok=!!(j&&j.response&&j.response.result);
+      var ok=commandResponse(j).result;
       if(ok){ toast('Wake sent · waiting for the car…','ok'); poll(); }   // keep spinning until SOC arrives
       else { wakeStop(); toast('Wake failed — is the car in range?','err'); poll(); }
     })
@@ -681,8 +707,12 @@ function wakeCar(){
 function genKey(){
   if(state&&state.key_present && !confirm('Regenerate the security key?\n\nThe current key is invalidated and you must re-pair with the vehicle.')) return;
   toast('Generating new key…','info');
-  fetch('/gen_keys?force=1',{method:'POST'})
-    .then(function(){toast('New key generated · re-pair with the vehicle','ok'); poll();})
+  return requestJson('/gen_keys?force=1',{method:'POST'})
+    .then(function(j){
+      if(!j||typeof j.result!=='boolean') throw new Error('invalid key response');
+      if(!j.result){ toast(j.reason||'Key generation failed','err'); return; }
+      toast('New key generated · re-pair with the vehicle','ok'); poll();
+    })
     .catch(function(){toast('Key generation failed','err')});
 }
 
@@ -690,6 +720,8 @@ function genKey(){
 // Status shows inline in the header meta line (progress ring + text), next to the
 // version — no bottom popup. A tiny ring sized for the 13.5px meta line.
 var otaBusy=false;
+var OTA_CHECK_TIMEOUT_MS=60000, OTA_UPDATE_TIMEOUT_MS=480000, OTA_HTTP_TIMEOUT_MS=5000;
+var otaClearTimer=null;
 // var(--ok) so it matches the green signal bars while keeping the exact OTA ring geometry.
 function otaMiniRing(pct,indet,col){
   var sz=16,c=sz/2,r=6,sw=2.6,circ=2*Math.PI*r; col=col||'var(--accent)';
@@ -709,67 +741,110 @@ function otaInline(html,cls){
   var el=$("otaStat"); if(!el)return;
   el.innerHTML=html||''; el.className='otastat'+(cls?' '+cls:'');
 }
-function otaInlineClear(delay){ setTimeout(function(){ otaInline(''); }, delay||3000); }
+function otaInlineClear(delay){ clearTimeout(otaClearTimer); otaClearTimer=setTimeout(function(){ otaClearTimer=null; otaInline(''); }, delay||3000); }
+function otaBegin(phase,timeout){ clearTimeout(otaClearTimer); otaClearTimer=null; otaPhase=phase; otaDeadline=Date.now()+timeout; }
+function otaReset(){ clearTimeout(otaTimer); clearTimeout(otaClearTimer); otaClearTimer=null; otaBusy=false; otaPhase=null; otaDeadline=0; otaExpectedVersion=null; }
+function otaFail(message){ otaReset(); otaInline('<span>'+esc(message)+'</span>','err'); otaInlineClear(6000); }
+function otaSchedule(fn,delay){
+  if(!otaDeadline||Date.now()<otaDeadline){ otaTimer=setTimeout(fn,delay); return; }
+  otaFail(otaPhase==='check'?'check timed out':'update timed out');
+}
+function otaVersion(v){return typeof v==='string'&&v.length<=64&&/^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?$/.test(v)}
+function otaStatus(){
+  return requestJsonWithTimeout('/ota/status',{cache:'no-store'},OTA_HTTP_TIMEOUT_MS).then(function(o){
+    var valid=o&&['idle','checking','downloading','done','error'].indexOf(o.state)>=0&&
+      typeof o.update_available==='boolean'&&typeof o.progress==='number'&&isFinite(o.progress)&&o.progress>=0&&o.progress<=100&&
+      typeof o.message==='string'&&typeof o.available==='string'&&typeof o.current==='string';
+    if(valid&&(o.update_available||o.state==='downloading'||o.state==='done')) valid=otaVersion(o.available);
+    if(!valid) throw new Error('invalid OTA status response');
+    return o;
+  });
+}
 function otaCheck(){
   if(otaBusy) return;              // a check/update is already running
   otaBusy=true;
+  otaBegin('check',OTA_CHECK_TIMEOUT_MS);
   otaInline(otaMiniRing(0,true,'currentColor'));   // checking — spinning ring only, no label
-  fetch('/ota/check?ms='+Date.now()).then(otaCheckPoll).catch(function(){ otaBusy=false; otaInline('<span>check failed</span>','err'); otaInlineClear(4000); });
+  return requestJsonWithTimeout('/ota/check?ms='+Date.now(),{},OTA_HTTP_TIMEOUT_MS).then(function(j){
+    if(!j||j.started!==true) throw new Error((j&&j.reason)||'check did not start');
+    otaCheckPoll();
+  }).catch(function(){ otaFail('check failed'); });
 }
 function otaCheckPoll(){
   clearTimeout(otaTimer);
-  fetch('/ota/status').then(function(r){return r.json()}).then(function(o){
-    if(o.state==='checking'){ otaTimer=setTimeout(otaCheckPoll,1200); return; }
-    if(o.state==='downloading'||o.state==='done'){ otaProgress(o); return; }   // already updating
-    if(o.state==='error'){ otaBusy=false; otaInline('<span>check failed</span>','err'); otaInlineClear(4000); return; }
+  return otaStatus().then(function(o){
+    if(o.state==='checking'){ otaSchedule(otaCheckPoll,1200); return; }
+    if(o.state==='downloading'||o.state==='done'){
+      otaExpectedVersion=o.available||null; otaBegin('update',OTA_UPDATE_TIMEOUT_MS); otaProgress(o); return;
+    }
+    if(o.state==='error'){ otaFail('check failed'+(o.message?' — '+o.message:'')); return; }
+    if(o.state!=='idle'){ otaFail('invalid check state'); return; }
     if(o.update_available){
       otaAvail=o.available||''; if(state)render(state); otaInline('');         // clear while the dialog is up
       if(confirm('New version '+(o.available||'')+' available — update now?\n\nYou’re on v'+(o.current||'')+'. The device downloads the firmware and reboots when done.')){
+        otaExpectedVersion=o.available||null;
+        otaBegin('update',OTA_UPDATE_TIMEOUT_MS);
         otaInline(otaMiniRing(0,true,'currentColor')+'<span>starting…</span>');
-        fetch('/ota/update',{method:'POST'}).then(otaPoll).catch(function(){otaPoll()});
-      } else { otaAvail=null; if(state)render(state); otaBusy=false; }   // cancelled → version back to grey
+        return requestJsonWithTimeout('/ota/update',{method:'POST'},OTA_HTTP_TIMEOUT_MS).then(function(j){
+          if(!j||j.result!==true) throw new Error((j&&j.reason)||'update did not start');
+          otaPoll();
+        }).catch(function(){ otaFail('update failed to start'); });
+      } else { otaAvail=null; if(state)render(state); otaReset(); }   // cancelled → version back to grey
     } else {
-      otaAvail=null; if(state)render(state); otaBusy=false;
+      otaAvail=null; if(state)render(state); otaReset();
       otaInline('<span>up to date</span>'); otaInlineClear(3500);
     }
-  }).catch(function(){ otaBusy=false; otaInline('<span>check failed</span>','err'); otaInlineClear(4000); });
+  }).catch(function(){ otaFail('check failed'); });
 }
 function otaPoll(){
   clearTimeout(otaTimer);
-  fetch('/ota/status').then(function(r){return r.json()}).then(otaProgress).catch(function(){ otaTimer=setTimeout(otaPoll,1500); });
+  if(otaDeadline&&Date.now()>=otaDeadline){ otaFail('update timed out'); return; }
+  return otaStatus().then(otaProgress).catch(function(){ otaSchedule(otaPoll,1500); });
 }
 function otaProgress(o){
   otaBusy=true;
-  if(o.state==='downloading'){ var p=num(o.progress)||0; otaInline(otaMiniRing(p,false,'currentColor')+'<span>'+p+'%</span>'); otaTimer=setTimeout(otaPoll,800); }
-  else if(o.state==='done'){ otaInline(otaMiniRing(100,false,'currentColor')+'<span>rebooting…</span>'); setTimeout(function(){waitReboot(state&&state.version)},2000); }
-  else if(o.state==='error'){ otaBusy=false; otaInline('<span>update failed'+(o.message?' — '+esc(o.message):'')+'</span>','err'); otaInlineClear(6000); }
-  else { otaTimer=setTimeout(otaPoll,1000); }
+  if(o.state==='downloading'){ var p=num(o.progress)||0; otaInline(otaMiniRing(p,false,'currentColor')+'<span>'+p+'%</span>'); otaSchedule(otaPoll,800); }
+  else if(o.state==='done'){
+    if(!otaVersion(otaExpectedVersion)){ otaFail('update target version is missing'); return; }
+    clearTimeout(otaTimer); otaPhase='reboot';
+    otaInline(otaMiniRing(100,false,'currentColor')+'<span>verifying…</span>');
+    setTimeout(function(){waitReboot(otaExpectedVersion)},1200);
+  }
+  else if(o.state==='error'){ otaFail('update failed'+(o.message?' — '+o.message:'')); }
+  else if(o.state==='idle'&&otaPhase==='update'){
+    // The 1.2 s "done" state can be missed in a background tab. Verify the target version instead
+    // of polling a fresh boot's idle state forever or treating idle as success.
+    if(!otaVersion(otaExpectedVersion)){ otaFail('update target version is missing'); return; }
+    otaPhase='reboot'; otaInline(otaMiniRing(100,false,'currentColor')+'<span>verifying…</span>');
+    waitReboot(otaExpectedVersion);
+  }
+  else if(o.state==='checking'){ otaSchedule(otaPoll,1000); }
+  else { otaFail('update entered an unexpected state'); }
 }
 function resumeOta(){
-  fetch('/ota/status').then(function(r){return r.json()}).then(function(o){
-    if(o&&(o.state==='downloading'||o.state==='done')){ otaBusy=true; otaProgress(o); }
+  return otaStatus().then(function(o){
+    if(o&&(o.state==='downloading'||o.state==='done')){
+      otaBusy=true; otaExpectedVersion=o.available||null; otaBegin('update',OTA_UPDATE_TIMEOUT_MS); otaProgress(o);
+    }
   }).catch(function(){});
 }
 // After "done" the device reboots ~1.2s later. Poll /status in the background and
-// reload once it's back on the NEW image. We can't rely only on seeing it go *down*
-// — by the time we start polling it may already be back online — so a firmware
-// version change is the primary "rebooted" signal, with a down→up transition and an
-// overall timeout as fallbacks. The per-request abort keeps polling responsive while
-// the device is unreachable instead of hanging on a dead socket.
-function waitReboot(preVer){
-  var sawDown=false, started=Date.now();
+// reload only after /status reports the exact target version. We can't rely on seeing the device
+// go down — by the time polling starts it may already be online again — and a different version is
+// not success. Per-request and overall deadlines keep an unreachable device from wedging the UI.
+function waitReboot(expectedVer){
+  if(!otaVersion(expectedVer)){ otaFail('update target version is missing'); return; }
+  var started=Date.now();
   (function probe(){
-    var ctl=('AbortController' in window)?new AbortController():null;
-    var to=ctl?setTimeout(function(){ctl.abort()},3000):null;
-    fetch('/status?ms='+Date.now(),{cache:'no-store',signal:ctl?ctl.signal:undefined})
-      .then(function(r){ if(!r.ok)throw 0; return r.json(); })
-      .then(function(o){ if(to)clearTimeout(to);
-        if((preVer&&o&&o.version&&o.version!==preVer)||sawDown){ location.reload(); return; }
+    requestJsonWithTimeout('/status?ms='+Date.now(),{cache:'no-store'},3000)
+      .then(function(o){
+        if(!o||typeof o.version!=='string') throw new Error('invalid status response');
+        if(o.version===expectedVer){ location.reload(); return; }
         next();
       })
-      .catch(function(){ if(to)clearTimeout(to); sawDown=true; next(); });
+      .catch(next);
     function next(){
-      if(Date.now()-started>90000){ location.reload(); return; }   // safety net
+      if(Date.now()-started>90000){ otaFail('update rebooted but the expected version was not verified'); return; }
       setTimeout(probe,1000);
     }
   })();
@@ -789,4 +864,4 @@ function boot(){
   setInterval(function(){ if(feedOk) paintCd(); },1000);
   resumeOta();
 }
-boot();
+if(!(typeof window!=='undefined'&&window.__TESLA_UI_NO_BOOT__)) boot();

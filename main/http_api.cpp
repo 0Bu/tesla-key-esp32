@@ -29,40 +29,59 @@ static const char* fw_version() {
     return buf;
 }
 
-// Extract last path segment from URI like /api/1/vehicles/VIN/command/CMD
+static constexpr const char* kVehiclePrefix = "/api/1/vehicles/";
+
+static const char* uri_path_end(const char* uri) {
+    const char* query = uri ? strchr(uri, '?') : nullptr;
+    return query ? query : (uri ? uri + strlen(uri) : nullptr);
+}
+
+// Parse exactly /api/1/vehicles/{VIN}/command/{CMD}. The central dispatcher is deliberately
+// broad, so this handler must anchor the full route itself rather than accepting a matching
+// substring inside an unrelated path.
 static bool parse_uri(const char* uri, char* vin_out, size_t vin_sz,
                       char* cmd_out, size_t cmd_sz) {
-    // URI pattern: /api/1/vehicles/{VIN}/command/{CMD}
-    const char* vehicles = strstr(uri, "/vehicles/");
-    if (!vehicles) return false;
-    const char* vin_start = vehicles + strlen("/vehicles/");
-    const char* command   = strstr(vin_start, "/command/");
-    if (!command) return false;
+    if (!uri || strncmp(uri, kVehiclePrefix, strlen(kVehiclePrefix)) != 0) return false;
+    const char* path_end = uri_path_end(uri);
+    const char* vin_start = uri + strlen(kVehiclePrefix);
+    const char* command = strchr(vin_start, '/');
+    static constexpr const char* kCommand = "/command/";
+    if (!command || command >= path_end ||
+        strncmp(command, kCommand, strlen(kCommand)) != 0) return false;
     size_t vin_len = command - vin_start;
     if (vin_len == 0 || vin_len >= vin_sz) return false;
     strncpy(vin_out, vin_start, vin_len);
     vin_out[vin_len] = '\0';
-    const char* cmd_start = command + strlen("/command/");
-    // strip query string
-    const char* q = strchr(cmd_start, '?');
-    size_t cmd_len = q ? (size_t)(q - cmd_start) : strlen(cmd_start);
+    const char* cmd_start = command + strlen(kCommand);
+    size_t cmd_len = static_cast<size_t>(path_end - cmd_start);
     if (cmd_len == 0 || cmd_len >= cmd_sz) return false;
+    if (memchr(cmd_start, '/', cmd_len) != nullptr) return false;
     strncpy(cmd_out, cmd_start, cmd_len);
     cmd_out[cmd_len] = '\0';
     return true;
 }
 
-// Extract VIN from /api/1/vehicles/{VIN}/...
-static bool parse_vin_only(const char* uri, char* vin_out, size_t vin_sz) {
-    const char* vehicles = strstr(uri, "/vehicles/");
-    if (!vehicles) return false;
-    const char* vin_start = vehicles + strlen("/vehicles/");
+// Parse exactly /api/1/vehicles/{VIN}{suffix}, allowing only a trailing query string.
+static bool parse_vin_route(const char* uri, const char* suffix,
+                            char* vin_out, size_t vin_sz) {
+    if (!uri || !suffix ||
+        strncmp(uri, kVehiclePrefix, strlen(kVehiclePrefix)) != 0) return false;
+    const char* path_end = uri_path_end(uri);
+    const char* vin_start = uri + strlen(kVehiclePrefix);
     const char* slash = strchr(vin_start, '/');
-    size_t vin_len = slash ? (size_t)(slash - vin_start) : strlen(vin_start);
+    if (!slash || slash >= path_end) return false;
+    size_t vin_len = static_cast<size_t>(slash - vin_start);
     if (vin_len == 0 || vin_len >= vin_sz) return false;
+    const size_t suffix_len = strlen(suffix);
+    if (static_cast<size_t>(path_end - slash) != suffix_len ||
+        strncmp(slash, suffix, suffix_len) != 0) return false;
     strncpy(vin_out, vin_start, vin_len);
     vin_out[vin_len] = '\0';
     return true;
+}
+
+static bool request_vin_matches(const char* vin) {
+    return g_vehicle && vin && g_vehicle->vin() == vin;
 }
 
 // Parse one REST integer argument against the shared command registry. Optional values keep
@@ -133,6 +152,9 @@ esp_err_t handle_command(GuardedReq rq) {
     char vin[64], cmd[64];
     if (!parse_uri(req->uri, vin, sizeof(vin), cmd, sizeof(cmd))) {
         return send_json(req, 400, make_response(false, "unknown", "?", "invalid URI"));
+    }
+    if (!request_vin_matches(vin)) {
+        return send_json(req, 404, make_response(false, cmd, vin, "vehicle VIN mismatch"));
     }
     ESP_LOGI(TAG, "CMD %s on VIN %s", cmd, vin);
 
@@ -213,8 +235,10 @@ esp_err_t handle_command(GuardedReq rq) {
 esp_err_t handle_vehicle_data(GuardedReq rq) {
     httpd_req_t* req = rq.req;
     char vin[64] = {0};
-    if (!parse_vin_only(req->uri, vin, sizeof(vin)))
+    if (!parse_vin_route(req->uri, "/vehicle_data", vin, sizeof(vin)))
         return send_json(req, 400, make_response(false, "vehicle_data", "?", "invalid URI"));
+    if (!request_vin_matches(vin))
+        return send_json(req, 404, make_response(false, "vehicle_data", vin, "vehicle VIN mismatch"));
 
     ChargeStateResult cs{};
     bool ok = g_vehicle->get_charge_state(cs);
@@ -256,8 +280,10 @@ esp_err_t handle_vehicle_data(GuardedReq rq) {
 esp_err_t handle_body_controller(GuardedReq rq) {
     httpd_req_t* req = rq.req;
     char vin[64] = {0};
-    if (!parse_vin_only(req->uri, vin, sizeof(vin)))
+    if (!parse_vin_route(req->uri, "/body_controller_state", vin, sizeof(vin)))
         return send_json(req, 400, make_response(false, "body_controller_state", "?", "invalid URI"));
+    if (!request_vin_matches(vin))
+        return send_json(req, 404, make_response(false, "body_controller_state", vin, "vehicle VIN mismatch"));
 
     VehicleStatusResult vs{};
     bool ok = g_vehicle->get_vehicle_status(vs);

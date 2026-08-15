@@ -16,6 +16,7 @@
 #include "logic/charge_control.hpp"
 #include "logic/link_state.hpp"
 #include "logic/ui_state.hpp"
+#include "logic/vin_transition.hpp"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
@@ -37,6 +38,9 @@ public:
     bool init(const std::string& vin, BleClient& ble, NvsStorageAdapter& storage,
               NvsStorageAdapter& config_store, std::string& known_mac,
               bool start_tasks = true);
+    // Idempotently starts the two mutating background tasks after the caller has completed boot
+    // recovery and all essential initialization. Partial creation is unwound before false.
+    bool start_tasks();
 
     bool wake_up(int timeout_ms = 20000);
     bool charge_start(int timeout_ms = 20000);
@@ -134,23 +138,42 @@ public:
     // idle health probe): "AWAKE" / "ASLEEP" / "UNKNOWN". Diagnostic/transparency only — the
     // hero uses link_state(), which DEBOUNCES this (a single ASLEEP blip is not yet "asleep").
     const char* vcsec_sleep_raw() const {
-        if (!vehicle_) return "UNKNOWN";
-        switch (vehicle_->sleep_state()) {
+        switch (static_cast<TeslaBLE::SleepState>(vcsec_sleep_state_.load())) {
             case TeslaBLE::SleepState::ASLEEP: return "ASLEEP";
             case TeslaBLE::SleepState::AWAKE:  return "AWAKE";
             default:                           return "UNKNOWN";
         }
     }
 
+    struct KeyGenerationResult {
+        tk::KeyRotationResult rotation{tk::KeyRotationResult::NotCommitted};
+        bool existing_key_refused{false};
+        bool key_probe_failed{false};
+        bool transition_blocked{false};
+    };
+    // Request-local result is produced while command_mutex_ still owns the whole rotation; HTTP
+    // uses it directly instead of re-sampling a fingerprint after unlock. The overwrite guard is
+    // checked under that same lock, so auto-pair cannot create a key between a preflight check and
+    // mutation. The bool wrapper is retained for trusted first-boot/auto-pair callers.
+    KeyGenerationResult generate_key_result(bool allow_replace);
+    // Auto-pair-only wrapper: re-samples revocation, durable-key presence and runtime safety
+    // together under command_mutex_ before it authorizes mutation.
     bool generate_key();
     // Always enrolls a Charging Manager key (charging + wake only); never an owner key.
     bool pair(int timeout_ms = 30000);
 
-    // Re-point the device at a different vehicle (VIN change): regenerate the key,
-    // drop the now-orphaned session + cached data, and forget the discovered BLE MAC
-    // (it belongs to the old car). The caller is expected to reboot afterwards so the
-    // new VIN takes effect. Safe to call regardless of current pairing state.
-    bool reset_for_new_vehicle();
+    struct NewVehicleResetResult {
+        tk::VinTransitionApply state{tk::VinTransitionApply::IdentityUnverified};
+        std::string previous_key_id;
+    };
+    using VinTransitionStager = std::function<bool(const std::string& previous_key_id)>;
+
+    // Re-point the device at a different vehicle as one command-FIFO transaction. The staging
+    // callback persists the VIN journal + complete ConfigBlob while command_mutex_ still binds
+    // `previous_key_id`; auto-rekey therefore cannot change the fingerprint between staging,
+    // rotation and result classification. Any staged attempt gates all signing until the caller
+    // reboots, because this Vehicle instance still owns the old in-memory VIN.
+    NewVehicleResetResult reset_for_new_vehicle(const VinTransitionStager& stage);
 
     const std::string& vin() const { return vin_; }
     // A plausible Tesla VIN is exactly 17 chars, uppercase alphanumeric with I/O/Q excluded
@@ -159,6 +182,9 @@ public:
     // vehicle without a real configured VIN (the boot placeholder "UNKNOWN" is not plausible).
     static bool vin_is_plausible(const std::string& vin);
     bool has_plausible_vin() const { return vin_is_plausible(vin_); }
+    bool key_rotation_recovered_at_boot() const {
+        return key_rotation_recovered_at_boot_;
+    }
     TeslaBLE::Vehicle* vehicle() { return vehicle_.get(); }
 
     // Status accessors (for /status and the web UI)
@@ -206,7 +232,7 @@ public:
     // Reason the most recent command failed (e.g. "complete", "not_charging"), or empty
     // if it succeeded or got no response at all (car unreachable / timed out). Lets the
     // UI tell "the car rejected this" apart from "the car couldn't be reached".
-    std::string last_command_error() const { return last_error_; }
+    std::string last_command_error() const;
 
     // NOTE: generic runtime-config persistence deliberately does NOT live here. The HTTP
     // layer talks to the tesla_cfg store directly (g_config in http_handlers.hpp) — the
@@ -263,18 +289,48 @@ private:
     using Builder = std::function<int(TeslaBLE::Client*, uint8_t*, size_t*)>;
     using ResultCb = TeslaBLE::Command::OperationResultCallback;
 
+    // A command result belongs to exactly one caller. The completion object is retained by
+    // both the waiting task and tesla-ble's queued callback, so a timeout can return without
+    // leaving a callback that refers to stack storage or a semaphore reused by the next call.
+    struct CommandCompletion {
+        SemaphoreHandle_t sem{xSemaphoreCreateBinary()};
+        bool completed{false};
+        bool success{false};
+        std::string error;
+
+        ~CommandCompletion() { if (sem) vSemaphoreDelete(sem); }
+        CommandCompletion() = default;
+        CommandCompletion(const CommandCompletion&) = delete;
+        CommandCompletion& operator=(const CommandCompletion&) = delete;
+    };
+
+    struct CommandOutcome {
+        bool completed{false};
+        bool success{false};
+        std::string error;
+    };
+
     // Install the persistent set_*_state_callback hooks that keep the last_known_*
     // caches fresh (charge + the read-only telemetry domains). Called once from init();
     // lives in vehicle_telemetry.cpp next to the protobuf→struct parsers it uses.
     void install_state_callbacks_();
 
-    bool ensure_connected_(int timeout_ms = 10000);
+    bool ensure_connected_until_(uint32_t deadline);
 
     // Drop the BLE link, reset the library's in-memory peer sessions, erase the
     // persisted VCSEC/Infotainment sessions, and clear cached vehicle readings.
     // After this has_session() is false until a fresh handshake re-pairs, so the UI
     // and evcc stop serving stale "paired"/SOC data from a defunct pairing.
-    void clear_session_and_cache_();
+    // Returns false when the in-memory reset or any persisted-session erase failed. A caller
+    // that has already committed a new private key must then leave its cross-namespace journal
+    // armed: the new identity is durable, but boot recovery still has cleanup work to finish.
+    bool clear_session_and_cache_();
+    // Every key rotation first commits a marker in tesla_ble. The locked runner removes it only
+    // after old sessions are durably erased; boot recovery performs the same cleanup before a
+    // TeslaBLE::Vehicle can be constructed and load/sign with persisted peer state.
+    tk::KeyRotationResult generate_key_locked_();
+    bool finish_key_rotation_cleanup_();
+    bool recover_pending_key_rotation_at_boot_();
 
     // Signed VCSEC GET_STATUS poll used purely to detect that our key was deleted on the
     // car side (the response then carries KEY_NOT_ON_WHITELIST, or a tagless session-info →
@@ -295,16 +351,33 @@ private:
                      bool count_as_activity = true, bool auth_fail_is_revocation = false);
     bool send_infotainment_(const std::string& name, Builder builder, int timeout_ms,
                             TeslaBLE::WakePolicy wp = TeslaBLE::WakePolicy::WAKE_IF_NEEDED);
-    // Same runner with command_mutex_ + cmd_in_flight_ already held. Used by
+    // Same runner with command_mutex_ + cmd_in_flight_ already held. The absolute deadline
+    // includes connection setup and all preceding work in the transaction. Used by
     // set_charging_amps to keep the action and its independent ChargeState readback
     // in one serialized transaction, with no background poll inserted between them.
-    bool send_infotainment_locked_(const std::string& name, Builder builder, int timeout_ms,
-                                   TeslaBLE::WakePolicy wp);
+    CommandOutcome send_infotainment_locked_(const std::string& name, Builder builder,
+                                              uint32_t deadline, TeslaBLE::WakePolicy wp);
+
+    CommandOutcome send_vcsec_locked_(const std::string& name, Builder builder,
+                                      TeslaBLE::WakePolicy wp, uint32_t deadline,
+                                      bool auth_fail_is_revocation);
 
     // Build the per-command result callback. auth_fail_is_revocation gates whether an
     // "authentication failed" reply may count toward the two-strike pairing_lost_ heuristic
     // (true only for the authorised health probe); an explicit "whitelist" fault always trips.
-    ResultCb make_result_cb_(bool auth_fail_is_revocation = false);
+    ResultCb make_result_cb_(const std::shared_ptr<CommandCompletion>& completion,
+                             uint32_t generation,
+                             bool auth_fail_is_revocation = false);
+    std::shared_ptr<CommandCompletion> begin_completion_(uint32_t& generation);
+    CommandOutcome await_completion_(const std::shared_ptr<CommandCompletion>& completion,
+                                     uint32_t generation, uint32_t deadline,
+                                     const char* name);
+    void invalidate_and_flush_(uint32_t generation);
+    void publish_command_outcome_(const CommandOutcome& outcome);
+    bool command_identity_ready_() const {
+        return key_runtime_safe_.load() && !pairing_cleanup_pending_.load() &&
+               !vin_transition_pending_.load() && !key_reload_required_.load();
+    }
 
     // Copy a background-refreshed cache under cache_mutex_ (see cache_mutex_ below). The
     // caches hold std::string members written from the BLE RX task; an unlocked by-value
@@ -326,22 +399,46 @@ private:
 
     std::unique_ptr<TeslaBLE::Vehicle> vehicle_;
 
-    SemaphoreHandle_t cmd_sem_{nullptr};
     SemaphoreHandle_t vehicle_mutex_{nullptr};
-    // Serializes a whole command/query cycle so concurrent HTTP requests
-    // (e.g. evcc poll + a manual command) cannot share cmd_sem_/last_result_.
+    // Serializes a whole command/query cycle so concurrent HTTP requests and the automatic
+    // health/pairing task cannot interleave entries in tesla-ble's single FIFO.
     SemaphoreHandle_t command_mutex_{nullptr};
     // Guards the last_known_* caches below: they hold std::string members written from
     // the BLE RX task (parse_* callbacks) and read by the HTTP task, so an unlocked
     // by-value copy would race the writer (torn string → UB).
     SemaphoreHandle_t cache_mutex_{nullptr};
-    bool              last_result_{false};
+    // Guards the externally visible result snapshot. Background health/pair operations never
+    // publish here, so they cannot replace a foreground request's error between its bool return
+    // and the HTTP/MCP layer reading last_command_error().
+    SemaphoreHandle_t result_mutex_{nullptr};
     // Failure text from the most recent signed command (the Tesla "...action failed:
     // <reason>" message), or empty after a success / when no response came back. Lets
     // the HTTP layer report the real reason (e.g. "complete") instead of a generic one.
-    // Written in make_result_cb_ (BLE RX task) before cmd_sem_ is given; read by the
-    // HTTP task only after it takes cmd_sem_, so the semaphore orders the access.
     std::string       last_error_;
+
+    // Monotonically identifies the one active tesla-ble FIFO request. A timeout increments
+    // this BEFORE set_connected(false) synchronously finalises queued callbacks. Callbacks from
+    // the invalidated generation therefore cannot signal or mutate a later request.
+    std::atomic<uint32_t> command_generation_{0};
+
+    // regenerate_key() can fail after mutating the in-memory key while the durable NVS key
+    // remains old (or absent on first boot). Until a successful persisted generation or reboot
+    // reconstructs Vehicle from storage, no command may enrol that ambiguous runtime identity.
+    std::atomic<bool> key_runtime_safe_{false};
+    // tesla-ble attempted a private-key write but could not confirm its NVS commit. The durable
+    // fingerprint is now unknowable from this Vehicle instance (which may have restored the old
+    // RAM key), so block signing AND all further rotations until boot reloads storage.
+    std::atomic<bool> key_reload_required_{false};
+    // Set only when this boot consumed a persisted key_rotate marker. main uses it to prevent
+    // an absent durable key from entering an automatic CommitUnknown reboot loop.
+    bool key_rotation_recovered_at_boot_{false};
+    // The new key is durable, but session/cache erasure was incomplete. Auto-pair retries only
+    // that idempotent cleanup; it must not generate a different key on every retry.
+    std::atomic<bool> pairing_cleanup_pending_{false};
+    // Set before /set_vin stages its cross-namespace journal and held until the mandatory reboot.
+    // It closes the otherwise small unlock→HTTP-rollback/reboot window in which auto-pair or a
+    // telemetry task could sign/re-key using a request whose persisted VIN is still in flight.
+    std::atomic<bool> vin_transition_pending_{false};
 
     // Set from a command callback (possibly the BLE RX task) when the vehicle reports
     // KEY_NOT_ON_WHITELIST — i.e. our key was removed on the car side. The auto-pair
@@ -453,6 +550,10 @@ private:
     // the run has held for kAsleepDebounceS, which filters those blips. Cleared on a pairing
     // reset (clear_session_and_cache_).
     std::atomic<uint32_t> vcsec_asleep_since_ticks_{0};
+    // Vehicle::sleep_state() is written by tesla-ble from the BLE RX task. Sampling that field
+    // directly from loop/status tasks is a C++ data race, so RX publishes this atomic mirror
+    // while vehicle_mutex_ is held and every other task reads only the mirror.
+    std::atomic<int> vcsec_sleep_state_{static_cast<int>(TeslaBLE::SleepState::UNKNOWN)};
     // Fold one sampled VCSEC sleep reading into the debounce clock. ASLEEP starts/continues
     // the run (keeping its original start tick); AWAKE breaks it. UNKNOWN is not passed here
     // (the caller leaves the clock untouched so a transient unknown can't reset a real run).
@@ -475,9 +576,6 @@ private:
     TirePressureResult  last_known_tires_{};
     ClosuresStateResult last_known_closures_{};
 
-    // Pending status result stored as a member to avoid lambda capturing stack refs
-    VehicleStatusResult pending_status_{};
-
     // ── BLE phase deadlines (see ble_phase()) ─────────────────────────────────────
     // Tick counts, 0 = not armed. Each is written only by the code that owns that
     // phase — ensure_connected_ owns the connect attempt, auto_pair_task_fn_ owns the
@@ -492,6 +590,18 @@ private:
     static uint32_t deadline_in_(uint32_t ms) {
         uint32_t d = xTaskGetTickCount() + pdMS_TO_TICKS(ms);
         return d ? d : 1;
+    }
+    static TickType_t ticks_until_(uint32_t deadline) {
+        int32_t left = static_cast<int32_t>(deadline - xTaskGetTickCount());
+        return left > 0 ? static_cast<TickType_t>(left) : 0;
+    }
+    static int remaining_ms_(uint32_t deadline) {
+        TickType_t ticks = ticks_until_(deadline);
+        return ticks > 0 ? static_cast<int>(ticks * portTICK_PERIOD_MS) : 0;
+    }
+    static uint32_t capped_deadline_(uint32_t deadline, uint32_t max_ms) {
+        uint32_t cap = deadline_in_(max_ms);
+        return ticks_until_(deadline) <= ticks_until_(cap) ? deadline : cap;
     }
 
     TaskHandle_t loop_task_{nullptr};

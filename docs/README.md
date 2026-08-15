@@ -37,7 +37,7 @@ targets (where the driver is not compiled in).
 ## Flash prebuilt artifacts
 
 Browser flasher + WiFi/VIN setup: [../README.md](../README.md). The flasher is served on
-GitHub Pages (inline esptool-js / Web Serial), rebuilt and deployed automatically by CI on every
+GitHub Pages (repository-vendored, hash-pinned esptool-js / Web Serial), rebuilt and deployed automatically by CI on every
 firmware change; each change also publishes a
 [GitHub release](https://github.com/0Bu/tesla-key-esp32/releases/latest) with the same bins.
 
@@ -49,8 +49,11 @@ works for any chip. This erases `nvs` (re-enter WiFi/VIN, re-pair once):
 esptool --chip <esp32|esp32s3|esp32c3|esp32c6> write_flash 0x0 \
   tesla-key-esp32<suffix>-<version>-merged.bin
 ```
-To preserve `nvs`, flash the separate parts from a local `build/` instead:
-`cd build && esptool --chip <target> write_flash "@flash_args"`.
+To preserve `nvs`, use a provenance-matched signed app from the exact Release/main run, or the
+repository's `flash-esp32` workflow with an explicit offline `DEV_SIGNING_KEY_FILE`. That path
+verifies signature, target and size, writes only the signed app at `0x20000`, then erases
+`otadata` at `0xf000` last. Never flash a local `build/` through `@flash_args`: local build output
+is unsigned and crash-loops before `app_main`.
 
 ## Build from source
 
@@ -65,8 +68,8 @@ brew install esptool                                          # host flasher (on
 git clone https://github.com/0Bu/tesla-key-esp32.git && cd tesla-key-esp32
 
 # Build via the CI-pinned ESP-IDF image (first run pulls it, then materialises
-# yoziru/tesla-ble — 2–4 min). CMake applies the repository's pinned anti-replay
-# patch automatically. The wrapper keeps build/ host-owned. Pick your chip:
+# yoziru/tesla-ble — 2–4 min). CMake applies the repository's ordered, hash-recorded
+# patch series automatically. The wrapper keeps build/ host-owned. Pick your chip:
 ./scripts/idf-docker.sh idf.py set-target esp32s3 build   # or esp32 / esp32c3 / esp32c6
 
 # Or reproduce the complete unsigned four-target CI build + ELF/map/size diagnostics:
@@ -75,9 +78,9 @@ git clone https://github.com/0Bu/tesla-key-esp32.git && cd tesla-key-esp32
 # Optional: WiFi SSID/pass + VIN (BLE MAC auto) — interactive
 ./scripts/idf-docker.sh idf.py menuconfig
 
-# Flash from the host (preserves nvs — @flash_args skips nvs@0x9000). Use the same
-# --chip you built for; @flash_args already has the right bootloader offset.
-cd build && esptool --chip esp32s3 -p <port> write_flash "@flash_args"   # or esp32 / esp32c3 / esp32c6
+# STOP after the build: build/tesla-key-esp32.bin and @flash_args are unsigned.
+# For USB delivery, follow the flash-esp32 workflow with an explicit verified signing key,
+# or use an exact provenance-matched signed Release/main artifact.
 ```
 
 WiFi/VIN may be left blank and set later via the setup AP. Flash-mode fallback: hold `BOOT`,
@@ -94,18 +97,41 @@ I (700) main: tesla-key-esp32 running. API on port 80.
 
 ## Provision without rebuilding
 
-Writes WiFi/VIN to the NVS config partition only:
+Use the device's transactional HTTP path; never generate and flash a partial NVS image. Such an
+image spans the complete `0x6000` partition and erases the vehicle private key, pairing sessions and
+every omitted setting. On a first boot, join `tesla-key-esp32-setup`, then run:
+
 ```bash
-python provision.py --port <port> --ssid MyNet --password secret --vin 5YJ3E1EA1JF000001
+python3 provision.py --url http://192.168.4.1 --ssid MyNet --vin 5YJ3E1EA1JF000001
+# password is prompted without echo; automation: --password-stdin or a chmod-600 --password-file
 ```
+
+For an already reachable device, the same command with
+`--url http://tesla-key-esp32.local` uses `POST /set_wifi` and its one-shot rollback. A vehicle
+identity change is deliberately separate because it clears the old pairing:
+
+```bash
+python3 provision.py --url http://tesla-key-esp32.local --mode lan \
+  --vin-only --vin 5YJ3E1EA1JF000001 --confirm-vin-change
+```
+
+The retired `--port` path fails closed with a data-loss explanation. For genuine low-level recovery,
+make and verify a complete NVS backup before writing anything at `0x9000`.
+
+The WiFi contract is the same in the setup portal, LAN API and host tool: a 1–32-byte UTF-8 SSID,
+plus either an explicitly selected open network, an 8–63-byte UTF-8 WPA2 passphrase, or exactly 64
+ASCII hexadecimal characters for a raw PSK. Enterprise authentication is not supported.
 
 ## Upgrading
 
 WiFi, VIN, private key and BLE sessions live in the `nvs` partition (`0x9000`, namespaces
 `tesla_cfg` + `tesla_ble`).
 
-- Web flasher / host `esptool … write_flash "@flash_args"`: `nvs` untouched → data kept.
-- `esptool … write_flash 0x0 …-merged.bin`, `esptool … erase_flash`: erase whole flash → data lost.
+- OTA, or verified signed app-only USB at `0x20000` followed by the `otadata` activation erase:
+  `nvs` untouched → data kept.
+- Web installer **keep configuration** mode: the four bounded parts do not overlap `nvs` → data kept.
+- Web installer factory reset, `esptool … write_flash 0x0 …-merged.bin`, or
+  `esptool … erase_flash`: `nvs` erased/overwritten → data lost.
 
 `nvs` offset/size must not change across versions, or old data is stranded.
 
@@ -315,7 +341,8 @@ POST /set_syslog           Persist the UDP Syslog server for the diag log and re
                              ({"server":"host:port"}; a bare host defaults to port 514;
                              "" disables Syslog)
 POST /set_wifi             Change the WiFi credentials over the LAN and reboot
-                             ({"ssid":"…","pass":"…"}; an empty pass means an open network).
+                             ({"ssid":"…","pass":"…"}; an empty pass means an open network;
+                             otherwise 8–63 UTF-8 bytes or exactly 64 ASCII hex for a raw PSK).
                              The previous pair is stashed as a ONE-SHOT rollback backup in the
                              same atomic config entry: if the new credentials get a lease the
                              backup is dropped, and if the AP keeps refusing them the next boot
@@ -421,10 +448,21 @@ handshake/ack); `/status.syslog.reachable` is an advisory ARP/ICMP ping hint onl
 delivery gate, so a collector behind a firewalled-ICMP host still receives lines with
 `reachable:false` shown in the UI.
 
+## Private wake capture
+
+`scripts/capture_wake.py http://tesla-key-esp32.local --wake` correlates `/status` transitions
+with the live `/diag` ring for a difficult BLE wake diagnosis. By default it substitutes the VIN
+and long authenticated-frame hex, writes a new 0600 log in a fresh 0700 temporary directory and
+never overwrites an existing file. Use `--output /private/path/wake-capture-case.log` only when you
+need a stable location; inside this checkout the name must match the ignored
+`wake-capture-*.log` pattern. Full VIN/frame bytes require the conspicuous
+`--include-sensitive` opt-in and must not be attached to a public issue. The tool makes a
+best-effort `verbose=0` request in `finally`, including when the enable response was lost.
+
 ## Troubleshooting
 
-**No WiFi** — verify SSID/pass (case-sensitive); WPA2 only, no enterprise; reflash or
-`provision.py`.
+**No WiFi** — verify SSID/pass (case-sensitive); open or WPA2-PSK, no enterprise. Join the setup AP and use
+its form or the safe HTTP-only `provision.py`; do not flash a generated partial NVS image.
 
 **BLE doesn't find vehicle** — car within ~10 m, awake; scanning starts after WiFi.
 Log: `scanning for Tesla BLE...` → `Tesla '<name>' found: … — connecting`.
@@ -469,7 +507,7 @@ Full threat model + Flash Encryption / Secure Boot: [SECURITY.md](SECURITY.md).
 | Service UUID | `00000211-b2d1-43f0-9b88-960cebf8b91e` |
 | Encryption | ECDH + AES-GCM (mbedTLS) |
 | Signing | ECDSA P-256 (key in NVS) |
-| BLE library | [yoziru/tesla-ble](https://github.com/yoziru/tesla-ble) v5.1.1 + repository anti-replay patch |
+| BLE library | [yoziru/tesla-ble](https://github.com/yoziru/tesla-ble) v5.1.1 + ordered repository patch series (including anti-replay) |
 | BLE stack | NimBLE |
 | Fragment size | 20 bytes / BLE write chunk |
 | HTTP server | `esp_http_server` :80 |

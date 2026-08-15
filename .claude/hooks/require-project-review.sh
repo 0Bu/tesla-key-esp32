@@ -4,8 +4,8 @@
 # before merging a PR into main.
 #
 # Two merge paths are gated, so the gate holds in BOTH environments:
-#   • Bash `gh pr merge ...`              — local terminal sessions
-#   • mcp__github__merge_pull_request     — Claude Code on the web / remote (no `gh` CLI)
+#   • Bash `gh pr merge <number-or-url> --match-head-commit <sha> ...`
+#   • mcp__github__merge_pull_request     — exact github.com repo + expected_head_sha
 # Matched via the `matcher` entries in .claude/settings.json that both invoke this script.
 #
 # Mechanism (NO file marker — see pr-gate-lib.sh): after running /project-review and confirming
@@ -24,7 +24,18 @@
 proj="${CLAUDE_PROJECT_DIR:-$PWD}"
 GATE_PROJ="$proj"
 # shellcheck source=/dev/null
-. "$proj/.claude/hooks/pr-gate-lib.sh" 2>/dev/null || exit 0   # lib missing -> don't block
+if ! . "$proj/.claude/hooks/pr-gate-lib.sh" 2>/dev/null; then
+  echo "BLOCKED: project-review gate library could not be loaded." >&2
+  exit 2
+fi
+for gate_fn in gate_bash_actions gate_pr_merge_selector gate_pr_merge_match_sha \
+               gate_mcp_repo_matches gate_fetch_pr \
+               gate_checkbox_status gate_sha_matches gate_full_head_sha; do
+  if [ "${GATE_PR_LIB_API:-}" != 1 ] || ! declare -F "$gate_fn" >/dev/null 2>&1; then
+    echo "BLOCKED: project-review gate library is incomplete ($gate_fn)." >&2
+    exit 2
+  fi
+done
 
 # Read the tool-call payload from stdin (PreToolUse JSON).
 input="$(cat 2>/dev/null)"
@@ -34,17 +45,42 @@ cmd="$(printf '%s'  "$input" | jq -r '.tool_input.command // ""' 2>/dev/null)"
 # Is this a gated merge, and which PR does it target? The MCP merge tool is gated
 # unconditionally (selector = its pullNumber). A Bash call is gated only when it *invokes*
 # `gh pr merge` at a command position. gate_bash_actions recognises chained/grouped/wrapped
-# actions and returns every guarded action. Multiple merge actions in one Bash call are rejected:
-# checking only the first selector would leave later merges unverified. The matcher is deliberately
-# textual and may conservatively block guarded-looking quoted data.
-action=""; selector=""
+# actions and returns every guarded action. A merge must be the only shell segment; a preceding
+# PR edit/checkout could mutate what was validated. Multiple/ambiguous actions fail closed. The
+# matcher is deliberately textual and may conservatively block guarded-looking quoted data.
+action=""; selector=""; expected_head=""; mcp_merge=0
 case "$tool" in
   mcp__github__merge_pull_request)
     action="merge_pull_request (GitHub MCP)"
-    selector="$(printf '%s' "$input" | jq -r '.tool_input.pullNumber // .tool_input.pull_number // ""' 2>/dev/null)"
+    if ! gate_mcp_repo_matches "$input"; then
+      echo "BLOCKED: GitHub MCP merge target does not exactly match this worktree's origin." >&2
+      exit 2
+    fi
+    selector="$(printf '%s' "$input" \
+      | jq -er '(.tool_input.pullNumber // .tool_input.pull_number) | tostring | select(test("^[0-9]+$"))' \
+          2>/dev/null)" || {
+      echo "BLOCKED: GitHub MCP merge requires one explicit numeric pullNumber." >&2
+      exit 2
+    }
+    expected_head="$(printf '%s' "$input" \
+      | jq -er '.tool_input.expected_head_sha | strings | select(test("^[0-9a-f]{40}$"))' \
+          2>/dev/null)" || {
+      echo "BLOCKED: GitHub MCP merge requires expected_head_sha as one full commit SHA." >&2
+      exit 2
+    }
+    mcp_merge=1
     ;;
   Bash)
     records="$(gate_bash_actions "$cmd")"
+    if printf '%s\n' "$records" | grep -Fq $'\t__GATE_UNSAFE_SHELL_CONTEXT__'; then
+      {
+        echo "BLOCKED: \`gh pr merge\` must be the only shell action in its Bash tool call."
+        echo
+        echo "A preceding/following command can mutate the reviewed PR after PreToolUse validates it."
+        echo "Run the merge as a separate Bash call."
+      } >&2
+      exit 2
+    fi
     merge_records="$(printf '%s\n' "$records" | grep $'^merge\t' || true)"
     merge_count=0
     [ -z "$merge_records" ] || merge_count="$(printf '%s\n' "$merge_records" | wc -l | tr -d ' ')"
@@ -59,9 +95,14 @@ case "$tool" in
     if [ "$merge_count" -eq 1 ]; then
       action="gh pr merge"
       merge_args="${merge_records#*$'\t'}"
-      # First PR-number or URL token after the sole merge action; absent means current branch.
-      selector="$(printf '%s' "$merge_args" | tr ' ' '\n' \
-                    | grep -m1 -E '^([0-9]+|https?://[^ ]+)$' || true)"
+      selector="$(gate_pr_merge_selector "$merge_args")" || {
+        echo "BLOCKED: \`gh pr merge\` requires a literal PR number/URL as its first argument." >&2
+        exit 2
+      }
+      expected_head="$(gate_pr_merge_match_sha "$merge_args")" || {
+        echo "BLOCKED: merge requires --match-head-commit <full-40hex-PR-head> immediately after the selector." >&2
+        exit 2
+      }
     fi
     ;;
 esac
@@ -92,6 +133,12 @@ if [ "$fetch_rc" -ne 0 ]; then
 fi
 head_sha="$(printf '%s' "$pr" | head -n1)"
 body="$(printf '%s' "$pr" | tail -n +2)"
+local_head="$(gate_full_head_sha)"
+if [ -z "$local_head" ] || [ "$local_head" != "$head_sha" ] \
+    || [ -z "$expected_head" ] || [ "$expected_head" != "$head_sha" ]; then
+  echo "BLOCKED: merge PR head does not exactly match the locally audited HEAD." >&2
+  exit 2
+fi
 
 status="$(gate_checkbox_status "$body" "$key")"
 box_state="${status%% *}"; box_sha=""

@@ -1,0 +1,4 @@
+#pragma once
+
+#define ESP_LOGE(tag, format, ...) do { (void)(tag); } while (0)
+#define ESP_LOGW(tag, format, ...) do { (void)(tag); } while (0)

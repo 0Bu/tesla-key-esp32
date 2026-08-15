@@ -46,6 +46,74 @@ enum class HealthVerdict {
     GiveUp,  // no health within the hard cap — leave PENDING_VERIFY, a reboot rolls it back
 };
 
+enum class OtaVerificationState : uint8_t {
+    Stable,
+    PendingVerify,
+    Unknown,
+};
+
+enum class IdentityMutationEntry : uint8_t {
+    HttpGenerateKey,
+    HttpSetVin,
+    InitialKey,
+    AutomaticKey,
+};
+
+// One process-wide exclusion gate binds OTA workers and identity transactions. Merely sampling
+// ota_is_busy() before a key/VIN write is a TOCTOU bug: an update task can start after the sample
+// and reboot while the recovery journal is only half committed. The same gate also prevents an
+// OTA check/download from starting after an identity transaction has begun.
+enum class OtaIdentityGateState : uint8_t {
+    Idle,
+    Ota,
+    IdentityMutation,
+};
+
+enum class OtaRebootClass : uint8_t {
+    SuccessfulUserConfigCommit,
+    AutomaticIdentityRecovery,
+    AutomaticWifiRollback,
+    AutomaticFaultRecovery,
+};
+
+// Cancelling rollback is irreversible. Only a successfully persisted configuration explicitly
+// requested by the user proves enough of the new image to authorize it; policy/fault recovery
+// reboots are evidence of failure and must leave PENDING_VERIFY armed.
+constexpr bool ota_reboot_confirms_pending_image(OtaRebootClass reboot_class) {
+    return reboot_class == OtaRebootClass::SuccessfulUserConfigCommit;
+}
+
+// Key/VIN rotations persist recovery journals whose semantics can evolve with the firmware. A
+// rollback reboot must never hand a half-committed identity to an older image, so probation is a
+// hard write barrier at every entry point. Failure to query the running image state is equally
+// non-authoritative and therefore fail-closed.
+constexpr bool identity_mutation_allowed(OtaVerificationState state,
+                                         IdentityMutationEntry entry) {
+    (void)entry;
+    return state == OtaVerificationState::Stable;
+}
+
+constexpr bool ota_operation_may_start(OtaIdentityGateState state) {
+    return state == OtaIdentityGateState::Idle;
+}
+
+constexpr bool identity_mutation_may_start(OtaVerificationState verification,
+                                           OtaIdentityGateState gate,
+                                           IdentityMutationEntry entry) {
+    return identity_mutation_allowed(verification, entry) &&
+           gate == OtaIdentityGateState::Idle;
+}
+
+constexpr const char* identity_mutation_entry_name(IdentityMutationEntry entry) {
+    switch (entry) {
+        case IdentityMutationEntry::HttpGenerateKey: return "HTTP key generation";
+        case IdentityMutationEntry::HttpSetVin:      return "HTTP VIN transition";
+        case IdentityMutationEntry::InitialKey:      return "initial key generation";
+        case IdentityMutationEntry::AutomaticKey:    return "automatic key rotation";
+    }
+    return "identity mutation";
+}
+
 // The minimum uptime before even a healthy image commits. Long enough that an image which boots and
 // then dies under load (BLE + HTTP + MQTT + the telemetry poll are all running by then) reboots
 // while still pending, which is what rolls it back.
