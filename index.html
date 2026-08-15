@@ -2,6 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'sha256-0niK5V1ZqALRVwC3GwNl6fk5YQWIk+PpQX2mrLriz98='; connect-src 'self'; img-src 'self' data:; font-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-src 'none'; worker-src 'none'">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="theme-color" content="#e82127">
 <title>Install tesla-key-esp32</title>
@@ -129,6 +130,7 @@ h1{margin:0;color:var(--fg);font-size:clamp(26px,4vw,36px);line-height:1.12;lett
   flex:none; color:var(--fg); font:650 12px/1.3 var(--font-mono);
   background:var(--soft); border:1px solid var(--line); border-radius:7px; padding:5px 8px;
 }
+.installer-version a{color:inherit;text-decoration:underline;text-underline-offset:2px}
 .installer-action-row{display:flex;align-items:center;gap:14px;margin-top:20px;flex-wrap:wrap}
 .installer-primary,.installer-secondary,.installer-release{
   min-height:44px; display:inline-flex; align-items:center; justify-content:center; gap:8px;
@@ -141,16 +143,18 @@ h1{margin:0;color:var(--fg);font-size:clamp(26px,4vw,36px);line-height:1.12;lett
 .installer-secondary:hover:not(:disabled),.installer-release:hover:not(:disabled){background:var(--soft)}
 button:disabled{cursor:default;opacity:.55;transform:none}
 .installer-device-actions{
-  display:grid; grid-template-columns:minmax(0,1.25fr) minmax(0,.72fr) minmax(0,.9fr) minmax(0,1.45fr);
+  display:grid; grid-template-columns:minmax(0,1.25fr) minmax(0,.72fr) minmax(0,.9fr);
   align-items:start; gap:10px;
 }
-.installer-device-actions>button,.installer-device-actions .serial-release,.installer-device-actions .installer-release{width:100%}
+.installer-device-actions>button{width:100%}
 .installer-device-actions button{padding-inline:12px;white-space:nowrap}
-.installer-device-actions .installer-release{min-height:44px}
 .installer-browser-note{color:var(--muted);font-size:12px}
 .installer-page-status{margin:12px 0 0;color:var(--muted);font-size:12px}
 .installer-page-status[data-kind="success"]{color:var(--success)}
 .installer-page-status[data-kind="error"],.installer-unsupported{color:var(--err)}
+.installer-usb-release{margin-top:14px;padding-top:12px;border-top:1px solid var(--line)}
+.installer-usb-release .release-help{margin:6px 0 0}
+.installer-usb-release-status{margin:8px 0 0}
 
 .installer-device{
   display:none; grid-template-columns:minmax(0,.9fr) minmax(0,1.25fr) minmax(0,.9fr);
@@ -326,7 +330,7 @@ code{font-family:var(--font-mono);font-size:.88em;background:var(--soft);border:
         <section class="installer-card installer-usb-card" aria-labelledby="connect-title">
           <div class="installer-card-head">
             <div><span class="installer-card-kicker">USB connection</span><strong class="installer-card-title" id="connect-title">Connect ESP board</strong></div>
-            <span class="installer-version" id="firmware-version" hidden>Version <span id="firmware-version-value"></span></span>
+            <span class="installer-version" id="firmware-version" hidden>Version <span id="firmware-version-value"></span> · <a id="firmware-source-link" hidden><span id="firmware-source-value"></span></a></span>
           </div>
 
           <div class="installer-action-row">
@@ -338,6 +342,12 @@ code{font-family:var(--font-mono);font-size:.88em;background:var(--soft);border:
           </div>
           <p class="installer-unsupported" id="serial-unsupported" hidden>This browser cannot use Web Serial. Use Chrome or Edge on a desktop.</p>
           <p class="installer-page-status" id="page-status" role="status" aria-live="polite" hidden></p>
+
+          <div class="serial-release installer-usb-release" id="serial-release" hidden>
+            <button class="installer-release" id="release-serial-port" type="button" aria-describedby="release-port-help serial-release-status">Remove browser permission</button>
+            <p class="release-help" id="release-port-help">Removes this port's “paired” permission from the site.</p>
+          </div>
+          <p class="serial-status installer-usb-release-status" id="serial-release-status" role="status" aria-live="polite" hidden></p>
 
           <div class="installer-device" aria-live="polite">
             <div class="installer-device-item"><span class="installer-device-label">Device</span><span class="installer-device-value" id="device-value">—</span></div>
@@ -365,11 +375,11 @@ code{font-family:var(--font-mono);font-size:.88em;background:var(--soft);border:
         <div class="installer-choice-grid">
           <label class="installer-choice">
             <input type="radio" name="install-mode" value="keep" checked>
-            <span class="installer-choice-body"><span class="installer-choice-name">Keep configuration <span class="installer-recommended">Recommended</span></span><span class="installer-choice-text">WiFi, VIN, MQTT, pairing key and BLE sessions stay intact.</span></span>
+            <span class="installer-choice-body"><span class="installer-choice-name">Keep configuration <span class="installer-recommended" id="keep-recommended">Recommended for updates</span></span><span class="installer-choice-text">WiFi, VIN, MQTT, pairing key and BLE sessions stay intact. Use only after the dual-OTA layout is already installed.</span></span>
           </label>
           <label class="installer-choice">
             <input type="radio" name="install-mode" value="erase">
-            <span class="installer-choice-body"><span class="installer-choice-name">Erase everything</span><span class="installer-choice-text">Full factory reset. WiFi setup and vehicle pairing are required again.</span></span>
+            <span class="installer-choice-body"><span class="installer-choice-name">Erase everything <span class="installer-recommended" id="erase-recommended" hidden>Recommended for first install</span></span><span class="installer-choice-text">Full factory reset. WiFi setup and vehicle pairing are required again.</span></span>
           </label>
         </div>
 
@@ -380,11 +390,6 @@ code{font-family:var(--font-mono);font-size:.88em;background:var(--soft);border:
             Reset
           </button>
           <button class="installer-secondary" type="button" id="disconnect-button" disabled>Disconnect</button>
-          <div class="serial-release" id="serial-release" hidden>
-            <button class="installer-release" id="release-serial-port" type="button" aria-describedby="release-port-help serial-release-status">Remove browser permission</button>
-            <p class="release-help" id="release-port-help">Removes this port's “paired” permission from the site.</p>
-            <p class="serial-status" id="serial-release-status" role="status" aria-live="polite" hidden></p>
-          </div>
         </div>
 
         <div class="installer-progress-wrap" aria-live="polite">
@@ -392,7 +397,7 @@ code{font-family:var(--font-mono);font-size:.88em;background:var(--soft);border:
           <div class="installer-progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="progress-track"><div class="installer-progress-fill" id="progress-fill"></div></div>
         </div>
 
-        <div class="installer-success"><span class="installer-success-icon" aria-hidden="true">✓</span><span><strong>Firmware installed successfully</strong><span>The device restarted and the USB port is ready again.</span></span></div>
+        <div class="installer-success"><span class="installer-success-icon" aria-hidden="true">✓</span><span><strong>Firmware installed successfully</strong><span>The expected version was observed during boot and the USB port is ready again.</span></span></div>
       </section>
 
       <section class="installer-card installer-after" aria-labelledby="after-title">
@@ -416,48 +421,6 @@ code{font-family:var(--font-mono);font-size:.88em;background:var(--soft);border:
   <footer class="installer-footer">MIT · not affiliated with Tesla, Inc.</footer>
 </div>
 
-<script>
-  (function () {
-    var match = location.pathname.match(/\/PR\/(\d+)\//);
-    if (!match) return;
-
-    var number = match[1].replace(/\D/g, "");
-    var channel = document.getElementById("build-channel");
-    var note = document.getElementById("preview-note");
-    var text = document.getElementById("preview-note-text");
-    var link = document.createElement("a");
-    var strong = document.createElement("strong");
-
-    channel.textContent = "Preview build · PR #" + number;
-    channel.dataset.kind = "preview";
-    strong.textContent = "Pre-merge firmware for PR #" + number + ". ";
-    link.href = "https://github.com/0Bu/tesla-key-esp32/pull/" + number;
-    link.textContent = "View pull request";
-    text.append(strong, "This page flashes that PR's signed build; the device still checks OTA against main. ", link, ".");
-    note.hidden = false;
-  })();
-</script>
-<script type="module">
-  import { ESPLoader, Transport } from "https://cdn.jsdelivr.net/npm/esptool-js@0.6.1/+esm";
-  import { attachWebInstaller } from "./web-installer.mjs";
-  import { attachSerialPortRelease } from "./serial-port-release.mjs";
-
-  const root = document.getElementById("web-installer");
-  const controller = attachWebInstaller({
-    root,
-    serial: navigator.serial,
-    ESPLoaderCtor: ESPLoader,
-    TransportCtor: Transport
-  });
-
-  attachSerialPortRelease({
-    serial: navigator.serial,
-    SerialPortCtor: window.SerialPort,
-    container: document.getElementById("serial-release"),
-    button: document.getElementById("release-serial-port"),
-    status: document.getElementById("serial-release-status"),
-    onBeforeRelease: controller.disconnectPortForRelease
-  });
-</script>
+<script type="module" src="./installer-bootstrap.mjs"></script>
 </body>
 </html>
