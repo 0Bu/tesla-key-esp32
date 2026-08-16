@@ -35,13 +35,13 @@ should, do the config/build/version all agree, and do the runtime invariants sti
 
 Work in this order — it's what makes the review catch *drift* rather than just style:
 
-1. **Build the intended model from the docs first.** Read [`AGENTS.md`](../../../AGENTS.md)
-   for runner policy, authorization, safety, evidence, build and review contracts. Read the
-   owning deep references for firmware facts: [`docs/README.md`](../../../docs/README.md) for
-   hardware, HTTP API and commands; [`docs/ARCHITECTURE.md`](../../../docs/ARCHITECTURE.md) for
-   telemetry, MQTT, sleep/link state, pairing and OTA; [`docs/MCP.md`](../../../docs/MCP.md) for
-   MCP tools; [`docs/SECURITY.md`](../../../docs/SECURITY.md) for NVS, signing and exposure; and
-   [`README.md`](../../../README.md) for the user journey. The policy and deep references must
+1. **Build the intended model from the docs first.**
+   [`AGENTS.md`](../../../AGENTS.md) owns runner policy, authorization, safety, evidence, build, and review contracts.
+   [`docs/README.md`](../../../docs/README.md) owns hardware, HTTP API, and commands.
+   [`docs/ARCHITECTURE.md`](../../../docs/ARCHITECTURE.md) owns telemetry, MQTT, sleep/link state, pairing, and OTA.
+   [`docs/MCP.md`](../../../docs/MCP.md) owns MCP tools.
+   [`docs/SECURITY.md`](../../../docs/SECURITY.md) owns NVS, signing, and exposure.
+   [`README.md`](../../../README.md) owns the user journey. The policy and deep references must
    agree with the code without copying those long technical catalogs back into `AGENTS.md`.
    Note every concrete claim: endpoints, commands, NVS keys, partition offsets, flash
    size, version, defaults. These are your assertions to check.

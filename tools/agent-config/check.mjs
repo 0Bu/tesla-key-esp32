@@ -35,6 +35,17 @@ function safeRelative(value, label) {
   return normalized;
 }
 
+function normalizeProse(text) {
+  return text.replace(/\s+/g, " ").trim();
+}
+
+function proseSentences(text) {
+  const protectedDots = normalizeProse(text).replaceAll(".md", "__DOT_MD__");
+  return protectedDots.split(/(?<=[.!?])\s+/).map((sentence) =>
+    sentence.replaceAll("__DOT_MD__", ".md")
+  );
+}
+
 function restrictedFrontmatter(file, label) {
   let text;
   try { text = fs.readFileSync(file, "utf8"); }
@@ -198,6 +209,27 @@ const readOnlySkills = new Set([
   "device-diag", "display-preview", "ota-release-verify", "project-review",
   "skill-audit", "vehicle-command-audit",
 ]);
+const ownerContracts = new Map([
+  ["project-review", [
+    "[`AGENTS.md`](../../../AGENTS.md) owns runner policy, authorization, safety, evidence, build, and review contracts.",
+    "[`docs/README.md`](../../../docs/README.md) owns hardware, HTTP API, and commands.",
+    "[`docs/ARCHITECTURE.md`](../../../docs/ARCHITECTURE.md) owns telemetry, MQTT, sleep/link state, pairing, and OTA.",
+    "[`docs/MCP.md`](../../../docs/MCP.md) owns MCP tools.",
+    "[`docs/SECURITY.md`](../../../docs/SECURITY.md) owns NVS, signing, and exposure.",
+  ]],
+  ["device-diag", [
+    "[`docs/ARCHITECTURE.md`](../../../docs/ARCHITECTURE.md) owns pairing lifecycle and invalidation.",
+  ]],
+  ["vehicle-command-audit", [
+    "[`docs/README.md`](../../../docs/README.md) owns the HTTP command catalog.",
+    "[`docs/ARCHITECTURE.md`](../../../docs/ARCHITECTURE.md) owns link-state and pairing semantics.",
+    "[`docs/MCP.md`](../../../docs/MCP.md) owns MCP tools.",
+    "`AGENTS.md` owns only runner policy and safety boundaries.",
+  ]],
+]);
+const deepOwnerTerms = /(?:HTTP|API|commands?|MCP|NVS|MQTT|link-state|pairing)/i;
+const agentsDeepOwner = /AGENTS\.md[^.!?]*(?:owns|contains|documents|catalogs|lists|is the owner of)[^.!?]*/i;
+const deepCatalogInAgents = /(?:catalog|list|table|section|details)[^.!?]*(?:in|under|within|of)\s+`?AGENTS\.md/i;
 for (const [name, pair] of skillMappings) {
   const legacy = restrictedFrontmatter(repoPath(pair.source), `legacy skill ${name}`);
   const canonical = restrictedFrontmatter(repoPath(pair.target), `canonical skill ${name}`);
@@ -218,26 +250,33 @@ for (const [name, pair] of skillMappings) {
     die(1, `high-risk skill ${name} must require explicit user authorization`);
   }
   if (name === "usb-recovery") {
-    const liveBoundary = /USB-write approval does not authorize live verification/is;
-    const exactTargetApproval = /separate explicit user approval[\s\S]{0,160}exact recovered device\/IP[\s\S]{0,160}(?:named GET|GET endpoints)/is;
-    const otaStateChange = /GET \/ota\/check[\s\S]{0,80}state-changing/is;
+    const liveContracts = [
+      "The USB-write approval does not authorize live verification.",
+      "Before any HTTP request, obtain separate explicit user approval for the exact recovered device/IP and the named GET endpoints.",
+      "`GET /ota/check` is state-changing and must be named explicitly in that live approval.",
+    ];
     for (const [side, text] of [["canonical", canonical.text], ["legacy", legacy.text]]) {
-      if (!liveBoundary.test(text) || !exactTargetApproval.test(text) || !otaStateChange.test(text)) {
-        die(1, `${side} usb-recovery skill must preserve the separate live-verification boundary`);
+      const normalized = normalizeProse(text);
+      if (liveContracts.some((required) => !normalized.includes(required))) {
+        die(1, `${side} usb-recovery skill is missing the exact live-verification contract`);
       }
     }
   }
-  if (name === "project-review") {
-    const staleOwners = [
-      /API list in\s+`AGENTS\.md`/i,
-      /command list in\s+`AGENTS\.md`/i,
-      /namespace table in\s+`AGENTS\.md`/i,
-      /four-state summary in\s+`AGENTS\.md`/i,
-      /MQTT sections? of\s+`AGENTS\.md`/i,
-    ];
-    if (staleOwners.some((pattern) => pattern.test(canonical.text))) {
-      die(1, "project-review assigns a deep technical catalog back to compact AGENTS.md");
+  const requiredOwners = ownerContracts.get(name);
+  if (requiredOwners) {
+    const normalized = normalizeProse(canonical.text);
+    if (requiredOwners.some((required) => !normalized.includes(required))) {
+      die(1, `${name} is missing an exact documentation-owner contract`);
     }
+    const contradictoryOwner = proseSentences(canonical.text).some((sentence) =>
+      (agentsDeepOwner.test(sentence) && deepOwnerTerms.test(sentence)) ||
+      (deepCatalogInAgents.test(sentence) && deepOwnerTerms.test(sentence))
+    );
+    if (contradictoryOwner) {
+      die(1, `${name} assigns a deep technical catalog to compact AGENTS.md`);
+    }
+  }
+  if (name === "project-review") {
     const policyPaths = ["AGENTS.md", ".agents/", ".codex/", "tools/agent-hooks/", "tools/agent-config/"];
     const featureParagraph = canonical.text.match(/\*\*`\$feature-docs`\*\*[\s\S]*?(?=\n- \*\*`\$|\n### |\n## |$)/)?.[0] || "";
     if (policyPaths.some((required) => !featureParagraph.includes(required))) {

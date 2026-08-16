@@ -95,11 +95,12 @@ Code: `main/ble_client.{cpp,hpp}`, `main/vehicle_ctrl.{cpp,hpp}` (+ `vehicle_com
 `vehicle_telemetry.cpp`, `vehicle_pairing.cpp`), `main/http_server.cpp` (+ `http_api.cpp`,
 `http_status.cpp`, `http_ota.cpp`, `http_config.cpp`), `main/mqtt_ha.cpp`,
 `main/ota_update.cpp`, `main/Kconfig.projbuild`, `partitions.csv`.
-Docs to hold accountable: [`README.md`](../../../README.md),
-[`docs/README.md`](../../../docs/README.md), [`docs/SECURITY.md`](../../../docs/SECURITY.md),
-[`docs/ARCHITECTURE.md`](../../../docs/ARCHITECTURE.md), and
-[`docs/MCP.md`](../../../docs/MCP.md). `AGENTS.md` owns runner policy and safety boundaries, not
-the command, link-state or pairing catalogs audited here.
+Docs to hold accountable: [`README.md`](../../../README.md) and
+[`docs/SECURITY.md`](../../../docs/SECURITY.md).
+[`docs/README.md`](../../../docs/README.md) owns the HTTP command catalog.
+[`docs/ARCHITECTURE.md`](../../../docs/ARCHITECTURE.md) owns link-state and pairing semantics.
+[`docs/MCP.md`](../../../docs/MCP.md) owns MCP tools.
+`AGENTS.md` owns only runner policy and safety boundaries.
 
 ### Fetch gotchas (these silently waste a pass if you don't know them)
 - Use **`raw.githubusercontent.com`**, not `github.com/.../blob/...` — the HTML blob view **403s** via a webpage fetcher.
@@ -178,13 +179,13 @@ sources; if still present, report it rather than editing. Nearly all are documen
 |---|---|---|---|---|
 | 1 | doc (crux) | `docs/README.md` "Commands" | Claims **only** `door_lock/unlock` are role-rejected. Also rejected: `flash_lights`, `honk_horn`, `set_sentry_mode`, `auto_conditioning_start/stop`. Code already names them at the `vehicle_commands.cpp` role-refusal comment. | Widen the "sent but rejected for the Charging-Manager role" note to the full set; only charging + charge-port + wake actually execute. |
 | 2 | doc | `docs/README.md` `/status.link` and MQTT `sleep_status`; `docs/ARCHITECTURE.md` "Sleep / link-state" | Enum value sets omit **`idle`/`IDLE`** (code emits 5 / 4 values). | Add `idle`/`IDLE` to the owning deep references. |
-| 3 | doc | `docs/README.md:126` | `set_charging_amps` "(0–32)" but code clamps **0–48**. | Document `(0–48; car enforces its per-model max)`. |
-| 4 | doc | `README.md:54` | Quotes car prompt as "Add new key"; firmware strings say **"Add key"**. | One-word fix. |
+| 3 | doc | `docs/README.md` "Commands" | `set_charging_amps` "(0–32)" but code clamps **0–48**. | Document `(0–48; car enforces its per-model max)`. |
+| 4 | doc | `README.md` "Step 4 — Pair with the car" | Quotes car prompt as "Add new key"; firmware strings say **"Add key"**. | One-word fix. |
 | 5 | doc | `README.md` "Pair with the car"; `docs/README.md` "Pairing" | "max 3 **keys** per vehicle" — really ~3 simultaneous **connections** (19 keys stored). | Reframe as the ~3-connection limit. |
 | 6 | doc/comment | `Kconfig.projbuild` OTA help | Says image is `tesla-key-esp32-<target>.bin`; actual suffix scheme is `""`/`-s3`/`-c3`/`-c6`. | Correct to the real suffix map. |
 | 7 | doc/comment | old `vehicle_ctrl.hpp` / `main.cpp` / `http_server.cpp` comments | Historical comments said the device made no NTP call and conflated command expiry with wall time. Current contract: SNTP is primary, `/set_time` is fallback; wall time gates TLS/human timestamps **and persisted-session load age**, while command `expires_at` uses vehicle clock + monotonic delta. | Keep that distinction; do not remove the early NVS clock restore as "signing does not use RTC". |
 | 8 | doc | `docs/ARCHITECTURE.md` "Pairing lifecycle / invalidation" | Describes only the `"whitelist"` substring; omits the **primary** `UNKNOWN_KEY_ID` `set_message_callback` detector that fires on a cached session. | List all three detectors, primary first. |
-| 9 | logical (low) | `vehicle_commands.cpp:227-230` | `set_charge_limit` silently clamps `<50→50` and reports **success** (upstream passes through and lets the car answer). Harmless on the evcc path. | Optional: reject out-of-range, or pass through. |
+| 9 | logical (low) | `main/vehicle_commands.cpp` `set_charge_limit` | `set_charge_limit` silently clamps `<50→50` and reports **success** (upstream passes through and lets the car answer). Harmless on the evcc path. | Optional: reject out-of-range, or pass through. |
 
 ## How to run
 

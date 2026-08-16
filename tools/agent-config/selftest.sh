@@ -164,12 +164,48 @@ expect_failure "canonical skill model pin" "$fixture" "frontmatter keys must be 
 fixture="$WORK/usb-live-boundary"; make_fixture "$fixture"
 perl -0pi -e 's/USB-write approval does not authorize live verification/USB write also authorizes live verification/g' \
   "$fixture/.agents/skills/usb-recovery/SKILL.md"
-expect_failure "usb recovery live boundary" "$fixture" "separate live-verification boundary"
+expect_failure "usb recovery live boundary" "$fixture" "exact live-verification contract"
+
+fixture="$WORK/usb-live-order"; make_fixture "$fixture"
+perl -0pi -e 's/Before any HTTP request/After any HTTP request/g' \
+  "$fixture/.agents/skills/usb-recovery/SKILL.md"
+expect_failure "usb recovery approval order" "$fixture" "exact live-verification contract"
+
+fixture="$WORK/usb-named-endpoints"; make_fixture "$fixture"
+perl -0pi -e 's/the named GET endpoints/unnamed GET endpoints/g' \
+  "$fixture/.agents/skills/usb-recovery/SKILL.md"
+expect_failure "usb recovery named endpoints" "$fixture" "exact live-verification contract"
+
+fixture="$WORK/usb-ota-state"; make_fixture "$fixture"
+perl -0pi -e 's/`GET \/ota\/check` is state-changing/`GET \/ota\/check` is not state-changing/g' \
+  "$fixture/.agents/skills/usb-recovery/SKILL.md"
+expect_failure "usb recovery OTA state" "$fixture" "exact live-verification contract"
+
+fixture="$WORK/usb-legacy-boundary"; make_fixture "$fixture"
+perl -0pi -e 's/Before any HTTP request/After any HTTP request/g' \
+  "$fixture/.claude/skills/usb-recovery/SKILL.md"
+refresh_fingerprint "$fixture"
+expect_failure "legacy usb recovery boundary" "$fixture" "exact live-verification contract"
 
 fixture="$WORK/project-review-owner"; make_fixture "$fixture"
-perl -0pi -e 's/API list in\n  `docs\/README\.md`/API list in\n  `AGENTS.md`/' \
+perl -0pi -e 's/\[`docs\/README\.md`\]\(\.\.\/\.\.\/\.\.\/docs\/README\.md\) owns hardware, HTTP API, and commands\./`AGENTS.md` owns hardware, HTTP API, and commands./' \
   "$fixture/.agents/skills/project-review/SKILL.md"
-expect_failure "compact AGENTS owner" "$fixture" "deep technical catalog back to compact AGENTS.md"
+expect_failure "project-review owner contract" "$fixture" "exact documentation-owner contract"
+
+fixture="$WORK/project-review-contradiction"; make_fixture "$fixture"
+printf '\n`AGENTS.md` contains the HTTP API catalog.\n' >> \
+  "$fixture/.agents/skills/project-review/SKILL.md"
+expect_failure "compact AGENTS contradiction" "$fixture" "deep technical catalog to compact AGENTS.md"
+
+fixture="$WORK/device-diag-owner"; make_fixture "$fixture"
+perl -0pi -e 's/\[`docs\/ARCHITECTURE\.md`\]\(\.\.\/\.\.\/\.\.\/docs\/ARCHITECTURE\.md\) owns pairing lifecycle and invalidation\./`AGENTS.md` owns pairing lifecycle and invalidation./' \
+  "$fixture/.agents/skills/device-diag/SKILL.md"
+expect_failure "device-diag owner contract" "$fixture" "exact documentation-owner contract"
+
+fixture="$WORK/vehicle-audit-owner"; make_fixture "$fixture"
+perl -0pi -e 's/\[`docs\/README\.md`\]\(\.\.\/\.\.\/\.\.\/docs\/README\.md\) owns the HTTP command catalog\./`AGENTS.md` owns the HTTP command catalog./' \
+  "$fixture/.agents/skills/vehicle-command-audit/SKILL.md"
+expect_failure "vehicle audit owner contract" "$fixture" "exact documentation-owner contract"
 
 fixture="$WORK/project-review-feature-path"; make_fixture "$fixture"
 perl -0pi -e 's/, and\n  `tools\/agent-config\/`/, and\n  `tools\/agent-config-missing\/`/' \

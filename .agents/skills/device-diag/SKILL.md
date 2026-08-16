@@ -33,6 +33,8 @@ The default diagnostic request does **not** authorize `?verbose=1`, `?verbose=0`
 serial session that may toggle reset lines, pairing, flashing, OTA, or any vehicle command. Those
 are state-changing or hardware-touching follow-ups and require separate explicit user approval.
 
+[`docs/ARCHITECTURE.md`](../../../docs/ARCHITECTURE.md) owns pairing lifecycle and invalidation.
+
 The device host is its mDNS name **`http://tesla-key-esp32.local`** (advertised by the firmware
 in [`main/main.cpp`](../../../main/main.cpp)) or the board's IP. Substitute `<host>` below.
 

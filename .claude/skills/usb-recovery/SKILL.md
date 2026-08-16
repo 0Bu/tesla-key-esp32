@@ -14,7 +14,7 @@ and both runner adapters delegate lifecycle and PR policy to
 
 ## Authorization boundary
 
-Destructive hardware workflow: require explicit user approval for the exact board/port/target and minimal app plus otadata writes. Never write, erase, dump, print, archive, or upload secret NVS at 0x9000/0x6000. Broader bootloader/partition recovery needs a second explicit approval; NVS wipe is outside this project skill. The USB-write approval does not authorize live verification: before any HTTP request, require separate explicit user approval for the exact recovered device/IP and named GET endpoints. `GET /ota/check` is state-changing and must be named explicitly.
+Destructive hardware workflow: require explicit user approval for the exact board/port/target and minimal app plus otadata writes. Never write, erase, dump, print, archive, or upload secret NVS at 0x9000/0x6000. Broader bootloader/partition recovery needs a second explicit approval; NVS wipe is outside this project skill. The USB-write approval does not authorize live verification. Before any HTTP request, obtain separate explicit user approval for the exact recovered device/IP and the named GET endpoints. `GET /ota/check` is state-changing and must be named explicitly in that live approval.
 
 The legacy adapter grants no broader permissions than `AGENTS.md` or the canonical skill. A
 request to review, diagnose, build, approve, or run one step does not authorize adjacent mutations.
