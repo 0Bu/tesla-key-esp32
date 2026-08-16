@@ -1,152 +1,26 @@
 {
-  "permissions": {
-    "allow": [
-      "Bash(ls:*)",
-      "Bash(cat:*)",
-      "Bash(find:*)",
-      "Bash(grep:*)",
-      "Bash(rg:*)",
-      "Bash(jq:*)",
-      "Bash(wc:*)",
-      "Bash(head:*)",
-      "Bash(tail:*)",
-      "Bash(file:*)",
-      "Bash(git status:*)",
-      "Bash(git diff:*)",
-      "Bash(git log:*)",
-      "Bash(git show:*)",
-      "Bash(git branch:*)",
-      "Bash(git add:*)",
-      "Bash(git fetch:*)",
-      "Bash(git checkout:*)",
-      "Bash(git push:*)",
-      "Bash(gh pr view:*)",
-      "Bash(gh pr list:*)",
-      "Bash(gh pr diff:*)",
-      "Bash(gh run view:*)",
-      "Bash(gh run list:*)",
-      "Bash(gh run download:*)",
-      "Bash(gh pr create:*)",
-      "Bash(gh pr comment:*)",
-      "Bash(gh run watch:*)",
-      "Bash(scripts/run-mock-tests.sh:*)",
-      "Bash(scripts/idf-docker.sh:*)",
-      "Bash(scripts/next-version.sh:*)",
-      "Bash(scripts/select-release-version.sh:*)",
-      "Bash(scripts/build-pages.sh:*)",
-      "Bash(cmake:*)",
-      "Bash(ctest:*)",
-      "Bash(python3:*)",
-      "Bash(esptool:*)",
-      "Bash(curl:*)"
-    ]
-  },
+  "permissions": {"allow": []},
   "hooks": {
-    "SessionStart": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/report-capabilities.sh\"",
-            "statusMessage": "Detecting toolchain capabilities\u2026"
-          },
-          {
-            "type": "command",
-            "command": "bash \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/build-efficiency-check.sh\"",
-            "statusMessage": "Auditing the last post-merge build for efficiency\u2026"
-          }
-        ]
-      }
-    ],
+    "SessionStart": [{"hooks": [
+      {"type": "command", "command": "bash \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/report-capabilities.sh\"", "statusMessage": "Detecting repository capabilities…", "timeout": 15},
+      {"type": "command", "command": "bash \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/build-efficiency-check.sh\"", "statusMessage": "Loading read-only build-efficiency context…", "timeout": 15}
+    ]}],
+    "SubagentStart": [{"hooks": [
+      {"type": "command", "command": "python3 \"${CLAUDE_PROJECT_DIR:-.}/tools/agent-hooks/agent_hook.py\" subagent-context", "statusMessage": "Loading repository and authorization boundaries…", "timeout": 10}
+    ]}],
+    "Stop": [{"hooks": [
+      {"type": "command", "command": "bash \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/run-logic-tests.sh\"", "statusMessage": "Running changed host logic tests…", "timeout": 600}
+    ]}],
     "PreToolUse": [
-      {
-        "matcher": "Read|Edit|Write|Bash",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/guard-secrets.sh\"",
-            "statusMessage": "Checking for private key material\u2026"
-          }
-        ]
-      },
-      {
-        "matcher": "Edit|Write",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/guard-partitions.sh\"",
-            "statusMessage": "Checking partition-table safety\u2026"
-          }
-        ]
-      },
-      {
-        "matcher": "Bash",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/require-project-review.sh\"",
-            "statusMessage": "Checking project-review gate\u2026"
-          },
-          {
-            "type": "command",
-            "command": "bash \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/require-skill-audit.sh\"",
-            "statusMessage": "Checking skill-audit gate\u2026"
-          },
-          {
-            "type": "command",
-            "command": "bash \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/require-feature-docs.sh\"",
-            "statusMessage": "Checking feature-docs gate\u2026"
-          }
-        ]
-      },
-      {
-        "matcher": "mcp__github__merge_pull_request",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/require-project-review.sh\"",
-            "statusMessage": "Checking project-review gate\u2026"
-          },
-          {
-            "type": "command",
-            "command": "bash \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/require-feature-docs.sh\"",
-            "statusMessage": "Checking feature-docs gate\u2026"
-          }
-        ]
-      },
-      {
-        "matcher": "mcp__github__create_pull_request|mcp__github__push_files",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/require-skill-audit.sh\"",
-            "statusMessage": "Checking skill-audit gate\u2026"
-          }
-        ]
-      }
+      {"matcher": "^(?:Read|Edit|MultiEdit|Write|Bash)$", "hooks": [
+        {"type": "command", "command": "bash \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/guard-secrets.sh\"", "statusMessage": "Checking secret and partition safety…", "timeout": 15}
+      ]},
+      {"matcher": "^(?:Bash|mcp__.*(?:github|GitHub).*)$", "hooks": [
+        {"type": "command", "command": "bash \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/require-project-review.sh\"", "statusMessage": "Checking current PR policy evidence…", "timeout": 180}
+      ]}
     ],
-    "PostToolUse": [
-      {
-        "matcher": "Edit|MultiEdit|Write",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/clang-format-edit.sh\"",
-            "statusMessage": "Formatting edited C/C++\u2026"
-          }
-        ]
-      }
-    ],
-    "Stop": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/run-logic-tests.sh\"",
-            "statusMessage": "Running host logic tests\u2026"
-          }
-        ]
-      }
-    ]
+    "PostToolUse": [{"matcher": "^(?:Edit|MultiEdit|Write)$", "hooks": [
+      {"type": "command", "command": "bash \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/clang-format-edit.sh\"", "statusMessage": "Formatting edited first-party C/C++…", "timeout": 30}
+    ]}]
   }
 }

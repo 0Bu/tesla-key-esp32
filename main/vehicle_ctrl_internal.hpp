@@ -3,7 +3,7 @@
 // Internal header for the VehicleController implementation files ONLY
 // (vehicle_ctrl.cpp — init/link_state glue, vehicle_commands.cpp — command dispatch,
 // vehicle_telemetry.cpp — parsers/caches/background poll, vehicle_pairing.cpp —
-// pairing lifecycle/keys; see .claude/CLAUDE.md "Architecture"). The public API
+// pairing lifecycle/keys; see docs/ARCHITECTURE.md). The public API
 // stays vehicle_ctrl.hpp.
 
 #include <atomic>

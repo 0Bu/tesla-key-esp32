@@ -40,7 +40,7 @@ struct SyslogMsg {
 };
 
 // Depth chosen small on purpose: this device's binding memory limit is the largest
-// *contiguous* free block (a few tens of KB steady-state — see the project CLAUDE.md),
+// *contiguous* free block (a few tens of KB steady-state — see the project AGENTS.md),
 // and the queue is one contiguous allocation taken once at boot. 24 * ~258 B ~= 6.2 KB.
 static constexpr UBaseType_t kQueueDepth = 24;
 

@@ -143,7 +143,7 @@ static cJSON* tool_schema_(const tk::CmdInfo& info) {
 }
 
 // tools/list is this endpoint's LARGEST response (~1.5 KB serialized) and cJSON prints it
-// into one contiguous block — the crash-risk currency on this heap (see CLAUDE.md), so
+// into one contiguous block — the crash-risk currency on this heap (see AGENTS.md), so
 // tool descriptions in logic/mcp.hpp stay terse and the tool set stays small. The static
 // registry strings are attached as references (no per-request strdup of .rodata).
 static esp_err_t handle_tools_list_(httpd_req_t* req, cJSON* id) {

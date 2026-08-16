@@ -1,0 +1,26 @@
+{
+  "description": "Runner-neutral tesla-key-esp32 lifecycle, safety, formatting, and PR-policy hooks.",
+  "hooks": {
+    "SessionStart": [{"matcher": "^(?:startup|resume|clear|compact)$", "hooks": [
+      {"type": "command", "command": "python3 \"$(git rev-parse --show-toplevel)/tools/agent-hooks/agent_hook.py\" capabilities", "statusMessage": "Detecting repository capabilities", "timeout": 15},
+      {"type": "command", "command": "python3 \"$(git rev-parse --show-toplevel)/tools/agent-hooks/agent_hook.py\" build-efficiency", "statusMessage": "Loading read-only build-efficiency context", "timeout": 15}
+    ]}],
+    "SubagentStart": [{"hooks": [
+      {"type": "command", "command": "python3 \"$(git rev-parse --show-toplevel)/tools/agent-hooks/agent_hook.py\" subagent-context", "statusMessage": "Loading repository and authorization boundaries", "timeout": 10}
+    ]}],
+    "Stop": [{"hooks": [
+      {"type": "command", "command": "python3 \"$(git rev-parse --show-toplevel)/tools/agent-hooks/agent_hook.py\" stop-logic-tests", "statusMessage": "Running changed host logic tests", "timeout": 600}
+    ]}],
+    "PreToolUse": [
+      {"matcher": "^(?:Read|Edit|MultiEdit|Write|Bash|apply_patch|exec_command|shell|shell_command)$", "hooks": [
+        {"type": "command", "command": "python3 \"$(git rev-parse --show-toplevel)/tools/agent-hooks/agent_hook.py\" pre-tool-guards --runner codex", "statusMessage": "Checking secret and partition safety", "timeout": 15}
+      ]},
+      {"matcher": "^(?:Bash|exec_command|shell|shell_command|mcp__.*(?:github|GitHub).*)$", "hooks": [
+        {"type": "command", "command": "bash \"$(git rev-parse --show-toplevel)/tools/agent-hooks/require-pr-gates.sh\"", "statusMessage": "Checking current PR policy evidence", "timeout": 180}
+      ]}
+    ],
+    "PostToolUse": [{"matcher": "^(?:Edit|MultiEdit|Write|apply_patch)$", "hooks": [
+      {"type": "command", "command": "python3 \"$(git rev-parse --show-toplevel)/tools/agent-hooks/agent_hook.py\" format", "statusMessage": "Formatting edited first-party C and C++", "timeout": 30}
+    ]}]
+  }
+}

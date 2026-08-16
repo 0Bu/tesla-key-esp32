@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "invariants": [
+    {
+      "id": "read-only-default",
+      "pattern": "analysis[\\s\\S]{0,120}(review|audit)[\\s\\S]{0,120}read-only by[\\s\\S]{0,20}default"
+    },
+    {
+      "id": "implementation-not-publication",
+      "pattern": "implementation request[\\s\\S]{0,180}(does[\\s*]*not|not)[\\s\\S]{0,30}authorize[\\s\\S]{0,120}(commit|push|merge|release)"
+    },
+    {
+      "id": "four-target-contract",
+      "pattern": "esp32[\\s\\S]{0,80}esp32s3[\\s\\S]{0,80}esp32c3[\\s\\S]{0,80}esp32c6"
+    },
+    {
+      "id": "toolchain-pin",
+      "pattern": "ESP-IDF[\\s\\S]{0,40}v?5\\.5\\.5"
+    },
+    {
+      "id": "tesla-ble-pin",
+      "pattern": "tesla-ble[\\s\\S]{0,40}v?5\\.1\\.1"
+    },
+    {
+      "id": "nvs-layout-secret",
+      "pattern": "NVS[\\s\\S]{0,300}secret[\\s\\S]{0,800}0x9000[\\s\\S]{0,80}0x6000"
+    },
+    {
+      "id": "unsigned-not-flashable",
+      "pattern": "unsigned images?[\\s*>]{1,24}(?:are|is)[\\s*>]{1,24}not[\\s*>]{1,24}flashable"
+    },
+    {
+      "id": "real-signing-key-boundary",
+      "pattern": "OTA_SIGNING_KEY[\\s\\S]{0,220}(PR code|unavailable)"
+    },
+    {
+      "id": "vehicle-wake-boundary",
+      "pattern": "live reads?[\\s\\S]{0,120}wake[\\s\\S]{0,600}(explicit user authorization|user explicitly authorizes)"
+    },
+    {
+      "id": "contiguous-heap",
+      "pattern": "largest[\\s\\S]{0,30}contiguous[\\s\\S]{0,30}free block[\\s\\S]{0,80}not total"
+    }
+  ]
+}

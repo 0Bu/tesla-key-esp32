@@ -24,6 +24,8 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Validate runner-neutral agent configuration
+        run: ./tools/agent-config/selftest.sh
       - name: Run host-side logic tests
         run: ./scripts/run-mock-tests.sh
       - name: Test ESP-IDF build contracts
