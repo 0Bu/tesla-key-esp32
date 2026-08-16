@@ -8,7 +8,7 @@
 // Pure, hardware-free logic shared by the firmware and the host-side mock build
 // (test/, built without ESP-IDF). Anything in this directory must stay free of IDF,
 // FreeRTOS, NimBLE, NVS, cJSON and esp_http_server includes so it compiles with a
-// plain host toolchain. See test/README.md and the project CLAUDE.md.
+// plain host toolchain. See test/README.md and the project AGENTS.md.
 namespace tk {
 
 // Parse a web-UI "host:port" syslog target (e.g. "192.168.1.22:514") into its parts.

@@ -1,7 +1,7 @@
 # Host-side mock build — compiles the IDF-free pure logic in main/logic/ with the
 # system toolchain (no ESP-IDF, no Docker, no board) so logic regressions are caught
 # in seconds, locally / in CI / in a Claude Code web session. See test/README.md and
-# the project CLAUDE.md "Host-side mock build" section.
+# the project AGENTS.md "Build and test entry points" section.
 #
 #   cmake -S test -B build_mock && cmake --build build_mock && ctest --test-dir build_mock
 #

@@ -2,8 +2,9 @@
 
 A small, hardware-free test target that compiles and runs the project's **pure logic**
 with the system toolchain — **no ESP-IDF, no Docker, no USB board**. It gives a real
-"run it and see" loop in seconds, in any environment: a local terminal, CI, or a Claude
-Code web session (which [cannot build firmware or flash](../.claude/CLAUDE.md#environment-note-claude-code-on-the-web--remote-sandbox)).
+"run it and see" loop in seconds, in any environment: a local terminal, CI, or a remote coding
+agent. Firmware builds still require the pinned Docker workflow, and flash/OTA require both the
+right host capabilities and explicit authorization; see [`AGENTS.md`](../AGENTS.md).
 
 ## Run it
 
@@ -33,7 +34,10 @@ failed check.
 
 CI runs this as the `logic-test` job, a **fast gate the per-target firmware build
 depends on** (`.github/workflows/build.yml`) — a logic regression fails in seconds
-instead of after four ESP-IDF builds.
+instead of after four ESP-IDF builds. The same job also runs
+`tools/agent-config/selftest.sh`; that parser-based suite checks the runner-neutral agent
+configuration, compatibility manifest/fingerprint, skill frontmatter, reviewer sandboxes, hook
+wiring, and Context7 pin before any firmware build starts.
 
 ## What's covered
 

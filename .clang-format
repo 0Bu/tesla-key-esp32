@@ -6,7 +6,7 @@
 # assignments/declarations/trailing comments, short funcs kept on one line.
 #
 # clang-format is NOT installed on the dev box or in CI, so this is currently a spec on
-# paper that the .claude/hooks/clang-format-edit.sh hook honours only where the tool
+# paper that the runner-neutral tools/agent-hooks formatting hook honours only where the tool
 # exists. VERIFY CHURN ONCE before relying on auto-format:
 #     clang-format --dry-run -Werror main/*.cpp main/*.hpp main/logic/*.hpp test/*.cpp
 # and tune below (esp. AllowShortFunctionsOnASingleLine) until that dry-run is quiet.

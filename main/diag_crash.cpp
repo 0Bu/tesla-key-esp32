@@ -178,7 +178,7 @@ void diag_crash_capture() {
 // `dismissed` is written from the httpd task while the MQTT task may be reading s_ci. It is a
 // single byte store that only ever goes false -> true, so a concurrent reader sees one state or the
 // other and both are self-consistent renderings of the same CrashInfo. No lock — and none of the
-// paths involved may take one anyway (an allocation under a mutex is the wedge rule in CLAUDE.md).
+// paths involved may take one anyway (an allocation under a mutex is the wedge rule in AGENTS.md).
 bool diag_crash_dismiss() {
     bool erased = false;
 #if defined(CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH)
