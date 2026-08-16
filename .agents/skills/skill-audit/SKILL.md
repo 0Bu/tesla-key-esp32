@@ -127,7 +127,8 @@ the authority for the per-sibling drift check; `$project-review` defers the mech
   `AGENTS.md` / `.agents/` / `.codex/` / `tools/agent-hooks/` / `tools/agent-config/` /
   shipped Pages runtime (`docs/index.html`, `installer-bootstrap.mjs`, `serial-port-release.mjs`,
   `web-installer.mjs`, `docs/vendor/`) /
-  `.github/workflows/{build,signed-pr-preview,pr-preview-cleanup}.yml` (the shared
+  `.github/workflows/{build,signed-pr-preview,pr-preview-cleanup}.yml` /
+  `scripts/release-relevance.sh` (the shared
   `gate_feature_docs_relevant` predicate). A path that drifts out of that list stops gating
   silently. All three gates must block when the shared library is missing, truncated or lacks a
   required function; `scripts/test-pr-gates.sh` pins those negative cases.

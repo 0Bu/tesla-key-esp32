@@ -228,8 +228,17 @@ const ownerContracts = new Map([
   ]],
 ]);
 const deepOwnerTerms = /(?:HTTP|API|commands?|MCP|NVS|MQTT|link-state|pairing)/i;
-const agentsDeepOwner = /AGENTS\.md[^.!?]*(?:owns|contains|documents|catalogs|lists|is the owner of)[^.!?]*/i;
-const deepCatalogInAgents = /(?:catalog|list|table|section|details)[^.!?]*(?:in|under|within|of)\s+`?AGENTS\.md/i;
+const documentationOwnership = /(?:\bowns?\b|\bcontains?\b|\bdocuments?\b|\bcatalog(?:s|ues)?\b|\blists?\b|\bsource of truth\b|\bauthoritative (?:source|reference)\b|\bcanonical (?:source|reference)\b|\b(?:documented|defined|described|listed|catalog(?:ed|ued))\s+(?:in|under|within|by)\b)/i;
+const usbPositiveAuthorization = /USB-write approval[^.!?]*(?:also\s+)?(?:authorizes|allows|permits|covers|includes|is sufficient for)[^.!?]*(?:live verification|HTTP|GET)/i;
+const usbNoApprovalNeeded = /(?:live verification|HTTP requests?|GET endpoints?)[^.!?]*(?:without (?:separate )?(?:approval|authorization)|requires? no (?:approval|authorization)|need not (?:be )?(?:approved|authorized))/i;
+const usbOtaNotStateChanging = /GET \/ota\/check[^.!?]*(?:is not|isn't|not) state-changing/i;
+const usbAbsentApprovalProceeds = /(?:(?:approval|authorization)[^.!?]*(?:absent|missing|not obtained)|without (?:separate )?(?:approval|authorization))[^.!?]*(?:continue|proceed|run|contact|send|request)/i;
+const featureDocsScopeTokens = [
+  "main/", "test/", "sdkconfig.defaults*", "partitions.csv", "AGENTS.md", ".agents/", ".codex/",
+  "tools/agent-hooks/", "tools/agent-config/", "docs/index.html", "installer-bootstrap.mjs",
+  "serial-port-release.mjs", "web-installer.mjs", "docs/vendor/",
+  "build,signed-pr-preview,pr-preview-cleanup", "scripts/release-relevance.sh",
+];
 for (const [name, pair] of skillMappings) {
   const legacy = restrictedFrontmatter(repoPath(pair.source), `legacy skill ${name}`);
   const canonical = restrictedFrontmatter(repoPath(pair.target), `canonical skill ${name}`);
@@ -260,6 +269,21 @@ for (const [name, pair] of skillMappings) {
       if (liveContracts.some((required) => !normalized.includes(required))) {
         die(1, `${side} usb-recovery skill is missing the exact live-verification contract`);
       }
+      const contradiction = proseSentences(text).some((sentence) =>
+        usbPositiveAuthorization.test(sentence) || usbNoApprovalNeeded.test(sentence) ||
+        usbOtaNotStateChanging.test(sentence) || usbAbsentApprovalProceeds.test(sentence)
+      );
+      if (contradiction) {
+        die(1, `${side} usb-recovery skill contradicts the live-verification contract`);
+      }
+    }
+    const operationalContracts = [
+      "Do not run this section merely because the USB recovery was approved.",
+      "If that approval is absent, stop after the verified USB write and report that live recovery acceptance remains pending.",
+    ];
+    const normalizedCanonical = normalizeProse(canonical.text);
+    if (operationalContracts.some((required) => !normalizedCanonical.includes(required))) {
+      die(1, "canonical usb-recovery skill is missing the exact operational live-verification stop");
     }
   }
   const requiredOwners = ownerContracts.get(name);
@@ -268,19 +292,21 @@ for (const [name, pair] of skillMappings) {
     if (requiredOwners.some((required) => !normalized.includes(required))) {
       die(1, `${name} is missing an exact documentation-owner contract`);
     }
-    const contradictoryOwner = proseSentences(canonical.text).some((sentence) =>
-      (agentsDeepOwner.test(sentence) && deepOwnerTerms.test(sentence)) ||
-      (deepCatalogInAgents.test(sentence) && deepOwnerTerms.test(sentence))
-    );
-    if (contradictoryOwner) {
-      die(1, `${name} assigns a deep technical catalog to compact AGENTS.md`);
+    for (const [side, text] of [["canonical", canonical.text], ["legacy", legacy.text]]) {
+      const contradictoryOwner = proseSentences(text).some((sentence) =>
+        /AGENTS\.md/i.test(sentence) && deepOwnerTerms.test(sentence) &&
+        documentationOwnership.test(sentence)
+      );
+      if (contradictoryOwner) {
+        die(1, `${side} ${name} assigns a deep technical catalog to compact AGENTS.md`);
+      }
     }
   }
-  if (name === "project-review") {
-    const policyPaths = ["AGENTS.md", ".agents/", ".codex/", "tools/agent-hooks/", "tools/agent-config/"];
-    const featureParagraph = canonical.text.match(/\*\*`\$feature-docs`\*\*[\s\S]*?(?=\n- \*\*`\$|\n### |\n## |$)/)?.[0] || "";
-    if (policyPaths.some((required) => !featureParagraph.includes(required))) {
-      die(1, "project-review feature-docs checklist omits an agent-policy relevance path");
+  if (["feature-docs", "project-review", "skill-audit"].includes(name)) {
+    const scopeText = name === "feature-docs" ? canonical.text :
+      canonical.text.match(/\*\*`\$feature-docs`\*\*[\s\S]*?(?=\n- \*\*`\$|\n### |\n## |$)/)?.[0] || "";
+    if (featureDocsScopeTokens.some((required) => !scopeText.includes(required))) {
+      die(1, `${name} feature-docs checklist omits a relevance-scope path`);
     }
   }
   if (readOnlySkills.has(name) && !/read-only|does not (?:edit|modify)|must not (?:edit|modify)/is.test(canonical.text)) {

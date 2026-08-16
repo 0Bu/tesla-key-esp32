@@ -187,6 +187,27 @@ perl -0pi -e 's/Before any HTTP request/After any HTTP request/g' \
 refresh_fingerprint "$fixture"
 expect_failure "legacy usb recovery boundary" "$fixture" "exact live-verification contract"
 
+fixture="$WORK/usb-operational-stop"; make_fixture "$fixture"
+perl -0pi -e 's/If that approval is absent, stop after/If that approval is absent, continue after/' \
+  "$fixture/.agents/skills/usb-recovery/SKILL.md"
+expect_failure "usb recovery operational stop" "$fixture" "contradicts the live-verification contract"
+
+fixture="$WORK/usb-canonical-contradiction"; make_fixture "$fixture"
+printf '\nThe USB-write approval also authorizes live verification of any GET endpoint.\n' >> \
+  "$fixture/.agents/skills/usb-recovery/SKILL.md"
+expect_failure "canonical usb recovery contradiction" "$fixture" "contradicts the live-verification contract"
+
+fixture="$WORK/usb-absent-approval-continues"; make_fixture "$fixture"
+printf '\nIf that approval is absent, continue with the HTTP requests.\n' >> \
+  "$fixture/.agents/skills/usb-recovery/SKILL.md"
+expect_failure "usb recovery absent approval continues" "$fixture" "contradicts the live-verification contract"
+
+fixture="$WORK/usb-legacy-contradiction"; make_fixture "$fixture"
+printf '\nThe USB-write approval also authorizes live verification of any GET endpoint.\n' >> \
+  "$fixture/.claude/skills/usb-recovery/SKILL.md"
+refresh_fingerprint "$fixture"
+expect_failure "legacy usb recovery contradiction" "$fixture" "contradicts the live-verification contract"
+
 fixture="$WORK/project-review-owner"; make_fixture "$fixture"
 perl -0pi -e 's/\[`docs\/README\.md`\]\(\.\.\/\.\.\/\.\.\/docs\/README\.md\) owns hardware, HTTP API, and commands\./`AGENTS.md` owns hardware, HTTP API, and commands./' \
   "$fixture/.agents/skills/project-review/SKILL.md"
@@ -196,6 +217,22 @@ fixture="$WORK/project-review-contradiction"; make_fixture "$fixture"
 printf '\n`AGENTS.md` contains the HTTP API catalog.\n' >> \
   "$fixture/.agents/skills/project-review/SKILL.md"
 expect_failure "compact AGENTS contradiction" "$fixture" "deep technical catalog to compact AGENTS.md"
+
+fixture="$WORK/project-review-documented-in"; make_fixture "$fixture"
+printf '\nThe HTTP API is documented in `AGENTS.md`.\n' >> \
+  "$fixture/.agents/skills/project-review/SKILL.md"
+expect_failure "compact AGENTS documented-in contradiction" "$fixture" "deep technical catalog to compact AGENTS.md"
+
+fixture="$WORK/project-review-source-of-truth"; make_fixture "$fixture"
+printf '\n`AGENTS.md` is the source of truth for the HTTP API.\n' >> \
+  "$fixture/.agents/skills/project-review/SKILL.md"
+expect_failure "compact AGENTS source-of-truth contradiction" "$fixture" "deep technical catalog to compact AGENTS.md"
+
+fixture="$WORK/legacy-project-review-owner"; make_fixture "$fixture"
+printf '\n`AGENTS.md` is the source of truth for the HTTP API.\n' >> \
+  "$fixture/.claude/skills/project-review/SKILL.md"
+refresh_fingerprint "$fixture"
+expect_failure "legacy compact AGENTS owner contradiction" "$fixture" "deep technical catalog to compact AGENTS.md"
 
 fixture="$WORK/device-diag-owner"; make_fixture "$fixture"
 perl -0pi -e 's/\[`docs\/ARCHITECTURE\.md`\]\(\.\.\/\.\.\/\.\.\/docs\/ARCHITECTURE\.md\) owns pairing lifecycle and invalidation\./`AGENTS.md` owns pairing lifecycle and invalidation./' \
@@ -210,7 +247,12 @@ expect_failure "vehicle audit owner contract" "$fixture" "exact documentation-ow
 fixture="$WORK/project-review-feature-path"; make_fixture "$fixture"
 perl -0pi -e 's/, and\n  `tools\/agent-config\/`/, and\n  `tools\/agent-config-missing\/`/' \
   "$fixture/.agents/skills/project-review/SKILL.md"
-expect_failure "project-review feature path" "$fixture" "omits an agent-policy relevance path"
+expect_failure "project-review feature path" "$fixture" "omits a relevance-scope path"
+
+fixture="$WORK/skill-audit-release-path"; make_fixture "$fixture"
+perl -0pi -e 's/scripts\/release-relevance\.sh/scripts\/release-relevance-missing.sh/' \
+  "$fixture/.agents/skills/skill-audit/SKILL.md"
+expect_failure "skill-audit release relevance path" "$fixture" "omits a relevance-scope path"
 
 fixture="$WORK/safety"; make_fixture "$fixture"
 node - "$fixture/tools/agent-config/safety-invariants.json" <<'NODE'

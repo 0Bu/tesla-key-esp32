@@ -414,11 +414,11 @@ fi
 
 ## 4. Verify — the board is recovered only when it says so
 
-> **Separate live-device boundary.** Do not run this section merely because the USB recovery was
-> approved. First obtain explicit user approval to contact the exact recovered device/IP and list
-> the intended GET endpoints. If that approval is absent, stop after the verified USB write and
-> report that live recovery acceptance remains pending. `GET /ota/check` is state-changing and
-> must be named explicitly in that live approval.
+> **Separate live-device boundary.**
+> Do not run this section merely because the USB recovery was approved.
+> First obtain explicit user approval to contact the exact recovered device/IP and list the intended GET endpoints.
+> If that approval is absent, stop after the verified USB write and report that live recovery acceptance remains pending.
+> `GET /ota/check` is state-changing and must be named explicitly in that live approval.
 
 After that separate approval, and after the board reboots and rejoins WiFi:
 
