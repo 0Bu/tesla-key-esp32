@@ -687,14 +687,14 @@ def secret_violation(payload: dict[str, Any]) -> str | None:
         return "hook payload has no non-empty string tool_name"
     tool = normalized_tool(raw_tool)
     if tool not in FILE_TOOLS | PATCH_TOOLS | SHELL_TOOLS:
-        return f"hook payload names unsupported matched tool {raw_tool!r}"
+        return "hook payload names an unsupported matched tool; its value was redacted"
     if tool in FILE_TOOLS:
         targets = path_targets(payload)
         if not targets:
-            return f"cannot determine the {tool} target from the hook payload"
+            return "cannot determine the file-tool target from the hook payload"
         for target in targets:
             if is_sensitive_path(target):
-                return f"{target} is credential or private-key material and must not enter agent context"
+                return "the requested path is credential or private-key material and must not enter agent context"
         return None
     if tool in PATCH_TOOLS:
         command = command_from(payload)
@@ -703,12 +703,12 @@ def secret_violation(payload: dict[str, Any]) -> str | None:
             return "cannot determine apply_patch targets from the hook payload"
         for target in targets:
             if is_sensitive_path(target):
-                return f"apply_patch targets sensitive credential or private-key file {target}"
+                return "apply_patch targets sensitive credential or private-key material; the path was redacted"
         return None
     if tool in SHELL_TOOLS:
         command = command_from(payload)
         if not command:
-            return f"cannot determine the {tool} command from the hook payload"
+            return "cannot determine the shell-tool command from the hook payload"
         if SHELL_EXTGLOB.search(command):
             return "shell extglob expansion is not statically bounded by the credential/partition guard"
         if shell_dumps_environment(command):
