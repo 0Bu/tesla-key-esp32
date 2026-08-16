@@ -161,6 +161,21 @@ perl -0pi -e 's/^description:/model: canary\ndescription:/m' \
   "$fixture/.agents/skills/add-logic-test/SKILL.md"
 expect_failure "canonical skill model pin" "$fixture" "frontmatter keys must be exactly"
 
+fixture="$WORK/usb-live-boundary"; make_fixture "$fixture"
+perl -0pi -e 's/USB-write approval does not authorize live verification/USB write also authorizes live verification/g' \
+  "$fixture/.agents/skills/usb-recovery/SKILL.md"
+expect_failure "usb recovery live boundary" "$fixture" "separate live-verification boundary"
+
+fixture="$WORK/project-review-owner"; make_fixture "$fixture"
+perl -0pi -e 's/API list in\n  `docs\/README\.md`/API list in\n  `AGENTS.md`/' \
+  "$fixture/.agents/skills/project-review/SKILL.md"
+expect_failure "compact AGENTS owner" "$fixture" "deep technical catalog back to compact AGENTS.md"
+
+fixture="$WORK/project-review-feature-path"; make_fixture "$fixture"
+perl -0pi -e 's/, and\n  `tools\/agent-config\/`/, and\n  `tools\/agent-config-missing\/`/' \
+  "$fixture/.agents/skills/project-review/SKILL.md"
+expect_failure "project-review feature path" "$fixture" "omits an agent-policy relevance path"
+
 fixture="$WORK/safety"; make_fixture "$fixture"
 node - "$fixture/tools/agent-config/safety-invariants.json" <<'NODE'
 const fs = require("node:fs"); const file = process.argv[2];

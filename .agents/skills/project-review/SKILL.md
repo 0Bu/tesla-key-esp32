@@ -36,13 +36,13 @@ should, do the config/build/version all agree, and do the runtime invariants sti
 Work in this order — it's what makes the review catch *drift* rather than just style:
 
 1. **Build the intended model from the docs first.** Read [`AGENTS.md`](../../../AGENTS.md)
-   (the always-needed essentials: API, command list, NVS table, partition offsets, link-state
-   summary, invariants) **and** [`docs/ARCHITECTURE.md`](../../../docs/ARCHITECTURE.md) (the deep
-   reference AGENTS.md points to — telemetry fields, MQTT entities, full sleep/link-state +
-   connection-failure semantics, pairing, OTA detail), [`README.md`](../../../README.md),
-   [`docs/README.md`](../../../docs/README.md), [`docs/SECURITY.md`](../../../docs/SECURITY.md).
-   AGENTS.md and `docs/ARCHITECTURE.md` must agree with each other and with the code — drift
-   between the slim summary and the deep reference is itself a finding.
+   for runner policy, authorization, safety, evidence, build and review contracts. Read the
+   owning deep references for firmware facts: [`docs/README.md`](../../../docs/README.md) for
+   hardware, HTTP API and commands; [`docs/ARCHITECTURE.md`](../../../docs/ARCHITECTURE.md) for
+   telemetry, MQTT, sleep/link state, pairing and OTA; [`docs/MCP.md`](../../../docs/MCP.md) for
+   MCP tools; [`docs/SECURITY.md`](../../../docs/SECURITY.md) for NVS, signing and exposure; and
+   [`README.md`](../../../README.md) for the user journey. The policy and deep references must
+   agree with the code without copying those long technical catalogs back into `AGENTS.md`.
    Note every concrete claim: endpoints, commands, NVS keys, partition offsets, flash
    size, version, defaults. These are your assertions to check.
 2. **Read the code and find where reality diverges.** Walk the components below. For each
@@ -273,15 +273,14 @@ The most common inconsistency is a feature that exists in code but not in all th
 that describe it. When reviewing a change (or the repo as a whole), check these links:
 
 - **New/changed HTTP endpoint** → `handle_all` dispatch **and** the API list in
-  `AGENTS.md` **and** `docs/README.md` **and** the web UI if user-facing.
+  `docs/README.md` **and** the web UI if user-facing.
 - **New command** → a `kCommands` registry row (`main/logic/command_registry.hpp`) **and**
-  the kind dispatch in `main/command_exec.cpp` **and** the command list in `AGENTS.md`
-  **and** docs. (Note: vehicle-control *buttons* were deliberately removed from the web UI.)
+  the kind dispatch in `main/command_exec.cpp` **and** the command list in `docs/README.md`.
+  (Note: vehicle-control *buttons* were deliberately removed from the web UI.)
 - **New MCP tool** → the same `kCommands` row gains `mcp_name`/`mcp_desc` (the ONE source
   the advertised schema, the MCP executor validation AND the REST clamp are generated
   from; `tools/list` order = table order) **and** a `CHECK` in `test/test_logic.cpp`
-  (`test_mcp`) **and** the tool table in `docs/MCP.md` **and** the `/mcp` entry in
-  `AGENTS.md`. (Tools mirror the run-on-key charging command set + read-only
+  (`test_mcp`) **and** the tool table in `docs/MCP.md`. (Tools mirror the run-on-key charging command set + read-only
   `get_vehicle_state` — never expose a role-refused command: `mcp_name == nullptr`.)
 - **New/changed `/status` field** → `logic/status_model.hpp` **and** its golden emissions
   in `test/test_logic.cpp` (`test_status_model`) **and** the web UI consumer (`www/app.js`).
@@ -301,7 +300,8 @@ that describe it. When reviewing a change (or the repo as a whole), check these 
   the `ble_mac` write, whose success branch was covered and whose failure branch was not. Both
   landed with the feature that introduced them and neither carried a rule.
   The physical controller's board MAC is intentionally diagnostic and remains visible.
-- **New NVS key** → ≤15 chars **and** the namespace table in `AGENTS.md`.
+- **New NVS key** → ≤15 chars **and** the namespace/retention description in
+  `docs/README.md` **and**, when secret or security-relevant, `docs/SECURITY.md`.
 - **New Kconfig option** → `main/Kconfig.projbuild` **and** any doc that references defaults
   **and** `sdkconfig.defaults` if a non-default value is required.
 - **Partition / offset / flash-size change** → `partitions.csv` **and** every doc that states
@@ -313,8 +313,8 @@ that describe it. When reviewing a change (or the repo as a whole), check these 
 - **Sleep / link-state change** → `link_state()` is the single source of truth feeding **both**
   the web-UI hero (`main/www/app.js`) **and** MQTT `sleep_state` (`mqtt_ha.cpp`). Touch one
   sink → keep the other in sync (exhaustive MQTT switch, every web-UI state incl. unknown)
-  **and** update the four-state summary in `AGENTS.md` **and** the full semantics in
-  `docs/ARCHITECTURE.md`.
+  **and** update the full semantics in `docs/ARCHITECTURE.md` plus any enumerated status/MQTT
+  values in `docs/README.md`.
 - **New chip / target** → only for a chip tesla-ble already lists (the Component Manager refuses
   any other, and a locally patched checkout of the crypto library was tried for esp32c5 and
   dropped — `docs/adr/0004-drop-esp32c5-target.md`): `main/idf_component.yml` git dep
@@ -329,7 +329,7 @@ that describe it. When reviewing a change (or the repo as a whole), check these 
 - **New BOARD variant on an existing chip** → the runtime detector in `main/board.{cpp,hpp}`
   (ONE cached probe — never a second copy) **and** the per-target `sdkconfig.defaults.<target>`
   **and** `main/Kconfig.projbuild` if it adds an option **and** every doc that lists which boards
-  an image serves (`AGENTS.md`, `docs/README.md` Hardware, `docs/FEATURES.md`). The trap
+  an image serves (`docs/README.md` Hardware, `docs/FEATURES.md`). The trap
   is SHARED GPIOs: the esp32s3 image serves a T-Dongle-S3 (ST7735 on MOSI3/SCK5/CS4) and an
   AtomS3 Lite + ATOMIC PoE Base (W5500 on SCLK5/CS6/MISO7/MOSI8) — **GPIO5 is both** — so a new
   peripheral probe must be gated on the detector before it drives a pin.
@@ -339,15 +339,16 @@ that describe it. When reviewing a change (or the repo as a whole), check these 
   count `kWatchFailsToRecover` and the never-answered-ICMP guard — in the host-tested
   `main/logic/net_link.hpp` (`watch_step()`, cases in `test/test_logic.cpp`) **and** mirrored in
   the **"WiFi / LAN connectivity"** section of
-  `docs/ARCHITECTURE.md` (which quotes those numbers) **and** the deep-reference topic index in
-  `AGENTS.md`. This is the STA→LAN link, **distinct** from the car-BLE `link_state()`.
+  `docs/ARCHITECTURE.md` (which quotes those numbers). This is the STA→LAN link, **distinct**
+  from the car-BLE `link_state()`.
   Invariant: the watchdog must **never reboot** (a reboot mid-outage hits `wifi_connect()`'s
   boot timeout → setup portal, abandoning good credentials).
 - **MQTT transport / TLS-default change** → the scheme-defaulting rule lives in
   `mqtt_ha.cpp` (`mqtt_ha_start`: schemeless broker ⇒ `mqtt://`, but ⇒ `mqtts://` when
   credentials are present, CA-bundle-verified, **no plaintext fallback**) **and** surfaces in
   `/status` (`mqtt.tls`/`mqtt.error`, `http_status.cpp`) **and** the web UI's "· secured" MQTT
-  row **and** the MQTT sections of `AGENTS.md` + `docs/ARCHITECTURE.md`.
+  row **and** the MQTT sections of `docs/README.md`, `docs/ARCHITECTURE.md` and, for transport
+  trust claims, `docs/SECURITY.md`.
 - **tesla-ble library bump** → `main/idf_component.yml` pin **and** explicitly rebase/remove
   every committed `patches/tesla-ble/` change against the new source. Never hand-edit or commit
   `managed_components/`; the configure-time patch script owns generated checkout changes.
@@ -391,7 +392,7 @@ Run these checks against the current tree:
   multi-place feature; a feature that spans code + docs + config + UI but isn't listed is
   exactly the drift a coherence review is meant to catch.
 - **API / command lists are current.** Diff the routes in `http_server.cpp` (dispatch; handlers in `http_api/status/ota/config.cpp` + `mcp_server.cpp`) and the command
-  switch against the references the skill and `AGENTS.md` lean on.
+  switch against `docs/README.md` plus the MCP tool table in `docs/MCP.md`.
 - **No stale specifics in the skill text** — hardcoded chip names (e.g. a lone "ESP32-S3" where
   it is now multi-target), file paths, partition offsets, sizes, or version assumptions.
 - **Recency cross-check.** `git log --oneline -10 -- main/` vs. the skill's last change
@@ -452,7 +453,8 @@ what each must stay true to:
   `main/logic/target.hpp`).
 - **`$feature-docs`** keeps `docs/FEATURES.md` in sync when a platform feature lands or changes.
   Re-verify its conditional merge gate against `tools/agent-hooks/require-pr-gates.sh`, especially
-  that the relevance filter still covers `main/`, `test/`, `sdkconfig.defaults*`,
+  that the policy-path set covers `AGENTS.md`, `.agents/`, `.codex/`, `tools/agent-hooks/`, and
+  `tools/agent-config/`, and that the firmware/release set still covers `main/`, `test/`, `sdkconfig.defaults*`,
   `partitions.csv`, the shipped Pages runtime (`docs/index.html`, `installer-bootstrap.mjs`,
   `serial-port-release.mjs`, `web-installer.mjs`, `docs/vendor/`), and
   `.github/workflows/{build,signed-pr-preview,pr-preview-cleanup}.yml`, plus the cumulative

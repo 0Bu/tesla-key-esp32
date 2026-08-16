@@ -1,6 +1,6 @@
 ---
 name: usb-recovery
-description: Emergency no-build USB recovery using an already-published, provenance-verified signed CI image. Run only after explicit user approval for the exact board, port, target, app write, and otadata erase. The minimal flow preserves secret NVS at 0x9000/0x6000; NVS wipe, merged images, and broader bootloader/partition recovery are outside this authorization unless separately and explicitly approved.
+description: Emergency no-build USB recovery using an already-published, provenance-verified signed CI image. Run only after explicit user approval for the exact board, port, target, app write, and otadata erase. Live HTTP verification is a separate approval boundary. The minimal flow preserves secret NVS at 0x9000/0x6000; NVS wipe, merged images, and broader bootloader/partition recovery are outside this authorization unless separately and explicitly approved.
 ---
 
 > **Canonical runner-neutral skill.** Read [`AGENTS.md`](../../../AGENTS.md) before acting.
@@ -23,6 +23,10 @@ VIN and WiFi survive (no NFC re-enrol).
 > `nvs@0x9000/0x6000`. NVS contains WiFi, VIN, MQTT configuration, the vehicle private key, and BLE
 > sessions and is secret material. Bootloader/partition-table recovery is a broader destructive
 > scope requiring a second explicit approval after evidence that those regions are damaged.
+> The USB-write approval does not authorize live verification. Before any HTTP request, obtain
+> separate explicit user approval for the exact recovered device/IP and the named GET endpoints.
+> Treat `GET /ota/check` as state-changing because it starts an OTA availability check; it must be
+> named in that approval rather than inferred from permission to read version or status.
 
 Two failure modes dominate:
 
@@ -411,7 +415,13 @@ fi
 
 ## 4. Verify — the board is recovered only when it says so
 
-After it reboots and rejoins WiFi:
+> **Separate live-device boundary.** Do not run this section merely because the USB recovery was
+> approved. First obtain explicit user approval to contact the exact recovered device/IP and list
+> the intended GET endpoints. If that approval is absent, stop after the verified USB write and
+> report that live recovery acceptance remains pending. `GET /ota/check` is state-changing: it
+> starts an OTA availability check and requires explicit inclusion in the live approval.
+
+After that separate approval, and after the board reboots and rejoins WiFi:
 
 ```bash
 set -euo pipefail

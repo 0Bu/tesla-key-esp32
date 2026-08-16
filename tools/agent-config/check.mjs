@@ -217,6 +217,33 @@ for (const [name, pair] of skillMappings) {
   if (highRiskSkills.has(name) && !/explicit user (?:authorization|approval)|user explicitly authoriz/is.test(canonical.text)) {
     die(1, `high-risk skill ${name} must require explicit user authorization`);
   }
+  if (name === "usb-recovery") {
+    const liveBoundary = /USB-write approval does not authorize live verification/is;
+    const exactTargetApproval = /separate explicit user approval[\s\S]{0,160}exact recovered device\/IP[\s\S]{0,160}(?:named GET|GET endpoints)/is;
+    const otaStateChange = /GET \/ota\/check[\s\S]{0,80}state-changing/is;
+    for (const [side, text] of [["canonical", canonical.text], ["legacy", legacy.text]]) {
+      if (!liveBoundary.test(text) || !exactTargetApproval.test(text) || !otaStateChange.test(text)) {
+        die(1, `${side} usb-recovery skill must preserve the separate live-verification boundary`);
+      }
+    }
+  }
+  if (name === "project-review") {
+    const staleOwners = [
+      /API list in\s+`AGENTS\.md`/i,
+      /command list in\s+`AGENTS\.md`/i,
+      /namespace table in\s+`AGENTS\.md`/i,
+      /four-state summary in\s+`AGENTS\.md`/i,
+      /MQTT sections? of\s+`AGENTS\.md`/i,
+    ];
+    if (staleOwners.some((pattern) => pattern.test(canonical.text))) {
+      die(1, "project-review assigns a deep technical catalog back to compact AGENTS.md");
+    }
+    const policyPaths = ["AGENTS.md", ".agents/", ".codex/", "tools/agent-hooks/", "tools/agent-config/"];
+    const featureParagraph = canonical.text.match(/\*\*`\$feature-docs`\*\*[\s\S]*?(?=\n- \*\*`\$|\n### |\n## |$)/)?.[0] || "";
+    if (policyPaths.some((required) => !featureParagraph.includes(required))) {
+      die(1, "project-review feature-docs checklist omits an agent-policy relevance path");
+    }
+  }
   if (readOnlySkills.has(name) && !/read-only|does not (?:edit|modify)|must not (?:edit|modify)/is.test(canonical.text)) {
     die(1, `review/diagnostic skill ${name} must state its read-only boundary`);
   }

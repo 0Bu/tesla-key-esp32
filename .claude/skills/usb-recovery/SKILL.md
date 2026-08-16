@@ -1,6 +1,6 @@
 ---
 name: usb-recovery
-description: Emergency no-build USB recovery using an already-published, provenance-verified signed CI image. Run only after explicit user approval for the exact board, port, target, app write, and otadata erase. The minimal flow preserves secret NVS at 0x9000/0x6000; NVS wipe, merged images, and broader bootloader/partition recovery are outside this authorization unless separately and explicitly approved.
+description: Emergency no-build USB recovery using an already-published, provenance-verified signed CI image. Run only after explicit user approval for the exact board, port, target, app write, and otadata erase. Live HTTP verification is a separate approval boundary. The minimal flow preserves secret NVS at 0x9000/0x6000; NVS wipe, merged images, and broader bootloader/partition recovery are outside this authorization unless separately and explicitly approved.
 disable-model-invocation: true
 ---
 
@@ -14,7 +14,7 @@ and both runner adapters delegate lifecycle and PR policy to
 
 ## Authorization boundary
 
-Destructive hardware workflow: require explicit user approval for the exact board/port/target and minimal app plus otadata writes. Never write, erase, dump, print, archive, or upload secret NVS at 0x9000/0x6000. Broader bootloader/partition recovery needs a second explicit approval; NVS wipe is outside this project skill.
+Destructive hardware workflow: require explicit user approval for the exact board/port/target and minimal app plus otadata writes. Never write, erase, dump, print, archive, or upload secret NVS at 0x9000/0x6000. Broader bootloader/partition recovery needs a second explicit approval; NVS wipe is outside this project skill. The USB-write approval does not authorize live verification: before any HTTP request, require separate explicit user approval for the exact recovered device/IP and named GET endpoints. `GET /ota/check` is state-changing and must be named explicitly.
 
 The legacy adapter grants no broader permissions than `AGENTS.md` or the canonical skill. A
 request to review, diagnose, build, approve, or run one step does not authorize adjacent mutations.
