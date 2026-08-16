@@ -23,7 +23,6 @@ PY
 verdict(){ local out; out="$(printf '%s' "$1" | python3 "$hook" pre-tool-guards --runner "${2:-codex}")" || return 3; if [ -z "$out" ]; then printf allow; else printf '%s' "$out" | python3 -c 'import json,sys; print(json.load(sys.stdin)["hookSpecificOutput"]["permissionDecision"])'; fi; }
 expect_guard(){ local got; got="$(verdict "$2" "${4:-codex}" 2>/dev/null)" || got=invalid; if [ "$got" = "$1" ]; then pass_case "$3"; else fail_case "$3 (want=$1 got=$got)"; fi; }
 sha="$(git -C "$root" rev-parse HEAD)"
-branch="$(git -C "$root" rev-parse --abbrev-ref HEAD)"
 
 expect_guard deny '' 'empty guard payload fails closed'
 expect_guard deny '{bad' 'malformed guard JSON fails closed'
@@ -233,12 +232,33 @@ expect_rc 2 'relative body-file is read from the tool execution cwd' "$gate" --p
 printf '%s\n' '- [x] $skill-audit clean — PR create/push gate @ '"$sha" >"$worktree_test_tmp/body.md"
 expect_rc 0 'valid relative body-file works from a nested execution cwd' "$gate" --project-dir "$root" --payload-file "$tmp/nested-create.json"
 push_body="$(printf '%s\n' '- [x] $skill-audit clean — PR create/push gate @ '"$sha")"
-payload Bash command "git push origin $branch" "$root" >"$tmp/push.json"
-expect_rc 0 'git push to open PR accepts current skill-audit' env PATH="$tmp/bin:$PATH" TEST_HEAD="$sha" TEST_BODY="$push_body" "$gate" --project-dir "$root" --payload-file "$tmp/push.json"
+# Pull-request checkouts are detached in Actions. Prove that production behavior still rejects
+# detached HEAD, then inject a branch only through the isolated git test double for the allow case.
+if ( gate_branch(){ printf 'HEAD\n'; }; gate_push_head_sha 'origin HEAD' >/dev/null 2>&1 ); then
+  fail_case 'detached HEAD accepted as push source'
+else
+  pass_case 'detached HEAD fails closed as push source'
+fi
+real_git="$(command -v git)"
+cat >"$tmp/bin/git" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ -n "${TEST_BRANCH:-}" ] && [ "$#" -eq 5 ] \
+  && [ "$1" = -C ] && [ "$2" = "${TEST_ROOT:-}" ] \
+  && [ "$3" = rev-parse ] && [ "$4" = --abbrev-ref ] && [ "$5" = HEAD ]; then
+  printf '%s\n' "$TEST_BRANCH"
+  exit 0
+fi
+exec "${TEST_REAL_GIT:?}" "$@"
+SH
+chmod +x "$tmp/bin/git"
+push_branch=ci-selftest
+payload Bash command "git push origin $push_branch" "$root" >"$tmp/push.json"
+expect_rc 0 'git push to open PR accepts current skill-audit' env PATH="$tmp/bin:$PATH" TEST_ROOT="$root" TEST_BRANCH="$push_branch" TEST_REAL_GIT="$real_git" TEST_HEAD="$sha" TEST_BODY="$push_body" "$gate" --project-dir "$root" --payload-file "$tmp/push.json"
 
-( GATE_PROJ="$root"; PATH="$tmp/bin:$PATH" TEST_HEAD="$sha" TEST_CHANGED=2 gate_pr_changed_files 123 >/dev/null 2>&1 )
+( GATE_PROJ="$root"; PATH="$tmp/bin:$PATH" TEST_REAL_GIT="$real_git" TEST_HEAD="$sha" TEST_CHANGED=2 gate_pr_changed_files 123 >/dev/null 2>&1 )
 [ "$?" = 2 ] && pass_case 'paginated API truncation fails closed' || fail_case 'pagination truncation'
-( GATE_PROJ="$root"; PATH="$tmp/bin:$PATH" TEST_HEAD="$sha" TEST_CHANGED=3001 gate_pr_changed_files 123 >/dev/null 2>&1 )
+( GATE_PROJ="$root"; PATH="$tmp/bin:$PATH" TEST_REAL_GIT="$real_git" TEST_HEAD="$sha" TEST_CHANGED=3001 gate_pr_changed_files 123 >/dev/null 2>&1 )
 [ "$?" = 2 ] && pass_case 'remote changedFiles above 3000 fails closed' || fail_case 'remote file ceiling'
 
 if python3 - "$root/tools/agent-hooks/pr-gate-lib.sh" <<'PY'
@@ -293,20 +313,7 @@ except AssertionError as exc:
 PY
 then pass_case 'runner schema plus disabled-hook, async, and matcher mutation canaries'; else fail_case 'runner hook schema'; fi
 
-expected='build-efficiency-check.sh
-clang-format-edit.sh
-guard-partitions.sh
-guard-secrets.sh
-pr-gate-lib.sh
-report-capabilities.sh
-require-feature-docs.sh
-require-project-review.sh
-require-skill-audit.sh
-run-logic-tests.sh'
-actual="$(find "$root/.claude/hooks" -maxdepth 1 -type f -print | sed 's#.*/##' | sort)"
-adapter_refs="$(rg -l 'tools/agent-hooks' "$root"/.claude/hooks/*.sh | wc -l | tr -d ' ')"
-if [ "$actual" = "$expected" ] && [ "$adapter_refs" -eq 10 ] && awk 'FNR>7{bad=1} END{exit bad}' "$root"/.claude/hooks/*.sh \
-  && python3 - "$root/.claude/hooks" <<'PY'
+if python3 - "$root/.claude/hooks" <<'PY'
 import pathlib,sys
 root=pathlib.Path(sys.argv[1])
 expected={
@@ -321,18 +328,35 @@ expected={
  "require-skill-audit.sh":"require-pr-gates.sh",
  "run-logic-tests.sh":"stop-logic-tests",
 }
+paths=sorted(root.glob("*.sh"))
+assert [path.name for path in paths] == sorted(expected)
 def valid(name,text):
   endpoint=expected[name]
   delegation=("exec " in text) if name!="pr-gate-lib.sh" else ('\n. ' in text)
   return endpoint in text and delegation and "tools/agent-hooks" in text
-for name,endpoint in expected.items(): assert valid(name,(root/name).read_text())
+for path in paths:
+  text=path.read_text()
+  assert len(text.splitlines()) <= 7
+  assert valid(path.name,text)
 sample=(root/"guard-secrets.sh").read_text().replace("exec ","",1)
 assert not valid("guard-secrets.sh",sample)
 PY
 then pass_case 'all 10 legacy paths are thin and corruption-detectable adapters'; else fail_case 'adapter inventory/thinness'; fi
 
-foreign_pattern='dai''kin|x10''a|heat.?''pump|hp_''modbus|victoria''logs|schema''tic|ab''sence|ui-use-''case'
-if ! rg -ni "$foreign_pattern" "$root/tools/agent-hooks" "$root/.codex/hooks.json" "$root/.claude/hooks" "$root/.claude/settings.json" >/dev/null; then pass_case 'neutral core has no foreign-project policy residue'; else fail_case 'foreign-project residue'; fi
+if python3 - "$root" <<'PY'
+import pathlib,re,sys
+root=pathlib.Path(sys.argv[1])
+fragments=[("dai","kin"),("x10","a"),("heat.?","pump"),("hp_","modbus"),
+           ("victoria","logs"),("schema","tic"),("ab","sence"),("ui-use-","case")]
+pattern=re.compile("|".join(left+right for left,right in fragments),re.I)
+paths=[root/".codex/hooks.json",root/".claude/settings.json"]
+for directory in (root/"tools/agent-hooks",root/".claude/hooks"):
+  paths.extend(path for path in directory.rglob("*")
+               if path.is_file() and path.suffix in {".json",".py",".sh"})
+for path in paths:
+  assert not pattern.search(path.read_text(errors="replace")), path
+PY
+then pass_case 'neutral core has no foreign-project policy residue'; else fail_case 'foreign-project residue'; fi
 
 if python3 -m py_compile "$hook" "$parser" "$runner" \
   && bash -n "$root/tools/agent-hooks/"*.sh "$root/.claude/hooks/"*.sh \
