@@ -232,9 +232,19 @@ const usbPositiveAuthorization = /USB-write approval[^.!?]*(?:also\s+)?(?:author
 const usbNoApprovalNeeded = /(?:live verification|HTTP requests?|GET endpoints?)[^.!?]*(?:without (?:separate )?(?:approval|authorization)|requires? no (?:approval|authorization)|need not (?:be )?(?:approved|authorized))/i;
 const usbOtaNotStateChanging = /GET \/ota\/check[^.!?]*(?:is not|isn't|not) state-changing/i;
 const usbAbsentApprovalProceeds = /(?:(?:approval|authorization)[^.!?]*(?:absent|missing|not obtained)|without (?:separate )?(?:approval|authorization))[^.!?]*(?:continue|proceed|run|contact|send|request)/i;
-const exactUsbSkillSha256 = new Map([
-  ["canonical", "25b5d04627894c1d5bb4fea816cc81624efc540bdfc85a1229772b7faf689e32"],
-  ["legacy", "bc2232300747fcac0c77f4dc706bc72c640c2b42079adacf09e56478bca03af6"],
+const reviewedSkillSha256 = new Map([
+  ["add-logic-test", {canonical: "f8a37fddbbb5c47afa9eca4fb4823c203af099718b3327a656c717d0462546f7", legacy: "aaa50473b6877c8998fe6d9af4604c324c63ffa614872ce72fb0a006abdd0a9e"}],
+  ["device-diag", {canonical: "3648da0b50be0e6e67d23c6a40f878e4f56259b4681b96f5e7ea83939a1e7bf8", legacy: "27017438cde102b513b119171a1988aaf3e1079f2676f0d62a70e26d451edc43"}],
+  ["display-preview", {canonical: "4bff95d0314d50ce29d67beac7ef4f9db1ebcbb2fa609335e560e162f5a1ed46", legacy: "486c6a3b7a7bdb86a587ed97f2368e687524e02e58f0adba4c052376eb23d0d5"}],
+  ["e2e-evcc", {canonical: "04489835e6266dec020f4c5aa6663d228d47c5b880dcf6928379312b00c444cc", legacy: "8f40271c3fad7da834ed4cec4f231761af523cacf1ca14f8acb2f024a19a47dc"}],
+  ["feature-docs", {canonical: "1f2851768ed02689d0a0613b644153b111e2f8f45d7e4fc2b60f39b0d01c6a6a", legacy: "a34447175d62ae1be15a9fbcf5f81af543566a1d8ead2accfa73da3e68597cb6"}],
+  ["flash-esp32", {canonical: "d9945b914aa48ef7c150e207fc268011677f54ef6acde837c09111cf3229b71b", legacy: "d77312d51aa6d159b8e6a694e14f1bfaffb2709b8588a7bf51a0ac160fe2b84b"}],
+  ["ota-release-verify", {canonical: "3b0c7941871b9c350bf64a046e3344ac3b5effa2228daf375428b97e0168a511", legacy: "074c330c0f1d9676922f8dbce4605d2674c021013cb5125b2c595eb6a85bec66"}],
+  ["project-review", {canonical: "2fdfd711f5b98b1f21994021d6cf6a907421a0158a6a757ddb09704b78b6fc80", legacy: "0e754dffdbdfc6998b55895bc6d120706a02f48a76a679516752083ae856a9e9"}],
+  ["ship", {canonical: "6424efe4f169b067ad407e26960b71a0765888ecd765152e11d01ba2db74bed7", legacy: "bebfbfa087093cd4e3914f306a67483e99f8beeb49c2479ee1ca8d1c9382a0c5"}],
+  ["skill-audit", {canonical: "89f248d07cfdc713c1a6c9ecc971c8caabb1019fa04fbda9b6f4cbd2893b53b9", legacy: "14514707fba12dfe961252632657e7319f1d8816ee6f15b66888f828dea75d76"}],
+  ["usb-recovery", {canonical: "25b5d04627894c1d5bb4fea816cc81624efc540bdfc85a1229772b7faf689e32", legacy: "bc2232300747fcac0c77f4dc706bc72c640c2b42079adacf09e56478bca03af6"}],
+  ["vehicle-command-audit", {canonical: "30ab4506d71e11d3993d66ca566402e024d12ae7502fd2b0bb056778cdde191a", legacy: "144feba94438891a66f96b545db0f3284c57db24a29f23e2ca9282b2d5c60072"}],
 ]);
 const featureDocsScopeTokens = [
   "main/", "test/", "sdkconfig.defaults*", "partitions.csv", "AGENTS.md", ".agents/", ".codex/",
@@ -279,10 +289,6 @@ for (const [name, pair] of skillMappings) {
       if (contradiction) {
         die(1, `${side} usb-recovery skill contradicts the live-verification contract`);
       }
-      const digest = createHash("sha256").update(text).digest("hex");
-      if (digest !== exactUsbSkillSha256.get(side)) {
-        die(1, `${side} usb-recovery exact reviewed content contract drifted`);
-      }
     }
     const operationalContracts = [
       "Do not run this section merely because the USB recovery was approved.",
@@ -317,6 +323,14 @@ for (const [name, pair] of skillMappings) {
   }
   if (readOnlySkills.has(name) && !/read-only|does not (?:edit|modify)|must not (?:edit|modify)/is.test(canonical.text)) {
     die(1, `review/diagnostic skill ${name} must state its read-only boundary`);
+  }
+  const expectedDigests = reviewedSkillSha256.get(name);
+  if (!expectedDigests) die(1, `skill ${name} has no reviewed content digest`);
+  for (const [side, text] of [["canonical", canonical.text], ["legacy", legacy.text]]) {
+    const digest = createHash("sha256").update(text).digest("hex");
+    if (digest !== expectedDigests[side]) {
+      die(1, `${side} ${name} exact reviewed content contract drifted`);
+    }
   }
 }
 

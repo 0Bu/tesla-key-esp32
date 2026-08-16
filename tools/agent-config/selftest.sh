@@ -281,6 +281,22 @@ printf '\nThe canonical home for the HTTP API is `AGENTS.md`.\n' >> \
   "$fixture/.agents/skills/project-review/SKILL.md"
 expect_failure "compact AGENTS canonical-home contradiction" "$fixture" "deep technical catalog to compact AGENTS.md"
 
+fixture="$WORK/project-review-split-owner"; make_fixture "$fixture"
+printf '\n`AGENTS.md` is authoritative. Use it for the HTTP API.\n' >> \
+  "$fixture/.agents/skills/project-review/SKILL.md"
+expect_failure "compact AGENTS split owner contradiction" "$fixture" "exact reviewed content contract drifted"
+
+fixture="$WORK/flash-owner"; make_fixture "$fixture"
+printf '\n`AGENTS.md` owns the HTTP API.\n' >> \
+  "$fixture/.agents/skills/flash-esp32/SKILL.md"
+expect_failure "flash skill compact AGENTS owner contradiction" "$fixture" "exact reviewed content contract drifted"
+
+fixture="$WORK/legacy-flash-owner"; make_fixture "$fixture"
+printf '\n`AGENTS.md` owns the HTTP API.\n' >> \
+  "$fixture/.claude/skills/flash-esp32/SKILL.md"
+refresh_fingerprint "$fixture"
+expect_failure "legacy flash compact AGENTS owner contradiction" "$fixture" "exact reviewed content contract drifted"
+
 fixture="$WORK/device-diag-owner"; make_fixture "$fixture"
 perl -0pi -e 's/\[`docs\/ARCHITECTURE\.md`\]\(\.\.\/\.\.\/\.\.\/docs\/ARCHITECTURE\.md\) owns pairing lifecycle and invalidation\./`AGENTS.md` owns pairing lifecycle and invalidation./' \
   "$fixture/.agents/skills/device-diag/SKILL.md"
