@@ -419,7 +419,7 @@ bool VehicleController::wake_up(int timeout_ms) {
     // NOT the always-on VCSEC body controller. A parked, reachable car answers a VCSEC status
     // poll with sleep_status="AWAKE" even while its infotainment sleeps; that is exactly why
     // link_state()==Awake never trusts the VCSEC AWAKE flag (only the debounced ASLEEP one —
-    // see its doc / CLAUDE.md) and requires live infotainment telemetry. The previous code
+    // see its doc / AGENTS.md) and requires live infotainment telemetry. The previous code
     // used that VCSEC "AWAKE" BOTH to short-circuit ("already awake") AND to confirm the wake,
     // so on a nearby-sleeping car it returned success in ~0.4 s WITHOUT ever sending the wake:
     // the car never woke and the web-UI spinner just timed out. Trust live telemetry instead.

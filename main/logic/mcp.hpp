@@ -63,7 +63,7 @@ inline McpMethod mcp_method_from(const char* m) {
 // role-refused commands carry mcp_name == nullptr and never reach tools/list (the car
 // rejects them for this key role, so advertising them would only mislead the calling
 // model). Descriptions stay terse on purpose — tools/list is the endpoint's largest
-// response and cJSON prints it into ONE contiguous heap block (see CLAUDE.md).
+// response and cJSON prints it into ONE contiguous heap block (see AGENTS.md).
 
 // Clamp a JSON number to an int range BEFORE the int cast — casting an out-of-range
 // double to int is undefined behaviour, so a hostile {"amps":1e300} must never reach

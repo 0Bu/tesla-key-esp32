@@ -1,12 +1,12 @@
 # Architecture reference
 
 Deep internal reference for tesla-key-esp32. This is the **on-demand** companion to
-[`.claude/CLAUDE.md`](../.claude/CLAUDE.md): CLAUDE.md carries the always-needed essentials
-(build/flash, component map, NVS table, command list, HTTP API, memory constraints); the
+[`AGENTS.md`](../AGENTS.md): AGENTS.md carries the always-needed authorization, supported-target,
+build/flash-boundary, security, and memory-safety rules; the
 full narrative lives here so it isn't reloaded into every session. Read this when working on
 telemetry, the MQTT bridge, the web UI live feed, WiFi/LAN connectivity, sleep/link-state, pairing,
 OTA, or anything that touches locks/tasks (the Concurrency contract at the end). Keep both in sync —
-the `project-review` skill checks for drift between them.
+the canonical `$project-review` skill checks for drift between them.
 
 > **Scope split with [`FEATURES.md`](FEATURES.md).** This file is the *Tesla-side* narrative —
 > pairing, link state, telemetry, the MQTT entity list, the web UI feed. The *platform* mechanisms
@@ -16,6 +16,21 @@ the `project-review` skill checks for drift between them.
 > (`POST /set_wifi`), the `/heap` trend, the bug-report redaction (`?redact=1`) and the captive-portal
 > probe handling — are cataloged in `FEATURES.md`, one entry each with *what failure it prevents*.
 > Look there first for those; this file is where the vehicle-facing detail lives.
+
+## Repository agent architecture
+
+[`AGENTS.md`](../AGENTS.md) is the concise, runner-neutral policy loaded for normal repository
+work. Reusable workflows live under [`.agents/skills/`](../.agents/skills/), Codex project
+configuration and read-only specialist reviewers under [`.codex/`](../.codex/), and both Codex
+and the retained Claude compatibility layer delegate lifecycle policy to
+[`tools/agent-hooks/`](../tools/agent-hooks/). The machine-checkable legacy inventory and
+fingerprint live in [`.codex/migration-manifest.json`](../.codex/migration-manifest.json).
+
+This layer does not participate in firmware runtime behavior. It must not change the four-target
+build, dependency/patch chain, partition geometry, signing boundary, OTA format, pairing/session
+state, or vehicle-command behavior. Reviews and diagnosis are read-only by default; implementation
+does not imply commit, push, merge, release, hardware, or vehicle authorization. See the
+[migration and canary runbook](AGENT_MIGRATION.md).
 
 ## Web UI live feed (`GET /status`)
 

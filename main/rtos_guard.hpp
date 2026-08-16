@@ -5,7 +5,7 @@
 // Manual xSemaphoreTake()/xSemaphoreGive() pairs are NOT unwind-safe: any throw, early
 // return, or later maintenance edit inserted between the two calls leaks the lock, and a
 // silently-held mutex wedges every subsequent user of it until power-cycle. C++ exceptions
-// are enabled in this firmware (see .claude/CLAUDE.md "Memory is tight …"), and the
+// are enabled in this firmware (see AGENTS.md "Memory, exceptions and concurrency"), and the
 // tesla-ble builders/parsers, std::string/std::vector/std::function, and the cJSON/MQTT
 // payload builders can all throw std::bad_alloc while the largest contiguous free block is
 // exhausted — so a throw between a take and its give is a real, reachable failure, not a

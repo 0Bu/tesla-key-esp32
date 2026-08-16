@@ -1,5 +1,26 @@
 # tesla-key-esp32
 
+> **Compatibility canary:** Root [`AGENTS.md`](../AGENTS.md) is the compact, canonical instruction
+> set. `.claude/` remains an active legacy adapter/input during the canary; runner-neutral skills
+> live in [`.agents/skills/`](../.agents/skills/) and policy lives in
+> [`tools/agent-hooks/`](../tools/agent-hooks/). The complete mapping and rollback procedure are
+> [`.codex/migration-manifest.json`](../.codex/migration-manifest.json) and
+> [`docs/AGENT_MIGRATION.md`](../docs/AGENT_MIGRATION.md). Do not delete this compatibility layer.
+>
+> **Same authorization boundary:** analysis, review, audit, diagnosis and triage are read-only by
+> default. An implementation request permits only scoped repository edits and local verification;
+> it does not authorize commit, push, PR mutation, merge, release, Pages publication, real-key
+> signing, flash, OTA, NVS mutation, live-device access, vehicle wake or vehicle commands. Those
+> boundaries require a new explicit user instruction. Claude compatibility never grants broader
+> mutation rights than `AGENTS.md`.
+>
+> **Fixed safety contract:** targets remain exactly `esp32`, `esp32s3`, `esp32c3`, `esp32c6` on
+> ESP-IDF `v5.5.5` with `yoziru/tesla-ble` `v5.1.1` plus the ordered local patches. NVS is secret
+> material (WiFi, VIN, MQTT, vehicle private key and BLE sessions) at offset `0x9000`, size
+> `0x6000`; partition and OTA-slot offsets must not move. Locally built unsigned images are not
+> flashable. The real `OTA_SIGNING_KEY` remains unavailable to PR code and agents. Live reads may
+> wake the vehicle, and no vehicle command may run without explicit user authorization.
+
 ESP-IDF 5.x project for the ESP32 family. Acts as a BLE↔HTTP proxy for Tesla vehicles,
 API-compatible with TeslaBleHttpProxy (works as evcc BLE vehicle integration). Builds for
 **four targets — esp32, esp32s3, esp32c3, esp32c6** — from ONE source tree; CI
@@ -34,11 +55,10 @@ drops it before it can refresh a cache or complete the next FIFO command.
 A cloud session **cannot build** (no working Docker daemon for `scripts/idf-docker.sh`) and
 **cannot USB-flash** (no USB passthrough) — it is for editing, review and CI-driven builds.
 The `report-capabilities.sh` SessionStart hook prints what the current environment supports.
-Real builds/flashes run on a host with Docker + the board attached (see the `flash-esp32`
-skill) or in CI (`.github/workflows/build.yml`). The `build-efficiency-check.sh` SessionStart
-hook audits the latest post-merge `build` run on main for efficiency regressions (ccache hit
-rate, cache hygiene, build-duration/total-run regression, binary-size headroom) and, on a
-problem, has the session open an Issue / draft Fix-PR — deduped per run id, never auto-commits.
+Real builds/flashes run on a host with Docker + the board attached (see the `$flash-esp32`
+skill) or in CI (`.github/workflows/build.yml`). An optional SessionStart build-efficiency check
+is report-only: it may summarize already-available post-merge evidence, but it must never create
+an Issue, branch, commit or draft PR. Any GitHub mutation needs an explicit user instruction.
 Project MCP tooling is an external trust boundary: `.mcp.json` pins Context7 to an exact version,
 but never send it secrets, NVS dumps or unredacted vehicle diagnostics; firmware/CI do not need it.
 
@@ -97,12 +117,13 @@ hardware-free logic to `main/logic/` and a `CHECK` in `test/test_logic.cpp`. Ful
 No local ESP-IDF — builds run via `scripts/idf-docker.sh`, which uses the `espressif/idf`
 Docker image **pinned by `esp-idf-toolchain.txt`**; both the wrapper (`scripts/idf-version.sh`)
 and CI read that same immutable tag+digest contract. Flash from the host with `esptool`
-(`brew install esptool`), since Docker on macOS has no USB passthrough. The `flash-esp32` skill
+(`brew install esptool`), since Docker on macOS has no USB passthrough. The `$flash-esp32` skill
 can build the local tree, but it must never flash that unsigned output: a local app needs an
 explicit signing key, while a PR needs the opt-in, protected `signed-pr-preview` artifact whose
-metadata matches the current PR head. The `ship` skill runs the full delivery instead —
-squash-merge the PR, follow the post-merge CI, select the exact **signed** main artifact (never
-`firmware-unsigned`), flash it (or OTA) and verify the device version. When waiting on CI, block on
+metadata matches the current PR head. The `$ship` skill may run a delivery only when the user
+explicitly authorizes each requested merge/release/flash/OTA boundary — review or implementation
+alone grants none of them. An authorized delivery follows post-merge CI, selects the exact
+**signed** main artifact (never `firmware-unsigned`), and verifies the device version. When waiting on CI, block on
 `gh run watch <run-id> --exit-status` — never sleep-poll `gh run view` in a loop.
 
 ```bash
@@ -552,10 +573,10 @@ report `coredump:false`; only a USB/web-installer full flash adds it. That is a 
 # Serial monitor (host; no local idf.py) — exit Ctrl-A then K
 screen /dev/cu.usbmodemXXXX 115200
 
-# Test command via curl
+# VEHICLE MUTATION — run only with explicit authorization for this vehicle and command
 curl -X POST http://<ESP32-IP>/api/1/vehicles/<VIN>/command/wake_up
 
-# Check vehicle data
+# LIVE ACCESS — may wake the vehicle; prefer cached evidence and require explicit authorization
 curl http://<ESP32-IP>/api/1/vehicles/<VIN>/vehicle_data
 
 # Pull a crash dump (if any) + decode it offline against the matching-version .elf
@@ -569,6 +590,7 @@ curl http://<ESP32-IP>/heap | jq
 curl "http://<ESP32-IP>/status?redact=1" | jq
 curl "http://<ESP32-IP>/diag?redact=1"
 
-# Erase NVS (reset key + sessions) — host esptool
+# DESTRUCTIVE — use the external NVS backup/delete skills and explicit authorization; this full
+# erase also removes firmware/config and is not the normal NVS-only recovery path
 esptool --chip esp32s3 -p <port> erase_flash   # or esp32 / esp32c3 / esp32c6
 ```

@@ -1,84 +1,27 @@
 ---
 name: e2e-evcc
-description: Run the end-to-end test of the evcc → tesla-key-esp32 → vehicle path. Use when asked to verify the live integration, check that evcc can reach the ESP32 without timeouts, confirm all evcc functions work against the current firmware, or smoke-test the device after a flash/OTA. Runs scripts/e2e_evcc.sh from inside the evcc pod (the real network path).
+description: Run the live end-to-end test of the evcc → tesla-key-esp32 → vehicle path from inside the evcc pod. Use only after the user explicitly authorizes contacting the live cluster/device; command modes require a separate, scope-specific opt-in because they send real signed BLE commands and can physically actuate the vehicle.
 ---
 
-# e2e-evcc — live integration test
+# Legacy compatibility adapter — $e2e-evcc
 
-Verifies the whole chain evcc actually uses: **evcc pod (k3s) → `tesla-ble` HTTP template → ESP32 (`tesla-key-esp32`) → BLE → the real car.** The test runs the *exact* HTTP calls evcc makes, from **inside the evcc pod**, so it exercises the true path (pod → k3s node → LAN → ESP32 → BLE), not a shortcut from the laptop.
+This [.claude](../../) entry remains active during the canary period. The canonical project
+workflow is [`$e2e-evcc`](../../../.agents/skills/e2e-evcc/SKILL.md), governed by
+[`AGENTS.md`](../../../AGENTS.md). Canonical skills live under [`.agents/skills/`](../../../.agents/skills/),
+and both runner adapters delegate lifecycle and PR policy to
+[`tools/agent-hooks/`](../../../tools/agent-hooks/).
 
-The driver script is [`scripts/e2e_evcc.sh`](../../../scripts/e2e_evcc.sh). It needs `kubectl` pointed at the cluster where evcc runs.
+## Authorization boundary
 
-## How to run
+Do not contact the live cluster, board, or vehicle without explicit user approval. Read-path approval does not authorize RUN_COMMANDS, charge toggles, or the full command sweep; each broader command scope needs a separate explicit opt-in.
 
-Always start read-only (safe, this is the part that matters for evcc):
+The legacy adapter grants no broader permissions than `AGENTS.md` or the canonical skill. A
+request to review, diagnose, build, approve, or run one step does not authorize adjacent mutations.
+Only separate explicit user authorization may widen the scope.
+Stop and report any conflict instead of falling back to historical Claude-only behavior.
 
-```bash
-bash scripts/e2e_evcc.sh
-```
+## Delegation
 
-The write path issues real signed-BLE commands to the car — only run it when the user has asked to test commands, and confirm scope first (see below):
-
-```bash
-# wake_up, set_charging_amps (re-set current), set_charge_limit (change −10 then restore),
-# door_lock/door_unlock (negative role test — must be REFUSED, see below)
-RUN_COMMANDS=1 TIMEOUT=25 bash scripts/e2e_evcc.sh
-
-# additionally charge_start / charge_stop — PHYSICALLY commands the car to start/stop charging
-RUN_COMMANDS=1 ALLOW_CHARGE_TOGGLE=1 TIMEOUT=25 bash scripts/e2e_evcc.sh
-
-# full command smoke test — additionally exercises EVERY remaining firmware command
-# (charge_port open/close, flash_lights, honk_horn, climate start/stop, sentry on/off,
-# scheduled_charging on/off). PHYSICALLY actuates the car; NOT part of the evcc path.
-RUN_COMMANDS=1 RUN_ALL_COMMANDS=1 TIMEOUT=25 bash scripts/e2e_evcc.sh
-```
-
-The script does **not** hardcode any real device address or vehicle identifier — it learns them from the firmware itself (the single source of truth), so nothing private is committed to the repo:
-
-- **`ESP32_URL`** defaults to the device's mDNS name **`http://tesla-key-esp32.local`** (advertised by the firmware in `main.cpp`), resolvable from the evcc pod on the same LAN. Override it with the board's IP if mDNS isn't reachable in your cluster.
-- **`VIN`** is left unset by default and **auto-discovered from `GET $ESP32_URL/status`** (the `"vin"` field the firmware reports). Set `VIN=…` only to pin a specific value.
-
-Other overrides (env vars; fall back to the built-in defaults if unset): `EVCC_NS` (default `default`), `ITER` (vehicle_data burst size), `TIMEOUT` (per-request seconds). The test is **target-agnostic** — point `ESP32_URL` at whichever esp32 / esp32s3 / esp32c3 / esp32c6 board you want to verify and the VIN follows automatically from that board's `/status`.
-
-## Before running the write path — ask first
-
-`charge_start` / `charge_stop` are outward-facing physical actions on a real vehicle. Do **not** enable `ALLOW_CHARGE_TOGGLE=1` unless the user explicitly opted in. The same goes for `RUN_ALL_COMMANDS=1`, which additionally flashes the lights, honks the horn, opens the charge-port flap, toggles climate/sentry, etc. — only run it when the user explicitly wants a full command smoke test (e.g. just after a flash). `set_charge_limit` changes the car's limit but the script restores it; report the baseline it captured. `door_lock`/`door_unlock` are safe — the car refuses them for the Charging-Manager role (that's exactly what the test asserts).
-
-## What the script checks
-
-1. `GET /status` + `GET /api/proxy/1/version` — device up, `paired:true`, BLE connected, firmware version, the read-only `tele` telemetry block present (background poll alive), the `/api/proxy/1/version` endpoint (part of the proxy API surface — the firmware web UI/OTA read it; **evcc itself does not call it**), and that the two version sources agree (`/status` = `X`, proxy = `X-esp32` — catches a half-applied OTA). The `-esp32` suffix in the proxy `version` is **fixed for all four targets**; the actual chip is reported separately in `platform` (`ESP32` / `ESP32-S3` / `ESP32-C3` / `ESP32-C6` since the multi-target build), so don't expect e.g. `X-esp32c6` here — the script checks `platform` for presence only.
-2. `GET vehicle_data?endpoints=charge_state` × `ITER` — **the critical feedback check.** Reports avg/max latency and separately counts transport failures, HTTP 503 stale/unavailable active-window feedback, and malformed responses. Idle/asleep cache remains HTTP 200 so reads do not wake the car; a 503 means charging/recent-command feedback is too old or absent and is a real evcc failure. The test asserts every parsed field (`charging_state`, `battery_level`, `charge_limit_soc`, `charger_power`, `charge_rate`, `charge_amps`, `battery_range`).
-3. `GET body_controller_state` — live VCSEC BLE read (lock/sleep/presence).
-4. Commands (gated by `RUN_COMMANDS=1`) — `wake_up`, `set_charging_amps`, `set_charge_limit` (change+restore), `door_lock`/`door_unlock` (**inverted** assertion: must be refused → confirms the Charging-Manager role boundary), and optionally `charge_start`/`charge_stop` (`ALLOW_CHARGE_TOGGLE=1`). The charge toggle uses evcc's exact scalar request bodies: JSON `true` for start and `false` for stop.
-4b. Extended sweep (gated by `RUN_ALL_COMMANDS=1`) — every remaining firmware command: `charge_port_door_open/close`, `flash_lights`, `honk_horn`, `auto_conditioning_start/stop`, `set_sentry_mode`, `set_scheduled_charging`. Each is "soft" (car-side `false` is a NOTE, not a FAIL) — the point is that the whole command surface dispatches and round-trips without faulting the proxy.
-5. evcc's own logs (last 30 min) — scanned for Tesla timeout/`deadline`/`canceled`/`refused`/`i/o` errors.
-
-Exit 0 + `✅ e2e OK` means evcc can drive the ESP32 with no timeouts.
-
-## Coverage map (test ↔ firmware surface)
-
-What this test deliberately does **not** touch, and why — so "e2e OK" is not mistaken for "every endpoint verified":
-
-- **Management / destructive endpoints are out of scope:** `/scan`, `/gen_keys`, `/send_key`, `/set_time`, `/set_vin`, `/set_mqtt`, `/set_syslog`, `/ota/check`, `/ota/update`, `/ota/status`, and the `/` web UI. They re-pair, reboot, or wipe NVS — not part of the evcc runtime path. Verify those manually or via the flash/OTA skills. (`/set_mqtt` *is* a real route — `handle_set_mqtt` in `http_config.cpp`, POST `{"broker":"host:port"}` → verify the broker by CONNECTING to it, then persist + reboot; it's excluded here because it reboots, not because it's missing.)
-- **`/mcp`** (the MCP JSON-RPC server for AI agents, `main/mcp_server.cpp`) is not part of the evcc runtime path and is not exercised here — smoke-test it separately per `docs/MCP.md`.
-- **`/diag`** is used reactively (see *Diagnosing a real failure*), not asserted.
-- Everything the firmware *dispatches* — all 15 commands, `vehicle_data`, `body_controller_state`, `/status`, `/api/proxy/1/version` — is reachable by the test once the right gate is set (`RUN_COMMANDS` / `ALLOW_CHARGE_TOGGLE` / `RUN_ALL_COMMANDS`).
-
-## Interpreting results
-
-- **Reads must stay fast and current when active.** `vehicle_data` is served from the firmware's `last_known_charge_` cache (refreshed out-of-band while the BLE link is warm), so latency is ~0–3 ms even while a real BLE poll runs concurrently. Idle cache may be old by design so a sleeping car is not woken. While charging or for five minutes after a command, data older than 30 s returns HTTP 503; that is a genuine broken-feedback result, distinct from a transport timeout. Check `/status` and `GET /diag?verbose=1`.
-- **`set_charging_amps` is stricter than the other commands.** The command body is required and must be an integer; Tesla's action ACK is provisional. Success requires a separate fresh ChargeState with an exact amp match. Rejection, timeout, missing readback or mismatch is HTTP 502 with a JSON reason. The script uses raw HTTP over BusyBox `nc`, because BusyBox `wget` discards 502 bodies.
-- **`charge_start`/`charge_stop` returning `false` is usually NOT a bug.** The car rejects them based on live charging state — e.g. a vehicle at its limit / "Complete" refuses `charge_start` (`/diag` shows `Infotainment action failed: complete`). The script flags these as `NOTE`, not `FAIL`. They only truly pass when the car is plugged in and below its limit.
-- **`door_lock`/`door_unlock` are an *inverted* test — a car-side refusal is the PASS.** The key is enrolled Charging-Manager-only, so the car must reject them; `result:true` is a hard FAIL. Command failures are HTTP 502 with `result:false`, including an unreachable car, so the test preserves and inspects the JSON body: only a **non-reachability** reason proves the role refusal; reachability/timeout remains a FAIL. This assertion is meaningful only while the car is awake and signing.
-- **Extended-sweep (`RUN_ALL_COMMANDS`) commands returning `false` is usually NOT a bug** — same reasoning as charge_start/stop: acceptance depends on live state. The sweep proves the command path round-trips, not that the car acted.
-- evcc polls **only** `vehicle_data` on a loop (never `body_controller_state`), so routine operation never hits the blocking BLE read path.
-
-## Diagnosing a real failure
-
-```bash
-POD=$(kubectl get pod -n default -l app=evcc -o jsonpath='{.items[0].metadata.name}')
-# what evcc itself sees
-kubectl logs -n default "$POD" --since=30m | grep -iE 'tesla|vehicle_data|timeout|deadline'
-# device-side BLE command/result log
-kubectl exec -n default "$POD" -- wget -qO- 'http://<ESP32-IP>/diag?verbose=1'
-```
+Follow the canonical [`$e2e-evcc`](../../../.agents/skills/e2e-evcc/SKILL.md) instructions. Use
+`$e2e-evcc` for new invocations and records. The legacy `/e2e-evcc` spelling may be accepted only
+for existing canary-era PR records; it is not canonical and does not change authorization.

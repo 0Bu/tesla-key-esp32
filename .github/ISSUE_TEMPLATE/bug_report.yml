@@ -1,12 +1,12 @@
 name: Bug report
-description: Something in the firmware misbehaves. Give enough for Claude Code (or a human) to reproduce and fix.
+description: Something in the firmware misbehaves. Give enough for a coding agent or human to reproduce and fix.
 labels: ["bug"]
 body:
   - type: markdown
     attributes:
       value: |
         Thanks for filing a bug. Fill in what you can — the more concrete the repro, the faster it gets fixed.
-        Note: a cloud Claude Code session can edit and review code and rely on CI, but **cannot build or USB-flash** (no Docker daemon / no USB). Real builds/flashes run on a host with the board or in CI.
+        Note: a cloud coding-agent session can edit and review code and rely on CI, but **cannot build or USB-flash** without a Docker daemon and USB access. Real builds/flashes run on an authorized host with the board or in CI.
   - type: textarea
     id: summary
     attributes:
@@ -18,7 +18,7 @@ body:
     id: area
     attributes:
       label: Affected area
-      description: Which component (from the architecture map in .claude/CLAUDE.md)?
+      description: Which component (from the architecture map in AGENTS.md and docs/ARCHITECTURE.md)?
       options:
         - BLE client / connection
         - Vehicle commands (charge / wake / etc.)

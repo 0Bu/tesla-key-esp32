@@ -2,10 +2,10 @@
 
 // Internal header for the HTTP server implementation files ONLY (http_server.cpp,
 // http_api.cpp, http_status.cpp, http_ota.cpp, http_config.cpp, mcp_server.cpp — split
-// by route group; see .claude/CLAUDE.md "Architecture"). The public API stays
+// by route group; see docs/ARCHITECTURE.md). The public API stays
 // http_server.hpp.
 //
-// Memory-model invariant (CLAUDE.md): EVERY handler declared here is invoked exclusively
+// Memory-model invariant (AGENTS.md): EVERY handler declared here is invoked exclusively
 // through handle_all's try/catch in http_server.cpp (503 on OOM). This is enforced
 // structurally: handlers take GuardedReq — NOT the raw esp_http_server signature — so
 // registering one directly with httpd_register_uri_handler (which would bypass the
