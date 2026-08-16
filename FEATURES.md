@@ -6,9 +6,11 @@ mechanisms and diagnostic surfaces that are not specific to Tesla, BLE or evcc. 
 
 The Tesla-specific narrative (pairing, link state, telemetry, the MQTT entity list) lives in
 [`ARCHITECTURE.md`](ARCHITECTURE.md); the always-needed essentials are in
-[`../.claude/CLAUDE.md`](../.claude/CLAUDE.md). **Keep this file current when a technical feature
-lands or changes** — the `feature-docs` skill does that, and `.claude/hooks/require-feature-docs.sh`
-gates a PR whose diff reaches one of the areas below.
+[`../AGENTS.md`](../AGENTS.md). **Keep this file current when a technical feature lands or
+changes** — the canonical [`$feature-docs`](../.agents/skills/feature-docs/SKILL.md) skill does
+that, and the runner-neutral gate under [`tools/agent-hooks/`](../tools/agent-hooks/) gates a PR
+whose diff reaches one of the areas below. `.claude/` is only the active compatibility layer
+during the migration canary; see [`AGENT_MIGRATION.md`](AGENT_MIGRATION.md).
 
 Each entry says what the feature IS, where it lives, and — the part that is easy to lose — *what
 failure it exists to prevent*. A feature without that last part is one nobody can safely delete.
@@ -93,6 +95,7 @@ trusted-LAN only. See [`SECURITY.md`](SECURITY.md).
 
 | Feature | Where | Prevents |
 |---|---|---|
+| Runner-neutral agent policy and gates | `AGENTS.md`, `.agents/skills/`, `.codex/`, `tools/agent-hooks/`, `tools/agent-config/` | One runner silently gaining broader mutation rights, a USB-write approval being reused for live-device HTTP state changes, bypassing PR gates, or drifting from the retained Claude compatibility layer. CI parses and mutation-tests the configuration in the existing unprivileged `logic-test` job. |
 | Host mock build | `scripts/run-mock-tests.sh`, `test/` | Reasoning about logic instead of running it. Compiles `main/logic/` with the plain system toolchain — no ESP-IDF, no Docker, no board — so a cloud session has a real verification loop. |
 | Fail-closed Web Serial installer + monitor | `docs/index.html`, `docs/installer-bootstrap.mjs`, `docs/web-installer.mjs`, `scripts/check-pages-manifest.py`, `test/web_installer.test.mjs` | A generic browser dialog hiding chip mismatches, mixed deployments or corrupt downloads. Schema v2 binds source SHA, exact four-target layout, role offsets, lengths and SHA-256; all four parts verify before erase, and otadata activates last. The page also exposes reset plus the real 115200-baud boot log. |
 | Vendored installer runtime | `docs/vendor/`, `scripts/verify-vendored-esptool-js.sh` | Executing mutable CDN JavaScript inside the USB firmware trust boundary. The official `esptool-js@0.6.1` npm tarball SRI, extracted bundle and Apache license hashes are pinned; Pages serves the native ESM bundle under `script-src 'self'`. |
