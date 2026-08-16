@@ -68,6 +68,19 @@ expect_guard deny "$(payload Bash command 'bash -c \"espsecure.py sign_data --ke
 expect_guard allow "$(payload Read file_path partitions.csv "$root")" 'partition table readable'
 expect_guard deny "$(payload Edit file_path partitions.csv "$root")" 'Claude partition edit denied' claude
 expect_guard deny "$(payload Write file_path partitions.csv "$root")" 'Codex partition write denied'
+multi_edit_payload="$(python3 - "$root" <<'PY'
+import json,sys
+print(json.dumps({
+  "tool_name":"MultiEdit","cwd":sys.argv[1],
+  "tool_input":{
+    "file_path":"partitions.csv",
+    "edits":[{"file_path":"partitions.csv","old_string":"old","new_string":"new"}],
+  },
+}))
+PY
+)"
+expect_guard deny "$multi_edit_payload" 'Claude MultiEdit partition mutation denied' claude
+expect_guard deny "$multi_edit_payload" 'Codex MultiEdit partition mutation denied'
 patch_payload="$(python3 - "$root" <<'PY'
 import json,sys
 print(json.dumps({"tool_name":"apply_patch","cwd":sys.argv[1],"tool_input":{"patch":"*** Begin Patch\n*** Update File: partitions.csv\n@@\n-old\n+new\n*** End Patch"}}))

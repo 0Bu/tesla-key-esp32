@@ -857,7 +857,9 @@ def partition_violation(payload: dict[str, Any], *, shell_only: bool = False) ->
     if shell_only:
         return False
     if tool in FILE_TOOLS:
-        return tool in {"edit", "write"} and any(is_partitions_path(path) for path in path_targets(payload))
+        return tool in {"edit", "multiedit", "write"} and any(
+            is_partitions_path(path) for path in path_targets(payload)
+        )
     if tool in PATCH_TOOLS:
         command = command_from(payload)
         return any(is_partitions_path(path) for path in patch_targets(command))
