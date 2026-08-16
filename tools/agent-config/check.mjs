@@ -227,12 +227,15 @@ const ownerContracts = new Map([
     "`AGENTS.md` owns only runner policy and safety boundaries.",
   ]],
 ]);
-const deepOwnerTerms = /(?:HTTP|API|commands?|MCP|NVS|MQTT|link-state|pairing)/i;
-const documentationOwnership = /(?:\bowns?\b|\bcontains?\b|\bdocuments?\b|\bcatalog(?:s|ues)?\b|\blists?\b|\bsource of truth\b|\bauthoritative (?:source|reference)\b|\bcanonical (?:source|reference)\b|\b(?:documented|defined|described|listed|catalog(?:ed|ued))\s+(?:in|under|within|by)\b)/i;
+const deepOwnerTerms = /(?:HTTP|\bAPI\b|(?<![-/])\bcommands?\b|\bMCP\b|\bNVS\b|\bMQTT\b|link-state|pairing)/i;
 const usbPositiveAuthorization = /USB-write approval[^.!?]*(?:also\s+)?(?:authorizes|allows|permits|covers|includes|is sufficient for)[^.!?]*(?:live verification|HTTP|GET)/i;
 const usbNoApprovalNeeded = /(?:live verification|HTTP requests?|GET endpoints?)[^.!?]*(?:without (?:separate )?(?:approval|authorization)|requires? no (?:approval|authorization)|need not (?:be )?(?:approved|authorized))/i;
 const usbOtaNotStateChanging = /GET \/ota\/check[^.!?]*(?:is not|isn't|not) state-changing/i;
 const usbAbsentApprovalProceeds = /(?:(?:approval|authorization)[^.!?]*(?:absent|missing|not obtained)|without (?:separate )?(?:approval|authorization))[^.!?]*(?:continue|proceed|run|contact|send|request)/i;
+const exactUsbSkillSha256 = new Map([
+  ["canonical", "25b5d04627894c1d5bb4fea816cc81624efc540bdfc85a1229772b7faf689e32"],
+  ["legacy", "bc2232300747fcac0c77f4dc706bc72c640c2b42079adacf09e56478bca03af6"],
+]);
 const featureDocsScopeTokens = [
   "main/", "test/", "sdkconfig.defaults*", "partitions.csv", "AGENTS.md", ".agents/", ".codex/",
   "tools/agent-hooks/", "tools/agent-config/", "docs/index.html", "installer-bootstrap.mjs",
@@ -276,6 +279,10 @@ for (const [name, pair] of skillMappings) {
       if (contradiction) {
         die(1, `${side} usb-recovery skill contradicts the live-verification contract`);
       }
+      const digest = createHash("sha256").update(text).digest("hex");
+      if (digest !== exactUsbSkillSha256.get(side)) {
+        die(1, `${side} usb-recovery exact reviewed content contract drifted`);
+      }
     }
     const operationalContracts = [
       "Do not run this section merely because the USB recovery was approved.",
@@ -294,8 +301,7 @@ for (const [name, pair] of skillMappings) {
     }
     for (const [side, text] of [["canonical", canonical.text], ["legacy", legacy.text]]) {
       const contradictoryOwner = proseSentences(text).some((sentence) =>
-        /AGENTS\.md/i.test(sentence) && deepOwnerTerms.test(sentence) &&
-        documentationOwnership.test(sentence)
+        /AGENTS\.md/i.test(sentence) && deepOwnerTerms.test(sentence)
       );
       if (contradictoryOwner) {
         die(1, `${side} ${name} assigns a deep technical catalog to compact AGENTS.md`);
