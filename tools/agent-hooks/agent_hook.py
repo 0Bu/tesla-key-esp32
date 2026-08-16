@@ -681,7 +681,7 @@ def is_exact_espsecure_sign(command: str) -> bool:
     return True
 
 
-def secret_violation(payload: dict[str, Any]) -> str | None:
+def policy_violation_reason(payload: dict[str, Any]) -> str | None:
     raw_tool = payload.get("tool_name")
     if not isinstance(raw_tool, str) or not raw_tool.strip():
         return "hook payload has no non-empty string tool_name"
@@ -882,7 +882,7 @@ def emit_permission(decision: str, reason: str) -> None:
 
 
 def guard_secrets(payload: dict[str, Any] | None, error: str | None) -> bool:
-    reason = error or (secret_violation(payload or {}) if payload is not None else "unknown payload error")
+    reason = error or (policy_violation_reason(payload or {}) if payload is not None else "unknown payload error")
     if not reason:
         return False
     emit_permission(
