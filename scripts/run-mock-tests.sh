@@ -45,6 +45,7 @@ if command -v python3 >/dev/null 2>&1; then
     scripts/check-display-sim-parity.sh
     python3 test/test_provision.py
     python3 test/test_capture_wake.py
+    python3 test/test_log_origin_contract.py
     scripts/test-build-contracts.sh
     scripts/apply-tesla-ble-patches.sh --self-test
     scripts/reconcile-pr-previews.sh --self-test

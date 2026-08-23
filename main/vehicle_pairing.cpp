@@ -7,6 +7,7 @@
 #include "vehicle_ctrl_internal.hpp"
 #include "ota_update.hpp"
 #include <esp_log.h>
+#include <esp_timer.h>
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
@@ -48,6 +49,7 @@ void VehicleController::auto_pair_task_fn_(void* arg) {
     auto* self = static_cast<VehicleController*>(arg);
     vTaskDelay(pdMS_TO_TICKS(4000));  // let WiFi/BLE come up first
     bool warned_no_vin = false;
+    tk::PeriodicLogState unpaired_notice;
     while (true) {
       // Iteration-boundary containment (issue #204): pair()/generate_key()/health_probe_() run
       // tesla-ble crypto + std::string work that can throw std::bad_alloc. An escape would unwind
@@ -161,6 +163,9 @@ void VehicleController::auto_pair_task_fn_(void* arg) {
         }
 
         if (self->has_session()) {
+            // Re-entering enrolment after a real paired state is a state change and should
+            // announce its instructions immediately rather than inherit the old hourly clock.
+            tk::periodic_log_reset(unpaired_notice);
             // A live session means (re-)pairing succeeded; drop the re-auth notice.
             self->repair_notice_ = false;
             // We're paired: arm the message observer so a key-rejection fault on any
@@ -204,9 +209,10 @@ void VehicleController::auto_pair_task_fn_(void* arg) {
                 vTaskDelay(pdMS_TO_TICKS(1000));
             } else {
                 // No auth answer at all → could not reach/talk to the car. NOT a revocation;
-                // keep the pairing and retry. Logged so it's clear the key simply could not
-                // be verified (connectivity), rather than a deletion being silently missed.
-                ESP_LOGW(TAG, "auto-pair: car not reachable over BLE — can't verify key right now, will retry");
+                // keep the pairing and retry. The connection layer already emits the first
+                // failure and its hourly heartbeat; keep this per-probe summary at DEBUG so
+                // the supervisor cannot recreate the warning storm above that rate limiter.
+                ESP_LOGD(TAG, "auto-pair: car not reachable over BLE — can't verify key right now, will retry");
                 self->idle_until_next_health_poll_();
             }
             continue;
@@ -227,11 +233,18 @@ void VehicleController::auto_pair_task_fn_(void* arg) {
         //    dialog the car then shows on its touchscreen (the dialog only appears while a
         //    card is present) — it shows up here as a usable session.
         VehicleStatusResult st;
-        self->get_vehicle_status(st, 6000);
+        self->get_vehicle_status(st, tk::ConnectOrigin::Background, 6000);
         if (self->has_session()) {
             ESP_LOGI(TAG, "auto-pair: session established");
             continue;
         }
+
+        // Keep setup guidance visible on the state transition and as an hourly reminder, but
+        // not on every ~38 s automatic round. Per-round detail is available only in a build
+        // compiled with maximum DEBUG; production INFO/syslog stays bounded.
+        const bool announce_unpaired = tk::periodic_log_due(
+            unpaired_notice, static_cast<uint64_t>(esp_timer_get_time()) / 1000ULL,
+            tk::kAutoPairNoticeRepeatMs);
 
         // 2. Send the whitelist-add ONCE. This is what makes the car
         //    show the "Add key" dialog on its touchscreen — but the car only shows it while
@@ -243,9 +256,17 @@ void VehicleController::auto_pair_task_fn_(void* arg) {
         //    it still owns command_mutex_, so the probes below run clean. Sending it only once per round
         //    (instead of every ~45 s block) also stops the car re-prompting after the key
         //    is already registered.
-        ESP_LOGI(TAG, "auto-pair: not paired — requesting key enrolment from the car…");
-        self->pair(5000);
-        ESP_LOGI(TAG, "auto-pair: enrolment request attempted — place a Tesla NFC keycard on the center-console reader, then confirm 'Add key' on the touchscreen; waiting for the key to register…");
+        if (announce_unpaired) {
+            ESP_LOGI(TAG, "auto-pair: not paired — requesting key enrolment from the car…");
+        } else {
+            ESP_LOGD(TAG, "auto-pair: not paired — requesting key enrolment from the car…");
+        }
+        self->pair(tk::ConnectOrigin::Background, 5000);
+        if (announce_unpaired) {
+            ESP_LOGI(TAG, "auto-pair: enrolment request attempted — place a Tesla NFC keycard on the center-console reader, then confirm 'Add key' on the touchscreen; waiting for the key to register…");
+        } else {
+            ESP_LOGD(TAG, "auto-pair: enrolment request attempted — place a Tesla NFC keycard on the center-console reader, then confirm 'Add key' on the touchscreen; waiting for the key to register…");
+        }
 
         // 3. Poll for the resulting session at a short cadence so an enrolment that lands
         //    mid-round — the instant a keycard is tapped — is noticed within a few seconds
@@ -254,7 +275,7 @@ void VehicleController::auto_pair_task_fn_(void* arg) {
         //    the session, so has_session() flips and we stop here.
         bool established = false;
         for (int i = 0; i < 8; i++) {
-            self->get_vehicle_status(st, 3000);
+            self->get_vehicle_status(st, tk::ConnectOrigin::Background, 3000);
             if (self->has_session()) { established = true; break; }
             vTaskDelay(pdMS_TO_TICKS(400));
         }
@@ -262,7 +283,11 @@ void VehicleController::auto_pair_task_fn_(void* arg) {
             ESP_LOGI(TAG, "auto-pair: key registered on the car — session established, now PAIRED");
             continue;
         }
-        ESP_LOGI(TAG, "auto-pair: not registered yet — place a Tesla NFC keycard on the console reader and confirm 'Add key' on screen (or move closer if the car is out of BLE range)");
+        if (announce_unpaired) {
+            ESP_LOGI(TAG, "auto-pair: not registered yet — place a Tesla NFC keycard on the console reader and confirm 'Add key' on screen (or move closer if the car is out of BLE range)");
+        } else {
+            ESP_LOGD(TAG, "auto-pair: not registered yet — place a Tesla NFC keycard on the console reader and confirm 'Add key' on screen (or move closer if the car is out of BLE range)");
+        }
       } catch (const std::exception& e) {
           ESP_LOGE(TAG, "auto-pair iteration threw (%s) — pausing, will retry", e.what());
           vTaskDelay(pdMS_TO_TICKS(2000));
@@ -648,8 +673,9 @@ bool VehicleController::health_probe_(int timeout_ms) {
     return send_vcsec_("VCSEC Health Poll", [](TeslaBLE::Client* c, uint8_t* b, size_t* l) {
         return c->build_vcsec_information_request_message(
             VCSEC_InformationRequestType_INFORMATION_REQUEST_TYPE_GET_STATUS, b, l);
-    }, TeslaBLE::WakePolicy::NO_WAKE_FAIL, timeout_ms, /*count_as_activity=*/false,
-       /*auth_fail_is_revocation=*/true);
+    }, TeslaBLE::WakePolicy::NO_WAKE_FAIL, timeout_ms, tk::ConnectOrigin::Background,
+       /*auth_fail_is_revocation=*/true,
+       tk::CompletionTimeoutPolicy::BackgroundHealth);
 }
 
 time_t VehicleController::key_created_at() {
@@ -732,12 +758,16 @@ std::string VehicleController::key_fingerprint() {
     return fp;
 }
 
-bool VehicleController::pair(int timeout_ms) {
+bool VehicleController::pair(tk::ConnectOrigin origin, int timeout_ms) {
     if (timeout_ms <= 0) return false;
     const uint32_t deadline = deadline_in_(static_cast<uint32_t>(timeout_ms));
     tk::SemGuard cmd_guard(command_mutex_, ticks_until_(deadline));
     if (!cmd_guard) {
-        ESP_LOGW(TAG, "pair deadline exhausted waiting for another request");
+        if (origin == tk::ConnectOrigin::Foreground) {
+            ESP_LOGW(TAG, "pair deadline exhausted waiting for another request");
+        } else {
+            ESP_LOGD(TAG, "background pair deadline exhausted waiting for another request");
+        }
         return false;
     }
     // Check only after taking command_mutex_: a concurrent generate_key() may have changed the
@@ -760,13 +790,25 @@ bool VehicleController::pair(int timeout_ms) {
             return c->build_white_list_message(
                 role, VCSEC_KeyFormFactor_KEY_FORM_FACTOR_CLOUD_KEY, b, l);
         },
-        TeslaBLE::WakePolicy::NO_WAKE_FAIL, deadline,
-        /*auth_fail_is_revocation=*/false);
+        TeslaBLE::WakePolicy::NO_WAKE_FAIL, deadline, origin,
+        /*auth_fail_is_revocation=*/false,
+        origin == tk::ConnectOrigin::Foreground
+            ? tk::CompletionTimeoutPolicy::ForegroundWarn
+            : tk::CompletionTimeoutPolicy::ExpectedSilent);
 
     if (!outcome.completed && !outcome.error.empty()) {
-        ESP_LOGW(TAG, "pair request failed before confirmation: %s", outcome.error.c_str());
+        if (origin == tk::ConnectOrigin::Foreground) {
+            ESP_LOGW(TAG, "pair request failed before confirmation: %s", outcome.error.c_str());
+        } else {
+            ESP_LOGD(TAG, "background pair request failed before confirmation: %s",
+                     outcome.error.c_str());
+        }
     } else if (!outcome.completed) {
-        ESP_LOGW(TAG, "pair not confirmed — confirm the pairing request on the car's screen");
+        if (origin == tk::ConnectOrigin::Foreground) {
+            ESP_LOGW(TAG, "pair not confirmed — confirm the pairing request on the car's screen");
+        } else {
+            ESP_LOGD(TAG, "background pair request not confirmed");
+        }
     } else if (!outcome.success) {
         ESP_LOGW(TAG, "pair rejected: %s",
                  outcome.error.empty() ? "vehicle returned failure" : outcome.error.c_str());

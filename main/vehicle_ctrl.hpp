@@ -63,7 +63,10 @@ public:
     bool set_scheduled_charging(bool enable, int start_minutes, int timeout_ms = 20000);
 
     bool get_charge_state(ChargeStateResult& out, int timeout_ms = 20000);
-    bool get_vehicle_status(VehicleStatusResult& out, int timeout_ms = 20000);
+    // Origin is mandatory: HTTP/manual callers pass Foreground; the auto-pair supervisor
+    // passes Background so an absent car cannot turn unattended probes into an error stream.
+    bool get_vehicle_status(VehicleStatusResult& out, tk::ConnectOrigin origin,
+                            int timeout_ms = 20000);
 
     // Non-blocking accessors for cached state (refreshed in background; copied under
     // cache_mutex_ because the BLE RX task writes these concurrently — see cache_mutex_).
@@ -160,7 +163,7 @@ public:
     // together under command_mutex_ before it authorizes mutation.
     bool generate_key();
     // Always enrolls a Charging Manager key (charging + wake only); never an owner key.
-    bool pair(int timeout_ms = 30000);
+    bool pair(tk::ConnectOrigin origin, int timeout_ms = 30000);
 
     struct NewVehicleResetResult {
         tk::VinTransitionApply state{tk::VinTransitionApply::IdentityUnverified};
@@ -315,7 +318,7 @@ private:
     // lives in vehicle_telemetry.cpp next to the protobuf→struct parsers it uses.
     void install_state_callbacks_();
 
-    bool ensure_connected_until_(uint32_t deadline);
+    bool ensure_connected_until_(uint32_t deadline, tk::ConnectOrigin origin);
 
     // Drop the BLE link, reset the library's in-memory peer sessions, erase the
     // persisted VCSEC/Infotainment sessions, and clear cached vehicle readings.
@@ -348,7 +351,10 @@ private:
     // failed") cannot be mistaken for a revocation and destroy the pairing.
     bool send_vcsec_(const std::string& name, Builder builder,
                      TeslaBLE::WakePolicy wp, int timeout_ms,
-                     bool count_as_activity = true, bool auth_fail_is_revocation = false);
+                     tk::ConnectOrigin origin = tk::ConnectOrigin::Foreground,
+                     bool auth_fail_is_revocation = false,
+                     tk::CompletionTimeoutPolicy timeout_policy =
+                         tk::CompletionTimeoutPolicy::ForegroundWarn);
     bool send_infotainment_(const std::string& name, Builder builder, int timeout_ms,
                             TeslaBLE::WakePolicy wp = TeslaBLE::WakePolicy::WAKE_IF_NEEDED);
     // Same runner with command_mutex_ + cmd_in_flight_ already held. The absolute deadline
@@ -360,7 +366,8 @@ private:
 
     CommandOutcome send_vcsec_locked_(const std::string& name, Builder builder,
                                       TeslaBLE::WakePolicy wp, uint32_t deadline,
-                                      bool auth_fail_is_revocation);
+                                      tk::ConnectOrigin origin, bool auth_fail_is_revocation,
+                                      tk::CompletionTimeoutPolicy timeout_policy);
 
     // Build the per-command result callback. auth_fail_is_revocation gates whether an
     // "authentication failed" reply may count toward the two-strike pairing_lost_ heuristic
@@ -371,7 +378,10 @@ private:
     std::shared_ptr<CommandCompletion> begin_completion_(uint32_t& generation);
     CommandOutcome await_completion_(const std::shared_ptr<CommandCompletion>& completion,
                                      uint32_t generation, uint32_t deadline,
-                                     const char* name);
+                                     const char* name,
+                                     tk::CompletionTimeoutPolicy timeout_policy);
+    void note_completion_timeout_(const char* name,
+                                  tk::CompletionTimeoutPolicy timeout_policy);
     void invalidate_and_flush_(uint32_t generation);
     void publish_command_outcome_(const CommandOutcome& outcome);
     bool command_identity_ready_() const {
@@ -485,12 +495,12 @@ private:
     // clear the library's rx_buffer and re-sync, turning the reboot into a brief reconnect.
     std::atomic<bool> ble_fault_{false};
 
-    // True while a foreground command (evcc/manual, via send_vcsec_/send_infotainment_) is
-    // enqueued and awaiting its result. loop_task reads it and SKIPS injecting background
-    // telemetry polls (charge/climate/drive/tires/closures) for the duration, so a command
-    // isn't stuck behind freshly-queued, 7-s-failing polls in the library's single FIFO
-    // (the cause of 15-19 s command latency on an awake, busy link). The ~30 s VCSEC health
-    // poll is already serialized via command_mutex_ and can't pile up, so it needs no gating.
+    // True while a serialized command/query (including the VCSEC health probe) is enqueued and
+    // awaiting its result. loop_task reads it and SKIPS injecting background telemetry polls
+    // (charge/climate/drive/tires/closures) for the duration, so a command isn't stuck behind
+    // freshly-queued, 7-s-failing polls in the library's single FIFO (the cause of 15-19 s command
+    // latency on an awake, busy link). This is FIFO arbitration only: it must never be reused to
+    // decide whether the attempt was foreground or background.
     // Atomic: set by the HTTP task, read by loop_task. Managed by an RAII guard so it always
     // clears, even if the library call throws.
     std::atomic<bool> cmd_in_flight_{false};
@@ -504,6 +514,7 @@ private:
     // already serializes connect attempts themselves. Adding an atomic here would imply a
     // concurrency that does not exist and hide that invariant.
     tk::ConnectFailState connect_fail_{};
+    tk::CompletionTimeoutState completion_timeout_{};
 
     // Consecutive failed signed round-trips seen in make_result_cb_ (foreground commands +
     // the VCSEC health poll). On an awake, busy link the tesla-ble framer's single rx buffer

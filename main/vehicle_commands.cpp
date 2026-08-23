@@ -6,6 +6,7 @@
 #include "vehicle_ctrl.hpp"
 #include "vehicle_ctrl_internal.hpp"
 #include <esp_log.h>
+#include <esp_timer.h>
 #include <cstdio>
 #include <exception>
 #include <utility>
@@ -18,9 +19,15 @@ static const char* TAG = "vehicle_ctrl";
 
 // ─── Connectivity ─────────────────────────────────────────────────────────────
 
-bool VehicleController::ensure_connected_until_(uint32_t deadline) {
+bool VehicleController::ensure_connected_until_(uint32_t deadline, tk::ConnectOrigin origin) {
     if (!ble_) return false;
-    if (ble_->is_connected()) return true;
+    if (ble_->is_connected()) {
+        // The telemetry loop may have established this link outside this helper. It is still
+        // proof that the previous failure run ended; otherwise a later independent outage can
+        // inherit the old streak and have its first occurrence suppressed.
+        tk::connect_ok_note(connect_fail_);
+        return true;
+    }
     const int timeout_ms = remaining_ms_(deadline);
     if (timeout_ms <= 0) return false;
     // This is the ONE place a connect attempt is started and bounded, so it is also where
@@ -35,6 +42,7 @@ bool VehicleController::ensure_connected_until_(uint32_t deadline) {
     // the UI was showing and park the row on "timing out…" for the difference. One clock for
     // the wait and the countdown, the same rule idle_until_next_health_poll_ follows.
     connect_deadline_.store(deadline);
+    const int64_t attempt_start_us = esp_timer_get_time();
     ble_->connect("");
     while (!ble_->is_connected() &&
            (int32_t)(deadline - xTaskGetTickCount()) > 0) {
@@ -49,9 +57,10 @@ bool VehicleController::ensure_connected_until_(uint32_t deadline) {
         // ("connection timeout after 10000ms", ERROR, every attempt) asserted a timed-out
         // connect even when the scan never matched the car at all, and a car parked elsewhere
         // therefore emitted 7117 ERROR lines a week — see logic/connect_outcome.hpp for the
-        // measurement and the rate-limit rule. target_connectable() is the scanner's own
-        // verdict on the target: not seen / non-connectable / connectable.
-        // target_connectable() copies each advert name into a std::string (tesla-ble's
+        // measurement and the rate-limit rule. Use only adverts from THIS attempt here; the
+        // public target_connectable() intentionally retains 90 s of history for a stable UI
+        // and would otherwise mislabel a car that has just driven away.
+        // target_connectable_since() copies each advert name into a std::string (tesla-ble's
         // matches_vin overload), so it ALLOCATES and can throw — and this path runs when the
         // radio is unhappy, which correlates with the heap being unhappy. Letting that escape
         // would lose the line explaining the failure to the very condition it is reporting on,
@@ -60,28 +69,30 @@ bool VehicleController::ensure_connected_until_(uint32_t deadline) {
         // classifies conservatively: warn, rate-limited, no false at-BLE-limit alarm.
         int connectable = -1;
         try {
-            connectable = ble_->target_connectable();
+            connectable = ble_->target_connectable_since(attempt_start_us);
         } catch (...) {
         }
         const tk::ConnectFail kind = tk::connect_fail_from_connectable(connectable);
-        // Foreground = an evcc/MCP/user request is blocked on this attempt (the same flag the
-        // background polls pause on). Never rate-limited: a request that got nothing back must
-        // always leave a line behind.
-        switch (tk::connect_fail_note(connect_fail_, kind, cmd_in_flight_.load())) {
+        // Origin is explicit rather than inferred from cmd_in_flight_: the background health
+        // probe raises that flag too so loop_task cannot inject telemetry into the same FIFO.
+        // Foreground requests remain unthrottled; unattended probes use the slow heartbeat.
+        const uint64_t now_ms = static_cast<uint64_t>(esp_timer_get_time()) / 1000ULL;
+        switch (tk::connect_fail_note(connect_fail_, kind, origin, now_ms)) {
             case tk::ConnectLog::Error:
                 ESP_LOGE(TAG, "BLE connect gave up after %dms: %s (attempt %u of this run)",
                          timeout_ms, tk::connect_fail_text(kind), (unsigned) connect_fail_.streak);
                 break;
             case tk::ConnectLog::Warn:
                 ESP_LOGW(TAG, "BLE connect gave up after %dms: %s (attempt %u of this run; "
-                              "repeating every %u while unchanged)",
+                              "repeating every %llu min while unchanged)",
                          timeout_ms, tk::connect_fail_text(kind), (unsigned) connect_fail_.streak,
-                         (unsigned) tk::kConnectFailRepeatEvery);
+                         (unsigned long long)(tk::kConnectFailRepeatMs / 60000ULL));
                 break;
             case tk::ConnectLog::Suppress:
-                // Same cause as the last attempt and not a heartbeat tick. Still visible on the
-                // console and in /diag at DEBUG, and the condition itself is always readable in
-                // /status — only the forwarded log stops repeating itself.
+                // Same cause as the last attempt and not a heartbeat tick. Production builds
+                // compile at maximum INFO and therefore emit no line here; only a diagnostic
+                // build compiled with maximum DEBUG can expose individual attempts. /status
+                // still carries the BLE scan verdict in either build.
                 ESP_LOGD(TAG, "BLE connect gave up after %dms: %s (attempt %u)",
                          timeout_ms, tk::connect_fail_text(kind), (unsigned) connect_fail_.streak);
                 break;
@@ -145,9 +156,35 @@ void VehicleController::invalidate_and_flush_(uint32_t generation) {
     if (ble_) ble_->disconnect();
 }
 
+void VehicleController::note_completion_timeout_(
+        const char* name, tk::CompletionTimeoutPolicy timeout_policy) {
+    // Callers hold command_mutex_, so the health-timeout state is serialized with every signed
+    // command path. The logging consequence is identical for the generic command runner and the
+    // direct vehicle-status callback path; keeping it here prevents either from bypassing policy.
+    const uint64_t now_ms = static_cast<uint64_t>(esp_timer_get_time()) / 1000ULL;
+    switch (tk::completion_timeout_note(completion_timeout_, timeout_policy, now_ms)) {
+        case tk::CompletionTimeoutLog::Warn:
+            if (timeout_policy == tk::CompletionTimeoutPolicy::ForegroundWarn) {
+                ESP_LOGW(TAG, "'%s' timed out — invalidating request and flushing command FIFO",
+                         name);
+            } else {
+                ESP_LOGW(TAG, "background health '%s' timed out — invalidating request and "
+                              "flushing command FIFO (attempt %u of this run; repeating every %u min)",
+                         name, (unsigned)completion_timeout_.streak,
+                         (unsigned)(tk::kCompletionTimeoutRepeatMs / 60000ULL));
+            }
+            break;
+        case tk::CompletionTimeoutLog::Suppress:
+            ESP_LOGD(TAG, "background '%s' timed out — invalidating request and flushing command FIFO",
+                     name);
+            break;
+    }
+}
+
 VehicleController::CommandOutcome VehicleController::await_completion_(
         const std::shared_ptr<CommandCompletion>& completion,
-        uint32_t generation, uint32_t deadline, const char* name) {
+        uint32_t generation, uint32_t deadline, const char* name,
+        tk::CompletionTimeoutPolicy timeout_policy) {
     CommandOutcome out;
     if (!completion || !completion->sem) {
         out.error = "command completion unavailable";
@@ -156,13 +193,14 @@ VehicleController::CommandOutcome VehicleController::await_completion_(
     const bool signalled =
         xSemaphoreTake(completion->sem, ticks_until_(deadline)) == pdTRUE;
     if (signalled && command_generation_.load() == generation) {
+        tk::completion_ok_note(completion_timeout_);
         out.completed = completion->completed;
         out.success   = completion->success;
         out.error     = completion->error;
         return out;
     }
 
-    ESP_LOGW(TAG, "'%s' timed out — invalidating request and flushing command FIFO", name);
+    note_completion_timeout_(name, timeout_policy);
     invalidate_and_flush_(generation);
     return out;
 }
@@ -263,34 +301,37 @@ VehicleController::ResultCb VehicleController::make_result_cb_(
 
 bool VehicleController::send_vcsec_(const std::string& name, Builder builder,
                                      TeslaBLE::WakePolicy wp, int timeout_ms,
-                                     bool count_as_activity, bool auth_fail_is_revocation) {
+                                     tk::ConnectOrigin origin, bool auth_fail_is_revocation,
+                                     tk::CompletionTimeoutPolicy timeout_policy) {
+    const bool foreground = origin == tk::ConnectOrigin::Foreground;
     CommandOutcome out;
     if (timeout_ms <= 0) {
         out.error = "command deadline exhausted";
-        if (count_as_activity) publish_command_outcome_(out);
+        if (foreground) publish_command_outcome_(out);
         return false;
     }
     const uint32_t deadline = deadline_in_(static_cast<uint32_t>(timeout_ms));
     tk::SemGuard cmd_guard(command_mutex_, ticks_until_(deadline));
     if (!cmd_guard) {
         out.error = "command deadline exhausted waiting for another request";
-        if (count_as_activity) publish_command_outcome_(out);
+        if (foreground) publish_command_outcome_(out);
         return false;
     }
     tk::InFlightGuard inflight(cmd_in_flight_);
     // Real commands open the active window so loop_task resumes polling; the background
-    // health poll passes count_as_activity=false (else the window never expires and the
+    // health poll passes Background (else the window never expires and the
     // car never gets to idle/sleep).
-    if (count_as_activity) last_cmd_ticks_.store(xTaskGetTickCount());
+    if (foreground) last_cmd_ticks_.store(xTaskGetTickCount());
     out = send_vcsec_locked_(name, std::move(builder), wp, deadline,
-                             auth_fail_is_revocation);
-    if (count_as_activity) publish_command_outcome_(out);
+                             origin, auth_fail_is_revocation, timeout_policy);
+    if (foreground) publish_command_outcome_(out);
     return out.success;
 }
 
 VehicleController::CommandOutcome VehicleController::send_vcsec_locked_(
         const std::string& name, Builder builder, TeslaBLE::WakePolicy wp,
-        uint32_t deadline, bool auth_fail_is_revocation) {
+        uint32_t deadline, tk::ConnectOrigin origin, bool auth_fail_is_revocation,
+        tk::CompletionTimeoutPolicy timeout_policy) {
     CommandOutcome out;
     if (!command_identity_ready_()) {
         out.error = "runtime key is not verified; reboot or regenerate required";
@@ -300,7 +341,7 @@ VehicleController::CommandOutcome VehicleController::send_vcsec_locked_(
         out.error = "command deadline exhausted";
         return out;
     }
-    if (!ensure_connected_until_(capped_deadline_(deadline, 10000))) return out;
+    if (!ensure_connected_until_(capped_deadline_(deadline, 10000), origin)) return out;
     if (remaining_ms_(deadline) <= 0) {
         out.error = "command deadline exhausted";
         return out;
@@ -333,7 +374,7 @@ VehicleController::CommandOutcome VehicleController::send_vcsec_locked_(
         out.error = "command enqueue failed";
         return out;
     }
-    return await_completion_(completion, generation, deadline, name.c_str());
+    return await_completion_(completion, generation, deadline, name.c_str(), timeout_policy);
 }
 
 bool VehicleController::send_infotainment_(const std::string& name, Builder builder,
@@ -370,7 +411,8 @@ VehicleController::CommandOutcome VehicleController::send_infotainment_locked_(
         out.error = "command deadline exhausted";
         return out;
     }
-    if (!ensure_connected_until_(capped_deadline_(deadline, 10000))) return out;
+    if (!ensure_connected_until_(capped_deadline_(deadline, 10000),
+                                 tk::ConnectOrigin::Foreground)) return out;
     if (remaining_ms_(deadline) <= 0) {
         out.error = "command deadline exhausted";
         return out;
@@ -402,7 +444,8 @@ VehicleController::CommandOutcome VehicleController::send_infotainment_locked_(
         out.error = "command enqueue failed";
         return out;
     }
-    return await_completion_(completion, generation, deadline, name.c_str());
+    return await_completion_(completion, generation, deadline, name.c_str(),
+                             tk::CompletionTimeoutPolicy::ForegroundWarn);
 }
 
 // ─── Commands ─────────────────────────────────────────────────────────────────
