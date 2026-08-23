@@ -402,7 +402,7 @@ void VehicleController::loop_task_fn_(void* arg) {
             // Logged alongside the historical 8BIT figures (identical on the four PSRAM-less
             // targets) so the trend stays comparable with older captures.
             size_t largest = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL);
-            ESP_LOGW(TAG, "HEAP free=%u largest_block=%u min_free=%u internal_largest=%u",
+            ESP_LOGI(TAG, "HEAP free=%u largest_block=%u min_free=%u internal_largest=%u",
                      (unsigned) heap_caps_get_free_size(MALLOC_CAP_8BIT),
                      (unsigned) heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
                      (unsigned) heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT),
@@ -693,25 +693,40 @@ bool VehicleController::get_charge_state(ChargeStateResult& out, int /*timeout_m
     return true;
 }
 
-bool VehicleController::get_vehicle_status(VehicleStatusResult& out, int timeout_ms) {
+bool VehicleController::get_vehicle_status(VehicleStatusResult& out, tk::ConnectOrigin origin,
+                                           int timeout_ms) {
     out = {};
     if (timeout_ms <= 0) return false;
     const uint32_t deadline = deadline_in_(static_cast<uint32_t>(timeout_ms));
     tk::SemGuard cmd_guard(command_mutex_, ticks_until_(deadline));
-    if (!cmd_guard) return false;
+    if (!cmd_guard) {
+        if (origin == tk::ConnectOrigin::Foreground) {
+            ESP_LOGW(TAG, "vehicle-status deadline exhausted waiting for another request");
+        } else {
+            ESP_LOGD(TAG, "background vehicle-status deadline exhausted waiting for another request");
+        }
+        return false;
+    }
     if (!command_identity_ready_()) {
         ESP_LOGE(TAG, "vehicle-status poll refused — runtime key is not verified");
         return false;
     }
-    // Foreground blocking query (HTTP /body_controller_state, auto-pair probes) — mark it
-    // in-flight like the other runners so loop_task doesn't inject a slow background
-    // telemetry poll ahead of it on the single BLE FIFO.
+    // Mark both HTTP and auto-pair queries in-flight so loop_task doesn't inject a slow
+    // telemetry poll ahead of either one on the single BLE FIFO. This arbitration flag is
+    // independent of `origin`: only the HTTP request is foreground provenance.
     tk::InFlightGuard inflight(cmd_in_flight_);
     // A VCSEC status poll is the auto-pair / wake probe as well as an HTTP read, so it
     // must be able to bring the BLE link up. With a NO-wake policy it reads status
     // (including ASLEEP) without actually waking the car.
-    if (!ensure_connected_until_(capped_deadline_(deadline, 10000))) return false;
-    if (remaining_ms_(deadline) <= 0) return false;
+    if (!ensure_connected_until_(capped_deadline_(deadline, 10000), origin)) return false;
+    if (remaining_ms_(deadline) <= 0) {
+        if (origin == tk::ConnectOrigin::Foreground) {
+            ESP_LOGW(TAG, "vehicle-status deadline exhausted after BLE connect");
+        } else {
+            ESP_LOGD(TAG, "background vehicle-status deadline exhausted after BLE connect");
+        }
+        return false;
+    }
 
     struct StatusCompletion {
         SemaphoreHandle_t sem{xSemaphoreCreateBinary()};
@@ -719,7 +734,10 @@ bool VehicleController::get_vehicle_status(VehicleStatusResult& out, int timeout
         ~StatusCompletion() { if (sem) vSemaphoreDelete(sem); }
     };
     auto completion = std::make_shared<StatusCompletion>();
-    if (!completion->sem) return false;
+    if (!completion->sem) {
+        ESP_LOGE(TAG, "vehicle-status poll refused — command completion unavailable");
+        return false;
+    }
     uint32_t generation = command_generation_.fetch_add(1) + 1;
     if (generation == 0) {
         generation = 1;
@@ -770,13 +788,21 @@ bool VehicleController::get_vehicle_status(VehicleStatusResult& out, int timeout
 
     bool ok = xSemaphoreTake(completion->sem, ticks_until_(deadline)) == pdTRUE &&
               command_generation_.load() == generation;
-    if (!ok) invalidate_and_flush_(generation);
+    if (!ok) {
+        note_completion_timeout_(
+            "VCSEC Status Poll",
+            origin == tk::ConnectOrigin::Foreground
+                ? tk::CompletionTimeoutPolicy::ForegroundWarn
+                : tk::CompletionTimeoutPolicy::ExpectedSilent);
+        invalidate_and_flush_(generation);
+    }
     {
         tk::SemGuard g(vehicle_mutex_);
         vehicle_->set_vehicle_status_callback(nullptr);
     }
     if (ok) out = completion->status;
     if (ok && out.valid) {
+        tk::completion_ok_note(completion_timeout_);
         note_reachable_();  // car answered a VCSEC status read ⇒ reachable over BLE right now
         cmd_fail_streak_.store(0);  // a clean round-trip ⇒ link healthy, reset desync backstop
         tk::MutexGuard cache_guard(cache_mutex_);

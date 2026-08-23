@@ -469,7 +469,8 @@ static void test_syslog_policy() {
     auto sev = [](const char* s) { return tk::syslog_severity_for_line(s, std::strlen(s)); };
 
     CHECK(sev("E (206191310) vehicle_ctrl: vehicle loop() threw") == 3);   // err
-    CHECK(sev("W (79064752) vehicle_ctrl: HEAP free=71304") == 4);          // warning
+    CHECK(sev("I (79064752) vehicle_ctrl: HEAP free=71304") == 6);          // healthy trend = info
+    CHECK(pri("I (79064752) vehicle_ctrl: HEAP free=71304") == 14);         // user.info
     CHECK(sev("I (79061122) http_server: REQ: POST /mcp") == 6);            // info
     CHECK(sev("D (1234) tag: noisy detail") == 7);                          // debug
     CHECK(sev("V (1234) tag: noisier detail") == 7);
@@ -510,6 +511,16 @@ static void test_connect_outcome() {
     CHECK(tk::connect_fail_from_connectable(-1) == tk::ConnectFail::OutOfRange);
     CHECK(tk::connect_fail_from_connectable(0)  == tk::ConnectFail::AtBleLimit);
     CHECK(tk::connect_fail_from_connectable(1)  == tk::ConnectFail::ConnectFailed);
+    CHECK(!tk::advert_seen_in_attempt(999, 1000));
+    CHECK(tk::advert_seen_in_attempt(1000, 1000));
+    CHECK(tk::advert_seen_in_attempt(1001, 1000));
+    // A fresh SCAN_RSP must not promote an older/default connectability bit into the current
+    // attempt. Both target identity and the primary-advert bit need their own fresh timestamp.
+    CHECK(tk::connectable_verdict_in_attempt(true, true, 1001, 999, 1000) == -1);
+    CHECK(tk::connectable_verdict_in_attempt(true, false, 999, 1001, 1000) == -1);
+    CHECK(tk::connectable_verdict_in_attempt(false, true, 1001, 1001, 1000) == -1);
+    CHECK(tk::connectable_verdict_in_attempt(true, false, 1000, 1000, 1000) == 0);
+    CHECK(tk::connectable_verdict_in_attempt(true, true, 1001, 1001, 1000) == 1);
 
     // Foreground: an evcc/MCP/user request was blocked on this attempt. ALWAYS an error and
     // never rate-limited, whatever the cause or how long it has been failing — a request that
@@ -517,35 +528,49 @@ static void test_connect_outcome() {
     {
         tk::ConnectFailState st;
         for (int i = 0; i < 300; i++) {
-            CHECK(tk::connect_fail_note(st, tk::ConnectFail::OutOfRange, /*foreground*/true)
+            CHECK(tk::connect_fail_note(st, tk::ConnectFail::OutOfRange,
+                                        tk::ConnectOrigin::Foreground, (uint64_t)i)
                   == tk::ConnectLog::Error);
         }
         CHECK(st.streak == 300);
     }
 
-    // Background, car simply away: warn once, then silence until the hourly heartbeat. This is
-    // the 7117-lines-a-week case — 90 attempts (~1 h at the 40 s retry cadence) per line.
+    // Background, car simply away: warn once, then silence until a monotonic hour elapsed.
+    // Model the unpaired supervisor's worst burst (roughly ten attempts per 40 s): attempt
+    // counts must not turn the intended hourly heartbeat into one every few minutes.
     {
         tk::ConnectFailState st;
-        CHECK(tk::connect_fail_note(st, tk::ConnectFail::OutOfRange, false) == tk::ConnectLog::Warn);
+        constexpr uint64_t t0 = 1000;
+        CHECK(tk::connect_fail_note(st, tk::ConnectFail::OutOfRange,
+                                    tk::ConnectOrigin::Background, t0) == tk::ConnectLog::Warn);
         int emitted = 1;
-        for (uint32_t i = 2; i <= 270; i++) {
-            if (tk::connect_fail_note(st, tk::ConnectFail::OutOfRange, false) != tk::ConnectLog::Suppress)
+        for (uint32_t i = 1; i <= 899; i++) {
+            if (tk::connect_fail_note(st, tk::ConnectFail::OutOfRange,
+                                      tk::ConnectOrigin::Background, t0 + i * 4000ULL)
+                != tk::ConnectLog::Suppress)
                 emitted++;
         }
-        CHECK(st.streak == 270);
-        CHECK(emitted == 4);   // first + heartbeats at 90/180/270, not 270 lines
+        CHECK(st.streak == 900);
+        CHECK(emitted == 1);  // 900 attempts in <1 h still emit only the first
+        CHECK(tk::connect_fail_note(st, tk::ConnectFail::OutOfRange,
+                                    tk::ConnectOrigin::Background,
+                                    t0 + tk::kConnectFailRepeatMs) == tk::ConnectLog::Warn);
+        CHECK(st.streak == 901);
     }
 
     // Background, car present but unusable: still an ERROR even unattended (this is the
     // two-boards-on-one-car signature), and still rate-limited so it can't storm either.
     {
         tk::ConnectFailState st;
-        CHECK(tk::connect_fail_note(st, tk::ConnectFail::ConnectFailed, false) == tk::ConnectLog::Error);
-        CHECK(tk::connect_fail_note(st, tk::ConnectFail::ConnectFailed, false) == tk::ConnectLog::Suppress);
+        CHECK(tk::connect_fail_note(st, tk::ConnectFail::ConnectFailed,
+                                    tk::ConnectOrigin::Background, 1000) == tk::ConnectLog::Error);
+        CHECK(tk::connect_fail_note(st, tk::ConnectFail::ConnectFailed,
+                                    tk::ConnectOrigin::Background, 1001) == tk::ConnectLog::Suppress);
         tk::ConnectFailState lim;
-        CHECK(tk::connect_fail_note(lim, tk::ConnectFail::AtBleLimit, false) == tk::ConnectLog::Error);
-        CHECK(tk::connect_fail_note(lim, tk::ConnectFail::AtBleLimit, false) == tk::ConnectLog::Suppress);
+        CHECK(tk::connect_fail_note(lim, tk::ConnectFail::AtBleLimit,
+                                    tk::ConnectOrigin::Background, 1000) == tk::ConnectLog::Error);
+        CHECK(tk::connect_fail_note(lim, tk::ConnectFail::AtBleLimit,
+                                    tk::ConnectOrigin::Background, 1001) == tk::ConnectLog::Suppress);
     }
 
     // A CHANGE of cause is reported immediately, mid-suppression. "The car came back but now
@@ -553,9 +578,12 @@ static void test_connect_outcome() {
     // streak would hide it for up to an hour and defeat the rate limit's purpose.
     {
         tk::ConnectFailState st;
-        for (int i = 0; i < 50; i++) tk::connect_fail_note(st, tk::ConnectFail::OutOfRange, false);
+        for (int i = 0; i < 50; i++)
+            tk::connect_fail_note(st, tk::ConnectFail::OutOfRange,
+                                  tk::ConnectOrigin::Background, (uint64_t)i);
         CHECK(st.streak == 50);
-        CHECK(tk::connect_fail_note(st, tk::ConnectFail::ConnectFailed, false) == tk::ConnectLog::Error);
+        CHECK(tk::connect_fail_note(st, tk::ConnectFail::ConnectFailed,
+                                    tk::ConnectOrigin::Background, 50) == tk::ConnectLog::Error);
         CHECK(st.streak == 1);   // the new cause starts its own run
     }
 
@@ -563,19 +591,89 @@ static void test_connect_outcome() {
     // than inheriting the old streak's suppression.
     {
         tk::ConnectFailState st;
-        for (int i = 0; i < 50; i++) tk::connect_fail_note(st, tk::ConnectFail::OutOfRange, false);
+        for (int i = 0; i < 50; i++)
+            tk::connect_fail_note(st, tk::ConnectFail::OutOfRange,
+                                  tk::ConnectOrigin::Background, (uint64_t)i);
         tk::connect_ok_note(st);
         CHECK(st.streak == 0);
-        CHECK(tk::connect_fail_note(st, tk::ConnectFail::OutOfRange, false) == tk::ConnectLog::Warn);
+        CHECK(st.last_emit_ms == 0);
+        CHECK(tk::connect_fail_note(st, tk::ConnectFail::OutOfRange,
+                                    tk::ConnectOrigin::Background, 50) == tk::ConnectLog::Warn);
         CHECK(st.streak == 1);
     }
 
     // Saturating streak: a device left unreachable for months must not wrap its counter back
     // through 1 and re-announce as if the condition were new.
     {
-        tk::ConnectFailState st{tk::ConnectFail::OutOfRange, UINT32_MAX};
-        tk::connect_fail_note(st, tk::ConnectFail::OutOfRange, false);
+        tk::ConnectFailState st{tk::ConnectFail::OutOfRange, UINT32_MAX, 0};
+        tk::connect_fail_note(st, tk::ConnectFail::OutOfRange,
+                              tk::ConnectOrigin::Background, 1);
         CHECK(st.streak == UINT32_MAX);
+    }
+
+    // Completion timeouts have an independent policy: auto-enrolment is known not to complete,
+    // the signed health probe must still leave a first/hourly warning, and a blocked user call
+    // warns every time. One command response closes the health-timeout run.
+    {
+        tk::CompletionTimeoutState st;
+        CHECK(tk::completion_timeout_note(st, tk::CompletionTimeoutPolicy::ExpectedSilent, 0)
+              == tk::CompletionTimeoutLog::Suppress);
+        CHECK(st.streak == 0);
+        CHECK(tk::completion_timeout_note(st, tk::CompletionTimeoutPolicy::ForegroundWarn, 0)
+              == tk::CompletionTimeoutLog::Warn);
+        CHECK(st.streak == 0);
+
+        constexpr uint64_t t0 = 1000;
+        CHECK(tk::completion_timeout_note(st, tk::CompletionTimeoutPolicy::BackgroundHealth, t0)
+              == tk::CompletionTimeoutLog::Warn);
+        int emitted = 1;
+        for (uint32_t i = 1; i <= 89; i++) {
+            if (tk::completion_timeout_note(st, tk::CompletionTimeoutPolicy::BackgroundHealth,
+                                            t0 + i * 40000ULL)
+                == tk::CompletionTimeoutLog::Warn) {
+                emitted++;
+            }
+        }
+        CHECK(st.streak == 90);
+        CHECK(emitted == 1);
+        CHECK(tk::completion_timeout_note(st, tk::CompletionTimeoutPolicy::BackgroundHealth,
+                                          t0 + tk::kCompletionTimeoutRepeatMs)
+              == tk::CompletionTimeoutLog::Warn);
+
+        tk::completion_ok_note(st);
+        CHECK(st.streak == 0);
+        CHECK(st.last_emit_ms == 0);
+        CHECK(tk::completion_timeout_note(st, tk::CompletionTimeoutPolicy::BackgroundHealth,
+                                          t0 + tk::kCompletionTimeoutRepeatMs + 1)
+              == tk::CompletionTimeoutLog::Warn);
+
+        st.streak = UINT32_MAX;
+        tk::completion_timeout_note(st, tk::CompletionTimeoutPolicy::BackgroundHealth,
+                                    t0 + tk::kCompletionTimeoutRepeatMs + 2);
+        CHECK(st.streak == UINT32_MAX);
+    }
+
+    // Automatic enrolment instructions are INFO on entry and then only once per monotonic
+    // hour, even though the supervisor can complete hundreds of rounds in that interval.
+    {
+        tk::PeriodicLogState st;
+        constexpr uint64_t t0 = 5000;
+        CHECK(tk::periodic_log_due(st, t0, tk::kAutoPairNoticeRepeatMs));
+        int emitted = 1;
+        for (uint32_t i = 1; i <= 899; i++) {
+            if (tk::periodic_log_due(st, t0 + i * 4000ULL,
+                                     tk::kAutoPairNoticeRepeatMs)) {
+                emitted++;
+            }
+        }
+        CHECK(emitted == 1);
+        CHECK(tk::periodic_log_due(st, t0 + tk::kAutoPairNoticeRepeatMs,
+                                  tk::kAutoPairNoticeRepeatMs));
+        tk::periodic_log_reset(st);
+        CHECK(!st.active);
+        CHECK(st.last_emit_ms == 0);
+        CHECK(tk::periodic_log_due(st, t0 + tk::kAutoPairNoticeRepeatMs + 1,
+                                  tk::kAutoPairNoticeRepeatMs));
     }
 
     // Every cause names itself; the text is what the log line carries.

@@ -3,7 +3,7 @@
   "legacy_root": ".claude",
   "canonical_instructions": "AGENTS.md",
   "legacy_tree_sha256_format": "sha256(path-utf8 + NUL + raw-bytes + NUL for each tracked .claude file in bytewise path order)",
-  "legacy_tree_sha256": "eb370760f4a4e14b559cf3a4511077bb2ba537b3ced8a46398093ee97a610da2",
+  "legacy_tree_sha256": "670c643cc95b0e19e0dbce232527e7c91f5c9f5855c52cc07f2e605e08b57ad9",
   "entries": [
     {
       "source": ".claude/CLAUDE.md",

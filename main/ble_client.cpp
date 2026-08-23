@@ -1,6 +1,7 @@
 #include "ble_client.hpp"
 #include "diag_log.hpp"
 #include "rtos_guard.hpp"
+#include "logic/connect_outcome.hpp"
 #include <esp_log.h>
 #include <esp_timer.h>
 #include <array>
@@ -123,7 +124,7 @@ void BleClient::start_discovery(int ms) {
         esp_timer_stop(scan_timer_);
         esp_timer_start_once(scan_timer_, (int64_t)ms * 1000);
     }
-    ESP_LOGI(TAG, "discovery scan started for %d ms", ms);
+    ESP_LOGD(TAG, "discovery scan started for %d ms", ms);
 }
 
 void BleClient::on_scan_timeout() {
@@ -134,7 +135,7 @@ void BleClient::on_scan_timeout() {
     if (tk::ble::manual_discovery_timeout_may_cancel(
             scanning_.load(), want_connect_.load(), connecting_.load(), has_gap_link_())) {
         if (cancel_scan_locked_()) {
-            ESP_LOGI(TAG, "discovery scan window ended");
+            ESP_LOGD(TAG, "discovery scan window ended");
         }
     }
 }
@@ -227,13 +228,13 @@ bool BleClient::start_scan_locked_() {
     const bool running = tk::ble::scan_running_after_start(was_running, result);
     scanning_.store(running);
     if (result == tk::ble::ScanStartResult::Failed) {
-        ESP_LOGE(TAG, "scan start failed: %d", rc);
+        ESP_LOGD(TAG, "scan start failed: %d", rc);
     } else if (result == tk::ble::ScanStartResult::Started) {
-        ESP_LOGI(TAG, "scanning for Tesla BLE...");
+        ESP_LOGD(TAG, "scanning for Tesla BLE...");
     } else {
         // EALREADY is not a failure: NimBLE returns it only when discovery is already active.
         // Publishing true repairs a stale local snapshot instead of orphaning the live scan.
-        ESP_LOGI(TAG, "Tesla BLE scan already active");
+        ESP_LOGD(TAG, "Tesla BLE scan already active");
     }
     return running;
 }
@@ -252,7 +253,7 @@ bool BleClient::cancel_scan_locked_() {
     if (result == tk::ble::ScanCancelResult::Failed) {
         // Unexpected host errors do not prove that the controller stopped scanning. Preserve the
         // published state so a later timeout/deadline/connect attempt can retry cancellation.
-        ESP_LOGE(TAG, "scan cancel failed: %d", rc);
+        ESP_LOGD(TAG, "scan cancel failed: %d", rc);
     }
     return !running;
 }
@@ -289,7 +290,8 @@ void BleClient::note_scan_(const ble_gap_disc_desc& d, const ble_hs_adv_fields& 
             e = &scan_.back();
             memcpy(e->addr, d.addr.val, 6);
             e->name[0] = '\0';
-            e->connectable = true;   // optimistic until a primary advert proves otherwise
+            e->connectable = true;   // UI fallback until a primary advert proves otherwise
+            e->connectable_us = 0;   // fallback is never valid for attempt classification
         } else {
             // Replace the stalest entry.
             e = &scan_[0];
@@ -297,17 +299,35 @@ void BleClient::note_scan_(const ble_gap_disc_desc& d, const ble_hs_adv_fields& 
             memcpy(e->addr, d.addr.val, 6);
             e->name[0] = '\0';
             e->connectable = true;
+            e->connectable_us = 0;
         }
     }
+    const int64_t now_us = esp_timer_get_time();
     e->rssi    = d.rssi;
-    e->last_us = esp_timer_get_time();
+    e->last_us = now_us;
+    // The primary advert normally arrived before this named SCAN_RSP. Carry its separately
+    // timestamped bit into the Tesla entry; an old/default bit still fails the per-attempt gate.
+    for (const auto& observation : connectable_observations_) {
+        if (observation.seen_us > e->connectable_us &&
+            memcmp(observation.addr, d.addr.val, 6) == 0) {
+            e->connectable = observation.connectable;
+            e->connectable_us = observation.seen_us;
+            break;
+        }
+    }
     // If THIS report is a primary advert (not a scan response), it tells us the connectability
     // directly. SCAN_RSP carries no connectability, so leave the prior value untouched.
     switch (d.event_type) {
         case BLE_HCI_ADV_RPT_EVTYPE_ADV_IND:
-        case BLE_HCI_ADV_RPT_EVTYPE_DIR_IND:     e->connectable = true;  break;
+        case BLE_HCI_ADV_RPT_EVTYPE_DIR_IND:
+            e->connectable = true;
+            e->connectable_us = now_us;
+            break;
         case BLE_HCI_ADV_RPT_EVTYPE_SCAN_IND:
-        case BLE_HCI_ADV_RPT_EVTYPE_NONCONN_IND: e->connectable = false; break;
+        case BLE_HCI_ADV_RPT_EVTYPE_NONCONN_IND:
+            e->connectable = false;
+            e->connectable_us = now_us;
+            break;
         default: break;  // SCAN_RSP — connectability unknown from this PDU
     }
     if (f.name != nullptr && f.name_len > 0) {
@@ -345,19 +365,42 @@ std::vector<TeslaScan> BleClient::nearby() const {
 }
 
 void BleClient::note_connectable_(const ble_addr_t& addr, bool connectable) {
+    const int64_t now_us = esp_timer_get_time();
+    // Both note_connectable_ and note_scan_ run on the single NimBLE host task, so this pending
+    // cache needs no mutex and cannot lose the first primary advert merely because an HTTP reader
+    // briefly owns scan_mutex_. Reuse the matching slot or evict the oldest fixed-size record.
+    ConnectableObservation* pending = &connectable_observations_[0];
+    for (auto& observation : connectable_observations_) {
+        if (memcmp(observation.addr, addr.val, 6) == 0) {
+            pending = &observation;
+            break;
+        }
+        if (observation.seen_us < pending->seen_us) pending = &observation;
+    }
+    memcpy(pending->addr, addr.val, 6);
+    pending->seen_us = now_us;
+    pending->connectable = connectable;
+
     if (!scan_mutex_) return;
     tk::SemGuard g(scan_mutex_, 0);  // try-lock: never block the host task
     if (!g) return;
-    // Only updates entries we already know are Teslas (created by note_scan_ on a name match);
-    // a nameless primary advert for an unknown address is ignored.
+    // Also refresh an already identified Tesla entry immediately. Unknown addresses remain only
+    // in the host-task cache until the matching named SCAN_RSP creates their ScanEntry.
     for (auto& s : scan_) {
-        if (memcmp(s.addr, addr.val, 6) == 0) { s.connectable = connectable; break; }
+        if (memcmp(s.addr, addr.val, 6) == 0) {
+            s.connectable = connectable;
+            s.connectable_us = now_us;
+            break;
+        }
     }
 }
 
 int BleClient::target_connectable() const {
+    return target_connectable_since(esp_timer_get_time() - 90LL * 1000 * 1000);
+}
+
+int BleClient::target_connectable_since(int64_t since_us) const {
     if (!scan_mutex_ || target_vin_.empty()) return -1;
-    const int64_t now = esp_timer_get_time();
     int result = -1;
     std::array<ScanEntry, 12> snapshot{};
     size_t count = 0;
@@ -369,16 +412,11 @@ int BleClient::target_connectable() const {
     }
     for (size_t i = 0; i < count; ++i) {
         const auto& s = snapshot[i];
-        // 90 s window: a PAIRED device only scans briefly around each ~30-40 s health probe, so
-        // a 15 s freshness would flap to "unknown" between probes; 90 s keeps the at-limit signal
-        // stable across the gap. ("at its BLE limit" is a persistent condition, so a slightly
-        // older observation is still meaningful.)
-        if (now - s.last_us > 90LL * 1000 * 1000) continue;  // stale
         if (s.name[0] == '\0') continue;
-        if (TeslaBLE::matches_vin(std::string(s.name), target_vin_)) {
-            result = s.connectable ? 1 : 0;
-            break;
-        }
+        const bool matches = TeslaBLE::matches_vin(std::string(s.name), target_vin_);
+        result = tk::connectable_verdict_in_attempt(
+            matches, s.connectable, s.last_us, s.connectable_us, since_us);
+        if (matches) break;
     }
     return result;
 }
@@ -572,7 +610,7 @@ bool BleClient::write_chunk_(uint16_t conn_handle, uint16_t write_handle,
                              const uint8_t* data, size_t len) {
     int rc = ble_gattc_write_no_rsp_flat(conn_handle, write_handle, data, len);
     if (rc != 0) {
-        ESP_LOGW(TAG, "BLE write chunk failed: %d", rc);
+        ESP_LOGD(TAG, "BLE write chunk failed: %d", rc);
         return false;
     }
     return true;
@@ -589,7 +627,8 @@ int BleClient::on_gap_event(ble_gap_event* event) {
     try {
     switch (event->type) {
     case BLE_GAP_EVENT_DISC: {
-        // Check if this device advertises Tesla service UUID
+        // Parse this advert/SCAN_RSP; Tesla identity comes from the name below. The service UUID
+        // is not advertised and is discovered through GATT only after the connection succeeds.
         ble_hs_adv_fields fields{};
         int rc = ble_hs_adv_parse_fields(&fields,
                                           event->disc.data,
@@ -600,8 +639,9 @@ int BleClient::on_gap_event(ble_gap_event* event) {
         // in the SCAN_RSP (handled by note_scan_ below), but connectability lives on the
         // primary advert — which often arrives nameless and would otherwise break out here. A
         // car at its BLE connection limit advertises non-connectable (this is exactly the
-        // signal vehicle-command's ErrMaxConnectionsExceeded keys off). note_connectable_ only
-        // touches addresses already known to be Teslas, so it's a no-op for everything else.
+        // signal vehicle-command's ErrMaxConnectionsExceeded keys off). note_connectable_ keeps
+        // only a small fixed address cache; a record becomes authoritative only when the named
+        // SCAN_RSP identifies that address as the configured Tesla.
         switch (event->disc.event_type) {
             case BLE_HCI_ADV_RPT_EVTYPE_ADV_IND:
             case BLE_HCI_ADV_RPT_EVTYPE_DIR_IND:     note_connectable_(event->disc.addr, true);  break;
@@ -636,7 +676,10 @@ int BleClient::on_gap_event(ble_gap_event* event) {
                  event->disc.addr.val[5], event->disc.addr.val[4],
                  event->disc.addr.val[3], event->disc.addr.val[2],
                  event->disc.addr.val[1], event->disc.addr.val[0]);
-        ESP_LOGI(TAG, "Tesla '%s' found: %s — connecting", adv_name.c_str(), addr_str);
+        // Raw per-attempt detail is DEBUG. The command layer emits the single classified
+        // production signal (first occurrence + hourly background heartbeat, or every
+        // foreground failure), so retries cannot recreate an INFO/ERROR syslog storm here.
+        ESP_LOGD(TAG, "Tesla '%s' found: %s — connecting", adv_name.c_str(), addr_str);
         {
             tk::SemGuard g(client_mutex_);   // RAII: peer_addr_str_ = … can throw
             if (g) peer_addr_str_ = addr_str;
@@ -675,7 +718,7 @@ int BleClient::on_gap_event(ble_gap_event* event) {
                                  10000, nullptr,
                                  gap_event_cb, this);
             if (rc != 0) {
-                ESP_LOGE(TAG, "connect failed: %d", rc);
+                ESP_LOGD(TAG, "connect failed: %d", rc);
                 ready_generation_.store(tk::ble::kNoReadyGeneration);
                 connect_fail_count_.fetch_add(1);
                 const tk::ble::ConnectLifecycle lifecycle =
@@ -689,7 +732,7 @@ int BleClient::on_gap_event(ble_gap_event* event) {
 
     case BLE_GAP_EVENT_CONNECT: {
         if (event->connect.status != 0) {
-            ESP_LOGE(TAG, "connect error: %d", event->connect.status);
+            ESP_LOGD(TAG, "connect error: %d", event->connect.status);
             ready_generation_.store(tk::ble::kNoReadyGeneration);
             connect_fail_count_.fetch_add(1);   // advert was heard but the link never came up
             if (on_connected_) on_connected_(false);
@@ -749,20 +792,20 @@ int BleClient::on_gap_event(ble_gap_event* event) {
             }
         }
         if (canceled) {
-            ESP_LOGI(TAG, "late GAP connection after canceled intent — dropping handle=%d",
+            ESP_LOGD(TAG, "late GAP connection after canceled intent — dropping handle=%d",
                      event->connect.conn_handle);
             terminate_published_link_();
         } else if (svc_rc != 0) {
-            ESP_LOGE(TAG, "svc discovery failed: %d", svc_rc);
+            ESP_LOGD(TAG, "svc discovery failed: %d", svc_rc);
             disconnect();
         } else {
-            ESP_LOGI(TAG, "connected, handle=%d", event->connect.conn_handle);
+            ESP_LOGD(TAG, "connected, handle=%d", event->connect.conn_handle);
         }
         break;
     }
 
     case BLE_GAP_EVENT_DISCONNECT: {
-        ESP_LOGI(TAG, "disconnected, reason=%d", event->disconnect.reason);
+        ESP_LOGD(TAG, "disconnected, reason=%d", event->disconnect.reason);
         bool reconnect = false;
         {
             tk::SemGuard intent(intent_mutex_);
@@ -815,7 +858,7 @@ int BleClient::on_gap_event(ble_gap_event* event) {
     }
 
     case BLE_GAP_EVENT_MTU:
-        ESP_LOGI(TAG, "MTU negotiated: %d", event->mtu.value);
+        ESP_LOGD(TAG, "MTU negotiated: %d", event->mtu.value);
         break;
 
     default:
@@ -856,7 +899,7 @@ int BleClient::on_svc_disc(uint16_t conn_handle, uint32_t generation,
     try {
     if (error->status == BLE_HS_EDONE) {
         if (svc_start_handle_ == 0) {
-            ESP_LOGE(TAG, "Tesla service not found");
+            ESP_LOGD(TAG, "Tesla service not found");
             disconnect();
             return 0;
         }
@@ -866,13 +909,13 @@ int BleClient::on_svc_disc(uint16_t conn_handle, uint32_t generation,
                                           svc_start_handle_, svc_end_handle_,
                                           chr_disc_cb, generation_arg);
         if (rc != 0) {
-            ESP_LOGE(TAG, "characteristic discovery start failed: %d", rc);
+            ESP_LOGD(TAG, "characteristic discovery start failed: %d", rc);
             disconnect();
         }
         return 0;
     }
     if (error->status != 0) {
-        ESP_LOGE(TAG, "svc disc error: %d", error->status);
+        ESP_LOGD(TAG, "svc disc error: %d", error->status);
         disconnect();
         return 0;
     }
@@ -905,19 +948,19 @@ int BleClient::on_chr_disc(uint16_t conn_handle, uint32_t generation,
     if (error->status == BLE_HS_EDONE) {
         const uint16_t write_handle = write_handle_.load();
         if (write_handle == 0 || notify_val_handle_ == 0) {
-            ESP_LOGE(TAG, "required characteristics not found (write=%d notify=%d)",
+            ESP_LOGD(TAG, "required characteristics not found (write=%d notify=%d)",
                      write_handle, notify_val_handle_);
             disconnect();
             return 0;
         }
-        ESP_LOGI(TAG, "BLE characteristics ready (write=%d notify=%d)",
+        ESP_LOGD(TAG, "BLE characteristics ready (write=%d notify=%d)",
                  write_handle, notify_val_handle_);
         // Subscribe to notifications
         subscribe_notify_(conn_handle, generation);
         return 0;
     }
     if (error->status != 0) {
-        ESP_LOGE(TAG, "characteristic discovery error: %d", error->status);
+        ESP_LOGD(TAG, "characteristic discovery error: %d", error->status);
         disconnect();
         return 0;
     }
@@ -955,7 +998,7 @@ void BleClient::subscribe_notify_(uint16_t conn_handle, uint32_t generation) {
     int rc = ble_gattc_disc_all_dscs(conn_handle, notify_val_handle_, svc_end_handle_,
                                      dsc_disc_cb, generation_arg);
     if (rc != 0) {
-        ESP_LOGE(TAG, "CCCD discovery start failed: %d", rc);
+        ESP_LOGD(TAG, "CCCD discovery start failed: %d", rc);
         disconnect();
     }
 }
@@ -968,7 +1011,7 @@ int BleClient::on_dsc_disc(uint16_t conn_handle, const ble_gatt_error* error,
     try {
     if (error->status == BLE_HS_EDONE) {
         if (cccd_handle_ == 0) {
-            ESP_LOGE(TAG, "CCCD (0x2902) not found for notify chr — cannot subscribe");
+            ESP_LOGD(TAG, "CCCD (0x2902) not found for notify chr — cannot subscribe");
             disconnect();
             return 0;
         }
@@ -978,7 +1021,7 @@ int BleClient::on_dsc_disc(uint16_t conn_handle, const ble_gatt_error* error,
                                        value, sizeof(value), subscribe_write_cb,
                                        generation_arg);
         if (rc != 0) {
-            ESP_LOGE(TAG, "subscribe notify failed: %d", rc);
+            ESP_LOGD(TAG, "subscribe notify failed: %d", rc);
             disconnect();
             return 0;
         }
@@ -986,7 +1029,7 @@ int BleClient::on_dsc_disc(uint16_t conn_handle, const ble_gatt_error* error,
         return 0;
     }
     if (error->status != 0) {
-        ESP_LOGE(TAG, "CCCD discovery error: %d", error->status);
+        ESP_LOGD(TAG, "CCCD discovery error: %d", error->status);
         disconnect();
         return 0;
     }
@@ -1011,7 +1054,7 @@ int BleClient::on_subscribe_write(uint16_t conn_handle, const ble_gatt_error* er
     if (!connection_snapshot_matches_(conn_handle, generation)) return 0;
     try {
         if (!error || error->status != 0) {
-            ESP_LOGE(TAG, "CCCD subscription write failed: %d", error ? error->status : -1);
+            ESP_LOGD(TAG, "CCCD subscription write failed: %d", error ? error->status : -1);
             disconnect();
             return 0;
         }
@@ -1059,7 +1102,7 @@ int BleClient::on_subscribe_write(uint16_t conn_handle, const ble_gatt_error* er
             disconnect();
             return 0;
         }
-        ESP_LOGI(TAG, "BLE command-ready (CCCD handle %d, generation %lu)",
+        ESP_LOGD(TAG, "BLE command-ready (CCCD handle %d, generation %lu)",
                  cccd_handle_, static_cast<unsigned long>(generation));
     } catch (const std::exception& e) {
         ESP_LOGE(TAG, "subscribe completion exception (dropping connection): %s", e.what());

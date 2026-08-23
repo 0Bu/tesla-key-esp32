@@ -2,6 +2,7 @@
 
 #include <adapters.h>
 #include <functional>
+#include <array>
 #include <vector>
 #include <string>
 #include <cstdint>
@@ -131,12 +132,18 @@ public:
     // tell "found the car but can't connect" apart from "looking for the car".
     uint32_t connect_fail_recent() const;
 
-    // Connectability of the *target* car's most recent advert, mirroring how Tesla's official
+    // Connectability of the *target* car's advert during the last 90 s, mirroring how Tesla's official
     // vehicle-command derives ErrMaxConnectionsExceeded (it keys off the scan result's
     // Connectable flag, NOT the connect error — a vehicle at its BLE connection limit
     // advertises non-connectable). -1 = target not seen recently / not yet known,
-    // 0 = advertising NON-connectable (≈ at its ~3-device BLE limit), 1 = connectable.
+    // 0 = advertising NON-connectable (≈ at its ~3-device BLE limit), 1 = connectable. This
+    // intentionally stabilized snapshot is for UI/status only; failure logs use the method below.
     int target_connectable() const;
+    // Same verdict, but only when both the target name and the primary advert's connectability
+    // bit were observed at/after `since_us`. Connect attempts use this per-attempt view so the
+    // UI's deliberately stable 90 s cache (or a fresh SCAN_RSP carrying a stale bit) cannot
+    // mislabel a car that has since left as a current GATT failure.
+    int target_connectable_since(int64_t since_us) const;
 
     // Called from NimBLE host task callbacks — not for external use
     void on_sync();
@@ -165,9 +172,9 @@ private:
     // delayed DISCONNECT event can restart that request.
     void terminate_published_link_();
     void note_scan_(const ble_gap_disc_desc& d, const ble_hs_adv_fields& f);
-    // Update a known scan entry's connectability by address — for primary adverts that carry
-    // no name (Tesla puts the name in the SCAN_RSP, but connectability only on the primary
-    // advert), so we record it by address and read it back once the name has matched.
+    // Cache connectability by address — primary adverts carry no name (Tesla puts the name in
+    // the SCAN_RSP, but connectability only on the primary advert), so the first observation is
+    // retained and copied into the identified Tesla entry once the name arrives.
     void note_connectable_(const ble_addr_t& addr, bool connectable);
     void subscribe_notify_(uint16_t conn_handle, uint32_t generation);
     bool has_gap_link_() const;
@@ -177,9 +184,20 @@ private:
 
     // Discovery: nearby Teslas seen while not connected, and the connect intent.
     struct ScanEntry { uint8_t addr[6]; char name[24]; int8_t rssi; int64_t last_us;
-                       bool connectable; };  // connectable defaults true; flipped only on an
-                                             // observed non-connectable primary advert
+                       int64_t connectable_us; bool connectable; };
+    // `last_us` timestamps the name/RSSI report; `connectable_us` separately timestamps the
+    // primary advert that supplied `connectable`. SCAN_RSP must never make an older/default
+    // connectability verdict look current.
     std::vector<ScanEntry> scan_;
+    struct ConnectableObservation {
+        uint8_t addr[6];
+        int64_t seen_us;
+        bool connectable;
+    };
+    // Primary adverts are normally nameless and precede the SCAN_RSP that identifies a Tesla.
+    // Preserve their bit in a fixed, allocation-free host-task cache so the first observation of
+    // a new/rotating address can be correlated once its name arrives.
+    std::array<ConnectableObservation, 12> connectable_observations_{};
     SemaphoreHandle_t      scan_mutex_{nullptr};
     esp_timer_handle_t     scan_timer_{nullptr};
     // Serializes manual discovery, connect cancellation, GAP publication and CCCD readiness.

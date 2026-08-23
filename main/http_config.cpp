@@ -115,7 +115,7 @@ esp_err_t handle_send_key(GuardedReq rq) {
         return send_json(req, 403, root);
     }
 
-    bool ok = g_vehicle->pair();
+    bool ok = g_vehicle->pair(tk::ConnectOrigin::Foreground);
     cJSON* root = cJSON_CreateObject();
     cJSON_AddBoolToObject(root, "result", ok);
     cJSON_AddStringToObject(root, "role",   "charging_manager");

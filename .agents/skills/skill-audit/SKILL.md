@@ -150,7 +150,9 @@ the authority for the per-sibling drift check; `$project-review` defers the mech
   `loop_task_fn_` — the one the heap watchdog decides on, plus the
   `HEAP CRITICAL`/`EXHAUSTED` escalation lines beside it) — that
   `last_reboot` and `last_crash` are emitted only when set, and the signature sites it cites
-  (`connect error` in `ble_client.cpp`, the pairing-invalidation causes in `vehicle_ctrl.cpp`).
+  (classified production `BLE connect gave up` in `vehicle_commands.cpp`, raw maximum-DEBUG
+  `connect error` detail in `ble_client.cpp`, and the pairing-invalidation causes in
+  `vehicle_ctrl.cpp`).
 - **`$display-preview`** — renders `tools/display_sim.py` to PNGs for a human eyeball pass. Verify the
   CLI modes (`png`/`states`/`states-portrait`/`search`/`scroll`/`cheader`/`parity`) + default output
   paths still match the script's `__main__`, the `cheader`→`main/display_font.h` and `parity`→gate
