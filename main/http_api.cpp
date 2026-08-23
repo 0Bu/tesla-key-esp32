@@ -286,7 +286,7 @@ esp_err_t handle_body_controller(GuardedReq rq) {
         return send_json(req, 404, make_response(false, "body_controller_state", vin, "vehicle VIN mismatch"));
 
     VehicleStatusResult vs{};
-    bool ok = g_vehicle->get_vehicle_status(vs);
+    bool ok = g_vehicle->get_vehicle_status(vs, tk::ConnectOrigin::Foreground);
 
     cJSON* root     = cJSON_CreateObject();
     cJSON* response = cJSON_CreateObject();

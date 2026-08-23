@@ -171,8 +171,8 @@ patches/tesla-ble/     → ordered reviewed patch series on the pinned dependenc
                          CarServer responses before callbacks/FIFO completion and make private-key
                          regeneration report/recover persistence failure (all four targets)
 ble_client.cpp         → NimBLE GATT client (BleAdapter impl)
-                         Scans for UUID 00000211-b2d1-43f0-9b88-960cebf8b91e
-                         Write chr: 0212, Notify chr: 0213
+                         Discovers Tesla by VIN-derived name in SCAN_RSP; after connect, GATT
+                         service UUID: 0211, write chr: 0212, notify chr: 0213
 nvs_storage.cpp        → NVS StorageAdapter (maps library keys ≤15 chars)
 vehicle_ctrl.cpp       → VehicleController core: init/wiring, VIN gate, link_state() glue
 vehicle_commands.cpp   → sync command API via semaphores (send_vcsec_/send_infotainment_,
