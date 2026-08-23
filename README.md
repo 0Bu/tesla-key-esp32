@@ -465,7 +465,11 @@ best-effort `verbose=0` request in `finally`, including when the enable response
 its form or the safe HTTP-only `provision.py`; do not flash a generated partial NVS image.
 
 **BLE doesn't find vehicle** — car within ~10 m, awake; scanning starts after WiFi.
-Log: `scanning for Tesla BLE...` → `Tesla '<name>' found: … — connecting`.
+Production log: the origin-aware `BLE connect gave up …` line names whether no current advert was
+seen, the advert was non-connectable, or GATT readiness failed. A diagnostic build compiled with
+maximum DEBUG additionally shows `scanning for Tesla BLE...` → `Tesla '<name>' found: … — connecting`
+and the raw NimBLE/GATT status codes; those per-attempt details are compile-time absent from the
+normal INFO build so automatic retries cannot flood syslog.
 
 **Command times out** (`'charge_start' timed out`) — car in deep sleep; `wake_up` first,
 wait 5 s, retry. Stale session: `esptool --chip <target> -p <port> erase_flash`.

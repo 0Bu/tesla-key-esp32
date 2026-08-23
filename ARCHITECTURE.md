@@ -75,9 +75,12 @@ A rotating background poll in `loop_task_fn_` (one domain per ~30 s cycle: clima
 drive → tires → closures, full set ~120 s) refreshes per-domain caches via the
 `set_*_state_callback` hooks in `vehicle_telemetry.cpp`. All polls are `NO_WAKE_SKIP`
 (read-only, never wake the car) and feed the MQTT/HA bridge — evcc/pairing are unaffected.
-These background polls are **paused while a foreground evcc/manual command is in flight**
-(`cmd_in_flight_`), so a command is never queued behind a slow/failing poll in the single
-BLE FIFO — keeps command latency low on an awake, busy link.
+These background polls are **paused while a serialized command/query is in flight**
+(`cmd_in_flight_`), including the VCSEC health probe, so nothing is injected into the single
+BLE FIFO behind another operation. Whether a connect attempt is foreground is carried separately
+as `ConnectOrigin`; the arbitration flag is deliberately not reused as user-request provenance.
+Every HTTP/manual entry point and every unattended auto-pair call must choose that origin
+explicitly; the public methods deliberately provide no origin default.
 
 `set_charging_amps` uses that pause as a correctness boundary: under one
 `command_mutex_`/`cmd_in_flight_` transaction it sends the current action, waits for Tesla's
@@ -892,14 +895,36 @@ was expected, unchanged and self-resolving. So:
 | `0` (advert non-connectable) | `AtBleLimit` — at its ~3-device limit | **error** |
 | `1` (connectable, connect failed) | `ConnectFailed` | **error** — the two-boards-on-one-car signature |
 
-Rate limit: first occurrence of a cause is logged, then only every `kConnectFailRepeatEvery` (90 ≈
-hourly at the retry cadence) until the cause **changes** or a connect succeeds. A change of cause is
+Rate limit: first occurrence of a cause is logged, then once per monotonic hour
+(`kConnectFailRepeatMs`) until the cause **changes** or a connect succeeds. This is deliberately
+time-based because the unpaired auto-enrolment path can issue ten probes in a burst. A change of cause is
 never suppressed — "the car came back but now the connect fails" is precisely the transition worth
 seeing, and folding it into a running streak would hide it for up to an hour. **Foreground attempts
-(`cmd_in_flight_` — an evcc/MCP/user request is blocked on this one) are always ERROR and never
+(`ConnectOrigin::Foreground` — an evcc/MCP/user request is blocked on this one) are always ERROR and never
 suppressed**, whatever the cause: a request that returned nothing must leave a line behind.
-Suppressed attempts still reach the console and `/diag` at `DEBUG`, and the condition itself is
-always readable in `/status.ble`; only the forwarded log stops repeating itself.
+Classification requires both the target-name report and the primary advert carrying its
+connectability bit to have been observed since that connect attempt began. A fresh SCAN_RSP can
+therefore never lend an older/default connectability bit a fresh timestamp. The separate 90 s
+`target_connectable()` history remains intentionally stable for the UI, but cannot turn a stale
+previous sighting into a current `ConnectFailed`/`AtBleLimit` log. Raw scan, GAP-connect and GATT-
+readiness events are DEBUG-only; the classified command-layer line is the single production
+WARN/ERROR signal, so lower callbacks cannot bypass the same volume limit.
+The nameless primary usually arrives before the named SCAN_RSP; a fixed allocation-free host-task
+cache correlates them by address, including the first report for a new/rotated address.
+Suppressed attempts emit no line in the production build, whose compile-time maximum log level is
+INFO. Only a diagnostic build compiled with maximum DEBUG can expose the individual attempt lines;
+the BLE scan verdict remains readable in `/status.ble` regardless.
+Command-completion timeouts use a separate typed policy because provenance is not timeout
+semantics: the automatic Whitelist Add Key is expected not to complete and recovers its FIFO at
+DEBUG; the authorised background GET_STATUS health probe warns first and then hourly while it
+remains unanswered; a timed-out HTTP/evcc/user request warns every time.
+The direct HTTP/auto-pair vehicle-status callback follows that same rule (foreground warning,
+expected-silent enrolment probe), and any valid signed status response closes a prior health-
+timeout run just like a generic command completion.
+The unpaired supervisor's three setup reminders follow the same monotonic volume contract: INFO
+when enrolment is entered and once per hour while unchanged, DEBUG on the intervening ~38 s rounds.
+A background enrolment that merely loses the command mutex race is DEBUG; the same timeout for a
+blocked foreground pairing request remains WARN.
 
 Reachability is tracked by a
 `last_reachable_ticks_` clock stamped on every successful signed round-trip, incl. the idle
