@@ -19,6 +19,7 @@
 #include "logic/redact.hpp"
 #include "config_blob.hpp"
 #include "syslog.hpp"
+#include "stack_watch.hpp"
 #include <esp_netif.h>
 #include <esp_mac.h>
 #include <esp_app_desc.h>
@@ -212,6 +213,14 @@ static cJSON* build_status_object(bool redact) {
     in.uptime_s        = (uint32_t)(esp_timer_get_time() / 1000000);
     in.wifi_reconnects = tk::net_reconnect_count();
     in.safe_mode       = tk::safe_mode_active();
+    in.httpd_stack_min_free_bytes =
+        tk::stack_watch_min_free_bytes(tk::StackWatch::Httpd);
+    in.vehicle_stack_min_free_bytes =
+        tk::stack_watch_min_free_bytes(tk::StackWatch::Vehicle);
+    in.auto_pair_stack_min_free_bytes =
+        tk::stack_watch_min_free_bytes(tk::StackWatch::AutoPair);
+    in.mqtt_stack_min_free_bytes =
+        tk::stack_watch_min_free_bytes(tk::StackWatch::Mqtt);
 
     // ── last_crash ────────────────────────────────────────────────────────────────────────────
     // diag_crash_info_live() re-reads only the "is a dump still in flash" flag (a 4-byte read), not

@@ -12,6 +12,7 @@
 #include "logic/mqtt_uri.hpp"
 #include "diag_crash.hpp"
 #include "safe_mode.hpp"
+#include "stack_watch.hpp"
 #include <esp_heap_caps.h>
 #include <esp_task_wdt.h>
 
@@ -193,7 +194,12 @@ static const Entry ENTRIES[] = {
 
 // ─── Publish helpers ──────────────────────────────────────────────────────────
 static void pub(const std::string& topic, const char* payload, bool retain = true) {
-    if (s_client) esp_mqtt_client_publish(s_client, topic.c_str(), payload, 0, 1, retain ? 1 : 0);
+    if (!s_client) return;
+    esp_mqtt_client_publish(s_client, topic.c_str(), payload, 0, 1, retain ? 1 : 0);
+    // Every caller runs on mqtt_pub. Feeding only AFTER the blocking call returns preserves the
+    // watchdog's ability to catch a wedged socket while proving progress through a long discovery
+    // burst, whose many individually-completed publishes may legitimately outlive one 60 s cycle.
+    esp_task_wdt_reset();
 }
 
 // Print + publish a cJSON object to a topic, then delete it (takes ownership).
@@ -429,6 +435,18 @@ static void publish_state() {
 
         cJSON_AddNumberToObject(o, "wifi_reconnects", (double)tk::net_reconnect_count());
         cJSON_AddNumberToObject(o, "mqtt_reconnects", (double)s_reconnects.load());
+        // Payload-only fleet diagnostics (no extra HA entities). Omit an unsampled task rather than
+        // publishing zero bytes free for a task that has not run or is absent in safe mode.
+        const auto httpd_stack = tk::stack_watch_min_free_bytes(tk::StackWatch::Httpd);
+        const auto vehicle_stack = tk::stack_watch_min_free_bytes(tk::StackWatch::Vehicle);
+        const auto auto_pair_stack = tk::stack_watch_min_free_bytes(tk::StackWatch::AutoPair);
+        const auto mqtt_stack = tk::stack_watch_min_free_bytes(tk::StackWatch::Mqtt);
+        if (httpd_stack) cJSON_AddNumberToObject(o, "httpd_stack_min_free_bytes", *httpd_stack);
+        if (vehicle_stack)
+            cJSON_AddNumberToObject(o, "vehicle_stack_min_free_bytes", *vehicle_stack);
+        if (auto_pair_stack)
+            cJSON_AddNumberToObject(o, "auto_pair_stack_min_free_bytes", *auto_pair_stack);
+        if (mqtt_stack) cJSON_AddNumberToObject(o, "mqtt_stack_min_free_bytes", *mqtt_stack);
         pub_json(s_topic[D_DEVICE], o);
     }
 }
@@ -502,6 +520,9 @@ static void publisher_task(void*) {
         // a hang. What must trip the watchdog is a publish that never returns, not a broker that
         // never answers.
         esp_task_wdt_reset();
+        // Same retrospective placement as vehicle_loop: every branch reaches it, including broker
+        // outage and OOM recovery cycles, and the MQTT snapshot below reads this task's own mark.
+        tk::stack_watch_sample(tk::StackWatch::Mqtt);
 
         // Iteration-boundary containment (issue #204): publish_discovery()/publish_state()
         // build cJSON + std::string discovery payloads that can throw std::bad_alloc on a

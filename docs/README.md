@@ -280,7 +280,12 @@ GET  /status               { vin, ip, version, key_present, key_fingerprint,
                                           previous boot, n = consecutive such restarts;
                                           absent on any ordinary boot),
                              sys:{board_mac,free_heap,min_free_heap,largest_block,uptime_s,
-                                  wifi_reconnects,reset_reason,safe_mode} (ALWAYS present —
+                                  wifi_reconnects,reset_reason,safe_mode,
+                                  stack_min_free_bytes?:{httpd?,vehicle?,auto_pair?,mqtt?}}
+                               (the stack values are each task's historical minimum free bytes
+                                for this boot and are omitted until that task has sampled; a
+                                genuine measured zero remains visible),
+                               sys itself is ALWAYS present —
                                the block a remote triage reads first; the heap figures are
                                INTERNAL-only, so the C5's PSRAM cannot mask them, and
                                largest_block is the number the heap watchdog acts on;

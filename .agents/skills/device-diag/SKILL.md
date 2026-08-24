@@ -58,7 +58,7 @@ addr,devices[],connect_fail,car_connectable}`, `mqtt{configured,connected,tls,br
 `syslog{configured,resolved,reachable,host,port,error}`,
 `tele{climate,drive,tires,closures}` (**only while the BLE link is up**), `link`, `vcsec_sleep`
 (the raw, **un-debounced** VCSEC sleep flag, for diagnostics only — not what drives the hero),
-`sys{board_mac,free_heap,min_free_heap,largest_block,uptime_s,wifi_reconnects,reset_reason,safe_mode}`
+`sys{board_mac,free_heap,min_free_heap,largest_block,uptime_s,wifi_reconnects,reset_reason,safe_mode,stack_min_free_bytes?{httpd?,vehicle?,auto_pair?,mqtt?}}`
 (**always present** — the block to read first on a remote triage),
 plus `vehicle{…}` / `last{…}` / `last_seen_s` charge snapshots, `last_reboot` (present ONLY when the heap watchdog restarted us — see the signature table),
 and `last_crash{reason,reason_code,fault,coredump,task,pc,backtrace[],corrupted,elf_sha256}`
@@ -83,13 +83,19 @@ curl -s http://<host>/status | jq '{
   sys:  {board_mac: .sys.board_mac,
          largest_block: .sys.largest_block, free_heap: .sys.free_heap,
          uptime_s: .sys.uptime_s, reset_reason: .sys.reset_reason,
-         safe_mode: .sys.safe_mode},
+         safe_mode: .sys.safe_mode,
+         stack_min_free_bytes: .sys.stack_min_free_bytes},
   last_seen_s, last_reboot, last_crash
 }'
 ```
 
 `sys.board_mac` names the physical ESP32 controller, not the vehicle. It deliberately remains
 visible in `/status?redact=1` so two otherwise identical replacement boards can be distinguished.
+`sys.stack_min_free_bytes`, when present, contains byte-valued historical minima since this boot,
+sampled by each owning task. A missing object or member means that task has not sampled yet (for
+example, safe mode does not start vehicle, auto-pair or MQTT); a reported `0` is a genuine critical
+measurement, not the absence sentinel. Compare trends and target-specific baselines rather than
+inventing one universal threshold across ESP32 variants.
 
 Confirm firmware version + running chip (a half-applied OTA shows a version mismatch here):
 
