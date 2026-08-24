@@ -1145,7 +1145,8 @@ The FreeRTOS value is already retrospective, so the sample after a deep call sti
 call's minimum; it need not run at the exact deepest instruction. `/status.sys.stack_min_free_bytes`
 and the MQTT device payload expose the same cached values. The reporting period is **this boot**;
 the first request cannot report its own not-yet-completed path, and a task not started yet (or
-deliberately absent in safe mode) is omitted rather than emitted as zero. These are measurements,
+deliberately absent in safe mode) is omitted. Presence is stored separately from the measurement,
+so a genuine zero-byte high-water mark remains visible as the critical value it is. These are measurements,
 not universal alarm thresholds: stack sizes and call paths differ across the four supported targets,
 so any alert floor needs target/runtime evidence rather than a Daikin-derived constant.
 

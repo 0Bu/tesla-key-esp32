@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -144,13 +145,13 @@ struct Inputs {
     uint32_t    wifi_reconnects{0};
     std::string reset_reason;          // logic/reset_reason.hpp slug for THIS boot
     bool        safe_mode{false};      // the latched boot-loop recovery state (safe_mode.cpp)
-    // Historical minimum free stack since boot, sampled by each owning task. Zero means never
-    // sampled and is omitted: safe mode intentionally never starts three of these tasks, and an
-    // absent task is not a task with zero bytes left.
-    uint32_t    httpd_stack_min_free_bytes{0};
-    uint32_t    vehicle_stack_min_free_bytes{0};
-    uint32_t    auto_pair_stack_min_free_bytes{0};
-    uint32_t    mqtt_stack_min_free_bytes{0};
+    // Historical minimum free stack since boot, sampled by each owning task. nullopt means never
+    // sampled and is omitted: safe mode intentionally never starts three of these tasks. An
+    // engaged zero is a valid, critical measurement and must remain distinguishable from absence.
+    std::optional<uint32_t> httpd_stack_min_free_bytes;
+    std::optional<uint32_t> vehicle_stack_min_free_bytes;
+    std::optional<uint32_t> auto_pair_stack_min_free_bytes;
+    std::optional<uint32_t> mqtt_stack_min_free_bytes;
 
     // ── last_crash — emitted only when the boot is NOTABLE ────────────────────────────────────
     // have_crash is crash_is_notable(): a real fault reset, or a dump for this build still sitting
@@ -387,13 +388,13 @@ inline void emit_status(const Inputs& in, E& e) {
         in.auto_pair_stack_min_free_bytes || in.mqtt_stack_min_free_bytes) {
         e.obj_begin("stack_min_free_bytes");
         if (in.httpd_stack_min_free_bytes)
-            e.num("httpd", (double)in.httpd_stack_min_free_bytes);
+            e.num("httpd", (double)*in.httpd_stack_min_free_bytes);
         if (in.vehicle_stack_min_free_bytes)
-            e.num("vehicle", (double)in.vehicle_stack_min_free_bytes);
+            e.num("vehicle", (double)*in.vehicle_stack_min_free_bytes);
         if (in.auto_pair_stack_min_free_bytes)
-            e.num("auto_pair", (double)in.auto_pair_stack_min_free_bytes);
+            e.num("auto_pair", (double)*in.auto_pair_stack_min_free_bytes);
         if (in.mqtt_stack_min_free_bytes)
-            e.num("mqtt", (double)in.mqtt_stack_min_free_bytes);
+            e.num("mqtt", (double)*in.mqtt_stack_min_free_bytes);
         e.obj_end();
     }
     e.obj_end();

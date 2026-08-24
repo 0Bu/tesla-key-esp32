@@ -1177,8 +1177,8 @@ static void test_status_model() {
         "sys.stack_min_free_bytes.auto_pair=2048\n"
         "sys.stack_min_free_bytes.mqtt=1024\n"));
 
-    // A task that has not sampled yet is absent, never reported as zero bytes free. This matters
-    // in safe mode, where the vehicle, pairing and MQTT tasks intentionally do not exist.
+    // A task that has not sampled yet is absent. This matters in safe mode, where the vehicle,
+    // pairing and MQTT tasks intentionally do not exist.
     Inputs stack_partial;
     stack_partial.vin = "UNKNOWN";
     stack_partial.version = "1.4.2";
@@ -1189,6 +1189,19 @@ static void test_status_model() {
     CHECK(stack_out.out.find("sys.stack_min_free_bytes.vehicle") == std::string::npos);
     CHECK(stack_out.out.find("sys.stack_min_free_bytes.auto_pair") == std::string::npos);
     CHECK(stack_out.out.find("sys.stack_min_free_bytes.mqtt") == std::string::npos);
+
+    // Absence is distinct from a genuine zero-byte high-water mark: zero is a critical measured
+    // value and must not disappear behind the unsampled sentinel.
+    Inputs stack_zero;
+    stack_zero.vin = "UNKNOWN";
+    stack_zero.version = "1.4.2";
+    stack_zero.httpd_stack_min_free_bytes = 0;
+    CollectEmitter stack_zero_out;
+    tk::status::emit_status(stack_zero, stack_zero_out);
+    CHECK(stack_zero_out.out.find("sys.stack_min_free_bytes.httpd=0\n") != std::string::npos);
+    CHECK(stack_zero_out.out.find("sys.stack_min_free_bytes.vehicle") == std::string::npos);
+    CHECK(stack_zero_out.out.find("sys.stack_min_free_bytes.auto_pair") == std::string::npos);
+    CHECK(stack_zero_out.out.find("sys.stack_min_free_bytes.mqtt") == std::string::npos);
 
     // Scenario 2 — asleep: BLE link down (dropped between polls), charge cache retained,
     // debounced VCSEC sleep proven; no devices seen, no connect failures.

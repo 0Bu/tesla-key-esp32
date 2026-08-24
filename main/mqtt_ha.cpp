@@ -437,14 +437,16 @@ static void publish_state() {
         cJSON_AddNumberToObject(o, "mqtt_reconnects", (double)s_reconnects.load());
         // Payload-only fleet diagnostics (no extra HA entities). Omit an unsampled task rather than
         // publishing zero bytes free for a task that has not run or is absent in safe mode.
-        const uint32_t httpd_stack = tk::stack_watch_min_free_bytes(tk::StackWatch::Httpd);
-        const uint32_t vehicle_stack = tk::stack_watch_min_free_bytes(tk::StackWatch::Vehicle);
-        const uint32_t auto_pair_stack = tk::stack_watch_min_free_bytes(tk::StackWatch::AutoPair);
-        const uint32_t mqtt_stack = tk::stack_watch_min_free_bytes(tk::StackWatch::Mqtt);
-        if (httpd_stack) cJSON_AddNumberToObject(o, "httpd_stack_min_free_bytes", httpd_stack);
-        if (vehicle_stack) cJSON_AddNumberToObject(o, "vehicle_stack_min_free_bytes", vehicle_stack);
-        if (auto_pair_stack) cJSON_AddNumberToObject(o, "auto_pair_stack_min_free_bytes", auto_pair_stack);
-        if (mqtt_stack) cJSON_AddNumberToObject(o, "mqtt_stack_min_free_bytes", mqtt_stack);
+        const auto httpd_stack = tk::stack_watch_min_free_bytes(tk::StackWatch::Httpd);
+        const auto vehicle_stack = tk::stack_watch_min_free_bytes(tk::StackWatch::Vehicle);
+        const auto auto_pair_stack = tk::stack_watch_min_free_bytes(tk::StackWatch::AutoPair);
+        const auto mqtt_stack = tk::stack_watch_min_free_bytes(tk::StackWatch::Mqtt);
+        if (httpd_stack) cJSON_AddNumberToObject(o, "httpd_stack_min_free_bytes", *httpd_stack);
+        if (vehicle_stack)
+            cJSON_AddNumberToObject(o, "vehicle_stack_min_free_bytes", *vehicle_stack);
+        if (auto_pair_stack)
+            cJSON_AddNumberToObject(o, "auto_pair_stack_min_free_bytes", *auto_pair_stack);
+        if (mqtt_stack) cJSON_AddNumberToObject(o, "mqtt_stack_min_free_bytes", *mqtt_stack);
         pub_json(s_topic[D_DEVICE], o);
     }
 }

@@ -5,10 +5,11 @@
 // The heap watchdog and /heap trend already expose heap exhaustion before and after a restart, but
 // a growing task frame otherwise stays invisible until the stack watchpoint panics. Each watched
 // task samples its OWN high-water mark; readers only consume the cached minimum and never inspect a
-// foreign task handle. A zero result means that task has not sampled yet (safe mode deliberately
-// leaves the vehicle, auto-pair and MQTT tasks absent).
+// foreign task handle. Sample presence is tracked separately so a measured zero remains visible;
+// safe mode deliberately leaves the vehicle, auto-pair and MQTT tasks unsampled.
 
 #include <cstdint>
+#include <optional>
 
 namespace tk {
 
@@ -25,7 +26,8 @@ enum class StackWatch : uint8_t {
 // Lock-free, allocation-free and safe on OOM/error paths.
 void stack_watch_sample(StackWatch which) noexcept;
 
-// Worst sampled headroom since boot, in bytes. Zero means never sampled.
-uint32_t stack_watch_min_free_bytes(StackWatch which) noexcept;
+// Worst sampled headroom since boot, in bytes. nullopt means never sampled; an engaged zero is a
+// valid and critical measurement.
+std::optional<uint32_t> stack_watch_min_free_bytes(StackWatch which) noexcept;
 
 }  // namespace tk
