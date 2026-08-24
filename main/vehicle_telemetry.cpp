@@ -10,6 +10,7 @@
 #include "logic/heap_watchdog.hpp"
 #include "ota_update.hpp"
 #include "heap_trend.hpp"
+#include "stack_watch.hpp"
 #include <esp_log.h>
 #include <esp_heap_caps.h>
 #include <esp_system.h>
@@ -345,6 +346,9 @@ void VehicleController::loop_task_fn_(void* arg) {
       // Gating it on the work below would make a long-but-legitimate command look like a hang; put
       // after the work, a throw would skip it and turn an already-contained OOM into a reboot.
       esp_task_wdt_reset();
+      // Retrospective: FreeRTOS retains the lowest free stack ever observed for this task, so a
+      // top-of-loop sample records the deepest path of the previous cycle and no branch can skip it.
+      tk::stack_watch_sample(tk::StackWatch::Vehicle);
 
       // Iteration-boundary containment (issue #204): the poll injections + bookkeeping below
       // call tesla-ble builders and touch std::string caches that can throw std::bad_alloc.

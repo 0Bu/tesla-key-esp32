@@ -186,6 +186,9 @@ vehicle_telemetry.cpp  → protobuf parsers, cache callbacks, loop_task (backgro
                          sleep gating), data queries
 vehicle_pairing.cpp    → auto_pair_task, key mgmt/fingerprint, session invalidation,
                          health probe   (split map: vehicle_ctrl_internal.hpp)
+stack_watch.cpp/.hpp   → allocation-free per-owning-task historical minimum stack headroom for
+                         httpd, vehicle, auto-pair and MQTT; optional cache-only /status + MQTT
+                         output until sampled, with a genuine zero kept distinct from absence
 http_server.cpp        → esp_http_server on port 80: wildcard dispatch + the handle_all
                          try/catch OOM guard (503) EVERY handler runs under
 http_api.cpp           → evcc routes (/api/1/…, /api/proxy/1/version); command names/args
@@ -356,7 +359,7 @@ POST /api/1/vehicles/{VIN}/command/{command}   # execute command
 GET  /api/1/vehicles/{VIN}/vehicle_data        # charge state
 GET  /api/1/vehicles/{VIN}/body_controller_state
 GET  /status                                   # web-UI JSON snapshot (wifi, ble, mqtt, syslog, vehicle cache, read-only telemetry under "tele"). The web UI's live feed — app.js polls it every 4 s (cache-busted, no-store).
-                                               # ALWAYS carries sys{board_mac,free_heap,min_free_heap,largest_block,uptime_s,wifi_reconnects,reset_reason,safe_mode} — board_mac identifies the physical controller while the other fields expose its runtime health.
+                                               # ALWAYS carries sys{board_mac,free_heap,min_free_heap,largest_block,uptime_s,wifi_reconnects,reset_reason,safe_mode}; optional sys.stack_min_free_bytes{httpd?,vehicle?,auto_pair?,mqtt?} reports byte-valued since-boot task minima. Missing means unsampled; 0 is a genuine critical measurement.
                                                # last_crash{reason,reason_code,fault,coredump,task,pc,backtrace[],corrupted,elf_sha256} appears ONLY when the boot is notable (a fault reset, or a dump for this build still in flash, not dismissed) — presence is the signal.
 GET  /status?redact=1                          # the BUG-REPORT form: the reporter-identifying vehicle/network values (vin, ip, wifi.ssid, ble.addr + every scanned neighbour's, mqtt.broker, syslog.host) read "<redacted>". sys.board_mac deliberately remains visible so the physical controller can be diagnosed. The KEY is always kept — an omitted field forges an "older build" signal. Opt-in per request; the dashboard polls the unredacted payload
 POST /scan                                     # start a time-limited BLE discovery scan
@@ -548,7 +551,9 @@ catalog: [`docs/FEATURES.md`](../docs/FEATURES.md).
 - **Task watchdog** (60 s, `PANIC=y`; `vehicle_loop` + `mqtt_pub` subscribed) — catches a task
   blocked forever on a semaphore, the BLE stack or a socket, with the heap looking perfectly
   healthy. The budget is sized against the LONGEST legitimate block, which is not the 50 ms loop
-  cadence but the vehicle mutex (20 s for a command, 30 s for `pair()`).
+  cadence but the vehicle mutex (20 s for a command, 30 s for `pair()`). `mqtt_pub` feeds only
+  after each `esp_mqtt_client_publish()` has returned: a completed failed publish is progress,
+  while a publish blocked inside the network call still trips the watchdog.
 - **Safe mode** (`logic/boot_guard.hpp`, `safe_mode.cpp`) — 4 consecutive CRASH boots ⇒ WiFi + web UI
   + OTA only. The heap watchdog's cap counts only restarts WE chose; a panic loop was uncounted
   before this, and on this device every boot re-opens the car's polling window. It LATCHES: only a

@@ -5,6 +5,7 @@
 
 #include "vehicle_ctrl.hpp"
 #include "vehicle_ctrl_internal.hpp"
+#include "stack_watch.hpp"
 #include "ota_update.hpp"
 #include <esp_log.h>
 #include <esp_timer.h>
@@ -51,6 +52,9 @@ void VehicleController::auto_pair_task_fn_(void* arg) {
     bool warned_no_vin = false;
     tk::PeriodicLogState unpaired_notice;
     while (true) {
+      // Pairing/crypto is an allocation-rich 8 KiB task. Record its historical minimum at the one
+      // point every supervision round reaches, before an exception or early continue can skip it.
+      tk::stack_watch_sample(tk::StackWatch::AutoPair);
       // Iteration-boundary containment (issue #204): pair()/generate_key()/health_probe_() run
       // tesla-ble crypto + std::string work that can throw std::bad_alloc. An escape would unwind
       // into the FreeRTOS C task trampoline → std::terminate → reboot (and a reboot loop re-opens

@@ -21,6 +21,7 @@ idf_component_register(
         "diag_log.cpp"
         "diag_crash.cpp"
         "safe_mode.cpp"
+        "stack_watch.cpp"
         "heap_trend.cpp"
         "config_blob.cpp"
         "ota_update.cpp"

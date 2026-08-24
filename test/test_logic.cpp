@@ -1041,6 +1041,10 @@ static void test_status_model() {
     Inputs in;
     in.vin = "5YJ3E1EA7KF000316"; in.ip = "192.168.1.50"; in.version = "1.4.2";
     in.board_mac = "02:00:00:32:55:20";
+    in.httpd_stack_min_free_bytes = 4096;
+    in.vehicle_stack_min_free_bytes = 3072;
+    in.auto_pair_stack_min_free_bytes = 2048;
+    in.mqtt_stack_min_free_bytes = 1024;
     in.key_present = true; in.key_fingerprint = "AB:CD:EF:01";
     in.key_created = 1750000000; in.paired = true; in.paired_at = 1750500000;
     in.wifi_connected = true; in.wifi_ssid = "HomeNet"; in.wifi_rssi = -55; in.wifi_std = "Wi-Fi 6";
@@ -1166,7 +1170,38 @@ static void test_status_model() {
         "sys.uptime_s=0\n"
         "sys.wifi_reconnects=0\n"
         "sys.reset_reason=\"\"\n"
-        "sys.safe_mode=false\n"));
+        "sys.safe_mode=false\n"
+        "sys.stack_min_free_bytes{\n"
+        "sys.stack_min_free_bytes.httpd=4096\n"
+        "sys.stack_min_free_bytes.vehicle=3072\n"
+        "sys.stack_min_free_bytes.auto_pair=2048\n"
+        "sys.stack_min_free_bytes.mqtt=1024\n"));
+
+    // A task that has not sampled yet is absent. This matters in safe mode, where the vehicle,
+    // pairing and MQTT tasks intentionally do not exist.
+    Inputs stack_partial;
+    stack_partial.vin = "UNKNOWN";
+    stack_partial.version = "1.4.2";
+    stack_partial.httpd_stack_min_free_bytes = 1536;
+    CollectEmitter stack_out;
+    tk::status::emit_status(stack_partial, stack_out);
+    CHECK(stack_out.out.find("sys.stack_min_free_bytes.httpd=1536\n") != std::string::npos);
+    CHECK(stack_out.out.find("sys.stack_min_free_bytes.vehicle") == std::string::npos);
+    CHECK(stack_out.out.find("sys.stack_min_free_bytes.auto_pair") == std::string::npos);
+    CHECK(stack_out.out.find("sys.stack_min_free_bytes.mqtt") == std::string::npos);
+
+    // Absence is distinct from a genuine zero-byte high-water mark: zero is a critical measured
+    // value and must not disappear behind the unsampled sentinel.
+    Inputs stack_zero;
+    stack_zero.vin = "UNKNOWN";
+    stack_zero.version = "1.4.2";
+    stack_zero.httpd_stack_min_free_bytes = 0;
+    CollectEmitter stack_zero_out;
+    tk::status::emit_status(stack_zero, stack_zero_out);
+    CHECK(stack_zero_out.out.find("sys.stack_min_free_bytes.httpd=0\n") != std::string::npos);
+    CHECK(stack_zero_out.out.find("sys.stack_min_free_bytes.vehicle") == std::string::npos);
+    CHECK(stack_zero_out.out.find("sys.stack_min_free_bytes.auto_pair") == std::string::npos);
+    CHECK(stack_zero_out.out.find("sys.stack_min_free_bytes.mqtt") == std::string::npos);
 
     // Scenario 2 — asleep: BLE link down (dropped between polls), charge cache retained,
     // debounced VCSEC sleep proven; no devices seen, no connect failures.
