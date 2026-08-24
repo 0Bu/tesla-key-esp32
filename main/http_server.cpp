@@ -5,6 +5,7 @@
 // http_common.cpp. See http_handlers.hpp for the split map.
 
 #include "http_handlers.hpp"
+#include "stack_watch.hpp"
 #include <esp_log.h>
 #include <cstring>
 #include <exception>
@@ -93,6 +94,12 @@ static esp_err_t handle_all_dispatch(httpd_req_t* req) {
 // cause is the low largest-free-block; this is the safety net so no request can crash
 // the box.)
 static esp_err_t handle_all(httpd_req_t* req) {
+    // Sample on every exit, including the exception fallbacks. The request that came closest to
+    // the limit is exactly the one most likely to throw; a destructor also covers every early
+    // return without duplicating the measurement at each route.
+    struct SampleHttpdStackOnExit {
+        ~SampleHttpdStackOnExit() noexcept { tk::stack_watch_sample(tk::StackWatch::Httpd); }
+    } sample_httpd_stack;
     try {
         return handle_all_dispatch(req);
     } catch (const std::exception& e) {

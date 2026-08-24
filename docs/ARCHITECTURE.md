@@ -389,6 +389,9 @@ grouped under one device. **Read-only by design** — no command topics are subs
   (re)connect it (re)sends discovery + `online` + an immediate snapshot, then republishes
   state every interval. The same active-window gating that lets the car sleep applies to
   the *source* polls, so MQTT keeps serving the last-known (retained) values while asleep.
+  The 60 s task watchdog is fed at the loop boundary and after every completed publish: a
+  discovery burst that keeps making progress cannot false-trip it, while a single publish that
+  never returns still does.
 
 ## Syslog forwarder
 
@@ -1126,6 +1129,25 @@ Not in the table (ESP-IDF-owned, priorities from IDF Kconfig, not `task_config.h
 `cache_mutex_` and every `set_*_callback` lambda; the **esp_http_server task** — it runs every
 HTTP/MCP handler, i.e. the `command_mutex_` cycles and cache copies; plus the usual esp_timer /
 WiFi / LwIP system tasks.
+
+### Live stack-headroom evidence
+
+`main/stack_watch.cpp` makes the task inventory's second memory budget observable before a crash.
+It samples `uxTaskGetStackHighWaterMark(nullptr)` from the owning task only and retains the lowest
+free value, in ESP-IDF bytes, for the current boot. Four allocation-rich paths are watched:
+
+- `httpd`: once on every request exit, including exception/OOM fallbacks;
+- `vehicle`: at every 50 ms loop boundary;
+- `auto_pair`: at every pairing-supervisor round; and
+- `mqtt`: at every 500 ms publisher loop boundary.
+
+The FreeRTOS value is already retrospective, so the sample after a deep call still contains that
+call's minimum; it need not run at the exact deepest instruction. `/status.sys.stack_min_free_bytes`
+and the MQTT device payload expose the same cached values. The reporting period is **this boot**;
+the first request cannot report its own not-yet-completed path, and a task not started yet (or
+deliberately absent in safe mode) is omitted rather than emitted as zero. These are measurements,
+not universal alarm thresholds: stack sizes and call paths differ across the four supported targets,
+so any alert floor needs target/runtime evidence rather than a Daikin-derived constant.
 
 ### Atomics doctrine
 
