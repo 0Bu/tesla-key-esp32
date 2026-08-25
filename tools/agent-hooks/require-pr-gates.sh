@@ -2,9 +2,9 @@
 # Aggregate, runner-neutral Tesla PR policy.
 #
 # Actions:
-#   * gh pr create / git push to an existing PR -> current $skill-audit record
-#   * the one canonical gh pr merge command      -> current $project-review record and conditional
-#                                                    $feature-docs record
+#   * gh pr create / git push to an existing PR -> current $skill-audit and $pr-hygiene records
+#   * the one canonical gh pr merge command      -> current $project-review and $pr-hygiene records,
+#                                                    plus the conditional $feature-docs record
 # MCP merges, auto-merge/queue activation, direct REST/GraphQL merges, ambiguous payloads, and
 # unverifiable network state fail closed. This lexical hook is defense in depth; branch protection
 # and human review remain authoritative.
