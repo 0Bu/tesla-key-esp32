@@ -672,7 +672,7 @@ function editMqtt(){
 }
 function editSyslog(){
   var sy=state&&state.syslog, cur=(sy&&sy.host)?(sy.host+':'+(sy.port||514)):'';
-  var v=prompt('Syslog server for the diagnostic log (IP:PORT, e.g. 192.168.1.22:514).\nLeave empty to disable.',cur);
+  var v=prompt('Syslog server for the diagnostic log (IP:PORT, e.g. 192.168.1.99:514).\nLeave empty to disable.',cur);
   if(v==null) return;
   v=v.trim();
   if(v && v.indexOf(' ')>=0){ toast('Invalid server — use IP:PORT','err'); return; }

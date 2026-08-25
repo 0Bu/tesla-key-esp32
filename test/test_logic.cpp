@@ -407,30 +407,30 @@ static void test_syslog_policy() {
     std::string host; int port = 0;
 
     // host:port.
-    CHECK(tk::syslog_target_parse("192.168.1.22:514", host, port));
-    CHECK(host == "192.168.1.22" && port == 514);
+    CHECK(tk::syslog_target_parse("192.168.1.99:514", host, port));
+    CHECK(host == "192.168.1.99" && port == 514);
     CHECK(tk::syslog_target_parse("syslog.lan:1514", host, port));
     CHECK(host == "syslog.lan" && port == 1514);
 
     // Bare host defaults to port 514.
-    CHECK(tk::syslog_target_parse("192.168.1.22", host, port));
-    CHECK(host == "192.168.1.22" && port == 514);
+    CHECK(tk::syslog_target_parse("192.168.1.99", host, port));
+    CHECK(host == "192.168.1.99" && port == 514);
 
     // Rejected: empty, empty host/port either side of ':', a non-numeric or
     // out-of-range port.
     CHECK(!tk::syslog_target_parse("", host, port));
     CHECK(!tk::syslog_target_parse(":514", host, port));
-    CHECK(!tk::syslog_target_parse("192.168.1.22:", host, port));
-    CHECK(!tk::syslog_target_parse("192.168.1.22:abc", host, port));
-    CHECK(!tk::syslog_target_parse("192.168.1.22:0", host, port));
-    CHECK(!tk::syslog_target_parse("192.168.1.22:65536", host, port));
+    CHECK(!tk::syslog_target_parse("192.168.1.99:", host, port));
+    CHECK(!tk::syslog_target_parse("192.168.1.99:abc", host, port));
+    CHECK(!tk::syslog_target_parse("192.168.1.99:0", host, port));
+    CHECK(!tk::syslog_target_parse("192.168.1.99:65536", host, port));
 
     // /set_syslog validation: empty always disables; a valid target passes; a
     // malformed one, or one carrying whitespace, is rejected.
     CHECK(tk::syslog_target_is_plausible(""));
-    CHECK(tk::syslog_target_is_plausible("192.168.1.22:514"));
-    CHECK(!tk::syslog_target_is_plausible("192.168.1.22:abc"));
-    CHECK(!tk::syslog_target_is_plausible("192.168.1.22: 514"));
+    CHECK(tk::syslog_target_is_plausible("192.168.1.99:514"));
+    CHECK(!tk::syslog_target_is_plausible("192.168.1.99:abc"));
+    CHECK(!tk::syslog_target_is_plausible("192.168.1.99: 514"));
     CHECK(!tk::syslog_target_is_plausible(std::string(200, 'a') + ":514"));
 
     // Send-failure classification: routing/host errors are HARD (re-resolve now);

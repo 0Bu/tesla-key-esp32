@@ -111,7 +111,7 @@ Syslog collector — handy for watching a pairing or reconnect live, or for keep
 past a reboot.
 
 1. In the web UI, open the **Connections** panel and tap the **Syslog** row.
-2. Enter your collector as `IP:PORT` (e.g. `192.168.1.22:514`) and save. The device reboots.
+2. Enter your collector as `IP:PORT` (e.g. `192.168.1.99:514`) and save. The device reboots.
 3. Leave the field empty to turn Syslog off again.
 
 ---
