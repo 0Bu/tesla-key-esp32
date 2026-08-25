@@ -444,7 +444,7 @@ UDP Syslog collector (RFC 5424), best-effort. Useful to watch a pairing/reconnec
 keep history past the in-RAM ring's ~16 KB / a reboot.
 
 **Enable:** set the server in the web UI (Connections → Syslog, `IP:PORT`, e.g.
-`192.168.1.22:514`; a bare host defaults to port 514) — stored in NVS (`syslog_uri`) and
+`192.0.2.1:514`; a bare host defaults to port 514) — stored in NVS (`syslog_uri`) and
 applied after the reboot it triggers. Leave empty to disable. Compile-time default:
 `CONFIG_TESLA_SYSLOG_SERVER` (`""`), overridden by the NVS value.
 

@@ -260,6 +260,10 @@ case "$kind" in
       echo "BLOCKED: gh pr create requires one current top-level \$skill-audit record for $anchor." >&2
       exit 2
     }
+    record_ok "$body" pr-hygiene "$anchor" || {
+      echo "BLOCKED: gh pr create requires one current top-level \$pr-hygiene record for $anchor." >&2
+      exit 2
+    }
     ;;
   push)
     anchor="$(gate_push_head_sha "$spec")" || {
@@ -270,13 +274,17 @@ case "$kind" in
     case "$rc" in
       0) ;;
       1) exit 0 ;;
-      *) echo "BLOCKED: existing-PR state is unreadable; skill-audit gate fails closed." >&2; exit 2 ;;
+      *) echo "BLOCKED: existing-PR state is unreadable; PR gates fail closed." >&2; exit 2 ;;
     esac
     pr_head="$(printf '%s' "$pr" | head -n 1)"
     body="$(printf '%s' "$pr" | tail -n +2)"
     printf '%s' "$pr_head" | grep -Eq '^[0-9a-fA-F]{40}$' || exit 2
     record_ok "$body" skill-audit "$anchor" || {
       echo "BLOCKED: git push to an open PR requires one current top-level \$skill-audit record for $anchor." >&2
+      exit 2
+    }
+    record_ok "$body" pr-hygiene "$anchor" || {
+      echo "BLOCKED: git push to an open PR requires one current top-level \$pr-hygiene record for $anchor." >&2
       exit 2
     }
     ;;
@@ -322,6 +330,10 @@ PY
     body="$(cat "$body_file")" || exit 2
     record_ok "$body" project-review "$head_sha" || {
       echo "BLOCKED: merge/check requires one current top-level \$project-review record for $head_sha." >&2
+      exit 2
+    }
+    record_ok "$body" pr-hygiene "$head_sha" || {
+      echo "BLOCKED: merge/check requires one current top-level \$pr-hygiene record for $head_sha." >&2
       exit 2
     }
     if [ "$kind" = check ]; then

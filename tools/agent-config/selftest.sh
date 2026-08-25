@@ -19,6 +19,9 @@ const manifest = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
 const files = new Set([
   ".mcp.json",
   ".codex/migration-manifest.json",
+  ".github/PULL_REQUEST_TEMPLATE.md",
+  "docs/AGENT_MIGRATION.md",
+  "docs/FEATURES.md",
   "tools/agent-config/safety-invariants.json",
   "tools/agent-config/check_hooks.py",
   "tools/agent-hooks/agent_hook.py",
@@ -160,6 +163,26 @@ fixture="$WORK/skill-frontmatter"; make_fixture "$fixture"
 perl -0pi -e 's/^description:/model: canary\ndescription:/m' \
   "$fixture/.agents/skills/add-logic-test/SKILL.md"
 expect_failure "canonical skill model pin" "$fixture" "frontmatter keys must be exactly"
+
+fixture="$WORK/pr-hygiene-ranges"; make_fixture "$fixture"
+perl -0pi -e 's/192\.0\.2\.0\/24/192.168.0.0\/16/' \
+  "$fixture/.agents/skills/pr-hygiene/SKILL.md"
+expect_failure "pr-hygiene documentation ranges" "$fixture" "privacy/language gate contract"
+
+fixture="$WORK/ship-hygiene-gate"; make_fixture "$fixture"
+perl -0pi -e 's/\$pr-hygiene clean — content gate/\$project-review clean — content gate/' \
+  "$fixture/.agents/skills/ship/SKILL.md"
+expect_failure "ship pr-hygiene merge gate" "$fixture" "ship is missing a merge-gate contract"
+
+fixture="$WORK/migration-hygiene"; make_fixture "$fixture"
+perl -0pi -e 's/the independent `\$pr-hygiene` content screen/the content screen/' \
+  "$fixture/docs/AGENT_MIGRATION.md"
+expect_failure "migration pr-hygiene gate" "$fixture" "docs/AGENT_MIGRATION.md is missing a PR-policy contract"
+
+fixture="$WORK/feature-catalog-hygiene"; make_fixture "$fixture"
+perl -0pi -e 's/publishing personal\/private identifiers or non-English PR\/docs content/publishing unchecked content/' \
+  "$fixture/docs/FEATURES.md"
+expect_failure "feature catalog pr-hygiene gate" "$fixture" "docs/FEATURES.md is missing a PR-policy contract"
 
 fixture="$WORK/usb-live-boundary"; make_fixture "$fixture"
 perl -0pi -e 's/USB-write approval does not authorize live verification/USB write also authorizes live verification/g' \
@@ -308,9 +331,14 @@ perl -0pi -e 's/\[`docs\/README\.md`\]\(\.\.\/\.\.\/\.\.\/docs\/README\.md\) own
 expect_failure "vehicle audit owner contract" "$fixture" "exact documentation-owner contract"
 
 fixture="$WORK/project-review-feature-path"; make_fixture "$fixture"
-perl -0pi -e 's/, and\n  `tools\/agent-config\/`/, and\n  `tools\/agent-config-missing\/`/' \
+perl -0pi -e 's/tools\/agent-config\//tools\/agent-config-missing\//' \
   "$fixture/.agents/skills/project-review/SKILL.md"
 expect_failure "project-review feature path" "$fixture" "omits a relevance-scope path"
+
+fixture="$WORK/feature-template-path"; make_fixture "$fixture"
+perl -0pi -e 's/\.github\/PULL_REQUEST_TEMPLATE\.md/.github\/MISSING_TEMPLATE.md/g' \
+  "$fixture/.agents/skills/feature-docs/SKILL.md"
+expect_failure "feature-docs PR template path" "$fixture" "omits a relevance-scope path"
 
 fixture="$WORK/skill-audit-release-path"; make_fixture "$fixture"
 perl -0pi -e 's/scripts\/release-relevance\.sh/scripts\/release-relevance-missing.sh/' \

@@ -1,6 +1,6 @@
 ---
 name: feature-docs
-description: Keep docs/FEATURES.md (this firmware's technical-feature catalog) in sync when a platform feature lands or changes — including runner-neutral agent policy under AGENTS.md, .agents/, .codex/, tools/agent-hooks/, and tools/agent-config/. Use after implementing or changing a technical feature, before opening the PR. Required before merging a PR whose diff reaches those agent-policy paths, main/, test/, sdkconfig.defaults, partitions.csv, the shipped Pages runtime, release-relevance.sh, or the build/signed-preview/preview-cleanup release workflows.
+description: Keep docs/FEATURES.md (this firmware's technical-feature catalog) in sync when a platform feature lands or changes — including runner-neutral agent policy under AGENTS.md, .agents/, .codex/, .github/PULL_REQUEST_TEMPLATE.md, tools/agent-hooks/, and tools/agent-config/. Use after implementing or changing a technical feature, before opening the PR. Required before merging a PR whose diff reaches those agent-policy paths, main/, test/, sdkconfig.defaults, partitions.csv, the shipped Pages runtime, release-relevance.sh, or the build/signed-preview/preview-cleanup release workflows.
 ---
 
 > **Canonical runner-neutral skill.** Read [`AGENTS.md`](../../../AGENTS.md) before acting.
@@ -23,7 +23,8 @@ there, so the mechanism looks optional and gets deleted, or gets built a second 
 
 [`tools/agent-hooks/require-pr-gates.sh`](../../../tools/agent-hooks/require-pr-gates.sh) gates a merge on this having been run — but only when the
 PR's diff reaches `main/`, `test/`, `sdkconfig.defaults*`, `partitions.csv`, runner-neutral
-agent policy (`AGENTS.md`, `.agents/`, `.codex/`, `tools/agent-hooks/`, `tools/agent-config/`) or
+agent policy (`AGENTS.md`, `.agents/`, `.codex/`, `.github/PULL_REQUEST_TEMPLATE.md`,
+`tools/agent-hooks/`, `tools/agent-config/`) or
 the shipped Pages runtime (`docs/index.html`, `installer-bootstrap.mjs`,
 `serial-port-release.mjs`, `web-installer.mjs`, `docs/vendor/`) or
 `.github/workflows/{build,signed-pr-preview,pr-preview-cleanup}.yml`, or the cumulative
@@ -49,8 +50,8 @@ that separate authority through the appropriate workflow.
      safety contract
    - changes how CI decides whether current main still contains Release/Pages-unpublished firmware
    - changes runner-neutral instructions, skills, reviewer/config registration, lifecycle gates, or
-     their validators under `AGENTS.md`, `.agents/`, `.codex/`, `tools/agent-hooks/`, or
-     `tools/agent-config/`
+     their validators under `AGENTS.md`, `.agents/`, `.codex/`,
+     `.github/PULL_REQUEST_TEMPLATE.md`, `tools/agent-hooks/`, or `tools/agent-config/`
    - adds a new `main/logic/` header, or a new `main/*.cpp` subsystem
    - changes `partitions.csv`
    - turns a stub into something real (or the reverse)

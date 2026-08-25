@@ -206,7 +206,7 @@ for (const [label, names] of [
 
 const highRiskSkills = new Set(["e2e-evcc", "flash-esp32", "ship", "usb-recovery"]);
 const readOnlySkills = new Set([
-  "device-diag", "display-preview", "ota-release-verify", "project-review",
+  "device-diag", "display-preview", "ota-release-verify", "pr-hygiene", "project-review",
   "skill-audit", "vehicle-command-audit",
 ]);
 const ownerContracts = new Map([
@@ -237,20 +237,33 @@ const reviewedSkillSha256 = new Map([
   ["device-diag", {canonical: "af7fb5294bf0d138cdc887adadf616882ca6a8245b9b682379142d48f1df1a50", legacy: "27017438cde102b513b119171a1988aaf3e1079f2676f0d62a70e26d451edc43"}],
   ["display-preview", {canonical: "4bff95d0314d50ce29d67beac7ef4f9db1ebcbb2fa609335e560e162f5a1ed46", legacy: "486c6a3b7a7bdb86a587ed97f2368e687524e02e58f0adba4c052376eb23d0d5"}],
   ["e2e-evcc", {canonical: "04489835e6266dec020f4c5aa6663d228d47c5b880dcf6928379312b00c444cc", legacy: "8f40271c3fad7da834ed4cec4f231761af523cacf1ca14f8acb2f024a19a47dc"}],
-  ["feature-docs", {canonical: "1f2851768ed02689d0a0613b644153b111e2f8f45d7e4fc2b60f39b0d01c6a6a", legacy: "a34447175d62ae1be15a9fbcf5f81af543566a1d8ead2accfa73da3e68597cb6"}],
+  ["feature-docs", {canonical: "43c1db745640619aea155b2e34b8fb0127b1d681b936294bffdfd8422566bb46", legacy: "708795047c04ced5a269cba056217432541bdf8a1381f478563b58aa289e2af7"}],
   ["flash-esp32", {canonical: "d9945b914aa48ef7c150e207fc268011677f54ef6acde837c09111cf3229b71b", legacy: "d77312d51aa6d159b8e6a694e14f1bfaffb2709b8588a7bf51a0ac160fe2b84b"}],
   ["ota-release-verify", {canonical: "3b0c7941871b9c350bf64a046e3344ac3b5effa2228daf375428b97e0168a511", legacy: "074c330c0f1d9676922f8dbce4605d2674c021013cb5125b2c595eb6a85bec66"}],
-  ["project-review", {canonical: "90d16cb463f0918cf8fae9c49faeaa1aa935e47a44e6578c32e711e0647000f6", legacy: "0e754dffdbdfc6998b55895bc6d120706a02f48a76a679516752083ae856a9e9"}],
-  ["ship", {canonical: "6424efe4f169b067ad407e26960b71a0765888ecd765152e11d01ba2db74bed7", legacy: "bebfbfa087093cd4e3914f306a67483e99f8beeb49c2479ee1ca8d1c9382a0c5"}],
-  ["skill-audit", {canonical: "ce322222e17344f254ab89c86b445b0cf608d4ae09f94c62b3507700ee382806", legacy: "14514707fba12dfe961252632657e7319f1d8816ee6f15b66888f828dea75d76"}],
+  ["pr-hygiene", {canonical: "baaf53e5114859768213e7021ebf4c960a82fefd0ea90046fcbf575357bdbb72", legacy: "c01e4ffa18ded6ced5f4a8e37c031d10a38243e268003795ce63aac173049f11"}],
+  ["project-review", {canonical: "ff8b5a3424c7414bc3402f2ab85e41e5f1385381a74dffb5f7fb5ddf6c8239a1", legacy: "0e754dffdbdfc6998b55895bc6d120706a02f48a76a679516752083ae856a9e9"}],
+  ["ship", {canonical: "604da450727cb85e56c7cbc7ac6924b6378e7bb15a2ef4a5fd93983588af6ed1", legacy: "bebfbfa087093cd4e3914f306a67483e99f8beeb49c2479ee1ca8d1c9382a0c5"}],
+  ["skill-audit", {canonical: "d4c4a345345cda8aa26966a6cfd6c8889d8f178656571ac0489f925a527b6a75", legacy: "14514707fba12dfe961252632657e7319f1d8816ee6f15b66888f828dea75d76"}],
   ["usb-recovery", {canonical: "25b5d04627894c1d5bb4fea816cc81624efc540bdfc85a1229772b7faf689e32", legacy: "bc2232300747fcac0c77f4dc706bc72c640c2b42079adacf09e56478bca03af6"}],
   ["vehicle-command-audit", {canonical: "30ab4506d71e11d3993d66ca566402e024d12ae7502fd2b0bb056778cdde191a", legacy: "144feba94438891a66f96b545db0f3284c57db24a29f23e2ca9282b2d5c60072"}],
 ]);
 const featureDocsScopeTokens = [
   "main/", "test/", "sdkconfig.defaults*", "partitions.csv", "AGENTS.md", ".agents/", ".codex/",
+  ".github/PULL_REQUEST_TEMPLATE.md",
   "tools/agent-hooks/", "tools/agent-config/", "docs/index.html", "installer-bootstrap.mjs",
   "serial-port-release.mjs", "web-installer.mjs", "docs/vendor/",
   "build,signed-pr-preview,pr-preview-cleanup", "scripts/release-relevance.sh",
+];
+const prHygieneContracts = [
+  "### `PRIVACY-LEAK`", "### `LANGUAGE`", "at PR creation, every push, and merge",
+  "192.0.2.0/24", "198.51.100.0/24", "203.0.113.0/24", "2001:db8::/32",
+  "- [x] `$pr-hygiene` clean — content gate @ <short-sha>",
+];
+const shipMergeGateContracts = [
+  "- [x] $project-review clean — merge gate @ <sha>",
+  "- [x] $pr-hygiene clean — content gate @ <sha>",
+  "- [x] $feature-docs synced — merge gate @ <sha>",
+  "`$project-review` does not establish `$pr-hygiene` readiness",
 ];
 for (const [name, pair] of skillMappings) {
   const legacy = restrictedFrontmatter(repoPath(pair.source), `legacy skill ${name}`);
@@ -299,6 +312,18 @@ for (const [name, pair] of skillMappings) {
       die(1, "canonical usb-recovery skill is missing the exact operational live-verification stop");
     }
   }
+  if (name === "pr-hygiene") {
+    const normalized = normalizeProse(canonical.text);
+    if (prHygieneContracts.some((required) => !normalized.includes(required))) {
+      die(1, "pr-hygiene is missing a privacy/language gate contract");
+    }
+  }
+  if (name === "ship") {
+    const normalized = normalizeProse(canonical.text);
+    if (shipMergeGateContracts.some((required) => !normalized.includes(required))) {
+      die(1, "ship is missing a merge-gate contract");
+    }
+  }
   const requiredOwners = ownerContracts.get(name);
   if (requiredOwners) {
     const normalized = normalizeProse(canonical.text);
@@ -331,6 +356,26 @@ for (const [name, pair] of skillMappings) {
     if (digest !== expectedDigests[side]) {
       die(1, `${side} ${name} exact reviewed content contract drifted`);
     }
+  }
+}
+
+for (const [relative, contracts] of new Map([
+  ["AGENTS.md", ["`$pr-hygiene` is required at PR creation, every push, and every merge"]],
+  [".github/PULL_REQUEST_TEMPLATE.md", [
+    "These four boxes ARE the publish/merge gates",
+    "`$pr-hygiene` clean — content gate @ <sha>",
+  ]],
+  ["docs/AGENT_MIGRATION.md", ["the independent `$pr-hygiene` content screen"]],
+  ["docs/FEATURES.md", [
+    "Runner-neutral agent policy and four SHA-bound PR gates",
+    "publishing personal/private identifiers or non-English PR/docs content",
+  ]],
+])) {
+  let text;
+  try { text = normalizeProse(fs.readFileSync(repoPath(relative), "utf8")); }
+  catch (error) { die(1, `${relative} is unreadable: ${error.message}`); }
+  if (contracts.some((required) => !text.includes(required))) {
+    die(1, `${relative} is missing a PR-policy contract`);
   }
 }
 
