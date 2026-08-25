@@ -1,0 +1,56 @@
+diff --git a/include/vehicle.h b/include/vehicle.h
+--- a/include/vehicle.h
++++ b/include/vehicle.h
+@@ -14,0 +15 @@
++#include <cstdint>
+@@ -309,0 +311,3 @@
++  std::chrono::steady_clock::time_point last_rx_recovery_warning_log_{};
++  std::chrono::steady_clock::time_point last_rx_recovery_error_log_{};
++  uint32_t suppressed_rx_recovery_logs_{0};
+@@ -340,0 +345 @@
++  void log_rx_recovery_(const char *reason, bool severe = false);
+diff --git a/src/vehicle.cpp b/src/vehicle.cpp
+--- a/src/vehicle.cpp
++++ b/src/vehicle.cpp
+@@ -70,0 +71,23 @@
++void Vehicle::log_rx_recovery_(const char *reason, bool severe) {
++  constexpr auto kLogInterval = std::chrono::hours(1);
++  const auto now = std::chrono::steady_clock::now();
++  auto &last_log = severe ? last_rx_recovery_error_log_ : last_rx_recovery_warning_log_;
++  if (last_log != std::chrono::steady_clock::time_point{} &&
++      now - last_log < kLogInterval) {
++    if (suppressed_rx_recovery_logs_ != UINT32_MAX) {
++      ++suppressed_rx_recovery_logs_;
++    }
++    return;
++  }
++
++  if (severe) {
++    LOG_ERROR("RX framing recovery: %s; suppressed %" PRIu32 " similar events", reason,
++              suppressed_rx_recovery_logs_);
++  } else {
++    LOG_WARNING("RX framing recovery: %s; suppressed %" PRIu32 " similar events", reason,
++                suppressed_rx_recovery_logs_);
++  }
++  last_log = now;
++  suppressed_rx_recovery_logs_ = 0;
++}
++
+@@ -639 +662 @@
+-    LOG_ERROR("Invalid message length %d, attempting buffer recovery", msg_len);
++    log_rx_recovery_("invalid message length; attempting recovery");
+@@ -643 +666 @@
+-        LOG_ERROR("Severe buffer corruption detected (length: %d), clearing buffer", msg_len);
++        log_rx_recovery_("severe buffer corruption; clearing buffer", true);
+@@ -645 +668 @@
+-        LOG_WARNING("Buffer recovery failed, clearing all data");
++        log_rx_recovery_("recovery failed; clearing buffer");
+@@ -654 +677 @@
+-    LOG_WARNING("Buffer recovery produced invalid length %d, clearing buffer", msg_len);
++    log_rx_recovery_("recovery produced invalid length; clearing buffer");
+@@ -677 +700 @@
+-    LOG_ERROR("Failed to parse Universal Message (buffer size: %zu) - attempting buffer recovery", rx_buffer_.size());
++    log_rx_recovery_("message parse failed; attempting recovery");
+@@ -679 +702 @@
+-      LOG_WARNING("Buffer recovery failed after parse error, clearing all data");
++      log_rx_recovery_("recovery failed after parse error; clearing buffer");
