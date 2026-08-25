@@ -93,7 +93,8 @@ the authority for the per-sibling drift check; `$project-review` defers the mech
   `-merged.bin` copies. The skill must select one exact signed artifact and bind the run plus
   metadata to the merge SHA/version. Verify also `partitions.csv` (`app@0x20000`,
   `otadata@0xf000/0x2000`, `nvs@0x9000` untouched), the merge
-  gate it defers to (`require-pr-gates.sh`), and the verify endpoints (`/status`,
+  gate it defers to (`require-pr-gates.sh`: current `$project-review` and `$pr-hygiene` records,
+  plus `$feature-docs` when relevant), and the verify endpoints (`/status`,
   `/api/proxy/1/version`, `/ota/check|update|status`). OTA must require exact-version availability
   before POST, use bounded download/reboot probing, and keep exact version/platform under
   observation for at least 100 s from the first post-OTA live baseline, with both monotonic
@@ -119,18 +120,27 @@ the authority for the per-sibling drift check; `$project-review` defers the mech
   Verify against `scripts/run-mock-tests.sh`, the CI `logic-test` job
   (`.github/workflows/build.yml`), the `run-logic-tests.sh` **Stop hook** (`.codex/hooks.json`),
   the `CHECK`/`CHECK_STR`/`CHECK_NEAR` macro set, and the `static_assert` lock pattern.
+- **`$pr-hygiene`** — screens the PR title/body, commit messages and touched documentation for
+  personal/private information (`PRIVACY-LEAK`: LAN IPs, MAC addresses, VINs, WiFi network names,
+  hostnames, emails) and content not written in English (`LANGUAGE`). Verify it against
+  `tools/agent-hooks/require-pr-gates.sh` — it is the **fourth** PR gate, and the strictest: it
+  fires at PR creation, every push, **and** merge, unlike `$skill-audit` (create/push only) or
+  `$project-review`/`$feature-docs` (merge only). Unlike `$skill-audit ⊂ $project-review`, a clean
+  `$project-review` or `$skill-audit` run does **not** establish `$pr-hygiene` readiness —
+  confidentiality/language is a separate axis from coherence.
 - **`$feature-docs`** — keeps `docs/FEATURES.md` in sync when a platform feature lands or changes.
-  Verify the gate it defers to, `tools/agent-hooks/require-pr-gates.sh` — the **third** PR gate
-  beside this one and `$project-review`, and the only *conditional* one — and above all its
-  **relevance filter**: the paths that arm it must still match the hook's own regex, currently
+  Verify the gate it defers to, `tools/agent-hooks/require-pr-gates.sh` — the **fourth** PR gate
+  beside this one, `$project-review` and `$pr-hygiene`, and the only *conditional* one — and above
+  all its **relevance filter**: the paths that arm it must still match the hook's own regex, currently
   `main/` / `test/` / `sdkconfig.defaults*` / `partitions.csv` /
-  `AGENTS.md` / `.agents/` / `.codex/` / `tools/agent-hooks/` / `tools/agent-config/` /
+  `AGENTS.md` / `.agents/` / `.codex/` / `.github/PULL_REQUEST_TEMPLATE.md` /
+  `tools/agent-hooks/` / `tools/agent-config/` /
   shipped Pages runtime (`docs/index.html`, `installer-bootstrap.mjs`, `serial-port-release.mjs`,
   `web-installer.mjs`, `docs/vendor/`) /
   `.github/workflows/{build,signed-pr-preview,pr-preview-cleanup}.yml` /
   `scripts/release-relevance.sh` (the shared
   `gate_feature_docs_relevant` predicate). A path that drifts out of that list stops gating
-  silently. All three gates must block when the shared library is missing, truncated or lacks a
+  silently. All four gates must block when the shared library is missing, truncated or lacks a
   required function; `scripts/test-pr-gates.sh` pins those negative cases.
 - **`$skill-audit`** (this skill) — verify its own numbers/paths, report-only boundary, neutral hook
   references, PR-record mechanism, sibling list, command count `15`, and tesla-ble pin. Report any

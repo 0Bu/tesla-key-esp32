@@ -11,7 +11,7 @@
 // plain host toolchain. See test/README.md and the project AGENTS.md.
 namespace tk {
 
-// Parse a web-UI "host:port" syslog target (e.g. "192.168.1.22:514") into its parts.
+// Parse a web-UI "host:port" syslog target (e.g. "192.0.2.1:514") into its parts.
 // A bare host with no ':' defaults to port 514. Returns false (host/port left
 // untouched) for an empty string or anything malformed — callers treat "" as
 // "syslog disabled", not a parse error.

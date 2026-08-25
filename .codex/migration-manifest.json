@@ -3,7 +3,7 @@
   "legacy_root": ".claude",
   "canonical_instructions": "AGENTS.md",
   "legacy_tree_sha256_format": "sha256(path-utf8 + NUL + raw-bytes + NUL for each tracked .claude file in bytewise path order)",
-  "legacy_tree_sha256": "337836f22c88e07c2108c60897552a3f50b9b4415d2a2bac179e09245d951569",
+  "legacy_tree_sha256": "5d6ee655958a478bbe4b63d734c29fee020a1caad41bb98c733e8f3fb4ba80e6",
   "entries": [
     {
       "source": ".claude/CLAUDE.md",
@@ -119,6 +119,11 @@
       "source": ".claude/skills/ota-release-verify/SKILL.md",
       "status": "canonical",
       "targets": [".agents/skills/ota-release-verify/SKILL.md"]
+    },
+    {
+      "source": ".claude/skills/pr-hygiene/SKILL.md",
+      "status": "canonical",
+      "targets": [".agents/skills/pr-hygiene/SKILL.md"]
     },
     {
       "source": ".claude/skills/project-review/SKILL.md",

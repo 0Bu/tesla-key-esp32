@@ -56,7 +56,7 @@ menu "Tesla Key Configuration"
         default ""
         help
             MQTT broker for the Home Assistant telemetry bridge, e.g.
-            "mqtt://192.168.1.10:1883". A bare "host:port" is also accepted.
+            "mqtt://192.0.2.1:1883". A bare "host:port" is also accepted.
             Leave empty to disable MQTT. Can be set/changed at runtime in the web
             UI (Connection → MQTT), which stores it in NVS and overrides this.
 
@@ -100,7 +100,7 @@ menu "Tesla Key Configuration"
         default ""
         help
             UDP Syslog collector for the device's diagnostic log (the same output
-            served by GET /diag and the serial console), e.g. "192.168.1.22:514". A
+            served by GET /diag and the serial console), e.g. "192.0.2.1:514". A
             bare host defaults to port 514. Leave empty to disable. Can be
             set/changed at runtime in the web UI (Connections -> Syslog), which
             stores it in NVS ("syslog_uri") and overrides this.

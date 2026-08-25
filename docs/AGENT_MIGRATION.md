@@ -73,8 +73,9 @@ that authorization, use this sequence without skipping steps:
    adapters, including malformed payload and mutation canaries.
 6. Run the exact candidate PR head through remote CI. Confirm the unprivileged PR boundary and
    the unchanged `logic-test -> build -> publish -> deploy` dependency chain.
-7. Run `$skill-audit`, `$project-review`, and conditional `$feature-docs` against that exact head.
-   Stamp only that reviewed head; any new commit invalidates the records.
+7. Run `$skill-audit`, `$project-review`, the independent `$pr-hygiene` content screen, and
+   conditional `$feature-docs` against that exact head. Stamp only that reviewed head; any new
+   commit invalidates the records.
 8. Only after the explicit publication instruction may an operator commit, push, create a PR, or
    use the sole merge form:
 

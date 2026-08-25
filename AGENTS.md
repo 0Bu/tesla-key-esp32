@@ -167,8 +167,12 @@ in legacy canary PR records. Hook policy lives in `tools/agent-hooks/`, not in r
 ## PR, review and merge discipline
 
 - `$skill-audit` is required before PR creation or push. `$project-review` is required before every
-  merge. `$feature-docs` is conditionally required when the cataloged feature surface changes.
-  Records are bound to the exact current PR head and become stale after any push.
+  merge. `$pr-hygiene` is required at PR creation, every push, and every merge — it screens the PR
+  title/body, commit messages and touched documentation for personal/private information (LAN IPs,
+  MAC addresses, VINs, WiFi network names, hostnames, emails) and for content not written in
+  English; it is not a subset of `$project-review` or `$skill-audit`. `$feature-docs` is
+  conditionally required when the cataloged feature surface changes. Records are bound to the exact
+  current PR head and become stale after any push.
 - Reviewers report actionable findings with path/line, cause, impact and evidence. A green build is
   not review proof. Resolve P1/P2 findings and rerun the affected independent review after edits.
 - The only accepted merge shape is:

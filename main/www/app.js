@@ -657,7 +657,7 @@ function editVin(){
 }
 function editMqtt(){
   var cur=(state&&state.mqtt&&state.mqtt.broker)?state.mqtt.broker:'';
-  var v=prompt('MQTT broker for Home Assistant (IP:PORT, e.g. 192.168.1.10:1883).\nLeave empty to disable.',cur);
+  var v=prompt('MQTT broker for Home Assistant (IP:PORT, e.g. 192.0.2.1:1883).\nLeave empty to disable.',cur);
   if(v==null) return;
   v=v.trim();
   if(v && v.indexOf(' ')>=0){ toast('Invalid broker — use IP:PORT','err'); return; }
@@ -672,7 +672,7 @@ function editMqtt(){
 }
 function editSyslog(){
   var sy=state&&state.syslog, cur=(sy&&sy.host)?(sy.host+':'+(sy.port||514)):'';
-  var v=prompt('Syslog server for the diagnostic log (IP:PORT, e.g. 192.168.1.22:514).\nLeave empty to disable.',cur);
+  var v=prompt('Syslog server for the diagnostic log (IP:PORT, e.g. 192.0.2.1:514).\nLeave empty to disable.',cur);
   if(v==null) return;
   v=v.trim();
   if(v && v.indexOf(' ')>=0){ toast('Invalid server — use IP:PORT','err'); return; }

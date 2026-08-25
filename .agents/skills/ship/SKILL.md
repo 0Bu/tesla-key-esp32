@@ -37,11 +37,14 @@ gh pr view "$PR" --json number,state,mergeable,headRefOid,body
 - The user explicitly authorized merging this exact numeric PR/head and, if firmware-relevant,
   acknowledged the protected signing/release side effect of the main build.
 - **Merge gate:** [`tools/agent-hooks/require-pr-gates.sh`](../../../tools/agent-hooks/require-pr-gates.sh)
-  blocks merge unless the PR body's `- [x] $project-review clean — merge gate @ <sha>` box is
-  ticked, the stamp matches the head commit, and the command carries that same full SHA in
-  `--match-head-commit`. If stale, run read-only `$project-review` and report that a separately
-  authorized PR-body update is needed. Never stamp from this skill and never use a structured/MCP
-  merge action; the neutral gate permits only the exact CLI form below.
+  blocks merge unless the PR body's `- [x] $project-review clean — merge gate @ <sha>` and
+  `- [x] $pr-hygiene clean — content gate @ <sha>` boxes are ticked and current. A
+  feature-relevant diff also requires `- [x] $feature-docs synced — merge gate @ <sha>`. The
+  command must carry that same full head SHA in `--match-head-commit`. If any record is missing or
+  stale, run the corresponding read-only review/sync workflow and report that a separately
+  authorized PR-body update is needed; `$project-review` does not establish `$pr-hygiene`
+  readiness. Never stamp from this skill and never use a structured/MCP merge action; the neutral
+  gate permits only the exact CLI form below.
 
 ## 1. Merge (squash — repo convention)
 

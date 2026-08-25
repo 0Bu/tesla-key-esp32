@@ -71,7 +71,9 @@ Work in this order — it's what makes the review catch *drift* rather than just
    ```
 
    [`tools/agent-hooks/require-pr-gates.sh`](../../../tools/agent-hooks/require-pr-gates.sh) validates
-   top-level records against the exact PR head. The review itself never ticks/stamps them. The only
+   top-level records against the exact PR head. The review itself never ticks/stamps them. A clean
+   `$pr-hygiene` record must come from a separate run — its personal-data/language screen is a
+   different axis from this review's coherence scope, so it is never established here. The only
    canonical merge is `gh --repo github.com/0Bu/tesla-key-esp32 pr merge <numeric-pr> --match-head-commit <full-40-hex-head-sha> --squash`;
    structured/MCP merges and all alternative modes fail closed.
 
@@ -432,7 +434,9 @@ what each must stay true to:
   firmware-change-gated release), `scripts/ci-build-all.sh` (unsigned four-target producer),
   `scripts/ci-sign-artifacts.sh` (suffix map, signing, merged copies), `partitions.csv` offsets,
   and the `/ota/*` endpoints. Complementary to `$flash-esp32`
-  (local-tree build+flash, no merge); it defers the merge gate to `require-pr-gates.sh`.
+  (local-tree build+flash, no merge); it defers the merge gate to `require-pr-gates.sh`, including
+  current `$project-review` and independent `$pr-hygiene` records plus `$feature-docs` when the
+  diff is feature-relevant.
 - **`$e2e-evcc`** wraps `scripts/e2e_evcc.sh`. Re-verify the command count (must equal the
   REST rows — `api_name != nullptr` — in `logic/command_registry.hpp`'s `kCommands` —
   currently **15**), the version-coherence claim (`/status` = `X`,
@@ -452,17 +456,26 @@ what each must stay true to:
   (`.codex/hooks.json`), the `CHECK`/`CHECK_STR`/`CHECK_NEAR` macro set in
   `test/test_logic.cpp`, and the `static_assert` lock pattern (`main/ota_update.cpp` /
   `main/logic/target.hpp`).
+- **`$pr-hygiene`** screens the PR title/body, commit messages and touched documentation for
+  personal/private information (LAN IPs, MAC addresses, VINs, WiFi network names, hostnames,
+  emails) and for content not written in English. Re-verify it against
+  `tools/agent-hooks/require-pr-gates.sh`: it is the **fourth** PR gate and the strictest — it
+  fires at PR creation, every push, **and** merge, unlike `$skill-audit` (create/push only) or
+  `$project-review`/`$feature-docs` (merge only) — and, unlike `$skill-audit ⊂ $project-review`,
+  neither this review nor `$skill-audit` establishes its readiness on their own; confidentiality
+  and language are a separate axis from coherence.
 - **`$feature-docs`** keeps `docs/FEATURES.md` in sync when a platform feature lands or changes.
   Re-verify its conditional merge gate against `tools/agent-hooks/require-pr-gates.sh`, especially
-  that the policy-path set covers `AGENTS.md`, `.agents/`, `.codex/`, `tools/agent-hooks/`, and
-  `tools/agent-config/`, and that the firmware/release set still covers `main/`, `test/`, `sdkconfig.defaults*`,
+  that the policy-path set covers `AGENTS.md`, `.agents/`, `.codex/`,
+  `.github/PULL_REQUEST_TEMPLATE.md`, `tools/agent-hooks/`, and `tools/agent-config/`, and that the
+  firmware/release set still covers `main/`, `test/`, `sdkconfig.defaults*`,
   `partitions.csv`, the shipped Pages runtime (`docs/index.html`, `installer-bootstrap.mjs`,
   `serial-port-release.mjs`, `web-installer.mjs`, `docs/vendor/`), and
   `.github/workflows/{build,signed-pr-preview,pr-preview-cleanup}.yml`, plus the cumulative
   Release/Pages classifier `scripts/release-relevance.sh`.
-  Confirm all three gates fail closed when `pr-gate-lib.sh` is missing or incomplete. Keep its
+  Confirm all four gates fail closed when `pr-gate-lib.sh` is missing or incomplete. Keep its
   gate mechanics aligned with the
-  two unconditional PR gates and with `$skill-audit`'s corresponding sibling entry. Bash matching
+  three unconditional PR gates and with `$skill-audit`'s corresponding sibling entry. Bash matching
   is centralized in `gate_bash_actions`: wrappers/path-qualified commands and compound actions
   must be recognised, while every create/push/merge must be standalone so no earlier segment can
   mutate the audited HEAD/config/PR. Multiple/ambiguous actions fail closed.

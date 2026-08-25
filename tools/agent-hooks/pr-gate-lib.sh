@@ -43,19 +43,20 @@ agent_gate_workdir_matches() {
 #   catalog can have moved. Keep the release workflow set explicit: Renovate is dependency
 #   maintenance, while build/sign/publish and preview cleanup are catalogued release behavior.
 gate_feature_docs_relevant() {
-  grep -Eq '^(main/|test/|sdkconfig\.defaults($|\.)|partitions\.csv$|AGENTS\.md$|\.agents/|\.codex/|tools/agent-hooks/|tools/agent-config/|docs/(index\.html|installer-bootstrap\.mjs|serial-port-release\.mjs|web-installer\.mjs|vendor/)|\.github/workflows/(build|signed-pr-preview|pr-preview-cleanup)\.yml$|scripts/release-relevance\.sh$)'
+  grep -Eq '^(main/|test/|sdkconfig\.defaults($|\.)|partitions\.csv$|AGENTS\.md$|\.agents/|\.codex/|\.github/PULL_REQUEST_TEMPLATE\.md$|tools/agent-hooks/|tools/agent-config/|docs/(index\.html|installer-bootstrap\.mjs|serial-port-release\.mjs|web-installer\.mjs|vendor/)|\.github/workflows/(build|signed-pr-preview|pr-preview-cleanup)\.yml$|scripts/release-relevance\.sh$)'
 }
 
 # gate_checkbox_status <content> <key>
 #   Prints exactly one of:  "checked <sha>" | "checked" | "unchecked" | "absent" | "ambiguous"
 #   A match is one complete canonical Markdown task-list line. Its leading checkbox is followed by
-#   exactly `/<key>`, the key-specific success word, an em dash, the key-specific gate phrase and
+#   exactly `$<key>` (or the canary-era `/<key>`), the key-specific success word, an em dash, the
+#   key-specific gate phrase and
 #   one standalone 7..40-hex SHA. Optional Markdown code ticks around `/<key>` are accepted; no
 #   other status/trailing prose is. Callers pass an actual PR body; command text/titles are never
 #   inspected.
 gate_checkbox_status() {
   local content="$1" key="$2"
-  printf '%s' "$key" | grep -Eq '^(skill-audit|project-review|feature-docs)$' \
+  printf '%s' "$key" | grep -Eq '^(skill-audit|project-review|feature-docs|pr-hygiene)$' \
     || { printf 'absent\n'; return 0; }
   printf '%s' "$content" | python3 -c '
 import re, sys
@@ -65,6 +66,7 @@ spec = {
     "skill-audit": ("clean", "PR create/push gate"),
     "project-review": ("clean", "merge gate"),
     "feature-docs": ("synced", "merge gate"),
+    "pr-hygiene": ("clean", "content gate"),
 }[key]
 fence_char = None
 fence_length = 0
