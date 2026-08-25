@@ -88,9 +88,9 @@ tap `RESET`, release `BOOT`, then flash. Serial log: `screen <port> 115200` (exi
 
 Boot log:
 ```
-I (500) main: VIN: 5YJ3E1EA1JF000001  BLE MAC: (scan)
+I (500) main: VIN: <VIN>  BLE MAC: (scan)
 I (600) main: WiFi connected to 'MyNetwork'
-I (650) main: IP: 192.168.1.42
+I (650) main: IP: 192.0.2.1
 I (700) http_server: HTTP server started on :80
 I (700) main: tesla-key-esp32 running. API on port 80.
 ```
@@ -102,7 +102,7 @@ image spans the complete `0x6000` partition and erases the vehicle private key, 
 every omitted setting. On a first boot, join `tesla-key-esp32-setup`, then run:
 
 ```bash
-python3 provision.py --url http://192.168.4.1 --ssid MyNet --vin 5YJ3E1EA1JF000001
+python3 provision.py --url http://192.168.4.1 --ssid MyNet --vin '<VIN>'
 # password is prompted without echo; automation: --password-stdin or a chmod-600 --password-file
 ```
 
@@ -112,7 +112,7 @@ identity change is deliberately separate because it clears the old pairing:
 
 ```bash
 python3 provision.py --url http://tesla-key-esp32.local --mode lan \
-  --vin-only --vin 5YJ3E1EA1JF000001 --confirm-vin-change
+  --vin-only --vin '<VIN>' --confirm-vin-change
 ```
 
 The retired `--port` path fails closed with a data-loss explanation. For genuine low-level recovery,
@@ -209,7 +209,7 @@ vehicle/proxy reason) but use HTTP 502 rather than a misleading HTTP 200.
 
 ```json
 { "response": { "result": true, "command": "charge_start",
-  "vin": "5YJ3E1EA1JF000001", "reason": "command executed successfully" } }
+  "vin": "<VIN>", "reason": "command executed successfully" } }
 ```
 
 ### Vehicle data
@@ -218,7 +218,7 @@ vehicle/proxy reason) but use HTTP 502 rather than a misleading HTTP 200.
 GET /api/1/vehicles/{VIN}/vehicle_data
 ```
 ```json
-{ "response": { "result": true, "vin": "5YJ3E1EA1JF000001", "reason": "success",
+{ "response": { "result": true, "vin": "<VIN>", "reason": "success",
   "response": {
   "charge_state": { "charging_state": "Charging", "battery_level": 72,
     "charge_limit_soc": 80, "charger_power": 11, "charge_rate": 58.3,
@@ -236,7 +236,7 @@ so polling does not wake it. While charging or within five minutes of a command,
 GET /api/1/vehicles/{VIN}/body_controller_state
 ```
 ```json
-{ "response": { "result": true, "vin": "5YJ3E1EA1JF000001", "data": {
+{ "response": { "result": true, "vin": "<VIN>", "data": {
   "vehicle_lock_state": "LOCKED", "vehicle_sleep_status": "ASLEEP",
   "user_presence": "NOT_PRESENT" }, "reason": "success" } }
 ```
@@ -383,7 +383,7 @@ name: tesla
 type: template                      # required when using template:
 template: tesla-ble
 title: Tesla Key ESP32              # optional
-vin: 5YJ3E1EA1JF000001
+vin: <VIN>
 capacity: 60                        # optional, battery kWh
 url: http://tesla-key-esp32.local   # or http://<ESP32-IP>
 port: 80                            # device serves on 80 (template default 8080)
