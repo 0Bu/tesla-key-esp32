@@ -31,7 +31,7 @@ cannot build or USB-flash — see AGENTS.md).
 ## Gates
 
 <!--
-These three boxes ARE the publish/merge gates — they replace the old on-disk markers. The
+These four boxes ARE the publish/merge gates — they replace the old on-disk markers. The
 runner-neutral gate under tools/agent-hooks/ reads them straight from this PR body, each matching
 its OWN box. After a CLEAN run, tick the box and replace <sha> with the reviewed commit
 (`git rev-parse --short=12 HEAD`). A later commit changes the sha and re-stales the gate, forcing
@@ -42,8 +42,14 @@ the shipped Pages runtime, release-relevance logic, or the build/signed-preview/
 workflows. Because `docs/FEATURES.md` catalogs the runner-neutral policy itself, it also arms for
 `AGENTS.md`, `.agents/`, `.codex/`, `tools/agent-hooks/`, and `tools/agent-config/` — delete its
 line only on a docs- or unrelated chore-only PR. A full $project-review also clears the
-skill-audit gate, but NOT the feature-docs one.
+skill-audit gate, but NOT the feature-docs one, NOR the pr-hygiene one.
+
+$pr-hygiene is unconditional like $skill-audit and $project-review, and is the only gate that also
+re-arms at every push AND at merge — it screens this PR's title/body, its commits, and any touched
+docs for personal/private information and non-English content. Neither $project-review nor
+$skill-audit being clean establishes it; run $pr-hygiene separately.
 -->
 - [ ] `$skill-audit` clean — PR create/push gate @ <sha>
 - [ ] `$project-review` clean — merge gate @ <sha>
+- [ ] `$pr-hygiene` clean — content gate @ <sha>
 - [ ] `$feature-docs` synced — merge gate @ <sha>

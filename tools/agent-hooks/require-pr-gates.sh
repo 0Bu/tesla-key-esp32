@@ -260,6 +260,10 @@ case "$kind" in
       echo "BLOCKED: gh pr create requires one current top-level \$skill-audit record for $anchor." >&2
       exit 2
     }
+    record_ok "$body" pr-hygiene "$anchor" || {
+      echo "BLOCKED: gh pr create requires one current top-level \$pr-hygiene record for $anchor." >&2
+      exit 2
+    }
     ;;
   push)
     anchor="$(gate_push_head_sha "$spec")" || {
@@ -277,6 +281,10 @@ case "$kind" in
     printf '%s' "$pr_head" | grep -Eq '^[0-9a-fA-F]{40}$' || exit 2
     record_ok "$body" skill-audit "$anchor" || {
       echo "BLOCKED: git push to an open PR requires one current top-level \$skill-audit record for $anchor." >&2
+      exit 2
+    }
+    record_ok "$body" pr-hygiene "$anchor" || {
+      echo "BLOCKED: git push to an open PR requires one current top-level \$pr-hygiene record for $anchor." >&2
       exit 2
     }
     ;;
@@ -322,6 +330,10 @@ PY
     body="$(cat "$body_file")" || exit 2
     record_ok "$body" project-review "$head_sha" || {
       echo "BLOCKED: merge/check requires one current top-level \$project-review record for $head_sha." >&2
+      exit 2
+    }
+    record_ok "$body" pr-hygiene "$head_sha" || {
+      echo "BLOCKED: merge/check requires one current top-level \$pr-hygiene record for $head_sha." >&2
       exit 2
     }
     if [ "$kind" = check ]; then

@@ -55,7 +55,7 @@ gate_feature_docs_relevant() {
 #   inspected.
 gate_checkbox_status() {
   local content="$1" key="$2"
-  printf '%s' "$key" | grep -Eq '^(skill-audit|project-review|feature-docs)$' \
+  printf '%s' "$key" | grep -Eq '^(skill-audit|project-review|feature-docs|pr-hygiene)$' \
     || { printf 'absent\n'; return 0; }
   printf '%s' "$content" | python3 -c '
 import re, sys
@@ -65,6 +65,7 @@ spec = {
     "skill-audit": ("clean", "PR create/push gate"),
     "project-review": ("clean", "merge gate"),
     "feature-docs": ("synced", "merge gate"),
+    "pr-hygiene": ("clean", "content gate"),
 }[key]
 fence_char = None
 fence_length = 0

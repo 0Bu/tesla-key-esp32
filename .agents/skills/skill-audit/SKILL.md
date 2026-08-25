@@ -119,10 +119,18 @@ the authority for the per-sibling drift check; `$project-review` defers the mech
   Verify against `scripts/run-mock-tests.sh`, the CI `logic-test` job
   (`.github/workflows/build.yml`), the `run-logic-tests.sh` **Stop hook** (`.codex/hooks.json`),
   the `CHECK`/`CHECK_STR`/`CHECK_NEAR` macro set, and the `static_assert` lock pattern.
+- **`$pr-hygiene`** — screens the PR title/body, commit messages and touched documentation for
+  personal/private information (`PRIVACY-LEAK`: LAN IPs, MAC addresses, VINs, WiFi network names,
+  hostnames, emails) and content not written in English (`LANGUAGE`). Verify it against
+  `tools/agent-hooks/require-pr-gates.sh` — it is the **fourth** PR gate, and the strictest: it
+  fires at PR creation, every push, **and** merge, unlike `$skill-audit` (create/push only) or
+  `$project-review`/`$feature-docs` (merge only). Unlike `$skill-audit ⊂ $project-review`, a clean
+  `$project-review` or `$skill-audit` run does **not** establish `$pr-hygiene` readiness —
+  confidentiality/language is a separate axis from coherence.
 - **`$feature-docs`** — keeps `docs/FEATURES.md` in sync when a platform feature lands or changes.
-  Verify the gate it defers to, `tools/agent-hooks/require-pr-gates.sh` — the **third** PR gate
-  beside this one and `$project-review`, and the only *conditional* one — and above all its
-  **relevance filter**: the paths that arm it must still match the hook's own regex, currently
+  Verify the gate it defers to, `tools/agent-hooks/require-pr-gates.sh` — the **fourth** PR gate
+  beside this one, `$project-review` and `$pr-hygiene`, and the only *conditional* one — and above
+  all its **relevance filter**: the paths that arm it must still match the hook's own regex, currently
   `main/` / `test/` / `sdkconfig.defaults*` / `partitions.csv` /
   `AGENTS.md` / `.agents/` / `.codex/` / `tools/agent-hooks/` / `tools/agent-config/` /
   shipped Pages runtime (`docs/index.html`, `installer-bootstrap.mjs`, `serial-port-release.mjs`,

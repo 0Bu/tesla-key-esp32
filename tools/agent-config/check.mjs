@@ -206,7 +206,7 @@ for (const [label, names] of [
 
 const highRiskSkills = new Set(["e2e-evcc", "flash-esp32", "ship", "usb-recovery"]);
 const readOnlySkills = new Set([
-  "device-diag", "display-preview", "ota-release-verify", "project-review",
+  "device-diag", "display-preview", "ota-release-verify", "pr-hygiene", "project-review",
   "skill-audit", "vehicle-command-audit",
 ]);
 const ownerContracts = new Map([
@@ -240,9 +240,10 @@ const reviewedSkillSha256 = new Map([
   ["feature-docs", {canonical: "1f2851768ed02689d0a0613b644153b111e2f8f45d7e4fc2b60f39b0d01c6a6a", legacy: "a34447175d62ae1be15a9fbcf5f81af543566a1d8ead2accfa73da3e68597cb6"}],
   ["flash-esp32", {canonical: "d9945b914aa48ef7c150e207fc268011677f54ef6acde837c09111cf3229b71b", legacy: "d77312d51aa6d159b8e6a694e14f1bfaffb2709b8588a7bf51a0ac160fe2b84b"}],
   ["ota-release-verify", {canonical: "3b0c7941871b9c350bf64a046e3344ac3b5effa2228daf375428b97e0168a511", legacy: "074c330c0f1d9676922f8dbce4605d2674c021013cb5125b2c595eb6a85bec66"}],
-  ["project-review", {canonical: "90d16cb463f0918cf8fae9c49faeaa1aa935e47a44e6578c32e711e0647000f6", legacy: "0e754dffdbdfc6998b55895bc6d120706a02f48a76a679516752083ae856a9e9"}],
+  ["pr-hygiene", {canonical: "c612b5eb50c9d85ef0db4f27d096295e9e97d87bba6d189294391d07d587eac8", legacy: "f21698b352edeb11c5bb1f8ea0b388e47a104b0b7c7b74cf2f37ed0ef9c82b2a"}],
+  ["project-review", {canonical: "e111d8775f6afe835abcb69acf70a95c99cb9c5bf251e4f408cf593e4d48f9aa", legacy: "0e754dffdbdfc6998b55895bc6d120706a02f48a76a679516752083ae856a9e9"}],
   ["ship", {canonical: "6424efe4f169b067ad407e26960b71a0765888ecd765152e11d01ba2db74bed7", legacy: "bebfbfa087093cd4e3914f306a67483e99f8beeb49c2479ee1ca8d1c9382a0c5"}],
-  ["skill-audit", {canonical: "ce322222e17344f254ab89c86b445b0cf608d4ae09f94c62b3507700ee382806", legacy: "14514707fba12dfe961252632657e7319f1d8816ee6f15b66888f828dea75d76"}],
+  ["skill-audit", {canonical: "5f0fdffaa326f0d2fe751266bf8802eb357dcc282c269f035803ac9711ec6ae9", legacy: "14514707fba12dfe961252632657e7319f1d8816ee6f15b66888f828dea75d76"}],
   ["usb-recovery", {canonical: "25b5d04627894c1d5bb4fea816cc81624efc540bdfc85a1229772b7faf689e32", legacy: "bc2232300747fcac0c77f4dc706bc72c640c2b42079adacf09e56478bca03af6"}],
   ["vehicle-command-audit", {canonical: "30ab4506d71e11d3993d66ca566402e024d12ae7502fd2b0bb056778cdde191a", legacy: "144feba94438891a66f96b545db0f3284c57db24a29f23e2ca9282b2d5c60072"}],
 ]);
