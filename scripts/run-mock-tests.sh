@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Host-side mock build: compile and run the IDF-free pure-logic tests (test/) with the
 # system toolchain — no ESP-IDF, no Docker, no board. Catches logic regressions in
-# seconds, in any environment (local terminal, CI, Claude Code web session). This is the
+# seconds, in any environment (local terminal, CI, remote coding session). This is the
 # real "run it and see" loop a cloud session has (it cannot build firmware or USB-flash).
 #
 # Usage: scripts/run-mock-tests.sh

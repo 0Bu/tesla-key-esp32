@@ -4,7 +4,7 @@
 # THERE IS NO FILE MARKER. The pass-state of a review/audit lives as a TICKED, SHA-STAMPED
 # checkbox in the pull request's body, e.g.:
 #     - [x] `$project-review` clean — merge gate @ a1b2c3d4e5f6
-# Legacy slash records remain accepted only for the compatibility canary period.
+# Historical slash-form records remain accepted for existing PR bodies.
 # The gate reads that checkbox from the PR (for a merge/push) or from the body being submitted
 # (for a PR-create call, no network needed) and allows the action only while the box is checked
 # AND the stamped commit still matches the commit the action targets. Any new commit re-stales it
@@ -49,7 +49,7 @@ gate_feature_docs_relevant() {
 # gate_checkbox_status <content> <key>
 #   Prints exactly one of:  "checked <sha>" | "checked" | "unchecked" | "absent" | "ambiguous"
 #   A match is one complete canonical Markdown task-list line. Its leading checkbox is followed by
-#   exactly `$<key>` (or the canary-era `/<key>`), the key-specific success word, an em dash, the
+#   exactly `$<key>` (or the historical `/<key>` form), the key-specific success word, an em dash, the
 #   key-specific gate phrase and
 #   one standalone 7..40-hex SHA. Optional Markdown code ticks around `/<key>` are accepted; no
 #   other status/trailing prose is. Callers pass an actual PR body; command text/titles are never
@@ -1236,7 +1236,7 @@ PY
 gate_repo_slug() {
   local s count
   # Extract owner/repo from the origin URL. Handles SSH (git@host:owner/repo), HTTPS
-  # (https://host/owner/repo) AND the Claude-Code-on-the-web proxy form
+  # (https://host/owner/repo) and web-runner proxy forms
   # (http://user@127.0.0.1:PORT/git/owner/repo) by strapping to the final two path segments.
   s="$(git -C "${GATE_PROJ:-$PWD}" remote get-url --all origin 2>/dev/null)" || return 2
   count="$(printf '%s\n' "$s" | awk 'NF { n++ } END { print n+0 }')"

@@ -252,7 +252,7 @@ fi
   the reported version match the release/manifest.
 - **Never flash `tesla-key-esp32<sfx>-<ver>-merged.bin`** to preserve NVS — the merged image is a
   single full-flash blob spanning `0x0` and **wipes `nvs@0x9000`** (forces a full re-pair).
-- After flashing, confirm the live device with the [`$e2e-evcc`](../e2e-evcc/SKILL.md) skill.
+- After flashing, confirm the live device with the global `$tesla-key-e2e-evcc` skill.
 
 ## Picking the right serial port
 
@@ -301,4 +301,4 @@ multiple compatible boards attached that can flash the wrong device.
 ## After flashing
 
 To confirm the live device is healthy (paired, BLE up, no evcc timeouts), propose the
-[`$e2e-evcc`](../e2e-evcc/SKILL.md) skill and obtain its separate explicit live-test approval.
+global `$tesla-key-e2e-evcc` skill and obtain its separate explicit live-test approval.

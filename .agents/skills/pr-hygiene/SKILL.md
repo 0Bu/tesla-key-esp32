@@ -93,8 +93,8 @@ against the new head.
 ## The PR gate
 
 [`tools/agent-hooks/require-pr-gates.sh`](../../../tools/agent-hooks/require-pr-gates.sh), invoked
-by both runner adapters, refuses to open a PR, push to one, or merge one until its `$pr-hygiene`
-record is uniquely present and stamped with the exact commit being published — the **strictest**
+by the project hook configuration, refuses to open a PR, push to one, or merge one until its
+`$pr-hygiene` record is uniquely present and stamped with the exact commit being published — the **strictest**
 of the PR gates, since it fires at every one of those checkpoints rather than only create/push
 (`$skill-audit`) or only merge (`$project-review`, conditionally `$feature-docs`). There is no
 file marker; pass state lives only in the PR body and is parsed by the neutral core, using the

@@ -12,8 +12,6 @@ task touches them:
 - [`docs/FEATURES.md`](docs/FEATURES.md): technical feature catalog and documentation gate.
 - [`docs/MCP.md`](docs/MCP.md): MCP wire contract and command/read-only boundaries.
 - [`test/README.md`](test/README.md): host-test scope, entry points and hardware exclusions.
-- [`docs/AGENT_MIGRATION.md`](docs/AGENT_MIGRATION.md): runner migration, compatibility canary and
-  rollback. `.claude/` is an active compatibility layer during the canary, not the canonical core.
 
 ## Authorization and ownership
 
@@ -76,12 +74,10 @@ scripts/run-mock-tests.sh                    # host C++ logic + Python/Node test
 scripts/test-build-contracts.sh              # pins, targets, partitions and CI/release contracts
 scripts/test-pr-gates.sh                     # PR command/record policy canaries
 tools/agent-config/selftest.sh                # runner mapping/config/hook mutation canaries
-scripts/check-reproducible-build.sh           # build reproducibility contract
-scripts/test-release-contract.sh              # disposable-key release/signing contract only
-scripts/check-pages-manifest.py               # Pages manifest contract
-scripts/check-release-pages-bytes.py          # release-to-Pages byte binding
 scripts/idf-docker.sh idf.py -B build set-target esp32s3 build
-scripts/ci-build-all.sh                        # canonical four-target CI build
+scripts/idf-docker.sh ./scripts/ci-build-verify.sh 0.0.0-local "$(git rev-parse HEAD)"
+                                               # four targets + disposable signing +
+                                               # manifest/Pages bytes + reproducibility
 ```
 
 Also run syntax checks appropriate to edited JSON, TOML, YAML, Python and Bash, relative Markdown
@@ -139,6 +135,9 @@ ESP HTTP, NimBLE, NVS, OTA or FreeRTOS shells.
 - A live read is not automatically harmless: connecting or requesting stale data can wake the
   vehicle. Default diagnosis uses already-collected/local evidence. Do not contact a vehicle,
   evcc endpoint or device unless the user explicitly authorizes the live boundary and target.
+- Live evcc end-to-end checks are host/cluster operations provided by the global
+  `$tesla-key-e2e-evcc` skill. They do not belong to this versioned project skill set and retain
+  their own explicit read, command, and charge-toggle authorization boundaries.
 - Never send a vehicle command, pair, regenerate keys, change VIN, modify charge current, wake the
   car, reboot the board, flash, OTA or clear a crash/NVS artifact from a review or diagnosis task.
 - Background telemetry, display and status code must consume cached state and must not introduce a
@@ -162,7 +161,7 @@ ESP HTTP, NimBLE, NVS, OTA or FreeRTOS shells.
 Update the owning document with the code/configuration that changes its contract. Do not move long
 API, architecture, incident or field references into this compact file. References to project
 skills use `$skill-name` and canonical paths under `.agents/skills/`; `/skill-name` is accepted only
-in legacy canary PR records. Hook policy lives in `tools/agent-hooks/`, not in runner adapters.
+in historical PR records. Hook policy lives in `tools/agent-hooks/`.
 
 ## PR, review and merge discipline
 
@@ -186,7 +185,7 @@ in legacy canary PR records. Hook policy lives in `tools/agent-hooks/`, not in r
 - Do not create a commit, push, PR, review stamp, merge, release or Pages update unless the user has
   authorized that phase explicitly. Local migration completion is not Phase 7 publication approval.
 
-Runner-neutral policy is implemented in [`tools/agent-hooks/`](tools/agent-hooks/), configured for
-Codex by [`.codex/hooks.json`](.codex/hooks.json), and reached by thin `.claude/hooks/` adapters.
-Hooks are lexical defense in depth: they do not replace sandboxing, explicit authorization, branch
-protection, protected environments or human review.
+Runner-neutral policy is implemented in [`tools/agent-hooks/`](tools/agent-hooks/) and configured
+for this project by [`.codex/hooks.json`](.codex/hooks.json). Hooks are lexical defense in depth:
+they do not replace sandboxing, explicit authorization, branch protection, protected environments
+or human review.

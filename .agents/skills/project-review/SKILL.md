@@ -437,13 +437,6 @@ what each must stay true to:
   (local-tree build+flash, no merge); it defers the merge gate to `require-pr-gates.sh`, including
   current `$project-review` and independent `$pr-hygiene` records plus `$feature-docs` when the
   diff is feature-relevant.
-- **`$e2e-evcc`** wraps `scripts/e2e_evcc.sh`. Re-verify the command count (must equal the
-  REST rows — `api_name != nullptr` — in `logic/command_registry.hpp`'s `kCommands` —
-  currently **15**), the version-coherence claim (`/status` = `X`,
-  `/api/proxy/1/version` = `X-esp32` via `fw_version()`), the `vehicle_data` fields it asserts,
-  the out-of-scope endpoint list, the evcc-exact scalar charge-toggle bodies (`true` for
-  `charge_start`, `false` for `charge_stop`), and the env-var gates (`RUN_COMMANDS` /
-  `ALLOW_CHARGE_TOGGLE` / `RUN_ALL_COMMANDS`).
 - **`$vehicle-command-audit`** compares the firmware against upstream `teslamotors/vehicle-command`,
   gated by what `yoziru/tesla-ble` (pin in `main/idf_component.yml`) can actually do. Re-verify the
   tesla-ble **pin** in its source map (`v5.1.1`) still matches `idf_component.yml`, that its upstream
@@ -500,7 +493,8 @@ what each must stay true to:
   error-signature sites (the classified production `BLE connect gave up` line in
   `vehicle_commands.cpp`, raw maximum-DEBUG `connect error` detail in `ble_client.cpp`, and
   `BOOT`/`HEAP` in `main.cpp`). Keep it
-  complementary to `$e2e-evcc` (which drives the command path) and the flash/recovery skills.
+  complementary to the global `$tesla-key-e2e-evcc` skill (which drives the command path) and the
+  flash/recovery skills.
 - **`$display-preview`** renders `tools/display_sim.py` to PNGs for a human eyeball pass. Re-verify its
   CLI modes + default outputs against the script's `__main__`, the presenter/renderer it targets
   (`main/logic/display_model.hpp`, `main/display.cpp`), and the parity gate it defers to
@@ -538,10 +532,10 @@ lenses this skill delegates to; keep them complementary, not contradictory):
   against the *Memory / heap* invariant above (largest **contiguous** block is the binding limit,
   `handle_all` try/catch → 503, streamed `/diag`) and against `main.cpp`'s heap-attribution log —
   the two heap maps must not diverge.
-- **`agent_config_reviewer`** audits runner-neutral agent configuration, the retained `.claude/`
-  compatibility layer, skills, hooks, and subagents—not firmware logic. Confirm its boundary still
-  points firmware-correctness work back at this skill and its inventory matches `AGENTS.md`,
-  `.agents/`, `.codex/`, `.claude/`, and `tools/agent-hooks/`.
+- **`agent_config_reviewer`** audits runner-neutral agent configuration, skills, hooks, and
+  subagents—not firmware logic. Confirm its boundary still points firmware-correctness work back
+  at this skill and its inventory matches `AGENTS.md`, `.agents/`, `.codex/`, and
+  `tools/agent-hooks/`.
 - **`multi_target_build_reviewer`** is the per-target build/config divergence lens (the four
   targets built from one tree). Re-verify its facts against the *Cross-cutting consistency*
   section and the build wiring: the target set (esp32/s3/c3/c6), per-target bootloader offsets
@@ -553,10 +547,9 @@ lenses this skill delegates to; keep them complementary, not contradictory):
 - **Any skill or agent added since this was written** must be audited too — and added to this list.
 
 A skill or agent that drives a script is only as current as the script: when the script changes,
-re-read the doc that documents it. Runner adapters in `.codex/hooks.json` and
-`.claude/settings.json` must both delegate to the neutral implementation under
-`tools/agent-hooks/` (`agent_hook.py`, `require-pr-gates.sh`, and their shared helpers). A hook
-whose behaviour a skill/agent describes must match that core.
+re-read the doc that documents it. Project hooks in `.codex/hooks.json` must delegate to the
+neutral implementation under `tools/agent-hooks/` (`agent_hook.py`, `require-pr-gates.sh`, and
+their shared helpers). A hook whose behaviour a skill/agent describes must match that core.
 
 ## Verification discipline (avoid confident-but-wrong findings)
 

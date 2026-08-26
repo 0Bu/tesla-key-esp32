@@ -21,16 +21,14 @@ the canonical `$project-review` skill checks for drift between them.
 
 [`AGENTS.md`](../AGENTS.md) is the concise, runner-neutral policy loaded for normal repository
 work. Reusable workflows live under [`.agents/skills/`](../.agents/skills/), Codex project
-configuration and read-only specialist reviewers under [`.codex/`](../.codex/), and both Codex
-and the retained Claude compatibility layer delegate lifecycle policy to
-[`tools/agent-hooks/`](../tools/agent-hooks/). The machine-checkable legacy inventory and
-fingerprint live in [`.codex/migration-manifest.json`](../.codex/migration-manifest.json).
+configuration and read-only specialist reviewers under [`.codex/`](../.codex/), and lifecycle
+policy lives under [`tools/agent-hooks/`](../tools/agent-hooks/). CI mutation-tests this single
+project-owned configuration and rejects reintroduction of retired runner-specific metadata.
 
 This layer does not participate in firmware runtime behavior. It must not change the four-target
 build, dependency/patch chain, partition geometry, signing boundary, OTA format, pairing/session
 state, or vehicle-command behavior. Reviews and diagnosis are read-only by default; implementation
-does not imply commit, push, merge, release, hardware, or vehicle authorization. See the
-[migration and canary runbook](AGENT_MIGRATION.md).
+does not imply commit, push, merge, release, hardware, or vehicle authorization.
 
 ## Web UI live feed (`GET /status`)
 

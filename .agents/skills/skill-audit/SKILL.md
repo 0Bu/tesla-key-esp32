@@ -1,6 +1,6 @@
 ---
 name: skill-audit
-description: Read-only drift audit of every canonical skill under .agents/skills, read-only reviewer under .codex/agents, and retained .claude compatibility adapter against tesla-key-esp32. Report contradictions and gate readiness only; never correct files, edit or stamp a PR body, commit, push, merge, release, flash, OTA, or contact a live device/vehicle unless the user separately authorizes implementation.
+description: Read-only drift audit of every canonical skill under .agents/skills and read-only reviewer under .codex/agents against tesla-key-esp32. Report contradictions and gate readiness only; never correct files, edit or stamp a PR body, commit, push, merge, release, flash, OTA, or contact a live device/vehicle unless the user separately authorizes implementation.
 ---
 
 > **Canonical runner-neutral skill.** Read [`AGENTS.md`](../../../AGENTS.md) before acting.
@@ -11,11 +11,10 @@ description: Read-only drift audit of every canonical skill under .agents/skills
 
 # skill-audit — keep every skill & agent in sync with the project
 
-The `.agents/skills/*/SKILL.md` files, read-only reviewers in `.codex/agents/*.toml`, and retained
-`.claude/` compatibility adapters are documents that **drift**. A wrong partition offset, stale
-command count, removed endpoint, renamed script, or superseded target set silently mis-teaches a
-future session. `$skill-audit` catches and reports that drift. It never edits a file or external
-state during an audit-only run.
+The `.agents/skills/*/SKILL.md` files and read-only reviewers in `.codex/agents/*.toml` are
+documents that **drift**. A wrong partition offset, stale command count, removed endpoint, renamed
+script, or superseded target set silently mis-teaches a future session. `$skill-audit` catches and
+reports that drift. It never edits a file or external state during an audit-only run.
 
 It is the skills/agents subset of `$project-review`. A clean `$project-review` can establish
 readiness for both PR records, but neither audit mutates the PR body. Use `$skill-audit` for the
@@ -42,18 +41,17 @@ finding must name the project fact it contradicts; otherwise omit it.
 
 Work in this order—it is a **single read-only pass**: enumerate → check → report → stop.
 
-1. **Enumerate—discover, do not hardcode.** Read every `.agents/skills/*/SKILL.md`, every
-   `.codex/agents/*.toml`, and every retained legacy compatibility entry under `.claude/skills/`.
-   Inventory
-   `AGENTS.md`, `.codex/hooks.json`, `.claude/settings.json`, `tools/agent-hooks/`, `scripts/`,
-   `main/`, `partitions.csv`, `main/idf_component.yml`, and `version.txt`.
+1. **Enumerate—discover, do not hardcode.** Read every `.agents/skills/*/SKILL.md` and every
+   `.codex/agents/*.toml`. Inventory `AGENTS.md`, `.codex/hooks.json`, `tools/agent-hooks/`,
+   `scripts/`, `main/`, `partitions.csv`, `main/idf_component.yml`, and `version.txt`. Host/cluster
+   operational skills such as global `$tesla-key-e2e-evcc` are outside this project audit.
 2. **Extract concrete claims.** List numbers, paths, counts, flags, target sets, script names,
    authorization boundaries, and described hook behavior.
 3. **Verify claims against the tree.** Use runner-neutral file reads/search (`rg` preferred) and
    safe host checks. Never contact a live device/vehicle or perform a mutation to prove an audit
    claim. Local tests that create ignored build output run only when the review scope requests
    them and are reported separately from CI/hardware evidence.
-4. **Report, do not correct.** Every canonical skill, reviewer, and legacy adapter gets a ✓ or a
+4. **Report, do not correct.** Every canonical skill and reviewer gets a ✓ or a
    `SKILL-DRIFT` finding with the exact proposed change. An audit request never authorizes applying
    that proposal.
 5. **Report gate readiness without editing the PR.** If no contradiction remains, provide the exact
@@ -103,13 +101,6 @@ the authority for the per-sibling drift check; `$project-review` defers the mech
   device uptime is insufficient and hidden reboots or an unconfirmed rollback cancellation must
   fail closed.
   USB gets only a short bounded boot/reachability retry, never that OTA probation wait.
-- **`$e2e-evcc`** — wraps `scripts/e2e_evcc.sh`. Verify the command count (must equal the
-  REST rows — `api_name != nullptr` — in `logic/command_registry.hpp`'s `kCommands` —
-  currently **15**), the version-coherence claim (`/status` = `X`,
-  `/api/proxy/1/version` = `X-esp32`), the `vehicle_data` fields it asserts, the out-of-scope
-  endpoint list, the evcc-exact scalar charge-toggle bodies (`true` for `charge_start`,
-  `false` for `charge_stop`), and the env-var gates
-  (`RUN_COMMANDS`/`ALLOW_CHARGE_TOGGLE`/`RUN_ALL_COMMANDS`).
 - **`$vehicle-command-audit`** — compares the firmware against upstream `teslamotors/vehicle-command`,
   gated by what `yoziru/tesla-ble` can do. Verify the tesla-ble **pin** in its source map
   (`v5.1.1`) still matches `main/idf_component.yml`, every repository-owned patch under
@@ -200,9 +191,9 @@ owns and must stay in sync with it:
   consistency* section.
 - **`heap_safety_reviewer`** — the allocation/throw lens. Its heap rules/numbers must match
   `$project-review`'s *Memory / heap* invariant and `main.cpp`'s heap-attribution log.
-- **`agent_config_reviewer`** — audits runner-neutral configuration and the retained `.claude/`
-  compatibility layer, not firmware logic. Confirm its read-only boundary and inventory of
-  `AGENTS.md`, `.agents/`, `.codex/`, `.claude/`, and `tools/agent-hooks/`.
+- **`agent_config_reviewer`** — audits runner-neutral configuration, not firmware logic. Confirm
+  its read-only boundary and inventory of `AGENTS.md`, `.agents/`, `.codex/`, and
+  `tools/agent-hooks/`.
 - **`multi_target_build_reviewer`** — the per-target build/config divergence lens. Verify its
   facts against the build wiring: the target set (esp32/s3/c3/c6), per-target bootloader
   offsets (`0x1000` classic esp32 / `0x0` s3·c3·c6 — `boot_offset()` in
@@ -219,8 +210,8 @@ re-read the doc that documents it.
 
 ## The PR gate
 
-[`tools/agent-hooks/require-pr-gates.sh`](../../../tools/agent-hooks/require-pr-gates.sh), invoked
-by both runner adapters, refuses PR create/push until the PR's `$skill-audit` record is uniquely
+[`tools/agent-hooks/require-pr-gates.sh`](../../../tools/agent-hooks/require-pr-gates.sh) refuses
+PR create/push until the PR's `$skill-audit` record is uniquely
 present and stamped with the exact commit being published. Server-side push-files actions fail
 closed because no local audit SHA can bind a commit created after the pre-tool check. There is no
 file marker; pass state lives only in the PR body and is parsed by the neutral core. `$skill-audit`
@@ -264,21 +255,21 @@ readiness for both records, while `$skill-audit` establishes only its own.
 # Skill audit — tesla-key-esp32 (<date>)
 
 ## Summary
-<1–3 sentences: how many canonical skills, reviewers, and legacy adapters were checked; how many drifted.>
+<1–3 sentences: how many canonical skills and reviewers were checked; how many drifted.>
 
 ## Findings
 For each drift, in priority order:
 ### [SKILL-DRIFT] <skill/agent> — <short title>
-- **Where:** `.agents/…`, `.codex/…`, or `.claude/…:line` → ground truth: `path:line`
+- **Where:** `.agents/…` or `.codex/…:line` → ground truth: `path:line`
 - **What:** the fact it asserts vs. what the project actually says
 - **Proposed fix:** the exact edit; not applied during this audit
 
 ## Coverage
-<Every canonical skill, reviewer, and legacy adapter: ✓ matches project / ✗ drifted.>
+<Every canonical skill and reviewer: ✓ matches project / ✗ drifted.>
 
 ## Gate
 <ready record for a separately authorized PR edit | withheld — drift still open>
 ```
 
 Keep each finding tight and tied to a named project fact. A clean run is a valid outcome: every
-canonical skills/reviewers/adapters ✓, zero edits, gate record ready but not inserted.
+canonical skills/reviewers ✓, zero edits, gate record ready but not inserted.
