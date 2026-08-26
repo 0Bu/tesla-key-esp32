@@ -16,4 +16,4 @@ dependencies:
   # way for a while and dropped — see docs/adr/0004-drop-esp32c5-target.md.)
   yoziru/tesla-ble:
     git: "https://github.com/yoziru/tesla-ble.git"
-    version: "v5.1.1"
+    version: "v5.1.2"
