@@ -165,7 +165,9 @@ pairing when full.
 
 ## HTTP API
 
-Base: `http://<ESP32-IP>`. No auth, no TLS — see [SECURITY.md](SECURITY.md).
+Base: `http://<ESP32-IP>`. No auth, no TLS — see [SECURITY.md](SECURITY.md). Mutating browser
+requests from a foreign Origin are rejected with `403`; headerless evcc/curl clients remain
+compatible, so this is not a replacement for the trusted-LAN boundary.
 
 ### Commands
 
@@ -268,7 +270,9 @@ GET  /status               { vin, ip, version, key_present, key_fingerprint,
                              vcsec_sleep: "AWAKE"|"ASLEEP"|"UNKNOWN" (raw un-debounced flag, diagnostics),
                              vehicle:{soc,status,charge_limit,power,amps,actual_amps,volts,phases}
                                (only when link=="awake", cached; each field only when reported),
-                             mqtt:{configured,connected,tls,broker,error?} (HA bridge),
+                             mqtt:{configured,connected,tls,broker,error?} (HA bridge;
+                               broker is credential-free host:port even when the saved URI
+                               contains userinfo),
                              syslog:{configured,resolved,reachable,host?,port?,error?}
                                (UDP diag-log forwarder; reachable is an advisory ping hint,
                                never a delivery gate),
@@ -287,7 +291,7 @@ GET  /status               { vin, ip, version, key_present, key_fingerprint,
                                 genuine measured zero remains visible),
                                sys itself is ALWAYS present —
                                the block a remote triage reads first; the heap figures are
-                               INTERNAL-only, so the C5's PSRAM cannot mask them, and
+                               INTERNAL-only, so external RAM cannot mask them, and
                                largest_block is the number the heap watchdog acts on;
                                board_mac is the physical eFuse identity and remains visible
                                in ?redact=1 diagnostics),
@@ -518,7 +522,7 @@ Full threat model + Flash Encryption / Secure Boot: [SECURITY.md](SECURITY.md).
 | Signing | ECDSA P-256 (key in NVS) |
 | BLE library | [yoziru/tesla-ble](https://github.com/yoziru/tesla-ble) v5.1.1 + ordered repository patch series (including anti-replay) |
 | BLE stack | NimBLE |
-| Fragment size | 20 bytes / BLE write chunk |
+| Fragment size | Negotiated ATT MTU − 3 (20-byte safe default until MTU exchange; max 244) |
 | HTTP server | `esp_http_server` :80 |
 
 ## License

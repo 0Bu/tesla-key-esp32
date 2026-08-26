@@ -109,7 +109,8 @@ the authority for the per-sibling drift check; `$project-review` defers the mech
   (e.g. `pkg/vehicle/charge.go`), and its "worked findings" don't assert drift already fixed.
 - **`$add-logic-test`** — scaffolds a `main/logic/` unit + `CHECK`s in `test/test_logic.cpp`.
   Verify against `scripts/run-mock-tests.sh`, the CI `logic-test` job
-  (`.github/workflows/build.yml`), the `run-logic-tests.sh` **Stop hook** (`.codex/hooks.json`),
+  (`.github/workflows/build.yml`), the `stop-logic-tests` handler in
+  `tools/agent-hooks/agent_hook.py` wired by `.codex/hooks.json`,
   the `CHECK`/`CHECK_STR`/`CHECK_NEAR` macro set, and the `static_assert` lock pattern.
 - **`$pr-hygiene`** — screens the PR title/body, commit messages and touched documentation for
   personal/private information (`PRIVACY-LEAK`: LAN IPs, MAC addresses, VINs, WiFi network names,

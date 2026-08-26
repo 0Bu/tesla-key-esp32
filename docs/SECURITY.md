@@ -77,6 +77,13 @@ beyond what the open REST routes already allow). This is acceptable only because
 If you need access control, put the device behind a reverse proxy with TLS + auth, or
 segment it onto a trusted VLAN.
 
+The firmware does reject a narrower browser threat: a mutating request carrying an `Origin`
+whose authority differs from `Host`, or `Sec-Fetch-Site: cross-site`, receives `403` before route
+dispatch. Same-origin UI requests continue to work, and headerless clients such as evcc and curl
+remain compatible. This is **not authentication**: a raw LAN peer can omit browser headers and
+still call every endpoint, and an old/non-conforming browser that sends neither header is
+indistinguishable from such a client. The trusted-LAN boundary therefore remains mandatory.
+
 `POST /set_wifi` deserves naming explicitly, because it is the one open route whose worst
 case is *losing the device* rather than mis-charging the car: a LAN peer can point it at a
 network you do not control, and the board reboots onto it. Two things bound that. The
@@ -89,8 +96,10 @@ that follows restores them unless the new network actually hands out a lease
 the attacker genuinely controls — that association succeeds, so nothing rolls back. The
 mitigation there is the same as for every other route on this list: a trusted LAN.
 
-Two non-auth hardening measures remain in place:
+Three non-auth hardening measures remain in place:
 
+- **Browser-origin gate** — rejects cross-site mutating POSTs while retaining headerless evcc/curl
+  compatibility; it does not restrict a raw LAN caller.
 - **`/gen_keys` overwrite guard** — refuses to regenerate when a key already exists
   (returns `409`); regenerating un-pairs the vehicle. Use `/gen_keys?force=1` to replace.
 - **Body size cap** — POST bodies over 2 KB are rejected (bounds the receive buffer).
@@ -412,3 +421,5 @@ it.
   HTTP during provisioning. Keep the setup window short; consider WPA2 on the AP.
 - **Do not expose the device to the internet.** Home LAN only.
 - The private key is **never logged**; VIN/MAC/SSID appear in serial logs (physical access).
+- mDNS advertises firmware version but not the VIN; enumerating `_http._tcp` must not multicast a
+  vehicle identifier before a trusted client explicitly queries the open LAN API.

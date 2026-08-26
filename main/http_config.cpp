@@ -423,10 +423,13 @@ esp_err_t handle_set_mqtt(GuardedReq rq) {
     free(body);
 
     std::string broker;
-    if (json) {
-        cJSON* j = cJSON_GetObjectItemCaseSensitive(json, "broker");
-        if (cJSON_IsString(j) && j->valuestring) broker = j->valuestring;
+    cJSON* j = json ? cJSON_GetObjectItemCaseSensitive(json, "broker") : nullptr;
+    if (!cJSON_IsObject(json) || !cJSON_IsString(j) || !j->valuestring) {
+        cJSON_Delete(json);
+        return send_json(req, 400, make_response(false, "set_mqtt", "",
+                                                 "invalid JSON body (broker string required)"));
     }
+    broker = j->valuestring;
     cJSON_Delete(json);
 
     broker = tk::mqtt_trim(broker);

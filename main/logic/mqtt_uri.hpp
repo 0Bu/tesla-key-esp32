@@ -69,6 +69,21 @@ inline std::string mqtt_effective_uri(const std::string& broker, bool have_usern
     return (has_creds ? "mqtts://" : "mqtt://") + b;
 }
 
+// Credential-free authority for status, UI and logs. The stored URI remains untouched for the
+// MQTT client; only human-readable surfaces use this projection. `rfind('@')` is intentional:
+// userinfo may contain percent escapes or unusual characters, while the final '@' separates it
+// from the host. A path is not part of the broker identity shown to the user.
+inline std::string mqtt_broker_display(const std::string& uri) {
+    std::string authority = mqtt_trim(uri);
+    const size_t scheme = authority.find("://");
+    if (scheme != std::string::npos) authority.erase(0, scheme + 3);
+    const size_t slash = authority.find('/');
+    if (slash != std::string::npos) authority.erase(slash);
+    const size_t userinfo = authority.rfind('@');
+    if (userinfo != std::string::npos) authority.erase(0, userinfo + 1);
+    return authority;
+}
+
 // Does this URI open a TLS session? Decides both the CA bundle attachment and the pre-flight's
 // memory budget below.
 inline bool mqtt_uri_is_tls(const std::string& uri) {

@@ -20,6 +20,9 @@
 //                                    (logic/syslog_policy.hpp <- syslog.cpp, /set_syslog)
 //   * BLE connect-failure cause + its log level / rate limit
 //                                    (logic/connect_outcome.hpp <- ensure_connected_)
+//   * browser same-origin mutation gate + negotiated ATT write payload
+//                                    (logic/http_origin.hpp <- http_server.cpp,
+//                                     logic/ble_chunk.hpp <- ble_client.cpp)
 // The cJSON serializers stay IDF/cJSON-coupled, but they are one-to-one visitors now:
 // every which-field/when/what-value decision they render is host-tested here.
 
@@ -53,6 +56,8 @@
 #include "logic/heap_history.hpp"
 #include "logic/health_gate.hpp"
 #include "logic/mqtt_uri.hpp"
+#include "logic/http_origin.hpp"
+#include "logic/ble_chunk.hpp"
 #include "logic/wifi_rollback.hpp"
 #include "logic/redact.hpp"
 #include "logic/captive.hpp"
@@ -2483,6 +2488,14 @@ static void test_mqtt_uri() {
     CHECK(tk::mqtt_effective_uri("   host:1883  ", false) == "mqtt://host:1883");
     CHECK(tk::mqtt_effective_uri("", true).empty());   // empty stays empty: it disables the bridge
 
+    // Human-readable surfaces never receive embedded credentials. The client still dials the
+    // original URI; this projection is only for /status, UI defaults and logs.
+    CHECK(tk::mqtt_broker_display("mqtt://host:1883") == "host:1883");
+    CHECK(tk::mqtt_broker_display("mqtts://user:secret@broker.example:8883") ==
+          "broker.example:8883");
+    CHECK(tk::mqtt_broker_display(" user@realm:pw@host:1883/path ") == "host:1883");
+    CHECK(tk::mqtt_broker_display("").empty());
+
     CHECK(tk::mqtt_uri_is_tls("mqtts://h:8883"));
     CHECK(!tk::mqtt_uri_is_tls("mqtt://h:1883"));
     CHECK(!tk::mqtt_uri_is_tls(""));
@@ -2510,6 +2523,42 @@ static void test_mqtt_uri() {
     for (R r : {R::Ok, R::Unreachable, R::Refused, R::Timeout, R::NoHeap, R::Internal})
         CHECK(tk::mqtt_probe_reason(r) != nullptr && tk::mqtt_probe_reason(r)[0] != '\0');
     CHECK(std::string(tk::mqtt_probe_reason(R::Unreachable)).find("not saved") != std::string::npos);
+}
+
+// ─── Browser-origin gate for mutating HTTP requests (logic/http_origin.hpp) ────────────────────
+static void test_http_origin() {
+    // evcc/curl do not send browser-origin metadata and retain the documented trusted-LAN API.
+    CHECK(tk::mutation_origin_allowed("", "", ""));
+    CHECK(tk::mutation_origin_allowed("tesla-key-esp32.local", "", "none"));
+
+    CHECK(tk::mutation_origin_allowed("tesla-key-esp32.local",
+                                      "http://tesla-key-esp32.local", "same-origin"));
+    CHECK(tk::mutation_origin_allowed("TESLA-KEY-ESP32.LOCAL:80",
+                                      "http://tesla-key-esp32.local", "same-origin"));
+    CHECK(tk::mutation_origin_allowed("proxy.example",
+                                      "https://PROXY.EXAMPLE:443", "same-origin"));
+
+    CHECK(!tk::mutation_origin_allowed("tesla-key-esp32.local",
+                                       "https://evil.example", "cross-site"));
+    CHECK(!tk::mutation_origin_allowed("tesla-key-esp32.local",
+                                       "http://evil.example", ""));
+    CHECK(!tk::mutation_origin_allowed("tesla-key-esp32.local", "null", "same-site"));
+    CHECK(!tk::mutation_origin_allowed("", "http://tesla-key-esp32.local", "same-origin"));
+    CHECK(!tk::mutation_origin_allowed("tesla-key-esp32.local",
+                                       "http://tesla-key-esp32.local/path", "same-origin"));
+    CHECK(!tk::mutation_origin_allowed("tesla-key-esp32.local",
+                                       "http://user@tesla-key-esp32.local", "same-origin"));
+}
+
+// ─── Negotiated ATT payload size (logic/ble_chunk.hpp) ────────────────────────────────────────
+static void test_ble_chunk() {
+    CHECK(tk::ble_write_payload_for_mtu(0) == 20);
+    CHECK(tk::ble_write_payload_for_mtu(3) == 20);
+    CHECK(tk::ble_write_payload_for_mtu(23) == 20);
+    CHECK(tk::ble_write_payload_for_mtu(24) == 21);
+    CHECK(tk::ble_write_payload_for_mtu(64) == 61);
+    CHECK(tk::ble_write_payload_for_mtu(247) == 244);
+    CHECK(tk::ble_write_payload_for_mtu(517) == 244);
 }
 
 // ─── WiFi credential rollback ─────────────────────────────────────────────────
@@ -2957,6 +3006,8 @@ int main() {
     test_heap_persist();
     test_health_gate();
     test_mqtt_uri();
+    test_http_origin();
+    test_ble_chunk();
     test_wifi_rollback();
     test_net_link();
     test_status_eth();

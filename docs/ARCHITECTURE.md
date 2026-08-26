@@ -490,9 +490,10 @@ The escalation lives in the pure, host-tested `main/logic/heap_watchdog.hpp`, sa
   skipping would let a run that began *before* the download resume its clock and fire during it.
   Queried via `ota_is_busy()` (one atomic), never `ota_get_status()` (copies `std::string`s and
   can throw on the very heap this is deciding about).
-- **On fire:** `ESP_LOGE`, persist `reboot_why=heap:<n>` to NVS `tesla_cfg`,
-  `ota_confirm_pending_image()` so a deliberate restart inside the ~90 s OTA health gate is not
-  mistaken for a failed boot, a **300 ms `vTaskDelay`**, then `esp_restart()`. The delay is not
+- **On fire:** `ESP_LOGE`, persist `reboot_why=heap:<n>` to NVS `tesla_cfg`, deliberately **do not
+  confirm** a `PENDING_VERIFY` image, wait a **300 ms `vTaskDelay`**, then `esp_restart()`. Automatic
+  fault recovery must leave rollback armed: if the newly installed image caused the heap
+  regression, confirming it here would make the bad slot permanent. The delay is not
   cosmetic: `syslog_send()` only *queues*, and its task runs at priority 3 against `loop_task`'s
   5, so without a yield the final message dies in the queue on a single-core target — and the
   `/diag` ring does not survive the reboot either. Skipping it would throw away the one line that
@@ -956,6 +957,15 @@ so no stale data is shown (`clear_session_and_cache_()` in `vehicle_pairing.cpp`
    the same VIN is a no-op for the pairing.
 
 After any of these `has_session()` is false → UI shows "not paired", hides controls/SOC.
+
+`has_session()` is also sampled by the 50 ms vehicle loop. The storage adapter therefore caches
+the first successful `session_vcsec` existence probe and updates that atomic cache after every
+successful session save/remove; NVS read errors remain uncached and are retried. This avoids a
+continuous NVS length probe without making a transient storage fault look durably absent.
+
+The main-task BLE-MAC string is startup-only input. When it is empty, the NimBLE host task
+atomically claims one best-effort NVS persistence attempt after its first successful connection;
+it never mutates that `std::string` across tasks.
 
 **Session reuse across a reboot needs the wall clock restored first.** The `sess_vcsec`/`sess_info`
 blobs in NVS exist so a restart does not cost a fresh handshake, but tesla-ble only accepts a

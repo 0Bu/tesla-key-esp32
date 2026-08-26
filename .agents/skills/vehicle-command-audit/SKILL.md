@@ -122,8 +122,8 @@ re-confirm it against the *current* tree and catch anything that drifted since. 
    **`Connectable`** flag (not the connect error). *Baseline: matches.* (We use a fixed 20-byte
    write chunk vs upstream's MTU-derived block — slower but safe; OK as long as docs say so.)
 2. **Roles / Charging-Manager scope** — charging commands + wake only; everything else
-   (lights/horn/sentry/**climate**/locks) is role-rejected. *Baseline: code correct
-   (`vehicle_commands.cpp` role-refusal comment), **docs understated** — see worked example.*
+   (lights/horn/sentry/**climate**/locks) is role-rejected. *Baseline: code and current docs match;
+   the worked table retains the former drift only as a labelled historical example.*
 3. **Session / signing / clock** — `expires_at` = **vehicle's `SessionInfo.ClockTime` + a
    monotonic `steady_clock` delta** (`src/peer.cpp` `generate_expires_at`), per-domain counter +
    16-byte epoch, separate VCSEC/Infotainment sessions. **The device wall clock does NOT enter
@@ -137,7 +137,7 @@ re-confirm it against the *current* tree and catch anything that drifted since. 
    car stores up to **19 keys** — don't call it a 3-key cap.)
 5. **Command params / ranges** — amps clamp **0–48** (faithful to real chargers; upstream has no
    cap), charge-limit **50–100**, scheduled-charging `start_minutes` **0–1439** after local
-   midnight. *Baseline: code faithful; docs say amps "0–32".*
+   midnight. *Baseline: code and current docs both say 0–48.*
 6. **Wake / sleep** — wake is a **VCSEC-domain** `RKE_ACTION_WAKE_VEHICLE` (not infotainment);
    `vehicleSleepStatus`/`vehicleLockState`/`userPresence` string values match the upstream enums;
    the "trust debounced VCSEC ASLEEP, never VCSEC AWAKE" asymmetry is a correct reading.
@@ -177,9 +177,9 @@ sources; if still present, report it rather than editing. Nearly all are documen
 
 | # | Cat | Where (doc) | Drift | Fix |
 |---|---|---|---|---|
-| 1 | doc (crux) | `docs/README.md` "Commands" | Claims **only** `door_lock/unlock` are role-rejected. Also rejected: `flash_lights`, `honk_horn`, `set_sentry_mode`, `auto_conditioning_start/stop`. Code already names them at the `vehicle_commands.cpp` role-refusal comment. | Widen the "sent but rejected for the Charging-Manager role" note to the full set; only charging + charge-port + wake actually execute. |
+| 1 | doc (crux, historical) | `docs/README.md` "Commands" | Formerly claimed only `door_lock/unlock` were role-rejected; current docs name the complete role-refused set. | Re-verify the current command list; do not report this historical example as current drift. |
 | 2 | doc | `docs/README.md` `/status.link` and MQTT `sleep_status`; `docs/ARCHITECTURE.md` "Sleep / link-state" | Enum value sets omit **`idle`/`IDLE`** (code emits 5 / 4 values). | Add `idle`/`IDLE` to the owning deep references. |
-| 3 | doc | `docs/README.md` "Commands" | `set_charging_amps` "(0–32)" but code clamps **0–48**. | Document `(0–48; car enforces its per-model max)`. |
+| 3 | doc (historical) | `docs/README.md` "Commands" | Formerly said `set_charging_amps` was 0–32; current docs and code say **0–48**. | Re-verify the current range; do not report this historical example as current drift. |
 | 4 | doc | `README.md` "Step 4 — Pair with the car" | Quotes car prompt as "Add new key"; firmware strings say **"Add key"**. | One-word fix. |
 | 5 | doc | `README.md` "Pair with the car"; `docs/README.md` "Pairing" | "max 3 **keys** per vehicle" — really ~3 simultaneous **connections** (19 keys stored). | Reframe as the ~3-connection limit. |
 | 6 | doc/comment | `Kconfig.projbuild` OTA help | Says image is `tesla-key-esp32-<target>.bin`; actual suffix scheme is `""`/`-s3`/`-c3`/`-c6`. | Correct to the real suffix map. |

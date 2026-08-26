@@ -685,14 +685,14 @@ extern "C" void app_main() {
     if (mdns_init() == ESP_OK) {
         mdns_hostname_set(MDNS_HOSTNAME);
         mdns_instance_name_set("tesla-key-esp32");
-        // TXT records so discovery tools (dns-sd -B / avahi-browse / our own /scan)
-        // can tell multiple devices apart without first resolving each .local host.
-        // mdns copies these internally, so the pointers need only outlive the call.
+        // Advertise only the firmware version. The full VIN is private identity data and must not
+        // become multicast-browseable merely because a client enumerates HTTP services; callers
+        // that are already trusted to query this open LAN API can obtain it from /status.
+        // mdns copies this internally, so the pointer need only outlive the call.
         mdns_txt_item_t txt[] = {
-            { "vin", vin.c_str() },
             { "ver", esp_app_get_description()->version },
         };
-        mdns_service_add(nullptr, "_http", "_tcp", 80, txt, 2);
+        mdns_service_add(nullptr, "_http", "_tcp", 80, txt, 1);
         ESP_LOGI(TAG, "mDNS: http://%s.local", MDNS_HOSTNAME);
     } else {
         ESP_LOGW(TAG, "mDNS init failed");

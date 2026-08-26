@@ -122,12 +122,12 @@ const reviewedSkillSha256 = new Map([
   ["feature-docs", "43c1db745640619aea155b2e34b8fb0127b1d681b936294bffdfd8422566bb46"],
   ["flash-esp32", "6ead7b8f1732c66285f16c8427ee952043ad8d730001fd76c90c8d0ed01fc99e"],
   ["ota-release-verify", "3b0c7941871b9c350bf64a046e3344ac3b5effa2228daf375428b97e0168a511"],
-  ["pr-hygiene", "addfebbad2a6e7717f34acccaafd765fee02f1b05aa3735e84e6dfff61c4af5f"],
-  ["project-review", "3bee267fe77b7ef047e73acb47991643d2a522e980ae98e2980b713215cfc0b3"],
+  ["pr-hygiene", "feac7188b13c82b33cd83808930d3b7e6f6952c7ebc46b727d25d37714f69778"],
+  ["project-review", "a486e145e3e2b736efc9f1ffc9aa28f2657a0a65d3cb86bb63d18d07319d54c7"],
   ["ship", "604da450727cb85e56c7cbc7ac6924b6378e7bb15a2ef4a5fd93983588af6ed1"],
-  ["skill-audit", "bf3b11bc0bfaa9d29c7e261a549b9bbb94a429f19468648afe42d50c3a42f6ce"],
+  ["skill-audit", "8dda290cc6bc295dc464db42951382a40344e8086ba7bd23a56124d4c1fb64dc"],
   ["usb-recovery", "ed31dfbbf41a7a155eb73ec80e09c23338049a3ca7ac4754bdfdff960e733c24"],
-  ["vehicle-command-audit", "30ab4506d71e11d3993d66ca566402e024d12ae7502fd2b0bb056778cdde191a"],
+  ["vehicle-command-audit", "fcc055663cc8c95cb4a1cd9ea51a38aef1d32345657a09a4e37404a10ac878cc"],
 ]);
 const featureDocsScopeTokens = [
   "main/", "test/", "sdkconfig.defaults*", "partitions.csv", "AGENTS.md", ".agents/", ".codex/",

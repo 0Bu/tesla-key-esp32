@@ -147,6 +147,11 @@ static bool json_bool_arg(const cJSON* obj, const tk::CmdArg& arg,
 
 // ─── POST /api/1/vehicles/{VIN}/command/{CMD} ─────────────────────────────────
 
+bool is_command_route(const char* uri) {
+    char vin[64], cmd[64];
+    return parse_uri(uri, vin, sizeof(vin), cmd, sizeof(cmd));
+}
+
 esp_err_t handle_command(GuardedReq rq) {
     httpd_req_t* req = rq.req;
     char vin[64], cmd[64];
