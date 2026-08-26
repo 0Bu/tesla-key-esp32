@@ -165,7 +165,10 @@ pairing when full.
 
 ## HTTP API
 
-Base: `http://<ESP32-IP>`. No auth, no TLS — see [SECURITY.md](SECURITY.md).
+Base: `http://<ESP32-IP>`. No auth, no TLS — see [SECURITY.md](SECURITY.md). Mutating browser
+requests from a foreign or DNS-rebound Origin are rejected with `403`; Host must be the device
+name/current IP, and state-changing legacy GET forms use the same gate. Headerless evcc/curl
+clients remain compatible, so this is not a replacement for the trusted-LAN boundary.
 
 ### Commands
 
@@ -189,6 +192,10 @@ POST /api/1/vehicles/{VIN}/command/{command}   Content-Type: application/json
 For evcc compatibility, `charge_start` also accepts the JSON scalar `true` and
 `charge_stop` accepts `false`. These are the exact bodies emitted by evcc's generic
 boolean setter; mismatched booleans and all other non-object bodies remain HTTP 400.
+
+Supplied integer arguments must be integral and inside the listed range; REST returns HTTP 400
+instead of silently clamping to a different command value. Optional omitted fields retain their
+documented compatibility defaults.
 
 `charging_amps` is required and must be a whole number. A successful `set_charging_amps`
 response means more than a Tesla command acknowledgement: the firmware performs a new,
@@ -268,7 +275,9 @@ GET  /status               { vin, ip, version, key_present, key_fingerprint,
                              vcsec_sleep: "AWAKE"|"ASLEEP"|"UNKNOWN" (raw un-debounced flag, diagnostics),
                              vehicle:{soc,status,charge_limit,power,amps,actual_amps,volts,phases}
                                (only when link=="awake", cached; each field only when reported),
-                             mqtt:{configured,connected,tls,broker,error?} (HA bridge),
+                             mqtt:{configured,connected,tls,broker,error?} (HA bridge;
+                               broker is credential-free host:port even when the saved URI
+                               contains userinfo),
                              syslog:{configured,resolved,reachable,host?,port?,error?}
                                (UDP diag-log forwarder; reachable is an advisory ping hint,
                                never a delivery gate),
@@ -287,7 +296,7 @@ GET  /status               { vin, ip, version, key_present, key_fingerprint,
                                 genuine measured zero remains visible),
                                sys itself is ALWAYS present —
                                the block a remote triage reads first; the heap figures are
-                               INTERNAL-only, so the C5's PSRAM cannot mask them, and
+                               INTERNAL-only, so external RAM cannot mask them, and
                                largest_block is the number the heap watchdog acts on;
                                board_mac is the physical eFuse identity and remains visible
                                in ?redact=1 diagnostics),
@@ -506,7 +515,11 @@ Full threat model + Flash Encryption / Secure Boot: [SECURITY.md](SECURITY.md).
 - Private key in NVS, **unencrypted by default**; dumpable via USB on a factory S3. Enable
   Flash + NVS Encryption (irreversible).
 - API has no auth / TLS by design (evcc cannot send credentials). Trusted LAN only; never
-  expose to the internet. Front with a reverse proxy or VLAN if access control is needed.
+  expose to the internet. Front with a reverse proxy or VLAN if access control is needed. A
+  reverse proxy must set its upstream `Host` to the device IP or `.local` name and remove
+  `Origin` (or rewrite it to the same device authority); the firmware rejects a forwarded public
+  proxy hostname on mutating browser requests. Likewise, use the `.local` name or current IP for
+  browser configuration rather than a router-expanded DHCP FQDN.
 
 ## Internals
 
@@ -518,7 +531,7 @@ Full threat model + Flash Encryption / Secure Boot: [SECURITY.md](SECURITY.md).
 | Signing | ECDSA P-256 (key in NVS) |
 | BLE library | [yoziru/tesla-ble](https://github.com/yoziru/tesla-ble) v5.1.1 + ordered repository patch series (including anti-replay) |
 | BLE stack | NimBLE |
-| Fragment size | 20 bytes / BLE write chunk |
+| Fragment size | Negotiated ATT MTU − 3 (20-byte safe default until MTU exchange; max 244) |
 | HTTP server | `esp_http_server` :80 |
 
 ## License

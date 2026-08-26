@@ -555,17 +555,6 @@ static void publisher_task(void*) {
     }
 }
 
-// ─── Config helpers ───────────────────────────────────────────────────────────
-// Display form "host:port": strip any "scheme://" and trailing path.
-static std::string broker_display(const std::string& uri) {
-    std::string s = uri;
-    size_t p = s.find("://");
-    if (p != std::string::npos) s = s.substr(p + 3);
-    size_t slash = s.find('/');
-    if (slash != std::string::npos) s = s.substr(0, slash);
-    return s;
-}
-
 // ─── Public API ───────────────────────────────────────────────────────────────
 static void mqtt_ha_cleanup_start_failure() noexcept {
     if (s_client) {
@@ -605,7 +594,9 @@ static bool mqtt_ha_start_impl(VehicleController& vehicle,
     // connects to, which is worse than no check at all.
     s_uri = tk::mqtt_effective_uri(s_uri, !s_user.empty());
     s_tls = tk::mqtt_uri_is_tls(s_uri);
-    s_broker_disp = broker_display(s_uri);
+    // Status, UI defaults and logs receive only the credential-free authority. Keep s_uri intact
+    // for the client itself: removing userinfo there would break authentication.
+    s_broker_disp = tk::mqtt_broker_display(s_uri);
     s_interval_s = CONFIG_TESLA_MQTT_PUBLISH_INTERVAL_S;
     if (s_interval_s < 5) s_interval_s = 5;
 

@@ -5,7 +5,9 @@
 // http_common.cpp. See http_handlers.hpp for the split map.
 
 #include "http_handlers.hpp"
+#include "net.hpp"
 #include "stack_watch.hpp"
+#include "logic/http_origin.hpp"
 #include <esp_log.h>
 #include <cstring>
 #include <exception>
@@ -35,6 +37,46 @@ static bool path_ends_with(const char* path, const char* suffix) {
     return lp >= ls && strcmp(path + lp - ls, suffix) == 0;
 }
 
+static bool read_header_bounded(httpd_req_t* req, const char* name, char* out, size_t capacity) {
+    out[0] = '\0';
+    const size_t len = httpd_req_get_hdr_value_len(req, name);
+    if (len == 0) return true;
+    if (len >= capacity) return false;
+    return httpd_req_get_hdr_value_str(req, name, out, capacity) == ESP_OK;
+}
+
+// Preserve the documented headerless trusted-LAN API used by evcc/curl, but do not let a foreign
+// browser origin borrow the user's LAN reachability for a mutating request. Host is first bound to
+// the device's own name/IP so a DNS-rebinding page cannot make attacker-controlled Host and Origin
+// compare equal. This is deliberately not authentication: a raw LAN peer can still call every
+// endpoint described in docs/SECURITY.md.
+static bool browser_mutation_allowed(httpd_req_t* req) {
+    char origin[192];
+    char fetch_site[32];
+    if (!read_header_bounded(req, "Origin", origin, sizeof(origin)) ||
+        !read_header_bounded(req, "Sec-Fetch-Site", fetch_site, sizeof(fetch_site))) {
+        return false;
+    }
+    if (origin[0] == '\0' && fetch_site[0] == '\0') return true;
+
+    char host[128];
+    if (!read_header_bounded(req, "Host", host, sizeof(host))) return false;
+    char device_ip[16] = {};
+    esp_netif_t* netif = tk::net_active_netif();
+    esp_netif_ip_info_t ip{};
+    if (netif && esp_netif_get_ip_info(netif, &ip) == ESP_OK) {
+        esp_ip4addr_ntoa(&ip.ip, device_ip, sizeof(device_ip));
+    }
+    return tk::mutation_origin_allowed(host, origin, fetch_site, device_ip);
+}
+
+static esp_err_t reject_cross_origin_mutation(httpd_req_t* req) {
+    ESP_LOGW(TAG, "rejected cross-origin mutation");
+    httpd_resp_set_status(req, "403 Forbidden");
+    httpd_resp_set_type(req, "text/plain; charset=utf-8");
+    return httpd_resp_sendstr(req, "cross-origin mutation rejected");
+}
+
 // ─── Wildcard handler dispatching ─────────────────────────────────────────────
 
 // Single catch-all handler registered for /*
@@ -45,6 +87,10 @@ static esp_err_t handle_all_dispatch(httpd_req_t* req) {
     const bool POST = req->method == HTTP_POST;
     ESP_LOGI(TAG, "REQ: %s %s", GET ? "GET" : (POST ? "POST" : "OTHER"), req->uri);
 
+    if (tk::mutation_origin_required(POST, req->uri) && !browser_mutation_allowed(req)) {
+        return reject_cross_origin_mutation(req);
+    }
+
     // Log all headers to see what evcc is sending
     char header_val[128];
     if (httpd_req_get_hdr_value_str(req, "User-Agent", header_val, sizeof(header_val)) == ESP_OK) {
@@ -54,9 +100,9 @@ static esp_err_t handle_all_dispatch(httpd_req_t* req) {
         ESP_LOGI(TAG, "  Accept: %s", header_val);
     }
 
-    // Parameterized API routes (the VIN is embedded in the path): match the trailing segment of
-    // the query-stripped path. /command/ is matched as an interior segment since {CMD} follows.
-    if (POST && strstr(path, "/command/"))                      return handle_command({req});
+    // Parameterized API routes (the VIN is embedded in the path). The command route delegates its
+    // exact shape to the handler parser; an unrelated path containing "/command/" stays a 404.
+    if (POST && is_command_route(req->uri))                     return handle_command({req});
     if (GET  && path_ends_with(path, "/vehicle_data"))          return handle_vehicle_data({req});
     if (GET  && path_ends_with(path, "/body_controller_state")) return handle_body_controller({req});
 

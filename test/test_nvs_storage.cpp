@@ -141,6 +141,38 @@ int main() {
     NvsStorageAdapter storage("tesla_cfg");
     CHECK(storage.initialize());
 
+    // Unknown long keys fail closed instead of aliasing after a silent 15-character truncation.
+    // No NVS read is attempted, so the empty scripts must remain untouched.
+    {
+        std::vector<uint8_t> out{0xAA};
+        script_blob_reads({});
+        CHECK(!storage.load("unknown_key_name_too_long", out));
+        CHECK(out.empty());
+        check_blob_script_consumed();
+        CHECK(!storage.save("unknown_key_name_too_long", std::vector<uint8_t>{1}));
+    }
+
+    // The hot VCSEC session-presence check probes NVS once, then follows successful writes and
+    // removals from the adapter cache. A read error would stay Unknown and be retried instead.
+    {
+        script_blob_reads({{ESP_OK, 4, {}}});
+        CHECK(storage.blob_exists("session_vcsec"));
+        CHECK(storage.blob_exists("session_vcsec"));
+        check_blob_script_consumed();
+        CHECK(storage.remove("session_vcsec"));
+        CHECK(!storage.blob_exists("session_vcsec"));
+        CHECK(storage.save("session_vcsec", std::vector<uint8_t>{1, 2, 3, 4}));
+        CHECK(storage.blob_exists("session_vcsec"));
+    }
+    {
+        NvsStorageAdapter retrying("tesla_ble");
+        CHECK(retrying.initialize());
+        script_blob_reads({{ESP_FAIL, 0, {}}, {ESP_OK, 4, {}}});
+        CHECK(!retrying.blob_exists("session_vcsec"));
+        CHECK(retrying.blob_exists("session_vcsec"));
+        check_blob_script_consumed();
+    }
+
     // tesla-ble's generic StorageAdapter path loads the durable private key and sessions. Its
     // probe and data read must describe one stable blob: accepting a shorter second value can put
     // key B in Vehicle RAM while a later fingerprint read observes durable key A, invalidating the

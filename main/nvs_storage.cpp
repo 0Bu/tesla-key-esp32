@@ -27,15 +27,18 @@ std::string NvsStorageAdapter::map_key(const std::string& key) const {
     if (key == "session_infotainment") return "sess_info";  // ≤15 chars; "sess_infotainmnt" was 16 → KEY_TOO_LONG
     if (key == "session_vcsec")        return "sess_vcsec";
     if (key == "private_key")          return "private_key";
-    // Truncate to 15 chars as last resort (should not happen)
+    // Unknown long keys must fail closed. Silent truncation can make two logical records collide
+    // and overwrite key/session material under a name neither caller intended.
     if (key.length() <= 15) return key;
-    return key.substr(0, 15);
+    ESP_LOGE(TAG, "refusing unmapped NVS key longer than 15 characters: '%s'", key.c_str());
+    return {};
 }
 
 bool NvsStorageAdapter::load(const std::string& key, std::vector<uint8_t>& buffer) {
     buffer.clear();
     if (!initialized_) return false;
     std::string nvskey = map_key(key);
+    if (nvskey.empty()) return false;
     size_t len = 0;
     esp_err_t err = nvs_get_blob(handle_, nvskey.c_str(), nullptr, &len);
     if (err == ESP_ERR_NVS_NOT_FOUND) return false;
@@ -73,17 +76,30 @@ bool NvsStorageAdapter::load(const std::string& key, std::vector<uint8_t>& buffe
 
 bool NvsStorageAdapter::blob_exists(const std::string& key) const {
     if (!initialized_) return false;
+    if (key == "session_vcsec") {
+        const int8_t cached = session_vcsec_present_.load();
+        if (cached >= 0) return cached == 1;
+    }
     // map_key() returns a ≤15-char key, so it is small-string-optimised (no heap). Unlike
     // load(), this probes only the stored length and never resizes/reads the blob into a
     // vector — the point is a heap-free existence test on a repeatedly-sampled hot path.
     std::string nvskey = map_key(key);
+    if (nvskey.empty()) return false;
     size_t len = 0;
     esp_err_t err = nvs_get_blob(handle_, nvskey.c_str(), nullptr, &len);
-    if (err == ESP_ERR_NVS_NOT_FOUND || len == 0) return false;
+    if (err == ESP_ERR_NVS_NOT_FOUND) {
+        if (key == "session_vcsec") session_vcsec_present_.store(0);
+        return false;
+    }
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "exists probe failed '%s': %s", nvskey.c_str(), esp_err_to_name(err));
         return false;
     }
+    if (len == 0) {
+        if (key == "session_vcsec") session_vcsec_present_.store(0);
+        return false;
+    }
+    if (key == "session_vcsec") session_vcsec_present_.store(1);
     return true;
 }
 
@@ -94,6 +110,7 @@ bool NvsStorageAdapter::probe_blob(const std::string& key, bool& exists) const {
         return false;
     }
     std::string nvskey = map_key(key);
+    if (nvskey.empty()) return false;
     size_t len = 0;
     const esp_err_t err = nvs_get_blob(handle_, nvskey.c_str(), nullptr, &len);
     if (err == ESP_ERR_NVS_NOT_FOUND) return true;
@@ -110,6 +127,7 @@ bool NvsStorageAdapter::probe_blob(const std::string& key, bool& exists) const {
 bool NvsStorageAdapter::save(const std::string& key, const std::vector<uint8_t>& buffer) {
     if (!initialized_) return false;
     std::string nvskey = map_key(key);
+    if (nvskey.empty()) return false;
     esp_err_t err = nvs_set_blob(handle_, nvskey.c_str(), buffer.data(), buffer.size());
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "save failed '%s': %s", nvskey.c_str(), esp_err_to_name(err));
@@ -120,12 +138,14 @@ bool NvsStorageAdapter::save(const std::string& key, const std::vector<uint8_t>&
         ESP_LOGE(TAG, "commit failed after save '%s': %s", nvskey.c_str(), esp_err_to_name(err));
         return false;
     }
+    if (key == "session_vcsec") session_vcsec_present_.store(1);
     return true;
 }
 
 bool NvsStorageAdapter::remove(const std::string& key) {
     if (!initialized_) return false;
     std::string nvskey = map_key(key);
+    if (nvskey.empty()) return false;
     esp_err_t err = nvs_erase_key(handle_, nvskey.c_str());
     if (err != ESP_OK && err != ESP_ERR_NVS_NOT_FOUND) {
         ESP_LOGE(TAG, "remove failed '%s': %s", nvskey.c_str(), esp_err_to_name(err));
@@ -136,6 +156,7 @@ bool NvsStorageAdapter::remove(const std::string& key) {
         ESP_LOGE(TAG, "commit failed after remove '%s': %s", nvskey.c_str(), esp_err_to_name(err));
         return false;
     }
+    if (key == "session_vcsec") session_vcsec_present_.store(0);
     return true;
 }
 
@@ -145,6 +166,7 @@ bool NvsStorageAdapter::remove(const std::string& key) {
 bool NvsStorageAdapter::load_str(const char* key, std::string& out) {
     if (!initialized_) return false;
     std::string nvskey = map_key(key);
+    if (nvskey.empty()) return false;
     size_t len = 0;
     esp_err_t err = nvs_get_str(handle_, nvskey.c_str(), nullptr, &len);
     if (err == ESP_ERR_NVS_NOT_FOUND || len == 0) return false;
@@ -170,6 +192,7 @@ tk::NvsStringLoadState NvsStorageAdapter::load_str_state(const char* key, std::s
     }
 
     std::string nvskey = map_key(key);
+    if (nvskey.empty()) return tk::NvsStringLoadState::Error;
     size_t len = 0;
     esp_err_t err = nvs_get_str(handle_, nvskey.c_str(), nullptr, &len);
     const tk::NvsStringProbe probe =
@@ -212,6 +235,7 @@ tk::NvsStringLoadState NvsStorageAdapter::load_str_state(const char* key, std::s
 bool NvsStorageAdapter::save_str(const char* key, const std::string& value) {
     if (!initialized_) return false;
     std::string nvskey = map_key(key);
+    if (nvskey.empty()) return false;
     esp_err_t err = nvs_set_str(handle_, nvskey.c_str(), value.c_str());
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "save_str failed '%s': %s", nvskey.c_str(), esp_err_to_name(err));

@@ -10,6 +10,7 @@
 #include <esp_timer.h>
 
 #include "logic/ble_readiness.hpp"
+#include "logic/ble_chunk.hpp"
 
 #include "host/ble_hs.h"
 #include "host/ble_gatt.h"
@@ -52,9 +53,6 @@ static const ble_uuid128_t TESLA_NOTIFY_UUID = {
 // Client Characteristic Configuration Descriptor — the standard 0x2902 descriptor written to
 // enable notifications. Discovered at runtime rather than assumed at notify_val_handle_+1.
 static const ble_uuid16_t CCCD_UUID = BLE_UUID16_INIT(0x2902);
-
-// Max BLE write chunk (ATT MTU 247 - 3 header = 244, but 20 is safest default)
-static constexpr size_t BLE_CHUNK_SIZE = 20;
 
 // A nearby Tesla vehicle seen while scanning (not connected).
 struct TeslaScan {
@@ -233,6 +231,9 @@ private:
     // discovery, a confirmed CCCD write, and on_connected_(true) for the same generation.
     // Tying it to the generation also rejects a delayed callback after handle reuse.
     std::atomic<uint32_t> ready_generation_{tk::ble::kNoReadyGeneration};
+    // ATT payload available for the current connection generation. It starts at the mandatory
+    // 20-byte default and is raised only after NimBLE publishes a negotiated MTU event.
+    std::atomic<uint16_t> write_payload_size_{tk::kBleDefaultWritePayload};
     // disconnect() is asynchronous: the GAP event that clears the handle arrives later. This
     // flag closes that interval immediately, so a following command cannot enqueue on a link
     // already being terminated. The host task clears it only after publishing a fresh link.
@@ -244,7 +245,6 @@ private:
     std::atomic<uint32_t> connect_fail_count_{0};
     std::atomic<int64_t>  last_connect_attempt_us_{0};
     std::atomic<uint16_t> write_handle_{0};
-    uint16_t notify_handle_{0};
     uint16_t notify_val_handle_{0};
     uint16_t cccd_handle_{0};   // discovered CCCD (0x2902) for the notify chr; 0 until found
 
@@ -259,7 +259,6 @@ private:
     uint16_t svc_start_handle_{0};
     uint16_t svc_end_handle_{0};
 
-    ble_addr_t target_addr_{};
     bool       has_target_{false};
     std::string peer_addr_str_;
     std::string target_vin_;
