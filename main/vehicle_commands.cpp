@@ -644,9 +644,12 @@ bool VehicleController::set_charging_amps(int amps, int timeout_ms) {
 }
 
 bool VehicleController::set_charge_limit(int percent, int timeout_ms) {
-    // Clamp to the documented 50–100 % range (below 50 the car refuses; above 100 is invalid).
-    if (percent < 50)  percent = 50;
-    if (percent > 100) percent = 100;
+    // Never silently execute a different limit than the caller requested. Public command parsers
+    // already validate this range; keep the controller boundary strict as defense in depth.
+    if (percent < 50 || percent > 100) {
+        ESP_LOGE(TAG, "Set Charge Limit rejected: %d is outside 50-100", percent);
+        return false;
+    }
     int32_t pct32 = (int32_t)percent;
     return send_infotainment_("Set Charge Limit", [pct32](TeslaBLE::Client* c, uint8_t* b, size_t* l) {
         return c->build_car_server_vehicle_action_message(

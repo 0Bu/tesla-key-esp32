@@ -7,7 +7,7 @@
 
 // Pure, hardware-free core of the MCP endpoint (POST /mcp — see main/mcp_server.cpp):
 // protocol-version negotiation, JSON-RPC method routing, and the integer-argument
-// clamp. The tool registry itself lives in logic/command_registry.hpp — ONE table
+// validation. The tool registry itself lives in logic/command_registry.hpp — ONE table
 // shared with the REST /command dispatch (http_api.cpp), so the two surfaces can never
 // disagree about names or argument bounds. Everything IDF/cJSON-coupled stays in
 // mcp_server.cpp; keeping the decisions here lets the host mock build (test/) verify
@@ -65,27 +65,17 @@ inline McpMethod mcp_method_from(const char* m) {
 // model). Descriptions stay terse on purpose — tools/list is the endpoint's largest
 // response and cJSON prints it into ONE contiguous heap block (see AGENTS.md).
 
-// Clamp a JSON number to an int range BEFORE the int cast — casting an out-of-range
-// double to int is undefined behaviour, so a hostile {"amps":1e300} must never reach
-// (int). Same rule as http_api.cpp's json_int_arg; the cJSON unwrapping stays
-// in mcp_server.cpp. NaN falls through BOTH comparisons (NaN compares false), so it
-// must be caught explicitly — the string-argument path parses with strtod, which
-// accepts "nan"; without this check {"amps":"nan"} would reach the (int) cast.
-inline int clamped_int(double d, int lo, int hi) {
-    if (d != d) return lo;   // NaN → the safe bound, never the cast
-    if (d < (double)lo) return lo;
-    if (d > (double)hi) return hi;
-    return (int)d;
-}
-
 // MCP advertises these arguments as JSON Schema `integer`. Accepting a fractional cJSON
 // number and silently truncating it executes a different command than the client requested;
-// accepting NaN/Infinity (reachable through numeric strings and permissive parsers) either
-// reaches an undefined int cast or turns a non-boolean into true. Keep the compatibility for
-// numeric strings in mcp_server.cpp, but require their decoded value to obey the same rules.
+// silently clamping an out-of-range number has the same problem. Accepting NaN/Infinity
+// (reachable through numeric strings and permissive parsers) can also reach an undefined int
+// cast. Keep numeric-string compatibility in mcp_server.cpp, but validate before conversion.
 inline bool mcp_integer_value(double d, int lo, int hi, int& out) {
-    if (!std::isfinite(d) || std::trunc(d) != d) return false;
-    out = clamped_int(d, lo, hi);
+    if (!std::isfinite(d) || std::trunc(d) != d ||
+        d < static_cast<double>(lo) || d > static_cast<double>(hi)) {
+        return false;
+    }
+    out = static_cast<int>(d);
     return true;
 }
 

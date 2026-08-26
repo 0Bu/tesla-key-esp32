@@ -5,6 +5,8 @@
 #include <cstdio>
 #include <cstring>
 #include <atomic>
+#include <algorithm>
+#include <cstdint>
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "rtos_guard.hpp"
@@ -25,6 +27,8 @@ static constexpr size_t DIAG_CAP = 16 * 1024;
 static char              s_buf[DIAG_CAP];
 static size_t            s_head    = 0;      // next write position
 static bool              s_wrapped = false;  // buffer has wrapped at least once
+static uint64_t          s_written = 0;      // monotonic byte sequence within one clear generation
+static uint32_t          s_generation = 0;   // increments when /diag?clear=1 resets the sequence
 static SemaphoreHandle_t s_mtx     = nullptr;
 static vprintf_like_t    s_prev    = nullptr;
 static const char*       TAG       = "diag_log";
@@ -40,6 +44,7 @@ static void diag_append_(const char* data, size_t len) {
         s_buf[s_head++] = data[i];
         if (s_head >= DIAG_CAP) { s_head = 0; s_wrapped = true; }
     }
+    s_written += len;
 }
 
 // esp_log hook: capture the formatted line, then forward to the original sink so
@@ -75,17 +80,45 @@ void diag_log_init() {
 
 void diag_log_dump_chunks(const std::function<bool(const char*, size_t)>& sink) {
     if (!s_mtx) return;
-    // Hold the mutex for the whole send so a concurrent writer can't shift s_head
-    // mid-dump. The spans point straight into the static buffer — no large heap
-    // allocation, which is the whole point (a 48 KB std::string can throw bad_alloc
-    // on a fragmented heap, whose largest free block can fall to ~31 KB → crash).
-    // RAII: `sink` writes to httpd and CAN throw (bad_alloc under heap pressure); the
-    // guard releases s_mtx during unwinding so a throwing sink can't wedge the ring.
-    tk::SemGuard g(s_mtx);
-    if (s_wrapped) {
-        if (sink(s_buf + s_head, DIAG_CAP - s_head)) sink(s_buf, s_head);
-    } else {
-        sink(s_buf, s_head);
+
+    // Snapshot byte-sequence bounds, then copy one fixed chunk at a time under the mutex and SEND
+    // only after releasing it. The old implementation held s_mtx across httpd_resp_send_chunk();
+    // a slow client therefore made every logger wait 20 ms and drop the incident lines /diag was
+    // trying to collect. Sequence numbers let us notice a concurrent wrap without retaining a
+    // pointer into mutable ring storage. If the client is so slow that unread snapshot bytes are
+    // overwritten (or /diag?clear=1 changes generation), stop rather than splice unrelated data.
+    uint64_t next = 0;
+    uint64_t end = 0;
+    uint32_t generation = 0;
+    {
+        tk::SemGuard g(s_mtx);
+        const size_t size = s_wrapped ? DIAG_CAP : s_head;
+        end = s_written;
+        next = end - size;
+        generation = s_generation;
+    }
+
+    char chunk[256];
+    while (next < end) {
+        size_t copied = 0;
+        {
+            tk::SemGuard g(s_mtx);
+            if (generation != s_generation) return;
+
+            const size_t size = s_wrapped ? DIAG_CAP : s_head;
+            const uint64_t oldest = s_written - size;
+            if (next < oldest || next > s_written) return;
+
+            copied = static_cast<size_t>(std::min<uint64_t>(sizeof(chunk), end - next));
+            const size_t oldest_pos = s_wrapped ? s_head : 0;
+            const size_t logical_offset = static_cast<size_t>(next - oldest);
+            const size_t physical = (oldest_pos + logical_offset) % DIAG_CAP;
+            const size_t first = std::min(copied, DIAG_CAP - physical);
+            std::memcpy(chunk, s_buf + physical, first);
+            if (first < copied) std::memcpy(chunk + first, s_buf, copied - first);
+        }
+        if (!sink(chunk, copied)) return;
+        next += copied;
     }
 }
 
@@ -94,6 +127,8 @@ void diag_log_clear() {
     tk::SemGuard g(s_mtx);
     s_head    = 0;
     s_wrapped = false;
+    s_written = 0;
+    ++s_generation;
 }
 
 void diag_set_verbose(bool on) { s_verbose.store(on); }

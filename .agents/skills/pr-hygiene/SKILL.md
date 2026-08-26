@@ -44,7 +44,7 @@ their scope is coherence, not confidentiality or language.
 - A private session/transcript URL, non-public ticket or internal dashboard link, or a URL carrying
   an authentication token. A public documentation or source permalink is not a finding.
 - The board's own diagnostic MAC (this firmware's `sys.board_mac`) is intentionally visible
-  on-device (see `docs/SECURITY.md` and the `/status?redact=1` contract in `AGENTS.md`); quoting
+  on-device (see `docs/README.md` `/status?redact=1` and `main/logic/status_model.hpp`); quoting
   that design choice is not itself a finding. Only a value that is plausibly the tester's own
   real hardware or network, written into PR/commit prose, is.
 

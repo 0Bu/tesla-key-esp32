@@ -274,7 +274,7 @@ esp_err_t handle_diag(GuardedReq rq) {
     httpd_resp_set_type(req, "text/plain; charset=utf-8");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     httpd_resp_set_hdr(req, "X-Diag-Verbose", diag_verbose() ? "1" : "0");
-    // Stream the log straight from its static buffer in (at most) two chunks. Building one
+    // Stream the log from its static buffer in bounded chunks. Building one
     // big std::string here used to throw std::bad_alloc when the whole buffer exceeded the
     // largest contiguous free block on a fragmented heap → uncaught in the httpd task →
     // abort() → reboot. Chunked send needs no large contiguous allocation, so /diag is safe
@@ -292,7 +292,7 @@ esp_err_t handle_diag(GuardedReq rq) {
     // rules are the host-tested logic/redact.hpp, and they FAIL CLOSED — a line
     // the ring truncated mid-value redacts to the end of the line rather than giving up.
     //
-    // The ring hands us one or two spans that do NOT align to line boundaries, so lines are
+    // The ring hands us bounded spans that do NOT align to line boundaries, so lines are
     // reassembled into a fixed stack buffer sized to the ring's own line limit. Bounded on purpose:
     // building the redacted dump as one std::string is exactly the allocation /diag streams to
     // avoid, and a redaction REPLACEMENT is usually longer than the value it replaces, so the

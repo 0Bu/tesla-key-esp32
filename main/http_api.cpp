@@ -7,7 +7,6 @@
 
 #include "http_handlers.hpp"
 #include "logic/command_result.hpp"   // outcome text shared with the MCP tools/call path
-#include "logic/mcp.hpp"              // shared bounded double → int conversion
 #include "platform.hpp"
 #include <esp_log.h>
 #include <esp_app_desc.h>
@@ -86,8 +85,8 @@ static bool request_vin_matches(const char* vin) {
 
 // Parse one REST integer argument against the shared command registry. Optional values keep
 // the TeslaBleHttpProxy-compatible default, but an api_required value (charging_amps) must be
-// present and parseable: silently turning a truncated/malformed evcc body into 0 A made the
-// command log "success" for a different value than the controller requested.
+// present and parseable. Any supplied value must be an in-range integer: silently truncating or
+// clamping executes a different command than the controller requested while reporting success.
 static bool json_int_arg(const cJSON* obj, const tk::CmdArg& arg,
                          int& out, const char*& problem) {
     const cJSON* j = obj ? cJSON_GetObjectItemCaseSensitive(obj, arg.api_key) : nullptr;
@@ -114,15 +113,14 @@ static bool json_int_arg(const cJSON* obj, const tk::CmdArg& arg,
         problem = "invalid argument";
         return false;
     }
-    if (!std::isfinite(d)) {
-        problem = "invalid argument";
-        return false;
-    }
-    if (arg.api_required && std::trunc(d) != d) {
+    if (!std::isfinite(d) || std::trunc(d) != d) {
         problem = "integer required";
         return false;
     }
-    out = tk::clamped_int(d, arg.lo, arg.hi);
+    if (!tk::strict_rest_int(d, arg, out)) {
+        problem = "argument out of range";
+        return false;
+    }
     return true;
 }
 
@@ -146,6 +144,11 @@ static bool json_bool_arg(const cJSON* obj, const tk::CmdArg& arg,
 }
 
 // ─── POST /api/1/vehicles/{VIN}/command/{CMD} ─────────────────────────────────
+
+bool is_command_route(const char* uri) {
+    char vin[64], cmd[64];
+    return parse_uri(uri, vin, sizeof(vin), cmd, sizeof(cmd));
+}
 
 esp_err_t handle_command(GuardedReq rq) {
     httpd_req_t* req = rq.req;

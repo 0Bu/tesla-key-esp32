@@ -715,7 +715,8 @@ bool VehicleController::has_key() {
 }
 
 bool VehicleController::has_session() {
-    // Existence probe only — see has_key(); sampled ~1 Hz from the display/LED tasks.
+    // The adapter caches this known key after the first successful existence probe and updates it
+    // on save/remove; the 50 ms vehicle loop therefore does not hit NVS continuously.
     return storage_ && storage_->blob_exists("session_vcsec");
 }
 

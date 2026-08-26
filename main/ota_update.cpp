@@ -124,7 +124,7 @@ void ota_confirm_pending_image(tk::OtaRebootClass reboot_class) {
 
 // Short per-target image suffix so "esp32" appears only once in the OTA filename: esp32 ->
 // "" (tesla-key-esp32.bin), esp32s3 -> "-s3", esp32c3 -> "-c3", esp32c6 -> "-c6".
-// Must stay in lockstep with image_suffix() in scripts/ci-build-all.sh + build-pages.sh
+// Must stay in lockstep with image_suffix() in ci-sign-artifacts.sh + build-pages.sh
 // (which name the published asset the device pulls) — a mismatch 404s every OTA download.
 // Kept as a string-literal macro because the download URL is assembled by compile-time
 // concatenation below; the static_assert ties it to the host-tested tk::image_suffix()

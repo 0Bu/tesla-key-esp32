@@ -16,7 +16,7 @@
 // (and client responses) get HTTP 202 with no body, as the transport spec prescribes.
 // Batches are rejected: protocol 2025-06-18 removed them, and a bounded single-message
 // parse keeps the heap cost predictable. Method/tool routing, version negotiation and the
-// argument clamps live in logic/mcp.hpp (host-tested); this file is the cJSON/httpd shell.
+// argument validation lives in logic/mcp.hpp (host-tested); this file is the cJSON/httpd shell.
 // User/integrator guide (wire + client examples): docs/MCP.md.
 
 static const char* TAG = "mcp_server";
@@ -112,7 +112,7 @@ static esp_err_t handle_initialize_(httpd_req_t* req, cJSON* id, const cJSON* pa
 
 // Build one tool's inputSchema from the shared command registry
 // (logic/command_registry.hpp) — the ONE place bounds and required-ness live, read by
-// this schema, the executor's checks AND the REST /command clamp, so none of the three
+// this schema, the executor's checks AND the REST /command validation, so none of the three
 // can ever disagree.
 static cJSON* tool_schema_(const tk::CmdInfo& info) {
     cJSON* schema = cJSON_CreateObject();
@@ -225,8 +225,8 @@ static esp_err_t handle_tools_call_(httpd_req_t* req, cJSON* id, const cJSON* pa
     // "enable" would DISABLE the schedule; start_minutes:"08:00" would schedule
     // midnight). Absent optional Int args default to 0. LLM clients routinely encode
     // loosely, so numeric strings are accepted for Int args ("16" → 16) and exact 0/1
-    // numbers for Bool args. Integers must be finite and integral before they are clamped to
-    // the spec bounds; booleans reject every numeric spelling except finite 0 and 1.
+    // numbers for Bool args. Integers must be finite, integral and inside the spec bounds;
+    // booleans reject every numeric spelling except finite 0 and 1.
     int  ival[tk::kCmdMaxArgs] = {};
     bool bval[tk::kCmdMaxArgs] = {};
     for (int i = 0; i < tk::kCmdMaxArgs; ++i) {

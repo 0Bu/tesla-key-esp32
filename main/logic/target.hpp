@@ -21,8 +21,8 @@ inline constexpr const char* platform_name(Target t) {
     }
 }
 
-// Must stay in lockstep with image_suffix() in scripts/ci-build-all.sh +
-// scripts/build-pages.sh (CI builds the per-target filenames from the same rule).
+// Must stay in lockstep with image_suffix() in scripts/ci-sign-artifacts.sh +
+// scripts/build-pages.sh (publication names the per-target files from the same rule).
 inline constexpr const char* image_suffix(Target t) {
     switch (t) {
         case Target::Esp32S3: return "-s3";
