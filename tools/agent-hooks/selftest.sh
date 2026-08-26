@@ -20,14 +20,14 @@ import json,sys
 print(json.dumps({"tool_name":sys.argv[1],"cwd":sys.argv[4],"tool_input":{sys.argv[2]:sys.argv[3]}}))
 PY
 }
-verdict(){ local out; out="$(printf '%s' "$1" | python3 "$hook" pre-tool-guards --runner "${2:-codex}")" || return 3; if [ -z "$out" ]; then printf allow; else printf '%s' "$out" | python3 -c 'import json,sys; print(json.load(sys.stdin)["hookSpecificOutput"]["permissionDecision"])'; fi; }
-expect_guard(){ local got; got="$(verdict "$2" "${4:-codex}" 2>/dev/null)" || got=invalid; if [ "$got" = "$1" ]; then pass_case "$3"; else fail_case "$3 (want=$1 got=$got)"; fi; }
+verdict(){ local out; out="$(printf '%s' "$1" | python3 "$hook" pre-tool-guards)" || return 3; if [ -z "$out" ]; then printf allow; else printf '%s' "$out" | python3 -c 'import json,sys; print(json.load(sys.stdin)["hookSpecificOutput"]["permissionDecision"])'; fi; }
+expect_guard(){ local got; got="$(verdict "$2" 2>/dev/null)" || got=invalid; if [ "$got" = "$1" ]; then pass_case "$3"; else fail_case "$3 (want=$1 got=$got)"; fi; }
 sha="$(git -C "$root" rev-parse HEAD)"
 
 expect_guard deny '' 'empty guard payload fails closed'
 expect_guard deny '{bad' 'malformed guard JSON fails closed'
 expect_guard deny '{}' 'partial guard payload fails closed'
-expect_guard allow "$(payload Read file_path docs/SECURITY.md "$root")" 'Claude Read schema permits normal file' claude
+expect_guard allow "$(payload Read file_path docs/SECURITY.md "$root")" 'Read schema permits normal file'
 expect_guard allow "$(payload exec_command cmd 'git status --short' "$root")" 'Codex exec_command/cmd schema permits normal command'
 expect_guard deny "$(payload exec_command_extra cmd 'cat ota_signing_key.pem' "$root")" 'suffix-manipulated tool fails closed'
 expect_guard deny "$(payload Mystery command 'cat ota_signing_key.pem' "$root")" 'unknown tool fails closed'
@@ -50,7 +50,7 @@ payloads=[
 ]
 for payload in payloads:
   result=subprocess.run(
-    [sys.executable,sys.argv[1],"pre-tool-guards","--runner","codex"],
+    [sys.executable,sys.argv[1],"pre-tool-guards"],
     input=json.dumps(payload),text=True,capture_output=True,check=False,
   )
   assert result.returncode==0
@@ -66,7 +66,7 @@ expect_guard deny "$(payload Bash command 'espsecure.py sign_data --keyfile ota_
 expect_guard deny "$(payload Bash command 'espsecure.py sign_data --keyfile ota_signing_key.pem ota_signing_key.pem' "$root")" 'key-as-datafile denied'
 expect_guard deny "$(payload Bash command 'bash -c \"espsecure.py sign_data --keyfile ota_signing_key.pem firmware.bin\"' "$root")" 'wrapped sign_data denied'
 expect_guard allow "$(payload Read file_path partitions.csv "$root")" 'partition table readable'
-expect_guard deny "$(payload Edit file_path partitions.csv "$root")" 'Claude partition edit denied' claude
+expect_guard deny "$(payload Edit file_path partitions.csv "$root")" 'partition edit denied'
 expect_guard deny "$(payload Write file_path partitions.csv "$root")" 'Codex partition write denied'
 multi_edit_payload="$(python3 - "$root" <<'PY'
 import json,sys
@@ -79,8 +79,7 @@ print(json.dumps({
 }))
 PY
 )"
-expect_guard deny "$multi_edit_payload" 'Claude MultiEdit partition mutation denied' claude
-expect_guard deny "$multi_edit_payload" 'Codex MultiEdit partition mutation denied'
+expect_guard deny "$multi_edit_payload" 'MultiEdit partition mutation denied'
 patch_payload="$(python3 - "$root" <<'PY'
 import json,sys
 print(json.dumps({"tool_name":"apply_patch","cwd":sys.argv[1],"tool_input":{"patch":"*** Begin Patch\n*** Update File: partitions.csv\n@@\n-old\n+new\n*** End Patch"}}))
@@ -122,8 +121,8 @@ sub="$(printf '{"agent_type":"reviewer"}' | python3 "$hook" subagent-context)"
 if printf '%s' "$sub" | grep -qF 'Do not wake the vehicle' && printf '%s' "$sub" | grep -qF 'Review agents remain read-only'; then pass_case 'SubagentStart boundary context'; else fail_case 'SubagentStart context'; fi
 build="$(printf '{}' | python3 "$hook" build-efficiency)"
 if printf '%s' "$build" | grep -qF 'Report-only' && printf '%s' "$build" | grep -qF 'must not create issues, branches, commits, or draft PRs'; then pass_case 'SessionStart build context is report-only'; else fail_case 'SessionStart build context'; fi
-legacy_build="$($root/.claude/hooks/build-efficiency-check.sh --self-test 2>&1)"; legacy_rc=$?
-if [ "$legacy_rc" = 0 ] && [ "$legacy_build" = 'build-efficiency report-only self-test: PASS' ]; then pass_case 'legacy build-efficiency self-test proves report-only adapter parity'; else fail_case 'legacy build-efficiency self-test parity'; fi
+selftest_build="$(python3 "$hook" build-efficiency --self-test 2>&1)"; selftest_rc=$?
+if [ "$selftest_rc" = 0 ] && [ "$selftest_build" = 'build-efficiency report-only self-test: PASS' ]; then pass_case 'build-efficiency self-test proves report-only behavior'; else fail_case 'build-efficiency self-test'; fi
 
 . "$root/tools/agent-hooks/pr-gate-lib.sh"
 project_record='- [x] $project-review clean — merge gate @ '"$sha"
@@ -327,7 +326,7 @@ sleep 1.2
 [ "$timeout_rc" = 124 ] && [ ! -e "$timeout_marker" ] && pass_case 'inner timeout kills SIGTERM-ignoring descendants' || fail_case 'timeout descendant escaped'
 expect_rc 2 'invalid timeout rejected' python3 "$runner" invalid true
 
-if python3 - "$root/.codex/hooks.json" "$root/.claude/settings.json" "$root/.codex/config.toml" <<'PY'
+if python3 - "$root/.codex/hooks.json" "$root/.codex/config.toml" <<'PY'
 import copy,json,sys,tomllib
 expected={"SessionStart","SubagentStart","Stop","PreToolUse","PostToolUse"}
 def validate(data):
@@ -339,10 +338,8 @@ def validate(data):
       for hook in group["hooks"]:
         assert hook["type"]=="command" and hook.get("async") is not True
         assert isinstance(hook.get("timeout"),int) and hook["timeout"]>0
-for path in sys.argv[1:]:
-  if path.endswith(".json"): validate(json.load(open(path)))
-assert json.load(open(sys.argv[2]))["permissions"]["allow"]==[]
 codex=json.load(open(sys.argv[1]))
+validate(codex)
 bad=copy.deepcopy(codex); bad["hooks"]["PreToolUse"][0]["hooks"][0]["async"]=True
 try: validate(bad); raise AssertionError("async mutation accepted")
 except AssertionError as exc:
@@ -351,7 +348,7 @@ bad=copy.deepcopy(codex); bad["hooks"]["PreToolUse"][0]["matcher"]=bad["hooks"][
 try: validate(bad); raise AssertionError("unanchored mutation accepted")
 except AssertionError as exc:
   if str(exc)=="unanchored mutation accepted": raise
-text=open(sys.argv[3],"rb").read(); config=tomllib.loads(text.decode())
+text=open(sys.argv[2],"rb").read(); config=tomllib.loads(text.decode())
 def validate_features(value): assert value["features"]["hooks"] is True
 validate_features(config)
 mutated=tomllib.loads(text.decode().replace("hooks = true","hooks = false",1))
@@ -359,37 +356,7 @@ try: validate_features(mutated); raise AssertionError("disabled hooks accepted")
 except AssertionError as exc:
   if str(exc)=="disabled hooks accepted": raise
 PY
-then pass_case 'runner schema plus disabled-hook, async, and matcher mutation canaries'; else fail_case 'runner hook schema'; fi
-
-if python3 - "$root/.claude/hooks" <<'PY'
-import pathlib,sys
-root=pathlib.Path(sys.argv[1])
-expected={
- "build-efficiency-check.sh":"build-efficiency",
- "clang-format-edit.sh":"agent_hook.py\" format",
- "guard-partitions.sh":"pre-tool-guards --runner claude",
- "guard-secrets.sh":"pre-tool-guards --runner claude",
- "pr-gate-lib.sh":'. "$root/tools/agent-hooks/pr-gate-lib.sh"',
- "report-capabilities.sh":"agent_hook.py\" capabilities",
- "require-feature-docs.sh":"require-pr-gates.sh",
- "require-project-review.sh":"require-pr-gates.sh",
- "require-skill-audit.sh":"require-pr-gates.sh",
- "run-logic-tests.sh":"stop-logic-tests",
-}
-paths=sorted(path for path in root.iterdir() if path.is_file())
-assert [path.name for path in paths] == sorted(expected)
-def valid(name,text):
-  endpoint=expected[name]
-  delegation=("exec " in text) if name!="pr-gate-lib.sh" else ('\n. ' in text)
-  return endpoint in text and delegation and "tools/agent-hooks" in text
-for path in paths:
-  text=path.read_text()
-  assert len(text.splitlines()) <= 7
-  assert valid(path.name,text)
-sample=(root/"guard-secrets.sh").read_text().replace("exec ","",1)
-assert not valid("guard-secrets.sh",sample)
-PY
-then pass_case 'all 10 legacy paths are thin and corruption-detectable adapters'; else fail_case 'adapter inventory/thinness'; fi
+then pass_case 'Codex schema plus disabled-hook, async, and matcher mutation canaries'; else fail_case 'Codex hook schema'; fi
 
 if python3 - "$root" <<'PY'
 import pathlib,re,sys
@@ -397,8 +364,8 @@ root=pathlib.Path(sys.argv[1])
 fragments=[("dai","kin"),("x10","a"),("heat.?","pump"),("hp_","modbus"),
            ("victoria","logs"),("schema","tic"),("ab","sence"),("ui-use-","case")]
 pattern=re.compile("|".join(left+right for left,right in fragments),re.I)
-paths=[root/".codex/hooks.json",root/".claude/settings.json"]
-for directory in (root/"tools/agent-hooks",root/".claude/hooks"):
+paths=[root/".codex/hooks.json"]
+for directory in (root/"tools/agent-hooks",):
   paths.extend(path for path in directory.rglob("*") if path.is_file())
 for path in paths:
   data=path.read_bytes()
@@ -409,9 +376,8 @@ PY
 then pass_case 'neutral core has no foreign-project policy residue'; else fail_case 'foreign-project residue'; fi
 
 if python3 -m py_compile "$hook" "$parser" "$runner" \
-  && bash -n "$root/tools/agent-hooks/"*.sh "$root/.claude/hooks/"*.sh \
-  && python3 -m json.tool "$root/.codex/hooks.json" >/dev/null \
-  && python3 -m json.tool "$root/.claude/settings.json" >/dev/null; then pass_case 'Python, Bash, JSON syntax'; else fail_case 'syntax'; fi
+  && bash -n "$root/tools/agent-hooks/"*.sh \
+  && python3 -m json.tool "$root/.codex/hooks.json" >/dev/null; then pass_case 'Python, Bash, JSON syntax'; else fail_case 'syntax'; fi
 
 printf '\nagent hook self-test: %s passed, %s failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

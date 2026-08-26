@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Parse exact runner hook dispatch and retained thin Claude adapters."""
+"""Parse the exact synchronous Codex hook dispatch and neutral hook core."""
 
 from __future__ import annotations
 
@@ -7,7 +7,6 @@ import json
 import os
 from pathlib import Path
 import re
-import stat
 import sys
 from typing import Any
 
@@ -99,7 +98,7 @@ command_hook(
 command_hook(
     codex_hooks["PreToolUse"][0],
     matcher="^(?:Read|Edit|MultiEdit|Write|Bash|apply_patch|exec_command|shell|shell_command)$",
-    commands=[(f"{py} pre-tool-guards --runner codex", 15)], label="Codex guard",
+    commands=[(f"{py} pre-tool-guards", 15)], label="Codex guard",
 )
 command_hook(
     codex_hooks["PreToolUse"][1],
@@ -111,123 +110,6 @@ command_hook(
     codex_hooks["PostToolUse"][0], matcher="^(?:Edit|MultiEdit|Write|apply_patch)$",
     commands=[(f"{py} format", 30)], label="Codex formatter",
 )
-
-claude = load_json(".claude/settings.json")
-if set(claude) != {"permissions", "hooks"}:
-    fail(".claude/settings.json top-level keys drifted")
-if claude.get("permissions") != {"allow": []}:
-    fail(".claude/settings.json permissions.allow must be empty")
-claude_hooks = claude.get("hooks")
-if not isinstance(claude_hooks, dict) or set(claude_hooks) != events:
-    fail(".claude/settings.json event set drifted")
-claude_root = "${CLAUDE_PROJECT_DIR:-.}"
-command_hook(
-    claude_hooks["SessionStart"][0], matcher=None,
-    commands=[
-        (f'bash "{claude_root}/.claude/hooks/report-capabilities.sh"', 15),
-        (f'bash "{claude_root}/.claude/hooks/build-efficiency-check.sh"', 15),
-    ], label="Claude SessionStart",
-)
-command_hook(
-    claude_hooks["SubagentStart"][0], matcher=None,
-    commands=[(f'python3 "{claude_root}/tools/agent-hooks/agent_hook.py" subagent-context', 10)],
-    label="Claude SubagentStart",
-)
-command_hook(
-    claude_hooks["Stop"][0], matcher=None,
-    commands=[(f'bash "{claude_root}/.claude/hooks/run-logic-tests.sh"', 600)],
-    label="Claude Stop",
-)
-command_hook(
-    claude_hooks["PreToolUse"][0], matcher="^(?:Read|Edit|MultiEdit|Write|Bash)$",
-    commands=[(f'bash "{claude_root}/.claude/hooks/guard-secrets.sh"', 15)],
-    label="Claude guard",
-)
-command_hook(
-    claude_hooks["PreToolUse"][1], matcher="^(?:Bash|mcp__.*(?:github|GitHub).*)$",
-    commands=[(f'bash "{claude_root}/.claude/hooks/require-project-review.sh"', 180)],
-    label="Claude PR policy",
-)
-command_hook(
-    claude_hooks["PostToolUse"][0], matcher="^(?:Edit|MultiEdit|Write)$",
-    commands=[(f'bash "{claude_root}/.claude/hooks/clang-format-edit.sh"', 30)],
-    label="Claude formatter",
-)
-
-adapter_root = 'root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"'
-adapters: dict[str, str] = {
-    "build-efficiency-check.sh": "\n".join((
-        "#!/usr/bin/env bash",
-        "# Claude compatibility adapter; canonical implementation is runner-neutral and report-only.",
-        "set -u", adapter_root,
-        'exec python3 "$root/tools/agent-hooks/agent_hook.py" build-efficiency "$@"', "",
-    )),
-    "clang-format-edit.sh": "\n".join((
-        "#!/usr/bin/env bash", "# Claude compatibility adapter for the runner-neutral formatter.",
-        "set -u", adapter_root, 'exec python3 "$root/tools/agent-hooks/agent_hook.py" format', "",
-    )),
-    "guard-partitions.sh": "\n".join((
-        "#!/usr/bin/env bash",
-        "# Claude compatibility alias for the consolidated runner-neutral pre-tool guards.",
-        "set -u", adapter_root,
-        'exec python3 "$root/tools/agent-hooks/agent_hook.py" pre-tool-guards --runner claude', "",
-    )),
-    "guard-secrets.sh": "\n".join((
-        "#!/usr/bin/env bash",
-        "# Claude compatibility adapter for consolidated secret and partition guards.",
-        "set -u", adapter_root,
-        'exec python3 "$root/tools/agent-hooks/agent_hook.py" pre-tool-guards --runner claude', "",
-    )),
-    "pr-gate-lib.sh": "\n".join((
-        "#!/usr/bin/env bash",
-        "# Claude compatibility adapter; source the runner-neutral PR-gate library.",
-        adapter_root, "# shellcheck source=/dev/null", '. "$root/tools/agent-hooks/pr-gate-lib.sh"', "",
-    )),
-    "report-capabilities.sh": "\n".join((
-        "#!/usr/bin/env bash", "# Claude compatibility adapter for runner-neutral capability discovery.",
-        "set -u", adapter_root, 'exec python3 "$root/tools/agent-hooks/agent_hook.py" capabilities', "",
-    )),
-    "require-feature-docs.sh": "\n".join((
-        "#!/usr/bin/env bash",
-        "# Claude compatibility adapter; the aggregate core enforces conditional feature-docs evidence.",
-        "set -u", adapter_root,
-        'exec "$root/tools/agent-hooks/require-pr-gates.sh" --project-dir "$root"', "",
-    )),
-    "require-project-review.sh": "\n".join((
-        "#!/usr/bin/env bash",
-        "# Claude compatibility adapter for the aggregate runner-neutral PR policy.",
-        "set -u", adapter_root,
-        'exec "$root/tools/agent-hooks/require-pr-gates.sh" --project-dir "$root"', "",
-    )),
-    "require-skill-audit.sh": "\n".join((
-        "#!/usr/bin/env bash",
-        "# Claude compatibility adapter; the aggregate core enforces create/push skill-audit evidence.",
-        "set -u", adapter_root,
-        'exec "$root/tools/agent-hooks/require-pr-gates.sh" --project-dir "$root"', "",
-    )),
-    "run-logic-tests.sh": "\n".join((
-        "#!/usr/bin/env bash", "# Claude compatibility adapter for changed host logic tests.",
-        "set -u", adapter_root, 'exec python3 "$root/tools/agent-hooks/agent_hook.py" stop-logic-tests', "",
-    )),
-}
-adapter_dir = root / ".claude" / "hooks"
-try:
-    actual_adapters = {path.name for path in adapter_dir.iterdir() if path.is_file()}
-except OSError as exc:
-    fail(f"cannot enumerate Claude adapters: {exc}", 2)
-if actual_adapters != set(adapters):
-    fail("Claude adapter inventory drifted")
-for name, expected_text in adapters.items():
-    path = adapter_dir / name
-    try:
-        text = path.read_text(encoding="utf-8")
-        mode = path.stat().st_mode
-    except OSError as exc:
-        fail(f"cannot read adapter {name}: {exc}", 2)
-    if not mode & stat.S_IXUSR:
-        fail(f"Claude adapter drifted: {name} must be executable Bash")
-    if text != expected_text:
-        fail(f"Claude adapter drifted: {name} must match its exact thin delegation")
 
 core_files = {
     "agent_hook.py", "merge_payload.py", "pr-gate-lib.sh", "require-pr-gates.sh",
@@ -245,10 +127,9 @@ foreign = re.compile(
 )
 for relative in [
     *(f"tools/agent-hooks/{name}" for name in sorted(core_files)),
-    ".codex/hooks.json", ".claude/settings.json",
-    *(f".claude/hooks/{name}" for name in sorted(adapters)),
+    ".codex/hooks.json",
 ]:
     if foreign.search((root / relative).read_text(encoding="utf-8")):
         fail(f"foreign-project policy residue found in {relative}")
 
-print("agent-hook-config: parsed 5 lifecycle events, exact synchronous dispatch and 10 thin adapters")
+print("agent-hook-config: parsed 5 lifecycle events and exact synchronous Codex dispatch")

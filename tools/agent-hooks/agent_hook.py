@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""Runner-neutral hooks for Claude Code and Codex.
+"""Runner-neutral repository hooks.
 
-Hook payloads are read from stdin.  The runner adapters select the subcommand and
-runner explicitly.  Payload-sensitive guards inspect `cwd`, `tool_name`, and
-`tool_input`; repository-scoped lifecycle, context, and formatting actions stay
-anchored to the versioned hook core's own worktree.
+Hook payloads are read from stdin. Payload-sensitive guards inspect `cwd`,
+`tool_name`, and `tool_input`; repository-scoped lifecycle, context, and formatting
+actions stay anchored to the versioned hook core's own worktree.
 """
 
 from __future__ import annotations
@@ -894,7 +893,7 @@ def guard_secrets(payload: dict[str, Any] | None, error: str | None) -> bool:
     return True
 
 
-def guard_partitions(payload: dict[str, Any], _runner: str, *, shell_only: bool = False) -> bool:
+def guard_partitions(payload: dict[str, Any], *, shell_only: bool = False) -> bool:
     if not partition_violation(payload, shell_only=shell_only):
         return False
     invariant = (
@@ -915,7 +914,7 @@ def run_pre_tool_guards(args: argparse.Namespace) -> int:
     if guard_secrets(payload, error):
         return 0
     assert payload is not None
-    guard_partitions(payload, args.runner, shell_only=args.partition_shell_only)
+    guard_partitions(payload, shell_only=args.partition_shell_only)
     return 0
 
 
@@ -1112,7 +1111,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest="command", required=True)
     guards = subparsers.add_parser("pre-tool-guards")
-    guards.add_argument("--runner", choices=("claude", "codex"), required=True)
     guards.add_argument("--partition-shell-only", action="store_true")
     guards.set_defaults(func=run_pre_tool_guards)
     formatter = subparsers.add_parser("format")

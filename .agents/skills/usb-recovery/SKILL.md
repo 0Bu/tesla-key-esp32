@@ -459,4 +459,4 @@ curl -fsS "http://$DEVICE_IP/ota/status" | jq .
   newest release (the downgrade gate refuses a same-version image before the signature check).
 
 To confirm the live device is otherwise healthy (BLE up, no evcc timeouts), propose
-[`$e2e-evcc`](../e2e-evcc/SKILL.md) and obtain its separate explicit live-test approval.
+global `$tesla-key-e2e-evcc` skill and obtain its separate explicit live-test approval.

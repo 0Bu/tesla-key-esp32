@@ -1,5 +1,5 @@
 name = "agent_config_reviewer"
-description = "Audits tesla-key-esp32 agent configuration and compatibility without changing files or external state."
+description = "Audits tesla-key-esp32 agent configuration without changing files or external state."
 sandbox_mode = "read-only"
 approval_policy = "never"
 developer_instructions = """
@@ -8,17 +8,16 @@ modify Git state, mutate GitHub, use USB, flash or OTA a device, access NVS, cal
 send a vehicle command. Do not wake the vehicle. Review only and return evidence-backed findings.
 
 Inspect AGENTS.md, .agents/skills/*/SKILL.md, .codex/config.toml, .codex/hooks.json,
-.codex/agents/*.toml, .codex/migration-manifest.json, tools/agent-config/,
-tools/agent-hooks/, the retained .claude compatibility layer, .mcp.json, and the agent-related
+.codex/agents/*.toml, tools/agent-config/, tools/agent-hooks/, .mcp.json, and the agent-related
 steps in .github/workflows/build.yml. Check these Tesla-specific contracts:
 
-- AGENTS.md is the concise canonical policy; .claude is only an active compatibility layer.
-- Every tracked .claude file is mapped exactly once and the byte-level legacy fingerprint agrees.
+- AGENTS.md is the concise canonical policy; runner-specific compatibility metadata stays retired.
+- Project skills live only under .agents/skills; host/cluster evcc E2E is a global operational skill.
 - All canonical skills have only name and description in frontmatter and preserve their explicit
-  authorization boundaries, especially ship, flash-esp32, usb-recovery, e2e-evcc, device-diag,
-  skill-audit, and vehicle-command-audit.
-- Codex and Claude invoke the same runner-neutral hook core. Blocking handlers are synchronous,
-  matchers are anchored/grouped, and aliases use their real payload shapes.
+  authorization boundaries, especially ship, flash-esp32, usb-recovery, device-diag, skill-audit,
+  and vehicle-command-audit.
+- The project invokes one runner-neutral hook core. Blocking handlers are synchronous, matchers
+  are anchored/grouped, and hooks use their real payload shapes.
 - Context7 command and args match .mcp.json exactly; hooks and multi-agent support are enabled;
   no config grants automatic GitHub, hardware, NVS, OTA, or vehicle mutation.
 - The logic-test job only adds agent-configuration checks. Its permissions, DAG, action SHA pins,

@@ -384,11 +384,11 @@ push, merge, release, USB, flash, OTA, NVS, or live vehicle operations. The proj
 does not grant those mutations automatically; specialist reviewers under `.codex/agents/` run
 with `sandbox_mode = "read-only"`, no model pin, and no approval escalation.
 
-Codex and the retained Claude compatibility layer call the same runner-neutral core under
-[`tools/agent-hooks/`](../tools/agent-hooks/). Its secret, partition, and PR-gate checks are
-lexical defense in depth: they do not replace sandboxing, explicit authorization, branch
-protection, CI trust separation, or human review. In particular, no PR or agent-configuration
-gate receives `OTA_SIGNING_KEY`; through agent tools, the only permitted signing-key use remains
+The project configuration calls the runner-neutral core under
+[`tools/agent-hooks/`](../tools/agent-hooks/). Its secret, partition, and PR-gate checks are lexical
+defense in depth: they do not replace sandboxing, explicit authorization, branch protection, CI
+trust separation, or human review. In particular, no PR or agent-configuration gate receives
+`OTA_SIGNING_KEY`; through agent tools, the only permitted signing-key use remains
 an explicitly authorized, unchained `espsecure.py sign_data`/`sign-data` invocation that supplies
 the key only as a keyfile path. Never print, copy, redirect, archive, upload, or pass private-key,
 NVS, BLE-session, credential, or environment-dump material through an agent tool.

@@ -34,10 +34,10 @@ jobs:
           ./scripts/select-release-version.sh --self-test
           python3 scripts/check-sdkconfig-defaults.py --self-test
           python3 scripts/report-firmware-size.py --self-test
-          ./.claude/hooks/build-efficiency-check.sh --self-test
+          python3 tools/agent-hooks/agent_hook.py build-efficiency --self-test
           test "$(./scripts/idf-version.sh)" = v5.5.5
 
-      # The PR-gate command matcher (.claude/hooks/pr-gate-lib.sh). Cheap, offline, and it
+      # The PR-gate command matcher (tools/agent-hooks/pr-gate-lib.sh). Cheap, offline, and it
       # guards a hole that is invisible in review: an unmatched command is not a lenient
       # verdict, it is NO verdict — the hook exits 0 having checked nothing, so a regression
       # here silently disarms the merge gate rather than failing loudly.
