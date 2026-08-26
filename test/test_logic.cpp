@@ -2537,6 +2537,12 @@ static void test_http_origin() {
                                       "http://tesla-key-esp32.local", "same-origin", ""));
     CHECK(tk::mutation_origin_allowed("192.0.2.42:80",
                                       "http://192.0.2.42", "same-origin", "192.0.2.42"));
+    // Same-origin browser GETs may omit Origin, but their Fetch Metadata still activates Host
+    // validation. Only a truly headerless evcc/curl request receives the compatibility exception.
+    CHECK(tk::mutation_origin_allowed("tesla-key-esp32.local", "", "same-origin", ""));
+    CHECK(!tk::mutation_origin_allowed("attacker.example", "", "same-origin", "192.0.2.42"));
+    CHECK(!tk::mutation_origin_allowed("tesla-key-esp32.router.example", "", "same-origin",
+                                       "192.0.2.42"));
 
     CHECK(!tk::mutation_origin_allowed("tesla-key-esp32.local",
                                        "https://evil.example", "cross-site", ""));

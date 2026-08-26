@@ -86,10 +86,12 @@ or whose `Sec-Fetch-Site` is `cross-site`, receives `403` before route dispatch.
 a device-owned authority also closes the usual DNS-rebinding bypass where attacker-controlled
 `Host` and `Origin` match. The gate covers every POST plus the legacy state-changing GET forms
 `/ota/check`, `/diag?clear=1`, `/diag?verbose=0|1` and `/coredump?clear=1`. Same-origin UI requests
-continue to work, and headerless clients such as evcc and curl remain compatible. This is **not
-authentication**: a raw LAN peer can omit browser headers and still call every endpoint, and an
-old/non-conforming browser that sends neither header is indistinguishable from such a client. The
-trusted-LAN boundary therefore remains mandatory.
+continue to work, and headerless clients such as evcc and curl remain compatible. If either
+`Origin` or `Sec-Fetch-Site` is present, the device-owned `Host` check applies; this covers
+same-origin browser GETs that legitimately omit `Origin`. This is **not authentication**: a raw
+LAN peer can omit both browser headers and still call every endpoint, and an old/non-conforming
+browser that sends neither header is indistinguishable from such a client. The trusted-LAN
+boundary therefore remains mandatory.
 
 Open the configuration UI through `http://tesla-key-esp32.local` or the current device IP when
 you need to mutate settings. A router-expanded DHCP name such as

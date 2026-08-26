@@ -68,8 +68,13 @@ inline bool mutation_origin_allowed(std::string_view host, std::string_view orig
                                     std::string_view fetch_site,
                                     std::string_view device_ipv4) {
     if (ascii_iequal(fetch_site, "cross-site")) return false;
+    // Preserve compatibility only for genuinely headerless clients. Once either browser header
+    // is present, Host must be device-owned even though same-origin GETs commonly omit Origin.
+    // Otherwise a rebound attacker hostname with Sec-Fetch-Site: same-origin bypasses the gate.
+    if (origin.empty() && fetch_site.empty()) return true;
+    if (!device_host_allowed(host, device_ipv4)) return false;
     if (origin.empty()) return true;
-    if (!device_host_allowed(host, device_ipv4) || ascii_iequal(origin, "null")) return false;
+    if (ascii_iequal(origin, "null")) return false;
 
     std::string_view authority;
     std::string_view default_port;
