@@ -162,8 +162,8 @@ re-confirm it against the *current* tree and catch anything that drifted since. 
     `patches/tesla-ble/` still returns before state callbacks and FIFO completion, applies to
     the managed dependency tree, and is rebased explicitly on every pin bump.
 10. **Docs internal coherence vs code** — `/status.link` and MQTT `sleep_status` enum value sets,
-    endpoint/CONFIG/partition/version drift across the four docs. *Baseline: a few enum-set
-    omissions — see worked examples.*
+    endpoint/CONFIG/partition/version drift across the four docs. *Baseline: current docs and code
+    are coherent; the worked examples retain former omissions as explicitly historical findings.*
 
 ## Worked findings from the last full audit (institutional memory)
 

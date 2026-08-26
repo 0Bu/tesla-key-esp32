@@ -1031,15 +1031,16 @@ can't proceed). **Methods:** `initialize` (capabilities: `tools` only), `ping`,
 `logic/command_registry.hpp` (`kCommands`, `CmdArg`, `kCmdMaxArgs`) carries each command's
 REST name, MCP tool name + description, AND each argument's per-surface keys with ONE
 shared `{lo,hi}` bounds pair. The advertised `tools/list` JSON schema, the MCP executor's
-validation, and the REST `/command` clamp (`http_api.cpp`) are all generated from that
+validation, and the REST `/command` validation (`http_api.cpp`) are all generated from that
 table, so schema-vs-enforcement drift — and any `/api`-vs-`/mcp` disagreement about names
 or ranges — is impossible by construction. Surface semantics stay deliberately different:
 MCP is strict — an absent required argument OR a present-but-unparseable one is a `-32602`
 protocol error (silently defaulting `set_scheduled_charging`'s `enable` would *disable*
 the schedule and report success); loose-but-unambiguous encodings are coerced (numeric
-strings for ints, 0/1 for bools); parsed integers are clamped to the spec bounds before
-the int cast (UB guard) — while REST generally stays lenient for TeslaBleHttpProxy compat
-(absent → the spec's `api_default`). The registry also owns the one scalar-body
+strings for ints, 0/1 for bools); supplied integers must be integral and inside the spec bounds
+before the int cast (UB guard). REST retains TeslaBleHttpProxy compatibility defaults only for an
+absent optional field (`api_default`); a supplied fractional/out-of-range value is HTTP 400. The
+registry also owns the one scalar-body
 compatibility exception: evcc serializes `charge_start` as JSON `true` and `charge_stop`
 as JSON `false`; only those matching command/value pairs are accepted, while other
 non-object bodies remain HTTP 400. The explicit safety exception is
@@ -1047,7 +1048,7 @@ non-object bodies remain HTTP 400. The explicit safety exception is
 400 rather than silently becoming 0 A; a fractional value is also rejected because the Tesla
 field is an integer amp limit. All REST command failures retain their compatible JSON result/reason
 body but return HTTP 502 instead of a misleading HTTP 200. Both surfaces execute through the single kind→controller
-dispatch in `command_exec.cpp`. The registry, method routing, version table, clamp and the
+dispatch in `command_exec.cpp`. The registry, method routing, version table, validation and the
 shared command-outcome text (`logic/command_result.hpp`, also used by the REST
 `/command` reason so the two paths can never diverge) are IDF-free and covered by the
 host mock build (`test/test_logic.cpp`, `test_mcp` — including a pin on the `tools/list`

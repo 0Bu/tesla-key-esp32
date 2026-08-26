@@ -7,7 +7,7 @@
 
 // Pure, hardware-free core of the MCP endpoint (POST /mcp — see main/mcp_server.cpp):
 // protocol-version negotiation, JSON-RPC method routing, and the integer-argument
-// clamp. The tool registry itself lives in logic/command_registry.hpp — ONE table
+// validation. The tool registry itself lives in logic/command_registry.hpp — ONE table
 // shared with the REST /command dispatch (http_api.cpp), so the two surfaces can never
 // disagree about names or argument bounds. Everything IDF/cJSON-coupled stays in
 // mcp_server.cpp; keeping the decisions here lets the host mock build (test/) verify
