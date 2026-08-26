@@ -42,7 +42,7 @@ in [`main/main.cpp`](../../../main/main.cpp)) or the board's IP. Substitute `<ho
 
 | Need | Use instead |
 |------|-------------|
-| Drive the **evcc command path** end-to-end (issues real signed BLE commands, proves no-timeout) | [`$e2e-evcc`](../e2e-evcc/SKILL.md) |
+| Drive the **evcc command path** end-to-end (issues real signed BLE commands, proves no-timeout) | Global `$tesla-key-e2e-evcc` skill |
 | **Build / USB-flash** a local tree (no merge) | [`$flash-esp32`](../flash-esp32/SKILL.md) |
 | **Merge → CI → flash/OTA** the signed release | [`$ship`](../ship/SKILL.md) |
 | **USB-reflash + erase otadata** to recover a bricked / wrong-key device | [`$usb-recovery`](../usb-recovery/SKILL.md) (or the signed-artifact section of [`$flash-esp32`](../flash-esp32/SKILL.md)) |
@@ -234,7 +234,7 @@ Each row is a signature that's been root-caused before (cite the code site when 
 ## After triage
 
 If the read established the device is **healthy** (paired, BLE up, heap steady), prove the evcc
-runtime path with no timeouts via [`$e2e-evcc`](../e2e-evcc/SKILL.md). If the action column says
+runtime path with no timeouts via the global `$tesla-key-e2e-evcc` skill. If the action column says
 **reflash**, hand off to [`$usb-recovery`](../usb-recovery/SKILL.md) or
 [`$flash-esp32`](../flash-esp32/SKILL.md) — **this skill never flashes and never commands the
 car.**

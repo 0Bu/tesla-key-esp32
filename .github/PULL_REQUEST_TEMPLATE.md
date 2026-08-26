@@ -18,7 +18,7 @@ cannot build or USB-flash — see AGENTS.md).
 
 <!-- How this was checked. State what ran and what couldn't (e.g. no build in a cloud session). -->
 - [ ] `scripts/run-mock-tests.sh` passes (host-side logic tests — CI's `logic-test` gate)
-- [ ] `tools/agent-config/selftest.sh` passes when agent config, skills, hooks, or compatibility files changed
+- [ ] `tools/agent-config/selftest.sh` passes when agent config, skills, or hooks changed
 - [ ] Firmware built (`scripts/idf-docker.sh idf.py build`, or relied on CI) — N/A in a cloud session (no Docker daemon / no USB)
 
 ## Checklist

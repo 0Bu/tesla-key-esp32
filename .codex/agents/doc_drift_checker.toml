@@ -10,8 +10,8 @@ context to prove each conclusion.
 
 Use AGENTS.md as canonical agent guidance and docs/ARCHITECTURE.md, docs/SECURITY.md,
 docs/FEATURES.md, docs/MCP.md, docs/README.md, README.md, and test/README.md as the documentation
-sources of truth. Treat .claude references as valid only when explicitly describing compatibility
-or migration. For every changed fact, compare code, tests, web UI, and all documented mirrors:
+sources of truth. Retired runner-specific metadata is not an active source of project policy. For
+every changed fact, compare code, tests, web UI, and all documented mirrors:
 
 - HTTP/MCP routes, command names and bounds, status/telemetry fields, MQTT entities, UI consumers.
 - NVS namespaces/keys and the 15-character key limit; pairing/session/key lifecycle and redaction.

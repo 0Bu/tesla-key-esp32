@@ -1,9 +1,8 @@
 #!/usr/bin/env node
-// Deterministic runner-neutral instruction, mapping and safety contract.
+// Deterministic project-agent instruction and safety contract.
 import fs from "node:fs";
 import path from "node:path";
 import { createHash } from "node:crypto";
-import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 function die(code, message) {
@@ -22,17 +21,6 @@ function readJson(file, label) {
   catch (error) { die(2, `cannot read ${label}: ${error.message}`); }
   try { return JSON.parse(source); }
   catch (error) { die(2, `${label} is not valid JSON: ${error.message}`); }
-}
-
-function safeRelative(value, label) {
-  if (typeof value !== "string" || !value || path.isAbsolute(value)) {
-    die(2, `${label} must be a non-empty repository-relative path`);
-  }
-  const normalized = value.replaceAll("\\", "/");
-  if (normalized.startsWith("./") || normalized.includes("//") || normalized.split("/").includes("..")) {
-    die(2, `${label} is not normalized: ${value}`);
-  }
-  return normalized;
 }
 
 function normalizeProse(text) {
@@ -71,10 +59,7 @@ const root = path.resolve(
   process.env.AGENT_CONFIG_ROOT || path.join(path.dirname(fileURLToPath(import.meta.url)), "../.."),
 );
 const repoPath = (relative) => path.join(root, ...relative.split("/"));
-const manifestPath = repoPath(".codex/migration-manifest.json");
 const budget = positiveInteger(process.env.AGENT_INSTRUCTIONS_BUDGET_BYTES || "24576", "AGENTS budget");
-const fingerprintFormat =
-  "sha256(path-utf8 + NUL + raw-bytes + NUL for each tracked .claude file in bytewise path order)";
 
 function regularFile(relative, label) {
   let stat;
@@ -83,109 +68,15 @@ function regularFile(relative, label) {
   if (!stat.isFile()) die(1, `${label} is not a regular file: ${relative}`);
 }
 
-function trackedLegacyFiles() {
-  if (process.env.AGENT_CONFIG_TRACKED_FILES_FILE) {
-    try {
-      return fs.readFileSync(process.env.AGENT_CONFIG_TRACKED_FILES_FILE, "utf8")
-        .split(/\r?\n/).filter(Boolean);
-    } catch (error) { die(2, `cannot read tracked-file fixture: ${error.message}`); }
-  }
-  const result = spawnSync("git", ["-C", root, "ls-files", "-z", "--", ".claude"], {
-    encoding: "utf8",
-  });
-  if (result.status !== 0) die(2, "git ls-files could not enumerate tracked .claude files");
-  return result.stdout.split("\0").filter(Boolean);
+if (fs.existsSync(repoPath(".claude"))) {
+  die(1, ".claude metadata must remain retired; use AGENTS.md, .agents, .codex and tools/agent-hooks");
 }
-
-const manifest = readJson(manifestPath, "migration manifest");
-if (manifest?.schema_version !== 1 || manifest?.legacy_root !== ".claude") {
-  die(2, "migration manifest needs schema_version 1 and legacy_root .claude");
-}
-if (manifest?.canonical_instructions !== "AGENTS.md") {
-  die(2, "migration manifest canonical_instructions must be AGENTS.md");
-}
-if (manifest?.legacy_tree_sha256_format !== fingerprintFormat) {
-  die(2, `legacy_tree_sha256_format must be: ${fingerprintFormat}`);
-}
-if (!/^[0-9a-f]{64}$/.test(manifest?.legacy_tree_sha256 || "")) {
-  die(2, "legacy_tree_sha256 must be a lowercase SHA-256");
-}
-if (!Array.isArray(manifest.entries) || manifest.entries.length === 0) {
-  die(2, "migration manifest entries must be a non-empty array");
-}
-
-const allowedStatuses = new Set(["canonical", "adapter", "deprecated"]);
-const mappings = new Map();
-for (let index = 0; index < manifest.entries.length; index++) {
-  const entry = manifest.entries[index];
-  if (!entry || typeof entry !== "object" || Array.isArray(entry)) die(2, `entry ${index} is invalid`);
-  const source = safeRelative(entry.source, `entry ${index} source`);
-  if (!source.startsWith(".claude/")) die(2, `manifest source is outside .claude: ${source}`);
-  if (mappings.has(source)) die(1, `migration manifest maps ${source} more than once`);
-  if (!allowedStatuses.has(entry.status)) die(2, `invalid mapping status for ${source}`);
-  if (!Array.isArray(entry.targets)) die(2, `targets for ${source} must be an array`);
-  if (entry.status !== "deprecated" && entry.targets.length === 0) {
-    die(1, `${entry.status} mapping has no target: ${source}`);
-  }
-  const targets = entry.targets.map((target, targetIndex) =>
-    safeRelative(target, `${source} target ${targetIndex}`));
-  if (new Set(targets).size !== targets.length) die(1, `${source} repeats a target`);
-  regularFile(source, "manifest source");
-  for (const target of targets) regularFile(target, `target for ${source}`);
-  mappings.set(source, { status: entry.status, targets });
-}
-
-const tracked = trackedLegacyFiles();
-if (new Set(tracked).size !== tracked.length) die(2, "tracked .claude enumeration has duplicates");
-for (const source of tracked) {
-  if (!mappings.has(source)) die(1, `tracked legacy file is absent from migration manifest: ${source}`);
-}
-for (const source of mappings.keys()) {
-  if (!tracked.includes(source)) die(1, `manifest source is not a tracked legacy file: ${source}`);
-}
-
-const bytewise = [...tracked].sort((left, right) =>
-  Buffer.compare(Buffer.from(left, "utf8"), Buffer.from(right, "utf8")));
-const fingerprint = createHash("sha256");
-for (const source of bytewise) {
-  fingerprint.update(Buffer.from(source, "utf8"));
-  fingerprint.update(Buffer.from([0]));
-  fingerprint.update(fs.readFileSync(repoPath(source)));
-  fingerprint.update(Buffer.from([0]));
-}
-const actualFingerprint = fingerprint.digest("hex");
-if (actualFingerprint !== manifest.legacy_tree_sha256) {
-  die(1, `reviewed legacy fingerprint drifted (expected ${manifest.legacy_tree_sha256}, got ${actualFingerprint})`);
-}
-
-const instructionMapping = mappings.get(".claude/CLAUDE.md");
-if (instructionMapping?.status !== "adapter" || !instructionMapping.targets.includes("AGENTS.md")) {
-  die(1, ".claude/CLAUDE.md must be an adapter mapped to AGENTS.md");
+if (fs.existsSync(repoPath(".codex/migration-manifest.json"))) {
+  die(1, ".codex/migration-manifest.json must remain retired with the compatibility layer");
 }
 regularFile("AGENTS.md", "canonical instructions");
 const agentsSize = fs.statSync(repoPath("AGENTS.md")).size;
 if (agentsSize > budget) die(1, `AGENTS.md is ${agentsSize} bytes, over the ${budget}-byte budget`);
-
-const skillMappings = new Map();
-const reviewerMappings = new Map();
-for (const [source, mapping] of mappings) {
-  let match = source.match(/^\.claude\/skills\/([^/]+)\/SKILL\.md$/);
-  if (match) {
-    const expected = `.agents/skills/${match[1]}/SKILL.md`;
-    if (mapping.status !== "canonical" || !mapping.targets.includes(expected)) {
-      die(1, `skill ${match[1]} must map canonically to ${expected}`);
-    }
-    skillMappings.set(match[1], { source, target: expected });
-  }
-  match = source.match(/^\.claude\/agents\/([^/]+)\.md$/);
-  if (match) {
-    const target = mapping.targets.find((candidate) => /^\.codex\/agents\/[^/]+\.toml$/.test(candidate));
-    if (mapping.status !== "canonical" || !target) {
-      die(1, `legacy reviewer ${source} needs one canonical .codex/agents TOML target`);
-    }
-    reviewerMappings.set(match[1], { source, target });
-  }
-}
 
 function directoryNames(relative) {
   try {
@@ -194,17 +85,9 @@ function directoryNames(relative) {
   } catch { die(1, `directory is missing: ${relative}`); }
 }
 
-const mappedSkills = [...skillMappings.keys()].sort();
-for (const [label, names] of [
-  ["legacy", directoryNames(".claude/skills")],
-  ["canonical", directoryNames(".agents/skills")],
-]) {
-  if (names.join("\0") !== mappedSkills.join("\0")) {
-    die(1, `${label} skill set differs from manifest (expected ${mappedSkills.join(", ")}; got ${names.join(", ")})`);
-  }
-}
+const canonicalSkills = directoryNames(".agents/skills");
 
-const highRiskSkills = new Set(["e2e-evcc", "flash-esp32", "ship", "usb-recovery"]);
+const highRiskSkills = new Set(["flash-esp32", "ship", "usb-recovery"]);
 const readOnlySkills = new Set([
   "device-diag", "display-preview", "ota-release-verify", "pr-hygiene", "project-review",
   "skill-audit", "vehicle-command-audit",
@@ -233,19 +116,18 @@ const usbNoApprovalNeeded = /(?:live verification|HTTP requests?|GET endpoints?)
 const usbOtaNotStateChanging = /GET \/ota\/check[^.!?]*(?:is not|isn't|not) state-changing/i;
 const usbAbsentApprovalProceeds = /(?:(?:approval|authorization)[^.!?]*(?:absent|missing|not obtained)|without (?:separate )?(?:approval|authorization))[^.!?]*(?:continue|proceed|run|contact|send|request)/i;
 const reviewedSkillSha256 = new Map([
-  ["add-logic-test", {canonical: "f8a37fddbbb5c47afa9eca4fb4823c203af099718b3327a656c717d0462546f7", legacy: "aaa50473b6877c8998fe6d9af4604c324c63ffa614872ce72fb0a006abdd0a9e"}],
-  ["device-diag", {canonical: "af7fb5294bf0d138cdc887adadf616882ca6a8245b9b682379142d48f1df1a50", legacy: "27017438cde102b513b119171a1988aaf3e1079f2676f0d62a70e26d451edc43"}],
-  ["display-preview", {canonical: "4bff95d0314d50ce29d67beac7ef4f9db1ebcbb2fa609335e560e162f5a1ed46", legacy: "486c6a3b7a7bdb86a587ed97f2368e687524e02e58f0adba4c052376eb23d0d5"}],
-  ["e2e-evcc", {canonical: "04489835e6266dec020f4c5aa6663d228d47c5b880dcf6928379312b00c444cc", legacy: "8f40271c3fad7da834ed4cec4f231761af523cacf1ca14f8acb2f024a19a47dc"}],
-  ["feature-docs", {canonical: "43c1db745640619aea155b2e34b8fb0127b1d681b936294bffdfd8422566bb46", legacy: "708795047c04ced5a269cba056217432541bdf8a1381f478563b58aa289e2af7"}],
-  ["flash-esp32", {canonical: "d9945b914aa48ef7c150e207fc268011677f54ef6acde837c09111cf3229b71b", legacy: "d77312d51aa6d159b8e6a694e14f1bfaffb2709b8588a7bf51a0ac160fe2b84b"}],
-  ["ota-release-verify", {canonical: "3b0c7941871b9c350bf64a046e3344ac3b5effa2228daf375428b97e0168a511", legacy: "074c330c0f1d9676922f8dbce4605d2674c021013cb5125b2c595eb6a85bec66"}],
-  ["pr-hygiene", {canonical: "baaf53e5114859768213e7021ebf4c960a82fefd0ea90046fcbf575357bdbb72", legacy: "c01e4ffa18ded6ced5f4a8e37c031d10a38243e268003795ce63aac173049f11"}],
-  ["project-review", {canonical: "ff8b5a3424c7414bc3402f2ab85e41e5f1385381a74dffb5f7fb5ddf6c8239a1", legacy: "0e754dffdbdfc6998b55895bc6d120706a02f48a76a679516752083ae856a9e9"}],
-  ["ship", {canonical: "604da450727cb85e56c7cbc7ac6924b6378e7bb15a2ef4a5fd93983588af6ed1", legacy: "bebfbfa087093cd4e3914f306a67483e99f8beeb49c2479ee1ca8d1c9382a0c5"}],
-  ["skill-audit", {canonical: "d4c4a345345cda8aa26966a6cfd6c8889d8f178656571ac0489f925a527b6a75", legacy: "14514707fba12dfe961252632657e7319f1d8816ee6f15b66888f828dea75d76"}],
-  ["usb-recovery", {canonical: "25b5d04627894c1d5bb4fea816cc81624efc540bdfc85a1229772b7faf689e32", legacy: "bc2232300747fcac0c77f4dc706bc72c640c2b42079adacf09e56478bca03af6"}],
-  ["vehicle-command-audit", {canonical: "30ab4506d71e11d3993d66ca566402e024d12ae7502fd2b0bb056778cdde191a", legacy: "144feba94438891a66f96b545db0f3284c57db24a29f23e2ca9282b2d5c60072"}],
+  ["add-logic-test", "f8a37fddbbb5c47afa9eca4fb4823c203af099718b3327a656c717d0462546f7"],
+  ["device-diag", "7babf410873975ec05bb029c3c9522e70f9aadd96d0823829c48236f24ca3d44"],
+  ["display-preview", "4bff95d0314d50ce29d67beac7ef4f9db1ebcbb2fa609335e560e162f5a1ed46"],
+  ["feature-docs", "43c1db745640619aea155b2e34b8fb0127b1d681b936294bffdfd8422566bb46"],
+  ["flash-esp32", "6ead7b8f1732c66285f16c8427ee952043ad8d730001fd76c90c8d0ed01fc99e"],
+  ["ota-release-verify", "3b0c7941871b9c350bf64a046e3344ac3b5effa2228daf375428b97e0168a511"],
+  ["pr-hygiene", "addfebbad2a6e7717f34acccaafd765fee02f1b05aa3735e84e6dfff61c4af5f"],
+  ["project-review", "3bee267fe77b7ef047e73acb47991643d2a522e980ae98e2980b713215cfc0b3"],
+  ["ship", "604da450727cb85e56c7cbc7ac6924b6378e7bb15a2ef4a5fd93983588af6ed1"],
+  ["skill-audit", "bf3b11bc0bfaa9d29c7e261a549b9bbb94a429f19468648afe42d50c3a42f6ce"],
+  ["usb-recovery", "ed31dfbbf41a7a155eb73ec80e09c23338049a3ca7ac4754bdfdff960e733c24"],
+  ["vehicle-command-audit", "30ab4506d71e11d3993d66ca566402e024d12ae7502fd2b0bb056778cdde191a"],
 ]);
 const featureDocsScopeTokens = [
   "main/", "test/", "sdkconfig.defaults*", "partitions.csv", "AGENTS.md", ".agents/", ".codex/",
@@ -265,14 +147,15 @@ const shipMergeGateContracts = [
   "- [x] $feature-docs synced — merge gate @ <sha>",
   "`$project-review` does not establish `$pr-hygiene` readiness",
 ];
-for (const [name, pair] of skillMappings) {
-  const legacy = restrictedFrontmatter(repoPath(pair.source), `legacy skill ${name}`);
-  const canonical = restrictedFrontmatter(repoPath(pair.target), `canonical skill ${name}`);
-  if (legacy.values.get("name") !== name || canonical.values.get("name") !== name) {
+for (const name of canonicalSkills) {
+  const canonical = restrictedFrontmatter(
+    repoPath(`.agents/skills/${name}/SKILL.md`), `canonical skill ${name}`,
+  );
+  if (canonical.values.get("name") !== name) {
     die(1, `skill ${name} frontmatter name mismatch`);
   }
-  if (!legacy.values.get("description") || !canonical.values.get("description")) {
-    die(1, `skill ${name} needs descriptions on both compatibility sides`);
+  if (!canonical.values.get("description")) {
+    die(1, `skill ${name} needs a description`);
   }
   const canonicalKeys = [...canonical.values.keys()].sort();
   if (canonicalKeys.join("\0") !== "description\0name") {
@@ -290,18 +173,16 @@ for (const [name, pair] of skillMappings) {
       "Before any HTTP request, obtain separate explicit user approval for the exact recovered device/IP and the named GET endpoints.",
       "`GET /ota/check` is state-changing and must be named explicitly in that live approval.",
     ];
-    for (const [side, text] of [["canonical", canonical.text], ["legacy", legacy.text]]) {
-      const normalized = normalizeProse(text);
-      if (liveContracts.some((required) => !normalized.includes(required))) {
-        die(1, `${side} usb-recovery skill is missing the exact live-verification contract`);
-      }
-      const contradiction = proseSentences(text).some((sentence) =>
-        usbPositiveAuthorization.test(sentence) || usbNoApprovalNeeded.test(sentence) ||
-        usbOtaNotStateChanging.test(sentence) || usbAbsentApprovalProceeds.test(sentence)
-      );
-      if (contradiction) {
-        die(1, `${side} usb-recovery skill contradicts the live-verification contract`);
-      }
+    const normalized = normalizeProse(canonical.text);
+    if (liveContracts.some((required) => !normalized.includes(required))) {
+      die(1, "canonical usb-recovery skill is missing the exact live-verification contract");
+    }
+    const contradiction = proseSentences(canonical.text).some((sentence) =>
+      usbPositiveAuthorization.test(sentence) || usbNoApprovalNeeded.test(sentence) ||
+      usbOtaNotStateChanging.test(sentence) || usbAbsentApprovalProceeds.test(sentence)
+    );
+    if (contradiction) {
+      die(1, "canonical usb-recovery skill contradicts the live-verification contract");
     }
     const operationalContracts = [
       "Do not run this section merely because the USB recovery was approved.",
@@ -330,13 +211,11 @@ for (const [name, pair] of skillMappings) {
     if (requiredOwners.some((required) => !normalized.includes(required))) {
       die(1, `${name} is missing an exact documentation-owner contract`);
     }
-    for (const [side, text] of [["canonical", canonical.text], ["legacy", legacy.text]]) {
-      const contradictoryOwner = proseSentences(text).some((sentence) =>
-        /AGENTS\.md/i.test(sentence) && deepOwnerTerms.test(sentence)
-      );
-      if (contradictoryOwner) {
-        die(1, `${side} ${name} assigns a deep technical catalog to compact AGENTS.md`);
-      }
+    const contradictoryOwner = proseSentences(canonical.text).some((sentence) =>
+      /AGENTS\.md/i.test(sentence) && deepOwnerTerms.test(sentence)
+    );
+    if (contradictoryOwner) {
+      die(1, `canonical ${name} assigns a deep technical catalog to compact AGENTS.md`);
     }
   }
   if (["feature-docs", "project-review", "skill-audit"].includes(name)) {
@@ -349,13 +228,11 @@ for (const [name, pair] of skillMappings) {
   if (readOnlySkills.has(name) && !/read-only|does not (?:edit|modify)|must not (?:edit|modify)/is.test(canonical.text)) {
     die(1, `review/diagnostic skill ${name} must state its read-only boundary`);
   }
-  const expectedDigests = reviewedSkillSha256.get(name);
-  if (!expectedDigests) die(1, `skill ${name} has no reviewed content digest`);
-  for (const [side, text] of [["canonical", canonical.text], ["legacy", legacy.text]]) {
-    const digest = createHash("sha256").update(text).digest("hex");
-    if (digest !== expectedDigests[side]) {
-      die(1, `${side} ${name} exact reviewed content contract drifted`);
-    }
+  const expectedDigest = reviewedSkillSha256.get(name);
+  if (!expectedDigest) die(1, `skill ${name} has no reviewed content digest`);
+  const digest = createHash("sha256").update(canonical.text).digest("hex");
+  if (digest !== expectedDigest) {
+    die(1, `canonical ${name} exact reviewed content contract drifted`);
   }
 }
 
@@ -365,7 +242,6 @@ for (const [relative, contracts] of new Map([
     "These four boxes ARE the publish/merge gates",
     "`$pr-hygiene` clean — content gate @ <sha>",
   ]],
-  ["docs/AGENT_MIGRATION.md", ["the independent `$pr-hygiene` content screen"]],
   ["docs/FEATURES.md", [
     "Runner-neutral agent policy and four SHA-bound PR gates",
     "publishing personal/private identifiers or non-English PR/docs content",
@@ -379,7 +255,12 @@ for (const [relative, contracts] of new Map([
   }
 }
 
-const canonicalReviewerTargets = [...reviewerMappings.values()].map((pair) => pair.target).sort();
+const canonicalReviewerTargets = [
+  ".codex/agents/agent_config_reviewer.toml",
+  ".codex/agents/doc_drift_checker.toml",
+  ".codex/agents/heap_safety_reviewer.toml",
+  ".codex/agents/multi_target_build_reviewer.toml",
+];
 let actualReviewerTargets;
 try {
   actualReviewerTargets = fs.readdirSync(repoPath(".codex/agents"), { withFileTypes: true })
@@ -389,7 +270,9 @@ try {
 if (canonicalReviewerTargets.join("\0") !== actualReviewerTargets.join("\0")) {
   die(1, "canonical reviewer set differs from manifest");
 }
-if (reviewerMappings.size !== 4) die(1, `expected four mapped reviewers, got ${reviewerMappings.size}`);
+if (actualReviewerTargets.length !== 4) {
+  die(1, `expected four canonical reviewers, got ${actualReviewerTargets.length}`);
+}
 
 const safety = readJson(repoPath("tools/agent-config/safety-invariants.json"), "safety invariants");
 if (safety?.schema_version !== 1 || !Array.isArray(safety.invariants) || safety.invariants.length === 0) {
@@ -397,7 +280,6 @@ if (safety?.schema_version !== 1 || !Array.isArray(safety.invariants) || safety.
 }
 const instructionTexts = new Map([
   ["AGENTS.md", fs.readFileSync(repoPath("AGENTS.md"), "utf8")],
-  [".claude/CLAUDE.md", fs.readFileSync(repoPath(".claude/CLAUDE.md"), "utf8")],
 ]);
 const invariantIds = new Set();
 for (const invariant of safety.invariants) {
@@ -413,5 +295,5 @@ for (const invariant of safety.invariants) {
   }
 }
 
-console.log(`agent-config: ${tracked.length} legacy mappings, ${skillMappings.size} skill pairs, ${reviewerMappings.size} reviewers and ${invariantIds.size} cross-runner invariants clean`);
+console.log(`agent-config: ${canonicalSkills.length} canonical skills, ${actualReviewerTargets.length} reviewers and ${invariantIds.size} instruction invariants clean`);
 console.log(`agent-config: AGENTS.md budget ${agentsSize}/${budget} bytes`);
