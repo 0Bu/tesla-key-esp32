@@ -37,15 +37,38 @@ inline bool authority_matches_host(std::string_view authority, std::string_view 
     return ascii_iequal(without_default_port(authority), without_default_port(host));
 }
 
+inline std::string_view host_without_port(std::string_view host) {
+    if (host.empty() || host.find_first_of("/?#@ \t\r\n") != std::string_view::npos) return {};
+    const size_t colon = host.rfind(':');
+    if (colon == std::string_view::npos) return host;
+    if (host.find(':') != colon || colon == 0 || colon + 1 == host.size()) return {};
+    for (size_t i = colon + 1; i < host.size(); ++i) {
+        if (host[i] < '0' || host[i] > '9') return {};
+    }
+    return host.substr(0, colon);
+}
+
+// Never use the request's Host header itself as the trust anchor: a DNS-rebinding page controls
+// both Host and Origin and could otherwise make two attacker-owned strings compare equal while the
+// browser connects to this board. Bind browser requests to names the device owns instead.
+inline bool device_host_allowed(std::string_view host, std::string_view device_ipv4) {
+    const std::string_view name = host_without_port(host);
+    if (name.empty()) return false;
+    return ascii_iequal(name, "tesla-key-esp32.local") ||
+           ascii_iequal(name, "tesla-key-esp32") ||
+           (!device_ipv4.empty() && ascii_iequal(name, device_ipv4));
+}
+
 // The device API remains intentionally unauthenticated for evcc and other trusted-LAN clients.
 // This gate addresses a narrower browser threat: a foreign web origin using a LAN user's browser
-// to submit a mutating POST. Headerless non-browser clients remain allowed. Same-origin browser
-// POSTs are accepted by comparing Origin authority with Host, including default HTTP(S) ports.
+// to submit a mutating request. Headerless non-browser clients remain allowed. Same-origin browser
+// requests are accepted only when Host is the device mDNS/DHCP name or its current local IPv4.
 inline bool mutation_origin_allowed(std::string_view host, std::string_view origin,
-                                    std::string_view fetch_site) {
+                                    std::string_view fetch_site,
+                                    std::string_view device_ipv4) {
     if (ascii_iequal(fetch_site, "cross-site")) return false;
     if (origin.empty()) return true;
-    if (host.empty() || ascii_iequal(origin, "null")) return false;
+    if (!device_host_allowed(host, device_ipv4) || ascii_iequal(origin, "null")) return false;
 
     std::string_view authority;
     std::string_view default_port;
@@ -64,6 +87,44 @@ inline bool mutation_origin_allowed(std::string_view host, std::string_view orig
         return false;
     }
     return authority_matches_host(authority, host, default_port);
+}
+
+inline std::string_view request_path(std::string_view uri) {
+    const size_t query = uri.find('?');
+    return uri.substr(0, query);
+}
+
+inline bool query_has_exact(std::string_view uri, std::string_view key,
+                            std::string_view value) {
+    const size_t query = uri.find('?');
+    if (query == std::string_view::npos) return false;
+    std::string_view rest = uri.substr(query + 1);
+    while (!rest.empty()) {
+        const size_t amp = rest.find('&');
+        const std::string_view item = rest.substr(0, amp);
+        const size_t equals = item.find('=');
+        if (equals != std::string_view::npos && item.substr(0, equals) == key &&
+            item.substr(equals + 1) == value) {
+            return true;
+        }
+        if (amp == std::string_view::npos) break;
+        rest.remove_prefix(amp + 1);
+    }
+    return false;
+}
+
+// GET is normally read-only, but these legacy diagnostic/OTA routes deliberately mutate state.
+// Keep their browser-CSRF gate adjacent to the POST policy so a method name cannot hide a write.
+inline bool mutation_origin_required(bool is_post, std::string_view uri) {
+    if (is_post) return true;
+    const std::string_view path = request_path(uri);
+    if (path == "/ota/check") return true;
+    if (path == "/diag") {
+        return query_has_exact(uri, "clear", "1") ||
+               query_has_exact(uri, "verbose", "0") ||
+               query_has_exact(uri, "verbose", "1");
+    }
+    return path == "/coredump" && query_has_exact(uri, "clear", "1");
 }
 
 }  // namespace tk

@@ -789,7 +789,7 @@ static void test_target() {
     CHECK(base + tk::image_suffix(tk::Target::Esp32C6) + ".bin" == "tesla-key-esp32-c6.bin");
 }
 
-// ─── MCP endpoint core (version negotiation, routing, tool registry, clamp) ──────
+// ─── MCP endpoint core (version negotiation, routing, tool registry, validation) ──────
 static void test_mcp() {
     using MM = tk::McpMethod;
 
@@ -830,7 +830,7 @@ static void test_mcp() {
     CHECK(tk::cmd_info(tk::CmdKind::Unknown)       == nullptr);
 
     // Arg-spec table — the single source of truth the advertised schema, the MCP
-    // executor clamp AND the REST /command clamp all read (drift between them is
+    // executor validation AND the REST /command validation all read (drift between them is
     // impossible by construction; this pins the values themselves). Every non-None arg
     // has sane shared bounds; an absent OPTIONAL Int defaults to 0 on the MCP side and
     // to api_default on the REST side, so both must lie inside the advertised bounds.
@@ -869,6 +869,16 @@ static void test_mcp() {
     // Read-only + no-arg tools carry no args.
     CHECK(tk::cmd_info(tk::CmdKind::GetVehicleState)->args[0].type == tk::CmdArgType::None);
     CHECK(tk::cmd_info(tk::CmdKind::WakeUp)->args[0].type          == tk::CmdArgType::None);
+
+    // REST never reports success for a value different from the one supplied. Optional fields
+    // may still use their registry default when absent, but a present value is strict.
+    int strict = -1;
+    CHECK(tk::strict_rest_int(50.0, lim->args[0], strict) && strict == 50);
+    CHECK(tk::strict_rest_int(100.0, lim->args[0], strict) && strict == 100);
+    CHECK(!tk::strict_rest_int(49.0, lim->args[0], strict));
+    CHECK(!tk::strict_rest_int(101.0, lim->args[0], strict));
+    CHECK(!tk::strict_rest_int(80.5, lim->args[0], strict));
+    CHECK(!tk::strict_rest_int(std::nan(""), lim->args[0], strict));
 
     // REST surface of the shared table: exactly the 15 TeslaBleHttpProxy commands
     // resolve by API name, each to its own kind; get_vehicle_state is NOT one of them.
@@ -925,25 +935,14 @@ static void test_mcp() {
     }
     CHECK(mi == 9);
 
-    // Clamp: an out-of-range double must never reach the int cast (UB guard).
-    CHECK(tk::clamped_int(16.0,   0, 48)    == 16);
-    CHECK(tk::clamped_int(-5.0,   0, 48)    == 0);
-    CHECK(tk::clamped_int(1e300,  0, 48)    == 48);
-    CHECK(tk::clamped_int(-1e300, 50, 100)  == 50);
-    CHECK(tk::clamped_int(99.9,   50, 100)  == 99);
-    CHECK(tk::clamped_int(1440.0, 0, 1439)  == 1439);
-    // NaN compares false against BOTH bounds, so without its explicit check it would
-    // fall through to the (int) cast — the exact UB this guard exists to prevent
-    // (reachable via the string-argument path: strtod accepts "nan").
-    CHECK(tk::clamped_int(std::nan(""), 0, 48) == 0);
-    CHECK(tk::clamped_int(std::nan(""), 50, 100) == 50);
-
     // MCP's advertised integer/boolean schema is enforced after permissive JSON/string
-    // decoding: values remain bounded, but fractions and every non-finite spelling fail;
+    // decoding: out-of-range, fractional and every non-finite spelling fails;
     // numeric booleans are exactly 0/1 rather than C-style "any non-zero".
     int parsed_int = -1;
     CHECK(tk::mcp_integer_value(16.0, 0, 48, parsed_int) && parsed_int == 16);
-    CHECK(tk::mcp_integer_value(1e300, 0, 48, parsed_int) && parsed_int == 48);
+    CHECK(!tk::mcp_integer_value(-1.0, 0, 48, parsed_int));
+    CHECK(!tk::mcp_integer_value(49.0, 0, 48, parsed_int));
+    CHECK(!tk::mcp_integer_value(1e300, 0, 48, parsed_int));
     CHECK(!tk::mcp_integer_value(16.5, 0, 48, parsed_int));
     CHECK(!tk::mcp_integer_value(std::nan(""), 0, 48, parsed_int));
     CHECK(!tk::mcp_integer_value(HUGE_VAL, 0, 48, parsed_int));
@@ -2528,26 +2527,44 @@ static void test_mqtt_uri() {
 // ─── Browser-origin gate for mutating HTTP requests (logic/http_origin.hpp) ────────────────────
 static void test_http_origin() {
     // evcc/curl do not send browser-origin metadata and retain the documented trusted-LAN API.
-    CHECK(tk::mutation_origin_allowed("", "", ""));
-    CHECK(tk::mutation_origin_allowed("tesla-key-esp32.local", "", "none"));
+    CHECK(tk::mutation_origin_allowed("", "", "", ""));
+    CHECK(tk::mutation_origin_allowed("tesla-key-esp32.local", "", "none", ""));
 
     CHECK(tk::mutation_origin_allowed("tesla-key-esp32.local",
-                                      "http://tesla-key-esp32.local", "same-origin"));
+                                      "http://tesla-key-esp32.local", "same-origin", ""));
     CHECK(tk::mutation_origin_allowed("TESLA-KEY-ESP32.LOCAL:80",
-                                      "http://tesla-key-esp32.local", "same-origin"));
-    CHECK(tk::mutation_origin_allowed("proxy.example",
-                                      "https://PROXY.EXAMPLE:443", "same-origin"));
+                                      "http://tesla-key-esp32.local", "same-origin", ""));
+    CHECK(tk::mutation_origin_allowed("192.0.2.42:80",
+                                      "http://192.0.2.42", "same-origin", "192.0.2.42"));
 
     CHECK(!tk::mutation_origin_allowed("tesla-key-esp32.local",
-                                       "https://evil.example", "cross-site"));
+                                       "https://evil.example", "cross-site", ""));
     CHECK(!tk::mutation_origin_allowed("tesla-key-esp32.local",
-                                       "http://evil.example", ""));
-    CHECK(!tk::mutation_origin_allowed("tesla-key-esp32.local", "null", "same-site"));
-    CHECK(!tk::mutation_origin_allowed("", "http://tesla-key-esp32.local", "same-origin"));
+                                       "http://evil.example", "", ""));
+    CHECK(!tk::mutation_origin_allowed("tesla-key-esp32.local", "null", "same-site", ""));
+    CHECK(!tk::mutation_origin_allowed("", "http://tesla-key-esp32.local", "same-origin", ""));
     CHECK(!tk::mutation_origin_allowed("tesla-key-esp32.local",
-                                       "http://tesla-key-esp32.local/path", "same-origin"));
+                                       "http://tesla-key-esp32.local/path", "same-origin", ""));
     CHECK(!tk::mutation_origin_allowed("tesla-key-esp32.local",
-                                       "http://user@tesla-key-esp32.local", "same-origin"));
+                                       "http://user@tesla-key-esp32.local", "same-origin", ""));
+    // DNS rebinding: matching Host/Origin are insufficient when the authority is not device-owned.
+    CHECK(!tk::mutation_origin_allowed("attacker.example",
+                                       "http://attacker.example", "same-origin", "192.0.2.42"));
+    CHECK(!tk::mutation_origin_allowed("192.0.2.99",
+                                       "http://192.0.2.99", "same-origin", "192.0.2.42"));
+
+    CHECK(tk::mutation_origin_required(true, "/status"));
+    CHECK(tk::mutation_origin_required(false, "/ota/check"));
+    CHECK(tk::mutation_origin_required(false, "/ota/check?ms=123"));
+    CHECK(tk::mutation_origin_required(false, "/diag?clear=1"));
+    CHECK(tk::mutation_origin_required(false, "/diag?redact=1&verbose=0"));
+    CHECK(tk::mutation_origin_required(false, "/diag?verbose=1"));
+    CHECK(tk::mutation_origin_required(false, "/coredump?clear=1"));
+    CHECK(!tk::mutation_origin_required(false, "/diag"));
+    CHECK(!tk::mutation_origin_required(false, "/diag?clear=0&verbose=2"));
+    CHECK(!tk::mutation_origin_required(false, "/diag?next=clear=1"));
+    CHECK(!tk::mutation_origin_required(false, "/coredump"));
+    CHECK(!tk::mutation_origin_required(false, "/ota/status"));
 }
 
 // ─── Negotiated ATT payload size (logic/ble_chunk.hpp) ────────────────────────────────────────

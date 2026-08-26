@@ -193,8 +193,9 @@ bool VehicleController::init(const std::string& vin,
                 // looks like a BLE problem instead of a storage one.
                 if (!config_store_->save_str("ble_mac", addr)) {
                     ESP_LOGW(TAG, "could not persist Tesla MAC %s — next boot rescans", addr.c_str());
+                } else {
+                    ESP_LOGI(TAG, "Tesla MAC saved: %s", addr.c_str());
                 }
-                ESP_LOGI(TAG, "Tesla MAC saved: %s", addr.c_str());
             }
         }
     });

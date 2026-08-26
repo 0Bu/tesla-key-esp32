@@ -119,8 +119,8 @@ re-confirm it against the *current* tree and catch anything that drifted since. 
 1. **BLE transport** — service `00000211…`, write `…0212`, notify `…0213`; VIN→name `S%02xC` over
    the **first 8 bytes** of `sha1(VIN)` (⇒ `S` + 16 hex + `C`); 2-byte big-endian length prefix;
    block `min(txMtu,maxBLEMessageSize)-3`; `ErrMaxConnectionsExceeded` keyed off the advert
-   **`Connectable`** flag (not the connect error). *Baseline: matches.* (We use a fixed 20-byte
-   write chunk vs upstream's MTU-derived block — slower but safe; OK as long as docs say so.)
+   **`Connectable`** flag (not the connect error). *Baseline: matches.* (Writes use a 20-byte
+   fallback until MTU negotiation, then `min(MTU-3, 244)` like the pinned library limit.)
 2. **Roles / Charging-Manager scope** — charging commands + wake only; everything else
    (lights/horn/sentry/**climate**/locks) is role-rejected. *Baseline: code and current docs match;
    the worked table retains the former drift only as a labelled historical example.*
@@ -135,9 +135,10 @@ re-confirm it against the *current* tree and catch anything that drifted since. 
    shows "Unknown key"), requires an **NFC card on the console reader**, verify via a SessionInfo
    probe. *Baseline: matches.* (Note: the **"3"** is the simultaneous-BLE-**connection** limit; a
    car stores up to **19 keys** — don't call it a 3-key cap.)
-5. **Command params / ranges** — amps clamp **0–48** (faithful to real chargers; upstream has no
-   cap), charge-limit **50–100**, scheduled-charging `start_minutes` **0–1439** after local
-   midnight. *Baseline: code and current docs both say 0–48.*
+5. **Command params / ranges** — amps **0–48** (faithful to real chargers; upstream has no cap),
+   charge-limit **50–100**, scheduled-charging `start_minutes` **0–1439** after local midnight.
+   REST and MCP reject supplied fractional/out-of-range values rather than silently executing a
+   different value. *Baseline: code and current docs match.*
 6. **Wake / sleep** — wake is a **VCSEC-domain** `RKE_ACTION_WAKE_VEHICLE` (not infotainment);
    `vehicleSleepStatus`/`vehicleLockState`/`userPresence` string values match the upstream enums;
    the "trust debounced VCSEC ASLEEP, never VCSEC AWAKE" asymmetry is a correct reading.
@@ -169,23 +170,22 @@ re-confirm it against the *current* tree and catch anything that drifted since. 
 These were previously confirmed and are institutional examples. Re-verify each against current
 sources; if still present, report it rather than editing. Nearly all are documentation findings.
 
-> **Status (re-verified 2026-07-02, project-review pass): findings 1–8 are FIXED** in the
-> current tree — the docs/comments now state the code facts each row cites. Only **#9** (the
-> silent `set_charge_limit` `<50→50` clamp reporting success, `vehicle_commands.cpp`) remains, and
-> it is the optional, low-severity row. The table stays as institutional memory for the *shape*
-> of findings; re-verify a row against the tree before acting on it.
+> **Status (re-verified 2026-08-26): findings 1–9 are FIXED** in the current tree — the
+> docs/comments now state the code facts each row cites, and supplied command integers are rejected
+> when fractional or outside their advertised range. The table stays as institutional memory for
+> the *shape* of findings; re-verify a row against the tree before acting on it.
 
 | # | Cat | Where (doc) | Drift | Fix |
 |---|---|---|---|---|
 | 1 | doc (crux, historical) | `docs/README.md` "Commands" | Formerly claimed only `door_lock/unlock` were role-rejected; current docs name the complete role-refused set. | Re-verify the current command list; do not report this historical example as current drift. |
-| 2 | doc | `docs/README.md` `/status.link` and MQTT `sleep_status`; `docs/ARCHITECTURE.md` "Sleep / link-state" | Enum value sets omit **`idle`/`IDLE`** (code emits 5 / 4 values). | Add `idle`/`IDLE` to the owning deep references. |
+| 2 | doc (historical) | `docs/README.md` `/status.link` and MQTT `sleep_status`; `docs/ARCHITECTURE.md` "Sleep / link-state" | Formerly omitted **`idle`/`IDLE`**; current docs list the complete code-emitted values. | Re-verify the enum sets; do not report this historical example as current drift. |
 | 3 | doc (historical) | `docs/README.md` "Commands" | Formerly said `set_charging_amps` was 0–32; current docs and code say **0–48**. | Re-verify the current range; do not report this historical example as current drift. |
-| 4 | doc | `README.md` "Step 4 — Pair with the car" | Quotes car prompt as "Add new key"; firmware strings say **"Add key"**. | One-word fix. |
-| 5 | doc | `README.md` "Pair with the car"; `docs/README.md` "Pairing" | "max 3 **keys** per vehicle" — really ~3 simultaneous **connections** (19 keys stored). | Reframe as the ~3-connection limit. |
-| 6 | doc/comment | `Kconfig.projbuild` OTA help | Says image is `tesla-key-esp32-<target>.bin`; actual suffix scheme is `""`/`-s3`/`-c3`/`-c6`. | Correct to the real suffix map. |
+| 4 | doc (historical) | `README.md` "Step 4 — Pair with the car" | Formerly quoted "Add new key"; current text matches the firmware's **"Add key"** prompt. | Re-verify the prompt; do not report this historical example as current drift. |
+| 5 | doc (historical) | `README.md` "Pair with the car"; `docs/README.md` "Pairing" | Formerly called ~3 simultaneous BLE **connections** a three-key cap; current docs distinguish it from the 19 stored keys. | Re-verify the distinction; do not report this historical example as current drift. |
+| 6 | doc/comment (historical) | `Kconfig.projbuild` OTA help | Formerly implied `tesla-key-esp32-<target>.bin`; current help lists the real `""`/`-s3`/`-c3`/`-c6` suffix map. | Re-verify the suffix map; do not report this historical example as current drift. |
 | 7 | doc/comment | old `vehicle_ctrl.hpp` / `main.cpp` / `http_server.cpp` comments | Historical comments said the device made no NTP call and conflated command expiry with wall time. Current contract: SNTP is primary, `/set_time` is fallback; wall time gates TLS/human timestamps **and persisted-session load age**, while command `expires_at` uses vehicle clock + monotonic delta. | Keep that distinction; do not remove the early NVS clock restore as "signing does not use RTC". |
-| 8 | doc | `docs/ARCHITECTURE.md` "Pairing lifecycle / invalidation" | Describes only the `"whitelist"` substring; omits the **primary** `UNKNOWN_KEY_ID` `set_message_callback` detector that fires on a cached session. | List all three detectors, primary first. |
-| 9 | logical (low) | `main/vehicle_commands.cpp` `set_charge_limit` | `set_charge_limit` silently clamps `<50→50` and reports **success** (upstream passes through and lets the car answer). Harmless on the evcc path. | Optional: reject out-of-range, or pass through. |
+| 8 | doc (historical) | `docs/ARCHITECTURE.md` "Pairing lifecycle / invalidation" | Formerly described only the `"whitelist"` substring; current docs list `UNKNOWN_KEY_ID` first and all three detectors. | Re-verify all detectors; do not report this historical example as current drift. |
+| 9 | logical (historical) | REST/MCP argument parsing + `main/vehicle_commands.cpp` `set_charge_limit` | Formerly clamped `<50→50` and could report success for a value the caller did not request; current parsers reject fractional/out-of-range input and the controller rejects an invalid direct call. | Re-verify strict rejection; do not report this historical example as current drift. |
 
 ## How to run
 

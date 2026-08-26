@@ -166,8 +166,9 @@ pairing when full.
 ## HTTP API
 
 Base: `http://<ESP32-IP>`. No auth, no TLS — see [SECURITY.md](SECURITY.md). Mutating browser
-requests from a foreign Origin are rejected with `403`; headerless evcc/curl clients remain
-compatible, so this is not a replacement for the trusted-LAN boundary.
+requests from a foreign or DNS-rebound Origin are rejected with `403`; Host must be the device
+name/current IP, and state-changing legacy GET forms use the same gate. Headerless evcc/curl
+clients remain compatible, so this is not a replacement for the trusted-LAN boundary.
 
 ### Commands
 
@@ -191,6 +192,10 @@ POST /api/1/vehicles/{VIN}/command/{command}   Content-Type: application/json
 For evcc compatibility, `charge_start` also accepts the JSON scalar `true` and
 `charge_stop` accepts `false`. These are the exact bodies emitted by evcc's generic
 boolean setter; mismatched booleans and all other non-object bodies remain HTTP 400.
+
+Supplied integer arguments must be integral and inside the listed range; REST returns HTTP 400
+instead of silently clamping to a different command value. Optional omitted fields retain their
+documented compatibility defaults.
 
 `charging_amps` is required and must be a whole number. A successful `set_charging_amps`
 response means more than a Tesla command acknowledgement: the firmware performs a new,
