@@ -91,6 +91,11 @@ authentication**: a raw LAN peer can omit browser headers and still call every e
 old/non-conforming browser that sends neither header is indistinguishable from such a client. The
 trusted-LAN boundary therefore remains mandatory.
 
+Open the configuration UI through `http://tesla-key-esp32.local` or the current device IP when
+you need to mutate settings. A router-expanded DHCP name such as
+`tesla-key-esp32.router.example` may resolve for read-only/headerless clients, but is deliberately
+not a device-owned browser authority and receives `403` on mutations.
+
 `POST /set_wifi` deserves naming explicitly, because it is the one open route whose worst
 case is *losing the device* rather than mis-charging the car: a LAN peer can point it at a
 network you do not control, and the board reboots onto it. Two things bound that. The

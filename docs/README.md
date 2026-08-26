@@ -518,7 +518,8 @@ Full threat model + Flash Encryption / Secure Boot: [SECURITY.md](SECURITY.md).
   expose to the internet. Front with a reverse proxy or VLAN if access control is needed. A
   reverse proxy must set its upstream `Host` to the device IP or `.local` name and remove
   `Origin` (or rewrite it to the same device authority); the firmware rejects a forwarded public
-  proxy hostname on mutating browser requests.
+  proxy hostname on mutating browser requests. Likewise, use the `.local` name or current IP for
+  browser configuration rather than a router-expanded DHCP FQDN.
 
 ## Internals
 

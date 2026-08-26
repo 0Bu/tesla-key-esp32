@@ -2551,6 +2551,9 @@ static void test_http_origin() {
     // DNS rebinding: matching Host/Origin are insufficient when the authority is not device-owned.
     CHECK(!tk::mutation_origin_allowed("attacker.example",
                                        "http://attacker.example", "same-origin", "192.0.2.42"));
+    CHECK(!tk::mutation_origin_allowed("tesla-key-esp32.router.example",
+                                       "http://tesla-key-esp32.router.example", "same-origin",
+                                       "192.0.2.42"));
     CHECK(!tk::mutation_origin_allowed("192.0.2.99",
                                        "http://192.0.2.99", "same-origin", "192.0.2.42"));
 

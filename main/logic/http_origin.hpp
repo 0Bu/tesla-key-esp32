@@ -62,7 +62,8 @@ inline bool device_host_allowed(std::string_view host, std::string_view device_i
 // The device API remains intentionally unauthenticated for evcc and other trusted-LAN clients.
 // This gate addresses a narrower browser threat: a foreign web origin using a LAN user's browser
 // to submit a mutating request. Headerless non-browser clients remain allowed. Same-origin browser
-// requests are accepted only when Host is the device mDNS/DHCP name or its current local IPv4.
+// requests are accepted only when Host is the canonical device name or its current local IPv4.
+// Router-expanded DHCP FQDNs are not device-owned and therefore cannot be allowlisted safely.
 inline bool mutation_origin_allowed(std::string_view host, std::string_view origin,
                                     std::string_view fetch_site,
                                     std::string_view device_ipv4) {
