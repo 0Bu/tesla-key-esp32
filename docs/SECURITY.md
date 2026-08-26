@@ -75,7 +75,10 @@ beyond what the open REST routes already allow). This is acceptable only because
 - the device is meant to live on a **trusted home LAN**, never exposed to the internet.
 
 If you need access control, put the device behind a reverse proxy with TLS + auth, or
-segment it onto a trusted VLAN.
+segment it onto a trusted VLAN. A proxy must send a device-owned upstream `Host` (the current
+device IP or its `.local` name) and either remove `Origin` or rewrite its authority to that same
+device authority. Forwarding the proxy's public hostname unchanged is intentionally rejected by
+the browser-mutation gate described below.
 
 The firmware does reject a narrower browser threat: a mutating request carrying an `Origin`
 whose authority differs from `Host`, whose `Host` is neither the device name nor its current IP,

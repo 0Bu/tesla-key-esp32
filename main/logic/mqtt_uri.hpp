@@ -77,10 +77,10 @@ inline std::string mqtt_broker_display(const std::string& uri) {
     std::string authority = mqtt_trim(uri);
     const size_t scheme = authority.find("://");
     if (scheme != std::string::npos) authority.erase(0, scheme + 3);
-    const size_t slash = authority.find('/');
-    if (slash != std::string::npos) authority.erase(slash);
     const size_t userinfo = authority.rfind('@');
     if (userinfo != std::string::npos) authority.erase(0, userinfo + 1);
+    const size_t slash = authority.find('/');
+    if (slash != std::string::npos) authority.erase(slash);
     return authority;
 }
 

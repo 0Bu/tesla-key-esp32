@@ -2493,6 +2493,7 @@ static void test_mqtt_uri() {
     CHECK(tk::mqtt_broker_display("mqtts://user:secret@broker.example:8883") ==
           "broker.example:8883");
     CHECK(tk::mqtt_broker_display(" user@realm:pw@host:1883/path ") == "host:1883");
+    CHECK(tk::mqtt_broker_display("mqtt://user:secret/path@host:1883") == "host:1883");
     CHECK(tk::mqtt_broker_display("").empty());
 
     CHECK(tk::mqtt_uri_is_tls("mqtts://h:8883"));

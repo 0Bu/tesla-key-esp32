@@ -515,7 +515,10 @@ Full threat model + Flash Encryption / Secure Boot: [SECURITY.md](SECURITY.md).
 - Private key in NVS, **unencrypted by default**; dumpable via USB on a factory S3. Enable
   Flash + NVS Encryption (irreversible).
 - API has no auth / TLS by design (evcc cannot send credentials). Trusted LAN only; never
-  expose to the internet. Front with a reverse proxy or VLAN if access control is needed.
+  expose to the internet. Front with a reverse proxy or VLAN if access control is needed. A
+  reverse proxy must set its upstream `Host` to the device IP or `.local` name and remove
+  `Origin` (or rewrite it to the same device authority); the firmware rejects a forwarded public
+  proxy hostname on mutating browser requests.
 
 ## Internals
 
