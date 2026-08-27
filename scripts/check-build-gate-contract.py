@@ -81,6 +81,7 @@ TRUSTED_DEFAULT_COMPARE = 'if [ "$current_default" != "$TRUSTED_DEFAULT_SHA" ]; 
 FINAL_RELEASE_API = 'gh api "repos/$GITHUB_REPOSITORY/releases/tags/v$RELEASE_VERSION" > "$release_json"'
 FINAL_RELEASE_CHECK = "python3 scripts/check-published-release.py"
 FINAL_RELEASE_JSON_ARG = '--release-json "$release_json"'
+DRAFT_RELEASE_API = 'gh api "repos/$GITHUB_REPOSITORY/releases/$DRAFT_RELEASE_ID" > "$draft_json"'
 DRAFT_RELEASE_CHECK = "--expect-state draft"
 PUBLISH_DRAFT = 'gh api --method PATCH "repos/$GITHUB_REPOSITORY/releases/$release_id"'
 IMMUTABLE_RELEASE_CHECK = "--expect-state published-immutable"
@@ -933,8 +934,8 @@ def validate(root: Path) -> None:
         build_workflow,
         "build.yml draft -> immutable Release transaction",
         ("Assemble local Pages candidate before any publication", LOCAL_PAGES_CHECK,
-         "Upload signed firmware artifacts", "Create draft release", DRAFT_RELEASE_CHECK,
-         PUBLISH_DRAFT, "Refetch and accept immutable published Release"),
+         "Upload signed firmware artifacts", "Create draft release", DRAFT_RELEASE_API,
+         DRAFT_RELEASE_CHECK, PUBLISH_DRAFT, "Refetch and accept immutable published Release"),
     )
     refetch_position = build_workflow.find("Refetch and accept immutable published Release")
     immutable_position = build_workflow.find(IMMUTABLE_RELEASE_CHECK, refetch_position)
@@ -944,6 +945,10 @@ def validate(root: Path) -> None:
     require(
         "draft: true" in build_workflow
         and "fail_on_unmatched_files: true" in build_workflow
+        and "id: create-release" in build_workflow
+        and "DRAFT_RELEASE_ID: ${{ steps.create-release.outputs.id }}" in build_workflow
+        and '[[ "$DRAFT_RELEASE_ID" =~ ^[1-9][0-9]*$ ]]' in build_workflow
+        and '[[ "$release_id" == "$DRAFT_RELEASE_ID" ]]' in build_workflow
         and build_workflow.count(
             'gh api "repos/$GITHUB_REPOSITORY/releases/tags/v$RELEASE_VERSION"'
         ) >= 3,
@@ -1354,6 +1359,14 @@ def self_test(root: Path) -> None:
          "logic/build/rebuild/publish/deploy chain"),
         ("release-draft", ".github/workflows/build.yml", "          draft: true\n",
          "          draft: false\n", "draft-upload"),
+        ("release-draft-action-id", ".github/workflows/build.yml",
+         "        id: create-release\n", "", "draft-upload"),
+        ("release-draft-output-id", ".github/workflows/build.yml",
+         "DRAFT_RELEASE_ID: ${{ steps.create-release.outputs.id }}",
+         "DRAFT_RELEASE_ID: ${{ steps.create-release.outputs.url }}", "draft-upload"),
+        ("release-draft-by-tag", ".github/workflows/build.yml", DRAFT_RELEASE_API,
+         'gh api "repos/$GITHUB_REPOSITORY/releases/tags/v$RELEASE_VERSION" > "$draft_json"',
+         "draft -> immutable Release transaction"),
         ("release-publish-order", ".github/workflows/build.yml", DRAFT_RELEASE_CHECK,
          PUBLISH_DRAFT + "\n            " + DRAFT_RELEASE_CHECK,
          "production-key and complete draft validation"),
