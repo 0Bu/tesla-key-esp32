@@ -296,17 +296,21 @@ static std::string_view running_version() {
     return description ? tk::bounded_c_string_view(description->version) : std::string_view{};
 }
 
+static void publish_check_status(const OtaStatusPod& candidate) noexcept {
+    SemaphoreHandle_t lock = ensure_lock();
+    if (!lock) return;
+    tk::SemGuard g(lock);
+    if (!g) return;
+    s_status = candidate;
+}
+
 static void set_check_error(const char* message) noexcept {
     OtaStatusPod candidate{};
     candidate.state = OtaState::Error;
     copy_status_text(candidate.message, message);
     const std::string_view current = running_version();
     copy_status_text(candidate.current, current.data());
-    SemaphoreHandle_t lock = ensure_lock();
-    if (!lock) return;
-    tk::SemGuard g(lock);
-    if (!g) return;
-    s_status = candidate;
+    publish_check_status(candidate);
 }
 
 // ─── Small HTTPS GET into a buffer (for the tiny manifest.json) ─────────────────
@@ -452,11 +456,7 @@ static void set_check_done(const OtaCheckResult& r) {
     copy_status_text(candidate.message, r.reason.c_str());
     copy_status_text(candidate.available, r.available.c_str());
     copy_status_text(candidate.current, r.current.c_str());
-    SemaphoreHandle_t lock = ensure_lock();
-    if (!lock) return;
-    tk::SemGuard g(lock);
-    if (!g) return;
-    s_status = candidate;
+    publish_check_status(candidate);
 }
 
 static void ota_check_task(void*) {

@@ -187,11 +187,10 @@ private:
     bool start_scan_locked_();
     bool cancel_scan_locked_();
     void ensure_scanning_locked_();
-    void ensure_scanning_();
+    void ensure_scanning_(TickType_t timeout = portMAX_DELAY);
     // NimBLE-host and esp_timer callbacks must never take the blocking lifecycle-lock path.
-    // These adapters use a zero-wait attempt and fail closed; task callers retain the ordinary
-    // blocking methods above.
-    void ensure_scanning_from_callback_() noexcept;
+    // Callback scan callers pass a zero deadline; callback disconnect cancels only atomic state.
+    // Task callers retain the ordinary blocking deadline above.
     void disconnect_from_callback_() noexcept;
     // Terminate the currently published GAP link after the caller has already invalidated
     // readiness under intent_mutex_. Deliberately preserves a newer connect intent so the

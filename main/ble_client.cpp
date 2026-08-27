@@ -245,7 +245,7 @@ void BleClient::on_sync() {
         ESP_LOGW(TAG, "NimBLE synced after the boot acknowledgement timeout; runtime stays closed");
     }
     ESP_LOGI(TAG, "NimBLE synced");
-    if (want_connect_.load()) ensure_scanning_from_callback_();
+    if (want_connect_.load()) ensure_scanning_(0);
     // Idle: radio quiet. Discovery scanning is started manually for a limited window
     // (start_discovery), and a connect scan is started on demand by connect().
 }
@@ -347,39 +347,23 @@ bool BleClient::cancel_scan_locked_() {
 }
 
 // Start a discovery scan if we are idle (not connected and not mid-connect).
-void BleClient::ensure_scanning_() {
+void BleClient::ensure_scanning_(TickType_t timeout) {
     if (!intent_mutex_) return;
-    tk::SemGuard intent(intent_mutex_);
-    if (!intent) return;
-    ensure_scanning_locked_();
-}
-
-void BleClient::ensure_scanning_from_callback_() noexcept {
-    if (!intent_mutex_) return;
-    tk::SemGuard intent(intent_mutex_, 0);
+    tk::SemGuard intent(intent_mutex_, timeout);
     if (!intent) return;
     ensure_scanning_locked_();
 }
 
 void BleClient::disconnect_from_callback_() noexcept {
-    // Close command readiness before attempting any shared lifecycle publication. A contended
-    // lifecycle lock cancels the connect intent fail-closed; the asynchronous GAP disconnect
-    // event will finish retiring the handle, and no host/timer callback waits for a task owner.
+    // Every field touched here is atomic. Close readiness and cancel the old intent directly:
+    // taking intent_mutex_ would add no protection when a zero-wait attempt loses, while even a
+    // successful attempt would make this host callback larger for the same fail-closed result.
+    // A command that starts after these stores is a fresh intent; the delayed GAP disconnect path
+    // already preserves and restarts that generation after retiring the old handle.
     ready_generation_.store(tk::ble::kNoReadyGeneration);
     disconnecting_.store(true);
-    if (intent_mutex_) {
-        tk::SemGuard intent(intent_mutex_, 0);
-        if (intent) {
-            want_connect_.store(false);
-            connecting_.store(false);
-        } else {
-            want_connect_.store(false);
-            connecting_.store(false);
-        }
-    } else {
-        want_connect_.store(false);
-        connecting_.store(false);
-    }
+    want_connect_.store(false);
+    connecting_.store(false);
     terminate_published_link_();
 }
 
@@ -897,7 +881,7 @@ int BleClient::on_gap_event(ble_gap_event* event) {
             const tk::ble::ConnectLifecycle retry =
                 tk::ble::connect_lifecycle_after_start_failure(want_connect_.load());
             connecting_.store(retry.connecting);
-            if (retry.want_connect) ensure_scanning_from_callback_();
+            if (retry.want_connect) ensure_scanning_(0);
             break;
         }
         bool canceled = false;
@@ -997,7 +981,7 @@ int BleClient::on_gap_event(ble_gap_event* event) {
             (void)on_connected_(connected_context_, false, BLE_HS_CONN_HANDLE_NONE,
                                 connection_generation_.load());
         }
-        if (reconnect) ensure_scanning_from_callback_();
+        if (reconnect) ensure_scanning_(0);
         // Otherwise stay idle (no auto-scan); discovery is manual, connect is on demand.
         break;
     }

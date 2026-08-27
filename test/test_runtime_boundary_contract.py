@@ -1731,7 +1731,7 @@ def require_nimble_start_ack_contract(gate_header: str, client_header: str,
         if token not in on_sync:
             raise AssertionError(f"NimBLE on_sync terminal acknowledgement missing {token!r}")
     require_before("NimBLE callback acknowledgement before scanning", on_sync,
-                   "start_gate_.acknowledge_sync()", "ensure_scanning_from_callback_()")
+                   "start_gate_.acknowledge_sync()", "ensure_scanning_(0)")
     if "g_instance->on_sync()" not in on_sync_callback:
         raise AssertionError("registered NimBLE on_sync callback bypasses BleClient acknowledgement")
 
@@ -2537,7 +2537,7 @@ def require_ota_status_lock_contract(ota_source: str, runtime_tests: str) -> Non
         if token not in ota_source:
             raise AssertionError(f"OTA status fixed snapshot contract missing {token!r}")
 
-    for writer_name in ("set_state", "set_check_error", "set_check_done"):
+    for writer_name in ("set_state", "publish_check_status"):
         writer = function_body_in(ota_source, writer_name)
         first_status = writer.find("s_status")
         if first_status < 0:
@@ -2552,7 +2552,8 @@ def require_ota_status_lock_contract(ota_source: str, runtime_tests: str) -> Non
                 raise AssertionError(
                     f"OTA status writer {writer_name} can access shared state without guard: {token!r}"
                 )
-        if "copy_status_text" not in writer[: writer.find("ensure_lock")]:
+        if (writer_name == "set_state" and
+                "copy_status_text" not in writer[: writer.find("ensure_lock")]):
             raise AssertionError(
                 f"OTA status writer {writer_name} must build fixed text before taking the lock"
             )
@@ -2578,12 +2579,15 @@ def require_ota_status_lock_contract(ota_source: str, runtime_tests: str) -> Non
         "copy_status_text(candidate.message, r.reason.c_str());",
         "copy_status_text(candidate.available, r.available.c_str());",
         "copy_status_text(candidate.current, r.current.c_str());",
-        "s_status = candidate;",
+        "publish_check_status(candidate);",
     ):
         if token not in done:
             raise AssertionError(f"OTA completed-check snapshot missing {token!r}")
-    if done.count("s_status = candidate;") != 1 or re.search(r"s_status\s*\.", done):
+    if done.count("publish_check_status(candidate);") != 1 or "s_status" in done:
         raise AssertionError("OTA completed check is not one whole-snapshot publication")
+    publisher = scrub_cpp(function_body_in(ota_source, "publish_check_status"))
+    if publisher.count("s_status = candidate;") != 1 or re.search(r"s_status\s*\.", publisher):
+        raise AssertionError("OTA completed-check publisher is not one whole-snapshot assignment")
 
     for token in (
         "test_ota_status_lock_failure_matrix",
@@ -2607,7 +2611,7 @@ def require_ble_callback_lock_contract(ble_source: str) -> None:
         "on_scan_timeout",
         "on_sync",
         "on_reset",
-        "ensure_scanning_from_callback_",
+        "ensure_scanning_",
         "disconnect_from_callback_",
         "on_gap_event",
         "on_svc_disc",
@@ -2622,15 +2626,16 @@ def require_ble_callback_lock_contract(ble_source: str) -> None:
             raise AssertionError(
                 f"BLE callback path {name} uses the blocking intent-mutex guard"
             )
-        if name not in ("ensure_scanning_from_callback_", "disconnect_from_callback_"):
+        if name not in ("ensure_scanning_", "disconnect_from_callback_"):
             if re.search(r"\bdisconnect\s*\(", body):
                 raise AssertionError(
                     f"BLE callback path {name} delegates to blocking disconnect()"
                 )
-            if re.search(r"\bensure_scanning_\s*\(", body):
-                raise AssertionError(
-                    f"BLE callback path {name} delegates to blocking ensure_scanning_()"
-                )
+            for deadline in re.findall(r"\bensure_scanning_\s*\(([^)]*)\)", body):
+                if deadline.strip() != "0":
+                    raise AssertionError(
+                        f"BLE callback path {name} delegates to a non-zero scan-lock deadline"
+                    )
 
     timeout = function_body_in(ble_source, "on_scan_timeout")
     for token in (
@@ -2644,22 +2649,35 @@ def require_ble_callback_lock_contract(ble_source: str) -> None:
     reset = function_body_in(ble_source, "on_reset")
     subscribe = function_body_in(ble_source, "on_subscribe_write")
     gap = function_body_in(ble_source, "on_gap_event")
-    scan_adapter = function_body_in(ble_source, "ensure_scanning_from_callback_")
+    scan_adapter = function_body_in(ble_source, "ensure_scanning_")
     drop_adapter = function_body_in(ble_source, "disconnect_from_callback_")
     for label, body in (
         ("host reset", reset),
         ("GAP lifecycle", gap),
         ("CCCD completion", subscribe),
-        ("callback scan adapter", scan_adapter),
-        ("callback disconnect adapter", drop_adapter),
     ):
         if "tk::SemGuard intent(intent_mutex_, 0);" not in body:
             raise AssertionError(f"BLE {label} lost its zero-wait lifecycle lock")
+    if "tk::SemGuard intent(intent_mutex_, timeout);" not in scan_adapter:
+        raise AssertionError("BLE shared scan adapter lost its caller-selected lock deadline")
+    for token in (
+        "ready_generation_.store(tk::ble::kNoReadyGeneration);",
+        "disconnecting_.store(true);",
+        "want_connect_.store(false);",
+        "connecting_.store(false);",
+        "terminate_published_link_();",
+    ):
+        if token not in drop_adapter:
+            raise AssertionError(
+                f"BLE callback disconnect adapter lost fail-closed atomic publication {token!r}"
+            )
+    if "SemGuard" in drop_adapter:
+        raise AssertionError("BLE callback disconnect adapter unnecessarily takes a lifecycle lock")
     for name in ("on_svc_disc", "on_chr_disc", "subscribe_notify_",
                  "on_dsc_disc", "on_subscribe_write"):
         if "disconnect_from_callback_();" not in function_body_in(ble_source, name):
             raise AssertionError(f"BLE callback {name} lost fail-closed nonblocking disconnect")
-    if "ensure_scanning_from_callback_();" not in function_body_in(ble_source, "on_sync"):
+    if "ensure_scanning_(0);" not in function_body_in(ble_source, "on_sync"):
         raise AssertionError("NimBLE sync callback delegates to a blocking scan path")
 
 
@@ -4888,6 +4906,14 @@ def self_test_canaries(tasks: set[str], callbacks: set[str]) -> None:
     require_mutation_rejected(
         "BLE GATT callback delegates to blocking disconnect",
         lambda: require_ble_callback_lock_contract(blocking_ble_disconnect),
+    )
+    blocking_ble_scan = ble_callback_source.replace("ensure_scanning_(0);",
+                                                    "ensure_scanning_(portMAX_DELAY);", 1)
+    if blocking_ble_scan == ble_callback_source:
+        raise AssertionError("BLE callback scan-deadline mutation did not apply")
+    require_mutation_rejected(
+        "BLE host callback delegates to blocking scan deadline",
+        lambda: require_ble_callback_lock_contract(blocking_ble_scan),
     )
 
     controller_source = SOURCES["vehicle_ctrl.cpp"]
