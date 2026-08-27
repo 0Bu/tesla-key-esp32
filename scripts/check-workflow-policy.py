@@ -1078,6 +1078,10 @@ def self_test(root: Path) -> None:
          "    needs: build\n", "must need both build and successful immutable Release"),
         ("strict-host", "build.yml", "./scripts/run-mock-tests.sh --require-all",
          "./scripts/run-mock-tests.sh", "fail-closed host gate"),
+        ("logic-merge-history", "build.yml",
+         "          fetch-depth: 0\n      - name: Validate runner-neutral agent configuration",
+         "      - name: Validate runner-neutral agent configuration",
+         "fetch PR merge parents"),
         ("sanitizers", "build.yml", "./scripts/run-sanitizer-tests.sh --self-test",
          "true", "ASan/UBSan/LSan"),
         ("four-target-contract", "build.yml",
@@ -1235,6 +1239,15 @@ def self_test(root: Path) -> None:
          "        with:\n          ref: ${{ github.sha }}\n          fetch-depth: 0\n"
          "          persist-credentials: true",
          "protected signer must never check out PR code"),
+        ("preview-add-pr-checkout", "signed-pr-preview.yml",
+         "      # Recompute the version after the Environment approval wait.",
+         "      - name: Unsafe protected PR checkout\n"
+         "        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1\n"
+         "        with:\n"
+         "          ref: ${{ needs.validate.outputs.head-sha }}\n"
+         "          path: _ci-source\n\n"
+         "      # Recompute the version after the Environment approval wait.",
+         "action inventory drift"),
         ("preview-privileged-run-id", "signed-pr-preview.yml",
          "          run-id: ${{ github.event.workflow_run.id }}\n",
          "          run-id: ${{ github.run_id }}\n", "exact privileged job schema drift"),
