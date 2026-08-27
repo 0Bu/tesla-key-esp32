@@ -1445,6 +1445,25 @@ def validate_app_binary_producer(
     elf2image = list(tokens[3:first_chain])
     config = parse_sdkconfig(sdkconfig)
     prefix = {"esp32": "ESP32", "esp32s3": "ESP32S3", "esp32c3": "ESP32C3", "esp32c6": "ESP32C6"}[target]
+    expected_flash_frequency = {
+        "esp32": "40m",
+        "esp32s3": "80m",
+        "esp32c3": "80m",
+        "esp32c6": "80m",
+    }[target]
+    expected_flash_config = {
+        "CONFIG_ESPTOOLPY_FLASHMODE": "dio",
+        "CONFIG_ESPTOOLPY_FLASHFREQ": expected_flash_frequency,
+        "CONFIG_ESPTOOLPY_FLASHSIZE": "4MB",
+    }
+    observed_flash_config = {
+        key: config.get(key) for key in expected_flash_config
+    }
+    if observed_flash_config != expected_flash_config:
+        raise SemanticsError(
+            "target-specific app flash geometry drifted: "
+            f"expected={expected_flash_config!r} observed={observed_flash_config!r}"
+        )
     revision_args: list[str] = []
     for option, key in (
         ("--min-rev", f"CONFIG_{prefix}_REV_MIN"),
@@ -1455,7 +1474,8 @@ def validate_app_binary_producer(
             revision_args.extend((option, config[key]))
     expected_elf2image = [
         python, str(idf_root / "components/esptool_py/esptool/esptool.py"),
-        "--chip", target, "elf2image", "--flash_mode", "dio", "--flash_freq", "40m",
+        "--chip", target, "elf2image", "--flash_mode", "dio",
+        "--flash_freq", expected_flash_frequency,
         "--flash_size", "4MB", "--elf-sha256-offset", "0xb0", "--secure-pad-v2",
         *revision_args, "-o", str(build_root / "tesla-key-esp32.bin"),
         str(build_root / "tesla-key-esp32.elf"),
@@ -2053,7 +2073,13 @@ def self_test_build_graph_contract(repository_root: Path) -> None:
 
         # Bind the exact elf2image command, its output bytes and the complete default Ninja closure.
         app_sdkconfig = fixture_root / "app-sdkconfig"
-        app_sdkconfig.write_text('CONFIG_IDF_TARGET="esp32c3"\n', encoding="utf-8")
+        app_sdkconfig_text = (
+            'CONFIG_IDF_TARGET="esp32c3"\n'
+            'CONFIG_ESPTOOLPY_FLASHMODE="dio"\n'
+            'CONFIG_ESPTOOLPY_FLASHFREQ="80m"\n'
+            'CONFIG_ESPTOOLPY_FLASHSIZE="4MB"\n'
+        )
+        app_sdkconfig.write_text(app_sdkconfig_text, encoding="utf-8")
         app = build_root / "tesla-key-esp32.bin"
         elf = build_root / "tesla-key-esp32.elf"
         app_bytes = b"fixture-app-from-elf"
@@ -2069,7 +2095,7 @@ def self_test_build_graph_contract(repository_root: Path) -> None:
             "cd", str(build_root), "&&", python,
             str(idf_root / "components/esptool_py/esptool/esptool.py"),
             "--chip", "esp32c3", "elf2image", "--flash_mode", "dio",
-            "--flash_freq", "40m", "--flash_size", "4MB", "--elf-sha256-offset", "0xb0",
+            "--flash_freq", "80m", "--flash_size", "4MB", "--elf-sha256-offset", "0xb0",
             "--secure-pad-v2", "-o", str(app), str(elf), "&&",
             app_cmake, "-E", "echo", f"Generated {app}", "&&",
             app_cmake, "-E", "md5sum", str(app), ">", str(timestamp),
@@ -2101,12 +2127,22 @@ def self_test_build_graph_contract(repository_root: Path) -> None:
 
         validate_producer()
         changed_elf2image = list(producer)
-        changed_elf2image[changed_elf2image.index("40m")] = "80m"
+        changed_elf2image[changed_elf2image.index("80m")] = "40m"
         rejected(
             "altered elf2image command canary",
             "elf2image command/arguments drifted",
             lambda: validate_producer(tuple(changed_elf2image)),
         )
+        app_sdkconfig.write_text(
+            app_sdkconfig_text.replace('FLASHFREQ="80m"', 'FLASHFREQ="40m"'),
+            encoding="utf-8",
+        )
+        rejected(
+            "target-specific flash-frequency config canary",
+            "target-specific app flash geometry drifted",
+            validate_producer,
+        )
+        app_sdkconfig.write_text(app_sdkconfig_text, encoding="utf-8")
         rejected(
             "elf2image reproduced-app byte-drift canary",
             "not the pinned elf2image output",
