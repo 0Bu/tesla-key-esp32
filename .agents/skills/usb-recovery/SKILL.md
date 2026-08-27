@@ -35,7 +35,7 @@ Two failure modes dominate:
   (TOFU, `CONFIG_SECURE_SIGNED_ON_UPDATE_NO_SECURE_BOOT`). If the running image was signed with
   a key ≠ the current CI `OTA_SIGNING_KEY` (classic case: a **local build** whose reported
   version is the `version.txt` floor, e.g. `1.4.0`), every CI-signed OTA fails at the final
-  validate. Fixed live 2026-07-08 on a board at `.196` → recovered to `1.4.34`, OTA "up to date".
+  validate. Fixed live 2026-07-08 on a test board → recovered to `1.4.34`, OTA "up to date".
 - **(b) A boot / reboot loop after flashing an UNSIGNED local build.** An unsigned app
   `abort()`s in ESP-IDF's `check_signature_on_update_check()` during core init, **before
   `app_main`**, on *any* target — it does not boot-and-TOFU. Local `scripts/idf-docker.sh`
