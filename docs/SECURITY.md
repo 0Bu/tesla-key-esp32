@@ -422,7 +422,11 @@ Compilation and signing are separate trust domains:
    before key provisioning,
    uploads exactly 40 files into a **draft**, binds every byte, app alias, ELF checksum and every
    complete merged layout (signer-owned bootloader/partition/erased otadata/signed app, all erased
-   gaps including NVS, and exact EOF), and reruns the candidate check in the same shell step
+   gaps including NVS, and exact EOF). Drafts are not discoverable through GitHub's release-by-tag
+   endpoint, so the upload action's numeric Release ID is validated and used for the draft API read;
+   the response must carry the same ID. This also makes a protected retry safely reuse and rebind
+   the existing draft instead of creating a second candidate. The job reruns the candidate check in
+   the same shell step
    immediately before `PATCH draft=false`. All four apps must verify cryptographically against the
    production pin. A fresh API read must report the same stable Release with `immutable: true`.
    `reuse` accepts only that exact current immutable 40-file Release. It reads every download once

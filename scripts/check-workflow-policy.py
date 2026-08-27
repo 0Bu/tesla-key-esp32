@@ -166,7 +166,7 @@ SIGNING_ENVIRONMENT_JOBS = {
 # reviewed allowlists: step order plus every name/uses/with/env/if/run byte is pinned.  Semantic
 # checks below keep failures explanatory; this final digest closes gaps in the narrow scanner.
 EXPECTED_PRIVILEGED_JOB_SHA256 = {
-    ("build.yml", "publish"): "22c2ceeef6a0868703f10008e0d4f9f0b90458d5d2c9c66eb337c6919cc4d29c",
+    ("build.yml", "publish"): "9ba6593d9072f9e2b4534ac893b026fb1e0e547ea69b5fa2c49f27f85bcb5968",
     ("build.yml", "deploy"): "cf1d70d6cf11600e3940ff58983a7101b75b191b8cdf10b8cfaebf60b20f2092",
     ("signed-pr-preview.yml", "sign-preview"): "24b664bb2ec5aa6220bdca95568781b8c25e8d2ff53c617956ee90ca07c4b22d",
 }
@@ -469,9 +469,15 @@ def validate(root: Path) -> None:
         and "_reuse-release.json _release-reuse-download . ./_fw" in build["publish"]
         and "--expect-state published-immutable" in build["publish"]
         and "Create draft release" in build["publish"]
+        and "id: create-release" in build["publish"]
         and "draft: true" in build["publish"]
         and "fail_on_unmatched_files: true" in build["publish"]
         and "Bind complete draft Release and publish exact candidate" in build["publish"]
+        and "DRAFT_RELEASE_ID: ${{ steps.create-release.outputs.id }}" in build["publish"]
+        and '[[ "$DRAFT_RELEASE_ID" =~ ^[1-9][0-9]*$ ]]' in build["publish"]
+        and 'gh api "repos/$GITHUB_REPOSITORY/releases/$DRAFT_RELEASE_ID" > "$draft_json"'
+        in build["publish"]
+        and '[[ "$release_id" == "$DRAFT_RELEASE_ID" ]]' in build["publish"]
         and "--expect-state draft" in build["publish"]
         and 'gh api --method PATCH "repos/$GITHUB_REPOSITORY/releases/$release_id"'
         in build["publish"]
@@ -489,6 +495,7 @@ def validate(root: Path) -> None:
         "python3 scripts/check-release-pages-bytes.py",
         "Upload signed firmware artifacts",
         "Create draft release",
+        'gh api "repos/$GITHUB_REPOSITORY/releases/$DRAFT_RELEASE_ID" > "$draft_json"',
         "--expect-state draft",
         'gh api --method PATCH "repos/$GITHUB_REPOSITORY/releases/$release_id"',
         "Refetch and accept immutable published Release",
@@ -515,6 +522,9 @@ def validate(root: Path) -> None:
     )
     require(
         publication.index("Create draft release")
+        < publication.index(
+            'gh api "repos/$GITHUB_REPOSITORY/releases/$DRAFT_RELEASE_ID" > "$draft_json"'
+        )
         < publication.index("--expect-state draft")
         < publication.index('gh api --method PATCH "repos/$GITHUB_REPOSITORY/releases/$release_id"')
         < publication.index("Refetch and accept immutable published Release")
@@ -1167,6 +1177,16 @@ def self_test(root: Path) -> None:
          "python3 scripts/missing-release-check.py", "validate mode metadata"),
         ("release-not-draft", "build.yml", "          draft: true\n",
          "          draft: false\n", "fail-closed between first publication"),
+        ("release-draft-action-id", "build.yml", "        id: create-release\n", "",
+         "fail-closed between first publication"),
+        ("release-draft-output-id", "build.yml",
+         "DRAFT_RELEASE_ID: ${{ steps.create-release.outputs.id }}",
+         "DRAFT_RELEASE_ID: ${{ steps.create-release.outputs.url }}",
+         "fail-closed between first publication"),
+        ("release-draft-by-tag", "build.yml",
+         'gh api "repos/$GITHUB_REPOSITORY/releases/$DRAFT_RELEASE_ID" > "$draft_json"',
+         'gh api "repos/$GITHUB_REPOSITORY/releases/tags/v$RELEASE_VERSION" > "$draft_json"',
+         "fail-closed between first publication"),
         ("release-publish-before-validation", "build.yml", "--expect-state draft",
          'gh api --method PATCH "repos/$GITHUB_REPOSITORY/releases/$release_id"\n'
          "            --expect-state draft", "order drifted"),

@@ -515,6 +515,7 @@ jobs:
       # Upload into a mutable draft first. No draft becomes OTA/Pages authority until every one of
       # its exact 40 Release assets is rebound to the local bytes below.
       - name: Create draft release
+        id: create-release
         if: steps.release-mode.outputs.mode == 'create'
         uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3
         with:
@@ -554,17 +555,26 @@ jobs:
           DISPLAY_VERSION: ${{ needs.build.outputs.display-version }}
           RELEASE_VERSION: ${{ needs.build.outputs.release-version }}
           SOURCE_SHA: ${{ github.sha }}
+          DRAFT_RELEASE_ID: ${{ steps.create-release.outputs.id }}
         run: |
           set -euo pipefail
           draft_json="$(mktemp)"
           publish_json="$(mktemp)"
           trap 'rm -f "$draft_json" "$publish_json"' EXIT
-          gh api "repos/$GITHUB_REPOSITORY/releases/tags/v$RELEASE_VERSION" > "$draft_json"
+          [[ "$DRAFT_RELEASE_ID" =~ ^[1-9][0-9]*$ ]] || {
+            echo "draft action returned an invalid Release ID" >&2
+            exit 1
+          }
+          gh api "repos/$GITHUB_REPOSITORY/releases/$DRAFT_RELEASE_ID" > "$draft_json"
           python3 scripts/check-release-assets.py "$draft_json" . \
             --version "$DISPLAY_VERSION" --source-sha "$SOURCE_SHA" \
             --expect-state draft \
             --expected-public-key-digest scripts/ota-signing-public-key.sha256
           release_id="$(jq -er '.id | select(type == "number" and . > 0)' "$draft_json")"
+          [[ "$release_id" == "$DRAFT_RELEASE_ID" ]] || {
+            echo "draft API response does not match the action Release ID" >&2
+            exit 1
+          }
           # Publication is the first point at which the Release can become channel authority. The
           # validator checked all 40 byte sets; refresh main/tag authority in the final command
           # immediately before PATCH so an advancing main can never publish a stale draft.
