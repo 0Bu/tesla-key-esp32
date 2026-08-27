@@ -438,6 +438,12 @@ def validate(root: Path) -> None:
         and sdkconfig_defaults.count("CONFIG_MBEDTLS_TLS_CLIENT_ONLY=y") == 1,
         "sdkconfig.defaults: firmware must remain TLS-client-only",
     )
+    require(
+        sdkconfig_defaults.count("CONFIG_ESP_WIFI_ENTERPRISE_SUPPORT=n") == 1
+        and sdkconfig_defaults.count("CONFIG_ESP_WIFI_ENABLE_SAE_PK=n") == 1
+        and sdkconfig_defaults.count("CONFIG_ESP_WIFI_SOFTAP_SAE_SUPPORT=n") == 1,
+        "sdkconfig.defaults: unreachable enterprise/SAE-PK/setup-AP SAE surfaces must stay disabled",
+    )
 
     for text, label in (
         (build_all, "ci-build-all.sh"),
@@ -1258,6 +1264,15 @@ def self_test(root: Path) -> None:
         ("tls-client-only", "sdkconfig.defaults",
          "CONFIG_MBEDTLS_TLS_CLIENT_ONLY=y", "CONFIG_MBEDTLS_TLS_CLIENT_ONLY=n",
          "firmware must remain TLS-client-only"),
+        ("wifi-enterprise-disabled", "sdkconfig.defaults",
+         "CONFIG_ESP_WIFI_ENTERPRISE_SUPPORT=n", "CONFIG_ESP_WIFI_ENTERPRISE_SUPPORT=y",
+         "unreachable enterprise/SAE-PK/setup-AP SAE surfaces"),
+        ("wifi-sae-pk-disabled", "sdkconfig.defaults",
+         "CONFIG_ESP_WIFI_ENABLE_SAE_PK=n", "CONFIG_ESP_WIFI_ENABLE_SAE_PK=y",
+         "unreachable enterprise/SAE-PK/setup-AP SAE surfaces"),
+        ("wifi-softap-sae-disabled", "sdkconfig.defaults",
+         "CONFIG_ESP_WIFI_SOFTAP_SAE_SUPPORT=n", "CONFIG_ESP_WIFI_SOFTAP_SAE_SUPPORT=y",
+         "unreachable enterprise/SAE-PK/setup-AP SAE surfaces"),
         ("boundary-build-ignore", ".gitignore", "/build_boundary_*/", "/build_boundary_removed/",
          "boundary-build trees must stay outside the source fingerprint"),
         ("manifest-layout", "scripts/check-pages-manifest.py",

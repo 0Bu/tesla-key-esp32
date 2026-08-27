@@ -39,8 +39,8 @@
     "esp32c6": {
       "memoryModel": "unified",
       "staticCapacity": 452112,
-      "maxStaticUsed": 195692,
-      "maxBss": 48144,
+      "maxStaticUsed": 195708,
+      "maxBss": 48160,
       "iramCapacity": 0,
       "maxIramUsed": 0,
       "maxUnsignedApp": 1966080,

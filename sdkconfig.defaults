@@ -65,6 +65,15 @@ CONFIG_BT_NIMBLE_ATT_PREFERRED_MTU=247
 CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=10
 CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=32
 CONFIG_ESP_WIFI_DYNAMIC_TX_BUFFER=y
+# Provisioning stores exactly an SSID and passphrase; it has no EAP identity, certificate or
+# enterprise-key contract. Do not link the otherwise default WPA-Enterprise client surface into
+# every target. Personal WPA2/WPA3 station support and the open setup AP remain unchanged.
+CONFIG_ESP_WIFI_ENTERPRISE_SUPPORT=n
+# The credential model supports WPA2/WPA3-Personal station passphrases. It has no SAE-PK public
+# key input, and the captive setup AP is intentionally open, so neither optional SAE-PK nor
+# WPA3-SoftAP code can be reached. Keep ordinary WPA3-SAE/H2E station compatibility enabled.
+CONFIG_ESP_WIFI_ENABLE_SAE_PK=n
+CONFIG_ESP_WIFI_SOFTAP_SAE_SUPPORT=n
 
 # HTTP Server
 CONFIG_HTTPD_MAX_REQ_HDR_LEN=1024
