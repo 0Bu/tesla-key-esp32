@@ -34,10 +34,11 @@
 // carry the tesla-ble session blobs), so this needs no new NVS plumbing — just the key below.
 //
 // OWNERSHIP — why exactly these fields and not the others. Everything in here has ONE writer:
-// the HTTP/provisioning task (the setup portal, `/set_vin`, `/set_mqtt`, `/set_syslog`), which
+// the HTTP/provisioning task (the setup portal, `/set_vin`, `/set_mqtt`, `/set_syslog`,
+// `/set_wifi`), which
 // is serialized against itself on the single httpd task. The remaining `tesla_cfg` keys are
-// DELIBERATELY left as their own self-healing entries, because they have DIFFERENT writers and
-// a whole-struct writer would revert another owner's field from a stale snapshot:
+// DELIBERATELY separate because they have different writers OR journal/runtime-state lifetimes;
+// folding them into a whole config snapshot could revert another owner or erase recovery state:
 //   * `ble_mac`   — written by the BLE scanner (vehicle_ctrl.cpp) when it learns the car's
 //                   address. A cache: a stale one costs one rescan, so it self-heals.
 //   * `last_time` — written from the clock path (main.cpp / http_common.cpp) so the wall clock
@@ -45,8 +46,12 @@
 //   * `reboot_why`— written on the way DOWN, by whoever ends the boot (the heap watchdog's
 //                   `heap:<n>` breadcrumb), and read+cleared on the way up.
 //   * `disp_rot`  — written by the display task on a BOOT-button tap.
-// None of them is a credential, none is lost by being rewritten, and each is owned by a task
-// that must not be able to publish an httpd-owned snapshot on top of the httpd task's work.
+//   * `vin_txn`   — an HTTP-owned cross-namespace transition journal, cleared only after the
+//                   vehicle-key/session side and the config blob agree.
+//   * `boot_fails`— boot-owned crash-loop safety state; malformed/read/write failure latches the
+//                   recovery-only safe mode rather than being rewritten as configuration.
+// None is a normal credential/service value. Its distinct owner or transaction lifetime must not
+// be overwritten by publishing an ordinary httpd-owned configuration snapshot.
 //
 // THE READER MUST KEEP THE LEGACY PER-KEY LAYOUT AS A FALLBACK. When the `cfg` entry is absent
 // (a fresh device, or an OTA upgrade from a build that predates this blob) or fails its CRC, the
@@ -60,6 +65,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include "nvs_contract.hpp"
 
 namespace tk {
 
@@ -110,9 +116,8 @@ struct ConfigBlob {
     std::string syslog_uri;
 };
 
-// The NVS key inside the `tesla_cfg` namespace. Three chars, so `NvsStorageAdapter::map_key()`
-// passes it through unchanged (it only rewrites keys past NVS's 15-char limit).
-inline constexpr char kConfigBlobKey[] = "cfg";
+// The NVS key inside the `tesla_cfg` namespace is owned by the exact persistence registry.
+inline constexpr const char* kConfigBlobKey = nvs_contract::kConfigBlob;
 
 // Magic, so a foreign or garbled entry is rejected before its length fields are ever trusted.
 inline constexpr uint8_t kConfigBlobMagic0 = 'T';
@@ -347,10 +352,11 @@ inline bool config_blob_decode(const uint8_t* in, size_t len, ConfigBlob& out) {
 
 // Did a config save achieve what its CALLER requires? Adapted from the sibling project's
 // predicate of the same name (which weighs its atomic blob against a self-healing link cache);
-// here the two durability domains are the atomic `cfg` blob and the OTHER-OWNER runtime keys
-// listed in the header block (`ble_mac`, `last_time`, `reboot_why`, `disp_rot`):
+// here the two durability domains are the atomic `cfg` blob and any separately keyed
+// journal/runtime record listed in the header block:
 //
-//   * a credential/service save (the setup portal, /set_vin, /set_mqtt, /set_syslog) owns blob
+//   * a credential/service save (the setup portal, /set_vin, /set_mqtt, /set_syslog,
+//     /set_wifi) owns blob
 //     fields only. Once that ONE atomic write lands the request IS committed, and a failure
 //     while maintaining an unrelated self-healing key must not turn it into a false HTTP 500 —
 //     the user would re-enter credentials that are already stored;

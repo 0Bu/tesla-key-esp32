@@ -20,6 +20,12 @@ every changed fact, compare code, tests, web UI, and all documented mirrors:
   esp32, esp32s3, esp32c3, esp32c6.
 - Kconfig/defaults, OTA/release/provenance narrative, architecture maps, logic-test mirrors, and
   runner-neutral agent/skill/hook references.
+- Typed HTTP/MCP body/JSON failures, sticky response ownership, retained MQTT publish ordering,
+  C-boundary inventory/containment, safe-mode and heap-breadcrumb NVS fail-closed behavior.
+- Exact PR-head provenance, minimal signed-image alignment/cryptographic verification, clean
+  four-target reproducibility, physical size invariants, and prepublication 16-part Pages binding.
+- Host/static, sanitizer, pinned-IDF, disposable-key, remote CI, signed publication, bench/hardware,
+  OTA and vehicle evidence must remain separately labelled.
 
 Report prioritized findings only; do not fix them. Every finding must state severity, changed fact,
 path and line, cause, impact, stale mirror/direction of drift, and evidence. End with the fact

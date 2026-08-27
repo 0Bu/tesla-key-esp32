@@ -45,6 +45,7 @@
 #include "task_config.hpp"
 #include "logic/net_link.hpp"
 #include "logic/wifi_rollback.hpp"
+#include "ping_probe.hpp"
 
 static const char* TAG = "net";
 
@@ -56,6 +57,31 @@ static const char* TAG = "net";
 static const char* kNetHostname = "tesla-key-esp32";
 
 namespace tk {
+
+static void net_boot_require(esp_err_t err, const char* component) {
+    if (err == ESP_OK) return;
+    ESP_LOGE(TAG, "%s failed: %s", component, esp_err_to_name(err));
+    boot_fatal(component);
+}
+
+// The public initializer remains fail-closed, but Ethernet needs the error before parking so it
+// can release the SPI bus retained by its early hardware probe.  esp_netif itself cannot be
+// deinitialized in IDF 5.5; this helper only makes the failure observable to the caller before
+// the common boot-fatal boundary is entered.
+static esp_err_t net_init_substrate(const char** failed_component) {
+    esp_err_t err = esp_netif_init();
+    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+        *failed_component = "network interface substrate";
+        return err;
+    }
+    err = esp_event_loop_create_default();
+    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+        *failed_component = "network event loop";
+        return err;
+    }
+    *failed_component = nullptr;
+    return ESP_OK;
+}
 
 // ── shared link state ─────────────────────────────────────────────────────────
 // Written on the event-loop task, read from the http / mqtt / display / led tasks. Atomics,
@@ -139,10 +165,8 @@ static void link_down(NetLink kind) {
 void net_init() {
     // Both are idempotent-by-error: provisioning_run() may already have created them on the
     // setup-AP path, and ESP_ERR_INVALID_STATE means exactly "already done".
-    esp_err_t err = esp_netif_init();
-    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) ESP_ERROR_CHECK(err);
-    err = esp_event_loop_create_default();
-    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) ESP_ERROR_CHECK(err);
+    const char* failed_component = nullptr;
+    net_boot_require(net_init_substrate(&failed_component), failed_component);
 }
 
 // ── WiFi station ──────────────────────────────────────────────────────────────
@@ -162,7 +186,8 @@ static esp_netif_t* s_sta_netif_ptr() { return s_sta_netif; }
 static std::atomic<int> s_last_disco_reason{0};
 
 static void wifi_event_handler(void*, esp_event_base_t base, int32_t event_id, void* data) {
-    if (base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
+    try {
+      if (base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
         esp_wifi_connect();
     } else if (base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
         link_down(NetLink::Wifi);
@@ -197,6 +222,9 @@ static void wifi_event_handler(void*, esp_event_base_t base, int32_t event_id, v
         s_last_disco_reason.store(0);
         link_up(NetLink::Wifi);
         xEventGroupSetBits(s_wifi_events, WIFI_CONNECTED_BIT);
+      }
+    } catch (...) {
+        ESP_LOGE(TAG, "WiFi event callback threw; event dropped");
     }
 }
 
@@ -226,13 +254,15 @@ bool net_start_wifi(const char* ssid, const char* password, bool rollback_pendin
         ESP_LOGW(TAG, "could not set DHCP hostname '%s'", kNetHostname);
 
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
+    net_boot_require(esp_wifi_init(&cfg), "WiFi driver initialization");
 
     esp_event_handler_instance_t h1, h2;
-    ESP_ERROR_CHECK(esp_event_handler_instance_register(
-        WIFI_EVENT, ESP_EVENT_ANY_ID, wifi_event_handler, nullptr, &h1));
-    ESP_ERROR_CHECK(esp_event_handler_instance_register(
-        IP_EVENT, IP_EVENT_STA_GOT_IP, wifi_event_handler, nullptr, &h2));
+    net_boot_require(esp_event_handler_instance_register(
+        WIFI_EVENT, ESP_EVENT_ANY_ID, wifi_event_handler, nullptr, &h1),
+        "WiFi event handler registration");
+    net_boot_require(esp_event_handler_instance_register(
+        IP_EVENT, IP_EVENT_STA_GOT_IP, wifi_event_handler, nullptr, &h2),
+        "WiFi IP handler registration");
 
     wifi_config_t wifi_cfg{};
     const size_t ssid_len = strlen(ssid);
@@ -261,9 +291,9 @@ bool net_start_wifi(const char* ssid, const char* password, bool rollback_pendin
     wifi_cfg.sta.scan_method = WIFI_ALL_CHANNEL_SCAN;
     wifi_cfg.sta.sort_method = WIFI_CONNECT_AP_BY_SIGNAL;
 
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
-    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_cfg));
-    ESP_ERROR_CHECK(esp_wifi_start());
+    net_boot_require(esp_wifi_set_mode(WIFI_MODE_STA), "WiFi station mode");
+    net_boot_require(esp_wifi_set_config(WIFI_IF_STA, &wifi_cfg), "WiFi station configuration");
+    net_boot_require(esp_wifi_start(), "WiFi station start");
 
     // Keep WiFi modem-sleep at MIN_MODEM (the IDF default). Modem-sleep parks the radio between
     // DTIM beacons, which DOES add ~100 ms per round-trip (the original cause of the sluggish
@@ -273,7 +303,7 @@ bool net_start_wifi(const char* ssid, const char* password, bool rollback_pendin
     // connect failed with NimBLE "connect error: 13"), breaking evcc and pairing. So we MUST
     // leave power-save on and tackle web-UI latency elsewhere — the page is gzipped (~13 KB vs
     // 41 KB) and the TCP window is enlarged (sdkconfig.defaults), clearing it in ~1-2 RTTs.
-    ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_MIN_MODEM));
+    net_boot_require(esp_wifi_set_ps(WIFI_PS_MIN_MODEM), "WiFi/BLE coexistence power mode");
 
     // Without a pending credential change this is the long-standing behaviour: one 30 s budget,
     // then fall back to the setup portal.
@@ -406,7 +436,148 @@ static constexpr int kEthLinkPollMs  = 250;
 static esp_netif_t*     s_eth_netif  = nullptr;
 static esp_netif_t* s_eth_netif_ptr() { return s_eth_netif; }
 static esp_eth_netif_glue_handle_t s_eth_glue = nullptr;
+static EventGroupHandle_t s_eth_events = nullptr;
 static bool s_spi_bus_up = false;
+static std::atomic<bool> s_eth_link{false};
+
+static spi_host_device_t eth_spi_host();
+static void eth_event_handler(void*, esp_event_base_t, int32_t, void*);
+
+// net_eth_probe() deliberately retains the bus for the driver.  Any later construction failure
+// must give it back or the WiFi/setup fallback inherits claimed pins and a retry would mistake the
+// physical-presence bit for an initialized bus.
+static bool eth_release_spi_bus() {
+    if (!s_spi_bus_up) return true;
+    const esp_err_t err = spi_bus_free(eth_spi_host());
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "W5500 SPI bus release failed: %s", esp_err_to_name(err));
+        return false;
+    }
+    s_spi_bus_up = false;
+    return true;
+}
+
+struct EthStartupResources {
+    EventGroupHandle_t events = nullptr;
+    esp_netif_t* netif = nullptr;
+    esp_eth_mac_t* mac = nullptr;
+    esp_eth_phy_t* phy = nullptr;
+    esp_eth_handle_t handle = nullptr;
+    esp_eth_netif_glue_handle_t glue = nullptr;
+    bool eth_handler_registered = false;
+    bool ip_handler_registered = false;
+    bool start_attempted = false;
+    bool published = false;
+};
+
+static bool eth_cleanup_startup(EthStartupResources& r) {
+    bool clean = true;
+
+    // esp_eth_start() changes the driver's FSM before auto-negotiation, event posting and timer
+    // activation.  A failing call can therefore still require stop(); ESP_ERR_INVALID_STATE is
+    // the harmless case where it never crossed that boundary (or already returned to STOP).
+    if (r.start_attempted && r.handle) {
+        const esp_err_t err = esp_eth_stop(r.handle);
+        if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+            ESP_LOGE(TAG, "W5500 partial driver stop failed: %s", esp_err_to_name(err));
+            clean = false;
+        }
+    }
+
+    if (r.ip_handler_registered) {
+        const esp_err_t err = esp_event_handler_unregister(
+            IP_EVENT, IP_EVENT_ETH_GOT_IP, eth_event_handler);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "W5500 IP handler unregister failed: %s", esp_err_to_name(err));
+            clean = false;
+        }
+        r.ip_handler_registered = false;
+    }
+    if (r.eth_handler_registered) {
+        const esp_err_t err = esp_event_handler_unregister(
+            ETH_EVENT, ESP_EVENT_ANY_ID, eth_event_handler);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "W5500 event handler unregister failed: %s", esp_err_to_name(err));
+            clean = false;
+        }
+        r.eth_handler_registered = false;
+    }
+
+    // Callbacks need coherent globals during activation.  Retract them only after the driver is
+    // stopped and the application handlers are gone, before any pointed-to object is destroyed.
+    if (r.published) {
+        if (s_eth_handle == r.handle) s_eth_handle = nullptr;
+        if (s_eth_glue == r.glue) s_eth_glue = nullptr;
+        if (s_eth_netif == r.netif) s_eth_netif = nullptr;
+        if (s_eth_events == r.events) s_eth_events = nullptr;
+        s_eth_link.store(false);
+        link_down(NetLink::Eth);
+        r.published = false;
+    }
+
+    if (r.glue) {
+        const esp_err_t err = esp_eth_del_netif_glue(r.glue);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "W5500 netif glue release failed: %s", esp_err_to_name(err));
+            clean = false;
+        }
+        r.glue = nullptr;
+    }
+    if (r.netif) {
+        esp_netif_destroy(r.netif);
+        r.netif = nullptr;
+    }
+
+    // The driver owns the initialized MAC/PHY relationship but not the objects themselves:
+    // uninstall deinitializes them, then their explicit del methods release their allocations.
+    // If uninstall fails, deleting either object or its SPI device would create a live dangling
+    // driver; leave that tail intact and force a fatal boot instead of manufacturing a UAF.
+    bool driver_released = true;
+    if (r.handle) {
+        const esp_err_t err = esp_eth_driver_uninstall(r.handle);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "W5500 driver uninstall failed: %s", esp_err_to_name(err));
+            driver_released = false;
+            clean = false;
+        } else {
+            r.handle = nullptr;
+        }
+    }
+    if (driver_released) {
+        if (r.phy) {
+            const esp_err_t err = r.phy->del(r.phy);
+            if (err != ESP_OK) {
+                ESP_LOGE(TAG, "W5500 PHY release failed: %s", esp_err_to_name(err));
+                clean = false;
+            }
+            r.phy = nullptr;
+        }
+        if (r.mac) {
+            const esp_err_t err = r.mac->del(r.mac);
+            if (err != ESP_OK) {
+                ESP_LOGE(TAG, "W5500 MAC release failed: %s", esp_err_to_name(err));
+                clean = false;
+            }
+            r.mac = nullptr;
+        }
+    }
+    if (r.events) {
+        vEventGroupDelete(r.events);
+        r.events = nullptr;
+    }
+    if (driver_released && !eth_release_spi_bus()) clean = false;
+    return clean;
+}
+
+static bool eth_startup_fallback(EthStartupResources& r) {
+    if (!eth_cleanup_startup(r)) boot_fatal("Ethernet startup cleanup");
+    return false;
+}
+
+[[noreturn]] static void eth_startup_fatal(EthStartupResources& r, const char* component) {
+    if (!eth_cleanup_startup(r)) boot_fatal("Ethernet startup cleanup");
+    boot_fatal(component);
+}
 
 // The W5500's identity register. VERSIONR lives at 0x0039 of the Common Register block and
 // reads a fixed 0x04 on every part — the only positive way to tell "a W5500 is wired to these
@@ -439,7 +610,7 @@ static bool w5500_read_common(spi_device_handle_t dev, uint16_t reg, uint8_t* ou
 // On success the SPI bus stays installed for net_start_eth() to reuse; on failure it is torn
 // down completely, so a board without the base leaves those GPIOs exactly as it found them.
 bool net_eth_probe() {
-    if (s_eth_present.load()) return true;
+    if (s_eth_present.load() && s_spi_bus_up) return true;
 
     // NEVER probe on the T-Dongle-S3. Its ST7735 sits on MOSI 3 / SCK 5 / CS 4 — GPIO5 is
     // literally the pin this probe would drive as SPI clock. The display has not claimed the bus
@@ -480,8 +651,7 @@ bool net_eth_probe() {
     if (!found) {
         ESP_LOGI(TAG, "no W5500 on SPI (VERSIONR=0x%02x, expected 0x%02x) — WiFi only",
                  ver, kW5500VersionVal);
-        spi_bus_free(eth_spi_host());
-        s_spi_bus_up = false;
+        if (!eth_release_spi_bus()) boot_fatal("W5500 probe cleanup");
         return false;
     }
 
@@ -493,16 +663,14 @@ bool net_eth_probe() {
     return true;
 }
 
-static EventGroupHandle_t s_eth_events = nullptr;
 static const int ETH_GOT_IP_BIT = BIT0;
 
 // Does the PHY report a negotiated link? Distinct from holding a LEASE, and the distinction is
 // what keeps the WiFi stack switched off on a wired board: "no cable" and "cable in, DHCP still
 // thinking" call for opposite answers at the boot deadline.
-static std::atomic<bool> s_eth_link{false};
-
 static void eth_event_handler(void*, esp_event_base_t base, int32_t event_id, void* data) {
-    if (base == ETH_EVENT && event_id == ETHERNET_EVENT_CONNECTED) {
+    try {
+      if (base == ETH_EVENT && event_id == ETHERNET_EVENT_CONNECTED) {
         ESP_LOGI(TAG, "Ethernet link up");
         s_eth_link.store(true);
     } else if (base == ETH_EVENT && event_id == ETHERNET_EVENT_DISCONNECTED) {
@@ -514,16 +682,27 @@ static void eth_event_handler(void*, esp_event_base_t base, int32_t event_id, vo
         ESP_LOGI(TAG, "IP (eth): " IPSTR, IP2STR(&ev->ip_info.ip));
         link_up(NetLink::Eth);
         xEventGroupSetBits(s_eth_events, ETH_GOT_IP_BIT);
+      }
+    } catch (...) {
+        ESP_LOGE(TAG, "Ethernet event callback threw; event dropped");
     }
 }
 
 bool net_start_eth() {
     if (!net_eth_probe()) return false;
 
-    s_eth_events = xEventGroupCreate();
-    if (!s_eth_events) boot_fatal("Ethernet event group");
+    // The probe ran before esp-netif by design and retained SPI ownership.  Observe substrate
+    // failure here so that ownership can still be unwound before boot_fatal parks a valid image.
+    const char* substrate_component = nullptr;
+    const esp_err_t substrate_err = net_init_substrate(&substrate_component);
+    if (substrate_err != ESP_OK) {
+        if (!eth_release_spi_bus()) boot_fatal("Ethernet startup cleanup");
+        net_boot_require(substrate_err, substrate_component);
+    }
 
-    net_init();
+    EthStartupResources r{};
+    r.events = xEventGroupCreate();
+    if (!r.events) eth_startup_fatal(r, "Ethernet event group");
 
     // Give the Ethernet netif a HIGHER route priority than the WiFi station, because ESP-IDF
     // defaults the other way round: esp_netif_defaults.h ships WIFI_STA_DEF at route_prio 100
@@ -539,9 +718,9 @@ bool net_start_eth() {
     eth_base.route_prio = kEthRoutePrio;
     esp_netif_config_t netif_cfg = ESP_NETIF_DEFAULT_ETH();
     netif_cfg.base = &eth_base;
-    s_eth_netif = esp_netif_new(&netif_cfg);
-    if (!s_eth_netif) boot_fatal("Ethernet netif");
-    if (esp_netif_set_hostname(s_eth_netif, kNetHostname) != ESP_OK)
+    r.netif = esp_netif_new(&netif_cfg);
+    if (!r.netif) eth_startup_fatal(r, "Ethernet netif");
+    if (esp_netif_set_hostname(r.netif, kNetHostname) != ESP_OK)
         ESP_LOGW(TAG, "could not set DHCP hostname '%s'", kNetHostname);
 
     spi_device_interface_config_t devcfg = {};
@@ -565,14 +744,18 @@ bool net_start_eth() {
     // is reset over SPI (its MR register) instead, which esp_eth_phy_w5500 does at init.
     phy_cfg.reset_gpio_num = -1;
 
-    esp_eth_mac_t* mac = esp_eth_mac_new_w5500(&w5500_cfg, &mac_cfg);
-    esp_eth_phy_t* phy = esp_eth_phy_new_w5500(&phy_cfg);
-    if (!mac || !phy) { ESP_LOGE(TAG, "W5500 mac/phy alloc failed"); return false; }
+    r.mac = esp_eth_mac_new_w5500(&w5500_cfg, &mac_cfg);
+    r.phy = esp_eth_phy_new_w5500(&phy_cfg);
+    if (!r.mac || !r.phy) {
+        ESP_LOGE(TAG, "W5500 mac/phy alloc failed");
+        return eth_startup_fallback(r);
+    }
 
-    esp_eth_config_t eth_cfg = ETH_DEFAULT_CONFIG(mac, phy);
-    if (esp_eth_driver_install(&eth_cfg, &s_eth_handle) != ESP_OK) {
-        ESP_LOGE(TAG, "W5500 driver install failed");
-        return false;
+    esp_eth_config_t eth_cfg = ETH_DEFAULT_CONFIG(r.mac, r.phy);
+    esp_err_t err = esp_eth_driver_install(&eth_cfg, &r.handle);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "W5500 driver install failed: %s", esp_err_to_name(err));
+        return eth_startup_fallback(r);
     }
 
     // The W5500 has no MAC address of its own (no EEPROM), so one must be supplied. ESP_MAC_ETH
@@ -580,19 +763,57 @@ bool net_start_eth() {
     // WiFi STA MAC, so the two interfaces can never collide on the same LAN.
     uint8_t mac_addr[6] = {0};
     if (esp_read_mac(mac_addr, ESP_MAC_ETH) == ESP_OK)
-        esp_eth_ioctl(s_eth_handle, ETH_CMD_S_MAC_ADDR, mac_addr);
+        esp_eth_ioctl(r.handle, ETH_CMD_S_MAC_ADDR, mac_addr);
 
-    s_eth_glue = esp_eth_new_netif_glue(s_eth_handle);
-    if (!s_eth_glue || esp_netif_attach(s_eth_netif, s_eth_glue) != ESP_OK) {
-        ESP_LOGE(TAG, "W5500 netif attach failed");
-        return false;
+    r.glue = esp_eth_new_netif_glue(r.handle);
+    if (!r.glue) {
+        ESP_LOGE(TAG, "W5500 netif glue allocation failed");
+        return eth_startup_fallback(r);
+    }
+    err = esp_netif_attach(r.netif, r.glue);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "W5500 netif attach failed: %s", esp_err_to_name(err));
+        return eth_startup_fallback(r);
     }
 
-    ESP_ERROR_CHECK(esp_event_handler_register(ETH_EVENT, ESP_EVENT_ANY_ID,
-                                               eth_event_handler, nullptr));
-    ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_ETH_GOT_IP,
-                                               eth_event_handler, nullptr));
-    ESP_ERROR_CHECK(esp_eth_start(s_eth_handle));
+    err = esp_event_handler_register(ETH_EVENT, ESP_EVENT_ANY_ID,
+                                     eth_event_handler, nullptr);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Ethernet event handler registration failed: %s",
+                 esp_err_to_name(err));
+        eth_startup_fatal(r, "Ethernet event handler registration");
+    }
+    r.eth_handler_registered = true;
+
+    err = esp_event_handler_register(IP_EVENT, IP_EVENT_ETH_GOT_IP,
+                                     eth_event_handler, nullptr);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Ethernet IP handler registration failed: %s", esp_err_to_name(err));
+        eth_startup_fatal(r, "Ethernet IP handler registration");
+    }
+    r.ip_handler_registered = true;
+
+    // Construction is complete.  Publish one coherent set immediately before activation: the
+    // event-loop task may run a link/IP callback before esp_eth_start() returns, and that callback
+    // must already find its matching netif, event group and driver handle.  A start failure
+    // retracts this set before destroying any resource.
+    s_eth_events = r.events;
+    s_eth_netif = r.netif;
+    s_eth_handle = r.handle;
+    s_eth_glue = r.glue;
+    r.published = true;
+    s_eth_link.store(false);
+    link_down(NetLink::Eth);
+
+    r.start_attempted = true;
+    err = esp_eth_start(r.handle);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Ethernet driver start failed: %s", esp_err_to_name(err));
+        eth_startup_fatal(r, "Ethernet driver start");
+    }
+
+    // Ownership is now process-lifetime state.  It remains active even when the boot-time link or
+    // DHCP windows below return false, so later cable insertion can claim the wired lease.
 
     // TWO questions, two very different deadlines. Answering them with one timer is what made a
     // credential-less board sit dark for the whole lease window before its setup AP appeared.
@@ -679,15 +900,10 @@ static const int kWdPeriodS       = 30;   // connectivity-check cadence
 static const int kWdPingTimeoutMs = 1000; // per-echo timeout
 static const int kWdPingCount     = 3;    // echoes per check; healthy if ≥1 replies
 
-// Persistent across probes (the single watchdog task calls gateway_reachable() serially). The
-// control block and its semaphore MUST outlive any in-flight esp_ping session: the ping's
-// internal thread is NOT joined by esp_ping_delete_session() and calls wd_on_ping_end()
-// unconditionally once started. If that callback ran against a per-call stack frame after a
-// take() timeout it would write freed memory / give a deleted semaphore (use-after-free).
-// File-scope storage removes the window entirely; a stale give from a late completion is
-// harmlessly drained at the next probe.
-struct WdPing { SemaphoreHandle_t done; uint32_t received; };
-static WdPing s_wd = { nullptr, 0 };
+// Persistent across probes. The shared generation owner retains a timed-out session until its
+// exact on_ping_end acknowledgement, so neither callback storage nor semaphore can be reused by a
+// later probe while the old ping task is still alive.
+static PingProbeControl s_wd{};
 
 // Set true the first time THIS TRANSPORT's gateway answers ICMP — the baseline watch_step()
 // requires before it will act. Indexed by NetLink, and that indexing is the point: a single
@@ -701,14 +917,6 @@ static_assert(static_cast<int>(NetLink::None) == 0 && static_cast<int>(NetLink::
 
 static std::atomic<bool>& gw_baseline(NetLink k) {
     return s_gw_ever_reachable[static_cast<int>(k)];
-}
-
-static void wd_on_ping_end(esp_ping_handle_t hdl, void* args) {
-    auto* p = (WdPing*) args;
-    uint32_t recv = 0;
-    esp_ping_get_profile(hdl, ESP_PING_PROF_REPLY, &recv, sizeof(recv));
-    p->received = recv;
-    xSemaphoreGive(p->done);
 }
 
 // Blocking ICMP echo to the current default gateway. True if ≥1 reply came back. Returns true
@@ -736,26 +944,15 @@ static bool gateway_reachable() {
     cfg.timeout_ms  = kWdPingTimeoutMs;
     cfg.interval_ms = 250;
 
-    esp_ping_callbacks_t cbs = {};
-    cbs.cb_args     = &s_wd;
-    cbs.on_ping_end = wd_on_ping_end;
-
-    esp_ping_handle_t hdl = nullptr;
-    if (esp_ping_new_session(&cfg, &cbs, &hdl) != ESP_OK || !hdl)
-        return true;  // probe setup failed → don't false-alarm
-
-    xSemaphoreTake(s_wd.done, 0);  // drain any stale give from a prior timed-out probe
-    s_wd.received = 0;
-    esp_ping_start(hdl);
-    // Wait out the whole sequence (count × (timeout + interval)) plus generous margin. A take()
-    // timeout is harmless here because s_wd is persistent (see above).
-    xSemaphoreTake(s_wd.done, pdMS_TO_TICKS(kWdPingCount * (kWdPingTimeoutMs + 250) + 2000));
-    esp_ping_stop(hdl);
-    esp_ping_delete_session(hdl);
-
-    bool ok = s_wd.received > 0;
+    const PingProbeResult result = ping_probe_run(
+        s_wd, cfg,
+        pdMS_TO_TICKS(kWdPingCount * (kWdPingTimeoutMs + 250) + 2000),
+        pdMS_TO_TICKS(2000));
+    // Only an exact completed generation with zero replies is evidence of failure. Setup failure
+    // or a quarantined late callback remains "unknown", so the watchdog cannot false-alarm.
+    const bool ok = result == PingProbeResult::Reply;
     if (ok) gw_baseline(s_kind.load()).store(true);
-    return ok;
+    return result == PingProbeResult::NoReply ? false : true;
 }
 
 // Force the ACTIVE transport to re-establish its link. WiFi drops the ghost association and
@@ -791,8 +988,9 @@ static void net_recover() {
 }
 
 static void net_watchdog_task(void*) {
-    tk::LinkWatch watch{};
-    for (;;) {
+    try {
+      tk::LinkWatch watch{};
+      for (;;) {
         vTaskDelay(pdMS_TO_TICKS(kWdPeriodS * 1000));
 
         // When the link already knows it is down, the transport's own reconnect path owns
@@ -819,14 +1017,23 @@ static void net_watchdog_task(void*) {
                 net_recover();
                 break;
         }
+      }
+    } catch (...) {
+        ESP_LOGE(TAG, "network watchdog task threw; stopping watchdog task");
+        vTaskDelete(nullptr);
     }
 }
 
 bool net_watchdog_start() {
     s_wd.done = xSemaphoreCreateBinary();
     if (!s_wd.done) return false;
-    return xTaskCreate(net_watchdog_task, "net_wd", 3072, nullptr,
-                       kPrioWifiWatchdog, nullptr) == pdPASS;
+    if (xTaskCreate(net_watchdog_task, "net_wd", 3072, nullptr,
+                    kPrioWifiWatchdog, nullptr) != pdPASS) {
+        vSemaphoreDelete(s_wd.done);
+        s_wd.done = nullptr;
+        return false;
+    }
+    return true;
 }
 
 }  // namespace tk

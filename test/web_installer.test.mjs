@@ -153,6 +153,15 @@ test("manifest v2 rejects malicious offsets, paths and incomplete provenance", (
     () => validateManifest(badSha, "https://example.test/manifest.json"),
     (error) => error.name === "InvalidManifestError" && /source commit/.test(error.message)
   );
+
+  for (const version of ["01.4.75", `1.4.75-${"x".repeat(25)}`]) {
+    const badVersion = structuredClone(manifest);
+    badVersion.version = version;
+    assert.throws(
+      () => validateManifest(badVersion, "https://example.test/manifest.json"),
+      (error) => error.name === "InvalidManifestError" && /version/.test(error.message)
+    );
+  }
 });
 
 test("firmware integrity failure is detected before flashing", async () => {

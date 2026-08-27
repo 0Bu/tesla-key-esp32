@@ -3,7 +3,9 @@ name: pr-preview-cleanup
 on:
   # Remove a preview as soon as it stops describing the current eligible PR. Restrict event cleanup
   # to the trusted default branch and always execute the script from that branch, never base.ref.
-  pull_request:
+  # Execute only the default-branch-owned workflow definition. The cleanup token can mutate
+  # gh-pages, so neither the workflow YAML nor any executable checkout may come from the PR.
+  pull_request_target:
     branches: [main]
     types: [closed, synchronize, unlabeled]
   # Events are not a durable queue. Reconcile gh-pages so a cancelled/failed close run cannot leave
@@ -19,13 +21,14 @@ permissions:
 jobs:
   cleanup-event:
     if: >-
-      github.event_name == 'pull_request'
+      github.event_name == 'pull_request_target'
       && github.event.pull_request.head.repo.full_name == github.repository
       && (github.event.action != 'unlabeled' || github.event.label.name == 'signed-preview')
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       contents: write
+      pages: read
     concurrency:
       # Same group as signed-pr-preview: close/synchronize/label removal cancels any signer that could
       # otherwise publish after this deletion.
@@ -34,8 +37,17 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event.repository.default_branch }}
+          ref: ${{ github.event.pull_request.base.sha }}
           persist-credentials: false
+      - name: Validate branch-backed Pages authority before cleanup
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          pages_json="$(mktemp)"
+          trap 'rm -f "$pages_json"' EXIT
+          gh api "repos/$GITHUB_REPOSITORY/pages" > "$pages_json"
+          python3 scripts/check-pages-source.py "$pages_json"
       - name: Remove ineligible or superseded PR preview
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -45,6 +57,9 @@ jobs:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read
     outputs:
       stale: ${{ steps.discover.outputs.stale }}
     steps:
@@ -73,6 +88,7 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: write
+      pages: read
       pull-requests: read
     concurrency:
       # Each candidate is revalidated while holding the exact sign/cleanup lock for that PR.
@@ -83,6 +99,15 @@ jobs:
         with:
           ref: ${{ github.event.repository.default_branch }}
           persist-credentials: false
+      - name: Validate branch-backed Pages authority before reconciliation
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          pages_json="$(mktemp)"
+          trap 'rm -f "$pages_json"' EXIT
+          gh api "repos/$GITHUB_REPOSITORY/pages" > "$pages_json"
+          python3 scripts/check-pages-source.py "$pages_json"
       - name: Revalidate and remove stale preview
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

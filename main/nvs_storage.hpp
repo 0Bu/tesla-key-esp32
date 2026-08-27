@@ -2,17 +2,20 @@
 
 #include <adapters.h>
 #include <string>
+#include <string_view>
 #include <vector>
 #include <atomic>
 #include <cstdint>
 #include <nvs_flash.h>
 #include <nvs.h>
+#include "logic/nvs_contract.hpp"
 #include "logic/nvs_string_load.hpp"
 #include "logic/nvs_blob_load.hpp"
 
 class NvsStorageAdapter : public TeslaBLE::StorageAdapter {
 public:
-    explicit NvsStorageAdapter(const char* namespace_name = "tesla_ble");
+    explicit NvsStorageAdapter(
+        const char* namespace_name = tk::nvs_contract::kTeslaBleNamespace);
     ~NvsStorageAdapter();
 
     bool initialize();
@@ -40,7 +43,8 @@ public:
     // callers must not collapse an I/O/corruption error into ordinary absence.
     bool probe_blob(const std::string& key, bool& exists) const;
 
-    // Config helpers (plain string values)
+    // Config helpers (plain string values). load_str() publishes a complete value atomically and
+    // preserves the caller's previous output on every probe/read/length/allocation failure.
     bool load_str(const char* key, std::string& out);
     // Safety-critical tri-state string read. Only a genuine NOT_FOUND is Missing; wrong type,
     // corrupt/empty data and either NVS read failure are Error.
@@ -60,12 +64,16 @@ public:
 
 private:
     const char* ns_;
+    tk::nvs_contract::Namespace ns_kind_{tk::nvs_contract::Namespace::Unknown};
     nvs_handle_t handle_{0};
     bool initialized_{false};
     // -1 unknown, 0 absent, 1 present. has_session() is sampled by the 50 ms vehicle loop; a
     // successful first NVS probe is stable until this same adapter saves/removes the session.
     mutable std::atomic<int8_t> session_vcsec_present_{-1};
 
-    // NVS keys are max 15 chars — map known long library keys and reject unknown long ones.
-    std::string map_key(const std::string& key) const;
+    // The exact registry replaces the former truncation fallback: an unknown logical key,
+    // namespace mismatch or wrong storage API is rejected before an NVS call, so two long names
+    // can never alias the same 15-byte flash key.
+    const char* map_key(std::string_view key, tk::nvs_contract::StorageApi api,
+                        bool erase_any_api = false) const;
 };

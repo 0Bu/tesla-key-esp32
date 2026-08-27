@@ -20,9 +20,14 @@ steps in .github/workflows/build.yml. Check these Tesla-specific contracts:
   are anchored/grouped, and hooks use their real payload shapes.
 - Context7 command and args match .mcp.json exactly; hooks and multi-agent support are enabled;
   no config grants automatic GitHub, hardware, NVS, OTA, or vehicle mutation.
-- The logic-test job only adds agent-configuration checks. Its permissions, DAG, action SHA pins,
-  four-target build, signing/publish isolation, provenance checks, and release/Pages contracts
-  remain unchanged.
+- The unprivileged fast job runs agent configuration plus fail-closed repo/workflow lint, strict
+  host/CMake coverage, Linux sanitizer tripwires, deterministic fuzz/protocol checks and a real
+  browser gate before the exact-head four-target build. Missing tools are failures in CI mode.
+- Trusted-base `pull_request_target` policy reads current server metadata with read-only permissions,
+  never checks out PR code, and is documented as a merge block only when its named check is required
+  by repository rules. Bench acceptance remains an inert report validator, never a hidden board job.
+- Permissions, DAG, action SHA pins, four-target build, signing/publish isolation, provenance checks,
+  Release/Pages contracts and mutation canaries remain fail closed.
 
 Report a prioritized findings list. Every finding must include: severity, path and line, cause,
 impact, and concrete evidence (quoted minimally or identified by command/check output). Give a

@@ -17,13 +17,16 @@
 #include "mqtt_ha.hpp"
 #include "logic/status_model.hpp"
 #include "logic/redact.hpp"
+#include "logic/heap_json_stream.hpp"
 #include "config_blob.hpp"
 #include "syslog.hpp"
 #include "stack_watch.hpp"
+#include "status_json_emitter.hpp"
 #include <esp_netif.h>
 #include <esp_mac.h>
 #include <esp_app_desc.h>
 #include <esp_heap_caps.h>
+#include <esp_log.h>
 #include <esp_timer.h>
 #include <sdkconfig.h>
 #include <esp_core_dump.h>
@@ -33,15 +36,22 @@
 #include <string>
 #include <string_view>
 
+static constexpr const char* TAG = "http-status";
+
 // ─── POST /scan — start a time-limited BLE discovery scan ─────────────────────
 
 esp_err_t handle_scan(GuardedReq rq) {
     httpd_req_t* req = rq.req;
-    g_vehicle->ble_scan();
-    cJSON* root = cJSON_CreateObject();
-    cJSON_AddBoolToObject(root, "result", true);
-    cJSON_AddStringToObject(root, "reason", "scanning for nearby Teslas (~12s)");
-    return send_json(req, 200, root);
+    if (!g_vehicle->ble_scan()) {
+        tk::JsonBuilder unavailable;
+        unavailable.boolean(unavailable.root(), "result", false);
+        unavailable.string(unavailable.root(), "reason", "vehicle runtime unavailable");
+        return send_json(req, 503, unavailable.release());
+    }
+    tk::JsonBuilder json;
+    json.boolean(json.root(), "result", true);
+    json.string(json.root(), "reason", "scanning for nearby Teslas (~12s)");
+    return send_json(req, 200, json.release());
 }
 
 // ─── GET /status — device + pairing state (drives the web UI) ──────────────────
@@ -60,30 +70,9 @@ static void current_ip(char* out, size_t sz) {
 
 // cJSON visitor for tk::status::emit_status() — builds the response tree one-to-one as
 // the model walks it (no intermediate field list; the contract layer adds zero heap).
-// Under heap pressure cJSON_Create* returns NULL: attaching NULL is a cJSON no-op and
-// every later attach to a NULL parent is too, so the walk degrades to a partial-but-
-// valid document exactly like the old inline builder did; send_json's NULL-print guard
-// covers total exhaustion.
-namespace {
-struct CjsonEmitter {
-    cJSON* stack[5];
-    int    depth = 0;
-    explicit CjsonEmitter(cJSON* root) { stack[0] = root; }
-    cJSON* top() { return stack[depth]; }
-    void attach(const char* key, cJSON* node) {
-        if (cJSON_IsArray(top())) cJSON_AddItemToArray(top(), node);
-        else                      cJSON_AddItemToObject(top(), key, node);
-    }
-    void obj_begin(const char* key) { cJSON* o = cJSON_CreateObject(); attach(key, o); stack[++depth] = o; }
-    void obj_end() { --depth; }
-    void arr_begin(const char* key) { cJSON* a = cJSON_CreateArray(); attach(key, a); stack[++depth] = a; }
-    void arr_end() { --depth; }
-    void str(const char* key, const char* v) { attach(key, cJSON_CreateString(v)); }
-    void num(const char* key, double v)      { attach(key, cJSON_CreateNumber(v)); }
-    void boolean(const char* key, bool v)    { attach(key, cJSON_CreateBool(v)); }
-};
-}  // namespace
-
+// The shared builder is sticky: any Create/Add failure invalidates the whole tree; release() then
+// destroys it and returns nullptr, so send_json emits 503 instead of a structurally valid but
+// dangerously partial status document with an HTTP 200.
 // Build the device + pairing + vehicle status object (caller owns the returned cJSON) — the body of
 // GET /status, which the web UI polls every 4 s. GATHER ONLY here: every which-field/when/what-value
 // decision lives in the host-tested model (logic/status_model.hpp, golden CHECKs in
@@ -243,10 +232,10 @@ static cJSON* build_status_object(bool redact) {
 
     // The last-known charge snapshot ("last" / "last_seen_s", shown on the asleep card
     // regardless of link state) is emitted by the model from in.charge + in.last_seen.
-    cJSON* root = cJSON_CreateObject();
-    CjsonEmitter e(root);
+    tk::JsonBuilder json;
+    tk::StatusJsonEmitter e(json);
     tk::status::emit_status(in, e);
-    return root;
+    return e.release();
 }
 
 // GET /status — the live snapshot. The web UI's feed: app.js polls this every 4 s, and it also
@@ -274,15 +263,17 @@ esp_err_t handle_diag(GuardedReq rq) {
     httpd_resp_set_type(req, "text/plain; charset=utf-8");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     httpd_resp_set_hdr(req, "X-Diag-Verbose", diag_verbose() ? "1" : "0");
-    // Stream the log from its static buffer in bounded chunks. Building one
-    // big std::string here used to throw std::bad_alloc when the whole buffer exceeded the
+    // Stream the log in fixed-size chunks. Each chunk is copied under the ring mutex and sent only
+    // after that mutex is released, so slow/throwing HTTP I/O cannot stall log producers. Building
+    // one big std::string here used to throw std::bad_alloc when the whole buffer exceeded the
     // largest contiguous free block on a fragmented heap → uncaught in the httpd task →
     // abort() → reboot. Chunked send needs no large contiguous allocation, so /diag is safe
     // regardless of buffer size or fragmentation.
     if (!query_param_is(req, "redact", "1")) {
-        diag_log_dump_chunks([req](const char* p, size_t n) {
+        const DiagDumpResult dump = diag_log_dump_chunks([req](const char* p, size_t n) {
             return n == 0 || httpd_resp_send_chunk(req, p, n) == ESP_OK;
         });
+        if (dump != DiagDumpResult::Complete) return ESP_FAIL;
         return httpd_resp_send_chunk(req, nullptr, 0);  // terminate the chunked response
     }
 
@@ -292,40 +283,62 @@ esp_err_t handle_diag(GuardedReq rq) {
     // rules are the host-tested logic/redact.hpp, and they FAIL CLOSED — a line
     // the ring truncated mid-value redacts to the end of the line rather than giving up.
     //
-    // The ring hands us bounded spans that do NOT align to line boundaries, so lines are
-    // reassembled into a fixed stack buffer sized to the ring's own line limit. Bounded on purpose:
+    // A wrapped byte ring may begin inside a secret after its marker was overwritten. The dump
+    // seam therefore suppresses that first untrusted fragment through its newline; all retained
+    // complete lines are reassembled in a fixed stack buffer. Bounded on purpose:
     // building the redacted dump as one std::string is exactly the allocation /diag streams to
     // avoid, and a redaction REPLACEMENT is usually longer than the value it replaces, so the
     // redacted text can be bigger than the buffer it came from.
     static constexpr size_t kLineMax = 288;   // diag lines are capped at 256; slack for a long one
+    static constexpr size_t kRedactedLineMax = tk::diag_redacted_capacity(kLineMax);
     char   line[kLineMax];
-    size_t len = 0;
+    char   redacted[kRedactedLineMax];
     bool   ok  = true;
+    tk::DiagLineFrame frame;
 
-    auto flush_line = [&](bool had_newline) {
+    auto flush_line = [&](size_t len, bool had_newline) noexcept {
+        if (!ok) return;
         if (len == 0 && !had_newline) return;
-        std::string out = tk::redact_diag_line(std::string_view(line, len));
-        if (had_newline) out.push_back('\n');
-        ok = ok && httpd_resp_send_chunk(req, out.data(), out.size()) == ESP_OK;
-        len = 0;
+        const tk::FixedDiagRedaction result =
+            tk::redact_diag_line_fixed(std::string_view(line, len),
+                                       redacted, sizeof(redacted));
+        const char* out = result.safe ? redacted : tk::kRedacted;
+        const size_t out_len = result.safe ? result.size : tk::kRedactedLength;
+        if (out_len != 0 && httpd_resp_send_chunk(req, out, out_len) != ESP_OK) ok = false;
+        if (ok && had_newline && httpd_resp_send_chunk(req, "\n", 1) != ESP_OK) ok = false;
+    };
+    auto flush_overlong = [&](bool had_newline) noexcept {
+        if (!ok) return;
+        if (httpd_resp_send_chunk(req, tk::kRedacted, tk::kRedactedLength) != ESP_OK) ok = false;
+        if (ok && had_newline && httpd_resp_send_chunk(req, "\n", 1) != ESP_OK) ok = false;
     };
 
-    diag_log_dump_chunks([&](const char* p, size_t n) {
+    const DiagDumpResult dump = diag_log_dump_chunks([&](const char* p, size_t n) noexcept {
         for (size_t i = 0; i < n && ok; i++) {
-            if (p[i] == '\n') {
-                flush_line(true);
-            } else {
-                // An over-long line (the ring wrapped mid-line, or a library printed something
-                // huge) is flushed WITHOUT its newline rather than truncated: dropping bytes from a
-                // diagnostic log is worse than splitting one line in two, and the fail-closed
-                // redaction still covers the fragment it is handed.
-                if (len == kLineMax) flush_line(false);
-                line[len++] = p[i];
+            const tk::DiagLineStep step = tk::diag_line_step(frame, p[i], kLineMax);
+            switch (step.action) {
+                case tk::DiagLineAction::Append:
+                    line[step.size] = p[i];
+                    break;
+                case tk::DiagLineAction::EmitLine:
+                    flush_line(step.size, true);
+                    break;
+                case tk::DiagLineAction::IgnoreOverlong:
+                    break;
+                case tk::DiagLineAction::EmitOverlong:
+                    flush_overlong(true);
+                    break;
             }
         }
         return ok;
-    });
-    flush_line(false);   // whatever the ring ended on, unterminated
+    }, DiagDumpStart::AfterWrappedLineBoundary);
+    // Do not make a truncated snapshot look like a complete 200 response. In particular, never
+    // flush the partly accumulated line after a sink failure or a concurrent clear/overwrite,
+    // and never send the success terminator after either failure class.
+    if (dump != DiagDumpResult::Complete || !ok) return ESP_FAIL;
+    if (frame.overlong) flush_overlong(false);
+    else                flush_line(frame.size, false);  // unterminated final line
+    if (!ok) return ESP_FAIL;
     return httpd_resp_send_chunk(req, nullptr, 0);
 }
 
@@ -350,35 +363,35 @@ esp_err_t handle_coredump(GuardedReq rq) {
     // to be able to tell "this board never captures dumps" from "no crash has happened yet", and
     // silence cannot carry that difference. The esp_core_dump_image_* symbols are not linked here
     // at all, so everything below has to be compiled out rather than merely skipped.
-    cJSON* root = cJSON_CreateObject();
-    cJSON_AddStringToObject(root, "error", "core dumps are not enabled on this target");
-    return send_json(req, 404, root);
+    tk::JsonBuilder json;
+    json.string(json.root(), "error", "core dumps are not enabled on this target");
+    return send_json(req, 404, json.release());
 #else
     if (query_param_is(req, "clear", "1")) {
         esp_err_t err = esp_core_dump_image_erase();
-        cJSON* root = cJSON_CreateObject();
-        cJSON_AddBoolToObject(root, "ok", err == ESP_OK);
-        if (err != ESP_OK) cJSON_AddStringToObject(root, "error", esp_err_to_name(err));
-        return send_json(req, err == ESP_OK ? 200 : 500, root);
+        tk::JsonBuilder json;
+        json.boolean(json.root(), "ok", err == ESP_OK);
+        if (err != ESP_OK) json.string(json.root(), "error", esp_err_to_name(err));
+        return send_json(req, err == ESP_OK ? 200 : 500, json.release());
     }
 
     size_t addr = 0, size = 0;
     if (esp_core_dump_image_get(&addr, &size) != ESP_OK || size == 0) {
-        cJSON* root = cJSON_CreateObject();
+        tk::JsonBuilder json;
         // 404 with a reason rather than an empty body: on a device flashed before the coredump
         // partition existed this is the PERMANENT answer, and "no coredump partition" is a very
         // different thing for the reader to know than "no crash has happened".
-        cJSON_AddStringToObject(root, "error", "no core dump available");
-        return send_json(req, 404, root);
+        json.string(json.root(), "error", "no core dump available");
+        return send_json(req, 404, json.release());
     }
 
     const esp_partition_t* part = esp_partition_find_first(ESP_PARTITION_TYPE_DATA,
                                                            ESP_PARTITION_SUBTYPE_DATA_COREDUMP,
                                                            nullptr);
     if (!part) {
-        cJSON* root = cJSON_CreateObject();
-        cJSON_AddStringToObject(root, "error", "no coredump partition");
-        return send_json(req, 404, root);
+        tk::JsonBuilder json;
+        json.string(json.root(), "error", "no coredump partition");
+        return send_json(req, 404, json.release());
     }
 
     httpd_resp_set_type(req, "application/octet-stream");
@@ -391,7 +404,16 @@ esp_err_t handle_coredump(GuardedReq rq) {
     size_t off = 0;
     while (off < size) {
         const size_t n = (size - off) > sizeof(buf) ? sizeof(buf) : (size - off);
-        if (esp_partition_read(part, off, buf, n) != ESP_OK) break;
+        const esp_err_t read_err = esp_partition_read(part, off, buf, n);
+        if (read_err != ESP_OK) {
+            // Once chunking starts, a terminating zero chunk would make a truncated dump look
+            // complete to the downloader. Return failure without that terminator so httpd closes
+            // the response; the byte offset is the durable clue for flash/read diagnostics.
+            ESP_LOGE(TAG, "coredump read failed at offset %u/%u: %s",
+                     static_cast<unsigned>(off), static_cast<unsigned>(size),
+                     esp_err_to_name(read_err));
+            return ESP_FAIL;
+        }
         if (httpd_resp_send_chunk(req, buf, n) != ESP_OK) return ESP_FAIL;  // client went away
         off += n;
     }
@@ -406,10 +428,10 @@ esp_err_t handle_coredump(GuardedReq rq) {
 esp_err_t handle_crash_dismiss(GuardedReq rq) {
     httpd_req_t* req = rq.req;
     const bool ok = tk::diag_crash_dismiss();
-    cJSON* root = cJSON_CreateObject();
-    cJSON_AddBoolToObject(root, "ok", ok);
-    if (!ok) cJSON_AddStringToObject(root, "error", "core dump erase failed");
-    return send_json(req, ok ? 200 : 500, root);
+    tk::JsonBuilder json;
+    json.boolean(json.root(), "ok", ok);
+    if (!ok) json.string(json.root(), "error", "core dump erase failed");
+    return send_json(req, ok ? 200 : 500, json.release());
 }
 
 // ─── GET /heap — the board's own 24-hour memory trend ─────────────────────────
@@ -434,26 +456,20 @@ esp_err_t handle_heap(GuardedReq rq) {
     uint32_t bucket0 = 0, boot_bucket = 0;
     const size_t n = tk::heap_trend_snapshot(free_s, large_s, kMax, &bucket0, &boot_bucket);
 
-    cJSON* root = cJSON_CreateObject();
-    cJSON_AddNumberToObject(root, "dt", (double)tk::heap_trend_dt_s());
-    cJSON_AddNumberToObject(root, "b0", (double)bucket0);
-    // The bucket THIS boot started in. The ring now survives a restart (.noinit), so a reader that
-    // assumed bucket == uptime/dt would misplace every retained sample — and, worse, would draw a
-    // trend that crosses a reboot as one unbroken run. Every sample before b_boot came from an
-    // earlier run; the restart sits exactly on that boundary.
-    cJSON_AddNumberToObject(root, "b_boot", (double)boot_bucket);
-    cJSON_AddStringToObject(root, "unit", "KiB");
-    cJSON_AddNumberToObject(root, "scale", 10);   // samples are tenths of the unit
-    cJSON* jf = cJSON_AddArrayToObject(root, "free");
-    cJSON* jl = cJSON_AddArrayToObject(root, "largest");
-    for (size_t i = 0; i < n; i++) {
-        cJSON_AddItemToArray(jf, tk::heap_trend_absent(free_s[i])
-                                     ? cJSON_CreateNull() : cJSON_CreateNumber(free_s[i]));
-        cJSON_AddItemToArray(jl, tk::heap_trend_absent(large_s[i])
-                                     ? cJSON_CreateNull() : cJSON_CreateNumber(large_s[i]));
-    }
+    // Stream bounded chunks directly from the caller-owned snapshot. The full 24-hour history is
+    // 576 values; materialising it as cJSON nodes plus one contiguous Print buffer makes the heap
+    // diagnostic disappear precisely under the fragmentation it is meant to explain.
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
-    return send_json(req, 200, root);
+    httpd_resp_set_type(req, "application/json");
+    const tk::HeapJsonStreamView view{
+        tk::heap_trend_dt_s(), bucket0, boot_bucket,
+        free_s, large_s, n, tk::kHeapTrendNoSample,
+    };
+    const bool sent = tk::stream_heap_json(view, [req](const char* data, size_t size) {
+        return httpd_resp_send_chunk(req, data, size) == ESP_OK;
+    });
+    if (!sent) return ESP_FAIL;
+    return httpd_resp_send_chunk(req, nullptr, 0);
 }
 
 // ─── GET / — web UI (embedded from main/www/, inlined + gzipped at build time) ──

@@ -33,13 +33,14 @@ cannot build or USB-flash — see AGENTS.md).
 <!--
 These four boxes ARE the publish/merge gates — they replace the old on-disk markers. The
 runner-neutral gate under tools/agent-hooks/ reads them straight from this PR body, each matching
-its OWN box. After a CLEAN run, tick the box and replace <sha> with the reviewed commit
-(`git rev-parse --short=12 HEAD`). A later commit changes the sha and re-stales the gate, forcing
+its OWN box. After a CLEAN run, tick the box and replace <full-40-hex-sha> with the exact reviewed
+commit (`git rev-parse HEAD`). Prefixes are rejected. A later commit changes the SHA and re-stales the gate, forcing
 a fresh run. Do NOT tick a box without actually running the check.
 
 $feature-docs only arms when the diff reaches main/, test/, sdkconfig.defaults*, partitions.csv,
-the shipped Pages runtime, release-relevance logic, or the build/signed-preview/preview-cleanup
-workflows. Because `docs/FEATURES.md` catalogs the runner-neutral policy itself, it also arms for
+the shipped Pages runtime, release-relevance logic, or the build/signed-preview/preview-cleanup/
+PR-policy/bench-acceptance workflows. Because `docs/FEATURES.md` catalogs the runner-neutral policy
+itself, it also arms for
 `AGENTS.md`, `.agents/`, `.codex/`, `.github/PULL_REQUEST_TEMPLATE.md`, `tools/agent-hooks/`, and
 `tools/agent-config/` — delete its line only on a docs- or unrelated chore-only PR. A full
 $project-review also clears the
@@ -50,7 +51,7 @@ re-arms at every push AND at merge — it screens this PR's title/body, its comm
 docs for personal/private information and non-English content. Neither $project-review nor
 $skill-audit being clean establishes it; run $pr-hygiene separately.
 -->
-- [ ] `$skill-audit` clean — PR create/push gate @ <sha>
-- [ ] `$project-review` clean — merge gate @ <sha>
-- [ ] `$pr-hygiene` clean — content gate @ <sha>
-- [ ] `$feature-docs` synced — merge gate @ <sha>
+- [ ] `$skill-audit` clean — PR create/push gate @ <full-40-hex-sha>
+- [ ] `$project-review` clean — merge gate @ <full-40-hex-sha>
+- [ ] `$pr-hygiene` clean — content gate @ <full-40-hex-sha>
+- [ ] `$feature-docs` synced — merge gate @ <full-40-hex-sha>

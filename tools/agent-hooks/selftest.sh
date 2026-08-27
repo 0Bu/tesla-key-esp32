@@ -23,6 +23,8 @@ PY
 verdict(){ local out; out="$(printf '%s' "$1" | python3 "$hook" pre-tool-guards)" || return 3; if [ -z "$out" ]; then printf allow; else printf '%s' "$out" | python3 -c 'import json,sys; print(json.load(sys.stdin)["hookSpecificOutput"]["permissionDecision"])'; fi; }
 expect_guard(){ local got; got="$(verdict "$2" 2>/dev/null)" || got=invalid; if [ "$got" = "$1" ]; then pass_case "$3"; else fail_case "$3 (want=$1 got=$got)"; fi; }
 sha="$(git -C "$root" rev-parse HEAD)"
+short_sha="$(printf '%s' "$sha" | cut -c1-12)"
+upper_sha="$(printf '%s' "$sha" | tr 'a-f' 'A-F')"
 
 expect_guard deny '' 'empty guard payload fails closed'
 expect_guard deny '{bad' 'malformed guard JSON fails closed'
@@ -100,22 +102,38 @@ PY
 then pass_case 'formatter targets only first-party C/C++'; else fail_case 'formatter target filter'; fi
 
 if python3 - "$hook" "$tmp" <<'PY'
-import importlib.util,io,pathlib,sys
+import contextlib,importlib.util,io,json,pathlib,subprocess,sys
 spec=importlib.util.spec_from_file_location("h",sys.argv[1]); m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
-r=pathlib.Path(sys.argv[2])/"stop"; (r/"scripts").mkdir(parents=True); (r/"scripts/run-mock-tests.sh").write_text("#!/bin/sh\nexit 0\n")
-m.HOOK_ROOT=r; calls=[]
+r=pathlib.Path(sys.argv[2])/"stop"; (r/"scripts").mkdir(parents=True)
+script=r/"scripts/run-mock-tests.sh"; script.write_text("#!/bin/sh\nexit 0\n"); script.chmod(0o755)
+m.HOOK_ROOT=r
 class R:
   def __init__(self,code=0,out=""): self.returncode=code; self.stdout=out; self.stderr=""
-def run(argv,*a,**k):
-  calls.append([str(x) for x in argv])
-  if "ls-files" in argv: return R(0,"main/logic/new.hpp\n")
-  return R(0,"")
-m.subprocess.run=run; m.shutil.which=lambda _: "/usr/bin/tool"; old=sys.stdin; sys.stdin=io.StringIO("{}")
-try: rc=m.run_stop_logic_tests(type("A",(),{})())
-finally: sys.stdin=old
-assert rc==0 and any(str(r/"scripts/run-mock-tests.sh") in c for c in calls)
+def invoke(script_result=R(), missing_tool=None, timeout=False):
+  calls=[]
+  def run(argv,*a,**k):
+    calls.append([str(x) for x in argv])
+    if "ls-files" in argv: return R(0,"main/logic/new.hpp\n")
+    if str(script) in [str(x) for x in argv]:
+      if timeout: raise subprocess.TimeoutExpired(argv,540)
+      return script_result
+    return R(1,"")
+  m.subprocess.run=run
+  m.shutil.which=lambda tool: None if tool==missing_tool else "/usr/bin/tool"
+  old_stdin=sys.stdin; sys.stdin=io.StringIO("{}"); output=io.StringIO()
+  try:
+    with contextlib.redirect_stdout(output): rc=m.run_stop_logic_tests(type("A",(),{})())
+  finally: sys.stdin=old_stdin
+  return rc,output.getvalue(),calls
+rc,out,calls=invoke()
+assert rc==0 and not out and any(c==[str(script),"--require-all"] for c in calls)
+for kwargs in ({"missing_tool":"git"},{"missing_tool":"python3"},{"missing_tool":"cmake"},
+               {"script_result":R(9,"failed")},{"timeout":True}):
+  rc,out,_=invoke(**kwargs); assert rc==0 and json.loads(out)["decision"]=="block"
+script.unlink()
+rc,out,_=invoke(); assert rc==0 and json.loads(out)["decision"]=="block"
 PY
-then pass_case 'Stop hook catches untracked main/test logic'; else fail_case 'Stop untracked logic'; fi
+then pass_case 'Stop hook requires strict tools/script and blocks failure/timeout'; else fail_case 'Stop strict fail-closed contract'; fi
 
 sub="$(printf '{"agent_type":"reviewer"}' | python3 "$hook" subagent-context)"
 if printf '%s' "$sub" | grep -qF 'Do not wake the vehicle' && printf '%s' "$sub" | grep -qF 'Review agents remain read-only'; then pass_case 'SubagentStart boundary context'; else fail_case 'SubagentStart context'; fi
@@ -129,6 +147,10 @@ project_record='- [x] $project-review clean — merge gate @ '"$sha"
 legacy_record='- [x] /project-review clean — merge gate @ '"$sha"
 [ "$(gate_checkbox_status "$project_record" project-review)" = "checked $sha" ] && pass_case 'canonical dollar record parses' || fail_case 'canonical record'
 [ "$(gate_checkbox_status "$legacy_record" project-review)" = "checked $sha" ] && pass_case 'legacy slash record parses' || fail_case 'legacy record'
+[ "$(gate_checkbox_status '- [x] $project-review clean — merge gate @ '"$short_sha" project-review)" = absent ] && pass_case 'SHA-prefix record rejected' || fail_case 'SHA-prefix record accepted'
+[ "$(gate_checkbox_status '- [x] $project-review clean — merge gate @ '"$upper_sha" project-review)" = absent ] && pass_case 'uppercase SHA record rejected' || fail_case 'uppercase SHA record accepted'
+if gate_sha_matches "$sha" "$sha"; then pass_case 'full SHA exact match accepted'; else fail_case 'full SHA exact match rejected'; fi
+if gate_sha_matches "$short_sha" "$sha"; then fail_case 'SHA-prefix match accepted'; else pass_case 'SHA-prefix match rejected'; fi
 [ "$(gate_checkbox_status "$project_record"$'\n'"$legacy_record" project-review)" = ambiguous ] && pass_case 'duplicate records ambiguous' || fail_case 'duplicate records'
 [ "$(gate_checkbox_status '- [x] $project-review clean — merge gate @ 0123456 @ deadbee' project-review)" = absent ] && pass_case 'multiply stamped record rejected' || fail_case 'multiple stamps'
 hygiene_record='- [x] $pr-hygiene clean — content gate @ '"$sha"
@@ -152,6 +174,12 @@ rename='[[{"filename":"docs/chore.md","previous_filename":".codex/hooks.json"}]]
 rename_out="$(printf '%s' "$rename" | gate_extract_changed_pages 1)" || rename_out=FAIL
 if [ "$rename_out" = $'docs/chore.md\n.codex/hooks.json' ] && printf '%s\n' "$rename_out" | gate_feature_docs_relevant; then pass_case 'rename out of catalogued agent-policy path preserves relevance'; else fail_case 'rename extraction'; fi
 if printf '%s\n' '.github/PULL_REQUEST_TEMPLATE.md' | gate_feature_docs_relevant; then pass_case 'PR template is feature-docs relevant'; else fail_case 'PR template relevance'; fi
+if printf '%s\n' '.github/workflows/pr-policy.yml' | gate_feature_docs_relevant \
+   && printf '%s\n' '.github/workflows/bench-acceptance.yml' | gate_feature_docs_relevant; then
+  pass_case 'policy and bench workflows are feature-docs relevant'
+else
+  fail_case 'new workflow feature-docs relevance'
+fi
 if printf '%s' "$rename" | gate_extract_changed_pages 2 >/dev/null 2>&1; then fail_case 'truncated count accepted'; else pass_case 'truncated count fails closed'; fi
 if printf '[]' | gate_extract_changed_pages 3001 >/dev/null 2>&1; then fail_case '3001 files accepted'; else pass_case '3000-file limit fails closed'; fi
 if printf '[[{"filename":"../escape"}]]' | gate_extract_changed_pages 1 >/dev/null 2>&1; then fail_case 'unsafe path accepted'; else pass_case 'unsafe changed path fails closed'; fi
@@ -173,6 +201,8 @@ grep -v pr-hygiene "$tmp/all.md" >"$tmp/no-hygiene.md"
 expect_rc 2 'aggregate check requires pr-hygiene unconditionally' env AGENT_POLICY_CI=1 AGENT_PR_BODY_FILE="$tmp/no-hygiene.md" AGENT_PR_HEAD_SHA="$sha" AGENT_CHANGED_FILES_FILE="$tmp/docs.files" "$gate" --check --project-dir "$root"
 sed 's/@ [0-9a-f]*/@ deadbee/' "$tmp/all.md" >"$tmp/stale.md"
 expect_rc 2 'stale record SHA rejected' env AGENT_POLICY_CI=1 AGENT_PR_BODY_FILE="$tmp/stale.md" AGENT_PR_HEAD_SHA="$sha" AGENT_CHANGED_FILES_FILE="$tmp/feature.files" "$gate" --check --project-dir "$root"
+sed "s/$sha/$short_sha/g" "$tmp/all.md" >"$tmp/prefix.md"
+expect_rc 2 'same-prefix records cannot satisfy current-head gate' env AGENT_POLICY_CI=1 AGENT_PR_BODY_FILE="$tmp/prefix.md" AGENT_PR_HEAD_SHA="$sha" AGENT_CHANGED_FILES_FILE="$tmp/feature.files" "$gate" --check --project-dir "$root"
 
 merge_error(){ printf '%s' "$1" | python3 "$parser" | python3 -c 'import sys; p=sys.stdin.buffer.read().split(b"\0"); print((p[5] if len(p)>5 else b"parse-failed").decode())'; }
 canonical="gh --repo github.com/0Bu/tesla-key-esp32 pr merge 123 --match-head-commit $sha --squash"

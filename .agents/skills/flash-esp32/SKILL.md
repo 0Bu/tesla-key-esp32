@@ -183,12 +183,13 @@ EXPECTED_SHA=$(printf '%s' "$PR_JSON" | jq -r .head.sha)
   echo "REFUSING: run is not a successful signed-pr-preview" >&2; exit 1;
 }
 
-# Select the one exact signed-preview artifact for this PR; ambiguity or absence is a hard stop.
+# Select the one exact signed-preview artifact for this PR and current full head SHA; ambiguity or
+# absence is a hard stop. The display version is metadata, not artifact-name authority.
+EXPECTED_ART="tesla-key-esp32-pr${PR}-${EXPECTED_SHA}"
 ARTS=$(gh api "repos/:owner/:repo/actions/runs/$RUNID/artifacts" \
-  --jq '.artifacts[] | select(.expired == false) | .name' \
-  | grep -E "^tesla-key-esp32-pr${PR}-[0-9]+\\.[0-9]+\\.[0-9]+-PR-${PR}$" || true)
+  --jq ".artifacts[] | select(.expired == false and .name == \"$EXPECTED_ART\") | .name")
 [ "$(printf '%s\n' "$ARTS" | awk 'NF {n++} END {print n+0}')" -eq 1 ] || {
-  echo "REFUSING: expected exactly one unexpired signed artifact for PR $PR" >&2; exit 1;
+  echo "REFUSING: expected exactly one unexpired signed artifact for current PR head $EXPECTED_SHA" >&2; exit 1;
 }
 ART=$(printf '%s\n' "$ARTS" | awk 'NF {print}')
 CI_DIR=$(mktemp -d "${TMPDIR:-/tmp}/tesla-pr-artifact.XXXXXX")
@@ -197,12 +198,16 @@ gh run download "$RUNID" -n "$ART" -D "$CI_DIR"
 # Bind downloaded bytes to the current PR head, not merely to a plausible artifact name.
 META="$CI_DIR/_ci-input/dist/build-metadata.txt"
 [ -f "$META" ] && [ ! -L "$META" ] || { echo "REFUSING: metadata missing/unsafe" >&2; exit 1; }
-VERSION="${ART#tesla-key-esp32-pr${PR}-}"
 [ "$(grep -c '^head_sha=' "$META")" -eq 1 ] \
   && [ "$(sed -n 's/^head_sha=//p' "$META")" = "$EXPECTED_SHA" ] \
-  && [ "$(grep -c '^display_version=' "$META")" -eq 1 ] \
-  && [ "$(sed -n 's/^display_version=//p' "$META")" = "$VERSION" ] || {
-  echo "REFUSING: signed artifact version/provenance is not the current PR head" >&2; exit 1;
+  && [ "$(grep -c '^display_version=' "$META")" -eq 1 ] || {
+  echo "REFUSING: signed artifact provenance is not the current PR head" >&2; exit 1;
+}
+VERSION=$(sed -n 's/^display_version=//p' "$META")
+[[ "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)-PR-([1-9][0-9]*)$ ]] \
+  && (( ${#VERSION} <= 31 )) \
+  && [ "${BASH_REMATCH[4]}" = "$PR" ] || {
+  echo "REFUSING: signed artifact display version is not the exact PR preview identity" >&2; exit 1;
 }
 case "$TARGET" in esp32) SFX=""; FAMILY=ESP32 ;; esp32s3) SFX=-s3; FAMILY=ESP32-S3 ;;
   esp32c3) SFX=-c3; FAMILY=ESP32-C3 ;; esp32c6) SFX=-c6; FAMILY=ESP32-C6 ;;
@@ -212,6 +217,7 @@ APP="$CI_DIR/tesla-key-esp32$SFX.bin"
 [ "$(wc -c < "$APP" | tr -d ' ')" -le $((0x1e8000)) ] || {
   echo "REFUSING: signed preview app exceeds the policy limit" >&2; exit 1;
 }
+python3 scripts/check-firmware-artifacts.py --app-only --target "$TARGET" --version "$VERSION" --app "$APP" --signed-app --expected-public-key-digest scripts/ota-signing-public-key.sha256
 APP_INFO=$(esptool image-info "$APP")
 printf '%s\n' "$APP_INFO"
 printf '%s\n' "$APP_INFO" | grep -qx "Detected image type: $FAMILY" \

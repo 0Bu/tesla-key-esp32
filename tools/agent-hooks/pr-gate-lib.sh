@@ -3,7 +3,7 @@
 #
 # THERE IS NO FILE MARKER. The pass-state of a review/audit lives as a TICKED, SHA-STAMPED
 # checkbox in the pull request's body, e.g.:
-#     - [x] `$project-review` clean — merge gate @ a1b2c3d4e5f6
+#     - [x] `$project-review` clean — merge gate @ a1b2c3d4e5f6789012345678901234567890abcd
 # Historical slash-form records remain accepted for existing PR bodies.
 # The gate reads that checkbox from the PR (for a merge/push) or from the body being submitted
 # (for a PR-create call, no network needed) and allows the action only while the box is checked
@@ -19,7 +19,7 @@
 
 # Hooks verify this marker and the functions they consume immediately after sourcing. A missing,
 # truncated or syntactically broken library is a hard block, never an unclassified/allowed action.
-GATE_PR_LIB_API=2
+GATE_PR_LIB_API=3
 
 agent_gate_run_bounded() {
   local seconds="$1" root
@@ -43,7 +43,7 @@ agent_gate_workdir_matches() {
 #   catalog can have moved. Keep the release workflow set explicit: Renovate is dependency
 #   maintenance, while build/sign/publish and preview cleanup are catalogued release behavior.
 gate_feature_docs_relevant() {
-  grep -Eq '^(main/|test/|sdkconfig\.defaults($|\.)|partitions\.csv$|AGENTS\.md$|\.agents/|\.codex/|\.github/PULL_REQUEST_TEMPLATE\.md$|tools/agent-hooks/|tools/agent-config/|docs/(index\.html|installer-bootstrap\.mjs|serial-port-release\.mjs|web-installer\.mjs|vendor/)|\.github/workflows/(build|signed-pr-preview|pr-preview-cleanup)\.yml$|scripts/release-relevance\.sh$)'
+  grep -Eq '^(main/|test/|sdkconfig\.defaults($|\.)|partitions\.csv$|AGENTS\.md$|\.agents/|\.codex/|\.github/PULL_REQUEST_TEMPLATE\.md$|tools/agent-hooks/|tools/agent-config/|docs/(index\.html|installer-bootstrap\.mjs|serial-port-release\.mjs|web-installer\.mjs|vendor/)|\.github/workflows/(build|signed-pr-preview|pr-preview-cleanup|pr-policy|bench-acceptance)\.yml$|scripts/release-relevance\.sh$)'
 }
 
 # gate_checkbox_status <content> <key>
@@ -51,7 +51,7 @@ gate_feature_docs_relevant() {
 #   A match is one complete canonical Markdown task-list line. Its leading checkbox is followed by
 #   exactly `$<key>` (or the historical `/<key>` form), the key-specific success word, an em dash, the
 #   key-specific gate phrase and
-#   one standalone 7..40-hex SHA. Optional Markdown code ticks around `/<key>` are accepted; no
+#   one standalone lowercase full 40-hex SHA. Optional Markdown code ticks around `/<key>` are accepted; no
 #   other status/trailing prose is. Callers pass an actual PR body; command text/titles are never
 #   inspected.
 gate_checkbox_status() {
@@ -155,11 +155,13 @@ if len(matching) != 1:
 mark, text = matching[0]
 success, phrase = spec
 record = re.compile(
-    rf"^`?[$/]{re.escape(key)}`?\s+{re.escape(success)}\s+—\s+{re.escape(phrase)}\s+@\s+([0-9a-f]{{7,40}})$",
+    rf"^`?[$/]{re.escape(key)}`?\s+{re.escape(success)}\s+—\s+{re.escape(phrase)}\s+@\s+([0-9a-f]{{40}})$",
     re.I,
 )
 match = record.fullmatch(text)
 if not match:
+    print("absent")
+elif match.group(1) != match.group(1).lower():
     print("absent")
 elif mark.lower() != "x":
     print("unchecked")
@@ -168,15 +170,11 @@ else:
 ' "$key"
 }
 
-# gate_sha_matches <a> <b>  -> 0 if one is a (>=7 char) case-insensitive prefix of the other.
+# gate_sha_matches <a> <b>  -> 0 only for two identical lowercase full commit SHAs.
 gate_sha_matches() {
-  local a b
-  a="$(printf '%s' "$1" | tr 'A-F' 'a-f')"
-  b="$(printf '%s' "$2" | tr 'A-F' 'a-f')"
-  [ "${#a}" -ge 7 ] && [ "${#b}" -ge 7 ] || return 1
-  case "$a" in "$b"*) return 0 ;; esac
-  case "$b" in "$a"*) return 0 ;; esac
-  return 1
+  printf '%s' "$1" | grep -Eq '^[0-9a-f]{40}$' || return 1
+  printf '%s' "$2" | grep -Eq '^[0-9a-f]{40}$' || return 1
+  [ "$1" = "$2" ]
 }
 
 # gate_bash_segments <cmd>
@@ -1058,8 +1056,8 @@ PY
   cat -- "$resolved" 2>/dev/null || return 2
 }
 
-# gate_head_sha  -> local HEAD (short 12), empty if not a git repo.
-gate_head_sha() { git -C "${GATE_PROJ:-$PWD}" rev-parse --short=12 HEAD 2>/dev/null; }
+# gate_head_sha  -> exact local HEAD commit, empty if not a git repo.
+gate_head_sha() { git -C "${GATE_PROJ:-$PWD}" rev-parse --verify 'HEAD^{commit}' 2>/dev/null; }
 
 # gate_full_head_sha  -> exact local HEAD commit, empty if not a git repo.
 gate_full_head_sha() {

@@ -1,5 +1,6 @@
 # ESP-IDF build output
 build/
+/build_boundary_*/
 /.ccache/
 sdkconfig
 sdkconfig.old
@@ -62,3 +63,5 @@ ota_signing_key.pem
 /_fw/
 /_pr_site/
 /dist/
+# Second-runner artifacts are downloaded as inert comparison data in protected signer jobs.
+/_ci-independent/

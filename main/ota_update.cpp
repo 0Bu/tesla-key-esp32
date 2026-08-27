@@ -9,16 +9,23 @@
 #include <esp_app_desc.h>
 #include <esp_http_client.h>
 #include <esp_https_ota.h>
+#include <esp_heap_caps.h>
 #include <esp_ota_ops.h>
 #include <esp_crt_bundle.h>
 #include <cJSON.h>
 
+#include "logic/heap_watchdog.hpp"
+#include "logic/json_syntax.hpp"
+#include "logic/ota_contract.hpp"
+#include "ble_client.hpp"
+#include "ota_manifest.hpp"
 #include "platform.hpp"
+#include "runtime_admission.hpp"
 #include "task_config.hpp"
 #include "rtos_guard.hpp"
 
 #include <atomic>
-#include <cstdio>
+#include <array>
 #include <cstring>
 #include <exception>
 #include <memory>
@@ -26,30 +33,24 @@
 
 static const char* TAG = "ota";
 
-// One atomic owner word closes both halves of the OTA/identity TOCTOU window. A separate
+// One atomic owner word closes the OTA/identity/fault-restart TOCTOU windows. A separate
 // `s_running` boolean can answer status questions, but cannot serialize "checked false, then OTA
 // started". Every OTA worker owns Ota from before task creation until it exits/reboots; every
-// key/VIN transaction owns IdentityMutation for its complete journal + NVS mutation lifetime.
-static std::atomic<tk::OtaIdentityGateState> s_operation_gate{
-    tk::OtaIdentityGateState::Idle};
+// key/VIN transaction owns IdentityMutation for its complete journal + NVS mutation lifetime; a
+// fault restart owns FaultRestart from before reboot_why is persisted until restart (or releases
+// it when persistence fails).
+static tk::OtaIdentityOperationGate s_operation_gate;
 
 static bool try_begin_ota_operation() {
-    auto expected = s_operation_gate.load(std::memory_order_acquire);
-    if (!tk::ota_operation_may_start(expected)) return false;
-    return s_operation_gate.compare_exchange_strong(
-        expected, tk::OtaIdentityGateState::Ota,
-        std::memory_order_acq_rel, std::memory_order_acquire);
+    return s_operation_gate.try_begin(tk::OtaIdentityGateState::Ota);
 }
 
 static void finish_operation(tk::OtaIdentityGateState owner) {
-    auto expected = owner;
-    if (!s_operation_gate.compare_exchange_strong(
-            expected, tk::OtaIdentityGateState::Idle,
-            std::memory_order_acq_rel, std::memory_order_acquire)) {
+    if (!s_operation_gate.finish(owner)) {
         // Never clear a different owner's gate: doing so would turn an invariant violation into
         // permission for a real overlapping reboot/mutation. Leave it fail-closed and diagnose.
         ESP_LOGE(TAG, "OTA/identity operation gate owner mismatch (expected=%d, actual=%d)",
-                 static_cast<int>(owner), static_cast<int>(expected));
+                 static_cast<int>(owner), static_cast<int>(s_operation_gate.state()));
     }
 }
 
@@ -77,16 +78,14 @@ tk::OtaVerificationState ota_verification_state() {
 bool ota_identity_mutation_allowed(tk::IdentityMutationEntry entry) {
     return tk::identity_mutation_may_start(
         ota_verification_state(),
-        s_operation_gate.load(std::memory_order_acquire), entry);
+        s_operation_gate.state(), entry);
 }
 
 OtaIdentityMutationGuard::OtaIdentityMutationGuard(tk::IdentityMutationEntry entry) {
     const tk::OtaVerificationState before = ota_verification_state();
-    auto expected = s_operation_gate.load(std::memory_order_acquire);
+    const auto expected = s_operation_gate.state();
     if (!tk::identity_mutation_may_start(before, expected, entry)) return;
-    if (!s_operation_gate.compare_exchange_strong(
-            expected, tk::OtaIdentityGateState::IdentityMutation,
-            std::memory_order_acq_rel, std::memory_order_acquire)) {
+    if (!s_operation_gate.try_begin(tk::OtaIdentityGateState::IdentityMutation)) {
         return;
     }
 
@@ -104,13 +103,71 @@ OtaIdentityMutationGuard::~OtaIdentityMutationGuard() {
     if (held_) finish_operation(tk::OtaIdentityGateState::IdentityMutation);
 }
 
-// Confirm a still-unverified OTA image before a deliberate reboot — see the header. Mirrors the
-// mark-valid path in main.cpp's ota_health_gate_task, but fires immediately (the user interacting is
-// the health signal) so an intentional restart within the health window doesn't trigger a rollback.
+bool ota_fault_restart_begin() {
+    return s_operation_gate.try_begin(tk::OtaIdentityGateState::FaultRestart);
+}
+
+void ota_fault_restart_cancel() {
+    finish_operation(tk::OtaIdentityGateState::FaultRestart);
+}
+
+OtaHealthCommitGuard::OtaHealthCommitGuard()
+    : held_(s_operation_gate.try_begin(tk::OtaIdentityGateState::HealthCommit)) {}
+
+OtaHealthCommitGuard::~OtaHealthCommitGuard() {
+    if (held_) finish_operation(tk::OtaIdentityGateState::HealthCommit);
+}
+
+// Confirm a still-unverified OTA image before a successful network/logging/setup commit reboot —
+// see the header. Mirrors the mark-valid path in main.cpp's ota_health_gate_task, but fires once the
+// durable commit AND the post-admission heap sample prove the runtime healthy. Identity mutations
+// deliberately never reach this path. A qualifying restart inside the health window must not
+// trigger a rollback unless the image is already critically heap-starved.
 void ota_confirm_pending_image(tk::OtaRebootClass reboot_class) {
     if (!tk::ota_reboot_confirms_pending_image(reboot_class)) {
         ESP_LOGE(TAG, "refusing OTA confirmation for non-user recovery reboot class %d",
                  static_cast<int>(reboot_class));
+        return;
+    }
+
+    // The user commit is valid health evidence, but mark-valid is still the same irreversible
+    // operation as the timed health gate. Serialize it against a persisted FaultRestart window,
+    // OTA and identity work; if another owner won, leave PENDING_VERIFY armed so the imminent
+    // reboot fails closed into rollback instead of crossing that owner's shutdown transaction.
+    OtaHealthCommitGuard commit_guard;
+    if (!commit_guard) {
+        ESP_LOGW(TAG, "OTA image confirmation postponed by an active operation; rollback remains armed");
+        return;
+    }
+    // A durable configuration write is not proof that the essential runtime started. In
+    // particular, recovery HTTP remains available in Safe Mode and during a partial boot. Check
+    // admission only after owning HealthCommit so Ready cannot race a FaultRestart/OTA owner; all
+    // non-Ready states leave the one automatic rollback armed.
+    if (!tk::runtime_admission_vehicle_ready()) {
+        ESP_LOGW(TAG, "OTA image confirmation refused: essential runtime is not ready; "
+                      "rollback remains armed");
+        return;
+    }
+    if (!ble_host_synced()) {
+        ESP_LOGW(TAG, "OTA image confirmation refused: NimBLE host is not synced; "
+                      "rollback remains armed");
+        return;
+    }
+    if (ble_host_reset_count() != 0) {
+        ESP_LOGW(TAG, "OTA image confirmation refused: NimBLE host reset since admission; "
+                      "rollback remains armed");
+        return;
+    }
+    // Re-sample only after winning the same exclusive owner as the timed health gate. A healthy
+    // sample taken before the CAS could become stale while FaultRestart persists its breadcrumb;
+    // crossing that window would permanently validate the image immediately before it reboots.
+    const size_t commit_largest = heap_caps_get_largest_free_block(
+        MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL);
+    if (commit_largest < tk::kHeapCriticalBytes) {
+        ESP_LOGW(TAG, "OTA image confirmation refused: internal largest block %u B < %u B; "
+                      "rollback remains armed",
+                 static_cast<unsigned>(commit_largest),
+                 static_cast<unsigned>(tk::kHeapCriticalBytes));
         return;
     }
     const esp_partition_t* running = esp_ota_get_running_partition();
@@ -124,8 +181,9 @@ void ota_confirm_pending_image(tk::OtaRebootClass reboot_class) {
 
 // Short per-target image suffix so "esp32" appears only once in the OTA filename: esp32 ->
 // "" (tesla-key-esp32.bin), esp32s3 -> "-s3", esp32c3 -> "-c3", esp32c6 -> "-c6".
-// Must stay in lockstep with image_suffix() in ci-sign-artifacts.sh + build-pages.sh
-// (which name the published asset the device pulls) — a mismatch 404s every OTA download.
+// Must stay in lockstep with the signer/Pages target tables and the host-tested
+// tk::image_suffix() mapping (which name the published asset the device pulls) — a mismatch
+// 404s every OTA download.
 // Kept as a string-literal macro because the download URL is assembled by compile-time
 // concatenation below; the static_assert ties it to the host-tested tk::image_suffix()
 // so the macro and the pure mapping can never drift.
@@ -145,9 +203,36 @@ static_assert(std::string_view{TESLA_OTA_IMG_SUFFIX} == tk::image_suffix(TK_TARG
 
 // ─── Shared status (written by the OTA task, read by HTTP handlers) ────────────
 
+static constexpr size_t kOtaStatusMessageCapacity = 96;
+static constexpr size_t kOtaStatusVersionCapacity = tk::kOtaVersionMaxBytes + 1;
+
+template <size_t N>
+static void copy_status_text(std::array<char, N>& out, const char* text) noexcept {
+    static_assert(N > 0);
+    out.fill('\0');
+    if (!text) return;
+    const size_t size = strnlen(text, N - 1);
+    std::memcpy(out.data(), text, size);
+}
+
+struct OtaStatusPod {
+    OtaState state{OtaState::Idle};
+    int progress{0};
+    bool update_available{false};
+    std::array<char, kOtaStatusMessageCapacity> message{};
+    std::array<char, kOtaStatusVersionCapacity> available{};
+    std::array<char, kOtaStatusVersionCapacity> current{};
+};
+
+static OtaStatusPod initial_status() noexcept {
+    OtaStatusPod status{};
+    copy_status_text(status.message, "idle");
+    return status;
+}
+
 static std::atomic<SemaphoreHandle_t> s_lock{nullptr};
-static OtaStatus                     s_status = { OtaState::Idle, 0, "idle", "", false, "" };
-static std::atomic<bool>             s_running{false};    // a check or download task is active
+static OtaStatusPod                   s_status = initial_status();
+static std::atomic<bool>              s_running{false};    // a check or download task is active
 
 static SemaphoreHandle_t ensure_lock() {
     SemaphoreHandle_t lock = s_lock.load(std::memory_order_acquire);
@@ -164,66 +249,74 @@ static SemaphoreHandle_t ensure_lock() {
     return candidate;
 }
 
-// The status fields are std::string, so every assignment/copy below can throw bad_alloc on a
-// fragmented heap. RAII (tk::SemGuard) releases s_lock during unwinding, so a throw here can't
-// wedge the lock and freeze /ota/status for the rest of the boot.
 static void set_state(OtaState st, int pct, const char* msg) {
+    std::array<char, kOtaStatusMessageCapacity> message{};
+    copy_status_text(message, msg);
     SemaphoreHandle_t lock = ensure_lock();
     if (!lock) return;
     tk::SemGuard g(lock);
     if (!g) return;
     s_status.state    = st;
     s_status.progress = pct;
-    s_status.message  = msg ? msg : "";
+    s_status.message  = message;
 }
 
-static void set_available(const char* ver) {
-    SemaphoreHandle_t lock = ensure_lock();
-    if (!lock) return;
-    tk::SemGuard g(lock);
-    if (!g) return;
-    s_status.available = ver ? ver : "";
+static OtaStatus unavailable_status_snapshot() {
+    // This object is built independently of s_status. It may still throw if the standard library
+    // cannot represent even these short strings under total OOM (callers already contain that),
+    // but it can never race a writer or copy a concurrently-reallocated std::string buffer.
+    return {OtaState::Error, 0, "unavailable", "", false, ""};
 }
 
 OtaStatus ota_get_status() {
     SemaphoreHandle_t lock = ensure_lock();
-    if (!lock) return s_status;
-    tk::SemGuard g(lock);
-    if (!g) return s_status;   // best-effort read if the lock never allocated
-    return s_status;
+    if (!lock) return unavailable_status_snapshot();
+    OtaStatusPod snapshot{};
+    {
+        tk::SemGuard g(lock);
+        if (!g) return unavailable_status_snapshot();
+        snapshot = s_status;  // fixed POD/arrays only; noexcept and cross-generation coherent
+    }
+    // Any allocation happens after releasing the status lock. A failed materialization is caught
+    // by the HTTP/task boundary and cannot leave a partially published shared generation.
+    return {snapshot.state, snapshot.progress, snapshot.message.data(),
+            snapshot.available.data(), snapshot.update_available, snapshot.current.data()};
 }
 
 bool ota_is_busy() {
     return s_running.load(std::memory_order_acquire) ||
-           s_operation_gate.load(std::memory_order_acquire) ==
+           s_operation_gate.state() ==
                tk::OtaIdentityGateState::Ota;
 }
 
-// ─── Version comparison (semver-ish "x.y.z") ───────────────────────────────────
+// ─── Canonical, bounded version input ──────────────────────────────────────────
 
-static void parse_ver(const char* s, int v[3]) {
-    v[0] = v[1] = v[2] = 0;
-    if (s) sscanf(s, "%d.%d.%d", &v[0], &v[1], &v[2]);
+static std::string_view running_version() {
+    const esp_app_desc_t* description = esp_app_get_description();
+    return description ? tk::bounded_c_string_view(description->version) : std::string_view{};
 }
 
-// true if version a is strictly newer than b
-static bool ver_newer(const char* a, const char* b) {
-    int va[3], vb[3];
-    parse_ver(a, va);
-    parse_ver(b, vb);
-    for (int i = 0; i < 3; ++i) {
-        if (va[i] != vb[i]) return va[i] > vb[i];
-    }
-    return false;
+static void publish_check_status(const OtaStatusPod& candidate) noexcept {
+    SemaphoreHandle_t lock = ensure_lock();
+    if (!lock) return;
+    tk::SemGuard g(lock);
+    if (!g) return;
+    s_status = candidate;
 }
 
-static const char* running_version() {
-    return esp_app_get_description()->version;
+static void set_check_error(const char* message) noexcept {
+    OtaStatusPod candidate{};
+    candidate.state = OtaState::Error;
+    copy_status_text(candidate.message, message);
+    const std::string_view current = running_version();
+    copy_status_text(candidate.current, current.data());
+    publish_check_status(candidate);
 }
 
 // ─── Small HTTPS GET into a buffer (for the tiny manifest.json) ─────────────────
 
 static bool http_get_to_buffer(const char* url, std::string& out) {
+    out.clear();
     esp_http_client_config_t cfg = {};
     cfg.url               = url;
     cfg.crt_bundle_attach = esp_crt_bundle_attach;   // verify against bundled CA roots
@@ -239,19 +332,47 @@ static bool http_get_to_buffer(const char* url, std::string& out) {
         }
     } client_guard{c};
 
-    bool ok = false;
     if (esp_http_client_open(c, 0) == ESP_OK) {
-        esp_http_client_fetch_headers(c);
-        int status = esp_http_client_get_status_code(c);
+        const std::int64_t content_length = esp_http_client_fetch_headers(c);
+        const int status = esp_http_client_get_status_code(c);
         if (status == 200) {
-            char buf[512];
-            int  r;
-            out.clear();
-            while ((r = esp_http_client_read(c, buf, sizeof(buf))) > 0) {
-                out.append(buf, r);
-                if (out.size() > 8192) break;   // manifest is tiny; bound the read
+            const bool chunked = esp_http_client_is_chunked_response(c);
+            tk::BoundedHttpBodyGate body_gate(content_length, chunked);
+            if (!body_gate.valid_headers()) {
+                ESP_LOGW(TAG, "manifest length is missing, empty or exceeds %u bytes",
+                         static_cast<unsigned>(tk::kOtaManifestMaxBytes));
+                return false;
             }
-            ok = !out.empty();
+
+            // One exact bounded allocation: repeated append growth can transiently require both
+            // the old and new contiguous blocks while TLS is still live. Fixed-length responses
+            // reserve their declared size; chunked responses reserve the hard 8192-byte ceiling.
+            try {
+                out.reserve(chunked ? tk::kOtaManifestMaxBytes
+                                    : static_cast<std::size_t>(content_length));
+            } catch (...) {
+                ESP_LOGW(TAG, "manifest buffer allocation failed");
+                return false;
+            }
+
+            char buf[512];
+            while (true) {
+                const std::size_t requested = body_gate.next_read_size(sizeof(buf));
+                if (requested == 0) {
+                    out.clear();
+                    return false;
+                }
+                const int read = esp_http_client_read(c, buf, static_cast<int>(requested));
+                const auto decision = body_gate.accept_read(
+                    read, esp_http_client_is_complete_data_received(c));
+                if (decision == tk::BoundedBodyReadResult::Reject) {
+                    ESP_LOGW(TAG, "manifest response was truncated, oversized or read failed");
+                    out.clear();
+                    return false;
+                }
+                if (read > 0) out.append(buf, static_cast<std::size_t>(read));
+                if (decision == tk::BoundedBodyReadResult::Complete) return true;
+            }
         } else {
             ESP_LOGW(TAG, "manifest HTTP status %d", status);
         }
@@ -259,77 +380,111 @@ static bool http_get_to_buffer(const char* url, std::string& out) {
         ESP_LOGW(TAG, "manifest connection failed");
     }
 
-    return ok;
+    out.clear();
+    return false;
 }
 
 // ─── Check for a newer release ──────────────────────────────────────────────────
 
 OtaCheckResult ota_check() {
     OtaCheckResult res{};
-    res.current = running_version();
+    const std::string_view current = running_version();
+    res.current.assign(current.data(), current.size());
 
-    set_state(OtaState::Checking, 0, "checking for updates");
     ESP_LOGI(TAG, "checking %s (running %s)", CONFIG_TESLA_OTA_MANIFEST_URL, res.current.c_str());
 
     std::string body;
     if (!http_get_to_buffer(CONFIG_TESLA_OTA_MANIFEST_URL, body)) {
         res.ok     = false;
         res.reason = "could not reach update server";
-        set_state(OtaState::Idle, 0, "check failed");
         return res;
     }
 
-    std::unique_ptr<cJSON, decltype(&cJSON_Delete)> j(cJSON_Parse(body.c_str()), cJSON_Delete);
-    cJSON* v = j ? cJSON_GetObjectItemCaseSensitive(j.get(), "version") : nullptr;
-    if (cJSON_IsString(v) && v->valuestring) res.available = v->valuestring;
-
-    if (res.available.empty()) {
+    const char* parse_end = nullptr;
+    const auto materialized = tk::json_materialize<cJSON>(
+        body.data(), body.size(), [&](const char* text) {
+            return cJSON_ParseWithLengthOpts(
+                text, body.size() + 1, &parse_end, true);
+        });
+    if (materialized.status != tk::JsonMaterializeStatus::Ok) {
         res.ok     = false;
-        res.reason = "no version in manifest";
-        set_state(OtaState::Idle, 0, "check failed");
+        res.reason = materialized.status == tk::JsonMaterializeStatus::NoMemory
+                         ? "update manifest ran out of resources"
+                         : "invalid update manifest";
         return res;
     }
+    std::unique_ptr<cJSON, decltype(&cJSON_Delete)> j(materialized.root, cJSON_Delete);
+    const tk::OtaManifestVersion manifest = tk::inspect_ota_manifest(j.get());
+    if (parse_end != body.c_str() + body.size() ||
+        manifest.status != tk::OtaManifestInspectStatus::Valid || !manifest.value) {
+        res.ok     = false;
+        res.reason = "invalid update manifest";
+        return res;
+    }
+    // cJSON owns decoded strings. Release the bounded transport body before any result-string
+    // allocation so the largest-block peak is body+cJSON, never body+cJSON+another body-sized copy.
+    std::string{}.swap(body);
+    const std::string_view available(manifest.value);
+    // Validate the cJSON-owned view before copying: an attacker-controlled ~8 KiB version must
+    // not trigger another large contiguous std::string allocation while TLS/body/cJSON coexist.
+    if (!tk::canonical_ota_version(available)) {
+        res.ok     = false;
+        res.reason = "invalid version in manifest";
+        return res;
+    }
+    if (!tk::canonical_ota_version(res.current)) {
+        res.ok     = false;
+        res.reason = "invalid running firmware version";
+        return res;
+    }
+    res.available.assign(available.data(), available.size());
 
     res.ok               = true;
-    res.update_available = ver_newer(res.available.c_str(), res.current.c_str());
+    res.update_available = tk::compare_ota_versions(res.available, res.current) ==
+                           tk::OtaVersionOrder::Newer;
     res.reason           = res.update_available ? "update available" : "up to date";
-    set_available(res.available.c_str());
-    set_state(OtaState::Idle, 0, res.reason.c_str());
     ESP_LOGI(TAG, "available %s — %s", res.available.c_str(), res.reason.c_str());
     return res;
 }
 
 // Publish a finished check into the shared status for /ota/status polling.
 static void set_check_done(const OtaCheckResult& r) {
-    SemaphoreHandle_t lock = ensure_lock();
-    if (!lock) return;
-    tk::SemGuard g(lock);   // RAII: the std::string assigns below can throw
-    if (!g) return;
-    s_status.state            = r.ok ? OtaState::Idle : OtaState::Error;
-    s_status.progress         = 0;
-    s_status.message          = r.reason;
-    s_status.available        = r.available;
-    s_status.update_available = r.update_available;
-    s_status.current          = r.current;
+    OtaStatusPod candidate{};
+    candidate.state = r.ok ? OtaState::Idle : OtaState::Error;
+    candidate.progress = 0;
+    candidate.update_available = r.update_available;
+    copy_status_text(candidate.message, r.reason.c_str());
+    copy_status_text(candidate.available, r.available.c_str());
+    copy_status_text(candidate.current, r.current.c_str());
+    publish_check_status(candidate);
 }
 
 static void ota_check_task(void*) {
-    // A one-shot job: contain any throw (http_get_to_buffer's std::string appends, cJSON, the
-    // status std::string ops can all bad_alloc) as a terminal Error state — NEVER let it unwind
-    // into the FreeRTOS C trampoline and reboot the device mid-check (issue #204).
     try {
-        OtaCheckResult r = ota_check();   // blocking HTTPS GET, runs off the HTTP task
-        set_check_done(r);
-    } catch (const std::exception& e) {
-        ESP_LOGE(TAG, "OTA check task exception: %s", e.what());
-        try { set_state(OtaState::Error, 0, "update check ran out of resources"); } catch (...) {}
+        // A one-shot job: contain any throw (http_get_to_buffer's std::string appends, cJSON, the
+        // result std::string ops can all bad_alloc) as a terminal Error state — NEVER let it unwind
+        // into the FreeRTOS C trampoline and reboot the device mid-check (issue #204).
+        try {
+            OtaCheckResult r = ota_check();   // blocking HTTPS GET, runs off the HTTP task
+            set_check_done(r);
+        } catch (const std::exception& e) {
+            ESP_LOGE(TAG, "OTA check task exception: %s", e.what());
+            set_check_error("update check ran out of resources");
+        } catch (...) {
+            ESP_LOGE(TAG, "OTA check task unknown exception");
+            set_check_error("update check failed unexpectedly");
+        }
+        s_running.store(false, std::memory_order_release);
+        finish_operation(tk::OtaIdentityGateState::Ota);
+        vTaskDelete(nullptr);
     } catch (...) {
-        ESP_LOGE(TAG, "OTA check task unknown exception");
-        try { set_state(OtaState::Error, 0, "update check failed unexpectedly"); } catch (...) {}
+        // The outer boundary also contains any future throwing setup/cleanup statement added
+        // around the operation-specific handler above.
+        ESP_LOGE(TAG, "OTA check boundary cleanup threw; stopping task");
+        s_running.store(false, std::memory_order_release);
+        finish_operation(tk::OtaIdentityGateState::Ota);
+        vTaskDelete(nullptr);
     }
-    s_running.store(false, std::memory_order_release);
-    finish_operation(tk::OtaIdentityGateState::Ota);
-    vTaskDelete(nullptr);
 }
 
 bool ota_check_start() {
@@ -353,7 +508,7 @@ bool ota_check_start() {
     if (xTaskCreate(ota_check_task, "ota_chk", 8192, nullptr, tk::kPrioOtaCheck, nullptr) != pdPASS) {
         s_running.store(false, std::memory_order_release);
         finish_operation(tk::OtaIdentityGateState::Ota);
-        try { set_state(OtaState::Error, 0, "could not start check task"); } catch (...) {}
+        set_check_error("could not start check task");
         return false;
     }
     return true;
@@ -432,9 +587,19 @@ static void ota_task_impl() {
         set_state(OtaState::Error, 0, "could not read image header");
         return;
     }
-    if (!ver_newer(new_app.version, running_version())) {
-        ESP_LOGW(TAG, "OTA refused: image %s not newer than running %s (downgrade blocked)",
-                 new_app.version, running_version());
+    const std::string_view new_version = tk::bounded_c_string_view(new_app.version);
+    const std::string_view current_version = running_version();
+    if (!tk::canonical_ota_version(new_version) ||
+        !tk::canonical_ota_version(current_version)) {
+        ESP_LOGW(TAG, "OTA refused: image or running version is malformed");
+        set_state(OtaState::Error, 0, "invalid firmware version");
+        return;
+    }
+    if (tk::compare_ota_versions(new_version, current_version) !=
+        tk::OtaVersionOrder::Newer) {
+        ESP_LOGW(TAG, "OTA refused: image %.*s not newer than running %.*s (downgrade blocked)",
+                 static_cast<int>(new_version.size()), new_version.data(),
+                 static_cast<int>(current_version.size()), current_version.data());
         set_state(OtaState::Error, 0, "no newer version available");
         return;
     }
@@ -449,15 +614,16 @@ static void ota_task_impl() {
     // to match exactly turns "the newest thing the host is willing to serve" back into "the build
     // the release actually is". Also catches the ordinary, far more likely case: a publish that
     // wrote a new manifest beside a stale image.
-    if (pre.available != new_app.version) {
-        ESP_LOGE(TAG, "OTA refused: manifest advertises %s but the image is %s — the manifest and "
+    if (std::string_view(pre.available) != new_version) {
+        ESP_LOGE(TAG, "OTA refused: manifest advertises %s but the image is %.*s — the manifest and "
                       "the image disagree, so neither can be trusted to be the published release",
-                 pre.available.c_str(), new_app.version);
+                 pre.available.c_str(), static_cast<int>(new_version.size()), new_version.data());
         set_state(OtaState::Error, 0, "manifest and image versions disagree");
         return;
     }
-    ESP_LOGI(TAG, "OTA image %s newer than running %s and matches the manifest — proceeding",
-             new_app.version, running_version());
+    ESP_LOGI(TAG, "OTA image %.*s newer than running %.*s and matches the manifest — proceeding",
+             static_cast<int>(new_version.size()), new_version.data(),
+             static_cast<int>(current_version.size()), current_version.data());
 
     while (true) {
         err = esp_https_ota_perform(handle);
@@ -487,17 +653,24 @@ static void ota_task_impl() {
 
 static void ota_task(void*) {
     try {
-        ota_task_impl();
-    } catch (const std::exception& e) {
-        ESP_LOGE(TAG, "OTA task exception: %s", e.what());
-        try { set_state(OtaState::Error, 0, "update ran out of resources"); } catch (...) {}
+        try {
+            ota_task_impl();
+        } catch (const std::exception& e) {
+            ESP_LOGE(TAG, "OTA task exception: %s", e.what());
+            try { set_state(OtaState::Error, 0, "update ran out of resources"); } catch (...) {}
+        } catch (...) {
+            ESP_LOGE(TAG, "OTA task unknown exception");
+            try { set_state(OtaState::Error, 0, "update failed unexpectedly"); } catch (...) {}
+        }
+        s_running.store(false, std::memory_order_release);
+        finish_operation(tk::OtaIdentityGateState::Ota);
+        vTaskDelete(nullptr);
     } catch (...) {
-        ESP_LOGE(TAG, "OTA task unknown exception");
-        try { set_state(OtaState::Error, 0, "update failed unexpectedly"); } catch (...) {}
+        ESP_LOGE(TAG, "OTA task boundary cleanup threw; stopping task");
+        s_running.store(false, std::memory_order_release);
+        finish_operation(tk::OtaIdentityGateState::Ota);
+        vTaskDelete(nullptr);
     }
-    s_running.store(false, std::memory_order_release);
-    finish_operation(tk::OtaIdentityGateState::Ota);
-    vTaskDelete(nullptr);
 }
 
 bool ota_start() {

@@ -6,9 +6,14 @@
 // surface invoked it.
 
 #include "http_handlers.hpp"
+#include "runtime_admission.hpp"
 
 bool execute_vehicle_command(VehicleController& v, tk::CmdKind kind,
                              const int* ival, const bool* bval) {
+    // Defense in depth for any future non-HTTP command surface.  The wildcard dispatcher already
+    // returns 503 before parsing REST/MCP commands, but no caller may turn a partial boot into a
+    // BLE connect or signed vehicle command by invoking this shared dispatcher directly.
+    if (!tk::runtime_admission_vehicle_ready()) return false;
     switch (kind) {
         case tk::CmdKind::WakeUp:          return v.wake_up();
         case tk::CmdKind::ChargeStart:     return v.charge_start();

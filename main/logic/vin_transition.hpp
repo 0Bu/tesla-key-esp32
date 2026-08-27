@@ -148,10 +148,6 @@ enum class VinTransitionApply : uint8_t {
     Complete,
 };
 
-constexpr bool vin_transition_reboot_confirms_ota(VinTransitionApply result) {
-    return result == VinTransitionApply::Complete;
-}
-
 constexpr bool vin_transition_recovery_blocks_staging(bool key_reload_required,
                                                        bool pairing_cleanup_pending) {
     return key_reload_required || pairing_cleanup_pending;

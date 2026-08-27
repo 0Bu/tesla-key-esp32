@@ -1,12 +1,13 @@
 #pragma once
 
 #include <cstdint>
+#include "nvs_contract.hpp"
 
 namespace tk {
 
 // Lives in the same tesla_ble namespace as the private key and peer sessions. NVS entry names
 // are limited to 15 bytes, so keep this spelling short and pin its length in the host tests.
-inline constexpr char kKeyRotationMarker[] = "key_rotate";
+inline constexpr const char* kKeyRotationMarker = nvs_contract::kKeyRotation;
 
 // NotCommitted proves the private key mutation was never attempted. CommitUnknown means the
 // mutation was attempted but tesla-ble could not confirm the NVS commit: either the old or the

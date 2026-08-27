@@ -11,6 +11,17 @@ set -euo pipefail
 
 STABLE_TAG_RE='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
 VERSION_RE='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
+MAX_VERSION_BYTES=31
+
+valid_stable_version() {
+  local version="$1"
+  [[ "$version" =~ $VERSION_RE ]] && (( ${#version} <= MAX_VERSION_BYTES ))
+}
+
+valid_stable_tag() {
+  local tag="$1"
+  [[ "$tag" =~ $STABLE_TAG_RE ]] && (( ${#tag} - 1 <= MAX_VERSION_BYTES ))
+}
 
 validate_sha() {
   local repo_root="$1" sha="$2" label="$3"
@@ -49,7 +60,7 @@ fetch_current_main() {
 latest_valid_tag() {
   local repo_root="$1" tag rows=""
   while IFS= read -r tag; do
-    [[ "$tag" =~ $STABLE_TAG_RE ]] || continue
+    valid_stable_tag "$tag" || continue
     rows+="${rows:+$'\n'}$tag"
   done < <(git -C "$repo_root" tag -l 'v*')
   [[ -n "$rows" ]] || return 0
@@ -73,12 +84,12 @@ latest_published_stable_version() {
   }
   release_json="$(gh api "repos/$repository/releases/latest" 2>/dev/null)" || return 2
   tag="$(printf '%s' "$release_json" | jq -er '
-    select(.draft == false and .prerelease == false and
+    select(.draft == false and .prerelease == false and .immutable == true and
            (.tag_name | type == "string" and
             test("^v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"))) |
     .tag_name
   ' 2>/dev/null)" || return 2
-  [[ "$tag" =~ $STABLE_TAG_RE ]] || return 2
+  valid_stable_tag "$tag" || return 2
   version="${tag#v}"
   tag_sha="$(git -C "$repo_root" rev-parse "${tag}^{commit}" 2>/dev/null)" || return 2
   [[ "$tag_sha" =~ ^[0-9a-f]{40}$ ]] || return 2
@@ -112,7 +123,7 @@ select_version() {
   latest_tag="$(latest_valid_tag "$repo_root")" || return
   tag_rows="$(git -C "$repo_root" tag -l 'v*')" || return
   while IFS= read -r tag; do
-    [[ "$tag" =~ $STABLE_TAG_RE ]] || continue
+    valid_stable_tag "$tag" || continue
     resolved="$(git -C "$repo_root" rev-parse "${tag}^{commit}")" || return
     [[ "$resolved" == "$source_sha" ]] || continue
     matching+=("$tag")
@@ -141,12 +152,14 @@ require_current_release() {
   local tag latest_tag candidate tag_rows resolved
   local -a matching=()
   validate_current_main "$repo_root" "$source_sha" "$current_main_sha" || return
-  [[ "$version" =~ $VERSION_RE ]] || { echo "invalid release version: $version" >&2; return 2; }
+  valid_stable_version "$version" || {
+    echo "invalid or overlong release version: $version" >&2; return 2;
+  }
   tag="v$version"
   latest_tag="$(latest_valid_tag "$repo_root")" || return
   tag_rows="$(git -C "$repo_root" tag -l 'v*')" || return
   while IFS= read -r candidate; do
-    [[ "$candidate" =~ $STABLE_TAG_RE ]] || continue
+    valid_stable_tag "$candidate" || continue
     resolved="$(git -C "$repo_root" rev-parse "${candidate}^{commit}")" || return
     [[ "$resolved" == "$source_sha" ]] || continue
     matching+=("$candidate")
@@ -159,7 +172,7 @@ require_current_release() {
 
 require_published_release() {
   local repo_root="$1" source_sha="$2" current_main_sha="$3" version="$4"
-  local repository release_json latest_json release_id latest_id tag
+  local repository release_json latest_json release_id latest_id tag metadata_file
   require_current_release "$repo_root" "$source_sha" "$current_main_sha" "$version" || return
   command -v gh >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 || {
     echo "gh and jq are required to verify the published GitHub Release" >&2; return 2;
@@ -170,10 +183,21 @@ require_published_release() {
   }
   tag="v$version"
   release_json="$(gh api "repos/$repository/releases/tags/$tag")" || return
+  metadata_file="$(mktemp "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/tesla-release-metadata.XXXXXX")" \
+    || return 2
+  if ! printf '%s' "$release_json" > "$metadata_file" \
+      || ! python3 "$repo_root/scripts/check-release-assets.py" \
+        "$metadata_file" --metadata-only --version "$version" --source-sha "$source_sha" \
+        --expect-state published-immutable >/dev/null; then
+    rm -f -- "$metadata_file"
+    echo "GitHub Release $tag failed the exact 40-asset metadata contract" >&2
+    return 2
+  fi
+  rm -f -- "$metadata_file"
   release_id="$(printf '%s' "$release_json" | jq -er --arg tag "$tag" \
       --arg sha "$source_sha" --arg v "$version" '
     select(.tag_name == $tag and .target_commitish == $sha and
-           .draft == false and .prerelease == false) |
+           .draft == false and .prerelease == false and .immutable == true) |
     ["tesla-key-esp32-" + $v + "-merged.bin",
      "tesla-key-esp32-s3-" + $v + "-merged.bin",
      "tesla-key-esp32-c3-" + $v + "-merged.bin",
@@ -186,12 +210,13 @@ require_published_release() {
        (.[0].digest | type == "string" and test("^sha256:[0-9a-f]{64}$"))))) |
     .id | select(type == "number")
   ')" || {
-    echo "GitHub Release $tag is absent, stale or lacks exact digest-bound merged assets" >&2
+    echo "GitHub Release $tag is absent, mutable, stale or lacks exact digest-bound merged assets" >&2
     return 2
   }
   latest_json="$(gh api "repos/$repository/releases/latest")" || return
   latest_id="$(printf '%s' "$latest_json" | jq -er \
-    'select(.draft == false and .prerelease == false) | .id | select(type == "number")')" || return
+    'select(.draft == false and .prerelease == false and .immutable == true) |
+     .id | select(type == "number")')" || return
   [[ "$latest_id" == "$release_id" ]] || {
     echo "GitHub Release $tag is not the latest published Release" >&2
     return 2
@@ -200,7 +225,9 @@ require_published_release() {
 
 require_release_candidate() {
   local repo_root="$1" source_sha="$2" current_main_sha="$3" version="$4" selected
-  [[ "$version" =~ $VERSION_RE ]] || { echo "invalid release version: $version" >&2; return 2; }
+  valid_stable_version "$version" || {
+    echo "invalid or overlong release version: $version" >&2; return 2;
+  }
   selected="$(select_version "$repo_root" "$source_sha" "$current_main_sha")" || return
   [[ "$selected" == "$version" ]] || {
     echo "stale release candidate: selected=$version current-authorized=$selected" >&2
@@ -209,13 +236,25 @@ require_release_candidate() {
 }
 
 self_test() {
-  local script_root tmp remote sha_a sha_b sha_c sha_d got current fake_legacy
+  local script_root tmp remote sha_a sha_b sha_c sha_d got current fake_legacy overlong_version
+  local fake_mutable fake_without_immutable
   script_root="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
   tmp="$(mktemp -d "${TMPDIR:-/tmp}/tesla-release-version.XXXXXX")"
   remote="$tmp.remote.git"
   trap 'rm -rf -- "$tmp" "$remote"' RETURN
   mkdir -p "$tmp/scripts"
-  cp "$script_root/next-version.sh" "$tmp/scripts/next-version.sh"
+  cp "$script_root/next-version.sh" "$tmp/scripts/"
+  # check-release-assets loads both validators by exact sibling path at import time. Keep the
+  # isolated selector fixture closed but complete, so its published-Release test exercises the
+  # same fail-closed validator import graph as CI instead of failing before the contract runs.
+  for validator in \
+    check-release-assets.py check-otadata-contract.py check-firmware-artifacts.py; do
+    [[ -f "$script_root/$validator" && ! -L "$script_root/$validator" ]] || {
+      echo "selector self-test validator import is missing/unsafe: $validator" >&2
+      return 1
+    }
+    cp "$script_root/$validator" "$tmp/scripts/"
+  done
   chmod +x "$tmp/scripts/next-version.sh"
   "$tmp/scripts/next-version.sh" --self-test >/dev/null
   printf '1.2.0\n' > "$tmp/version.txt"
@@ -247,6 +286,25 @@ self_test() {
   got="$(select_version "$tmp" "$sha_b" "$sha_b")"
   [[ "$got" == 1.2.1 ]] || { echo "same-SHA tag reuse failed: $got" >&2; return 1; }
   require_current_release "$tmp" "$sha_b" "$sha_b" 1.2.1
+  overlong_version="12345678901234567890123456789012.0.0"
+  (( ${#overlong_version} > MAX_VERSION_BYTES )) || {
+    echo "overlong release fixture is not overlong" >&2; return 1;
+  }
+  git -C "$tmp" tag "v$overlong_version" "$sha_b"
+  got="$(select_version "$tmp" "$sha_b" "$sha_b")"
+  [[ "$got" == 1.2.1 ]] || {
+    echo "overlong stable tag changed same-SHA selection: $got" >&2; return 1;
+  }
+  if require_current_release "$tmp" "$sha_b" "$sha_b" "$overlong_version" \
+      >/dev/null 2>&1; then
+    echo "overlong current release version was accepted" >&2
+    return 1
+  fi
+  if require_release_candidate "$tmp" "$sha_b" "$sha_b" "$overlong_version" \
+      >/dev/null 2>&1; then
+    echo "overlong release candidate was accepted" >&2
+    return 1
+  fi
   git -C "$tmp" tag v1.2.1-rc.1 "$sha_a"
   got="$(select_version "$tmp" "$sha_b" "$sha_b")"
   [[ "$got" == 1.2.1 ]] || {
@@ -260,20 +318,68 @@ self_test() {
     'case "$2" in */releases/latest) cat "$GH_FAKE_LATEST" ;; *) cat "$GH_FAKE_RELEASE" ;; esac' \
     > "$fakebin/gh"
   chmod +x "$fakebin/gh"
-  printf '{"id":7,"tag_name":"v1.2.1","target_commitish":"%s","draft":false,"prerelease":false,"assets":[%s]}\n' \
-    "$sha_b" \
-    '{"id":1,"name":"tesla-key-esp32-1.2.1-merged.bin","size":1,"digest":"sha256:0000000000000000000000000000000000000000000000000000000000000000"},{"id":2,"name":"tesla-key-esp32-s3-1.2.1-merged.bin","size":1,"digest":"sha256:0000000000000000000000000000000000000000000000000000000000000000"},{"id":3,"name":"tesla-key-esp32-c3-1.2.1-merged.bin","size":1,"digest":"sha256:0000000000000000000000000000000000000000000000000000000000000000"},{"id":4,"name":"tesla-key-esp32-c6-1.2.1-merged.bin","size":1,"digest":"sha256:0000000000000000000000000000000000000000000000000000000000000000"}' \
-    > "$fake_release"
+  python3 - "$script_root/check-release-assets.py" "$fake_release" "$sha_b" <<'PY'
+import importlib.util
+import json
+from pathlib import Path
+import sys
+import tempfile
+
+spec = importlib.util.spec_from_file_location("release_assets", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(module)
+with tempfile.TemporaryDirectory(prefix="release-selector-assets-") as directory:
+    root = Path(directory)
+    for asset in module.expected_local_assets(root, "1.2.1").values():
+        asset.parent.mkdir(parents=True, exist_ok=True)
+        asset.write_bytes(b"x")
+    release = module.make_full_release(
+        root, "1.2.1", sys.argv[3], "published-immutable"
+    )
+    release["id"] = 7
+    Path(sys.argv[2]).write_text(json.dumps(release), encoding="utf-8")
+PY
   jq '.id = 8' "$fake_release" > "$fake_latest_newer"
+  fake_mutable="$tmp/fake-release-mutable.json"
+  fake_without_immutable="$tmp/fake-release-without-immutable.json"
+  jq '.immutable = false' "$fake_release" > "$fake_mutable"
+  jq 'del(.immutable)' "$fake_release" > "$fake_without_immutable"
   PATH="$fakebin:$PATH" GITHUB_REPOSITORY=owner/repo \
     GH_FAKE_RELEASE="$fake_release" GH_FAKE_LATEST="$fake_release" \
     require_published_release "$tmp" "$sha_b" "$sha_b" 1.2.1
+  jq '.assets = .assets[:-1]' "$fake_release" > "$tmp/fake-release-missing.json"
+  jq '.assets += [{"id":999,"name":"extra.bin","size":1,"digest":
+      "sha256:0000000000000000000000000000000000000000000000000000000000000000"}]' \
+    "$fake_release" > "$tmp/fake-release-extra.json"
+  for invalid in "$tmp/fake-release-missing.json" "$tmp/fake-release-extra.json"; do
+    if PATH="$fakebin:$PATH" GITHUB_REPOSITORY=owner/repo \
+        GH_FAKE_RELEASE="$invalid" GH_FAKE_LATEST="$fake_release" \
+        require_published_release "$tmp" "$sha_b" "$sha_b" 1.2.1 >/dev/null 2>&1; then
+      echo "missing/extra immutable Release inventory was accepted" >&2
+      return 1
+    fi
+  done
   if PATH="$fakebin:$PATH" GITHUB_REPOSITORY=owner/repo \
       GH_FAKE_RELEASE="$fake_release" GH_FAKE_LATEST="$fake_latest_newer" \
       require_published_release "$tmp" "$sha_b" "$sha_b" 1.2.1 >/dev/null 2>&1; then
     echo "non-latest GitHub Release was accepted" >&2
     return 1
   fi
+  for invalid in "$fake_mutable" "$fake_without_immutable"; do
+    if PATH="$fakebin:$PATH" GITHUB_REPOSITORY=owner/repo \
+        GH_FAKE_RELEASE="$invalid" GH_FAKE_LATEST="$fake_release" \
+        require_published_release "$tmp" "$sha_b" "$sha_b" 1.2.1 >/dev/null 2>&1; then
+      echo "mutable/missing-immutable tagged GitHub Release was accepted" >&2
+      return 1
+    fi
+    if PATH="$fakebin:$PATH" GITHUB_REPOSITORY=owner/repo \
+        GH_FAKE_RELEASE="$fake_release" GH_FAKE_LATEST="$invalid" \
+        require_published_release "$tmp" "$sha_b" "$sha_b" 1.2.1 >/dev/null 2>&1; then
+      echo "mutable/missing-immutable latest GitHub Release was accepted" >&2
+      return 1
+    fi
+  done
   git -C "$tmp" tag not-a-release "$sha_a"
   got="$(select_version "$tmp" "$sha_b" "$sha_b")"
   [[ "$got" == 1.2.1 ]] || { echo "non-v tag changed selection: $got" >&2; return 1; }
@@ -341,6 +447,14 @@ self_test() {
     echo "prerelease tag displaced the latest published stable preview base: $got" >&2
     return 1
   }
+  for invalid in "$fake_mutable" "$fake_without_immutable"; do
+    if PATH="$fakebin:$PATH" GITHUB_REPOSITORY=owner/repo \
+        GH_FAKE_RELEASE="$fake_release" GH_FAKE_LATEST="$invalid" \
+        latest_published_stable_version "$tmp" >/dev/null 2>&1; then
+      echo "mutable/missing-immutable latest stable preview base was accepted" >&2
+      return 1
+    fi
+  done
 
   # Exercise the exact remote-main fetch used by CI, not only the pure comparison helper.
   git init --bare -q "$remote"

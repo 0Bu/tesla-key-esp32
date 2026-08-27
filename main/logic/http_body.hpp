@@ -1,5 +1,5 @@
 #pragma once
-// Request-body reassembly (http_common.cpp read_body, provisioning.cpp save_post). Pure, IDF-free,
+// Request-body reassembly (http_common.cpp read_body_result, provisioning.cpp save_post). Pure, IDF-free,
 // host-tested (test/test_logic.cpp).
 //
 // A POST body is a TCP stream, not a datagram: esp_http_server hands over whatever has arrived, and
@@ -36,6 +36,23 @@ enum class BodyRecv : uint8_t {
     Error,     // peer closed, or an unrecoverable socket error
 };
 
+// Preserve WHY the shared request-body reader failed.  A raw nullptr cannot distinguish a client
+// that sent no body from a body which could not be allocated.  That distinction is security-
+// relevant for persisted configuration handlers: an explicit JSON string "" disables a service,
+// while an omitted/failed body must never be allowed to collapse to the same value and be saved.
+enum class BodyReadStatus : uint8_t {
+    Ok,
+    Empty,
+    TooLarge,
+    NoMemory,
+    ReceiveFailed,
+};
+
+struct BodyReadResult {
+    char*          data{nullptr};  // malloc-owned on Ok; caller releases it
+    BodyReadStatus status{BodyReadStatus::Empty};
+};
+
 struct BodyChunk {
     BodyRecv kind;
     size_t   bytes;   // meaningful only when kind == Data
@@ -46,12 +63,29 @@ struct BodyChunk {
 // sends in one segment.
 inline constexpr int BODY_MAX_IDLE = 2;
 
+// A fixed receive buffer always reserves its final byte for the terminator. Exact-full is therefore
+// too large, not a successful body with an out-of-bounds NUL. Shared by the firmware preflight and
+// the reader so their acceptance boundary cannot drift.
+inline constexpr bool http_body_fits_buffer(size_t total, size_t capacity) noexcept {
+    return total > 0 && total < capacity;
+}
+
+// Raw embedded NUL is never a valid HTTP form/JSON byte for these text request bodies. Keeping the
+// check length-aware prevents a terminator from turning a longer received body into a trusted prefix.
+inline bool http_body_has_embedded_nul(const char* data, size_t length) noexcept {
+    if (!data) return length != 0;
+    for (size_t i = 0; i < length; ++i) {
+        if (data[i] == '\0') return true;
+    }
+    return false;
+}
+
 // Read exactly `total` bytes into `buf` and NUL-terminate. Returns the byte count, or -1 if the body
 // does not fit `cap` (leaving room for the terminator), is empty, or the peer failed to deliver it.
 // `recv(dst, len)` must return a BodyChunk.
 template <typename Recv>
 int http_body_read(char* buf, size_t cap, size_t total, Recv recv) {
-    if (!buf || total == 0 || total >= cap) return -1;
+    if (!buf || !http_body_fits_buffer(total, cap)) return -1;
 
     size_t got  = 0;
     int    idle = 0;
@@ -69,6 +103,41 @@ int http_body_read(char* buf, size_t cap, size_t total, Recv recv) {
     }
     buf[got] = '\0';
     return static_cast<int>(got);
+}
+
+// Allocate and receive one bounded body while retaining a typed failure outcome.  The allocator,
+// releaser and recv callback are seams rather than hard-coded libc/IDF calls so every failure can
+// be injected deterministically in the host gate.  The firmware adapter in http_common.cpp binds
+// them to malloc/free/httpd_req_recv.
+template <typename Allocate, typename Release, typename Recv>
+BodyReadResult http_body_receive(size_t total, size_t max_body_len,
+                                 Allocate allocate, Release release, Recv recv) {
+    if (total == 0) return {nullptr, BodyReadStatus::Empty};
+    if (total > max_body_len) return {nullptr, BodyReadStatus::TooLarge};
+
+    char* buf = static_cast<char*>(allocate(total + 1));
+    if (!buf) return {nullptr, BodyReadStatus::NoMemory};
+
+    if (http_body_read(buf, total + 1, total, recv) < 0) {
+        release(buf);
+        return {nullptr, BodyReadStatus::ReceiveFailed};
+    }
+    return {buf, BodyReadStatus::Ok};
+}
+
+inline constexpr int body_read_http_status(BodyReadStatus status) {
+    return status == BodyReadStatus::TooLarge ? 413
+         : status == BodyReadStatus::NoMemory ? 503
+         : status == BodyReadStatus::Ok       ? 200
+                                               : 400;
+}
+
+inline constexpr const char* body_read_reason(BodyReadStatus status) {
+    return status == BodyReadStatus::Empty         ? "missing body"
+         : status == BodyReadStatus::TooLarge      ? "request body too large"
+         : status == BodyReadStatus::NoMemory      ? "out of memory"
+         : status == BodyReadStatus::ReceiveFailed ? "request body read failed"
+                                                    : "";
 }
 
 } // namespace tk

@@ -21,7 +21,7 @@ for fn in gate_bash_actions gate_pr_create_body gate_push_head_sha gate_fetch_pr
           gate_pr_changed_files gate_checkbox_status gate_sha_matches gate_full_head_sha \
           gate_branch gate_repo_slug gate_origin_is_github agent_gate_workdir_matches \
           agent_gate_run_bounded; do
-  if [ "${GATE_PR_LIB_API:-}" != 2 ] || ! declare -F "$fn" >/dev/null 2>&1; then
+  if [ "${GATE_PR_LIB_API:-}" != 3 ] || ! declare -F "$fn" >/dev/null 2>&1; then
     echo "BLOCKED: runner-neutral PR gate library is incomplete ($fn)." >&2
     exit 2
   fi

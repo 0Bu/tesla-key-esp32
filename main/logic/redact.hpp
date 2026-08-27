@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstring>
 #include <string>
 #include <string_view>
 
@@ -172,6 +173,156 @@ inline constexpr DiagRedaction kDiagRedactions[] = {
     {" (base topic ", ", HA prefix "},
 };
 inline constexpr std::size_t kDiagRedactionCount = sizeof(kDiagRedactions) / sizeof(kDiagRedactions[0]);
+inline constexpr std::size_t kRedactedLength = sizeof("<redacted>") - 1;
+
+// Fixed-output capacity sufficient for every rule to expand an empty matched value into the
+// replacement. The diagnostic route uses this at compile time for its stack buffer; no allocation
+// or capacity guess remains after the first response chunk has left the device.
+constexpr std::size_t diag_redacted_capacity(std::size_t input_capacity) noexcept {
+    return input_capacity + kDiagRedactionCount * kRedactedLength;
+}
+
+struct FixedDiagRedaction {
+    std::size_t size;
+    bool safe;          // false means the caller must emit a static fail-closed replacement
+};
+
+// Fixed-buffer line framing for the streaming route. Once a logical line exceeds the input
+// buffer, none of it may be emitted in fragments: a redaction marker can sit in the first fragment
+// while the secret continues markerless in the next. The state therefore discards the WHOLE
+// overlong line through its newline and tells the caller to emit one static <redacted> token.
+enum class DiagLineAction {
+    Append,
+    EmitLine,
+    IgnoreOverlong,
+    EmitOverlong,
+};
+
+struct DiagLineFrame {
+    std::size_t size{0};
+    bool overlong{false};
+};
+
+struct DiagLineStep {
+    DiagLineAction action;
+    std::size_t size;  // append index, or completed line length for EmitLine
+};
+
+inline DiagLineStep diag_line_step(DiagLineFrame& frame,
+                                   char byte,
+                                   std::size_t capacity) noexcept {
+    if (frame.overlong) {
+        if (byte == '\n') {
+            frame.overlong = false;
+            frame.size = 0;
+            return {DiagLineAction::EmitOverlong, 0};
+        }
+        return {DiagLineAction::IgnoreOverlong, 0};
+    }
+    if (byte == '\n') {
+        const std::size_t completed = frame.size;
+        frame.size = 0;
+        return {DiagLineAction::EmitLine, completed};
+    }
+    if (frame.size >= capacity) {
+        frame.size = 0;
+        frame.overlong = true;
+        return {DiagLineAction::IgnoreOverlong, 0};
+    }
+    const std::size_t index = frame.size++;
+    return {DiagLineAction::Append, index};
+}
+
+inline constexpr std::size_t kDiagNotFound = static_cast<std::size_t>(-1);
+
+inline constexpr std::size_t diag_cstrlen(const char* text) noexcept {
+    std::size_t size = 0;
+    while (text && text[size] != '\0') ++size;
+    return size;
+}
+
+inline std::size_t diag_find_bytes(const char* haystack,
+                                   std::size_t haystack_size,
+                                   const char* needle,
+                                   std::size_t needle_size,
+                                   std::size_t start = 0) noexcept {
+    if (!haystack || !needle || start > haystack_size) return kDiagNotFound;
+    if (needle_size == 0) return start;
+    if (needle_size > haystack_size - start) return kDiagNotFound;
+    const std::size_t last = haystack_size - needle_size;
+    for (std::size_t at = start; at <= last; ++at) {
+        if (std::memcmp(haystack + at, needle, needle_size) == 0) return at;
+    }
+    return kDiagNotFound;
+}
+
+// Allocation-free /diag redaction for the streaming HTTP path. Input and output may be different
+// buffers only (the route supplies two fixed stack buffers). Every transformation uses bounded
+// memcpy/memmove and this function is noexcept. If a caller supplies less capacity than the input
+// or an expansion, the whole line collapses to <redacted> (with its CR/LF suffix preserved) rather
+// than exposing a partial value. Only a buffer too small even for that token returns safe=false.
+inline FixedDiagRedaction redact_diag_line_fixed(std::string_view line,
+                                                 char* out,
+                                                 std::size_t capacity) noexcept {
+    std::size_t newline_size = 0;
+    while (newline_size < line.size()) {
+        const char c = line[line.size() - 1 - newline_size];
+        if (c != '\n' && c != '\r') break;
+        ++newline_size;
+    }
+
+    auto collapse = [&]() noexcept -> FixedDiagRedaction {
+        if (!out || capacity < kRedactedLength + newline_size) return {0, false};
+        std::memcpy(out, kRedacted, kRedactedLength);
+        if (newline_size != 0) {
+            std::memcpy(out + kRedactedLength,
+                        line.data() + line.size() - newline_size,
+                        newline_size);
+        }
+        return {kRedactedLength + newline_size, true};
+    };
+
+    if (!out || line.size() > capacity) return collapse();
+    if (!line.empty()) std::memcpy(out, line.data(), line.size());
+
+    std::size_t size = line.size();
+    std::size_t limit = size - newline_size;
+    for (std::size_t i = 0; i < kDiagRedactionCount; ++i) {
+        const DiagRedaction& rule = kDiagRedactions[i];
+        const std::size_t marker_size = diag_cstrlen(rule.marker);
+        if (marker_size == 0) return collapse();
+        std::size_t cursor = 0;
+        for (;;) {
+            std::size_t start = diag_find_bytes(out, limit, rule.marker, marker_size, cursor);
+            if (start == kDiagNotFound || start + marker_size > limit) break;
+            start += marker_size;
+
+            const std::size_t end_size = diag_cstrlen(rule.end);
+            std::size_t stop = end_size == 0
+                ? limit
+                : diag_find_bytes(out, limit, rule.end, end_size, start);
+            if (stop == kDiagNotFound || stop > limit) stop = limit;  // fail closed
+
+            const std::size_t removed = stop - start;
+            if (kRedactedLength > removed &&
+                kRedactedLength - removed > capacity - size) {
+                // A line can repeat one rule more often than the fixed route buffer's ordinary
+                // one-expansion-per-rule allowance. Collapse the complete line instead of
+                // truncating or leaving a later occurrence visible.
+                return collapse();
+            }
+            const std::size_t tail = size - stop;
+            std::memmove(out + start + kRedactedLength, out + stop, tail);
+            std::memcpy(out + start, kRedacted, kRedactedLength);
+            size = size - removed + kRedactedLength;
+            limit = limit - removed + kRedactedLength;
+            // Continue after the replacement. This is monotonic even for an empty value, and
+            // prevents a marker in already-processed bytes from being selected again.
+            cursor = start + kRedactedLength;
+        }
+    }
+    return {size, true};
+}
 
 // Two log lines are deliberately NOT in the table, and it is worth saying why so nobody "fixes"
 // them: provisioning.cpp's "failed to persist setup form (ssid=%s pass=%s vin=%s)" interpolates
@@ -192,22 +343,13 @@ inline constexpr std::size_t kDiagRedactionCount = sizeof(kDiagRedactions) / siz
 // either way — a /diag whose lines ran together would be redacted and unreadable, which is its
 // own way of losing the report.
 inline std::string redact_diag_line(std::string_view line) {
-    std::string out(line);
-    std::size_t limit = out.size();
-    while (limit > 0 && (out[limit - 1] == '\n' || out[limit - 1] == '\r')) limit--;
-    for (std::size_t i = 0; i < kDiagRedactionCount; i++) {
-        const DiagRedaction& r = kDiagRedactions[i];
-        std::string_view marker(r.marker);
-        std::size_t start = out.find(marker);
-        if (start == std::string::npos || start + marker.size() > limit) continue;
-        start += marker.size();
-        std::string_view end_tok(r.end);
-        std::size_t stop = end_tok.empty() ? std::string::npos : out.find(end_tok, start);
-        if (stop == std::string::npos || stop > limit) stop = limit;   // fail closed, keep the newline
-        std::size_t before = stop - start;
-        out.replace(start, before, kRedacted);
-        limit = limit - before + std::string_view(kRedacted).size();
-    }
+    // Convenience wrapper for host tests/non-streaming callers. The HTTP route deliberately does
+    // not call this allocating adapter; it delegates straight to redact_diag_line_fixed().
+    std::string out(diag_redacted_capacity(line.size()), '\0');
+    const FixedDiagRedaction result =
+        redact_diag_line_fixed(line, out.data(), out.size());
+    if (!result.safe) return std::string(kRedacted);
+    out.resize(result.size);
     return out;
 }
 

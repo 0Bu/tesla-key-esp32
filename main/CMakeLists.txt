@@ -21,6 +21,7 @@ idf_component_register(
         "diag_log.cpp"
         "diag_crash.cpp"
         "safe_mode.cpp"
+        "runtime_admission.cpp"
         "stack_watch.cpp"
         "heap_trend.cpp"
         "config_blob.cpp"
@@ -113,7 +114,7 @@ add_custom_command(
     VERBATIM)
 add_custom_command(
     OUTPUT  "${CMAKE_CURRENT_BINARY_DIR}/index.html.gz"
-    COMMAND gzip -9 -n -c "${CMAKE_CURRENT_BINARY_DIR}/index_inlined.html"
+    COMMAND /usr/bin/gzip -9 -n -c "${CMAKE_CURRENT_BINARY_DIR}/index_inlined.html"
             > "${CMAKE_CURRENT_BINARY_DIR}/index.html.gz"
     DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/index_inlined.html"
     COMMENT "Gzipping web UI (index_inlined.html -> index.html.gz)"
@@ -127,7 +128,7 @@ add_dependencies(${COMPONENT_LIB} gen_index_gz)
 # in flash. Symbols: _binary_setup_html_gz_{start,end}.
 add_custom_command(
     OUTPUT  "${CMAKE_CURRENT_BINARY_DIR}/setup.html.gz"
-    COMMAND gzip -9 -n -c "${CMAKE_CURRENT_SOURCE_DIR}/www/setup.html"
+    COMMAND /usr/bin/gzip -9 -n -c "${CMAKE_CURRENT_SOURCE_DIR}/www/setup.html"
             > "${CMAKE_CURRENT_BINARY_DIR}/setup.html.gz"
     DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/www/setup.html"
     COMMENT "Gzipping setup portal (www/setup.html -> setup.html.gz)"

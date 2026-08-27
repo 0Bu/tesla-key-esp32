@@ -25,11 +25,13 @@ class NvsStorageAdapter;
 // keys are deliberately left in place rather than deleted, so a downgrade to an older build still
 // finds its configuration.
 //
-// SCOPE. Only the values whose ONE writer is the HTTP/provisioning task. `ble_mac`, `last_time`,
-// `reboot_why` and `disp_rot` stay as separate keys on purpose: they have DIFFERENT writers (the
-// vehicle loop, the SNTP callback, the display task), and a whole-struct writer would revert
-// another owner's field from a stale snapshot — the exact bug this file exists to prevent, pointed
-// the other way.
+// SCOPE. Only durable user configuration whose coherent transaction is owned by the
+// HTTP/provisioning task belongs in this blob. Other `tesla_cfg` records stay separate either
+// because another task owns them (`ble_mac`, `last_time`, `reboot_why`, `disp_rot`) or because they
+// are journals/runtime safety state with a different lifetime (`vin_txn`, `boot_fails`). In the
+// first case a whole-struct writer could revert another owner's field from a stale snapshot; in the
+// second, folding an in-flight transaction or boot latch into a config snapshot would erase its
+// recovery semantics.
 
 namespace tk {
 

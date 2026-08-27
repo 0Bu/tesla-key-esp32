@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import re
 import sys
@@ -25,6 +26,21 @@ EXPECTED_OFFSETS = {
 }
 
 
+def load_otadata_contract():
+    path = Path(__file__).with_name("check-otadata-contract.py")
+    if path.is_symlink() or not path.is_file():
+        raise ValueError(f"missing/unsafe shared otadata validator: {path}")
+    spec = importlib.util.spec_from_file_location("tesla_key_otadata_contract", path)
+    if spec is None or spec.loader is None:
+        raise ValueError(f"cannot load shared otadata validator: {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+OTADATA_CONTRACT = load_otadata_contract()
+
+
 def regular_file(path: Path, label: str) -> bytes:
     if path.is_symlink() or not path.is_file():
         raise ValueError(f"{label} is missing, non-regular or a symlink: {path}")
@@ -32,7 +48,7 @@ def regular_file(path: Path, label: str) -> bytes:
 
 
 def verify(site: Path, release_dir: Path, version: str) -> int:
-    if not VERSION_RE.fullmatch(version):
+    if not VERSION_RE.fullmatch(version) or len(version) > 31:
         raise ValueError(f"invalid canonical release version: {version}")
     manifest_path = site / "manifest.json"
     manifest = json.loads(regular_file(manifest_path, "Pages manifest"))
@@ -60,6 +76,7 @@ def verify(site: Path, release_dir: Path, version: str) -> int:
         if offsets != EXPECTED_OFFSETS[family]:
             raise ValueError(f"{family} manifest part offsets/order drifted: {offsets!r}")
 
+        declared_ranges: list[tuple[int, int, str]] = []
         for part in parts:
             name = part.get("path")
             size = part.get("size")
@@ -71,6 +88,11 @@ def verify(site: Path, release_dir: Path, version: str) -> int:
             page_bytes = regular_file(site / name, f"Pages part {name}")
             if len(page_bytes) != size:
                 raise ValueError(f"Pages part {name} length differs from manifest")
+            if name.startswith("ota_data_initial-"):
+                try:
+                    OTADATA_CONTRACT.validate_bytes(page_bytes, f"Pages part {name}")
+                except OTADATA_CONTRACT.OtadataError as error:
+                    raise ValueError(str(error)) from error
             release_bytes = merged[offset : offset + size]
             if len(release_bytes) != size:
                 raise ValueError(f"Release asset {merged_name} is too short for {name}@{offset}")
@@ -78,7 +100,30 @@ def verify(site: Path, release_dir: Path, version: str) -> int:
                 raise ValueError(
                     f"Pages part {name} differs from Release asset {merged_name}@{offset}"
                 )
+            declared_ranges.append((offset, offset + size, name))
             compared += 1
+
+        # merge_bin's complete byte contract is minimal and erased outside the four declared
+        # payloads. Checking only slices would allow attacker-controlled NVS/gap or trailing bytes
+        # to ride inside an otherwise valid Release asset.
+        ordered_ranges = sorted(declared_ranges)
+        cursor = 0
+        for start, end, name in ordered_ranges:
+            if start < cursor:
+                raise ValueError(f"{family} merged ranges overlap at {name}@{start}")
+            gap = merged[cursor:start]
+            bad = next((index for index, value in enumerate(gap) if value != 0xFF), None)
+            if bad is not None:
+                absolute = cursor + bad
+                raise ValueError(
+                    f"{family} undeclared merged byte at 0x{absolute:x} is not erased 0xff"
+                )
+            cursor = end
+        if len(merged) != cursor:
+            raise ValueError(
+                f"{family} merged asset length must end exactly at 0x{cursor:x}, "
+                f"got 0x{len(merged):x}"
+            )
 
     if seen != set(MERGED_NAMES):
         raise ValueError(f"Pages chipFamily set is incomplete: {sorted(seen)!r}")

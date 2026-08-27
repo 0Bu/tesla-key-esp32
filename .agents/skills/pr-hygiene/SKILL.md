@@ -80,7 +80,7 @@ Work in this order — a single read-only pass: enumerate → check → report �
    the exact record a separately authorized PR-body update would need:
 
    ```
-   - [x] `$pr-hygiene` clean — content gate @ <short-sha>
+   - [x] `$pr-hygiene` clean — content gate @ <full-40-hex-sha>
    ```
 
 ### Termination — one report-only pass

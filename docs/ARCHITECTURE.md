@@ -24,6 +24,9 @@ work. Reusable workflows live under [`.agents/skills/`](../.agents/skills/), Cod
 configuration and read-only specialist reviewers under [`.codex/`](../.codex/), and lifecycle
 policy lives under [`tools/agent-hooks/`](../tools/agent-hooks/). CI mutation-tests this single
 project-owned configuration and rejects reintroduction of retired runner-specific metadata.
+`.github/workflows/pr-policy.yml` evaluates the current SHA-bound gate records from trusted
+base-branch code with a read-only token and never checks out PR code; repository rules must require
+its `pr-policy / current-head-records` status for that executable policy to block merges server-side.
 
 This layer does not participate in firmware runtime behavior. It must not change the four-target
 build, dependency/patch chain, partition geometry, signing boundary, OTA format, pairing/session
@@ -73,6 +76,11 @@ A rotating background poll in `loop_task_fn_` (one domain per ~30 s cycle: clima
 drive → tires → closures, full set ~120 s) refreshes per-domain caches via the
 `set_*_state_callback` hooks in `vehicle_telemetry.cpp`. All polls are `NO_WAKE_SKIP`
 (read-only, never wake the car) and feed the MQTT/HA bridge — evcc/pairing are unaffected.
+tesla-ble invokes those hooks synchronously while `vehicle_mutex_` owns `Vehicle::loop()`, so the
+hooks copy only trivially-copyable nanopb state into fixed latest-value slots under a short
+`portMUX`. The same `vehicle_loop` iteration releases `vehicle_mutex_` before parsing strings and
+publishing the public caches under `cache_mutex_`; no heap operation or nested cache lock runs from
+the library callback.
 These background polls are **paused while a serialized command/query is in flight**
 (`cmd_in_flight_`), including the VCSEC health probe, so nothing is injected into the single
 BLE FIFO behind another operation. Whether a connect attempt is foreground is carried separately
@@ -82,11 +90,13 @@ explicitly; the public methods deliberately provide no origin default.
 
 `set_charging_amps` uses that pause as a correctness boundary: under one
 `command_mutex_`/`cmd_in_flight_` transaction it sends the current action, waits for Tesla's
-ACK, then sends an independent `getChargeState` request. The persistent cache callback runs
-before the poll command completes and increments `charge_state_generation_`; success therefore
-clears the previous ChargeState before decoding the new snapshot, so an omitted field cannot
-inherit an old presence/value. Success requires both a new generation, a present field, and an
-exact `charging_amps` match. The ACK alone is never
+ACK, then sends an independent `getChargeState` request. Before the poll command can complete, the
+persistent callback publishes a separate fixed `ChargingAmpsFeedback` generation plus the three
+readback currents under the same short `portMUX`; it does not wait for the deferred string cache.
+Success therefore requires a new fixed generation, a present field, and an exact
+`charging_amps` match. The full deferred parser still clears the previous ChargeState before
+decoding the new public snapshot, so an omitted field cannot inherit an old presence/value. The
+ACK alone is never
 reported as success. Two mismatching/missing readbacks exhaust the original command budget and
 return an error, with requested/applied/request/actual current values written to the log.
 
@@ -121,6 +131,21 @@ flashed); one manifest `version` covers all targets (CI builds them from one com
 Triggered from the web UI by tapping the firmware version in the top meta line.
 Implemented in `main/ota_update.cpp`.
 
+**Manifest intake is a bounded, exact protocol.** The HTTPS body is capped at 8192 bytes. A
+non-chunked response needs a positive `Content-Length` no larger than that cap and must deliver
+exactly that many bytes; a chunked response may omit a length, but it still needs the transport's
+complete-data signal, must be non-empty and may not deliver a cap-plus-one byte. Truncation, a
+negative/early-zero read or a lying length fails closed. The body reserves one bounded contiguous
+block rather than repeatedly growing while TLS is live. Before cJSON allocation, the shared
+allocation-free syntax gate requires one fully consumed JSON document, at most 16 container levels,
+valid UTF-8/escapes and no decoded U+0000. `cJSON_ParseWithLengthOpts` must then consume the exact
+body, the root must be an object, every root key must be unique after escape decoding, and exactly
+one string-valued `version` must exist. Its version is validated before copying with the canonical
+three-component grammar (zero or no leading zero, optional `[0-9A-Za-z.-]+` suffix, maximum 31
+bytes); numeric cores compare as digit spans, so an oversized integer cannot overflow. The body is
+released before copying the bounded version/result strings, keeping the peak at body + cJSON rather
+than body + cJSON + another attacker-sized string.
+
 **Downgrade gate (software anti-rollback).** Just after `esp_https_ota_begin` — before the
 bulk download — `ota_task` reads the version from the downloaded image's own app descriptor
 (`esp_https_ota_get_img_desc`) and refuses anything not strictly newer than the running
@@ -131,8 +156,9 @@ a new `version` in `manifest.json` but serves an old `.bin`. No eFuses burned.
 
 **Rollback** is enabled (`CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE`); `main.cpp` defers
 `esp_ota_mark_app_valid_cancel_rollback()` to a health gate (`ota_health_gate_task`) whose verdict
-is the pure, host-tested `logic/health_gate.hpp`. Health is **a proven link plus an uptime floor**,
-not uptime alone: the image must hold a lease (`tk::net_is_up()`, either transport) *and* have run
+is the pure, host-tested `logic/health_gate.hpp`. Health is **a proven link, a non-critical largest
+contiguous INTERNAL heap block and an uptime floor**, not uptime alone: the image must hold a lease
+(`tk::net_is_up()`, either transport), report at least `kHeapCriticalBytes` (4 KiB) and have run
 `kHealthGateBaseS` (90 s). An image that boots but then crashes/OOM-reboots under load dies while
 still `PENDING_VERIFY`, so the bootloader reverts to the previous slot rather than having committed
 it at startup — and so does an image that boots perfectly but never gets on the network, which a
@@ -141,15 +167,25 @@ because the repair would have to arrive over the link the image broke; the remed
 Past `kHealthGateCapS` (600 s) an image with a route and no lease is judged broken and simply left
 `PENDING_VERIFY`: the next reboot from any cause rolls it back. It deliberately does **not** restart
 itself — that would turn a long router outage into a silent, unrequested downgrade of a good build —
-and any deliberate `/set_*` save commits it instead, via the `ota_confirm_pending_image()` path
-described below. A device with neither credentials nor a wire is legitimately offline (setup mode)
+and any successfully persisted, user-requested rebooting configuration save listed below commits
+it instead, via the `ota_confirm_pending_image(SuccessfulUserConfigCommit)` path described below.
+A device with neither credentials nor a wire is legitimately offline (setup mode)
 and counts as healthy, so an OTA installed just before the credentials were cleared is not thrown
-away. A **deliberate, user-initiated reboot** inside that window is a
-different case, though: the three config handlers that reboot (`/set_vin`, `/set_mqtt`,
-`/set_syslog`), the setup-portal save **and the heap watchdog's deliberate restart** call
-`ota_confirm_pending_image()` first — a restart we chose is proof the image runs, so it must not
-look like a failed boot and roll the update back. It is a no-op on a normal boot / already-valid image. (An unattended
-brownout/power-cycle in the window still reverts — that is the crash-safety net working as intended.)
+away. A **deliberate, user-initiated reboot** inside that window is a different case only for the
+successfully persisted rebooting service/network saves (`/set_mqtt`, `/set_syslog`, `/set_wifi`)
+and the setup-portal save: they may confirm after the requested transaction is durably committed.
+Both the timed and explicit confirmation paths first acquire the shared `HealthCommit` owner
+against OTA, identity work and `FaultRestart`, then re-sample the INTERNAL largest block. A busy
+owner or critical sample leaves rollback armed, closing the persisted-fault/restart race.
+VIN and key mutation have a stricter identity boundary. `OtaIdentityMutationGuard` admits
+`/set_vin` and `/gen_keys[?force=1]` only while the running image is already `Stable` and no
+OTA/update or other identity mutation owns the gate; `PendingVerify`, unknown verification state
+or an active OTA returns HTTP `503` before the VIN journal or key transaction starts. Neither
+operation can therefore confirm or mutate identity on a probationary image.
+Automatic VIN/key recovery, WiFi rollback and the heap watchdog are fault recovery, not health
+evidence; they deliberately leave `PENDING_VERIFY` armed so the reboot rolls a regressed image
+back. A brownout/power-cycle in the window likewise reverts. Confirmation is a no-op on an
+already-valid image.
 
 **Image signature.** Builds use the Secure Boot v2 RSA-3072 signature scheme *without*
 hardware Secure Boot (`CONFIG_SECURE_SIGNED_APPS_NO_SECURE_BOOT` + `..._RSA_SCHEME` +
@@ -167,9 +203,15 @@ Partition layout (`partitions.csv`) is dual-OTA (`otadata` + `ota_0`/`ota_1`, ~2
 sized to fill 4 MB (the smallest supported flash; a larger one leaves the top
 unused) so ONE table serves every target; app at `0x20000`. The `ci-build-all.sh` **app-size gate**
 sits at `slot − 32 KB` (0x1e8000): each image's code rounds up to a 64 KB Secure-Boot boundary + a
-4 KB signature, and the largest — esp32c6, 0x1e1000 signed — clears it by ~28 KB. That block
-boundary is worth knowing about: c6 currently projects to 0x1e1000 signed, only 28 KiB below the
-policy gate. The gate is still met, but c6 is the target to size-check first.
+4 KB signature. Firmware-size baseline schema v2 records reviewed per-target maxima for the raw
+unsigned app, ELF `total_size`, `flash_code + flash_rodata`, static memory, `.bss` and IRAM, and
+rejects growth in any dimension. That review baseline is deliberately separate from the unchanged
+projected-signed hard gate at the slot policy: growth inside one 64 KiB signing bucket still needs
+review, while signed padding/slot overflow remains an independent failure. The generated report,
+rather than a copied number in this narrative, is the source for current target headroom.
+The firmware is a TLS client only (OTA and MQTTS); its server is deliberately plain LAN HTTP, so
+`CONFIG_MBEDTLS_TLS_CLIENT_ONLY=y` omits the unused TLS-server state machine and keeps C6 below the
+next 64 KiB signing boundary without weakening client certificate verification.
 **esp32s3 carries the extra on-device display code and still fits at the base `-Og`** like every
 target: the Package A size levers
 (#154) freed the ~64 KB the display needs, so no `-Os` (which hard-freezes under load — rejected
@@ -195,10 +237,101 @@ are written before otadata is written separately and last at `0xf000`, so activa
 a complete verified flash. OTA is a single channel
 where each device pulls its own
 `tesla-key-esp32<suffix>.bin` (`tesla-key-esp32.bin` for the classic esp32, `-s3`/`-c3`/`-c6`
-otherwise). The per-target bootloader offset (0x1000 on the classic
-esp32, 0x0 on s3/c3/c6) is encoded in unsigned build metadata (`@flash_args`) and the signed
-factory-install manifest. `@flash_args` is audited as layout evidence, never used as authority to
-flash the unsigned local app; signed app-only delivery leaves the installed bootloader untouched.
+otherwise). The per-target bootloader offset (0x1000 on the classic esp32, 0x0 on s3/c3/c6) is
+owned exclusively by trusted signer constants and checked against the resulting merged image and
+signed factory-install manifest. The source-bound unsigned inventory binds exact paths, sizes and
+digests, not flash offsets; producer `@flash_args` data is never signing or layout authority. Signed
+app-only delivery leaves the installed bootloader untouched.
+Before the protected job provisions the signing key, CI recomputes the canonical source fingerprint,
+compares the primary build with a separate exact-source rebuild (all 53 payload files plus manifest),
+and pins the exact IDF image, four dependency locks, resolved tesla-ble commit/component hash and
+three patch digests. It parses the source/generated partition tables, requires every generated
+`ota_data_initial.bin` to be exactly `0x2000` erased `0xff` bytes, and checks unsigned ESP image
+headers/checksum/hash/chip ID/app descriptor. The signer copies those no-follow-validated files into
+private staging and rehashes them before key use. It repeats the image check on the signed app and
+cryptographically verifies its RSA-PSS signature against the reviewed production-authority digest
+in `scripts/ota-signing-public-key.sha256`. It requires each merged image to end exactly after the
+signed app, with every undeclared byte—including the NVS range—left erased.
+
+Main classifies publication as exactly `create` or `reuse`. `create` revalidates current main, the
+Release candidate and the tag's HTTP-404 absence before the key is provisioned, uploads exactly 40
+assets into a draft, and binds their identity, size, digest and internal relationships. Before the
+draft becomes public, all four complete merged images must byte-match the signer-owned bootloader,
+partition table, erased otadata, signed app and every erased gap (including NVS) through exact EOF;
+the unversioned/versioned app aliases and merged slice at `0x20000` must be identical, and every
+`.elf.sha256` must name its ELF. Every signed app must pass RSA-PSS verification against the pinned
+production-authority digest. In both modes CI then assembles the complete local root installer and
+byte-binds all 16 manifest parts to the four merged images before either the signed Actions
+artifact is uploaded or a draft/Release is created or mutated. The candidate is checked again in
+the same shell step immediately
+before `PATCH draft=false`; only a fresh stable `immutable: true` response becomes authority.
+`reuse` accepts only that exact current 40-asset immutable Release. It opens every downloaded asset
+exactly once through a directory-relative no-follow descriptor, binds metadata size/digest to that
+immutable byte snapshot, and uses only the snapshot for every subsequent signature, alias,
+full-layout, diagnostic and staging check. A post-validation path-swap canary proves later path
+replacement cannot change staged bytes. It compares all 28 diagnostics and four
+signed/merged images with the current independent build, and stages Pages without provisioning a
+key, signing, re-uploading or mutating the Release. It does upload a new SHA-bound Actions recovery
+artifact containing the exact twelve verified app/merged aliases, so USB recovery remains available
+for a successful reuse run. Both create and reuse require the root to contain exactly four
+unversioned signed apps, four versioned signed apps and four versioned merged images—no glob-matched
+extra, missing, empty, symlinked or hard-linked file may cross the Actions-artifact or draft-Release
+boundary. Build, signing, Pages, manifest, Release and bench consumers share the canonical
+display-version grammar: no leading-zero core component and at most 31 bytes for the ESP app
+descriptor. The protected `publish` job includes that locally 16/16-bound `_site/` in the exact
+SHA/version-named Actions artifact together with the exact sixteen signer-owned per-target
+bootloader/partition/otadata/signed-app layout inputs, and stops only after Release publication has
+been refetched as immutable; it never mutates `gh-pages`.
+
+A separate main-push-only `deploy` job has no signing Environment, OTA key or OIDC authority. It
+checks out the same exact SHA without persisted credentials, downloads only the named signed
+artifact, repeats the exact twelve-file root inventory, verifies the Pages manifest and all 16
+parts against those local root images, then uses the sixteen layout inputs plus 28 diagnostics to
+byte-bind the downloaded artifact to fresh metadata for all 40 immutable Release assets. It
+revalidates branch-backed Pages and current immutable Release authority in that same final step
+immediately before the branch write. After branch publication it performs
+bounded cache-busted HTTPS reads of the live manifest and all 16 parts and verifies them byte-for-byte
+against the immutable merged assets.
+Build, independent rebuild, signing/Release mutation, branch deployment and live-channel acceptance
+are distinct gates rather than one green job being treated as proof of all five.
+
+The compiler stack gate is deliberately a **frame inventory**, not a call-graph estimate.
+`scripts/check-stack-usage.py` parses every repository-owned GCC `-fstack-usage` record for each of
+the four targets. Baseline schema v2 records every frame at or above 256 bytes by target,
+translation unit and function identity; a new, removed or enlarged reviewed frame fails closed.
+Every frame, including those below the review threshold, is still inventoried and checked against
+the absolute 4096-byte limit, and any unbounded dynamic frame is rejected. GCC `.su` records do not
+encode complete call depth, so this gate makes no claim about composed task-stack depth; runtime
+high-water sampling remains the separate on-device signal.
+
+The effective-build gate is based on the complete firmware graph Ninja actually compiled and
+linked, not only on CMake source text. Every C/C++ translation unit in `compile_commands.json` must
+belong to the repository, the pinned IDF tree, a locked managed component or the closed generated
+source set; every one invokes the target compiler directly, has only trusted include roots and has
+a current Ninja dependency record whose source/header inputs remain in those same roots. For main
+code, the literal `SRCS` list and recursively reviewed `.def`, `.h`, `.hh`, `.hpp`, `.hxx`, `.inc`,
+`.inl`, `.ipp` and `.tpp` inventory stay exact. Each final Ninja compile command equals the compile
+database command plus CMake/Ninja's exact target-bound five-token depfile block immediately before
+`-o`; this permits the generator's real dependency plumbing but no launcher, wrapper or hidden
+compiler rewrite.
+
+Generated firmware inputs are independently reconstructed or hash-pinned: the project ELF anchor,
+three Nanopb runtime sources, the inlined/gzipped installer pages and the X.509 bundle assembly.
+Their exact Ninja producer commands are pinned as well. Every linked archive is rebuilt only by the
+target `ar`/`ranlib` pair and may contain only compile-database objects; the final ELF link starts
+with the pinned C++ driver, uses only the two reviewed build response files, build/IDF search roots
+and restricted build/IDF linker scripts, and rejects external/prebuilt objects, archives, scripts,
+command chains and pre/post link seams. The final app `.bin` is likewise tied to the exact pinned
+Python/esptool `elf2image` producer, chip, flash parameters, revision bounds, ELF input and
+post-build digest step.
+
+The build rejects the presence—even empty—of `CPATH`, `CPLUS_INCLUDE_PATH`, `C_INCLUDE_PATH`,
+`OBJC_INCLUDE_PATH`, `DEPENDENCIES_OUTPUT`, `SUNPRO_DEPENDENCIES`, `GCC_EXEC_PREFIX`,
+`COMPILER_PATH` and `LIBRARY_PATH`; `EXTRA_CFLAGS`/`EXTRA_CXXFLAGS` are overwritten with the sole
+diagnostic `-fstack-usage` option rather than inheriting caller-controlled flags. Every
+caller-provided `CCACHE_*` variable is rejected, including empty and future names. The pinned
+official IDF image's expected `IDF_CCACHE_ENABLE=1` default is then overwritten with exactly `0`
+before even the build-script self-test.
 The same page can reset the selected board and stream its 115200-baud boot log after probing or
 flashing. Its separate **Remove browser permission** action uses `Serial.getPorts()` and
 `SerialPort.forget()` to revoke a previously granted port permission. It stays hidden when this
@@ -241,6 +374,14 @@ error blocks too and cannot be mistaken for an absent marker. A VIN
 transition is also journalled as `tesla_cfg/vin_txn`; the host-tested recovery decision lives in
 `logic/vin_transition.hpp`, so power loss cannot silently combine a new VIN with the old key/session
 state.
+
+The third patch bounds RX-framing recovery logs without hiding the recovery itself. Warning and
+error paths keep separate `steady_clock` timestamps and emit at most once per hour per severity;
+repeated events increment a shared `UINT32_MAX`-saturating suppression counter that is reported and
+reset only after the next emitted log. Only severe buffer corruption selects error severity. The
+host semantic gate pins the helper plus all six parser/recovery callsites, so a new direct log or a
+lost throttle cannot reintroduce an input-amplified log storm while the generic patch applicator
+still reports green.
 
 All four images use the same tesla-ble revision and ordered patch-series behavior. The wider
 tesla-ble dependency strategy (IDF-6 / Mbed TLS 4 crypto seam, issue #61) is
@@ -299,27 +440,43 @@ board carries this LED); pins/brightness from Kconfig (a T-Dongle-S3 wires it DI
 **PR preview installer.** A maintainer can opt a reviewed same-repo PR into a **signed** build
 with the `signed-preview` label, so it can be browser-flashed and tried *before* merge. The normal
 PR build is unsigned and unprivileged. Only after it succeeds does the default-branch
-`signed-pr-preview.yml` workflow validate the current head, enter the protected
-`firmware-signing` Environment, revalidate state/head/label after the approval wait, and sign the
-artifact strictly as data — PR code is never checked out or executed with the key. CI then writes
+`signed-pr-preview.yml` workflow validate the current head and independently rebuild that exact SHA
+on a separate runner defined by the trusted workflow. That job can execute PR source, but has no
+secrets, write/identity-token scope, Environment, restored cache or access to the primary artifact.
+Only after the two exact 53-file inventories plus manifests match does the signer enter the protected
+`firmware-signing` Environment, revalidate state/head/label after the approval wait, and recompute the
+latest complete immutable stable version base. The protected job never checks out the PR; the
+default-owned DAG binds both secret-free producers to the exact head, and the signer treats their
+byte-identical, source-SHA/version-bound inventories only as bounded data. It never executes an
+artifact file and does not provision the key until both rebuilds and the exact `<base>-PR-<N>`
+identity match. It also
+refetches the current default branch immediately before key provisioning, artifact upload and Pages
+publication and requires all three checks to equal the trusted workflow's exact `github.sha`; a main
+advance retires the stale queued policy run. CI then writes
+all four signed apps through the same RSA-PSS and production-authority digest gate as main before it
+writes
 the PR's **full self-contained site**
 (`build-pages.sh` → the installer page + a per-PR `manifest.json` + same-origin bins) to
 `PR/<N>/` on the **`gh-pages` branch**, so `https://0bu.github.io/tesla-key-esp32/PR/<N>/` is a
 directly browsable installer for that PR — it detects it is under `/PR/<N>/`, shows a preview
 banner, and flashes that PR's own firmware. The **root** page has **no version picker**: it
 always flashes **main**. A PR's firmware is reached only by its own `PR/<N>/` page — open the URL
-directly, or follow the link posted on the PR. A `gh-pages` branch (not the Actions
-Pages artifact) is required because the browser flasher fetches every part in-page and GitHub
-release assets carry no CORS headers, so the bins must be same-origin — and the atomic Actions
-deploy (main-only, whole-site) can't host per-PR subpaths. Main owns the gh-pages **root**;
+directly, or follow the link posted on the PR. The serving topology has exactly one authority:
+branch-backed legacy Pages from **`gh-pages:/`**. Pages Actions artifacts and the
+`actions/upload-pages-artifact` / `actions/deploy-pages` path are not part of this repository's
+publication model. The browser flasher fetches every part in-page and GitHub Release assets carry
+no CORS headers, so the bins must be same-origin while root and durable PR subpaths must coexist.
+Main owns the gh-pages **root**;
 each PR owns `PR/<N>/`; both are synced by `scripts/publish-pages-branch.sh` (root sync
 preserves the `PR/` tree). Constraints:
 
 - **Signed-only and opt-in.** Unlabelled and fork PRs remain unsigned compile checks and publish
   **no** preview (an unsigned image crash-loops at boot — see [`SECURITY.md`](SECURITY.md)).
 - **Versioning `<latest-stable-release>-PR-<N>`** (e.g. `1.4.30-PR-157`), stamped from the newest
-  complete non-prerelease GitHub Release (its stable tag plus all four digest-bound merged assets),
-  never a raw newer RC tag. `ver_newer()` parses only `x.y.z` and ignores the suffix, so basing on
+  complete immutable non-prerelease GitHub Release (its stable tag plus all four digest-bound merged
+  assets), never a raw newer RC tag. The protected signer derives this base again after the approval
+  wait and requires exact equality, so a stale but regex-valid base cannot be signed. `ver_newer()`
+  parses only `x.y.z` and ignores the suffix, so basing on
   the *latest stable release* (not `next` or a prerelease core) guarantees a later main release compares strictly-newer → the
   PR-flashed device OTA-updates forward to main; a `next` base would collide with the number
   the merge cuts and stall OTA.
@@ -328,13 +485,19 @@ preserves the `PR/` tree). Constraints:
   preview. The real-key signature anchors trust so the main release is accepted.
 - **Cleanup and reconciliation.** Signing and deletion share the same per-PR concurrency group. A
   close, force-push or `signed-preview` label removal deletes the old tree and cancels an in-flight
-  publisher. A daily/manual matrix reconciliation revalidates each surviving directory under that
+  publisher. The event cleanup is a trusted-base `pull_request_target` workflow and checks out the
+  exact base SHA before running either the Pages-authority check or deletion script; it never
+  executes PR workflow/code with the branch-write token. A daily/manual matrix reconciliation revalidates each surviving directory under that
   same lock and removes it unless the PR is open, same-repository, labelled and its current head
   equals the schema-v2 manifest `sourceSha`.
 
 GitHub Pages is configured to **Deploy from branch `gh-pages` at `/`**; that branch is the serving
-authority for both the root installer and `PR/<N>/`. Release reconciliation additionally reads the
-configured live Pages URL and requires its root manifest identity to match the branch, tag and
+authority for both the root installer and `PR/<N>/`. `scripts/check-pages-source.py` validates the
+Pages API's `legacy` mode, exact branch/path and credential-free HTTPS URL. Main and signed-preview
+signers run it before signing; the separate main deploy job and signed preview check it again
+immediately before their branch mutation, while preview cleanup does so before deletion. Live
+acceptance refetches the same API state and derives the URL from it.
+Release reconciliation then requires the served root manifest identity to match the branch, tag and
 latest stable Release, so a branch update that has not reached the public site never counts as a
 completed publication.
 
@@ -363,9 +526,14 @@ grouped under one device. **Read-only by design** — no command topics are subs
   ESP32 board; changing the configured vehicle intentionally creates a different HA device. The
   physical WiFi-STA eFuse MAC remains independently visible as `sys.board_mac` and in the boot
   diagnostics so replacement boards can still be distinguished during triage.
-- **Topics:** `<base>/<node>/{charge,climate,drive,tires,closures,vehicle,device}` (retained
-  JSON), availability/LWT `<base>/<node>/availability` (`online`/`offline`). Discovery
-  configs under `<prefix>/<sensor|binary_sensor>/<node>/<object>/config` (retained).
+- **Topics and discovery registry:** the IDF-free production registry in
+  `logic/mqtt_discovery_registry.hpp` contains exactly 55 entity rows and is the only source for
+  component, object ID, state domain, JSON field/type, value-template inversion and HA metadata.
+  It maps domains to `<base>/<node>/{charge,climate,drive,tires,closures,vehicle,device}` (retained
+  JSON), availability/LWT is `<base>/<node>/availability` (`online`/`offline`), and discovery
+  configs are `<prefix>/<sensor|binary_sensor>/<node>/<object>/config` (retained). Production
+  derives each config topic, `unique_id`, state topic and value template from the row rather than
+  reconstructing that mapping in the IDF shell.
 - **Entities:** charge (soc, charge_limit, power, amps, range **km**, rate **km/h**,
   charging_state, plus extended read-only enrichment: actual_current/current_request **A**
   (delivered vs requested), volts **V** at the charger, charger phases, energy_added **kWh**
@@ -375,11 +543,17 @@ grouped under one device. **Read-only by design** — no command topics are subs
   cop/cop_cooling/cop_temp/cop_reason and defrost front_defrost/rear_defrost/defrost_mode),
   drive (shift,
   odometer km), tires (fl/fr/rl/rr bar + warn), closures (locked/door/frunk/trunk/window/
-  occupant), sleep_state, and device diagnostics (wifi/ble RSSI, ble_link, paired, **last
-  boot** (boot-time timestamp), free_heap, firmware). Numeric fields — and the single
-  booleans on/preconditioning/cop_cooling/defrost/locked/occupant — are emitted only when
-  the car reported them (proto3 optional), so an unseen value reads "unknown" in HA rather
-  than a phantom 0. The aggregates warn and door/frunk/trunk/window fold several per-wheel/
+  occupant), sleep_state, and device diagnostics (optional wifi/ble RSSI, ble_link, paired,
+  optional **last boot** timestamp, free_heap, largest_block, min_free_heap, firmware,
+  reset reason slug/code, crash-dump and safe-mode flags, and WiFi/MQTT reconnect counters).
+  The same retained Device JSON also carries optional per-task minimum-free-stack bytes for HTTP,
+  vehicle, auto-pair and MQTT as raw MQTT diagnostics; those four payload-only fields deliberately
+  have no HA discovery rows and therefore do not create entities. Optional
+  car-sourced numeric and boolean fields are emitted only when the car reported them (proto3
+  optional), so an unseen value reads "unknown" in HA rather than a phantom 0/OFF. Every binary
+  discovery template has the same presence guard; `locked` alone inverts ON/OFF for HA's `lock`
+  class. Device `safe_mode` and `crash_dump` are real JSON booleans, not truthy `"ON"`/`"OFF"`
+  strings. The aggregates warn and door/frunk/trunk/window fold several per-wheel/
   per-opening booleans with present-AND-true semantics (an unreported part counts as
   no-warning/closed by design). **Units:** Tesla reports range/rate/odometer imperial; the MQTT bridge
   converts to metric (km, km/h) — only the Tesla-compatible `/api` path keeps miles (evcc).
@@ -387,6 +561,15 @@ grouped under one device. **Read-only by design** — no command topics are subs
   (re)connect it (re)sends discovery + `online` + an immediate snapshot, then republishes
   state every interval. The same active-window gating that lets the car sleep applies to
   the *source* polls, so MQTT keeps serving the last-known (retained) values while asleep.
+  Every retained JSON payload is built by the same `mqtt_payloads.hpp` production emitters the
+  pinned-cJSON host matrix executes, and is completed through the sticky owner before the
+  publish seam is called; a build/print failure therefore publishes nothing and cannot replace a
+  good retained document with a partial one. Discovery → availability → state is short-circuited,
+  and any build, print or broker-publish failure rearms the complete discovery sequence rather than
+  resuming halfway through it. The host gate materializes all 55 registry rows and requires every
+  referenced `value_json` field and type in the corresponding full domain emitter. Static policy
+  derives every `build_*_payload` definition, production call and named OOM/success case as equal
+  sets, so adding a ninth factory without a gate case fails closed.
   The 60 s task watchdog is fed at the loop boundary and after every completed publish: a
   discovery burst that keeps making progress cannot false-trip it, while a single publish that
   never returns still does.
@@ -399,6 +582,18 @@ to a UDP Syslog collector, best-effort, framed as RFC 5424 (`<PRI>1 - tesla-key-
 mirrors every `ESP_LOG*` line (from this firmware **and** ESP-IDF/NimBLE internals — NimBLE is
 pre-throttled to `WARN` there) into the `/diag` ring; the same call also queues the line for
 Syslog, so there is exactly one capture point to keep in sync, not two.
+
+`diag_log.cpp` copies each bounded line into the ring and snapshots the optional sink while holding
+the ring mutex, then releases the mutex before invoking the sink. The sink may allocate, throw or
+perform queue/network work; keeping it outside the lock prevents an OOM/unwind path or a slow
+forwarder from wedging `/diag` and every producer that logs. Chunked readers also bind their
+logical snapshot to an append count and clear epoch: writers may replace bytes already sent, but if
+they reach an unread byte the response stops before mixing two generations. That fail-closed rule
+is especially important for `?redact=1`, where a new prefix joined to an old sensitive tail could
+otherwise evade line-marker redaction. A wrapped ring's initial partial line is discarded before
+redaction, and a logical line longer than the bounded 288-byte frame is emitted only as the static
+`<redacted>` token; the marker and its sensitive value can therefore never be split across two
+independently redacted fragments.
 
 - **Severity** (`tk::syslog_pri_for_line`, host-tested): facility is always `user` (1); the
   severity comes from the line's own esp_log level, which the hook sees because it captures the
@@ -425,6 +620,12 @@ Syslog, so there is exactly one capture point to keep in sync, not two.
   (`have_checked`, not `!resolved` — a persistently failing DNS/host must not re-run
   `getaddrinfo()`+ping every loop). **Delivery gates on DNS resolution only** (`resolved`) —
   never on the reachability probe below — since Syslog is inherently best-effort UDP.
+  Startup uses `logic/syslog_start_gate.hpp` because FreeRTOS may schedule the consumer before
+  `xTaskCreate()` returns. The task waits while its queue remains startup-local and unpublished;
+  only a successful create commits the gate and publishes the process-lifetime queue with
+  release/acquire ordering. A create failure cancels the waiter before deleting the unpublished
+  queue. Once published, the global log hook may have snapshotted it at any time, so normal boot
+  never deletes it — optional forwarding degrades without creating a hook-versus-delete UAF.
 - **Reachability probe (advisory only, never a delivery gate):** ARP for an on-subnet host (L2,
   works even when the collector firewalls ICMP), else a 2-echo ICMP ping (800 ms timeout each).
   Surfaced in `/status.syslog.reachable` purely as a UI hint ("Enabled · not answering ping").
@@ -490,10 +691,12 @@ The escalation lives in the pure, host-tested `main/logic/heap_watchdog.hpp`, sa
   skipping would let a run that began *before* the download resume its clock and fire during it.
   Queried via `ota_is_busy()` (one atomic), never `ota_get_status()` (copies `std::string`s and
   can throw on the very heap this is deciding about).
-- **On fire:** `ESP_LOGE`, persist `reboot_why=heap:<n>` to NVS `tesla_cfg`, deliberately **do not
-  confirm** a `PENDING_VERIFY` image, wait a **300 ms `vTaskDelay`**, then `esp_restart()`. Automatic
-  fault recovery must leave rollback armed: if the newly installed image caused the heap
-  regression, confirming it here would make the bad slot permanent. The delay is not
+- **On fire:** persist `reboot_why=heap:<n>` to NVS `tesla_cfg`; **only a successful durable write
+  authorizes the reboot**. A normal write failure or exception leaves the device up degraded at the
+  current ladder step, so an unrecorded restart can never erase the evidence/cap. After persistence,
+  `ESP_LOGE`, a **300 ms `vTaskDelay`**, then `esp_restart()`. This is automatic fault recovery and
+  therefore deliberately does **not** confirm a `PENDING_VERIFY` OTA image: a new image whose heap regression
+  fires the watchdog must roll back on the next boot. The delay is not
   cosmetic: `syslog_send()` only *queues*, and its task runs at priority 3 against `loop_task`'s
   5, so without a yield the final message dies in the queue on a single-core target — and the
   `/diag` ring does not survive the reboot either. Skipping it would throw away the one line that
@@ -503,19 +706,22 @@ The escalation lives in the pure, host-tested `main/logic/heap_watchdog.hpp`, sa
   would cycle the radios every ~10 min indefinitely. Relatedly, a boot that followed a watchdog
   restart **does not seed the active polling window** (`vehicle_ctrl.cpp` `init()`) — that seeding
   is what would make a restart loop expensive for a parked car, and a self-healed device has no
-  user waiting on a warm cache. The count resets on any ordinary boot (power cycle, crash, OTA),
-  since those leave no breadcrumb, so this only ever bounds a genuine loop.
+  user waiting on a warm cache. Only an exact NVS `NOT_FOUND` is an ordinary boot. A breadcrumb is
+  consumed with an erase; a read/erase failure or a malformed/out-of-range value closes the ladder
+  at the cap and suppresses the post-restart activity window instead of being mistaken for zero.
+  A genuine power cycle, crash or OTA normally leaves no breadcrumb, so the counter still bounds
+  only deliberate watchdog restarts when storage is healthy.
 - **Afterwards:** `main.cpp` takes the NVS breadcrumb once at boot (read + clear) and holds it for
   the process; `/status` reports it as **`last_reboot`** (omitted on every ordinary boot). This
   exists because `esp_reset_reason()` cannot tell a deliberate `esp_restart()` from a user power
   cycle — both read SW/POWERON — so without it a device that self-heals unattended at 04:00 leaves
   no trace, and the next investigation starts from scratch.
 
-Nothing on this path allocates **in our code** — the `"heap:<n>"` breadcrumb is at most 9 chars and
-lands in `std::string`'s inline buffer — and the one call that can allocate internally (NVS)
-returns `ESP_ERR_NO_MEM` rather than throwing and is `try`-guarded anyway. That matters because
-this code runs precisely when allocation is failing: a throw escaping here would unwind into the
-net-less loop task and turn a wedge into an `abort()`.
+The critical-path `"heap:<n>"` formatter uses a fixed buffer and does not allocate. The subsequent
+NVS write can still fail or allocate internally, and the boot-time NVS read materializes a
+`std::string`; both normal errors and exceptions are contained. Persistence failure blocks
+`esp_restart()`. That matters because this code runs precisely when allocation is failing: an
+uncontained throw or an unrecorded reboot here would turn a wedge into an opaque reboot loop.
 
 ### Why a restart, and not in-place recovery
 
@@ -668,6 +874,15 @@ holds stays free on a device whose binding limit is the largest *contiguous* blo
    Ethernet proves nothing about credentials on trial, and spending them there would discard the
    only way back to a working network the moment the cable is unplugged.
 
+Every resource acquired after the positive probe is owned by one startup record until activation
+commits. A failure unwinds in dependency-reverse order: stop the driver; unregister IP/Ethernet
+handlers; retract the coherent globals; delete glue and netif; uninstall the driver; delete PHY,
+MAC and event group; finally release SPI. If driver uninstall fails, its PHY/MAC/SPI tail is kept
+alive and boot fails closed — deleting objects still reachable by the driver would turn a bounded
+startup fault into dangling callbacks or a later UAF. A no-link/DHCP boot fallback is different:
+the successfully activated Ethernet stack remains process-lifetime state so a later cable can
+take over without rebooting.
+
 **Polling mode is deliberate, not a workaround.** The M5Stack ATOMIC PoE Base routes only
 SCLK/CS/MISO/MOSI + power — there is no INT line and no RST line to wire — so the driver polls at
 `CONFIG_TESLA_ETH_POLL_MS` (10 ms) and the PHY is reset over SPI (the W5500's `MR` register)
@@ -765,9 +980,15 @@ The STA→LAN link (distinct from the car BLE link-state below) is kept up by tw
   echo, is treated as unreachable — which is why the baseline guard matters. It
   **never reboots** — a reboot during an AP outage would hit the 30 s boot timeout and drop
   into the setup portal, abandoning good credentials. (Implementation note: the ICMP probe's
-  control block + semaphore are file-scope persistent because `esp_ping`'s worker thread is not
-  joined on teardown and its completion callback always runs — a per-call stack frame would be
-  a use-after-free if a probe timed out while that thread was still alive.)
+  control block, callback arguments and semaphore are file-scope persistent and shared through
+  `ping_probe_run` by the network watchdog and Syslog reachability check. Each session owns an
+  exact monotonically increasing generation. On timeout the caller requests `esp_ping_stop` and
+  waits a second bounded interval; if the matching `on_ping_end` still has not arrived, the handle
+  remains quarantined as `PendingEnd` and no delete, new session or generation reuse is allowed.
+  A later call may clean up only after that exact generation ended; stale/out-of-order callbacks
+  cannot complete a replacement waiter. Create/start failures abandon a generation only while no
+  callback-capable worker was started. This prevents both the former stack use-after-free and a
+  delete/reuse race with esp_ping's asynchronous worker.)
 
 ## Sleep / link-state (the single source of truth)
 
@@ -963,9 +1184,11 @@ the first successful `session_vcsec` existence probe and updates that atomic cac
 successful session save/remove; NVS read errors remain uncached and are retried. This avoids a
 continuous NVS length probe without making a transient storage fault look durably absent.
 
-The main-task BLE-MAC string is startup-only input. When it is empty, the NimBLE host task
-atomically claims one best-effort NVS persistence attempt after its first successful connection;
-it never mutates that `std::string` across tasks.
+The main-task BLE-MAC string is startup-only input. When it is empty, the NimBLE host posts a fixed
+LinkUp record only. `vehicle_loop` first applies `Vehicle::set_connected(true)`, then acknowledges
+the exact connection generation as command-ready, materializes the fixed peer address after
+unlock, and performs the one best-effort NVS persistence attempt outside every shared lock. It
+never mutates the startup `std::string` across tasks.
 
 **Session reuse across a reboot needs the wall clock restored first.** The `sess_vcsec`/`sess_info`
 blobs in NVS exist so a restart does not cost a fresh handshake, but tesla-ble only accepts a
@@ -997,6 +1220,55 @@ no longer depends on the `"UNKNOWN"` placeholder hashing to a name that happens 
 collide (the placeholder is kept out of the matching path). The web UI already shows "Add the
 vehicle VIN below to begin." when no VIN is set, so it never implies pairing without one.
 
+## HTTP request-body and allocator-failure contract
+
+Every normal REST and MCP body enters through `read_body_result()`. Its typed result preserves the
+difference between an empty body, a body over the 2 KiB cap, allocation failure and a receive
+failure; handlers map those cases deliberately instead of folding them all into malformed JSON.
+Persisted configuration routes require a body and map empty/receive/malformed input to HTTP `400`;
+REST vehicle commands deliberately accept empty input only where their shared command registry
+declares no argument or the legacy optional boolean shape. All REST routes map oversize to `413`
+and allocation failure to `503`. MCP keeps JSON-RPC error transport semantics: empty/receive/malformed input is an HTTP-200
+`-32700` envelope, oversize is HTTP `413` with `-32600`, and allocation failure is HTTP `503` with
+`-32603`. JSON nested beyond 16 arrays/objects is a deliberate request-complexity limit: REST maps
+it to `400`, while MCP returns HTTP `200` with Invalid Request `-32600`; it is not a parse error.
+Malformed raw UTF-8 inside a JSON string — a bad/truncated/overlong sequence, a UTF-16-surrogate
+encoding or a scalar above U+10FFFF — remains a syntax error (REST `400`, MCP `-32700`).
+Escaped U+0000 is also rejected before cJSON (REST `400`, MCP `-32600`) because cJSON's
+NUL-terminated string API cannot preserve it for exact request-ID correlation.
+No rejected request reaches command dispatch or a persistent config mutation.
+
+`logic/json_syntax.hpp` first classifies bounded JSON without allocating, including the explicit
+16-container nesting limit, shortest-form raw UTF-8 scalar validation and capture of the original
+top-level numeric-ID token. That matters because
+`cJSON_Parse()` receives the bounded, explicitly NUL-terminated body and returns null for both
+malformed input and allocator failure: syntactically
+valid, supported input followed by a null cJSON tree is therefore treated as OOM/`503`, while
+malformed, over-nested and NUL-containing JSON retain their distinct mappings above. Body and
+parse-tree owners are released after copying the bounded inputs and before any
+blocking BLE, probe, NVS or restart path. `logic/config_request.hpp` owns the MQTT/Syslog mutation
+order and is tested with load, probe, save, response and restart spies; a failure before the durable
+save performs none of the later actions. Empty MQTT/Syslog values remain intentional disable
+requests, not missing bodies.
+
+The captive provisioning server is a separate transport boundary. Its `POST /save` does not use
+the normal API server's allocated 2 KiB intake: it reassembles at most 1024 body bytes in its fixed
+buffer path. An empty body or a declared body above 1024 bytes returns HTTP `400` before form
+parsing or persistence; a receive failure is also `400`. The 2 KiB REST/MCP policy must therefore
+not be generalized to this setup-only endpoint.
+
+Responses use `JsonBuilder`, whose failure bit is sticky: a failed Create/Add retains ownership
+until all stack emitters have unwound, then discards the whole tree instead of leaking a partial
+HTTP-200/MCP result. REST and MCP serialize through the same `json_http_reply` production seam;
+it does not apply a success status or send until printing completed, and print OOM sets 503 before
+the one fixed fallback send. `test/run-cjson-oom-tests.sh` compiles the exact cJSON source from
+pinned ESP-IDF v5.5.5 and fails every allocation in the production status emitter, representative
+REST/MCP envelopes, their shared reply seam and the parser;
+the MQTT companion does the same for retained discovery/state payloads and broker failures. The
+tests prove ownership and response policy behind deterministic transport/publish seams. Only the
+pinned IDF build compiles the real HTTP/NVS/FreeRTOS integration, so host success is not reported as
+on-device runtime evidence.
+
 ## MCP endpoint (/mcp)
 
 `main/mcp_server.cpp` exposes the device to MCP (Model Context Protocol) clients — Claude
@@ -1013,9 +1285,13 @@ JSON-RPC 2.0 message and is answered with `application/json`:
   device has no server-push use case.
 - No `Mcp-Session-Id` — every request is self-contained; the `MCP-Protocol-Version`
   header is ignored (nothing version-dependent happens after `initialize`).
-- Notifications (`notifications/*`) and stray client responses (a message without an
-  `id`) are acknowledged with `202 Accepted` and no body, per the transport spec. A
-  method-less, id-less message (`{}`) is NOT a notification — it gets `-32600` so a
+- Every request and notification must carry `jsonrpc` as the exact string `"2.0"`. The common
+  envelope also rejects duplicate object keys recursively before notification classification or
+  dispatch; a unique valid `id` can still correlate `-32600`, while a duplicate id returns null.
+- Notifications (`notifications/*`: a message with a method and no `id`) are acknowledged with
+  `202 Accepted` and no body, per the transport spec. The server never initiates requests, so a
+  client response has no valid role here. A method-less, id-less message (`{}`) is NOT a
+  notification — it gets `-32600` so a
   broken client isn't left waiting for a reply that never comes.
 - JSON-RPC **batches are rejected** (`-32600`) — protocol `2025-06-18` removed them, and
   the single-message parse keeps the heap cost bounded (2 KB body cap, same as the REST
@@ -1061,9 +1337,21 @@ in [`MCP.md`](MCP.md#tools).
 `cJSON_PrintUnformatted` builds it in one contiguous block — the crash-risk currency on
 this heap — so tool descriptions stay terse and the tool set small; the static registry
 strings are attached via `cJSON_CreateStringReference` (no per-request strdup of
-`.rodata`). The send path carries the same NULL-print → 503 guard as `send_json` (plus an
-envelope-OOM guard that frees the orphaned payload), and both handlers are dispatched
-inside `http_server.cpp`'s `handle_all` try/catch.
+`.rodata`). The real `tools/list` and cache-state/double-print producers live in
+`mcp_json_payloads.hpp`, so the pinned-cJSON matrix executes their growth allocations rather than a
+smaller fixture. JSON-RPC numeric ids are checked from the raw token before cJSON rounding and must
+be canonical decimal safe integers in `[-9007199254740991, 9007199254740991]` (no fraction,
+exponent or negative zero); the materialized value must match and the response uses an internally
+generated exact decimal token. Strings are copied into fixed maximum-64-byte storage. Other types,
+longer strings and ambiguous duplicate ids are rejected with a null response id.
+The same sticky owner used by REST prevents any failed envelope/object adoption from
+escaping as a partial result; NULL printing maps to 503. Once method-specific input has been
+reduced to static pointers, booleans, enums and fixed argument arrays, the request tree is released
+before response construction as well as before a blocking vehicle call. A real-cJSON maximum
+2-KiB `tools/list` input canary measures live bytes and proves that padding- and id-dependent
+allocations are zero before the
+largest response is built. Both handlers are dispatched inside `http_server.cpp`'s `handle_all`
+try/catch.
 
 **Security posture:** identical to the rest of the HTTP API — no auth, no TLS, trusted
 LAN only (see [`SECURITY.md`](SECURITY.md)). The endpoint grants nothing the open REST
@@ -1079,7 +1367,8 @@ parked car never sleeps.
 
 ### Lock hierarchy (`VehicleController`)
 
-Four primitives, created in `VehicleController::init` (`vehicle_ctrl.cpp`). The ONE shared,
+The controller uses four FreeRTOS mutexes plus one fixed-data critical-section mux, created or
+initialized in `VehicleController::init` / the object definition. The ONE shared,
 exception-safe RAII guard is `tk::SemGuard` in [`main/rtos_guard.hpp`](../main/rtos_guard.hpp)
 (blocking or finite/zero-wait, exposes `acquired()`); `vehicle_ctrl_internal.hpp` keeps the
 historical alias `tk::MutexGuard = tk::SemGuard` plus `tk::InFlightGuard`. Every take/give around
@@ -1088,28 +1377,32 @@ through the guard so the lock is released during stack unwinding, never left hel
 
 | Primitive | Kind | Protects |
 |---|---|---|
-| `command_mutex_` | mutex, RAII | one whole command/query transaction: exclusive use of `cmd_sem_`, `last_result_`, `last_error_`; for `set_charging_amps`, the action and verifying ChargeState poll are one transaction |
+| `command_mutex_` | mutex, RAII | one whole command/query transaction and tesla-ble FIFO generation; for `set_charging_amps`, the action and verifying ChargeState poll are one transaction |
 | `vehicle_mutex_` | mutex, RAII (`SemGuard`) | **every** call into the tesla-ble `vehicle_` object (send, `loop()`, `on_rx_data`, `set_connected`) |
-| `cmd_sem_` | binary semaphore | signals "result callback ran" from the BLE RX task to the waiting command (the result callback **always** gives it, even if its body throws) |
 | `cache_mutex_` | mutex, RAII, leaf | the `last_known_*` caches (`std::string` members ⇒ an unlocked copy is torn-read UB) |
+| `result_mutex_` | mutex, RAII, leaf | the externally visible `last_error_` snapshot read by HTTP/MCP after a foreground command returns |
+| `CommandCompletion::sem` | per-request binary semaphore, shared ownership | signals one request-local fixed completion record; a timed-out callback cannot address stack storage or a later request's semaphore |
+| `telemetry_pending_mux_` | `portMUX`, innermost, POD only | the fixed latest-value nanopb mailboxes, pending mask and charging-amps feedback generation written synchronously by tesla-ble callbacks |
 
-**Normative order:** `command_mutex_` → `vehicle_mutex_` → `cache_mutex_`. Acquire strictly
-left-to-right; never take a lock while holding one to its right. Corollaries, each load-bearing
-today:
+**Normative order:** semaphore nesting is `command_mutex_` → `vehicle_mutex_`. `cache_mutex_` and
+`result_mutex_` are independent leaf locks and are never held while another semaphore is acquired.
+`telemetry_pending_mux_` is innermost: only bounded POD copies happen inside it, and code inside the
+critical section never takes a semaphore, allocates, logs, parses or calls out. Corollaries, each
+load-bearing today:
 
-- `vehicle_mutex_` is held only for the library call itself — **never across the `cmd_sem_`
-  wait** (the RX task needs it to deliver the very result being waited for; holding it would
-  deadlock every command into its timeout).
+- `vehicle_mutex_` is held only for the library call itself — **never across a request-local
+  `CommandCompletion::sem` wait** (the RX path needs it to deliver the result; holding it would
+  deadlock every command into its timeout). Each completion is retained by the waiter and queued
+  callback; generation invalidation prevents a late callback from completing a later request.
 - `cache_mutex_` is a **leaf**: held only for a plain struct copy/assignment, never while
-  calling out (library, BLE, NVS, logging) and never while taking another lock. It *is*
-  legitimately taken while `vehicle_mutex_` is held — the RX parse path
-  (`on_rx_data`/`loop()` under `vehicle_mutex_`) synchronously fires the `set_*_state_callback`
-  cache writers — which is exactly the vehicle→cache order above.
+  calling out (library, BLE, NVS, logging) and never while taking another lock. The synchronous
+  tesla-ble state callbacks no longer take it: they publish fixed nanopb latest values, and
+  `vehicle_loop` parses/publishes them only after releasing `vehicle_mutex_`.
 - `clear_session_and_cache_()` takes `vehicle_mutex_` internally, so it must **not** be entered
   while holding it (non-recursive mutex ⇒ self-deadlock; see the comment at its definition).
-- `last_result_`/`last_error_` need no lock of their own: the RX callback writes them **before**
-  giving `cmd_sem_`, and the command task reads them only **after** taking it — the semaphore
-  is the ordering edge. `command_mutex_` guarantees a single waiter at a time.
+- The callback writes only its request-local fixed `CommandCompletion` fields before giving that
+  completion's semaphore. After the wait, the command task may allocate/log and publishes the
+  user-facing `last_error_` under `result_mutex_`; callbacks never touch that string.
 - `cmd_in_flight_` (atomic, `tk::InFlightGuard`) is set only under `command_mutex_`; `loop_task`
   reads it to pause background polls — a flag, not a lock; it orders nothing.
 
@@ -1119,9 +1412,18 @@ Application-task priorities are declared **only** in [`main/task_config.hpp`](..
 (`tk::kPrio*`) so relative order is reviewable in one place; stack sizes stay at the
 `xTaskCreate` sites with their sizing rationale. Current inventory:
 
+`vehicle_loop` and `auto_pair` are created as one lifecycle unit behind
+`logic/task_start_gate.hpp`. Both entry functions may be scheduled immediately, but while the gate
+is `Creating` their only permitted operation is a one-tick wait—before TWDT registration, mutexes,
+BLE or vehicle access. Two successful creates move the pair to `Running`; if the second create
+fails, `Cancelled` makes the first task acknowledge and self-delete, and the creator waits for that
+acknowledgement instead of externally deleting a task that could be running on another core. After
+the pair is released it still waits on the global runtime-admission gate below. The loop task's TWDT
+subscription is RAII-owned and is removed on every unwind before the task can self-delete.
+
 | Task | Priority | Stack | Created in | Purpose |
 |---|---|---|---|---|
-| `vehicle_loop` | `kPrioVehicleLoop` = 5 | 8192 | `vehicle_ctrl.cpp` (fn: `vehicle_telemetry.cpp`) | pump `vehicle_->loop()`, rotating NO_WAKE telemetry poll, sleep gating, BLE-fault link reset |
+| `vehicle_loop` | `kPrioVehicleLoop` = 5 | 8192 | `vehicle_ctrl.cpp` (fn: `vehicle_telemetry.cpp`) | drain fixed NimBLE Link/RX events, pump `vehicle_->loop()`, parse deferred telemetry after unlock, rotating NO_WAKE poll, sleep gating, BLE-fault link reset |
 | `captive_dns` | `kPrioCaptiveDns` = 5 | 4096 | `provisioning.cpp` | captive-portal DNS (setup-AP mode only; vehicle stack not running) |
 | `ota` | `kPrioOta` = 5 | 8192 | `ota_update.cpp` | OTA download + flash (transient) |
 | `ota_chk` | `kPrioOtaCheck` = 5 | 8192 | `ota_update.cpp` | OTA manifest check (transient) |
@@ -1129,13 +1431,19 @@ Application-task priorities are declared **only** in [`main/task_config.hpp`](..
 | `net_wd` | `kPrioWifiWatchdog` = 4 | 3072 | `net.cpp` | ghost-link watchdog (force the active transport to re-establish, never reboot) |
 | `mqtt_pub` | `kPrioMqttPub` = 4 | 6144 | `mqtt_ha.cpp` | MQTT/HA publisher (reads the caches) |
 | `display` | `kPrioDisplay` = 3 | 6144 | `display.cpp` | ST7735 renderer (`CONFIG_TESLA_DISPLAY_ENABLED` builds) |
-| `ota_gate` | `kPrioOtaGate` = 3 | 3072 | `main.cpp` | one-shot OTA rollback health gate (polls every 5 s; commits on a proven link past 90 s, gives up at 600 s) |
+| `ota_gate` | `kPrioOtaGate` = 3 | 3072 | `main.cpp` | one-shot OTA rollback health gate (polls every 5 s; commits on proven link + INTERNAL largest block ≥4 KiB past 90 s under the shared owner, gives up at 600 s) |
+| `safe_gate` | `kPrioOtaGate` = 3 | 2560 | `safe_mode.cpp` | one-shot healthy-window timer; after 30 s under the full normal workload, durably clears the crash-boot counter, while latched safe mode never creates it |
 | `syslog_task` | `kPrioSyslog` = 3 | 6144 | `syslog.cpp` | best-effort UDP Syslog forwarder (opt-in; degraded-not-fatal on a failed start) |
 | `led` | `kPrioLed` = 2 | 3072 | `led_status.cpp` | APA102 status LED (`CONFIG_TESLA_LED_ENABLED` builds) |
 
 Not in the table (ESP-IDF-owned, priorities from IDF Kconfig, not `task_config.hpp`): the
-**NimBLE host task** — it runs the RX data callback, i.e. `vehicle_mutex_` → parse →
-`cache_mutex_` and every `set_*_callback` lambda; the **esp_http_server task** — it runs every
+**NimBLE host task** — the two project adapters that cross into `VehicleController`
+(`ble_link_event_cb_`, `ble_rx_event_cb_`) only copy bounded bytes/POD into the statically backed
+deferred queue; they never call `Vehicle`, NVS, logging or an allocating parser. The surrounding
+GAP/GATT lifecycle callbacks still perform bounded parsing, DEBUG diagnostics and synchronous
+NimBLE submissions, but every lifecycle mutex attempt is zero-wait and every failure drops/retries
+fail-closed instead of blocking the host. `vehicle_loop` owns `Vehicle::set_connected`,
+`on_rx_data`, final ready publication and deferred telemetry parsing. The **esp_http_server task** runs every
 HTTP/MCP handler, i.e. the `command_mutex_` cycles and cache copies; plus the usual esp_timer /
 WiFi / LwIP system tasks.
 
@@ -1155,9 +1463,26 @@ call's minimum; it need not run at the exact deepest instruction. `/status.sys.s
 and the MQTT device payload expose the same cached values. The reporting period is **this boot**;
 the first request cannot report its own not-yet-completed path, and a task not started yet (or
 deliberately absent in safe mode) is omitted. Presence is stored separately from the measurement,
-so a genuine zero-byte high-water mark remains visible as the critical value it is. These are measurements,
-not universal alarm thresholds: stack sizes and call paths differ across the four supported targets,
-so any alert floor needs target/runtime evidence rather than a Daikin-derived constant.
+so a genuine zero-byte high-water mark remains visible as the critical value it is. These are
+measurements, not universal alarm thresholds: stack sizes and call paths differ across the four
+supported targets. The manual bench-report gate nevertheless needs more than a one-byte
+near-overflow to call a run acceptable. It therefore reserves one eighth of each configured watched
+task stack: `httpd` and `vehicle` must each retain at least 1024 B and `mqtt` at least 768 B;
+all three must be present for every normal/final profile. `auto_pair` is optional because a valid
+already-paired run need not sample it, but when reported it must retain at least 1024 B. These are
+reviewed acceptance-policy margins derived from the configured 8192/8192/6144/8192-byte task
+stacks, not claims of hardware-derived universal alert floors. Recovery still omits vehicle/MQTT
+during its latched safe-mode phase, then its required separate non-fault reboot supplies the final
+normal-boot snapshot to which the three-task rule applies. Its default-branch workflow materializes a closed
+`report-json` dispatch input, checks schema/plausibility and equality to the separately entered
+source hash, firmware hash, profile and target, fingerprints the validated JSON, then uploads that
+exact file without an intervening step. The report SHA-256 and resulting Actions artifact
+ID/archive digest identify and protect the report only: stack readings, NVS
+preservation, firmware signature verification, source/artifact identity and physical execution are
+operator declarations, not independently measured or cryptographically proven by the ingest.
+Schema v2 records `initialBootFailCount` and `finalBootFailCount`. The recovery profile must begin
+and end at zero, perform at least four fault resets to reach the safe-mode latch, then a separate
+non-fault reboot to clear it—at least five planned reboots in total.
 
 ### Atomics doctrine
 
@@ -1189,19 +1514,66 @@ car never sleeps). The rule, by execution model:
   so no tight error loop forms, and continue with the next iteration.
 - **One-shot jobs** (`ota_chk`, `ota`) convert a throw into a terminal **error state** visible in
   `/ota/status` — never a reboot.
-- **C callbacks** (NimBLE GAP/GATT + RX, the tesla-ble result/state callbacks, the MQTT event
-  handler, the SNTP sync cb) catch locally and return a valid API result; the tesla-ble result
-  callback additionally **always** gives `cmd_sem_` so the foreground waiter is released on a throw.
+- **C callbacks** (NimBLE GAP/GATT + RX, MQTT, SNTP) catch locally or pass a mechanical
+  fixed-buffer/POD/atomic audit and return a valid API result. Persistent tesla-ble state callbacks
+  are thin adapters to fixed latest-value mailboxes; the dynamic status and command-result
+  callbacks publish POD/fixed text only. The command-result callback additionally **always** gives
+  its request-local `CommandCompletion::sem` after its catch-all, so the foreground waiter is
+  released without logging or allocating while `vehicle_mutex_` is held. NimBLE-host and
+  `esp_timer` lifecycle callbacks use only zero-wait mutex attempts; catch-all containment is not
+  treated as protection against a blocked callback.
 - **Critical boot** (`app_main`) has a top-level boundary; anything that escapes it is logged and
   enters the same fatal-startup policy as an explicitly failed essential component instead of
   reaching a bare `abort()`.
-- A catch-all (`catch (...)`) always follows `catch (std::exception&)` because third-party code is
-  not guaranteed to throw only standard exception types.
+- Every boundary has a terminal catch-all (`catch (...)`) because third-party code is not guaranteed
+  to throw only standard exception types. Task and one-shot paths may first log
+  `catch (std::exception&)`; C ABI callbacks may intentionally use catch-all only when their only
+  safe response is a fixed valid API result.
+
+`test/test_runtime_boundary_contract.py` first derives the shipped C++ inventory from the literal
+`main/CMakeLists.txt` `SRCS` block, including nested `.cpp`/`.cc`/`.cxx` paths, then derives every
+FreeRTOS task and reviewed C callback from the actual registration calls and callback-bearing
+structs, including address-of spelling and the `esp_log_set_vprintf` hook. Inline/runtime-selected
+callbacks and non-literal source registration are rejected; each boundary either has
+a direct/delegated catch-all or passes a mechanical fixed-buffer/C/atomic call audit. Mutation
+canaries add a registration, remove a catch/lifetime release, introduce a dynamic callback or a
+throwing call, restore NimBLE→Vehicle re-entry, parse/log/allocate inside a tesla-ble callback,
+publish BLE readiness before the deferred Vehicle acknowledgement, reuse stale charging-current
+feedback, materialize OTA strings under the status lock, race crash dismissal with its immutable
+string/vector snapshot, register a nested `.cc` source, bypass sticky cJSON construction, remove the real
+`/status` emitter or any production MQTT builder/sequencer seam, bypass persist-before-restart,
+move either vehicle task across its dual/global admission barriers, restore external task deletion,
+remove TWDT unwind, bypass either production ping user, or reorder/bypass bounded OTA body/JSON/
+version validation.
+All shipped sources plus headers are scanned for raw cJSON Create/Add bypasses outside the single
+`JsonBuilder` implementation. The companion
+runtime binary exercises diagnostic generation changes after unlock, every partial MQTT-probe
+ownership stage, safe-mode NVS failures/exceptions, and heap-breadcrumb save/read/erase/malformed
+failures. It also compiles the production ping lifecycle against deterministic esp_ping/FreeRTOS
+stubs for create/start failure, reply/no-reply and timeout→stop→late-end quarantine with stale
+callback rejection. This is structural/direct host evidence; the four-target IDF build remains the
+integration gate for the actual C frames.
 
 ### Startup failure policy (normative)
 
 Component start/init functions **report success/failure**; `app_main` classifies them and never
 runs a partial system that still announces itself as "running" (issue #204):
+
+`logic/runtime_admission.hpp` is the fail-closed cross-task latch for that rule. Boot starts in
+`Booting`; only after every essential service and both vehicle task allocations succeed may
+`app_main` make the one-way transition to `Ready`. Safe mode transitions to `SafeMode`, while any
+fatal startup path stores `Fatal`; neither terminal state can later be promoted. The two vehicle
+task entries wait without touching the car until `Ready`; vehicle-active HTTP/MCP routes return
+503 and the shared command/telemetry entry points refuse work unless the same gate is ready. The OTA
+health task also treats `Booting`, `SafeMode` and `Fatal` as non-health evidence, so a partial boot
+cannot spend rollback merely because its timer survived.
+
+NimBLE has an additional acknowledgement boundary because the pinned ESP-IDF wrapper starts its
+hidden host task through a void function that cannot report task-create failure. `ble_client.start`
+does not admit the essential service until the real host sync callback wins a bounded
+`logic/nimble_start_gate.hpp` transition. Timeout is terminal, so a late callback cannot resurrect
+boot. OTA health snapshots that positive sync and a saturating per-boot reset counter, then refuses
+confirmation if the host is no longer synced or any reset occurred after admission.
 
 - **Essential** — `config`/`tesla_ble` NVS, `VehicleController::init` (its sync primitives + tasks),
   the WiFi event group/station netif/watchdog semaphore+task, NimBLE and its BLE mutex/timer

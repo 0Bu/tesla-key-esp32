@@ -2,6 +2,7 @@
 #include "ota_update.hpp"      // ota_confirm_pending_image() — guard OTA rollback across the setup reboot
 #include "logic/http_body.hpp" // http_body_read() — reassemble a multi-segment POST body
 
+#include <array>
 #include <cstring>
 #include <cstdio>
 #include <cstdlib>
@@ -9,6 +10,7 @@
 #include <cstdint>
 #include <exception>
 #include <string>
+#include <string_view>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -22,12 +24,19 @@
 #include "logic/captive.hpp"
 #include "logic/wifi_credentials.hpp"
 #include "config_blob.hpp"
+#include "boot_fatal.hpp"
 #include "task_config.hpp"
 
 static const char* TAG = "provisioning";
 static const char* AP_SSID = "tesla-key-esp32-setup";
 
 static NvsStorageAdapter* g_cfg = nullptr;
+
+static void provisioning_boot_require(esp_err_t err, const char* component) {
+    if (err == ESP_OK) return;
+    ESP_LOGE(TAG, "%s failed: %s", component, esp_err_to_name(err));
+    boot_fatal(component);
+}
 
 // ─── HTML form ──────────────────────────────────────────────────────────────
 
@@ -39,47 +48,61 @@ extern const uint8_t setup_html_gz_end[]   asm("_binary_setup_html_gz_end");
 
 // ─── x-www-form-urlencoded parsing ───────────────────────────────────────────
 
-static std::string url_decode(const std::string& in) {
-    std::string out;
+static bool url_decode(std::string_view in, std::string& out) {
+    out.clear();
     out.reserve(in.size());
     for (size_t i = 0; i < in.size(); ++i) {
         char c = in[i];
         if (c == '+') {
             out += ' ';
-        } else if (c == '%' && i + 2 < in.size()) {
+        } else if (c == '%') {
+            if (i + 2 >= in.size()) return false;
             auto hex = [](char h) -> int {
                 if (h >= '0' && h <= '9') return h - '0';
                 if (h >= 'a' && h <= 'f') return h - 'a' + 10;
                 if (h >= 'A' && h <= 'F') return h - 'A' + 10;
-                return 0;
+                return -1;
             };
-            out += (char)(hex(in[i + 1]) * 16 + hex(in[i + 2]));
+            const int high = hex(in[i + 1]);
+            const int low = hex(in[i + 2]);
+            if (high < 0 || low < 0) return false;
+            const char decoded = static_cast<char>(high * 16 + low);
+            if (decoded == '\0') return false;
+            out += decoded;
             i += 2;
         } else {
+            if (c == '\0') return false;
             out += c;
         }
     }
-    return out;
+    return true;
 }
 
-static std::string form_field(const std::string& body, const std::string& key) {
-    std::string token = key + "=";
-    size_t pos = body.find(token);
-    while (pos != std::string::npos) {
-        // ensure it's a field boundary (start or after '&')
-        if (pos == 0 || body[pos - 1] == '&') break;
-        pos = body.find(token, pos + 1);
+static bool form_field(std::string_view body, std::string_view key, std::string& out) {
+    out.clear();
+    size_t pos = body.find(key);
+    while (pos != std::string_view::npos) {
+        const size_t equals = pos + key.size();
+        // Require an exact field boundary and '=' after the complete key; a substring such as
+        // `old_ssid=` must never be accepted as the requested `ssid=` field.
+        if ((pos == 0 || body[pos - 1] == '&') &&
+            equals < body.size() && body[equals] == '=') {
+            const size_t start = equals + 1;
+            const size_t end = body.find('&', start);
+            return url_decode(body.substr(start, end == std::string_view::npos
+                                                     ? std::string_view::npos
+                                                     : end - start),
+                              out);
+        }
+        pos = body.find(key, pos + 1);
     }
-    if (pos == std::string::npos) return "";
-    size_t start = pos + token.size();
-    size_t end   = body.find('&', start);
-    return url_decode(body.substr(start, end == std::string::npos ? std::string::npos
-                                                                   : end - start));
+    return true;  // An omitted field remains the empty value and is validated by its caller.
 }
 
 // ─── HTTP handlers ────────────────────────────────────────────────────────────
 
 static esp_err_t form_get(httpd_req_t* req) {
+  try {
     // The portal only auto-pops if the joining OS's connectivity probe gets the answer THAT OS
     // keys on — iOS asks for captive.apple.com/hotspot-detect.html, Android for /generate_204,
     // Windows for /connecttest.txt. Answering all of them with 200 + the page (what this did
@@ -101,18 +124,31 @@ static esp_err_t form_get(httpd_req_t* req) {
     httpd_resp_set_hdr(req, "Content-Encoding", "gzip");
     const size_t len = setup_html_gz_end - setup_html_gz_start;
     return httpd_resp_send(req, (const char*)setup_html_gz_start, len);
+  } catch (...) {
+    // This is an httpd C callback. A future throwing helper must degrade to a valid handler
+    // return rather than unwinding through the server task.
+    return ESP_ERR_NO_MEM;
+  }
 }
 
 static esp_err_t save_post_impl(httpd_req_t* req) {
-    int len = req->content_len;
-    if (len <= 0 || len > 1024) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "empty/oversized form");
+    static constexpr size_t kSaveBodyMaxBytes = 1024;
+    const int len = req->content_len;
+    if (len <= 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "empty form");
+        return ESP_FAIL;
+    }
+
+    // Fixed stack storage: the full 1024-byte wire limit plus one mandatory terminator byte.
+    // A 1025-byte Content-Length is rejected before recv, so the terminator never leaves the array.
+    std::array<char, kSaveBodyMaxBytes + 1> body{};
+    if (!tk::http_body_fits_buffer(static_cast<size_t>(len), body.size())) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "oversized form");
         return ESP_FAIL;
     }
     // Reassemble the whole body: httpd_req_recv may return only the first TCP segment, so a single
     // recv could persist a truncated ssid/pass/vin. Loop until content_len (bounded timeout retry) —
-    // logic/http_body.hpp. +1 capacity for its NUL terminator.
-    std::string body(len + 1, '\0');
+    // logic/http_body.hpp. The reader writes the terminator only after all `len` bytes arrive.
     int got = tk::http_body_read(body.data(), body.size(), len,
         [req](char* dst, size_t want) -> tk::BodyChunk {
             int r = httpd_req_recv(req, dst, want);
@@ -120,15 +156,25 @@ static esp_err_t save_post_impl(httpd_req_t* req) {
             if (r <= 0)                      return { tk::BodyRecv::Error,   0 };
             return { tk::BodyRecv::Data, static_cast<size_t>(r) };
         });
-    if (got < 0) {
+    if (got < 0 || got != len) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "recv failed");
         return ESP_FAIL;
     }
-    body.resize(got);
+    if (tk::http_body_has_embedded_nul(body.data(), static_cast<size_t>(got))) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid NUL in form");
+        return ESP_FAIL;
+    }
+    const std::string_view body_view(body.data(), static_cast<size_t>(got));
 
-    std::string ssid = form_field(body, "ssid");
-    std::string pass = form_field(body, "pass");
-    std::string vin  = form_field(body, "vin");
+    std::string ssid;
+    std::string pass;
+    std::string vin;
+    if (!form_field(body_view, "ssid", ssid) ||
+        !form_field(body_view, "pass", pass) ||
+        !form_field(body_view, "vin", vin)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid form encoding");
+        return ESP_FAIL;
+    }
 
     const tk::WifiCredentialError wifi_error = tk::wifi_credentials_error(ssid, pass);
     if (wifi_error != tk::WifiCredentialError::None) {
@@ -211,12 +257,15 @@ static esp_err_t save_post(httpd_req_t* req) {
         return save_post_impl(req);
     } catch (const std::exception& e) {
         ESP_LOGE(TAG, "setup save threw (%s); returning 503", e.what());
+        httpd_resp_set_status(req, "503 Service Unavailable");
+        httpd_resp_set_type(req, "text/plain");
+        return httpd_resp_sendstr(req, "out of memory");
     } catch (...) {
         ESP_LOGE(TAG, "setup save threw (unknown); returning 503");
+        httpd_resp_set_status(req, "503 Service Unavailable");
+        httpd_resp_set_type(req, "text/plain");
+        return httpd_resp_sendstr(req, "out of memory");
     }
-    httpd_resp_set_status(req, "503 Service Unavailable");
-    httpd_resp_set_type(req, "text/plain");
-    return httpd_resp_sendstr(req, "out of memory");
 }
 
 // ─── Captive-portal DNS ───────────────────────────────────────────────────────
@@ -273,12 +322,16 @@ void provisioning_run(NvsStorageAdapter& config_store) {
     esp_wifi_stop();
     esp_wifi_deinit();
 
-    esp_netif_init();
+    const esp_err_t netif_err = esp_netif_init();
+    if (netif_err != ESP_OK && netif_err != ESP_ERR_INVALID_STATE) {
+        provisioning_boot_require(netif_err, "setup network interface substrate");
+    }
     esp_err_t loop_err = esp_event_loop_create_default();
     if (loop_err != ESP_OK && loop_err != ESP_ERR_INVALID_STATE) {
-        ESP_ERROR_CHECK(loop_err);
+        provisioning_boot_require(loop_err, "setup network event loop");
     }
     esp_netif_t* ap_netif = esp_netif_create_default_wifi_ap();
+    if (!ap_netif) boot_fatal("setup AP network interface");
 
     // RFC 8910 (DHCP option 114): hand the joining client the portal URI in its DHCP lease. Recent
     // iOS and Android prefer this over probing at all, so the portal opens without depending on the
@@ -309,7 +362,7 @@ void provisioning_run(NvsStorageAdapter& config_store) {
     }
 
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
+    provisioning_boot_require(esp_wifi_init(&cfg), "setup WiFi driver initialization");
 
     wifi_config_t ap{};
     strncpy((char*)ap.ap.ssid, AP_SSID, sizeof(ap.ap.ssid) - 1);
@@ -318,9 +371,10 @@ void provisioning_run(NvsStorageAdapter& config_store) {
     ap.ap.max_connection = 4;
     ap.ap.authmode       = WIFI_AUTH_OPEN;   // open network for easy setup
 
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_AP));  // AP only — portal is the sole WiFi setup path
-    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap));
-    ESP_ERROR_CHECK(esp_wifi_start());
+    // AP only — the portal is the sole WiFi setup path.
+    provisioning_boot_require(esp_wifi_set_mode(WIFI_MODE_AP), "setup AP mode");
+    provisioning_boot_require(esp_wifi_set_config(WIFI_IF_AP, &ap), "setup AP configuration");
+    provisioning_boot_require(esp_wifi_start(), "setup AP start");
 
     ESP_LOGI(TAG, "Setup AP up. Join WiFi '%s' and open http://192.168.4.1", AP_SSID);
 
@@ -329,8 +383,7 @@ void provisioning_run(NvsStorageAdapter& config_store) {
     hcfg.max_uri_handlers = 4;
     httpd_handle_t server = nullptr;
     if (httpd_start(&server, &hcfg) != ESP_OK) {
-        ESP_LOGE(TAG, "failed to start setup HTTP server; halting setup mode");
-        for (;;) vTaskDelay(pdMS_TO_TICKS(10000));
+        boot_fatal("setup HTTP server");
     }
 
     httpd_uri_t save = { .uri = "/save", .method = HTTP_POST,
@@ -342,7 +395,7 @@ void provisioning_run(NvsStorageAdapter& config_store) {
         httpd_register_uri_handler(server, &form) != ESP_OK) {
         ESP_LOGE(TAG, "setup portal handler registration failed; halting setup mode");
         httpd_stop(server);
-        for (;;) vTaskDelay(pdMS_TO_TICKS(10000));
+        boot_fatal("setup HTTP handlers");
     }
 
     // Redirect phones only after the entire HTTP surface is ready. Otherwise an orphaned DNS

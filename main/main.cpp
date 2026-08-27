@@ -32,6 +32,7 @@
 #include "diag_log.hpp"
 #include "diag_crash.hpp"
 #include "safe_mode.hpp"
+#include "runtime_admission.hpp"
 #include "config_blob.hpp"
 #include "ota_update.hpp"
 #include "mqtt_ha.hpp"
@@ -40,6 +41,7 @@
 #include "led_status.hpp"
 #include "logic/bootlog.hpp"
 #include "logic/health_gate.hpp"
+#include "logic/heap_watchdog.hpp"
 #include "logic/vin_transition.hpp"
 
 static const char* MDNS_HOSTNAME = "tesla-key-esp32";  // → http://tesla-key-esp32.local
@@ -52,6 +54,10 @@ static const char* TAG = "main";
 // rebooted, because a reboot loop repeatedly opens the vehicle polling window while erasing the
 // most useful in-memory diagnostic context.
 [[noreturn]] void boot_fatal(const char* component) {
+    // First close every vehicle-active ingress and release any background task still waiting at
+    // the boot barrier.  HTTP/OTA recovery may remain alive on an already-valid image, but a
+    // partial runtime is never allowed to scan, connect, pair or command the car.
+    tk::runtime_admission_mark_fatal();
     ESP_LOGE(TAG, "FATAL: essential component '%s' failed to initialize; refusing to run a "
                   "partial firmware", component);
 
@@ -81,20 +87,27 @@ static std::atomic<bool>  s_ntp_synced{false};
 static NvsStorageAdapter* s_cfg_store  = nullptr;
 
 static void on_time_sync(struct timeval*) {
-    const bool first_sync = !s_ntp_synced.exchange(true);
-    if (first_sync && s_cfg_store) {
-        try {
-            if (!s_cfg_store->save_str("last_time", std::to_string((long long)time(nullptr)))) {
-                ESP_LOGW(TAG, "NTP time synced but not cached to NVS — a headless reboot with "
-                              "NTP unreachable will come up at 1970");
+    try {
+        const bool first_sync = !s_ntp_synced.exchange(true);
+        if (first_sync && s_cfg_store) {
+            try {
+                if (!s_cfg_store->save_str(tk::nvs_contract::kLastTime,
+                                           std::to_string((long long)time(nullptr)))) {
+                    ESP_LOGW(TAG, "NTP time synced but not cached to NVS — a headless reboot "
+                                  "with NTP unreachable will come up at 1970");
+                }
+            } catch (const std::exception& e) {
+                ESP_LOGE(TAG, "NTP callback could not cache time (%s)", e.what());
+            } catch (...) {
+                ESP_LOGE(TAG, "NTP callback could not cache time (unknown exception)");
             }
-        } catch (const std::exception& e) {
-            ESP_LOGE(TAG, "NTP callback could not cache time (%s)", e.what());
-        } catch (...) {
-            ESP_LOGE(TAG, "NTP callback could not cache time (unknown exception)");
         }
+        ESP_LOGI(TAG, "NTP time synced");
+    } catch (const std::exception& e) {
+        ESP_LOGE(TAG, "NTP callback boundary failed (%s)", e.what());
+    } catch (...) {
+        ESP_LOGE(TAG, "NTP callback boundary failed (unknown exception)");
     }
-    ESP_LOGI(TAG, "NTP time synced");
 }
 
 // Queried by the HTTP /set_time handler so the browser clock is applied only as a
@@ -108,7 +121,7 @@ bool clock_synced_via_ntp() { return s_ntp_synced.load(); }
 // it must be usable before esp_netif exists. Refined by NTP as soon as the link is up.
 static void restore_clock_from_nvs(NvsStorageAdapter& config_store) {
     std::string last_time;
-    if (!config_store.load_str("last_time", last_time) || last_time.empty()) {
+    if (!config_store.load_str(tk::nvs_contract::kLastTime, last_time) || last_time.empty()) {
         ESP_LOGW(TAG, "no cached clock in NVS — starting at 1970 until NTP syncs; persisted "
                       "BLE sessions will be rejected as stale for this boot");
         return;
@@ -155,11 +168,10 @@ static void log_heap(const char* where) {
 // has to prove itself first — catching a "boots fine, then crashes/OOM-reboots under load"
 // image, which the old mark-at-startup placement would have already committed.
 //
-// What counts as proof is decided by logic/health_gate.hpp, and it is CONNECTIVITY plus a
-// minimum uptime — not uptime alone. An image that boots perfectly and never gets on the
-// network is exactly the image no OTA can fix afterwards, and it survives any pure timer
-// without difficulty; the old 90-second sleep sealed that image in as valid and spent the
-// rollback that would have undone it. No-op on a normal (non-pending) boot.
+// What counts as proof is decided by logic/health_gate.hpp: CONNECTIVITY, a non-critical largest
+// internal heap block, and a minimum uptime — not uptime alone. An image that boots perfectly but
+// never gets on the network or immediately exhausts contiguous heap is exactly the image rollback
+// must retain. No-op on a normal (non-pending) boot.
 //
 // Whether being online is even the expected state is the caller's fact, sampled once at arm
 // time: a device with no credentials and no wire is legitimately offline. On this firmware
@@ -168,6 +180,7 @@ static void log_heap(const char* where) {
 static bool s_ota_gate_link_expected = false;
 
 static void ota_health_gate_task(void*) {
+  try {
     const esp_partition_t* running = esp_ota_get_running_partition();
     esp_ota_img_states_t st;
     if (esp_ota_get_state_partition(running, &st) != ESP_OK ||
@@ -176,8 +189,8 @@ static void ota_health_gate_task(void*) {
         return;
     }
 
-    ESP_LOGI(TAG, "OTA image pending verify — rollback stays armed until the link is proven "
-                  "(min %us, giving up after %us)",
+    ESP_LOGI(TAG, "OTA image pending verify — rollback stays armed until link, BLE host and heap health "
+                  "are proven (min %us, giving up after %us)",
              (unsigned) tk::kHealthGateBaseS, (unsigned) tk::kHealthGateCapS);
 
     // Poll rather than sleep-then-decide: the verdict is a function of elapsed time AND a link
@@ -186,31 +199,69 @@ static void ota_health_gate_task(void*) {
     const TickType_t   start  = xTaskGetTickCount();
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(kPollS * 1000));
+        // The health timer is not proof that boot completed.  A late essential failure can leave
+        // HTTP and this task alive while app_main is parked; Safe Mode intentionally omits the
+        // vehicle runtime.  Neither state may spend the one automatic OTA rollback.
+        switch (tk::runtime_admission_action()) {
+            case tk::RuntimeAdmissionAction::Wait:
+                continue;
+            case tk::RuntimeAdmissionAction::Stop:
+                ESP_LOGE(TAG, "OTA image remains pending: essential runtime was not admitted");
+                vTaskDelete(nullptr);
+                return;
+            case tk::RuntimeAdmissionAction::Run:
+                break;
+        }
         const uint32_t elapsed_s =
             (uint32_t) (pdTICKS_TO_MS(xTaskGetTickCount() - start) / 1000);
+        const size_t largest = heap_caps_get_largest_free_block(
+            MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL);
+        const bool runtime_healthy = largest >= tk::kHeapCriticalBytes &&
+                                     ble_host_synced() && ble_host_reset_count() == 0;
         const tk::HealthVerdict v =
             tk::health_gate_decide(elapsed_s, tk::kHealthGateBaseS, tk::kHealthGateCapS,
-                                   s_ota_gate_link_expected, tk::net_is_up());
+                                   s_ota_gate_link_expected, tk::net_is_up(), runtime_healthy);
         if (v == tk::HealthVerdict::Wait) continue;
 
         if (v == tk::HealthVerdict::Commit) {
-            if (esp_ota_mark_app_valid_cancel_rollback() == ESP_OK)
+            // Mark-valid spends the only automatic rollback. Join the same owner word as OTA,
+            // identity journals and FaultRestart, then re-check heap after winning the CAS: a
+            // watchdog sample racing the verdict either owns FaultRestart first (we retry), or
+            // loses to this owner while the heap re-check can still veto the commit.
+            OtaHealthCommitGuard commit_guard;
+            if (!commit_guard) continue;
+            if (!tk::runtime_admission_vehicle_ready()) continue;
+            if (!ble_host_synced()) continue;
+            if (ble_host_reset_count() != 0) continue;
+            const size_t commit_largest = heap_caps_get_largest_free_block(
+                MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL);
+            if (commit_largest < tk::kHeapCriticalBytes) continue;
+
+            if (esp_ota_mark_app_valid_cancel_rollback() == ESP_OK) {
                 ESP_LOGI(TAG, "OTA image healthy after %us on %s — marked valid (rollback "
                               "cancelled, largest block %u)",
                          (unsigned) elapsed_s, tk::net_link_str(tk::net_kind()),
-                         (unsigned) heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+                         (unsigned) commit_largest);
+            }
         } else {
             // Loud, and to syslog as well as /diag: this is the one outcome where the device
             // keeps running a build that is going to disappear on the next reboot, and nothing
             // else in the system will mention it.
-            ESP_LOGE(TAG, "OTA image never got a link within %us — NOT marking it valid; the "
-                          "next reboot rolls back to the previous firmware. Save any setting "
-                          "(e.g. POST /set_mqtt) to keep this image instead.",
+            ESP_LOGE(TAG, "OTA image never proved link, BLE host and heap health within %us — NOT marking "
+                          "it valid; the "
+                          "next reboot rolls back to the previous firmware. Save a network or "
+                          "logging setting that durably commits and reboots (POST /set_wifi, "
+                          "/set_mqtt, /set_syslog or the setup portal) to keep this image instead.",
                      (unsigned) tk::kHealthGateCapS);
         }
         break;
     }
     vTaskDelete(nullptr);
+  } catch (...) {
+    // Leave rollback armed. A health-gate exception is not evidence that this image is healthy.
+    ESP_LOGE(TAG, "OTA health-gate task threw; image remains pending and task stops");
+    vTaskDelete(nullptr);
+  }
 }
 
 extern "C" void app_main() {
@@ -250,16 +301,19 @@ extern "C" void app_main() {
     // our own components (vehicle_ctrl, ble_client, …) keep logging at INFO.
     esp_log_level_set("NimBLE", ESP_LOG_WARN);
 
-    // Initialize NVS
-    esp_err_t ret = nvs_flash_init();
-    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_ERROR_CHECK(nvs_flash_erase());
-        ret = nvs_flash_init();
+    // Initialize NVS without ever applying ESP-IDF's destructive example fallback. This single
+    // partition contains WiFi, VIN, the vehicle private key and BLE sessions: NO_FREE_PAGES or a
+    // newer on-flash format is recovery evidence, not permission to erase identity. A pending OTA
+    // actively rolls back through boot_fatal(); a valid image parks for explicit NVS recovery.
+    const esp_err_t flash_init_err = nvs_flash_init();
+    if (flash_init_err != ESP_OK) {
+        ESP_LOGE(TAG, "NVS flash initialization failed (%s); preserving the complete partition",
+                 esp_err_to_name(flash_init_err));
+        boot_fatal("NVS flash initialization");
     }
-    ESP_ERROR_CHECK(ret);
 
     // Static so they outlive app_main() (which deletes itself via vTaskDelete)
-    static NvsStorageAdapter config_store("tesla_cfg");
+    static NvsStorageAdapter config_store(tk::nvs_contract::kConfigNamespace);
     if (!config_store.initialize())
         boot_fatal("configuration NVS");
 
@@ -269,7 +323,7 @@ extern "C" void app_main() {
     // only recovery authority. Only exact blob NOT_FOUND permits the pre-blob legacy path.
     std::string vin_txn;
     const tk::NvsStringLoadState vin_txn_state =
-        config_store.load_str_state("vin_txn", vin_txn);
+        config_store.load_str_state(tk::nvs_contract::kVinTransition, vin_txn);
     tk::VinTransitionMarker marker;
     const bool vin_txn_valid = vin_txn_state == tk::NvsStringLoadState::Present &&
                                tk::parse_vin_transition_marker(vin_txn, marker);
@@ -316,9 +370,12 @@ extern "C" void app_main() {
     // web UI + OTA ONLY, so a device that crashes on the vehicle path stays reachable in a browser
     // instead of needing a USB cable. It also stops each boot re-opening the car's polling window,
     // which is what turns a reboot loop into a flat traction battery.
-    // A deliberate esp_restart() (a /set_* save, an OTA) reports ESP_RST_SW and is NOT a fault, so
-    // ordinary reboots never count toward it.
+    // A deliberate esp_restart() (a successfully persisted rebooting configuration save, setup
+    // portal save, or OTA) reports ESP_RST_SW and is NOT a fault, so ordinary reboots never count.
     const bool safe_mode = tk::safe_mode_begin(config_store, tk::diag_crash_info().fault);
+    if (safe_mode && !tk::runtime_admission_mark_safe_mode()) {
+        boot_fatal("safe-mode runtime admission");
+    }
 
     // UDP Syslog forwarder for the diag log (NVS "syslog_uri" / CONFIG_TESLA_SYSLOG_SERVER;
     // "" = disabled). Started before the network so it captures boot-time log lines too — its
@@ -343,11 +400,11 @@ extern "C" void app_main() {
     // self-heal to the /diag RAM ring, which the next restart erases. Queued lines survive until
     // WiFi is up, so this does reach the collector. The read itself stays above, before anything
     // else can reboot, so the value always describes the boot just made.
-    if (!VehicleController::boot_reboot_reason().empty()) {
+    if (VehicleController::boot_reboot_reason()[0] != '\0') {
         ESP_LOGW(TAG, "BOOT this boot was caused by the firmware itself: reason=%s — the previous "
                       "run restarted deliberately because its heap stayed unusable (also in "
                       "/status as last_reboot; see docs/ARCHITECTURE.md)",
-                 VehicleController::boot_reboot_reason().c_str());
+                 VehicleController::boot_reboot_reason());
     }
 
     // Resolve WiFi credentials from the configuration snapshot verified above. With an armed VIN
@@ -390,7 +447,7 @@ extern "C" void app_main() {
 
     // Resolve BLE MAC (persisted after first successful scan)
     static std::string ble_mac = CONFIG_TESLA_BLE_MAC;
-    config_store.load_str("ble_mac", ble_mac);
+    config_store.load_str(tk::nvs_contract::kBleMac, ble_mac);
 
     // Physical board identity is diagnostic evidence, not the HA identity (which follows VIN).
     uint8_t board_mac[6] = {0};
@@ -432,7 +489,7 @@ extern "C" void app_main() {
     // Construct the controller (NVS + key) here; NimBLE itself (ble_client.start)
     // is started after WiFi is up. The controller's accessors are safe to call
     // before that — they report "not connected" until the link comes up.
-    static NvsStorageAdapter tesla_store("tesla_ble");
+    static NvsStorageAdapter tesla_store(tk::nvs_contract::kTeslaBleNamespace);
     if (!tesla_store.initialize())
         boot_fatal("Tesla NVS");
     static BleClient ble_client;
@@ -468,7 +525,7 @@ extern "C" void app_main() {
     if (vin_txn_action == tk::VinTransitionJournalAction::Recover) {
         bool durable_key_present = false;
         const bool key_probe_ok =
-            tesla_store.probe_blob("private_key", durable_key_present);
+            tesla_store.probe_blob(tk::nvs_contract::kPrivateKey, durable_key_present);
         const std::string current_key = vehicle.key_fingerprint();
         if (!tk::vin_transition_key_evidence_verified(marker.previous_key_id, current_key,
                                                        key_probe_ok, durable_key_present)) {
@@ -495,7 +552,7 @@ extern "C" void app_main() {
                 bootloader_random_disable();
                 boot_fatal("VIN transition rollback");
             }
-            if (!config_store.remove("vin_txn")) {
+            if (!config_store.remove(tk::nvs_contract::kVinTransition)) {
                 bootloader_random_disable();
                 boot_fatal("VIN transition marker cleanup");
             }
@@ -505,17 +562,17 @@ extern "C" void app_main() {
         } else if (recovery == tk::VinTransitionRecovery::ClearMarker) {
             // Only the verified old-key + old-VIN quadrant may retire the journal without a repair
             // reboot. No other state falls through to this erase.
-            if (!config_store.remove("vin_txn")) {
+            if (!config_store.remove(tk::nvs_contract::kVinTransition)) {
                 bootloader_random_disable();
                 boot_fatal("VIN transition marker cleanup");
             }
         } else if (recovery == tk::VinTransitionRecovery::CompleteNewIdentity) {
             ESP_LOGW(TAG, "interrupted VIN change detected after key commit — completing cleanup");
-            const bool vcsec_removed = tesla_store.remove("session_vcsec");
-            const bool info_removed = tesla_store.remove("session_infotainment");
-            const bool paired_removed = tesla_store.remove("paired_at");
-            const bool mac_removed = config_store.remove("ble_mac");
-            const bool marker_removed = config_store.remove("vin_txn");
+            const bool vcsec_removed = tesla_store.remove(tk::nvs_contract::kSessionVcsec);
+            const bool info_removed = tesla_store.remove(tk::nvs_contract::kSessionInfotainment);
+            const bool paired_removed = tesla_store.remove(tk::nvs_contract::kPairedAt);
+            const bool mac_removed = config_store.remove(tk::nvs_contract::kBleMac);
+            const bool marker_removed = config_store.remove(tk::nvs_contract::kVinTransition);
             if (!vcsec_removed || !info_removed || !paired_removed || !mac_removed ||
                 !marker_removed) {
                 bootloader_random_disable();
@@ -789,11 +846,24 @@ extern "C" void app_main() {
         boot_fatal("OTA health gate");
 
     vehicle_task_phase = tk::VehicleTaskStartPhase::EssentialServicesReady;
-    if (tk::vehicle_tasks_may_start(vehicle_task_phase, safe_mode) &&
-        !vehicle.start_tasks()) {
-        // start_tasks() unwinds a partially-created pair before returning false, so boot_fatal
-        // cannot leave either mutating task running in the background.
-        boot_fatal("Vehicle background tasks");
+    if (!safe_mode) {
+        if (!tk::vehicle_tasks_may_start(vehicle_task_phase, safe_mode) ||
+            !vehicle.start_tasks()) {
+            // start_tasks() keeps both entries behind a start barrier and cooperatively cancels a
+            // partial create before returning false, so boot_fatal cannot leave a mutating task.
+            boot_fatal("Vehicle background tasks");
+        }
+        // A sync acknowledgement proved the hidden NimBLE task was created. It must also remain
+        // stable through essential-service admission: a reset/re-sync during boot is not authority
+        // to start vehicle tasks or to spend rollback on this image.
+        if (!ble_host_synced() || ble_host_reset_count() != 0) {
+            boot_fatal("NimBLE host stability");
+        }
+        // Last essential transition.  Both task entries continue waiting until this succeeds, so
+        // there is no scheduling window in which a merely allocated task can contact the car.
+        if (!tk::runtime_admission_mark_ready()) {
+            boot_fatal("vehicle runtime admission");
+        }
     }
 
     // Clear the crash-boot counter once THIS boot has proven it can stay up under load. A timer,

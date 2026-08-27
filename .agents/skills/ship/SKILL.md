@@ -87,9 +87,13 @@ and stop instead of flashing an unchanged rebuild.
 
 ## 3. Download the signed image
 
-The main run contains several artifacts: `firmware-unsigned`, the signed
-`tesla-key-esp32-<version>` artifact, and usually `github-pages`. Never download all of them and
-infer a path. Select exactly one signed main artifact by name, then bind its metadata to the run SHA:
+The main run contains multiple firmware/build-evidence artifacts, including `firmware-unsigned`,
+the independent rebuild and the signed `tesla-key-esp32-<version>-<full-source-SHA>` artifact. Pages is published
+only through branch-backed `gh-pages:/`; there is no Pages Actions artifact to select. Never
+download all run artifacts and infer a path. Select exactly one signed main artifact by name, then
+bind its metadata to the run SHA. Both create and verified immutable-Release reuse runs upload this
+recovery artifact; reuse does not provision a key or mutate/re-upload the Release, and its apps have
+already passed RSA-PSS verification against the production-authority pin:
 
 ```bash
 set -euo pipefail
@@ -104,21 +108,25 @@ RUN_SHA=$(gh run view "$run_id" --json headSha --jq .headSha)
 }
 ARTS=$(gh api "repos/:owner/:repo/actions/runs/$run_id/artifacts" \
   --jq '.artifacts[] | select(.expired == false) | .name' \
-  | grep -E '^tesla-key-esp32-[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$' || true)
+  | grep -E "^tesla-key-esp32-(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?-${RUN_SHA}$" || true)
 [ "$(printf '%s\n' "$ARTS" | awk 'NF {n++} END {print n+0}')" -eq 1 ] || {
   echo "REFUSING: expected exactly one unexpired signed main artifact" >&2; exit 1;
 }
 ART=$(printf '%s\n' "$ARTS" | awk 'NF {print}')
-VERSION="${ART#tesla-key-esp32-}"
 SHIP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/tesla-main-artifact.XXXXXX")
 gh run download "$run_id" -n "$ART" -D "$SHIP_DIR"
 META="$SHIP_DIR/dist/build-metadata.txt"
 [ -f "$META" ] && [ ! -L "$META" ] \
   && [ "$(grep -c '^head_sha=' "$META")" -eq 1 ] \
   && [ "$(sed -n 's/^head_sha=//p' "$META")" = "$RUN_SHA" ] \
-  && [ "$(grep -c '^display_version=' "$META")" -eq 1 ] \
-  && [ "$(sed -n 's/^display_version=//p' "$META")" = "$VERSION" ] || {
-  echo "REFUSING: signed artifact metadata does not match the main run" >&2; exit 1;
+  && [ "$(grep -c '^display_version=' "$META")" -eq 1 ] || {
+  echo "REFUSING: signed artifact metadata does not match the main run SHA" >&2; exit 1;
+}
+VERSION=$(sed -n 's/^display_version=//p' "$META")
+[[ "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$ ]] \
+  && (( ${#VERSION} <= 31 )) \
+  && [ "$ART" = "tesla-key-esp32-$VERSION-$RUN_SHA" ] || {
+  echo "REFUSING: signed artifact name is not bound to metadata version and run SHA" >&2; exit 1;
 }
 ```
 
@@ -155,6 +163,7 @@ APP="$SHIP_DIR/tesla-key-esp32$SFX.bin"
 [ "$(wc -c < "$APP" | tr -d ' ')" -le $((0x1e8000)) ] || {
   echo "REFUSING: signed main app exceeds the policy limit" >&2; exit 1;
 }
+python3 scripts/check-firmware-artifacts.py --app-only --target "$TARGET" --version "$VERSION" --app "$APP" --signed-app --expected-public-key-digest scripts/ota-signing-public-key.sha256
 APP_INFO=$(esptool image-info "$APP")
 printf '%s\n' "$APP_INFO"
 printf '%s\n' "$APP_INFO" | grep -qx "Detected image type: $FAMILY" \
@@ -187,8 +196,9 @@ board with no auto-reset needs BOOT held + `--before no-reset`. Port selection: 
 ### Explicitly selected OTA delivery
 
 Do not choose OTA as a fallback or infer it from release/merge approval. Only run this branch after
-the user explicitly authorizes OTA to the identified device. The same CI run publishes the Pages
-manifest. The check is asynchronous, so bind its completed
+the user explicitly authorizes OTA to the identified device. The same CI run publishes the manifest
+through the sole branch-backed `gh-pages:/` authority and accepts the live bytes against the
+immutable Release. The check is asynchronous, so bind its completed
 status to the artifact's exact `VERSION` before authorizing the POST. A stale/different manifest,
 an error, an unexpected state or a timeout is a hard stop:
 

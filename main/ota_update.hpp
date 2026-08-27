@@ -78,10 +78,40 @@ private:
     bool held_ = false;
 };
 
+// Acquire the same process-wide operation gate for a deliberate fault restart. The caller must
+// do this BEFORE persisting reboot_why: an OTA or identity transaction already in flight postpones
+// the restart without changing durable state. A failed persistence must call
+// ota_fault_restart_cancel(); after a successful persistence the owner is deliberately held until
+// esp_restart() so no OTA/identity operation can enter the shutdown window.
+bool ota_fault_restart_begin();
+void ota_fault_restart_cancel();
+
+// Serialize the irreversible PENDING_VERIFY -> VALID transition against OTA workers, identity
+// journals and a deliberate fault restart. The health task must re-check the heap only after this
+// guard is held, then keep it alive through esp_ota_mark_app_valid_cancel_rollback().
+class OtaHealthCommitGuard {
+public:
+    OtaHealthCommitGuard();
+    ~OtaHealthCommitGuard();
+
+    OtaHealthCommitGuard(const OtaHealthCommitGuard&) = delete;
+    OtaHealthCommitGuard& operator=(const OtaHealthCommitGuard&) = delete;
+    OtaHealthCommitGuard(OtaHealthCommitGuard&&) = delete;
+    OtaHealthCommitGuard& operator=(OtaHealthCommitGuard&&) = delete;
+
+    explicit operator bool() const { return held_; }
+
+private:
+    bool held_ = false;
+};
+
 // If the running image is still ESP_OTA_IMG_PENDING_VERIFY (a fresh OTA the ~90 s health gate in
 // main.cpp hasn't confirmed yet), mark it valid NOW so it can't be rolled back. Call this before
-// any DELIBERATE, user-initiated reboot (a config save that reboots, the setup-portal save): the
-// user actively interacting is proof the image runs, so an intentional restart inside the health
-// window must not look like a failed boot and revert the update. No-op on a normal boot or an
-// already-valid image, so it is always safe to call before esp_restart().
+// a SuccessfulUserConfigCommit reboot after /set_wifi, /set_mqtt, /set_syslog or a setup-portal
+// save: the successful durable commit plus a healthy internal contiguous-heap sample proves the
+// image runs, so that intentional restart inside the health window normally must not look like a
+// failed boot and revert the update. Identity mutations (/set_vin and /gen_keys) never call this
+// path and remain Stable-only. If the shared owner is busy or heap is already critical,
+// confirmation fails closed and leaves rollback armed. No-op on a normal boot or an already-valid
+// image.
 void ota_confirm_pending_image(tk::OtaRebootClass reboot_class);

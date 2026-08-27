@@ -30,7 +30,9 @@ CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
 # signature block (trust-on-first-use): the FIRST signed image reaches a device still on OLD
 # pre-signed-config firmware (which performs no verification), or is USB-flashed as a signed
 # image (a current UNSIGNED build won't boot — it aborts at the runtime signature check; see
-# docs/SECURITY.md). From then on every OTA image must be signed with the same offline key.
+# docs/SECURITY.md). From then on every OTA image must be signed with the same offline key;
+# software-only TOFU cannot rotate that key over OTA. The separately reviewed production digest
+# pin and USB-only fleet migration contract live in docs/SECURITY.md.
 # Classic esp32 needs chip rev v3.0+ (ECO3) for the V2
 # RSA scheme — enforced in sdkconfig.defaults.esp32. Full key lifecycle: docs/SECURITY.md.
 CONFIG_SECURE_SIGNED_APPS_NO_SECURE_BOOT=y
@@ -63,6 +65,15 @@ CONFIG_BT_NIMBLE_ATT_PREFERRED_MTU=247
 CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=10
 CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=32
 CONFIG_ESP_WIFI_DYNAMIC_TX_BUFFER=y
+# Provisioning stores exactly an SSID and passphrase; it has no EAP identity, certificate or
+# enterprise-key contract. Do not link the otherwise default WPA-Enterprise client surface into
+# every target. Personal WPA2/WPA3 station support and the open setup AP remain unchanged.
+CONFIG_ESP_WIFI_ENTERPRISE_SUPPORT=n
+# The credential model supports WPA2/WPA3-Personal station passphrases. It has no SAE-PK public
+# key input, and the captive setup AP is intentionally open, so neither optional SAE-PK nor
+# WPA3-SoftAP code can be reached. Keep ordinary WPA3-SAE/H2E station compatibility enabled.
+CONFIG_ESP_WIFI_ENABLE_SAE_PK=n
+CONFIG_ESP_WIFI_SOFTAP_SAE_SUPPORT=n
 
 # HTTP Server
 CONFIG_HTTPD_MAX_REQ_HDR_LEN=1024
@@ -163,6 +174,13 @@ CONFIG_MBEDTLS_ERROR_STRINGS=n
 # long-lived connections where resumption buys nothing. ~1.8 KB.
 CONFIG_MBEDTLS_CLIENT_SSL_SESSION_TICKETS=n
 CONFIG_MBEDTLS_SERVER_SSL_SESSION_TICKETS=n
+
+# This firmware is a TLS client only: OTA and MQTTS verify remote servers, while its own HTTP
+# endpoint is deliberately plain LAN HTTP.  Do not link the unused TLS-server state machine; on
+# the C6 it is enough to keep the Secure-Boot-v2 image below the next 64 KiB padding boundary
+# without weakening the OTA-slot safety margin or changing client-side certificate validation.
+CONFIG_MBEDTLS_TLS_SERVER_AND_CLIENT=n
+CONFIG_MBEDTLS_TLS_CLIENT_ONLY=y
 
 # No filesystem: certs/keys come from the CA bundle and NVS, never a VFS path. ~1.2 KB.
 CONFIG_MBEDTLS_FS_IO=n
