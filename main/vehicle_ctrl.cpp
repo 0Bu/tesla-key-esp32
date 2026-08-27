@@ -5,6 +5,7 @@
 // vehicle_pairing.cpp (pairing lifecycle/keys); shared RAII in vehicle_ctrl_internal.hpp.
 
 #include "vehicle_ctrl.hpp"
+#include "runtime_admission.hpp"
 #include "logic/vin.hpp"
 #include "logic/heap_watchdog.hpp"
 #include "task_config.hpp"
@@ -20,14 +21,20 @@ static const char* TAG = "vehicle_ctrl";
 
 // Function-local static so it is constructed on first use, before app_main writes it — no
 // static-init-order dependency on the translation units that read it.
-static std::string& boot_reason_slot() {
-    static std::string why;
-    return why;
+static tk::RebootReasonRecord& boot_reason_slot() {
+    static tk::RebootReasonRecord reason;
+    return reason;
 }
-void               VehicleController::set_boot_reboot_reason(const std::string& w) { boot_reason_slot() = w; }
-const std::string& VehicleController::boot_reboot_reason() { return boot_reason_slot(); }
-uint8_t            VehicleController::boot_heap_restarts() {
-    return tk::heap_reason_parse(boot_reason_slot().c_str());
+void VehicleController::set_boot_reboot_reason(const tk::RebootReasonRecord& reason) {
+    boot_reason_slot() = reason;
+}
+const char* VehicleController::boot_reboot_reason() { return boot_reason_slot().text; }
+uint8_t VehicleController::boot_heap_restarts() { return boot_reason_slot().heap_restarts; }
+
+bool VehicleController::ble_scan(int ms) {
+    if (!tk::runtime_admission_vehicle_ready() || !ble_) return false;
+    ble_->start_discovery(ms);
+    return true;
 }
 
 // ─── Custom no-op shared_ptr deleters ────────────────────────────────────────
@@ -61,9 +68,9 @@ bool VehicleController::recover_pending_key_rotation_at_boot_() {
     pairing_cleanup_pending_.store(true);
     ESP_LOGW(TAG, "interrupted key rotation detected — cleaning persisted peer state before key load");
 
-    const bool vcsec_removed = storage_->remove("session_vcsec");
-    const bool info_removed = storage_->remove("session_infotainment");
-    const bool paired_removed = storage_->remove("paired_at");
+    const bool vcsec_removed = storage_->remove(tk::nvs_contract::kSessionVcsec);
+    const bool info_removed = storage_->remove(tk::nvs_contract::kSessionInfotainment);
+    const bool paired_removed = storage_->remove(tk::nvs_contract::kPairedAt);
     const bool cleanup_ok = vcsec_removed && info_removed && paired_removed;
     // Short-circuit deliberately: the journal is the retry authority and must remain durable
     // after any failed peer erase. Each remove commits independently, so power loss at every
@@ -106,7 +113,7 @@ bool VehicleController::init(const std::string& vin,
     }
 
     bool stored_private_key = false;
-    if (!storage_->probe_blob("private_key", stored_private_key)) {
+    if (!storage_->probe_blob(tk::nvs_contract::kPrivateKey, stored_private_key)) {
         // Missing is a valid first-boot state; unreadable is not. Do not construct Vehicle or
         // start auto-pair with an NVS error misclassified as permission to generate a new key.
         ESP_LOGE(TAG, "private-key storage probe failed — refusing vehicle construction");
@@ -191,7 +198,7 @@ bool VehicleController::init(const std::string& vin,
                 // Best-effort cache (a lost MAC costs one extra scan next boot, nothing more) —
                 // but say so rather than dropping the result, or the next boot's slow reconnect
                 // looks like a BLE problem instead of a storage one.
-                if (!config_store_->save_str("ble_mac", addr)) {
+                if (!config_store_->save_str(tk::nvs_contract::kBleMac, addr)) {
                     ESP_LOGW(TAG, "could not persist Tesla MAC %s — next boot rescans", addr.c_str());
                 }
                 ESP_LOGI(TAG, "Tesla MAC saved: %s", addr.c_str());
@@ -273,33 +280,95 @@ bool VehicleController::init(const std::string& vin,
 }
 
 bool VehicleController::start_tasks() {
-    if (loop_task_ && auto_pair_task_) return true;
+    if (loop_task_ && auto_pair_task_ &&
+        task_start_gate_.state() == tk::TaskStartState::Running) return true;
     if (loop_task_ || auto_pair_task_) {
-        ESP_LOGE(TAG, "inconsistent vehicle task lifecycle — unwinding partial state");
-        if (loop_task_) { vTaskDelete(loop_task_); loop_task_ = nullptr; }
-        if (auto_pair_task_) { vTaskDelete(auto_pair_task_); auto_pair_task_ = nullptr; }
+        // Never externally delete a task: it may be running on the other core while registered
+        // with TWDT or holding a mutex. A failed start remains fail-closed until its entry task
+        // has observed Cancelled, acknowledged and self-deleted.
+        ESP_LOGE(TAG, "inconsistent vehicle task lifecycle — refusing external task deletion");
+        return false;
     }
     if (!vehicle_ || !vehicle_mutex_ || !command_mutex_ || !cache_mutex_ || !result_mutex_) {
         ESP_LOGE(TAG, "vehicle tasks cannot start before controller initialization completes");
         return false;
     }
 
-    if (xTaskCreate(loop_task_fn_, "vehicle_loop", 8192, this,
-                    tk::kPrioVehicleLoop, &loop_task_) != pdPASS) {
-        ESP_LOGE(TAG, "vehicle_loop task creation failed");
-        loop_task_ = nullptr;
+    if (!task_start_gate_.begin()) {
+        ESP_LOGE(TAG, "vehicle task start gate is not idle");
         return false;
     }
+
+    TaskHandle_t loop_task = nullptr;
+    if (xTaskCreate(loop_task_fn_, "vehicle_loop", 8192, this,
+                    tk::kPrioVehicleLoop, &loop_task) != pdPASS) {
+        ESP_LOGE(TAG, "vehicle_loop task creation failed");
+        task_start_gate_.cancel();
+        task_start_gate_.reset_cancelled(0);
+        return false;
+    }
+    loop_task_ = loop_task;
+
+    TaskHandle_t auto_pair_task = nullptr;
     if (xTaskCreate(auto_pair_task_fn_, "auto_pair", 8192, this,
-                    tk::kPrioAutoPair, &auto_pair_task_) != pdPASS) {
+                    tk::kPrioAutoPair, &auto_pair_task) != pdPASS) {
         ESP_LOGE(TAG, "auto_pair task creation failed");
-        // Unwind the loop task we already started so no half-initialised controller is left running.
-        if (loop_task_) { vTaskDelete(loop_task_); loop_task_ = nullptr; }
-        auto_pair_task_ = nullptr;
+        task_start_gate_.cancel();
+
+        // The first task has done nothing except wait at await_task_start_(). Give it a bounded
+        // chance to observe cancellation and self-delete. No external vTaskDelete is safe here:
+        // on a dual-core target the task could otherwise be killed while using TWDT or a mutex.
+        const TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(1000);
+        while (!task_start_gate_.cancelled_tasks_acknowledged(1) &&
+               static_cast<int32_t>(deadline - xTaskGetTickCount()) > 0) {
+            vTaskDelay(1);
+        }
+        if (!task_start_gate_.cancelled_tasks_acknowledged(1)) {
+            ESP_LOGE(TAG, "vehicle_loop did not acknowledge cancelled start");
+            return false;
+        }
+        loop_task_ = nullptr;
+        if (!task_start_gate_.reset_cancelled(1)) {
+            ESP_LOGE(TAG, "vehicle task start gate could not reset after cancellation");
+        }
+        return false;
+    }
+    auto_pair_task_ = auto_pair_task;
+    if (!task_start_gate_.release()) {
+        // Both tasks still sit before every runtime resource. Cancel them cooperatively; boot will
+        // fail closed rather than run a lifecycle whose release state cannot be proven.
+        task_start_gate_.cancel();
+        ESP_LOGE(TAG, "vehicle task start gate could not release both tasks");
         return false;
     }
     ESP_LOGI(TAG, "VehicleController ready for VIN %s", vin_.c_str());
     return true;
+}
+
+bool VehicleController::await_task_start_() {
+    for (;;) {
+        switch (task_start_gate_.entry_action()) {
+            case tk::TaskEntryAction::Run:
+                // Both allocations succeeding is necessary but not sufficient: app_main has
+                // additional essential services to admit as one boot.  Wait until its global
+                // fail-closed gate says the entire runtime is Ready.
+                switch (tk::runtime_admission_action()) {
+                    case tk::RuntimeAdmissionAction::Run:  return true;
+                    case tk::RuntimeAdmissionAction::Stop: return false;
+                    case tk::RuntimeAdmissionAction::Wait:
+                        vTaskDelay(1);
+                        break;
+                }
+                break;
+            case tk::TaskEntryAction::Cancel:
+                task_start_gate_.acknowledge_cancel();
+                return false;
+            case tk::TaskEntryAction::Wait:
+                // This is the only operation permitted before both task allocations succeed.
+                vTaskDelay(1);
+                break;
+        }
+    }
 }
 
 // A plausible Tesla VIN: exactly 17 chars, uppercase alphanumeric excluding I/O/Q (reserved by

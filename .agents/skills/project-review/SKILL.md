@@ -13,8 +13,10 @@ description: "Read-only whole-project coherence review of tesla-key-esp32 for bu
 
 This project is an **ESP-IDF 5.x C++ firmware** for the **ESP32 family** — one source tree
 builds for esp32 / esp32s3 / esp32c3 / esp32c6 — exactly the four targets yoziru/tesla-ble
-supports, which the ESP-IDF Component Manager enforces at dependency resolution. All four receive the repository-owned replay-rejection patch in
-`patches/tesla-ble/` via root CMake. The firmware acts as a **BLE↔HTTP proxy for a Tesla
+supports, which the ESP-IDF Component Manager enforces at dependency resolution. All four receive
+the complete ordered repository patch series in `patches/tesla-ble/` via root CMake: replay
+rejection, transactional key regeneration/persistence, and bounded RX-framing recovery logs. The
+firmware acts as a **BLE↔HTTP proxy for a Tesla
 vehicle**, API-compatible with TeslaBleHttpProxy,
 so it works as an **evcc** BLE vehicle. It is small but dense with **non-local invariants**:
 a one-line change in code often has to be mirrored in three docs, a Kconfig option, the
@@ -66,12 +68,13 @@ Work in this order — it's what makes the review catch *drift* rather than just
    the exact records that a separately authorized PR-body update would need:
 
    ```
-   - [x] `$project-review` clean — merge gate @ <short-sha>
-   - [x] `$skill-audit` clean — PR create/push gate @ <short-sha>
+   - [x] `$project-review` clean — merge gate @ <full-40-hex-sha>
+   - [x] `$skill-audit` clean — PR create/push gate @ <full-40-hex-sha>
    ```
 
    [`tools/agent-hooks/require-pr-gates.sh`](../../../tools/agent-hooks/require-pr-gates.sh) validates
-   top-level records against the exact PR head. The review itself never ticks/stamps them. A clean
+   top-level records against the exact lowercase 40-hex PR head; prefixes are rejected. The review
+   itself never ticks/stamps them. A clean
    `$pr-hygiene` record must come from a separate run — its personal-data/language screen is a
    different axis from this review's coherence scope, so it is never established here. The only
    canonical merge is `gh --repo github.com/0Bu/tesla-key-esp32 pr merge <numeric-pr> --match-head-commit <full-40-hex-head-sha> --squash`;
@@ -92,22 +95,22 @@ links yourself — that's where the value is.
 | Task stack headroom | `main/stack_watch.{cpp,hpp}` + `logic/status_model.hpp` + `main/http_status.cpp` + `main/mqtt_ha.cpp` | Allocation-free, per-owning-task historical minima for httpd, vehicle, auto-pair and MQTT. Unsampled tasks are absent, while a genuine zero-byte measurement remains reportable; `/status` and MQTT are cache-only readers. |
 | RTOS RAII guards | `main/rtos_guard.hpp` | `tk::SemGuard` / `MutexGuard` / `InFlightGuard` — the take/give and flag pairs that must survive a throw. Every `command_mutex_` / `scan_mutex_` acquisition goes through these, so the lock hierarchy in `docs/ARCHITECTURE.md` ("Concurrency") is only true while they are used; deliberately in `tk::` to avoid an ODR clash with a stock `MutexGuard` |
 | BLE GATT client | `main/ble_client.{cpp,hpp}` | NimBLE central; discovers vehicles by the Tesla name in SCAN_RSP (the service UUID is absent from adverts), then discovers the Tesla service/write/notify UUIDs after connect; RX notify → `on_rx_data` (runs on the **NimBLE host task**) |
-| Vehicle control | `main/vehicle_ctrl.{cpp,hpp}` + `vehicle_commands.cpp` + `vehicle_telemetry.cpp` + `vehicle_pairing.cpp` (+ `vehicle_ctrl_internal.hpp`) | one `VehicleController`, split by concern: core wiring/`link_state()` glue; command API; **loop_task** (active-window polling + sleep gating) + caches; pairing lifecycle/keys |
-| HTTP API | `main/http_server.{cpp,hpp}` + `http_api.cpp` + `http_status.cpp` + `http_ota.cpp` + `http_config.cpp` + `http_common.cpp` + `mcp_server.cpp` + `command_exec.cpp` (+ `http_handlers.hpp`) | `esp_http_server` on :80; single catch-all `handle_all` dispatch (wrapped in try/catch) in `http_server.cpp` — EVERY route goes through it, enforced structurally by the `GuardedReq` signature; handlers split by route group; `mcp_server.cpp` serves `/mcp` (stateless JSON-RPC 2.0 MCP server for AI agents — guide in `docs/MCP.md`); both command surfaces resolve names/args via `logic/command_registry.hpp` and execute through `command_exec.cpp`; `/status` shaping decided in `logic/status_model.hpp` (`build_status_object()` gathers + serializes only) |
+| Vehicle control | `main/vehicle_ctrl.{cpp,hpp}` + `vehicle_commands.cpp` + `vehicle_telemetry.cpp` + `vehicle_pairing.cpp` (+ `vehicle_ctrl_internal.hpp`, `reboot_reason.hpp`) | one `VehicleController`, split by concern: core wiring/`link_state()` glue; command API; **loop_task** (active-window polling + sleep gating) + caches; pairing lifecycle/keys; allocation-free, fail-closed heap-watchdog breadcrumb restore |
+| HTTP API | `main/http_server.{cpp,hpp}` + `http_api.cpp` + `http_status.cpp` + `http_ota.cpp` + `http_config.cpp` + `http_common.cpp` + `mcp_server.cpp` + `command_exec.cpp` (+ `http_handlers.hpp`, `json_builder.hpp`, `json_http_reply.hpp`, `mcp_json_payloads.hpp`, `status_json_emitter.hpp`, `mqtt_probe_owner.hpp`, `logic/http_route.hpp`) | `esp_http_server` on :80; single catch-all `handle_all` dispatch (wrapped in try/catch) in `http_server.cpp` — EVERY request is classified by the exact method/path table in `logic/http_route.hpp` and then enters the mapped handler through the `GuardedReq` containment signature; handlers split by route group; typed body/JSON results preserve 400/413/503 and forbid dispatch/persistence after rejection; request owners are released before blocking work and sticky cJSON ownership prevents partial 200/MCP responses under allocation failure; the MQTT configuration probe owns partial callback resources through its non-throwing RAII seam; `mcp_server.cpp` serves `/mcp` (stateless JSON-RPC 2.0 MCP server for AI agents — guide in `docs/MCP.md`); both command surfaces resolve names/args via `logic/command_registry.hpp` and execute through `command_exec.cpp`; `/status` shaping decided in `logic/status_model.hpp` (`build_status_object()` gathers + serializes only) |
 
-| HA bridge | `main/mqtt_ha.{cpp,hpp}` | read-only MQTT discovery publish; its own tasks |
-| Storage | `main/nvs_storage.{cpp,hpp}` | NVS adapter; **maps library keys ≤15 chars** |
+| HA bridge | `main/mqtt_ha.{cpp,hpp}` + `main/mqtt_json_publish.hpp` + `main/mqtt_payloads.hpp` + `main/mqtt_publish_sequence.hpp` | read-only MQTT discovery publish; its own tasks. Retained JSON is fully built before publish; build/print/broker failure publishes nothing, short-circuits discovery → availability → state, and rearms the full discovery sequence. |
+| Storage | `main/nvs_storage.{cpp,hpp}` + `logic/nvs_contract.hpp` | Exact 19-record namespace/logical-key/stored-key/API/owner/retention registry. The adapter maps only the two declared long tesla-ble session names and rejects unknown namespaces, keys, wrong APIs and >15-byte/colliding additions before an NVS call; the direct display U8 migration seam is separately inventoried. |
 | Diag log | `main/diag_log.{cpp,hpp}` | in-RAM console ring (`GET /diag`); **static `.bss` buffer** (heap budget!) |
 | Syslog | `main/syslog.{cpp,hpp}` | UDP RFC 5424 forwarder for the captured diag lines; server from NVS `syslog_uri` / `CONFIG_TESLA_SYSLOG_SERVER` (`POST /set_syslog`, empty = disabled); hard/transient send-failure split **and** the per-line RFC 5424 PRI (facility `user`, severity from each line's own esp_log level) in the host-tested `logic/syslog_policy.hpp` |
 | Crash forensics | `main/diag_crash.{cpp,hpp}` + `logic/crashinfo.hpp` + `logic/reset_reason.hpp` + `logic/bootlog.hpp` | ONE-SHOT boot capture of why the last run ended: reset reason **always** (needs no partition, so already-deployed devices keep reporting it), plus the core-dump SUMMARY where the `coredump` partition exists. Parsed once at boot, never on a request path; an ORPHAN dump (app-elf-sha ≠ running build) is erased, and declared foreign only on PROOF. Feeds `/status.last_crash`, MQTT, and the once-per-boot syslog replay (`/diag` is RAM and does not survive the reboot it would explain). BACKTRACE is **Xtensa-only** — on RISC-V (c3/c6, half the fleet) the decode is left to `GET /coredump` offline |
-| Boot-loop safe mode | `main/safe_mode.{cpp,hpp}` + `logic/boot_guard.hpp` | counts CRASH-ONLY boots in NVS (`boot_fails`); past the threshold it **latches** → WiFi + web UI + OTA only, BLE/vehicle/MQTT skipped, so a board crashing on the vehicle path stays fixable in a browser. Complements the heap watchdog, whose cap counts only restarts WE chose — a PANIC loop was uncounted before this. The healthy timer is deliberately NOT armed while latched. Drives `/status.sys.safe_mode` |
+| Boot-loop safe mode | `main/safe_mode.{cpp,hpp}` + `logic/boot_guard.hpp` | counts CRASH-ONLY boots in NVS (`boot_fails`); past the threshold it **latches** → WiFi + web UI + OTA only, BLE/vehicle/MQTT skipped, so a board crashing on the vehicle path stays fixable in a browser. NVS read/write failure or exception enters safe mode; a healthy clear is reported only after a successful write. Complements the heap watchdog, whose cap counts only restarts WE chose — a PANIC loop was uncounted before this. The healthy timer is deliberately NOT armed while latched. Drives `/status.sys.safe_mode` |
 | Heap trend | `main/heap_trend.{cpp,hpp}` + `logic/heap_history.hpp` | the board's own 24-hour free/largest-block ring (`GET /heap`), fed from the SAME two samples `loop_task` hands the heap watchdog, so the chart a human reads and the threshold the firmware acts on cannot disagree. Fixed static storage (~1.2 KB), **never heap** — a diagnostic must not compete for the block it exists to measure. It lives in **`.noinit`**, so it survives every reset that kept power: the heap watchdog's answer to exhaustion IS a restart, and a `.bss` ring was erased by the one event it exists to explain. The retained image must pass a CRC-32 **and** a derived layout fingerprint (`HeapPersist` in `logic/heap_history.hpp`) or the trend starts empty, and a carry offset keeps ONE bucket clock across the reboot — `GET /heap`'s `b_boot` names the bucket this boot began in |
-| Config blob | `main/config_blob.{cpp,hpp}` + `logic/config_store.hpp` + `logic/wifi_rollback.hpp` | the ONE atomic credential/service entry in NVS: WiFi creds + one-shot rollback backup + VIN + `mqtt_uri` + `syslog_uri` as a single CRC-checked `nvs_set_blob`, all-or-nothing across a write failure AND a power cut. READS the legacy per-key layout as fallback (absent/failed CRC) and mirrors back on save, so neither an OTA nor a downgrade strands a deployed device's config. Deliberately EXCLUDES `ble_mac`/`last_time`/`reboot_why`/`disp_rot` — different writers, and a whole-struct writer would revert another owner's field from a stale snapshot |
+| Config blob | `main/config_blob.{cpp,hpp}` + `logic/config_store.hpp` + `logic/wifi_rollback.hpp` | the ONE atomic credential/service entry in NVS: WiFi creds + one-shot rollback backup + VIN + `mqtt_uri` + `syslog_uri` as a single CRC-checked `nvs_set_blob`, all-or-nothing across a write failure AND a power cut. READS the legacy per-key layout as fallback (absent/failed CRC) and mirrors back on save, so neither an OTA nor a downgrade strands a deployed device's config. Deliberately EXCLUDES separately owned cache/time/display/reboot records (`ble_mac`, `last_time`, `reboot_why`, `disp_rot`) and different-lifetime journal/safety state (`vin_txn`, `boot_fails`); a config snapshot must neither revert another writer nor erase recovery state. |
 | OTA | `main/ota_update.{cpp,hpp}` | pull-based self-update; dual-slot |
-| Provisioning | `main/provisioning.{cpp,hpp}` + `logic/captive.hpp` | captive setup portal when no WiFi |
+| Provisioning | `main/provisioning.{cpp,hpp}` + `logic/captive.hpp` + `logic/http_body.hpp` | captive setup portal when no WiFi; its `POST /save` is a separate fixed 1024-byte receive path (empty/oversized → 400), not the normal API/MCP 2 KiB body policy |
 | Web UI | `main/www/` (`index.html` markup + `style.css` + `app.js`, spliced by `inline_assets.cmake`) | compiled into the app binary as ONE self-contained page; live-updates by polling `GET /status` every 4 s (cache-busted + `no-store`; a failed poll keeps the last frame and parks the BLE countdown) |
 | On-device indicators | `main/display.{cpp,hpp}` + `main/display_font.h` (generated by `tools/display_sim.py`) + `main/led_status.{cpp,hpp}` | ST7735 status panel (T-Dongle-S3, `CONFIG_TESLA_DISPLAY_ENABLED`) + underside APA102 status LED (`CONFIG_TESLA_LED_ENABLED`, default off). Both are **thin renderers** — cache-only (never wake the car), no MQTT; the "what to show" decisions live in the host-tested `logic/display_model.hpp` / `logic/led_status.hpp`, both reading the shared `logic/ui_state.hpp` snapshot + `logic/soc_gradient.hpp` ramp. No-op stubs on boards without the hardware |
-| Pure logic (host-tested) | `main/logic/*.hpp` (`vin`, `units`, `link_state`, `net_link`, `target`, `mcp`, `command_registry`, `status_model`, `vehicle_data`, `command_result`, `ui_state`, `display_model`, `soc_gradient`, `led_status`, `syslog_policy`, `active_window`, `charge_control`, `ble_readiness`, `ble_phase`, `ble_row`, `ha_identity`, `ha_templates`, `http_body`, `heap_watchdog`, `connect_outcome`, `redact`, `boot_guard`, `crashinfo`, `reset_reason`, `bootlog`, `heap_history`, `config_store`, `wifi_rollback`, `wifi_credentials`, `key_rotation`, `vin_transition`, `captive`, `health_gate`, `mqtt_uri`, `nvs_blob_load`, `nvs_string_load`) + `test/test_logic.cpp` | **IDF-free** logic the device and the host test share (exception: `ble_row` is a **spec** header — no firmware TU includes it; its consumer is the browser, held to it by the parity harness): VIN validation, the shared WiFi credential contract, generation-bound BLE command readiness + bounded connect-intent lifecycle, fail-closed transactional key-rotation/VIN-transition recovery, the vehicle-stable HA node identifier, imperial→metric units, the `link_state()` four-state machine + its `/status`/MQTT strings, per-target platform/OTA-suffix map, the ONE command registry both `/api` and `/mcp` dispatch from (names/kinds/shared arg bounds + `tools/list` row order + the command-specific evcc boolean-body compatibility rule) with the MCP JSON-RPC routing/version negotiation, the golden-pinned `/status` field contract (`status_model` over the `vehicle_data` result structs), the shared command result-string mapping, charging-current ACK/readback + active-cache freshness, and the on-device display presenter + status-LED ladder (both off the shared `ui_state` snapshot + `soc_gradient` ramp). Host-built + run by `scripts/run-mock-tests.sh` (CI `logic-test` gate) — the real local verification loop; the same script also parity-checks `tools/display_sim.py` against the C++ display presenter (`scripts/check-display-sim-parity.sh`) AND the web UI's `BLE_ROW` region in `main/www/app.js` against `tk::ble::decide` (`scripts/check-ble-row-parity.sh`) |
+| Pure logic (host-tested) | `main/logic/*.hpp` (exhaustively owned by `test/logic_test_ownership.json`, including `http_route`, `nvs_contract` and `mqtt_discovery_registry`) + its named host-test entry in `test/test_logic.cpp`, `test/test_nvs_storage.cpp` or `test/test_mqtt_json_publish.cpp` | **IDF-free** logic the device and the host test share. The ownership gate requires each header's concrete test function to have exactly one definition and one invocation; decoy strings/comments and uninvoked definitions fail. In addition to the decision models, exact HTTP routes, all 19 NVS records and all MQTT discovery entities are production-shared contracts with mutation canaries. |
 
 | Library | `managed_components/yoziru__tesla-ble/` | **fetched, regenerated — NEVER edit or commit** (pin in `main/idf_component.yml`); root CMake applies committed `patches/tesla-ble/` through `scripts/apply-tesla-ble-patches.sh` |
 
@@ -163,6 +166,23 @@ Treat a violation of any of these as a real finding.
   build the whole log into one `std::string`.
 - Static buffers (e.g. `diag_log`'s ring) come straight off the heap budget — sizing them up
   shrinks the largest free block.
+- The compile-time stack budget is per-frame evidence, not a call graph. Re-derive
+  `scripts/check-stack-usage.py` against schema-v2 `firmware-stack-baseline.json`: every target's
+  every compiler `.su` frame is inventoried; every target/file/function frame ≥256 bytes is
+  review-baselined; >4096 bytes and any unbounded dynamic frame fail. Do not infer or report
+  composed call depth from this gate; on-device high-water telemetry is separate evidence.
+- The `main` production translation-unit surface is exactly the one literal
+  `idf_component_register(SRCS ...)` inventory. `target_sources`, included/subdirectory CMake,
+  property attachment, paths escaping `main/`, or any change to the exact private four-option block
+  are stop findings. Independently inspect the full compile database: every repository-owned C/C++
+  source must be either the exact literal `__idf_main` inventory, an explicitly reviewed generated
+  source, or part of a lock-verified managed component. Extra local IDF components, local include
+  roots outside those owners, untrusted external source/include roots outside the pinned IDF tree
+  and exact current-build generated-source allowlist, forced include/macro files, compiler
+  plugins/specs, preprocessor pass-through or prefix/sysroot forms, a compiler wrapper/environment,
+  macro/`include_next` source directives, a main source outside `__idf_main`, missing
+  `-fstack-usage`, or anything other than exactly `-Og` is a gate bypass. External reproducibility
+  build directories must still pass the same closed generated-source classification.
 - **Those guards all mean "recover and continue", which is right for a TRANSIENT shortage and
   wedges the device on a permanent one** (2026-07-18: `bad_alloc` out of `loop()` ~20×/s for ten
   hours, nothing serving, no reboot — a wedge is worse than a crash, because a crash restarts).
@@ -170,15 +190,19 @@ Treat a violation of any of these as a real finding.
   `loop_task_fn_`: INTERNAL `largest_block` (`8BIT|INTERNAL` — plain `8BIT` would include any
   PSRAM and make it a silent no-op there) under 4 KB for 5 **unbroken** minutes,
   OTA-excused, capped at 5 consecutive restarts, breadcrumb `reboot_why=heap:<n>` → `/status`
-  `last_reboot`. That path must stay **allocation-free** (it runs because allocation is failing),
+  `last_reboot`. NVS persistence success is the reboot authority; save failure stays degraded, and
+  read/erase failure or a malformed breadcrumb fails closed at the cap without reopening the
+  vehicle window. Every exception/error is contained because this runs while allocation is failing,
   and every log line on it must render under ~230 chars — `diag_log.cpp` formats into a 256-byte
   stack buffer and truncates silently past it. **This is deliberate; do not review it as a reboot
   risk.** `.codex/agents/heap_safety_reviewer.toml` restates this bullet and must move with it.
 
 ### NVS / config
-- Namespaces: `tesla_cfg` (runtime cfg) and `tesla_ble` (key + sessions). NVS keys are
-  **≤15 chars** — the storage adapter maps longer library keys; a new key over 15 chars is a
-  bug. An **empty** config value disables the feature it gates (e.g. `mqtt_uri`).
+- Namespaces: exactly `tesla_cfg` (runtime cfg) and `tesla_ble` (key + sessions). The exact
+  namespace/logical-key/stored-key/API/owner/retention table is `logic/nvs_contract.hpp` and its
+  operator mirror is `docs/README.md`. Stored names are **≤15 bytes**; there is no truncation
+  fallback. Unknown, moved, colliding, wrong-API and 16-byte keys fail before NVS access. An
+  **empty** config value disables the feature it gates (e.g. `mqtt_uri`).
 
 ### OTA / versioning
 - Dual-OTA layout (`partitions.csv`): `nvs@0x9000`, app at **`0x20000`**, two ~2 MB slots
@@ -193,12 +217,20 @@ Treat a violation of any of these as a real finding.
 - Rollback is enabled and **deliberately deferred**: `main.cpp` does NOT mark the image valid
   at startup — `ota_health_gate_task` calls `esp_ota_mark_app_valid_cancel_rollback()` only
   on the verdict of the host-tested `logic/health_gate.hpp`, which is a PROVEN LINK
-  (`tk::net_is_up()`, either transport) **plus** an uptime floor of `kHealthGateBaseS` = 90 s —
-  not uptime alone. A crash inside that window reboots still-`PENDING_VERIFY` and the bootloader
+  (`tk::net_is_up()`, either transport), INTERNAL largest block ≥ 4 KiB **plus** an uptime floor
+  of `kHealthGateBaseS` = 90 s — not uptime alone. A crash inside that window reboots
+  still-`PENDING_VERIFY` and the bootloader
   reverts; so does an image that boots fine and never gets online, which a pure timer used to
   commit and which no later OTA could repair. Past `kHealthGateCapS` = 600 s an unhealthy image
   is LEFT pending (it must NOT self-restart — that would silently downgrade a good build over a
-  router outage). A credential-less, wireless device is in setup mode and counts as healthy.
+  router outage). Only successfully persisted rebooting `/set_mqtt`, `/set_syslog`, `/set_wifi`
+  and setup-portal saves may confirm early. Both mark-valid paths must acquire the shared
+  `HealthCommit` owner against OTA/identity/`FaultRestart` and re-check INTERNAL largest block after
+  admission; any failure leaves rollback armed. `/set_vin` and `/gen_keys[?force=1]` are admitted by
+  `OtaIdentityMutationGuard` only in Stable state with the OTA/identity gate idle;
+  PendingVerify/unknown/active-OTA returns 503 before mutation. VIN/recovery reboots are not health
+  evidence and must leave rollback armed. A credential-less, wireless device is in setup mode and
+  counts as healthy.
   Re-introducing a mark-valid at startup, or a bare timer, is the regression to flag.
 - **OTA images are signed** (Secure Boot v2 RSA-3072 scheme *without* hardware Secure Boot, no
   eFuses): `CONFIG_SECURE_SIGNED_APPS_NO_SECURE_BOOT` + `..._RSA_SCHEME` +
@@ -209,8 +241,22 @@ Treat a violation of any of these as a real finding.
   `signed-preview`; the default-branch `workflow_run` then validates head/repo/state/label, waits
   for Environment approval, signs the artifact strictly as data and revalidates immediately before
   publishing `gh-pages/PR/<N>/`. Fork PRs are never eligible. Signer and cleanup share a per-PR lock,
-  with event-driven plus scheduled reconciliation. Trust is TOFU from the running app's signature block. Classic esp32 needs
+  with event-driven plus scheduled reconciliation. Trust is TOFU from the running app's signature
+  block. Production create/reuse and protected signed-preview paths must additionally verify every
+  RSA-PSS signature against `scripts/ota-signing-public-key.sha256` and accept exactly one
+  first-position block before artifact or Pages publication. Changing the
+  key or pin is a separately reviewed USB fleet migration: software-only TOFU cannot rotate keys
+  over OTA. The `flash-esp32`, `ship` and both `usb-recovery` artifact-selection paths must run the
+  same app-only signature/pin validator before a physical write; metadata/size checks alone are a
+  stop finding. The signed-preview producer and `flash-esp32` consumer must agree on the exact
+  `tesla-key-esp32-pr<PR>-<full-head-SHA>` artifact name; the consumer obtains the display version
+  only from the checked `build-metadata.txt`. Classic esp32 needs
   `CONFIG_ESP32_REV_MIN_3` (`sdkconfig.defaults.esp32`).
+- **Pages has one serving authority:** GitHub Pages API must report branch-backed `legacy` mode,
+  source `gh-pages:/`, for both root and `PR/<N>/`. `scripts/check-pages-source.py` is run before
+  protected signing, immediately before branch publication/deletion, and when deriving the URL for
+  live acceptance. `actions/upload-pages-artifact` / `actions/deploy-pages` or another branch/path
+  is a stop finding, not an alternative deployment mode.
 - **Downgrade gate (software anti-rollback):** before the bulk download, `ota_task` reads the
   downloaded image's own app-descriptor version (`esp_https_ota_get_img_desc`) and refuses
   anything not strictly newer than the running firmware — a signature proves authenticity, not
@@ -219,19 +265,24 @@ Treat a violation of any of these as a real finding.
   `scripts/next-version.sh`, see `.github/workflows/build.yml`) computes the actual stable release
   as the maximum of that floor, stable-tag patch increments and prerelease-core promotions, but
   publishes only stable `X.Y.Z` identities and idempotently reuses one stable Release tag already
-  pointing at the exact current-main
-  source SHA after a partial-publish retry only while it remains the newest valid tag; stale runs
-  block. `scripts/release-relevance.sh` compares current main cumulatively with the last root-Pages
-  snapshot whose branch manifest, actually served live manifest, source SHA, latest GitHub Release,
-  tag and four digest-bound merged assets all agree; rename folding is disabled so deleting or
+  pointing at the exact current-main source SHA after a partial-publish retry only while it remains
+  the newest valid tag; stale runs block. A retry with an already immutable Release must download
+  and bind its exact 40 assets, 28 diagnostics, signed-app aliases/merged slices and ELF checksums,
+  then reconcile Pages without key provisioning, signing, Release upload or Release mutation.
+  A successful reuse run still uploads one new SHA-bound Actions recovery artifact containing the
+  twelve production-pin-verified app/merged aliases; absence or ambiguity is a stop finding.
+  `scripts/release-relevance.sh` compares current main cumulatively with the last root-Pages
+  snapshot whose branch manifest, actually served live manifest, source SHA, latest GitHub Release
+  API object with `immutable: true`, tag and four digest-bound merged assets all agree; rename folding is disabled so deleting or
   moving a firmware path stays relevant. Thus a docs-only successor reconciles firmware from a
-  stale overlapping main run, and a same-SHA rerun retries a failed Pages deployment, instead of
-  losing that release. An absent, unreadable or partially published baseline yields
-  release-relevant, never a silent skip. CI refetches current main again before
-  signing/Release/Pages mutation and deployment;
-  PR preview display versions use `--latest-published-stable` (complete stable Release assets),
+  stale overlapping main run, and a same-SHA rerun retries a failed branch publication, instead of
+  losing that release. An absent, unreadable, mutable, missing-`immutable`, or partially published baseline yields
+  release-relevant, never a silent skip. CI refetches current main/release-candidate state before
+  signing, immediately before signed-artifact upload, in the same shell step before draft publish,
+  and before Release/Pages mutation;
+  PR preview display versions use `--latest-published-stable` (complete immutable stable Release assets),
   never a newer raw prerelease tag whose numeric core could collide with the subsequent stable OTA;
-  Pages also requires the matching latest GitHub Release object and four digest-bound merged
+  Pages also requires the matching latest GitHub Release object to report `immutable: true` and four digest-bound merged
   assets, not merely a checkout-local tag. CI
   **stamps the selected version into the build**, so the reported version,
   firmware filename, Release tag and OTA manifest agree.
@@ -265,6 +316,9 @@ Treat a violation of any of these as a real finding.
 - proto3-optional fields are emitted **only when the car reported them** (presence flags) so
   the UI/HA show "—"/unknown, never a phantom 0. The MQTT bridge is **read-only** (no command
   topics subscribed — the car is never controlled or woken from HA).
+- Retained discovery/state JSON is all-or-nothing: sticky cJSON construction publishes nothing on
+  build/print OOM or a broker error, and any failure rearms Discovery → availability → state. The
+  exact pinned-cJSON allocation matrix and publish spy must stay wired into the sanitized IDF gate.
 - `sleep_state` (MQTT) and the web-UI hero **both** derive from `link_state()` — see *Link
   state* above. The MQTT switch over the four values must stay **exhaustive** (no catch-all
   `else` defaulting to "asleep") and the web UI must handle every state, including the omitted
@@ -303,8 +357,9 @@ that describe it. When reviewing a change (or the repo as a whole), check these 
   the `ble_mac` write, whose success branch was covered and whose failure branch was not. Both
   landed with the feature that introduced them and neither carried a rule.
   The physical controller's board MAC is intentionally diagnostic and remains visible.
-- **New NVS key** → ≤15 chars **and** the namespace/retention description in
-  `docs/README.md` **and**, when secret or security-relevant, `docs/SECURITY.md`.
+- **New NVS key** → register logical/stored key, namespace, storage API, owner, retention and
+  secrecy in `logic/nvs_contract.hpp`; update its exact host oracle and `docs/README.md`, and,
+  when secret or security-relevant, `docs/SECURITY.md`.
 - **New Kconfig option** → `main/Kconfig.projbuild` **and** any doc that references defaults
   **and** `sdkconfig.defaults` if a non-default value is required.
 - **Partition / offset / flash-size change** → `partitions.csv` **and** every doc that states
@@ -420,7 +475,7 @@ what each must stay true to:
   otadata last and preserve bootloader/partition/NVS; absence/ambiguity/SHA mismatch must stop
   before USB write. Fresh-board bootloader offsets belong to the Pages installer contract.
 - **`$ship`** takes a merged PR to the board: squash-merge → `gh run watch` on the post-merge
-  `build` run → download the signed artifact (`tesla-key-esp32-<version>`; per-target
+  `build` run → download the signed artifact (`tesla-key-esp32-<version>-<full-source-SHA>`; per-target
   `tesla-key-esp32<sfx>.bin`, never `*-merged.bin`) → USB app-slot flash (`0x20000` + otadata
   erase `0xf000/0x2000`, NVS preserved) or device OTA → verify via `/status` +
   `/api/proxy/1/version`. The OTA branch must bind `update_available` to the exact artifact
@@ -464,7 +519,7 @@ what each must stay true to:
   firmware/release set still covers `main/`, `test/`, `sdkconfig.defaults*`,
   `partitions.csv`, the shipped Pages runtime (`docs/index.html`, `installer-bootstrap.mjs`,
   `serial-port-release.mjs`, `web-installer.mjs`, `docs/vendor/`), and
-  `.github/workflows/{build,signed-pr-preview,pr-preview-cleanup}.yml`, plus the cumulative
+  `.github/workflows/{build,signed-pr-preview,pr-preview-cleanup,pr-policy,bench-acceptance}.yml`, plus the cumulative
   Release/Pages classifier `scripts/release-relevance.sh`.
   Confirm all four gates fail closed when `pr-gate-lib.sh` is missing or incomplete. Keep its
   gate mechanics aligned with the
@@ -505,6 +560,7 @@ what each must stay true to:
   with the latest GitHub Release: manifest `sourceSha` equals the dereferenced Release-tag commit,
   all 16 parts match manifest length/SHA-256 and their byte ranges in the four exact Release merged
   assets, and all four apps report the exact Release version and chip family. Re-verify the
+  legacy `gh-pages:/` serving authority (`scripts/check-pages-source.py`), the
   manifest/firmware-base URLs (`main/Kconfig.projbuild`), the 4-chipFamily set + per-part offsets
   (`scripts/build-pages.sh`/`scripts/check-release-pages-bytes.py`), the suffix map
   (`ota_update.cpp`/`logic/target.hpp`/`ci-sign-artifacts.sh`/`build-pages.sh`), and the `/ota/*` +

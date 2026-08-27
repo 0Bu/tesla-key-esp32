@@ -119,14 +119,14 @@ const reviewedSkillSha256 = new Map([
   ["add-logic-test", "f8a37fddbbb5c47afa9eca4fb4823c203af099718b3327a656c717d0462546f7"],
   ["device-diag", "7babf410873975ec05bb029c3c9522e70f9aadd96d0823829c48236f24ca3d44"],
   ["display-preview", "4bff95d0314d50ce29d67beac7ef4f9db1ebcbb2fa609335e560e162f5a1ed46"],
-  ["feature-docs", "43c1db745640619aea155b2e34b8fb0127b1d681b936294bffdfd8422566bb46"],
-  ["flash-esp32", "6ead7b8f1732c66285f16c8427ee952043ad8d730001fd76c90c8d0ed01fc99e"],
-  ["ota-release-verify", "3b0c7941871b9c350bf64a046e3344ac3b5effa2228daf375428b97e0168a511"],
-  ["pr-hygiene", "addfebbad2a6e7717f34acccaafd765fee02f1b05aa3735e84e6dfff61c4af5f"],
-  ["project-review", "3bee267fe77b7ef047e73acb47991643d2a522e980ae98e2980b713215cfc0b3"],
-  ["ship", "604da450727cb85e56c7cbc7ac6924b6378e7bb15a2ef4a5fd93983588af6ed1"],
-  ["skill-audit", "bf3b11bc0bfaa9d29c7e261a549b9bbb94a429f19468648afe42d50c3a42f6ce"],
-  ["usb-recovery", "ed31dfbbf41a7a155eb73ec80e09c23338049a3ca7ac4754bdfdff960e733c24"],
+  ["feature-docs", "c2d26e873399d4970145ed53ab64e5e3abfd198391343ad107ec1dbdf10012ff"],
+  ["flash-esp32", "cd67535f6206b72eb824548fce9338f97c5e813aff14633c6149b636b2146aeb"],
+  ["ota-release-verify", "347c7f3cdffa25a9563f104c099e08d1f91101e2d54b39442b97e9fcbc77400b"],
+  ["pr-hygiene", "ffd0828fe5e3d99d76bae0cfb36d355bf99e91f822ef0a4da407e39a9fa16150"],
+  ["project-review", "8a7acf3ba3bd0adbc4cebed742708221a0131afb8d50c802d4c29cd2cffde2ec"],
+  ["ship", "41ae3355c7b2d24624d92a5c23666b18361083f8ef305faf43b57303a9f20275"],
+  ["skill-audit", "7ce18817fb57b5f79eae89e913f8d80d290f62649e9ddc05051cfa1a2ef6b980"],
+  ["usb-recovery", "fe65ae5f954f6a4838e09101114c07faab0b82abcb351146b66e29a4199f8993"],
   ["vehicle-command-audit", "30ab4506d71e11d3993d66ca566402e024d12ae7502fd2b0bb056778cdde191a"],
 ]);
 const featureDocsScopeTokens = [
@@ -134,12 +134,12 @@ const featureDocsScopeTokens = [
   ".github/PULL_REQUEST_TEMPLATE.md",
   "tools/agent-hooks/", "tools/agent-config/", "docs/index.html", "installer-bootstrap.mjs",
   "serial-port-release.mjs", "web-installer.mjs", "docs/vendor/",
-  "build,signed-pr-preview,pr-preview-cleanup", "scripts/release-relevance.sh",
+  "build,signed-pr-preview,pr-preview-cleanup,pr-policy,bench-acceptance", "scripts/release-relevance.sh",
 ];
 const prHygieneContracts = [
   "### `PRIVACY-LEAK`", "### `LANGUAGE`", "at PR creation, every push, and merge",
   "192.0.2.0/24", "198.51.100.0/24", "203.0.113.0/24", "2001:db8::/32",
-  "- [x] `$pr-hygiene` clean — content gate @ <short-sha>",
+  "- [x] `$pr-hygiene` clean — content gate @ <full-40-hex-sha>",
 ];
 const shipMergeGateContracts = [
   "- [x] $project-review clean — merge gate @ <sha>",
@@ -147,6 +147,37 @@ const shipMergeGateContracts = [
   "- [x] $feature-docs synced — merge gate @ <sha>",
   "`$project-review` does not establish `$pr-hygiene` readiness",
 ];
+const productionFlashAuthorityCommand =
+  'python3 scripts/check-firmware-artifacts.py --app-only --target "$TARGET" --version "$VERSION" --app "$APP" --signed-app --expected-public-key-digest scripts/ota-signing-public-key.sha256';
+const productionFlashAuthorityCounts = new Map([
+  ["flash-esp32", 1],
+  ["ship", 1],
+  ["usb-recovery", 2],
+]);
+const canonicalMainArtifactNameRegex =
+  'grep -E "^tesla-key-esp32-(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?-${RUN_SHA}$"';
+const canonicalMainVersionRegex =
+  '[[ "$VERSION" =~ ^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$ ]]';
+const canonicalVersionLength = '&& (( ${#VERSION} <= 31 ))';
+const canonicalStableReleaseTagRegex =
+  '[[ "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$ ]]';
+const mainArtifactConsumerContracts = new Map([
+  ["ship", [
+    canonicalMainArtifactNameRegex,
+    "VERSION=$(sed -n 's/^display_version=//p' \"$META\")",
+    canonicalMainVersionRegex,
+    canonicalVersionLength,
+    '[ "$ART" = "tesla-key-esp32-$VERSION-$RUN_SHA" ]',
+  ]],
+  ["usb-recovery", [
+    'SIGNED_ART="tesla-key-esp32-$VERSION-$SOURCE_SHA"',
+    canonicalMainArtifactNameRegex,
+    "VERSION=$(sed -n 's/^display_version=//p' \"$META\")",
+    canonicalMainVersionRegex,
+    canonicalVersionLength,
+    '[ "$ART" = "tesla-key-esp32-$VERSION-$RUN_SHA" ]',
+  ]],
+]);
 for (const name of canonicalSkills) {
   const canonical = restrictedFrontmatter(
     repoPath(`.agents/skills/${name}/SKILL.md`), `canonical skill ${name}`,
@@ -205,6 +236,44 @@ for (const name of canonicalSkills) {
       die(1, "ship is missing a merge-gate contract");
     }
   }
+  const expectedFlashAuthorityCount = productionFlashAuthorityCounts.get(name);
+  if (expectedFlashAuthorityCount !== undefined) {
+    const actualFlashAuthorityCount = canonical.text.split(productionFlashAuthorityCommand).length - 1;
+    if (actualFlashAuthorityCount !== expectedFlashAuthorityCount) {
+      die(1, `${name} is missing its production-authority verification contract before flash`);
+    }
+  }
+  const mainArtifactContracts = mainArtifactConsumerContracts.get(name);
+  if (mainArtifactContracts?.some((required) => !canonical.text.includes(required))) {
+    die(1, `${name} main artifact consumer must bind full run SHA and derive version from metadata`);
+  }
+  if (name === "flash-esp32") {
+    const previewConsumerContracts = [
+      'EXPECTED_ART="tesla-key-esp32-pr${PR}-${EXPECTED_SHA}"',
+      'VERSION=$(sed -n \'s/^display_version=//p\' "$META")',
+      '[[ "$VERSION" =~ ^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)-PR-([1-9][0-9]*)$ ]]',
+      canonicalVersionLength,
+      '[ "${BASH_REMATCH[4]}" = "$PR" ]',
+    ];
+    if (previewConsumerContracts.some((required) => !canonical.text.includes(required))) {
+      die(1, "flash-esp32 signed-preview consumer must bind artifact name to PR/full head SHA and version to metadata");
+    }
+  }
+  if (name === "ota-release-verify") {
+    const stableTagCount = canonical.text.split(canonicalStableReleaseTagRegex).length - 1;
+    const stableLengthCount = canonical.text.split('(( ${#REL} <= 31 ))').length - 1;
+    if (stableTagCount !== 2 || stableLengthCount !== 2) {
+      die(1, "ota-release-verify must select the canonical <=31-byte stable Release tag in both snapshots");
+    }
+  }
+  if (name === "usb-recovery") {
+    const releaseVersionContract =
+      'VERSION=${RELEASE_TAG#v}\n(( ${#VERSION} <= 31 )) || {';
+    if (!canonical.text.includes(canonicalStableReleaseTagRegex) ||
+        !canonical.text.includes(releaseVersionContract)) {
+      die(1, "usb-recovery Release selection must be canonical, stable and <=31 bytes");
+    }
+  }
   const requiredOwners = ownerContracts.get(name);
   if (requiredOwners) {
     const normalized = normalizeProse(canonical.text);
@@ -240,7 +309,7 @@ for (const [relative, contracts] of new Map([
   ["AGENTS.md", ["`$pr-hygiene` is required at PR creation, every push, and every merge"]],
   [".github/PULL_REQUEST_TEMPLATE.md", [
     "These four boxes ARE the publish/merge gates",
-    "`$pr-hygiene` clean — content gate @ <sha>",
+    "`$pr-hygiene` clean — content gate @ <full-40-hex-sha>",
   ]],
   ["docs/FEATURES.md", [
     "Runner-neutral agent policy and four SHA-bound PR gates",
@@ -272,6 +341,18 @@ if (canonicalReviewerTargets.join("\0") !== actualReviewerTargets.join("\0")) {
 }
 if (actualReviewerTargets.length !== 4) {
   die(1, `expected four canonical reviewers, got ${actualReviewerTargets.length}`);
+}
+const multiTargetReviewer = normalizeProse(
+  fs.readFileSync(repoPath(".codex/agents/multi_target_build_reviewer.toml"), "utf8"),
+);
+const multiTargetPublicationContracts = [
+  "logic-test -> build -> independent-rebuild -> publish -> deploy",
+  "SHA/version-bound Actions artifact",
+  "deploy consumes only that named artifact",
+  "without a signing Environment, OTA key or OIDC",
+];
+if (multiTargetPublicationContracts.some((required) => !multiTargetReviewer.includes(required))) {
+  die(1, "multi-target reviewer is missing the independent-rebuild/publication DAG contract");
 }
 
 const safety = readJson(repoPath("tools/agent-config/safety-invariants.json"), "safety invariants");

@@ -4,6 +4,7 @@
 // implementation split — see vehicle_ctrl_internal.hpp.
 
 #include "vehicle_ctrl.hpp"
+#include "runtime_admission.hpp"
 #include "vehicle_ctrl_internal.hpp"
 #include "stack_watch.hpp"
 #include "ota_update.hpp"
@@ -47,7 +48,14 @@ static const char* TAG = "vehicle_ctrl";
 // Timed-out queued work is invalidated before set_connected(false) synchronously flushes
 // callbacks, so the next round starts clean and no late completion reaches another request.
 void VehicleController::auto_pair_task_fn_(void* arg) {
+  try {
     auto* self = static_cast<VehicleController*>(arg);
+    if (!self || !self->await_task_start_()) {
+        // The start-cancel path is intentionally resource-free and always self-deletes.
+        vTaskDelete(nullptr);
+        return;
+    }
+
     vTaskDelay(pdMS_TO_TICKS(4000));  // let WiFi/BLE come up first
     bool warned_no_vin = false;
     tk::PeriodicLogState unpaired_notice;
@@ -126,7 +134,8 @@ void VehicleController::auto_pair_task_fn_(void* arg) {
         // An NVS error is not first-boot absence: gate all signing and wait for reboot/recovery.
         bool stored_key_present = false;
         const bool key_probe_ok = self->storage_ &&
-                                  self->storage_->probe_blob("private_key", stored_key_present);
+                                  self->storage_->probe_blob(tk::nvs_contract::kPrivateKey,
+                                                             stored_key_present);
         const bool pairing_lost = self->pairing_lost_.load();
         const tk::AutomaticKeyAction key_action = tk::decide_automatic_key_action(
             key_probe_ok, stored_key_present, self->key_runtime_safe_.load(), pairing_lost);
@@ -300,6 +309,10 @@ void VehicleController::auto_pair_task_fn_(void* arg) {
           vTaskDelay(pdMS_TO_TICKS(2000));
       }
     }
+  } catch (...) {
+      ESP_LOGE(TAG, "auto-pair task boundary threw outside an iteration — stopping task");
+      vTaskDelete(nullptr);
+  }
 }
 
 // ─── Key management ───────────────────────────────────────────────────────────
@@ -321,7 +334,7 @@ VehicleController::KeyGenerationResult VehicleController::generate_key_result(
     bool key_exists = false;
     bool probe_ok = true;
     if (!allow_replace) {
-        probe_ok = storage_ && storage_->probe_blob("private_key", key_exists);
+        probe_ok = storage_ && storage_->probe_blob(tk::nvs_contract::kPrivateKey, key_exists);
     }
     switch (tk::decide_key_generation_preflight(allow_replace, probe_ok, key_exists)) {
         case tk::KeyGenerationPreflight::ProbeFailed:
@@ -358,7 +371,8 @@ bool VehicleController::generate_key() {
     }
 
     bool key_exists = false;
-    const bool probe_ok = storage_ && storage_->probe_blob("private_key", key_exists);
+    const bool probe_ok = storage_ &&
+                          storage_->probe_blob(tk::nvs_contract::kPrivateKey, key_exists);
     const bool pairing_lost = pairing_lost_.load();
     const tk::AutomaticKeyAction action = tk::decide_automatic_key_action(
         probe_ok, key_exists, key_runtime_safe_.load(), pairing_lost);
@@ -451,7 +465,8 @@ tk::KeyRotationResult VehicleController::generate_key_locked_() {
     if (storage_) {
         try {
             time_t now = time(nullptr);
-            if (!storage_->save_str("key_created", std::to_string((long long)now))) {
+            if (!storage_->save_str(tk::nvs_contract::kKeyCreated,
+                                    std::to_string((long long)now))) {
                 ESP_LOGW(TAG, "key generated but its creation date was not persisted");
             }
         } catch (...) {
@@ -537,9 +552,9 @@ bool VehicleController::clear_session_and_cache_() {
         // that belongs to a key the car has already forgotten — and the symptom is a device
         // that looks paired and fails every command. has_session() reads flash, so this is a
         // real divergence rather than a cosmetic one.
-        const bool v = storage_->remove("session_vcsec");
-        const bool i = storage_->remove("session_infotainment");
-        const bool p = storage_->remove("paired_at");   // re-pair re-stamps the pairing date
+        const bool v = storage_->remove(tk::nvs_contract::kSessionVcsec);
+        const bool i = storage_->remove(tk::nvs_contract::kSessionInfotainment);
+        const bool p = storage_->remove(tk::nvs_contract::kPairedAt);  // re-pair re-stamps date
         if (!v || !i || !p) {
             ESP_LOGE(TAG, "session erase incomplete (vcsec=%d info=%d paired_at=%d) — "
                           "flash may still hold a stale session across the next boot",
@@ -593,7 +608,8 @@ VehicleController::NewVehicleResetResult VehicleController::reset_for_new_vehicl
     // HTTP flow released the mutex between fingerprint capture and rotation, letting auto-rekey
     // change the durable key and causing the request to misclassify its own failure.
     bool key_present = false;
-    const bool key_probe_ok = storage_ && storage_->probe_blob("private_key", key_present);
+    const bool key_probe_ok = storage_ &&
+                              storage_->probe_blob(tk::nvs_contract::kPrivateKey, key_present);
     if (key_probe_ok && key_present) result.previous_key_id = key_fingerprint();
     const bool identity_verified = tk::private_key_identity_verified(
         key_probe_ok, key_present, !result.previous_key_id.empty());
@@ -627,7 +643,8 @@ VehicleController::NewVehicleResetResult VehicleController::reset_for_new_vehicl
     if (tk::key_rotation_committed(rotation)) {
         // The discovered BLE MAC belongs to the previous car; boot recovery can retry this via
         // vin_txn if the cross-namespace erase does not commit here.
-        const bool mac_removed = config_store_ && config_store_->remove("ble_mac");
+        const bool mac_removed = config_store_ &&
+                                 config_store_->remove(tk::nvs_contract::kBleMac);
         if (!mac_removed) {
             ESP_LOGE(TAG, "old vehicle's BLE MAC cleanup incomplete — VIN journal remains armed");
             result.state = tk::VinTransitionApply::RecoverCommittedIdentity;
@@ -685,14 +702,14 @@ bool VehicleController::health_probe_(int timeout_ms) {
 time_t VehicleController::key_created_at() {
     if (!storage_) return 0;
     std::string s;
-    if (!storage_->load_str("key_created", s)) return 0;
+    if (!storage_->load_str(tk::nvs_contract::kKeyCreated, s)) return 0;
     return (time_t)atoll(s.c_str());
 }
 
 time_t VehicleController::paired_at() {
     if (!storage_ || !has_session()) return 0;
     std::string s;
-    if (storage_->load_str("paired_at", s)) {
+    if (storage_->load_str(tk::nvs_contract::kPairedAt, s)) {
         time_t t = (time_t)atoll(s.c_str());
         if (t > 1600000000) return t;
     }
@@ -701,7 +718,8 @@ time_t VehicleController::paired_at() {
     // tracking (or whose clock was unsynced) gets stamped at first sync instead.
     time_t now = time(nullptr);
     if (now > 1600000000) {
-        if (!storage_->save_str("paired_at", std::to_string((long long)now))) {
+        if (!storage_->save_str(tk::nvs_contract::kPairedAt,
+                                std::to_string((long long)now))) {
             ESP_LOGW(TAG, "pairing date not persisted — the UI will re-stamp it on the next sync");
         }
         return now;
@@ -711,18 +729,18 @@ time_t VehicleController::paired_at() {
 
 bool VehicleController::has_key() {
     // Existence probe only — never read the key blob into a vector just to test presence.
-    return storage_ && storage_->blob_exists("private_key");
+    return storage_ && storage_->blob_exists(tk::nvs_contract::kPrivateKey);
 }
 
 bool VehicleController::has_session() {
     // Existence probe only — see has_key(); sampled ~1 Hz from the display/LED tasks.
-    return storage_ && storage_->blob_exists("session_vcsec");
+    return storage_ && storage_->blob_exists(tk::nvs_contract::kSessionVcsec);
 }
 
 std::string VehicleController::key_fingerprint() {
     if (!storage_) return "";
     std::vector<uint8_t> pem;
-    if (!storage_->load("private_key", pem) || pem.empty()) return "";
+    if (!storage_->load(tk::nvs_contract::kPrivateKey, pem) || pem.empty()) return "";
     // mbedtls expects the PEM buffer to be NUL-terminated and the length to include it.
     if (pem.back() != '\0') pem.push_back('\0');
 
@@ -763,6 +781,7 @@ std::string VehicleController::key_fingerprint() {
 }
 
 bool VehicleController::pair(tk::ConnectOrigin origin, int timeout_ms) {
+    if (!tk::runtime_admission_vehicle_ready()) return false;
     if (timeout_ms <= 0) return false;
     const uint32_t deadline = deadline_in_(static_cast<uint32_t>(timeout_ms));
     tk::SemGuard cmd_guard(command_mutex_, ticks_until_(deadline));

@@ -13,8 +13,9 @@ concurrency:
   group: build-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
-# Tests and compilation are unprivileged by default. Only the main-only publish job can access
-# the signing environment and write releases/Pages.
+# Tests and compilation are unprivileged by default. Only the main-only publish job can access the
+# signing Environment and write the immutable Release; only the separate key-free deploy job writes
+# branch-backed Pages from publish's exact SHA/version-bound artifact.
 permissions:
   contents: read
 
@@ -22,18 +23,27 @@ jobs:
   logic-test:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Validate runner-neutral agent configuration
         run: ./tools/agent-config/selftest.sh
+      - name: Validate repository syntax, links and workflow policy
+        run: ./scripts/repo-lint.sh
       - name: Run host-side logic tests
-        run: ./scripts/run-mock-tests.sh
+        run: ./scripts/run-mock-tests.sh --require-all
+      - name: Prove and run Linux memory-safety instrumentation
+        run: |
+          ./scripts/run-sanitizer-tests.sh --self-test
+          ./scripts/run-sanitizer-tests.sh
       - name: Test ESP-IDF build contracts
         run: |
           ./scripts/ci-build-all.sh --self-test
           ./scripts/select-release-version.sh --self-test
           python3 scripts/check-sdkconfig-defaults.py --self-test
           python3 scripts/report-firmware-size.py --self-test
+          python3 scripts/check-build-gate-contract.py --self-test
           python3 tools/agent-hooks/agent_hook.py build-efficiency --self-test
           test "$(./scripts/idf-version.sh)" = v5.5.5
 
@@ -60,6 +70,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # PR artifacts and their provenance are built from the exact current head. The separate
+          # logic-test job intentionally keeps GitHub's merge ref to catch base-integration issues.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 0
 
       - name: Read pinned ESP-IDF toolchain
@@ -67,21 +80,7 @@ jobs:
         run: |
           echo "version=$(./scripts/idf-version.sh)" >> "$GITHUB_OUTPUT"
           echo "image-version=$(./scripts/idf-version.sh --image-version)" >> "$GITHUB_OUTPUT"
-          h="$(sha256sum esp-idf-toolchain.txt sdkconfig.defaults sdkconfig.defaults.* \
-               dependencies.lock.* | sha256sum | cut -c1-16)"
-          echo "cache-hash=$h" >> "$GITHUB_OUTPUT"
-          if [ "${{ github.event_name }}" = pull_request ]; then scope=pr; else scope=main; fi
-          echo "cache-scope=$scope" >> "$GITHUB_OUTPUT"
           echo "ESP-IDF image: $(./scripts/idf-version.sh --image)"
-
-      - name: Cache ccache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: .ccache
-          # Never let a PR-populated compiler-object cache feed a main build that will be signed.
-          key: ccache-${{ steps.toolchain.outputs.cache-hash }}-${{ steps.toolchain.outputs.cache-scope }}-${{ github.sha }}
-          restore-keys: |
-            ccache-${{ steps.toolchain.outputs.cache-hash }}-${{ steps.toolchain.outputs.cache-scope }}-
 
       - name: Compute release version
         id: version
@@ -89,7 +88,7 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           GH_TOKEN: ${{ github.token }}
           GITHUB_REPOSITORY: ${{ github.repository }}
-          SOURCE_SHA: ${{ github.sha }}
+          SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           git fetch --tags --force
           if [ "$EVENT_NAME" = push ] && [ "${{ github.ref }}" = refs/heads/main ]; then
@@ -165,8 +164,52 @@ jobs:
             _unsigned/
             dist/
 
-  publish:
+  independent-rebuild:
+    # On main, a distinct runner rebuilds the exact source without secrets, write permissions,
+    # signing environment or a cache restored from the producer. PR preview trust does not use
+    # this PR-controlled workflow definition; signed-pr-preview.yml owns its workflow_run rebuild.
     needs: build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Read pinned ESP-IDF toolchain
+        id: toolchain
+        run: |
+          echo "image-version=$(./scripts/idf-version.sh --image-version)" >> "$GITHUB_OUTPUT"
+          echo "ESP-IDF image: $(./scripts/idf-version.sh --image)"
+      - name: Apply the producer's exact display-version stamp
+        env:
+          DISPLAY_VERSION: ${{ needs.build.outputs.display-version }}
+        run: printf '%s\n' "$DISPLAY_VERSION" > version.txt
+      - name: Independently rebuild all four targets
+        uses: espressif/esp-idf-ci-action@e6f5c74232b1ccd4c97ed641f1e48553853f1fd5 # v1.2.0
+        with:
+          esp_idf_version: ${{ steps.toolchain.outputs.image-version }}
+          target: esp32
+          command: >-
+            ./scripts/ci-build-all.sh
+            "${{ needs.build.outputs.display-version }}"
+            "${{ github.sha }}"
+      - name: Upload independent rebuild evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: firmware-independent-rebuild
+          if-no-files-found: error
+          retention-days: 7
+          path: |
+            _unsigned/
+            dist/
+
+  publish:
+    needs: [build, independent-rebuild]
     if: >-
       github.ref == 'refs/heads/main'
       && github.event_name == 'push'
@@ -176,8 +219,7 @@ jobs:
     environment: firmware-signing
     permissions:
       contents: write
-      pages: write
-      id-token: write
+      pages: read
       actions: read
     steps:
       # Checkout only the exact main commit that produced the unsigned data artifact.
@@ -185,6 +227,7 @@ jobs:
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Bind publish job to current main
         env:
@@ -196,6 +239,12 @@ jobs:
         with:
           name: firmware-unsigned
           path: .
+
+      - name: Download independent rebuild evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: firmware-independent-rebuild
+          path: _ci-independent
 
       - name: Validate build provenance
         env:
@@ -221,6 +270,11 @@ jobs:
             echo "refusing symlinks in unsigned artifact" >&2
             exit 1
           fi
+          # The downloaded producer manifest is only a claim. Recompute the source-tree
+          # fingerprint from this exact protected checkout and rehash the full allowlisted tree.
+          python3 scripts/check-build-artifact-inventory.py \
+            --verify --artifact-root . --compare-to _ci-independent --source-root . \
+            --expected-source-sha "$EXPECTED_SHA" --version "$EXPECTED_VERSION"
 
       - name: Revalidate current Release candidate before signing
         env:
@@ -228,7 +282,94 @@ jobs:
           SOURCE_SHA: ${{ github.sha }}
         run: ./scripts/select-release-version.sh --require-release-candidate "$SOURCE_SHA" "$DISPLAY_VERSION"
 
+      # The root installer and durable PR/<N>/ previews require one branch-backed site. Refuse the
+      # signing boundary if the repository was switched to Actions Pages or another branch/path.
+      - name: Validate branch-backed Pages authority before signing
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          pages_json="$(mktemp)"
+          trap 'rm -f "$pages_json"' EXIT
+          gh api "repos/$GITHUB_REPOSITORY/pages" > "$pages_json"
+          python3 scripts/check-pages-source.py "$pages_json"
+
+      # A same-SHA retry may find the exact Release already published and immutable while Pages is
+      # stale. That state must reuse all published bytes without exposing the key or attempting an
+      # impossible immutable-Release mutation. Only an exact HTTP 404 selects first publication.
+      - name: Classify first publication or immutable reuse
+        id: release-mode
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DISPLAY_VERSION: ${{ needs.build.outputs.display-version }}
+          RELEASE_VERSION: ${{ needs.build.outputs.release-version }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          release_json="$(mktemp)"
+          api_error="$(mktemp)"
+          trap 'rm -f "$release_json" "$api_error"' EXIT
+          if gh api "repos/$GITHUB_REPOSITORY/releases/tags/v$RELEASE_VERSION" \
+              > "$release_json" 2> "$api_error"; then
+            python3 scripts/check-release-assets.py "$release_json" \
+              --metadata-only --version "$DISPLAY_VERSION" --source-sha "$SOURCE_SHA" \
+              --expect-state published-immutable
+            mode=reuse
+          elif grep -Eq '\(HTTP 404\)' "$api_error"; then
+            mode=create
+          else
+            echo "cannot classify GitHub Release state" >&2
+            sed -n '1,5p' "$api_error" >&2
+            exit 1
+          fi
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+          echo "Release publication mode: $mode"
+
+      - name: Reuse and stage exact immutable Release bytes
+        if: steps.release-mode.outputs.mode == 'reuse'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DISPLAY_VERSION: ${{ needs.build.outputs.display-version }}
+          RELEASE_VERSION: ${{ needs.build.outputs.release-version }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          ./scripts/select-release-version.sh --require-release-candidate "$SOURCE_SHA" "$DISPLAY_VERSION"
+          test ! -e _release-reuse-download
+          test ! -e _reuse-release.json
+          mkdir _release-reuse-download
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/v$RELEASE_VERSION" > _reuse-release.json
+          gh release download "v$RELEASE_VERSION" --repo "$GITHUB_REPOSITORY" \
+            --dir _release-reuse-download
+          python3 scripts/prepare-reused-release.py \
+            _reuse-release.json _release-reuse-download . ./_fw \
+            --version "$DISPLAY_VERSION" --source-sha "$SOURCE_SHA"
+
+      - name: Revalidate absent Release candidate immediately before key provisioning
+        if: steps.release-mode.outputs.mode == 'create'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DISPLAY_VERSION: ${{ needs.build.outputs.display-version }}
+          RELEASE_VERSION: ${{ needs.build.outputs.release-version }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          ./scripts/select-release-version.sh --require-release-candidate "$SOURCE_SHA" "$DISPLAY_VERSION"
+          api_error="$(mktemp)"
+          trap 'rm -f "$api_error"' EXIT
+          if gh api "repos/$GITHUB_REPOSITORY/releases/tags/v$RELEASE_VERSION" \
+              > /dev/null 2> "$api_error"; then
+            echo "Release appeared after create-mode classification; refusing key provisioning" >&2
+            exit 1
+          fi
+          grep -Eq '\(HTTP 404\)' "$api_error" || {
+            echo "cannot prove Release candidate is absent" >&2
+            sed -n '1,5p' "$api_error" >&2
+            exit 1
+          }
+
       - name: Provision OTA signing key
+        if: steps.release-mode.outputs.mode == 'create'
         env:
           OTA_SIGNING_KEY: ${{ secrets.OTA_SIGNING_KEY }}
         run: |
@@ -242,39 +383,159 @@ jobs:
       # Only trusted main scripts and the digest-pinned ESP-IDF image see the key. No PR source is
       # compiled or executed in this job; the input artifact is handled strictly as binary data.
       - name: Sign and stage release artifacts
+        if: steps.release-mode.outputs.mode == 'create'
         env:
           DISPLAY_VERSION: ${{ needs.build.outputs.display-version }}
-        run: ./scripts/idf-docker.sh ./scripts/ci-sign-artifacts.sh "$DISPLAY_VERSION" _unsigned
+          SOURCE_SHA: ${{ github.sha }}
+        run: >-
+          ./scripts/idf-docker.sh ./scripts/ci-sign-artifacts.sh
+          "$DISPLAY_VERSION" _unsigned "$SOURCE_SHA" . _ci-independent
 
       - name: Remove OTA signing key
-        if: always()
+        if: always() && steps.release-mode.outputs.mode == 'create'
         run: rm -f ota_signing_key.pem
+
+      # Create mode must prove that the protected secret is still the production authority;
+      # reuse mode must prove that an immutable Release was not signed by an attacker's key.
+      # This is key-free RSA-PSS verification against the reviewed public-key digest pin.
+      - name: Verify production signing authority for all staged apps
+        env:
+          DISPLAY_VERSION: ${{ needs.build.outputs.display-version }}
+        run: |
+          set -euo pipefail
+          for row in 'esp32|' 'esp32s3|-s3' 'esp32c3|-c3' 'esp32c6|-c6'; do
+            target="${row%%|*}"
+            suffix="${row#*|}"
+            python3 scripts/check-firmware-artifacts.py \
+              --target "$target" --version "$DISPLAY_VERSION" --signed-app \
+              --bootloader "_fw/$target/bootloader.bin" \
+              --app "tesla-key-esp32$suffix.bin" \
+              --expected-public-key-digest scripts/ota-signing-public-key.sha256
+          done
+
+      # Both create and immutable-reuse mode must prove the complete local installer layout before
+      # any Actions artifact upload or GitHub Release mutation can make the candidate external.
+      - name: Assemble local Pages candidate before any publication
+        env:
+          DISPLAY_VERSION: ${{ needs.build.outputs.display-version }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          ./scripts/select-release-version.sh --require-release-candidate "$SOURCE_SHA" "$DISPLAY_VERSION"
+          ./scripts/build-pages.sh ./_site "$DISPLAY_VERSION" "$SOURCE_SHA"
+
+      - name: Bind all 16 local Pages parts before any publication
+        env:
+          DISPLAY_VERSION: ${{ needs.build.outputs.display-version }}
+          RELEASE_MODE: ${{ steps.release-mode.outputs.mode }}
+        run: |
+          set -euo pipefail
+          release_dir=.
+          if [ "$RELEASE_MODE" = reuse ]; then
+            release_dir=_release-reuse-download
+          elif [ "$RELEASE_MODE" != create ]; then
+            echo "invalid Release publication mode: $RELEASE_MODE" >&2
+            exit 1
+          fi
+          python3 scripts/check-release-pages-bytes.py \
+            ./_site "$release_dir" --version "$DISPLAY_VERSION"
+
+      - name: Revalidate current Release candidate immediately before signed artifact upload
+        env:
+          DISPLAY_VERSION: ${{ needs.build.outputs.display-version }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          ./scripts/select-release-version.sh --require-release-candidate "$SOURCE_SHA" "$DISPLAY_VERSION"
+          python3 scripts/check-signed-root-inventory.py . --version "$DISPLAY_VERSION"
 
       - name: Upload signed firmware artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: tesla-key-esp32-${{ needs.build.outputs.display-version }}
+          name: tesla-key-esp32-${{ needs.build.outputs.display-version }}-${{ github.sha }}
           if-no-files-found: error
           path: |
-            tesla-key-esp32*.bin
+            tesla-key-esp32.bin
+            tesla-key-esp32-s3.bin
+            tesla-key-esp32-c3.bin
+            tesla-key-esp32-c6.bin
+            tesla-key-esp32-${{ needs.build.outputs.display-version }}.bin
+            tesla-key-esp32-s3-${{ needs.build.outputs.display-version }}.bin
+            tesla-key-esp32-c3-${{ needs.build.outputs.display-version }}.bin
+            tesla-key-esp32-c6-${{ needs.build.outputs.display-version }}.bin
+            tesla-key-esp32-${{ needs.build.outputs.display-version }}-merged.bin
+            tesla-key-esp32-s3-${{ needs.build.outputs.display-version }}-merged.bin
+            tesla-key-esp32-c3-${{ needs.build.outputs.display-version }}-merged.bin
+            tesla-key-esp32-c6-${{ needs.build.outputs.display-version }}-merged.bin
+            _fw/esp32/bootloader.bin
+            _fw/esp32/partition-table.bin
+            _fw/esp32/tesla-key-esp32.bin
+            _fw/esp32/ota_data_initial.bin
+            _fw/esp32s3/bootloader.bin
+            _fw/esp32s3/partition-table.bin
+            _fw/esp32s3/tesla-key-esp32.bin
+            _fw/esp32s3/ota_data_initial.bin
+            _fw/esp32c3/bootloader.bin
+            _fw/esp32c3/partition-table.bin
+            _fw/esp32c3/tesla-key-esp32.bin
+            _fw/esp32c3/ota_data_initial.bin
+            _fw/esp32c6/bootloader.bin
+            _fw/esp32c6/partition-table.bin
+            _fw/esp32c6/tesla-key-esp32.bin
+            _fw/esp32c6/ota_data_initial.bin
             dist/
+            _site/
 
       - name: Revalidate current Release candidate immediately before Release mutation
+        if: steps.release-mode.outputs.mode == 'create'
         env:
+          GH_TOKEN: ${{ github.token }}
           DISPLAY_VERSION: ${{ needs.build.outputs.display-version }}
+          RELEASE_VERSION: ${{ needs.build.outputs.release-version }}
           SOURCE_SHA: ${{ github.sha }}
-        run: ./scripts/select-release-version.sh --require-release-candidate "$SOURCE_SHA" "$DISPLAY_VERSION"
+        run: |
+          set -euo pipefail
+          ./scripts/select-release-version.sh --require-release-candidate "$SOURCE_SHA" "$DISPLAY_VERSION"
+          api_error="$(mktemp)"
+          trap 'rm -f "$api_error"' EXIT
+          if gh api "repos/$GITHUB_REPOSITORY/releases/tags/v$RELEASE_VERSION" \
+              > /dev/null 2> "$api_error"; then
+            echo "Release appeared before draft creation; refusing Release mutation" >&2
+            exit 1
+          fi
+          grep -Eq '\(HTTP 404\)' "$api_error" || {
+            echo "cannot prove Release candidate is absent before draft creation" >&2
+            sed -n '1,5p' "$api_error" >&2
+            exit 1
+          }
+          python3 scripts/check-signed-root-inventory.py . --version "$DISPLAY_VERSION"
 
-      - name: Create release
-        if: github.event_name == 'push' && needs.build.outputs.firmware == 'yes'
+      # Upload into a mutable draft first. No draft becomes OTA/Pages authority until every one of
+      # its exact 40 Release assets is rebound to the local bytes below.
+      - name: Create draft release
+        if: steps.release-mode.outputs.mode == 'create'
         uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3
         with:
           tag_name: v${{ needs.build.outputs.release-version }}
           target_commitish: ${{ github.sha }}
           name: v${{ needs.build.outputs.release-version }}
           generate_release_notes: true
+          draft: true
+          prerelease: false
+          make_latest: false
+          fail_on_unmatched_files: true
           files: |
-            tesla-key-esp32*.bin
+            tesla-key-esp32.bin
+            tesla-key-esp32-s3.bin
+            tesla-key-esp32-c3.bin
+            tesla-key-esp32-c6.bin
+            tesla-key-esp32-${{ needs.build.outputs.display-version }}.bin
+            tesla-key-esp32-s3-${{ needs.build.outputs.display-version }}.bin
+            tesla-key-esp32-c3-${{ needs.build.outputs.display-version }}.bin
+            tesla-key-esp32-c6-${{ needs.build.outputs.display-version }}.bin
+            tesla-key-esp32-${{ needs.build.outputs.display-version }}-merged.bin
+            tesla-key-esp32-s3-${{ needs.build.outputs.display-version }}-merged.bin
+            tesla-key-esp32-c3-${{ needs.build.outputs.display-version }}-merged.bin
+            tesla-key-esp32-c6-${{ needs.build.outputs.display-version }}-merged.bin
             dist/*/*.elf
             dist/*/*.elf.sha256
             dist/*/*.map
@@ -283,32 +544,47 @@ jobs:
             dist/*/size-*.json
             dist/*/size-*.md
 
-      - name: Configure Pages
-        uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6
-
-      - name: Assemble Pages site
+      - name: Bind complete draft Release and publish exact candidate
+        if: steps.release-mode.outputs.mode == 'create'
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
           DISPLAY_VERSION: ${{ needs.build.outputs.display-version }}
+          RELEASE_VERSION: ${{ needs.build.outputs.release-version }}
           SOURCE_SHA: ${{ github.sha }}
         run: |
-          ./scripts/select-release-version.sh --require-published-release "$SOURCE_SHA" "$DISPLAY_VERSION"
-          ./scripts/build-pages.sh ./_site "$DISPLAY_VERSION" "$SOURCE_SHA"
+          set -euo pipefail
+          draft_json="$(mktemp)"
+          publish_json="$(mktemp)"
+          trap 'rm -f "$draft_json" "$publish_json"' EXIT
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/v$RELEASE_VERSION" > "$draft_json"
+          python3 scripts/check-release-assets.py "$draft_json" . \
+            --version "$DISPLAY_VERSION" --source-sha "$SOURCE_SHA" \
+            --expect-state draft \
+            --expected-public-key-digest scripts/ota-signing-public-key.sha256
+          release_id="$(jq -er '.id | select(type == "number" and . > 0)' "$draft_json")"
+          # Publication is the first point at which the Release can become channel authority. The
+          # validator checked all 40 byte sets; refresh main/tag authority in the final command
+          # immediately before PATCH so an advancing main can never publish a stale draft.
+          ./scripts/select-release-version.sh --require-release-candidate "$SOURCE_SHA" "$DISPLAY_VERSION"
+          gh api --method PATCH "repos/$GITHUB_REPOSITORY/releases/$release_id" \
+            -F draft=false -f make_latest=true > "$publish_json"
 
-      - name: Publish site to gh-pages
+      - name: Refetch and accept immutable published Release
+        if: steps.release-mode.outputs.mode == 'create'
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
           DISPLAY_VERSION: ${{ needs.build.outputs.display-version }}
+          RELEASE_VERSION: ${{ needs.build.outputs.release-version }}
           SOURCE_SHA: ${{ github.sha }}
         run: |
-          ./scripts/select-release-version.sh --require-published-release "$SOURCE_SHA" "$DISPLAY_VERSION"
-          ./scripts/publish-pages-branch.sh root ./_site
-
-      - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5
-        with:
-          path: ./_site
+          set -euo pipefail
+          release_json="$(mktemp)"
+          trap 'rm -f "$release_json"' EXIT
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/v$RELEASE_VERSION" > "$release_json"
+          python3 scripts/check-release-assets.py "$release_json" . \
+            --version "$DISPLAY_VERSION" --source-sha "$SOURCE_SHA" \
+            --expect-state published-immutable \
+            --expected-public-key-digest scripts/ota-signing-public-key.sha256
 
   deploy:
     needs: [build, publish]
@@ -316,42 +592,81 @@ jobs:
       github.ref == 'refs/heads/main'
       && github.event_name == 'push'
       && needs.build.outputs.firmware == 'yes'
-      && needs.publish.result == 'success'
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     permissions:
-      contents: read
-      pages: write
-      id-token: write
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url || steps.deployment-retry.outputs.page_url }}
+      actions: read
+      contents: write
+      pages: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
-      - name: Revalidate current Release immediately before Pages deployment
+          persist-credentials: false
+
+      - name: Download exact signed Release and Pages candidate
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: tesla-key-esp32-${{ needs.build.outputs.display-version }}-${{ github.sha }}
+          path: _deploy-input
+
+      - name: Validate downloaded signed root and local Pages bytes
+        env:
+          DISPLAY_VERSION: ${{ needs.build.outputs.display-version }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          python3 scripts/check-signed-root-inventory.py ./_deploy-input \
+            --version "$DISPLAY_VERSION"
+          python3 scripts/check-pages-manifest.py ./_deploy-input/_site \
+            --source-sha "$SOURCE_SHA" --version "$DISPLAY_VERSION"
+          python3 scripts/check-release-pages-bytes.py \
+            ./_deploy-input/_site ./_deploy-input --version "$DISPLAY_VERSION"
+
+      - name: Revalidate branch-backed Pages authority immediately before deployment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DISPLAY_VERSION: ${{ needs.build.outputs.display-version }}
+          RELEASE_VERSION: ${{ needs.build.outputs.release-version }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          pages_json="$(mktemp)"
+          release_json="$(mktemp)"
+          trap 'rm -f "$pages_json" "$release_json"' EXIT
+          gh api "repos/$GITHUB_REPOSITORY/pages" > "$pages_json"
+          python3 scripts/check-pages-source.py "$pages_json"
+          ./scripts/select-release-version.sh --require-published-release "$SOURCE_SHA" "$DISPLAY_VERSION"
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/v$RELEASE_VERSION" > "$release_json"
+          python3 scripts/check-release-assets.py "$release_json" ./_deploy-input \
+            --version "$DISPLAY_VERSION" --source-sha "$SOURCE_SHA" \
+            --expect-state published-immutable \
+            --expected-public-key-digest scripts/ota-signing-public-key.sha256
+
+      - name: Deploy root site to gh-pages
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: ./scripts/publish-pages-branch.sh root ./_deploy-input/_site
+
+      - name: Accept branch-served Pages against immutable Release bytes
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           DISPLAY_VERSION: ${{ needs.build.outputs.display-version }}
+          RELEASE_VERSION: ${{ needs.build.outputs.release-version }}
           SOURCE_SHA: ${{ github.sha }}
-        run: ./scripts/select-release-version.sh --require-published-release "$SOURCE_SHA" "$DISPLAY_VERSION"
-      - name: Deploy to GitHub Pages
-        id: deployment
-        continue-on-error: true
-        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5
-      - name: Wait before retrying the Pages deployment
-        if: steps.deployment.outcome == 'failure'
-        run: sleep 30
-      - name: Revalidate current Release immediately before Pages deployment retry
-        if: steps.deployment.outcome == 'failure'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          DISPLAY_VERSION: ${{ needs.build.outputs.display-version }}
-          SOURCE_SHA: ${{ github.sha }}
-        run: ./scripts/select-release-version.sh --require-published-release "$SOURCE_SHA" "$DISPLAY_VERSION"
-      - name: Retry deploy to GitHub Pages
-        id: deployment-retry
-        if: steps.deployment.outcome == 'failure'
-        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5
+        run: |
+          set -euo pipefail
+          release_json="$(mktemp)"
+          pages_json="$(mktemp)"
+          trap 'rm -f "$release_json" "$pages_json"' EXIT
+          gh api "repos/$GITHUB_REPOSITORY/pages" > "$pages_json"
+          pages_base_url="$(python3 scripts/check-pages-source.py "$pages_json" --print-url)"
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/v$RELEASE_VERSION" > "$release_json"
+          python3 scripts/check-published-release.py \
+            --pages-base-url "$pages_base_url" \
+            --release-base-url "https://github.com/$GITHUB_REPOSITORY/releases/download/v$RELEASE_VERSION" \
+            --release-json "$release_json" \
+            --version "$DISPLAY_VERSION" \
+            --source-sha "$SOURCE_SHA" \
+            --attempts 6 --interval 10 --timeout 15

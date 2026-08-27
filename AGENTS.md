@@ -42,9 +42,10 @@ task touches them:
   unrelated task.
 - [`main/idf_component.yml`](main/idf_component.yml) pins `yoziru/tesla-ble` **v5.1.1**.
   [`patches/tesla-ble/`](patches/tesla-ble/) is an ordered, hash-checked, fail-closed local series:
-  the anti-replay response-counter fix and key-regeneration/persistence API adaptation are current
-  contracts, not obsolete C5 workarounds. Do not edit the pin, patch order, wire behavior or key
-  compatibility without a separately authorized dependency migration and protocol-vector review.
+  the anti-replay response-counter fix, key-regeneration/persistence API adaptation, and bounded
+  RX-framing recovery logging are current contracts, not obsolete C5 workarounds. Do not edit the
+  pin, patch order, wire behavior, key compatibility or log-flood throttle without a separately
+  authorized dependency migration and protocol-vector review.
 - ESP-IDF 6/Mbed TLS 4/PSA work is intentionally separate. Preserve P-256 ECDH byte order,
   `SHA1(shared-secret)[:16]`, HMAC/session derivation, AES-GCM nonce/AAD/tag layout, Tesla key-ID
   derivation and PEM/NVS key reuse. See
@@ -70,12 +71,15 @@ task touches them:
 Use the narrowest relevant checks first, then the full contract before handoff:
 
 ```bash
-scripts/run-mock-tests.sh                    # host C++ logic + Python/Node tests
+scripts/run-mock-tests.sh                    # capability-aware local host suite
+scripts/run-mock-tests.sh --require-all      # fail-closed CI host/CMake/browser suite
+scripts/repo-lint.sh                         # offline syntax/link/workflow-policy canaries
+scripts/run-sanitizer-tests.sh               # Linux ASan + UBSan + LSan + fuzz/runtime suite
 scripts/test-build-contracts.sh              # pins, targets, partitions and CI/release contracts
 scripts/test-pr-gates.sh                     # PR command/record policy canaries
 tools/agent-config/selftest.sh                # runner mapping/config/hook mutation canaries
 scripts/idf-docker.sh idf.py -B build set-target esp32s3 build
-scripts/idf-docker.sh ./scripts/ci-build-verify.sh 0.0.0-local "$(git rev-parse HEAD)"
+scripts/idf-docker.sh ./scripts/ci-build-verify.sh "$(cat version.txt)" "$(git rev-parse HEAD)"
                                                # four targets + disposable signing +
                                                # manifest/Pages bytes + reproducibility
 ```
@@ -124,8 +128,13 @@ ESP HTTP, NimBLE, NVS, OTA or FreeRTOS shells.
   no wrapper, pipe, redirect, copy, print, archive, upload or compound command is allowed.
 - Preserve CI's split: unprivileged build emits unsigned bytes and provenance; protected publish
   revalidates the exact main/release candidate before provisioning the key, signs already-built
-  bytes, removes the key, and binds signed Release/Pages artifacts. Do not weaken action SHA pins,
-  symlink checks, signed size gates, preview revalidation or release/Pages byte identity.
+  bytes, removes the key, and binds signed Release/Pages artifacts. Every production app must pass
+  RSA-PSS verification against `scripts/ota-signing-public-key.sha256`; changing the key/pin is a
+  separately reviewed USB fleet migration because software-only TOFU cannot rotate keys over OTA.
+  A same-SHA retry with an exact immutable Release must use the key-free byte-verified reuse path;
+  it must never sign, re-upload or mutate that Release again, but it does publish one new
+  SHA-bound Actions recovery artifact from the verified bytes. Do not weaken action/privileged-job
+  pins, symlink checks, signed size gates, preview revalidation or release/Pages byte identity.
 - Pairing keys and sessions must survive ordinary OTA. Any NVS erase, forced key generation,
   restore or identity change is destructive and needs a backup/rollback plan plus explicit user
   approval. Never confuse firmware rollback with NVS/key recovery.
@@ -170,8 +179,9 @@ in historical PR records. Hook policy lives in `tools/agent-hooks/`.
   title/body, commit messages and touched documentation for personal/private information (LAN IPs,
   MAC addresses, VINs, WiFi network names, hostnames, emails) and for content not written in
   English; it is not a subset of `$project-review` or `$skill-audit`. `$feature-docs` is
-  conditionally required when the cataloged feature surface changes. Records are bound to the exact
-  current PR head and become stale after any push.
+  conditionally required when the cataloged feature surface changes, including the PR-policy and
+  bench-acceptance workflows. Records are bound to the exact current PR head and become stale after
+  any push.
 - Reviewers report actionable findings with path/line, cause, impact and evidence. A green build is
   not review proof. Resolve P1/P2 findings and rerun the affected independent review after edits.
 - The only accepted merge shape is:

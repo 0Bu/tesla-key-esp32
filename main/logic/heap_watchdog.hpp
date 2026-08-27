@@ -55,11 +55,11 @@
 // largest_block sat at 544–1536 B — total free would have looked survivable the whole time.
 //
 // WHY *INTERNAL* largest_block. The caller must sample MALLOC_CAP_8BIT|MALLOC_CAP_INTERNAL, not
-// plain MALLOC_CAP_8BIT: the latter reports the max across every heap carrying the cap, and the
-// a board with PSRAM registers it there (CONFIG_SPIRAM_USE_MALLOC). Such a board in the exact wedge —
-// internal DRAM at 768 B — would read ~7.8 MB and never trigger, i.e. the watchdog would be a
-// silent no-op on the one target that has the extra RAM. The thresholds below are internal-DRAM
-// numbers and only mean anything against an internal-DRAM sample.
+// plain MALLOC_CAP_8BIT: the latter reports the max across every heap carrying the cap, and a
+// board variant with PSRAM registers it there (CONFIG_SPIRAM_USE_MALLOC). Such a variant in the
+// exact wedge — internal DRAM at 768 B — could report megabytes and never trigger, i.e. the
+// watchdog would become a silent no-op. The thresholds below are internal-DRAM numbers and only
+// mean anything against an internal-DRAM sample.
 #include <cstddef>
 #include <cstdint>
 
@@ -128,8 +128,8 @@ inline constexpr bool heap_may_restart(uint8_t consecutive) {
 }
 
 // The NVS breadcrumb is "heap:<n>" — the reason plus how many consecutive restarts it has now
-// caused. Formatted into a fixed buffer rather than a std::string: this runs on a heap that is by
-// definition failing, so the whole restart path stays allocation-free.
+// caused. Its formatting itself is fixed-buffer/allocation-free; the NVS write can still fail, and
+// the caller must treat persistence success as the authority to restart.
 struct HeapReason {
     char text[16];
 };
@@ -146,9 +146,10 @@ inline HeapReason heap_reason_format(uint8_t consecutive) {
     return r;
 }
 
-// How many consecutive restarts the stored breadcrumb represents. 0 for anything that is not one
-// of ours — an absent key, an empty string, or a value from a future/other writer — so an
-// unparseable breadcrumb can only ever UNDER-count, never wrongly suppress a needed restart.
+// Low-level numeric parse: 0 means absent or non-canonical. The NVS consumer in reboot_reason.hpp
+// separately compares the exact canonical text and treats any present invalid value as fail-closed
+// storage ambiguity at the restart cap; callers must not interpret this parser's 0 as an ordinary
+// boot on its own.
 inline uint8_t heap_reason_parse(const char* s) {
     if (!s) return 0;
     const char* pre = "heap:";

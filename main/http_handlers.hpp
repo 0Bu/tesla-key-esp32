@@ -12,17 +12,20 @@
 // guard) is a compile error, not a comment violation.
 
 #include "http_server.hpp"
+#include "json_builder.hpp"
+#include "json_http_reply.hpp"
+#include "mcp_json_payloads.hpp"
 #include "logic/command_registry.hpp"
+#include "logic/http_body.hpp"
 #include <esp_http_server.h>
-#include <cJSON.h>
 
 // Global vehicle reference (set once in http_server_start).
 extern VehicleController* g_vehicle;
 
 // Global runtime-config store (tesla_cfg NVS namespace; set once in http_server_start,
-// same idiom as g_vehicle). The persisted-config handlers (/set_vin, /set_mqtt, /set_time)
-// read/write it directly. Keys must be ≤15 chars (NVS limit); an empty value disables the
-// feature it gates.
+// same idiom as g_vehicle). The configuration handlers read/write it directly: /set_vin,
+// /set_mqtt, /set_syslog and /set_wifi update the atomic `cfg` blob, while /set_time updates the
+// separately owned `last_time` key. Keys must be ≤15 chars (NVS limit).
 extern NvsStorageAdapter* g_config;
 
 // Proof-of-guard wrapper: constructed only inside handle_all's try/catch dispatch in
@@ -49,8 +52,10 @@ esp_err_t send_json(httpd_req_t* req, int status, cJSON* root);
 
 cJSON* make_response(bool result, const char* command, const char* vin, const char* reason);
 
-// Read POST body into a string (caller must free). NULL on empty/oversized/failed read.
-char* read_body(httpd_req_t* req);
+// Read a POST body while preserving the exact failure class.  Persisted configuration handlers
+// MUST use this form so empty/failed/OOM input can never be mistaken for an explicit JSON "" that
+// disables a service.  `data` is malloc-owned on Ok and must be freed by the caller.
+tk::BodyReadResult read_body_result(httpd_req_t* req);
 
 // True only if query parameter `key` is present AND equals `want` exactly. Replaces
 // strstr(uri,"force=1")-style checks, which also fire on "force=10", "xforce=1", or the

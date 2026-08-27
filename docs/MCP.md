@@ -34,7 +34,10 @@ The server implements the **Streamable HTTP transport in its stateless profile**
 | `GET /mcp` | `405 Method Not Allowed` (+ `Allow: POST`) — no server-initiated stream is offered |
 | Sessions | None. No `Mcp-Session-Id` header is issued or expected; every request is self-contained |
 | `MCP-Protocol-Version` header | Ignored (nothing version-dependent happens after `initialize`) |
-| Notifications (`notifications/*` — any message with a `method` but no `id`) | `202 Accepted`, empty body. A message with neither `method` nor `id` (`{}`) is malformed, not a notification → `-32600` |
+| `jsonrpc` member | Required on requests **and notifications** as the exact string `"2.0"`. Missing, non-string and other-version values are rejected with `-32600` before notification handling or method dispatch |
+| Notifications (`notifications/*` — a valid JSON-RPC 2.0 message with a `method` but no `id`) | `202 Accepted`, empty body. A message with neither `method` nor `id` is malformed, not a notification → `-32600` |
+| JSON-RPC request `id` | A string of at most 64 bytes, or a canonical decimal JSON-safe integer in `[-9007199254740991, 9007199254740991]`. Numeric fractions, exponent notation, negative zero, non-finite/materialization artifacts and values at or beyond `±2^53` are rejected with `-32600`; accepted numeric IDs are emitted as the same exact decimal integer. Explicit null, other types, longer strings and escaped U+0000 are also invalid and correlate as `id:null` |
+| Duplicate object keys | Rejected recursively with `-32600`, including decoded equivalents such as `method` and `\u006dethod`. A separate unique valid `id` is preserved for the error; a duplicate/invalid `id` is ambiguous and returns `id:null` |
 | JSON-RPC batches (arrays) | Rejected with `-32600` (batching was removed in protocol `2025-06-18`) |
 | Protocol revisions | `2025-06-18` and `2025-03-26`. Requesting anything else returns the server's latest (`2025-06-18`); the client may then disconnect per the spec |
 
@@ -212,9 +215,24 @@ curl -s http://tesla-key-esp32.local/mcp -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","id":6,"method":"resources/list"}'
 # {"jsonrpc":"2.0","id":6,"error":{"code":-32601,"message":"method not found"}}
 
-# Malformed / oversized (>2 KB) body → -32700
+# Malformed body, including invalid raw UTF-8 in a JSON string → -32700
 curl -s http://tesla-key-esp32.local/mcp -H 'Content-Type: application/json' -d 'not json'
 # {"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"parse error"}}
+
+# Missing/non-string/non-"2.0" jsonrpc → -32600; a separate valid id is correlated
+# {"jsonrpc":"2.0","id":7,"error":{"code":-32600,"message":"jsonrpc must be \"2.0\""}}
+
+# Duplicate keys at any nesting level → -32600 before tool or vehicle dispatch
+# A duplicate id is ambiguous and therefore returns id:null.
+
+# Body over 2 KB → HTTP 413 plus -32600
+# {"jsonrpc":"2.0","id":null,"error":{"code":-32600,"message":"request body too large"}}
+
+# Otherwise valid JSON nested beyond 16 arrays/objects → HTTP 200 plus -32600
+# {"jsonrpc":"2.0","id":null,"error":{"code":-32600,"message":"JSON nesting too deep"}}
+
+# Escaped U+0000 anywhere in JSON → HTTP 200 plus -32600
+# {"jsonrpc":"2.0","id":null,"error":{"code":-32600,"message":"JSON NUL escape not supported"}}
 
 # Batch → -32600 (single messages only)
 curl -s http://tesla-key-esp32.local/mcp -H 'Content-Type: application/json' -d '[]'
@@ -229,10 +247,11 @@ curl -si http://tesla-key-esp32.local/mcp | head -1
 
 | Code | Meaning here |
 |------|--------------|
-| `-32700` | Body is not valid JSON, empty, or over the 2 KB cap |
-| `-32600` | Batch array or non-object body, a request whose `method` field is missing, or a `notifications/*` message that (wrongly) carries an `id` |
+| `-32700` | Body is not valid JSON (including malformed raw UTF-8 or invalid string escapes), empty, or could not be received |
+| `-32600` | Body exceeds the 2 KB cap (HTTP 413), exceeds the 16-container nesting limit, contains escaped U+0000, is a batch array or non-object body, omits `jsonrpc` or does not carry it as the exact string `"2.0"`, has duplicate object keys at any depth, has no `method`, carries an invalid request `id` (not a canonical safe integer or a string of at most 64 bytes), or is a `notifications/*` message that wrongly carries an `id` |
 | `-32601` | Method not implemented (`resources/*`, `prompts/*`, …) |
 | `-32602` | `tools/call` with an unknown tool name, an absent required argument (`missing required argument: <key>`), or a present-but-unparseable argument (`invalid argument: <key>`) |
+| `-32603` | HTTP `503`: receive-buffer, cJSON materialization, response-build or response-print allocation failure |
 
 ---
 
@@ -340,8 +359,11 @@ agent process on the same network).
 - **One request at a time.** The httpd serves requests sequentially and commands hold the
   handler for the BLE round-trip; concurrent MCP calls (or an MCP call racing an evcc
   command) simply queue. Keep client timeouts ≥ 30 s.
-- **Body cap 2 KB.** Applies to every POST on the device. All real MCP requests are far
-  smaller; an oversized body gets `-32700`.
+- **MCP body cap 2 KiB.** This is the normal API server's per-request bound and therefore applies
+  to `POST /mcp`; all real MCP requests are far smaller, and an oversized MCP body gets HTTP `413`
+  with `-32600`. It is not a device-wide POST constant: the setup AP's separate provisioning
+  `POST /save` path uses a fixed 1024-byte form buffer and returns HTTP `400` for an empty or
+  oversized body.
 - **Don't poll commands — poll state.** `get_vehicle_state` is free (cache-only, no BLE);
   `wake_up`/commands cost a BLE connect and, repeated needlessly, keep the car from
   sleeping. A well-behaved agent checks `link` first and only wakes when it must.

@@ -10,6 +10,7 @@
 #include <esp_timer.h>
 
 #include "logic/ble_readiness.hpp"
+#include "logic/nimble_start_gate.hpp"
 
 #include "host/ble_hs.h"
 #include "host/ble_gatt.h"
@@ -123,6 +124,10 @@ public:
     void start_discovery(int ms);
     void on_scan_timeout();   // internal (timer callback)
     bool is_scanning() const { return scanning_; }
+    bool host_synced() const noexcept { return host_synced_.load(std::memory_order_acquire); }
+    std::uint32_t host_reset_count() const noexcept {
+        return host_reset_count_.load(std::memory_order_acquire);
+    }
 
     // Consecutive failed connects to the *target* car — its advert was heard and the
     // VIN-derived name matched, but ble_gap_connect timed out/errored so the link never came
@@ -218,6 +223,14 @@ private:
     // association (~4 s), which can lose the race with auto_pair's fixed 4 s warm-up, so
     // gate the scan on the real host state rather than on timing.
     std::atomic<bool>      host_synced_{false};
+    // Monotonic evidence that the essential host has reset since boot. Current synced=true alone
+    // would hide a reset followed by a quick re-sync between health samples and could spend OTA
+    // rollback on an unstable image.
+    std::atomic<std::uint32_t> host_reset_count_{0};
+    // nimble_port_freertos_init() is a void, unchecked wrapper in the pinned IDF. Only the first
+    // on_sync callback proves that its hidden task allocation succeeded. This separate one-shot
+    // gate makes a timeout terminal even if a callback arrives after boot has failed closed.
+    tk::NimbleStartGate    start_gate_;
 
     ConnectedCb on_connected_;
     RxDataCb    on_rx_data_;
@@ -271,3 +284,7 @@ private:
 
 // Global instance used by static NimBLE callbacks
 BleClient* ble_client_instance();
+// Current host health, not the one-shot startup acknowledgement. OTA rollback may be committed
+// only while this is true; an on_reset without a later on_sync is degraded runtime, not health.
+bool ble_host_synced() noexcept;
+std::uint32_t ble_host_reset_count() noexcept;

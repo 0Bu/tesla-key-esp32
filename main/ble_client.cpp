@@ -10,6 +10,8 @@
 #include <algorithm>
 #include <exception>
 
+#include "freertos/task.h"
+
 #include "host/ble_hs.h"
 #include "host/ble_uuid.h"
 #include <vin_utils.h>
@@ -28,6 +30,14 @@ static const char* TAG = "ble_client";
 // Singleton storage
 static BleClient* g_instance = nullptr;
 BleClient* ble_client_instance() { return g_instance; }
+bool ble_host_synced() noexcept {
+    BleClient* instance = g_instance;
+    return instance && instance->host_synced();
+}
+std::uint32_t ble_host_reset_count() noexcept {
+    BleClient* instance = g_instance;
+    return instance ? instance->host_reset_count() : 0;
+}
 
 // ─── Static NimBLE callbacks ─────────────────────────────────────────────────
 
@@ -37,12 +47,20 @@ static void nimble_host_task(void*) {
 }
 
 static void on_sync_cb() {
-    if (g_instance) g_instance->on_sync();
+    try {
+        if (g_instance) g_instance->on_sync();
+    } catch (...) {
+        ESP_LOGD(TAG, "NimBLE sync callback threw; state publication aborted");
+    }
 }
 
 static void on_reset_cb(int reason) {
-    ESP_LOGW(TAG, "NimBLE host reset, reason=%d", reason);
-    if (g_instance) g_instance->on_reset();
+    try {
+        ESP_LOGW(TAG, "NimBLE host reset, reason=%d", reason);
+        if (g_instance) g_instance->on_reset();
+    } catch (...) {
+        ESP_LOGD(TAG, "NimBLE reset callback threw; reset remains contained");
+    }
 }
 
 static int gap_event_cb(ble_gap_event* event, void* arg) {
@@ -89,7 +107,11 @@ static int subscribe_write_cb(uint16_t conn_handle, const ble_gatt_error* error,
 // ─── BleClient ───────────────────────────────────────────────────────────────
 
 static void scan_timeout_cb(void* arg) {
-    static_cast<BleClient*>(arg)->on_scan_timeout();
+    try {
+        static_cast<BleClient*>(arg)->on_scan_timeout();
+    } catch (...) {
+        ESP_LOGD(TAG, "BLE scan timer callback threw; timeout publication aborted");
+    }
 }
 
 BleClient::BleClient() {
@@ -156,6 +178,11 @@ bool BleClient::start() {
     ble_hs_cfg.sync_cb  = on_sync_cb;
     ble_hs_cfg.reset_cb = on_reset_cb;
 
+    if (!start_gate_.begin()) {
+        ESP_LOGE(TAG, "NimBLE start acknowledgement gate is not idle");
+        return false;
+    }
+
     // Prefer larger MTU to reduce fragmentation
     ble_att_set_preferred_mtu(247);
 
@@ -166,12 +193,42 @@ bool BleClient::start() {
     // service sources when the peripheral role is disabled, so referencing them
     // would fail to link.
 
+    // ESP-IDF v5.5's wrapper ignores the hidden xTaskCreatePinnedToCore() result and returns void.
+    // Therefore the wrapper returning is not an essential-service success signal. Wait for the
+    // host's real sync callback, with a bounded boot delay; a missing host task otherwise lets
+    // app_main publish RuntimeAdmission::Ready and later spend OTA rollback on a partial image.
     nimble_port_freertos_init(nimble_host_task);
-    return true;
+    constexpr TickType_t kSyncTimeout = pdMS_TO_TICKS(5000);
+    constexpr TickType_t kPoll = pdMS_TO_TICKS(10);
+    const TickType_t started = xTaskGetTickCount();
+    for (;;) {
+        switch (start_gate_.action()) {
+            case tk::NimbleStartAction::Ready:
+                return true;
+            case tk::NimbleStartAction::Fail:
+                return false;
+            case tk::NimbleStartAction::Wait:
+                break;
+        }
+        if (xTaskGetTickCount() - started >= kSyncTimeout) {
+            if (start_gate_.mark_timed_out()) {
+                ESP_LOGE(TAG, "NimBLE host did not acknowledge sync within 5000 ms");
+                return false;
+            }
+            // A callback won the exact deadline race; consume its terminal state instead of
+            // overwriting it with timeout.
+            continue;
+        }
+        vTaskDelay(kPoll);
+    }
 }
 
 void BleClient::on_sync() {
     host_synced_ = true;
+    const bool admitted = start_gate_.acknowledge_sync();
+    if (!admitted && start_gate_.state() == tk::NimbleStartState::TimedOut) {
+        ESP_LOGW(TAG, "NimBLE synced after the boot acknowledgement timeout; runtime stays closed");
+    }
     ESP_LOGI(TAG, "NimBLE synced");
     if (want_connect_.load()) ensure_scanning_();
     // Idle: radio quiet. Discovery scanning is started manually for a limited window
@@ -179,6 +236,14 @@ void BleClient::on_sync() {
 }
 
 void BleClient::on_reset() {
+    // Sticky boot evidence for the OTA health gate. Saturate instead of wrapping: even though
+    // UINT32_MAX resets in one boot are physically implausible, wrapping to zero would turn a
+    // fail-closed predicate back into an allow after enough fault callbacks.
+    std::uint32_t resets = host_reset_count_.load(std::memory_order_acquire);
+    while (resets != UINT32_MAX &&
+           !host_reset_count_.compare_exchange_weak(
+               resets, resets + 1, std::memory_order_acq_rel, std::memory_order_acquire)) {
+    }
     {
         tk::SemGuard intent(intent_mutex_);
         disconnecting_.store(true);
@@ -864,13 +929,15 @@ int BleClient::on_gap_event(ble_gap_event* event) {
     default:
         break;
     }
+    return 0;
     } catch (const std::exception& e) {
         ESP_LOGE(TAG, "on_gap_event exception (dropping event type=%d): %s",
                  event->type, e.what());
+        return 0;
     } catch (...) {
         ESP_LOGE(TAG, "on_gap_event unknown exception (dropping event type=%d)", event->type);
+        return 0;
     }
-    return 0;
 }
 
 // ─── GATT service discovery ───────────────────────────────────────────────────
@@ -895,8 +962,8 @@ bool BleClient::connection_snapshot_matches_(uint16_t conn_handle,
 int BleClient::on_svc_disc(uint16_t conn_handle, uint32_t generation,
                             const ble_gatt_error* error,
                             const ble_gatt_svc* svc) {
-    if (!connection_snapshot_matches_(conn_handle, generation)) return 0;
     try {
+    if (!connection_snapshot_matches_(conn_handle, generation)) return 0;
     if (error->status == BLE_HS_EDONE) {
         if (svc_start_handle_ == 0) {
             ESP_LOGD(TAG, "Tesla service not found");
@@ -930,21 +997,23 @@ int BleClient::on_svc_disc(uint16_t conn_handle, uint32_t generation,
         svc_end_handle_   = svc->end_handle;
         ESP_LOGD(TAG, "Tesla service: %d-%d", svc_start_handle_, svc_end_handle_);
     }
+    return 0;
     } catch (const std::exception& e) {
         ESP_LOGE(TAG, "on_svc_disc exception (dropping connection): %s", e.what());
         disconnect();
+        return 0;
     } catch (...) {
         ESP_LOGE(TAG, "on_svc_disc unknown exception (dropping connection)");
         disconnect();
+        return 0;
     }
-    return 0;
 }
 
 int BleClient::on_chr_disc(uint16_t conn_handle, uint32_t generation,
                             const ble_gatt_error* error,
                             const ble_gatt_chr* chr) {
-    if (!connection_snapshot_matches_(conn_handle, generation)) return 0;
     try {
+    if (!connection_snapshot_matches_(conn_handle, generation)) return 0;
     if (error->status == BLE_HS_EDONE) {
         const uint16_t write_handle = write_handle_.load();
         if (write_handle == 0 || notify_val_handle_ == 0) {
@@ -974,14 +1043,16 @@ int BleClient::on_chr_disc(uint16_t conn_handle, uint32_t generation,
         notify_val_handle_ = chr->val_handle;
         ESP_LOGD(TAG, "notify chr: val=%d", notify_val_handle_);
     }
+    return 0;
     } catch (const std::exception& e) {
         ESP_LOGE(TAG, "on_chr_disc exception (dropping connection): %s", e.what());
         disconnect();
+        return 0;
     } catch (...) {
         ESP_LOGE(TAG, "on_chr_disc unknown exception (dropping connection)");
         disconnect();
+        return 0;
     }
-    return 0;
 }
 
 void BleClient::subscribe_notify_(uint16_t conn_handle, uint32_t generation) {
@@ -1006,9 +1077,9 @@ void BleClient::subscribe_notify_(uint16_t conn_handle, uint32_t generation) {
 int BleClient::on_dsc_disc(uint16_t conn_handle, const ble_gatt_error* error,
                            uint16_t chr_val_handle, const ble_gatt_dsc* dsc,
                            uint32_t generation) {
+    try {
     if (!connection_snapshot_matches_(conn_handle, generation) ||
         chr_val_handle != notify_val_handle_) return 0;
-    try {
     if (error->status == BLE_HS_EDONE) {
         if (cccd_handle_ == 0) {
             ESP_LOGD(TAG, "CCCD (0x2902) not found for notify chr — cannot subscribe");
@@ -1039,20 +1110,22 @@ int BleClient::on_dsc_disc(uint16_t conn_handle, const ble_gatt_error* error,
         cccd_handle_ = dsc->handle;
         ESP_LOGD(TAG, "found CCCD at handle %d", cccd_handle_);
     }
+    return 0;
     } catch (const std::exception& e) {
         ESP_LOGE(TAG, "on_dsc_disc exception (dropping connection): %s", e.what());
         disconnect();
+        return 0;
     } catch (...) {
         ESP_LOGE(TAG, "on_dsc_disc unknown exception (dropping connection)");
         disconnect();
+        return 0;
     }
-    return 0;
 }
 
 int BleClient::on_subscribe_write(uint16_t conn_handle, const ble_gatt_error* error,
                                   uint32_t generation) {
-    if (!connection_snapshot_matches_(conn_handle, generation)) return 0;
     try {
+        if (!connection_snapshot_matches_(conn_handle, generation)) return 0;
         if (!error || error->status != 0) {
             ESP_LOGD(TAG, "CCCD subscription write failed: %d", error ? error->status : -1);
             disconnect();
@@ -1104,14 +1177,16 @@ int BleClient::on_subscribe_write(uint16_t conn_handle, const ble_gatt_error* er
         }
         ESP_LOGD(TAG, "BLE command-ready (CCCD handle %d, generation %lu)",
                  cccd_handle_, static_cast<unsigned long>(generation));
+        return 0;
     } catch (const std::exception& e) {
         ESP_LOGE(TAG, "subscribe completion exception (dropping connection): %s", e.what());
         ready_generation_.store(tk::ble::kNoReadyGeneration);
         disconnect();
+        return 0;
     } catch (...) {
         ESP_LOGE(TAG, "subscribe completion exception (dropping connection)");
         ready_generation_.store(tk::ble::kNoReadyGeneration);
         disconnect();
+        return 0;
     }
-    return 0;
 }

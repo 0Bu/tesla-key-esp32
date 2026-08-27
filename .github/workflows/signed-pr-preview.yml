@@ -1,9 +1,10 @@
 name: signed-pr-preview
 
-# The unprivileged build workflow may execute PR code but never receives the OTA key. Once that
-# workflow succeeds, this default-branch workflow can sign its data-only artifact without checking
-# out or executing the PR. A maintainer must opt in with the `signed-preview` label; protect the
-# firmware-signing Environment with required reviewers for a second, repository-enforced approval.
+# The unprivileged build workflow may execute PR code but never receives the OTA key. Once it
+# succeeds, this default-branch workflow independently rebuilds that exact head on a separate
+# repository-secret/write/environment/cache-free runner. The protected job later checks out the PR only as
+# inert fingerprint data and never executes it. A maintainer must opt in with the `signed-preview`
+# label; protect the firmware-signing Environment with required reviewers as a second approval.
 on:
   workflow_run:
     workflows: [build]
@@ -32,7 +33,7 @@ jobs:
       - name: Validate current PR head and explicit preview label
         id: check
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.workflow_run.pull_requests[0].number }}
           # Use the associated PR head explicitly; workflow_run.head_sha can describe the tested
           # merge ref depending on how the source workflow was created.
@@ -55,8 +56,82 @@ jobs:
           echo "head-sha=$current_sha" >> "$GITHUB_OUTPUT"
           echo "signed preview eligible: $eligible"
 
-  sign-preview:
+  trusted-rebuild:
+    # This job is defined by the default-branch workflow_run file, not by the PR-controlled build
+    # workflow. It may execute the exact PR source, but has no repository/Environment secret, write
+    # permission, Environment, restored cache or producer-artifact access. Its only token is read-only.
     needs: validate
+    if: needs.validate.outputs.eligible == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - name: Check out trusted default-branch gates
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # workflow_run's github.sha is the exact trusted default-branch commit whose workflow
+          # definition is executing; do not follow a moving branch name mid-run.
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Select complete immutable stable preview base
+        id: trusted-version
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ needs.validate.outputs.pr }}
+        run: |
+          set -euo pipefail
+          git fetch --tags --force
+          base="$(./scripts/select-release-version.sh --latest-published-stable)"
+          [[ "$base" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          version="${base}-PR-${PR_NUMBER}"
+          (( ${#version} <= 31 ))
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Read trusted pinned ESP-IDF toolchain
+        id: toolchain
+        run: |
+          echo "image-version=$(./scripts/idf-version.sh --image-version)" >> "$GITHUB_OUTPUT"
+          echo "ESP-IDF image: $(./scripts/idf-version.sh --image)"
+
+      # Switch the same checkout root to the exact PR only after all trusted policy inputs have
+      # been captured. Matching the producer's root path avoids path-dependent ELF/map drift.
+      - name: Check out exact PR head for isolated rebuild
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.validate.outputs.head-sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Apply trusted exact preview-version stamp
+        env:
+          DISPLAY_VERSION: ${{ steps.trusted-version.outputs.version }}
+        run: printf '%s\n' "$DISPLAY_VERSION" > version.txt
+
+      - name: Independently rebuild exact PR head on the trusted workflow runner
+        uses: espressif/esp-idf-ci-action@e6f5c74232b1ccd4c97ed641f1e48553853f1fd5 # v1.2.0
+        with:
+          esp_idf_version: ${{ steps.toolchain.outputs.image-version }}
+          target: esp32
+          command: >-
+            ./scripts/ci-build-all.sh
+            "${{ steps.trusted-version.outputs.version }}"
+            "${{ needs.validate.outputs.head-sha }}"
+
+      - name: Upload trusted independent rebuild evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: trusted-preview-rebuild-${{ needs.validate.outputs.head-sha }}
+          if-no-files-found: error
+          retention-days: 1
+          path: |
+            _unsigned/
+            dist/
+
+  sign-preview:
+    needs: [validate, trusted-rebuild]
     if: needs.validate.outputs.eligible == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -67,13 +142,14 @@ jobs:
     permissions:
       actions: read
       contents: write
+      pages: read
       pull-requests: read
     steps:
       # Validation is repeated after the Environment approval wait. A force-push, close or label
       # removal while a reviewer is deciding must invalidate the queued signing operation.
       - name: Revalidate PR immediately before signing
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ needs.validate.outputs.pr }}
           EXPECTED_SHA: ${{ needs.validate.outputs.head-sha }}
         run: |
@@ -87,7 +163,34 @@ jobs:
       # The workflow and scripts always come from the trusted default branch, never the PR ref.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event.repository.default_branch }}
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      # Recompute the version after the Environment approval wait. A newer stable Release racing
+      # the rebuild makes the exact artifact version comparison fail closed instead of signing a
+      # stale-but-regex-valid preview base.
+      - name: Compute trusted preview version immediately before key boundary
+        id: trusted-version
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ needs.validate.outputs.pr }}
+        run: |
+          set -euo pipefail
+          git fetch --tags --force
+          base="$(./scripts/select-release-version.sh --latest-published-stable)"
+          [[ "$base" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          version="${base}-PR-${PR_NUMBER}"
+          (( ${#version} <= 31 ))
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      # Inspect the exact PR source as inert data with the trusted default-branch validator. No
+      # executable or script from this checkout is invoked in the protected signing job.
+      - name: Check out expected PR source for independent fingerprinting
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.validate.outputs.head-sha }}
+          path: _ci-source
           persist-credentials: false
 
       - name: Download successful PR build as data
@@ -95,13 +198,20 @@ jobs:
         with:
           name: firmware-unsigned
           path: _ci-input
-          github-token: ${{ secrets.GITHUB_TOKEN }}
+          github-token: ${{ github.token }}
           run-id: ${{ github.event.workflow_run.id }}
+
+      - name: Download trusted independent PR rebuild as data
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: trusted-preview-rebuild-${{ needs.validate.outputs.head-sha }}
+          path: _ci-independent
 
       - name: Validate artifact metadata and shape
         id: metadata
         env:
           EXPECTED_SHA: ${{ needs.validate.outputs.head-sha }}
+          EXPECTED_VERSION: ${{ steps.trusted-version.outputs.version }}
           PR_NUMBER: ${{ needs.validate.outputs.pr }}
         run: |
           set -euo pipefail
@@ -115,15 +225,49 @@ jobs:
             exit 1
           fi
           version="$(sed -n 's/^display_version=//p' "$meta")"
-          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+-PR-${PR_NUMBER}$ ]]; then
-            echo "unexpected preview version: $version" >&2
+          if [ "$version" != "$EXPECTED_VERSION" ]; then
+            echo "preview version mismatch: expected=$EXPECTED_VERSION actual=$version" >&2
             exit 1
           fi
           if find _ci-input/_unsigned -type l -print -quit | grep -q .; then
             echo "refusing symlinks in unsigned artifact" >&2
             exit 1
           fi
+          # Neither producer inventory is trusted provenance on its own. The default-branch
+          # validator recomputes the exact source fingerprint and compares all 53 payload files
+          # plus the canonical manifest from the separate trusted-workflow rebuild before any key.
+          python3 scripts/check-build-artifact-inventory.py \
+            --verify --artifact-root _ci-input --compare-to _ci-independent \
+            --source-root _ci-source \
+            --expected-source-sha "$EXPECTED_SHA" --version "$version"
           echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Revalidate PR immediately before key provisioning
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ needs.validate.outputs.pr }}
+          EXPECTED_SHA: ${{ needs.validate.outputs.head-sha }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          TRUSTED_DEFAULT_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          test "$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq .state)" = open
+          test "$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq .head.sha)" = "$EXPECTED_SHA"
+          test "$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq .head.repo.full_name)" = "$GITHUB_REPOSITORY"
+          test "$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" \
+            --jq 'any(.labels[]; .name == "signed-preview")')" = true
+          pages_json="$(mktemp)"
+          trap 'rm -f "$pages_json"' EXIT
+          gh api "repos/$GITHUB_REPOSITORY/pages" > "$pages_json"
+          python3 scripts/check-pages-source.py "$pages_json"
+          git check-ref-format "refs/heads/$DEFAULT_BRANCH"
+          git fetch --no-tags origin \
+            "+refs/heads/$DEFAULT_BRANCH:refs/remotes/origin/$DEFAULT_BRANCH"
+          current_default="$(git rev-parse "refs/remotes/origin/$DEFAULT_BRANCH")"
+          if [ "$current_default" != "$TRUSTED_DEFAULT_SHA" ]; then
+            echo "trusted default branch advanced; refusing stale signing policy" >&2
+            exit 1
+          fi
 
       - name: Provision OTA signing key
         env:
@@ -139,23 +283,32 @@ jobs:
       - name: Sign prebuilt app bytes
         env:
           DISPLAY_VERSION: ${{ steps.metadata.outputs.version }}
+          EXPECTED_SHA: ${{ needs.validate.outputs.head-sha }}
         run: >-
           ./scripts/idf-docker.sh ./scripts/ci-sign-artifacts.sh
-          "$DISPLAY_VERSION" _ci-input/_unsigned
+          "$DISPLAY_VERSION" _ci-input/_unsigned "$EXPECTED_SHA" _ci-source _ci-independent
 
       - name: Remove OTA signing key
         if: always()
         run: rm -f ota_signing_key.pem
 
-      - name: Upload signed hardware-test artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: tesla-key-esp32-pr${{ needs.validate.outputs.pr }}-${{ steps.metadata.outputs.version }}
-          if-no-files-found: error
-          retention-days: 14
-          path: |
-            tesla-key-esp32*.bin
-            _ci-input/dist/
+      # The signer verifies each output against the supplied private key. This separate key-free
+      # check proves that the Environment secret still represents the reviewed production
+      # authority before any signed preview byte becomes downloadable or reaches Pages.
+      - name: Verify production signing authority for all preview apps
+        env:
+          DISPLAY_VERSION: ${{ steps.metadata.outputs.version }}
+        run: |
+          set -euo pipefail
+          for row in 'esp32|' 'esp32s3|-s3' 'esp32c3|-c3' 'esp32c6|-c6'; do
+            target="${row%%|*}"
+            suffix="${row#*|}"
+            python3 scripts/check-firmware-artifacts.py \
+              --target "$target" --version "$DISPLAY_VERSION" --signed-app \
+              --bootloader "_fw/$target/bootloader.bin" \
+              --app "tesla-key-esp32$suffix.bin" \
+              --expected-public-key-digest scripts/ota-signing-public-key.sha256
+          done
 
       - name: Assemble signed PR preview site
         env:
@@ -163,14 +316,23 @@ jobs:
           SOURCE_SHA: ${{ needs.validate.outputs.head-sha }}
         run: ./scripts/build-pages.sh ./_pr_site "$DISPLAY_VERSION" "$SOURCE_SHA"
 
-      # This check is intentionally adjacent to the push.  The earlier check protects the key; this
-      # one protects publication after signing/building has taken time.  The shared concurrency group
-      # with cleanup additionally makes a close/synchronize/label-removal cancel this job.
-      - name: Revalidate PR immediately before publication
+      - name: Bind all 16 preview parts to signed merged bytes
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DISPLAY_VERSION: ${{ steps.metadata.outputs.version }}
+        run: >-
+          python3 scripts/check-release-pages-bytes.py
+          ./_pr_site . --version "$DISPLAY_VERSION"
+
+      # Artifact upload is an external publication boundary too. Revalidate only after every local
+      # signed byte has been assembled and checked; a force-push, close or label removal during
+      # signing must fail before any stale real-key artifact becomes downloadable.
+      - name: Revalidate PR immediately before signed artifact upload
+        env:
+          GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ needs.validate.outputs.pr }}
           EXPECTED_SHA: ${{ needs.validate.outputs.head-sha }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          TRUSTED_DEFAULT_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
           test "$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq .state)" = open
@@ -180,6 +342,69 @@ jobs:
             --jq 'any(.labels[]; .name == "signed-preview")')" = true
           python3 scripts/check-pages-manifest.py ./_pr_site \
             --source-sha "$EXPECTED_SHA" --version "${{ steps.metadata.outputs.version }}"
+          git check-ref-format "refs/heads/$DEFAULT_BRANCH"
+          git fetch --no-tags origin \
+            "+refs/heads/$DEFAULT_BRANCH:refs/remotes/origin/$DEFAULT_BRANCH"
+          current_default="$(git rev-parse "refs/remotes/origin/$DEFAULT_BRANCH")"
+          if [ "$current_default" != "$TRUSTED_DEFAULT_SHA" ]; then
+            echo "trusted default branch advanced; refusing stale signed artifact publication" >&2
+            exit 1
+          fi
+          python3 scripts/check-signed-root-inventory.py . \
+            --version "${{ steps.metadata.outputs.version }}"
+
+      - name: Upload current-head signed hardware-test artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: tesla-key-esp32-pr${{ needs.validate.outputs.pr }}-${{ needs.validate.outputs.head-sha }}
+          if-no-files-found: error
+          retention-days: 14
+          path: |
+            tesla-key-esp32.bin
+            tesla-key-esp32-s3.bin
+            tesla-key-esp32-c3.bin
+            tesla-key-esp32-c6.bin
+            tesla-key-esp32-${{ steps.metadata.outputs.version }}.bin
+            tesla-key-esp32-s3-${{ steps.metadata.outputs.version }}.bin
+            tesla-key-esp32-c3-${{ steps.metadata.outputs.version }}.bin
+            tesla-key-esp32-c6-${{ steps.metadata.outputs.version }}.bin
+            tesla-key-esp32-${{ steps.metadata.outputs.version }}-merged.bin
+            tesla-key-esp32-s3-${{ steps.metadata.outputs.version }}-merged.bin
+            tesla-key-esp32-c3-${{ steps.metadata.outputs.version }}-merged.bin
+            tesla-key-esp32-c6-${{ steps.metadata.outputs.version }}-merged.bin
+            _ci-input/dist/
+
+      # This separate check is intentionally adjacent to the Pages push. The pre-artifact check
+      # protects the downloadable artifact; this one protects Pages after upload has taken time.
+      # The shared concurrency group with cleanup additionally cancels stale in-flight jobs.
+      - name: Revalidate PR immediately before publication
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ needs.validate.outputs.pr }}
+          EXPECTED_SHA: ${{ needs.validate.outputs.head-sha }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          TRUSTED_DEFAULT_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          test "$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq .state)" = open
+          test "$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq .head.sha)" = "$EXPECTED_SHA"
+          test "$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq .head.repo.full_name)" = "$GITHUB_REPOSITORY"
+          test "$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" \
+            --jq 'any(.labels[]; .name == "signed-preview")')" = true
+          python3 scripts/check-pages-manifest.py ./_pr_site \
+            --source-sha "$EXPECTED_SHA" --version "${{ steps.metadata.outputs.version }}"
+          pages_json="$(mktemp)"
+          trap 'rm -f "$pages_json"' EXIT
+          gh api "repos/$GITHUB_REPOSITORY/pages" > "$pages_json"
+          python3 scripts/check-pages-source.py "$pages_json"
+          git check-ref-format "refs/heads/$DEFAULT_BRANCH"
+          git fetch --no-tags origin \
+            "+refs/heads/$DEFAULT_BRANCH:refs/remotes/origin/$DEFAULT_BRANCH"
+          current_default="$(git rev-parse "refs/remotes/origin/$DEFAULT_BRANCH")"
+          if [ "$current_default" != "$TRUSTED_DEFAULT_SHA" ]; then
+            echo "trusted default branch advanced; refusing stale Pages publication" >&2
+            exit 1
+          fi
 
       - name: Publish signed PR preview to gh-pages
         env:

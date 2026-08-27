@@ -7,7 +7,9 @@
 #include "diag_crash.hpp"
 #include "safe_mode.hpp"
 #include "logic/syslog_policy.hpp"
+#include "logic/syslog_start_gate.hpp"
 #include "logic/bootlog.hpp"
+#include "ping_probe.hpp"
 #include <esp_app_desc.h>
 #include <string>
 #include <vector>
@@ -44,7 +46,10 @@ struct SyslogMsg {
 // and the queue is one contiguous allocation taken once at boot. 24 * ~258 B ~= 6.2 KB.
 static constexpr UBaseType_t kQueueDepth = 24;
 
-static QueueHandle_t     s_queue      = nullptr;
+// Only syslog_send() consumes this publication. A queue is published exactly once, after the
+// consumer task exists, and then lives until reboot. Startup failures clean up only unpublished
+// local ownership, so a concurrent log hook can never retain a handle that is being deleted.
+static std::atomic<QueueHandle_t> s_queue{nullptr};
 static SemaphoreHandle_t s_status_mtx = nullptr;
 static SyslogStatus      s_status;
 // atomic: written in syslog_start (app_main), read by syslog_task and syslog_status (HTTP task).
@@ -52,13 +57,39 @@ static std::atomic<bool> s_configured{false};
 static std::string       s_cfg_host;
 static int               s_cfg_port   = 514;
 
-// File-scope so the control block + semaphore outlive any in-flight esp_ping session:
-// the ping's internal thread is NOT joined by esp_ping_delete_session() and calls the
-// callback unconditionally once started. A per-call stack frame would be a
-// use-after-free if take() timed out first; file-scope storage removes the window (a
-// stale give is drained at the next probe). Mirrors main.cpp's WdPing.
-struct PingCtl { SemaphoreHandle_t done; uint32_t received; };
-static PingCtl s_ping = { nullptr, 0 };
+// Persistent generation owner: a timeout stops the ping, but neither deletes nor reuses its
+// callback state until the exact on_ping_end acknowledgement has arrived.
+static tk::PingProbeControl s_ping{};
+
+// Static because the task may begin running before xTaskCreate() returns. The task observes Run
+// only after all boot-lifetime globals have been published; Cancel is a fail-closed escape for a
+// future post-create startup failure. The current success tail contains only noexcept stores.
+struct SyslogTaskStart {
+    QueueHandle_t queue{nullptr};
+    tk::SyslogStartGate gate{};
+};
+
+static SyslogTaskStart s_task_start{};
+
+// Owns only resources that have not been published to syslog_send() or released to the task.
+// Its destructor covers exceptions during configuration/startup without touching a live queue.
+struct SyslogStartResources {
+    QueueHandle_t queue{nullptr};
+    SemaphoreHandle_t ping_done{nullptr};
+    SemaphoreHandle_t status_mtx{nullptr};
+
+    ~SyslogStartResources() noexcept {
+        if (queue) vQueueDelete(queue);
+        if (ping_done) vSemaphoreDelete(ping_done);
+        if (status_mtx) vSemaphoreDelete(status_mtx);
+    }
+
+    void release() noexcept {
+        queue = nullptr;
+        ping_done = nullptr;
+        status_mtx = nullptr;
+    }
+};
 
 static void set_status(bool resolved, bool reachable, const std::string& error) {
     // RAII give — the s_status.error = error assignment can throw bad_alloc.
@@ -84,14 +115,6 @@ SyslogStatus syslog_status() {
         copy.error     = s_status.error;
     }
     return copy;
-}
-
-static void syslog_on_ping_end(esp_ping_handle_t hdl, void* args) {
-    auto* p = static_cast<PingCtl*>(args);
-    uint32_t recv = 0;
-    esp_ping_get_profile(hdl, ESP_PING_PROF_REPLY, &recv, sizeof(recv));
-    p->received = recv;
-    xSemaphoreGive(p->done);
 }
 
 // ADVISORY reachability probe — never a delivery gate (syslog is best-effort UDP, and
@@ -136,22 +159,8 @@ static bool syslog_ping_host(const struct in_addr& ip) {
     cfg.timeout_ms  = 800;
     cfg.interval_ms = 200;
 
-    esp_ping_callbacks_t cbs = {};
-    cbs.cb_args     = &s_ping;
-    cbs.on_ping_end = syslog_on_ping_end;
-
-    esp_ping_handle_t hdl = nullptr;
-    if (esp_ping_new_session(&cfg, &cbs, &hdl) != ESP_OK || !hdl) return false;
-
-    xSemaphoreTake(s_ping.done, 0);   // drain a stale give from a prior timed-out probe
-    s_ping.received = 0;
-    esp_ping_start(hdl);
-    // A take() timeout here is harmless because s_ping is persistent (see above).
-    xSemaphoreTake(s_ping.done, pdMS_TO_TICKS(2200));
-    esp_ping_stop(hdl);
-    vTaskDelay(pdMS_TO_TICKS(50));    // let the ping task context exit before deletion
-    esp_ping_delete_session(hdl);
-    return s_ping.received > 0;
+    return tk::ping_probe_run(s_ping, cfg, pdMS_TO_TICKS(2200), pdMS_TO_TICKS(1600)) ==
+           tk::PingProbeResult::Reply;
 }
 
 // Frame one line as RFC 5424 and push it as a single UDP datagram.
@@ -284,7 +293,31 @@ static void syslog_replay_boot(const struct sockaddr_in& dest, bool& replayed) {
     ESP_LOGI(TAG, "replayed %u boot record(s) to the collector", (unsigned)lines.size());
 }
 
-static void syslog_task(void*) {
+static void syslog_task(void* raw_start) {
+  try {
+    auto* start = static_cast<SyslogTaskStart*>(raw_start);
+    if (!start) {
+        vTaskDelete(nullptr);
+        return;
+    }
+
+    // xTaskCreate() may schedule this task immediately, before the creating task resumes. Do not
+    // touch the queue or any other published runtime state until startup explicitly commits Run.
+    for (;;) {
+        const tk::SyslogStartAction action = start->gate.action();
+        if (action == tk::SyslogStartAction::Run) break;
+        if (action == tk::SyslogStartAction::Cancel) {
+            vTaskDelete(nullptr);
+            return;
+        }
+        vTaskDelay(1);
+    }
+    QueueHandle_t const queue = start->queue;
+    if (!queue) {
+        vTaskDelete(nullptr);
+        return;
+    }
+
     struct sockaddr_in dest_addr{};
     bool resolved     = false;   // DNS resolved -> dest_addr valid -> forwarding lines
     bool reachable    = false;   // advisory probe result (see syslog_ping_host)
@@ -305,7 +338,7 @@ static void syslog_task(void*) {
         if (!s_configured) {
             // Block until a line arrives, then drop it (nothing to forward) — no busy-spin.
             SyslogMsg msg;
-            xQueueReceive(s_queue, &msg, portMAX_DELAY);
+            xQueueReceive(queue, &msg, portMAX_DELAY);
             continue;
         }
 
@@ -357,7 +390,7 @@ static void syslog_task(void*) {
         // Forward one queued line while a destination is resolved. Delivery is gated
         // on DNS only (resolved), never on the advisory reachability probe.
         SyslogMsg msg;
-        if (xQueueReceive(s_queue, &msg, pdMS_TO_TICKS(500)) == pdTRUE) {
+        if (xQueueReceive(queue, &msg, pdMS_TO_TICKS(500)) == pdTRUE) {
             if (resolved) {
                 int err = 0;
                 switch (syslog_sendto(dest_addr, msg.text, msg.len, &err)) {
@@ -390,22 +423,10 @@ static void syslog_task(void*) {
           vTaskDelay(pdMS_TO_TICKS(1000));
       }
     }
-}
-
-static void syslog_cleanup_start_failure() noexcept {
-    if (s_queue) {
-        vQueueDelete(s_queue);
-        s_queue = nullptr;
-    }
-    if (s_ping.done) {
-        vSemaphoreDelete(s_ping.done);
-        s_ping.done = nullptr;
-    }
-    if (s_status_mtx) {
-        vSemaphoreDelete(s_status_mtx);
-        s_status_mtx = nullptr;
-    }
-    s_configured.store(false);
+  } catch (...) {
+      ESP_LOGE(TAG, "syslog task boundary threw outside an iteration — stopping task");
+      vTaskDelete(nullptr);
+  }
 }
 
 static bool syslog_start_impl(NvsStorageAdapter& config_store) {
@@ -433,12 +454,13 @@ static bool syslog_start_impl(NvsStorageAdapter& config_store) {
     // Check every resource; on any failure unwind what we did allocate and fall back to the
     // disabled state so syslog_send() is a no-op and syslog_status() honestly reports
     // not-forwarding (an OPTIONAL subsystem must degrade visibly, never half-run).
-    s_status_mtx = xSemaphoreCreateMutex();
-    s_ping.done  = xSemaphoreCreateBinary();
-    s_queue      = xQueueCreate(kQueueDepth, sizeof(SyslogMsg));
-    if (!s_status_mtx || !s_ping.done || !s_queue) {
+    SyslogStartResources resources;
+    resources.status_mtx = xSemaphoreCreateMutex();
+    resources.ping_done  = xSemaphoreCreateBinary();
+    resources.queue      = xQueueCreate(kQueueDepth, sizeof(SyslogMsg));
+    if (!resources.status_mtx || !resources.ping_done || !resources.queue) {
         ESP_LOGE(TAG, "resource allocation failed — Syslog forwarding disabled (degraded)");
-        syslog_cleanup_start_failure();
+        s_configured.store(false, std::memory_order_release);
         return false;
     }
 
@@ -446,12 +468,44 @@ static bool syslog_start_impl(NvsStorageAdapter& config_store) {
     // stack (unlike esp-mqtt, whose socket work lives in an internal task). 4096 is
     // too thin for that call chain — mirrors syslog.cpp in the sibling
     // daikin-altherma-esp32 project, where this was measured.
-    // Publish the fully-built configuration before the task can run. HTTP is not started yet;
-    // if task creation fails, cleanup immediately withdraws the configured state again.
-    s_configured.store(true);
-    if (xTaskCreate(syslog_task, "syslog_task", 6144, nullptr, tk::kPrioSyslog, nullptr) != pdPASS) {
+    // Keep queue ownership local and invisible to the global log hook while task creation can
+    // still fail. A newly scheduled task waits on the start gate and therefore cannot consume the
+    // queue before the rest of the runtime state is committed.
+    s_task_start.queue = resources.queue;
+    if (!s_task_start.gate.begin()) {
+        s_task_start.queue = nullptr;
+        ESP_LOGE(TAG, "start gate was already used — Syslog forwarding disabled (degraded)");
+        s_configured.store(false, std::memory_order_release);
+        return false;
+    }
+    if (xTaskCreate(syslog_task, "syslog_task", 6144, &s_task_start,
+                    tk::kPrioSyslog, nullptr) != pdPASS) {
+        (void)s_task_start.gate.cancel();
+        s_task_start.queue = nullptr;
         ESP_LOGE(TAG, "task creation failed — Syslog forwarding disabled (degraded)");
-        syslog_cleanup_start_failure();
+        s_configured.store(false, std::memory_order_release);
+        return false;
+    }
+
+    // No operation from here through commit() can throw. Publish every boot-lifetime resource
+    // before opening the task gate. A sender that observes the queue is guaranteed that it will
+    // not be deleted for this boot, even on the defensive commit-failure path below.
+    s_status_mtx = resources.status_mtx;
+    s_ping.done = resources.ping_done;
+    s_configured.store(true, std::memory_order_release);
+    QueueHandle_t const queue = resources.queue;
+    resources.release();
+    s_queue.store(queue, std::memory_order_release);
+    if (!s_task_start.gate.commit()) {
+        // begin() succeeded and this startup path is the only writer, so this is defensive only.
+        // Withdraw the sender publication and cancel a still-waiting task, but deliberately keep
+        // every resource allocated until reboot: a sender may already hold the queue handle, or a
+        // corrupted/unexpected Running state may already have let the task capture it. Leaking an
+        // optional subsystem for this boot is bounded and safe; deleting here would re-open UAF.
+        s_configured.store(false, std::memory_order_release);
+        s_queue.store(nullptr, std::memory_order_release);
+        (void)s_task_start.gate.cancel();
+        ESP_LOGE(TAG, "start gate commit failed — Syslog forwarding disabled (degraded)");
         return false;
     }
     return true;
@@ -461,17 +515,18 @@ bool syslog_start(NvsStorageAdapter& config_store) {
     try {
         return syslog_start_impl(config_store);
     } catch (const std::exception& e) {
-        syslog_cleanup_start_failure();
+        s_configured.store(false, std::memory_order_release);
         ESP_LOGE(TAG, "Syslog initialization threw (%s); forwarding disabled", e.what());
     } catch (...) {
-        syslog_cleanup_start_failure();
+        s_configured.store(false, std::memory_order_release);
         ESP_LOGE(TAG, "Syslog initialization threw (unknown); forwarding disabled");
     }
     return false;
 }
 
 void syslog_send(const char* msg, size_t len) {
-    if (!s_queue) return;
+    QueueHandle_t const queue = s_queue.load(std::memory_order_acquire);
+    if (!queue) return;
 
     // Loop guard: this module's own diagnostics (ESP_LOGx(TAG, ...) above) carry the
     // "syslog:" tag esp_log renders into every line, and diag_log.cpp's capture hook
@@ -493,5 +548,5 @@ void syslog_send(const char* msg, size_t len) {
     std::memcpy(m.text, msg, len);
     m.text[len] = '\0';
     m.len = static_cast<uint16_t>(len);
-    xQueueSend(s_queue, &m, 0); // non-blocking
+    xQueueSend(queue, &m, 0); // non-blocking
 }

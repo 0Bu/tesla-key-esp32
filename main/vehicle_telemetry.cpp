@@ -4,6 +4,7 @@
 // Part of the VehicleController implementation split — see vehicle_ctrl_internal.hpp.
 
 #include "vehicle_ctrl.hpp"
+#include "runtime_admission.hpp"
 #include "vehicle_ctrl_internal.hpp"
 #include "logic/units.hpp"
 #include "logic/active_window.hpp"
@@ -22,6 +23,29 @@
 #include <car_server.pb.h>
 
 static const char* TAG = "vehicle_ctrl";
+
+namespace {
+
+// A task that exits through the C++ exception boundary must unregister itself before FreeRTOS
+// self-deletion. The destructor runs during that unwind; no external task ever owns this handle.
+class TaskWatchdogSubscription {
+public:
+    bool subscribe() noexcept {
+        active_ = esp_task_wdt_add(nullptr) == ESP_OK;
+        return active_;
+    }
+    bool active() const noexcept { return active_; }
+    ~TaskWatchdogSubscription() {
+        if (active_ && esp_task_wdt_delete(nullptr) != ESP_OK) {
+            ESP_LOGE(TAG, "vehicle loop could not unregister from the task watchdog");
+        }
+    }
+
+private:
+    bool active_{false};
+};
+
+}  // namespace
 
 namespace {
 // Translate a nanopb CarServer_ChargeState into our flat result struct. Each scalar is a
@@ -317,7 +341,14 @@ void VehicleController::install_state_callbacks_() {
 // ─── Background poll / sleep-gating loop ──────────────────────────────────────
 
 void VehicleController::loop_task_fn_(void* arg) {
+  try {
     auto* self = static_cast<VehicleController*>(arg);
+    if (!self || !self->await_task_start_()) {
+        // Cancellation is acknowledged inside await_task_start_(). No watchdog, mutex, BLE object
+        // or vehicle state has been touched, so a second-create OOM unwinds without cross-core kill.
+        vTaskDelete(nullptr);
+        return;
+    }
 
     // Subscribe to the Task Watchdog. The heap watchdog above already covers the wedge caused by
     // memory exhaustion; this covers the one it structurally cannot see — a task blocked forever on
@@ -331,7 +362,8 @@ void VehicleController::loop_task_fn_(void* arg) {
     // and sufficient — a slow-but-progressing command never trips it, a genuinely stuck one does.
     // A failed subscription is logged and the loop runs on unwatched: losing the watchdog is worse
     // than not having it, but far better than refusing to poll the car.
-    if (esp_task_wdt_add(nullptr) != ESP_OK) {
+    TaskWatchdogSubscription watchdog;
+    if (!watchdog.subscribe()) {
         ESP_LOGW(TAG, "vehicle_loop could not subscribe to the task watchdog — a wedged poll will "
                       "no longer reboot the device automatically");
     }
@@ -345,7 +377,7 @@ void VehicleController::loop_task_fn_(void* arg) {
       // Feed the task watchdog FIRST and UNCONDITIONALLY, before anything that can block or throw.
       // Gating it on the work below would make a long-but-legitimate command look like a hang; put
       // after the work, a throw would skip it and turn an already-contained OOM into a reboot.
-      esp_task_wdt_reset();
+      if (watchdog.active()) esp_task_wdt_reset();
       // Retrospective: FreeRTOS retains the lowest free stack ever observed for this task, so a
       // top-of-loop sample records the deepest path of the previous cycle and no branch can skip it.
       tk::stack_watch_sample(tk::StackWatch::Vehicle);
@@ -480,6 +512,37 @@ void VehicleController::loop_task_fn_(void* arg) {
                                  held_s, (unsigned) prior);
                     }
                 } else {
+                    tk::HeapReason why = tk::heap_reason_format((uint8_t)(prior + 1));
+                    // Join the same CAS gate used by OTA and identity journals BEFORE making the
+                    // restart durable. If either operation is in flight, postpone this watchdog
+                    // sample without writing reboot_why; the next sample retries after the owner
+                    // exits. Once the breadcrumb is durable we intentionally hold FaultRestart
+                    // until esp_restart(), closing the inverse "persisted, then OTA started" race.
+                    if (!ota_fault_restart_begin()) {
+                        static bool said_gate = false;
+                        if (!said_gate) {
+                            said_gate = true;
+                            ESP_LOGW(TAG, "HEAP EXHAUSTED for %u s but OTA/identity work is in "
+                                          "flight — postponing deliberate restart",
+                                     held_s);
+                        }
+                        continue;
+                    }
+                    if (!self->persist_reboot_reason_(why.text)) {
+                        // Persistence authorizes the reboot: without the next counter a reboot
+                        // would forget this attempt and could cycle BLE/radios forever. Stay up
+                        // degraded and keep retrying the durable write on later watchdog samples.
+                        // Release FaultRestart so the failed attempt does not wedge OTA/identity.
+                        ota_fault_restart_cancel();
+                        static bool said_persist = false;
+                        if (!said_persist) {
+                            said_persist = true;
+                            ESP_LOGE(TAG, "HEAP EXHAUSTED for %u s but reboot_why could not be "
+                                          "persisted — NOT restarting, staying up degraded",
+                                     held_s);
+                        }
+                        continue;
+                    }
                     // The one line that has to survive the reboot and explain it on its own —
                     // state, threshold, how long, which restart, and where the reasoning lives.
                     // Keep every line here well under ~230 chars: diag_log.cpp's capture hook
@@ -493,8 +556,6 @@ void VehicleController::loop_task_fn_(void* arg) {
                              (unsigned) heap_caps_get_free_size(MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL),
                              (unsigned) (prior + 1), (unsigned) tk::kHeapMaxConsecutiveRestarts,
                              (unsigned) (prior + 1));
-                    tk::HeapReason why = tk::heap_reason_format((uint8_t)(prior + 1));
-                    self->persist_reboot_reason_(why.text);
                     // Heap exhaustion is an automatic fault reboot, not a user health signal.
                     // Leaving PENDING_VERIFY armed is exactly what lets the bootloader escape a
                     // new image whose heap regression triggers this watchdog.
@@ -508,7 +569,7 @@ void VehicleController::loop_task_fn_(void* arg) {
                     // nothing against a 5 min hold, and nothing against the 60 s task-watchdog
                     // budget this task is now subscribed to either — but feed it first anyway, so a
                     // deliberate restart is never misreported as a task_wdt panic on the way out.
-                    esp_task_wdt_reset();
+                    if (watchdog.active()) esp_task_wdt_reset();
                     vTaskDelay(pdMS_TO_TICKS(300));
                     esp_restart();
                 }
@@ -644,6 +705,11 @@ void VehicleController::loop_task_fn_(void* arg) {
 
       vTaskDelay(pdMS_TO_TICKS(50));
     }
+  } catch (...) {
+      ESP_LOGE(TAG, "vehicle loop boundary threw outside an iteration — stopping task");
+      // TaskWatchdogSubscription has already unwound and removed this task from TWDT.
+      vTaskDelete(nullptr);
+  }
 }
 
 // ─── Data queries ─────────────────────────────────────────────────────────────
@@ -700,6 +766,7 @@ bool VehicleController::get_charge_state(ChargeStateResult& out, int /*timeout_m
 bool VehicleController::get_vehicle_status(VehicleStatusResult& out, tk::ConnectOrigin origin,
                                            int timeout_ms) {
     out = {};
+    if (!tk::runtime_admission_vehicle_ready()) return false;
     if (timeout_ms <= 0) return false;
     const uint32_t deadline = deadline_in_(static_cast<uint32_t>(timeout_ms));
     tk::SemGuard cmd_guard(command_mutex_, ticks_until_(deadline));

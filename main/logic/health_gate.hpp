@@ -34,8 +34,11 @@
 // does not restart itself, because a self-restart would turn a long router outage into an automatic
 // downgrade of a perfectly good build — the failure mode is silent and the operator never asked for
 // it. Leaving it pending keeps the rollback armed and costs nothing while the device runs; and any
-// deliberate configuration save (/set_wifi, /set_mqtt, …) calls ota_confirm_pending_image() on its
-// way to a reboot, which is the manual override for someone who knows the image is fine.
+// successfully persisted, rebooting network/logging save (/set_wifi, /set_mqtt, /set_syslog or the
+// setup portal) calls ota_confirm_pending_image() on its way to a reboot, which is the manual
+// override for someone who knows the image is fine. Identity mutations (/set_vin, /gen_keys) never
+// confirm a pending image and remain Stable-only.
+#include <atomic>
 #include <cstdint>
 
 namespace tk {
@@ -59,14 +62,46 @@ enum class IdentityMutationEntry : uint8_t {
     AutomaticKey,
 };
 
-// One process-wide exclusion gate binds OTA workers and identity transactions. Merely sampling
-// ota_is_busy() before a key/VIN write is a TOCTOU bug: an update task can start after the sample
-// and reboot while the recovery journal is only half committed. The same gate also prevents an
-// OTA check/download from starting after an identity transaction has begun.
+// One process-wide exclusion gate binds OTA workers, identity transactions, deliberate fault
+// restarts and the irreversible health commit. Merely sampling ota_is_busy() before a key/VIN
+// write is a TOCTOU bug: an update task can start after the sample and reboot while the recovery
+// journal is only half committed. The same gate prevents an OTA check/download from starting after
+// an identity transaction has begun, and prevents health confirmation from crossing a persisted
+// fault-restart window.
 enum class OtaIdentityGateState : uint8_t {
     Idle,
     Ota,
     IdentityMutation,
+    FaultRestart,
+    HealthCommit,
+};
+
+// The executable CAS seam shared by firmware and host tests. Acquiring always compares directly
+// against Idle; a preceding state sample is never authority to overwrite a winner. Releasing is
+// equally owner-checked, so one cleanup path cannot accidentally clear another operation's gate.
+class OtaIdentityOperationGate {
+public:
+    bool try_begin(OtaIdentityGateState owner) noexcept {
+        if (owner == OtaIdentityGateState::Idle) return false;
+        auto expected = OtaIdentityGateState::Idle;
+        return state_.compare_exchange_strong(
+            expected, owner, std::memory_order_acq_rel, std::memory_order_acquire);
+    }
+
+    bool finish(OtaIdentityGateState owner) noexcept {
+        if (owner == OtaIdentityGateState::Idle) return false;
+        auto expected = owner;
+        return state_.compare_exchange_strong(
+            expected, OtaIdentityGateState::Idle,
+            std::memory_order_acq_rel, std::memory_order_acquire);
+    }
+
+    OtaIdentityGateState state() const noexcept {
+        return state_.load(std::memory_order_acquire);
+    }
+
+private:
+    std::atomic<OtaIdentityGateState> state_{OtaIdentityGateState::Idle};
 };
 
 enum class OtaRebootClass : uint8_t {
@@ -135,6 +170,7 @@ static_assert(kHealthGateCapS > kHealthGateBaseS,
 //   link_expected  the device HAS a configured route (credentials or a wire), so being online is
 //                  the expected state; false means setup mode, where offline is correct
 //   link_up        a transport currently holds a lease (tk::net_is_up() — either transport)
+//   runtime_healthy the largest internal heap block is outside the watchdog's critical region
 //
 // Commit is checked before GiveUp on purpose: a device that comes online exactly at the cap has met
 // the condition, and reading the two in the other order would discard it over one sample of timing.
@@ -142,8 +178,9 @@ inline HealthVerdict health_gate_decide(uint32_t elapsed_s,
                                         uint32_t base_window_s,
                                         uint32_t hard_cap_s,
                                         bool     link_expected,
-                                        bool     link_up) {
-    const bool healthy = link_up || !link_expected;
+                                        bool     link_up,
+                                        bool     runtime_healthy) {
+    const bool healthy = (link_up || !link_expected) && runtime_healthy;
     if (elapsed_s >= base_window_s && healthy) return HealthVerdict::Commit;
     if (elapsed_s >= hard_cap_s)               return HealthVerdict::GiveUp;
     return HealthVerdict::Wait;

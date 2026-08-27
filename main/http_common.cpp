@@ -2,7 +2,6 @@
 // plumbing, body/query parsing, and the browser-clock plausibility window.
 
 #include "http_handlers.hpp"
-#include "logic/http_body.hpp"
 #include <esp_log.h>
 #include <esp_app_desc.h>
 #include <cstring>
@@ -11,69 +10,74 @@
 
 static const char* TAG = "http_server";
 
-// Largest POST body we accept, to bound the malloc in read_body() against a
+// Largest POST body we accept, to bound the malloc in read_body_result() against a
 // hostile/oversized Content-Length. All real requests here are tiny JSON objects.
 static constexpr size_t MAX_BODY_LEN = 2048;
 
+static const char* http_status_text_(int status) noexcept {
+    return status == 400 ? "400 Bad Request"
+         : status == 403 ? "403 Forbidden"
+         : status == 404 ? "404 Not Found"
+         : status == 409 ? "409 Conflict"
+         : status == 413 ? "413 Payload Too Large"
+         : status == 502 ? "502 Bad Gateway"
+         : status == 503 ? "503 Service Unavailable"
+                         : "500 Internal Server Error";
+}
+
+struct RestJsonTransport {
+    httpd_req_t* req;
+
+    void set_json_type() const noexcept {
+        httpd_resp_set_type(req, "application/json");
+    }
+    void set_status(int status) const noexcept {
+        httpd_resp_set_status(req, http_status_text_(status));
+    }
+    esp_err_t send(const char* body) const noexcept {
+        return httpd_resp_sendstr(req, body);
+    }
+};
+
 esp_err_t send_json(httpd_req_t* req, int status, cJSON* root) {
-    char* body = cJSON_PrintUnformatted(root);
-    cJSON_Delete(root);
-    httpd_resp_set_type(req, "application/json");
-    // On a fragmented heap cJSON_PrintUnformatted returns NULL rather than throwing, so this
-    // path bypasses the handle_all try/catch. Guard it: httpd_resp_sendstr(NULL) would
-    // strlen(NULL) and crash the C httpd task → reboot (which re-opens the poll window and
-    // defeats car sleep). Degrade to a 503 like handle_all's own OOM fallback.
-    if (!body) {
-        httpd_resp_set_status(req, "503 Service Unavailable");
-        return httpd_resp_sendstr(req, "{\"result\":false,\"reason\":\"out of memory\"}");
-    }
-    if (status != 200) {
-        httpd_resp_set_status(req, status == 400 ? "400 Bad Request"
-                                : status == 403 ? "403 Forbidden"
-                                : status == 404 ? "404 Not Found"
-                                : status == 409 ? "409 Conflict"
-                                : status == 502 ? "502 Bad Gateway"
-                                : status == 503 ? "503 Service Unavailable"
-                                : "500 Internal Server Error");
-    }
-    esp_err_t ret = httpd_resp_sendstr(req, body);
-    free(body);
-    return ret;
+    RestJsonTransport transport{req};
+    return tk::json_http_reply(
+        transport,
+        tk::json_owner(root),
+        status,
+        "{\"result\":false,\"reason\":\"out of memory\"}");
 }
 
 cJSON* make_response(bool result, const char* command,
                      const char* vin, const char* reason) {
-    cJSON* root     = cJSON_CreateObject();
-    cJSON* response = cJSON_CreateObject();
-    cJSON_AddItemToObject(root, "response", response);
-    cJSON_AddBoolToObject(response, "result", result);
-    cJSON_AddStringToObject(response, "command", command);
-    cJSON_AddStringToObject(response, "vin",     vin);
-    cJSON_AddStringToObject(response, "reason",  reason);
-    return root;
+    tk::JsonBuilder json;
+    cJSON* response = json.object(json.root(), "response");
+    json.boolean(response, "result", result);
+    json.string(response, "command", command);
+    json.string(response, "vin", vin);
+    json.string(response, "reason", reason);
+    return json.release();
 }
 
-char* read_body(httpd_req_t* req) {
-    if (req->content_len == 0) return nullptr;
-    if (req->content_len > MAX_BODY_LEN) {
-        ESP_LOGW(TAG, "rejecting oversized body: %u bytes", (unsigned)req->content_len);
-        return nullptr;
-    }
-    size_t len = req->content_len;
-    char* buf  = (char*)malloc(len + 1);
-    if (!buf) return nullptr;
-    // A POST body is a TCP stream: httpd_req_recv may return only the first segment, so loop until
-    // all content_len bytes are in (with a bounded timeout retry) — a single recv truncated a
-    // multi-segment body. Loop + NUL-terminate host-tested in logic/http_body.hpp.
-    int received = tk::http_body_read(buf, len + 1, len,
+tk::BodyReadResult read_body_result(httpd_req_t* req) {
+    const tk::BodyReadResult result = tk::http_body_receive(
+        req->content_len, MAX_BODY_LEN,
+        [](size_t n) -> void* { return malloc(n); },
+        [](void* p) { free(p); },
         [req](char* dst, size_t want) -> tk::BodyChunk {
             int r = httpd_req_recv(req, dst, want);
             if (r == HTTPD_SOCK_ERR_TIMEOUT) return { tk::BodyRecv::Timeout, 0 };
             if (r <= 0)                      return { tk::BodyRecv::Error,   0 };
             return { tk::BodyRecv::Data, static_cast<size_t>(r) };
         });
-    if (received < 0) { free(buf); return nullptr; }
-    return buf;   // already NUL-terminated by http_body_read
+    if (result.status == tk::BodyReadStatus::TooLarge) {
+        ESP_LOGW(TAG, "rejecting oversized body: %u bytes", (unsigned)req->content_len);
+    } else if (result.status == tk::BodyReadStatus::NoMemory) {
+        ESP_LOGW(TAG, "could not allocate %u-byte request body", (unsigned)req->content_len);
+    } else if (result.status == tk::BodyReadStatus::ReceiveFailed) {
+        ESP_LOGW(TAG, "request body receive failed after bounded retries");
+    }
+    return result;
 }
 
 bool query_param_is(httpd_req_t* req, const char* key, const char* want) {
@@ -129,7 +133,7 @@ long long apply_browser_clock(double epoch_ms) {
     // browser visit) still comes up with a plausible clock for OTA TLS cert validation and the
     // key_created/paired_at timestamps. NOT needed for tesla-ble signed-command freshness
     // (expires_at derives from the vehicle's SessionInfo.ClockTime + a monotonic delta).
-    if (!g_config->save_str("last_time", std::to_string(sec))) {
+    if (!g_config->save_str(tk::nvs_contract::kLastTime, std::to_string(sec))) {
         // The clock is already applied in RAM, so this request still succeeded; what is lost is
         // only the restore across the NEXT reboot. Naming it here is what separates "NVS is
         // failing" from "the browser never set the time" when a headless boot comes up at 1970.

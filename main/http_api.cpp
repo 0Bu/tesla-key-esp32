@@ -6,6 +6,7 @@
 // Dispatched from handle_all in http_server.cpp (inside its try/catch OOM guard).
 
 #include "http_handlers.hpp"
+#include "logic/json_syntax.hpp"
 #include "logic/command_result.hpp"   // outcome text shared with the MCP tools/call path
 #include "logic/mcp.hpp"              // shared bounded double → int conversion
 #include "platform.hpp"
@@ -14,6 +15,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <memory>
 #include <cstdlib>
 #include <string>
 
@@ -36,9 +38,9 @@ static const char* uri_path_end(const char* uri) {
     return query ? query : (uri ? uri + strlen(uri) : nullptr);
 }
 
-// Parse exactly /api/1/vehicles/{VIN}/command/{CMD}. The central dispatcher is deliberately
-// broad, so this handler must anchor the full route itself rather than accepting a matching
-// substring inside an unrelated path.
+// Parse exactly /api/1/vehicles/{VIN}/command/{CMD}. The central classifier already admits only
+// this route shape; this second full anchor keeps the handler safe if it is ever called directly
+// and prevents a matching substring inside an unrelated path.
 static bool parse_uri(const char* uri, char* vin_out, size_t vin_sz,
                       char* cmd_out, size_t cmd_sz) {
     if (!uri || strncmp(uri, kVehiclePrefix, strlen(kVehiclePrefix)) != 0) return false;
@@ -167,25 +169,53 @@ esp_err_t handle_command(GuardedReq rq) {
     // evcc's generic boolean setter sends the JSON scalar true for charge_start and false
     // for charge_stop; the shared registry policy admits exactly those two compatibility
     // forms while keeping every other non-object body invalid.
-    char* body = read_body(req);
-    if (!body && req->content_len > 0) {
-        return send_json(req, 400, make_response(false, cmd, vin, "invalid request body"));
+    tk::BodyReadResult body = read_body_result(req);
+    if (body.status == tk::BodyReadStatus::TooLarge) {
+        return send_json(req, 413, make_response(false, cmd, vin, "request body too large"));
     }
-    cJSON* json = body ? cJSON_Parse(body) : nullptr;
-    free(body);
+    if (body.status == tk::BodyReadStatus::NoMemory) {
+        return send_json(req, 503, make_response(false, cmd, vin, "out of memory"));
+    }
+    if (body.status == tk::BodyReadStatus::ReceiveFailed) {
+        return send_json(req, 400, make_response(false, cmd, vin, "request body read failed"));
+    }
+
+    std::unique_ptr<char, decltype(&free)> body_owner(body.data, &free);
+    tk::JsonOwner json;
+    if (body.status == tk::BodyReadStatus::Ok) {
+        const auto materialized = tk::json_materialize<cJSON>(
+            body.data, req->content_len, [](const char* text) { return cJSON_Parse(text); });
+        if (materialized.status == tk::JsonMaterializeStatus::Malformed) {
+            return send_json(req, 400, make_response(false, cmd, vin, "invalid JSON"));
+        }
+        if (materialized.status == tk::JsonMaterializeStatus::TooDeep) {
+            return send_json(req, 400, make_response(false, cmd, vin, "JSON nesting too deep"));
+        }
+        if (materialized.status == tk::JsonMaterializeStatus::UnsupportedNul) {
+            return send_json(req, 400,
+                             make_response(false, cmd, vin, "JSON NUL escape not supported"));
+        }
+        if (materialized.status == tk::JsonMaterializeStatus::NoMemory) {
+            return send_json(req, 503, make_response(false, cmd, vin, "out of memory"));
+        }
+        json.reset(materialized.root);
+    }
+    // cJSON owns its own parsed tree; release the separate <=2 KiB receive buffer before any BLE
+    // command or response allocation. Keeping both alive needlessly shrinks the largest contiguous
+    // INTERNAL block at the most allocation-heavy point in this request.
+    body_owner.reset();
     tk::RestBodyShape body_shape = tk::RestBodyShape::Empty;
-    if (req->content_len > 0) {
-        if (cJSON_IsObject(json)) {
+    if (body.status == tk::BodyReadStatus::Ok) {
+        if (cJSON_IsObject(json.get())) {
             body_shape = tk::RestBodyShape::Object;
-        } else if (cJSON_IsBool(json)) {
-            body_shape = cJSON_IsTrue(json) ? tk::RestBodyShape::BoolTrue
+        } else if (cJSON_IsBool(json.get())) {
+            body_shape = cJSON_IsTrue(json.get()) ? tk::RestBodyShape::BoolTrue
                                            : tk::RestBodyShape::BoolFalse;
         } else {
             body_shape = tk::RestBodyShape::Other;
         }
     }
     if (!tk::rest_body_allowed(info->kind, body_shape)) {
-        cJSON_Delete(json);
         return send_json(req, 400, make_response(false, cmd, vin, "invalid JSON object"));
     }
 
@@ -197,12 +227,12 @@ esp_err_t handle_command(GuardedReq rq) {
         const tk::CmdArg& a = info->args[i];
         if (a.type == tk::CmdArgType::None || !a.api_key) continue;
         if (a.type == tk::CmdArgType::Int) {
-            if (!json_int_arg(json, a, ival[i], problem)) {
+            if (!json_int_arg(json.get(), a, ival[i], problem)) {
                 problem_key = a.api_key;
                 break;
             }
         } else {
-            if (!json_bool_arg(json, a, bval[i], problem)) {
+            if (!json_bool_arg(json.get(), a, bval[i], problem)) {
                 problem_key = a.api_key;
                 break;
             }
@@ -211,12 +241,13 @@ esp_err_t handle_command(GuardedReq rq) {
     if (problem) {
         char reason[96];
         snprintf(reason, sizeof(reason), "%s: %s", problem, problem_key);
-        cJSON_Delete(json);
         return send_json(req, 400, make_response(false, cmd, vin, reason));
     }
 
+    // All command arguments now live in fixed local arrays. Drop the input-scaled parse tree before
+    // the BLE round-trip (up to ~20 s) and before any response/error-string allocation.
+    json.reset();
     bool ok = execute_vehicle_command(*g_vehicle, info->kind, ival, bval);
-    cJSON_Delete(json);
     // On failure, distinguish "the car rejected it" (we got an error reply, e.g.
     // "complete") from "the car was unreachable" (no reply / timed out). The former
     // carries the real Tesla reason; only the latter is an in-range problem. The text
@@ -248,31 +279,28 @@ esp_err_t handle_vehicle_data(GuardedReq rq) {
     // evcc reads e.g. .response.response.charge_state.battery_level and
     // .response.response.charge_state.charge_amps — note the doubled "response"
     // and the field name "charge_amps" (not "charging_amps").
-    cJSON* root  = cJSON_CreateObject();
-    cJSON* outer = cJSON_CreateObject();
-    cJSON_AddItemToObject(root, "response", outer);
-    cJSON_AddBoolToObject(outer, "result", ok);
-    cJSON_AddStringToObject(outer, "vin", vin);
+    tk::JsonBuilder json;
+    cJSON* outer = json.object(json.root(), "response");
+    json.boolean(outer, "result", ok);
+    json.string(outer, "vin", vin);
 
     // Always emit a fully-populated charge_state. evcc's tesla-ble template parses
     // .response.response.charge_state.battery_range etc. as floats; a missing field
     // would make it parse "<nil>" and fail. On failure cs is zero-initialised, which
     // still yields valid numbers (and get_charge_state already falls back to the cache).
-    cJSON* inner = cJSON_CreateObject();
-    cJSON_AddItemToObject(outer, "response", inner);
-    cJSON* state = cJSON_CreateObject();
-    cJSON_AddItemToObject(inner, "charge_state", state);
-    cJSON_AddStringToObject(state, "charging_state",
-                            cs.charging_state.empty() ? "Disconnected" : cs.charging_state.c_str());
-    cJSON_AddNumberToObject(state, "battery_level",    cs.battery_level);
-    cJSON_AddNumberToObject(state, "charge_limit_soc", cs.charge_limit_soc);
-    cJSON_AddNumberToObject(state, "charger_power",    cs.charger_power);
-    cJSON_AddNumberToObject(state, "charge_rate",      cs.charge_rate);
-    cJSON_AddNumberToObject(state, "charge_amps",      cs.charging_amps);
-    cJSON_AddNumberToObject(state, "battery_range",    cs.battery_range);
-    cJSON_AddStringToObject(outer, "reason", ok ? "success" : "stale or unavailable");
+    cJSON* inner = json.object(outer, "response");
+    cJSON* state = json.object(inner, "charge_state");
+    json.string(state, "charging_state",
+                cs.charging_state.empty() ? "Disconnected" : cs.charging_state.c_str());
+    json.number(state, "battery_level", cs.battery_level);
+    json.number(state, "charge_limit_soc", cs.charge_limit_soc);
+    json.number(state, "charger_power", cs.charger_power);
+    json.number(state, "charge_rate", cs.charge_rate);
+    json.number(state, "charge_amps", cs.charging_amps);
+    json.number(state, "battery_range", cs.battery_range);
+    json.string(outer, "reason", ok ? "success" : "stale or unavailable");
 
-    return send_json(req, ok ? 200 : 503, root);
+    return send_json(req, ok ? 200 : 503, json.release());
 }
 
 // ─── GET /api/1/vehicles/{VIN}/body_controller_state ─────────────────────────
@@ -288,32 +316,30 @@ esp_err_t handle_body_controller(GuardedReq rq) {
     VehicleStatusResult vs{};
     bool ok = g_vehicle->get_vehicle_status(vs, tk::ConnectOrigin::Foreground);
 
-    cJSON* root     = cJSON_CreateObject();
-    cJSON* response = cJSON_CreateObject();
-    cJSON_AddItemToObject(root, "response", response);
-    cJSON_AddBoolToObject(response, "result", ok);
-    cJSON_AddStringToObject(response, "vin", vin);
+    tk::JsonBuilder json;
+    cJSON* response = json.object(json.root(), "response");
+    json.boolean(response, "result", ok);
+    json.string(response, "vin", vin);
 
     if (ok) {
-        cJSON* data = cJSON_CreateObject();
-        cJSON_AddStringToObject(data, "vehicle_lock_state",   vs.lock_state.c_str());
-        cJSON_AddStringToObject(data, "vehicle_sleep_status", vs.sleep_status.c_str());
-        cJSON_AddStringToObject(data, "user_presence",        vs.user_presence.c_str());
-        cJSON_AddItemToObject(response, "data", data);
-        cJSON_AddStringToObject(response, "reason", "success");
+        cJSON* data = json.object(response, "data");
+        json.string(data, "vehicle_lock_state", vs.lock_state.c_str());
+        json.string(data, "vehicle_sleep_status", vs.sleep_status.c_str());
+        json.string(data, "user_presence", vs.user_presence.c_str());
+        json.string(response, "reason", "success");
     } else {
-        cJSON_AddStringToObject(response, "reason", "failed to retrieve vehicle status");
+        json.string(response, "reason", "failed to retrieve vehicle status");
     }
 
-    return send_json(req, 200, root);
+    return send_json(req, 200, json.release());
 }
 
 // ─── GET /api/proxy/1/version ─────────────────────────────────────────────────
 
 esp_err_t handle_version(GuardedReq rq) {
     httpd_req_t* req = rq.req;
-    cJSON* root = cJSON_CreateObject();
-    cJSON_AddStringToObject(root, "version", fw_version());
-    cJSON_AddStringToObject(root, "platform", TK_PLATFORM);
-    return send_json(req, 200, root);
+    tk::JsonBuilder json;
+    json.string(json.root(), "version", fw_version());
+    json.string(json.root(), "platform", TK_PLATFORM);
+    return send_json(req, 200, json.release());
 }

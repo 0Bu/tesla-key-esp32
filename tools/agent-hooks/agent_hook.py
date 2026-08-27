@@ -1083,14 +1083,22 @@ def run_stop_logic_tests(_: argparse.Namespace) -> int:
         )
         if unstaged == 0 and staged == 0 and untracked.returncode == 0 and not untracked.stdout.strip():
             return 0
-    if not any(shutil.which(tool) for tool in ("cmake", "g++", "clang++")):
+    def block(reason: str) -> int:
+        message = ("Host logic tests could not prove the changed main/test boundary:\n" + reason)[:4000]
+        print(json.dumps({"decision": "block", "reason": message}, separators=(",", ":")))
         return 0
+
+    missing = [tool for tool in ("git", "python3", "cmake", "node") if shutil.which(tool) is None]
+    if not any(shutil.which(tool) for tool in ("g++", "clang++")):
+        missing.append("g++ or clang++")
+    if missing:
+        return block("required --require-all tools are unavailable: " + ", ".join(missing))
     script = root / "scripts/run-mock-tests.sh"
-    if not script.is_file():
-        return 0
+    if not script.is_file() or script.is_symlink() or not os.access(script, os.X_OK):
+        return block("scripts/run-mock-tests.sh is missing, a symlink, or not executable")
     try:
         result = subprocess.run(
-            [str(script)],
+            [str(script), "--require-all"],
             cwd=root,
             check=False,
             capture_output=True,
@@ -1102,9 +1110,9 @@ def run_stop_logic_tests(_: argparse.Namespace) -> int:
         output = (result.stdout + result.stderr).strip()
     except subprocess.TimeoutExpired as exc:
         output = f"host logic tests exceeded 540 seconds: {exc}"
-    reason = ("Host logic tests failed — fix before stopping:\n" + output)[:4000]
-    print(json.dumps({"decision": "block", "reason": reason}, separators=(",", ":")))
-    return 0
+    except OSError as exc:
+        output = f"host logic tests could not be started: {exc}"
+    return block(output or f"host logic tests exited {result.returncode} without diagnostics")
 
 
 def build_parser() -> argparse.ArgumentParser:

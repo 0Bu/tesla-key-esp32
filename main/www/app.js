@@ -749,7 +749,7 @@ function otaSchedule(fn,delay){
   if(!otaDeadline||Date.now()<otaDeadline){ otaTimer=setTimeout(fn,delay); return; }
   otaFail(otaPhase==='check'?'check timed out':'update timed out');
 }
-function otaVersion(v){return typeof v==='string'&&v.length<=64&&/^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?$/.test(v)}
+function otaVersion(v){return typeof v==='string'&&v.length<=31&&/^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?$/.test(v)}
 function otaStatus(){
   return requestJsonWithTimeout('/ota/status',{cache:'no-store'},OTA_HTTP_TIMEOUT_MS).then(function(o){
     var valid=o&&['idle','checking','downloading','done','error'].indexOf(o.state)>=0&&

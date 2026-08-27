@@ -17,6 +17,8 @@
 #include "logic/link_state.hpp"
 #include "logic/ui_state.hpp"
 #include "logic/vin_transition.hpp"
+#include "logic/task_start_gate.hpp"
+#include "reboot_reason.hpp"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
@@ -37,9 +39,10 @@ public:
     // a half-constructed controller to read from.
     bool init(const std::string& vin, BleClient& ble, NvsStorageAdapter& storage,
               NvsStorageAdapter& config_store, std::string& known_mac,
-              bool start_tasks = true);
+              bool start_tasks = false);
     // Idempotently starts the two mutating background tasks after the caller has completed boot
-    // recovery and all essential initialization. Partial creation is unwound before false.
+    // recovery and all essential initialization. Neither task can leave its start barrier until
+    // both creates succeed; a partially-created task acknowledges cancellation and self-deletes.
     bool start_tasks();
 
     bool wake_up(int timeout_ms = 20000);
@@ -201,7 +204,7 @@ public:
     // signal-strength display). false if nothing seen.
     bool ble_seen_rssi(int8_t& out) const { return ble_ && ble_->last_advert_rssi(out); }
     std::string ble_peer() const { return ble_ ? ble_->peer_addr_str() : std::string{}; }
-    void ble_scan(int ms = 12000) { if (ble_) ble_->start_discovery(ms); }
+    bool ble_scan(int ms = 12000);
     bool ble_scanning() const { return ble_ && ble_->is_scanning(); }
     // Consecutive recent connect failures to the target car (0 = none / out of range). Lets
     // the web UI show "found the car but can't connect" instead of blaming BLE range.
@@ -246,45 +249,29 @@ public:
 private:
     // Record WHY we are about to restart ourselves, so the reason survives into the next boot
     // (see take_reboot_reason()). Written from loop_task's heap watchdog on a heap that is by
-    // definition failing. Nothing here allocates in OUR code — "heap:<n>" is at most 9 chars and
-    // lands in std::string's inline buffer — and the one call that can allocate internally (NVS)
-    // reports ESP_ERR_NO_MEM rather than throwing. The try/catch and the ignored return are
-    // belt-and-braces: losing the breadcrumb is far better than turning the restart into an abort.
-    void persist_reboot_reason_(const char* why) {
-        if (!config_store_) return;
-        try {
-            // Discarded ON PURPOSE, and now said so explicitly because the component compiles
-            // with -Werror=unused-result: we are already on the way to a deliberate restart on a
-            // failing heap, so there is no better outcome to escalate to. Losing the breadcrumb
-            // costs one line of the next boot's /status; turning the restart into an abort would
-            // cost the restart itself.
-            (void)config_store_->save_str("reboot_why", why);
-        } catch (...) {
-        }
+    // definition failing. Restart authorization is fail-closed: without a durable next counter,
+    // rebooting would erase the five-cycle cap and could reopen the BLE/radio window forever.
+    bool persist_reboot_reason_(const char* why) noexcept {
+        return tk::persist_reboot_reason(config_store_, why);
     }
 
 public:
-    // Why the PREVIOUS boot ended, if it ended by our own hand ("heap:<n>"); empty otherwise —
-    // including after a power cycle, a crash or a normal OTA reboot, none of which write it.
-    // Read once at startup (main.cpp) and cleared, so it always describes the boot just made.
-    static std::string take_reboot_reason(NvsStorageAdapter& cfg) {
-        std::string why;
-        cfg.load_str("reboot_why", why);
-        // A failed CLEAR would replay this reason on every later boot, so it is reported rather
-        // than dropped — but it must not change what this boot reports, hence no early return.
-        if (!why.empty() && !cfg.save_str("reboot_why", "")) {
-            ESP_LOGW("vehicle_ctrl", "could not clear reboot_why — it may repeat next boot");
-        }
-        return why;
+    // Why the PREVIOUS boot ended, if it ended by our own hand ("heap:<n>"); empty after an
+    // ordinary power/crash/OTA boot. A `heap:nvs-*` value instead reports that the breadcrumb was
+    // unreadable, invalid or could not be consumed; that boot is conservatively counted at the cap.
+    // Read once at startup (main.cpp) and consumed, so it always describes the boot just made.
+    static tk::RebootReasonRecord take_reboot_reason(NvsStorageAdapter& cfg) {
+        return tk::take_reboot_reason(cfg);
     }
 
     // The value take_reboot_reason() returned at boot, held for the life of the process so
     // /status can report it. Set once from app_main before any handler runs; read-only after.
-    static void               set_boot_reboot_reason(const std::string& why);
-    static const std::string& boot_reboot_reason();
+    static void        set_boot_reboot_reason(const tk::RebootReasonRecord& why);
+    static const char* boot_reboot_reason();
 
     // How many consecutive heap-watchdog restarts led to THIS boot (0 on any ordinary boot).
-    // Parsed from the breadcrumb; feeds the restart cap and the skip below.
+    // Classified while consuming the breadcrumb; an NVS read/erase error sets this to the cap,
+    // closing both the automatic-restart ladder and the post-restart vehicle activity window.
     static uint8_t boot_heap_restarts();
 
 private:
@@ -614,6 +601,12 @@ private:
         uint32_t cap = deadline_in_(max_ms);
         return ticks_until_(deadline) <= ticks_until_(cap) ? deadline : cap;
     }
+
+    // xTaskCreate() can schedule the first task before the second allocation is attempted. This
+    // gate keeps both entry functions quiescent until both handles exist and provides a
+    // cooperative Cancel/Ack/Self-delete path for a second-create OOM.
+    tk::DualTaskStartGate task_start_gate_{};
+    bool await_task_start_();
 
     TaskHandle_t loop_task_{nullptr};
     static void loop_task_fn_(void* arg);
