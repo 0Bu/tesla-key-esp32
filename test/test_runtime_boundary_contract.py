@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 from collections import Counter
 import tempfile
@@ -2772,6 +2773,38 @@ def require_ble_callback_lock_contract(ble_source: str) -> None:
     }
     require_exact("BLE callback call-allowlist owners", set(allowed_calls), callback_reachable)
 
+    # Calls alone cannot see a constructor spelled through a type alias (or a blocking RAII
+    # object). Pin the normalized executable program for every closure member as the final closed
+    # world: comments, formatting and literal contents may move, but adding/removing a declaration
+    # or statement is an explicit fingerprint review event. The semantic allowlists above/below
+    # keep these hashes explainable instead of treating them as correctness evidence by themselves.
+    program_fingerprints = {
+        "cancel_scan_locked_": "ed79b53939e28078f96405b2be3b17f8f14830b9ca33bcd5b51db9b2a4cf4c40",
+        "connection_snapshot_matches_": "e27c016ecb425d1c9715778c6671bbffe257308cf5583325aecd4e67ba66402e",
+        "disconnect_from_callback_": "73bfc2472e7d1f93de72de34be27a8b10a756c14175cffee401cc2433d10438b",
+        "ensure_scanning_": "b0df06d9554e0e89430a71423e5da1c124c5ae0a2dcff53999eb020ae12b858e",
+        "ensure_scanning_locked_": "96dda6c77fa2762bce01e467af651b603ab8e63cf2856f6a7958d0a8e0002766",
+        "has_gap_link_": "87be523038b9d7843373203c7d307a6946e2bad88340360a926cfaef0caf3508",
+        "note_connectable_": "f22081647b1c6b17e884c21a5173fb45ba567dbefa0a3dbdc8cfdec519e6931a",
+        "note_scan_": "0bc069b1372559facfd9e3e2adb29a307f1332d2de58d80c7f60042cf57e44b3",
+        "on_chr_disc": "02ae0d160e0c2e143672a61f53d687abb98b8f9268aa0af3cd925ed0a5f162f3",
+        "on_dsc_disc": "5cb6705aca81956c2e1d6a493d3915dd89ed893f305b5f73b7c133e329d7f618",
+        "on_gap_event": "8119fa18dcc9a2d10783fbf88c814e15bba9ec0caf79529d5065cf64b0a054e0",
+        "on_reset": "a6a11090a79118c9ef6526cb04fe27e35adb57b18f5801fa2479cb9a2110b990",
+        "on_scan_timeout": "7611bc6220fd5cc504a1f6b3b0503645a304f5ee97d32c47b91b22486f1fce95",
+        "on_subscribe_write": "81ae3da42c21def1cfc51bb8aea945e57cfff8ac1e43e7210770bb678f557d9d",
+        "on_svc_disc": "77cd5b3c710eddaba67c822084dca5bee1a39de1028fd5d330b30823d0dae50f",
+        "on_sync": "7c8b104bd654a1ac3a460c0764aa100d2ef356eead442851ae6729ad4b9266bc",
+        "start_scan_locked_": "15d90a0dd3771816e41339b817f74ccf8c8068bc86d26b87f9077e173cc629ca",
+        "subscribe_notify_": "00365f0a70b509e1ae52003e893292d393066d8f10bdce97b87c32a3e6712091",
+        "terminate_published_link_": "278504e6e169798cd796886fc12cb9eebc75fab2d3c52b20beefef339501fb9a",
+    }
+    require_exact(
+        "BLE callback program-fingerprint owners",
+        set(program_fingerprints),
+        callback_reachable,
+    )
+
     allowed_std_tokens = {
         "on_chr_disc": {"std::exception"},
         "on_dsc_disc": {"std::exception"},
@@ -2791,6 +2824,9 @@ def require_ble_callback_lock_contract(ble_source: str) -> None:
     )
     for name in sorted(callback_reachable):
         body = scrub_cpp(function_body_in(ble_source, name))
+        normalized_program = " ".join(body.split()).encode("utf-8")
+        if hashlib.sha256(normalized_program).hexdigest() != program_fingerprints[name]:
+            raise AssertionError(f"BLE callback path {name} executable program changed")
         require_exact(
             f"BLE callback path {name} call allowlist",
             called_functions(body),
@@ -5226,6 +5262,19 @@ def self_test_canaries(tasks: set[str], callbacks: set[str]) -> None:
     require_mutation_rejected(
         "BLE callback closure reaches an unreviewed translation-unit helper",
         lambda: require_ble_callback_lock_contract(static_allocating_ble_helper),
+    )
+    aliased_allocating_ble_type = ble_callback_source.replace(
+        "void BleClient::terminate_published_link_() {",
+        "using CallbackHiddenString = std::string;\n\n"
+        "void BleClient::terminate_published_link_() {\n"
+        "    CallbackHiddenString hidden = \"a deliberately long callback allocation\";",
+        1,
+    )
+    if aliased_allocating_ble_type == ble_callback_source:
+        raise AssertionError("BLE aliased callback allocation mutation did not apply")
+    require_mutation_rejected(
+        "BLE callback executable fingerprint rejects aliased RAII allocation",
+        lambda: require_ble_callback_lock_contract(aliased_allocating_ble_type),
     )
     raw_wait_ble_helper = ble_callback_source.replace(
         "void BleClient::terminate_published_link_() {",
