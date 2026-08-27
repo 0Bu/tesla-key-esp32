@@ -1363,7 +1363,8 @@ parked car never sleeps.
 
 ### Lock hierarchy (`VehicleController`)
 
-Four primitives, created in `VehicleController::init` (`vehicle_ctrl.cpp`). The ONE shared,
+The controller uses four FreeRTOS mutexes plus one fixed-data critical-section mux, created or
+initialized in `VehicleController::init` / the object definition. The ONE shared,
 exception-safe RAII guard is `tk::SemGuard` in [`main/rtos_guard.hpp`](../main/rtos_guard.hpp)
 (blocking or finite/zero-wait, exposes `acquired()`); `vehicle_ctrl_internal.hpp` keeps the
 historical alias `tk::MutexGuard = tk::SemGuard` plus `tk::InFlightGuard`. Every take/give around
@@ -1372,27 +1373,32 @@ through the guard so the lock is released during stack unwinding, never left hel
 
 | Primitive | Kind | Protects |
 |---|---|---|
-| `command_mutex_` | mutex, RAII | one whole command/query transaction: exclusive use of `cmd_sem_`, `last_result_`, `last_error_`; for `set_charging_amps`, the action and verifying ChargeState poll are one transaction |
+| `command_mutex_` | mutex, RAII | one whole command/query transaction and tesla-ble FIFO generation; for `set_charging_amps`, the action and verifying ChargeState poll are one transaction |
 | `vehicle_mutex_` | mutex, RAII (`SemGuard`) | **every** call into the tesla-ble `vehicle_` object (send, `loop()`, `on_rx_data`, `set_connected`) |
-| `cmd_sem_` | binary semaphore | signals "result callback ran" from tesla-ble's serialized dispatch to the waiting command; the callback publishes fixed completion fields and **always** gives it after its catch-all |
 | `cache_mutex_` | mutex, RAII, leaf | the `last_known_*` caches (`std::string` members ⇒ an unlocked copy is torn-read UB) |
+| `result_mutex_` | mutex, RAII, leaf | the externally visible `last_error_` snapshot read by HTTP/MCP after a foreground command returns |
+| `CommandCompletion::sem` | per-request binary semaphore, shared ownership | signals one request-local fixed completion record; a timed-out callback cannot address stack storage or a later request's semaphore |
+| `telemetry_pending_mux_` | `portMUX`, innermost, POD only | the fixed latest-value nanopb mailboxes, pending mask and charging-amps feedback generation written synchronously by tesla-ble callbacks |
 
-**Normative order:** `command_mutex_` → `vehicle_mutex_` → `cache_mutex_`. Acquire strictly
-left-to-right; never take a lock while holding one to its right. Corollaries, each load-bearing
-today:
+**Normative order:** semaphore nesting is `command_mutex_` → `vehicle_mutex_`. `cache_mutex_` and
+`result_mutex_` are independent leaf locks and are never held while another semaphore is acquired.
+`telemetry_pending_mux_` is innermost: only bounded POD copies happen inside it, and code inside the
+critical section never takes a semaphore, allocates, logs, parses or calls out. Corollaries, each
+load-bearing today:
 
-- `vehicle_mutex_` is held only for the library call itself — **never across the `cmd_sem_`
-  wait** (the RX task needs it to deliver the very result being waited for; holding it would
-  deadlock every command into its timeout).
+- `vehicle_mutex_` is held only for the library call itself — **never across a request-local
+  `CommandCompletion::sem` wait** (the RX path needs it to deliver the result; holding it would
+  deadlock every command into its timeout). Each completion is retained by the waiter and queued
+  callback; generation invalidation prevents a late callback from completing a later request.
 - `cache_mutex_` is a **leaf**: held only for a plain struct copy/assignment, never while
   calling out (library, BLE, NVS, logging) and never while taking another lock. The synchronous
   tesla-ble state callbacks no longer take it: they publish fixed nanopb latest values, and
   `vehicle_loop` parses/publishes them only after releasing `vehicle_mutex_`.
 - `clear_session_and_cache_()` takes `vehicle_mutex_` internally, so it must **not** be entered
   while holding it (non-recursive mutex ⇒ self-deadlock; see the comment at its definition).
-- `last_result_`/`last_error_` need no lock of their own: the RX callback writes them **before**
-  giving `cmd_sem_`, and the command task reads them only **after** taking it — the semaphore
-  is the ordering edge. `command_mutex_` guarantees a single waiter at a time.
+- The callback writes only its request-local fixed `CommandCompletion` fields before giving that
+  completion's semaphore. After the wait, the command task may allocate/log and publishes the
+  user-facing `last_error_` under `result_mutex_`; callbacks never touch that string.
 - `cmd_in_flight_` (atomic, `tk::InFlightGuard`) is set only under `command_mutex_`; `loop_task`
   reads it to pause background polls — a flag, not a lock; it orders nothing.
 
@@ -1427,10 +1433,13 @@ subscription is RAII-owned and is removed on every unwind before the task can se
 | `led` | `kPrioLed` = 2 | 3072 | `led_status.cpp` | APA102 status LED (`CONFIG_TESLA_LED_ENABLED` builds) |
 
 Not in the table (ESP-IDF-owned, priorities from IDF Kconfig, not `task_config.hpp`): the
-**NimBLE host task** — its GAP/GATT callbacks may only copy bounded bytes/POD into the statically
-backed deferred queue, invalidate atomics and request a link drop; it never calls `Vehicle`, NVS,
-logging or an allocating parser. `vehicle_loop` owns `Vehicle::set_connected`, `on_rx_data`, final
-ready publication and deferred telemetry parsing. The **esp_http_server task** runs every
+**NimBLE host task** — the two project adapters that cross into `VehicleController`
+(`ble_link_event_cb_`, `ble_rx_event_cb_`) only copy bounded bytes/POD into the statically backed
+deferred queue; they never call `Vehicle`, NVS, logging or an allocating parser. The surrounding
+GAP/GATT lifecycle callbacks still perform bounded parsing, DEBUG diagnostics and synchronous
+NimBLE submissions, but every lifecycle mutex attempt is zero-wait and every failure drops/retries
+fail-closed instead of blocking the host. `vehicle_loop` owns `Vehicle::set_connected`,
+`on_rx_data`, final ready publication and deferred telemetry parsing. The **esp_http_server task** runs every
 HTTP/MCP handler, i.e. the `command_mutex_` cycles and cache copies; plus the usual esp_timer /
 WiFi / LwIP system tasks.
 
@@ -1505,8 +1514,10 @@ car never sleeps). The rule, by execution model:
   fixed-buffer/POD/atomic audit and return a valid API result. Persistent tesla-ble state callbacks
   are thin adapters to fixed latest-value mailboxes; the dynamic status and command-result
   callbacks publish POD/fixed text only. The command-result callback additionally **always** gives
-  `cmd_sem_` after its catch-all, so the foreground waiter is released without logging or
-  allocating while `vehicle_mutex_` is held.
+  its request-local `CommandCompletion::sem` after its catch-all, so the foreground waiter is
+  released without logging or allocating while `vehicle_mutex_` is held. NimBLE-host and
+  `esp_timer` lifecycle callbacks use only zero-wait mutex attempts; catch-all containment is not
+  treated as protection against a blocked callback.
 - **Critical boot** (`app_main`) has a top-level boundary; anything that escapes it is logged and
   enters the same fatal-startup policy as an explicitly failed essential component instead of
   reaching a bare `abort()`.

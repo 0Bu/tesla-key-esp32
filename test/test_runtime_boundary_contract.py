@@ -1731,7 +1731,7 @@ def require_nimble_start_ack_contract(gate_header: str, client_header: str,
         if token not in on_sync:
             raise AssertionError(f"NimBLE on_sync terminal acknowledgement missing {token!r}")
     require_before("NimBLE callback acknowledgement before scanning", on_sync,
-                   "start_gate_.acknowledge_sync()", "ensure_scanning_()")
+                   "start_gate_.acknowledge_sync()", "ensure_scanning_from_callback_()")
     if "g_instance->on_sync()" not in on_sync_callback:
         raise AssertionError("registered NimBLE on_sync callback bypasses BleClient acknowledgement")
 
@@ -2537,7 +2537,7 @@ def require_ota_status_lock_contract(ota_source: str, runtime_tests: str) -> Non
         if token not in ota_source:
             raise AssertionError(f"OTA status fixed snapshot contract missing {token!r}")
 
-    for writer_name in ("set_state", "set_available", "set_check_done"):
+    for writer_name in ("set_state", "set_check_error", "set_check_done"):
         writer = function_body_in(ota_source, writer_name)
         first_status = writer.find("s_status")
         if first_status < 0:
@@ -2562,6 +2562,29 @@ def require_ota_status_lock_contract(ota_source: str, runtime_tests: str) -> Non
                 f"OTA status writer {writer_name} allocates/throws under the status lock"
             )
 
+    # A completed manifest check has one publication point. ota_check() computes only its local
+    # result; set_check_done() moves all public fields as one fixed snapshot. Re-introducing the
+    # former set_available()+set_state() intermediates exposes a new version/message alongside
+    # stale current/update_available values to a concurrent /ota/status reader.
+    check = scrub_cpp(function_body_in(ota_source, "ota_check"))
+    if re.search(r"\b(?:set_state|set_check_error|set_check_done)\s*\(", check):
+        raise AssertionError("OTA manifest check publishes a partial shared-status generation")
+    done = scrub_cpp(function_body_in(ota_source, "set_check_done"))
+    for token in (
+        "OtaStatusPod candidate{};",
+        "candidate.state =",
+        "candidate.progress = 0;",
+        "candidate.update_available = r.update_available;",
+        "copy_status_text(candidate.message, r.reason.c_str());",
+        "copy_status_text(candidate.available, r.available.c_str());",
+        "copy_status_text(candidate.current, r.current.c_str());",
+        "s_status = candidate;",
+    ):
+        if token not in done:
+            raise AssertionError(f"OTA completed-check snapshot missing {token!r}")
+    if done.count("s_status = candidate;") != 1 or re.search(r"s_status\s*\.", done):
+        raise AssertionError("OTA completed check is not one whole-snapshot publication")
+
     for token in (
         "test_ota_status_lock_failure_matrix",
         "read_alloc_failure.status_reads == 0",
@@ -2576,6 +2599,68 @@ def require_ota_status_lock_contract(ota_source: str, runtime_tests: str) -> Non
     ):
         if token not in runtime_tests:
             raise AssertionError(f"OTA status lock fault matrix missing {token!r}")
+
+
+def require_ble_callback_lock_contract(ble_source: str) -> None:
+    """Keep NimBLE-host and esp_timer callbacks off unbounded lifecycle waits."""
+    callback_reachable = (
+        "on_scan_timeout",
+        "on_sync",
+        "on_reset",
+        "ensure_scanning_from_callback_",
+        "disconnect_from_callback_",
+        "on_gap_event",
+        "on_svc_disc",
+        "on_chr_disc",
+        "subscribe_notify_",
+        "on_dsc_disc",
+        "on_subscribe_write",
+    )
+    for name in callback_reachable:
+        body = scrub_cpp(function_body_in(ble_source, name))
+        if re.search(r"tk::SemGuard\s+\w+\s*\(\s*intent_mutex_\s*\)\s*;", body):
+            raise AssertionError(
+                f"BLE callback path {name} uses the blocking intent-mutex guard"
+            )
+        if name not in ("ensure_scanning_from_callback_", "disconnect_from_callback_"):
+            if re.search(r"\bdisconnect\s*\(", body):
+                raise AssertionError(
+                    f"BLE callback path {name} delegates to blocking disconnect()"
+                )
+            if re.search(r"\bensure_scanning_\s*\(", body):
+                raise AssertionError(
+                    f"BLE callback path {name} delegates to blocking ensure_scanning_()"
+                )
+
+    timeout = function_body_in(ble_source, "on_scan_timeout")
+    for token in (
+        "tk::SemGuard intent(intent_mutex_, 0);",
+        "if (!intent)",
+        "esp_timer_start_once(scan_timer_, 10 * 1000)",
+    ):
+        if token not in timeout:
+            raise AssertionError(f"BLE timer retry contract missing {token!r}")
+
+    reset = function_body_in(ble_source, "on_reset")
+    subscribe = function_body_in(ble_source, "on_subscribe_write")
+    gap = function_body_in(ble_source, "on_gap_event")
+    scan_adapter = function_body_in(ble_source, "ensure_scanning_from_callback_")
+    drop_adapter = function_body_in(ble_source, "disconnect_from_callback_")
+    for label, body in (
+        ("host reset", reset),
+        ("GAP lifecycle", gap),
+        ("CCCD completion", subscribe),
+        ("callback scan adapter", scan_adapter),
+        ("callback disconnect adapter", drop_adapter),
+    ):
+        if "tk::SemGuard intent(intent_mutex_, 0);" not in body:
+            raise AssertionError(f"BLE {label} lost its zero-wait lifecycle lock")
+    for name in ("on_svc_disc", "on_chr_disc", "subscribe_notify_",
+                 "on_dsc_disc", "on_subscribe_write"):
+        if "disconnect_from_callback_();" not in function_body_in(ble_source, name):
+            raise AssertionError(f"BLE callback {name} lost fail-closed nonblocking disconnect")
+    if "ensure_scanning_from_callback_();" not in function_body_in(ble_source, "on_sync"):
+        raise AssertionError("NimBLE sync callback delegates to a blocking scan path")
 
 
 def require_tesla_cpp_callback_contract(
@@ -3108,6 +3193,7 @@ def require_runtime_source_contracts() -> None:
         SOURCES["ota_update.cpp"],
         (ROOT / "test/test_runtime_boundaries.cpp").read_text(encoding="utf-8"),
     )
+    require_ble_callback_lock_contract(SOURCES["ble_client.cpp"])
     require_tesla_cpp_callback_contract(
         SOURCES["vehicle_ctrl.cpp"],
         SOURCES["vehicle_telemetry.cpp"],
@@ -4767,6 +4853,41 @@ def self_test_canaries(tasks: set[str], callbacks: set[str]) -> None:
     require_mutation_rejected(
         "OTA status string materialization under lock",
         lambda: require_ota_status_lock_contract(materialize_under_lock, runtime_tests),
+    )
+
+    partial_check_publish = ota_source.replace(
+        "    ESP_LOGI(TAG, \"available %s — %s\", res.available.c_str(), res.reason.c_str());",
+        "    set_state(OtaState::Idle, 0, res.reason.c_str());\n"
+        "    ESP_LOGI(TAG, \"available %s — %s\", res.available.c_str(), res.reason.c_str());",
+        1,
+    )
+    if partial_check_publish == ota_source:
+        raise AssertionError("OTA partial-check publication mutation did not apply")
+    require_mutation_rejected(
+        "OTA manifest check publishes partial status before whole snapshot",
+        lambda: require_ota_status_lock_contract(partial_check_publish, runtime_tests),
+    )
+
+    ble_callback_source = SOURCES["ble_client.cpp"]
+    blocking_ble_callback = ble_callback_source.replace(
+        "tk::SemGuard intent(intent_mutex_, 0);",
+        "tk::SemGuard intent(intent_mutex_);",
+        1,
+    )
+    if blocking_ble_callback == ble_callback_source:
+        raise AssertionError("BLE callback blocking-lock mutation did not apply")
+    require_mutation_rejected(
+        "BLE timer callback uses unbounded lifecycle lock",
+        lambda: require_ble_callback_lock_contract(blocking_ble_callback),
+    )
+    blocking_ble_disconnect = ble_callback_source.replace(
+        "disconnect_from_callback_();", "disconnect();", 1
+    )
+    if blocking_ble_disconnect == ble_callback_source:
+        raise AssertionError("BLE callback blocking-disconnect mutation did not apply")
+    require_mutation_rejected(
+        "BLE GATT callback delegates to blocking disconnect",
+        lambda: require_ble_callback_lock_contract(blocking_ble_disconnect),
     )
 
     controller_source = SOURCES["vehicle_ctrl.cpp"]

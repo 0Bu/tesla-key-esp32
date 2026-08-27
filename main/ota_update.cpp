@@ -261,16 +261,6 @@ static void set_state(OtaState st, int pct, const char* msg) {
     s_status.message  = message;
 }
 
-static void set_available(const char* ver) {
-    std::array<char, kOtaStatusVersionCapacity> available{};
-    copy_status_text(available, ver);
-    SemaphoreHandle_t lock = ensure_lock();
-    if (!lock) return;
-    tk::SemGuard g(lock);
-    if (!g) return;
-    s_status.available = available;
-}
-
 static OtaStatus unavailable_status_snapshot() {
     // This object is built independently of s_status. It may still throw if the standard library
     // cannot represent even these short strings under total OOM (callers already contain that),
@@ -304,6 +294,19 @@ bool ota_is_busy() {
 static std::string_view running_version() {
     const esp_app_desc_t* description = esp_app_get_description();
     return description ? tk::bounded_c_string_view(description->version) : std::string_view{};
+}
+
+static void set_check_error(const char* message) noexcept {
+    OtaStatusPod candidate{};
+    candidate.state = OtaState::Error;
+    copy_status_text(candidate.message, message);
+    const std::string_view current = running_version();
+    copy_status_text(candidate.current, current.data());
+    SemaphoreHandle_t lock = ensure_lock();
+    if (!lock) return;
+    tk::SemGuard g(lock);
+    if (!g) return;
+    s_status = candidate;
 }
 
 // ─── Small HTTPS GET into a buffer (for the tiny manifest.json) ─────────────────
@@ -384,14 +387,12 @@ OtaCheckResult ota_check() {
     const std::string_view current = running_version();
     res.current.assign(current.data(), current.size());
 
-    set_state(OtaState::Checking, 0, "checking for updates");
     ESP_LOGI(TAG, "checking %s (running %s)", CONFIG_TESLA_OTA_MANIFEST_URL, res.current.c_str());
 
     std::string body;
     if (!http_get_to_buffer(CONFIG_TESLA_OTA_MANIFEST_URL, body)) {
         res.ok     = false;
         res.reason = "could not reach update server";
-        set_state(OtaState::Idle, 0, "check failed");
         return res;
     }
 
@@ -406,7 +407,6 @@ OtaCheckResult ota_check() {
         res.reason = materialized.status == tk::JsonMaterializeStatus::NoMemory
                          ? "update manifest ran out of resources"
                          : "invalid update manifest";
-        set_state(OtaState::Idle, 0, "check failed");
         return res;
     }
     std::unique_ptr<cJSON, decltype(&cJSON_Delete)> j(materialized.root, cJSON_Delete);
@@ -415,7 +415,6 @@ OtaCheckResult ota_check() {
         manifest.status != tk::OtaManifestInspectStatus::Valid || !manifest.value) {
         res.ok     = false;
         res.reason = "invalid update manifest";
-        set_state(OtaState::Idle, 0, "check failed");
         return res;
     }
     // cJSON owns decoded strings. Release the bounded transport body before any result-string
@@ -427,13 +426,11 @@ OtaCheckResult ota_check() {
     if (!tk::canonical_ota_version(available)) {
         res.ok     = false;
         res.reason = "invalid version in manifest";
-        set_state(OtaState::Idle, 0, "check failed");
         return res;
     }
     if (!tk::canonical_ota_version(res.current)) {
         res.ok     = false;
         res.reason = "invalid running firmware version";
-        set_state(OtaState::Idle, 0, "check failed");
         return res;
     }
     res.available.assign(available.data(), available.size());
@@ -442,8 +439,6 @@ OtaCheckResult ota_check() {
     res.update_available = tk::compare_ota_versions(res.available, res.current) ==
                            tk::OtaVersionOrder::Newer;
     res.reason           = res.update_available ? "update available" : "up to date";
-    set_available(res.available.c_str());
-    set_state(OtaState::Idle, 0, res.reason.c_str());
     ESP_LOGI(TAG, "available %s — %s", res.available.c_str(), res.reason.c_str());
     return res;
 }
@@ -467,17 +462,17 @@ static void set_check_done(const OtaCheckResult& r) {
 static void ota_check_task(void*) {
     try {
         // A one-shot job: contain any throw (http_get_to_buffer's std::string appends, cJSON, the
-        // status std::string ops can all bad_alloc) as a terminal Error state — NEVER let it unwind
+        // result std::string ops can all bad_alloc) as a terminal Error state — NEVER let it unwind
         // into the FreeRTOS C trampoline and reboot the device mid-check (issue #204).
         try {
             OtaCheckResult r = ota_check();   // blocking HTTPS GET, runs off the HTTP task
             set_check_done(r);
         } catch (const std::exception& e) {
             ESP_LOGE(TAG, "OTA check task exception: %s", e.what());
-            try { set_state(OtaState::Error, 0, "update check ran out of resources"); } catch (...) {}
+            set_check_error("update check ran out of resources");
         } catch (...) {
             ESP_LOGE(TAG, "OTA check task unknown exception");
-            try { set_state(OtaState::Error, 0, "update check failed unexpectedly"); } catch (...) {}
+            set_check_error("update check failed unexpectedly");
         }
         s_running.store(false, std::memory_order_release);
         finish_operation(tk::OtaIdentityGateState::Ota);
@@ -513,7 +508,7 @@ bool ota_check_start() {
     if (xTaskCreate(ota_check_task, "ota_chk", 8192, nullptr, tk::kPrioOtaCheck, nullptr) != pdPASS) {
         s_running.store(false, std::memory_order_release);
         finish_operation(tk::OtaIdentityGateState::Ota);
-        try { set_state(OtaState::Error, 0, "could not start check task"); } catch (...) {}
+        set_check_error("could not start check task");
         return false;
     }
     return true;

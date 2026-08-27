@@ -131,10 +131,11 @@ The suite also has gates outside the single pure-logic translation unit:
   each C boundary to be contained, delegated to a contained method, or mechanically restricted to
   reviewed fixed-buffer/C/atomic calls. The same closed inventory pins every tesla-ble callback
   setter to a thin named adapter, fixed NimBLE Link/RX deferral, task-owned readiness publication,
-  post-Vehicle-lock telemetry parsing, fixed command/status completion records, coherent
-  charging-current feedback, atomic crash dismissal and post-unlock OTA string materialization.
+  zero-wait lifecycle locking across every NimBLE/timer callback path, post-Vehicle-lock telemetry
+  parsing, fixed command/status completion records, coherent charging-current feedback, atomic
+  crash dismissal, one whole-snapshot manifest-check publication and post-unlock OTA string materialization.
   Mutations that restore direct host→Vehicle calls, logging/allocation/NVS under the Vehicle lock,
-  stale current feedback or mixed OTA/crash state are rejected. It also gates sticky response construction, early request
+  an unbounded callback wait, stale current feedback or mixed OTA/crash state are rejected. It also gates sticky response construction, early request
   owner release, partial-handle cleanup, persist-before-restart ordering, the real `/status` emitter,
   the production MQTT publish/sequencer plus Discovery and all seven state builders, the global
   default-closed runtime-admission facade/route matrix, the dual vehicle-task Creating/Running/
