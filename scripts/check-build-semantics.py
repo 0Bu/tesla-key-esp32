@@ -1444,7 +1444,6 @@ def validate_app_binary_producer(
         raise SemanticsError("ELF-to-app producer has an extra command chain")
     elf2image = list(tokens[3:first_chain])
     config = parse_sdkconfig(sdkconfig)
-    prefix = {"esp32": "ESP32", "esp32s3": "ESP32S3", "esp32c3": "ESP32C3", "esp32c6": "ESP32C6"}[target]
     expected_flash_frequency = {
         "esp32": "40m",
         "esp32s3": "80m",
@@ -1464,14 +1463,29 @@ def validate_app_binary_producer(
             "target-specific app flash geometry drifted: "
             f"expected={expected_flash_config!r} observed={observed_flash_config!r}"
         )
+    try:
+        min_revision_full = int(config["CONFIG_ESP_REV_MIN_FULL"])
+        max_revision_full = int(config["CONFIG_ESP_REV_MAX_FULL"])
+    except (KeyError, ValueError) as exc:
+        raise SemanticsError("target revision bounds are missing or malformed") from exc
+    if min_revision_full < 0 or max_revision_full < min_revision_full:
+        raise SemanticsError("target revision bounds are invalid")
+
+    # ESP-IDF 5.5.5 retains the legacy image-header --min-rev only for ESP32 (major revision)
+    # and ESP32-C3 (minor revision), deriving both from the canonical full revision. Other
+    # supported targets carry only the full min/max pair. Mirror that exact pinned producer.
+    legacy_min_revision = 0
+    if target == "esp32":
+        legacy_min_revision = min_revision_full // 100
+    elif target == "esp32c3":
+        legacy_min_revision = min_revision_full % 100
     revision_args: list[str] = []
-    for option, key in (
-        ("--min-rev", f"CONFIG_{prefix}_REV_MIN"),
-        ("--min-rev-full", "CONFIG_ESP_REV_MIN_FULL"),
-        ("--max-rev-full", "CONFIG_ESP_REV_MAX_FULL"),
-    ):
-        if key in config:
-            revision_args.extend((option, config[key]))
+    if legacy_min_revision:
+        revision_args.extend(("--min-rev", str(legacy_min_revision)))
+    revision_args.extend((
+        "--min-rev-full", str(min_revision_full),
+        "--max-rev-full", str(max_revision_full),
+    ))
     expected_elf2image = [
         python, str(idf_root / "components/esptool_py/esptool/esptool.py"),
         "--chip", target, "elf2image", "--flash_mode", "dio",
@@ -2078,6 +2092,8 @@ def self_test_build_graph_contract(repository_root: Path) -> None:
             'CONFIG_ESPTOOLPY_FLASHMODE="dio"\n'
             'CONFIG_ESPTOOLPY_FLASHFREQ="80m"\n'
             'CONFIG_ESPTOOLPY_FLASHSIZE="4MB"\n'
+            'CONFIG_ESP_REV_MIN_FULL=3\n'
+            'CONFIG_ESP_REV_MAX_FULL=199\n'
         )
         app_sdkconfig.write_text(app_sdkconfig_text, encoding="utf-8")
         app = build_root / "tesla-key-esp32.bin"
@@ -2096,7 +2112,8 @@ def self_test_build_graph_contract(repository_root: Path) -> None:
             str(idf_root / "components/esptool_py/esptool/esptool.py"),
             "--chip", "esp32c3", "elf2image", "--flash_mode", "dio",
             "--flash_freq", "80m", "--flash_size", "4MB", "--elf-sha256-offset", "0xb0",
-            "--secure-pad-v2", "-o", str(app), str(elf), "&&",
+            "--secure-pad-v2", "--min-rev", "3", "--min-rev-full", "3",
+            "--max-rev-full", "199", "-o", str(app), str(elf), "&&",
             app_cmake, "-E", "echo", f"Generated {app}", "&&",
             app_cmake, "-E", "md5sum", str(app), ">", str(timestamp),
         )
@@ -2132,6 +2149,13 @@ def self_test_build_graph_contract(repository_root: Path) -> None:
             "altered elf2image command canary",
             "elf2image command/arguments drifted",
             lambda: validate_producer(tuple(changed_elf2image)),
+        )
+        changed_revision = list(producer)
+        changed_revision[changed_revision.index("--min-rev") + 1] = "2"
+        rejected(
+            "altered legacy revision argument canary",
+            "elf2image command/arguments drifted",
+            lambda: validate_producer(tuple(changed_revision)),
         )
         app_sdkconfig.write_text(
             app_sdkconfig_text.replace('FLASHFREQ="80m"', 'FLASHFREQ="40m"'),
