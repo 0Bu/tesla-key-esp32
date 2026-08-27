@@ -87,9 +87,9 @@ Notes that matter to a calling agent:
   `enable` errors instead of guessing. A **present but unparseable** argument (e.g.
   `start_minutes: "08:00"`) is likewise `-32602` (`invalid argument: <key>`), never
   silently defaulted. Loose-but-unambiguous encodings are accepted: numeric strings for
-  integers (`"16"` → 16) and `0`/`1` for booleans. **Out-of-range integers are clamped**
-  server-side to the bounds above (the schemas advertise the same bounds — both are
-  generated from one spec table, so they cannot drift).
+  integers (`"16"` → 16) and `0`/`1` for booleans. Fractional or out-of-range integers are
+  rejected rather than silently executing a different value (the schemas advertise the same
+  bounds — both are generated from one spec table, so they cannot drift).
 - **Failures are tool results, not protocol errors:** a refused or undeliverable command
   comes back as a normal `tools/call` result with `isError: true` and the reason as text —
   the real Tesla refusal (e.g. `complete` when the battery is already at its limit) when
@@ -177,7 +177,7 @@ curl -s http://tesla-key-esp32.local/mcp \
 ```json
 {"jsonrpc":"2.0","id":3,"result":{
   "content":[{"type":"text","text":
-    "{\"vin\":\"5YJ3E1EA7KF000316\",\"paired\":true,\"link\":\"asleep\",\"last_seen_s\":4210,\"soc\":72,\"charging_state\":\"Disconnected\",\"charge_limit\":80,\"charge_amps\":16,\"charger_power_kw\":0}"}],
+    "{\"vin\":\"<VIN>\",\"paired\":true,\"link\":\"asleep\",\"last_seen_s\":4210,\"soc\":72,\"charging_state\":\"Disconnected\",\"charge_limit\":80,\"charge_amps\":16,\"charger_power_kw\":0}"}],
   "isError":false}}
 ```
 
@@ -367,7 +367,7 @@ agent process on the same network).
 - **Don't poll commands — poll state.** `get_vehicle_state` is free (cache-only, no BLE);
   `wake_up`/commands cost a BLE connect and, repeated needlessly, keep the car from
   sleeping. A well-behaved agent checks `link` first and only wakes when it must.
-- **The car is the authority.** The device clamps arguments and forwards; the vehicle may
+- **The car is the authority.** The device validates arguments and forwards; the vehicle may
   still refuse (already at limit, cable locked, …) — that reason comes back verbatim in
   the `isError` result text.
 - **No push.** The server never initiates messages (no SSE): to observe a change, poll

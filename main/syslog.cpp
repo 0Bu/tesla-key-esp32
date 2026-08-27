@@ -164,7 +164,7 @@ static bool syslog_ping_host(const struct in_addr& ip) {
 }
 
 // Frame one line as RFC 5424 and push it as a single UDP datagram.
-enum class SendResult { Ok, Empty, SocketFailed, SendFailed };
+enum class SendResult { Ok, Empty, EncodeFailed, SocketFailed, SendFailed };
 
 // One UDP socket, reused for the syslog task's whole lifetime — NOT one socket()/
 // close() per line. This device's own diag log routinely runs several lines/second
@@ -208,7 +208,7 @@ static SendResult syslog_sendto(const struct sockaddr_in& dest, const char* text
     int pkt_len = std::snprintf(packet, sizeof(packet), "<%d>1 - tesla-key-esp32 - - - - %.*s",
                                  tk::syslog_pri_for_line(text, len),
                                  static_cast<int>(len), text);
-    if (pkt_len <= 0) return SendResult::Ok;
+    if (pkt_len <= 0) return SendResult::EncodeFailed;
     // snprintf returns the length it WOULD have written; clamp to what fits or sendto reads OOB.
     if (pkt_len > static_cast<int>(sizeof(packet)) - 1) pkt_len = static_cast<int>(sizeof(packet)) - 1;
     if (sendto(s_sock, packet, pkt_len, 0, (struct sockaddr*)&dest, sizeof(dest)) < 0) {
@@ -401,6 +401,9 @@ static void syslog_task(void* raw_start) {
                         }
                         break;
                     case SendResult::Empty:   // nothing to send — neither success nor failure
+                        break;
+                    case SendResult::EncodeFailed:
+                        ESP_LOGE(TAG, "RFC 5424 packet encoding failed; line dropped");
                         break;
                     // Whether this clears the resolve throttle now depends on WHICH
                     // error it was (logic/syslog_policy.hpp), not merely that one occurred.

@@ -259,6 +259,7 @@ void BleClient::on_reset() {
         conn_handle_.store(BLE_HS_CONN_HANDLE_NONE);
         write_handle_.store(0);
         ready_generation_.store(tk::ble::kNoReadyGeneration);
+        write_payload_size_.store(tk::kBleDefaultWritePayload);
         conn_rssi_valid_.store(false);
         disconnecting_.store(false);
         connection_generation_.fetch_add(1);  // even: disconnected snapshot is stable
@@ -646,15 +647,16 @@ bool BleClient::write(const std::vector<uint8_t>& data) {
     const uint16_t conn_handle = conn_handle_.load();
     const uint16_t write_handle = write_handle_.load();
     const uint32_t ready_generation = ready_generation_.load();
+    const size_t write_payload_size = write_payload_size_.load();
     if (disconnecting_.load() || conn_handle == BLE_HS_CONN_HANDLE_NONE || write_handle == 0 ||
         ready_generation != generation || connection_generation_.load() != generation) {
         return false;
     }
 
-    for (size_t offset = 0; offset < data.size(); offset += BLE_CHUNK_SIZE) {
+    for (size_t offset = 0; offset < data.size(); offset += write_payload_size) {
         if (disconnecting_.load() || ready_generation_.load() != generation ||
             connection_generation_.load() != generation) return false;
-        size_t chunk = std::min(BLE_CHUNK_SIZE, data.size() - offset);
+        size_t chunk = std::min(write_payload_size, data.size() - offset);
         if (!write_chunk_(conn_handle, write_handle, data.data() + offset, chunk)) {
             return false;
         }
@@ -827,6 +829,7 @@ int BleClient::on_gap_event(ble_gap_event* event) {
             connection_generation_.fetch_add(1);
             write_handle_.store(0);
             ready_generation_.store(tk::ble::kNoReadyGeneration);
+            write_payload_size_.store(tk::kBleDefaultWritePayload);
             conn_handle_.store(event->connect.conn_handle);
             disconnecting_.store(false);
             connection_generation_.fetch_add(1);
@@ -881,7 +884,7 @@ int BleClient::on_gap_event(ble_gap_event* event) {
             conn_handle_.store(BLE_HS_CONN_HANDLE_NONE);
             write_handle_.store(0);
             ready_generation_.store(tk::ble::kNoReadyGeneration);
-            notify_handle_     = 0;
+            write_payload_size_.store(tk::kBleDefaultWritePayload);
             notify_val_handle_ = 0;
             cccd_handle_       = 0;
             connecting_        = false;
@@ -924,6 +927,10 @@ int BleClient::on_gap_event(ble_gap_event* event) {
 
     case BLE_GAP_EVENT_MTU:
         ESP_LOGD(TAG, "MTU negotiated: %d", event->mtu.value);
+        if (event->mtu.conn_handle == conn_handle_.load()) {
+            write_payload_size_.store(static_cast<uint16_t>(
+                tk::ble_write_payload_for_mtu(event->mtu.value)));
+        }
         break;
 
     default:
@@ -1039,7 +1046,6 @@ int BleClient::on_chr_disc(uint16_t conn_handle, uint32_t generation,
         write_handle_.store(chr->val_handle);
         ESP_LOGD(TAG, "write chr: %d", chr->val_handle);
     } else if (ble_uuid_cmp(&chr->uuid.u, &TESLA_NOTIFY_UUID.u) == 0) {
-        notify_handle_     = chr->def_handle;
         notify_val_handle_ = chr->val_handle;
         ESP_LOGD(TAG, "notify chr: val=%d", notify_val_handle_);
     }

@@ -678,7 +678,7 @@ The escalation lives in the pure, host-tested `main/logic/heap_watchdog.hpp`, sa
   authorizes the reboot**. A normal write failure or exception leaves the device up degraded at the
   current ladder step, so an unrecorded restart can never erase the evidence/cap. After persistence,
   `ESP_LOGE`, a **300 ms `vTaskDelay`**, then `esp_restart()`. This is automatic fault recovery and
-  therefore deliberately does **not** confirm a pending OTA: a new image whose heap regression
+  therefore deliberately does **not** confirm a `PENDING_VERIFY` OTA image: a new image whose heap regression
   fires the watchdog must roll back on the next boot. The delay is not
   cosmetic: `syslog_send()` only *queues*, and its task runs at priority 3 against `loop_task`'s
   5, so without a yield the final message dies in the queue on a single-core target — and the
@@ -1153,6 +1153,15 @@ so no stale data is shown (`clear_session_and_cache_()` in `vehicle_pairing.cpp`
 
 After any of these `has_session()` is false → UI shows "not paired", hides controls/SOC.
 
+`has_session()` is also sampled by the 50 ms vehicle loop. The storage adapter therefore caches
+the first successful `session_vcsec` existence probe and updates that atomic cache after every
+successful session save/remove; NVS read errors remain uncached and are retried. This avoids a
+continuous NVS length probe without making a transient storage fault look durably absent.
+
+The main-task BLE-MAC string is startup-only input. When it is empty, the NimBLE host task
+atomically claims one best-effort NVS persistence attempt after its first successful connection;
+it never mutates that `std::string` across tasks.
+
 **Session reuse across a reboot needs the wall clock restored first.** The `sess_vcsec`/`sess_info`
 blobs in NVS exist so a restart does not cost a fresh handshake, but tesla-ble only accepts a
 persisted session younger than an hour, and it measures that as
@@ -1270,15 +1279,16 @@ can't proceed). **Methods:** `initialize` (capabilities: `tools` only), `ping`,
 `logic/command_registry.hpp` (`kCommands`, `CmdArg`, `kCmdMaxArgs`) carries each command's
 REST name, MCP tool name + description, AND each argument's per-surface keys with ONE
 shared `{lo,hi}` bounds pair. The advertised `tools/list` JSON schema, the MCP executor's
-validation, and the REST `/command` clamp (`http_api.cpp`) are all generated from that
+validation, and the REST `/command` validation (`http_api.cpp`) are all generated from that
 table, so schema-vs-enforcement drift — and any `/api`-vs-`/mcp` disagreement about names
 or ranges — is impossible by construction. Surface semantics stay deliberately different:
 MCP is strict — an absent required argument OR a present-but-unparseable one is a `-32602`
 protocol error (silently defaulting `set_scheduled_charging`'s `enable` would *disable*
 the schedule and report success); loose-but-unambiguous encodings are coerced (numeric
-strings for ints, 0/1 for bools); parsed integers are clamped to the spec bounds before
-the int cast (UB guard) — while REST generally stays lenient for TeslaBleHttpProxy compat
-(absent → the spec's `api_default`). The registry also owns the one scalar-body
+strings for ints, 0/1 for bools); supplied integers must be integral and inside the spec bounds
+before the int cast (UB guard). REST retains TeslaBleHttpProxy compatibility defaults only for an
+absent optional field (`api_default`); a supplied fractional/out-of-range value is HTTP 400. The
+registry also owns the one scalar-body
 compatibility exception: evcc serializes `charge_start` as JSON `true` and `charge_stop`
 as JSON `false`; only those matching command/value pairs are accepted, while other
 non-object bodies remain HTTP 400. The explicit safety exception is
@@ -1286,7 +1296,7 @@ non-object bodies remain HTTP 400. The explicit safety exception is
 400 rather than silently becoming 0 A; a fractional value is also rejected because the Tesla
 field is an integer amp limit. All REST command failures retain their compatible JSON result/reason
 body but return HTTP 502 instead of a misleading HTTP 200. Both surfaces execute through the single kind→controller
-dispatch in `command_exec.cpp`. The registry, method routing, version table, clamp and the
+dispatch in `command_exec.cpp`. The registry, method routing, version table, validation and the
 shared command-outcome text (`logic/command_result.hpp`, also used by the REST
 `/command` reason so the two paths can never diverge) are IDF-free and covered by the
 host mock build (`test/test_logic.cpp`, `test_mcp` — including a pin on the `tools/list`

@@ -102,7 +102,7 @@ bool VehicleController::init(const std::string& vin,
     ble_          = &ble;
     storage_      = &storage;
     config_store_ = &config_store;
-    known_mac_    = &known_mac;
+    persist_discovered_mac_.store(known_mac.empty());
     vin_          = vin;
 
     if (!recover_pending_key_rotation_at_boot_()) {
@@ -190,18 +190,19 @@ bool VehicleController::init(const std::string& vin,
         }
 
         // Persist discovered MAC on first connection so we skip scanning next boot
-        if (connected && known_mac_ && known_mac_->empty() && config_store_) {
+        if (connected && persist_discovered_mac_.load() && config_store_) {
             std::string addr = ble_client_instance()
                                ? ble_client_instance()->peer_addr_str() : "";
-            if (!addr.empty()) {
-                *known_mac_ = addr;
+            bool expected = true;
+            if (!addr.empty() && persist_discovered_mac_.compare_exchange_strong(expected, false)) {
                 // Best-effort cache (a lost MAC costs one extra scan next boot, nothing more) —
                 // but say so rather than dropping the result, or the next boot's slow reconnect
                 // looks like a BLE problem instead of a storage one.
                 if (!config_store_->save_str(tk::nvs_contract::kBleMac, addr)) {
                     ESP_LOGW(TAG, "could not persist Tesla MAC %s — next boot rescans", addr.c_str());
+                } else {
+                    ESP_LOGI(TAG, "Tesla MAC saved: %s", addr.c_str());
                 }
-                ESP_LOGI(TAG, "Tesla MAC saved: %s", addr.c_str());
             }
         }
     });

@@ -391,7 +391,10 @@ private:
     BleClient*         ble_{nullptr};
     NvsStorageAdapter* storage_{nullptr};
     NvsStorageAdapter* config_store_{nullptr};
-    std::string*       known_mac_{nullptr};
+    // Set at init when no durable BLE MAC exists. The NimBLE host task atomically claims the
+    // one best-effort persistence attempt after its first successful connection; it never
+    // writes the main-task-owned std::string passed to init().
+    std::atomic<bool>  persist_discovered_mac_{false};
     std::string        vin_;
 
     std::unique_ptr<TeslaBLE::Vehicle> vehicle_;

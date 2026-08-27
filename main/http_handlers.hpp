@@ -83,6 +83,8 @@ bool execute_vehicle_command(VehicleController& v, tk::CmdKind kind,
 // ─── Route handlers ───────────────────────────────────────────────────────────
 
 // http_api.cpp — evcc-facing TeslaBleHttpProxy-compatible API
+// Exact, query-tolerant predicate owned by the same parser as handle_command().
+bool is_command_route(const char* uri);
 esp_err_t handle_command(GuardedReq rq);          // POST /api/1/vehicles/{VIN}/command/{CMD}
 esp_err_t handle_vehicle_data(GuardedReq rq);     // GET  /api/1/vehicles/{VIN}/vehicle_data
 esp_err_t handle_body_controller(GuardedReq rq);  // GET  /api/1/vehicles/{VIN}/body_controller_state

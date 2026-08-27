@@ -4,6 +4,8 @@
 #include <string>
 #include <string_view>
 #include <vector>
+#include <atomic>
+#include <cstdint>
 #include <nvs_flash.h>
 #include <nvs.h>
 #include "logic/nvs_contract.hpp"
@@ -33,8 +35,8 @@ public:
     [[nodiscard]] bool remove(const std::string& key) override;
 
     // Allocation-free existence probe: asks NVS only for the stored blob length and never
-    // materialises the blob in a std::vector like load() does. For hot boolean checks such
-    // as VehicleController::has_key()/has_session(), sampled ~1 Hz from several tasks.
+    // materialises the blob in a std::vector like load() does. The known VCSEC session key is
+    // cached after a successful probe because has_session() is sampled by the 50 ms vehicle loop.
     bool blob_exists(const std::string& key) const;
     // Safety-critical tri-state probe: true means the NVS query itself succeeded and `exists`
     // distinguishes present/missing; false means storage could not be read. Unlike blob_exists(),
@@ -65,6 +67,9 @@ private:
     tk::nvs_contract::Namespace ns_kind_{tk::nvs_contract::Namespace::Unknown};
     nvs_handle_t handle_{0};
     bool initialized_{false};
+    // -1 unknown, 0 absent, 1 present. has_session() is sampled by the 50 ms vehicle loop; a
+    // successful first NVS probe is stable until this same adapter saves/removes the session.
+    mutable std::atomic<int8_t> session_vcsec_present_{-1};
 
     // The exact registry replaces the former truncation fallback: an unknown logical key,
     // namespace mismatch or wrong storage API is rejected before an NVS call, so two long names

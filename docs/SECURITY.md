@@ -90,7 +90,28 @@ beyond what the open REST routes already allow). This is acceptable only because
 - the device is meant to live on a **trusted home LAN**, never exposed to the internet.
 
 If you need access control, put the device behind a reverse proxy with TLS + auth, or
-segment it onto a trusted VLAN.
+segment it onto a trusted VLAN. A proxy must send a device-owned upstream `Host` (the current
+device IP or its `.local` name) and either remove `Origin` or rewrite its authority to that same
+device authority. Forwarding the proxy's public hostname unchanged is intentionally rejected by
+the browser-mutation gate described below.
+
+The firmware does reject a narrower browser threat: a mutating request carrying an `Origin`
+whose authority differs from `Host`, whose `Host` is neither the device name nor its current IP,
+or whose `Sec-Fetch-Site` is `cross-site`, receives `403` before route dispatch. Binding `Host` to
+a device-owned authority also closes the usual DNS-rebinding bypass where attacker-controlled
+`Host` and `Origin` match. The gate covers every POST plus the legacy state-changing GET forms
+`/ota/check`, `/diag?clear=1`, `/diag?verbose=0|1` and `/coredump?clear=1`. Same-origin UI requests
+continue to work, and headerless clients such as evcc and curl remain compatible. If either
+`Origin` or `Sec-Fetch-Site` is present, the device-owned `Host` check applies; this covers
+same-origin browser GETs that legitimately omit `Origin`. This is **not authentication**: a raw
+LAN peer can omit both browser headers and still call every endpoint, and an old/non-conforming
+browser that sends neither header is indistinguishable from such a client. The trusted-LAN
+boundary therefore remains mandatory.
+
+Open the configuration UI through `http://tesla-key-esp32.local` or the current device IP when
+you need to mutate settings. A router-expanded DHCP name such as
+`tesla-key-esp32.router.example` may resolve for read-only/headerless clients, but is deliberately
+not a device-owned browser authority and receives `403` on mutations.
 
 `POST /set_wifi` deserves naming explicitly, because it is the one open route whose worst
 case is *losing the device* rather than mis-charging the car: a LAN peer can point it at a
@@ -104,8 +125,11 @@ that follows restores them unless the new network actually hands out a lease
 the attacker genuinely controls — that association succeeds, so nothing rolls back. The
 mitigation there is the same as for every other route on this list: a trusted LAN.
 
-Two non-auth hardening measures remain in place:
+Three non-auth hardening measures remain in place:
 
+- **Browser-origin gate** — rejects cross-site/DNS-rebound browser mutations (including the
+  state-changing legacy GET forms) while retaining headerless evcc/curl compatibility; it does
+  not restrict a raw LAN caller.
 - **`/gen_keys` identity and overwrite guards** — refuses every key mutation while the running
   image is PendingVerify, its verification state is unknown, or an OTA/update owns the identity
   gate (returns `503` without changing a key). Once Stable, it still refuses to regenerate an
@@ -606,3 +630,5 @@ it.
   HTTP during provisioning. Keep the setup window short; consider WPA2 on the AP.
 - **Do not expose the device to the internet.** Home LAN only.
 - The private key is **never logged**; VIN/MAC/SSID appear in serial logs (physical access).
+- mDNS advertises firmware version but not the VIN; enumerating `_http._tcp` must not multicast a
+  vehicle identifier before a trusted client explicitly queries the open LAN API.

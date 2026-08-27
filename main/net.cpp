@@ -49,9 +49,11 @@
 
 static const char* TAG = "net";
 
-// The DHCP client hostname, requested BEFORE the lease so the router can register it in its
-// local DNS (e.g. http://tesla-key-esp32.fritz.box). Same name main.cpp gives mDNS, so the
-// two agree; kept here because it must be set on the netif at creation time.
+// The DHCP client hostname, requested BEFORE the lease so the router can register the board for
+// headerless API clients and diagnostics. Browser mutations deliberately use the canonical
+// `tesla-key-esp32.local` name or current IP: accepting an arbitrary router-added DNS suffix as a
+// trusted Host would reopen DNS rebinding. Same base name main.cpp gives mDNS; kept here because it
+// must be set on the netif at creation time.
 static const char* kNetHostname = "tesla-key-esp32";
 
 namespace tk {

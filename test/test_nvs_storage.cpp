@@ -532,6 +532,43 @@ static void test_blob_probe_and_write_paths(NvsStorageAdapter& tesla) {
     check_call(1, "commit", NC::kTeslaBleNamespace);
 }
 
+static void test_session_presence_cache() {
+    namespace NC = tk::nvs_contract;
+    NvsStorageAdapter storage(NC::kTeslaBleNamespace);
+    CHECK(storage.initialize());
+
+    // The hot VCSEC session-presence check probes once, then follows successful durable writes
+    // and removals from the adapter cache without touching NVS again.
+    script_blob_reads({{ESP_OK, 4, {}}});
+    clear_call_log();
+    CHECK(storage.blob_exists(NC::kSessionVcsec));
+    CHECK(storage.blob_exists(NC::kSessionVcsec));
+    CHECK(nvs_call_log.size() == 1);
+    check_blob_script_consumed();
+
+    clear_call_log();
+    CHECK(storage.remove(NC::kSessionVcsec));
+    CHECK(nvs_call_log.size() == 2);
+    clear_call_log();
+    CHECK(!storage.blob_exists(NC::kSessionVcsec));
+    CHECK(nvs_call_log.empty());
+
+    CHECK(storage.save(NC::kSessionVcsec, std::vector<uint8_t>{1, 2, 3, 4}));
+    clear_call_log();
+    CHECK(storage.blob_exists(NC::kSessionVcsec));
+    CHECK(nvs_call_log.empty());
+
+    // A read fault remains Unknown and must be retried rather than cached as ordinary absence.
+    NvsStorageAdapter retrying(NC::kTeslaBleNamespace);
+    CHECK(retrying.initialize());
+    script_blob_reads({{ESP_FAIL, 0, {}}, {ESP_OK, 4, {}}});
+    clear_call_log();
+    CHECK(!retrying.blob_exists(NC::kSessionVcsec));
+    CHECK(retrying.blob_exists(NC::kSessionVcsec));
+    CHECK(nvs_call_log.size() == 2);
+    check_blob_script_consumed();
+}
+
 static void test_string_read_write_paths(NvsStorageAdapter& config) {
     namespace NC = tk::nvs_contract;
 
@@ -802,6 +839,7 @@ int main() {
     test_registered_physical_key_mapping(storage, tesla_storage);
     test_adapter_no_call_guards(storage, tesla_storage);
     test_blob_probe_and_write_paths(tesla_storage);
+    test_session_presence_cache();
     test_string_read_write_paths(storage);
     test_raw_blob_write_paths(storage);
     test_remove_paths(storage, tesla_storage);

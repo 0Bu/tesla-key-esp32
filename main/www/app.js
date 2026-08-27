@@ -657,7 +657,7 @@ function editVin(){
 }
 function editMqtt(){
   var cur=(state&&state.mqtt&&state.mqtt.broker)?state.mqtt.broker:'';
-  var v=prompt('MQTT broker for Home Assistant (IP:PORT, e.g. 192.0.2.1:1883).\nLeave empty to disable.',cur);
+  var v=prompt('MQTT broker for Home Assistant (IP:PORT or full URI).\nSaved credentials are hidden; leave the shown host unchanged to keep them.\nLeave empty to disable.',cur);
   if(v==null) return;
   v=v.trim();
   if(v && v.indexOf(' ')>=0){ toast('Invalid broker — use IP:PORT','err'); return; }

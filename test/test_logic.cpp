@@ -20,6 +20,9 @@
 //                                    (logic/syslog_policy.hpp <- syslog.cpp, /set_syslog)
 //   * BLE connect-failure cause + its log level / rate limit
 //                                    (logic/connect_outcome.hpp <- ensure_connected_)
+//   * browser same-origin mutation gate + negotiated ATT write payload
+//                                    (logic/http_origin.hpp <- http_server.cpp,
+//                                     logic/ble_chunk.hpp <- ble_client.cpp)
 // The cJSON serializers stay IDF/cJSON-coupled, but they are one-to-one visitors now:
 // every which-field/when/what-value decision they render is host-tested here.
 
@@ -63,6 +66,8 @@
 #include "logic/heap_history.hpp"
 #include "logic/health_gate.hpp"
 #include "logic/mqtt_uri.hpp"
+#include "logic/http_origin.hpp"
+#include "logic/ble_chunk.hpp"
 #include "logic/wifi_rollback.hpp"
 #include "logic/redact.hpp"
 #include "logic/captive.hpp"
@@ -1260,6 +1265,7 @@ static void test_heap_json_stream() {
     CHECK(nth_send_failure.chunks.size() == 2);
 }
 
+// ─── MCP endpoint core (version negotiation, routing, tool registry, validation) ──────
 static void test_mcp() {
     using MM = tk::McpMethod;
 
@@ -1300,7 +1306,7 @@ static void test_mcp() {
     CHECK(tk::cmd_info(tk::CmdKind::Unknown)       == nullptr);
 
     // Arg-spec table — the single source of truth the advertised schema, the MCP
-    // executor clamp AND the REST /command clamp all read (drift between them is
+    // executor validation AND the REST /command validation all read (drift between them is
     // impossible by construction; this pins the values themselves). Every non-None arg
     // has sane shared bounds; an absent OPTIONAL Int defaults to 0 on the MCP side and
     // to api_default on the REST side, so both must lie inside the advertised bounds.
@@ -1339,6 +1345,16 @@ static void test_mcp() {
     // Read-only + no-arg tools carry no args.
     CHECK(tk::cmd_info(tk::CmdKind::GetVehicleState)->args[0].type == tk::CmdArgType::None);
     CHECK(tk::cmd_info(tk::CmdKind::WakeUp)->args[0].type          == tk::CmdArgType::None);
+
+    // REST never reports success for a value different from the one supplied. Optional fields
+    // may still use their registry default when absent, but a present value is strict.
+    int strict = -1;
+    CHECK(tk::strict_rest_int(50.0, lim->args[0], strict) && strict == 50);
+    CHECK(tk::strict_rest_int(100.0, lim->args[0], strict) && strict == 100);
+    CHECK(!tk::strict_rest_int(49.0, lim->args[0], strict));
+    CHECK(!tk::strict_rest_int(101.0, lim->args[0], strict));
+    CHECK(!tk::strict_rest_int(80.5, lim->args[0], strict));
+    CHECK(!tk::strict_rest_int(std::nan(""), lim->args[0], strict));
 
     // REST surface of the shared table: exactly the 15 TeslaBleHttpProxy commands
     // resolve by API name, each to its own kind; get_vehicle_state is NOT one of them.
@@ -1395,25 +1411,14 @@ static void test_mcp() {
     }
     CHECK(mi == 9);
 
-    // Clamp: an out-of-range double must never reach the int cast (UB guard).
-    CHECK(tk::clamped_int(16.0,   0, 48)    == 16);
-    CHECK(tk::clamped_int(-5.0,   0, 48)    == 0);
-    CHECK(tk::clamped_int(1e300,  0, 48)    == 48);
-    CHECK(tk::clamped_int(-1e300, 50, 100)  == 50);
-    CHECK(tk::clamped_int(99.9,   50, 100)  == 99);
-    CHECK(tk::clamped_int(1440.0, 0, 1439)  == 1439);
-    // NaN compares false against BOTH bounds, so without its explicit check it would
-    // fall through to the (int) cast — the exact UB this guard exists to prevent
-    // (reachable via the string-argument path: strtod accepts "nan").
-    CHECK(tk::clamped_int(std::nan(""), 0, 48) == 0);
-    CHECK(tk::clamped_int(std::nan(""), 50, 100) == 50);
-
     // MCP's advertised integer/boolean schema is enforced after permissive JSON/string
-    // decoding: values remain bounded, but fractions and every non-finite spelling fail;
+    // decoding: out-of-range, fractional and every non-finite spelling fails;
     // numeric booleans are exactly 0/1 rather than C-style "any non-zero".
     int parsed_int = -1;
     CHECK(tk::mcp_integer_value(16.0, 0, 48, parsed_int) && parsed_int == 16);
-    CHECK(tk::mcp_integer_value(1e300, 0, 48, parsed_int) && parsed_int == 48);
+    CHECK(!tk::mcp_integer_value(-1.0, 0, 48, parsed_int));
+    CHECK(!tk::mcp_integer_value(49.0, 0, 48, parsed_int));
+    CHECK(!tk::mcp_integer_value(1e300, 0, 48, parsed_int));
     CHECK(!tk::mcp_integer_value(16.5, 0, 48, parsed_int));
     CHECK(!tk::mcp_integer_value(std::nan(""), 0, 48, parsed_int));
     CHECK(!tk::mcp_integer_value(HUGE_VAL, 0, 48, parsed_int));
@@ -3516,6 +3521,15 @@ static void test_mqtt_uri() {
     CHECK(tk::mqtt_effective_uri("   host:1883  ", false) == "mqtt://host:1883");
     CHECK(tk::mqtt_effective_uri("", true).empty());   // empty stays empty: it disables the bridge
 
+    // Human-readable surfaces never receive embedded credentials. The client still dials the
+    // original URI; this projection is only for /status, UI defaults and logs.
+    CHECK(tk::mqtt_broker_display("mqtt://host:1883") == "host:1883");
+    CHECK(tk::mqtt_broker_display("mqtts://user:secret@broker.example:8883") ==
+          "broker.example:8883");
+    CHECK(tk::mqtt_broker_display(" user@realm:pw@host:1883/path ") == "host:1883");
+    CHECK(tk::mqtt_broker_display("mqtt://user:secret/path@host:1883") == "host:1883");
+    CHECK(tk::mqtt_broker_display("").empty());
+
     CHECK(tk::mqtt_uri_is_tls("mqtts://h:8883"));
     CHECK(!tk::mqtt_uri_is_tls("mqtt://h:1883"));
     CHECK(!tk::mqtt_uri_is_tls(""));
@@ -3543,6 +3557,69 @@ static void test_mqtt_uri() {
     for (R r : {R::Ok, R::Unreachable, R::Refused, R::Timeout, R::NoHeap, R::Internal})
         CHECK(tk::mqtt_probe_reason(r) != nullptr && tk::mqtt_probe_reason(r)[0] != '\0');
     CHECK(std::string(tk::mqtt_probe_reason(R::Unreachable)).find("not saved") != std::string::npos);
+}
+
+// ─── Browser-origin gate for mutating HTTP requests (logic/http_origin.hpp) ────────────────────
+static void test_http_origin() {
+    // evcc/curl do not send browser-origin metadata and retain the documented trusted-LAN API.
+    CHECK(tk::mutation_origin_allowed("", "", "", ""));
+    CHECK(tk::mutation_origin_allowed("tesla-key-esp32.local", "", "none", ""));
+
+    CHECK(tk::mutation_origin_allowed("tesla-key-esp32.local",
+                                      "http://tesla-key-esp32.local", "same-origin", ""));
+    CHECK(tk::mutation_origin_allowed("TESLA-KEY-ESP32.LOCAL:80",
+                                      "http://tesla-key-esp32.local", "same-origin", ""));
+    CHECK(tk::mutation_origin_allowed("192.0.2.42:80",
+                                      "http://192.0.2.42", "same-origin", "192.0.2.42"));
+    // Same-origin browser GETs may omit Origin, but their Fetch Metadata still activates Host
+    // validation. Only a truly headerless evcc/curl request receives the compatibility exception.
+    CHECK(tk::mutation_origin_allowed("tesla-key-esp32.local", "", "same-origin", ""));
+    CHECK(!tk::mutation_origin_allowed("attacker.example", "", "same-origin", "192.0.2.42"));
+    CHECK(!tk::mutation_origin_allowed("tesla-key-esp32.router.example", "", "same-origin",
+                                       "192.0.2.42"));
+
+    CHECK(!tk::mutation_origin_allowed("tesla-key-esp32.local",
+                                       "https://evil.example", "cross-site", ""));
+    CHECK(!tk::mutation_origin_allowed("tesla-key-esp32.local",
+                                       "http://evil.example", "", ""));
+    CHECK(!tk::mutation_origin_allowed("tesla-key-esp32.local", "null", "same-site", ""));
+    CHECK(!tk::mutation_origin_allowed("", "http://tesla-key-esp32.local", "same-origin", ""));
+    CHECK(!tk::mutation_origin_allowed("tesla-key-esp32.local",
+                                       "http://tesla-key-esp32.local/path", "same-origin", ""));
+    CHECK(!tk::mutation_origin_allowed("tesla-key-esp32.local",
+                                       "http://user@tesla-key-esp32.local", "same-origin", ""));
+    // DNS rebinding: matching Host/Origin are insufficient when the authority is not device-owned.
+    CHECK(!tk::mutation_origin_allowed("attacker.example",
+                                       "http://attacker.example", "same-origin", "192.0.2.42"));
+    CHECK(!tk::mutation_origin_allowed("tesla-key-esp32.router.example",
+                                       "http://tesla-key-esp32.router.example", "same-origin",
+                                       "192.0.2.42"));
+    CHECK(!tk::mutation_origin_allowed("192.0.2.99",
+                                       "http://192.0.2.99", "same-origin", "192.0.2.42"));
+
+    CHECK(tk::mutation_origin_required(true, "/status"));
+    CHECK(tk::mutation_origin_required(false, "/ota/check"));
+    CHECK(tk::mutation_origin_required(false, "/ota/check?ms=123"));
+    CHECK(tk::mutation_origin_required(false, "/diag?clear=1"));
+    CHECK(tk::mutation_origin_required(false, "/diag?redact=1&verbose=0"));
+    CHECK(tk::mutation_origin_required(false, "/diag?verbose=1"));
+    CHECK(tk::mutation_origin_required(false, "/coredump?clear=1"));
+    CHECK(!tk::mutation_origin_required(false, "/diag"));
+    CHECK(!tk::mutation_origin_required(false, "/diag?clear=0&verbose=2"));
+    CHECK(!tk::mutation_origin_required(false, "/diag?next=clear=1"));
+    CHECK(!tk::mutation_origin_required(false, "/coredump"));
+    CHECK(!tk::mutation_origin_required(false, "/ota/status"));
+}
+
+// ─── Negotiated ATT payload size (logic/ble_chunk.hpp) ────────────────────────────────────────
+static void test_ble_chunk() {
+    CHECK(tk::ble_write_payload_for_mtu(0) == 20);
+    CHECK(tk::ble_write_payload_for_mtu(3) == 20);
+    CHECK(tk::ble_write_payload_for_mtu(23) == 20);
+    CHECK(tk::ble_write_payload_for_mtu(24) == 21);
+    CHECK(tk::ble_write_payload_for_mtu(64) == 61);
+    CHECK(tk::ble_write_payload_for_mtu(247) == 244);
+    CHECK(tk::ble_write_payload_for_mtu(517) == 244);
 }
 
 // ─── WiFi credential rollback ─────────────────────────────────────────────────
@@ -4101,6 +4178,8 @@ int main() {
     test_heap_persist();
     test_health_gate();
     test_mqtt_uri();
+    test_http_origin();
+    test_ble_chunk();
     test_wifi_rollback();
     test_net_link();
     test_status_eth();

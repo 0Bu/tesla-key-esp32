@@ -82,17 +82,29 @@ bool NvsStorageAdapter::load(const std::string& key, std::vector<uint8_t>& buffe
 
 bool NvsStorageAdapter::blob_exists(const std::string& key) const {
     if (!initialized_) return false;
+    if (key == tk::nvs_contract::kSessionVcsec) {
+        const int8_t cached = session_vcsec_present_.load();
+        if (cached >= 0) return cached == 1;
+    }
     // map_key() returns a pointer into the constexpr registry, so this hot existence probe does
     // not allocate or materialise the blob in a vector.
     const char* nvskey = map_key(key, tk::nvs_contract::StorageApi::Blob);
     if (!nvskey) return false;
     size_t len = 0;
     esp_err_t err = nvs_get_blob(handle_, nvskey, nullptr, &len);
-    if (err == ESP_ERR_NVS_NOT_FOUND || len == 0) return false;
+    if (err == ESP_ERR_NVS_NOT_FOUND) {
+        if (key == tk::nvs_contract::kSessionVcsec) session_vcsec_present_.store(0);
+        return false;
+    }
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "exists probe failed '%s': %s", nvskey, esp_err_to_name(err));
         return false;
     }
+    if (len == 0) {
+        if (key == tk::nvs_contract::kSessionVcsec) session_vcsec_present_.store(0);
+        return false;
+    }
+    if (key == tk::nvs_contract::kSessionVcsec) session_vcsec_present_.store(1);
     return true;
 }
 
@@ -131,6 +143,7 @@ bool NvsStorageAdapter::save(const std::string& key, const std::vector<uint8_t>&
         ESP_LOGE(TAG, "commit failed after save '%s': %s", nvskey, esp_err_to_name(err));
         return false;
     }
+    if (key == tk::nvs_contract::kSessionVcsec) session_vcsec_present_.store(1);
     return true;
 }
 
@@ -148,6 +161,7 @@ bool NvsStorageAdapter::remove(const std::string& key) {
         ESP_LOGE(TAG, "commit failed after remove '%s': %s", nvskey, esp_err_to_name(err));
         return false;
     }
+    if (key == tk::nvs_contract::kSessionVcsec) session_vcsec_present_.store(0);
     return true;
 }
 

@@ -7,18 +7,19 @@
 // Charging-Manager key role, and advertising them would only mislead a calling model),
 // and the argument specs. An argument's REST key and MCP key may differ
 // (TeslaBleHttpProxy compat says "charging_amps"; the MCP tool says "amps") but its
-// {lo,hi} bounds are ONE pair of struct members read by the REST clamp, the MCP clamp
+// {lo,hi} bounds are ONE pair of struct members read by REST/MCP validation
 // AND the advertised tools/list JSON schema — so the surfaces can never disagree about
 // a range again by construction. IDF-free; host-tested in test/test_logic.cpp.
 //
 // Surface semantics stay deliberately different and are encoded per-surface:
-//   REST is generally LENIENT for protocol compatibility, but safety-critical
-//   arguments may set api_required (set_charging_amps does): absent or malformed
-//   input must not silently turn into a different vehicle command.
+//   REST accepts documented compatibility defaults for absent optional fields, but every
+//   supplied integer must be integral and inside the advertised range. Safety-critical
+//   arguments may also set api_required (set_charging_amps does).
 //   MCP is STRICT: an absent REQUIRED arg or a present-but-unparseable one is a
 //   -32602 protocol error (silently defaulting set_scheduled_charging's "enable"
 //   would DISABLE the schedule and report success).
 
+#include <cmath>
 #include <cstring>
 
 namespace tk {
@@ -75,8 +76,17 @@ struct CmdArg {
     bool        api_required;  // REST: absent/malformed body is HTTP 400 when true
     bool        mcp_required;  // MCP: absent argument is JSON-RPC -32602 when true
     int         api_default;   // REST fallback when absent (Int; must lie in [lo,hi])
-    int         lo, hi;        // Int only: THE shared inclusive clamp/schema bounds
+    int         lo, hi;        // Int only: THE shared inclusive validation/schema bounds
 };
+
+inline bool strict_rest_int(double value, const CmdArg& arg, int& out) {
+    if (!std::isfinite(value) || std::trunc(value) != value ||
+        value < static_cast<double>(arg.lo) || value > static_cast<double>(arg.hi)) {
+        return false;
+    }
+    out = static_cast<int>(value);
+    return true;
+}
 
 inline constexpr CmdArg kNoCmdArg{ nullptr, nullptr, CmdArgType::None, false, false, 0, 0, 0 };
 

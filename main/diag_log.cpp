@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <cstring>
 #include <atomic>
+#include <algorithm>
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "rtos_guard.hpp"
@@ -26,7 +27,7 @@ static constexpr size_t DIAG_CAP = 16 * 1024;
 static char              s_buf[DIAG_CAP];
 static size_t            s_head    = 0;      // next write position
 static bool              s_wrapped = false;  // buffer has wrapped at least once
-static uint64_t          s_written = 0;      // bytes appended since the last clear
+static uint64_t          s_written = 0;      // monotonic byte sequence within one clear epoch
 static uint64_t          s_epoch   = 0;      // detects clear while a dump is in flight
 static SemaphoreHandle_t s_mtx     = nullptr;
 static vprintf_like_t    s_prev    = nullptr;
