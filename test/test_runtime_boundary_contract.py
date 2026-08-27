@@ -598,6 +598,22 @@ def function_body_in(text: str, name: str) -> str:
     raise AssertionError(f"cannot locate boundary definition: {name}")
 
 
+def function_definition_names(text: str) -> set[str]:
+    """Discover ordinary free/static and qualified definitions in one reviewed source file."""
+    definition = re.compile(
+        r"^[ \t]*(?:extern\s+\"C\"\s+)?(?:static\s+)?"
+        r"(?:[A-Za-z_]\w*(?:::\w+)*(?:[<>,*&]+)?[ \t]+)+"
+        r"(?:[A-Za-z_]\w*::)*([A-Za-z_]\w*)\s*\([^;{}]*\)\s*"
+        r"(?:const\s*)?(?:noexcept\s*)?\{",
+        re.MULTILINE,
+    )
+    names = [match.group(1) for match in definition.finditer(scrub_cpp_preserving_layout(text))]
+    duplicates = sorted(name for name, count in Counter(names).items() if count > 1)
+    if duplicates:
+        raise AssertionError(f"ambiguous duplicate local function definitions: {duplicates}")
+    return set(names)
+
+
 def function_body(name: str) -> str:
     for text in MAIN_CODE.values():
         try:
@@ -2610,13 +2626,20 @@ def require_ota_status_lock_contract(ota_source: str, runtime_tests: str) -> Non
     ):
         if token not in error:
             raise AssertionError(f"OTA check-error fixed snapshot missing {token!r}")
-    if error.count("publish_check_status(candidate);") != 1 or "s_status" in error:
-        raise AssertionError("OTA check-error fallback is not one whole-snapshot publication")
-    if re.search(
-        r"\b(?:std::string|new|throw|append|assign|set_state|malloc|calloc|realloc|strdup)\b",
-        error,
-    ):
-        raise AssertionError("OTA check-error fallback can allocate, throw, or publish partially")
+    expected_error = (
+        "{ OtaStatusPod candidate{}; candidate.state = OtaState::Error; "
+        "copy_status_text(candidate.message, message); "
+        "const std::string_view current = running_version(); "
+        "copy_status_text(candidate.current, current.data()); "
+        "publish_check_status(candidate); }"
+    )
+    if " ".join(error.split()) != expected_error:
+        raise AssertionError("OTA check-error fallback is not the exact fixed snapshot program")
+    require_exact(
+        "OTA check-error fallback call allowlist",
+        called_functions(error),
+        {"copy_status_text", "data", "publish_check_status", "running_version"},
+    )
 
     for token in (
         "test_ota_status_lock_failure_matrix",
@@ -2648,7 +2671,9 @@ def require_ble_callback_lock_contract(ble_source: str) -> None:
         "on_dsc_disc",
         "on_subscribe_write",
     }
-    local_functions = set(re.findall(r"\bBleClient::([A-Za-z_]\w*)\s*\(", scrub_cpp(ble_source)))
+    # Include both BleClient members and translation-unit free/static helpers. A callback path
+    # must not be able to hide an allocating helper merely by moving it outside the class.
+    local_functions = function_definition_names(ble_source)
     callback_reachable = set(callback_entries)
     pending = list(callback_entries)
     while pending:
@@ -2686,6 +2711,76 @@ def require_ble_callback_lock_contract(ble_source: str) -> None:
         expected_callback_reachable,
     )
 
+    allowed_calls = {
+        "cancel_scan_locked_": {
+            "ESP_LOGD", "ble_gap_disc_cancel", "load", "scan_running_after_cancel", "store",
+        },
+        "connection_snapshot_matches_": {"load"},
+        "disconnect_from_callback_": {"store", "terminate_published_link_"},
+        "ensure_scanning_": {"ensure_scanning_locked_", "intent"},
+        "ensure_scanning_locked_": {
+            "connect_scan_should_start", "has_gap_link_", "load", "start_scan_locked_",
+        },
+        "has_gap_link_": {"gap_link_available", "load"},
+        "note_connectable_": {"esp_timer_get_time", "g", "memcmp", "memcpy"},
+        "note_scan_": {"esp_timer_get_time", "g", "memcmp", "memcpy", "size"},
+        "on_chr_disc": {
+            "ESP_LOGD", "ESP_LOGE", "ble_uuid_cmp", "connection_snapshot_matches_",
+            "disconnect_from_callback_", "load", "store", "subscribe_notify_", "what",
+        },
+        "on_dsc_disc": {
+            "ESP_LOGD", "ESP_LOGE", "ble_gattc_write_flat", "ble_uuid_cmp",
+            "connection_snapshot_matches_", "disconnect_from_callback_", "what",
+        },
+        "on_gap_event": {
+            "ESP_LOGD", "ESP_LOGE", "ESP_LOGI", "ESP_LOGW", "OS_MBUF_PKTLEN",
+            "ble_gap_connect", "ble_gap_terminate", "ble_gattc_disc_svc_by_uuid",
+            "ble_hs_adv_parse_fields", "ble_write_payload_for_mtu", "cancel_scan_locked_",
+            "connect_attempt_may_advance", "connect_lifecycle_after_gap_connected",
+            "connect_lifecycle_after_start_failure", "connect_lifecycle_during_gap_start",
+            "connection_snapshot_matches_", "data", "diag_verbose",
+            "disconnect_from_callback_", "ensure_scanning_", "ensure_scanning_locked_",
+            "esp_timer_get_time", "fetch_add", "fill", "g", "intent",
+            "is_tesla_vehicle_name", "load", "memcpy", "note_connectable_", "note_scan_",
+            "on_connected_", "on_rx_data_", "os_mbuf_copydata", "size", "snprintf", "store",
+            "strcmp", "terminate_published_link_", "what",
+        },
+        "on_reset": {
+            "compare_exchange_weak", "connect_lifecycle_after_host_reset", "fetch_add", "intent",
+            "load", "on_connected_", "store",
+        },
+        "on_scan_timeout": {
+            "ESP_LOGD", "cancel_scan_locked_", "esp_timer_start_once", "has_gap_link_", "intent",
+            "load", "manual_discovery_timeout_may_cancel",
+        },
+        "on_subscribe_write": {
+            "ESP_LOGD", "ESP_LOGE", "connect_attempt_may_advance",
+            "connection_snapshot_matches_", "disconnect_from_callback_", "intent", "load",
+            "on_connected_", "store", "what",
+        },
+        "on_svc_disc": {
+            "ESP_LOGD", "ESP_LOGE", "ble_gattc_disc_all_chrs", "ble_uuid_cmp",
+            "connection_snapshot_matches_", "disconnect_from_callback_", "what",
+        },
+        "on_sync": {"ESP_LOGI", "ESP_LOGW", "acknowledge_sync", "ensure_scanning_", "load", "state"},
+        "start_scan_locked_": {"ESP_LOGD", "ble_gap_disc", "load", "scan_running_after_start", "store"},
+        "subscribe_notify_": {
+            "ESP_LOGD", "ble_gattc_disc_all_dscs", "connection_snapshot_matches_",
+            "disconnect_from_callback_",
+        },
+        "terminate_published_link_": {"ESP_LOGW", "ble_gap_terminate", "load", "store", "taskYIELD"},
+    }
+    require_exact("BLE callback call-allowlist owners", set(allowed_calls), callback_reachable)
+
+    allowed_std_tokens = {
+        "on_chr_disc": {"std::exception"},
+        "on_dsc_disc": {"std::exception"},
+        "on_gap_event": {"std::array", "std::exception", "std::memcpy", "std::min", "std::strcmp"},
+        "on_reset": {"std::memory_order_acq_rel", "std::memory_order_acquire", "std::uint32_t"},
+        "on_subscribe_write": {"std::exception"},
+        "on_svc_disc": {"std::exception"},
+    }
+
     allocation_or_throw = re.compile(
         r"\b(?:std::string|std::vector|std::function|new|throw|malloc|calloc|realloc|"
         r"strdup|asprintf|cJSON_\w+)\b"
@@ -2696,6 +2791,16 @@ def require_ble_callback_lock_contract(ble_source: str) -> None:
     )
     for name in sorted(callback_reachable):
         body = scrub_cpp(function_body_in(ble_source, name))
+        require_exact(
+            f"BLE callback path {name} call allowlist",
+            called_functions(body),
+            allowed_calls[name],
+        )
+        require_exact(
+            f"BLE callback path {name} standard-library token allowlist",
+            set(re.findall(r"\bstd::[A-Za-z_]\w*", body)),
+            allowed_std_tokens.get(name, set()),
+        )
         if allocation_or_throw.search(body):
             raise AssertionError(
                 f"BLE callback path {name} contains an allocation or explicit throw"
@@ -5005,6 +5110,20 @@ def self_test_canaries(tasks: set[str], callbacks: set[str]) -> None:
         "OTA noexcept check-error fallback allocation",
         lambda: require_ota_status_lock_contract(allocating_check_error, runtime_tests),
     )
+    hidden_allocating_check_error = ota_source.replace(
+        "static void set_check_error(const char* message) noexcept {\n"
+        "    OtaStatusPod candidate{};",
+        "static void set_check_error(const char* message) noexcept {\n"
+        "    auto fallback_allocation = std::to_string(42);\n"
+        "    OtaStatusPod candidate{};",
+        1,
+    )
+    if hidden_allocating_check_error == ota_source:
+        raise AssertionError("OTA check-error indirect-allocation mutation did not apply")
+    require_mutation_rejected(
+        "OTA noexcept check-error fallback calls an unreviewed allocator",
+        lambda: require_ota_status_lock_contract(hidden_allocating_check_error, runtime_tests),
+    )
 
     partial_check_error = ota_source.replace(
         "    publish_check_status(candidate);\n}\n\n// ─── Small HTTPS GET",
@@ -5082,6 +5201,31 @@ def self_test_canaries(tasks: set[str], callbacks: set[str]) -> None:
     require_mutation_rejected(
         "BLE noexcept disconnect helper chain allocates",
         lambda: require_ble_callback_lock_contract(allocating_ble_helper),
+    )
+    hidden_allocating_ble_helper = ble_callback_source.replace(
+        "void BleClient::terminate_published_link_() {",
+        "void BleClient::terminate_published_link_() {\n"
+        "    auto callback_allocation = std::to_string(42);",
+        1,
+    )
+    if hidden_allocating_ble_helper == ble_callback_source:
+        raise AssertionError("BLE transitive-helper indirect-allocation mutation did not apply")
+    require_mutation_rejected(
+        "BLE noexcept disconnect helper calls an unreviewed allocator",
+        lambda: require_ble_callback_lock_contract(hidden_allocating_ble_helper),
+    )
+    static_allocating_ble_helper = ble_callback_source.replace(
+        "void BleClient::terminate_published_link_() {",
+        "static void callback_allocating_helper() { std::string value; }\n\n"
+        "void BleClient::terminate_published_link_() {\n"
+        "    callback_allocating_helper();",
+        1,
+    )
+    if static_allocating_ble_helper == ble_callback_source:
+        raise AssertionError("BLE translation-unit helper allocation mutation did not apply")
+    require_mutation_rejected(
+        "BLE callback closure reaches an unreviewed translation-unit helper",
+        lambda: require_ble_callback_lock_contract(static_allocating_ble_helper),
     )
     raw_wait_ble_helper = ble_callback_source.replace(
         "void BleClient::terminate_published_link_() {",
