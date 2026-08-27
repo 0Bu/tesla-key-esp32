@@ -213,8 +213,8 @@ export function validateManifest(manifest, manifestUrl) {
   if (!manifest || manifest.layoutVersion !== MANIFEST_LAYOUT_VERSION) {
     throw manifestError(`Firmware manifest layoutVersion must be ${MANIFEST_LAYOUT_VERSION}.`);
   }
-  if (typeof manifest.version !== "string" ||
-      !/^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?$/.test(manifest.version)) {
+  if (typeof manifest.version !== "string" || manifest.version.length > 31 ||
+      !/^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?$/.test(manifest.version)) {
     throw manifestError("The firmware manifest contains an invalid version.");
   }
   if (typeof manifest.sourceSha !== "string" || !/^[0-9a-f]{40}$/.test(manifest.sourceSha)) {
