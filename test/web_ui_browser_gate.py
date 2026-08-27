@@ -14,6 +14,11 @@ import tempfile
 
 
 ROOT = Path(__file__).resolve().parent.parent
+# GitHub's shared Linux runners can spend more than 20 seconds cold-starting Chrome under load.
+# Two profiles at 45 seconds plus bounded termination grace remain below run-mock-tests.sh's
+# 120-second outer gate, while a genuinely hung browser still fails closed.
+PROFILE_TIMEOUT_SECONDS = 45
+TERMINATION_GRACE_SECONDS = 2
 
 
 def browser_binary() -> str | None:
@@ -167,7 +172,7 @@ def run_profile(browser: str, html: Path, profile: str, size: str, user_data: Pa
             start_new_session=True,
         )
         try:
-            returncode = process.wait(timeout=20)
+            returncode = process.wait(timeout=PROFILE_TIMEOUT_SECONDS)
         except subprocess.TimeoutExpired:
             # Chrome for Testing on macOS can finish --dump-dom and then remain alive while its
             # updater/crash helper drains. Terminate the isolated process group; a completed DOM
@@ -178,13 +183,13 @@ def run_profile(browser: str, html: Path, profile: str, size: str, user_data: Pa
             except ProcessLookupError:
                 pass
             try:
-                returncode = process.wait(timeout=2)
+                returncode = process.wait(timeout=TERMINATION_GRACE_SECONDS)
             except subprocess.TimeoutExpired:
                 try:
                     os.killpg(process.pid, signal.SIGKILL)
                 except ProcessLookupError:
                     pass
-                returncode = process.wait(timeout=2)
+                returncode = process.wait(timeout=TERMINATION_GRACE_SECONDS)
         stdout_file.seek(0)
         stderr_file.seek(0)
         stdout = stdout_file.read()

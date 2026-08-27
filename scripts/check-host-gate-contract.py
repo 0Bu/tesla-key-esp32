@@ -24,6 +24,7 @@ def validate(root: Path) -> None:
     idf_verify = (root / "scripts/ci-build-verify.sh").read_text(encoding="utf-8")
     hook = (root / "tools/agent-hooks/agent_hook.py").read_text(encoding="utf-8")
     cmake = (root / "test/CMakeLists.txt").read_text(encoding="utf-8")
+    browser_gate = (root / "test/web_ui_browser_gate.py").read_text(encoding="utf-8")
     require("--require-all" in run_mock and 'REQUIRE_ALL=1' in run_mock,
             "run-mock-tests.sh has no strict mode")
     for tool in ("python3", "node", "cmake"):
@@ -94,6 +95,18 @@ def validate(root: Path) -> None:
             "test/test_nvs_storage.cpp main/nvs_storage.cpp main/config_blob.cpp" in run_mock and
             'run_gate "execute NVS adapter tests" 120 "$BUILD_DIR/nvs_storage_tests"' in run_mock,
             "cmake-less fallback does not compile and execute nvs_storage_tests")
+    require(
+        'run_gate "real-browser DOM and accessibility contract" 120 \\\n'
+        "            python3 test/web_ui_browser_gate.py --require-browser" in run_mock,
+        "strict real-browser gate must retain its 120-second outer timeout",
+    )
+    require(
+        "PROFILE_TIMEOUT_SECONDS = 45" in browser_gate
+        and browser_gate.count("process.wait(timeout=PROFILE_TIMEOUT_SECONDS)") == 1
+        and "TERMINATION_GRACE_SECONDS = 2" in browser_gate
+        and browser_gate.count("process.wait(timeout=TERMINATION_GRACE_SECONDS)") == 2,
+        "real-browser gate cold-start and termination budgets drifted",
+    )
     cjson_gate = "CJSON_OOM_SANITIZE=1 bash ./test/run-cjson-oom-tests.sh"
     mqtt_gate = "MQTT_JSON_SANITIZE=1 bash ./test/run-mqtt-json-publish-tests.sh"
     build = './scripts/ci-build-all.sh "$version" "$source_sha"'
@@ -147,6 +160,12 @@ def self_test(root: Path) -> None:
         ("scripts/run-mock-tests.sh",
          'run_gate "execute NVS adapter tests" 120 "$BUILD_DIR/nvs_storage_tests"',
          "# removed NVS fallback execution", "compile and execute nvs_storage_tests"),
+        ("test/web_ui_browser_gate.py", "PROFILE_TIMEOUT_SECONDS = 45",
+         "PROFILE_TIMEOUT_SECONDS = 20", "cold-start and termination budgets"),
+        ("scripts/run-mock-tests.sh",
+         'run_gate "real-browser DOM and accessibility contract" 120 \\\n',
+         'run_gate "real-browser DOM and accessibility contract" 90 \\\n',
+         "120-second outer timeout"),
         ("scripts/ci-build-verify.sh", "CJSON_OOM_SANITIZE=1 bash ./test/run-cjson-oom-tests.sh",
          "true", "real-cJSON host gates"),
         ("scripts/ci-build-verify.sh", "MQTT_JSON_SANITIZE=1 bash ./test/run-mqtt-json-publish-tests.sh",
@@ -160,6 +179,7 @@ def self_test(root: Path) -> None:
                 "scripts/ci-build-verify.sh",
                 "tools/agent-hooks/agent_hook.py",
                 "test/CMakeLists.txt",
+                "test/web_ui_browser_gate.py",
             ):
                 destination = fixture / path
                 destination.parent.mkdir(parents=True, exist_ok=True)

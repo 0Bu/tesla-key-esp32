@@ -242,7 +242,9 @@ The suite also has gates outside the single pure-logic translation unit:
   exactly six migrated RX-recovery callsites. `test/web_ui_browser_gate.py` assembles
   the shipped page and checks console errors, rejected requests plus the poller's degraded state,
   escaping, keyboard/accessibility semantics and desktop/mobile layout in a real headless
-  Chrome/Chromium process.
+  Chrome/Chromium process. Each profile has a 45-second cold-start/DOM deadline so a loaded shared
+  runner does not turn normal Chrome startup into a flaky failure; both profiles plus bounded
+  process-group termination remain inside the host gate's 120-second fail-closed limit.
 
 ## What's *not* covered (by design)
 
