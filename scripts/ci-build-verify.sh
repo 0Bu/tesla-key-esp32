@@ -22,6 +22,7 @@ python3 ./scripts/check-build-artifact-inventory.py \
 # EXACT_FOUR_TARGETS_BEGIN repro
 for target in esp32 esp32s3 esp32c3 esp32c6; do
   ./scripts/check-reproducible-build.sh "$target" \
+    "$version" \
     "_unsigned/$target/tesla-key-esp32.bin" \
     "dist/$target/tesla-key-esp32-$target.elf"
 done

@@ -636,9 +636,14 @@ def validate(root: Path) -> None:
         ("check-dependency-contract.py --root .", "check-partition-contract.py --csv partitions.csv",
          "# EXACT_FOUR_TARGETS_BEGIN build"),
     )
+    require(build_all.count('-D "PROJECT_VER=$version"') == 2,
+            "ci-build-all.sh: display version must bind both target configuration invocations")
+    require(reproducible.count('-D "PROJECT_VER=$version"') == 2,
+            "check-reproducible-build.sh: display version must bind both fresh-build invocations")
     marked_target_loop(
         build_all, "ci-build-all.sh", "build", "for target in $TARGETS; do",
-        ('idf.py set-target "$target"', "idf.py build",
+        ('idf.py -D "PROJECT_VER=$version" set-target "$target"',
+         'idf.py -D "PROJECT_VER=$version" build',
          "check-otadata-contract.py build/ota_data_initial.bin",
          'cp build/ota_data_initial.bin "$input/ota_data_initial.bin"'),
     )
@@ -650,9 +655,9 @@ def validate(root: Path) -> None:
         build_all,
         "ci-build-all.sh target gate chain",
         (
-            'idf.py set-target "$target"',
+            'idf.py -D "PROJECT_VER=$version" set-target "$target"',
             "check-sdkconfig-defaults.py",
-            "idf.py build",
+            'idf.py -D "PROJECT_VER=$version" build',
             "check-build-semantics.py",
             "check-partition-contract.py \\",
             "check-firmware-artifacts.py \\",
@@ -738,7 +743,7 @@ def validate(root: Path) -> None:
             "ci-build-verify.sh: reproducibility loop must cover exactly four targets")
     marked_target_loop(
         verify, "ci-build-verify.sh", "repro", EXACT_TARGET_LOOP,
-        ('./scripts/check-reproducible-build.sh "$target"',),
+        ('./scripts/check-reproducible-build.sh "$target"', '"$version"',),
     )
     require_order(
         verify,
@@ -1276,6 +1281,12 @@ def self_test(root: Path) -> None:
          "independent inventory/private-stage preflight"),
         ("repro-target", "scripts/ci-build-verify.sh", EXACT_TARGET_LOOP,
          "for target in esp32 esp32s3 esp32c3; do", "reproducibility loop"),
+        ("primary-version-binding", "scripts/ci-build-all.sh",
+         '-D "PROJECT_VER=$version" set-target', 'set-target',
+         "display version must bind"),
+        ("repro-version-binding", "scripts/check-reproducible-build.sh",
+         '-D "PROJECT_VER=$version" set-target', 'set-target',
+         "display version must bind"),
         ("repro-shared-dir", "scripts/check-reproducible-build.sh",
          'build_dir="$work_root/build-$pass"', 'build_dir="$work_root/build"',
          "distinct fresh"),

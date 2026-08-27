@@ -48,18 +48,24 @@ if [[ "${1:-}" == --self-test ]]; then
   exit 0
 fi
 
-target="${1:?usage: check-reproducible-build.sh <target> [baseline-app baseline-elf]}"
+target="${1:?usage: check-reproducible-build.sh <target> <display-version> [baseline-app baseline-elf]}"
 case "$target" in esp32|esp32s3|esp32c3|esp32c6) ;; *) echo "unsupported target: $target" >&2; exit 2 ;; esac
-baseline_app="${2:-}"
-baseline_elf="${3:-}"
+version="${2:?usage: check-reproducible-build.sh <target> <display-version> [baseline-app baseline-elf]}"
+VERSION_RE='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$'
+[[ "$version" =~ $VERSION_RE && ${#version} -le 31 ]] || {
+  echo "invalid display version: $version" >&2
+  exit 2
+}
+baseline_app="${3:-}"
+baseline_elf="${4:-}"
 if [[ -n "$baseline_app" || -n "$baseline_elf" ]]; then
-  [[ -n "$baseline_app" && -n "$baseline_elf" && $# -eq 3 ]] || {
+  [[ -n "$baseline_app" && -n "$baseline_elf" && $# -eq 4 ]] || {
     echo "baseline app and ELF must be supplied together" >&2; exit 2;
   }
   [[ -f "$baseline_app" && ! -L "$baseline_app" ]] || { echo "invalid baseline app: $baseline_app" >&2; exit 1; }
   [[ -f "$baseline_elf" && ! -L "$baseline_elf" ]] || { echo "invalid baseline ELF: $baseline_elf" >&2; exit 1; }
-elif [[ $# -ne 1 ]]; then
-  echo "usage: check-reproducible-build.sh <target> [baseline-app baseline-elf]" >&2
+elif [[ $# -ne 2 ]]; then
+  echo "usage: check-reproducible-build.sh <target> <display-version> [baseline-app baseline-elf]" >&2
   exit 2
 fi
 
@@ -90,10 +96,12 @@ build_once() {
     echo "reproducible-build $target: pass $pass is not starting from a fresh path" >&2
     return 1
   }
-  idf.py -B "$build_dir" -D "SDKCONFIG=$generated_config" set-target "$target"
+  idf.py -B "$build_dir" -D "SDKCONFIG=$generated_config" \
+    -D "PROJECT_VER=$version" set-target "$target"
   python3 scripts/check-sdkconfig-defaults.py \
     --target "$target" --generated "$generated_config"
-  idf.py -B "$build_dir" -D "SDKCONFIG=$generated_config" build
+  idf.py -B "$build_dir" -D "SDKCONFIG=$generated_config" \
+    -D "PROJECT_VER=$version" build
   python3 scripts/check-build-semantics.py \
     --target "$target" --sdkconfig "$generated_config" \
     --compile-commands "$build_dir/compile_commands.json" --source-root "$repo_root"

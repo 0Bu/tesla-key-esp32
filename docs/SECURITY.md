@@ -367,7 +367,9 @@ Compilation and signing are separate trust domains:
    trusted source attestation**. The canonical inventory covers exactly 53 allowlisted payload files
    plus its manifest and records the exact commit plus a content/mode fingerprint of all tracked and
    non-ignored source files (only the workflow-generated `version.txt` is excluded and separately
-   bound).
+   bound). The validated display-version argument is also passed explicitly as CMake `PROJECT_VER`
+   to every authoritative and independent configuration invocation; a stale repository-floor
+   `version.txt` therefore cannot stamp different app-descriptor bytes in the documented local gate.
    `scripts/ci-build-all.sh` also projects the **minimal** 64 KiB alignment padding plus exactly one
    4 KiB signature sector, so an image cannot pass compilation and then unexpectedly overflow its
    OTA slot when signed. Main

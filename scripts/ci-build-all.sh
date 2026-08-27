@@ -141,9 +141,13 @@ for target in $TARGETS; do
   lock_before="$(sha256sum "$lock" | cut -d' ' -f1)"
 
   rm -f sdkconfig sdkconfig.old
-  idf.py set-target "$target"
+  # The CLI display version is the authoritative app-descriptor input. GitHub happens to write
+  # the same value to version.txt before entering the container, but this script is also the
+  # documented local/agent entry point and must not silently fall back to the repository floor.
+  # Pass it on every configuring invocation so a stale CMake cache cannot retain another stamp.
+  idf.py -D "PROJECT_VER=$version" set-target "$target"
   python3 scripts/check-sdkconfig-defaults.py --target "$target"
-  idf.py build
+  idf.py -D "PROJECT_VER=$version" build
 
   python3 scripts/check-otadata-contract.py build/ota_data_initial.bin
   python3 scripts/check-build-semantics.py \
