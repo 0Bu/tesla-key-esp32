@@ -485,7 +485,9 @@ preserves the `PR/` tree). Constraints:
   preview. The real-key signature anchors trust so the main release is accepted.
 - **Cleanup and reconciliation.** Signing and deletion share the same per-PR concurrency group. A
   close, force-push or `signed-preview` label removal deletes the old tree and cancels an in-flight
-  publisher. A daily/manual matrix reconciliation revalidates each surviving directory under that
+  publisher. The event cleanup is a trusted-base `pull_request_target` workflow and checks out the
+  exact base SHA before running either the Pages-authority check or deletion script; it never
+  executes PR workflow/code with the branch-write token. A daily/manual matrix reconciliation revalidates each surviving directory under that
   same lock and removes it unless the PR is open, same-repository, labelled and its current head
   equals the schema-v2 manifest `sourceSha`.
 

@@ -478,7 +478,10 @@ Compilation and signing are separate trust domains:
    PR state is checked again immediately before artifact upload and Pages publication. Fork PRs are
    ineligible. Without this labelled approval, every PR remains compile-only and unsigned. Preview
    signing and cleanup share one per-PR concurrency group, so close/force-push/label-removal cancels
-   an in-flight publisher. A daily and manually dispatchable reconciliation removes any gh-pages
+   an in-flight publisher. PR-event cleanup runs only from the trusted `pull_request_target`
+   definition and checks out the exact base SHA before executing the Pages validator or deletion
+   script; PR workflow/code is never executed with the branch-write token. A daily and manually
+   dispatchable reconciliation removes any gh-pages
    preview whose PR is no longer open, same-repository, labelled and at the manifest's `sourceSha`.
 
 Pages has exactly one serving authority: GitHub's branch-backed legacy mode with source

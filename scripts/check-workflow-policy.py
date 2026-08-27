@@ -889,6 +889,15 @@ def validate(root: Path) -> None:
         == {"contents": "write", "pages": "read", "pull-requests": "read"},
         "pr-preview-cleanup.yml mutator permissions must retain exact branch and Pages-read scope",
     )
+    cleanup_text = contents["pr-preview-cleanup.yml"]
+    require(
+        re.search(r"^  pull_request_target:\s*$", cleanup_text, re.MULTILINE) is not None
+        and re.search(r"^  pull_request:\s*$", cleanup_text, re.MULTILINE) is None
+        and "github.event_name == 'pull_request_target'" in cleanup["cleanup-event"]
+        and "github.event_name == 'pull_request'" not in cleanup["cleanup-event"]
+        and "ref: ${{ github.event.pull_request.base.sha }}" in cleanup["cleanup-event"],
+        "pr-preview-cleanup.yml must execute trusted base workflow/code for PR mutations",
+    )
     cleanup_source = "python3 scripts/check-pages-source.py"
     require(
         cleanup["cleanup-event"].count(cleanup_source) == 1
@@ -917,9 +926,9 @@ def validate(root: Path) -> None:
     require("contents: write" not in policy_text and "pull-requests: write" not in policy_text,
             "pr-policy.yml must remain read-only")
     for name, text in contents.items():
-        if name != "pr-policy.yml":
+        if name not in {"pr-policy.yml", "pr-preview-cleanup.yml"}:
             require("pull_request_target:" not in text,
-                    f"{name}: pull_request_target is reserved for trusted PR metadata policy")
+                    f"{name}: pull_request_target is reserved for trusted PR metadata/mutation policy")
 
     bench_text = contents.get("bench-acceptance.yml")
     bench = jobs_by_file.get("bench-acceptance.yml")
@@ -1016,6 +1025,15 @@ def validate(root: Path) -> None:
             "path: ${{ runner.temp }}/bench-acceptance/report.json" in bench_job and
             "if-no-files-found: error" in bench_job,
             "bench-acceptance.yml upload must bind the run ID, source SHA and exact validated path")
+    require(
+        bench_text.count("${{ runner.temp }}") == 3
+        and bench_job.count("${{ runner.temp }}") == 3
+        and "    env:\n      REPORT_PATH: ${{ runner.temp }}" not in bench_job
+        and bench_job.count(
+            "REPORT_PATH: ${{ runner.temp }}/bench-acceptance/report.json"
+        ) == 2,
+        "bench-acceptance.yml may resolve runner.temp only inside runner-backed steps",
+    )
     require("ARTIFACT_ID: ${{ steps.upload-report.outputs.artifact-id }}" in bench_job and
             "ARTIFACT_DIGEST: ${{ steps.upload-report.outputs.artifact-digest }}" in bench_job and
             "REPORT_SHA256: ${{ steps.validate-report.outputs.report-sha256 }}" in bench_job and
@@ -1276,6 +1294,11 @@ def self_test(root: Path) -> None:
          "before every branch mutation"),
         ("preview-trusted-trigger", "signed-pr-preview.yml", "  workflow_run:\n",
          "  workflow_dispatch:\n", "default-branch-owned completed-build workflow_run"),
+        ("cleanup-trusted-trigger", "pr-preview-cleanup.yml", "  pull_request_target:\n",
+         "  pull_request:\n", "trusted base workflow/code"),
+        ("cleanup-event-name", "pr-preview-cleanup.yml",
+         "github.event_name == 'pull_request_target'",
+         "github.event_name == 'pull_request'", "trusted base workflow/code"),
         ("preview-workflow-attestation", "signed-pr-preview.yml",
          "--accept-workflow-attested-source",
          "--accept-unbound-workflow-source", "workflow-attested bytes"),
@@ -1349,13 +1372,23 @@ def self_test(root: Path) -> None:
         ("bench-default-ref", "bench-acceptance.yml",
          "    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)\n", "",
          "non-default-branch"),
+        ("bench-job-runner-context", "bench-acceptance.yml",
+         "    steps:\n      - name: Check out trusted default-branch validator\n",
+         "    env:\n      REPORT_PATH: ${{ runner.temp }}/bench-acceptance/report.json\n"
+         "    steps:\n      - name: Check out trusted default-branch validator\n",
+         "runner.temp only inside runner-backed steps"),
+        ("bench-workflow-runner-context", "bench-acceptance.yml",
+         "name: bench-acceptance\n\n",
+         "name: bench-acceptance\n\nenv:\n"
+         "  REPORT_PATH: ${{ runner.temp }}/bench-acceptance/report.json\n\n",
+         "runner.temp only inside runner-backed steps"),
         ("bench-id-token", "bench-acceptance.yml",
-         "    permissions:\n      contents: read\n    env:\n",
-         "    permissions:\n      contents: read\n      id-token: write\n    env:\n",
+         "    permissions:\n      contents: read\n    steps:\n",
+         "    permissions:\n      contents: read\n      id-token: write\n    steps:\n",
          "permissions must match the exact reviewed inventory"),
         ("bench-environment", "bench-acceptance.yml",
-         "    permissions:\n      contents: read\n    env:\n",
-         "    permissions:\n      contents: read\n    environment: firmware-signing\n    env:\n",
+         "    permissions:\n      contents: read\n    steps:\n",
+         "    permissions:\n      contents: read\n    environment: firmware-signing\n    steps:\n",
          "protected Environment inventory drift"),
         ("bench-third-action", "bench-acceptance.yml",
          "      - name: Materialize inert report input\n",

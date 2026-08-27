@@ -42,8 +42,6 @@ jobs:
     timeout-minutes: 5
     permissions:
       contents: read
-    env:
-      REPORT_PATH: ${{ runner.temp }}/bench-acceptance/report.json
     steps:
       - name: Check out trusted default-branch validator
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -52,6 +50,7 @@ jobs:
           persist-credentials: false
       - name: Materialize inert report input
         env:
+          REPORT_PATH: ${{ runner.temp }}/bench-acceptance/report.json
           REPORT_JSON: ${{ inputs.report-json }}
         run: |
           set -euo pipefail
@@ -61,6 +60,7 @@ jobs:
       - name: Validate schema, plausibility and requested identity
         id: validate-report
         env:
+          REPORT_PATH: ${{ runner.temp }}/bench-acceptance/report.json
           EXPECTED_SHA: ${{ inputs.expected-source-sha }}
           EXPECTED_ARTIFACT_SHA256: ${{ inputs.expected-artifact-sha256 }}
           EXPECTED_PROFILE: ${{ inputs.expected-profile }}
