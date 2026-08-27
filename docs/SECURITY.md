@@ -458,14 +458,16 @@ Compilation and signing are separate trust domains:
    verifies that the PR head is current, then launches a distinct default-branch-defined rebuild of
    that exact SHA. This rebuild may execute PR code, but has exact read-only permissions, no
    repository/Environment secret, Environment, identity token, restored cache or access to the
-   primary artifact (its ephemeral `github.token` is read-scoped). Only its data
-   artifact crosses into the protected job. After the Environment approval wait, that job repeats
-   the head/repository/state/label checks and independently derives the exact
-   `<latest-complete-immutable-stable>-PR-<N>` version. It checks out the PR SHA only into an isolated
-   directory as **inert fingerprint data**: no executable, script, action or build from that checkout
-   is invoked in the key/write-capable job. The trusted default-branch validator compares the normal
-   producer and independent rebuild's exact 53 payload bytes plus manifest against that source and
-   exact version before provisioning the key; a different but regex-valid stable base fails too.
+   primary artifact (its ephemeral `github.token` is read-scoped). Only data artifacts from that
+   rebuild and the original secret-free build cross into the protected job. After the Environment
+   approval wait, that job repeats the head/repository/state/label checks and independently derives
+   the exact `<latest-complete-immutable-stable>-PR-<N>` version. It never checks out the PR: doing so
+   in a write/key-capable `workflow_run` would create an untrusted-checkout TOCTOU path even if the
+   intended use were read-only. Instead, the default-owned DAG binds both producing jobs to the same
+   exact current PR head, and the trusted default-branch validator requires their canonical manifests
+   and all 53 payload files to be byte-identical, structurally bounded and source-SHA/version-bound
+   before provisioning the key; a different but regex-valid stable base fails too. No file from
+   either artifact is executed in the protected job.
    Immediately before key provisioning, signed artifact upload and Pages publication, the protected
    job refetches the repository's current default-branch head and requires it to remain exactly the
    trusted `workflow_run` `github.sha`. A main advance therefore retires a queued old policy run

@@ -139,7 +139,6 @@ EXPECTED_ACTIONS = {
     ),
     ("signed-pr-preview.yml", "sign-preview"): (
         "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
-        "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
         "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c",
         "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c",
         "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
@@ -169,7 +168,7 @@ SIGNING_ENVIRONMENT_JOBS = {
 EXPECTED_PRIVILEGED_JOB_SHA256 = {
     ("build.yml", "publish"): "22c2ceeef6a0868703f10008e0d4f9f0b90458d5d2c9c66eb337c6919cc4d29c",
     ("build.yml", "deploy"): "cf1d70d6cf11600e3940ff58983a7101b75b191b8cdf10b8cfaebf60b20f2092",
-    ("signed-pr-preview.yml", "sign-preview"): "28f478a1a8de7158561ac6929ddcbe64306fd4806fb3b4498b8a7f5f5e8d09ed",
+    ("signed-pr-preview.yml", "sign-preview"): "24b664bb2ec5aa6220bdca95568781b8c25e8d2ff53c617956ee90ca07c4b22d",
 }
 TRUSTED_DEFAULT_ENV = "TRUSTED_DEFAULT_SHA: ${{ github.sha }}"
 TRUSTED_DEFAULT_FETCH = "git fetch --no-tags origin"
@@ -690,6 +689,10 @@ def validate(root: Path) -> None:
     )
     require("contents: write" not in build["logic-test"] and "contents: write" not in build["build"],
             "build.yml: untrusted build jobs must not write repository contents")
+    require(
+        build["logic-test"].count("fetch-depth: 0") == 1,
+        "build.yml:logic-test must fetch PR merge parents for commit whitespace validation",
+    )
 
     signed_text = contents.get("signed-pr-preview.yml", "")
     signed = jobs_by_file.get("signed-pr-preview.yml")
@@ -740,16 +743,17 @@ def validate(root: Path) -> None:
     )
     require(
         preview_checkout_refs
-        == ["${{ github.sha }}", "${{ needs.validate.outputs.head-sha }}"]
-        and signed["sign-preview"].count("persist-credentials: false") == 2,
-        "signed-pr-preview.yml protected checkouts must use exact refs without persisted credentials",
+        == ["${{ github.sha }}"]
+        and signed["sign-preview"].count("persist-credentials: false") == 1
+        and "ref: ${{ needs.validate.outputs.head-sha }}" not in signed["sign-preview"]
+        and "_ci-source" not in signed["sign-preview"],
+        "signed-pr-preview.yml protected signer must never check out PR code",
     )
     require(
-        "ref: ${{ needs.validate.outputs.head-sha }}" in signed["sign-preview"]
-        and "path: _ci-source" in signed["sign-preview"]
-        and "check-build-artifact-inventory.py" in signed["sign-preview"]
+        "check-build-artifact-inventory.py" in signed["sign-preview"]
         and "--compare-to _ci-independent" in signed["sign-preview"]
-        and "--source-root _ci-source" in signed["sign-preview"]
+        and "--accept-workflow-attested-source" in signed["sign-preview"]
+        and "--workflow-attested _ci-independent" in signed["sign-preview"]
         and "name: trusted-preview-rebuild-${{ needs.validate.outputs.head-sha }}"
         in signed["sign-preview"]
         and "name: firmware-independent-rebuild" not in signed["sign-preview"]
@@ -757,7 +761,7 @@ def validate(root: Path) -> None:
         and signed["sign-preview"].index("check-build-artifact-inventory.py")
         < signed["sign-preview"].index("Revalidate PR immediately before key provisioning")
         < signed["sign-preview"].index("Provision OTA signing key"),
-        "signed-pr-preview.yml must compare trusted independent bytes for the exact inert PR source",
+        "signed-pr-preview.yml must compare exact-head workflow-attested bytes without a PR checkout",
     )
     require(
         signed["sign-preview"].count(TRUSTED_DEFAULT_ENV) == 3
@@ -783,10 +787,14 @@ def validate(root: Path) -> None:
             f"signed-pr-preview.yml {begin}: current trusted default SHA check is missing",
         )
     require(
-        "_ci-source/" not in signed["sign-preview"]
-        and "cd _ci-source" not in signed["sign-preview"]
-        and "working-directory: _ci-source" not in signed["sign-preview"],
-        "signed-pr-preview.yml protected job must never execute the inert PR checkout",
+        not re.search(
+            r"(?:^|\s)(?:bash|sh|python3|node)\s+_ci-(?:input|independent)/|"
+            r"(?:^|\s)\./_ci-(?:input|independent)/|"
+            r"working-directory:\s*_ci-(?:input|independent)",
+            signed["sign-preview"],
+            re.MULTILINE,
+        ),
+        "signed-pr-preview.yml protected job must never execute a downloaded artifact",
     )
     require(
         signed["sign-preview"].count(
@@ -1216,9 +1224,7 @@ def self_test(root: Path) -> None:
          "      # The workflow and scripts always come from the trusted default branch, never the PR ref.\n"
          "      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1\n"
          "        with:\n          ref: refs/heads/main",
-         "protected checkouts must use exact refs"),
-        ("preview-privileged-path", "signed-pr-preview.yml", "          path: _ci-source\n",
-         "          path: _ci-source-alt\n", "exact privileged job schema drift"),
+         "protected signer must never check out PR code"),
         ("preview-privileged-persist", "signed-pr-preview.yml",
          "      # The workflow and scripts always come from the trusted default branch, never the PR ref.\n"
          "      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1\n"
@@ -1228,7 +1234,7 @@ def self_test(root: Path) -> None:
          "      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1\n"
          "        with:\n          ref: ${{ github.sha }}\n          fetch-depth: 0\n"
          "          persist-credentials: true",
-         "protected checkouts must use exact refs"),
+         "protected signer must never check out PR code"),
         ("preview-privileged-run-id", "signed-pr-preview.yml",
          "          run-id: ${{ github.event.workflow_run.id }}\n",
          "          run-id: ${{ github.run_id }}\n", "exact privileged job schema drift"),
@@ -1257,13 +1263,14 @@ def self_test(root: Path) -> None:
          "before every branch mutation"),
         ("preview-trusted-trigger", "signed-pr-preview.yml", "  workflow_run:\n",
          "  workflow_dispatch:\n", "default-branch-owned completed-build workflow_run"),
-        ("preview-source-inventory", "signed-pr-preview.yml", "path: _ci-source",
-         "path: _ci-missing", "exact inert PR source"),
+        ("preview-workflow-attestation", "signed-pr-preview.yml",
+         "--accept-workflow-attested-source",
+         "--accept-unbound-workflow-source", "workflow-attested bytes"),
         ("preview-executes-pr", "signed-pr-preview.yml",
          "          meta=_ci-input/dist/build-metadata.txt\n",
-         "          bash _ci-source/scripts/ci-build-all.sh local local\n"
+         "          bash _ci-input/scripts/ci-build-all.sh local local\n"
          "          meta=_ci-input/dist/build-metadata.txt\n",
-         "must never execute the inert PR checkout"),
+         "must never execute a downloaded artifact"),
         ("preview-trusted-rebuild-ref", "signed-pr-preview.yml",
          "      - name: Check out exact PR head for isolated rebuild\n"
          "        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1\n"
@@ -1294,13 +1301,13 @@ def self_test(root: Path) -> None:
          "      - name: Download trusted independent PR rebuild as data\n"
          "        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1\n"
          "        with:\n"
-         "          name: firmware-independent-rebuild", "trusted independent bytes"),
+         "          name: firmware-independent-rebuild", "workflow-attested bytes"),
         ("preview-wrong-stable-base", "signed-pr-preview.yml",
          'if [ "$version" != "$EXPECTED_VERSION" ]; then',
          'if ! [[ "$version" =~ ^[0-9]+\\.[0-9]+\\.[0-9]+-PR-${PR_NUMBER}$ ]]; then',
          "exact stable-base version"),
         ("preview-independent-bytes", "signed-pr-preview.yml", "--compare-to _ci-independent",
-         "--compare-to _ci-input", "trusted independent bytes"),
+         "--compare-to _ci-input", "workflow-attested bytes"),
         ("preview-upload-head", "signed-pr-preview.yml",
          "name: tesla-key-esp32-pr${{ needs.validate.outputs.pr }}-${{ needs.validate.outputs.head-sha }}",
          "name: tesla-key-esp32-pr${{ needs.validate.outputs.pr }}",
@@ -1315,7 +1322,7 @@ def self_test(root: Path) -> None:
          "Validate stale signed artifact after upload", "current trusted default SHA"),
         ("preview-pre-key-revalidation", "signed-pr-preview.yml",
          "Revalidate PR immediately before key provisioning",
-         "Revalidate PR after key provisioning", "trusted independent bytes"),
+         "Revalidate PR after key provisioning", "workflow-attested bytes"),
         ("preview-current-default", "signed-pr-preview.yml",
          TRUSTED_DEFAULT_ENV, "TRUSTED_DEFAULT_SHA: ${{ needs.validate.outputs.head-sha }}",
          "current trusted default SHA"),

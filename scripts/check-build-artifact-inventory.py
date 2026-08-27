@@ -4,7 +4,9 @@
 The producing build is untrusted at the signing boundary.  Its inventory becomes evidence only
 after this trusted validator independently recomputes the expected checkout fingerprint, rejects
 any path-shape drift, and copies every allowlisted regular file through no-follow file descriptors
-into a private signer-owned directory.
+into a private signer-owned directory.  The signed-preview workflow has a narrower exception: its
+protected job must not check out PR code, so two exact-SHA, secret-free workflow jobs attest the
+source identity and the signer compares their complete inventories without executing either one.
 """
 
 from __future__ import annotations
@@ -435,7 +437,12 @@ def parse_manifest(raw: bytes) -> dict[str, Any]:
 
 
 def verify_inventory(
-    artifact_root: Path, source_root: Path, expected_source_sha: str, version: str
+    artifact_root: Path,
+    source_root: Path | None,
+    expected_source_sha: str,
+    version: str,
+    *,
+    accept_workflow_attested_source: bool = False,
 ) -> dict[str, Any]:
     require(
         VERSION_RE.fullmatch(version) is not None and len(version) <= 31,
@@ -451,9 +458,20 @@ def verify_inventory(
     document = parse_manifest(raw)
     require(document["displayVersion"] == version,
             "artifact inventory display version differs from trusted expectation")
-    trusted_source = source_state(source_root, expected_source_sha)
-    require(document["source"] == trusted_source,
-            "builder-claimed source fingerprint differs from the independently inspected checkout")
+    if accept_workflow_attested_source:
+        require(
+            document["source"]["commit"] == expected_source_sha,
+            "workflow-attested source commit differs from the exact expected PR head",
+        )
+        trusted_source = document["source"]
+    else:
+        require(source_root is not None,
+                "source root is required without exact workflow source attestation")
+        trusted_source = source_state(source_root, expected_source_sha)
+        require(
+            document["source"] == trusted_source,
+            "builder-claimed source fingerprint differs from the independently inspected checkout",
+        )
     expected_document = inventory_document(artifact_root, trusted_source, version)
     require(document == expected_document,
             "artifact payload size/digest differs from its canonical inventory")
@@ -501,17 +519,29 @@ def compare_relative(left_fd: int, right_fd: int, relative: str, maximum: int) -
 def compare_inventories(
     artifact_root: Path,
     comparison_root: Path,
-    source_root: Path,
+    source_root: Path | None,
     expected_source_sha: str,
     version: str,
+    *,
+    accept_workflow_attested_source: bool = False,
 ) -> dict[str, Any]:
     artifact_root = ensure_root(artifact_root, "primary artifact root")
     comparison_root = ensure_root(comparison_root, "independent artifact root")
     require(not os.path.samefile(artifact_root, comparison_root),
             "primary and independent artifact roots must be distinct directories")
-    primary = verify_inventory(artifact_root, source_root, expected_source_sha, version)
+    primary = verify_inventory(
+        artifact_root,
+        source_root,
+        expected_source_sha,
+        version,
+        accept_workflow_attested_source=accept_workflow_attested_source,
+    )
     independent = verify_inventory(
-        comparison_root, source_root, expected_source_sha, version
+        comparison_root,
+        source_root,
+        expected_source_sha,
+        version,
+        accept_workflow_attested_source=accept_workflow_attested_source,
     )
     require(primary == independent,
             "primary and independent canonical artifact inventories differ")
@@ -567,16 +597,29 @@ def copy_file_no_follow(source_fd: int, destination: Path, relative: str) -> Non
 def copy_verified_inventory(
     artifact_root: Path,
     destination: Path,
-    source_root: Path,
+    source_root: Path | None,
     expected_source_sha: str,
     version: str,
     comparison_root: Path | None = None,
+    *,
+    accept_workflow_attested_source: bool = False,
 ) -> dict[str, Any]:
     if comparison_root is None:
-        document = verify_inventory(artifact_root, source_root, expected_source_sha, version)
+        document = verify_inventory(
+            artifact_root,
+            source_root,
+            expected_source_sha,
+            version,
+            accept_workflow_attested_source=accept_workflow_attested_source,
+        )
     else:
         document = compare_inventories(
-            artifact_root, comparison_root, source_root, expected_source_sha, version
+            artifact_root,
+            comparison_root,
+            source_root,
+            expected_source_sha,
+            version,
+            accept_workflow_attested_source=accept_workflow_attested_source,
         )
     destination = ensure_root(destination, "private signer stage", empty=True)
     source_fd = open_root(ensure_root(artifact_root, "artifact root"))
@@ -586,7 +629,13 @@ def copy_verified_inventory(
     finally:
         os.close(source_fd)
     # This second full validation rehashes the private copy and closes the pre-copy/post-copy gap.
-    copied = verify_inventory(destination, source_root, expected_source_sha, version)
+    copied = verify_inventory(
+        destination,
+        source_root,
+        expected_source_sha,
+        version,
+        accept_workflow_attested_source=accept_workflow_attested_source,
+    )
     require(copied == document, "private signer stage inventory differs after verified copy")
     return copied
 
@@ -625,6 +674,30 @@ def self_test(source_root: Path) -> None:
         assert compare_inventories(
             artifact, private, source_root, source_sha, "1.2.3-test"
         ) == document
+        workflow_private = base / "workflow-private"
+        workflow_private.mkdir()
+        assert copy_verified_inventory(
+            artifact,
+            workflow_private,
+            None,
+            source_sha,
+            "1.2.3-test",
+            private,
+            accept_workflow_attested_source=True,
+        ) == document
+        try:
+            compare_inventories(
+                artifact,
+                private,
+                None,
+                "f" * 40,
+                "1.2.3-test",
+                accept_workflow_attested_source=True,
+            )
+        except InventoryError as exc:
+            assert "workflow-attested source commit" in str(exc)
+        else:
+            raise AssertionError("workflow attestation accepted the wrong exact PR head")
 
         def rejected(mutator: Any, expected: str) -> None:
             mutated = base / "mutated"
@@ -732,6 +805,7 @@ def main() -> int:
     parser.add_argument("--compare-to", type=Path)
     parser.add_argument("--artifact-root", type=Path, default=Path.cwd())
     parser.add_argument("--source-root", type=Path, default=Path.cwd())
+    parser.add_argument("--accept-workflow-attested-source", action="store_true")
     parser.add_argument("--expected-source-sha")
     parser.add_argument("--version")
     parser.add_argument("--self-test", action="store_true")
@@ -746,6 +820,12 @@ def main() -> int:
             parser.error("--expected-source-sha and --version are required")
         if args.write and args.compare_to is not None:
             parser.error("--compare-to is valid only with --verify or --copy-to")
+        if args.accept_workflow_attested_source and (
+            args.write or args.compare_to is None
+        ):
+            parser.error(
+                "--accept-workflow-attested-source requires two compared verify/copy artifacts"
+            )
         if args.write:
             document = write_inventory(
                 args.artifact_root, args.source_root, args.expected_source_sha, args.version
@@ -759,6 +839,7 @@ def main() -> int:
                 args.expected_source_sha,
                 args.version,
                 args.compare_to,
+                accept_workflow_attested_source=args.accept_workflow_attested_source,
             )
             action = (
                 "independently compared + privately staged"
@@ -773,6 +854,7 @@ def main() -> int:
                     args.source_root,
                     args.expected_source_sha,
                     args.version,
+                    accept_workflow_attested_source=args.accept_workflow_attested_source,
                 )
                 action = "independently byte-compared"
             else:

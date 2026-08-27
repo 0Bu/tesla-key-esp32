@@ -27,6 +27,9 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # repo-lint checks the checked-out commit itself; PR merge refs need both parents present.
+          fetch-depth: 0
       - name: Validate runner-neutral agent configuration
         run: ./tools/agent-config/selftest.sh
       - name: Validate repository syntax, links and workflow policy

@@ -2,10 +2,10 @@
 # Sign data-only CI build outputs and assemble release/Pages artifacts. This script must run only
 # from trusted default-branch code; it never compiles or executes anything from the input artifact.
 #
-# Usage: ./scripts/ci-sign-artifacts.sh <version> <unsigned-dir> <source-sha> <source-root> <independent-root>
+# Usage: ./scripts/ci-sign-artifacts.sh <version> <unsigned-dir> <source-sha> <source-root|--workflow-attested> <independent-root>
 set -euo pipefail
 
-usage="ci-sign-artifacts.sh <version> <unsigned-dir> <source-sha> <source-root> <independent-root>"
+usage="ci-sign-artifacts.sh <version> <unsigned-dir> <source-sha> <source-root|--workflow-attested> <independent-root>"
 version="${1:?usage: $usage}"
 unsigned_input="${2:?usage: $usage}"
 expected_source_sha="${3:?usage: $usage}"
@@ -74,13 +74,24 @@ flash_frequency() { [[ "$1" == esp32 ]] && echo 40m || echo 80m; }
 
 # Complete every key-free check before the first invocation that can read the private key. This
 # prevents stale, cross-target or structurally corrupt PR-produced bytes from being validly signed.
-# The producer's inventory is not a trusted source attestation. Recompute it from the separately
-# selected checkout, reject every extra/missing/symlinked path, then copy through no-follow file
-# descriptors into a private stage and rehash that copy before the key boundary.
-python3 scripts/check-dependency-contract.py --root "$source_root"
+# The producer's inventory is not a trusted source attestation. Production recomputes it from the
+# separately selected checkout. The signed-preview exception deliberately has no PR checkout in
+# the protected job: two secret-free, exact-head workflow jobs attest the same SHA and the signer
+# requires their complete manifests and all 53 payload files to be byte-identical. Both modes copy
+# through no-follow file descriptors into a private stage and rehash it before the key boundary.
+inventory_source_args=(--source-root "$source_root")
+if [[ "$source_root" == --workflow-attested ]]; then
+  inventory_source_args=(--accept-workflow-attested-source)
+else
+  [[ -d "$source_root" && ! -L "$source_root" ]] || {
+    echo "source root is missing, non-directory or symlinked: $source_root" >&2
+    exit 1
+  }
+  python3 scripts/check-dependency-contract.py --root "$source_root"
+fi
 python3 scripts/check-build-artifact-inventory.py \
   --copy-to "$private_stage" --artifact-root "$artifact_root" \
-  --compare-to "$independent_root" --source-root "$source_root" \
+  --compare-to "$independent_root" "${inventory_source_args[@]}" \
   --expected-source-sha "$expected_source_sha" --version "$version"
 unsigned_dir="$private_stage/_unsigned"
 python3 scripts/check-partition-contract.py --csv partitions.csv

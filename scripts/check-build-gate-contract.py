@@ -1046,10 +1046,12 @@ def validate(root: Path) -> None:
         and "ref: ${{ github.sha }}" in preview_workflow
         and "ref: ${{ needs.validate.outputs.head-sha }}\n          fetch-depth: 0"
         in preview_workflow
-        and "path: _ci-source" in preview_workflow
-        and "ref: ${{ needs.validate.outputs.head-sha }}" in preview_workflow
-        and "--source-root _ci-source" in preview_workflow
+        and preview_workflow.count("ref: ${{ needs.validate.outputs.head-sha }}") == 1
+        and "path: _ci-source" not in preview_workflow
+        and "--source-root _ci-source" not in preview_workflow
         and "--compare-to _ci-independent" in preview_workflow
+        and "--accept-workflow-attested-source" in preview_workflow
+        and "--workflow-attested _ci-independent" in preview_workflow
         and preview_workflow.count(
             "name: trusted-preview-rebuild-${{ needs.validate.outputs.head-sha }}"
         ) == 2
@@ -1389,6 +1391,9 @@ def self_test(root: Path) -> None:
          "python3 scripts/check-pages-manifest.py", "branch-backed Pages before key"),
         ("preview-independent-compare", ".github/workflows/signed-pr-preview.yml",
          "--compare-to _ci-independent", "--compare-to _ci-input",
+         "default-owned rebuild"),
+        ("preview-workflow-attestation", ".github/workflows/signed-pr-preview.yml",
+         "--accept-workflow-attested-source", "--accept-unbound-workflow-source",
          "default-owned rebuild"),
         ("preview-trusted-dag", ".github/workflows/signed-pr-preview.yml",
          "needs: [validate, trusted-rebuild]", "needs: validate",

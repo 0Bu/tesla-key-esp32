@@ -2,9 +2,9 @@ name: signed-pr-preview
 
 # The unprivileged build workflow may execute PR code but never receives the OTA key. Once it
 # succeeds, this default-branch workflow independently rebuilds that exact head on a separate
-# repository-secret/write/environment/cache-free runner. The protected job later checks out the PR only as
-# inert fingerprint data and never executes it. A maintainer must opt in with the `signed-preview`
-# label; protect the firmware-signing Environment with required reviewers as a second approval.
+# repository-secret/write/environment/cache-free runner. The protected job never checks out the PR;
+# it accepts only two byte-identical exact-head build artifacts as inert data. A maintainer must opt
+# in with the `signed-preview` label; protect the firmware-signing Environment with required reviewers.
 on:
   workflow_run:
     workflows: [build]
@@ -184,15 +184,6 @@ jobs:
           (( ${#version} <= 31 ))
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
-      # Inspect the exact PR source as inert data with the trusted default-branch validator. No
-      # executable or script from this checkout is invoked in the protected signing job.
-      - name: Check out expected PR source for independent fingerprinting
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ needs.validate.outputs.head-sha }}
-          path: _ci-source
-          persist-credentials: false
-
       - name: Download successful PR build as data
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -233,12 +224,12 @@ jobs:
             echo "refusing symlinks in unsigned artifact" >&2
             exit 1
           fi
-          # Neither producer inventory is trusted provenance on its own. The default-branch
-          # validator recomputes the exact source fingerprint and compares all 53 payload files
-          # plus the canonical manifest from the separate trusted-workflow rebuild before any key.
+          # Neither producer inventory is trusted provenance on its own. The default-owned DAG
+          # binds both secret-free jobs to the same exact PR head, then this protected job compares
+          # all 53 payload files plus the canonical manifest without checking out or executing PR code.
           python3 scripts/check-build-artifact-inventory.py \
             --verify --artifact-root _ci-input --compare-to _ci-independent \
-            --source-root _ci-source \
+            --accept-workflow-attested-source \
             --expected-source-sha "$EXPECTED_SHA" --version "$version"
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
@@ -286,7 +277,7 @@ jobs:
           EXPECTED_SHA: ${{ needs.validate.outputs.head-sha }}
         run: >-
           ./scripts/idf-docker.sh ./scripts/ci-sign-artifacts.sh
-          "$DISPLAY_VERSION" _ci-input/_unsigned "$EXPECTED_SHA" _ci-source _ci-independent
+          "$DISPLAY_VERSION" _ci-input/_unsigned "$EXPECTED_SHA" --workflow-attested _ci-independent
 
       - name: Remove OTA signing key
         if: always()

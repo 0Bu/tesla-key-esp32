@@ -445,9 +445,11 @@ on a separate runner defined by the trusted workflow. That job can execute PR so
 secrets, write/identity-token scope, Environment, restored cache or access to the primary artifact.
 Only after the two exact 53-file inventories plus manifests match does the signer enter the protected
 `firmware-signing` Environment, revalidate state/head/label after the approval wait, and recompute the
-latest complete immutable stable version base. The protected job checks out the PR only as isolated,
-inert source data for its canonical fingerprint; it never executes anything from that checkout and
-does not provision the key until both rebuilds and the exact `<base>-PR-<N>` identity match. It also
+latest complete immutable stable version base. The protected job never checks out the PR; the
+default-owned DAG binds both secret-free producers to the exact head, and the signer treats their
+byte-identical, source-SHA/version-bound inventories only as bounded data. It never executes an
+artifact file and does not provision the key until both rebuilds and the exact `<base>-PR-<N>`
+identity match. It also
 refetches the current default branch immediately before key provisioning, artifact upload and Pages
 publication and requires all three checks to equal the trusted workflow's exact `github.sha`; a main
 advance retires the stale queued policy run. CI then writes
