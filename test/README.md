@@ -83,6 +83,8 @@ The firmware delegates these decision/conversion cores to IDF-free headers under
 | Per-task stack-headroom status contract (one nested byte-valued block; sampled tasks present, never-sampled/safe-mode tasks absent rather than zero) | `logic/status_model.hpp` | `stack_watch.cpp`; samples in `http_server.cpp`, `vehicle_telemetry.cpp`, `vehicle_pairing.cpp`, `mqtt_ha.cpp` |
 | OTA rollback health and operation gate (commit on proven link PLUS uptime floor PLUS INTERNAL largest block ≥4 KiB; setup-mode link exemption; give up past cap; shared OTA/identity/FaultRestart/HealthCommit CAS; both mark-valid paths re-check heap after ownership; only persisted rebooting MQTT/Syslog/WiFi/setup saves may confirm early) | `logic/health_gate.hpp` | `main.cpp` `ota_health_gate_task`, `ota_update.cpp` guards/wrappers, `vehicle_telemetry.cpp`, `http_config.cpp`; owner/heap-return mutation canaries; `/set_vin` and `/gen_keys[?force=1]` are 503-blocked during PendingVerify/unknown/active work and never confirm probation |
 | Dual-task start barrier (Creating → Running or Cancelled → exact acknowledgement/reset) | `logic/task_start_gate.hpp` | `vehicle_ctrl.cpp`, `vehicle_telemetry.cpp`, `vehicle_pairing.cpp`; fault-injected second-create failure proves zero protected-resource access before cooperative self-delete |
+| NimBLE hidden-host-task acknowledgement (Idle → AwaitingSync → Synced/TimedOut, timeout terminal against a late callback) | `logic/nimble_start_gate.hpp` | `ble_client.cpp`; the runtime matrix also pins sync/reset ordering and sticky saturating reset evidence consumed by OTA health |
+| Syslog startup commit gate (Waiting → Running/Cancelled, both terminal) | `logic/syslog_start_gate.hpp` | `syslog.cpp`; the runtime matrix proves pre-commit task isolation, unpublished-queue cleanup on create failure, release/acquire publication on success and no deletion after publication |
 | Global essential-runtime admission (Booting → Ready/SafeMode/Fatal, terminal fail-closed states) | `logic/runtime_admission.hpp` | `main.cpp`, vehicle task entries, HTTP/MCP/command/telemetry gates and OTA health admission |
 | Generation-owned asynchronous ping completion (late/out-of-order callback rejection, retire vs unstarted abandon) | `logic/ping_probe.hpp` | shared `ping_probe.hpp` lifecycle used by `net.cpp` and `syslog.cpp` |
 | MQTT broker URI + save-time pre-flight (the credential-aware `mqtts://` default and its explicit-scheme override, host:port plausibility incl. userinfo, credential-free status/log projection, the probe's contiguous-heap budget, and the outcome→HTTP-status mapping that keeps "refused" apart from "unreachable") | `logic/mqtt_uri.hpp` | `mqtt_ha.cpp` `mqtt_ha_start_impl`, `http_config.cpp` `handle_set_mqtt` |
@@ -117,7 +119,10 @@ The suite also has gates outside the single pure-logic translation unit:
   close the restart/activity window conservatively. The same executable compiles the production
   `ping_probe.hpp` against an esp_ping/FreeRTOS stub and covers session-create/start failure,
   reply/no-reply, timeout→stop→late-end quarantine, stale-generation rejection and exact cleanup
-  before reuse.
+  before reuse. Its startup fault matrices also pin NimBLE sync/reset admission, the Syslog
+  queue-publication lifetime, and reverse-order W5500 cleanup across every partial acquisition;
+  a failed Ethernet driver uninstall deliberately preserves the dependent PHY/MAC/SPI tail and
+  fails closed.
 - `test/test_runtime_boundary_contract.py` derives its C++ source inventory from the literal
   `main/CMakeLists.txt` `SRCS` block (including nested `.cpp`/`.cc`/`.cxx` files), then derives the
   current task/callback inventory from actual registration calls and callback-bearing structs

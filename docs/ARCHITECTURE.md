@@ -609,6 +609,12 @@ independently redacted fragments.
   (`have_checked`, not `!resolved` — a persistently failing DNS/host must not re-run
   `getaddrinfo()`+ping every loop). **Delivery gates on DNS resolution only** (`resolved`) —
   never on the reachability probe below — since Syslog is inherently best-effort UDP.
+  Startup uses `logic/syslog_start_gate.hpp` because FreeRTOS may schedule the consumer before
+  `xTaskCreate()` returns. The task waits while its queue remains startup-local and unpublished;
+  only a successful create commits the gate and publishes the process-lifetime queue with
+  release/acquire ordering. A create failure cancels the waiter before deleting the unpublished
+  queue. Once published, the global log hook may have snapshotted it at any time, so normal boot
+  never deletes it — optional forwarding degrades without creating a hook-versus-delete UAF.
 - **Reachability probe (advisory only, never a delivery gate):** ARP for an on-subnet host (L2,
   works even when the collector firewalls ICMP), else a 2-echo ICMP ping (800 ms timeout each).
   Surfaced in `/status.syslog.reachable` purely as a UI hint ("Enabled · not answering ping").
@@ -856,6 +862,15 @@ holds stays free on a device whose binding limit is the largest *contiguous* blo
 4. On the wired path the WiFi credential-rollback backup is **not** consumed: coming up on
    Ethernet proves nothing about credentials on trial, and spending them there would discard the
    only way back to a working network the moment the cable is unplugged.
+
+Every resource acquired after the positive probe is owned by one startup record until activation
+commits. A failure unwinds in dependency-reverse order: stop the driver; unregister IP/Ethernet
+handlers; retract the coherent globals; delete glue and netif; uninstall the driver; delete PHY,
+MAC and event group; finally release SPI. If driver uninstall fails, its PHY/MAC/SPI tail is kept
+alive and boot fails closed — deleting objects still reachable by the driver would turn a bounded
+startup fault into dangling callbacks or a later UAF. A no-link/DHCP boot fallback is different:
+the successfully activated Ethernet stack remains process-lifetime state so a later cable can
+take over without rebooting.
 
 **Polling mode is deliberate, not a workaround.** The M5Stack ATOMIC PoE Base routes only
 SCLK/CS/MISO/MOSI + power — there is no INT line and no RST line to wire — so the driver polls at
@@ -1521,6 +1536,13 @@ task entries wait without touching the car until `Ready`; vehicle-active HTTP/MC
 503 and the shared command/telemetry entry points refuse work unless the same gate is ready. The OTA
 health task also treats `Booting`, `SafeMode` and `Fatal` as non-health evidence, so a partial boot
 cannot spend rollback merely because its timer survived.
+
+NimBLE has an additional acknowledgement boundary because the pinned ESP-IDF wrapper starts its
+hidden host task through a void function that cannot report task-create failure. `ble_client.start`
+does not admit the essential service until the real host sync callback wins a bounded
+`logic/nimble_start_gate.hpp` transition. Timeout is terminal, so a late callback cannot resurrect
+boot. OTA health snapshots that positive sync and a saturating per-boot reset counter, then refuses
+confirmation if the host is no longer synced or any reset occurred after admission.
 
 - **Essential** — `config`/`tesla_ble` NVS, `VehicleController::init` (its sync primitives + tasks),
   the WiFi event group/station netif/watchdog semaphore+task, NimBLE and its BLE mutex/timer
