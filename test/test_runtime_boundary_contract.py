@@ -581,7 +581,7 @@ def function_body_in(text: str, name: str) -> str:
         rf"^[ \t]*(?:extern\s+\"C\"\s+)?(?:static\s+)?"
         rf"(?:[A-Za-z_]\w*(?:::\w+)*(?:[<>,*&]+)?[ \t]+)+"
         rf"(?:[A-Za-z_]\w*::)*{re.escape(name)}\s*\([^;{{}}]*\)\s*"
-        rf"(?:noexcept\s*)?\{{",
+        rf"(?:const\s*)?(?:noexcept\s*)?\{{",
         re.MULTILINE,
     )
     match = definition.search(text)
@@ -2589,6 +2589,35 @@ def require_ota_status_lock_contract(ota_source: str, runtime_tests: str) -> Non
     if publisher.count("s_status = candidate;") != 1 or re.search(r"s_status\s*\.", publisher):
         raise AssertionError("OTA completed-check publisher is not one whole-snapshot assignment")
 
+    # set_check_error() is the last-resort path used from exception/OOM catches and task-create
+    # failure. It is noexcept by design: keep the entire path fixed-buffer-only and publish one
+    # complete generation, otherwise a second allocation failure would terminate the task and a
+    # partial set_state() fallback could expose mixed check fields to concurrent readers.
+    if not re.search(
+        r"static\s+void\s+set_check_error\s*\(\s*const\s+char\s*\*\s*message\s*\)\s*"
+        r"noexcept\s*\{",
+        ota_source,
+    ):
+        raise AssertionError("OTA check-error fallback must remain noexcept")
+    error = scrub_cpp(function_body_in(ota_source, "set_check_error"))
+    for token in (
+        "OtaStatusPod candidate{};",
+        "candidate.state = OtaState::Error;",
+        "copy_status_text(candidate.message, message);",
+        "const std::string_view current = running_version();",
+        "copy_status_text(candidate.current, current.data());",
+        "publish_check_status(candidate);",
+    ):
+        if token not in error:
+            raise AssertionError(f"OTA check-error fixed snapshot missing {token!r}")
+    if error.count("publish_check_status(candidate);") != 1 or "s_status" in error:
+        raise AssertionError("OTA check-error fallback is not one whole-snapshot publication")
+    if re.search(
+        r"\b(?:std::string|new|throw|append|assign|set_state|malloc|calloc|realloc|strdup)\b",
+        error,
+    ):
+        raise AssertionError("OTA check-error fallback can allocate, throw, or publish partially")
+
     for token in (
         "test_ota_status_lock_failure_matrix",
         "read_alloc_failure.status_reads == 0",
@@ -2607,11 +2636,10 @@ def require_ota_status_lock_contract(ota_source: str, runtime_tests: str) -> Non
 
 def require_ble_callback_lock_contract(ble_source: str) -> None:
     """Keep NimBLE-host and esp_timer callbacks off unbounded lifecycle waits."""
-    callback_reachable = (
+    callback_entries = {
         "on_scan_timeout",
         "on_sync",
         "on_reset",
-        "ensure_scanning_",
         "disconnect_from_callback_",
         "on_gap_event",
         "on_svc_disc",
@@ -2619,14 +2647,80 @@ def require_ble_callback_lock_contract(ble_source: str) -> None:
         "subscribe_notify_",
         "on_dsc_disc",
         "on_subscribe_write",
+    }
+    local_functions = set(re.findall(r"\bBleClient::([A-Za-z_]\w*)\s*\(", scrub_cpp(ble_source)))
+    callback_reachable = set(callback_entries)
+    pending = list(callback_entries)
+    while pending:
+        name = pending.pop()
+        body = function_body_in(ble_source, name)
+        for helper in called_functions(body) & local_functions:
+            if helper not in callback_reachable:
+                callback_reachable.add(helper)
+                pending.append(helper)
+
+    expected_callback_reachable = {
+        "cancel_scan_locked_",
+        "connection_snapshot_matches_",
+        "disconnect_from_callback_",
+        "ensure_scanning_",
+        "ensure_scanning_locked_",
+        "has_gap_link_",
+        "note_connectable_",
+        "note_scan_",
+        "on_chr_disc",
+        "on_dsc_disc",
+        "on_gap_event",
+        "on_reset",
+        "on_scan_timeout",
+        "on_subscribe_write",
+        "on_svc_disc",
+        "on_sync",
+        "start_scan_locked_",
+        "subscribe_notify_",
+        "terminate_published_link_",
+    }
+    require_exact(
+        "BLE callback-reachable local helper closure",
+        callback_reachable,
+        expected_callback_reachable,
     )
-    for name in callback_reachable:
+
+    allocation_or_throw = re.compile(
+        r"\b(?:std::string|std::vector|std::function|new|throw|malloc|calloc|realloc|"
+        r"strdup|asprintf|cJSON_\w+)\b"
+    )
+    blocking_wait = re.compile(
+        r"\b(?:xSemaphoreTake|xSemaphoreTakeRecursive|vTaskDelay|vTaskDelayUntil|"
+        r"ulTaskNotifyTake|xTaskNotifyWait|xQueueReceive|xQueuePeek)\s*\("
+    )
+    for name in sorted(callback_reachable):
         body = scrub_cpp(function_body_in(ble_source, name))
+        if allocation_or_throw.search(body):
+            raise AssertionError(
+                f"BLE callback path {name} contains an allocation or explicit throw"
+            )
+        if blocking_wait.search(body):
+            raise AssertionError(f"BLE callback path {name} contains a blocking RTOS wait")
+        guards = re.findall(r"\btk::SemGuard\s+\w+\s*\(([^()]*)\)\s*;", body)
+        if len(guards) != body.count("tk::SemGuard"):
+            raise AssertionError(f"BLE callback path {name} has an unparsed semaphore guard")
+        for raw_arguments in guards:
+            arguments = [argument.strip() for argument in raw_arguments.split(",")]
+            if len(arguments) != 2:
+                raise AssertionError(
+                    f"BLE callback path {name} uses an unbounded semaphore guard"
+                )
+            deadline = arguments[1].strip()
+            if deadline != "0" and not (name == "ensure_scanning_" and deadline == "timeout"):
+                raise AssertionError(
+                    f"BLE callback path {name} uses non-zero semaphore deadline {deadline!r}"
+                )
         if re.search(r"tk::SemGuard\s+\w+\s*\(\s*intent_mutex_\s*\)\s*;", body):
             raise AssertionError(
                 f"BLE callback path {name} uses the blocking intent-mutex guard"
             )
-        if name not in ("ensure_scanning_", "disconnect_from_callback_"):
+        if name in callback_entries - {"disconnect_from_callback_"}:
             if re.search(r"\bdisconnect\s*\(", body):
                 raise AssertionError(
                     f"BLE callback path {name} delegates to blocking disconnect()"
@@ -2636,6 +2730,17 @@ def require_ble_callback_lock_contract(ble_source: str) -> None:
                     raise AssertionError(
                         f"BLE callback path {name} delegates to a non-zero scan-lock deadline"
                     )
+
+    # The only callback-reachable parameterized wait adapter is accepted because every incoming
+    # edge in this reviewed closure passes zero. A task-side default call may still block without
+    # weakening the NimBLE-host boundary.
+    for caller in sorted(callback_reachable - {"ensure_scanning_"}):
+        body = function_body_in(ble_source, caller)
+        for deadline in re.findall(r"\bensure_scanning_\s*\(([^)]*)\)", scrub_cpp(body)):
+            if deadline.strip() != "0":
+                raise AssertionError(
+                    f"BLE callback helper {caller} reaches ensure_scanning_ with non-zero deadline"
+                )
 
     timeout = function_body_in(ble_source, "on_scan_timeout")
     for token in (
@@ -4886,6 +4991,33 @@ def self_test_canaries(tasks: set[str], callbacks: set[str]) -> None:
         lambda: require_ota_status_lock_contract(partial_check_publish, runtime_tests),
     )
 
+    allocating_check_error = ota_source.replace(
+        "static void set_check_error(const char* message) noexcept {\n"
+        "    OtaStatusPod candidate{};",
+        "static void set_check_error(const char* message) noexcept {\n"
+        "    std::string fallback_allocation;\n"
+        "    OtaStatusPod candidate{};",
+        1,
+    )
+    if allocating_check_error == ota_source:
+        raise AssertionError("OTA check-error allocation mutation did not apply")
+    require_mutation_rejected(
+        "OTA noexcept check-error fallback allocation",
+        lambda: require_ota_status_lock_contract(allocating_check_error, runtime_tests),
+    )
+
+    partial_check_error = ota_source.replace(
+        "    publish_check_status(candidate);\n}\n\n// ─── Small HTTPS GET",
+        "    set_state(OtaState::Error, 0, message);\n}\n\n// ─── Small HTTPS GET",
+        1,
+    )
+    if partial_check_error == ota_source:
+        raise AssertionError("OTA check-error partial-publication mutation did not apply")
+    require_mutation_rejected(
+        "OTA noexcept check-error fallback publishes partial status",
+        lambda: require_ota_status_lock_contract(partial_check_error, runtime_tests),
+    )
+
     ble_callback_source = SOURCES["ble_client.cpp"]
     blocking_ble_callback = ble_callback_source.replace(
         "tk::SemGuard intent(intent_mutex_, 0);",
@@ -4914,6 +5046,54 @@ def self_test_canaries(tasks: set[str], callbacks: set[str]) -> None:
     require_mutation_rejected(
         "BLE host callback delegates to blocking scan deadline",
         lambda: require_ble_callback_lock_contract(blocking_ble_scan),
+    )
+    blocking_ble_helper = ble_callback_source.replace(
+        "bool BleClient::start_scan_locked_() {",
+        "bool BleClient::start_scan_locked_() {\n"
+        "    tk::SemGuard regression(intent_mutex_);",
+        1,
+    )
+    if blocking_ble_helper == ble_callback_source:
+        raise AssertionError("BLE transitive-helper blocking-lock mutation did not apply")
+    require_mutation_rejected(
+        "BLE callback transitive helper uses unbounded lifecycle lock",
+        lambda: require_ble_callback_lock_contract(blocking_ble_helper),
+    )
+    blocking_ble_registry = ble_callback_source.replace(
+        "void BleClient::note_scan_(const ble_gap_disc_desc& d, const ble_hs_adv_fields& f) {",
+        "void BleClient::note_scan_(const ble_gap_disc_desc& d, const ble_hs_adv_fields& f) {\n"
+        "    tk::SemGuard regression(scan_mutex_);",
+        1,
+    )
+    if blocking_ble_registry == ble_callback_source:
+        raise AssertionError("BLE registry-helper blocking-lock mutation did not apply")
+    require_mutation_rejected(
+        "BLE callback registry helper uses unbounded lock",
+        lambda: require_ble_callback_lock_contract(blocking_ble_registry),
+    )
+    allocating_ble_helper = ble_callback_source.replace(
+        "void BleClient::terminate_published_link_() {",
+        "void BleClient::terminate_published_link_() {\n"
+        "    std::string callback_allocation;",
+        1,
+    )
+    if allocating_ble_helper == ble_callback_source:
+        raise AssertionError("BLE transitive-helper allocation mutation did not apply")
+    require_mutation_rejected(
+        "BLE noexcept disconnect helper chain allocates",
+        lambda: require_ble_callback_lock_contract(allocating_ble_helper),
+    )
+    raw_wait_ble_helper = ble_callback_source.replace(
+        "void BleClient::terminate_published_link_() {",
+        "void BleClient::terminate_published_link_() {\n"
+        "    (void)xSemaphoreTake(intent_mutex_, portMAX_DELAY);",
+        1,
+    )
+    if raw_wait_ble_helper == ble_callback_source:
+        raise AssertionError("BLE transitive-helper raw-wait mutation did not apply")
+    require_mutation_rejected(
+        "BLE noexcept disconnect helper chain waits on raw semaphore",
+        lambda: require_ble_callback_lock_contract(raw_wait_ble_helper),
     )
 
     controller_source = SOURCES["vehicle_ctrl.cpp"]
