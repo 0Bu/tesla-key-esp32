@@ -37,8 +37,10 @@ targets (where the driver is not compiled in).
 ## Flash prebuilt artifacts
 
 Browser flasher + WiFi/VIN setup: [../README.md](../README.md). The flasher is served on
-GitHub Pages (repository-vendored, hash-pinned esptool-js / Web Serial), rebuilt and deployed automatically by CI on every
-firmware change; each change also publishes a
+GitHub Pages (repository-vendored, hash-pinned esptool-js / Web Serial). CI publishes the root and
+signed `PR/<N>/` previews through the repository's single branch-backed authority,
+`gh-pages:/`; it does not use a Pages Actions artifact/deploy path. Every publishing workflow
+validates that Pages API mode/source before signing or branch mutation. Each firmware change also publishes a
 [GitHub release](https://github.com/0Bu/tesla-key-esp32/releases/latest) with the same bins.
 
 Flash by hand (needs `brew install esptool`). Use the per-target **merged** image — it bakes
@@ -126,6 +128,27 @@ ASCII hexadecimal characters for a raw PSK. Enterprise authentication is not sup
 
 WiFi, VIN, private key and BLE sessions live in the `nvs` partition (`0x9000`, namespaces
 `tesla_cfg` + `tesla_ble`).
+
+The exact persistence contract is `main/logic/nvs_contract.hpp`; the adapter rejects every
+unregistered namespace, key or storage API instead of truncating an unknown name. Records and
+their independent owners/retention are:
+
+| Namespace / logical key (stored key where different) | Owner | Retention |
+|---|---|---|
+| `tesla_cfg/cfg` | HTTP/provisioning atomic config | durable across OTA |
+| `tesla_cfg/wifi_ssid`, `wifi_pass`, `vin`, `mqtt_uri`, `syslog_uri` | legacy config mirror | downgrade compatibility |
+| `tesla_cfg/last_time` | clock | replaceable cache |
+| `tesla_cfg/vin_txn` | VIN transition | recovery journal |
+| `tesla_cfg/ble_mac` | BLE discovery | replaceable cache |
+| `tesla_cfg/reboot_why` | heap watchdog | recovery journal |
+| `tesla_cfg/boot_fails` | boot guard | recovery journal |
+| `tesla_cfg/disp_rot` | display | durable across OTA |
+| `tesla_cfg/disp_flip` | display | read-only legacy migration |
+| `tesla_ble/private_key` | pinned tesla-ble library | durable across OTA |
+| `tesla_ble/session_vcsec` (`sess_vcsec`), `session_infotainment` (`sess_info`) | pinned tesla-ble library | replaceable session cache |
+| `tesla_ble/paired_at` | pairing | replaceable metadata |
+| `tesla_ble/key_created` | pairing | durable across OTA |
+| `tesla_ble/key_rotate` | key rotation | recovery journal |
 
 - OTA, or verified signed app-only USB at `0x20000` followed by the `otadata` activation erase:
   `nvs` untouched → data kept.
@@ -296,7 +319,7 @@ GET  /status               { vin, ip, version, key_present, key_fingerprint,
                                 genuine measured zero remains visible),
                                sys itself is ALWAYS present —
                                the block a remote triage reads first; the heap figures are
-                               INTERNAL-only, so external RAM cannot mask them, and
+                               INTERNAL-only, so PSRAM on a board variant cannot mask them, and
                                largest_block is the number the heap watchdog acts on;
                                board_mac is the physical eFuse identity and remains visible
                                in ?redact=1 diagnostics),
@@ -319,7 +342,8 @@ GET  /diag[?verbose=0|1][?clear=1][?redact=1]   Plain-text in-memory diag log (v
                              the current verbose state for the web UI; redact=1 is the
                              bug-report form — it substitutes VIN/SSID/IP/vehicle-BLE-MAC/
                              broker/syslog-host per LINE, retains Board MAC, and fails closed
-                             on a truncated one)
+                             on a truncated one; a wrapped partial first line is discarded and
+                             any logical line over 288 bytes is emitted only as "<redacted>")
 GET  /coredump[?clear=1]   Stream the raw crash image (chunked octet-stream; 404 when there is
                              none, and permanently so on a device flashed before the coredump
                              partition existed). Decode it offline against the .elf of the
@@ -342,9 +366,13 @@ GET  /heap                 { dt, b0, b_boot, unit:"KiB", scale:10, free[], large
                              power cut), so the slope that PRECEDED a heap-watchdog reboot is
                              still there afterwards; b_boot is the bucket this boot began in,
                              so any sample before it came from an earlier run
-POST /gen_keys[?force=1]   Generate ECDSA P-256 key (refuses overwrite without force)
+POST /gen_keys[?force=1]   Generate ECDSA P-256 key (refuses overwrite without force).
+                             Identity mutation is Stable-only: PendingVerify, unknown OTA state
+                             or an active OTA/update returns 503 before any key is changed
 POST /send_key             Manually trigger pairing (charging_manager only; normally automatic)
 POST /set_vin              Persist VIN and reboot
+                             Identity mutation is Stable-only: PendingVerify, unknown OTA state
+                             or an active OTA/update returns 503 before the VIN journal starts
 POST /set_mqtt             Verify the MQTT broker, then persist it and reboot
                              ({"broker":"host:port"} or full "mqtt://…"; "" disables MQTT).
                              A changed, non-empty broker is CONNECTED to before it is saved:
@@ -437,7 +465,12 @@ tesla-key/<node>/drive       {shift,odometer}
 tesla-key/<node>/tires       {fl,fr,rl,rr,warn}
 tesla-key/<node>/closures    {locked,door,frunk,trunk,window,user}
 tesla-key/<node>/vehicle     {sleep_status: AWAKE | ASLEEP | IDLE | UNREACHABLE}
-tesla-key/<node>/device      {wifi_rssi,ble_rssi,ble_connected,paired,boot_time,free_heap,version}
+tesla-key/<node>/device      {wifi_rssi?,ble_rssi?,ble_connected,paired,boot_time?,free_heap,
+                              version,largest_block,min_free_heap,reset_reason,
+                              reset_reason_code,crash_dump,safe_mode,wifi_reconnects,
+                              mqtt_reconnects,httpd_stack_min_free_bytes?,
+                              vehicle_stack_min_free_bytes?,auto_pair_stack_min_free_bytes?,
+                              mqtt_stack_min_free_bytes?}
 homeassistant/<sensor|binary_sensor>/<node>/<object>/config   (discovery, retained)
 ```
 

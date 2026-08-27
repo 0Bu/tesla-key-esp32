@@ -26,11 +26,11 @@ static void load_legacy(NvsStorageAdapter& cfg, ConfigBlob& out) {
     legacy.vin       = CONFIG_TESLA_VIN;
     legacy.mqtt_uri  = CONFIG_TESLA_MQTT_BROKER_URI;
     legacy.syslog_uri = CONFIG_TESLA_SYSLOG_SERVER;
-    cfg.load_str("wifi_ssid", legacy.wifi_ssid);
-    cfg.load_str("wifi_pass", legacy.wifi_pass);
-    cfg.load_str("vin",       legacy.vin);
-    cfg.load_str("mqtt_uri",  legacy.mqtt_uri);
-    cfg.load_str("syslog_uri", legacy.syslog_uri);
+    cfg.load_str(nvs_contract::kLegacyWifiSsid, legacy.wifi_ssid);
+    cfg.load_str(nvs_contract::kLegacyWifiPass, legacy.wifi_pass);
+    cfg.load_str(nvs_contract::kLegacyVin, legacy.vin);
+    cfg.load_str(nvs_contract::kLegacyMqttUri, legacy.mqtt_uri);
+    cfg.load_str(nvs_contract::kLegacySyslogUri, legacy.syslog_uri);
     out = std::move(legacy);
 }
 
@@ -83,11 +83,11 @@ bool cfg_save(NvsStorageAdapter& cfg, const ConfigBlob& in) {
     // configuration. Best-effort by design and deliberately after the blob: the blob is the source
     // of truth from here on, so a failure to mirror costs only the downgrade path, and turning that
     // into a failed save would reject a credential change that has already been committed durably.
-    if (!cfg.save_str("wifi_ssid", in.wifi_ssid) ||
-        !cfg.save_str("wifi_pass", in.wifi_pass) ||
-        !cfg.save_str("vin",       in.vin) ||
-        !cfg.save_str("mqtt_uri",  in.mqtt_uri) ||
-        !cfg.save_str("syslog_uri", in.syslog_uri)) {
+    if (!cfg.save_str(nvs_contract::kLegacyWifiSsid, in.wifi_ssid) ||
+        !cfg.save_str(nvs_contract::kLegacyWifiPass, in.wifi_pass) ||
+        !cfg.save_str(nvs_contract::kLegacyVin, in.vin) ||
+        !cfg.save_str(nvs_contract::kLegacyMqttUri, in.mqtt_uri) ||
+        !cfg.save_str(nvs_contract::kLegacySyslogUri, in.syslog_uri)) {
         ESP_LOGW(TAG, "config saved, but the legacy key mirror is incomplete — only a downgrade to "
                       "a pre-blob build would notice");
     }

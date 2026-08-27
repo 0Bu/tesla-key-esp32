@@ -77,6 +77,11 @@ Per-target image **suffix** (must agree across four places —
 `[ bootloader@per-target, partition@32768, app@131072, ota_data_initial@61440 ]`. The browser verifies
 all bytes before writing and writes otadata last as the activation step.
 
+Pages has one serving topology: GitHub's branch-backed `legacy` mode from `gh-pages:/`, holding both
+the root channel and `PR/<N>/`. [`scripts/check-pages-source.py`](../../../scripts/check-pages-source.py)
+validates that API contract and the credential-free HTTPS URL; an Actions Pages mode, another
+branch/path or a Pages Actions artifact is not an alternate valid channel.
+
 Images are built unsigned by [`scripts/ci-build-all.sh`](../../../scripts/ci-build-all.sh), then
 signed only by trusted [`scripts/ci-sign-artifacts.sh`](../../../scripts/ci-sign-artifacts.sh)
 (`espsecure.py sign_data --version 2`, Secure Boot v2 RSA-3072; protected-Environment secret
@@ -86,7 +91,13 @@ freshness**; unprivileged CI uses only a disposable test key to exercise the rel
 Version coherence: [`scripts/select-release-version.sh`](../../../scripts/select-release-version.sh)
 reuses one valid Release tag already pointing at the exact source SHA (idempotent retry after a
 partial publish), but only while that tag is the newest valid tag and the source is still
-`origin/main`; otherwise it blocks stale runs. For an untagged current main,
+`origin/main`; otherwise it blocks stale runs. If that Release is already immutable, the build
+workflow downloads and binds all 40 assets and reconciles only Pages—without provisioning the key,
+signing, re-uploading or attempting to mutate the Release. It still emits one new SHA-bound Actions
+recovery artifact from the verified bytes. Every signed app must pass RSA-PSS verification against
+[`scripts/ota-signing-public-key.sha256`](../../../scripts/ota-signing-public-key.sha256), and every
+merged image must match its declared parts, erased gaps (including NVS) and exact EOF. For an
+untagged current main,
 [`scripts/next-version.sh`](../../../scripts/next-version.sh)
 selects the maximum of the `version.txt` floor, every stable tag's next patch and every
 prerelease tag's stable-core promotion; invalid `v*` tags are ignored fail-closed. The
@@ -113,15 +124,18 @@ gh run list --workflow build.yml --branch main --limit 5 \
   --json databaseId,headSha,conclusion,displayTitle,createdAt \
   --jq '.[] | "\(.createdAt)  \(.conclusion)  \(.displayTitle)  (run \(.databaseId))"'
 
-# The API's latest non-draft, non-prerelease Release is the authority. Its dereferenced tag commit
-# is the source SHA the published manifest must carry.
+# The API's latest immutable, non-draft, non-prerelease Release is the authority. Missing or false
+# `immutable` fails closed. Its dereferenced tag commit is the source SHA the manifest must carry.
 RELEASE_JSON=$(gh api repos/:owner/:repo/releases/latest)
 RELEASE_TAG=$(printf '%s' "$RELEASE_JSON" | jq -er \
-  'select(.draft == false and .prerelease == false) | .tag_name')
-[[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || {
-  echo "REFUSING: latest Release tag is not supported SemVer: $RELEASE_TAG" >&2; exit 1;
+  'select(.draft == false and .prerelease == false and .immutable == true) | .tag_name')
+[[ "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || {
+  echo "REFUSING: latest Release tag is not canonical stable vX.Y.Z: $RELEASE_TAG" >&2; exit 1;
 }
 REL=${RELEASE_TAG#v}
+(( ${#REL} <= 31 )) || {
+  echo "REFUSING: Release version exceeds the 31-byte app descriptor" >&2; exit 1;
+}
 SOURCE_SHA=$(gh api "repos/:owner/:repo/commits/$RELEASE_TAG" --jq .sha)
 [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] || {
   echo "REFUSING: Release tag did not resolve to a full commit SHA" >&2; exit 1;
@@ -138,9 +152,10 @@ do not expect it to equal the live version; CI stamps the real one uncommitted.
 sign/release/Pages jobs, and the Release tag is targeted explicitly at that push SHA. A manual
 `workflow_dispatch` is an unprivileged build/test only and cannot replace Pages. Therefore a
 different live `sourceSha` is actual stale/unreconciled channel state, not a supported republish
-mode. The publish/deploy jobs refetch and compare `origin/main` immediately before signing,
-Release/Pages mutation and deployment, and require the exact source-bound tag to remain newest;
-Pages steps additionally require the matching latest GitHub Release object and its four unique,
+mode. The publish jobs refetch and compare `origin/main` immediately before signing, signed-artifact
+upload and Release/Pages mutation, and require the exact source-bound tag to remain newest;
+Pages steps additionally require the matching latest GitHub Release object to report
+`immutable: true` and expose four unique,
 nonempty, SHA-256-digest-bound merged assets. Do not waive a failure before device OTA.
 
 ### 2. Download the complete published snapshot and bind all 16 parts to Release assets
@@ -153,14 +168,16 @@ for tool in git gh curl jq python3 esptool; do
   command -v "$tool" >/dev/null || { echo "REFUSING: missing required tool: $tool" >&2; exit 1; }
 done
 
-BASE=https://0bu.github.io/tesla-key-esp32
 RELEASE_JSON=$(gh api repos/:owner/:repo/releases/latest)
 RELEASE_TAG=$(printf '%s' "$RELEASE_JSON" | jq -er \
-  'select(.draft == false and .prerelease == false) | .tag_name')
-[[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || {
-  echo "REFUSING: latest Release tag is not supported SemVer: $RELEASE_TAG" >&2; exit 1;
+  'select(.draft == false and .prerelease == false and .immutable == true) | .tag_name')
+[[ "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || {
+  echo "REFUSING: latest Release tag is not canonical stable vX.Y.Z: $RELEASE_TAG" >&2; exit 1;
 }
 REL=${RELEASE_TAG#v}
+(( ${#REL} <= 31 )) || {
+  echo "REFUSING: Release version exceeds the 31-byte app descriptor" >&2; exit 1;
+}
 SOURCE_SHA=$(gh api "repos/:owner/:repo/commits/$RELEASE_TAG" --jq .sha)
 [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] || {
   echo "REFUSING: Release tag did not resolve to a full commit SHA" >&2; exit 1;
@@ -171,6 +188,10 @@ SITE="$SNAPSHOT/pages"
 RELEASE="$SNAPSHOT/release"
 mkdir -p "$SITE" "$RELEASE"
 trap 'rm -rf -- "$SNAPSHOT"' EXIT HUP INT TERM
+PAGES_JSON="$SNAPSHOT/pages-api.json"
+gh api repos/:owner/:repo/pages > "$PAGES_JSON"
+BASE=$(python3 scripts/check-pages-source.py "$PAGES_JSON" --print-url)
+BASE=${BASE%/}
 curl -fsSL --retry 2 --retry-all-errors "$BASE/manifest.json" -o "$SITE/manifest.json"
 
 # Exact layoutVersion-2 contract: four ordered builds x four ordered parts. Hard-coded safe
@@ -249,9 +270,13 @@ jq -r '.builds[] | .chipFamily + ": " +
   ([.parts[] | "\(.path)@\(.offset) \(.size)B \(.sha256)"] | join("  "))' \
   "$SITE/manifest.json"
 
-# Validate each downloaded app as an ESP image, then bind its embedded descriptor to the exact
-# release version and its manifest chip family.
-while IFS=: read -r family app; do
+# Validate each downloaded app cryptographically against the reviewed production authority, then
+# independently bind its ESP descriptor to the exact Release version and manifest chip family.
+while IFS=: read -r target family boot app; do
+  python3 scripts/check-firmware-artifacts.py \
+    --target "$target" --version "$REL" --signed-app \
+    --bootloader "$SITE/$boot" --app "$SITE/$app" \
+    --expected-public-key-digest scripts/ota-signing-public-key.sha256
   INFO=$(esptool image-info "$SITE/$app") || {
     echo "REFUSING: $app is not a valid ESP image" >&2; exit 1;
   }
@@ -261,17 +286,17 @@ while IFS=: read -r family app; do
     }
   printf '%s -> %s / %s\n' "$app" "$family" "$REL"
 done <<'APP_IMAGES'
-ESP32:tesla-key-esp32.bin
-ESP32-S3:tesla-key-esp32-s3.bin
-ESP32-C3:tesla-key-esp32-c3.bin
-ESP32-C6:tesla-key-esp32-c6.bin
+esp32:ESP32:bootloader-esp32.bin:tesla-key-esp32.bin
+esp32s3:ESP32-S3:bootloader-esp32s3.bin:tesla-key-esp32-s3.bin
+esp32c3:ESP32-C3:bootloader-esp32c3.bin:tesla-key-esp32-c3.bin
+esp32c6:ESP32-C6:bootloader-esp32c6.bin:tesla-key-esp32-c6.bin
 APP_IMAGES
 
 # Refuse a race in which a newer Release became authoritative or any selected asset was replaced
 # inside the same Release while this snapshot was downloaded/checked.
 LATEST_RELEASE_JSON=$(gh api repos/:owner/:repo/releases/latest)
 LATEST_RELEASE_ID=$(printf '%s' "$LATEST_RELEASE_JSON" | jq -er \
-  'select(.draft == false and .prerelease == false) | .id')
+  'select(.draft == false and .prerelease == false and .immutable == true) | .id')
 END_ASSET_SET=$(printf '%s' "$LATEST_RELEASE_JSON" | release_asset_set) || {
   echo "REFUSING: latest Release asset set became incomplete" >&2; exit 1;
 }
@@ -325,9 +350,10 @@ table below before retrying. (Endpoints: [`main/http_ota.cpp`](../../../main/htt
 
 | Symptom | Where it shows | What it means | Fix |
 |---------|----------------|---------------|-----|
+| Pages API is not `legacy` + `gh-pages:/` | step 2 before download | the repository no longer has the single branch-backed root + `PR/<N>/` serving authority | do not OTA; restore the repository Pages source contract and rerun from a fresh snapshot |
 | Any of the 16 fixed Pages files returns **≠ 200** | step 2 (or device `"could not start download"` for an app) | incomplete/old Pages snapshot — a manifest-bound URL does not exist | reconcile Pages from the exact Release commit; confirm `build-pages.sh` copied and manifest-bound all four parts for every target |
 | manifest lacks layout v2 fields, or `sourceSha` ≠ the Release tag commit | step 2 | legacy, stale, or non-Release republish; regex-valid provenance alone is insufficient | do not OTA; reconcile Pages from the exact Release commit, then rerun this check |
-| manifest length/SHA-256 differs from any downloaded part | step 2 | partial publish, cache race, or bytes changed underneath the manifest | do not OTA; let the atomic Pages publish settle or republish, then rerun from a fresh snapshot |
+| manifest length/SHA-256 differs from any downloaded part | step 2 | partial branch publication, cache race, or bytes changed underneath the manifest | do not OTA; let branch-backed Pages settle or republish, then rerun from a fresh snapshot |
 | Pages part differs from its byte range in the Release merged asset | step 2 | same-version/source manifest was regenerated around bytes that were not attached to the bound GitHub Release | do not OTA; republish Pages exclusively from the signed Release staging tree and rerun |
 | an app's embedded target/version differs from its manifest family/Release | step 2/3 | stale or cross-target app was published under the expected basename | do not OTA; rebuild/sign/publish the exact Release and verify all four descriptors |
 | `/ota/status` `message:"downloaded image is invalid"` (serial: `image valid, signature bad`) | step 4, `state:"error"` | **TOFU key mismatch** — the running image's trust anchor ≠ the current `OTA_SIGNING_KEY`; the channel is fine, the *device* can't accept it | USB-reflash the published signed `.bin` to `0x20000` + erase otadata (keeps NVS) — see [`$usb-recovery`](../usb-recovery/SKILL.md) and [`docs/SECURITY.md`](../../../docs/SECURITY.md) "Trust anchor (trust-on-first-use)" |

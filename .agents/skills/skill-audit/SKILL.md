@@ -84,8 +84,9 @@ the authority for the per-sibling drift check; `$project-review` defers the mech
   exact and source-SHA-bound; every USB write must use a verified signed app and preserve NVS.
 - **`$ship`** — the merge→CI→signed-artifact→flash pipeline. Verify against
   `.github/workflows/build.yml` (unsigned `firmware-unsigned` build artifact, protected main-only
-  artifact `tesla-key-esp32-<version>`, the firmware-change-gated release step) and
-  `.github/workflows/signed-pr-preview.yml` (separate `tesla-key-esp32-pr<N>-<version>` path).
+  artifact `tesla-key-esp32-<version>-<full-source-SHA>`, the firmware-change-gated release step) and
+  `.github/workflows/signed-pr-preview.yml` (separate
+  `tesla-key-esp32-pr<N>-<full-head-SHA>` path).
   `scripts/ci-build-all.sh` owns the four unsigned trees + projected-signed size gate;
   `scripts/ci-sign-artifacts.sh` owns the suffix map, real signing, actual signed-size gate and
   `-merged.bin` copies. The skill must select one exact signed artifact and bind the run plus
@@ -129,7 +130,7 @@ the authority for the per-sibling drift check; `$project-review` defers the mech
   `tools/agent-hooks/` / `tools/agent-config/` /
   shipped Pages runtime (`docs/index.html`, `installer-bootstrap.mjs`, `serial-port-release.mjs`,
   `web-installer.mjs`, `docs/vendor/`) /
-  `.github/workflows/{build,signed-pr-preview,pr-preview-cleanup}.yml` /
+  `.github/workflows/{build,signed-pr-preview,pr-preview-cleanup,pr-policy,bench-acceptance}.yml` /
   `scripts/release-relevance.sh` (the shared
   `gate_feature_docs_relevant` predicate). A path that drifts out of that list stops gating
   silently. All four gates must block when the shared library is missing, truncated or lacks a
@@ -164,7 +165,8 @@ the authority for the per-sibling drift check; `$project-review` defers the mech
   same for the web UI: `tk::ble::decide` (`main/logic/ble_row.hpp`) vs the `BLE_ROW` region of
   `main/www/app.js`, via `test/ble_row_golden_dump.cpp` + `tools/ble_row_parity.js`.
 - **`$ota-release-verify`** — verifies the already-published OTA channel byte-for-byte against the
-  latest GitHub Release: manifest `sourceSha` equals the dereferenced Release-tag commit, all 16
+  latest GitHub Release whose API reports `immutable: true`: manifest `sourceSha` equals the
+  dereferenced Release-tag commit, all 16
   parts match manifest length/SHA-256 and their byte ranges in the four exact Release merged
   assets, and all four apps report the exact Release version and chip family. Verify the
   manifest/firmware-base URLs (`main/Kconfig.projbuild`), the 4-chipFamily set +
@@ -173,7 +175,8 @@ the authority for the per-sibling drift check; `$project-review` defers the mech
   `ota_update.cpp`/`logic/target.hpp`/`ci-sign-artifacts.sh`/`build-pages.sh`, the `version.txt`
   floor vs CI-stamped version, the build/test-only `workflow_dispatch` boundary (it must never
   sign/release/republish Pages), same-SHA reuse only for the newest valid tag, current-main/tag and
-  latest-Release/digest-asset rechecks before signing/Release/Pages mutation and deploy, and the `/ota/*` +
+  latest-Release/`immutable: true`/digest-asset selection and end-of-run race rechecks before
+  signing/Release/Pages mutation and deploy, and the `/ota/*` +
   `/api/proxy/1/version` endpoints. Read-only;
   complementary to `$ship` (which cuts/flashes a release).
 - **`$usb-recovery`** — no-build emergency reflash requiring explicit, scope-specific user approval.
@@ -219,7 +222,7 @@ file marker; pass state lives only in the PR body and is parsed by the neutral c
 reports the following record after a clean audit but never inserts or stamps it:
 
 ```
-- [x] `$skill-audit` clean — PR create/push gate @ <short-sha>
+- [x] `$skill-audit` clean — PR create/push gate @ <full-40-hex-sha>
 ```
 
 **What the gate recognises.** `gate_bash_actions` in `pr-gate-lib.sh` splits Bash input into

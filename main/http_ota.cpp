@@ -43,35 +43,35 @@ esp_err_t handle_ota_check(GuardedReq rq) {
     httpd_req_t* req = rq.req;
     apply_browser_time_query_(req);
     bool started = ota_check_start();
-    cJSON* root = cJSON_CreateObject();
-    cJSON_AddBoolToObject(root, "started", started);
+    tk::JsonBuilder json;
+    json.boolean(json.root(), "started", started);
     if (!started)
-        cJSON_AddStringToObject(root, "reason", "a check or update is already in progress");
-    return send_json(req, started ? 200 : 409, root);
+        json.string(json.root(), "reason", "a check or update is already in progress");
+    return send_json(req, started ? 200 : 409, json.release());
 }
 
 // POST /ota/update — start the background download+install, return immediately.
 esp_err_t handle_ota_update(GuardedReq rq) {
     httpd_req_t* req = rq.req;
     bool started = ota_start();
-    cJSON* root = cJSON_CreateObject();
-    cJSON_AddBoolToObject(root,   "result", started);
-    cJSON_AddStringToObject(root, "reason",
+    tk::JsonBuilder json;
+    json.boolean(json.root(), "result", started);
+    json.string(json.root(), "reason",
         started ? "update started — the device will reboot when done"
                 : "an update is already in progress");
-    return send_json(req, started ? 200 : 409, root);
+    return send_json(req, started ? 200 : 409, json.release());
 }
 
 // GET /ota/status — poll download progress.
 esp_err_t handle_ota_status(GuardedReq rq) {
     httpd_req_t* req = rq.req;
     OtaStatus s = ota_get_status();
-    cJSON* root = cJSON_CreateObject();
-    cJSON_AddStringToObject(root, "state",            ota_state_str(s.state));
-    cJSON_AddNumberToObject(root, "progress",         s.progress);
-    cJSON_AddStringToObject(root, "message",          s.message.c_str());
-    cJSON_AddStringToObject(root, "available",        s.available.c_str());
-    cJSON_AddBoolToObject(root,   "update_available", s.update_available);
-    cJSON_AddStringToObject(root, "current",          s.current.c_str());
-    return send_json(req, 200, root);
+    tk::JsonBuilder json;
+    json.string(json.root(), "state", ota_state_str(s.state));
+    json.number(json.root(), "progress", s.progress);
+    json.string(json.root(), "message", s.message.c_str());
+    json.string(json.root(), "available", s.available.c_str());
+    json.boolean(json.root(), "update_available", s.update_available);
+    json.string(json.root(), "current", s.current.c_str());
+    return send_json(req, 200, json.release());
 }

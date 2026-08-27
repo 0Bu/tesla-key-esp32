@@ -3,10 +3,10 @@
 
 #include <esp_log.h>
 #include <cstdio>
+#include <cstdint>
 #include <cstring>
 #include <atomic>
 #include <algorithm>
-#include <cstdint>
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "rtos_guard.hpp"
@@ -27,8 +27,8 @@ static constexpr size_t DIAG_CAP = 16 * 1024;
 static char              s_buf[DIAG_CAP];
 static size_t            s_head    = 0;      // next write position
 static bool              s_wrapped = false;  // buffer has wrapped at least once
-static uint64_t          s_written = 0;      // monotonic byte sequence within one clear generation
-static uint32_t          s_generation = 0;   // increments when /diag?clear=1 resets the sequence
+static uint64_t          s_written = 0;      // monotonic byte sequence within one clear epoch
+static uint64_t          s_epoch   = 0;      // detects clear while a dump is in flight
 static SemaphoreHandle_t s_mtx     = nullptr;
 static vprintf_like_t    s_prev    = nullptr;
 static const char*       TAG       = "diag_log";
@@ -42,9 +42,9 @@ static void diag_append_(const char* data, size_t len) {
     if (!g) return;
     for (size_t i = 0; i < len; i++) {
         s_buf[s_head++] = data[i];
+        ++s_written;
         if (s_head >= DIAG_CAP) { s_head = 0; s_wrapped = true; }
     }
-    s_written += len;
 }
 
 // esp_log hook: capture the formatted line, then forward to the original sink so
@@ -78,48 +78,78 @@ void diag_log_init() {
     s_prev = esp_log_set_vprintf(diag_vprintf_);
 }
 
-void diag_log_dump_chunks(const std::function<bool(const char*, size_t)>& sink) {
-    if (!s_mtx) return;
-
-    // Snapshot byte-sequence bounds, then copy one fixed chunk at a time under the mutex and SEND
-    // only after releasing it. The old implementation held s_mtx across httpd_resp_send_chunk();
-    // a slow client therefore made every logger wait 20 ms and drop the incident lines /diag was
-    // trying to collect. Sequence numbers let us notice a concurrent wrap without retaining a
-    // pointer into mutable ring storage. If the client is so slow that unread snapshot bytes are
-    // overwritten (or /diag?clear=1 changes generation), stop rather than splice unrelated data.
-    uint64_t next = 0;
-    uint64_t end = 0;
-    uint32_t generation = 0;
+DiagDumpResult diag_log_dump_chunks(const std::function<bool(const char*, size_t)>& sink,
+                                    DiagDumpStart start_mode) {
+    if (!s_mtx) return DiagDumpResult::SnapshotInvalidated;
+    // Snapshot the logical spans, then copy each bounded piece under the mutex and invoke the sink
+    // only AFTER releasing it.  The sink is HTTP/network I/O and may block or throw; doing either
+    // while holding the shared log mutex stalls every producer and violates the firmware lock
+    // contract. A whole-ring snapshot would need another 16 KB allocation/static buffer. A writer
+    // may replace bytes already delivered, but if it reaches any unread snapshot byte the
+    // dump aborts before copying it. Mixing generations would be worse than a truncated response:
+    // in redact mode a new prefix plus an old sensitive tail could evade a line-based marker.
+    size_t head = 0;
+    bool wrapped = false;
+    uint64_t snapshot_written = 0;
+    uint64_t snapshot_epoch = 0;
     {
         tk::SemGuard g(s_mtx);
-        const size_t size = s_wrapped ? DIAG_CAP : s_head;
-        end = s_written;
-        next = end - size;
-        generation = s_generation;
+        if (!g) return DiagDumpResult::SnapshotInvalidated;
+        head = s_head;
+        wrapped = s_wrapped;
+        snapshot_written = s_written;
+        snapshot_epoch = s_epoch;
     }
 
-    char chunk[256];
-    while (next < end) {
-        size_t copied = 0;
-        {
-            tk::SemGuard g(s_mtx);
-            if (generation != s_generation) return;
-
-            const size_t size = s_wrapped ? DIAG_CAP : s_head;
-            const uint64_t oldest = s_written - size;
-            if (next < oldest || next > s_written) return;
-
-            copied = static_cast<size_t>(std::min<uint64_t>(sizeof(chunk), end - next));
-            const size_t oldest_pos = s_wrapped ? s_head : 0;
-            const size_t logical_offset = static_cast<size_t>(next - oldest);
-            const size_t physical = (oldest_pos + logical_offset) % DIAG_CAP;
-            const size_t first = std::min(copied, DIAG_CAP - physical);
-            std::memcpy(chunk, s_buf + physical, first);
-            if (first < copied) std::memcpy(chunk + first, s_buf, copied - first);
+    static constexpr size_t kDumpChunk = 256;
+    char chunk[kDumpChunk];
+    const size_t snapshot_len = wrapped ? DIAG_CAP : head;
+    const uint64_t snapshot_start = snapshot_written - snapshot_len;
+    bool discard_partial_line =
+        wrapped && start_mode == DiagDumpStart::AfterWrappedLineBoundary;
+    auto dump_span = [&](size_t start, size_t len,
+                         uint64_t absolute_start) -> DiagDumpResult {
+        for (size_t offset = 0; offset < len;) {
+            const size_t n = (len - offset < sizeof(chunk)) ? len - offset : sizeof(chunk);
+            {
+                tk::SemGuard g(s_mtx);
+                if (!g) return DiagDumpResult::SnapshotInvalidated;
+                const uint64_t unread = absolute_start + offset;
+                if (s_epoch != snapshot_epoch || s_written < unread ||
+                    s_written - unread > DIAG_CAP) {
+                    return DiagDumpResult::SnapshotInvalidated;
+                }
+                memcpy(chunk, s_buf + start + offset, n);
+            }
+            const char* delivered = chunk;
+            size_t delivered_size = n;
+            if (discard_partial_line) {
+                const void* boundary = std::memchr(chunk, '\n', n);
+                if (!boundary) {
+                    offset += n;
+                    continue;
+                }
+                const size_t skipped =
+                    static_cast<const char*>(boundary) - chunk + 1;
+                discard_partial_line = false;
+                delivered += skipped;
+                delivered_size -= skipped;
+            }
+            if (delivered_size != 0 && !sink(delivered, delivered_size)) {
+                return DiagDumpResult::SinkFailed;
+            }
+            offset += n;
         }
-        if (!sink(chunk, copied)) return;
-        next += copied;
+        return DiagDumpResult::Complete;
+    };
+
+    if (wrapped) {
+        const size_t first_len = DIAG_CAP - head;
+        const DiagDumpResult first = dump_span(head, first_len, snapshot_start);
+        if (first != DiagDumpResult::Complete) return first;
+        return dump_span(0, head, snapshot_start + first_len);
     }
+    return dump_span(0, head, snapshot_start);
 }
 
 void diag_log_clear() {
@@ -128,7 +158,7 @@ void diag_log_clear() {
     s_head    = 0;
     s_wrapped = false;
     s_written = 0;
-    ++s_generation;
+    ++s_epoch;
 }
 
 void diag_set_verbose(bool on) { s_verbose.store(on); }

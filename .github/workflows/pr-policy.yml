@@ -1,0 +1,34 @@
+name: pr-policy
+
+# This workflow evaluates PR metadata with trusted base-branch code. It never checks out, imports,
+# sources, or executes the pull request. The job must be configured as a required status check in
+# the repository ruleset for this executable policy to block a merge server-side.
+on:
+  pull_request_target:
+    branches: [main]
+    types: [opened, synchronize, reopened, edited]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  current-head-records:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - name: Check out trusted base policy only
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          persist-credentials: false
+      - name: Validate SHA-bound PR policy records
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: >-
+          ./tools/agent-hooks/require-pr-gates.sh
+          --check --pr "$PR_NUMBER" --project-dir "$GITHUB_WORKSPACE"

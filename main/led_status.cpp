@@ -112,6 +112,7 @@ float anim_factor(tk::LedAnim a, float t) {
 }
 
 void led_task(void* arg) {
+  try {
     auto& v = *static_cast<VehicleController*>(arg);
 
     gpio_config_t io = {};
@@ -171,6 +172,10 @@ void led_task(void* arg) {
           vTaskDelay(pdMS_TO_TICKS(200));
       }
     }
+  } catch (...) {
+      ESP_LOGE(TAG, "LED task boundary threw outside a frame — stopping task");
+      vTaskDelete(nullptr);
+  }
 }
 
 }  // namespace

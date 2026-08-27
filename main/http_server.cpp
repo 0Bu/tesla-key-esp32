@@ -5,6 +5,8 @@
 // http_common.cpp. See http_handlers.hpp for the split map.
 
 #include "http_handlers.hpp"
+#include "logic/http_route.hpp"
+#include "runtime_admission.hpp"
 #include "net.hpp"
 #include "stack_watch.hpp"
 #include "logic/http_origin.hpp"
@@ -23,18 +25,12 @@ NvsStorageAdapter* g_config  = nullptr;
 // query value like "?next=/status" be mistaken for a route, and a substring like "force=1" be
 // found anywhere. Truncation only changes a route into a 404, never the reverse, so it's safe.
 static const char* uri_path(httpd_req_t* req, char* buf, size_t n) {
-    const char* uri = req->uri;
-    size_t i = 0;
-    for (; uri[i] && uri[i] != '?' && i + 1 < n; ++i) buf[i] = uri[i];
-    buf[i] = '\0';
+    if (!buf || n == 0) return buf;
+    const std::string_view path = tk::http_path_only(req ? req->uri : "");
+    const size_t copy = path.size() < n - 1 ? path.size() : n - 1;
+    if (copy != 0) memcpy(buf, path.data(), copy);
+    buf[copy] = '\0';
     return buf;
-}
-
-// True if `path` ends with `suffix` (exact tail match) — used for the parameterized API routes
-// whose path carries the VIN, e.g. ".../{VIN}/vehicle_data".
-static bool path_ends_with(const char* path, const char* suffix) {
-    size_t lp = strlen(path), ls = strlen(suffix);
-    return lp >= ls && strcmp(path + lp - ls, suffix) == 0;
 }
 
 static bool read_header_bounded(httpd_req_t* req, const char* name, char* out, size_t capacity) {
@@ -76,7 +72,6 @@ static esp_err_t reject_cross_origin_mutation(httpd_req_t* req) {
     httpd_resp_set_type(req, "text/plain; charset=utf-8");
     return httpd_resp_sendstr(req, "cross-origin mutation rejected");
 }
-
 // ─── Wildcard handler dispatching ─────────────────────────────────────────────
 
 // Single catch-all handler registered for /*
@@ -100,37 +95,47 @@ static esp_err_t handle_all_dispatch(httpd_req_t* req) {
         ESP_LOGI(TAG, "  Accept: %s", header_val);
     }
 
-    // Parameterized API routes (the VIN is embedded in the path). The command route delegates its
-    // exact shape to the handler parser; an unrelated path containing "/command/" stays a 404.
-    if (POST && is_command_route(req->uri))                     return handle_command({req});
-    if (GET  && path_ends_with(path, "/vehicle_data"))          return handle_vehicle_data({req});
-    if (GET  && path_ends_with(path, "/body_controller_state")) return handle_body_controller({req});
+    const tk::HttpVerb verb = GET ? tk::HttpVerb::Get
+                                  : (POST ? tk::HttpVerb::Post : tk::HttpVerb::Other);
+    const tk::HttpRoute route = tk::classify_http_route(verb, path);
+    if (tk::http_route_requires_vehicle_runtime(route) &&
+        !tk::runtime_admission_vehicle_ready()) {
+        ESP_LOGW(TAG, "vehicle-active route refused while runtime is not ready: %s", path);
+        httpd_resp_set_status(req, "503 Service Unavailable");
+        httpd_resp_set_type(req, "application/json");
+        return httpd_resp_sendstr(
+            req, "{\"error\":\"vehicle runtime unavailable\",\"retryable\":false}");
+    }
+    switch (route) {
+        case tk::HttpRoute::Command:        return handle_command({req});
+        case tk::HttpRoute::VehicleData:    return handle_vehicle_data({req});
+        case tk::HttpRoute::BodyController: return handle_body_controller({req});
+        case tk::HttpRoute::OtaCheck:       return handle_ota_check({req});
+        case tk::HttpRoute::OtaUpdate:      return handle_ota_update({req});
+        case tk::HttpRoute::OtaStatus:      return handle_ota_status({req});
+        case tk::HttpRoute::GenKeys:        return handle_gen_keys({req});
+        case tk::HttpRoute::SendKey:        return handle_send_key({req});
+        case tk::HttpRoute::SetTime:        return handle_set_time({req});
+        case tk::HttpRoute::SetVin:         return handle_set_vin({req});
+        case tk::HttpRoute::SetMqtt:        return handle_set_mqtt({req});
+        case tk::HttpRoute::SetSyslog:      return handle_set_syslog({req});
+        case tk::HttpRoute::SetWifi:        return handle_set_wifi({req});
+        case tk::HttpRoute::Scan:           return handle_scan({req});
+        case tk::HttpRoute::Coredump:       return handle_coredump({req});
+        case tk::HttpRoute::CrashDismiss:   return handle_crash_dismiss({req});
+        case tk::HttpRoute::Heap:           return handle_heap({req});
+        case tk::HttpRoute::McpPost:        return mcp_handle_post({req});
+        case tk::HttpRoute::McpGet:         return mcp_handle_get({req});
+        case tk::HttpRoute::Version:        return handle_version({req});
+        case tk::HttpRoute::Status:         return handle_status({req});
+        case tk::HttpRoute::Diag:           return handle_diag({req});
+        case tk::HttpRoute::Index:          return handle_index({req});
+        case tk::HttpRoute::NotFound:       break;
+    }
 
-    // Fixed routes — exact path match. "/ota/status" can no longer fall through to "/status".
-    if (GET  && strcmp(path, "/ota/check")  == 0)               return handle_ota_check({req});
-    if (POST && strcmp(path, "/ota/update") == 0)               return handle_ota_update({req});
-    if (GET  && strcmp(path, "/ota/status") == 0)               return handle_ota_status({req});
-    if (POST && strcmp(path, "/gen_keys")   == 0)               return handle_gen_keys({req});
-    if (POST && strcmp(path, "/send_key")   == 0)               return handle_send_key({req});
-    if (POST && strcmp(path, "/set_time")   == 0)               return handle_set_time({req});
-    if (POST && strcmp(path, "/set_vin")    == 0)               return handle_set_vin({req});
-    if (POST && strcmp(path, "/set_mqtt")   == 0)               return handle_set_mqtt({req});
-    if (POST && strcmp(path, "/set_syslog") == 0)               return handle_set_syslog({req});
-    if (POST && strcmp(path, "/set_wifi")   == 0)               return handle_set_wifi({req});
-    if (POST && strcmp(path, "/scan")       == 0)               return handle_scan({req});
-    if (GET  && strcmp(path, "/coredump")   == 0)               return handle_coredump({req});
-    if (POST && strcmp(path, "/crash/dismiss") == 0)            return handle_crash_dismiss({req});
-    if (GET  && strcmp(path, "/heap")       == 0)               return handle_heap({req});
-    if (POST && strcmp(path, "/mcp")        == 0)               return mcp_handle_post({req});
-    if (GET  && strcmp(path, "/mcp")        == 0)               return mcp_handle_get({req});
-    if (GET  && strcmp(path, "/api/proxy/1/version") == 0)      return handle_version({req});
-    if (GET  && strcmp(path, "/status")     == 0)               return handle_status({req});
-    if (GET  && strcmp(path, "/diag")       == 0)               return handle_diag({req});
-    if (GET  && (strcmp(path, "/") == 0 || strcmp(path, "/index.html") == 0)) return handle_index({req});
-
-    cJSON* root = cJSON_CreateObject();
-    cJSON_AddStringToObject(root, "error", "not found");
-    return send_json(req, 404, root);
+    tk::JsonBuilder json;
+    json.string(json.root(), "error", "not found");
+    return send_json(req, 404, json.release());
 }
 
 // Catch-all wrapper: a handler that runs out of memory throws std::bad_alloc (e.g. a
@@ -140,22 +145,26 @@ static esp_err_t handle_all_dispatch(httpd_req_t* req) {
 // cause is the low largest-free-block; this is the safety net so no request can crash
 // the box.)
 static esp_err_t handle_all(httpd_req_t* req) {
-    // Sample on every exit, including the exception fallbacks. The request that came closest to
-    // the limit is exactly the one most likely to throw; a destructor also covers every early
-    // return without duplicating the measurement at each route.
-    struct SampleHttpdStackOnExit {
-        ~SampleHttpdStackOnExit() noexcept { tk::stack_watch_sample(tk::StackWatch::Httpd); }
-    } sample_httpd_stack;
     try {
+        // Sample on every exit, including the exception fallbacks. The request that came closest to
+        // the limit is exactly the one most likely to throw; a destructor also covers every early
+        // return without duplicating the measurement at each route. Construct it inside the outer
+        // boundary so even a future throwing constructor cannot escape into the C httpd frame.
+        struct SampleHttpdStackOnExit {
+            ~SampleHttpdStackOnExit() noexcept { tk::stack_watch_sample(tk::StackWatch::Httpd); }
+        } sample_httpd_stack;
         return handle_all_dispatch(req);
     } catch (const std::exception& e) {
         ESP_LOGE(TAG, "handler for %s threw (%s) — likely OOM; returning 503", req->uri, e.what());
+        httpd_resp_set_status(req, "503 Service Unavailable");
+        httpd_resp_set_type(req, "text/plain");
+        return httpd_resp_sendstr(req, "out of memory");
     } catch (...) {
         ESP_LOGE(TAG, "handler for %s threw (unknown) — returning 503", req->uri);
+        httpd_resp_set_status(req, "503 Service Unavailable");
+        httpd_resp_set_type(req, "text/plain");
+        return httpd_resp_sendstr(req, "out of memory");
     }
-    httpd_resp_set_status(req, "503 Service Unavailable");
-    httpd_resp_set_type(req, "text/plain");
-    return httpd_resp_sendstr(req, "out of memory");
 }
 
 // ─── Start ────────────────────────────────────────────────────────────────────

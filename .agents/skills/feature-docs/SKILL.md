@@ -1,6 +1,6 @@
 ---
 name: feature-docs
-description: Keep docs/FEATURES.md (this firmware's technical-feature catalog) in sync when a platform feature lands or changes — including runner-neutral agent policy under AGENTS.md, .agents/, .codex/, .github/PULL_REQUEST_TEMPLATE.md, tools/agent-hooks/, and tools/agent-config/. Use after implementing or changing a technical feature, before opening the PR. Required before merging a PR whose diff reaches those agent-policy paths, main/, test/, sdkconfig.defaults, partitions.csv, the shipped Pages runtime, release-relevance.sh, or the build/signed-preview/preview-cleanup release workflows.
+description: Keep docs/FEATURES.md (this firmware's technical-feature catalog) in sync when a platform feature lands or changes — including runner-neutral agent policy under AGENTS.md, .agents/, .codex/, .github/PULL_REQUEST_TEMPLATE.md, tools/agent-hooks/, and tools/agent-config/. Use after implementing or changing a technical feature, before opening the PR. Required before merging a PR whose diff reaches those agent-policy paths, main/, test/, sdkconfig.defaults, partitions.csv, the shipped Pages runtime, release-relevance.sh, or the build/signed-preview/preview-cleanup/PR-policy/bench-acceptance workflows.
 ---
 
 > **Canonical runner-neutral skill.** Read [`AGENTS.md`](../../../AGENTS.md) before acting.
@@ -27,7 +27,7 @@ agent policy (`AGENTS.md`, `.agents/`, `.codex/`, `.github/PULL_REQUEST_TEMPLATE
 `tools/agent-hooks/`, `tools/agent-config/`) or
 the shipped Pages runtime (`docs/index.html`, `installer-bootstrap.mjs`,
 `serial-port-release.mjs`, `web-installer.mjs`, `docs/vendor/`) or
-`.github/workflows/{build,signed-pr-preview,pr-preview-cleanup}.yml`, or the cumulative
+`.github/workflows/{build,signed-pr-preview,pr-preview-cleanup,pr-policy,bench-acceptance}.yml`, or the cumulative
 Release/Pages-baseline classifier `scripts/release-relevance.sh`. Other docs-only or unrelated
 script/workflow PRs clear without ceremony. The shared gate library and every function this hook
 uses are load-checked first; missing or truncated gate code blocks the merge.
@@ -48,7 +48,8 @@ that separate authority through the appropriate workflow.
      diagnostic surface
    - changes the shipped Web-Installer runtime, its local dependency bundle or its serial/manifest
      safety contract
-   - changes how CI decides whether current main still contains Release/Pages-unpublished firmware
+   - changes how CI decides whether current main still contains Release/Pages-unpublished firmware,
+     or changes the single branch-backed Pages authority/source validator
    - changes runner-neutral instructions, skills, reviewer/config registration, lifecycle gates, or
      their validators under `AGENTS.md`, `.agents/`, `.codex/`,
      `.github/PULL_REQUEST_TEMPLATE.md`, `tools/agent-hooks/`, or `tools/agent-config/`
@@ -98,9 +99,10 @@ that separate authority through the appropriate workflow.
 7. **Report gate readiness; do not mutate the PR by default.** After a successful sync, provide the
    exact top-level CommonMark record for a separately authorized PR-body update:
    ```
-   - [x] `$feature-docs` synced — merge gate @ <short-sha>
+   - [x] `$feature-docs` synced — merge gate @ <full-40-hex-sha>
    ```
-   The stamp is valid only while it matches the PR head. A later commit forces a fresh sync. An
+   The stamp must be the exact lowercase 40-hex PR head; prefixes are rejected. A later commit
+   forces a fresh sync. An
    implementation or documentation request does not authorize editing the PR body or merging it.
    The only canonical merge command is
    `gh --repo github.com/0Bu/tesla-key-esp32 pr merge <numeric-pr> --match-head-commit <full-40-hex-head-sha> --squash`.
