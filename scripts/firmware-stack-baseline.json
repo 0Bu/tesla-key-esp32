@@ -8,8 +8,8 @@
     "esp32": {
       "files": {
         "CMakeFiles/__idf_main.dir/ble_client.cpp.su": {
-          "/COMPONENT_MAIN_DIR/ble_client.cpp :: int BleClient::on_gap_event(ble_gap_event*)": 336,
-          "/COMPONENT_MAIN_DIR/ble_client.cpp :: int BleClient::target_connectable_since(int64_t) const": 752,
+          "/COMPONENT_MAIN_DIR/ble_client.cpp :: int BleClient::on_gap_event(ble_gap_event*)": 544,
+          "/COMPONENT_MAIN_DIR/ble_client.cpp :: int BleClient::target_connectable_since(int64_t) const": 720,
           "/COMPONENT_MAIN_DIR/ble_client.cpp :: std::vector<TeslaScan> BleClient::nearby() const": 816
         },
         "CMakeFiles/__idf_main.dir/board.cpp.su": {},
@@ -19,8 +19,8 @@
         },
         "CMakeFiles/__idf_main.dir/diag_crash.cpp.su": {},
         "CMakeFiles/__idf_main.dir/diag_log.cpp.su": {
-          "/COMPONENT_MAIN_DIR/diag_log.cpp :: int diag_vprintf_(const char*, va_list)": 320,
-          "/COMPONENT_MAIN_DIR/diag_log.cpp :: void diag_log_dump_chunks(const std::function<bool(const char*, unsigned int)>&, DiagDumpStart)": 352
+          "/COMPONENT_MAIN_DIR/diag_log.cpp :: DiagDumpResult diag_log_dump_chunks(const std::function<bool(const char*, unsigned int)>&, DiagDumpStart)": 336,
+          "/COMPONENT_MAIN_DIR/diag_log.cpp :: int diag_vprintf_(const char*, va_list)": 320
         },
         "CMakeFiles/__idf_main.dir/display.cpp.su": {},
         "CMakeFiles/__idf_main.dir/heap_trend.cpp.su": {},
@@ -38,13 +38,15 @@
         },
         "CMakeFiles/__idf_main.dir/http_ota.cpp.su": {},
         "CMakeFiles/__idf_main.dir/http_server.cpp.su": {
+          "/COMPONENT_MAIN_DIR/http_server.cpp :: bool browser_mutation_allowed(httpd_req_t*)": 480,
           "/COMPONENT_MAIN_DIR/http_server.cpp :: esp_err_t handle_all_dispatch(httpd_req_t*)": 336
         },
         "CMakeFiles/__idf_main.dir/http_status.cpp.su": {
           "/COMPONENT_MAIN_DIR/http_status.cpp :: cJSON* build_status_object(bool)": 1568,
-          "/COMPONENT_MAIN_DIR/http_status.cpp :: esp_err_t handle_coredump(GuardedReq)": 1088,
+          "/COMPONENT_MAIN_DIR/http_status.cpp :: esp_err_t handle_coredump(GuardedReq)": 1104,
           "/COMPONENT_MAIN_DIR/http_status.cpp :: esp_err_t handle_diag(GuardedReq)": 880,
-          "/COMPONENT_MAIN_DIR/http_status.cpp :: esp_err_t handle_heap(GuardedReq)": 1216
+          "/COMPONENT_MAIN_DIR/http_status.cpp :: esp_err_t handle_heap(GuardedReq)": 1232,
+          "/COMPONENT_MAIN_DIR/logic/heap_json_stream.hpp :: bool tk::stream_heap_json(const HeapJsonStreamView&, Send) [with Send = handle_heap(GuardedReq)::<lambda(const char*, size_t)>]": 336
         },
         "CMakeFiles/__idf_main.dir/led_status.cpp.su": {},
         "CMakeFiles/__idf_main.dir/main.cpp.su": {
@@ -64,14 +66,15 @@
         },
         "CMakeFiles/__idf_main.dir/nvs_storage.cpp.su": {},
         "CMakeFiles/__idf_main.dir/ota_update.cpp.su": {
-          "/COMPONENT_MAIN_DIR/ota_update.cpp :: bool http_get_to_buffer(const char*, std::string&)": 704,
-          "/COMPONENT_MAIN_DIR/ota_update.cpp :: void ota_task_impl()": 592
+          "/COMPONENT_MAIN_DIR/ota_update.cpp :: bool http_get_to_buffer(const char*, std::string&)": 736,
+          "/COMPONENT_MAIN_DIR/ota_update.cpp :: void ota_task_impl()": 624
         },
         "CMakeFiles/__idf_main.dir/provisioning.cpp.su": {
           "/COMPONENT_MAIN_DIR/provisioning.cpp :: esp_err_t save_post_impl(httpd_req_t*)": 1456,
           "/COMPONENT_MAIN_DIR/provisioning.cpp :: void dns_task(void*)": 592,
           "/COMPONENT_MAIN_DIR/provisioning.cpp :: void provisioning_run(NvsStorageAdapter&)": 528
         },
+        "CMakeFiles/__idf_main.dir/runtime_admission.cpp.su": {},
         "CMakeFiles/__idf_main.dir/safe_mode.cpp.su": {},
         "CMakeFiles/__idf_main.dir/stack_watch.cpp.su": {},
         "CMakeFiles/__idf_main.dir/syslog.cpp.su": {
@@ -81,23 +84,28 @@
           "/COMPONENT_MAIN_DIR/syslog.cpp :: void syslog_task(void*)": 480
         },
         "CMakeFiles/__idf_main.dir/vehicle_commands.cpp.su": {
-          "/COMPONENT_MAIN_DIR/vehicle_commands.cpp :: bool VehicleController::set_charging_amps(int, int)": 576
+          "/COMPONENT_MAIN_DIR/vehicle_commands.cpp :: bool VehicleController::set_charging_amps(int, int)": 480
         },
-        "CMakeFiles/__idf_main.dir/vehicle_ctrl.cpp.su": {},
+        "CMakeFiles/__idf_main.dir/vehicle_ctrl.cpp.su": {
+          "/COMPONENT_MAIN_DIR/vehicle_ctrl.cpp :: bool VehicleController::enqueue_ble_link_event_(bool, uint16_t, uint32_t)": 288,
+          "/COMPONENT_MAIN_DIR/vehicle_ctrl.cpp :: bool VehicleController::enqueue_ble_rx_event_(const uint8_t*, size_t, uint32_t)": 288
+        },
         "CMakeFiles/__idf_main.dir/vehicle_pairing.cpp.su": {
           "/COMPONENT_MAIN_DIR/vehicle_pairing.cpp :: bool VehicleController::clear_session_and_cache_()": 304,
           "/COMPONENT_MAIN_DIR/vehicle_pairing.cpp :: std::string VehicleController::key_fingerprint()": 848
         },
         "CMakeFiles/__idf_main.dir/vehicle_telemetry.cpp.su": {
-          "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: static void VehicleController::loop_task_fn_(void*)": 304
+          "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: static void VehicleController::loop_task_fn_(void*)": 320,
+          "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: void VehicleController::process_ble_host_events_()": 560,
+          "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: void VehicleController::process_pending_telemetry_()": 1408
         }
       }
     },
     "esp32s3": {
       "files": {
         "CMakeFiles/__idf_main.dir/ble_client.cpp.su": {
-          "/COMPONENT_MAIN_DIR/ble_client.cpp :: int BleClient::on_gap_event(ble_gap_event*)": 336,
-          "/COMPONENT_MAIN_DIR/ble_client.cpp :: int BleClient::target_connectable_since(int64_t) const": 752,
+          "/COMPONENT_MAIN_DIR/ble_client.cpp :: int BleClient::on_gap_event(ble_gap_event*)": 544,
+          "/COMPONENT_MAIN_DIR/ble_client.cpp :: int BleClient::target_connectable_since(int64_t) const": 720,
           "/COMPONENT_MAIN_DIR/ble_client.cpp :: std::vector<TeslaScan> BleClient::nearby() const": 816
         },
         "CMakeFiles/__idf_main.dir/board.cpp.su": {},
@@ -107,8 +115,8 @@
         },
         "CMakeFiles/__idf_main.dir/diag_crash.cpp.su": {},
         "CMakeFiles/__idf_main.dir/diag_log.cpp.su": {
-          "/COMPONENT_MAIN_DIR/diag_log.cpp :: int diag_vprintf_(const char*, va_list)": 320,
-          "/COMPONENT_MAIN_DIR/diag_log.cpp :: void diag_log_dump_chunks(const std::function<bool(const char*, unsigned int)>&, DiagDumpStart)": 352
+          "/COMPONENT_MAIN_DIR/diag_log.cpp :: DiagDumpResult diag_log_dump_chunks(const std::function<bool(const char*, unsigned int)>&, DiagDumpStart)": 336,
+          "/COMPONENT_MAIN_DIR/diag_log.cpp :: int diag_vprintf_(const char*, va_list)": 320
         },
         "CMakeFiles/__idf_main.dir/display.cpp.su": {},
         "CMakeFiles/__idf_main.dir/heap_trend.cpp.su": {},
@@ -126,13 +134,15 @@
         },
         "CMakeFiles/__idf_main.dir/http_ota.cpp.su": {},
         "CMakeFiles/__idf_main.dir/http_server.cpp.su": {
+          "/COMPONENT_MAIN_DIR/http_server.cpp :: bool browser_mutation_allowed(httpd_req_t*)": 480,
           "/COMPONENT_MAIN_DIR/http_server.cpp :: esp_err_t handle_all_dispatch(httpd_req_t*)": 336
         },
         "CMakeFiles/__idf_main.dir/http_status.cpp.su": {
           "/COMPONENT_MAIN_DIR/http_status.cpp :: cJSON* build_status_object(bool)": 1568,
-          "/COMPONENT_MAIN_DIR/http_status.cpp :: esp_err_t handle_coredump(GuardedReq)": 1088,
+          "/COMPONENT_MAIN_DIR/http_status.cpp :: esp_err_t handle_coredump(GuardedReq)": 1104,
           "/COMPONENT_MAIN_DIR/http_status.cpp :: esp_err_t handle_diag(GuardedReq)": 880,
-          "/COMPONENT_MAIN_DIR/http_status.cpp :: esp_err_t handle_heap(GuardedReq)": 1216
+          "/COMPONENT_MAIN_DIR/http_status.cpp :: esp_err_t handle_heap(GuardedReq)": 1232,
+          "/COMPONENT_MAIN_DIR/logic/heap_json_stream.hpp :: bool tk::stream_heap_json(const HeapJsonStreamView&, Send) [with Send = handle_heap(GuardedReq)::<lambda(const char*, size_t)>]": 336
         },
         "CMakeFiles/__idf_main.dir/led_status.cpp.su": {},
         "CMakeFiles/__idf_main.dir/main.cpp.su": {
@@ -148,18 +158,20 @@
           "/COMPONENT_MAIN_DIR/mqtt_ha.cpp :: bool publish_state()": 496
         },
         "CMakeFiles/__idf_main.dir/net.cpp.su": {
+          "/COMPONENT_MAIN_DIR/net.cpp :: bool tk::net_start_eth()": 272,
           "/COMPONENT_MAIN_DIR/net.cpp :: bool tk::net_start_wifi(const char*, const char*, bool)": 416
         },
         "CMakeFiles/__idf_main.dir/nvs_storage.cpp.su": {},
         "CMakeFiles/__idf_main.dir/ota_update.cpp.su": {
-          "/COMPONENT_MAIN_DIR/ota_update.cpp :: bool http_get_to_buffer(const char*, std::string&)": 704,
-          "/COMPONENT_MAIN_DIR/ota_update.cpp :: void ota_task_impl()": 592
+          "/COMPONENT_MAIN_DIR/ota_update.cpp :: bool http_get_to_buffer(const char*, std::string&)": 736,
+          "/COMPONENT_MAIN_DIR/ota_update.cpp :: void ota_task_impl()": 624
         },
         "CMakeFiles/__idf_main.dir/provisioning.cpp.su": {
           "/COMPONENT_MAIN_DIR/provisioning.cpp :: esp_err_t save_post_impl(httpd_req_t*)": 1456,
           "/COMPONENT_MAIN_DIR/provisioning.cpp :: void dns_task(void*)": 592,
           "/COMPONENT_MAIN_DIR/provisioning.cpp :: void provisioning_run(NvsStorageAdapter&)": 528
         },
+        "CMakeFiles/__idf_main.dir/runtime_admission.cpp.su": {},
         "CMakeFiles/__idf_main.dir/safe_mode.cpp.su": {},
         "CMakeFiles/__idf_main.dir/stack_watch.cpp.su": {},
         "CMakeFiles/__idf_main.dir/syslog.cpp.su": {
@@ -169,23 +181,28 @@
           "/COMPONENT_MAIN_DIR/syslog.cpp :: void syslog_task(void*)": 480
         },
         "CMakeFiles/__idf_main.dir/vehicle_commands.cpp.su": {
-          "/COMPONENT_MAIN_DIR/vehicle_commands.cpp :: bool VehicleController::set_charging_amps(int, int)": 576
+          "/COMPONENT_MAIN_DIR/vehicle_commands.cpp :: bool VehicleController::set_charging_amps(int, int)": 480
         },
-        "CMakeFiles/__idf_main.dir/vehicle_ctrl.cpp.su": {},
+        "CMakeFiles/__idf_main.dir/vehicle_ctrl.cpp.su": {
+          "/COMPONENT_MAIN_DIR/vehicle_ctrl.cpp :: bool VehicleController::enqueue_ble_link_event_(bool, uint16_t, uint32_t)": 288,
+          "/COMPONENT_MAIN_DIR/vehicle_ctrl.cpp :: bool VehicleController::enqueue_ble_rx_event_(const uint8_t*, size_t, uint32_t)": 288
+        },
         "CMakeFiles/__idf_main.dir/vehicle_pairing.cpp.su": {
           "/COMPONENT_MAIN_DIR/vehicle_pairing.cpp :: bool VehicleController::clear_session_and_cache_()": 304,
           "/COMPONENT_MAIN_DIR/vehicle_pairing.cpp :: std::string VehicleController::key_fingerprint()": 848
         },
         "CMakeFiles/__idf_main.dir/vehicle_telemetry.cpp.su": {
-          "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: static void VehicleController::loop_task_fn_(void*)": 304
+          "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: static void VehicleController::loop_task_fn_(void*)": 320,
+          "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: void VehicleController::process_ble_host_events_()": 560,
+          "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: void VehicleController::process_pending_telemetry_()": 1408
         }
       }
     },
     "esp32c3": {
       "files": {
         "CMakeFiles/__idf_main.dir/ble_client.cpp.su": {
-          "/COMPONENT_MAIN_DIR/ble_client.cpp :: int BleClient::on_gap_event(ble_gap_event*)": 336,
-          "/COMPONENT_MAIN_DIR/ble_client.cpp :: int BleClient::target_connectable_since(int64_t) const": 752,
+          "/COMPONENT_MAIN_DIR/ble_client.cpp :: int BleClient::on_gap_event(ble_gap_event*)": 544,
+          "/COMPONENT_MAIN_DIR/ble_client.cpp :: int BleClient::target_connectable_since(int64_t) const": 720,
           "/COMPONENT_MAIN_DIR/ble_client.cpp :: std::vector<TeslaScan> BleClient::nearby() const": 800
         },
         "CMakeFiles/__idf_main.dir/board.cpp.su": {},
@@ -195,8 +212,8 @@
         },
         "CMakeFiles/__idf_main.dir/diag_crash.cpp.su": {},
         "CMakeFiles/__idf_main.dir/diag_log.cpp.su": {
-          "/COMPONENT_MAIN_DIR/diag_log.cpp :: int diag_vprintf_(const char*, va_list)": 288,
-          "/COMPONENT_MAIN_DIR/diag_log.cpp :: void diag_log_dump_chunks(const std::function<bool(const char*, unsigned int)>&, DiagDumpStart)": 336
+          "/COMPONENT_MAIN_DIR/diag_log.cpp :: DiagDumpResult diag_log_dump_chunks(const std::function<bool(const char*, unsigned int)>&, DiagDumpStart)": 336,
+          "/COMPONENT_MAIN_DIR/diag_log.cpp :: int diag_vprintf_(const char*, va_list)": 288
         },
         "CMakeFiles/__idf_main.dir/display.cpp.su": {},
         "CMakeFiles/__idf_main.dir/heap_trend.cpp.su": {},
@@ -214,13 +231,15 @@
         },
         "CMakeFiles/__idf_main.dir/http_ota.cpp.su": {},
         "CMakeFiles/__idf_main.dir/http_server.cpp.su": {
-          "/COMPONENT_MAIN_DIR/http_server.cpp :: esp_err_t handle_all_dispatch(httpd_req_t*)": 304
+          "/COMPONENT_MAIN_DIR/http_server.cpp :: bool browser_mutation_allowed(httpd_req_t*)": 448,
+          "/COMPONENT_MAIN_DIR/http_server.cpp :: esp_err_t handle_all_dispatch(httpd_req_t*)": 320
         },
         "CMakeFiles/__idf_main.dir/http_status.cpp.su": {
           "/COMPONENT_MAIN_DIR/http_status.cpp :: cJSON* build_status_object(bool)": 1536,
           "/COMPONENT_MAIN_DIR/http_status.cpp :: esp_err_t handle_coredump(GuardedReq)": 1088,
           "/COMPONENT_MAIN_DIR/http_status.cpp :: esp_err_t handle_diag(GuardedReq)": 864,
-          "/COMPONENT_MAIN_DIR/http_status.cpp :: esp_err_t handle_heap(GuardedReq)": 1216
+          "/COMPONENT_MAIN_DIR/http_status.cpp :: esp_err_t handle_heap(GuardedReq)": 1232,
+          "/COMPONENT_MAIN_DIR/logic/heap_json_stream.hpp :: bool tk::stream_heap_json(const HeapJsonStreamView&, Send) [with Send = handle_heap(GuardedReq)::<lambda(const char*, size_t)>]": 320
         },
         "CMakeFiles/__idf_main.dir/led_status.cpp.su": {},
         "CMakeFiles/__idf_main.dir/main.cpp.su": {
@@ -239,40 +258,46 @@
         },
         "CMakeFiles/__idf_main.dir/nvs_storage.cpp.su": {},
         "CMakeFiles/__idf_main.dir/ota_update.cpp.su": {
-          "/COMPONENT_MAIN_DIR/ota_update.cpp :: bool http_get_to_buffer(const char*, std::string&)": 688,
-          "/COMPONENT_MAIN_DIR/ota_update.cpp :: void ota_task_impl()": 576
+          "/COMPONENT_MAIN_DIR/ota_update.cpp :: bool http_get_to_buffer(const char*, std::string&)": 736,
+          "/COMPONENT_MAIN_DIR/ota_update.cpp :: void ota_task_impl()": 624
         },
         "CMakeFiles/__idf_main.dir/provisioning.cpp.su": {
           "/COMPONENT_MAIN_DIR/provisioning.cpp :: esp_err_t save_post_impl(httpd_req_t*)": 1440,
           "/COMPONENT_MAIN_DIR/provisioning.cpp :: void dns_task(void*)": 576,
           "/COMPONENT_MAIN_DIR/provisioning.cpp :: void provisioning_run(NvsStorageAdapter&)": 496
         },
+        "CMakeFiles/__idf_main.dir/runtime_admission.cpp.su": {},
         "CMakeFiles/__idf_main.dir/safe_mode.cpp.su": {},
         "CMakeFiles/__idf_main.dir/stack_watch.cpp.su": {},
         "CMakeFiles/__idf_main.dir/syslog.cpp.su": {
           "/COMPONENT_MAIN_DIR/syslog.cpp :: SendResult syslog_sendto(const sockaddr_in&, const char*, size_t, int*)": 352,
           "/COMPONENT_MAIN_DIR/syslog.cpp :: bool syslog_start_impl(NvsStorageAdapter&)": 304,
           "/COMPONENT_MAIN_DIR/syslog.cpp :: void syslog_send(const char*, size_t)": 304,
-          "/COMPONENT_MAIN_DIR/syslog.cpp :: void syslog_task(void*)": 448
+          "/COMPONENT_MAIN_DIR/syslog.cpp :: void syslog_task(void*)": 464
         },
         "CMakeFiles/__idf_main.dir/vehicle_commands.cpp.su": {
-          "/COMPONENT_MAIN_DIR/vehicle_commands.cpp :: bool VehicleController::set_charging_amps(int, int)": 576
+          "/COMPONENT_MAIN_DIR/vehicle_commands.cpp :: bool VehicleController::set_charging_amps(int, int)": 480
         },
-        "CMakeFiles/__idf_main.dir/vehicle_ctrl.cpp.su": {},
+        "CMakeFiles/__idf_main.dir/vehicle_ctrl.cpp.su": {
+          "/COMPONENT_MAIN_DIR/vehicle_ctrl.cpp :: bool VehicleController::enqueue_ble_link_event_(bool, uint16_t, uint32_t)": 288,
+          "/COMPONENT_MAIN_DIR/vehicle_ctrl.cpp :: bool VehicleController::enqueue_ble_rx_event_(const uint8_t*, size_t, uint32_t)": 288
+        },
         "CMakeFiles/__idf_main.dir/vehicle_pairing.cpp.su": {
           "/COMPONENT_MAIN_DIR/vehicle_pairing.cpp :: bool VehicleController::clear_session_and_cache_()": 272,
           "/COMPONENT_MAIN_DIR/vehicle_pairing.cpp :: std::string VehicleController::key_fingerprint()": 832
         },
         "CMakeFiles/__idf_main.dir/vehicle_telemetry.cpp.su": {
-          "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: static void VehicleController::loop_task_fn_(void*)": 288
+          "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: static void VehicleController::loop_task_fn_(void*)": 320,
+          "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: void VehicleController::process_ble_host_events_()": 544,
+          "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: void VehicleController::process_pending_telemetry_()": 1392
         }
       }
     },
     "esp32c6": {
       "files": {
         "CMakeFiles/__idf_main.dir/ble_client.cpp.su": {
-          "/COMPONENT_MAIN_DIR/ble_client.cpp :: int BleClient::on_gap_event(ble_gap_event*)": 336,
-          "/COMPONENT_MAIN_DIR/ble_client.cpp :: int BleClient::target_connectable_since(int64_t) const": 752,
+          "/COMPONENT_MAIN_DIR/ble_client.cpp :: int BleClient::on_gap_event(ble_gap_event*)": 544,
+          "/COMPONENT_MAIN_DIR/ble_client.cpp :: int BleClient::target_connectable_since(int64_t) const": 720,
           "/COMPONENT_MAIN_DIR/ble_client.cpp :: std::vector<TeslaScan> BleClient::nearby() const": 800
         },
         "CMakeFiles/__idf_main.dir/board.cpp.su": {},
@@ -282,8 +307,8 @@
         },
         "CMakeFiles/__idf_main.dir/diag_crash.cpp.su": {},
         "CMakeFiles/__idf_main.dir/diag_log.cpp.su": {
-          "/COMPONENT_MAIN_DIR/diag_log.cpp :: int diag_vprintf_(const char*, va_list)": 288,
-          "/COMPONENT_MAIN_DIR/diag_log.cpp :: void diag_log_dump_chunks(const std::function<bool(const char*, unsigned int)>&, DiagDumpStart)": 336
+          "/COMPONENT_MAIN_DIR/diag_log.cpp :: DiagDumpResult diag_log_dump_chunks(const std::function<bool(const char*, unsigned int)>&, DiagDumpStart)": 336,
+          "/COMPONENT_MAIN_DIR/diag_log.cpp :: int diag_vprintf_(const char*, va_list)": 288
         },
         "CMakeFiles/__idf_main.dir/display.cpp.su": {},
         "CMakeFiles/__idf_main.dir/heap_trend.cpp.su": {},
@@ -301,13 +326,15 @@
         },
         "CMakeFiles/__idf_main.dir/http_ota.cpp.su": {},
         "CMakeFiles/__idf_main.dir/http_server.cpp.su": {
-          "/COMPONENT_MAIN_DIR/http_server.cpp :: esp_err_t handle_all_dispatch(httpd_req_t*)": 304
+          "/COMPONENT_MAIN_DIR/http_server.cpp :: bool browser_mutation_allowed(httpd_req_t*)": 448,
+          "/COMPONENT_MAIN_DIR/http_server.cpp :: esp_err_t handle_all_dispatch(httpd_req_t*)": 320
         },
         "CMakeFiles/__idf_main.dir/http_status.cpp.su": {
           "/COMPONENT_MAIN_DIR/http_status.cpp :: cJSON* build_status_object(bool)": 1536,
           "/COMPONENT_MAIN_DIR/http_status.cpp :: esp_err_t handle_coredump(GuardedReq)": 1088,
           "/COMPONENT_MAIN_DIR/http_status.cpp :: esp_err_t handle_diag(GuardedReq)": 864,
-          "/COMPONENT_MAIN_DIR/http_status.cpp :: esp_err_t handle_heap(GuardedReq)": 1216
+          "/COMPONENT_MAIN_DIR/http_status.cpp :: esp_err_t handle_heap(GuardedReq)": 1232,
+          "/COMPONENT_MAIN_DIR/logic/heap_json_stream.hpp :: bool tk::stream_heap_json(const HeapJsonStreamView&, Send) [with Send = handle_heap(GuardedReq)::<lambda(const char*, size_t)>]": 320
         },
         "CMakeFiles/__idf_main.dir/led_status.cpp.su": {},
         "CMakeFiles/__idf_main.dir/main.cpp.su": {
@@ -326,32 +353,38 @@
         },
         "CMakeFiles/__idf_main.dir/nvs_storage.cpp.su": {},
         "CMakeFiles/__idf_main.dir/ota_update.cpp.su": {
-          "/COMPONENT_MAIN_DIR/ota_update.cpp :: bool http_get_to_buffer(const char*, std::string&)": 688,
-          "/COMPONENT_MAIN_DIR/ota_update.cpp :: void ota_task_impl()": 576
+          "/COMPONENT_MAIN_DIR/ota_update.cpp :: bool http_get_to_buffer(const char*, std::string&)": 736,
+          "/COMPONENT_MAIN_DIR/ota_update.cpp :: void ota_task_impl()": 624
         },
         "CMakeFiles/__idf_main.dir/provisioning.cpp.su": {
           "/COMPONENT_MAIN_DIR/provisioning.cpp :: esp_err_t save_post_impl(httpd_req_t*)": 1440,
           "/COMPONENT_MAIN_DIR/provisioning.cpp :: void dns_task(void*)": 576,
-          "/COMPONENT_MAIN_DIR/provisioning.cpp :: void provisioning_run(NvsStorageAdapter&)": 496
+          "/COMPONENT_MAIN_DIR/provisioning.cpp :: void provisioning_run(NvsStorageAdapter&)": 512
         },
+        "CMakeFiles/__idf_main.dir/runtime_admission.cpp.su": {},
         "CMakeFiles/__idf_main.dir/safe_mode.cpp.su": {},
         "CMakeFiles/__idf_main.dir/stack_watch.cpp.su": {},
         "CMakeFiles/__idf_main.dir/syslog.cpp.su": {
           "/COMPONENT_MAIN_DIR/syslog.cpp :: SendResult syslog_sendto(const sockaddr_in&, const char*, size_t, int*)": 352,
           "/COMPONENT_MAIN_DIR/syslog.cpp :: bool syslog_start_impl(NvsStorageAdapter&)": 304,
           "/COMPONENT_MAIN_DIR/syslog.cpp :: void syslog_send(const char*, size_t)": 304,
-          "/COMPONENT_MAIN_DIR/syslog.cpp :: void syslog_task(void*)": 448
+          "/COMPONENT_MAIN_DIR/syslog.cpp :: void syslog_task(void*)": 464
         },
         "CMakeFiles/__idf_main.dir/vehicle_commands.cpp.su": {
-          "/COMPONENT_MAIN_DIR/vehicle_commands.cpp :: bool VehicleController::set_charging_amps(int, int)": 576
+          "/COMPONENT_MAIN_DIR/vehicle_commands.cpp :: bool VehicleController::set_charging_amps(int, int)": 480
         },
-        "CMakeFiles/__idf_main.dir/vehicle_ctrl.cpp.su": {},
+        "CMakeFiles/__idf_main.dir/vehicle_ctrl.cpp.su": {
+          "/COMPONENT_MAIN_DIR/vehicle_ctrl.cpp :: bool VehicleController::enqueue_ble_link_event_(bool, uint16_t, uint32_t)": 288,
+          "/COMPONENT_MAIN_DIR/vehicle_ctrl.cpp :: bool VehicleController::enqueue_ble_rx_event_(const uint8_t*, size_t, uint32_t)": 288
+        },
         "CMakeFiles/__idf_main.dir/vehicle_pairing.cpp.su": {
           "/COMPONENT_MAIN_DIR/vehicle_pairing.cpp :: bool VehicleController::clear_session_and_cache_()": 272,
           "/COMPONENT_MAIN_DIR/vehicle_pairing.cpp :: std::string VehicleController::key_fingerprint()": 832
         },
         "CMakeFiles/__idf_main.dir/vehicle_telemetry.cpp.su": {
-          "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: static void VehicleController::loop_task_fn_(void*)": 288
+          "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: static void VehicleController::loop_task_fn_(void*)": 320,
+          "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: void VehicleController::process_ble_host_events_()": 544,
+          "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: void VehicleController::process_pending_telemetry_()": 1392
         }
       }
     }

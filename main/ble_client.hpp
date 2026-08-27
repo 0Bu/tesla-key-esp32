@@ -1,7 +1,6 @@
 #pragma once
 
 #include <adapters.h>
-#include <functional>
 #include <array>
 #include <vector>
 #include <string>
@@ -66,17 +65,28 @@ struct TeslaScan {
 
 class BleClient : public TeslaBLE::BleAdapter {
 public:
-    using ConnectedCb   = std::function<void(bool connected)>;
-    using RxDataCb      = std::function<void(const std::vector<uint8_t>& data)>;
+    // These callbacks execute on the NimBLE host task. Keep the ABI POD-only and noexcept so the
+    // host can only hand fixed data to a non-blocking consumer; all Vehicle/string/NVS work is
+    // deferred to vehicle_loop.
+    using ConnectedCb = bool (*)(void* context, bool connected, uint16_t conn_handle,
+                                 uint32_t generation) noexcept;
+    using RxDataCb = bool (*)(void* context, const uint8_t* data, size_t size,
+                              uint32_t generation) noexcept;
 
     BleClient();
 
-    void set_connected_cb(ConnectedCb cb)  { on_connected_ = std::move(cb); }
-    void set_rx_data_cb(RxDataCb cb)       { on_rx_data_   = std::move(cb); }
+    void set_connected_cb(ConnectedCb cb, void* context) {
+        on_connected_ = cb;
+        connected_context_ = context;
+    }
+    void set_rx_data_cb(RxDataCb cb, void* context) {
+        on_rx_data_ = cb;
+        rx_context_ = context;
+    }
     // VIN of the vehicle to connect to; the scanner matches the Tesla BLE name derived from
     // it. Empty = no target ⇒ nearby Teslas are still listed (/scan) but the scanner never
     // connects or enrols on one (the device must not pair onto an arbitrary nearby Tesla).
-    void set_target_vin(const std::string& vin) { target_vin_ = vin; }
+    void set_target_vin(const std::string& vin);
 
     // Start NimBLE host + scanning task
     bool start();
@@ -87,6 +97,11 @@ public:
     void connect(const std::string& address) override;
     void disconnect() override;
     bool write(const std::vector<uint8_t>& data) override;
+
+    // vehicle_loop calls this only after Vehicle::set_connected(true) succeeded for the deferred
+    // LinkUp event. It re-checks the handle/generation/connect intent under the BLE lifecycle lock;
+    // a deadline cancellation or replacement link can therefore never be acknowledged as ready.
+    bool complete_ready(uint16_t conn_handle, uint32_t generation) noexcept;
 
     bool is_connected() const {
         if (disconnecting_.load()) return false;
@@ -125,6 +140,9 @@ public:
     bool host_synced() const noexcept { return host_synced_.load(std::memory_order_acquire); }
     std::uint32_t host_reset_count() const noexcept {
         return host_reset_count_.load(std::memory_order_acquire);
+    }
+    std::uint32_t lifecycle_generation() const noexcept {
+        return connection_generation_.load(std::memory_order_acquire);
     }
 
     // Consecutive failed connects to the *target* car — its advert was heard and the
@@ -191,7 +209,8 @@ private:
     // `last_us` timestamps the name/RSSI report; `connectable_us` separately timestamps the
     // primary advert that supplied `connectable`. SCAN_RSP must never make an older/default
     // connectability verdict look current.
-    std::vector<ScanEntry> scan_;
+    std::array<ScanEntry, 12> scan_{};
+    size_t                    scan_count_{0};
     struct ConnectableObservation {
         uint8_t addr[6];
         int64_t seen_us;
@@ -230,8 +249,10 @@ private:
     // gate makes a timeout terminal even if a callback arrives after boot has failed closed.
     tk::NimbleStartGate    start_gate_;
 
-    ConnectedCb on_connected_;
-    RxDataCb    on_rx_data_;
+    ConnectedCb on_connected_{nullptr};
+    void*       connected_context_{nullptr};
+    RxDataCb    on_rx_data_{nullptr};
+    void*       rx_context_{nullptr};
 
     // GAP/GATT handles are published by the NimBLE host task and consumed by command/status
     // tasks. Plain uint16_t fields made every is_connected/disconnect/write overlap a C++ data
@@ -241,7 +262,8 @@ private:
     std::atomic<uint16_t> conn_handle_{BLE_HS_CONN_HANDLE_NONE};
     std::atomic<uint32_t> connection_generation_{0};
     // A GAP handle is not command-ready. This token is published only after Tesla GATT
-    // discovery, a confirmed CCCD write, and on_connected_(true) for the same generation.
+    // discovery, a confirmed CCCD write, and vehicle_loop's successful completion ack for the
+    // same generation.
     // Tying it to the generation also rejects a delayed callback after handle reuse.
     std::atomic<uint32_t> ready_generation_{tk::ble::kNoReadyGeneration};
     // ATT payload available for the current connection generation. It starts at the mandatory
@@ -273,8 +295,10 @@ private:
     uint16_t svc_end_handle_{0};
 
     bool       has_target_{false};
-    std::string peer_addr_str_;
-    std::string target_vin_;
+    std::array<char, 18> peer_addr_{};
+    // Precomputed before NimBLE starts. The host callback compares fixed buffers only; the
+    // pinned tesla-ble VIN helper allocates a std::string even through its const-char overload.
+    std::array<char, 19> target_name_{};
 
     // Outbound write queue processed via direct NimBLE calls
     SemaphoreHandle_t write_mutex_{nullptr};

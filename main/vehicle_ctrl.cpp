@@ -10,6 +10,7 @@
 #include "logic/heap_watchdog.hpp"
 #include "task_config.hpp"
 #include <cmath>
+#include <cstring>
 #include <esp_log.h>
 
 // No protobuf includes needed here: the only generated types this TU touches are the
@@ -44,6 +45,55 @@ struct NoDelete {
     void operator()(TeslaBLE::BleAdapter*)    const {}
     void operator()(TeslaBLE::StorageAdapter*)const {}
 };
+
+bool VehicleController::ble_link_event_cb_(void* context, bool connected,
+                                           uint16_t conn_handle,
+                                           uint32_t generation) noexcept {
+    auto* self = static_cast<VehicleController*>(context);
+    return self && self->enqueue_ble_link_event_(connected, conn_handle, generation);
+}
+
+bool VehicleController::ble_rx_event_cb_(void* context, const uint8_t* data, size_t size,
+                                         uint32_t generation) noexcept {
+    auto* self = static_cast<VehicleController*>(context);
+    return self && self->enqueue_ble_rx_event_(data, size, generation);
+}
+
+bool VehicleController::enqueue_ble_link_event_(bool connected, uint16_t conn_handle,
+                                                uint32_t generation) noexcept {
+    if (!connected) {
+        // Invalidate the active waiter before deferred Vehicle cleanup: a physical link loss can
+        // never complete or be adopted by a later request while the FIFO is waiting for its task.
+        command_generation_.fetch_add(1, std::memory_order_acq_rel);
+        auth_fail_streak_.store(0, std::memory_order_release);
+    }
+    BleHostEvent event{};
+    event.kind = connected ? tk::BleDeferredEventKind::LinkUp
+                           : tk::BleDeferredEventKind::LinkDown;
+    event.conn_handle = conn_handle;
+    event.generation = generation;
+    const bool queued = ble_event_queue_ &&
+                        xQueueSend(ble_event_queue_, &event, 0) == pdTRUE;
+    if (!queued) ble_event_overflow_.store(true, std::memory_order_release);
+    return queued;
+}
+
+bool VehicleController::enqueue_ble_rx_event_(const uint8_t* data, size_t size,
+                                              uint32_t generation) noexcept {
+    if (!data || size == 0 || size > tk::kBleMaxWritePayload) {
+        ble_event_overflow_.store(true, std::memory_order_release);
+        return false;
+    }
+    BleHostEvent event{};
+    event.kind = tk::BleDeferredEventKind::Rx;
+    event.size = static_cast<uint16_t>(size);
+    event.generation = generation;
+    std::memcpy(event.data.data(), data, size);
+    const bool queued = ble_event_queue_ &&
+                        xQueueSend(ble_event_queue_, &event, 0) == pdTRUE;
+    if (!queued) ble_event_overflow_.store(true, std::memory_order_release);
+    return queued;
+}
 
 bool VehicleController::recover_pending_key_rotation_at_boot_() {
     key_rotation_recovered_at_boot_ = false;
@@ -124,11 +174,15 @@ bool VehicleController::init(const std::string& vin,
     command_mutex_ = xSemaphoreCreateMutex();
     cache_mutex_   = xSemaphoreCreateMutex();
     result_mutex_  = xSemaphoreCreateMutex();
+    ble_event_queue_ = xQueueCreateStatic(
+        kBleHostEventDepth, sizeof(BleHostEvent), ble_event_queue_storage_.data(),
+        &ble_event_queue_control_);
     // VehicleController is an ESSENTIAL component: without these primitives the command
     // serialization and cache locking cannot hold, so refuse to report a healthy controller
     // rather than run one that could deadlock or race (issue #204, Scenario C). app_main halts
     // boot on a false return.
-    if (!vehicle_mutex_ || !command_mutex_ || !cache_mutex_ || !result_mutex_) {
+    if (!vehicle_mutex_ || !command_mutex_ || !cache_mutex_ || !result_mutex_ ||
+        !ble_event_queue_) {
         ESP_LOGE(TAG, "synchronization primitive allocation failed");
         return false;
     }
@@ -143,88 +197,10 @@ bool VehicleController::init(const std::string& vin,
     // This also keeps a corrupt/truncated key from being treated as enrolment-safe after reboot.
     key_runtime_safe_.store(stored_private_key && vehicle_->has_private_key());
 
-    // Wire BLE → Vehicle callbacks
-    ble_->set_connected_cb([this](bool connected) {
-        if (!connected) {
-            // Vehicle::set_connected(false) synchronously finalises tesla-ble's queued
-            // callbacks. Some flush results are SKIPPED (compatible_success), so invalidate
-            // the active request before entering the library: a physical link loss can never
-            // masquerade as success or signal a later request.
-            command_generation_.fetch_add(1);
-        }
-        {
-            // RAII give — this runs on the NimBLE host task and the callers (on_gap_event /
-            // on_dsc_disc) catch instead of rethrowing, so a throw out of the library here must
-            // not skip the give: a silently-held vehicle_mutex_ would wedge every later
-            // command/poll until power-cycle. The catch also flags a link reset (loop_task).
-            tk::SemGuard g(vehicle_mutex_);
-            try {
-                vehicle_->set_connected(connected);
-                vcsec_sleep_state_.store(static_cast<int>(
-                    connected ? vehicle_->sleep_state() : TeslaBLE::SleepState::UNKNOWN));
-            } catch (const std::exception& e) {
-                ESP_LOGE(TAG, "set_connected threw (%s) — resetting link", e.what());
-                vcsec_sleep_state_.store(static_cast<int>(TeslaBLE::SleepState::UNKNOWN));
-                ble_fault_.store(true);
-            } catch (...) {
-                ESP_LOGE(TAG, "set_connected threw (unknown) — resetting link");
-                vcsec_sleep_state_.store(static_cast<int>(TeslaBLE::SleepState::UNKNOWN));
-                ble_fault_.store(true);
-            }
-        }
-
-        if (!connected) {
-            // The BLE link just dropped. The "auth response authentication failed" →
-            // pairing_lost_ heuristic in make_result_cb_ (now fed only by the signed health
-            // probe) requires TWO such replies in a row,
-            // on the premise that a genuinely de-whitelisted key keeps failing on a healthy,
-            // continuously-connected link. A lossy/recovering link, by contrast, emits the
-            // same message as transient corruption and then drops — so two failures that
-            // straddle a disconnect are NOT evidence of a deleted key. Reset the streak here
-            // so a reconnect starts clean and a flaky link can't be mistaken for a revocation
-            // (which would clear the session and wrongly prompt "approve on the touchscreen"
-            // on an already-paired car). The definitive signals — a "whitelist" message and
-            // the ERROR_UNKNOWN_KEY_ID/INACTIVE_KEY/INVALID_KEY_HANDLE faults — are immediate
-            // and unaffected, so a real key deletion is still caught.
-            auth_fail_streak_.store(0);
-        }
-
-        // Persist discovered MAC on first connection so we skip scanning next boot
-        if (connected && persist_discovered_mac_.load() && config_store_) {
-            std::string addr = ble_client_instance()
-                               ? ble_client_instance()->peer_addr_str() : "";
-            bool expected = true;
-            if (!addr.empty() && persist_discovered_mac_.compare_exchange_strong(expected, false)) {
-                // Best-effort cache (a lost MAC costs one extra scan next boot, nothing more) —
-                // but say so rather than dropping the result, or the next boot's slow reconnect
-                // looks like a BLE problem instead of a storage one.
-                if (!config_store_->save_str(tk::nvs_contract::kBleMac, addr)) {
-                    ESP_LOGW(TAG, "could not persist Tesla MAC %s — next boot rescans", addr.c_str());
-                } else {
-                    ESP_LOGI(TAG, "Tesla MAC saved: %s", addr.c_str());
-                }
-            }
-        }
-    });
-    ble_->set_rx_data_cb([this](const std::vector<uint8_t>& data) {
-        // on_rx_data parses Tesla's length-prefixed frames out of these bytes synchronously.
-        // A weak/lossy BLE link desyncs the framing ("Invalid message length …") and some
-        // corrupt inputs make the parser throw (out_of_range / bad_alloc). This callback runs
-        // in NimBLE's host task, so an escaping throw unwinds through C dispatch frames →
-        // std::terminate → abort() → reboot. Catch it at this nearest C++ boundary and flag a
-        // link reset (handled in loop_task). RAII give — the mutex releases on unwind too.
-        tk::SemGuard g(vehicle_mutex_);
-        try {
-            vehicle_->on_rx_data(data);
-            vcsec_sleep_state_.store(static_cast<int>(vehicle_->sleep_state()));
-        } catch (const std::exception& e) {
-            ESP_LOGE(TAG, "on_rx_data threw (%s) — corrupt BLE RX; resetting link", e.what());
-            ble_fault_.store(true);
-        } catch (...) {
-            ESP_LOGE(TAG, "on_rx_data threw (unknown) — corrupt BLE RX; resetting link");
-            ble_fault_.store(true);
-        }
-    });
+    // Exact named adapters are mechanically audited as fixed POD/atomic/queue-only callbacks.
+    // The NimBLE host never calls Vehicle, allocates, waits on a shared mutex, logs or touches NVS.
+    ble_->set_connected_cb(&VehicleController::ble_link_event_cb_, this);
+    ble_->set_rx_data_cb(&VehicleController::ble_rx_event_cb_, this);
 
     // Persistent charge-state + read-only telemetry cache callbacks (installed once,
     // never cleared) — defined in vehicle_telemetry.cpp next to the parsers they use.
@@ -236,22 +212,12 @@ bool VehicleController::init(const std::string& vin,
     // every signed command on the *infotainment* domain immediately with a signed-message
     // fault naming the key (ERROR_UNKNOWN_KEY_ID) — the background charge poll triggers
     // exactly that. Observe every incoming message and, while we believe we're paired,
-    // treat such a fault as a lost pairing. Runs in the BLE RX task; only cheap atomic
-    // ops here. Gated on believed_paired_ so enrolment-time rejections are ignored.
+    // treat such a fault as a lost pairing. Runs inside serialized Vehicle dispatch; only atomic
+    // ops here. Gated on believed_paired_ so enrolment-time rejections are ignored. Keep the
+    // std::function adapter itself mechanically trivial: tesla-ble invokes it synchronously while
+    // Vehicle owns its internal dispatch, so logging/allocation belongs in the normal task loop.
     vehicle_->set_message_callback([this](const UniversalMessage_RoutableMessage& msg) {
-        if (!believed_paired_ || !msg.has_signedMessageStatus) return;
-        switch (msg.signedMessageStatus.signed_message_fault) {
-            case UniversalMessage_MessageFault_E_MESSAGEFAULT_ERROR_UNKNOWN_KEY_ID:
-            case UniversalMessage_MessageFault_E_MESSAGEFAULT_ERROR_INACTIVE_KEY:
-            case UniversalMessage_MessageFault_E_MESSAGEFAULT_ERROR_INVALID_KEY_HANDLE:
-                if (!pairing_lost_.exchange(true)) {
-                    ESP_LOGW(TAG, "auto-pair: car rejected our key (fault %d) — key deleted on the car side, pairing lost",
-                             (int)msg.signedMessageStatus.signed_message_fault);
-                }
-                break;
-            default:
-                break;
-        }
+        on_vehicle_message_(msg);
     });
 
     // Seed the active window open at boot so evcc gets a warm cache for the first few
@@ -278,6 +244,20 @@ bool VehicleController::init(const std::string& vin,
     }
 
     return this->start_tasks();
+}
+
+void VehicleController::on_vehicle_message_(
+    const UniversalMessage_RoutableMessage& msg) noexcept {
+    if (!believed_paired_ || !msg.has_signedMessageStatus) return;
+    switch (msg.signedMessageStatus.signed_message_fault) {
+        case UniversalMessage_MessageFault_E_MESSAGEFAULT_ERROR_UNKNOWN_KEY_ID:
+        case UniversalMessage_MessageFault_E_MESSAGEFAULT_ERROR_INACTIVE_KEY:
+        case UniversalMessage_MessageFault_E_MESSAGEFAULT_ERROR_INVALID_KEY_HANDLE:
+            pairing_lost_.store(true, std::memory_order_release);
+            break;
+        default:
+            break;
+    }
 }
 
 bool VehicleController::start_tasks() {

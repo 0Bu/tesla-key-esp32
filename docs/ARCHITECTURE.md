@@ -76,6 +76,11 @@ A rotating background poll in `loop_task_fn_` (one domain per ~30 s cycle: clima
 drive → tires → closures, full set ~120 s) refreshes per-domain caches via the
 `set_*_state_callback` hooks in `vehicle_telemetry.cpp`. All polls are `NO_WAKE_SKIP`
 (read-only, never wake the car) and feed the MQTT/HA bridge — evcc/pairing are unaffected.
+tesla-ble invokes those hooks synchronously while `vehicle_mutex_` owns `Vehicle::loop()`, so the
+hooks copy only trivially-copyable nanopb state into fixed latest-value slots under a short
+`portMUX`. The same `vehicle_loop` iteration releases `vehicle_mutex_` before parsing strings and
+publishing the public caches under `cache_mutex_`; no heap operation or nested cache lock runs from
+the library callback.
 These background polls are **paused while a serialized command/query is in flight**
 (`cmd_in_flight_`), including the VCSEC health probe, so nothing is injected into the single
 BLE FIFO behind another operation. Whether a connect attempt is foreground is carried separately
@@ -85,11 +90,13 @@ explicitly; the public methods deliberately provide no origin default.
 
 `set_charging_amps` uses that pause as a correctness boundary: under one
 `command_mutex_`/`cmd_in_flight_` transaction it sends the current action, waits for Tesla's
-ACK, then sends an independent `getChargeState` request. The persistent cache callback runs
-before the poll command completes and increments `charge_state_generation_`; success therefore
-clears the previous ChargeState before decoding the new snapshot, so an omitted field cannot
-inherit an old presence/value. Success requires both a new generation, a present field, and an
-exact `charging_amps` match. The ACK alone is never
+ACK, then sends an independent `getChargeState` request. Before the poll command can complete, the
+persistent callback publishes a separate fixed `ChargingAmpsFeedback` generation plus the three
+readback currents under the same short `portMUX`; it does not wait for the deferred string cache.
+Success therefore requires a new fixed generation, a present field, and an exact
+`charging_amps` match. The full deferred parser still clears the previous ChargeState before
+decoding the new public snapshot, so an omitted field cannot inherit an old presence/value. The
+ACK alone is never
 reported as success. Two mismatching/missing readbacks exhaust the original command budget and
 return an error, with requested/applied/request/actual current values written to the log.
 
@@ -1173,9 +1180,11 @@ the first successful `session_vcsec` existence probe and updates that atomic cac
 successful session save/remove; NVS read errors remain uncached and are retried. This avoids a
 continuous NVS length probe without making a transient storage fault look durably absent.
 
-The main-task BLE-MAC string is startup-only input. When it is empty, the NimBLE host task
-atomically claims one best-effort NVS persistence attempt after its first successful connection;
-it never mutates that `std::string` across tasks.
+The main-task BLE-MAC string is startup-only input. When it is empty, the NimBLE host posts a fixed
+LinkUp record only. `vehicle_loop` first applies `Vehicle::set_connected(true)`, then acknowledges
+the exact connection generation as command-ready, materializes the fixed peer address after
+unlock, and performs the one best-effort NVS persistence attempt outside every shared lock. It
+never mutates the startup `std::string` across tasks.
 
 **Session reuse across a reboot needs the wall clock restored first.** The `sess_vcsec`/`sess_info`
 blobs in NVS exist so a restart does not cost a fresh handshake, but tesla-ble only accepts a
@@ -1365,7 +1374,7 @@ through the guard so the lock is released during stack unwinding, never left hel
 |---|---|---|
 | `command_mutex_` | mutex, RAII | one whole command/query transaction: exclusive use of `cmd_sem_`, `last_result_`, `last_error_`; for `set_charging_amps`, the action and verifying ChargeState poll are one transaction |
 | `vehicle_mutex_` | mutex, RAII (`SemGuard`) | **every** call into the tesla-ble `vehicle_` object (send, `loop()`, `on_rx_data`, `set_connected`) |
-| `cmd_sem_` | binary semaphore | signals "result callback ran" from the BLE RX task to the waiting command (the result callback **always** gives it, even if its body throws) |
+| `cmd_sem_` | binary semaphore | signals "result callback ran" from tesla-ble's serialized dispatch to the waiting command; the callback publishes fixed completion fields and **always** gives it after its catch-all |
 | `cache_mutex_` | mutex, RAII, leaf | the `last_known_*` caches (`std::string` members ⇒ an unlocked copy is torn-read UB) |
 
 **Normative order:** `command_mutex_` → `vehicle_mutex_` → `cache_mutex_`. Acquire strictly
@@ -1376,10 +1385,9 @@ today:
   wait** (the RX task needs it to deliver the very result being waited for; holding it would
   deadlock every command into its timeout).
 - `cache_mutex_` is a **leaf**: held only for a plain struct copy/assignment, never while
-  calling out (library, BLE, NVS, logging) and never while taking another lock. It *is*
-  legitimately taken while `vehicle_mutex_` is held — the RX parse path
-  (`on_rx_data`/`loop()` under `vehicle_mutex_`) synchronously fires the `set_*_state_callback`
-  cache writers — which is exactly the vehicle→cache order above.
+  calling out (library, BLE, NVS, logging) and never while taking another lock. The synchronous
+  tesla-ble state callbacks no longer take it: they publish fixed nanopb latest values, and
+  `vehicle_loop` parses/publishes them only after releasing `vehicle_mutex_`.
 - `clear_session_and_cache_()` takes `vehicle_mutex_` internally, so it must **not** be entered
   while holding it (non-recursive mutex ⇒ self-deadlock; see the comment at its definition).
 - `last_result_`/`last_error_` need no lock of their own: the RX callback writes them **before**
@@ -1405,7 +1413,7 @@ subscription is RAII-owned and is removed on every unwind before the task can se
 
 | Task | Priority | Stack | Created in | Purpose |
 |---|---|---|---|---|
-| `vehicle_loop` | `kPrioVehicleLoop` = 5 | 8192 | `vehicle_ctrl.cpp` (fn: `vehicle_telemetry.cpp`) | pump `vehicle_->loop()`, rotating NO_WAKE telemetry poll, sleep gating, BLE-fault link reset |
+| `vehicle_loop` | `kPrioVehicleLoop` = 5 | 8192 | `vehicle_ctrl.cpp` (fn: `vehicle_telemetry.cpp`) | drain fixed NimBLE Link/RX events, pump `vehicle_->loop()`, parse deferred telemetry after unlock, rotating NO_WAKE poll, sleep gating, BLE-fault link reset |
 | `captive_dns` | `kPrioCaptiveDns` = 5 | 4096 | `provisioning.cpp` | captive-portal DNS (setup-AP mode only; vehicle stack not running) |
 | `ota` | `kPrioOta` = 5 | 8192 | `ota_update.cpp` | OTA download + flash (transient) |
 | `ota_chk` | `kPrioOtaCheck` = 5 | 8192 | `ota_update.cpp` | OTA manifest check (transient) |
@@ -1419,8 +1427,10 @@ subscription is RAII-owned and is removed on every unwind before the task can se
 | `led` | `kPrioLed` = 2 | 3072 | `led_status.cpp` | APA102 status LED (`CONFIG_TESLA_LED_ENABLED` builds) |
 
 Not in the table (ESP-IDF-owned, priorities from IDF Kconfig, not `task_config.hpp`): the
-**NimBLE host task** — it runs the RX data callback, i.e. `vehicle_mutex_` → parse →
-`cache_mutex_` and every `set_*_callback` lambda; the **esp_http_server task** — it runs every
+**NimBLE host task** — its GAP/GATT callbacks may only copy bounded bytes/POD into the statically
+backed deferred queue, invalidate atomics and request a link drop; it never calls `Vehicle`, NVS,
+logging or an allocating parser. `vehicle_loop` owns `Vehicle::set_connected`, `on_rx_data`, final
+ready publication and deferred telemetry parsing. The **esp_http_server task** runs every
 HTTP/MCP handler, i.e. the `command_mutex_` cycles and cache copies; plus the usual esp_timer /
 WiFi / LwIP system tasks.
 
@@ -1491,9 +1501,12 @@ car never sleeps). The rule, by execution model:
   so no tight error loop forms, and continue with the next iteration.
 - **One-shot jobs** (`ota_chk`, `ota`) convert a throw into a terminal **error state** visible in
   `/ota/status` — never a reboot.
-- **C callbacks** (NimBLE GAP/GATT + RX, the tesla-ble result/state callbacks, the MQTT event
-  handler, the SNTP sync cb) catch locally and return a valid API result; the tesla-ble result
-  callback additionally **always** gives `cmd_sem_` so the foreground waiter is released on a throw.
+- **C callbacks** (NimBLE GAP/GATT + RX, MQTT, SNTP) catch locally or pass a mechanical
+  fixed-buffer/POD/atomic audit and return a valid API result. Persistent tesla-ble state callbacks
+  are thin adapters to fixed latest-value mailboxes; the dynamic status and command-result
+  callbacks publish POD/fixed text only. The command-result callback additionally **always** gives
+  `cmd_sem_` after its catch-all, so the foreground waiter is released without logging or
+  allocating while `vehicle_mutex_` is held.
 - **Critical boot** (`app_main`) has a top-level boundary; anything that escapes it is logged and
   enters the same fatal-startup policy as an explicitly failed essential component instead of
   reaching a bare `abort()`.
@@ -1509,7 +1522,10 @@ structs, including address-of spelling and the `esp_log_set_vprintf` hook. Inlin
 callbacks and non-literal source registration are rejected; each boundary either has
 a direct/delegated catch-all or passes a mechanical fixed-buffer/C/atomic call audit. Mutation
 canaries add a registration, remove a catch/lifetime release, introduce a dynamic callback or a
-throwing call, register a nested `.cc` source, bypass sticky cJSON construction, remove the real
+throwing call, restore NimBLE→Vehicle re-entry, parse/log/allocate inside a tesla-ble callback,
+publish BLE readiness before the deferred Vehicle acknowledgement, reuse stale charging-current
+feedback, materialize OTA strings under the status lock, race crash dismissal with its immutable
+string/vector snapshot, register a nested `.cc` source, bypass sticky cJSON construction, remove the real
 `/status` emitter or any production MQTT builder/sequencer seam, bypass persist-before-restart,
 move either vehicle task across its dual/global admission barriers, restore external task deletion,
 remove TWDT unwind, bypass either production ping user, or reorder/bypass bounded OTA body/JSON/

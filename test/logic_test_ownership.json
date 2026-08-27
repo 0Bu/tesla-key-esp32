@@ -3,6 +3,7 @@
   "headers": {
     "active_window.hpp": {"test": "test/test_logic.cpp", "evidence": "test_active_window("},
     "ble_chunk.hpp": {"test": "test/test_logic.cpp", "evidence": "test_ble_chunk("},
+    "ble_deferred_event.hpp": {"test": "test/test_logic.cpp", "evidence": "test_ble_deferred_event("},
     "ble_phase.hpp": {"test": "test/test_logic.cpp", "evidence": "test_ble_phase("},
     "ble_readiness.hpp": {"test": "test/test_logic.cpp", "evidence": "test_ble_readiness("},
     "ble_row.hpp": {"test": "test/test_logic.cpp", "evidence": "test_ble_row("},

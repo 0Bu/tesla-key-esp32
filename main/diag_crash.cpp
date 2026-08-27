@@ -13,6 +13,7 @@
 
 #include <cstdlib>
 #include <cstring>
+#include <atomic>
 
 static const char* TAG = "diag_crash";
 
@@ -37,9 +38,10 @@ static_assert(static_cast<int>(ResetCode::Brownout) == ESP_RST_BROWNOUT, "reset 
 // OTA-upgraded device back into an HTTP 500.
 static_assert(kEspErrNotFound == ESP_ERR_NOT_FOUND, "ESP_ERR_NOT_FOUND drift");
 
-// Filled once by diag_crash_capture(); read-only afterwards EXCEPT the `dismissed` byte (see
-// diag_crash_dismiss for why that needs no lock).
+// Filled once by diag_crash_capture() and immutable afterwards. Dismissal has its own atomic so an
+// HTTP writer can never race the string/vector snapshot copied by HTTP or MQTT.
 static CrashInfo s_ci;
+static std::atomic<bool> s_dismissed{false};
 
 // Every esp_core_dump_image_* symbol lives in IDF's core_dump_flash.c, which is compiled ONLY
 // when CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH is set — so on a build that disables core dumps these
@@ -66,6 +68,7 @@ bool diag_crash_coredump_present() {
 
 CrashInfo diag_crash_info_live() {
     CrashInfo c = s_ci;                            // boot-time reason + parsed summary
+    c.dismissed = s_dismissed.load(std::memory_order_acquire);
     c.coredump  = diag_crash_coredump_present();   // …but the image itself may be gone by now
     return c;
 }
@@ -73,6 +76,7 @@ CrashInfo diag_crash_info_live() {
 const CrashInfo& diag_crash_info() { return s_ci; }
 
 void diag_crash_capture() {
+    s_dismissed.store(false, std::memory_order_release);
     crash_set_reset(s_ci, static_cast<int>(esp_reset_reason()));
     s_ci.coredump = diag_crash_coredump_present();
 
@@ -175,10 +179,9 @@ void diag_crash_capture() {
 // check would leave behind exactly the images that check REJECTS — a truncated or checksum-broken
 // dump, which is stale crash residue like any other.
 //
-// `dismissed` is written from the httpd task while the MQTT task may be reading s_ci. It is a
-// single byte store that only ever goes false -> true, so a concurrent reader sees one state or the
-// other and both are self-consistent renderings of the same CrashInfo. No lock — and none of the
-// paths involved may take one anyway (an allocation under a mutex is the wedge rule in AGENTS.md).
+// `dismissed` is written from the httpd task while MQTT/status may snapshot the report. It is kept
+// outside the otherwise immutable CrashInfo and release/acquire-published, so there is no plain
+// bool versus string/vector-copy data race and no allocation under a mutex.
 bool diag_crash_dismiss() {
     bool erased = false;
 #if defined(CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH)
@@ -201,7 +204,7 @@ bool diag_crash_dismiss() {
     // On a build with no dump there is nothing to erase, and dismissal still MEANS something: the
     // report it clears is the fault RESET, which is what /status.last_crash carries there. Failing
     // it would leave a crash banner that no action can dismiss.
-    s_ci.dismissed = true;
+    s_dismissed.store(true, std::memory_order_release);
     ESP_LOGI(TAG, "crash report dismissed (reset=%s, dump %s)", reset_reason_slug(s_ci.reset_code),
              erased ? "erased" : "none present");
     return true;

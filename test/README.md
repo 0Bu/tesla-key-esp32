@@ -76,6 +76,7 @@ The firmware delegates these decision/conversion cores to IDF-free headers under
 | POST-body reassembly plus typed Empty/TooLarge/OOM/receive-failure outcomes (loop `recv` to `content_len`, bounded timeout retry, route-specific empty handling and 400/413/503 mapping) | `logic/http_body.hpp` | `http_common.cpp` `read_body_result`, config/REST-command/MCP handlers use the normal 2 KiB API cap; no-argument/legacy-optional commands may accept Empty. Provisioning `POST /save` keeps its separate fixed 1024-byte path and maps empty/oversized input to 400 |
 | Device-bound browser-origin decision for mutations (device name/current-IP Host binding, same Host/Origin including default ports, DNS-rebinding/cross-site/null/malformed rejection, state-changing GET classification, headerless evcc/curl compatibility) | `logic/http_origin.hpp` | `http_server.cpp` wildcard dispatcher |
 | Negotiated ATT write payload (20-byte pre-MTU fallback, MTU−3, 244-byte cap) | `logic/ble_chunk.hpp` | `ble_client.cpp` MTU callback + generation-bound write loop |
+| Deferred NimBLE LinkUp/LinkDown/RX generation policy (stale up/data rejected; ordered down barrier retained) | `logic/ble_deferred_event.hpp` | fixed host-event queue in `vehicle_ctrl.cpp`, consumed by `vehicle_telemetry.cpp`; ready is acknowledged only after successful Vehicle state application |
 | Allocation-free bounded JSON classification and raw numeric-ID capture, including malformed raw UTF-8 vs >16-level nesting vs escaped-U+0000 vs valid-but-cJSON-OOM, plus canonical JSON-safe-integer boundaries | `logic/json_syntax.hpp` | `http_config.cpp`, `http_api.cpp`, `mcp_server.cpp` before `cJSON_Parse` |
 | Persisted one-string config transaction ordering: reject before load/probe/save/restart, preserve an explicit empty disable, and respond before a successful restart | `logic/config_request.hpp` | `http_config.cpp` `/set_mqtt` and `/set_syslog` |
 | Charging-current verification (Tesla ACK vs fresh exact readback) + active-window ChargeState freshness gate | `logic/charge_control.hpp` | `vehicle_commands.cpp` `set_charging_amps`, `vehicle_telemetry.cpp` `get_charge_state` |
@@ -128,7 +129,12 @@ The suite also has gates outside the single pure-logic translation unit:
   current task/callback inventory from actual registration calls and callback-bearing structs
   (including the log vprintf hook), and requires
   each C boundary to be contained, delegated to a contained method, or mechanically restricted to
-  reviewed fixed-buffer/C/atomic calls. It also gates sticky response construction, early request
+  reviewed fixed-buffer/C/atomic calls. The same closed inventory pins every tesla-ble callback
+  setter to a thin named adapter, fixed NimBLE Link/RX deferral, task-owned readiness publication,
+  post-Vehicle-lock telemetry parsing, fixed command/status completion records, coherent
+  charging-current feedback, atomic crash dismissal and post-unlock OTA string materialization.
+  Mutations that restore direct host→Vehicle calls, logging/allocation/NVS under the Vehicle lock,
+  stale current feedback or mixed OTA/crash state are rejected. It also gates sticky response construction, early request
   owner release, partial-handle cleanup, persist-before-restart ordering, the real `/status` emitter,
   the production MQTT publish/sequencer plus Discovery and all seven state builders, the global
   default-closed runtime-admission facade/route matrix, the dual vehicle-task Creating/Running/

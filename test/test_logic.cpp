@@ -68,6 +68,7 @@
 #include "logic/mqtt_uri.hpp"
 #include "logic/http_origin.hpp"
 #include "logic/ble_chunk.hpp"
+#include "logic/ble_deferred_event.hpp"
 #include "logic/wifi_rollback.hpp"
 #include "logic/redact.hpp"
 #include "logic/captive.hpp"
@@ -3622,6 +3623,20 @@ static void test_ble_chunk() {
     CHECK(tk::ble_write_payload_for_mtu(517) == 244);
 }
 
+// ─── Deferred NimBLE host events (logic/ble_deferred_event.hpp) ──────────────
+static void test_ble_deferred_event() {
+    using K = tk::BleDeferredEventKind;
+    CHECK(tk::ble_deferred_event_may_apply(K::LinkUp, 8, 8));
+    CHECK(tk::ble_deferred_event_may_apply(K::Rx, 8, 8));
+    CHECK(!tk::ble_deferred_event_may_apply(K::LinkUp, 7, 7));  // unstable generation
+    CHECK(!tk::ble_deferred_event_may_apply(K::Rx, 8, 10));    // stale old-link bytes
+    CHECK(!tk::ble_deferred_event_may_apply(K::LinkUp, 10, 8));
+    // A queued disconnect is an ordering barrier even if the host has already advanced to the
+    // following link. The FIFO applies Down first, then the current LinkUp.
+    CHECK(tk::ble_deferred_event_may_apply(K::LinkDown, 8, 10));
+    CHECK(tk::ble_deferred_event_may_apply(K::LinkDown, 9, 10));
+}
+
 // ─── WiFi credential rollback ─────────────────────────────────────────────────
 static void test_wifi_rollback() {
     // Only the AP's own refusal is evidence about the CREDENTIALS. Everything else — a router
@@ -4180,6 +4195,7 @@ int main() {
     test_mqtt_uri();
     test_http_origin();
     test_ble_chunk();
+    test_ble_deferred_event();
     test_wifi_rollback();
     test_net_link();
     test_status_eth();

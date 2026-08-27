@@ -25,6 +25,7 @@
 #include "rtos_guard.hpp"
 
 #include <atomic>
+#include <array>
 #include <cstring>
 #include <exception>
 #include <memory>
@@ -202,9 +203,36 @@ static_assert(std::string_view{TESLA_OTA_IMG_SUFFIX} == tk::image_suffix(TK_TARG
 
 // ─── Shared status (written by the OTA task, read by HTTP handlers) ────────────
 
+static constexpr size_t kOtaStatusMessageCapacity = 96;
+static constexpr size_t kOtaStatusVersionCapacity = tk::kOtaVersionMaxBytes + 1;
+
+template <size_t N>
+static void copy_status_text(std::array<char, N>& out, const char* text) noexcept {
+    static_assert(N > 0);
+    out.fill('\0');
+    if (!text) return;
+    const size_t size = strnlen(text, N - 1);
+    std::memcpy(out.data(), text, size);
+}
+
+struct OtaStatusPod {
+    OtaState state{OtaState::Idle};
+    int progress{0};
+    bool update_available{false};
+    std::array<char, kOtaStatusMessageCapacity> message{};
+    std::array<char, kOtaStatusVersionCapacity> available{};
+    std::array<char, kOtaStatusVersionCapacity> current{};
+};
+
+static OtaStatusPod initial_status() noexcept {
+    OtaStatusPod status{};
+    copy_status_text(status.message, "idle");
+    return status;
+}
+
 static std::atomic<SemaphoreHandle_t> s_lock{nullptr};
-static OtaStatus                     s_status = { OtaState::Idle, 0, "idle", "", false, "" };
-static std::atomic<bool>             s_running{false};    // a check or download task is active
+static OtaStatusPod                   s_status = initial_status();
+static std::atomic<bool>              s_running{false};    // a check or download task is active
 
 static SemaphoreHandle_t ensure_lock() {
     SemaphoreHandle_t lock = s_lock.load(std::memory_order_acquire);
@@ -221,25 +249,26 @@ static SemaphoreHandle_t ensure_lock() {
     return candidate;
 }
 
-// The status fields are std::string, so every assignment/copy below can throw bad_alloc on a
-// fragmented heap. RAII (tk::SemGuard) releases s_lock during unwinding, so a throw here can't
-// wedge the lock and freeze /ota/status for the rest of the boot.
 static void set_state(OtaState st, int pct, const char* msg) {
+    std::array<char, kOtaStatusMessageCapacity> message{};
+    copy_status_text(message, msg);
     SemaphoreHandle_t lock = ensure_lock();
     if (!lock) return;
     tk::SemGuard g(lock);
     if (!g) return;
     s_status.state    = st;
     s_status.progress = pct;
-    s_status.message  = msg ? msg : "";
+    s_status.message  = message;
 }
 
 static void set_available(const char* ver) {
+    std::array<char, kOtaStatusVersionCapacity> available{};
+    copy_status_text(available, ver);
     SemaphoreHandle_t lock = ensure_lock();
     if (!lock) return;
     tk::SemGuard g(lock);
     if (!g) return;
-    s_status.available = ver ? ver : "";
+    s_status.available = available;
 }
 
 static OtaStatus unavailable_status_snapshot() {
@@ -252,9 +281,16 @@ static OtaStatus unavailable_status_snapshot() {
 OtaStatus ota_get_status() {
     SemaphoreHandle_t lock = ensure_lock();
     if (!lock) return unavailable_status_snapshot();
-    tk::SemGuard g(lock);
-    if (!g) return unavailable_status_snapshot();
-    return s_status;
+    OtaStatusPod snapshot{};
+    {
+        tk::SemGuard g(lock);
+        if (!g) return unavailable_status_snapshot();
+        snapshot = s_status;  // fixed POD/arrays only; noexcept and cross-generation coherent
+    }
+    // Any allocation happens after releasing the status lock. A failed materialization is caught
+    // by the HTTP/task boundary and cannot leave a partially published shared generation.
+    return {snapshot.state, snapshot.progress, snapshot.message.data(),
+            snapshot.available.data(), snapshot.update_available, snapshot.current.data()};
 }
 
 bool ota_is_busy() {
@@ -414,16 +450,18 @@ OtaCheckResult ota_check() {
 
 // Publish a finished check into the shared status for /ota/status polling.
 static void set_check_done(const OtaCheckResult& r) {
+    OtaStatusPod candidate{};
+    candidate.state = r.ok ? OtaState::Idle : OtaState::Error;
+    candidate.progress = 0;
+    candidate.update_available = r.update_available;
+    copy_status_text(candidate.message, r.reason.c_str());
+    copy_status_text(candidate.available, r.available.c_str());
+    copy_status_text(candidate.current, r.current.c_str());
     SemaphoreHandle_t lock = ensure_lock();
     if (!lock) return;
-    tk::SemGuard g(lock);   // RAII: the std::string assigns below can throw
+    tk::SemGuard g(lock);
     if (!g) return;
-    s_status.state            = r.ok ? OtaState::Idle : OtaState::Error;
-    s_status.progress         = 0;
-    s_status.message          = r.reason;
-    s_status.available        = r.available;
-    s_status.update_available = r.update_available;
-    s_status.current          = r.current;
+    s_status = candidate;
 }
 
 static void ota_check_task(void*) {

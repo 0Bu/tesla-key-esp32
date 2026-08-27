@@ -130,6 +130,16 @@ BleClient::BleClient() {
     }
 }
 
+void BleClient::set_target_vin(const std::string& vin) {
+    target_name_.fill('\0');
+    if (vin.empty()) return;
+    // Startup-only allocation, before NimBLE is admitted. Host callbacks consume only the fixed
+    // result below and never call tesla-ble's allocating VIN-name helper.
+    const std::string name = TeslaBLE::get_vin_advertisement_name(vin);
+    if (name.size() != target_name_.size() - 1) return;
+    std::memcpy(target_name_.data(), name.data(), name.size());
+}
+
 // Start a time-limited discovery scan (lists nearby Teslas, does not connect).
 void BleClient::start_discovery(int ms) {
     if (!intent_mutex_) return;
@@ -264,7 +274,10 @@ void BleClient::on_reset() {
         disconnecting_.store(false);
         connection_generation_.fetch_add(1);  // even: disconnected snapshot is stable
     }
-    if (on_connected_) on_connected_(false);
+    if (on_connected_) {
+        (void)on_connected_(connected_context_, false, BLE_HS_CONN_HANDLE_NONE,
+                            connection_generation_.load());
+    }
 }
 
 bool BleClient::start_scan_locked_() {
@@ -342,18 +355,19 @@ void BleClient::ensure_scanning_locked_() {
 // Upsert a discovered Tesla into the nearby list (called from the host task).
 void BleClient::note_scan_(const ble_gap_disc_desc& d, const ble_hs_adv_fields& f) {
     if (!scan_mutex_) return;
-    // try-lock: never block the host task. RAII give — scan_.push_back() below can throw
-    // bad_alloc on a fragmented heap, and a hand-rolled give would then be skipped.
+    // try-lock: never block the host task. The registry is a fixed array, so mutation under this
+    // host-task lock cannot allocate or throw.
     tk::SemGuard g(scan_mutex_, 0);
     if (!g) return;
     ScanEntry* e = nullptr;
-    for (auto& s : scan_) {
+    for (size_t i = 0; i < scan_count_; ++i) {
+        auto& s = scan_[i];
         if (memcmp(s.addr, d.addr.val, 6) == 0) { e = &s; break; }
     }
     if (!e) {
-        if (scan_.size() < 12) {
-            scan_.push_back(ScanEntry{});
-            e = &scan_.back();
+        if (scan_count_ < scan_.size()) {
+            e = &scan_[scan_count_++];
+            *e = ScanEntry{};
             memcpy(e->addr, d.addr.val, 6);
             e->name[0] = '\0';
             e->connectable = true;   // UI fallback until a primary advert proves otherwise
@@ -361,7 +375,10 @@ void BleClient::note_scan_(const ble_gap_disc_desc& d, const ble_hs_adv_fields& 
         } else {
             // Replace the stalest entry.
             e = &scan_[0];
-            for (auto& s : scan_) if (s.last_us < e->last_us) e = &s;
+            for (size_t i = 0; i < scan_count_; ++i) {
+                auto& s = scan_[i];
+                if (s.last_us < e->last_us) e = &s;
+            }
             memcpy(e->addr, d.addr.val, 6);
             e->name[0] = '\0';
             e->connectable = true;
@@ -414,7 +431,7 @@ std::vector<TeslaScan> BleClient::nearby() const {
         // sorting happen after release, so a slow /scan response cannot starve advert updates.
         tk::SemGuard g(scan_mutex_, pdMS_TO_TICKS(50));
         if (!g) return out;
-        count = std::min(snapshot.size(), scan_.size());
+        count = std::min(snapshot.size(), scan_count_);
         std::copy_n(scan_.begin(), count, snapshot.begin());
     }
     for (size_t i = 0; i < count; ++i) {
@@ -452,7 +469,8 @@ void BleClient::note_connectable_(const ble_addr_t& addr, bool connectable) {
     if (!g) return;
     // Also refresh an already identified Tesla entry immediately. Unknown addresses remain only
     // in the host-task cache until the matching named SCAN_RSP creates their ScanEntry.
-    for (auto& s : scan_) {
+    for (size_t i = 0; i < scan_count_; ++i) {
+        auto& s = scan_[i];
         if (memcmp(s.addr, addr.val, 6) == 0) {
             s.connectable = connectable;
             s.connectable_us = now_us;
@@ -466,20 +484,20 @@ int BleClient::target_connectable() const {
 }
 
 int BleClient::target_connectable_since(int64_t since_us) const {
-    if (!scan_mutex_ || target_vin_.empty()) return -1;
+    if (!scan_mutex_ || target_name_[0] == '\0') return -1;
     int result = -1;
     std::array<ScanEntry, 12> snapshot{};
     size_t count = 0;
     {
         tk::SemGuard g(scan_mutex_, pdMS_TO_TICKS(50));
         if (!g) return -1;
-        count = std::min(snapshot.size(), scan_.size());
+        count = std::min(snapshot.size(), scan_count_);
         std::copy_n(scan_.begin(), count, snapshot.begin());
     }
     for (size_t i = 0; i < count; ++i) {
         const auto& s = snapshot[i];
         if (s.name[0] == '\0') continue;
-        const bool matches = TeslaBLE::matches_vin(std::string(s.name), target_vin_);
+        const bool matches = std::strcmp(s.name, target_name_.data()) == 0;
         result = tk::connectable_verdict_in_attempt(
             matches, s.connectable, s.last_us, s.connectable_us, since_us);
         if (matches) break;
@@ -489,9 +507,14 @@ int BleClient::target_connectable_since(int64_t since_us) const {
 
 std::string BleClient::peer_addr_str() const {
     if (!client_mutex_) return "";
-    // RAII give — the string copy can throw bad_alloc; the guard releases on unwind.
-    tk::SemGuard g(client_mutex_);
-    return peer_addr_str_;
+    std::array<char, 18> snapshot{};
+    {
+        tk::SemGuard g(client_mutex_, pdMS_TO_TICKS(50));
+        if (!g) return "";
+        snapshot = peer_addr_;
+    }
+    // Materialize only after releasing the shared mutex.
+    return std::string(snapshot.data());
 }
 
 uint32_t BleClient::connect_fail_recent() const {
@@ -673,6 +696,27 @@ bool BleClient::write(const std::vector<uint8_t>& data) {
     return true;
 }
 
+bool BleClient::complete_ready(uint16_t conn_handle, uint32_t generation) noexcept {
+    if (!intent_mutex_) return false;
+    // The host never waits for this acknowledgement; the ordinary vehicle task may wait for the
+    // very short lifecycle publication, but bounds even that wait so corruption cannot wedge it.
+    tk::SemGuard intent(intent_mutex_, pdMS_TO_TICKS(100));
+    if (!intent || !tk::ble::connect_attempt_may_advance(
+                       want_connect_.load(),
+                       connection_snapshot_matches_(conn_handle, generation))) {
+        return false;
+    }
+    ready_generation_.store(generation);
+    if (!connection_snapshot_matches_(conn_handle, generation)) {
+        ready_generation_.store(tk::ble::kNoReadyGeneration);
+        return false;
+    }
+    const tk::ble::ConnectLifecycle ready = tk::ble::connect_lifecycle_after_command_ready();
+    connecting_.store(ready.connecting);
+    want_connect_.store(ready.want_connect);
+    return true;
+}
+
 bool BleClient::write_chunk_(uint16_t conn_handle, uint16_t write_handle,
                              const uint8_t* data, size_t len) {
     int rc = ble_gattc_write_no_rsp_flat(conn_handle, write_handle, data, len);
@@ -686,11 +730,10 @@ bool BleClient::write_chunk_(uint16_t conn_handle, uint16_t write_handle,
 // ─── GAP event handler ────────────────────────────────────────────────────────
 
 int BleClient::on_gap_event(ble_gap_event* event) {
-    // Runs on the NimBLE host task (dispatched from the C gap_event_cb, no try/catch in the
-    // chain). The NOTIFY_RX and DISC cases allocate from the heap, so an OOM std::bad_alloc on
-    // a fragmented heap would unwind into C frames → std::terminate → abort → reboot (and a
-    // reboot loop also re-opens the poll window, defeating car-sleep). Contain it here — drop
-    // the event — mirroring the guards in vehicle_ctrl (on_rx_data) and the HTTP handler.
+    // Runs on the NimBLE host task (dispatched from the C gap_event_cb). All host-owned state and
+    // RX slots are fixed/bounded, but IDF/library helpers remain third-party C/C++ seams. Contain
+    // any unexpected exception here and drop the event rather than unwinding through a C frame
+    // into abort/reboot. Vehicle parsing is deferred to vehicle_loop and never occurs here.
     try {
     switch (event->type) {
     case BLE_GAP_EVENT_DISC: {
@@ -722,8 +765,10 @@ int BleClient::on_gap_event(ble_gap_event* event) {
         // on the name (carried in the scan response). The service UUID is only used
         // later for GATT discovery once connected.
         if (fields.name == nullptr || fields.name_len == 0) break;
-        std::string adv_name((const char*)fields.name, fields.name_len);
-        if (!TeslaBLE::is_tesla_vehicle_name(adv_name)) break;
+        char adv_name[24]{};
+        const size_t adv_name_len = std::min<size_t>(fields.name_len, sizeof(adv_name) - 1);
+        std::memcpy(adv_name, fields.name, adv_name_len);
+        if (adv_name_len != 18 || !TeslaBLE::is_tesla_vehicle_name(adv_name)) break;
 
         // Always record the Tesla in the nearby list (with RSSI) for the web UI.
         note_scan_(event->disc, fields);
@@ -735,7 +780,7 @@ int BleClient::on_gap_event(ble_gap_event* event) {
         // Connect ONLY to the configured VIN's vehicle. With no VIN configured the target is
         // empty and we never connect/enrol — the device enrols a Charging-Manager key and must
         // not pair onto an arbitrary nearby Tesla. (Listing via note_scan_ above still works.)
-        if (target_vin_.empty() || !TeslaBLE::matches_vin(adv_name, target_vin_)) break;
+        if (target_name_[0] == '\0' || std::strcmp(adv_name, target_name_.data()) != 0) break;
 
         char addr_str[18];
         snprintf(addr_str, sizeof(addr_str),
@@ -746,10 +791,14 @@ int BleClient::on_gap_event(ble_gap_event* event) {
         // Raw per-attempt detail is DEBUG. The command layer emits the single classified
         // production signal (first occurrence + hourly background heartbeat, or every
         // foreground failure), so retries cannot recreate an INFO/ERROR syslog storm here.
-        ESP_LOGD(TAG, "Tesla '%s' found: %s — connecting", adv_name.c_str(), addr_str);
+        ESP_LOGD(TAG, "Tesla '%s' found: %s — connecting", adv_name, addr_str);
         {
-            tk::SemGuard g(client_mutex_);   // RAII: peer_addr_str_ = … can throw
-            if (g) peer_addr_str_ = addr_str;
+            // Never block the host task. Both sides are fixed buffers, so the critical section
+            // cannot allocate or throw; a missed diagnostic/MAC cache attempt costs one rescan.
+            tk::SemGuard g(client_mutex_, 0);
+            if (g) {
+                std::memcpy(peer_addr_.data(), addr_str, sizeof(addr_str));
+            }
         }
         // Seed the link RSSI from this advert so the UI has a real value to show from the
         // moment we connect (incl. while pairing), before the first live read succeeds.
@@ -802,7 +851,10 @@ int BleClient::on_gap_event(ble_gap_event* event) {
             ESP_LOGD(TAG, "connect error: %d", event->connect.status);
             ready_generation_.store(tk::ble::kNoReadyGeneration);
             connect_fail_count_.fetch_add(1);   // advert was heard but the link never came up
-            if (on_connected_) on_connected_(false);
+            if (on_connected_) {
+                (void)on_connected_(connected_context_, false, BLE_HS_CONN_HANDLE_NONE,
+                                    connection_generation_.load());
+            }
             // Keep the intent so an in-flight command retries within its timeout
             // window; ensure_connected_() clears it via stop_connecting() on timeout.
             const tk::ble::ConnectLifecycle retry =
@@ -898,10 +950,13 @@ int BleClient::on_gap_event(ble_gap_event* event) {
             connection_generation_.fetch_add(1);  // even: disconnected snapshot is stable
         }
         {
-            tk::SemGuard g(client_mutex_);   // RAII give
-            if (g) peer_addr_str_.clear();
+            tk::SemGuard g(client_mutex_, 0);
+            if (g) peer_addr_.fill('\0');
         }
-        if (on_connected_) on_connected_(false);
+        if (on_connected_) {
+            (void)on_connected_(connected_context_, false, BLE_HS_CONN_HANDLE_NONE,
+                                connection_generation_.load());
+        }
         if (reconnect) ensure_scanning_();
         // Otherwise stay idle (no auto-scan); discovery is manual, connect is on demand.
         break;
@@ -911,8 +966,18 @@ int BleClient::on_gap_event(ble_gap_event* event) {
         if (event->notify_rx.attr_handle != notify_val_handle_) break;
         struct os_mbuf* om = event->notify_rx.om;
         if (!om) break;
-        uint16_t pkt_len = OS_MBUF_PKTLEN(om);
-        std::vector<uint8_t> buf(pkt_len);
+        const uint16_t pkt_len = OS_MBUF_PKTLEN(om);
+        std::array<uint8_t, tk::kBleMaxWritePayload> buf{};
+        if (pkt_len == 0 || pkt_len > buf.size()) {
+            ESP_LOGW(TAG, "RX notify length %u exceeds fixed host slot — dropping link", pkt_len);
+            ready_generation_.store(tk::ble::kNoReadyGeneration);
+            want_connect_.store(false);
+            disconnecting_.store(true);
+            terminate_published_link_();
+            break;
+        }
+        const uint32_t generation = connection_generation_.load();
+        if (!connection_snapshot_matches_(event->notify_rx.conn_handle, generation)) break;
         int rc = os_mbuf_copydata(om, 0, pkt_len, buf.data());
         if (rc == 0) {
             if (diag_verbose()) {
@@ -920,7 +985,14 @@ int BleClient::on_gap_event(ble_gap_event* event) {
                 for (size_t i = 0; i < n; i++) p += snprintf(hex+p, sizeof(hex)-p, "%02x ", buf[i]);
                 ESP_LOGI(TAG, "RX notify len=%u: %s", pkt_len, hex);
             }
-            if (on_rx_data_) on_rx_data_(buf);
+            if (on_rx_data_ &&
+                !on_rx_data_(rx_context_, buf.data(), pkt_len, generation)) {
+                ESP_LOGW(TAG, "RX defer queue full — dropping link fail-closed");
+                ready_generation_.store(tk::ble::kNoReadyGeneration);
+                want_connect_.store(false);
+                disconnecting_.store(true);
+                terminate_published_link_();
+            }
         }
         break;
     }
@@ -950,8 +1022,8 @@ int BleClient::on_gap_event(ble_gap_event* event) {
 // ─── GATT service discovery ───────────────────────────────────────────────────
 
 // The discovery and subscription callbacks below are NimBLE-host-task entry points just like
-// on_gap_event (dispatched from C, no try/catch in the chain) — on_subscribe_write in particular
-// ends in on_connected_(true), whose vehicle_ctrl lambda allocates (std::string, NVS).
+// on_gap_event (dispatched from C, no try/catch in the chain). Link/RX delivery itself is now a
+// fixed POD enqueue; the boundary remains because NimBLE/diagnostic helpers are third-party code.
 // An escaping std::bad_alloc would unwind into C frames → std::terminate → reboot, and a
 // reboot loop re-opens the poll window, defeating car-sleep. Contain it per callback; a
 // caught throw aborts this connection attempt cleanly (disconnect), the next on-demand
@@ -1154,25 +1226,14 @@ int BleClient::on_subscribe_write(uint16_t conn_handle, const ble_gatt_error* er
                                connection_snapshot_matches_(conn_handle, generation))) {
                 canceled = true;
             } else {
-                // Vehicle::set_connected(true) must complete before a waiting first command
-                // observes readiness. If it throws, the catch below releases the mutex and
-                // disconnects; the token stays invalid.
-                on_connected_(true);
-                if (!tk::ble::connect_attempt_may_advance(
-                        want_connect_.load(),
-                        connection_snapshot_matches_(conn_handle, generation))) {
+                // vehicle_loop owns the possibly throwing Vehicle transition. The host only
+                // enqueues this fixed event; complete_ready() publishes the token after the
+                // consumer reports a successful set_connected(true).
+                if (!on_connected_(connected_context_, true, conn_handle, generation) ||
+                    !tk::ble::connect_attempt_may_advance(
+                         want_connect_.load(),
+                         connection_snapshot_matches_(conn_handle, generation))) {
                     canceled = true;
-                } else {
-                    ready_generation_.store(generation);
-                    if (!connection_snapshot_matches_(conn_handle, generation)) {
-                        ready_generation_.store(tk::ble::kNoReadyGeneration);
-                        canceled = true;
-                    } else {
-                        const tk::ble::ConnectLifecycle ready =
-                            tk::ble::connect_lifecycle_after_command_ready();
-                        connecting_.store(ready.connecting);
-                        want_connect_.store(ready.want_connect);
-                    }
                 }
             }
         }
@@ -1181,7 +1242,7 @@ int BleClient::on_subscribe_write(uint16_t conn_handle, const ble_gatt_error* er
             disconnect();
             return 0;
         }
-        ESP_LOGD(TAG, "BLE command-ready (CCCD handle %d, generation %lu)",
+        ESP_LOGD(TAG, "BLE link deferred after CCCD (handle %d, generation %lu)",
                  cccd_handle_, static_cast<unsigned long>(generation));
         return 0;
     } catch (const std::exception& e) {

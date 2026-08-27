@@ -6,6 +6,8 @@
 #include <functional>
 #include <memory>
 #include <atomic>
+#include <array>
+#include <cstdint>
 #include <ctime>
 #include <esp_log.h>
 #include "ble_client.hpp"
@@ -18,10 +20,12 @@
 #include "logic/ui_state.hpp"
 #include "logic/vin_transition.hpp"
 #include "logic/task_start_gate.hpp"
+#include "logic/ble_deferred_event.hpp"
 #include "reboot_reason.hpp"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "freertos/queue.h"
 
 #include "logic/vehicle_data.hpp"
 
@@ -71,8 +75,8 @@ public:
     bool get_vehicle_status(VehicleStatusResult& out, tk::ConnectOrigin origin,
                             int timeout_ms = 20000);
 
-    // Non-blocking accessors for cached state (refreshed in background; copied under
-    // cache_mutex_ because the BLE RX task writes these concurrently — see cache_mutex_).
+    // Non-blocking accessors for cached state (refreshed by vehicle_loop; copied under
+    // cache_mutex_ because HTTP/MQTT readers run concurrently — see cache_mutex_).
     ChargeStateResult   get_cached_charge()   { return copy_locked_(last_known_charge_); }
     VehicleStatusResult get_cached_status()   { return copy_locked_(last_known_status_); }
     ClimateStateResult  get_cached_climate()  { return copy_locked_(last_known_climate_); }
@@ -247,6 +251,71 @@ public:
     // below, which loop_task is the only writer of).
 
 private:
+    struct BleHostEvent {
+        tk::BleDeferredEventKind kind{tk::BleDeferredEventKind::LinkDown};
+        uint16_t conn_handle{BLE_HS_CONN_HANDLE_NONE};
+        uint16_t size{0};
+        uint32_t generation{0};
+        std::array<uint8_t, tk::kBleMaxWritePayload> data{};
+    };
+    static constexpr size_t kBleHostEventDepth = 16;
+
+    // Exact nonthrowing adapters registered with BleClient. They may only copy POD into the
+    // statically backed queue and publish atomic fault evidence; vehicle_loop owns every library,
+    // allocation, cache and NVS operation.
+    static bool ble_link_event_cb_(void* context, bool connected, uint16_t conn_handle,
+                                   uint32_t generation) noexcept;
+    static bool ble_rx_event_cb_(void* context, const uint8_t* data, size_t size,
+                                 uint32_t generation) noexcept;
+    bool enqueue_ble_link_event_(bool connected, uint16_t conn_handle,
+                                 uint32_t generation) noexcept;
+    bool enqueue_ble_rx_event_(const uint8_t* data, size_t size,
+                               uint32_t generation) noexcept;
+    void process_ble_host_events_();
+    bool apply_ble_link_state_(bool connected);
+    void persist_discovered_mac_after_ready_();
+    void on_charge_state_(const CarServer_ChargeState& state) noexcept;
+    void on_climate_state_(const CarServer_ClimateState& state) noexcept;
+    void on_drive_state_(const CarServer_DriveState& state) noexcept;
+    void on_tire_pressure_state_(const CarServer_TirePressureState& state) noexcept;
+    void on_closures_state_(const CarServer_ClosuresState& state) noexcept;
+    void on_vehicle_message_(const UniversalMessage_RoutableMessage& message) noexcept;
+    void process_pending_telemetry_();
+    struct ChargingAmpsFeedback {
+        uint32_t generation{0};
+        bool has_charging_amps{false};
+        int charging_amps{0};
+        bool has_current_request{false};
+        int current_request{0};
+        bool has_actual_current{false};
+        int actual_current{0};
+    };
+    ChargingAmpsFeedback charging_amps_feedback_snapshot_() noexcept;
+
+    StaticQueue_t ble_event_queue_control_{};
+    std::array<uint8_t, kBleHostEventDepth * sizeof(BleHostEvent)> ble_event_queue_storage_{};
+    QueueHandle_t ble_event_queue_{nullptr};
+    std::atomic<bool> ble_event_overflow_{false};
+
+    // tesla-ble invokes telemetry callbacks synchronously while Vehicle is serialized by
+    // vehicle_mutex_. The callbacks therefore copy only nanopb POD into these latest-value slots;
+    // vehicle_loop parses strings and updates the public caches after releasing vehicle_mutex_.
+    enum PendingTelemetry : uint32_t {
+        PendingCharge   = 1u << 0,
+        PendingClimate  = 1u << 1,
+        PendingDrive    = 1u << 2,
+        PendingTires    = 1u << 3,
+        PendingClosures = 1u << 4,
+    };
+    portMUX_TYPE telemetry_pending_mux_ = portMUX_INITIALIZER_UNLOCKED;
+    uint32_t telemetry_pending_mask_{0};
+    CarServer_ChargeState telemetry_pending_charge_{};
+    ChargingAmpsFeedback charging_amps_feedback_{};
+    CarServer_ClimateState telemetry_pending_climate_{};
+    CarServer_DriveState telemetry_pending_drive_{};
+    CarServer_TirePressureState telemetry_pending_tires_{};
+    CarServer_ClosuresState telemetry_pending_closures_{};
+
     // Record WHY we are about to restart ourselves, so the reason survives into the next boot
     // (see take_reboot_reason()). Written from loop_task's heap watchdog on a heap that is by
     // definition failing. Restart authorization is fail-closed: without a durable next counter,
@@ -283,10 +352,13 @@ private:
     // both the waiting task and tesla-ble's queued callback, so a timeout can return without
     // leaving a callback that refers to stack storage or a semaphore reused by the next call.
     struct CommandCompletion {
+        static constexpr size_t kErrorCapacity = 192;
         SemaphoreHandle_t sem{xSemaphoreCreateBinary()};
         bool completed{false};
         bool success{false};
-        std::string error;
+        bool drop_link{false};
+        bool callback_fault{false};
+        std::array<char, kErrorCapacity> error{};
 
         ~CommandCompletion() { if (sem) vSemaphoreDelete(sem); }
         CommandCompletion() = default;
@@ -377,7 +449,7 @@ private:
     }
 
     // Copy a background-refreshed cache under cache_mutex_ (see cache_mutex_ below). The
-    // caches hold std::string members written from the BLE RX task; an unlocked by-value
+    // caches hold std::string members written by vehicle_loop; an unlocked by-value
     // read races the writer (torn string → UB), so all reads/writes take this mutex.
     template <typename T> T copy_locked_(const T& src) {
         if (!cache_mutex_) return src;
@@ -391,9 +463,9 @@ private:
     BleClient*         ble_{nullptr};
     NvsStorageAdapter* storage_{nullptr};
     NvsStorageAdapter* config_store_{nullptr};
-    // Set at init when no durable BLE MAC exists. The NimBLE host task atomically claims the
-    // one best-effort persistence attempt after its first successful connection; it never
-    // writes the main-task-owned std::string passed to init().
+    // Set at init when no durable BLE MAC exists. vehicle_loop atomically claims the one
+    // best-effort persistence attempt only after it applies LinkUp and publishes readiness;
+    // it never writes the main-task-owned std::string passed to init().
     std::atomic<bool>  persist_discovered_mac_{false};
     std::string        vin_;
 
@@ -403,8 +475,8 @@ private:
     // Serializes a whole command/query cycle so concurrent HTTP requests and the automatic
     // health/pairing task cannot interleave entries in tesla-ble's single FIFO.
     SemaphoreHandle_t command_mutex_{nullptr};
-    // Guards the last_known_* caches below: they hold std::string members written from
-    // the BLE RX task (parse_* callbacks) and read by the HTTP task, so an unlocked
+    // Guards the last_known_* caches below: they hold std::string members written by
+    // vehicle_loop after deferred parsing and read by HTTP/MQTT tasks, so an unlocked
     // by-value copy would race the writer (torn string → UB).
     SemaphoreHandle_t cache_mutex_{nullptr};
     // Guards the externally visible result snapshot. Background health/pair operations never
@@ -440,7 +512,7 @@ private:
     // telemetry task could sign/re-key using a request whose persisted VIN is still in flight.
     std::atomic<bool> vin_transition_pending_{false};
 
-    // Set from a command callback (possibly the BLE RX task) when the vehicle reports
+    // Set from tesla-ble's serialized message/result callback when the vehicle reports
     // KEY_NOT_ON_WHITELIST — i.e. our key was removed on the car side. The auto-pair
     // supervisor consumes it to re-key and restart pairing. atomic: cross-task flag.
     std::atomic<bool> pairing_lost_{false};
@@ -520,13 +592,14 @@ private:
     static constexpr int kCmdFailDropStreak = 3;
 
     // Uptime tick of the last live infotainment data received (see seconds_since_contact).
-    // Stamped from the cache callbacks (BLE RX task); read by the HTTP task. atomic so no
+    // Stamped after vehicle_loop publishes deferred caches; read by HTTP/MQTT tasks. atomic so no
     // lock is needed. 0 = nothing received yet. Cleared on a pairing reset.
     std::atomic<uint32_t> last_contact_ticks_{0};
     // ChargeState-specific freshness + generation. last_contact_ticks_ also advances for
     // climate/drive/etc., so it cannot prove that the current-limit readback is fresh.
-    // Generation changes on every decoded ChargeState and lets set_charging_amps distinguish
-    // its explicit post-command poll from an older cached value.
+    // Generation changes on every published public ChargeState and gates active-window freshness.
+    // set_charging_amps uses the earlier fixed ChargingAmpsFeedback generation instead, so command
+    // completion cannot outrun deferred string-cache publication.
     std::atomic<uint32_t> last_charge_ticks_{0};
     std::atomic<uint32_t> charge_state_generation_{0};
     std::atomic<bool>     charge_cache_stale_reported_{false};
@@ -551,9 +624,9 @@ private:
     // the run has held for kAsleepDebounceS, which filters those blips. Cleared on a pairing
     // reset (clear_session_and_cache_).
     std::atomic<uint32_t> vcsec_asleep_since_ticks_{0};
-    // Vehicle::sleep_state() is written by tesla-ble from the BLE RX task. Sampling that field
-    // directly from loop/status tasks is a C++ data race, so RX publishes this atomic mirror
-    // while vehicle_mutex_ is held and every other task reads only the mirror.
+    // Vehicle::sleep_state() is mutated inside serialized tesla-ble calls. Sampling that field
+    // directly from status/HTTP tasks is a C++ data race, so vehicle_loop publishes this atomic
+    // mirror while vehicle_mutex_ is held and every other task reads only the mirror.
     std::atomic<int> vcsec_sleep_state_{static_cast<int>(TeslaBLE::SleepState::UNKNOWN)};
     // Fold one sampled VCSEC sleep reading into the debounce clock. ASLEEP starts/continues
     // the run (keeping its original start tick); AWAKE breaks it. UNKNOWN is not passed here

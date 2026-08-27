@@ -251,6 +251,8 @@ EXPECTED_CALLBACKS = {
     "handle_all",
     "diag_vprintf_",
     "app_main",
+    "ble_link_event_cb_",
+    "ble_rx_event_cb_",
 }
 
 # These boundaries contain their own catch-all in the registered function/task body. The gate
@@ -306,6 +308,8 @@ REVIEWED_NON_THROWING = {
     "on_mqtt_probe": "plain-data probe verdict plus semaphore give only",
     "ping_probe_on_end": "generation-atomic ping result plus semaphore give only",
     "diag_vprintf_": "fixed-buffer/C/queue-only",
+    "ble_link_event_cb_": "POD cast plus fixed queue delegate only",
+    "ble_rx_event_cb_": "POD cast plus fixed queue delegate only",
 }
 
 REVIEWED_ALLOWED_CALLS = {
@@ -319,12 +323,20 @@ REVIEWED_ALLOWED_CALLS = {
     "diag_vprintf_": {
         "va_copy", "vsnprintf", "va_end", "diag_append_", "syslog_send", "s_prev", "vprintf",
     },
+    "ble_link_event_cb_": {"static_cast", "enqueue_ble_link_event_"},
+    "ble_rx_event_cb_": {"static_cast", "enqueue_ble_rx_event_"},
 }
 
 REVIEWED_DELEGATED_HELPERS = {
     "diag_vprintf_": {
         "diag_append_": {"g", "pdMS_TO_TICKS"},  # SemGuard variable construction + C macro
         "syslog_send": {"sv", "find", "memcpy", "load", "xQueueSend"},
+    },
+    "ble_link_event_cb_": {
+        "enqueue_ble_link_event_": {"fetch_add", "store", "xQueueSend"},
+    },
+    "ble_rx_event_cb_": {
+        "enqueue_ble_rx_event_": {"store", "static_cast", "data", "memcpy", "xQueueSend"},
     },
 }
 
@@ -451,17 +463,15 @@ def callback_inventory(text: str) -> set[str]:
         "tcpip_try_callback": 0,
         "tcpip_callback_with_block": 0,
     }
-    # These are C++ std::function setters/helpers, not C ABI callback boundaries. Keeping the
-    # explicit list here still makes a newly introduced callback-shaped API a review event.
+    # These are synchronous tesla-ble std::function setters/helpers, not C ABI callback
+    # boundaries. Their inline adapters are separately pinned to named helpers below.
     reviewed_cpp_callback_calls = {
         "install_state_callbacks_",
         "set_charge_state_callback",
         "set_climate_state_callback",
         "set_closures_state_callback",
-        "set_connected_cb",
         "set_drive_state_callback",
         "set_message_callback",
-        "set_rx_data_cb",
         "set_tire_pressure_state_callback",
         "set_vehicle_status_callback",
     }
@@ -491,6 +501,8 @@ def callback_inventory(text: str) -> set[str]:
         )
     }
     known_callback_calls = set(callback_arg) | reviewed_cpp_callback_calls | reviewed_struct_callback_calls | {
+        "set_connected_cb",
+        "set_rx_data_cb",
         # The actual function is carried by httpd_uri_t.handler and inventoried below.
         "httpd_register_uri_handler",
         # Cleanup names the already-inventoried handler but does not register a new callback.
@@ -503,6 +515,26 @@ def callback_inventory(text: str) -> set[str]:
         for args in call_arguments(code, function):
             if index < len(args) and args[index]:
                 found.add(normalize_registered_callback(args[index], function))
+
+    # BleClient owns the actual NimBLE-host boundary but accepts two project callbacks through a
+    # typed C-style setter. Require an exact statically named function: lambdas/std::function or a
+    # runtime-selected callback are rejected before the semantic fixed-call audit below.
+    for function, declaration_arg in {
+        "set_connected_cb": "ConnectedCb cb",
+        "set_rx_data_cb": "RxDataCb cb",
+    }.items():
+        registrations = 0
+        for args in call_arguments(code, function):
+            if not args or not args[0]:
+                continue
+            if args[0].strip() == declaration_arg:
+                continue
+            found.add(normalize_registered_callback(args[0], function))
+            registrations += 1
+        if registrations > 1:
+            raise AssertionError(
+                f"{function}: expected at most one statically named registration, got {registrations}"
+            )
 
     # Registration through callback-bearing structs/designated initializers.
     found.update(
@@ -2466,22 +2498,48 @@ def require_ota_status_lock_contract(ota_source: str, runtime_tests: str) -> Non
     for token in (
         "SemaphoreHandle_t lock = ensure_lock();",
         "if (!lock) return unavailable_status_snapshot();",
+        "OtaStatusPod snapshot{};",
         "tk::SemGuard g(lock);",
         "if (!g) return unavailable_status_snapshot();",
-        "return s_status;",
+        "snapshot = s_status;",
+        "snapshot.message.data()",
+        "snapshot.available.data()",
+        "snapshot.current.data()",
     ):
         if token not in reader:
             raise AssertionError(f"OTA status reader lock contract missing {token!r}")
     if reader.count("s_status") != 1:
         raise AssertionError("OTA status reader has an unlocked or duplicate shared-status access")
     require_before("OTA reader allocation failure before shared read", reader,
-                   "if (!lock) return unavailable_status_snapshot();", "return s_status;")
+                   "if (!lock) return unavailable_status_snapshot();", "snapshot = s_status;")
     require_before("OTA reader guard failure before shared read", reader,
-                   "if (!g) return unavailable_status_snapshot();", "return s_status;")
+                   "if (!g) return unavailable_status_snapshot();", "snapshot = s_status;")
+    require_before("OTA reader fixed snapshot before string materialization", reader,
+                   "snapshot = s_status;", "snapshot.message.data()")
+    reader_layout = scrub_cpp_preserving_layout(reader)
+    snapshot_pos = reader_layout.find("OtaStatusPod snapshot{};")
+    locked_open = reader_layout.find("{", snapshot_pos + len("OtaStatusPod snapshot{};"))
+    if locked_open < 0:
+        raise AssertionError("OTA reader fixed snapshot lock scope is missing")
+    locked_close = balanced_end(
+        reader_layout, locked_open, "{", "}", "OTA reader status-lock scope"
+    )
+    locked_scope = reader_layout[locked_open:locked_close + 1]
+    if "snapshot.message.data()" in locked_scope or "return {" in locked_scope:
+        raise AssertionError("OTA reader materializes allocating status while holding its lock")
+
+    for token in (
+        "struct OtaStatusPod",
+        "std::array<char, kOtaStatusMessageCapacity>",
+        "std::array<char, kOtaStatusVersionCapacity>",
+        "static OtaStatusPod                   s_status",
+    ):
+        if token not in ota_source:
+            raise AssertionError(f"OTA status fixed snapshot contract missing {token!r}")
 
     for writer_name in ("set_state", "set_available", "set_check_done"):
         writer = function_body_in(ota_source, writer_name)
-        first_status = writer.find("s_status.")
+        first_status = writer.find("s_status")
         if first_status < 0:
             raise AssertionError(f"OTA status writer {writer_name} no longer publishes status")
         for token in (
@@ -2494,6 +2552,15 @@ def require_ota_status_lock_contract(ota_source: str, runtime_tests: str) -> Non
                 raise AssertionError(
                     f"OTA status writer {writer_name} can access shared state without guard: {token!r}"
                 )
+        if "copy_status_text" not in writer[: writer.find("ensure_lock")]:
+            raise AssertionError(
+                f"OTA status writer {writer_name} must build fixed text before taking the lock"
+            )
+        locked_tail = scrub_cpp(writer[writer.find("tk::SemGuard g(lock)") :])
+        if re.search(r"\b(?:std::string|assign|append|new|throw)\b", locked_tail):
+            raise AssertionError(
+                f"OTA status writer {writer_name} allocates/throws under the status lock"
+            )
 
     for token in (
         "test_ota_status_lock_failure_matrix",
@@ -2509,6 +2576,210 @@ def require_ota_status_lock_contract(ota_source: str, runtime_tests: str) -> Non
     ):
         if token not in runtime_tests:
             raise AssertionError(f"OTA status lock fault matrix missing {token!r}")
+
+
+def require_tesla_cpp_callback_contract(
+    controller: str, telemetry: str, ble_source: str, commands: str
+) -> None:
+    """Keep every tesla-ble std::function callback on a reviewed, bounded seam."""
+    persistent = {
+        "set_charge_state_callback": "on_charge_state_",
+        "set_climate_state_callback": "on_climate_state_",
+        "set_drive_state_callback": "on_drive_state_",
+        "set_tire_pressure_state_callback": "on_tire_pressure_state_",
+        "set_closures_state_callback": "on_closures_state_",
+        "set_message_callback": "on_vehicle_message_",
+    }
+    combined = controller + "\n" + telemetry
+    for setter, helper in persistent.items():
+        registrations = call_arguments(combined, setter)
+        if len(registrations) != 1 or len(registrations[0]) != 1:
+            raise AssertionError(
+                f"{setter}: expected one single-argument persistent registration"
+            )
+        adapter = scrub_cpp(registrations[0][0])
+        compact = re.sub(r"\s+", " ", adapter).strip()
+        if not re.fullmatch(
+            rf"\[this\]\s*\([^)]*\)\s*\{{\s*{re.escape(helper)}\s*\(\s*\w+\s*\)\s*;\s*\}}",
+            compact,
+        ):
+            raise AssertionError(f"{setter}: adapter must delegate only to {helper}")
+        for forbidden in (
+            "std::string", "std::vector", "tk::SemGuard", "tk::MutexGuard",
+            "save_str", "ESP_LOG", "throw", "new ",
+        ):
+            if forbidden in adapter:
+                raise AssertionError(f"{setter}: adapter contains forbidden {forbidden!r}")
+
+    # Persistent state callbacks run synchronously inside Vehicle::loop. They may only publish a
+    # trivially-copyable latest value under the bounded portMUX; parsing and cache publication are
+    # deferred until vehicle_mutex_ is no longer held.
+    for helper, pending in {
+        "on_charge_state_": "telemetry_pending_charge_",
+        "on_climate_state_": "telemetry_pending_climate_",
+        "on_drive_state_": "telemetry_pending_drive_",
+        "on_tire_pressure_state_": "telemetry_pending_tires_",
+        "on_closures_state_": "telemetry_pending_closures_",
+    }.items():
+        body = function_body_in(telemetry, helper)
+        for token in (
+            "portENTER_CRITICAL(&telemetry_pending_mux_);",
+            f"{pending} = state;",
+            "telemetry_pending_mask_ |= Pending",
+            "portEXIT_CRITICAL(&telemetry_pending_mux_);",
+        ):
+            if token not in body:
+                raise AssertionError(f"{helper}: fixed mailbox callback missing {token!r}")
+        for forbidden in (
+            "std::string", "std::vector", "tk::SemGuard", "tk::MutexGuard",
+            "save_str", "ESP_LOG", "parse_", "throw", "new ",
+        ):
+            if forbidden in scrub_cpp(body):
+                raise AssertionError(f"{helper}: callback contains forbidden {forbidden!r}")
+
+    charge_callback = function_body_in(telemetry, "on_charge_state_")
+    for token in (
+        "charging_amps_feedback_.generation + 1",
+        "charging_amps_feedback_.generation = generation ? generation : 1;",
+        "charging_amps_feedback_.has_charging_amps = true;",
+        "charging_amps_feedback_.has_current_request = true;",
+        "charging_amps_feedback_.has_actual_current = true;",
+    ):
+        if token not in charge_callback:
+            raise AssertionError(f"charge callback fixed readback seam missing {token!r}")
+    feedback_snapshot = function_body_in(telemetry, "charging_amps_feedback_snapshot_")
+    for token in (
+        "portENTER_CRITICAL(&telemetry_pending_mux_);",
+        "const ChargingAmpsFeedback snapshot = charging_amps_feedback_;",
+        "portEXIT_CRITICAL(&telemetry_pending_mux_);",
+        "return snapshot;",
+    ):
+        if token not in feedback_snapshot:
+            raise AssertionError(f"charging-amps feedback snapshot missing {token!r}")
+
+    message = function_body_in(controller, "on_vehicle_message_")
+    for forbidden in (
+        "std::string", "std::vector", "tk::SemGuard", "tk::MutexGuard",
+        "save_str", "ESP_LOG", "throw", "new ",
+    ):
+        if forbidden in scrub_cpp(message):
+            raise AssertionError(f"on_vehicle_message_: callback contains forbidden {forbidden!r}")
+    if "pairing_lost_.store(true, std::memory_order_release);" not in message:
+        raise AssertionError("on_vehicle_message_: pairing loss is not an atomic publication")
+
+    deferred = function_body_in(telemetry, "process_pending_telemetry_")
+    if "vehicle_mutex_" in scrub_cpp(deferred):
+        raise AssertionError("deferred telemetry parser reacquires vehicle_mutex_")
+    for parser in (
+        "parse_charge_state", "parse_climate_state", "parse_drive_state",
+        "parse_tire_pressure", "parse_closures_state",
+    ):
+        if deferred.count(parser + "(") != 1:
+            raise AssertionError(f"deferred telemetry parser inventory drift: {parser}")
+
+    loop = scrub_cpp(function_body_in(telemetry, "loop_task_fn_"))
+    require_before("BLE host drain before tesla-ble pump", loop,
+                   "process_ble_host_events_();", "vehicle_->loop();")
+    require_before("telemetry parse after tesla-ble pump", loop,
+                   "vehicle_->loop();", "process_pending_telemetry_();")
+    require_before("telemetry parse after Vehicle guard scope", loop,
+                   "vcsec_sleep_state_.store", "process_pending_telemetry_();")
+
+    if combined.count("vehicle_->on_rx_data(") != 1:
+        raise AssertionError("Vehicle::on_rx_data must have one deferred task-owned callsite")
+    if "vehicle_->on_rx_data(" in scrub_cpp(ble_source):
+        raise AssertionError("NimBLE host callback directly reentered Vehicle::on_rx_data")
+    ble_events = function_body_in(telemetry, "process_ble_host_events_")
+    if "vehicle_->on_rx_data(data);" not in ble_events:
+        raise AssertionError("Vehicle::on_rx_data escaped the deferred event processor")
+    if ble_source.count("BleClient::complete_ready(") != 1:
+        raise AssertionError("BleClient ready publication definition inventory drift")
+    subscribe = function_body_in(ble_source, "on_subscribe_write")
+    if "complete_ready" in scrub_cpp(subscribe) or "ready_generation_.store(generation)" in scrub_cpp(subscribe):
+        raise AssertionError("NimBLE subscribe callback publishes readiness before Vehicle ack")
+    if "ble_->complete_ready(event.conn_handle, event.generation)" not in ble_events:
+        raise AssertionError("deferred Vehicle LinkUp acknowledgement does not publish readiness")
+
+    # The request-scoped VCSEC callback is dynamic, but still executes from Vehicle::loop while its
+    # mutex is held. It may publish POD and signal a pre-created semaphore only; string shaping is
+    # required after the callback has been cleared and the lock released.
+    status = function_body_in(telemetry, "get_vehicle_status")
+    callback_start = status.find("auto callback = [this, completion, generation]")
+    callback_end = status.find(";\n\n    try", callback_start)
+    if callback_start < 0 or callback_end < 0:
+        raise AssertionError("vehicle-status callback capture/containment shape drift")
+    callback = scrub_cpp(status[callback_start:callback_end])
+    for forbidden in (
+        "std::string", "std::vector", "tk::SemGuard", "tk::MutexGuard",
+        "save_str", "ESP_LOG", "throw", "new ", ".status",
+    ):
+        if forbidden in callback:
+            raise AssertionError(f"vehicle-status callback contains forbidden {forbidden!r}")
+    for token in (
+        "completion->lock_state = static_cast<int32_t>(vs.vehicleLockState);",
+        "completion->sleep_status = static_cast<int32_t>(vs.vehicleSleepStatus);",
+        "completion->user_presence = static_cast<int32_t>(vs.userPresence);",
+        "xSemaphoreGive(completion->sem);",
+    ):
+        if token not in callback:
+            raise AssertionError(f"vehicle-status callback POD seam missing {token!r}")
+    require_before("vehicle-status callback shaped before Vehicle lock", status,
+                   "auto callback =", "tk::SemGuard g(vehicle_mutex_);")
+    require_before("vehicle-status callback cleared before string shaping", status,
+                   "vehicle_->set_vehicle_status_callback(nullptr);", "out.valid = true;")
+
+    result_factory = function_body_in(commands, "make_result_cb_")
+    result_code = scrub_cpp(result_factory)
+    for forbidden in (
+        "std::string", "std::vector", "tk::SemGuard", "tk::MutexGuard",
+        "save_str", "ESP_LOG", "throw", "new ", "catch (const",
+    ):
+        if forbidden in result_code:
+            raise AssertionError(f"command result callback contains forbidden {forbidden!r}")
+    for token in (
+        "const auto& msg = result.error()->message();",
+        "std::memcpy(completion->error.data(), msg.data(), error_size);",
+        "completion->callback_fault = true;",
+        "xSemaphoreGive(completion->sem);",
+    ):
+        if token not in result_factory:
+            raise AssertionError(f"command result fixed completion seam missing {token!r}")
+    waiter = function_body_in(commands, "await_completion_")
+    for token in (
+        "out.error     = completion->error.data();",
+        'ESP_LOGW(TAG, "command failed: %s", out.error.c_str());',
+        'ESP_LOGE(TAG, "result callback failed — command result may be partial");',
+    ):
+        if token not in waiter:
+            raise AssertionError(f"command result task-side consequence missing {token!r}")
+    amps = function_body_in(commands, "set_charging_amps")
+    for token in (
+        "const ChargingAmpsFeedback feedback_before = charging_amps_feedback_snapshot_();",
+        "const ChargingAmpsFeedback feedback_after = charging_amps_feedback_snapshot_();",
+        "feedback_after.generation != feedback_before.generation",
+        "feedback_after.has_charging_amps",
+    ):
+        if token not in amps:
+            raise AssertionError(f"charging-amps fixed readback contract missing {token!r}")
+    if "copy_locked_(last_known_charge_)" in scrub_cpp(amps):
+        raise AssertionError("charging-amps verification races deferred public cache publication")
+
+
+def require_crash_dismiss_atomic_contract(crash_source: str) -> None:
+    for token in (
+        "static std::atomic<bool> s_dismissed{false};",
+        "s_dismissed.store(false, std::memory_order_release);",
+        "c.dismissed = s_dismissed.load(std::memory_order_acquire);",
+        "s_dismissed.store(true, std::memory_order_release);",
+    ):
+        if token not in crash_source:
+            raise AssertionError(f"crash dismissal atomic contract missing {token!r}")
+    code = scrub_cpp(crash_source)
+    if "s_ci.dismissed =" in code or re.search(r"static\s+bool\s+s_dismissed", code):
+        raise AssertionError("crash dismissal reintroduced a racy shared bool/string snapshot")
+    dismiss = function_body_in(crash_source, "diag_crash_dismiss")
+    require_before("crash evidence erase before atomic dismissal", dismiss,
+                   "esp_core_dump_image_erase();", "s_dismissed.store(true")
 
 
 def require_heap_restart_gate_contract(telemetry: str) -> None:
@@ -2837,6 +3108,13 @@ def require_runtime_source_contracts() -> None:
         SOURCES["ota_update.cpp"],
         (ROOT / "test/test_runtime_boundaries.cpp").read_text(encoding="utf-8"),
     )
+    require_tesla_cpp_callback_contract(
+        SOURCES["vehicle_ctrl.cpp"],
+        SOURCES["vehicle_telemetry.cpp"],
+        SOURCES["ble_client.cpp"],
+        SOURCES["vehicle_commands.cpp"],
+    )
+    require_crash_dismiss_atomic_contract(SOURCES["diag_crash.cpp"])
     require_coredump_stream_contract(
         SOURCES["http_status.cpp"],
         (ROOT / "test/test_runtime_boundaries.cpp").read_text(encoding="utf-8"),
@@ -3220,6 +3498,30 @@ def self_test_canaries(tasks: set[str], callbacks: set[str]) -> None:
             pass
         else:
             raise AssertionError(f"reviewed-boundary mutation passed unexpectedly: {injected}")
+
+    # The two project callbacks invoked directly by the NimBLE host are a stricter subset: their
+    # named adapters and immediate helpers must remain POD/atomic/nonblocking-queue only. Exercise
+    # the exact regressions this gate previously missed.
+    for reviewed in ("ble_link_event_cb_", "ble_rx_event_cb_"):
+        allowed = REVIEWED_ALLOWED_CALLS[reviewed]
+        for injected in ("std::string s;", "tk::SemGuard g(m);", "save_str(key, value);"):
+            mutated = function_body(reviewed)[:-1] + injected + "}"
+            require_mutation_rejected(
+                f"{reviewed} host-callback mutation {injected}",
+                lambda mutated=mutated, reviewed=reviewed, allowed=allowed:
+                    require_reviewed_nonthrowing(reviewed, mutated, allowed),
+            )
+        for helper, helper_allowed in REVIEWED_DELEGATED_HELPERS[reviewed].items():
+            body = function_body(helper)
+            for injected in ("std::string s;", "tk::SemGuard g(m);", "save_str(key, value);"):
+                mutated = body[:-1] + injected + "}"
+                require_mutation_rejected(
+                    f"{helper} host-helper mutation {injected}",
+                    lambda mutated=mutated, helper=helper, helper_allowed=helper_allowed:
+                        require_reviewed_nonthrowing(
+                            helper, mutated, helper_allowed, delegated=True
+                        ),
+                )
 
     # Catch-all presence is insufficient: a helper before a narrow try or cleanup after its catch
     # can throw through the same C/RTOS frame. Exercise every contained production boundary with an
@@ -4451,6 +4753,132 @@ def self_test_canaries(tasks: set[str], callbacks: set[str]) -> None:
         require_mutation_rejected(
             label,
             lambda source=source: require_ota_status_lock_contract(source, runtime_tests),
+        )
+
+    materialize_under_lock = ota_source.replace(
+        "    }\n    // Any allocation happens after releasing the status lock.",
+        "        return {snapshot.state, snapshot.progress, snapshot.message.data(),\n"
+        "                snapshot.available.data(), snapshot.update_available, snapshot.current.data()};\n"
+        "    }\n    // Any allocation happens after releasing the status lock.",
+        1,
+    )
+    if materialize_under_lock == ota_source:
+        raise AssertionError("OTA materialization-under-lock mutation did not apply")
+    require_mutation_rejected(
+        "OTA status string materialization under lock",
+        lambda: require_ota_status_lock_contract(materialize_under_lock, runtime_tests),
+    )
+
+    controller_source = SOURCES["vehicle_ctrl.cpp"]
+    telemetry_source = SOURCES["vehicle_telemetry.cpp"]
+    ble_source = SOURCES["ble_client.cpp"]
+    commands_source = SOURCES["vehicle_commands.cpp"]
+    callback_mutations = (
+        (
+            "persistent callback allocation",
+            controller_source,
+            telemetry_source.replace(
+                "on_charge_state_(state);",
+                "std::string callback_allocation; on_charge_state_(state);",
+                1,
+            ),
+            ble_source,
+        ),
+        (
+            "telemetry callback parsing under Vehicle lock",
+            controller_source,
+            telemetry_source.replace(
+                "telemetry_pending_charge_ = state;",
+                "parse_charge_state(state, last_known_charge_);",
+                1,
+            ),
+            ble_source,
+        ),
+        (
+            "deferred telemetry drain removed",
+            controller_source,
+            telemetry_source.replace("self->process_pending_telemetry_();", "", 1),
+            ble_source,
+        ),
+        (
+            "NimBLE host direct Vehicle RX reentry",
+            controller_source,
+            telemetry_source,
+            ble_source.replace(
+                "int BleClient::on_gap_event",
+                "void callback_canary() { vehicle_->on_rx_data(data); }\n\n"
+                "int BleClient::on_gap_event",
+                1,
+            ),
+        ),
+    )
+    for label, controller_mutated, telemetry_mutated, ble_mutated in callback_mutations:
+        if (controller_mutated, telemetry_mutated, ble_mutated) == (
+            controller_source, telemetry_source, ble_source
+        ):
+            raise AssertionError(f"{label} mutation did not apply")
+        require_mutation_rejected(
+            label,
+            lambda controller_mutated=controller_mutated,
+                   telemetry_mutated=telemetry_mutated,
+                   ble_mutated=ble_mutated:
+                require_tesla_cpp_callback_contract(
+                    controller_mutated, telemetry_mutated, ble_mutated, commands_source
+                ),
+        )
+
+    command_callback_log = commands_source.replace(
+        "completion->completed = true;",
+        'ESP_LOGW(TAG, "callback mutation"); completion->completed = true;',
+        1,
+    )
+    if command_callback_log == commands_source:
+        raise AssertionError("command callback logging mutation did not apply")
+    require_mutation_rejected(
+        "command callback logging under Vehicle lock",
+        lambda: require_tesla_cpp_callback_contract(
+            controller_source, telemetry_source, ble_source, command_callback_log
+        ),
+    )
+    stale_amp_readback = commands_source.replace(
+        "const ChargingAmpsFeedback feedback_after = charging_amps_feedback_snapshot_();",
+        "const ChargingAmpsFeedback feedback_after = feedback_before;",
+        1,
+    )
+    if stale_amp_readback == commands_source:
+        raise AssertionError("stale charging-amps feedback mutation did not apply")
+    require_mutation_rejected(
+        "charging-amps verification reuses stale generation",
+        lambda: require_tesla_cpp_callback_contract(
+            controller_source, telemetry_source, ble_source, stale_amp_readback
+        ),
+    )
+
+    crash_source = SOURCES["diag_crash.cpp"]
+    for label, crash_mutated in (
+        (
+            "crash dismissal plain bool",
+            crash_source.replace(
+                "static std::atomic<bool> s_dismissed{false};",
+                "static bool s_dismissed{false};",
+                1,
+            ),
+        ),
+        (
+            "crash dismissal shared snapshot write",
+            crash_source.replace(
+                "s_dismissed.store(true, std::memory_order_release);",
+                "s_ci.dismissed = true;",
+                1,
+            ),
+        ),
+    ):
+        if crash_mutated == crash_source:
+            raise AssertionError(f"{label} mutation did not apply")
+        require_mutation_rejected(
+            label,
+            lambda crash_mutated=crash_mutated:
+                require_crash_dismiss_atomic_contract(crash_mutated),
         )
 
     for old, replacement, label in (
