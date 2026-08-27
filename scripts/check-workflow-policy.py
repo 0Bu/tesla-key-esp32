@@ -89,7 +89,7 @@ EXPECTED_JOB_PERMISSIONS = {
 EXPECTED_ACTIONS = {
     ("bench-acceptance.yml", "ingest-report"): (
         "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
-        "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
+        "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
     ),
     ("build.yml", "logic-test"): (
         "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
@@ -942,7 +942,7 @@ def validate(root: Path) -> None:
             "bench-acceptance.yml must ingest its own privacy-safe report-json dispatch input")
     expected_bench_actions = [
         "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
-        "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
+        "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
     ]
     bench_actions = re.findall(r"^\s+uses:\s*([^\s#]+)", bench_job, re.MULTILINE)
     require(bench_actions == expected_bench_actions,
@@ -1433,8 +1433,8 @@ def self_test(root: Path) -> None:
          "          cp scripts/check-bench-acceptance.py \"$REPORT_PATH\"\n",
          "run blocks must match"),
         ("bench-download-consumer", "bench-acceptance.yml",
-         "uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
-         "uses: actions/download-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
+         "uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
+         "uses: actions/download-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
          "action inventory drift"),
         ("bench-hardware-network", "bench-acceptance.yml", "          umask 077\n",
          "          umask 077\n          curl https://device.invalid/status\n",
