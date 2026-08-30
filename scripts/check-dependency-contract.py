@@ -48,6 +48,10 @@ PATCH_INVENTORY = (
         "0003-rate-limit-rx-framing-recovery-logs.patch",
         "09d6ce7e859d9c0ce71b64c337c01792e0a48cc73266f0fe9ee95d190902b92a",
     ),
+    (
+        "0004-drop-unused-parental-controls-actions.patch",
+        "6984321d34bdafe900244d0fe18052cc015a5b42ba0cf4e12e8ed9fb08791743",
+    ),
 )
 MANIFEST_LOGICAL_LINES = (
     "dependencies:",
