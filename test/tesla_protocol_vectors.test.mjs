@@ -322,7 +322,7 @@ test('all target locks pin the reviewed tesla-ble source and exact target set', 
   const targets = ['esp32', 'esp32s3', 'esp32c3', 'esp32c6'];
   for (const target of targets) {
     const lock = readFileSync(`dependencies.lock.${target}`, 'utf8');
-    assert.match(lock, /version: 9386f858446eccd9482b625871fe99d8decb3502/);
+    assert.match(lock, /version: a0e5efa610e7ee93ca04fd36bed72e9aac03f008/);
     assert.match(lock, new RegExp(`^target: ${target}$`, 'm'));
     const listed = [...lock.matchAll(/^    - (esp32(?:s3|c3|c6)?)$/gm)].map((match) => match[1]);
     assert.deepEqual(listed, targets);

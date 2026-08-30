@@ -497,7 +497,7 @@ what each must stay true to:
   diff is feature-relevant.
 - **`$vehicle-command-audit`** compares the firmware against upstream `teslamotors/vehicle-command`,
   gated by what `yoziru/tesla-ble` (pin in `main/idf_component.yml`) can actually do. Re-verify the
-  tesla-ble **pin** in its source map (`v5.1.1`) still matches `idf_component.yml`, that its upstream
+  tesla-ble **pin** in its source map (`v5.1.2`) still matches `idf_component.yml`, that its upstream
   file paths still resolve (e.g. `pkg/vehicle/charge.go`), and that its "worked findings" table is
   not asserting drift already fixed in the tree. It is the *upstream-conformance* counterpart to this
   skill — keep the two complementary, not overlapping.
