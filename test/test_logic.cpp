@@ -40,6 +40,7 @@
 #include "logic/soc_gradient.hpp"
 #include "logic/led_status.hpp"
 #include "logic/syslog_policy.hpp"
+#include "logic/syslog_start_gate.hpp"
 #include "logic/connect_outcome.hpp"
 #include "logic/active_window.hpp"
 #include "logic/ble_readiness.hpp"
@@ -47,7 +48,16 @@
 #include "logic/ble_row.hpp"
 #include "logic/ha_templates.hpp"
 #include "logic/http_body.hpp"
+#include "logic/http_route.hpp"
+#include "logic/json_syntax.hpp"
+#include "logic/config_request.hpp"
+#include "logic/heap_json_stream.hpp"
 #include "logic/heap_watchdog.hpp"
+#include "logic/ota_contract.hpp"
+#include "logic/task_start_gate.hpp"
+#include "logic/nimble_start_gate.hpp"
+#include "logic/ping_probe.hpp"
+#include "logic/runtime_admission.hpp"
 #include "logic/charge_control.hpp"
 #include "logic/reset_reason.hpp"
 #include "logic/crashinfo.hpp"
@@ -58,6 +68,7 @@
 #include "logic/mqtt_uri.hpp"
 #include "logic/http_origin.hpp"
 #include "logic/ble_chunk.hpp"
+#include "logic/ble_deferred_event.hpp"
 #include "logic/wifi_rollback.hpp"
 #include "logic/redact.hpp"
 #include "logic/captive.hpp"
@@ -67,6 +78,7 @@
 #include "logic/nvs_string_load.hpp"
 #include "logic/vin_transition.hpp"
 
+#include <array>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -252,14 +264,6 @@ static void test_vin_transition() {
     CHECK(tk::decide_vin_transition_apply(true, true,
                                           tk::KeyRotationResult::Complete) ==
           A::Complete);
-    CHECK(!tk::vin_transition_reboot_confirms_ota(A::IdentityUnverified));
-    CHECK(!tk::vin_transition_reboot_confirms_ota(A::IdentityRecoveryPending));
-    CHECK(!tk::vin_transition_reboot_confirms_ota(A::StageFailed));
-    CHECK(!tk::vin_transition_reboot_confirms_ota(A::RollBackPreviousIdentity));
-    CHECK(!tk::vin_transition_reboot_confirms_ota(A::RecoverAmbiguousIdentity));
-    CHECK(!tk::vin_transition_reboot_confirms_ota(A::RecoverCommittedIdentity));
-    CHECK(tk::vin_transition_reboot_confirms_ota(A::Complete));
-
     // A previous key rotation whose runtime identity or peer cleanup is still pending must
     // block before /set_vin writes vin_txn or ConfigBlob. The prior CleanupPending result does
     // not belong to this request and cannot be reclassified as its committed key mutation.
@@ -787,6 +791,479 @@ static void test_target() {
     CHECK(base + tk::image_suffix(tk::Target::Esp32)   + ".bin" == "tesla-key-esp32.bin");
     CHECK(base + tk::image_suffix(tk::Target::Esp32S3) + ".bin" == "tesla-key-esp32-s3.bin");
     CHECK(base + tk::image_suffix(tk::Target::Esp32C6) + ".bin" == "tesla-key-esp32-c6.bin");
+}
+
+// ─── OTA manifest body and version freshness contracts ─────────────────────────
+static void test_ota_contract() {
+    using Order = tk::OtaVersionOrder;
+    using Read = tk::BoundedBodyReadResult;
+
+    CHECK(tk::canonical_ota_version("0.0.0"));
+    CHECK(tk::canonical_ota_version("1.4.84"));
+    CHECK(tk::canonical_ota_version("1.4.84-PR-123"));
+    CHECK(tk::canonical_ota_version("1.4.84-dev.7"));
+    CHECK(!tk::canonical_ota_version(""));
+    CHECK(!tk::canonical_ota_version("+1.2.3"));
+    CHECK(!tk::canonical_ota_version("-1.2.3"));
+    CHECK(!tk::canonical_ota_version("01.2.3"));
+    CHECK(!tk::canonical_ota_version("1.02.3"));
+    CHECK(!tk::canonical_ota_version("1.2.03"));
+    CHECK(!tk::canonical_ota_version("1.2"));
+    CHECK(!tk::canonical_ota_version("1.2.3x"));
+    CHECK(!tk::canonical_ota_version("1.2.3 "));
+    CHECK(!tk::canonical_ota_version("1.2.3-"));
+    CHECK(!tk::canonical_ota_version("1.2.3+meta"));
+
+    const std::string max_version = "1.2.3-" + std::string(25, 'a');
+    const std::string overlong_version = "1.2.3-" + std::string(26, 'a');
+    CHECK(max_version.size() == tk::kOtaVersionMaxBytes);
+    CHECK(tk::canonical_ota_version(max_version));
+    CHECK(overlong_version.size() == tk::kOtaVersionMaxBytes + 1);
+    CHECK(!tk::canonical_ota_version(overlong_version));
+
+    // Magnitude uses digit spans, not bounded integer conversion: these values exceed uint64_t,
+    // yet compare deterministically without scanf overflow/UB.
+    CHECK(tk::compare_ota_versions("18446744073709551616.0.0",
+                                   "9999999999999999999.0.0") == Order::Newer);
+    CHECK(tk::compare_ota_versions("9999999999999999999.0.0",
+                                   "18446744073709551616.0.0") == Order::Older);
+    CHECK(tk::compare_ota_versions("1.10.0", "1.9.99") == Order::Newer);
+    CHECK(tk::compare_ota_versions("1.2.3", "1.2.3") == Order::Equal);
+    CHECK(tk::compare_ota_versions("1.2.3-dev", "1.2.3") == Order::Equal);
+    CHECK(tk::compare_ota_versions("01.2.3", "1.2.2") == Order::Invalid);
+
+    char unterminated[32];
+    std::memset(unterminated, '1', sizeof(unterminated));
+    const auto unterminated_view = tk::bounded_c_string_view(unterminated);
+    CHECK(unterminated_view.size() == sizeof(unterminated));
+    CHECK(!tk::canonical_ota_version(unterminated_view));
+
+    tk::BoundedHttpBodyGate exact_limit(8192, false);
+    CHECK(exact_limit.valid_headers());
+    CHECK(exact_limit.next_read_size(512) == 512);
+    CHECK(exact_limit.accept_read(8191, false) == Read::Continue);
+    CHECK(exact_limit.next_read_size(512) == 2);  // last accepted byte plus oversize probe
+    CHECK(exact_limit.accept_read(1, true) == Read::Complete);
+    CHECK(exact_limit.bytes_received() == 8192);
+
+    tk::BoundedHttpBodyGate over_limit(8193, false);
+    CHECK(!over_limit.valid_headers());
+    CHECK(over_limit.accept_read(1, true) == Read::Reject);
+
+    tk::BoundedHttpBodyGate negative_after_prefix(10, false);
+    CHECK(negative_after_prefix.accept_read(5, false) == Read::Continue);
+    CHECK(negative_after_prefix.accept_read(-1, false) == Read::Reject);
+
+    tk::BoundedHttpBodyGate truncated(10, false);
+    CHECK(truncated.accept_read(5, false) == Read::Continue);
+    CHECK(truncated.accept_read(0, true) == Read::Reject);
+
+    tk::BoundedHttpBodyGate premature_complete(10, false);
+    CHECK(premature_complete.accept_read(5, true) == Read::Reject);
+
+    tk::BoundedHttpBodyGate empty(0, false);
+    CHECK(!empty.valid_headers());
+    CHECK(empty.accept_read(0, true) == Read::Reject);
+
+    tk::BoundedHttpBodyGate chunked_exact(0, true);
+    CHECK(chunked_exact.valid_headers());
+    CHECK(chunked_exact.accept_read(8192, true) == Read::Complete);
+
+    tk::BoundedHttpBodyGate chunked_over(0, true);
+    CHECK(chunked_over.accept_read(8192, false) == Read::Continue);
+    CHECK(chunked_over.next_read_size(512) == 1);
+    CHECK(chunked_over.accept_read(1, true) == Read::Reject);
+
+    std::string depth_16_manifest = "{\"version\":\"1.2.3\",\"ignored\":";
+    depth_16_manifest.append(15, '[');  // root object + 15 arrays = the accepted depth 16
+    depth_16_manifest += '0';
+    depth_16_manifest.append(15, ']');
+    depth_16_manifest += '}';
+    CHECK(tk::json_syntax_status(depth_16_manifest.data(), depth_16_manifest.size()) ==
+          tk::JsonSyntaxStatus::Valid);
+    std::string depth_17_manifest = "{\"version\":\"1.2.3\",\"ignored\":";
+    depth_17_manifest.append(16, '[');
+    depth_17_manifest += '0';
+    depth_17_manifest.append(16, ']');
+    depth_17_manifest += '}';
+    CHECK(tk::json_syntax_status(depth_17_manifest.data(), depth_17_manifest.size()) ==
+          tk::JsonSyntaxStatus::TooDeep);
+    const std::string nul_key = "{\"ver\\u0000sion\":\"1.2.3\"}";
+    const std::string nul_value = "{\"version\":\"1.2.3\\u0000junk\"}";
+    CHECK(tk::json_syntax_status(nul_key.data(), nul_key.size()) ==
+          tk::JsonSyntaxStatus::UnsupportedNul);
+    CHECK(tk::json_syntax_status(nul_value.data(), nul_value.size()) ==
+          tk::JsonSyntaxStatus::UnsupportedNul);
+    const std::string trailing = "{\"version\":\"1.2.3\"}junk";
+    CHECK(tk::json_syntax_status(trailing.data(), trailing.size()) ==
+          tk::JsonSyntaxStatus::Malformed);
+}
+
+// ─── atomic two-task start / second-create fault injection ───────────────────
+static void test_task_start_gate() {
+    using Action = tk::TaskEntryAction;
+    using State = tk::TaskStartState;
+
+    tk::DualTaskStartGate gate;
+    CHECK(gate.state() == State::Idle);
+    CHECK(gate.begin());
+
+    // Fault injection: task one has entered, but task two's xTaskCreate has not returned yet.
+    // The entry may only wait; the protected-resource counter models TWDT/mutex/BLE/vehicle work.
+    int protected_resource_touches = 0;
+    Action first = gate.entry_action();
+    if (first == Action::Run) ++protected_resource_touches;
+    CHECK(first == Action::Wait);
+    CHECK(protected_resource_touches == 0);
+
+    // Simulate task-two allocation failure. Task one observes Cancel, acknowledges exactly once,
+    // and would self-delete; it still cannot touch a protected resource.
+    CHECK(gate.cancel());
+    first = gate.entry_action();
+    if (first == Action::Run) ++protected_resource_touches;
+    CHECK(first == Action::Cancel);
+    gate.acknowledge_cancel();
+    CHECK(gate.cancelled_tasks_acknowledged(1));
+    CHECK(!gate.cancelled_tasks_acknowledged(0));
+    CHECK(protected_resource_touches == 0);
+    CHECK(gate.reset_cancelled(1));
+    CHECK(gate.state() == State::Idle);
+
+    // The success path releases both entries only after both creates are proven.
+    CHECK(gate.begin());
+    CHECK(gate.entry_action() == Action::Wait);
+    CHECK(gate.release());
+    CHECK(gate.entry_action() == Action::Run);
+    CHECK(!gate.cancel());
+    CHECK(!gate.begin());
+}
+
+// ─── whole-runtime vehicle admission / partial-boot fault injection ──────────
+static void test_runtime_admission() {
+    using Action = tk::RuntimeAdmissionAction;
+    using State = tk::RuntimeAdmissionState;
+
+    tk::RuntimeAdmissionGate normal;
+    CHECK(normal.state() == State::Booting);
+    CHECK(normal.action() == Action::Wait);
+    CHECK(!normal.vehicle_ready());
+    CHECK(normal.mark_ready());
+    CHECK(normal.state() == State::Ready);
+    CHECK(normal.action() == Action::Run);
+    CHECK(normal.vehicle_ready());
+    CHECK(!normal.mark_safe_mode());
+
+    // Every late essential-start fault closes a previously admitted surface as defense in depth.
+    normal.mark_fatal();
+    CHECK(normal.state() == State::Fatal);
+    CHECK(normal.action() == Action::Stop);
+    CHECK(!normal.vehicle_ready());
+    CHECK(!normal.mark_ready());
+
+    tk::RuntimeAdmissionGate safe_mode;
+    CHECK(safe_mode.mark_safe_mode());
+    CHECK(safe_mode.state() == State::SafeMode);
+    CHECK(safe_mode.action() == Action::Stop);
+    CHECK(!safe_mode.vehicle_ready());
+    CHECK(!safe_mode.mark_ready());
+
+    tk::RuntimeAdmissionGate partial_boot;
+    partial_boot.mark_fatal();
+    CHECK(partial_boot.action() == Action::Stop);
+    CHECK(!partial_boot.mark_ready());
+}
+
+// `ota_confirm_pending_image()` already owns HealthCommit before consulting this gate. Pin the
+// complete post-owner admission matrix here; the runtime-boundary contract below binds the real
+// irreversible mark-valid call to this exact Ready-only predicate.
+static void test_ota_confirm_runtime_admission_matrix() {
+    auto may_mark_valid_after_owner = [](const tk::RuntimeAdmissionGate& admission,
+                                         bool health_commit_owner) {
+        return health_commit_owner && admission.vehicle_ready();
+    };
+
+    tk::RuntimeAdmissionGate booting;
+    CHECK(!may_mark_valid_after_owner(booting, true));
+
+    tk::RuntimeAdmissionGate ready;
+    CHECK(ready.mark_ready());
+    CHECK(may_mark_valid_after_owner(ready, true));
+    CHECK(!may_mark_valid_after_owner(ready, false));
+
+    tk::RuntimeAdmissionGate safe_mode;
+    CHECK(safe_mode.mark_safe_mode());
+    CHECK(!may_mark_valid_after_owner(safe_mode, true));
+
+    tk::RuntimeAdmissionGate fatal;
+    fatal.mark_fatal();
+    CHECK(!may_mark_valid_after_owner(fatal, true));
+
+    // A late essential failure revokes even an admission that was Ready moments earlier.
+    ready.mark_fatal();
+    CHECK(!may_mark_valid_after_owner(ready, true));
+}
+
+// ─── NimBLE hidden-host-task start acknowledgement ──────────────────────────
+static void test_nimble_start_gate() {
+    using Action = tk::NimbleStartAction;
+    using State = tk::NimbleStartState;
+
+    tk::NimbleStartGate success;
+    CHECK(success.state() == State::Idle);
+    CHECK(success.action() == Action::Wait);
+    CHECK(!success.acknowledge_sync());  // sync cannot pre-authorize start()
+    CHECK(success.begin());
+    CHECK(!success.begin());
+    CHECK(success.state() == State::AwaitingSync);
+    CHECK(success.action() == Action::Wait);
+    CHECK(success.acknowledge_sync());
+    CHECK(success.state() == State::Synced);
+    CHECK(success.action() == Action::Ready);
+    CHECK(!success.mark_timed_out());  // on_sync won the exact deadline race
+
+    // The IDF wrapper hides its xTaskCreatePinnedToCore result. A create failure is therefore
+    // observed as no on_sync acknowledgement: the bounded waiter times out and stays terminal.
+    tk::NimbleStartGate hidden_create_failure;
+    CHECK(hidden_create_failure.begin());
+    CHECK(hidden_create_failure.action() == Action::Wait);
+    CHECK(hidden_create_failure.mark_timed_out());
+    CHECK(hidden_create_failure.state() == State::TimedOut);
+    CHECK(hidden_create_failure.action() == Action::Fail);
+    CHECK(!hidden_create_failure.acknowledge_sync());  // late sync cannot resurrect boot
+    CHECK(hidden_create_failure.state() == State::TimedOut);
+    CHECK(hidden_create_failure.action() == Action::Fail);
+    CHECK(!hidden_create_failure.begin());
+
+    // Explicitly pin the other ordering of the timeout/on_sync race.
+    tk::NimbleStartGate timeout_wins;
+    CHECK(timeout_wins.begin());
+    CHECK(timeout_wins.mark_timed_out());
+    CHECK(!timeout_wins.acknowledge_sync());
+    CHECK(timeout_wins.action() == Action::Fail);
+}
+
+static void test_syslog_start_gate() {
+    using Action = tk::SyslogStartAction;
+    using State = tk::SyslogStartState;
+
+    tk::SyslogStartGate success;
+    CHECK(success.state() == State::Idle);
+    CHECK(success.action() == Action::Wait);
+    CHECK(success.begin());
+    CHECK(!success.begin());
+    CHECK(success.state() == State::Waiting);
+    CHECK(success.action() == Action::Wait);  // an immediately scheduled task cannot consume
+    CHECK(success.commit());
+    CHECK(success.state() == State::Running);
+    CHECK(success.action() == Action::Run);
+    CHECK(!success.cancel());
+    CHECK(!success.commit());
+
+    tk::SyslogStartGate task_create_failure;
+    CHECK(task_create_failure.begin());
+    CHECK(task_create_failure.cancel());
+    CHECK(task_create_failure.state() == State::Cancelled);
+    CHECK(task_create_failure.action() == Action::Cancel);
+    CHECK(!task_create_failure.commit());  // a late creator cannot resurrect deleted locals
+    CHECK(!task_create_failure.begin());
+
+    // Neither terminal action can be manufactured before startup owns resources.
+    tk::SyslogStartGate idle;
+    CHECK(!idle.commit());
+    CHECK(!idle.cancel());
+    CHECK(idle.action() == Action::Wait);
+}
+
+static void test_ble_host_health_ota_matrix() {
+    auto explicit_commit_allowed = [](bool runtime_ready, bool host_synced,
+                                      std::uint32_t host_reset_count, bool heap_healthy,
+                                      bool health_commit_owner) {
+        return health_commit_owner && runtime_ready && host_synced && host_reset_count == 0 &&
+               heap_healthy;
+    };
+
+    bool host_synced = true;
+    std::uint32_t host_reset_count = 0;
+    CHECK(explicit_commit_allowed(true, host_synced, host_reset_count, true, true));
+
+    // on_reset is dynamic degradation after a successful boot. Uptime, link and heap staying
+    // healthy must not let either OTA path spend rollback again during this boot; on_sync restores
+    // BLE operations, not the already-failed OTA stability proof.
+    host_synced = false;
+    host_reset_count = 1;
+    CHECK(!explicit_commit_allowed(true, host_synced, host_reset_count, true, true));
+    CHECK(tk::health_gate_decide(tk::kHealthGateBaseS, tk::kHealthGateBaseS,
+                                 tk::kHealthGateCapS, true, true,
+                                 true && host_synced && host_reset_count == 0) ==
+          tk::HealthVerdict::Wait);
+
+    // A quick re-sync restores BLE operations, but it cannot erase the sticky reset evidence
+    // accumulated during this boot. Only a fresh boot with no reset may spend OTA rollback.
+    host_synced = true;  // later on_sync after reset
+    CHECK(!explicit_commit_allowed(true, host_synced, host_reset_count, true, true));
+    CHECK(tk::health_gate_decide(tk::kHealthGateBaseS, tk::kHealthGateBaseS,
+                                 tk::kHealthGateCapS, true, true,
+                                 true && host_synced && host_reset_count == 0) ==
+          tk::HealthVerdict::Wait);
+
+    host_reset_count = 0;  // fresh stable boot
+    CHECK(explicit_commit_allowed(true, true, host_reset_count, true, true));
+    CHECK(tk::health_gate_decide(tk::kHealthGateBaseS, tk::kHealthGateBaseS,
+                                 tk::kHealthGateCapS, true, true,
+                                 true && host_reset_count == 0) == tk::HealthVerdict::Commit);
+
+    CHECK(!explicit_commit_allowed(false, true, 0, true, true));
+    CHECK(!explicit_commit_allowed(true, true, 0, false, true));
+    CHECK(!explicit_commit_allowed(true, true, 0, true, false));
+    CHECK(!explicit_commit_allowed(true, true, UINT32_MAX, true, true));
+}
+
+// ─── asynchronous ping generation / late callback ownership ─────────────────
+static void test_ping_probe_generation() {
+    tk::PingProbeGeneration probe;
+    std::uint32_t replies = 99;
+
+    const std::uint32_t first = probe.begin();
+    CHECK(first != 0);
+    CHECK(probe.begin() == 0);  // no overlapping session / callback-args reuse
+    CHECK(!probe.complete(first + 1, 7));  // out-of-order callback is ignored
+    CHECK(!probe.ended(first));
+    CHECK(probe.complete(first, 2));
+    CHECK(probe.ended(first));
+    CHECK(probe.result(first, replies));
+    CHECK(replies == 2);
+    CHECK(probe.retire(first));
+
+    const std::uint32_t second = probe.begin();
+    CHECK(second != 0 && second != first);
+    CHECK(!probe.complete(first, 9));  // late callback cannot complete/wake the new generation
+    CHECK(!probe.ended(second));
+    CHECK(probe.complete(second, 0));
+    CHECK(probe.result(second, replies));
+    CHECK(replies == 0);
+    CHECK(probe.retire(second));
+
+    const std::uint32_t invalid_measurement = probe.begin();
+    CHECK(invalid_measurement != 0);
+    CHECK(probe.complete(invalid_measurement, 0, false));
+    bool measurement_valid = true;
+    CHECK(probe.result(invalid_measurement, replies, measurement_valid));
+    CHECK(!measurement_valid);
+    CHECK(!probe.result(invalid_measurement, replies));
+    CHECK(probe.retire(invalid_measurement));
+
+    const std::uint32_t never_started = probe.begin();
+    CHECK(never_started != 0);
+    CHECK(probe.abandon_unstarted(never_started));
+    CHECK(probe.active() == 0);
+    CHECK(!probe.complete(never_started, 1));
+}
+
+// ─── MCP endpoint core (version negotiation, routing, tool registry, clamp) ──────
+// Bounded /heap JSON stream: full history must remain fixed-chunk and fail closed.
+struct HeapStreamCapture {
+    std::vector<std::string> chunks;
+    int calls{0};
+    int fail_at{-1};
+
+    bool send(const char* data, std::size_t size) {
+        const int call = calls++;
+        if (call == fail_at) return false;
+        CHECK(data != nullptr);
+        CHECK(size != 0);
+        CHECK(size <= 192);
+        chunks.emplace_back(data, size);
+        return true;
+    }
+
+    std::string joined() const {
+        std::string result;
+        for (const std::string& chunk : chunks) result += chunk;
+        return result;
+    }
+};
+
+static bool capture_heap_stream(const tk::HeapJsonStreamView& view,
+                                HeapStreamCapture& capture) {
+    return tk::stream_heap_json(view, [&capture](const char* data, std::size_t size) {
+        return capture.send(data, size);
+    });
+}
+
+static void test_heap_json_stream() {
+    constexpr std::int16_t kAbsent = INT16_MIN;
+
+    HeapStreamCapture empty;
+    CHECK(capture_heap_stream({300, 4, 7, nullptr, nullptr, 0, kAbsent}, empty));
+    CHECK(empty.joined() ==
+          "{\"dt\":300,\"b0\":4,\"b_boot\":7,\"unit\":\"KiB\",\"scale\":10,"
+          "\"free\":[],\"largest\":[]}");
+
+    // A non-empty view without either caller-owned series fails before the first send.
+    const std::int16_t one[] = {1};
+    HeapStreamCapture missing_free;
+    CHECK(!capture_heap_stream({1, 2, 3, nullptr, one, 1, kAbsent}, missing_free));
+    CHECK(missing_free.calls == 0);
+    HeapStreamCapture missing_largest;
+    CHECK(!capture_heap_stream({1, 2, 3, one, nullptr, 1, kAbsent}, missing_largest));
+    CHECK(missing_largest.calls == 0);
+
+    // Pin null/value edges and the complete int16_t numeric range that remains after reserving
+    // INT16_MIN as the absent sentinel.
+    const std::int16_t free_edges[] = {kAbsent, -32767, 0, 32767};
+    const std::int16_t largest_edges[] = {32767, 0, -32767, kAbsent};
+    HeapStreamCapture edges;
+    CHECK(capture_heap_stream(
+        {UINT32_MAX, UINT32_MAX, 0, free_edges, largest_edges, 4, kAbsent}, edges));
+    CHECK(edges.joined() ==
+          "{\"dt\":4294967295,\"b0\":4294967295,\"b_boot\":0,\"unit\":\"KiB\","
+          "\"scale\":10,\"free\":[null,-32767,0,32767],"
+          "\"largest\":[32767,0,-32767,null]}");
+
+    // Full production occupancy: 288 buckets in each series, with every transport call bounded
+    // by the writer's fixed 192-byte buffer.
+    constexpr std::size_t kFullCount = 288;
+    std::array<std::int16_t, kFullCount> free_samples{};
+    std::array<std::int16_t, kFullCount> largest_samples{};
+    for (std::size_t i = 0; i < kFullCount; ++i) {
+        free_samples[i] = i % 17 == 0 ? kAbsent : static_cast<std::int16_t>(i);
+        largest_samples[i] =
+            i % 19 == 0 ? kAbsent : static_cast<std::int16_t>(30000 - i);
+    }
+    HeapStreamCapture full;
+    const tk::HeapJsonStreamView full_view{
+        300, 123456, 120000, free_samples.data(), largest_samples.data(), kFullCount, kAbsent,
+    };
+    CHECK(capture_heap_stream(full_view, full));
+    CHECK(full.chunks.size() > 2);
+
+    std::string expected =
+        "{\"dt\":300,\"b0\":123456,\"b_boot\":120000,\"unit\":\"KiB\","
+        "\"scale\":10,\"free\":[";
+    for (std::size_t i = 0; i < kFullCount; ++i) {
+        if (i != 0) expected += ',';
+        expected += free_samples[i] == kAbsent ? "null" : std::to_string(free_samples[i]);
+    }
+    expected += "],\"largest\":[";
+    for (std::size_t i = 0; i < kFullCount; ++i) {
+        if (i != 0) expected += ',';
+        expected += largest_samples[i] == kAbsent ? "null" : std::to_string(largest_samples[i]);
+    }
+    expected += "]}";
+    CHECK(full.joined() == expected);
+
+    // A failed first or later send aborts immediately and cannot fabricate completed JSON.
+    HeapStreamCapture first_send_failure;
+    first_send_failure.fail_at = 0;
+    CHECK(!capture_heap_stream(full_view, first_send_failure));
+    CHECK(first_send_failure.calls == 1);
+    CHECK(first_send_failure.chunks.empty());
+
+    HeapStreamCapture nth_send_failure;
+    nth_send_failure.fail_at = 2;
+    CHECK(!capture_heap_stream(full_view, nth_send_failure));
+    CHECK(nth_send_failure.calls == 3);
+    CHECK(nth_send_failure.chunks.size() == 2);
 }
 
 // ─── MCP endpoint core (version negotiation, routing, tool registry, validation) ──────
@@ -1775,6 +2252,407 @@ static void test_http_body() {
     // Empty / null guards.
     CHECK(http_body_read(buf, sizeof(buf), 0, [&](char*, size_t) -> BodyChunk { return { BodyRecv::Data, 0 }; }) == -1);
     CHECK(http_body_read(nullptr, 8, 4, [&](char*, size_t) -> BodyChunk { return { BodyRecv::Data, 0 }; }) == -1);
+
+    // Captive-portal production accepts exactly 1024 wire bytes in fixed storage with a separate
+    // terminator byte. The next wire byte is rejected before recv.
+    {
+        constexpr size_t max_payload = 1024;
+        constexpr size_t capacity = max_payload + 1;
+        char fixed[capacity]{};
+        CHECK(!http_body_fits_buffer(0, capacity));
+        CHECK(http_body_fits_buffer(1, capacity));
+        CHECK(http_body_fits_buffer(max_payload, capacity));
+        CHECK(!http_body_fits_buffer(max_payload + 1, capacity));
+
+        int recv_calls = 0;
+        CHECK(http_body_read(fixed, capacity, max_payload + 1,
+            [&](char*, size_t) -> BodyChunk {
+                ++recv_calls;
+                return {BodyRecv::Data, 1};
+            }) == -1);
+        CHECK(recv_calls == 0);
+
+        const std::string largest(max_payload, 'x');
+        CHECK(http_body_read(fixed, capacity, largest.size(),
+            [&](char* dst, size_t wanted) -> BodyChunk {
+                std::memcpy(dst, largest.data(), wanted);
+                return {BodyRecv::Data, wanted};
+            }) == static_cast<int>(largest.size()));
+        CHECK(fixed[max_payload] == '\0');
+        CHECK(!http_body_has_embedded_nul(fixed, largest.size()));
+    }
+    {
+        const char embedded[] = {'a', '\0', 'b', '\0'};
+        CHECK(http_body_has_embedded_nul(embedded, 3));
+        CHECK(!http_body_has_embedded_nul(embedded, 1));
+        CHECK(!http_body_has_embedded_nul(nullptr, 0));
+        CHECK(http_body_has_embedded_nul(nullptr, 1));
+    }
+
+    // The allocation-owning adapter keeps every failure class distinct. Persisted configuration
+    // handlers rely on this: only Ok proceeds to JSON parsing, while Empty/recv/OOM can never be
+    // mistaken for an explicitly submitted empty string that disables a service.
+    {
+        int allocs = 0;
+        auto r = http_body_receive(0, 8,
+            [&](size_t n) -> void* { ++allocs; return std::malloc(n); },
+            [](void* p) { std::free(p); },
+            [](char*, size_t) -> BodyChunk { return {BodyRecv::Error, 0}; });
+        CHECK(r.status == BodyReadStatus::Empty);
+        CHECK(r.data == nullptr);
+        CHECK(allocs == 0);
+        CHECK(body_read_http_status(r.status) == 400);
+    }
+    {
+        int allocs = 0;
+        auto r = http_body_receive(9, 8,
+            [&](size_t n) -> void* { ++allocs; return std::malloc(n); },
+            [](void* p) { std::free(p); },
+            [](char*, size_t) -> BodyChunk { return {BodyRecv::Error, 0}; });
+        CHECK(r.status == BodyReadStatus::TooLarge);
+        CHECK(allocs == 0);
+        CHECK(body_read_http_status(r.status) == 413);
+    }
+    {
+        auto r = http_body_receive(4, 8,
+            [](size_t) -> void* { return nullptr; },
+            [](void*) {},
+            [](char*, size_t) -> BodyChunk { return {BodyRecv::Error, 0}; });
+        CHECK(r.status == BodyReadStatus::NoMemory);
+        CHECK(body_read_http_status(r.status) == 503);
+    }
+    {
+        int releases = 0;
+        auto r = http_body_receive(4, 8,
+            [](size_t n) -> void* { return std::malloc(n); },
+            [&](void* p) { ++releases; std::free(p); },
+            [](char*, size_t) -> BodyChunk { return {BodyRecv::Error, 0}; });
+        CHECK(r.status == BodyReadStatus::ReceiveFailed);
+        CHECK(r.data == nullptr);
+        CHECK(releases == 1);
+        CHECK(body_read_http_status(r.status) == 400);
+    }
+    {
+        const std::string body = "{\"broker\":\"\"}";  // explicit disable remains a valid body
+        size_t offset = 0;
+        int releases = 0;
+        auto r = http_body_receive(body.size(), 64,
+            [](size_t n) -> void* { return std::malloc(n); },
+            [&](void* p) { ++releases; std::free(p); },
+            [&](char* dst, size_t) -> BodyChunk {
+                dst[0] = body[offset++];
+                return {BodyRecv::Data, 1};
+            });
+        CHECK(r.status == BodyReadStatus::Ok);
+        CHECK(r.data != nullptr);
+        CHECK(std::string(r.data) == body);
+        CHECK(releases == 0);
+        std::free(r.data);
+    }
+}
+
+static void test_json_materialize() {
+    using namespace tk;
+
+    int64_t safe_integer = 0;
+    CHECK(json_safe_integer(0.0, safe_integer) && safe_integer == 0);
+    CHECK(json_safe_integer(-0.0, safe_integer) && safe_integer == 0);
+    CHECK(json_safe_integer(9007199254740991.0, safe_integer) &&
+          safe_integer == kJsonSafeIntegerMax);
+    CHECK(json_safe_integer(-9007199254740991.0, safe_integer) &&
+          safe_integer == -kJsonSafeIntegerMax);
+    CHECK(!json_safe_integer(9007199254740992.0, safe_integer));  // +2^53
+    CHECK(!json_safe_integer(-9007199254740992.0, safe_integer)); // -2^53
+    CHECK(!json_safe_integer(7.5, safe_integer));
+    CHECK(!json_safe_integer(-0.5, safe_integer));
+    CHECK(!json_safe_integer(std::nan(""), safe_integer));
+    CHECK(!json_safe_integer(HUGE_VAL, safe_integer));
+
+    static constexpr char max_safe_lexeme[] = "9007199254740991";
+    static constexpr char min_safe_lexeme[] = "-9007199254740991";
+    CHECK(json_canonical_safe_integer(max_safe_lexeme,
+                                      max_safe_lexeme + sizeof(max_safe_lexeme) - 1,
+                                      safe_integer) &&
+          safe_integer == kJsonSafeIntegerMax);
+    CHECK(json_canonical_safe_integer(min_safe_lexeme,
+                                      min_safe_lexeme + sizeof(min_safe_lexeme) - 1,
+                                      safe_integer) &&
+          safe_integer == -kJsonSafeIntegerMax);
+    for (const char* invalid_integer : {
+             "9007199254740992", "-9007199254740992", "1.5", "1e3", "1e-400",
+             "9007199254740990.5", "-0", "01"}) {
+        CHECK(!json_canonical_safe_integer(
+            invalid_integer, invalid_integer + std::strlen(invalid_integer), safe_integer));
+    }
+
+    for (const char* valid_id : {
+             "{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"ping\"}",
+             "{\"jsonrpc\":\"2.0\",\"id\":9007199254740991,\"method\":\"ping\"}",
+             "{\"jsonrpc\":\"2.0\",\"id\":-9007199254740991,\"method\":\"ping\"}",
+             "{\"jsonrpc\":\"2.0\",\"\\u0069d\":17,\"method\":\"ping\"}",
+             "{\"jsonrpc\":\"2.0\",\"i\\u0064\":18,\"method\":\"ping\"}",
+             "{\"jsonrpc\":\"2.0\",\"\\u0069\\u0064\":19,\"method\":\"ping\"}"}) {
+        const JsonRawNumberId raw =
+            json_top_level_numeric_id(valid_id, std::strlen(valid_id));
+        CHECK(raw.status == JsonRawNumberStatus::ValidInteger);
+    }
+    for (const char* invalid_id : {
+             "{\"id\":9007199254740992}", "{\"id\":1.5}", "{\"id\":1e-400}",
+             "{\"id\":1e3}", "{\"id\":9007199254740990.5}", "{\"id\":-0}",
+             "{\"\\u0069d\":1e3}"}) {
+        const JsonRawNumberId raw =
+            json_top_level_numeric_id(invalid_id, std::strlen(invalid_id));
+        CHECK(raw.status == JsonRawNumberStatus::InvalidNumber);
+    }
+    const char* string_id = "{\"id\":\"request-1\"}";
+    CHECK(json_top_level_numeric_id(string_id, std::strlen(string_id)).status ==
+          JsonRawNumberStatus::NonNumber);
+    const char* escaped_string_id = "{\"\\u0069\\u0064\":\"request-2\"}";
+    CHECK(json_top_level_numeric_id(escaped_string_id, std::strlen(escaped_string_id)).status ==
+          JsonRawNumberStatus::NonNumber);
+    const char* lookalike_id = "{\"\\u0131d\":20}";
+    CHECK(json_top_level_numeric_id(lookalike_id, std::strlen(lookalike_id)).status ==
+          JsonRawNumberStatus::Missing);
+
+    for (const char* valid : {
+             "{}", "{\"broker\":\"\"}", " { \"ms\" : 1.7e+12 } \n",
+             "[true,false,null,-1,0,3.14]", "{\"escaped\":\"a\\\\b\\\"c\\u20ac\"}",
+             "{\"astral\":\"\\uD834\\uDD1E\"}"}) {
+        CHECK(json_syntax_valid(valid, std::strlen(valid)));
+    }
+    for (const char* invalid : {
+             "", "{", "{\"broker\"}", "{\"broker\":}", "{\"broker\":\"x\",}",
+             "{\"x\":01}", "{\"x\":1.}", "{\"x\":1e}", "{\"x\":\"\\q\"}",
+             "true false", "[1,]", "{\"x\":\"\\uD800\"}",
+             "{\"x\":\"\\uDC00\"}", "{\"x\":\"\\uD800\\u0041\"}",
+             "{\"x\":\"\\uD800x\\uDC00\"}"}) {
+        CHECK(!json_syntax_valid(invalid, std::strlen(invalid)));
+    }
+
+    struct RawUtf8 {
+        const char* bytes;
+        size_t length;
+    };
+    static constexpr char utf8_2_min[] = "\xc2\x80";
+    static constexpr char utf8_2_max[] = "\xdf\xbf";
+    static constexpr char utf8_3_min[] = "\xe0\xa0\x80";
+    static constexpr char utf8_before_surrogate[] = "\xed\x9f\xbf";
+    static constexpr char utf8_after_surrogate[] = "\xee\x80\x80";
+    static constexpr char utf8_4_min[] = "\xf0\x90\x80\x80";
+    static constexpr char utf8_4_max[] = "\xf4\x8f\xbf\xbf";
+    const RawUtf8 valid_utf8[] = {
+        {utf8_2_min, sizeof(utf8_2_min) - 1},
+        {utf8_2_max, sizeof(utf8_2_max) - 1},
+        {utf8_3_min, sizeof(utf8_3_min) - 1},
+        {utf8_before_surrogate, sizeof(utf8_before_surrogate) - 1},
+        {utf8_after_surrogate, sizeof(utf8_after_surrogate) - 1},
+        {utf8_4_min, sizeof(utf8_4_min) - 1},
+        {utf8_4_max, sizeof(utf8_4_max) - 1},
+    };
+    for (const RawUtf8& raw : valid_utf8) {
+        const std::string document =
+            std::string("{\"x\":\"") + std::string(raw.bytes, raw.length) + "\"}";
+        CHECK(json_syntax_status(document.data(), document.size()) == JsonSyntaxStatus::Valid);
+    }
+
+    static constexpr char lone_continuation[] = "\x80";
+    static constexpr char bad_two_byte_lead[] = "\xc0\x80";
+    static constexpr char truncated_two_byte[] = "\xc2";
+    static constexpr char bad_two_byte_tail[] = "\xc2\x20";
+    static constexpr char truncated_three_byte[] = "\xe2\x82";
+    static constexpr char overlong_three_byte[] = "\xe0\x80\x80";
+    static constexpr char high_surrogate[] = "\xed\xa0\x80";
+    static constexpr char low_surrogate[] = "\xed\xbf\xbf";
+    static constexpr char truncated_four_byte[] = "\xf0\x90\x80";
+    static constexpr char overlong_four_byte[] = "\xf0\x80\x80\x80";
+    static constexpr char above_unicode[] = "\xf4\x90\x80\x80";
+    static constexpr char bad_four_byte_lead[] = "\xf5\x80\x80\x80";
+    static constexpr char impossible_lead[] = "\xff";
+    const RawUtf8 invalid_utf8[] = {
+        {lone_continuation, sizeof(lone_continuation) - 1},
+        {bad_two_byte_lead, sizeof(bad_two_byte_lead) - 1},
+        {truncated_two_byte, sizeof(truncated_two_byte) - 1},
+        {bad_two_byte_tail, sizeof(bad_two_byte_tail) - 1},
+        {truncated_three_byte, sizeof(truncated_three_byte) - 1},
+        {overlong_three_byte, sizeof(overlong_three_byte) - 1},
+        {high_surrogate, sizeof(high_surrogate) - 1},
+        {low_surrogate, sizeof(low_surrogate) - 1},
+        {truncated_four_byte, sizeof(truncated_four_byte) - 1},
+        {overlong_four_byte, sizeof(overlong_four_byte) - 1},
+        {above_unicode, sizeof(above_unicode) - 1},
+        {bad_four_byte_lead, sizeof(bad_four_byte_lead) - 1},
+        {impossible_lead, sizeof(impossible_lead) - 1},
+    };
+    for (const RawUtf8& raw : invalid_utf8) {
+        const std::string document =
+            std::string("{\"x\":\"") + std::string(raw.bytes, raw.length) + "\"}";
+        CHECK(json_syntax_status(document.data(), document.size()) == JsonSyntaxStatus::Malformed);
+    }
+    std::string max_depth(kJsonMaxNesting, '[');
+    max_depth += '0';
+    max_depth.append(kJsonMaxNesting, ']');
+    CHECK(json_syntax_status(max_depth.data(), max_depth.size()) == JsonSyntaxStatus::Valid);
+    std::string too_deep(kJsonMaxNesting + 1, '[');
+    too_deep += '0';
+    too_deep.append(kJsonMaxNesting + 1, ']');
+    CHECK(!json_syntax_valid(too_deep.data(), too_deep.size()));
+    CHECK(json_syntax_status(too_deep.data(), too_deep.size()) == JsonSyntaxStatus::TooDeep);
+    std::string too_deep_empty(kJsonMaxNesting + 1, '[');
+    too_deep_empty.append(kJsonMaxNesting + 1, ']');
+    CHECK(json_syntax_status(too_deep_empty.data(), too_deep_empty.size()) ==
+          JsonSyntaxStatus::TooDeep);
+    static constexpr char embedded_nul[] = "{\"id\":\"a\\u0000b\"}";
+    CHECK(json_syntax_status(embedded_nul, std::strlen(embedded_nul)) ==
+          JsonSyntaxStatus::UnsupportedNul);
+
+    struct FakeJson { int value; } node{7};
+    const char* valid = "{\"broker\":\"host:1883\"}";
+
+    // Deterministic n-th-allocation cJSON seam: the production callback is cJSON_Parse; this fake
+    // models its internal allocation sequence and fails each allocation in turn. The shared
+    // wrapper must classify every one as NoMemory/503 territory, never malformed JSON.
+    for (int fail_at = 1; fail_at <= 12; ++fail_at) {
+        int allocations = 0;
+        auto parsed = json_materialize<FakeJson>(valid, std::strlen(valid),
+            [&](const char*) -> FakeJson* {
+                for (int i = 0; i < 12; ++i) {
+                    ++allocations;
+                    if (allocations == fail_at) return nullptr;
+                }
+                return &node;
+            });
+        CHECK(parsed.status == JsonMaterializeStatus::NoMemory);
+        CHECK(parsed.root == nullptr);
+        CHECK(allocations == fail_at);
+    }
+
+    auto malformed = json_materialize<FakeJson>("{bad", 4,
+        [&](const char*) -> FakeJson* { return &node; });
+    CHECK(malformed.status == JsonMaterializeStatus::Malformed);
+    CHECK(malformed.root == nullptr);
+    int too_deep_parse_calls = 0;
+    auto limited = json_materialize<FakeJson>(too_deep.data(), too_deep.size(),
+        [&](const char*) -> FakeJson* { ++too_deep_parse_calls; return &node; });
+    CHECK(limited.status == JsonMaterializeStatus::TooDeep);
+    CHECK(limited.root == nullptr);
+    CHECK(too_deep_parse_calls == 0);
+    int nul_parse_calls = 0;
+    auto unsupported_nul = json_materialize<FakeJson>(
+        embedded_nul, std::strlen(embedded_nul),
+        [&](const char*) -> FakeJson* { ++nul_parse_calls; return &node; });
+    CHECK(unsupported_nul.status == JsonMaterializeStatus::UnsupportedNul);
+    CHECK(unsupported_nul.root == nullptr);
+    CHECK(nul_parse_calls == 0);
+    auto ok = json_materialize<FakeJson>(valid, std::strlen(valid),
+        [&](const char*) -> FakeJson* { return &node; });
+    CHECK(ok.status == JsonMaterializeStatus::Ok);
+    CHECK(ok.root == &node);
+}
+
+static void test_config_request_gate() {
+    using namespace tk;
+
+    struct Spies {
+        int normalize = 0;
+        int load = 0;
+        int validate = 0;
+        int probe = 0;
+        int save = 0;
+        int respond = 0;
+        int commit = 0;
+        int response_status = 0;
+        bool response_ok = false;
+        std::string response_reason;
+        std::string saved_value;
+        bool responded = false;
+    } s;
+
+    const ConfigStringMessages messages{
+        "already disabled", "unchanged", "invalid", "disabled", "saved", "save failed"};
+    std::string current = "old:1";
+    bool valid = true;
+    ConfigProbeVerdict probe_result{};
+    bool save_ok = true;
+
+    auto run = [&](const ConfigStringSubmission& submitted) {
+        s = {};
+        return apply_config_string(
+            submitted,
+            [&](const std::string& value) { ++s.normalize; return value; },
+            [&]() { ++s.load; return current; },
+            [&](const std::string&) { ++s.validate; return valid; },
+            [&](const std::string&) { ++s.probe; return probe_result; },
+            [&](const std::string& value) {
+                ++s.save;
+                s.saved_value = value;
+                return save_ok;
+            },
+            [&](int status, bool ok, const char* reason) {
+                ++s.respond;
+                s.responded = true;
+                s.response_status = status;
+                s.response_ok = ok;
+                s.response_reason = reason;
+                return 77;
+            },
+            [&]() {
+                CHECK(s.responded);  // response must leave before delay/restart
+                ++s.commit;
+            },
+            messages);
+    };
+
+    // Every transport/schema/parser rejection exits before even loading current NVS state. This
+    // is the no-mutation proof for the common path the real MQTT/Syslog handlers delegate to.
+    for (ConfigSubmissionStatus status : {
+             ConfigSubmissionStatus::MissingBody, ConfigSubmissionStatus::TooLarge,
+             ConfigSubmissionStatus::BodyNoMemory, ConfigSubmissionStatus::ReceiveFailed,
+             ConfigSubmissionStatus::MalformedJson, ConfigSubmissionStatus::JsonTooDeep,
+             ConfigSubmissionStatus::JsonUnsupportedNul, ConfigSubmissionStatus::JsonNoMemory,
+             ConfigSubmissionStatus::ObjectRequired,
+             ConfigSubmissionStatus::StringFieldRequired}) {
+        CHECK(run({status, {}}) == 77);
+        CHECK(s.normalize == 0 && s.load == 0 && s.validate == 0 && s.probe == 0);
+        CHECK(s.save == 0 && s.commit == 0 && s.respond == 1);
+        CHECK(s.response_status == config_submission_http_status(status));
+        CHECK(!s.response_ok);
+    }
+
+    // Empty is accepted only when it arrived as a Ready string field. It is persisted and rebooted
+    // after the response, preserving the intentional disable operation without conflating it
+    // with any failure above.
+    current = "host:1883";
+    valid = true;
+    probe_result = {};
+    save_ok = true;
+    CHECK(run({ConfigSubmissionStatus::Ready, ""}) == 77);
+    CHECK(s.normalize == 1 && s.load == 1 && s.validate == 1 && s.probe == 1);
+    CHECK(s.save == 1 && s.saved_value.empty());
+    CHECK(s.response_status == 200 && s.response_ok && s.response_reason == "disabled");
+    CHECK(s.commit == 1);
+
+    current = "same";
+    CHECK(run({ConfigSubmissionStatus::Ready, "same"}) == 77);
+    CHECK(s.load == 1 && s.validate == 0 && s.probe == 0 && s.save == 0 && s.commit == 0);
+    CHECK(s.response_status == 200 && s.response_ok && s.response_reason == "unchanged");
+
+    current = "old";
+    valid = false;
+    CHECK(run({ConfigSubmissionStatus::Ready, "bad"}) == 77);
+    CHECK(s.validate == 1 && s.probe == 0 && s.save == 0 && s.commit == 0);
+    CHECK(s.response_status == 400 && !s.response_ok);
+
+    valid = true;
+    probe_result = {false, 502, "unreachable"};
+    CHECK(run({ConfigSubmissionStatus::Ready, "new"}) == 77);
+    CHECK(s.probe == 1 && s.save == 0 && s.commit == 0);
+    CHECK(s.response_status == 502 && s.response_reason == "unreachable");
+
+    probe_result = {};
+    save_ok = false;
+    CHECK(run({ConfigSubmissionStatus::Ready, "new"}) == 77);
+    CHECK(s.save == 1 && s.commit == 0);
+    CHECK(s.response_status == 500 && !s.response_ok && s.response_reason == "save failed");
 }
 
 // ── HA MQTT-discovery binary value_template (logic/ha_templates.hpp) — the phantom-OFF fix ─────
@@ -2117,9 +2995,10 @@ static void test_reset_reason() {
     CHECK(std::string(tk::reset_reason_slug(9999)) == "unknown");
 
     // The fault set drives BOTH the crash report and the safe-mode counter, so its boundaries are
-    // the load-bearing part. SW is NOT a fault: every /set_* save, every OTA and the heap
-    // watchdog's own restart report it, and counting those would latch safe mode on a device whose
-    // user merely changed the broker four times.
+    // the load-bearing part. SW is NOT a fault: every successfully persisted rebooting
+    // configuration/portal save, every OTA and the heap watchdog's own restart report it, and
+    // counting those would latch safe mode on a device whose user merely changed the broker four
+    // times.
     CHECK(tk::reset_is_fault((int)tk::ResetCode::Panic));
     CHECK(tk::reset_is_fault((int)tk::ResetCode::IntWdt));
     CHECK(tk::reset_is_fault((int)tk::ResetCode::TaskWdt));
@@ -2239,6 +3118,19 @@ static void test_bootlog() {
 
 // ─── Boot-loop safe mode ──────────────────────────────────────────────────────
 static void test_boot_guard() {
+    unsigned parsed = 999u;
+    CHECK(tk::boot_fail_parse("0", parsed) && parsed == 0);
+    CHECK(tk::boot_fail_parse("1", parsed) && parsed == 1);
+    CHECK(tk::boot_fail_parse("100", parsed) && parsed == tk::kBootFailMax);
+    static constexpr const char* invalid_values[] = {
+        nullptr, "", "00", "01", "+1", "-1", "junk", "1x", "1.0", "101",
+        "42949672960",
+    };
+    for (const char* invalid : invalid_values) {
+        parsed = 77u;
+        CHECK(!tk::boot_fail_parse(invalid, parsed));
+    }
+
     // A clean boot RESETS the count. Without that, four crashes spread over a year would latch
     // safe mode on a device that has been healthy the whole time.
     CHECK(tk::boot_fail_next(3, false) == 0);
@@ -2249,9 +3141,9 @@ static void test_boot_guard() {
 
     // Saturating: the counter must never wrap around into "healthy".
     CHECK(tk::boot_fail_next(tk::kBootFailMax, true) == tk::kBootFailMax);
-    // A garbled NVS read resolves DOWNWARD. Under-counting only delays safe mode; over-counting
-    // would cripple a device that never crashed.
-    CHECK(tk::boot_fail_next(999999u, true) <= tk::kBootFailMax);
+    // Defensive direct callers fail toward the latch even though production parses first.
+    CHECK(tk::boot_fail_next(tk::kBootFailMax + 1u, true) == tk::kBootFailMax);
+    CHECK(tk::boot_fail_next(999999u, true) == tk::kBootFailMax);
 
     CHECK(!tk::boot_safe_mode(0));
     CHECK(!tk::boot_safe_mode(tk::kBootFailThreshold - 1));
@@ -2262,6 +3154,97 @@ static void test_boot_guard() {
     CHECK(!tk::boot_healthy_elapsed(0));
     CHECK(!tk::boot_healthy_elapsed(tk::kBootHealthyS - 1));
     CHECK(tk::boot_healthy_elapsed(tk::kBootHealthyS));
+}
+
+// ─── Exact HTTP method/path routing ──────────────────────────────────────────
+static void test_http_route() {
+    using tk::HttpRoute;
+    using tk::HttpVerb;
+
+    static_assert(tk::kFixedHttpRoutes.size() == 21,
+                  "extend the complete fixed-route matrix when a route is added");
+    for (const tk::FixedHttpRoute& fixed : tk::kFixedHttpRoutes) {
+        CHECK(tk::classify_http_route(fixed.verb, fixed.path) == fixed.route);
+
+        const HttpVerb opposite = fixed.verb == HttpVerb::Get ? HttpVerb::Post : HttpVerb::Get;
+        HttpRoute expected = HttpRoute::NotFound;
+        for (const tk::FixedHttpRoute& candidate : tk::kFixedHttpRoutes) {
+            if (candidate.verb == opposite && candidate.path == fixed.path) {
+                expected = candidate.route;  // /mcp intentionally has one route per verb.
+                break;
+            }
+        }
+        CHECK(tk::classify_http_route(opposite, fixed.path) == expected);
+    }
+
+    static constexpr std::string_view vin = "5YJ3E1EA7KF000316";
+    const std::string base = std::string(tk::kVehicleRoutePrefix) + std::string(vin);
+    CHECK(tk::classify_http_route(HttpVerb::Get, base + "/vehicle_data") ==
+          HttpRoute::VehicleData);
+    CHECK(tk::classify_http_route(HttpVerb::Get, base + "/body_controller_state") ==
+          HttpRoute::BodyController);
+    CHECK(tk::classify_http_route(HttpVerb::Post, base + "/command/charge_start") ==
+          HttpRoute::Command);
+
+    CHECK(tk::classify_http_route(HttpVerb::Post, base + "/vehicle_data") ==
+          HttpRoute::NotFound);
+    CHECK(tk::classify_http_route(HttpVerb::Post, base + "/body_controller_state") ==
+          HttpRoute::NotFound);
+    CHECK(tk::classify_http_route(HttpVerb::Get, base + "/command/charge_start") ==
+          HttpRoute::NotFound);
+    CHECK(tk::classify_http_route(HttpVerb::Get, "/api/1/vehicles//vehicle_data") ==
+          HttpRoute::NotFound);
+    CHECK(tk::classify_http_route(HttpVerb::Post, base + "/command/") ==
+          HttpRoute::NotFound);
+    CHECK(tk::classify_http_route(HttpVerb::Get,
+                                  "/api/1/vehicle/5YJ3E1EA7KF000316/vehicle_data") ==
+          HttpRoute::NotFound);
+    CHECK(tk::classify_http_route(HttpVerb::Get, base + "/vehicle_data/extra") ==
+          HttpRoute::NotFound);
+    CHECK(tk::classify_http_route(HttpVerb::Post,
+                                  base + "/command/charge_start/extra") ==
+          HttpRoute::NotFound);
+    CHECK(tk::classify_http_route(HttpVerb::Get, base + "/not_vehicle_data") ==
+          HttpRoute::NotFound);
+    CHECK(tk::classify_http_route(HttpVerb::Get, base + "/vehicle_data?cached=1") ==
+          HttpRoute::NotFound);
+    CHECK(tk::classify_http_route(HttpVerb::Get, "/prefix/status") ==
+          HttpRoute::NotFound);
+    CHECK(tk::classify_http_route(HttpVerb::Get, "/status?next=/ota/status") ==
+          HttpRoute::NotFound);
+    CHECK(tk::http_path_only("/status?next=/ota/status") == "/status");
+    CHECK(tk::classify_http_route(
+              HttpVerb::Get, tk::http_path_only("/status?next=/ota/status")) ==
+          HttpRoute::Status);
+    CHECK(tk::http_path_only("/unknown?next=/status") == "/unknown");
+    CHECK(tk::classify_http_route(
+              HttpVerb::Get, tk::http_path_only("/unknown?next=/status")) ==
+          HttpRoute::NotFound);
+    CHECK(tk::classify_http_route(HttpVerb::Get, "/ota/status") == HttpRoute::OtaStatus);
+    CHECK(tk::classify_http_route(HttpVerb::Get, "/status") == HttpRoute::Status);
+    CHECK(tk::classify_http_route(HttpVerb::Other, "/status") == HttpRoute::NotFound);
+    CHECK(tk::classify_http_route(HttpVerb::Other, base + "/vehicle_data") ==
+          HttpRoute::NotFound);
+    CHECK(tk::classify_http_route(HttpVerb::Get, "/unknown") == HttpRoute::NotFound);
+
+    // Exact fail-closed admission map. The eight vehicle-touching wildcard routes must return 503
+    // during Booting, SafeMode and Fatal; recovery/status/config/OTA routes stay available.
+    constexpr std::array<HttpRoute, 8> gated{{
+        HttpRoute::Command, HttpRoute::VehicleData, HttpRoute::BodyController,
+        HttpRoute::GenKeys, HttpRoute::SendKey, HttpRoute::SetVin,
+        HttpRoute::Scan, HttpRoute::McpPost,
+    }};
+    for (HttpRoute route : gated) CHECK(tk::http_route_requires_vehicle_runtime(route));
+
+    constexpr std::array<HttpRoute, 15> recovery{{
+        HttpRoute::NotFound, HttpRoute::OtaCheck, HttpRoute::OtaUpdate,
+        HttpRoute::OtaStatus, HttpRoute::SetTime, HttpRoute::SetMqtt,
+        HttpRoute::SetSyslog, HttpRoute::SetWifi, HttpRoute::Coredump,
+        HttpRoute::CrashDismiss, HttpRoute::Heap, HttpRoute::McpGet,
+        HttpRoute::Version, HttpRoute::Status, HttpRoute::Diag,
+    }};
+    for (HttpRoute route : recovery) CHECK(!tk::http_route_requires_vehicle_runtime(route));
+    CHECK(!tk::http_route_requires_vehicle_runtime(HttpRoute::Index));
 }
 
 // ─── Heap trend ring ──────────────────────────────────────────────────────────
@@ -2403,27 +3386,35 @@ static void test_health_gate() {
 
     // Inside the base window nothing commits, however healthy it looks. The window is what catches
     // the image that boots, works, and then dies under load.
-    CHECK(tk::health_gate_decide(0,      base, cap, true, true)  == V::Wait);
-    CHECK(tk::health_gate_decide(89,     base, cap, true, true)  == V::Wait);
-    CHECK(tk::health_gate_decide(base,   base, cap, true, true)  == V::Commit);
+    CHECK(tk::health_gate_decide(0,      base, cap, true, true, true)  == V::Wait);
+    CHECK(tk::health_gate_decide(89,     base, cap, true, true, true)  == V::Wait);
+    CHECK(tk::health_gate_decide(base,   base, cap, true, true, true)  == V::Commit);
 
     // THE REGRESSION THIS EXISTS FOR: an image that boots perfectly and never gets a link. The old
     // gate was a 90-second sleep, so this case committed — and it is precisely the image no OTA can
     // fix afterwards, because the fix would have to arrive over the link it broke.
-    CHECK(tk::health_gate_decide(base,   base, cap, true, false) == V::Wait);
-    CHECK(tk::health_gate_decide(cap - 1,base, cap, true, false) == V::Wait);
-    CHECK(tk::health_gate_decide(cap,    base, cap, true, false) == V::GiveUp);
+    CHECK(tk::health_gate_decide(base,   base, cap, true, false, true) == V::Wait);
+    CHECK(tk::health_gate_decide(cap - 1,base, cap, true, false, true) == V::Wait);
+    CHECK(tk::health_gate_decide(cap,    base, cap, true, false, true) == V::GiveUp);
 
     // A device with no route is legitimately offline (setup mode) — that must read as healthy, not
     // as a broken image, or an OTA installed just before the credentials were cleared would be
     // thrown away.
-    CHECK(tk::health_gate_decide(base,   base, cap, false, false) == V::Commit);
-    CHECK(tk::health_gate_decide(base-1, base, cap, false, false) == V::Wait);
+    CHECK(tk::health_gate_decide(base,   base, cap, false, false, true) == V::Commit);
+    CHECK(tk::health_gate_decide(base-1, base, cap, false, false, true) == V::Wait);
 
     // Coming online exactly at the cap still commits: Commit is evaluated before GiveUp, so one
     // sample of timing cannot cost a good build.
-    CHECK(tk::health_gate_decide(cap,    base, cap, true, true)  == V::Commit);
-    CHECK(tk::health_gate_decide(cap + 60, base, cap, true, true) == V::Commit);
+    CHECK(tk::health_gate_decide(cap,    base, cap, true, true, true)  == V::Commit);
+    CHECK(tk::health_gate_decide(cap + 60, base, cap, true, true, true) == V::Commit);
+
+    // A working LAN is not health proof when the largest internal block is already below the
+    // watchdog's critical threshold. This is the rollback regression: the old 90-second commit
+    // preceded the deliberate heap restart by roughly 210 seconds and made that restart permanent.
+    CHECK(tk::health_gate_decide(base, base, cap, true, true, false) == V::Wait);
+    CHECK(tk::health_gate_decide(cap - 1, base, cap, true, true, false) == V::Wait);
+    CHECK(tk::health_gate_decide(cap, base, cap, true, true, false) == V::GiveUp);
+    CHECK(tk::health_gate_decide(base, base, cap, false, false, false) == V::Wait);
 
     // The shipped constants leave a real window between "earliest possible commit" and "give up".
     CHECK(tk::kHealthGateCapS > tk::kHealthGateBaseS);
@@ -2443,12 +3434,56 @@ static void test_health_gate() {
         CHECK(tk::identity_mutation_may_start(O::Stable, G::Idle, entry));
         CHECK(!tk::identity_mutation_may_start(O::Stable, G::Ota, entry));
         CHECK(!tk::identity_mutation_may_start(O::Stable, G::IdentityMutation, entry));
+        CHECK(!tk::identity_mutation_may_start(O::Stable, G::FaultRestart, entry));
+        CHECK(!tk::identity_mutation_may_start(O::Stable, G::HealthCommit, entry));
         CHECK(!tk::identity_mutation_may_start(O::PendingVerify, G::Idle, entry));
         CHECK(!tk::identity_mutation_may_start(O::Unknown, G::Idle, entry));
     }
     CHECK(tk::ota_operation_may_start(G::Idle));
     CHECK(!tk::ota_operation_may_start(G::Ota));
     CHECK(!tk::ota_operation_may_start(G::IdentityMutation));
+    CHECK(!tk::ota_operation_may_start(G::FaultRestart));
+    CHECK(!tk::ota_operation_may_start(G::HealthCommit));
+
+    // Exercise the exact atomic CAS seam used by the firmware, not only its admission predicates.
+    // Every owner blocks both peers; an owner-mismatched cleanup cannot clear the winner.
+    tk::OtaIdentityOperationGate operation;
+    CHECK(operation.state() == G::Idle);
+    CHECK(!operation.try_begin(G::Idle));
+
+    CHECK(operation.try_begin(G::Ota));
+    CHECK(operation.state() == G::Ota);
+    CHECK(!operation.try_begin(G::IdentityMutation));
+    CHECK(!operation.try_begin(G::FaultRestart));
+    CHECK(!operation.try_begin(G::HealthCommit));
+    CHECK(!operation.finish(G::IdentityMutation));
+    CHECK(operation.state() == G::Ota);
+    CHECK(operation.finish(G::Ota));
+
+    CHECK(operation.try_begin(G::IdentityMutation));
+    CHECK(!operation.try_begin(G::Ota));
+    CHECK(!operation.try_begin(G::FaultRestart));
+    CHECK(!operation.try_begin(G::HealthCommit));
+    CHECK(operation.finish(G::IdentityMutation));
+
+    // Persistence failure: FaultRestart releases its own owner, so a postponed OTA or identity
+    // operation can enter on the next attempt rather than remaining wedged for the boot.
+    CHECK(operation.try_begin(G::FaultRestart));
+    CHECK(!operation.try_begin(G::Ota));
+    CHECK(!operation.try_begin(G::IdentityMutation));
+    CHECK(!operation.try_begin(G::HealthCommit));
+    CHECK(operation.finish(G::FaultRestart));
+    CHECK(operation.try_begin(G::HealthCommit));
+    CHECK(!operation.try_begin(G::Ota));
+    CHECK(!operation.try_begin(G::IdentityMutation));
+    CHECK(!operation.try_begin(G::FaultRestart));
+    CHECK(operation.finish(G::HealthCommit));
+    CHECK(operation.try_begin(G::Ota));
+    CHECK(operation.finish(G::Ota));
+    CHECK(operation.try_begin(G::IdentityMutation));
+    CHECK(operation.finish(G::IdentityMutation));
+    CHECK(!operation.finish(G::FaultRestart));
+    CHECK(operation.state() == G::Idle);
 
     // Only a successful, explicit user configuration commit is authority to spend OTA rollback.
     // Automatic recovery/fault reboots must leave PENDING_VERIFY armed for the bootloader.
@@ -2588,6 +3623,20 @@ static void test_ble_chunk() {
     CHECK(tk::ble_write_payload_for_mtu(517) == 244);
 }
 
+// ─── Deferred NimBLE host events (logic/ble_deferred_event.hpp) ──────────────
+static void test_ble_deferred_event() {
+    using K = tk::BleDeferredEventKind;
+    CHECK(tk::ble_deferred_event_may_apply(K::LinkUp, 8, 8));
+    CHECK(tk::ble_deferred_event_may_apply(K::Rx, 8, 8));
+    CHECK(!tk::ble_deferred_event_may_apply(K::LinkUp, 7, 7));  // unstable generation
+    CHECK(!tk::ble_deferred_event_may_apply(K::Rx, 8, 10));    // stale old-link bytes
+    CHECK(!tk::ble_deferred_event_may_apply(K::LinkUp, 10, 8));
+    // A queued disconnect is an ordering barrier even if the host has already advanced to the
+    // following link. The FIFO applies Down first, then the current LinkUp.
+    CHECK(tk::ble_deferred_event_may_apply(K::LinkDown, 8, 10));
+    CHECK(tk::ble_deferred_event_may_apply(K::LinkDown, 9, 10));
+}
+
 // ─── WiFi credential rollback ─────────────────────────────────────────────────
 static void test_wifi_rollback() {
     // Only the AP's own refusal is evidence about the CREDENTIALS. Everything else — a router
@@ -2722,6 +3771,105 @@ static void test_status_eth() {
 static void test_redact() {
     CHECK(tk::redact_or("MySSID", false) == "MySSID");
     CHECK(tk::redact_or("MySSID", true)  == tk::kRedacted);
+
+    // A logical line must never be split into independently redacted fragments: the marker can
+    // end the first fragment while a markerless secret tail starts the second. Exact-capacity
+    // lines still emit normally; capacity+1 discards through LF and emits one fail-closed token.
+    using LA = tk::DiagLineAction;
+    tk::DiagLineFrame framing;
+    static_assert(noexcept(tk::diag_line_step(framing, 'x', 4)));
+    for (size_t i = 0; i < 4; ++i) {
+        const tk::DiagLineStep step = tk::diag_line_step(framing, "abcd"[i], 4);
+        CHECK(step.action == LA::Append);
+        CHECK(step.size == i);
+    }
+    tk::DiagLineStep step = tk::diag_line_step(framing, '\n', 4);
+    CHECK(step.action == LA::EmitLine && step.size == 4);
+    CHECK(!framing.overlong && framing.size == 0);
+
+    for (char byte : std::string("abcdeSECRET")) {
+        step = tk::diag_line_step(framing, byte, 4);
+    }
+    CHECK(step.action == LA::IgnoreOverlong);
+    CHECK(framing.overlong && framing.size == 0);
+    step = tk::diag_line_step(framing, '\n', 4);
+    CHECK(step.action == LA::EmitOverlong);
+    CHECK(!framing.overlong && framing.size == 0);
+    step = tk::diag_line_step(framing, 'x', 4);
+    CHECK(step.action == LA::Append && step.size == 0);
+    step = tk::diag_line_step(framing, '\n', 4);
+    CHECK(step.action == LA::EmitLine && step.size == 1);
+
+    tk::DiagLineFrame unterminated;
+    for (char byte : std::string("marker=SECRET")) {
+        tk::diag_line_step(unterminated, byte, 4);
+    }
+    CHECK(unterminated.overlong);  // route emits a static token at end-of-snapshot
+
+    // The shipped /diag route uses this fixed-buffer seam after streaming starts. Pin both its
+    // noexcept contract and its worst-case capacity formula independently of the allocating
+    // convenience wrapper used by the assertions below.
+    static_assert(noexcept(tk::redact_diag_line_fixed({}, nullptr, 0)));
+    constexpr std::string_view fixed_input =
+        "I (1) main: VIN: 5YJ3E1EA7KF000316  BLE MAC: aa:bb:cc:dd:ee:ff  "
+        "Board MAC: 02:00:00:32:55:20\n";
+    char fixed_output[tk::diag_redacted_capacity(fixed_input.size())]{};
+    const tk::FixedDiagRedaction fixed = tk::redact_diag_line_fixed(
+        fixed_input, fixed_output, sizeof(fixed_output));
+    CHECK(fixed.safe);
+    const std::string fixed_text(fixed_output, fixed.size);
+    CHECK(fixed_text.find("5YJ3E1EA7KF000316") == std::string::npos);
+    CHECK(fixed_text.find("aa:bb:cc:dd:ee:ff") == std::string::npos);
+    CHECK(fixed_text.find("02:00:00:32:55:20") != std::string::npos);
+    CHECK(fixed_text.back() == '\n');
+
+    // One rule may occur more than once in the same physical log line (for example a helper that
+    // prints two URIs). Redacting only the first occurrence makes the table look complete while
+    // the second VIN is still exported. Keep the fixtures below the route's 255-byte line bound.
+    constexpr std::string_view repeated_marker =
+        "I http: /api/1/vehicles/5YJ3E1EA7KF000316/vehicle_data -> "
+        "/api/1/vehicles/7SAYGDEE9PF000111/command/charge_start\n";
+    static_assert(repeated_marker.size() <= 255);
+    char repeated_output[tk::diag_redacted_capacity(repeated_marker.size())]{};
+    const tk::FixedDiagRedaction repeated = tk::redact_diag_line_fixed(
+        repeated_marker, repeated_output, sizeof(repeated_output));
+    CHECK(repeated.safe);
+    const std::string repeated_text(repeated_output, repeated.size);
+    CHECK(repeated_text.find("5YJ3E1EA7KF000316") == std::string::npos);
+    CHECK(repeated_text.find("7SAYGDEE9PF000111") == std::string::npos);
+    CHECK(repeated_text.find("/vehicle_data") != std::string::npos);
+    CHECK(repeated_text.find("/command/charge_start") != std::string::npos);
+
+    // Different bounded rules can also coexist. Every matching value must be scrubbed even after
+    // an earlier replacement shifted the rest of the fixed buffer.
+    constexpr std::string_view different_markers =
+        "I main: VIN: 5YJ3E1EA7KF000316  BLE MAC: aa:bb:cc:dd:ee:ff  "
+        "Board MAC: 02:00:00:32:55:20; /api/1/vehicles/7SAYGDEE9PF000111/vehicle_data\n";
+    static_assert(different_markers.size() <= 255);
+    char different_output[tk::diag_redacted_capacity(different_markers.size())]{};
+    const tk::FixedDiagRedaction different = tk::redact_diag_line_fixed(
+        different_markers, different_output, sizeof(different_output));
+    CHECK(different.safe);
+    const std::string different_text(different_output, different.size);
+    CHECK(different_text.find("5YJ3E1EA7KF000316") == std::string::npos);
+    CHECK(different_text.find("aa:bb:cc:dd:ee:ff") == std::string::npos);
+    CHECK(different_text.find("7SAYGDEE9PF000111") == std::string::npos);
+    CHECK(different_text.find("02:00:00:32:55:20") != std::string::npos);
+
+    // Capacity pressure fails closed by replacing the entire line, never by returning a prefix
+    // containing the sensitive tail. If even the static token cannot fit, safe=false tells the
+    // route to emit its own static token instead.
+    char collapsed[tk::kRedactedLength]{};
+    const tk::FixedDiagRedaction small = tk::redact_diag_line_fixed(
+        "I (1) main: VIN: 5YJ3E1EA7KF000316", collapsed, sizeof(collapsed));
+    CHECK(small.safe);
+    CHECK(small.size == tk::kRedactedLength);
+    CHECK(std::memcmp(collapsed, tk::kRedacted, tk::kRedactedLength) == 0);
+    char impossible[tk::kRedactedLength - 1]{};
+    const tk::FixedDiagRedaction no_room = tk::redact_diag_line_fixed(
+        "I (1) main: VIN: 5YJ3E1EA7KF000316", impossible, sizeof(impossible));
+    CHECK(!no_room.safe);
+    CHECK(no_room.size == 0);
 
     // Car identifiers are scrubbed, but the replaceable board identity deliberately survives.
     const std::string boot = tk::redact_diag_line(
@@ -3013,6 +4161,15 @@ int main() {
     test_link_state();
     test_link_state_strings();
     test_target();
+    test_ota_contract();
+    test_task_start_gate();
+    test_runtime_admission();
+    test_ota_confirm_runtime_admission_matrix();
+    test_nimble_start_gate();
+    test_syslog_start_gate();
+    test_ble_host_health_ota_matrix();
+    test_ping_probe_generation();
+    test_heap_json_stream();
     test_mcp();
     test_status_model();
     test_display_helpers();
@@ -3025,16 +4182,20 @@ int main() {
     test_ble_phase();
     test_ble_row();
     test_http_body();
+    test_json_materialize();
+    test_config_request_gate();
     test_reset_reason();
     test_crashinfo();
     test_bootlog();
     test_boot_guard();
+    test_http_route();
     test_heap_history();
     test_heap_persist();
     test_health_gate();
     test_mqtt_uri();
     test_http_origin();
     test_ble_chunk();
+    test_ble_deferred_event();
     test_wifi_rollback();
     test_net_link();
     test_status_eth();

@@ -4,6 +4,7 @@
 // Part of the VehicleController implementation split — see vehicle_ctrl_internal.hpp.
 
 #include "vehicle_ctrl.hpp"
+#include "runtime_admission.hpp"
 #include "vehicle_ctrl_internal.hpp"
 #include "logic/units.hpp"
 #include "logic/active_window.hpp"
@@ -15,13 +16,39 @@
 #include <esp_heap_caps.h>
 #include <esp_system.h>
 #include <esp_task_wdt.h>
+#include <exception>
+#include <type_traits>
 #include <utility>
+#include <vector>
 
 // protobuf generated headers (from tesla-ble)
 #include <vcsec.pb.h>
 #include <car_server.pb.h>
 
 static const char* TAG = "vehicle_ctrl";
+
+namespace {
+
+// A task that exits through the C++ exception boundary must unregister itself before FreeRTOS
+// self-deletion. The destructor runs during that unwind; no external task ever owns this handle.
+class TaskWatchdogSubscription {
+public:
+    bool subscribe() noexcept {
+        active_ = esp_task_wdt_add(nullptr) == ESP_OK;
+        return active_;
+    }
+    bool active() const noexcept { return active_; }
+    ~TaskWatchdogSubscription() {
+        if (active_ && esp_task_wdt_delete(nullptr) != ESP_OK) {
+            ESP_LOGE(TAG, "vehicle loop could not unregister from the task watchdog");
+        }
+    }
+
+private:
+    bool active_{false};
+};
+
+}  // namespace
 
 namespace {
 // Translate a nanopb CarServer_ChargeState into our flat result struct. Each scalar is a
@@ -279,45 +306,275 @@ void VehicleController::install_state_callbacks_() {
     // Persistent charge-state callback: refreshes the cache on *every* ChargeState
     // (the background refresh in loop_task). Installed once, never cleared; HTTP
     // reads serve last_known_charge_ from this cache without blocking.
-    vehicle_->set_charge_state_callback([this](const CarServer_ChargeState& cs) {
-        tk::MutexGuard g(cache_mutex_);
-        parse_charge_state(cs, last_known_charge_);
-        uint32_t now = xTaskGetTickCount();
-        last_charge_ticks_.store(now);
-        charge_state_generation_.fetch_add(1);
-        charge_cache_stale_reported_.store(false);
-        note_contact_();
+    vehicle_->set_charge_state_callback([this](const CarServer_ChargeState& state) {
+        on_charge_state_(state);
     });
 
     // Read-only telemetry callbacks. Fed by the rotating background poll in loop_task_fn_
     // (one telemetry domain per cycle). Each refreshes its own cache for the web UI; none
     // affect pairing or evcc. Installed once, never cleared.
-    vehicle_->set_climate_state_callback([this](const CarServer_ClimateState& cs) {
-        tk::MutexGuard g(cache_mutex_);
-        parse_climate_state(cs, last_known_climate_);
-        note_contact_();
+    vehicle_->set_climate_state_callback([this](const CarServer_ClimateState& state) {
+        on_climate_state_(state);
     });
-    vehicle_->set_drive_state_callback([this](const CarServer_DriveState& ds) {
-        tk::MutexGuard g(cache_mutex_);
-        parse_drive_state(ds, last_known_drive_);
-        note_contact_();
+    vehicle_->set_drive_state_callback([this](const CarServer_DriveState& state) {
+        on_drive_state_(state);
     });
-    vehicle_->set_tire_pressure_state_callback([this](const CarServer_TirePressureState& t) {
-        tk::MutexGuard g(cache_mutex_);
-        parse_tire_pressure(t, last_known_tires_);
-        note_contact_();
+    vehicle_->set_tire_pressure_state_callback([this](const CarServer_TirePressureState& state) {
+        on_tire_pressure_state_(state);
     });
-    vehicle_->set_closures_state_callback([this](const CarServer_ClosuresState& c) {
-        tk::MutexGuard g(cache_mutex_);
-        parse_closures_state(c, last_known_closures_);
-        note_contact_();
+    vehicle_->set_closures_state_callback([this](const CarServer_ClosuresState& state) {
+        on_closures_state_(state);
     });
+}
+
+static_assert(std::is_trivially_copyable_v<CarServer_ChargeState>);
+static_assert(std::is_trivially_copyable_v<CarServer_ClimateState>);
+static_assert(std::is_trivially_copyable_v<CarServer_DriveState>);
+static_assert(std::is_trivially_copyable_v<CarServer_TirePressureState>);
+static_assert(std::is_trivially_copyable_v<CarServer_ClosuresState>);
+
+void VehicleController::on_charge_state_(const CarServer_ChargeState& state) noexcept {
+    portENTER_CRITICAL(&telemetry_pending_mux_);
+    telemetry_pending_charge_ = state;
+    telemetry_pending_mask_ |= PendingCharge;
+    uint32_t generation = charging_amps_feedback_.generation + 1;
+    charging_amps_feedback_ = {};
+    charging_amps_feedback_.generation = generation ? generation : 1;
+    if (state.which_optional_charging_amps == CarServer_ChargeState_charging_amps_tag) {
+        charging_amps_feedback_.has_charging_amps = true;
+        charging_amps_feedback_.charging_amps = state.optional_charging_amps.charging_amps;
+    }
+    if (state.which_optional_charge_current_request ==
+        CarServer_ChargeState_charge_current_request_tag) {
+        charging_amps_feedback_.has_current_request = true;
+        charging_amps_feedback_.current_request =
+            state.optional_charge_current_request.charge_current_request;
+    }
+    if (state.which_optional_charger_actual_current ==
+        CarServer_ChargeState_charger_actual_current_tag) {
+        charging_amps_feedback_.has_actual_current = true;
+        charging_amps_feedback_.actual_current =
+            state.optional_charger_actual_current.charger_actual_current;
+    }
+    portEXIT_CRITICAL(&telemetry_pending_mux_);
+}
+
+VehicleController::ChargingAmpsFeedback VehicleController::charging_amps_feedback_snapshot_() noexcept {
+    portENTER_CRITICAL(&telemetry_pending_mux_);
+    const ChargingAmpsFeedback snapshot = charging_amps_feedback_;
+    portEXIT_CRITICAL(&telemetry_pending_mux_);
+    return snapshot;
+}
+
+void VehicleController::on_climate_state_(const CarServer_ClimateState& state) noexcept {
+    portENTER_CRITICAL(&telemetry_pending_mux_);
+    telemetry_pending_climate_ = state;
+    telemetry_pending_mask_ |= PendingClimate;
+    portEXIT_CRITICAL(&telemetry_pending_mux_);
+}
+
+void VehicleController::on_drive_state_(const CarServer_DriveState& state) noexcept {
+    portENTER_CRITICAL(&telemetry_pending_mux_);
+    telemetry_pending_drive_ = state;
+    telemetry_pending_mask_ |= PendingDrive;
+    portEXIT_CRITICAL(&telemetry_pending_mux_);
+}
+
+void VehicleController::on_tire_pressure_state_(
+    const CarServer_TirePressureState& state) noexcept {
+    portENTER_CRITICAL(&telemetry_pending_mux_);
+    telemetry_pending_tires_ = state;
+    telemetry_pending_mask_ |= PendingTires;
+    portEXIT_CRITICAL(&telemetry_pending_mux_);
+}
+
+void VehicleController::on_closures_state_(const CarServer_ClosuresState& state) noexcept {
+    portENTER_CRITICAL(&telemetry_pending_mux_);
+    telemetry_pending_closures_ = state;
+    telemetry_pending_mask_ |= PendingClosures;
+    portEXIT_CRITICAL(&telemetry_pending_mux_);
+}
+
+void VehicleController::process_pending_telemetry_() {
+    CarServer_ChargeState charge{};
+    CarServer_ClimateState climate{};
+    CarServer_DriveState drive{};
+    CarServer_TirePressureState tires{};
+    CarServer_ClosuresState closures{};
+
+    portENTER_CRITICAL(&telemetry_pending_mux_);
+    const uint32_t pending = telemetry_pending_mask_;
+    telemetry_pending_mask_ = 0;
+    if (pending & PendingCharge) charge = telemetry_pending_charge_;
+    if (pending & PendingClimate) climate = telemetry_pending_climate_;
+    if (pending & PendingDrive) drive = telemetry_pending_drive_;
+    if (pending & PendingTires) tires = telemetry_pending_tires_;
+    if (pending & PendingClosures) closures = telemetry_pending_closures_;
+    portEXIT_CRITICAL(&telemetry_pending_mux_);
+
+    // Parse outside both vehicle_mutex_ and cache_mutex_. Only bounded result publication is
+    // serialized; temporary strings are created and destroyed in normal task context.
+    if (pending & PendingCharge) {
+        ChargeStateResult parsed{};
+        parse_charge_state(charge, parsed);
+        {
+            tk::MutexGuard g(cache_mutex_);
+            last_known_charge_ = std::move(parsed);
+        }
+        const uint32_t now = xTaskGetTickCount();
+        last_charge_ticks_.store(now);
+        charge_state_generation_.fetch_add(1);
+        charge_cache_stale_reported_.store(false);
+        note_contact_();
+    }
+    if (pending & PendingClimate) {
+        ClimateStateResult parsed{};
+        parse_climate_state(climate, parsed);
+        { tk::MutexGuard g(cache_mutex_); last_known_climate_ = std::move(parsed); }
+        note_contact_();
+    }
+    if (pending & PendingDrive) {
+        DriveStateResult parsed{};
+        parse_drive_state(drive, parsed);
+        { tk::MutexGuard g(cache_mutex_); last_known_drive_ = std::move(parsed); }
+        note_contact_();
+    }
+    if (pending & PendingTires) {
+        TirePressureResult parsed{};
+        parse_tire_pressure(tires, parsed);
+        { tk::MutexGuard g(cache_mutex_); last_known_tires_ = std::move(parsed); }
+        note_contact_();
+    }
+    if (pending & PendingClosures) {
+        ClosuresStateResult parsed{};
+        parse_closures_state(closures, parsed);
+        { tk::MutexGuard g(cache_mutex_); last_known_closures_ = std::move(parsed); }
+        note_contact_();
+    }
 }
 
 // ─── Background poll / sleep-gating loop ──────────────────────────────────────
 
+bool VehicleController::apply_ble_link_state_(bool connected) {
+    tk::SemGuard g(vehicle_mutex_);
+    if (!g) return false;
+    try {
+        vehicle_->set_connected(connected);
+        vcsec_sleep_state_.store(static_cast<int>(
+            connected ? vehicle_->sleep_state() : TeslaBLE::SleepState::UNKNOWN));
+        return true;
+    } catch (const std::exception& e) {
+        ESP_LOGE(TAG, "deferred set_connected(%d) threw (%s) — dropping link",
+                 static_cast<int>(connected), e.what());
+    } catch (...) {
+        ESP_LOGE(TAG, "deferred set_connected(%d) threw (unknown) — dropping link",
+                 static_cast<int>(connected));
+    }
+    vcsec_sleep_state_.store(static_cast<int>(TeslaBLE::SleepState::UNKNOWN));
+    return false;
+}
+
+void VehicleController::persist_discovered_mac_after_ready_() {
+    if (!persist_discovered_mac_.load() || !config_store_ || !ble_) return;
+    // Both the string materialization and NVS commit occur on vehicle_loop and outside every
+    // shared mutex. A failed persistence only costs one scan on the next boot.
+    const std::string addr = ble_->peer_addr_str();
+    bool expected = true;
+    if (addr.empty() ||
+        !persist_discovered_mac_.compare_exchange_strong(expected, false)) return;
+    if (!config_store_->save_str(tk::nvs_contract::kBleMac, addr)) {
+        ESP_LOGW(TAG, "could not persist Tesla MAC %s — next boot rescans", addr.c_str());
+    } else {
+        ESP_LOGI(TAG, "Tesla MAC saved: %s", addr.c_str());
+    }
+}
+
+void VehicleController::process_ble_host_events_() {
+    if (!ble_event_queue_ || !ble_ || !vehicle_) return;
+
+    if (ble_event_overflow_.exchange(false, std::memory_order_acq_rel)) {
+        BleHostEvent discarded{};
+        while (xQueueReceive(ble_event_queue_, &discarded, 0) == pdTRUE) {}
+        // A lost byte or transition makes tesla-ble's framing/state unknowable. Reset the library
+        // first, then terminate the physical link. No stale LinkUp may become ready afterward.
+        (void)apply_ble_link_state_(false);
+        ble_->disconnect();
+        ESP_LOGW(TAG, "BLE deferred-event queue overflow — link reset fail-closed");
+        return;
+    }
+
+    BleHostEvent event{};
+    while (xQueueReceive(ble_event_queue_, &event, 0) == pdTRUE) {
+        const uint32_t current_generation = ble_->lifecycle_generation();
+        if (!tk::ble_deferred_event_may_apply(event.kind, event.generation,
+                                               current_generation)) {
+            continue;
+        }
+
+        if (event.kind == tk::BleDeferredEventKind::LinkDown) {
+            if (!apply_ble_link_state_(false)) ble_fault_.store(true);
+            continue;
+        }
+
+        if (event.kind == tk::BleDeferredEventKind::LinkUp) {
+            const bool applied = apply_ble_link_state_(true);
+            if (!applied || !ble_->complete_ready(event.conn_handle, event.generation)) {
+                // set_connected(true) may have succeeded just before cancellation won the ready
+                // CAS. Explicitly unwind the library state rather than waiting for a later event.
+                if (applied) (void)apply_ble_link_state_(false);
+                ble_->disconnect();
+                continue;
+            }
+            persist_discovered_mac_after_ready_();
+            ESP_LOGD(TAG, "BLE command-ready after deferred Vehicle ack (generation %lu)",
+                     static_cast<unsigned long>(event.generation));
+            continue;
+        }
+
+        // Materialize the tesla-ble API vector before taking vehicle_mutex_. If this allocation
+        // fails, no shared lock is held and the only safe recovery is a clean reconnect.
+        std::vector<uint8_t> data;
+        try {
+            data.assign(event.data.begin(), event.data.begin() + event.size);
+        } catch (const std::exception& e) {
+            ESP_LOGE(TAG, "deferred BLE RX allocation failed (%s) — dropping link", e.what());
+            ble_fault_.store(true);
+            break;
+        } catch (...) {
+            ESP_LOGE(TAG, "deferred BLE RX allocation failed (unknown) — dropping link");
+            ble_fault_.store(true);
+            break;
+        }
+        {
+            tk::SemGuard g(vehicle_mutex_);
+            if (!g) {
+                ble_fault_.store(true);
+                break;
+            }
+            try {
+                vehicle_->on_rx_data(data);
+                vcsec_sleep_state_.store(static_cast<int>(vehicle_->sleep_state()));
+            } catch (const std::exception& e) {
+                ESP_LOGE(TAG, "deferred on_rx_data threw (%s) — dropping link", e.what());
+                ble_fault_.store(true);
+            } catch (...) {
+                ESP_LOGE(TAG, "deferred on_rx_data threw (unknown) — dropping link");
+                ble_fault_.store(true);
+            }
+        }
+        if (ble_fault_.load()) break;
+    }
+}
+
 void VehicleController::loop_task_fn_(void* arg) {
+  try {
     auto* self = static_cast<VehicleController*>(arg);
+    if (!self || !self->await_task_start_()) {
+        // Cancellation is acknowledged inside await_task_start_(). No watchdog, mutex, BLE object
+        // or vehicle state has been touched, so a second-create OOM unwinds without cross-core kill.
+        vTaskDelete(nullptr);
+        return;
+    }
 
     // Subscribe to the Task Watchdog. The heap watchdog above already covers the wedge caused by
     // memory exhaustion; this covers the one it structurally cannot see — a task blocked forever on
@@ -331,7 +588,8 @@ void VehicleController::loop_task_fn_(void* arg) {
     // and sufficient — a slow-but-progressing command never trips it, a genuinely stuck one does.
     // A failed subscription is logged and the loop runs on unwatched: losing the watchdog is worse
     // than not having it, but far better than refusing to poll the car.
-    if (esp_task_wdt_add(nullptr) != ESP_OK) {
+    TaskWatchdogSubscription watchdog;
+    if (!watchdog.subscribe()) {
         ESP_LOGW(TAG, "vehicle_loop could not subscribe to the task watchdog — a wedged poll will "
                       "no longer reboot the device automatically");
     }
@@ -345,7 +603,7 @@ void VehicleController::loop_task_fn_(void* arg) {
       // Feed the task watchdog FIRST and UNCONDITIONALLY, before anything that can block or throw.
       // Gating it on the work below would make a long-but-legitimate command look like a hang; put
       // after the work, a throw would skip it and turn an already-contained OOM into a reboot.
-      esp_task_wdt_reset();
+      if (watchdog.active()) esp_task_wdt_reset();
       // Retrospective: FreeRTOS retains the lowest free stack ever observed for this task, so a
       // top-of-loop sample records the deepest path of the previous cycle and no branch can skip it.
       tk::stack_watch_sample(tk::StackWatch::Vehicle);
@@ -356,6 +614,15 @@ void VehicleController::loop_task_fn_(void* arg) {
       // and a reboot loop also re-opens the car-poll window (defeating sleep). Contain it, then
       // fall through to the tail delay so we never spin a tight error loop.
       try {
+        // NimBLE callbacks only enqueue fixed POD records. Drain them here, in a normal task with
+        // the task-level exception boundary, before pumping tesla-ble's state machine.
+        self->process_ble_host_events_();
+        if (self->ble_fault_.exchange(false)) {
+            ESP_LOGW(TAG, "BLE deferred processing fault — dropping link to reset library state");
+            if (self->ble_connected()) self->ble_->disconnect();
+            vTaskDelay(pdMS_TO_TICKS(50));
+            continue;
+        }
         {
             // RAII give — vehicle_->loop() can throw on corrupt RX the same way on_rx_data does;
             // the guard releases vehicle_mutex_ on unwind so it can't wedge every later command.
@@ -382,7 +649,12 @@ void VehicleController::loop_task_fn_(void* arg) {
             }
         }
 
-        // A parse fault flagged from loop() or the BLE rx callback: drop the link once,
+        // tesla-ble state callbacks above only copied nanopb POD into the latest-value mailbox.
+        // The Vehicle lock is now released, so parsers may materialize strings and publish caches
+        // without creating a nested vehicle_mutex_ -> cache_mutex_ / heap dependency.
+        self->process_pending_telemetry_();
+
+        // A parse fault flagged from loop(): drop the link once,
         // outside the vehicle mutex. Disconnect drives set_connected(false), which clears the
         // library's rx_buffer and resets sessions so the next connect re-syncs cleanly —
         // turning a would-be abort()/reboot into a brief reconnect.
@@ -480,6 +752,37 @@ void VehicleController::loop_task_fn_(void* arg) {
                                  held_s, (unsigned) prior);
                     }
                 } else {
+                    tk::HeapReason why = tk::heap_reason_format((uint8_t)(prior + 1));
+                    // Join the same CAS gate used by OTA and identity journals BEFORE making the
+                    // restart durable. If either operation is in flight, postpone this watchdog
+                    // sample without writing reboot_why; the next sample retries after the owner
+                    // exits. Once the breadcrumb is durable we intentionally hold FaultRestart
+                    // until esp_restart(), closing the inverse "persisted, then OTA started" race.
+                    if (!ota_fault_restart_begin()) {
+                        static bool said_gate = false;
+                        if (!said_gate) {
+                            said_gate = true;
+                            ESP_LOGW(TAG, "HEAP EXHAUSTED for %u s but OTA/identity work is in "
+                                          "flight — postponing deliberate restart",
+                                     held_s);
+                        }
+                        continue;
+                    }
+                    if (!self->persist_reboot_reason_(why.text)) {
+                        // Persistence authorizes the reboot: without the next counter a reboot
+                        // would forget this attempt and could cycle BLE/radios forever. Stay up
+                        // degraded and keep retrying the durable write on later watchdog samples.
+                        // Release FaultRestart so the failed attempt does not wedge OTA/identity.
+                        ota_fault_restart_cancel();
+                        static bool said_persist = false;
+                        if (!said_persist) {
+                            said_persist = true;
+                            ESP_LOGE(TAG, "HEAP EXHAUSTED for %u s but reboot_why could not be "
+                                          "persisted — NOT restarting, staying up degraded",
+                                     held_s);
+                        }
+                        continue;
+                    }
                     // The one line that has to survive the reboot and explain it on its own —
                     // state, threshold, how long, which restart, and where the reasoning lives.
                     // Keep every line here well under ~230 chars: diag_log.cpp's capture hook
@@ -493,8 +796,6 @@ void VehicleController::loop_task_fn_(void* arg) {
                              (unsigned) heap_caps_get_free_size(MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL),
                              (unsigned) (prior + 1), (unsigned) tk::kHeapMaxConsecutiveRestarts,
                              (unsigned) (prior + 1));
-                    tk::HeapReason why = tk::heap_reason_format((uint8_t)(prior + 1));
-                    self->persist_reboot_reason_(why.text);
                     // Heap exhaustion is an automatic fault reboot, not a user health signal.
                     // Leaving PENDING_VERIFY armed is exactly what lets the bootloader escape a
                     // new image whose heap regression triggers this watchdog.
@@ -508,7 +809,7 @@ void VehicleController::loop_task_fn_(void* arg) {
                     // nothing against a 5 min hold, and nothing against the 60 s task-watchdog
                     // budget this task is now subscribed to either — but feed it first anyway, so a
                     // deliberate restart is never misreported as a task_wdt panic on the way out.
-                    esp_task_wdt_reset();
+                    if (watchdog.active()) esp_task_wdt_reset();
                     vTaskDelay(pdMS_TO_TICKS(300));
                     esp_restart();
                 }
@@ -644,6 +945,11 @@ void VehicleController::loop_task_fn_(void* arg) {
 
       vTaskDelay(pdMS_TO_TICKS(50));
     }
+  } catch (...) {
+      ESP_LOGE(TAG, "vehicle loop boundary threw outside an iteration — stopping task");
+      // TaskWatchdogSubscription has already unwound and removed this task from TWDT.
+      vTaskDelete(nullptr);
+  }
 }
 
 // ─── Data queries ─────────────────────────────────────────────────────────────
@@ -700,6 +1006,7 @@ bool VehicleController::get_charge_state(ChargeStateResult& out, int /*timeout_m
 bool VehicleController::get_vehicle_status(VehicleStatusResult& out, tk::ConnectOrigin origin,
                                            int timeout_ms) {
     out = {};
+    if (!tk::runtime_admission_vehicle_ready()) return false;
     if (timeout_ms <= 0) return false;
     const uint32_t deadline = deadline_in_(static_cast<uint32_t>(timeout_ms));
     tk::SemGuard cmd_guard(command_mutex_, ticks_until_(deadline));
@@ -734,7 +1041,9 @@ bool VehicleController::get_vehicle_status(VehicleStatusResult& out, tk::Connect
 
     struct StatusCompletion {
         SemaphoreHandle_t sem{xSemaphoreCreateBinary()};
-        VehicleStatusResult status{};
+        int32_t lock_state{0};
+        int32_t sleep_status{0};
+        int32_t user_presence{0};
         ~StatusCompletion() { if (sem) vSemaphoreDelete(sem); }
     };
     auto completion = std::make_shared<StatusCompletion>();
@@ -750,23 +1059,9 @@ bool VehicleController::get_vehicle_status(VehicleStatusResult& out, tk::Connect
 
     auto callback = [this, completion, generation](const VCSEC_VehicleStatus& vs) {
         if (command_generation_.load() != generation) return;
-        completion->status = {};
-        completion->status.valid = true;
-        switch (vs.vehicleLockState) {
-            case VCSEC_VehicleLockState_E_VEHICLELOCKSTATE_LOCKED:   completion->status.lock_state = "LOCKED";   break;
-            case VCSEC_VehicleLockState_E_VEHICLELOCKSTATE_UNLOCKED: completion->status.lock_state = "UNLOCKED"; break;
-            default:                                                 completion->status.lock_state = "UNKNOWN";  break;
-        }
-        switch (vs.vehicleSleepStatus) {
-            case VCSEC_VehicleSleepStatus_E_VEHICLE_SLEEP_STATUS_AWAKE:  completion->status.sleep_status = "AWAKE";   break;
-            case VCSEC_VehicleSleepStatus_E_VEHICLE_SLEEP_STATUS_ASLEEP: completion->status.sleep_status = "ASLEEP";  break;
-            default:                                                      completion->status.sleep_status = "UNKNOWN"; break;
-        }
-        switch (vs.userPresence) {
-            case VCSEC_UserPresence_E_VEHICLE_USER_PRESENCE_PRESENT:     completion->status.user_presence = "PRESENT";     break;
-            case VCSEC_UserPresence_E_VEHICLE_USER_PRESENCE_NOT_PRESENT: completion->status.user_presence = "NOT_PRESENT"; break;
-            default:                                                      completion->status.user_presence = "UNKNOWN";     break;
-        }
+        completion->lock_state = static_cast<int32_t>(vs.vehicleLockState);
+        completion->sleep_status = static_cast<int32_t>(vs.vehicleSleepStatus);
+        completion->user_presence = static_cast<int32_t>(vs.userPresence);
         if (command_generation_.load() == generation) xSemaphoreGive(completion->sem);
     };
 
@@ -804,7 +1099,24 @@ bool VehicleController::get_vehicle_status(VehicleStatusResult& out, tk::Connect
         tk::SemGuard g(vehicle_mutex_);
         vehicle_->set_vehicle_status_callback(nullptr);
     }
-    if (ok) out = completion->status;
+    if (ok) {
+        out.valid = true;
+        switch (completion->lock_state) {
+            case VCSEC_VehicleLockState_E_VEHICLELOCKSTATE_LOCKED: out.lock_state = "LOCKED"; break;
+            case VCSEC_VehicleLockState_E_VEHICLELOCKSTATE_UNLOCKED: out.lock_state = "UNLOCKED"; break;
+            default: out.lock_state = "UNKNOWN"; break;
+        }
+        switch (completion->sleep_status) {
+            case VCSEC_VehicleSleepStatus_E_VEHICLE_SLEEP_STATUS_AWAKE: out.sleep_status = "AWAKE"; break;
+            case VCSEC_VehicleSleepStatus_E_VEHICLE_SLEEP_STATUS_ASLEEP: out.sleep_status = "ASLEEP"; break;
+            default: out.sleep_status = "UNKNOWN"; break;
+        }
+        switch (completion->user_presence) {
+            case VCSEC_UserPresence_E_VEHICLE_USER_PRESENCE_PRESENT: out.user_presence = "PRESENT"; break;
+            case VCSEC_UserPresence_E_VEHICLE_USER_PRESENCE_NOT_PRESENT: out.user_presence = "NOT_PRESENT"; break;
+            default: out.user_presence = "UNKNOWN"; break;
+        }
+    }
     if (ok && out.valid) {
         tk::completion_ok_note(completion_timeout_);
         note_reachable_();  // car answered a VCSEC status read ⇒ reachable over BLE right now

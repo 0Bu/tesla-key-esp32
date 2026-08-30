@@ -43,8 +43,9 @@
 // esp_system.h; the device glue maps esp_reset_reason() and must map it NARROWLY:
 //   count    — ESP_RST_PANIC, ESP_RST_INT_WDT, ESP_RST_TASK_WDT, ESP_RST_WDT, ESP_RST_BROWNOUT.
 //   ignore   — ESP_RST_POWERON, ESP_RST_EXT, ESP_RST_USB/JTAG, ESP_RST_DEEPSLEEP, and above all
-//              ESP_RST_SW: /set_vin, /set_mqtt and /set_syslog each persist-and-reboot, and an OTA
-//              install reboots too, so ordinary provisioning is a BURST of software reboots. Read
+//              ESP_RST_SW: /set_vin, /set_mqtt, /set_syslog, /set_wifi and the setup portal each
+//              persist-and-reboot, and an OTA install reboots too, so ordinary provisioning is a
+//              BURST of software reboots. Read
 //              as crashes they would latch safe mode on a device nobody has broken — the one
 //              failure this guard must never have.
 //   ignore   — the heap watchdog's own restart (also ESP_RST_SW, and identifiable by the
@@ -83,18 +84,38 @@ inline constexpr uint32_t kBootHealthyS = 30;
 // safe mode on the boot that needed it most.
 inline constexpr unsigned kBootFailMax = 100;
 
+// Parse only the canonical decimal strings store_count() can produce. A present-but-empty,
+// signed, prefixed, overflowing or out-of-range value is storage ambiguity, not zero: the boot
+// glue fails closed into safe mode rather than authorizing the vehicle/MQTT stack on a possible
+// crash loop.
+inline bool boot_fail_parse(const char* raw, unsigned& out) noexcept {
+    if (!raw || *raw == '\0') return false;
+    if (*raw == '0') {
+        if (raw[1] != '\0') return false;
+        out = 0;
+        return true;
+    }
+    unsigned value = 0;
+    for (const char* p = raw; *p; ++p) {
+        if (*p < '0' || *p > '9') return false;
+        const unsigned digit = static_cast<unsigned>(*p - '0');
+        if (value > (kBootFailMax - digit) / 10u) return false;
+        value = value * 10u + digit;
+    }
+    out = value;
+    return true;
+}
+
 // The next value of the persisted crash counter. A fault boot increments (saturating); ANY other
 // boot resets to 0, because the reset is what makes this a consecutive-failure counter rather than
 // a lifetime crash tally — a device that crashed twice last winter and has run since is not in a
 // loop, and must not be one panic away from coming up crippled.
 //
-// A garbled read (a value no writer of ours could have produced) is treated as 0 rather than
-// clamped to the maximum. That direction is chosen: under-counting only DELAYS safe mode, while
-// over-counting latches it on a device that never crashed — and a corrupt NVS read is itself no
-// evidence of a crash loop.
+// Production calls this only after boot_fail_parse. The defensive clamp still fails toward the
+// latch if another caller ever passes an out-of-contract value directly.
 inline constexpr unsigned boot_fail_next(unsigned stored, bool was_fault) {
     if (!was_fault) return 0;
-    const unsigned cur = (stored > kBootFailMax) ? 0u : stored;
+    const unsigned cur = (stored > kBootFailMax) ? kBootFailMax : stored;
     return (cur >= kBootFailMax) ? kBootFailMax : cur + 1u;
 }
 

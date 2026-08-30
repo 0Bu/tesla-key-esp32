@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import pathlib
 import re
@@ -20,10 +21,28 @@ TARGETS = (
 )
 SOURCE_SHA = re.compile(r"^[0-9a-f]{40}$")
 DIGEST = re.compile(r"^[0-9a-f]{64}$")
+VERSION_RE = re.compile(
+    r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$"
+)
 
 
 class ManifestError(RuntimeError):
     pass
+
+
+def load_otadata_contract():
+    path = pathlib.Path(__file__).with_name("check-otadata-contract.py")
+    if path.is_symlink() or not path.is_file():
+        raise ManifestError(f"missing/unsafe shared otadata validator: {path}")
+    spec = importlib.util.spec_from_file_location("tesla_key_otadata_contract", path)
+    if spec is None or spec.loader is None:
+        raise ManifestError(f"cannot load shared otadata validator: {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+OTADATA_CONTRACT = load_otadata_contract()
 
 
 def sha256(path: pathlib.Path) -> str:
@@ -56,8 +75,10 @@ def validate(site: pathlib.Path, expected_source: str | None, expected_version: 
     if expected_source is not None and source_sha != expected_source:
         raise ManifestError(f"sourceSha mismatch: expected {expected_source}, got {source_sha}")
     version = manifest["version"]
-    if not isinstance(version, str) or not re.fullmatch(
-        r"[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?", version
+    if (
+        not isinstance(version, str)
+        or not VERSION_RE.fullmatch(version)
+        or len(version) > 31
     ):
         raise ManifestError("invalid version")
     if expected_version is not None and version != expected_version:
@@ -102,6 +123,11 @@ def validate(site: pathlib.Path, expected_source: str | None, expected_version: 
                 raise ManifestError(f"{chip}/{name}: manifest length does not match file")
             if sha256(path) != digest:
                 raise ManifestError(f"{chip}/{name}: manifest SHA-256 does not match file")
+            if name == f"ota_data_initial-{target}.bin":
+                try:
+                    OTADATA_CONTRACT.validate_path(path)
+                except OTADATA_CONTRACT.OtadataError as error:
+                    raise ManifestError(f"{chip}/{name}: {error}") from error
             if name in referenced:
                 raise ManifestError(f"duplicate manifest path: {name}")
             referenced.add(name)

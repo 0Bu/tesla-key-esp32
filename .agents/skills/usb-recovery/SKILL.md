@@ -35,7 +35,7 @@ Two failure modes dominate:
   (TOFU, `CONFIG_SECURE_SIGNED_ON_UPDATE_NO_SECURE_BOOT`). If the running image was signed with
   a key ≠ the current CI `OTA_SIGNING_KEY` (classic case: a **local build** whose reported
   version is the `version.txt` floor, e.g. `1.4.0`), every CI-signed OTA fails at the final
-  validate. Fixed live 2026-07-08 on a board at `.196` → recovered to `1.4.34`, OTA "up to date".
+  validate. Fixed live 2026-07-08 on a test board → recovered to `1.4.34`, OTA "up to date".
 - **(b) A boot / reboot loop after flashing an UNSIGNED local build.** An unsigned app
   `abort()`s in ESP-IDF's `check_signature_on_update_check()` during core init, **before
   `app_main`**, on *any* target — it does not boot-and-TOFU. Local `scripts/idf-docker.sh`
@@ -111,7 +111,9 @@ esac
 **Option A — exact GitHub Release asset, cross-checked against its signed main artifact.** Require
 an explicit release tag; bind it to the one successful main push build, select exactly the
 versioned target asset, verify GitHub's recorded length/SHA-256, then require byte identity with
-the source-SHA-bound signed Actions artifact. A mutable Release asset alone is not provenance:
+the source-SHA-bound signed Actions artifact. Both create and verified reuse runs produce that
+artifact; reuse performs no signing or Release mutation/re-upload and accepts only RSA-PSS-valid
+apps matching the production-authority pin. A mutable Release asset alone is not provenance:
 
 ```bash
 set -euo pipefail
@@ -119,10 +121,13 @@ set -euo pipefail
 : "${FAMILY:?run the target-selection block first}"
 [ "${SFX+x}" = x ] || { echo "REFUSING: image suffix is unset" >&2; exit 1; }
 : "${RELEASE_TAG:?set RELEASE_TAG explicitly, for example v1.4.74}"
-[[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || {
-  echo "REFUSING: release tag is not vX.Y.Z[-prerelease]" >&2; exit 1;
+[[ "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || {
+  echo "REFUSING: release tag is not canonical stable vX.Y.Z" >&2; exit 1;
 }
 VERSION=${RELEASE_TAG#v}
+(( ${#VERSION} <= 31 )) || {
+  echo "REFUSING: release version exceeds the 31-byte app descriptor" >&2; exit 1;
+}
 git fetch --tags -q
 SOURCE_SHA=$(git rev-parse "$RELEASE_TAG^{commit}")
 [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] || {
@@ -170,7 +175,7 @@ else ACTUAL_DIGEST=sha256:$(shasum -a 256 "$APP" | awk '{print $1}'); fi
 # A Release asset can be replaced. Bind these bytes to the unique build run and its metadata by
 # comparing them with the exact signed artifact produced by that run. Expiry is a hard stop; a
 # durable standalone Release path needs a future signed provenance manifest published with it.
-SIGNED_ART="tesla-key-esp32-$VERSION"
+SIGNED_ART="tesla-key-esp32-$VERSION-$SOURCE_SHA"
 SIGNED_ROWS=$(gh api "repos/:owner/:repo/actions/runs/$RUNID/artifacts" \
   --jq ".artifacts[] | select(.expired == false and .name == \"$SIGNED_ART\") | .name")
 [ "$(printf '%s\n' "$SIGNED_ROWS" | awk 'NF {n++} END {print n+0}')" -eq 1 ] || {
@@ -198,6 +203,7 @@ fi
 [ "$PROVENANCE_DIGEST" = "$ACTUAL_DIGEST" ] || {
   echo "REFUSING: Release bytes differ from the source-SHA-bound signed artifact" >&2; exit 1;
 }
+python3 scripts/check-firmware-artifacts.py --app-only --target "$TARGET" --version "$VERSION" --app "$APP" --signed-app --expected-public-key-digest scripts/ota-signing-public-key.sha256
 APP_INFO=$(esptool image-info "$APP")
 printf '%s\n' "$APP_INFO"
 printf '%s\n' "$APP_INFO" | grep -qx "Detected image type: $FAMILY" \
@@ -207,7 +213,8 @@ printf '%s\n' "$APP_INFO" | grep -qx "Detected image type: $FAMILY" \
 ```
 
 **Option B — exact signed artifact from a specific successful main `build` run.** The run also
-contains `firmware-unsigned` and often `github-pages`; selecting the first artifact is forbidden:
+contains unsigned and independent-rebuild evidence. Pages is served from branch-backed
+`gh-pages:/`, not a run artifact; selecting the first Actions artifact is forbidden:
 
 ```bash
 set -euo pipefail
@@ -226,21 +233,25 @@ RUN_SHA=$(gh run view "$RUNID" --json headSha --jq .headSha)
 }
 ARTS=$(gh api "repos/:owner/:repo/actions/runs/$RUNID/artifacts" \
   --jq '.artifacts[] | select(.expired == false) | .name' \
-  | grep -E '^tesla-key-esp32-[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$' || true)
+  | grep -E "^tesla-key-esp32-(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?-${RUN_SHA}$" || true)
 [ "$(printf '%s\n' "$ARTS" | awk 'NF {n++} END {print n+0}')" -eq 1 ] || {
   echo "REFUSING: expected exactly one unexpired signed main artifact" >&2; exit 1;
 }
 ART=$(printf '%s\n' "$ARTS" | awk 'NF {print}')
-VERSION="${ART#tesla-key-esp32-}"
 CI_DIR=$(mktemp -d "${TMPDIR:-/tmp}/tesla-recovery.XXXXXX")
 gh run download "$RUNID" -n "$ART" -D "$CI_DIR"
 META="$CI_DIR/dist/build-metadata.txt"
 [ -f "$META" ] && [ ! -L "$META" ] \
   && [ "$(grep -c '^head_sha=' "$META")" -eq 1 ] \
   && [ "$(sed -n 's/^head_sha=//p' "$META")" = "$RUN_SHA" ] \
-  && [ "$(grep -c '^display_version=' "$META")" -eq 1 ] \
-  && [ "$(sed -n 's/^display_version=//p' "$META")" = "$VERSION" ] || {
-  echo "REFUSING: signed artifact metadata does not match the selected main run" >&2; exit 1;
+  && [ "$(grep -c '^display_version=' "$META")" -eq 1 ] || {
+  echo "REFUSING: signed artifact metadata does not match the selected main run SHA" >&2; exit 1;
+}
+VERSION=$(sed -n 's/^display_version=//p' "$META")
+[[ "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$ ]] \
+  && (( ${#VERSION} <= 31 )) \
+  && [ "$ART" = "tesla-key-esp32-$VERSION-$RUN_SHA" ] || {
+  echo "REFUSING: signed artifact name is not bound to metadata version and run SHA" >&2; exit 1;
 }
 APP="$CI_DIR/tesla-key-esp32$SFX.bin"
 [ -f "$APP" ] && [ ! -L "$APP" ] || {
@@ -249,6 +260,7 @@ APP="$CI_DIR/tesla-key-esp32$SFX.bin"
 [ "$(wc -c < "$APP" | tr -d ' ')" -le $((0x1e8000)) ] || {
   echo "REFUSING: signed target app exceeds the policy limit" >&2; exit 1;
 }
+python3 scripts/check-firmware-artifacts.py --app-only --target "$TARGET" --version "$VERSION" --app "$APP" --signed-app --expected-public-key-digest scripts/ota-signing-public-key.sha256
 APP_INFO=$(esptool image-info "$APP")
 printf '%s\n' "$APP_INFO"
 printf '%s\n' "$APP_INFO" | grep -qx "Detected image type: $FAMILY" \

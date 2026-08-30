@@ -7,7 +7,9 @@
 #include "vehicle_ctrl_internal.hpp"
 #include <esp_log.h>
 #include <esp_timer.h>
+#include <algorithm>
 #include <cstdio>
+#include <cstring>
 #include <exception>
 #include <utility>
 
@@ -196,7 +198,15 @@ VehicleController::CommandOutcome VehicleController::await_completion_(
         tk::completion_ok_note(completion_timeout_);
         out.completed = completion->completed;
         out.success   = completion->success;
-        out.error     = completion->error;
+        out.error     = completion->error.data();
+        if (!out.error.empty()) ESP_LOGW(TAG, "command failed: %s", out.error.c_str());
+        if (completion->drop_link) {
+            ESP_LOGW(TAG, "telemetry desync: %d consecutive BLE failures — dropping link to resync",
+                     kCmdFailDropStreak);
+        }
+        if (completion->callback_fault) {
+            ESP_LOGE(TAG, "result callback failed — command result may be partial");
+        }
         return out;
     }
 
@@ -226,9 +236,10 @@ VehicleController::ResultCb VehicleController::make_result_cb_(
             note_reachable_();
         }
         if (result.is_failure() && result.error()) {
-            const std::string& msg = result.error()->message();
-            completion->error = msg;
-            ESP_LOGW(TAG, "command failed: %s", msg.c_str());
+            const auto& msg = result.error()->message();
+            const size_t error_size = std::min(msg.size(), completion->error.size() - 1);
+            std::memcpy(completion->error.data(), msg.data(), error_size);
+            completion->error[error_size] = '\0';
             // Soft-desync backstop: when the link is churning (buffer-recovery storm) the
             // library reports failures here but recovers internally without throwing, so
             // ble_fault_ never fires. After kCmdFailDropStreak failures in a row, drop the
@@ -236,8 +247,7 @@ VehicleController::ResultCb VehicleController::make_result_cb_(
             if (cmd_fail_streak_.fetch_add(1) + 1 >= kCmdFailDropStreak) {
                 cmd_fail_streak_.store(0);
                 if (believed_paired_.load() && !ble_fault_.exchange(true)) {
-                    ESP_LOGW(TAG, "telemetry desync: %d consecutive BLE failures — dropping link to resync",
-                             kCmdFailDropStreak);
+                    completion->drop_link = true;
                 }
             }
             // Two distinct ways a Tesla signals "your key is no longer whitelisted"
@@ -269,27 +279,23 @@ VehicleController::ResultCb VehicleController::make_result_cb_(
             //     real deletion is still caught even with no evcc traffic. Two in a row are
             //     required (one-off glitch guard); the counter resets on any success above
             //     and on a BLE disconnect.
-            if (msg.find("whitelist") != std::string::npos) {
+            if (msg.find("whitelist") != msg.npos) {
                 if (believed_paired_.load()) {
                     pairing_lost_      = true;
                     auth_fail_streak_  = 0;
                 }
             } else if (auth_fail_is_revocation &&
-                       msg.find("authentication failed") != std::string::npos) {
+                       msg.find("authentication failed") != msg.npos) {
                 if (++auth_fail_streak_ >= 2) {
                     pairing_lost_     = true;
                     auth_fail_streak_ = 0;
                 }
             }
         }
-      } catch (const std::exception& e) {
-          ESP_LOGE(TAG, "result callback threw (%s) — command result may be partial", e.what());
-          completion->completed = true;
-          completion->success = false;
       } catch (...) {
-          ESP_LOGE(TAG, "result callback threw (unknown) — command result may be partial");
           completion->completed = true;
           completion->success = false;
+          completion->callback_fault = true;
       }
       if (command_generation_.load() == generation && completion->sem) {
           xSemaphoreGive(completion->sem);
@@ -575,7 +581,7 @@ bool VehicleController::set_charging_amps(int amps, int timeout_ms) {
         int left_ms = remaining_ms_(deadline);
         if (left_ms <= 0) break;
 
-        const uint32_t generation_before = charge_state_generation_.load();
+        const ChargingAmpsFeedback feedback_before = charging_amps_feedback_snapshot_();
         poll_outcome = send_infotainment_locked_(
             "Verify Charging Amps",
             [](TeslaBLE::Client* c, uint8_t* b, size_t* l) {
@@ -585,18 +591,17 @@ bool VehicleController::set_charging_amps(int amps, int timeout_ms) {
             deadline, TeslaBLE::WakePolicy::WAKE_IF_NEEDED);
         bool poll_ok = poll_outcome.success;
 
-        const uint32_t generation_after = charge_state_generation_.load();
-        ChargeStateResult state = copy_locked_(last_known_charge_);
-        if (poll_ok && generation_after != generation_before) {
-            observed_amps = state.charging_amps;
+        const ChargingAmpsFeedback feedback_after = charging_amps_feedback_snapshot_();
+        if (poll_ok && feedback_after.generation != feedback_before.generation) {
+            observed_amps = feedback_after.charging_amps;
             readback = tk::verify_charging_amps(
-                amps, state.valid, state.has_charging_amps, state.charging_amps);
+                amps, true, feedback_after.has_charging_amps, feedback_after.charging_amps);
             if (readback == tk::ChargingAmpsReadback::Verified) {
                 ESP_LOGI(TAG,
                          "set charging amps verified: requested=%d A applied=%d A request=%d A actual=%d A",
-                         amps, state.charging_amps,
-                         state.has_current_request ? state.charge_current_request : -1,
-                         state.has_actual_current ? state.charger_actual_current : -1);
+                         amps, feedback_after.charging_amps,
+                         feedback_after.has_current_request ? feedback_after.current_request : -1,
+                         feedback_after.has_actual_current ? feedback_after.actual_current : -1);
                 CommandOutcome verified;
                 verified.completed = true;
                 verified.success = true;
@@ -607,9 +612,9 @@ bool VehicleController::set_charging_amps(int amps, int timeout_ms) {
                 ESP_LOGW(TAG,
                          "set charging amps readback mismatch (attempt %d/2): "
                          "requested=%d A applied=%d A request=%d A actual=%d A",
-                         attempt, amps, state.charging_amps,
-                         state.has_current_request ? state.charge_current_request : -1,
-                         state.has_actual_current ? state.charger_actual_current : -1);
+                         attempt, amps, feedback_after.charging_amps,
+                         feedback_after.has_current_request ? feedback_after.current_request : -1,
+                         feedback_after.has_actual_current ? feedback_after.actual_current : -1);
             } else {
                 ESP_LOGW(TAG,
                          "set charging amps readback missing charging_amps (attempt %d/2)",

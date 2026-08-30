@@ -109,7 +109,7 @@ for raw_message in (
     "characteristic discovery error: %d",
     "CCCD discovery error: %d",
     "CCCD subscription write failed: %d",
-    "BLE command-ready (CCCD handle %d, generation %lu)",
+    "BLE link deferred after CCCD (handle %d, generation %lu)",
 ):
     assert f'ESP_LOGD(TAG, "{raw_message}' in ble_client
     assert not re.search(rf'ESP_LOG[IEW]\(TAG, "{re.escape(raw_message)}', ble_client)
@@ -122,8 +122,14 @@ expected_production_ble_logs = {
     ("E", "failed to create BLE scan timer"),
     ("E", "BLE resource allocation failed"),
     ("E", "nimble_port_init failed: %d"),
+    ("E", "NimBLE start acknowledgement gate is not idle"),
+    ("E", "NimBLE host did not acknowledge sync within 5000 ms"),
+    ("W", "NimBLE synced after the boot acknowledgement timeout; runtime stays closed"),
     ("I", "NimBLE synced"),
     ("W", "could not obtain stable BLE handle while disconnecting"),
+    ("W", "RX defer queue full — dropping link fail-closed"),
+    ("W", "RX notify length %u exceeds fixed host slot — dropping link"),
+    ("E", "CCCD subscribed but connected callback is unavailable"),
     ("I", "RX notify len=%u: %s"),
     ("E", "on_gap_event exception (dropping event type=%d): %s"),
     ("E", "on_gap_event unknown exception (dropping event type=%d)"),
@@ -140,7 +146,7 @@ expected_production_ble_logs = {
 assert set(production_ble_logs) == expected_production_ble_logs
 assert len(production_ble_logs) == len(expected_production_ble_logs)
 verbose_start = ble_client.index("if (diag_verbose())")
-verbose_end = ble_client.index("if (on_rx_data_)", verbose_start)
+verbose_end = ble_client.index("if (on_rx_data_ &&", verbose_start)
 assert 'ESP_LOGI(TAG, "RX notify len=%u: %s"' in ble_client[verbose_start:verbose_end]
 
 # Healthy periodic heap samples are INFO; watchdog threshold/recovery messages remain separate.

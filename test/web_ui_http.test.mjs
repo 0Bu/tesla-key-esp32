@@ -150,6 +150,14 @@ test("OTA status schema, deadline and missed-done idle recovery fail closed", as
   assert.match(element("otaStat").innerHTML, /verifying/);
 });
 
+test("OTA versions use the canonical 31-byte firmware descriptor grammar", () => {
+  const { context } = loadUi();
+  assert.equal(context.otaVersion("1.4.75"), true);
+  assert.equal(context.otaVersion("1.4.75-PR-123"), true);
+  assert.equal(context.otaVersion("01.4.75"), false);
+  assert.equal(context.otaVersion(`1.4.75-${"x".repeat(25)}`), false);
+});
+
 test("device page exposes keyboard and live-region semantics", () => {
   const html = fs.readFileSync(new URL("../main/www/index.html", import.meta.url), "utf8");
   assert.match(html, /<button[^>]+id="verLink"[^>]+aria-label="Check for firmware updates"/);

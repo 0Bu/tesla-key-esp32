@@ -172,6 +172,83 @@ fixture="$WORK/flash-owner"; make_fixture "$fixture"
 printf '\n`AGENTS.md` owns the HTTP API.\n' >> "$fixture/.agents/skills/flash-esp32/SKILL.md"
 expect_failure "flash skill exact-content guard" "$fixture" "exact reviewed content contract drifted"
 
+fixture="$WORK/flash-production-authority"; make_fixture "$fixture"
+perl -0pi -e 's#scripts/ota-signing-public-key\.sha256#scripts/unreviewed-flash-key.sha256#g' \
+  "$fixture/.agents/skills/flash-esp32/SKILL.md"
+expect_failure "flash production authority" "$fixture" \
+  "production-authority verification contract before flash"
+
+fixture="$WORK/flash-preview-head-name"; make_fixture "$fixture"
+perl -0pi -e 's/EXPECTED_ART="tesla-key-esp32-pr\$\{PR\}-\$\{EXPECTED_SHA\}"/EXPECTED_ART="legacy-preview-name"/' \
+  "$fixture/.agents/skills/flash-esp32/SKILL.md"
+expect_failure "flash preview full-head artifact" "$fixture" \
+  "signed-preview consumer must bind artifact name to PR/full head SHA and version to metadata"
+
+fixture="$WORK/flash-preview-leading-zero"; make_fixture "$fixture"
+perl -0pi -e 's/\Q(0|[1-9][0-9]*)\E/[0-9]+/' \
+  "$fixture/.agents/skills/flash-esp32/SKILL.md"
+expect_failure "flash preview canonical core" "$fixture" \
+  "signed-preview consumer must bind artifact name to PR/full head SHA and version to metadata"
+
+fixture="$WORK/flash-preview-capture"; make_fixture "$fixture"
+perl -0pi -e 's/BASH_REMATCH\[4\]/BASH_REMATCH[3]/' \
+  "$fixture/.agents/skills/flash-esp32/SKILL.md"
+expect_failure "flash preview PR capture" "$fixture" \
+  "signed-preview consumer must bind artifact name to PR/full head SHA and version to metadata"
+
+fixture="$WORK/ship-production-authority"; make_fixture "$fixture"
+perl -0pi -e 's#scripts/ota-signing-public-key\.sha256#scripts/unreviewed-ship-key.sha256#g' \
+  "$fixture/.agents/skills/ship/SKILL.md"
+expect_failure "ship production authority" "$fixture" \
+  "production-authority verification contract before flash"
+
+fixture="$WORK/ship-main-artifact-head"; make_fixture "$fixture"
+perl -0pi -e 's/tesla-key-esp32-\$VERSION-\$RUN_SHA/tesla-key-esp32-\$VERSION/' \
+  "$fixture/.agents/skills/ship/SKILL.md"
+expect_failure "ship main artifact full SHA" "$fixture" \
+  "main artifact consumer must bind full run SHA and derive version from metadata"
+
+fixture="$WORK/ship-main-artifact-leading-zero"; make_fixture "$fixture"
+perl -0pi -e 's/\Q(0|[1-9][0-9]*)\E/[0-9]+/' \
+  "$fixture/.agents/skills/ship/SKILL.md"
+expect_failure "ship main artifact canonical core" "$fixture" \
+  "main artifact consumer must bind full run SHA and derive version from metadata"
+
+fixture="$WORK/ship-main-artifact-version-length"; make_fixture "$fixture"
+perl -0pi -e 's/<= 31/<= 63/' "$fixture/.agents/skills/ship/SKILL.md"
+expect_failure "ship main artifact version length" "$fixture" \
+  "main artifact consumer must bind full run SHA and derive version from metadata"
+
+fixture="$WORK/ota-release-stable-tag"; make_fixture "$fixture"
+perl -0pi -e 's/(\[\[ "\$RELEASE_TAG" =~ [^\n]+)\$ \]\]/$1(-[0-9A-Za-z.-]+)?\$ ]]/g' \
+  "$fixture/.agents/skills/ota-release-verify/SKILL.md"
+expect_failure "OTA verifier stable Release" "$fixture" \
+  "canonical <=31-byte stable Release tag"
+
+fixture="$WORK/usb-release-stable-tag"; make_fixture "$fixture"
+perl -0pi -e 's/(\[\[ "\$RELEASE_TAG" =~ [^\n]+)\$ \]\]/$1(-[0-9A-Za-z.-]+)?\$ ]]/' \
+  "$fixture/.agents/skills/usb-recovery/SKILL.md"
+expect_failure "USB recovery stable Release" "$fixture" \
+  "Release selection must be canonical, stable and <=31 bytes"
+
+fixture="$WORK/usb-production-authority"; make_fixture "$fixture"
+perl -0pi -e 's#scripts/ota-signing-public-key\.sha256#scripts/unreviewed-recovery-key.sha256#g' \
+  "$fixture/.agents/skills/usb-recovery/SKILL.md"
+expect_failure "usb recovery production authority" "$fixture" \
+  "production-authority verification contract before flash"
+
+fixture="$WORK/usb-main-artifact-head"; make_fixture "$fixture"
+perl -0pi -e 's/SIGNED_ART="tesla-key-esp32-\$VERSION-\$SOURCE_SHA"/SIGNED_ART="tesla-key-esp32-\$VERSION"/' \
+  "$fixture/.agents/skills/usb-recovery/SKILL.md"
+expect_failure "usb recovery main artifact full SHA" "$fixture" \
+  "main artifact consumer must bind full run SHA and derive version from metadata"
+
+fixture="$WORK/usb-main-artifact-version"; make_fixture "$fixture"
+perl -0pi -e 's/VERSION=\$\(sed -n '\''s\/\^display_version=\/\/p'\'' "\$META"\)/VERSION="\${ART#tesla-key-esp32-}"/' \
+  "$fixture/.agents/skills/usb-recovery/SKILL.md"
+expect_failure "usb recovery main artifact metadata version" "$fixture" \
+  "main artifact consumer must bind full run SHA and derive version from metadata"
+
 fixture="$WORK/device-diag-owner"; make_fixture "$fixture"
 perl -0pi -e 's/\[`docs\/ARCHITECTURE\.md`\]\(\.\.\/\.\.\/\.\.\/docs\/ARCHITECTURE\.md\) owns pairing lifecycle and invalidation\./`AGENTS.md` owns pairing lifecycle and invalidation./' \
   "$fixture/.agents/skills/device-diag/SKILL.md"
@@ -206,6 +283,12 @@ value["invariants"].append({"id": "missing-canary", "pattern": "NEVER_PRESENT_CA
 path.write_text(json.dumps(value, indent=2) + "\n")
 PY
 expect_failure "missing safety invariant" "$fixture" "missing-canary"
+
+fixture="$WORK/multi-target-publication-dag"; make_fixture "$fixture"
+perl -0pi -e 's/logic-test -> build -> independent-rebuild -> publish ->/logic-test -> build -> publish ->/' \
+  "$fixture/.codex/agents/multi_target_build_reviewer.toml"
+expect_failure "multi-target publication DAG" "$fixture" \
+  "multi-target reviewer is missing the independent-rebuild/publication DAG contract"
 
 echo "== hook configuration =="
 fixture="$WORK/hook-async"; make_fixture "$fixture"

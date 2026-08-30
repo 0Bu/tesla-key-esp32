@@ -9,7 +9,10 @@
 // Dispatched from handle_all in http_server.cpp (inside its try/catch OOM guard).
 
 #include "http_handlers.hpp"
+#include "mqtt_probe_owner.hpp"
 #include "config_blob.hpp"
+#include "logic/config_request.hpp"
+#include "logic/json_syntax.hpp"
 #include "logic/syslog_policy.hpp"
 #include "logic/mqtt_uri.hpp"
 #include "logic/wifi_credentials.hpp"
@@ -25,9 +28,85 @@
 #include "freertos/semphr.h"
 #include <cstdlib>
 #include <cctype>
+#include <memory>
 #include <string>
 
 static const char* TAG = "http_server";
+
+namespace {
+
+// Parse one required JSON object without collapsing transport failures into a syntactically valid
+// empty configuration. The body buffer and cJSON tree are RAII-owned, so a std::bad_alloc while a
+// field is copied still releases both before handle_all turns the exception into a 503.
+struct ParsedJsonBody {
+    tk::JsonOwner json;
+    tk::ConfigSubmissionStatus status{tk::ConfigSubmissionStatus::MalformedJson};
+
+    explicit operator bool() const { return json != nullptr; }
+};
+
+tk::ConfigSubmissionStatus body_submission_status_(tk::BodyReadStatus status) {
+    switch (status) {
+        case tk::BodyReadStatus::Ok:            return tk::ConfigSubmissionStatus::Ready;
+        case tk::BodyReadStatus::Empty:         return tk::ConfigSubmissionStatus::MissingBody;
+        case tk::BodyReadStatus::TooLarge:      return tk::ConfigSubmissionStatus::TooLarge;
+        case tk::BodyReadStatus::NoMemory:      return tk::ConfigSubmissionStatus::BodyNoMemory;
+        case tk::BodyReadStatus::ReceiveFailed: return tk::ConfigSubmissionStatus::ReceiveFailed;
+    }
+    return tk::ConfigSubmissionStatus::ReceiveFailed;
+}
+
+ParsedJsonBody parse_json_object_body_(httpd_req_t* req) {
+    tk::BodyReadResult body = read_body_result(req);
+    if (body.status != tk::BodyReadStatus::Ok) {
+        return {tk::JsonOwner{}, body_submission_status_(body.status)};
+    }
+
+    std::unique_ptr<char, decltype(&free)> body_owner(body.data, &free);
+    // cJSON reports both malformed input and allocator exhaustion as nullptr. The shared wrapper
+    // validates without allocating first, then classifies a parser nullptr as resource failure.
+    const auto materialized = tk::json_materialize<cJSON>(
+        body.data, req->content_len, [](const char* text) { return cJSON_Parse(text); });
+    if (materialized.status == tk::JsonMaterializeStatus::Malformed) {
+        return {tk::JsonOwner{}, tk::ConfigSubmissionStatus::MalformedJson};
+    }
+    if (materialized.status == tk::JsonMaterializeStatus::TooDeep) {
+        return {tk::JsonOwner{}, tk::ConfigSubmissionStatus::JsonTooDeep};
+    }
+    if (materialized.status == tk::JsonMaterializeStatus::UnsupportedNul) {
+        return {tk::JsonOwner{}, tk::ConfigSubmissionStatus::JsonUnsupportedNul};
+    }
+    if (materialized.status == tk::JsonMaterializeStatus::NoMemory) {
+        return {tk::JsonOwner{}, tk::ConfigSubmissionStatus::JsonNoMemory};
+    }
+    tk::JsonOwner json(materialized.root);
+    if (!cJSON_IsObject(json.get())) {
+        return {tk::JsonOwner{}, tk::ConfigSubmissionStatus::ObjectRequired};
+    }
+    return {std::move(json), tk::ConfigSubmissionStatus::Ready};
+}
+
+esp_err_t send_config_body_error_(httpd_req_t* req, const char* command,
+                                  const ParsedJsonBody& body) {
+    return send_json(req, tk::config_submission_http_status(body.status),
+                     make_response(false, command, "",
+                                   tk::config_submission_reason(body.status)));
+}
+
+const char* required_string_(const cJSON* object, const char* key) {
+    const cJSON* value = cJSON_GetObjectItemCaseSensitive(object, key);
+    return cJSON_IsString(value) && value->valuestring ? value->valuestring : nullptr;
+}
+
+tk::ConfigStringSubmission parse_string_submission_(httpd_req_t* req, const char* key) {
+    ParsedJsonBody body = parse_json_object_body_(req);
+    if (!body) return {body.status, {}};
+    const char* value = required_string_(body.json.get(), key);
+    if (!value) return {tk::ConfigSubmissionStatus::StringFieldRequired, {}};
+    return {tk::ConfigSubmissionStatus::Ready, value};
+}
+
+}  // namespace
 
 // ─── POST /gen_keys ───────────────────────────────────────────────────────────
 
@@ -35,11 +114,11 @@ esp_err_t handle_gen_keys(GuardedReq rq) {
     httpd_req_t* req = rq.req;
     OtaIdentityMutationGuard identity_guard(tk::IdentityMutationEntry::HttpGenerateKey);
     if (!identity_guard) {
-        cJSON* root = cJSON_CreateObject();
-        cJSON_AddBoolToObject(root, "result", false);
-        cJSON_AddStringToObject(root, "reason",
+        tk::JsonBuilder json;
+        json.boolean(json.root(), "result", false);
+        json.string(json.root(), "reason",
             "key generation is blocked during OTA verification/update; no key was changed");
-        return send_json(req, 503, root);
+        return send_json(req, 503, json.release());
     }
     // Refuse to silently overwrite an existing key: regenerating un-pairs the device and breaks
     // charging until a physical re-pair. The controller checks this under command_mutex_, not as
@@ -48,26 +127,26 @@ esp_err_t handle_gen_keys(GuardedReq rq) {
     const VehicleController::KeyGenerationResult generated =
         g_vehicle->generate_key_result(allow_replace);
     if (generated.key_probe_failed) {
-        cJSON* root = cJSON_CreateObject();
-        cJSON_AddBoolToObject(root, "result", false);
-        cJSON_AddStringToObject(root, "reason",
+        tk::JsonBuilder json;
+        json.boolean(json.root(), "result", false);
+        json.string(json.root(), "reason",
             "private-key storage could not be verified; no key was changed");
-        return send_json(req, 503, root);
+        return send_json(req, 503, json.release());
     }
     if (generated.existing_key_refused) {
-        cJSON* root = cJSON_CreateObject();
-        cJSON_AddBoolToObject(root, "result", false);
-        cJSON_AddStringToObject(root, "reason",
+        tk::JsonBuilder json;
+        json.boolean(json.root(), "result", false);
+        json.string(json.root(), "reason",
             "a key already exists — regenerating un-pairs the vehicle; "
             "call /gen_keys?force=1 to replace it");
-        return send_json(req, 409, root);
+        return send_json(req, 409, json.release());
     }
     if (generated.transition_blocked) {
-        cJSON* root = cJSON_CreateObject();
-        cJSON_AddBoolToObject(root, "result", false);
-        cJSON_AddStringToObject(root, "reason",
+        tk::JsonBuilder json;
+        json.boolean(json.root(), "result", false);
+        json.string(json.root(), "reason",
             "a VIN transition is awaiting reboot; key generation is temporarily blocked");
-        return send_json(req, 409, root);
+        return send_json(req, 409, json.release());
     }
 
     const tk::KeyRotationResult rotation = generated.rotation;
@@ -79,17 +158,17 @@ esp_err_t handle_gen_keys(GuardedReq rq) {
     // proves the new key committed, so the supervisor retries only idempotent cleanup.
     const bool reboot_to_restore = rotation == tk::KeyRotationResult::NotCommitted ||
                                    rotation == tk::KeyRotationResult::CommitUnknown;
-    cJSON* root = cJSON_CreateObject();
-    cJSON_AddBoolToObject(root, "result", ok);
-    cJSON_AddStringToObject(
-        root, "reason",
+    tk::JsonBuilder json;
+    json.boolean(json.root(), "result", ok);
+    json.string(
+        json.root(), "reason",
         ok ? "key generated — use /send_key to pair with vehicle"
            : rotation == tk::KeyRotationResult::CommitUnknown
                ? "key commit outcome is ambiguous — rebooting to reload durable identity"
            : reboot_to_restore
                ? "key generation did not commit — rebooting to restore durable identity"
                : "new key saved, but pairing cleanup failed — retrying cleanup");
-    esp_err_t r = send_json(req, ok ? 200 : 500, root);
+    esp_err_t r = send_json(req, ok ? 200 : 500, json.release());
     if (reboot_to_restore) {
         // NotCommitted/CommitUnknown are recovery reboots after an HTTP 500, not successful
         // user configuration commits. Keep a pending OTA rollback-capable.
@@ -107,22 +186,22 @@ esp_err_t handle_send_key(GuardedReq rq) {
     // owner key — its sole purpose is the evcc BLE integration. Reject an explicit
     // owner request rather than silently enrolling a different role than asked for.
     if (query_param_is(req, "role", "owner")) {
-        cJSON* root = cJSON_CreateObject();
-        cJSON_AddBoolToObject(root, "result", false);
-        cJSON_AddStringToObject(root, "role",   "owner");
-        cJSON_AddStringToObject(root, "reason",
+        tk::JsonBuilder json;
+        json.boolean(json.root(), "result", false);
+        json.string(json.root(), "role", "owner");
+        json.string(json.root(), "reason",
             "owner role disabled — this device only enrolls Charging Manager keys");
-        return send_json(req, 403, root);
+        return send_json(req, 403, json.release());
     }
 
     bool ok = g_vehicle->pair(tk::ConnectOrigin::Foreground);
-    cJSON* root = cJSON_CreateObject();
-    cJSON_AddBoolToObject(root, "result", ok);
-    cJSON_AddStringToObject(root, "role",   "charging_manager");
-    cJSON_AddStringToObject(root, "reason",
+    tk::JsonBuilder json;
+    json.boolean(json.root(), "result", ok);
+    json.string(json.root(), "role", "charging_manager");
+    json.string(json.root(), "reason",
         ok ? "key sent — confirm the pairing request on the car's screen"
            : "failed to send key (vehicle not reachable or timed out)");
-    return send_json(req, 200, root);
+    return send_json(req, 200, json.release());
 }
 
 // ─── POST /set_time — set the wall clock from the browser (NTP fallback) ───────
@@ -135,22 +214,23 @@ esp_err_t handle_send_key(GuardedReq rq) {
 // applied fallback time is persisted so a later offline reboot starts plausibly.
 esp_err_t handle_set_time(GuardedReq rq) {
     httpd_req_t* req = rq.req;
-    // NTP already synced → it's authoritative; drain the body and accept as a no-op.
+    ParsedJsonBody parsed = parse_json_object_body_(req);
+    if (!parsed) return send_config_body_error_(req, "set_time", parsed);
+
+    cJSON* j = cJSON_GetObjectItemCaseSensitive(parsed.json.get(), "ms");
+    if (!cJSON_IsNumber(j)) {
+        return send_json(req, 400,
+                         make_response(false, "set_time", "", "numeric ms field required"));
+    }
+    const double epoch_ms = j->valuedouble;
+    parsed.json.reset();
+
+    // NTP already synced -> it is authoritative. Still require a complete, syntactically valid
+    // request before accepting the no-op, so body OOM/oversize/receive/schema failures never turn
+    // into a misleading success response merely because the clock happened to be synchronized.
     if (clock_synced_via_ntp()) {
-        free(read_body(req));
         return send_json(req, 200, make_response(true, "set_time", "", "clock set via NTP"));
     }
-
-    char* body = read_body(req);
-    cJSON* json = body ? cJSON_Parse(body) : nullptr;
-    free(body);
-
-    double epoch_ms = 0;
-    if (json) {
-        cJSON* j = cJSON_GetObjectItemCaseSensitive(json, "ms");
-        if (cJSON_IsNumber(j)) epoch_ms = j->valuedouble;
-    }
-    cJSON_Delete(json);
 
     // Reject a missing/implausible browser clock so we never push the device clock into the
     // cert-invalid range — floor ~2023-11, ceiling build year + 10 (see browser_time_plausible).
@@ -169,16 +249,15 @@ esp_err_t handle_set_time(GuardedReq rq) {
 
 esp_err_t handle_set_vin(GuardedReq rq) {
     httpd_req_t* req = rq.req;
-    char* body = read_body(req);
-    cJSON* json = body ? cJSON_Parse(body) : nullptr;
-    free(body);
-
-    std::string vin;
-    if (json) {
-        cJSON* j = cJSON_GetObjectItemCaseSensitive(json, "vin");
-        if (cJSON_IsString(j) && j->valuestring) vin = j->valuestring;
+    ParsedJsonBody parsed = parse_json_object_body_(req);
+    if (!parsed) return send_config_body_error_(req, "set_vin", parsed);
+    const char* submitted_vin = required_string_(parsed.json.get(), "vin");
+    if (!submitted_vin) {
+        return send_json(req, 400,
+                         make_response(false, "set_vin", "", "string vin field required"));
     }
-    cJSON_Delete(json);
+    std::string vin = submitted_vin;
+    parsed.json.reset();
 
     // Normalise to the canonical stored form (trim, uppercase) before validating or
     // comparing, so "unchanged" is judged on the stored representation, not on casing.
@@ -222,7 +301,7 @@ esp_err_t handle_set_vin(GuardedReq rq) {
             // mutation, so every power cut has an unambiguous boot-recovery authority.
             const std::string marker =
                 tk::make_vin_transition_marker(current.vin, previous_key_id);
-            if (!g_config->save_str("vin_txn", marker)) return false;
+            if (!g_config->save_str(tk::nvs_contract::kVinTransition, marker)) return false;
             vin_marker_written = true;
             return tk::cfg_save(*g_config, next);
         });
@@ -241,7 +320,8 @@ esp_err_t handle_set_vin(GuardedReq rq) {
         ESP_LOGE(TAG, "VIN change did not commit a new key; restoring previous configuration");
         const bool rolled_back = !vin_marker_written || tk::cfg_save(*g_config, current);
         const bool marker_removed =
-            !vin_marker_written || (rolled_back && g_config->remove("vin_txn"));
+            !vin_marker_written ||
+                (rolled_back && g_config->remove(tk::nvs_contract::kVinTransition));
         previous_identity_restored = rolled_back && marker_removed;
         recovery_pending = !previous_identity_restored;
         if (recovery_pending) {
@@ -260,7 +340,7 @@ esp_err_t handle_set_vin(GuardedReq rq) {
         recovery_pending = true;
         ESP_LOGE(TAG, "VIN and new key committed, but cleanup is incomplete — boot recovery remains armed");
     } else if (reset.state == A::Complete) {
-        if (!g_config->remove("vin_txn")) {
+        if (!g_config->remove(tk::nvs_contract::kVinTransition)) {
             // The durable new VIN/key tuple is valid. A remaining marker only causes the boot
             // path to repeat idempotent session/MAC cleanup before normal operation.
             ESP_LOGW(TAG, "VIN change committed but transition marker remains for boot recovery");
@@ -285,11 +365,9 @@ esp_err_t handle_set_vin(GuardedReq rq) {
     esp_err_t r = send_json(req, ok ? 200 : recovery_blocked ? 409 : 500,
                             make_response(ok, "set_vin", vin.c_str(), reason));
     if (reboot) {
-        // Only the fully committed HTTP-200 transaction is a deliberate successful config save.
-        // Rollback, ambiguous-fingerprint and cleanup-recovery reboots keep OTA probation armed.
-        if (tk::vin_transition_reboot_confirms_ota(reset.state)) {
-            ota_confirm_pending_image(tk::OtaRebootClass::SuccessfulUserConfigCommit);
-        }
+        // VIN/key identity changes are admitted only in Stable state by OtaIdentityMutationGuard.
+        // Therefore this reboot can never be evidence for a PendingVerify image; recovery and
+        // failure reboots likewise leave whatever OTA state exists untouched.
         vTaskDelay(pdMS_TO_TICKS(800));
         esp_restart();
     }
@@ -316,6 +394,22 @@ struct MqttProbeCtx {
     SemaphoreHandle_t   sem       = nullptr;
     bool                connected = false;
     tk::MqttProbeResult result    = tk::MqttProbeResult::Timeout;
+};
+
+struct EspMqttProbeOps {
+    using Client = esp_mqtt_client_handle_t;
+    using Semaphore = SemaphoreHandle_t;
+
+    static void stop(Client client) noexcept { (void)esp_mqtt_client_stop(client); }
+    static void destroy(Client client) noexcept { (void)esp_mqtt_client_destroy(client); }
+    static void delete_semaphore(Semaphore sem) noexcept { vSemaphoreDelete(sem); }
+};
+
+struct MqttProbeResources {
+    // Declaration order matters: owner is destroyed first, joining the callback task while its
+    // plain-data context is still alive; ctx is destroyed only after all C handles are gone.
+    MqttProbeCtx ctx{};
+    tk::MqttProbeResourceOwner<EspMqttProbeOps> owner{};
 };
 
 static void on_mqtt_probe(void* handler_args, esp_event_base_t, int32_t id, void* event_data) {
@@ -351,7 +445,9 @@ static void on_mqtt_probe(void* handler_args, esp_event_base_t, int32_t id, void
     }
 }
 
-// Connect to `uri` once and report how it went. Never persists anything, never throws.
+// Connect to `uri` once and report how it went. Never persists anything. All throwing request
+// preparation happens before resource acquisition; acquired C handles are RAII-owned so an
+// exception added later cannot leak the semaphore/client or leave a callback racing its stack ctx.
 //
 // It blocks the httpd task for up to 8 s, which also blocks every other request — evcc's poll
 // included. That is accepted rather than overlooked: this endpoint already ends in a reboot, a BLE
@@ -372,114 +468,89 @@ static tk::MqttProbeResult mqtt_probe_broker(const std::string& uri) {
         return tk::MqttProbeResult::NoHeap;
     }
 
-    MqttProbeCtx ctx{};
-    ctx.sem = xSemaphoreCreateBinary();
-    if (!ctx.sem) return tk::MqttProbeResult::Internal;
-
     esp_mqtt_client_config_t cfg = {};
     cfg.broker.address.uri = uri.c_str();
     if (tls) cfg.broker.verification.crt_bundle_attach = esp_crt_bundle_attach;
-    const std::string user = CONFIG_TESLA_MQTT_USERNAME;
-    const std::string pass = CONFIG_TESLA_MQTT_PASSWORD;
-    if (!user.empty()) cfg.credentials.username = user.c_str();
-    if (!pass.empty()) cfg.credentials.authentication.password = pass.c_str();
+    // sdkconfig credentials are immortal literals. Referencing them directly avoids two needless
+    // std::string allocations and guarantees there is no throwing construction after acquire.
+    if (CONFIG_TESLA_MQTT_USERNAME[0] != '\0')
+        cfg.credentials.username = CONFIG_TESLA_MQTT_USERNAME;
+    if (CONFIG_TESLA_MQTT_PASSWORD[0] != '\0')
+        cfg.credentials.authentication.password = CONFIG_TESLA_MQTT_PASSWORD;
     cfg.credentials.client_id = "teslakey_probe";
     cfg.session.keepalive     = 15;
     // One attempt, not a retry loop: this is a question, and esp-mqtt's default reconnect would
     // keep dialling a wrong broker in the background after the answer was already reported.
     cfg.network.disable_auto_reconnect = true;
 
-    esp_mqtt_client_handle_t client = esp_mqtt_client_init(&cfg);
-    if (!client) {
-        vSemaphoreDelete(ctx.sem);
+    MqttProbeResources resources;
+    resources.owner.sem = xSemaphoreCreateBinary();
+    resources.ctx.sem = resources.owner.sem;
+    if (!resources.ctx.sem) return tk::MqttProbeResult::Internal;
+    resources.owner.client = esp_mqtt_client_init(&cfg);
+    if (!resources.owner.client) return tk::MqttProbeResult::Internal;
+    if (esp_mqtt_client_register_event(resources.owner.client,
+                                       static_cast<esp_mqtt_event_id_t>(MQTT_EVENT_ANY),
+                                       on_mqtt_probe, &resources.ctx) != ESP_OK) {
         return tk::MqttProbeResult::Internal;
     }
-    esp_mqtt_client_register_event(client, static_cast<esp_mqtt_event_id_t>(MQTT_EVENT_ANY),
-                                   on_mqtt_probe, &ctx);
 
     // A failed start emits no event at all, so waiting would burn the whole window and then
     // blame a timeout. Nothing was started, so nothing is stopped.
-    if (esp_mqtt_client_start(client) != ESP_OK) {
-        esp_mqtt_client_destroy(client);
-        vSemaphoreDelete(ctx.sem);
+    if (esp_mqtt_client_start(resources.owner.client) != ESP_OK)
         return tk::MqttProbeResult::Internal;
-    }
+    resources.owner.started = true;
 
-    const bool answered = xSemaphoreTake(ctx.sem, pdMS_TO_TICKS(8000)) == pdTRUE;
-    // stop() joins the mqtt task, so the callback cannot touch ctx after this line — which is
-    // what makes a stack-local ctx safe here.
-    esp_mqtt_client_stop(client);
-    esp_mqtt_client_destroy(client);
-    vSemaphoreDelete(ctx.sem);
+    const bool answered = xSemaphoreTake(resources.ctx.sem, pdMS_TO_TICKS(8000)) == pdTRUE;
 
     if (!answered) return tk::MqttProbeResult::Timeout;
-    return ctx.result;
+    // Join the callback task before reading the shared verdict. The owner still destroys the
+    // client/semaphore after this function copies the now-stable plain-data result.
+    if (esp_mqtt_client_stop(resources.owner.client) != ESP_OK)
+        return tk::MqttProbeResult::Internal;
+    resources.owner.started = false;
+    return resources.ctx.result;
 }
 
 esp_err_t handle_set_mqtt(GuardedReq rq) {
     httpd_req_t* req = rq.req;
-    char* body = read_body(req);
-    cJSON* json = body ? cJSON_Parse(body) : nullptr;
-    free(body);
-
-    std::string broker;
-    cJSON* j = json ? cJSON_GetObjectItemCaseSensitive(json, "broker") : nullptr;
-    if (!cJSON_IsObject(json) || !cJSON_IsString(j) || !j->valuestring) {
-        cJSON_Delete(json);
-        return send_json(req, 400, make_response(false, "set_mqtt", "",
-                                                 "invalid JSON body (broker string required)"));
-    }
-    broker = j->valuestring;
-    cJSON_Delete(json);
-
-    broker = tk::mqtt_trim(broker);
-
-    // Unchanged → nothing to apply: skip the NVS write and the reboot entirely. The
-    // stored value is the bare broker string as last saved (mqtt_ha adds the scheme);
-    // stored empty/unset and submitted empty compare equal, so neither triggers a reboot.
-    // Also skips the probe: an unchanged broker is not a claim anyone is making now, and
-    // probing it would make an idempotent no-op fail whenever the broker is down.
+    const tk::ConfigStringSubmission submitted = parse_string_submission_(req, "broker");
     tk::ConfigBlob cfg;
-    tk::cfg_load(*g_config, cfg);
-    if (broker == cfg.mqtt_uri) {
-        return send_json(req, 200, make_response(true, "set_mqtt", "",
-            broker.empty() ? "MQTT already disabled — no reboot"
-                           : "MQTT broker unchanged — no reboot"));
-    }
-
-    // Validate plausibility before applying a *changed* value.
-    if (!tk::mqtt_broker_is_plausible(broker)) {
-        return send_json(req, 400, make_response(false, "set_mqtt", "",
-                                                 "invalid broker (use host:port)"));
-    }
-
-    // Then verify it for real. Only a non-empty broker is probed — an empty value DISABLES the
-    // bridge, and there is nothing to connect to in order to prove that.
-    if (!broker.empty()) {
-        const std::string uri =
-            tk::mqtt_effective_uri(broker, !std::string(CONFIG_TESLA_MQTT_USERNAME).empty());
-        const tk::MqttProbeResult pr = mqtt_probe_broker(uri);
-        if (pr != tk::MqttProbeResult::Ok) {
+    return tk::apply_config_string(
+        submitted,
+        [](const std::string& value) { return tk::mqtt_trim(value); },
+        [&]() {
+            tk::cfg_load(*g_config, cfg);
+            return cfg.mqtt_uri;
+        },
+        [](const std::string& value) { return tk::mqtt_broker_is_plausible(value); },
+        [&](const std::string& broker) {
+            // Only a non-empty broker is probed — an empty value explicitly disables the bridge.
+            if (broker.empty()) return tk::ConfigProbeVerdict{};
+            const std::string uri = tk::mqtt_effective_uri(
+                broker, !std::string(CONFIG_TESLA_MQTT_USERNAME).empty());
+            const tk::MqttProbeResult result = mqtt_probe_broker(uri);
+            if (result == tk::MqttProbeResult::Ok) return tk::ConfigProbeVerdict{};
             ESP_LOGW(TAG, "set_mqtt: broker check failed (%s) — not saving",
-                     tk::mqtt_probe_reason(pr));
-            return send_json(req, tk::mqtt_probe_http_status(pr),
-                             make_response(false, "set_mqtt", "", tk::mqtt_probe_reason(pr)));
-        }
-    }
-
-    cfg.mqtt_uri = broker;
-    bool ok = tk::cfg_save(*g_config, cfg);
-    esp_err_t r = send_json(req, ok ? 200 : 500,
-        make_response(ok, "set_mqtt", "",
-                      ok ? (broker.empty() ? "MQTT disabled — rebooting"
-                                           : "MQTT broker saved — rebooting")
-                         : "failed to save MQTT broker"));
-    if (ok) {
-        ota_confirm_pending_image(tk::OtaRebootClass::SuccessfulUserConfigCommit);
-        vTaskDelay(pdMS_TO_TICKS(800));
-        esp_restart();
-    }
-    return r;
+                     tk::mqtt_probe_reason(result));
+            return tk::ConfigProbeVerdict{false, tk::mqtt_probe_http_status(result),
+                                          tk::mqtt_probe_reason(result)};
+        },
+        [&](const std::string& broker) {
+            cfg.mqtt_uri = broker;
+            return tk::cfg_save(*g_config, cfg);
+        },
+        [&](int status, bool ok, const char* reason) {
+            return send_json(req, status, make_response(ok, "set_mqtt", "", reason));
+        },
+        [&]() {
+            ota_confirm_pending_image(tk::OtaRebootClass::SuccessfulUserConfigCommit);
+            vTaskDelay(pdMS_TO_TICKS(800));
+            esp_restart();
+        },
+        {"MQTT already disabled — no reboot", "MQTT broker unchanged — no reboot",
+         "invalid broker (use host:port)", "MQTT disabled — rebooting",
+         "MQTT broker saved — rebooting", "failed to save MQTT broker"});
 }
 
 // ─── POST /set_syslog — persist the Syslog server, then reboot ───────────────────
@@ -489,50 +560,37 @@ esp_err_t handle_set_mqtt(GuardedReq rq) {
 
 esp_err_t handle_set_syslog(GuardedReq rq) {
     httpd_req_t* req = rq.req;
-    char* body = read_body(req);
-    cJSON* json = body ? cJSON_Parse(body) : nullptr;
-    free(body);
-
-    std::string server;
-    if (json) {
-        cJSON* j = cJSON_GetObjectItemCaseSensitive(json, "server");
-        if (cJSON_IsString(j) && j->valuestring) server = j->valuestring;
-    }
-    cJSON_Delete(json);
-
-    // Trim surrounding whitespace.
-    size_t s = server.find_first_not_of(" \t\r\n");
-    size_t e = server.find_last_not_of(" \t\r\n");
-    server = (s == std::string::npos) ? std::string{} : server.substr(s, e - s + 1);
-
-    // Unchanged → nothing to apply: skip the NVS write and the reboot entirely.
+    const tk::ConfigStringSubmission submitted = parse_string_submission_(req, "server");
     tk::ConfigBlob cfg;
-    tk::cfg_load(*g_config, cfg);
-    if (server == cfg.syslog_uri) {
-        return send_json(req, 200, make_response(true, "set_syslog", "",
-            server.empty() ? "Syslog already disabled — no reboot"
-                           : "Syslog server unchanged — no reboot"));
-    }
-
-    // Validate plausibility before applying a *changed* value.
-    if (!tk::syslog_target_is_plausible(server)) {
-        return send_json(req, 400, make_response(false, "set_syslog", "",
-                                                 "invalid server (use host:port)"));
-    }
-
-    cfg.syslog_uri = server;
-    bool ok = tk::cfg_save(*g_config, cfg);
-    esp_err_t r = send_json(req, ok ? 200 : 500,
-        make_response(ok, "set_syslog", "",
-                      ok ? (server.empty() ? "Syslog disabled — rebooting"
-                                           : "Syslog server saved — rebooting")
-                         : "failed to save Syslog server"));
-    if (ok) {
-        ota_confirm_pending_image(tk::OtaRebootClass::SuccessfulUserConfigCommit);
-        vTaskDelay(pdMS_TO_TICKS(800));
-        esp_restart();
-    }
-    return r;
+    return tk::apply_config_string(
+        submitted,
+        [](const std::string& value) {
+            const size_t start = value.find_first_not_of(" \t\r\n");
+            const size_t end = value.find_last_not_of(" \t\r\n");
+            return start == std::string::npos ? std::string{}
+                                              : value.substr(start, end - start + 1);
+        },
+        [&]() {
+            tk::cfg_load(*g_config, cfg);
+            return cfg.syslog_uri;
+        },
+        [](const std::string& value) { return tk::syslog_target_is_plausible(value); },
+        [](const std::string&) { return tk::ConfigProbeVerdict{}; },
+        [&](const std::string& server) {
+            cfg.syslog_uri = server;
+            return tk::cfg_save(*g_config, cfg);
+        },
+        [&](int status, bool ok, const char* reason) {
+            return send_json(req, status, make_response(ok, "set_syslog", "", reason));
+        },
+        [&]() {
+            ota_confirm_pending_image(tk::OtaRebootClass::SuccessfulUserConfigCommit);
+            vTaskDelay(pdMS_TO_TICKS(800));
+            esp_restart();
+        },
+        {"Syslog already disabled — no reboot", "Syslog server unchanged — no reboot",
+         "invalid server (use host:port)", "Syslog disabled — rebooting",
+         "Syslog server saved — rebooting", "failed to save Syslog server"});
 }
 
 // ─── POST /set_wifi — change the WiFi credentials over the LAN, undoably ──────
@@ -551,18 +609,22 @@ esp_err_t handle_set_syslog(GuardedReq rq) {
 // its refusal spends them, while an absent SSID (a router still rebooting) is given minutes.
 esp_err_t handle_set_wifi(GuardedReq rq) {
     httpd_req_t* req = rq.req;
-    char* body = read_body(req);
-    if (!body) return send_json(req, 400, make_response(false, "set_wifi", "", "missing body"));
+    ParsedJsonBody parsed = parse_json_object_body_(req);
+    if (!parsed) return send_config_body_error_(req, "set_wifi", parsed);
 
-    cJSON* json = cJSON_Parse(body);
-    free(body);
-    if (!json) return send_json(req, 400, make_response(false, "set_wifi", "", "invalid JSON"));
-
-    cJSON* js = cJSON_GetObjectItem(json, "ssid");
-    cJSON* jp = cJSON_GetObjectItem(json, "pass");
-    std::string ssid = (js && cJSON_IsString(js)) ? js->valuestring : "";
-    std::string pass = (jp && cJSON_IsString(jp)) ? jp->valuestring : "";
-    cJSON_Delete(json);
+    const char* submitted_ssid = required_string_(parsed.json.get(), "ssid");
+    const char* submitted_pass = required_string_(parsed.json.get(), "pass");
+    // An explicit empty passphrase represents an open AP; a missing/wrong-typed field represents
+    // a malformed request. Keeping those states apart prevents bad JSON from silently removing a
+    // previously stored password and rebooting the board onto a different network contract.
+    if (!submitted_ssid || !submitted_pass) {
+        return send_json(req, 400,
+                         make_response(false, "set_wifi", "",
+                                       "string ssid and pass fields required"));
+    }
+    std::string ssid = submitted_ssid;
+    std::string pass = submitted_pass;
+    parsed.json.reset();
 
     // Exactly the same contract is enforced by the captive setup endpoint and host-tested in
     // logic/wifi_credentials.hpp. Empty means open AP; 64 bytes are accepted only as a raw hex PSK.

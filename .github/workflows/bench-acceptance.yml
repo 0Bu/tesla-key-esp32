@@ -1,0 +1,102 @@
+name: bench-acceptance
+
+# Ingest one privacy-safe, operator-produced bench report as inert JSON. Bench collection is a
+# separate, explicitly authorized hardware operation. This workflow validates schema, plausibility
+# and equality to explicit operator inputs; it does not independently prove firmware bytes, NVS,
+# signature verification or physical execution. It never contacts a board, vehicle or signing
+# service and never checks out code from the reported source commit.
+on:
+  workflow_dispatch:
+    inputs:
+      report-json:
+        description: Privacy-safe closed-schema bench report JSON (no logs or hardware identifiers)
+        required: true
+        type: string
+      expected-source-sha:
+        description: Operator-declared full source commit SHA exercised by the bench
+        required: true
+        type: string
+      expected-artifact-sha256:
+        description: Operator-declared SHA-256 of the signed firmware artifact exercised
+        required: true
+        type: string
+      expected-profile:
+        description: Acceptance profile
+        required: true
+        type: choice
+        options: [smoke, soak, ota, recovery]
+      expected-target:
+        description: Hardware target
+        required: true
+        type: choice
+        options: [esp32, esp32s3, esp32c3, esp32c6]
+
+permissions:
+  contents: read
+
+jobs:
+  ingest-report:
+    # workflow_dispatch can be pointed at another ref; do not execute a branch copy of this gate.
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Check out trusted default-branch validator
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Materialize inert report input
+        env:
+          REPORT_PATH: ${{ runner.temp }}/bench-acceptance/report.json
+          REPORT_JSON: ${{ inputs.report-json }}
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir -p "$(dirname "$REPORT_PATH")"
+          printf '%s' "$REPORT_JSON" > "$REPORT_PATH"
+      - name: Validate schema, plausibility and requested identity
+        id: validate-report
+        env:
+          REPORT_PATH: ${{ runner.temp }}/bench-acceptance/report.json
+          EXPECTED_SHA: ${{ inputs.expected-source-sha }}
+          EXPECTED_ARTIFACT_SHA256: ${{ inputs.expected-artifact-sha256 }}
+          EXPECTED_PROFILE: ${{ inputs.expected-profile }}
+          EXPECTED_TARGET: ${{ inputs.expected-target }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$EXPECTED_SHA" | grep -Eq '^[0-9a-f]{40}$'
+          printf '%s' "$EXPECTED_ARTIFACT_SHA256" | grep -Eq '^[0-9a-f]{64}$'
+          python3 scripts/check-bench-acceptance.py "$REPORT_PATH" \
+            --expect-source-sha "$EXPECTED_SHA" \
+            --expect-artifact-sha256 "$EXPECTED_ARTIFACT_SHA256" \
+            --expect-profile "$EXPECTED_PROFILE" \
+            --expect-target "$EXPECTED_TARGET"
+          report_sha256="$(sha256sum "$REPORT_PATH" | cut -d ' ' -f 1)"
+          printf 'report-sha256=%s\n' "$report_sha256" >> "$GITHUB_OUTPUT"
+      - name: Publish the validated inert report
+        id: upload-report
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: bench-acceptance-report-${{ github.run_id }}-${{ inputs.expected-source-sha }}
+          path: ${{ runner.temp }}/bench-acceptance/report.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: Record validated artifact identity
+        env:
+          ARTIFACT_ID: ${{ steps.upload-report.outputs.artifact-id }}
+          ARTIFACT_DIGEST: ${{ steps.upload-report.outputs.artifact-digest }}
+          REPORT_SHA256: ${{ steps.validate-report.outputs.report-sha256 }}
+          ARTIFACT_NAME: bench-acceptance-report-${{ github.run_id }}-${{ inputs.expected-source-sha }}
+        run: |
+          set -euo pipefail
+          {
+            printf '### Bench report ingest\n\n'
+            printf -- '- Report artifact: `%s`\n' "$ARTIFACT_NAME"
+            printf -- '- Validated report.json SHA-256: `%s`\n' "$REPORT_SHA256"
+            printf -- '- Actions artifact ID: `%s`\n' "$ARTIFACT_ID"
+            printf -- '- Actions artifact digest: `%s`\n' "$ARTIFACT_DIGEST"
+            printf -- '- Evidence boundary: schema/plausibility checked; bench observations, source, firmware hash, NVS preservation and signature verification are operator-declared.\n'
+          } >> "$GITHUB_STEP_SUMMARY"

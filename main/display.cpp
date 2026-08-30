@@ -11,6 +11,7 @@
 // complete no-op on a generic board.
 
 #include "display.hpp"
+#include "logic/nvs_contract.hpp"
 #include "sdkconfig.h"
 
 #if CONFIG_TESLA_DISPLAY_ENABLED
@@ -576,9 +577,10 @@ static constexpr int SPI_CLOCK_HZ = 40 * 1000 * 1000;   // HW-verified on the T-
 // the old 180° landscape flip) → the equivalent index: unflipped → 1 (landscape), flipped → 3.
 static int load_disp_rot() {
     nvs_handle_t h; uint8_t rot = 0xFF, flip = 0;
-    if (nvs_open("tesla_cfg", NVS_READONLY, &h) == ESP_OK) {
-        if (nvs_get_u8(h, "disp_rot", &rot) != ESP_OK) rot = 0xFF;   // absent → migrate/default
-        nvs_get_u8(h, "disp_flip", &flip);                          // legacy key (ignored if disp_rot present)
+    if (nvs_open(tk::nvs_contract::kConfigNamespace, NVS_READONLY, &h) == ESP_OK) {
+        if (nvs_get_u8(h, tk::nvs_contract::kDisplayRotation, &rot) != ESP_OK)
+            rot = 0xFF;  // absent → migrate/default
+        nvs_get_u8(h, tk::nvs_contract::kLegacyDisplayFlip, &flip);
         nvs_close(h);
     }
     if (rot <= 3) return rot;
@@ -586,8 +588,8 @@ static int load_disp_rot() {
 }
 static void save_disp_rot(int rot) {
     nvs_handle_t h;
-    if (nvs_open("tesla_cfg", NVS_READWRITE, &h) == ESP_OK) {
-        nvs_set_u8(h, "disp_rot", (uint8_t)(rot & 3));
+    if (nvs_open(tk::nvs_contract::kConfigNamespace, NVS_READWRITE, &h) == ESP_OK) {
+        nvs_set_u8(h, tk::nvs_contract::kDisplayRotation, (uint8_t)(rot & 3));
         nvs_commit(h);
         nvs_close(h);
     }
@@ -613,6 +615,7 @@ static void rotate_90(void) {
 }
 
 static void display_task(void* arg) {
+  try {
     VehicleController& v = *static_cast<VehicleController*>(arg);
 
     // BOOT button (BOOT_BTN: S3 IO0): input with pull-up; a press pulls it LOW.
@@ -660,6 +663,10 @@ static void display_task(void* arg) {
           vTaskDelay(pdMS_TO_TICKS(200));
       }
     }
+  } catch (...) {
+      ESP_LOGE(TAG, "display task boundary threw outside a frame — stopping task");
+      vTaskDelete(nullptr);
+  }
 }
 
 void display_start(VehicleController& vehicle) {

@@ -18,8 +18,13 @@ fw="${FIRMWARE_STAGE_DIR:-$repo_root/_fw}"
 docs="$repo_root/docs"
 source_sha="${3:-$(git -C "$repo_root" rev-parse HEAD)}"
 
-[[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || {
+VERSION_RE='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$'
+[[ "$version" =~ $VERSION_RE ]] || {
   echo "invalid Pages version (expected X.Y.Z or X.Y.Z-prerelease): $version" >&2
+  exit 2
+}
+(( ${#version} <= 31 )) || {
+  echo "invalid Pages version (must fit the 31-byte ESP app descriptor): $version" >&2
   exit 2
 }
 [[ "$source_sha" =~ ^[0-9a-f]{40}$ ]] || {
@@ -101,6 +106,7 @@ for md in "$docs"/*.md; do
 done
 
 builds=""
+# EXACT_FOUR_TARGETS_BEGIN pages
 for target in $TARGETS; do
   source_dir="$fw/$target"
   for name in bootloader.bin partition-table.bin tesla-key-esp32.bin ota_data_initial.bin; do
@@ -109,6 +115,7 @@ for target in $TARGETS; do
       echo "missing/unsafe signed Pages input: $path" >&2; exit 1;
     }
   done
+  python3 "$repo_root/scripts/check-otadata-contract.py" "$source_dir/ota_data_initial.bin"
 
   bo="$(boot_offset "$target")"
   boot_size="$(file_size "$source_dir/bootloader.bin")"
@@ -153,6 +160,7 @@ JSON
   builds="${builds:+$builds,
 }$entry"
 done
+# EXACT_FOUR_TARGETS_END pages
 
 cat > "$out/manifest.json" <<JSON
 {
