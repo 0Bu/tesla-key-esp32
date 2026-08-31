@@ -15,7 +15,8 @@ This project is an **ESP-IDF 5.x C++ firmware** for the **ESP32 family** — one
 builds for esp32 / esp32s3 / esp32c3 / esp32c6 — exactly the four targets yoziru/tesla-ble
 supports, which the ESP-IDF Component Manager enforces at dependency resolution. All four receive
 the complete ordered repository patch series in `patches/tesla-ble/` via root CMake: replay
-rejection, transactional key regeneration/persistence, and bounded RX-framing recovery logs. The
+rejection, transactional key regeneration/persistence, bounded RX-framing recovery logs, and the
+trim of unsent Parental Controls actions that keeps esp32c6 under the app-size policy. The
 firmware acts as a **BLE↔HTTP proxy for a Tesla
 vehicle**, API-compatible with TeslaBleHttpProxy,
 so it works as an **evcc** BLE vehicle. It is small but dense with **non-local invariants**:
@@ -497,7 +498,7 @@ what each must stay true to:
   diff is feature-relevant.
 - **`$vehicle-command-audit`** compares the firmware against upstream `teslamotors/vehicle-command`,
   gated by what `yoziru/tesla-ble` (pin in `main/idf_component.yml`) can actually do. Re-verify the
-  tesla-ble **pin** in its source map (`v5.1.1`) still matches `idf_component.yml`, that its upstream
+  tesla-ble **pin** in its source map (`v5.1.2`) still matches `idf_component.yml`, that its upstream
   file paths still resolve (e.g. `pkg/vehicle/charge.go`), and that its "worked findings" table is
   not asserting drift already fixed in the tree. It is the *upstream-conformance* counterpart to this
   skill — keep the two complementary, not overlapping.

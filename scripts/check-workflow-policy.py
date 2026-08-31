@@ -109,7 +109,7 @@ EXPECTED_ACTIONS = {
         "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c",
         "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c",
         "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
-        "softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228",
+        "softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64",
     ),
     ("build.yml", "deploy"): (
         "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
@@ -128,7 +128,7 @@ EXPECTED_ACTIONS = {
         "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
     ),
     ("renovate.yaml", "renovate"): (
-        "renovatebot/github-action@5402b206248e5a8c8427a15102702eb9c1793efc",
+        "renovatebot/github-action@39b914146caeff8cd512e61c8992f1d5913af85c",
     ),
     ("signed-pr-preview.yml", "validate"): (),
     ("signed-pr-preview.yml", "trusted-rebuild"): (
@@ -166,7 +166,7 @@ SIGNING_ENVIRONMENT_JOBS = {
 # reviewed allowlists: step order plus every name/uses/with/env/if/run byte is pinned.  Semantic
 # checks below keep failures explanatory; this final digest closes gaps in the narrow scanner.
 EXPECTED_PRIVILEGED_JOB_SHA256 = {
-    ("build.yml", "publish"): "9ba6593d9072f9e2b4534ac893b026fb1e0e547ea69b5fa2c49f27f85bcb5968",
+    ("build.yml", "publish"): "fa8acc9cd7caebc1ed0de9dd6560108d8e0cc2321e99982ada7ee769623f707b",
     ("build.yml", "deploy"): "cf1d70d6cf11600e3940ff58983a7101b75b191b8cdf10b8cfaebf60b20f2092",
     ("signed-pr-preview.yml", "sign-preview"): "24b664bb2ec5aa6220bdca95568781b8c25e8d2ff53c617956ee90ca07c4b22d",
 }
@@ -1252,11 +1252,11 @@ def self_test(root: Path) -> None:
          "          name: firmware-unsigned\n          path: _ci-input\n",
          "exact privileged job schema drift"),
         ("privileged-action-owner", "build.yml",
-         "softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228",
-         "trusted/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228",
+         "softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64",
+         "trusted/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64",
          "action inventory drift"),
         ("privileged-action-sha", "build.yml",
-         "softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228",
+         "softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64",
          "softprops/action-gh-release@0123456789abcdef0123456789abcdef01234567",
          "action inventory drift"),
         ("preview-privileged-ref", "signed-pr-preview.yml",

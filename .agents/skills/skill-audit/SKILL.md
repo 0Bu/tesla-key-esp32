@@ -104,7 +104,7 @@ the authority for the per-sibling drift check; `$project-review` defers the mech
   USB gets only a short bounded boot/reachability retry, never that OTA probation wait.
 - **`$vehicle-command-audit`** — compares the firmware against upstream `teslamotors/vehicle-command`,
   gated by what `yoziru/tesla-ble` can do. Verify the tesla-ble **pin** in its source map
-  (`v5.1.1`) still matches `main/idf_component.yml`, every repository-owned patch under
+  (`v5.1.2`) still matches `main/idf_component.yml`, every repository-owned patch under
   `patches/tesla-ble/` is applied lexically/idempotently/fail-closed, and the complete patch series
   applies through root CMake to the one materialised managed-component tree; its upstream paths resolve
   (e.g. `pkg/vehicle/charge.go`), and its "worked findings" don't assert drift already fixed.

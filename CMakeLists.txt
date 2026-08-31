@@ -19,9 +19,11 @@ idf_build_set_property(COMPILE_OPTIONS "-Wno-error=format" APPEND)
 
 project(tesla-key-esp32)
 
-# yoziru/tesla-ble v5.1.1 has two correctness gaps: replayed CarServer responses continue
+# yoziru/tesla-ble v5.1.2 has two correctness gaps: replayed CarServer responses continue
 # into callbacks/FIFO completion, and key regeneration cannot report or recover from a
-# persistence failure. Apply the ordered, reviewable repository-owned patch series after
+# persistence failure. It also binds Parental Controls actions into the VehicleAction oneof
+# that this firmware never sends, which keeps their descriptors out of reach of --gc-sections.
+# Apply the ordered, reviewable repository-owned patch series after
 # Component Manager has materialised the pinned dependency and before any source compiles.
 execute_process(
     COMMAND "${CMAKE_SOURCE_DIR}/scripts/apply-tesla-ble-patches.sh"
