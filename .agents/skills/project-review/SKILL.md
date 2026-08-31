@@ -518,7 +518,7 @@ what each must stay true to:
   and language are a separate axis from coherence.
 - **`$feature-docs`** keeps `docs/FEATURES.md` in sync when a platform feature lands or changes.
   Re-verify its conditional merge gate against `tools/agent-hooks/require-pr-gates.sh`, especially
-  that the policy-path set covers `AGENTS.md`, `.agents/`, `.codex/`,
+  that the policy-path set covers `AGENTS.md`, `.agents/`, `.codex/`, `.claude/`,
   `.github/PULL_REQUEST_TEMPLATE.md`, `tools/agent-hooks/`, and `tools/agent-config/`, and that the
   firmware/release set still covers `main/`, `test/`, `sdkconfig.defaults*`,
   `partitions.csv`, the shipped Pages runtime (`docs/index.html`, `installer-bootstrap.mjs`,
@@ -592,10 +592,10 @@ lenses this skill delegates to; keep them complementary, not contradictory):
   against the *Memory / heap* invariant above (largest **contiguous** block is the binding limit,
   `handle_all` try/catch → 503, streamed `/diag`) and against `main.cpp`'s heap-attribution log —
   the two heap maps must not diverge.
-- **`agent_config_reviewer`** audits runner-neutral agent configuration, skills, hooks, and
-  subagents—not firmware logic. Confirm its boundary still points firmware-correctness work back
-  at this skill and its inventory matches `AGENTS.md`, `.agents/`, `.codex/`, and
-  `tools/agent-hooks/`.
+- **`agent_config_reviewer`** audits runner-neutral agent configuration, both runner adapters,
+  skills, hooks, and subagents—not firmware logic. Confirm its boundary still points
+  firmware-correctness work back at this skill and its inventory matches `AGENTS.md`, `.agents/`,
+  `.codex/`, `.claude/`, and `tools/agent-hooks/`.
 - **`multi_target_build_reviewer`** is the per-target build/config divergence lens (the four
   targets built from one tree). Re-verify its facts against the *Cross-cutting consistency*
   section and the build wiring: the target set (esp32/s3/c3/c6), per-target bootloader offsets
@@ -607,9 +607,11 @@ lenses this skill delegates to; keep them complementary, not contradictory):
 - **Any skill or agent added since this was written** must be audited too — and added to this list.
 
 A skill or agent that drives a script is only as current as the script: when the script changes,
-re-read the doc that documents it. Project hooks in `.codex/hooks.json` must delegate to the
-neutral implementation under `tools/agent-hooks/` (`agent_hook.py`, `require-pr-gates.sh`, and
-their shared helpers). A hook whose behaviour a skill/agent describes must match that core.
+re-read the doc that documents it. Runner adapters in `.codex/hooks.json` and
+`.claude/settings.json` must both delegate to the neutral implementation under `tools/agent-hooks/`
+(`agent_hook.py`, `require-pr-gates.sh`, and their shared helpers), binding identical commands and
+timeouts. A hook whose behaviour a skill/agent describes must match that core, and an adapter that
+restates policy instead of delegating is itself a finding.
 
 ## Verification discipline (avoid confident-but-wrong findings)
 

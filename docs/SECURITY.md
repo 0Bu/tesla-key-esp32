@@ -595,8 +595,12 @@ push, merge, release, USB, flash, OTA, NVS, or live vehicle operations. The proj
 does not grant those mutations automatically; specialist reviewers under `.codex/agents/` run
 with `sandbox_mode = "read-only"`, no model pin, and no approval escalation.
 
-The project configuration calls the runner-neutral core under
-[`tools/agent-hooks/`](../tools/agent-hooks/). Its secret, partition, and PR-gate checks are lexical
+Both runner adapters — [`.codex/hooks.json`](../.codex/hooks.json) and
+[`.claude/settings.json`](../.claude/settings.json) — call the same runner-neutral core under
+[`tools/agent-hooks/`](../tools/agent-hooks/) with byte-identical commands and timeouts, so no runner
+gets a weaker guard set than another, and a runner whose adapter is missing runs with no guards at
+all. `.claude/agents/*.md` mirror the read-only reviewers verbatim and grant no file-mutation tool;
+`.claude/settings.json` pre-approves no tool. Their secret, partition, and PR-gate checks are lexical
 defense in depth: they do not replace sandboxing, explicit authorization, branch protection, CI
 trust separation, or human review. In particular, no PR or agent-configuration gate receives
 `OTA_SIGNING_KEY`; through agent tools, the only permitted signing-key use remains

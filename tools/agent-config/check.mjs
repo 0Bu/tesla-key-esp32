@@ -68,9 +68,6 @@ function regularFile(relative, label) {
   if (!stat.isFile()) die(1, `${label} is not a regular file: ${relative}`);
 }
 
-if (fs.existsSync(repoPath(".claude"))) {
-  die(1, ".claude metadata must remain retired; use AGENTS.md, .agents, .codex and tools/agent-hooks");
-}
 if (fs.existsSync(repoPath(".codex/migration-manifest.json"))) {
   die(1, ".codex/migration-manifest.json must remain retired with the compatibility layer");
 }
@@ -119,18 +116,19 @@ const reviewedSkillSha256 = new Map([
   ["add-logic-test", "f8a37fddbbb5c47afa9eca4fb4823c203af099718b3327a656c717d0462546f7"],
   ["device-diag", "7babf410873975ec05bb029c3c9522e70f9aadd96d0823829c48236f24ca3d44"],
   ["display-preview", "4bff95d0314d50ce29d67beac7ef4f9db1ebcbb2fa609335e560e162f5a1ed46"],
-  ["feature-docs", "c2d26e873399d4970145ed53ab64e5e3abfd198391343ad107ec1dbdf10012ff"],
+  ["feature-docs", "d92ec292681c0c9dbac126811acb49238d9271725807f8dc487011b62b956627"],
   ["flash-esp32", "cd67535f6206b72eb824548fce9338f97c5e813aff14633c6149b636b2146aeb"],
   ["ota-release-verify", "347c7f3cdffa25a9563f104c099e08d1f91101e2d54b39442b97e9fcbc77400b"],
-  ["pr-hygiene", "7ef6544f83a50dbe696e360081c33091ce8d7f0826ec839efd7c4805cdf2344a"],
-  ["project-review", "1cb0f6c4f5df556743c9a32670662ae51e76bc4b13d823a8f682ab8693d18d2d"],
+  ["pr-hygiene", "e3cba227139f65a60616fb308c829f5320a8352dfcd250c94982157c0be8d60b"],
+  ["project-review", "89b46c5129c2fd885e9f1a2aa9f0c94299f0043e48681dc0ddfe515d0282f9fb"],
   ["ship", "41ae3355c7b2d24624d92a5c23666b18361083f8ef305faf43b57303a9f20275"],
-  ["skill-audit", "231af57cfccedb5e16d2a5196b2d9857d34a3098b5e74885f37f51a7590d684a"],
+  ["skill-audit", "d091ec35cc2ff4f250430778dd942d6c6b6203b292539ff1b49194a63b5b1c19"],
   ["usb-recovery", "6f3cbd9533e75d14b5a14cd19987fa07db046b6c5412f4d52d2aa54944481cf9"],
   ["vehicle-command-audit", "3921ad8810c7804caf145dbee2c2571373dca712c0488a9c77dd7746b19c691a"],
 ]);
 const featureDocsScopeTokens = [
   "main/", "test/", "sdkconfig.defaults*", "partitions.csv", "AGENTS.md", ".agents/", ".codex/",
+  ".claude/",
   ".github/PULL_REQUEST_TEMPLATE.md",
   "tools/agent-hooks/", "tools/agent-config/", "docs/index.html", "installer-bootstrap.mjs",
   "serial-port-release.mjs", "web-installer.mjs", "docs/vendor/",
@@ -355,6 +353,119 @@ if (multiTargetPublicationContracts.some((required) => !multiTargetReviewer.incl
   die(1, "multi-target reviewer is missing the independent-rebuild/publication DAG contract");
 }
 
+// ---- Runner adapters -------------------------------------------------------
+// Claude Code reads CLAUDE.md, .claude/settings.json, .claude/skills and .claude/agents; it does
+// not read AGENTS.md, .agents/skills or .codex/hooks.json. Without an adapter a Claude session
+// loads none of this project's policy and arms none of its hooks, while a Codex session arms all
+// of them. The adapter closes that asymmetry and is allowed to do nothing else: every entry below
+// must delegate to the canonical source, never restate or reinterpret a boundary.
+const adapterBudget = positiveInteger(
+  process.env.AGENT_ADAPTER_BUDGET_BYTES || "4096", "adapter budget",
+);
+
+function adapterFile(relative, label) {
+  regularFile(relative, label);
+  const size = fs.statSync(repoPath(relative)).size;
+  if (size > adapterBudget) {
+    die(1, `${relative} is ${size} bytes, over the ${adapterBudget}-byte adapter budget; adapters delegate, they do not restate policy`);
+  }
+  return fs.readFileSync(repoPath(relative), "utf8");
+}
+
+const claudeMemory = adapterFile(".claude/CLAUDE.md", "Claude memory adapter");
+if (!claudeMemory.includes("@../AGENTS.md")) {
+  die(1, ".claude/CLAUDE.md must import @../AGENTS.md; Claude Code reads CLAUDE.md, not AGENTS.md");
+}
+const claudeMemoryContracts = [
+  "Analysis, review, audit, diagnosis and triage are **read-only**.",
+  "Where the two could be read differently, `AGENTS.md` wins.",
+];
+const normalizedMemory = normalizeProse(claudeMemory);
+if (claudeMemoryContracts.some((required) => !normalizedMemory.includes(required))) {
+  die(1, ".claude/CLAUDE.md must restate the read-only boundary and defer to AGENTS.md");
+}
+regularFile(".claude/settings.json", "Claude hook configuration");
+
+function codexReviewer(relative) {
+  const text = fs.readFileSync(repoPath(relative), "utf8");
+  const name = text.match(/^name = "([^"]+)"$/m);
+  const description = text.match(/^description = "([^"]+)"$/m);
+  const instructions = text.match(/^developer_instructions = """\n([\s\S]*?)\n"""\s*$/m);
+  if (!name || !description || !instructions) die(1, `${relative} is not a parsable reviewer`);
+  return { name: name[1], description: description[1], instructions: instructions[1].trim() };
+}
+
+const adapterReviewerTools = "Read, Grep, Glob, Bash";
+const expectedAdapterReviewers = new Map(actualReviewerTargets.map((relative) => {
+  const reviewer = codexReviewer(relative);
+  return [`${reviewer.name.replaceAll("_", "-")}.md`, reviewer];
+}));
+let actualAdapterReviewers;
+try {
+  actualAdapterReviewers = fs.readdirSync(repoPath(".claude/agents"), { withFileTypes: true })
+    .filter((entry) => entry.isFile()).map((entry) => entry.name).sort();
+} catch { die(1, ".claude/agents is missing"); }
+if ([...expectedAdapterReviewers.keys()].sort().join("\0") !== actualAdapterReviewers.join("\0")) {
+  die(1, "Claude reviewer adapters differ from the canonical .codex/agents set");
+}
+for (const [file, reviewer] of expectedAdapterReviewers) {
+  const relative = `.claude/agents/${file}`;
+  const size = fs.statSync(repoPath(relative)).size;
+  if (size > adapterBudget + Buffer.byteLength(reviewer.instructions, "utf8")) {
+    die(1, `${relative} adds more than the adapter budget to its mirrored reviewer instructions`);
+  }
+  const adapter = restrictedFrontmatter(repoPath(relative), `Claude reviewer ${file}`);
+  const keys = [...adapter.values.keys()].sort();
+  if (keys.join("\0") !== "description\0name\0tools") {
+    die(1, `${relative} frontmatter keys must be exactly name, description and tools`);
+  }
+  if (adapter.values.get("name") !== file.replace(/\.md$/, "")) {
+    die(1, `${relative} frontmatter name must match its filename`);
+  }
+  if (adapter.values.get("description") !== reviewer.description) {
+    die(1, `${relative} description drifted from its canonical .codex reviewer`);
+  }
+  if (adapter.values.get("tools") !== adapterReviewerTools) {
+    die(1, `${relative} must grant exactly "${adapterReviewerTools}"; a read-only reviewer gets no file-mutation tool`);
+  }
+  if (!adapter.body.endsWith(reviewer.instructions)) {
+    die(1, `${relative} instructions drifted from .codex/agents/${reviewer.name}.toml; both runners review one contract`);
+  }
+}
+
+const canonicalSkillDescriptions = new Map(canonicalSkills.map((name) => [
+  name,
+  restrictedFrontmatter(repoPath(`.agents/skills/${name}/SKILL.md`), `canonical skill ${name}`)
+    .values.get("description"),
+]));
+const adapterSkills = directoryNames(".claude/skills");
+if (adapterSkills.join("\0") !== canonicalSkills.join("\0")) {
+  die(1, "Claude skill adapters must cover exactly the canonical .agents/skills set");
+}
+for (const name of adapterSkills) {
+  const relative = `.claude/skills/${name}/SKILL.md`;
+  adapterFile(relative, `Claude skill adapter ${name}`);
+  const adapter = restrictedFrontmatter(repoPath(relative), `Claude skill adapter ${name}`);
+  const keys = [...adapter.values.keys()].sort();
+  if (keys.join("\0") !== "description\0name") {
+    die(1, `${relative} frontmatter keys must be exactly name and description`);
+  }
+  if (adapter.values.get("name") !== name) die(1, `${relative} frontmatter name mismatch`);
+  if (adapter.values.get("description") !== canonicalSkillDescriptions.get(name)) {
+    die(1, `${relative} description drifted from .agents/skills/${name}/SKILL.md`);
+  }
+  const delegation = [
+    `[\`.agents/skills/${name}/SKILL.md\`](../../../.agents/skills/${name}/SKILL.md)`,
+    "This adapter grants nothing.",
+    "If this file and the canonical skill ever disagree, the canonical skill wins",
+    `Refer to this workflow as \`$${name}\` in reports and PR gate records.`,
+  ];
+  const normalized = normalizeProse(adapter.text);
+  if (delegation.some((required) => !normalized.includes(required))) {
+    die(1, `${relative} must delegate to the canonical skill without widening it`);
+  }
+}
+
 const safety = readJson(repoPath("tools/agent-config/safety-invariants.json"), "safety invariants");
 if (safety?.schema_version !== 1 || !Array.isArray(safety.invariants) || safety.invariants.length === 0) {
   die(2, "safety invariants need schema_version 1 and a non-empty invariants array");
@@ -377,4 +488,5 @@ for (const invariant of safety.invariants) {
 }
 
 console.log(`agent-config: ${canonicalSkills.length} canonical skills, ${actualReviewerTargets.length} reviewers and ${invariantIds.size} instruction invariants clean`);
+console.log(`agent-config: Claude adapter mirrors ${adapterSkills.length} skills and ${expectedAdapterReviewers.size} reviewers`);
 console.log(`agent-config: AGENTS.md budget ${agentsSize}/${budget} bytes`);

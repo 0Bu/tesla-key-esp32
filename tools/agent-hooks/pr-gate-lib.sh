@@ -43,7 +43,7 @@ agent_gate_workdir_matches() {
 #   catalog can have moved. Keep the release workflow set explicit: Renovate is dependency
 #   maintenance, while build/sign/publish and preview cleanup are catalogued release behavior.
 gate_feature_docs_relevant() {
-  grep -Eq '^(main/|test/|sdkconfig\.defaults($|\.)|partitions\.csv$|AGENTS\.md$|\.agents/|\.codex/|\.github/PULL_REQUEST_TEMPLATE\.md$|tools/agent-hooks/|tools/agent-config/|docs/(index\.html|installer-bootstrap\.mjs|serial-port-release\.mjs|web-installer\.mjs|vendor/)|\.github/workflows/(build|signed-pr-preview|pr-preview-cleanup|pr-policy|bench-acceptance)\.yml$|scripts/release-relevance\.sh$)'
+  grep -Eq '^(main/|test/|sdkconfig\.defaults($|\.)|partitions\.csv$|AGENTS\.md$|\.agents/|\.codex/|\.claude/|\.github/PULL_REQUEST_TEMPLATE\.md$|tools/agent-hooks/|tools/agent-config/|docs/(index\.html|installer-bootstrap\.mjs|serial-port-release\.mjs|web-installer\.mjs|vendor/)|\.github/workflows/(build|signed-pr-preview|pr-preview-cleanup|pr-policy|bench-acceptance)\.yml$|scripts/release-relevance\.sh$)'
 }
 
 # gate_checkbox_status <content> <key>

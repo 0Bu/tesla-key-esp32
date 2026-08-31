@@ -12,7 +12,7 @@ fail() { echo "agent-config selftest: $1" >&2; exit 1; }
 make_fixture() {
   local dest="$1"
   rm -rf "$dest"
-  mkdir -p "$dest/.codex" "$dest/.agents" "$dest/.github" "$dest/docs" "$dest/tools"
+  mkdir -p "$dest/.codex" "$dest/.agents" "$dest/.claude" "$dest/.github" "$dest/docs" "$dest/tools"
   cp "$ROOT/.mcp.json" "$dest/.mcp.json"
   cp "$ROOT/AGENTS.md" "$dest/AGENTS.md"
   cp "$ROOT/.github/PULL_REQUEST_TEMPLATE.md" "$dest/.github/PULL_REQUEST_TEMPLATE.md"
@@ -20,6 +20,10 @@ make_fixture() {
   cp "$ROOT/.codex/config.toml" "$dest/.codex/config.toml"
   cp "$ROOT/.codex/hooks.json" "$dest/.codex/hooks.json"
   cp -R "$ROOT/.agents/skills" "$dest/.agents/skills"
+  cp "$ROOT/.claude/CLAUDE.md" "$dest/.claude/CLAUDE.md"
+  cp "$ROOT/.claude/settings.json" "$dest/.claude/settings.json"
+  cp -R "$ROOT/.claude/agents" "$dest/.claude/agents"
+  cp -R "$ROOT/.claude/skills" "$dest/.claude/skills"
   cp "$ROOT/docs/FEATURES.md" "$dest/docs/FEATURES.md"
   cp -R "$ROOT/tools/agent-config" "$dest/tools/agent-config"
   cp -R "$ROOT/tools/agent-hooks" "$dest/tools/agent-hooks"
@@ -44,15 +48,55 @@ expect_failure() {
   passes=$((passes + 1))
 }
 
-echo "== clean contract and retired metadata =="
+echo "== clean contract, retired migration state and runner adapters =="
 fixture="$WORK/clean"; make_fixture "$fixture"
 run_gate "$fixture" >/dev/null || fail "clean fixture failed"
 echo "  PASS  clean fixture"
 passes=$((passes + 1))
 
-fixture="$WORK/claude-residue"; make_fixture "$fixture"
-mkdir "$fixture/.claude"
-expect_failure "retired .claude metadata" "$fixture" ".claude metadata must remain retired"
+fixture="$WORK/adapter-missing"; make_fixture "$fixture"
+rm -rf "$fixture/.claude"
+expect_failure "missing Claude adapter" "$fixture" "Claude memory adapter is missing"
+
+fixture="$WORK/adapter-import"; make_fixture "$fixture"
+perl -0pi -e 's/\@\.\.\/AGENTS\.md/AGENTS.md/' "$fixture/.claude/CLAUDE.md"
+expect_failure "adapter drops the AGENTS.md import" "$fixture" "must import @../AGENTS.md"
+
+fixture="$WORK/adapter-boundary"; make_fixture "$fixture"
+perl -0pi -e 's/are \*\*read-only\*\*\./may edit./' "$fixture/.claude/CLAUDE.md"
+expect_failure "adapter drops the read-only boundary" "$fixture" \
+  "must restate the read-only boundary and defer to AGENTS.md"
+
+fixture="$WORK/adapter-policy-bloat"; make_fixture "$fixture"
+head -c 5000 /dev/zero | tr '\0' 'x' >> "$fixture/.claude/CLAUDE.md"
+expect_failure "adapter restates policy" "$fixture" "over the 4096-byte adapter budget"
+
+fixture="$WORK/adapter-reviewer-drift"; make_fixture "$fixture"
+perl -0pi -e 's/Never edit files/May edit files/' \
+  "$fixture/.claude/agents/doc-drift-checker.md"
+expect_failure "Claude reviewer instruction drift" "$fixture" \
+  "instructions drifted from .codex/agents"
+
+fixture="$WORK/adapter-reviewer-tools"; make_fixture "$fixture"
+perl -0pi -e 's/^tools: Read, Grep, Glob, Bash$/tools: Read, Grep, Glob, Bash, Edit, Write/m' \
+  "$fixture/.claude/agents/heap-safety-reviewer.md"
+expect_failure "writable Claude reviewer" "$fixture" "a read-only reviewer gets no file-mutation tool"
+
+fixture="$WORK/adapter-skill-missing"; make_fixture "$fixture"
+rm -rf "$fixture/.claude/skills/ship"
+expect_failure "unmirrored canonical skill" "$fixture" \
+  "must cover exactly the canonical .agents/skills set"
+
+fixture="$WORK/adapter-skill-description"; make_fixture "$fixture"
+perl -0pi -e 's/^description: .+$/description: Canary./m' \
+  "$fixture/.claude/skills/flash-esp32/SKILL.md"
+expect_failure "Claude skill description drift" "$fixture" "description drifted from .agents/skills"
+
+fixture="$WORK/adapter-skill-widening"; make_fixture "$fixture"
+perl -0pi -e 's/This adapter grants nothing\./This adapter may widen the canonical boundary./' \
+  "$fixture/.claude/skills/usb-recovery/SKILL.md"
+expect_failure "Claude skill adapter widening" "$fixture" \
+  "must delegate to the canonical skill without widening it"
 
 fixture="$WORK/migration-residue"; make_fixture "$fixture"
 printf '{}\n' > "$fixture/.codex/migration-manifest.json"
@@ -300,6 +344,47 @@ value["hooks"]["PreToolUse"][0]["hooks"][0]["async"] = True
 path.write_text(json.dumps(value, indent=2) + "\n")
 PY
 expect_failure "async blocking hook" "$fixture" "must not be async"
+
+fixture="$WORK/claude-hook-command"; make_fixture "$fixture"
+python3 - "$fixture/.claude/settings.json" <<'PYCANARY'
+import json, pathlib, sys
+path = pathlib.Path(sys.argv[1])
+value = json.loads(path.read_text())
+value["hooks"]["PreToolUse"][0]["hooks"][0]["command"] = "true"
+path.write_text(json.dumps(value, indent=2) + "\n")
+PYCANARY
+expect_failure "Claude hook command drift" "$fixture" "Claude PreToolUse command drifted"
+
+fixture="$WORK/claude-hook-async"; make_fixture "$fixture"
+python3 - "$fixture/.claude/settings.json" <<'PYCANARY'
+import json, pathlib, sys
+path = pathlib.Path(sys.argv[1])
+value = json.loads(path.read_text())
+value["hooks"]["PreToolUse"][0]["hooks"][0]["async"] = True
+path.write_text(json.dumps(value, indent=2) + "\n")
+PYCANARY
+expect_failure "async Claude blocking hook" "$fixture" "must not be async"
+
+fixture="$WORK/claude-hook-preapproval"; make_fixture "$fixture"
+python3 - "$fixture/.claude/settings.json" <<'PYCANARY'
+import json, pathlib, sys
+path = pathlib.Path(sys.argv[1])
+value = json.loads(path.read_text())
+value["permissions"]["allow"] = ["Bash"]
+path.write_text(json.dumps(value, indent=2) + "\n")
+PYCANARY
+expect_failure "Claude tool pre-approval" "$fixture" "must pre-approve no tool"
+
+fixture="$WORK/claude-hook-matcher"; make_fixture "$fixture"
+python3 - "$fixture/.claude/settings.json" <<'PYCANARY'
+import json, pathlib, sys
+path = pathlib.Path(sys.argv[1])
+value = json.loads(path.read_text())
+group = value["hooks"]["PreToolUse"][0]
+group["matcher"] = group["matcher"].removeprefix("^")
+path.write_text(json.dumps(value, indent=2) + "\n")
+PYCANARY
+expect_failure "unanchored Claude matcher" "$fixture" "Claude PreToolUse matcher drifted"
 
 fixture="$WORK/hook-matcher"; make_fixture "$fixture"
 python3 - "$fixture/.codex/hooks.json" <<'PY'

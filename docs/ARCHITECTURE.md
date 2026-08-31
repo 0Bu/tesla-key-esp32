@@ -22,8 +22,13 @@ the canonical `$project-review` skill checks for drift between them.
 [`AGENTS.md`](../AGENTS.md) is the concise, runner-neutral policy loaded for normal repository
 work. Reusable workflows live under [`.agents/skills/`](../.agents/skills/), Codex project
 configuration and read-only specialist reviewers under [`.codex/`](../.codex/), and lifecycle
-policy lives under [`tools/agent-hooks/`](../tools/agent-hooks/). CI mutation-tests this single
-project-owned configuration and rejects reintroduction of retired runner-specific metadata.
+policy lives under [`tools/agent-hooks/`](../tools/agent-hooks/). Each runner reaches that one core
+through a thin adapter — [`.codex/hooks.json`](../.codex/hooks.json) and
+[`.claude/settings.json`](../.claude/settings.json) — because a runner reads only its own
+configuration: Claude Code loads `CLAUDE.md`, `.claude/settings.json`, `.claude/skills/` and
+`.claude/agents/`, and never `AGENTS.md`, `.agents/skills/` or `.codex/hooks.json`. An adapter holds
+no policy; CI mutation-tests both against the canonical set and rejects any adapter that drifts from
+it, restates a boundary or exceeds its byte budget.
 `.github/workflows/pr-policy.yml` evaluates the current SHA-bound gate records from trusted
 base-branch code with a read-only token and never checks out PR code; repository rules must require
 its `pr-policy / current-head-records` status for that executable policy to block merges server-side.

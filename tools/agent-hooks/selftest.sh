@@ -174,6 +174,13 @@ rename='[[{"filename":"docs/chore.md","previous_filename":".codex/hooks.json"}]]
 rename_out="$(printf '%s' "$rename" | gate_extract_changed_pages 1)" || rename_out=FAIL
 if [ "$rename_out" = $'docs/chore.md\n.codex/hooks.json' ] && printf '%s\n' "$rename_out" | gate_feature_docs_relevant; then pass_case 'rename out of catalogued agent-policy path preserves relevance'; else fail_case 'rename extraction'; fi
 if printf '%s\n' '.github/PULL_REQUEST_TEMPLATE.md' | gate_feature_docs_relevant; then pass_case 'PR template is feature-docs relevant'; else fail_case 'PR template relevance'; fi
+if printf '%s\n' '.claude/settings.json' | gate_feature_docs_relevant \
+   && printf '%s\n' '.claude/skills/ship/SKILL.md' | gate_feature_docs_relevant \
+   && ! printf '%s\n' 'docs/MCP.md' | gate_feature_docs_relevant; then
+  pass_case 'Claude runner adapter is feature-docs relevant'
+else
+  fail_case 'Claude adapter feature-docs relevance'
+fi
 if printf '%s\n' '.github/workflows/pr-policy.yml' | gate_feature_docs_relevant \
    && printf '%s\n' '.github/workflows/bench-acceptance.yml' | gate_feature_docs_relevant; then
   pass_case 'policy and bench workflows are feature-docs relevant'

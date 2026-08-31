@@ -169,8 +169,9 @@ ESP HTTP, NimBLE, NVS, OTA or FreeRTOS shells.
 
 Update the owning document with the code/configuration that changes its contract. Do not move long
 API, architecture, incident or field references into this compact file. References to project
-skills use `$skill-name` and canonical paths under `.agents/skills/`; `/skill-name` is accepted only
-in historical PR records. Hook policy lives in `tools/agent-hooks/`.
+skills use `$skill-name` and canonical paths under `.agents/skills/`; a runner's own `/skill-name`
+invocation selects the same workflow but is not the spelling for a PR record. Hook policy lives in
+`tools/agent-hooks/`, never in a runner adapter.
 
 ## PR, review and merge discipline
 
@@ -196,6 +197,10 @@ in historical PR records. Hook policy lives in `tools/agent-hooks/`.
   authorized that phase explicitly. Local migration completion is not Phase 7 publication approval.
 
 Runner-neutral policy is implemented in [`tools/agent-hooks/`](tools/agent-hooks/) and configured
-for this project by [`.codex/hooks.json`](.codex/hooks.json). Hooks are lexical defense in depth:
-they do not replace sandboxing, explicit authorization, branch protection, protected environments
-or human review.
+by the thin adapters [`.codex/hooks.json`](.codex/hooks.json) and
+[`.claude/settings.json`](.claude/settings.json), which bind the identical commands and timeouts and
+differ only in the tool names their runner uses. An adapter carries no policy of its own: every
+`.claude` entry delegates here, to [`.agents/skills/`](.agents/skills/) or to the neutral core, and a
+runner without an armed adapter is an unguarded runner. Hooks are lexical defense in depth: they do
+not replace sandboxing, explicit authorization, branch protection, protected environments or human
+review.

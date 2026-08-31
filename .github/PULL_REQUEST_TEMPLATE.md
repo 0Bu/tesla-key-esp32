@@ -18,7 +18,7 @@ cannot build or USB-flash — see AGENTS.md).
 
 <!-- How this was checked. State what ran and what couldn't (e.g. no build in a cloud session). -->
 - [ ] `scripts/run-mock-tests.sh` passes (host-side logic tests — CI's `logic-test` gate)
-- [ ] `tools/agent-config/selftest.sh` passes when agent config, skills, or hooks changed
+- [ ] `tools/agent-config/selftest.sh` passes when agent config, skills, hooks, or a runner adapter (`.codex/`, `.claude/`) changed
 - [ ] Firmware built (`scripts/idf-docker.sh idf.py build`, or relied on CI) — N/A in a cloud session (no Docker daemon / no USB)
 
 ## Checklist
@@ -41,8 +41,9 @@ $feature-docs only arms when the diff reaches main/, test/, sdkconfig.defaults*,
 the shipped Pages runtime, release-relevance logic, or the build/signed-preview/preview-cleanup/
 PR-policy/bench-acceptance workflows. Because `docs/FEATURES.md` catalogs the runner-neutral policy
 itself, it also arms for
-`AGENTS.md`, `.agents/`, `.codex/`, `.github/PULL_REQUEST_TEMPLATE.md`, `tools/agent-hooks/`, and
-`tools/agent-config/` — delete its line only on a docs- or unrelated chore-only PR. A full
+`AGENTS.md`, `.agents/`, `.codex/`, `.claude/`, `.github/PULL_REQUEST_TEMPLATE.md`,
+`tools/agent-hooks/`, and `tools/agent-config/` — delete its line only on a docs- or unrelated
+chore-only PR. A full
 $project-review also clears the
 skill-audit gate, but NOT the feature-docs one, NOR the pr-hygiene one.
 

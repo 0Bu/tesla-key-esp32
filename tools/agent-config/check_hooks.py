@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Parse the exact synchronous Codex hook dispatch and neutral hook core."""
+"""Parse the exact synchronous Codex and Claude hook dispatch and neutral hook core."""
 
 from __future__ import annotations
 
@@ -111,6 +111,67 @@ command_hook(
     commands=[(f"{py} format", 30)], label="Codex formatter",
 )
 
+# Claude Code reads .claude/settings.json and never .codex/hooks.json, so the adapter must arm the
+# same neutral core. Only the tool-name matchers may differ: the commands, their order and their
+# timeouts are asserted byte-identical to Codex's, so one runner cannot quietly drift into a
+# weaker guard set than the other.
+claude = load_json(".claude/settings.json")
+if set(claude) != {"permissions", "hooks"}:
+    fail(".claude/settings.json must contain only permissions and hooks")
+permissions = claude.get("permissions")
+if not isinstance(permissions, dict) or set(permissions) != {"allow"}:
+    fail(".claude/settings.json permissions must contain only allow")
+if permissions.get("allow") != []:
+    fail(".claude/settings.json must pre-approve no tool; authorization stays explicit per request")
+claude_hooks = claude.get("hooks")
+if not isinstance(claude_hooks, dict) or set(claude_hooks) != events:
+    fail(".claude/settings.json event set drifted")
+if any(not isinstance(claude_hooks[event], list) for event in events):
+    fail(".claude/settings.json event groups must be arrays")
+for event in sorted(events):
+    if len(claude_hooks[event]) != len(codex_hooks[event]):
+        fail(f"Claude {event} dispatch count differs from Codex")
+
+# Claude Code names its file and shell tools Read/Edit/MultiEdit/Write/Bash; the neutral core's
+# FILE_TOOLS and SHELL_TOOLS cover exactly those, so the matchers name them and nothing it cannot
+# parse. Everything else is the Codex command, verbatim.
+claude_matchers = {
+    "SessionStart": "^(?:startup|resume|clear|compact)$",
+    "SubagentStart": None,
+    "Stop": None,
+    "PreToolUse": [
+        "^(?:Read|Edit|MultiEdit|Write|Bash)$",
+        "^(?:Bash|mcp__.*(?:github|GitHub).*)$",
+    ],
+    "PostToolUse": "^(?:Edit|MultiEdit|Write)$",
+}
+
+
+def group_commands(group: Any, label: str) -> list[tuple[str, int]]:
+    if not isinstance(group, dict):
+        fail(f"{label} hook group must be an object")
+    hooks = group.get("hooks")
+    if not isinstance(hooks, list):
+        fail(f"{label} hooks must be an array")
+    commands: list[tuple[str, int]] = []
+    for hook in hooks:
+        if not isinstance(hook, dict):
+            fail(f"{label} command hook must be an object")
+        commands.append((str(hook.get("command")), hook.get("timeout")))
+    return commands
+
+
+for event in sorted(events):
+    matcher = claude_matchers[event]
+    for index, group in enumerate(claude_hooks[event]):
+        expected_matcher = matcher[index] if isinstance(matcher, list) else matcher
+        command_hook(
+            group,
+            matcher=expected_matcher,
+            commands=group_commands(codex_hooks[event][index], f"Codex {event}"),
+            label=f"Claude {event}",
+        )
+
 core_files = {
     "agent_hook.py", "merge_payload.py", "pr-gate-lib.sh", "require-pr-gates.sh",
     "run_with_timeout.py", "selftest.sh",
@@ -132,4 +193,6 @@ for relative in [
     if foreign.search((root / relative).read_text(encoding="utf-8")):
         fail(f"foreign-project policy residue found in {relative}")
 
-print("agent-hook-config: parsed 5 lifecycle events and exact synchronous Codex dispatch")
+print(
+    "agent-hook-config: parsed 5 lifecycle events and exact synchronous Codex and Claude dispatch"
+)

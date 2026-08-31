@@ -1,6 +1,6 @@
 ---
 name: feature-docs
-description: Keep docs/FEATURES.md (this firmware's technical-feature catalog) in sync when a platform feature lands or changes — including runner-neutral agent policy under AGENTS.md, .agents/, .codex/, .github/PULL_REQUEST_TEMPLATE.md, tools/agent-hooks/, and tools/agent-config/. Use after implementing or changing a technical feature, before opening the PR. Required before merging a PR whose diff reaches those agent-policy paths, main/, test/, sdkconfig.defaults, partitions.csv, the shipped Pages runtime, release-relevance.sh, or the build/signed-preview/preview-cleanup/PR-policy/bench-acceptance workflows.
+description: Keep docs/FEATURES.md (this firmware's technical-feature catalog) in sync when a platform feature lands or changes — including runner-neutral agent policy under AGENTS.md, .agents/, .codex/, .claude/, .github/PULL_REQUEST_TEMPLATE.md, tools/agent-hooks/, and tools/agent-config/. Use after implementing or changing a technical feature, before opening the PR. Required before merging a PR whose diff reaches those agent-policy paths, main/, test/, sdkconfig.defaults, partitions.csv, the shipped Pages runtime, release-relevance.sh, or the build/signed-preview/preview-cleanup/PR-policy/bench-acceptance workflows.
 ---
 
 > **Canonical runner-neutral skill.** Read [`AGENTS.md`](../../../AGENTS.md) before acting.
@@ -23,8 +23,8 @@ there, so the mechanism looks optional and gets deleted, or gets built a second 
 
 [`tools/agent-hooks/require-pr-gates.sh`](../../../tools/agent-hooks/require-pr-gates.sh) gates a merge on this having been run — but only when the
 PR's diff reaches `main/`, `test/`, `sdkconfig.defaults*`, `partitions.csv`, runner-neutral
-agent policy (`AGENTS.md`, `.agents/`, `.codex/`, `.github/PULL_REQUEST_TEMPLATE.md`,
-`tools/agent-hooks/`, `tools/agent-config/`) or
+agent policy (`AGENTS.md`, `.agents/`, `.codex/`, `.claude/`,
+`.github/PULL_REQUEST_TEMPLATE.md`, `tools/agent-hooks/`, `tools/agent-config/`) or
 the shipped Pages runtime (`docs/index.html`, `installer-bootstrap.mjs`,
 `serial-port-release.mjs`, `web-installer.mjs`, `docs/vendor/`) or
 `.github/workflows/{build,signed-pr-preview,pr-preview-cleanup,pr-policy,bench-acceptance}.yml`, or the cumulative
@@ -51,7 +51,7 @@ that separate authority through the appropriate workflow.
    - changes how CI decides whether current main still contains Release/Pages-unpublished firmware,
      or changes the single branch-backed Pages authority/source validator
    - changes runner-neutral instructions, skills, reviewer/config registration, lifecycle gates, or
-     their validators under `AGENTS.md`, `.agents/`, `.codex/`,
+     their validators under `AGENTS.md`, `.agents/`, `.codex/`, `.claude/`,
      `.github/PULL_REQUEST_TEMPLATE.md`, `tools/agent-hooks/`, or `tools/agent-config/`
    - adds a new `main/logic/` header, or a new `main/*.cpp` subsystem
    - changes `partitions.csv`

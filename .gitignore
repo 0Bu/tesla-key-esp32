@@ -36,6 +36,12 @@ __pycache__/
 .codex/.logic-tests-blocked
 .codex/.build-efficiency-audited
 
+# Per-user Claude Code overlays. The versioned adapter is .claude/CLAUDE.md, .claude/settings.json,
+# .claude/agents/ and .claude/skills/; canonical policy stays in AGENTS.md, .agents/, .codex/ and
+# tools/agent-hooks/. These two files are personal, may loosen local behavior, and stay untracked.
+.claude/settings.local.json
+CLAUDE.local.md
+
 # macOS
 .DS_Store
 
