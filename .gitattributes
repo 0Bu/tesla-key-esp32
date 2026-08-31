@@ -1,0 +1,5 @@
+# Repository-owned patch series: a unified-diff context line for a blank source line is
+# exactly one space, which git's whitespace checker reports as a trailing-space error. The
+# patch bytes are pinned by scripts/check-dependency-contract.py and consumed by GNU patch, so
+# they must not be "cleaned". Exempt them from the whitespace check rather than the reverse.
+patches/**/*.patch -whitespace
