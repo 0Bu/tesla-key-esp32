@@ -245,7 +245,7 @@ app-only delivery leaves the installed bootloader untouched.
 Before the protected job provisions the signing key, CI recomputes the canonical source fingerprint,
 compares the primary build with a separate exact-source rebuild (all 53 payload files plus manifest),
 and pins the exact IDF image, four dependency locks, resolved tesla-ble commit/component hash and
-three patch digests. It parses the source/generated partition tables, requires every generated
+four patch digests. It parses the source/generated partition tables, requires every generated
 `ota_data_initial.bin` to be exactly `0x2000` erased `0xff` bytes, and checks unsigned ESP image
 headers/checksum/hash/chip ID/app descriptor. The signer copies those no-follow-validated files into
 private staging and rehashes them before key use. It repeats the image check on the signed app and
@@ -351,7 +351,7 @@ therefore means upstreaming it there first. A local patched checkout was carried
 while and has been dropped — [`adr/0004-drop-esp32c5-target.md`](adr/0004-drop-esp32c5-target.md).
 
 The first patch is a **correctness and anti-replay fix shared by all four targets**. Upstream
-v5.1.1 calls `Peer::validate_response_counter()` and logs a duplicate CarServer response, but
+v5.1.2 calls `Peer::validate_response_counter()` and logs a duplicate CarServer response, but
 then continues into state callbacks and FIFO command completion. A replay from an earlier
 request can therefore refresh `last_known_charge_` or complete whichever command is currently
 at the queue head. Root `CMakeLists.txt`, after dependency resolution, invokes
@@ -382,6 +382,14 @@ reset only after the next emitted log. Only severe buffer corruption selects err
 host semantic gate pins the helper plus all six parser/recovery callsites, so a new direct log or a
 lost throttle cannot reintroduce an input-amplified log storm while the generic patch applicator
 still reports green.
+
+The fourth patch drops the five Parental Controls arms that v5.1.2 added to the
+`CarServer_VehicleAction` oneof, together with their nanopb message descriptors. The firmware never
+builds or sends those actions, but a referenced oneof arm keeps its descriptor tables out of reach
+of `--gc-sections`, so they cost flash in every image. Removing them returns `car_server.pb.c` to
+byte-identical descriptor size with v5.1.1. This is a size patch, not a correctness one: esp32c6
+sits closest to the app-size policy ceiling, and image sizes quantize to 64 KiB, so a few hundred
+bytes there decide whether the signed image still fits the `0x1f0000` OTA slot.
 
 All four images use the same tesla-ble revision and ordered patch-series behavior. The wider
 tesla-ble dependency strategy (IDF-6 / Mbed TLS 4 crypto seam, issue #61) is

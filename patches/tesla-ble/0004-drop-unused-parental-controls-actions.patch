@@ -1,0 +1,62 @@
+diff --git a/generated/include/car_server.pb.h b/generated/include/car_server.pb.h
+index 468a8d8..8c4d9f1 100644
+--- a/generated/include/car_server.pb.h
++++ b/generated/include/car_server.pb.h
+@@ -1400,20 +1400,6 @@ extern "C" {
+     107) \
+   X(a, STATIC, ONEOF, MESSAGE, \
+     (vehicle_action_msg, batchRemoveChargeSchedulesAction, vehicle_action_msg.batchRemoveChargeSchedulesAction), 108) \
+-  X(a, STATIC, ONEOF, MESSAGE, \
+-    (vehicle_action_msg, parentalControlsClearPinAction, vehicle_action_msg.parentalControlsClearPinAction), 109) \
+-  X(a, STATIC, ONEOF, MESSAGE, \
+-    (vehicle_action_msg, parentalControlsClearPinAdminAction, vehicle_action_msg.parentalControlsClearPinAdminAction), \
+-    110) \
+-  X(a, STATIC, ONEOF, MESSAGE, \
+-    (vehicle_action_msg, parentalControlsAction, vehicle_action_msg.parentalControlsAction), 111) \
+-  X(a, STATIC, ONEOF, MESSAGE, \
+-    (vehicle_action_msg, parentalControlsEnableSettingsAction, \
+-     vehicle_action_msg.parentalControlsEnableSettingsAction), \
+-    112) \
+-  X(a, STATIC, ONEOF, MESSAGE, \
+-    (vehicle_action_msg, parentalControlsSetSpeedLimitAction, vehicle_action_msg.parentalControlsSetSpeedLimitAction), \
+-    113) \
+   X(a, STATIC, ONEOF, MESSAGE, (vehicle_action_msg, setLowPowerModeAction, vehicle_action_msg.setLowPowerModeAction), \
+     130) \
+   X(a, STATIC, ONEOF, MESSAGE, \
+@@ -1497,15 +1483,6 @@ extern "C" {
+   CarServer_BatchRemovePreconditionSchedulesAction
+ #define CarServer_VehicleAction_vehicle_action_msg_batchRemoveChargeSchedulesAction_MSGTYPE \
+   CarServer_BatchRemoveChargeSchedulesAction
+-#define CarServer_VehicleAction_vehicle_action_msg_parentalControlsClearPinAction_MSGTYPE \
+-  CarServer_ParentalControlsClearPinAction
+-#define CarServer_VehicleAction_vehicle_action_msg_parentalControlsClearPinAdminAction_MSGTYPE \
+-  CarServer_ParentalControlsClearPinAdminAction
+-#define CarServer_VehicleAction_vehicle_action_msg_parentalControlsAction_MSGTYPE CarServer_ParentalControlsAction
+-#define CarServer_VehicleAction_vehicle_action_msg_parentalControlsEnableSettingsAction_MSGTYPE \
+-  CarServer_ParentalControlsEnableSettingsAction
+-#define CarServer_VehicleAction_vehicle_action_msg_parentalControlsSetSpeedLimitAction_MSGTYPE \
+-  CarServer_ParentalControlsSetSpeedLimitAction
+ #define CarServer_VehicleAction_vehicle_action_msg_setLowPowerModeAction_MSGTYPE CarServer_SetLowPowerModeAction
+ #define CarServer_VehicleAction_vehicle_action_msg_setKeepAccessoryPowerModeAction_MSGTYPE \
+   CarServer_SetKeepAccessoryPowerModeAction
+diff --git a/generated/src/car_server.pb.c b/generated/src/car_server.pb.c
+index d86e4c0..e28c603 100644
+--- a/generated/src/car_server.pb.c
++++ b/generated/src/car_server.pb.c
+@@ -159,16 +159,6 @@ PB_BIND(CarServer_VehicleControlSetPinToDriveAction, CarServer_VehicleControlSet
+ 
+ PB_BIND(CarServer_VehicleControlResetPinToDriveAction, CarServer_VehicleControlResetPinToDriveAction, AUTO)
+ 
+-PB_BIND(CarServer_ParentalControlsClearPinAction, CarServer_ParentalControlsClearPinAction, AUTO)
+-
+-PB_BIND(CarServer_ParentalControlsClearPinAdminAction, CarServer_ParentalControlsClearPinAdminAction, AUTO)
+-
+-PB_BIND(CarServer_ParentalControlsAction, CarServer_ParentalControlsAction, AUTO)
+-
+-PB_BIND(CarServer_ParentalControlsEnableSettingsAction, CarServer_ParentalControlsEnableSettingsAction, AUTO)
+-
+-PB_BIND(CarServer_ParentalControlsSetSpeedLimitAction, CarServer_ParentalControlsSetSpeedLimitAction, AUTO)
+-
+ PB_BIND(CarServer_VehicleControlResetPinToDriveAdminAction, CarServer_VehicleControlResetPinToDriveAdminAction, AUTO)
+ 
+ PB_BIND(CarServer_SetLowPowerModeAction, CarServer_SetLowPowerModeAction, AUTO)

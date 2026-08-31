@@ -19,26 +19,26 @@ TOOLCHAIN = (
     "a9231d0697ab8f7517cc072e93b7c83e04907bfbfba80b6440d7dbbf90665cf2\n"
 )
 TESLA_GIT = "https://github.com/yoziru/tesla-ble.git"
-TESLA_VERSION = "v5.1.1"
-TESLA_RESOLVED_COMMIT = "9386f858446eccd9482b625871fe99d8decb3502"
-TESLA_COMPONENT_HASH = "9c4fb0d6686d8abd3f8854fbac93767f47434e8d41b73505ee7538d81f90d250"
-LOCK_MANIFEST_HASH = "8af75b6f450609f83ee236637c8c59377c58b5fe5d24e326169ccce57857603d"
+TESLA_VERSION = "v5.1.2"
+TESLA_RESOLVED_COMMIT = "a0e5efa610e7ee93ca04fd36bed72e9aac03f008"
+TESLA_COMPONENT_HASH = "1ae0006ec68f649d13b58671950971e29186873114168756bcc4fd832fc5826f"
+LOCK_MANIFEST_HASH = "1655b3b3b8e45dd7e3ecc5b9129b2b447762c76715d9a1668186434482084bdc"
 
 # These digests deliberately cover comments, ordering and every transitive resolution. A reviewed
 # dependency update changes this validator together with the lockfiles; a normal build may not
 # silently rewrite an otherwise semantically plausible lock.
 FILE_DIGESTS = {
     "esp-idf-toolchain.txt": "92d5b9212bb54c107927f58ffd51511a00bd72d65836edf20cb3d23b8533d962",
-    "main/idf_component.yml": "7cb87e774939e0456834098d5db74d13bffaf920fda810af777d1d889b8905fb",
-    "dependencies.lock.esp32": "b4fb2601a1a8919009dbaf5f20a623f336ec0a6888679f774042ee6aada3197a",
-    "dependencies.lock.esp32s3": "d12740bb431949c73e451706bbbc4d3e916ad83f743b6966284c5ff62ea579a8",
-    "dependencies.lock.esp32c3": "d67d70b859ec1131f3adbfb19ddca7de38f8e1ded29a96e740de0d8f0200ceae",
-    "dependencies.lock.esp32c6": "a4f04fdac5d69d8771765c9097f27fb0f0fec78e9b912bb7f31e3f68de9a0687",
+    "main/idf_component.yml": "ac4fa7c2d0a1e4ecd9bda0be0136f91659537f4165df0fa34fc83b8f9a329a00",
+    "dependencies.lock.esp32": "eeab4a18a51e20b9541cdb9bf03b2c52cb3607fb658cc40ee1085df25c41ff9e",
+    "dependencies.lock.esp32s3": "7b6aa6349aa9cbf284fef2d330268092b7db7a62000261564d2df9ff395edfec",
+    "dependencies.lock.esp32c3": "7fa2bee50f7d3acd057d3e0fd58b7af05f4e2b6e207ed1141aa7b9793c4a0722",
+    "dependencies.lock.esp32c6": "231ae00025aeb421ce2fed32b7df38095dea26df011877f7685f236162bc39be",
 }
 PATCH_INVENTORY = (
     (
         "0001-reject-replayed-carserver-responses.patch",
-        "0052234dbfd6cc69b631d4874622fbb8d23a66e9e2e63a1cd48614d41897f818",
+        "3b2a8db400bff98dff1ccde0253147f8ccc91df3a16b965f657e6740311cc5b6",
     ),
     (
         "0002-report-key-regeneration-result.patch",
@@ -47,6 +47,10 @@ PATCH_INVENTORY = (
     (
         "0003-rate-limit-rx-framing-recovery-logs.patch",
         "09d6ce7e859d9c0ce71b64c337c01792e0a48cc73266f0fe9ee95d190902b92a",
+    ),
+    (
+        "0004-drop-unused-parental-controls-actions.patch",
+        "6984321d34bdafe900244d0fe18052cc015a5b42ba0cf4e12e8ed9fb08791743",
     ),
 )
 MANIFEST_LOGICAL_LINES = (
@@ -127,7 +131,7 @@ def validate(root: Path) -> None:
     manifest_data = read_regular(root / "main/idf_component.yml")
     manifest_text = decode(manifest_data, "main/idf_component.yml")
     require(logical_yaml_lines(manifest_text) == MANIFEST_LOGICAL_LINES,
-            "main/idf_component.yml exact IDF/mdns/tesla-ble v5.1.1 Git contract drifted")
+            "main/idf_component.yml exact IDF/mdns/tesla-ble v5.1.2 Git contract drifted")
 
     actual_locks = tuple(sorted(path.name for path in root.glob("dependencies.lock.*")))
     expected_locks = tuple(f"dependencies.lock.{target}" for target in TARGETS)
@@ -202,10 +206,10 @@ def self_test(root: Path) -> None:
          "exact ESP-IDF v5.5.5"),
         ("toolchain-image", text("esp-idf-toolchain.txt", "a9231", "b9231"),
          "exact ESP-IDF v5.5.5"),
-        ("manifest-version", text("main/idf_component.yml", 'version: "v5.1.1"',
-                                  'version: "v5.1.0"'), "v5.1.1 Git contract"),
+        ("manifest-version", text("main/idf_component.yml", 'version: "v5.1.2"',
+                                  'version: "v5.1.0"'), "v5.1.2 Git contract"),
         ("manifest-git", text("main/idf_component.yml", TESLA_GIT,
-                              "https://example.invalid/tesla-ble.git"), "v5.1.1 Git contract"),
+                              "https://example.invalid/tesla-ble.git"), "v5.1.2 Git contract"),
         ("resolved-commit", text("dependencies.lock.esp32", TESLA_RESOLVED_COMMIT,
                                  "0" * 40), "resolved commit/component hash"),
         ("component-hash", text("dependencies.lock.esp32s3", TESLA_COMPONENT_HASH,
@@ -261,7 +265,7 @@ def main() -> int:
         return 1
     print(
         "dependency-contract: PASS "
-        f"(ESP-IDF v5.5.5, {len(TARGETS)} locks, tesla-ble v5.1.1, "
+        f"(ESP-IDF v5.5.5, {len(TARGETS)} locks, tesla-ble v5.1.2, "
         f"{len(PATCH_INVENTORY)} patches"
         + (", mutation canaries" if args.self_test else "")
         + ")"
