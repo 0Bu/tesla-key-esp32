@@ -15,7 +15,8 @@ This project is an **ESP-IDF 5.x C++ firmware** for the **ESP32 family** — one
 builds for esp32 / esp32s3 / esp32c3 / esp32c6 — exactly the four targets yoziru/tesla-ble
 supports, which the ESP-IDF Component Manager enforces at dependency resolution. All four receive
 the complete ordered repository patch series in `patches/tesla-ble/` via root CMake: replay
-rejection, transactional key regeneration/persistence, and bounded RX-framing recovery logs. The
+rejection, transactional key regeneration/persistence, bounded RX-framing recovery logs, and the
+trim of unsent Parental Controls actions that keeps esp32c6 under the app-size policy. The
 firmware acts as a **BLE↔HTTP proxy for a Tesla
 vehicle**, API-compatible with TeslaBleHttpProxy,
 so it works as an **evcc** BLE vehicle. It is small but dense with **non-local invariants**:

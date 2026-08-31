@@ -328,3 +328,67 @@ test('all target locks pin the reviewed tesla-ble source and exact target set', 
     assert.deepEqual(listed, targets);
   }
 });
+
+// Patch 0004 is the one size-motivated patch in the series: it deletes VehicleAction oneof arms
+// so --gc-sections can reach their nanopb descriptors. Deleting an arm the firmware DOES send
+// would still compile and still shrink the image — it would fail only against a real vehicle.
+// So assert the two properties that make it safe: it removes nothing but Parental Controls, and
+// what it removes is disjoint from the tags vehicle_commands.cpp actually builds.
+test('parental-controls trim patch removes only actions this firmware never sends', () => {
+  const patch = readFileSync(
+    'patches/tesla-ble/0004-drop-unused-parental-controls-actions.patch',
+    'utf8',
+  );
+  const removed = patch
+    .split('\n')
+    .filter((line) => line.startsWith('-') && !line.startsWith('---'))
+    .map((line) => line.slice(1));
+
+  // A pure-deletion patch: rewriting a descriptor is not in this patch's remit.
+  const added = patch
+    .split('\n')
+    .filter((line) => line.startsWith('+') && !line.startsWith('+++'));
+  assert.deepEqual(added, []);
+
+  // Only the two generated protobuf files, never hand-written upstream source.
+  const files = [...patch.matchAll(/^diff --git a\/(\S+) b\/(\S+)$/gm)];
+  assert.deepEqual(
+    files.map((match) => match[1]),
+    ['generated/include/car_server.pb.h', 'generated/src/car_server.pb.c'],
+  );
+  for (const [, before, after] of files) {
+    assert.equal(before, after);
+  }
+
+  const arms = [
+    ...removed.join('\n').matchAll(/\(vehicle_action_msg, ([A-Za-z]+),/g),
+  ].map((match) => match[1]);
+  const unique = [...new Set(arms)].sort();
+  assert.deepEqual(unique, [
+    'parentalControlsAction',
+    'parentalControlsClearPinAction',
+    'parentalControlsClearPinAdminAction',
+    'parentalControlsEnableSettingsAction',
+    'parentalControlsSetSpeedLimitAction',
+  ]);
+
+  // Each removed arm loses its MSGTYPE alias and its descriptor binding, and nothing else does.
+  const msgtypes = removed.filter((line) => line.startsWith('#define'));
+  const binds = removed.filter((line) => line.startsWith('PB_BIND('));
+  assert.equal(msgtypes.length, unique.length);
+  assert.equal(binds.length, unique.length);
+  for (const line of [...msgtypes, ...binds]) {
+    assert.match(line, /parentalControls/i);
+  }
+
+  // The safety property: none of these is a tag the firmware builds a command from.
+  const commands = readFileSync('main/vehicle_commands.cpp', 'utf8');
+  assert.match(commands, /CarServer_VehicleAction_chargingStartStopAction_tag/);
+  for (const arm of unique) {
+    assert.equal(
+      commands.includes(`CarServer_VehicleAction_${arm}_tag`),
+      false,
+      `patch 0004 removes ${arm}, which vehicle_commands.cpp still sends`,
+    );
+  }
+});
