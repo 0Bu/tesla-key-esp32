@@ -28,13 +28,10 @@ __pycache__/
 *.swp
 *~
 
-# The project-review (merge) and skill-audit (PR create/push) gates no longer use on-disk
-# markers — their pass-state is a ticked, SHA-stamped checkbox in the PR body itself
-# (see tools/agent-hooks/pr-gate-lib.sh). Nothing to ignore for those two gates.
-
-# Per-tree transient hook state.
-.codex/.logic-tests-blocked
-.codex/.build-efficiency-audited
+# The project-review (merge) and skill-audit (PR create/push) gates do not use on-disk markers —
+# their pass-state is a ticked, SHA-stamped checkbox in the PR body itself (see
+# tools/agent-hooks/pr-gate-lib.sh). The hooks keep no per-tree state either, so there is nothing
+# to ignore for the gates.
 
 # macOS
 .DS_Store

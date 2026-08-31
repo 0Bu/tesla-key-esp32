@@ -4,7 +4,7 @@ A small, hardware-free test target that compiles and runs the project's **pure l
 with the system toolchain — **no ESP-IDF, no Docker, no USB board**. It gives a real
 "run it and see" loop in seconds, in any environment: a local terminal, CI, or a remote coding
 agent. Firmware builds still require the pinned Docker workflow, and flash/OTA require both the
-right host capabilities and explicit authorization; see [`AGENTS.md`](../AGENTS.md).
+right host capabilities and explicit authorization; see [`CLAUDE.md`](../.claude/CLAUDE.md).
 
 ## Run it
 
@@ -39,9 +39,10 @@ The test binaries are dependency-free (no gtest) and return non-zero on the firs
 CI runs this as the `logic-test` job, a **fast gate the per-target firmware build
 depends on** (`.github/workflows/build.yml`) — a logic regression fails in seconds
 instead of after four ESP-IDF builds. The same job also runs
-`tools/agent-config/selftest.sh`; that parser-based suite checks the runner-neutral agent
-configuration, compatibility manifest/fingerprint, skill frontmatter, reviewer sandboxes, hook
-wiring, and Context7 pin before any firmware build starts. Repository/workflow lint, sanitizer
+`tools/agent-config/selftest.sh`; that parser-based suite checks the `.claude/` project agent
+configuration — reviewed skill content, skill and subagent frontmatter, the read-only reviewer
+tool allow-lists, the `.claude/settings.json` hook wiring, and the Context7 pin — before any
+firmware build starts. Repository/workflow lint, sanitizer
 tripwires, deterministic fuzzing, protocol vectors and a real Chrome/Chromium page gate run in the
 same job before the pinned four-target firmware build.
 

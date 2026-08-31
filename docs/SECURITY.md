@@ -589,13 +589,17 @@ OTA** or `idf.py flash` from a trusted machine. Plan the update path before burn
 
 ## Development tooling trust boundary
 
-[`AGENTS.md`](../AGENTS.md) is the canonical authorization policy. Analysis, review, diagnosis,
-and triage are read-only by default, and an implementation request does not authorize commit,
-push, merge, release, USB, flash, OTA, NVS, or live vehicle operations. The project Codex config
-does not grant those mutations automatically; specialist reviewers under `.codex/agents/` run
-with `sandbox_mode = "read-only"`, no model pin, and no approval escalation.
+[`.claude/CLAUDE.md`](../.claude/CLAUDE.md) is the canonical authorization policy. Analysis,
+review, diagnosis, and triage are read-only by default, and an implementation request does not
+authorize commit, push, merge, release, USB, flash, OTA, NVS, or live vehicle operations. The
+project configuration does not grant those mutations automatically; the specialist reviewers under
+`.claude/agents/` carry no model pin and declare a read-only tool allow-list (`Read`, `Grep`,
+`Glob`, `Bash`), so no file-mutating or delegating tool is reachable from a review subagent. Claude
+subagents have no sandbox flag, so that allow-list plus the reviewer instruction text — both parsed
+by `tools/agent-config/check_agents.py` — carry the boundary that Codex expressed as
+`sandbox_mode = "read-only"`.
 
-The project configuration calls the runner-neutral core under
+The project configuration calls the shared hook core under
 [`tools/agent-hooks/`](../tools/agent-hooks/). Its secret, partition, and PR-gate checks are lexical
 defense in depth: they do not replace sandboxing, explicit authorization, branch protection, CI
 trust separation, or human review. In particular, no PR or agent-configuration gate receives

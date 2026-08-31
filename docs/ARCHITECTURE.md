@@ -1,7 +1,7 @@
 # Architecture reference
 
 Deep internal reference for tesla-key-esp32. This is the **on-demand** companion to
-[`AGENTS.md`](../AGENTS.md): AGENTS.md carries the always-needed authorization, supported-target,
+[`CLAUDE.md`](../.claude/CLAUDE.md): CLAUDE.md carries the always-needed authorization, supported-target,
 build/flash-boundary, security, and memory-safety rules; the
 full narrative lives here so it isn't reloaded into every session. Read this when working on
 telemetry, the MQTT bridge, the web UI live feed, WiFi/LAN connectivity, sleep/link-state, pairing,
@@ -19,11 +19,13 @@ the canonical `$project-review` skill checks for drift between them.
 
 ## Repository agent architecture
 
-[`AGENTS.md`](../AGENTS.md) is the concise, runner-neutral policy loaded for normal repository
-work. Reusable workflows live under [`.agents/skills/`](../.agents/skills/), Codex project
-configuration and read-only specialist reviewers under [`.codex/`](../.codex/), and lifecycle
-policy lives under [`tools/agent-hooks/`](../tools/agent-hooks/). CI mutation-tests this single
-project-owned configuration and rejects reintroduction of retired runner-specific metadata.
+[`.claude/CLAUDE.md`](../.claude/CLAUDE.md) is the concise project policy loaded by Claude Code for
+normal repository work. Reusable workflows live under [`.claude/skills/`](../.claude/skills/),
+read-only specialist reviewers under [`.claude/agents/`](../.claude/agents/), the hook dispatch in
+[`.claude/settings.json`](../.claude/settings.json), and lifecycle policy under
+[`tools/agent-hooks/`](../tools/agent-hooks/). CI mutation-tests this single project-owned
+configuration and rejects reintroduction of the retired `.agents/`, `.codex/` and root `AGENTS.md`
+layouts.
 `.github/workflows/pr-policy.yml` evaluates the current SHA-bound gate records from trusted
 base-branch code with a read-only token and never checks out PR code; repository rules must require
 its `pr-policy / current-head-records` status for that executable policy to block merges server-side.

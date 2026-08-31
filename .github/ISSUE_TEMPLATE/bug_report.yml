@@ -18,7 +18,7 @@ body:
     id: area
     attributes:
       label: Affected area
-      description: Which component (from the architecture map in AGENTS.md and docs/ARCHITECTURE.md)?
+      description: Which component (from the architecture map in .claude/CLAUDE.md and docs/ARCHITECTURE.md)?
       options:
         - BLE client / connection
         - Vehicle commands (charge / wake / etc.)

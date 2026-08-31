@@ -1,0 +1,25 @@
+{
+  "hooks": {
+    "SessionStart": [{"matcher": "^(?:startup|resume|clear|compact|fork)$", "hooks": [
+      {"type": "command", "command": "python3 \"${CLAUDE_PROJECT_DIR}/tools/agent-hooks/agent_hook.py\" capabilities", "statusMessage": "Detecting repository capabilities", "timeout": 15},
+      {"type": "command", "command": "python3 \"${CLAUDE_PROJECT_DIR}/tools/agent-hooks/agent_hook.py\" build-efficiency", "statusMessage": "Loading read-only build-efficiency context", "timeout": 15}
+    ]}],
+    "SubagentStart": [{"hooks": [
+      {"type": "command", "command": "python3 \"${CLAUDE_PROJECT_DIR}/tools/agent-hooks/agent_hook.py\" subagent-context", "statusMessage": "Loading repository and authorization boundaries", "timeout": 10}
+    ]}],
+    "Stop": [{"hooks": [
+      {"type": "command", "command": "python3 \"${CLAUDE_PROJECT_DIR}/tools/agent-hooks/agent_hook.py\" stop-logic-tests", "statusMessage": "Running changed host logic tests", "timeout": 600}
+    ]}],
+    "PreToolUse": [
+      {"matcher": "^(?:Read|Edit|MultiEdit|Write|Bash)$", "hooks": [
+        {"type": "command", "command": "python3 \"${CLAUDE_PROJECT_DIR}/tools/agent-hooks/agent_hook.py\" pre-tool-guards", "statusMessage": "Checking secret and partition safety", "timeout": 15}
+      ]},
+      {"matcher": "^(?:Bash|mcp__.*(?:github|GitHub).*)$", "hooks": [
+        {"type": "command", "command": "bash \"${CLAUDE_PROJECT_DIR}/tools/agent-hooks/require-pr-gates.sh\"", "statusMessage": "Checking current PR policy evidence", "timeout": 180}
+      ]}
+    ],
+    "PostToolUse": [{"matcher": "^(?:Edit|MultiEdit|Write)$", "hooks": [
+      {"type": "command", "command": "python3 \"${CLAUDE_PROJECT_DIR}/tools/agent-hooks/agent_hook.py\" format", "statusMessage": "Formatting edited first-party C and C++", "timeout": 30}
+    ]}]
+  }
+}

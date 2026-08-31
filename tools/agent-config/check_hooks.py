@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Parse the exact synchronous Codex hook dispatch and neutral hook core."""
+"""Parse the exact synchronous Claude hook dispatch and the shared hook core."""
 
 from __future__ import annotations
 
@@ -63,52 +63,52 @@ def command_hook(
             fail(f"{label} timeout drifted")
 
 
-codex = load_json(".codex/hooks.json")
-if set(codex) != {"description", "hooks"} or not isinstance(codex.get("description"), str):
-    fail(".codex/hooks.json must contain only description and hooks")
-codex_hooks = codex.get("hooks")
+settings = load_json(".claude/settings.json")
+if set(settings) != {"hooks"}:
+    fail(".claude/settings.json must contain only hooks")
+claude_hooks = settings.get("hooks")
 events = {"SessionStart", "SubagentStart", "Stop", "PreToolUse", "PostToolUse"}
-if not isinstance(codex_hooks, dict) or set(codex_hooks) != events:
-    fail(".codex/hooks.json event set drifted")
-if any(not isinstance(codex_hooks[event], list) for event in events):
-    fail(".codex/hooks.json event groups must be arrays")
-if len(codex_hooks["SessionStart"]) != 1 or len(codex_hooks["SubagentStart"]) != 1:
-    fail("Codex start dispatch count drifted")
-if len(codex_hooks["Stop"]) != 1 or len(codex_hooks["PreToolUse"]) != 2:
-    fail("Codex stop/pre-tool dispatch count drifted")
-if len(codex_hooks["PostToolUse"]) != 1:
-    fail("Codex post-tool dispatch count drifted")
+if not isinstance(claude_hooks, dict) or set(claude_hooks) != events:
+    fail(".claude/settings.json event set drifted")
+if any(not isinstance(claude_hooks[event], list) for event in events):
+    fail(".claude/settings.json event groups must be arrays")
+if len(claude_hooks["SessionStart"]) != 1 or len(claude_hooks["SubagentStart"]) != 1:
+    fail("Claude start dispatch count drifted")
+if len(claude_hooks["Stop"]) != 1 or len(claude_hooks["PreToolUse"]) != 2:
+    fail("Claude stop/pre-tool dispatch count drifted")
+if len(claude_hooks["PostToolUse"]) != 1:
+    fail("Claude post-tool dispatch count drifted")
 
-git_root = "$(git rev-parse --show-toplevel)"
-py = f'python3 "{git_root}/tools/agent-hooks/agent_hook.py"'
+project_dir = "${CLAUDE_PROJECT_DIR}"
+py = f'python3 "{project_dir}/tools/agent-hooks/agent_hook.py"'
 command_hook(
-    codex_hooks["SessionStart"][0],
-    matcher="^(?:startup|resume|clear|compact)$",
+    claude_hooks["SessionStart"][0],
+    matcher="^(?:startup|resume|clear|compact|fork)$",
     commands=[(f"{py} capabilities", 15), (f"{py} build-efficiency", 15)],
-    label="Codex SessionStart",
+    label="Claude SessionStart",
 )
 command_hook(
-    codex_hooks["SubagentStart"][0], matcher=None,
-    commands=[(f"{py} subagent-context", 10)], label="Codex SubagentStart",
+    claude_hooks["SubagentStart"][0], matcher=None,
+    commands=[(f"{py} subagent-context", 10)], label="Claude SubagentStart",
 )
 command_hook(
-    codex_hooks["Stop"][0], matcher=None,
-    commands=[(f"{py} stop-logic-tests", 600)], label="Codex Stop",
+    claude_hooks["Stop"][0], matcher=None,
+    commands=[(f"{py} stop-logic-tests", 600)], label="Claude Stop",
 )
 command_hook(
-    codex_hooks["PreToolUse"][0],
-    matcher="^(?:Read|Edit|MultiEdit|Write|Bash|apply_patch|exec_command|shell|shell_command)$",
-    commands=[(f"{py} pre-tool-guards", 15)], label="Codex guard",
+    claude_hooks["PreToolUse"][0],
+    matcher="^(?:Read|Edit|MultiEdit|Write|Bash)$",
+    commands=[(f"{py} pre-tool-guards", 15)], label="Claude guard",
 )
 command_hook(
-    codex_hooks["PreToolUse"][1],
-    matcher="^(?:Bash|exec_command|shell|shell_command|mcp__.*(?:github|GitHub).*)$",
-    commands=[(f'bash "{git_root}/tools/agent-hooks/require-pr-gates.sh"', 180)],
-    label="Codex PR policy",
+    claude_hooks["PreToolUse"][1],
+    matcher="^(?:Bash|mcp__.*(?:github|GitHub).*)$",
+    commands=[(f'bash "{project_dir}/tools/agent-hooks/require-pr-gates.sh"', 180)],
+    label="Claude PR policy",
 )
 command_hook(
-    codex_hooks["PostToolUse"][0], matcher="^(?:Edit|MultiEdit|Write|apply_patch)$",
-    commands=[(f"{py} format", 30)], label="Codex formatter",
+    claude_hooks["PostToolUse"][0], matcher="^(?:Edit|MultiEdit|Write)$",
+    commands=[(f"{py} format", 30)], label="Claude formatter",
 )
 
 core_files = {
@@ -119,17 +119,17 @@ core_dir = root / "tools" / "agent-hooks"
 try:
     actual_core = {path.name for path in core_dir.iterdir() if path.is_file()}
 except OSError as exc:
-    fail(f"cannot enumerate neutral hook core: {exc}", 2)
+    fail(f"cannot enumerate shared hook core: {exc}", 2)
 if actual_core != core_files:
-    fail("runner-neutral hook-core inventory drifted")
+    fail("shared hook-core inventory drifted")
 foreign = re.compile(
     r"daikin|x10a|heat.?pump|hp_modbus|victorialogs|schematic|absence|ui-use-case", re.I
 )
 for relative in [
     *(f"tools/agent-hooks/{name}" for name in sorted(core_files)),
-    ".codex/hooks.json",
+    ".claude/settings.json",
 ]:
     if foreign.search((root / relative).read_text(encoding="utf-8")):
         fail(f"foreign-project policy residue found in {relative}")
 
-print("agent-hook-config: parsed 5 lifecycle events and exact synchronous Codex dispatch")
+print("agent-hook-config: parsed 5 lifecycle events and exact synchronous Claude dispatch")

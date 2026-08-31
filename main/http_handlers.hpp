@@ -5,7 +5,7 @@
 // by route group; see docs/ARCHITECTURE.md). The public API stays
 // http_server.hpp.
 //
-// Memory-model invariant (AGENTS.md): EVERY handler declared here is invoked exclusively
+// Memory-model invariant (.claude/CLAUDE.md): EVERY handler declared here is invoked exclusively
 // through handle_all's try/catch in http_server.cpp (503 on OOM). This is enforced
 // structurally: handlers take GuardedReq — NOT the raw esp_http_server signature — so
 // registering one directly with httpd_register_uri_handler (which would bypass the

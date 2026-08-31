@@ -59,7 +59,7 @@ const root = path.resolve(
   process.env.AGENT_CONFIG_ROOT || path.join(path.dirname(fileURLToPath(import.meta.url)), "../.."),
 );
 const repoPath = (relative) => path.join(root, ...relative.split("/"));
-const budget = positiveInteger(process.env.AGENT_INSTRUCTIONS_BUDGET_BYTES || "24576", "AGENTS budget");
+const budget = positiveInteger(process.env.AGENT_INSTRUCTIONS_BUDGET_BYTES || "24576", "CLAUDE.md budget");
 
 function regularFile(relative, label) {
   let stat;
@@ -68,15 +68,15 @@ function regularFile(relative, label) {
   if (!stat.isFile()) die(1, `${label} is not a regular file: ${relative}`);
 }
 
-if (fs.existsSync(repoPath(".claude"))) {
-  die(1, ".claude metadata must remain retired; use AGENTS.md, .agents, .codex and tools/agent-hooks");
+for (const retired of [".agents", ".codex", "AGENTS.md"]) {
+  if (fs.existsSync(repoPath(retired))) {
+    die(1, `${retired} must remain retired; use .claude and tools/agent-hooks`);
+  }
 }
-if (fs.existsSync(repoPath(".codex/migration-manifest.json"))) {
-  die(1, ".codex/migration-manifest.json must remain retired with the compatibility layer");
-}
-regularFile("AGENTS.md", "canonical instructions");
-const agentsSize = fs.statSync(repoPath("AGENTS.md")).size;
-if (agentsSize > budget) die(1, `AGENTS.md is ${agentsSize} bytes, over the ${budget}-byte budget`);
+regularFile(".claude/CLAUDE.md", "canonical instructions");
+regularFile(".claude/settings.json", "project hook settings");
+const agentsSize = fs.statSync(repoPath(".claude/CLAUDE.md")).size;
+if (agentsSize > budget) die(1, `.claude/CLAUDE.md is ${agentsSize} bytes, over the ${budget}-byte budget`);
 
 function directoryNames(relative) {
   try {
@@ -85,7 +85,7 @@ function directoryNames(relative) {
   } catch { die(1, `directory is missing: ${relative}`); }
 }
 
-const canonicalSkills = directoryNames(".agents/skills");
+const canonicalSkills = directoryNames(".claude/skills");
 
 const highRiskSkills = new Set(["flash-esp32", "ship", "usb-recovery"]);
 const readOnlySkills = new Set([
@@ -94,7 +94,7 @@ const readOnlySkills = new Set([
 ]);
 const ownerContracts = new Map([
   ["project-review", [
-    "[`AGENTS.md`](../../../AGENTS.md) owns runner policy, authorization, safety, evidence, build, and review contracts.",
+    "[`CLAUDE.md`](../../CLAUDE.md) owns runner policy, authorization, safety, evidence, build, and review contracts.",
     "[`docs/README.md`](../../../docs/README.md) owns hardware, HTTP API, and commands.",
     "[`docs/ARCHITECTURE.md`](../../../docs/ARCHITECTURE.md) owns telemetry, MQTT, sleep/link state, pairing, and OTA.",
     "[`docs/MCP.md`](../../../docs/MCP.md) owns MCP tools.",
@@ -107,7 +107,7 @@ const ownerContracts = new Map([
     "[`docs/README.md`](../../../docs/README.md) owns the HTTP command catalog.",
     "[`docs/ARCHITECTURE.md`](../../../docs/ARCHITECTURE.md) owns link-state and pairing semantics.",
     "[`docs/MCP.md`](../../../docs/MCP.md) owns MCP tools.",
-    "`AGENTS.md` owns only runner policy and safety boundaries.",
+    "`CLAUDE.md` owns only runner policy and safety boundaries.",
   ]],
 ]);
 const deepOwnerTerms = /(?:HTTP|\bAPI\b|(?<![-/])\bcommands?\b|\bMCP\b|\bNVS\b|\bMQTT\b|link-state|pairing)/i;
@@ -116,21 +116,21 @@ const usbNoApprovalNeeded = /(?:live verification|HTTP requests?|GET endpoints?)
 const usbOtaNotStateChanging = /GET \/ota\/check[^.!?]*(?:is not|isn't|not) state-changing/i;
 const usbAbsentApprovalProceeds = /(?:(?:approval|authorization)[^.!?]*(?:absent|missing|not obtained)|without (?:separate )?(?:approval|authorization))[^.!?]*(?:continue|proceed|run|contact|send|request)/i;
 const reviewedSkillSha256 = new Map([
-  ["add-logic-test", "f8a37fddbbb5c47afa9eca4fb4823c203af099718b3327a656c717d0462546f7"],
-  ["device-diag", "7babf410873975ec05bb029c3c9522e70f9aadd96d0823829c48236f24ca3d44"],
-  ["display-preview", "4bff95d0314d50ce29d67beac7ef4f9db1ebcbb2fa609335e560e162f5a1ed46"],
-  ["feature-docs", "c2d26e873399d4970145ed53ab64e5e3abfd198391343ad107ec1dbdf10012ff"],
-  ["flash-esp32", "cd67535f6206b72eb824548fce9338f97c5e813aff14633c6149b636b2146aeb"],
-  ["ota-release-verify", "347c7f3cdffa25a9563f104c099e08d1f91101e2d54b39442b97e9fcbc77400b"],
-  ["pr-hygiene", "7ef6544f83a50dbe696e360081c33091ce8d7f0826ec839efd7c4805cdf2344a"],
-  ["project-review", "98a76b25dd8856f41631f05b1bbab69680a46e6c898ef05618ac5a377200216f"],
-  ["ship", "41ae3355c7b2d24624d92a5c23666b18361083f8ef305faf43b57303a9f20275"],
-  ["skill-audit", "149e6b4e6a05913529cf1c5ecff84f3ca0b39f6b461aff2455106b8d312df05b"],
-  ["usb-recovery", "6f3cbd9533e75d14b5a14cd19987fa07db046b6c5412f4d52d2aa54944481cf9"],
-  ["vehicle-command-audit", "8fe01cf96f9c16cd749aea01a2433726836832ce8fbd6c2a6c1ad64e65aa0049"],
+  ["add-logic-test", "2e566e242b1e8c6d1a52be2e2ce8b1ba0244ee9b63452565d3f928554c5e4638"],
+  ["device-diag", "205c8ec656a7e5782fefc49accf02adb4c0ffaa058da162537bd7ce7cfebd783"],
+  ["display-preview", "97a85981ceaff06c032c82c87b7cbc6ba2d660892b849e1785f9090db629d10c"],
+  ["feature-docs", "ab6987b40cc6f9e739a09fce66ff7b90d672470640f5214edcc9de3ef1ee050c"],
+  ["flash-esp32", "989d425b201b4aa329ff103599170830a605507437815a8db187d21baa308278"],
+  ["ota-release-verify", "32d5188bdb0387fc77bfebcffe54c2b57e8c2a380d3a4646a591662f9411729b"],
+  ["pr-hygiene", "073f1c5f2720e6e089a2b52a946ad5cc061877a04ae95f9cac1366416d023c74"],
+  ["project-review", "ec6c6507b97ff6a8968e0f503e193878f2de754b17f50d004726e07ab888793a"],
+  ["ship", "8ab9d6fb3fc7260843493fb492454de3ebbff792dbd30ba278343647dbaa2e84"],
+  ["skill-audit", "eee35d04d2d7269eb597196f1150299ef35c286c85b730b4372c9e43362bb109"],
+  ["usb-recovery", "5d7d1b4641c7ebff07e3e438ff50d12730a51a0d637ab97d7ffc1d96f769669b"],
+  ["vehicle-command-audit", "b2d38767e62cce8ea2f33edd802a14ae64fd14bc3e9f5d79d9fee6ec2848ecfe"],
 ]);
 const featureDocsScopeTokens = [
-  "main/", "test/", "sdkconfig.defaults*", "partitions.csv", "AGENTS.md", ".agents/", ".codex/",
+  "main/", "test/", "sdkconfig.defaults*", "partitions.csv", ".claude/",
   ".github/PULL_REQUEST_TEMPLATE.md",
   "tools/agent-hooks/", "tools/agent-config/", "docs/index.html", "installer-bootstrap.mjs",
   "serial-port-release.mjs", "web-installer.mjs", "docs/vendor/",
@@ -180,7 +180,7 @@ const mainArtifactConsumerContracts = new Map([
 ]);
 for (const name of canonicalSkills) {
   const canonical = restrictedFrontmatter(
-    repoPath(`.agents/skills/${name}/SKILL.md`), `canonical skill ${name}`,
+    repoPath(`.claude/skills/${name}/SKILL.md`), `canonical skill ${name}`,
   );
   if (canonical.values.get("name") !== name) {
     die(1, `skill ${name} frontmatter name mismatch`);
@@ -281,10 +281,10 @@ for (const name of canonicalSkills) {
       die(1, `${name} is missing an exact documentation-owner contract`);
     }
     const contradictoryOwner = proseSentences(canonical.text).some((sentence) =>
-      /AGENTS\.md/i.test(sentence) && deepOwnerTerms.test(sentence)
+      /CLAUDE\.md/i.test(sentence) && deepOwnerTerms.test(sentence)
     );
     if (contradictoryOwner) {
-      die(1, `canonical ${name} assigns a deep technical catalog to compact AGENTS.md`);
+      die(1, `canonical ${name} assigns a deep technical catalog to compact CLAUDE.md`);
     }
   }
   if (["feature-docs", "project-review", "skill-audit"].includes(name)) {
@@ -306,13 +306,13 @@ for (const name of canonicalSkills) {
 }
 
 for (const [relative, contracts] of new Map([
-  ["AGENTS.md", ["`$pr-hygiene` is required at PR creation, every push, and every merge"]],
+  [".claude/CLAUDE.md", ["`$pr-hygiene` is required at PR creation, every push, and every merge"]],
   [".github/PULL_REQUEST_TEMPLATE.md", [
     "These four boxes ARE the publish/merge gates",
     "`$pr-hygiene` clean — content gate @ <full-40-hex-sha>",
   ]],
   ["docs/FEATURES.md", [
-    "Runner-neutral agent policy and four SHA-bound PR gates",
+    "Project agent policy and four SHA-bound PR gates",
     "publishing personal/private identifiers or non-English PR/docs content",
   ]],
 ])) {
@@ -325,17 +325,17 @@ for (const [relative, contracts] of new Map([
 }
 
 const canonicalReviewerTargets = [
-  ".codex/agents/agent_config_reviewer.toml",
-  ".codex/agents/doc_drift_checker.toml",
-  ".codex/agents/heap_safety_reviewer.toml",
-  ".codex/agents/multi_target_build_reviewer.toml",
+  ".claude/agents/agent-config-reviewer.md",
+  ".claude/agents/doc-drift-checker.md",
+  ".claude/agents/heap-safety-reviewer.md",
+  ".claude/agents/multi-target-build-reviewer.md",
 ];
 let actualReviewerTargets;
 try {
-  actualReviewerTargets = fs.readdirSync(repoPath(".codex/agents"), { withFileTypes: true })
-    .filter((entry) => entry.isFile() && entry.name.endsWith(".toml"))
-    .map((entry) => `.codex/agents/${entry.name}`).sort();
-} catch { die(1, ".codex/agents is missing"); }
+  actualReviewerTargets = fs.readdirSync(repoPath(".claude/agents"), { withFileTypes: true })
+    .filter((entry) => entry.isFile() && entry.name.endsWith(".md"))
+    .map((entry) => `.claude/agents/${entry.name}`).sort();
+} catch { die(1, ".claude/agents is missing"); }
 if (canonicalReviewerTargets.join("\0") !== actualReviewerTargets.join("\0")) {
   die(1, "canonical reviewer set differs from manifest");
 }
@@ -343,7 +343,7 @@ if (actualReviewerTargets.length !== 4) {
   die(1, `expected four canonical reviewers, got ${actualReviewerTargets.length}`);
 }
 const multiTargetReviewer = normalizeProse(
-  fs.readFileSync(repoPath(".codex/agents/multi_target_build_reviewer.toml"), "utf8"),
+  fs.readFileSync(repoPath(".claude/agents/multi-target-build-reviewer.md"), "utf8"),
 );
 const multiTargetPublicationContracts = [
   "logic-test -> build -> independent-rebuild -> publish -> deploy",
@@ -360,7 +360,7 @@ if (safety?.schema_version !== 1 || !Array.isArray(safety.invariants) || safety.
   die(2, "safety invariants need schema_version 1 and a non-empty invariants array");
 }
 const instructionTexts = new Map([
-  ["AGENTS.md", fs.readFileSync(repoPath("AGENTS.md"), "utf8")],
+  [".claude/CLAUDE.md", fs.readFileSync(repoPath(".claude/CLAUDE.md"), "utf8")],
 ]);
 const invariantIds = new Set();
 for (const invariant of safety.invariants) {
@@ -377,4 +377,4 @@ for (const invariant of safety.invariants) {
 }
 
 console.log(`agent-config: ${canonicalSkills.length} canonical skills, ${actualReviewerTargets.length} reviewers and ${invariantIds.size} instruction invariants clean`);
-console.log(`agent-config: AGENTS.md budget ${agentsSize}/${budget} bytes`);
+console.log(`agent-config: .claude/CLAUDE.md budget ${agentsSize}/${budget} bytes`);

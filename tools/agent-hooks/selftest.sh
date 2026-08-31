@@ -30,7 +30,7 @@ expect_guard deny '' 'empty guard payload fails closed'
 expect_guard deny '{bad' 'malformed guard JSON fails closed'
 expect_guard deny '{}' 'partial guard payload fails closed'
 expect_guard allow "$(payload Read file_path docs/SECURITY.md "$root")" 'Read schema permits normal file'
-expect_guard allow "$(payload exec_command cmd 'git status --short' "$root")" 'Codex exec_command/cmd schema permits normal command'
+expect_guard allow "$(payload exec_command cmd 'git status --short' "$root")" 'alternate exec_command/cmd payload schema permits normal command'
 expect_guard deny "$(payload exec_command_extra cmd 'cat ota_signing_key.pem' "$root")" 'suffix-manipulated tool fails closed'
 expect_guard deny "$(payload Mystery command 'cat ota_signing_key.pem' "$root")" 'unknown tool fails closed'
 expect_guard deny "$(payload Read file_path /tmp/offline.pem "$root")" 'PEM read denied'
@@ -69,7 +69,7 @@ expect_guard deny "$(payload Bash command 'espsecure.py sign_data --keyfile ota_
 expect_guard deny "$(payload Bash command 'bash -c \"espsecure.py sign_data --keyfile ota_signing_key.pem firmware.bin\"' "$root")" 'wrapped sign_data denied'
 expect_guard allow "$(payload Read file_path partitions.csv "$root")" 'partition table readable'
 expect_guard deny "$(payload Edit file_path partitions.csv "$root")" 'partition edit denied'
-expect_guard deny "$(payload Write file_path partitions.csv "$root")" 'Codex partition write denied'
+expect_guard deny "$(payload Write file_path partitions.csv "$root")" 'partition write denied'
 multi_edit_payload="$(python3 - "$root" <<'PY'
 import json,sys
 print(json.dumps({
@@ -170,9 +170,9 @@ for hidden in \
 done
 [ "$hidden_failed" = 0 ] && pass_case 'fenced, HTML, comment, quote, and indented records ignored' || fail_case 'hidden record accepted'
 
-rename='[[{"filename":"docs/chore.md","previous_filename":".codex/hooks.json"}]]'
+rename='[[{"filename":"docs/chore.md","previous_filename":".claude/settings.json"}]]'
 rename_out="$(printf '%s' "$rename" | gate_extract_changed_pages 1)" || rename_out=FAIL
-if [ "$rename_out" = $'docs/chore.md\n.codex/hooks.json' ] && printf '%s\n' "$rename_out" | gate_feature_docs_relevant; then pass_case 'rename out of catalogued agent-policy path preserves relevance'; else fail_case 'rename extraction'; fi
+if [ "$rename_out" = $'docs/chore.md\n.claude/settings.json' ] && printf '%s\n' "$rename_out" | gate_feature_docs_relevant; then pass_case 'rename out of catalogued agent-policy path preserves relevance'; else fail_case 'rename extraction'; fi
 if printf '%s\n' '.github/PULL_REQUEST_TEMPLATE.md' | gate_feature_docs_relevant; then pass_case 'PR template is feature-docs relevant'; else fail_case 'PR template relevance'; fi
 if printf '%s\n' '.github/workflows/pr-policy.yml' | gate_feature_docs_relevant \
    && printf '%s\n' '.github/workflows/bench-acceptance.yml' | gate_feature_docs_relevant; then
@@ -264,7 +264,7 @@ case "$args" in
     python3 -c 'import json,os; print(json.dumps({"number":123,"changedFiles":int(os.environ.get("TEST_CHANGED","1"))}))' ;;
   *" api "*|api*)
     case "${TEST_FILES_MODE:-normal}" in
-      rename) printf '[[{"filename":"docs/chore.md","previous_filename":".codex/hooks.json"}]]\n' ;;
+      rename) printf '[[{"filename":"docs/chore.md","previous_filename":".claude/settings.json"}]]\n' ;;
       *) printf '[[{"filename":"main/main.cpp"}]]\n' ;;
     esac ;;
   *) exit 91 ;;
@@ -356,10 +356,11 @@ sleep 1.2
 [ "$timeout_rc" = 124 ] && [ ! -e "$timeout_marker" ] && pass_case 'inner timeout kills SIGTERM-ignoring descendants' || fail_case 'timeout descendant escaped'
 expect_rc 2 'invalid timeout rejected' python3 "$runner" invalid true
 
-if python3 - "$root/.codex/hooks.json" "$root/.codex/config.toml" <<'PY'
-import copy,json,sys,tomllib
+if python3 - "$root/.claude/settings.json" <<'PY'
+import copy,json,sys
 expected={"SessionStart","SubagentStart","Stop","PreToolUse","PostToolUse"}
 def validate(data):
+  assert set(data)=={"hooks"}
   hooks=data["hooks"]; assert set(hooks)==expected
   for groups in hooks.values():
     for group in groups:
@@ -368,25 +369,23 @@ def validate(data):
       for hook in group["hooks"]:
         assert hook["type"]=="command" and hook.get("async") is not True
         assert isinstance(hook.get("timeout"),int) and hook["timeout"]>0
-codex=json.load(open(sys.argv[1]))
-validate(codex)
-bad=copy.deepcopy(codex); bad["hooks"]["PreToolUse"][0]["hooks"][0]["async"]=True
+        assert hook["command"].startswith(('python3 "${CLAUDE_PROJECT_DIR}/','bash "${CLAUDE_PROJECT_DIR}/'))
+settings=json.load(open(sys.argv[1]))
+validate(settings)
+bad=copy.deepcopy(settings); bad["hooks"]["PreToolUse"][0]["hooks"][0]["async"]=True
 try: validate(bad); raise AssertionError("async mutation accepted")
 except AssertionError as exc:
   if str(exc)=="async mutation accepted": raise
-bad=copy.deepcopy(codex); bad["hooks"]["PreToolUse"][0]["matcher"]=bad["hooks"]["PreToolUse"][0]["matcher"][1:]
+bad=copy.deepcopy(settings); bad["hooks"]["PreToolUse"][0]["matcher"]=bad["hooks"]["PreToolUse"][0]["matcher"][1:]
 try: validate(bad); raise AssertionError("unanchored mutation accepted")
 except AssertionError as exc:
   if str(exc)=="unanchored mutation accepted": raise
-text=open(sys.argv[2],"rb").read(); config=tomllib.loads(text.decode())
-def validate_features(value): assert value["features"]["hooks"] is True
-validate_features(config)
-mutated=tomllib.loads(text.decode().replace("hooks = true","hooks = false",1))
-try: validate_features(mutated); raise AssertionError("disabled hooks accepted")
+bad=copy.deepcopy(settings); bad["hooks"]["Stop"][0]["hooks"][0]["command"]="python3 tools/agent-hooks/agent_hook.py stop-logic-tests"
+try: validate(bad); raise AssertionError("unrooted project path accepted")
 except AssertionError as exc:
-  if str(exc)=="disabled hooks accepted": raise
+  if str(exc)=="unrooted project path accepted": raise
 PY
-then pass_case 'Codex schema plus disabled-hook, async, and matcher mutation canaries'; else fail_case 'Codex hook schema'; fi
+then pass_case 'Claude settings schema plus async, matcher and project-path mutation canaries'; else fail_case 'Claude hook schema'; fi
 
 if python3 - "$root" <<'PY'
 import pathlib,re,sys
@@ -394,7 +393,7 @@ root=pathlib.Path(sys.argv[1])
 fragments=[("dai","kin"),("x10","a"),("heat.?","pump"),("hp_","modbus"),
            ("victoria","logs"),("schema","tic"),("ab","sence"),("ui-use-","case")]
 pattern=re.compile("|".join(left+right for left,right in fragments),re.I)
-paths=[root/".codex/hooks.json"]
+paths=[root/".claude/settings.json"]
 for directory in (root/"tools/agent-hooks",):
   paths.extend(path for path in directory.rglob("*") if path.is_file())
 for path in paths:
@@ -403,11 +402,11 @@ for path in paths:
     continue
   assert not pattern.search(data.decode(errors="replace")), path
 PY
-then pass_case 'neutral core has no foreign-project policy residue'; else fail_case 'foreign-project residue'; fi
+then pass_case 'shared core has no foreign-project policy residue'; else fail_case 'foreign-project residue'; fi
 
 if python3 -m py_compile "$hook" "$parser" "$runner" \
   && bash -n "$root/tools/agent-hooks/"*.sh \
-  && python3 -m json.tool "$root/.codex/hooks.json" >/dev/null; then pass_case 'Python, Bash, JSON syntax'; else fail_case 'syntax'; fi
+  && python3 -m json.tool "$root/.claude/settings.json" >/dev/null; then pass_case 'Python, Bash, JSON syntax'; else fail_case 'syntax'; fi
 
 printf '\nagent hook self-test: %s passed, %s failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

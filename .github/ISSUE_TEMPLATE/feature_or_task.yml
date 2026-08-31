@@ -29,7 +29,7 @@ body:
     id: area
     attributes:
       label: Affected area
-      description: Which component (from the architecture map in AGENTS.md and docs/ARCHITECTURE.md)?
+      description: Which component (from the architecture map in .claude/CLAUDE.md and docs/ARCHITECTURE.md)?
       options:
         - BLE client / connection
         - Vehicle commands (charge / wake / etc.)
@@ -50,11 +50,11 @@ body:
     id: constraints
     attributes:
       label: Constraints to honour (repo invariants)
-      description: Tick the ones the implementer must respect. See AGENTS.md.
+      description: Tick the ones the implementer must respect. See .claude/CLAUDE.md.
       options:
         - label: Target-agnostic — must still build for all four chips (esp32 / esp32s3 / esp32c3 / esp32c6).
         - label: Heap-safe — no new large *contiguous* allocations; HTTP handlers stay under the handle_all try/catch.
-        - label: Doc-sync — update AGENTS.md and docs/ (ARCHITECTURE / SECURITY / MCP / README) where behavior changes.
+        - label: Doc-sync — update .claude/CLAUDE.md and docs/ (ARCHITECTURE / SECURITY / MCP / README) where behavior changes.
         - label: New hardware-free logic goes in main/logic/ with a CHECK in test/test_logic.cpp ($add-logic-test skill).
         - label: Verify via scripts/run-mock-tests.sh and $project-review before merge.
   - type: markdown

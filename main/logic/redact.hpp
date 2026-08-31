@@ -8,7 +8,7 @@
 // Pure, hardware-free logic shared by the firmware and the host-side mock build
 // (test/, built without ESP-IDF). Anything in this directory must stay free of IDF,
 // FreeRTOS, NimBLE, NVS, cJSON and esp_http_server includes so it compiles with a
-// plain host toolchain. See test/README.md and the project AGENTS.md.
+// plain host toolchain. See test/README.md and the project .claude/CLAUDE.md.
 namespace tk {
 
 // What a diagnostic snapshot must NOT carry when it leaves the device — the ONE implementation
@@ -35,7 +35,7 @@ namespace tk {
 //     status::Inputs fields it gathers, BEFORE emit_status() walks them — never as a
 //     post-processing pass over the finished JSON. That is a memory rule, not a style
 //     preference: a second pass needs a second full-size buffer, and on this device the binding
-//     limit is the largest CONTIGUOUS free block (see the project AGENTS.md), so the pass is a
+//     limit is the largest CONTIGUOUS free block (see the project .claude/CLAUDE.md), so the pass is a
 //     crash risk on exactly the request a user makes when something is already wrong.
 //
 //   * /diag leaks by LINE. A handful of log statements interpolate a VIN, an SSID, an IP, a

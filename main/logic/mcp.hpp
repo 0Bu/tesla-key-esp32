@@ -63,7 +63,7 @@ inline McpMethod mcp_method_from(const char* m) {
 // role-refused commands carry mcp_name == nullptr and never reach tools/list (the car
 // rejects them for this key role, so advertising them would only mislead the calling
 // model). Descriptions stay terse on purpose — tools/list is the endpoint's largest
-// response and cJSON prints it into ONE contiguous heap block (see AGENTS.md).
+// response and cJSON prints it into ONE contiguous heap block (see .claude/CLAUDE.md).
 
 // MCP advertises these arguments as JSON Schema `integer`. Accepting a fractional cJSON
 // number and silently truncating it executes a different command than the client requested;

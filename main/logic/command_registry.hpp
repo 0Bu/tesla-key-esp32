@@ -99,7 +99,7 @@ struct CmdInfo {
     const char* api_name;   // REST /command/{CMD} name; nullptr = not a REST command
     const char* mcp_name;   // MCP tool name; nullptr = not an MCP tool
     const char* mcp_desc;   // tools/list description (terse ON PURPOSE — tools/list is
-                            // the MCP endpoint's largest single cJSON print, see AGENTS.md)
+                            // the MCP endpoint's largest single cJSON print, see .claude/CLAUDE.md)
     CmdArg      args[kCmdMaxArgs];   // kNoCmdArg-padded, positional (values arrays match)
 };
 

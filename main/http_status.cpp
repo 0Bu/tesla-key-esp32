@@ -120,7 +120,7 @@ static cJSON* build_status_object(bool redact) {
     // writers (main.cpp's rollback, POST /set_wifi) reboot immediately after saving — while
     // /status is the web UI's 4 s poll, so a read here is an NVS blob read plus its std::vector on
     // a request path, forever, for a value that is fixed at boot. This device's binding limit is
-    // the largest CONTIGUOUS free block and the rule in AGENTS.md is not to allocate on a request
+    // the largest CONTIGUOUS free block and the rule in .claude/CLAUDE.md is not to allocate on a request
     // path without needing to.
     static const bool s_rolled_back = [] {
         tk::ConfigBlob cb;
@@ -399,7 +399,7 @@ esp_err_t handle_coredump(GuardedReq rq) {
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
 
     // 1 KB of stack, not heap: the read buffer must not compete for the contiguous block, and this
-    // handler runs on the httpd task whose stack budget is hand-counted (see AGENTS.md).
+    // handler runs on the httpd task whose stack budget is hand-counted (see .claude/CLAUDE.md).
     char   buf[1024];
     size_t off = 0;
     while (off < size) {

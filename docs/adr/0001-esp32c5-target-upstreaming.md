@@ -39,7 +39,7 @@ built from a *clone-plus-edit* rather than the Component Manager's registry path
    - Delete `scripts/prepare-tesla-ble-c5.sh`; remove its invocation from
      `scripts/ci-build-all.sh` and the mention from `scripts/idf-docker.sh`/CI docs if present.
    - Drop the `third_party/` entry from `.gitignore` if nothing else uses it.
-   - Update the narrative: `AGENTS.md` (toolchain + target contract) and
+   - Update the narrative: `.claude/CLAUDE.md` (toolchain + target contract) and
      `docs/ARCHITECTURE.md` §"esp32c5 via a local build-time patch" (reduce to a historical
      note pointing at this ADR).
    - Verify: `scripts/ci-build-all.sh` — all five targets green, c5 size gate unchanged; the
