@@ -36,7 +36,7 @@ keys; it no longer truncates an unknown key. This includes the pinned tesla-ble 
 NVS calls in every shipped source/header/inline fragment and the operator-facing retention mirror is
 in `docs/README.md`.
 
-**BLE response anti-replay:** the pinned `yoziru/tesla-ble` v5.1.1 detects an invalid
+**BLE response anti-replay:** the pinned `yoziru/tesla-ble` v5.1.2 detects an invalid
 CarServer response counter but, upstream, still dispatches that response to telemetry callbacks
 and the command FIFO. The repository applies `patches/tesla-ble/` to every target at build time
 so a rejected counter is logged and dropped before it can update state or complete a newer
