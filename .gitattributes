@@ -1,0 +1,8 @@
+# Vendored patch series are verbatim unified diffs. A context line for a blank
+# target line is, by the diff format, a line whose only byte is the leading
+# marker space -- so git's whitespace checker (git diff --check / git show
+# --check, run by scripts/repo-lint.sh) would flag it as a trailing-whitespace
+# error even though the bytes must be preserved exactly for the patch to apply.
+# Turn whitespace checking off for these files so the hygiene gate leaves them
+# untouched.
+patches/**/*.patch -whitespace
