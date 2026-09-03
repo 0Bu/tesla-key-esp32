@@ -15,16 +15,6 @@ Build from source, full API and security model: [docs/README.md](docs/README.md)
 - A browser with Web Serial support
 - The Tesla's 17-character VIN
 
-A classic **esp32** board must be **chip revision v3.0 (ECO3)** or newer — standard since ~2020.
-Pre-ECO3 silicon (for example the ESP32-PICO-D4 in the M5 ATOM Lite and other older devkits) writes
-to 100% but then fails to boot with `chip revision check failed. Required >= v3.0`; the web installer
-detects this and stops before flashing. The esp32s3, esp32c3 and esp32c6 targets have no such
-requirement. Why this floor exists: [docs/SECURITY.md](docs/SECURITY.md).
-
-An esp32s3 can run on Ethernet instead of WiFi — including PoE, so one cable powers it and you
-can mount it wherever the car is. It needs no WiFi setup (Step 2) — it comes up on DHCP and the
-VIN is set in the web UI. See [docs/README.md](docs/README.md#wired-networking-optional-esp32s3).
-
 ---
 
 ## Step 1 — Install the firmware
