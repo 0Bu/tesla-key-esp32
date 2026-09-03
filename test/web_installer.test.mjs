@@ -203,7 +203,7 @@ test("serial log parsing preserves split line endings and classifies IDF levels"
   assert.equal(stripSerialAnsi(second.lines[0].text), "W (7700) uart: pin busy");
 });
 
-function fakeEsptool(chipFamily = "ESP32-S3") {
+function fakeEsptool(chipFamily = "ESP32-S3", { chipRevision } = {}) {
   const calls = [];
   class Transport {
     constructor(port) { this.port = port; calls.push("transport"); }
@@ -213,6 +213,10 @@ function fakeEsptool(chipFamily = "ESP32-S3") {
     constructor(options) {
       this.options = options;
       this.chip = { CHIP_NAME: chipFamily };
+      if (chipRevision !== undefined) {
+        this.chip.getChipRevision = async () => chipRevision;
+        this.chip.getChipDescription = async () => `${chipFamily} (revision ${chipRevision})`;
+      }
       calls.push("loader");
     }
     async main() { calls.push("main"); }
@@ -327,6 +331,54 @@ test("an integrity error occurs before erase or either write phase", async () =>
       cryptoImpl: webcrypto
     }),
     { name: "FirmwareIntegrityError" }
+  );
+  assert.equal(fake.calls.includes("erase"), false);
+  assert.equal(fake.calls.some((call) => Array.isArray(call) && call[0] === "write"), false);
+});
+
+test("probing refuses a pre-ECO3 classic ESP32 and still releases the port", async () => {
+  const fake = fakeEsptool("ESP32", { chipRevision: 1 });
+  await assert.rejects(
+    probeDevice({
+      port: { getInfo() { return { usbVendorId: 0x10c4, usbProductId: 0xea60 }; } },
+      manifest,
+      TransportCtor: fake.Transport,
+      ESPLoaderCtor: fake.Loader
+    }),
+    (error) => error.name === "UnsupportedChipRevisionError" &&
+      /ECO3/.test(error.message) && /v3\.0/.test(error.message)
+  );
+  // The rejected probe still hands control back to the app and closes the port.
+  assert.deepEqual(fake.calls, ["transport", "loader", "main", "flashId", "reset:soft_reset", "disconnect"]);
+});
+
+test("probing accepts an ECO3 (revision v3) classic ESP32", async () => {
+  const fake = fakeEsptool("ESP32", { chipRevision: 3 });
+  const result = await probeDevice({
+    port: { getInfo() { return { usbVendorId: 0x10c4, usbProductId: 0xea60 }; } },
+    manifest,
+    TransportCtor: fake.Transport,
+    ESPLoaderCtor: fake.Loader
+  });
+  assert.equal(result.chipFamily, "ESP32");
+  assert.equal(result.build.parts[0].path, "bootloader-esp32.bin");
+});
+
+test("installing refuses a pre-ECO3 classic ESP32 before erasing or writing flash", async () => {
+  const fake = fakeEsptool("ESP32", { chipRevision: 1 });
+  await assert.rejects(
+    flashDevice({
+      port: { getInfo() { return { usbVendorId: 0x10c4, usbProductId: 0xea60 }; } },
+      manifest,
+      manifestUrl: "https://example.test/manifest.json",
+      eraseFirst: true,
+      TransportCtor: fake.Transport,
+      ESPLoaderCtor: fake.Loader,
+      fetchImpl: async (url) => firmwareResponse(url),
+      cryptoImpl: webcrypto,
+      onState() {}
+    }),
+    { name: "UnsupportedChipRevisionError" }
   );
   assert.equal(fake.calls.includes("erase"), false);
   assert.equal(fake.calls.some((call) => Array.isArray(call) && call[0] === "write"), false);
