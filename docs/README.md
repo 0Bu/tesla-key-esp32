@@ -11,7 +11,11 @@ Exactly the four chips yoziru/tesla-ble supports — **esp32, esp32s3, esp32c3, 
 WiFi 2.4 GHz + BLE). The ESP-IDF Component Manager enforces that list at dependency resolution,
 so the supported set cannot drift from what the crypto library declares. **≥ 4 MB flash**
 (dual-OTA layout: two ~2 MB app slots; a larger flash just leaves the top unused). No PSRAM
-required. ESP32-S2 (no Bluetooth) and ESP32-H2 / P4 (no WiFi) cannot run this firmware. A chip
+required. ESP32-S2 (no Bluetooth) and ESP32-H2 / P4 (no WiFi) cannot run this firmware. The classic
+**esp32** must additionally be **chip revision v3.0 (ECO3)** or newer (standard since ~2020): the
+signed image requires it (`CONFIG_ESP32_REV_MIN_3`), so pre-ECO3 silicon such as the ESP32-PICO-D4
+is rejected before flashing and the other three targets have no such floor (see
+[SECURITY.md](SECURITY.md)). A chip
 tesla-ble does not declare — esp32c5, esp32c61 — would need upstreaming there first; carrying a
 locally patched checkout of the crypto library instead was tried for the C5 and dropped
 ([adr/0004](adr/0004-drop-esp32c5-target.md)). USB data cable for flashing.
