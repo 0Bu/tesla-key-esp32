@@ -12,6 +12,13 @@ const PARTITION_TABLE_OFFSET = 0x8000;
 const APP_OFFSET = 0x20000;
 const APP_SLOT_SIZE = 0x1f0000;
 const SUPPORTED_CHIPS = ["ESP32", "ESP32-S3", "ESP32-C3", "ESP32-C6"];
+// Classic ESP32 firmware is built with CONFIG_ESP32_REV_MIN_3 (see sdkconfig.defaults.esp32) so the
+// signed image boots only on chip revision v3.0 (ECO3) or newer. esptool reports the classic ESP32
+// wafer revision as a bare major integer, so ECO3 is revision >= 3. A pre-ECO3 chip still flashes to
+// 100% and only then has its image rejected by the 2nd-stage bootloader ("chip revision check
+// failed. Required >= v3.0"), which looks like a brick. The other targets meet their signing
+// scheme's floor at their default revision, so only ESP32 carries a minimum here.
+const MIN_CHIP_REVISION_MAJOR = { ESP32: 3 };
 const ANSI_CONTROL_SEQUENCE = /\x1B\[[0-?]*[ -/]*[@-~]/g;
 const sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
@@ -352,6 +359,33 @@ export async function verifyBootVersion({
   }
 }
 
+// Refuse a chip whose revision is below its firmware's minimum before any flash write, turning the
+// otherwise cryptic post-flash boot loop into an actionable message. Reads that cannot resolve a
+// numeric revision fail open — the normal flash path and its on-device bootloader still apply.
+async function assertChipRevisionSupported(loader, chipFamily) {
+  const required = MIN_CHIP_REVISION_MAJOR[chipFamily];
+  const chip = loader && loader.chip;
+  if (required === undefined || !chip || typeof chip.getChipRevision !== "function") return;
+  let revision;
+  try {
+    revision = await chip.getChipRevision(loader);
+  } catch (_error) {
+    return;
+  }
+  if (typeof revision !== "number" || revision >= required) return;
+  let description;
+  try {
+    if (typeof chip.getChipDescription === "function") description = await chip.getChipDescription(loader);
+  } catch (_error) {}
+  const label = description || `${chipFamily} (revision ${revision})`;
+  throw errorWithName(
+    "UnsupportedChipRevisionError",
+    `${label} is pre-ECO3. The ${chipFamily} firmware requires chip revision v${required}.0 (ECO3) or ` +
+    `newer, so this board would flash but then fail to boot ("chip revision check failed"). Use an ECO3 ` +
+    `ESP32 (standard since ~2020) or an esp32s3/c3/c6 board — see Requirements in the README.`
+  );
+}
+
 export async function probeDevice({
   port,
   manifest,
@@ -382,6 +416,7 @@ export async function probeDevice({
       if (!build) {
         throw errorWithName("UnsupportedChipError", `${chipFamily} is not supported by this firmware.`);
       }
+      await assertChipRevisionSupported(loader, chipFamily);
       return { chipFamily, build };
     })(), timeoutMs, errorWithName(
       "DeviceProbeTimeoutError",
@@ -433,6 +468,7 @@ export async function flashDevice({
         chipFamily ? `${chipFamily} is not supported by this firmware.` : "The ESP chip could not be identified."
       );
     }
+    await assertChipRevisionSupported(loader, chipFamily);
 
     onState({ stage: "preparing", percentage: 0, message: "Loading firmware" });
     const fileArray = await fetchFirmwareParts(build, manifestUrl, fetchImpl, cryptoImpl);
