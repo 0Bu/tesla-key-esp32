@@ -6,7 +6,7 @@
 // running on, rather than cutting a build (and an OTA channel, and a CI target, and a manifest
 // entry) per variant. The esp32s3 image alone serves several: a LilyGo T-Dongle-S3 with an
 // ST7735 panel, a bare ESP32-S3 with nothing attached, and a range of W5500-over-SPI Ethernet
-// boards (M5Stack AtomS3 Lite + ATOMIC PoE Base, Waveshare ESP32-S3-ETH, LilyGO T-ETH-Lite),
+// boards (M5Stack AtomS3 Lite + ATOMIC PoE Base and Waveshare ESP32-S3-ETH),
 // each detected at boot by net_eth_probe()'s candidate table (main/logic/eth_board.hpp).
 //
 // The detector lives here, not in display.cpp where it started, because it now has TWO callers

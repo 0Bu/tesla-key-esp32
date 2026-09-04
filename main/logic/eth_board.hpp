@@ -1,31 +1,28 @@
 #pragma once
 
 #include <cstddef>
-#include <cstdint>
 
 // Pure, hardware-free model of supported SPI Ethernet (W5500) board candidates and pin
 // validation. ESP32-S3 has no internal EMAC, so all Ethernet transports run W5500 over SPI.
 // Because the GPIO matrix allows flexible routing, each commercial board uses a different pin-set.
-// This table enables zero-configuration multi-candidate probing at boot.
+// This table enables zero-configuration probing of hardware-verified candidates at boot.
 namespace tk {
 
 struct EthSpiCandidate {
     const char* name;
-    int8_t sclk;
-    int8_t cs;
-    int8_t miso;
-    int8_t mosi;
+    int sclk;
+    int cs;
+    int miso;
+    int mosi;
 };
 
-// Curated list of known commercial ESP32-S3 PoE / Ethernet boards with onboard W5500 over SPI.
+// Curated list of hardware-verified ESP32-S3 PoE / Ethernet boards with W5500 over SPI.
 // Ordered by priority:
 // 1. M5Stack AtomS3 Lite + ATOMIC PoE Base (default / baseline)
 // 2. Waveshare ESP32-S3-ETH / PoE
-// 3. LilyGO T-ETH-Lite ESP32-S3
 inline constexpr EthSpiCandidate kEthDefaultCandidates[] = {
     { "M5Stack ATOMIC PoE",       5,  6,  7,  8 },
     { "Waveshare ESP32-S3-ETH",  13, 14, 12, 11 },
-    { "LilyGO T-ETH-Lite",        10,  9, 11, 12 },
 };
 
 inline constexpr size_t kEthDefaultCandidateCount =
@@ -42,12 +39,14 @@ inline constexpr bool eth_candidate_pins_unique(const EthSpiCandidate& cand) {
 // Forbidden pins:
 //   - Out of range (< 0 or > 48)
 //   - Strapping pins: 0 (boot), 3 (JTAG/strapping), 45 (VDD_SPI), 46 (ROM log)
+//   - GPIO numbers 22..25, which are not bonded out on ESP32-S3
 //   - Flash / Quad-SPI PSRAM internal pins: 26..32
 //   - Octal Flash / Octal PSRAM pins: 33..37
 //   - USB D+/D-: 19, 20
-inline constexpr bool eth_gpio_is_forbidden(int8_t pin) {
+inline constexpr bool eth_gpio_is_forbidden(int pin) {
     if (pin < 0 || pin > 48) return true;
     if (pin == 0 || pin == 3 || pin == 45 || pin == 46) return true;
+    if (pin >= 22 && pin <= 25) return true;
     if (pin >= 26 && pin <= 37) return true;
     if (pin == 19 || pin == 20) return true;
     return false;

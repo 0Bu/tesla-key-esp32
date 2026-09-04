@@ -628,10 +628,10 @@ bool net_eth_probe() {
     // prepend the Kconfig configuration so custom builds take precedence.
     const EthSpiCandidate custom_cand = {
         "Configured SPI",
-        (int8_t)CONFIG_TESLA_ETH_SPI_SCLK,
-        (int8_t)CONFIG_TESLA_ETH_SPI_CS,
-        (int8_t)CONFIG_TESLA_ETH_SPI_MISO,
-        (int8_t)CONFIG_TESLA_ETH_SPI_MOSI
+        CONFIG_TESLA_ETH_SPI_SCLK,
+        CONFIG_TESLA_ETH_SPI_CS,
+        CONFIG_TESLA_ETH_SPI_MISO,
+        CONFIG_TESLA_ETH_SPI_MOSI
     };
 
     const bool custom_differs =

@@ -3770,11 +3770,10 @@ static void test_status_eth() {
 
 // ─── Ethernet board candidates and pin validation ────────────────────────────
 static void test_eth_board() {
-    // Exactly three commercial candidates in known priority order
-    CHECK(tk::kEthDefaultCandidateCount == 3);
+    // Exactly two hardware-verified candidates in known priority order
+    CHECK(tk::kEthDefaultCandidateCount == 2);
     CHECK(std::string(tk::kEthDefaultCandidates[0].name) == "M5Stack ATOMIC PoE");
     CHECK(std::string(tk::kEthDefaultCandidates[1].name) == "Waveshare ESP32-S3-ETH");
-    CHECK(std::string(tk::kEthDefaultCandidates[2].name) == "LilyGO T-ETH-Lite");
 
     // All default candidates must pass pin validation
     for (size_t i = 0; i < tk::kEthDefaultCandidateCount; ++i) {
@@ -3802,8 +3801,8 @@ static void test_eth_board() {
     CHECK(tk::eth_gpio_is_forbidden(45));
     CHECK(tk::eth_gpio_is_forbidden(46));
 
-    // Forbidden pins: Flash / PSRAM (26..37)
-    for (int8_t p = 26; p <= 37; ++p) {
+    // Forbidden pins: nonexistent GPIO22..25 and Flash / PSRAM GPIO26..37
+    for (int p = 22; p <= 37; ++p) {
         CHECK(tk::eth_gpio_is_forbidden(p));
     }
 
@@ -3814,6 +3813,8 @@ static void test_eth_board() {
     // Forbidden pins: Out-of-bounds (<0 or >48)
     CHECK(tk::eth_gpio_is_forbidden(-1));
     CHECK(tk::eth_gpio_is_forbidden(49));
+    CHECK(tk::eth_gpio_is_forbidden(261));
+    CHECK(tk::eth_gpio_is_forbidden(-251));
 
     // Candidates using forbidden pins must be rejected
     const tk::EthSpiCandidate strap_cand = { "Strap", 0, 6, 7, 8 };
@@ -3824,6 +3825,13 @@ static void test_eth_board() {
 
     const tk::EthSpiCandidate usb_cand = { "USB", 5, 6, 19, 8 };
     CHECK(!tk::eth_candidate_pins_valid(usb_cand));
+
+    // Keep the original Kconfig integer until validation: these values used to narrow to GPIO5.
+    const tk::EthSpiCandidate oversized_cand = { "Oversized", 261, 6, 7, 8 };
+    CHECK(!tk::eth_candidate_pins_valid(oversized_cand));
+
+    const tk::EthSpiCandidate undersized_cand = { "Undersized", -251, 6, 7, 8 };
+    CHECK(!tk::eth_candidate_pins_valid(undersized_cand));
 }
 
 // ─── Bug-report redaction ─────────────────────────────────────────────────────

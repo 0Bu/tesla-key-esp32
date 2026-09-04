@@ -105,7 +105,7 @@ menu "Tesla Key Configuration"
             set/changed at runtime in the web UI (Connections -> Syslog), which
             stores it in NVS ("syslog_uri") and overrides this.
 
-    # ── Ethernet (W5500 over SPI — the M5Stack ATOMIC PoE Base) ──────────────────────────────
+    # ── Ethernet (W5500 over SPI — supported ESP32-S3 Ethernet boards) ───────────────────────
     # OFF by default and enabled per target, for two independent reasons. (1) Flash: compiling
     # in esp_eth + the W5500 driver costs tens of KB, and esp32c6 has only ~92 KB of headroom
     # under the ci-build-all.sh size gate, where growth is quantised to 64 KB Secure-Boot blocks.
@@ -130,23 +130,27 @@ menu "Tesla Key Configuration"
 
     # Defaults are the M5Stack AtomS3 Lite + ATOMIC PoE Base wiring (the base routes only these
     # four signals plus power — there is no INT and no RST line, hence the polling mode below).
-    # At boot, net_eth_probe() tests known commercial board candidates (M5Stack, Waveshare,
-    # LilyGO); configuring custom pins here prepends them as the primary candidate.
+    # At boot, net_eth_probe() tests the hardware-verified M5Stack and Waveshare candidates;
+    # configuring custom pins here prepends them as the primary candidate.
     config TESLA_ETH_SPI_SCLK
         int "W5500 SPI SCLK GPIO"
         depends on TESLA_ETH_ENABLED
+        range 0 48
         default 5
     config TESLA_ETH_SPI_CS
         int "W5500 SPI CS GPIO"
         depends on TESLA_ETH_ENABLED
+        range 0 48
         default 6
     config TESLA_ETH_SPI_MISO
         int "W5500 SPI MISO GPIO"
         depends on TESLA_ETH_ENABLED
+        range 0 48
         default 7
     config TESLA_ETH_SPI_MOSI
         int "W5500 SPI MOSI GPIO"
         depends on TESLA_ETH_ENABLED
+        range 0 48
         default 8
     config TESLA_ETH_SPI_CLOCK_MHZ
         int "W5500 SPI clock (MHz)"

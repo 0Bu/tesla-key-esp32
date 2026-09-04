@@ -15,17 +15,18 @@ namespace tk {
 static const char* TAG = "board";
 
 // Detect the LilyGo T-Dongle-S3 by its TF-card socket's external SD pull-ups. The single esp32s3
-// image also runs on a generic ESP32-S3 (no panel) and on an M5Stack AtomS3 Lite + ATOMIC PoE
-// Base; the ST7735 itself can't be probed (its SDA is write-only — no MISO), but the dongle wires
-// the S3's SDMMC bus (CMD=16, D0-D3=14/17/21/18, CLK=12) with EXTERNAL pull-ups, while the other
-// two boards leave those GPIOs unrouted and floating. Read each with an internal pull-DOWN: still
-// HIGH ⇒ an external pull-up holds it ⇒ the dongle. A majority vote (≥4/6) tolerates a stray.
-// HW-verified: 6/6 HIGH on a T-Dongle-S3, 0/6 on a generic ESP32-S3. These GPIOs are otherwise
-// unused; each is reset and left floating after the probe.
+// image also runs on generic boards and the supported W5500 Ethernet boards; the ST7735 itself
+// can't be probed (its SDA is write-only — no MISO), but the dongle wires the S3's SDMMC bus
+// (CMD=16, D0-D3=14/17/21/18, CLK=12) with EXTERNAL pull-ups. Read each as an input with an
+// internal pull-DOWN: still HIGH ⇒ an external pull-up holds it ⇒ the dongle. A majority vote
+// (≥4/6) tolerates a stray.
+// HW-verified: 6/6 HIGH on a T-Dongle-S3, 0/6 on a generic ESP32-S3. Each GPIO is reset and left
+// floating after the probe.
 //
 // MUST run before anything drives a GPIO, and in particular before the Ethernet backend claims
-// SPI: none of the six pins overlaps the W5500's 5/6/7/8, but the ANSWER decides whether that
-// claim is allowed at all (the T-Dongle's panel clock is GPIO5).
+// SPI. GPIO12/14 are part of the Waveshare SPI wiring, but this detector never drives them as
+// outputs and restores them to floating before the Ethernet probe. The ANSWER decides whether any
+// W5500 probe is allowed at all (the T-Dongle's panel clock is GPIO5).
 static bool probe_t_dongle_s3() {
     static const gpio_num_t sd_pins[] = { GPIO_NUM_16, GPIO_NUM_14, GPIO_NUM_17,
                                           GPIO_NUM_21, GPIO_NUM_18, GPIO_NUM_12 };

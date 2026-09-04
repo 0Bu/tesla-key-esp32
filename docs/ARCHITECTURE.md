@@ -862,9 +862,11 @@ slower than it needs to be. Coming up on Ethernet does not merely avoid *using* 
 holds stays free on a device whose binding limit is the largest *contiguous* block.
 
 1. `tk::net_eth_probe()` runs very early — **before** the setup-portal decision — and tests an
-   ordered candidate table of known commercial board pinouts (M5Stack ATOMIC PoE Base, Waveshare
-   ESP32-S3-ETH, LilyGO T-ETH-Lite, or custom Kconfig overrides), reading the W5500's `VERSIONR`
-   (0x0039, always 0x04). A floating MISO reads 0x00/0xFF, so there is no realistic false positive.
+   ordered candidate table of hardware-verified board pinouts (M5Stack ATOMIC PoE Base, Waveshare
+   ESP32-S3-ETH, or custom Kconfig overrides), reading the W5500's `VERSIONR` (0x0039, always
+   0x04). A floating MISO reads 0x00/0xFF, so there is no realistic false positive. Custom GPIO
+   values retain their full Kconfig integer width through validation; nonexistent, reserved,
+   strapping, flash/PSRAM and USB pins are rejected before the SPI driver can narrow or drive them.
    Each failing candidate tears down the SPI bus cleanly before the next candidate is evaluated;
    the winning candidate's pins are latched for the driver. On no answer across all candidates,
    the SPI bus is freed completely and those GPIOs are left as they were found.
@@ -872,12 +874,13 @@ holds stays free on a device whose binding limit is the largest *contiguous* blo
    address with nothing configured, so a captive AP would strand a perfectly reachable device —
    a regression created purely by adding a transport. The VIN is then set over the LAN.
 3. `tk::net_start_eth()` waits for a lease, and the deadline means **two different things**:
-   with the PHY reporting **no link** (no cable, dead switch port) it falls back to WiFi after
-   `CONFIG_TESLA_ETH_WAIT_S` (20 s) — nothing is coming. With the **link up but no lease yet** (a
-   slow or busy DHCP server) it keeps waiting, up to `kEthLeaseLinkedCapFactor` × that. Falling
-   back there would run the WiFi stack for the rest of the boot — paying the BLE coexistence cost
-   and ~57 KB of largest-block — on a board that is in fact wired. The Ethernet driver keeps
-   running either way, so a cable plugged in later still takes over.
+   with the PHY reporting **no link** (no cable, dead switch port) it falls back to WiFi after the
+   fixed `kEthLinkGraceMs` window (4 s) — nothing is coming. With the **link up but no lease yet**
+   (a slow or busy DHCP server) it waits in `CONFIG_TESLA_ETH_WAIT_S` intervals (20 s by default),
+   up to `kEthLeaseLinkedCapFactor` × that interval. Falling back there would run the WiFi stack
+   for the rest of the boot — paying the BLE coexistence cost and ~57 KB of largest-block — on a
+   board that is in fact wired. The Ethernet driver keeps running either way, so a cable plugged
+   in later still takes over.
    **On the wired path `esp_wifi_init()` is never called at all:** `main.cpp` short-circuits
    (`!on_wire && !net_start_wifi(...)`), which is what turns "prefer the wire" into "no radio
    coexistence" rather than merely "prefer the wire for routing".
@@ -894,10 +897,13 @@ startup fault into dangling callbacks or a later UAF. A no-link/DHCP boot fallba
 the successfully activated Ethernet stack remains process-lifetime state so a later cable can
 take over without rebooting.
 
-**Polling mode is deliberate, not a workaround.** The M5Stack ATOMIC PoE Base routes only
-SCLK/CS/MISO/MOSI + power — there is no INT line and no RST line to wire — so the driver polls at
-`CONFIG_TESLA_ETH_POLL_MS` (10 ms) and the PHY is reset over SPI (the W5500's `MR` register)
-instead of by a strobe. ESP-IDF ships a CI configuration for exactly this shape
+**Polling mode is deliberate, not a workaround.** The common transport models only
+SCLK/CS/MISO/MOSI. The M5Stack ATOMIC PoE Base routes only those signals plus power — there is no
+INT line and no RST line to wire — so the driver polls at `CONFIG_TESLA_ETH_POLL_MS` (10 ms) and
+the PHY is reset over SPI (the W5500's `MR` register) instead of by a strobe. Waveshare exposes
+INT/RST, but this shared path leaves those auxiliary lines untouched. Any future candidate must
+audit every SPI and auxiliary pin against earlier candidates before it may join the ordered probe.
+ESP-IDF ships a CI configuration for exactly this polling shape
 (`components/esp_eth/test_apps/sdkconfig.ci.poll_w5500`, also 10 ms at 20 MHz). The poll period
 bounds RX *latency*, not throughput: each poll drains everything queued in the W5500's 16 KB
 buffer. Note that ESP-IDF **6.0 moves the SPI Ethernet drivers out of the core** into the
