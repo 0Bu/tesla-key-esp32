@@ -919,14 +919,23 @@ void VehicleController::loop_task_fn_(void* arg) {
             self->ble_->connect("");
         }
 
-        // Background charge-state refresh (paired + window + connected), every 10 s. This
-        // infotainment poll doubles as the reliable key-revocation canary: a deleted key
-        // makes it fault with ERROR_UNKNOWN_KEY_ID, which the message observer turns into
-        // pairing_lost_. Gated on the active window so an idle car is left to sleep; the
-        // VCSEC health poll still catches a deletion while idle.
-        if (paired && window && self->ble_connected() && !self->cmd_in_flight_.load()
-            && (now_ticks - last_poll_ticks > pdMS_TO_TICKS(10000))) {
-            last_poll_ticks = now_ticks;
+        // Background charge-state refresh (paired + connected). Two triggers share ONE poll:
+        //   • the 10 s in-window cadence (recent command or charging) — this infotainment poll
+        //     doubles as the reliable key-revocation canary: a deleted key faults it with
+        //     ERROR_UNKNOWN_KEY_ID, which the message observer turns into pairing_lost_; and
+        //   • a one-shot on the VCSEC wake edge (issue #264), fired ONCE outside the window so a
+        //     self-woken car (cable plug-in) refreshes its stale SOC without our opening the
+        //     window — otherwise evcc keeps acting on the stale reading. When the window is open
+        //     the cadence already covers it, so the pending request is just consumed.
+        // Both use the same NO_WAKE_SKIP poll: a car already back asleep is skipped, so we only
+        // ride a wake the car performed itself, and an idle car is still left to sleep.
+        if (window) wake_poll_pending = false;  // in-window cadence below already refreshes it
+        const bool charge_due =
+            paired && self->ble_connected() && !self->cmd_in_flight_.load() &&
+            ((window && now_ticks - last_poll_ticks > pdMS_TO_TICKS(10000)) || wake_poll_pending);
+        if (charge_due) {
+            if (window) last_poll_ticks = now_ticks;  // wake-edge poll does not reset the cadence
+            wake_poll_pending = false;
             ESP_LOGD(TAG, "background charge-state refresh…");
             // Fire-and-forget poll. We must NOT block here: this task also pumps
             // vehicle_->loop(), which drives the command's transmission/retries. The
@@ -934,26 +943,6 @@ void VehicleController::loop_task_fn_(void* arg) {
             // response arrives. NO_WAKE_SKIP so a sleeping car is left undisturbed.
             tk::SemGuard g(self->vehicle_mutex_);   // RAII: charge_state_poll can throw
             self->vehicle_->charge_state_poll(TeslaBLE::WakePolicy::NO_WAKE_SKIP);
-        }
-
-        // One-shot wake-edge charge poll (issue #264). Fires OUTSIDE the active window — that is
-        // the whole point: a self-woken car (cable plug-in) that sent no command and shows no
-        // cached charging would otherwise never refresh its SOC, so evcc keeps acting on a stale
-        // reading. NO_WAKE_SKIP preserves the anti-vampire-drain guarantee (a car already back
-        // asleep is skipped, so we only ride a wake the car performed itself); exactly one poll
-        // per wake episode. If it reports Charging/Starting the charging arm opens the window and
-        // normal session polling takes over. When the window is already open the 10 s refresh
-        // above covers it, so just consume the request without a redundant poll.
-        if (wake_poll_pending && paired) {
-            if (window) {
-                wake_poll_pending = false;
-            } else if (self->ble_connected() && !self->cmd_in_flight_.load()) {
-                wake_poll_pending = false;
-                ESP_LOGI(TAG, "VCSEC wake edge: one-shot charge poll to refresh cached SOC");
-                tk::SemGuard g(self->vehicle_mutex_);   // RAII: charge_state_poll can throw
-                self->vehicle_->charge_state_poll(TeslaBLE::WakePolicy::NO_WAKE_SKIP);
-            }
-            // else: not connected yet or a command is in flight — keep the request, retry next cycle.
         }
 
         // Background telemetry refresh (paired + window + connected): one domain per cycle,
