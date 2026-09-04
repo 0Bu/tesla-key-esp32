@@ -26,7 +26,7 @@ The esp32s3 image also drives a **WIZnet W5500 over SPI**, so the device can run
 including **PoE**, which means one cable for power and network and therefore free placement:
 this firmware's BLE range to the car is signal-limited, so being able to mount the device where
 the car is beats every radio tweak. Verified on an **M5Stack AtomS3 Lite on an ATOMIC PoE Base**
-(802.3af, 5 V/1.2 A; SCLK 5 / CS 6 / MISO 7 / MOSI 8).
+(802.3af, 5 V/1.2 A; SCLK 5 / CS 6 / MISO 7 / MOSI 8) and **Waveshare ESP32-S3-ETH** (SCLK 13 / CS 14 / MISO 12 / MOSI 11); **LilyGO T-ETH-Lite** is probed automatically as well.
 
 On a wire the WiFi stack is **never started**: WiFi and BLE share one antenna path, so this
 removes radio coexistence entirely (and frees the ~57 KB of contiguous heap the stack holds).
@@ -34,7 +34,7 @@ A wired board needs **no WiFi credentials at all** — it comes up on DHCP and t
 the web UI. With a controller present but no link, it falls back to WiFi (or the setup portal)
 rather than stranding itself, and a cable plugged in later still takes over.
 
-The **same** `esp32s3` image serves a LilyGo T-Dongle-S3, a bare ESP32-S3 and this board — each
+The **same** `esp32s3` image serves a LilyGo T-Dongle-S3, a bare ESP32-S3 and all supported PoE boards — each
 is detected at boot. There is no separate build, and nothing to enable on the other three
 targets (where the driver is not compiled in).
 

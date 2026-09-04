@@ -861,10 +861,13 @@ slower than it needs to be. Coming up on Ethernet does not merely avoid *using* 
 **starting** it: no coexistence arbitration at all, and the ~57 KB of largest-block the stack
 holds stays free on a device whose binding limit is the largest *contiguous* block.
 
-1. `tk::net_eth_probe()` runs very early — **before** the setup-portal decision — and reads the
-   W5500's `VERSIONR` (0x0039, always 0x04). A floating MISO reads 0x00/0xFF, so there is no
-   realistic false positive. On no answer the SPI bus is freed again and those GPIOs are left as
-   they were found.
+1. `tk::net_eth_probe()` runs very early — **before** the setup-portal decision — and tests an
+   ordered candidate table of known commercial board pinouts (M5Stack ATOMIC PoE Base, Waveshare
+   ESP32-S3-ETH, LilyGO T-ETH-Lite, or custom Kconfig overrides), reading the W5500's `VERSIONR`
+   (0x0039, always 0x04). A floating MISO reads 0x00/0xFF, so there is no realistic false positive.
+   Each failing candidate tears down the SPI bus cleanly before the next candidate is evaluated;
+   the winning candidate's pins are latched for the driver. On no answer across all candidates,
+   the SPI bus is freed completely and those GPIOs are left as they were found.
 2. A wired board with **no stored SSID does not enter the setup portal**. DHCP gives it an
    address with nothing configured, so a captive AP would strand a perfectly reachable device —
    a regression created purely by adding a transport. The VIN is then set over the LAN.

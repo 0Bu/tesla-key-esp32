@@ -130,6 +130,8 @@ menu "Tesla Key Configuration"
 
     # Defaults are the M5Stack AtomS3 Lite + ATOMIC PoE Base wiring (the base routes only these
     # four signals plus power — there is no INT and no RST line, hence the polling mode below).
+    # At boot, net_eth_probe() tests known commercial board candidates (M5Stack, Waveshare,
+    # LilyGO); configuring custom pins here prepends them as the primary candidate.
     config TESLA_ETH_SPI_SCLK
         int "W5500 SPI SCLK GPIO"
         depends on TESLA_ETH_ENABLED

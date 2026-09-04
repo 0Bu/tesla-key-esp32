@@ -37,6 +37,7 @@
 #include "logic/command_result.hpp"
 #include "logic/ui_state.hpp"
 #include "logic/display_model.hpp"
+#include "logic/eth_board.hpp"
 #include "logic/soc_gradient.hpp"
 #include "logic/led_status.hpp"
 #include "logic/syslog_policy.hpp"
@@ -3767,6 +3768,64 @@ static void test_status_eth() {
       CHECK(e.out.find("eth.speed") == std::string::npos); }
 }
 
+// ─── Ethernet board candidates and pin validation ────────────────────────────
+static void test_eth_board() {
+    // Exactly three commercial candidates in known priority order
+    CHECK(tk::kEthDefaultCandidateCount == 3);
+    CHECK(std::string(tk::kEthDefaultCandidates[0].name) == "M5Stack ATOMIC PoE");
+    CHECK(std::string(tk::kEthDefaultCandidates[1].name) == "Waveshare ESP32-S3-ETH");
+    CHECK(std::string(tk::kEthDefaultCandidates[2].name) == "LilyGO T-ETH-Lite");
+
+    // All default candidates must pass pin validation
+    for (size_t i = 0; i < tk::kEthDefaultCandidateCount; ++i) {
+        const auto& cand = tk::kEthDefaultCandidates[i];
+        CHECK(tk::eth_candidate_pins_unique(cand));
+        CHECK(tk::eth_candidate_pins_valid(cand));
+        CHECK(!tk::eth_gpio_is_forbidden(cand.sclk));
+        CHECK(!tk::eth_gpio_is_forbidden(cand.cs));
+        CHECK(!tk::eth_gpio_is_forbidden(cand.miso));
+        CHECK(!tk::eth_gpio_is_forbidden(cand.mosi));
+    }
+
+    // Pin uniqueness rejection: duplicate pins must fail
+    const tk::EthSpiCandidate dup_sclk_cs = { "Dup", 5, 5, 7, 8 };
+    CHECK(!tk::eth_candidate_pins_unique(dup_sclk_cs));
+    CHECK(!tk::eth_candidate_pins_valid(dup_sclk_cs));
+
+    const tk::EthSpiCandidate dup_miso_mosi = { "Dup", 5, 6, 7, 7 };
+    CHECK(!tk::eth_candidate_pins_unique(dup_miso_mosi));
+    CHECK(!tk::eth_candidate_pins_valid(dup_miso_mosi));
+
+    // Forbidden pins: Strapping pins (0, 3, 45, 46)
+    CHECK(tk::eth_gpio_is_forbidden(0));
+    CHECK(tk::eth_gpio_is_forbidden(3));
+    CHECK(tk::eth_gpio_is_forbidden(45));
+    CHECK(tk::eth_gpio_is_forbidden(46));
+
+    // Forbidden pins: Flash / PSRAM (26..37)
+    for (int8_t p = 26; p <= 37; ++p) {
+        CHECK(tk::eth_gpio_is_forbidden(p));
+    }
+
+    // Forbidden pins: USB D+/D- (19, 20)
+    CHECK(tk::eth_gpio_is_forbidden(19));
+    CHECK(tk::eth_gpio_is_forbidden(20));
+
+    // Forbidden pins: Out-of-bounds (<0 or >48)
+    CHECK(tk::eth_gpio_is_forbidden(-1));
+    CHECK(tk::eth_gpio_is_forbidden(49));
+
+    // Candidates using forbidden pins must be rejected
+    const tk::EthSpiCandidate strap_cand = { "Strap", 0, 6, 7, 8 };
+    CHECK(!tk::eth_candidate_pins_valid(strap_cand));
+
+    const tk::EthSpiCandidate flash_cand = { "Flash", 5, 26, 7, 8 };
+    CHECK(!tk::eth_candidate_pins_valid(flash_cand));
+
+    const tk::EthSpiCandidate usb_cand = { "USB", 5, 6, 19, 8 };
+    CHECK(!tk::eth_candidate_pins_valid(usb_cand));
+}
+
 // ─── Bug-report redaction ─────────────────────────────────────────────────────
 static void test_redact() {
     CHECK(tk::redact_or("MySSID", false) == "MySSID");
@@ -4199,6 +4258,7 @@ int main() {
     test_wifi_rollback();
     test_net_link();
     test_status_eth();
+    test_eth_board();
     test_redact();
     test_captive();
     test_config_store();

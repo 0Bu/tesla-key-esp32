@@ -18,6 +18,7 @@
     "connect_outcome.hpp": {"test": "test/test_logic.cpp", "evidence": "test_connect_outcome("},
     "crashinfo.hpp": {"test": "test/test_logic.cpp", "evidence": "test_crashinfo("},
     "display_model.hpp": {"test": "test/test_logic.cpp", "evidence": "test_display_model("},
+    "eth_board.hpp": {"test": "test/test_logic.cpp", "evidence": "test_eth_board("},
     "ha_identity.hpp": {"test": "test/test_logic.cpp", "evidence": "test_ha_identity("},
     "ha_templates.hpp": {"test": "test/test_logic.cpp", "evidence": "test_ha_templates("},
     "health_gate.hpp": {"test": "test/test_logic.cpp", "evidence": "test_health_gate("},
