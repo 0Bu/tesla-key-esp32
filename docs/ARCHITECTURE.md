@@ -862,9 +862,10 @@ slower than it needs to be. Coming up on Ethernet does not merely avoid *using* 
 holds stays free on a device whose binding limit is the largest *contiguous* block.
 
 1. `tk::net_eth_probe()` runs very early — **before** the setup-portal decision — and reads the
-   W5500's `VERSIONR` (0x0039, always 0x04). A floating MISO reads 0x00/0xFF, so there is no
-   realistic false positive. On no answer the SPI bus is freed again and those GPIOs are left as
-   they were found.
+   W5500's `VERSIONR` (0x0039, always 0x04) on each known candidate wiring in turn (`kEthCandidates[]`:
+   the ATOMIC PoE Base pins first, then the Waveshare ESP32-S3-ETH's onboard W5500), latching the
+   first to answer. A floating MISO reads 0x00/0xFF, so there is no realistic false positive. On
+   no answer each candidate frees the SPI bus again, leaving those GPIOs as they were found.
 2. A wired board with **no stored SSID does not enter the setup portal**. DHCP gives it an
    address with nothing configured, so a captive AP would strand a perfectly reachable device —
    a regression created purely by adding a transport. The VIN is then set over the LAN.
@@ -892,7 +893,8 @@ the successfully activated Ethernet stack remains process-lifetime state so a la
 take over without rebooting.
 
 **Polling mode is deliberate, not a workaround.** The M5Stack ATOMIC PoE Base routes only
-SCLK/CS/MISO/MOSI + power — there is no INT line and no RST line to wire — so the driver polls at
+SCLK/CS/MISO/MOSI + power — there is no INT line and no RST line to wire — and the Waveshare
+ESP32-S3-ETH routes RST/INT (GPIO9/GPIO10) but neither needs driving, so the driver polls at
 `CONFIG_TESLA_ETH_POLL_MS` (10 ms) and the PHY is reset over SPI (the W5500's `MR` register)
 instead of by a strobe. ESP-IDF ships a CI configuration for exactly this shape
 (`components/esp_eth/test_apps/sdkconfig.ci.poll_w5500`, also 10 ms at 20 MHz). The poll period

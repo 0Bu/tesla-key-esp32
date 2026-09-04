@@ -603,33 +603,42 @@ static bool w5500_read_common(spi_device_handle_t dev, uint16_t reg, uint8_t* ou
     return true;
 }
 
-// Is a W5500 actually wired to the configured pins? Called ONCE, very early — before the setup
-// portal decision, because a wired board with no stored SSID must not be sent to a captive AP it
-// does not need.
-//
-// On success the SPI bus stays installed for net_start_eth() to reuse; on failure it is torn
-// down completely, so a board without the base leaves those GPIOs exactly as it found them.
-bool net_eth_probe() {
-    if (s_eth_present.load() && s_spi_bus_up) return true;
+// One candidate W5500 wiring. Boards route the chip to different GPIOs — the M5Stack ATOMIC PoE
+// Base and the Waveshare ESP32-S3-ETH are the two known cases — and the probe is cheap enough
+// (one VERSIONR read) to just try each known wiring in turn at boot.
+struct EthPinSet {
+    int sclk, cs, miso, mosi;
+};
 
-    // NEVER probe on the T-Dongle-S3. Its ST7735 sits on MOSI 3 / SCK 5 / CS 4 — GPIO5 is
-    // literally the pin this probe would drive as SPI clock. The display has not claimed the bus
-    // yet at this point in boot, so the fight would not show up here; it would show up later as
-    // a panel that never initialises, which is a miserable thing to debug.
-    if (board_is_t_dongle_s3()) {
-        ESP_LOGI(TAG, "T-Dongle-S3 detected — skipping the W5500 probe (its panel owns GPIO%d)",
-                 CONFIG_TESLA_ETH_SPI_SCLK);
-        return false;
-    }
+// The known wirings, probed IN ORDER; the first to answer VERSIONR=0x04 wins. The primary entry
+// stays build-configurable through Kconfig (it defaults to the ATOMIC PoE Base); the rest are
+// boards whose wiring is fixed in silicon, so they live here as DATA — a new board is one row,
+// not another four Kconfig knobs. A wiring that would collide with some other supported board's
+// peripheral needs a detector veto the way the T-Dongle's GPIO5 does in net_eth_probe(), so keep
+// new rows to pins that are free on every board this one image already serves.
+static constexpr EthPinSet kEthCandidates[] = {
+    { CONFIG_TESLA_ETH_SPI_SCLK, CONFIG_TESLA_ETH_SPI_CS,
+      CONFIG_TESLA_ETH_SPI_MISO, CONFIG_TESLA_ETH_SPI_MOSI },  // M5Stack AtomS3 Lite + ATOMIC PoE Base
+    { 13, 14, 12, 11 },                                        // Waveshare ESP32-S3-ETH (onboard W5500)
+};
 
+// The wiring the probe latched. net_start_eth() must attach the driver to the SAME pins the probe
+// answered on, so this is written exactly once, by the winning candidate.
+static EthPinSet s_eth_pins = kEthCandidates[0];
+
+// Probe ONE candidate wiring. On a hit the SPI bus stays installed (for net_start_eth() to reuse)
+// and true is returned; on a miss the bus is torn down completely, so the next candidate — or the
+// WiFi/setup fallback — finds those GPIOs exactly as the probe found them.
+static bool eth_probe_pin_set(const EthPinSet& p) {
     spi_bus_config_t buscfg = {};
-    buscfg.mosi_io_num = CONFIG_TESLA_ETH_SPI_MOSI;
-    buscfg.miso_io_num = CONFIG_TESLA_ETH_SPI_MISO;
-    buscfg.sclk_io_num = CONFIG_TESLA_ETH_SPI_SCLK;
+    buscfg.mosi_io_num = p.mosi;
+    buscfg.miso_io_num = p.miso;
+    buscfg.sclk_io_num = p.sclk;
     buscfg.quadwp_io_num = -1;
     buscfg.quadhd_io_num = -1;
     if (spi_bus_initialize(eth_spi_host(), &buscfg, SPI_DMA_CH_AUTO) != ESP_OK) {
-        ESP_LOGW(TAG, "W5500 probe: SPI bus init failed — no Ethernet");
+        ESP_LOGW(TAG, "W5500 probe: SPI bus init failed on SCLK%d/CS%d/MISO%d/MOSI%d",
+                 p.sclk, p.cs, p.miso, p.mosi);
         return false;
     }
     s_spi_bus_up = true;
@@ -637,7 +646,7 @@ bool net_eth_probe() {
     spi_device_interface_config_t devcfg = {};
     devcfg.mode           = 0;                                        // W5500 is SPI mode 0
     devcfg.clock_speed_hz = CONFIG_TESLA_ETH_SPI_CLOCK_MHZ * 1000 * 1000;
-    devcfg.spics_io_num   = CONFIG_TESLA_ETH_SPI_CS;
+    devcfg.spics_io_num   = p.cs;
     devcfg.queue_size     = 1;
 
     spi_device_handle_t dev = nullptr;
@@ -649,18 +658,46 @@ bool net_eth_probe() {
     }
 
     if (!found) {
-        ESP_LOGI(TAG, "no W5500 on SPI (VERSIONR=0x%02x, expected 0x%02x) — WiFi only",
-                 ver, kW5500VersionVal);
+        ESP_LOGI(TAG, "no W5500 on SCLK%d/CS%d/MISO%d/MOSI%d (VERSIONR=0x%02x, expected 0x%02x)",
+                 p.sclk, p.cs, p.miso, p.mosi, ver, kW5500VersionVal);
         if (!eth_release_spi_bus()) boot_fatal("W5500 probe cleanup");
         return false;
     }
 
     ESP_LOGI(TAG, "W5500 found (VERSIONR=0x%02x) on SCLK%d/CS%d/MISO%d/MOSI%d @ %d MHz",
-             ver, CONFIG_TESLA_ETH_SPI_SCLK, CONFIG_TESLA_ETH_SPI_CS,
-             CONFIG_TESLA_ETH_SPI_MISO, CONFIG_TESLA_ETH_SPI_MOSI,
-             CONFIG_TESLA_ETH_SPI_CLOCK_MHZ);
-    s_eth_present.store(true);
+             ver, p.sclk, p.cs, p.miso, p.mosi, CONFIG_TESLA_ETH_SPI_CLOCK_MHZ);
     return true;
+}
+
+// Is a W5500 actually wired to ANY known candidate? Called ONCE, very early — before the setup
+// portal decision, because a wired board with no stored SSID must not be sent to a captive AP it
+// does not need.
+//
+// On success the SPI bus stays installed for net_start_eth() to reuse; on failure every candidate
+// tore its own bus down, so a board without a W5500 leaves those GPIOs exactly as it found them.
+bool net_eth_probe() {
+    if (s_eth_present.load() && s_spi_bus_up) return true;
+
+    // NEVER probe on the T-Dongle-S3. Its ST7735 sits on MOSI 3 / SCK 5 / CS 4 — GPIO5 is
+    // literally the pin the primary candidate would drive as SPI clock. The display has not
+    // claimed the bus yet at this point in boot, so the fight would not show up here; it would
+    // show up later as a panel that never initialises, which is a miserable thing to debug.
+    if (board_is_t_dongle_s3()) {
+        ESP_LOGI(TAG, "T-Dongle-S3 detected — skipping the W5500 probe (its panel owns GPIO%d)",
+                 CONFIG_TESLA_ETH_SPI_SCLK);
+        return false;
+    }
+
+    for (const EthPinSet& p : kEthCandidates) {
+        if (eth_probe_pin_set(p)) {
+            s_eth_pins = p;
+            s_eth_present.store(true);
+            return true;
+        }
+    }
+
+    ESP_LOGI(TAG, "no W5500 on any candidate wiring — WiFi only");
+    return false;
 }
 
 static const int ETH_GOT_IP_BIT = BIT0;
@@ -726,7 +763,7 @@ bool net_start_eth() {
     spi_device_interface_config_t devcfg = {};
     devcfg.mode           = 0;
     devcfg.clock_speed_hz = CONFIG_TESLA_ETH_SPI_CLOCK_MHZ * 1000 * 1000;
-    devcfg.spics_io_num   = CONFIG_TESLA_ETH_SPI_CS;
+    devcfg.spics_io_num   = s_eth_pins.cs;   // the wiring the probe actually answered on
     devcfg.queue_size     = 20;
 
     eth_w5500_config_t w5500_cfg = ETH_W5500_DEFAULT_CONFIG(eth_spi_host(), &devcfg);
