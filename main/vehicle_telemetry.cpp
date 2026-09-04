@@ -8,6 +8,7 @@
 #include "vehicle_ctrl_internal.hpp"
 #include "logic/units.hpp"
 #include "logic/active_window.hpp"
+#include "logic/wake_poll.hpp"
 #include "logic/heap_watchdog.hpp"
 #include "ota_update.hpp"
 #include "heap_trend.hpp"
@@ -599,6 +600,8 @@ void VehicleController::loop_task_fn_(void* arg) {
     int      tele_idx           = 0;  // rotates the telemetry domain polled each cycle
     bool     prev_window        = false;  // edge-detect the active window
     auto     prev_sleep         = TeslaBLE::SleepState::UNKNOWN;  // edge-detect VCSEC sleep flag
+    tk::WakePollState wake_poll{};         // one-shot charge poll on the VCSEC wake edge (#264)
+    bool     wake_poll_pending  = false;   // latched fire request until connected & queue-idle
     while (true) {
       // Feed the task watchdog FIRST and UNCONDITIONALLY, before anything that can block or throw.
       // Gating it on the work below would make a long-but-legitimate command look like a hang; put
@@ -843,6 +846,25 @@ void VehicleController::loop_task_fn_(void* arg) {
             if (st == TeslaBLE::SleepState::ASLEEP)     self->note_vcsec_sleep_(true);
             else if (st == TeslaBLE::SleepState::AWAKE)  self->note_vcsec_sleep_(false);
             // UNKNOWN: leave the run untouched.
+
+            // One-shot charge poll on the VCSEC wake edge (issue #264). Arm only after a DEBOUNCED
+            // ASLEEP run (reusing kAsleepDebounceS, the same debounce link_state() trusts), so the
+            // ~60 s COP AWAKE↔ASLEEP flap and UNKNOWN→AWAKE at boot can't fire it; then request
+            // exactly one poll the next time the car wakes itself (cable plug-in, door, app). The
+            // decision is host-tested in logic/wake_poll.hpp; this site only samples and latches.
+            const tk::WakeSample wake_sample =
+                st == TeslaBLE::SleepState::ASLEEP ? tk::WakeSample::Asleep
+              : st == TeslaBLE::SleepState::AWAKE  ? tk::WakeSample::Awake
+                                                   : tk::WakeSample::Unknown;
+            if (tk::wake_edge_should_poll(
+                    wake_poll, {wake_sample, self->vcsec_stably_asleep_(tk::kAsleepDebounceS)})) {
+                wake_poll_pending = true;
+            }
+        } else {
+            // Unpaired: the sampler above does not run, so retire any armed edge and pending
+            // request rather than carry them across a pairing reset.
+            wake_poll = {};
+            wake_poll_pending = false;
         }
 
         // ── Active-window gate ──────────────────────────────────────────────────────────
@@ -912,6 +934,26 @@ void VehicleController::loop_task_fn_(void* arg) {
             // response arrives. NO_WAKE_SKIP so a sleeping car is left undisturbed.
             tk::SemGuard g(self->vehicle_mutex_);   // RAII: charge_state_poll can throw
             self->vehicle_->charge_state_poll(TeslaBLE::WakePolicy::NO_WAKE_SKIP);
+        }
+
+        // One-shot wake-edge charge poll (issue #264). Fires OUTSIDE the active window — that is
+        // the whole point: a self-woken car (cable plug-in) that sent no command and shows no
+        // cached charging would otherwise never refresh its SOC, so evcc keeps acting on a stale
+        // reading. NO_WAKE_SKIP preserves the anti-vampire-drain guarantee (a car already back
+        // asleep is skipped, so we only ride a wake the car performed itself); exactly one poll
+        // per wake episode. If it reports Charging/Starting the charging arm opens the window and
+        // normal session polling takes over. When the window is already open the 10 s refresh
+        // above covers it, so just consume the request without a redundant poll.
+        if (wake_poll_pending && paired) {
+            if (window) {
+                wake_poll_pending = false;
+            } else if (self->ble_connected() && !self->cmd_in_flight_.load()) {
+                wake_poll_pending = false;
+                ESP_LOGI(TAG, "VCSEC wake edge: one-shot charge poll to refresh cached SOC");
+                tk::SemGuard g(self->vehicle_mutex_);   // RAII: charge_state_poll can throw
+                self->vehicle_->charge_state_poll(TeslaBLE::WakePolicy::NO_WAKE_SKIP);
+            }
+            // else: not connected yet or a command is in flight — keep the request, retry next cycle.
         }
 
         // Background telemetry refresh (paired + window + connected): one domain per cycle,
