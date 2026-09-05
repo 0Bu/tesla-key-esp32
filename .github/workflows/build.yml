@@ -57,10 +57,121 @@ jobs:
       - name: Test the PR-gate command matcher
         run: ./scripts/test-pr-gates.sh
 
-  build:
+  build-target:
     needs: logic-test
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      pages: read
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [esp32, esp32s3, esp32c3, esp32c6]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+
+      - name: Detect firmware-relevant changes
+        id: changes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          if [ "${{ github.event_name }}" = pull_request ]; then
+            if ! changed="$(./scripts/release-relevance.sh --changed-pr "${{ github.event.pull_request.base.sha }}" "${{ github.event.pull_request.head.sha }}")"; then
+              echo "release relevance check failed; building target" >&2
+              changed=yes
+            fi
+          elif [ "${{ github.event_name }}" = push ] && [ "${{ github.ref }}" = refs/heads/main ]; then
+            if ! changed="$(./scripts/release-relevance.sh --changed "$SOURCE_SHA")"; then
+              echo "release relevance check failed; scheduling publication reconciliation" >&2
+              changed=yes
+            fi
+          else
+            changed=yes
+          fi
+          case "$changed" in
+            yes|no) ;;
+            *) echo "invalid release relevance result: $changed" >&2; exit 1 ;;
+          esac
+          echo "firmware=$changed" >> "$GITHUB_OUTPUT"
+          echo "firmware-relevant: $changed"
+
+      - name: Read pinned ESP-IDF toolchain
+        if: steps.changes.outputs.firmware == 'yes'
+        id: toolchain
+        run: |
+          echo "version=$(./scripts/idf-version.sh)" >> "$GITHUB_OUTPUT"
+          echo "image-version=$(./scripts/idf-version.sh --image-version)" >> "$GITHUB_OUTPUT"
+          echo "ESP-IDF image: $(./scripts/idf-version.sh --image)"
+
+      - name: Compute release version
+        if: steps.changes.outputs.firmware == 'yes'
+        id: version
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          git fetch --tags --force
+          if [ "$EVENT_NAME" = push ] && [ "${{ github.ref }}" = refs/heads/main ]; then
+            release="$(./scripts/select-release-version.sh --select-main "$SOURCE_SHA")"
+          else
+            release="$(./scripts/select-release-version.sh)"
+          fi
+          latest="$(./scripts/select-release-version.sh --latest-published-stable)"
+          echo "version=$release" >> "$GITHUB_OUTPUT"
+          echo "latest=$latest" >> "$GITHUB_OUTPUT"
+
+      - name: Stamp firmware version
+        if: steps.changes.outputs.firmware == 'yes'
+        id: stamp
+        run: |
+          if [ "${{ github.event_name }}" = pull_request ]; then
+            base="${{ steps.version.outputs.latest }}"
+            [ -n "$base" ] || base="${{ steps.version.outputs.version }}"
+            disp="${base}-PR-${{ github.event.pull_request.number }}"
+          else
+            disp="${{ steps.version.outputs.version }}"
+          fi
+          echo "$disp" > version.txt
+          echo "disp=$disp" >> "$GITHUB_OUTPUT"
+          echo "stamped firmware version: $disp"
+
+      - name: Build target and exercise reproducibility
+        if: steps.changes.outputs.firmware == 'yes'
+        uses: espressif/esp-idf-ci-action@e6f5c74232b1ccd4c97ed641f1e48553853f1fd5 # v1.2.0
+        env:
+          CI_SKIP_REPRO: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && '1' || '0' }}
+        with:
+          esp_idf_version: ${{ steps.toolchain.outputs.image-version }}
+          target: esp32
+          command: >-
+            ./scripts/ci-build-verify.sh
+            --target "${{ matrix.target }}"
+            "${{ steps.stamp.outputs.disp }}"
+            "${{ github.event.pull_request.head.sha || github.sha }}"
+
+      - name: Upload target build artifacts
+        if: steps.changes.outputs.firmware == 'yes'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: firmware-target-${{ matrix.target }}
+          if-no-files-found: error
+          retention-days: 1
+          path: |
+            _unsigned/${{ matrix.target }}/
+            dist/${{ matrix.target }}/
+
+  build:
+    needs: [logic-test, build-target]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
     permissions:
       contents: read
       # release-relevance.sh reads the configured live Pages URL; without this minimum scope the
@@ -105,14 +216,22 @@ jobs:
 
       - name: Detect firmware-relevant changes
         id: changes
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         env:
           GH_TOKEN: ${{ github.token }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           SOURCE_SHA: ${{ github.sha }}
         run: |
-          if ! changed="$(./scripts/release-relevance.sh --changed "$SOURCE_SHA")"; then
-            echo "release relevance check failed; scheduling publication reconciliation" >&2
+          if [ "${{ github.event_name }}" = pull_request ]; then
+            if ! changed="$(./scripts/release-relevance.sh --changed-pr "${{ github.event.pull_request.base.sha }}" "${{ github.event.pull_request.head.sha }}")"; then
+              echo "release relevance check failed; scheduling publication reconciliation" >&2
+              changed=yes
+            fi
+          elif [ "${{ github.event_name }}" = push ] && [ "${{ github.ref }}" = refs/heads/main ]; then
+            if ! changed="$(./scripts/release-relevance.sh --changed "$SOURCE_SHA")"; then
+              echo "release relevance check failed; scheduling publication reconciliation" >&2
+              changed=yes
+            fi
+          else
             changed=yes
           fi
           case "$changed" in
@@ -120,6 +239,7 @@ jobs:
             *) echo "invalid release relevance result: $changed" >&2; exit 1 ;;
           esac
           echo "firmware=$changed" >> "$GITHUB_OUTPUT"
+          echo "firmware-relevant: $changed"
 
       - name: Stamp firmware version
         id: stamp
@@ -138,26 +258,37 @@ jobs:
           echo "disp=$disp" >> "$GITHUB_OUTPUT"
           echo "stamped firmware version: $disp"
 
+      - name: Download target build artifacts
+        if: steps.changes.outputs.firmware == 'yes'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: firmware-target-*
+          merge-multiple: true
+          path: .
+
       # Full SHA pins both the action implementation and the digest-pinned ESP-IDF image it starts.
       # This job has neither the OTA key nor a write-capable GITHUB_TOKEN.
       - name: Build all targets and exercise reproducibility plus disposable-key release contracts
+        if: steps.changes.outputs.firmware == 'yes'
         uses: espressif/esp-idf-ci-action@e6f5c74232b1ccd4c97ed641f1e48553853f1fd5 # v1.2.0
         with:
           esp_idf_version: ${{ steps.toolchain.outputs.image-version }}
           target: esp32
           command: >-
             ./scripts/ci-build-verify.sh
+            --verify-only
             "${{ steps.stamp.outputs.disp }}"
             "${{ github.event.pull_request.head.sha || github.sha }}"
 
       - name: Publish firmware size summary
-        if: always()
+        if: always() && steps.changes.outputs.firmware == 'yes'
         run: |
           for report in dist/*/size-*.md; do
             [ -f "$report" ] && cat "$report" >> "$GITHUB_STEP_SUMMARY"
           done
 
       - name: Upload unsigned build and diagnostics
+        if: steps.changes.outputs.firmware == 'yes'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: firmware-unsigned
@@ -172,7 +303,7 @@ jobs:
     # signing environment or a cache restored from the producer. PR preview trust does not use
     # this PR-controlled workflow definition; signed-pr-preview.yml owns its workflow_run rebuild.
     needs: build
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.build.outputs.firmware == 'yes'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:

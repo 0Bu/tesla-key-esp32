@@ -97,6 +97,17 @@ if [[ "${1:-}" == --self-test ]]; then
   exit 0
 fi
 
+target_override=""
+if [[ "${1:-}" == --target ]]; then
+  shift
+  target_override="${1:?usage: ci-build-all.sh [--target <target>] <display-version> [source-sha]}"
+  shift
+  case "$target_override" in
+    esp32|esp32s3|esp32c3|esp32c6) ;;
+    *) echo "unsupported target: $target_override" >&2; exit 2 ;;
+  esac
+fi
+
 version="${1:?usage: ci-build-all.sh <display-version> [source-sha]}"
 # GitHub Actions does not reliably forward step-level environment variables through container
 # actions. CI therefore passes the producing commit explicitly; local builds retain a clear,
@@ -121,12 +132,20 @@ python3 scripts/check-partition-contract.py --csv partitions.csv
 echo "ccache disabled for effective-compiler/dependency gate visibility"
 
 TARGETS="esp32 esp32s3 esp32c3 esp32c6"
+if [[ -n "$target_override" ]]; then
+  TARGETS="$target_override"
+fi
 APP_POLICY_LIMIT=$((0x1e8000))
 SIGNATURE_ALIGNMENT=$((0x10000))
 SIGNATURE_SECTOR=$((0x1000))
 
-rm -rf _unsigned dist
-mkdir -p _unsigned dist
+if [[ -z "$target_override" ]]; then
+  rm -rf _unsigned dist
+  mkdir -p _unsigned dist
+else
+  rm -rf "_unsigned/$target_override" "dist/$target_override"
+  mkdir -p "_unsigned/$target_override" "dist/$target_override"
+fi
 
 # EXACT_FOUR_TARGETS_BEGIN build
 for target in $TARGETS; do
@@ -231,6 +250,7 @@ for target in $TARGETS; do
 done
 # EXACT_FOUR_TARGETS_END budget
 
+if [[ -z "$target_override" ]]; then
 {
   printf 'head_sha=%s\n' "$source_sha"
   printf 'display_version=%s\n' "$version"
@@ -245,6 +265,7 @@ fi
 python3 scripts/check-build-artifact-inventory.py \
   --write --artifact-root . --source-root . \
   --expected-source-sha "$inventory_source_sha" --version "$version"
+fi
 
 echo "Built unsigned targets: $TARGETS"
 find _unsigned dist -maxdepth 3 -type f -print | sort

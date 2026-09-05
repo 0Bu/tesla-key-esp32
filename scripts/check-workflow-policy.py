@@ -25,6 +25,7 @@ PINNED_ACTION = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+@[0-9a-f]{40}$")
 JOB = re.compile(r"^  ([A-Za-z0-9_-]+):\s*$", re.MULTILINE)
 UNPRIVILEGED_PERMISSIONS = {
     ("build.yml", "logic-test"): {"contents": "read"},
+    ("build.yml", "build-target"): {"contents": "read", "pages": "read"},
     ("build.yml", "build"): {"contents": "read", "pages": "read"},
     ("build.yml", "independent-rebuild"): {"contents": "read"},
     ("signed-pr-preview.yml", "validate"): {
@@ -38,7 +39,9 @@ UNPRIVILEGED_PERMISSIONS = {
 
 EXPECTED_WORKFLOW_JOBS = {
     "bench-acceptance.yml": {"ingest-report"},
-    "build.yml": {"logic-test", "build", "independent-rebuild", "publish", "deploy"},
+    "build.yml": {
+        "logic-test", "build-target", "build", "independent-rebuild", "publish", "deploy",
+    },
     "pr-policy.yml": {"current-head-records"},
     "pr-preview-cleanup.yml": {"cleanup-event", "discover-stale", "reconcile-stale"},
     "renovate.yaml": {"renovate"},
@@ -57,6 +60,7 @@ EXPECTED_TOP_LEVEL_PERMISSIONS = {
 EXPECTED_JOB_PERMISSIONS = {
     ("bench-acceptance.yml", "ingest-report"): {"contents": "read"},
     ("build.yml", "logic-test"): {"contents": "read"},
+    ("build.yml", "build-target"): {"contents": "read", "pages": "read"},
     ("build.yml", "build"): {"contents": "read", "pages": "read"},
     ("build.yml", "independent-rebuild"): {"contents": "read"},
     ("build.yml", "publish"): {"actions": "read", "contents": "write", "pages": "read"},
@@ -94,8 +98,14 @@ EXPECTED_ACTIONS = {
     ("build.yml", "logic-test"): (
         "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
     ),
+    ("build.yml", "build-target"): (
+        "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+        "espressif/esp-idf-ci-action@e6f5c74232b1ccd4c97ed641f1e48553853f1fd5",
+        "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
+    ),
     ("build.yml", "build"): (
         "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+        "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c",
         "espressif/esp-idf-ci-action@e6f5c74232b1ccd4c97ed641f1e48553853f1fd5",
         "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
     ),
@@ -371,9 +381,15 @@ def validate(root: Path) -> None:
 
     build = jobs_by_file.get("build.yml")
     require(build is not None, "build.yml is missing")
-    for name in ("logic-test", "build", "independent-rebuild", "publish", "deploy"):
+    for name in (
+        "logic-test", "build-target", "build", "independent-rebuild", "publish", "deploy",
+    ):
         require(name in build, f"build.yml:{name} job is missing")
+    require(job_has_need(build["build-target"], "logic-test"),
+            "build.yml:build-target must need logic-test")
     require(job_has_need(build["build"], "logic-test"), "build.yml:build must need logic-test")
+    require(job_has_need(build["build"], "build-target"),
+            "build.yml:build must need build-target")
     require(job_has_need(build["independent-rebuild"], "build"),
             "build.yml:independent-rebuild must need build")
     require(job_has_need(build["publish"], "build") and
@@ -392,6 +408,19 @@ def validate(root: Path) -> None:
             "build.yml:logic-test must prove and run ASan/UBSan/LSan")
     require("python3 scripts/check-build-gate-contract.py --self-test" in build["logic-test"],
             "build.yml:logic-test must run the mutation-tested four-target build contract")
+    build_target_refs = re.findall(
+        r"^\s+ref:\s*([^\n#]+?)\s*$", build["build-target"], re.MULTILINE
+    )
+    require(build_target_refs == ["${{ github.event.pull_request.head.sha || github.sha }}"],
+            "build.yml:build-target must check out the exact PR head (or push SHA)")
+    require(
+        '"${{ github.event.pull_request.head.sha || github.sha }}"' in build["build-target"] and
+        "./scripts/ci-build-verify.sh" in build["build-target"]
+        and "actions/cache@" not in build["build-target"]
+        and "cache-hash" not in build["build-target"]
+        and "cache-scope" not in build["build-target"],
+        "build.yml:build-target provenance must bind ci-build-verify to the exact PR head",
+    )
     build_refs = re.findall(r"^\s+ref:\s*([^\n#]+?)\s*$", build["build"], re.MULTILINE)
     require(build_refs == ["${{ github.event.pull_request.head.sha || github.sha }}"],
             "build.yml:build must check out the exact PR head (or push SHA)")
