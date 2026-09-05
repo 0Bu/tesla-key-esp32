@@ -155,6 +155,30 @@ changed_since_release() {
   fi
 }
 
+changed_for_pr() {
+  local repo_root="$1" base_sha="$2" head_sha="$3" files
+  validate_sha "$repo_root" "$base_sha" || {
+    echo "invalid PR base SHA: $base_sha; failing closed to yes" >&2
+    printf 'yes\n'
+    return 0
+  }
+  validate_sha "$repo_root" "$head_sha" || {
+    echo "invalid PR head SHA: $head_sha; failing closed to yes" >&2
+    printf 'yes\n'
+    return 0
+  }
+  files="$(git -C "$repo_root" diff --name-only --no-renames "$base_sha" "$head_sha")" || {
+    echo "cannot diff PR base $base_sha to $head_sha; failing closed to yes" >&2
+    printf 'yes\n'
+    return 0
+  }
+  if printf '%s\n' "$files" | grep -Eq "$RELEVANT_RE"; then
+    printf 'yes\n'
+  else
+    printf 'no\n'
+  fi
+}
+
 write_fake_release() {
   local path="$1" version="$2" sha="$3"
   python3 - "$contract_root/scripts/check-release-assets.py" "$path" "$version" "$sha" <<'PY'
@@ -464,18 +488,41 @@ PYTHON_WRAPPER
     echo "unreadable Release authority failed open to no" >&2
     return 1
   fi
+
+  # PR relevance test: docs-only diff produces no, firmware diff produces yes, bad SHA fails closed
+  git -C "$tmp" checkout -q -b pr-branch
+  echo "test doc edit" >> "$tmp/docs/README.md"
+  git -C "$tmp" commit -qam "edit docs"
+  sha_pr_docs="$(git -C "$tmp" rev-parse HEAD)"
+  got="$(changed_for_pr "$tmp" "$sha_c" "$sha_pr_docs")"
+  [[ "$got" == no ]] || { echo "docs-only PR expected no, got: $got" >&2; return 1; }
+
+  echo "void foo() {}" >> "$tmp/main/firmware.cpp"
+  git -C "$tmp" add main/firmware.cpp
+  git -C "$tmp" commit -qm "edit firmware"
+  sha_pr_fw="$(git -C "$tmp" rev-parse HEAD)"
+  got="$(changed_for_pr "$tmp" "$sha_c" "$sha_pr_fw")"
+  [[ "$got" == yes ]] || { echo "firmware PR expected yes, got: $got" >&2; return 1; }
+
+  got="$(changed_for_pr "$tmp" "bad-sha" "$sha_pr_fw" 2>/dev/null)"
+  [[ "$got" == yes ]] || { echo "invalid PR SHA expected yes, got: $got" >&2; return 1; }
+
   echo "release relevance self-test: PASS"
 }
 
 repo_root="$contract_root"
 case "${1:-}" in
   --changed)
-    [[ $# -eq 2 ]] || { echo "usage: $0 --changed CURRENT_SHA | --self-test" >&2; exit 2; }
+    [[ $# -eq 2 ]] || { echo "usage: $0 --changed CURRENT_SHA | --changed-pr BASE_SHA HEAD_SHA | --self-test" >&2; exit 2; }
     changed_since_release "$repo_root" "$2"
     ;;
+  --changed-pr)
+    [[ $# -eq 3 ]] || { echo "usage: $0 --changed CURRENT_SHA | --changed-pr BASE_SHA HEAD_SHA | --self-test" >&2; exit 2; }
+    changed_for_pr "$repo_root" "$2" "$3"
+    ;;
   --self-test)
-    [[ $# -eq 1 ]] || { echo "usage: $0 --changed CURRENT_SHA | --self-test" >&2; exit 2; }
+    [[ $# -eq 1 ]] || { echo "usage: $0 --changed CURRENT_SHA | --changed-pr BASE_SHA HEAD_SHA | --self-test" >&2; exit 2; }
     self_test
     ;;
-  *) echo "usage: $0 --changed CURRENT_SHA | --self-test" >&2; exit 2 ;;
+  *) echo "usage: $0 --changed CURRENT_SHA | --changed-pr BASE_SHA HEAD_SHA | --self-test" >&2; exit 2 ;;
 esac

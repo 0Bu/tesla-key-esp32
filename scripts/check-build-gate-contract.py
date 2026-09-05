@@ -917,7 +917,7 @@ def validate(root: Path) -> None:
             '(("false", False), ("missing", None))' in published_release,
             "check-published-release.py: immutable API metadata gate/canaries drifted")
 
-    require(build_workflow.count(HEAD_REF) == 1 and SOURCE_EXPR in build_workflow,
+    require(build_workflow.count(HEAD_REF) == 2 and SOURCE_EXPR in build_workflow,
             "build.yml: PR producer must bind to the exact head SHA")
     require(
         build_workflow.count("  independent-rebuild:") == 1
