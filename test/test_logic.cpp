@@ -43,6 +43,7 @@
 #include "logic/syslog_start_gate.hpp"
 #include "logic/connect_outcome.hpp"
 #include "logic/active_window.hpp"
+#include "logic/wake_poll.hpp"
 #include "logic/ble_readiness.hpp"
 #include "logic/ble_phase.hpp"
 #include "logic/ble_row.hpp"
@@ -2694,6 +2695,72 @@ static void test_active_window() {
     CHECK(active_window_open({false, false, false, 0}) == false);
 }
 
+// ── Wake-edge one-shot charge poll (logic/wake_poll.hpp) — the stale-SOC-after-plug-in fix ──
+static void test_wake_poll() {
+    using namespace tk;
+
+    // Boot / reconnect: UNKNOWN then AWAKE with no prior stable-asleep run must NOT fire.
+    {
+        WakePollState st{};
+        CHECK(wake_edge_should_poll(st, {WakeSample::Unknown, false}) == false);
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake,   false}) == false);
+        CHECK(st.armed == false);
+    }
+
+    // The fix: a debounced ASLEEP run arms, and the next self-initiated AWAKE fires exactly one
+    // poll (cable plug-in after a long sleep).
+    {
+        WakePollState st{};
+        CHECK(wake_edge_should_poll(st, {WakeSample::Asleep, false}) == false); // not yet stable
+        CHECK(st.armed == false);
+        CHECK(wake_edge_should_poll(st, {WakeSample::Asleep, true})  == false); // debounce reached → arm
+        CHECK(st.armed == true);
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake,  false}) == true);  // fire once
+        CHECK(st.armed == false);
+    }
+
+    // One poll per wake episode: a second AWAKE without a fresh stable-asleep run must not re-fire,
+    // and re-arming requires another debounced ASLEEP run.
+    {
+        WakePollState st{};
+        (void)wake_edge_should_poll(st, {WakeSample::Asleep, true});
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false}) == true);
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false}) == false);
+        CHECK(wake_edge_should_poll(st, {WakeSample::Asleep, true}) == false);  // re-arm
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false}) == true);
+    }
+
+    // COP flap: an ASLEEP run that never reaches the debounce (vcsec_stably_asleep stays false)
+    // never arms, so the ~60 s AWAKE↔ASLEEP cycling cannot spawn spurious polls.
+    {
+        WakePollState st{};
+        for (int i = 0; i < 5; ++i) {
+            CHECK(wake_edge_should_poll(st, {WakeSample::Asleep, false}) == false);
+            CHECK(wake_edge_should_poll(st, {WakeSample::Awake,  false}) == false);
+        }
+        CHECK(st.armed == false);
+    }
+
+    // UNKNOWN between arm and wake preserves the arm (a wake during a BLE gap is still honoured).
+    {
+        WakePollState st{};
+        (void)wake_edge_should_poll(st, {WakeSample::Asleep, true});   // armed
+        CHECK(wake_edge_should_poll(st, {WakeSample::Unknown, false}) == false);
+        CHECK(st.armed == true);
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false}) == true);
+    }
+
+    // A bare ASLEEP reading after arming does not disarm; the pending wake still fires.
+    {
+        WakePollState st{};
+        (void)wake_edge_should_poll(st, {WakeSample::Asleep, true});
+        CHECK(st.armed == true);
+        CHECK(wake_edge_should_poll(st, {WakeSample::Asleep, false}) == false);
+        CHECK(st.armed == true);
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false}) == true);
+    }
+}
+
 // ── BLE command readiness (logic/ble_readiness.hpp) — GAP is not GATT-ready ───────────
 static void test_ble_readiness() {
     using namespace tk::ble;
@@ -4178,6 +4245,7 @@ int main() {
     test_heap_watchdog();
     test_charge_control();
     test_active_window();
+    test_wake_poll();
     test_ble_readiness();
     test_ble_phase();
     test_ble_row();

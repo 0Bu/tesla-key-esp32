@@ -55,6 +55,7 @@
     "vehicle_data.hpp": {"test": "test/test_logic.cpp", "evidence": "test_status_model("},
     "vin.hpp": {"test": "test/test_logic.cpp", "evidence": "test_vin("},
     "vin_transition.hpp": {"test": "test/test_logic.cpp", "evidence": "test_vin_transition("},
+    "wake_poll.hpp": {"test": "test/test_logic.cpp", "evidence": "test_wake_poll("},
     "wifi_credentials.hpp": {"test": "test/test_logic.cpp", "evidence": "test_wifi_credentials("},
     "wifi_rollback.hpp": {"test": "test/test_logic.cpp", "evidence": "test_wifi_rollback("}
   }

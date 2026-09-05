@@ -106,6 +106,24 @@ old so read-only polling never wakes a sleeping car; during the active window (c
 command in the last five minutes), data older than 30 s returns HTTP 503. Thus a BLE
 parser/retry storm is visible to evcc instead of being hidden behind a valid-looking HTTP 200.
 
+**One-shot charge poll on the self-wake edge** (`logic/wake_poll.hpp`, fired in
+`loop_task_fn_`). A parked, asleep car that wakes **itself** — most importantly when the charge
+cable is plugged in — would otherwise never refresh its cached SOC: the active window opens only
+on a recent command or cached charging, so nothing polls, and evcc keeps serving the stale
+pre-plug-in reading. If that stale SOC happens to sit above `minSoc`, evcc sees no reason to start
+the very charge that would open the window — a stall the stale data perpetuates. `loop_task`
+closes this by watching the VCSEC sleep flag's `ASLEEP→AWAKE` edge (the same mirror the debounce
+below samples) and firing **exactly one** `charge_state_poll(NO_WAKE_SKIP)` per wake episode.
+`NO_WAKE_SKIP` keeps the anti-drain guarantee intact — a car already back asleep is skipped, so
+the device only ever piggybacks on a wake the car performed itself; it **never** opens the active
+window merely because the car is awake. The one-shot arms only after a *debounced* `ASLEEP` run
+(reusing `kAsleepDebounceS`), so the ~60 s Cabin-Overheat-Protection `AWAKE↔ASLEEP` flap and an
+`UNKNOWN→AWAKE` at boot cannot fire it, and it re-arms only on a fresh stable-asleep run. If the
+refreshed state is `Charging`/`Starting` the existing charging arm opens the window and normal
+session polling takes over; otherwise the cache is refreshed and the car re-sleeps undisturbed.
+The arm/fire decision is the host-tested `logic/wake_poll.hpp`; the loop only samples the flag
+mirror and fires.
+
 Exposed under `tele` in `/status`, emitted only while the BLE link is up — the MQTT bridge
 reads the caches directly, so it keeps publishing regardless (the device's web UI
 renders the Overheat / Defrost chips from `tele.climate` — each shown only when a live AC draw
