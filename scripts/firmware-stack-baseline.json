@@ -95,7 +95,7 @@
           "/COMPONENT_MAIN_DIR/vehicle_pairing.cpp :: std::string VehicleController::key_fingerprint()": 848
         },
         "CMakeFiles/__idf_main.dir/vehicle_telemetry.cpp.su": {
-          "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: static void VehicleController::loop_task_fn_(void*)": 320,
+          "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: static void VehicleController::loop_task_fn_(void*)": 336,
           "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: void VehicleController::process_ble_host_events_()": 560,
           "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: void VehicleController::process_pending_telemetry_()": 1408
         }
@@ -192,7 +192,7 @@
           "/COMPONENT_MAIN_DIR/vehicle_pairing.cpp :: std::string VehicleController::key_fingerprint()": 848
         },
         "CMakeFiles/__idf_main.dir/vehicle_telemetry.cpp.su": {
-          "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: static void VehicleController::loop_task_fn_(void*)": 320,
+          "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: static void VehicleController::loop_task_fn_(void*)": 336,
           "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: void VehicleController::process_ble_host_events_()": 560,
           "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: void VehicleController::process_pending_telemetry_()": 1408
         }
