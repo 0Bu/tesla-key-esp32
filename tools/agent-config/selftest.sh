@@ -50,6 +50,14 @@ run_gate "$fixture" >/dev/null || fail "clean fixture failed"
 echo "  PASS  clean fixture"
 passes=$((passes + 1))
 
+node "$ROOT/tools/agent-config/update-skill-digests.mjs" --self-test >/dev/null || fail "update-skill-digests self-test failed"
+echo "  PASS  update-skill-digests self-test"
+passes=$((passes + 1))
+
+python3 "$ROOT/tools/agent-config/export-subagents.py" --self-test >/dev/null || fail "export-subagents self-test failed"
+echo "  PASS  export-subagents self-test"
+passes=$((passes + 1))
+
 fixture="$WORK/claude-residue"; make_fixture "$fixture"
 mkdir "$fixture/.claude"
 expect_failure "retired .claude metadata" "$fixture" ".claude metadata must remain retired"
