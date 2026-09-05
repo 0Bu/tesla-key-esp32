@@ -1622,7 +1622,7 @@ def require_runtime_admission_contract(logic_header: str, facade_header: str,
     route_body = function_body_in(http_route_header,
                                   "http_route_requires_vehicle_runtime")
     groups = re.findall(
-        r"((?:\s*case\s+HttpRoute::[A-Za-z0-9_]+\s*:\s*)+)"
+        r"((?:case\s+HttpRoute::[A-Za-z0-9_]+\s*:\s*)+)"
         r"return\s+(true|false)\s*;", scrub_cpp(route_body), re.DOTALL,
     )
     classified: dict[bool, set[str]] = {True: set(), False: set()}
