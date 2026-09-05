@@ -9,7 +9,6 @@ actions stay anchored to the versioned hook core's own worktree.
 from __future__ import annotations
 
 import argparse
-import ast
 import fnmatch
 import json
 import os
@@ -1001,6 +1000,7 @@ def run_subagent_context(_: argparse.Namespace) -> int:
 
 def verify_build_efficiency_report_only() -> tuple[bool, str]:
     """Prove the SessionStart handler itself contains only context I/O, never mutation calls."""
+    import ast
     tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
     function = next(
         node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "run_build_efficiency"
@@ -1136,6 +1136,12 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
+    if len(sys.argv) == 2:
+        cmd = sys.argv[1]
+        if cmd == "pre-tool-guards":
+            return run_pre_tool_guards(argparse.Namespace(partition_shell_only=False))
+        if cmd == "format":
+            return run_format(argparse.Namespace())
     parser = build_parser()
     args = parser.parse_args()
     return int(args.func(args))
