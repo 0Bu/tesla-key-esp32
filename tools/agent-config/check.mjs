@@ -89,7 +89,7 @@ const canonicalSkills = directoryNames(".agents/skills");
 
 const highRiskSkills = new Set(["flash-esp32", "ship", "usb-recovery"]);
 const readOnlySkills = new Set([
-  "device-diag", "display-preview", "ota-release-verify", "pr-hygiene", "project-review",
+  "device-diag", "display-preview", "mock-test", "ota-release-verify", "pr-hygiene", "project-review",
   "skill-audit", "vehicle-command-audit",
 ]);
 const ownerContracts = new Map([
@@ -121,6 +121,7 @@ const reviewedSkillSha256 = new Map([
   ["display-preview", "4bff95d0314d50ce29d67beac7ef4f9db1ebcbb2fa609335e560e162f5a1ed46"],
   ["feature-docs", "c2d26e873399d4970145ed53ab64e5e3abfd198391343ad107ec1dbdf10012ff"],
   ["flash-esp32", "cd67535f6206b72eb824548fce9338f97c5e813aff14633c6149b636b2146aeb"],
+  ["mock-test", "8cfaaa7d4d7fdbda24375ca743f9954ee39c6db053684000fac1bf1bce00ac0f"],
   ["ota-release-verify", "347c7f3cdffa25a9563f104c099e08d1f91101e2d54b39442b97e9fcbc77400b"],
   ["pr-hygiene", "7ef6544f83a50dbe696e360081c33091ce8d7f0826ec839efd7c4805cdf2344a"],
   ["project-review", "4d4be821828d0b010d16bc94002d339b9f917389ad356741cf6af0a07927d96e"],
