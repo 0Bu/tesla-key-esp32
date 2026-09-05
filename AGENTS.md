@@ -40,7 +40,7 @@ task touches them:
 - [`esp-idf-toolchain.txt`](esp-idf-toolchain.txt) pins ESP-IDF **v5.5.5** and its container digest.
   Use the repository wrappers; do not substitute a host IDF or move to ESP-IDF 6 as part of an
   unrelated task.
-- [`main/idf_component.yml`](main/idf_component.yml) pins `yoziru/tesla-ble` **v5.1.2**.
+- [`main/idf_component.yml`](main/idf_component.yml) pins `yoziru/tesla-ble` **v5.1.3**.
   [`patches/tesla-ble/`](patches/tesla-ble/) is an ordered, hash-checked, fail-closed local series:
   the anti-replay response-counter fix, key-regeneration/persistence API adaptation, and bounded
   RX-framing recovery logging are current contracts, not obsolete C5 workarounds. Do not edit the

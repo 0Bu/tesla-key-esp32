@@ -351,7 +351,7 @@ therefore means upstreaming it there first. A local patched checkout was carried
 while and has been dropped — [`adr/0004-drop-esp32c5-target.md`](adr/0004-drop-esp32c5-target.md).
 
 The first patch is a **correctness and anti-replay fix shared by all four targets**. Upstream
-v5.1.2 calls `Peer::validate_response_counter()` and logs a duplicate CarServer response, but
+v5.1.3 calls `Peer::validate_response_counter()` and logs a duplicate CarServer response, but
 then continues into state callbacks and FIFO command completion. A replay from an earlier
 request can therefore refresh `last_known_charge_` or complete whichever command is currently
 at the queue head. Root `CMakeLists.txt`, after dependency resolution, invokes

@@ -569,7 +569,7 @@ Full threat model + Flash Encryption / Secure Boot: [SECURITY.md](SECURITY.md).
 | Service UUID | `00000211-b2d1-43f0-9b88-960cebf8b91e` |
 | Encryption | ECDH + AES-GCM (mbedTLS) |
 | Signing | ECDSA P-256 (key in NVS) |
-| BLE library | [yoziru/tesla-ble](https://github.com/yoziru/tesla-ble) v5.1.2 + ordered repository patch series (including anti-replay) |
+| BLE library | [yoziru/tesla-ble](https://github.com/yoziru/tesla-ble) v5.1.3 + ordered repository patch series (including anti-replay) |
 | BLE stack | NimBLE |
 | Fragment size | Negotiated ATT MTU − 3 (20-byte safe default until MTU exchange; max 244) |
 | HTTP server | `esp_http_server` :80 |
