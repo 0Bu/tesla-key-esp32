@@ -43,6 +43,7 @@
 #include "board.hpp"
 #include "boot_fatal.hpp"
 #include "task_config.hpp"
+#include "logic/eth_board.hpp"
 #include "logic/net_link.hpp"
 #include "logic/wifi_rollback.hpp"
 #include "ping_probe.hpp"
@@ -439,6 +440,7 @@ static esp_eth_netif_glue_handle_t s_eth_glue = nullptr;
 static EventGroupHandle_t s_eth_events = nullptr;
 static bool s_spi_bus_up = false;
 static std::atomic<bool> s_eth_link{false};
+static EthSpiCandidate s_latched_eth_pins = {};
 
 static spi_host_device_t eth_spi_host();
 static void eth_event_handler(void*, esp_event_base_t, int32_t, void*);
@@ -454,6 +456,7 @@ static bool eth_release_spi_bus() {
         return false;
     }
     s_spi_bus_up = false;
+    s_latched_eth_pins = {};
     return true;
 }
 
@@ -617,50 +620,93 @@ bool net_eth_probe() {
     // yet at this point in boot, so the fight would not show up here; it would show up later as
     // a panel that never initialises, which is a miserable thing to debug.
     if (board_is_t_dongle_s3()) {
-        ESP_LOGI(TAG, "T-Dongle-S3 detected — skipping the W5500 probe (its panel owns GPIO%d)",
-                 CONFIG_TESLA_ETH_SPI_SCLK);
+        ESP_LOGI(TAG, "T-Dongle-S3 detected — skipping the W5500 probe (its panel owns GPIO5)");
         return false;
     }
 
-    spi_bus_config_t buscfg = {};
-    buscfg.mosi_io_num = CONFIG_TESLA_ETH_SPI_MOSI;
-    buscfg.miso_io_num = CONFIG_TESLA_ETH_SPI_MISO;
-    buscfg.sclk_io_num = CONFIG_TESLA_ETH_SPI_SCLK;
-    buscfg.quadwp_io_num = -1;
-    buscfg.quadhd_io_num = -1;
-    if (spi_bus_initialize(eth_spi_host(), &buscfg, SPI_DMA_CH_AUTO) != ESP_OK) {
-        ESP_LOGW(TAG, "W5500 probe: SPI bus init failed — no Ethernet");
-        return false;
-    }
-    s_spi_bus_up = true;
+    // Curated candidate list. If Kconfig configured pins differ from candidate 0 (M5Stack 5/6/7/8),
+    // prepend the Kconfig configuration so custom builds take precedence.
+    const EthSpiCandidate custom_cand = {
+        "Configured SPI",
+        CONFIG_TESLA_ETH_SPI_SCLK,
+        CONFIG_TESLA_ETH_SPI_CS,
+        CONFIG_TESLA_ETH_SPI_MISO,
+        CONFIG_TESLA_ETH_SPI_MOSI
+    };
 
-    spi_device_interface_config_t devcfg = {};
-    devcfg.mode           = 0;                                        // W5500 is SPI mode 0
-    devcfg.clock_speed_hz = CONFIG_TESLA_ETH_SPI_CLOCK_MHZ * 1000 * 1000;
-    devcfg.spics_io_num   = CONFIG_TESLA_ETH_SPI_CS;
-    devcfg.queue_size     = 1;
+    const bool custom_differs =
+        (custom_cand.sclk != kEthDefaultCandidates[0].sclk ||
+         custom_cand.cs   != kEthDefaultCandidates[0].cs ||
+         custom_cand.miso != kEthDefaultCandidates[0].miso ||
+         custom_cand.mosi != kEthDefaultCandidates[0].mosi);
 
-    spi_device_handle_t dev = nullptr;
-    uint8_t ver = 0;
-    bool found = false;
-    if (spi_bus_add_device(eth_spi_host(), &devcfg, &dev) == ESP_OK) {
-        found = w5500_read_common(dev, kW5500VersionReg, &ver) && ver == kW5500VersionVal;
-        spi_bus_remove_device(dev);   // the driver adds its own device with its own config
-    }
+    EthSpiCandidate candidate_storage[kEthDefaultCandidateCount + 1];
+    const EthSpiCandidate* candidates = kEthDefaultCandidates;
+    size_t num_candidates = kEthDefaultCandidateCount;
 
-    if (!found) {
-        ESP_LOGI(TAG, "no W5500 on SPI (VERSIONR=0x%02x, expected 0x%02x) — WiFi only",
-                 ver, kW5500VersionVal);
-        if (!eth_release_spi_bus()) boot_fatal("W5500 probe cleanup");
-        return false;
+    if (custom_differs) {
+        candidate_storage[0] = custom_cand;
+        for (size_t i = 0; i < kEthDefaultCandidateCount; ++i) {
+            candidate_storage[i + 1] = kEthDefaultCandidates[i];
+        }
+        candidates = candidate_storage;
+        num_candidates = kEthDefaultCandidateCount + 1;
     }
 
-    ESP_LOGI(TAG, "W5500 found (VERSIONR=0x%02x) on SCLK%d/CS%d/MISO%d/MOSI%d @ %d MHz",
-             ver, CONFIG_TESLA_ETH_SPI_SCLK, CONFIG_TESLA_ETH_SPI_CS,
-             CONFIG_TESLA_ETH_SPI_MISO, CONFIG_TESLA_ETH_SPI_MOSI,
-             CONFIG_TESLA_ETH_SPI_CLOCK_MHZ);
-    s_eth_present.store(true);
-    return true;
+    for (size_t i = 0; i < num_candidates; ++i) {
+        const auto& cand = candidates[i];
+        if (!eth_candidate_pins_valid(cand)) {
+            ESP_LOGW(TAG, "skipping invalid Ethernet SPI candidate '%s'", cand.name);
+            continue;
+        }
+
+        spi_bus_config_t buscfg = {};
+        buscfg.mosi_io_num = cand.mosi;
+        buscfg.miso_io_num = cand.miso;
+        buscfg.sclk_io_num = cand.sclk;
+        buscfg.quadwp_io_num = -1;
+        buscfg.quadhd_io_num = -1;
+        if (spi_bus_initialize(eth_spi_host(), &buscfg, SPI_DMA_CH_AUTO) != ESP_OK) {
+            ESP_LOGW(TAG, "W5500 probe (%s): SPI bus init failed", cand.name);
+            continue;
+        }
+
+        spi_device_interface_config_t devcfg = {};
+        devcfg.mode           = 0;                                        // W5500 is SPI mode 0
+        devcfg.clock_speed_hz = CONFIG_TESLA_ETH_SPI_CLOCK_MHZ * 1000 * 1000;
+        devcfg.spics_io_num   = cand.cs;
+        devcfg.queue_size     = 1;
+
+        spi_device_handle_t dev = nullptr;
+        uint8_t ver = 0;
+        bool found = false;
+        if (spi_bus_add_device(eth_spi_host(), &devcfg, &dev) == ESP_OK) {
+            found = w5500_read_common(dev, kW5500VersionReg, &ver) && ver == kW5500VersionVal;
+            spi_bus_remove_device(dev);   // the driver adds its own device with its own config
+        }
+
+        if (found) {
+            s_spi_bus_up = true;
+            s_latched_eth_pins = cand;
+            s_eth_present.store(true);
+            ESP_LOGI(TAG, "W5500 found (VERSIONR=0x%02x) on %s: SCLK%d/CS%d/MISO%d/MOSI%d @ %d MHz",
+                     ver, cand.name, cand.sclk, cand.cs, cand.miso, cand.mosi,
+                     CONFIG_TESLA_ETH_SPI_CLOCK_MHZ);
+            return true;
+        }
+
+        ESP_LOGI(TAG, "no W5500 on %s (SCLK%d/CS%d/MISO%d/MOSI%d, VERSIONR=0x%02x, expected 0x%02x)",
+                 cand.name, cand.sclk, cand.cs, cand.miso, cand.mosi, ver, kW5500VersionVal);
+
+        const esp_err_t err = spi_bus_free(eth_spi_host());
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "W5500 probe bus cleanup failed for %s: %s", cand.name, esp_err_to_name(err));
+            boot_fatal("W5500 probe cleanup");
+        }
+    }
+
+    ESP_LOGI(TAG, "no W5500 on SPI across %zu candidate(s) — WiFi only", num_candidates);
+    return false;
 }
 
 static const int ETH_GOT_IP_BIT = BIT0;
@@ -726,7 +772,7 @@ bool net_start_eth() {
     spi_device_interface_config_t devcfg = {};
     devcfg.mode           = 0;
     devcfg.clock_speed_hz = CONFIG_TESLA_ETH_SPI_CLOCK_MHZ * 1000 * 1000;
-    devcfg.spics_io_num   = CONFIG_TESLA_ETH_SPI_CS;
+    devcfg.spics_io_num   = s_latched_eth_pins.cs;
     devcfg.queue_size     = 20;
 
     eth_w5500_config_t w5500_cfg = ETH_W5500_DEFAULT_CONFIG(eth_spi_host(), &devcfg);

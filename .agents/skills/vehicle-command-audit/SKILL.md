@@ -152,7 +152,7 @@ re-confirm it against the *current* tree and catch anything that drifted since. 
    *Baseline: sound; `docs/ARCHITECTURE.md` describes all three detectors.*
 8. **Library-version claims** — every command the firmware calls resolves to a real builder at the
    pin; doc claims about what's *not* exposed (scheduled departure) match the pin's
-   `message_builders.cpp`. *Baseline: matches at v5.1.1.*
+   `message_builders.cpp`. *Baseline: matches at v5.1.2.*
 9. **evcc / TeslaBleHttpProxy HTTP shape** — `/api/.../command/{name}` names, `vehicle_data` =
    `.response.response.charge_state.*` with **`charge_amps`** (not `charging_amps`), doubled
    `response`, **miles/mph on the `/api` path** (metric is MQTT-only), `charging_state` strings

@@ -55,9 +55,10 @@ task touches them:
 
 ## Environment and evidence boundaries
 
-- `scripts/idf-docker.sh` is the pinned ESP-IDF boundary. A host mock result is not an IDF build;
-  an IDF build is not a signed image; a signed image is not a flash; a flash is not runtime or
-  vehicle proof.
+- `scripts/idf-docker.sh` is the pinned ESP-IDF boundary and explicitly caps each build container
+  at 1.5 CPU and 1800 MiB so co-resident services retain capacity. Do not bypass or raise those
+  limits during ordinary builds. A host mock result is not an IDF build; an IDF build is not a
+  signed image; a signed image is not a flash; a flash is not runtime or vehicle proof.
 - A remote runner may have neither Docker nor USB. Report capabilities rather than manufacturing
   evidence. Do not bypass a missing boundary with an unpinned toolchain.
 - Keep evidence separate in reports: host tests, four-target CI-equivalent build, disposable-key

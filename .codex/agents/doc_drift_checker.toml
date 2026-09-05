@@ -18,8 +18,10 @@ every changed fact, compare code, tests, web UI, and all documented mirrors:
 - Partition offsets (NVS 0x9000/0x6000, app 0x20000, OTA slots), target/platform/suffix mappings.
 - ESP-IDF v5.5.5, yoziru/tesla-ble v5.1.2, the ordered fail-closed patch series, and four targets
   esp32, esp32s3, esp32c3, esp32c6.
-- Kconfig/defaults, OTA/release/provenance narrative, architecture maps, logic-test mirrors, and
-  runner-neutral agent/skill/hook references.
+- Kconfig/defaults, pinned build-container CPU/memory limits, OTA/release/provenance narrative,
+  architecture maps, logic-test mirrors, and runner-neutral agent/skill/hook references.
+- Runtime board detectors and ordered peripheral candidates, including every SPI and auxiliary
+  INT/RST GPIO a probe can touch on this candidate and every later board in the sequence.
 - Typed HTTP/MCP body/JSON failures, sticky response ownership, retained MQTT publish ordering,
   C-boundary inventory/containment, safe-mode and heap-breadcrumb NVS fail-closed behavior.
 - Exact PR-head provenance, minimal signed-image alignment/cryptographic verification, clean

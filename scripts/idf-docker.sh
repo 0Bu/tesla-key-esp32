@@ -23,10 +23,14 @@ echo "idf-docker: using ${image} (from esp-idf-toolchain.txt)" >&2
 tty_flags=()
 if [ -t 0 ] && [ -t 1 ]; then tty_flags=(-it); fi
 
-# -u maps to the host user so build/ artifacts aren't root-owned; HOME=/tmp gives
-# that non-root user a writable home; GIT_CONFIG safe.directory='*' avoids git
-# "dubious ownership" on the mounted repo and on /opt/esp/idf.
-exec docker run --rm ${tty_flags[@]+"${tty_flags[@]}"} \
+# Hard limits keep a local ESP-IDF build from starving co-resident services. They are explicit
+# here rather than inherited from a Docker daemon/shim default, so standard Docker and the k3s
+# shim enforce the same ceiling. The complete S3 build is proven below both limits.
+#
+# -u maps to the host user so build/ artifacts aren't root-owned; HOME=/tmp gives that non-root
+# user a writable home; GIT_CONFIG safe.directory='*' avoids git "dubious ownership" on the
+# mounted repo and on /opt/esp/idf.
+exec docker run --rm --cpus 1.5 --memory 1800m ${tty_flags[@]+"${tty_flags[@]}"} \
   -v "$repo_root":/project -w /project \
   -u "$(id -u):$(id -g)" -e HOME=/tmp \
   -e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=safe.directory -e GIT_CONFIG_VALUE_0='*' \

@@ -89,8 +89,8 @@ links yourself — that's where the value is.
 | Area | Files | Responsibility |
 |---|---|---|
 | Boot / wiring | `main/main.cpp` (+ `boot_fatal.hpp`) | NVS, config/VIN resolve, clock restore, BLE + network bring-up ORDER, SNTP, mDNS, starts every component; boot heap log; OTA mark-valid |
-| Board identity | `main/board.{cpp,hpp}` | Runtime board detection for the ONE image per chip. The esp32s3 image serves THREE boards (T-Dongle-S3 / bare ESP32-S3 / AtomS3 Lite + ATOMIC PoE Base). ONE cached detector because display and Ethernet OVERLAP ON A PIN — the panel's SPI clock is GPIO5, the PoE base's SCLK |
-| Network transport | `main/net.{cpp,hpp}` + `main/ping_probe.hpp` + `logic/net_link.hpp` | The ONE transport seam: everything above it asks `tk::net_is_up()` / `net_kind()` / `net_active_netif()` and never touches `esp_wifi`. Owns the WiFi station, the endless-reconnect handler, the credential-rollback boot window (`logic/wifi_rollback.hpp`) and the generation-owned gateway-ICMP ghost-link watchdog (`net_wd`); the transport identity `NetLink::{None,Wifi,Eth}` and the watchdog's decision (incl. the never-answered-ICMP baseline rule) are host-tested in `logic/net_link.hpp`. Also the OPTIONAL W5500 SPI Ethernet backend (`CONFIG_TESLA_ETH_ENABLED`, esp32s3 only): VERSIONR probe, POLLING mode (the PoE base routes no INT/RST), a TWO-PHASE bring-up (a short link grace answers "is a cable attached", then the generous lease deadline once the PHY reports link — one timer for both delayed the setup AP on a credential-less board), a raised `route_prio` (ESP-IDF defaults ETH *below* the WiFi station; it governs `netif_default`/off-link traffic only — `ip4_route()` matches on-link destinations by `netif_list` order), and — on a lease — WiFi is never started at all |
+| Board identity | `main/board.{cpp,hpp}` | Runtime board detection for the ONE image per chip. The esp32s3 image serves a T-Dongle-S3, bare ESP32-S3 and the supported W5500 board layouts. ONE cached detector because display and Ethernet OVERLAP ON A PIN — the panel's SPI clock is GPIO5, the PoE base's SCLK; candidate order and GPIO validity live in `main/logic/eth_board.hpp` |
+| Network transport | `main/net.{cpp,hpp}` + `main/ping_probe.hpp` + `logic/net_link.hpp` + `logic/eth_board.hpp` | The ONE transport seam: everything above it asks `tk::net_is_up()` / `net_kind()` / `net_active_netif()` and never touches `esp_wifi`. Owns the WiFi station, the endless-reconnect handler, the credential-rollback boot window (`logic/wifi_rollback.hpp`) and the generation-owned gateway-ICMP ghost-link watchdog (`net_wd`); the transport identity `NetLink::{None,Wifi,Eth}` and the watchdog's decision (incl. the never-answered-ICMP baseline rule) are host-tested in `logic/net_link.hpp`. Also the OPTIONAL W5500 SPI Ethernet backend (`CONFIG_TESLA_ETH_ENABLED`, esp32s3 only): ordered hardware-verified VERSIONR candidates plus full-width custom-pin validation, POLLING mode (the PoE base routes no INT/RST), a TWO-PHASE bring-up (a short link grace answers "is a cable attached", then the generous lease deadline once the PHY reports link — one timer for both delayed the setup AP on a credential-less board), a raised `route_prio` (ESP-IDF defaults ETH *below* the WiFi station; it governs `netif_default`/off-link traffic only — `ip4_route()` matches on-link destinations by `netif_list` order), and — on a lease — WiFi is never started at all |
 | Target identity | `main/platform.hpp` | `TK_PLATFORM` string per `CONFIG_IDF_TARGET_*`; must agree with `/api/proxy/1/version`, the HA device model, and esp-web-tools `chipFamily` |
 | Task priorities | `main/task_config.hpp` | `tk::kPrio*` — the ONE named-constant table every `xTaskCreate` site takes its priority from; must agree with the task inventory in `docs/ARCHITECTURE.md` ("Concurrency") |
 | Task stack headroom | `main/stack_watch.{cpp,hpp}` + `logic/status_model.hpp` + `main/http_status.cpp` + `main/mqtt_ha.cpp` | Allocation-free, per-owning-task historical minima for httpd, vehicle, auto-pair and MQTT. Unsampled tasks are absent, while a genuine zero-byte measurement remains reportable; `/status` and MQTT are cache-only readers. |
@@ -389,12 +389,14 @@ that describe it. When reviewing a change (or the repo as a whole), check these 
   the size policy: `ci-build-all.sh` gates the deterministic projected signed size and the trusted
   signer independently gates the actual signed bytes after 64-KiB padding + 4-KiB signature.)
 - **New BOARD variant on an existing chip** → the runtime detector in `main/board.{cpp,hpp}`
-  (ONE cached probe — never a second copy) **and** the per-target `sdkconfig.defaults.<target>`
-  **and** `main/Kconfig.projbuild` if it adds an option **and** every doc that lists which boards
-  an image serves (`docs/README.md` Hardware, `docs/FEATURES.md`). The trap
-  is SHARED GPIOs: the esp32s3 image serves a T-Dongle-S3 (ST7735 on MOSI3/SCK5/CS4) and an
-  AtomS3 Lite + ATOMIC PoE Base (W5500 on SCLK5/CS6/MISO7/MOSI8) — **GPIO5 is both** — so a new
-  peripheral probe must be gated on the detector before it drives a pin.
+  (ONE cached probe — never a second copy), any ordered peripheral-candidate table such as
+  `main/logic/eth_board.hpp`, the per-target `sdkconfig.defaults.<target>`,
+  `main/Kconfig.projbuild` if it adds an option, and every doc that lists which boards an image
+  serves (`docs/README.md` Hardware, `docs/FEATURES.md`). Audit the ordered probe as a physical
+  sequence: every pin a candidate can drive or sample — including auxiliary INT/RST lines not
+  represented by its primary bus tuple — must be safe on every later board. The known trap is
+  GPIO5: the T-Dongle-S3 ST7735 SCK and AtomS3 Lite + ATOMIC PoE W5500 SCLK share it, so the W5500
+  probe is gated on the cached detector before it drives any candidate pin.
 - **WiFi/LAN reconnect or watchdog change** → the STA→LAN reconnect policy lives ONLY in
   `main/net.cpp` (`MAX_RETRY`, `s_ever_up`, `kWdPeriodS`/`kWdPingCount`, the
   `s_gw_ever_reachable` baseline latch) with the watchdog's DECISION — the consecutive-failure
@@ -472,7 +474,8 @@ what each must stay true to:
 
 - **`$flash-esp32`** wraps the local compile + explicitly signed USB-flash path and the
   provenance-checked signed-PR-preview download. Re-verify against `scripts/idf-docker.sh`
-  (Docker-pinned from `esp-idf-toolchain.txt`, no local IDF), `.github/workflows/build.yml`
+  (Docker-pinned from `esp-idf-toolchain.txt`, explicit 1.5-CPU/1800-MiB container limits, no
+  local IDF), `.github/workflows/build.yml`
   (ordinary PR artifact is `firmware-unsigned`), `.github/workflows/signed-pr-preview.yml`,
   `partitions.csv` (offsets `nvs@0x9000`, `otadata@0xf000`, app `@0x20000`), the target set and
   app-only activation sequence. Every flash command must use a verified signed app, write/erase
