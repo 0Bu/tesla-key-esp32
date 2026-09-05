@@ -245,7 +245,7 @@ app-only delivery leaves the installed bootloader untouched.
 Before the protected job provisions the signing key, CI recomputes the canonical source fingerprint,
 compares the primary build with a separate exact-source rebuild (all 53 payload files plus manifest),
 and pins the exact IDF image, four dependency locks, resolved tesla-ble commit/component hash and
-four patch digests. It parses the source/generated partition tables, requires every generated
+five patch digests. It parses the source/generated partition tables, requires every generated
 `ota_data_initial.bin` to be exactly `0x2000` erased `0xff` bytes, and checks unsigned ESP image
 headers/checksum/hash/chip ID/app descriptor. The signer copies those no-follow-validated files into
 private staging and rehashes them before key use. It repeats the image check on the signed app and
@@ -390,6 +390,13 @@ of `--gc-sections`, so they cost flash in every image. Removing them returns `ca
 byte-identical descriptor size with v5.1.1. This is a size patch, not a correctness one: esp32c6
 sits closest to the app-size policy ceiling, and image sizes quantize to 64 KiB, so a few hundred
 bytes there decide whether the signed image still fits the `0x1f0000` OTA slot.
+
+The fifth patch aligns session-counter replay with teslamotors/vehicle-command `signer.go`
+(`UpdateSessionInfo`): when the vehicle reports a lower counter, keep `max(local, reported)` and
+still apply epoch/time, instead of hard-rejecting or calling `force_update_session` to the
+vehicle's lower counter. Upstream v5.1.3 resyncs by forcing that lower counter, which breaks
+anti-replay monotonicity; removing the call site also lets `--gc-sections` drop the otherwise-dead
+`force_update_session` and keeps esp32c6 inside the OTA slot budget.
 
 All four images use the same tesla-ble revision and ordered patch-series behavior. The wider
 tesla-ble dependency strategy (IDF-6 / Mbed TLS 4 crypto seam, issue #61) is
@@ -1209,20 +1216,18 @@ never mutates the startup `std::string` across tasks.
 
 **Session reuse across a reboot needs the wall clock restored first.** The `sess_vcsec`/`sess_info`
 blobs in NVS exist so a restart does not cost a fresh handshake, but tesla-ble only accepts a
-persisted session younger than an hour, and it measures that as
-
-```c
-uint32_t session_age = (uint32_t) time(nullptr) - session.clock_time;   // vehicle.cpp
-```
-
-At 1970 that subtraction **underflows** — the age comes out as the raw stored epoch (~1.78e9), which
-is comfortably over the 3600 s limit, so *every* persisted session is rejected however fresh it is.
-`main.cpp` therefore calls `restore_clock_from_nvs()` (the `last_time` cache written on each NTP
-sync) **before** `VehicleController::init()`, not next to the SNTP setup after WiFi where it used to
-sit — the restore itself needs no network, so nothing kept it down there. Measured before the fix:
-49 boots in the 17.–24.07.2026 syslog, 49 rejections of both domains, the last of them discarding a
-VCSEC session that was 43 minutes old. NTP refines the restored clock seconds later; the ordering is
-what matters, not the precision.
+persisted session younger than an hour, and it measures that as a signed
+`(unix_now - session.clock_time)` (v5.1.3; previously an unsigned subtraction). A negative age —
+session clock ahead of the local clock, including a reboot before time resync — is accepted
+rather than underflowed to a huge unsigned age. A 1970 clock would therefore *keep* sessions
+instead of discarding them; restore is still required so a real clock can enforce the one-hour
+stale window (and TLS cert validity). `main.cpp` therefore calls `restore_clock_from_nvs()`
+(the `last_time` cache written on each NTP sync) **before** `VehicleController::init()`, not
+next to the SNTP setup after WiFi where it used to sit — the restore itself needs no network, so
+nothing kept it down there. Measured on the old unsigned path: 49 boots in the 17.–24.07.2026
+syslog, 49 rejections of both domains, the last of them discarding a VCSEC session that was 43
+minutes old. NTP refines the restored clock seconds later; the ordering is what matters, not the
+precision.
 
 **A configured VIN gates pairing entirely.** The device targets the car by its VIN-derived
 BLE name (`S<hex>C`), so `auto_pair_task` first checks `has_plausible_vin()` (17-char VIN;

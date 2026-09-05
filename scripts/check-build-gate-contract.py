@@ -147,6 +147,8 @@ REQUIRED_FILES = (
     "patches/tesla-ble/0001-reject-replayed-carserver-responses.patch",
     "patches/tesla-ble/0002-report-key-regeneration-result.patch",
     "patches/tesla-ble/0003-rate-limit-rx-framing-recovery-logs.patch",
+    "patches/tesla-ble/0004-drop-unused-parental-controls-actions.patch",
+    "patches/tesla-ble/0005-align-session-counter-replay-with-signer-go.patch",
     "test/run-cjson-oom-tests.sh",
     "test/run-mqtt-json-publish-tests.sh",
 )
@@ -917,7 +919,7 @@ def validate(root: Path) -> None:
             '(("false", False), ("missing", None))' in published_release,
             "check-published-release.py: immutable API metadata gate/canaries drifted")
 
-    require(build_workflow.count(HEAD_REF) == 1 and SOURCE_EXPR in build_workflow,
+    require(build_workflow.count(HEAD_REF) == 2 and SOURCE_EXPR in build_workflow,
             "build.yml: PR producer must bind to the exact head SHA")
     require(
         build_workflow.count("  independent-rebuild:") == 1

@@ -47,8 +47,8 @@ error clocks are independent, the shared suppression count saturates rather than
 only the severe-corruption path explicitly selects error severity.
 `test/tesla_protocol_vectors.test.mjs` independently pins the public VIN-advertisement vector,
 P-256 ECDH byte order, `SHA1(shared-secret)[:16]`, the `session info` HMAC label, AES-GCM
-metadata/AAD/nonce/tag layout and all three local patch invariants. It uses public test keys only and
-never reads device or vehicle identity material.
+metadata/AAD/nonce/tag layout and all five local patch invariants, including signer.go session-counter
+replay alignment. It uses public test keys only and never reads device or vehicle identity material.
 
 ## Current device state (factory ESP32-S3)
 

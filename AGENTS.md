@@ -42,8 +42,9 @@ task touches them:
   unrelated task.
 - [`main/idf_component.yml`](main/idf_component.yml) pins `yoziru/tesla-ble` **v5.1.3**.
   [`patches/tesla-ble/`](patches/tesla-ble/) is an ordered, hash-checked, fail-closed local series:
-  the anti-replay response-counter fix, key-regeneration/persistence API adaptation, and bounded
-  RX-framing recovery logging are current contracts, not obsolete C5 workarounds. Do not edit the
+  the anti-replay response-counter fix, key-regeneration/persistence API adaptation, bounded
+  RX-framing recovery logging, unused Parental Controls trim, and signer.go session-counter
+  replay alignment are current contracts, not obsolete C5 workarounds. Do not edit the
   pin, patch order, wire behavior, key compatibility or log-flood throttle without a separately
   authorized dependency migration and protocol-vector review.
 - ESP-IDF 6/Mbed TLS 4/PSA work is intentionally separate. Preserve P-256 ECDH byte order,
