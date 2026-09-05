@@ -26,15 +26,19 @@ CONFIG_TESLA_DISPLAY_DC=2
 CONFIG_TESLA_DISPLAY_RST=1
 CONFIG_TESLA_DISPLAY_BL=38
 
-# ── Ethernet (W5500 over SPI) — the M5Stack AtomS3 Lite on an ATOMIC PoE Base ─────────────────
-# Compiled in for esp32s3 only. The ONE esp32s3 image now serves THREE boards: the T-Dongle-S3
-# (ST7735 panel), a generic ESP32-S3 (neither), and the AtomS3 Lite + PoE base (W5500). Each is
-# detected at runtime and the other two pay nothing: net.cpp reads the W5500's VERSIONR register
-# once at boot and frees the SPI bus again when nothing answers.
+# ── Ethernet (W5500 over SPI) — M5Stack ATOMIC PoE Base and Waveshare ESP32-S3-ETH ─────────────
+# Compiled in for esp32s3 only. The ONE esp32s3 image serves the T-Dongle-S3 (ST7735 panel), a
+# generic ESP32-S3 (neither), and any of several W5500 PoE/Ethernet boards. Each is detected at
+# runtime and the others pay only a brief probe: net_eth_probe() reads the W5500's VERSIONR
+# register once at boot on each known candidate wiring in turn (main/logic/eth_board.hpp's
+# kEthDefaultCandidates[] — M5Stack ATOMIC PoE on SCLK5/CS6/MISO7/MOSI8, Waveshare ESP32-S3-ETH on
+# SCLK13/CS14/MISO12/MOSI11), latches the first to answer, and frees the SPI bus again when nothing
+# answers. The pins below, when they differ from the M5Stack default, are prepended as the primary
+# candidate for a custom build after full-width GPIO validation.
 #
-# The two boards OVERLAP ON A PIN — the T-Dongle's panel clock is GPIO5, which is also the PoE
-# base's SPI SCLK — so net_eth_probe() refuses to probe once tk::board_is_t_dongle_s3() says yes.
-# That shared detector is why the probe is safe to compile in unconditionally here.
+# The T-Dongle OVERLAPS ON A PIN with the M5Stack default — its panel clock is GPIO5, which is also
+# the PoE base's SPI SCLK — so net_eth_probe() refuses to probe once tk::board_is_t_dongle_s3()
+# says yes. That shared detector is why the probe is safe to compile in unconditionally here.
 #
 # NOT enabled for esp32/esp32c3/esp32c6: no board in use has a W5500, and esp32c6 has only ~92 KB
 # under the ci-build-all.sh size gate, where growth is quantised to 64 KB Secure-Boot blocks.

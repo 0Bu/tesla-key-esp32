@@ -414,9 +414,10 @@ extern "C" void app_main() {
     static std::string password = cfg_blob.wifi_pass;
 
     // Is there a wire? Probed HERE, before the setup-portal decision and before anything else
-    // has touched a GPIO — it reads one W5500 identity register and does not wait for a link or
-    // a lease, so it costs a few hundred microseconds. On a board with no controller (or on the
-    // T-Dongle-S3, whose panel owns the SPI clock pin) it frees the bus again and reports false.
+    // has touched a GPIO — it tries the bounded, hardware-verified candidate table by reading the
+    // W5500 identity register, without waiting for a link or lease. On a board with no controller
+    // (or on the T-Dongle-S3, whose panel owns the SPI clock pin) it frees the bus again and
+    // reports false.
     const bool have_wire = tk::net_eth_probe();
 
     // The setup portal exists because a device with no credentials has no other way to be

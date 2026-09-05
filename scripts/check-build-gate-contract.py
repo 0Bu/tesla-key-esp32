@@ -127,6 +127,7 @@ REQUIRED_FILES = (
     "scripts/prepare-reused-release.py",
     "scripts/check-release-pages-bytes.py",
     "scripts/check-reproducible-build.sh",
+    "scripts/idf-docker.sh",
     "scripts/ci-build-all.sh",
     "scripts/ci-build-verify.sh",
     "scripts/ci-sign-artifacts.sh",
@@ -282,6 +283,7 @@ def validate(root: Path) -> None:
         read(root, relative)
 
     build_all = read(root, "scripts/ci-build-all.sh")
+    idf_docker = read(root, "scripts/idf-docker.sh")
     dependency_contract = read(root, "scripts/check-dependency-contract.py")
     inventory = read(root, "scripts/check-build-artifact-inventory.py")
     build_semantics = read(root, "scripts/check-build-semantics.py")
@@ -444,6 +446,10 @@ def validate(root: Path) -> None:
         and sdkconfig_defaults.count("CONFIG_ESP_WIFI_ENABLE_SAE_PK=n") == 1
         and sdkconfig_defaults.count("CONFIG_ESP_WIFI_SOFTAP_SAE_SUPPORT=n") == 1,
         "sdkconfig.defaults: unreachable enterprise/SAE-PK/setup-AP SAE surfaces must stay disabled",
+    )
+    require(
+        idf_docker.count("docker run --rm --cpus 1.5 --memory 1800m") == 1,
+        "idf-docker.sh: build containers must retain the explicit 1.5 CPU / 1800 MiB limits",
     )
 
     for text, label in (
@@ -1133,6 +1139,9 @@ def copy_fixture(root: Path, destination: Path) -> None:
 def self_test(root: Path) -> None:
     validate(root)
     mutations = (
+        ("idf-docker-resource-limits", "scripts/idf-docker.sh",
+         "docker run --rm --cpus 1.5 --memory 1800m",
+         "docker run --rm --cpus 4 --memory 8g", "explicit 1.5 CPU / 1800 MiB limits"),
         ("build-target", "scripts/ci-build-all.sh",
          'TARGETS="esp32 esp32s3 esp32c3 esp32c6"',
          'TARGETS="esp32 esp32s3 esp32c3"', "ci-build-all.sh: target set/order"),

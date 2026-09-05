@@ -11,6 +11,8 @@ supplied diff (or worktree diff), the relevant scripts/configuration, and existi
 Protect these exact contracts:
 
 - One source tree builds exactly esp32, esp32s3, esp32c3, and esp32c6 with pinned ESP-IDF v5.5.5.
+- The pinned Docker wrapper retains explicit 1.5-CPU and 1800-MiB limits so a build cannot starve
+  co-resident k3s/Docker services; do not treat daemon or shim defaults as the contract.
 - yoziru/tesla-ble remains v5.1.2 and the ordered repository patch series remains hash-checked and
   fail-closed; no ESP-IDF 6, Mbed TLS 4, or PSA migration is part of agent migration.
 - NVS remains at 0x9000 with size 0x6000; app remains at 0x20000; OTA/otadata offsets and the
