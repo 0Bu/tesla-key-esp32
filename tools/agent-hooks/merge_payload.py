@@ -509,8 +509,15 @@ def main() -> int:
         return 2
     if not isinstance(data, dict):
         return 2
+    tool_call = data.get("toolCall")
     tool = str(data.get("tool_name") or "")
-    tool_input = data.get("tool_input") or {}
+    if not tool and isinstance(tool_call, dict):
+        tool = str(tool_call.get("name") or "")
+    tool_input = data.get("tool_input")
+    if tool_input is None and isinstance(tool_call, dict):
+        tool_input = tool_call.get("args")
+    if tool_input is None:
+        tool_input = data.get("tool_args") or {}
     if not isinstance(tool_input, dict):
         return 2
     parsed: dict[str, str] | None = None
@@ -524,10 +531,10 @@ def main() -> int:
         tool_lower.startswith("mcp__") and any(tool_lower.endswith(action) for action in MCP_BLOCKED_ACTIONS)
     ):
         parsed = blocked_mcp_activation(tool)
-    elif tool.lower() in {"bash", "exec_command", "shell", "shell_command"}:
+    elif tool.lower() in {"bash", "exec_command", "shell", "shell_command", "run_command"}:
         command_values = [
             str(tool_input[key])
-            for key in ("command", "cmd")
+            for key in ("command", "cmd", "CommandLine", "commandline")
             if tool_input.get(key) not in (None, "")
         ]
         distinct_commands = list(dict.fromkeys(command_values))
@@ -557,15 +564,19 @@ def main() -> int:
                 parsed["error"] = parsed["error"] or "merge command changes argv or working directory after target binding"
     if parsed is None:
         parsed = {"action": "", "selector": "", "repo": "", "host": "", "error": ""}
-    raw_payload_cwd = data.get("cwd")
+    raw_payload_cwd = data.get("cwd") or tool_input.get("Cwd") or tool_input.get("cwd")
+    if not raw_payload_cwd:
+        ws_paths = data.get("workspacePaths")
+        if isinstance(ws_paths, list) and ws_paths and isinstance(ws_paths[0], str) and ws_paths[0]:
+            raw_payload_cwd = ws_paths[0]
     payload_cwd = str(raw_payload_cwd or "")
-    if parsed["action"] and tool.lower() in {"bash", "exec_command", "shell", "shell_command"} and (
+    if parsed["action"] and tool.lower() in {"bash", "exec_command", "shell", "shell_command", "run_command"} and (
         not isinstance(raw_payload_cwd, str) or not raw_payload_cwd.strip()
     ):
         parsed["error"] = parsed["error"] or "shell merge hook payload has no execution cwd"
     workdir_values = [
         str(tool_input[key])
-        for key in ("workdir", "cwd")
+        for key in ("workdir", "cwd", "Cwd")
         if tool_input.get(key) not in (None, "")
     ]
     distinct_workdirs = list(dict.fromkeys(workdir_values))

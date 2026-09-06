@@ -56,8 +56,25 @@ def read_payload(*, fail_closed: bool) -> tuple[dict[str, Any] | None, str | Non
     return payload, None
 
 
+def extract_raw_tool(payload: dict[str, Any]) -> Any:
+    raw = payload.get("tool_name")
+    if raw is None:
+        tool_call = payload.get("toolCall")
+        if isinstance(tool_call, dict):
+            raw = tool_call.get("name")
+    if raw is None:
+        raw = payload.get("tool")
+    return raw
+
+
 def tool_input(payload: dict[str, Any]) -> dict[str, Any]:
-    value = payload.get("tool_input", {})
+    value = payload.get("tool_input")
+    if value is None:
+        tool_call = payload.get("toolCall")
+        if isinstance(tool_call, dict):
+            value = tool_call.get("args")
+    if value is None:
+        value = payload.get("tool_args") or {}
     return value if isinstance(value, dict) else {"command": value if isinstance(value, str) else ""}
 
 
@@ -75,6 +92,10 @@ def command_from(payload: dict[str, Any]) -> str:
 def payload_cwd(payload: dict[str, Any]) -> Path:
     ti = tool_input(payload)
     value = payload.get("cwd") or ti.get("Cwd") or ti.get("cwd")
+    if not isinstance(value, str) or not value:
+        ws_paths = payload.get("workspacePaths")
+        if isinstance(ws_paths, list) and ws_paths and isinstance(ws_paths[0], str) and ws_paths[0]:
+            value = ws_paths[0]
     if not isinstance(value, str) or not value:
         value = os.environ.get("AGENT_PROJECT_DIR") or os.environ.get("PROJECT_DIR") or os.getcwd()
     return Path(value).expanduser().resolve(strict=False)
@@ -696,7 +717,7 @@ def is_exact_espsecure_sign(command: str) -> bool:
 
 
 def policy_violation_reason(payload: dict[str, Any]) -> str | None:
-    raw_tool = payload.get("tool_name")
+    raw_tool = extract_raw_tool(payload)
     if not isinstance(raw_tool, str) or not raw_tool.strip():
         return "hook payload has no non-empty string tool_name"
     tool = normalized_tool(raw_tool)
@@ -865,7 +886,7 @@ def shell_writes_partitions(command: str) -> bool:
 
 
 def partition_violation(payload: dict[str, Any], *, shell_only: bool = False) -> bool:
-    tool = normalized_tool(payload.get("tool_name"))
+    tool = normalized_tool(extract_raw_tool(payload))
     if tool in SHELL_TOOLS:
         return shell_writes_partitions(command_from(payload))
     if shell_only:
@@ -886,19 +907,27 @@ def partition_violation(payload: dict[str, Any], *, shell_only: bool = False) ->
     return False
 
 
-def emit_permission(decision: str, reason: str) -> None:
-    print(
-        json.dumps(
-            {
-                "hookSpecificOutput": {
-                    "hookEventName": "PreToolUse",
-                    "permissionDecision": decision,
-                    "permissionDecisionReason": reason,
-                }
-            },
-            separators=(",", ":"),
+def emit_permission(decision: str, reason: str, payload: dict[str, Any] | None = None) -> None:
+    is_antigravity = bool(
+        payload
+        and (
+            payload.get("conversationId")
+            or payload.get("terminationReason")
+            or payload.get("workspacePaths")
+            or payload.get("toolCall")
         )
     )
+    data: dict[str, Any] = {
+        "decision": decision,
+        "reason": reason,
+    }
+    if not is_antigravity:
+        data["hookSpecificOutput"] = {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": decision,
+            "permissionDecisionReason": reason,
+        }
+    print(json.dumps(data, separators=(",", ":")))
 
 
 def guard_secrets(payload: dict[str, Any] | None, error: str | None) -> bool:
@@ -910,6 +939,7 @@ def guard_secrets(payload: dict[str, Any] | None, error: str | None) -> bool:
         "Blocked by the repository secret guard: "
         + reason
         + ". Do not read or copy the value. The sole key-path exception is an unchained espsecure sign_data invocation.",
+        payload=payload,
     )
     return True
 
@@ -926,7 +956,48 @@ def guard_partitions(payload: dict[str, Any], *, shell_only: bool = False) -> bo
         invariant
         + ". Do not retry through a wrapper or alternate tool; an explicitly authorized maintainer must review "
         "and apply any partition-table change outside this agent hook path.",
+        payload=payload,
     )
+    return True
+
+
+def invariant_violation(payload: dict[str, Any]) -> str | None:
+    tool = normalized_tool(extract_raw_tool(payload))
+    targets = path_targets(payload)
+    if tool in PATCH_TOOLS:
+        targets.extend(patch_targets(command_from(payload)))
+    for target in targets:
+        normalized = target.strip().strip("'\"").replace("\\", "/").lower()
+        if "managed_components/" in normalized and tool in FILE_TOOLS | PATCH_TOOLS:
+            return "managed_components/ is upstream and auto-generated; edits must be made upstream or via patches"
+    content_candidates: list[str] = []
+    ti = tool_input(payload)
+    for key in ("ReplacementContent", "CodeContent", "content", "patch", "command", "cmd", "CommandLine"):
+        val = ti.get(key)
+        if isinstance(val, str) and val:
+            content_candidates.append(val)
+    for content in content_candidates:
+        if any(target.endswith(("sdkconfig", "sdkconfig.defaults")) or "sdkconfig.defaults." in target for target in targets):
+            if re.search(r"CONFIG_COMPILER_OPTIMIZATION_SIZE\s*=\s*y", content) or re.search(r"(?:^|\s)-Os(?:\s|$)", content):
+                return "CONFIG_COMPILER_OPTIMIZATION_SIZE (-Os) is banned; it hard-freezes the device under BLE load"
+        if any("main/logic/" in target.replace("\\", "/") for target in targets):
+            if re.search(r'#include\s*[<"](?:esp_|freertos/|nvs)', content):
+                return "main/logic/ must remain completely free of ESP-IDF, FreeRTOS, and NVS headers for host testability (see main/logic/AGENTS.md)"
+        if any("main/www/" in target.replace("\\", "/") and target.endswith(".js") for target in targets):
+            if re.search(r"\b(?:eval|document\.write)\s*\(", content):
+                return "eval() and document.write() are strictly banned in main/www/ (see docs/SECURITY.md)"
+    if tool in SHELL_TOOLS:
+        cmd = command_from(payload)
+        if re.search(r"CONFIG_COMPILER_OPTIMIZATION_SIZE\s*=\s*y", cmd) and "sdkconfig" in cmd:
+            return "CONFIG_COMPILER_OPTIMIZATION_SIZE (-Os) is banned; it hard-freezes the device under BLE load"
+    return None
+
+
+def guard_invariants(payload: dict[str, Any]) -> bool:
+    reason = invariant_violation(payload)
+    if not reason:
+        return False
+    emit_permission("deny", f"Blocked by project invariant guard: {reason}.", payload=payload)
     return True
 
 
@@ -935,7 +1006,9 @@ def run_pre_tool_guards(args: argparse.Namespace) -> int:
     if guard_secrets(payload, error):
         return 0
     assert payload is not None
-    guard_partitions(payload, shell_only=args.partition_shell_only)
+    if guard_partitions(payload, shell_only=args.partition_shell_only):
+        return 0
+    guard_invariants(payload)
     return 0
 
 
@@ -961,8 +1034,9 @@ def eligible_format_path(root: Path, target: str) -> Path | None:
 def run_format(_: argparse.Namespace) -> int:
     payload, _ = read_payload(fail_closed=False)
     if not payload or shutil.which("clang-format") is None:
+        print("{}", end="")
         return 0
-    tool = normalized_tool(payload.get("tool_name"))
+    tool = normalized_tool(extract_raw_tool(payload))
     targets = path_targets(payload)
     if tool in PATCH_TOOLS:
         targets.extend(patch_targets(command_from(payload)))
@@ -971,6 +1045,7 @@ def run_format(_: argparse.Namespace) -> int:
         path = eligible_format_path(root, target)
         if path is not None and path.is_file():
             subprocess.run(["clang-format", "-i", str(path)], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    print("{}", end="")
     return 0
 
 
@@ -1073,8 +1148,39 @@ def run_build_efficiency(args: argparse.Namespace) -> int:
     print("<build-efficiency-context>")
     print("Report-only: inspect the latest completed main build for cache hit rate, duration, artifacts, and target sizes.")
     print("SessionStart must not create issues, branches, commits, or draft PRs; any mutation needs an explicit user request.")
-    print("Use the pinned ESP-IDF 5.5.5 Docker entrypoints and keep esp32/esp32s3/esp32c3/esp32c6 evidence separate.")
+    print("Use the pinned ESP-IDF 5.5.5 Docker entrypoints and keep esp32/esp32s3/esp32c3/esp32c6/esp32c5 evidence separate.")
     print("</build-efficiency-context>")
+    return 0
+
+
+def run_antigravity_pre_invocation(_: argparse.Namespace) -> int:
+    payload, _ = read_payload(fail_closed=False)
+    payload = payload or {}
+    inv_num = payload.get("invocationNum", 1)
+    if inv_num == 1:
+        docker = shutil.which("docker")
+        docker_ok = False
+        if docker:
+            try:
+                docker_ok = subprocess.run(
+                    [docker, "info"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5, check=False
+                ).returncode == 0
+            except subprocess.SubprocessError:
+                docker_ok = False
+        esptool = shutil.which("esptool") or shutil.which("esptool.py")
+        host = any(shutil.which(tool) for tool in ("cmake", "g++", "clang++"))
+        lines = [
+            f"[tesla-key-esp32 capabilities ({HOOK_ROOT})]",
+            "  + Docker daemon: firmware builds available" if docker_ok else "  - No Docker daemon: firmware build unavailable (CI builds only)",
+            "  + esptool present" if esptool else "  - No esptool: USB flashing unavailable",
+            "  + Host C++ toolchain: mock tests available (scripts/run-mock-tests.sh)" if host else "  - No host C++ toolchain: rely on CI",
+            "  * Protected: partitions.csv, signing keys, NVS dumps, and -Os optimization level.",
+            "  * PR publish/merge require stamped checklist gates ($skill-audit, $project-review, $pr-hygiene).",
+        ]
+        msg = "\n".join(lines)
+        print(json.dumps({"injectSteps": [{"ephemeralMessage": msg}]}, separators=(",", ":")))
+    else:
+        print(json.dumps({"injectSteps": []}, separators=(",", ":")))
     return 0
 
 
@@ -1085,20 +1191,21 @@ def run_stop_logic_tests(_: argparse.Namespace) -> int:
         return 0
     root = HOOK_ROOT
     if shutil.which("git"):
+        watch_paths = ["main/", "test/", "tools/display_sim.py"]
         unstaged = subprocess.run(
-            ["git", "-C", str(root), "diff", "--quiet", "--", "main/", "test/"],
+            ["git", "-C", str(root), "diff", "--quiet", "--", *watch_paths],
             check=False,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         ).returncode
         staged = subprocess.run(
-            ["git", "-C", str(root), "diff", "--cached", "--quiet", "--", "main/", "test/"],
+            ["git", "-C", str(root), "diff", "--cached", "--quiet", "--", *watch_paths],
             check=False,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         ).returncode
         untracked = subprocess.run(
-            ["git", "-C", str(root), "ls-files", "--others", "--exclude-standard", "--", "main/", "test/"],
+            ["git", "-C", str(root), "ls-files", "--others", "--exclude-standard", "--", *watch_paths],
             check=False,
             capture_output=True,
             text=True,
@@ -1107,7 +1214,22 @@ def run_stop_logic_tests(_: argparse.Namespace) -> int:
             return 0
     def block(reason: str) -> int:
         message = ("Host logic tests could not prove the changed main/test boundary:\n" + reason)[:4000]
-        print(json.dumps({"decision": "block", "reason": message}, separators=(",", ":")))
+        is_antigravity = bool(payload.get("conversationId") or payload.get("terminationReason") or payload.get("workspacePaths"))
+        decision = "continue" if is_antigravity else "block"
+        print(
+            json.dumps(
+                {
+                    "decision": decision,
+                    "reason": message,
+                    "hookSpecificOutput": {
+                        "hookEventName": "Stop",
+                        "permissionDecision": "block",
+                        "permissionDecisionReason": message,
+                    },
+                },
+                separators=(",", ":"),
+            )
+        )
         return 0
 
     missing = [tool for tool in ("git", "python3", "cmake", "node") if shutil.which(tool) is None]
@@ -1154,6 +1276,8 @@ def build_parser() -> argparse.ArgumentParser:
     build_efficiency.set_defaults(func=run_build_efficiency)
     stop_tests = subparsers.add_parser("stop-logic-tests")
     stop_tests.set_defaults(func=run_stop_logic_tests)
+    antigravity_pre = subparsers.add_parser("antigravity-pre-invocation")
+    antigravity_pre.set_defaults(func=run_antigravity_pre_invocation)
     return parser
 
 
@@ -1164,6 +1288,8 @@ def main() -> int:
             return run_pre_tool_guards(argparse.Namespace(partition_shell_only=False))
         if cmd == "format":
             return run_format(argparse.Namespace())
+        if cmd == "antigravity-pre-invocation":
+            return run_antigravity_pre_invocation(argparse.Namespace())
     parser = build_parser()
     args = parser.parse_args()
     return int(args.func(args))

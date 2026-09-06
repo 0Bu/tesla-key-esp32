@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+# Git pre-commit hook for tesla-key-esp32.
+# Enforces secret boundaries, partition safety, compiler flag bans, and pure-logic contracts before commits.
+set -euo pipefail
+
+root="$(git rev-parse --show-toplevel)"
+cd "$root"
+
+staged_files="$(git diff --cached --name-only -z | tr '\0' '\n')"
+if [ -z "$staged_files" ]; then
+    exit 0
+fi
+
+# 1. Guard against committing secret or transient files
+while IFS= read -r file; do
+    [ -z "$file" ] && continue
+    case "$file" in
+        *.pem|*.key|nvs*.bin|*wake-capture-*.log|secrets.env|sdkconfig.local)
+            echo "BLOCKED by pre-commit: cannot commit secret or transient file: $file" >&2
+            exit 1
+            ;;
+        partitions.csv)
+            if [ "${ALLOW_PARTITION_CHANGE:-0}" != "1" ]; then
+                echo "BLOCKED by pre-commit: partitions.csv is immutable (set ALLOW_PARTITION_CHANGE=1 to override)" >&2
+                exit 1
+            fi
+            ;;
+    esac
+done <<< "$staged_files"
+
+# 2. Guard against -Os compiler optimization flag
+if git diff --cached -- 'sdkconfig*' | grep -Eq 'CONFIG_COMPILER_OPTIMIZATION_SIZE\s*=\s*y|(^|[[:space:]])-Os([[:space:]]|$)'; then
+    echo "BLOCKED by pre-commit: CONFIG_COMPILER_OPTIMIZATION_SIZE (-Os) is banned; it causes device freezes under BLE load" >&2
+    exit 1
+fi
+
+# 3. Guard against edits to managed_components/
+if echo "$staged_files" | grep -q '^managed_components/'; then
+    echo "BLOCKED by pre-commit: managed_components/ is upstream and auto-generated; edits must be made via patches" >&2
+    exit 1
+fi
+
+# 4. Guard against ESP-IDF/FreeRTOS includes in main/logic/
+if echo "$staged_files" | grep -q '^main/logic/'; then
+    if git diff --cached -- 'main/logic/' | grep -Eq '^\+[[:space:]]*#[[:space:]]*include[[:space:]]*[<"](esp_|freertos/|nvs)'; then
+        echo "BLOCKED by pre-commit: main/logic/ must remain completely free of ESP-IDF, FreeRTOS, and NVS headers for host testability" >&2
+        exit 1
+    fi
+fi
+
+# 5. Guard against eval / document.write in main/www/
+if echo "$staged_files" | grep -q '^main/www/.*\.js$'; then
+    if git diff --cached -- 'main/www/*.js' | grep -Eq '^\+[[:space:]]*.*(eval|document\.write)[[:space:]]*\('; then
+        echo "BLOCKED by pre-commit: eval() and document.write() are strictly banned in main/www/ to prevent DOM XSS" >&2
+        exit 1
+    fi
+fi
+
+# 6. Run host logic tests if firmware logic changed
+if ! git diff --cached --quiet -- main/ test/ tools/display_sim.py; then
+    echo "[pre-commit] Firmware logic changed; verifying host tests..."
+    if command -v cmake >/dev/null 2>&1; then
+        ./scripts/run-mock-tests.sh --require-all
+    else
+        ./scripts/run-mock-tests.sh
+    fi
+fi
+
+exit 0

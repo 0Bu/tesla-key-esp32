@@ -19,6 +19,7 @@ make_fixture() {
   cp -R "$ROOT/.codex/agents" "$dest/.codex/agents"
   cp "$ROOT/.codex/config.toml" "$dest/.codex/config.toml"
   cp "$ROOT/.codex/hooks.json" "$dest/.codex/hooks.json"
+  cp "$ROOT/.agents/hooks.json" "$dest/.agents/hooks.json"
   cp -R "$ROOT/.agents/skills" "$dest/.agents/skills"
   cp "$ROOT/docs/FEATURES.md" "$dest/docs/FEATURES.md"
   cp -R "$ROOT/tools/agent-config" "$dest/tools/agent-config"
@@ -318,6 +319,36 @@ value["hooks"]["PreToolUse"][0]["matcher"] = value["hooks"]["PreToolUse"][0]["ma
 path.write_text(json.dumps(value, indent=2) + "\n")
 PY
 expect_failure "unanchored blocking matcher" "$fixture" "matcher drifted"
+
+fixture="$WORK/antigravity-hook-description"; make_fixture "$fixture"
+python3 - "$fixture/.agents/hooks.json" <<'PY'
+import json, pathlib, sys
+path = pathlib.Path(sys.argv[1])
+value = json.loads(path.read_text())
+value["description"] = "invalid top-level description"
+path.write_text(json.dumps(value, indent=2) + "\n")
+PY
+expect_failure "Antigravity description residue" "$fixture" ".agents/hooks.json must contain only"
+
+fixture="$WORK/antigravity-hook-matcher"; make_fixture "$fixture"
+python3 - "$fixture/.agents/hooks.json" <<'PY'
+import json, pathlib, sys
+path = pathlib.Path(sys.argv[1])
+value = json.loads(path.read_text())
+value["pre-tool-guards"]["PreToolUse"][0]["matcher"] = value["pre-tool-guards"]["PreToolUse"][0]["matcher"].removeprefix("^")
+path.write_text(json.dumps(value, indent=2) + "\n")
+PY
+expect_failure "Antigravity unanchored blocking matcher" "$fixture" "Antigravity guard matcher drifted"
+
+fixture="$WORK/antigravity-hook-async"; make_fixture "$fixture"
+python3 - "$fixture/.agents/hooks.json" <<'PY'
+import json, pathlib, sys
+path = pathlib.Path(sys.argv[1])
+value = json.loads(path.read_text())
+value["pre-tool-guards"]["PreToolUse"][0]["hooks"][0]["async"] = True
+path.write_text(json.dumps(value, indent=2) + "\n")
+PY
+expect_failure "Antigravity async blocking hook" "$fixture" "must not be async"
 
 echo
 echo "agent-config selftest: all $passes mutation canaries caught"
