@@ -26,7 +26,7 @@
         "CMakeFiles/__idf_main.dir/heap_trend.cpp.su": {},
         "CMakeFiles/__idf_main.dir/http_api.cpp.su": {
           "/COMPONENT_MAIN_DIR/http_api.cpp :: esp_err_t handle_command(GuardedReq)": 336,
-          "/COMPONENT_MAIN_DIR/http_api.cpp :: esp_err_t handle_vehicle_data(GuardedReq)": 256
+          "/COMPONENT_MAIN_DIR/http_api.cpp :: esp_err_t handle_vehicle_data(GuardedReq)": 288
         },
         "CMakeFiles/__idf_main.dir/http_common.cpp.su": {},
         "CMakeFiles/__idf_main.dir/http_config.cpp.su": {
@@ -122,7 +122,7 @@
         "CMakeFiles/__idf_main.dir/heap_trend.cpp.su": {},
         "CMakeFiles/__idf_main.dir/http_api.cpp.su": {
           "/COMPONENT_MAIN_DIR/http_api.cpp :: esp_err_t handle_command(GuardedReq)": 336,
-          "/COMPONENT_MAIN_DIR/http_api.cpp :: esp_err_t handle_vehicle_data(GuardedReq)": 256
+          "/COMPONENT_MAIN_DIR/http_api.cpp :: esp_err_t handle_vehicle_data(GuardedReq)": 288
         },
         "CMakeFiles/__idf_main.dir/http_common.cpp.su": {},
         "CMakeFiles/__idf_main.dir/http_config.cpp.su": {
@@ -219,7 +219,7 @@
         "CMakeFiles/__idf_main.dir/heap_trend.cpp.su": {},
         "CMakeFiles/__idf_main.dir/http_api.cpp.su": {
           "/COMPONENT_MAIN_DIR/http_api.cpp :: esp_err_t handle_command(GuardedReq)": 320,
-          "/COMPONENT_MAIN_DIR/http_api.cpp :: esp_err_t handle_vehicle_data(GuardedReq)": 256
+          "/COMPONENT_MAIN_DIR/http_api.cpp :: esp_err_t handle_vehicle_data(GuardedReq)": 288
         },
         "CMakeFiles/__idf_main.dir/http_common.cpp.su": {},
         "CMakeFiles/__idf_main.dir/http_config.cpp.su": {
@@ -314,7 +314,7 @@
         "CMakeFiles/__idf_main.dir/heap_trend.cpp.su": {},
         "CMakeFiles/__idf_main.dir/http_api.cpp.su": {
           "/COMPONENT_MAIN_DIR/http_api.cpp :: esp_err_t handle_command(GuardedReq)": 320,
-          "/COMPONENT_MAIN_DIR/http_api.cpp :: esp_err_t handle_vehicle_data(GuardedReq)": 256
+          "/COMPONENT_MAIN_DIR/http_api.cpp :: esp_err_t handle_vehicle_data(GuardedReq)": 288
         },
         "CMakeFiles/__idf_main.dir/http_common.cpp.su": {},
         "CMakeFiles/__idf_main.dir/http_config.cpp.su": {
