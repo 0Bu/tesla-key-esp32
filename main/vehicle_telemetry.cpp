@@ -63,6 +63,9 @@ void parse_charge_state(const CarServer_ChargeState& cs, ChargeStateResult& out)
     if (cs.which_optional_battery_level == CarServer_ChargeState_battery_level_tag) {
         out.battery_level = (float)cs.optional_battery_level.battery_level; out.has_battery_level = true;
     }
+    if (cs.which_optional_usable_battery_level == CarServer_ChargeState_usable_battery_level_tag) {
+        out.usable_battery_level = (float)cs.optional_usable_battery_level.usable_battery_level; out.has_usable_battery_level = true;
+    }
     if (cs.which_optional_charge_limit_soc == CarServer_ChargeState_charge_limit_soc_tag) {
         out.charge_limit_soc = (float)cs.optional_charge_limit_soc.charge_limit_soc; out.has_charge_limit_soc = true;
     }

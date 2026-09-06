@@ -127,6 +127,8 @@ static tk::JsonOwner vehicle_state_result_() {
     if (cs.valid) {
         state.has_soc = cs.has_battery_level;
         state.soc = cs.battery_level;
+        state.has_usable_soc = cs.has_usable_battery_level;
+        state.usable_soc = cs.usable_battery_level;
         state.charging_state = cs.charging_state.c_str();
         state.has_charge_limit = cs.has_charge_limit_soc;
         state.charge_limit = cs.charge_limit_soc;
