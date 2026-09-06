@@ -60,9 +60,9 @@ fi
 if ! git diff --cached --quiet -- main/ test/ tools/display_sim.py; then
     echo "[pre-commit] Firmware logic changed; verifying host tests..."
     if command -v cmake >/dev/null 2>&1; then
-        ./scripts/run-mock-tests.sh --require-all
+        env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_OBJECT_DIRECTORY -u GIT_PREFIX ./scripts/run-mock-tests.sh --require-all
     else
-        ./scripts/run-mock-tests.sh
+        env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_OBJECT_DIRECTORY -u GIT_PREFIX ./scripts/run-mock-tests.sh
     fi
 fi
 
