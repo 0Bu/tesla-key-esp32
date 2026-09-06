@@ -10,6 +10,7 @@
 #include "logic/command_result.hpp"   // outcome text shared with the MCP tools/call path
 #include "logic/vehicle_data.hpp"
 #include "platform.hpp"
+#include "status_json_emitter.hpp"  // shared cJSON visitor — same seam /status uses
 #include <esp_log.h>
 #include <esp_app_desc.h>
 #include <cmath>
@@ -283,29 +284,28 @@ esp_err_t handle_vehicle_data(GuardedReq rq) {
     // evcc reads e.g. .response.response.charge_state.battery_level and
     // .response.response.charge_state.charge_amps — note the doubled "response"
     // and the field name "charge_amps" (not "charging_amps").
+    //
+    // charge_state is emitted by tk::emit_vehicle_charge_state() — the SAME seam
+    // test/test_logic.cpp::test_vehicle_data() drives on the host — so the evcc field
+    // contract (names, order, and the always-emit-every-field rule that keeps evcc from
+    // parsing a missing key as "<nil>") is guarded by the mock build rather than being
+    // re-hand-rolled here. StatusJsonEmitter mirrors build_status_object()'s seam. On
+    // failure cs is zero-initialised, which still yields valid numbers (and
+    // get_charge_state already falls back to the cache).
     tk::JsonBuilder json;
-    cJSON* outer = json.object(json.root(), "response");
-    json.boolean(outer, "result", ok);
-    json.string(outer, "vin", vin);
+    tk::StatusJsonEmitter e(json);
+    e.obj_begin("response");
+    e.boolean("result", ok);
+    e.str("vin", vin);
+    e.obj_begin("response");
+    e.obj_begin("charge_state");
+    tk::emit_vehicle_charge_state(cs, e);
+    e.obj_end();
+    e.obj_end();
+    e.str("reason", ok ? "success" : "stale or unavailable");
+    e.obj_end();
 
-    // Always emit a fully-populated charge_state. evcc's tesla-ble template parses
-    // .response.response.charge_state.battery_range etc. as floats; a missing field
-    // would make it parse "<nil>" and fail. On failure cs is zero-initialised, which
-    // still yields valid numbers (and get_charge_state already falls back to the cache).
-    cJSON* inner = json.object(outer, "response");
-    cJSON* state = json.object(inner, "charge_state");
-    json.string(state, "charging_state",
-                cs.charging_state.empty() ? "Disconnected" : cs.charging_state.c_str());
-    json.number(state, "battery_level", cs.battery_level);
-    json.number(state, "charge_limit_soc", cs.charge_limit_soc);
-    json.number(state, "charger_power", cs.charger_power);
-    json.number(state, "charge_rate", cs.charge_rate);
-    json.number(state, "charge_amps", cs.charging_amps);
-    json.number(state, "battery_range", cs.battery_range);
-    json.number(state, "minutes_to_full_charge", cs.minutes_to_full_charge);
-    json.string(outer, "reason", ok ? "success" : "stale or unavailable");
-
-    return send_json(req, ok ? 200 : 503, json.release());
+    return send_json(req, ok ? 200 : 503, e.release());
 }
 
 // ─── GET /api/1/vehicles/{VIN}/body_controller_state ─────────────────────────
