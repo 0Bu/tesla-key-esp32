@@ -144,8 +144,8 @@ inline constexpr DiagRedaction kDiagRedactions[] = {
     // containing a quote would end the span early and leak its own tail. Running to the end of
     // the line costs nothing here (the value is last) and cannot be gamed.
     {"WiFi connected to '", ""},
-    // main.cpp "IP: " IPSTR — this device's own LAN address.
-    {"main: IP: ", ""},
+    // net.cpp "IP: " IPSTR (WiFi) and "IP: " IPSTR " (eth)" (Ethernet) — this device's own LAN address.
+    {"net: IP: ", ""},
     // provisioning.cpp "saved config: ssid='%s' vin='%s' — rebooting" — BOTH values in one span,
     // for the SSID reason above (a quote inside the SSID would otherwise expose the VIN behind
     // it). The lost "— rebooting" tail costs nothing: the reboot is self-evident from the next

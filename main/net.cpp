@@ -725,7 +725,7 @@ static void eth_event_handler(void*, esp_event_base_t base, int32_t event_id, vo
         link_down(NetLink::Eth);
     } else if (base == IP_EVENT && event_id == IP_EVENT_ETH_GOT_IP) {
         ip_event_got_ip_t* ev = (ip_event_got_ip_t*)data;
-        ESP_LOGI(TAG, "IP (eth): " IPSTR, IP2STR(&ev->ip_info.ip));
+        ESP_LOGI(TAG, "IP: " IPSTR " (eth)", IP2STR(&ev->ip_info.ip));
         link_up(NetLink::Eth);
         xEventGroupSetBits(s_eth_events, ETH_GOT_IP_BIT);
       }
