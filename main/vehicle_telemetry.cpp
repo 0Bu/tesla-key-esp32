@@ -8,6 +8,7 @@
 #include "vehicle_ctrl_internal.hpp"
 #include "logic/units.hpp"
 #include "logic/active_window.hpp"
+#include "logic/wake_poll.hpp"
 #include "logic/heap_watchdog.hpp"
 #include "ota_update.hpp"
 #include "heap_trend.hpp"
@@ -599,6 +600,7 @@ void VehicleController::loop_task_fn_(void* arg) {
     int      tele_idx           = 0;  // rotates the telemetry domain polled each cycle
     bool     prev_window        = false;  // edge-detect the active window
     auto     prev_sleep         = TeslaBLE::SleepState::UNKNOWN;  // edge-detect VCSEC sleep flag
+    tk::WakePollState wake_poll{};         // one-shot charge poll on the VCSEC wake edge (#264)
     while (true) {
       // Feed the task watchdog FIRST and UNCONDITIONALLY, before anything that can block or throw.
       // Gating it on the work below would make a long-but-legitimate command look like a hang; put
@@ -835,14 +837,25 @@ void VehicleController::loop_task_fn_(void* arg) {
             TeslaBLE::SleepState st = static_cast<TeslaBLE::SleepState>(
                 self->vcsec_sleep_state_.load());
             if (st != prev_sleep) {
-                ESP_LOGI(TAG, "VCSEC sleep flag: %s",
-                         st == TeslaBLE::SleepState::ASLEEP ? "ASLEEP"
-                       : st == TeslaBLE::SleepState::AWAKE  ? "AWAKE" : "UNKNOWN");
+                ESP_LOGI(TAG, "VCSEC sleep flag: %s", self->vcsec_sleep_raw());
                 prev_sleep = st;
             }
-            if (st == TeslaBLE::SleepState::ASLEEP)     self->note_vcsec_sleep_(true);
-            else if (st == TeslaBLE::SleepState::AWAKE)  self->note_vcsec_sleep_(false);
+            if (st == TeslaBLE::SleepState::ASLEEP) {
+                self->note_vcsec_sleep_(true);
+                // One-shot charge poll on the VCSEC wake edge (issue #264). Arm only after a DEBOUNCED
+                // ASLEEP run (reusing kAsleepDebounceS, the same debounce link_state() trusts), so the
+                // ~60 s COP AWAKE↔ASLEEP flap and UNKNOWN→AWAKE at boot can't fire it; then request
+                // exactly one poll the next time the car wakes itself (cable plug-in, door, app).
+                wake_poll.note_asleep(self->vcsec_stably_asleep_(tk::kAsleepDebounceS));
+            } else if (st == TeslaBLE::SleepState::AWAKE) {
+                self->note_vcsec_sleep_(false);
+                wake_poll.note_awake();
+            }
             // UNKNOWN: leave the run untouched.
+        } else {
+            // Unpaired: the sampler above does not run, so retire any armed edge and pending
+            // request rather than carry them across a pairing reset.
+            wake_poll = {};
         }
 
         // ── Active-window gate ──────────────────────────────────────────────────────────
@@ -881,7 +894,7 @@ void VehicleController::loop_task_fn_(void* arg) {
 
         // Falling edge: window just closed → drop the link once so the car can sleep.
         if (paired && prev_window && !window && self->ble_connected()) {
-            ESP_LOGI(TAG, "idle: no command and not charging — dropping BLE link so the car can sleep");
+            ESP_LOGI(TAG, "idle: dropping link so car can sleep");
             self->ble_->disconnect();
         }
         // Rising edge: window just opened → refresh the cache promptly (reset throttles).
@@ -897,14 +910,19 @@ void VehicleController::loop_task_fn_(void* arg) {
             self->ble_->connect("");
         }
 
-        // Background charge-state refresh (paired + window + connected), every 10 s. This
-        // infotainment poll doubles as the reliable key-revocation canary: a deleted key
-        // makes it fault with ERROR_UNKNOWN_KEY_ID, which the message observer turns into
-        // pairing_lost_. Gated on the active window so an idle car is left to sleep; the
-        // VCSEC health poll still catches a deletion while idle.
-        if (paired && window && self->ble_connected() && !self->cmd_in_flight_.load()
-            && (now_ticks - last_poll_ticks > pdMS_TO_TICKS(10000))) {
-            last_poll_ticks = now_ticks;
+        // Background charge-state refresh (paired + connected). Two triggers share ONE poll:
+        //   • the 10 s in-window cadence (recent command or charging) — this infotainment poll
+        //     doubles as the reliable key-revocation canary: a deleted key faults it with
+        //     ERROR_UNKNOWN_KEY_ID, which the message observer turns into pairing_lost_; and
+        //   • a one-shot on the VCSEC wake edge (issue #264), fired ONCE outside the window so a
+        //     self-woken car (cable plug-in) refreshes its stale SOC without our opening the
+        //     window — otherwise evcc keeps acting on the stale reading. When the window is open
+        //     the cadence already covers it, so the pending request is just consumed.
+        // Both use the same NO_WAKE_SKIP poll: a car already back asleep is skipped, so we only
+        // ride a wake the car performed itself, and an idle car is still left to sleep.
+        const bool poll_cadence = window && (now_ticks - last_poll_ticks > pdMS_TO_TICKS(10000));
+        if (paired && (poll_cadence || wake_poll.take_pending()) && self->ble_connected() && !self->cmd_in_flight_.load()) {
+            if (poll_cadence) last_poll_ticks = now_ticks;
             ESP_LOGD(TAG, "background charge-state refresh…");
             // Fire-and-forget poll. We must NOT block here: this task also pumps
             // vehicle_->loop(), which drives the command's transmission/retries. The
