@@ -2761,6 +2761,73 @@ static void test_wake_poll() {
         CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false}) == true);
     }
 
+    // Regression test for PR #265: health probe holds cmd_in_flight_ on the cycle the AWAKE edge is
+    // observed. The pending wake-poll MUST stay latched across blocked cycles until queue-idle.
+    {
+        WakePollState st{};
+        st.note_asleep(true);  // stably asleep -> armed
+        CHECK(st.armed == true);
+        CHECK(st.pending == false);
+
+        st.note_awake();       // car wakes -> armed false, pending latched
+        CHECK(st.armed == false);
+        CHECK(st.pending == true);
+
+        // Cycle 1: loop runs while health probe is still in-flight on auto_pair_task
+        CHECK(charge_poll_should_fire({true, false, true, true /* cmd_in_flight */}, st) == false);
+        CHECK(st.pending == true);  // MUST NOT be consumed while channel is blocked!
+
+        // Cycle 2: health probe completes, channel becomes idle -> poll fires and consumes latch
+        CHECK(charge_poll_should_fire({true, false, true, false /* cmd_in_flight */}, st) == true);
+        CHECK(st.pending == false); // consumed now that poll actually dispatched
+
+        // Cycle 3: subsequent cycle outside active window -> does not re-fire
+        CHECK(charge_poll_should_fire({true, false, true, false}, st) == false);
+        CHECK(st.pending == false);
+        CHECK(st.armed == false);
+    }
+
+    // Disconnected link preserves the pending latch until reconnected and queue-idle.
+    {
+        WakePollState st{};
+        st.note_asleep(true);
+        st.note_awake();
+        CHECK(st.pending == true);
+
+        // Link down: must not consume pending
+        CHECK(charge_poll_should_fire({true, false, false /* ble_connected */, false}, st) == false);
+        CHECK(st.pending == true);
+
+        // Link up: fires
+        CHECK(charge_poll_should_fire({true, false, true, false}, st) == true);
+        CHECK(st.pending == false);
+    }
+
+    // Active window: cadence poll consumes any lingering pending wake request.
+    {
+        WakePollState st{};
+        st.pending = true;
+        CHECK(charge_poll_should_fire({true, true /* poll_cadence */, true, false}, st) == true);
+        CHECK(st.pending == false);
+    }
+
+    // Unpaired device: gate prevents firing.
+    {
+        WakePollState st{};
+        st.pending = true;
+        CHECK(charge_poll_should_fire({false /* paired */, false, true, false}, st) == false);
+        CHECK(st.pending == true);
+    }
+
+    // Fresh debounced stable-asleep run clears any stale pending latch and re-arms.
+    {
+        WakePollState st{};
+        st.pending = true;
+        st.note_asleep(true);
+        CHECK(st.pending == false);
+        CHECK(st.armed == true);
+    }
+
     // ── Cache-invalid bootstrap trigger (issue #264 second variant) ──
 
     // Boot with invalid cache and car already AWAKE: fires exactly once, no spam on next cycles.
@@ -2851,6 +2918,27 @@ static void test_wake_poll() {
         // Disconnect resets dispatch flag
         st.note_disconnected();
         CHECK(st.bootstrap_dispatched == false);
+    }
+
+    // Direct loop wiring simulation: wake_poll_update followed by charge_poll_should_fire
+    // verifies that pending latch is preserved when health probe is busy on single core.
+    {
+        WakePollState st{};
+        // Boot awake with invalid cache, but channel is busy (cmd_in_flight = true)
+        wake_poll_update(st, {WakeSample::Awake, false, true, false});
+        CHECK(st.armed == false);
+        CHECK(st.pending == true);
+        CHECK(st.bootstrap_dispatched == true);
+
+        // Gate evaluation while busy: does not fire, pending remains latched
+        CHECK(charge_poll_should_fire({true, false, true, true /* cmd_in_flight */}, st) == false);
+        CHECK(st.pending == true);
+
+        // Next loop iteration: health probe finished, cmd_in_flight drops to false
+        wake_poll_update(st, {WakeSample::Awake, false, true, false});
+        CHECK(st.pending == true);
+        CHECK(charge_poll_should_fire({true, false, true, false /* idle */}, st) == true);
+        CHECK(st.pending == false);
     }
 }
 

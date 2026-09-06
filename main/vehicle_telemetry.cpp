@@ -500,7 +500,7 @@ void VehicleController::process_ble_host_events_() {
         // first, then terminate the physical link. No stale LinkUp may become ready afterward.
         (void)apply_ble_link_state_(false);
         ble_->disconnect();
-        ESP_LOGW(TAG, "BLE event queue overflow — link reset");
+        ESP_LOGW(TAG, "BLE deferred-event queue overflow — link reset fail-closed");
         return;
     }
 
@@ -591,7 +591,8 @@ void VehicleController::loop_task_fn_(void* arg) {
     // than not having it, but far better than refusing to poll the car.
     TaskWatchdogSubscription watchdog;
     if (!watchdog.subscribe()) {
-        ESP_LOGW(TAG, "vehicle_loop: watchdog subscribe failed");
+        ESP_LOGW(TAG, "vehicle_loop could not subscribe to the task watchdog — a wedged poll will "
+                      "no longer reboot the device automatically");
     }
     uint32_t last_poll_ticks    = 0;
     uint32_t last_connect_ticks = 0;
@@ -599,7 +600,7 @@ void VehicleController::loop_task_fn_(void* arg) {
     int      tele_idx           = 0;  // rotates the telemetry domain polled each cycle
     bool     prev_window        = false;  // edge-detect the active window
     auto     prev_sleep         = TeslaBLE::SleepState::UNKNOWN;  // edge-detect VCSEC sleep flag
-    tk::WakePollState wake_poll{};         // one-shot charge poll on VCSEC wake edge & bootstrap (#264)
+    tk::WakePollState wake_poll{};         // one-shot charge poll on the VCSEC wake edge (#264)
     while (true) {
       // Feed the task watchdog FIRST and UNCONDITIONALLY, before anything that can block or throw.
       // Gating it on the work below would make a long-but-legitimate command look like a hang; put
@@ -619,7 +620,7 @@ void VehicleController::loop_task_fn_(void* arg) {
         // the task-level exception boundary, before pumping tesla-ble's state machine.
         self->process_ble_host_events_();
         if (self->ble_fault_.exchange(false)) {
-            ESP_LOGW(TAG, "BLE deferred processing fault — dropping link");
+            ESP_LOGW(TAG, "BLE deferred processing fault — dropping link to reset library state");
             if (self->ble_connected()) self->ble_->disconnect();
             vTaskDelay(pdMS_TO_TICKS(50));
             continue;
@@ -660,7 +661,7 @@ void VehicleController::loop_task_fn_(void* arg) {
         // library's rx_buffer and resets sessions so the next connect re-syncs cleanly —
         // turning a would-be abort()/reboot into a brief reconnect.
         if (self->ble_fault_.exchange(false)) {
-            ESP_LOGW(TAG, "BLE parse fault — dropping link");
+            ESP_LOGW(TAG, "BLE parse fault — dropping link to clear corrupt RX state");
             if (self->ble_connected()) self->ble_->disconnect();
         }
 
@@ -722,17 +723,14 @@ void VehicleController::loop_task_fn_(void* arg) {
                               "restarting in %u s unless it recovers",
                          (unsigned) largest, threshold, left_s);
             } else if (v.action == tk::HeapAction::Watching) {
-                ESP_LOGE(TAG, "HEAP CRITICAL for %u s (internal largest_block %u B < %u B) — "
-                              "restarting in %u s unless it recovers",
+                ESP_LOGE(TAG, "HEAP CRITICAL for %u s (largest %u B < %u B) — restart in %u s unless recovered",
                          held_s, (unsigned) largest, threshold, left_s);
             } else if (v.action == tk::HeapAction::Recovered) {
                 if (v.ota_excused) {
-                    ESP_LOGW(TAG, "HEAP critical run (%u s) cleared: an OTA is in flight and holds "
-                                  "the largest allocations we make — not judging the heap during "
-                                  "an install", held_s);
+                    ESP_LOGW(TAG, "HEAP critical run (%u s) cleared: OTA in flight holds large allocations",
+                             held_s);
                 } else {
-                    ESP_LOGW(TAG, "HEAP recovered after %u s critical (internal largest_block now "
-                                  "%u B) — watchdog disarmed, no restart needed",
+                    ESP_LOGW(TAG, "HEAP recovered after %u s critical (largest_block now %u B) — watchdog disarmed",
                              held_s, (unsigned) largest);
                 }
             }
@@ -747,9 +745,7 @@ void VehicleController::loop_task_fn_(void* arg) {
                     static bool said = false;
                     if (!said) {
                         said = true;
-                        ESP_LOGE(TAG, "HEAP EXHAUSTED for %u s but %u consecutive watchdog restarts "
-                                      "have not fixed it — NOT restarting again, staying up "
-                                      "degraded so it can be diagnosed",
+                        ESP_LOGE(TAG, "HEAP EXHAUSTED for %u s: %u watchdog restarts failed — staying degraded",
                                  held_s, (unsigned) prior);
                     }
                 } else {
@@ -763,8 +759,7 @@ void VehicleController::loop_task_fn_(void* arg) {
                         static bool said_gate = false;
                         if (!said_gate) {
                             said_gate = true;
-                            ESP_LOGW(TAG, "HEAP EXHAUSTED for %u s but OTA/identity work is in "
-                                          "flight — postponing deliberate restart",
+                            ESP_LOGW(TAG, "HEAP EXHAUSTED for %u s: OTA/identity in flight — postponing restart",
                                      held_s);
                         }
                         continue;
@@ -778,8 +773,7 @@ void VehicleController::loop_task_fn_(void* arg) {
                         static bool said_persist = false;
                         if (!said_persist) {
                             said_persist = true;
-                            ESP_LOGE(TAG, "HEAP EXHAUSTED for %u s but reboot_why could not be "
-                                          "persisted — NOT restarting, staying up degraded",
+                            ESP_LOGE(TAG, "HEAP EXHAUSTED for %u s: reboot_why write failed — staying degraded",
                                      held_s);
                         }
                         continue;
@@ -789,10 +783,8 @@ void VehicleController::loop_task_fn_(void* arg) {
                     // Keep every line here well under ~230 chars: diag_log.cpp's capture hook
                     // formats into a 256-byte stack buffer, so a longer line reaches syslog cut
                     // off mid-sentence — and this is the one that must not be.
-                    ESP_LOGE(TAG, "HEAP EXHAUSTED for %u s (internal largest_block %u B < %u B, "
-                                  "free %u B) — RESTARTING DELIBERATELY (watchdog restart %u/%u, "
-                                  "reboot_why=heap:%u; no in-place recovery exists, see "
-                                  "docs/ARCHITECTURE.md)",
+                    ESP_LOGE(TAG, "HEAP EXHAUSTED for %u s (largest %u B < %u B, free %u B) — "
+                                  "RESTARTING (restart %u/%u, reboot_why=heap:%u)",
                              held_s, (unsigned) largest, threshold,
                              (unsigned) heap_caps_get_free_size(MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL),
                              (unsigned) (prior + 1), (unsigned) tk::kHeapMaxConsecutiveRestarts,
@@ -834,16 +826,10 @@ void VehicleController::loop_task_fn_(void* arg) {
         // (e.g. whether VCSEC ever asserts ASLEEP, or just flaps for COP) without spamming.
         bool charging_state = false;
         if (paired) {
+            const bool conn = self->ble_connected();
             ChargeStateResult cs = self->copy_locked_(self->last_known_charge_);
             charging_state = cs.valid && (cs.charging_state == "Charging" ||
                                           cs.charging_state == "Starting");
-            if (!self->ble_connected()) {
-                wake_poll.note_disconnected();
-            } else {
-                // One-shot charge poll bootstrap (issue #264): arm if paired & connected but cache
-                // has never been populated, so an already-awake car after reboot doesn't deadlock evcc.
-                wake_poll.note_bootstrap(cs.valid);
-            }
 
             TeslaBLE::SleepState st = static_cast<TeslaBLE::SleepState>(
                 self->vcsec_sleep_state_.load());
@@ -851,18 +837,21 @@ void VehicleController::loop_task_fn_(void* arg) {
                 ESP_LOGI(TAG, "VCSEC sleep flag: %s", self->vcsec_sleep_raw());
                 prev_sleep = st;
             }
+
+            tk::WakeSample sample = tk::WakeSample::Unknown;
             if (st == TeslaBLE::SleepState::ASLEEP) {
                 self->note_vcsec_sleep_(true);
-                // One-shot charge poll on the VCSEC wake edge (issue #264). Arm only after a DEBOUNCED
-                // ASLEEP run (reusing kAsleepDebounceS, the same debounce link_state() trusts), so the
-                // ~60 s COP AWAKE↔ASLEEP flap and UNKNOWN→AWAKE at boot can't fire it; then request
-                // exactly one poll the next time the car wakes itself (cable plug-in, door, app).
-                wake_poll.note_asleep(self->vcsec_stably_asleep_(tk::kAsleepDebounceS));
+                sample = tk::WakeSample::Asleep;
             } else if (st == TeslaBLE::SleepState::AWAKE) {
                 self->note_vcsec_sleep_(false);
-                wake_poll.note_awake();
+                sample = tk::WakeSample::Awake;
             }
-            // UNKNOWN: leave the run untouched.
+
+            // Dual-trigger one-shot charge poll (issue #264):
+            //   1. Wake edge on ASLEEP→AWAKE after debounced asleep run
+            //   2. Bootstrap when paired & connected but cache has never been populated
+            tk::wake_poll_update(wake_poll,
+                                 {sample, self->vcsec_stably_asleep_(tk::kAsleepDebounceS), conn, cs.valid});
         } else {
             // Unpaired: the sampler above does not run, so retire any armed edge and pending
             // request rather than carry them across a pairing reset.
@@ -927,8 +916,7 @@ void VehicleController::loop_task_fn_(void* arg) {
         // Both use the same NO_WAKE_SKIP poll: a car already back asleep is skipped, so we only
         // ride a wake the car performed itself, and an idle car is still left to sleep.
         const bool poll_cadence = window && (now_ticks - last_poll_ticks > pdMS_TO_TICKS(10000));
-        if (paired && self->ble_connected() && !self->cmd_in_flight_.load()
-            && (wake_poll.take_pending() || poll_cadence)) {
+        if (tk::charge_poll_should_fire({paired, poll_cadence, self->ble_connected(), self->cmd_in_flight_.load()}, wake_poll)) {
             if (poll_cadence) last_poll_ticks = now_ticks;
             ESP_LOGD(TAG, "background charge-state refresh…");
             // Fire-and-forget poll. We must NOT block here: this task also pumps
