@@ -907,21 +907,27 @@ def partition_violation(payload: dict[str, Any], *, shell_only: bool = False) ->
     return False
 
 
-def emit_permission(decision: str, reason: str) -> None:
-    print(
-        json.dumps(
-            {
-                "decision": decision,
-                "reason": reason,
-                "hookSpecificOutput": {
-                    "hookEventName": "PreToolUse",
-                    "permissionDecision": decision,
-                    "permissionDecisionReason": reason,
-                },
-            },
-            separators=(",", ":"),
+def emit_permission(decision: str, reason: str, payload: dict[str, Any] | None = None) -> None:
+    is_antigravity = bool(
+        payload
+        and (
+            payload.get("conversationId")
+            or payload.get("terminationReason")
+            or payload.get("workspacePaths")
+            or payload.get("toolCall")
         )
     )
+    data: dict[str, Any] = {
+        "decision": decision,
+        "reason": reason,
+    }
+    if not is_antigravity:
+        data["hookSpecificOutput"] = {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": decision,
+            "permissionDecisionReason": reason,
+        }
+    print(json.dumps(data, separators=(",", ":")))
 
 
 def guard_secrets(payload: dict[str, Any] | None, error: str | None) -> bool:
@@ -933,6 +939,7 @@ def guard_secrets(payload: dict[str, Any] | None, error: str | None) -> bool:
         "Blocked by the repository secret guard: "
         + reason
         + ". Do not read or copy the value. The sole key-path exception is an unchained espsecure sign_data invocation.",
+        payload=payload,
     )
     return True
 
@@ -949,6 +956,7 @@ def guard_partitions(payload: dict[str, Any], *, shell_only: bool = False) -> bo
         invariant
         + ". Do not retry through a wrapper or alternate tool; an explicitly authorized maintainer must review "
         "and apply any partition-table change outside this agent hook path.",
+        payload=payload,
     )
     return True
 
@@ -989,7 +997,7 @@ def guard_invariants(payload: dict[str, Any]) -> bool:
     reason = invariant_violation(payload)
     if not reason:
         return False
-    emit_permission("deny", f"Blocked by project invariant guard: {reason}.")
+    emit_permission("deny", f"Blocked by project invariant guard: {reason}.", payload=payload)
     return True
 
 

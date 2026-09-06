@@ -101,6 +101,7 @@ expect_guard deny "$(payload Bash command 'cat source > partitions.csv' "$root")
 expect_guard deny "$(payload write_to_file TargetFile partitions.csv "$root")" 'Antigravity write_to_file partition write denied'
 expect_guard deny "$(payload replace_file_content TargetFile partitions.csv "$root")" 'Antigravity replace_file_content partition mutation denied'
 
+codex_os_payload="$(payload Bash command 'echo CONFIG_COMPILER_OPTIMIZATION_SIZE=y >> sdkconfig.defaults' "$root")"
 ag_os_payload="$(python3 - "$root" <<'PY'
 import json,sys
 print(json.dumps({
@@ -110,9 +111,10 @@ print(json.dumps({
 }))
 PY
 )"
-expect_guard deny "$ag_os_payload" 'CONFIG_COMPILER_OPTIMIZATION_SIZE=y denied'
+expect_guard deny "$codex_os_payload" 'CONFIG_COMPILER_OPTIMIZATION_SIZE=y denied'
 expect_ag_guard deny "$ag_os_payload" 'Antigravity top-level decision deny for -Os'
 
+codex_mc_payload="$(payload Edit file_path managed_components/yoziru__tesla-ble/src/ble.c "$root")"
 ag_mc_payload="$(python3 - "$root" <<'PY'
 import json,sys
 print(json.dumps({
@@ -122,9 +124,14 @@ print(json.dumps({
 }))
 PY
 )"
-expect_guard deny "$ag_mc_payload" 'write to managed_components denied'
+expect_guard deny "$codex_mc_payload" 'write to managed_components denied'
 expect_ag_guard deny "$ag_mc_payload" 'Antigravity top-level decision deny for managed_components'
 
+codex_logic_payload="$(python3 - "$root" <<'PY'
+import json,sys
+print(json.dumps({"tool_name":"Edit","cwd":sys.argv[1],"tool_input":{"file_path":"main/logic/units.hpp","content":"#include <esp_log.h>"}}))
+PY
+)"
 ag_logic_payload="$(python3 - "$root" <<'PY'
 import json,sys
 print(json.dumps({
@@ -134,9 +141,14 @@ print(json.dumps({
 }))
 PY
 )"
-expect_guard deny "$ag_logic_payload" 'ESP-IDF include in main/logic denied'
+expect_guard deny "$codex_logic_payload" 'ESP-IDF include in main/logic denied'
 expect_ag_guard deny "$ag_logic_payload" 'Antigravity top-level decision deny for pure-logic IDF include'
 
+codex_xss_payload="$(python3 - "$root" <<'PY'
+import json,sys
+print(json.dumps({"tool_name":"Edit","cwd":sys.argv[1],"tool_input":{"file_path":"main/www/app.js","content":"eval(x)"}}))
+PY
+)"
 ag_xss_payload="$(python3 - "$root" <<'PY'
 import json,sys
 print(json.dumps({
@@ -146,7 +158,7 @@ print(json.dumps({
 }))
 PY
 )"
-expect_guard deny "$ag_xss_payload" 'eval in main/www/app.js denied'
+expect_guard deny "$codex_xss_payload" 'eval in main/www/app.js denied'
 expect_ag_guard deny "$ag_xss_payload" 'Antigravity top-level decision deny for eval in web UI'
 
 if python3 - "$root" "$hook" <<'PY'
