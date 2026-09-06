@@ -1,0 +1,54 @@
+{
+  "description": "Antigravity runner lifecycle, safety, formatting, and PR-policy hooks for tesla-key-esp32.",
+  "pre-tool-guards": {
+    "PreToolUse": [
+      {
+        "matcher": "^(?:run_command|view_file|replace_file_content|write_to_file|Read|Edit|MultiEdit|Write|Bash|apply_patch|exec_command|shell|shell_command)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$(git rev-parse --show-toplevel)/tools/agent-hooks/agent_hook.py\" pre-tool-guards",
+            "statusMessage": "Checking secret and partition safety",
+            "timeout": 15
+          }
+        ]
+      },
+      {
+        "matcher": "^(?:run_command|Bash|exec_command|shell|shell_command|mcp__.*(?:github|GitHub).*)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$(git rev-parse --show-toplevel)/tools/agent-hooks/require-pr-gates.sh\"",
+            "statusMessage": "Checking current PR policy evidence",
+            "timeout": 180
+          }
+        ]
+      }
+    ]
+  },
+  "post-tool-formatter": {
+    "PostToolUse": [
+      {
+        "matcher": "^(?:replace_file_content|write_to_file|Edit|MultiEdit|Write|apply_patch)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$(git rev-parse --show-toplevel)/tools/agent-hooks/agent_hook.py\" format",
+            "statusMessage": "Formatting edited first-party C and C++",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  },
+  "stop-tests": {
+    "Stop": [
+      {
+        "type": "command",
+        "command": "python3 \"$(git rev-parse --show-toplevel)/tools/agent-hooks/agent_hook.py\" stop-logic-tests",
+        "statusMessage": "Running changed host logic tests",
+        "timeout": 600
+      }
+    ]
+  }
+}

@@ -21,9 +21,17 @@ import sys
 from typing import Any
 
 
-FILE_TOOLS = {"read", "edit", "multiedit", "write"}
+FILE_TOOLS = {
+    "read",
+    "edit",
+    "multiedit",
+    "write",
+    "view_file",
+    "replace_file_content",
+    "write_to_file",
+}
 PATCH_TOOLS = {"apply_patch"}
-SHELL_TOOLS = {"bash", "exec_command", "shell", "shell_command"}
+SHELL_TOOLS = {"bash", "exec_command", "shell", "shell_command", "run_command"}
 HOOK_ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -56,7 +64,7 @@ def tool_input(payload: dict[str, Any]) -> dict[str, Any]:
 def command_from(payload: dict[str, Any]) -> str:
     ti = tool_input(payload)
     values: list[str] = []
-    for key in ("command", "cmd", "patch"):
+    for key in ("command", "cmd", "patch", "CommandLine", "commandline"):
         value = ti.get(key)
         if isinstance(value, str) and value:
             values.append(value)
@@ -65,7 +73,8 @@ def command_from(payload: dict[str, Any]) -> str:
 
 
 def payload_cwd(payload: dict[str, Any]) -> Path:
-    value = payload.get("cwd")
+    ti = tool_input(payload)
+    value = payload.get("cwd") or ti.get("Cwd") or ti.get("cwd")
     if not isinstance(value, str) or not value:
         value = os.environ.get("AGENT_PROJECT_DIR") or os.environ.get("PROJECT_DIR") or os.getcwd()
     return Path(value).expanduser().resolve(strict=False)
@@ -95,7 +104,14 @@ def project_root(payload: dict[str, Any]) -> Path:
 def path_targets(payload: dict[str, Any]) -> list[str]:
     ti = tool_input(payload)
     values: list[str] = []
-    for key in ("file_path", "path"):
+    for key in (
+        "file_path",
+        "path",
+        "TargetFile",
+        "targetfile",
+        "AbsolutePath",
+        "absolutepath",
+    ):
         value = ti.get(key)
         if isinstance(value, str) and value:
             values.append(value)
@@ -855,7 +871,13 @@ def partition_violation(payload: dict[str, Any], *, shell_only: bool = False) ->
     if shell_only:
         return False
     if tool in FILE_TOOLS:
-        return tool in {"edit", "multiedit", "write"} and any(
+        return tool in {
+            "edit",
+            "multiedit",
+            "write",
+            "replace_file_content",
+            "write_to_file",
+        } and any(
             is_partitions_path(path) for path in path_targets(payload)
         )
     if tool in PATCH_TOOLS:

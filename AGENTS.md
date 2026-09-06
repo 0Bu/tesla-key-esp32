@@ -172,7 +172,10 @@ ESP HTTP, NimBLE, NVS, OTA or FreeRTOS shells.
 Update the owning document with the code/configuration that changes its contract. Do not move long
 API, architecture, incident or field references into this compact file. References to project
 skills use `$skill-name` and canonical paths under `.agents/skills/`; `/skill-name` is accepted only
-in historical PR records. Hook policy lives in `tools/agent-hooks/`.
+in historical PR records. Hierarchical scoped rules live under [`main/AGENTS.md`](main/AGENTS.md)
+(C++/heap safety), [`main/logic/AGENTS.md`](main/logic/AGENTS.md) (pure-logic isolation), and
+`.agents/rules/` (protocol invariants). Hook policy lives in `tools/agent-hooks/`, with runner hook
+configuration and subagent manifests in `.codex/` and `.agents/`.
 
 ## PR, review and merge discipline
 
