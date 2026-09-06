@@ -268,7 +268,7 @@ GET /api/1/vehicles/{VIN}/vehicle_data
   "response": {
   "charge_state": { "charging_state": "Charging", "battery_level": 72,
     "charge_limit_soc": 80, "charger_power": 11, "charge_rate": 58.3,
-    "charge_amps": 16, "battery_range": 280.5 } } } }
+    "charge_amps": 16, "battery_range": 280.5, "minutes_to_full_charge": 45 } } } }
 ```
 Doubled `response` and `charge_amps` are intentional — they match the Fleet API /
 TeslaBleHttpProxy shape evcc parses. While the car is idle, the cache may remain available
