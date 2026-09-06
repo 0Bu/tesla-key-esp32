@@ -8,6 +8,7 @@
 #include "http_handlers.hpp"
 #include "logic/json_syntax.hpp"
 #include "logic/command_result.hpp"   // outcome text shared with the MCP tools/call path
+#include "logic/vehicle_data.hpp"
 #include "platform.hpp"
 #include <esp_log.h>
 #include <esp_app_desc.h>
@@ -301,6 +302,7 @@ esp_err_t handle_vehicle_data(GuardedReq rq) {
     json.number(state, "charge_rate", cs.charge_rate);
     json.number(state, "charge_amps", cs.charging_amps);
     json.number(state, "battery_range", cs.battery_range);
+    json.number(state, "minutes_to_full_charge", cs.minutes_to_full_charge);
     json.string(outer, "reason", ok ? "success" : "stale or unavailable");
 
     return send_json(req, ok ? 200 : 503, json.release());

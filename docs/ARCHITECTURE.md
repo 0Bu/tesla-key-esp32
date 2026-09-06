@@ -576,8 +576,8 @@ grouped under one device. **Read-only by design** — no command topics are subs
 - **Entities:** charge (soc, charge_limit, power, amps, range **km**, rate **km/h**,
   charging_state, plus extended read-only enrichment: actual_current/current_request **A**
   (delivered vs requested), volts **V** at the charger, charger phases, energy_added **kWh**
-  session, minutes_to_full,
-  charge limit_reason — HA bridge only, never on the `/api` evcc path), climate
+  session, minutes_to_full (also serialized on `/vehicle_data` for evcc finishtime),
+  charge limit_reason — HA bridge only, not on `/api`), climate
   (inside/outside/setpoint °C, on, preconditioning, plus Cabin-Overheat-Protection
   cop/cop_cooling/cop_temp/cop_reason and defrost front_defrost/rear_defrost/defrost_mode),
   drive (shift,
