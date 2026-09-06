@@ -24,9 +24,9 @@ struct ChargeStateResult {
     float       charge_rate{0};         bool has_charge_rate{false};
     int         charging_amps{0};       bool has_charging_amps{false};
     float       battery_range{0};       bool has_battery_range{false};
-    // ── Extended read-only charge telemetry (HA/MQTT bridge only; never on the /api evcc
-    // path). Already decoded for free in the same CarServer_ChargeState the fields above
-    // come from, so parsing them adds no BLE round-trip. Presence-flagged like the rest.
+    // ── Extended read-only charge telemetry (HA/MQTT bridge + minutes_to_full_charge on
+    // /api vehicle_data). Already decoded for free in the same CarServer_ChargeState the fields
+    // above come from, so parsing them adds no BLE round-trip. Presence-flagged like the rest.
     int         charger_actual_current{0}; bool has_actual_current{false};   // A delivered now
     int         charger_voltage{0};        bool has_voltage{false};          // V at the charger
     int         charge_current_request{0}; bool has_current_request{false};  // A the car asked for
@@ -35,6 +35,26 @@ struct ChargeStateResult {
     int         minutes_to_full_charge{0}; bool has_minutes_to_full{false};  // min
     std::string charge_limit_reason;       // "" if the car reported none
 };
+
+namespace tk {
+
+// Serialize charge_state for GET /api/1/vehicles/{VIN}/vehicle_data
+// Shape mirrors Tesla Fleet API / TeslaBleHttpProxy: always emits every field so evcc
+// parsing floats/ints never hits a missing key. On failure/omission, cs is zero-initialised
+// and minutes_to_full_charge emits 0 (where evcc's > 0 guard correctly yields "").
+template <typename Emitter>
+void emit_vehicle_charge_state(const ChargeStateResult& cs, Emitter& e) {
+    e.str("charging_state", cs.charging_state.empty() ? "Disconnected" : cs.charging_state.c_str());
+    e.num("battery_level",          cs.battery_level);
+    e.num("charge_limit_soc",       cs.charge_limit_soc);
+    e.num("charger_power",          cs.charger_power);
+    e.num("charge_rate",            cs.charge_rate);
+    e.num("charge_amps",            cs.charging_amps);
+    e.num("battery_range",          cs.battery_range);
+    e.num("minutes_to_full_charge", cs.minutes_to_full_charge);
+}
+
+}  // namespace tk
 
 struct VehicleStatusResult {
     bool valid{false};

@@ -1889,6 +1889,49 @@ static void test_status_model() {
     CHECK(epn.out.find("ble.phase") == std::string::npos);
 }
 
+// ─── GET /api/1/vehicles/{VIN}/vehicle_data charge_state contract ─────────────
+static void test_vehicle_data() {
+    // Scenario 1 — actively charging: all fields populated, non-zero minutes_to_full_charge
+    ChargeStateResult cs1{};
+    cs1.valid = true;
+    cs1.charging_state = "Charging";
+    cs1.battery_level = 72;
+    cs1.charge_limit_soc = 80;
+    cs1.charger_power = 11;
+    cs1.charge_rate = 58.25f;
+    cs1.charging_amps = 16;
+    cs1.battery_range = 280.5f;
+    cs1.minutes_to_full_charge = 45;
+
+    CollectEmitter e1;
+    tk::emit_vehicle_charge_state(cs1, e1);
+    CHECK(golden_eq(e1.out,
+        "charging_state=\"Charging\"\n"
+        "battery_level=72\n"
+        "charge_limit_soc=80\n"
+        "charger_power=11\n"
+        "charge_rate=58.25\n"
+        "charge_amps=16\n"
+        "battery_range=280.5\n"
+        "minutes_to_full_charge=45\n"));
+
+    // Scenario 2 — zero-initialized / disconnected: every field must still be emitted (evcc requirement),
+    // with minutes_to_full_charge emitting 0 so evcc's '> 0' guard yields ""
+    ChargeStateResult cs2{};
+
+    CollectEmitter e2;
+    tk::emit_vehicle_charge_state(cs2, e2);
+    CHECK(golden_eq(e2.out,
+        "charging_state=\"Disconnected\"\n"
+        "battery_level=0\n"
+        "charge_limit_soc=0\n"
+        "charger_power=0\n"
+        "charge_rate=0\n"
+        "charge_amps=0\n"
+        "battery_range=0\n"
+        "minutes_to_full_charge=0\n"));
+}
+
 // ─── on-device display presenter (logic/display_model.hpp <- display.cpp compose()) ──────
 namespace dm = tk::display;
 
@@ -4497,6 +4540,7 @@ int main() {
     test_heap_json_stream();
     test_mcp();
     test_status_model();
+    test_vehicle_data();
     test_display_helpers();
     test_display_model();
     test_led();

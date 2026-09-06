@@ -215,6 +215,7 @@ write_pages_manifest() {
 self_test() {
   local tmp remote fakebin fake_release fake_live sha_r sha_a sha_b sha_stack
   local sha_dependency sha_otadata sha_signed_root sha_public_key sha_reuse sha_c got real_python
+  unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_PREFIX
   tmp="$(mktemp -d "${TMPDIR:-/tmp}/tesla-release-relevance.XXXXXX")"
   remote="$tmp.remote.git"
   trap 'rm -rf -- "$tmp" "$remote"' RETURN
