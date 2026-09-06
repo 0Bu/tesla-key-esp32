@@ -31,9 +31,11 @@ expect_guard deny '{bad' 'malformed guard JSON fails closed'
 expect_guard deny '{}' 'partial guard payload fails closed'
 expect_guard allow "$(payload Read file_path docs/SECURITY.md "$root")" 'Read schema permits normal file'
 expect_guard allow "$(payload exec_command cmd 'git status --short' "$root")" 'Codex exec_command/cmd schema permits normal command'
+expect_guard allow "$(payload run_command CommandLine 'git status --short' "$root")" 'Antigravity run_command schema permits normal command'
 expect_guard deny "$(payload exec_command_extra cmd 'cat ota_signing_key.pem' "$root")" 'suffix-manipulated tool fails closed'
 expect_guard deny "$(payload Mystery command 'cat ota_signing_key.pem' "$root")" 'unknown tool fails closed'
 expect_guard deny "$(payload Read file_path /tmp/offline.pem "$root")" 'PEM read denied'
+expect_guard deny "$(payload view_file AbsolutePath /tmp/offline.pem "$root")" 'Antigravity view_file PEM read denied'
 expect_guard deny "$(payload Write file_path /tmp/nvs-backup.bin "$root")" 'NVS dump denied'
 expect_guard deny "$(payload Bash command 'cat ble_sessions.bin' "$root")" 'BLE session material denied'
 expect_guard deny "$(payload Bash command printenv "$root")" 'environment dump denied'
@@ -89,6 +91,8 @@ PY
 )"
 expect_guard deny "$patch_payload" 'apply_patch partition mutation denied'
 expect_guard deny "$(payload Bash command 'cat source > partitions.csv' "$root")" 'partition redirect denied'
+expect_guard deny "$(payload write_to_file TargetFile partitions.csv "$root")" 'Antigravity write_to_file partition write denied'
+expect_guard deny "$(payload replace_file_content TargetFile partitions.csv "$root")" 'Antigravity replace_file_content partition mutation denied'
 
 if python3 - "$root" "$hook" <<'PY'
 import importlib.util,pathlib,sys
