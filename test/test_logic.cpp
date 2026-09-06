@@ -2760,6 +2760,98 @@ static void test_wake_poll() {
         CHECK(st.armed == true);
         CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false}) == true);
     }
+
+    // ── Cache-invalid bootstrap trigger (issue #264 second variant) ──
+
+    // Boot with invalid cache and car already AWAKE: fires exactly once, no spam on next cycles.
+    {
+        WakePollState st{};
+        // First AWAKE cycle with invalid cache fires the bootstrap poll
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, false}) == true);
+        CHECK(st.armed == false);
+        CHECK(st.pending == false);
+        CHECK(st.bootstrap_dispatched == true);
+
+        // Next cycles while cache is still invalid do NOT re-fire (prevent queue flooding)
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, false}) == false);
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, false}) == false);
+
+        // Once cache is populated, remains idle
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, true}) == false);
+    }
+
+    // Boot with invalid cache and car ASLEEP: does NOT poll while asleep, fires once car wakes.
+    {
+        WakePollState st{};
+        // Asleep with invalid cache: must NOT poll sleeping car
+        CHECK(wake_edge_should_poll(st, {WakeSample::Asleep, false, true, false}) == false);
+        CHECK(st.armed == true);
+        CHECK(st.pending == false);
+
+        // Car wakes up: fires the armed bootstrap poll
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, false}) == true);
+        CHECK(st.armed == false);
+        CHECK(st.pending == false);
+
+        // Does not re-fire
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, false}) == false);
+    }
+
+    // Boot with invalid cache and UNKNOWN flag: does NOT poll while UNKNOWN, fires on first AWAKE.
+    {
+        WakePollState st{};
+        CHECK(wake_edge_should_poll(st, {WakeSample::Unknown, false, true, false}) == false);
+        CHECK(st.armed == true);
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, false}) == true);
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, false}) == false);
+    }
+
+    // Reconnect retry: if connection drops while cache is still invalid, reconnect allows retry.
+    {
+        WakePollState st{};
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, false}) == true);
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, false}) == false);
+
+        // BLE drops before cache could be populated
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, false, false}) == false);
+        CHECK(st.bootstrap_dispatched == false);
+
+        // BLE reconnects while cache still invalid: retries once
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, false}) == true);
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, false}) == false);
+
+        // Once cache becomes valid, future reconnects never fire bootstrap
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, false, true}) == false);
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, true}) == false);
+    }
+
+    // Direct WakePollState methods unit tests.
+    {
+        WakePollState st{};
+        // Disconnected: does not arm
+        st.note_bootstrap(false, false);
+        CHECK(st.armed == false);
+        CHECK(st.bootstrap_dispatched == false);
+
+        // Connected + valid cache: does not arm
+        st.note_bootstrap(true, true);
+        CHECK(st.armed == false);
+        CHECK(st.bootstrap_dispatched == false);
+
+        // Connected + invalid cache: arms
+        st.note_bootstrap(true, false);
+        CHECK(st.armed == true);
+        CHECK(st.bootstrap_dispatched == true);
+
+        // Second call while connected does not re-arm
+        st.armed = false;
+        st.note_bootstrap(true, false);
+        CHECK(st.armed == false);
+
+        // Disconnect resets dispatch flag
+        st.note_disconnected();
+        CHECK(st.bootstrap_dispatched == false);
+    }
 }
 
 // ── BLE command readiness (logic/ble_readiness.hpp) — GAP is not GATT-ready ───────────
