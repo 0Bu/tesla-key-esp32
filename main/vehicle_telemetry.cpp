@@ -500,7 +500,7 @@ void VehicleController::process_ble_host_events_() {
         // first, then terminate the physical link. No stale LinkUp may become ready afterward.
         (void)apply_ble_link_state_(false);
         ble_->disconnect();
-        ESP_LOGW(TAG, "BLE deferred-event queue overflow — link reset fail-closed");
+        ESP_LOGW(TAG, "BLE event queue overflow — link reset");
         return;
     }
 
@@ -591,8 +591,7 @@ void VehicleController::loop_task_fn_(void* arg) {
     // than not having it, but far better than refusing to poll the car.
     TaskWatchdogSubscription watchdog;
     if (!watchdog.subscribe()) {
-        ESP_LOGW(TAG, "vehicle_loop could not subscribe to the task watchdog — a wedged poll will "
-                      "no longer reboot the device automatically");
+        ESP_LOGW(TAG, "vehicle_loop: watchdog subscribe failed");
     }
     uint32_t last_poll_ticks    = 0;
     uint32_t last_connect_ticks = 0;
@@ -620,7 +619,7 @@ void VehicleController::loop_task_fn_(void* arg) {
         // the task-level exception boundary, before pumping tesla-ble's state machine.
         self->process_ble_host_events_();
         if (self->ble_fault_.exchange(false)) {
-            ESP_LOGW(TAG, "BLE deferred processing fault — dropping link to reset library state");
+            ESP_LOGW(TAG, "BLE deferred processing fault — dropping link");
             if (self->ble_connected()) self->ble_->disconnect();
             vTaskDelay(pdMS_TO_TICKS(50));
             continue;
@@ -661,7 +660,7 @@ void VehicleController::loop_task_fn_(void* arg) {
         // library's rx_buffer and resets sessions so the next connect re-syncs cleanly —
         // turning a would-be abort()/reboot into a brief reconnect.
         if (self->ble_fault_.exchange(false)) {
-            ESP_LOGW(TAG, "BLE parse fault — dropping link to clear corrupt RX state");
+            ESP_LOGW(TAG, "BLE parse fault — dropping link");
             if (self->ble_connected()) self->ble_->disconnect();
         }
 
@@ -835,17 +834,16 @@ void VehicleController::loop_task_fn_(void* arg) {
         // (e.g. whether VCSEC ever asserts ASLEEP, or just flaps for COP) without spamming.
         bool charging_state = false;
         if (paired) {
-            const bool conn = self->ble_connected();
             ChargeStateResult cs = self->copy_locked_(self->last_known_charge_);
-            if (!conn) {
+            charging_state = cs.valid && (cs.charging_state == "Charging" ||
+                                          cs.charging_state == "Starting");
+            if (!self->ble_connected()) {
                 wake_poll.note_disconnected();
             } else {
                 // One-shot charge poll bootstrap (issue #264): arm if paired & connected but cache
                 // has never been populated, so an already-awake car after reboot doesn't deadlock evcc.
-                wake_poll.note_bootstrap(conn, cs.valid);
+                wake_poll.note_bootstrap(cs.valid);
             }
-            charging_state = cs.valid && (cs.charging_state == "Charging" ||
-                                          cs.charging_state == "Starting");
 
             TeslaBLE::SleepState st = static_cast<TeslaBLE::SleepState>(
                 self->vcsec_sleep_state_.load());
@@ -929,18 +927,16 @@ void VehicleController::loop_task_fn_(void* arg) {
         // Both use the same NO_WAKE_SKIP poll: a car already back asleep is skipped, so we only
         // ride a wake the car performed itself, and an idle car is still left to sleep.
         const bool poll_cadence = window && (now_ticks - last_poll_ticks > pdMS_TO_TICKS(10000));
-        if (paired && self->ble_connected() && !self->cmd_in_flight_.load()) {
-            const bool poll_wake = wake_poll.take_pending();
-            if (poll_cadence || poll_wake) {
-                if (poll_cadence) last_poll_ticks = now_ticks;
-                ESP_LOGD(TAG, "background charge-state refresh…");
-                // Fire-and-forget poll. We must NOT block here: this task also pumps
-                // vehicle_->loop(), which drives the command's transmission/retries. The
-                // persistent charge-state callback updates last_known_charge_ when the
-                // response arrives. NO_WAKE_SKIP so a sleeping car is left undisturbed.
-                tk::SemGuard g(self->vehicle_mutex_);   // RAII: charge_state_poll can throw
-                self->vehicle_->charge_state_poll(TeslaBLE::WakePolicy::NO_WAKE_SKIP);
-            }
+        if (paired && self->ble_connected() && !self->cmd_in_flight_.load()
+            && (wake_poll.take_pending() || poll_cadence)) {
+            if (poll_cadence) last_poll_ticks = now_ticks;
+            ESP_LOGD(TAG, "background charge-state refresh…");
+            // Fire-and-forget poll. We must NOT block here: this task also pumps
+            // vehicle_->loop(), which drives the command's transmission/retries. The
+            // persistent charge-state callback updates last_known_charge_ when the
+            // response arrives. NO_WAKE_SKIP so a sleeping car is left undisturbed.
+            tk::SemGuard g(self->vehicle_mutex_);   // RAII: charge_state_poll can throw
+            self->vehicle_->charge_state_poll(TeslaBLE::WakePolicy::NO_WAKE_SKIP);
         }
 
         // Background telemetry refresh (paired + window + connected): one domain per cycle,

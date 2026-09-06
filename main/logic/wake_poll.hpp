@@ -59,11 +59,15 @@ struct WakePollState {
         }
     }
 
-    inline void note_bootstrap(bool ble_connected, bool cache_valid) {
-        if (!bootstrap_dispatched && ble_connected && !cache_valid) {
+    inline void note_bootstrap(bool cache_valid) {
+        if (!bootstrap_dispatched && !cache_valid) {
             bootstrap_dispatched = true;
             armed = true;
         }
+    }
+
+    inline void note_bootstrap(bool ble_connected, bool cache_valid) {
+        if (ble_connected) note_bootstrap(cache_valid);
     }
 
     inline void note_disconnected() {
