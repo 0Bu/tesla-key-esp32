@@ -125,8 +125,8 @@ SyslogStatus syslog_status() {
 static bool syslog_ping_host(const struct in_addr& ip) {
     struct netif* net = netif_default;
     if (net) {
-        uint32_t mask = net->netmask.u_addr.ip4.addr;
-        bool is_local = ((ip.s_addr & mask) == (net->ip_addr.u_addr.ip4.addr & mask));
+        uint32_t mask = netif_ip4_netmask(net)->addr;
+        bool is_local = ((ip.s_addr & mask) == (netif_ip4_addr(net)->addr & mask));
         if (is_local) {
             // Provoke an ARP request with a 0-length datagram, then read the ARP cache back.
             int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_IP);
@@ -150,8 +150,7 @@ static bool syslog_ping_host(const struct in_addr& ip) {
     // ICMP echo (remote host, or a local host not yet in the ARP cache).
     if (!s_ping.done) return false;   // probe not initialised -> can't measure -> advisory "unverified"
     ip_addr_t target{};
-    target.type = IPADDR_TYPE_V4;
-    target.u_addr.ip4.addr = ip.s_addr;
+    ip_addr_set_ip4_u32(&target, ip.s_addr);
 
     esp_ping_config_t cfg = ESP_PING_DEFAULT_CONFIG();
     cfg.target_addr = target;

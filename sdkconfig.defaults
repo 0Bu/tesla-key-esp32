@@ -185,6 +185,28 @@ CONFIG_MBEDTLS_TLS_CLIENT_ONLY=y
 # No filesystem: certs/keys come from the CA bundle and NVS, never a VFS path. ~1.2 KB.
 CONFIG_MBEDTLS_FS_IO=n
 
+# Drop obsolete and unneeded elliptic curves: Tesla BLE strictly uses NIST P-256 (SECP256R1),
+# while Web PKI / TLS uses P-256, P-384, P-521, or X25519. Dropping Brainpool (BP256/384/512)
+# and obsolete small curves (SECP192/224) saves flash across all targets with zero runtime risk.
+CONFIG_MBEDTLS_ECP_DP_BP256R1_ENABLED=n
+CONFIG_MBEDTLS_ECP_DP_BP384R1_ENABLED=n
+CONFIG_MBEDTLS_ECP_DP_BP512R1_ENABLED=n
+CONFIG_MBEDTLS_ECP_DP_SECP192R1_ENABLED=n
+CONFIG_MBEDTLS_ECP_DP_SECP224R1_ENABLED=n
+CONFIG_MBEDTLS_ECP_DP_SECP192K1_ENABLED=n
+CONFIG_MBEDTLS_ECP_DP_SECP224K1_ENABLED=n
+CONFIG_MBEDTLS_ECP_DP_SECP256K1_ENABLED=n
+
+# Drop unused X.509 parsing: the firmware only verifies server certificates against the Mozilla
+# CA bundle. No CRL (Certificate Revocation List) or CSR (Certificate Signing Request) parsing is used.
+CONFIG_MBEDTLS_X509_CRL_PARSE_C=n
+CONFIG_MBEDTLS_X509_CSR_PARSE_C=n
+
+# Disable IPv6 stack: this firmware operates strictly over IPv4 on the local network
+# (DHCP station / captive setup AP). Drops unused IPv6/ND6/SLAAC/MLD6 code, saving ~41 KiB
+# flash and 1.5-3 KiB DRAM/BSS across all targets.
+CONFIG_LWIP_IPV6=n
+
 # Silent asserts — keep the abort()/reboot on a failed assertion (so a bad state still
 # reverts via the rollback gate) but drop the "assert failed: <expr> <file>:<line>" string
 # tables. Serial/diag logging is unaffected. ~5 KB.
