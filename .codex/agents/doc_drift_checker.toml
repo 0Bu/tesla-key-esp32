@@ -16,7 +16,7 @@ every changed fact, compare code, tests, web UI, and all documented mirrors:
 - HTTP/MCP routes, command names and bounds, status/telemetry fields, MQTT entities, UI consumers.
 - NVS namespaces/keys and the 15-character key limit; pairing/session/key lifecycle and redaction.
 - Partition offsets (NVS 0x9000/0x6000, app 0x20000, OTA slots), target/platform/suffix mappings.
-- ESP-IDF v5.5.5, yoziru/tesla-ble v5.1.2, the ordered fail-closed patch series, and four targets
+- ESP-IDF v5.5.5, yoziru/tesla-ble v5.1.3, the ordered fail-closed patch series, and four targets
   esp32, esp32s3, esp32c3, esp32c6.
 - Kconfig/defaults, pinned build-container CPU/memory limits, OTA/release/provenance narrative,
   architecture maps, logic-test mirrors, and runner-neutral agent/skill/hook references.

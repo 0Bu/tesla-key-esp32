@@ -237,7 +237,7 @@ The suite also has gates outside the single pure-logic translation unit:
   parsers/codecs. Linux CI recompiles the host binaries and the same fuzz driver under
   ASan+UBSan+LSan after proving all three detectors with deliberate tripwires.
 - `test/tesla_protocol_vectors.test.mjs` checks the public Tesla VIN/ECDH/HMAC/AES-GCM vectors and
-  all three repository patch contracts. Patch 0003 mutation-tests the one-hour interval, separate
+  all five repository patch contracts. Patch 0003 mutation-tests the one-hour interval, separate
   warning/error clocks, `UINT32_MAX` saturation, log-before-reset order, severity branches and
   exactly six migrated RX-recovery callsites. `test/web_ui_browser_gate.py` assembles
   the shipped page and checks console errors, rejected requests plus the poller's degraded state,

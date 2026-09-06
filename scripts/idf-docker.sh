@@ -23,6 +23,21 @@ echo "idf-docker: using ${image} (from esp-idf-toolchain.txt)" >&2
 tty_flags=()
 if [ -t 0 ] && [ -t 1 ]; then tty_flags=(-it); fi
 
+mount_flags=(-v "$repo_root":/project)
+git_common="$(git -C "$repo_root" rev-parse --git-common-dir 2>/dev/null || true)"
+if [ -n "$git_common" ]; then
+  git_common_abs="$(cd "$repo_root" && cd "$git_common" && pwd -P 2>/dev/null || true)"
+  if [ -n "$git_common_abs" ]; then
+    case "$git_common_abs" in
+      "$repo_root"/*) ;;
+      *)
+        git_parent="$(dirname "$git_common_abs")"
+        mount_flags+=(-v "$git_parent":"$git_parent")
+        ;;
+    esac
+  fi
+fi
+
 # Hard limits keep a local ESP-IDF build from starving co-resident services. They are explicit
 # here rather than inherited from a Docker daemon/shim default, so standard Docker and the k3s
 # shim enforce the same ceiling. The complete S3 build is proven below both limits.
@@ -31,7 +46,7 @@ if [ -t 0 ] && [ -t 1 ]; then tty_flags=(-it); fi
 # user a writable home; GIT_CONFIG safe.directory='*' avoids git "dubious ownership" on the
 # mounted repo and on /opt/esp/idf.
 exec docker run --rm --cpus 1.5 --memory 1800m ${tty_flags[@]+"${tty_flags[@]}"} \
-  -v "$repo_root":/project -w /project \
+  "${mount_flags[@]}" -w /project \
   -u "$(id -u):$(id -g)" -e HOME=/tmp \
   -e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=safe.directory -e GIT_CONFIG_VALUE_0='*' \
   "$image" "$@"
