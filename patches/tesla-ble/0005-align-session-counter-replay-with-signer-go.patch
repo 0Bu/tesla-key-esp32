@@ -1,0 +1,38 @@
+diff --git a/src/peer.cpp b/src/peer.cpp
+index 22fe5df..3748218 100644
+--- a/src/peer.cpp
++++ b/src/peer.cpp
+@@ -206,9 +206,8 @@ int Peer::update_session(Signatures_SessionInfo *session_info) {
+             epoch_changed, time_advanced, clock_time_, session_info->clock_time);
+ 
+   if (!epoch_changed && session_info->counter < counter_) {
+-    LOG_WARNING("Session counter replay detected (vehicle=%" PRIu32 ", local=%" PRIu32 ")", session_info->counter,
+-                counter_);
+-    return TeslaBLE_Status_E_ERROR_COUNTER_REPLAY;
++    LOG_WARNING("Session counter replay detected (vehicle=%" PRIu32 ", local=%" PRIu32 ") - keeping higher local counter",
++                session_info->counter, counter_);
+   }
+ 
+   // Update counter based on error state or normal progression
+diff --git a/src/vehicle.cpp b/src/vehicle.cpp
+index 6a4c189..d4ab503 100644
+--- a/src/vehicle.cpp
++++ b/src/vehicle.cpp
+@@ -821,16 +821,7 @@ void TeslaBLE::Vehicle::handle_session_info_message_(const UniversalMessage_Rout
+   }
+ 
+   auto *peer = client_->get_peer(domain);
+-  int update_result = peer ? peer->update_session(&session_info) : TeslaBLE_Status_E_ERROR_INVALID_SESSION;
+-  if (peer && update_result == TeslaBLE_Status_E_ERROR_COUNTER_REPLAY) {
+-    // The vehicle reports a counter below ours (it lost counter state).
+-    // Upstream signer.go always applies such updates, keeping
+-    // max(local, reported); hard-rejecting strands the session with a counter
+-    // the vehicle no longer acks. Resync to the vehicle's truth.
+-    LOG_WARNING("Counter replay for %s - forcing session resync to vehicle counter", domain_to_string(domain));
+-    update_result = peer->force_update_session(&session_info);
+-  }
+-  if (peer && update_result == TeslaBLE_Status_E_OK) {
++  if (peer && peer->update_session(&session_info) == TeslaBLE_Status_E_OK) {
+     LOG_INFO("Session updated for %s", domain_to_string(domain));
+     persist_session_(domain, msg.payload.session_info);
+     handle_authentication_response_(domain, true);

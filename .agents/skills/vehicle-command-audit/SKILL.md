@@ -29,7 +29,7 @@ other**?"; this skill asks "do they agree with **Tesla's protocol**, and is each
 
 `teslamotors/vehicle-command` is the **truth**, but it is NOT what we run. We run
 **yoziru/tesla-ble** (pinned in [`main/idf_component.yml`](../../../main/idf_component.yml) — **read
-the pin first**, currently `v5.1.2`). The Go SDK exposes commands, builders, fields and enum
+the pin first**, currently `v5.1.3`). The Go SDK exposes commands, builders, fields and enum
 values the pinned C++ port may **not** have. So every comparison is **three-way**, and a
 divergence from upstream does **not** automatically mean "change the code":
 
@@ -81,7 +81,7 @@ The high-value paths (verified to exist):
 
 ### Feasibility — `yoziru/tesla-ble` at the pinned tag
 Fetch raw at the **pin** (base `https://raw.githubusercontent.com/yoziru/tesla-ble/<pin>`; confirm
-`<pin>` from `idf_component.yml`). Layout at v5.1.2:
+`<pin>` from `idf_component.yml`). Layout at v5.1.3:
 `include/{vehicle.h, client.h, command_error.h, message_builders.h, peer.h, vin_utils.h, errors.h, …}`
 and `src/{vehicle.cpp, client.cpp, peer.cpp, message_builders.cpp, message_processor.cpp, crypto_context.cpp, vin_utils.cpp, errors.cpp, …}`.
 - **Does a command builder exist?** → `src/message_builders.cpp` (e.g. `scheduledChargingAction` IS
@@ -129,8 +129,11 @@ re-confirm it against the *current* tree and catch anything that drifted since. 
    16-byte epoch, separate VCSEC/Infotainment sessions. **The device wall clock does NOT enter
    per-command signing/expiry** — a wrong RTC cannot make an already-loaded command stale or
    replayable. It **does** gate persisted-session reuse: `Vehicle::load_session()` computes
-   `system_clock - SessionInfo.ClockTime` and rejects age > 1 h, so the NVS clock restore before
-   controller init is required. *Baseline: code and current comments match this split.*
+   a *signed* `system_clock - SessionInfo.ClockTime` age and rejects age > 1 h. A negative age
+   (stored session clock ahead of the local clock, including a reboot before time resync) is
+   accepted rather than underflowed to a huge unsigned age, so the NVS clock restore before
+   controller init is still required to enforce the one-hour stale window. *Baseline: code and
+   current comments match this split at v5.1.3.*
 4. **Pairing / whitelist** — add-key carries role + `KEY_FORM_FACTOR_CLOUD_KEY`, no key name (car
    shows "Unknown key"), requires an **NFC card on the console reader**, verify via a SessionInfo
    probe. *Baseline: matches.* (Note: the **"3"** is the simultaneous-BLE-**connection** limit; a
@@ -152,12 +155,12 @@ re-confirm it against the *current* tree and catch anything that drifted since. 
    *Baseline: sound; `docs/ARCHITECTURE.md` describes all three detectors.*
 8. **Library-version claims** — every command the firmware calls resolves to a real builder at the
    pin; doc claims about what's *not* exposed (scheduled departure) match the pin's
-   `message_builders.cpp`. *Baseline: matches at v5.1.2.*
+   `message_builders.cpp`. *Baseline: matches at v5.1.3.*
 9. **evcc / TeslaBleHttpProxy HTTP shape** — `/api/.../command/{name}` names, `vehicle_data` =
    `.response.response.charge_state.*` with **`charge_amps`** (not `charging_amps`), doubled
    `response`, **miles/mph on the `/api` path** (metric is MQTT-only), `charging_state` strings
    `Charging/Disconnected/Complete/Stopped/NoPower/Starting`. *Baseline: full match.*
-9a. **Response-counter anti-replay** — upstream `yoziru/tesla-ble` v5.1.2 logs a failed
+9a. **Response-counter anti-replay** — upstream `yoziru/tesla-ble` v5.1.3 logs a failed
     `validate_response_counter()` but continues dispatch. Verify the repository patch under
     `patches/tesla-ble/` still returns before state callbacks and FIFO completion, applies to
     the managed dependency tree, and is rebased explicitly on every pin bump.

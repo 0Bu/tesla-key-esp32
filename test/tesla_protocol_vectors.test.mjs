@@ -322,7 +322,7 @@ test('all target locks pin the reviewed tesla-ble source and exact target set', 
   const targets = ['esp32', 'esp32s3', 'esp32c3', 'esp32c6'];
   for (const target of targets) {
     const lock = readFileSync(`dependencies.lock.${target}`, 'utf8');
-    assert.match(lock, /version: a0e5efa610e7ee93ca04fd36bed72e9aac03f008/);
+    assert.match(lock, /version: 54ee51f1c82ae6937b00f6c2347d3fb8a9f06dce/);
     assert.match(lock, new RegExp(`^target: ${target}$`, 'm'));
     const listed = [...lock.matchAll(/^    - (esp32(?:s3|c3|c6)?)$/gm)].map((match) => match[1]);
     assert.deepEqual(listed, targets);
@@ -390,5 +390,60 @@ test('parental-controls trim patch removes only actions this firmware never send
       false,
       `patch 0004 removes ${arm}, which vehicle_commands.cpp still sends`,
     );
+  }
+});
+
+function validateSessionCounterReplayPatch(patch) {
+  const files = [...patch.matchAll(/^diff --git a\/(\S+) b\/(\S+)$/gm)];
+  assert.deepEqual(
+    files.map((match) => match[1]),
+    ['src/peer.cpp', 'src/vehicle.cpp'],
+  );
+  for (const [, before, after] of files) {
+    assert.equal(before, after);
+  }
+
+  // peer.cpp: must remove the hard rejection return TeslaBLE_Status_E_ERROR_COUNTER_REPLAY
+  assert.match(patch, /-    return TeslaBLE_Status_E_ERROR_COUNTER_REPLAY;/);
+  assert.match(
+    patch,
+    /\+    LOG_WARNING\("Session counter replay detected \(vehicle=%" PRIu32 ", local=%" PRIu32 "\) - keeping higher local counter"/,
+  );
+
+  // vehicle.cpp: must eliminate the force_update_session call site
+  assert.match(patch, /-    update_result = peer->force_update_session\(&session_info\);/);
+  assert.match(
+    patch,
+    /\+  if \(peer && peer->update_session\(&session_info\) == TeslaBLE_Status_E_OK\) \{/,
+  );
+  assert.equal(patch.includes('+    update_result = peer->force_update_session'), false);
+}
+
+test('session counter replay patch aligns with signer.go and removes force_update_session dead code', () => {
+  const patch = readFileSync(
+    'patches/tesla-ble/0005-align-session-counter-replay-with-signer-go.patch',
+    'utf8',
+  );
+  validateSessionCounterReplayPatch(patch);
+
+  const mutations = [
+    replaceExactlyOnce(
+      patch,
+      '-    return TeslaBLE_Status_E_ERROR_COUNTER_REPLAY;',
+      '+    return TeslaBLE_Status_E_ERROR_COUNTER_REPLAY;',
+    ),
+    replaceExactlyOnce(
+      patch,
+      '-    update_result = peer->force_update_session(&session_info);',
+      '+    update_result = peer->force_update_session(&session_info);',
+    ),
+    replaceExactlyOnce(
+      patch,
+      '+  if (peer && peer->update_session(&session_info) == TeslaBLE_Status_E_OK) {',
+      '+  if (peer && peer->update_session(&session_info) != TeslaBLE_Status_E_OK) {',
+    ),
+  ];
+  for (const mutation of mutations) {
+    assert.throws(() => validateSessionCounterReplayPatch(mutation));
   }
 });

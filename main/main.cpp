@@ -466,13 +466,15 @@ extern "C" void app_main() {
     // Wall clock, restored from NVS — BEFORE VehicleController::init below, which is the whole
     // point of doing it here rather than next to the SNTP setup after WiFi (where it used to
     // live). init() hands the persisted BLE sessions to tesla-ble, which validates their age as
-    //     session_age = (uint32_t) time(nullptr) - session.clock_time      (vehicle.cpp:1123)
-    // and rejects anything older than an hour. Run at 1970 that subtraction underflows, so the
-    // age comes out as the raw stored epoch and EVERY persisted session is discarded: 49 boots
-    // in the 17.-24.07.2026 syslog, 49 rejections of both domains. The last one threw away a
-    // VCSEC session that was 43 minutes old — comfortably inside the library's own window —
-    // and paid a fresh handshake for it, which is exactly what NVS `sess_vcsec`/`sess_info`
-    // exist to avoid.
+    // a signed (unix_now - session.clock_time) and rejects anything older than an hour.
+    // v5.1.3 accepts a negative age (session clock ahead of the local clock) instead of the
+    // old unsigned underflow that treated 1970 as "millions of seconds old". A 1970 clock
+    // would now keep sessions rather than discard them; restore is still required so a real
+    // clock can enforce the one-hour stale window. 49 boots in the 17.-24.07.2026 syslog, 49
+    // rejections of both domains, were the underflow failure: the last one threw away a VCSEC
+    // session that was 43 minutes old — comfortably inside the library's own window — and paid
+    // a fresh handshake for it, which is exactly what NVS `sess_vcsec`/`sess_info` exist to
+    // avoid.
     //
     // Needs no network (unlike SNTP, which stays below with the rest of the post-WiFi setup),
     // so there is nothing keeping it down there. NTP refines this within seconds of the link

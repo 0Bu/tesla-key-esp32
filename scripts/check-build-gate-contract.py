@@ -147,6 +147,8 @@ REQUIRED_FILES = (
     "patches/tesla-ble/0001-reject-replayed-carserver-responses.patch",
     "patches/tesla-ble/0002-report-key-regeneration-result.patch",
     "patches/tesla-ble/0003-rate-limit-rx-framing-recovery-logs.patch",
+    "patches/tesla-ble/0004-drop-unused-parental-controls-actions.patch",
+    "patches/tesla-ble/0005-align-session-counter-replay-with-signer-go.patch",
     "test/run-cjson-oom-tests.sh",
     "test/run-mqtt-json-publish-tests.sh",
 )
@@ -384,11 +386,11 @@ def validate(root: Path) -> None:
 
     require(literal_assignment(root, "scripts/check-dependency-contract.py", "TARGETS") == TARGETS,
             "check-dependency-contract.py: exact target lock set/order drifted")
-    require(literal_assignment(root, "scripts/check-dependency-contract.py", "TESLA_VERSION") == "v5.1.2" and
+    require(literal_assignment(root, "scripts/check-dependency-contract.py", "TESLA_VERSION") == "v5.1.3" and
             literal_assignment(root, "scripts/check-dependency-contract.py", "TESLA_RESOLVED_COMMIT") ==
-            "a0e5efa610e7ee93ca04fd36bed72e9aac03f008" and
+            "54ee51f1c82ae6937b00f6c2347d3fb8a9f06dce" and
             literal_assignment(root, "scripts/check-dependency-contract.py", "TESLA_COMPONENT_HASH") ==
-            "1ae0006ec68f649d13b58671950971e29186873114168756bcc4fd832fc5826f",
+            "ec449e03bbf01f3243e369b062d612a6ecf1105ef548c767373e0b3309ddf7de",
             "check-dependency-contract.py: tesla-ble version/resolution contract drifted")
     require(literal_assignment(root, "scripts/check-otadata-contract.py", "OTADATA_SIZE") == 0x2000 and
             literal_assignment(root, "scripts/check-otadata-contract.py", "ERASED_BYTE") == 0xFF,

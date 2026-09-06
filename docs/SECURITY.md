@@ -36,7 +36,7 @@ keys; it no longer truncates an unknown key. This includes the pinned tesla-ble 
 NVS calls in every shipped source/header/inline fragment and the operator-facing retention mirror is
 in `docs/README.md`.
 
-**BLE response anti-replay:** the pinned `yoziru/tesla-ble` v5.1.2 detects an invalid
+**BLE response anti-replay:** the pinned `yoziru/tesla-ble` v5.1.3 detects an invalid
 CarServer response counter but, upstream, still dispatches that response to telemetry callbacks
 and the command FIFO. The repository applies `patches/tesla-ble/` to every target at build time
 so a rejected counter is logged and dropped before it can update state or complete a newer
@@ -47,8 +47,8 @@ error clocks are independent, the shared suppression count saturates rather than
 only the severe-corruption path explicitly selects error severity.
 `test/tesla_protocol_vectors.test.mjs` independently pins the public VIN-advertisement vector,
 P-256 ECDH byte order, `SHA1(shared-secret)[:16]`, the `session info` HMAC label, AES-GCM
-metadata/AAD/nonce/tag layout and all three local patch invariants. It uses public test keys only and
-never reads device or vehicle identity material.
+metadata/AAD/nonce/tag layout and all five local patch invariants, including signer.go session-counter
+replay alignment. It uses public test keys only and never reads device or vehicle identity material.
 
 ## Current device state (factory ESP32-S3)
 
