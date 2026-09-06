@@ -363,5 +363,9 @@ PY
   *) echo "BLOCKED: internal PR-gate action classification failed." >&2; exit 2 ;;
 esac
 
-echo "agent PR gates: $kind policy satisfied"
+if printf '%s' "$payload" | grep -Eq '("conversationId"|"workspacePaths"|"toolCall")'; then
+  echo '{"decision":"allow"}'
+else
+  echo "agent PR gates: $kind policy satisfied"
+fi
 exit 0
