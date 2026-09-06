@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# Git pre-push hook for tesla-key-esp32.
+# Enforces PR branch policy and checklist evidence before pushing to remote.
+set -euo pipefail
+
+root="$(git rev-parse --show-toplevel)"
+cd "$root"
+
+# Allow emergency bypass if explicitly requested
+if [ "${AGENT_PR_GATES_SKIP:-0}" = "1" ]; then
+    echo "WARNING: AGENT_PR_GATES_SKIP=1 set; bypassing pre-push PR policy checks." >&2
+    exit 0
+fi
+
+# 1. Prevent direct pushes to main branch
+current_branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")"
+if [ "$current_branch" = "main" ]; then
+    echo "BLOCKED by pre-push: direct push to main branch is prohibited; open a pull request instead." >&2
+    exit 1
+fi
+
+# 2. Check PR policy gates using require-pr-gates.sh
+head_sha="$(git rev-parse HEAD)"
+push_payload="$(python3 - "$root" "$head_sha" "$current_branch" <<'PY'
+import json, sys
+root, sha, branch = sys.argv[1], sys.argv[2], sys.argv[3]
+print(json.dumps({
+    "conversationId": "git-cli",
+    "workspacePaths": [root],
+    "toolCall": {
+        "name": "run_command",
+        "args": {
+            "CommandLine": f"git push origin {branch}",
+            "Cwd": root
+        }
+    }
+}))
+PY
+)"
+
+if ! printf '%s' "$push_payload" | bash "$root/tools/agent-hooks/require-pr-gates.sh"; then
+    echo "BLOCKED by pre-push: PR policy gates not satisfied for branch '$current_branch' @ $head_sha." >&2
+    echo "Ensure checklist gates (\$skill-audit, \$pr-hygiene) are checked in your PR body before pushing." >&2
+    echo "To bypass in an emergency: AGENT_PR_GATES_SKIP=1 git push ..." >&2
+    exit 1
+fi
+
+exit 0

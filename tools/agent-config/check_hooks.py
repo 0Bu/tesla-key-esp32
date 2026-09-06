@@ -31,6 +31,24 @@ def load_json(relative: str) -> dict[str, Any]:
     return value
 
 
+def check_handler_list(handlers: Any, commands: list[tuple[str, int]], label: str) -> None:
+    if not isinstance(handlers, list) or len(handlers) != len(commands):
+        fail(f"{label} command count drifted")
+    for hook, (command, timeout) in zip(handlers, commands, strict=True):
+        if not isinstance(hook, dict):
+            fail(f"{label} command hook must be an object")
+        if hook.get("async") is True:
+            fail(f"{label} blocking hook must not be async")
+        if set(hook) != {"type", "command", "statusMessage", "timeout"}:
+            fail(f"{label} command keys drifted; blocking hooks must not be async")
+        if hook.get("type") != "command" or hook.get("command") != command:
+            fail(f"{label} command drifted")
+        if not isinstance(hook.get("statusMessage"), str) or not hook["statusMessage"]:
+            fail(f"{label} needs a statusMessage")
+        if hook.get("timeout") != timeout:
+            fail(f"{label} timeout drifted")
+
+
 def command_hook(
     group: Any,
     *,
@@ -46,21 +64,7 @@ def command_hook(
     if group.get("matcher") != matcher:
         fail(f"{label} matcher drifted")
     hooks = group.get("hooks")
-    if not isinstance(hooks, list) or len(hooks) != len(commands):
-        fail(f"{label} command count drifted")
-    for hook, (command, timeout) in zip(hooks, commands, strict=True):
-        if not isinstance(hook, dict):
-            fail(f"{label} command hook must be an object")
-        if hook.get("async") is True:
-            fail(f"{label} blocking hook must not be async")
-        if set(hook) != {"type", "command", "statusMessage", "timeout"}:
-            fail(f"{label} command keys drifted; blocking hooks must not be async")
-        if hook.get("type") != "command" or hook.get("command") != command:
-            fail(f"{label} command drifted")
-        if not isinstance(hook.get("statusMessage"), str) or not hook["statusMessage"]:
-            fail(f"{label} needs a statusMessage")
-        if hook.get("timeout") != timeout:
-            fail(f"{label} timeout drifted")
+    check_handler_list(hooks, commands, label)
 
 
 codex = load_json(".codex/hooks.json")
@@ -111,6 +115,50 @@ command_hook(
     commands=[(f"{py} format", 30)], label="Codex formatter",
 )
 
+agents = load_json(".agents/hooks.json")
+expected_agent_sections = {"capabilities", "pre-tool-guards", "post-tool-formatter", "stop-tests"}
+if (
+    not isinstance(agents, dict)
+    or set(agents) != expected_agent_sections
+    or any(not isinstance(v, dict) for v in agents.values())
+):
+    fail(".agents/hooks.json must contain only capabilities, pre-tool-guards, post-tool-formatter, and stop-tests objects")
+
+check_handler_list(
+    agents["capabilities"].get("PreInvocation"),
+    [(f"{py} antigravity-pre-invocation", 15)],
+    label="Antigravity PreInvocation",
+)
+check_handler_list(
+    agents["stop-tests"].get("Stop"),
+    [(f"{py} stop-logic-tests", 600)],
+    label="Antigravity Stop",
+)
+pre_tools = agents["pre-tool-guards"].get("PreToolUse")
+if not isinstance(pre_tools, list) or len(pre_tools) != 2:
+    fail("Antigravity PreToolUse group count drifted")
+command_hook(
+    pre_tools[0],
+    matcher="^(?:run_command|view_file|replace_file_content|write_to_file|apply_patch|Read|Edit|MultiEdit|Write|Bash|exec_command|shell|shell_command)$",
+    commands=[(f"{py} pre-tool-guards", 15)],
+    label="Antigravity guard",
+)
+command_hook(
+    pre_tools[1],
+    matcher="^(?:run_command|Bash|exec_command|shell|shell_command|mcp__.*(?:github|GitHub).*)$",
+    commands=[(f'bash "{git_root}/tools/agent-hooks/require-pr-gates.sh"', 180)],
+    label="Antigravity PR policy",
+)
+post_tools = agents["post-tool-formatter"].get("PostToolUse")
+if not isinstance(post_tools, list) or len(post_tools) != 1:
+    fail("Antigravity PostToolUse group count drifted")
+command_hook(
+    post_tools[0],
+    matcher="^(?:replace_file_content|write_to_file|apply_patch|Edit|MultiEdit|Write)$",
+    commands=[(f"{py} format", 30)],
+    label="Antigravity formatter",
+)
+
 core_files = {
     "agent_hook.py", "merge_payload.py", "pr-gate-lib.sh", "require-pr-gates.sh",
     "run_with_timeout.py", "selftest.sh",
@@ -128,8 +176,9 @@ foreign = re.compile(
 for relative in [
     *(f"tools/agent-hooks/{name}" for name in sorted(core_files)),
     ".codex/hooks.json",
+    ".agents/hooks.json",
 ]:
     if foreign.search((root / relative).read_text(encoding="utf-8")):
         fail(f"foreign-project policy residue found in {relative}")
 
-print("agent-hook-config: parsed 5 lifecycle events and exact synchronous Codex dispatch")
+print("agent-hook-config: parsed 5 lifecycle events and exact synchronous Codex and Antigravity dispatch")
