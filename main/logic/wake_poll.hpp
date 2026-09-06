@@ -49,7 +49,10 @@ struct WakePollState {
     bool bootstrap_dispatched = false;  // bootstrap one-shot has already armed for this connection
 
     inline void note_asleep(bool stably_asleep) {
-        if (stably_asleep) armed = true;
+        if (stably_asleep) {
+            armed = true;
+            pending = false;
+        }
     }
 
     inline void note_awake() {
@@ -59,15 +62,11 @@ struct WakePollState {
         }
     }
 
-    inline void note_bootstrap(bool cache_valid) {
-        if (!bootstrap_dispatched && !cache_valid) {
+    inline void note_bootstrap(bool ble_connected, bool cache_valid) {
+        if (!bootstrap_dispatched && ble_connected && !cache_valid) {
             bootstrap_dispatched = true;
             armed = true;
         }
-    }
-
-    inline void note_bootstrap(bool ble_connected, bool cache_valid) {
-        if (ble_connected) note_bootstrap(cache_valid);
     }
 
     inline void note_disconnected() {
@@ -88,30 +87,58 @@ struct WakePollInputs {
     bool       charge_cache_valid = true; // whether charge-state cache is already populated
 };
 
-// Advance the one-shot state machine by one sample; return true iff the loop should fire a single
-// charge_state_poll(NO_WAKE_SKIP) this cycle.
-//   ASLEEP  — once the run is debounce-stable, arm the one-shot (a bare ASLEEP reading does not,
-//             and a bare reading after arming never disarms).
-//   AWAKE   — fire iff armed, then disarm (one poll per wake episode; re-arm needs a fresh run).
-//   UNKNOWN — leave the arm untouched, so a transient link/boot gap neither arms nor fires and
-//             cannot drop an arm that a real wake during the gap should still honour.
-inline bool wake_edge_should_poll(WakePollState& st, const WakePollInputs& in) {
+// Update the WakePollState from this cycle's telemetry sample.
+inline void wake_poll_update(WakePollState& st, const WakePollInputs& in) {
     if (!in.ble_connected) {
         st.note_disconnected();
-        return false;
+        return;
     }
     st.note_bootstrap(in.ble_connected, in.charge_cache_valid);
     switch (in.sample) {
         case WakeSample::Asleep:
             st.note_asleep(in.vcsec_stably_asleep);
-            return false;
+            break;
         case WakeSample::Awake:
             st.note_awake();
-            return st.take_pending();
+            break;
         case WakeSample::Unknown:
         default:
-            return false;
+            break;
     }
+}
+
+struct ChargePollGateInputs {
+    bool paired = false;
+    bool poll_cadence = false;
+    bool ble_connected = false;
+    bool cmd_in_flight = false;
+};
+
+// Decide whether the vehicle loop should fire a background charge-state poll this iteration.
+// The poll fires if the device is paired, connected, queue-idle (!cmd_in_flight), and EITHER:
+//   • poll_cadence is true (10 s periodic refresh within the active window), OR
+//   • a wake-edge or bootstrap poll request is latched in st.pending (issue #264).
+//
+// Crucially, st.take_pending() is ONLY called when the command channel is actually ready to
+// dispatch (ble_connected && !cmd_in_flight). If the channel is blocked — which is always the case
+// on the iteration an ASLEEP→AWAKE edge is discovered via the health probe, because the probe holds
+// cmd_in_flight_ — st.pending remains latched so the poll fires on the subsequent iteration once
+// the probe completes and cmd_in_flight_ drops.
+inline bool charge_poll_should_fire(const ChargePollGateInputs& in, WakePollState& st) {
+    if (in.paired && (in.poll_cadence || st.pending) && in.ble_connected && !in.cmd_in_flight) {
+        st.take_pending();
+        return true;
+    }
+    return false;
+}
+
+// Advance the one-shot state machine by one sample; return true iff a charge poll should fire
+// immediately, assuming channel is idle and connected.
+// Composes wake_poll_update and charge_poll_should_fire so test coverage aligns with the
+// production loop call-site.
+inline bool wake_edge_should_poll(WakePollState& st, const WakePollInputs& in) {
+    wake_poll_update(st, in);
+    return charge_poll_should_fire({true, false, in.ble_connected, false}, st);
 }
 
 }  // namespace tk
