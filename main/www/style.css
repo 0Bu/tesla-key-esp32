@@ -197,7 +197,7 @@ code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
 @keyframes sb3{0%,40%{opacity:.25} 54%,88%{opacity:1} 100%{opacity:.25}}
 @keyframes sb4{0%,62%{opacity:.25} 76%,88%{opacity:1} 100%{opacity:.25}}
 /* BLE "vehicle status unknown" glyph — the link is up but we have no fresh telemetry
-   (link_state unknown/unreachable; the hero shows a neutral grey card). All four bars are
+   (link_state unknown/unreachable; the hero card is hidden entirely). All four bars are
    orange — the same amber family as the setup/connection states — and over a light-orange
    base a DARKER-orange crest ping-pongs edge→edge (bar1→4→1), so a connected-but-stateless
    link reads as "checking" rather than a healthy green link. Each bar's own keyframe bakes
