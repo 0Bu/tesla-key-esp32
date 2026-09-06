@@ -88,21 +88,32 @@ except Exception:
     raise SystemExit(2)
 if not isinstance(value,dict):
     raise SystemExit(2)
+tool_call=value.get("toolCall")
 tool=value.get("tool_name")
+if not tool and isinstance(tool_call,dict):
+    tool=tool_call.get("name")
 tool_input=value.get("tool_input")
+if tool_input is None and isinstance(tool_call,dict):
+    tool_input=tool_call.get("args")
+if tool_input is None:
+    tool_input=value.get("tool_args") or {}
 if not isinstance(tool,str) or not tool.strip() or not isinstance(tool_input,dict):
     raise SystemExit(2)
-commands=[tool_input.get(k) for k in ("command","cmd") if tool_input.get(k) not in (None,"")]
+commands=[tool_input.get(k) for k in ("command","cmd","CommandLine","commandline") if tool_input.get(k) not in (None,"")]
 if any(not isinstance(x,str) for x in commands) or len(dict.fromkeys(commands))>1:
     error="conflicting or non-string command/cmd fields"
     command=""
 else:
     error=""
     command=commands[0] if commands else ""
-cwd=value.get("cwd")
+cwd=value.get("cwd") or tool_input.get("Cwd") or tool_input.get("cwd")
+if not cwd:
+    ws=value.get("workspacePaths")
+    if isinstance(ws,list) and ws and isinstance(ws[0],str) and ws[0]:
+        cwd=ws[0]
 if not isinstance(cwd,str) or not cwd:
     cwd=""
-workdirs=[tool_input.get(k) for k in ("workdir","cwd") if tool_input.get(k) not in (None,"")]
+workdirs=[tool_input.get(k) for k in ("workdir","cwd","Cwd") if tool_input.get(k) not in (None,"")]
 if any(not isinstance(x,str) for x in workdirs) or len(dict.fromkeys(workdirs))>1:
     error=error or "conflicting or non-string workdir/cwd fields"
 else:
@@ -164,7 +175,7 @@ if [ -n "$payload" ]; then
     [ -z "$basic_error" ] || { echo "BLOCKED: $basic_error" >&2; exit 2; }
     tool_lower="$(printf '%s' "$tool" | tr '[:upper:]' '[:lower:]')"
     case "$tool_lower" in
-      bash|exec_command|shell|shell_command)
+      bash|exec_command|shell|shell_command|run_command)
         [ -n "$cmd" ] || { echo "BLOCKED: shell hook payload has no command." >&2; exit 2; }
         records="$(gate_bash_actions "$cmd")"
         # A merge-looking action not classified by the stricter parser is a parser disagreement.

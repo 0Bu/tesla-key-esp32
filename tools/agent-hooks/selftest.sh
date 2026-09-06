@@ -20,8 +20,15 @@ import json,sys
 print(json.dumps({"tool_name":sys.argv[1],"cwd":sys.argv[4],"tool_input":{sys.argv[2]:sys.argv[3]}}))
 PY
 }
+ag_payload(){ python3 - "$@" <<'PY'
+import json,sys
+print(json.dumps({"conversationId":"ag-test","workspacePaths":[sys.argv[4]],"toolCall":{"name":sys.argv[1],"args":{sys.argv[2]:sys.argv[3]}}}))
+PY
+}
 verdict(){ local out; out="$(printf '%s' "$1" | python3 "$hook" pre-tool-guards)" || return 3; if [ -z "$out" ]; then printf allow; else printf '%s' "$out" | python3 -c 'import json,sys; print(json.load(sys.stdin)["hookSpecificOutput"]["permissionDecision"])'; fi; }
+ag_verdict(){ local out; out="$(printf '%s' "$1" | python3 "$hook" pre-tool-guards)" || return 3; if [ -z "$out" ]; then printf allow; else printf '%s' "$out" | python3 -c 'import json,sys; print(json.load(sys.stdin)["decision"])'; fi; }
 expect_guard(){ local got; got="$(verdict "$2" 2>/dev/null)" || got=invalid; if [ "$got" = "$1" ]; then pass_case "$3"; else fail_case "$3 (want=$1 got=$got)"; fi; }
+expect_ag_guard(){ local got; got="$(ag_verdict "$2" 2>/dev/null)" || got=invalid; if [ "$got" = "$1" ]; then pass_case "$3"; else fail_case "$3 (want=$1 got=$got)"; fi; }
 sha="$(git -C "$root" rev-parse HEAD)"
 short_sha="$(printf '%s' "$sha" | cut -c1-12)"
 upper_sha="$(printf '%s' "$sha" | tr 'a-f' 'A-F')"
@@ -94,6 +101,54 @@ expect_guard deny "$(payload Bash command 'cat source > partitions.csv' "$root")
 expect_guard deny "$(payload write_to_file TargetFile partitions.csv "$root")" 'Antigravity write_to_file partition write denied'
 expect_guard deny "$(payload replace_file_content TargetFile partitions.csv "$root")" 'Antigravity replace_file_content partition mutation denied'
 
+ag_os_payload="$(python3 - "$root" <<'PY'
+import json,sys
+print(json.dumps({
+  "conversationId":"test",
+  "workspacePaths":[sys.argv[1]],
+  "toolCall":{"name":"write_to_file","args":{"TargetFile":"sdkconfig.defaults","CodeContent":"CONFIG_COMPILER_OPTIMIZATION_SIZE=y"}},
+}))
+PY
+)"
+expect_guard deny "$ag_os_payload" 'CONFIG_COMPILER_OPTIMIZATION_SIZE=y denied'
+expect_ag_guard deny "$ag_os_payload" 'Antigravity top-level decision deny for -Os'
+
+ag_mc_payload="$(python3 - "$root" <<'PY'
+import json,sys
+print(json.dumps({
+  "conversationId":"test",
+  "workspacePaths":[sys.argv[1]],
+  "toolCall":{"name":"write_to_file","args":{"TargetFile":"managed_components/yoziru__tesla-ble/src/ble.c","CodeContent":"void f(){}"}},
+}))
+PY
+)"
+expect_guard deny "$ag_mc_payload" 'write to managed_components denied'
+expect_ag_guard deny "$ag_mc_payload" 'Antigravity top-level decision deny for managed_components'
+
+ag_logic_payload="$(python3 - "$root" <<'PY'
+import json,sys
+print(json.dumps({
+  "conversationId":"test",
+  "workspacePaths":[sys.argv[1]],
+  "toolCall":{"name":"write_to_file","args":{"TargetFile":"main/logic/units.hpp","CodeContent":"#include <esp_log.h>"}},
+}))
+PY
+)"
+expect_guard deny "$ag_logic_payload" 'ESP-IDF include in main/logic denied'
+expect_ag_guard deny "$ag_logic_payload" 'Antigravity top-level decision deny for pure-logic IDF include'
+
+ag_xss_payload="$(python3 - "$root" <<'PY'
+import json,sys
+print(json.dumps({
+  "conversationId":"test",
+  "workspacePaths":[sys.argv[1]],
+  "toolCall":{"name":"write_to_file","args":{"TargetFile":"main/www/app.js","CodeContent":"eval(dangerousCode)"}},
+}))
+PY
+)"
+expect_guard deny "$ag_xss_payload" 'eval in main/www/app.js denied'
+expect_ag_guard deny "$ag_xss_payload" 'Antigravity top-level decision deny for eval in web UI'
+
 if python3 - "$root" "$hook" <<'PY'
 import importlib.util,pathlib,sys
 spec=importlib.util.spec_from_file_location("h",sys.argv[2]); m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
@@ -123,7 +178,10 @@ def invoke(script_result=R(), missing_tool=None, timeout=False):
       return script_result
     return R(1,"")
   m.subprocess.run=run
-  m.shutil.which=lambda tool: None if tool==missing_tool else "/usr/bin/tool"
+  def mock_which(tool):
+    if missing_tool=="compiler" and tool in ("g++","clang++"): return None
+    return None if tool==missing_tool else "/usr/bin/tool"
+  m.shutil.which=mock_which
   old_stdin=sys.stdin; sys.stdin=io.StringIO("{}"); output=io.StringIO()
   try:
     with contextlib.redirect_stdout(output): rc=m.run_stop_logic_tests(type("A",(),{})())
@@ -131,11 +189,18 @@ def invoke(script_result=R(), missing_tool=None, timeout=False):
   return rc,output.getvalue(),calls
 rc,out,calls=invoke()
 assert rc==0 and not out and any(c==[str(script),"--require-all"] for c in calls)
-for kwargs in ({"missing_tool":"git"},{"missing_tool":"python3"},{"missing_tool":"cmake"},
-               {"script_result":R(9,"failed")},{"timeout":True}):
+for kwargs in ({"missing_tool":"git"},{"missing_tool":"python3"},{"missing_tool":"cmake"},{"missing_tool":"node"},
+               {"missing_tool":"compiler"},{"script_result":R(9,"failed")},{"timeout":True}):
   rc,out,_=invoke(**kwargs); assert rc==0 and json.loads(out)["decision"]=="block"
 script.unlink()
 rc,out,_=invoke(); assert rc==0 and json.loads(out)["decision"]=="block"
+old_stdin=sys.stdin; sys.stdin=io.StringIO('{"conversationId":"ag-123"}'); output=io.StringIO()
+try:
+  with contextlib.redirect_stdout(output): rc=m.run_stop_logic_tests(type("A",(),{})())
+finally: sys.stdin=old_stdin
+ag_out=json.loads(output.getvalue())
+assert rc==0 and ag_out["decision"]=="continue" and ag_out["hookSpecificOutput"]["permissionDecision"]=="block"
+assert any("tools/display_sim.py" in str(arg) for call in calls for arg in call)
 PY
 then pass_case 'Stop hook requires strict tools/script and blocks failure/timeout'; else fail_case 'Stop strict fail-closed contract'; fi
 
@@ -303,6 +368,22 @@ printf '%s\n' '- [x] $skill-audit clean — PR create/push gate @ '"$sha" >"$tmp
 payload exec_command cmd "gh pr create --body-file $tmp/create-no-hygiene.md" "$root" >"$tmp/create-no-hygiene.json"
 expect_rc 2 'gh pr create requires pr-hygiene' "$gate" --project-dir "$root" --payload-file "$tmp/create-no-hygiene.json"
 
+ag_push="$(python3 - "$root" <<'PY'
+import json,sys
+print(json.dumps({"conversationId":"test","workspacePaths":[sys.argv[1]],"toolCall":{"name":"run_command","args":{"CommandLine":"git push origin branch","Cwd":sys.argv[1]}}}))
+PY
+)"
+printf '%s' "$ag_push" >"$tmp/ag-push.json"
+expect_rc 2 'Antigravity run_command git push without gates blocked' "$gate" --project-dir "$root" --payload-file "$tmp/ag-push.json"
+
+ag_status="$(python3 - "$root" <<'PY'
+import json,sys
+print(json.dumps({"conversationId":"test","workspacePaths":[sys.argv[1]],"toolCall":{"name":"run_command","args":{"CommandLine":"git status --short","Cwd":sys.argv[1]}}}))
+PY
+)"
+printf '%s' "$ag_status" >"$tmp/ag-status.json"
+expect_rc 0 'Antigravity run_command normal command allowed' "$gate" --project-dir "$root" --payload-file "$tmp/ag-status.json"
+
 mkdir -p "$worktree_tmp" "$worktree_test_tmp"
 printf '%s\n' '- [x] $skill-audit clean — PR create/push gate @ '"$sha" '- [x] $pr-hygiene clean — content gate @ '"$sha" >"$worktree_tmp/body.md"
 printf '%s\n' '- [ ] $skill-audit clean — PR create/push gate @ '"$sha" >"$worktree_test_tmp/body.md"
@@ -360,7 +441,7 @@ sleep 1.2
 [ "$timeout_rc" = 124 ] && [ ! -e "$timeout_marker" ] && pass_case 'inner timeout kills SIGTERM-ignoring descendants' || fail_case 'timeout descendant escaped'
 expect_rc 2 'invalid timeout rejected' python3 "$runner" invalid true
 
-if python3 - "$root/.codex/hooks.json" "$root/.codex/config.toml" <<'PY'
+if python3 - "$root/.codex/hooks.json" "$root/.codex/config.toml" "$root/.agents/hooks.json" <<'PY'
 import copy,json,sys,tomllib
 expected={"SessionStart","SubagentStart","Stop","PreToolUse","PostToolUse"}
 def validate(data):
@@ -389,8 +470,26 @@ mutated=tomllib.loads(text.decode().replace("hooks = true","hooks = false",1))
 try: validate_features(mutated); raise AssertionError("disabled hooks accepted")
 except AssertionError as exc:
   if str(exc)=="disabled hooks accepted": raise
+
+ag=json.load(open(sys.argv[3]))
+assert "description" not in ag
+assert set(ag)=={"capabilities","pre-tool-guards","post-tool-formatter","stop-tests"}
+for g in ag["pre-tool-guards"]["PreToolUse"]:
+  m=g.get("matcher")
+  assert m and m.startswith("^") and m.endswith("$")
+  for h in g["hooks"]:
+    assert h["type"]=="command" and h.get("async") is not True and h["timeout"]>0
+for g in ag["post-tool-formatter"]["PostToolUse"]:
+  m=g.get("matcher")
+  assert m and m.startswith("^") and m.endswith("$")
+  for h in g["hooks"]:
+    assert h["type"]=="command" and h.get("async") is not True and h["timeout"]>0
+for h in ag["capabilities"]["PreInvocation"]:
+  assert h["type"]=="command" and h.get("async") is not True and h["timeout"]>0
+for h in ag["stop-tests"]["Stop"]:
+  assert h["type"]=="command" and h.get("async") is not True and h["timeout"]>0
 PY
-then pass_case 'Codex schema plus disabled-hook, async, and matcher mutation canaries'; else fail_case 'Codex hook schema'; fi
+then pass_case 'Codex and Antigravity hook schemas plus mutation canaries'; else fail_case 'Hook schemas'; fi
 
 if python3 - "$root" <<'PY'
 import pathlib,re,sys
@@ -398,7 +497,7 @@ root=pathlib.Path(sys.argv[1])
 fragments=[("dai","kin"),("x10","a"),("heat.?","pump"),("hp_","modbus"),
            ("victoria","logs"),("schema","tic"),("ab","sence"),("ui-use-","case")]
 pattern=re.compile("|".join(left+right for left,right in fragments),re.I)
-paths=[root/".codex/hooks.json"]
+paths=[root/".codex/hooks.json", root/".agents/hooks.json"]
 for directory in (root/"tools/agent-hooks",):
   paths.extend(path for path in directory.rglob("*") if path.is_file())
 for path in paths:
@@ -411,7 +510,8 @@ then pass_case 'neutral core has no foreign-project policy residue'; else fail_c
 
 if python3 -m py_compile "$hook" "$parser" "$runner" \
   && bash -n "$root/tools/agent-hooks/"*.sh \
-  && python3 -m json.tool "$root/.codex/hooks.json" >/dev/null; then pass_case 'Python, Bash, JSON syntax'; else fail_case 'syntax'; fi
+  && python3 -m json.tool "$root/.codex/hooks.json" >/dev/null \
+  && python3 -m json.tool "$root/.agents/hooks.json" >/dev/null; then pass_case 'Python, Bash, JSON syntax'; else fail_case 'syntax'; fi
 
 printf '\nagent hook self-test: %s passed, %s failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]
