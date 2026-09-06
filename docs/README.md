@@ -84,6 +84,14 @@ git clone https://github.com/0Bu/tesla-key-esp32.git && cd tesla-key-esp32
 # Or reproduce the complete unsigned four-target CI build + ELF/map/size diagnostics:
 ./scripts/idf-docker.sh ./scripts/ci-build-all.sh local
 
+# Cloud/remote session (docker CLI but no engine): bring up an engine that runs the SAME pinned
+# digest first, then build as usual. It configures a digest-identical Docker Hub pull-through
+# mirror when the network policy blocks Docker Hub's CDN, and idf-docker.sh routes the build
+# container through the host egress proxy. A full build also needs the policy to allow the ESP
+# Component Registry (components.espressif.com) and GitHub.
+./scripts/start-docker-daemon.sh --pull       # start engine + pre-pull the pinned image
+IDF_AUTO_DOCKERD=1 ./scripts/idf-docker.sh ./scripts/ci-build-all.sh local   # or start it explicitly
+
 # Acceleration options:
 # 1. Compile in high-speed container-native volume (eliminates macOS VirtioFS I/O latency):
 IDF_FAST_BUILD=1 ./scripts/idf-docker.sh idf.py build

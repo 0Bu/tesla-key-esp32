@@ -1,8 +1,9 @@
 <!--
 Fill in each section below. Delete checklist lines that don't apply to this change.
 This template is used by human authors and coding agents — keep it short and honest:
-say what was actually verified, and note anything that couldn't be (a cloud session
-cannot build or USB-flash — see AGENTS.md).
+say what was actually verified, and note anything that couldn't be (a cloud session can build only
+after `scripts/start-docker-daemon.sh` and only if the network policy allows the ESP Component
+Registry; it can never USB-flash — see AGENTS.md).
 -->
 
 ## Summary
@@ -19,7 +20,7 @@ cannot build or USB-flash — see AGENTS.md).
 <!-- How this was checked. State what ran and what couldn't (e.g. no build in a cloud session). -->
 - [ ] `scripts/run-mock-tests.sh` passes (host-side logic tests — CI's `logic-test` gate)
 - [ ] `tools/agent-config/selftest.sh` passes when agent config, skills, or hooks changed
-- [ ] Firmware built (`scripts/idf-docker.sh idf.py build`, or relied on CI) — N/A in a cloud session (no Docker daemon / no USB)
+- [ ] Firmware built (`scripts/idf-docker.sh idf.py build`, or relied on CI) — in a cloud session run `scripts/start-docker-daemon.sh` first; a full build also needs the network policy to allow `components.espressif.com` (else rely on CI)
 - [ ] Firmware size budget verified (`scripts/check-firmware-size.sh`) — within 64 KiB boundary and reviewed baseline
 
 ## Checklist

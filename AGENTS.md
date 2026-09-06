@@ -60,8 +60,15 @@ task touches them:
   at 1.5 CPU and 1800 MiB so co-resident services retain capacity. Do not bypass or raise those
   limits during ordinary builds. A host mock result is not an IDF build; an IDF build is not a
   signed image; a signed image is not a flash; a flash is not runtime or vehicle proof.
-- A remote runner may have neither Docker nor USB. Report capabilities rather than manufacturing
-  evidence. Do not bypass a missing boundary with an unpinned toolchain.
+- A remote/cloud runner starts with the `docker` CLI but no running engine, and no USB.
+  `scripts/start-docker-daemon.sh` provisions an engine that runs the SAME pinned digest — using a
+  digest-identical Docker Hub pull-through mirror (`mirror.gcr.io`) when the network policy blocks
+  Docker Hub's blob CDN — so remote builds stay pinned. `scripts/idf-docker.sh` then routes the
+  build container through the host egress proxy (only when `HTTPS_PROXY` is set) so the in-container
+  Component Manager can fetch dependencies. A full build additionally needs the environment's
+  network policy to allow the ESP Component Registry (`components.espressif.com`) and GitHub; if the
+  registry is blocked, report the blocked host — never unpin, vendor, or route around the policy to
+  get past it. Report capabilities rather than manufacturing evidence.
 - Keep evidence separate in reports: host tests, four-target CI-equivalent build, disposable-key
   signing contract, remote CI, hardware/USB, OTA, vehicle/live API and browser/visual checks.
   State **not run** for every boundary not exercised.
@@ -80,6 +87,7 @@ scripts/run-sanitizer-tests.sh               # Linux ASan + UBSan + LSan + fuzz/
 scripts/test-build-contracts.sh              # pins, targets, partitions and CI/release contracts
 scripts/test-pr-gates.sh                     # PR command/record policy canaries
 tools/agent-config/selftest.sh                # runner mapping/config/hook mutation canaries
+scripts/start-docker-daemon.sh               # cloud/remote session ONLY: bring up the pinned engine
 scripts/idf-docker.sh idf.py -B build set-target esp32s3 build
 scripts/idf-docker.sh ./scripts/ci-build-verify.sh "$(cat version.txt)" "$(git rev-parse HEAD)"
                                                # four targets + disposable signing +

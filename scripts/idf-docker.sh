@@ -24,6 +24,24 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 image="$("$repo_root/scripts/idf-version.sh" --image)"
 echo "idf-docker: using ${image} (from esp-idf-toolchain.txt)" >&2
 
+# Preflight: in a cloud/remote session the docker CLI is installed but no engine
+# is running, so every docker command below would fail opaquely. Provide the
+# pinned-image boundary instead — point to (or, with IDF_AUTO_DOCKERD=1, run) the
+# engine provisioner, which still uses the exact pinned digest. The `daemon`
+# sub-commands manage/inspect the accelerator container and must keep working (or
+# no-op) without an engine, so they are exempt.
+if [ "${1:-}" != "daemon" ] && ! docker info >/dev/null 2>&1; then
+  if [ "${IDF_AUTO_DOCKERD:-0}" = "1" ]; then
+    echo "idf-docker: no Docker engine reachable; provisioning one (IDF_AUTO_DOCKERD=1)..." >&2
+    "$repo_root/scripts/start-docker-daemon.sh" >&2
+  else
+    echo "idf-docker: no Docker engine reachable at unix:///var/run/docker.sock." >&2
+    echo "idf-docker: in a cloud/remote session start the pinned-image engine first:" >&2
+    echo "idf-docker:   scripts/start-docker-daemon.sh    (or re-run with IDF_AUTO_DOCKERD=1)" >&2
+    exit 1
+  fi
+fi
+
 # Interactive TTY only when actually attached, so `menuconfig` works from a
 # terminal but piped/automated runs (e.g. `... | tail`) don't break.
 tty_flags=()
@@ -79,6 +97,36 @@ if [ "$is_authoritative_gate" -eq 0 ] && [ "${CCACHE_DISABLE:-0}" != "1" ]; then
   )
 fi
 
+# Egress proxy for the build container. On the host of a policy-proxied session (e.g. a
+# Claude Code cloud session) HTTPS_PROXY and a CA are set, but a build container inherits
+# neither — so the in-container ESP-IDF Component Manager (Python/requests) and git cannot
+# fetch managed components (espressif/mdns) or the pinned tesla-ble source. Route the
+# container through the SAME host proxy (never around its policy) so those reach whatever
+# egress policy allows. Guarded on HTTPS_PROXY, so CI (no proxy) and local Docker Desktop
+# stay byte-for-byte unchanged. --network host lets the container reach a proxy bound to the
+# host loopback; the CA is mounted read-only and pointed at by the Go/curl/requests/pip vars.
+# These affect dependency transport only, never compiler inputs, so reproducibility holds.
+proxy_env=()
+proxy_run_flags=()
+if [ -n "${HTTPS_PROXY:-}" ]; then
+  proxy_run_flags+=(--network host)
+  proxy_env+=(-e "HTTPS_PROXY=${HTTPS_PROXY}" -e "https_proxy=${HTTPS_PROXY}")
+  if [ -n "${NO_PROXY:-}" ]; then
+    proxy_env+=(-e "NO_PROXY=${NO_PROXY}" -e "no_proxy=${NO_PROXY}")
+  fi
+  proxy_ca="${SSL_CERT_FILE:-/root/.ccr/ca-bundle.crt}"
+  if [ -f "$proxy_ca" ]; then
+    proxy_run_flags+=(-v "$proxy_ca":/tmp/agent-proxy-ca.crt:ro)
+    proxy_env+=(
+      -e SSL_CERT_FILE=/tmp/agent-proxy-ca.crt
+      -e CURL_CA_BUNDLE=/tmp/agent-proxy-ca.crt
+      -e REQUESTS_CA_BUNDLE=/tmp/agent-proxy-ca.crt
+      -e PIP_CERT=/tmp/agent-proxy-ca.crt
+      -e GIT_SSL_CAINFO=/tmp/agent-proxy-ca.crt
+    )
+  fi
+fi
+
 # Fast-Build: mount a dedicated Docker volume at /build_cache to avoid macOS VirtioFS I/O latency.
 vol_flags=()
 if [ "${IDF_FAST_BUILD:-0}" = "1" ] || [ "${1:-}" = "daemon" ]; then
@@ -105,6 +153,8 @@ if [ "${1:-}" = "daemon" ]; then
       echo "idf-docker: starting background daemon ($daemon_name)..."
       docker run -d --name "$daemon_name" \
         --cpus 1.5 --memory 1800m \
+        ${proxy_run_flags[@]+"${proxy_run_flags[@]}"} \
+        ${proxy_env[@]+"${proxy_env[@]}"} \
         ${vol_flags[@]+"${vol_flags[@]}"} \
         "${mount_flags[@]}" -w /project \
         -u "$(id -u):$(id -g)" -e HOME=/tmp \
@@ -163,6 +213,7 @@ if [ "$is_authoritative_gate" -eq 0 ] && ([ "${IDF_DOCKER_DAEMON:-0}" = "1" ] ||
     "$0" daemon start >&2
   fi
   exec docker exec ${tty_flags[@]+"${tty_flags[@]}"} \
+    ${proxy_env[@]+"${proxy_env[@]}"} \
     ${extra_env[@]+"${extra_env[@]}"} \
     "$daemon_name" \
     bash -c 'if [ -f /tmp/esp_env.sh ]; then . /tmp/esp_env.sh; else . /opt/esp/entrypoint.sh true; fi; exec "$@"' -- "${run_cmd[@]}"
@@ -176,6 +227,8 @@ fi
 # user a writable home; GIT_CONFIG safe.directory='*' avoids git "dubious ownership" on the
 # mounted repo and on /opt/esp/idf.
 exec docker run --rm --cpus 1.5 --memory 1800m ${tty_flags[@]+"${tty_flags[@]}"} \
+  ${proxy_run_flags[@]+"${proxy_run_flags[@]}"} \
+  ${proxy_env[@]+"${proxy_env[@]}"} \
   ${vol_flags[@]+"${vol_flags[@]}"} \
   "${mount_flags[@]}" -w /project \
   -u "$(id -u):$(id -g)" -e HOME=/tmp \
