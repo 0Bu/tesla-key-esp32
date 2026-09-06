@@ -1063,6 +1063,18 @@ def require_status_production_seams(producer: str, handler: str) -> None:
             raise AssertionError(f"/status handler bypasses tested production seam {token!r}")
 
 
+def require_vehicle_data_production_seams(handler: str) -> None:
+    # /vehicle_data must serialize charge_state through the SAME emitter the host test
+    # (test_logic.cpp::test_vehicle_data) drives, so the evcc field contract is guarded by
+    # the mock build instead of a hand-rolled JSON copy that can silently drift. Mirrors the
+    # /status seam above (build_status_object -> StatusJsonEmitter + emit_status). Scrub first
+    # so a token that appears only in a comment can never satisfy a production seam.
+    code = scrub_cpp(handler)
+    for token in ("tk::StatusJsonEmitter", "tk::emit_vehicle_charge_state", "e.release()"):
+        if token not in code:
+            raise AssertionError(f"/vehicle_data handler bypasses tested production seam {token!r}")
+
+
 def require_diag_dump_completion_contract(handler: str, diag_header: str,
                                           diag_source: str,
                                           runtime_tests: str) -> None:
@@ -3385,6 +3397,7 @@ def require_runtime_source_contracts() -> None:
     require_status_production_seams(
         function_body("build_status_object"), function_body("handle_status")
     )
+    require_vehicle_data_production_seams(function_body("handle_vehicle_data"))
     require_diag_dump_completion_contract(
         function_body("handle_diag"),
         (MAIN / "diag_log.hpp").read_text(encoding="utf-8"),
@@ -4112,6 +4125,18 @@ def self_test_canaries(tasks: set[str], callbacks: set[str]) -> None:
             pass
         else:
             raise AssertionError(f"/status seam-removal mutation passed unexpectedly: {token}")
+
+    vehicle_data_handler = function_body("handle_vehicle_data")
+    for token in ("tk::StatusJsonEmitter", "tk::emit_vehicle_charge_state", "e.release()"):
+        # Replace every occurrence (the handler comment names the seams too): the canary must
+        # remove the real production callsite, not just a comment mention, to prove the guard bites.
+        mutated_vd = vehicle_data_handler.replace(token, "fixture_vehicle_data_bypass")
+        try:
+            require_vehicle_data_production_seams(mutated_vd)
+        except AssertionError:
+            pass
+        else:
+            raise AssertionError(f"/vehicle_data seam-removal mutation passed unexpectedly: {token}")
 
     route_dispatch = function_body("handle_all_dispatch")
     route_mutations = (
