@@ -4081,7 +4081,18 @@ static void test_redact() {
     CHECK(mqtt.find("base topic ") != std::string::npos);
     CHECK(mqtt.find("HA prefix homeassistant") != std::string::npos);
 
-    CHECK(tk::kDiagRedactionCount > 0);
+    // Device LAN IP lines (WiFi and Ethernet from net.cpp).
+    const std::string ip_wifi = tk::redact_diag_line(
+        "I (51230) net: IP: 192.168.1.42\n");
+    CHECK(ip_wifi.find("192.168.1.42") == std::string::npos);
+    CHECK(ip_wifi.find("net: IP: ") != std::string::npos);
+
+    const std::string ip_eth = tk::redact_diag_line(
+        "I (51230) net: IP: 192.168.1.42 (eth)\n");
+    CHECK(ip_eth.find("192.168.1.42") == std::string::npos);
+    CHECK(ip_eth.find("net: IP: ") != std::string::npos);
+
+    CHECK(tk::kDiagRedactionCount == 17);
     CHECK(tk::kRedactedStatusFields == 6);
 }
 
