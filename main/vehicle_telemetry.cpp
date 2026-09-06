@@ -601,7 +601,6 @@ void VehicleController::loop_task_fn_(void* arg) {
     bool     prev_window        = false;  // edge-detect the active window
     auto     prev_sleep         = TeslaBLE::SleepState::UNKNOWN;  // edge-detect VCSEC sleep flag
     tk::WakePollState wake_poll{};         // one-shot charge poll on the VCSEC wake edge (#264)
-    bool     wake_poll_pending  = false;   // latched fire request until connected & queue-idle
     while (true) {
       // Feed the task watchdog FIRST and UNCONDITIONALLY, before anything that can block or throw.
       // Gating it on the work below would make a long-but-legitimate command look like a hang; put
@@ -838,33 +837,25 @@ void VehicleController::loop_task_fn_(void* arg) {
             TeslaBLE::SleepState st = static_cast<TeslaBLE::SleepState>(
                 self->vcsec_sleep_state_.load());
             if (st != prev_sleep) {
-                ESP_LOGI(TAG, "VCSEC sleep flag: %s",
-                         st == TeslaBLE::SleepState::ASLEEP ? "ASLEEP"
-                       : st == TeslaBLE::SleepState::AWAKE  ? "AWAKE" : "UNKNOWN");
+                ESP_LOGI(TAG, "VCSEC sleep flag: %s", self->vcsec_sleep_raw());
                 prev_sleep = st;
             }
-            if (st == TeslaBLE::SleepState::ASLEEP)     self->note_vcsec_sleep_(true);
-            else if (st == TeslaBLE::SleepState::AWAKE)  self->note_vcsec_sleep_(false);
-            // UNKNOWN: leave the run untouched.
-
-            // One-shot charge poll on the VCSEC wake edge (issue #264). Arm only after a DEBOUNCED
-            // ASLEEP run (reusing kAsleepDebounceS, the same debounce link_state() trusts), so the
-            // ~60 s COP AWAKE↔ASLEEP flap and UNKNOWN→AWAKE at boot can't fire it; then request
-            // exactly one poll the next time the car wakes itself (cable plug-in, door, app). The
-            // decision is host-tested in logic/wake_poll.hpp; this site only samples and latches.
-            const tk::WakeSample wake_sample =
-                st == TeslaBLE::SleepState::ASLEEP ? tk::WakeSample::Asleep
-              : st == TeslaBLE::SleepState::AWAKE  ? tk::WakeSample::Awake
-                                                   : tk::WakeSample::Unknown;
-            if (tk::wake_edge_should_poll(
-                    wake_poll, {wake_sample, self->vcsec_stably_asleep_(tk::kAsleepDebounceS)})) {
-                wake_poll_pending = true;
+            if (st == TeslaBLE::SleepState::ASLEEP) {
+                self->note_vcsec_sleep_(true);
+                // One-shot charge poll on the VCSEC wake edge (issue #264). Arm only after a DEBOUNCED
+                // ASLEEP run (reusing kAsleepDebounceS, the same debounce link_state() trusts), so the
+                // ~60 s COP AWAKE↔ASLEEP flap and UNKNOWN→AWAKE at boot can't fire it; then request
+                // exactly one poll the next time the car wakes itself (cable plug-in, door, app).
+                wake_poll.note_asleep(self->vcsec_stably_asleep_(tk::kAsleepDebounceS));
+            } else if (st == TeslaBLE::SleepState::AWAKE) {
+                self->note_vcsec_sleep_(false);
+                wake_poll.note_awake();
             }
+            // UNKNOWN: leave the run untouched.
         } else {
             // Unpaired: the sampler above does not run, so retire any armed edge and pending
             // request rather than carry them across a pairing reset.
             wake_poll = {};
-            wake_poll_pending = false;
         }
 
         // ── Active-window gate ──────────────────────────────────────────────────────────
@@ -903,7 +894,7 @@ void VehicleController::loop_task_fn_(void* arg) {
 
         // Falling edge: window just closed → drop the link once so the car can sleep.
         if (paired && prev_window && !window && self->ble_connected()) {
-            ESP_LOGI(TAG, "idle: no command and not charging — dropping BLE link so the car can sleep");
+            ESP_LOGI(TAG, "idle: dropping link so car can sleep");
             self->ble_->disconnect();
         }
         // Rising edge: window just opened → refresh the cache promptly (reset throttles).
@@ -929,13 +920,9 @@ void VehicleController::loop_task_fn_(void* arg) {
         //     the cadence already covers it, so the pending request is just consumed.
         // Both use the same NO_WAKE_SKIP poll: a car already back asleep is skipped, so we only
         // ride a wake the car performed itself, and an idle car is still left to sleep.
-        if (window) wake_poll_pending = false;  // in-window cadence below already refreshes it
-        const bool charge_due =
-            paired && self->ble_connected() && !self->cmd_in_flight_.load() &&
-            ((window && now_ticks - last_poll_ticks > pdMS_TO_TICKS(10000)) || wake_poll_pending);
-        if (charge_due) {
-            if (window) last_poll_ticks = now_ticks;  // wake-edge poll does not reset the cadence
-            wake_poll_pending = false;
+        const bool poll_cadence = window && (now_ticks - last_poll_ticks > pdMS_TO_TICKS(10000));
+        if (paired && (poll_cadence || wake_poll.take_pending()) && self->ble_connected() && !self->cmd_in_flight_.load()) {
+            if (poll_cadence) last_poll_ticks = now_ticks;
             ESP_LOGD(TAG, "background charge-state refresh…");
             // Fire-and-forget poll. We must NOT block here: this task also pumps
             // vehicle_->loop(), which drives the command's transmission/retries. The

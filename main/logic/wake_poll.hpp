@@ -36,7 +36,25 @@ enum class WakeSample : uint8_t { Unknown, Asleep, Awake };
 // State the vehicle loop carries across iterations. Zero-initialized is the correct
 // "just booted, nothing observed yet, not armed" starting point.
 struct WakePollState {
-    bool armed = false;  // a debounced-asleep run has completed; the next AWAKE fires one poll
+    bool armed = false;    // a debounced-asleep run has completed; the next AWAKE fires one poll
+    bool pending = false;  // latched fire request until connected & queue-idle
+
+    inline void note_asleep(bool stably_asleep) {
+        if (stably_asleep) armed = true;
+    }
+
+    inline void note_awake() {
+        if (armed) {
+            armed = false;
+            pending = true;
+        }
+    }
+
+    inline bool take_pending() {
+        const bool p = pending;
+        pending = false;
+        return p;
+    }
 };
 
 struct WakePollInputs {
@@ -54,13 +72,11 @@ struct WakePollInputs {
 inline bool wake_edge_should_poll(WakePollState& st, const WakePollInputs& in) {
     switch (in.sample) {
         case WakeSample::Asleep:
-            if (in.vcsec_stably_asleep) st.armed = true;
+            st.note_asleep(in.vcsec_stably_asleep);
             return false;
-        case WakeSample::Awake: {
-            const bool fire = st.armed;
-            st.armed = false;
-            return fire;
-        }
+        case WakeSample::Awake:
+            st.note_awake();
+            return st.take_pending();
         case WakeSample::Unknown:
         default:
             return false;
