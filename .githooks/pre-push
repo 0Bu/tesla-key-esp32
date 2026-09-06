@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Git pre-push hook for tesla-key-esp32.
-# Enforces PR branch policy and checklist evidence before pushing to remote.
+# Enforces PR branch policy, checklist evidence, and firmware size validation before pushing to remote.
 set -euo pipefail
 
 root="$(git rev-parse --show-toplevel)"
@@ -18,6 +18,35 @@ if [ "$current_branch" = "main" ]; then
     echo "BLOCKED by pre-push: direct push to main branch is prohibited; open a pull request instead." >&2
     exit 1
 fi
+
+# Read standard pre-push stdin: <local_ref> <local_sha> <remote_ref> <remote_sha>
+has_firmware_changes=0
+zero_sha="0000000000000000000000000000000000000000"
+
+while read -r local_ref local_sha remote_ref remote_sha; do
+  # Skip branch deletions
+  if [[ "$local_sha" == "$zero_sha" ]]; then
+    continue
+  fi
+
+  # Determine diff base
+  if [[ "$remote_sha" == "$zero_sha" ]]; then
+    # New remote branch: compare against origin/main or HEAD~1
+    if git rev-parse --verify origin/main >/dev/null 2>&1; then
+      diff_range="origin/main...$local_sha"
+    else
+      diff_range="HEAD~1...$local_sha"
+    fi
+  else
+    diff_range="$remote_sha...$local_sha"
+  fi
+
+  changed_files="$(git diff --name-only "$diff_range" 2>/dev/null || true)"
+  if printf '%s\n' "$changed_files" | grep -Eq '^(main/|CMakeLists\.txt$|sdkconfig|partitions\.csv$|scripts/ci-build-all\.sh$)'; then
+    has_firmware_changes=1
+    break
+  fi
+done
 
 # 2. Check PR policy gates using require-pr-gates.sh
 head_sha="$(git rev-parse HEAD)"
@@ -43,6 +72,26 @@ if ! printf '%s' "$push_payload" | bash "$root/tools/agent-hooks/require-pr-gate
     echo "Ensure checklist gates (\$skill-audit, \$pr-hygiene) are checked in your PR body before pushing." >&2
     echo "To bypass in an emergency: AGENT_PR_GATES_SKIP=1 git push ..." >&2
     exit 1
+fi
+
+# 3. Validate firmware size if firmware-relevant changes are detected
+if [[ "$has_firmware_changes" -eq 1 ]]; then
+  echo "🔍 Firmware-relevant changes detected in push."
+  echo "   Running pre-push firmware size validation..."
+
+  target_args=(--target esp32c6)
+  if [[ "${PRE_PUSH_ALL_TARGETS:-0}" == "1" ]]; then
+    target_args=(--all)
+  fi
+
+  if ! "$root/scripts/check-firmware-size.sh" "${target_args[@]}"; then
+    echo "" >&2
+    echo "❌ Push rejected: firmware size exceeds policy limit or reviewed baseline!" >&2
+    echo "   Run './scripts/check-firmware-size.sh --target esp32c6' to inspect." >&2
+    echo "   If this growth was intentional and reviewed, run with '--update-baseline' and commit." >&2
+    exit 1
+  fi
+  echo "✅ Pre-push firmware size check passed."
 fi
 
 exit 0

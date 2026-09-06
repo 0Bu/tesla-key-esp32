@@ -174,7 +174,7 @@ API, architecture, incident or field references into this compact file. Referenc
 skills use `$skill-name` and canonical paths under `.agents/skills/`; `/skill-name` is accepted only
 in historical PR records. Hierarchical scoped rules live under [`main/AGENTS.md`](main/AGENTS.md)
 (C++/heap safety), [`main/logic/AGENTS.md`](main/logic/AGENTS.md) (pure-logic isolation), and
-`.agents/rules/` (protocol invariants). Hook policy lives in `tools/agent-hooks/`, with runner hook
+`.agents/rules/` (protocol and firmware budget invariants). Hook policy lives in `tools/agent-hooks/`, with runner hook
 configuration and subagent manifests in `.codex/` and `.agents/`.
 
 ## PR, review and merge discipline
