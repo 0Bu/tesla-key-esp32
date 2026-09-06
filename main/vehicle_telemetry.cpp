@@ -500,7 +500,7 @@ void VehicleController::process_ble_host_events_() {
         // first, then terminate the physical link. No stale LinkUp may become ready afterward.
         (void)apply_ble_link_state_(false);
         ble_->disconnect();
-        ESP_LOGW(TAG, "BLE deferred-event queue overflow — link reset fail-closed");
+        ESP_LOGW(TAG, "BLE event queue overflow — link reset");
         return;
     }
 
@@ -591,8 +591,7 @@ void VehicleController::loop_task_fn_(void* arg) {
     // than not having it, but far better than refusing to poll the car.
     TaskWatchdogSubscription watchdog;
     if (!watchdog.subscribe()) {
-        ESP_LOGW(TAG, "vehicle_loop could not subscribe to the task watchdog — a wedged poll will "
-                      "no longer reboot the device automatically");
+        ESP_LOGW(TAG, "vehicle_loop: watchdog subscribe failed");
     }
     uint32_t last_poll_ticks    = 0;
     uint32_t last_connect_ticks = 0;
@@ -600,7 +599,7 @@ void VehicleController::loop_task_fn_(void* arg) {
     int      tele_idx           = 0;  // rotates the telemetry domain polled each cycle
     bool     prev_window        = false;  // edge-detect the active window
     auto     prev_sleep         = TeslaBLE::SleepState::UNKNOWN;  // edge-detect VCSEC sleep flag
-    tk::WakePollState wake_poll{};         // one-shot charge poll on the VCSEC wake edge (#264)
+    tk::WakePollState wake_poll{};         // one-shot charge poll on VCSEC wake edge & bootstrap (#264)
     while (true) {
       // Feed the task watchdog FIRST and UNCONDITIONALLY, before anything that can block or throw.
       // Gating it on the work below would make a long-but-legitimate command look like a hang; put
@@ -620,7 +619,7 @@ void VehicleController::loop_task_fn_(void* arg) {
         // the task-level exception boundary, before pumping tesla-ble's state machine.
         self->process_ble_host_events_();
         if (self->ble_fault_.exchange(false)) {
-            ESP_LOGW(TAG, "BLE deferred processing fault — dropping link to reset library state");
+            ESP_LOGW(TAG, "BLE deferred processing fault — dropping link");
             if (self->ble_connected()) self->ble_->disconnect();
             vTaskDelay(pdMS_TO_TICKS(50));
             continue;
@@ -661,7 +660,7 @@ void VehicleController::loop_task_fn_(void* arg) {
         // library's rx_buffer and resets sessions so the next connect re-syncs cleanly —
         // turning a would-be abort()/reboot into a brief reconnect.
         if (self->ble_fault_.exchange(false)) {
-            ESP_LOGW(TAG, "BLE parse fault — dropping link to clear corrupt RX state");
+            ESP_LOGW(TAG, "BLE parse fault — dropping link");
             if (self->ble_connected()) self->ble_->disconnect();
         }
 
@@ -833,7 +832,19 @@ void VehicleController::loop_task_fn_(void* arg) {
         // STABLE ASLEEP run before showing "Vehicle asleep". UNKNOWN leaves the clock alone.
         // Log only on a transition so the serial console reveals what the car actually reports
         // (e.g. whether VCSEC ever asserts ASLEEP, or just flaps for COP) without spamming.
+        bool charging_state = false;
         if (paired) {
+            ChargeStateResult cs = self->copy_locked_(self->last_known_charge_);
+            charging_state = cs.valid && (cs.charging_state == "Charging" ||
+                                          cs.charging_state == "Starting");
+            if (!self->ble_connected()) {
+                wake_poll.note_disconnected();
+            } else {
+                // One-shot charge poll bootstrap (issue #264): arm if paired & connected but cache
+                // has never been populated, so an already-awake car after reboot doesn't deadlock evcc.
+                wake_poll.note_bootstrap(cs.valid);
+            }
+
             TeslaBLE::SleepState st = static_cast<TeslaBLE::SleepState>(
                 self->vcsec_sleep_state_.load());
             if (st != prev_sleep) {
@@ -875,12 +886,6 @@ void VehicleController::loop_task_fn_(void* arg) {
         // revocation canary. Idle evcc reads may use the last cache value; during this
         // active window get_charge_state requires a recent ChargeState instead.
         uint32_t now_ticks = xTaskGetTickCount();
-        bool charging_state;
-        {
-            ChargeStateResult cs = self->copy_locked_(self->last_known_charge_);
-            charging_state = cs.valid && (cs.charging_state == "Charging" ||
-                                          cs.charging_state == "Starting");
-        }
         uint32_t lc = self->last_cmd_ticks_.load();
         bool recent_cmd = (lc != 0) && ((now_ticks - lc) < pdMS_TO_TICKS(kActiveWindowMs));
         // Gate the charging arm on FRESH contact: charging_state is a RAM cache never invalidated on
@@ -914,14 +919,16 @@ void VehicleController::loop_task_fn_(void* arg) {
         //   • the 10 s in-window cadence (recent command or charging) — this infotainment poll
         //     doubles as the reliable key-revocation canary: a deleted key faults it with
         //     ERROR_UNKNOWN_KEY_ID, which the message observer turns into pairing_lost_; and
-        //   • a one-shot on the VCSEC wake edge (issue #264), fired ONCE outside the window so a
-        //     self-woken car (cable plug-in) refreshes its stale SOC without our opening the
-        //     window — otherwise evcc keeps acting on the stale reading. When the window is open
-        //     the cadence already covers it, so the pending request is just consumed.
+        //   • a one-shot on the VCSEC wake edge (issue #264) or cache-invalid bootstrap, fired ONCE
+        //     outside the window so a self-woken or rebooted-awake car refreshes its stale/empty SOC
+        //     without our opening the window — otherwise evcc keeps acting on the stale reading or
+        //     coasts on HTTP 503s. When the window is open the cadence already covers it, so the
+        //     pending request is just consumed.
         // Both use the same NO_WAKE_SKIP poll: a car already back asleep is skipped, so we only
         // ride a wake the car performed itself, and an idle car is still left to sleep.
         const bool poll_cadence = window && (now_ticks - last_poll_ticks > pdMS_TO_TICKS(10000));
-        if (paired && (poll_cadence || wake_poll.take_pending()) && self->ble_connected() && !self->cmd_in_flight_.load()) {
+        if (paired && self->ble_connected() && !self->cmd_in_flight_.load()
+            && (wake_poll.take_pending() || poll_cadence)) {
             if (poll_cadence) last_poll_ticks = now_ticks;
             ESP_LOGD(TAG, "background charge-state refresh…");
             // Fire-and-forget poll. We must NOT block here: this task also pumps
