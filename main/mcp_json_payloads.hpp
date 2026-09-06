@@ -181,6 +181,8 @@ struct VehicleStatePayload {
     double last_seen_s{};
     bool has_soc{};
     double soc{};
+    bool has_usable_soc{};
+    double usable_soc{};
     const char* charging_state{};
     bool has_charge_limit{};
     double charge_limit{};
@@ -198,6 +200,7 @@ inline JsonOwner build_vehicle_state_object(const VehicleStatePayload& in) noexc
     json.string(json.root(), "link", in.link);
     if (in.has_last_seen) json.number(json.root(), "last_seen_s", in.last_seen_s);
     if (in.has_soc) json.number(json.root(), "soc", in.soc);
+    if (in.has_usable_soc) json.number(json.root(), "usable_soc", in.usable_soc);
     if (in.charging_state && in.charging_state[0] != '\0')
         json.string(json.root(), "charging_state", in.charging_state);
     if (in.has_charge_limit) json.number(json.root(), "charge_limit", in.charge_limit);

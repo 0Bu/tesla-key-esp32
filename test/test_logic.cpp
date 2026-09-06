@@ -1868,6 +1868,69 @@ static void test_status_model() {
         "sys.reset_reason=\"\"\n"
         "sys.safe_mode=false\n"));
 
+    // Scenario 5 — cold pack (issue #276): vehicle reports nominal battery_level (tag 114)
+    // AND usable_battery_level (tag 115) with delta due to cold buffer.
+    Inputs s5;
+    s5.vin = "5YJ3E1EA7KF000316"; s5.ip = "192.168.1.50"; s5.version = "1.4.2";
+    s5.board_mac = "02:00:00:32:55:20";
+    s5.key_present = true; s5.key_fingerprint = "AB:CD:EF:01";
+    s5.paired = true;
+    s5.wifi_connected = true; s5.wifi_ssid = "HomeNet"; s5.wifi_rssi = -55;
+    s5.ble_connected = false;
+    s5.ble_scanning = false;
+    s5.link = tk::LinkState::Awake; s5.vcsec_sleep = "AWAKE";
+    s5.charge.valid = true;
+    s5.charge.has_battery_level = true;        s5.charge.battery_level = 76.0f;
+    s5.charge.has_usable_battery_level = true; s5.charge.usable_battery_level = 72.0f;
+    s5.charge.charging_state = "Charging";
+    s5.have_last_seen = true; s5.last_seen_s = 5;
+
+    CollectEmitter e5;
+    tk::status::emit_status(s5, e5);
+    CHECK(golden_eq(e5.out,
+        "vin=\"5YJ3E1EA7KF000316\"\n"
+        "ip=\"192.168.1.50\"\n"
+        "version=\"1.4.2\"\n"
+        "key_present=true\n"
+        "key_fingerprint=\"AB:CD:EF:01\"\n"
+        "paired=true\n"
+        "reauth=false\n"
+        "wifi{\n"
+        "wifi.ssid=\"HomeNet\"\n"
+        "wifi.rssi=-55\n"
+        "mqtt{\n"
+        "mqtt.configured=false\n"
+        "mqtt.connected=false\n"
+        "mqtt.tls=false\n"
+        "syslog{\n"
+        "syslog.configured=false\n"
+        "syslog.resolved=false\n"
+        "syslog.reachable=false\n"
+        "ble{\n"
+        "ble.connected=false\n"
+        "ble.scanning=false\n"
+        "ble.devices[\n"
+        "link=\"awake\"\n"
+        "vcsec_sleep=\"AWAKE\"\n"
+        "vehicle{\n"
+        "vehicle.soc=76\n"
+        "vehicle.usable_soc=72\n"
+        "vehicle.status=\"Charging\"\n"
+        "last{\n"
+        "last.soc=76\n"
+        "last.usable_soc=72\n"
+        "last.status=\"Charging\"\n"
+        "last_seen_s=5\n"
+        "sys{\n"
+        "sys.board_mac=\"02:00:00:32:55:20\"\n"
+        "sys.free_heap=0\n"
+        "sys.min_free_heap=0\n"
+        "sys.largest_block=0\n"
+        "sys.uptime_s=0\n"
+        "sys.wifi_reconnects=0\n"
+        "sys.reset_reason=\"\"\n"
+        "sys.safe_mode=false\n"));
+
     // ── BLE phase countdown presence rules ────────────────────────────────────────────
     // phase_s rides WITH phase and is emitted even at 0. A countdown that vanished on its
     // last second left the Bluetooth row showing a bare "Disconnected" for the seconds
@@ -1908,6 +1971,7 @@ static void test_vehicle_data() {
     CHECK(golden_eq(e1.out,
         "charging_state=\"Charging\"\n"
         "battery_level=72\n"
+        "usable_battery_level=72\n"
         "charge_limit_soc=80\n"
         "charger_power=11\n"
         "charge_rate=58.25\n"
@@ -1924,6 +1988,7 @@ static void test_vehicle_data() {
     CHECK(golden_eq(e2.out,
         "charging_state=\"Disconnected\"\n"
         "battery_level=0\n"
+        "usable_battery_level=0\n"
         "charge_limit_soc=0\n"
         "charger_power=0\n"
         "charge_rate=0\n"
@@ -4515,6 +4580,26 @@ static void test_status_sys_and_redaction() {
     CHECK(e.out.find("rolled_back") == std::string::npos);
 }
 
+// ─── Vehicle data logic (tag 115 usable_battery_level fallback) ──────────────
+static void test_vehicle_data_logic() {
+    ChargeStateResult cs;
+    CHECK_NEAR(tk::effective_usable_soc(cs), 0.0);
+
+    // Only nominal present -> fallback
+    cs.has_battery_level = true;
+    cs.battery_level = 75.0f;
+    CHECK_NEAR(tk::effective_usable_soc(cs), 75.0);
+
+    // Both present -> prefer usable
+    cs.has_usable_battery_level = true;
+    cs.usable_battery_level = 71.0f;
+    CHECK_NEAR(tk::effective_usable_soc(cs), 71.0);
+
+    // Only usable present
+    cs.has_battery_level = false;
+    CHECK_NEAR(tk::effective_usable_soc(cs), 71.0);
+}
+
 int main() {
     test_vin();
     test_wifi_credentials();
@@ -4539,6 +4624,7 @@ int main() {
     test_ping_probe_generation();
     test_heap_json_stream();
     test_mcp();
+    test_vehicle_data_logic();
     test_status_model();
     test_vehicle_data();
     test_display_helpers();

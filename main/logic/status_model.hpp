@@ -348,7 +348,8 @@ inline void emit_status(const Inputs& in, E& e) {
     if (in.link == LinkState::Awake && in.charge.valid) {
         const ChargeStateResult& cs = in.charge;
         e.obj_begin("vehicle");
-        if (cs.has_battery_level)    e.num("soc", cs.battery_level);
+        if (cs.has_battery_level)        e.num("soc", cs.battery_level);
+        if (cs.has_usable_battery_level) e.num("usable_soc", cs.usable_battery_level);
         e.str("status", cs.charging_state.c_str());
         if (cs.has_charge_limit_soc) e.num("charge_limit", cs.charge_limit_soc);
         // Whole-number kW: the rounding IS part of the contract (the UI shows it raw).
@@ -363,7 +364,8 @@ inline void emit_status(const Inputs& in, E& e) {
     // ── last — last-known snapshot for the asleep/"Parked" cards, link-independent. ──
     if (in.charge.valid) {
         e.obj_begin("last");
-        if (in.charge.has_battery_level) e.num("soc", in.charge.battery_level);
+        if (in.charge.has_battery_level)        e.num("soc", in.charge.battery_level);
+        if (in.charge.has_usable_battery_level) e.num("usable_soc", in.charge.usable_battery_level);
         e.str("status", in.charge.charging_state.c_str());
         e.obj_end();
     }
