@@ -67,6 +67,8 @@ inline JsonOwner build_discovery_payload(const DiscoveryPayload& in) noexcept {
 struct ChargePayload {
     bool has_battery_level{};
     double battery_level{};
+    bool has_usable_battery_level{};
+    double usable_battery_level{};
     bool has_charge_limit{};
     double charge_limit{};
     bool has_power{};
@@ -97,6 +99,7 @@ inline JsonOwner build_charge_payload(const ChargePayload& in) noexcept {
     JsonBuilder json;
     cJSON* root = json.root();
     if (in.has_battery_level) json.number(root, "soc", in.battery_level);
+    if (in.has_usable_battery_level) json.number(root, "usable_soc", in.usable_battery_level);
     if (in.has_charge_limit) json.number(root, "charge_limit", in.charge_limit);
     if (in.has_power) json.number(root, "power", in.power);
     if (in.has_amps) json.number(root, "amps", in.amps);

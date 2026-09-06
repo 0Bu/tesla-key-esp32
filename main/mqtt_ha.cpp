@@ -155,6 +155,8 @@ static bool publish_state() {
             tk::mqtt::ChargePayload payload;
             payload.has_battery_level = cs.has_battery_level;
             payload.battery_level = cs.battery_level;
+            payload.has_usable_battery_level = cs.has_usable_battery_level;
+            payload.usable_battery_level = cs.usable_battery_level;
             payload.has_charge_limit = cs.has_charge_limit_soc;
             payload.charge_limit = cs.charge_limit_soc;
             payload.has_power = cs.has_charger_power;

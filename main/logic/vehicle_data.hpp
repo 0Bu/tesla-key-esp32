@@ -17,8 +17,9 @@ struct ChargeStateResult {
     // values it has no reading for (proto3 optional). The display paths (MQTT/HA, /status)
     // emit a field only when present so it renders "unknown"/omitted, not a phantom 0. The
     // evcc-facing /api path is the deliberate exception — it always emits every field.
-    float       battery_level{0};       bool has_battery_level{false};
-    float       charge_limit_soc{0};    bool has_charge_limit_soc{false};
+    float       battery_level{0};        bool has_battery_level{false};
+    float       usable_battery_level{0}; bool has_usable_battery_level{false};
+    float       charge_limit_soc{0};     bool has_charge_limit_soc{false};
     std::string charging_state;
     float       charger_power{0};       bool has_charger_power{false};
     float       charge_rate{0};         bool has_charge_rate{false};
@@ -46,6 +47,7 @@ template <typename Emitter>
 void emit_vehicle_charge_state(const ChargeStateResult& cs, Emitter& e) {
     e.str("charging_state", cs.charging_state.empty() ? "Disconnected" : cs.charging_state.c_str());
     e.num("battery_level",          cs.battery_level);
+    e.num("usable_battery_level",   cs.has_usable_battery_level ? cs.usable_battery_level : cs.battery_level);
     e.num("charge_limit_soc",       cs.charge_limit_soc);
     e.num("charger_power",          cs.charger_power);
     e.num("charge_rate",            cs.charge_rate);
@@ -54,6 +56,10 @@ void emit_vehicle_charge_state(const ChargeStateResult& cs, Emitter& e) {
     e.num("minutes_to_full_charge", cs.minutes_to_full_charge);
 }
 
+// Usable battery level with fallback to nominal battery level when tag 115 is omitted.
+inline float effective_usable_soc(const ChargeStateResult& cs) {
+    return cs.has_usable_battery_level ? cs.usable_battery_level : cs.battery_level;
+}
 }  // namespace tk
 
 struct VehicleStatusResult {

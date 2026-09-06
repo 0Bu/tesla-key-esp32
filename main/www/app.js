@@ -326,7 +326,8 @@ function equalizeChips(box){
 // rejects as "complete". charge_limit is emitted by /status only when the car reported it, so
 // an unknown limit (field absent) leaves the start button live rather than blocking on a guess.
 function chargeComplete(v,charging){
-  return !charging && !!v && v.charge_limit!=null && (v.soc!=null?v.soc:0)>=v.charge_limit;
+  var cur = (v && v.usable_soc!=null) ? v.usable_soc : (v ? v.soc : null);
+  return !charging && !!v && v.charge_limit!=null && (cur!=null?cur:0)>=v.charge_limit;
 }
 // Compact "time ago" for the asleep card (seconds → "<1 min" / "5 min" / "2 h" / "3 d").
 function fmtAgo(sec){
@@ -391,7 +392,7 @@ function render(s){
   hst.innerHTML='';   // cleared here; only the paired+reporting branch populates it
   if(paired&&v){
     if(waking){ waking=false; clearTimeout(wakeTimeout); }   // car is awake & reporting — stop the spinner
-    var soc=num(v.soc)||0, col=socColor(soc);
+    var soc=(v.usable_soc!=null?num(v.usable_soc):num(v.soc))||0, col=socColor(soc);
     // "Charge complete" = battery reached its target and not charging; the start tap is gated
     // (the car would only reject a charge_start here as "complete"). See chargeComplete().
     var complete=chargeComplete(v,charging);
@@ -414,7 +415,7 @@ function render(s){
       hs.textContent='Tap the icon to wake the car.';
       // Last-known battery + how long the car has been asleep, from the retained cache —
       // shown without waking the car (last reading; a parked car barely drains).
-      var ls=s.last||{}, lsoc=(ls.soc!=null)?Math.round(ls.soc):null, ago=fmtAgo(s.last_seen_s), chips=[];
+      var ls=s.last||{}, lsoc=(ls.usable_soc!=null)?Math.round(ls.usable_soc):((ls.soc!=null)?Math.round(ls.soc):null), ago=fmtAgo(s.last_seen_s), chips=[];
       if(lsoc!=null) chips.push(stat('Battery','<span style="color:'+socColor(lsoc)+'">'+lsoc+'</span>','%'));
       if(ago)        chips.push(stat('Idle', ago, ''));
       // No Overheat/Defrost chips here: their value is the live AC draw, which exists only while
@@ -430,9 +431,9 @@ function render(s){
       hicHTML='<button class="wakebtn" onclick="wakeCar()" title="Tap to wake the car" aria-label="Wake the car">'+ringSleep()+'<span class="glyph">'+PARKED+'</span></button>';
       setHTML(hl,'<span>Parked</span>');
       hs.textContent='No live reading — tap the icon to wake the car.';
-      var ils=s.last||{}, ilsoc=(ils.soc!=null)?Math.round(ils.soc):null, iago=fmtAgo(s.last_seen_s), ichips=[];
-      if(ilsoc!=null) ichips.push(stat('Battery','<span style="color:'+socColor(ilsoc)+'">'+ilsoc+'</span>','%'));
-      if(iago)        ichips.push(stat('Idle', iago, ''));
+      var ils=s.last||{}, ilsoc=(ils.usable_soc!=null)?Math.round(ils.usable_soc):((ils.soc!=null)?Math.round(ils.soc):null), iago=fmtAgo(s.last_seen_s), ichips=[];
+      if(ilsoc!=null) chips.push(stat('Battery','<span style="color:'+socColor(ilsoc)+'">'+ilsoc+'</span>','%'));
+      if(iago)        chips.push(stat('Idle', iago, ''));
       // No Overheat/Defrost chips here (same as the asleep card): both key off the live AC
       // draw (liveKw needs s.vehicle), and /status emits "vehicle" only while link==='awake'.
       hst.innerHTML=ichips.join('');
@@ -466,7 +467,7 @@ function render(s){
         // "Disconnected" and a "Bluetooth connected" subtitle would contradict it.
         hs.textContent=linked ? 'Bluetooth connected — checking status…'
                               : 'Reaching your Tesla over Bluetooth…';
-        var uls=s.last||{}, ulsoc=(uls.soc!=null)?Math.round(uls.soc):null, uago=fmtAgo(s.last_seen_s), uchips=[];
+        var uls=s.last||{}, ulsoc=(uls.usable_soc!=null)?Math.round(uls.usable_soc):((uls.soc!=null)?Math.round(uls.soc):null), uago=fmtAgo(s.last_seen_s), uchips=[];
         if(ulsoc!=null) uchips.push(stat('Battery','<span style="color:'+socColor(ulsoc)+'">'+ulsoc+'</span>','%'));
         if(uago)        uchips.push(stat('Idle', uago, ''));
         hst.innerHTML=uchips.join('');

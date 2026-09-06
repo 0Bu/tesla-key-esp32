@@ -401,8 +401,8 @@ VehicleController::LinkState VehicleController::link_state() const {
 tk::UiSnapshot VehicleController::ui_snapshot() {
     tk::UiSnapshot s;
     ChargeStateResult cs = get_cached_charge();
-    s.have_soc  = cs.valid && cs.has_battery_level;
-    s.soc       = static_cast<int>(lroundf(cs.battery_level));
+    s.have_soc  = cs.valid && (cs.has_usable_battery_level || cs.has_battery_level);
+    s.soc       = static_cast<int>(lroundf(tk::effective_usable_soc(cs)));
     s.charging  = (cs.charging_state == "Charging");
     s.link_state    = link_state();
     s.ble_connected = ble_connected();
