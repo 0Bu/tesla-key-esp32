@@ -84,6 +84,15 @@ git clone https://github.com/0Bu/tesla-key-esp32.git && cd tesla-key-esp32
 # Or reproduce the complete unsigned four-target CI build + ELF/map/size diagnostics:
 ./scripts/idf-docker.sh ./scripts/ci-build-all.sh local
 
+# Acceleration options:
+# 1. Compile in high-speed container-native volume (eliminates macOS VirtioFS I/O latency):
+IDF_FAST_BUILD=1 ./scripts/idf-docker.sh idf.py build
+
+# 2. Daemon mode: keeps container running with pre-exported ESP-IDF environment (0.12s latency):
+./scripts/idf-docker.sh daemon start
+./scripts/idf-docker.sh idf.py build
+./scripts/idf-docker.sh daemon stop
+
 # Optional: WiFi SSID/pass + VIN (BLE MAC auto) — interactive
 ./scripts/idf-docker.sh idf.py menuconfig
 
