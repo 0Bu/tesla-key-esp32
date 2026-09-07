@@ -138,7 +138,7 @@ EXPECTED_ACTIONS = {
         "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
     ),
     ("renovate.yaml", "renovate"): (
-        "renovatebot/github-action@39b914146caeff8cd512e61c8992f1d5913af85c",
+        "renovatebot/github-action@37beffda261423addd537c33f2d126df7f6ffbab",
     ),
     ("signed-pr-preview.yml", "validate"): (),
     ("signed-pr-preview.yml", "trusted-rebuild"): (
