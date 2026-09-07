@@ -261,6 +261,25 @@ if printf '%s\n' '.github/workflows/pr-policy.yml' | gate_feature_docs_relevant 
 else
   fail_case 'new workflow feature-docs relevance'
 fi
+if printf '%s\n' '.github/workflows/renovate.yaml' | gate_is_renovate_maintenance \
+   && printf '%s\n' '.github/renovate.json' | gate_is_renovate_maintenance \
+   && printf '%s\n' '.github/workflows/renovate.yaml' '.github/renovate.json' | gate_is_renovate_maintenance; then
+  pass_case 'Renovate maintenance files match gate_is_renovate_maintenance'
+else
+  fail_case 'Renovate maintenance files matching'
+fi
+
+if printf '%s\n' '.github/workflows/renovate.yaml' 'esp-idf-toolchain.txt' | gate_is_renovate_maintenance >/dev/null 2>&1 \
+   || printf '%s\n' 'esp-idf-toolchain.txt' | gate_is_renovate_maintenance >/dev/null 2>&1 \
+   || printf '%s\n' 'main/idf_component.yml' | gate_is_renovate_maintenance >/dev/null 2>&1 \
+   || printf '%s\n' 'main/main.cpp' | gate_is_renovate_maintenance >/dev/null 2>&1 \
+   || printf '%s\n' '.github/workflows/build.yml' | gate_is_renovate_maintenance >/dev/null 2>&1 \
+   || printf '%s\n' '' | gate_is_renovate_maintenance >/dev/null 2>&1; then
+  fail_case 'non-renovate or mixed files accepted by gate_is_renovate_maintenance'
+else
+  pass_case 'non-renovate and mixed files rejected by gate_is_renovate_maintenance'
+fi
+
 if printf '%s' "$rename" | gate_extract_changed_pages 2 >/dev/null 2>&1; then fail_case 'truncated count accepted'; else pass_case 'truncated count fails closed'; fi
 if printf '[]' | gate_extract_changed_pages 3001 >/dev/null 2>&1; then fail_case '3001 files accepted'; else pass_case '3000-file limit fails closed'; fi
 if printf '[[{"filename":"../escape"}]]' | gate_extract_changed_pages 1 >/dev/null 2>&1; then fail_case 'unsafe path accepted'; else pass_case 'unsafe changed path fails closed'; fi
@@ -278,6 +297,11 @@ expect_rc 0 'aggregate check accepts current feature records' env AGENT_POLICY_C
 grep -v feature-docs "$tmp/all.md" >"$tmp/no-feature.md"
 expect_rc 2 'feature-relevant check requires feature-docs' env AGENT_POLICY_CI=1 AGENT_PR_BODY_FILE="$tmp/no-feature.md" AGENT_PR_HEAD_SHA="$sha" AGENT_CHANGED_FILES_FILE="$tmp/feature.files" "$gate" --check --project-dir "$root"
 expect_rc 0 'docs-only check skips feature-docs' env AGENT_POLICY_CI=1 AGENT_PR_BODY_FILE="$tmp/no-feature.md" AGENT_PR_HEAD_SHA="$sha" AGENT_CHANGED_FILES_FILE="$tmp/docs.files" "$gate" --check --project-dir "$root"
+printf '%s\n' .github/workflows/renovate.yaml >"$tmp/renovate.files"
+: >"$tmp/no-gates.md"
+expect_rc 0 'Renovate maintenance PR satisfies check without gate records' env AGENT_POLICY_CI=1 AGENT_PR_BODY_FILE="$tmp/no-gates.md" AGENT_PR_HEAD_SHA="$sha" AGENT_CHANGED_FILES_FILE="$tmp/renovate.files" "$gate" --check --project-dir "$root"
+printf '%s\n' .github/workflows/renovate.yaml esp-idf-toolchain.txt >"$tmp/renovate-mixed.files"
+expect_rc 2 'mixed Renovate and toolchain PR requires gates' env AGENT_POLICY_CI=1 AGENT_PR_BODY_FILE="$tmp/no-gates.md" AGENT_PR_HEAD_SHA="$sha" AGENT_CHANGED_FILES_FILE="$tmp/renovate-mixed.files" "$gate" --check --project-dir "$root"
 grep -v pr-hygiene "$tmp/all.md" >"$tmp/no-hygiene.md"
 expect_rc 2 'aggregate check requires pr-hygiene unconditionally' env AGENT_POLICY_CI=1 AGENT_PR_BODY_FILE="$tmp/no-hygiene.md" AGENT_PR_HEAD_SHA="$sha" AGENT_CHANGED_FILES_FILE="$tmp/docs.files" "$gate" --check --project-dir "$root"
 sed 's/@ [0-9a-f]*/@ deadbee/' "$tmp/all.md" >"$tmp/stale.md"
