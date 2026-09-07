@@ -267,14 +267,17 @@ GET /api/1/vehicles/{VIN}/vehicle_data
 { "response": { "result": true, "vin": "<VIN>", "reason": "success",
   "response": {
   "charge_state": { "charging_state": "Charging", "battery_level": 72,
-    "charge_limit_soc": 80, "charger_power": 11, "charge_rate": 58.3,
-    "charge_amps": 16, "battery_range": 280.5, "minutes_to_full_charge": 45 } } } }
+    "usable_battery_level": 72, "charge_limit_soc": 80, "charger_power": 11,
+    "charge_rate": 58.3, "charge_amps": 16, "battery_range": 280.5,
+    "minutes_to_full_charge": 45 } } } }
 ```
 Doubled `response` and `charge_amps` are intentional — they match the Fleet API /
-TeslaBleHttpProxy shape evcc parses. While the car is idle, the cache may remain available
-so polling does not wake it. While charging or within five minutes of a command, a
-`ChargeState` older than 30 seconds is rejected with HTTP 503 and reason
-`"stale or unavailable"` instead of being presented as live telemetry.
+TeslaBleHttpProxy shape evcc parses. Both `battery_level` (nominal pack SOC) and
+`usable_battery_level` (usable pack SOC matching the Tesla app) are served.
+While the car is idle, the cache may remain available so polling does not wake it.
+While charging or within five minutes of a command, a `ChargeState` older than
+30 seconds is rejected with HTTP 503 and reason `"stale or unavailable"` instead
+of being presented as live telemetry.
 
 ### Body controller state (no wake)
 
