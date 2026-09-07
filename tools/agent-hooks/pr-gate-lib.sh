@@ -46,6 +46,44 @@ gate_feature_docs_relevant() {
   grep -Eq '^(main/|test/|sdkconfig\.defaults($|\.)|partitions\.csv$|AGENTS\.md$|\.agents/|\.codex/|\.github/PULL_REQUEST_TEMPLATE\.md$|tools/agent-hooks/|tools/agent-config/|docs/(index\.html|installer-bootstrap\.mjs|serial-port-release\.mjs|web-installer\.mjs|vendor/)|\.github/workflows/(build|signed-pr-preview|pr-preview-cleanup|pr-policy|bench-acceptance)\.yml$|scripts/release-relevance\.sh$)'
 }
 
+# gate_is_renovate_maintenance [files_file]
+#   Succeeds (rc=0) only when the non-empty changed-files input contains exclusively
+#   Renovate maintenance files (.github/workflows/renovate.yaml and/or .github/renovate.json).
+#   Any other file (e.g. esp-idf-toolchain.txt, main/idf_component.yml, docs/index.html,
+#   firmware logic, other workflows) fails closed (rc=1). If a path argument is provided,
+#   it reads from that file; otherwise it reads lines from stdin.
+gate_is_renovate_maintenance() {
+  local target="${1:-}" count=0 line
+  if [ -n "$target" ]; then
+    [ -f "$target" ] && [ -r "$target" ] && [ ! -L "$target" ] || return 1
+    while IFS= read -r line || [ -n "$line" ]; do
+      [ -n "$line" ] || continue
+      case "$line" in
+        .github/workflows/renovate.yaml|.github/renovate.json)
+          count=$((count + 1))
+          ;;
+        *)
+          return 1
+          ;;
+      esac
+    done < "$target"
+  else
+    while IFS= read -r line || [ -n "$line" ]; do
+      [ -n "$line" ] || continue
+      case "$line" in
+        .github/workflows/renovate.yaml|.github/renovate.json)
+          count=$((count + 1))
+          ;;
+        *)
+          return 1
+          ;;
+      esac
+    done
+  fi
+  [ "$count" -gt 0 ] || return 1
+  return 0
+}
+
 # gate_checkbox_status <content> <key>
 #   Prints exactly one of:  "checked <sha>" | "checked" | "unchecked" | "absent" | "ambiguous"
 #   A match is one complete canonical Markdown task-list line. Its leading checkbox is followed by
