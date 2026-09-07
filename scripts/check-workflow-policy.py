@@ -138,7 +138,7 @@ EXPECTED_ACTIONS = {
         "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
     ),
     ("renovate.yaml", "renovate"): (
-        "renovatebot/github-action@39b914146caeff8cd512e61c8992f1d5913af85c",
+        "renovatebot/github-action@37beffda261423addd537c33f2d126df7f6ffbab",
     ),
     ("signed-pr-preview.yml", "validate"): (),
     ("signed-pr-preview.yml", "trusted-rebuild"): (
@@ -353,10 +353,19 @@ def validate(root: Path) -> None:
                 f"{name}:{job_name}: permissions must match the exact reviewed inventory: "
                 f"{EXPECTED_JOB_PERMISSIONS[key]}",
             )
-            require(
-                tuple(ACTION.findall(job)) == EXPECTED_ACTIONS[key],
-                f"{name}:{job_name}: action inventory drift",
-            )
+            if key == ("renovate.yaml", "renovate"):
+                actions = tuple(ACTION.findall(job))
+                require(
+                    len(actions) == 1
+                    and actions[0].startswith("renovatebot/github-action@")
+                    and PINNED_ACTION.fullmatch(actions[0]) is not None,
+                    f"{name}:{job_name}: action inventory drift",
+                )
+            else:
+                require(
+                    tuple(ACTION.findall(job)) == EXPECTED_ACTIONS[key],
+                    f"{name}:{job_name}: action inventory drift",
+                )
             actual_secrets = Counter(re.findall(r"\bsecrets\.([A-Za-z_][A-Za-z0-9_]*)", job))
             require(
                 actual_secrets == EXPECTED_SECRET_REFERENCES.get(key, Counter()),
@@ -1120,6 +1129,17 @@ def self_test(root: Path) -> None:
          "espressif/esp-idf-ci-action@e6f5c74232b1ccd4c97ed641f1e48553853f1fd5",
          "espressif/esp-idf-ci-action@0123456789abcdef0123456789abcdef01234567",
          "action inventory drift"),
+        ("renovate-action-pin", "renovate.yaml",
+         "renovatebot/github-action@37beffda261423addd537c33f2d126df7f6ffbab",
+         "renovatebot/github-action@main", "40-hex"),
+        ("renovate-action-owner", "renovate.yaml",
+         "renovatebot/github-action@37beffda261423addd537c33f2d126df7f6ffbab",
+         "attacker/github-action@37beffda261423addd537c33f2d126df7f6ffbab",
+         "action inventory drift"),
+        ("renovate-extra-action", "renovate.yaml",
+         "          token: ${{ secrets.RENOVATE_TOKEN }}\n",
+         "          token: ${{ secrets.RENOVATE_TOKEN }}\n      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1\n",
+         "action inventory drift"),
         ("extra-build-job", "build.yml", "jobs:\n",
          "jobs:\n  exfiltrate:\n    runs-on: ubuntu-latest\n"
          "    timeout-minutes: 1\n    permissions:\n      contents: write\n"
@@ -1501,6 +1521,16 @@ def self_test(root: Path) -> None:
                         f"self-test {name} failed for the wrong reason: {exc}")
             else:
                 raise PolicyError(f"self-test accepted mutation: {name}")
+
+    with tempfile.TemporaryDirectory(prefix="workflow-policy-renovate-bump-") as directory:
+        fixture = Path(directory)
+        shutil.copytree(root / ".github/workflows", fixture / ".github/workflows")
+        replace_once(
+            fixture / ".github/workflows/renovate.yaml",
+            "renovatebot/github-action@37beffda261423addd537c33f2d126df7f6ffbab",
+            "renovatebot/github-action@0123456789abcdef0123456789abcdef01234567",
+        )
+        validate(fixture)
 
     # Move the real local Pages assembly/bind block after the real Actions artifact upload.  This
     # is an order mutation, not a deleted-token canary: all stages remain present and only their
