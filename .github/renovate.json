@@ -53,8 +53,10 @@
     {
       "description": "Only renovatebot/github-action in renovate.yaml is managed by Renovate; build and release workflow actions are pinned security boundaries audited in scripts/check-workflow-policy.py.",
       "matchManagers": ["github-actions"],
-      "excludeDepNames": ["renovatebot/github-action"],
-      "enabled": false
+      "enabled": false,
+      "matchDepNames": [
+        "!renovatebot/github-action"
+      ]
     }
   ]
 }
