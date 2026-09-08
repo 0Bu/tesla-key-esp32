@@ -315,7 +315,7 @@ GET  /status               { vin, ip, version, key_present, key_fingerprint,
                              link: "awake"|"idle"|"asleep"|"unreachable"|"unknown" (drives the
                                hero; "idle" = reachable but not provably asleep — the "Parked" card),
                              vcsec_sleep: "AWAKE"|"ASLEEP"|"UNKNOWN" (raw un-debounced flag, diagnostics),
-                             vehicle:{soc,status,charge_limit,power,amps,actual_amps,volts,phases}
+                             vehicle:{soc,usable_soc,status,charge_limit,power,amps,actual_amps,volts,phases}
                                (only when link=="awake", cached; each field only when reported),
                              mqtt:{configured,connected,tls,broker,error?} (HA bridge;
                                broker is credential-free host:port even when the saved URI
@@ -325,7 +325,7 @@ GET  /status               { vin, ip, version, key_present, key_fingerprint,
                                never a delivery gate),
                              tele:{climate,drive,tires,closures} (read-only telemetry;
                                emitted only while the BLE link is up),
-                             last:{soc,status} (last-known snapshot for the asleep card),
+                             last:{soc,usable_soc,status} (last-known snapshot for the asleep card),
                              last_seen_s (seconds since last contact),
                              last_reboot: "heap:<n>" (only when the heap watchdog ended the
                                           previous boot, n = consecutive such restarts;
@@ -351,10 +351,11 @@ GET  /status               { vin, ip, version, key_present, key_fingerprint,
                                 backtrace on RISC-V (esp32c3/c6); the downloaded dump
                                 still unwinds offline on every target) }
 GET  /status?redact=1      The BUG-REPORT form of the same payload: vin, ip, wifi.ssid,
-                             ble.addr (and every scanned neighbour's), mqtt.broker and
-                             syslog.host read "<redacted>". The KEY is always kept —
-                             omitting a field would forge an "older build" signal;
-                             sys.board_mac deliberately remains visible for hardware triage
+                             ble.addr (and every scanned neighbour's, plus scanned vehicle
+                             names), mqtt.broker and syslog.host read "<redacted>". The KEY
+                             is always kept — omitting a field would forge an "older build"
+                             signal; sys.board_mac deliberately remains visible for hardware
+                             triage
 POST /scan                 Time-limited BLE discovery scan (populates ble.devices)
 GET  /diag[?verbose=0|1][?clear=1][?redact=1]   Plain-text in-memory diag log (verbose=0 turns
                              raw-RX logging back off; the X-Diag-Verbose response header echoes
@@ -474,7 +475,7 @@ changing the configured vehicle intentionally creates a different HA device):
 
 ```
 tesla-key/<node>/availability                 online | offline   (LWT, retained)
-tesla-key/<node>/charge      {soc,charge_limit,power,amps,range,rate,charging_state,
+tesla-key/<node>/charge      {soc,usable_soc,charge_limit,power,amps,range,rate,charging_state,
                               actual_current,current_request,volts,phases,energy_added,
                               minutes_to_full,limit_reason}
 tesla-key/<node>/climate     {inside,outside,setpoint,on,preconditioning,
