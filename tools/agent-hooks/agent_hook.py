@@ -21,15 +21,15 @@ import sys
 from typing import Any
 
 
-FILE_TOOLS = {
-    "read",
+FILE_READ_TOOLS = {"read", "view_file"}
+FILE_MUTATING_TOOLS = {
     "edit",
     "multiedit",
     "write",
-    "view_file",
     "replace_file_content",
     "write_to_file",
 }
+FILE_TOOLS = FILE_READ_TOOLS | FILE_MUTATING_TOOLS
 PATCH_TOOLS = {"apply_patch"}
 SHELL_TOOLS = {"bash", "exec_command", "shell", "shell_command", "run_command"}
 HOOK_ROOT = Path(__file__).resolve().parents[2]
@@ -968,7 +968,7 @@ def invariant_violation(payload: dict[str, Any]) -> str | None:
         targets.extend(patch_targets(command_from(payload)))
     for target in targets:
         normalized = target.strip().strip("'\"").replace("\\", "/").lower()
-        if "managed_components/" in normalized and tool in FILE_TOOLS | PATCH_TOOLS:
+        if "managed_components/" in normalized and tool in FILE_MUTATING_TOOLS | PATCH_TOOLS:
             return "managed_components/ is upstream and auto-generated; edits must be made upstream or via patches"
     content_candidates: list[str] = []
     ti = tool_input(payload)

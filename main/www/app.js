@@ -432,8 +432,8 @@ function render(s){
       setHTML(hl,'<span>Parked</span>');
       hs.textContent='No live reading — tap the icon to wake the car.';
       var ils=s.last||{}, ilsoc=(ils.usable_soc!=null)?Math.round(ils.usable_soc):((ils.soc!=null)?Math.round(ils.soc):null), iago=fmtAgo(s.last_seen_s), ichips=[];
-      if(ilsoc!=null) chips.push(stat('Battery','<span style="color:'+socColor(ilsoc)+'">'+ilsoc+'</span>','%'));
-      if(iago)        chips.push(stat('Idle', iago, ''));
+      if(ilsoc!=null) ichips.push(stat('Battery','<span style="color:'+socColor(ilsoc)+'">'+ilsoc+'</span>','%'));
+      if(iago)        ichips.push(stat('Idle', iago, ''));
       // No Overheat/Defrost chips here (same as the asleep card): both key off the live AC
       // draw (liveKw needs s.vehicle), and /status emits "vehicle" only while link==='awake'.
       hst.innerHTML=ichips.join('');

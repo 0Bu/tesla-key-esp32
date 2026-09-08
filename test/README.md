@@ -225,7 +225,7 @@ The suite also has gates outside the single pure-logic translation unit:
   contract also pins one canonical display-version grammar across build, signer, Pages, manifest,
   Release and bench consumers; leading-zero cores and values over 31 bytes fail closed.
 - `scripts/check-workflow-policy.py` and `scripts/check-build-gate-contract.py` require the main
-  DAG `logic-test → build → independent-rebuild → publish → deploy`. `publish` owns signing and
+  DAG `logic-test → build-target → build → independent-rebuild → publish → deploy`. `publish` owns signing and
   immutable Release acceptance, includes the locally 16/16-bound `_site/` in its exact named
   artifact together with the explicit sixteen signer layout inputs, and never writes `gh-pages`;
   `deploy` has no signing Environment/key/OIDC, revalidates the downloaded twelve-file root plus

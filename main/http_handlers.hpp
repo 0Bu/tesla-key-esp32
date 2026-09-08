@@ -57,6 +57,11 @@ cJSON* make_response(bool result, const char* command, const char* vin, const ch
 // disables a service.  `data` is malloc-owned on Ok and must be freed by the caller.
 tk::BodyReadResult read_body_result(httpd_req_t* req);
 
+// Validates that if a query string is present on req, it fits within CONFIG_HTTPD_MAX_URI_LEN
+// and can be successfully retrieved. Returns ESP_OK if no query or valid query,
+// or ESP_ERR_HTTPD_RESULT_TRUNC / ESP_FAIL on error.
+esp_err_t validate_query_string(httpd_req_t* req);
+
 // True only if query parameter `key` is present AND equals `want` exactly. Replaces
 // strstr(uri,"force=1")-style checks, which also fire on "force=10", "xforce=1", or the
 // same string buried in an unrelated parameter value — a real hazard for /gen_keys?force=1,

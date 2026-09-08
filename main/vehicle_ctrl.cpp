@@ -246,6 +246,29 @@ bool VehicleController::init(const std::string& vin,
     return this->start_tasks();
 }
 
+bool VehicleController::init_safe_mode(const std::string& vin,
+                                       NvsStorageAdapter& config_store) {
+    config_store_ = &config_store;
+    vin_          = vin;
+    key_runtime_safe_.store(false);
+    pairing_cleanup_pending_.store(false);
+    vin_transition_pending_.store(false);
+    key_reload_required_.store(false);
+
+    if (!vehicle_mutex_) vehicle_mutex_ = xSemaphoreCreateMutex();
+    if (!command_mutex_) command_mutex_ = xSemaphoreCreateMutex();
+    if (!cache_mutex_)   cache_mutex_   = xSemaphoreCreateMutex();
+    if (!result_mutex_)  result_mutex_  = xSemaphoreCreateMutex();
+
+    if (!vehicle_mutex_ || !command_mutex_ || !cache_mutex_ || !result_mutex_) {
+        ESP_LOGE(TAG, "safe mode: synchronization primitive allocation failed");
+        return false;
+    }
+
+    ESP_LOGI(TAG, "VehicleController initialized in safe mode (inert)");
+    return true;
+}
+
 void VehicleController::on_vehicle_message_(
     const UniversalMessage_RoutableMessage& msg) noexcept {
     if (!believed_paired_ || !msg.has_signedMessageStatus) return;

@@ -492,31 +492,41 @@ extern "C" void app_main() {
     // Construct the controller (NVS + key) here; NimBLE itself (ble_client.start)
     // is started after WiFi is up. The controller's accessors are safe to call
     // before that — they report "not connected" until the link comes up.
-    static NvsStorageAdapter tesla_store(tk::nvs_contract::kTeslaBleNamespace);
-    if (!tesla_store.initialize())
-        boot_fatal("Tesla NVS");
     static BleClient ble_client;
     static VehicleController vehicle;
-    // TeslaBLE constructs its crypto context while loading an existing private key. The DRBG is
-    // seeded exactly once at that point, so enabling hardware entropy only in the no-key branch
-    // is too late for every already-provisioned device. Keep SAR-ADC entropy active across BOTH
-    // controller construction/key load and a possible first-boot key generation; WiFi/BLE are not
-    // running yet and therefore cannot supply RF entropy themselves.
-    bootloader_random_enable();
-    // init() wires the connected + rx callbacks onto ble_client and passes the
-    // config_store so it can save the discovered MAC. ESSENTIAL: without the controller
-    // there is no BLE proxy at all, so a failed init halts boot (and leaves any pending OTA
-    // image unconfirmed → rolled back).
-    // The controller is fully WIRED here, but its mutating tasks are deliberately deferred until
-    // VIN/key recovery and every ESSENTIAL initializer have succeeded. boot_fatal parks app_main;
-    // starting auto_pair here would therefore let it rotate keys behind a recovery halt.
-    if (!vehicle.init(vin, ble_client, tesla_store, config_store, ble_mac,
-                      /*start_tasks=*/false)) {
-        bootloader_random_disable();
-        boot_fatal("VehicleController");
-    }
+
     tk::VehicleTaskStartPhase vehicle_task_phase =
         tk::VehicleTaskStartPhase::ControllerWired;
+
+    if (safe_mode) {
+        ESP_LOGW(TAG, "Safe mode active — initializing inert vehicle controller");
+        if (!vehicle.init_safe_mode(vin, config_store)) {
+            boot_fatal("VehicleController safe mode");
+        }
+        vehicle_task_phase = tk::VehicleTaskStartPhase::IdentityResolved;
+    } else {
+        static NvsStorageAdapter tesla_store(tk::nvs_contract::kTeslaBleNamespace);
+        if (!tesla_store.initialize())
+            boot_fatal("Tesla NVS");
+
+        // TeslaBLE constructs its crypto context while loading an existing private key. The DRBG is
+        // seeded exactly once at that point, so enabling hardware entropy only in the no-key branch
+        // is too late for every already-provisioned device. Keep SAR-ADC entropy active across BOTH
+        // controller construction/key load and a possible first-boot key generation; WiFi/BLE are not
+        // running yet and therefore cannot supply RF entropy themselves.
+        bootloader_random_enable();
+        // init() wires the connected + rx callbacks onto ble_client and passes the
+        // config_store so it can save the discovered MAC. ESSENTIAL: without the controller
+        // there is no BLE proxy at all, so a failed init halts boot (and leaves any pending OTA
+        // image unconfirmed → rolled back).
+        // The controller is fully WIRED here, but its mutating tasks are deliberately deferred until
+        // VIN/key recovery and every ESSENTIAL initializer have succeeded. boot_fatal parks app_main;
+        // starting auto_pair here would therefore let it rotate keys behind a recovery halt.
+        if (!vehicle.init(vin, ble_client, tesla_store, config_store, ble_mac,
+                          /*start_tasks=*/false)) {
+            bootloader_random_disable();
+            boot_fatal("VehicleController");
+        }
 
     // Recover a /set_vin transaction interrupted between the tesla_cfg ConfigBlob commit and the
     // tesla_ble private-key/session commits. The marker stores "previous VIN|previous key id".
@@ -651,6 +661,7 @@ extern "C" void app_main() {
     }
     vehicle_task_phase = tk::VehicleTaskStartPhase::IdentityResolved;
     bootloader_random_disable();
+    }
     // Match by the VIN-derived BLE name on scan. Pass the real VIN only when it is a plausible
     // 17-char VIN; with none configured we pass an EMPTY target so the scanner lists nearby
     // Teslas but never connects/enrols on one. The "UNKNOWN" placeholder must stay out of the

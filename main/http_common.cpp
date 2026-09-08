@@ -80,10 +80,22 @@ tk::BodyReadResult read_body_result(httpd_req_t* req) {
     return result;
 }
 
+esp_err_t validate_query_string(httpd_req_t* req) {
+    if (!req) return ESP_ERR_INVALID_ARG;
+    size_t qlen = httpd_req_get_url_query_len(req);
+    if (qlen == 0) return ESP_OK;
+    if (qlen >= 128) {
+        ESP_LOGW(TAG, "query string length %u exceeds supported buffer", (unsigned)qlen);
+        return ESP_ERR_HTTPD_RESULT_TRUNC;
+    }
+    return ESP_OK;
+}
+
 bool query_param_is(httpd_req_t* req, const char* key, const char* want) {
-    char q[96];
+    if (!req || !key || !want) return false;
+    char q[128];
     if (httpd_req_get_url_query_str(req, q, sizeof(q)) != ESP_OK) return false;
-    char val[24];
+    char val[32];
     if (httpd_query_key_value(q, key, val, sizeof(val)) != ESP_OK) return false;
     return strcmp(val, want) == 0;
 }

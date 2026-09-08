@@ -118,6 +118,10 @@ OtaHealthCommitGuard::~OtaHealthCommitGuard() {
     if (held_) finish_operation(tk::OtaIdentityGateState::HealthCommit);
 }
 
+bool ota_config_restart_begin() {
+    return s_operation_gate.try_begin(tk::OtaIdentityGateState::ConfigRestart);
+}
+
 // Confirm a still-unverified OTA image before a successful network/logging/setup commit reboot —
 // see the header. Mirrors the mark-valid path in main.cpp's ota_health_gate_task, but fires once the
 // durable commit AND the post-admission heap sample prove the runtime healthy. Identity mutations
