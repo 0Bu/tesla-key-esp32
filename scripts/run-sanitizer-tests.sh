@@ -19,17 +19,38 @@ if [ "$(uname -s)" != Linux ]; then
 fi
 command -v cmake >/dev/null 2>&1 || { echo "sanitizer-gate: cmake is required" >&2; exit 2; }
 
+can_link_sanitizers() {
+    local candidate="$1"
+    printf 'int main(){}\n' | "$candidate" -fsanitize=address,undefined,leak -x c++ - -o /dev/null >/dev/null 2>&1
+}
+
 CXX="${CXX:-}"
 if [ -z "$CXX" ]; then
-    if command -v clang++ >/dev/null 2>&1; then CXX=clang++
-    elif command -v g++ >/dev/null 2>&1; then CXX=g++
-    else echo "sanitizer-gate: clang++ or g++ is required" >&2; exit 2
+    for candidate in clang++ g++; do
+        if command -v "$candidate" >/dev/null 2>&1 && can_link_sanitizers "$candidate"; then
+            CXX="$candidate"
+            break
+        fi
+    done
+    if [ -z "$CXX" ]; then
+        if command -v clang++ >/dev/null 2>&1 || command -v g++ >/dev/null 2>&1; then
+            echo "sanitizer-gate: clang++ or g++ found, but sanitizer runtimes (-fsanitize=address,undefined,leak) failed to link" >&2
+            exit 2
+        else
+            echo "sanitizer-gate: clang++ or g++ is required" >&2
+            exit 2
+        fi
+    fi
+else
+    command -v "$CXX" >/dev/null 2>&1 || {
+        echo "sanitizer-gate: configured compiler is unavailable: $CXX" >&2
+        exit 2
+    }
+    if ! can_link_sanitizers "$CXX"; then
+        echo "sanitizer-gate: configured compiler '$CXX' cannot link sanitizer runtimes (-fsanitize=address,undefined,leak)" >&2
+        exit 2
     fi
 fi
-command -v "$CXX" >/dev/null 2>&1 || {
-    echo "sanitizer-gate: configured compiler is unavailable: $CXX" >&2
-    exit 2
-}
 
 work="$(mktemp -d "${TMPDIR:-/tmp}/tesla-key-sanitizers.XXXXXX")"
 trap 'rm -rf "$work"' EXIT
