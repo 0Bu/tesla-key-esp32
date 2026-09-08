@@ -101,7 +101,9 @@ Notes that matter to a calling agent:
   the web UI hero uses — one of `awake` / `asleep` / `idle` / `unreachable`, plus
   `unknown` before first contact (see
   [`ARCHITECTURE.md`](ARCHITECTURE.md#sleep--link-state-the-single-source-of-truth)) —
-  and `last_seen_s` is seconds since the last live contact.
+  and `last_seen_s` is seconds since the last live contact. Optional telemetry fields
+  (`soc`, `usable_soc`, `charging_state`, `charge_limit`, `charge_amps`, `charger_power_kw`)
+  appear only when reported by the vehicle.
 
 ---
 
@@ -177,7 +179,7 @@ curl -s http://tesla-key-esp32.local/mcp \
 ```json
 {"jsonrpc":"2.0","id":3,"result":{
   "content":[{"type":"text","text":
-    "{\"vin\":\"<VIN>\",\"paired\":true,\"link\":\"asleep\",\"last_seen_s\":4210,\"soc\":72,\"charging_state\":\"Disconnected\",\"charge_limit\":80,\"charge_amps\":16,\"charger_power_kw\":0}"}],
+    "{\"vin\":\"<VIN>\",\"paired\":true,\"link\":\"asleep\",\"last_seen_s\":4210,\"soc\":72,\"usable_soc\":70,\"charging_state\":\"Disconnected\",\"charge_limit\":80,\"charge_amps\":16,\"charger_power_kw\":0}"}],
   "isError":false}}
 ```
 

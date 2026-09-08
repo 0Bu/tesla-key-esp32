@@ -322,8 +322,9 @@ inline void emit_status(const Inputs& in, E& e) {
             e.obj_begin(nullptr);
             // Scanned NEIGHBOURS, not just the car: these are other people's devices in the
             // reporter's home, so they are redacted for the same reason the car's own MAC is.
+            // Advert names (S<hash>C) are derived from the VIN, so they are redacted too.
             e.str("addr", redacted_or(d.addr, in.redact));
-            e.str("name", d.name.c_str());
+            e.str("name", redacted_or(d.name, in.redact));
             e.num("rssi", d.rssi);
             e.boolean("connectable", d.connectable);
             e.obj_end();

@@ -106,10 +106,10 @@ overwrites `version.txt` in the workspace (**not** committed) with the version b
 `esp_app_get_description()->version`, the release tag, and the manifest `version` all agree. The
 main Pages manifest carries `steps.stamp.outputs.disp` = the release version.
 
-Device-side **downgrade gate** ([`ota_update.cpp`](../../../main/ota_update.cpp) ~266-284): before
+Device-side **downgrade gate** ([`ota_update.cpp`](../../../main/ota_update.cpp) ~579-624): before
 the bulk download, `ota_task` reads the incoming image's own version via
 `esp_https_ota_get_img_desc` and refuses anything not strictly newer than the running firmware
-(`ver_newer`) — software anti-rollback, no eFuses.
+(`tk::compare_ota_versions()`, [`ota_contract.hpp`](../../../main/logic/ota_contract.hpp)) — software anti-rollback, no eFuses.
 
 ## The check
 
