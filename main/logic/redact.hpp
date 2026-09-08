@@ -73,9 +73,10 @@ inline constexpr const char* kRedacted = "<redacted>";
 //   ble.addr      the vehicle's BLE MAC (and ble.devices[].addr, which carries the same value
 //                 for the target car plus the addresses of every other BLE device in the
 //                 reporter's home — a second, broader leak riding on one array)
+//   ble.devices[].name  the VIN-derived Tesla advert name (S<hash>C) for nearby vehicles
 //   mqtt.broker   a LAN address ("host:port"), often naming the reporter's HA install
 //   syslog.host   a LAN address
-inline constexpr std::size_t kRedactedStatusFields = 6;
+inline constexpr std::size_t kRedactedStatusFields = 7;
 
 // Field-level substitution for the /status gather step. Returns by value because every caller
 // feeds it straight into a std::string field of status::Inputs, which copies anyway.
@@ -101,6 +102,8 @@ inline constexpr DiagRedaction kDiagRedactions[] = {
     // before the Board-MAC delimiter, the second rule still fails closed to the line end.
     {"main: VIN: ", "  BLE MAC: "},
     {"  BLE MAC: ", "  Board MAC: "},
+    // main.cpp "interrupted VIN change detected before key commit — restoring %s"
+    {"interrupted VIN change detected before key commit — restoring ", ""},
     // vehicle_ctrl.cpp "VehicleController ready for VIN %s"
     {"VehicleController ready for VIN ", ""},
     // http_api.cpp "CMD %s on VIN %s" — the marker starts AFTER the command name, so which
@@ -119,9 +122,9 @@ inline constexpr DiagRedaction kDiagRedactions[] = {
     // VIN is only addressing. A truncated line with no closing "/" fails closed to the end of
     // the line, like every other rule here.
     {"/api/1/vehicles/", "/"},
-    // vehicle_ctrl.cpp "Tesla MAC saved: %s"
+    // vehicle_telemetry.cpp "Tesla MAC saved: %s"
     {"Tesla MAC saved: ", ""},
-    // vehicle_ctrl.cpp "could not persist Tesla MAC %s — next boot rescans" — the SAME address on
+    // vehicle_telemetry.cpp "could not persist Tesla MAC %s — next boot rescans" — the SAME address on
     // the failure branch of the very same write. A separate rule because the prefix differs, and
     // that is the whole lesson: this table is keyed on log PHRASES, so a new phrase carrying an
     // old value is a silent leak. The failure branch arrived with the [[nodiscard]] NVS work and
@@ -326,8 +329,9 @@ inline FixedDiagRedaction redact_diag_line_fixed(std::string_view line,
 
 // Two log lines are deliberately NOT in the table, and it is worth saying why so nobody "fixes"
 // them: provisioning.cpp's "failed to persist setup form (ssid=%s pass=%s vin=%s)" interpolates
-// the strings "ok"/"failed", never the values; main.cpp's "could not set DHCP hostname '%s'"
-// interpolates a compile-time constant. A rule on either would redact a word that says nothing.
+// the strings "ok"/"failed", never the values; net.cpp's "could not set DHCP hostname '%s'"
+// (WiFi and Ethernet sites) interpolates a compile-time constant. A rule on either would redact
+// a word that says nothing.
 
 // Redact one /diag line. A line matching no rule is returned unchanged — the ring is mostly
 // lifecycle and BLE chatter that names nothing.

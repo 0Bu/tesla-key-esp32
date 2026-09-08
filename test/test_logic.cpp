@@ -4380,8 +4380,21 @@ static void test_redact() {
     CHECK(ip_eth.find("192.168.1.42") == std::string::npos);
     CHECK(ip_eth.find("net: IP: ") != std::string::npos);
 
-    CHECK(tk::kDiagRedactionCount == 17);
-    CHECK(tk::kRedactedStatusFields == 6);
+    // Interrupted VIN transition recovery log line in main.cpp:
+    // "interrupted VIN change detected before key commit — restoring %s"
+    const std::string vin_restored = tk::redact_diag_line(
+        "W (123) main: interrupted VIN change detected before key commit — restoring 5YJ3E1EA7KF000316\n");
+    CHECK(vin_restored.find("5YJ3E1EA7KF000316") == std::string::npos);
+    CHECK(vin_restored.find("restoring ") != std::string::npos);
+    CHECK(vin_restored.back() == '\n');
+
+    const std::string vin_unconf = tk::redact_diag_line(
+        "W (123) main: interrupted VIN change detected before key commit — restoring unconfigured VIN\n");
+    CHECK(vin_unconf.find("restoring <redacted>") != std::string::npos);
+    CHECK(vin_unconf.back() == '\n');
+
+    CHECK(tk::kDiagRedactionCount == 18);
+    CHECK(tk::kRedactedStatusFields == 7);
 }
 
 // ─── Captive-portal reply policy ──────────────────────────────────────────────
@@ -4553,6 +4566,7 @@ static void test_status_sys_and_redaction() {
 
     // A scanned NEIGHBOUR's MAC is other people's hardware in the reporter's home, so it is
     // redacted for the same reason the car's own is.
+    // Advert names (S<hash>C) are derived from the VIN, so they are redacted too.
     Inputs d;
     d.redact = true;
     tk::status::BleDevice dev;
@@ -4561,6 +4575,9 @@ static void test_status_sys_and_redaction() {
     CollectEmitter ed;
     tk::status::emit_status(d, ed);
     CHECK(ed.out.find("11:22:33:44:55:66") == std::string::npos);
+    CHECK(ed.out.find("SomeCar") == std::string::npos);
+    CHECK(ed.out.find("ble.devices.0.name=\"<redacted>\"") != std::string::npos);
+    CHECK(ed.out.find("ble.devices.0.addr=\"<redacted>\"") != std::string::npos);
 
     // The UNREDACTED payload is what the dashboard polls: redaction is opt-in per request, and a
     // default-on version would silently break the UI it shares a builder with.

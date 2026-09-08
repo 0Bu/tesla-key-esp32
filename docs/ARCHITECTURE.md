@@ -514,8 +514,8 @@ preserves the `PR/` tree). Constraints:
 - **Versioning `<latest-stable-release>-PR-<N>`** (e.g. `1.4.30-PR-157`), stamped from the newest
   complete immutable non-prerelease GitHub Release (its stable tag plus all four digest-bound merged
   assets), never a raw newer RC tag. The protected signer derives this base again after the approval
-  wait and requires exact equality, so a stale but regex-valid base cannot be signed. `ver_newer()`
-  parses only `x.y.z` and ignores the suffix, so basing on
+  wait and requires exact equality, so a stale but regex-valid base cannot be signed.
+  `tk::compare_ota_versions()` (`main/logic/ota_contract.hpp`) parses only `x.y.z` and ignores the suffix, so basing on
   the *latest stable release* (not `next` or a prerelease core) guarantees a later main release compares strictly-newer → the
   PR-flashed device OTA-updates forward to main; a `next` base would collide with the number
   the merge cuts and stall OTA.
@@ -574,7 +574,7 @@ grouped under one device. **Read-only by design** — no command topics are subs
   derives each config topic, `unique_id`, state topic and value template from the row rather than
   reconstructing that mapping in the IDF shell.
 - **Entities:** charge (soc, charge_limit, power, amps, range **km**, rate **km/h**,
-  charging_state, plus extended read-only enrichment: actual_current/current_request **A**
+  charging_state, plus extended read-only enrichment: usable_soc [payload-only], actual_current/current_request **A**
   (delivered vs requested), volts **V** at the charger, charger phases, energy_added **kWh**
   session, minutes_to_full (also serialized on `/vehicle_data` for evcc finishtime),
   charge limit_reason — HA bridge only, not on `/api`), climate
@@ -587,7 +587,9 @@ grouped under one device. **Read-only by design** — no command topics are subs
   reset reason slug/code, crash-dump and safe-mode flags, and WiFi/MQTT reconnect counters).
   The same retained Device JSON also carries optional per-task minimum-free-stack bytes for HTTP,
   vehicle, auto-pair and MQTT as raw MQTT diagnostics; those four payload-only fields deliberately
-  have no HA discovery rows and therefore do not create entities. Optional
+  have no HA discovery rows and therefore do not create entities. Similarly, the retained Charge JSON
+  carries optional `usable_soc` as a payload-only diagnostic field alongside `soc` without a dedicated
+  discovery sensor row to avoid duplicate Home Assistant battery sensors. Optional
   car-sourced numeric and boolean fields are emitted only when the car reported them (proto3
   optional), so an unseen value reads "unknown" in HA rather than a phantom 0/OFF. Every binary
   discovery template has the same presence guard; `locked` alone inverts ON/OFF for HA's `lock`
@@ -1009,7 +1011,7 @@ The STA→LAN link (distinct from the car BLE link-state below) is kept up by tw
   IP, keeps emitting TCP that times out — e.g. MQTT `esp-tls select() timeout`) but the AP
   forwards nothing and **no disconnect event ever fires**, so the handler never runs. The
   watchdog ICMP-echoes the **default gateway** only while the link believes it is up; after
-  `kWdFailToReassoc` (2) consecutive failures (~60 s) it forces **one** `esp_wifi_disconnect()`
+  `tk::kWatchFailsToRecover` (2) consecutive failures (~60 s) it forces **one** `esp_wifi_disconnect()`
   — the endless-retry handler then reconnects with the known-good credentials (so the watchdog
   never calls `esp_wifi_connect()` itself, avoiding a cross-task double-connect). On a wired
   link the same verdict restarts the Ethernet MAC (`esp_eth_stop`/`esp_eth_start`), which
