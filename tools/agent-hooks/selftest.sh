@@ -127,6 +127,19 @@ PY
 expect_guard deny "$codex_mc_payload" 'write to managed_components denied'
 expect_ag_guard deny "$ag_mc_payload" 'Antigravity top-level decision deny for managed_components'
 
+codex_mc_read_payload="$(payload read file_path managed_components/yoziru__tesla-ble/src/ble.c "$root")"
+ag_mc_read_payload="$(python3 - "$root" <<'PY'
+import json,sys
+print(json.dumps({
+  "conversationId":"test",
+  "workspacePaths":[sys.argv[1]],
+  "toolCall":{"name":"view_file","args":{"AbsolutePath":"managed_components/yoziru__tesla-ble/src/ble.c"}},
+}))
+PY
+)"
+expect_guard allow "$codex_mc_read_payload" 'read from managed_components allowed'
+expect_ag_guard allow "$ag_mc_read_payload" 'Antigravity top-level decision allow for view_file managed_components'
+
 codex_logic_payload="$(python3 - "$root" <<'PY'
 import json,sys
 print(json.dumps({"tool_name":"Edit","cwd":sys.argv[1],"tool_input":{"file_path":"main/logic/units.hpp","content":"#include <esp_log.h>"}}))

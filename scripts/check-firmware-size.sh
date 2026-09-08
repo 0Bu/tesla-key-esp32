@@ -90,7 +90,11 @@ for target in "${target_list[@]}"; do
 
   echo ""
   echo "--- Building and measuring $target ---"
-  ./scripts/idf-docker.sh ./scripts/ci-build-all.sh --target "$target" local local
+  build_flags=(--target "$target")
+  if [[ "$update_baseline" -eq 1 ]]; then
+    build_flags+=(--no-enforce-budget)
+  fi
+  ./scripts/idf-docker.sh ./scripts/ci-build-all.sh "${build_flags[@]}" local local
 
   unsigned_bin="_unsigned/$target/tesla-key-esp32.bin"
   size_json="dist/$target/size-$target.json"
@@ -151,6 +155,7 @@ if tgt_budget["memoryModel"] == "unified":
 else:
     tgt_budget["maxStaticUsed"] = max(tgt_budget["maxStaticUsed"], observed.get("used_dram", 0))
     tgt_budget["maxBss"] = max(tgt_budget["maxBss"], observed.get("dram_bss", 0))
+    tgt_budget["maxIramUsed"] = max(tgt_budget.get("maxIramUsed", 0), observed.get("used_iram", 0))
 
 with open(baseline_path, "w", encoding="utf-8") as f:
     json.dump(baseline, f, indent=2)

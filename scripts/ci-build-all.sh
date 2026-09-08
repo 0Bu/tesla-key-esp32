@@ -97,18 +97,30 @@ if [[ "${1:-}" == --self-test ]]; then
   exit 0
 fi
 
+enforce_budget=1
 target_override=""
-if [[ "${1:-}" == --target ]]; then
-  shift
-  target_override="${1:?usage: ci-build-all.sh [--target <target>] <display-version> [source-sha]}"
-  shift
-  case "$target_override" in
-    esp32|esp32s3|esp32c3|esp32c6) ;;
-    *) echo "unsupported target: $target_override" >&2; exit 2 ;;
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --target)
+      shift
+      target_override="${1:?usage: ci-build-all.sh [--target <target>] [--no-enforce-budget] <display-version> [source-sha]}"
+      shift
+      case "$target_override" in
+        esp32|esp32s3|esp32c3|esp32c6) ;;
+        *) echo "unsupported target: $target_override" >&2; exit 2 ;;
+      esac
+      ;;
+    --no-enforce-budget)
+      shift
+      enforce_budget=0
+      ;;
+    *)
+      break
+      ;;
   esac
-fi
+done
 
-version="${1:?usage: ci-build-all.sh <display-version> [source-sha]}"
+version="${1:?usage: ci-build-all.sh [--target <target>] [--no-enforce-budget] <display-version> [source-sha]}"
 # GitHub Actions does not reliably forward step-level environment variables through container
 # actions. CI therefore passes the producing commit explicitly; local builds retain a clear,
 # non-provenance marker when the optional argument is omitted.
@@ -235,14 +247,19 @@ for target in $TARGETS; do
   input="_unsigned/$target"
   diagnostic="dist/$target"
   projected_signed_size="$(tr -d '[:space:]' < "$diagnostic/projected-signed-size.txt")"
+  budget_args=(
+    --budget-baseline scripts/firmware-size-baseline.json
+  )
+  if [[ "$enforce_budget" -eq 1 ]]; then
+    budget_args+=(--enforce-budget)
+  fi
   python3 scripts/report-firmware-size.py \
     --idf-size "$diagnostic/size-$target.json" \
     --unsigned-app "$input/tesla-key-esp32.bin" \
     --projected-signed-size "$projected_signed_size" \
     --policy-limit "$APP_POLICY_LIMIT" \
     --target "$target" \
-    --budget-baseline scripts/firmware-size-baseline.json \
-    --enforce-budget > "$diagnostic/size-$target.md"
+    "${budget_args[@]}" > "$diagnostic/size-$target.md"
   python3 scripts/check-stack-usage.py \
     --target "$target" \
     --observed-json "$diagnostic/stack-usage-$target.json" \

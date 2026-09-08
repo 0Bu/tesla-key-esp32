@@ -3792,6 +3792,7 @@ static void test_health_gate() {
         CHECK(!tk::identity_mutation_may_start(O::Stable, G::IdentityMutation, entry));
         CHECK(!tk::identity_mutation_may_start(O::Stable, G::FaultRestart, entry));
         CHECK(!tk::identity_mutation_may_start(O::Stable, G::HealthCommit, entry));
+        CHECK(!tk::identity_mutation_may_start(O::Stable, G::ConfigRestart, entry));
         CHECK(!tk::identity_mutation_may_start(O::PendingVerify, G::Idle, entry));
         CHECK(!tk::identity_mutation_may_start(O::Unknown, G::Idle, entry));
     }
@@ -3800,6 +3801,7 @@ static void test_health_gate() {
     CHECK(!tk::ota_operation_may_start(G::IdentityMutation));
     CHECK(!tk::ota_operation_may_start(G::FaultRestart));
     CHECK(!tk::ota_operation_may_start(G::HealthCommit));
+    CHECK(!tk::ota_operation_may_start(G::ConfigRestart));
 
     // Exercise the exact atomic CAS seam used by the firmware, not only its admission predicates.
     // Every owner blocks both peers; an owner-mismatched cleanup cannot clear the winner.
@@ -3812,6 +3814,7 @@ static void test_health_gate() {
     CHECK(!operation.try_begin(G::IdentityMutation));
     CHECK(!operation.try_begin(G::FaultRestart));
     CHECK(!operation.try_begin(G::HealthCommit));
+    CHECK(!operation.try_begin(G::ConfigRestart));
     CHECK(!operation.finish(G::IdentityMutation));
     CHECK(operation.state() == G::Ota);
     CHECK(operation.finish(G::Ota));
@@ -3820,6 +3823,7 @@ static void test_health_gate() {
     CHECK(!operation.try_begin(G::Ota));
     CHECK(!operation.try_begin(G::FaultRestart));
     CHECK(!operation.try_begin(G::HealthCommit));
+    CHECK(!operation.try_begin(G::ConfigRestart));
     CHECK(operation.finish(G::IdentityMutation));
 
     // Persistence failure: FaultRestart releases its own owner, so a postponed OTA or identity
@@ -3828,12 +3832,23 @@ static void test_health_gate() {
     CHECK(!operation.try_begin(G::Ota));
     CHECK(!operation.try_begin(G::IdentityMutation));
     CHECK(!operation.try_begin(G::HealthCommit));
+    CHECK(!operation.try_begin(G::ConfigRestart));
     CHECK(operation.finish(G::FaultRestart));
     CHECK(operation.try_begin(G::HealthCommit));
     CHECK(!operation.try_begin(G::Ota));
     CHECK(!operation.try_begin(G::IdentityMutation));
     CHECK(!operation.try_begin(G::FaultRestart));
+    CHECK(!operation.try_begin(G::ConfigRestart));
     CHECK(operation.finish(G::HealthCommit));
+
+    // ConfigRestart: blocks OTA and IdentityMutation, and releases on failure or persists through reboot.
+    CHECK(operation.try_begin(G::ConfigRestart));
+    CHECK(!operation.try_begin(G::Ota));
+    CHECK(!operation.try_begin(G::IdentityMutation));
+    CHECK(!operation.try_begin(G::FaultRestart));
+    CHECK(!operation.try_begin(G::HealthCommit));
+    CHECK(operation.finish(G::ConfigRestart));
+
     CHECK(operation.try_begin(G::Ota));
     CHECK(operation.finish(G::Ota));
     CHECK(operation.try_begin(G::IdentityMutation));
@@ -4615,6 +4630,13 @@ static void test_vehicle_data_logic() {
     // Only usable present
     cs.has_battery_level = false;
     CHECK_NEAR(tk::effective_usable_soc(cs), 71.0);
+
+    // Identity epoch gating: snapshot taken before pairing cleanup must not publish
+    CHECK(tk::telemetry_epoch_matches(0, 0));
+    CHECK(tk::telemetry_epoch_matches(42, 42));
+    CHECK(!tk::telemetry_epoch_matches(0, 1));
+    CHECK(!tk::telemetry_epoch_matches(1, 0));
+    CHECK(!tk::telemetry_epoch_matches(42, 43));
 }
 
 int main() {

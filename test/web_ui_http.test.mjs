@@ -17,6 +17,7 @@ function loadUi() {
         innerHTML: "",
         textContent: "",
         title: "",
+        style: {},
         setAttribute(name, value) { this[name] = String(value); },
         appendChild(child) { this.children.push(child); child.parentNode = this; },
         removeChild(child) { this.children.splice(this.children.indexOf(child), 1); },
@@ -172,4 +173,20 @@ test("setup form enforces the shared WiFi credential contract without optimistic
   assert.match(html, /pb===64&&\/\^\[0-9a-f\]\{64\}\$\/i/);
   assert.match(html, /Recovery setup preserves an existing VIN:[\s\S]*use Change VIN on the device page/);
   assert.doesNotMatch(html, /setTimeout\(function\(\)\{ \$\("form"\)\.classList\.add\('hide'\)/);
+});
+
+test("render handles s.link === 'idle' without ReferenceError and sets chips", () => {
+  const { context, element } = loadUi();
+  context.render({
+    link: "idle",
+    paired: true,
+    key_present: true,
+    vin: "5YJSA1E21HF123456",
+    last: { usable_soc: 75 },
+    last_seen_s: 120
+  });
+  assert.match(element("hlabel").innerHTML, /Parked/);
+  assert.match(element("hstats").innerHTML, /Battery/);
+  assert.match(element("hstats").innerHTML, /75/);
+  assert.match(element("hstats").innerHTML, /Idle/);
 });
