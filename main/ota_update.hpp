@@ -105,6 +105,12 @@ private:
     bool held_ = false;
 };
 
+// Acquire the process-wide operation gate for a configuration-triggered reboot window
+// (/set_mqtt, /set_syslog, /set_wifi, and setup portal /save). Must be called after early
+// OTA confirmation, and holds the owner until esp_restart() so no OTA or identity
+// transaction can start during the delayed restart window.
+bool ota_config_restart_begin();
+
 // If the running image is still ESP_OTA_IMG_PENDING_VERIFY (a fresh OTA the ~90 s health gate in
 // main.cpp hasn't confirmed yet), mark it valid NOW so it can't be rolled back. Call this before
 // a SuccessfulUserConfigCommit reboot after /set_wifi, /set_mqtt, /set_syslog or a setup-portal

@@ -47,7 +47,7 @@ Protect these exact contracts:
   previews, Release/Pages byte binding, and cleanup stay intact.
 - A mutation-tested exact-four-target chain covers build, sign, Pages assembly and reproducibility;
   adding, removing or skipping a target must fail closed across all consumers.
-- The main publication DAG stays exactly logic-test -> build -> independent-rebuild -> publish ->
+- The main publication DAG stays exactly logic-test -> build-target -> build -> independent-rebuild -> publish ->
   deploy. Publish consumes both exact-source unsigned builds, owns signing and immutable Release
   publication, and emits the SHA/version-bound Actions artifact; deploy consumes only that named
   artifact and owns the branch-backed Pages write without a signing Environment, OTA key or OIDC.

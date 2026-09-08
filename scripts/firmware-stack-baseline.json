@@ -97,7 +97,7 @@
         "CMakeFiles/__idf_main.dir/vehicle_telemetry.cpp.su": {
           "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: static void VehicleController::loop_task_fn_(void*)": 352,
           "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: void VehicleController::process_ble_host_events_()": 560,
-          "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: void VehicleController::process_pending_telemetry_()": 1408
+          "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: void VehicleController::process_pending_telemetry_()": 1440
         }
       }
     },
@@ -194,7 +194,7 @@
         "CMakeFiles/__idf_main.dir/vehicle_telemetry.cpp.su": {
           "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: static void VehicleController::loop_task_fn_(void*)": 352,
           "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: void VehicleController::process_ble_host_events_()": 560,
-          "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: void VehicleController::process_pending_telemetry_()": 1408
+          "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: void VehicleController::process_pending_telemetry_()": 1440
         }
       }
     },
@@ -283,13 +283,13 @@
           "/COMPONENT_MAIN_DIR/vehicle_ctrl.cpp :: bool VehicleController::enqueue_ble_rx_event_(const uint8_t*, size_t, uint32_t)": 288
         },
         "CMakeFiles/__idf_main.dir/vehicle_pairing.cpp.su": {
-          "/COMPONENT_MAIN_DIR/vehicle_pairing.cpp :: bool VehicleController::clear_session_and_cache_()": 288,
+          "/COMPONENT_MAIN_DIR/vehicle_pairing.cpp :: bool VehicleController::clear_session_and_cache_()": 304,
           "/COMPONENT_MAIN_DIR/vehicle_pairing.cpp :: std::string VehicleController::key_fingerprint()": 832
         },
         "CMakeFiles/__idf_main.dir/vehicle_telemetry.cpp.su": {
           "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: static void VehicleController::loop_task_fn_(void*)": 336,
           "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: void VehicleController::process_ble_host_events_()": 544,
-          "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: void VehicleController::process_pending_telemetry_()": 1392
+          "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: void VehicleController::process_pending_telemetry_()": 1408
         }
       }
     },
@@ -378,13 +378,13 @@
           "/COMPONENT_MAIN_DIR/vehicle_ctrl.cpp :: bool VehicleController::enqueue_ble_rx_event_(const uint8_t*, size_t, uint32_t)": 288
         },
         "CMakeFiles/__idf_main.dir/vehicle_pairing.cpp.su": {
-          "/COMPONENT_MAIN_DIR/vehicle_pairing.cpp :: bool VehicleController::clear_session_and_cache_()": 288,
+          "/COMPONENT_MAIN_DIR/vehicle_pairing.cpp :: bool VehicleController::clear_session_and_cache_()": 304,
           "/COMPONENT_MAIN_DIR/vehicle_pairing.cpp :: std::string VehicleController::key_fingerprint()": 832
         },
         "CMakeFiles/__idf_main.dir/vehicle_telemetry.cpp.su": {
           "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: static void VehicleController::loop_task_fn_(void*)": 336,
           "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: void VehicleController::process_ble_host_events_()": 544,
-          "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: void VehicleController::process_pending_telemetry_()": 1392
+          "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: void VehicleController::process_pending_telemetry_()": 1408
         }
       }
     }

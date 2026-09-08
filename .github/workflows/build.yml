@@ -25,6 +25,9 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: read
+    outputs:
+      release-version: ${{ steps.version.outputs.version }}
+      latest-published-stable: ${{ steps.version.outputs.latest }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -56,6 +59,24 @@ jobs:
       # here silently disarms the merge gate rather than failing loudly.
       - name: Test the PR-gate command matcher
         run: ./scripts/test-pr-gates.sh
+
+      - name: Compute release version
+        id: version
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          git fetch --tags --force
+          if [ "$EVENT_NAME" = push ] && [ "${{ github.ref }}" = refs/heads/main ]; then
+            release="$(./scripts/select-release-version.sh --select-main "$SOURCE_SHA")"
+          else
+            release="$(./scripts/select-release-version.sh)"
+          fi
+          latest="$(./scripts/select-release-version.sh --latest-published-stable)"
+          echo "version=$release" >> "$GITHUB_OUTPUT"
+          echo "latest=$latest" >> "$GITHUB_OUTPUT"
 
   build-target:
     needs: logic-test
@@ -109,35 +130,16 @@ jobs:
           echo "image-version=$(./scripts/idf-version.sh --image-version)" >> "$GITHUB_OUTPUT"
           echo "ESP-IDF image: $(./scripts/idf-version.sh --image)"
 
-      - name: Compute release version
-        if: steps.changes.outputs.firmware == 'yes'
-        id: version
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          GH_TOKEN: ${{ github.token }}
-          GITHUB_REPOSITORY: ${{ github.repository }}
-          SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-        run: |
-          git fetch --tags --force
-          if [ "$EVENT_NAME" = push ] && [ "${{ github.ref }}" = refs/heads/main ]; then
-            release="$(./scripts/select-release-version.sh --select-main "$SOURCE_SHA")"
-          else
-            release="$(./scripts/select-release-version.sh)"
-          fi
-          latest="$(./scripts/select-release-version.sh --latest-published-stable)"
-          echo "version=$release" >> "$GITHUB_OUTPUT"
-          echo "latest=$latest" >> "$GITHUB_OUTPUT"
-
       - name: Stamp firmware version
         if: steps.changes.outputs.firmware == 'yes'
         id: stamp
         run: |
           if [ "${{ github.event_name }}" = pull_request ]; then
-            base="${{ steps.version.outputs.latest }}"
-            [ -n "$base" ] || base="${{ steps.version.outputs.version }}"
+            base="${{ needs.logic-test.outputs.latest-published-stable }}"
+            [ -n "$base" ] || base="${{ needs.logic-test.outputs.release-version }}"
             disp="${base}-PR-${{ github.event.pull_request.number }}"
           else
-            disp="${{ steps.version.outputs.version }}"
+            disp="${{ needs.logic-test.outputs.release-version }}"
           fi
           echo "$disp" > version.txt
           echo "disp=$disp" >> "$GITHUB_OUTPUT"
@@ -179,7 +181,7 @@ jobs:
       pages: read
     outputs:
       display-version: ${{ steps.stamp.outputs.disp }}
-      release-version: ${{ steps.version.outputs.version }}
+      release-version: ${{ needs.logic-test.outputs.release-version }}
       firmware: ${{ steps.changes.outputs.firmware }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -195,24 +197,6 @@ jobs:
           echo "version=$(./scripts/idf-version.sh)" >> "$GITHUB_OUTPUT"
           echo "image-version=$(./scripts/idf-version.sh --image-version)" >> "$GITHUB_OUTPUT"
           echo "ESP-IDF image: $(./scripts/idf-version.sh --image)"
-
-      - name: Compute release version
-        id: version
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          GH_TOKEN: ${{ github.token }}
-          GITHUB_REPOSITORY: ${{ github.repository }}
-          SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-        run: |
-          git fetch --tags --force
-          if [ "$EVENT_NAME" = push ] && [ "${{ github.ref }}" = refs/heads/main ]; then
-            release="$(./scripts/select-release-version.sh --select-main "$SOURCE_SHA")"
-          else
-            release="$(./scripts/select-release-version.sh)"
-          fi
-          latest="$(./scripts/select-release-version.sh --latest-published-stable)"
-          echo "version=$release" >> "$GITHUB_OUTPUT"
-          echo "latest=$latest" >> "$GITHUB_OUTPUT"
 
       - name: Detect firmware-relevant changes
         id: changes
@@ -245,14 +229,14 @@ jobs:
         id: stamp
         run: |
           if [ "${{ github.event_name }}" = pull_request ]; then
-            base="${{ steps.version.outputs.latest }}"
-            [ -n "$base" ] || base="${{ steps.version.outputs.version }}"
+            base="${{ needs.logic-test.outputs.latest-published-stable }}"
+            [ -n "$base" ] || base="${{ needs.logic-test.outputs.release-version }}"
             disp="${base}-PR-${{ github.event.pull_request.number }}"
           elif [ "${{ steps.changes.outputs.firmware }}" = yes ]; then
-            disp="${{ steps.version.outputs.version }}"
+            disp="${{ needs.logic-test.outputs.release-version }}"
           else
-            disp="${{ steps.version.outputs.latest }}"
-            [ -n "$disp" ] || disp="${{ steps.version.outputs.version }}"
+            disp="${{ needs.logic-test.outputs.latest-published-stable }}"
+            [ -n "$disp" ] || disp="${{ needs.logic-test.outputs.release-version }}"
           fi
           echo "$disp" > version.txt
           echo "disp=$disp" >> "$GITHUB_OUTPUT"

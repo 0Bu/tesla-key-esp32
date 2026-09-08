@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <string>
 
 // Vehicle-state result structs — the cached shapes VehicleController hands to every
@@ -60,6 +61,14 @@ void emit_vehicle_charge_state(const ChargeStateResult& cs, Emitter& e) {
 inline float effective_usable_soc(const ChargeStateResult& cs) {
     return cs.has_usable_battery_level ? cs.usable_battery_level : cs.battery_level;
 }
+
+// Pure decision logic for publishing pending telemetry against an identity epoch.
+// A telemetry snapshot taken before pairing cleanup must not outlive the cleanup and revive
+// stale readings into active caches.
+inline bool telemetry_epoch_matches(uint32_t captured_epoch, uint32_t current_epoch) noexcept {
+    return captured_epoch == current_epoch;
+}
+
 }  // namespace tk
 
 struct VehicleStatusResult {

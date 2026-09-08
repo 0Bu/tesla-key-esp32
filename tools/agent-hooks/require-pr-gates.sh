@@ -20,7 +20,7 @@ fi
 for fn in gate_bash_actions gate_pr_create_body gate_push_head_sha gate_fetch_pr \
           gate_pr_changed_files gate_checkbox_status gate_sha_matches gate_full_head_sha \
           gate_branch gate_repo_slug gate_origin_is_github agent_gate_workdir_matches \
-          agent_gate_run_bounded gate_is_renovate_maintenance; do
+          agent_gate_run_bounded gate_is_renovate_maintenance gate_feature_docs_relevant; do
   if [ "${GATE_PR_LIB_API:-}" != 3 ] || ! declare -F "$fn" >/dev/null 2>&1; then
     echo "BLOCKED: runner-neutral PR gate library is incomplete ($fn)." >&2
     exit 2
@@ -356,11 +356,16 @@ PY
           exit 2
         }
       fi
-      if printf '%s\n' "$(cat "$files_file")" | gate_feature_docs_relevant; then
+      feature_relevant_rc=0
+      printf '%s\n' "$(cat "$files_file")" | gate_feature_docs_relevant || feature_relevant_rc=$?
+      if [ "$feature_relevant_rc" -eq 0 ]; then
         record_ok "$body" feature-docs "$head_sha" || {
           echo "BLOCKED: feature-relevant merge/check requires one current top-level \$feature-docs record for $head_sha." >&2
           exit 2
         }
+      elif [ "$feature_relevant_rc" -ne 1 ]; then
+        echo "BLOCKED: feature-docs relevance check failed (exit code $feature_relevant_rc)." >&2
+        exit 2
       fi
     fi
     ;;

@@ -185,11 +185,16 @@ static esp_netif_t* s_sta_netif_ptr() { return s_sta_netif; }
 // read by the boot window below — atomic, because the credential-rollback decision reads it
 // while associations are still churning. 0 = nothing has failed yet.
 static std::atomic<int> s_last_disco_reason{0};
+static std::atomic<bool> s_rollback_active{false};
 
 static void wifi_event_handler(void*, esp_event_base_t base, int32_t event_id, void* data) {
     try {
       if (base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
         esp_wifi_connect();
+    } else if (base == WIFI_EVENT && event_id == WIFI_EVENT_STA_CONNECTED) {
+        // Station associated — clear any previous disconnect reason immediately so a concurrent
+        // rollback check sees DiscoClass::None while waiting on DHCP.
+        s_last_disco_reason.store(0);
     } else if (base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
         link_down(NetLink::Wifi);
         // Keep the reason: it is the only evidence available about WHY the association failed,
@@ -197,15 +202,15 @@ static void wifi_event_handler(void*, esp_event_base_t base, int32_t event_id, v
         // these credentials" and "the AP was not there". Stored, never acted on here — this runs
         // on the event task and the decision belongs to the boot window in net_start_wifi().
         if (data) s_last_disco_reason.store(((wifi_event_sta_disconnected_t*)data)->reason);
-        if (!s_ever_up.load() && s_retry_num >= MAX_RETRY) {
-            // Never been online AND the boot retry budget is spent → credentials are almost
-            // certainly wrong. Stop so net_start_wifi() times out and main.cpp falls back to
-            // the setup portal.
+        if (!s_ever_up.load() && !s_rollback_active.load() && s_retry_num >= MAX_RETRY) {
+            // Never been online AND not in rollback grace AND the boot retry budget is spent →
+            // credentials are almost certainly wrong. Stop so net_start_wifi() times out and main.cpp
+            // falls back to the setup portal.
             xEventGroupSetBits(s_wifi_events, WIFI_FAIL_BIT);
         } else {
-            // Still within the boot budget, OR we have been online before (a runtime drop:
-            // router reboot, roaming, a delivered deauth). Credentials are known-good →
-            // reconnect FOREVER. Surrendering here is what previously stranded the device off
+            // Still within the boot budget, OR in rollback grace period, OR we have been online before
+            // (a runtime drop: router reboot, roaming, a delivered deauth). Credentials are known-good
+            // or on probation → reconnect FOREVER. Surrendering here is what previously stranded the device off
             // WiFi until a manual reset.
             esp_wifi_connect();
             s_retry_num++;
@@ -327,6 +332,11 @@ bool net_start_wifi(const char* ssid, const char* password, bool rollback_pendin
     // because the router is still rebooting, a slow DHCP) is not evidence against the
     // credentials and gets the full grace window instead. The policy is the host-tested
     // logic/wifi_rollback.hpp; this loop only supplies the samples.
+    s_rollback_active.store(true);
+    struct RollbackGuard {
+        ~RollbackGuard() { s_rollback_active.store(false); }
+    } rollback_guard;
+
     tk::RollbackWatch watch{};
     for (int elapsed = 0;; elapsed += (int)tk::kWifiBootWindowS) {
         EventBits_t bits = xEventGroupWaitBits(s_wifi_events,

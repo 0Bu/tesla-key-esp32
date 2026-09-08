@@ -112,6 +112,13 @@ static void test_example() {
 // …and add `test_example();` inside main().
 ```
 
+### 3b. Register the unit in `test/logic_test_ownership.json`
+
+Every pure-logic header in `main/logic/` must be registered in
+[`test/logic_test_ownership.json`](../../../test/logic_test_ownership.json) with its test file and
+evidence token (e.g. `"test": "test/test_logic.cpp", "evidence": "test_<name>("`).
+`scripts/repo-lint.sh` enforces this mapping offline; omitting it fails CI and pre-commit checks.
+
 ### 4. Run the mock build — it must print `OK`
 
 ```bash

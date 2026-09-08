@@ -340,6 +340,7 @@ static_assert(std::is_trivially_copyable_v<CarServer_ClosuresState>);
 void VehicleController::on_charge_state_(const CarServer_ChargeState& state) noexcept {
     portENTER_CRITICAL(&telemetry_pending_mux_);
     telemetry_pending_charge_ = state;
+    telemetry_pending_charge_epoch_ = identity_epoch_.load(std::memory_order_relaxed);
     telemetry_pending_mask_ |= PendingCharge;
     uint32_t generation = charging_amps_feedback_.generation + 1;
     charging_amps_feedback_ = {};
@@ -373,6 +374,7 @@ VehicleController::ChargingAmpsFeedback VehicleController::charging_amps_feedbac
 void VehicleController::on_climate_state_(const CarServer_ClimateState& state) noexcept {
     portENTER_CRITICAL(&telemetry_pending_mux_);
     telemetry_pending_climate_ = state;
+    telemetry_pending_climate_epoch_ = identity_epoch_.load(std::memory_order_relaxed);
     telemetry_pending_mask_ |= PendingClimate;
     portEXIT_CRITICAL(&telemetry_pending_mux_);
 }
@@ -380,6 +382,7 @@ void VehicleController::on_climate_state_(const CarServer_ClimateState& state) n
 void VehicleController::on_drive_state_(const CarServer_DriveState& state) noexcept {
     portENTER_CRITICAL(&telemetry_pending_mux_);
     telemetry_pending_drive_ = state;
+    telemetry_pending_drive_epoch_ = identity_epoch_.load(std::memory_order_relaxed);
     telemetry_pending_mask_ |= PendingDrive;
     portEXIT_CRITICAL(&telemetry_pending_mux_);
 }
@@ -388,6 +391,7 @@ void VehicleController::on_tire_pressure_state_(
     const CarServer_TirePressureState& state) noexcept {
     portENTER_CRITICAL(&telemetry_pending_mux_);
     telemetry_pending_tires_ = state;
+    telemetry_pending_tires_epoch_ = identity_epoch_.load(std::memory_order_relaxed);
     telemetry_pending_mask_ |= PendingTires;
     portEXIT_CRITICAL(&telemetry_pending_mux_);
 }
@@ -395,6 +399,7 @@ void VehicleController::on_tire_pressure_state_(
 void VehicleController::on_closures_state_(const CarServer_ClosuresState& state) noexcept {
     portENTER_CRITICAL(&telemetry_pending_mux_);
     telemetry_pending_closures_ = state;
+    telemetry_pending_closures_epoch_ = identity_epoch_.load(std::memory_order_relaxed);
     telemetry_pending_mask_ |= PendingClosures;
     portEXIT_CRITICAL(&telemetry_pending_mux_);
 }
@@ -405,55 +410,102 @@ void VehicleController::process_pending_telemetry_() {
     CarServer_DriveState drive{};
     CarServer_TirePressureState tires{};
     CarServer_ClosuresState closures{};
+    uint32_t charge_epoch = 0;
+    uint32_t climate_epoch = 0;
+    uint32_t drive_epoch = 0;
+    uint32_t tires_epoch = 0;
+    uint32_t closures_epoch = 0;
 
     portENTER_CRITICAL(&telemetry_pending_mux_);
     const uint32_t pending = telemetry_pending_mask_;
     telemetry_pending_mask_ = 0;
-    if (pending & PendingCharge) charge = telemetry_pending_charge_;
-    if (pending & PendingClimate) climate = telemetry_pending_climate_;
-    if (pending & PendingDrive) drive = telemetry_pending_drive_;
-    if (pending & PendingTires) tires = telemetry_pending_tires_;
-    if (pending & PendingClosures) closures = telemetry_pending_closures_;
+    if (pending & PendingCharge) {
+        charge = telemetry_pending_charge_;
+        charge_epoch = telemetry_pending_charge_epoch_;
+    }
+    if (pending & PendingClimate) {
+        climate = telemetry_pending_climate_;
+        climate_epoch = telemetry_pending_climate_epoch_;
+    }
+    if (pending & PendingDrive) {
+        drive = telemetry_pending_drive_;
+        drive_epoch = telemetry_pending_drive_epoch_;
+    }
+    if (pending & PendingTires) {
+        tires = telemetry_pending_tires_;
+        tires_epoch = telemetry_pending_tires_epoch_;
+    }
+    if (pending & PendingClosures) {
+        closures = telemetry_pending_closures_;
+        closures_epoch = telemetry_pending_closures_epoch_;
+    }
     portEXIT_CRITICAL(&telemetry_pending_mux_);
 
     // Parse outside both vehicle_mutex_ and cache_mutex_. Only bounded result publication is
     // serialized; temporary strings are created and destroyed in normal task context.
+    // Each publication verifies the snapshot's identity epoch against current identity_epoch_
+    // under cache_mutex_ so a concurrent pairing cleanup cannot be revived by delayed parsing.
     if (pending & PendingCharge) {
         ChargeStateResult parsed{};
         parse_charge_state(charge, parsed);
         {
             tk::MutexGuard g(cache_mutex_);
-            last_known_charge_ = std::move(parsed);
+            if (tk::telemetry_epoch_matches(charge_epoch, identity_epoch_.load(std::memory_order_acquire))) {
+                last_known_charge_ = std::move(parsed);
+                const uint32_t now = xTaskGetTickCount();
+                last_charge_ticks_.store(now);
+                charge_state_generation_.fetch_add(1);
+                charge_cache_stale_reported_.store(false);
+                note_contact_();
+            } else {
+                ESP_LOGW(TAG, "discarding charge telemetry from defunct identity epoch (%u vs %u)",
+                         (unsigned)charge_epoch, (unsigned)identity_epoch_.load(std::memory_order_acquire));
+            }
         }
-        const uint32_t now = xTaskGetTickCount();
-        last_charge_ticks_.store(now);
-        charge_state_generation_.fetch_add(1);
-        charge_cache_stale_reported_.store(false);
-        note_contact_();
     }
     if (pending & PendingClimate) {
         ClimateStateResult parsed{};
         parse_climate_state(climate, parsed);
-        { tk::MutexGuard g(cache_mutex_); last_known_climate_ = std::move(parsed); }
-        note_contact_();
+        {
+            tk::MutexGuard g(cache_mutex_);
+            if (tk::telemetry_epoch_matches(climate_epoch, identity_epoch_.load(std::memory_order_acquire))) {
+                last_known_climate_ = std::move(parsed);
+                note_contact_();
+            }
+        }
     }
     if (pending & PendingDrive) {
         DriveStateResult parsed{};
         parse_drive_state(drive, parsed);
-        { tk::MutexGuard g(cache_mutex_); last_known_drive_ = std::move(parsed); }
-        note_contact_();
+        {
+            tk::MutexGuard g(cache_mutex_);
+            if (tk::telemetry_epoch_matches(drive_epoch, identity_epoch_.load(std::memory_order_acquire))) {
+                last_known_drive_ = std::move(parsed);
+                note_contact_();
+            }
+        }
     }
     if (pending & PendingTires) {
         TirePressureResult parsed{};
         parse_tire_pressure(tires, parsed);
-        { tk::MutexGuard g(cache_mutex_); last_known_tires_ = std::move(parsed); }
-        note_contact_();
+        {
+            tk::MutexGuard g(cache_mutex_);
+            if (tk::telemetry_epoch_matches(tires_epoch, identity_epoch_.load(std::memory_order_acquire))) {
+                last_known_tires_ = std::move(parsed);
+                note_contact_();
+            }
+        }
     }
     if (pending & PendingClosures) {
         ClosuresStateResult parsed{};
         parse_closures_state(closures, parsed);
-        { tk::MutexGuard g(cache_mutex_); last_known_closures_ = std::move(parsed); }
-        note_contact_();
+        {
+            tk::MutexGuard g(cache_mutex_);
+            if (tk::telemetry_epoch_matches(closures_epoch, identity_epoch_.load(std::memory_order_acquire))) {
+                last_known_closures_ = std::move(parsed);
+                note_contact_();
+            }
+        }
     }
 }
 

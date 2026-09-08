@@ -244,6 +244,9 @@ static cJSON* build_status_object(bool redact) {
 // poll cache-busts the URL for the same reason.
 esp_err_t handle_status(GuardedReq rq) {
     httpd_req_t* req = rq.req;
+    if (validate_query_string(req) != ESP_OK) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid query string");
+    }
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     // ?redact=1 is the BUG-REPORT form: the six reporter-identifying values read "<redacted>"
     // (logic/status_model.hpp). Opt-in per request, never the default — the dashboard legitimately
@@ -256,6 +259,9 @@ esp_err_t handle_status(GuardedReq rq) {
 
 esp_err_t handle_diag(GuardedReq rq) {
     httpd_req_t* req = rq.req;
+    if (validate_query_string(req) != ESP_OK) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid query string");
+    }
     if (query_param_is(req, "clear", "1"))        diag_log_clear();
     if (query_param_is(req, "verbose", "1"))      diag_set_verbose(true);
     else if (query_param_is(req, "verbose", "0")) diag_set_verbose(false);

@@ -294,7 +294,7 @@ PY
 expect_failure "missing safety invariant" "$fixture" "missing-canary"
 
 fixture="$WORK/multi-target-publication-dag"; make_fixture "$fixture"
-perl -0pi -e 's/logic-test -> build -> independent-rebuild -> publish ->/logic-test -> build -> publish ->/' \
+perl -0pi -e 's/logic-test -> build-target -> build -> independent-rebuild -> publish ->/logic-test -> build-target -> build -> publish ->/' \
   "$fixture/.codex/agents/multi_target_build_reviewer.toml"
 expect_failure "multi-target publication DAG" "$fixture" \
   "multi-target reviewer is missing the independent-rebuild/publication DAG contract"

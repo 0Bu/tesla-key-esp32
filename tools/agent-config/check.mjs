@@ -116,7 +116,7 @@ const usbNoApprovalNeeded = /(?:live verification|HTTP requests?|GET endpoints?)
 const usbOtaNotStateChanging = /GET \/ota\/check[^.!?]*(?:is not|isn't|not) state-changing/i;
 const usbAbsentApprovalProceeds = /(?:(?:approval|authorization)[^.!?]*(?:absent|missing|not obtained)|without (?:separate )?(?:approval|authorization))[^.!?]*(?:continue|proceed|run|contact|send|request)/i;
 const reviewedSkillSha256 = new Map([
-  ["add-logic-test", "f8a37fddbbb5c47afa9eca4fb4823c203af099718b3327a656c717d0462546f7"],
+  ["add-logic-test", "9f5561e5a0ceda2409b1d76115e728bfe4673139683890c64c854a60a6740171"],
   ["device-diag", "7babf410873975ec05bb029c3c9522e70f9aadd96d0823829c48236f24ca3d44"],
   ["display-preview", "4bff95d0314d50ce29d67beac7ef4f9db1ebcbb2fa609335e560e162f5a1ed46"],
   ["feature-docs", "c2d26e873399d4970145ed53ab64e5e3abfd198391343ad107ec1dbdf10012ff"],
@@ -125,7 +125,7 @@ const reviewedSkillSha256 = new Map([
   ["ota-release-verify", "167ab9e940abf2cf2c39d3675525c5d4457afd676a15a70b98c66f3e0ccaeaec"],
   ["pr-hygiene", "7ef6544f83a50dbe696e360081c33091ce8d7f0826ec839efd7c4805cdf2344a"],
   ["project-review", "4d4be821828d0b010d16bc94002d339b9f917389ad356741cf6af0a07927d96e"],
-  ["ship", "41ae3355c7b2d24624d92a5c23666b18361083f8ef305faf43b57303a9f20275"],
+  ["ship", "19f2753afa4c9dbca25e2364ad7f6654d155dcc9f30edee2c7d2590c3ca82a45"],
   ["skill-audit", "bba8d696c9d83ec667062eb8d8d265d358f71595418e3462d71004fe05b4cfb8"],
   ["usb-recovery", "6f3cbd9533e75d14b5a14cd19987fa07db046b6c5412f4d52d2aa54944481cf9"],
   ["vehicle-command-audit", "b1a90f83451b2e84119ae7ad034774b8c02f0c035c5466061c5c565ebc1aa77f"],
@@ -347,7 +347,7 @@ const multiTargetReviewer = normalizeProse(
   fs.readFileSync(repoPath(".codex/agents/multi_target_build_reviewer.toml"), "utf8"),
 );
 const multiTargetPublicationContracts = [
-  "logic-test -> build -> independent-rebuild -> publish -> deploy",
+  "logic-test -> build-target -> build -> independent-rebuild -> publish -> deploy",
   "SHA/version-bound Actions artifact",
   "deploy consumes only that named artifact",
   "without a signing Environment, OTA key or OIDC",

@@ -229,6 +229,8 @@ static esp_err_t save_post_impl(httpd_req_t* req) {
     // No rollback backup from HERE: the setup portal is the path taken when there is nothing that
     // works to fall back to, and arming it would mean a failed first attempt "restores" an empty
     // configuration — which is this same portal, one reboot later.
+
+
     if (!tk::cfg_save(*g_cfg, cfg)) {
         ESP_LOGE(TAG, "failed to persist setup form; staying in setup mode");
         httpd_resp_set_status(req, "500 Internal Server Error");
@@ -247,6 +249,7 @@ static esp_err_t save_post_impl(httpd_req_t* req) {
         "The device will be reachable at <b>http://tesla-key-esp32.local</b>.</p>");
 
     ota_confirm_pending_image(tk::OtaRebootClass::SuccessfulUserConfigCommit);
+    ota_config_restart_begin();
     vTaskDelay(pdMS_TO_TICKS(1000));
     esp_restart();
     return ESP_OK;

@@ -566,6 +566,19 @@ bool VehicleController::clear_session_and_cache_() {
         cleanup_ok = false;
     }
 
+    // Invalidate the identity epoch and discard any unconsumed pending telemetry snapshots so a
+    // concurrent or delayed telemetry parse cannot revive defunct readings into active caches.
+    identity_epoch_.fetch_add(1, std::memory_order_acq_rel);
+    portENTER_CRITICAL(&telemetry_pending_mux_);
+    telemetry_pending_mask_ = 0;
+    telemetry_pending_charge_ = {};
+    telemetry_pending_climate_ = {};
+    telemetry_pending_drive_ = {};
+    telemetry_pending_tires_ = {};
+    telemetry_pending_closures_ = {};
+    charging_amps_feedback_ = {};
+    portEXIT_CRITICAL(&telemetry_pending_mux_);
+
     // Drop cached readings so /status and vehicle_data never serve old SOC/charge data
     // (or stale telemetry) from a defunct pairing. Under cache_mutex_ since the HTTP task
     // may be copying these concurrently.
@@ -577,14 +590,14 @@ bool VehicleController::clear_session_and_cache_() {
         last_known_drive_    = {};
         last_known_tires_    = {};
         last_known_closures_ = {};
+        last_contact_ticks_.store(0);    // no live data anymore → "asleep" card has nothing to show
+        last_charge_ticks_.store(0);
+        charge_state_generation_.store(0);
+        charge_cache_stale_reported_.store(false);
+        last_reachable_ticks_.store(0);  // and no proven reachability → link_state() back to Unknown
+        vcsec_asleep_since_ticks_.store(0);  // forget any debounced sleep run from the old pairing
+        vcsec_sleep_state_.store(static_cast<int>(TeslaBLE::SleepState::UNKNOWN));
     }
-    last_contact_ticks_.store(0);    // no live data anymore → "asleep" card has nothing to show
-    last_charge_ticks_.store(0);
-    charge_state_generation_.store(0);
-    charge_cache_stale_reported_.store(false);
-    last_reachable_ticks_.store(0);  // and no proven reachability → link_state() back to Unknown
-    vcsec_asleep_since_ticks_.store(0);  // forget any debounced sleep run from the old pairing
-    vcsec_sleep_state_.store(static_cast<int>(TeslaBLE::SleepState::UNKNOWN));
     ESP_LOGI(TAG, "pairing/session cleanup %s", cleanup_ok ? "complete" : "incomplete");
     return cleanup_ok;
 }
