@@ -141,6 +141,7 @@ long long apply_browser_clock(double epoch_ms) {
     tv.tv_sec  = (time_t)sec;
     tv.tv_usec = (suseconds_t)((long long)epoch_ms % 1000) * 1000;
     settimeofday(&tv, nullptr);
+    mark_clock_authoritative();
     // Persist the applied wall clock ("last_time", tesla_cfg): the device has no battery-backed
     // RTC, so main.cpp restores this on boot — a headless reboot (evcc only, NTP blocked, no
     // browser visit) still comes up with a plausible clock for OTA TLS cert validation and the

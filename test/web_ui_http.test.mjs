@@ -339,3 +339,90 @@ test("render displays safe mode banner when sys.safe_mode is active", () => {
   assert.equal(rb.classList.contains("show"), true);
   assert.match(rb.querySelector(".bt").innerHTML, /Safe Mode active/);
 });
+
+test("toggleCharge renders server rejection reason on HTTP 502", async () => {
+  const { context } = loadUi();
+  const messages = [];
+  context.state = { vin: "5YJ3E1EA1JF000001", vehicle: { status: "Stopped" } };
+  context.toast = (message, kind) => messages.push({ message, kind });
+  context.fetch = async () => ({
+    ok: false,
+    status: 502,
+    async json() {
+      return { response: { result: false, reason: "action failed: complete" } };
+    }
+  });
+
+  await context.toggleCharge();
+
+  assert.equal(messages.at(-1).kind, "info");
+  assert.equal(messages.at(-1).message, "Charging is already complete");
+});
+
+test("wakeCar renders server reason on HTTP 502", async () => {
+  const { context } = loadUi();
+  const messages = [];
+  context.state = { vin: "5YJ3E1EA1JF000001" };
+  context.toast = (message, kind) => messages.push({ message, kind });
+  context.fetch = async () => ({
+    ok: false,
+    status: 502,
+    async json() {
+      return { response: { result: false, reason: "Car not reachable" } };
+    }
+  });
+
+  await context.wakeCar();
+
+  assert.equal(messages.at(-1).kind, "err");
+  assert.equal(messages.at(-1).message, "Wake failed — Car not reachable");
+});
+
+test("editVin, editMqtt, editSyslog render server reason on HTTP 4xx/5xx", async () => {
+  const { context } = loadUi();
+  const messages = [];
+  context.toast = (message, kind) => messages.push({ message, kind });
+
+  // editVin HTTP 409
+  context.state = { vin: "UNKNOWN" };
+  context.prompt = () => "5YJ3E1EA1JF000001";
+  context.confirm = () => true;
+  context.fetch = async () => ({
+    ok: false,
+    status: 409,
+    async json() {
+      return { response: { result: false, reason: "key identity recovery is pending" } };
+    }
+  });
+  await context.editVin();
+  assert.equal(messages.at(-1).kind, "err");
+  assert.equal(messages.at(-1).message, "key identity recovery is pending");
+
+  // editMqtt HTTP 400
+  context.state = { mqtt: { broker: "" } };
+  context.prompt = () => "192.168.1.50:1883";
+  context.fetch = async () => ({
+    ok: false,
+    status: 400,
+    async json() {
+      return { response: { result: false, reason: "broker refused connection" } };
+    }
+  });
+  await context.editMqtt();
+  assert.equal(messages.at(-1).kind, "err");
+  assert.equal(messages.at(-1).message, "broker refused connection");
+
+  // editSyslog HTTP 400
+  context.state = { syslog: { host: "" } };
+  context.prompt = () => "192.168.1.50:514";
+  context.fetch = async () => ({
+    ok: false,
+    status: 400,
+    async json() {
+      return { response: { result: false, reason: "invalid syslog port" } };
+    }
+  });
+  await context.editSyslog();
+  assert.equal(messages.at(-1).kind, "err");
+  assert.equal(messages.at(-1).message, "invalid syslog port");
+});

@@ -92,7 +92,7 @@
         },
         "CMakeFiles/__idf_main.dir/vehicle_pairing.cpp.su": {
           "/COMPONENT_MAIN_DIR/vehicle_pairing.cpp :: bool VehicleController::clear_session_and_cache_()": 320,
-          "/COMPONENT_MAIN_DIR/vehicle_pairing.cpp :: std::string VehicleController::key_fingerprint()": 848
+          "/COMPONENT_MAIN_DIR/vehicle_pairing.cpp :: std::string VehicleController::compute_key_fingerprint_()": 848
         },
         "CMakeFiles/__idf_main.dir/vehicle_telemetry.cpp.su": {
           "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: static void VehicleController::loop_task_fn_(void*)": 352,
@@ -189,7 +189,7 @@
         },
         "CMakeFiles/__idf_main.dir/vehicle_pairing.cpp.su": {
           "/COMPONENT_MAIN_DIR/vehicle_pairing.cpp :: bool VehicleController::clear_session_and_cache_()": 320,
-          "/COMPONENT_MAIN_DIR/vehicle_pairing.cpp :: std::string VehicleController::key_fingerprint()": 848
+          "/COMPONENT_MAIN_DIR/vehicle_pairing.cpp :: std::string VehicleController::compute_key_fingerprint_()": 848
         },
         "CMakeFiles/__idf_main.dir/vehicle_telemetry.cpp.su": {
           "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: static void VehicleController::loop_task_fn_(void*)": 352,
@@ -284,7 +284,7 @@
         },
         "CMakeFiles/__idf_main.dir/vehicle_pairing.cpp.su": {
           "/COMPONENT_MAIN_DIR/vehicle_pairing.cpp :: bool VehicleController::clear_session_and_cache_()": 304,
-          "/COMPONENT_MAIN_DIR/vehicle_pairing.cpp :: std::string VehicleController::key_fingerprint()": 832
+          "/COMPONENT_MAIN_DIR/vehicle_pairing.cpp :: std::string VehicleController::compute_key_fingerprint_()": 832
         },
         "CMakeFiles/__idf_main.dir/vehicle_telemetry.cpp.su": {
           "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: static void VehicleController::loop_task_fn_(void*)": 336,
@@ -379,7 +379,7 @@
         },
         "CMakeFiles/__idf_main.dir/vehicle_pairing.cpp.su": {
           "/COMPONENT_MAIN_DIR/vehicle_pairing.cpp :: bool VehicleController::clear_session_and_cache_()": 304,
-          "/COMPONENT_MAIN_DIR/vehicle_pairing.cpp :: std::string VehicleController::key_fingerprint()": 832
+          "/COMPONENT_MAIN_DIR/vehicle_pairing.cpp :: std::string VehicleController::compute_key_fingerprint_()": 832
         },
         "CMakeFiles/__idf_main.dir/vehicle_telemetry.cpp.su": {
           "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: static void VehicleController::loop_task_fn_(void*)": 336,

@@ -1,4 +1,5 @@
 #include "mqtt_ha.hpp"
+#include "time_sync.hpp"
 #include "config_blob.hpp"
 #include "net.hpp"
 #include "vehicle_ctrl.hpp"
@@ -306,12 +307,21 @@ static bool publish_state() {
         payload.paired = s_vehicle->has_session();
         // Boot time as an ISO-8601 timestamp → HA renders it as auto-scaling relative
         // time ("8 minutes ago" → "2 days ago"), so it's human-readable and each reboot
-        // shows as a step change. Only emit once the wall clock is plausibly NTP-synced
-        // (else the absolute time would be wrong); cached so it stays stable per boot.
+        // shows as a step change. Only emit once the wall clock is authoritatively synced
+        // (SNTP or browser /set_time), not merely restored from NVS (which represents historical
+        // time from a prior shutdown). Cached once synced so it stays stable per boot.
         static time_t s_boot_epoch = 0;
-        time_t now_ = time(nullptr);
-        if (s_boot_epoch == 0 && now_ > 1600000000)
-            s_boot_epoch = now_ - (time_t)(esp_timer_get_time() / 1000000);
+        static bool   s_latched_via_ntp = false;
+        if (clock_is_authoritative()) {
+            const bool is_ntp = clock_synced_via_ntp();
+            if (s_boot_epoch == 0 || (!s_latched_via_ntp && is_ntp)) {
+                time_t now_ = time(nullptr);
+                if (now_ > 1600000000) {
+                    s_boot_epoch = now_ - (time_t)(esp_timer_get_time() / 1000000);
+                    if (is_ntp) s_latched_via_ntp = true;
+                }
+            }
+        }
         char boot_time[32] = {};
         if (s_boot_epoch > 0) {
             struct tm tmv; gmtime_r(&s_boot_epoch, &tmv);
