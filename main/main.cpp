@@ -494,13 +494,15 @@ extern "C" void app_main() {
     // before that — they report "not connected" until the link comes up.
     static BleClient ble_client;
     static VehicleController vehicle;
-
     tk::VehicleTaskStartPhase vehicle_task_phase =
         tk::VehicleTaskStartPhase::ControllerWired;
 
     static NvsStorageAdapter tesla_store(tk::nvs_contract::kTeslaBleNamespace);
-    if (!tesla_store.initialize())
+    const bool tesla_store_ok = tesla_store.initialize();
+    if (!tesla_store_ok && !safe_mode)
         boot_fatal("Tesla NVS");
+    if (safe_mode && !tesla_store_ok)
+        ESP_LOGE(TAG, "safe mode: Tesla NVS unavailable — identity fields will read empty");
 
     if (safe_mode) {
         ESP_LOGW(TAG, "Safe mode active — initializing inert vehicle controller");

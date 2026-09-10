@@ -390,9 +390,9 @@ POST /gen_keys[?force=1]   Generate ECDSA P-256 key (refuses overwrite without f
                              Identity mutation is Stable-only: PendingVerify, unknown OTA state
                              or an active OTA/update returns 503 before any key is changed
 POST /send_key             Manually trigger pairing (charging_manager only; normally automatic)
-POST /set_vin              Persist VIN and reboot
-                             Identity mutation is Stable-only: PendingVerify, unknown OTA state
-                             or an active OTA/update returns 503 before the VIN journal starts
+POST /set_vin              Persist VIN, regenerate security key, clear paired BLE MAC/session, and reboot.
+                              Identity mutation is Stable-only: PendingVerify, unknown OTA state
+                              or an active OTA/update returns 503 before the VIN journal starts
 POST /set_mqtt             Verify the MQTT broker, then persist it and reboot
                              ({"broker":"host:port"} or full "mqtt://…"; "" disables MQTT).
                              A changed, non-empty broker is CONNECTED to before it is saved:
