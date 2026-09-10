@@ -5,6 +5,7 @@
 // vehicle_pairing.cpp (pairing lifecycle/keys); shared RAII in vehicle_ctrl_internal.hpp.
 
 #include "vehicle_ctrl.hpp"
+#include "vehicle_ctrl_internal.hpp"
 #include "runtime_admission.hpp"
 #include "logic/vin.hpp"
 #include "logic/heap_watchdog.hpp"
@@ -196,6 +197,11 @@ bool VehicleController::init(const std::string& vin,
     // identity only when storage contains a key AND this Vehicle instance successfully loaded it.
     // This also keeps a corrupt/truncated key from being treated as enrolment-safe after reboot.
     key_runtime_safe_.store(stored_private_key && vehicle_->has_private_key());
+    if (stored_private_key) {
+        std::string fp = compute_key_fingerprint_();
+        tk::MutexGuard cache_guard(cache_mutex_);
+        key_fingerprint_cache_ = std::move(fp);
+    }
 
     // Exact named adapters are mechanically audited as fixed POD/atomic/queue-only callbacks.
     // The NimBLE host never calls Vehicle, allocates, waits on a shared mutex, logs or touches NVS.
@@ -265,6 +271,13 @@ bool VehicleController::init_safe_mode(const std::string& vin,
     if (!vehicle_mutex_ || !command_mutex_ || !cache_mutex_ || !result_mutex_) {
         ESP_LOGE(TAG, "safe mode: synchronization primitive allocation failed");
         return false;
+    }
+
+    bool stored_key = false;
+    if (storage_->probe_blob(tk::nvs_contract::kPrivateKey, stored_key) && stored_key) {
+        std::string fp = compute_key_fingerprint_();
+        tk::MutexGuard cache_guard(cache_mutex_);
+        key_fingerprint_cache_ = std::move(fp);
     }
 
     ESP_LOGI(TAG, "VehicleController initialized in safe mode (inert)");

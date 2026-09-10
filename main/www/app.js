@@ -623,13 +623,20 @@ function toggleCharge(){
   var cmd=isCharging?'charge_stop':'charge_start';
   chgBusy=true; if(state)render(state);
   toast(isCharging?'Stopping charge…':'Starting charge…','info');
-  fetch('/api/1/vehicles/'+encodeURIComponent(vin)+'/command/'+cmd,{method:'POST'})
-    .then(function(r){if(!r.ok)throw new Error('HTTP '+r.status);return r.json()})
-    .then(function(j){
-      var ok=commandResponse(j).result;
-      if(ok){ toast(isCharging?'Charging stopped':'Charging started','ok'); return; }
-      var f=chargeFailMsg((j&&j.response&&j.response.reason)||'', isCharging);
-      toast(f.msg, f.type);
+  return requestJsonResult('/api/1/vehicles/'+encodeURIComponent(vin)+'/command/'+cmd,{method:'POST'})
+    .then(function(res){
+      var j=res.json;
+      if(j && j.response && typeof j.response.result === 'boolean'){
+        if(j.response.result){ toast(isCharging?'Charging stopped':'Charging started','ok'); return; }
+        var f=chargeFailMsg((j.response.reason)||'', isCharging);
+        toast(f.msg, f.type);
+        return;
+      }
+      if(!res.ok && res.status){
+        toast('Command failed (HTTP '+res.status+')','err');
+        return;
+      }
+      toast('Command failed — is the car in range?','err');
     })
     .catch(function(){ toast('Command failed — is the car in range?','err'); })
     .then(function(){ chgBusy=false; poll(); });
@@ -662,11 +669,18 @@ function editVin(){
   var hasKey = keyKnown ? state.key_present : true;
   if(hasKey && !confirm('Change vehicle VIN?\n\nThis generates a new security key and clears the stored pairing. You must re-pair with the vehicle.')) return;
   toast('Saving VIN…','info');
-  return requestJson('/set_vin',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({vin:v})})
-    .then(function(j){var o=commandResponse(j);
-      if(!o.result){ toast(o.reason||'Failed to save VIN','err'); return; }
-      if(/no reboot|unchanged/i.test(o.reason||'')){ toast('VIN unchanged','info'); return; }
-      toast('VIN saved · rebooting','ok');})
+  return requestJsonResult('/set_vin',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({vin:v})})
+    .then(function(res){
+      var o=res.json&&res.json.response;
+      if(o && typeof o.result === 'boolean' && typeof o.reason === 'string'){
+        if(!o.result){ toast(o.reason||'Failed to save VIN','err'); return; }
+        if(/no reboot|unchanged/i.test(o.reason||'')){ toast('VIN unchanged','info'); return; }
+        toast('VIN saved · rebooting','ok');
+        return;
+      }
+      var msg=(!res.ok && res.status)?('Failed to save VIN (HTTP '+res.status+')'):'Failed to save VIN — no change was confirmed';
+      toast(msg,'err');
+    })
     .catch(function(){toast('Failed to save VIN — no change was confirmed','err')});
 }
 function editMqtt(){
@@ -677,11 +691,18 @@ function editMqtt(){
   if(v && v.indexOf(' ')>=0){ toast('Invalid broker — use IP:PORT','err'); return; }
   if(v===cur){ toast(v?'MQTT broker unchanged':'MQTT already disabled','info'); return; }
   toast(v?'Saving MQTT broker…':'Disabling MQTT…','info');
-  return requestJson('/set_mqtt',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({broker:v})})
-    .then(function(j){var o=commandResponse(j);
-      if(!o.result){ toast(o.reason||'Failed to save MQTT broker','err'); return; }
-      if(/no reboot|unchanged|already/i.test(o.reason||'')){ toast(v?'MQTT broker unchanged':'MQTT already disabled','info'); return; }
-      toast('Saved · rebooting','ok');})
+  return requestJsonResult('/set_mqtt',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({broker:v})})
+    .then(function(res){
+      var o=res.json&&res.json.response;
+      if(o && typeof o.result === 'boolean' && typeof o.reason === 'string'){
+        if(!o.result){ toast(o.reason||'Failed to save MQTT broker','err'); return; }
+        if(/no reboot|unchanged|already/i.test(o.reason||'')){ toast(v?'MQTT broker unchanged':'MQTT already disabled','info'); return; }
+        toast('Saved · rebooting','ok');
+        return;
+      }
+      var msg=(!res.ok && res.status)?('Failed to save MQTT broker (HTTP '+res.status+')'):'Failed to save MQTT broker — no change was confirmed';
+      toast(msg,'err');
+    })
     .catch(function(){toast('Failed to save MQTT broker — no change was confirmed','err')});
 }
 function editSyslog(){
@@ -692,11 +713,18 @@ function editSyslog(){
   if(v && v.indexOf(' ')>=0){ toast('Invalid server — use IP:PORT','err'); return; }
   if(v===cur){ toast(v?'Syslog server unchanged':'Syslog already disabled','info'); return; }
   toast(v?'Saving Syslog server…':'Disabling Syslog…','info');
-  return requestJson('/set_syslog',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({server:v})})
-    .then(function(j){var o=commandResponse(j);
-      if(!o.result){ toast(o.reason||'Failed to save Syslog server','err'); return; }
-      if(/no reboot|unchanged|already/i.test(o.reason||'')){ toast(v?'Syslog server unchanged':'Syslog already disabled','info'); return; }
-      toast('Saved · rebooting','ok');})
+  return requestJsonResult('/set_syslog',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({server:v})})
+    .then(function(res){
+      var o=res.json&&res.json.response;
+      if(o && typeof o.result === 'boolean' && typeof o.reason === 'string'){
+        if(!o.result){ toast(o.reason||'Failed to save Syslog server','err'); return; }
+        if(/no reboot|unchanged|already/i.test(o.reason||'')){ toast(v?'Syslog server unchanged':'Syslog already disabled','info'); return; }
+        toast('Saved · rebooting','ok');
+        return;
+      }
+      var msg=(!res.ok && res.status)?('Failed to save Syslog server (HTTP '+res.status+')'):'Failed to save Syslog server — no change was confirmed';
+      toast(msg,'err');
+    })
     .catch(function(){toast('Failed to save Syslog server — no change was confirmed','err')});
 }
 function wakeStop(){ waking=false; clearTimeout(wakeTimeout); }
@@ -709,12 +737,24 @@ function wakeCar(){
   // safety net: stop spinning if no charge data shows up in time
   wakeTimeout=setTimeout(function(){ if(waking){ wakeStop(); toast('Still asleep — try again','info'); poll(); } }, 90000);
   toast('Waking the car…','info');
-  fetch('/api/1/vehicles/'+encodeURIComponent(vin)+'/command/wake_up',{method:'POST'})
-    .then(function(r){if(!r.ok)throw new Error('HTTP '+r.status);return r.json()})
-    .then(function(j){
-      var ok=commandResponse(j).result;
-      if(ok){ toast('Wake sent · waiting for the car…','ok'); poll(); }   // keep spinning until SOC arrives
-      else { wakeStop(); toast('Wake failed — is the car in range?','err'); poll(); }
+  return requestJsonResult('/api/1/vehicles/'+encodeURIComponent(vin)+'/command/wake_up',{method:'POST'})
+    .then(function(res){
+      var j=res.json;
+      if(j && j.response && typeof j.response.result === 'boolean'){
+        if(j.response.result){
+          toast('Wake sent · waiting for the car…','ok');
+        } else {
+          wakeStop();
+          var r=(j.response.reason||'').trim();
+          toast(r?('Wake failed — '+r):'Wake failed — is the car in range?','err');
+        }
+        poll();
+        return;
+      }
+      wakeStop();
+      var msg=(!res.ok && res.status)?('Wake failed (HTTP '+res.status+')'):'Wake failed — is the car in range?';
+      toast(msg,'err');
+      poll();
     })
     .catch(function(){ wakeStop(); toast('Wake failed — is the car in range?','err'); poll(); });
 }

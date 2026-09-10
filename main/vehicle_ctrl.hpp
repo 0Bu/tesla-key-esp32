@@ -404,6 +404,8 @@ private:
     tk::KeyRotationResult generate_key_locked_();
     bool finish_key_rotation_cleanup_();
     bool recover_pending_key_rotation_at_boot_();
+    std::string compute_key_fingerprint_();
+    std::string key_fingerprint_cache_{};
 
     // Signed VCSEC GET_STATUS poll used purely to detect that our key was deleted on the
     // car side (the response then carries KEY_NOT_ON_WHITELIST, or a tagless session-info →

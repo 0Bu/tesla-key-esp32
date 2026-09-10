@@ -8,6 +8,7 @@
 #include "vehicle_ctrl_internal.hpp"
 #include "stack_watch.hpp"
 #include "ota_update.hpp"
+#include "time_sync.hpp"
 #include <esp_log.h>
 #include <esp_timer.h>
 #include <cstdio>
@@ -458,6 +459,11 @@ tk::KeyRotationResult VehicleController::generate_key_locked_() {
         return tk::KeyRotationResult::CommitUnknown;
     }
     pairing_cleanup_pending_.store(true);
+    {
+        std::string new_fp = compute_key_fingerprint_();
+        tk::MutexGuard cache_guard(cache_mutex_);
+        key_fingerprint_cache_ = std::move(new_fp);
+    }
     // Record when the key was generated so the UI can show the key's creation
     // date next to its fingerprint. Wall-clock comes from the browser (POST
     // /set_time) or the NVS-cached time; if neither is set yet this stamps a
@@ -726,11 +732,12 @@ time_t VehicleController::paired_at() {
         time_t t = (time_t)atoll(s.c_str());
         if (t > 1600000000) return t;
     }
-    // First time we observe a session with a valid wall clock: stamp it now. For a
+    // First time we observe a session with an authoritative wall clock: stamp it now. For a
     // fresh handshake this is within seconds of pairing; a pairing that predates this
     // tracking (or whose clock was unsynced) gets stamped at first sync instead.
+    // Do NOT stamp when the clock is merely restored from NVS (historical shutdown time).
     time_t now = time(nullptr);
-    if (now > 1600000000) {
+    if (clock_is_authoritative() && now > 1600000000) {
         if (!storage_->save_str(tk::nvs_contract::kPairedAt,
                                 std::to_string((long long)now))) {
             ESP_LOGW(TAG, "pairing date not persisted — the UI will re-stamp it on the next sync");
@@ -752,7 +759,7 @@ bool VehicleController::has_session() {
     return storage_ && storage_->blob_exists(tk::nvs_contract::kSessionVcsec);
 }
 
-std::string VehicleController::key_fingerprint() {
+__attribute__((noinline)) std::string VehicleController::compute_key_fingerprint_() {
     if (!storage_) return "";
     std::vector<uint8_t> pem;
     if (!storage_->load(tk::nvs_contract::kPrivateKey, pem) || pem.empty()) return "";
@@ -792,6 +799,22 @@ std::string VehicleController::key_fingerprint() {
     mbedtls_pk_free(&pk);
     mbedtls_ctr_drbg_free(&drbg);
     mbedtls_entropy_free(&ent);
+    return fp;
+}
+
+std::string VehicleController::key_fingerprint() {
+    {
+        tk::MutexGuard cache_guard(cache_mutex_);
+        if (!key_fingerprint_cache_.empty()) return key_fingerprint_cache_;
+    }
+    if (!storage_ || !storage_->blob_exists(tk::nvs_contract::kPrivateKey)) {
+        return "";
+    }
+    std::string fp = compute_key_fingerprint_();
+    if (!fp.empty()) {
+        tk::MutexGuard cache_guard(cache_mutex_);
+        key_fingerprint_cache_ = fp;
+    }
     return fp;
 }
 
