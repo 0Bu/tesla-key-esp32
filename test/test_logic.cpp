@@ -3843,6 +3843,7 @@ static void test_health_gate() {
 
     // ConfigRestart: blocks OTA and IdentityMutation, and releases on failure or persists through reboot.
     CHECK(operation.try_begin(G::ConfigRestart));
+    CHECK(!operation.try_begin(G::ConfigRestart));
     CHECK(!operation.try_begin(G::Ota));
     CHECK(!operation.try_begin(G::IdentityMutation));
     CHECK(!operation.try_begin(G::FaultRestart));

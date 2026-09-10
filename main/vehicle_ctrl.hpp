@@ -44,10 +44,11 @@ public:
     bool init(const std::string& vin, BleClient& ble, NvsStorageAdapter& storage,
               NvsStorageAdapter& config_store, std::string& known_mac,
               bool start_tasks = false);
-    // Inert minimal initialization for safe mode: sets VIN and config_store, allocates
-    // essential mutexes for safe UI/status accessors, but constructs no TeslaBLE::Vehicle,
-    // probes no keys/sessions in NVS, and starts no mutating background tasks.
-    bool init_safe_mode(const std::string& vin, NvsStorageAdapter& config_store);
+    // Inert minimal initialization for safe mode: sets VIN, storage, and config_store, allocates
+    // essential mutexes for safe UI/status accessors, but constructs no TeslaBLE::Vehicle
+    // and starts no mutating background tasks.
+    bool init_safe_mode(const std::string& vin, NvsStorageAdapter& storage,
+                        NvsStorageAdapter& config_store);
     // Idempotently starts the two mutating background tasks after the caller has completed boot
     // recovery and all essential initialization. Neither task can leave its start barrier until
     // both creates succeed; a partially-created task acknowledges cancellation and self-deletes.

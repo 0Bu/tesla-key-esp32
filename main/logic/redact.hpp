@@ -142,7 +142,7 @@ inline constexpr DiagRedaction kDiagRedactions[] = {
     // reach these two spans.
     {"Tesla '", "' found: "},
     {"' found: ", " — connecting"},
-    // main.cpp "WiFi connected to '%s'" — deliberately NO end token even though the format ends
+    // net.cpp (two call sites) "WiFi connected to '%s'" — deliberately NO end token even though the format ends
     // in a closing quote. An SSID is arbitrary bytes chosen by whoever runs the AP, so an SSID
     // containing a quote would end the span early and leak its own tail. Running to the end of
     // the line costs nothing here (the value is last) and cannot be gamed.

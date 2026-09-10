@@ -373,6 +373,9 @@ esp_err_t handle_coredump(GuardedReq rq) {
     json.string(json.root(), "error", "core dumps are not enabled on this target");
     return send_json(req, 404, json.release());
 #else
+    if (validate_query_string(req) != ESP_OK) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid query string");
+    }
     if (query_param_is(req, "clear", "1")) {
         esp_err_t err = esp_core_dump_image_erase();
         tk::JsonBuilder json;
