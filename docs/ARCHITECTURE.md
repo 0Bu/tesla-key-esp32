@@ -1044,13 +1044,14 @@ The STA→LAN link (distinct from the car BLE link-state below) is kept up by tw
 
 **sleep_state** comes from `VehicleController::link_state()` — the *single* source of truth
 shared with the web UI so the two never drift. Four published values:
-`AWAKE` (fresh live infotainment telemetry, < 60 s), `ASLEEP` (no live data AND **proven,
+`AWAKE` (fresh live infotainment telemetry, < 60 s via `kAwakeMaxAgeS`), `ASLEEP` (no live data AND **proven,
 debounced** sleep — the car's own VCSEC sleep flag, read from the library's
 `Vehicle::sleep_state()` and sampled in `loop_task`, has held `ASLEEP` for ≥ `kAsleepDebounceS`
-≈ 120 s while still reachable, so a Cabin-Overheat-Protection `AWAKE↔ASLEEP` flap (~60 s)
-can't trip it), `IDLE` (reachable over BLE but **not provably asleep** — we stopped polling
+≈ 120 s while still reachable within `kReachableMaxAgeS` = 150 s, so a Cabin-Overheat-Protection `AWAKE↔ASLEEP` flap (~60 s)
+can't trip it), `IDLE` (reachable over BLE within `kReachableMaxAgeS` = 150 s but **not provably asleep** — we stopped polling
 the infotainment domain to let the car sleep and the VCSEC flag hasn't confirmed; we honestly
-don't know, so we never claim sleep), and `UNREACHABLE` (the car answers *nothing* over BLE ⇒
+don't know, so we never claim sleep), and `UNREACHABLE` (no signed BLE round-trip for ≥ `kReachableMaxAgeS` = 150 s
+— spanning two ~30 s health-probe cycles plus miss/retry headroom — or the car answers *nothing* over BLE ⇒
 driven off / out of range / deep sleep). Nothing heard since boot/re-pair ⇒ omitted so HA
 shows "unknown" (strictly: the state topics are retained, so until the first post-reboot
 publish replaces them HA may still show the pre-reboot value; a fresh install shows

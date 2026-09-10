@@ -22,6 +22,13 @@ function requestJson(url,options){
     return r.json();
   });
 }
+function requestJsonResult(url,options){
+  return fetch(url,options).then(function(r){
+    return r.json().catch(function(){ return null; }).then(function(j){
+      return {ok:!!(r&&r.ok), status:r?r.status:0, json:j};
+    });
+  });
+}
 function requestJsonWithTimeout(url,options,timeoutMs){
   var ctl=typeof AbortController!=='undefined'?new AbortController():null;
   var opts=Object.assign({},options||{}); if(ctl)opts.signal=ctl.signal;
@@ -651,6 +658,9 @@ function editVin(){
   v=v.trim().toUpperCase();
   if(!vinValid(v)){ toast('Invalid VIN — must be 17 characters','err'); return; }
   if(v===(state&&state.vin)){ toast('VIN unchanged','info'); return; }
+  var keyKnown = state && typeof state.key_present === 'boolean';
+  var hasKey = keyKnown ? state.key_present : true;
+  if(hasKey && !confirm('Change vehicle VIN?\n\nThis generates a new security key and clears the stored pairing. You must re-pair with the vehicle.')) return;
   toast('Saving VIN…','info');
   return requestJson('/set_vin',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({vin:v})})
     .then(function(j){var o=commandResponse(j);
@@ -714,18 +724,17 @@ function genKey(){
   if(hasKey && !confirm('Regenerate the security key?\n\nThe current key is invalidated and you must re-pair with the vehicle.')) return;
   toast('Generating new key…','info');
   var query = (keyKnown && state.key_present) ? '?force=1' : '';
-  return fetch('/gen_keys' + query, {method: 'POST'})
-    .then(function(r){
-      return r.json().catch(function(){ return null; }).then(function(j){
-        if(!r.ok){
-          var msg = (j && j.reason) ? j.reason : ('HTTP ' + r.status);
-          toast(msg, 'err');
-          return;
-        }
-        if(!j || typeof j.result !== 'boolean') throw new Error('invalid key response');
-        if(!j.result){ toast(j.reason || 'Key generation failed', 'err'); return; }
-        toast('New key generated · re-pair with the vehicle', 'ok'); poll();
-      });
+  return requestJsonResult('/gen_keys' + query, {method: 'POST'})
+    .then(function(res){
+      var j = res.json;
+      if(!res.ok){
+        var msg = (j && j.reason) ? j.reason : ('HTTP ' + res.status);
+        toast(msg, 'err');
+        return;
+      }
+      if(!j || typeof j.result !== 'boolean') throw new Error('invalid key response');
+      if(!j.result){ toast(j.reason || 'Key generation failed', 'err'); return; }
+      toast('New key generated · re-pair with the vehicle', 'ok'); poll();
     })
     .catch(function(){ toast('Key generation failed', 'err'); });
 }

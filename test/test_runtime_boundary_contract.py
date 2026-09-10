@@ -1293,6 +1293,16 @@ def require_operation_wrapper_contract(ota_source: str) -> None:
         raise AssertionError("HealthCommit guard does not acquire the shared owner into held_")
     if not destructor:
         raise AssertionError("HealthCommit guard does not owner-release exactly when held")
+    config_begin = re.search(
+        r"bool\s+ota_config_restart_begin\s*\(\s*\)\s*\{([^}]*)\}",
+        ota_source,
+        re.DOTALL,
+    )
+    if not config_begin or (
+        "s_operation_gate.try_begin(tk::OtaIdentityGateState::ConfigRestart)"
+        not in config_begin.group(1)
+    ):
+        raise AssertionError("ConfigRestart begin wrapper bypasses the shared CAS gate")
 
     confirm_start = ota_source.find("void ota_confirm_pending_image")
     confirm_end = ota_source.find("// Short per-target image suffix", confirm_start)
@@ -3037,6 +3047,17 @@ def require_tesla_cpp_callback_contract(
     ):
         if deferred.count(parser + "(") != 1:
             raise AssertionError(f"deferred telemetry parser inventory drift: {parser}")
+
+    cache_blocks = re.findall(
+        r"tk::MutexGuard\s+\w+\s*\(\s*cache_mutex_\s*\)\s*;(?P<body>.*?)\}",
+        telemetry,
+        re.DOTALL,
+    )
+    if not cache_blocks:
+        raise AssertionError("vehicle_telemetry.cpp cache_mutex_ critical section inventory missing")
+    for body in cache_blocks:
+        if "ESP_LOG" in body:
+            raise AssertionError("cache_mutex_ critical section contains forbidden ESP_LOG logging")
 
     loop = scrub_cpp(function_body_in(telemetry, "loop_task_fn_"))
     require_before("BLE host drain before tesla-ble pump", loop,
@@ -5346,6 +5367,16 @@ def self_test_canaries(tasks: set[str], callbacks: set[str]) -> None:
             ble_source,
         ),
         (
+            "cache_mutex_ logging canary",
+            controller_source,
+            telemetry_source.replace(
+                "last_known_charge_ = std::move(parsed);",
+                'ESP_LOGW(TAG, "canary"); last_known_charge_ = std::move(parsed);',
+                1,
+            ),
+            ble_source,
+        ),
+        (
             "NimBLE host direct Vehicle RX reentry",
             controller_source,
             telemetry_source,
@@ -5441,6 +5472,11 @@ def self_test_canaries(tasks: set[str], callbacks: set[str]) -> None:
             "finish_operation(tk::OtaIdentityGateState::HealthCommit);",
             "",
             "HealthCommit release",
+        ),
+        (
+            "s_operation_gate.try_begin(tk::OtaIdentityGateState::ConfigRestart);",
+            "true;",
+            "ConfigRestart begin",
         ),
         (
             "OtaHealthCommitGuard commit_guard;\n    if (!commit_guard)",

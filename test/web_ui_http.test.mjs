@@ -75,6 +75,20 @@ test("requestJson rejects HTTP errors without parsing them as success", async ()
   assert.equal(parsed, false);
 });
 
+test("requestJsonResult returns status, ok and parsed JSON even on HTTP error", async () => {
+  const { context } = loadUi();
+  context.fetch = async () => ({
+    ok: false,
+    status: 503,
+    async json() { return { result: false, reason: "gate held" }; }
+  });
+
+  const res = await context.requestJsonResult("/gen_keys");
+  assert.equal(res.ok, false);
+  assert.equal(res.status, 503);
+  assert.deepEqual(res.json, { result: false, reason: "gate held" });
+});
+
 test("requestJsonWithTimeout rejects a hung HTTP request", async () => {
   const { context } = loadUi();
   context.fetch = () => new Promise(() => {});
@@ -87,6 +101,7 @@ test("configuration network failure is reported as failure, never saved", async 
   const messages = [];
   context.state = { vin: "UNKNOWN" };
   context.prompt = () => "5YJ3E1EA1JF000001";
+  context.confirm = () => true;
   context.fetch = async () => { throw new Error("offline"); };
   context.toast = (message, kind) => messages.push({ message, kind });
 
@@ -102,6 +117,7 @@ test("configuration success requires the command response schema", async () => {
   const messages = [];
   context.state = { vin: "UNKNOWN" };
   context.prompt = () => "5YJ3E1EA1JF000001";
+  context.confirm = () => true;
   context.fetch = async () => ({ ok: true, status: 200, async json() { return { response: { result: "true", reason: "saved" } }; } });
   context.toast = (message, kind) => messages.push({ message, kind });
 
@@ -109,6 +125,39 @@ test("configuration success requires the command response schema", async () => {
 
   assert.equal(messages.at(-1).kind, "err");
   assert.doesNotMatch(messages.at(-1).message, /saved/i);
+});
+
+test("VIN change requires confirmation when key is present or unknown", async () => {
+  const { context } = loadUi();
+  let confirmed = false;
+  let fetchCalled = false;
+  context.state = { vin: "UNKNOWN" };
+  context.prompt = () => "5YJ3E1EA1JF000001";
+  context.confirm = () => { confirmed = true; return false; };
+  context.fetch = async () => { fetchCalled = true; return { ok: true, async json() { return {}; } }; };
+
+  await context.editVin();
+
+  assert.equal(confirmed, true);
+  assert.equal(fetchCalled, false);
+});
+
+test("VIN change skips confirmation when key is known absent", async () => {
+  const { context } = loadUi();
+  let confirmCalled = false;
+  let fetchCalled = false;
+  context.state = { vin: "UNKNOWN", key_present: false };
+  context.prompt = () => "5YJ3E1EA1JF000001";
+  context.confirm = () => { confirmCalled = true; return true; };
+  context.fetch = async () => {
+    fetchCalled = true;
+    return { ok: true, async json() { return { response: { result: true, reason: "saved" } }; } };
+  };
+
+  await context.editVin();
+
+  assert.equal(confirmCalled, false);
+  assert.equal(fetchCalled, true);
 });
 
 test("key generation requires confirmation and omits force when state is null", async () => {

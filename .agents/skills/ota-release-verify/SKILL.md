@@ -53,7 +53,7 @@ defaults and [`main/ota_update.cpp`](../../../main/ota_update.cpp):
 - `CONFIG_TESLA_OTA_MANIFEST_URL` = `https://0bu.github.io/tesla-key-esp32/manifest.json`.
 - `CONFIG_TESLA_OTA_FIRMWARE_BASE_URL` = `https://0bu.github.io/tesla-key-esp32/`.
 - Image URL the device builds: `FIRMWARE_BASE_URL` + `"tesla-key-esp32"` + `<suffix>` + `".bin"`
-  (`ota_update.cpp` line ~232). **The step-3 URLs below are exactly this string** — a 404 here is
+  (`ota_update.cpp` lines ~546-547). **The step-3 URLs below are exactly this string** — a 404 here is
   the 404 a real device would hit.
 
 Per-target image **suffix** (must agree across four places —

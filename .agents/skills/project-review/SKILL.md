@@ -138,12 +138,12 @@ Treat a violation of any of these as a real finding.
 ### Link state (single source of truth)
 - `VehicleController::link_state()` is the **single source of truth**, shared by the web UI
   and the MQTT bridge so the two can never disagree. **Four states:** **AWAKE** (fresh live
-  infotainment telemetry < 60 s), **ASLEEP** (no live data **and** the car's VCSEC sleep flag
+  infotainment telemetry < 60 s via `kAwakeMaxAgeS`), **ASLEEP** (no live data **and** the car's VCSEC sleep flag
   has held ASLEEP for ≥ ~120 s — *debounced*, sampled in `loop_task`, so a Cabin-Overheat
-  `AWAKE↔ASLEEP` flap (~60 s) can't trip it), **IDLE** (reachable over BLE but **not provably
+  `AWAKE↔ASLEEP` flap (~60 s) can't trip it — while reachable within `kReachableMaxAgeS` = 150 s), **IDLE** (reachable over BLE within `kReachableMaxAgeS` = 150 s but **not provably
   asleep** — we stopped polling infotainment to let it sleep and VCSEC hasn't confirmed →
   web UI shows the neutral **"Parked"** card, which makes **no** sleep claim), **UNREACHABLE**
-  (answers nothing over BLE). Nothing heard since boot/re-pair ⇒ MQTT sleep_state **omitted**
+  (no signed BLE round-trip for ≥ `kReachableMaxAgeS` = 150 s, spanning two ~30 s probe cycles plus miss headroom, or answers nothing over BLE). Nothing heard since boot/re-pair ⇒ MQTT sleep_state **omitted**
   (HA shows "unknown"); the web UI **hides the hero card** for both `unreachable` and the
   cold-start `unknown` — rather than fill it with stale battery/idle chips — and signals the state
   on the BLE row instead (orange ping-pong bars + orange MAC). Never a sleep claim.
