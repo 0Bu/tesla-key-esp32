@@ -238,7 +238,7 @@ bool VehicleController::init(const std::string& vin,
     if (!start_tasks) {
         // The fully wired controller is safe to read, but the caller owns the lifecycle boundary:
         // normal boot defers these mutating tasks until recovery + essential services complete;
-        // safe mode intentionally never starts them.
+        // safe mode uses init_safe_mode() which never starts them.
         ESP_LOGI(TAG, "vehicle_loop and auto_pair deferred");
         return true;
     }
@@ -247,7 +247,9 @@ bool VehicleController::init(const std::string& vin,
 }
 
 bool VehicleController::init_safe_mode(const std::string& vin,
+                                       NvsStorageAdapter& storage,
                                        NvsStorageAdapter& config_store) {
+    storage_      = &storage;
     config_store_ = &config_store;
     vin_          = vin;
     key_runtime_safe_.store(false);

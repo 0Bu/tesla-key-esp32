@@ -498,16 +498,17 @@ extern "C" void app_main() {
     tk::VehicleTaskStartPhase vehicle_task_phase =
         tk::VehicleTaskStartPhase::ControllerWired;
 
+    static NvsStorageAdapter tesla_store(tk::nvs_contract::kTeslaBleNamespace);
+    if (!tesla_store.initialize())
+        boot_fatal("Tesla NVS");
+
     if (safe_mode) {
         ESP_LOGW(TAG, "Safe mode active — initializing inert vehicle controller");
-        if (!vehicle.init_safe_mode(vin, config_store)) {
+        if (!vehicle.init_safe_mode(vin, tesla_store, config_store)) {
             boot_fatal("VehicleController safe mode");
         }
         vehicle_task_phase = tk::VehicleTaskStartPhase::IdentityResolved;
     } else {
-        static NvsStorageAdapter tesla_store(tk::nvs_contract::kTeslaBleNamespace);
-        if (!tesla_store.initialize())
-            boot_fatal("Tesla NVS");
 
         // TeslaBLE constructs its crypto context while loading an existing private key. The DRBG is
         // seeded exactly once at that point, so enabling hardware entropy only in the no-key branch
@@ -661,7 +662,7 @@ extern "C" void app_main() {
     }
     vehicle_task_phase = tk::VehicleTaskStartPhase::IdentityResolved;
     bootloader_random_disable();
-    }
+    }  // !safe_mode
     // Match by the VIN-derived BLE name on scan. Pass the real VIN only when it is a plausible
     // 17-char VIN; with none configured we pass an EMPTY target so the scanner lists nearby
     // Teslas but never connects/enrols on one. The "UNKNOWN" placeholder must stay out of the

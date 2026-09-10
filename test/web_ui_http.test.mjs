@@ -21,7 +21,20 @@ function loadUi() {
         setAttribute(name, value) { this[name] = String(value); },
         appendChild(child) { this.children.push(child); child.parentNode = this; },
         removeChild(child) { this.children.splice(this.children.indexOf(child), 1); },
-        classList: { add() {}, remove() {}, toggle() {} }
+        classList: {
+          _classes: new Set(),
+          add(c) { this._classes.add(c); },
+          remove(c) { this._classes.delete(c); },
+          contains(c) { return this._classes.has(c); },
+          toggle(c) { this._classes.has(c) ? this._classes.delete(c) : this._classes.add(c); }
+        },
+        querySelector(sel) {
+          if (!this._subs) this._subs = new Map();
+          if (!this._subs.has(sel)) {
+            this._subs.set(sel, { innerHTML: "", textContent: "", className: "" });
+          }
+          return this._subs.get(sel);
+        }
       });
     }
     return elements.get(id);
@@ -96,6 +109,79 @@ test("configuration success requires the command response schema", async () => {
 
   assert.equal(messages.at(-1).kind, "err");
   assert.doesNotMatch(messages.at(-1).message, /saved/i);
+});
+
+test("key generation requires confirmation and omits force when state is null", async () => {
+  const { context } = loadUi();
+  let confirmed = false;
+  let requestedUrl = null;
+  context.state = null;
+  context.confirm = () => { confirmed = true; return true; };
+  context.fetch = async (url) => {
+    requestedUrl = url;
+    return {
+      ok: false,
+      status: 409,
+      async json() {
+        return { result: false, reason: "a key already exists — regenerating un-pairs the vehicle; call /gen_keys?force=1 to replace it" };
+      }
+    };
+  };
+  const messages = [];
+  context.toast = (message, kind) => messages.push({ message, kind });
+
+  await context.genKey();
+
+  assert.equal(confirmed, true);
+  assert.equal(requestedUrl, "/gen_keys");
+  assert.deepEqual(messages.at(-1), {
+    message: "a key already exists — regenerating un-pairs the vehicle; call /gen_keys?force=1 to replace it",
+    kind: "err"
+  });
+});
+
+test("key generation aborts when user cancels confirmation", async () => {
+  const { context } = loadUi();
+  let fetchCalled = false;
+  context.state = null;
+  context.confirm = () => false;
+  context.fetch = async () => { fetchCalled = true; return { ok: true, async json() { return { result: true }; } }; };
+
+  await context.genKey();
+
+  assert.equal(fetchCalled, false);
+});
+
+test("key generation sends force=1 only when key is known to be present", async () => {
+  const { context } = loadUi();
+  let requestedUrl = null;
+  context.state = { key_present: true };
+  context.confirm = () => true;
+  context.fetch = async (url) => {
+    if (url.startsWith("/gen_keys")) requestedUrl = url;
+    return { ok: true, status: 200, async json() { return { result: true }; } };
+  };
+
+  await context.genKey();
+
+  assert.equal(requestedUrl, "/gen_keys?force=1");
+});
+
+test("key generation skips confirmation and omits force when key is known absent", async () => {
+  const { context } = loadUi();
+  let confirmCalled = false;
+  let requestedUrl = null;
+  context.state = { key_present: false };
+  context.confirm = () => { confirmCalled = true; return true; };
+  context.fetch = async (url) => {
+    if (url.startsWith("/gen_keys")) requestedUrl = url;
+    return { ok: true, status: 200, async json() { return { result: true }; } };
+  };
+
+  await context.genKey();
+
+  assert.equal(confirmCalled, false);
+  assert.equal(requestedUrl, "/gen_keys");
 });
 
 test("key generation requires a successful result schema", async () => {
@@ -189,4 +275,18 @@ test("render handles s.link === 'idle' without ReferenceError and sets chips", (
   assert.match(element("hstats").innerHTML, /Battery/);
   assert.match(element("hstats").innerHTML, /75/);
   assert.match(element("hstats").innerHTML, /Idle/);
+});
+
+test("render displays safe mode banner when sys.safe_mode is active", () => {
+  const { context, element } = loadUi();
+  context.render({
+    link: "idle",
+    paired: false,
+    key_present: true,
+    vin: "5YJ3E1EA7KF000316",
+    sys: { safe_mode: true }
+  });
+  const rb = element("reauthBanner");
+  assert.equal(rb.classList.contains("show"), true);
+  assert.match(rb.querySelector(".bt").innerHTML, /Safe Mode active/);
 });
