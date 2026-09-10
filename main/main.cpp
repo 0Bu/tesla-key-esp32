@@ -39,6 +39,7 @@
 #include "syslog.hpp"
 #include "display.hpp"
 #include "led_status.hpp"
+#include "time_sync.hpp"
 #include "logic/bootlog.hpp"
 #include "logic/health_gate.hpp"
 #include "logic/heap_watchdog.hpp"
@@ -84,11 +85,13 @@ static const char* TAG = "main";
 // task. volatile stops selected compiler optimizations but is NOT a cross-task
 // happens-before edge under the C++ memory model; std::atomic is. Simple seq_cst policy.
 static std::atomic<bool>  s_ntp_synced{false};
+static std::atomic<bool>  s_clock_authoritative{false};
 static NvsStorageAdapter* s_cfg_store  = nullptr;
 
 static void on_time_sync(struct timeval*) {
     try {
         const bool first_sync = !s_ntp_synced.exchange(true);
+        s_clock_authoritative.store(true, std::memory_order_release);
         if (first_sync && s_cfg_store) {
             try {
                 if (!s_cfg_store->save_str(tk::nvs_contract::kLastTime,
@@ -112,7 +115,9 @@ static void on_time_sync(struct timeval*) {
 
 // Queried by the HTTP /set_time handler so the browser clock is applied only as a
 // fallback while NTP has not synced this boot.
-bool clock_synced_via_ntp() { return s_ntp_synced.load(); }
+bool clock_synced_via_ntp() noexcept { return s_ntp_synced.load(std::memory_order_acquire); }
+bool clock_is_authoritative() noexcept { return s_clock_authoritative.load(std::memory_order_acquire); }
+void mark_clock_authoritative() noexcept { s_clock_authoritative.store(true, std::memory_order_release); }
 
 // Seed the wall clock from the NVS cache written by on_time_sync, so we never sit at 1970
 // waiting for NTP (or forever, if the network blocks it and no browser ever visits). Called

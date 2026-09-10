@@ -34,9 +34,7 @@ extern NvsStorageAdapter* g_config;
 // registration impossible by construction.
 struct GuardedReq { httpd_req_t* req; };
 
-// Defined in main.cpp: true once SNTP has synced this boot. The browser /set_time
-// fallback only applies the client clock while this is false (NTP is authoritative).
-bool clock_synced_via_ntp();
+#include "time_sync.hpp"
 
 // Link state, the active netif and the WiFi-only readings all come from the transport seam
 // (net.hpp): tk::net_is_up(), tk::net_active_netif(), tk::net_wifi_signal(). Handlers must not
