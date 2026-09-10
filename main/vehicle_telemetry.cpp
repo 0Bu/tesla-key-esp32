@@ -448,7 +448,10 @@ void VehicleController::process_pending_telemetry_() {
     if (pending & PendingCharge) {
         ChargeStateResult parsed{};
         parse_charge_state(charge, parsed);
-        {
+        if (!tk::telemetry_epoch_matches(charge_epoch, identity_epoch_.load(std::memory_order_acquire))) {
+            ESP_LOGW(TAG, "discarding charge telemetry from defunct identity epoch (%u vs %u)",
+                     (unsigned)charge_epoch, (unsigned)identity_epoch_.load(std::memory_order_acquire));
+        } else {
             tk::MutexGuard g(cache_mutex_);
             if (tk::telemetry_epoch_matches(charge_epoch, identity_epoch_.load(std::memory_order_acquire))) {
                 last_known_charge_ = std::move(parsed);
@@ -457,9 +460,6 @@ void VehicleController::process_pending_telemetry_() {
                 charge_state_generation_.fetch_add(1);
                 charge_cache_stale_reported_.store(false);
                 note_contact_();
-            } else {
-                ESP_LOGW(TAG, "discarding charge telemetry from defunct identity epoch (%u vs %u)",
-                         (unsigned)charge_epoch, (unsigned)identity_epoch_.load(std::memory_order_acquire));
             }
         }
     }

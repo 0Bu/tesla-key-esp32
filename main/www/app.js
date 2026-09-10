@@ -377,6 +377,9 @@ function render(s){
   if(s.reauth && !paired){
     rb.classList.add('show');
     rb.querySelector('.bt').innerHTML='<b>Key was reset.</b> The vehicle removed this device’s key, so a fresh one was generated automatically. Approve the new pairing on your Tesla’s touchscreen.';
+  } else if(s.sys && s.sys.safe_mode){
+    rb.classList.add('show');
+    rb.querySelector('.bt').innerHTML='<b>Safe Mode active.</b> Vehicle Bluetooth, commands, and telemetry are stopped. Use this recovery dashboard to inspect diagnostics or update firmware.';
   } else rb.classList.remove('show');
 
   // hero — single source of overall status.
@@ -706,15 +709,25 @@ function wakeCar(){
     .catch(function(){ wakeStop(); toast('Wake failed — is the car in range?','err'); poll(); });
 }
 function genKey(){
-  if(state&&state.key_present && !confirm('Regenerate the security key?\n\nThe current key is invalidated and you must re-pair with the vehicle.')) return;
+  var keyKnown = state && typeof state.key_present === 'boolean';
+  var hasKey = keyKnown ? state.key_present : true;
+  if(hasKey && !confirm('Regenerate the security key?\n\nThe current key is invalidated and you must re-pair with the vehicle.')) return;
   toast('Generating new key…','info');
-  return requestJson('/gen_keys?force=1',{method:'POST'})
-    .then(function(j){
-      if(!j||typeof j.result!=='boolean') throw new Error('invalid key response');
-      if(!j.result){ toast(j.reason||'Key generation failed','err'); return; }
-      toast('New key generated · re-pair with the vehicle','ok'); poll();
+  var query = (keyKnown && state.key_present) ? '?force=1' : '';
+  return fetch('/gen_keys' + query, {method: 'POST'})
+    .then(function(r){
+      return r.json().catch(function(){ return null; }).then(function(j){
+        if(!r.ok){
+          var msg = (j && j.reason) ? j.reason : ('HTTP ' + r.status);
+          toast(msg, 'err');
+          return;
+        }
+        if(!j || typeof j.result !== 'boolean') throw new Error('invalid key response');
+        if(!j.result){ toast(j.reason || 'Key generation failed', 'err'); return; }
+        toast('New key generated · re-pair with the vehicle', 'ok'); poll();
+      });
     })
-    .catch(function(){toast('Key generation failed','err')});
+    .catch(function(){ toast('Key generation failed', 'err'); });
 }
 
 /* ---------- OTA ---------- */
