@@ -137,9 +137,7 @@ EXPECTED_ACTIONS = {
     ("pr-preview-cleanup.yml", "reconcile-stale"): (
         "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
     ),
-    ("renovate.yaml", "renovate"): (
-        "renovatebot/github-action@37beffda261423addd537c33f2d126df7f6ffbab",
-    ),
+    # Note: ("renovate.yaml", "renovate") is dynamic: validated in validate() against PINNED_ACTION.
     ("signed-pr-preview.yml", "validate"): (),
     ("signed-pr-preview.yml", "trusted-rebuild"): (
         "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
@@ -1118,6 +1116,13 @@ def replace_once(path: Path, old: str, new: str) -> None:
 
 def self_test(root: Path) -> None:
     validate(root)
+    renovate_workflow = (root / ".github/workflows/renovate.yaml").read_text(encoding="utf-8")
+    renovate_actions = ACTION.findall(renovate_workflow)
+    require(
+        len(renovate_actions) == 1 and renovate_actions[0].startswith("renovatebot/github-action@"),
+        "renovate.yaml: expected single renovatebot/github-action action",
+    )
+    current_renovate_action = renovate_actions[0]
     mutations = [
         ("action-pin", "build.yml", "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
          "actions/checkout@main", "40-hex"),
@@ -1130,11 +1135,11 @@ def self_test(root: Path) -> None:
          "espressif/esp-idf-ci-action@0123456789abcdef0123456789abcdef01234567",
          "action inventory drift"),
         ("renovate-action-pin", "renovate.yaml",
-         "renovatebot/github-action@37beffda261423addd537c33f2d126df7f6ffbab",
+         current_renovate_action,
          "renovatebot/github-action@main", "40-hex"),
         ("renovate-action-owner", "renovate.yaml",
-         "renovatebot/github-action@37beffda261423addd537c33f2d126df7f6ffbab",
-         "attacker/github-action@37beffda261423addd537c33f2d126df7f6ffbab",
+         current_renovate_action,
+         current_renovate_action.replace("renovatebot/", "attacker/", 1),
          "action inventory drift"),
         ("renovate-extra-action", "renovate.yaml",
          "          token: ${{ secrets.RENOVATE_TOKEN }}\n",
@@ -1527,7 +1532,7 @@ def self_test(root: Path) -> None:
         shutil.copytree(root / ".github/workflows", fixture / ".github/workflows")
         replace_once(
             fixture / ".github/workflows/renovate.yaml",
-            "renovatebot/github-action@37beffda261423addd537c33f2d126df7f6ffbab",
+            current_renovate_action,
             "renovatebot/github-action@0123456789abcdef0123456789abcdef01234567",
         )
         validate(fixture)
