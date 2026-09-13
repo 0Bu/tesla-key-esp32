@@ -183,10 +183,12 @@ configuration and subagent manifests in `.codex/` and `.agents/`.
   merge. `$pr-hygiene` is required at PR creation, every push, and every merge — it screens the PR
   title/body, commit messages and touched documentation for personal/private information (LAN IPs,
   MAC addresses, VINs, WiFi network names, hostnames, emails) and for content not written in
-  English; it is not a subset of `$project-review` or `$skill-audit`. `$feature-docs` is
-  conditionally required when the cataloged feature surface changes, including the PR-policy and
-  bench-acceptance workflows. Records are bound to the exact current PR head and become stale after
-  any push.
+  English; it is not a subset of `$project-review` or `$skill-audit`. Automated Renovate
+  maintenance PRs whose diff is strictly limited to `.github/workflows/renovate.yaml` or
+  `.github/renovate.json` (`gate_is_renovate_maintenance`) are exempt from manual gate records
+  at merge/check. `$feature-docs` is conditionally required when the cataloged feature surface
+  changes, including the PR-policy and bench-acceptance workflows. Records are bound to the
+  exact current PR head and become stale after any push.
 - Reviewers report actionable findings with path/line, cause, impact and evidence. A green build is
   not review proof. Resolve P1/P2 findings and rerun the affected independent review after edits.
 - The only accepted merge shape is:

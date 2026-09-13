@@ -593,11 +593,14 @@ extern "C" void app_main() {
             const bool info_removed = tesla_store.remove(tk::nvs_contract::kSessionInfotainment);
             const bool paired_removed = tesla_store.remove(tk::nvs_contract::kPairedAt);
             const bool mac_removed = config_store.remove(tk::nvs_contract::kBleMac);
-            const bool marker_removed = config_store.remove(tk::nvs_contract::kVinTransition);
-            if (!vcsec_removed || !info_removed || !paired_removed || !mac_removed ||
-                !marker_removed) {
+            if (!tk::vin_transition_cleanup_ready_for_marker_removal(
+                    vcsec_removed, info_removed, paired_removed, mac_removed)) {
                 bootloader_random_disable();
                 boot_fatal("VIN transition completion");
+            }
+            if (!config_store.remove(tk::nvs_contract::kVinTransition)) {
+                bootloader_random_disable();
+                boot_fatal("VIN transition marker cleanup");
             }
             bootloader_random_disable();
             vTaskDelay(pdMS_TO_TICKS(100));

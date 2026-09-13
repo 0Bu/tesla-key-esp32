@@ -40,7 +40,7 @@ CI runs this as the `logic-test` job, a **fast gate the per-target firmware buil
 depends on** (`.github/workflows/build.yml`) — a logic regression fails in seconds
 instead of after four ESP-IDF builds. The same job also runs
 `tools/agent-config/selftest.sh`; that parser-based suite checks the runner-neutral agent
-configuration, compatibility manifest/fingerprint, skill frontmatter, reviewer sandboxes, hook
+configuration, rejects retired manifests, validates skill frontmatter, reviewer sandboxes, hook
 wiring, and Context7 pin before any firmware build starts. Repository/workflow lint, sanitizer
 tripwires, deterministic fuzzing, protocol vectors and a real Chrome/Chromium page gate run in the
 same job before the pinned four-target firmware build.

@@ -122,7 +122,10 @@ def verify_rsa_pss_sha256(n: int, e: int, signature: bytes, digest: bytes) -> No
         raise ArtifactError("invalid RSA-PSS signature or digest length")
     if n.bit_length() != RSA_BYTES * 8 or e < 3 or e % 2 == 0:
         raise ArtifactError("invalid RSA-3072 public key")
-    encoded = pow(int.from_bytes(signature, "big"), e, n).to_bytes(RSA_BYTES, "big")
+    sig_int = int.from_bytes(signature, "big")
+    if not (0 <= sig_int < n):
+        raise ArtifactError("Secure Boot v2 RSA signature representative out of range (s >= n)")
+    encoded = pow(sig_int, e, n).to_bytes(RSA_BYTES, "big")
     hash_size = hashlib.sha256().digest_size
     db_size = RSA_BYTES - hash_size - 1
     if encoded[-1] != 0xBC or encoded[0] & 0x80:
@@ -526,6 +529,34 @@ def self_test() -> None:
             assert "RSA-PSS" in str(exc)
         else:
             raise AssertionError("CRC-consistent invalid RSA-PSS signature was accepted")
+
+        # An out-of-range signature representative (s >= n) must be rejected per RSAVP1 (RFC 8017).
+        signed.write_bytes(fake_sign(app.read_bytes()))
+        oor_signature = bytearray(signed.read_bytes())
+        raw_sig = oor_signature[
+            -SIGNATURE_SECTOR + RSA_SIGNATURE_OFFSET : -SIGNATURE_SECTOR + SIGNATURE_DATA_SIZE
+        ][::-1]
+        sig_val = int.from_bytes(raw_sig, "big")
+        oor_sig_val = sig_val + TEST_RSA_N
+        if oor_sig_val >= (1 << (RSA_BYTES * 8)):
+            oor_sig_val = TEST_RSA_N + 1
+        oor_signature[
+            -SIGNATURE_SECTOR + RSA_SIGNATURE_OFFSET : -SIGNATURE_SECTOR + SIGNATURE_DATA_SIZE
+        ] = oor_sig_val.to_bytes(RSA_BYTES, "big")[::-1]
+        block_start = len(oor_signature) - SIGNATURE_SECTOR
+        crc = zlib.crc32(
+            oor_signature[block_start : block_start + SIGNATURE_DATA_SIZE]
+        ) & 0xFFFFFFFF
+        struct.pack_into(
+            "<I", oor_signature, block_start + SIGNATURE_DATA_SIZE, crc
+        )
+        signed.write_bytes(oor_signature)
+        try:
+            validate_set("esp32c6", "1.2.3-test", boot, signed, signed_app=True)
+        except ArtifactError as exc:
+            assert "out of range" in str(exc)
+        else:
+            raise AssertionError("out-of-range RSA signature representative (s >= n) was accepted")
 
         try:
             validate_set("esp32c3", "1.2.3-test", boot, app, signed_app=False)
