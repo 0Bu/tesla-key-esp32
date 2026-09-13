@@ -20,6 +20,21 @@ every changed fact, compare code, tests, web UI, and all documented mirrors:
   esp32, esp32s3, esp32c3, esp32c6.
 - Kconfig/defaults, pinned build-container CPU/memory limits, OTA/release/provenance narrative,
   architecture maps, logic-test mirrors, and runner-neutral agent/skill/hook references.
+- Sleep/link state: link_state() is the single source feeding BOTH the web-UI hero and MQTT
+  sleep_state — the MQTT switch must stay exhaustive (no catch-all defaulting to asleep) and
+  the web UI must handle every state including the omitted unknown, with the semantics in
+  docs/ARCHITECTURE.md and any enumerated values in docs/README.md.
+- WiFi/LAN reconnect and the gateway-ICMP watchdog: policy in main/net.cpp with the decision in
+  the host-tested main/logic/net_link.hpp, mirrored by the numbers quoted in the
+  "WiFi / LAN connectivity" section of docs/ARCHITECTURE.md. Distinct from the car-BLE link
+  state; the watchdog must never reboot.
+- MQTT transport and TLS defaulting: the schemeless-broker rule in mqtt_ha_start (credentials
+  imply mqtts:// with no plaintext fallback) surfaces in /status mqtt.tls/mqtt.error, the web
+  UI's secured row, and the MQTT sections of docs/README.md, docs/ARCHITECTURE.md and — for
+  transport trust claims — docs/SECURITY.md.
+- Durable wall-clock stamps (key_created, paired_at, MQTT boot_time) gate on
+  clock_is_authoritative() in main/time_sync.hpp; a clock merely restored from NVS is not
+  authoritative.
 - Runtime board detectors and ordered peripheral candidates, including every SPI and auxiliary
   INT/RST GPIO a probe can touch on this candidate and every later board in the sequence.
 - Typed HTTP/MCP body/JSON failures, sticky response ownership, retained MQTT publish ordering,

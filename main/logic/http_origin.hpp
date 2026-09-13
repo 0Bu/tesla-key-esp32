@@ -100,6 +100,18 @@ inline std::string_view request_path(std::string_view uri) {
     return uri.substr(0, query);
 }
 
+// Decide whether the raw query string carries key=value, using the SAME matching rules the
+// handler's read will use. This must track esp_http_server's httpd_query_key_value(), because the
+// gate below classifies the request and http_common.cpp's query_param_is() performs it — the two
+// disagreeing is a gate bypass, not a style difference:
+//   * the KEY is compared case-INSENSITIVELY (IDF uses strncasecmp on an exact-length match), so
+//     `?CLEAR=1` is the same parameter as `?clear=1`. Comparing it case-sensitively here left
+//     `/diag?CLEAR=1`, `?VERBOSE=0|1` and `/coredump?CLEAR=1` unclassified while the handler still
+//     cleared the ring, flipped verbose logging and erased the core dump.
+//   * the VALUE is compared case-SENSITIVELY and byte-for-byte up to '&'. IDF copies it verbatim —
+//     no percent-decoding, no case folding — and query_param_is() then does a plain strcmp, so
+//     folding it here would classify requests the handler ignores and, worse, invite the inverse
+//     mistake later. Keep this half exact.
 inline bool query_has_exact(std::string_view uri, std::string_view key,
                             std::string_view value) {
     const size_t query = uri.find('?');
@@ -109,7 +121,7 @@ inline bool query_has_exact(std::string_view uri, std::string_view key,
         const size_t amp = rest.find('&');
         const std::string_view item = rest.substr(0, amp);
         const size_t equals = item.find('=');
-        if (equals != std::string_view::npos && item.substr(0, equals) == key &&
+        if (equals != std::string_view::npos && ascii_iequal(item.substr(0, equals), key) &&
             item.substr(equals + 1) == value) {
             return true;
         }
