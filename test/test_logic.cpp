@@ -273,6 +273,14 @@ static void test_vin_transition() {
     CHECK(tk::vin_transition_recovery_blocks_staging(true, false));
     CHECK(tk::vin_transition_recovery_blocks_staging(false, true));
     CHECK(tk::vin_transition_recovery_blocks_staging(true, true));
+
+    // Transition journal removal is permitted only after all session, pairing, and MAC erasures succeed.
+    CHECK(!tk::vin_transition_cleanup_ready_for_marker_removal(false, true, true, true));
+    CHECK(!tk::vin_transition_cleanup_ready_for_marker_removal(true, false, true, true));
+    CHECK(!tk::vin_transition_cleanup_ready_for_marker_removal(true, true, false, true));
+    CHECK(!tk::vin_transition_cleanup_ready_for_marker_removal(true, true, true, false));
+    CHECK(!tk::vin_transition_cleanup_ready_for_marker_removal(false, false, false, false));
+    CHECK(tk::vin_transition_cleanup_ready_for_marker_removal(true, true, true, true));
 }
 
 static void test_key_rotation() {

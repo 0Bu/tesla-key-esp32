@@ -7,7 +7,7 @@ It complements the canonical repository policy in [`../../AGENTS.md`](../../AGEN
 
 - Never proactively send unsolicited commands or connection requests to a sleeping vehicle.
 - Passive telemetry and status endpoints (`GET /status`, `GET /diag`) must consume cached link and state information from RAM and must not initiate a BLE connection or wake sequence.
-- Vehicle wake operations (`POST /wake`) require explicit intent and must respect debouncing and backoff limits.
+- Vehicle wake operations (`POST /api/1/vehicles/<VIN>/command/wake_up`) require explicit intent and must respect debouncing and backoff limits.
 
 ## 2. VCSEC Anti-Replay & Session Security
 

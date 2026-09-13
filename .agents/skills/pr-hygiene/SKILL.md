@@ -17,7 +17,8 @@ documentation prose it touches — are safe to publish. This project's own histo
 both failure modes: a PR body quoting the tester's real LAN IP, MAC addresses and a real Tesla
 VIN as "example" values, and a run of early PR bodies written entirely in German. `$pr-hygiene`
 is the dedicated, unconditional gate for exactly those two concerns, checked at PR creation,
-every push, and merge — never assume a clean `$skill-audit` or `$project-review` also covers it;
+every push, and merge (automated PRs limited exclusively to `.github/workflows/renovate.yaml` or
+`.github/renovate.json` are exempt at merge/check via `gate_is_renovate_maintenance`) — never assume a clean `$skill-audit` or `$project-review` also covers it;
 their scope is coherence, not confidentiality or language.
 
 ## What counts as a finding
