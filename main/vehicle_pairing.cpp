@@ -452,6 +452,15 @@ tk::KeyRotationResult VehicleController::generate_key_locked_() {
         // fingerprint can classify durable identity. Keep key_rotate (and, for /set_vin,
         // vin_txn) armed and require boot to reload the authoritative fingerprint.
         key_reload_required_.store(true);
+        // Drop the cached fingerprint with it. The cache is a fast path for /status, seeded at
+        // init() and refreshed after a COMMITTED rotation; holding it here would keep serving the
+        // pre-rotation value while flash may already carry the new key — the one state in which
+        // the cached answer is knowably unreliable. Clearing it sends key_fingerprint() back to
+        // the storage-backed path, which reports whatever is durably there.
+        {
+            tk::MutexGuard cache_guard(cache_mutex_);
+            key_fingerprint_cache_.clear();
+        }
         ESP_LOGE(TAG, "key generation/persistence outcome is ambiguous — runtime key is untrusted; reboot required");
         invalidate_and_flush_(command_generation_.load());
         // Keep key_rotate armed. A reboot erases every potentially mismatched session before it
@@ -464,11 +473,17 @@ tk::KeyRotationResult VehicleController::generate_key_locked_() {
         tk::MutexGuard cache_guard(cache_mutex_);
         key_fingerprint_cache_ = std::move(new_fp);
     }
-    // Record when the key was generated so the UI can show the key's creation
-    // date next to its fingerprint. Wall-clock comes from the browser (POST
-    // /set_time) or the NVS-cached time; if neither is set yet this stamps a
-    // near-zero value, which the UI ignores.
-    if (storage_) {
+    // Record when the key was generated so the UI can show the key's creation date next to its
+    // fingerprint — but only from an AUTHORITATIVE clock (SNTP, or an explicit browser
+    // /set_time), never from the NVS-cached wall clock main.cpp restores at boot. That cached
+    // value is the time of the PREVIOUS sync, so stamping it here would date a key minutes old
+    // to hours or weeks ago, durably: nothing rewrites key_created until the next rotation. The
+    // exposure is a headless board on a network that blocks NTP, re-keying because the car
+    // dropped our key — exactly the case with no browser to correct it. Same rule as the sibling
+    // paired_at() stamp; see main/time_sync.hpp. Leaving it unstamped is the better failure:
+    // status_model.hpp omits key_created below its plausibility floor, so the UI shows nothing
+    // rather than a confident wrong date, and the next rotation under a real clock stamps it.
+    if (storage_ && clock_is_authoritative()) {
         try {
             time_t now = time(nullptr);
             if (!storage_->save_str(tk::nvs_contract::kKeyCreated,

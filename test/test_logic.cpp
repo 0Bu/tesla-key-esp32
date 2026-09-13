@@ -3990,6 +3990,32 @@ static void test_http_origin() {
     CHECK(!tk::mutation_origin_required(false, "/diag?next=clear=1"));
     CHECK(!tk::mutation_origin_required(false, "/coredump"));
     CHECK(!tk::mutation_origin_required(false, "/ota/status"));
+
+    // esp_http_server matches a query KEY case-insensitively (strncasecmp on an exact-length
+    // match), so the handler acts on ?CLEAR=1 exactly as on ?clear=1. Classifying only the
+    // lowercase spelling left every one of these mutating GETs ungated — the core-dump erase
+    // included. The classifier must agree with the parser it guards.
+    CHECK(tk::mutation_origin_required(false, "/diag?CLEAR=1"));
+    CHECK(tk::mutation_origin_required(false, "/diag?Clear=1"));
+    CHECK(tk::mutation_origin_required(false, "/diag?VERBOSE=1"));
+    CHECK(tk::mutation_origin_required(false, "/diag?Verbose=0"));
+    CHECK(tk::mutation_origin_required(false, "/coredump?CLEAR=1"));
+    CHECK(tk::mutation_origin_required(false, "/diag?redact=1&VERBOSE=0"));
+    // IDF stops at the FIRST case-insensitive key hit, so ?CLEAR=1&clear=0 mutates. Classifying
+    // on any matching occurrence is a superset of what the handler acts on, which fails closed.
+    CHECK(tk::mutation_origin_required(false, "/diag?CLEAR=1&clear=0"));
+    CHECK(tk::mutation_origin_required(false, "/diag?clear=0&CLEAR=1"));
+
+    // The VALUE half stays exact: IDF copies it verbatim (no case folding, no percent-decoding)
+    // and query_param_is() strcmp()s it, so these must remain unclassified — folding the value
+    // would gate requests the handler ignores, and inverting this pair is the original bug.
+    CHECK(!tk::mutation_origin_required(false, "/diag?CLEAR=0"));
+    CHECK(!tk::mutation_origin_required(false, "/diag?clear=%31"));
+    CHECK(!tk::mutation_origin_required(false, "/diag?CLEAR=TRUE"));
+    CHECK(!tk::mutation_origin_required(false, "/coredump?CLEAR=0"));
+    // A key that merely CONTAINS the name is still a different parameter on both sides.
+    CHECK(!tk::mutation_origin_required(false, "/diag?XCLEAR=1"));
+    CHECK(!tk::mutation_origin_required(false, "/diag?CLEARED=1"));
 }
 
 // ─── Negotiated ATT payload size (logic/ble_chunk.hpp) ────────────────────────────────────────
