@@ -100,7 +100,11 @@ whose authority differs from `Host`, whose `Host` is neither the device name nor
 or whose `Sec-Fetch-Site` is `cross-site`, receives `403` before route dispatch. Binding `Host` to
 a device-owned authority also closes the usual DNS-rebinding bypass where attacker-controlled
 `Host` and `Origin` match. The gate covers every POST plus the legacy state-changing GET forms
-`/ota/check`, `/diag?clear=1`, `/diag?verbose=0|1` and `/coredump?clear=1`. Same-origin UI requests
+`/ota/check`, `/diag?clear=1`, `/diag?verbose=0|1` and `/coredump?clear=1`. Those query **keys are
+matched case-insensitively**, because `esp_http_server` matches them that way when the handler
+reads them: `?CLEAR=1` is the same request as `?clear=1` and is gated identically. The **values**
+stay exact — ESP-IDF copies them verbatim, with no percent-decoding — so `?clear=%31` is not
+`?clear=1` on either side. Same-origin UI requests
 continue to work, and headerless clients such as evcc and curl remain compatible. If either
 `Origin` or `Sec-Fetch-Site` is present, the device-owned `Host` check applies; this covers
 same-origin browser GETs that legitimately omit `Origin`. This is **not authentication**: a raw
