@@ -483,8 +483,15 @@ extern "C" void app_main() {
     //
     // Needs no network (unlike SNTP, which stays below with the rest of the post-WiFi setup),
     // so there is nothing keeping it down there. NTP refines this within seconds of the link
-    // coming up; until then a cached-but-slightly-stale clock beats 1970 for every consumer —
-    // session ages here, TLS cert validity for OTA, and the key_created/paired_at stamps.
+    // coming up; until then a cached-but-slightly-stale clock beats 1970 for the consumers that
+    // only need a plausible ordering — session ages here, and TLS cert validity for OTA.
+    //
+    // It is deliberately NOT good enough for a DURABLE wall-clock stamp. A restored clock reads
+    // the time of the PREVIOUS sync, so writing key_created or paired_at from it dates a fresh
+    // key or pairing to whenever the board last had a real clock — and that wrong value then
+    // outlives the boot. Both stamps therefore gate on clock_is_authoritative()
+    // (main/time_sync.hpp), which only SNTP or an explicit browser /set_time sets; this restore
+    // deliberately does not. Any new durable stamp must do the same.
     //
     // If you are about to move this back down: the comment that used to sit next to it said
     // "tesla-ble signed-command freshness does NOT [need real UTC]", which is true — signing
