@@ -64,9 +64,13 @@ gh --repo github.com/0Bu/tesla-key-esp32 pr merge <pr_number> \
   --match-head-commit <40_hex_head_sha> --squash
 ```
 
-3. Confirm the resulting merge commit on `main`:
+3. Confirm and capture the resulting merge commit on `main`:
 ```bash
-gh pr view <pr_number> --json mergeCommit --jq '.mergeCommit.oid'
+MERGE_SHA="$(gh pr view <pr_number> --json mergeCommit --jq '.mergeCommit.oid')"
+printf '%s\n' "$MERGE_SHA" | grep -Eq '^[0-9a-fA-F]{40}$' || {
+  echo "REFUSING: invalid or missing merge commit SHA from PR <pr_number>" >&2; exit 1;
+}
+echo "Merged commit: $MERGE_SHA"
 ```
 
 ## 2. Watch the post-merge build on main — `gh run watch`, never sleep-polling

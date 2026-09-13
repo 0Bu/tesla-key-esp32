@@ -512,6 +512,11 @@ what each must stay true to:
   `CHECK`/`CHECK_STR`/`CHECK_NEAR` macro set in
   `test/test_logic.cpp`, and the `static_assert` lock pattern (`main/ota_update.cpp` /
   `main/logic/target.hpp`).
+- **`$mock-test`** executes fast host-side logic, mock, and sanitizer test runners for IDF-free logic
+  and boundaries. Re-verify against `scripts/run-fast-tests.sh` (`--logic`, `--nvs`, `--boundary`,
+  `--sanitizers`, `--all`), `scripts/run-mock-tests.sh` (host suite, parity checks, `--require-all`
+  fail-closed mode), and `scripts/run-sanitizer-tests.sh` (Linux ASan/UBSan/LSan tripwires). It is
+  read-only and reports host test evidence distinct from IDF/Docker/hardware boundaries.
 - **`$pr-hygiene`** screens the PR title/body, commit messages and touched documentation for
   personal/private information (LAN IPs, MAC addresses, VINs, WiFi network names, hostnames,
   emails) and for content not written in English. Re-verify it against

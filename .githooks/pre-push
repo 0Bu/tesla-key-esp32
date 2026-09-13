@@ -12,7 +12,10 @@ if [ "${AGENT_PR_GATES_SKIP:-0}" = "1" ]; then
     exit 0
 fi
 
-# 1. Prevent direct pushes to main branch
+remote_name="${1:-origin}"
+remote_url="${2:-}"
+
+# 1. Prevent direct pushes from main branch
 current_branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")"
 if [ "$current_branch" = "main" ]; then
     echo "BLOCKED by pre-push: direct push to main branch is prohibited; open a pull request instead." >&2
@@ -23,43 +26,88 @@ fi
 has_firmware_changes=0
 zero_sha="0000000000000000000000000000000000000000"
 
-while read -r local_ref local_sha remote_ref remote_sha; do
-  # Skip branch deletions
+updates=()
+if [ ! -t 0 ]; then
+  while read -r local_ref local_sha remote_ref remote_sha; do
+    updates+=("$local_ref $local_sha $remote_ref $remote_sha")
+  done
+fi
+
+# If invoked without stdin lines (e.g. manual verification)
+if [ "${#updates[@]}" -eq 0 ]; then
+  if [ -z "$current_branch" ] || [ "$current_branch" = "HEAD" ]; then
+    echo "BLOCKED by pre-push: cannot determine branch to verify from detached HEAD." >&2
+    exit 1
+  fi
+  head_sha="$(git rev-parse HEAD 2>/dev/null || echo "")"
+  updates+=("refs/heads/$current_branch" "$head_sha" "refs/heads/$current_branch" "$zero_sha")
+fi
+
+head_sha="$(git rev-parse HEAD 2>/dev/null || echo "")"
+
+if [ "${#updates[@]}" -gt 0 ]; then
+for update in "${updates[@]}"; do
+  read -r local_ref local_sha remote_ref remote_sha <<< "$update"
+
+  # Block any attempt to update destination main branch
+  if [[ "$remote_ref" == "refs/heads/main" || "$remote_ref" == "main" ]]; then
+    echo "BLOCKED by pre-push: direct push to destination main branch is prohibited; open a pull request instead." >&2
+    exit 1
+  fi
+
+  # Skip branch deletions for PR policy and firmware diff
   if [[ "$local_sha" == "$zero_sha" ]]; then
     continue
   fi
 
-  # Determine diff base
+  # Require pushed local commit to match current local HEAD
+  if [ -n "$head_sha" ] && [ "$local_sha" != "$head_sha" ]; then
+    echo "BLOCKED by pre-push: pushed ref '$local_ref' commit ($local_sha) does not match local HEAD ($head_sha)." >&2
+    exit 1
+  fi
+
+  # Determine diff base for firmware checks
   if [[ "$remote_sha" == "$zero_sha" ]]; then
     # New remote branch: compare against origin/main or HEAD~1
     if git rev-parse --verify origin/main >/dev/null 2>&1; then
       diff_range="origin/main...$local_sha"
-    else
+    elif git rev-parse --verify HEAD~1 >/dev/null 2>&1; then
       diff_range="HEAD~1...$local_sha"
+    else
+      echo "BLOCKED by pre-push: unable to determine diff base for new branch." >&2
+      exit 1
     fi
   else
     diff_range="$remote_sha...$local_sha"
   fi
 
-  changed_files="$(git diff --name-only "$diff_range" 2>/dev/null || true)"
+  if ! changed_files="$(git diff --name-only "$diff_range" 2>/dev/null)"; then
+    echo "BLOCKED by pre-push: unable to determine diff for range '$diff_range'." >&2
+    exit 1
+  fi
   if printf '%s\n' "$changed_files" | grep -Eq '^(main/|CMakeLists\.txt$|sdkconfig|partitions\.csv$|scripts/ci-build-all\.sh$)'; then
     has_firmware_changes=1
-    break
   fi
-done
 
-# 2. Check PR policy gates using require-pr-gates.sh
-head_sha="$(git rev-parse HEAD)"
-push_payload="$(python3 - "$root" "$head_sha" "$current_branch" <<'PY'
+  # 2. Check PR policy gates using require-pr-gates.sh
+  local_branch="${local_ref#refs/heads/}"
+  remote_branch="${remote_ref#refs/heads/}"
+  if [ "$local_branch" = "$remote_branch" ]; then
+    push_cmd="git push $remote_name $remote_branch"
+  else
+    push_cmd="git push $remote_name $local_branch:$remote_branch"
+  fi
+
+  push_payload="$(python3 - "$root" "$push_cmd" <<'PY'
 import json, sys
-root, sha, branch = sys.argv[1], sys.argv[2], sys.argv[3]
+root, cmd = sys.argv[1], sys.argv[2]
 print(json.dumps({
     "conversationId": "git-cli",
     "workspacePaths": [root],
     "toolCall": {
         "name": "run_command",
         "args": {
-            "CommandLine": f"git push origin {branch}",
+            "CommandLine": cmd,
             "Cwd": root
         }
     }
@@ -67,11 +115,13 @@ print(json.dumps({
 PY
 )"
 
-if ! printf '%s' "$push_payload" | bash "$root/tools/agent-hooks/require-pr-gates.sh"; then
-    echo "BLOCKED by pre-push: PR policy gates not satisfied for branch '$current_branch' @ $head_sha." >&2
-    echo "Ensure checklist gates (\$skill-audit, \$pr-hygiene) are checked in your PR body before pushing." >&2
-    echo "To bypass in an emergency: AGENT_PR_GATES_SKIP=1 git push ..." >&2
-    exit 1
+  if ! printf '%s' "$push_payload" | bash "$root/tools/agent-hooks/require-pr-gates.sh"; then
+      echo "BLOCKED by pre-push: PR policy gates not satisfied for '$push_cmd' (target '$remote_ref' @ $local_sha)." >&2
+      echo "Ensure checklist gates (\$skill-audit, \$pr-hygiene) are checked in your PR body before pushing." >&2
+      echo "To bypass in an emergency: AGENT_PR_GATES_SKIP=1 git push ..." >&2
+      exit 1
+  fi
+done
 fi
 
 # 3. Validate firmware size if firmware-relevant changes are detected

@@ -113,6 +113,11 @@ the authority for the per-sibling drift check; `$project-review` defers the mech
   (`.github/workflows/build.yml`), the `stop-logic-tests` handler in
   `tools/agent-hooks/agent_hook.py` wired by `.codex/hooks.json`,
   the `CHECK`/`CHECK_STR`/`CHECK_NEAR` macro set, and the `static_assert` lock pattern.
+- **`$mock-test`** — fast host-side logic, mock, and sanitizer test runner. Verify against
+  `scripts/run-fast-tests.sh` (`--logic`, `--nvs`, `--boundary`, `--sanitizers`, `--all`),
+  `scripts/run-mock-tests.sh` (host suite, parity checks, `--require-all` CI mode), and
+  `scripts/run-sanitizer-tests.sh` (Linux ASan/UBSan/LSan tripwires). It is read-only and
+  reports host test evidence distinct from IDF/Docker/hardware boundaries.
 - **`$pr-hygiene`** — screens the PR title/body, commit messages and touched documentation for
   personal/private information (`PRIVACY-LEAK`: LAN IPs, MAC addresses, VINs, WiFi network names,
   hostnames, emails) and content not written in English (`LANGUAGE`). Verify it against

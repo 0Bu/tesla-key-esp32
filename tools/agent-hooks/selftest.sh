@@ -467,6 +467,36 @@ expect_rc 0 'git push to open PR accepts current skill-audit and pr-hygiene' env
 no_hygiene_push_body="$(printf '%s\n' '- [x] $skill-audit clean — PR create/push gate @ '"$sha")"
 expect_rc 2 'git push to open PR requires pr-hygiene' env PATH="$tmp/bin:$PATH" TEST_ROOT="$root" TEST_BRANCH="$push_branch" TEST_REAL_GIT="$real_git" TEST_HEAD="$sha" TEST_BODY="$no_hygiene_push_body" "$gate" --project-dir "$root" --payload-file "$tmp/push.json"
 
+if printf 'refs/heads/feature %s refs/heads/main 0000000000000000000000000000000000000000\n' "$sha" | "$root/.githooks/pre-push" origin >/dev/null 2>&1; then
+  fail_case 'pre-push hook accepts push to destination main'
+else
+  pass_case 'pre-push hook blocks push to destination main'
+fi
+
+if printf 'refs/heads/feature 0000000000000000000000000000000000000000 refs/heads/main 0000000000000000000000000000000000000000\n' | "$root/.githooks/pre-push" origin >/dev/null 2>&1; then
+  fail_case 'pre-push hook accepts deletion of main branch'
+else
+  pass_case 'pre-push hook blocks deletion of main branch'
+fi
+
+if printf 'refs/heads/feature %s refs/heads/feature 0000000000000000000000000000000000000000\n' "$sha" | "$root/.githooks/pre-push" foreign >/dev/null 2>&1; then
+  fail_case 'pre-push hook accepts push to foreign remote'
+else
+  pass_case 'pre-push hook blocks push to foreign remote'
+fi
+
+if printf 'refs/heads/feature %s refs/heads/feature 1111111111111111111111111111111111111111\n' "$sha" | "$root/.githooks/pre-push" origin >/dev/null 2>&1; then
+  fail_case 'pre-push hook accepts unresolvable diff range'
+else
+  pass_case 'pre-push hook fails closed on unresolvable diff range'
+fi
+
+if "$root/.githooks/pre-push" origin </dev/null >/dev/null 2>&1; then
+  fail_case 'pre-push hook accepts detached HEAD without stdin'
+else
+  pass_case 'pre-push hook blocks detached HEAD without stdin'
+fi
+
 ( GATE_PROJ="$root"; PATH="$tmp/bin:$PATH" TEST_REAL_GIT="$real_git" TEST_HEAD="$sha" TEST_CHANGED=2 gate_pr_changed_files 123 >/dev/null 2>&1 )
 [ "$?" = 2 ] && pass_case 'paginated API truncation fails closed' || fail_case 'pagination truncation'
 ( GATE_PROJ="$root"; PATH="$tmp/bin:$PATH" TEST_REAL_GIT="$real_git" TEST_HEAD="$sha" TEST_CHANGED=3001 gate_pr_changed_files 123 >/dev/null 2>&1 )
