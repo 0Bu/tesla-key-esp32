@@ -5,7 +5,7 @@
 # the same inputs and diff. Fails if the browser and the firmware presenter disagree — so "the
 # row renders what the host-tested rules say" is checked by CI, not by hand.
 #
-# Needs a C++17 compiler + node (both present in the CI logic-test job — ubuntu-latest ships
+# Needs a C++17 compiler + node (both present in the CI logic-test job — ubuntu-26.04 ships
 # Node). Run directly, or automatically at the end of scripts/run-mock-tests.sh.
 set -euo pipefail
 
