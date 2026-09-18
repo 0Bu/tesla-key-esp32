@@ -161,7 +161,7 @@ fi
 # Browser checks: exercise the inline Web Serial installer and port-release flow, then confirm the
 # BLE_ROW region of main/www/app.js still decides the Bluetooth row exactly as tk::ble::decide()
 # does (so the browser can't silently drift from the host-tested rules). Skipped only where node is
-# unavailable — the C++ logic tests are the hard gate; CI's ubuntu-latest runner ships node.
+# unavailable — the C++ logic tests are the hard gate; CI's ubuntu-26.04 runner ships node.
 if command -v node >/dev/null 2>&1; then
     run_gate "Node web UI contracts" 120 node --test \
         test/serial_port_release.test.mjs test/web_installer.test.mjs test/web_ui_http.test.mjs \

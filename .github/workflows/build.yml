@@ -21,7 +21,7 @@ permissions:
 
 jobs:
   logic-test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     permissions:
       contents: read
@@ -80,7 +80,7 @@ jobs:
 
   build-target:
     needs: logic-test
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 30
     permissions:
       contents: read
@@ -172,7 +172,7 @@ jobs:
 
   build:
     needs: [logic-test, build-target]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 20
     permissions:
       contents: read
@@ -288,7 +288,7 @@ jobs:
     # this PR-controlled workflow definition; signed-pr-preview.yml owns its workflow_run rebuild.
     needs: build
     if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.build.outputs.firmware == 'yes'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 60
     permissions:
       contents: read
@@ -332,7 +332,7 @@ jobs:
       github.ref == 'refs/heads/main'
       && github.event_name == 'push'
       && needs.build.outputs.firmware == 'yes'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 20
     environment: firmware-signing
     permissions:
@@ -720,7 +720,7 @@ jobs:
       github.ref == 'refs/heads/main'
       && github.event_name == 'push'
       && needs.build.outputs.firmware == 'yes'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 20
     permissions:
       actions: read
