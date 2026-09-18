@@ -174,9 +174,9 @@ SIGNING_ENVIRONMENT_JOBS = {
 # reviewed allowlists: step order plus every name/uses/with/env/if/run byte is pinned.  Semantic
 # checks below keep failures explanatory; this final digest closes gaps in the narrow scanner.
 EXPECTED_PRIVILEGED_JOB_SHA256 = {
-    ("build.yml", "publish"): "fa8acc9cd7caebc1ed0de9dd6560108d8e0cc2321e99982ada7ee769623f707b",
-    ("build.yml", "deploy"): "cf1d70d6cf11600e3940ff58983a7101b75b191b8cdf10b8cfaebf60b20f2092",
-    ("signed-pr-preview.yml", "sign-preview"): "24b664bb2ec5aa6220bdca95568781b8c25e8d2ff53c617956ee90ca07c4b22d",
+    ("build.yml", "publish"): "951df7adbd88171956b416269199705ea3abe151a10969f40cad2605d0283a24",
+    ("build.yml", "deploy"): "d6e78adf09157e537268ffcfe341eb5425ff2d0e655921973c4ed048710d8d04",
+    ("signed-pr-preview.yml", "sign-preview"): "18d34f6a9aae2add8b5af9cb69c3af3c391205cb2b795e45f62a150674cce4a7",
 }
 TRUSTED_DEFAULT_ENV = "TRUSTED_DEFAULT_SHA: ${{ github.sha }}"
 TRUSTED_DEFAULT_FETCH = "git fetch --no-tags origin"
@@ -1146,7 +1146,7 @@ def self_test(root: Path) -> None:
          "          token: ${{ secrets.RENOVATE_TOKEN }}\n      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1\n",
          "action inventory drift"),
         ("extra-build-job", "build.yml", "jobs:\n",
-         "jobs:\n  exfiltrate:\n    runs-on: ubuntu-latest\n"
+         "jobs:\n  exfiltrate:\n    runs-on: ubuntu-26.04\n"
          "    timeout-minutes: 1\n    permissions:\n      contents: write\n"
          "    steps:\n      - run: true\n",
          "job inventory drift"),
@@ -1178,8 +1178,8 @@ def self_test(root: Path) -> None:
          "      contents: read\n    environment: firmware-signing\n    steps:\n",
          "protected Environment inventory drift"),
         ("unprivileged-write", "build.yml",
-         "  logic-test:\n    runs-on: ubuntu-latest\n    timeout-minutes: 10\n    permissions:\n      contents: read",
-         "  logic-test:\n    runs-on: ubuntu-latest\n    timeout-minutes: 10\n    permissions:\n      contents: write",
+         "  logic-test:\n    runs-on: ubuntu-26.04\n    timeout-minutes: 10\n    permissions:\n      contents: read",
+         "  logic-test:\n    runs-on: ubuntu-26.04\n    timeout-minutes: 10\n    permissions:\n      contents: write",
          "permissions must match the exact reviewed inventory"),
         ("unprivileged-arbitrary-write", "build.yml",
          "      contents: read\n    steps:\n",
@@ -1479,7 +1479,7 @@ def self_test(root: Path) -> None:
          "      - name: Materialize inert report input\n",
          "step inventory must be exact"),
         ("bench-extra-job", "bench-acceptance.yml", "jobs:\n",
-         "jobs:\n  contact-device:\n    runs-on: ubuntu-latest\n    timeout-minutes: 1\n    steps:\n      - run: true\n",
+         "jobs:\n  contact-device:\n    runs-on: ubuntu-26.04\n    timeout-minutes: 1\n    steps:\n      - run: true\n",
          "job inventory drift"),
         ("bench-local-producer", "bench-acceptance.yml", "      report-json:\n",
          "      report-body:\n", "report-json dispatch input"),
@@ -1573,7 +1573,7 @@ def self_test(root: Path) -> None:
         shutil.copytree(root / ".github/workflows", fixture / ".github/workflows")
         (fixture / ".github/workflows/exfiltrate.yml").write_text(
             "name: exfiltrate\non: push\npermissions:\n  contents: write\njobs:\n"
-            "  exfiltrate:\n    runs-on: ubuntu-latest\n    timeout-minutes: 1\n"
+            "  exfiltrate:\n    runs-on: ubuntu-26.04\n    timeout-minutes: 1\n"
             "    permissions:\n      contents: write\n    environment: firmware-signing\n"
             "    steps:\n      - run: true\n        env:\n"
             "          LEAK: ${{ secrets.OTA_SIGNING_KEY }}\n",

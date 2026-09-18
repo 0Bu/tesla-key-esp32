@@ -109,7 +109,7 @@ compiles `test/ble_row_golden_dump.cpp` to dump `tk::ble::decide()`'s verdict ov
 input sweep, and has `tools/ble_row_parity.js` re-decide the same inputs with the JavaScript that
 actually ships — extracted from the `BLE_ROW` region of `main/www/app.js`, not a copy — and diff
 them. So the browser cannot silently drift from the host-tested rules for the Bluetooth row.
-(Skipped only where `node` is absent; CI's ubuntu-latest runner ships it, so it does run there.)
+(Skipped only where `node` is absent; CI's ubuntu-26.04 runner ships it, so it does run there.)
 
 The suite also has gates outside the single pure-logic translation unit:
 
