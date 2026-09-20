@@ -472,7 +472,7 @@ extern "C" void app_main() {
     // point of doing it here rather than next to the SNTP setup after WiFi (where it used to
     // live). init() hands the persisted BLE sessions to tesla-ble, which validates their age as
     // a signed (unix_now - session.clock_time) and rejects anything older than an hour.
-    // v5.1.3 accepts a negative age (session clock ahead of the local clock) instead of the
+    // Since v5.1.3, tesla-ble accepts a negative age (session clock ahead of the local clock) instead of the
     // old unsigned underflow that treated 1970 as "millions of seconds old". A 1970 clock
     // would now keep sessions rather than discard them; restore is still required so a real
     // clock can enforce the one-hour stale window. 49 boots in the 17.-24.07.2026 syslog, 49

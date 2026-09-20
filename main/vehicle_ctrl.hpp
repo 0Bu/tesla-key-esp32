@@ -109,6 +109,17 @@ public:
         return true;
     }
 
+    // Seconds since the last ChargeState specifically was received, written to `out`. Returns
+    // false if none has arrived since boot / re-pair. seconds_since_contact also advances for
+    // climate/drive/tires/closures, so only this clock can prove the SOC reading itself is
+    // current — which is what the stale-cache bootstrap in logic/wake_poll.hpp keys on.
+    bool seconds_since_charge(uint32_t& out) const {
+        uint32_t t = last_charge_ticks_.load();
+        if (t == 0) return false;
+        out = (xTaskGetTickCount() - t) / configTICK_RATE_HZ;  // ticks → seconds; uint wrap is fine
+        return true;
+    }
+
     // Seconds since the car was last REACHABLE over BLE (any successful signed round-trip,
     // incl. the idle VCSEC health poll). Returns false if never reached since boot / re-pair.
     // Unlike seconds_since_contact this keeps refreshing while the car only sleeps nearby

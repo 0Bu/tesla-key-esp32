@@ -879,6 +879,8 @@ void VehicleController::loop_task_fn_(void* arg) {
         // STABLE ASLEEP run before showing "Vehicle asleep". UNKNOWN leaves the clock alone.
         // Log only on a transition so the serial console reveals what the car actually reports
         // (e.g. whether VCSEC ever asserts ASLEEP, or just flaps for COP) without spamming.
+        uint32_t now_ticks = xTaskGetTickCount();
+        const uint32_t now_s = now_ticks / configTICK_RATE_HZ;
         bool charging_state = false;
         if (paired) {
             const bool conn = self->ble_connected();
@@ -902,11 +904,20 @@ void VehicleController::loop_task_fn_(void* arg) {
                 sample = tk::WakeSample::Awake;
             }
 
-            // Dual-trigger one-shot charge poll (issue #264):
+            // Dual-trigger one-shot charge poll (issue #264, #300, #301):
             //   1. Wake edge on ASLEEP→AWAKE after debounced asleep run
-            //   2. Bootstrap when paired & connected but cache has never been populated
+            //   2. Bootstrap when paired & connected but the cached ChargeState is missing or
+            //      stale. Age, not validity, is the key: a car that drove away and came back
+            //      reconnects with a *valid* but hours-old reading, and its UNKNOWN→AWAKE
+            //      reconnect raises no wake edge, so validity alone would leave the pre-drive
+            //      SOC on the wire indefinitely. Use the ChargeState-specific clock —
+            //      seconds_since_contact also advances for climate/drive/tyres/closures and so
+            //      cannot prove the SOC itself is current.
+            uint32_t   charge_age  = 0;
+            const bool have_charge = self->seconds_since_charge(charge_age);
             tk::wake_poll_update(wake_poll,
-                                 {sample, self->vcsec_stably_asleep_(tk::kAsleepDebounceS), conn, cs.valid});
+                                 {sample, self->vcsec_stably_asleep_(tk::kAsleepDebounceS), conn,
+                                  have_charge, charge_age, now_s});
         } else {
             // Unpaired: the sampler above does not run, so retire any armed edge and pending
             // request rather than carry them across a pairing reset.
@@ -929,7 +940,6 @@ void VehicleController::loop_task_fn_(void* arg) {
         // The auto-pair VCSEC health poll keeps running (it never wakes the MCU) as the
         // revocation canary. Idle evcc reads may use the last cache value; during this
         // active window get_charge_state requires a recent ChargeState instead.
-        uint32_t now_ticks = xTaskGetTickCount();
         uint32_t lc = self->last_cmd_ticks_.load();
         bool recent_cmd = (lc != 0) && ((now_ticks - lc) < pdMS_TO_TICKS(kActiveWindowMs));
         // Gate the charging arm on FRESH contact: charging_state is a RAM cache never invalidated on
@@ -971,7 +981,7 @@ void VehicleController::loop_task_fn_(void* arg) {
         // Both use the same NO_WAKE_SKIP poll: a car already back asleep is skipped, so we only
         // ride a wake the car performed itself, and an idle car is still left to sleep.
         const bool poll_cadence = window && (now_ticks - last_poll_ticks > pdMS_TO_TICKS(10000));
-        if (tk::charge_poll_should_fire({paired, poll_cadence, self->ble_connected(), self->cmd_in_flight_.load()}, wake_poll)) {
+        if (tk::charge_poll_should_fire({paired, poll_cadence, self->ble_connected(), self->cmd_in_flight_.load(), now_s}, wake_poll)) {
             if (poll_cadence) last_poll_ticks = now_ticks;
             ESP_LOGD(TAG, "background charge-state refresh…");
             // Fire-and-forget poll. We must NOT block here: this task also pumps

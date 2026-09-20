@@ -1,5 +1,5 @@
 diff --git a/src/peer.cpp b/src/peer.cpp
-index 22fe5df..3748218 100644
+index f332ccc..67f532d 100644
 --- a/src/peer.cpp
 +++ b/src/peer.cpp
 @@ -206,9 +206,8 @@ int Peer::update_session(Signatures_SessionInfo *session_info) {
@@ -15,10 +15,10 @@ index 22fe5df..3748218 100644
  
    // Update counter based on error state or normal progression
 diff --git a/src/vehicle.cpp b/src/vehicle.cpp
-index 6a4c189..d4ab503 100644
+index b0ceecf..8cebf2a 100644
 --- a/src/vehicle.cpp
 +++ b/src/vehicle.cpp
-@@ -821,16 +821,7 @@ void TeslaBLE::Vehicle::handle_session_info_message_(const UniversalMessage_Rout
+@@ -829,16 +829,7 @@ void TeslaBLE::Vehicle::handle_session_info_message_(const UniversalMessage_Rout
    }
  
    auto *peer = client_->get_peer(domain);
