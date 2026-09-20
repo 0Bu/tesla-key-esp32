@@ -19,34 +19,30 @@ TOOLCHAIN = (
     "a9231d0697ab8f7517cc072e93b7c83e04907bfbfba80b6440d7dbbf90665cf2\n"
 )
 TESLA_GIT = "https://github.com/yoziru/tesla-ble.git"
-TESLA_VERSION = "v5.1.3"
-TESLA_RESOLVED_COMMIT = "54ee51f1c82ae6937b00f6c2347d3fb8a9f06dce"
-TESLA_COMPONENT_HASH = "ec449e03bbf01f3243e369b062d612a6ecf1105ef548c767373e0b3309ddf7de"
-LOCK_MANIFEST_HASH = "27e060f9ed2a13a2ccf66ffc7082b9395c3da19e751ef5342c37790f8b20ba56"
+TESLA_VERSION = "v5.2.0"
+TESLA_RESOLVED_COMMIT = "07a4ef503a52f736009fdeba953f185aecc863f3"
+TESLA_COMPONENT_HASH = "fb55938820781e8a731fc1557c0c4542bbf6833729062cfdb86a978b07016025"
+LOCK_MANIFEST_HASH = "237ea7c60435890a8296d77775999b9332cee898da572911ff4a75da4d33712f"
 
 # These digests deliberately cover comments, ordering and every transitive resolution. A reviewed
 # dependency update changes this validator together with the lockfiles; a normal build may not
 # silently rewrite an otherwise semantically plausible lock.
 FILE_DIGESTS = {
     "esp-idf-toolchain.txt": "92d5b9212bb54c107927f58ffd51511a00bd72d65836edf20cb3d23b8533d962",
-    "main/idf_component.yml": "a15aaaba15b0ef15b4d70fd5b9c45b38d3e418f8ddfea18260c95a47372eff2a",
-    "dependencies.lock.esp32": "b9500de38b5762c3dfa049ef2b74cf11bf5f344492eac6a45e1ef7ac4cdd91ee",
-    "dependencies.lock.esp32s3": "4b1a5030f2feec739cfdab8287fbb34b92b966eebe5e3d45a7b6803c3a9966fa",
-    "dependencies.lock.esp32c3": "2d5622db70c663bae39f2ad0a796e66a42a2c686ff8378c418038e2f1e94315a",
-    "dependencies.lock.esp32c6": "c1007cf3cf57b9d0b572954099233cc2680525f197a98339cbcfbb23c31d3271",
+    "main/idf_component.yml": "0924f7d5bb4e31165cbfbfc40c09a3b4643675e02dcb4770b71069d6df2dd857",
+    "dependencies.lock.esp32": "50639308f06156f8dc5a733912846e5c8de2939a54519b0efb6fdef35b98f62f",
+    "dependencies.lock.esp32s3": "944323fb0d8967bb031649e5e3c80c66f84818002e915d4debeea1e965d18c7b",
+    "dependencies.lock.esp32c3": "8c3fbd5b84c9bb1ebe6a652debd06fab5f75a5989ae4b612e1dcdc62f687babe",
+    "dependencies.lock.esp32c6": "14c14fd71331b6225bd24b984a1a7329736539856870edb5c7c84d43bdf03dc5",
 }
 PATCH_INVENTORY = (
     (
-        "0001-reject-replayed-carserver-responses.patch",
-        "3b2a8db400bff98dff1ccde0253147f8ccc91df3a16b965f657e6740311cc5b6",
-    ),
-    (
         "0002-report-key-regeneration-result.patch",
-        "fd0494a669fd61cd678193d79f15c5acb99f518fe7e7ed483e904ace147aa42a",
+        "f8aed9724ea590dbb6ca7058212b7cf65869ee6b5abaa5d99d03349e3a1a09de",
     ),
     (
         "0003-rate-limit-rx-framing-recovery-logs.patch",
-        "09d6ce7e859d9c0ce71b64c337c01792e0a48cc73266f0fe9ee95d190902b92a",
+        "23b271a066d74e83e1f059237a5dddfa469f6967be64d5a09e7ec46b451217d3",
     ),
     (
         "0004-drop-unused-parental-controls-actions.patch",
@@ -54,7 +50,7 @@ PATCH_INVENTORY = (
     ),
     (
         "0005-align-session-counter-replay-with-signer-go.patch",
-        "2b8344fbc4b181f58c1e296b494cd26a5c6d3f4a400643263b2266946f04e247",
+        "5e72f4e5a1493251457ad6dd7eb6720cec64e26107000e5dbf06ee0c33a4d532",
     ),
 )
 MANIFEST_LOGICAL_LINES = (
@@ -135,7 +131,7 @@ def validate(root: Path) -> None:
     manifest_data = read_regular(root / "main/idf_component.yml")
     manifest_text = decode(manifest_data, "main/idf_component.yml")
     require(logical_yaml_lines(manifest_text) == MANIFEST_LOGICAL_LINES,
-            "main/idf_component.yml exact IDF/mdns/tesla-ble v5.1.3 Git contract drifted")
+            "main/idf_component.yml exact IDF/mdns/tesla-ble v5.2.0 Git contract drifted")
 
     actual_locks = tuple(sorted(path.name for path in root.glob("dependencies.lock.*")))
     expected_locks = tuple(f"dependencies.lock.{target}" for target in TARGETS)
@@ -210,22 +206,22 @@ def self_test(root: Path) -> None:
          "exact ESP-IDF v5.5.5"),
         ("toolchain-image", text("esp-idf-toolchain.txt", "a9231", "b9231"),
          "exact ESP-IDF v5.5.5"),
-        ("manifest-version", text("main/idf_component.yml", 'version: "v5.1.3"',
-                                  'version: "v5.1.0"'), "v5.1.3 Git contract"),
+        ("manifest-version", text("main/idf_component.yml", 'version: "v5.2.0"',
+                                  'version: "v5.1.0"'), "v5.2.0 Git contract"),
         ("manifest-git", text("main/idf_component.yml", TESLA_GIT,
-                              "https://example.invalid/tesla-ble.git"), "v5.1.3 Git contract"),
+                              "https://example.invalid/tesla-ble.git"), "v5.2.0 Git contract"),
         ("resolved-commit", text("dependencies.lock.esp32", TESLA_RESOLVED_COMMIT,
                                  "0" * 40), "resolved commit/component hash"),
         ("component-hash", text("dependencies.lock.esp32s3", TESLA_COMPONENT_HASH,
-                                "0" * 64), "resolved commit/component hash"),
+                                 "0" * 64), "resolved commit/component hash"),
         ("resolved-target", text("dependencies.lock.esp32c3", "    - esp32c6\n", ""),
          "resolved commit/component hash"),
         ("lock-target", text("dependencies.lock.esp32c6", "target: esp32c6",
                              "target: esp32c5"), "lock target must be exactly"),
         ("transitive-drift", text("dependencies.lock.esp32", "version: 1.11.3",
                                   "version: 1.11.2"), "file byte digest drifted"),
-        ("patch-byte", text("patches/tesla-ble/0001-reject-replayed-carserver-responses.patch",
-                            "CarServer", "Carserver"), "patch digest drifted"),
+        ("patch-byte", text("patches/tesla-ble/0002-report-key-regeneration-result.patch",
+                            "regenerate_key", "regen_key"), "patch digest drifted"),
         ("missing-lock", lambda fixture: (fixture / "dependencies.lock.esp32c6").unlink(),
          "lockfile inventory drifted"),
         ("extra-lock", lambda fixture: shutil.copy2(fixture / "dependencies.lock.esp32",
@@ -269,7 +265,7 @@ def main() -> int:
         return 1
     print(
         "dependency-contract: PASS "
-        f"(ESP-IDF v5.5.5, {len(TARGETS)} locks, tesla-ble v5.1.3, "
+        f"(ESP-IDF v5.5.5, {len(TARGETS)} locks, tesla-ble {TESLA_VERSION}, "
         f"{len(PATCH_INVENTORY)} patches"
         + (", mutation canaries" if args.self_test else "")
         + ")"

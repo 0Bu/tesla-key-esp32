@@ -113,15 +113,6 @@ test('official AES-GCM command vector pins sorted TLV, AAD, nonce and tag layout
   assert.throws(() => rejected.final());
 });
 
-test('repository patch text preserves anti-replay early return before dispatch', () => {
-  const patch = readFileSync('patches/tesla-ble/0001-reject-replayed-carserver-responses.patch', 'utf8');
-  const guard = patch.indexOf('!peer->validate_response_counter(response_counter)');
-  const earlyReturn = patch.indexOf('+    return;', guard);
-  const firstDispatch = patch.indexOf('if (response.which_response_msg', guard);
-  assert.ok(guard >= 0 && earlyReturn > guard && firstDispatch > earlyReturn);
-  assert.match(patch, /old actionStatus=OK must not acknowledge a new charging limit/);
-});
-
 test('repository key-regeneration patch remains transactional and fail-closed', () => {
   const patch = readFileSync('patches/tesla-ble/0002-report-key-regeneration-result.patch', 'utf8');
   const exportOld = patch.indexOf('client_->get_private_key');
@@ -159,25 +150,18 @@ function validateRxRecoveryLogPatch(patch) {
   assert.equal(
     occurrences(
       added,
-      'std::chrono::steady_clock::time_point last_rx_recovery_warning_log_{};',
-    ),
-    1,
-  );
-  assert.equal(
-    occurrences(
-      added,
-      'std::chrono::steady_clock::time_point last_rx_recovery_error_log_{};',
+      'std::chrono::steady_clock::time_point last_rx_recovery_log_{};',
     ),
     1,
   );
   assert.equal(occurrences(added, 'uint32_t suppressed_rx_recovery_logs_{0};'), 1);
   assert.equal(
-    occurrences(added, 'void log_rx_recovery_(const char *reason, bool severe = false);'),
+    occurrences(added, 'void log_rx_recovery_(const char *reason);'),
     1,
   );
 
   const functionStart = added.indexOf(
-    'void Vehicle::log_rx_recovery_(const char *reason, bool severe) {',
+    'void Vehicle::log_rx_recovery_(const char *reason) {',
   );
   assert.ok(functionStart >= 0);
   const functionEnd = added.indexOf('\n}\n', functionStart);
@@ -187,18 +171,10 @@ function validateRxRecoveryLogPatch(patch) {
   assert.equal(occurrences(body, 'constexpr auto kLogInterval = std::chrono::hours(1);'), 1);
   assert.equal(occurrences(body, 'std::chrono::hours('), 1);
   assert.equal(occurrences(body, 'const auto now = std::chrono::steady_clock::now();'), 1);
-  assert.equal(
-    occurrences(
-      body,
-      'auto &last_log = severe ? last_rx_recovery_error_log_ : last_rx_recovery_warning_log_;',
-    ),
-    1,
-  );
-  assert.equal(occurrences(added, 'last_rx_recovery_warning_log_'), 2);
-  assert.equal(occurrences(added, 'last_rx_recovery_error_log_'), 2);
+  assert.equal(occurrences(added, 'last_rx_recovery_log_'), 4);
 
-  const suppressionBlock = `  if (last_log != std::chrono::steady_clock::time_point{} &&
-      now - last_log < kLogInterval) {
+  const suppressionBlock = `  if (last_rx_recovery_log_ != std::chrono::steady_clock::time_point{} &&
+      now - last_rx_recovery_log_ < kLogInterval) {
     if (suppressed_rx_recovery_logs_ != UINT32_MAX) {
       ++suppressed_rx_recovery_logs_;
     }
@@ -208,49 +184,57 @@ function validateRxRecoveryLogPatch(patch) {
   assert.equal(occurrences(body, 'UINT32_MAX'), 1);
   assert.equal(occurrences(body, '++suppressed_rx_recovery_logs_;'), 1);
 
-  const severityBlock = `  if (severe) {
-    LOG_ERROR("RX framing recovery: %s; suppressed %" PRIu32 " similar events", reason,
-              suppressed_rx_recovery_logs_);
-  } else {
-    LOG_WARNING("RX framing recovery: %s; suppressed %" PRIu32 " similar events", reason,
-                suppressed_rx_recovery_logs_);
-  }`;
-  assert.equal(occurrences(body, severityBlock), 1);
-  assert.equal(occurrences(body, 'last_log = now;'), 1);
+  const warningBlock = `  LOG_WARNING("RX framing recovery: %s; suppressed %" PRIu32 " similar events", reason,
+              suppressed_rx_recovery_logs_);`;
+  assert.equal(occurrences(body, warningBlock), 1);
+  assert.equal(occurrences(body, 'last_rx_recovery_log_ = now;'), 1);
   assert.equal(occurrences(body, 'suppressed_rx_recovery_logs_ = 0;'), 1);
-  const severityAt = body.indexOf(severityBlock);
-  const clockResetAt = body.indexOf('last_log = now;');
+  const warningAt = body.indexOf(warningBlock);
+  const clockResetAt = body.indexOf('last_rx_recovery_log_ = now;');
   const suppressionResetAt = body.indexOf('suppressed_rx_recovery_logs_ = 0;');
-  assert.ok(severityAt >= 0 && clockResetAt > severityAt && suppressionResetAt > clockResetAt);
+  assert.ok(warningAt >= 0 && clockResetAt > warningAt && suppressionResetAt > clockResetAt);
 
   const calls = addedLines
     .filter((line) => /^\s{4,}log_rx_recovery_\(/.test(line))
     .map((line) => line.trim());
   assert.deepEqual(calls, [
     'log_rx_recovery_("invalid message length; attempting recovery");',
-    'log_rx_recovery_("severe buffer corruption; clearing buffer", true);',
-    'log_rx_recovery_("recovery failed; clearing buffer");',
+    'log_rx_recovery_("recovery found no complete frame; retaining data for fragmented recovery");',
     'log_rx_recovery_("recovery produced invalid length; clearing buffer");',
     'log_rx_recovery_("message parse failed; attempting recovery");',
-    'log_rx_recovery_("recovery failed after parse error; clearing buffer");',
+    'log_rx_recovery_("recovery failed after parse error; retaining data for fragmented recovery");',
   ]);
-  assert.equal(calls.filter((line) => line.endsWith(', true);')).length, 1);
-  assert.equal(calls[1], 'log_rx_recovery_("severe buffer corruption; clearing buffer", true);');
 
   assert.deepEqual(
     removedLines.filter((line) => /^LOG_(?:ERROR|WARNING)\(/.test(line)),
     [
       'LOG_ERROR("Invalid message length %d, attempting buffer recovery", msg_len);',
-      'LOG_ERROR("Severe buffer corruption detected (length: %d), clearing buffer", msg_len);',
-      'LOG_WARNING("Buffer recovery failed, clearing all data");',
+      'LOG_WARNING("Buffer recovery found no complete frame, retaining data for fragmented recovery");',
       'LOG_WARNING("Buffer recovery produced invalid length %d, clearing buffer", msg_len);',
       'LOG_ERROR("Failed to parse Universal Message (buffer size: %zu) - attempting buffer recovery", rx_buffer_.size());',
-      'LOG_WARNING("Buffer recovery failed after parse error, clearing all data");',
+      'LOG_WARNING("Buffer recovery failed after parse error, retaining data for fragmented recovery");',
     ],
   );
+
+  const debugAdded = addedLines
+    .filter((line) => /^\s{2,}LOG_DEBUG\(/.test(line))
+    .map((line) => line.trim());
+  assert.deepEqual(debugAdded, [
+    'LOG_DEBUG("Attempting to recover buffer from %zu bytes", rx_buffer_.size());',
+    'LOG_DEBUG("Found valid message at offset %zu, length %d", i, potential_len);',
+    'LOG_DEBUG("Successfully recovered valid message, continuing processing");',
+  ]);
+
+  const infoRemoved = removedLines
+    .filter((line) => line.startsWith('LOG_INFO('));
+  assert.deepEqual(infoRemoved, [
+    'LOG_INFO("Attempting to recover buffer from %zu bytes", rx_buffer_.size());',
+    'LOG_INFO("Found valid message at offset %zu, length %d", i, potential_len);',
+    'LOG_INFO("Successfully recovered valid message, continuing processing");',
+  ]);
 }
 
-test('repository RX framing recovery patch rate-limits all six callsites fail-closed', () => {
+test('repository RX framing recovery patch rate-limits callsites fail-closed and demotes recovery spam', () => {
   const patch = readFileSync(
     'patches/tesla-ble/0003-rate-limit-rx-framing-recovery-logs.patch',
     'utf8',
@@ -265,8 +249,8 @@ test('repository RX framing recovery patch rate-limits all six callsites fail-cl
     ),
     replaceExactlyOnce(
       patch,
-      'severe ? last_rx_recovery_error_log_ : last_rx_recovery_warning_log_',
-      'severe ? last_rx_recovery_warning_log_ : last_rx_recovery_warning_log_',
+      'last_rx_recovery_log_ != std::chrono::steady_clock::time_point{}',
+      'last_rx_recovery_log_ == std::chrono::steady_clock::time_point{}',
     ),
     replaceExactlyOnce(
       patch,
@@ -281,27 +265,15 @@ test('repository RX framing recovery patch rate-limits all six callsites fail-cl
       );
       return replaceExactlyOnce(
         withoutReset,
-        '+  if (severe) {\n',
-        '+  suppressed_rx_recovery_logs_ = 0;\n+  if (severe) {\n',
+        '+  LOG_WARNING("RX framing recovery:',
+        '+  suppressed_rx_recovery_logs_ = 0;\n+  LOG_WARNING("RX framing recovery:',
       );
     })(),
-    (() => {
-      const placeholder = replaceExactlyOnce(
-        patch,
-        'LOG_ERROR("RX framing recovery:',
-        'LOG_TEMP("RX framing recovery:',
-      );
-      const swappedWarning = replaceExactlyOnce(
-        placeholder,
-        'LOG_WARNING("RX framing recovery:',
-        'LOG_ERROR("RX framing recovery:',
-      );
-      return replaceExactlyOnce(
-        swappedWarning,
-        'LOG_TEMP("RX framing recovery:',
-        'LOG_WARNING("RX framing recovery:',
-      );
-    })(),
+    replaceExactlyOnce(
+      patch,
+      'LOG_WARNING("RX framing recovery:',
+      'LOG_INFO("RX framing recovery:',
+    ),
     replaceExactlyOnce(
       patch,
       '+    log_rx_recovery_("invalid message length; attempting recovery");\n',
@@ -309,8 +281,8 @@ test('repository RX framing recovery patch rate-limits all six callsites fail-cl
     ),
     replaceExactlyOnce(
       patch,
-      'log_rx_recovery_("severe buffer corruption; clearing buffer", true);',
-      'log_rx_recovery_("severe buffer corruption; clearing buffer");',
+      '+    LOG_DEBUG("Successfully recovered valid message, continuing processing");',
+      '+    LOG_INFO("Successfully recovered valid message, continuing processing");',
     ),
   ];
   for (const mutation of mutations) {
@@ -322,7 +294,7 @@ test('all target locks pin the reviewed tesla-ble source and exact target set', 
   const targets = ['esp32', 'esp32s3', 'esp32c3', 'esp32c6'];
   for (const target of targets) {
     const lock = readFileSync(`dependencies.lock.${target}`, 'utf8');
-    assert.match(lock, /version: 54ee51f1c82ae6937b00f6c2347d3fb8a9f06dce/);
+    assert.match(lock, /version: 07a4ef503a52f736009fdeba953f185aecc863f3/);
     assert.match(lock, new RegExp(`^target: ${target}$`, 'm'));
     const listed = [...lock.matchAll(/^    - (esp32(?:s3|c3|c6)?)$/gm)].map((match) => match[1]);
     assert.deepEqual(listed, targets);
