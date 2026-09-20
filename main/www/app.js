@@ -648,6 +648,8 @@ function chargeFailMsg(reason,isCharging){
   if(r.indexOf('not reachable')>=0||r.indexOf('timed out')>=0||r.indexOf('unreachable')>=0)
     return {msg:'Car not reachable — is it in range?', type:'err'};
   if(r.indexOf('complete')>=0)        return {msg:'Charging is already complete', type:'info'};
+  if(r.indexOf('already_set')>=0||r.indexOf('already set')>=0)
+                                      return {msg:'Setting already active on vehicle', type:'info'};
   if(r.indexOf('not_charging')>=0||r.indexOf('not charging')>=0)
                                       return {msg:'The car isn’t charging', type:'info'};
   if(r.indexOf('is_charging')>=0)     return {msg:'The car is already charging', type:'info'};

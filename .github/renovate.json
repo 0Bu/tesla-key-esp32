@@ -3,7 +3,7 @@
   "customManagers": [
     {
       "customType": "regex",
-      "description": "Bump the yoziru/tesla-ble git dependency pinned in idf_component.yml",
+      "description": "Bump the yoziru/tesla-ble git dependency pinned in idf_component.yml. Upgrades across the 5.x line require manual review and patch rebase per #304; closed PR #303 was superseded by #305 and remote branch deleted so future tags (> v5.2.0) are proposed as fresh PRs.",
       "managerFilePatterns": ["/^main/idf_component\\.yml$/"],
       "matchStrings": [
         "git:\\s*\"https://github\\.com/yoziru/tesla-ble\\.git\"\\s+version:\\s*\"(?<currentValue>v[0-9]+\\.[0-9]+\\.[0-9]+)\""

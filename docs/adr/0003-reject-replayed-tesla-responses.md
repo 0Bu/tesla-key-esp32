@@ -1,52 +1,54 @@
 # ADR-0003: Reject replayed CarServer responses before dispatch
 
-Status: superseded by upstream yoziru/tesla-ble v5.2.0 (incorporated into upstream `src/vehicle.cpp`)
+Status: superseded by upstream yoziru/tesla-ble v5.2.0 (incorporated into upstream `src/vehicle.cpp` and closed by Request-UUID gating)
 
 ## Context
 
-`yoziru/tesla-ble` v5.1.1 decrypts and parses a CarServer response, calls
-`Peer::validate_response_counter()`, and logs when that anti-replay check fails. It nevertheless
-continues processing the invalid response: vehicle-data callbacks run and an `actionStatus` or
-`vehicleData` payload can complete the command currently at the head of the library's single
-FIFO.
+In `yoziru/tesla-ble` v5.1.1, the library decrypted and parsed CarServer responses, called
+`Peer::validate_response_counter()`, and logged when that anti-replay check failed. It nevertheless
+continued processing the invalid response: vehicle-data callbacks ran and an `actionStatus` or
+`vehicleData` payload could complete whatever sat at the head of the library's single command FIFO.
 
-That is not only noisy duplicate telemetry. If an older response is recovered from a damaged BLE
-receive buffer while a later command is waiting, the replay can be attributed to the later
-command. For charging-current control this makes a historical `actionStatus=OK` look like the
-acknowledgement for the latest amp request, or makes historical ChargeState data look fresh.
+Historical analysis initially characterized this as risk of an earlier command's response
+completing a later waiting command. In cryptographic reality, that cross-command path was not
+reachable for encrypted responses: their AEAD Associated Data (AD) binds the SHA-1 request hash
+under the derived session keys, so a stale encrypted response from an earlier command fails
+decryption entirely. What patch 0001 actually blocked was duplicate delivery of the exact same
+response when the old, unbuffered RX recovery algorithm rescanned a damaged buffer and re-emitted
+already processed frames.
 
-The production incident that motivated this decision showed all three conditions together:
-repeated receive-buffer recovery, duplicate response-counter warnings, and charging-current
-commands whose accepted response did not prove the car's effective current.
+Conversely, the genuinely unguarded cross-command gap existed for unauthenticated *plaintext*
+CarServer responses: `parse_payload_car_server_response()` returns `response_counter = 0` for
+unauthenticated frames, and the anti-replay check was strictly gated on `response_counter > 0`.
+Patch 0001 therefore never ran for plaintext responses at all. In the upstream Go reference
+implementation (`teslamotors/vehicle-command`), both plaintext and encrypted responses pass
+through a unified UUID-keyed handler map (`internal/dispatcher/dispatcher.go:245-315`), making
+cross-command misattribution impossible.
 
-## Decision
+## Historical Decision (v5.1.1–v5.1.3)
 
-Keep the dependency pinned at upstream v5.1.1 and commit a minimal source patch under
-`patches/tesla-ble/`: after a non-zero response counter fails validation, log it and immediately
-return from `handle_carserver_message_()`. No state callback runs and the replay cannot complete
-the FIFO head.
+Keep the dependency pinned and apply a minimal source patch (`patches/tesla-ble/0001-...`): after
+a non-zero response counter fails validation, log it and immediately return from
+`handle_carserver_message_()`, dropping duplicate frame deliveries before callbacks or FIFO
+completion.
 
-Root CMake invokes `scripts/apply-tesla-ble-patches.sh` after ESP-IDF dependency resolution and
-before compilation. The script patches both possible source locations:
+Complementarily, the firmware treated charging action ACKs as provisional and verified requested
+current through an explicit subsequent `ChargeState` readback.
 
-- `managed_components/yoziru__tesla-ble` for esp32, esp32s3, esp32c3 and esp32c6;
+## Superseded in v5.2.0
 
-It is idempotent and fails closed if the patch no longer applies to the pinned source. This makes
-an upstream version bump require an explicit rebase/review instead of silently losing the fix.
+Upstream `yoziru/tesla-ble` v5.1.4 / v5.2.0 resolved this across both dimensions:
 
-The firmware separately treats the Tesla charging action ACK as provisional and verifies the
-requested amp value using a new, explicit ChargeState request. Each decoded ChargeState first
-clears the previous snapshot so a newly omitted field cannot inherit an old value/presence bit.
-These controls are
-complementary: the dependency patch establishes that the response is not a replay; the firmware
-readback establishes that the accepted action actually changed the car's effective setting.
+1. **Anti-replay early return is upstream**: `src/vehicle.cpp:965-966` returns immediately on
+   failed `validate_response_counter()`, identical to former patch 0001. Patch 0001 was dropped.
+2. **Request-UUID gating closes the cross-command gap**: `src/vehicle.cpp:931-941` matches incoming
+   CarServer responses against the last requested UUID (`get_last_request_uuid()`). A late or
+   foreign response is discarded with `LOG_WARNING("Ignoring CarServer response for a different request")`,
+   so foreign or plaintext responses end in a clean timeout rather than false completion.
 
 ## Consequences
 
-- All four targets compile the same anti-replay behavior.
-- A replay is visible in logs but cannot alter caches or command outcomes.
-- Dependency source is modified only in ignored, generated checkouts; the reviewable patch is
-  committed.
-- Builds require the standard `patch` utility, present in the pinned ESP-IDF image.
-- When upstream rejects invalid counters itself, remove this patch and ADR wiring after verifying
-  the pinned release contains equivalent behavior.
+- Patch 0001 is deleted from the repository patch series.
+- Cross-command misattribution is closed cryptographically for encrypted responses (AEAD AD binding)
+  and architecturally for all CarServer responses (Request-UUID matching).
+- Mismatched CarServer responses manifest as timeouts rather than false completions.

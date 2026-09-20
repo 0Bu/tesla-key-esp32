@@ -29,7 +29,7 @@ other**?"; this skill asks "do they agree with **Tesla's protocol**, and is each
 
 `teslamotors/vehicle-command` is the **truth**, but it is NOT what we run. We run
 **yoziru/tesla-ble** (pinned in [`main/idf_component.yml`](../../../main/idf_component.yml) — **read
-the pin first**, currently `v5.1.3`). The Go SDK exposes commands, builders, fields and enum
+the pin first**, currently `v5.2.0`). The Go SDK exposes commands, builders, fields and enum
 values the pinned C++ port may **not** have. So every comparison is **three-way**, and a
 divergence from upstream does **not** automatically mean "change the code":
 
@@ -81,7 +81,7 @@ The high-value paths (verified to exist):
 
 ### Feasibility — `yoziru/tesla-ble` at the pinned tag
 Fetch raw at the **pin** (base `https://raw.githubusercontent.com/yoziru/tesla-ble/<pin>`; confirm
-`<pin>` from `idf_component.yml`). Layout at v5.1.3:
+`<pin>` from `idf_component.yml`). Layout at v5.2.0:
 `include/{vehicle.h, client.h, command_error.h, message_builders.h, peer.h, vin_utils.h, errors.h, …}`
 and `src/{vehicle.cpp, client.cpp, peer.cpp, message_builders.cpp, message_processor.cpp, crypto_context.cpp, vin_utils.cpp, errors.cpp, …}`.
 - **Does a command builder exist?** → `src/message_builders.cpp` (e.g. `scheduledChargingAction` IS
@@ -133,7 +133,7 @@ re-confirm it against the *current* tree and catch anything that drifted since. 
    (stored session clock ahead of the local clock, including a reboot before time resync) is
    accepted rather than underflowed to a huge unsigned age, so the NVS clock restore before
    controller init is still required to enforce the one-hour stale window. *Baseline: code and
-   current comments match this split at v5.1.3.*
+   current comments match this split at v5.2.0.*
 4. **Pairing / whitelist** — add-key carries role + `KEY_FORM_FACTOR_CLOUD_KEY`, no key name (car
    shows "Unknown key"), requires an **NFC card on the console reader**, verify via a SessionInfo
    probe. *Baseline: matches.* (Note: the **"3"** is the simultaneous-BLE-**connection** limit; a
@@ -155,15 +155,27 @@ re-confirm it against the *current* tree and catch anything that drifted since. 
    *Baseline: sound; `docs/ARCHITECTURE.md` describes all three detectors.*
 8. **Library-version claims** — every command the firmware calls resolves to a real builder at the
    pin; doc claims about what's *not* exposed (scheduled departure) match the pin's
-   `message_builders.cpp`. *Baseline: matches at v5.1.3.*
+   `message_builders.cpp`. *Baseline: matches at v5.2.0.*
 9. **evcc / TeslaBleHttpProxy HTTP shape** — `/api/.../command/{name}` names, `vehicle_data` =
    `.response.response.charge_state.*` with **`charge_amps`** (not `charging_amps`), doubled
    `response`, **miles/mph on the `/api` path** (metric is MQTT-only), `charging_state` strings
    `Charging/Disconnected/Complete/Stopped/NoPower/Starting`. *Baseline: full match.*
-9a. **Response-counter anti-replay** — upstream `yoziru/tesla-ble` v5.1.3 logs a failed
-    `validate_response_counter()` but continues dispatch. Verify the repository patch under
-    `patches/tesla-ble/` still returns before state callbacks and FIFO completion, applies to
-    the managed dependency tree, and is rebased explicitly on every pin bump.
+9a. **Response-counter anti-replay and patch series** — upstream `yoziru/tesla-ble` v5.2.0 incorporates
+    early return on failed `validate_response_counter()` (`src/vehicle.cpp:965-966`), superseding
+    patch 0001. Verify the current 4 repository patches under `patches/tesla-ble/` (0002 key regeneration,
+    0003 RX recovery log rate-limiting, 0004 parental controls trim, 0005 session counter replay)
+    apply lexically/idempotently through root CMake to the managed dependency tree, and are rebased
+    explicitly on every pin bump.
+9b. **ADRs and cryptographic / protocol boundary claims** — when an ADR or architecture doc makes
+    claims about protocol vulnerabilities, replays, or countermeasures:
+    - Cryptographically verify the claims against `teslamotors/vehicle-command` Go reference sources
+      (`internal/authentication/signer.go`, `internal/dispatcher/dispatcher.go`, `pkg/protocol/protocol.md`).
+    - Distinguish AEAD Associated Data binding (which cryptographically binds the request SHA-1 to
+      authenticated responses, preventing cross-command injection between different requests) from
+      link-layer duplicate frame delivery (caused by RX buffer recovery re-emitting the same response)
+      and unauthenticated plaintext responses (where `response_counter = 0` requires Request-UUID matching).
+    - Do not assert application-layer replay vulnerability where AEAD authentication already guarantees
+      message-to-request integrity.
 10. **Docs internal coherence vs code** — `/status.link` and MQTT `sleep_status` enum value sets,
     endpoint/CONFIG/partition/version drift across the four docs. *Baseline: current docs and code
     are coherent; the worked examples retain former omissions as explicitly historical findings.*

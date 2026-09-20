@@ -100,6 +100,19 @@ ACK alone is never
 reported as success. Two mismatching/missing readbacks exhaust the original command budget and
 return an error, with requested/applied/request/actual current values written to the log.
 
+**CarServer response validation & command idempotency** (`yoziru/tesla-ble` v5.2.0):
+CarServer domain responses undergo two explicit library-level checks:
+1. **Request-UUID matching** (`src/vehicle.cpp:931-941`): Every CarServer response carrying a non-empty
+   `request_uuid` is verified against the last UUID dispatched by the firmware for that domain. A
+   mismatched, late, or foreign response is dropped with `LOG_WARNING("Ignoring CarServer response for a different request")`,
+   so stale or foreign responses result in an explicit timeout instead of incorrectly completing whatever
+   sits at the FIFO head.
+2. **Idempotent setpoints via `already_set`** (`src/vehicle.cpp:985-988`): When a setpoint command
+   (such as `set_charge_limit` or `set_charging_amps`) is sent with a value the vehicle already holds,
+   the vehicle returns `actionStatus.result != OK` with reason `already_set`. Upstream v5.2.0 completes
+   the command successfully rather than reporting an action failure. The setpoint write paths in the
+   web UI, MQTT, and MCP are thus fully idempotent.
+
 The same ChargeState callback stamps `last_charge_ticks_`. `GET vehicle_data` remains
 cache-only and non-blocking, but the cache is treated differently by state: idle values may be
 old so read-only polling never wakes a sleeping car; during the active window (charging or a

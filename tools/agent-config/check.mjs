@@ -116,19 +116,19 @@ const usbNoApprovalNeeded = /(?:live verification|HTTP requests?|GET endpoints?)
 const usbOtaNotStateChanging = /GET \/ota\/check[^.!?]*(?:is not|isn't|not) state-changing/i;
 const usbAbsentApprovalProceeds = /(?:(?:approval|authorization)[^.!?]*(?:absent|missing|not obtained)|without (?:separate )?(?:approval|authorization))[^.!?]*(?:continue|proceed|run|contact|send|request)/i;
 const reviewedSkillSha256 = new Map([
-  ["add-logic-test", "9f5561e5a0ceda2409b1d76115e728bfe4673139683890c64c854a60a6740171"],
+  ["add-logic-test", "5bc6af893a1f95a5b4b1d2302da43c1e5e8de11d5e65e1c62d342e0dbfe6a327"],
   ["device-diag", "d524b5dee5d58be5bfda8630099ab36ada9dd4a77500cc6cc9126970efc376cb"],
   ["display-preview", "4bff95d0314d50ce29d67beac7ef4f9db1ebcbb2fa609335e560e162f5a1ed46"],
-  ["feature-docs", "c2d26e873399d4970145ed53ab64e5e3abfd198391343ad107ec1dbdf10012ff"],
+  ["feature-docs", "f66394acb3a1d8bb86ee716fddda83236bfdfca404282b93dce0945e6c26a00b"],
   ["flash-esp32", "cd67535f6206b72eb824548fce9338f97c5e813aff14633c6149b636b2146aeb"],
   ["mock-test", "8cfaaa7d4d7fdbda24375ca743f9954ee39c6db053684000fac1bf1bce00ac0f"],
   ["ota-release-verify", "1504ad6c0d781bbfef36c3eca75813faff6e4a5896a5f1bac04507a4e77456e8"],
   ["pr-hygiene", "0b73adc70cb8185d19fe868a2aa8dc195e1d2eec792ae7b498672f2bb6e99459"],
-  ["project-review", "e9db5c8b6336be01654168439f72c2ae6d1bfaa2478532c74bc896d2adb56cc8"],
+  ["project-review", "ef11d271935dae45b072a8ab75e99e5d00dd631b82b071b5368904f883179985"],
   ["ship", "47f0e4d2408af37cb127404638e5c1294b335745c249f751d6acc3f3a8210d46"],
-  ["skill-audit", "d518013b0fb29d40ff83095206b673fa61126590525f21d665621df30e56b92b"],
+  ["skill-audit", "410fc174dff31da5822e1fe9af16ad799bb42a730b190e020c6e06f2d0a9a525"],
   ["usb-recovery", "6f3cbd9533e75d14b5a14cd19987fa07db046b6c5412f4d52d2aa54944481cf9"],
-  ["vehicle-command-audit", "b1a90f83451b2e84119ae7ad034774b8c02f0c035c5466061c5c565ebc1aa77f"],
+  ["vehicle-command-audit", "9cae13b6ca9332cf68270671fde43f42a633c0bad01fad0f86ec9d616e93f653"],
 ]);
 const featureDocsScopeTokens = [
   "main/", "test/", "sdkconfig.defaults*", "partitions.csv", "AGENTS.md", ".agents/", ".codex/",
@@ -179,6 +179,11 @@ const mainArtifactConsumerContracts = new Map([
     '[ "$ART" = "tesla-key-esp32-$VERSION-$RUN_SHA" ]',
   ]],
 ]);
+let idfComponentYml;
+try { idfComponentYml = fs.readFileSync(repoPath("main/idf_component.yml"), "utf8"); }
+catch { idfComponentYml = null; }
+const teslaBlePinMatch = idfComponentYml ? idfComponentYml.match(/git:\s*"https:\/\/github\.com\/yoziru\/tesla-ble\.git"\s+version:\s*"([^"]+)"/) : null;
+
 for (const name of canonicalSkills) {
   const canonical = restrictedFrontmatter(
     repoPath(`.agents/skills/${name}/SKILL.md`), `canonical skill ${name}`,
@@ -295,6 +300,11 @@ for (const name of canonicalSkills) {
       die(1, `${name} feature-docs checklist omits a relevance-scope path`);
     }
   }
+  if (["vehicle-command-audit", "skill-audit", "project-review"].includes(name)) {
+    if (teslaBlePinMatch && !canonical.text.includes(teslaBlePinMatch[1])) {
+      die(1, `canonical ${name} pin assertion does not match idf_component.yml pin (${teslaBlePinMatch[1]})`);
+    }
+  }
   if (readOnlySkills.has(name) && !/read-only|does not (?:edit|modify)|must not (?:edit|modify)/is.test(canonical.text)) {
     die(1, `review/diagnostic skill ${name} must state its read-only boundary`);
   }
@@ -354,6 +364,18 @@ const multiTargetPublicationContracts = [
 ];
 if (multiTargetPublicationContracts.some((required) => !multiTargetReviewer.includes(required))) {
   die(1, "multi-target reviewer is missing the independent-rebuild/publication DAG contract");
+}
+if (teslaBlePinMatch) {
+  const currentPin = teslaBlePinMatch[1];
+  if (!multiTargetReviewer.includes(`yoziru/tesla-ble remains ${currentPin}`)) {
+    die(1, `multi-target reviewer pin assertion does not match idf_component.yml pin (${currentPin})`);
+  }
+  const docDriftReviewer = normalizeProse(
+    fs.readFileSync(repoPath(".codex/agents/doc_drift_checker.toml"), "utf8"),
+  );
+  if (!docDriftReviewer.includes(`yoziru/tesla-ble ${currentPin}`)) {
+    die(1, `doc drift checker pin assertion does not match idf_component.yml pin (${currentPin})`);
+  }
 }
 
 const safety = readJson(repoPath("tools/agent-config/safety-invariants.json"), "safety invariants");
