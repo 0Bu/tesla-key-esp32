@@ -1,5 +1,5 @@
 #pragma once
-// One-shot charge-state poll on the VCSEC ASLEEP→AWAKE wake edge and stale-cache bootstrap (issues #264, #300, #301).
+// One-shot charge-state poll on the VCSEC ASLEEP→AWAKE wake edge and stale-cache bootstrap (issues #264, #300, #301, #308).
 // Pure, IDF-free, host-tested (test/test_logic.cpp).
 //
 // Problem this closes. While parked and asleep the firmware stops all infotainment polling so the
@@ -31,6 +31,10 @@
 //      older than kChargeCacheFreshS (!cache_fresh), arm the same one-shot. When the car is AWAKE,
 //      it fires once to refresh the cache and break the deadlock. If a poll fails/times out,
 //      exponential backoff retries without hammering an unresponsive MCU (issue #301).
+//   3. Awake-episode quiescence latch: once a fresh charge cache is acquired or held during an
+//      awake episode, the episode latch (episode_fresh) engages and prevents subsequent periodic
+//      re-arming while the car remains continuously connected and awake (issue #308). The system
+//      remains completely quiescent so an idle parked car can reach sleep undisturbed.
 //
 // Both use the same NO_WAKE_SKIP poll: a car already back asleep is skipped, so the device still
 // never causes a wake: we only ever piggyback on one the car did on its own. One poll refreshes the
@@ -54,9 +58,8 @@ namespace tk {
 // How recent last_known_charge_ must be for the bootstrap trigger to consider it trustworthy.
 // Deliberately the same threshold link_state() calls "Awake": below it we hold genuinely live
 // data, above it the reading is a leftover that a drive could have invalidated. The bootstrap is
-// armed at most once per BLE connection, so a tight threshold costs at most one extra
-// NO_WAKE_SKIP poll per connection while making the post-drive case (which is what leaves a
-// hours-old SOC on the wire) impossible to miss.
+// armed at most once per BLE connection or wake episode, so a tight threshold costs at most one extra
+// NO_WAKE_SKIP poll while making the post-drive case impossible to miss.
 inline constexpr uint32_t kChargeCacheFreshS = kAwakeMaxAgeS;
 
 // Backoff parameters for bootstrap retries when CarServer fails / times out (issue #301).
@@ -72,6 +75,7 @@ struct WakePollState {
     bool armed = false;                 // debounced-asleep or bootstrap arm; next AWAKE fires one poll
     bool pending = false;               // latched fire request until connected & queue-idle
     bool bootstrap_dispatched = false;  // bootstrap one-shot has already armed for this connection
+    bool episode_fresh = false;         // a fresh charge cache was acquired/held for this awake episode (issue #308)
     uint32_t bootstrap_backoff_s = 0;   // current backoff interval in seconds
     uint32_t next_bootstrap_retry_s = 0;// earliest now_s for next retry attempt
 
@@ -79,6 +83,10 @@ struct WakePollState {
         if (stably_asleep) {
             armed = true;
             pending = false;
+            episode_fresh = false;
+            bootstrap_dispatched = false;
+            bootstrap_backoff_s = 0;
+            next_bootstrap_retry_s = 0;
         }
     }
 
@@ -94,8 +102,14 @@ struct WakePollState {
             return;
         }
         if (cache_fresh) {
+            episode_fresh = true;
             bootstrap_backoff_s = 0;
             next_bootstrap_retry_s = 0;
+            return;
+        }
+        if (episode_fresh) {
+            // Once a fresh cache is acquired for this awake episode, stay quiescent
+            // while continuously connected and awake (issue #308).
             return;
         }
         if (!bootstrap_dispatched) {
@@ -119,15 +133,20 @@ struct WakePollState {
 
     inline void note_disconnected() {
         pending = false;
+        armed = false;
         bootstrap_dispatched = false;
         bootstrap_backoff_s = 0;
         next_bootstrap_retry_s = 0;
+        episode_fresh = false;
     }
 
     inline bool take_pending(uint32_t now_s = 0) {
         const bool p = pending;
         pending = false;
-        if (p && bootstrap_backoff_s > 0) {
+        if (p) {
+            if (bootstrap_backoff_s == 0) {
+                bootstrap_backoff_s = kBootstrapInitialBackoffS;
+            }
             next_bootstrap_retry_s = now_s + bootstrap_backoff_s;
         }
         return p;

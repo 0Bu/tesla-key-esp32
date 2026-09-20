@@ -3015,25 +3015,35 @@ static void test_wake_poll() {
         st.note_bootstrap(false, false);
         CHECK(st.armed == false);
         CHECK(st.bootstrap_dispatched == false);
+        CHECK(st.episode_fresh == false);
 
-        // Connected + valid cache: does not arm
+        // Connected + valid cache: does not arm, latches episode_fresh (issue #308)
         st.note_bootstrap(true, true);
         CHECK(st.armed == false);
         CHECK(st.bootstrap_dispatched == false);
+        CHECK(st.episode_fresh == true);
 
-        // Connected + invalid cache: arms
-        st.note_bootstrap(true, false);
-        CHECK(st.armed == true);
-        CHECK(st.bootstrap_dispatched == true);
-
-        // Second call while connected does not re-arm
-        st.armed = false;
+        // Once episode_fresh is latched, subsequent stale cache on same connection does not arm
         st.note_bootstrap(true, false);
         CHECK(st.armed == false);
-
-        // Disconnect resets dispatch flag
-        st.note_disconnected();
         CHECK(st.bootstrap_dispatched == false);
+
+        // Clean state: connected + invalid cache arms bootstrap
+        WakePollState st_stale{};
+        st_stale.note_bootstrap(true, false);
+        CHECK(st_stale.armed == true);
+        CHECK(st_stale.bootstrap_dispatched == true);
+        CHECK(st_stale.episode_fresh == false);
+
+        // Second call while connected does not re-arm
+        st_stale.armed = false;
+        st_stale.note_bootstrap(true, false);
+        CHECK(st_stale.armed == false);
+
+        // Disconnect resets dispatch and episode flags
+        st_stale.note_disconnected();
+        CHECK(st_stale.bootstrap_dispatched == false);
+        CHECK(st_stale.episode_fresh == false);
     }
 
     // Direct loop wiring simulation: wake_poll_update followed by charge_poll_should_fire
@@ -3206,51 +3216,116 @@ static void test_wake_poll() {
         CHECK(charge_poll_should_fire({true, false, true, false, 2}, st) == false);
     }
 
-    // Issue #300 + #301: Cache ages out while continuously connected without sleep.
-    // Verifies that a merely aged/stale cache re-arms bootstrap, but backoff prevents
-    // continuous polling on failure, and a successful poll makes cache fresh, self-limiting.
+    // Issue #308: Continuous awake quiescence latch.
+    // When connected with a fresh cache (or once fresh cache is acquired during an awake episode),
+    // the system MUST remain quiescent even after charge_cache_age_s exceeds kChargeCacheFreshS (60s).
+    // It must NOT periodically re-arm a bootstrap poll every 60 seconds while the vehicle stays awake.
     {
         WakePollState st{};
         // Connect at t = 0 with fresh cache (age = 10s < kChargeCacheFreshS) -> no poll
         CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, true, 10, 0}) == false);
         CHECK(st.bootstrap_dispatched == false);
+        CHECK(st.episode_fresh == true);
 
         // At t = 49 (age = 59s < 60s): still fresh -> no poll
         CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, true, 59, 49}) == false);
 
-        // At t = 50 (age = 60s = kChargeCacheFreshS): cache is now stale -> arms and fires!
-        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, true, 60, 50}) == true);
-        CHECK(st.bootstrap_dispatched == true);
-        CHECK(st.bootstrap_backoff_s == kBootstrapInitialBackoffS); // 30s
-        CHECK(st.next_bootstrap_retry_s == 80);
+        // At t = 50 (age = 60s = kChargeCacheFreshS): cache age exceeds threshold, but
+        // episode_fresh is latched -> remains completely quiescent (does NOT fire)!
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, true, 60, 50}) == false);
+        CHECK(st.armed == false);
+        CHECK(st.pending == false);
+        CHECK(st.bootstrap_dispatched == false);
 
-        // Poll in flight / times out at 75; cache remains stale (age = 85s).
-        // Before backoff expires (t = 79), does NOT re-fire!
-        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, true, 85, 75}) == false);
-        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, true, 89, 79}) == false);
-
-        // At t = 80 (50 + 30): retry #1 fires!
-        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, true, 90, 80}) == true);
-        CHECK(st.bootstrap_backoff_s == 60);
-        CHECK(st.next_bootstrap_retry_s == 140);
-
-        // Retry #1 times out; before t = 140 does NOT re-fire!
+        // Long-term awake quiescence: vehicle remains parked and connected without commands or charging
         CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, true, 110, 100}) == false);
-        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, true, 149, 139}) == false);
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, true, 310, 300}) == false);
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, true, 610, 600}) == false);
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, true, 1810, 1800}) == false);
+    }
 
-        // At t = 140 (80 + 60): retry #2 fires!
-        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, true, 150, 140}) == true);
-        CHECK(st.bootstrap_backoff_s == 120);
-        CHECK(st.next_bootstrap_retry_s == 260);
+    // Multi-cycle steady-state simulation (Issue #308 + Section 3a of $add-logic-test):
+    // Verifies the complete lifecycle across multiple sleep/wake/disconnect/drive episodes:
+    //   Cycle 1: Stably asleep -> wake-edge poll -> fresh cache latched -> 15 min awake quiescence.
+    //   Transition: Enters stable sleep -> episode latch clears -> armed for next wake edge.
+    //   Cycle 2: Second wake-edge poll -> poll times out -> retry backoff -> retry succeeds -> quiescent.
+    //   Cycle 3: Drive away (disconnect) -> reconnect with stale cache -> bootstrap fires -> succeeds -> quiescent.
+    {
+        WakePollState st{};
 
-        // Retry #2 succeeds at t = 142: cache becomes fresh (age = 0s)
-        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, true, 0, 142}) == false);
-        CHECK(st.bootstrap_backoff_s == 0);
-        CHECK(st.next_bootstrap_retry_s == 0);
+        // ── Cycle 1: Stable sleep to wake-edge poll and long awake quiescence ──
+        // Car is stably asleep
+        CHECK(wake_edge_should_poll(st, {WakeSample::Asleep, true, true, true, 3600, 0}) == false);
+        CHECK(st.armed == true);
+        CHECK(st.episode_fresh == false);
 
-        // Self-limiting: quiet after backoff deadline passes, because cache is fresh (< 60s)
-        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, true, 18, 160}) == false);
-        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, true, 58, 200}) == false);
+        // Car wakes up (plugged in): wake-edge poll fires once
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, true, 3600, 1}) == true);
+        CHECK(st.armed == false);
+        CHECK(st.pending == false);
+
+        // In-flight (now_s = 2): no duplicate poll
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, true, 3601, 2}) == false);
+
+        // Poll completes at now_s = 3: fresh charge cache received (age = 0s)
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, true, 0, 3}) == false);
+        CHECK(st.episode_fresh == true);
+
+        // Vehicle stays parked and awake for 15 minutes (900s) without charging or commands.
+        // Simulate periodic checks every 30 seconds: 0 polls must fire!
+        for (uint32_t t = 30; t <= 900; t += 30) {
+            uint32_t age = t - 3; // cache ages naturally
+            CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, true, age, t}) == false);
+        }
+
+        // ── Transition: Car goes to sleep ──
+        // COP flap (unstable asleep) must NOT clear episode latch
+        CHECK(wake_edge_should_poll(st, {WakeSample::Asleep, false, true, true, 905, 908}) == false);
+        CHECK(st.episode_fresh == true);
+
+        // Stable asleep (> kAsleepDebounceS) ends the awake episode, clears latch, arms next wake edge
+        CHECK(wake_edge_should_poll(st, {WakeSample::Asleep, true, true, true, 915, 918}) == false);
+        CHECK(st.armed == true);
+        CHECK(st.episode_fresh == false);
+
+        // ── Cycle 2: Second wake episode with timeout and retry backoff ──
+        // Car wakes up: wake-edge fires attempt 1
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, true, 1200, 1200}) == true);
+        CHECK(st.armed == false);
+
+        // Attempt 1 times out at 1225 (cache remains stale age 1225s)
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, true, 1225, 1225}) == false);
+        // Before 30s backoff (1200 + 30 = 1230), does NOT re-fire
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, true, 1229, 1229}) == false);
+
+        // At backoff expiry (now_s = 1230): retry fires!
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, true, 1230, 1230}) == true);
+
+        // Retry succeeds at now_s = 1232: fresh cache acquired
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, true, 0, 1232}) == false);
+        CHECK(st.episode_fresh == true);
+
+        // Quiescence resumes while awake: no polls even after cache reaches 60s, 100s, 300s
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, true, 70, 1302}) == false);
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, true, 200, 1432}) == false);
+
+        // ── Cycle 3: Car drives away and returns (reconnect with stale cache) ──
+        // Departure: BLE disconnects
+        wake_poll_update(st, {WakeSample::Unknown, false, false, true, 300, 1500});
+        CHECK(st.episode_fresh == false);
+        CHECK(st.bootstrap_dispatched == false);
+
+        // Return from 2-hour drive: reconnects AWAKE with 7200s old cache
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, true, 7200, 8700}) == true);
+        CHECK(st.bootstrap_dispatched == true);
+
+        // Bootstrap poll succeeds at now_s = 8702: fresh cache acquired
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, true, 0, 8702}) == false);
+        CHECK(st.episode_fresh == true);
+
+        // Quiescent indefinitely while parked and connected
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, true, 100, 8802}) == false);
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, true, 1000, 9702}) == false);
     }
 }
 

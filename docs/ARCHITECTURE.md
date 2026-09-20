@@ -146,6 +146,10 @@ When the car is awake, it fires `charge_state_poll(NO_WAKE_SKIP)` to refresh the
 If the CarServer poll times out or fails (issue #301), the latch tracks success rather than dispatch: `WakePollState`
 retries with exponential backoff (starting at 30 s, capped at 300 s) so an unresponsive MCU is not hammered, while
 preserving the "one poll per wake episode" guarantee on success.
+Once a fresh charge cache is acquired or held during an awake episode (issue #308), the episode latch (`episode_fresh`)
+engages and keeps the system quiescent even after `seconds_since_charge` crosses `kChargeCacheFreshS`, so an idle parked car
+is not polled every 60 seconds and can transition to sleep undisturbed. The latch resets only when the car enters stable
+sleep (`stably_asleep`) or BLE disconnects.
 If the car is asleep, the bootstrap arm stays dormant until the car wakes up.
 The arm/fire decision is the pure host-tested `logic/wake_poll.hpp`; the loop only samples the flag mirror,
 checks the cache age and connection state, and fires.
