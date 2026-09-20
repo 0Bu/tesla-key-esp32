@@ -419,9 +419,22 @@ that describe it. When reviewing a change (or the repo as a whole), check these 
   `/status` (`mqtt.tls`/`mqtt.error`, `http_status.cpp`) **and** the web UI's "· secured" MQTT
   row **and** the MQTT sections of `docs/README.md`, `docs/ARCHITECTURE.md` and, for transport
   trust claims, `docs/SECURITY.md`.
-- **tesla-ble library bump** → `main/idf_component.yml` pin **and** explicitly rebase/remove
-  every committed `patches/tesla-ble/` change against the new source. Never hand-edit or commit
-  `managed_components/`; the configure-time patch script owns generated checkout changes.
+- **tesla-ble library bump (dependency lifecycle)** →
+  1. `main/idf_component.yml` pin **and** all four target locks (`dependencies.lock.*`).
+  2. `patches/tesla-ble/`: rebase, recreate or retire patches; sync inventory and hashes in
+     `scripts/check-dependency-contract.py` and `scripts/check-build-gate-contract.py`.
+  3. Upstream diff audit (`git diff <old>..<new>`): inspect upstream commits for semantic and behavioral
+     changes (e.g. `already_set` idempotency, Request-UUID response dispatch vs timeouts, error strings).
+     Reflect any behavioral changes in `docs/ARCHITECTURE.md`, `docs/FEATURES.md`, and UI/API handlers (`main/www/app.js`).
+  4. ADR accuracy: update or supersede affected ADRs (`docs/adr/0003-...`), accurately distinguishing
+     AEAD Associated Data request binding from duplicate frame delivery under buffer recovery or plaintext frames.
+  5. Metadata sinks: update pin citations in `.codex/agents/*.toml`, `.agents/subagents.json`
+     (`export-subagents.py`), and skill source maps (`vehicle-command-audit`, `skill-audit`, `project-review`);
+     recompute digests via `update-skill-digests.mjs --write`.
+  6. Empirical evidence: record live hardware or high-fidelity mock verification traces for new behaviors (`docs/reviews/`).
+  7. Renovate lifecycle: when closing an automated dependency PR manually, document in `.github/renovate.json`
+     that it was abandoned and that `currentValue` will track future releases. Never hand-edit or commit
+     `managed_components/`; the configure-time patch script owns generated checkout changes.
 
 ## Reviewing the skills (meta-coherence)
 
@@ -507,7 +520,7 @@ what each must stay true to:
   diff is feature-relevant.
 - **`$vehicle-command-audit`** compares the firmware against upstream `teslamotors/vehicle-command`,
   gated by what `yoziru/tesla-ble` (pin in `main/idf_component.yml`) can actually do. Re-verify the
-  tesla-ble **pin** in its source map (`v5.1.3`) still matches `idf_component.yml`, that its upstream
+  tesla-ble **pin** in its source map (`v5.2.0`) still matches `idf_component.yml`, that its upstream
   file paths still resolve (e.g. `pkg/vehicle/charge.go`), and that its "worked findings" table is
   not asserting drift already fixed in the tree. It is the *upstream-conformance* counterpart to this
   skill — keep the two complementary, not overlapping.
