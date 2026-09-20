@@ -144,7 +144,6 @@ REQUIRED_FILES = (
     "dependencies.lock.esp32s3",
     "dependencies.lock.esp32c3",
     "dependencies.lock.esp32c6",
-    "patches/tesla-ble/0001-reject-replayed-carserver-responses.patch",
     "patches/tesla-ble/0002-report-key-regeneration-result.patch",
     "patches/tesla-ble/0003-rate-limit-rx-framing-recovery-logs.patch",
     "patches/tesla-ble/0004-drop-unused-parental-controls-actions.patch",
@@ -386,11 +385,11 @@ def validate(root: Path) -> None:
 
     require(literal_assignment(root, "scripts/check-dependency-contract.py", "TARGETS") == TARGETS,
             "check-dependency-contract.py: exact target lock set/order drifted")
-    require(literal_assignment(root, "scripts/check-dependency-contract.py", "TESLA_VERSION") == "v5.1.3" and
+    require(literal_assignment(root, "scripts/check-dependency-contract.py", "TESLA_VERSION") == "v5.2.0" and
             literal_assignment(root, "scripts/check-dependency-contract.py", "TESLA_RESOLVED_COMMIT") ==
-            "54ee51f1c82ae6937b00f6c2347d3fb8a9f06dce" and
+            "07a4ef503a52f736009fdeba953f185aecc863f3" and
             literal_assignment(root, "scripts/check-dependency-contract.py", "TESLA_COMPONENT_HASH") ==
-            "ec449e03bbf01f3243e369b062d612a6ecf1105ef548c767373e0b3309ddf7de",
+            "fb55938820781e8a731fc1557c0c4542bbf6833729062cfdb86a978b07016025",
             "check-dependency-contract.py: tesla-ble version/resolution contract drifted")
     require(literal_assignment(root, "scripts/check-otadata-contract.py", "OTADATA_SIZE") == 0x2000 and
             literal_assignment(root, "scripts/check-otadata-contract.py", "ERASED_BYTE") == 0xFF,

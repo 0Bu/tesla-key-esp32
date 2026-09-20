@@ -3056,6 +3056,202 @@ static void test_wake_poll() {
         CHECK(charge_poll_should_fire({true, false, true, false /* idle */}, st) == true);
         CHECK(st.pending == false);
     }
+
+    // Issue #301: Bootstrap latch on success rather than dispatch.
+    // Device reboots with invalid cache, car is AWAKE.
+    // 1. Initial attempt fires at now_s = 0
+    // 2. Poll in flight, times out at now_s = 25 (cache remains invalid)
+    // 3. Before backoff elapsed (now_s = 29), does not re-fire
+    // 4. Once backoff expires (now_s = 30), re-arms and fires retry
+    // 5. Retry in flight, times out (cache remains invalid)
+    // 6. Exponential backoff (now 60s): does not re-fire at now_s = 89; fires at now_s = 90
+    // 7. Success at now_s = 92: cache becomes valid. Future cycles (even after backoff) do NOT fire!
+    {
+        WakePollState st{};
+        // Cycle 1 at now_s = 0: car is AWAKE, cache invalid -> fires first attempt
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, false, 0, 0}) == true);
+        CHECK(st.bootstrap_dispatched == true);
+        CHECK(st.bootstrap_backoff_s == kBootstrapInitialBackoffS);
+        CHECK(st.next_bootstrap_retry_s == 30);
+
+        // While in-flight and before backoff expiry: does not re-fire
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, false, 0, 10}) == false);
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, false, 0, 25}) == false); // timeout point
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, false, 0, 29}) == false);
+
+        // At backoff expiry (now_s = 30): re-arms and fires retry!
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, false, 0, 30}) == true);
+        CHECK(st.bootstrap_backoff_s == 60);
+        CHECK(st.next_bootstrap_retry_s == 90);
+
+        // Second attempt also times out at 55; before 90 does not fire
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, false, 0, 55}) == false);
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, false, 0, 89}) == false);
+
+        // At now_s = 90 (30 + 60): fires third attempt!
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, false, 0, 90}) == true);
+        CHECK(st.bootstrap_backoff_s == 120);
+        CHECK(st.next_bootstrap_retry_s == 210);
+
+        // Third attempt succeeds at now_s = 92: cache becomes valid!
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, true, 0, 92}) == false);
+        CHECK(st.bootstrap_backoff_s == 0);
+        CHECK(st.next_bootstrap_retry_s == 0);
+
+        // Long after initial backoff and subsequent backoffs, cache remains valid -> no more polls
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, true, 0, 215}) == false);
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, true, 0, 1000}) == false);
+    }
+
+    // ── Issue #300: Stale-cache bootstrap on age rather than validity ──
+
+    // Freshness predicate boundary checks:
+    {
+        // Missing cache is never fresh
+        CHECK(charge_cache_fresh({WakeSample::Awake, false, true, false /* have_cache */, 0}) == false);
+
+        // Present cache strictly younger than kChargeCacheFreshS is fresh
+        CHECK(charge_cache_fresh({WakeSample::Awake, false, true, true, kChargeCacheFreshS - 1}) == true);
+        CHECK(charge_cache_fresh({WakeSample::Awake, false, true, true, kChargeCacheFreshS}) == false);
+        CHECK(charge_cache_fresh({WakeSample::Awake, false, true, true, kChargeCacheFreshS + 1}) == false);
+        CHECK(charge_cache_fresh({WakeSample::Awake, false, true, true, 28800}) == false);
+    }
+
+    // Post-drive regression (common daily case):
+    // Car was parked and asleep, cache was valid but hours old (e.g. 8 hours = 28800 s).
+    // Car wakes and departs (BLE disconnects -> UNKNOWN sleep).
+    // Car returns and plugs in: BLE reconnects with UNKNOWN->AWAKE transition (no wake edge).
+    // Stale-cache bootstrap must fire to refresh the pre-drive SoC.
+    {
+        WakePollState st{};
+
+        // Car departs: BLE drops
+        wake_poll_update(st, {WakeSample::Unknown, false, false /* disconnected */, true, 28800, 100});
+        CHECK(st.bootstrap_dispatched == false);
+
+        // Car arrives and reconnects: AWAKE with 8-hour-old cache
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true /* connected */, true, 28800, 101}) == true);
+        CHECK(st.bootstrap_dispatched == true);
+
+        // While cache is still stale (poll in-flight), does not re-fire immediately
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, true, 28800, 102}) == false);
+
+        // Poll completes successfully, cache is now fresh (age 0 s)
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, true, 0, 105}) == false);
+
+        // Car stays parked and awake; no further polls
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, true, 10, 115}) == false);
+    }
+
+    // Short hop: car leaves for 30 seconds (< kChargeCacheFreshS) and reconnects AWAKE.
+    // Cache is still fresh, so it must NOT re-arm bootstrap poll.
+    {
+        WakePollState st{};
+        // Disconnect on departure
+        wake_poll_update(st, {WakeSample::Unknown, false, false, true, 10, 50});
+
+        // Reconnect after 30s drive: cache age is 40s (< 60s)
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, true, 40, 80}) == false);
+        CHECK(st.armed == false);
+        CHECK(st.pending == false);
+    }
+
+    // Boundary check on reconnect: exactly at kChargeCacheFreshS arms, at kChargeCacheFreshS - 1 does not
+    {
+        WakePollState st_just_fresh{};
+        wake_poll_update(st_just_fresh, {WakeSample::Unknown, false, false, true, 0, 0});
+        CHECK(wake_edge_should_poll(st_just_fresh, {WakeSample::Awake, false, true, true, kChargeCacheFreshS - 1, 10}) == false);
+
+        WakePollState st_stale{};
+        wake_poll_update(st_stale, {WakeSample::Unknown, false, false, true, 0, 0});
+        CHECK(wake_edge_should_poll(st_stale, {WakeSample::Awake, false, true, true, kChargeCacheFreshS, 10}) == true);
+    }
+
+    // Stale-cache bootstrap combined with retry backoff (#300 + #301):
+    // Reconnect with stale cache, but CarServer poll times out. Backoff must govern retries.
+    {
+        WakePollState st{};
+        // Reconnect at now_s = 200 with stale cache (age 3600s) -> fires attempt 1
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, true, 3600, 200}) == true);
+
+        // In flight / timeout at 225, cache still stale (age 3625s) -> within 30s backoff
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, true, 3625, 225}) == false);
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, true, 3629, 229}) == false);
+
+        // Backoff expires at now_s = 230 -> retry fires
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, true, 3630, 230}) == true);
+
+        // Retry succeeds at now_s = 232 -> cache becomes fresh (age = 0)
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, true, 0, 232}) == false);
+
+        // Stays quiet even after subsequent backoff deadlines
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, true, 10, 300}) == false);
+    }
+
+    // Pending poll must NOT survive BLE disconnect into a new connection where the car is ASLEEP.
+    {
+        WakePollState st{};
+        // Awake with invalid cache, but channel is busy
+        wake_poll_update(st, {WakeSample::Awake, false, true, false, 0, 0});
+        CHECK(st.pending == true);
+
+        // BLE disconnects before command could be sent
+        wake_poll_update(st, {WakeSample::Unknown, false, false, false, 0, 1});
+        // Disconnect must clear pending!
+        CHECK(st.pending == false);
+
+        // BLE reconnects while car is ASLEEP (not stably asleep)
+        wake_poll_update(st, {WakeSample::Asleep, false, true, false, 0, 2});
+        // Must NOT poll a sleeping car on reconnect!
+        CHECK(charge_poll_should_fire({true, false, true, false, 2}, st) == false);
+    }
+
+    // Issue #300 + #301: Cache ages out while continuously connected without sleep.
+    // Verifies that a merely aged/stale cache re-arms bootstrap, but backoff prevents
+    // continuous polling on failure, and a successful poll makes cache fresh, self-limiting.
+    {
+        WakePollState st{};
+        // Connect at t = 0 with fresh cache (age = 10s < kChargeCacheFreshS) -> no poll
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, true, 10, 0}) == false);
+        CHECK(st.bootstrap_dispatched == false);
+
+        // At t = 49 (age = 59s < 60s): still fresh -> no poll
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, true, 59, 49}) == false);
+
+        // At t = 50 (age = 60s = kChargeCacheFreshS): cache is now stale -> arms and fires!
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, true, 60, 50}) == true);
+        CHECK(st.bootstrap_dispatched == true);
+        CHECK(st.bootstrap_backoff_s == kBootstrapInitialBackoffS); // 30s
+        CHECK(st.next_bootstrap_retry_s == 80);
+
+        // Poll in flight / times out at 75; cache remains stale (age = 85s).
+        // Before backoff expires (t = 79), does NOT re-fire!
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, true, 85, 75}) == false);
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, true, 89, 79}) == false);
+
+        // At t = 80 (50 + 30): retry #1 fires!
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, true, 90, 80}) == true);
+        CHECK(st.bootstrap_backoff_s == 60);
+        CHECK(st.next_bootstrap_retry_s == 140);
+
+        // Retry #1 times out; before t = 140 does NOT re-fire!
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, true, 110, 100}) == false);
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, true, 149, 139}) == false);
+
+        // At t = 140 (80 + 60): retry #2 fires!
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, true, 150, 140}) == true);
+        CHECK(st.bootstrap_backoff_s == 120);
+        CHECK(st.next_bootstrap_retry_s == 260);
+
+        // Retry #2 succeeds at t = 142: cache becomes fresh (age = 0s)
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, true, 0, 142}) == false);
+        CHECK(st.bootstrap_backoff_s == 0);
+        CHECK(st.next_bootstrap_retry_s == 0);
+
+        // Self-limiting: quiet after backoff deadline passes, because cache is fresh (< 60s)
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, true, 18, 160}) == false);
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, true, 58, 200}) == false);
+    }
 }
 
 // ── BLE command readiness (logic/ble_readiness.hpp) — GAP is not GATT-ready ───────────

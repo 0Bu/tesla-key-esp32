@@ -1,6 +1,6 @@
 # ADR-0003: Reject replayed CarServer responses before dispatch
 
-Status: accepted
+Status: superseded by upstream yoziru/tesla-ble v5.2.0 (incorporated into upstream `src/vehicle.cpp`)
 
 ## Context
 
