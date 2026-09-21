@@ -146,9 +146,9 @@ ESP HTTP, NimBLE, NVS, OTA or FreeRTOS shells.
 - A live read is not automatically harmless: connecting or requesting stale data can wake the
   vehicle. Default diagnosis uses already-collected/local evidence. Do not contact a vehicle,
   evcc endpoint or device unless the user explicitly authorizes the live boundary and target.
-- Live evcc end-to-end checks are host/cluster operations provided by the global
-  `$tesla-key-e2e-evcc` skill. They do not belong to this versioned project skill set and retain
-  their own explicit read, command, and charge-toggle authorization boundaries.
+- Live evcc end-to-end checks are host/cluster operations provided by `scripts/e2e_evcc.sh` (and
+  orchestrated by `$deploy`). They exercise the live pod-to-vehicle path and retain their own
+  explicit read, command, and charge-toggle authorization boundaries.
 - Never send a vehicle command, pair, regenerate keys, change VIN, modify charge current, wake the
   car, reboot the board, flash, OTA or clear a crash/NVS artifact from a review or diagnosis task.
 - Background telemetry, display and status code must consume cached state and must not introduce a
