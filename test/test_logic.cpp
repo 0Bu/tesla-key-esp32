@@ -1472,6 +1472,10 @@ static void test_mcp() {
     CHECK(tk::classify_command_failure("authentication failed") == FailureOrigin::VehicleResponse);
     CHECK(tk::classify_command_failure("key not on whitelist - pairing required") == FailureOrigin::VehicleResponse);
     CHECK(tk::classify_command_failure("command rejected by vehicle") == FailureOrigin::VehicleResponse);
+    CHECK(tk::classify_command_failure("Infotainment action failed: could_not_reach_service") ==
+          FailureOrigin::VehicleResponse);
+    CHECK(tk::classify_command_failure("Infotainment action failed") == FailureOrigin::VehicleResponse);
+    CHECK(tk::classify_command_failure("action failed: charging_port_closed") == FailureOrigin::VehicleResponse);
     CHECK(tk::classify_command_failure("command response timeout; max retries exceeded") ==
           FailureOrigin::TransportOrTimeout);
     CHECK(tk::classify_command_failure("authentication / wake timeout; max retries exceeded") ==
@@ -6151,6 +6155,28 @@ static void test_command_runner_link_loss_and_faults() {
         runner.notify_tx_complete(0);
         CHECK(runner.tick(300, true, true, false) == TxAction::SendInfoSessionInfoRequest);
         CHECK(runner.current_command()->wake_confirmed);
+    }
+    // Wake confirmation arriving early while waiting for VCSEC auth (e.g. initial status frame)
+    // must be remembered so no redundant Wake is emitted after VCSEC auth finishes.
+    {
+        CommandRunner runner;
+        // VCSEC session not yet established
+        runner.enqueue("Set Charge Limit", BleDomain::Infotainment, WakePolicy::WakeIfNeeded, 30000, 0);
+        CHECK(runner.tick(0, true, false, true) == TxAction::SendVcsecSessionInfoRequest);
+        CHECK(runner.current_command()->state == CommandState::WaitingVcsecAuth);
+        CHECK(!runner.current_command()->wake_confirmed);
+
+        // VehicleStatus arrives with closureStatuses while still waiting for VCSEC session
+        runner.notify_vehicle_awake(true);
+        CHECK(runner.current_command()->wake_confirmed);
+        CHECK(runner.current_command()->state == CommandState::WaitingVcsecAuth);
+
+        // VCSEC session finishes authentication
+        runner.vcsec_session().set_established({1}, 10, 1000);
+        runner.current_command()->state = CommandState::Idle;
+
+        // Advances directly to infotainment auth, skipping SendWake despite is_asleep=true
+        CHECK(runner.tick(500, true, false, true) == TxAction::SendInfoSessionInfoRequest);
     }
     // No confirmation: an asleep car still gets the wake policy (unchanged), and a NoWakeFail
     // command still fails locally with the text the link backstop classifies as LocalPolicy.

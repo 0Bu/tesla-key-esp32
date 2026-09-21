@@ -45,7 +45,8 @@ inline CommandFailureOrigin classify_command_failure(std::string_view err) noexc
     if (err.find("vehicle asleep") != std::string_view::npos) return CommandFailureOrigin::LocalPolicy;
     if (err.find("authentication failed") != std::string_view::npos ||
         err.find("whitelist") != std::string_view::npos ||
-        err.find("rejected") != std::string_view::npos) {
+        err.find("rejected") != std::string_view::npos ||
+        err.find("action failed") != std::string_view::npos) {
         return CommandFailureOrigin::VehicleResponse;
     }
     return CommandFailureOrigin::TransportOrTimeout;
