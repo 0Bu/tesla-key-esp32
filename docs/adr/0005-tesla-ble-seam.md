@@ -44,13 +44,16 @@ The architecture is implemented according to the reference specifications:
 
 The reference is written in Go, relying on goroutines, runtime-managed channels, garbage collection, and dynamic heap allocation. On ESP32 with FreeRTOS and tight memory constraints (8192 B `vehicle_loop` stack), the following deliberate adaptations and departures from `vehicle-command` are made:
 - **No goroutines / channels**: Replaced by deterministic FreeRTOS queues (`ble_event_queue_`) and the single `vehicle_loop` execution thread.
-- **Bounded vector buffers**: `tk::RxFramer` uses a `std::vector<uint8_t>` with `buffer_.reserve(kMaxFrameLength + 2)` and strict cap `kMaxFrameLength = 2048`, avoiding unbounded heap allocation while preserving stack budget.
-- **Max frame length (2048 vs 1024 B)**: `ble.go:21` defines `MaxBLEMessageSize = 1024`. On ESP32 with `tesla-ble`, certain complex telemetry or configuration responses exceed 1024 bytes; the firmware supports up to 2048 bytes.
+- **Bounded vector buffers**: `tk::RxFramer` uses a `std::vector<uint8_t>` capped strictly to `kMaxFrameLength = 2048` (+2 length header bytes), avoiding unbounded heap allocation while preserving stack budget.
+- **Max frame length (2048 vs 1024 B)**: `ble.go:21` defines `MaxBLEMessageSize = 1024`. `tesla-ble` defines `maxBLEMessageSize = 2048` (even though `UniversalMessage_RoutableMessage_size` is 741 B). The firmware aligns `kMaxFrameLength = 2048` with `tesla-ble`'s buffer definition.
 - **Length 0 rejected**: `tk::RxFramer` rejects incoming frames with decoded length 0 fail-closed (`CorruptLength`), preventing zero-byte framing lockups.
-- **No session-info latency expiry (`maxLatency`)**: `vehicle-command` evaluates session expiration against a real-time `maxLatency` window. The firmware does not expire in-memory sessions purely on clock delta, but enforces a strict 1-hour stale-session window on NVS load after boot (`logic/session_state.hpp` / `vehicle_pairing.cpp`).
+- **No session-info latency expiry (`maxLatency`)**: `vehicle-command` evaluates session expiration against a real-time `maxLatency` window. The firmware's `load_nvs_sessions_()` (`main/vehicle_telemetry.cpp`) inherits upstream `vehicle.cpp`'s check comparing Unix time (`time(nullptr)`) against vehicle epoch seconds (`SessionInfo.clock_time`), which causes stored sessions to be rejected once system clock is set rather than acting as a real-time clock window.
 - **Routing-address matching**: `vehicle-command` generates ephemeral 16-byte routing addresses for VCSEC requests (`dispatcher.go:400-409`). The firmware uses the connection channel and `last_request_hash_` on the single client instance, bypassing routing address generation.
-- **One-plaintext-response rule**: `vehicle-command` enforces strict single unauthenticated response acceptance. In the firmware, foreign-UUID responses are dropped before reaching telemetry callbacks.
+- **One-plaintext-response rule**: Unlike `vehicle-command` (which applies no replay check to plaintext, `dispatcher.go:301-308`), this firmware's `BleDispatcher` enforces a strict one-unauthenticated-response rule where foreign-UUID responses are dropped before reaching telemetry callbacks.
 - **Tick-based backoff vs 1 s RetryInterval**: `vehicle-command` uses a fixed 1 s retry interval. The firmware's `CommandRunner` coordinates multi-phase step timeouts (5 s) and bounded retry budgets (3 retries).
+- **Wake completion on transmission (N1)**: The firmware advances past Wake upon BLE transmission completion (`TxAction::SendWake` -> `notify_tx_complete`), whereas `vehicle-command` waits for a vehicle confirmation reply (`pkg/vehicle/vcsec.go:174-193`).
+- **Sleep state evaluation vs wake advancement (R1)**: The raw `vehicleSleepStatus` from VCSEC strictly determines the reported sleep state (`vcsec_sleep_state_`); `has_closureStatuses` is used solely as a progress signal to advance commands waiting for a wake.
+- **Proactive session info on fault & universal revocation check (R3)**: When a signed message fault carries a proactive `session_info` payload (`dispatcher.go:295-299`), it is applied inline; key revocation detection (`on_vehicle_message_`) runs for every fault message regardless of command in-flight state.
 - **Key fingerprint (`key_fingerprint()`)**: Retained natively in `main/vehicle_pairing.cpp` using mbedtls SHA-1 on the exported public key (`SHA1(pubkey_bytes)[:4]`), keeping it decoupled from `tesla-ble` internals.
 - **Serialized command execution**: Protected by `command_mutex_` to prevent BLE radio contention and preserve FreeRTOS task high-water mark.
 
@@ -78,7 +81,7 @@ The native BLE orchestration layer is implemented across:
 
 With this architecture in place, patches 0001, 0002, 0003, and the `vehicle.cpp` portion of 0005 were retired. The active patch series in `patches/tesla-ble/` consists strictly of:
 1. `0004-drop-unused-parental-controls-actions.patch` (trim unused Nanopb message descriptors for target size budget)
-2. `0005-signer-go-session-counter-replay-alignment.patch` (`peer.cpp` session counter monotonic progression alignment per `signer.go`)
+2. `0005-align-session-counter-replay-with-signer-go.patch` (`peer.cpp` session counter monotonic progression alignment per `signer.go`)
 
 ### 6. Compilation of Dead Translation Units (TESLABLE_SRCS)
 

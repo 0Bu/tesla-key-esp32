@@ -14,10 +14,10 @@ description: "Read-only whole-project coherence review of tesla-key-esp32 for bu
 This project is an **ESP-IDF 5.x C++ firmware** for the **ESP32 family** — one source tree
 builds for esp32 / esp32s3 / esp32c3 / esp32c6 — exactly the four targets yoziru/tesla-ble
 supports, which the ESP-IDF Component Manager enforces at dependency resolution. All four receive
-the complete ordered repository patch series in `patches/tesla-ble/` via root CMake: replay
-rejection, transactional key regeneration/persistence, bounded RX-framing recovery logs, the
-trim of unsent Parental Controls actions, and signer.go session-counter replay alignment that
-keeps esp32c6 under the app-size policy. The firmware acts as a **BLE↔HTTP proxy for a Tesla
+the complete ordered repository patch series in `patches/tesla-ble/` via root CMake: the
+trim of unused Parental Controls actions, and signer.go session-counter replay alignment that
+keeps esp32c6 under the app-size policy (native orchestration in `main/logic/` handles framing,
+dispatch, monotonic session progression, and transactional key regeneration). The firmware acts as a **BLE↔HTTP proxy for a Tesla
 vehicle**, API-compatible with TeslaBleHttpProxy,
 so it works as an **evcc** BLE vehicle. It is small but dense with **non-local invariants**:
 a one-line change in code often has to be mirrored in three docs, a Kconfig option, the
