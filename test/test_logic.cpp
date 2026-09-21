@@ -6025,7 +6025,7 @@ static void test_command_runner() {
         CHECK(runner.current_command()->phase == CommandPhase::SendingRequest);
     }
 
-    // 4b. "Wake" Session Bypass and Immediate TX Completion
+    // 4b. "Wake" Session Flow and Immediate TX Completion
     {
         CommandRunner runner;
         CHECK(!runner.vcsec_session().is_authenticated());
@@ -6038,8 +6038,25 @@ static void test_command_runner() {
                            success_res = ok;
                        });
 
-        // "Wake" must bypass session authentication even when asleep / unauthenticated
+        // "Wake" requires VCSEC session authentication to encrypt the RKE action payload
         TxAction act = runner.tick(1000, true /* connected */, false /* awake */, true /* asleep */);
+        CHECK(act == TxAction::SendVcsecSessionInfoRequest);
+        CHECK(runner.current_command()->state == CommandState::WaitingVcsecAuth);
+        CHECK(runner.current_command()->phase == CommandPhase::EnsuringVcsecSession);
+
+        // Simulate session info arrival via handle_session_info
+        SessionInfoData vcsec_data{};
+        vcsec_data.epoch = {1, 2, 3};
+        vcsec_data.counter = 1;
+        vcsec_data.clock_time = 1000;
+        auto vcsec_bytes = encode_session_info(vcsec_data);
+        auto res = runner.handle_session_info(BleDomain::VehicleSecurity, nullptr, 0,
+                                             vcsec_bytes.data(), vcsec_bytes.size(),
+                                             nullptr, 0, nullptr, 0);
+        CHECK(res == SessionUpdateResult::Ok);
+        CHECK(runner.vcsec_session().is_authenticated());
+
+        act = runner.tick(1020, true, false, true);
         CHECK(act == TxAction::SendCommandPayload);
         CHECK(runner.current_command()->state == CommandState::Ready);
         CHECK(runner.current_command()->phase == CommandPhase::SendingRequest);
