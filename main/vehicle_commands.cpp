@@ -145,7 +145,10 @@ void VehicleController::invalidate_and_flush_(uint32_t generation) {
     {
         tk::SemGuard g(vehicle_mutex_);
         try {
-            vehicle_->set_connected(false);
+            command_runner_.clear();
+            command_builders_.fill(nullptr);
+            command_runner_.rx_framer().reset();
+            command_runner_.dispatcher().reset();
             vcsec_sleep_state_.store(static_cast<int>(TeslaBLE::SleepState::UNKNOWN));
         } catch (const std::exception& e) {
             ESP_LOGE(TAG, "command FIFO flush threw (%s) — forcing BLE reset", e.what());
@@ -360,13 +363,34 @@ VehicleController::CommandOutcome VehicleController::send_vcsec_locked_(
         return out;
     }
 
+    uint32_t cmd_id = 0;
     try {
-        // RAII give — send_command_result runs the protobuf builder, which can throw bad_alloc;
-        // a hand-rolled give would then be skipped and vehicle_mutex_ wedged forever (Scenario B).
         tk::SemGuard g(vehicle_mutex_);
-        vehicle_->send_command_result(
-            UniversalMessage_Domain_DOMAIN_VEHICLE_SECURITY,
-            name, builder, make_result_cb_(completion, generation, auth_fail_is_revocation), wp);
+        const uint32_t now_ms = (xTaskGetTickCount() * 1000) / configTICK_RATE_HZ;
+        const uint32_t timeout_ms = remaining_ms_(deadline);
+        const tk::WakePolicy wake_policy = (wp == TeslaBLE::WakePolicy::NO_WAKE_SKIP) ? tk::WakePolicy::NoWakeSkip :
+                                           (wp == TeslaBLE::WakePolicy::NO_WAKE_FAIL) ? tk::WakePolicy::NoWakeFail :
+                                           tk::WakePolicy::WakeIfNeeded;
+
+        auto on_done = [this, completion, generation, auth_fail_is_revocation](bool success, const std::string& err) {
+            auto cb = make_result_cb_(completion, generation, auth_fail_is_revocation);
+            if (success) {
+                cb(TeslaBLE::OperationResult::success());
+            } else {
+                cb(TeslaBLE::OperationResult::failure(
+                    std::make_unique<TeslaBLE::CommandError>(
+                        err, TeslaBLE::CommandError::Severity::TEMPORARY,
+                        TeslaBLE::CommandError::Outcome::DEFINITELY_FAILED)));
+            }
+        };
+
+        cmd_id = command_runner_.enqueue(
+            name, tk::BleDomain::VehicleSecurity, wake_policy, timeout_ms, now_ms, {}, std::move(on_done));
+        if (cmd_id == 0) {
+            out.error = "command queue full";
+            return out;
+        }
+        command_builders_[cmd_id % tk::CommandRunner::kMaxQueueSize] = std::move(builder);
     } catch (const std::exception& e) {
         ESP_LOGE(TAG, "'%s' enqueue threw (%s) — invalidating command FIFO", name.c_str(), e.what());
         // The builder/library may have queued work before throwing. Treat it exactly like a
@@ -380,7 +404,16 @@ VehicleController::CommandOutcome VehicleController::send_vcsec_locked_(
         out.error = "command enqueue failed";
         return out;
     }
-    return await_completion_(completion, generation, deadline, name.c_str(), timeout_policy);
+    CommandOutcome outcome = await_completion_(completion, generation, deadline, name.c_str(), timeout_policy);
+    {
+        tk::SemGuard g(vehicle_mutex_);
+        auto* cmd = command_runner_.current_command();
+        if (cmd && cmd->id == cmd_id) {
+            command_builders_[cmd_id % tk::CommandRunner::kMaxQueueSize] = nullptr;
+            command_runner_.pop_current();
+        }
+    }
+    return outcome;
 }
 
 bool VehicleController::send_infotainment_(const std::string& name, Builder builder,
@@ -431,14 +464,34 @@ VehicleController::CommandOutcome VehicleController::send_infotainment_locked_(
         return out;
     }
 
+    uint32_t cmd_id = 0;
     try {
-        // RAII give — the builder inside send_command_result can throw (Scenario B).
         tk::SemGuard g(vehicle_mutex_);
-        // WAKE_IF_NEEDED so charge commands also work when the car is asleep
-        // (matches TeslaBleHttpProxy, which auto-wakes the vehicle).
-        vehicle_->send_command_result(
-            UniversalMessage_Domain_DOMAIN_INFOTAINMENT,
-            name, builder, make_result_cb_(completion, generation), wp);
+        const uint32_t now_ms = (xTaskGetTickCount() * 1000) / configTICK_RATE_HZ;
+        const uint32_t timeout_ms = remaining_ms_(deadline);
+        const tk::WakePolicy wake_policy = (wp == TeslaBLE::WakePolicy::NO_WAKE_SKIP) ? tk::WakePolicy::NoWakeSkip :
+                                           (wp == TeslaBLE::WakePolicy::NO_WAKE_FAIL) ? tk::WakePolicy::NoWakeFail :
+                                           tk::WakePolicy::WakeIfNeeded;
+
+        auto on_done = [this, completion, generation](bool success, const std::string& err) {
+            auto cb = make_result_cb_(completion, generation);
+            if (success) {
+                cb(TeslaBLE::OperationResult::success());
+            } else {
+                cb(TeslaBLE::OperationResult::failure(
+                    std::make_unique<TeslaBLE::CommandError>(
+                        err, TeslaBLE::CommandError::Severity::TEMPORARY,
+                        TeslaBLE::CommandError::Outcome::DEFINITELY_FAILED)));
+            }
+        };
+
+        cmd_id = command_runner_.enqueue(
+            name, tk::BleDomain::Infotainment, wake_policy, timeout_ms, now_ms, {}, std::move(on_done));
+        if (cmd_id == 0) {
+            out.error = "command queue full";
+            return out;
+        }
+        command_builders_[cmd_id % tk::CommandRunner::kMaxQueueSize] = std::move(builder);
     } catch (const std::exception& e) {
         ESP_LOGE(TAG, "'%s' enqueue threw (%s) — invalidating command FIFO", name.c_str(), e.what());
         invalidate_and_flush_(generation);
@@ -450,8 +503,17 @@ VehicleController::CommandOutcome VehicleController::send_infotainment_locked_(
         out.error = "command enqueue failed";
         return out;
     }
-    return await_completion_(completion, generation, deadline, name.c_str(),
-                             tk::CompletionTimeoutPolicy::ForegroundWarn);
+    CommandOutcome outcome = await_completion_(completion, generation, deadline, name.c_str(),
+                                               tk::CompletionTimeoutPolicy::ForegroundWarn);
+    {
+        tk::SemGuard g(vehicle_mutex_);
+        auto* cmd = command_runner_.current_command();
+        if (cmd && cmd->id == cmd_id) {
+            command_builders_[cmd_id % tk::CommandRunner::kMaxQueueSize] = nullptr;
+            command_runner_.pop_current();
+        }
+    }
+    return outcome;
 }
 
 // ─── Commands ─────────────────────────────────────────────────────────────────

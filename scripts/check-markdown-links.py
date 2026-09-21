@@ -34,7 +34,10 @@ def markdown_files(root: Path) -> list[Path]:
             return paths
     except (OSError, subprocess.CalledProcessError, UnicodeDecodeError):
         pass
-    return [path for path in root.rglob("*.md") if ".git" not in path.parts]
+    return [
+        path for path in root.rglob("*.md")
+        if not any(part in {".git", "build", "build_mock"} or part.startswith("build_boundary_") for part in path.parts)
+    ]
 
 
 def visible_markdown(text: str) -> str:

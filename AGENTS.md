@@ -42,11 +42,10 @@ task touches them:
   unrelated task.
 - [`main/idf_component.yml`](main/idf_component.yml) pins `yoziru/tesla-ble` **v5.2.0**.
   [`patches/tesla-ble/`](patches/tesla-ble/) is an ordered, hash-checked, fail-closed local series:
-  the key-regeneration/persistence API adaptation, bounded RX-framing recovery logging, unused
-  Parental Controls trim, and signer.go session-counter replay alignment are current contracts,
-  not obsolete C5 workarounds. Do not edit the pin, patch order, wire behavior, key compatibility
-  or log-flood throttle without a separately authorized dependency migration and protocol-vector
-  review.
+  unused Parental Controls trim and signer.go session-counter replay alignment (earlier patches
+  0001-0003 are retired in favor of native `main/logic/` orchestration). Do not edit the
+  pin, patch order, wire behavior, key compatibility or size trims without a separately
+  authorized dependency migration and protocol-vector review.
 - ESP-IDF 6/Mbed TLS 4/PSA work is intentionally separate. Preserve P-256 ECDH byte order,
   `SHA1(shared-secret)[:16]`, HMAC/session derivation, AES-GCM nonce/AAD/tag layout, Tesla key-ID
   derivation and PEM/NVS key reuse. See

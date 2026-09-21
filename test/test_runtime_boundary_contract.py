@@ -2953,34 +2953,18 @@ def require_tesla_cpp_callback_contract(
     controller: str, telemetry: str, ble_source: str, commands: str
 ) -> None:
     """Keep every tesla-ble std::function callback on a reviewed, bounded seam."""
-    persistent = {
-        "set_charge_state_callback": "on_charge_state_",
-        "set_climate_state_callback": "on_climate_state_",
-        "set_drive_state_callback": "on_drive_state_",
-        "set_tire_pressure_state_callback": "on_tire_pressure_state_",
-        "set_closures_state_callback": "on_closures_state_",
-        "set_message_callback": "on_vehicle_message_",
-    }
-    combined = controller + "\n" + telemetry
-    for setter, helper in persistent.items():
-        registrations = call_arguments(combined, setter)
-        if len(registrations) != 1 or len(registrations[0]) != 1:
-            raise AssertionError(
-                f"{setter}: expected one single-argument persistent registration"
-            )
-        adapter = scrub_cpp(registrations[0][0])
-        compact = re.sub(r"\s+", " ", adapter).strip()
-        if not re.fullmatch(
-            rf"\[this\]\s*\([^)]*\)\s*\{{\s*{re.escape(helper)}\s*\(\s*\w+\s*\)\s*;\s*\}}",
-            compact,
-        ):
-            raise AssertionError(f"{setter}: adapter must delegate only to {helper}")
-        for forbidden in (
-            "std::string", "std::vector", "tk::SemGuard", "tk::MutexGuard",
-            "save_str", "ESP_LOG", "throw", "new ",
-        ):
-            if forbidden in adapter:
-                raise AssertionError(f"{setter}: adapter contains forbidden {forbidden!r}")
+    # Native orchestration layer: process_rx_frame_ dispatches incoming CarServer and VCSEC
+    # responses directly to the reviewed fixed-mailbox helpers.
+    for helper in (
+        "on_charge_state_",
+        "on_climate_state_",
+        "on_drive_state_",
+        "on_tire_pressure_state_",
+        "on_closures_state_",
+        "on_vehicle_message_",
+    ):
+        if helper + "(" not in telemetry:
+            raise AssertionError(f"process_rx_frame_ must dispatch to {helper}")
 
     # Persistent state callbacks run synchronously inside Vehicle::loop. They may only publish a
     # trivially-copyable latest value under the bounded portMUX; parsing and cache publication are
@@ -3060,20 +3044,19 @@ def require_tesla_cpp_callback_contract(
             raise AssertionError("cache_mutex_ critical section contains forbidden ESP_LOG logging")
 
     loop = scrub_cpp(function_body_in(telemetry, "loop_task_fn_"))
-    require_before("BLE host drain before tesla-ble pump", loop,
-                   "process_ble_host_events_();", "vehicle_->loop();")
-    require_before("telemetry parse after tesla-ble pump", loop,
-                   "vehicle_->loop();", "process_pending_telemetry_();")
-    require_before("telemetry parse after Vehicle guard scope", loop,
-                   "vcsec_sleep_state_.store", "process_pending_telemetry_();")
+    require_before("BLE host drain before command runner pump", loop,
+                   "process_ble_host_events_();", "drive_command_runner_();")
+    require_before("telemetry parse after command runner pump", loop,
+                   "drive_command_runner_();", "process_pending_telemetry_();")
 
-    if combined.count("vehicle_->on_rx_data(") != 1:
-        raise AssertionError("Vehicle::on_rx_data must have one deferred task-owned callsite")
-    if "vehicle_->on_rx_data(" in scrub_cpp(ble_source):
-        raise AssertionError("NimBLE host callback directly reentered Vehicle::on_rx_data")
+    combined = controller + "\n" + telemetry
+    if combined.count("process_rx_frame_(") == 0:
+        raise AssertionError("process_rx_frame_ must have task-owned callsite")
+    if "process_rx_frame_(" in scrub_cpp(ble_source):
+        raise AssertionError("NimBLE host callback directly reentered process_rx_frame_")
     ble_events = function_body_in(telemetry, "process_ble_host_events_")
-    if "vehicle_->on_rx_data(data);" not in ble_events:
-        raise AssertionError("Vehicle::on_rx_data escaped the deferred event processor")
+    if "process_rx_frame_(payload, len);" not in ble_events:
+        raise AssertionError("process_rx_frame_ escaped the deferred event processor")
     if ble_source.count("BleClient::complete_ready(") != 1:
         raise AssertionError("BleClient ready publication definition inventory drift")
     subscribe = function_body_in(ble_source, "on_subscribe_write")
@@ -3082,8 +3065,8 @@ def require_tesla_cpp_callback_contract(
     if "ble_->complete_ready(event.conn_handle, event.generation)" not in ble_events:
         raise AssertionError("deferred Vehicle LinkUp acknowledgement does not publish readiness")
 
-    # The request-scoped VCSEC callback is dynamic, but still executes from Vehicle::loop while its
-    # mutex is held. It may publish POD and signal a pre-created semaphore only; string shaping is
+    # The request-scoped VCSEC callback is dynamic, but still executes while vehicle_mutex_
+    # is held. It may publish POD and signal a pre-created semaphore only; string shaping is
     # required after the callback has been cleared and the lock released.
     status = function_body_in(telemetry, "get_vehicle_status")
     callback_start = status.find("auto callback = [this, completion, generation]")
@@ -3108,7 +3091,7 @@ def require_tesla_cpp_callback_contract(
     require_before("vehicle-status callback shaped before Vehicle lock", status,
                    "auto callback =", "tk::SemGuard g(vehicle_mutex_);")
     require_before("vehicle-status callback cleared before string shaping", status,
-                   "vehicle_->set_vehicle_status_callback(nullptr);", "out.valid = true;")
+                   "vehicle_status_callback_ = nullptr;", "out.valid = true;")
 
     result_factory = function_body_in(commands, "make_result_cb_")
     result_code = scrub_cpp(result_factory)
@@ -5344,8 +5327,8 @@ def self_test_canaries(tasks: set[str], callbacks: set[str]) -> None:
             "persistent callback allocation",
             controller_source,
             telemetry_source.replace(
-                "on_charge_state_(state);",
-                "std::string callback_allocation; on_charge_state_(state);",
+                "telemetry_pending_charge_ = state;",
+                "std::string callback_allocation; telemetry_pending_charge_ = state;",
                 1,
             ),
             ble_source,
@@ -5382,7 +5365,7 @@ def self_test_canaries(tasks: set[str], callbacks: set[str]) -> None:
             telemetry_source,
             ble_source.replace(
                 "int BleClient::on_gap_event",
-                "void callback_canary() { vehicle_->on_rx_data(data); }\n\n"
+                "void callback_canary() { process_rx_frame_(payload, len); }\n\n"
                 "int BleClient::on_gap_event",
                 1,
             ),
