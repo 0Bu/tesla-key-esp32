@@ -188,43 +188,34 @@ bool VehicleController::init(const std::string& vin,
         return false;
     }
 
-    auto ble_sp     = std::shared_ptr<TeslaBLE::BleAdapter>(&ble, NoDelete{});
-    auto storage_sp = std::shared_ptr<TeslaBLE::StorageAdapter>(&storage, NoDelete{});
-    vehicle_ = std::make_unique<TeslaBLE::Vehicle>(ble_sp, storage_sp);
-
-    vehicle_->set_vin(vin);
+    client_ = std::make_unique<TeslaBLE::Client>();
+    client_->set_vin(vin);
+    if (stored_private_key) {
+        std::vector<uint8_t> key_bytes;
+        if (storage_->load(tk::nvs_contract::kPrivateKey, key_bytes) && !key_bytes.empty()) {
+            client_->load_private_key(key_bytes.data(), key_bytes.size());
+        }
+    }
     // A blob's mere presence does not prove that the library parsed it. Commands may use the
-    // identity only when storage contains a key AND this Vehicle instance successfully loaded it.
+    // identity only when storage contains a key AND this Client instance successfully loaded it.
     // This also keeps a corrupt/truncated key from being treated as enrolment-safe after reboot.
-    key_runtime_safe_.store(stored_private_key && vehicle_->has_private_key());
+    key_runtime_safe_.store(stored_private_key && client_->has_private_key());
     if (stored_private_key) {
         std::string fp = compute_key_fingerprint_();
         tk::MutexGuard cache_guard(cache_mutex_);
         key_fingerprint_cache_ = std::move(fp);
     }
 
+    load_nvs_sessions_();
+
     // Exact named adapters are mechanically audited as fixed POD/atomic/queue-only callbacks.
-    // The NimBLE host never calls Vehicle, allocates, waits on a shared mutex, logs or touches NVS.
+    // The NimBLE host never calls Client, allocates, waits on a shared mutex, logs or touches NVS.
     ble_->set_connected_cb(&VehicleController::ble_link_event_cb_, this);
     ble_->set_rx_data_cb(&VehicleController::ble_rx_event_cb_, this);
 
     // Persistent charge-state + read-only telemetry cache callbacks (installed once,
     // never cleared) — defined in vehicle_telemetry.cpp next to the parsers they use.
     install_state_callbacks_();
-
-    // Reliable key-revocation detector. When the key is deleted on the car side, the
-    // VCSEC health poll keeps succeeding from its cached session (the whitelist is not
-    // re-checked per command), so it can miss the deletion entirely. But the car rejects
-    // every signed command on the *infotainment* domain immediately with a signed-message
-    // fault naming the key (ERROR_UNKNOWN_KEY_ID) — the background charge poll triggers
-    // exactly that. Observe every incoming message and, while we believe we're paired,
-    // treat such a fault as a lost pairing. Runs inside serialized Vehicle dispatch; only atomic
-    // ops here. Gated on believed_paired_ so enrolment-time rejections are ignored. Keep the
-    // std::function adapter itself mechanically trivial: tesla-ble invokes it synchronously while
-    // Vehicle owns its internal dispatch, so logging/allocation belongs in the normal task loop.
-    vehicle_->set_message_callback([this](const UniversalMessage_RoutableMessage& msg) {
-        on_vehicle_message_(msg);
-    });
 
     // Seed the active window open at boot so evcc gets a warm cache for the first few
     // minutes after start; it then backs off if the car stays idle (no command, not charging).
@@ -313,7 +304,7 @@ bool VehicleController::start_tasks() {
         ESP_LOGE(TAG, "inconsistent vehicle task lifecycle — refusing external task deletion");
         return false;
     }
-    if (!vehicle_ || !vehicle_mutex_ || !command_mutex_ || !cache_mutex_ || !result_mutex_) {
+    if (!client_ || !vehicle_mutex_ || !command_mutex_ || !cache_mutex_ || !result_mutex_) {
         ESP_LOGE(TAG, "vehicle tasks cannot start before controller initialization completes");
         return false;
     }

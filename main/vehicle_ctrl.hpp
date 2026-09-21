@@ -2,6 +2,7 @@
 
 #include <vehicle.h>
 #include <client.h>
+#include "logic/command_runner.hpp"
 #include <string>
 #include <functional>
 #include <memory>
@@ -21,6 +22,7 @@
 #include "logic/vin_transition.hpp"
 #include "logic/task_start_gate.hpp"
 #include "logic/ble_deferred_event.hpp"
+#include "logic/rx_framing.hpp"
 #include "reboot_reason.hpp"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -211,7 +213,7 @@ public:
     bool key_rotation_recovered_at_boot() const {
         return key_rotation_recovered_at_boot_;
     }
-    TeslaBLE::Vehicle* vehicle() { return vehicle_.get(); }
+    TeslaBLE::Client* client() { return client_.get(); }
 
     // Status accessors (for /status and the web UI)
     bool ble_connected() const { return ble_ && ble_->is_connected(); }
@@ -493,7 +495,17 @@ private:
     std::atomic<bool>  persist_discovered_mac_{false};
     std::string        vin_;
 
-    std::unique_ptr<TeslaBLE::Vehicle> vehicle_;
+    std::unique_ptr<TeslaBLE::Client>  client_;
+    tk::CommandRunner                  command_runner_;
+    std::array<Builder, tk::CommandRunner::kMaxQueueSize> command_builders_{};
+    std::function<void(const VCSEC_VehicleStatus&)> vehicle_status_callback_{nullptr};
+
+    void drive_command_runner_();
+    void process_rx_frame_(const uint8_t* frame, size_t len);
+    bool load_nvs_sessions_();
+    bool persist_session_(UniversalMessage_Domain domain, const UniversalMessage_RoutableMessage_session_info_t& info);
+    bool regenerate_key_native_();
+    void enqueue_background_poll_(const std::string& name, tk::BleDomain domain, Builder builder);
 
     SemaphoreHandle_t vehicle_mutex_{nullptr};
     // Serializes a whole command/query cycle so concurrent HTTP requests and the automatic

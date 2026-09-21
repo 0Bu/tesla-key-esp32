@@ -388,7 +388,7 @@ bool VehicleController::generate_key() {
 }
 
 tk::KeyRotationResult VehicleController::generate_key_locked_() {
-    if (!vehicle_ || !storage_) {
+    if (!client_ || !storage_) {
         ESP_LOGE(TAG, "key generation unavailable — controller/storage not initialized");
         return tk::KeyRotationResult::NotCommitted;
     }
@@ -434,8 +434,8 @@ tk::KeyRotationResult VehicleController::generate_key_locked_() {
 
     bool generated = false;
     try {
-        tk::SemGuard g(vehicle_mutex_);   // RAII: regenerate_key() (crypto/NVS) can throw
-        generated = vehicle_->regenerate_key();
+        tk::SemGuard g(vehicle_mutex_);   // RAII: regenerate_key_native_() (crypto/NVS) can throw
+        generated = regenerate_key_native_();
     } catch (const std::exception& e) {
         ESP_LOGE(TAG, "key generation threw (%s) — durable commit not confirmed", e.what());
     } catch (...) {
@@ -518,6 +518,35 @@ tk::KeyRotationResult VehicleController::generate_key_locked_() {
     return tk::KeyRotationResult::Complete;
 }
 
+bool VehicleController::regenerate_key_native_() {
+    if (!client_ || !storage_) return false;
+    std::vector<uint8_t> old_key(32);
+    size_t old_len = old_key.size();
+    const bool had_old = (client_->has_private_key() &&
+                          client_->get_private_key(old_key.data(), old_key.size(), &old_len) == 0);
+    if (had_old) {
+        old_key.resize(old_len);
+    }
+    if (client_->create_private_key() != 0) {
+        ESP_LOGE(TAG, "Failed to create new private key");
+        return false;
+    }
+    std::vector<uint8_t> new_key(32);
+    size_t new_len = new_key.size();
+    if (client_->get_private_key(new_key.data(), new_key.size(), &new_len) != 0) {
+        ESP_LOGE(TAG, "Failed to export new private key");
+        if (had_old) (void)client_->load_private_key(old_key.data(), old_key.size());
+        return false;
+    }
+    new_key.resize(new_len);
+    if (!storage_->save(tk::nvs_contract::kPrivateKey, new_key)) {
+        ESP_LOGE(TAG, "Failed to persist new private key");
+        if (had_old) (void)client_->load_private_key(old_key.data(), old_key.size());
+        return false;
+    }
+    return true;
+}
+
 bool VehicleController::finish_key_rotation_cleanup_() {
     if (!clear_session_and_cache_()) return false;
     // The marker is removed LAST. If this commit fails, pairing_cleanup_pending_ keeps every
@@ -549,14 +578,21 @@ bool VehicleController::clear_session_and_cache_() {
     // physical GAP link. Disconnect unconditionally so a rotation also aborts service/CCCD
     // discovery; otherwise its delayed ready callback could publish the just-invalidated link.
     if (ble_) ble_->disconnect();
-    if ((had_link || had_session) && vehicle_) {
-        // set_connected(false) synchronously flushes queued callbacks. Although key rotation
-        // owns command_mutex_, invalidate defensively before the flush so no compatible SKIPPED
-        // result can be observed as success by an older waiter.
+    if (had_link || had_session) {
+        // Reset command runner and in-memory peer sessions so a stale session key cannot be reused.
         command_generation_.fetch_add(1);
         try {
-            tk::SemGuard g(vehicle_mutex_);   // RAII: set_connected() can throw
-            vehicle_->set_connected(false);
+            tk::SemGuard g(vehicle_mutex_);
+            command_runner_.reset();
+            command_builders_.fill(nullptr);
+            if (client_) {
+                if (auto* p = client_->get_peer(UniversalMessage_Domain_DOMAIN_VEHICLE_SECURITY)) {
+                    p->set_is_valid(false);
+                }
+                if (auto* p = client_->get_peer(UniversalMessage_Domain_DOMAIN_INFOTAINMENT)) {
+                    p->set_is_valid(false);
+                }
+            }
         } catch (const std::exception& e) {
             ESP_LOGE(TAG, "pairing in-memory reset threw (%s)", e.what());
             cleanup_ok = false;

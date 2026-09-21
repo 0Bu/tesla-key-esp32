@@ -154,6 +154,17 @@ bool is_command_route(const char* uri) {
     return parse_uri(uri, vin, sizeof(vin), cmd, sizeof(cmd));
 }
 
+[[gnu::noinline]] static esp_err_t send_command_result(httpd_req_t* req, bool ok,
+                                                       const char* cmd, const char* vin,
+                                                       const std::string& err) {
+    const bool effective_ok = ok || tk::is_nominal_already_set(err);
+    // A false command outcome is not an HTTP success: evcc otherwise accepts the request
+    // as delivered and the old current can remain active. Keep the Tesla-compatible JSON
+    // body, but make the transport status retryable/observable.
+    return send_json(req, effective_ok ? 200 : 502,
+                     make_response(effective_ok, cmd, vin, tk::command_result_text(effective_ok, err)));
+}
+
 esp_err_t handle_command(GuardedReq rq) {
     httpd_req_t* req = rq.req;
     char vin[64], cmd[64];
@@ -259,11 +270,7 @@ esp_err_t handle_command(GuardedReq rq) {
     // selection is shared with the MCP tools/call result (logic/mcp.hpp) so the two
     // paths can never report the same outcome differently.
     std::string err = g_vehicle->last_command_error();
-    // A false command outcome is not an HTTP success: evcc otherwise accepts the request
-    // as delivered and the old current can remain active. Keep the Tesla-compatible JSON
-    // body, but make the transport status retryable/observable.
-    return send_json(req, ok ? 200 : 502,
-                     make_response(ok, cmd, vin, tk::command_result_text(ok, err)));
+    return send_command_result(req, ok, cmd, vin, err);
 }
 
 // ─── GET /api/1/vehicles/{VIN}/vehicle_data ───────────────────────────────────
