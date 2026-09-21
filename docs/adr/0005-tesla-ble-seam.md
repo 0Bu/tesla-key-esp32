@@ -7,7 +7,7 @@
 
 ## Context
 
-The firmware integrates `yoziru/tesla-ble` v5.1.3 as an ESP-IDF component. Upstream `tesla-ble` divides into two distinct layers:
+The firmware integrates `yoziru/tesla-ble` v5.2.0 as an ESP-IDF component. Upstream `tesla-ble` divides into two distinct layers:
 1. **The protocol crypto core** (`client.h`, `peer.h`, `crypto_context.h`, generated Nanopb protobufs): handles P-256 ECDH, HMAC key derivation, AES-GCM encryption/decryption, and protobuf serialization.
 2. **The vehicle orchestration layer** (`vehicle.cpp`, `tb_logging.cpp`): manages BLE stream reassembly, request-response dispatch, command queuing, authentication flows, and retry/timeout heuristics.
 
@@ -18,7 +18,7 @@ While the protocol crypto core is sound, the upstream orchestration layer has pr
 - **Session counter monotonicity inversion**: Upstream forces lower reported counters rather than maintaining `max(local, reported)` as the reference requires (requiring patch 0005).
 - **Dead code bloat**: Unused Parental Controls actions in the protobufs waste flash on size-constrained targets like `esp32c6` (requiring patch 0004).
 
-Maintaining five source patches against an upstream library that continues to add heuristic orchestration complexity is unsustainable. Furthermore, it tightly couples transport quirks to protocol decoding.
+The repository previously maintained four local patches against v5.2.0 (0002–0005; patch 0001 was retired earlier in favor of native dispatch). Maintaining source patches against an upstream orchestration layer is unsustainable. Furthermore, it tightly couples transport quirks to protocol decoding.
 
 ### Normative Reference: `teslamotors/vehicle-command`
 
@@ -35,21 +35,28 @@ The architecture is implemented according to the reference specifications:
 | Component | Reference Implementation | Firmware Implementation | Key Characteristics |
 |---|---|---|---|
 | **RX Framing** | `pkg/connector/ble/ble.go:67-105` | `main/logic/rx_framing.hpp` (`tk::RxFramer`) | Deterministic 2-byte big-endian length prefix. Discards buffer on inter-chunk timeout (1000 ms) or invalid length (0 or > 2048). No heuristic scanning or speculative probe loops. |
-| **Message Dispatch** | `internal/dispatcher/dispatcher.go` | `main/` dispatcher seam | Route response to matching outstanding request keyed by UUID and domain. VCSEC responses are exempt from UUID matching. Unmatched or orphan responses are dropped fail-closed. |
-| **Anti-Replay Window** | `internal/dispatcher/dispatcher.go:245-315` | Per-request replay window | Monotonic counter tracking per outstanding request rather than a global shared slot (`last_request_hash_`). Replay protection applies uniformly to authenticated and plaintext responses. |
-| **Session & Auth State** | `pkg/protocol/signer.go` | Session manager | Counter progression follows max(local, reported). Session info HMAC is verified against request UUID. Durable NVS format and keys are strictly preserved. |
-| **Outcome Classification** | `pkg/protocol/protocol.md` | `main/logic/command_result.hpp` | `is_nominal_already_set()` treats nominal `already_set` vehicle responses as idempotent success at the application layer, separating transport ACK from semantic outcome. |
+| **Message Dispatch** | `internal/dispatcher/dispatcher.go` | `main/logic/ble_dispatcher.hpp` (`tk::BleDispatcher`), `main/vehicle_telemetry.cpp` | Route response to matching outstanding request keyed by UUID and domain. Responses are routed before telemetry callbacks. VCSEC responses are exempt from UUID matching only when request UUID is empty. Unmatched or orphan responses are dropped fail-closed. |
+| **Anti-Replay Window** | `internal/dispatcher/dispatcher.go:245-315` | `main/logic/ble_dispatcher.hpp`, `main/vehicle_telemetry.cpp` | Monotonic counter tracking per outstanding request and via upstream `Peer::validate_response_counter()`. Plaintext CarServer responses with foreign UUIDs are dropped before telemetry processing. |
+| **Session & Auth State** | `pkg/protocol/signer.go` | `main/logic/session_state.hpp` (`tk::SessionTracker`), `main/vehicle_commands.cpp` | Counter progression follows `max(local, reported)`. Zero in-house crypto (P-256 ECDH, HMAC and AES-GCM remain upstream in `TeslaBLE::Client`/`Peer`). Durable NVS format and keys are strictly preserved. |
+| **Outcome Classification** | `internal/dispatcher/dispatcher.go`, `cmd/tesla-control` | `main/logic/command_result.hpp` (`tk::is_nominal_already_set`) | Maps nominal vehicle outcomes (`already_set` when vehicle setpoint is already at requested value) as idempotent success at the application layer, separating transport ACK from semantic outcome. |
 
-### 2. Platform-Forced Departures
+### 2. Platform-Forced Departures and Reference Deviations
 
-The reference is written in Go, relying on goroutines, runtime-managed channels, garbage collection, and dynamic heap allocation. On ESP32 with FreeRTOS and tight memory constraints (e.g. 8192 B `vehicle_loop` stack), the following deliberate adaptations are made:
+The reference is written in Go, relying on goroutines, runtime-managed channels, garbage collection, and dynamic heap allocation. On ESP32 with FreeRTOS and tight memory constraints (8192 B `vehicle_loop` stack), the following deliberate adaptations and departures from `vehicle-command` are made:
 - **No goroutines / channels**: Replaced by deterministic FreeRTOS queues (`ble_event_queue_`) and the single `vehicle_loop` execution thread.
-- **Bounded static buffers**: `tk::RxFramer` enforces `kMaxBufferSize = 2 + 2048 + 512` with explicit overflow checks, avoiding heap fragmentation and largest-contiguous-block depletion.
+- **Bounded vector buffers**: `tk::RxFramer` uses a `std::vector<uint8_t>` with `buffer_.reserve(kMaxFrameLength + 2)` and strict cap `kMaxFrameLength = 2048`, avoiding unbounded heap allocation while preserving stack budget.
+- **Max frame length (2048 vs 1024 B)**: `ble.go:21` defines `MaxBLEMessageSize = 1024`. On ESP32 with `tesla-ble`, certain complex telemetry or configuration responses exceed 1024 bytes; the firmware supports up to 2048 bytes.
+- **Length 0 rejected**: `tk::RxFramer` rejects incoming frames with decoded length 0 fail-closed (`CorruptLength`), preventing zero-byte framing lockups.
+- **No session-info latency expiry (`maxLatency`)**: `vehicle-command` evaluates session expiration against a real-time `maxLatency` window. The firmware does not expire in-memory sessions purely on clock delta, but enforces a strict 1-hour stale-session window on NVS load after boot (`logic/session_state.hpp` / `vehicle_pairing.cpp`).
+- **Routing-address matching**: `vehicle-command` generates ephemeral 16-byte routing addresses for VCSEC requests (`dispatcher.go:400-409`). The firmware uses the connection channel and `last_request_hash_` on the single client instance, bypassing routing address generation.
+- **One-plaintext-response rule**: `vehicle-command` enforces strict single unauthenticated response acceptance. In the firmware, foreign-UUID responses are dropped before reaching telemetry callbacks.
+- **Tick-based backoff vs 1 s RetryInterval**: `vehicle-command` uses a fixed 1 s retry interval. The firmware's `CommandRunner` coordinates multi-phase step timeouts (5 s) and bounded retry budgets (3 retries).
+- **Key fingerprint (`key_fingerprint()`)**: Retained natively in `main/vehicle_pairing.cpp` using mbedtls SHA-1 on the exported public key (`SHA1(pubkey_bytes)[:4]`), keeping it decoupled from `tesla-ble` internals.
 - **Serialized command execution**: Protected by `command_mutex_` to prevent BLE radio contention and preserve FreeRTOS task high-water mark.
 
 ### 3. Superseding of ADR-0003
 
-ADR-0003 introduced patch 0001 to drop replayed CarServer responses. However, as noted in Issue #306, ADR-0003 only blocked replayed messages where `response_counter > 0`. Plaintext or unauthenticated CarServer responses (`response_counter == 0`) remained open to attribution confusion in `vehicle.cpp`. Under the new dispatcher model, every response must match an active request by UUID (or be an allowed VCSEC broadcast). Thus, ADR-0003 is formally **superseded** by this ADR.
+ADR-0003 introduced patch 0001 to drop replayed CarServer responses. However, as noted in Issue #306, ADR-0003 only blocked replayed messages where `response_counter > 0`. Plaintext or unauthenticated CarServer responses (`response_counter == 0`) remained open to attribution confusion in `vehicle.cpp`. Under the new dispatcher model, every response must match an active request by UUID (or be an allowed empty-UUID VCSEC broadcast). Thus, ADR-0003 is formally **superseded** by this ADR.
 
 ### 4. Relationship to ADR-0002 and Issues #61 / #65
 
@@ -58,14 +65,20 @@ This architecture leaves `crypto_context.cpp` and `peer.cpp` upstream in `yoziru
 - Dropping `vehicle.cpp` simplifies any future PSA bridge fork by reducing the patch footprint.
 - Issues #61 and #65 remain **OPEN** and tracking the upstream crypto seam.
 
-### 5. Migration and Phasing Plan
+### 5. Delivered Architecture and Patch Retirement
 
-To ensure continuous system stability and zero regression on hardware:
-- **Phase 1 (Step 1)**: Deploy pure-logic, host-tested `tk::RxFramer` (`main/logic/rx_framing.hpp`) and wire it directly into the BLE event pipeline (`main/vehicle_telemetry.cpp`). `tk::RxFramer` acts as a fail-closed pre-filter ensuring only complete, verified frames reach `vehicle_`.
-- **Phase 2 (Steps 2–4)**: Implement pure-logic message dispatch, session state machine, and command FIFO in `main/logic/` with full host unit test coverage in `test/test_logic.cpp`.
-- **Phase 3 (Step 5 - Cutover)**: Cut over `main/vehicle_ctrl.cpp` to use the new native orchestration layer directly, bypassing `TeslaBLE::Vehicle`.
-  - *Patch Retirement*: Only at Phase 3 cutover are patches 0001, 0002, 0003, and the `vehicle.cpp` half of 0005 removed from `patches/tesla-ble/` and `scripts/apply-tesla-ble-patches.sh`.
-  - *Safety constraint*: Patches 0001 and 0002 must NOT be deleted prior to Phase 3 cutover, as `TeslaBLE::Vehicle` still requires them for transactional key generation (`has_private_key()`, `regenerate_key()`) and CarServer replay protection during the transition.
+The native BLE orchestration layer is implemented across:
+- `main/logic/rx_framing.hpp`: Deterministic 2-byte BE length-prefix framing (`tk::RxFramer`).
+- `main/logic/ble_dispatcher.hpp`: Multi-slot UUID and domain dispatcher (`tk::BleDispatcher`).
+- `main/logic/session_state.hpp`: Thin `tk::SessionTracker` mirror with monotonic counter progression (`max(local, reported)`), zero in-house crypto.
+- `main/logic/command_runner.hpp`: Command state machine arbitrating VCSEC auth, Wake, infotainment auth, and payload dispatch.
+- `main/logic/command_result.hpp`: Normative `is_nominal_already_set()` outcome evaluation.
+- `main/vehicle_ctrl.{hpp,cpp}`, `main/vehicle_commands.cpp`, `main/vehicle_telemetry.cpp`, `main/vehicle_pairing.cpp`: Direct integration with `TeslaBLE::Client`.
+- Native transactional key generation (`regenerate_key_native_()` in `main/vehicle_pairing.cpp`) with 2048 B export buffers and fail-closed rollback.
+
+With this architecture in place, patches 0001, 0002, 0003, and the `vehicle.cpp` portion of 0005 were retired. The active patch series in `patches/tesla-ble/` consists strictly of:
+1. `0004-drop-unused-parental-controls-actions.patch` (trim unused Nanopb message descriptors for target size budget)
+2. `0005-signer-go-session-counter-replay-alignment.patch` (`peer.cpp` session counter monotonic progression alignment per `signer.go`)
 
 ### 6. Compilation of Dead Translation Units (TESLABLE_SRCS)
 
@@ -77,4 +90,4 @@ Upstream `CMakeLists.txt` lists `vehicle.cpp` and `tb_logging.cpp` in `TESLABLE_
 - **Security & Anti-Replay**: Eliminates the plaintext CarServer replay window. Response attribution is strictly bound by request UUID.
 - **NVS & Key Preservation**: Zero modification to durable NVS schemas, key formats, or session storage. Existing paired vehicles survive update without re-pairing.
 - **Heap & Memory Budget**: Pure decision logic is isolated in `main/logic/` and host-tested. Allocations on the `vehicle_loop` stack remain strictly bounded.
-- **Dependency Contract**: Upstream `yoziru/tesla-ble` dependency pin and `targets:` enforcement remain intact.
+- **Dependency Contract**: Upstream `yoziru/tesla-ble` dependency pin (v5.2.0) and `targets:` enforcement remain intact.

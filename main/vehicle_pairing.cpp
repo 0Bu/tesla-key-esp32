@@ -17,8 +17,9 @@
 #include <exception>
 
 // protobuf generated headers (from tesla-ble) — VCSEC only: this TU never builds
-// infotainment (CarServer) messages; Keys_Role comes via <vehicle.h> → keys.pb.h.
+// infotainment (CarServer) messages; Keys_Role comes via keys.pb.h.
 #include <vcsec.pb.h>
+#include <keys.pb.h>
 
 // mbedtls for deriving the public-key fingerprint from the stored PEM key
 #include <mbedtls/pk.h>
@@ -520,18 +521,25 @@ tk::KeyRotationResult VehicleController::generate_key_locked_() {
 
 bool VehicleController::regenerate_key_native_() {
     if (!client_ || !storage_) return false;
-    std::vector<uint8_t> old_key(32);
+    std::vector<uint8_t> old_key(2048);
     size_t old_len = old_key.size();
-    const bool had_old = (client_->has_private_key() &&
-                          client_->get_private_key(old_key.data(), old_key.size(), &old_len) == 0);
-    if (had_old) {
+    bool had_old = false;
+    if (client_->has_private_key()) {
+        if (client_->get_private_key(old_key.data(), old_key.size(), &old_len) != 0) {
+            ESP_LOGE(TAG, "Failed to export existing private key - aborting re-key");
+            return false;
+        }
         old_key.resize(old_len);
+        had_old = true;
     }
+
     if (client_->create_private_key() != 0) {
         ESP_LOGE(TAG, "Failed to create new private key");
+        if (had_old) (void)client_->load_private_key(old_key.data(), old_key.size());
         return false;
     }
-    std::vector<uint8_t> new_key(32);
+
+    std::vector<uint8_t> new_key(2048);
     size_t new_len = new_key.size();
     if (client_->get_private_key(new_key.data(), new_key.size(), &new_len) != 0) {
         ESP_LOGE(TAG, "Failed to export new private key");
@@ -539,6 +547,7 @@ bool VehicleController::regenerate_key_native_() {
         return false;
     }
     new_key.resize(new_len);
+
     if (!storage_->save(tk::nvs_contract::kPrivateKey, new_key)) {
         ESP_LOGE(TAG, "Failed to persist new private key");
         if (had_old) (void)client_->load_private_key(old_key.data(), old_key.size());
@@ -583,7 +592,8 @@ bool VehicleController::clear_session_and_cache_() {
         command_generation_.fetch_add(1);
         try {
             tk::SemGuard g(vehicle_mutex_);
-            command_runner_.reset();
+            command_runner_.reset(/*reset_framer=*/false);
+            request_framer_reset_();
             command_builders_.fill(nullptr);
             if (client_) {
                 if (auto* p = client_->get_peer(UniversalMessage_Domain_DOMAIN_VEHICLE_SECURITY)) {
@@ -653,7 +663,7 @@ bool VehicleController::clear_session_and_cache_() {
         charge_cache_stale_reported_.store(false);
         last_reachable_ticks_.store(0);  // and no proven reachability → link_state() back to Unknown
         vcsec_asleep_since_ticks_.store(0);  // forget any debounced sleep run from the old pairing
-        vcsec_sleep_state_.store(static_cast<int>(TeslaBLE::SleepState::UNKNOWN));
+        vcsec_sleep_state_.store(static_cast<int>(tk::SleepState::Unknown));
     }
     ESP_LOGI(TAG, "pairing/session cleanup %s", cleanup_ok ? "complete" : "incomplete");
     return cleanup_ok;
@@ -764,7 +774,7 @@ bool VehicleController::health_probe_(int timeout_ms) {
     return send_vcsec_("VCSEC Health Poll", [](TeslaBLE::Client* c, uint8_t* b, size_t* l) {
         return c->build_vcsec_information_request_message(
             VCSEC_InformationRequestType_INFORMATION_REQUEST_TYPE_GET_STATUS, b, l);
-    }, TeslaBLE::WakePolicy::NO_WAKE_FAIL, timeout_ms, tk::ConnectOrigin::Background,
+    }, WakePolicy::NoWakeFail, timeout_ms, tk::ConnectOrigin::Background,
        /*auth_fail_is_revocation=*/true,
        tk::CompletionTimeoutPolicy::BackgroundHealth);
 }
@@ -902,7 +912,7 @@ bool VehicleController::pair(tk::ConnectOrigin origin, int timeout_ms) {
             return c->build_white_list_message(
                 role, VCSEC_KeyFormFactor_KEY_FORM_FACTOR_CLOUD_KEY, b, l);
         },
-        TeslaBLE::WakePolicy::NO_WAKE_FAIL, deadline, origin,
+        WakePolicy::NoWakeFail, deadline, origin,
         /*auth_fail_is_revocation=*/false,
         origin == tk::ConnectOrigin::Foreground
             ? tk::CompletionTimeoutPolicy::ForegroundWarn

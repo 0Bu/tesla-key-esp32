@@ -147,9 +147,9 @@ void VehicleController::invalidate_and_flush_(uint32_t generation) {
         try {
             command_runner_.clear();
             command_builders_.fill(nullptr);
-            command_runner_.rx_framer().reset();
+            request_framer_reset_();
             command_runner_.dispatcher().reset();
-            vcsec_sleep_state_.store(static_cast<int>(TeslaBLE::SleepState::UNKNOWN));
+            vcsec_sleep_state_.store(static_cast<int>(tk::SleepState::Unknown));
         } catch (const std::exception& e) {
             ESP_LOGE(TAG, "command FIFO flush threw (%s) — forcing BLE reset", e.what());
             ble_fault_.store(true);
@@ -221,7 +221,7 @@ VehicleController::CommandOutcome VehicleController::await_completion_(
 VehicleController::ResultCb VehicleController::make_result_cb_(
         const std::shared_ptr<CommandCompletion>& completion,
         uint32_t generation, bool auth_fail_is_revocation) {
-    return [this, completion, generation, auth_fail_is_revocation](TeslaBLE::OperationResult result) {
+    return [this, completion, generation, auth_fail_is_revocation](tk::OperationResult result) {
       // A timeout flush synchronously invokes queued callbacks. Generation is deliberately
       // checked before any state mutation, so such callbacks cannot complete a later request.
       if (command_generation_.load() != generation) return;
@@ -309,7 +309,7 @@ VehicleController::ResultCb VehicleController::make_result_cb_(
 // ─── Generic command runners ──────────────────────────────────────────────────
 
 bool VehicleController::send_vcsec_(const std::string& name, Builder builder,
-                                     TeslaBLE::WakePolicy wp, int timeout_ms,
+                                     WakePolicy wp, int timeout_ms,
                                      tk::ConnectOrigin origin, bool auth_fail_is_revocation,
                                      tk::CompletionTimeoutPolicy timeout_policy) {
     const bool foreground = origin == tk::ConnectOrigin::Foreground;
@@ -338,7 +338,7 @@ bool VehicleController::send_vcsec_(const std::string& name, Builder builder,
 }
 
 VehicleController::CommandOutcome VehicleController::send_vcsec_locked_(
-        const std::string& name, Builder builder, TeslaBLE::WakePolicy wp,
+        const std::string& name, Builder builder, WakePolicy wp,
         uint32_t deadline, tk::ConnectOrigin origin, bool auth_fail_is_revocation,
         tk::CompletionTimeoutPolicy timeout_policy) {
     CommandOutcome out;
@@ -366,26 +366,22 @@ VehicleController::CommandOutcome VehicleController::send_vcsec_locked_(
     uint32_t cmd_id = 0;
     try {
         tk::SemGuard g(vehicle_mutex_);
-        const uint32_t now_ms = (xTaskGetTickCount() * 1000) / configTICK_RATE_HZ;
+        const uint32_t now_ms = static_cast<uint32_t>(pdTICKS_TO_MS(xTaskGetTickCount()));
         const uint32_t timeout_ms = remaining_ms_(deadline);
-        const tk::WakePolicy wake_policy = (wp == TeslaBLE::WakePolicy::NO_WAKE_SKIP) ? tk::WakePolicy::NoWakeSkip :
-                                           (wp == TeslaBLE::WakePolicy::NO_WAKE_FAIL) ? tk::WakePolicy::NoWakeFail :
-                                           tk::WakePolicy::WakeIfNeeded;
 
-        auto on_done = [this, completion, generation, auth_fail_is_revocation](bool success, const std::string& err) {
-            auto cb = make_result_cb_(completion, generation, auth_fail_is_revocation);
+        auto cb = make_result_cb_(completion, generation, auth_fail_is_revocation);
+        auto on_done = [cb](bool success, const std::string& err) {
             if (success) {
-                cb(TeslaBLE::OperationResult::success());
+                cb(tk::OperationResult::success());
             } else {
-                cb(TeslaBLE::OperationResult::failure(
-                    std::make_unique<TeslaBLE::CommandError>(
-                        err, TeslaBLE::CommandError::Severity::TEMPORARY,
-                        TeslaBLE::CommandError::Outcome::DEFINITELY_FAILED)));
+                cb(tk::OperationResult::failure(
+                    std::make_unique<tk::CommandError>(
+                        err, tk::CommandError::Severity::Temporary,
+                        tk::CommandError::Outcome::DefinitelyFailed)));
             }
         };
-
         cmd_id = command_runner_.enqueue(
-            name, tk::BleDomain::VehicleSecurity, wake_policy, timeout_ms, now_ms, {}, std::move(on_done));
+            name, tk::BleDomain::VehicleSecurity, wp, timeout_ms, now_ms, {}, std::move(on_done));
         if (cmd_id == 0) {
             out.error = "command queue full";
             return out;
@@ -417,7 +413,7 @@ VehicleController::CommandOutcome VehicleController::send_vcsec_locked_(
 }
 
 bool VehicleController::send_infotainment_(const std::string& name, Builder builder,
-                                            int timeout_ms, TeslaBLE::WakePolicy wp) {
+                                            int timeout_ms, WakePolicy wp) {
     CommandOutcome out;
     if (timeout_ms <= 0) {
         out.error = "command deadline exhausted";
@@ -440,7 +436,7 @@ bool VehicleController::send_infotainment_(const std::string& name, Builder buil
 
 VehicleController::CommandOutcome VehicleController::send_infotainment_locked_(
         const std::string& name, Builder builder, uint32_t deadline,
-        TeslaBLE::WakePolicy wp) {
+        WakePolicy wp) {
     CommandOutcome out;
     if (!command_identity_ready_()) {
         out.error = "runtime key is not verified; reboot or regenerate required";
@@ -467,26 +463,22 @@ VehicleController::CommandOutcome VehicleController::send_infotainment_locked_(
     uint32_t cmd_id = 0;
     try {
         tk::SemGuard g(vehicle_mutex_);
-        const uint32_t now_ms = (xTaskGetTickCount() * 1000) / configTICK_RATE_HZ;
+        const uint32_t now_ms = static_cast<uint32_t>(pdTICKS_TO_MS(xTaskGetTickCount()));
         const uint32_t timeout_ms = remaining_ms_(deadline);
-        const tk::WakePolicy wake_policy = (wp == TeslaBLE::WakePolicy::NO_WAKE_SKIP) ? tk::WakePolicy::NoWakeSkip :
-                                           (wp == TeslaBLE::WakePolicy::NO_WAKE_FAIL) ? tk::WakePolicy::NoWakeFail :
-                                           tk::WakePolicy::WakeIfNeeded;
 
-        auto on_done = [this, completion, generation](bool success, const std::string& err) {
-            auto cb = make_result_cb_(completion, generation);
+        auto cb = make_result_cb_(completion, generation);
+        auto on_done = [cb](bool success, const std::string& err) {
             if (success) {
-                cb(TeslaBLE::OperationResult::success());
+                cb(tk::OperationResult::success());
             } else {
-                cb(TeslaBLE::OperationResult::failure(
-                    std::make_unique<TeslaBLE::CommandError>(
-                        err, TeslaBLE::CommandError::Severity::TEMPORARY,
-                        TeslaBLE::CommandError::Outcome::DEFINITELY_FAILED)));
+                cb(tk::OperationResult::failure(
+                    std::make_unique<tk::CommandError>(
+                        err, tk::CommandError::Severity::Temporary,
+                        tk::CommandError::Outcome::DefinitelyFailed)));
             }
         };
-
         cmd_id = command_runner_.enqueue(
-            name, tk::BleDomain::Infotainment, wake_policy, timeout_ms, now_ms, {}, std::move(on_done));
+            name, tk::BleDomain::Infotainment, wp, timeout_ms, now_ms, {}, std::move(on_done));
         if (cmd_id == 0) {
             out.error = "command queue full";
             return out;
@@ -551,7 +543,7 @@ bool VehicleController::wake_up(int timeout_ms) {
     if (wake_budget_ms > 0) {
         (void)send_vcsec_("Wake", [](TeslaBLE::Client* c, uint8_t* b, size_t* l) {
             return c->build_vcsec_action_message(VCSEC_RKEAction_E_RKE_ACTION_WAKE_VEHICLE, b, l);
-        }, TeslaBLE::WakePolicy::NO_WAKE_FAIL, wake_budget_ms);
+        }, WakePolicy::NoWakeFail, wake_budget_ms);
     }
 
     // Confirm the infotainment actually woke by waiting for live charge telemetry: loop_task
@@ -599,22 +591,12 @@ bool VehicleController::set_charging_amps(int amps, int timeout_ms) {
         publish_command_outcome_(outcome);
         return false;
     }
-    // One deadline covers waiting for command_mutex_, connecting, the action ACK, both
-    // readbacks and the retry gap. No sub-step receives a fresh timeout budget.
     const uint32_t deadline = deadline_in_(static_cast<uint32_t>(timeout_ms));
-    // Guard against garbage input. Lower bound 0; upper bound 48 A — the maximum any Tesla
-    // onboard charger accepts (docs/README.md documents the same 0–48 range), so a legitimate
-    // high-current request (e.g. a 48 A-capable Model 3/Y) is never capped.
-    // The car still enforces its own per-model maximum.
     if (amps < 0)  amps = 0;
     if (amps > 48) amps = 48;
-    int32_t amps32 = (int32_t)amps;
-
+    const int32_t amps32 = static_cast<int32_t>(amps);
     ESP_LOGI(TAG, "set charging amps requested: %d A", amps);
 
-    // Keep the action ACK and the independent ChargeState readback in one serialized
-    // transaction. cmd_in_flight_ prevents the background task from adding a telemetry
-    // poll to tesla-ble's single FIFO while we verify the safety-critical current limit.
     tk::SemGuard cmd_guard(command_mutex_, ticks_until_(deadline));
     if (!cmd_guard) {
         outcome.error = "command deadline exhausted waiting for another request";
@@ -630,7 +612,7 @@ bool VehicleController::set_charging_amps(int amps, int timeout_ms) {
                 return c->build_car_server_vehicle_action_message(
                     b, l, CarServer_VehicleAction_setChargingAmpsAction_tag, &amps32);
             },
-            deadline, TeslaBLE::WakePolicy::WAKE_IF_NEEDED);
+            deadline, WakePolicy::WakeIfNeeded);
     if (!outcome.success) {
         publish_command_outcome_(outcome);
         return false;
@@ -650,7 +632,7 @@ bool VehicleController::set_charging_amps(int amps, int timeout_ms) {
                 return c->build_car_server_get_vehicle_data_message(
                     b, l, CarServer_GetVehicleData_getChargeState_tag);
             },
-            deadline, TeslaBLE::WakePolicy::WAKE_IF_NEEDED);
+            deadline, WakePolicy::WakeIfNeeded);
         bool poll_ok = poll_outcome.success;
 
         const ChargingAmpsFeedback feedback_after = charging_amps_feedback_snapshot_();
@@ -729,7 +711,7 @@ bool VehicleController::charge_port_open(int timeout_ms) {
         VCSEC_ClosureMoveRequest req = VCSEC_ClosureMoveRequest_init_zero;
         req.chargePort = VCSEC_ClosureMoveType_E_CLOSURE_MOVE_TYPE_OPEN;
         return c->build_vcsec_closure_message(&req, b, l);
-    }, TeslaBLE::WakePolicy::WAKE_IF_NEEDED, timeout_ms);
+    }, WakePolicy::WakeIfNeeded, timeout_ms);
 }
 
 bool VehicleController::charge_port_close(int timeout_ms) {
@@ -737,19 +719,19 @@ bool VehicleController::charge_port_close(int timeout_ms) {
         VCSEC_ClosureMoveRequest req = VCSEC_ClosureMoveRequest_init_zero;
         req.chargePort = VCSEC_ClosureMoveType_E_CLOSURE_MOVE_TYPE_CLOSE;
         return c->build_vcsec_closure_message(&req, b, l);
-    }, TeslaBLE::WakePolicy::WAKE_IF_NEEDED, timeout_ms);
+    }, WakePolicy::WakeIfNeeded, timeout_ms);
 }
 
 bool VehicleController::door_lock(int timeout_ms) {
     return send_vcsec_("Lock", [](TeslaBLE::Client* c, uint8_t* b, size_t* l) {
         return c->build_vcsec_action_message(VCSEC_RKEAction_E_RKE_ACTION_LOCK, b, l);
-    }, TeslaBLE::WakePolicy::WAKE_IF_NEEDED, timeout_ms);
+    }, WakePolicy::WakeIfNeeded, timeout_ms);
 }
 
 bool VehicleController::door_unlock(int timeout_ms) {
     return send_vcsec_("Unlock", [](TeslaBLE::Client* c, uint8_t* b, size_t* l) {
         return c->build_vcsec_action_message(VCSEC_RKEAction_E_RKE_ACTION_UNLOCK, b, l);
-    }, TeslaBLE::WakePolicy::WAKE_IF_NEEDED, timeout_ms);
+    }, WakePolicy::WakeIfNeeded, timeout_ms);
 }
 
 bool VehicleController::flash_lights(int timeout_ms) {

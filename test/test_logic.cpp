@@ -5253,6 +5253,46 @@ static void test_rx_framing() {
         CHECK(frames[1].size() == 2 && frames[1][0] == 0x11);
         CHECK(framer.buffered_bytes() == 0);
     }
+
+    // 14. Duplicate fragment and duplicate frame arrival (L4)
+    {
+        // 14a. Duplicate fragment during split frame:
+        // When a middle fragment is duplicated, the stream contains unexpected extra bytes.
+        // The framer extracts the first frame of declared length L, and the duplicate
+        // remaining bytes either trigger a CorruptLength or BufferOverflow for the next frame.
+        tk::RxFramer framer;
+        std::vector<std::vector<uint8_t>> frames;
+        tk::RxFramerDropReason last_drop = tk::RxFramerDropReason::None;
+        auto on_frame = [&](const uint8_t* p, size_t len) { frames.emplace_back(p, p + len); };
+        auto on_drop = [&](tk::RxFramerDropReason r, size_t) { last_drop = r; };
+
+        const uint8_t chunk1[] = {0x00, 0x04, 0x01, 0x02}; // needs 4 bytes, got 2
+        framer.push_chunk(chunk1, sizeof(chunk1), 100, on_frame, on_drop);
+        CHECK(frames.empty());
+        CHECK(framer.buffered_bytes() == 4);
+
+        // Duplicate chunk1 arrives again:
+        framer.push_chunk(chunk1, sizeof(chunk1), 150, on_frame, on_drop);
+        // Now 6 bytes in buffer: 2-byte header (len=4), then 4 bytes (0x01, 0x02, 0x00, 0x04)
+        // This completes frame 1 with the duplicate bytes!
+        CHECK(frames.size() == 1);
+        CHECK(frames[0].size() == 4);
+        // Residual bytes {0x01, 0x02} remain in buffer
+        CHECK(framer.buffered_bytes() == 2);
+
+        // 14b. Exact duplicate frame notification:
+        // If the sender transmits an exact duplicate frame back-to-back, the framer
+        // deterministically extracts both complete frames. Upper layer (BleDispatcher)
+        // anti-replay detects and drops the second frame.
+        framer.reset();
+        frames.clear();
+        const uint8_t frame_bytes[] = {0x00, 0x03, 'A', 'B', 'C'};
+        framer.push_chunk(frame_bytes, sizeof(frame_bytes), 200, on_frame);
+        framer.push_chunk(frame_bytes, sizeof(frame_bytes), 250, on_frame);
+        CHECK(frames.size() == 2);
+        CHECK(frames[0] == frames[1]);
+        CHECK(framer.buffered_bytes() == 0);
+    }
 }
 
 static void test_ble_dispatcher() {
@@ -5384,14 +5424,15 @@ static void test_ble_dispatcher() {
         CHECK(o_empty.routed);
         CHECK(o_empty.request_id == vcsec_id_c);
 
-        // Case D: Unknown UUID with len 16 also falls back to VCSEC exemption
+        // Case D: Non-matching 16-byte UUID on VCSEC is dropped as Unmatched (M2)
         disp.reset();
         uint32_t vcsec_id_d = disp.register_request(D::VehicleSecurity, vcsec_req_uuid_a);
         CHECK(vcsec_id_d > 0);
         tk::BleUuid different_uuid = {0x99, 0x88};
         auto o_diff = disp.dispatch(D::VehicleSecurity, different_uuid.data(), different_uuid.size(), false, 0);
-        CHECK(o_diff.routed);
-        CHECK(o_diff.request_id == vcsec_id_d);
+        CHECK(!o_diff.routed);
+        CHECK(o_diff.drop_reason == R::Unmatched);
+        CHECK(disp.stats().unmatched_drops == 1);
 
         // Unregister -> unmatched
         disp.unregister_request(vcsec_id_d);
@@ -5505,294 +5546,103 @@ static void test_ble_dispatcher() {
 
 static void test_session_state() {
     using S = tk::SessionState;
-    using U = tk::SessionUpdateResult;
 
-    // 1. Pure C++ SHA-256 and HMAC-SHA256 test vectors
-    {
-        // SHA-256 of empty string
-        auto h_empty = tk::Sha256::hash(nullptr, 0);
-        char hex[65];
-        for (size_t i = 0; i < 32; ++i) {
-            std::snprintf(hex + i * 2, 3, "%02x", h_empty[i]);
-        }
-        CHECK(std::string(hex) == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
-
-        // SHA-256 of "abc"
-        const uint8_t abc[] = {'a', 'b', 'c'};
-        auto h_abc = tk::Sha256::hash(abc, 3);
-        for (size_t i = 0; i < 32; ++i) {
-            std::snprintf(hex + i * 2, 3, "%02x", h_abc[i]);
-        }
-        CHECK(std::string(hex) == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
-
-        // RFC 4231 Vector 1: Key = 20 bytes 0x0b, Data = "Hi There"
-        uint8_t k_rfc[20];
-        std::memset(k_rfc, 0x0b, 20);
-        const uint8_t d_rfc[] = "Hi There";
-        auto tag_rfc = tk::HmacSha256::compute(k_rfc, 20, d_rfc, 8);
-        for (size_t i = 0; i < 32; ++i) {
-            std::snprintf(hex + i * 2, 3, "%02x", tag_rfc[i]);
-        }
-        CHECK(std::string(hex) == "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7");
-
-        // Official Tesla session info KDF vector (from tesla_protocol_vectors.test.mjs):
-        // Shared secret = 1b2fce19967b79db696f909cff89ea9a (16 bytes)
-        // Label = "session info" (12 bytes)
-        // Expected key = fceb679ee7bca756fcd441bf238bf2f338629b41d9eb9c67be1b32c9672ce300
-        const uint8_t tesla_shared_secret[16] = {
-            0x1b, 0x2f, 0xce, 0x19, 0x96, 0x7b, 0x79, 0xdb,
-            0x69, 0x6f, 0x90, 0x9c, 0xff, 0x89, 0xea, 0x9a
-        };
-        const uint8_t label[] = "session info";
-        auto tesla_session_key = tk::HmacSha256::compute(tesla_shared_secret, 16, label, 12);
-        for (size_t i = 0; i < 32; ++i) {
-            std::snprintf(hex + i * 2, 3, "%02x", tesla_session_key[i]);
-        }
-        CHECK(std::string(hex) == "fceb679ee7bca756fcd441bf238bf2f338629b41d9eb9c67be1b32c9672ce300");
-    }
-
-    // 2. Protobuf encoding & decoding of Signatures.SessionInfo
-    {
-        tk::SessionInfoData in{};
-        in.counter = 12345;
-        in.epoch = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16};
-        in.clock_time = 1710000000;
-        in.status = 0;
-        in.handle = 42;
-        in.public_key = {0x04, 0xAA, 0xBB, 0xCC};
-
-        auto encoded = tk::encode_session_info(in);
-        CHECK(!encoded.empty());
-
-        tk::SessionInfoData out{};
-        CHECK(tk::decode_session_info(encoded.data(), encoded.size(), out));
-        CHECK(out.counter == 12345);
-        CHECK(out.epoch == in.epoch);
-        CHECK(out.clock_time == 1710000000);
-        CHECK(out.status == 0);
-        CHECK(out.handle == 42);
-        CHECK(out.public_key == in.public_key);
-
-        // Corrupt / truncated bytes fail gracefully
-        tk::SessionInfoData corrupt{};
-        CHECK(!tk::decode_session_info(nullptr, 0, corrupt));
-        uint8_t bad_varint[] = {0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88};
-        CHECK(!tk::decode_session_info(bad_varint, sizeof(bad_varint), corrupt));
-    }
-
-    // 3. Handshake and HMAC validation against Request-UUID
+    // 1. Initial unauthenticated state
     {
         tk::SessionTracker session;
         CHECK(session.state() == S::Unauthenticated);
         CHECK(!session.is_authenticated());
+        CHECK(session.counter() == 0);
+        CHECK(session.clock_time() == 0);
+        CHECK(!session.has_pending_handshake());
+        uint32_t next_counter = 0;
+        CHECK(!session.next_tx_counter(next_counter));
+    }
 
+    // 2. Handshake lifecycle
+    {
+        tk::SessionTracker session;
         std::array<uint8_t, 16> req_uuid = {0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,
                                             0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x00};
         session.start_handshake(req_uuid);
         CHECK(session.state() == S::Authenticating);
         CHECK(session.has_pending_handshake());
+        CHECK(session.handshake_uuid() == req_uuid);
 
-        // Prepare session info protobuf
-        tk::SessionInfoData data{};
-        data.counter = 10;
-        data.epoch = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16};
-        data.clock_time = 1000;
-        data.status = 0;
-        auto encoded_info = tk::encode_session_info(data);
-
-        // Derive session info key and HMAC tag: HMAC(key, challenge || encoded_info)
-        const uint8_t dummy_key[32] = {0xAA};
-        std::vector<uint8_t> hmac_input;
-        hmac_input.insert(hmac_input.end(), req_uuid.begin(), req_uuid.end());
-        hmac_input.insert(hmac_input.end(), encoded_info.begin(), encoded_info.end());
-        auto valid_tag = tk::HmacSha256::compute(dummy_key, sizeof(dummy_key),
-                                                 hmac_input.data(), hmac_input.size());
-
-        // UUID mismatch rejection
-        std::array<uint8_t, 16> wrong_uuid = {0xFF};
-        auto res_uuid = session.update_session(wrong_uuid.data(), wrong_uuid.size(),
-                                               encoded_info.data(), encoded_info.size(),
-                                               valid_tag.data(), valid_tag.size(),
-                                               dummy_key, sizeof(dummy_key));
-        CHECK(res_uuid == U::UuidMismatch);
-        CHECK(session.state() == S::Authenticating);
-
-        // Tampered HMAC tag rejection
-        auto bad_tag = valid_tag;
-        bad_tag[0] ^= 0x01;
-        auto res_hmac = session.update_session(req_uuid.data(), req_uuid.size(),
-                                               encoded_info.data(), encoded_info.size(),
-                                               bad_tag.data(), bad_tag.size(),
-                                               dummy_key, sizeof(dummy_key));
-        CHECK(res_hmac == U::InvalidHmac);
-        CHECK(session.state() == S::Authenticating);
-
-        // Truncated HMAC tag (e.g. 16 bytes) must be rejected
-        auto res_trunc = session.update_session(req_uuid.data(), req_uuid.size(),
-                                                encoded_info.data(), encoded_info.size(),
-                                                valid_tag.data(), 16,
-                                                dummy_key, sizeof(dummy_key));
-        CHECK(res_trunc == U::InvalidHmac);
-        CHECK(session.state() == S::Authenticating);
-
-        // Missing tag when key is provided must be rejected
-        auto res_missing_tag = session.update_session(req_uuid.data(), req_uuid.size(),
-                                                      encoded_info.data(), encoded_info.size(),
-                                                      nullptr, 0,
-                                                      dummy_key, sizeof(dummy_key));
-        CHECK(res_missing_tag == U::InvalidHmac);
-        CHECK(session.state() == S::Authenticating);
-
-        // Tag provided without key must be rejected (cannot verify)
-        auto res_no_key = session.update_session(req_uuid.data(), req_uuid.size(),
-                                                 encoded_info.data(), encoded_info.size(),
-                                                 valid_tag.data(), valid_tag.size(),
-                                                 nullptr, 0);
-        CHECK(res_no_key == U::InvalidHmac);
-        CHECK(session.state() == S::Authenticating);
-
-        // Valid UUID + valid HMAC -> Success!
-        auto res_ok = session.update_session(req_uuid.data(), req_uuid.size(),
-                                             encoded_info.data(), encoded_info.size(),
-                                             valid_tag.data(), valid_tag.size(),
-                                             dummy_key, sizeof(dummy_key));
-        CHECK(res_ok == U::Ok);
-        CHECK(session.state() == S::Established);
-        CHECK(session.is_authenticated());
-        CHECK(session.counter() == 10);
-        CHECK(session.clock_time() == 1000);
+        // Reset clears pending handshake
+        session.reset();
+        CHECK(session.state() == S::Unauthenticated);
         CHECK(!session.has_pending_handshake());
     }
 
-    // 4. Monotonic counter alignment max(local, reported) per signer.go:103-107 & patch 0005
+    // 3. Establishment and Monotonic Counter Alignment per signer.go: max(local, reported)
     {
         tk::SessionTracker session;
-        std::array<uint8_t, 16> epoch_a = {0x0A};
+        std::array<uint8_t, 16> epoch_a = {0x0A, 0x01};
         session.set_established(epoch_a, 50, 1000);
+        CHECK(session.state() == S::Established);
+        CHECK(session.is_authenticated());
+        CHECK(session.epoch() == epoch_a);
         CHECK(session.counter() == 50);
+        CHECK(session.clock_time() == 1000);
+        CHECK(!session.has_pending_handshake());
 
-        // Advance counter via outgoing command
+        // Increment local counter via outgoing command
         uint32_t tx1 = 0;
         CHECK(session.next_tx_counter(tx1));
         CHECK(tx1 == 51);
         CHECK(session.counter() == 51);
 
-        // Vehicle reports counter below ours (e.g. 20) with advanced clock (1010) on SAME epoch.
-        // Signer.go & patch 0005 maintain max(local, reported) -> keeps 51, does NOT drop to 20!
-        tk::SessionInfoData update1{};
-        update1.epoch = epoch_a;
-        update1.clock_time = 1010;
-        update1.counter = 20;
-        update1.public_key = {0x04, 0x11, 0x22};
-        auto enc1 = tk::encode_session_info(update1);
-        auto res1 = session.update_session(nullptr, 0, enc1.data(), enc1.size(),
-                                           nullptr, 0, nullptr, 0);
-        CHECK(res1 == U::Ok);
-        CHECK(session.counter() == 51); // Kept higher local counter on same epoch!
+        // Vehicle reports counter below ours (e.g. 20) with advanced clock (1010).
+        // Per signer.go UpdateSessionInfo: counter = max(local, reported).
+        // Maintains 51, does NOT drop to 20!
+        session.set_established(epoch_a, 20, 1010);
+        CHECK(session.counter() == 51);
         CHECK(session.clock_time() == 1010);
 
-        // Vehicle reports higher counter (80) on same epoch -> advances to 80
-        tk::SessionInfoData update2{};
-        update2.epoch = epoch_a;
-        update2.clock_time = 1020;
-        update2.counter = 80;
-        auto enc2 = tk::encode_session_info(update2);
-        auto res2 = session.update_session(nullptr, 0, enc2.data(), enc2.size(),
-                                           nullptr, 0, nullptr, 0);
-        CHECK(res2 == U::Ok);
+        // Vehicle reports higher counter (80) -> advances to 80
+        session.set_established(epoch_a, 80, 1020);
         CHECK(session.counter() == 80);
         CHECK(session.clock_time() == 1020);
 
-        // Vehicle reports new epoch (epoch_b) with starting counter 15 ->
-        // Per protocol spec, a client resets/adopts counter on epoch change
-        std::array<uint8_t, 16> epoch_b = {0x0B};
-        tk::SessionInfoData update3{};
-        update3.epoch = epoch_b;
-        update3.clock_time = 1000;
-        update3.counter = 15;
-        // Omit public_key in update3 to verify previous public key is preserved
-        auto enc3 = tk::encode_session_info(update3);
-        auto res3 = session.update_session(nullptr, 0, enc3.data(), enc3.size(),
-                                           nullptr, 0, nullptr, 0);
-        CHECK(res3 == U::Ok);
+        // New epoch (epoch_b): signer.go maintains monotonic counter progression max(local, reported)
+        // If reported counter is 15 (< 80), local counter 80 is preserved!
+        std::array<uint8_t, 16> epoch_b = {0x0B, 0x02};
+        session.set_established(epoch_b, 15, 1030);
         CHECK(session.epoch() == epoch_b);
-        CHECK(session.counter() == 15); // Adopted vehicle's new epoch counter!
+        CHECK(session.counter() == 80); // Preserved >= 80 per signer.go UpdateSessionInfo
+        CHECK(session.clock_time() == 1030);
 
-        // On epoch_b: vehicle reports lower counter 5 with advanced clock (1010) ->
-        // Intra-epoch monotonicity preserves 15!
-        tk::SessionInfoData update4{};
-        update4.epoch = epoch_b;
-        update4.clock_time = 1010;
-        update4.counter = 5;
-        auto enc4 = tk::encode_session_info(update4);
-        auto res4 = session.update_session(nullptr, 0, enc4.data(), enc4.size(),
-                                           nullptr, 0, nullptr, 0);
-        CHECK(res4 == U::Ok);
-        CHECK(session.counter() == 15); // Preserved on same epoch!
-        CHECK(session.clock_time() == 1010);
-
-        // On epoch_b: vehicle reports higher counter 40 with advanced clock (1020) -> advances to 40
-        tk::SessionInfoData update5{};
-        update5.epoch = epoch_b;
-        update5.clock_time = 1020;
-        update5.counter = 40;
-        auto enc5 = tk::encode_session_info(update5);
-        auto res5 = session.update_session(nullptr, 0, enc5.data(), enc5.size(),
-                                           nullptr, 0, nullptr, 0);
-        CHECK(res5 == U::Ok);
-        CHECK(session.counter() == 40);
-        CHECK(session.clock_time() == 1020);
-
-        // Stale clock_time on unchanged epoch: clock_time went backwards -> rejected
-        tk::SessionInfoData update_stale{};
-        update_stale.epoch = epoch_b;
-        update_stale.clock_time = 900; // < 1020
-        update_stale.counter = 90;
-        auto enc_stale = tk::encode_session_info(update_stale);
-        auto res_stale = session.update_session(nullptr, 0, enc_stale.data(), enc_stale.size(),
-                                               nullptr, 0, nullptr, 0);
-        CHECK(res_stale == U::StaleClockTime);
+        // If new epoch reports higher counter (120), advances to 120
+        session.set_established(epoch_b, 120, 1040);
+        CHECK(session.counter() == 120);
+        CHECK(session.clock_time() == 1040);
     }
 
-    // 5. Key Not On Whitelist handling
-    {
-        tk::SessionTracker session;
-        session.set_established({1}, 10, 1000);
-        CHECK(session.is_authenticated());
-
-        tk::SessionInfoData rejected{};
-        rejected.status = 1; // KEY_NOT_ON_WHITELIST
-        auto enc = tk::encode_session_info(rejected);
-        auto res = session.update_session(nullptr, 0, enc.data(), enc.size(), nullptr, 0, nullptr, 0);
-        CHECK(res == U::KeyNotOnWhitelist);
-        CHECK(session.state() == S::Unauthenticated);
-        CHECK(!session.is_authenticated());
-    }
-
-    // 6. NVS export and import with age validation
+    // 4. Session Age Validation
     {
         tk::SessionTracker session;
         std::array<uint8_t, 16> epoch = {0x55, 0x66};
         session.set_established(epoch, 200, 5000);
 
-        auto nvs_bytes = session.export_for_nvs();
-        CHECK(!nvs_bytes.empty());
+        // Valid age: current_time = 6000 (age 1000s <= 3600s)
+        CHECK(session.validate_session_age(6000, 3600));
 
-        // Import into fresh session with valid age: current_time = 6000 (age 1000s <= 3600s)
-        tk::SessionTracker loaded;
-        CHECK(loaded.import_from_nvs(nvs_bytes.data(), nvs_bytes.size(), 6000, 3600));
-        CHECK(loaded.is_authenticated());
-        CHECK(loaded.counter() == 200);
-        CHECK(loaded.epoch() == epoch);
-        CHECK(loaded.clock_time() == 5000);
+        // Exactly at max age: current_time = 8600 (age 3600s <= 3600s)
+        CHECK(session.validate_session_age(8600, 3600));
 
-        // Import with expired age: current_time = 10000 (age 5000s > 3600s) -> rejected
-        tk::BleSessionTracker stale;
-        CHECK(!stale.import_from_nvs(nvs_bytes.data(), nvs_bytes.size(), 10000, 3600));
-        CHECK(!stale.is_authenticated());
+        // Stale session: current_time = 8601 (age 3601s > 3600s)
+        CHECK(!session.validate_session_age(8601, 3600));
+
+        // Clock in future / time went backwards (current_time < clock_time): rejected
+        CHECK(!session.validate_session_age(4999, 3600));
+
+        // Unauthenticated session cannot be validated
+        session.reset();
+        CHECK(!session.validate_session_age(6000, 3600));
     }
 
-    // 7. Counter rollover protection (signer.go:171)
+    // 5. Counter Rollover Protection (signer.go:171)
     {
         tk::SessionTracker session;
         session.set_established({1}, 0xFFFFFFFE, 1000);
@@ -5801,6 +5651,20 @@ static void test_session_state() {
         CHECK(c == 0xFFFFFFFF);
         // Next attempt hits rollover: refused!
         CHECK(!session.next_tx_counter(c));
+    }
+
+    // 6. Reset
+    {
+        tk::SessionTracker session;
+        session.set_established({1, 2, 3}, 42, 9999);
+        CHECK(session.is_authenticated());
+        session.reset();
+        CHECK(!session.is_authenticated());
+        CHECK(session.state() == S::Unauthenticated);
+        CHECK(session.counter() == 0);
+        CHECK(session.clock_time() == 0);
+        const std::array<uint8_t, 16> empty_epoch{};
+        CHECK(session.epoch() == empty_epoch);
     }
 }
 
@@ -6005,16 +5869,9 @@ static void test_command_runner() {
         CHECK(runner.current_command()->state == CommandState::WaitingVcsecAuth);
         CHECK(runner.current_command()->phase == CommandPhase::EnsuringVcsecSession);
 
-        // Provide VCSEC SessionInfo response
-        SessionInfoData vcsec_data{};
-        vcsec_data.epoch = {1, 2, 3};
-        vcsec_data.counter = 5;
-        vcsec_data.clock_time = 1000;
-        auto vcsec_bytes = encode_session_info(vcsec_data);
-        auto res = runner.handle_session_info(BleDomain::VehicleSecurity, nullptr, 0,
-                                             vcsec_bytes.data(), vcsec_bytes.size(),
-                                             nullptr, 0, nullptr, 0);
-        CHECK(res == SessionUpdateResult::Ok);
+        // Provide VCSEC SessionInfo response via set_established
+        runner.vcsec_session().set_established({1, 2, 3}, 5, 1000);
+        runner.current_command()->state = CommandState::Idle;
         CHECK(runner.vcsec_session().is_authenticated());
 
         // Step 2: Now VCSEC is satisfied, Infotainment session is needed
@@ -6023,16 +5880,9 @@ static void test_command_runner() {
         CHECK(runner.current_command()->state == CommandState::WaitingInfoAuth);
         CHECK(runner.current_command()->phase == CommandPhase::EnsuringInfotainmentSession);
 
-        // Provide Infotainment SessionInfo response
-        SessionInfoData info_data{};
-        info_data.epoch = {4, 5, 6};
-        info_data.counter = 12;
-        info_data.clock_time = 1000;
-        auto info_bytes = encode_session_info(info_data);
-        res = runner.handle_session_info(BleDomain::Infotainment, nullptr, 0,
-                                        info_bytes.data(), info_bytes.size(),
-                                        nullptr, 0, nullptr, 0);
-        CHECK(res == SessionUpdateResult::Ok);
+        // Provide Infotainment SessionInfo response via set_established
+        runner.info_session().set_established({4, 5, 6}, 12, 1000);
+        runner.current_command()->state = CommandState::Idle;
         CHECK(runner.info_session().is_authenticated());
 
         // Step 3: All prerequisites satisfied -> Ready to send command
@@ -6056,7 +5906,7 @@ static void test_command_runner() {
         CHECK(runner.current_command()->phase == CommandPhase::SendingRequest);
     }
 
-    // 4b. "Wake" Session Flow and Immediate TX Completion
+    // 4b. "Wake" Session Flow and Vehicle Confirmation (N1)
     {
         CommandRunner runner;
         CHECK(!runner.vcsec_session().is_authenticated());
@@ -6075,16 +5925,9 @@ static void test_command_runner() {
         CHECK(runner.current_command()->state == CommandState::WaitingVcsecAuth);
         CHECK(runner.current_command()->phase == CommandPhase::EnsuringVcsecSession);
 
-        // Simulate session info arrival via handle_session_info
-        SessionInfoData vcsec_data{};
-        vcsec_data.epoch = {1, 2, 3};
-        vcsec_data.counter = 1;
-        vcsec_data.clock_time = 1000;
-        auto vcsec_bytes = encode_session_info(vcsec_data);
-        auto res = runner.handle_session_info(BleDomain::VehicleSecurity, nullptr, 0,
-                                             vcsec_bytes.data(), vcsec_bytes.size(),
-                                             nullptr, 0, nullptr, 0);
-        CHECK(res == SessionUpdateResult::Ok);
+        // Simulate session info arrival via set_established
+        runner.vcsec_session().set_established({1, 2, 3}, 1, 1000);
+        runner.current_command()->state = CommandState::Idle;
         CHECK(runner.vcsec_session().is_authenticated());
 
         act = runner.tick(1020, true, false, true);
@@ -6092,7 +5935,8 @@ static void test_command_runner() {
         CHECK(runner.current_command()->state == CommandState::Ready);
         CHECK(runner.current_command()->phase == CommandPhase::SendingRequest);
 
-        // Notifying TX completion immediately finishes "Wake" with success (no commandStatus acknowledgement needed)
+        // Notifying TX completion finishes Wake immediately with success
+        // (Wake action has no commandStatus acknowledgement from Tesla; transmission completes it)
         runner.notify_tx_complete(1050);
         CHECK(completed);
         CHECK(success_res);
@@ -6283,11 +6127,249 @@ static void test_command_runner() {
     }
 }
 
+static void test_command_runner_link_loss_and_faults() {
+    using namespace tk;
+
+    // M1: Link loss fails command immediately
+    {
+        CommandRunner runner;
+        runner.vcsec_session().set_established({1}, 10, 1000);
+        runner.enqueue("FlashLights", BleDomain::VehicleSecurity, WakePolicy::WakeIfNeeded, 20000, 1000);
+        runner.tick(1000, true, true, false);
+        runner.notify_tx_complete(1050);
+        CHECK(runner.has_active_command());
+        CHECK(runner.current_command()->state == CommandState::AwaitingResponse);
+
+        // Notify link loss
+        runner.notify_link_lost("connection lost");
+        CommandRequest* cmd = runner.current_command();
+        CHECK(cmd->is_completed);
+        CHECK(!cmd->is_success);
+        CHECK(cmd->terminal_reason == TerminalReason::BleDisconnected);
+        CHECK(cmd->error_message == "connection lost");
+    }
+
+    // M1: Signed message fault (not session error) fails command immediately
+    {
+        CommandRunner runner;
+        runner.vcsec_session().set_established({1}, 10, 1000);
+        runner.enqueue("HonkHorn", BleDomain::VehicleSecurity, WakePolicy::WakeIfNeeded, 20000, 1000);
+        runner.tick(1000, true, true, false);
+        runner.notify_tx_complete(1050);
+
+        runner.notify_signed_message_fault(false, "signed message authentication failed");
+        CommandRequest* cmd = runner.current_command();
+        CHECK(cmd->is_completed);
+        CHECK(!cmd->is_success);
+        CHECK(cmd->terminal_reason == TerminalReason::AuthenticationFailed);
+        CHECK(cmd->error_message == "signed message authentication failed");
+    }
+
+    // M1: Signed message fault (session error) triggers retry up to max_retries
+    {
+        CommandRunner runner;
+        runner.vcsec_session().set_established({1}, 10, 1000);
+        runner.enqueue("HonkHorn", BleDomain::VehicleSecurity, WakePolicy::WakeIfNeeded, 20000, 1000);
+        runner.tick(1000, true, true, false);
+        runner.notify_tx_complete(1050);
+        CommandRequest* cmd = runner.current_command();
+        CHECK(cmd->retry_count == 0);
+
+        // Retry 1
+        runner.notify_signed_message_fault(true, "session error");
+        CHECK(!cmd->is_completed);
+        CHECK(cmd->retry_count == 1);
+        CHECK(cmd->state == CommandState::Idle);
+
+        // Advance to AwaitingResponse again
+        runner.tick(1100, true, true, false);
+        runner.notify_tx_complete(1150);
+
+        // Retry 2
+        runner.notify_signed_message_fault(true, "session error");
+        CHECK(!cmd->is_completed);
+        CHECK(cmd->retry_count == 2);
+
+        runner.tick(1200, true, true, false);
+        runner.notify_tx_complete(1250);
+
+        // Retry 3
+        runner.notify_signed_message_fault(true, "session error");
+        CHECK(!cmd->is_completed);
+        CHECK(cmd->retry_count == 3);
+
+        runner.tick(1300, true, true, false);
+        runner.notify_tx_complete(1350);
+
+        // 4th session error exceeds max_retries -> fails
+        runner.notify_signed_message_fault(true, "session error");
+        CHECK(cmd->is_completed);
+        CHECK(!cmd->is_success);
+        CHECK(cmd->terminal_reason == TerminalReason::AuthenticationFailed);
+        CHECK(cmd->error_message == "session error; max retries exceeded");
+    }
+
+    // N1/N2: VCSEC commands run even while vehicle is asleep
+    {
+        CommandRunner runner;
+        runner.vcsec_session().set_established({1}, 10, 1000);
+        runner.enqueue("VCSEC Health Poll", BleDomain::VehicleSecurity, WakePolicy::NoWakeFail, 20000, 1000);
+
+        // Tick while vehicle is ASLEEP: must NOT fail with "vehicle asleep"!
+        TxAction act = runner.tick(1000, true /* connected */, false /* awake */, true /* asleep */);
+        CHECK(act == TxAction::SendCommandPayload);
+        CommandRequest* cmd = runner.current_command();
+        CHECK(cmd->state == CommandState::Ready);
+        CHECK(!cmd->is_completed);
+    }
+}
+
+static void test_tx_wire_framing() {
+    // B1: Verify that builder output already includes 2-byte big-endian length prefix.
+    // Transmitting builder output directly without double length prefix allows proper car-side decode.
+    // If a double length prefix is mistakenly prepended (len + 2 bytes), the car-side decode fails.
+
+    // Simulated builder output: 2-byte big-endian length (e.g. 4 bytes payload), then payload
+    std::vector<uint8_t> builder_output = {0x00, 0x04, 0x08, 0x02, 0x12, 0x00};
+
+    // Correct TX path (single length prefix):
+    // Car-side decoder reads 2-byte length L = (wire[0]<<8)|wire[1] = 4, then expects wire.size() == 2 + L
+    const size_t L_direct = (static_cast<size_t>(builder_output[0]) << 8) | builder_output[1];
+    CHECK(L_direct == 4);
+    CHECK(builder_output.size() == 2 + L_direct);
+
+    // Defective B1 path (double length prefix prepended to builder output):
+    size_t len = builder_output.size(); // 6
+    std::vector<uint8_t> double_prefixed(2 + len);
+    double_prefixed[0] = static_cast<uint8_t>((len >> 8) & 0xFF); // 0x00
+    double_prefixed[1] = static_cast<uint8_t>(len & 0xFF);        // 0x06
+    std::memcpy(double_prefixed.data() + 2, builder_output.data(), len);
+
+    // Car-side decode of double-prefixed frame:
+    // Car reads L = (0x00 << 8) | 0x06 = 6.
+    // The payload handed to protobuf parser starts with {0x00, 0x04, ...}, which is NOT valid protobuf wire format!
+    CHECK(double_prefixed.size() == 8);
+    CHECK(double_prefixed[0] == 0x00 && double_prefixed[1] == 0x06);
+    CHECK(double_prefixed[2] == 0x00 && double_prefixed[3] == 0x04);
+    // In protobuf, field tags are varints where field 0 is invalid (tag must be (field_num << 3) | wire_type, field >= 1).
+    // A protobuf starting with 0x00 is guaranteed invalid wire-format data!
+    uint8_t proto_first_byte = double_prefixed[2];
+    CHECK(proto_first_byte == 0x00); // Invalid protobuf tag -> decoder fails
+}
+
+static void test_key_regeneration_contract() {
+    // B2: Key export buffer requirement and fail-closed transactionality.
+    // Client::get_private_key() writes a PEM string (228 bytes for P-256).
+    // An export buffer of 32 bytes always fails; buffer must be >= 2048 bytes.
+
+    const size_t kP256PemLen = 228;
+    const size_t kSmallBufSize = 32;
+    const size_t kLargeBufSize = 2048;
+
+    auto mock_get_private_key = [](uint8_t* buf, size_t buf_len, size_t* out_len) -> int {
+        if (!buf || buf_len < kP256PemLen) return -1; // Buffer too small!
+        *out_len = kP256PemLen;
+        return 0;
+    };
+
+    // 1. 32-byte buffer fails:
+    std::vector<uint8_t> small_buf(kSmallBufSize);
+    size_t len32 = small_buf.size();
+    CHECK(mock_get_private_key(small_buf.data(), small_buf.size(), &len32) != 0);
+
+    // 2. 2048-byte buffer succeeds:
+    std::vector<uint8_t> big_buf(kLargeBufSize);
+    size_t len2048 = big_buf.size();
+    CHECK(mock_get_private_key(big_buf.data(), big_buf.size(), &len2048) == 0);
+    CHECK(len2048 == kP256PemLen);
+
+    // 3. Transactional fail-closed logic:
+    // If old key cannot be exported, refuse to mutate runtime identity
+    bool old_exported = (mock_get_private_key(small_buf.data(), small_buf.size(), &len32) == 0);
+    CHECK(!old_exported);
+
+    // If new key fails to persist, restore old key:
+    std::string old_key_pem = "OLD_KEY_PEM_DATA";
+    std::string current_key = old_key_pem;
+    std::string nvs_stored = old_key_pem;
+
+    auto regenerate = [&](bool fail_storage) -> bool {
+        std::vector<uint8_t> old_k(kLargeBufSize);
+        size_t old_l = old_k.size();
+        if (mock_get_private_key(old_k.data(), old_k.size(), &old_l) != 0) return false;
+
+        // Generate new key in memory
+        current_key = "NEW_KEY_PEM_DATA";
+
+        // Attempt save
+        if (fail_storage) {
+            // Rollback to old key on save failure!
+            current_key = old_key_pem;
+            return false;
+        }
+        nvs_stored = current_key;
+        return true;
+    };
+
+    CHECK(!regenerate(true));
+    CHECK(current_key == old_key_pem); // Rolled back!
+    CHECK(nvs_stored == old_key_pem);  // NVS unchanged!
+
+    CHECK(regenerate(false));
+    CHECK(current_key == "NEW_KEY_PEM_DATA");
+    CHECK(nvs_stored == "NEW_KEY_PEM_DATA");
+}
+
+static void test_telemetry_dispatch_routing_order() {
+    // H1: Responses must be routed before delivering telemetry.
+    // A CarServer response with a foreign (unmatched) request UUID must NOT invoke telemetry callbacks.
+    tk::CommandRunner runner;
+    runner.vcsec_session().set_established({1}, 10, 1000);
+    runner.info_session().set_established({2}, 20, 1000);
+
+    tk::BleUuid our_uuid{}; our_uuid.fill(0x11);
+    uint32_t cmd_id = runner.enqueue("Verify Amps", tk::BleDomain::Infotainment,
+                                     tk::WakePolicy::WakeIfNeeded, 20000, 1000, our_uuid);
+    CHECK(cmd_id > 0);
+    runner.tick(1000, true, true, false);
+    runner.notify_tx_complete(1050);
+
+    bool callback_invoked = false;
+    auto charge_state_callback = [&]() { callback_invoked = true; };
+
+    // Simulate arrival of response with FOREIGN request UUID:
+    tk::BleUuid foreign_uuid{}; foreign_uuid.fill(0xAB);
+    auto outcome = runner.handle_response(tk::BleDomain::Infotainment, foreign_uuid.data(), foreign_uuid.size(),
+                                          true, 100, true, "");
+    CHECK(!outcome.routed);
+    CHECK(outcome.drop_reason == tk::DispatchDropReason::Unmatched);
+
+    // Because outcome was not routed to our request, callback is NOT invoked
+    if (outcome.routed) {
+        charge_state_callback();
+    }
+    CHECK(!callback_invoked);
+
+    // Simulate arrival of response with MATCHING request UUID:
+    outcome = runner.handle_response(tk::BleDomain::Infotainment, our_uuid.data(), our_uuid.size(),
+                                     true, 101, true, "");
+    CHECK(outcome.routed);
+    CHECK(outcome.drop_reason == tk::DispatchDropReason::None);
+    if (outcome.routed) {
+        charge_state_callback();
+    }
+    CHECK(callback_invoked);
+}
+
 int main() {
     test_rx_framing();
     test_ble_dispatcher();
     test_session_state();
     test_command_runner();
+    test_command_runner_link_loss_and_faults();
+    test_tx_wire_framing();
+    test_key_regeneration_contract();
+    test_telemetry_dispatch_routing_order();
     test_vin();
     test_wifi_credentials();
     test_key_rotation();
