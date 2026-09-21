@@ -134,6 +134,7 @@ public:
     static constexpr uint32_t kDefaultCommandTimeoutMs = 20000;
     static constexpr uint32_t kInitialRetryDelayMs = 500;
     static constexpr uint32_t kMaxRetryDelayMs = 5000;
+    static constexpr uint32_t kDefaultRxInterChunkTimeoutMs = 3000;
 
     CommandRunner() noexcept = default;
 
@@ -573,7 +574,7 @@ private:
         }
     }
 
-    RxFramer rx_framer_;
+    RxFramer rx_framer_{kDefaultRxInterChunkTimeoutMs};
     BleDispatcher dispatcher_;
     SessionTracker vcsec_session_;
     SessionTracker info_session_;

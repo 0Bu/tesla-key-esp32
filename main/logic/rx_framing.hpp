@@ -51,6 +51,7 @@ public:
     // Inspect internal buffer size and statistics
     size_t buffered_bytes() const noexcept { return buffer_.size(); }
     const RxFramerStats& stats() const noexcept { return stats_; }
+    uint32_t timeout_ms() const noexcept { return timeout_ms_; }
 
     // Standalone timeout check. Drops stale incomplete buffer if elapsed time exceeds timeout_ms_.
     // Useful for periodic task ticks without requiring incoming data.

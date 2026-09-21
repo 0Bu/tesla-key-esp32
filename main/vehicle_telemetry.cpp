@@ -775,8 +775,10 @@ void VehicleController::handle_signed_message_fault_(const UniversalMessage_Rout
                 break;
         }
     }
+    // R3: Run key-revocation detector unconditionally for all signed message faults
+    // so late ERROR_UNKNOWN_KEY_ID faults after command timeout or flush are never missed.
+    on_vehicle_message_(msg);
     if (cmd) {
-        on_vehicle_message_(msg);
         command_runner_.notify_signed_message_fault(has_session_error, "signed message authentication failed");
     }
 }
@@ -932,13 +934,14 @@ void VehicleController::handle_vcsec_frame_(const UniversalMessage_RoutableMessa
             }
             case VCSEC_FromVCSECMessage_vehicleStatus_tag: {
                 const auto& vs = vcsec_msg.sub_message.vehicleStatus;
-                bool is_asleep = (vs.vehicleSleepStatus == VCSEC_VehicleSleepStatus_E_VEHICLE_SLEEP_STATUS_ASLEEP);
-                if (vs.has_closureStatuses) {
-                    is_asleep = false; // L2: closureStatuses confirms vehicle is awake
-                }
+                const bool is_asleep = (vs.vehicleSleepStatus == VCSEC_VehicleSleepStatus_E_VEHICLE_SLEEP_STATUS_ASLEEP);
+                ESP_LOGD(TAG, "VCSEC VehicleStatus: sleep_status=%d, has_closureStatuses=%d",
+                         static_cast<int>(vs.vehicleSleepStatus), static_cast<int>(vs.has_closureStatuses));
                 vcsec_sleep_state_.store(static_cast<int>(is_asleep ? tk::SleepState::Asleep : tk::SleepState::Awake));
                 note_vcsec_sleep_(is_asleep);
-                if (!is_asleep) {
+                // R1: Upstream v5.2.0 uses has_closureStatuses only as a wake-progress signal to advance
+                // a command waiting for a wake, preserving the raw reported sleep state in vcsec_sleep_state_.
+                if (!is_asleep || vs.has_closureStatuses) {
                     command_runner_.notify_vehicle_awake(true);
                 }
                 if (vehicle_status_callback_) {
@@ -1060,6 +1063,11 @@ void VehicleController::process_rx_frame_(const uint8_t* frame, size_t len) {
     if (msg.has_signedMessageStatus &&
         msg.signedMessageStatus.operation_status == UniversalMessage_OperationStatus_E_OPERATIONSTATUS_ERROR) {
         handle_signed_message_fault_(msg);
+        // R3: Vehicles may proactively include session info with a fault reply when there is a desync
+        // (vehicle-command dispatcher.go:295-299, upstream vehicle.cpp:710-723). Apply it immediately.
+        if (msg.which_payload == UniversalMessage_RoutableMessage_session_info_tag) {
+            handle_session_info_frame_(msg);
+        }
         return;
     }
 
