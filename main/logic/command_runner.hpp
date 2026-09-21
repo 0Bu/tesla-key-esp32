@@ -343,45 +343,47 @@ public:
 
         // 5. Prerequisite Progression & Wake-up Policy Coordination
         if (cmd->domain == BleDomain::VehicleSecurity) {
-            // Pairing "Whitelist Add Key" starts with untrusted key, so session auth is bypassed.
-            // "Wake" is an unauthenticated RKE action designed to wake a sleeping car;
-            // it must not wait for a VCSEC session (which an asleep car cannot establish).
-            if (cmd->name == "Whitelist Add Key" || cmd->name == "Wake") {
+            // Pairing "Whitelist Add Key" starts with untrusted key, so session auth is bypassed
+            if (cmd->name == "Whitelist Add Key") {
                 cmd->state = CommandState::Ready;
                 cmd->phase = CommandPhase::SendingRequest;
                 cmd->phase_started_at_ms = now_ms;
                 return TxAction::SendCommandPayload;
             }
 
-            // For other VCSEC commands (status poll, lock, unlock):
-            if (is_asleep) {
-                switch (cmd->wake_policy) {
-                    case WakePolicy::NoWakeSkip:
-                        finish_command_(cmd, false, "vehicle asleep", TerminalReason::VehicleAsleep);
-                        cmd->state = CommandState::Skipped;
-                        return TxAction::None;
-                    case WakePolicy::NoWakeFail:
-                        finish_command_(cmd, false, "vehicle asleep", TerminalReason::VehicleAsleep);
-                        cmd->state = CommandState::Failed;
-                        return TxAction::None;
-                    case WakePolicy::WakeIfNeeded:
-                        cmd->state = CommandState::WaitingWake;
-                        cmd->phase = CommandPhase::EnsuringAwake;
-                        cmd->phase_started_at_ms = now_ms;
-                        return TxAction::SendWake;
-                }
-            } else if (!is_awake && cmd->wake_policy == WakePolicy::WakeIfNeeded) {
-                cmd->state = CommandState::WaitingWake;
-                cmd->phase = CommandPhase::EnsuringAwake;
-                cmd->phase_started_at_ms = now_ms;
-                return TxAction::SendWake;
-            }
-
+            // VCSEC commands require an authenticated VCSEC session (including Wake,
+            // which is an encrypted RKE action).
             if (!vcsec_session_.is_authenticated()) {
                 cmd->state = CommandState::WaitingVcsecAuth;
                 cmd->phase = CommandPhase::EnsuringVcsecSession;
                 cmd->phase_started_at_ms = now_ms;
                 return TxAction::SendVcsecSessionInfoRequest;
+            }
+
+            // If the vehicle is asleep, evaluate wake policy for non-Wake VCSEC commands
+            if (cmd->name != "Wake") {
+                if (is_asleep) {
+                    switch (cmd->wake_policy) {
+                        case WakePolicy::NoWakeSkip:
+                            finish_command_(cmd, false, "vehicle asleep", TerminalReason::VehicleAsleep);
+                            cmd->state = CommandState::Skipped;
+                            return TxAction::None;
+                        case WakePolicy::NoWakeFail:
+                            finish_command_(cmd, false, "vehicle asleep", TerminalReason::VehicleAsleep);
+                            cmd->state = CommandState::Failed;
+                            return TxAction::None;
+                        case WakePolicy::WakeIfNeeded:
+                            cmd->state = CommandState::WaitingWake;
+                            cmd->phase = CommandPhase::EnsuringAwake;
+                            cmd->phase_started_at_ms = now_ms;
+                            return TxAction::SendWake;
+                    }
+                } else if (!is_awake && cmd->wake_policy == WakePolicy::WakeIfNeeded) {
+                    cmd->state = CommandState::WaitingWake;
+                    cmd->phase = CommandPhase::EnsuringAwake;
+                    cmd->phase_started_at_ms = now_ms;
+                    return TxAction::SendWake;
+                }
             }
 
             // VCSEC session is authenticated -> ready to send command
@@ -392,9 +394,16 @@ public:
         }
 
         if (cmd->domain == BleDomain::Infotainment) {
-            // Prerequisite 1: Wake policy evaluation (aligned with vehicle-command & upstream)
-            // If the vehicle is asleep or unknown-and-wake-needed, WAKE IT FIRST before
-            // attempting session authentication (an asleep car cannot respond to SessionInfoRequest).
+            // Prerequisite 1: VCSEC session (required to encrypt SendWake and for general vehicle security)
+            if (!vcsec_session_.is_authenticated()) {
+                cmd->state = CommandState::WaitingVcsecAuth;
+                cmd->phase = CommandPhase::EnsuringVcsecSession;
+                cmd->phase_started_at_ms = now_ms;
+                return TxAction::SendVcsecSessionInfoRequest;
+            }
+
+            // Prerequisite 2: Wake policy evaluation (aligned with vehicle-command & upstream)
+            // Once VCSEC session is established, send SendWake if vehicle is asleep / unknown
             if (is_asleep) {
                 switch (cmd->wake_policy) {
                     case WakePolicy::NoWakeSkip:
@@ -419,15 +428,7 @@ public:
                 return TxAction::SendWake;
             }
 
-            // Prerequisite 2: VCSEC session (vehicle is awake or sleep policy permits)
-            if (!vcsec_session_.is_authenticated()) {
-                cmd->state = CommandState::WaitingVcsecAuth;
-                cmd->phase = CommandPhase::EnsuringVcsecSession;
-                cmd->phase_started_at_ms = now_ms;
-                return TxAction::SendVcsecSessionInfoRequest;
-            }
-
-            // Prerequisite 3: Infotainment session
+            // Prerequisite 3: Infotainment session (only once vehicle is awake)
             if (!info_session_.is_authenticated()) {
                 cmd->state = CommandState::WaitingInfoAuth;
                 cmd->phase = CommandPhase::EnsuringInfotainmentSession;
