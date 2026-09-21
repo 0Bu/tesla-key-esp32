@@ -408,42 +408,36 @@ now superseded by upstream v5.2.0. Root `CMakeLists.txt`, after dependency resol
 hash marker makes repeated CMake passes idempotent and lets a later patch be added, while a changed
 or removed already-applied patch fails closed and requires deliberate rematerialisation.
 
-The first active patch (0002) makes private-key regeneration transactional from the controller's point of
-view. It verifies that an existing in-memory key can be exported before mutation, reports key
-creation and NVS persistence failures, and restores the prior in-memory key if persistence of the
-replacement fails. Firmware command, pairing, and polling paths remain fail-closed until the
-persisted key identity is verified and the old sessions have been cleared. The host-tested
-`logic/key_rotation.hpp` contract keeps `tesla_ble/key_rotate` armed across power loss and blocks
-vehicle construction/signing until that cleanup reaches its durable terminal state; an NVS probe
-error blocks too and cannot be mistaken for an absent marker. A VIN
-transition is also journalled as `tesla_cfg/vin_txn`; the host-tested recovery decision lives in
-`logic/vin_transition.hpp`, so power loss cannot silently combine a new VIN with the old key/session
-state.
+Historically, patches 0001, 0002, and 0003 patched `TeslaBLE::Vehicle` to implement anti-replay checks,
+transactional key regeneration, and throttled RX framing recovery. With the implementation of Issue #306
+and [`adr/0005-tesla-ble-seam.md`](adr/0005-tesla-ble-seam.md), the monolithic `TeslaBLE::Vehicle` class
+is completely bypassed. Instead, the firmware integrates directly with `TeslaBLE::Client` and hosts
+native, hardware-free pure-logic orchestration in `main/logic/`:
+- **Deterministic RX Framing** (`logic/rx_framing.hpp`): Strict 2-byte big-endian length prefix framing matching `teslamotors/vehicle-command` `pkg/connector/ble/ble.go`, with bounded buffer allocation and inter-chunk timeout, replacing patch 0003.
+- **BLE Dispatcher & Session State** (`logic/ble_dispatcher.hpp`, `logic/session_state.hpp`): Separate VCSEC and Infotainment session trackers with monotonic counter validation, strict request UUID matching for responses, and isolated ephemeral/session states, replacing patch 0001 (and superseding [`adr/0003-reject-replayed-tesla-responses.md`](adr/0003-reject-replayed-tesla-responses.md)).
+- **Native Transactional Key Regeneration** (`main/vehicle_pairing.cpp`): Transactional private-key generation with automatic rollback on NVS failure, replacing patch 0002. The host-tested `logic/key_rotation.hpp` contract keeps `tesla_ble/key_rotate` armed across power loss and blocks vehicle construction/signing until that cleanup reaches its durable terminal state; an NVS probe error blocks too and cannot be mistaken for an absent marker. A VIN transition is also journalled as `tesla_cfg/vin_txn`; the host-tested recovery decision lives in `logic/vin_transition.hpp`, so power loss cannot silently combine a new VIN with the old key/session state.
+- **Native Command FIFO & Request Runner** (`logic/command_runner.hpp`): Bounded FIFO queue (8 slots) arbitrating multi-phase prerequisites (VCSEC auth -> wake -> infotainment session auth -> payload execution) with exponential backoff and nominal `already_set` outcome evaluation.
 
-The second active patch (0003) bounds RX-framing recovery logs without hiding the recovery itself.
-In v5.2.0, the obsolete `severe` corruption path was removed upstream; the rate-limiting helper
-emits warning logs at most once per hour with an `UINT32_MAX`-saturating suppression counter, and
-recovery candidate progress is logged at DEBUG severity to prevent UART log storms during sustained
-framing corruption.
+As a result, patches 0001-0003 were retired. The remaining patch series consists of two surgical patches:
 
-The third active patch (0004) drops the five Parental Controls arms that v5.1.2 added to the
-`CarServer_VehicleAction` oneof, together with their nanopb message descriptors. The firmware never
-builds or sends those actions, but a referenced oneof arm keeps its descriptor tables out of reach
-of `--gc-sections`, so they cost flash in every image. Removing them returns `car_server.pb.c` to
-byte-identical descriptor size with v5.1.1. This is a size patch, not a correctness one: esp32c6
-sits closest to the app-size policy ceiling, and image sizes quantize to 64 KiB, so a few hundred
-bytes there decide whether the signed image still fits the `0x1f0000` OTA slot.
+The first patch (`0004-drop-unused-parental-controls-actions.patch`) drops the five Parental Controls arms that
+v5.1.2 added to the `CarServer_VehicleAction` oneof, together with their nanopb message descriptors. The
+firmware never builds or sends those actions, but a referenced oneof arm keeps its descriptor tables out
+of reach of `--gc-sections`, so they cost flash in every image. Removing them returns `car_server.pb.c` to
+byte-identical descriptor size with v5.1.1. This is a size patch, not a correctness one: esp32c6 sits closest
+to the app-size policy ceiling, and image sizes quantize to 64 KiB, so a few hundred bytes there decide
+whether the signed image still fits the `0x1f0000` OTA slot.
 
-The fourth active patch (0005) aligns session-counter replay with teslamotors/vehicle-command `signer.go`
-(`UpdateSessionInfo`): when the vehicle reports a lower counter, keep `max(local, reported)` and
-still apply epoch/time, instead of hard-rejecting or calling `force_update_session` to the
-vehicle's lower counter. Upstream resyncs by forcing that lower counter, which breaks
-anti-replay monotonicity; removing the call site also lets `--gc-sections` drop the otherwise-dead
-`force_update_session` and keeps esp32c6 inside the OTA slot budget.
+The second patch (`0005-align-session-counter-replay-with-signer-go.patch`) aligns session-counter replay
+in `src/peer.cpp` with teslamotors/vehicle-command `signer.go` (`UpdateSessionInfo`): when the vehicle reports
+a lower counter, keep `max(local, reported)` and still apply epoch/time, instead of hard-rejecting or calling
+`force_update_session` to the vehicle's lower counter. Upstream resyncs by forcing that lower counter,
+which breaks anti-replay monotonicity; removing the call site in `src/peer.cpp` also lets `--gc-sections` drop
+the otherwise-dead `force_update_session` and keeps esp32c6 inside the OTA slot budget.
 
-All four images use the same tesla-ble revision and ordered patch-series behavior. The wider
-tesla-ble dependency strategy (IDF-6 / Mbed TLS 4 crypto seam, issue #61) is
-[`adr/0002-idf6-mbedtls4-crypto-seam.md`](adr/0002-idf6-mbedtls4-crypto-seam.md).
+All four images use the same tesla-ble revision and ordered patch-series behavior. The wider orchestration seam
+and reference alignment is [`adr/0005-tesla-ble-seam.md`](adr/0005-tesla-ble-seam.md)
+(and for the IDF-6 / Mbed TLS 4 crypto seam, issue #61, [`adr/0002-idf6-mbedtls4-crypto-seam.md`](adr/0002-idf6-mbedtls4-crypto-seam.md)).
 
 **On-device ST7735 display (LilyGO T-Dongle-S3).** The dongle carries a
 0.96" ST7735 LCD and it IS driven — see `main/display.cpp` (a status panel: WiFi/BLE header + a

@@ -1,8 +1,8 @@
 {
   "name": "tesla-key-esp32",
   "layoutVersion": 2,
-  "sourceSha": "75ee96f1e3d13619f07212827c5ba3302c30f8b5",
-  "version": "1.4.111",
+  "sourceSha": "79dcfcd0ee805e280f6366f359625fabdc45dbe6",
+  "version": "1.4.112",
   "new_install_prompt_erase": true,
   "builds": [
     {
@@ -10,7 +10,7 @@
       "parts": [
         { "path": "bootloader-esp32.bin", "offset": 4096, "size": 24800, "sha256": "29fb3d9f1f0c26e6c3aec7a4075e9de3ca3d022a75109b91e8e8996906eb771e" },
         { "path": "partition-table-esp32.bin", "offset": 32768, "size": 3072, "sha256": "521bd6bd48a9c47269fd713a319645f9d9147038d4243282677aef35f92ba05c" },
-        { "path": "tesla-key-esp32.bin", "offset": 131072, "size": 1642496, "sha256": "dfaf1b389d3c7190b1807f7fed164c8fad12ec869e8e7dfc368032f35fc83005" },
+        { "path": "tesla-key-esp32.bin", "offset": 131072, "size": 1642496, "sha256": "8eed053db0e6577fa784275e475aa7d3d98df466303fbdcca6540f7bf9456f35" },
         { "path": "ota_data_initial-esp32.bin", "offset": 61440, "size": 8192, "sha256": "7d2c7ac4888bfd75cd5f56e8d61f69595121183afc81556c876732fd3782c62f" }
       ]
     },
@@ -19,7 +19,7 @@
       "parts": [
         { "path": "bootloader-esp32s3.bin", "offset": 0, "size": 19824, "sha256": "0c9ee400be0084cafc667c959f3042a7ca64c28610102079958954000458b1fd" },
         { "path": "partition-table-esp32s3.bin", "offset": 32768, "size": 3072, "sha256": "521bd6bd48a9c47269fd713a319645f9d9147038d4243282677aef35f92ba05c" },
-        { "path": "tesla-key-esp32-s3.bin", "offset": 131072, "size": 1708032, "sha256": "20d0142cf21869d6fef60d0d7d300ac97a652fc66fc65d23869a98320dd7ff5b" },
+        { "path": "tesla-key-esp32-s3.bin", "offset": 131072, "size": 1708032, "sha256": "4ff638f1b815b6d017b4169c2e565c5ab42a8dc49b6abde33290ed44a193e268" },
         { "path": "ota_data_initial-esp32s3.bin", "offset": 61440, "size": 8192, "sha256": "7d2c7ac4888bfd75cd5f56e8d61f69595121183afc81556c876732fd3782c62f" }
       ]
     },
@@ -28,7 +28,7 @@
       "parts": [
         { "path": "bootloader-esp32c3.bin", "offset": 0, "size": 20112, "sha256": "83f6256692fd0954ac9ef50b6d1db2579fc85f74926c465c3e50a052221b3e57" },
         { "path": "partition-table-esp32c3.bin", "offset": 32768, "size": 3072, "sha256": "521bd6bd48a9c47269fd713a319645f9d9147038d4243282677aef35f92ba05c" },
-        { "path": "tesla-key-esp32-c3.bin", "offset": 131072, "size": 1773568, "sha256": "6d8e332806a342a3a04c7360afc06053ca6446b4824deca32c924ef14fd34f6e" },
+        { "path": "tesla-key-esp32-c3.bin", "offset": 131072, "size": 1773568, "sha256": "05b1189ef65ec26d95709a6e093398c36570b5e39440df32fd02fb3ae4efe2a1" },
         { "path": "ota_data_initial-esp32c3.bin", "offset": 61440, "size": 8192, "sha256": "7d2c7ac4888bfd75cd5f56e8d61f69595121183afc81556c876732fd3782c62f" }
       ]
     },
@@ -37,7 +37,7 @@
       "parts": [
         { "path": "bootloader-esp32c6.bin", "offset": 0, "size": 20736, "sha256": "2642cf8fac070bd806d9cba5475a6a581f8296a302ea54c930f3b31954c1c1eb" },
         { "path": "partition-table-esp32c6.bin", "offset": 32768, "size": 3072, "sha256": "521bd6bd48a9c47269fd713a319645f9d9147038d4243282677aef35f92ba05c" },
-        { "path": "tesla-key-esp32-c6.bin", "offset": 131072, "size": 1970176, "sha256": "23a25990fa3fa3019b0c930772054917aca62ae4eaeb7771424ed9a9a5fc41f8" },
+        { "path": "tesla-key-esp32-c6.bin", "offset": 131072, "size": 1904640, "sha256": "3f66626afd949e3dd1b9c31f7bdba461c12fa025d0d166fc12e68145fbbdb3f5" },
         { "path": "ota_data_initial-esp32c6.bin", "offset": 61440, "size": 8192, "sha256": "7d2c7ac4888bfd75cd5f56e8d61f69595121183afc81556c876732fd3782c62f" }
       ]
     }
