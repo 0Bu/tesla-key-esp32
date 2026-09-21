@@ -28,15 +28,17 @@ Fix some logic.
 - [ ] \`\$project-review\` clean — merge gate @ <full-40-hex-sha>
 - [ ] \`\$pr-hygiene\` clean — content gate @ <full-40-hex-sha>
 - [ ] \`\$feature-docs\` synced — merge gate @ <full-40-hex-sha>
+- [ ] \`\$vehicle-command-audit\` clean — merge gate @ <full-40-hex-sha>
 BODY
 )"
 
   local replaced
-  replaced="$(python3 - "$sample_body" "$sha" 1 <<'PY'
+  replaced="$(python3 - "$sample_body" "$sha" 1 1 <<'PY'
 import re, sys
 body = sys.argv[1]
 sha = sys.argv[2]
 feat_relevant = sys.argv[3] == "1"
+veh_relevant = sys.argv[4] == "1"
 
 records = [
     f"- [x] `$skill-audit` clean — PR create/push gate @ {sha}",
@@ -45,6 +47,8 @@ records = [
 ]
 if feat_relevant:
     records.append(f"- [x] `$feature-docs` synced — merge gate @ {sha}")
+if veh_relevant:
+    records.append(f"- [x] `$vehicle-command-audit` clean — merge gate @ {sha}")
 
 # Replace template checkboxes if present
 patterns = [
@@ -52,6 +56,7 @@ patterns = [
     r"[-*+]\s+\[[ xX]\]\s+`?\$project-review`?.*",
     r"[-*+]\s+\[[ xX]\]\s+`?\$pr-hygiene`?.*",
     r"[-*+]\s+\[[ xX]\]\s+`?\$feature-docs`?.*",
+    r"[-*+]\s+\[[ xX]\]\s+`?\$vehicle-command-audit`?.*",
 ]
 lines = body.splitlines()
 new_lines = []
@@ -82,6 +87,8 @@ PY
   [ "$status" = "checked $sha" ] || { echo "self-test failed on pr-hygiene: $status" >&2; exit 1; }
   status="$(gate_checkbox_status "$replaced" "feature-docs")"
   [ "$status" = "checked $sha" ] || { echo "self-test failed on feature-docs: $status" >&2; exit 1; }
+  status="$(gate_checkbox_status "$replaced" "vehicle-command-audit")"
+  [ "$status" = "checked $sha" ] || { echo "self-test failed on vehicle-command-audit: $status" >&2; exit 1; }
 
   echo "stamp-pr-gates: self-test PASS"
 }
@@ -125,6 +132,10 @@ feat_relevant=0
 if printf '%s\n' "$changed_files" | gate_feature_docs_relevant; then
   feat_relevant=1
 fi
+veh_relevant=0
+if printf '%s\n' "$changed_files" | gate_vehicle_command_relevant; then
+  veh_relevant=1
+fi
 
 records=(
   "- [x] \`\$skill-audit\` clean — PR create/push gate @ $target_head"
@@ -134,15 +145,19 @@ records=(
 if [ "$feat_relevant" = 1 ]; then
   records+=("- [x] \`\$feature-docs\` synced — merge gate @ $target_head")
 fi
+if [ "$veh_relevant" = 1 ]; then
+  records+=("- [x] \`\$vehicle-command-audit\` clean — merge gate @ $target_head")
+fi
 
 if [ -n "$update_pr" ]; then
   command -v gh >/dev/null 2>&1 || { echo "stamp-pr-gates: gh CLI required for --update-pr" >&2; exit 2; }
   current_body="$(gh pr view "$update_pr" --repo 0Bu/tesla-key-esp32 --json body -q .body)"
-  updated_body="$(python3 - "$current_body" "$target_head" "$feat_relevant" <<'PY'
+  updated_body="$(python3 - "$current_body" "$target_head" "$feat_relevant" "$veh_relevant" <<'PY'
 import re, sys
 body = sys.argv[1]
 sha = sys.argv[2]
 feat_relevant = sys.argv[3] == "1"
+veh_relevant = sys.argv[4] == "1"
 
 records = [
     f"- [x] `$skill-audit` clean — PR create/push gate @ {sha}",
@@ -151,12 +166,15 @@ records = [
 ]
 if feat_relevant:
     records.append(f"- [x] `$feature-docs` synced — merge gate @ {sha}")
+if veh_relevant:
+    records.append(f"- [x] `$vehicle-command-audit` clean — merge gate @ {sha}")
 
 patterns = [
     r"[-*+]\s+\[[ xX]\]\s+`?\$skill-audit`?.*",
     r"[-*+]\s+\[[ xX]\]\s+`?\$project-review`?.*",
     r"[-*+]\s+\[[ xX]\]\s+`?\$pr-hygiene`?.*",
     r"[-*+]\s+\[[ xX]\]\s+`?\$feature-docs`?.*",
+    r"[-*+]\s+\[[ xX]\]\s+`?\$vehicle-command-audit`?.*",
 ]
 lines = body.splitlines()
 new_lines = []

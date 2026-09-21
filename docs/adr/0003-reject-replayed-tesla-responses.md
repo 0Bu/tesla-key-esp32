@@ -1,6 +1,7 @@
 # ADR-0003: Reject replayed CarServer responses before dispatch
 
-Status: superseded by upstream yoziru/tesla-ble v5.2.0 (incorporated into upstream `src/vehicle.cpp` and closed by Request-UUID gating)
+Status: superseded by [ADR-0005](0005-tesla-ble-seam.md)
+Note: The rationale in this ADR was incomplete — it blocked duplicate delivery of counter > 0 CarServer responses, but unauthenticated/plaintext responses (response_counter == 0) still bypassed the check. ADR-0005 replaces vehicle.cpp with UUID-keyed dispatcher routing that covers both authenticated and plaintext responses.
 
 ## Context
 

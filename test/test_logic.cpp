@@ -79,6 +79,10 @@
 #include "logic/key_rotation.hpp"
 #include "logic/nvs_string_load.hpp"
 #include "logic/vin_transition.hpp"
+#include "logic/rx_framing.hpp"
+#include "logic/ble_dispatcher.hpp"
+#include "logic/session_state.hpp"
+#include "logic/command_runner.hpp"
 
 #include <array>
 #include <cmath>
@@ -1449,6 +1453,45 @@ static void test_mcp() {
     CHECK_STR(tk::command_result_text(true,  tesla_reason), "command executed successfully");
     CHECK_STR(tk::command_result_text(false, tesla_reason), "complete");
     CHECK_STR(tk::command_result_text(false, no_reason),    "vehicle not reachable");
+
+    // Nominal error: already_set is classified as success for idempotent commands
+    CHECK(tk::is_nominal_already_set("already_set"));
+    CHECK(tk::is_nominal_already_set("action failed: already_set"));
+    CHECK(!tk::is_nominal_already_set("complete"));
+    CHECK(!tk::is_nominal_already_set(""));
+    CHECK_STR(tk::command_result_text(false, "already_set"), "command executed successfully");
+    CHECK_STR(tk::command_result_text(false, "action failed: already_set"), "command executed successfully");
+
+    // Protocol Invariant Gate: command table integrity & role boundaries.
+    // Every registered command must have:
+    // 1. Non-empty description if MCP tool is exposed.
+    // 2. Strict type assignment for every argument.
+    // 3. Role-denied commands (DoorLock..ClimateStop) MUST NOT be exposed as MCP tools
+    //    (mcp_name must be nullptr, protecting models from sending commands the car refuses).
+    for (const auto& cmd : tk::kCommands) {
+        if (cmd.mcp_name) {
+            CHECK(cmd.mcp_desc != nullptr && std::strlen(cmd.mcp_desc) > 0);
+            CHECK(cmd.kind != tk::CmdKind::DoorLock &&
+                  cmd.kind != tk::CmdKind::DoorUnlock &&
+                  cmd.kind != tk::CmdKind::FlashLights &&
+                  cmd.kind != tk::CmdKind::HonkHorn &&
+                  cmd.kind != tk::CmdKind::SetSentryMode &&
+                  cmd.kind != tk::CmdKind::ClimateStart &&
+                  cmd.kind != tk::CmdKind::ClimateStop);
+        }
+        for (int a = 0; a < tk::kCmdMaxArgs; ++a) {
+            const auto& arg = cmd.args[a];
+            if (arg.type == tk::CmdArgType::None) {
+                CHECK(arg.api_key == nullptr && arg.mcp_key == nullptr);
+            } else {
+                CHECK(arg.api_key != nullptr || arg.mcp_key != nullptr);
+                if (arg.type == tk::CmdArgType::Int) {
+                    CHECK(arg.lo <= arg.hi);
+                }
+            }
+        }
+    }
+
 }
 
 // ─── Charging-current ACK/readback + active-cache freshness ───────────────────
@@ -4945,7 +4988,1306 @@ static void test_vehicle_data_logic() {
     CHECK(!tk::telemetry_epoch_matches(42, 43));
 }
 
+// ─── BLE RX framing (teslamotors/vehicle-command ble.go:67-105) ─────────────
+static void test_rx_framing() {
+    // 1. Happy path: single complete frame in one chunk
+    {
+        tk::RxFramer framer;
+        const uint8_t chunk[] = {0x00, 0x04, 't', 'e', 's', 't'};
+        std::vector<std::vector<uint8_t>> frames;
+        size_t n = framer.push_chunk(chunk, sizeof(chunk), 100, [&](const uint8_t* p, size_t len) {
+            frames.emplace_back(p, p + len);
+        });
+        CHECK(n == 1);
+        CHECK(frames.size() == 1);
+        CHECK(frames[0].size() == 4);
+        CHECK(frames[0][0] == 't' && frames[0][3] == 't');
+        CHECK(framer.buffered_bytes() == 0);
+        CHECK(framer.stats().frames_completed == 1);
+    }
+
+    // 2. Split frame across multiple notifications
+    {
+        tk::RxFramer framer;
+        std::vector<std::vector<uint8_t>> frames;
+        auto on_frame = [&](const uint8_t* p, size_t len) {
+            frames.emplace_back(p, p + len);
+        };
+
+        const uint8_t chunk1[] = {0x00, 0x06, 0x10, 0x20}; // header + 2 bytes (needs 4 more)
+        size_t n1 = framer.push_chunk(chunk1, sizeof(chunk1), 100, on_frame);
+        CHECK(n1 == 0);
+        CHECK(frames.empty());
+        CHECK(framer.buffered_bytes() == 4);
+
+        const uint8_t chunk2[] = {0x30, 0x40, 0x50, 0x60}; // remaining 4 bytes
+        size_t n2 = framer.push_chunk(chunk2, sizeof(chunk2), 250, on_frame);
+        CHECK(n2 == 1);
+        CHECK(frames.size() == 1);
+        CHECK(frames[0].size() == 6);
+        CHECK(frames[0][0] == 0x10 && frames[0][5] == 0x60);
+        CHECK(framer.buffered_bytes() == 0);
+        CHECK(framer.stats().frames_completed == 1);
+    }
+
+    // 3. Several frames in one single notification (back-to-back)
+    {
+        tk::RxFramer framer;
+        std::vector<std::vector<uint8_t>> frames;
+        const uint8_t multi[] = {
+            0x00, 0x03, 1, 2, 3,       // frame 1 (len=3)
+            0x00, 0x02, 10, 20,        // frame 2 (len=2)
+            0x00, 0x01, 99             // frame 3 (len=1)
+        };
+        size_t n = framer.push_chunk(multi, sizeof(multi), 100, [&](const uint8_t* p, size_t len) {
+            frames.emplace_back(p, p + len);
+        });
+        CHECK(n == 3);
+        CHECK(frames.size() == 3);
+        CHECK(frames[0].size() == 3 && frames[0][0] == 1);
+        CHECK(frames[1].size() == 2 && frames[1][0] == 10);
+        CHECK(frames[2].size() == 1 && frames[2][0] == 99);
+        CHECK(framer.buffered_bytes() == 0);
+        CHECK(framer.stats().frames_completed == 3);
+    }
+
+    // 4. Corrupt length before a split frame
+    {
+        tk::RxFramer framer;
+        std::vector<std::vector<uint8_t>> frames;
+        tk::RxFramerDropReason last_reason = tk::RxFramerDropReason::None;
+        size_t last_dropped = 0;
+        auto on_drop = [&](tk::RxFramerDropReason r, size_t d) {
+            last_reason = r;
+            last_dropped = d;
+        };
+
+        // Chunk with corrupt length (> 2048)
+        const uint8_t corrupt[] = {0x10, 0x00, 0xAA, 0xBB}; // 4096 bytes > 2048
+        size_t nc = framer.push_chunk(corrupt, sizeof(corrupt), 100,
+            [&](const uint8_t* p, size_t len) { frames.emplace_back(p, p + len); },
+            on_drop);
+        CHECK(nc == 0);
+        CHECK(frames.empty());
+        CHECK(last_reason == tk::RxFramerDropReason::CorruptLength);
+        CHECK(last_dropped == 4);
+        CHECK(framer.buffered_bytes() == 0);
+        CHECK(framer.stats().corrupt_length_drops == 1);
+
+        // Next chunk is valid: should be accepted cleanly
+        const uint8_t valid[] = {0x00, 0x02, 0x11, 0x22};
+        size_t nv = framer.push_chunk(valid, sizeof(valid), 150,
+            [&](const uint8_t* p, size_t len) { frames.emplace_back(p, p + len); },
+            on_drop);
+        CHECK(nv == 1);
+        CHECK(frames.size() == 1);
+        CHECK(frames[0].size() == 2);
+        CHECK(framer.buffered_bytes() == 0);
+    }
+
+    // 5. Zero length is treated as corrupt (Tesla messages are never 0 bytes)
+    {
+        tk::RxFramer framer;
+        tk::RxFramerDropReason last_reason = tk::RxFramerDropReason::None;
+        const uint8_t zero_len[] = {0x00, 0x00, 0x01, 0x02};
+        framer.push_chunk(zero_len, sizeof(zero_len), 100,
+            [](const uint8_t*, size_t) {},
+            [&](tk::RxFramerDropReason r, size_t) { last_reason = r; });
+        CHECK(last_reason == tk::RxFramerDropReason::CorruptLength);
+        CHECK(framer.buffered_bytes() == 0);
+    }
+
+    // 6. Max payload boundary (2048 is valid, 2049 is corrupt)
+    {
+        tk::RxFramer framer;
+        const uint8_t max_valid[] = {0x08, 0x00}; // 2048
+        framer.push_chunk(max_valid, sizeof(max_valid), 100, [](const uint8_t*, size_t) {});
+        CHECK(framer.buffered_bytes() == 2); // awaiting 2048 payload bytes
+
+        framer.reset();
+        CHECK(framer.buffered_bytes() == 0);
+
+        tk::RxFramerDropReason last_reason = tk::RxFramerDropReason::None;
+        const uint8_t overflow_len[] = {0x08, 0x01}; // 2049 > 2048
+        framer.push_chunk(overflow_len, sizeof(overflow_len), 100,
+            [](const uint8_t*, size_t) {},
+            [&](tk::RxFramerDropReason r, size_t) { last_reason = r; });
+        CHECK(last_reason == tk::RxFramerDropReason::CorruptLength);
+        CHECK(framer.buffered_bytes() == 0);
+    }
+
+    // 7. Inter-chunk timeout drops stale incomplete buffer
+    {
+        tk::RxFramer framer;
+        tk::RxFramerDropReason last_reason = tk::RxFramerDropReason::None;
+        size_t last_dropped = 0;
+        auto on_drop = [&](tk::RxFramerDropReason r, size_t d) {
+            last_reason = r;
+            last_dropped = d;
+        };
+
+        const uint8_t partial[] = {0x00, 0x10, 1, 2, 3}; // needs 16, got 3
+        framer.push_chunk(partial, sizeof(partial), 1000, [](const uint8_t*, size_t) {}, on_drop);
+        CHECK(framer.buffered_bytes() == 5);
+        CHECK(last_reason == tk::RxFramerDropReason::None);
+
+        // Next chunk arrives after 1001 ms (> 1000 ms timeout)
+        std::vector<std::vector<uint8_t>> frames;
+        const uint8_t next_valid[] = {0x00, 0x02, 7, 8};
+        size_t n = framer.push_chunk(next_valid, sizeof(next_valid), 2001,
+            [&](const uint8_t* p, size_t len) { frames.emplace_back(p, p + len); },
+            on_drop);
+        CHECK(last_reason == tk::RxFramerDropReason::InterChunkTimeout);
+        CHECK(last_dropped == 5);
+        CHECK(n == 1);
+        CHECK(frames.size() == 1);
+        CHECK(frames[0].size() == 2 && frames[0][0] == 7);
+        CHECK(framer.buffered_bytes() == 0);
+        CHECK(framer.stats().timeout_drops == 1);
+    }
+
+    // 8. Null and empty chunks are safe no-ops
+    {
+        tk::RxFramer framer;
+        CHECK(framer.push_chunk(nullptr, 0, 100, [](const uint8_t*, size_t) {}) == 0);
+        const uint8_t d[] = {1};
+        CHECK(framer.push_chunk(d, 0, 100, [](const uint8_t*, size_t) {}) == 0);
+        CHECK(framer.buffered_bytes() == 0);
+    }
+
+    // 9. Standalone check_timeout() drops stale incomplete buffer without incoming chunks
+    {
+        tk::RxFramer framer;
+        tk::RxFramerDropReason reason = tk::RxFramerDropReason::None;
+        size_t dropped = 0;
+        const uint8_t partial[] = {0x00, 0x0A, 1, 2}; // needs 10 bytes, got 2
+        framer.push_chunk(partial, sizeof(partial), 1000, [](const uint8_t*, size_t) {});
+        CHECK(framer.buffered_bytes() == 4);
+
+        // Tick before timeout: no drop
+        CHECK(!framer.check_timeout(1999, [&](tk::RxFramerDropReason r, size_t d) {
+            reason = r; dropped = d;
+        }));
+        CHECK(framer.buffered_bytes() == 4);
+        CHECK(reason == tk::RxFramerDropReason::None);
+
+        // Tick after timeout: drops stale buffer
+        CHECK(framer.check_timeout(2001, [&](tk::RxFramerDropReason r, size_t d) {
+            reason = r; dropped = d;
+        }));
+        CHECK(framer.buffered_bytes() == 0);
+        CHECK(reason == tk::RxFramerDropReason::InterChunkTimeout);
+        CHECK(dropped == 4);
+        CHECK(framer.stats().timeout_drops == 1);
+    }
+
+    // 10. Header split across notification chunks (1 byte in chunk 1, rest in chunk 2)
+    {
+        tk::RxFramer framer;
+        std::vector<std::vector<uint8_t>> frames;
+        const uint8_t chunk1[] = {0x00}; // first byte of 2-byte header
+        size_t n1 = framer.push_chunk(chunk1, sizeof(chunk1), 100, [&](const uint8_t* p, size_t len) {
+            frames.emplace_back(p, p + len);
+        });
+        CHECK(n1 == 0);
+        CHECK(frames.empty());
+        CHECK(framer.buffered_bytes() == 1);
+
+        const uint8_t chunk2[] = {0x03, 0xAA, 0xBB, 0xCC}; // second byte of header + 3 payload bytes
+        size_t n2 = framer.push_chunk(chunk2, sizeof(chunk2), 150, [&](const uint8_t* p, size_t len) {
+            frames.emplace_back(p, p + len);
+        });
+        CHECK(n2 == 1);
+        CHECK(frames.size() == 1);
+        CHECK(frames[0].size() == 3);
+        CHECK(frames[0][0] == 0xAA && frames[0][2] == 0xCC);
+        CHECK(framer.buffered_bytes() == 0);
+    }
+
+    // 11. Reentrant reset() called inside frame_cb terminates extraction cleanly without crash
+    {
+        tk::RxFramer framer;
+        // Concatenated frames: frame 1 and frame 2
+        const uint8_t multi[] = {0x00, 0x02, 1, 2, 0x00, 0x02, 3, 4};
+        size_t calls = 0;
+        size_t n = framer.push_chunk(multi, sizeof(multi), 100, [&](const uint8_t*, size_t) {
+            calls++;
+            framer.reset(); // reentrant reset on connection teardown
+        });
+        CHECK(calls == 1);
+        CHECK(n == 1);
+        CHECK(framer.buffered_bytes() == 0);
+    }
+
+    // 12. Integer overflow protection in buffer size + len check
+    {
+        tk::RxFramer framer;
+        tk::RxFramerDropReason reason = tk::RxFramerDropReason::None;
+        size_t dropped = 0;
+        const uint8_t dummy[1] = {0};
+        // Pass huge length that would wrap buffer.size() + len if unchecked
+        size_t huge_len = static_cast<size_t>(-10);
+        size_t n = framer.push_chunk(dummy, huge_len, 100,
+            [](const uint8_t*, size_t) {},
+            [&](tk::RxFramerDropReason r, size_t d) { reason = r; dropped = d; });
+        CHECK(n == 0);
+        CHECK(reason == tk::RxFramerDropReason::BufferOverflow);
+        CHECK(framer.stats().overflow_drops == 1);
+    }
+
+    // 13. Malformed payload inside frame delivers frame deterministically and continues
+    {
+        tk::RxFramer framer;
+        std::vector<std::vector<uint8_t>> frames;
+        // Two frames: first has corrupt/garbage protobuf payload (e.g. 0xFF, 0xFF), second has valid payload
+        const uint8_t multi[] = {
+            0x00, 0x02, 0xFF, 0xFF,
+            0x00, 0x02, 0x11, 0x22
+        };
+        size_t n = framer.push_chunk(multi, sizeof(multi), 100, [&](const uint8_t* p, size_t len) {
+            frames.emplace_back(p, p + len);
+        });
+        CHECK(n == 2);
+        CHECK(frames.size() == 2);
+        CHECK(frames[0].size() == 2 && frames[0][0] == 0xFF);
+        CHECK(frames[1].size() == 2 && frames[1][0] == 0x11);
+        CHECK(framer.buffered_bytes() == 0);
+    }
+}
+
+static void test_ble_dispatcher() {
+    using D = tk::BleDomain;
+    using R = tk::DispatchDropReason;
+
+    // 1. Lifecycle and registration bounds
+    {
+        tk::BleDispatcher disp;
+        CHECK(disp.active_count() == 0);
+
+        tk::BleUuid uuid1 = {1, 2, 3, 4};
+        uint32_t id1 = disp.register_request(D::Infotainment, uuid1);
+        CHECK(id1 > 0);
+        CHECK(disp.has_request(id1));
+        CHECK(disp.active_count() == 1);
+
+        // Domain None rejected
+        CHECK(disp.register_request(D::None, uuid1) == 0);
+
+        // Unregister
+        CHECK(disp.unregister_request(id1));
+        CHECK(!disp.has_request(id1));
+        CHECK(disp.active_count() == 0);
+        CHECK(!disp.unregister_request(id1)); // Idempotent
+
+        // Fill up to capacity (kMaxRequests = 8)
+        std::vector<uint32_t> ids;
+        for (size_t i = 0; i < tk::BleDispatcher::kMaxRequests; ++i) {
+            tk::BleUuid u{};
+            u[0] = static_cast<uint8_t>(i + 1);
+            uint32_t id = disp.register_request(D::Infotainment, u);
+            CHECK(id > 0);
+            ids.push_back(id);
+        }
+        CHECK(disp.active_count() == tk::BleDispatcher::kMaxRequests);
+        // Exceeded capacity rejected safely
+        tk::BleUuid extra{};
+        extra[0] = 99;
+        CHECK(disp.register_request(D::Infotainment, extra) == 0);
+
+        disp.reset();
+        CHECK(disp.active_count() == 0);
+    }
+
+    // 2. Missing source domain and invalid UUID length drops
+    {
+        tk::BleDispatcher disp;
+        tk::BleUuid uuid = {1, 2, 3};
+        disp.register_request(D::Infotainment, uuid);
+
+        // Missing source (domain None)
+        auto o1 = disp.dispatch(D::None, uuid.data(), uuid.size(), false, 0);
+        CHECK(!o1.routed);
+        CHECK(o1.drop_reason == R::MissingSource);
+        CHECK(disp.stats().missing_source_drops == 1);
+
+        // Invalid UUID length (e.g. 5 bytes instead of 0 or 16)
+        uint8_t short_uuid[5] = {1, 2, 3, 4, 5};
+        auto o2 = disp.dispatch(D::Infotainment, short_uuid, sizeof(short_uuid), false, 0);
+        CHECK(!o2.routed);
+        CHECK(o2.drop_reason == R::InvalidUuidLength);
+        CHECK(disp.stats().invalid_uuid_drops == 1);
+    }
+
+    // 3. Infotainment UUID matching
+    {
+        tk::BleDispatcher disp;
+        tk::BleUuid uuid_a = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16};
+        tk::BleUuid uuid_b = {9, 8, 7, 6, 5, 4, 3, 2, 1, 0,  1,  2,  3,  4,  5,  6};
+        uint32_t id_a = disp.register_request(D::Infotainment, uuid_a);
+        uint32_t id_b = disp.register_request(D::Infotainment, uuid_b);
+
+        // Empty UUID on Infotainment does not match
+        auto o0 = disp.dispatch(D::Infotainment, nullptr, 0, true, 1);
+        CHECK(!o0.routed);
+        CHECK(o0.drop_reason == R::Unmatched);
+
+        // Non-existent UUID
+        tk::BleUuid uuid_unknown = {0xFF};
+        auto o_un = disp.dispatch(D::Infotainment, uuid_unknown.data(), uuid_unknown.size(), true, 1);
+        CHECK(!o_un.routed);
+        CHECK(o_un.drop_reason == R::Unmatched);
+
+        // Matching UUID A routes to id_a
+        auto o_a = disp.dispatch(D::Infotainment, uuid_a.data(), uuid_a.size(), true, 1);
+        CHECK(o_a.routed);
+        CHECK(o_a.drop_reason == R::None);
+        CHECK(o_a.request_id == id_a);
+
+        // Matching UUID B routes to id_b
+        auto o_b = disp.dispatch(D::Infotainment, uuid_b.data(), uuid_b.size(), true, 1);
+        CHECK(o_b.routed);
+        CHECK(o_b.drop_reason == R::None);
+        CHECK(o_b.request_id == id_b);
+    }
+
+    // 4. VCSEC UUID match exemption & multi-request precedence (modelled on dispatcher.go:259-261)
+    {
+        tk::BleDispatcher disp;
+        tk::BleUuid vcsec_req_uuid_a = {0xAA, 0x11};
+        tk::BleUuid vcsec_req_uuid_b = {0xBB, 0x22};
+        uint32_t vcsec_id_a = disp.register_request(D::VehicleSecurity, vcsec_req_uuid_a);
+        uint32_t vcsec_id_b = disp.register_request(D::VehicleSecurity, vcsec_req_uuid_b);
+        CHECK(vcsec_id_a > 0);
+        CHECK(vcsec_id_b > 0);
+        CHECK(vcsec_id_a != vcsec_id_b);
+
+        // Case A: Response with UUID B must route to Request B (exact UUID takes precedence)
+        auto ob = disp.dispatch(D::VehicleSecurity, vcsec_req_uuid_b.data(), vcsec_req_uuid_b.size(), false, 0);
+        CHECK(ob.routed);
+        CHECK(ob.request_id == vcsec_id_b);
+
+        // Case B: Response with UUID A must route to Request A (exact UUID takes precedence)
+        auto oa = disp.dispatch(D::VehicleSecurity, vcsec_req_uuid_a.data(), vcsec_req_uuid_a.size(), false, 0);
+        CHECK(oa.routed);
+        CHECK(oa.request_id == vcsec_id_a);
+
+        // Subsequent plaintext to same slots is correctly dropped as replay
+        auto oa_dup = disp.dispatch(D::VehicleSecurity, vcsec_req_uuid_a.data(), vcsec_req_uuid_a.size(), false, 0);
+        CHECK(!oa_dup.routed);
+        CHECK(oa_dup.drop_reason == R::Replay);
+
+        // Case C: Empty UUID (len 0) falls back to VCSEC exemption on fresh request
+        disp.reset();
+        uint32_t vcsec_id_c = disp.register_request(D::VehicleSecurity, vcsec_req_uuid_a);
+        CHECK(vcsec_id_c > 0);
+        auto o_empty = disp.dispatch(D::VehicleSecurity, nullptr, 0, false, 0);
+        CHECK(o_empty.routed);
+        CHECK(o_empty.request_id == vcsec_id_c);
+
+        // Case D: Unknown UUID with len 16 also falls back to VCSEC exemption
+        disp.reset();
+        uint32_t vcsec_id_d = disp.register_request(D::VehicleSecurity, vcsec_req_uuid_a);
+        CHECK(vcsec_id_d > 0);
+        tk::BleUuid different_uuid = {0x99, 0x88};
+        auto o_diff = disp.dispatch(D::VehicleSecurity, different_uuid.data(), different_uuid.size(), false, 0);
+        CHECK(o_diff.routed);
+        CHECK(o_diff.request_id == vcsec_id_d);
+
+        // Unregister -> unmatched
+        disp.unregister_request(vcsec_id_d);
+        auto o_none = disp.dispatch(D::VehicleSecurity, nullptr, 0, false, 0);
+        CHECK(!o_none.routed);
+        CHECK(o_none.drop_reason == R::Unmatched);
+    }
+
+    // 5. Per-request anti-replay window (authenticated responses)
+    {
+        tk::BleDispatcher disp;
+        tk::BleUuid uuid = {0x10};
+        uint32_t id = disp.register_request(D::Infotainment, uuid);
+        CHECK(id > 0);
+
+        // First response with counter 100: accepted
+        auto o1 = disp.dispatch(D::Infotainment, uuid.data(), uuid.size(), true, 100);
+        CHECK(o1.routed);
+        CHECK(o1.drop_reason == R::None);
+
+        // Duplicate counter 100: dropped as replay
+        auto o2 = disp.dispatch(D::Infotainment, uuid.data(), uuid.size(), true, 100);
+        CHECK(!o2.routed);
+        CHECK(o2.drop_reason == R::Replay);
+
+        // Higher counter 105: accepted
+        auto o3 = disp.dispatch(D::Infotainment, uuid.data(), uuid.size(), true, 105);
+        CHECK(o3.routed);
+
+        // Out-of-order counter 102 (within 64-bit window): accepted
+        auto o4 = disp.dispatch(D::Infotainment, uuid.data(), uuid.size(), true, 102);
+        CHECK(o4.routed);
+
+        // Duplicate of out-of-order counter 102: dropped as replay
+        auto o5 = disp.dispatch(D::Infotainment, uuid.data(), uuid.size(), true, 102);
+        CHECK(!o5.routed);
+        CHECK(o5.drop_reason == R::Replay);
+
+        // Counter 40 (more than 64 behind highest 105): dropped as replay
+        auto o6 = disp.dispatch(D::Infotainment, uuid.data(), uuid.size(), true, 40);
+        CHECK(!o6.routed);
+        CHECK(o6.drop_reason == R::Replay);
+
+        // Counter 0: initial counter 0 is accepted, duplicate counter 0 is dropped as replay
+        disp.reset();
+        id = disp.register_request(D::Infotainment, uuid);
+        CHECK(id > 0);
+        auto o_z1 = disp.dispatch(D::Infotainment, uuid.data(), uuid.size(), true, 0);
+        CHECK(o_z1.routed);
+        auto o_z2 = disp.dispatch(D::Infotainment, uuid.data(), uuid.size(), true, 0);
+        CHECK(!o_z2.routed);
+        CHECK(o_z2.drop_reason == R::Replay);
+    }
+
+    // 6. Anti-replay protection for plaintext / unauthenticated responses (counter 0 / no counter)
+    {
+        tk::BleDispatcher disp;
+        tk::BleUuid uuid = {0x20};
+        uint32_t id = disp.register_request(D::Infotainment, uuid);
+        CHECK(id > 0);
+
+        // First plaintext response without counter: accepted
+        auto o1 = disp.dispatch(D::Infotainment, uuid.data(), uuid.size(), false, 0);
+        CHECK(o1.routed);
+        CHECK(o1.drop_reason == R::None);
+
+        // Second plaintext response without counter: dropped as replay!
+        auto o2 = disp.dispatch(D::Infotainment, uuid.data(), uuid.size(), false, 0);
+        CHECK(!o2.routed);
+        CHECK(o2.drop_reason == R::Replay);
+        CHECK(disp.stats().replay_drops > 0);
+    }
+
+    // 7. Duplicate registration prevention and capacity exhaustion
+    {
+        tk::BleDispatcher disp;
+        tk::BleUuid uuid = {0x33};
+        uint32_t id1 = disp.register_request(D::Infotainment, uuid);
+        CHECK(id1 > 0);
+        // Duplicate registration for same domain and UUID is rejected
+        uint32_t id_dup = disp.register_request(D::Infotainment, uuid);
+        CHECK(id_dup == 0);
+        CHECK(disp.active_count() == 1);
+
+        // Different domain with same UUID is allowed
+        uint32_t id_diff_domain = disp.register_request(D::VehicleSecurity, uuid);
+        CHECK(id_diff_domain > 0);
+        CHECK(disp.active_count() == 2);
+
+        // Fill remaining 6 slots
+        for (uint8_t i = 3; i <= 8; ++i) {
+            tk::BleUuid u = {i, 0x55};
+            uint32_t id = disp.register_request(D::Infotainment, u);
+            CHECK(id > 0);
+        }
+        CHECK(disp.active_count() == 8);
+
+        // 9th request must fail with capacity exhausted (0)
+        tk::BleUuid u9 = {0x99};
+        uint32_t id9 = disp.register_request(D::Infotainment, u9);
+        CHECK(id9 == 0);
+
+        // Unregister one slot and register again -> succeeds
+        CHECK(disp.unregister_request(id1));
+        CHECK(disp.active_count() == 7);
+        uint32_t id_retry = disp.register_request(D::Infotainment, u9);
+        CHECK(id_retry > 0);
+        CHECK(disp.active_count() == 8);
+    }
+}
+
+static void test_session_state() {
+    using S = tk::SessionState;
+    using U = tk::SessionUpdateResult;
+
+    // 1. Pure C++ SHA-256 and HMAC-SHA256 test vectors
+    {
+        // SHA-256 of empty string
+        auto h_empty = tk::Sha256::hash(nullptr, 0);
+        char hex[65];
+        for (size_t i = 0; i < 32; ++i) {
+            std::snprintf(hex + i * 2, 3, "%02x", h_empty[i]);
+        }
+        CHECK(std::string(hex) == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+
+        // SHA-256 of "abc"
+        const uint8_t abc[] = {'a', 'b', 'c'};
+        auto h_abc = tk::Sha256::hash(abc, 3);
+        for (size_t i = 0; i < 32; ++i) {
+            std::snprintf(hex + i * 2, 3, "%02x", h_abc[i]);
+        }
+        CHECK(std::string(hex) == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+
+        // RFC 4231 Vector 1: Key = 20 bytes 0x0b, Data = "Hi There"
+        uint8_t k_rfc[20];
+        std::memset(k_rfc, 0x0b, 20);
+        const uint8_t d_rfc[] = "Hi There";
+        auto tag_rfc = tk::HmacSha256::compute(k_rfc, 20, d_rfc, 8);
+        for (size_t i = 0; i < 32; ++i) {
+            std::snprintf(hex + i * 2, 3, "%02x", tag_rfc[i]);
+        }
+        CHECK(std::string(hex) == "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7");
+
+        // Official Tesla session info KDF vector (from tesla_protocol_vectors.test.mjs):
+        // Shared secret = 1b2fce19967b79db696f909cff89ea9a (16 bytes)
+        // Label = "session info" (12 bytes)
+        // Expected key = fceb679ee7bca756fcd441bf238bf2f338629b41d9eb9c67be1b32c9672ce300
+        const uint8_t tesla_shared_secret[16] = {
+            0x1b, 0x2f, 0xce, 0x19, 0x96, 0x7b, 0x79, 0xdb,
+            0x69, 0x6f, 0x90, 0x9c, 0xff, 0x89, 0xea, 0x9a
+        };
+        const uint8_t label[] = "session info";
+        auto tesla_session_key = tk::HmacSha256::compute(tesla_shared_secret, 16, label, 12);
+        for (size_t i = 0; i < 32; ++i) {
+            std::snprintf(hex + i * 2, 3, "%02x", tesla_session_key[i]);
+        }
+        CHECK(std::string(hex) == "fceb679ee7bca756fcd441bf238bf2f338629b41d9eb9c67be1b32c9672ce300");
+    }
+
+    // 2. Protobuf encoding & decoding of Signatures.SessionInfo
+    {
+        tk::SessionInfoData in{};
+        in.counter = 12345;
+        in.epoch = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16};
+        in.clock_time = 1710000000;
+        in.status = 0;
+        in.handle = 42;
+        in.public_key = {0x04, 0xAA, 0xBB, 0xCC};
+
+        auto encoded = tk::encode_session_info(in);
+        CHECK(!encoded.empty());
+
+        tk::SessionInfoData out{};
+        CHECK(tk::decode_session_info(encoded.data(), encoded.size(), out));
+        CHECK(out.counter == 12345);
+        CHECK(out.epoch == in.epoch);
+        CHECK(out.clock_time == 1710000000);
+        CHECK(out.status == 0);
+        CHECK(out.handle == 42);
+        CHECK(out.public_key == in.public_key);
+
+        // Corrupt / truncated bytes fail gracefully
+        tk::SessionInfoData corrupt{};
+        CHECK(!tk::decode_session_info(nullptr, 0, corrupt));
+        uint8_t bad_varint[] = {0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88};
+        CHECK(!tk::decode_session_info(bad_varint, sizeof(bad_varint), corrupt));
+    }
+
+    // 3. Handshake and HMAC validation against Request-UUID
+    {
+        tk::SessionTracker session;
+        CHECK(session.state() == S::Unauthenticated);
+        CHECK(!session.is_authenticated());
+
+        std::array<uint8_t, 16> req_uuid = {0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,
+                                            0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x00};
+        session.start_handshake(req_uuid);
+        CHECK(session.state() == S::Authenticating);
+        CHECK(session.has_pending_handshake());
+
+        // Prepare session info protobuf
+        tk::SessionInfoData data{};
+        data.counter = 10;
+        data.epoch = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16};
+        data.clock_time = 1000;
+        data.status = 0;
+        auto encoded_info = tk::encode_session_info(data);
+
+        // Derive session info key and HMAC tag: HMAC(key, challenge || encoded_info)
+        const uint8_t dummy_key[32] = {0xAA};
+        std::vector<uint8_t> hmac_input;
+        hmac_input.insert(hmac_input.end(), req_uuid.begin(), req_uuid.end());
+        hmac_input.insert(hmac_input.end(), encoded_info.begin(), encoded_info.end());
+        auto valid_tag = tk::HmacSha256::compute(dummy_key, sizeof(dummy_key),
+                                                 hmac_input.data(), hmac_input.size());
+
+        // UUID mismatch rejection
+        std::array<uint8_t, 16> wrong_uuid = {0xFF};
+        auto res_uuid = session.update_session(wrong_uuid.data(), wrong_uuid.size(),
+                                               encoded_info.data(), encoded_info.size(),
+                                               valid_tag.data(), valid_tag.size(),
+                                               dummy_key, sizeof(dummy_key));
+        CHECK(res_uuid == U::UuidMismatch);
+        CHECK(session.state() == S::Authenticating);
+
+        // Tampered HMAC tag rejection
+        auto bad_tag = valid_tag;
+        bad_tag[0] ^= 0x01;
+        auto res_hmac = session.update_session(req_uuid.data(), req_uuid.size(),
+                                               encoded_info.data(), encoded_info.size(),
+                                               bad_tag.data(), bad_tag.size(),
+                                               dummy_key, sizeof(dummy_key));
+        CHECK(res_hmac == U::InvalidHmac);
+        CHECK(session.state() == S::Authenticating);
+
+        // Truncated HMAC tag (e.g. 16 bytes) must be rejected
+        auto res_trunc = session.update_session(req_uuid.data(), req_uuid.size(),
+                                                encoded_info.data(), encoded_info.size(),
+                                                valid_tag.data(), 16,
+                                                dummy_key, sizeof(dummy_key));
+        CHECK(res_trunc == U::InvalidHmac);
+        CHECK(session.state() == S::Authenticating);
+
+        // Missing tag when key is provided must be rejected
+        auto res_missing_tag = session.update_session(req_uuid.data(), req_uuid.size(),
+                                                      encoded_info.data(), encoded_info.size(),
+                                                      nullptr, 0,
+                                                      dummy_key, sizeof(dummy_key));
+        CHECK(res_missing_tag == U::InvalidHmac);
+        CHECK(session.state() == S::Authenticating);
+
+        // Tag provided without key must be rejected (cannot verify)
+        auto res_no_key = session.update_session(req_uuid.data(), req_uuid.size(),
+                                                 encoded_info.data(), encoded_info.size(),
+                                                 valid_tag.data(), valid_tag.size(),
+                                                 nullptr, 0);
+        CHECK(res_no_key == U::InvalidHmac);
+        CHECK(session.state() == S::Authenticating);
+
+        // Valid UUID + valid HMAC -> Success!
+        auto res_ok = session.update_session(req_uuid.data(), req_uuid.size(),
+                                             encoded_info.data(), encoded_info.size(),
+                                             valid_tag.data(), valid_tag.size(),
+                                             dummy_key, sizeof(dummy_key));
+        CHECK(res_ok == U::Ok);
+        CHECK(session.state() == S::Established);
+        CHECK(session.is_authenticated());
+        CHECK(session.counter() == 10);
+        CHECK(session.clock_time() == 1000);
+        CHECK(!session.has_pending_handshake());
+    }
+
+    // 4. Monotonic counter alignment max(local, reported) per signer.go:103-107 & patch 0005
+    {
+        tk::SessionTracker session;
+        std::array<uint8_t, 16> epoch_a = {0x0A};
+        session.set_established(epoch_a, 50, 1000);
+        CHECK(session.counter() == 50);
+
+        // Advance counter via outgoing command
+        uint32_t tx1 = 0;
+        CHECK(session.next_tx_counter(tx1));
+        CHECK(tx1 == 51);
+        CHECK(session.counter() == 51);
+
+        // Vehicle reports counter below ours (e.g. 20) with advanced clock (1010) on SAME epoch.
+        // Signer.go & patch 0005 maintain max(local, reported) -> keeps 51, does NOT drop to 20!
+        tk::SessionInfoData update1{};
+        update1.epoch = epoch_a;
+        update1.clock_time = 1010;
+        update1.counter = 20;
+        update1.public_key = {0x04, 0x11, 0x22};
+        auto enc1 = tk::encode_session_info(update1);
+        auto res1 = session.update_session(nullptr, 0, enc1.data(), enc1.size(),
+                                           nullptr, 0, nullptr, 0);
+        CHECK(res1 == U::Ok);
+        CHECK(session.counter() == 51); // Kept higher local counter on same epoch!
+        CHECK(session.clock_time() == 1010);
+
+        // Vehicle reports higher counter (80) on same epoch -> advances to 80
+        tk::SessionInfoData update2{};
+        update2.epoch = epoch_a;
+        update2.clock_time = 1020;
+        update2.counter = 80;
+        auto enc2 = tk::encode_session_info(update2);
+        auto res2 = session.update_session(nullptr, 0, enc2.data(), enc2.size(),
+                                           nullptr, 0, nullptr, 0);
+        CHECK(res2 == U::Ok);
+        CHECK(session.counter() == 80);
+        CHECK(session.clock_time() == 1020);
+
+        // Vehicle reports new epoch (epoch_b) with starting counter 15 ->
+        // Per protocol spec, a client resets/adopts counter on epoch change
+        std::array<uint8_t, 16> epoch_b = {0x0B};
+        tk::SessionInfoData update3{};
+        update3.epoch = epoch_b;
+        update3.clock_time = 1000;
+        update3.counter = 15;
+        // Omit public_key in update3 to verify previous public key is preserved
+        auto enc3 = tk::encode_session_info(update3);
+        auto res3 = session.update_session(nullptr, 0, enc3.data(), enc3.size(),
+                                           nullptr, 0, nullptr, 0);
+        CHECK(res3 == U::Ok);
+        CHECK(session.epoch() == epoch_b);
+        CHECK(session.counter() == 15); // Adopted vehicle's new epoch counter!
+
+        // On epoch_b: vehicle reports lower counter 5 with advanced clock (1010) ->
+        // Intra-epoch monotonicity preserves 15!
+        tk::SessionInfoData update4{};
+        update4.epoch = epoch_b;
+        update4.clock_time = 1010;
+        update4.counter = 5;
+        auto enc4 = tk::encode_session_info(update4);
+        auto res4 = session.update_session(nullptr, 0, enc4.data(), enc4.size(),
+                                           nullptr, 0, nullptr, 0);
+        CHECK(res4 == U::Ok);
+        CHECK(session.counter() == 15); // Preserved on same epoch!
+        CHECK(session.clock_time() == 1010);
+
+        // On epoch_b: vehicle reports higher counter 40 with advanced clock (1020) -> advances to 40
+        tk::SessionInfoData update5{};
+        update5.epoch = epoch_b;
+        update5.clock_time = 1020;
+        update5.counter = 40;
+        auto enc5 = tk::encode_session_info(update5);
+        auto res5 = session.update_session(nullptr, 0, enc5.data(), enc5.size(),
+                                           nullptr, 0, nullptr, 0);
+        CHECK(res5 == U::Ok);
+        CHECK(session.counter() == 40);
+        CHECK(session.clock_time() == 1020);
+
+        // Stale clock_time on unchanged epoch: clock_time went backwards -> rejected
+        tk::SessionInfoData update_stale{};
+        update_stale.epoch = epoch_b;
+        update_stale.clock_time = 900; // < 1020
+        update_stale.counter = 90;
+        auto enc_stale = tk::encode_session_info(update_stale);
+        auto res_stale = session.update_session(nullptr, 0, enc_stale.data(), enc_stale.size(),
+                                               nullptr, 0, nullptr, 0);
+        CHECK(res_stale == U::StaleClockTime);
+    }
+
+    // 5. Key Not On Whitelist handling
+    {
+        tk::SessionTracker session;
+        session.set_established({1}, 10, 1000);
+        CHECK(session.is_authenticated());
+
+        tk::SessionInfoData rejected{};
+        rejected.status = 1; // KEY_NOT_ON_WHITELIST
+        auto enc = tk::encode_session_info(rejected);
+        auto res = session.update_session(nullptr, 0, enc.data(), enc.size(), nullptr, 0, nullptr, 0);
+        CHECK(res == U::KeyNotOnWhitelist);
+        CHECK(session.state() == S::Unauthenticated);
+        CHECK(!session.is_authenticated());
+    }
+
+    // 6. NVS export and import with age validation
+    {
+        tk::SessionTracker session;
+        std::array<uint8_t, 16> epoch = {0x55, 0x66};
+        session.set_established(epoch, 200, 5000);
+
+        auto nvs_bytes = session.export_for_nvs();
+        CHECK(!nvs_bytes.empty());
+
+        // Import into fresh session with valid age: current_time = 6000 (age 1000s <= 3600s)
+        tk::SessionTracker loaded;
+        CHECK(loaded.import_from_nvs(nvs_bytes.data(), nvs_bytes.size(), 6000, 3600));
+        CHECK(loaded.is_authenticated());
+        CHECK(loaded.counter() == 200);
+        CHECK(loaded.epoch() == epoch);
+        CHECK(loaded.clock_time() == 5000);
+
+        // Import with expired age: current_time = 10000 (age 5000s > 3600s) -> rejected
+        tk::BleSessionTracker stale;
+        CHECK(!stale.import_from_nvs(nvs_bytes.data(), nvs_bytes.size(), 10000, 3600));
+        CHECK(!stale.is_authenticated());
+    }
+
+    // 7. Counter rollover protection (signer.go:171)
+    {
+        tk::SessionTracker session;
+        session.set_established({1}, 0xFFFFFFFE, 1000);
+        uint32_t c = 0;
+        CHECK(session.next_tx_counter(c));
+        CHECK(c == 0xFFFFFFFF);
+        // Next attempt hits rollover: refused!
+        CHECK(!session.next_tx_counter(c));
+    }
+}
+
+static void test_command_runner() {
+    using namespace tk;
+
+    // 1. Enqueue & FIFO ordering and queue saturation
+    {
+        CommandRunner runner;
+        CHECK(!runner.has_active_command());
+        CHECK(runner.queue_size() == 0);
+        CHECK(!runner.is_queue_full());
+
+        // Enqueue up to capacity (kMaxQueueSize = 8)
+        for (uint32_t i = 0; i < CommandRunner::kMaxQueueSize; ++i) {
+            std::string name = "Cmd_" + std::to_string(i);
+            uint32_t id = runner.enqueue(name, BleDomain::VehicleSecurity, WakePolicy::WakeIfNeeded, 20000, 1000);
+            CHECK(id == i + 1);
+            CHECK(runner.queue_size() == i + 1);
+        }
+        CHECK(runner.is_queue_full());
+
+        // 9th enqueue must be rejected
+        uint32_t rej = runner.enqueue("Cmd_Overflow", BleDomain::VehicleSecurity, WakePolicy::WakeIfNeeded, 20000, 1000);
+        CHECK(rej == 0);
+        CHECK(runner.queue_size() == CommandRunner::kMaxQueueSize);
+
+        // Verify FIFO front is Cmd_0 with ID 1
+        CommandRequest* front = runner.current_command();
+        CHECK(front != nullptr);
+        CHECK(front->id == 1);
+        CHECK(front->name == "Cmd_0");
+
+        // Pop front command
+        runner.pop_current();
+        CHECK(runner.queue_size() == CommandRunner::kMaxQueueSize - 1);
+        front = runner.current_command();
+        CHECK(front != nullptr);
+        CHECK(front->id == 2);
+        CHECK(front->name == "Cmd_1");
+
+        // Clear all
+        runner.clear();
+        CHECK(runner.queue_size() == 0);
+        CHECK(!runner.has_active_command());
+        CHECK(runner.current_command() == nullptr);
+    }
+
+    // 2. Wake-up Policy Coordination
+    {
+        // 2a. NoWakeSkip when vehicle is asleep
+        {
+            CommandRunner runner;
+            // Pre-authenticate VCSEC so it reaches the wake check
+            runner.vcsec_session().set_established({1}, 10, 1000);
+
+            bool completed_called = false;
+            bool success_val = true;
+            std::string err_val;
+            runner.enqueue("ChargePoll", BleDomain::Infotainment, WakePolicy::NoWakeSkip, 20000, 1000, {},
+                           [&](bool ok, const std::string& err) {
+                               completed_called = true;
+                               success_val = ok;
+                               err_val = err;
+                           });
+
+            TxAction act = runner.tick(1000, true /* connected */, false /* awake */, true /* asleep */);
+            CHECK(act == TxAction::None);
+
+            CommandRequest* cmd = runner.current_command();
+            CHECK(cmd != nullptr);
+            CHECK(cmd->is_completed);
+            CHECK(!cmd->is_success);
+            CHECK(cmd->state == CommandState::Skipped);
+            CHECK(cmd->terminal_reason == TerminalReason::VehicleAsleep);
+            CHECK(completed_called);
+            CHECK(!success_val);
+            CHECK(err_val == "vehicle asleep");
+        }
+
+        // 2b. NoWakeFail when vehicle is asleep
+        {
+            CommandRunner runner;
+            runner.vcsec_session().set_established({1}, 10, 1000);
+
+            runner.enqueue("ChargeCmd", BleDomain::Infotainment, WakePolicy::NoWakeFail, 20000, 1000);
+            TxAction act = runner.tick(1000, true, false /* awake */, true /* asleep */);
+            CHECK(act == TxAction::None);
+
+            CommandRequest* cmd = runner.current_command();
+            CHECK(cmd != nullptr);
+            CHECK(cmd->is_completed);
+            CHECK(!cmd->is_success);
+            CHECK(cmd->state == CommandState::Failed);
+            CHECK(cmd->terminal_reason == TerminalReason::VehicleAsleep);
+        }
+
+        // 2c. WakeIfNeeded when vehicle is asleep -> coordinates wake sequence
+        {
+            CommandRunner runner;
+            runner.vcsec_session().set_established({1}, 10, 1000);
+
+            runner.enqueue("ChargeStart", BleDomain::Infotainment, WakePolicy::WakeIfNeeded, 20000, 1000);
+            TxAction act = runner.tick(1000, true, false /* awake */, true /* asleep */);
+            CHECK(act == TxAction::SendWake);
+
+            CommandRequest* cmd = runner.current_command();
+            CHECK(cmd != nullptr);
+            CHECK(!cmd->is_completed);
+            CHECK(cmd->state == CommandState::WaitingWake);
+            CHECK(cmd->phase == CommandPhase::EnsuringAwake);
+
+            // Notify vehicle is now awake
+            runner.notify_vehicle_awake(true);
+
+            // Now vehicle is awake, but infotainment session not established yet -> needs info session
+            act = runner.tick(1100, true, true /* awake */, false /* asleep */);
+            CHECK(act == TxAction::SendInfoSessionInfoRequest);
+            CHECK(cmd->state == CommandState::WaitingInfoAuth);
+            CHECK(cmd->phase == CommandPhase::EnsuringInfotainmentSession);
+        }
+
+        // 2d. WakeIfNeeded when vehicle is already awake -> skips wake sequence directly
+        {
+            CommandRunner runner;
+            runner.vcsec_session().set_established({1}, 10, 1000);
+            runner.info_session().set_established({2}, 20, 1000);
+
+            runner.enqueue("ChargeStart", BleDomain::Infotainment, WakePolicy::WakeIfNeeded, 20000, 1000);
+            TxAction act = runner.tick(1000, true, true /* awake */, false /* asleep */);
+            CHECK(act == TxAction::SendCommandPayload);
+
+            CommandRequest* cmd = runner.current_command();
+            CHECK(cmd != nullptr);
+            CHECK(cmd->state == CommandState::Ready);
+            CHECK(cmd->phase == CommandPhase::SendingRequest);
+        }
+
+        // 2e. NoWakeSkip when sleep state is Unknown -> does NOT skip, proceeds to infotainment auth
+        {
+            CommandRunner runner;
+            runner.vcsec_session().set_established({1}, 10, 1000);
+
+            runner.enqueue("ChargePoll", BleDomain::Infotainment, WakePolicy::NoWakeSkip, 20000, 1000);
+            // Neither awake nor asleep -> Unknown
+            TxAction act = runner.tick(1000, true /* connected */, false /* awake */, false /* asleep */);
+            CHECK(act == TxAction::SendInfoSessionInfoRequest);
+
+            CommandRequest* cmd = runner.current_command();
+            CHECK(cmd != nullptr);
+            CHECK(!cmd->is_completed);
+            CHECK(cmd->state == CommandState::WaitingInfoAuth);
+        }
+
+        // 2f. NoWakeFail when sleep state is Unknown -> does NOT fail, proceeds to infotainment auth
+        {
+            CommandRunner runner;
+            runner.vcsec_session().set_established({1}, 10, 1000);
+
+            runner.enqueue("ChargeCmd", BleDomain::Infotainment, WakePolicy::NoWakeFail, 20000, 1000);
+            TxAction act = runner.tick(1000, true, false /* awake */, false /* asleep */);
+            CHECK(act == TxAction::SendInfoSessionInfoRequest);
+
+            CommandRequest* cmd = runner.current_command();
+            CHECK(cmd != nullptr);
+            CHECK(!cmd->is_completed);
+            CHECK(cmd->state == CommandState::WaitingInfoAuth);
+        }
+
+        // 2g. WakeIfNeeded when sleep state is Unknown -> coordinates wake
+        {
+            CommandRunner runner;
+            runner.vcsec_session().set_established({1}, 10, 1000);
+
+            runner.enqueue("ChargeStart", BleDomain::Infotainment, WakePolicy::WakeIfNeeded, 20000, 1000);
+            TxAction act = runner.tick(1000, true, false /* awake */, false /* asleep */);
+            CHECK(act == TxAction::SendWake);
+
+            CommandRequest* cmd = runner.current_command();
+            CHECK(cmd != nullptr);
+            CHECK(cmd->state == CommandState::WaitingWake);
+
+            // On next tick without explicit notify, if is_awake becomes true, advances immediately without timeout
+            act = runner.tick(1050, true, true /* now awake */, false /* asleep */);
+            CHECK(act == TxAction::SendInfoSessionInfoRequest);
+            CHECK(cmd->state == CommandState::WaitingInfoAuth);
+        }
+    }
+
+    // 3. Prerequisite Phase Progression (VCSEC Auth -> Wake -> Infotainment Auth -> Ready)
+    {
+        CommandRunner runner;
+        // Unauthenticated initial state
+        CHECK(!runner.vcsec_session().is_authenticated());
+        CHECK(!runner.info_session().is_authenticated());
+
+        runner.enqueue("ClimateOn", BleDomain::Infotainment, WakePolicy::WakeIfNeeded, 20000, 1000);
+
+        // Step 1: Infotainment requires VCSEC session first
+        TxAction act = runner.tick(1000, true, true);
+        CHECK(act == TxAction::SendVcsecSessionInfoRequest);
+        CHECK(runner.current_command()->state == CommandState::WaitingVcsecAuth);
+        CHECK(runner.current_command()->phase == CommandPhase::EnsuringVcsecSession);
+
+        // Provide VCSEC SessionInfo response
+        SessionInfoData vcsec_data{};
+        vcsec_data.epoch = {1, 2, 3};
+        vcsec_data.counter = 5;
+        vcsec_data.clock_time = 1000;
+        auto vcsec_bytes = encode_session_info(vcsec_data);
+        auto res = runner.handle_session_info(BleDomain::VehicleSecurity, nullptr, 0,
+                                             vcsec_bytes.data(), vcsec_bytes.size(),
+                                             nullptr, 0, nullptr, 0);
+        CHECK(res == SessionUpdateResult::Ok);
+        CHECK(runner.vcsec_session().is_authenticated());
+
+        // Step 2: Now VCSEC is satisfied, Infotainment session is needed
+        act = runner.tick(1100, true, true);
+        CHECK(act == TxAction::SendInfoSessionInfoRequest);
+        CHECK(runner.current_command()->state == CommandState::WaitingInfoAuth);
+        CHECK(runner.current_command()->phase == CommandPhase::EnsuringInfotainmentSession);
+
+        // Provide Infotainment SessionInfo response
+        SessionInfoData info_data{};
+        info_data.epoch = {4, 5, 6};
+        info_data.counter = 12;
+        info_data.clock_time = 1000;
+        auto info_bytes = encode_session_info(info_data);
+        res = runner.handle_session_info(BleDomain::Infotainment, nullptr, 0,
+                                        info_bytes.data(), info_bytes.size(),
+                                        nullptr, 0, nullptr, 0);
+        CHECK(res == SessionUpdateResult::Ok);
+        CHECK(runner.info_session().is_authenticated());
+
+        // Step 3: All prerequisites satisfied -> Ready to send command
+        act = runner.tick(1200, true, true);
+        CHECK(act == TxAction::SendCommandPayload);
+        CHECK(runner.current_command()->state == CommandState::Ready);
+        CHECK(runner.current_command()->phase == CommandPhase::SendingRequest);
+    }
+
+    // 4. "Whitelist Add Key" Session Bypass
+    {
+        CommandRunner runner;
+        CHECK(!runner.vcsec_session().is_authenticated());
+
+        runner.enqueue("Whitelist Add Key", BleDomain::VehicleSecurity, WakePolicy::WakeIfNeeded, 20000, 1000);
+
+        // Bypass session auth directly
+        TxAction act = runner.tick(1000, true, false);
+        CHECK(act == TxAction::SendCommandPayload);
+        CHECK(runner.current_command()->state == CommandState::Ready);
+        CHECK(runner.current_command()->phase == CommandPhase::SendingRequest);
+    }
+
+    // 4b. "Wake" Session Flow and Immediate TX Completion
+    {
+        CommandRunner runner;
+        CHECK(!runner.vcsec_session().is_authenticated());
+
+        bool completed = false;
+        bool success_res = false;
+        runner.enqueue("Wake", BleDomain::VehicleSecurity, WakePolicy::NoWakeFail, 9000, 1000, {},
+                       [&](bool ok, const std::string&) {
+                           completed = true;
+                           success_res = ok;
+                       });
+
+        // "Wake" requires VCSEC session authentication to encrypt the RKE action payload
+        TxAction act = runner.tick(1000, true /* connected */, false /* awake */, true /* asleep */);
+        CHECK(act == TxAction::SendVcsecSessionInfoRequest);
+        CHECK(runner.current_command()->state == CommandState::WaitingVcsecAuth);
+        CHECK(runner.current_command()->phase == CommandPhase::EnsuringVcsecSession);
+
+        // Simulate session info arrival via handle_session_info
+        SessionInfoData vcsec_data{};
+        vcsec_data.epoch = {1, 2, 3};
+        vcsec_data.counter = 1;
+        vcsec_data.clock_time = 1000;
+        auto vcsec_bytes = encode_session_info(vcsec_data);
+        auto res = runner.handle_session_info(BleDomain::VehicleSecurity, nullptr, 0,
+                                             vcsec_bytes.data(), vcsec_bytes.size(),
+                                             nullptr, 0, nullptr, 0);
+        CHECK(res == SessionUpdateResult::Ok);
+        CHECK(runner.vcsec_session().is_authenticated());
+
+        act = runner.tick(1020, true, false, true);
+        CHECK(act == TxAction::SendCommandPayload);
+        CHECK(runner.current_command()->state == CommandState::Ready);
+        CHECK(runner.current_command()->phase == CommandPhase::SendingRequest);
+
+        // Notifying TX completion immediately finishes "Wake" with success (no commandStatus acknowledgement needed)
+        runner.notify_tx_complete(1050);
+        CHECK(completed);
+        CHECK(success_res);
+        CHECK(runner.current_command()->is_completed);
+        CHECK(runner.current_command()->is_success);
+        CHECK(runner.current_command()->terminal_reason == TerminalReason::Success);
+    }
+
+    // 5. BleDispatcher Integration, Routing & Anti-Replay
+    {
+        CommandRunner runner;
+        runner.vcsec_session().set_established({1}, 10, 1000);
+        runner.info_session().set_established({2}, 20, 1000);
+
+        BleUuid cmd_uuid = {0xAA, 0xBB, 0xCC, 0xDD, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12};
+        runner.enqueue("Lock", BleDomain::VehicleSecurity, WakePolicy::WakeIfNeeded, 20000, 1000, cmd_uuid);
+
+        TxAction act = runner.tick(1000, true, true);
+        CHECK(act == TxAction::SendCommandPayload);
+
+        // Confirm TX complete: registers with dispatcher
+        runner.notify_tx_complete(1050);
+        CommandRequest* cmd = runner.current_command();
+        CHECK(cmd->state == CommandState::AwaitingResponse);
+        CHECK(cmd->phase == CommandPhase::AwaitingResponse);
+        CHECK(cmd->dispatcher_request_id != 0);
+        CHECK(runner.dispatcher().has_request(cmd->dispatcher_request_id));
+
+        // 5a. Route response matching UUID
+        auto outcome = runner.handle_response(BleDomain::VehicleSecurity, cmd_uuid.data(), cmd_uuid.size(),
+                                             true, 100, true, "");
+        CHECK(outcome.routed);
+        CHECK(cmd->is_completed);
+        CHECK(cmd->is_success);
+        CHECK(cmd->terminal_reason == TerminalReason::Success);
+        // Request unregistered from dispatcher
+        CHECK(!runner.dispatcher().has_request(cmd->dispatcher_request_id));
+
+        // 5b. Replay check: second response with same counter is dropped
+        auto replay_outcome = runner.dispatcher().dispatch(BleDomain::VehicleSecurity, cmd_uuid.data(), cmd_uuid.size(),
+                                                           true, 100);
+        // Dispatcher slot was unregistered or duplicate
+        CHECK(!replay_outcome.routed);
+    }
+
+    // 6. Outcome Classification: is_nominal_already_set mapping
+    {
+        CommandRunner runner;
+        runner.vcsec_session().set_established({1}, 10, 1000);
+
+        BleUuid cmd_uuid = {0x11, 0x22, 0x33, 0x44};
+        runner.enqueue("DoorLock", BleDomain::VehicleSecurity, WakePolicy::WakeIfNeeded, 20000, 1000, cmd_uuid);
+        runner.tick(1000, true, true);
+        runner.notify_tx_complete(1010);
+
+        // Vehicle replies with error containing "already_set" (e.g. door is already locked)
+        auto outcome = runner.handle_response(BleDomain::VehicleSecurity, cmd_uuid.data(), cmd_uuid.size(),
+                                             false, 0, false, "door_lock: already_set");
+        CHECK(outcome.routed);
+        CommandRequest* cmd = runner.current_command();
+        CHECK(cmd->is_completed);
+        CHECK(cmd->is_success); // Treated as idempotent success!
+        CHECK(cmd->is_already_set);
+        CHECK(cmd->terminal_reason == TerminalReason::AlreadySet);
+        CHECK(cmd->error_message == "command executed successfully");
+    }
+
+    // 7. Generic Error Outcome
+    {
+        CommandRunner runner;
+        runner.vcsec_session().set_established({1}, 10, 1000);
+
+        BleUuid cmd_uuid = {0x55, 0x66, 0x77, 0x88};
+        runner.enqueue("Honk", BleDomain::VehicleSecurity, WakePolicy::WakeIfNeeded, 20000, 1000, cmd_uuid);
+        runner.tick(1000, true, true);
+        runner.notify_tx_complete(1010);
+
+        auto outcome = runner.handle_response(BleDomain::VehicleSecurity, cmd_uuid.data(), cmd_uuid.size(),
+                                             false, 0, false, "remote_access_disabled");
+        CHECK(outcome.routed);
+        CommandRequest* cmd = runner.current_command();
+        CHECK(cmd->is_completed);
+        CHECK(!cmd->is_success);
+        CHECK(!cmd->is_already_set);
+        CHECK(cmd->error_message == "remote_access_disabled");
+        CHECK(cmd->terminal_reason == TerminalReason::AuthenticationFailed);
+    }
+
+    // 8. Response Timeout and Retry Arbitration
+    {
+        CommandRunner runner;
+        runner.vcsec_session().set_established({1}, 10, 1000);
+
+        runner.enqueue("Flash", BleDomain::VehicleSecurity, WakePolicy::WakeIfNeeded, 30000, 1000);
+        runner.tick(1000, true, true);
+        runner.notify_tx_complete(1010);
+
+        CommandRequest* cmd = runner.current_command();
+        CHECK(cmd->state == CommandState::AwaitingResponse);
+        CHECK(cmd->retry_count == 0);
+
+        // Advance past response timeout (7000ms): 1010 + 7000 = 8010
+        TxAction act = runner.tick(8015, true, true);
+        CHECK(act == TxAction::SendCommandPayload); // Retry #1
+        CHECK(cmd->state == CommandState::Ready);
+        CHECK(cmd->retry_count == 1);
+        runner.notify_tx_complete(8020);
+
+        // Advance again for retry #2
+        act = runner.tick(15025, true, true);
+        CHECK(act == TxAction::SendCommandPayload);
+        CHECK(cmd->retry_count == 2);
+        runner.notify_tx_complete(15030);
+
+        // Advance again for retry #3 (reaches max_retries = 3)
+        act = runner.tick(22035, true, true);
+        CHECK(act == TxAction::SendCommandPayload);
+        CHECK(cmd->retry_count == 3);
+        runner.notify_tx_complete(22040);
+
+        // Next timeout exceeds max_retries: fails permanently
+        act = runner.tick(29045, true, true);
+        CHECK(act == TxAction::None);
+        CHECK(cmd->is_completed);
+        CHECK(!cmd->is_success);
+        CHECK(cmd->state == CommandState::Failed);
+        CHECK(cmd->terminal_reason == TerminalReason::MaxRetriesExceeded);
+    }
+
+    // 9. Overall Command Deadline Exhaustion
+    {
+        CommandRunner runner;
+        runner.vcsec_session().set_established({1}, 10, 1000);
+
+        runner.enqueue("TestDeadline", BleDomain::VehicleSecurity, WakePolicy::WakeIfNeeded, 5000, 1000);
+        TxAction act = runner.tick(1000, true, true);
+        CHECK(act == TxAction::SendCommandPayload);
+        runner.notify_tx_complete(1050);
+
+        // Tick after deadline (1000 + 5000 = 6000)
+        act = runner.tick(6001, true, true);
+        CHECK(act == TxAction::None);
+        CommandRequest* cmd = runner.current_command();
+        CHECK(cmd->is_completed);
+        CHECK(!cmd->is_success);
+        CHECK(cmd->terminal_reason == TerminalReason::DeadlineExceeded);
+    }
+
+    // 10. Disconnection during waiting
+    {
+        CommandRunner runner;
+        runner.vcsec_session().set_established({1}, 10, 1000);
+
+        runner.enqueue("TestDisconnect", BleDomain::VehicleSecurity, WakePolicy::WakeIfNeeded, 5000, 1000);
+        runner.tick(1000, true, true);
+        runner.notify_tx_complete(1050);
+
+        // Disconnected at 2000ms: within deadline, runner waits
+        TxAction act = runner.tick(2000, false /* disconnected */, true);
+        CHECK(act == TxAction::None);
+        CHECK(!runner.current_command()->is_completed);
+
+        // Disconnected past deadline (6001ms): deadline exhausted
+        act = runner.tick(6001, false, true);
+        CHECK(act == TxAction::None);
+        CHECK(runner.current_command()->is_completed);
+        CHECK(!runner.current_command()->is_success);
+        CHECK(runner.current_command()->terminal_reason == TerminalReason::DeadlineExceeded);
+    }
+
+    // 11. RxFramer Integration in CommandRunner
+    {
+        CommandRunner runner;
+        std::vector<uint8_t> received;
+
+        // Valid frame: 2-byte length 4, followed by 4 payload bytes
+        std::vector<uint8_t> chunk = {0x00, 0x04, 0xDE, 0xAD, 0xBE, 0xEF};
+        size_t extracted = runner.push_rx_chunk(
+            chunk.data(), chunk.size(), 1000,
+            [&](const uint8_t* payload, size_t len) {
+                received.assign(payload, payload + len);
+            },
+            [](RxFramerDropReason, size_t) {});
+
+        CHECK(extracted == 1);
+        CHECK(received.size() == 4);
+        CHECK(received[0] == 0xDE && received[3] == 0xEF);
+    }
+}
+
 int main() {
+    test_rx_framing();
+    test_ble_dispatcher();
+    test_session_state();
+    test_command_runner();
     test_vin();
     test_wifi_credentials();
     test_key_rotation();
