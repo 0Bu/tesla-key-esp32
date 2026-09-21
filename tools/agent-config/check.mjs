@@ -87,7 +87,7 @@ function directoryNames(relative) {
 
 const canonicalSkills = directoryNames(".agents/skills");
 
-const highRiskSkills = new Set(["flash-esp32", "ship", "usb-recovery"]);
+const highRiskSkills = new Set(["deploy", "flash-esp32", "ship", "usb-recovery"]);
 const readOnlySkills = new Set([
   "device-diag", "display-preview", "mock-test", "ota-release-verify", "pr-hygiene", "project-review",
   "skill-audit", "vehicle-command-audit",
@@ -117,6 +117,7 @@ const usbOtaNotStateChanging = /GET \/ota\/check[^.!?]*(?:is not|isn't|not) stat
 const usbAbsentApprovalProceeds = /(?:(?:approval|authorization)[^.!?]*(?:absent|missing|not obtained)|without (?:separate )?(?:approval|authorization))[^.!?]*(?:continue|proceed|run|contact|send|request)/i;
 const reviewedSkillSha256 = new Map([
   ["add-logic-test", "5bc6af893a1f95a5b4b1d2302da43c1e5e8de11d5e65e1c62d342e0dbfe6a327"],
+  ["deploy", "855ba875f47a51ec66ba84862abf32b3f657820e8e4b6cc277df02e1357dfcf0"],
   ["device-diag", "d524b5dee5d58be5bfda8630099ab36ada9dd4a77500cc6cc9126970efc376cb"],
   ["display-preview", "4bff95d0314d50ce29d67beac7ef4f9db1ebcbb2fa609335e560e162f5a1ed46"],
   ["feature-docs", "f66394acb3a1d8bb86ee716fddda83236bfdfca404282b93dce0945e6c26a00b"],
