@@ -332,10 +332,12 @@ public:
         }
 
         // 3. If currently waiting for wake and the vehicle is confirmed awake, advance immediately
-        if (cmd->state == CommandState::WaitingWake && is_awake) {
-            cmd->state = CommandState::Idle;
-            cmd->phase_started_at_ms = now_ms;
+        if (is_awake) {
             cmd->wake_confirmed = true;
+            if (cmd->state == CommandState::WaitingWake) {
+                cmd->state = CommandState::Idle;
+                cmd->phase_started_at_ms = now_ms;
+            }
         }
 
         // 4. Step timeouts for authentication / wake phases
@@ -485,11 +487,11 @@ public:
                 finish_command_(cmd, true, "", TerminalReason::Success);
                 return;
             }
+            cmd->wake_confirmed = true;
             if (cmd->state == CommandState::WaitingWake || cmd->phase == CommandPhase::EnsuringAwake) {
                 // Advance to infotainment session or ready; the wake is not re-sent afterwards
                 cmd->state = CommandState::Idle;
                 cmd->phase_started_at_ms = 0;
-                cmd->wake_confirmed = true;
             }
         }
     }
