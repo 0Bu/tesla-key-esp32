@@ -51,8 +51,14 @@ $pr-hygiene is unconditional like $skill-audit and $project-review, and is the o
 re-arms at every push AND at merge — it screens this PR's title/body, its commits, and any touched
 docs for personal/private information and non-English content. Neither $project-review nor
 $skill-audit being clean establishes it; run $pr-hygiene separately.
+
+$vehicle-command-audit only arms when the diff reaches vehicle-command/BLE paths:
+main/vehicle_*, main/ble_client.*, main/logic/command_registry.hpp, patches/tesla-ble/,
+main/idf_component.yml, or .agents/skills/vehicle-command-audit/ — delete its line on PRs
+not touching the vehicle command protocol.
 -->
 - [ ] `$skill-audit` clean — PR create/push gate @ <full-40-hex-sha>
 - [ ] `$project-review` clean — merge gate @ <full-40-hex-sha>
 - [ ] `$pr-hygiene` clean — content gate @ <full-40-hex-sha>
 - [ ] `$feature-docs` synced — merge gate @ <full-40-hex-sha>
+- [ ] `$vehicle-command-audit` clean — merge gate @ <full-40-hex-sha>
