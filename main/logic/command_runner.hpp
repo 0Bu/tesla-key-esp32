@@ -238,7 +238,7 @@ public:
         } else if (success) {
             finish_command_(cmd, true, "", TerminalReason::Success);
         } else {
-            finish_command_(cmd, false, err.empty() ? "command rejected by vehicle" : err,
+            finish_command_(cmd, false, err.empty() ? "command rejected by vehicle" : err.c_str(),
                             TerminalReason::AuthenticationFailed);
         }
     }
@@ -343,12 +343,38 @@ public:
 
         // 5. Prerequisite Progression & Wake-up Policy Coordination
         if (cmd->domain == BleDomain::VehicleSecurity) {
-            // Pairing "Whitelist Add Key" starts with untrusted key, so session auth is bypassed
-            if (cmd->name == "Whitelist Add Key") {
+            // Pairing "Whitelist Add Key" starts with untrusted key, so session auth is bypassed.
+            // "Wake" is an unauthenticated RKE action designed to wake a sleeping car;
+            // it must not wait for a VCSEC session (which an asleep car cannot establish).
+            if (cmd->name == "Whitelist Add Key" || cmd->name == "Wake") {
                 cmd->state = CommandState::Ready;
                 cmd->phase = CommandPhase::SendingRequest;
                 cmd->phase_started_at_ms = now_ms;
                 return TxAction::SendCommandPayload;
+            }
+
+            // For other VCSEC commands (status poll, lock, unlock):
+            if (is_asleep) {
+                switch (cmd->wake_policy) {
+                    case WakePolicy::NoWakeSkip:
+                        finish_command_(cmd, false, "vehicle asleep", TerminalReason::VehicleAsleep);
+                        cmd->state = CommandState::Skipped;
+                        return TxAction::None;
+                    case WakePolicy::NoWakeFail:
+                        finish_command_(cmd, false, "vehicle asleep", TerminalReason::VehicleAsleep);
+                        cmd->state = CommandState::Failed;
+                        return TxAction::None;
+                    case WakePolicy::WakeIfNeeded:
+                        cmd->state = CommandState::WaitingWake;
+                        cmd->phase = CommandPhase::EnsuringAwake;
+                        cmd->phase_started_at_ms = now_ms;
+                        return TxAction::SendWake;
+                }
+            } else if (!is_awake && cmd->wake_policy == WakePolicy::WakeIfNeeded) {
+                cmd->state = CommandState::WaitingWake;
+                cmd->phase = CommandPhase::EnsuringAwake;
+                cmd->phase_started_at_ms = now_ms;
+                return TxAction::SendWake;
             }
 
             if (!vcsec_session_.is_authenticated()) {
@@ -366,15 +392,9 @@ public:
         }
 
         if (cmd->domain == BleDomain::Infotainment) {
-            // Prerequisite 1: VCSEC session
-            if (!vcsec_session_.is_authenticated()) {
-                cmd->state = CommandState::WaitingVcsecAuth;
-                cmd->phase = CommandPhase::EnsuringVcsecSession;
-                cmd->phase_started_at_ms = now_ms;
-                return TxAction::SendVcsecSessionInfoRequest;
-            }
-
-            // Prerequisite 2: Wake policy evaluation (aligned with vehicle-command & upstream)
+            // Prerequisite 1: Wake policy evaluation (aligned with vehicle-command & upstream)
+            // If the vehicle is asleep or unknown-and-wake-needed, WAKE IT FIRST before
+            // attempting session authentication (an asleep car cannot respond to SessionInfoRequest).
             if (is_asleep) {
                 switch (cmd->wake_policy) {
                     case WakePolicy::NoWakeSkip:
@@ -397,6 +417,14 @@ public:
                 cmd->phase = CommandPhase::EnsuringAwake;
                 cmd->phase_started_at_ms = now_ms;
                 return TxAction::SendWake;
+            }
+
+            // Prerequisite 2: VCSEC session (vehicle is awake or sleep policy permits)
+            if (!vcsec_session_.is_authenticated()) {
+                cmd->state = CommandState::WaitingVcsecAuth;
+                cmd->phase = CommandPhase::EnsuringVcsecSession;
+                cmd->phase_started_at_ms = now_ms;
+                return TxAction::SendVcsecSessionInfoRequest;
             }
 
             // Prerequisite 3: Infotainment session
@@ -423,6 +451,11 @@ public:
         if (!cmd) return;
 
         cmd->last_tx_ms = now_ms;
+        if (cmd->name == "Wake") {
+            // Wake action has no commandStatus acknowledgement from Tesla; transmission completes it.
+            finish_command_(cmd, true, "wake transmitted", TerminalReason::Success);
+            return;
+        }
         if (cmd->state == CommandState::Ready) {
             cmd->state = CommandState::AwaitingResponse;
             cmd->phase = CommandPhase::AwaitingResponse;
@@ -506,7 +539,7 @@ public:
         } else if (is_success) {
             finish_command_(cmd, true, "", TerminalReason::Success);
         } else {
-            finish_command_(cmd, false, error_string.empty() ? "command rejected by vehicle" : error_string,
+            finish_command_(cmd, false, error_string.empty() ? "command rejected by vehicle" : error_string.c_str(),
                             TerminalReason::AuthenticationFailed);
         }
 
@@ -523,12 +556,12 @@ public:
     }
 
 private:
-    void finish_command_(CommandRequest* cmd, bool success, const std::string& err,
-                         TerminalReason reason) noexcept {
+    [[gnu::noinline]] void finish_command_(CommandRequest* cmd, bool success, const char* err,
+                                          TerminalReason reason) noexcept {
         if (!cmd || cmd->is_completed) return;
         cmd->is_completed = true;
         cmd->is_success = success;
-        cmd->error_message = err;
+        cmd->error_message = (err != nullptr) ? err : "";
         cmd->terminal_reason = reason;
         cmd->state = success ? CommandState::Completed : CommandState::Failed;
         cmd->phase = CommandPhase::Terminal;
@@ -539,7 +572,7 @@ private:
         }
 
         if (cmd->on_complete) {
-            cmd->on_complete(success, err);
+            cmd->on_complete(success, cmd->error_message);
         }
     }
 
