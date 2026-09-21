@@ -45,6 +45,12 @@ wiring, and Context7 pin before any firmware build starts. Repository/workflow l
 tripwires, deterministic fuzzing, protocol vectors and a real Chrome/Chromium page gate run in the
 same job before the pinned four-target firmware build.
 
+`scripts/test-tesla-ble-harness.sh --require-all` (same CI job) builds the real `yoziru/tesla-ble`
+v5.2.0 with Nanopb and Mbed TLS on the host and runs `test/test_tesla_ble_harness.cpp`. It calls
+the production helpers themselves — `tk::build_ble_tx_frame` / `tk::is_well_formed_ble_frame`
+(the `drive_command_runner_()` TX path) and `tk::regenerate_private_key()` (the transaction
+behind `regenerate_key_native_()`) — so a regression in them fails there, not only in a copy.
+
 ## What's covered
 
 The firmware delegates these decision/conversion cores to IDF-free headers under
@@ -62,7 +68,7 @@ The firmware delegates these decision/conversion cores to IDF-free headers under
 | MCP protocol core (version negotiation, JSON-RPC method routing, strict integer validation) | `logic/mcp.hpp` | `mcp_server.cpp` (`/mcp` schema + executor) |
 | Shared command registry — REST + MCP names, kinds, per-surface arg keys with ONE bounds pair, `tools/list` row order, and the command-specific evcc boolean-body compatibility rule | `logic/command_registry.hpp` | `http_api.cpp` `/command` body validation + dispatch, `mcp_server.cpp` schema + executor, `command_exec.cpp` |
 | `/status` field contract — order, key names, presence rules, value shaping (golden emissions for awake+charging / asleep / unreachable+scan / factory-fresh) | `logic/status_model.hpp` (+ `logic/vehicle_data.hpp` inputs) | `http_status.cpp` `handle_status` (gather + cJSON visitor only) |
-| Shared command-outcome text (success / Tesla reason / unreachable) | `logic/command_result.hpp` | `http_api.cpp` `/command` reason, `mcp_server.cpp` tools/call result |
+| Shared command-outcome text (success / Tesla reason / unreachable) and the failure-origin classification behind the soft-desync link backstop (vehicle response / local policy / transport) | `logic/command_result.hpp` | `http_api.cpp` `/command` reason, `mcp_server.cpp` tools/call result, `vehicle_commands.cpp` `make_result_cb_` |
 | On-device display presenter (hero priority ladder, SoC gradient, RSSI→bars, SSID scroll, landscape/portrait `Orient` geometry) reading the shared UI snapshot | `logic/display_model.hpp`, `logic/ui_state.hpp` | `display.cpp` renderer `draw_landscape`/`draw_portrait` (via `VehicleController::ui_snapshot()`) |
 | Status-LED priority ladder (error/OTA/warn/WiFi/pairing/charging/asleep/SoC) reading the same UI snapshot + latched `LedAlerts` | `logic/led_status.hpp`, `logic/ui_state.hpp` | `led_status.cpp` APA102 task (via `VehicleController::ui_snapshot()`) |
 | Shared SoC colour ramp (red→amber→green), one table for the panel fill AND the LED | `logic/soc_gradient.hpp` | `logic/display_model.hpp`, `led_status.cpp` |
@@ -92,7 +98,7 @@ The firmware delegates these decision/conversion cores to IDF-free headers under
 | MQTT broker URI + save-time pre-flight (the credential-aware `mqtts://` default and its explicit-scheme override, host:port plausibility incl. userinfo, credential-free status/log projection, the probe's contiguous-heap budget, and the outcome→HTTP-status mapping that keeps "refused" apart from "unreachable") | `logic/mqtt_uri.hpp` | `mqtt_ha.cpp` `mqtt_ha_start_impl`, `http_config.cpp` `handle_set_mqtt` |
 | MQTT retained-publish ordering/retry (Discovery → availability → state, with any build/print/publish failure rearming the full sequence) | `main/mqtt_publish_sequence.hpp` | `mqtt_ha.cpp` publish task and the production cJSON gate |
 | Retained memory trend (the CRC + derived layout fingerprint a `.noinit` image must pass before it is adopted — a zeroed image is explicitly INVALID, since that is what SRAM noise most often looks like — and the carry that keeps one bucket clock across a restart, landing the reboot on a bucket boundary and drawing longer downtime as a gap) | `logic/heap_history.hpp` (`HeapPersist`) | `heap_trend.cpp` |
-| Pure BLE RX framing (2-byte BE length reassembly, 1s inter-chunk timeout, no heuristic recovery scan, aligns with teslamotors/vehicle-command `ble.go`) | `logic/rx_framing.hpp` | Step 1 of Issue 306 (orchestration seam); host-tested foundation for replacement RX loop |
+| Pure BLE RX/TX framing (2-byte BE length reassembly with an inter-chunk timeout — 1 s default as in teslamotors/vehicle-command `ble.go`, 3 s as configured by `tk::CommandRunner` — no heuristic recovery scan; TX writes builder output unchanged and refuses malformed frames) | `logic/rx_framing.hpp` | Step 1 of Issue 306 (orchestration seam); host-tested foundation for replacement RX loop |
 
 The target mapping is double-locked: `ota_update.cpp` `static_assert`s its compile-time
 image-suffix literal against `tk::image_suffix()`, so the macro and the host-tested

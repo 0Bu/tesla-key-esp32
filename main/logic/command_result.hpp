@@ -26,6 +26,30 @@ inline const char* command_result_text(bool ok, const std::string& err) {
     return err.empty() ? "vehicle not reachable" : err.c_str();
 }
 
+// Where a failed command's outcome came from, for the soft-desync link backstop:
+// - VehicleResponse: the car answered (auth/role refusal, whitelist status, rejection). The link
+//   is demonstrably working, so it resets the failure streak and counts as contact.
+// - LocalPolicy: decided on the device without any BLE exchange (the command runner's
+//   "vehicle asleep" skip/fail from the cached VCSEC flag). Neither a transport fault nor
+//   proof of contact.
+// - TransportOrTimeout: everything else (timeouts, write/build failures, lost link); counts
+//   toward the drop-and-resync streak.
+enum class CommandFailureOrigin : uint8_t {
+    TransportOrTimeout,
+    VehicleResponse,
+    LocalPolicy,
+};
+
+inline CommandFailureOrigin classify_command_failure(std::string_view err) noexcept {
+    if (err.find("vehicle asleep") != std::string_view::npos) return CommandFailureOrigin::LocalPolicy;
+    if (err.find("authentication failed") != std::string_view::npos ||
+        err.find("whitelist") != std::string_view::npos ||
+        err.find("rejected") != std::string_view::npos) {
+        return CommandFailureOrigin::VehicleResponse;
+    }
+    return CommandFailureOrigin::TransportOrTimeout;
+}
+
 class CommandError {
 public:
     enum class Severity {

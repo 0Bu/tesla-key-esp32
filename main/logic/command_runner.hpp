@@ -119,6 +119,11 @@ struct CommandRequest {
     bool is_completed{false};
     bool is_success{false};
     bool is_already_set{false};
+    // Set once this command's wake was confirmed (VCSEC reported awake, or a VehicleStatus with
+    // closureStatuses answered while it waited for a wake). From then on the wake policy is not
+    // re-evaluated: like upstream v5.2.0 the command proceeds to the infotainment session instead
+    // of re-sending Wake while the raw VCSEC sleep flag still reads ASLEEP.
+    bool wake_confirmed{false};
     std::string error_message{};
     TerminalReason terminal_reason{TerminalReason::None};
 
@@ -330,6 +335,7 @@ public:
         if (cmd->state == CommandState::WaitingWake && is_awake) {
             cmd->state = CommandState::Idle;
             cmd->phase_started_at_ms = now_ms;
+            cmd->wake_confirmed = true;
         }
 
         // 4. Step timeouts for authentication / wake phases
@@ -389,8 +395,10 @@ public:
             }
 
             // Prerequisite 2: Wake policy evaluation (aligned with vehicle-command & upstream)
-            // Once VCSEC session is established, send SendWake if vehicle is asleep / unknown
-            if (is_asleep) {
+            // Once VCSEC session is established, send SendWake if vehicle is asleep / unknown.
+            // A confirmed wake is final for this command (see CommandRequest::wake_confirmed):
+            // it proceeds to the infotainment session even while the raw flag reads ASLEEP.
+            if (!cmd->wake_confirmed && is_asleep) {
                 switch (cmd->wake_policy) {
                     case WakePolicy::NoWakeSkip:
                         finish_command_(cmd, false, "vehicle asleep", TerminalReason::VehicleAsleep);
@@ -406,7 +414,7 @@ public:
                         cmd->phase_started_at_ms = now_ms;
                         return TxAction::SendWake;
                 }
-            } else if (!is_awake && cmd->wake_policy == WakePolicy::WakeIfNeeded) {
+            } else if (!cmd->wake_confirmed && !is_awake && cmd->wake_policy == WakePolicy::WakeIfNeeded) {
                 // Sleep status is Unknown; WakeIfNeeded policy coordinates wake sequence
                 cmd->state = CommandState::WaitingWake;
                 cmd->phase = CommandPhase::EnsuringAwake;
@@ -478,9 +486,10 @@ public:
                 return;
             }
             if (cmd->state == CommandState::WaitingWake || cmd->phase == CommandPhase::EnsuringAwake) {
-                // Advance to infotainment session or ready
+                // Advance to infotainment session or ready; the wake is not re-sent afterwards
                 cmd->state = CommandState::Idle;
                 cmd->phase_started_at_ms = 0;
+                cmd->wake_confirmed = true;
             }
         }
     }
