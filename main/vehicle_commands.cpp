@@ -243,11 +243,20 @@ VehicleController::ResultCb VehicleController::make_result_cb_(
             const size_t error_size = std::min(msg.size(), completion->error.size() - 1);
             std::memcpy(completion->error.data(), msg.data(), error_size);
             completion->error[error_size] = '\0';
-            // Soft-desync backstop: when the link is churning (buffer-recovery storm) the
-            // library reports failures here but recovers internally without throwing, so
-            // ble_fault_ never fires. After kCmdFailDropStreak failures in a row, drop the
-            // link once (only while paired) to force the same clean rx-buffer/session resync.
-            if (cmd_fail_streak_.fetch_add(1) + 1 >= kCmdFailDropStreak) {
+            // Soft-desync backstop: when the link is churning (buffer-recovery storm) or
+            // timing out, drop the link after kCmdFailDropStreak consecutive transport faults.
+            // Explicit responses from the car (role refusals, auth failures, whitelist status,
+            // or nominal command rejections) prove the BLE link is answering cleanly, so they
+            // reset the streak rather than dropping the connection under legitimate negative tests.
+            const bool is_vehicle_response =
+                msg.find("authentication failed") != msg.npos ||
+                msg.find("whitelist") != msg.npos ||
+                msg.find("rejected") != msg.npos ||
+                msg.find("asleep") != msg.npos;
+            if (is_vehicle_response) {
+                cmd_fail_streak_.store(0);
+                note_reachable_();
+            } else if (cmd_fail_streak_.fetch_add(1) + 1 >= kCmdFailDropStreak) {
                 cmd_fail_streak_.store(0);
                 if (believed_paired_.load() && !ble_fault_.exchange(true)) {
                     completion->drop_link = true;

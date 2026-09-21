@@ -6052,6 +6052,7 @@ static void test_command_runner() {
     // 11. RxFramer Integration in CommandRunner
     {
         CommandRunner runner;
+        CHECK(runner.rx_framer().timeout_ms() == 3000);
         std::vector<uint8_t> received;
 
         // Valid frame: 2-byte length 4, followed by 4 payload bytes
@@ -6066,6 +6067,32 @@ static void test_command_runner() {
         CHECK(extracted == 1);
         CHECK(received.size() == 4);
         CHECK(received[0] == 0xDE && received[3] == 0xEF);
+
+        // Incomplete chunk: 2-byte header + 2 payload bytes (needs 4 payload bytes)
+        std::vector<uint8_t> partial = {0x00, 0x04, 0xAA, 0xBB};
+        runner.push_rx_chunk(partial.data(), partial.size(), 1000,
+                             [](const uint8_t*, size_t) {},
+                             [](RxFramerDropReason, size_t) {});
+        CHECK(runner.rx_framer().buffered_bytes() == 4);
+
+        // At t = 3500 (elapsed = 2500ms <= 3000ms), timeout must not drop
+        bool dropped_early = false;
+        runner.rx_framer().check_timeout(3500, [&](RxFramerDropReason, size_t) {
+            dropped_early = true;
+        });
+        CHECK(!dropped_early);
+        CHECK(runner.rx_framer().buffered_bytes() == 4);
+
+        // At t = 4001 (elapsed = 3001ms > 3000ms), timeout drops
+        RxFramerDropReason drop_reason = RxFramerDropReason::None;
+        size_t dropped_bytes = 0;
+        runner.rx_framer().check_timeout(4001, [&](RxFramerDropReason reason, size_t dropped) {
+            drop_reason = reason;
+            dropped_bytes = dropped;
+        });
+        CHECK(drop_reason == RxFramerDropReason::InterChunkTimeout);
+        CHECK(dropped_bytes == 4);
+        CHECK(runner.rx_framer().buffered_bytes() == 0);
     }
 }
 
