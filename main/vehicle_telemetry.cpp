@@ -1120,59 +1120,50 @@ void VehicleController::drive_command_runner_() {
         return;
     }
 
-    // B1: Client builders already call prepend_length(); write builder output directly without double length prefix
-    tx_buffer_.resize(tk::RxFramer::kMaxFrameLength);
-    uint8_t* payload_buf = tx_buffer_.data();
-    size_t len = tx_buffer_.size();
-    int res = -1;
-
-    switch (action) {
-        case tk::TxAction::SendVcsecSessionInfoRequest: {
-            ESP_LOGD(TAG, "Sending VCSEC SessionInfoRequest");
-            res = client_->build_session_info_request_message(
-                UniversalMessage_Domain_DOMAIN_VEHICLE_SECURITY, payload_buf, &len);
-            break;
-        }
-        case tk::TxAction::SendWake: {
-            ESP_LOGD(TAG, "Sending VCSEC Wake action");
-            res = client_->build_vcsec_action_message(
-                VCSEC_RKEAction_E_RKE_ACTION_WAKE_VEHICLE, payload_buf, &len);
-            break;
-        }
-        case tk::TxAction::SendInfoSessionInfoRequest: {
-            ESP_LOGD(TAG, "Sending Infotainment SessionInfoRequest");
-            res = client_->build_session_info_request_message(
-                UniversalMessage_Domain_DOMAIN_INFOTAINMENT, payload_buf, &len);
-            break;
-        }
-        case tk::TxAction::SendCommandPayload: {
-            auto& builder = command_builders_[cmd->id % tk::CommandRunner::kMaxQueueSize];
-            if (builder) {
-                ESP_LOGD(TAG, "Building command payload for '%s'", cmd->name.c_str());
-                res = builder(client_.get(), payload_buf, &len);
-                if (res == 0) {
-                    UniversalMessage_Domain d = (cmd->domain == tk::BleDomain::VehicleSecurity)
-                        ? UniversalMessage_Domain_DOMAIN_VEHICLE_SECURITY
-                        : UniversalMessage_Domain_DOMAIN_INFOTAINMENT;
-                    pb_byte_t req_uuid[16] = {0};
-                    size_t req_uuid_len = sizeof(req_uuid);
-                    if (client_->get_last_request_uuid(d, req_uuid, &req_uuid_len) && req_uuid_len == 16) {
-                        std::memcpy(cmd->uuid.data(), req_uuid, 16);
+    // B1: tesla-ble builders already emit the complete wire frame (Client::prepend_length).
+    // tk::build_ble_tx_frame() keeps it unchanged and is exercised against the real library by
+    // test/test_tesla_ble_harness.cpp; tk::is_well_formed_ble_frame() refuses a malformed frame.
+    const int res = tk::build_ble_tx_frame(
+        tx_buffer_, tk::RxFramer::kMaxFrameLength, [&](uint8_t* buf, size_t* len) -> int {
+            switch (action) {
+                case tk::TxAction::SendVcsecSessionInfoRequest:
+                    ESP_LOGD(TAG, "Sending VCSEC SessionInfoRequest");
+                    return client_->build_session_info_request_message(
+                        UniversalMessage_Domain_DOMAIN_VEHICLE_SECURITY, buf, len);
+                case tk::TxAction::SendWake:
+                    ESP_LOGD(TAG, "Sending VCSEC Wake action");
+                    return client_->build_vcsec_action_message(
+                        VCSEC_RKEAction_E_RKE_ACTION_WAKE_VEHICLE, buf, len);
+                case tk::TxAction::SendInfoSessionInfoRequest:
+                    ESP_LOGD(TAG, "Sending Infotainment SessionInfoRequest");
+                    return client_->build_session_info_request_message(
+                        UniversalMessage_Domain_DOMAIN_INFOTAINMENT, buf, len);
+                case tk::TxAction::SendCommandPayload: {
+                    auto& builder = command_builders_[cmd->id % tk::CommandRunner::kMaxQueueSize];
+                    if (!builder) {
+                        ESP_LOGE(TAG, "Missing builder for command '%s'", cmd->name.c_str());
+                        return -1;
                     }
+                    ESP_LOGD(TAG, "Building command payload for '%s'", cmd->name.c_str());
+                    const int rc = builder(client_.get(), buf, len);
+                    if (rc == 0) {
+                        UniversalMessage_Domain d = (cmd->domain == tk::BleDomain::VehicleSecurity)
+                            ? UniversalMessage_Domain_DOMAIN_VEHICLE_SECURITY
+                            : UniversalMessage_Domain_DOMAIN_INFOTAINMENT;
+                        pb_byte_t req_uuid[16] = {0};
+                        size_t req_uuid_len = sizeof(req_uuid);
+                        if (client_->get_last_request_uuid(d, req_uuid, &req_uuid_len) && req_uuid_len == 16) {
+                            std::memcpy(cmd->uuid.data(), req_uuid, 16);
+                        }
+                    }
+                    return rc;
                 }
-            } else {
-                ESP_LOGE(TAG, "Missing builder for command '%s'", cmd->name.c_str());
-                res = -1;
+                default:
+                    return -1;
             }
-            break;
-        }
-        default:
-            break;
-    }
+        });
 
-    if (res == 0 && len > 0) {
-        tx_buffer_.resize(len);
-
+    if (res == 0 && tk::is_well_formed_ble_frame(tx_buffer_)) {
         if (ble_ && ble_->write(tx_buffer_)) {
             command_runner_.notify_tx_complete(now_ms);
         } else {
@@ -1180,7 +1171,12 @@ void VehicleController::drive_command_runner_() {
             command_runner_.notify_tx_failed("BLE write failed");
         }
     } else {
-        ESP_LOGE(TAG, "Failed to build payload for action %d (res=%d)", static_cast<int>(action), res);
+        if (res == 0) {
+            ESP_LOGE(TAG, "Refusing malformed TX frame for action %d (%u bytes)",
+                     static_cast<int>(action), static_cast<unsigned>(tx_buffer_.size()));
+        } else {
+            ESP_LOGE(TAG, "Failed to build payload for action %d (res=%d)", static_cast<int>(action), res);
+        }
         command_runner_.notify_tx_failed("Payload build failed");
     }
 }

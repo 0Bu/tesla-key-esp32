@@ -234,63 +234,52 @@ test('session counter replay patch aligns with signer.go', () => {
   }
 });
 
-test('B1: TX framing writes builder output directly without double length prefix', () => {
+function functionBody(source, signature, nextSignature) {
+  const start = source.indexOf(signature);
+  assert.ok(start >= 0, `${signature} must be defined`);
+  const end = source.indexOf(nextSignature, start + signature.length);
+  assert.ok(end > start, `${signature} scope bounded by ${nextSignature}`);
+  return source.slice(start, end);
+}
+
+test('B1: TX path builds through the harness-tested helper and refuses malformed frames', () => {
+  // The behaviour (builder output written unchanged, double prefix refused) is exercised against
+  // the real tesla-ble by test/test_tesla_ble_harness.cpp and in test_logic.cpp. This pins the
+  // IDF call site to those helpers so the harness keeps covering the production path.
   const telemetry = readFileSync('main/vehicle_telemetry.cpp', 'utf8');
-  assert.match(
-    telemetry,
-    /tx_buffer_\.resize\(tk::RxFramer::kMaxFrameLength\);/,
-    'must resize reusable tx_buffer to max frame length',
-  );
-  assert.match(
-    telemetry,
-    /uint8_t\*\s+payload_buf\s*=\s*tx_buffer_\.data\(\);/,
-    'builder must write directly to tx_buffer start without extra 2-byte offset',
-  );
-  assert.equal(
-    telemetry.includes('payload_buf = framed.data() + 2'),
-    false,
-    'must not offset by 2 bytes for redundant length prefix',
-  );
-  assert.equal(
-    telemetry.includes('framed[0] = static_cast<uint8_t>((len >> 8)'),
-    false,
-    'must not prepend secondary 2-byte big-endian length prefix',
-  );
+  const body = functionBody(telemetry, 'void VehicleController::drive_command_runner_()',
+                            'void VehicleController::loop_task_fn_(');
+  const build = body.indexOf('tk::build_ble_tx_frame(');
+  const guard = body.indexOf('tk::is_well_formed_ble_frame(tx_buffer_)');
+  const write = body.indexOf('ble_->write(tx_buffer_)');
+  assert.ok(build >= 0, 'drive_command_runner_ must build via tk::build_ble_tx_frame');
+  assert.ok(guard > build, 'the structural guard must run after building');
+  assert.ok(write > guard, 'the frame must be written only after the guard');
+  assert.equal(occurrences(body, 'ble_->write('), 1, 'exactly one BLE write site');
+  for (const forbidden of ['tx_buffer_.insert(', 'tx_buffer_[0]', 'tx_buffer_[1]', 'framed[0]']) {
+    assert.equal(body.includes(forbidden), false, `must not touch the frame header (${forbidden})`);
+  }
+
+  const framing = readFileSync('main/logic/rx_framing.hpp', 'utf8');
+  assert.match(framing, /int build_ble_tx_frame\(std::vector<uint8_t>& wire, size_t capacity, BuildFn&& build\)/);
+  assert.match(framing, /inline bool is_well_formed_ble_frame\(const uint8_t\* wire, size_t size\) noexcept/);
 });
 
-test('B2: native key regeneration uses >= 2048 B buffers and fail-closed transactional rollback', () => {
+test('B2: key regeneration runs the harness-tested transaction with a PEM-sized buffer', () => {
   const pairing = readFileSync('main/vehicle_pairing.cpp', 'utf8');
-  const fnStart = pairing.indexOf('bool VehicleController::regenerate_key_native_()');
-  assert.ok(fnStart >= 0, 'regenerate_key_native_ must be defined');
-  const fnEnd = pairing.indexOf('bool VehicleController::finish_key_rotation_cleanup_()', fnStart);
-  assert.ok(fnEnd > fnStart, 'regenerate_key_native_ scope bounded');
-  const fnBody = pairing.slice(fnStart, fnEnd);
+  const body = functionBody(pairing, 'bool VehicleController::regenerate_key_native_()',
+                            'bool VehicleController::finish_key_rotation_cleanup_()');
+  assert.ok(body.includes('tk::regenerate_private_key('),
+            'regenerate_key_native_ must delegate to tk::regenerate_private_key');
+  for (const direct of ['get_private_key(', 'create_private_key(', 'load_private_key(']) {
+    assert.equal(body.includes(direct), false, `the transaction must not be re-implemented (${direct})`);
+  }
+  assert.match(body, /storage_->save\(tk::nvs_contract::kPrivateKey, new_key\)/);
 
-  // Buffer sizes must be at least 2048 bytes for PEM export
-  assert.match(fnBody, /std::vector<uint8_t>\s+old_key\(2048\);/);
-  assert.match(fnBody, /std::vector<uint8_t>\s+new_key\(2048\);/);
-
-  // Fail-closed guard: if existing key cannot be exported, abort without key mutation
-  assert.match(fnBody, /if\s*\(client_->has_private_key\(\)\)\s*\{/);
-  assert.match(fnBody, /if\s*\(client_->get_private_key\(old_key\.data\(\),\s*old_key\.size\(\),\s*&old_len\)\s*!=\s*0\)\s*\{/);
-
-  // Transactional rollback: if create_private_key fails, restore old key
-  const createStart = fnBody.indexOf('client_->create_private_key() != 0');
-  assert.ok(createStart >= 0);
-  const createRollback = fnBody.indexOf('if (had_old) (void)client_->load_private_key(old_key.data(), old_key.size());', createStart);
-  assert.ok(createRollback > createStart);
-
-  // Transactional rollback: if exporting new key fails, restore old key
-  const exportNewStart = fnBody.indexOf('client_->get_private_key(new_key.data(), new_key.size(), &new_len) != 0');
-  assert.ok(exportNewStart > createStart);
-  const exportNewRollback = fnBody.indexOf('if (had_old) (void)client_->load_private_key(old_key.data(), old_key.size());', exportNewStart);
-  assert.ok(exportNewRollback > exportNewStart);
-
-  // Transactional rollback: if saving to storage fails, restore old key
-  const saveStart = fnBody.indexOf('!storage_->save(tk::nvs_contract::kPrivateKey, new_key)');
-  assert.ok(saveStart > exportNewStart);
-  const saveRollback = fnBody.indexOf('if (had_old) (void)client_->load_private_key(old_key.data(), old_key.size());', saveStart);
-  assert.ok(saveRollback > saveStart);
+  const rotation = readFileSync('main/logic/key_rotation.hpp', 'utf8');
+  const capacity = rotation.match(/inline constexpr size_t kPrivateKeyPemCapacity = (\d+);/);
+  assert.ok(capacity && Number(capacity[1]) >= 2048, 'PEM export capacity must stay >= 2048 B');
+  assert.match(rotation, /KeyRegenerationResult regenerate_private_key\(Client& client, Persist&& persist,/);
 });
 
 test('H1: CarServer response is routed by UUID before delivering vehicleData telemetry callbacks', () => {

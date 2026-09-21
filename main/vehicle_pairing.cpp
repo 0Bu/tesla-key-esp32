@@ -4,6 +4,7 @@
 // implementation split — see vehicle_ctrl_internal.hpp.
 
 #include "vehicle_ctrl.hpp"
+#include "logic/key_rotation.hpp"
 #include "runtime_admission.hpp"
 #include "vehicle_ctrl_internal.hpp"
 #include "stack_watch.hpp"
@@ -521,39 +522,29 @@ tk::KeyRotationResult VehicleController::generate_key_locked_() {
 
 bool VehicleController::regenerate_key_native_() {
     if (!client_ || !storage_) return false;
-    std::vector<uint8_t> old_key(2048);
-    size_t old_len = old_key.size();
-    bool had_old = false;
-    if (client_->has_private_key()) {
-        if (client_->get_private_key(old_key.data(), old_key.size(), &old_len) != 0) {
+    // The transaction itself is tk::regenerate_private_key() (logic/key_rotation.hpp), which the
+    // real-library host harness runs too; this shell only binds NVS and reports the outcome.
+    const tk::KeyRegenerationResult result = tk::regenerate_private_key(
+        *client_, [this](const std::vector<uint8_t>& new_key) {
+            return storage_->save(tk::nvs_contract::kPrivateKey, new_key);
+        });
+    switch (result) {
+        case tk::KeyRegenerationResult::Committed:
+            return true;
+        case tk::KeyRegenerationResult::ExportExistingFailed:
             ESP_LOGE(TAG, "Failed to export existing private key - aborting re-key");
-            return false;
-        }
-        old_key.resize(old_len);
-        had_old = true;
+            break;
+        case tk::KeyRegenerationResult::CreateFailed:
+            ESP_LOGE(TAG, "Failed to create new private key");
+            break;
+        case tk::KeyRegenerationResult::ExportNewFailed:
+            ESP_LOGE(TAG, "Failed to export new private key");
+            break;
+        case tk::KeyRegenerationResult::PersistFailed:
+            ESP_LOGE(TAG, "Failed to persist new private key");
+            break;
     }
-
-    if (client_->create_private_key() != 0) {
-        ESP_LOGE(TAG, "Failed to create new private key");
-        if (had_old) (void)client_->load_private_key(old_key.data(), old_key.size());
-        return false;
-    }
-
-    std::vector<uint8_t> new_key(2048);
-    size_t new_len = new_key.size();
-    if (client_->get_private_key(new_key.data(), new_key.size(), &new_len) != 0) {
-        ESP_LOGE(TAG, "Failed to export new private key");
-        if (had_old) (void)client_->load_private_key(old_key.data(), old_key.size());
-        return false;
-    }
-    new_key.resize(new_len);
-
-    if (!storage_->save(tk::nvs_contract::kPrivateKey, new_key)) {
-        ESP_LOGE(TAG, "Failed to persist new private key");
-        if (had_old) (void)client_->load_private_key(old_key.data(), old_key.size());
-        return false;
-    }
-    return true;
+    return false;
 }
 
 bool VehicleController::finish_key_rotation_cleanup_() {

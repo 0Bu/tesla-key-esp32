@@ -84,6 +84,7 @@
 #include "logic/session_state.hpp"
 #include "logic/command_runner.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdio>
@@ -1461,6 +1462,23 @@ static void test_mcp() {
     CHECK(!tk::is_nominal_already_set(""));
     CHECK_STR(tk::command_result_text(false, "already_set"), "command executed successfully");
     CHECK_STR(tk::command_result_text(false, "action failed: already_set"), "command executed successfully");
+
+    // Soft-desync link backstop: which failures prove contact, which are local, which count
+    // toward the drop-and-resync streak (tk::classify_command_failure, make_result_cb_).
+    using FailureOrigin = tk::CommandFailureOrigin;
+    CHECK(tk::classify_command_failure("vehicle asleep") == FailureOrigin::LocalPolicy);
+    CHECK(tk::classify_command_failure("signed message authentication failed") == FailureOrigin::VehicleResponse);
+    CHECK(tk::classify_command_failure("VCSEC authentication failed") == FailureOrigin::VehicleResponse);
+    CHECK(tk::classify_command_failure("authentication failed") == FailureOrigin::VehicleResponse);
+    CHECK(tk::classify_command_failure("key not on whitelist - pairing required") == FailureOrigin::VehicleResponse);
+    CHECK(tk::classify_command_failure("command rejected by vehicle") == FailureOrigin::VehicleResponse);
+    CHECK(tk::classify_command_failure("command response timeout; max retries exceeded") ==
+          FailureOrigin::TransportOrTimeout);
+    CHECK(tk::classify_command_failure("authentication / wake timeout; max retries exceeded") ==
+          FailureOrigin::TransportOrTimeout);
+    CHECK(tk::classify_command_failure("Payload build failed") == FailureOrigin::TransportOrTimeout);
+    CHECK(tk::classify_command_failure("connection lost") == FailureOrigin::TransportOrTimeout);
+    CHECK(tk::classify_command_failure("") == FailureOrigin::TransportOrTimeout);
 
     // Protocol Invariant Gate: command table integrity & role boundaries.
     // Every registered command must have:
@@ -6099,6 +6117,53 @@ static void test_command_runner() {
 static void test_command_runner_link_loss_and_faults() {
     using namespace tk;
 
+    // R1: a VehicleStatus with closureStatuses confirms the wake while the raw VCSEC flag still
+    // reads ASLEEP. The command then proceeds to the infotainment session instead of re-sending
+    // Wake on every status reply (upstream v5.2.0 semantics; the loop sent one Wake per reply).
+    {
+        CommandRunner runner;
+        runner.vcsec_session().set_established({1}, 10, 1000);
+        runner.enqueue("Set Charging Amps", BleDomain::Infotainment, WakePolicy::WakeIfNeeded, 30000, 0);
+        CHECK(runner.tick(0, true, false, true) == TxAction::SendWake);
+        runner.notify_tx_complete(0);
+        CHECK(runner.current_command()->state == CommandState::WaitingWake);
+        CHECK(!runner.current_command()->wake_confirmed);
+
+        runner.notify_vehicle_awake(true);   // VehicleStatus{ASLEEP, closureStatuses}
+        CHECK(runner.current_command()->wake_confirmed);
+        CHECK(runner.tick(350, true, false, true) == TxAction::SendInfoSessionInfoRequest);
+        runner.notify_vehicle_awake(true);   // further status replies change nothing
+        CHECK(runner.current_command()->state == CommandState::WaitingInfoAuth);
+        CHECK(runner.tick(700, true, false, true) == TxAction::None);
+        CHECK(runner.current_command()->retry_count == 0);
+
+        // After the infotainment session is up, the payload goes out despite the ASLEEP flag.
+        runner.info_session().set_established({2}, 20, 1000);
+        runner.current_command()->state = CommandState::Idle;
+        CHECK(runner.tick(900, true, false, true) == TxAction::SendCommandPayload);
+    }
+    // A confirmed VCSEC AWAKE while waiting for the wake is final as well.
+    {
+        CommandRunner runner;
+        runner.vcsec_session().set_established({1}, 10, 1000);
+        runner.enqueue("Start Charging", BleDomain::Infotainment, WakePolicy::WakeIfNeeded, 30000, 0);
+        CHECK(runner.tick(0, true, false, false) == TxAction::SendWake);   // sleep state unknown
+        runner.notify_tx_complete(0);
+        CHECK(runner.tick(300, true, true, false) == TxAction::SendInfoSessionInfoRequest);
+        CHECK(runner.current_command()->wake_confirmed);
+    }
+    // No confirmation: an asleep car still gets the wake policy (unchanged), and a NoWakeFail
+    // command still fails locally with the text the link backstop classifies as LocalPolicy.
+    {
+        CommandRunner runner;
+        runner.vcsec_session().set_established({1}, 10, 1000);
+        runner.enqueue("Charge State Poll", BleDomain::Infotainment, WakePolicy::NoWakeFail, 10000, 0);
+        CHECK(runner.tick(0, true, false, true) == TxAction::None);
+        CHECK(runner.current_command()->terminal_reason == TerminalReason::VehicleAsleep);
+        CHECK(tk::classify_command_failure(runner.current_command()->error_message) ==
+              tk::CommandFailureOrigin::LocalPolicy);
+    }
+
     // M1: Link loss fails command immediately
     {
         CommandRunner runner;
@@ -6194,99 +6259,165 @@ static void test_command_runner_link_loss_and_faults() {
 }
 
 static void test_tx_wire_framing() {
-    // B1: Verify that builder output already includes 2-byte big-endian length prefix.
-    // Transmitting builder output directly without double length prefix allows proper car-side decode.
-    // If a double length prefix is mistakenly prepended (len + 2 bytes), the car-side decode fails.
-
-    // Simulated builder output: 2-byte big-endian length (e.g. 4 bytes payload), then payload
-    std::vector<uint8_t> builder_output = {0x00, 0x04, 0x08, 0x02, 0x12, 0x00};
-
-    // Correct TX path (single length prefix):
-    // Car-side decoder reads 2-byte length L = (wire[0]<<8)|wire[1] = 4, then expects wire.size() == 2 + L
-    const size_t L_direct = (static_cast<size_t>(builder_output[0]) << 8) | builder_output[1];
-    CHECK(L_direct == 4);
-    CHECK(builder_output.size() == 2 + L_direct);
-
-    // Defective B1 path (double length prefix prepended to builder output):
-    size_t len = builder_output.size(); // 6
-    std::vector<uint8_t> double_prefixed(2 + len);
-    double_prefixed[0] = static_cast<uint8_t>((len >> 8) & 0xFF); // 0x00
-    double_prefixed[1] = static_cast<uint8_t>(len & 0xFF);        // 0x06
-    std::memcpy(double_prefixed.data() + 2, builder_output.data(), len);
-
-    // Car-side decode of double-prefixed frame:
-    // Car reads L = (0x00 << 8) | 0x06 = 6.
-    // The payload handed to protobuf parser starts with {0x00, 0x04, ...}, which is NOT valid protobuf wire format!
-    CHECK(double_prefixed.size() == 8);
-    CHECK(double_prefixed[0] == 0x00 && double_prefixed[1] == 0x06);
-    CHECK(double_prefixed[2] == 0x00 && double_prefixed[3] == 0x04);
-    // In protobuf, field tags are varints where field 0 is invalid (tag must be (field_num << 3) | wire_type, field >= 1).
-    // A protobuf starting with 0x00 is guaranteed invalid wire-format data!
-    uint8_t proto_first_byte = double_prefixed[2];
-    CHECK(proto_first_byte == 0x00); // Invalid protobuf tag -> decoder fails
-}
-
-static void test_key_regeneration_contract() {
-    // B2: Key export buffer requirement and fail-closed transactionality.
-    // Client::get_private_key() writes a PEM string (228 bytes for P-256).
-    // An export buffer of 32 bytes always fails; buffer must be >= 2048 bytes.
-
-    const size_t kP256PemLen = 228;
-    const size_t kSmallBufSize = 32;
-    const size_t kLargeBufSize = 2048;
-
-    auto mock_get_private_key = [](uint8_t* buf, size_t buf_len, size_t* out_len) -> int {
-        if (!buf || buf_len < kP256PemLen) return -1; // Buffer too small!
-        *out_len = kP256PemLen;
+    // B1: the TX path writes the builder's frame unchanged (tk::build_ble_tx_frame) and refuses a
+    // malformed frame (tk::is_well_formed_ble_frame) — the exact helpers drive_command_runner_()
+    // calls. tesla-ble builders already emit [len_hi len_lo][RoutableMessage]; the same helpers run
+    // against the real library in test/test_tesla_ble_harness.cpp.
+    // Stand-in builder output shaped like a real RoutableMessage (field 6 to_destination first).
+    const std::vector<uint8_t> proto = {0x32, 0x02, 0x08, 0x02, 0x3a, 0x00};
+    auto prefixed_builder = [&](uint8_t* buf, size_t* len) -> int {
+        if (*len < proto.size() + 2) return -7;
+        buf[0] = static_cast<uint8_t>(proto.size() >> 8);
+        buf[1] = static_cast<uint8_t>(proto.size() & 0xFF);
+        std::memcpy(buf + 2, proto.data(), proto.size());
+        *len = proto.size() + 2;
         return 0;
     };
 
-    // 1. 32-byte buffer fails:
-    std::vector<uint8_t> small_buf(kSmallBufSize);
-    size_t len32 = small_buf.size();
-    CHECK(mock_get_private_key(small_buf.data(), small_buf.size(), &len32) != 0);
+    std::vector<uint8_t> wire;
+    CHECK(tk::build_ble_tx_frame(wire, tk::RxFramer::kMaxFrameLength, prefixed_builder) == 0);
+    CHECK(wire.size() == proto.size() + 2);
+    CHECK(wire[0] == 0x00 && wire[1] == proto.size());
+    CHECK(std::memcmp(wire.data() + 2, proto.data(), proto.size()) == 0);  // no extra header
+    CHECK(tk::is_well_formed_ble_frame(wire));
 
-    // 2. 2048-byte buffer succeeds:
-    std::vector<uint8_t> big_buf(kLargeBufSize);
-    size_t len2048 = big_buf.size();
-    CHECK(mock_get_private_key(big_buf.data(), big_buf.size(), &len2048) == 0);
-    CHECK(len2048 == kP256PemLen);
+    // The B1 regression — a second length prefix in front of the builder frame — is refused.
+    std::vector<uint8_t> doubled = {0x00, static_cast<uint8_t>(wire.size())};
+    doubled.insert(doubled.end(), wire.begin(), wire.end());
+    CHECK(!tk::is_well_formed_ble_frame(doubled));
+    // Also for inner lengths >= 256: the high byte 0x01/0x02 still decodes as field number 0.
+    for (uint8_t hi : {uint8_t{0x01}, uint8_t{0x02}}) {
+        std::vector<uint8_t> big(2 + 2 + 300, 0x00);
+        const size_t outer = big.size() - 2;
+        big[0] = static_cast<uint8_t>(outer >> 8);
+        big[1] = static_cast<uint8_t>(outer & 0xFF);
+        big[2] = hi;
+        big[3] = 0x2C;
+        CHECK(!tk::is_well_formed_ble_frame(big));
+    }
 
-    // 3. Transactional fail-closed logic:
-    // If old key cannot be exported, refuse to mutate runtime identity
-    bool old_exported = (mock_get_private_key(small_buf.data(), small_buf.size(), &len32) == 0);
-    CHECK(!old_exported);
+    // Builder errors, empty and oversized outputs leave the buffer empty.
+    CHECK(tk::build_ble_tx_frame(wire, 4, prefixed_builder) == -7);
+    CHECK(wire.empty());
+    CHECK(tk::build_ble_tx_frame(wire, 16, [](uint8_t*, size_t* len) { *len = 0; return 0; }) == -1);
+    CHECK(wire.empty());
+    CHECK(tk::build_ble_tx_frame(wire, 16, [](uint8_t*, size_t* len) { *len = 17; return 0; }) == -1);
+    CHECK(wire.empty());
 
-    // If new key fails to persist, restore old key:
-    std::string old_key_pem = "OLD_KEY_PEM_DATA";
-    std::string current_key = old_key_pem;
-    std::string nvs_stored = old_key_pem;
+    // Structural checks: the length must cover exactly the rest; the first tag needs field >= 1
+    // and a known wire type; a multi-byte tag is decoded as a varint.
+    CHECK(!tk::is_well_formed_ble_frame(nullptr, 0));
+    const uint8_t short_len[] = {0x00, 0x05, 0x32, 0x00};            // declares 5, carries 2
+    CHECK(!tk::is_well_formed_ble_frame(short_len, sizeof(short_len)));
+    const uint8_t zero_field[] = {0x00, 0x02, 0x02, 0x00};           // field 0, wire type 2
+    CHECK(!tk::is_well_formed_ble_frame(zero_field, sizeof(zero_field)));
+    const uint8_t group_wire[] = {0x00, 0x02, 0x33, 0x00};           // field 6, wire type 3
+    CHECK(!tk::is_well_formed_ble_frame(group_wire, sizeof(group_wire)));
+    const uint8_t multibyte_tag[] = {0x00, 0x03, 0x92, 0x03, 0x00};  // field 50, wire type 2
+    CHECK(tk::is_well_formed_ble_frame(multibyte_tag, sizeof(multibyte_tag)));
+    const uint8_t truncated_tag[] = {0x00, 0x01, 0x92};              // continuation, no next byte
+    CHECK(!tk::is_well_formed_ble_frame(truncated_tag, sizeof(truncated_tag)));
+}
 
-    auto regenerate = [&](bool fail_storage) -> bool {
-        std::vector<uint8_t> old_k(kLargeBufSize);
-        size_t old_l = old_k.size();
-        if (mock_get_private_key(old_k.data(), old_k.size(), &old_l) != 0) return false;
+namespace {
+// Stand-in for the tesla-ble Client key contract used by tk::regenerate_private_key(): a PEM
+// export needs `pem_len` bytes (mbedtls_pk_write_key_pem fails on a smaller buffer).
+struct FakeKeyClient {
+    std::string key;            // current in-memory key ("" = none)
+    std::string next = "NEW";   // key produced by the next create_private_key()
+    size_t pem_len = 228;       // exported length including the NUL
+    bool fail_create = false;
+    bool fail_export_after_create = false;
+    bool created = false;
+    int loads = 0;
 
-        // Generate new key in memory
-        current_key = "NEW_KEY_PEM_DATA";
+    bool has_private_key() const { return !key.empty(); }
+    int get_private_key(uint8_t* buf, size_t cap, size_t* out) {
+        if (key.empty() || (created && fail_export_after_create)) return -1;
+        if (cap < pem_len) return -2;
+        std::memset(buf, 0, pem_len);
+        std::memcpy(buf, key.data(), std::min(key.size(), pem_len - 1));
+        *out = pem_len;
+        return 0;
+    }
+    int create_private_key() {
+        if (fail_create) return -3;
+        key = next;
+        created = true;
+        return 0;
+    }
+    int load_private_key(const uint8_t* buf, size_t len) {
+        ++loads;
+        const char* text = reinterpret_cast<const char*>(buf);
+        key.assign(text, static_cast<size_t>(std::find(text, text + len, '\0') - text));
+        return 0;
+    }
+};
+}  // namespace
 
-        // Attempt save
-        if (fail_storage) {
-            // Rollback to old key on save failure!
-            current_key = old_key_pem;
-            return false;
-        }
-        nvs_stored = current_key;
+static void test_key_regeneration_contract() {
+    // B2: tk::regenerate_private_key() is the transaction behind regenerate_key_native_(); the
+    // real-library run is test/test_tesla_ble_harness.cpp. Branches here use a fake client.
+    using R = tk::KeyRegenerationResult;
+    CHECK(tk::kPrivateKeyPemCapacity >= 228);  // P-256 SEC1 PEM incl. NUL
+    std::string stored;
+    bool fail_persist = false;
+    auto persist = [&](const std::vector<uint8_t>& pem) {
+        if (fail_persist) return false;
+        stored.assign(reinterpret_cast<const char*>(pem.data()));
         return true;
     };
 
-    CHECK(!regenerate(true));
-    CHECK(current_key == old_key_pem); // Rolled back!
-    CHECK(nvs_stored == old_key_pem);  // NVS unchanged!
-
-    CHECK(regenerate(false));
-    CHECK(current_key == "NEW_KEY_PEM_DATA");
-    CHECK(nvs_stored == "NEW_KEY_PEM_DATA");
+    {   // success: RAM key and storage both hold the new key
+        FakeKeyClient c;
+        c.key = "OLD";
+        stored = "OLD";
+        CHECK(tk::regenerate_private_key(c, persist) == R::Committed);
+        CHECK(c.key == "NEW" && stored == "NEW" && c.loads == 0);
+    }
+    {   // persistence failure: previous key restored in RAM, storage untouched
+        FakeKeyClient c;
+        c.key = "OLD";
+        stored = "OLD";
+        fail_persist = true;
+        CHECK(tk::regenerate_private_key(c, persist) == R::PersistFailed);
+        CHECK(c.key == "OLD" && stored == "OLD" && c.loads == 1);
+        fail_persist = false;
+    }
+    {   // the B2 defect (32-byte export buffer) fails closed before any mutation
+        FakeKeyClient c;
+        c.key = "OLD";
+        CHECK(tk::regenerate_private_key(c, persist, 32) == R::ExportExistingFailed);
+        CHECK(c.key == "OLD" && !c.created);
+    }
+    {   // creation failure keeps the previous key
+        FakeKeyClient c;
+        c.key = "OLD";
+        c.fail_create = true;
+        CHECK(tk::regenerate_private_key(c, persist) == R::CreateFailed);
+        CHECK(c.key == "OLD");
+    }
+    {   // export of the new key fails: previous key restored
+        FakeKeyClient c;
+        c.key = "OLD";
+        c.fail_export_after_create = true;
+        CHECK(tk::regenerate_private_key(c, persist) == R::ExportNewFailed);
+        CHECK(c.key == "OLD" && c.loads == 1);
+    }
+    {   // first boot (no key yet): commits the new key
+        FakeKeyClient c;
+        stored.clear();
+        CHECK(tk::regenerate_private_key(c, persist) == R::Committed);
+        CHECK(c.key == "NEW" && stored == "NEW");
+    }
+    {   // first boot + persistence failure: nothing to restore; caller treats it as CommitUnknown
+        FakeKeyClient c;
+        stored.clear();
+        fail_persist = true;
+        CHECK(tk::regenerate_private_key(c, persist) == R::PersistFailed);
+        CHECK(c.key == "NEW" && stored.empty() && c.loads == 0);
+        fail_persist = false;
+    }
 }
 
 static void test_telemetry_dispatch_routing_order() {
