@@ -49,6 +49,7 @@ python3 scripts/check-markdown-links.py --self-test
 python3 scripts/check-logic-test-ownership.py --self-test
 python3 scripts/check-nvs-contract.py --self-test
 python3 scripts/check-host-gate-contract.py --self-test
+python3 scripts/check-vehicle-command-sync.py --self-test
 
 git diff --check
 git diff --cached --check

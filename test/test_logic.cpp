@@ -1461,6 +1461,37 @@ static void test_mcp() {
     CHECK(!tk::is_nominal_already_set(""));
     CHECK_STR(tk::command_result_text(false, "already_set"), "command executed successfully");
     CHECK_STR(tk::command_result_text(false, "action failed: already_set"), "command executed successfully");
+
+    // Protocol Invariant Gate: command table integrity & role boundaries.
+    // Every registered command must have:
+    // 1. Non-empty description if MCP tool is exposed.
+    // 2. Strict type assignment for every argument.
+    // 3. Role-denied commands (DoorLock..ClimateStop) MUST NOT be exposed as MCP tools
+    //    (mcp_name must be nullptr, protecting models from sending commands the car refuses).
+    for (const auto& cmd : tk::kCommands) {
+        if (cmd.mcp_name) {
+            CHECK(cmd.mcp_desc != nullptr && std::strlen(cmd.mcp_desc) > 0);
+            CHECK(cmd.kind != tk::CmdKind::DoorLock &&
+                  cmd.kind != tk::CmdKind::DoorUnlock &&
+                  cmd.kind != tk::CmdKind::FlashLights &&
+                  cmd.kind != tk::CmdKind::HonkHorn &&
+                  cmd.kind != tk::CmdKind::SetSentryMode &&
+                  cmd.kind != tk::CmdKind::ClimateStart &&
+                  cmd.kind != tk::CmdKind::ClimateStop);
+        }
+        for (int a = 0; a < tk::kCmdMaxArgs; ++a) {
+            const auto& arg = cmd.args[a];
+            if (arg.type == tk::CmdArgType::None) {
+                CHECK(arg.api_key == nullptr && arg.mcp_key == nullptr);
+            } else {
+                CHECK(arg.api_key != nullptr || arg.mcp_key != nullptr);
+                if (arg.type == tk::CmdArgType::Int) {
+                    CHECK(arg.lo <= arg.hi);
+                }
+            }
+        }
+    }
+
 }
 
 // ─── Charging-current ACK/readback + active-cache freshness ───────────────────

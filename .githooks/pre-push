@@ -24,6 +24,7 @@ fi
 
 # Read standard pre-push stdin: <local_ref> <local_sha> <remote_ref> <remote_sha>
 has_firmware_changes=0
+has_vehicle_changes=0
 zero_sha="0000000000000000000000000000000000000000"
 
 updates=()
@@ -88,6 +89,10 @@ for update in "${updates[@]}"; do
   if printf '%s\n' "$changed_files" | grep -Eq '^(main/|CMakeLists\.txt$|sdkconfig|partitions\.csv$|scripts/ci-build-all\.sh$)'; then
     has_firmware_changes=1
   fi
+  if printf '%s\n' "$changed_files" | grep -Eq '^(main/(vehicle_commands\.cpp|vehicle_ctrl\.(cpp|hpp)|vehicle_ctrl_internal\.hpp|vehicle_telemetry\.cpp|vehicle_pairing\.cpp|ble_client\.(cpp|hpp)|logic/command_registry\.hpp|idf_component\.yml)|patches/tesla-ble/|\.agents/skills/vehicle-command-audit/)'; then
+    has_vehicle_changes=1
+  fi
+
 
   # 2. Check PR policy gates using require-pr-gates.sh
   local_branch="${local_ref#refs/heads/}"
@@ -124,7 +129,20 @@ PY
 done
 fi
 
-# 3. Validate firmware size if firmware-relevant changes are detected
+# 3. Validate vehicle-command protocol sync if vehicle-relevant changes are detected
+if [[ "$has_vehicle_changes" -eq 1 ]]; then
+  echo "🔍 Vehicle-command protocol changes detected in push."
+  echo "   Running pre-push vehicle command sync validation..."
+  if ! python3 "$root/scripts/check-vehicle-command-sync.py" --check; then
+    echo "" >&2
+    echo "❌ Push rejected: vehicle-command protocol invariants violated!" >&2
+    echo "   Run 'python3 scripts/check-vehicle-command-sync.py --check' to inspect." >&2
+    exit 1
+  fi
+  echo "✅ Pre-push vehicle command sync check passed."
+fi
+
+# 4. Validate firmware size if firmware-relevant changes are detected
 if [[ "$has_firmware_changes" -eq 1 ]]; then
   echo "🔍 Firmware-relevant changes detected in push."
   echo "   Running pre-push firmware size validation..."
