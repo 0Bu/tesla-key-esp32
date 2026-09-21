@@ -87,7 +87,7 @@ and `src/{vehicle.cpp, client.cpp, peer.cpp, message_builders.cpp, message_proce
 - **Does a command builder exist?** → `src/message_builders.cpp` (e.g. `scheduledChargingAction` IS
   registered; `scheduledDepartureAction` is **not** — that absence is *why* scheduled departure isn't exposed).
 - **Enum / API values** (`SleepState`, `WakePolicy`, roles, form factors) → `include/vehicle.h`, `include/client.h`.
-- **How a fault becomes a string** the firmware matches → `include/command_error.h`, `src/vehicle.cpp`.
+- **How a fault becomes a string** the firmware matches → `include/command_error.h`, `main/logic/command_runner.hpp`, `main/vehicle_telemetry.cpp`.
 - **VIN→BLE-name / matching** → `include/vin_utils.h`, `src/vin_utils.cpp` (the firmware delegates here; it does **not** build the name itself).
 
 ### Local — the firmware + its four docs
@@ -160,12 +160,11 @@ re-confirm it against the *current* tree and catch anything that drifted since. 
    `.response.response.charge_state.*` with **`charge_amps`** (not `charging_amps`), doubled
    `response`, **miles/mph on the `/api` path** (metric is MQTT-only), `charging_state` strings
    `Charging/Disconnected/Complete/Stopped/NoPower/Starting`. *Baseline: full match.*
-9a. **Response-counter anti-replay and patch series** — upstream `yoziru/tesla-ble` v5.2.0 incorporates
-    early return on failed `validate_response_counter()` (`src/vehicle.cpp:965-966`), superseding
-    patch 0001. Verify the current 4 repository patches under `patches/tesla-ble/` (0002 key regeneration,
-    0003 RX recovery log rate-limiting, 0004 parental controls trim, 0005 session counter replay)
-    apply lexically/idempotently through root CMake to the managed dependency tree, and are rebased
-    explicitly on every pin bump.
+9a. **Response-counter anti-replay and patch series** — response-counter anti-replay and Request-UUID routing
+    are enforced natively by `main/logic/ble_dispatcher.hpp` and `Peer::validate_response_counter()`, superseding
+    patch 0001 and ADR-0003. Verify the current 2 repository patches under `patches/tesla-ble/` (0004 parental
+    controls trim and 0005 session counter replay) apply lexically/idempotently through root CMake to the
+    managed dependency tree, and are rebased explicitly on every pin bump.
 9b. **ADRs and cryptographic / protocol boundary claims** — when an ADR or architecture doc makes
     claims about protocol vulnerabilities, replays, or countermeasures:
     - Cryptographically verify the claims against `teslamotors/vehicle-command` Go reference sources

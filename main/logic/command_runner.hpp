@@ -41,6 +41,12 @@ enum class WakePolicy : uint8_t {
     WakeIfNeeded = 2,
 };
 
+enum class SleepState : uint8_t {
+    Unknown = 0,
+    Asleep = 1,
+    Awake = 2,
+};
+
 enum class CommandState : uint8_t {
     Idle = 0,
     EnsuringVcsec,
@@ -131,9 +137,13 @@ public:
 
     CommandRunner() noexcept = default;
 
-    // Reset all internal state, framer, dispatcher, and active commands
-    void reset() noexcept {
-        rx_framer_.reset();
+    // Reset all internal state, dispatcher, sessions, and active commands.
+    // framer is optionally reset (defaults to true for standalone use/tests; pass false when
+    // reset from non-loop tasks so RxFramer remains strictly single-owner on vehicle_loop).
+    void reset(bool reset_framer = true) noexcept {
+        if (reset_framer) {
+            rx_framer_.reset();
+        }
         dispatcher_.reset();
         vcsec_session_.reset();
         info_session_.reset();
@@ -360,33 +370,8 @@ public:
                 return TxAction::SendVcsecSessionInfoRequest;
             }
 
-            // If the vehicle is asleep, evaluate wake policy for non-Wake VCSEC commands
-            if (cmd->name != "Wake") {
-                if (is_asleep) {
-                    switch (cmd->wake_policy) {
-                        case WakePolicy::NoWakeSkip:
-                            finish_command_(cmd, false, "vehicle asleep", TerminalReason::VehicleAsleep);
-                            cmd->state = CommandState::Skipped;
-                            return TxAction::None;
-                        case WakePolicy::NoWakeFail:
-                            finish_command_(cmd, false, "vehicle asleep", TerminalReason::VehicleAsleep);
-                            cmd->state = CommandState::Failed;
-                            return TxAction::None;
-                        case WakePolicy::WakeIfNeeded:
-                            cmd->state = CommandState::WaitingWake;
-                            cmd->phase = CommandPhase::EnsuringAwake;
-                            cmd->phase_started_at_ms = now_ms;
-                            return TxAction::SendWake;
-                    }
-                } else if (!is_awake && cmd->wake_policy == WakePolicy::WakeIfNeeded) {
-                    cmd->state = CommandState::WaitingWake;
-                    cmd->phase = CommandPhase::EnsuringAwake;
-                    cmd->phase_started_at_ms = now_ms;
-                    return TxAction::SendWake;
-                }
-            }
-
-            // VCSEC session is authenticated -> ready to send command
+            // VCSEC body controller is always reachable while connected; commands do not
+            // require vehicle infotainment to be awake, and health poll runs while vehicle sleeps.
             cmd->state = CommandState::Ready;
             cmd->phase = CommandPhase::SendingRequest;
             cmd->phase_started_at_ms = now_ms;
@@ -486,35 +471,46 @@ public:
     void notify_vehicle_awake(bool awake) noexcept {
         CommandRequest* cmd = current_command();
         if (!cmd) return;
-        if (awake && (cmd->state == CommandState::WaitingWake || cmd->phase == CommandPhase::EnsuringAwake)) {
-            // Advance to infotainment session or ready
-            cmd->state = CommandState::Idle;
-            cmd->phase_started_at_ms = 0;
+        if (awake) {
+            if (cmd->name == "Wake") {
+                finish_command_(cmd, true, "", TerminalReason::Success);
+                return;
+            }
+            if (cmd->state == CommandState::WaitingWake || cmd->phase == CommandPhase::EnsuringAwake) {
+                // Advance to infotainment session or ready
+                cmd->state = CommandState::Idle;
+                cmd->phase_started_at_ms = 0;
+            }
         }
     }
 
-    // Update Session from incoming SessionInfo
-    SessionUpdateResult handle_session_info(BleDomain domain, const uint8_t* incoming_uuid, size_t uuid_len,
-                                          const uint8_t* encoded_info, size_t info_len,
-                                          const uint8_t* tag, size_t tag_len,
-                                          const uint8_t* session_info_key, size_t key_len) {
-        SessionTracker& tracker = (domain == BleDomain::Infotainment) ? info_session_ : vcsec_session_;
-        SessionUpdateResult res = tracker.update_session(
-            incoming_uuid, uuid_len, encoded_info, info_len, tag, tag_len, session_info_key, key_len);
+    // Notify link loss: fail in-flight command immediately
+    void notify_link_lost(const char* reason = "connection lost") noexcept {
+        CommandRequest* cmd = current_command();
+        if (!cmd) return;
+        finish_command_(cmd, false, reason, TerminalReason::BleDisconnected);
+    }
 
-        if (res == SessionUpdateResult::Ok) {
-            CommandRequest* cmd = current_command();
-            if (cmd) {
-                if (domain == BleDomain::VehicleSecurity &&
-                    (cmd->state == CommandState::WaitingVcsecAuth || cmd->phase == CommandPhase::EnsuringVcsecSession)) {
-                    cmd->state = CommandState::Idle; // Prerequisite satisfied
-                } else if (domain == BleDomain::Infotainment &&
-                           (cmd->state == CommandState::WaitingInfoAuth || cmd->phase == CommandPhase::EnsuringInfotainmentSession)) {
-                    cmd->state = CommandState::Idle; // Prerequisite satisfied
+    // Notify signed message fault: retry if session error, otherwise fail immediately
+    void notify_signed_message_fault(bool is_session_error,
+                                     const char* reason = "signed message authentication failed") noexcept {
+        CommandRequest* cmd = current_command();
+        if (!cmd) return;
+        if (is_session_error) {
+            if (cmd->retry_count < cmd->max_retries) {
+                cmd->retry_count++;
+                cmd->state = CommandState::Idle;
+                if (cmd->dispatcher_request_id != 0) {
+                    dispatcher_.unregister_request(cmd->dispatcher_request_id);
+                    cmd->dispatcher_request_id = 0;
                 }
+            } else {
+                finish_command_(cmd, false, "session error; max retries exceeded",
+                                TerminalReason::AuthenticationFailed);
             }
+        } else {
+            finish_command_(cmd, false, reason, TerminalReason::AuthenticationFailed);
         }
-        return res;
     }
 
     // Handle generic incoming command response

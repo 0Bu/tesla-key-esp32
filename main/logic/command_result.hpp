@@ -1,7 +1,9 @@
 #pragma once
 
+#include <memory>
 #include <string>
 #include <string_view>
+#include <utility>
 
 // Pure, hardware-free command-outcome text, shared by the REST /command reason
 // (http_api.cpp) and the MCP tools/call result (mcp_server.cpp) so the two paths can
@@ -23,5 +25,67 @@ inline const char* command_result_text(bool ok, const std::string& err) {
     if (ok || is_nominal_already_set(err)) return "command executed successfully";
     return err.empty() ? "vehicle not reachable" : err.c_str();
 }
+
+class CommandError {
+public:
+    enum class Severity {
+        Temporary,
+        Permanent,
+        Unknown
+    };
+
+    enum class Outcome {
+        MayHaveSucceeded,
+        DefinitelyFailed,
+        Unknown
+    };
+
+    explicit CommandError(std::string msg,
+                          Severity severity = Severity::Temporary,
+                          Outcome outcome = Outcome::DefinitelyFailed)
+        : msg_(std::move(msg)), severity_(severity), outcome_(outcome) {}
+
+    const std::string& message() const noexcept { return msg_; }
+    Severity severity() const noexcept { return severity_; }
+    Outcome outcome() const noexcept { return outcome_; }
+
+private:
+    std::string msg_;
+    Severity severity_;
+    Outcome outcome_;
+};
+
+class OperationResult {
+public:
+    static OperationResult success() {
+        return OperationResult(true, nullptr);
+    }
+
+    static OperationResult failure(std::unique_ptr<CommandError> error) {
+        return OperationResult(false, std::move(error));
+    }
+
+    static OperationResult failure(std::string msg) {
+        return OperationResult(false, std::make_unique<CommandError>(std::move(msg)));
+    }
+
+    bool compatible_success() const noexcept { return success_; }
+    bool is_success() const noexcept { return success_; }
+    bool is_failure() const noexcept { return !success_; }
+    const CommandError* error() const noexcept { return error_.get(); }
+    std::unique_ptr<CommandError> release_error() noexcept { return std::move(error_); }
+
+    OperationResult(OperationResult&&) noexcept = default;
+    OperationResult& operator=(OperationResult&&) noexcept = default;
+    OperationResult(const OperationResult&) = delete;
+    OperationResult& operator=(const OperationResult&) = delete;
+
+private:
+    OperationResult(bool ok, std::unique_ptr<CommandError> err)
+        : success_(ok), error_(std::move(err)) {}
+
+    bool success_{false};
+    std::unique_ptr<CommandError> error_;
+};
 
 }  // namespace tk

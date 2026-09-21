@@ -271,15 +271,12 @@ def source_state(source_root: Path, expected_source_sha: str) -> dict[str, Any]:
     actual_commit = git_output(source_root, "rev-parse", "HEAD").decode("ascii").strip()
     require(actual_commit == expected_source_sha,
             f"source checkout commit mismatch: expected={expected_source_sha} actual={actual_commit}")
-    deleted_paths = {
-        item for item in git_output(source_root, "ls-files", "--deleted", "-z").split(b"\0") if item
-    }
     raw_paths = [
         item
         for item in git_output(
             source_root, "ls-files", "--cached", "--others", "--exclude-standard", "-z"
         ).split(b"\0")
-        if item and item not in deleted_paths and os.fsdecode(item) not in SOURCE_EXCLUSIONS
+        if item and os.fsdecode(item) not in SOURCE_EXCLUSIONS
     ]
     require(len(raw_paths) == len(set(raw_paths)), "source checkout contains duplicate path records")
     digest = hashlib.sha256(b"tesla-key-source-tree-sha256-v1\0")

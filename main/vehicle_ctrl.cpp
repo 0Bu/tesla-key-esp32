@@ -15,7 +15,7 @@
 #include <esp_log.h>
 
 // No protobuf includes needed here: the only generated types this TU touches are the
-// UniversalMessage_* ones, which vehicle_ctrl.hpp already provides via <vehicle.h>.
+// UniversalMessage_* ones, which vehicle_ctrl.hpp provides via universal_message.pb.h.
 
 static const char* TAG = "vehicle_ctrl";
 
