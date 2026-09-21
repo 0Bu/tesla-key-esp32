@@ -244,6 +244,10 @@ sources; if still present, report it rather than editing. Nearly all are documen
 
 ## Prioritized actions
 1. <must-fix> … 2. <should-fix> … 3. <nice-to-have> …
+
+## PR gate record
+When clean, stamp the pull request body with:
+- [x] `$vehicle-command-audit` clean — merge gate @ <full-40-hex-sha>
 ```
 
 Order by user impact: a role/protocol mismatch that misleads a user or breaks evcc outranks a

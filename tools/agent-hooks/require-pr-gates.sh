@@ -20,7 +20,8 @@ fi
 for fn in gate_bash_actions gate_pr_create_body gate_push_head_sha gate_fetch_pr \
           gate_pr_changed_files gate_checkbox_status gate_sha_matches gate_full_head_sha \
           gate_branch gate_repo_slug gate_origin_is_github agent_gate_workdir_matches \
-          agent_gate_run_bounded gate_is_renovate_maintenance gate_feature_docs_relevant; do
+          agent_gate_run_bounded gate_is_renovate_maintenance gate_feature_docs_relevant gate_vehicle_command_relevant; do
+
   if [ "${GATE_PR_LIB_API:-}" != 3 ] || ! declare -F "$fn" >/dev/null 2>&1; then
     echo "BLOCKED: runner-neutral PR gate library is incomplete ($fn)." >&2
     exit 2
@@ -367,6 +368,12 @@ PY
         echo "BLOCKED: feature-docs relevance check failed (exit code $feature_relevant_rc)." >&2
         exit 2
       fi
+    fi
+    if printf '%s\n' "$(cat "$files_file")" | gate_vehicle_command_relevant; then
+      record_ok "$body" vehicle-command-audit "$head_sha" || {
+        echo "BLOCKED: vehicle-command-relevant merge/check requires one current top-level \$vehicle-command-audit record for $head_sha." >&2
+        exit 2
+      }
     fi
     ;;
   *) echo "BLOCKED: internal PR-gate action classification failed." >&2; exit 2 ;;

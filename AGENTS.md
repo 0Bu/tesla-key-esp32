@@ -186,8 +186,11 @@ configuration and subagent manifests in `.codex/` and `.agents/`.
   maintenance PRs whose diff is strictly limited to `.github/workflows/renovate.yaml` or
   `.github/renovate.json` (`gate_is_renovate_maintenance`) are exempt from manual gate records
   at merge/check. `$feature-docs` is conditionally required when the cataloged feature surface
-  changes, including the PR-policy and bench-acceptance workflows. Records are bound to the
-  exact current PR head and become stale after any push.
+  changes, including the PR-policy and bench-acceptance workflows. `$vehicle-command-audit` is
+  conditionally required when vehicle-command/BLE paths change (`main/vehicle_*`, `main/ble_client.*`,
+  `main/logic/command_registry.hpp`, `patches/tesla-ble/`, `main/idf_component.yml`). Records are
+  bound to the exact current PR head and become stale after any push.
+
 - Reviewers report actionable findings with path/line, cause, impact and evidence. A green build is
   not review proof. Resolve P1/P2 findings and rerun the affected independent review after edits.
 - The only accepted merge shape is:

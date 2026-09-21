@@ -293,20 +293,36 @@ else
   pass_case 'non-renovate and mixed files rejected by gate_is_renovate_maintenance'
 fi
 
+if printf '%s\n' 'main/vehicle_commands.cpp' | gate_vehicle_command_relevant \
+   && printf '%s\n' 'main/logic/command_registry.hpp' | gate_vehicle_command_relevant \
+   && printf '%s\n' 'patches/tesla-ble/0001-fix.patch' | gate_vehicle_command_relevant; then
+  pass_case 'vehicle-command files are vehicle-command relevant'
+else
+  fail_case 'vehicle-command file relevance'
+fi
+if printf '%s\n' 'docs/README.md' | gate_vehicle_command_relevant \
+   || printf '%s\n' 'main/display.cpp' | gate_vehicle_command_relevant; then
+  fail_case 'unrelated files match vehicle-command relevance'
+else
+  pass_case 'unrelated files do not match vehicle-command relevance'
+fi
 if printf '%s' "$rename" | gate_extract_changed_pages 2 >/dev/null 2>&1; then fail_case 'truncated count accepted'; else pass_case 'truncated count fails closed'; fi
 if printf '[]' | gate_extract_changed_pages 3001 >/dev/null 2>&1; then fail_case '3001 files accepted'; else pass_case '3000-file limit fails closed'; fi
 if printf '[[{"filename":"../escape"}]]' | gate_extract_changed_pages 1 >/dev/null 2>&1; then fail_case 'unsafe path accepted'; else pass_case 'unsafe changed path fails closed'; fi
 
-# Aggregate offline records: all four gates and conditional feature-docs.
+# Aggregate offline records: all four gates, conditional feature-docs, and conditional vehicle-command-audit.
 make_body(){ printf '%s\n' \
   '- [x] $skill-audit clean — PR create/push gate @ '"$sha" \
   '- [x] $project-review clean — merge gate @ '"$sha" \
   '- [x] $pr-hygiene clean — content gate @ '"$sha" \
-  '- [x] $feature-docs synced — merge gate @ '"$sha"; }
+  '- [x] $feature-docs synced — merge gate @ '"$sha" \
+  '- [x] $vehicle-command-audit clean — merge gate @ '"$sha"; }
 make_body >"$tmp/all.md"
 printf '%s\n' main/logic/charge_control.hpp >"$tmp/feature.files"
 printf '%s\n' docs/SECURITY.md >"$tmp/docs.files"
+printf '%s\n' main/vehicle_commands.cpp >"$tmp/vehicle.files"
 expect_rc 0 'aggregate check accepts current feature records' env AGENT_POLICY_CI=1 AGENT_PR_BODY_FILE="$tmp/all.md" AGENT_PR_HEAD_SHA="$sha" AGENT_CHANGED_FILES_FILE="$tmp/feature.files" "$gate" --check --project-dir "$root"
+expect_rc 0 'aggregate check accepts current vehicle records' env AGENT_POLICY_CI=1 AGENT_PR_BODY_FILE="$tmp/all.md" AGENT_PR_HEAD_SHA="$sha" AGENT_CHANGED_FILES_FILE="$tmp/vehicle.files" "$gate" --check --project-dir "$root"
 grep -v feature-docs "$tmp/all.md" >"$tmp/no-feature.md"
 expect_rc 2 'feature-relevant check requires feature-docs' env AGENT_POLICY_CI=1 AGENT_PR_BODY_FILE="$tmp/no-feature.md" AGENT_PR_HEAD_SHA="$sha" AGENT_CHANGED_FILES_FILE="$tmp/feature.files" "$gate" --check --project-dir "$root"
 expect_rc 0 'docs-only check skips feature-docs' env AGENT_POLICY_CI=1 AGENT_PR_BODY_FILE="$tmp/no-feature.md" AGENT_PR_HEAD_SHA="$sha" AGENT_CHANGED_FILES_FILE="$tmp/docs.files" "$gate" --check --project-dir "$root"
@@ -315,6 +331,10 @@ printf '%s\n' .github/workflows/renovate.yaml >"$tmp/renovate.files"
 expect_rc 0 'Renovate maintenance PR satisfies check without gate records' env AGENT_POLICY_CI=1 AGENT_PR_BODY_FILE="$tmp/no-gates.md" AGENT_PR_HEAD_SHA="$sha" AGENT_CHANGED_FILES_FILE="$tmp/renovate.files" "$gate" --check --project-dir "$root"
 printf '%s\n' .github/workflows/renovate.yaml esp-idf-toolchain.txt >"$tmp/renovate-mixed.files"
 expect_rc 2 'mixed Renovate and toolchain PR requires gates' env AGENT_POLICY_CI=1 AGENT_PR_BODY_FILE="$tmp/no-gates.md" AGENT_PR_HEAD_SHA="$sha" AGENT_CHANGED_FILES_FILE="$tmp/renovate-mixed.files" "$gate" --check --project-dir "$root"
+grep -v vehicle-command-audit "$tmp/all.md" >"$tmp/no-vehicle.md"
+expect_rc 2 'vehicle-relevant check requires vehicle-command-audit' env AGENT_POLICY_CI=1 AGENT_PR_BODY_FILE="$tmp/no-vehicle.md" AGENT_PR_HEAD_SHA="$sha" AGENT_CHANGED_FILES_FILE="$tmp/vehicle.files" "$gate" --check --project-dir "$root"
+expect_rc 0 'feature-only check skips vehicle-command-audit' env AGENT_POLICY_CI=1 AGENT_PR_BODY_FILE="$tmp/no-vehicle.md" AGENT_PR_HEAD_SHA="$sha" AGENT_CHANGED_FILES_FILE="$tmp/feature.files" "$gate" --check --project-dir "$root"
+
 grep -v pr-hygiene "$tmp/all.md" >"$tmp/no-hygiene.md"
 expect_rc 2 'aggregate check requires pr-hygiene unconditionally' env AGENT_POLICY_CI=1 AGENT_PR_BODY_FILE="$tmp/no-hygiene.md" AGENT_PR_HEAD_SHA="$sha" AGENT_CHANGED_FILES_FILE="$tmp/docs.files" "$gate" --check --project-dir "$root"
 sed 's/@ [0-9a-f]*/@ deadbee/' "$tmp/all.md" >"$tmp/stale.md"
@@ -383,6 +403,7 @@ case "$args" in
   *" api "*|api*)
     case "${TEST_FILES_MODE:-normal}" in
       rename) printf '[[{"filename":"docs/chore.md","previous_filename":".codex/hooks.json"}]]\n' ;;
+      vehicle) printf '[[{"filename":"main/vehicle_commands.cpp"}]]\n' ;;
       *) printf '[[{"filename":"main/main.cpp"}]]\n' ;;
     esac ;;
   *) exit 91 ;;
@@ -394,6 +415,9 @@ printf '%s' "$canonical_payload" >"$tmp/payload.json"
 expect_rc 0 'canonical merge passes exact current-head evidence' env PATH="$tmp/bin:$PATH" TEST_HEAD="$sha" TEST_BODY="$merge_body" TEST_CHANGED=1 TEST_FILES_MODE=normal "$gate" --project-dir "$root" --payload-file "$tmp/payload.json"
 no_hygiene_merge_body="$(printf '%s\n' '- [x] $project-review clean — merge gate @ '"$sha" '- [x] $feature-docs synced — merge gate @ '"$sha")"
 expect_rc 2 'canonical merge requires pr-hygiene' env PATH="$tmp/bin:$PATH" TEST_HEAD="$sha" TEST_BODY="$no_hygiene_merge_body" TEST_CHANGED=1 TEST_FILES_MODE=normal "$gate" --project-dir "$root" --payload-file "$tmp/payload.json"
+vehicle_merge_body="$(printf '%s\n' '- [x] $project-review clean — merge gate @ '"$sha" '- [x] $pr-hygiene clean — content gate @ '"$sha" '- [x] $feature-docs synced — merge gate @ '"$sha" '- [x] $vehicle-command-audit clean — merge gate @ '"$sha")"
+expect_rc 0 'canonical merge passes vehicle evidence when vehicle-relevant' env PATH="$tmp/bin:$PATH" TEST_HEAD="$sha" TEST_BODY="$vehicle_merge_body" TEST_CHANGED=1 TEST_FILES_MODE=vehicle "$gate" --project-dir "$root" --payload-file "$tmp/payload.json"
+expect_rc 2 'canonical merge requires vehicle-command-audit when vehicle-relevant' env PATH="$tmp/bin:$PATH" TEST_HEAD="$sha" TEST_BODY="$merge_body" TEST_CHANGED=1 TEST_FILES_MODE=vehicle "$gate" --project-dir "$root" --payload-file "$tmp/payload.json"
 other_head=0000000000000000000000000000000000000000
 other_command="gh --repo github.com/0Bu/tesla-key-esp32 pr merge 123 --match-head-commit $other_head --squash"
 payload Bash command "$other_command" "$root" >"$tmp/stale-head.json"
