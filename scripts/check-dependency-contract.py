@@ -37,20 +37,12 @@ FILE_DIGESTS = {
 }
 PATCH_INVENTORY = (
     (
-        "0002-report-key-regeneration-result.patch",
-        "f8aed9724ea590dbb6ca7058212b7cf65869ee6b5abaa5d99d03349e3a1a09de",
-    ),
-    (
-        "0003-rate-limit-rx-framing-recovery-logs.patch",
-        "23b271a066d74e83e1f059237a5dddfa469f6967be64d5a09e7ec46b451217d3",
-    ),
-    (
         "0004-drop-unused-parental-controls-actions.patch",
         "6984321d34bdafe900244d0fe18052cc015a5b42ba0cf4e12e8ed9fb08791743",
     ),
     (
         "0005-align-session-counter-replay-with-signer-go.patch",
-        "5e72f4e5a1493251457ad6dd7eb6720cec64e26107000e5dbf06ee0c33a4d532",
+        "60fe7ee4533d89c160a7a757692bec51aba8b82f312d5352d9c720d2057f36b0",
     ),
 )
 MANIFEST_LOGICAL_LINES = (
@@ -220,20 +212,20 @@ def self_test(root: Path) -> None:
                              "target: esp32c5"), "lock target must be exactly"),
         ("transitive-drift", text("dependencies.lock.esp32", "version: 1.11.3",
                                   "version: 1.11.2"), "file byte digest drifted"),
-        ("patch-byte", text("patches/tesla-ble/0002-report-key-regeneration-result.patch",
-                            "regenerate_key", "regen_key"), "patch digest drifted"),
+        ("patch-byte", text("patches/tesla-ble/0004-drop-unused-parental-controls-actions.patch",
+                            "CarServer", "Carserver"), "patch digest drifted"),
         ("missing-lock", lambda fixture: (fixture / "dependencies.lock.esp32c6").unlink(),
          "lockfile inventory drifted"),
         ("extra-lock", lambda fixture: shutil.copy2(fixture / "dependencies.lock.esp32",
                                                     fixture / "dependencies.lock.esp32c5"),
          "lockfile inventory drifted"),
         ("renamed-patch", lambda fixture: (fixture / "patches/tesla-ble" / PATCH_INVENTORY[0][0]).rename(
-            fixture / "patches/tesla-ble/0004-renamed.patch"), "patch filename inventory drifted"),
-        ("missing-patch", lambda fixture: (fixture / "patches/tesla-ble" / PATCH_INVENTORY[2][0]).unlink(),
+            fixture / "patches/tesla-ble/0006-renamed.patch"), "patch filename inventory drifted"),
+        ("missing-patch", lambda fixture: (fixture / "patches/tesla-ble" / PATCH_INVENTORY[1][0]).unlink(),
          "patch filename inventory drifted"),
         ("extra-patch", lambda fixture: shutil.copy2(
             fixture / "patches/tesla-ble" / PATCH_INVENTORY[0][0],
-            fixture / "patches/tesla-ble/0004-extra.patch"), "patch filename inventory drifted"),
+            fixture / "patches/tesla-ble/0006-extra.patch"), "patch filename inventory drifted"),
     )
 
     for name, mutate, expected in mutations:

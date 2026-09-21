@@ -25,6 +25,10 @@
 // protobuf generated headers (from tesla-ble)
 #include <vcsec.pb.h>
 #include <car_server.pb.h>
+#include <universal_message.pb.h>
+#include <signatures.pb.h>
+#include "logic/command_result.hpp"
+#include "logic/nvs_contract.hpp"
 
 static const char* TAG = "vehicle_ctrl";
 
@@ -307,28 +311,8 @@ void parse_closures_state(const CarServer_ClosuresState& c, ClosuresStateResult&
 // ─── Cache callbacks (installed once from init) ───────────────────────────────
 
 void VehicleController::install_state_callbacks_() {
-    // Persistent charge-state callback: refreshes the cache on *every* ChargeState
-    // (the background refresh in loop_task). Installed once, never cleared; HTTP
-    // reads serve last_known_charge_ from this cache without blocking.
-    vehicle_->set_charge_state_callback([this](const CarServer_ChargeState& state) {
-        on_charge_state_(state);
-    });
-
-    // Read-only telemetry callbacks. Fed by the rotating background poll in loop_task_fn_
-    // (one telemetry domain per cycle). Each refreshes its own cache for the web UI; none
-    // affect pairing or evcc. Installed once, never cleared.
-    vehicle_->set_climate_state_callback([this](const CarServer_ClimateState& state) {
-        on_climate_state_(state);
-    });
-    vehicle_->set_drive_state_callback([this](const CarServer_DriveState& state) {
-        on_drive_state_(state);
-    });
-    vehicle_->set_tire_pressure_state_callback([this](const CarServer_TirePressureState& state) {
-        on_tire_pressure_state_(state);
-    });
-    vehicle_->set_closures_state_callback([this](const CarServer_ClosuresState& state) {
-        on_closures_state_(state);
-    });
+    // With native orchestration layer, incoming telemetry responses are
+    // dispatched directly by process_rx_frame_ to on_*_state_ handlers.
 }
 
 static_assert(std::is_trivially_copyable_v<CarServer_ChargeState>);
@@ -512,12 +496,20 @@ void VehicleController::process_pending_telemetry_() {
 // ─── Background poll / sleep-gating loop ──────────────────────────────────────
 
 bool VehicleController::apply_ble_link_state_(bool connected) {
+    command_runner_.rx_framer().reset();
     tk::SemGuard g(vehicle_mutex_);
     if (!g) return false;
     try {
-        vehicle_->set_connected(connected);
-        vcsec_sleep_state_.store(static_cast<int>(
-            connected ? vehicle_->sleep_state() : TeslaBLE::SleepState::UNKNOWN));
+        if (!connected) {
+            command_runner_.dispatcher().reset();
+            vcsec_sleep_state_.store(static_cast<int>(TeslaBLE::SleepState::UNKNOWN));
+            if (client_) {
+                if (auto* p = client_->get_peer(UniversalMessage_Domain_DOMAIN_VEHICLE_SECURITY)) p->reset();
+                if (auto* p = client_->get_peer(UniversalMessage_Domain_DOMAIN_INFOTAINMENT)) p->reset();
+            }
+            command_runner_.vcsec_session().reset();
+            command_runner_.info_session().reset();
+        }
         return true;
     } catch (const std::exception& e) {
         ESP_LOGE(TAG, "deferred set_connected(%d) threw (%s) — dropping link",
@@ -546,7 +538,7 @@ void VehicleController::persist_discovered_mac_after_ready_() {
 }
 
 void VehicleController::process_ble_host_events_() {
-    if (!ble_event_queue_ || !ble_ || !vehicle_) return;
+    if (!ble_event_queue_ || !ble_ || !client_) return;
 
     if (ble_event_overflow_.exchange(false, std::memory_order_acq_rel)) {
         BleHostEvent discarded{};
@@ -587,38 +579,588 @@ void VehicleController::process_ble_host_events_() {
             continue;
         }
 
-        // Materialize the tesla-ble API vector before taking vehicle_mutex_. If this allocation
-        // fails, no shared lock is held and the only safe recovery is a clean reconnect.
-        std::vector<uint8_t> data;
+        const uint32_t now_ms = static_cast<uint32_t>(pdTICKS_TO_MS(xTaskGetTickCount()));
         try {
-            data.assign(event.data.begin(), event.data.begin() + event.size);
+            command_runner_.rx_framer().push_chunk(
+                event.data.data(), event.size, now_ms,
+                [&](const uint8_t* payload, size_t len) {
+                    tk::SemGuard g(vehicle_mutex_);
+                    if (!g) {
+                        command_runner_.rx_framer().reset();
+                        ble_fault_.store(true);
+                        return;
+                    }
+                    try {
+                        process_rx_frame_(payload, len);
+                    } catch (const std::exception& e) {
+                        ESP_LOGE(TAG, "deferred process_rx_frame_ threw (%s) — dropping link", e.what());
+                        command_runner_.rx_framer().reset();
+                        ble_fault_.store(true);
+                    } catch (...) {
+                        ESP_LOGE(TAG, "deferred process_rx_frame_ threw (unknown) — dropping link");
+                        command_runner_.rx_framer().reset();
+                        ble_fault_.store(true);
+                    }
+                },
+                [&](tk::RxFramerDropReason reason, size_t dropped) {
+                    switch (reason) {
+                        case tk::RxFramerDropReason::InterChunkTimeout:
+                            ESP_LOGW(TAG, "RX framer: inter-chunk timeout, dropped %zu stale bytes", dropped);
+                            break;
+                        case tk::RxFramerDropReason::CorruptLength:
+                            ESP_LOGW(TAG, "RX framer: corrupt length prefix, dropped %zu bytes", dropped);
+                            break;
+                        case tk::RxFramerDropReason::BufferOverflow:
+                            ESP_LOGE(TAG, "RX framer: buffer overflow, dropped %zu bytes", dropped);
+                            break;
+                        default:
+                            break;
+                    }
+                });
         } catch (const std::exception& e) {
-            ESP_LOGE(TAG, "deferred BLE RX allocation failed (%s) — dropping link", e.what());
+            ESP_LOGE(TAG, "RX framer push_chunk threw (%s) — dropping link", e.what());
+            command_runner_.rx_framer().reset();
             ble_fault_.store(true);
             break;
         } catch (...) {
-            ESP_LOGE(TAG, "deferred BLE RX allocation failed (unknown) — dropping link");
+            ESP_LOGE(TAG, "RX framer push_chunk threw (unknown) — dropping link");
+            command_runner_.rx_framer().reset();
             ble_fault_.store(true);
             break;
         }
-        {
-            tk::SemGuard g(vehicle_mutex_);
-            if (!g) {
-                ble_fault_.store(true);
-                break;
-            }
-            try {
-                vehicle_->on_rx_data(data);
-                vcsec_sleep_state_.store(static_cast<int>(vehicle_->sleep_state()));
-            } catch (const std::exception& e) {
-                ESP_LOGE(TAG, "deferred on_rx_data threw (%s) — dropping link", e.what());
-                ble_fault_.store(true);
-            } catch (...) {
-                ESP_LOGE(TAG, "deferred on_rx_data threw (unknown) — dropping link");
-                ble_fault_.store(true);
+        if (ble_fault_.load()) {
+            command_runner_.rx_framer().reset();
+            break;
+        }
+    }
+    if (!ble_fault_.load()) {
+        try {
+            const uint32_t now_ms = static_cast<uint32_t>(pdTICKS_TO_MS(xTaskGetTickCount()));
+            command_runner_.rx_framer().check_timeout(now_ms, [&](tk::RxFramerDropReason reason, size_t dropped) {
+                if (reason == tk::RxFramerDropReason::InterChunkTimeout) {
+                    ESP_LOGW(TAG, "RX framer: periodic timeout check dropped %zu stale bytes", dropped);
+                }
+            });
+        } catch (...) {
+            command_runner_.rx_framer().reset();
+            ble_fault_.store(true);
+        }
+    }
+}
+
+void VehicleController::enqueue_background_poll_(const std::string& name, tk::BleDomain domain, Builder builder) {
+    if (!command_identity_ready_()) return;
+    if (command_runner_.is_queue_full()) return;
+    const uint32_t now_ms = (xTaskGetTickCount() * 1000) / configTICK_RATE_HZ;
+    const uint32_t cmd_id = command_runner_.enqueue(
+        name, domain, tk::WakePolicy::NoWakeSkip, 10000, now_ms, {}, nullptr);
+    if (cmd_id > 0) {
+        command_builders_[cmd_id % tk::CommandRunner::kMaxQueueSize] = std::move(builder);
+    }
+}
+
+bool VehicleController::persist_session_(UniversalMessage_Domain domain,
+                                         const UniversalMessage_RoutableMessage_session_info_t& info) {
+    if (!storage_) return false;
+    const char* key = (domain == UniversalMessage_Domain_DOMAIN_VEHICLE_SECURITY)
+        ? tk::nvs_contract::kSessionVcsec
+        : tk::nvs_contract::kSessionInfotainment;
+    std::vector<uint8_t> data(info.bytes, info.bytes + info.size);
+    return storage_->save(key, data);
+}
+
+bool VehicleController::load_nvs_sessions_() {
+    if (!storage_ || !client_) return false;
+    bool any_loaded = false;
+
+    auto load_domain = [&](UniversalMessage_Domain domain, const char* key, tk::BleDomain tk_domain) {
+        std::vector<uint8_t> session_data;
+        if (!storage_->load(key, session_data) || session_data.empty()) {
+            return;
+        }
+        if (session_data.size() > sizeof(UniversalMessage_RoutableMessage_session_info_t::bytes)) {
+            ESP_LOGW(TAG, "Stored session data too large for %s: %zu", key, session_data.size());
+            return;
+        }
+
+        UniversalMessage_RoutableMessage_session_info_t buf{};
+        std::memcpy(buf.bytes, session_data.data(), session_data.size());
+        buf.size = session_data.size();
+
+        Signatures_SessionInfo session_info = Signatures_SessionInfo_init_default;
+        if (client_->parse_payload_session_info(&buf, &session_info) != 0) {
+            ESP_LOGW(TAG, "Failed to parse stored session for %s", key);
+            return;
+        }
+
+        if (session_info.status != Signatures_Session_Info_Status_SESSION_INFO_STATUS_OK) {
+            ESP_LOGW(TAG, "Stored session for %s has non-OK status: %d", key, static_cast<int>(session_info.status));
+            return;
+        }
+
+        const uint32_t current_time = static_cast<uint32_t>(time(nullptr));
+        const uint32_t session_time = session_info.clock_time;
+        if (session_time == 0) {
+            ESP_LOGW(TAG, "Stored session for %s has no timestamp; rejecting", key);
+            return;
+        }
+        const int64_t session_age_seconds = static_cast<int64_t>(current_time) - static_cast<int64_t>(session_time);
+        if (session_age_seconds >= 0 && session_age_seconds > 3600) {
+            ESP_LOGW(TAG, "Stored session for %s is expired (%lld s old); rejecting", key, (long long)session_age_seconds);
+            return;
+        }
+
+        auto* peer = client_->get_peer(domain);
+        if (peer && peer->update_session(&session_info) == 0) {
+            ESP_LOGI(TAG, "Loaded session from NVS for %s (counter: %lu)", key, (unsigned long)session_info.counter);
+            auto& tracker = (tk_domain == tk::BleDomain::VehicleSecurity)
+                ? command_runner_.vcsec_session() : command_runner_.info_session();
+            std::array<uint8_t, 16> epoch_arr{};
+            std::memcpy(epoch_arr.data(), session_info.epoch, 16);
+            tracker.set_established(epoch_arr, session_info.counter, session_info.clock_time);
+            any_loaded = true;
+        }
+    };
+
+    load_domain(UniversalMessage_Domain_DOMAIN_VEHICLE_SECURITY, tk::nvs_contract::kSessionVcsec, tk::BleDomain::VehicleSecurity);
+    load_domain(UniversalMessage_Domain_DOMAIN_INFOTAINMENT, tk::nvs_contract::kSessionInfotainment, tk::BleDomain::Infotainment);
+
+    return any_loaded;
+}
+
+void VehicleController::process_rx_frame_(const uint8_t* frame, size_t len) {
+    if (!client_) return;
+
+    UniversalMessage_RoutableMessage msg = UniversalMessage_RoutableMessage_init_default;
+    if (client_->parse_universal_message(const_cast<uint8_t*>(frame), len, &msg) != 0) {
+        ESP_LOGW(TAG, "Failed to parse universal message (%zu bytes)", len);
+        return;
+    }
+
+    on_vehicle_message_(msg);
+
+    bool has_session_error = false;
+    if (msg.has_signedMessageStatus &&
+        msg.signedMessageStatus.operation_status == UniversalMessage_OperationStatus_E_OPERATIONSTATUS_ERROR) {
+        UniversalMessage_Domain err_domain = UniversalMessage_Domain_DOMAIN_BROADCAST;
+        if (msg.has_from_destination &&
+            msg.from_destination.which_sub_destination == UniversalMessage_Destination_domain_tag) {
+            err_domain = msg.from_destination.sub_destination.domain;
+        } else if (auto* cmd = command_runner_.current_command()) {
+            err_domain = (cmd->domain == tk::BleDomain::VehicleSecurity)
+                ? UniversalMessage_Domain_DOMAIN_VEHICLE_SECURITY : UniversalMessage_Domain_DOMAIN_INFOTAINMENT;
+        }
+        auto fault = msg.signedMessageStatus.signed_message_fault;
+        ESP_LOGW(TAG, "Signed message fault: %d for domain %d", static_cast<int>(fault), static_cast<int>(err_domain));
+        auto* peer = client_->get_peer(err_domain);
+        if (peer) {
+            switch (fault) {
+                case UniversalMessage_MessageFault_E_MESSAGEFAULT_ERROR_TIME_EXPIRED:
+                case UniversalMessage_MessageFault_E_MESSAGEFAULT_ERROR_INCORRECT_EPOCH:
+                case UniversalMessage_MessageFault_E_MESSAGEFAULT_ERROR_INVALID_TOKEN_OR_COUNTER:
+                    peer->reset();
+                    if (err_domain == UniversalMessage_Domain_DOMAIN_INFOTAINMENT) {
+                        command_runner_.info_session().reset();
+                    } else {
+                        command_runner_.vcsec_session().reset();
+                    }
+                    has_session_error = true;
+                    break;
+                case UniversalMessage_MessageFault_E_MESSAGEFAULT_ERROR_INVALID_SIGNATURE:
+                    peer->reset();
+                    if (err_domain == UniversalMessage_Domain_DOMAIN_INFOTAINMENT) {
+                        command_runner_.info_session().reset();
+                        if (storage_) (void)storage_->remove(tk::nvs_contract::kSessionInfotainment);
+                    } else {
+                        command_runner_.vcsec_session().reset();
+                        if (storage_) (void)storage_->remove(tk::nvs_contract::kSessionVcsec);
+                    }
+                    has_session_error = true;
+                    break;
+                default:
+                    break;
             }
         }
-        if (ble_fault_.load()) break;
+        if (has_session_error) {
+            auto* cmd = command_runner_.current_command();
+            if (cmd && (cmd->state == tk::CommandState::AwaitingResponse ||
+                        cmd->state == tk::CommandState::WaitingVcsecAuth ||
+                        cmd->state == tk::CommandState::WaitingInfoAuth)) {
+                if (cmd->retry_count < cmd->max_retries) {
+                    cmd->retry_count++;
+                    cmd->state = tk::CommandState::Idle;
+                    if (cmd->dispatcher_request_id != 0) {
+                        command_runner_.dispatcher().unregister_request(cmd->dispatcher_request_id);
+                        cmd->dispatcher_request_id = 0;
+                    }
+                } else {
+                    command_runner_.complete_current_command(false, "session error; max retries exceeded", false);
+                }
+            }
+        }
+    }
+
+    if (msg.which_payload == UniversalMessage_RoutableMessage_session_info_tag) {
+        UniversalMessage_Domain domain = UniversalMessage_Domain_DOMAIN_BROADCAST;
+        if (msg.has_from_destination &&
+            msg.from_destination.which_sub_destination == UniversalMessage_Destination_domain_tag) {
+            domain = msg.from_destination.sub_destination.domain;
+        } else if (auto* cmd = command_runner_.current_command()) {
+            domain = (cmd->domain == tk::BleDomain::VehicleSecurity)
+                ? UniversalMessage_Domain_DOMAIN_VEHICLE_SECURITY : UniversalMessage_Domain_DOMAIN_INFOTAINMENT;
+        }
+        if (domain != UniversalMessage_Domain_DOMAIN_VEHICLE_SECURITY &&
+            domain != UniversalMessage_Domain_DOMAIN_INFOTAINMENT) {
+            ESP_LOGE(TAG, "Unknown domain for session info");
+            return;
+        }
+
+        Signatures_SessionInfo session_info = Signatures_SessionInfo_init_default;
+        int res = client_->parse_payload_session_info(
+            const_cast<UniversalMessage_RoutableMessage_session_info_t*>(&msg.payload.session_info), &session_info);
+        if (res != 0) {
+            ESP_LOGE(TAG, "Failed to parse session info payload (%d)", res);
+            return;
+        }
+
+        if (msg.which_sub_sigData != UniversalMessage_RoutableMessage_signature_data_tag ||
+            msg.sub_sigData.signature_data.which_sig_type != Signatures_SignatureData_session_info_tag_tag) {
+            ESP_LOGW(TAG, "Missing session info HMAC tag");
+            auto* cmd = command_runner_.current_command();
+            if (cmd) {
+                command_runner_.complete_current_command(false, "authentication failed", false);
+            }
+            return;
+        }
+        const auto& tag = msg.sub_sigData.signature_data.sig_type.session_info_tag.tag;
+        if (tag.size == 0) {
+            ESP_LOGW(TAG, "Empty session info HMAC tag");
+            auto* cmd = command_runner_.current_command();
+            if (cmd) {
+                command_runner_.complete_current_command(false, "authentication failed", false);
+            }
+            return;
+        }
+
+        pb_byte_t request_uuid[16] = {0};
+        size_t request_uuid_len = sizeof(request_uuid);
+        if (!client_->get_last_request_uuid(domain, request_uuid, &request_uuid_len)) {
+            ESP_LOGE(TAG, "Missing request UUID for session info verification");
+            return;
+        }
+        if (!client_->verify_session_info_tag(session_info, msg.payload.session_info.bytes, msg.payload.session_info.size,
+                                              request_uuid, request_uuid_len, tag.bytes, tag.size)) {
+            ESP_LOGE(TAG, "Session info HMAC verification failed");
+            auto* cmd = command_runner_.current_command();
+            if (cmd) {
+                command_runner_.complete_current_command(false, "authentication failed", false);
+            }
+            return;
+        }
+
+        if (session_info.status != Signatures_Session_Info_Status_SESSION_INFO_STATUS_OK) {
+            ESP_LOGW(TAG, "Session info status not OK: %d", static_cast<int>(session_info.status));
+            auto* cmd = command_runner_.current_command();
+            if (cmd) {
+                std::string err = (session_info.status == Signatures_Session_Info_Status_SESSION_INFO_STATUS_KEY_NOT_ON_WHITELIST)
+                    ? "key not on whitelist - pairing required"
+                    : "authentication failed";
+                command_runner_.complete_current_command(false, err, false);
+            }
+            return;
+        }
+
+        auto* peer = client_->get_peer(domain);
+        if (peer && peer->update_session(&session_info) == 0) {
+            ESP_LOGI(TAG, "Session updated for domain %d", static_cast<int>(domain));
+            persist_session_(domain, msg.payload.session_info);
+            auto tk_domain = (domain == UniversalMessage_Domain_DOMAIN_VEHICLE_SECURITY)
+                ? tk::BleDomain::VehicleSecurity : tk::BleDomain::Infotainment;
+            auto& tracker = (tk_domain == tk::BleDomain::VehicleSecurity)
+                ? command_runner_.vcsec_session() : command_runner_.info_session();
+            std::array<uint8_t, 16> epoch_arr{};
+            std::memcpy(epoch_arr.data(), session_info.epoch, 16);
+            tracker.set_established(epoch_arr, session_info.counter, session_info.clock_time);
+
+            auto* cmd = command_runner_.current_command();
+            if (cmd) {
+                if (has_session_error &&
+                    (cmd->state == tk::CommandState::AwaitingResponse ||
+                     cmd->state == tk::CommandState::WaitingVcsecAuth ||
+                     cmd->state == tk::CommandState::WaitingInfoAuth)) {
+                    cmd->state = tk::CommandState::Idle;
+                    cmd->retry_count++;
+                } else if (domain == UniversalMessage_Domain_DOMAIN_VEHICLE_SECURITY &&
+                           cmd->state == tk::CommandState::WaitingVcsecAuth) {
+                    cmd->state = tk::CommandState::Idle;
+                } else if (domain == UniversalMessage_Domain_DOMAIN_INFOTAINMENT &&
+                           cmd->state == tk::CommandState::WaitingInfoAuth) {
+                    cmd->state = tk::CommandState::Idle;
+                }
+            }
+        }
+        return;
+    }
+
+    if (msg.from_destination.which_sub_destination == UniversalMessage_Destination_domain_tag) {
+        switch (msg.from_destination.sub_destination.domain) {
+            case UniversalMessage_Domain_DOMAIN_VEHICLE_SECURITY: {
+                if (msg.which_payload != UniversalMessage_RoutableMessage_protobuf_message_as_bytes_tag) {
+                    ESP_LOGE(TAG, "VCSEC message missing protobuf payload");
+                    return;
+                }
+                const Signatures_SignatureData* sig_data = nullptr;
+                if (msg.which_sub_sigData == UniversalMessage_RoutableMessage_signature_data_tag) {
+                    sig_data = &msg.sub_sigData.signature_data;
+                }
+                UniversalMessage_MessageFault_E fault = UniversalMessage_MessageFault_E_MESSAGEFAULT_ERROR_NONE;
+                if (msg.has_signedMessageStatus) {
+                    fault = msg.signedMessageStatus.signed_message_fault;
+                }
+                const UniversalMessage_RoutableMessage_protobuf_message_as_bytes_t* payload =
+                    &msg.payload.protobuf_message_as_bytes;
+                UniversalMessage_RoutableMessage_protobuf_message_as_bytes_t decrypt_buffer;
+                if (sig_data && sig_data->which_sig_type == Signatures_SignatureData_AES_GCM_Response_data_tag) {
+                    auto* session = client_->get_peer(UniversalMessage_Domain_DOMAIN_VEHICLE_SECURITY);
+                    if (session && session->is_initialized()) {
+                        size_t req_hash_len = 0;
+                        const pb_byte_t* req_hash = client_->get_last_request_hash(&req_hash_len);
+                        if (req_hash && req_hash_len > 0) {
+                            size_t dec_len = 0;
+                            int ret = session->decrypt_response(
+                                payload->bytes, payload->size,
+                                sig_data->sig_type.AES_GCM_Response_data.nonce,
+                                sig_data->sig_type.AES_GCM_Response_data.tag,
+                                req_hash, req_hash_len, msg.flags, fault,
+                                decrypt_buffer.bytes, sizeof(decrypt_buffer.bytes), &dec_len);
+                            if (ret == 0) {
+                                decrypt_buffer.size = dec_len;
+                                payload = &decrypt_buffer;
+                            } else {
+                                ESP_LOGE(TAG, "Failed to decrypt VCSEC response (%d)", ret);
+                                return;
+                            }
+                        }
+                    }
+                }
+
+                VCSEC_FromVCSECMessage vcsec_msg = VCSEC_FromVCSECMessage_init_default;
+                if (client_->parse_from_vcsec_message(
+                        const_cast<UniversalMessage_RoutableMessage_protobuf_message_as_bytes_t*>(payload), &vcsec_msg) == 0) {
+                    switch (vcsec_msg.which_sub_message) {
+                        case VCSEC_FromVCSECMessage_commandStatus_tag: {
+                            const uint8_t* uuid_ptr = (msg.request_uuid.size > 0) ? msg.request_uuid.bytes : nullptr;
+                            const size_t uuid_len = msg.request_uuid.size;
+                            command_runner_.handle_response(
+                                tk::BleDomain::VehicleSecurity,
+                                uuid_ptr, uuid_len,
+                                false, 0,
+                                true, "");
+                            break;
+                        }
+                        case VCSEC_FromVCSECMessage_vehicleStatus_tag: {
+                            const auto& vs = vcsec_msg.sub_message.vehicleStatus;
+                            bool is_asleep = (vs.vehicleSleepStatus == VCSEC_VehicleSleepStatus_E_VEHICLE_SLEEP_STATUS_ASLEEP);
+                            vcsec_sleep_state_.store(static_cast<int>(is_asleep ? TeslaBLE::SleepState::ASLEEP : TeslaBLE::SleepState::AWAKE));
+                            note_vcsec_sleep_(is_asleep);
+                            if (!is_asleep || vs.has_closureStatuses) {
+                                command_runner_.notify_vehicle_awake(true);
+                            }
+                            if (vehicle_status_callback_) {
+                                vehicle_status_callback_(vs);
+                            }
+                            const uint8_t* uuid_ptr = (msg.request_uuid.size > 0) ? msg.request_uuid.bytes : nullptr;
+                            const size_t uuid_len = msg.request_uuid.size;
+                            command_runner_.handle_response(
+                                tk::BleDomain::VehicleSecurity,
+                                uuid_ptr, uuid_len,
+                                false, 0,
+                                true, "");
+                            break;
+                        }
+                        case VCSEC_FromVCSECMessage_nominalError_tag: {
+                            ESP_LOGW(TAG, "VCSEC Nominal Error: %d", static_cast<int>(vcsec_msg.sub_message.nominalError.genericError));
+                            const uint8_t* uuid_ptr = (msg.request_uuid.size > 0) ? msg.request_uuid.bytes : nullptr;
+                            const size_t uuid_len = msg.request_uuid.size;
+                            command_runner_.handle_response(
+                                tk::BleDomain::VehicleSecurity,
+                                uuid_ptr, uuid_len,
+                                false, 0,
+                                false, "VCSEC nominal error");
+                            break;
+                        }
+                        default:
+                            break;
+                    }
+                }
+                break;
+            }
+            case UniversalMessage_Domain_DOMAIN_INFOTAINMENT: {
+                const Signatures_SignatureData* sig_data = nullptr;
+                if (msg.which_sub_sigData == UniversalMessage_RoutableMessage_signature_data_tag) {
+                    sig_data = &msg.sub_sigData.signature_data;
+                }
+                UniversalMessage_MessageFault_E fault = UniversalMessage_MessageFault_E_MESSAGEFAULT_ERROR_NONE;
+                if (msg.has_signedMessageStatus) {
+                    fault = msg.signedMessageStatus.signed_message_fault;
+                }
+                CarServer_Response response = CarServer_Response_init_default;
+                uint32_t response_counter = 0;
+                int res = client_->parse_payload_car_server_response(
+                    const_cast<UniversalMessage_RoutableMessage_protobuf_message_as_bytes_t*>(&msg.payload.protobuf_message_as_bytes),
+                    const_cast<Signatures_SignatureData*>(sig_data), msg.which_sub_sigData, fault, msg.flags, &response,
+                    &response_counter);
+                if (res != 0) {
+                    ESP_LOGE(TAG, "Failed to parse CarServer response (%d)", res);
+                    return;
+                }
+                auto* peer = client_->get_peer(UniversalMessage_Domain_DOMAIN_INFOTAINMENT);
+                if (peer && response_counter > 0 && !peer->validate_response_counter(response_counter)) {
+                    ESP_LOGW(TAG, "Duplicate response counter detected: %lu", (unsigned long)response_counter);
+                    return;
+                }
+
+                if (response.which_response_msg == CarServer_Response_vehicleData_tag) {
+                    const auto& vd = response.response_msg.vehicleData;
+                    if (vd.has_charge_state)       on_charge_state_(vd.charge_state);
+                    if (vd.has_climate_state)      on_climate_state_(vd.climate_state);
+                    if (vd.has_drive_state)        on_drive_state_(vd.drive_state);
+                    if (vd.has_tire_pressure_state) on_tire_pressure_state_(vd.tire_pressure_state);
+                    if (vd.has_closures_state)     on_closures_state_(vd.closures_state);
+                }
+
+                bool is_success = true;
+                std::string err;
+                if (response.has_actionStatus) {
+                    if (response.actionStatus.result == CarServer_OperationStatus_E_OPERATIONSTATUS_OK) {
+                        is_success = true;
+                    } else {
+                        is_success = false;
+                        err = "Infotainment action failed";
+                        if (response.actionStatus.has_result_reason &&
+                            response.actionStatus.result_reason.which_reason == CarServer_ResultReason_plain_text_tag) {
+                            err += ": ";
+                            err += response.actionStatus.result_reason.reason.plain_text;
+                        }
+                    }
+                }
+                const uint8_t* uuid_ptr = (msg.request_uuid.size > 0) ? msg.request_uuid.bytes : nullptr;
+                const size_t uuid_len = msg.request_uuid.size;
+                auto outcome = command_runner_.handle_response(
+                    tk::BleDomain::Infotainment,
+                    uuid_ptr, uuid_len,
+                    response_counter > 0, response_counter,
+                    is_success, err);
+                if (!outcome.routed) {
+                    if (outcome.drop_reason == tk::DispatchDropReason::Replay) {
+                        ESP_LOGW(TAG, "CarServer response dropped as replay (counter=%lu)",
+                                 (unsigned long)response_counter);
+                    } else {
+                        ESP_LOGD(TAG, "CarServer response dropped (reason=%d)",
+                                 static_cast<int>(outcome.drop_reason));
+                    }
+                }
+                break;
+            }
+            default:
+                break;
+        }
+    }
+}
+
+void VehicleController::drive_command_runner_() {
+    if (!command_identity_ready_()) return;
+
+    auto* cmd = command_runner_.current_command();
+    if (cmd && cmd->is_completed && !cmd->on_complete) {
+        command_builders_[cmd->id % tk::CommandRunner::kMaxQueueSize] = nullptr;
+        command_runner_.pop_current();
+        cmd = command_runner_.current_command();
+    }
+
+    if (!cmd) return;
+
+    const uint32_t now_ms = (xTaskGetTickCount() * 1000) / configTICK_RATE_HZ;
+    const bool connected = ble_connected();
+    const auto sleep_state = static_cast<TeslaBLE::SleepState>(vcsec_sleep_state_.load());
+    const bool awake = (sleep_state == TeslaBLE::SleepState::AWAKE);
+    const bool asleep = (sleep_state == TeslaBLE::SleepState::ASLEEP);
+
+    tk::TxAction action = command_runner_.tick(now_ms, connected, awake, asleep);
+
+    if (cmd->is_completed && !cmd->on_complete) {
+        command_builders_[cmd->id % tk::CommandRunner::kMaxQueueSize] = nullptr;
+        command_runner_.pop_current();
+        return;
+    }
+
+    if (action == tk::TxAction::None) {
+        return;
+    }
+
+    std::vector<uint8_t> framed(2 + tk::RxFramer::kMaxFrameLength);
+    uint8_t* payload_buf = framed.data() + 2;
+    size_t len = tk::RxFramer::kMaxFrameLength;
+    int res = -1;
+
+    switch (action) {
+        case tk::TxAction::SendVcsecSessionInfoRequest: {
+            ESP_LOGD(TAG, "Sending VCSEC SessionInfoRequest");
+            res = client_->build_session_info_request_message(
+                UniversalMessage_Domain_DOMAIN_VEHICLE_SECURITY, payload_buf, &len);
+            break;
+        }
+        case tk::TxAction::SendWake: {
+            ESP_LOGD(TAG, "Sending VCSEC Wake action");
+            res = client_->build_vcsec_action_message(
+                VCSEC_RKEAction_E_RKE_ACTION_WAKE_VEHICLE, payload_buf, &len);
+            break;
+        }
+        case tk::TxAction::SendInfoSessionInfoRequest: {
+            ESP_LOGD(TAG, "Sending Infotainment SessionInfoRequest");
+            res = client_->build_session_info_request_message(
+                UniversalMessage_Domain_DOMAIN_INFOTAINMENT, payload_buf, &len);
+            break;
+        }
+        case tk::TxAction::SendCommandPayload: {
+            auto& builder = command_builders_[cmd->id % tk::CommandRunner::kMaxQueueSize];
+            if (builder) {
+                ESP_LOGD(TAG, "Building command payload for '%s'", cmd->name.c_str());
+                res = builder(client_.get(), payload_buf, &len);
+                if (res == 0) {
+                    UniversalMessage_Domain d = (cmd->domain == tk::BleDomain::VehicleSecurity)
+                        ? UniversalMessage_Domain_DOMAIN_VEHICLE_SECURITY
+                        : UniversalMessage_Domain_DOMAIN_INFOTAINMENT;
+                    pb_byte_t req_uuid[16] = {0};
+                    size_t req_uuid_len = sizeof(req_uuid);
+                    if (client_->get_last_request_uuid(d, req_uuid, &req_uuid_len) && req_uuid_len == 16) {
+                        std::memcpy(cmd->uuid.data(), req_uuid, 16);
+                    }
+                }
+            } else {
+                ESP_LOGE(TAG, "Missing builder for command '%s'", cmd->name.c_str());
+                res = -1;
+            }
+            break;
+        }
+        default:
+            break;
+    }
+
+    if (res == 0 && len > 0) {
+        framed[0] = static_cast<uint8_t>((len >> 8) & 0xFF);
+        framed[1] = static_cast<uint8_t>(len & 0xFF);
+        framed.resize(2 + len);
+
+        if (ble_ && ble_->write(framed)) {
+            command_runner_.notify_tx_complete(now_ms);
+        } else {
+            ESP_LOGW(TAG, "BLE write failed for action %d", static_cast<int>(action));
+            command_runner_.notify_tx_failed("BLE write failed");
+        }
+    } else {
+        ESP_LOGE(TAG, "Failed to build payload for action %d (res=%d)", static_cast<int>(action), res);
+        command_runner_.notify_tx_failed("Payload build failed");
     }
 }
 
@@ -681,25 +1223,18 @@ void VehicleController::loop_task_fn_(void* arg) {
             continue;
         }
         {
-            // RAII give — vehicle_->loop() can throw on corrupt RX the same way on_rx_data does;
-            // the guard releases vehicle_mutex_ on unwind so it can't wedge every later command.
+            // RAII give — drive_command_runner_() releases vehicle_mutex_ on unwind
+            // so it can't wedge every later command.
             tk::SemGuard g(self->vehicle_mutex_);
             try {
-                if (self->command_identity_ready_()) self->vehicle_->loop();
-                // on_rx_data() only queues decoded routable messages; loop() is what invokes
-                // handle_vcsec_message_ and mutates Vehicle::sleep_state(). Publish the mirror
-                // after that mutation while the same lock is still held, otherwise the atomic
-                // remains one processing cycle behind (or UNKNOWN forever on quiet links).
-                self->vcsec_sleep_state_.store(static_cast<int>(
-                    self->command_identity_ready_() ? self->vehicle_->sleep_state()
-                                                    : TeslaBLE::SleepState::UNKNOWN));
+                if (self->command_identity_ready_()) self->drive_command_runner_();
             } catch (const std::exception& e) {
-                ESP_LOGE(TAG, "vehicle loop() threw (%s) — resetting BLE link", e.what());
+                ESP_LOGE(TAG, "drive_command_runner_ threw (%s) — resetting BLE link", e.what());
                 self->vcsec_sleep_state_.store(
                     static_cast<int>(TeslaBLE::SleepState::UNKNOWN));
                 self->ble_fault_.store(true);
             } catch (...) {
-                ESP_LOGE(TAG, "vehicle loop() threw (unknown) — resetting BLE link");
+                ESP_LOGE(TAG, "drive_command_runner_ threw (unknown) — resetting BLE link");
                 self->vcsec_sleep_state_.store(
                     static_cast<int>(TeslaBLE::SleepState::UNKNOWN));
                 self->ble_fault_.store(true);
@@ -984,12 +1519,13 @@ void VehicleController::loop_task_fn_(void* arg) {
         if (tk::charge_poll_should_fire({paired, poll_cadence, self->ble_connected(), self->cmd_in_flight_.load(), now_s}, wake_poll)) {
             if (poll_cadence) last_poll_ticks = now_ticks;
             ESP_LOGD(TAG, "background charge-state refresh…");
-            // Fire-and-forget poll. We must NOT block here: this task also pumps
-            // vehicle_->loop(), which drives the command's transmission/retries. The
-            // persistent charge-state callback updates last_known_charge_ when the
-            // response arrives. NO_WAKE_SKIP so a sleeping car is left undisturbed.
-            tk::SemGuard g(self->vehicle_mutex_);   // RAII: charge_state_poll can throw
-            self->vehicle_->charge_state_poll(TeslaBLE::WakePolicy::NO_WAKE_SKIP);
+            tk::SemGuard g(self->vehicle_mutex_);
+            self->enqueue_background_poll_(
+                "Charge State Poll", tk::BleDomain::Infotainment,
+                [](TeslaBLE::Client* client, uint8_t* buff, size_t* len) {
+                    return client->build_car_server_get_vehicle_data_message(
+                        buff, len, CarServer_GetVehicleData_getChargeState_tag);
+                });
         }
 
         // Background telemetry refresh (paired + window + connected): one domain per cycle,
@@ -1005,12 +1541,40 @@ void VehicleController::loop_task_fn_(void* arg) {
             && (now_ticks - last_tele_ticks > pdMS_TO_TICKS(30000))) {
             last_tele_ticks = now_ticks;
             {
-                tk::SemGuard g(self->vehicle_mutex_);   // RAII: the *_poll builders can throw
+                tk::SemGuard g(self->vehicle_mutex_);
                 switch (tele_idx % 4) {
-                    case 0: self->vehicle_->climate_state_poll(TeslaBLE::WakePolicy::NO_WAKE_SKIP);  break;
-                    case 1: self->vehicle_->drive_state_poll(TeslaBLE::WakePolicy::NO_WAKE_SKIP);    break;
-                    case 2: self->vehicle_->tire_pressure_poll(TeslaBLE::WakePolicy::NO_WAKE_SKIP);  break;
-                    case 3: self->vehicle_->closures_state_poll(TeslaBLE::WakePolicy::NO_WAKE_SKIP); break;
+                    case 0:
+                        self->enqueue_background_poll_(
+                            "Climate State Poll", tk::BleDomain::Infotainment,
+                            [](TeslaBLE::Client* client, uint8_t* buff, size_t* len) {
+                                return client->build_car_server_get_vehicle_data_message(
+                                    buff, len, CarServer_GetVehicleData_getClimateState_tag);
+                            });
+                        break;
+                    case 1:
+                        self->enqueue_background_poll_(
+                            "Drive State Poll", tk::BleDomain::Infotainment,
+                            [](TeslaBLE::Client* client, uint8_t* buff, size_t* len) {
+                                return client->build_car_server_get_vehicle_data_message(
+                                    buff, len, CarServer_GetVehicleData_getDriveState_tag);
+                            });
+                        break;
+                    case 2:
+                        self->enqueue_background_poll_(
+                            "Tire Pressure Poll", tk::BleDomain::Infotainment,
+                            [](TeslaBLE::Client* client, uint8_t* buff, size_t* len) {
+                                return client->build_car_server_get_vehicle_data_message(
+                                    buff, len, CarServer_GetVehicleData_getTirePressureState_tag);
+                            });
+                        break;
+                    case 3:
+                        self->enqueue_background_poll_(
+                            "Closures State Poll", tk::BleDomain::Infotainment,
+                            [](TeslaBLE::Client* client, uint8_t* buff, size_t* len) {
+                                return client->build_car_server_get_vehicle_data_message(
+                                    buff, len, CarServer_GetVehicleData_getClosuresState_tag);
+                            });
+                        break;
                 }
             }
             tele_idx++;
@@ -1144,22 +1708,33 @@ bool VehicleController::get_vehicle_status(VehicleStatusResult& out, tk::Connect
     };
 
     try {
-        // Both setter and poll are tesla-ble calls and the setter mutates a std::function read
-        // from the RX task. Serialize them under the same mutex as on_rx_data/loop.
         tk::SemGuard g(vehicle_mutex_);
-        vehicle_->set_vehicle_status_callback(std::move(callback));
-        vehicle_->vcsec_poll();
+        vehicle_status_callback_ = std::move(callback);
+        const uint32_t now_ms = (xTaskGetTickCount() * 1000) / configTICK_RATE_HZ;
+        const uint32_t timeout_ms = remaining_ms_(deadline);
+        const uint32_t cmd_id = command_runner_.enqueue(
+            "VCSEC Status Poll", tk::BleDomain::VehicleSecurity, tk::WakePolicy::NoWakeSkip,
+            timeout_ms, now_ms, {}, nullptr);
+        if (cmd_id == 0) {
+            vehicle_status_callback_ = nullptr;
+            return false;
+        }
+        command_builders_[cmd_id % tk::CommandRunner::kMaxQueueSize] =
+            [](TeslaBLE::Client* client, uint8_t* buff, size_t* len) {
+                return client->build_vcsec_information_request_message(
+                    VCSEC_InformationRequestType_INFORMATION_REQUEST_TYPE_GET_STATUS, buff, len);
+            };
     } catch (const std::exception& e) {
         ESP_LOGE(TAG, "vehicle-status poll threw (%s) — invalidating command FIFO", e.what());
         invalidate_and_flush_(generation);
         tk::SemGuard g(vehicle_mutex_);
-        vehicle_->set_vehicle_status_callback(nullptr);
+        vehicle_status_callback_ = nullptr;
         return false;
     } catch (...) {
         ESP_LOGE(TAG, "vehicle-status poll threw (unknown) — invalidating command FIFO");
         invalidate_and_flush_(generation);
         tk::SemGuard g(vehicle_mutex_);
-        vehicle_->set_vehicle_status_callback(nullptr);
+        vehicle_status_callback_ = nullptr;
         return false;
     }
 
@@ -1175,7 +1750,12 @@ bool VehicleController::get_vehicle_status(VehicleStatusResult& out, tk::Connect
     }
     {
         tk::SemGuard g(vehicle_mutex_);
-        vehicle_->set_vehicle_status_callback(nullptr);
+        vehicle_status_callback_ = nullptr;
+        auto* cmd = command_runner_.current_command();
+        if (cmd && cmd->name == "VCSEC Status Poll") {
+            command_builders_[cmd->id % tk::CommandRunner::kMaxQueueSize] = nullptr;
+            command_runner_.pop_current();
+        }
     }
     if (ok) {
         out.valid = true;

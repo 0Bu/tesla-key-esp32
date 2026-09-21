@@ -144,8 +144,6 @@ REQUIRED_FILES = (
     "dependencies.lock.esp32s3",
     "dependencies.lock.esp32c3",
     "dependencies.lock.esp32c6",
-    "patches/tesla-ble/0002-report-key-regeneration-result.patch",
-    "patches/tesla-ble/0003-rate-limit-rx-framing-recovery-logs.patch",
     "patches/tesla-ble/0004-drop-unused-parental-controls-actions.patch",
     "patches/tesla-ble/0005-align-session-counter-replay-with-signer-go.patch",
     "test/run-cjson-oom-tests.sh",
