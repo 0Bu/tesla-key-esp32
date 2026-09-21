@@ -1,6 +1,8 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
+#include <vector>
 #include "nvs_contract.hpp"
 
 namespace tk {
@@ -149,6 +151,62 @@ constexpr KeyRotationBootState decide_key_rotation_boot(bool marker_present,
     if (!cleanup_attempted) return KeyRotationBootState::CleanupRequired;
     return cleanup_succeeded && marker_removed ? KeyRotationBootState::Ready
                                                : KeyRotationBootState::Blocked;
+}
+
+// tesla-ble's Client::get_private_key() exports PEM (mbedtls_pk_write_key_pem): about 228 B for
+// a P-256 SEC1 key including the terminating NUL. Upstream persist_private_key_() uses 2048 B;
+// a smaller export buffer makes every export fail (#314 review, B2).
+inline constexpr size_t kPrivateKeyPemCapacity = 2048;
+
+enum class KeyRegenerationResult : uint8_t {
+    Committed,             // new key created, exported and persisted: RAM matches storage
+    ExportExistingFailed,  // existing key not exportable: runtime identity left untouched
+    CreateFailed,          // creation failed: previous in-memory key restored (if any)
+    ExportNewFailed,       // new key not exportable: previous in-memory key restored (if any)
+    PersistFailed,         // persistence failed: previous in-memory key restored (if any)
+};
+
+// Fail-closed private-key regeneration over the tesla-ble Client contract (has_private_key,
+// get_private_key, create_private_key, load_private_key). `persist` receives the exported PEM
+// (including its NUL, as tesla-ble stores it) and returns whether it was saved. The runtime
+// identity is never replaced unless the previous key could be exported for a rollback. This is
+// the production transaction behind VehicleController::regenerate_key_native_(); the
+// real-library harness (test/test_tesla_ble_harness.cpp) runs exactly this template.
+template <typename Client, typename Persist>
+KeyRegenerationResult regenerate_private_key(Client& client, Persist&& persist,
+                                             size_t capacity = kPrivateKeyPemCapacity) {
+    std::vector<uint8_t> old_key;
+    bool had_old = false;
+    if (client.has_private_key()) {
+        old_key.resize(capacity);
+        size_t old_len = old_key.size();
+        if (client.get_private_key(old_key.data(), old_key.size(), &old_len) != 0 ||
+            old_len == 0 || old_len > old_key.size()) {
+            return KeyRegenerationResult::ExportExistingFailed;
+        }
+        old_key.resize(old_len);
+        had_old = true;
+    }
+    auto restore_old = [&]() {
+        if (had_old) (void)client.load_private_key(old_key.data(), old_key.size());
+    };
+    if (client.create_private_key() != 0) {
+        restore_old();
+        return KeyRegenerationResult::CreateFailed;
+    }
+    std::vector<uint8_t> new_key(capacity);
+    size_t new_len = new_key.size();
+    if (client.get_private_key(new_key.data(), new_key.size(), &new_len) != 0 ||
+        new_len == 0 || new_len > new_key.size()) {
+        restore_old();
+        return KeyRegenerationResult::ExportNewFailed;
+    }
+    new_key.resize(new_len);
+    if (!persist(static_cast<const std::vector<uint8_t>&>(new_key))) {
+        restore_old();
+        return KeyRegenerationResult::PersistFailed;
+    }
+    return KeyRegenerationResult::Committed;
 }
 
 }  // namespace tk

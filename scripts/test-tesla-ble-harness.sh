@@ -2,10 +2,12 @@
 # Host-side integration harness test against the real yoziru/tesla-ble v5.2.0 library,
 # Nanopb, and Mbed TLS.
 #
-# Validates:
-# - B1: TX wire framing matches builder output and parses correctly car-side
-# - B2: Native key regeneration round trip, 2048 B buffer requirement, and fail-closed rollback
-# - H1: CarServer UUID routing gate before telemetry delivery
+# Runs the production helpers from main/logic/ (not copies) against the real library:
+# - B1: tk::build_ble_tx_frame / tk::is_well_formed_ble_frame (the drive_command_runner_() TX path)
+#       with real builders, decoded vehicle-side like vehicle-command's ble.go
+# - B2: tk::regenerate_private_key (behind regenerate_key_native_()): round trip, 2048 B PEM
+#       export, fail-closed rollback
+# - H1: CommandRunner/BleDispatcher routing contract for foreign-UUID CarServer responses
 #
 # Usage: ./scripts/test-tesla-ble-harness.sh [--clean]
 

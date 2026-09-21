@@ -431,7 +431,7 @@ that describe it. When reviewing a change (or the repo as a whole), check these 
   5. Metadata sinks: update pin citations in `.codex/agents/*.toml`, `.agents/subagents.json`
      (`export-subagents.py`), and skill source maps (`vehicle-command-audit`, `skill-audit`, `project-review`);
      recompute digests via `update-skill-digests.mjs --write`.
-  6. Empirical evidence: record live hardware or high-fidelity mock verification traces for new behaviors (`docs/reviews/`).
+  6. Empirical evidence: record live hardware or high-fidelity mock verification traces for new behaviors in the PR description or the tracking issue (the former `docs/reviews/` directory was removed in #312).
   7. Renovate lifecycle: when closing an automated dependency PR manually, document in `.github/renovate.json`
      that it was abandoned and that `currentValue` will track future releases. Never hand-edit or commit
      `managed_components/`; the configure-time patch script owns generated checkout changes.

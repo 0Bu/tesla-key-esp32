@@ -248,19 +248,23 @@ VehicleController::ResultCb VehicleController::make_result_cb_(
             // Explicit responses from the car (role refusals, auth failures, whitelist status,
             // or nominal command rejections) prove the BLE link is answering cleanly, so they
             // reset the streak rather than dropping the connection under legitimate negative tests.
-            const bool is_vehicle_response =
-                msg.find("authentication failed") != msg.npos ||
-                msg.find("whitelist") != msg.npos ||
-                msg.find("rejected") != msg.npos ||
-                msg.find("asleep") != msg.npos;
-            if (is_vehicle_response) {
-                cmd_fail_streak_.store(0);
-                note_reachable_();
-            } else if (cmd_fail_streak_.fetch_add(1) + 1 >= kCmdFailDropStreak) {
-                cmd_fail_streak_.store(0);
-                if (believed_paired_.load() && !ble_fault_.exchange(true)) {
-                    completion->drop_link = true;
-                }
+            // A local "vehicle asleep" skip/fail exchanged nothing over BLE: it neither counts
+            // as a transport fault nor as contact (tk::classify_command_failure).
+            switch (tk::classify_command_failure(msg)) {
+                case tk::CommandFailureOrigin::VehicleResponse:
+                    cmd_fail_streak_.store(0);
+                    note_reachable_();
+                    break;
+                case tk::CommandFailureOrigin::LocalPolicy:
+                    break;
+                case tk::CommandFailureOrigin::TransportOrTimeout:
+                    if (cmd_fail_streak_.fetch_add(1) + 1 >= kCmdFailDropStreak) {
+                        cmd_fail_streak_.store(0);
+                        if (believed_paired_.load() && !ble_fault_.exchange(true)) {
+                            completion->drop_link = true;
+                        }
+                    }
+                    break;
             }
             // Two distinct ways a Tesla signals "your key is no longer whitelisted"
             // (it was deleted on the car side); both must invalidate the pairing so the
