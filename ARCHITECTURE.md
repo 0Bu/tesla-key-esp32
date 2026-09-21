@@ -100,18 +100,18 @@ ACK alone is never
 reported as success. Two mismatching/missing readbacks exhaust the original command budget and
 return an error, with requested/applied/request/actual current values written to the log.
 
-**CarServer response validation & command idempotency** (`yoziru/tesla-ble` v5.2.0):
-CarServer domain responses undergo two explicit library-level checks:
-1. **Request-UUID matching** (`src/vehicle.cpp:931-941`): Every CarServer response carrying a non-empty
-   `request_uuid` is verified against the last UUID dispatched by the firmware for that domain. A
-   mismatched, late, or foreign response is dropped with `LOG_WARNING("Ignoring CarServer response for a different request")`,
-   so stale or foreign responses result in an explicit timeout instead of incorrectly completing whatever
-   sits at the FIFO head.
-2. **Idempotent setpoints via `already_set`** (`src/vehicle.cpp:985-988`): When a setpoint command
-   (such as `set_charge_limit` or `set_charging_amps`) is sent with a value the vehicle already holds,
-   the vehicle returns `actionStatus.result != OK` with reason `already_set`. Upstream v5.2.0 completes
-   the command successfully rather than reporting an action failure. The setpoint write paths in the
-   web UI, MQTT, and MCP are thus fully idempotent.
+**CarServer response validation & command idempotency** (native BLE orchestration):
+CarServer domain responses undergo two explicit checks:
+1. **Request-UUID matching** (`main/logic/ble_dispatcher.hpp`, `main/vehicle_telemetry.cpp`): Every CarServer
+   response carrying a non-empty `request_uuid` is verified against the outstanding request UUID dispatched
+   by the firmware for that domain. A mismatched, late, or foreign response is dropped before invoking
+   telemetry callbacks, so stale or foreign responses result in an explicit timeout instead of incorrectly
+   completing whatever sits at the FIFO head.
+2. **Idempotent setpoints via `already_set`** (`main/logic/command_result.hpp`, `main/logic/command_runner.hpp`):
+   When a setpoint command (such as `set_charge_limit` or `set_charging_amps`) is sent with a value the
+   vehicle already holds, the vehicle returns `actionStatus.result != OK` with reason `already_set`.
+   `tk::is_nominal_already_set()` classifies this nominal error as idempotent success at the application
+   layer. The setpoint write paths in the web UI, MQTT, and MCP are thus fully idempotent.
 
 The same ChargeState callback stamps `last_charge_ticks_`. `GET vehicle_data` remains
 cache-only and non-blocking, but the cache is treated differently by state: idle values may be
@@ -1440,7 +1440,7 @@ through the guard so the lock is released during stack unwinding, never left hel
 | Primitive | Kind | Protects |
 |---|---|---|
 | `command_mutex_` | mutex, RAII | one whole command/query transaction and tesla-ble FIFO generation; for `set_charging_amps`, the action and verifying ChargeState poll are one transaction |
-| `vehicle_mutex_` | mutex, RAII (`SemGuard`) | **every** call into the tesla-ble `vehicle_` object (send, `loop()`, `on_rx_data`, `set_connected`) |
+| `vehicle_mutex_` | mutex, RAII (`SemGuard`) | **every** call into `client_` and command runner state (payload build/dispatch, `drive_command_runner_`, `process_rx_frame_`) |
 | `cache_mutex_` | mutex, RAII, leaf | the `last_known_*` caches (`std::string` members ⇒ an unlocked copy is torn-read UB) |
 | `result_mutex_` | mutex, RAII, leaf | the externally visible `last_error_` snapshot read by HTTP/MCP after a foreground command returns |
 | `CommandCompletion::sem` | per-request binary semaphore, shared ownership | signals one request-local fixed completion record; a timed-out callback cannot address stack storage or a later request's semaphore |
@@ -1485,7 +1485,7 @@ subscription is RAII-owned and is removed on every unwind before the task can se
 
 | Task | Priority | Stack | Created in | Purpose |
 |---|---|---|---|---|
-| `vehicle_loop` | `kPrioVehicleLoop` = 5 | 8192 | `vehicle_ctrl.cpp` (fn: `vehicle_telemetry.cpp`) | drain fixed NimBLE Link/RX events, pump `vehicle_->loop()`, parse deferred telemetry after unlock, rotating NO_WAKE poll, sleep gating, BLE-fault link reset |
+| `vehicle_loop` | `kPrioVehicleLoop` = 5 | 8192 | `vehicle_ctrl.cpp` (fn: `vehicle_telemetry.cpp`) | drain fixed NimBLE Link/RX events, drive `drive_command_runner_()`, parse deferred telemetry after unlock, rotating NO_WAKE poll, sleep gating, BLE-fault link reset |
 | `captive_dns` | `kPrioCaptiveDns` = 5 | 4096 | `provisioning.cpp` | captive-portal DNS (setup-AP mode only; vehicle stack not running) |
 | `ota` | `kPrioOta` = 5 | 8192 | `ota_update.cpp` | OTA download + flash (transient) |
 | `ota_chk` | `kPrioOtaCheck` = 5 | 8192 | `ota_update.cpp` | OTA manifest check (transient) |
@@ -1504,8 +1504,8 @@ Not in the table (ESP-IDF-owned, priorities from IDF Kconfig, not `task_config.h
 deferred queue; they never call `Vehicle`, NVS, logging or an allocating parser. The surrounding
 GAP/GATT lifecycle callbacks still perform bounded parsing, DEBUG diagnostics and synchronous
 NimBLE submissions, but every lifecycle mutex attempt is zero-wait and every failure drops/retries
-fail-closed instead of blocking the host. `vehicle_loop` owns `Vehicle::set_connected`,
-`on_rx_data`, final ready publication and deferred telemetry parsing. The **esp_http_server task** runs every
+fail-closed instead of blocking the host. `vehicle_loop` owns `apply_ble_link_state_`,
+`process_ble_host_events_`, final ready publication and deferred telemetry parsing. The **esp_http_server task** runs every
 HTTP/MCP handler, i.e. the `command_mutex_` cycles and cache copies; plus the usual esp_timer /
 WiFi / LwIP system tasks.
 
