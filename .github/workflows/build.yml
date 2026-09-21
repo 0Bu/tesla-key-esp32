@@ -39,6 +39,8 @@ jobs:
         run: ./scripts/repo-lint.sh
       - name: Run host-side logic tests
         run: ./scripts/run-mock-tests.sh --require-all
+      - name: Run tesla-ble integration harness
+        run: ./scripts/test-tesla-ble-harness.sh --require-all
       - name: Prove and run Linux memory-safety instrumentation
         run: |
           ./scripts/run-sanitizer-tests.sh --self-test

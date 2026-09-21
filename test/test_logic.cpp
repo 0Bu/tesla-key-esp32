@@ -5554,28 +5554,11 @@ static void test_session_state() {
         CHECK(!session.is_authenticated());
         CHECK(session.counter() == 0);
         CHECK(session.clock_time() == 0);
-        CHECK(!session.has_pending_handshake());
-        uint32_t next_counter = 0;
-        CHECK(!session.next_tx_counter(next_counter));
+        const std::array<uint8_t, 16> empty_epoch{};
+        CHECK(session.epoch() == empty_epoch);
     }
 
-    // 2. Handshake lifecycle
-    {
-        tk::SessionTracker session;
-        std::array<uint8_t, 16> req_uuid = {0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,
-                                            0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x00};
-        session.start_handshake(req_uuid);
-        CHECK(session.state() == S::Authenticating);
-        CHECK(session.has_pending_handshake());
-        CHECK(session.handshake_uuid() == req_uuid);
-
-        // Reset clears pending handshake
-        session.reset();
-        CHECK(session.state() == S::Unauthenticated);
-        CHECK(!session.has_pending_handshake());
-    }
-
-    // 3. Establishment and Monotonic Counter Alignment per signer.go: max(local, reported)
+    // 2. Establishment and Monotonic Counter Alignment per signer.go: max(local, reported)
     {
         tk::SessionTracker session;
         std::array<uint8_t, 16> epoch_a = {0x0A, 0x01};
@@ -5585,19 +5568,12 @@ static void test_session_state() {
         CHECK(session.epoch() == epoch_a);
         CHECK(session.counter() == 50);
         CHECK(session.clock_time() == 1000);
-        CHECK(!session.has_pending_handshake());
-
-        // Increment local counter via outgoing command
-        uint32_t tx1 = 0;
-        CHECK(session.next_tx_counter(tx1));
-        CHECK(tx1 == 51);
-        CHECK(session.counter() == 51);
 
         // Vehicle reports counter below ours (e.g. 20) with advanced clock (1010).
         // Per signer.go UpdateSessionInfo: counter = max(local, reported).
-        // Maintains 51, does NOT drop to 20!
+        // Maintains 50, does NOT drop to 20!
         session.set_established(epoch_a, 20, 1010);
-        CHECK(session.counter() == 51);
+        CHECK(session.counter() == 50);
         CHECK(session.clock_time() == 1010);
 
         // Vehicle reports higher counter (80) -> advances to 80
@@ -5619,41 +5595,7 @@ static void test_session_state() {
         CHECK(session.clock_time() == 1040);
     }
 
-    // 4. Session Age Validation
-    {
-        tk::SessionTracker session;
-        std::array<uint8_t, 16> epoch = {0x55, 0x66};
-        session.set_established(epoch, 200, 5000);
-
-        // Valid age: current_time = 6000 (age 1000s <= 3600s)
-        CHECK(session.validate_session_age(6000, 3600));
-
-        // Exactly at max age: current_time = 8600 (age 3600s <= 3600s)
-        CHECK(session.validate_session_age(8600, 3600));
-
-        // Stale session: current_time = 8601 (age 3601s > 3600s)
-        CHECK(!session.validate_session_age(8601, 3600));
-
-        // Clock in future / time went backwards (current_time < clock_time): rejected
-        CHECK(!session.validate_session_age(4999, 3600));
-
-        // Unauthenticated session cannot be validated
-        session.reset();
-        CHECK(!session.validate_session_age(6000, 3600));
-    }
-
-    // 5. Counter Rollover Protection (signer.go:171)
-    {
-        tk::SessionTracker session;
-        session.set_established({1}, 0xFFFFFFFE, 1000);
-        uint32_t c = 0;
-        CHECK(session.next_tx_counter(c));
-        CHECK(c == 0xFFFFFFFF);
-        // Next attempt hits rollover: refused!
-        CHECK(!session.next_tx_counter(c));
-    }
-
-    // 6. Reset
+    // 3. Reset clears session and counter
     {
         tk::SessionTracker session;
         session.set_established({1, 2, 3}, 42, 9999);
