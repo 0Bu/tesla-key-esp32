@@ -1,7 +1,7 @@
 #pragma once
 
-#include <vehicle.h>
 #include <client.h>
+#include "logic/command_result.hpp"
 #include "logic/command_runner.hpp"
 #include <string>
 #include <functional>
@@ -160,16 +160,18 @@ public:
     // tk::compute_link_state(). Alias keeps the existing VehicleController::LinkState::*
     // call sites (web UI, MQTT bridge) working unchanged.
     using LinkState = tk::LinkState;
+    using SleepState = tk::SleepState;
+    using WakePolicy = tk::WakePolicy;
     LinkState link_state() const;
 
     // Current RAW VCSEC sleep belief from the library (updated on every VCSEC poll, incl. the
     // idle health probe): "AWAKE" / "ASLEEP" / "UNKNOWN". Diagnostic/transparency only — the
     // hero uses link_state(), which DEBOUNCES this (a single ASLEEP blip is not yet "asleep").
     const char* vcsec_sleep_raw() const {
-        switch (static_cast<TeslaBLE::SleepState>(vcsec_sleep_state_.load())) {
-            case TeslaBLE::SleepState::ASLEEP: return "ASLEEP";
-            case TeslaBLE::SleepState::AWAKE:  return "AWAKE";
-            default:                           return "UNKNOWN";
+        switch (static_cast<tk::SleepState>(vcsec_sleep_state_.load())) {
+            case tk::SleepState::Asleep: return "ASLEEP";
+            case tk::SleepState::Awake:  return "AWAKE";
+            default:                     return "UNKNOWN";
         }
     }
 
@@ -370,7 +372,13 @@ public:
 private:
     // Builder function type used by send_command_result
     using Builder = std::function<int(TeslaBLE::Client*, uint8_t*, size_t*)>;
-    using ResultCb = TeslaBLE::Command::OperationResultCallback;
+    using ResultCb = std::function<void(tk::OperationResult)>;
+
+    // Sub-handlers for processing received BLE frames, decomposed to bound vehicle_loop stack frame.
+    void handle_signed_message_fault_(const UniversalMessage_RoutableMessage& msg);
+    void handle_session_info_frame_(const UniversalMessage_RoutableMessage& msg);
+    void handle_vcsec_frame_(const UniversalMessage_RoutableMessage& msg);
+    void handle_carserver_frame_(const UniversalMessage_RoutableMessage& msg);
 
     // A command result belongs to exactly one caller. The completion object is retained by
     // both the waiting task and tesla-ble's queued callback, so a timeout can return without
@@ -435,22 +443,22 @@ private:
     // (door/flash/honk/climate/sentry on a Charging-Manager key — all answered "authentication
     // failed") cannot be mistaken for a revocation and destroy the pairing.
     bool send_vcsec_(const std::string& name, Builder builder,
-                     TeslaBLE::WakePolicy wp, int timeout_ms,
+                     WakePolicy wp, int timeout_ms,
                      tk::ConnectOrigin origin = tk::ConnectOrigin::Foreground,
                      bool auth_fail_is_revocation = false,
                      tk::CompletionTimeoutPolicy timeout_policy =
                          tk::CompletionTimeoutPolicy::ForegroundWarn);
     bool send_infotainment_(const std::string& name, Builder builder, int timeout_ms,
-                            TeslaBLE::WakePolicy wp = TeslaBLE::WakePolicy::WAKE_IF_NEEDED);
+                            WakePolicy wp = WakePolicy::WakeIfNeeded);
     // Same runner with command_mutex_ + cmd_in_flight_ already held. The absolute deadline
     // includes connection setup and all preceding work in the transaction. Used by
     // set_charging_amps to keep the action and its independent ChargeState readback
     // in one serialized transaction, with no background poll inserted between them.
     CommandOutcome send_infotainment_locked_(const std::string& name, Builder builder,
-                                              uint32_t deadline, TeslaBLE::WakePolicy wp);
+                                              uint32_t deadline, WakePolicy wp);
 
     CommandOutcome send_vcsec_locked_(const std::string& name, Builder builder,
-                                      TeslaBLE::WakePolicy wp, uint32_t deadline,
+                                      WakePolicy wp, uint32_t deadline,
                                       tk::ConnectOrigin origin, bool auth_fail_is_revocation,
                                       tk::CompletionTimeoutPolicy timeout_policy);
 
@@ -663,7 +671,16 @@ private:
     // Vehicle::sleep_state() is mutated inside serialized tesla-ble calls. Sampling that field
     // directly from status/HTTP tasks is a C++ data race, so vehicle_loop publishes this atomic
     // mirror while vehicle_mutex_ is held and every other task reads only the mirror.
-    std::atomic<int> vcsec_sleep_state_{static_cast<int>(TeslaBLE::SleepState::UNKNOWN)};
+    std::atomic<int> vcsec_sleep_state_{static_cast<int>(tk::SleepState::Unknown)};
+
+    // Thread-safe single-owner RxFramer reset request flag (consumed strictly by vehicle_loop)
+    std::atomic<bool> rx_framer_reset_requested_{false};
+    void request_framer_reset_() noexcept {
+        rx_framer_reset_requested_.store(true, std::memory_order_release);
+    }
+
+    // Reusable single-allocation buffer for command transmission (builder wire format without double length)
+    std::vector<uint8_t> tx_buffer_{};
     // Fold one sampled VCSEC sleep reading into the debounce clock. ASLEEP starts/continues
     // the run (keeping its original start tick); AWAKE breaks it. UNKNOWN is not passed here
     // (the caller leaves the clock untouched so a transient unknown can't reset a real run).

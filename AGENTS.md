@@ -46,6 +46,9 @@ task touches them:
   0001-0003 are retired in favor of native `main/logic/` orchestration). Do not edit the
   pin, patch order, wire behavior, key compatibility or size trims without a separately
   authorized dependency migration and protocol-vector review.
+- `teslamotors/vehicle-command` is the normative reference for vehicle BLE protocol behaviour (see
+  [`docs/adr/0005-tesla-ble-seam.md`](docs/adr/0005-tesla-ble-seam.md)). Every departure from upstream
+  or reference must be documented in ADR-0005 and recorded in its departure list. No silent workarounds.
 - ESP-IDF 6/Mbed TLS 4/PSA work is intentionally separate. Preserve P-256 ECDH byte order,
   `SHA1(shared-secret)[:16]`, HMAC/session derivation, AES-GCM nonce/AAD/tag layout, Tesla key-ID
   derivation and PEM/NVS key reuse. See

@@ -36,13 +36,13 @@ keys; it no longer truncates an unknown key. This includes the pinned tesla-ble 
 NVS calls in every shipped source/header/inline fragment and the operator-facing retention mirror is
 in `docs/README.md`.
 
-**BLE response anti-replay:** `yoziru/tesla-ble` v5.2.0 incorporates the CarServer response
-counter anti-replay fix upstream, dropping replayed responses before dispatch to telemetry callbacks
-or the command FIFO. The repository continues to apply `patches/tesla-ble/` to every target at build time.
+**BLE response anti-replay and deterministic framing:** The native orchestration layer
+(`main/logic/ble_dispatcher.hpp`, `main/logic/rx_framing.hpp`, `main/logic/command_runner.hpp`)
+implements deterministic 2-byte BE length prefix framing without heuristic recovery loops,
+and routes every CarServer response strictly by Request UUID before delivering telemetry callbacks.
+Responses with replayed counters or foreign UUIDs are dropped fail-closed.
 Charging-current writes additionally require a fresh exact `ChargeState` readback;
 an action acknowledgement alone is not reported as success.
-RX framing/recovery callsites use the rate-limited helper: an hourly warning throttle with
-saturating suppression count eliminates UART log floods during sustained framing corruption.
 `test/tesla_protocol_vectors.test.mjs` independently pins the public VIN-advertisement vector,
 P-256 ECDH byte order, `SHA1(shared-secret)[:16]`, the `session info` HMAC label, AES-GCM
 metadata/AAD/nonce/tag layout and local patch invariants, including signer.go session-counter

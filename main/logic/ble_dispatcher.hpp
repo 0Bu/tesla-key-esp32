@@ -239,9 +239,8 @@ public:
         }
 
         // Pass 2: VCSEC UUID match exemption (dispatcher.go:259-261)
-        // If no exact UUID matched (e.g. response has empty/unspecified UUID, or legacy VCSEC frame),
-        // route to the first active VCSEC request handler.
-        if (!matched_slot && from_domain == BleDomain::VehicleSecurity) {
+        // Only if response has no request UUID (empty UUID, 0 bytes), route to the first active VCSEC request handler.
+        if (!matched_slot && uuid_len == 0 && from_domain == BleDomain::VehicleSecurity) {
             for (auto& slot : slots_) {
                 if (slot.active && slot.domain == BleDomain::VehicleSecurity) {
                     matched_slot = &slot;
