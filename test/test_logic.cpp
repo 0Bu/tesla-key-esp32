@@ -6025,6 +6025,34 @@ static void test_command_runner() {
         CHECK(runner.current_command()->phase == CommandPhase::SendingRequest);
     }
 
+    // 4b. "Wake" Session Bypass and Immediate TX Completion
+    {
+        CommandRunner runner;
+        CHECK(!runner.vcsec_session().is_authenticated());
+
+        bool completed = false;
+        bool success_res = false;
+        runner.enqueue("Wake", BleDomain::VehicleSecurity, WakePolicy::NoWakeFail, 9000, 1000, {},
+                       [&](bool ok, const std::string&) {
+                           completed = true;
+                           success_res = ok;
+                       });
+
+        // "Wake" must bypass session authentication even when asleep / unauthenticated
+        TxAction act = runner.tick(1000, true /* connected */, false /* awake */, true /* asleep */);
+        CHECK(act == TxAction::SendCommandPayload);
+        CHECK(runner.current_command()->state == CommandState::Ready);
+        CHECK(runner.current_command()->phase == CommandPhase::SendingRequest);
+
+        // Notifying TX completion immediately finishes "Wake" with success (no commandStatus acknowledgement needed)
+        runner.notify_tx_complete(1050);
+        CHECK(completed);
+        CHECK(success_res);
+        CHECK(runner.current_command()->is_completed);
+        CHECK(runner.current_command()->is_success);
+        CHECK(runner.current_command()->terminal_reason == TerminalReason::Success);
+    }
+
     // 5. BleDispatcher Integration, Routing & Anti-Replay
     {
         CommandRunner runner;
