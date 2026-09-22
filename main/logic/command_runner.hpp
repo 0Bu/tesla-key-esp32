@@ -131,7 +131,7 @@ inline bool is_command_awaiting_session_auth(bool has_active_command, bool is_co
 // in their Infotainment execution phases (WaitingInfoAuth, Ready, AwaitingResponse)
 // and must NOT match during prerequisite VCSEC auth or Wake phases.
 inline bool is_fault_domain_matching(BleDomain fault_domain, BleDomain cmd_domain, CommandState cmd_state) noexcept {
-    if (fault_domain == BleDomain::Broadcast || fault_domain == BleDomain::None) {
+    if (fault_domain == BleDomain::Broadcast) {
         return true;
     }
     if (fault_domain == BleDomain::VehicleSecurity) {

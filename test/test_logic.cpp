@@ -6581,7 +6581,9 @@ static void test_command_runner_telemetry_filter_logic() {
         // Broadcast faults match any command regardless of domain or state
         CHECK(tk::is_fault_domain_matching(BD::Broadcast, BD::VehicleSecurity, CS::Ready));
         CHECK(tk::is_fault_domain_matching(BD::Broadcast, BD::Infotainment, CS::Ready));
-        CHECK(tk::is_fault_domain_matching(BD::None, BD::VehicleSecurity, CS::Idle));
+        // Unknown domain (None) must NOT match any command (fail-closed)
+        CHECK(!tk::is_fault_domain_matching(BD::None, BD::VehicleSecurity, CS::Idle));
+        CHECK(!tk::is_fault_domain_matching(BD::None, BD::Infotainment, CS::Ready));
 
         // VehicleSecurity faults match VCSEC commands in any state
         CHECK(tk::is_fault_domain_matching(BD::VehicleSecurity, BD::VehicleSecurity, CS::Ready));
