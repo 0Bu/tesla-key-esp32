@@ -283,36 +283,29 @@ public:
             return TxAction::None;
         }
 
-        // Connection check
-        if (!is_connected) {
-            if (cmd->state == CommandState::AwaitingResponse ||
-                cmd->state == CommandState::WaitingVcsecAuth ||
-                cmd->state == CommandState::WaitingWake ||
-                cmd->state == CommandState::WaitingInfoAuth) {
-                // Link dropped while waiting: mark failed or await reconnect up to deadline
-                if (now_ms - cmd->enqueued_at_ms >= cmd->timeout_ms) {
-                    finish_command_(cmd, false, "connection lost; command deadline exhausted",
-                                    TerminalReason::DeadlineExceeded);
-                    return TxAction::None;
-                }
-            }
-            return TxAction::None;
-        }
-
         // 1. Overall deadline check
         if (cmd->timeout_ms > 0 && (now_ms - cmd->enqueued_at_ms) >= cmd->timeout_ms) {
-            finish_command_(cmd, false, "command deadline exhausted", TerminalReason::DeadlineExceeded);
+            finish_command_(cmd, false,
+                            !is_connected ? "connection lost; command deadline exhausted"
+                                          : "command deadline exhausted",
+                            TerminalReason::DeadlineExceeded);
             return TxAction::None;
         }
 
-        // 2. Response timeout and retry handling for AwaitingResponse
+        // 2. Connection check
+        if (!is_connected) {
+            return TxAction::None;
+        }
+
+        // 3. Response timeout and retry handling for AwaitingResponse
         if (cmd->state == CommandState::AwaitingResponse) {
             const uint32_t elapsed = now_ms - cmd->last_tx_ms;
             if (elapsed >= kDefaultResponseTimeoutMs) {
                 if (cmd->retry_count < cmd->max_retries) {
                     cmd->retry_count++;
+                    const uint32_t shift = std::min<uint32_t>(cmd->retry_count - 1, 10);
                     cmd->next_retry_delay_ms = std::min(kMaxRetryDelayMs,
-                        kInitialRetryDelayMs * (1U << (cmd->retry_count - 1)));
+                        kInitialRetryDelayMs * (1U << shift));
                     cmd->state = CommandState::Ready;
                     cmd->phase = CommandPhase::SendingRequest;
                     cmd->phase_started_at_ms = now_ms;
@@ -330,7 +323,7 @@ public:
             return TxAction::None; // Still waiting for response
         }
 
-        // 3. If currently waiting for wake and the vehicle is confirmed awake, advance immediately
+        // 4. If currently waiting for wake and the vehicle is confirmed awake, advance immediately
         if (is_awake) {
             if (cmd->state == CommandState::WaitingWake || cmd->phase == CommandPhase::EnsuringAwake) {
                 cmd->wake_confirmed = true;
@@ -339,7 +332,7 @@ public:
             }
         }
 
-        // 4. Step timeouts for authentication / wake phases
+        // 5. Step timeouts for authentication / wake phases
         if (cmd->state == CommandState::WaitingVcsecAuth ||
             cmd->state == CommandState::WaitingWake ||
             cmd->state == CommandState::WaitingInfoAuth) {
@@ -376,7 +369,7 @@ public:
             return TxAction::SendCommandPayload;
         };
 
-        // 5. Prerequisite Progression & Wake-up Policy Coordination
+        // 6. Prerequisite Progression & Wake-up Policy Coordination
         if (cmd->domain == BleDomain::VehicleSecurity) {
             // Pairing "Whitelist Add Key" starts with untrusted key, so session auth is bypassed
             if (cmd->name == "Whitelist Add Key") {

@@ -6134,6 +6134,54 @@ static void test_command_runner() {
         CHECK(runner.current_command()->is_completed);
         CHECK(!runner.current_command()->is_success);
         CHECK(runner.current_command()->terminal_reason == TerminalReason::DeadlineExceeded);
+        CHECK(runner.current_command()->error_message == "connection lost; command deadline exhausted");
+    }
+
+    // 10b. Disconnection while in Idle state (enqueued while offline) exhausts deadline
+    {
+        CommandRunner runner;
+        runner.enqueue("OfflineEnqueue", BleDomain::VehicleSecurity, WakePolicy::WakeIfNeeded, 5000, 1000);
+        CHECK(runner.current_command()->state == CommandState::Idle);
+
+        // Before deadline (3000ms < 1000 + 5000): waiting
+        TxAction act = runner.tick(3000, false /* disconnected */, false);
+        CHECK(act == TxAction::None);
+        CHECK(!runner.current_command()->is_completed);
+
+        // Past deadline (6001ms): must fail with DeadlineExceeded, not hang in Idle!
+        act = runner.tick(6001, false /* disconnected */, false);
+        CHECK(act == TxAction::None);
+        CHECK(runner.current_command()->is_completed);
+        CHECK(!runner.current_command()->is_success);
+        CHECK(runner.current_command()->terminal_reason == TerminalReason::DeadlineExceeded);
+        CHECK(runner.current_command()->error_message == "connection lost; command deadline exhausted");
+    }
+
+    // 10c. Disconnection while in Ready state (during retry backoff delay) exhausts deadline
+    {
+        CommandRunner runner;
+        runner.vcsec_session().set_established({1}, 10, 1000);
+        runner.enqueue("BackoffDisconnect", BleDomain::VehicleSecurity, WakePolicy::WakeIfNeeded, 10000, 1000);
+        runner.tick(1000, true, true);
+        runner.notify_tx_complete(1050);
+
+        // Response timeout at 8060 (1050 + 7000) transitions to Ready with backoff delay
+        runner.tick(8060, true, true);
+        CHECK(runner.current_command()->state == CommandState::Ready);
+        CHECK(runner.current_command()->next_retry_delay_ms == 500);
+
+        // Disconnected at 8200ms while still in backoff: waits
+        TxAction act = runner.tick(8200, false /* disconnected */, true);
+        CHECK(act == TxAction::None);
+        CHECK(!runner.current_command()->is_completed);
+
+        // Past overall deadline (11001ms >= 1000 + 10000): must fail with DeadlineExceeded!
+        act = runner.tick(11001, false /* disconnected */, true);
+        CHECK(act == TxAction::None);
+        CHECK(runner.current_command()->is_completed);
+        CHECK(!runner.current_command()->is_success);
+        CHECK(runner.current_command()->terminal_reason == TerminalReason::DeadlineExceeded);
+        CHECK(runner.current_command()->error_message == "connection lost; command deadline exhausted");
     }
 
     // 11. RxFramer Integration in CommandRunner
