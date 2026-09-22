@@ -31,24 +31,19 @@
 
 static const char* TAG = "vehicle_ctrl";
 
-// Automatic pairing supervisor. The hard constraint is the tesla-ble library's
-// single FIFO command queue: an unsigned "Whitelist Add Key" lingers in that
-// queue until the car confirms it (or ~180 s pass), so anything queued behind it
-// is blocked. The earlier design queued a session probe *behind* the whitelist-add,
-// so the probe never ran, commands piled up, and overlapping responses corrupted
-// the RX buffer ("Invalid message length …"). The car accepted the key while the
-// firmware never established a session.
+// Automatic pairing supervisor. Single-flight command discipline: an unsigned
+// "Whitelist Add Key" lingers until the car confirms it (or ~180 s pass), so
+// anything queued behind it is blocked.
 //
-// This version keeps the queue clean and runs ONE command at a time per round:
+// This supervisor keeps the queue clean and runs ONE command at a time per round:
 //   1. Probe with a signed VCSEC poll. If the key is already authorised this
 //      establishes + persists the session (done). If not, it fails *cleanly* with
 //      KEY_NOT_ON_WHITELIST and is popped — no clog.
 //   2. Send the whitelist-add. The car whitelists the key when the user confirms on
-//      screen but sends NO completing commandStatus, so this command can otherwise sit
-//      at the FIFO head through the library retries. pair() owns command_mutex_ through
-//      its absolute timeout and generation-aware flush, so nothing can queue behind it.
+//      screen but sends NO completing commandStatus. pair() owns command_mutex_ through
+//      its absolute timeout and generation-aware flush, so nothing can run behind it.
 //   3. Probe once more on a clean link — now authorised, this establishes the session.
-// Timed-out queued work is invalidated before set_connected(false) synchronously flushes
+// Timed-out queued work is invalidated before link reset synchronously flushes
 // callbacks, so the next round starts clean and no late completion reaches another request.
 void VehicleController::auto_pair_task_fn_(void* arg) {
   try {
@@ -568,9 +563,9 @@ bool VehicleController::finish_key_rotation_cleanup_() {
 // called while holding vehicle_mutex_ (it takes it to reset the in-memory peers).
 bool VehicleController::clear_session_and_cache_() {
     bool cleanup_ok = true;
-    // Reset the library's in-memory peer sessions (and flush its command queue / RX
-    // buffer) so a stale session key cannot be reused. set_connected(false) does this;
-    // only bother when something is actually established to avoid a spurious log on a
+    // Reset in-memory peer sessions (and flush command runner / RX
+    // state) so a stale session key cannot be reused.
+    // Only bother when something is actually established to avoid a spurious log on a
     // first-boot key generation.
     bool had_link    = ble_ && ble_->is_connected();
     bool had_session = has_session();

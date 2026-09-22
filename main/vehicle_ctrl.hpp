@@ -47,7 +47,7 @@ public:
               NvsStorageAdapter& config_store, std::string& known_mac,
               bool start_tasks = false);
     // Inert minimal initialization for safe mode: sets VIN, storage, and config_store, allocates
-    // essential mutexes for safe UI/status accessors, but constructs no TeslaBLE::Vehicle
+    // essential mutexes for safe UI/status accessors, but initializes no BLE client
     // and starts no mutating background tasks.
     bool init_safe_mode(const std::string& vin, NvsStorageAdapter& storage,
                         NvsStorageAdapter& config_store);
@@ -381,7 +381,7 @@ private:
     void handle_carserver_frame_(const UniversalMessage_RoutableMessage& msg);
 
     // A command result belongs to exactly one caller. The completion object is retained by
-    // both the waiting task and tesla-ble's queued callback, so a timeout can return without
+    // both the waiting task and the command completion callback, so a timeout can return without
     // leaving a callback that refers to stack storage or a semaphore reused by the next call.
     struct CommandCompletion {
         static constexpr size_t kErrorCapacity = 192;
@@ -411,7 +411,7 @@ private:
 
     bool ensure_connected_until_(uint32_t deadline, tk::ConnectOrigin origin);
 
-    // Drop the BLE link, reset the library's in-memory peer sessions, erase the
+    // Drop the BLE link, reset the in-memory peer sessions, erase the
     // persisted VCSEC/Infotainment sessions, and clear cached vehicle readings.
     // After this has_session() is false until a fresh handshake re-pairs, so the UI
     // and evcc stop serving stale "paired"/SOC data from a defunct pairing.
@@ -420,8 +420,8 @@ private:
     // armed: the new identity is durable, but boot recovery still has cleanup work to finish.
     bool clear_session_and_cache_();
     // Every key rotation first commits a marker in tesla_ble. The locked runner removes it only
-    // after old sessions are durably erased; boot recovery performs the same cleanup before a
-    // TeslaBLE::Vehicle can be constructed and load/sign with persisted peer state.
+    // after old sessions are durably erased; boot recovery performs the same cleanup before the
+    // vehicle controller can initialize and load/sign with persisted peer state.
     tk::KeyRotationResult generate_key_locked_();
     bool finish_key_rotation_cleanup_();
     bool recover_pending_key_rotation_at_boot_();
@@ -532,17 +532,17 @@ private:
     // the HTTP layer report the real reason (e.g. "complete") instead of a generic one.
     std::string       last_error_;
 
-    // Monotonically identifies the one active tesla-ble FIFO request. A timeout increments
-    // this BEFORE set_connected(false) synchronously finalises queued callbacks. Callbacks from
+    // Monotonically identifies the one active command request. A timeout increments
+    // this before clearing the command runner. Callbacks from
     // the invalidated generation therefore cannot signal or mutate a later request.
     std::atomic<uint32_t> command_generation_{0};
 
     // regenerate_key() can fail after mutating the in-memory key while the durable NVS key
     // remains old (or absent on first boot). Until a successful persisted generation or reboot
-    // reconstructs Vehicle from storage, no command may enrol that ambiguous runtime identity.
+    // reloads the key from storage, no command may enrol that ambiguous runtime identity.
     std::atomic<bool> key_runtime_safe_{false};
-    // tesla-ble attempted a private-key write but could not confirm its NVS commit. The durable
-    // fingerprint is now unknowable from this Vehicle instance (which may have restored the old
+    // A private-key write could not confirm its NVS commit. The durable
+    // fingerprint is now unknowable from this controller instance (which may have restored the old
     // RAM key), so block signing AND all further rotations until boot reloads storage.
     std::atomic<bool> key_reload_required_{false};
     // Set only when this boot consumed a persisted key_rotate marker. main uses it to prevent
@@ -604,7 +604,7 @@ private:
     // True while a serialized command/query (including the VCSEC health probe) is enqueued and
     // awaiting its result. loop_task reads it and SKIPS injecting background telemetry polls
     // (charge/climate/drive/tires/closures) for the duration, so a command isn't stuck behind
-    // freshly-queued, 7-s-failing polls in the library's single FIFO (the cause of 15-19 s command
+    // freshly-queued, 7-s-failing polls in the command FIFO (the cause of 15-19 s command
     // latency on an awake, busy link). This is FIFO arbitration only: it must never be reused to
     // decide whether the attempt was foreground or background.
     // Atomic: set by the HTTP task, read by loop_task. Managed by an RAII guard so it always
@@ -660,17 +660,16 @@ private:
     void note_reachable_() { last_reachable_ticks_.store(xTaskGetTickCount()); }
 
     // VCSEC sleep-flag debounce (see link_state()). The car's body controller reports a
-    // vehicleSleepStatus on every VCSEC poll — including the idle health probe — which the
-    // tesla-ble library tracks in Vehicle::sleep_state(). We sample it in loop_task and mark
+    // vehicleSleepStatus on every VCSEC poll — including the idle health probe. The RX path
+    // updates vcsec_sleep_state_ directly. We sample it in loop_task and mark
     // here the START tick of an uninterrupted ASLEEP run (0 = not currently ASLEEP). The flag
     // can flap AWAKE↔ASLEEP (~60 s) while Cabin-Overheat-Protection cycles the A/C, so a
     // single ASLEEP reading is NOT proof of sleep; link_state() only treats it as asleep once
     // the run has held for kAsleepDebounceS, which filters those blips. Cleared on a pairing
     // reset (clear_session_and_cache_).
     std::atomic<uint32_t> vcsec_asleep_since_ticks_{0};
-    // Vehicle::sleep_state() is mutated inside serialized tesla-ble calls. Sampling that field
-    // directly from status/HTTP tasks is a C++ data race, so vehicle_loop publishes this atomic
-    // mirror while vehicle_mutex_ is held and every other task reads only the mirror.
+    // vcsec_sleep_state_ is updated from incoming VCSEC frames under vehicle_mutex_; status
+    // and HTTP tasks read this atomic mirror so there is no data race.
     std::atomic<int> vcsec_sleep_state_{static_cast<int>(tk::SleepState::Unknown)};
 
     // Thread-safe single-owner RxFramer reset request flag (consumed strictly by vehicle_loop)

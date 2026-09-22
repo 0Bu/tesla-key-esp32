@@ -119,10 +119,9 @@ struct CommandRequest {
     bool is_completed{false};
     bool is_success{false};
     bool is_already_set{false};
-    // Set once this command's wake was confirmed (VCSEC reported awake, or a VehicleStatus with
-    // closureStatuses answered while it waited for a wake). From then on the wake policy is not
-    // re-evaluated: like upstream v5.2.0 the command proceeds to the infotainment session instead
-    // of re-sending Wake while the raw VCSEC sleep flag still reads ASLEEP.
+    // Set once this command's wake was confirmed while actively waiting for a wake (VCSEC reported awake,
+    // or a VehicleStatus with closureStatuses answered). Cleared on retry if the vehicle is asleep,
+    // so an asleep vehicle is re-evaluated and properly woken with SendWake.
     bool wake_confirmed{false};
     std::string error_message{};
     TerminalReason terminal_reason{TerminalReason::None};
@@ -314,6 +313,7 @@ public:
                     cmd->retry_count++;
                     cmd->next_retry_delay_ms = std::min(kMaxRetryDelayMs,
                         kInitialRetryDelayMs * (1U << (cmd->retry_count - 1)));
+                    cmd->wake_confirmed = false;
                     cmd->state = CommandState::Ready;
                     cmd->phase = CommandPhase::SendingRequest;
                     cmd->phase_started_at_ms = now_ms;
@@ -321,7 +321,7 @@ public:
                         dispatcher_.unregister_request(cmd->dispatcher_request_id);
                         cmd->dispatcher_request_id = 0;
                     }
-                    return TxAction::SendCommandPayload;
+                    return TxAction::None;
                 } else {
                     finish_command_(cmd, false, "command response timeout; max retries exceeded",
                                     TerminalReason::MaxRetriesExceeded);
@@ -333,8 +333,8 @@ public:
 
         // 3. If currently waiting for wake and the vehicle is confirmed awake, advance immediately
         if (is_awake) {
-            cmd->wake_confirmed = true;
-            if (cmd->state == CommandState::WaitingWake) {
+            if (cmd->state == CommandState::WaitingWake || cmd->phase == CommandPhase::EnsuringAwake) {
+                cmd->wake_confirmed = true;
                 cmd->state = CommandState::Idle;
                 cmd->phase_started_at_ms = now_ms;
             }
@@ -348,8 +348,12 @@ public:
             if (elapsed >= kDefaultStepTimeoutMs) {
                 if (cmd->retry_count < cmd->max_retries) {
                     cmd->retry_count++;
+                    cmd->next_retry_delay_ms = 0;
+                    cmd->wake_confirmed = false;
                     cmd->state = CommandState::Idle; // Reset to idle to retry prerequisites
+                    cmd->phase = CommandPhase::Queued;
                     cmd->phase_started_at_ms = now_ms;
+                    return TxAction::None;
                 } else {
                     finish_command_(cmd, false, "authentication / wake timeout; max retries exceeded",
                                     TerminalReason::StepTimeout);
@@ -360,14 +364,24 @@ public:
             }
         }
 
+        auto emit_payload = [&](CommandRequest* req) -> TxAction {
+            if (req->next_retry_delay_ms > 0) {
+                if (now_ms - req->phase_started_at_ms < req->next_retry_delay_ms) {
+                    return TxAction::None;
+                }
+                req->next_retry_delay_ms = 0;
+            }
+            req->state = CommandState::Ready;
+            req->phase = CommandPhase::SendingRequest;
+            req->phase_started_at_ms = now_ms;
+            return TxAction::SendCommandPayload;
+        };
+
         // 5. Prerequisite Progression & Wake-up Policy Coordination
         if (cmd->domain == BleDomain::VehicleSecurity) {
             // Pairing "Whitelist Add Key" starts with untrusted key, so session auth is bypassed
             if (cmd->name == "Whitelist Add Key") {
-                cmd->state = CommandState::Ready;
-                cmd->phase = CommandPhase::SendingRequest;
-                cmd->phase_started_at_ms = now_ms;
-                return TxAction::SendCommandPayload;
+                return emit_payload(cmd);
             }
 
             // VCSEC commands require an authenticated VCSEC session (including Wake,
@@ -381,10 +395,7 @@ public:
 
             // VCSEC body controller is always reachable while connected; commands do not
             // require vehicle infotainment to be awake, and health poll runs while vehicle sleeps.
-            cmd->state = CommandState::Ready;
-            cmd->phase = CommandPhase::SendingRequest;
-            cmd->phase_started_at_ms = now_ms;
-            return TxAction::SendCommandPayload;
+            return emit_payload(cmd);
         }
 
         if (cmd->domain == BleDomain::Infotainment) {
@@ -398,8 +409,7 @@ public:
 
             // Prerequisite 2: Wake policy evaluation (aligned with vehicle-command & upstream)
             // Once VCSEC session is established, send SendWake if vehicle is asleep / unknown.
-            // A confirmed wake is final for this command (see CommandRequest::wake_confirmed):
-            // it proceeds to the infotainment session even while the raw flag reads ASLEEP.
+            // A confirmed wake is remembered for this attempt, but re-evaluated if vehicle is asleep on retry.
             if (!cmd->wake_confirmed && is_asleep) {
                 switch (cmd->wake_policy) {
                     case WakePolicy::NoWakeSkip:
@@ -433,10 +443,7 @@ public:
             }
 
             // All prerequisites met -> Ready to send infotainment payload
-            cmd->state = CommandState::Ready;
-            cmd->phase = CommandPhase::SendingRequest;
-            cmd->phase_started_at_ms = now_ms;
-            return TxAction::SendCommandPayload;
+            return emit_payload(cmd);
         }
 
         return TxAction::None;
@@ -472,6 +479,8 @@ public:
         if (!cmd) return;
         if (cmd->retry_count < cmd->max_retries) {
             cmd->retry_count++;
+            cmd->next_retry_delay_ms = 0;
+            cmd->wake_confirmed = false;
             cmd->state = CommandState::Idle;
         } else {
             finish_command_(cmd, false, reason, TerminalReason::BleDisconnected);
@@ -487,11 +496,10 @@ public:
                 finish_command_(cmd, true, "", TerminalReason::Success);
                 return;
             }
-            cmd->wake_confirmed = true;
             if (cmd->state == CommandState::WaitingWake || cmd->phase == CommandPhase::EnsuringAwake) {
+                cmd->wake_confirmed = true;
                 // Advance to infotainment session or ready; the wake is not re-sent afterwards
                 cmd->state = CommandState::Idle;
-                cmd->phase_started_at_ms = 0;
             }
         }
     }
@@ -511,6 +519,8 @@ public:
         if (is_session_error) {
             if (cmd->retry_count < cmd->max_retries) {
                 cmd->retry_count++;
+                cmd->next_retry_delay_ms = 0;
+                cmd->wake_confirmed = false;
                 cmd->state = CommandState::Idle;
                 if (cmd->dispatcher_request_id != 0) {
                     dispatcher_.unregister_request(cmd->dispatcher_request_id);

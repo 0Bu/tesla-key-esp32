@@ -5956,9 +5956,9 @@ static void test_command_runner() {
         runner.tick(1000, true, true);
         runner.notify_tx_complete(1010);
 
-        // Vehicle replies with error containing "already_set" (e.g. door is already locked)
+        // Vehicle replies with normative already_set error (e.g. door is already locked)
         auto outcome = runner.handle_response(BleDomain::VehicleSecurity, cmd_uuid.data(), cmd_uuid.size(),
-                                             false, 0, false, "door_lock: already_set");
+                                             false, 0, false, "action failed: already_set");
         CHECK(outcome.routed);
         CommandRequest* cmd = runner.current_command();
         CHECK(cmd->is_completed);
@@ -5989,12 +5989,12 @@ static void test_command_runner() {
         CHECK(cmd->terminal_reason == TerminalReason::AuthenticationFailed);
     }
 
-    // 8. Response Timeout and Retry Arbitration
+    // 8. Response Timeout and Retry Arbitration (with exponential backoff)
     {
         CommandRunner runner;
         runner.vcsec_session().set_established({1}, 10, 1000);
 
-        runner.enqueue("Flash", BleDomain::VehicleSecurity, WakePolicy::WakeIfNeeded, 30000, 1000);
+        runner.enqueue("Flash", BleDomain::VehicleSecurity, WakePolicy::WakeIfNeeded, 40000, 1000);
         runner.tick(1000, true, true);
         runner.notify_tx_complete(1010);
 
@@ -6002,27 +6002,48 @@ static void test_command_runner() {
         CHECK(cmd->state == CommandState::AwaitingResponse);
         CHECK(cmd->retry_count == 0);
 
-        // Advance past response timeout (7000ms): 1010 + 7000 = 8010
+        // Advance past response timeout (7000ms): 1010 + 7000 = 8010.
+        // At 8015: timeout triggers, enters backoff (500ms delay), returns None
         TxAction act = runner.tick(8015, true, true);
-        CHECK(act == TxAction::SendCommandPayload); // Retry #1
+        CHECK(act == TxAction::None);
         CHECK(cmd->state == CommandState::Ready);
         CHECK(cmd->retry_count == 1);
-        runner.notify_tx_complete(8020);
+        CHECK(cmd->next_retry_delay_ms == 500);
 
-        // Advance again for retry #2
-        act = runner.tick(15025, true, true);
+        // During backoff delay (8200ms < 8015 + 500), tick returns None
+        CHECK(runner.tick(8200, true, true) == TxAction::None);
+
+        // At 8515ms (8015 + 500), backoff expires -> emits SendCommandPayload (Retry #1)
+        act = runner.tick(8515, true, true);
         CHECK(act == TxAction::SendCommandPayload);
+        runner.notify_tx_complete(8520);
+
+        // Advance for retry #2: 8520 + 7000 = 15520.
+        // At 15525: timeout triggers, enters backoff (1000ms delay), returns None
+        act = runner.tick(15525, true, true);
+        CHECK(act == TxAction::None);
         CHECK(cmd->retry_count == 2);
-        runner.notify_tx_complete(15030);
+        CHECK(cmd->next_retry_delay_ms == 1000);
 
-        // Advance again for retry #3 (reaches max_retries = 3)
-        act = runner.tick(22035, true, true);
+        // At 16525 (15525 + 1000), backoff expires -> emits SendCommandPayload (Retry #2)
+        act = runner.tick(16525, true, true);
         CHECK(act == TxAction::SendCommandPayload);
-        CHECK(cmd->retry_count == 3);
-        runner.notify_tx_complete(22040);
+        runner.notify_tx_complete(16530);
 
-        // Next timeout exceeds max_retries: fails permanently
-        act = runner.tick(29045, true, true);
+        // Advance for retry #3: 16530 + 7000 = 23530.
+        // At 23535: timeout triggers, enters backoff (2000ms delay), returns None
+        act = runner.tick(23535, true, true);
+        CHECK(act == TxAction::None);
+        CHECK(cmd->retry_count == 3);
+        CHECK(cmd->next_retry_delay_ms == 2000);
+
+        // At 25535 (23535 + 2000), backoff expires -> emits SendCommandPayload (Retry #3)
+        act = runner.tick(25535, true, true);
+        CHECK(act == TxAction::SendCommandPayload);
+        runner.notify_tx_complete(25540);
+
+        // Next timeout exceeds max_retries: 25540 + 7000 = 32540 -> fails permanently
+        act = runner.tick(32545, true, true);
         CHECK(act == TxAction::None);
         CHECK(cmd->is_completed);
         CHECK(!cmd->is_success);
@@ -6156,8 +6177,8 @@ static void test_command_runner_link_loss_and_faults() {
         CHECK(runner.tick(300, true, true, false) == TxAction::SendInfoSessionInfoRequest);
         CHECK(runner.current_command()->wake_confirmed);
     }
-    // Wake confirmation arriving early while waiting for VCSEC auth (e.g. initial status frame)
-    // must be remembered so no redundant Wake is emitted after VCSEC auth finishes.
+    // Status frames arriving early while waiting for VCSEC auth must not confirm wake
+    // when car is reported asleep: after VCSEC auth, tick emits SendWake.
     {
         CommandRunner runner;
         // VCSEC session not yet established
@@ -6168,15 +6189,101 @@ static void test_command_runner_link_loss_and_faults() {
 
         // VehicleStatus arrives with closureStatuses while still waiting for VCSEC session
         runner.notify_vehicle_awake(true);
-        CHECK(runner.current_command()->wake_confirmed);
+        // Not in WaitingWake or EnsuringAwake, so wake is not confirmed
+        CHECK(!runner.current_command()->wake_confirmed);
         CHECK(runner.current_command()->state == CommandState::WaitingVcsecAuth);
 
         // VCSEC session finishes authentication
         runner.vcsec_session().set_established({1}, 10, 1000);
         runner.current_command()->state = CommandState::Idle;
 
-        // Advances directly to infotainment auth, skipping SendWake despite is_asleep=true
-        CHECK(runner.tick(500, true, false, true) == TxAction::SendInfoSessionInfoRequest);
+        // Vehicle is asleep, so tick emits SendWake rather than advancing to infotainment auth
+        CHECK(runner.tick(500, true, false, true) == TxAction::SendWake);
+        CHECK(runner.current_command()->state == CommandState::WaitingWake);
+    }
+
+    // S1: Step timeout on info auth on asleep car resets wake_confirmed and emits SendWake
+    {
+        CommandRunner runner;
+        runner.vcsec_session().set_established({1}, 10, 1000);
+        runner.enqueue("Set Charge Limit", BleDomain::Infotainment, WakePolicy::WakeIfNeeded, 30000, 0);
+
+        // Step 1: Car is asleep, tick emits SendWake
+        CHECK(runner.tick(0, true, false, true) == TxAction::SendWake);
+        runner.notify_tx_complete(0);
+        CHECK(runner.current_command()->state == CommandState::WaitingWake);
+
+        // Wake confirmed while waiting for wake
+        runner.notify_vehicle_awake(true);
+        CHECK(runner.current_command()->wake_confirmed);
+
+        // Step 2: Advances to SendInfoSessionInfoRequest at t=100
+        CHECK(runner.tick(100, true, false, true) == TxAction::SendInfoSessionInfoRequest);
+        runner.notify_tx_complete(100);
+        CHECK(runner.current_command()->state == CommandState::WaitingInfoAuth);
+        CHECK(runner.current_command()->wake_confirmed);
+
+        // Step 3: Timeout waiting for info auth at t = 100 + kDefaultStepTimeoutMs (5000) = 5100 ms
+        // On step timeout, retry_count increments, wake_confirmed resets to false, state resets to Idle
+        CHECK(runner.tick(5100, true, false, true) == TxAction::None);
+        CHECK(!runner.current_command()->wake_confirmed);
+        CHECK(runner.current_command()->retry_count == 1);
+        CHECK(runner.current_command()->state == CommandState::Idle);
+
+        // Step 4: Next tick on asleep car re-evaluates sleep and emits SendWake
+        CHECK(runner.tick(5150, true, false, true) == TxAction::SendWake);
+        CHECK(runner.current_command()->state == CommandState::WaitingWake);
+    }
+
+    // TX write failure on infotainment command resets wake_confirmed and re-evaluates wake
+    {
+        CommandRunner runner;
+        runner.vcsec_session().set_established({1}, 10, 1000);
+        runner.info_session().set_established({2}, 10, 1000);
+        runner.enqueue("Set Charge Limit", BleDomain::Infotainment, WakePolicy::WakeIfNeeded, 30000, 0);
+
+        // Vehicle is asleep, first tick emits SendWake
+        CHECK(runner.tick(0, true, false, true) == TxAction::SendWake);
+        runner.notify_tx_complete(0);
+        runner.notify_vehicle_awake(true);
+        CHECK(runner.current_command()->wake_confirmed);
+
+        // Next tick emits SendCommandPayload
+        CHECK(runner.tick(100, true, false, true) == TxAction::SendCommandPayload);
+
+        // TX failure occurs during transmission
+        runner.notify_tx_failed("BLE write failed");
+        CHECK(!runner.current_command()->wake_confirmed);
+        CHECK(runner.current_command()->state == CommandState::Idle);
+        CHECK(runner.current_command()->retry_count == 1);
+
+        // Next tick re-evaluates sleep and emits SendWake
+        CHECK(runner.tick(150, true, false, true) == TxAction::SendWake);
+        CHECK(runner.current_command()->state == CommandState::WaitingWake);
+    }
+
+    // F4: Retry timing and backoff enforcement (at t7000 returns None, during backoff 500ms returns None, at t7500 emits SendCommandPayload)
+    {
+        CommandRunner runner;
+        runner.vcsec_session().set_established({1}, 10, 1000);
+        runner.enqueue("Flash", BleDomain::VehicleSecurity, WakePolicy::WakeIfNeeded, 30000, 0);
+
+        CHECK(runner.tick(0, true, true) == TxAction::SendCommandPayload);
+        runner.notify_tx_complete(0);
+        CHECK(runner.current_command()->state == CommandState::AwaitingResponse);
+        CHECK(runner.current_command()->retry_count == 0);
+
+        // At t = 7000ms: response timeout occurs (elapsed >= 7000). Enters Ready, backoff 500ms. Returns None.
+        CHECK(runner.tick(7000, true, true) == TxAction::None);
+        CHECK(runner.current_command()->state == CommandState::Ready);
+        CHECK(runner.current_command()->retry_count == 1);
+        CHECK(runner.current_command()->next_retry_delay_ms == 500);
+
+        // During backoff (e.g. t = 7250ms < 7000 + 500), returns None
+        CHECK(runner.tick(7250, true, true) == TxAction::None);
+
+        // At t = 7500ms (7000 + 500), backoff expires -> emits SendCommandPayload
+        CHECK(runner.tick(7500, true, true) == TxAction::SendCommandPayload);
     }
     // No confirmation: an asleep car still gets the wake policy (unchanged), and a NoWakeFail
     // command still fails locally with the text the link backstop classifies as LocalPolicy.

@@ -135,9 +135,7 @@ VehicleController::begin_completion_(uint32_t& generation) {
 }
 
 void VehicleController::invalidate_and_flush_(uint32_t generation) {
-    // tesla-ble has no targeted cancel API. Invalidate first because set_connected(false)
-    // synchronously finalises every queued callback; callbacks from the expired request must
-    // already see themselves as stale when that flush begins.
+    // Invalidate first so any in-flight or late completions are recognized as stale.
     if (command_generation_.load() == generation) {
         uint32_t next = generation + 1;
         command_generation_.store(next ? next : 1);
@@ -546,10 +544,9 @@ bool VehicleController::wake_up(int timeout_ms) {
         return true;  // fresh infotainment data (<60 s) ⇒ awake
     }
 
-    // Fire the wake. The car wakes on the first message; the library retries ~7 s then reports
-    // failure even on success (Tesla acks a wake with an authenticated-but-empty response that
-    // carries no commandStatus for the library to complete on), so we ignore send_vcsec_'s
-    // result and confirm out-of-band below. Sending it also opens the active window
+    // Fire the wake. The car wakes on the first message; Tesla acks a wake with an
+    // authenticated-but-empty response that carries no commandStatus to complete on,
+    // so we ignore send_vcsec_'s result and confirm out-of-band below. Sending it also opens the active window
     // (last_cmd_ticks_), so loop_task starts refreshing the charge cache as soon as the car is up.
     int wake_budget_ms = remaining_ms_(deadline);
     if (wake_budget_ms > 9000) wake_budget_ms = 9000;

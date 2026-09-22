@@ -113,8 +113,8 @@ bool VehicleController::recover_pending_key_rotation_at_boot_() {
         return true;
     }
 
-    // Do not construct TeslaBLE::Vehicle while this marker exists: its constructor loads the
-    // private key and persisted peers, and a torn rotation makes that combination ambiguous.
+    // Do not initialize client while this marker exists: key loading and persisted peers
+    // with a torn rotation make that combination ambiguous.
     key_runtime_safe_.store(false);
     pairing_cleanup_pending_.store(true);
     ESP_LOGW(TAG, "interrupted key rotation detected — cleaning persisted peer state before key load");
@@ -138,7 +138,7 @@ bool VehicleController::recover_pending_key_rotation_at_boot_() {
 
     pairing_cleanup_pending_.store(false);
     key_rotation_recovered_at_boot_ = true;
-    ESP_LOGI(TAG, "interrupted key-rotation cleanup completed before vehicle construction");
+    ESP_LOGI(TAG, "interrupted key-rotation cleanup completed before controller initialization");
     return true;
 }
 
@@ -158,16 +158,16 @@ bool VehicleController::init(const std::string& vin,
 
     if (!recover_pending_key_rotation_at_boot_()) {
         // app_main treats init failure as boot-fatal. No background task and, critically, no
-        // TeslaBLE::Vehicle exists on this path, so a pending journal can never be reported as
+        // active client exists on this path, so a pending journal can never be reported as
         // paired or used to sign/enrol until a later boot finishes its cleanup.
         return false;
     }
 
     bool stored_private_key = false;
     if (!storage_->probe_blob(tk::nvs_contract::kPrivateKey, stored_private_key)) {
-        // Missing is a valid first-boot state; unreadable is not. Do not construct Vehicle or
+        // Missing is a valid first-boot state; unreadable is not. Do not initialize client or
         // start auto-pair with an NVS error misclassified as permission to generate a new key.
-        ESP_LOGE(TAG, "private-key storage probe failed — refusing vehicle construction");
+        ESP_LOGE(TAG, "private-key storage probe failed — refusing controller initialization");
         return false;
     }
 

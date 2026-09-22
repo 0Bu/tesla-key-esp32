@@ -19,7 +19,7 @@ namespace tk {
 // Evaluates whether an error string represents a nominal already_set response from the vehicle
 // (teslamotors/vehicle-command NominalError, treated as idempotent success by caller).
 inline bool is_nominal_already_set(std::string_view err) noexcept {
-    return err.find("already_set") != std::string_view::npos;
+    return err == "already_set" || err == "action failed: already_set";
 }
 
 inline const char* command_result_text(bool ok, const std::string& err) {
