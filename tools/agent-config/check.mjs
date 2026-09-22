@@ -69,10 +69,7 @@ function regularFile(relative, label) {
 }
 
 if (fs.existsSync(repoPath(".claude"))) {
-  die(1, ".claude metadata must remain retired; use AGENTS.md, .agents, .codex and tools/agent-hooks");
-}
-if (fs.existsSync(repoPath(".codex/migration-manifest.json"))) {
-  die(1, ".codex/migration-manifest.json must remain retired with the compatibility layer");
+  die(1, ".claude metadata must remain retired; use AGENTS.md, .agents and tools/agent-hooks");
 }
 regularFile("AGENTS.md", "canonical instructions");
 const agentsSize = fs.statSync(repoPath("AGENTS.md")).size;
@@ -120,19 +117,19 @@ const reviewedSkillSha256 = new Map([
   ["deploy", "855ba875f47a51ec66ba84862abf32b3f657820e8e4b6cc277df02e1357dfcf0"],
   ["device-diag", "d524b5dee5d58be5bfda8630099ab36ada9dd4a77500cc6cc9126970efc376cb"],
   ["display-preview", "4bff95d0314d50ce29d67beac7ef4f9db1ebcbb2fa609335e560e162f5a1ed46"],
-  ["feature-docs", "f66394acb3a1d8bb86ee716fddda83236bfdfca404282b93dce0945e6c26a00b"],
+  ["feature-docs", "0255c6c85753efb851833a20e8da9519c8a61c58d4bb52f9f061cfe609d6e20a"],
   ["flash-esp32", "cd67535f6206b72eb824548fce9338f97c5e813aff14633c6149b636b2146aeb"],
   ["mock-test", "8cfaaa7d4d7fdbda24375ca743f9954ee39c6db053684000fac1bf1bce00ac0f"],
   ["ota-release-verify", "1504ad6c0d781bbfef36c3eca75813faff6e4a5896a5f1bac04507a4e77456e8"],
   ["pr-hygiene", "0b73adc70cb8185d19fe868a2aa8dc195e1d2eec792ae7b498672f2bb6e99459"],
-  ["project-review", "827633cc2cad00c9a0808d5b0cf30f0bfdd4deeda61119741a5074a8f1d6fd1b"],
+  ["project-review", "5f30bdf31cc1a2e8295f171eacd6d23ad6e9cfe4e5ac42e719809fbf1696fc26"],
   ["ship", "47f0e4d2408af37cb127404638e5c1294b335745c249f751d6acc3f3a8210d46"],
-  ["skill-audit", "410fc174dff31da5822e1fe9af16ad799bb42a730b190e020c6e06f2d0a9a525"],
+  ["skill-audit", "a774a6fe7188e6a272c2dbff1f6407f36cf11dc7fbaa533a9063509520964750"],
   ["usb-recovery", "6f3cbd9533e75d14b5a14cd19987fa07db046b6c5412f4d52d2aa54944481cf9"],
   ["vehicle-command-audit", "1c04ee8a22b5e161e390612611b3b5d8e38d8f102e9d8f85842461cdd7b620ff"],
 ]);
 const featureDocsScopeTokens = [
-  "main/", "test/", "sdkconfig.defaults*", "partitions.csv", "AGENTS.md", ".agents/", ".codex/",
+  "main/", "test/", "sdkconfig.defaults*", "partitions.csv", "AGENTS.md", ".agents/",
   ".github/PULL_REQUEST_TEMPLATE.md",
   "tools/agent-hooks/", "tools/agent-config/", "docs/index.html", "installer-bootstrap.mjs",
   "serial-port-release.mjs", "web-installer.mjs", "docs/vendor/",
@@ -336,27 +333,36 @@ for (const [relative, contracts] of new Map([
   }
 }
 
-const canonicalReviewerTargets = [
-  ".codex/agents/agent_config_reviewer.toml",
-  ".codex/agents/doc_drift_checker.toml",
-  ".codex/agents/heap_safety_reviewer.toml",
-  ".codex/agents/multi_target_build_reviewer.toml",
+regularFile(".agents/subagents.json", "canonical subagents manifest");
+const subagentsDoc = readJson(repoPath(".agents/subagents.json"), "subagents manifest");
+if (!subagentsDoc || !Array.isArray(subagentsDoc.subagents)) {
+  die(1, ".agents/subagents.json must contain a subagents array");
+}
+const canonicalReviewerTypes = [
+  "agent_config_reviewer",
+  "doc_drift_checker",
+  "heap_safety_reviewer",
+  "multi_target_build_reviewer",
 ];
-let actualReviewerTargets;
-try {
-  actualReviewerTargets = fs.readdirSync(repoPath(".codex/agents"), { withFileTypes: true })
-    .filter((entry) => entry.isFile() && entry.name.endsWith(".toml"))
-    .map((entry) => `.codex/agents/${entry.name}`).sort();
-} catch { die(1, ".codex/agents is missing"); }
-if (canonicalReviewerTargets.join("\0") !== actualReviewerTargets.join("\0")) {
+const actualReviewerTypes = subagentsDoc.subagents
+  .map((s) => s.TypeName)
+  .sort();
+if (canonicalReviewerTypes.join("\0") !== actualReviewerTypes.join("\0")) {
   die(1, "canonical reviewer set differs from manifest");
 }
-if (actualReviewerTargets.length !== 4) {
-  die(1, `expected four canonical reviewers, got ${actualReviewerTargets.length}`);
+if (actualReviewerTypes.length !== 4) {
+  die(1, `expected four canonical reviewers, got ${actualReviewerTypes.length}`);
 }
-const multiTargetReviewer = normalizeProse(
-  fs.readFileSync(repoPath(".codex/agents/multi_target_build_reviewer.toml"), "utf8"),
-);
+for (const subagent of subagentsDoc.subagents) {
+  if (subagent.SandboxMode !== "read-only") {
+    die(1, `${subagent.TypeName} sandbox_mode must be read-only`);
+  }
+  if (!subagent.Prompt || typeof subagent.Prompt !== "string" || !subagent.Prompt.trim()) {
+    die(1, `${subagent.TypeName} has empty prompt`);
+  }
+}
+const multiTargetReviewerObj = subagentsDoc.subagents.find((s) => s.TypeName === "multi_target_build_reviewer");
+const multiTargetReviewer = normalizeProse(multiTargetReviewerObj?.Prompt || "");
 const multiTargetPublicationContracts = [
   "logic-test -> build-target -> build -> independent-rebuild -> publish -> deploy",
   "SHA/version-bound Actions artifact",
@@ -371,9 +377,8 @@ if (teslaBlePinMatch) {
   if (!multiTargetReviewer.includes(`yoziru/tesla-ble remains ${currentPin}`)) {
     die(1, `multi-target reviewer pin assertion does not match idf_component.yml pin (${currentPin})`);
   }
-  const docDriftReviewer = normalizeProse(
-    fs.readFileSync(repoPath(".codex/agents/doc_drift_checker.toml"), "utf8"),
-  );
+  const docDriftReviewerObj = subagentsDoc.subagents.find((s) => s.TypeName === "doc_drift_checker");
+  const docDriftReviewer = normalizeProse(docDriftReviewerObj?.Prompt || "");
   if (!docDriftReviewer.includes(`yoziru/tesla-ble ${currentPin}`)) {
     die(1, `doc drift checker pin assertion does not match idf_component.yml pin (${currentPin})`);
   }
@@ -400,5 +405,5 @@ for (const invariant of safety.invariants) {
   }
 }
 
-console.log(`agent-config: ${canonicalSkills.length} canonical skills, ${actualReviewerTargets.length} reviewers and ${invariantIds.size} instruction invariants clean`);
+console.log(`agent-config: ${canonicalSkills.length} canonical skills, ${actualReviewerTypes.length} reviewers and ${invariantIds.size} instruction invariants clean`);
 console.log(`agent-config: AGENTS.md budget ${agentsSize}/${budget} bytes`);

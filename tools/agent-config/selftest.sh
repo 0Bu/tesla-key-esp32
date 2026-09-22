@@ -3,8 +3,12 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-WORK="$(mktemp -d)"
-trap 'rm -rf "$WORK"' EXIT
+WORK="$(mktemp -d 2>/dev/null || true)"
+if [ -z "$WORK" ] || [ ! -d "$WORK" ]; then
+  mkdir -p "$ROOT/.tmp"
+  WORK="$(mktemp -d "$ROOT/.tmp/agent-config-test.XXXXXX")"
+fi
+trap 'rm -rf "$WORK"; rmdir "$ROOT/.tmp" 2>/dev/null || true' EXIT
 passes=0
 
 fail() { echo "agent-config selftest: $1" >&2; exit 1; }
@@ -12,14 +16,12 @@ fail() { echo "agent-config selftest: $1" >&2; exit 1; }
 make_fixture() {
   local dest="$1"
   rm -rf "$dest"
-  mkdir -p "$dest/.codex" "$dest/.agents" "$dest/.github" "$dest/docs" "$dest/tools" "$dest/main"
+  mkdir -p "$dest/.agents" "$dest/.github" "$dest/docs" "$dest/tools" "$dest/main"
   cp "$ROOT/.mcp.json" "$dest/.mcp.json"
   cp "$ROOT/AGENTS.md" "$dest/AGENTS.md"
   cp "$ROOT/.github/PULL_REQUEST_TEMPLATE.md" "$dest/.github/PULL_REQUEST_TEMPLATE.md"
-  cp -R "$ROOT/.codex/agents" "$dest/.codex/agents"
-  cp "$ROOT/.codex/config.toml" "$dest/.codex/config.toml"
-  cp "$ROOT/.codex/hooks.json" "$dest/.codex/hooks.json"
   cp "$ROOT/.agents/hooks.json" "$dest/.agents/hooks.json"
+  cp "$ROOT/.agents/subagents.json" "$dest/.agents/subagents.json"
   cp -R "$ROOT/.agents/skills" "$dest/.agents/skills"
   cp "$ROOT/docs/FEATURES.md" "$dest/docs/FEATURES.md"
   cp -R "$ROOT/tools/agent-config" "$dest/tools/agent-config"
@@ -30,7 +32,6 @@ make_fixture() {
 run_gate() {
   local fixture="$1"
   AGENT_CONFIG_ROOT="$fixture" node "$ROOT/tools/agent-config/check.mjs" || return
-  AGENT_CONFIG_ROOT="$fixture" python3 "$ROOT/tools/agent-config/check_toml.py" || return
   AGENT_CONFIG_ROOT="$fixture" python3 "$ROOT/tools/agent-config/check_hooks.py" || return
 }
 
@@ -56,19 +57,12 @@ node "$ROOT/tools/agent-config/update-skill-digests.mjs" --self-test >/dev/null 
 echo "  PASS  update-skill-digests self-test"
 passes=$((passes + 1))
 
-python3 "$ROOT/tools/agent-config/export-subagents.py" --self-test >/dev/null || fail "export-subagents self-test failed"
-echo "  PASS  export-subagents self-test"
-passes=$((passes + 1))
-
 fixture="$WORK/claude-residue"; make_fixture "$fixture"
 mkdir "$fixture/.claude"
 expect_failure "retired .claude metadata" "$fixture" ".claude metadata must remain retired"
 
-fixture="$WORK/migration-residue"; make_fixture "$fixture"
-printf '{}\n' > "$fixture/.codex/migration-manifest.json"
-expect_failure "retired migration manifest" "$fixture" "migration-manifest.json must remain retired"
-
 fixture="$WORK/budget"; make_fixture "$fixture"
+
 set +e
 output="$(AGENT_CONFIG_ROOT="$fixture" AGENT_INSTRUCTIONS_BUDGET_BYTES=1 \
   node "$ROOT/tools/agent-config/check.mjs" 2>&1)"; rc=$?
@@ -78,27 +72,25 @@ set -e
 echo "  PASS  AGENTS budget"
 passes=$((passes + 1))
 
-echo "== parsed TOML, skills and policy =="
-fixture="$WORK/config-toml"; make_fixture "$fixture"
-printf '\n[broken\n' >> "$fixture/.codex/config.toml"
-expect_failure "invalid config TOML" "$fixture" "not valid TOML"
-
-fixture="$WORK/context-pin"; make_fixture "$fixture"
-perl -0pi -e 's/context7-mcp\@4\.0\.2/context7-mcp\@latest/' "$fixture/.codex/config.toml"
-expect_failure "Context7 pin drift" "$fixture" "Context7 must stay exactly pinned"
-
-fixture="$WORK/hooks-disabled"; make_fixture "$fixture"
-perl -0pi -e 's/hooks = true/hooks = false/' "$fixture/.codex/config.toml"
-expect_failure "disabled hooks" "$fixture" "explicitly enable multi_agent and hooks"
-
-fixture="$WORK/reviewer-model"; make_fixture "$fixture"
-printf '\nmodel = "canary"\n' >> "$fixture/.codex/agents/agent_config_reviewer.toml"
-expect_failure "reviewer model pin" "$fixture" "must not pin a model"
+echo "== parsed JSON, subagents, skills and policy =="
+fixture="$WORK/subagents-json"; make_fixture "$fixture"
+printf '\n{broken\n' >> "$fixture/.agents/subagents.json"
+expect_failure "invalid subagents JSON" "$fixture" "not valid JSON"
 
 fixture="$WORK/reviewer-write"; make_fixture "$fixture"
-perl -0pi -e 's/sandbox_mode = "read-only"/sandbox_mode = "workspace-write"/' \
-  "$fixture/.codex/agents/doc_drift_checker.toml"
+perl -0pi -e 's/"SandboxMode": "read-only"/"SandboxMode": "workspace-write"/' \
+  "$fixture/.agents/subagents.json"
 expect_failure "writable reviewer" "$fixture" "sandbox_mode must be read-only"
+
+fixture="$WORK/reviewer-missing"; make_fixture "$fixture"
+python3 - "$fixture/.agents/subagents.json" <<'PY'
+import json, pathlib, sys
+path = pathlib.Path(sys.argv[1])
+data = json.loads(path.read_text())
+data["subagents"] = [s for s in data["subagents"] if s["TypeName"] != "heap_safety_reviewer"]
+path.write_text(json.dumps(data, indent=2))
+PY
+expect_failure "missing reviewer" "$fixture" "canonical reviewer set differs from manifest"
 
 fixture="$WORK/skill-name"; make_fixture "$fixture"
 perl -0pi -e 's/^name: add-logic-test$/name: wrong-canary/m' \
@@ -296,7 +288,7 @@ expect_failure "missing safety invariant" "$fixture" "missing-canary"
 
 fixture="$WORK/multi-target-publication-dag"; make_fixture "$fixture"
 perl -0pi -e 's/logic-test -> build-target -> build -> independent-rebuild -> publish ->/logic-test -> build-target -> build -> publish ->/' \
-  "$fixture/.codex/agents/multi_target_build_reviewer.toml"
+  "$fixture/.agents/subagents.json"
 expect_failure "multi-target publication DAG" "$fixture" \
   "multi-target reviewer is missing the independent-rebuild/publication DAG contract"
 
@@ -306,25 +298,6 @@ expect_failure "stale pin assertion" "$fixture" \
   "pin assertion does not match idf_component.yml pin"
 
 echo "== hook configuration =="
-fixture="$WORK/hook-async"; make_fixture "$fixture"
-python3 - "$fixture/.codex/hooks.json" <<'PY'
-import json, pathlib, sys
-path = pathlib.Path(sys.argv[1])
-value = json.loads(path.read_text())
-value["hooks"]["PreToolUse"][0]["hooks"][0]["async"] = True
-path.write_text(json.dumps(value, indent=2) + "\n")
-PY
-expect_failure "async blocking hook" "$fixture" "must not be async"
-
-fixture="$WORK/hook-matcher"; make_fixture "$fixture"
-python3 - "$fixture/.codex/hooks.json" <<'PY'
-import json, pathlib, sys
-path = pathlib.Path(sys.argv[1])
-value = json.loads(path.read_text())
-value["hooks"]["PreToolUse"][0]["matcher"] = value["hooks"]["PreToolUse"][0]["matcher"].removeprefix("^")
-path.write_text(json.dumps(value, indent=2) + "\n")
-PY
-expect_failure "unanchored blocking matcher" "$fixture" "matcher drifted"
 
 fixture="$WORK/antigravity-hook-description"; make_fixture "$fixture"
 python3 - "$fixture/.agents/hooks.json" <<'PY'

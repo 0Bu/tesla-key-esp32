@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Parse the exact synchronous Codex hook dispatch and neutral hook core."""
+"""Parse and validate runner-neutral agent hook configuration."""
 
 from __future__ import annotations
 
@@ -67,53 +67,8 @@ def command_hook(
     check_handler_list(hooks, commands, label)
 
 
-codex = load_json(".codex/hooks.json")
-if set(codex) != {"description", "hooks"} or not isinstance(codex.get("description"), str):
-    fail(".codex/hooks.json must contain only description and hooks")
-codex_hooks = codex.get("hooks")
-events = {"SessionStart", "SubagentStart", "Stop", "PreToolUse", "PostToolUse"}
-if not isinstance(codex_hooks, dict) or set(codex_hooks) != events:
-    fail(".codex/hooks.json event set drifted")
-if any(not isinstance(codex_hooks[event], list) for event in events):
-    fail(".codex/hooks.json event groups must be arrays")
-if len(codex_hooks["SessionStart"]) != 1 or len(codex_hooks["SubagentStart"]) != 1:
-    fail("Codex start dispatch count drifted")
-if len(codex_hooks["Stop"]) != 1 or len(codex_hooks["PreToolUse"]) != 2:
-    fail("Codex stop/pre-tool dispatch count drifted")
-if len(codex_hooks["PostToolUse"]) != 1:
-    fail("Codex post-tool dispatch count drifted")
-
 git_root = "$(git rev-parse --show-toplevel)"
 py = f'python3 "{git_root}/tools/agent-hooks/agent_hook.py"'
-command_hook(
-    codex_hooks["SessionStart"][0],
-    matcher="^(?:startup|resume|clear|compact)$",
-    commands=[(f"{py} capabilities", 15), (f"{py} build-efficiency", 15)],
-    label="Codex SessionStart",
-)
-command_hook(
-    codex_hooks["SubagentStart"][0], matcher=None,
-    commands=[(f"{py} subagent-context", 10)], label="Codex SubagentStart",
-)
-command_hook(
-    codex_hooks["Stop"][0], matcher=None,
-    commands=[(f"{py} stop-logic-tests", 600)], label="Codex Stop",
-)
-command_hook(
-    codex_hooks["PreToolUse"][0],
-    matcher="^(?:Read|Edit|MultiEdit|Write|Bash|apply_patch|exec_command|shell|shell_command)$",
-    commands=[(f"{py} pre-tool-guards", 15)], label="Codex guard",
-)
-command_hook(
-    codex_hooks["PreToolUse"][1],
-    matcher="^(?:Bash|exec_command|shell|shell_command|mcp__.*(?:github|GitHub).*)$",
-    commands=[(f'bash "{git_root}/tools/agent-hooks/require-pr-gates.sh"', 180)],
-    label="Codex PR policy",
-)
-command_hook(
-    codex_hooks["PostToolUse"][0], matcher="^(?:Edit|MultiEdit|Write|apply_patch)$",
-    commands=[(f"{py} format", 30)], label="Codex formatter",
-)
 
 agents = load_json(".agents/hooks.json")
 expected_agent_sections = {"capabilities", "pre-tool-guards", "post-tool-formatter", "stop-tests"}
@@ -175,10 +130,9 @@ foreign = re.compile(
 )
 for relative in [
     *(f"tools/agent-hooks/{name}" for name in sorted(core_files)),
-    ".codex/hooks.json",
     ".agents/hooks.json",
 ]:
     if foreign.search((root / relative).read_text(encoding="utf-8")):
         fail(f"foreign-project policy residue found in {relative}")
 
-print("agent-hook-config: parsed 5 lifecycle events and exact synchronous Codex and Antigravity dispatch")
+print("agent-hook-config: parsed lifecycle events and exact synchronous agent dispatch")

@@ -13,7 +13,7 @@ for tool in git bash python3 node ruby; do
     }
 done
 
-while IFS= read -r -d '' path; do bash -n "$path"; done \
+while IFS= read -r -d '' path; do [ -f "$path" ] || continue; bash -n "$path"; done \
     < <(git ls-files --cached --others --exclude-standard -z -- '*.sh')
 
 python3 - "$root" <<'PY'
@@ -25,6 +25,8 @@ raw=subprocess.check_output([
 ])
 for relative in (value for value in raw.decode("utf-8").split("\0") if value):
     path=root/relative
+    if not path.is_file():
+        continue
     text=path.read_text(encoding="utf-8")
     if path.suffix==".py": compile(text,str(path),"exec")
     elif path.suffix==".json": json.loads(text)
@@ -32,14 +34,14 @@ for relative in (value for value in raw.decode("utf-8").split("\0") if value):
 print("repo-lint: Python, JSON and TOML syntax PASS")
 PY
 
-while IFS= read -r -d '' path; do node --check "$path" >/dev/null; done \
+while IFS= read -r -d '' path; do [ -f "$path" ] || continue; node --check "$path" >/dev/null; done \
     < <(git ls-files --cached --others --exclude-standard -z -- '*.js' '*.mjs')
 
-while IFS= read -r -d '' path; do ruby -c "$path" >/dev/null; done \
+while IFS= read -r -d '' path; do [ -f "$path" ] || continue; ruby -c "$path" >/dev/null; done \
     < <(git ls-files --cached --others --exclude-standard -z -- '*.rb')
 
 yaml_files=()
-while IFS= read -r -d '' path; do yaml_files+=("$path"); done \
+while IFS= read -r -d '' path; do [ -f "$path" ] && yaml_files+=("$path"); done \
     < <(git ls-files --cached --others --exclude-standard -z -- '*.yml' '*.yaml')
 ruby scripts/check-yaml-syntax.rb --self-test "${yaml_files[@]}"
 echo "repo-lint: YAML parsed by offline Psych; GitHub semantics use mutation-tested policy (no actionlint download)"

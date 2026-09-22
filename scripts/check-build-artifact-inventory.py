@@ -276,7 +276,9 @@ def source_state(source_root: Path, expected_source_sha: str) -> dict[str, Any]:
         for item in git_output(
             source_root, "ls-files", "--cached", "--others", "--exclude-standard", "-z"
         ).split(b"\0")
-        if item and os.fsdecode(item) not in SOURCE_EXCLUSIONS
+        if item
+        and os.fsdecode(item) not in SOURCE_EXCLUSIONS
+        and (source_root / os.fsdecode(item)).is_file()
     ]
     require(len(raw_paths) == len(set(raw_paths)), "source checkout contains duplicate path records")
     digest = hashlib.sha256(b"tesla-key-source-tree-sha256-v1\0")
