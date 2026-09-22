@@ -1457,11 +1457,9 @@ static void test_mcp() {
 
     // Nominal error: already_set is classified as success for idempotent commands
     CHECK(tk::is_nominal_already_set("already_set"));
-    CHECK(tk::is_nominal_already_set("action failed: already_set"));
     CHECK(!tk::is_nominal_already_set("complete"));
     CHECK(!tk::is_nominal_already_set(""));
     CHECK_STR(tk::command_result_text(false, "already_set"), "command executed successfully");
-    CHECK_STR(tk::command_result_text(false, "action failed: already_set"), "command executed successfully");
 
     // Soft-desync link backstop: which failures prove contact, which are local, which count
     // toward the drop-and-resync streak (tk::classify_command_failure, make_result_cb_).
@@ -1476,6 +1474,9 @@ static void test_mcp() {
           FailureOrigin::VehicleResponse);
     CHECK(tk::classify_command_failure("Infotainment action failed") == FailureOrigin::VehicleResponse);
     CHECK(tk::classify_command_failure("action failed: charging_port_closed") == FailureOrigin::VehicleResponse);
+    CHECK(tk::classify_command_failure("failed with error status") == FailureOrigin::VehicleResponse);
+    CHECK(tk::classify_command_failure("VCSEC command failed with error status") == FailureOrigin::VehicleResponse);
+    CHECK(tk::classify_command_failure("VCSEC command failed") == FailureOrigin::VehicleResponse);
     CHECK(tk::classify_command_failure("command response timeout; max retries exceeded") ==
           FailureOrigin::TransportOrTimeout);
     CHECK(tk::classify_command_failure("authentication / wake timeout; max retries exceeded") ==
@@ -5958,7 +5959,7 @@ static void test_command_runner() {
 
         // Vehicle replies with normative already_set error (e.g. door is already locked)
         auto outcome = runner.handle_response(BleDomain::VehicleSecurity, cmd_uuid.data(), cmd_uuid.size(),
-                                             false, 0, false, "action failed: already_set");
+                                             false, 0, false, "already_set");
         CHECK(outcome.routed);
         CommandRequest* cmd = runner.current_command();
         CHECK(cmd->is_completed);
@@ -6049,6 +6050,49 @@ static void test_command_runner() {
         CHECK(!cmd->is_success);
         CHECK(cmd->state == CommandState::Failed);
         CHECK(cmd->terminal_reason == TerminalReason::MaxRetriesExceeded);
+    }
+
+    // 8b. Infotainment Payload Response Timeout with is_asleep == true (P1 regression test)
+    {
+        CommandRunner runner;
+        runner.vcsec_session().set_established({1}, 10, 1000);
+        runner.info_session().set_established({2}, 20, 1000);
+
+        runner.enqueue("FlashLights", BleDomain::Infotainment, WakePolicy::WakeIfNeeded, 40000, 1000);
+        // Vehicle is initially reported asleep; tick returns SendWake
+        TxAction act = runner.tick(1000, true /* connected */, false /* is_awake */, true /* is_asleep */);
+        CHECK(act == TxAction::SendWake);
+        CHECK(runner.current_command()->state == CommandState::WaitingWake);
+
+        // Wake is confirmed awake
+        runner.notify_vehicle_awake(true);
+        CHECK(runner.current_command()->wake_confirmed);
+
+        // Next tick sends Infotainment payload
+        act = runner.tick(1050, true, true /* is_awake */, false /* is_asleep */);
+        CHECK(act == TxAction::SendCommandPayload);
+        runner.notify_tx_complete(1060);
+        CommandRequest* cmd = runner.current_command();
+        CHECK(cmd->state == CommandState::AwaitingResponse);
+        CHECK(cmd->retry_count == 0);
+
+        // Response timeout occurs (1060 + 7000 = 8060).
+        // At 8065: tick with is_asleep == true (e.g. VCSEC telemetry still reports ASLEEP).
+        // The in-flight command already sent its payload and was confirmed awake;
+        // it must retry the payload with exponential backoff, NOT regress into SendWake!
+        act = runner.tick(8065, true /* connected */, false /* is_awake */, true /* is_asleep */);
+        CHECK(act == TxAction::None);
+        CHECK(cmd->state == CommandState::Ready);
+        CHECK(cmd->retry_count == 1);
+        CHECK(cmd->next_retry_delay_ms == 500);
+        CHECK(cmd->wake_confirmed); // Must remain true!
+
+        // During backoff delay (8200ms < 8065 + 500), tick returns None
+        CHECK(runner.tick(8200, true, false, true) == TxAction::None);
+
+        // At 8565 (8065 + 500), backoff expires -> must emit SendCommandPayload, NOT SendWake!
+        act = runner.tick(8565, true /* connected */, false /* is_awake */, true /* is_asleep */);
+        CHECK(act == TxAction::SendCommandPayload);
     }
 
     // 9. Overall Command Deadline Exhaustion

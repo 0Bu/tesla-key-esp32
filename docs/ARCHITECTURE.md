@@ -1599,7 +1599,7 @@ callbacks and non-literal source registration are rejected; each boundary either
 a direct/delegated catch-all or passes a mechanical fixed-buffer/C/atomic call audit. Mutation
 canaries add a registration, remove a catch/lifetime release, introduce a dynamic callback or a
 throwing call, restore NimBLE→Vehicle re-entry, parse/log/allocate inside a tesla-ble callback,
-publish BLE readiness before the deferred Vehicle acknowledgement, reuse stale charging-current
+publish BLE readiness before the deferred vehicle acknowledgement, reuse stale charging-current
 feedback, materialize OTA strings under the status lock, race crash dismissal with its immutable
 string/vector snapshot, register a nested `.cc` source, bypass sticky cJSON construction, remove the real
 `/status` emitter or any production MQTT builder/sequencer seam, bypass persist-before-restart,

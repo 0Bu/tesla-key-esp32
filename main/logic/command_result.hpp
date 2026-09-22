@@ -19,7 +19,7 @@ namespace tk {
 // Evaluates whether an error string represents a nominal already_set response from the vehicle
 // (teslamotors/vehicle-command NominalError, treated as idempotent success by caller).
 inline bool is_nominal_already_set(std::string_view err) noexcept {
-    return err == "already_set" || err == "action failed: already_set";
+    return err == "already_set";
 }
 
 inline const char* command_result_text(bool ok, const std::string& err) {
@@ -28,8 +28,8 @@ inline const char* command_result_text(bool ok, const std::string& err) {
 }
 
 // Where a failed command's outcome came from, for the soft-desync link backstop:
-// - VehicleResponse: the car answered (auth/role refusal, whitelist status, rejection). The link
-//   is demonstrably working, so it resets the failure streak and counts as contact.
+// - VehicleResponse: the car answered (auth/role refusal, whitelist status, rejection, VCSEC error).
+//   The link is demonstrably working, so it resets the failure streak and counts as contact.
 // - LocalPolicy: decided on the device without any BLE exchange (the command runner's
 //   "vehicle asleep" skip/fail from the cached VCSEC flag). Neither a transport fault nor
 //   proof of contact.
@@ -46,7 +46,9 @@ inline CommandFailureOrigin classify_command_failure(std::string_view err) noexc
     if (err.find("authentication failed") != std::string_view::npos ||
         err.find("whitelist") != std::string_view::npos ||
         err.find("rejected") != std::string_view::npos ||
-        err.find("action failed") != std::string_view::npos) {
+        err.find("action failed") != std::string_view::npos ||
+        err.find("failed with error status") != std::string_view::npos ||
+        err.find("VCSEC command failed") != std::string_view::npos) {
         return CommandFailureOrigin::VehicleResponse;
     }
     return CommandFailureOrigin::TransportOrTimeout;

@@ -313,7 +313,6 @@ public:
                     cmd->retry_count++;
                     cmd->next_retry_delay_ms = std::min(kMaxRetryDelayMs,
                         kInitialRetryDelayMs * (1U << (cmd->retry_count - 1)));
-                    cmd->wake_confirmed = false;
                     cmd->state = CommandState::Ready;
                     cmd->phase = CommandPhase::SendingRequest;
                     cmd->phase_started_at_ms = now_ms;

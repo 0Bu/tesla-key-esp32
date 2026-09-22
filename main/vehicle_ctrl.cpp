@@ -104,7 +104,7 @@ bool VehicleController::recover_pending_key_rotation_at_boot_() {
     const tk::KeyRotationMarkerProbe probe =
         tk::classify_key_rotation_marker_probe(probe_ok, marker_present);
     if (probe == tk::KeyRotationMarkerProbe::Error) {
-        ESP_LOGE(TAG, "key-rotation marker could not be read — refusing vehicle construction");
+        ESP_LOGE(TAG, "key-rotation marker could not be read — refusing vehicle controller initialization");
         return false;
     }
     if (tk::decide_key_rotation_boot(probe == tk::KeyRotationMarkerProbe::Present,

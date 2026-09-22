@@ -84,6 +84,8 @@ Fetch raw at the **pin** (base `https://raw.githubusercontent.com/yoziru/tesla-b
 `<pin>` from `idf_component.yml`). Layout at v5.2.0:
 `include/{vehicle.h, client.h, command_error.h, message_builders.h, peer.h, vin_utils.h, errors.h, …}`
 and `src/{vehicle.cpp, client.cpp, peer.cpp, message_builders.cpp, message_processor.cpp, crypto_context.cpp, vin_utils.cpp, errors.cpp, …}`.
+- **Does a command builder exist?** → `src/message_builders.cpp` (e.g. `scheduledChargingAction` IS
+  registered; `scheduledDepartureAction` is **not** — that absence is *why* scheduled departure isn't exposed).
 - **Enum / API values** (roles, form factors) → `include/client.h`; firmware-level `SleepState`, `WakePolicy` → `main/logic/command_runner.hpp`.
 - **How a fault becomes a string** the firmware matches → `include/command_error.h`, `main/logic/command_runner.hpp`, `main/vehicle_telemetry.cpp`.
 - **VIN→BLE-name / matching** → `include/vin_utils.h`, `src/vin_utils.cpp` (the firmware delegates here; it does **not** build the name itself).

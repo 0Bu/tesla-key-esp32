@@ -513,10 +513,10 @@ bool VehicleController::apply_ble_link_state_(bool connected) {
         }
         return true;
     } catch (const std::exception& e) {
-        ESP_LOGE(TAG, "deferred set_connected(%d) threw (%s) — dropping link",
+        ESP_LOGE(TAG, "deferred apply_ble_link_state_(%d) threw (%s) — dropping link",
                  static_cast<int>(connected), e.what());
     } catch (...) {
-        ESP_LOGE(TAG, "deferred set_connected(%d) threw (unknown) — dropping link",
+        ESP_LOGE(TAG, "deferred apply_ble_link_state_(%d) threw (unknown) — dropping link",
                  static_cast<int>(connected));
     }
     vcsec_sleep_state_.store(static_cast<int>(tk::SleepState::Unknown));
@@ -825,6 +825,20 @@ void VehicleController::handle_session_info_frame_(const UniversalMessage_Routab
         (domain == UniversalMessage_Domain_DOMAIN_INFOTAINMENT && cmd->state == tk::CommandState::WaitingInfoAuth)
     );
 
+    pb_byte_t request_uuid[16] = {0};
+    size_t request_uuid_len = sizeof(request_uuid);
+    if (!client_->get_last_request_uuid(domain, request_uuid, &request_uuid_len)) {
+        ESP_LOGE(TAG, "Missing request UUID for session info verification");
+        return;
+    }
+
+    if (msg.request_uuid.size > 0 &&
+        (msg.request_uuid.size != request_uuid_len ||
+         std::memcmp(msg.request_uuid.bytes, request_uuid, request_uuid_len) != 0)) {
+        ESP_LOGW(TAG, "Dropping mismatched SessionInfo: request UUID does not match outstanding request");
+        return;
+    }
+
     if (msg.which_sub_sigData != UniversalMessage_RoutableMessage_signature_data_tag ||
         msg.sub_sigData.signature_data.which_sig_type != Signatures_SignatureData_session_info_tag_tag) {
         ESP_LOGW(TAG, "Missing session info HMAC tag");
@@ -843,20 +857,6 @@ void VehicleController::handle_session_info_frame_(const UniversalMessage_Routab
         } else {
             ESP_LOGW(TAG, "Dropping empty-tag SessionInfo: current command not in waiting-auth state");
         }
-        return;
-    }
-
-    pb_byte_t request_uuid[16] = {0};
-    size_t request_uuid_len = sizeof(request_uuid);
-    if (!client_->get_last_request_uuid(domain, request_uuid, &request_uuid_len)) {
-        ESP_LOGE(TAG, "Missing request UUID for session info verification");
-        return;
-    }
-
-    if (msg.request_uuid.size > 0 &&
-        (msg.request_uuid.size != request_uuid_len ||
-         std::memcmp(msg.request_uuid.bytes, request_uuid, request_uuid_len) != 0)) {
-        ESP_LOGW(TAG, "Dropping mismatched SessionInfo: request UUID does not match outstanding request");
         return;
     }
 
