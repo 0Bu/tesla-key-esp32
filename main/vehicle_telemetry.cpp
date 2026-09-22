@@ -513,10 +513,10 @@ bool VehicleController::apply_ble_link_state_(bool connected) {
         }
         return true;
     } catch (const std::exception& e) {
-        ESP_LOGE(TAG, "deferred set_connected(%d) threw (%s) — dropping link",
+        ESP_LOGE(TAG, "deferred apply_ble_link_state_(%d) threw (%s) — dropping link",
                  static_cast<int>(connected), e.what());
     } catch (...) {
-        ESP_LOGE(TAG, "deferred set_connected(%d) threw (unknown) — dropping link",
+        ESP_LOGE(TAG, "deferred apply_ble_link_state_(%d) threw (unknown) — dropping link",
                  static_cast<int>(connected));
     }
     vcsec_sleep_state_.store(static_cast<int>(tk::SleepState::Unknown));
@@ -544,7 +544,7 @@ void VehicleController::process_ble_host_events_() {
     if (ble_event_overflow_.exchange(false, std::memory_order_acq_rel)) {
         BleHostEvent discarded{};
         while (xQueueReceive(ble_event_queue_, &discarded, 0) == pdTRUE) {}
-        // A lost byte or transition makes tesla-ble's framing/state unknowable. Reset the library
+        // A lost byte or transition makes framing/state unknowable. Reset link and framer
         // first, then terminate the physical link. No stale LinkUp may become ready afterward.
         (void)apply_ble_link_state_(false);
         ble_->disconnect();
@@ -572,14 +572,14 @@ void VehicleController::process_ble_host_events_() {
         if (event.kind == tk::BleDeferredEventKind::LinkUp) {
             const bool applied = apply_ble_link_state_(true);
             if (!applied || !ble_->complete_ready(event.conn_handle, event.generation)) {
-                // set_connected(true) may have succeeded just before cancellation won the ready
-                // CAS. Explicitly unwind the library state rather than waiting for a later event.
+                // apply_ble_link_state_(true) may have succeeded just before cancellation won the ready
+                // CAS. Explicitly unwind link state rather than waiting for a later event.
                 if (applied) (void)apply_ble_link_state_(false);
                 ble_->disconnect();
                 continue;
             }
             persist_discovered_mac_after_ready_();
-            ESP_LOGD(TAG, "BLE command-ready after deferred Vehicle ack (generation %lu)",
+            ESP_LOGD(TAG, "BLE command-ready after deferred link ack (generation %lu)",
                      static_cast<unsigned long>(event.generation));
             continue;
         }
@@ -740,7 +740,8 @@ void VehicleController::handle_signed_message_fault_(const UniversalMessage_Rout
         msg.from_destination.which_sub_destination == UniversalMessage_Destination_domain_tag) {
         err_domain = msg.from_destination.sub_destination.domain;
     } else if (cmd) {
-        err_domain = (cmd->domain == tk::BleDomain::VehicleSecurity)
+        err_domain = (cmd->domain == tk::BleDomain::VehicleSecurity ||
+                      cmd->state == tk::CommandState::WaitingVcsecAuth)
             ? UniversalMessage_Domain_DOMAIN_VEHICLE_SECURITY : UniversalMessage_Domain_DOMAIN_INFOTAINMENT;
     }
     auto fault = msg.signedMessageStatus.signed_message_fault;
@@ -778,8 +779,20 @@ void VehicleController::handle_signed_message_fault_(const UniversalMessage_Rout
     // R3: Run key-revocation detector unconditionally for all signed message faults
     // so late ERROR_UNKNOWN_KEY_ID faults after command timeout or flush are never missed.
     on_vehicle_message_(msg);
-    if (cmd) {
-        command_runner_.notify_signed_message_fault(has_session_error, "signed message authentication failed");
+    if (cmd && !cmd->is_completed) {
+        tk::BleDomain fault_domain = tk::BleDomain::None;
+        if (err_domain == UniversalMessage_Domain_DOMAIN_VEHICLE_SECURITY) {
+            fault_domain = tk::BleDomain::VehicleSecurity;
+        } else if (err_domain == UniversalMessage_Domain_DOMAIN_INFOTAINMENT) {
+            fault_domain = tk::BleDomain::Infotainment;
+        } else if (err_domain == UniversalMessage_Domain_DOMAIN_BROADCAST) {
+            fault_domain = tk::BleDomain::Broadcast;
+        }
+        if (command_runner_.should_notify_signed_message_fault(fault_domain)) {
+            command_runner_.notify_signed_message_fault(has_session_error, "signed message authentication failed");
+        } else {
+            ESP_LOGW(TAG, "Dropping signed message fault for non-matching command domain");
+        }
     }
 }
 
@@ -806,24 +819,9 @@ void VehicleController::handle_session_info_frame_(const UniversalMessage_Routab
         return;
     }
 
-    if (msg.which_sub_sigData != UniversalMessage_RoutableMessage_signature_data_tag ||
-        msg.sub_sigData.signature_data.which_sig_type != Signatures_SignatureData_session_info_tag_tag) {
-        ESP_LOGW(TAG, "Missing session info HMAC tag");
-        auto* cmd = command_runner_.current_command();
-        if (cmd) {
-            command_runner_.complete_current_command(false, "authentication failed", false);
-        }
-        return;
-    }
-    const auto& tag = msg.sub_sigData.signature_data.sig_type.session_info_tag.tag;
-    if (tag.size == 0) {
-        ESP_LOGW(TAG, "Empty session info HMAC tag");
-        auto* cmd = command_runner_.current_command();
-        if (cmd) {
-            command_runner_.complete_current_command(false, "authentication failed", false);
-        }
-        return;
-    }
+    const auto session_domain = (domain == UniversalMessage_Domain_DOMAIN_VEHICLE_SECURITY)
+        ? tk::BleDomain::VehicleSecurity : tk::BleDomain::Infotainment;
+    const bool is_waiting_auth = command_runner_.is_awaiting_session_auth(session_domain);
 
     pb_byte_t request_uuid[16] = {0};
     size_t request_uuid_len = sizeof(request_uuid);
@@ -831,24 +829,54 @@ void VehicleController::handle_session_info_frame_(const UniversalMessage_Routab
         ESP_LOGE(TAG, "Missing request UUID for session info verification");
         return;
     }
+
+    if (!tk::is_session_info_uuid_matching(msg.request_uuid.bytes, msg.request_uuid.size,
+                                           request_uuid, request_uuid_len)) {
+        ESP_LOGW(TAG, "Dropping mismatched SessionInfo: request UUID does not match outstanding request");
+        return;
+    }
+
+    if (msg.which_sub_sigData != UniversalMessage_RoutableMessage_signature_data_tag ||
+        msg.sub_sigData.signature_data.which_sig_type != Signatures_SignatureData_session_info_tag_tag) {
+        ESP_LOGW(TAG, "Missing session info HMAC tag");
+        if (is_waiting_auth) {
+            command_runner_.complete_current_command(false, "authentication failed", false);
+        } else {
+            ESP_LOGW(TAG, "Dropping tagless SessionInfo: current command not in waiting-auth state");
+        }
+        return;
+    }
+    const auto& tag = msg.sub_sigData.signature_data.sig_type.session_info_tag.tag;
+    if (tag.size == 0) {
+        ESP_LOGW(TAG, "Empty session info HMAC tag");
+        if (is_waiting_auth) {
+            command_runner_.complete_current_command(false, "authentication failed", false);
+        } else {
+            ESP_LOGW(TAG, "Dropping empty-tag SessionInfo: current command not in waiting-auth state");
+        }
+        return;
+    }
+
     if (!client_->verify_session_info_tag(session_info, msg.payload.session_info.bytes, msg.payload.session_info.size,
                                           request_uuid, request_uuid_len, tag.bytes, tag.size)) {
         ESP_LOGE(TAG, "Session info HMAC verification failed");
-        auto* cmd = command_runner_.current_command();
-        if (cmd) {
+        if (is_waiting_auth) {
             command_runner_.complete_current_command(false, "authentication failed", false);
+        } else {
+            ESP_LOGW(TAG, "Dropping mismatched/unauthenticated SessionInfo: current command not in waiting-auth state");
         }
         return;
     }
 
     if (session_info.status != Signatures_Session_Info_Status_SESSION_INFO_STATUS_OK) {
         ESP_LOGW(TAG, "Session info status not OK: %d", static_cast<int>(session_info.status));
-        auto* cmd = command_runner_.current_command();
-        if (cmd) {
+        if (is_waiting_auth) {
             std::string err = (session_info.status == Signatures_Session_Info_Status_SESSION_INFO_STATUS_KEY_NOT_ON_WHITELIST)
                 ? "key not on whitelist - pairing required"
                 : "authentication failed";
             command_runner_.complete_current_command(false, err, false);
+        } else {
+            ESP_LOGW(TAG, "Dropping non-OK SessionInfo: current command not in waiting-auth state");
         }
         return;
     }
@@ -925,11 +953,17 @@ void VehicleController::handle_vcsec_frame_(const UniversalMessage_RoutableMessa
             case VCSEC_FromVCSECMessage_commandStatus_tag: {
                 const uint8_t* uuid_ptr = (msg.request_uuid.size > 0) ? msg.request_uuid.bytes : nullptr;
                 const size_t uuid_len = msg.request_uuid.size;
+                const auto op_status = vcsec_msg.sub_message.commandStatus.operationStatus;
+                const auto decision = tk::evaluate_vcsec_operation_status(static_cast<int>(op_status));
+                if (decision.action == tk::VcsecOpStatusAction::Wait) {
+                    ESP_LOGI(TAG, "VCSEC command status WAIT; awaiting final status");
+                    break;
+                }
                 command_runner_.handle_response(
                     tk::BleDomain::VehicleSecurity,
                     uuid_ptr, uuid_len,
                     false, 0,
-                    true, "");
+                    decision.is_ok, decision.error_message);
                 break;
             }
             case VCSEC_FromVCSECMessage_vehicleStatus_tag: {
@@ -1225,16 +1259,16 @@ void VehicleController::loop_task_fn_(void* arg) {
       tk::stack_watch_sample(tk::StackWatch::Vehicle);
 
       // Iteration-boundary containment (issue #204): the poll injections + bookkeeping below
-      // call tesla-ble builders and touch std::string caches that can throw std::bad_alloc.
+      // call command builders and touch std::string caches that can throw std::bad_alloc.
       // An escape would unwind into the FreeRTOS C task trampoline → std::terminate → reboot,
       // and a reboot loop also re-opens the car-poll window (defeating sleep). Contain it, then
       // fall through to the tail delay so we never spin a tight error loop.
       try {
         // NimBLE callbacks only enqueue fixed POD records. Drain them here, in a normal task with
-        // the task-level exception boundary, before pumping tesla-ble's state machine.
+        // the task-level exception boundary, before pumping the command runner.
         self->process_ble_host_events_();
         if (self->ble_fault_.exchange(false)) {
-            ESP_LOGW(TAG, "BLE deferred processing fault — dropping link to reset library state");
+            ESP_LOGW(TAG, "BLE deferred processing fault — dropping link to reset BLE state");
             if (self->ble_connected()) self->ble_->disconnect();
             vTaskDelay(pdMS_TO_TICKS(50));
             continue;
@@ -1258,14 +1292,14 @@ void VehicleController::loop_task_fn_(void* arg) {
             }
         }
 
-        // tesla-ble state callbacks above only copied nanopb POD into the latest-value mailbox.
-        // The Vehicle lock is now released, so parsers may materialize strings and publish caches
+        // Incoming state callbacks only copied nanopb POD into the latest-value mailbox.
+        // The vehicle mutex is now released, so parsers may materialize strings and publish caches
         // without creating a nested vehicle_mutex_ -> cache_mutex_ / heap dependency.
         self->process_pending_telemetry_();
 
-        // A parse fault flagged from loop(): drop the link once,
-        // outside the vehicle mutex. Disconnect drives set_connected(false), which clears the
-        // library's rx_buffer and resets sessions so the next connect re-syncs cleanly —
+        // A parse fault flagged from frame processing: drop the link once,
+        // outside the vehicle mutex. Disconnect drives apply_ble_link_state_(false), which clears the
+        // RX framer buffer and resets sessions so the next connect re-syncs cleanly —
         // turning a would-be abort()/reboot into a brief reconnect.
         if (self->ble_fault_.exchange(false)) {
             ESP_LOGW(TAG, "BLE parse fault — dropping link to clear corrupt RX state");
@@ -1424,10 +1458,9 @@ void VehicleController::loop_task_fn_(void* arg) {
         bool paired = identity_ready && self->has_session();
 
         // ── VCSEC sleep-flag sampler (feeds link_state()'s asleep debounce) ───────────────
-        // The library updates Vehicle::sleep_state() from the car's vehicleSleepStatus on
+        // The RX path updates vcsec_sleep_state_ from the car's vehicleSleepStatus on
         // every VCSEC poll, including auto_pair_task's idle health probe — the only BLE
-        // traffic while parked. The RX task publishes an atomic mirror while holding
-        // vehicle_mutex_; sample that mirror here and fold it into the debounce clock so link_state() can require a
+        // traffic while parked. Sample that atomic state here and fold it into the debounce clock so link_state() can require a
         // STABLE ASLEEP run before showing "Vehicle asleep". UNKNOWN leaves the clock alone.
         // Log only on a transition so the serial console reveals what the car actually reports
         // (e.g. whether VCSEC ever asserts ASLEEP, or just flaps for COP) without spamming.

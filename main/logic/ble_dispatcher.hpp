@@ -13,7 +13,7 @@
 // Key Characteristics:
 // - Routes incoming responses to registered outstanding requests by UUID and domain.
 // - VCSEC UUID match exemption: domain DOMAIN_VEHICLE_SECURITY matches outstanding VCSEC
-//   handlers regardless of response request UUID (modelled on dispatcher.go:259-261).
+//   handlers when the response carries an empty request UUID (modelled on dispatcher.go:259-261 and ADR-0005).
 // - Per-request anti-replay window: monotonic / sliding window counter tracking per outstanding
 //   request rather than a global shared slot.
 // - Replay protection applies uniformly to authenticated and plaintext responses.
@@ -23,6 +23,7 @@ namespace tk {
 
 enum class BleDomain : uint8_t {
     None = 0,
+    Broadcast = 1,
     VehicleSecurity = 2,
     Infotainment = 3,
 };

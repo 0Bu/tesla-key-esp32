@@ -953,7 +953,7 @@ int BleClient::on_gap_event(ble_gap_event* event) {
             // If a task owns the lifecycle transaction, cancel the old request instead of
             // blocking the host or preserving an intent whose generation cannot be linearized.
             if (!intent) want_connect_.store(false);
-            // Invalidate first: set_connected(false) and command tasks can run synchronously from
+            // Invalidate first: connection state transitions and command tasks can run synchronously from
             // the callbacks below, and none may adopt the old handles under a fresh generation.
             disconnecting_.store(true);
             connection_generation_.fetch_add(1);
@@ -1250,9 +1250,9 @@ int BleClient::on_subscribe_write(uint16_t conn_handle, const ble_gatt_error* er
                                connection_snapshot_matches_(conn_handle, generation))) {
                 canceled = true;
             } else {
-                // vehicle_loop owns the possibly throwing Vehicle transition. The host only
+                // vehicle_loop owns the possibly throwing connection transition. The host only
                 // enqueues this fixed event; complete_ready() publishes the token after the
-                // consumer reports a successful set_connected(true).
+                // consumer reports a successful link state transition.
                 if (!on_connected_(connected_context_, true, conn_handle, generation) ||
                     !tk::ble::connect_attempt_may_advance(
                          want_connect_.load(),
