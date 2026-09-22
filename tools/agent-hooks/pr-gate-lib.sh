@@ -33,6 +33,10 @@ agent_gate_workdir_matches() {
   [ -n "$requested" ] || return 1
   root_real="$(cd "$root" 2>/dev/null && pwd -P)" || return 1
   requested_real="$(cd "$requested" 2>/dev/null && pwd -P)" || return 1
+  [ "$root_real" = "$requested_real" ] && return 0
+  case "$requested_real" in
+    "$root_real"/*) return 0 ;;
+  esac
   root_git="$(git -C "$root_real" rev-parse --show-toplevel 2>/dev/null)" || return 1
   requested_git="$(git -C "$requested_real" rev-parse --show-toplevel 2>/dev/null)" || return 1
   [ "$root_git" = "$requested_git" ]
@@ -43,7 +47,7 @@ agent_gate_workdir_matches() {
 #   catalog can have moved. Keep the release workflow set explicit: Renovate is dependency
 #   maintenance, while build/sign/publish and preview cleanup are catalogued release behavior.
 gate_feature_docs_relevant() {
-  grep -Eq '^(main/|test/|sdkconfig\.defaults($|\.)|partitions\.csv$|AGENTS\.md$|\.agents/|\.codex/|\.github/PULL_REQUEST_TEMPLATE\.md$|tools/agent-hooks/|tools/agent-config/|docs/(index\.html|installer-bootstrap\.mjs|serial-port-release\.mjs|web-installer\.mjs|vendor/)|\.github/workflows/(build|signed-pr-preview|pr-preview-cleanup|pr-policy|bench-acceptance)\.yml$|scripts/release-relevance\.sh$)'
+  grep -Eq '^(main/|test/|sdkconfig\.defaults($|\.)|partitions\.csv$|AGENTS\.md$|\.agents/|\.github/PULL_REQUEST_TEMPLATE\.md$|tools/agent-hooks/|tools/agent-config/|docs/(index\.html|installer-bootstrap\.mjs|serial-port-release\.mjs|web-installer\.mjs|vendor/)|\.github/workflows/(build|signed-pr-preview|pr-preview-cleanup|pr-policy|bench-acceptance)\.yml$|scripts/release-relevance\.sh$)'
 }
 
 # gate_is_renovate_maintenance [files_file]

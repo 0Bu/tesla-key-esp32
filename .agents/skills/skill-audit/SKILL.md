@@ -1,6 +1,6 @@
 ---
 name: skill-audit
-description: Read-only drift audit of every canonical skill under .agents/skills and read-only reviewer under .codex/agents against tesla-key-esp32. Report contradictions and gate readiness only; never correct files, edit or stamp a PR body, commit, push, merge, release, flash, OTA, or contact a live device/vehicle unless the user separately authorizes implementation.
+description: Read-only drift audit of every canonical skill under .agents/skills and read-only reviewer in .agents/subagents.json against tesla-key-esp32. Report contradictions and gate readiness only; never correct files, edit or stamp a PR body, commit, push, merge, release, flash, OTA, or contact a live device/vehicle unless the user separately authorizes implementation.
 ---
 
 > **Canonical runner-neutral skill.** Read [`AGENTS.md`](../../../AGENTS.md) before acting.
@@ -9,9 +9,9 @@ description: Read-only drift audit of every canonical skill under .agents/skills
 > This skill does not grant permissions beyond the user's explicit request.
 > Invoke this workflow canonically as `$skill-audit`.
 
-# skill-audit — keep every skill & agent in sync with the project
+# skill-audit — keep skills and subagent prompts honest against the project
 
-The `.agents/skills/*/SKILL.md` files and read-only reviewers in `.codex/agents/*.toml` are
+The `.agents/skills/*/SKILL.md` files and read-only reviewers in `.agents/subagents.json` are
 documents that **drift**. A wrong partition offset, stale command count, removed endpoint, renamed
 script, or superseded target set silently mis-teaches a future session. `$skill-audit` catches and
 reports that drift. It never edits a file or external state during an audit-only run.
@@ -42,7 +42,7 @@ finding must name the project fact it contradicts; otherwise omit it.
 Work in this order—it is a **single read-only pass**: enumerate → check → report → stop.
 
 1. **Enumerate—discover, do not hardcode.** Read every `.agents/skills/*/SKILL.md` and every
-   `.codex/agents/*.toml`. Inventory `AGENTS.md`, `.codex/hooks.json`, `tools/agent-hooks/`,
+   `.agents/subagents.json` reviewer. Inventory `AGENTS.md`, `.agents/hooks.json`, `tools/agent-hooks/`,
    `scripts/`, `main/`, `partitions.csv`, `main/idf_component.yml`, and `version.txt`. Host/cluster
    operational skills such as global `$tesla-key-e2e-evcc` are outside this project audit.
 2. **Extract concrete claims.** List numbers, paths, counts, flags, target sets, script names,
@@ -114,7 +114,7 @@ the authority for the per-sibling drift check; `$project-review` defers the mech
 - **`$add-logic-test`** — scaffolds a `main/logic/` unit + `CHECK`s in `test/test_logic.cpp`.
   Verify against `scripts/run-mock-tests.sh`, the CI `logic-test` job
   (`.github/workflows/build.yml`), the `stop-logic-tests` handler in
-  `tools/agent-hooks/agent_hook.py` wired by `.codex/hooks.json`,
+  `tools/agent-hooks/agent_hook.py` wired by `.agents/hooks.json`,
   the `CHECK`/`CHECK_STR`/`CHECK_NEAR` macro set, and the `static_assert` lock pattern.
 - **`$mock-test`** — fast host-side logic, mock, and sanitizer test runner. Verify against
   `scripts/run-fast-tests.sh` (`--logic`, `--nvs`, `--boundary`, `--sanitizers`, `--all`),
@@ -134,7 +134,7 @@ the authority for the per-sibling drift check; `$project-review` defers the mech
   beside this one, `$project-review` and `$pr-hygiene`, and the only *conditional* one — and above
   all its **relevance filter**: the paths that arm it must still match the hook's own regex, currently
   `main/` / `test/` / `sdkconfig.defaults*` / `partitions.csv` /
-  `AGENTS.md` / `.agents/` / `.codex/` / `.github/PULL_REQUEST_TEMPLATE.md` /
+  `AGENTS.md` / `.agents/` / `.github/PULL_REQUEST_TEMPLATE.md` /
   `tools/agent-hooks/` / `tools/agent-config/` /
   shipped Pages runtime (`docs/index.html`, `installer-bootstrap.mjs`, `serial-port-release.mjs`,
   `web-installer.mjs`, `docs/vendor/`) /
@@ -195,7 +195,7 @@ the authority for the per-sibling drift check; `$project-review` defers the mech
   NVS-wipe warning, explicit unambiguous port / no-auto-reset / ROM-node handling, and bounded
   post-reset verification of exact version/platform plus `paired:true`.
 
-**Agents** (`.codex/agents/`) — audit these the same way; two duplicate content `$project-review`
+**Reviewers** (`.agents/subagents.json`) — audit these the same way; two duplicate content `$project-review`
 owns and must stay in sync with it:
 
 - **`doc_drift_checker`** — the fast targeted-diff lens for the cross-cutting links. Its
@@ -204,7 +204,7 @@ owns and must stay in sync with it:
 - **`heap_safety_reviewer`** — the allocation/throw lens. Its heap rules/numbers must match
   `$project-review`'s *Memory / heap* invariant and `main.cpp`'s heap-attribution log.
 - **`agent_config_reviewer`** — audits runner-neutral configuration, not firmware logic. Confirm
-  its read-only boundary and inventory of `AGENTS.md`, `.agents/`, `.codex/`, and
+  its read-only boundary and inventory of `AGENTS.md`, `.agents/`, and
   `tools/agent-hooks/`.
 - **`multi_target_build_reviewer`** — the per-target build/config divergence lens. Verify its
   facts against the build wiring: the target set (esp32/s3/c3/c6), per-target bootloader
@@ -272,7 +272,7 @@ readiness for both records, while `$skill-audit` establishes only its own.
 ## Findings
 For each drift, in priority order:
 ### [SKILL-DRIFT] <skill/agent> — <short title>
-- **Where:** `.agents/…` or `.codex/…:line` → ground truth: `path:line`
+- **Where:** `.agents/…:line` → ground truth: `path:line`
 - **What:** the fact it asserts vs. what the project actually says
 - **Proposed fix:** the exact edit; not applied during this audit
 

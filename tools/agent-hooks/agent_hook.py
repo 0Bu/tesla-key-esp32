@@ -1290,6 +1290,14 @@ def main() -> int:
             return run_format(argparse.Namespace())
         if cmd == "antigravity-pre-invocation":
             return run_antigravity_pre_invocation(argparse.Namespace())
+        if cmd == "stop-logic-tests":
+            return run_stop_logic_tests(argparse.Namespace())
+        if cmd == "subagent-context":
+            return run_subagent_context(argparse.Namespace())
+        if cmd == "capabilities":
+            return run_capabilities(argparse.Namespace())
+        if cmd == "build-efficiency":
+            return run_build_efficiency(argparse.Namespace(self_test=False))
     parser = build_parser()
     args = parser.parse_args()
     return int(args.func(args))

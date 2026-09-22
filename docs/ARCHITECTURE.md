@@ -20,8 +20,8 @@ the canonical `$project-review` skill checks for drift between them.
 ## Repository agent architecture
 
 [`AGENTS.md`](../AGENTS.md) is the concise, runner-neutral policy loaded for normal repository
-work. Reusable workflows live under [`.agents/skills/`](../.agents/skills/), Codex project
-configuration and read-only specialist reviewers under [`.codex/`](../.codex/), and lifecycle
+work. Reusable workflows live under [`.agents/skills/`](../.agents/skills/), runner-neutral agent
+configuration, hooks, and specialist reviewers under [`.agents/`](../.agents/), and lifecycle
 policy lives under [`tools/agent-hooks/`](../tools/agent-hooks/). CI mutation-tests this single
 project-owned configuration and rejects reintroduction of retired runner-specific metadata.
 `.github/workflows/pr-policy.yml` evaluates the current SHA-bound gate records from trusted

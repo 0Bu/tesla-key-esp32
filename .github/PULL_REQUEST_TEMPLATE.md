@@ -42,7 +42,7 @@ $feature-docs only arms when the diff reaches main/, test/, sdkconfig.defaults*,
 the shipped Pages runtime, release-relevance logic, or the build/signed-preview/preview-cleanup/
 PR-policy/bench-acceptance workflows. Because `docs/FEATURES.md` catalogs the runner-neutral policy
 itself, it also arms for
-`AGENTS.md`, `.agents/`, `.codex/`, `.github/PULL_REQUEST_TEMPLATE.md`, `tools/agent-hooks/`, and
+`AGENTS.md`, `.agents/`, `.github/PULL_REQUEST_TEMPLATE.md`, `tools/agent-hooks/`, and
 `tools/agent-config/` — delete its line only on a docs- or unrelated chore-only PR. A full
 $project-review also clears the
 skill-audit gate, but NOT the feature-docs one, NOR the pr-hygiene one.
