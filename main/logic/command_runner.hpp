@@ -4,6 +4,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <functional>
 #include <string>
 #include <string_view>
@@ -95,6 +96,81 @@ enum class TxAction : uint8_t {
     SendCommandPayload,
 };
 
+// Pure decision helpers for incoming telemetry and frame filtering
+
+// Evaluates whether an incoming SessionInfo response UUID matches the outstanding request UUID.
+// An empty/omitted response UUID (0 bytes) is valid and matches. A non-empty UUID must match
+// the expected request UUID exactly in length and byte content.
+inline bool is_session_info_uuid_matching(const uint8_t* msg_uuid, size_t msg_uuid_len,
+                                          const uint8_t* expected_uuid, size_t expected_uuid_len) noexcept {
+    if (msg_uuid_len == 0) return true;
+    if (msg_uuid_len != expected_uuid_len) return false;
+    if (msg_uuid == nullptr || expected_uuid == nullptr) return false;
+    return std::memcmp(msg_uuid, expected_uuid, msg_uuid_len) == 0;
+}
+
+// Evaluates whether an active command is currently awaiting authentication for the given domain.
+// Used to prevent unauthenticated/mismatched SessionInfo failure frames from failing commands
+// that are not in the waiting-auth phase for that domain.
+inline bool is_command_awaiting_session_auth(bool has_active_command, bool is_completed,
+                                             CommandState cmd_state, BleDomain session_domain) noexcept {
+    if (!has_active_command || is_completed) return false;
+    if (session_domain == BleDomain::VehicleSecurity) {
+        return cmd_state == CommandState::WaitingVcsecAuth;
+    }
+    if (session_domain == BleDomain::Infotainment) {
+        return cmd_state == CommandState::WaitingInfoAuth;
+    }
+    return false;
+}
+
+// Evaluates whether a signed message fault domain matches an in-flight command.
+// Signed message faults do not carry request UUIDs and are filtered by domain.
+// Broadcast faults match any command; VehicleSecurity faults match VCSEC commands
+// or commands awaiting VCSEC auth; Infotainment faults match Infotainment commands
+// in their Infotainment execution phases (WaitingInfoAuth, Ready, AwaitingResponse)
+// and must NOT match during prerequisite VCSEC auth or Wake phases.
+inline bool is_fault_domain_matching(BleDomain fault_domain, BleDomain cmd_domain, CommandState cmd_state) noexcept {
+    if (fault_domain == BleDomain::Broadcast) {
+        return true;
+    }
+    if (fault_domain == BleDomain::VehicleSecurity) {
+        return (cmd_domain == BleDomain::VehicleSecurity) ||
+               (cmd_state == CommandState::WaitingVcsecAuth);
+    }
+    if (fault_domain == BleDomain::Infotainment) {
+        return (cmd_domain == BleDomain::Infotainment) &&
+               (cmd_state == CommandState::WaitingInfoAuth ||
+                cmd_state == CommandState::Ready ||
+                cmd_state == CommandState::AwaitingResponse);
+    }
+    return false;
+}
+
+enum class VcsecOpStatusAction : uint8_t {
+    Wait,
+    CompleteOk,
+    Error,
+};
+
+struct VcsecOpStatusDecision {
+    VcsecOpStatusAction action{VcsecOpStatusAction::Error};
+    bool is_ok{false};
+    const char* error_message{""};
+};
+
+// Maps VCSEC command status operationStatus (OK=0, WAIT=1, ERROR=2) to action and error text.
+inline VcsecOpStatusDecision evaluate_vcsec_operation_status(int op_status_val) noexcept {
+    if (op_status_val == 1) { // VCSEC_OperationStatus_E_OPERATIONSTATUS_WAIT
+        return {VcsecOpStatusAction::Wait, false, ""};
+    }
+    if (op_status_val == 0) { // VCSEC_OperationStatus_E_OPERATIONSTATUS_OK
+        return {VcsecOpStatusAction::CompleteOk, true, ""};
+    }
+    return {VcsecOpStatusAction::Error, false, "VCSEC command failed with error status"};
+}
+
+
 // Represents an outstanding command in the FIFO
 struct CommandRequest {
     uint32_t id{0};
@@ -119,10 +195,9 @@ struct CommandRequest {
     bool is_completed{false};
     bool is_success{false};
     bool is_already_set{false};
-    // Set once this command's wake was confirmed (VCSEC reported awake, or a VehicleStatus with
-    // closureStatuses answered while it waited for a wake). From then on the wake policy is not
-    // re-evaluated: like upstream v5.2.0 the command proceeds to the infotainment session instead
-    // of re-sending Wake while the raw VCSEC sleep flag still reads ASLEEP.
+    // Set once this command's wake was confirmed while actively waiting for a wake (VCSEC reported awake,
+    // or a VehicleStatus with closureStatuses answered). Cleared on retry if the vehicle is asleep,
+    // so an asleep vehicle is re-evaluated and properly woken with SendWake.
     bool wake_confirmed{false};
     std::string error_message{};
     TerminalReason terminal_reason{TerminalReason::None};
@@ -272,6 +347,17 @@ public:
     SessionTracker& info_session() noexcept { return info_session_; }
     const SessionTracker& info_session() const noexcept { return info_session_; }
 
+    // Authentication and fault routing queries
+    [[nodiscard]] bool is_awaiting_session_auth(BleDomain session_domain) const noexcept {
+        const CommandRequest* cmd = current_command();
+        return cmd && is_command_awaiting_session_auth(true, cmd->is_completed, cmd->state, session_domain);
+    }
+
+    [[nodiscard]] bool should_notify_signed_message_fault(BleDomain fault_domain) const noexcept {
+        const CommandRequest* cmd = current_command();
+        return cmd && !cmd->is_completed && is_fault_domain_matching(fault_domain, cmd->domain, cmd->state);
+    }
+
     // Standalone tick: evaluates timeouts, retries, prerequisite progression, and next TX action.
     // sleep status model: is_awake indicates confirmed awake; is_asleep indicates confirmed asleep.
     // If both are false, the vehicle sleep state is Unknown (e.g. at boot/reconnect).
@@ -284,36 +370,29 @@ public:
             return TxAction::None;
         }
 
-        // Connection check
-        if (!is_connected) {
-            if (cmd->state == CommandState::AwaitingResponse ||
-                cmd->state == CommandState::WaitingVcsecAuth ||
-                cmd->state == CommandState::WaitingWake ||
-                cmd->state == CommandState::WaitingInfoAuth) {
-                // Link dropped while waiting: mark failed or await reconnect up to deadline
-                if (now_ms - cmd->enqueued_at_ms >= cmd->timeout_ms) {
-                    finish_command_(cmd, false, "connection lost; command deadline exhausted",
-                                    TerminalReason::DeadlineExceeded);
-                    return TxAction::None;
-                }
-            }
-            return TxAction::None;
-        }
-
         // 1. Overall deadline check
         if (cmd->timeout_ms > 0 && (now_ms - cmd->enqueued_at_ms) >= cmd->timeout_ms) {
-            finish_command_(cmd, false, "command deadline exhausted", TerminalReason::DeadlineExceeded);
+            finish_command_(cmd, false,
+                            !is_connected ? "connection lost; command deadline exhausted"
+                                          : "command deadline exhausted",
+                            TerminalReason::DeadlineExceeded);
             return TxAction::None;
         }
 
-        // 2. Response timeout and retry handling for AwaitingResponse
+        // 2. Connection check
+        if (!is_connected) {
+            return TxAction::None;
+        }
+
+        // 3. Response timeout and retry handling for AwaitingResponse
         if (cmd->state == CommandState::AwaitingResponse) {
             const uint32_t elapsed = now_ms - cmd->last_tx_ms;
             if (elapsed >= kDefaultResponseTimeoutMs) {
                 if (cmd->retry_count < cmd->max_retries) {
                     cmd->retry_count++;
+                    const uint32_t shift = std::min<uint32_t>(cmd->retry_count - 1, 10);
                     cmd->next_retry_delay_ms = std::min(kMaxRetryDelayMs,
-                        kInitialRetryDelayMs * (1U << (cmd->retry_count - 1)));
+                        kInitialRetryDelayMs * (1U << shift));
                     cmd->state = CommandState::Ready;
                     cmd->phase = CommandPhase::SendingRequest;
                     cmd->phase_started_at_ms = now_ms;
@@ -321,7 +400,7 @@ public:
                         dispatcher_.unregister_request(cmd->dispatcher_request_id);
                         cmd->dispatcher_request_id = 0;
                     }
-                    return TxAction::SendCommandPayload;
+                    return TxAction::None;
                 } else {
                     finish_command_(cmd, false, "command response timeout; max retries exceeded",
                                     TerminalReason::MaxRetriesExceeded);
@@ -331,16 +410,16 @@ public:
             return TxAction::None; // Still waiting for response
         }
 
-        // 3. If currently waiting for wake and the vehicle is confirmed awake, advance immediately
+        // 4. If currently waiting for wake and the vehicle is confirmed awake, advance immediately
         if (is_awake) {
-            cmd->wake_confirmed = true;
-            if (cmd->state == CommandState::WaitingWake) {
+            if (cmd->state == CommandState::WaitingWake || cmd->phase == CommandPhase::EnsuringAwake) {
+                cmd->wake_confirmed = true;
                 cmd->state = CommandState::Idle;
                 cmd->phase_started_at_ms = now_ms;
             }
         }
 
-        // 4. Step timeouts for authentication / wake phases
+        // 5. Step timeouts for authentication / wake phases
         if (cmd->state == CommandState::WaitingVcsecAuth ||
             cmd->state == CommandState::WaitingWake ||
             cmd->state == CommandState::WaitingInfoAuth) {
@@ -348,8 +427,12 @@ public:
             if (elapsed >= kDefaultStepTimeoutMs) {
                 if (cmd->retry_count < cmd->max_retries) {
                     cmd->retry_count++;
+                    cmd->next_retry_delay_ms = 0;
+                    cmd->wake_confirmed = false;
                     cmd->state = CommandState::Idle; // Reset to idle to retry prerequisites
+                    cmd->phase = CommandPhase::Queued;
                     cmd->phase_started_at_ms = now_ms;
+                    return TxAction::None;
                 } else {
                     finish_command_(cmd, false, "authentication / wake timeout; max retries exceeded",
                                     TerminalReason::StepTimeout);
@@ -360,14 +443,24 @@ public:
             }
         }
 
-        // 5. Prerequisite Progression & Wake-up Policy Coordination
+        auto emit_payload = [&](CommandRequest* req) -> TxAction {
+            if (req->next_retry_delay_ms > 0) {
+                if (now_ms - req->phase_started_at_ms < req->next_retry_delay_ms) {
+                    return TxAction::None;
+                }
+                req->next_retry_delay_ms = 0;
+            }
+            req->state = CommandState::Ready;
+            req->phase = CommandPhase::SendingRequest;
+            req->phase_started_at_ms = now_ms;
+            return TxAction::SendCommandPayload;
+        };
+
+        // 6. Prerequisite Progression & Wake-up Policy Coordination
         if (cmd->domain == BleDomain::VehicleSecurity) {
             // Pairing "Whitelist Add Key" starts with untrusted key, so session auth is bypassed
             if (cmd->name == "Whitelist Add Key") {
-                cmd->state = CommandState::Ready;
-                cmd->phase = CommandPhase::SendingRequest;
-                cmd->phase_started_at_ms = now_ms;
-                return TxAction::SendCommandPayload;
+                return emit_payload(cmd);
             }
 
             // VCSEC commands require an authenticated VCSEC session (including Wake,
@@ -381,10 +474,7 @@ public:
 
             // VCSEC body controller is always reachable while connected; commands do not
             // require vehicle infotainment to be awake, and health poll runs while vehicle sleeps.
-            cmd->state = CommandState::Ready;
-            cmd->phase = CommandPhase::SendingRequest;
-            cmd->phase_started_at_ms = now_ms;
-            return TxAction::SendCommandPayload;
+            return emit_payload(cmd);
         }
 
         if (cmd->domain == BleDomain::Infotainment) {
@@ -398,8 +488,7 @@ public:
 
             // Prerequisite 2: Wake policy evaluation (aligned with vehicle-command & upstream)
             // Once VCSEC session is established, send SendWake if vehicle is asleep / unknown.
-            // A confirmed wake is final for this command (see CommandRequest::wake_confirmed):
-            // it proceeds to the infotainment session even while the raw flag reads ASLEEP.
+            // A confirmed wake is remembered for this attempt, but re-evaluated if vehicle is asleep on retry.
             if (!cmd->wake_confirmed && is_asleep) {
                 switch (cmd->wake_policy) {
                     case WakePolicy::NoWakeSkip:
@@ -433,10 +522,7 @@ public:
             }
 
             // All prerequisites met -> Ready to send infotainment payload
-            cmd->state = CommandState::Ready;
-            cmd->phase = CommandPhase::SendingRequest;
-            cmd->phase_started_at_ms = now_ms;
-            return TxAction::SendCommandPayload;
+            return emit_payload(cmd);
         }
 
         return TxAction::None;
@@ -472,6 +558,8 @@ public:
         if (!cmd) return;
         if (cmd->retry_count < cmd->max_retries) {
             cmd->retry_count++;
+            cmd->next_retry_delay_ms = 0;
+            cmd->wake_confirmed = false;
             cmd->state = CommandState::Idle;
         } else {
             finish_command_(cmd, false, reason, TerminalReason::BleDisconnected);
@@ -487,11 +575,10 @@ public:
                 finish_command_(cmd, true, "", TerminalReason::Success);
                 return;
             }
-            cmd->wake_confirmed = true;
             if (cmd->state == CommandState::WaitingWake || cmd->phase == CommandPhase::EnsuringAwake) {
+                cmd->wake_confirmed = true;
                 // Advance to infotainment session or ready; the wake is not re-sent afterwards
                 cmd->state = CommandState::Idle;
-                cmd->phase_started_at_ms = 0;
             }
         }
     }
@@ -511,6 +598,8 @@ public:
         if (is_session_error) {
             if (cmd->retry_count < cmd->max_retries) {
                 cmd->retry_count++;
+                cmd->next_retry_delay_ms = 0;
+                cmd->wake_confirmed = false;
                 cmd->state = CommandState::Idle;
                 if (cmd->dispatcher_request_id != 0) {
                     dispatcher_.unregister_request(cmd->dispatcher_request_id);

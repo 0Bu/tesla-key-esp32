@@ -1457,11 +1457,12 @@ static void test_mcp() {
 
     // Nominal error: already_set is classified as success for idempotent commands
     CHECK(tk::is_nominal_already_set("already_set"));
-    CHECK(tk::is_nominal_already_set("action failed: already_set"));
     CHECK(!tk::is_nominal_already_set("complete"));
     CHECK(!tk::is_nominal_already_set(""));
+    CHECK(!tk::is_nominal_already_set("not_already_set"));
+    CHECK(!tk::is_nominal_already_set("already_set_suffix"));
+    CHECK(!tk::is_nominal_already_set("foo_already_set_bar"));
     CHECK_STR(tk::command_result_text(false, "already_set"), "command executed successfully");
-    CHECK_STR(tk::command_result_text(false, "action failed: already_set"), "command executed successfully");
 
     // Soft-desync link backstop: which failures prove contact, which are local, which count
     // toward the drop-and-resync streak (tk::classify_command_failure, make_result_cb_).
@@ -1476,6 +1477,9 @@ static void test_mcp() {
           FailureOrigin::VehicleResponse);
     CHECK(tk::classify_command_failure("Infotainment action failed") == FailureOrigin::VehicleResponse);
     CHECK(tk::classify_command_failure("action failed: charging_port_closed") == FailureOrigin::VehicleResponse);
+    CHECK(tk::classify_command_failure("failed with error status") == FailureOrigin::VehicleResponse);
+    CHECK(tk::classify_command_failure("VCSEC command failed with error status") == FailureOrigin::VehicleResponse);
+    CHECK(tk::classify_command_failure("VCSEC command failed") == FailureOrigin::VehicleResponse);
     CHECK(tk::classify_command_failure("command response timeout; max retries exceeded") ==
           FailureOrigin::TransportOrTimeout);
     CHECK(tk::classify_command_failure("authentication / wake timeout; max retries exceeded") ==
@@ -5816,6 +5820,40 @@ static void test_command_runner() {
             CHECK(act == TxAction::SendInfoSessionInfoRequest);
             CHECK(cmd->state == CommandState::WaitingInfoAuth);
         }
+
+        // 2h. F1a: Stale AWAKE during WaitingVcsecAuth must NOT prematurely confirm wake
+        // If an AWAKE arrives while awaiting VCSEC session auth, wake_confirmed must remain false.
+        // Once VCSEC session is established, if the vehicle is asleep, tick must emit SendWake.
+        {
+            CommandRunner runner;
+            runner.enqueue("ClimateOn", BleDomain::Infotainment, WakePolicy::WakeIfNeeded, 20000, 1000);
+
+            // Tick 1: Infotainment needs VCSEC session first
+            TxAction act = runner.tick(1000, true /* connected */, false /* awake */, false /* asleep */);
+            CHECK(act == TxAction::SendVcsecSessionInfoRequest);
+            CommandRequest* cmd = runner.current_command();
+            CHECK(cmd != nullptr);
+            CHECK(cmd->state == CommandState::WaitingVcsecAuth);
+            CHECK(!cmd->wake_confirmed);
+
+            // Stale AWAKE arrives while command is in WaitingVcsecAuth
+            act = runner.tick(1050, true /* connected */, true /* awake */, false /* asleep */);
+            CHECK(act == TxAction::None);
+            CHECK(cmd->state == CommandState::WaitingVcsecAuth);
+            // Critical check: wake_confirmed must NOT be set during WaitingVcsecAuth!
+            CHECK(!cmd->wake_confirmed);
+
+            // VCSEC auth completes
+            runner.vcsec_session().set_established({1, 2, 3}, 5, 1100);
+            cmd->state = CommandState::Idle;
+
+            // Vehicle reports ASLEEP: because wake_confirmed was not prematurely set,
+            // tick correctly emits SendWake rather than skipping to infotainment auth.
+            act = runner.tick(1100, true /* connected */, false /* awake */, true /* asleep */);
+            CHECK(act == TxAction::SendWake);
+            CHECK(cmd->state == CommandState::WaitingWake);
+            CHECK(cmd->phase == CommandPhase::EnsuringAwake);
+        }
     }
 
     // 3. Prerequisite Phase Progression (VCSEC Auth -> Wake -> Infotainment Auth -> Ready)
@@ -5956,9 +5994,9 @@ static void test_command_runner() {
         runner.tick(1000, true, true);
         runner.notify_tx_complete(1010);
 
-        // Vehicle replies with error containing "already_set" (e.g. door is already locked)
+        // Vehicle replies with normative already_set error (e.g. door is already locked)
         auto outcome = runner.handle_response(BleDomain::VehicleSecurity, cmd_uuid.data(), cmd_uuid.size(),
-                                             false, 0, false, "door_lock: already_set");
+                                             false, 0, false, "already_set");
         CHECK(outcome.routed);
         CommandRequest* cmd = runner.current_command();
         CHECK(cmd->is_completed);
@@ -5989,12 +6027,12 @@ static void test_command_runner() {
         CHECK(cmd->terminal_reason == TerminalReason::AuthenticationFailed);
     }
 
-    // 8. Response Timeout and Retry Arbitration
+    // 8. Response Timeout and Retry Arbitration (with exponential backoff)
     {
         CommandRunner runner;
         runner.vcsec_session().set_established({1}, 10, 1000);
 
-        runner.enqueue("Flash", BleDomain::VehicleSecurity, WakePolicy::WakeIfNeeded, 30000, 1000);
+        runner.enqueue("Flash", BleDomain::VehicleSecurity, WakePolicy::WakeIfNeeded, 40000, 1000);
         runner.tick(1000, true, true);
         runner.notify_tx_complete(1010);
 
@@ -6002,32 +6040,96 @@ static void test_command_runner() {
         CHECK(cmd->state == CommandState::AwaitingResponse);
         CHECK(cmd->retry_count == 0);
 
-        // Advance past response timeout (7000ms): 1010 + 7000 = 8010
+        // Advance past response timeout (7000ms): 1010 + 7000 = 8010.
+        // At 8015: timeout triggers, enters backoff (500ms delay), returns None
         TxAction act = runner.tick(8015, true, true);
-        CHECK(act == TxAction::SendCommandPayload); // Retry #1
+        CHECK(act == TxAction::None);
         CHECK(cmd->state == CommandState::Ready);
         CHECK(cmd->retry_count == 1);
-        runner.notify_tx_complete(8020);
+        CHECK(cmd->next_retry_delay_ms == 500);
 
-        // Advance again for retry #2
-        act = runner.tick(15025, true, true);
+        // During backoff delay (8200ms < 8015 + 500), tick returns None
+        CHECK(runner.tick(8200, true, true) == TxAction::None);
+
+        // At 8515ms (8015 + 500), backoff expires -> emits SendCommandPayload (Retry #1)
+        act = runner.tick(8515, true, true);
         CHECK(act == TxAction::SendCommandPayload);
+        runner.notify_tx_complete(8520);
+
+        // Advance for retry #2: 8520 + 7000 = 15520.
+        // At 15525: timeout triggers, enters backoff (1000ms delay), returns None
+        act = runner.tick(15525, true, true);
+        CHECK(act == TxAction::None);
         CHECK(cmd->retry_count == 2);
-        runner.notify_tx_complete(15030);
+        CHECK(cmd->next_retry_delay_ms == 1000);
 
-        // Advance again for retry #3 (reaches max_retries = 3)
-        act = runner.tick(22035, true, true);
+        // At 16525 (15525 + 1000), backoff expires -> emits SendCommandPayload (Retry #2)
+        act = runner.tick(16525, true, true);
         CHECK(act == TxAction::SendCommandPayload);
-        CHECK(cmd->retry_count == 3);
-        runner.notify_tx_complete(22040);
+        runner.notify_tx_complete(16530);
 
-        // Next timeout exceeds max_retries: fails permanently
-        act = runner.tick(29045, true, true);
+        // Advance for retry #3: 16530 + 7000 = 23530.
+        // At 23535: timeout triggers, enters backoff (2000ms delay), returns None
+        act = runner.tick(23535, true, true);
+        CHECK(act == TxAction::None);
+        CHECK(cmd->retry_count == 3);
+        CHECK(cmd->next_retry_delay_ms == 2000);
+
+        // At 25535 (23535 + 2000), backoff expires -> emits SendCommandPayload (Retry #3)
+        act = runner.tick(25535, true, true);
+        CHECK(act == TxAction::SendCommandPayload);
+        runner.notify_tx_complete(25540);
+
+        // Next timeout exceeds max_retries: 25540 + 7000 = 32540 -> fails permanently
+        act = runner.tick(32545, true, true);
         CHECK(act == TxAction::None);
         CHECK(cmd->is_completed);
         CHECK(!cmd->is_success);
         CHECK(cmd->state == CommandState::Failed);
         CHECK(cmd->terminal_reason == TerminalReason::MaxRetriesExceeded);
+    }
+
+    // 8b. Infotainment Payload Response Timeout with is_asleep == true (P1 regression test)
+    {
+        CommandRunner runner;
+        runner.vcsec_session().set_established({1}, 10, 1000);
+        runner.info_session().set_established({2}, 20, 1000);
+
+        runner.enqueue("FlashLights", BleDomain::Infotainment, WakePolicy::WakeIfNeeded, 40000, 1000);
+        // Vehicle is initially reported asleep; tick returns SendWake
+        TxAction act = runner.tick(1000, true /* connected */, false /* is_awake */, true /* is_asleep */);
+        CHECK(act == TxAction::SendWake);
+        CHECK(runner.current_command()->state == CommandState::WaitingWake);
+
+        // Wake is confirmed awake
+        runner.notify_vehicle_awake(true);
+        CHECK(runner.current_command()->wake_confirmed);
+
+        // Next tick sends Infotainment payload
+        act = runner.tick(1050, true, true /* is_awake */, false /* is_asleep */);
+        CHECK(act == TxAction::SendCommandPayload);
+        runner.notify_tx_complete(1060);
+        CommandRequest* cmd = runner.current_command();
+        CHECK(cmd->state == CommandState::AwaitingResponse);
+        CHECK(cmd->retry_count == 0);
+
+        // Response timeout occurs (1060 + 7000 = 8060).
+        // At 8065: tick with is_asleep == true (e.g. VCSEC telemetry still reports ASLEEP).
+        // The in-flight command already sent its payload and was confirmed awake;
+        // it must retry the payload with exponential backoff, NOT regress into SendWake!
+        act = runner.tick(8065, true /* connected */, false /* is_awake */, true /* is_asleep */);
+        CHECK(act == TxAction::None);
+        CHECK(cmd->state == CommandState::Ready);
+        CHECK(cmd->retry_count == 1);
+        CHECK(cmd->next_retry_delay_ms == 500);
+        CHECK(cmd->wake_confirmed); // Must remain true!
+
+        // During backoff delay (8200ms < 8065 + 500), tick returns None
+        CHECK(runner.tick(8200, true, false, true) == TxAction::None);
+
+        // At 8565 (8065 + 500), backoff expires -> must emit SendCommandPayload, NOT SendWake!
+        act = runner.tick(8565, true /* connected */, false /* is_awake */, true /* is_asleep */);
+        CHECK(act == TxAction::SendCommandPayload);
     }
 
     // 9. Overall Command Deadline Exhaustion
@@ -6069,6 +6171,54 @@ static void test_command_runner() {
         CHECK(runner.current_command()->is_completed);
         CHECK(!runner.current_command()->is_success);
         CHECK(runner.current_command()->terminal_reason == TerminalReason::DeadlineExceeded);
+        CHECK(runner.current_command()->error_message == "connection lost; command deadline exhausted");
+    }
+
+    // 10b. Disconnection while in Idle state (enqueued while offline) exhausts deadline
+    {
+        CommandRunner runner;
+        runner.enqueue("OfflineEnqueue", BleDomain::VehicleSecurity, WakePolicy::WakeIfNeeded, 5000, 1000);
+        CHECK(runner.current_command()->state == CommandState::Idle);
+
+        // Before deadline (3000ms < 1000 + 5000): waiting
+        TxAction act = runner.tick(3000, false /* disconnected */, false);
+        CHECK(act == TxAction::None);
+        CHECK(!runner.current_command()->is_completed);
+
+        // Past deadline (6001ms): must fail with DeadlineExceeded, not hang in Idle!
+        act = runner.tick(6001, false /* disconnected */, false);
+        CHECK(act == TxAction::None);
+        CHECK(runner.current_command()->is_completed);
+        CHECK(!runner.current_command()->is_success);
+        CHECK(runner.current_command()->terminal_reason == TerminalReason::DeadlineExceeded);
+        CHECK(runner.current_command()->error_message == "connection lost; command deadline exhausted");
+    }
+
+    // 10c. Disconnection while in Ready state (during retry backoff delay) exhausts deadline
+    {
+        CommandRunner runner;
+        runner.vcsec_session().set_established({1}, 10, 1000);
+        runner.enqueue("BackoffDisconnect", BleDomain::VehicleSecurity, WakePolicy::WakeIfNeeded, 10000, 1000);
+        runner.tick(1000, true, true);
+        runner.notify_tx_complete(1050);
+
+        // Response timeout at 8060 (1050 + 7000) transitions to Ready with backoff delay
+        runner.tick(8060, true, true);
+        CHECK(runner.current_command()->state == CommandState::Ready);
+        CHECK(runner.current_command()->next_retry_delay_ms == 500);
+
+        // Disconnected at 8200ms while still in backoff: waits
+        TxAction act = runner.tick(8200, false /* disconnected */, true);
+        CHECK(act == TxAction::None);
+        CHECK(!runner.current_command()->is_completed);
+
+        // Past overall deadline (11001ms >= 1000 + 10000): must fail with DeadlineExceeded!
+        act = runner.tick(11001, false /* disconnected */, true);
+        CHECK(act == TxAction::None);
+        CHECK(runner.current_command()->is_completed);
+        CHECK(!runner.current_command()->is_success);
+        CHECK(runner.current_command()->terminal_reason == TerminalReason::DeadlineExceeded);
+        CHECK(runner.current_command()->error_message == "connection lost; command deadline exhausted");
     }
 
     // 11. RxFramer Integration in CommandRunner
@@ -6156,8 +6306,8 @@ static void test_command_runner_link_loss_and_faults() {
         CHECK(runner.tick(300, true, true, false) == TxAction::SendInfoSessionInfoRequest);
         CHECK(runner.current_command()->wake_confirmed);
     }
-    // Wake confirmation arriving early while waiting for VCSEC auth (e.g. initial status frame)
-    // must be remembered so no redundant Wake is emitted after VCSEC auth finishes.
+    // Status frames arriving early while waiting for VCSEC auth must not confirm wake
+    // when car is reported asleep: after VCSEC auth, tick emits SendWake.
     {
         CommandRunner runner;
         // VCSEC session not yet established
@@ -6168,15 +6318,101 @@ static void test_command_runner_link_loss_and_faults() {
 
         // VehicleStatus arrives with closureStatuses while still waiting for VCSEC session
         runner.notify_vehicle_awake(true);
-        CHECK(runner.current_command()->wake_confirmed);
+        // Not in WaitingWake or EnsuringAwake, so wake is not confirmed
+        CHECK(!runner.current_command()->wake_confirmed);
         CHECK(runner.current_command()->state == CommandState::WaitingVcsecAuth);
 
         // VCSEC session finishes authentication
         runner.vcsec_session().set_established({1}, 10, 1000);
         runner.current_command()->state = CommandState::Idle;
 
-        // Advances directly to infotainment auth, skipping SendWake despite is_asleep=true
-        CHECK(runner.tick(500, true, false, true) == TxAction::SendInfoSessionInfoRequest);
+        // Vehicle is asleep, so tick emits SendWake rather than advancing to infotainment auth
+        CHECK(runner.tick(500, true, false, true) == TxAction::SendWake);
+        CHECK(runner.current_command()->state == CommandState::WaitingWake);
+    }
+
+    // S1: Step timeout on info auth on asleep car resets wake_confirmed and emits SendWake
+    {
+        CommandRunner runner;
+        runner.vcsec_session().set_established({1}, 10, 1000);
+        runner.enqueue("Set Charge Limit", BleDomain::Infotainment, WakePolicy::WakeIfNeeded, 30000, 0);
+
+        // Step 1: Car is asleep, tick emits SendWake
+        CHECK(runner.tick(0, true, false, true) == TxAction::SendWake);
+        runner.notify_tx_complete(0);
+        CHECK(runner.current_command()->state == CommandState::WaitingWake);
+
+        // Wake confirmed while waiting for wake
+        runner.notify_vehicle_awake(true);
+        CHECK(runner.current_command()->wake_confirmed);
+
+        // Step 2: Advances to SendInfoSessionInfoRequest at t=100
+        CHECK(runner.tick(100, true, false, true) == TxAction::SendInfoSessionInfoRequest);
+        runner.notify_tx_complete(100);
+        CHECK(runner.current_command()->state == CommandState::WaitingInfoAuth);
+        CHECK(runner.current_command()->wake_confirmed);
+
+        // Step 3: Timeout waiting for info auth at t = 100 + kDefaultStepTimeoutMs (5000) = 5100 ms
+        // On step timeout, retry_count increments, wake_confirmed resets to false, state resets to Idle
+        CHECK(runner.tick(5100, true, false, true) == TxAction::None);
+        CHECK(!runner.current_command()->wake_confirmed);
+        CHECK(runner.current_command()->retry_count == 1);
+        CHECK(runner.current_command()->state == CommandState::Idle);
+
+        // Step 4: Next tick on asleep car re-evaluates sleep and emits SendWake
+        CHECK(runner.tick(5150, true, false, true) == TxAction::SendWake);
+        CHECK(runner.current_command()->state == CommandState::WaitingWake);
+    }
+
+    // TX write failure on infotainment command resets wake_confirmed and re-evaluates wake
+    {
+        CommandRunner runner;
+        runner.vcsec_session().set_established({1}, 10, 1000);
+        runner.info_session().set_established({2}, 10, 1000);
+        runner.enqueue("Set Charge Limit", BleDomain::Infotainment, WakePolicy::WakeIfNeeded, 30000, 0);
+
+        // Vehicle is asleep, first tick emits SendWake
+        CHECK(runner.tick(0, true, false, true) == TxAction::SendWake);
+        runner.notify_tx_complete(0);
+        runner.notify_vehicle_awake(true);
+        CHECK(runner.current_command()->wake_confirmed);
+
+        // Next tick emits SendCommandPayload
+        CHECK(runner.tick(100, true, false, true) == TxAction::SendCommandPayload);
+
+        // TX failure occurs during transmission
+        runner.notify_tx_failed("BLE write failed");
+        CHECK(!runner.current_command()->wake_confirmed);
+        CHECK(runner.current_command()->state == CommandState::Idle);
+        CHECK(runner.current_command()->retry_count == 1);
+
+        // Next tick re-evaluates sleep and emits SendWake
+        CHECK(runner.tick(150, true, false, true) == TxAction::SendWake);
+        CHECK(runner.current_command()->state == CommandState::WaitingWake);
+    }
+
+    // F4: Retry timing and backoff enforcement (at t7000 returns None, during backoff 500ms returns None, at t7500 emits SendCommandPayload)
+    {
+        CommandRunner runner;
+        runner.vcsec_session().set_established({1}, 10, 1000);
+        runner.enqueue("Flash", BleDomain::VehicleSecurity, WakePolicy::WakeIfNeeded, 30000, 0);
+
+        CHECK(runner.tick(0, true, true) == TxAction::SendCommandPayload);
+        runner.notify_tx_complete(0);
+        CHECK(runner.current_command()->state == CommandState::AwaitingResponse);
+        CHECK(runner.current_command()->retry_count == 0);
+
+        // At t = 7000ms: response timeout occurs (elapsed >= 7000). Enters Ready, backoff 500ms. Returns None.
+        CHECK(runner.tick(7000, true, true) == TxAction::None);
+        CHECK(runner.current_command()->state == CommandState::Ready);
+        CHECK(runner.current_command()->retry_count == 1);
+        CHECK(runner.current_command()->next_retry_delay_ms == 500);
+
+        // During backoff (e.g. t = 7250ms < 7000 + 500), returns None
+        CHECK(runner.tick(7250, true, true) == TxAction::None);
+
+        // At t = 7500ms (7000 + 500), backoff expires -> emits SendCommandPayload
+        CHECK(runner.tick(7500, true, true) == TxAction::SendCommandPayload);
     }
     // No confirmation: an asleep car still gets the wake policy (unchanged), and a NoWakeFail
     // command still fails locally with the text the link backstop classifies as LocalPolicy.
@@ -6281,6 +6517,170 @@ static void test_command_runner_link_loss_and_faults() {
         CommandRequest* cmd = runner.current_command();
         CHECK(cmd->state == CommandState::Ready);
         CHECK(!cmd->is_completed);
+    }
+}
+
+static void test_command_runner_telemetry_filter_logic() {
+    // 1. is_session_info_uuid_matching
+    {
+        const uint8_t exp[16] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16};
+        const uint8_t same[16] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16};
+        const uint8_t diff[16] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 99};
+        const uint8_t short_uuid[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+
+        // Empty/omitted UUID in response is valid (matches)
+        CHECK(tk::is_session_info_uuid_matching(nullptr, 0, exp, sizeof(exp)));
+        CHECK(tk::is_session_info_uuid_matching(same, 0, exp, sizeof(exp)));
+
+        // Matching 16-byte UUID
+        CHECK(tk::is_session_info_uuid_matching(same, sizeof(same), exp, sizeof(exp)));
+
+        // Mismatched byte in 16-byte UUID
+        CHECK(!tk::is_session_info_uuid_matching(diff, sizeof(diff), exp, sizeof(exp)));
+
+        // Mismatched length
+        CHECK(!tk::is_session_info_uuid_matching(short_uuid, sizeof(short_uuid), exp, sizeof(exp)));
+        CHECK(!tk::is_session_info_uuid_matching(same, sizeof(same), short_uuid, sizeof(short_uuid)));
+
+        // Nullptr handling with non-zero length
+        CHECK(!tk::is_session_info_uuid_matching(nullptr, 16, exp, sizeof(exp)));
+        CHECK(!tk::is_session_info_uuid_matching(same, sizeof(same), nullptr, 16));
+    }
+
+    // 2. is_command_awaiting_session_auth
+    {
+        using CS = tk::CommandState;
+        using BD = tk::BleDomain;
+
+        // Inactive / completed commands are never awaiting auth
+        CHECK(!tk::is_command_awaiting_session_auth(false, false, CS::WaitingVcsecAuth, BD::VehicleSecurity));
+        CHECK(!tk::is_command_awaiting_session_auth(true, true, CS::WaitingVcsecAuth, BD::VehicleSecurity));
+
+        // VehicleSecurity session auth gate
+        CHECK(tk::is_command_awaiting_session_auth(true, false, CS::WaitingVcsecAuth, BD::VehicleSecurity));
+        CHECK(!tk::is_command_awaiting_session_auth(true, false, CS::WaitingInfoAuth, BD::VehicleSecurity));
+        CHECK(!tk::is_command_awaiting_session_auth(true, false, CS::Idle, BD::VehicleSecurity));
+        CHECK(!tk::is_command_awaiting_session_auth(true, false, CS::Ready, BD::VehicleSecurity));
+
+        // Infotainment session auth gate
+        CHECK(tk::is_command_awaiting_session_auth(true, false, CS::WaitingInfoAuth, BD::Infotainment));
+        CHECK(!tk::is_command_awaiting_session_auth(true, false, CS::WaitingVcsecAuth, BD::Infotainment));
+        CHECK(!tk::is_command_awaiting_session_auth(true, false, CS::Idle, BD::Infotainment));
+        CHECK(!tk::is_command_awaiting_session_auth(true, false, CS::Ready, BD::Infotainment));
+
+        // None / Broadcast domain never awaits session auth
+        CHECK(!tk::is_command_awaiting_session_auth(true, false, CS::WaitingVcsecAuth, BD::None));
+        CHECK(!tk::is_command_awaiting_session_auth(true, false, CS::WaitingInfoAuth, BD::Broadcast));
+    }
+
+    // 3. is_fault_domain_matching
+    {
+        using CS = tk::CommandState;
+        using BD = tk::BleDomain;
+
+        // Broadcast faults match any command regardless of domain or state
+        CHECK(tk::is_fault_domain_matching(BD::Broadcast, BD::VehicleSecurity, CS::Ready));
+        CHECK(tk::is_fault_domain_matching(BD::Broadcast, BD::Infotainment, CS::Ready));
+        // Unknown domain (None) must NOT match any command (fail-closed)
+        CHECK(!tk::is_fault_domain_matching(BD::None, BD::VehicleSecurity, CS::Idle));
+        CHECK(!tk::is_fault_domain_matching(BD::None, BD::Infotainment, CS::Ready));
+
+        // VehicleSecurity faults match VCSEC commands in any state
+        CHECK(tk::is_fault_domain_matching(BD::VehicleSecurity, BD::VehicleSecurity, CS::Ready));
+        CHECK(tk::is_fault_domain_matching(BD::VehicleSecurity, BD::VehicleSecurity, CS::WaitingVcsecAuth));
+        CHECK(tk::is_fault_domain_matching(BD::VehicleSecurity, BD::VehicleSecurity, CS::AwaitingResponse));
+
+        // VehicleSecurity faults match Infotainment commands ONLY if in WaitingVcsecAuth
+        CHECK(tk::is_fault_domain_matching(BD::VehicleSecurity, BD::Infotainment, CS::WaitingVcsecAuth));
+        CHECK(!tk::is_fault_domain_matching(BD::VehicleSecurity, BD::Infotainment, CS::WaitingInfoAuth));
+        CHECK(!tk::is_fault_domain_matching(BD::VehicleSecurity, BD::Infotainment, CS::Ready));
+        CHECK(!tk::is_fault_domain_matching(BD::VehicleSecurity, BD::Infotainment, CS::AwaitingResponse));
+
+        // Infotainment faults match Infotainment commands only in Infotainment execution phases,
+        // and must NOT match during prerequisite VCSEC auth, wake, or idle phases
+        CHECK(tk::is_fault_domain_matching(BD::Infotainment, BD::Infotainment, CS::WaitingInfoAuth));
+        CHECK(tk::is_fault_domain_matching(BD::Infotainment, BD::Infotainment, CS::Ready));
+        CHECK(tk::is_fault_domain_matching(BD::Infotainment, BD::Infotainment, CS::AwaitingResponse));
+        CHECK(!tk::is_fault_domain_matching(BD::Infotainment, BD::Infotainment, CS::WaitingVcsecAuth));
+        CHECK(!tk::is_fault_domain_matching(BD::Infotainment, BD::Infotainment, CS::WaitingWake));
+        CHECK(!tk::is_fault_domain_matching(BD::Infotainment, BD::Infotainment, CS::Idle));
+        CHECK(!tk::is_fault_domain_matching(BD::Infotainment, BD::VehicleSecurity, CS::Ready));
+        CHECK(!tk::is_fault_domain_matching(BD::Infotainment, BD::VehicleSecurity, CS::WaitingVcsecAuth));
+    }
+
+    // 4. evaluate_vcsec_operation_status
+    {
+        auto d_ok = tk::evaluate_vcsec_operation_status(0);
+        CHECK(d_ok.action == tk::VcsecOpStatusAction::CompleteOk);
+        CHECK(d_ok.is_ok);
+        CHECK(std::string(d_ok.error_message).empty());
+
+        auto d_wait = tk::evaluate_vcsec_operation_status(1);
+        CHECK(d_wait.action == tk::VcsecOpStatusAction::Wait);
+        CHECK(!d_wait.is_ok);
+        CHECK(std::string(d_wait.error_message).empty());
+
+        auto d_err = tk::evaluate_vcsec_operation_status(2);
+        CHECK(d_err.action == tk::VcsecOpStatusAction::Error);
+        CHECK(!d_err.is_ok);
+        CHECK(std::string(d_err.error_message) == "VCSEC command failed with error status");
+
+        auto d_unknown = tk::evaluate_vcsec_operation_status(99);
+        CHECK(d_unknown.action == tk::VcsecOpStatusAction::Error);
+        CHECK(!d_unknown.is_ok);
+        CHECK(std::string(d_unknown.error_message) == "VCSEC command failed with error status");
+    }
+
+    // 5. CommandRunner wrapper methods: is_awaiting_session_auth & should_notify_signed_message_fault
+    {
+        tk::CommandRunner runner;
+        // Empty queue: neither auth query is active
+        CHECK(!runner.is_awaiting_session_auth(tk::BleDomain::VehicleSecurity));
+        CHECK(!runner.is_awaiting_session_auth(tk::BleDomain::Infotainment));
+        CHECK(!runner.should_notify_signed_message_fault(tk::BleDomain::VehicleSecurity));
+        CHECK(!runner.should_notify_signed_message_fault(tk::BleDomain::Infotainment));
+
+        // Enqueue Infotainment command: starts in WaitingVcsecAuth on tick
+        runner.enqueue("Climate", tk::BleDomain::Infotainment, tk::WakePolicy::WakeIfNeeded, 20000, 1000);
+        runner.tick(1000, true, true);
+        CHECK(runner.current_command()->state == tk::CommandState::WaitingVcsecAuth);
+
+        // While awaiting VCSEC auth:
+        CHECK(runner.is_awaiting_session_auth(tk::BleDomain::VehicleSecurity));
+        CHECK(!runner.is_awaiting_session_auth(tk::BleDomain::Infotainment));
+        CHECK(runner.should_notify_signed_message_fault(tk::BleDomain::VehicleSecurity));
+        // Infotainment faults must NOT notify command while in VCSEC auth prerequisite
+        CHECK(!runner.should_notify_signed_message_fault(tk::BleDomain::Infotainment));
+        CHECK(runner.should_notify_signed_message_fault(tk::BleDomain::Broadcast));
+
+        // VCSEC auth succeeds, advance to WaitingInfoAuth
+        runner.vcsec_session().set_established({1, 2, 3}, 1, 1000);
+        runner.current_command()->state = tk::CommandState::Idle;
+        runner.tick(1100, true, true);
+        CHECK(runner.current_command()->state == tk::CommandState::WaitingInfoAuth);
+
+        // While awaiting Infotainment auth:
+        CHECK(!runner.is_awaiting_session_auth(tk::BleDomain::VehicleSecurity));
+        CHECK(runner.is_awaiting_session_auth(tk::BleDomain::Infotainment));
+        CHECK(!runner.should_notify_signed_message_fault(tk::BleDomain::VehicleSecurity));
+        CHECK(runner.should_notify_signed_message_fault(tk::BleDomain::Infotainment));
+
+        // Infotainment auth succeeds, advance to Ready/AwaitingResponse
+        runner.info_session().set_established({4, 5, 6}, 2, 1000);
+        runner.current_command()->state = tk::CommandState::Idle;
+        runner.tick(1200, true, true);
+        runner.notify_tx_complete(1250);
+        CHECK(runner.current_command()->state == tk::CommandState::AwaitingResponse);
+
+        CHECK(!runner.is_awaiting_session_auth(tk::BleDomain::VehicleSecurity));
+        CHECK(!runner.is_awaiting_session_auth(tk::BleDomain::Infotainment));
+        CHECK(!runner.should_notify_signed_message_fault(tk::BleDomain::VehicleSecurity));
+        CHECK(runner.should_notify_signed_message_fault(tk::BleDomain::Infotainment));
+
+        // Pop / complete command -> all false
+        runner.complete_current_command(true);
+        CHECK(!runner.is_awaiting_session_auth(tk::BleDomain::Infotainment));
+        CHECK(!runner.should_notify_signed_message_fault(tk::BleDomain::Infotainment));
     }
 }
 
@@ -6493,6 +6893,7 @@ int main() {
     test_session_state();
     test_command_runner();
     test_command_runner_link_loss_and_faults();
+    test_command_runner_telemetry_filter_logic();
     test_tx_wire_framing();
     test_key_regeneration_contract();
     test_telemetry_dispatch_routing_order();

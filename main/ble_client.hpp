@@ -98,7 +98,7 @@ public:
     void disconnect() override;
     bool write(const std::vector<uint8_t>& data) override;
 
-    // vehicle_loop calls this only after Vehicle::set_connected(true) succeeded for the deferred
+    // vehicle_loop calls this only after connection state is updated for the deferred
     // LinkUp event. It re-checks the handle/generation/connect intent under the BLE lifecycle lock;
     // a deadline cancellation or replacement link can therefore never be acknowledged as ready.
     bool complete_ready(uint16_t conn_handle, uint32_t generation) noexcept;

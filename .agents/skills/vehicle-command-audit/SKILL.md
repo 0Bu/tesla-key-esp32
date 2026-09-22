@@ -86,7 +86,7 @@ Fetch raw at the **pin** (base `https://raw.githubusercontent.com/yoziru/tesla-b
 and `src/{vehicle.cpp, client.cpp, peer.cpp, message_builders.cpp, message_processor.cpp, crypto_context.cpp, vin_utils.cpp, errors.cpp, …}`.
 - **Does a command builder exist?** → `src/message_builders.cpp` (e.g. `scheduledChargingAction` IS
   registered; `scheduledDepartureAction` is **not** — that absence is *why* scheduled departure isn't exposed).
-- **Enum / API values** (`SleepState`, `WakePolicy`, roles, form factors) → `include/vehicle.h`, `include/client.h`.
+- **Enum / API values** (roles, form factors) → `include/client.h`; firmware-level `SleepState`, `WakePolicy` → `main/logic/command_runner.hpp`.
 - **How a fault becomes a string** the firmware matches → `include/command_error.h`, `main/logic/command_runner.hpp`, `main/vehicle_telemetry.cpp`.
 - **VIN→BLE-name / matching** → `include/vin_utils.h`, `src/vin_utils.cpp` (the firmware delegates here; it does **not** build the name itself).
 
@@ -128,12 +128,13 @@ re-confirm it against the *current* tree and catch anything that drifted since. 
    monotonic `steady_clock` delta** (`src/peer.cpp` `generate_expires_at`), per-domain counter +
    16-byte epoch, separate VCSEC/Infotainment sessions. **The device wall clock does NOT enter
    per-command signing/expiry** — a wrong RTC cannot make an already-loaded command stale or
-   replayable. It **does** gate persisted-session reuse: `Vehicle::load_session()` computes
-   a *signed* `system_clock - SessionInfo.ClockTime` age and rejects age > 1 h. A negative age
-   (stored session clock ahead of the local clock, including a reboot before time resync) is
-   accepted rather than underflowed to a huge unsigned age, so the NVS clock restore before
-   controller init is still required to enforce the one-hour stale window. *Baseline: code and
-   current comments match this split at v5.2.0.*
+   replayable. It **does** gate persisted-session loading: `load_nvs_sessions_()` (inheriting
+   upstream `vehicle.cpp`'s `system_clock - SessionInfo.ClockTime` check, see ADR-0005 §2). Because
+   `SessionInfo.ClockTime` counts seconds in vehicle epoch rather than Unix epoch, restoring the
+   clock to Unix time ensures stored sessions are rejected (> 3600 s) rather than acting as a
+   real-time 1-hour reuse window; restoring NVS clock before controller init prevents an uninitialized
+   1970 clock (negative age) from keeping stale sessions. *Baseline: code and current docs match
+   this split at v5.2.0.*
 4. **Pairing / whitelist** — add-key carries role + `KEY_FORM_FACTOR_CLOUD_KEY`, no key name (car
    shows "Unknown key"), requires an **NFC card on the console reader**, verify via a SessionInfo
    probe. *Baseline: matches.* (Note: the **"3"** is the simultaneous-BLE-**connection** limit; a
