@@ -1253,20 +1253,19 @@ discovery, then acknowledges the exact connection generation as command-ready, m
 the fixed peer address after unlock, and performs the one best-effort NVS persistence attempt
 outside every shared lock. It never mutates the startup `std::string` across tasks.
 
-**Session reuse across a reboot needs the wall clock restored first.** The `sess_vcsec`/`sess_info`
-blobs in NVS exist so a restart does not cost a fresh handshake, but `load_nvs_sessions_()` only
-accepts a persisted session younger than an hour, and it measures that as a signed
-`(unix_now - session.clock_time)`. A negative age —
-session clock ahead of the local clock, including a reboot before time resync — is accepted
-rather than underflowed to a huge unsigned age. A 1970 clock would therefore *keep* sessions
-instead of discarding them; restore is still required so a real clock can enforce the one-hour
-stale window (and TLS cert validity). `main.cpp` therefore calls `restore_clock_from_nvs()`
-(the `last_time` cache written on each NTP sync) **before** `VehicleController::init()`, not
-next to the SNTP setup after WiFi where it used to sit — the restore itself needs no network, so
-nothing kept it down there. Measured on the old unsigned path: 49 boots in the 17.–24.07.2026
-syslog, 49 rejections of both domains, the last of them discarding a VCSEC session that was 43
-minutes old. NTP refines the restored clock seconds later; the ordering is what matters, not the
-precision.
+**Session persistence and clock restore ordering.** The `sess_vcsec`/`sess_info` blobs in NVS
+store the last authenticated session, but `load_nvs_sessions_()` inherits upstream `vehicle.cpp`'s
+age check computing `(unix_now - session.clock_time)` (see ADR-0005 §2). Because `session.clock_time`
+is reported by the vehicle relative to vehicle epoch/uptime (tens or hundreds of thousands of
+seconds) rather than Unix epoch, restoring the wall clock to Unix time (~1.77 billion seconds) causes
+the computed age to far exceed 3600 seconds, so stored sessions are rejected once the clock is set.
+A 1970 clock (before time sync or restore) produces a negative age and would keep stored sessions;
+restoring `last_time` from NVS before `VehicleController::init()` ensures the system clock is set to
+real Unix time so stale sessions from an uninitialized clock are rejected fail-closed.
+`main.cpp` calls `restore_clock_from_nvs()` (the `last_time` cache written on each NTP sync) **before**
+`VehicleController::init()`, not next to the SNTP setup after WiFi where it used to sit — the restore
+itself needs no network, so nothing kept it down there. True persistent session reuse across reboots
+would require upstream protocol alignment to track vehicle epoch separately from wall-clock Unix time.
 
 **A configured VIN gates pairing entirely.** The device targets the car by its VIN-derived
 BLE name (`S<hex>C`), so `auto_pair_task` first checks `has_plausible_vin()` (17-char VIN;

@@ -22,6 +22,7 @@
 namespace tk {
 
 enum class BleDomain : uint8_t {
+    Broadcast = 0,
     None = 0,
     VehicleSecurity = 2,
     Infotainment = 3,

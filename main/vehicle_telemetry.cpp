@@ -779,16 +779,15 @@ void VehicleController::handle_signed_message_fault_(const UniversalMessage_Rout
     // so late ERROR_UNKNOWN_KEY_ID faults after command timeout or flush are never missed.
     on_vehicle_message_(msg);
     if (cmd && !cmd->is_completed) {
-        bool domain_matches = false;
+        tk::BleDomain fault_domain = tk::BleDomain::None;
         if (err_domain == UniversalMessage_Domain_DOMAIN_VEHICLE_SECURITY) {
-            domain_matches = (cmd->domain == tk::BleDomain::VehicleSecurity) ||
-                             (cmd->state == tk::CommandState::WaitingVcsecAuth);
+            fault_domain = tk::BleDomain::VehicleSecurity;
         } else if (err_domain == UniversalMessage_Domain_DOMAIN_INFOTAINMENT) {
-            domain_matches = (cmd->domain == tk::BleDomain::Infotainment);
+            fault_domain = tk::BleDomain::Infotainment;
         } else if (err_domain == UniversalMessage_Domain_DOMAIN_BROADCAST) {
-            domain_matches = true;
+            fault_domain = tk::BleDomain::Broadcast;
         }
-        if (domain_matches) {
+        if (command_runner_.should_notify_signed_message_fault(fault_domain)) {
             command_runner_.notify_signed_message_fault(has_session_error, "signed message authentication failed");
         } else {
             ESP_LOGW(TAG, "Dropping signed message fault for non-matching command domain");
@@ -819,11 +818,9 @@ void VehicleController::handle_session_info_frame_(const UniversalMessage_Routab
         return;
     }
 
-    auto* cmd = command_runner_.current_command();
-    const bool is_waiting_auth = cmd && !cmd->is_completed && (
-        (domain == UniversalMessage_Domain_DOMAIN_VEHICLE_SECURITY && cmd->state == tk::CommandState::WaitingVcsecAuth) ||
-        (domain == UniversalMessage_Domain_DOMAIN_INFOTAINMENT && cmd->state == tk::CommandState::WaitingInfoAuth)
-    );
+    const auto session_domain = (domain == UniversalMessage_Domain_DOMAIN_VEHICLE_SECURITY)
+        ? tk::BleDomain::VehicleSecurity : tk::BleDomain::Infotainment;
+    const bool is_waiting_auth = command_runner_.is_awaiting_session_auth(session_domain);
 
     pb_byte_t request_uuid[16] = {0};
     size_t request_uuid_len = sizeof(request_uuid);
@@ -832,9 +829,8 @@ void VehicleController::handle_session_info_frame_(const UniversalMessage_Routab
         return;
     }
 
-    if (msg.request_uuid.size > 0 &&
-        (msg.request_uuid.size != request_uuid_len ||
-         std::memcmp(msg.request_uuid.bytes, request_uuid, request_uuid_len) != 0)) {
+    if (!tk::is_session_info_uuid_matching(msg.request_uuid.bytes, msg.request_uuid.size,
+                                           request_uuid, request_uuid_len)) {
         ESP_LOGW(TAG, "Dropping mismatched SessionInfo: request UUID does not match outstanding request");
         return;
     }
@@ -957,17 +953,16 @@ void VehicleController::handle_vcsec_frame_(const UniversalMessage_RoutableMessa
                 const uint8_t* uuid_ptr = (msg.request_uuid.size > 0) ? msg.request_uuid.bytes : nullptr;
                 const size_t uuid_len = msg.request_uuid.size;
                 const auto op_status = vcsec_msg.sub_message.commandStatus.operationStatus;
-                if (op_status == VCSEC_OperationStatus_E_OPERATIONSTATUS_WAIT) {
+                const auto decision = tk::evaluate_vcsec_operation_status(static_cast<int>(op_status));
+                if (decision.action == tk::VcsecOpStatusAction::Wait) {
                     ESP_LOGI(TAG, "VCSEC command status WAIT; awaiting final status");
                     break;
                 }
-                const bool is_ok = (op_status == VCSEC_OperationStatus_E_OPERATIONSTATUS_OK);
-                const char* err_str = is_ok ? "" : "VCSEC command failed with error status";
                 command_runner_.handle_response(
                     tk::BleDomain::VehicleSecurity,
                     uuid_ptr, uuid_len,
                     false, 0,
-                    is_ok, err_str);
+                    decision.is_ok, decision.error_message);
                 break;
             }
             case VCSEC_FromVCSECMessage_vehicleStatus_tag: {

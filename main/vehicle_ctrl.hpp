@@ -370,7 +370,7 @@ public:
     static uint8_t boot_heap_restarts();
 
 private:
-    // Builder function type used by send_command_result
+    // Builder function type used by send_vcsec_ and send_infotainment_
     using Builder = std::function<int(TeslaBLE::Client*, uint8_t*, size_t*)>;
     using ResultCb = std::function<void(tk::OperationResult)>;
 

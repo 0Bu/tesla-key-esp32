@@ -1459,6 +1459,9 @@ static void test_mcp() {
     CHECK(tk::is_nominal_already_set("already_set"));
     CHECK(!tk::is_nominal_already_set("complete"));
     CHECK(!tk::is_nominal_already_set(""));
+    CHECK(!tk::is_nominal_already_set("not_already_set"));
+    CHECK(!tk::is_nominal_already_set("already_set_suffix"));
+    CHECK(!tk::is_nominal_already_set("foo_already_set_bar"));
     CHECK_STR(tk::command_result_text(false, "already_set"), "command executed successfully");
 
     // Soft-desync link backstop: which failures prove contact, which are local, which count
@@ -5817,6 +5820,40 @@ static void test_command_runner() {
             CHECK(act == TxAction::SendInfoSessionInfoRequest);
             CHECK(cmd->state == CommandState::WaitingInfoAuth);
         }
+
+        // 2h. F1a: Stale AWAKE during WaitingVcsecAuth must NOT prematurely confirm wake
+        // If an AWAKE arrives while awaiting VCSEC session auth, wake_confirmed must remain false.
+        // Once VCSEC session is established, if the vehicle is asleep, tick must emit SendWake.
+        {
+            CommandRunner runner;
+            runner.enqueue("ClimateOn", BleDomain::Infotainment, WakePolicy::WakeIfNeeded, 20000, 1000);
+
+            // Tick 1: Infotainment needs VCSEC session first
+            TxAction act = runner.tick(1000, true /* connected */, false /* awake */, false /* asleep */);
+            CHECK(act == TxAction::SendVcsecSessionInfoRequest);
+            CommandRequest* cmd = runner.current_command();
+            CHECK(cmd != nullptr);
+            CHECK(cmd->state == CommandState::WaitingVcsecAuth);
+            CHECK(!cmd->wake_confirmed);
+
+            // Stale AWAKE arrives while command is in WaitingVcsecAuth
+            act = runner.tick(1050, true /* connected */, true /* awake */, false /* asleep */);
+            CHECK(act == TxAction::None);
+            CHECK(cmd->state == CommandState::WaitingVcsecAuth);
+            // Critical check: wake_confirmed must NOT be set during WaitingVcsecAuth!
+            CHECK(!cmd->wake_confirmed);
+
+            // VCSEC auth completes
+            runner.vcsec_session().set_established({1, 2, 3}, 5, 1100);
+            cmd->state = CommandState::Idle;
+
+            // Vehicle reports ASLEEP: because wake_confirmed was not prematurely set,
+            // tick correctly emits SendWake rather than skipping to infotainment auth.
+            act = runner.tick(1100, true /* connected */, false /* awake */, true /* asleep */);
+            CHECK(act == TxAction::SendWake);
+            CHECK(cmd->state == CommandState::WaitingWake);
+            CHECK(cmd->phase == CommandPhase::EnsuringAwake);
+        }
     }
 
     // 3. Prerequisite Phase Progression (VCSEC Auth -> Wake -> Infotainment Auth -> Ready)
@@ -6483,6 +6520,162 @@ static void test_command_runner_link_loss_and_faults() {
     }
 }
 
+static void test_command_runner_telemetry_filter_logic() {
+    // 1. is_session_info_uuid_matching
+    {
+        const uint8_t exp[16] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16};
+        const uint8_t same[16] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16};
+        const uint8_t diff[16] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 99};
+        const uint8_t short_uuid[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+
+        // Empty/omitted UUID in response is valid (matches)
+        CHECK(tk::is_session_info_uuid_matching(nullptr, 0, exp, sizeof(exp)));
+        CHECK(tk::is_session_info_uuid_matching(same, 0, exp, sizeof(exp)));
+
+        // Matching 16-byte UUID
+        CHECK(tk::is_session_info_uuid_matching(same, sizeof(same), exp, sizeof(exp)));
+
+        // Mismatched byte in 16-byte UUID
+        CHECK(!tk::is_session_info_uuid_matching(diff, sizeof(diff), exp, sizeof(exp)));
+
+        // Mismatched length
+        CHECK(!tk::is_session_info_uuid_matching(short_uuid, sizeof(short_uuid), exp, sizeof(exp)));
+        CHECK(!tk::is_session_info_uuid_matching(same, sizeof(same), short_uuid, sizeof(short_uuid)));
+
+        // Nullptr handling with non-zero length
+        CHECK(!tk::is_session_info_uuid_matching(nullptr, 16, exp, sizeof(exp)));
+        CHECK(!tk::is_session_info_uuid_matching(same, sizeof(same), nullptr, 16));
+    }
+
+    // 2. is_command_awaiting_session_auth
+    {
+        using CS = tk::CommandState;
+        using BD = tk::BleDomain;
+
+        // Inactive / completed commands are never awaiting auth
+        CHECK(!tk::is_command_awaiting_session_auth(false, false, CS::WaitingVcsecAuth, BD::VehicleSecurity));
+        CHECK(!tk::is_command_awaiting_session_auth(true, true, CS::WaitingVcsecAuth, BD::VehicleSecurity));
+
+        // VehicleSecurity session auth gate
+        CHECK(tk::is_command_awaiting_session_auth(true, false, CS::WaitingVcsecAuth, BD::VehicleSecurity));
+        CHECK(!tk::is_command_awaiting_session_auth(true, false, CS::WaitingInfoAuth, BD::VehicleSecurity));
+        CHECK(!tk::is_command_awaiting_session_auth(true, false, CS::Idle, BD::VehicleSecurity));
+        CHECK(!tk::is_command_awaiting_session_auth(true, false, CS::Ready, BD::VehicleSecurity));
+
+        // Infotainment session auth gate
+        CHECK(tk::is_command_awaiting_session_auth(true, false, CS::WaitingInfoAuth, BD::Infotainment));
+        CHECK(!tk::is_command_awaiting_session_auth(true, false, CS::WaitingVcsecAuth, BD::Infotainment));
+        CHECK(!tk::is_command_awaiting_session_auth(true, false, CS::Idle, BD::Infotainment));
+        CHECK(!tk::is_command_awaiting_session_auth(true, false, CS::Ready, BD::Infotainment));
+
+        // None / Broadcast domain never awaits session auth
+        CHECK(!tk::is_command_awaiting_session_auth(true, false, CS::WaitingVcsecAuth, BD::None));
+        CHECK(!tk::is_command_awaiting_session_auth(true, false, CS::WaitingInfoAuth, BD::Broadcast));
+    }
+
+    // 3. is_fault_domain_matching
+    {
+        using CS = tk::CommandState;
+        using BD = tk::BleDomain;
+
+        // Broadcast faults match any command regardless of domain or state
+        CHECK(tk::is_fault_domain_matching(BD::Broadcast, BD::VehicleSecurity, CS::Ready));
+        CHECK(tk::is_fault_domain_matching(BD::Broadcast, BD::Infotainment, CS::Ready));
+        CHECK(tk::is_fault_domain_matching(BD::None, BD::VehicleSecurity, CS::Idle));
+
+        // VehicleSecurity faults match VCSEC commands in any state
+        CHECK(tk::is_fault_domain_matching(BD::VehicleSecurity, BD::VehicleSecurity, CS::Ready));
+        CHECK(tk::is_fault_domain_matching(BD::VehicleSecurity, BD::VehicleSecurity, CS::WaitingVcsecAuth));
+        CHECK(tk::is_fault_domain_matching(BD::VehicleSecurity, BD::VehicleSecurity, CS::AwaitingResponse));
+
+        // VehicleSecurity faults match Infotainment commands ONLY if in WaitingVcsecAuth
+        CHECK(tk::is_fault_domain_matching(BD::VehicleSecurity, BD::Infotainment, CS::WaitingVcsecAuth));
+        CHECK(!tk::is_fault_domain_matching(BD::VehicleSecurity, BD::Infotainment, CS::WaitingInfoAuth));
+        CHECK(!tk::is_fault_domain_matching(BD::VehicleSecurity, BD::Infotainment, CS::Ready));
+        CHECK(!tk::is_fault_domain_matching(BD::VehicleSecurity, BD::Infotainment, CS::AwaitingResponse));
+
+        // Infotainment faults match Infotainment commands, but not VehicleSecurity commands
+        CHECK(tk::is_fault_domain_matching(BD::Infotainment, BD::Infotainment, CS::Ready));
+        CHECK(tk::is_fault_domain_matching(BD::Infotainment, BD::Infotainment, CS::AwaitingResponse));
+        CHECK(!tk::is_fault_domain_matching(BD::Infotainment, BD::VehicleSecurity, CS::Ready));
+        CHECK(!tk::is_fault_domain_matching(BD::Infotainment, BD::VehicleSecurity, CS::WaitingVcsecAuth));
+    }
+
+    // 4. evaluate_vcsec_operation_status
+    {
+        auto d_ok = tk::evaluate_vcsec_operation_status(0);
+        CHECK(d_ok.action == tk::VcsecOpStatusAction::CompleteOk);
+        CHECK(d_ok.is_ok);
+        CHECK(std::string(d_ok.error_message).empty());
+
+        auto d_wait = tk::evaluate_vcsec_operation_status(1);
+        CHECK(d_wait.action == tk::VcsecOpStatusAction::Wait);
+        CHECK(!d_wait.is_ok);
+        CHECK(std::string(d_wait.error_message).empty());
+
+        auto d_err = tk::evaluate_vcsec_operation_status(2);
+        CHECK(d_err.action == tk::VcsecOpStatusAction::Error);
+        CHECK(!d_err.is_ok);
+        CHECK(std::string(d_err.error_message) == "VCSEC command failed with error status");
+
+        auto d_unknown = tk::evaluate_vcsec_operation_status(99);
+        CHECK(d_unknown.action == tk::VcsecOpStatusAction::Error);
+        CHECK(!d_unknown.is_ok);
+        CHECK(std::string(d_unknown.error_message) == "VCSEC command failed with error status");
+    }
+
+    // 5. CommandRunner wrapper methods: is_awaiting_session_auth & should_notify_signed_message_fault
+    {
+        tk::CommandRunner runner;
+        // Empty queue: neither auth query is active
+        CHECK(!runner.is_awaiting_session_auth(tk::BleDomain::VehicleSecurity));
+        CHECK(!runner.is_awaiting_session_auth(tk::BleDomain::Infotainment));
+        CHECK(!runner.should_notify_signed_message_fault(tk::BleDomain::VehicleSecurity));
+        CHECK(!runner.should_notify_signed_message_fault(tk::BleDomain::Infotainment));
+
+        // Enqueue Infotainment command: starts in WaitingVcsecAuth on tick
+        runner.enqueue("Climate", tk::BleDomain::Infotainment, tk::WakePolicy::WakeIfNeeded, 20000, 1000);
+        runner.tick(1000, true, true);
+        CHECK(runner.current_command()->state == tk::CommandState::WaitingVcsecAuth);
+
+        // While awaiting VCSEC auth:
+        CHECK(runner.is_awaiting_session_auth(tk::BleDomain::VehicleSecurity));
+        CHECK(!runner.is_awaiting_session_auth(tk::BleDomain::Infotainment));
+        CHECK(runner.should_notify_signed_message_fault(tk::BleDomain::VehicleSecurity));
+        CHECK(runner.should_notify_signed_message_fault(tk::BleDomain::Infotainment));
+        CHECK(runner.should_notify_signed_message_fault(tk::BleDomain::Broadcast));
+
+        // VCSEC auth succeeds, advance to WaitingInfoAuth
+        runner.vcsec_session().set_established({1, 2, 3}, 1, 1000);
+        runner.current_command()->state = tk::CommandState::Idle;
+        runner.tick(1100, true, true);
+        CHECK(runner.current_command()->state == tk::CommandState::WaitingInfoAuth);
+
+        // While awaiting Infotainment auth:
+        CHECK(!runner.is_awaiting_session_auth(tk::BleDomain::VehicleSecurity));
+        CHECK(runner.is_awaiting_session_auth(tk::BleDomain::Infotainment));
+        CHECK(!runner.should_notify_signed_message_fault(tk::BleDomain::VehicleSecurity));
+        CHECK(runner.should_notify_signed_message_fault(tk::BleDomain::Infotainment));
+
+        // Infotainment auth succeeds, advance to Ready/AwaitingResponse
+        runner.info_session().set_established({4, 5, 6}, 2, 1000);
+        runner.current_command()->state = tk::CommandState::Idle;
+        runner.tick(1200, true, true);
+        runner.notify_tx_complete(1250);
+        CHECK(runner.current_command()->state == tk::CommandState::AwaitingResponse);
+
+        CHECK(!runner.is_awaiting_session_auth(tk::BleDomain::VehicleSecurity));
+        CHECK(!runner.is_awaiting_session_auth(tk::BleDomain::Infotainment));
+        CHECK(!runner.should_notify_signed_message_fault(tk::BleDomain::VehicleSecurity));
+        CHECK(runner.should_notify_signed_message_fault(tk::BleDomain::Infotainment));
+
+        // Pop / complete command -> all false
+        runner.complete_current_command(true);
+        CHECK(!runner.is_awaiting_session_auth(tk::BleDomain::Infotainment));
+        CHECK(!runner.should_notify_signed_message_fault(tk::BleDomain::Infotainment));
+    }
+}
+
 static void test_tx_wire_framing() {
     // B1: the TX path writes the builder's frame unchanged (tk::build_ble_tx_frame) and refuses a
     // malformed frame (tk::is_well_formed_ble_frame) — the exact helpers drive_command_runner_()
@@ -6692,6 +6885,7 @@ int main() {
     test_session_state();
     test_command_runner();
     test_command_runner_link_loss_and_faults();
+    test_command_runner_telemetry_filter_logic();
     test_tx_wire_framing();
     test_key_regeneration_contract();
     test_telemetry_dispatch_routing_order();

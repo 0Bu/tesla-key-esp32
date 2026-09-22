@@ -4,6 +4,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <functional>
 #include <string>
 #include <string_view>
@@ -94,6 +95,76 @@ enum class TxAction : uint8_t {
     SendInfoSessionInfoRequest,
     SendCommandPayload,
 };
+
+// Pure decision helpers for incoming telemetry and frame filtering
+
+// Evaluates whether an incoming SessionInfo response UUID matches the outstanding request UUID.
+// An empty/omitted response UUID (0 bytes) is valid and matches. A non-empty UUID must match
+// the expected request UUID exactly in length and byte content.
+inline bool is_session_info_uuid_matching(const uint8_t* msg_uuid, size_t msg_uuid_len,
+                                          const uint8_t* expected_uuid, size_t expected_uuid_len) noexcept {
+    if (msg_uuid_len == 0) return true;
+    if (msg_uuid_len != expected_uuid_len) return false;
+    if (msg_uuid == nullptr || expected_uuid == nullptr) return false;
+    return std::memcmp(msg_uuid, expected_uuid, msg_uuid_len) == 0;
+}
+
+// Evaluates whether an active command is currently awaiting authentication for the given domain.
+// Used to prevent unauthenticated/mismatched SessionInfo failure frames from failing commands
+// that are not in the waiting-auth phase for that domain.
+inline bool is_command_awaiting_session_auth(bool has_active_command, bool is_completed,
+                                             CommandState cmd_state, BleDomain session_domain) noexcept {
+    if (!has_active_command || is_completed) return false;
+    if (session_domain == BleDomain::VehicleSecurity) {
+        return cmd_state == CommandState::WaitingVcsecAuth;
+    }
+    if (session_domain == BleDomain::Infotainment) {
+        return cmd_state == CommandState::WaitingInfoAuth;
+    }
+    return false;
+}
+
+// Evaluates whether a signed message fault domain matches an in-flight command.
+// Signed message faults do not carry request UUIDs and are filtered by domain.
+// Broadcast faults match any command; VehicleSecurity faults match VCSEC commands
+// or commands awaiting VCSEC auth; Infotainment faults match Infotainment commands.
+inline bool is_fault_domain_matching(BleDomain fault_domain, BleDomain cmd_domain, CommandState cmd_state) noexcept {
+    if (fault_domain == BleDomain::Broadcast || fault_domain == BleDomain::None) {
+        return true;
+    }
+    if (fault_domain == BleDomain::VehicleSecurity) {
+        return (cmd_domain == BleDomain::VehicleSecurity) ||
+               (cmd_state == CommandState::WaitingVcsecAuth);
+    }
+    if (fault_domain == BleDomain::Infotainment) {
+        return (cmd_domain == BleDomain::Infotainment);
+    }
+    return false;
+}
+
+enum class VcsecOpStatusAction : uint8_t {
+    Wait,
+    CompleteOk,
+    Error,
+};
+
+struct VcsecOpStatusDecision {
+    VcsecOpStatusAction action{VcsecOpStatusAction::Error};
+    bool is_ok{false};
+    const char* error_message{""};
+};
+
+// Maps VCSEC command status operationStatus (OK=0, WAIT=1, ERROR=2) to action and error text.
+inline VcsecOpStatusDecision evaluate_vcsec_operation_status(int op_status_val) noexcept {
+    if (op_status_val == 1) { // VCSEC_OperationStatus_E_OPERATIONSTATUS_WAIT
+        return {VcsecOpStatusAction::Wait, false, ""};
+    }
+    if (op_status_val == 0) { // VCSEC_OperationStatus_E_OPERATIONSTATUS_OK
+        return {VcsecOpStatusAction::CompleteOk, true, ""};
+    }
+    return {VcsecOpStatusAction::Error, false, "VCSEC command failed with error status"};
+}
+
 
 // Represents an outstanding command in the FIFO
 struct CommandRequest {
@@ -270,6 +341,17 @@ public:
 
     SessionTracker& info_session() noexcept { return info_session_; }
     const SessionTracker& info_session() const noexcept { return info_session_; }
+
+    // Authentication and fault routing queries
+    [[nodiscard]] bool is_awaiting_session_auth(BleDomain session_domain) const noexcept {
+        const CommandRequest* cmd = current_command();
+        return cmd && is_command_awaiting_session_auth(true, cmd->is_completed, cmd->state, session_domain);
+    }
+
+    [[nodiscard]] bool should_notify_signed_message_fault(BleDomain fault_domain) const noexcept {
+        const CommandRequest* cmd = current_command();
+        return cmd && !cmd->is_completed && is_fault_domain_matching(fault_domain, cmd->domain, cmd->state);
+    }
 
     // Standalone tick: evaluates timeouts, retries, prerequisite progression, and next TX action.
     // sleep status model: is_awake indicates confirmed awake; is_asleep indicates confirmed asleep.
