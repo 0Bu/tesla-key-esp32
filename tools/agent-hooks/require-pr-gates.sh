@@ -76,7 +76,11 @@ fi
   exit 2
 }
 
-tmp="$(mktemp -d)" || exit 2
+tmp="$(mktemp -d 2>/dev/null || true)"
+if [ -z "$tmp" ] || [ ! -d "$tmp" ]; then
+  mkdir -p "$canonical_root/.tmp"
+  tmp="$(mktemp -d "$canonical_root/.tmp/pr-gates.XXXXXX")" || exit 2
+fi
 trap 'rm -rf "$tmp"' EXIT
 
 parse_basic_payload() {

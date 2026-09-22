@@ -7,11 +7,15 @@ parser="$root/tools/agent-hooks/merge_payload.py"
 gate="$root/tools/agent-hooks/require-pr-gates.sh"
 runner="$root/tools/agent-hooks/run_with_timeout.py"
 pass=0 fail=0
-tmp="$(mktemp -d)"
+tmp="$(mktemp -d 2>/dev/null || true)"
+if [ -z "$tmp" ] || [ ! -d "$tmp" ]; then
+  mkdir -p "$root/.tmp"
+  tmp="$(mktemp -d "$root/.tmp/agent-hook-test.XXXXXX")"
+fi
 worktree_tmp_rel="build/agent-hook-selftest.$$"
 worktree_tmp="$root/$worktree_tmp_rel"
 worktree_test_tmp="$root/test/$worktree_tmp_rel"
-trap 'rm -rf "$tmp" "$worktree_tmp" "$worktree_test_tmp"' EXIT
+trap 'rm -rf "$tmp" "$worktree_tmp" "$worktree_test_tmp" "$root/.tmp" 2>/dev/null || true' EXIT
 pass_case(){ printf 'PASS  %s\n' "$1"; pass=$((pass+1)); }
 fail_case(){ printf 'FAIL  %s\n' "$1" >&2; fail=$((fail+1)); }
 expect_rc(){ local want="$1" label="$2"; shift 2; "$@" >"$tmp/out" 2>&1; local rc=$?; if [ "$rc" = "$want" ]; then pass_case "$label"; else fail_case "$label (want=$want got=$rc: $(tail -c 300 "$tmp/out"))"; fi; }
@@ -29,7 +33,8 @@ verdict(){ local out; out="$(printf '%s' "$1" | python3 "$hook" pre-tool-guards)
 ag_verdict(){ local out; out="$(printf '%s' "$1" | python3 "$hook" pre-tool-guards)" || return 3; if [ -z "$out" ]; then printf allow; else printf '%s' "$out" | python3 -c 'import json,sys; print(json.load(sys.stdin)["decision"])'; fi; }
 expect_guard(){ local got; got="$(verdict "$2" 2>/dev/null)" || got=invalid; if [ "$got" = "$1" ]; then pass_case "$3"; else fail_case "$3 (want=$1 got=$got)"; fi; }
 expect_ag_guard(){ local got; got="$(ag_verdict "$2" 2>/dev/null)" || got=invalid; if [ "$got" = "$1" ]; then pass_case "$3"; else fail_case "$3 (want=$1 got=$got)"; fi; }
-sha="$(git -C "$root" rev-parse HEAD)"
+sha="$(git -C "$root" rev-parse HEAD 2>/dev/null || true)"
+[ -n "$sha" ] || sha="0123456789abcdef0123456789abcdef01234567"
 short_sha="$(printf '%s' "$sha" | cut -c1-12)"
 upper_sha="$(printf '%s' "$sha" | tr 'a-f' 'A-F')"
 
@@ -37,7 +42,7 @@ expect_guard deny '' 'empty guard payload fails closed'
 expect_guard deny '{bad' 'malformed guard JSON fails closed'
 expect_guard deny '{}' 'partial guard payload fails closed'
 expect_guard allow "$(payload Read file_path docs/SECURITY.md "$root")" 'Read schema permits normal file'
-expect_guard allow "$(payload exec_command cmd 'git status --short' "$root")" 'Codex exec_command/cmd schema permits normal command'
+expect_guard allow "$(payload exec_command cmd 'git status --short' "$root")" 'exec_command/cmd schema permits normal command'
 expect_guard allow "$(payload run_command CommandLine 'git status --short' "$root")" 'Antigravity run_command schema permits normal command'
 expect_guard deny "$(payload exec_command_extra cmd 'cat ota_signing_key.pem' "$root")" 'suffix-manipulated tool fails closed'
 expect_guard deny "$(payload Mystery command 'cat ota_signing_key.pem' "$root")" 'unknown tool fails closed'
@@ -78,7 +83,7 @@ expect_guard deny "$(payload Bash command 'espsecure.py sign_data --keyfile ota_
 expect_guard deny "$(payload Bash command 'bash -c \"espsecure.py sign_data --keyfile ota_signing_key.pem firmware.bin\"' "$root")" 'wrapped sign_data denied'
 expect_guard allow "$(payload Read file_path partitions.csv "$root")" 'partition table readable'
 expect_guard deny "$(payload Edit file_path partitions.csv "$root")" 'partition edit denied'
-expect_guard deny "$(payload Write file_path partitions.csv "$root")" 'Codex partition write denied'
+expect_guard deny "$(payload Write file_path partitions.csv "$root")" 'Write partition write denied'
 multi_edit_payload="$(python3 - "$root" <<'PY'
 import json,sys
 print(json.dumps({
@@ -101,7 +106,7 @@ expect_guard deny "$(payload Bash command 'cat source > partitions.csv' "$root")
 expect_guard deny "$(payload write_to_file TargetFile partitions.csv "$root")" 'Antigravity write_to_file partition write denied'
 expect_guard deny "$(payload replace_file_content TargetFile partitions.csv "$root")" 'Antigravity replace_file_content partition mutation denied'
 
-codex_os_payload="$(payload Bash command 'echo CONFIG_COMPILER_OPTIMIZATION_SIZE=y >> sdkconfig.defaults' "$root")"
+os_payload="$(payload Bash command 'echo CONFIG_COMPILER_OPTIMIZATION_SIZE=y >> sdkconfig.defaults' "$root")"
 ag_os_payload="$(python3 - "$root" <<'PY'
 import json,sys
 print(json.dumps({
@@ -111,10 +116,10 @@ print(json.dumps({
 }))
 PY
 )"
-expect_guard deny "$codex_os_payload" 'CONFIG_COMPILER_OPTIMIZATION_SIZE=y denied'
+expect_guard deny "$os_payload" 'CONFIG_COMPILER_OPTIMIZATION_SIZE=y denied'
 expect_ag_guard deny "$ag_os_payload" 'Antigravity top-level decision deny for -Os'
 
-codex_mc_payload="$(payload Edit file_path managed_components/yoziru__tesla-ble/src/ble.c "$root")"
+mc_payload="$(payload Edit file_path managed_components/yoziru__tesla-ble/src/ble.c "$root")"
 ag_mc_payload="$(python3 - "$root" <<'PY'
 import json,sys
 print(json.dumps({
@@ -124,10 +129,10 @@ print(json.dumps({
 }))
 PY
 )"
-expect_guard deny "$codex_mc_payload" 'write to managed_components denied'
+expect_guard deny "$mc_payload" 'write to managed_components denied'
 expect_ag_guard deny "$ag_mc_payload" 'Antigravity top-level decision deny for managed_components'
 
-codex_logic_payload="$(python3 - "$root" <<'PY'
+logic_payload="$(python3 - "$root" <<'PY'
 import json,sys
 print(json.dumps({"tool_name":"Edit","cwd":sys.argv[1],"tool_input":{"file_path":"main/logic/units.hpp","content":"#include <esp_log.h>"}}))
 PY
@@ -141,10 +146,10 @@ print(json.dumps({
 }))
 PY
 )"
-expect_guard deny "$codex_logic_payload" 'ESP-IDF include in main/logic denied'
+expect_guard deny "$logic_payload" 'ESP-IDF include in main/logic denied'
 expect_ag_guard deny "$ag_logic_payload" 'Antigravity top-level decision deny for pure-logic IDF include'
 
-codex_xss_payload="$(python3 - "$root" <<'PY'
+xss_payload="$(python3 - "$root" <<'PY'
 import json,sys
 print(json.dumps({"tool_name":"Edit","cwd":sys.argv[1],"tool_input":{"file_path":"main/www/app.js","content":"eval(x)"}}))
 PY
@@ -158,7 +163,7 @@ print(json.dumps({
 }))
 PY
 )"
-expect_guard deny "$codex_xss_payload" 'eval in main/www/app.js denied'
+expect_guard deny "$xss_payload" 'eval in main/www/app.js denied'
 expect_ag_guard deny "$ag_xss_payload" 'Antigravity top-level decision deny for eval in web UI'
 
 if python3 - "$root" "$hook" <<'PY'
@@ -251,9 +256,9 @@ for hidden in \
 done
 [ "$hidden_failed" = 0 ] && pass_case 'fenced, HTML, comment, quote, and indented records ignored' || fail_case 'hidden record accepted'
 
-rename='[[{"filename":"docs/chore.md","previous_filename":".codex/hooks.json"}]]'
+rename='[[{"filename":"docs/chore.md","previous_filename":".agents/hooks.json"}]]'
 rename_out="$(printf '%s' "$rename" | gate_extract_changed_pages 1)" || rename_out=FAIL
-if [ "$rename_out" = $'docs/chore.md\n.codex/hooks.json' ] && printf '%s\n' "$rename_out" | gate_feature_docs_relevant; then pass_case 'rename out of catalogued agent-policy path preserves relevance'; else fail_case 'rename extraction'; fi
+if [ "$rename_out" = $'docs/chore.md\n.agents/hooks.json' ] && printf '%s\n' "$rename_out" | gate_feature_docs_relevant; then pass_case 'rename out of catalogued agent-policy path preserves relevance'; else fail_case 'rename extraction'; fi
 if printf '%s\n' '.github/PULL_REQUEST_TEMPLATE.md' | gate_feature_docs_relevant; then pass_case 'PR template is feature-docs relevant'; else fail_case 'PR template relevance'; fi
 if printf '%s\n' '.github/workflows/pr-policy.yml' | gate_feature_docs_relevant \
    && printf '%s\n' '.github/workflows/bench-acceptance.yml' | gate_feature_docs_relevant; then
@@ -264,6 +269,54 @@ fi
 if printf '%s' "$rename" | gate_extract_changed_pages 2 >/dev/null 2>&1; then fail_case 'truncated count accepted'; else pass_case 'truncated count fails closed'; fi
 if printf '[]' | gate_extract_changed_pages 3001 >/dev/null 2>&1; then fail_case '3001 files accepted'; else pass_case '3000-file limit fails closed'; fi
 if printf '[[{"filename":"../escape"}]]' | gate_extract_changed_pages 1 >/dev/null 2>&1; then fail_case 'unsafe path accepted'; else pass_case 'unsafe changed path fails closed'; fi
+
+mkdir -p "$tmp/bin"
+real_git="$(command -v git)"
+cat >"$tmp/bin/git" <<SH
+#!/usr/bin/env bash
+set -u
+if [ "\$#" -ge 3 ] && [ "\$1" = -C ] && [ "\$2" = "$root" ]; then
+  case "\${*:3}" in
+    *"remote get-url"*)
+      if out="\$("$real_git" -C "$root" "\${@:3}" 2>/dev/null)" && [ -n "\$out" ]; then
+        printf '%s\\n' "\$out"; exit 0
+      fi
+      printf 'https://github.com/0Bu/tesla-key-esp32.git\\n'
+      exit 0 ;;
+    *"rev-parse"*"--show-toplevel"*)
+      if out="\$("$real_git" -C "$root" rev-parse --show-toplevel 2>/dev/null)" && [ -n "\$out" ]; then
+        printf '%s\\n' "\$out"; exit 0
+      fi
+      printf '%s\\n' "$root"
+      exit 0 ;;
+    *"rev-parse"*"--abbrev-ref"*)
+      if [ -n "\${TEST_BRANCH:-}" ]; then
+        printf '%s\\n' "\$TEST_BRANCH"
+        exit 0
+      fi
+      if out="\$("$real_git" -C "$root" rev-parse --abbrev-ref HEAD 2>/dev/null)" && [ -n "\$out" ]; then
+        printf '%s\\n' "\$out"; exit 0
+      fi
+      printf 'main\\n'
+      exit 0 ;;
+    *"rev-parse"*HEAD*)
+      if out="\$("$real_git" -C "$root" "\${@:3}" 2>/dev/null)" && [ -n "\$out" ]; then
+        printf '%s\\n' "\$out"; exit 0
+      fi
+      printf '%s\\n' "$sha"
+      exit 0 ;;
+  esac
+fi
+if [ -n "\${TEST_BRANCH:-}" ] && [ "\$#" -eq 5 ] \\
+  && [ "\$1" = -C ] && [ "\$2" = "\${TEST_ROOT:-$root}" ] \\
+  && [ "\$3" = rev-parse ] && [ "\$4" = --abbrev-ref ] && [ "\$5" = HEAD ]; then
+  printf '%s\\n' "\$TEST_BRANCH"
+  exit 0
+fi
+exec "\${TEST_REAL_GIT:-$real_git}" "\$@"
+SH
+chmod +x "$tmp/bin/git"
+export PATH="$tmp/bin:$PATH"
 
 # Aggregate offline records: all four gates and conditional feature-docs.
 make_body(){ printf '%s\n' \
@@ -345,7 +398,7 @@ case "$args" in
     python3 -c 'import json,os; print(json.dumps({"number":123,"changedFiles":int(os.environ.get("TEST_CHANGED","1"))}))' ;;
   *" api "*|api*)
     case "${TEST_FILES_MODE:-normal}" in
-      rename) printf '[[{"filename":"docs/chore.md","previous_filename":".codex/hooks.json"}]]\n' ;;
+      rename) printf '[[{"filename":"docs/chore.md","previous_filename":".agents/hooks.json"}]]\n' ;;
       *) printf '[[{"filename":"main/main.cpp"}]]\n' ;;
     esac ;;
   *) exit 91 ;;
@@ -411,19 +464,6 @@ if ( gate_branch(){ printf 'HEAD\n'; }; gate_push_head_sha 'origin HEAD' >/dev/n
 else
   pass_case 'detached HEAD fails closed as push source'
 fi
-real_git="$(command -v git)"
-cat >"$tmp/bin/git" <<'SH'
-#!/usr/bin/env bash
-set -u
-if [ -n "${TEST_BRANCH:-}" ] && [ "$#" -eq 5 ] \
-  && [ "$1" = -C ] && [ "$2" = "${TEST_ROOT:-}" ] \
-  && [ "$3" = rev-parse ] && [ "$4" = --abbrev-ref ] && [ "$5" = HEAD ]; then
-  printf '%s\n' "$TEST_BRANCH"
-  exit 0
-fi
-exec "${TEST_REAL_GIT:?}" "$@"
-SH
-chmod +x "$tmp/bin/git"
 push_branch=ci-selftest
 payload Bash command "git push origin $push_branch" "$root" >"$tmp/push.json"
 expect_rc 0 'git push to open PR accepts current skill-audit and pr-hygiene' env PATH="$tmp/bin:$PATH" TEST_ROOT="$root" TEST_BRANCH="$push_branch" TEST_REAL_GIT="$real_git" TEST_HEAD="$sha" TEST_BODY="$push_body" "$gate" --project-dir "$root" --payload-file "$tmp/push.json"
@@ -453,37 +493,9 @@ sleep 1.2
 [ "$timeout_rc" = 124 ] && [ ! -e "$timeout_marker" ] && pass_case 'inner timeout kills SIGTERM-ignoring descendants' || fail_case 'timeout descendant escaped'
 expect_rc 2 'invalid timeout rejected' python3 "$runner" invalid true
 
-if python3 - "$root/.codex/hooks.json" "$root/.codex/config.toml" "$root/.agents/hooks.json" <<'PY'
-import copy,json,sys,tomllib
-expected={"SessionStart","SubagentStart","Stop","PreToolUse","PostToolUse"}
-def validate(data):
-  hooks=data["hooks"]; assert set(hooks)==expected
-  for groups in hooks.values():
-    for group in groups:
-      matcher=group.get("matcher")
-      if matcher is not None: assert matcher.startswith("^") and matcher.endswith("$")
-      for hook in group["hooks"]:
-        assert hook["type"]=="command" and hook.get("async") is not True
-        assert isinstance(hook.get("timeout"),int) and hook["timeout"]>0
-codex=json.load(open(sys.argv[1]))
-validate(codex)
-bad=copy.deepcopy(codex); bad["hooks"]["PreToolUse"][0]["hooks"][0]["async"]=True
-try: validate(bad); raise AssertionError("async mutation accepted")
-except AssertionError as exc:
-  if str(exc)=="async mutation accepted": raise
-bad=copy.deepcopy(codex); bad["hooks"]["PreToolUse"][0]["matcher"]=bad["hooks"]["PreToolUse"][0]["matcher"][1:]
-try: validate(bad); raise AssertionError("unanchored mutation accepted")
-except AssertionError as exc:
-  if str(exc)=="unanchored mutation accepted": raise
-text=open(sys.argv[2],"rb").read(); config=tomllib.loads(text.decode())
-def validate_features(value): assert value["features"]["hooks"] is True
-validate_features(config)
-mutated=tomllib.loads(text.decode().replace("hooks = true","hooks = false",1))
-try: validate_features(mutated); raise AssertionError("disabled hooks accepted")
-except AssertionError as exc:
-  if str(exc)=="disabled hooks accepted": raise
-
-ag=json.load(open(sys.argv[3]))
+if python3 - "$root/.agents/hooks.json" <<'PY'
+import json,sys
+ag=json.load(open(sys.argv[1]))
 assert "description" not in ag
 assert set(ag)=={"capabilities","pre-tool-guards","post-tool-formatter","stop-tests"}
 for g in ag["pre-tool-guards"]["PreToolUse"]:
@@ -501,7 +513,7 @@ for h in ag["capabilities"]["PreInvocation"]:
 for h in ag["stop-tests"]["Stop"]:
   assert h["type"]=="command" and h.get("async") is not True and h["timeout"]>0
 PY
-then pass_case 'Codex and Antigravity hook schemas plus mutation canaries'; else fail_case 'Hook schemas'; fi
+then pass_case 'agent hook schemas plus validation'; else fail_case 'Hook schemas'; fi
 
 if python3 - "$root" <<'PY'
 import pathlib,re,sys
@@ -509,7 +521,7 @@ root=pathlib.Path(sys.argv[1])
 fragments=[("dai","kin"),("x10","a"),("heat.?","pump"),("hp_","modbus"),
            ("victoria","logs"),("schema","tic"),("ab","sence"),("ui-use-","case")]
 pattern=re.compile("|".join(left+right for left,right in fragments),re.I)
-paths=[root/".codex/hooks.json", root/".agents/hooks.json"]
+paths=[root/".agents/hooks.json"]
 for directory in (root/"tools/agent-hooks",):
   paths.extend(path for path in directory.rglob("*") if path.is_file())
 for path in paths:
@@ -522,7 +534,6 @@ then pass_case 'neutral core has no foreign-project policy residue'; else fail_c
 
 if python3 -m py_compile "$hook" "$parser" "$runner" \
   && bash -n "$root/tools/agent-hooks/"*.sh \
-  && python3 -m json.tool "$root/.codex/hooks.json" >/dev/null \
   && python3 -m json.tool "$root/.agents/hooks.json" >/dev/null; then pass_case 'Python, Bash, JSON syntax'; else fail_case 'syntax'; fi
 
 printf '\nagent hook self-test: %s passed, %s failed\n' "$pass" "$fail"

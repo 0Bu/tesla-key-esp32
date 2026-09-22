@@ -60,8 +60,8 @@ Work in this order — it's what makes the review catch *drift* rather than just
 5. **Verify before you assert** (see *Verification discipline*). Separate confirmed bugs
    from hypotheses. Do not over-claim.
 6. **Audit the review tooling against the project** (see *Reviewing the skills*). The skills
-   (this one **and** every sibling under `.agents/skills/`) **and** the review subagents under
-   `.codex/agents/` are part of what drifts — confirm each still maps the project that exists
+   (this one **and** every sibling under `.agents/skills/`) **and** the review subagents in
+   `.agents/subagents.json` are part of what drifts — confirm each still maps the project that exists
    before you trust it, and report any gap as a `SKILL-DRIFT` finding. Do not correct it during a
    review-only pass.
 7. **Write the report** in the structure at the end.
@@ -196,7 +196,7 @@ Treat a violation of any of these as a real finding.
   vehicle window. Every exception/error is contained because this runs while allocation is failing,
   and every log line on it must render under ~230 chars — `diag_log.cpp` formats into a 256-byte
   stack buffer and truncates silently past it. **This is deliberate; do not review it as a reboot
-  risk.** `.codex/agents/heap_safety_reviewer.toml` restates this bullet and must move with it.
+  risk.** `.agents/subagents.json` (`heap_safety_reviewer`) restates this bullet and must move with it.
 
 ### NVS / config
 - Namespaces: exactly `tesla_cfg` (runtime cfg) and `tesla_ble` (key + sessions). The exact
@@ -419,7 +419,7 @@ that describe it. When reviewing a change (or the repo as a whole), check these 
 
 ## Reviewing the skills (meta-coherence)
 
-The skills under `.agents/skills/` **and the review subagents under `.codex/agents/`** are
+The skills under `.agents/skills/` **and the review subagents in `.agents/subagents.json`** are
 themselves documents that drift — each lags the code by exactly the changes landed since it was
 last touched. A review is **not complete** until you have checked that **every** skill and
 **every** agent still describes the project that exists; otherwise future runs inherit a stale
@@ -466,7 +466,7 @@ Run these checks against the current tree:
 ### The other skills (audit and report each)
 
 The same drift hits the sibling skills. **Discover them, don't hardcode the list:**
-`ls .agents/skills/*/SKILL.md` (skills) **and** `ls .codex/agents/*.toml` (subagents). For each,
+`ls .agents/skills/*/SKILL.md` (skills) **and** `.agents/subagents.json` (subagents). For each,
 the test is the same — does its `description` + steps + concrete numbers (offsets, counts, flags,
 paths, target set) still match the script, code, and config it drives? Report a stale one as
 `SKILL-DRIFT` with a proposed change; do not edit it during the review. The current siblings and
@@ -508,7 +508,7 @@ what each must stay true to:
 - **`$add-logic-test`** scaffolds a new pure-logic unit in `main/logic/` + its `CHECK` cases in
   `test/test_logic.cpp`. Re-verify its claims against `scripts/run-mock-tests.sh`, the CI
   `logic-test` job (`.github/workflows/build.yml`), the `stop-logic-tests` handler in
-  `tools/agent-hooks/agent_hook.py` wired by `.codex/hooks.json`, the
+  `tools/agent-hooks/agent_hook.py` wired by `.agents/hooks.json`, the
   `CHECK`/`CHECK_STR`/`CHECK_NEAR` macro set in
   `test/test_logic.cpp`, and the `static_assert` lock pattern (`main/ota_update.cpp` /
   `main/logic/target.hpp`).
@@ -522,7 +522,7 @@ what each must stay true to:
   and language are a separate axis from coherence.
 - **`$feature-docs`** keeps `docs/FEATURES.md` in sync when a platform feature lands or changes.
   Re-verify its conditional merge gate against `tools/agent-hooks/require-pr-gates.sh`, especially
-  that the policy-path set covers `AGENTS.md`, `.agents/`, `.codex/`,
+  that the policy-path set covers `AGENTS.md`, `.agents/`,
   `.github/PULL_REQUEST_TEMPLATE.md`, `tools/agent-hooks/`, and `tools/agent-config/`, and that the
   firmware/release set still covers `main/`, `test/`, `sdkconfig.defaults*`,
   `partitions.csv`, the shipped Pages runtime (`docs/index.html`, `installer-bootstrap.mjs`,
@@ -585,7 +585,7 @@ what each must stay true to:
   gotchas. Post-reset verification uses a short bounded reachability retry and requires exact
   version/platform plus `paired:true`. It is the
   recovery counterpart to `$flash-esp32`/`$ship`, not a build path.
-The review subagents under `.codex/agents/` — audit these the same way (they are the targeted
+The review subagents in `.agents/subagents.json` — audit these the same way (they are the targeted
 lenses this skill delegates to; keep them complementary, not contradictory):
 
 - **`doc_drift_checker`** is the fast targeted-diff lens for the *cross-cutting* links. Its
@@ -598,7 +598,7 @@ lenses this skill delegates to; keep them complementary, not contradictory):
   the two heap maps must not diverge.
 - **`agent_config_reviewer`** audits runner-neutral agent configuration, skills, hooks, and
   subagents—not firmware logic. Confirm its boundary still points firmware-correctness work back
-  at this skill and its inventory matches `AGENTS.md`, `.agents/`, `.codex/`, and
+  at this skill and its inventory matches `AGENTS.md`, `.agents/`, and
   `tools/agent-hooks/`.
 - **`multi_target_build_reviewer`** is the per-target build/config divergence lens (the four
   targets built from one tree). Re-verify its facts against the *Cross-cutting consistency*
@@ -611,7 +611,7 @@ lenses this skill delegates to; keep them complementary, not contradictory):
 - **Any skill or agent added since this was written** must be audited too — and added to this list.
 
 A skill or agent that drives a script is only as current as the script: when the script changes,
-re-read the doc that documents it. Project hooks in `.codex/hooks.json` must delegate to the
+re-read the doc that documents it. Project hooks in `.agents/hooks.json` must delegate to the
 neutral implementation under `tools/agent-hooks/` (`agent_hook.py`, `require-pr-gates.sh`, and
 their shared helpers). A hook whose behaviour a skill/agent describes must match that core.
 

@@ -591,9 +591,9 @@ OTA** or `idf.py flash` from a trusted machine. Plan the update path before burn
 
 [`AGENTS.md`](../AGENTS.md) is the canonical authorization policy. Analysis, review, diagnosis,
 and triage are read-only by default, and an implementation request does not authorize commit,
-push, merge, release, USB, flash, OTA, NVS, or live vehicle operations. The project Codex config
-does not grant those mutations automatically; specialist reviewers under `.codex/agents/` run
-with `sandbox_mode = "read-only"`, no model pin, and no approval escalation.
+push, merge, release, USB, flash, OTA, NVS, or live vehicle operations. The project agent config
+does not grant those mutations automatically; specialist reviewers in `.agents/subagents.json` run
+with `SandboxMode = "read-only"`, no model pin, and no approval escalation.
 
 The project configuration calls the runner-neutral core under
 [`tools/agent-hooks/`](../tools/agent-hooks/). Its secret, partition, and PR-gate checks are lexical

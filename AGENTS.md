@@ -175,7 +175,7 @@ skills use `$skill-name` and canonical paths under `.agents/skills/`; `/skill-na
 in historical PR records. Hierarchical scoped rules live under [`main/AGENTS.md`](main/AGENTS.md)
 (C++/heap safety), [`main/logic/AGENTS.md`](main/logic/AGENTS.md) (pure-logic isolation), and
 `.agents/rules/` (protocol and firmware budget invariants). Hook policy lives in `tools/agent-hooks/`, with runner hook
-configuration and subagent manifests in `.codex/` and `.agents/`.
+configuration and subagent manifests in `.agents/`.
 
 ## PR, review and merge discipline
 
@@ -201,6 +201,6 @@ configuration and subagent manifests in `.codex/` and `.agents/`.
   authorized that phase explicitly. Local migration completion is not Phase 7 publication approval.
 
 Runner-neutral policy is implemented in [`tools/agent-hooks/`](tools/agent-hooks/) and configured
-for this project by [`.codex/hooks.json`](.codex/hooks.json). Hooks are lexical defense in depth:
+for this project by [`.agents/hooks.json`](.agents/hooks.json). Hooks are lexical defense in depth:
 they do not replace sandboxing, explicit authorization, branch protection, protected environments
 or human review.
