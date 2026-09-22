@@ -112,6 +112,9 @@ tk::ConfigStringSubmission parse_string_submission_(httpd_req_t* req, const char
 
 esp_err_t handle_gen_keys(GuardedReq rq) {
     httpd_req_t* req = rq.req;
+    if (validate_query_string(req) != ESP_OK) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid query string");
+    }
     OtaIdentityMutationGuard identity_guard(tk::IdentityMutationEntry::HttpGenerateKey);
     if (!identity_guard) {
         tk::JsonBuilder json;
@@ -182,6 +185,9 @@ esp_err_t handle_gen_keys(GuardedReq rq) {
 
 esp_err_t handle_send_key(GuardedReq rq) {
     httpd_req_t* req = rq.req;
+    if (validate_query_string(req) != ESP_OK) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid query string");
+    }
     // This firmware only enrolls a Charging Manager key (charging + wake), never an
     // owner key — its sole purpose is the evcc BLE integration. Reject an explicit
     // owner request rather than silently enrolling a different role than asked for.
@@ -526,15 +532,18 @@ esp_err_t handle_set_mqtt(GuardedReq rq) {
         [](const std::string& value) { return tk::mqtt_broker_is_plausible(value); },
         [&](const std::string& broker) {
             // Only a non-empty broker is probed — an empty value explicitly disables the bridge.
-            if (broker.empty()) return tk::ConfigProbeVerdict{};
-            const std::string uri = tk::mqtt_effective_uri(
-                broker, !std::string(CONFIG_TESLA_MQTT_USERNAME).empty());
-            const tk::MqttProbeResult result = mqtt_probe_broker(uri);
-            if (result == tk::MqttProbeResult::Ok) return tk::ConfigProbeVerdict{};
-            ESP_LOGW(TAG, "set_mqtt: broker check failed (%s) — not saving",
-                     tk::mqtt_probe_reason(result));
-            return tk::ConfigProbeVerdict{false, tk::mqtt_probe_http_status(result),
-                                          tk::mqtt_probe_reason(result)};
+            if (!broker.empty()) {
+                const std::string uri = tk::mqtt_effective_uri(
+                    broker, !std::string(CONFIG_TESLA_MQTT_USERNAME).empty());
+                const tk::MqttProbeResult result = mqtt_probe_broker(uri);
+                if (result != tk::MqttProbeResult::Ok) {
+                    ESP_LOGW(TAG, "set_mqtt: broker check failed (%s) — not saving",
+                             tk::mqtt_probe_reason(result));
+                    return tk::ConfigProbeVerdict{false, tk::mqtt_probe_http_status(result),
+                                                  tk::mqtt_probe_reason(result)};
+                }
+            }
+            return tk::ConfigProbeVerdict{};
         },
         [&](const std::string& broker) {
             cfg.mqtt_uri = broker;
@@ -545,6 +554,11 @@ esp_err_t handle_set_mqtt(GuardedReq rq) {
         },
         [&]() {
             ota_confirm_pending_image(tk::OtaRebootClass::SuccessfulUserConfigCommit);
+            if (!ota_config_restart_begin()) {
+                ESP_LOGW(TAG, "set_mqtt: reboot postponed — active operation owns gate; "
+                              "configuration saved and will apply on next restart");
+                return;
+            }
             vTaskDelay(pdMS_TO_TICKS(800));
             esp_restart();
         },
@@ -575,7 +589,9 @@ esp_err_t handle_set_syslog(GuardedReq rq) {
             return cfg.syslog_uri;
         },
         [](const std::string& value) { return tk::syslog_target_is_plausible(value); },
-        [](const std::string&) { return tk::ConfigProbeVerdict{}; },
+        [](const std::string&) {
+            return tk::ConfigProbeVerdict{};
+        },
         [&](const std::string& server) {
             cfg.syslog_uri = server;
             return tk::cfg_save(*g_config, cfg);
@@ -585,6 +601,11 @@ esp_err_t handle_set_syslog(GuardedReq rq) {
         },
         [&]() {
             ota_confirm_pending_image(tk::OtaRebootClass::SuccessfulUserConfigCommit);
+            if (!ota_config_restart_begin()) {
+                ESP_LOGW(TAG, "set_syslog: reboot postponed — active operation owns gate; "
+                              "configuration saved and will apply on next restart");
+                return;
+            }
             vTaskDelay(pdMS_TO_TICKS(800));
             esp_restart();
         },
@@ -663,6 +684,11 @@ esp_err_t handle_set_wifi(GuardedReq rq) {
                          : "config write failed"));
     if (ok) {
         ota_confirm_pending_image(tk::OtaRebootClass::SuccessfulUserConfigCommit);
+        if (!ota_config_restart_begin()) {
+            ESP_LOGW(TAG, "set_wifi: reboot postponed — active operation owns gate; "
+                          "configuration saved and will apply on next restart");
+            return r;
+        }
         vTaskDelay(pdMS_TO_TICKS(800));
         esp_restart();
     }

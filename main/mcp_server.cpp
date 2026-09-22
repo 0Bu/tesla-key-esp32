@@ -216,8 +216,9 @@ static esp_err_t handle_tools_call_(httpd_req_t* req, const tk::mcp_json::RpcId&
     // so the two can never report the same outcome differently. Tool-level failures are
     // isError results, not JSON-RPC errors (the protocol reserves those for malformed calls).
     std::string err = g_vehicle->last_command_error();
-    const char* text = tk::command_result_text(ok, err);
-    return send_rpc_result_(req, id, tk::mcp_json::build_tool_result(text, !ok));
+    const bool effective_ok = ok || tk::is_nominal_already_set(err);
+    const char* text = tk::command_result_text(effective_ok, err);
+    return send_rpc_result_(req, id, tk::mcp_json::build_tool_result(text, !effective_ok));
 }
 
 // ─── entry points (dispatched from http_server.cpp's handle_all) ──────────────

@@ -4,10 +4,12 @@
 // implementation split — see vehicle_ctrl_internal.hpp.
 
 #include "vehicle_ctrl.hpp"
+#include "logic/key_rotation.hpp"
 #include "runtime_admission.hpp"
 #include "vehicle_ctrl_internal.hpp"
 #include "stack_watch.hpp"
 #include "ota_update.hpp"
+#include "time_sync.hpp"
 #include <esp_log.h>
 #include <esp_timer.h>
 #include <cstdio>
@@ -16,8 +18,9 @@
 #include <exception>
 
 // protobuf generated headers (from tesla-ble) — VCSEC only: this TU never builds
-// infotainment (CarServer) messages; Keys_Role comes via <vehicle.h> → keys.pb.h.
+// infotainment (CarServer) messages; Keys_Role comes via keys.pb.h.
 #include <vcsec.pb.h>
+#include <keys.pb.h>
 
 // mbedtls for deriving the public-key fingerprint from the stored PEM key
 #include <mbedtls/pk.h>
@@ -28,24 +31,19 @@
 
 static const char* TAG = "vehicle_ctrl";
 
-// Automatic pairing supervisor. The hard constraint is the tesla-ble library's
-// single FIFO command queue: an unsigned "Whitelist Add Key" lingers in that
-// queue until the car confirms it (or ~180 s pass), so anything queued behind it
-// is blocked. The earlier design queued a session probe *behind* the whitelist-add,
-// so the probe never ran, commands piled up, and overlapping responses corrupted
-// the RX buffer ("Invalid message length …"). The car accepted the key while the
-// firmware never established a session.
+// Automatic pairing supervisor. Single-flight command discipline: an unsigned
+// "Whitelist Add Key" lingers until the car confirms it (or ~180 s pass), so
+// anything queued behind it is blocked.
 //
-// This version keeps the queue clean and runs ONE command at a time per round:
+// This supervisor keeps the queue clean and runs ONE command at a time per round:
 //   1. Probe with a signed VCSEC poll. If the key is already authorised this
 //      establishes + persists the session (done). If not, it fails *cleanly* with
 //      KEY_NOT_ON_WHITELIST and is popped — no clog.
 //   2. Send the whitelist-add. The car whitelists the key when the user confirms on
-//      screen but sends NO completing commandStatus, so this command can otherwise sit
-//      at the FIFO head through the library retries. pair() owns command_mutex_ through
-//      its absolute timeout and generation-aware flush, so nothing can queue behind it.
+//      screen but sends NO completing commandStatus. pair() owns command_mutex_ through
+//      its absolute timeout and generation-aware flush, so nothing can run behind it.
 //   3. Probe once more on a clean link — now authorised, this establishes the session.
-// Timed-out queued work is invalidated before set_connected(false) synchronously flushes
+// Timed-out queued work is invalidated before link reset synchronously flushes
 // callbacks, so the next round starts clean and no late completion reaches another request.
 void VehicleController::auto_pair_task_fn_(void* arg) {
   try {
@@ -387,7 +385,7 @@ bool VehicleController::generate_key() {
 }
 
 tk::KeyRotationResult VehicleController::generate_key_locked_() {
-    if (!vehicle_ || !storage_) {
+    if (!client_ || !storage_) {
         ESP_LOGE(TAG, "key generation unavailable — controller/storage not initialized");
         return tk::KeyRotationResult::NotCommitted;
     }
@@ -433,8 +431,8 @@ tk::KeyRotationResult VehicleController::generate_key_locked_() {
 
     bool generated = false;
     try {
-        tk::SemGuard g(vehicle_mutex_);   // RAII: regenerate_key() (crypto/NVS) can throw
-        generated = vehicle_->regenerate_key();
+        tk::SemGuard g(vehicle_mutex_);   // RAII: regenerate_key_native_() (crypto/NVS) can throw
+        generated = regenerate_key_native_();
     } catch (const std::exception& e) {
         ESP_LOGE(TAG, "key generation threw (%s) — durable commit not confirmed", e.what());
     } catch (...) {
@@ -451,6 +449,15 @@ tk::KeyRotationResult VehicleController::generate_key_locked_() {
         // fingerprint can classify durable identity. Keep key_rotate (and, for /set_vin,
         // vin_txn) armed and require boot to reload the authoritative fingerprint.
         key_reload_required_.store(true);
+        // Drop the cached fingerprint with it. The cache is a fast path for /status, seeded at
+        // init() and refreshed after a COMMITTED rotation; holding it here would keep serving the
+        // pre-rotation value while flash may already carry the new key — the one state in which
+        // the cached answer is knowably unreliable. Clearing it sends key_fingerprint() back to
+        // the storage-backed path, which reports whatever is durably there.
+        {
+            tk::MutexGuard cache_guard(cache_mutex_);
+            key_fingerprint_cache_.clear();
+        }
         ESP_LOGE(TAG, "key generation/persistence outcome is ambiguous — runtime key is untrusted; reboot required");
         invalidate_and_flush_(command_generation_.load());
         // Keep key_rotate armed. A reboot erases every potentially mismatched session before it
@@ -458,11 +465,22 @@ tk::KeyRotationResult VehicleController::generate_key_locked_() {
         return tk::KeyRotationResult::CommitUnknown;
     }
     pairing_cleanup_pending_.store(true);
-    // Record when the key was generated so the UI can show the key's creation
-    // date next to its fingerprint. Wall-clock comes from the browser (POST
-    // /set_time) or the NVS-cached time; if neither is set yet this stamps a
-    // near-zero value, which the UI ignores.
-    if (storage_) {
+    {
+        std::string new_fp = compute_key_fingerprint_();
+        tk::MutexGuard cache_guard(cache_mutex_);
+        key_fingerprint_cache_ = std::move(new_fp);
+    }
+    // Record when the key was generated so the UI can show the key's creation date next to its
+    // fingerprint — but only from an AUTHORITATIVE clock (SNTP, or an explicit browser
+    // /set_time), never from the NVS-cached wall clock main.cpp restores at boot. That cached
+    // value is the time of the PREVIOUS sync, so stamping it here would date a key minutes old
+    // to hours or weeks ago, durably: nothing rewrites key_created until the next rotation. The
+    // exposure is a headless board on a network that blocks NTP, re-keying because the car
+    // dropped our key — exactly the case with no browser to correct it. Same rule as the sibling
+    // paired_at() stamp; see main/time_sync.hpp. Leaving it unstamped is the better failure:
+    // status_model.hpp omits key_created below its plausibility floor, so the UI shows nothing
+    // rather than a confident wrong date, and the next rotation under a real clock stamps it.
+    if (storage_ && clock_is_authoritative()) {
         try {
             time_t now = time(nullptr);
             if (!storage_->save_str(tk::nvs_contract::kKeyCreated,
@@ -497,6 +515,33 @@ tk::KeyRotationResult VehicleController::generate_key_locked_() {
     return tk::KeyRotationResult::Complete;
 }
 
+bool VehicleController::regenerate_key_native_() {
+    if (!client_ || !storage_) return false;
+    // The transaction itself is tk::regenerate_private_key() (logic/key_rotation.hpp), which the
+    // real-library host harness runs too; this shell only binds NVS and reports the outcome.
+    const tk::KeyRegenerationResult result = tk::regenerate_private_key(
+        *client_, [this](const std::vector<uint8_t>& new_key) {
+            return storage_->save(tk::nvs_contract::kPrivateKey, new_key);
+        });
+    switch (result) {
+        case tk::KeyRegenerationResult::Committed:
+            return true;
+        case tk::KeyRegenerationResult::ExportExistingFailed:
+            ESP_LOGE(TAG, "Failed to export existing private key - aborting re-key");
+            break;
+        case tk::KeyRegenerationResult::CreateFailed:
+            ESP_LOGE(TAG, "Failed to create new private key");
+            break;
+        case tk::KeyRegenerationResult::ExportNewFailed:
+            ESP_LOGE(TAG, "Failed to export new private key");
+            break;
+        case tk::KeyRegenerationResult::PersistFailed:
+            ESP_LOGE(TAG, "Failed to persist new private key");
+            break;
+    }
+    return false;
+}
+
 bool VehicleController::finish_key_rotation_cleanup_() {
     if (!clear_session_and_cache_()) return false;
     // The marker is removed LAST. If this commit fails, pairing_cleanup_pending_ keeps every
@@ -518,9 +563,9 @@ bool VehicleController::finish_key_rotation_cleanup_() {
 // called while holding vehicle_mutex_ (it takes it to reset the in-memory peers).
 bool VehicleController::clear_session_and_cache_() {
     bool cleanup_ok = true;
-    // Reset the library's in-memory peer sessions (and flush its command queue / RX
-    // buffer) so a stale session key cannot be reused. set_connected(false) does this;
-    // only bother when something is actually established to avoid a spurious log on a
+    // Reset in-memory peer sessions (and flush command runner / RX
+    // state) so a stale session key cannot be reused.
+    // Only bother when something is actually established to avoid a spurious log on a
     // first-boot key generation.
     bool had_link    = ble_ && ble_->is_connected();
     bool had_session = has_session();
@@ -528,14 +573,22 @@ bool VehicleController::clear_session_and_cache_() {
     // physical GAP link. Disconnect unconditionally so a rotation also aborts service/CCCD
     // discovery; otherwise its delayed ready callback could publish the just-invalidated link.
     if (ble_) ble_->disconnect();
-    if ((had_link || had_session) && vehicle_) {
-        // set_connected(false) synchronously flushes queued callbacks. Although key rotation
-        // owns command_mutex_, invalidate defensively before the flush so no compatible SKIPPED
-        // result can be observed as success by an older waiter.
+    if (had_link || had_session) {
+        // Reset command runner and in-memory peer sessions so a stale session key cannot be reused.
         command_generation_.fetch_add(1);
         try {
-            tk::SemGuard g(vehicle_mutex_);   // RAII: set_connected() can throw
-            vehicle_->set_connected(false);
+            tk::SemGuard g(vehicle_mutex_);
+            command_runner_.reset(/*reset_framer=*/false);
+            request_framer_reset_();
+            command_builders_.fill(nullptr);
+            if (client_) {
+                if (auto* p = client_->get_peer(UniversalMessage_Domain_DOMAIN_VEHICLE_SECURITY)) {
+                    p->set_is_valid(false);
+                }
+                if (auto* p = client_->get_peer(UniversalMessage_Domain_DOMAIN_INFOTAINMENT)) {
+                    p->set_is_valid(false);
+                }
+            }
         } catch (const std::exception& e) {
             ESP_LOGE(TAG, "pairing in-memory reset threw (%s)", e.what());
             cleanup_ok = false;
@@ -566,6 +619,19 @@ bool VehicleController::clear_session_and_cache_() {
         cleanup_ok = false;
     }
 
+    // Invalidate the identity epoch and discard any unconsumed pending telemetry snapshots so a
+    // concurrent or delayed telemetry parse cannot revive defunct readings into active caches.
+    identity_epoch_.fetch_add(1, std::memory_order_acq_rel);
+    portENTER_CRITICAL(&telemetry_pending_mux_);
+    telemetry_pending_mask_ = 0;
+    telemetry_pending_charge_ = {};
+    telemetry_pending_climate_ = {};
+    telemetry_pending_drive_ = {};
+    telemetry_pending_tires_ = {};
+    telemetry_pending_closures_ = {};
+    charging_amps_feedback_ = {};
+    portEXIT_CRITICAL(&telemetry_pending_mux_);
+
     // Drop cached readings so /status and vehicle_data never serve old SOC/charge data
     // (or stale telemetry) from a defunct pairing. Under cache_mutex_ since the HTTP task
     // may be copying these concurrently.
@@ -577,14 +643,14 @@ bool VehicleController::clear_session_and_cache_() {
         last_known_drive_    = {};
         last_known_tires_    = {};
         last_known_closures_ = {};
+        last_contact_ticks_.store(0);    // no live data anymore → "asleep" card has nothing to show
+        last_charge_ticks_.store(0);
+        charge_state_generation_.store(0);
+        charge_cache_stale_reported_.store(false);
+        last_reachable_ticks_.store(0);  // and no proven reachability → link_state() back to Unknown
+        vcsec_asleep_since_ticks_.store(0);  // forget any debounced sleep run from the old pairing
+        vcsec_sleep_state_.store(static_cast<int>(tk::SleepState::Unknown));
     }
-    last_contact_ticks_.store(0);    // no live data anymore → "asleep" card has nothing to show
-    last_charge_ticks_.store(0);
-    charge_state_generation_.store(0);
-    charge_cache_stale_reported_.store(false);
-    last_reachable_ticks_.store(0);  // and no proven reachability → link_state() back to Unknown
-    vcsec_asleep_since_ticks_.store(0);  // forget any debounced sleep run from the old pairing
-    vcsec_sleep_state_.store(static_cast<int>(TeslaBLE::SleepState::UNKNOWN));
     ESP_LOGI(TAG, "pairing/session cleanup %s", cleanup_ok ? "complete" : "incomplete");
     return cleanup_ok;
 }
@@ -694,7 +760,7 @@ bool VehicleController::health_probe_(int timeout_ms) {
     return send_vcsec_("VCSEC Health Poll", [](TeslaBLE::Client* c, uint8_t* b, size_t* l) {
         return c->build_vcsec_information_request_message(
             VCSEC_InformationRequestType_INFORMATION_REQUEST_TYPE_GET_STATUS, b, l);
-    }, TeslaBLE::WakePolicy::NO_WAKE_FAIL, timeout_ms, tk::ConnectOrigin::Background,
+    }, WakePolicy::NoWakeFail, timeout_ms, tk::ConnectOrigin::Background,
        /*auth_fail_is_revocation=*/true,
        tk::CompletionTimeoutPolicy::BackgroundHealth);
 }
@@ -713,11 +779,12 @@ time_t VehicleController::paired_at() {
         time_t t = (time_t)atoll(s.c_str());
         if (t > 1600000000) return t;
     }
-    // First time we observe a session with a valid wall clock: stamp it now. For a
+    // First time we observe a session with an authoritative wall clock: stamp it now. For a
     // fresh handshake this is within seconds of pairing; a pairing that predates this
     // tracking (or whose clock was unsynced) gets stamped at first sync instead.
+    // Do NOT stamp when the clock is merely restored from NVS (historical shutdown time).
     time_t now = time(nullptr);
-    if (now > 1600000000) {
+    if (clock_is_authoritative() && now > 1600000000) {
         if (!storage_->save_str(tk::nvs_contract::kPairedAt,
                                 std::to_string((long long)now))) {
             ESP_LOGW(TAG, "pairing date not persisted — the UI will re-stamp it on the next sync");
@@ -739,7 +806,7 @@ bool VehicleController::has_session() {
     return storage_ && storage_->blob_exists(tk::nvs_contract::kSessionVcsec);
 }
 
-std::string VehicleController::key_fingerprint() {
+__attribute__((noinline)) std::string VehicleController::compute_key_fingerprint_() {
     if (!storage_) return "";
     std::vector<uint8_t> pem;
     if (!storage_->load(tk::nvs_contract::kPrivateKey, pem) || pem.empty()) return "";
@@ -782,6 +849,22 @@ std::string VehicleController::key_fingerprint() {
     return fp;
 }
 
+std::string VehicleController::key_fingerprint() {
+    {
+        tk::MutexGuard cache_guard(cache_mutex_);
+        if (!key_fingerprint_cache_.empty()) return key_fingerprint_cache_;
+    }
+    if (!storage_ || !storage_->blob_exists(tk::nvs_contract::kPrivateKey)) {
+        return "";
+    }
+    std::string fp = compute_key_fingerprint_();
+    if (!fp.empty()) {
+        tk::MutexGuard cache_guard(cache_mutex_);
+        key_fingerprint_cache_ = fp;
+    }
+    return fp;
+}
+
 bool VehicleController::pair(tk::ConnectOrigin origin, int timeout_ms) {
     if (!tk::runtime_admission_vehicle_ready()) return false;
     if (timeout_ms <= 0) return false;
@@ -815,7 +898,7 @@ bool VehicleController::pair(tk::ConnectOrigin origin, int timeout_ms) {
             return c->build_white_list_message(
                 role, VCSEC_KeyFormFactor_KEY_FORM_FACTOR_CLOUD_KEY, b, l);
         },
-        TeslaBLE::WakePolicy::NO_WAKE_FAIL, deadline, origin,
+        WakePolicy::NoWakeFail, deadline, origin,
         /*auth_fail_is_revocation=*/false,
         origin == tk::ConnectOrigin::Foreground
             ? tk::CompletionTimeoutPolicy::ForegroundWarn

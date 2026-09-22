@@ -19,7 +19,7 @@ jobs:
       github.event.workflow_run.event == 'pull_request'
       && github.event.workflow_run.conclusion == 'success'
       && github.event.workflow_run.pull_requests[0].number != null
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     permissions:
       actions: read
@@ -62,7 +62,7 @@ jobs:
     # permission, Environment, restored cache or producer-artifact access. Its only token is read-only.
     needs: validate
     if: needs.validate.outputs.eligible == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 60
     permissions:
       contents: read
@@ -133,7 +133,7 @@ jobs:
   sign-preview:
     needs: [validate, trusted-rebuild]
     if: needs.validate.outputs.eligible == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 20
     concurrency:
       group: signed-preview-${{ needs.validate.outputs.pr }}

@@ -5,6 +5,7 @@
 // vehicle_pairing.cpp (pairing lifecycle/keys); shared RAII in vehicle_ctrl_internal.hpp.
 
 #include "vehicle_ctrl.hpp"
+#include "vehicle_ctrl_internal.hpp"
 #include "runtime_admission.hpp"
 #include "logic/vin.hpp"
 #include "logic/heap_watchdog.hpp"
@@ -14,7 +15,7 @@
 #include <esp_log.h>
 
 // No protobuf includes needed here: the only generated types this TU touches are the
-// UniversalMessage_* ones, which vehicle_ctrl.hpp already provides via <vehicle.h>.
+// UniversalMessage_* ones, which vehicle_ctrl.hpp provides via universal_message.pb.h.
 
 static const char* TAG = "vehicle_ctrl";
 
@@ -103,7 +104,7 @@ bool VehicleController::recover_pending_key_rotation_at_boot_() {
     const tk::KeyRotationMarkerProbe probe =
         tk::classify_key_rotation_marker_probe(probe_ok, marker_present);
     if (probe == tk::KeyRotationMarkerProbe::Error) {
-        ESP_LOGE(TAG, "key-rotation marker could not be read — refusing vehicle construction");
+        ESP_LOGE(TAG, "key-rotation marker could not be read — refusing vehicle controller initialization");
         return false;
     }
     if (tk::decide_key_rotation_boot(probe == tk::KeyRotationMarkerProbe::Present,
@@ -112,8 +113,8 @@ bool VehicleController::recover_pending_key_rotation_at_boot_() {
         return true;
     }
 
-    // Do not construct TeslaBLE::Vehicle while this marker exists: its constructor loads the
-    // private key and persisted peers, and a torn rotation makes that combination ambiguous.
+    // Do not initialize client while this marker exists: key loading and persisted peers
+    // with a torn rotation make that combination ambiguous.
     key_runtime_safe_.store(false);
     pairing_cleanup_pending_.store(true);
     ESP_LOGW(TAG, "interrupted key rotation detected — cleaning persisted peer state before key load");
@@ -137,7 +138,7 @@ bool VehicleController::recover_pending_key_rotation_at_boot_() {
 
     pairing_cleanup_pending_.store(false);
     key_rotation_recovered_at_boot_ = true;
-    ESP_LOGI(TAG, "interrupted key-rotation cleanup completed before vehicle construction");
+    ESP_LOGI(TAG, "interrupted key-rotation cleanup completed before controller initialization");
     return true;
 }
 
@@ -157,16 +158,16 @@ bool VehicleController::init(const std::string& vin,
 
     if (!recover_pending_key_rotation_at_boot_()) {
         // app_main treats init failure as boot-fatal. No background task and, critically, no
-        // TeslaBLE::Vehicle exists on this path, so a pending journal can never be reported as
+        // active client exists on this path, so a pending journal can never be reported as
         // paired or used to sign/enrol until a later boot finishes its cleanup.
         return false;
     }
 
     bool stored_private_key = false;
     if (!storage_->probe_blob(tk::nvs_contract::kPrivateKey, stored_private_key)) {
-        // Missing is a valid first-boot state; unreadable is not. Do not construct Vehicle or
+        // Missing is a valid first-boot state; unreadable is not. Do not initialize client or
         // start auto-pair with an NVS error misclassified as permission to generate a new key.
-        ESP_LOGE(TAG, "private-key storage probe failed — refusing vehicle construction");
+        ESP_LOGE(TAG, "private-key storage probe failed — refusing controller initialization");
         return false;
     }
 
@@ -187,38 +188,34 @@ bool VehicleController::init(const std::string& vin,
         return false;
     }
 
-    auto ble_sp     = std::shared_ptr<TeslaBLE::BleAdapter>(&ble, NoDelete{});
-    auto storage_sp = std::shared_ptr<TeslaBLE::StorageAdapter>(&storage, NoDelete{});
-    vehicle_ = std::make_unique<TeslaBLE::Vehicle>(ble_sp, storage_sp);
-
-    vehicle_->set_vin(vin);
+    client_ = std::make_unique<TeslaBLE::Client>();
+    client_->set_vin(vin);
+    if (stored_private_key) {
+        std::vector<uint8_t> key_bytes;
+        if (storage_->load(tk::nvs_contract::kPrivateKey, key_bytes) && !key_bytes.empty()) {
+            client_->load_private_key(key_bytes.data(), key_bytes.size());
+        }
+    }
     // A blob's mere presence does not prove that the library parsed it. Commands may use the
-    // identity only when storage contains a key AND this Vehicle instance successfully loaded it.
+    // identity only when storage contains a key AND this Client instance successfully loaded it.
     // This also keeps a corrupt/truncated key from being treated as enrolment-safe after reboot.
-    key_runtime_safe_.store(stored_private_key && vehicle_->has_private_key());
+    key_runtime_safe_.store(stored_private_key && client_->has_private_key());
+    if (stored_private_key) {
+        std::string fp = compute_key_fingerprint_();
+        tk::MutexGuard cache_guard(cache_mutex_);
+        key_fingerprint_cache_ = std::move(fp);
+    }
+
+    load_nvs_sessions_();
 
     // Exact named adapters are mechanically audited as fixed POD/atomic/queue-only callbacks.
-    // The NimBLE host never calls Vehicle, allocates, waits on a shared mutex, logs or touches NVS.
+    // The NimBLE host never calls Client, allocates, waits on a shared mutex, logs or touches NVS.
     ble_->set_connected_cb(&VehicleController::ble_link_event_cb_, this);
     ble_->set_rx_data_cb(&VehicleController::ble_rx_event_cb_, this);
 
     // Persistent charge-state + read-only telemetry cache callbacks (installed once,
     // never cleared) — defined in vehicle_telemetry.cpp next to the parsers they use.
     install_state_callbacks_();
-
-    // Reliable key-revocation detector. When the key is deleted on the car side, the
-    // VCSEC health poll keeps succeeding from its cached session (the whitelist is not
-    // re-checked per command), so it can miss the deletion entirely. But the car rejects
-    // every signed command on the *infotainment* domain immediately with a signed-message
-    // fault naming the key (ERROR_UNKNOWN_KEY_ID) — the background charge poll triggers
-    // exactly that. Observe every incoming message and, while we believe we're paired,
-    // treat such a fault as a lost pairing. Runs inside serialized Vehicle dispatch; only atomic
-    // ops here. Gated on believed_paired_ so enrolment-time rejections are ignored. Keep the
-    // std::function adapter itself mechanically trivial: tesla-ble invokes it synchronously while
-    // Vehicle owns its internal dispatch, so logging/allocation belongs in the normal task loop.
-    vehicle_->set_message_callback([this](const UniversalMessage_RoutableMessage& msg) {
-        on_vehicle_message_(msg);
-    });
 
     // Seed the active window open at boot so evcc gets a warm cache for the first few
     // minutes after start; it then backs off if the car stays idle (no command, not charging).
@@ -238,12 +235,49 @@ bool VehicleController::init(const std::string& vin,
     if (!start_tasks) {
         // The fully wired controller is safe to read, but the caller owns the lifecycle boundary:
         // normal boot defers these mutating tasks until recovery + essential services complete;
-        // safe mode intentionally never starts them.
+        // safe mode uses init_safe_mode() which never starts them.
         ESP_LOGI(TAG, "vehicle_loop and auto_pair deferred");
         return true;
     }
 
     return this->start_tasks();
+}
+
+bool VehicleController::init_safe_mode(const std::string& vin,
+                                       NvsStorageAdapter& storage,
+                                       NvsStorageAdapter& config_store) {
+    storage_      = &storage;
+    config_store_ = &config_store;
+    vin_          = vin;
+    key_runtime_safe_.store(false);
+    pairing_cleanup_pending_.store(false);
+    vin_transition_pending_.store(false);
+    key_reload_required_.store(false);
+
+    if (!vehicle_mutex_) vehicle_mutex_ = xSemaphoreCreateMutex();
+    if (!command_mutex_) command_mutex_ = xSemaphoreCreateMutex();
+    if (!cache_mutex_)   cache_mutex_   = xSemaphoreCreateMutex();
+    if (!result_mutex_)  result_mutex_  = xSemaphoreCreateMutex();
+
+    if (!vehicle_mutex_ || !command_mutex_ || !cache_mutex_ || !result_mutex_) {
+        ESP_LOGE(TAG, "safe mode: synchronization primitive allocation failed");
+        return false;
+    }
+
+    // Deliberately NO fingerprint pre-warm here, unlike init(). Two reasons, both specific to
+    // safe mode:
+    //   * compute_key_fingerprint_() loads the private-key PEM and runs mbedtls_ctr_drbg_seed()
+    //     + mbedtls_pk_parse_key(). app_main only enables SAR-ADC entropy (bootloader_random_*)
+    //     around the NORMAL controller path, and WiFi/BLE are not up yet, so seeding here would
+    //     sit outside the one window main.cpp documents as covering every boot-time key load.
+    //   * safe mode exists so a board that keeps crashing stays fixable in a browser. That parse
+    //     allocates and can throw, and a throw on this path unwinds to app_main's boundary and
+    //     halts boot — taking down the recovery web UI, the one thing safe mode must deliver.
+    // key_fingerprint() computes it lazily on the first /status instead: by then WiFi is up and
+    // supplying RF entropy, and a throw lands in handle_all's containment net as a 503.
+
+    ESP_LOGI(TAG, "VehicleController initialized in safe mode (inert)");
+    return true;
 }
 
 void VehicleController::on_vehicle_message_(
@@ -270,7 +304,7 @@ bool VehicleController::start_tasks() {
         ESP_LOGE(TAG, "inconsistent vehicle task lifecycle — refusing external task deletion");
         return false;
     }
-    if (!vehicle_ || !vehicle_mutex_ || !command_mutex_ || !cache_mutex_ || !result_mutex_) {
+    if (!client_ || !vehicle_mutex_ || !command_mutex_ || !cache_mutex_ || !result_mutex_) {
         ESP_LOGE(TAG, "vehicle tasks cannot start before controller initialization completes");
         return false;
     }

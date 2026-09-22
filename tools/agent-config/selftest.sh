@@ -16,7 +16,7 @@ fail() { echo "agent-config selftest: $1" >&2; exit 1; }
 make_fixture() {
   local dest="$1"
   rm -rf "$dest"
-  mkdir -p "$dest/.agents" "$dest/.github" "$dest/docs" "$dest/tools"
+  mkdir -p "$dest/.agents" "$dest/.github" "$dest/docs" "$dest/tools" "$dest/main"
   cp "$ROOT/.mcp.json" "$dest/.mcp.json"
   cp "$ROOT/AGENTS.md" "$dest/AGENTS.md"
   cp "$ROOT/.github/PULL_REQUEST_TEMPLATE.md" "$dest/.github/PULL_REQUEST_TEMPLATE.md"
@@ -26,6 +26,7 @@ make_fixture() {
   cp "$ROOT/docs/FEATURES.md" "$dest/docs/FEATURES.md"
   cp -R "$ROOT/tools/agent-config" "$dest/tools/agent-config"
   cp -R "$ROOT/tools/agent-hooks" "$dest/tools/agent-hooks"
+  cp "$ROOT/main/idf_component.yml" "$dest/main/idf_component.yml"
 }
 
 run_gate() {
@@ -286,10 +287,15 @@ PY
 expect_failure "missing safety invariant" "$fixture" "missing-canary"
 
 fixture="$WORK/multi-target-publication-dag"; make_fixture "$fixture"
-perl -0pi -e 's/logic-test -> build -> independent-rebuild -> publish ->/logic-test -> build -> publish ->/' \
+perl -0pi -e 's/logic-test -> build-target -> build -> independent-rebuild -> publish ->/logic-test -> build-target -> build -> publish ->/' \
   "$fixture/.agents/subagents.json"
 expect_failure "multi-target publication DAG" "$fixture" \
   "multi-target reviewer is missing the independent-rebuild/publication DAG contract"
+
+fixture="$WORK/stale-pin"; make_fixture "$fixture"
+perl -0pi -e 's/version: "v5.2.0"/version: "v5.3.0"/' "$fixture/main/idf_component.yml"
+expect_failure "stale pin assertion" "$fixture" \
+  "pin assertion does not match idf_component.yml pin"
 
 echo "== hook configuration =="
 

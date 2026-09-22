@@ -22,6 +22,13 @@ function requestJson(url,options){
     return r.json();
   });
 }
+function requestJsonResult(url,options){
+  return fetch(url,options).then(function(r){
+    return r.json().catch(function(){ return null; }).then(function(j){
+      return {ok:!!(r&&r.ok), status:r?r.status:0, json:j};
+    });
+  });
+}
 function requestJsonWithTimeout(url,options,timeoutMs){
   var ctl=typeof AbortController!=='undefined'?new AbortController():null;
   var opts=Object.assign({},options||{}); if(ctl)opts.signal=ctl.signal;
@@ -377,6 +384,9 @@ function render(s){
   if(s.reauth && !paired){
     rb.classList.add('show');
     rb.querySelector('.bt').innerHTML='<b>Key was reset.</b> The vehicle removed this device’s key, so a fresh one was generated automatically. Approve the new pairing on your Tesla’s touchscreen.';
+  } else if(s.sys && s.sys.safe_mode){
+    rb.classList.add('show');
+    rb.querySelector('.bt').innerHTML='<b>Safe Mode active.</b> Vehicle Bluetooth, commands, and telemetry are stopped. Use this recovery dashboard to inspect diagnostics or update firmware.';
   } else rb.classList.remove('show');
 
   // hero — single source of overall status.
@@ -432,8 +442,8 @@ function render(s){
       setHTML(hl,'<span>Parked</span>');
       hs.textContent='No live reading — tap the icon to wake the car.';
       var ils=s.last||{}, ilsoc=(ils.usable_soc!=null)?Math.round(ils.usable_soc):((ils.soc!=null)?Math.round(ils.soc):null), iago=fmtAgo(s.last_seen_s), ichips=[];
-      if(ilsoc!=null) chips.push(stat('Battery','<span style="color:'+socColor(ilsoc)+'">'+ilsoc+'</span>','%'));
-      if(iago)        chips.push(stat('Idle', iago, ''));
+      if(ilsoc!=null) ichips.push(stat('Battery','<span style="color:'+socColor(ilsoc)+'">'+ilsoc+'</span>','%'));
+      if(iago)        ichips.push(stat('Idle', iago, ''));
       // No Overheat/Defrost chips here (same as the asleep card): both key off the live AC
       // draw (liveKw needs s.vehicle), and /status emits "vehicle" only while link==='awake'.
       hst.innerHTML=ichips.join('');
@@ -613,13 +623,20 @@ function toggleCharge(){
   var cmd=isCharging?'charge_stop':'charge_start';
   chgBusy=true; if(state)render(state);
   toast(isCharging?'Stopping charge…':'Starting charge…','info');
-  fetch('/api/1/vehicles/'+encodeURIComponent(vin)+'/command/'+cmd,{method:'POST'})
-    .then(function(r){if(!r.ok)throw new Error('HTTP '+r.status);return r.json()})
-    .then(function(j){
-      var ok=commandResponse(j).result;
-      if(ok){ toast(isCharging?'Charging stopped':'Charging started','ok'); return; }
-      var f=chargeFailMsg((j&&j.response&&j.response.reason)||'', isCharging);
-      toast(f.msg, f.type);
+  return requestJsonResult('/api/1/vehicles/'+encodeURIComponent(vin)+'/command/'+cmd,{method:'POST'})
+    .then(function(res){
+      var j=res.json;
+      if(j && j.response && typeof j.response.result === 'boolean'){
+        if(j.response.result){ toast(isCharging?'Charging stopped':'Charging started','ok'); return; }
+        var f=chargeFailMsg((j.response.reason)||'', isCharging);
+        toast(f.msg, f.type);
+        return;
+      }
+      if(!res.ok && res.status){
+        toast('Command failed (HTTP '+res.status+')','err');
+        return;
+      }
+      toast('Command failed — is the car in range?','err');
     })
     .catch(function(){ toast('Command failed — is the car in range?','err'); })
     .then(function(){ chgBusy=false; poll(); });
@@ -631,6 +648,8 @@ function chargeFailMsg(reason,isCharging){
   if(r.indexOf('not reachable')>=0||r.indexOf('timed out')>=0||r.indexOf('unreachable')>=0)
     return {msg:'Car not reachable — is it in range?', type:'err'};
   if(r.indexOf('complete')>=0)        return {msg:'Charging is already complete', type:'info'};
+  if(r.indexOf('already_set')>=0||r.indexOf('already set')>=0)
+                                      return {msg:'Setting already active on vehicle', type:'info'};
   if(r.indexOf('not_charging')>=0||r.indexOf('not charging')>=0)
                                       return {msg:'The car isn’t charging', type:'info'};
   if(r.indexOf('is_charging')>=0)     return {msg:'The car is already charging', type:'info'};
@@ -648,12 +667,22 @@ function editVin(){
   v=v.trim().toUpperCase();
   if(!vinValid(v)){ toast('Invalid VIN — must be 17 characters','err'); return; }
   if(v===(state&&state.vin)){ toast('VIN unchanged','info'); return; }
+  var keyKnown = state && typeof state.key_present === 'boolean';
+  var hasKey = keyKnown ? state.key_present : true;
+  if(hasKey && !confirm('Change vehicle VIN?\n\nThis generates a new security key and clears the stored pairing. You must re-pair with the vehicle.')) return;
   toast('Saving VIN…','info');
-  return requestJson('/set_vin',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({vin:v})})
-    .then(function(j){var o=commandResponse(j);
-      if(!o.result){ toast(o.reason||'Failed to save VIN','err'); return; }
-      if(/no reboot|unchanged/i.test(o.reason||'')){ toast('VIN unchanged','info'); return; }
-      toast('VIN saved · rebooting','ok');})
+  return requestJsonResult('/set_vin',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({vin:v})})
+    .then(function(res){
+      var o=res.json&&res.json.response;
+      if(o && typeof o.result === 'boolean' && typeof o.reason === 'string'){
+        if(!o.result){ toast(o.reason||'Failed to save VIN','err'); return; }
+        if(/no reboot|unchanged/i.test(o.reason||'')){ toast('VIN unchanged','info'); return; }
+        toast('VIN saved · rebooting','ok');
+        return;
+      }
+      var msg=(!res.ok && res.status)?('Failed to save VIN (HTTP '+res.status+')'):'Failed to save VIN — no change was confirmed';
+      toast(msg,'err');
+    })
     .catch(function(){toast('Failed to save VIN — no change was confirmed','err')});
 }
 function editMqtt(){
@@ -664,11 +693,18 @@ function editMqtt(){
   if(v && v.indexOf(' ')>=0){ toast('Invalid broker — use IP:PORT','err'); return; }
   if(v===cur){ toast(v?'MQTT broker unchanged':'MQTT already disabled','info'); return; }
   toast(v?'Saving MQTT broker…':'Disabling MQTT…','info');
-  return requestJson('/set_mqtt',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({broker:v})})
-    .then(function(j){var o=commandResponse(j);
-      if(!o.result){ toast(o.reason||'Failed to save MQTT broker','err'); return; }
-      if(/no reboot|unchanged|already/i.test(o.reason||'')){ toast(v?'MQTT broker unchanged':'MQTT already disabled','info'); return; }
-      toast('Saved · rebooting','ok');})
+  return requestJsonResult('/set_mqtt',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({broker:v})})
+    .then(function(res){
+      var o=res.json&&res.json.response;
+      if(o && typeof o.result === 'boolean' && typeof o.reason === 'string'){
+        if(!o.result){ toast(o.reason||'Failed to save MQTT broker','err'); return; }
+        if(/no reboot|unchanged|already/i.test(o.reason||'')){ toast(v?'MQTT broker unchanged':'MQTT already disabled','info'); return; }
+        toast('Saved · rebooting','ok');
+        return;
+      }
+      var msg=(!res.ok && res.status)?('Failed to save MQTT broker (HTTP '+res.status+')'):'Failed to save MQTT broker — no change was confirmed';
+      toast(msg,'err');
+    })
     .catch(function(){toast('Failed to save MQTT broker — no change was confirmed','err')});
 }
 function editSyslog(){
@@ -679,11 +715,18 @@ function editSyslog(){
   if(v && v.indexOf(' ')>=0){ toast('Invalid server — use IP:PORT','err'); return; }
   if(v===cur){ toast(v?'Syslog server unchanged':'Syslog already disabled','info'); return; }
   toast(v?'Saving Syslog server…':'Disabling Syslog…','info');
-  return requestJson('/set_syslog',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({server:v})})
-    .then(function(j){var o=commandResponse(j);
-      if(!o.result){ toast(o.reason||'Failed to save Syslog server','err'); return; }
-      if(/no reboot|unchanged|already/i.test(o.reason||'')){ toast(v?'Syslog server unchanged':'Syslog already disabled','info'); return; }
-      toast('Saved · rebooting','ok');})
+  return requestJsonResult('/set_syslog',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({server:v})})
+    .then(function(res){
+      var o=res.json&&res.json.response;
+      if(o && typeof o.result === 'boolean' && typeof o.reason === 'string'){
+        if(!o.result){ toast(o.reason||'Failed to save Syslog server','err'); return; }
+        if(/no reboot|unchanged|already/i.test(o.reason||'')){ toast(v?'Syslog server unchanged':'Syslog already disabled','info'); return; }
+        toast('Saved · rebooting','ok');
+        return;
+      }
+      var msg=(!res.ok && res.status)?('Failed to save Syslog server (HTTP '+res.status+')'):'Failed to save Syslog server — no change was confirmed';
+      toast(msg,'err');
+    })
     .catch(function(){toast('Failed to save Syslog server — no change was confirmed','err')});
 }
 function wakeStop(){ waking=false; clearTimeout(wakeTimeout); }
@@ -696,25 +739,46 @@ function wakeCar(){
   // safety net: stop spinning if no charge data shows up in time
   wakeTimeout=setTimeout(function(){ if(waking){ wakeStop(); toast('Still asleep — try again','info'); poll(); } }, 90000);
   toast('Waking the car…','info');
-  fetch('/api/1/vehicles/'+encodeURIComponent(vin)+'/command/wake_up',{method:'POST'})
-    .then(function(r){if(!r.ok)throw new Error('HTTP '+r.status);return r.json()})
-    .then(function(j){
-      var ok=commandResponse(j).result;
-      if(ok){ toast('Wake sent · waiting for the car…','ok'); poll(); }   // keep spinning until SOC arrives
-      else { wakeStop(); toast('Wake failed — is the car in range?','err'); poll(); }
+  return requestJsonResult('/api/1/vehicles/'+encodeURIComponent(vin)+'/command/wake_up',{method:'POST'})
+    .then(function(res){
+      var j=res.json;
+      if(j && j.response && typeof j.response.result === 'boolean'){
+        if(j.response.result){
+          toast('Wake sent · waiting for the car…','ok');
+        } else {
+          wakeStop();
+          var r=(j.response.reason||'').trim();
+          toast(r?('Wake failed — '+r):'Wake failed — is the car in range?','err');
+        }
+        poll();
+        return;
+      }
+      wakeStop();
+      var msg=(!res.ok && res.status)?('Wake failed (HTTP '+res.status+')'):'Wake failed — is the car in range?';
+      toast(msg,'err');
+      poll();
     })
     .catch(function(){ wakeStop(); toast('Wake failed — is the car in range?','err'); poll(); });
 }
 function genKey(){
-  if(state&&state.key_present && !confirm('Regenerate the security key?\n\nThe current key is invalidated and you must re-pair with the vehicle.')) return;
+  var keyKnown = state && typeof state.key_present === 'boolean';
+  var hasKey = keyKnown ? state.key_present : true;
+  if(hasKey && !confirm('Regenerate the security key?\n\nThe current key is invalidated and you must re-pair with the vehicle.')) return;
   toast('Generating new key…','info');
-  return requestJson('/gen_keys?force=1',{method:'POST'})
-    .then(function(j){
-      if(!j||typeof j.result!=='boolean') throw new Error('invalid key response');
-      if(!j.result){ toast(j.reason||'Key generation failed','err'); return; }
-      toast('New key generated · re-pair with the vehicle','ok'); poll();
+  var query = (keyKnown && state.key_present) ? '?force=1' : '';
+  return requestJsonResult('/gen_keys' + query, {method: 'POST'})
+    .then(function(res){
+      var j = res.json;
+      if(!res.ok){
+        var msg = (j && j.reason) ? j.reason : ('HTTP ' + res.status);
+        toast(msg, 'err');
+        return;
+      }
+      if(!j || typeof j.result !== 'boolean') throw new Error('invalid key response');
+      if(!j.result){ toast(j.reason || 'Key generation failed', 'err'); return; }
+      toast('New key generated · re-pair with the vehicle', 'ok'); poll();
     })
-    .catch(function(){toast('Key generation failed','err')});
+    .catch(function(){ toast('Key generation failed', 'err'); });
 }
 
 /* ---------- OTA ---------- */

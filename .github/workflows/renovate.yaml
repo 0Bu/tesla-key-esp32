@@ -10,13 +10,13 @@ permissions:
   pull-requests: write
 jobs:
   renovate:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 30
     permissions:
       contents: read
       pull-requests: write
     steps:
-      - uses: renovatebot/github-action@37beffda261423addd537c33f2d126df7f6ffbab # v46.2.6
+      - uses: renovatebot/github-action@9fea9f0fbf80401026d11d03911d62b1f70fef1f # v46.3.3
         with:
           token: ${{ secrets.RENOVATE_TOKEN }}
         env:

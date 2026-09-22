@@ -84,7 +84,7 @@ function directoryNames(relative) {
 
 const canonicalSkills = directoryNames(".agents/skills");
 
-const highRiskSkills = new Set(["flash-esp32", "ship", "usb-recovery"]);
+const highRiskSkills = new Set(["deploy", "flash-esp32", "ship", "usb-recovery"]);
 const readOnlySkills = new Set([
   "device-diag", "display-preview", "mock-test", "ota-release-verify", "pr-hygiene", "project-review",
   "skill-audit", "vehicle-command-audit",
@@ -113,19 +113,20 @@ const usbNoApprovalNeeded = /(?:live verification|HTTP requests?|GET endpoints?)
 const usbOtaNotStateChanging = /GET \/ota\/check[^.!?]*(?:is not|isn't|not) state-changing/i;
 const usbAbsentApprovalProceeds = /(?:(?:approval|authorization)[^.!?]*(?:absent|missing|not obtained)|without (?:separate )?(?:approval|authorization))[^.!?]*(?:continue|proceed|run|contact|send|request)/i;
 const reviewedSkillSha256 = new Map([
-  ["add-logic-test", "f8a37fddbbb5c47afa9eca4fb4823c203af099718b3327a656c717d0462546f7"],
-  ["device-diag", "7babf410873975ec05bb029c3c9522e70f9aadd96d0823829c48236f24ca3d44"],
+  ["add-logic-test", "5bc6af893a1f95a5b4b1d2302da43c1e5e8de11d5e65e1c62d342e0dbfe6a327"],
+  ["deploy", "855ba875f47a51ec66ba84862abf32b3f657820e8e4b6cc277df02e1357dfcf0"],
+  ["device-diag", "d524b5dee5d58be5bfda8630099ab36ada9dd4a77500cc6cc9126970efc376cb"],
   ["display-preview", "4bff95d0314d50ce29d67beac7ef4f9db1ebcbb2fa609335e560e162f5a1ed46"],
-  ["feature-docs", "9377c51c717b3f8903a6fad4b59e7172964e6fe77a4456fe96c509dda09310a5"],
+  ["feature-docs", "0255c6c85753efb851833a20e8da9519c8a61c58d4bb52f9f061cfe609d6e20a"],
   ["flash-esp32", "cd67535f6206b72eb824548fce9338f97c5e813aff14633c6149b636b2146aeb"],
   ["mock-test", "8cfaaa7d4d7fdbda24375ca743f9954ee39c6db053684000fac1bf1bce00ac0f"],
-  ["ota-release-verify", "347c7f3cdffa25a9563f104c099e08d1f91101e2d54b39442b97e9fcbc77400b"],
-  ["pr-hygiene", "7ef6544f83a50dbe696e360081c33091ce8d7f0826ec839efd7c4805cdf2344a"],
-  ["project-review", "e3ecccd296d5301da8aa8cdb769962623fc6d6942885051a3642065b4d75ca3c"],
-  ["ship", "41ae3355c7b2d24624d92a5c23666b18361083f8ef305faf43b57303a9f20275"],
-  ["skill-audit", "b0181a4c9e74dabfa9d7560f851ebc154eb8ada2a016c30088d345573039e7b5"],
+  ["ota-release-verify", "1504ad6c0d781bbfef36c3eca75813faff6e4a5896a5f1bac04507a4e77456e8"],
+  ["pr-hygiene", "0b73adc70cb8185d19fe868a2aa8dc195e1d2eec792ae7b498672f2bb6e99459"],
+  ["project-review", "5f30bdf31cc1a2e8295f171eacd6d23ad6e9cfe4e5ac42e719809fbf1696fc26"],
+  ["ship", "47f0e4d2408af37cb127404638e5c1294b335745c249f751d6acc3f3a8210d46"],
+  ["skill-audit", "a774a6fe7188e6a272c2dbff1f6407f36cf11dc7fbaa533a9063509520964750"],
   ["usb-recovery", "6f3cbd9533e75d14b5a14cd19987fa07db046b6c5412f4d52d2aa54944481cf9"],
-  ["vehicle-command-audit", "b1a90f83451b2e84119ae7ad034774b8c02f0c035c5466061c5c565ebc1aa77f"],
+  ["vehicle-command-audit", "1c04ee8a22b5e161e390612611b3b5d8e38d8f102e9d8f85842461cdd7b620ff"],
 ]);
 const featureDocsScopeTokens = [
   "main/", "test/", "sdkconfig.defaults*", "partitions.csv", "AGENTS.md", ".agents/",
@@ -176,6 +177,11 @@ const mainArtifactConsumerContracts = new Map([
     '[ "$ART" = "tesla-key-esp32-$VERSION-$RUN_SHA" ]',
   ]],
 ]);
+let idfComponentYml;
+try { idfComponentYml = fs.readFileSync(repoPath("main/idf_component.yml"), "utf8"); }
+catch { idfComponentYml = null; }
+const teslaBlePinMatch = idfComponentYml ? idfComponentYml.match(/git:\s*"https:\/\/github\.com\/yoziru\/tesla-ble\.git"\s+version:\s*"([^"]+)"/) : null;
+
 for (const name of canonicalSkills) {
   const canonical = restrictedFrontmatter(
     repoPath(`.agents/skills/${name}/SKILL.md`), `canonical skill ${name}`,
@@ -292,6 +298,11 @@ for (const name of canonicalSkills) {
       die(1, `${name} feature-docs checklist omits a relevance-scope path`);
     }
   }
+  if (["vehicle-command-audit", "skill-audit", "project-review"].includes(name)) {
+    if (teslaBlePinMatch && !canonical.text.includes(teslaBlePinMatch[1])) {
+      die(1, `canonical ${name} pin assertion does not match idf_component.yml pin (${teslaBlePinMatch[1]})`);
+    }
+  }
   if (readOnlySkills.has(name) && !/read-only|does not (?:edit|modify)|must not (?:edit|modify)/is.test(canonical.text)) {
     die(1, `review/diagnostic skill ${name} must state its read-only boundary`);
   }
@@ -353,13 +364,24 @@ for (const subagent of subagentsDoc.subagents) {
 const multiTargetReviewerObj = subagentsDoc.subagents.find((s) => s.TypeName === "multi_target_build_reviewer");
 const multiTargetReviewer = normalizeProse(multiTargetReviewerObj?.Prompt || "");
 const multiTargetPublicationContracts = [
-  "logic-test -> build -> independent-rebuild -> publish -> deploy",
+  "logic-test -> build-target -> build -> independent-rebuild -> publish -> deploy",
   "SHA/version-bound Actions artifact",
   "deploy consumes only that named artifact",
   "without a signing Environment, OTA key or OIDC",
 ];
 if (multiTargetPublicationContracts.some((required) => !multiTargetReviewer.includes(required))) {
   die(1, "multi-target reviewer is missing the independent-rebuild/publication DAG contract");
+}
+if (teslaBlePinMatch) {
+  const currentPin = teslaBlePinMatch[1];
+  if (!multiTargetReviewer.includes(`yoziru/tesla-ble remains ${currentPin}`)) {
+    die(1, `multi-target reviewer pin assertion does not match idf_component.yml pin (${currentPin})`);
+  }
+  const docDriftReviewerObj = subagentsDoc.subagents.find((s) => s.TypeName === "doc_drift_checker");
+  const docDriftReviewer = normalizeProse(docDriftReviewerObj?.Prompt || "");
+  if (!docDriftReviewer.includes(`yoziru/tesla-ble ${currentPin}`)) {
+    die(1, `doc drift checker pin assertion does not match idf_component.yml pin (${currentPin})`);
+  }
 }
 
 const safety = readJson(repoPath("tools/agent-config/safety-invariants.json"), "safety invariants");

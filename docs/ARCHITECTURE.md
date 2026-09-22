@@ -76,7 +76,7 @@ A rotating background poll in `loop_task_fn_` (one domain per ~30 s cycle: clima
 drive → tires → closures, full set ~120 s) refreshes per-domain caches via the
 `set_*_state_callback` hooks in `vehicle_telemetry.cpp`. All polls are `NO_WAKE_SKIP`
 (read-only, never wake the car) and feed the MQTT/HA bridge — evcc/pairing are unaffected.
-tesla-ble invokes those hooks synchronously while `vehicle_mutex_` owns `Vehicle::loop()`, so the
+Vehicle telemetry callbacks run synchronously while `vehicle_mutex_` processes incoming BLE frames in `vehicle_loop`, so the
 hooks copy only trivially-copyable nanopb state into fixed latest-value slots under a short
 `portMUX`. The same `vehicle_loop` iteration releases `vehicle_mutex_` before parsing strings and
 publishing the public caches under `cache_mutex_`; no heap operation or nested cache lock runs from
@@ -100,13 +100,26 @@ ACK alone is never
 reported as success. Two mismatching/missing readbacks exhaust the original command budget and
 return an error, with requested/applied/request/actual current values written to the log.
 
+**CarServer response validation & command idempotency** (native BLE orchestration):
+CarServer domain responses undergo two explicit checks:
+1. **Request-UUID matching** (`main/logic/ble_dispatcher.hpp`, `main/vehicle_telemetry.cpp`): Every CarServer
+   response carrying a non-empty `request_uuid` is verified against the outstanding request UUID dispatched
+   by the firmware for that domain. A mismatched, late, or foreign response is dropped before invoking
+   telemetry callbacks, so stale or foreign responses result in an explicit timeout instead of incorrectly
+   completing whatever sits at the FIFO head.
+2. **Idempotent setpoints via `already_set`** (`main/logic/command_result.hpp`, `main/logic/command_runner.hpp`):
+   When a setpoint command (such as `set_charge_limit` or `set_charging_amps`) is sent with a value the
+   vehicle already holds, the vehicle returns `actionStatus.result != OK` with reason `already_set`.
+   `tk::is_nominal_already_set()` classifies this nominal error as idempotent success at the application
+   layer. The setpoint write paths in the web UI, MQTT, and MCP are thus fully idempotent.
+
 The same ChargeState callback stamps `last_charge_ticks_`. `GET vehicle_data` remains
 cache-only and non-blocking, but the cache is treated differently by state: idle values may be
 old so read-only polling never wakes a sleeping car; during the active window (charging or a
 command in the last five minutes), data older than 30 s returns HTTP 503. Thus a BLE
 parser/retry storm is visible to evcc instead of being hidden behind a valid-looking HTTP 200.
 
-**One-shot charge poll on the self-wake edge and cache-invalid bootstrap** (`logic/wake_poll.hpp`, fired in
+**One-shot charge poll on the self-wake edge and stale-cache bootstrap** (`logic/wake_poll.hpp`, fired in
 `loop_task_fn_`). A parked, asleep car that wakes **itself** — most importantly when the charge
 cable is plugged in — would otherwise never refresh its cached SOC: the active window opens only
 on a recent command or cached charging, so nothing polls, and evcc keeps serving the stale
@@ -120,15 +133,26 @@ window merely because the car is awake. The one-shot arms only after a *debounce
 (reusing `kAsleepDebounceS`), so the ~60 s Cabin-Overheat-Protection `AWAKE↔ASLEEP` flap cannot fire
 spurious polls, and it re-arms only on a fresh stable-asleep run.
 
-A second deadlock variant arises after a device reboot/power-cycle when the car is already awake:
-`last_known_charge_` starts invalid, no `ASLEEP→AWAKE` edge occurs, and `/vehicle_data` returns HTTP 503
-indefinitely while evcc coasts on its own cache without issuing a command. `WakePollState` resolves this
-via a second **cache-invalid bootstrap** arming condition (`paired && ble_connected && !last_known_charge_.valid`).
-When the car is awake, it fires the same single `charge_state_poll(NO_WAKE_SKIP)` to populate the initial cache;
-once valid, the bootstrap trigger is satisfied and only the debounced wake-edge trigger remains active.
-If the car is asleep at boot, the bootstrap arm stays dormant until the car wakes up.
-The arm/fire decision is the host-tested `logic/wake_poll.hpp`; the loop only samples the flag mirror,
-checks the cache/connection state, and fires.
+Further deadlock variants arise when the car is awake and reachable but no `ASLEEP→AWAKE` edge occurs:
+  • Device reboot/power-cycle: `last_known_charge_` starts invalid, no edge occurs, and `/vehicle_data` returns
+    HTTP 503 indefinitely while evcc coasts on its own cache without issuing a command.
+  • Return from a drive (the common daily case): the pre-drive wake consumed the arm, BLE dropped on departure,
+    and reconnect on arrival reads `AWAKE` (`UNKNOWN→AWAKE` is not an edge). A cache-valid bootstrap does not fire
+    because the pre-drive reading is technically valid, leaving an hours-stale SOC on the wire (observed: 83% cached
+    vs 18% actual).
+`WakePollState` resolves both via a **stale-cache bootstrap** arming condition (`paired && ble_connected && !cache_fresh`),
+where cache freshness keys on age (`seconds_since_charge < kChargeCacheFreshS`) rather than validity alone.
+When the car is awake, it fires `charge_state_poll(NO_WAKE_SKIP)` to refresh the cache.
+If the CarServer poll times out or fails (issue #301), the latch tracks success rather than dispatch: `WakePollState`
+retries with exponential backoff (starting at 30 s, capped at 300 s) so an unresponsive MCU is not hammered, while
+preserving the "one poll per wake episode" guarantee on success.
+Once a fresh charge cache is acquired or held during an awake episode (issue #308), the episode latch (`episode_fresh`)
+engages and keeps the system quiescent even after `seconds_since_charge` crosses `kChargeCacheFreshS`, so an idle parked car
+is not polled every 60 seconds and can transition to sleep undisturbed. The latch resets only when the car enters stable
+sleep (`stably_asleep`) or BLE disconnects.
+If the car is asleep, the bootstrap arm stays dormant until the car wakes up.
+The arm/fire decision is the pure host-tested `logic/wake_poll.hpp`; the loop only samples the flag mirror,
+checks the cache age and connection state, and fires.
 
 Exposed under `tele` in `/status`, emitted only while the BLE link is up — the MQTT bridge
 reads the caches directly, so it keeps publishing regardless (the device's web UI
@@ -374,57 +398,45 @@ third-party dependency has to be kept in sync. Adding a chip upstream omits (esp
 therefore means upstreaming it there first. A local patched checkout was carried for esp32c5 for a
 while and has been dropped — [`adr/0004-drop-esp32c5-target.md`](adr/0004-drop-esp32c5-target.md).
 
-The first patch is a **correctness and anti-replay fix shared by all four targets**. Upstream
-v5.1.3 calls `Peer::validate_response_counter()` and logs a duplicate CarServer response, but
-then continues into state callbacks and FIFO command completion. A replay from an earlier
-request can therefore refresh `last_known_charge_` or complete whichever command is currently
-at the queue head. Root `CMakeLists.txt`, after dependency resolution, invokes
+Anti-replay and response matching are handled natively in the BLE dispatcher layer
+(`main/logic/ble_dispatcher.hpp`), superseding the earlier
+[`adr/0003-reject-replayed-tesla-responses.md`](adr/0003-reject-replayed-tesla-responses.md) per
+[`adr/0005-tesla-ble-seam.md`](adr/0005-tesla-ble-seam.md). Root `CMakeLists.txt`, after dependency resolution, invokes
 `scripts/apply-tesla-ble-patches.sh`; it applies every `patches/tesla-ble/*.patch` in lexical
 `NNNN-description.patch` order to the materialised source before compilation. A per-materialisation
 hash marker makes repeated CMake passes idempotent and lets a later patch be added, while a changed
-or removed already-applied patch fails closed and requires deliberate rematerialisation. The
-anti-replay patch returns immediately on
-an invalid response counter, before callbacks or `mark_command_completed_`. This is tracked in
-[`adr/0003-reject-replayed-tesla-responses.md`](adr/0003-reject-replayed-tesla-responses.md).
+or removed already-applied patch fails closed and requires deliberate rematerialisation.
 
-The second patch makes private-key regeneration transactional from the controller's point of
-view. It verifies that an existing in-memory key can be exported before mutation, reports key
-creation and NVS persistence failures, and restores the prior in-memory key if persistence of the
-replacement fails. Firmware command, pairing, and polling paths remain fail-closed until the
-persisted key identity is verified and the old sessions have been cleared. The host-tested
-`logic/key_rotation.hpp` contract keeps `tesla_ble/key_rotate` armed across power loss and blocks
-vehicle construction/signing until that cleanup reaches its durable terminal state; an NVS probe
-error blocks too and cannot be mistaken for an absent marker. A VIN
-transition is also journalled as `tesla_cfg/vin_txn`; the host-tested recovery decision lives in
-`logic/vin_transition.hpp`, so power loss cannot silently combine a new VIN with the old key/session
-state.
+Historically, patches 0001, 0002, and 0003 patched `TeslaBLE::Vehicle` to implement anti-replay checks,
+transactional key regeneration, and throttled RX framing recovery. With the implementation of Issue #306
+and [`adr/0005-tesla-ble-seam.md`](adr/0005-tesla-ble-seam.md), the monolithic `TeslaBLE::Vehicle` class
+is completely bypassed. Instead, the firmware integrates directly with `TeslaBLE::Client` and hosts
+native, hardware-free pure-logic orchestration in `main/logic/`:
+- **Deterministic RX Framing** (`logic/rx_framing.hpp`): Strict 2-byte big-endian length prefix framing matching `teslamotors/vehicle-command` `pkg/connector/ble/ble.go`, with bounded buffer allocation and inter-chunk timeout, replacing patch 0003. The TX side writes the tesla-ble builder output unchanged (`tk::build_ble_tx_frame`) and refuses a structurally malformed frame (`tk::is_well_formed_ble_frame`).
+- **BLE Dispatcher & Session State** (`logic/ble_dispatcher.hpp`, `logic/session_state.hpp`): Separate VCSEC and Infotainment session trackers mirroring the library `Peer`'s monotonic counter validation and session epoch, strict request UUID matching for responses, and isolated ephemeral/session states, replacing patch 0001 (and superseding [`adr/0003-reject-replayed-tesla-responses.md`](adr/0003-reject-replayed-tesla-responses.md)).
+- **Native Transactional Key Regeneration** (`logic/key_rotation.hpp` `tk::regenerate_private_key()`, called from `main/vehicle_pairing.cpp`): Transactional private-key generation with a 2048 B PEM export and automatic rollback on NVS failure, replacing patch 0002; `test/test_tesla_ble_harness.cpp` runs it against the real tesla-ble. The host-tested `logic/key_rotation.hpp` contract keeps `tesla_ble/key_rotate` armed across power loss and blocks vehicle construction/signing until that cleanup reaches its durable terminal state; an NVS probe error blocks too and cannot be mistaken for an absent marker. A VIN transition is also journalled as `tesla_cfg/vin_txn`; the host-tested recovery decision lives in `logic/vin_transition.hpp`, so power loss cannot silently combine a new VIN with the old key/session state.
+- **Native Command FIFO & Request Runner** (`logic/command_runner.hpp`): Bounded FIFO queue (8 slots) arbitrating multi-phase prerequisites (VCSEC auth -> wake -> infotainment session auth -> payload execution) with exponential backoff and nominal `already_set` outcome evaluation.
 
-The third patch bounds RX-framing recovery logs without hiding the recovery itself. Warning and
-error paths keep separate `steady_clock` timestamps and emit at most once per hour per severity;
-repeated events increment a shared `UINT32_MAX`-saturating suppression counter that is reported and
-reset only after the next emitted log. Only severe buffer corruption selects error severity. The
-host semantic gate pins the helper plus all six parser/recovery callsites, so a new direct log or a
-lost throttle cannot reintroduce an input-amplified log storm while the generic patch applicator
-still reports green.
+As a result, patches 0001-0003 were retired. The remaining patch series consists of two surgical patches:
 
-The fourth patch drops the five Parental Controls arms that v5.1.2 added to the
-`CarServer_VehicleAction` oneof, together with their nanopb message descriptors. The firmware never
-builds or sends those actions, but a referenced oneof arm keeps its descriptor tables out of reach
-of `--gc-sections`, so they cost flash in every image. Removing them returns `car_server.pb.c` to
-byte-identical descriptor size with v5.1.1. This is a size patch, not a correctness one: esp32c6
-sits closest to the app-size policy ceiling, and image sizes quantize to 64 KiB, so a few hundred
-bytes there decide whether the signed image still fits the `0x1f0000` OTA slot.
+The first patch (`0004-drop-unused-parental-controls-actions.patch`) drops the five Parental Controls arms that
+v5.1.2 added to the `CarServer_VehicleAction` oneof, together with their nanopb message descriptors. The
+firmware never builds or sends those actions, but a referenced oneof arm keeps its descriptor tables out
+of reach of `--gc-sections`, so they cost flash in every image. Removing them returns `car_server.pb.c` to
+byte-identical descriptor size with v5.1.1. This is a size patch, not a correctness one: esp32c6 sits closest
+to the app-size policy ceiling, and image sizes quantize to 64 KiB, so a few hundred bytes there decide
+whether the signed image still fits the `0x1f0000` OTA slot.
 
-The fifth patch aligns session-counter replay with teslamotors/vehicle-command `signer.go`
-(`UpdateSessionInfo`): when the vehicle reports a lower counter, keep `max(local, reported)` and
-still apply epoch/time, instead of hard-rejecting or calling `force_update_session` to the
-vehicle's lower counter. Upstream v5.1.3 resyncs by forcing that lower counter, which breaks
-anti-replay monotonicity; removing the call site also lets `--gc-sections` drop the otherwise-dead
-`force_update_session` and keeps esp32c6 inside the OTA slot budget.
+The second patch (`0005-align-session-counter-replay-with-signer-go.patch`) aligns session-counter replay
+in `src/peer.cpp` with teslamotors/vehicle-command `signer.go` (`UpdateSessionInfo`): when the vehicle reports
+a lower counter, keep `max(local, reported)` and still apply epoch/time, instead of hard-rejecting or calling
+`force_update_session` to the vehicle's lower counter. Upstream resyncs by forcing that lower counter,
+which breaks anti-replay monotonicity; removing the call site in `src/peer.cpp` also lets `--gc-sections` drop
+the otherwise-dead `force_update_session` and keeps esp32c6 inside the OTA slot budget.
 
-All four images use the same tesla-ble revision and ordered patch-series behavior. The wider
-tesla-ble dependency strategy (IDF-6 / Mbed TLS 4 crypto seam, issue #61) is
-[`adr/0002-idf6-mbedtls4-crypto-seam.md`](adr/0002-idf6-mbedtls4-crypto-seam.md).
+All four images use the same tesla-ble revision and ordered patch-series behavior. The wider orchestration seam
+and reference alignment is [`adr/0005-tesla-ble-seam.md`](adr/0005-tesla-ble-seam.md)
+(and for the IDF-6 / Mbed TLS 4 crypto seam, issue #61, [`adr/0002-idf6-mbedtls4-crypto-seam.md`](adr/0002-idf6-mbedtls4-crypto-seam.md)).
 
 **On-device ST7735 display (LilyGO T-Dongle-S3).** The dongle carries a
 0.96" ST7735 LCD and it IS driven — see `main/display.cpp` (a status panel: WiFi/BLE header + a
@@ -514,8 +526,8 @@ preserves the `PR/` tree). Constraints:
 - **Versioning `<latest-stable-release>-PR-<N>`** (e.g. `1.4.30-PR-157`), stamped from the newest
   complete immutable non-prerelease GitHub Release (its stable tag plus all four digest-bound merged
   assets), never a raw newer RC tag. The protected signer derives this base again after the approval
-  wait and requires exact equality, so a stale but regex-valid base cannot be signed. `ver_newer()`
-  parses only `x.y.z` and ignores the suffix, so basing on
+  wait and requires exact equality, so a stale but regex-valid base cannot be signed.
+  `tk::compare_ota_versions()` (`main/logic/ota_contract.hpp`) parses only `x.y.z` and ignores the suffix, so basing on
   the *latest stable release* (not `next` or a prerelease core) guarantees a later main release compares strictly-newer → the
   PR-flashed device OTA-updates forward to main; a `next` base would collide with the number
   the merge cuts and stall OTA.
@@ -574,7 +586,7 @@ grouped under one device. **Read-only by design** — no command topics are subs
   derives each config topic, `unique_id`, state topic and value template from the row rather than
   reconstructing that mapping in the IDF shell.
 - **Entities:** charge (soc, charge_limit, power, amps, range **km**, rate **km/h**,
-  charging_state, plus extended read-only enrichment: actual_current/current_request **A**
+  charging_state, plus extended read-only enrichment: usable_soc [payload-only], actual_current/current_request **A**
   (delivered vs requested), volts **V** at the charger, charger phases, energy_added **kWh**
   session, minutes_to_full (also serialized on `/vehicle_data` for evcc finishtime),
   charge limit_reason — HA bridge only, not on `/api`), climate
@@ -587,7 +599,9 @@ grouped under one device. **Read-only by design** — no command topics are subs
   reset reason slug/code, crash-dump and safe-mode flags, and WiFi/MQTT reconnect counters).
   The same retained Device JSON also carries optional per-task minimum-free-stack bytes for HTTP,
   vehicle, auto-pair and MQTT as raw MQTT diagnostics; those four payload-only fields deliberately
-  have no HA discovery rows and therefore do not create entities. Optional
+  have no HA discovery rows and therefore do not create entities. Similarly, the retained Charge JSON
+  carries optional `usable_soc` as a payload-only diagnostic field alongside `soc` without a dedicated
+  discovery sensor row to avoid duplicate Home Assistant battery sensors. Optional
   car-sourced numeric and boolean fields are emitted only when the car reported them (proto3
   optional), so an unseen value reads "unknown" in HA rather than a phantom 0/OFF. Every binary
   discovery template has the same presence guard; `locked` alone inverts ON/OFF for HA's `lock`
@@ -1009,7 +1023,7 @@ The STA→LAN link (distinct from the car BLE link-state below) is kept up by tw
   IP, keeps emitting TCP that times out — e.g. MQTT `esp-tls select() timeout`) but the AP
   forwards nothing and **no disconnect event ever fires**, so the handler never runs. The
   watchdog ICMP-echoes the **default gateway** only while the link believes it is up; after
-  `kWdFailToReassoc` (2) consecutive failures (~60 s) it forces **one** `esp_wifi_disconnect()`
+  `tk::kWatchFailsToRecover` (2) consecutive failures (~60 s) it forces **one** `esp_wifi_disconnect()`
   — the endless-retry handler then reconnects with the known-good credentials (so the watchdog
   never calls `esp_wifi_connect()` itself, avoiding a cross-task double-connect). On a wired
   link the same verdict restarts the Ethernet MAC (`esp_eth_stop`/`esp_eth_start`), which
@@ -1042,13 +1056,14 @@ The STA→LAN link (distinct from the car BLE link-state below) is kept up by tw
 
 **sleep_state** comes from `VehicleController::link_state()` — the *single* source of truth
 shared with the web UI so the two never drift. Four published values:
-`AWAKE` (fresh live infotainment telemetry, < 60 s), `ASLEEP` (no live data AND **proven,
-debounced** sleep — the car's own VCSEC sleep flag, read from the library's
-`Vehicle::sleep_state()` and sampled in `loop_task`, has held `ASLEEP` for ≥ `kAsleepDebounceS`
-≈ 120 s while still reachable, so a Cabin-Overheat-Protection `AWAKE↔ASLEEP` flap (~60 s)
-can't trip it), `IDLE` (reachable over BLE but **not provably asleep** — we stopped polling
+`AWAKE` (fresh live infotainment telemetry, < 60 s via `kAwakeMaxAgeS`), `ASLEEP` (no live data AND **proven,
+debounced** sleep — the car's own VCSEC sleep flag, read from the car's VCSEC sleep status
+(`vcsec_sleep_state_`) and sampled in `loop_task`, has held `ASLEEP` for ≥ `kAsleepDebounceS`
+≈ 120 s while still reachable within `kReachableMaxAgeS` = 150 s, so a Cabin-Overheat-Protection `AWAKE↔ASLEEP` flap (~60 s)
+can't trip it), `IDLE` (reachable over BLE within `kReachableMaxAgeS` = 150 s but **not provably asleep** — we stopped polling
 the infotainment domain to let the car sleep and the VCSEC flag hasn't confirmed; we honestly
-don't know, so we never claim sleep), and `UNREACHABLE` (the car answers *nothing* over BLE ⇒
+don't know, so we never claim sleep), and `UNREACHABLE` (no signed BLE round-trip for ≥ `kReachableMaxAgeS` = 150 s
+— spanning two ~30 s health-probe cycles plus miss/retry headroom — or the car answers *nothing* over BLE ⇒
 driven off / out of range / deep sleep). Nothing heard since boot/re-pair ⇒ omitted so HA
 shows "unknown" (strictly: the state topics are retained, so until the first post-reboot
 publish replaces them HA may still show the pre-reboot value; a fresh install shows
@@ -1233,25 +1248,24 @@ successful session save/remove; NVS read errors remain uncached and are retried.
 continuous NVS length probe without making a transient storage fault look durably absent.
 
 The main-task BLE-MAC string is startup-only input. When it is empty, the NimBLE host posts a fixed
-LinkUp record only. `vehicle_loop` first applies `Vehicle::set_connected(true)`, then acknowledges
-the exact connection generation as command-ready, materializes the fixed peer address after
-unlock, and performs the one best-effort NVS persistence attempt outside every shared lock. It
-never mutates the startup `std::string` across tasks.
+LinkUp record only. `vehicle_loop` marks the link connected on GATT service/characteristic
+discovery, then acknowledges the exact connection generation as command-ready, materializes
+the fixed peer address after unlock, and performs the one best-effort NVS persistence attempt
+outside every shared lock. It never mutates the startup `std::string` across tasks.
 
-**Session reuse across a reboot needs the wall clock restored first.** The `sess_vcsec`/`sess_info`
-blobs in NVS exist so a restart does not cost a fresh handshake, but tesla-ble only accepts a
-persisted session younger than an hour, and it measures that as a signed
-`(unix_now - session.clock_time)` (v5.1.3; previously an unsigned subtraction). A negative age —
-session clock ahead of the local clock, including a reboot before time resync — is accepted
-rather than underflowed to a huge unsigned age. A 1970 clock would therefore *keep* sessions
-instead of discarding them; restore is still required so a real clock can enforce the one-hour
-stale window (and TLS cert validity). `main.cpp` therefore calls `restore_clock_from_nvs()`
-(the `last_time` cache written on each NTP sync) **before** `VehicleController::init()`, not
-next to the SNTP setup after WiFi where it used to sit — the restore itself needs no network, so
-nothing kept it down there. Measured on the old unsigned path: 49 boots in the 17.–24.07.2026
-syslog, 49 rejections of both domains, the last of them discarding a VCSEC session that was 43
-minutes old. NTP refines the restored clock seconds later; the ordering is what matters, not the
-precision.
+**Session persistence and clock restore ordering.** The `sess_vcsec`/`sess_info` blobs in NVS
+store the last authenticated session, but `load_nvs_sessions_()` inherits upstream `vehicle.cpp`'s
+age check computing `(unix_now - session.clock_time)` (see ADR-0005 §2). Because `session.clock_time`
+is reported by the vehicle relative to vehicle epoch/uptime (tens or hundreds of thousands of
+seconds) rather than Unix epoch, restoring the wall clock to Unix time (~1.77 billion seconds) causes
+the computed age to far exceed 3600 seconds, so stored sessions are rejected once the clock is set.
+A 1970 clock (before time sync or restore) produces a negative age and would keep stored sessions;
+restoring `last_time` from NVS before `VehicleController::init()` ensures the system clock is set to
+real Unix time so stale sessions from an uninitialized clock are rejected fail-closed.
+`main.cpp` calls `restore_clock_from_nvs()` (the `last_time` cache written on each NTP sync) **before**
+`VehicleController::init()`, not next to the SNTP setup after WiFi where it used to sit — the restore
+itself needs no network, so nothing kept it down there. True persistent session reuse across reboots
+would require upstream protocol alignment to track vehicle epoch separately from wall-clock Unix time.
 
 **A configured VIN gates pairing entirely.** The device targets the car by its VIN-derived
 BLE name (`S<hex>C`), so `auto_pair_task` first checks `has_plausible_vin()` (17-char VIN;
@@ -1424,7 +1438,7 @@ through the guard so the lock is released during stack unwinding, never left hel
 | Primitive | Kind | Protects |
 |---|---|---|
 | `command_mutex_` | mutex, RAII | one whole command/query transaction and tesla-ble FIFO generation; for `set_charging_amps`, the action and verifying ChargeState poll are one transaction |
-| `vehicle_mutex_` | mutex, RAII (`SemGuard`) | **every** call into the tesla-ble `vehicle_` object (send, `loop()`, `on_rx_data`, `set_connected`) |
+| `vehicle_mutex_` | mutex, RAII (`SemGuard`) | **every** call into `client_` and command runner state (payload build/dispatch, `drive_command_runner_`, `process_rx_frame_`) |
 | `cache_mutex_` | mutex, RAII, leaf | the `last_known_*` caches (`std::string` members ⇒ an unlocked copy is torn-read UB) |
 | `result_mutex_` | mutex, RAII, leaf | the externally visible `last_error_` snapshot read by HTTP/MCP after a foreground command returns |
 | `CommandCompletion::sem` | per-request binary semaphore, shared ownership | signals one request-local fixed completion record; a timed-out callback cannot address stack storage or a later request's semaphore |
@@ -1469,7 +1483,7 @@ subscription is RAII-owned and is removed on every unwind before the task can se
 
 | Task | Priority | Stack | Created in | Purpose |
 |---|---|---|---|---|
-| `vehicle_loop` | `kPrioVehicleLoop` = 5 | 8192 | `vehicle_ctrl.cpp` (fn: `vehicle_telemetry.cpp`) | drain fixed NimBLE Link/RX events, pump `vehicle_->loop()`, parse deferred telemetry after unlock, rotating NO_WAKE poll, sleep gating, BLE-fault link reset |
+| `vehicle_loop` | `kPrioVehicleLoop` = 5 | 8192 | `vehicle_ctrl.cpp` (fn: `vehicle_telemetry.cpp`) | drain fixed NimBLE Link/RX events, drive `drive_command_runner_()`, parse deferred telemetry after unlock, rotating NO_WAKE poll, sleep gating, BLE-fault link reset |
 | `captive_dns` | `kPrioCaptiveDns` = 5 | 4096 | `provisioning.cpp` | captive-portal DNS (setup-AP mode only; vehicle stack not running) |
 | `ota` | `kPrioOta` = 5 | 8192 | `ota_update.cpp` | OTA download + flash (transient) |
 | `ota_chk` | `kPrioOtaCheck` = 5 | 8192 | `ota_update.cpp` | OTA manifest check (transient) |
@@ -1488,8 +1502,8 @@ Not in the table (ESP-IDF-owned, priorities from IDF Kconfig, not `task_config.h
 deferred queue; they never call `Vehicle`, NVS, logging or an allocating parser. The surrounding
 GAP/GATT lifecycle callbacks still perform bounded parsing, DEBUG diagnostics and synchronous
 NimBLE submissions, but every lifecycle mutex attempt is zero-wait and every failure drops/retries
-fail-closed instead of blocking the host. `vehicle_loop` owns `Vehicle::set_connected`,
-`on_rx_data`, final ready publication and deferred telemetry parsing. The **esp_http_server task** runs every
+fail-closed instead of blocking the host. `vehicle_loop` owns `apply_ble_link_state_`,
+`process_ble_host_events_`, final ready publication and deferred telemetry parsing. The **esp_http_server task** runs every
 HTTP/MCP handler, i.e. the `command_mutex_` cycles and cache copies; plus the usual esp_timer /
 WiFi / LwIP system tasks.
 
@@ -1584,7 +1598,7 @@ callbacks and non-literal source registration are rejected; each boundary either
 a direct/delegated catch-all or passes a mechanical fixed-buffer/C/atomic call audit. Mutation
 canaries add a registration, remove a catch/lifetime release, introduce a dynamic callback or a
 throwing call, restore NimBLE→Vehicle re-entry, parse/log/allocate inside a tesla-ble callback,
-publish BLE readiness before the deferred Vehicle acknowledgement, reuse stale charging-current
+publish BLE readiness before the deferred vehicle acknowledgement, reuse stale charging-current
 feedback, materialize OTA strings under the status lock, race crash dismissal with its immutable
 string/vector snapshot, register a nested `.cc` source, bypass sticky cJSON construction, remove the real
 `/status` emitter or any production MQTT builder/sequencer seam, bypass persist-before-restart,

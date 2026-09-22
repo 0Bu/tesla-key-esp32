@@ -74,6 +74,7 @@ enum class OtaIdentityGateState : uint8_t {
     IdentityMutation,
     FaultRestart,
     HealthCommit,
+    ConfigRestart,
 };
 
 // The executable CAS seam shared by firmware and host tests. Acquiring always compares directly

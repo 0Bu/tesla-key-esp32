@@ -113,28 +113,6 @@ test('official AES-GCM command vector pins sorted TLV, AAD, nonce and tag layout
   assert.throws(() => rejected.final());
 });
 
-test('repository patch text preserves anti-replay early return before dispatch', () => {
-  const patch = readFileSync('patches/tesla-ble/0001-reject-replayed-carserver-responses.patch', 'utf8');
-  const guard = patch.indexOf('!peer->validate_response_counter(response_counter)');
-  const earlyReturn = patch.indexOf('+    return;', guard);
-  const firstDispatch = patch.indexOf('if (response.which_response_msg', guard);
-  assert.ok(guard >= 0 && earlyReturn > guard && firstDispatch > earlyReturn);
-  assert.match(patch, /old actionStatus=OK must not acknowledge a new charging limit/);
-});
-
-test('repository key-regeneration patch remains transactional and fail-closed', () => {
-  const patch = readFileSync('patches/tesla-ble/0002-report-key-regeneration-result.patch', 'utf8');
-  const exportOld = patch.indexOf('client_->get_private_key');
-  const createNew = patch.indexOf('client_->create_private_key');
-  const persistNew = patch.indexOf('persist_private_key_');
-  const restoreOld = patch.indexOf('client_->load_private_key');
-  assert.match(patch, /\+  bool regenerate_key\(\);/);
-  assert.match(patch, /\+  bool has_private_key\(\) const/);
-  assert.ok(exportOld >= 0 && createNew > exportOld && persistNew > createNew && restoreOld > persistNew);
-  assert.match(patch, /Failed to export existing private key before regeneration/);
-  assert.match(patch, /Failed to restore previous in-memory private key after persistence failure/);
-});
-
 function occurrences(text, needle) {
   return text.split(needle).length - 1;
 }
@@ -144,185 +122,11 @@ function replaceExactlyOnce(text, before, after) {
   return text.replace(before, after);
 }
 
-function validateRxRecoveryLogPatch(patch) {
-  const addedLines = patch
-    .split('\n')
-    .filter((line) => line.startsWith('+') && !line.startsWith('+++'))
-    .map((line) => line.slice(1));
-  const removedLines = patch
-    .split('\n')
-    .filter((line) => line.startsWith('-') && !line.startsWith('---'))
-    .map((line) => line.slice(1).trim());
-  const added = addedLines.join('\n');
-
-  assert.equal(occurrences(added, '#include <cstdint>'), 1);
-  assert.equal(
-    occurrences(
-      added,
-      'std::chrono::steady_clock::time_point last_rx_recovery_warning_log_{};',
-    ),
-    1,
-  );
-  assert.equal(
-    occurrences(
-      added,
-      'std::chrono::steady_clock::time_point last_rx_recovery_error_log_{};',
-    ),
-    1,
-  );
-  assert.equal(occurrences(added, 'uint32_t suppressed_rx_recovery_logs_{0};'), 1);
-  assert.equal(
-    occurrences(added, 'void log_rx_recovery_(const char *reason, bool severe = false);'),
-    1,
-  );
-
-  const functionStart = added.indexOf(
-    'void Vehicle::log_rx_recovery_(const char *reason, bool severe) {',
-  );
-  assert.ok(functionStart >= 0);
-  const functionEnd = added.indexOf('\n}\n', functionStart);
-  assert.ok(functionEnd > functionStart);
-  const body = added.slice(functionStart, functionEnd + 2);
-
-  assert.equal(occurrences(body, 'constexpr auto kLogInterval = std::chrono::hours(1);'), 1);
-  assert.equal(occurrences(body, 'std::chrono::hours('), 1);
-  assert.equal(occurrences(body, 'const auto now = std::chrono::steady_clock::now();'), 1);
-  assert.equal(
-    occurrences(
-      body,
-      'auto &last_log = severe ? last_rx_recovery_error_log_ : last_rx_recovery_warning_log_;',
-    ),
-    1,
-  );
-  assert.equal(occurrences(added, 'last_rx_recovery_warning_log_'), 2);
-  assert.equal(occurrences(added, 'last_rx_recovery_error_log_'), 2);
-
-  const suppressionBlock = `  if (last_log != std::chrono::steady_clock::time_point{} &&
-      now - last_log < kLogInterval) {
-    if (suppressed_rx_recovery_logs_ != UINT32_MAX) {
-      ++suppressed_rx_recovery_logs_;
-    }
-    return;
-  }`;
-  assert.equal(occurrences(body, suppressionBlock), 1);
-  assert.equal(occurrences(body, 'UINT32_MAX'), 1);
-  assert.equal(occurrences(body, '++suppressed_rx_recovery_logs_;'), 1);
-
-  const severityBlock = `  if (severe) {
-    LOG_ERROR("RX framing recovery: %s; suppressed %" PRIu32 " similar events", reason,
-              suppressed_rx_recovery_logs_);
-  } else {
-    LOG_WARNING("RX framing recovery: %s; suppressed %" PRIu32 " similar events", reason,
-                suppressed_rx_recovery_logs_);
-  }`;
-  assert.equal(occurrences(body, severityBlock), 1);
-  assert.equal(occurrences(body, 'last_log = now;'), 1);
-  assert.equal(occurrences(body, 'suppressed_rx_recovery_logs_ = 0;'), 1);
-  const severityAt = body.indexOf(severityBlock);
-  const clockResetAt = body.indexOf('last_log = now;');
-  const suppressionResetAt = body.indexOf('suppressed_rx_recovery_logs_ = 0;');
-  assert.ok(severityAt >= 0 && clockResetAt > severityAt && suppressionResetAt > clockResetAt);
-
-  const calls = addedLines
-    .filter((line) => /^\s{4,}log_rx_recovery_\(/.test(line))
-    .map((line) => line.trim());
-  assert.deepEqual(calls, [
-    'log_rx_recovery_("invalid message length; attempting recovery");',
-    'log_rx_recovery_("severe buffer corruption; clearing buffer", true);',
-    'log_rx_recovery_("recovery failed; clearing buffer");',
-    'log_rx_recovery_("recovery produced invalid length; clearing buffer");',
-    'log_rx_recovery_("message parse failed; attempting recovery");',
-    'log_rx_recovery_("recovery failed after parse error; clearing buffer");',
-  ]);
-  assert.equal(calls.filter((line) => line.endsWith(', true);')).length, 1);
-  assert.equal(calls[1], 'log_rx_recovery_("severe buffer corruption; clearing buffer", true);');
-
-  assert.deepEqual(
-    removedLines.filter((line) => /^LOG_(?:ERROR|WARNING)\(/.test(line)),
-    [
-      'LOG_ERROR("Invalid message length %d, attempting buffer recovery", msg_len);',
-      'LOG_ERROR("Severe buffer corruption detected (length: %d), clearing buffer", msg_len);',
-      'LOG_WARNING("Buffer recovery failed, clearing all data");',
-      'LOG_WARNING("Buffer recovery produced invalid length %d, clearing buffer", msg_len);',
-      'LOG_ERROR("Failed to parse Universal Message (buffer size: %zu) - attempting buffer recovery", rx_buffer_.size());',
-      'LOG_WARNING("Buffer recovery failed after parse error, clearing all data");',
-    ],
-  );
-}
-
-test('repository RX framing recovery patch rate-limits all six callsites fail-closed', () => {
-  const patch = readFileSync(
-    'patches/tesla-ble/0003-rate-limit-rx-framing-recovery-logs.patch',
-    'utf8',
-  );
-  validateRxRecoveryLogPatch(patch);
-
-  const mutations = [
-    replaceExactlyOnce(
-      patch,
-      'std::chrono::hours(1)',
-      'std::chrono::minutes(1)',
-    ),
-    replaceExactlyOnce(
-      patch,
-      'severe ? last_rx_recovery_error_log_ : last_rx_recovery_warning_log_',
-      'severe ? last_rx_recovery_warning_log_ : last_rx_recovery_warning_log_',
-    ),
-    replaceExactlyOnce(
-      patch,
-      'suppressed_rx_recovery_logs_ != UINT32_MAX',
-      'suppressed_rx_recovery_logs_ <= UINT32_MAX',
-    ),
-    (() => {
-      const withoutReset = replaceExactlyOnce(
-        patch,
-        '+  suppressed_rx_recovery_logs_ = 0;\n',
-        '',
-      );
-      return replaceExactlyOnce(
-        withoutReset,
-        '+  if (severe) {\n',
-        '+  suppressed_rx_recovery_logs_ = 0;\n+  if (severe) {\n',
-      );
-    })(),
-    (() => {
-      const placeholder = replaceExactlyOnce(
-        patch,
-        'LOG_ERROR("RX framing recovery:',
-        'LOG_TEMP("RX framing recovery:',
-      );
-      const swappedWarning = replaceExactlyOnce(
-        placeholder,
-        'LOG_WARNING("RX framing recovery:',
-        'LOG_ERROR("RX framing recovery:',
-      );
-      return replaceExactlyOnce(
-        swappedWarning,
-        'LOG_TEMP("RX framing recovery:',
-        'LOG_WARNING("RX framing recovery:',
-      );
-    })(),
-    replaceExactlyOnce(
-      patch,
-      '+    log_rx_recovery_("invalid message length; attempting recovery");\n',
-      '',
-    ),
-    replaceExactlyOnce(
-      patch,
-      'log_rx_recovery_("severe buffer corruption; clearing buffer", true);',
-      'log_rx_recovery_("severe buffer corruption; clearing buffer");',
-    ),
-  ];
-  for (const mutation of mutations) {
-    assert.throws(() => validateRxRecoveryLogPatch(mutation));
-  }
-});
-
 test('all target locks pin the reviewed tesla-ble source and exact target set', () => {
   const targets = ['esp32', 'esp32s3', 'esp32c3', 'esp32c6'];
   for (const target of targets) {
     const lock = readFileSync(`dependencies.lock.${target}`, 'utf8');
-    assert.match(lock, /version: 54ee51f1c82ae6937b00f6c2347d3fb8a9f06dce/);
+    assert.match(lock, /version: 07a4ef503a52f736009fdeba953f185aecc863f3/);
     assert.match(lock, new RegExp(`^target: ${target}$`, 'm'));
     const listed = [...lock.matchAll(/^    - (esp32(?:s3|c3|c6)?)$/gm)].map((match) => match[1]);
     assert.deepEqual(listed, targets);
@@ -397,7 +201,7 @@ function validateSessionCounterReplayPatch(patch) {
   const files = [...patch.matchAll(/^diff --git a\/(\S+) b\/(\S+)$/gm)];
   assert.deepEqual(
     files.map((match) => match[1]),
-    ['src/peer.cpp', 'src/vehicle.cpp'],
+    ['src/peer.cpp'],
   );
   for (const [, before, after] of files) {
     assert.equal(before, after);
@@ -409,17 +213,9 @@ function validateSessionCounterReplayPatch(patch) {
     patch,
     /\+    LOG_WARNING\("Session counter replay detected \(vehicle=%" PRIu32 ", local=%" PRIu32 "\) - keeping higher local counter"/,
   );
-
-  // vehicle.cpp: must eliminate the force_update_session call site
-  assert.match(patch, /-    update_result = peer->force_update_session\(&session_info\);/);
-  assert.match(
-    patch,
-    /\+  if \(peer && peer->update_session\(&session_info\) == TeslaBLE_Status_E_OK\) \{/,
-  );
-  assert.equal(patch.includes('+    update_result = peer->force_update_session'), false);
 }
 
-test('session counter replay patch aligns with signer.go and removes force_update_session dead code', () => {
+test('session counter replay patch aligns with signer.go', () => {
   const patch = readFileSync(
     'patches/tesla-ble/0005-align-session-counter-replay-with-signer-go.patch',
     'utf8',
@@ -432,18 +228,99 @@ test('session counter replay patch aligns with signer.go and removes force_updat
       '-    return TeslaBLE_Status_E_ERROR_COUNTER_REPLAY;',
       '+    return TeslaBLE_Status_E_ERROR_COUNTER_REPLAY;',
     ),
-    replaceExactlyOnce(
-      patch,
-      '-    update_result = peer->force_update_session(&session_info);',
-      '+    update_result = peer->force_update_session(&session_info);',
-    ),
-    replaceExactlyOnce(
-      patch,
-      '+  if (peer && peer->update_session(&session_info) == TeslaBLE_Status_E_OK) {',
-      '+  if (peer && peer->update_session(&session_info) != TeslaBLE_Status_E_OK) {',
-    ),
   ];
   for (const mutation of mutations) {
     assert.throws(() => validateSessionCounterReplayPatch(mutation));
   }
+});
+
+function functionBody(source, signature, nextSignature) {
+  const start = source.indexOf(signature);
+  assert.ok(start >= 0, `${signature} must be defined`);
+  const end = source.indexOf(nextSignature, start + signature.length);
+  assert.ok(end > start, `${signature} scope bounded by ${nextSignature}`);
+  return source.slice(start, end);
+}
+
+test('B1: TX path builds through the harness-tested helper and refuses malformed frames', () => {
+  // The behaviour (builder output written unchanged, double prefix refused) is exercised against
+  // the real tesla-ble by test/test_tesla_ble_harness.cpp and in test_logic.cpp. This pins the
+  // IDF call site to those helpers so the harness keeps covering the production path.
+  const telemetry = readFileSync('main/vehicle_telemetry.cpp', 'utf8');
+  const body = functionBody(telemetry, 'void VehicleController::drive_command_runner_()',
+                            'void VehicleController::loop_task_fn_(');
+  const build = body.indexOf('tk::build_ble_tx_frame(');
+  const guard = body.indexOf('tk::is_well_formed_ble_frame(tx_buffer_)');
+  const write = body.indexOf('ble_->write(tx_buffer_)');
+  assert.ok(build >= 0, 'drive_command_runner_ must build via tk::build_ble_tx_frame');
+  assert.ok(guard > build, 'the structural guard must run after building');
+  assert.ok(write > guard, 'the frame must be written only after the guard');
+  assert.equal(occurrences(body, 'ble_->write('), 1, 'exactly one BLE write site');
+  for (const forbidden of ['tx_buffer_.insert(', 'tx_buffer_[0]', 'tx_buffer_[1]', 'framed[0]']) {
+    assert.equal(body.includes(forbidden), false, `must not touch the frame header (${forbidden})`);
+  }
+
+  const framing = readFileSync('main/logic/rx_framing.hpp', 'utf8');
+  assert.match(framing, /int build_ble_tx_frame\(std::vector<uint8_t>& wire, size_t capacity, BuildFn&& build\)/);
+  assert.match(framing, /inline bool is_well_formed_ble_frame\(const uint8_t\* wire, size_t size\) noexcept/);
+});
+
+test('B2: key regeneration runs the harness-tested transaction with a PEM-sized buffer', () => {
+  const pairing = readFileSync('main/vehicle_pairing.cpp', 'utf8');
+  const body = functionBody(pairing, 'bool VehicleController::regenerate_key_native_()',
+                            'bool VehicleController::finish_key_rotation_cleanup_()');
+  assert.ok(body.includes('tk::regenerate_private_key('),
+            'regenerate_key_native_ must delegate to tk::regenerate_private_key');
+  for (const direct of ['get_private_key(', 'create_private_key(', 'load_private_key(']) {
+    assert.equal(body.includes(direct), false, `the transaction must not be re-implemented (${direct})`);
+  }
+  assert.match(body, /storage_->save\(tk::nvs_contract::kPrivateKey, new_key\)/);
+
+  const rotation = readFileSync('main/logic/key_rotation.hpp', 'utf8');
+  const capacity = rotation.match(/inline constexpr size_t kPrivateKeyPemCapacity = (\d+);/);
+  assert.ok(capacity && Number(capacity[1]) >= 2048, 'PEM export capacity must stay >= 2048 B');
+  assert.match(rotation, /KeyRegenerationResult regenerate_private_key\(Client& client, Persist&& persist,/);
+});
+
+test('H1: CarServer response is routed by UUID before delivering vehicleData telemetry callbacks', () => {
+  const telemetry = readFileSync('main/vehicle_telemetry.cpp', 'utf8');
+  const fnStart = telemetry.indexOf('void VehicleController::handle_carserver_frame_(');
+  assert.ok(fnStart >= 0);
+  const fnEnd = telemetry.indexOf('void VehicleController::process_rx_frame_(');
+  assert.ok(fnEnd > fnStart);
+  const fnBody = telemetry.slice(fnStart, fnEnd);
+
+  const routeCall = fnBody.indexOf('command_runner_.handle_response(');
+  const dropCheck = fnBody.indexOf('if (!outcome.routed) {');
+  const callbackDelivery = fnBody.indexOf('if (response.which_response_msg == CarServer_Response_vehicleData_tag) {');
+
+  assert.ok(routeCall >= 0, 'must route response via command_runner_.handle_response');
+  assert.ok(dropCheck > routeCall, 'must check outcome.routed immediately after handle_response');
+  assert.ok(callbackDelivery > dropCheck, 'must deliver vehicleData callbacks strictly AFTER successful routing');
+});
+
+test('H2: RxFramer is strictly single-owner on vehicle_loop', () => {
+  const pairing = readFileSync('main/vehicle_pairing.cpp', 'utf8');
+  assert.match(
+    pairing,
+    /command_runner_\.reset\(\/\*reset_framer=\*\/false\);/,
+    'clear_session_and_cache_ must not reset RxFramer directly from external task',
+  );
+  assert.match(
+    pairing,
+    /request_framer_reset_\(\);/,
+    'clear_session_and_cache_ must request framer reset via atomic flag',
+  );
+
+  const commands = readFileSync('main/vehicle_commands.cpp', 'utf8');
+  assert.equal(
+    commands.includes('command_runner_.rx_framer().reset()'),
+    false,
+    'vehicle_commands.cpp must not reset RxFramer directly',
+  );
+  assert.match(
+    commands,
+    /request_framer_reset_\(\);/,
+    'vehicle_commands.cpp must request framer reset via atomic flag',
+  );
 });

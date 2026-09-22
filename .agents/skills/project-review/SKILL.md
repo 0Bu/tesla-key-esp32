@@ -14,10 +14,10 @@ description: "Read-only whole-project coherence review of tesla-key-esp32 for bu
 This project is an **ESP-IDF 5.x C++ firmware** for the **ESP32 family** — one source tree
 builds for esp32 / esp32s3 / esp32c3 / esp32c6 — exactly the four targets yoziru/tesla-ble
 supports, which the ESP-IDF Component Manager enforces at dependency resolution. All four receive
-the complete ordered repository patch series in `patches/tesla-ble/` via root CMake: replay
-rejection, transactional key regeneration/persistence, bounded RX-framing recovery logs, the
-trim of unsent Parental Controls actions, and signer.go session-counter replay alignment that
-keeps esp32c6 under the app-size policy. The firmware acts as a **BLE↔HTTP proxy for a Tesla
+the complete ordered repository patch series in `patches/tesla-ble/` via root CMake: the
+trim of unused Parental Controls actions, and signer.go session-counter replay alignment that
+keeps esp32c6 under the app-size policy (native orchestration in `main/logic/` handles framing,
+dispatch, monotonic session progression, and transactional key regeneration). The firmware acts as a **BLE↔HTTP proxy for a Tesla
 vehicle**, API-compatible with TeslaBleHttpProxy,
 so it works as an **evcc** BLE vehicle. It is small but dense with **non-local invariants**:
 a one-line change in code often has to be mirrored in three docs, a Kconfig option, the
@@ -89,13 +89,14 @@ links yourself — that's where the value is.
 | Area | Files | Responsibility |
 |---|---|---|
 | Boot / wiring | `main/main.cpp` (+ `boot_fatal.hpp`) | NVS, config/VIN resolve, clock restore, BLE + network bring-up ORDER, SNTP, mDNS, starts every component; boot heap log; OTA mark-valid |
+| Clock authority | `main/time_sync.hpp` + `main/main.cpp` (`on_time_sync`, `restore_clock_from_nvs`) + `main/http_common.cpp` (`apply_browser_clock`) | The ONE seam deciding whether the wall clock is AUTHORITATIVE (SNTP, or an explicit browser `/set_time`) as opposed to merely RESTORED from the NVS `last_time` cache, which reads the time of the PREVIOUS sync. A restored clock is good enough for session ages and OTA TLS validity; it is NOT good enough for a durable stamp, because the wrong value outlives the boot. Every durable wall-clock write — `key_created`, `paired_at`, the MQTT `boot_time` latch — gates on `clock_is_authoritative()`. `clock_synced_via_ntp()` is the narrower flag that stops a browser clock from overwriting a verified NTP one |
 | Board identity | `main/board.{cpp,hpp}` | Runtime board detection for the ONE image per chip. The esp32s3 image serves a T-Dongle-S3, bare ESP32-S3 and the supported W5500 board layouts. ONE cached detector because display and Ethernet OVERLAP ON A PIN — the panel's SPI clock is GPIO5, the PoE base's SCLK; candidate order and GPIO validity live in `main/logic/eth_board.hpp` |
 | Network transport | `main/net.{cpp,hpp}` + `main/ping_probe.hpp` + `logic/net_link.hpp` + `logic/eth_board.hpp` | The ONE transport seam: everything above it asks `tk::net_is_up()` / `net_kind()` / `net_active_netif()` and never touches `esp_wifi`. Owns the WiFi station, the endless-reconnect handler, the credential-rollback boot window (`logic/wifi_rollback.hpp`) and the generation-owned gateway-ICMP ghost-link watchdog (`net_wd`); the transport identity `NetLink::{None,Wifi,Eth}` and the watchdog's decision (incl. the never-answered-ICMP baseline rule) are host-tested in `logic/net_link.hpp`. Also the OPTIONAL W5500 SPI Ethernet backend (`CONFIG_TESLA_ETH_ENABLED`, esp32s3 only): ordered hardware-verified VERSIONR candidates plus full-width custom-pin validation, POLLING mode (the PoE base routes no INT/RST), a TWO-PHASE bring-up (a short link grace answers "is a cable attached", then the generous lease deadline once the PHY reports link — one timer for both delayed the setup AP on a credential-less board), a raised `route_prio` (ESP-IDF defaults ETH *below* the WiFi station; it governs `netif_default`/off-link traffic only — `ip4_route()` matches on-link destinations by `netif_list` order), and — on a lease — WiFi is never started at all |
 | Target identity | `main/platform.hpp` | `TK_PLATFORM` string per `CONFIG_IDF_TARGET_*`; must agree with `/api/proxy/1/version`, the HA device model, and esp-web-tools `chipFamily` |
 | Task priorities | `main/task_config.hpp` | `tk::kPrio*` — the ONE named-constant table every `xTaskCreate` site takes its priority from; must agree with the task inventory in `docs/ARCHITECTURE.md` ("Concurrency") |
 | Task stack headroom | `main/stack_watch.{cpp,hpp}` + `logic/status_model.hpp` + `main/http_status.cpp` + `main/mqtt_ha.cpp` | Allocation-free, per-owning-task historical minima for httpd, vehicle, auto-pair and MQTT. Unsampled tasks are absent, while a genuine zero-byte measurement remains reportable; `/status` and MQTT are cache-only readers. |
 | RTOS RAII guards | `main/rtos_guard.hpp` | `tk::SemGuard` / `MutexGuard` / `InFlightGuard` — the take/give and flag pairs that must survive a throw. Every `command_mutex_` / `scan_mutex_` acquisition goes through these, so the lock hierarchy in `docs/ARCHITECTURE.md` ("Concurrency") is only true while they are used; deliberately in `tk::` to avoid an ODR clash with a stock `MutexGuard` |
-| BLE GATT client | `main/ble_client.{cpp,hpp}` | NimBLE central; discovers vehicles by the Tesla name in SCAN_RSP (the service UUID is absent from adverts), then discovers the Tesla service/write/notify UUIDs after connect; RX notify → `on_rx_data` (runs on the **NimBLE host task**) |
+| BLE GATT client | `main/ble_client.{cpp,hpp}` | NimBLE central; discovers vehicles by the Tesla name in SCAN_RSP (the service UUID is absent from adverts), then discovers the Tesla service/write/notify UUIDs after connect; RX notify → `ble_event_queue_` consumed by `process_ble_host_events_` and `tk::RxFramer` on `vehicle_loop` |
 | Vehicle control | `main/vehicle_ctrl.{cpp,hpp}` + `main/runtime_admission.{cpp,hpp}` + `vehicle_commands.cpp` + `vehicle_telemetry.cpp` + `vehicle_pairing.cpp` (+ `vehicle_ctrl_internal.hpp`, `reboot_reason.hpp`) | one `VehicleController`, split by concern: core wiring/`link_state()` glue; global runtime admission; command API; **loop_task** (active-window polling + sleep gating) + caches; pairing lifecycle/keys; allocation-free, fail-closed heap-watchdog breadcrumb restore |
 | HTTP API | `main/http_server.{cpp,hpp}` + `http_api.cpp` + `http_status.cpp` + `http_ota.cpp` + `http_config.cpp` + `http_common.cpp` + `mcp_server.cpp` + `command_exec.cpp` (+ `http_handlers.hpp`, `json_builder.hpp`, `json_http_reply.hpp`, `mcp_json_payloads.hpp`, `status_json_emitter.hpp`, `mqtt_probe_owner.hpp`, `logic/http_route.hpp`) | `esp_http_server` on :80; single catch-all `handle_all` dispatch (wrapped in try/catch) in `http_server.cpp` — EVERY request is classified by the exact method/path table in `logic/http_route.hpp` and then enters the mapped handler through the `GuardedReq` containment signature; handlers split by route group; typed body/JSON results preserve 400/413/503 and forbid dispatch/persistence after rejection; request owners are released before blocking work and sticky cJSON ownership prevents partial 200/MCP responses under allocation failure; the MQTT configuration probe owns partial callback resources through its non-throwing RAII seam; `mcp_server.cpp` serves `/mcp` (stateless JSON-RPC 2.0 MCP server for AI agents — guide in `docs/MCP.md`); both command surfaces resolve names/args via `logic/command_registry.hpp` and execute through `command_exec.cpp`; `/status` shaping decided in `logic/status_model.hpp` (`build_status_object()` gathers + serializes only) |
 
@@ -138,12 +139,12 @@ Treat a violation of any of these as a real finding.
 ### Link state (single source of truth)
 - `VehicleController::link_state()` is the **single source of truth**, shared by the web UI
   and the MQTT bridge so the two can never disagree. **Four states:** **AWAKE** (fresh live
-  infotainment telemetry < 60 s), **ASLEEP** (no live data **and** the car's VCSEC sleep flag
+  infotainment telemetry < 60 s via `kAwakeMaxAgeS`), **ASLEEP** (no live data **and** the car's VCSEC sleep flag
   has held ASLEEP for ≥ ~120 s — *debounced*, sampled in `loop_task`, so a Cabin-Overheat
-  `AWAKE↔ASLEEP` flap (~60 s) can't trip it), **IDLE** (reachable over BLE but **not provably
+  `AWAKE↔ASLEEP` flap (~60 s) can't trip it — while reachable within `kReachableMaxAgeS` = 150 s), **IDLE** (reachable over BLE within `kReachableMaxAgeS` = 150 s but **not provably
   asleep** — we stopped polling infotainment to let it sleep and VCSEC hasn't confirmed →
   web UI shows the neutral **"Parked"** card, which makes **no** sleep claim), **UNREACHABLE**
-  (answers nothing over BLE). Nothing heard since boot/re-pair ⇒ MQTT sleep_state **omitted**
+  (no signed BLE round-trip for ≥ `kReachableMaxAgeS` = 150 s, spanning two ~30 s probe cycles plus miss headroom, or answers nothing over BLE). Nothing heard since boot/re-pair ⇒ MQTT sleep_state **omitted**
   (HA shows "unknown"); the web UI **hides the hero card** for both `unreachable` and the
   cold-start `unknown` — rather than fill it with stale battery/idle chips — and signals the state
   on the BLE row instead (orange ping-pong bars + orange MAC). Never a sleep claim.
@@ -161,7 +162,7 @@ Treat a violation of any of these as a real finding.
 - **C++ exceptions are enabled** (`CONFIG_COMPILER_CXX_EXCEPTIONS=y`), but an **uncaught**
   throw that unwinds into C frames (NimBLE host task, the C httpd loop) → `std::terminate` →
   `abort()` → reboot. So: HTTP handlers run under the `handle_all` try/catch (→ 503 on OOM);
-  library calls that parse BLE RX (`on_rx_data`, `loop()`) are wrapped; **flag any new large
+  calls that parse BLE RX (`process_rx_frame_()`, `drive_command_runner_()`) are wrapped; **flag any new large
   allocation** (`std::string` of a whole buffer, TLS for OTA, big JSON) that isn't guarded or
   could exceed the largest block. `/diag` must **stream** (`httpd_resp_send_chunk`), never
   build the whole log into one `std::string`.
@@ -370,6 +371,11 @@ that describe it. When reviewing a change (or the repo as a whole), check these 
   the offset (`0x20000`), flash size (`4 MB`), slot size (`~2 MB` / `0x1f0000`), or dual-OTA
   layout **and** the migration note.
 - **Version change** → `version.txt` only; hunt for any other hardcoded version.
+- **New durable wall-clock stamp** (an NVS record or retained payload carrying an absolute time) → gate the write on `clock_is_authoritative()` (`main/time_sync.hpp`) **and** give the
+  reader a plausibility floor so an unstamped value is OMITTED rather than shown as 1970
+  (`logic/status_model.hpp`'s `kEpochPlausibleFloor`). `restore_clock_from_nvs()` deliberately
+  does not set authority: a stamp taken from it dates a fresh key or pairing to the previous
+  sync, durably. `paired_at` and `key_created` are the two worked examples.
 - **New telemetry field** → parser (with presence flag) **and** `/status` JSON **and** MQTT
   discovery **and** the web UI **and** docs (the field list in `docs/ARCHITECTURE.md`).
 - **Sleep / link-state change** → `link_state()` is the single source of truth feeding **both**
@@ -413,9 +419,22 @@ that describe it. When reviewing a change (or the repo as a whole), check these 
   `/status` (`mqtt.tls`/`mqtt.error`, `http_status.cpp`) **and** the web UI's "· secured" MQTT
   row **and** the MQTT sections of `docs/README.md`, `docs/ARCHITECTURE.md` and, for transport
   trust claims, `docs/SECURITY.md`.
-- **tesla-ble library bump** → `main/idf_component.yml` pin **and** explicitly rebase/remove
-  every committed `patches/tesla-ble/` change against the new source. Never hand-edit or commit
-  `managed_components/`; the configure-time patch script owns generated checkout changes.
+- **tesla-ble library bump (dependency lifecycle)** →
+  1. `main/idf_component.yml` pin **and** all four target locks (`dependencies.lock.*`).
+  2. `patches/tesla-ble/`: rebase, recreate or retire patches; sync inventory and hashes in
+     `scripts/check-dependency-contract.py` and `scripts/check-build-gate-contract.py`.
+  3. Upstream diff audit (`git diff <old>..<new>`): inspect upstream commits for semantic and behavioral
+     changes (e.g. `already_set` idempotency, Request-UUID response dispatch vs timeouts, error strings).
+     Reflect any behavioral changes in `docs/ARCHITECTURE.md`, `docs/FEATURES.md`, and UI/API handlers (`main/www/app.js`).
+  4. ADR accuracy: update or supersede affected ADRs (`docs/adr/0003-...`), accurately distinguishing
+     AEAD Associated Data request binding from duplicate frame delivery under buffer recovery or plaintext frames.
+  5. Metadata sinks: update pin citations in `.codex/agents/*.toml`, `.agents/subagents.json`
+     (`export-subagents.py`), and skill source maps (`vehicle-command-audit`, `skill-audit`, `project-review`);
+     recompute digests via `update-skill-digests.mjs --write`.
+  6. Empirical evidence: record live hardware or high-fidelity mock verification traces for new behaviors in the PR description or the tracking issue (the former `docs/reviews/` directory was removed in #312).
+  7. Renovate lifecycle: when closing an automated dependency PR manually, document in `.github/renovate.json`
+     that it was abandoned and that `currentValue` will track future releases. Never hand-edit or commit
+     `managed_components/`; the configure-time patch script owns generated checkout changes.
 
 ## Reviewing the skills (meta-coherence)
 
@@ -501,7 +520,7 @@ what each must stay true to:
   diff is feature-relevant.
 - **`$vehicle-command-audit`** compares the firmware against upstream `teslamotors/vehicle-command`,
   gated by what `yoziru/tesla-ble` (pin in `main/idf_component.yml`) can actually do. Re-verify the
-  tesla-ble **pin** in its source map (`v5.1.3`) still matches `idf_component.yml`, that its upstream
+  tesla-ble **pin** in its source map (`v5.2.0`) still matches `idf_component.yml`, that its upstream
   file paths still resolve (e.g. `pkg/vehicle/charge.go`), and that its "worked findings" table is
   not asserting drift already fixed in the tree. It is the *upstream-conformance* counterpart to this
   skill — keep the two complementary, not overlapping.
@@ -512,6 +531,11 @@ what each must stay true to:
   `CHECK`/`CHECK_STR`/`CHECK_NEAR` macro set in
   `test/test_logic.cpp`, and the `static_assert` lock pattern (`main/ota_update.cpp` /
   `main/logic/target.hpp`).
+- **`$mock-test`** executes fast host-side logic, mock, and sanitizer test runners for IDF-free logic
+  and boundaries. Re-verify against `scripts/run-fast-tests.sh` (`--logic`, `--nvs`, `--boundary`,
+  `--sanitizers`, `--all`), `scripts/run-mock-tests.sh` (host suite, parity checks, `--require-all`
+  fail-closed mode), and `scripts/run-sanitizer-tests.sh` (Linux ASan/UBSan/LSan tripwires). It is
+  read-only and reports host test evidence distinct from IDF/Docker/hardware boundaries.
 - **`$pr-hygiene`** screens the PR title/body, commit messages and touched documentation for
   personal/private information (LAN IPs, MAC addresses, VINs, WiFi network names, hostnames,
   emails) and for content not written in English. Re-verify it against

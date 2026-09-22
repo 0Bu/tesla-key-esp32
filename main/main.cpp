@@ -39,6 +39,7 @@
 #include "syslog.hpp"
 #include "display.hpp"
 #include "led_status.hpp"
+#include "time_sync.hpp"
 #include "logic/bootlog.hpp"
 #include "logic/health_gate.hpp"
 #include "logic/heap_watchdog.hpp"
@@ -84,11 +85,13 @@ static const char* TAG = "main";
 // task. volatile stops selected compiler optimizations but is NOT a cross-task
 // happens-before edge under the C++ memory model; std::atomic is. Simple seq_cst policy.
 static std::atomic<bool>  s_ntp_synced{false};
+static std::atomic<bool>  s_clock_authoritative{false};
 static NvsStorageAdapter* s_cfg_store  = nullptr;
 
 static void on_time_sync(struct timeval*) {
     try {
         const bool first_sync = !s_ntp_synced.exchange(true);
+        s_clock_authoritative.store(true, std::memory_order_release);
         if (first_sync && s_cfg_store) {
             try {
                 if (!s_cfg_store->save_str(tk::nvs_contract::kLastTime,
@@ -112,7 +115,9 @@ static void on_time_sync(struct timeval*) {
 
 // Queried by the HTTP /set_time handler so the browser clock is applied only as a
 // fallback while NTP has not synced this boot.
-bool clock_synced_via_ntp() { return s_ntp_synced.load(); }
+bool clock_synced_via_ntp() noexcept { return s_ntp_synced.load(std::memory_order_acquire); }
+bool clock_is_authoritative() noexcept { return s_clock_authoritative.load(std::memory_order_acquire); }
+void mark_clock_authoritative() noexcept { s_clock_authoritative.store(true, std::memory_order_release); }
 
 // Seed the wall clock from the NVS cache written by on_time_sync, so we never sit at 1970
 // waiting for NTP (or forever, if the network blocks it and no browser ever visits). Called
@@ -467,7 +472,7 @@ extern "C" void app_main() {
     // point of doing it here rather than next to the SNTP setup after WiFi (where it used to
     // live). init() hands the persisted BLE sessions to tesla-ble, which validates their age as
     // a signed (unix_now - session.clock_time) and rejects anything older than an hour.
-    // v5.1.3 accepts a negative age (session clock ahead of the local clock) instead of the
+    // Since v5.1.3, tesla-ble accepts a negative age (session clock ahead of the local clock) instead of the
     // old unsigned underflow that treated 1970 as "millions of seconds old". A 1970 clock
     // would now keep sessions rather than discard them; restore is still required so a real
     // clock can enforce the one-hour stale window. 49 boots in the 17.-24.07.2026 syslog, 49
@@ -478,8 +483,15 @@ extern "C" void app_main() {
     //
     // Needs no network (unlike SNTP, which stays below with the rest of the post-WiFi setup),
     // so there is nothing keeping it down there. NTP refines this within seconds of the link
-    // coming up; until then a cached-but-slightly-stale clock beats 1970 for every consumer —
-    // session ages here, TLS cert validity for OTA, and the key_created/paired_at stamps.
+    // coming up; until then a cached-but-slightly-stale clock beats 1970 for the consumers that
+    // only need a plausible ordering — session ages here, and TLS cert validity for OTA.
+    //
+    // It is deliberately NOT good enough for a DURABLE wall-clock stamp. A restored clock reads
+    // the time of the PREVIOUS sync, so writing key_created or paired_at from it dates a fresh
+    // key or pairing to whenever the board last had a real clock — and that wrong value then
+    // outlives the boot. Both stamps therefore gate on clock_is_authoritative()
+    // (main/time_sync.hpp), which only SNTP or an explicit browser /set_time sets; this restore
+    // deliberately does not. Any new durable stamp must do the same.
     //
     // If you are about to move this back down: the comment that used to sit next to it said
     // "tesla-ble signed-command freshness does NOT [need real UTC]", which is true — signing
@@ -492,31 +504,44 @@ extern "C" void app_main() {
     // Construct the controller (NVS + key) here; NimBLE itself (ble_client.start)
     // is started after WiFi is up. The controller's accessors are safe to call
     // before that — they report "not connected" until the link comes up.
-    static NvsStorageAdapter tesla_store(tk::nvs_contract::kTeslaBleNamespace);
-    if (!tesla_store.initialize())
-        boot_fatal("Tesla NVS");
     static BleClient ble_client;
     static VehicleController vehicle;
-    // TeslaBLE constructs its crypto context while loading an existing private key. The DRBG is
-    // seeded exactly once at that point, so enabling hardware entropy only in the no-key branch
-    // is too late for every already-provisioned device. Keep SAR-ADC entropy active across BOTH
-    // controller construction/key load and a possible first-boot key generation; WiFi/BLE are not
-    // running yet and therefore cannot supply RF entropy themselves.
-    bootloader_random_enable();
-    // init() wires the connected + rx callbacks onto ble_client and passes the
-    // config_store so it can save the discovered MAC. ESSENTIAL: without the controller
-    // there is no BLE proxy at all, so a failed init halts boot (and leaves any pending OTA
-    // image unconfirmed → rolled back).
-    // The controller is fully WIRED here, but its mutating tasks are deliberately deferred until
-    // VIN/key recovery and every ESSENTIAL initializer have succeeded. boot_fatal parks app_main;
-    // starting auto_pair here would therefore let it rotate keys behind a recovery halt.
-    if (!vehicle.init(vin, ble_client, tesla_store, config_store, ble_mac,
-                      /*start_tasks=*/false)) {
-        bootloader_random_disable();
-        boot_fatal("VehicleController");
-    }
     tk::VehicleTaskStartPhase vehicle_task_phase =
         tk::VehicleTaskStartPhase::ControllerWired;
+
+    static NvsStorageAdapter tesla_store(tk::nvs_contract::kTeslaBleNamespace);
+    const bool tesla_store_ok = tesla_store.initialize();
+    if (!tesla_store_ok && !safe_mode)
+        boot_fatal("Tesla NVS");
+    if (safe_mode && !tesla_store_ok)
+        ESP_LOGE(TAG, "safe mode: Tesla NVS unavailable — identity fields will read empty");
+
+    if (safe_mode) {
+        ESP_LOGW(TAG, "Safe mode active — initializing inert vehicle controller");
+        if (!vehicle.init_safe_mode(vin, tesla_store, config_store)) {
+            boot_fatal("VehicleController safe mode");
+        }
+        vehicle_task_phase = tk::VehicleTaskStartPhase::IdentityResolved;
+    } else {
+
+        // TeslaBLE constructs its crypto context while loading an existing private key. The DRBG is
+        // seeded exactly once at that point, so enabling hardware entropy only in the no-key branch
+        // is too late for every already-provisioned device. Keep SAR-ADC entropy active across BOTH
+        // controller construction/key load and a possible first-boot key generation; WiFi/BLE are not
+        // running yet and therefore cannot supply RF entropy themselves.
+        bootloader_random_enable();
+        // init() wires the connected + rx callbacks onto ble_client and passes the
+        // config_store so it can save the discovered MAC. ESSENTIAL: without the controller
+        // there is no BLE proxy at all, so a failed init halts boot (and leaves any pending OTA
+        // image unconfirmed → rolled back).
+        // The controller is fully WIRED here, but its mutating tasks are deliberately deferred until
+        // VIN/key recovery and every ESSENTIAL initializer have succeeded. boot_fatal parks app_main;
+        // starting auto_pair here would therefore let it rotate keys behind a recovery halt.
+        if (!vehicle.init(vin, ble_client, tesla_store, config_store, ble_mac,
+                          /*start_tasks=*/false)) {
+            bootloader_random_disable();
+            boot_fatal("VehicleController");
+        }
 
     // Recover a /set_vin transaction interrupted between the tesla_cfg ConfigBlob commit and the
     // tesla_ble private-key/session commits. The marker stores "previous VIN|previous key id".
@@ -575,11 +600,14 @@ extern "C" void app_main() {
             const bool info_removed = tesla_store.remove(tk::nvs_contract::kSessionInfotainment);
             const bool paired_removed = tesla_store.remove(tk::nvs_contract::kPairedAt);
             const bool mac_removed = config_store.remove(tk::nvs_contract::kBleMac);
-            const bool marker_removed = config_store.remove(tk::nvs_contract::kVinTransition);
-            if (!vcsec_removed || !info_removed || !paired_removed || !mac_removed ||
-                !marker_removed) {
+            if (!tk::vin_transition_cleanup_ready_for_marker_removal(
+                    vcsec_removed, info_removed, paired_removed, mac_removed)) {
                 bootloader_random_disable();
                 boot_fatal("VIN transition completion");
+            }
+            if (!config_store.remove(tk::nvs_contract::kVinTransition)) {
+                bootloader_random_disable();
+                boot_fatal("VIN transition marker cleanup");
             }
             bootloader_random_disable();
             vTaskDelay(pdMS_TO_TICKS(100));
@@ -651,6 +679,7 @@ extern "C" void app_main() {
     }
     vehicle_task_phase = tk::VehicleTaskStartPhase::IdentityResolved;
     bootloader_random_disable();
+    }  // !safe_mode
     // Match by the VIN-derived BLE name on scan. Pass the real VIN only when it is a plausible
     // 17-char VIN; with none configured we pass an EMPTY target so the scanner lists nearby
     // Teslas but never connects/enrols on one. The "UNKNOWN" placeholder must stay out of the

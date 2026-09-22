@@ -19,13 +19,12 @@ idf_build_set_property(COMPILE_OPTIONS "-Wno-error=format" APPEND)
 
 project(tesla-key-esp32)
 
-# yoziru/tesla-ble v5.1.3 has correctness gaps: replayed CarServer responses continue
-# into callbacks/FIFO completion, and key regeneration cannot report or recover from a
-# persistence failure. It also binds Parental Controls actions into the VehicleAction oneof
-# that this firmware never sends, and pulls in redundant force_update_session dead code on
-# counter replay instead of aligning with signer.go. Apply the ordered, reviewable
-# repository-owned patch series after Component Manager has materialised the pinned
-# dependency and before any source compiles.
+# yoziru/tesla-ble v5.2.0 binds Parental Controls actions into the VehicleAction oneof
+# that this firmware never sends (trimmed to preserve target flash budget), and pulls
+# in redundant force_update_session dead code on counter replay instead of aligning with
+# signer.go. Key regeneration and BLE orchestration are handled natively in the firmware.
+# Apply the ordered, reviewable repository-owned patch series after Component Manager
+# has materialised the pinned dependency and before any source compiles.
 execute_process(
     COMMAND "${CMAKE_SOURCE_DIR}/scripts/apply-tesla-ble-patches.sh"
     RESULT_VARIABLE TESLA_BLE_PATCH_RESULT

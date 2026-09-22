@@ -17,10 +17,24 @@ function loadUi() {
         innerHTML: "",
         textContent: "",
         title: "",
+        style: {},
         setAttribute(name, value) { this[name] = String(value); },
         appendChild(child) { this.children.push(child); child.parentNode = this; },
         removeChild(child) { this.children.splice(this.children.indexOf(child), 1); },
-        classList: { add() {}, remove() {}, toggle() {} }
+        classList: {
+          _classes: new Set(),
+          add(c) { this._classes.add(c); },
+          remove(c) { this._classes.delete(c); },
+          contains(c) { return this._classes.has(c); },
+          toggle(c) { this._classes.has(c) ? this._classes.delete(c) : this._classes.add(c); }
+        },
+        querySelector(sel) {
+          if (!this._subs) this._subs = new Map();
+          if (!this._subs.has(sel)) {
+            this._subs.set(sel, { innerHTML: "", textContent: "", className: "" });
+          }
+          return this._subs.get(sel);
+        }
       });
     }
     return elements.get(id);
@@ -61,6 +75,20 @@ test("requestJson rejects HTTP errors without parsing them as success", async ()
   assert.equal(parsed, false);
 });
 
+test("requestJsonResult returns status, ok and parsed JSON even on HTTP error", async () => {
+  const { context } = loadUi();
+  context.fetch = async () => ({
+    ok: false,
+    status: 503,
+    async json() { return { result: false, reason: "gate held" }; }
+  });
+
+  const res = await context.requestJsonResult("/gen_keys");
+  assert.equal(res.ok, false);
+  assert.equal(res.status, 503);
+  assert.deepEqual(res.json, { result: false, reason: "gate held" });
+});
+
 test("requestJsonWithTimeout rejects a hung HTTP request", async () => {
   const { context } = loadUi();
   context.fetch = () => new Promise(() => {});
@@ -73,6 +101,7 @@ test("configuration network failure is reported as failure, never saved", async 
   const messages = [];
   context.state = { vin: "UNKNOWN" };
   context.prompt = () => "5YJ3E1EA1JF000001";
+  context.confirm = () => true;
   context.fetch = async () => { throw new Error("offline"); };
   context.toast = (message, kind) => messages.push({ message, kind });
 
@@ -88,6 +117,7 @@ test("configuration success requires the command response schema", async () => {
   const messages = [];
   context.state = { vin: "UNKNOWN" };
   context.prompt = () => "5YJ3E1EA1JF000001";
+  context.confirm = () => true;
   context.fetch = async () => ({ ok: true, status: 200, async json() { return { response: { result: "true", reason: "saved" } }; } });
   context.toast = (message, kind) => messages.push({ message, kind });
 
@@ -95,6 +125,112 @@ test("configuration success requires the command response schema", async () => {
 
   assert.equal(messages.at(-1).kind, "err");
   assert.doesNotMatch(messages.at(-1).message, /saved/i);
+});
+
+test("VIN change requires confirmation when key is present or unknown", async () => {
+  const { context } = loadUi();
+  let confirmed = false;
+  let fetchCalled = false;
+  context.state = { vin: "UNKNOWN" };
+  context.prompt = () => "5YJ3E1EA1JF000001";
+  context.confirm = () => { confirmed = true; return false; };
+  context.fetch = async () => { fetchCalled = true; return { ok: true, async json() { return {}; } }; };
+
+  await context.editVin();
+
+  assert.equal(confirmed, true);
+  assert.equal(fetchCalled, false);
+});
+
+test("VIN change skips confirmation when key is known absent", async () => {
+  const { context } = loadUi();
+  let confirmCalled = false;
+  let fetchCalled = false;
+  context.state = { vin: "UNKNOWN", key_present: false };
+  context.prompt = () => "5YJ3E1EA1JF000001";
+  context.confirm = () => { confirmCalled = true; return true; };
+  context.fetch = async () => {
+    fetchCalled = true;
+    return { ok: true, async json() { return { response: { result: true, reason: "saved" } }; } };
+  };
+
+  await context.editVin();
+
+  assert.equal(confirmCalled, false);
+  assert.equal(fetchCalled, true);
+});
+
+test("key generation requires confirmation and omits force when state is null", async () => {
+  const { context } = loadUi();
+  let confirmed = false;
+  let requestedUrl = null;
+  context.state = null;
+  context.confirm = () => { confirmed = true; return true; };
+  context.fetch = async (url) => {
+    requestedUrl = url;
+    return {
+      ok: false,
+      status: 409,
+      async json() {
+        return { result: false, reason: "a key already exists — regenerating un-pairs the vehicle; call /gen_keys?force=1 to replace it" };
+      }
+    };
+  };
+  const messages = [];
+  context.toast = (message, kind) => messages.push({ message, kind });
+
+  await context.genKey();
+
+  assert.equal(confirmed, true);
+  assert.equal(requestedUrl, "/gen_keys");
+  assert.deepEqual(messages.at(-1), {
+    message: "a key already exists — regenerating un-pairs the vehicle; call /gen_keys?force=1 to replace it",
+    kind: "err"
+  });
+});
+
+test("key generation aborts when user cancels confirmation", async () => {
+  const { context } = loadUi();
+  let fetchCalled = false;
+  context.state = null;
+  context.confirm = () => false;
+  context.fetch = async () => { fetchCalled = true; return { ok: true, async json() { return { result: true }; } }; };
+
+  await context.genKey();
+
+  assert.equal(fetchCalled, false);
+});
+
+test("key generation sends force=1 only when key is known to be present", async () => {
+  const { context } = loadUi();
+  let requestedUrl = null;
+  context.state = { key_present: true };
+  context.confirm = () => true;
+  context.fetch = async (url) => {
+    if (url.startsWith("/gen_keys")) requestedUrl = url;
+    return { ok: true, status: 200, async json() { return { result: true }; } };
+  };
+
+  await context.genKey();
+
+  assert.equal(requestedUrl, "/gen_keys?force=1");
+});
+
+test("key generation skips confirmation and omits force when key is known absent", async () => {
+  const { context } = loadUi();
+  let confirmCalled = false;
+  let requestedUrl = null;
+  context.state = { key_present: false };
+  context.confirm = () => { confirmCalled = true; return true; };
+  context.fetch = async (url) => {
+    if (url.startsWith("/gen_keys")) requestedUrl = url;
+    return { ok: true, status: 200, async json() { return { result: true }; } };
+  };
+
+  await context.genKey();
+
+  assert.equal(confirmCalled, false);
+  assert.equal(requestedUrl, "/gen_keys");
 });
 
 test("key generation requires a successful result schema", async () => {
@@ -172,4 +308,121 @@ test("setup form enforces the shared WiFi credential contract without optimistic
   assert.match(html, /pb===64&&\/\^\[0-9a-f\]\{64\}\$\/i/);
   assert.match(html, /Recovery setup preserves an existing VIN:[\s\S]*use Change VIN on the device page/);
   assert.doesNotMatch(html, /setTimeout\(function\(\)\{ \$\("form"\)\.classList\.add\('hide'\)/);
+});
+
+test("render handles s.link === 'idle' without ReferenceError and sets chips", () => {
+  const { context, element } = loadUi();
+  context.render({
+    link: "idle",
+    paired: true,
+    key_present: true,
+    vin: "5YJSA1E21HF123456",
+    last: { usable_soc: 75 },
+    last_seen_s: 120
+  });
+  assert.match(element("hlabel").innerHTML, /Parked/);
+  assert.match(element("hstats").innerHTML, /Battery/);
+  assert.match(element("hstats").innerHTML, /75/);
+  assert.match(element("hstats").innerHTML, /Idle/);
+});
+
+test("render displays safe mode banner when sys.safe_mode is active", () => {
+  const { context, element } = loadUi();
+  context.render({
+    link: "idle",
+    paired: false,
+    key_present: true,
+    vin: "5YJ3E1EA7KF000316",
+    sys: { safe_mode: true }
+  });
+  const rb = element("reauthBanner");
+  assert.equal(rb.classList.contains("show"), true);
+  assert.match(rb.querySelector(".bt").innerHTML, /Safe Mode active/);
+});
+
+test("toggleCharge renders server rejection reason on HTTP 502", async () => {
+  const { context } = loadUi();
+  const messages = [];
+  context.state = { vin: "5YJ3E1EA1JF000001", vehicle: { status: "Stopped" } };
+  context.toast = (message, kind) => messages.push({ message, kind });
+  context.fetch = async () => ({
+    ok: false,
+    status: 502,
+    async json() {
+      return { response: { result: false, reason: "action failed: complete" } };
+    }
+  });
+
+  await context.toggleCharge();
+
+  assert.equal(messages.at(-1).kind, "info");
+  assert.equal(messages.at(-1).message, "Charging is already complete");
+});
+
+test("wakeCar renders server reason on HTTP 502", async () => {
+  const { context } = loadUi();
+  const messages = [];
+  context.state = { vin: "5YJ3E1EA1JF000001" };
+  context.toast = (message, kind) => messages.push({ message, kind });
+  context.fetch = async () => ({
+    ok: false,
+    status: 502,
+    async json() {
+      return { response: { result: false, reason: "Car not reachable" } };
+    }
+  });
+
+  await context.wakeCar();
+
+  assert.equal(messages.at(-1).kind, "err");
+  assert.equal(messages.at(-1).message, "Wake failed — Car not reachable");
+});
+
+test("editVin, editMqtt, editSyslog render server reason on HTTP 4xx/5xx", async () => {
+  const { context } = loadUi();
+  const messages = [];
+  context.toast = (message, kind) => messages.push({ message, kind });
+
+  // editVin HTTP 409
+  context.state = { vin: "UNKNOWN" };
+  context.prompt = () => "5YJ3E1EA1JF000001";
+  context.confirm = () => true;
+  context.fetch = async () => ({
+    ok: false,
+    status: 409,
+    async json() {
+      return { response: { result: false, reason: "key identity recovery is pending" } };
+    }
+  });
+  await context.editVin();
+  assert.equal(messages.at(-1).kind, "err");
+  assert.equal(messages.at(-1).message, "key identity recovery is pending");
+
+  // editMqtt HTTP 400
+  context.state = { mqtt: { broker: "" } };
+  context.prompt = () => "192.168.1.50:1883";
+  context.fetch = async () => ({
+    ok: false,
+    status: 400,
+    async json() {
+      return { response: { result: false, reason: "broker refused connection" } };
+    }
+  });
+  await context.editMqtt();
+  assert.equal(messages.at(-1).kind, "err");
+  assert.equal(messages.at(-1).message, "broker refused connection");
+
+  // editSyslog HTTP 400
+  context.state = { syslog: { host: "" } };
+  context.prompt = () => "192.168.1.50:514";
+  context.fetch = async () => ({
+    ok: false,
+    status: 400,
+    async json() {
+      return { response: { result: false, reason: "invalid syslog port" } };
+    }
+  });
+  await context.editSyslog();
+  assert.equal(messages.at(-1).kind, "err");
+  assert.equal(messages.at(-1).message, "invalid syslog port");
 });

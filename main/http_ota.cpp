@@ -26,7 +26,7 @@ static const char* ota_state_str(OtaState s) {
 // start the check — no extra blocking round-trip on the (serialized) HTTP server.
 static void apply_browser_time_query_(httpd_req_t* req) {
     if (clock_synced_via_ntp()) return;
-    char q[48];
+    char q[kQueryBufBytes];
     if (httpd_req_get_url_query_str(req, q, sizeof(q)) != ESP_OK) return;
     char ms[24];
     if (httpd_query_key_value(q, "ms", ms, sizeof(ms)) != ESP_OK) return;
@@ -41,6 +41,9 @@ static void apply_browser_time_query_(httpd_req_t* req) {
 // never ties up the HTTP server; the UI polls /ota/status for the result.
 esp_err_t handle_ota_check(GuardedReq rq) {
     httpd_req_t* req = rq.req;
+    if (validate_query_string(req) != ESP_OK) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid query string");
+    }
     apply_browser_time_query_(req);
     bool started = ota_check_start();
     tk::JsonBuilder json;

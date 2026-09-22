@@ -1,5 +1,6 @@
 #include "nvs_storage.hpp"
 #include "config_blob.hpp"
+#include "logic/vin_transition.hpp"
 
 #include <algorithm>
 #include <array>
@@ -60,6 +61,7 @@ esp_err_t next_set_blob_error = ESP_OK;
 esp_err_t next_erase_error = ESP_OK;
 esp_err_t next_commit_error = ESP_OK;
 esp_err_t next_set_str_error = ESP_OK;
+std::string fail_erase_key;
 
 esp_err_t consume_error(esp_err_t& value) {
     const esp_err_t result = value;
@@ -160,6 +162,9 @@ extern "C" esp_err_t nvs_erase_key(nvs_handle_t handle, const char* key) {
     last_blob_key = key ? key : "";
     ++nvs_calls;
     record_call("erase_key", handle, key);
+    if (!fail_erase_key.empty() && fail_erase_key == (key ? key : "")) {
+        return ESP_FAIL;
+    }
     return consume_error(next_erase_error);
 }
 
@@ -725,6 +730,54 @@ static void test_remove_paths(NvsStorageAdapter& config, NvsStorageAdapter& tesl
     CHECK(nvs_call_log.size() == 2);
 }
 
+static void test_vin_transition_cleanup_ordering(NvsStorageAdapter& config, NvsStorageAdapter& tesla) {
+    namespace NC = tk::nvs_contract;
+    // CompleteNewIdentity cleanup ordering:
+    // If deleting session or MAC fails, kVinTransition marker must NOT be erased.
+    // The retry journal remains so the next boot can complete the unfinished cleanup.
+    auto perform_cleanup = [&]() -> bool {
+        const bool vcsec_removed = tesla.remove(NC::kSessionVcsec);
+        const bool info_removed = tesla.remove(NC::kSessionInfotainment);
+        const bool paired_removed = tesla.remove(NC::kPairedAt);
+        const bool mac_removed = config.remove(NC::kBleMac);
+        if (!tk::vin_transition_cleanup_ready_for_marker_removal(
+                vcsec_removed, info_removed, paired_removed, mac_removed)) {
+            return false;
+        }
+        return config.remove(NC::kVinTransition);
+    };
+
+    // Test failure of each individual erase: marker removal is never reached
+    for (const char* key_to_fail : {"sess_vcsec", "sess_info", "paired_at", "ble_mac"}) {
+        fail_erase_key = key_to_fail;
+        clear_call_log();
+        CHECK(!perform_cleanup());
+        for (const auto& call : nvs_call_log) {
+            CHECK(call.key != NC::kVinTransition);
+        }
+    }
+    fail_erase_key = "";
+
+    // Test commit failure on first erase: marker removal is never reached
+    next_commit_error = ESP_FAIL;
+    clear_call_log();
+    CHECK(!perform_cleanup());
+    for (const auto& call : nvs_call_log) {
+        CHECK(call.key != NC::kVinTransition);
+    }
+
+    // When all succeed, marker removal is executed
+    clear_call_log();
+    CHECK(perform_cleanup());
+    bool erased_marker = false;
+    for (const auto& call : nvs_call_log) {
+        if (call.api == "erase_key" && call.name_space == NC::kConfigNamespace && call.key == NC::kVinTransition) {
+            erased_marker = true;
+        }
+    }
+    CHECK(erased_marker);
+}
+
 static void test_nvs_blob_load() {
     using B = tk::NvsBlobLoadState;
     namespace NC = tk::nvs_contract;
@@ -843,6 +896,7 @@ int main() {
     test_string_read_write_paths(storage);
     test_raw_blob_write_paths(storage);
     test_remove_paths(storage, tesla_storage);
+    test_vin_transition_cleanup_ordering(storage, tesla_storage);
 
     {
         const size_t before = nvs_calls;

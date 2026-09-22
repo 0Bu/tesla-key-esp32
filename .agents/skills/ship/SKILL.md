@@ -48,18 +48,29 @@ gh pr view "$PR" --json number,state,mergeable,headRefOid,body
 
 ## 1. Merge (squash — repo convention)
 
+Resolve the target PR's head commit SHA first. The repository's PR gate hook statically inspects
+the literal merge command and strictly requires a static numeric PR identifier and a static 40-hex SHA
+for `--match-head-commit`; unexpanded shell variables (e.g. `"$PR"` or `"$PR_HEAD"`) are rejected
+fail-closed.
+
+1. Resolve the current PR head commit:
 ```bash
-set -euo pipefail
-PR_HEAD=$(gh pr view "$PR" --json headRefOid --jq .headRefOid)
-[[ "$PR_HEAD" =~ ^[0-9a-f]{40}$ ]] || {
-  echo "REFUSING: PR head SHA is unavailable or malformed" >&2; exit 1;
+gh pr view <pr_number> --json headRefOid --jq .headRefOid
+```
+
+2. Execute the exact canonical merge command using the literal numeric PR and literal 40-hex head SHA:
+```bash
+gh --repo github.com/0Bu/tesla-key-esp32 pr merge <pr_number> \
+  --match-head-commit <40_hex_head_sha> --squash
+```
+
+3. Confirm and capture the resulting merge commit on `main`:
+```bash
+MERGE_SHA="$(gh pr view <pr_number> --json mergeCommit --jq '.mergeCommit.oid')"
+printf '%s\n' "$MERGE_SHA" | grep -Eq '^[0-9a-fA-F]{40}$' || {
+  echo "REFUSING: invalid or missing merge commit SHA from PR <pr_number>" >&2; exit 1;
 }
-gh --repo github.com/0Bu/tesla-key-esp32 pr merge "$PR" \
-  --match-head-commit "$PR_HEAD" --squash
-MERGE_SHA=$(gh pr view "$PR" --json mergeCommit --jq '.mergeCommit.oid')
-[[ "$MERGE_SHA" =~ ^[0-9a-f]{40}$ ]] || {
-  echo "REFUSING: merge commit SHA is unavailable or malformed" >&2; exit 1;
-}
+echo "Merged commit: $MERGE_SHA"
 ```
 
 ## 2. Watch the post-merge build on main — `gh run watch`, never sleep-polling

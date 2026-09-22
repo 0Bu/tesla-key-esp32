@@ -185,4 +185,13 @@ inline VinTransitionRecovery decide_vin_transition_recovery(
     return VinTransitionRecovery::HaltInconsistent;
 }
 
+// All peer session and MAC entries must be erased before the transition journal is removed.
+// If any erase fails, the journal remains durable so the next boot repeats recovery.
+constexpr bool vin_transition_cleanup_ready_for_marker_removal(bool vcsec_removed,
+                                                               bool info_removed,
+                                                               bool paired_removed,
+                                                               bool mac_removed) {
+    return vcsec_removed && info_removed && paired_removed && mac_removed;
+}
+
 }  // namespace tk

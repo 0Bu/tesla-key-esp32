@@ -79,7 +79,12 @@
 #include "logic/key_rotation.hpp"
 #include "logic/nvs_string_load.hpp"
 #include "logic/vin_transition.hpp"
+#include "logic/rx_framing.hpp"
+#include "logic/ble_dispatcher.hpp"
+#include "logic/session_state.hpp"
+#include "logic/command_runner.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdio>
@@ -273,6 +278,14 @@ static void test_vin_transition() {
     CHECK(tk::vin_transition_recovery_blocks_staging(true, false));
     CHECK(tk::vin_transition_recovery_blocks_staging(false, true));
     CHECK(tk::vin_transition_recovery_blocks_staging(true, true));
+
+    // Transition journal removal is permitted only after all session, pairing, and MAC erasures succeed.
+    CHECK(!tk::vin_transition_cleanup_ready_for_marker_removal(false, true, true, true));
+    CHECK(!tk::vin_transition_cleanup_ready_for_marker_removal(true, false, true, true));
+    CHECK(!tk::vin_transition_cleanup_ready_for_marker_removal(true, true, false, true));
+    CHECK(!tk::vin_transition_cleanup_ready_for_marker_removal(true, true, true, false));
+    CHECK(!tk::vin_transition_cleanup_ready_for_marker_removal(false, false, false, false));
+    CHECK(tk::vin_transition_cleanup_ready_for_marker_removal(true, true, true, true));
 }
 
 static void test_key_rotation() {
@@ -1441,6 +1454,70 @@ static void test_mcp() {
     CHECK_STR(tk::command_result_text(true,  tesla_reason), "command executed successfully");
     CHECK_STR(tk::command_result_text(false, tesla_reason), "complete");
     CHECK_STR(tk::command_result_text(false, no_reason),    "vehicle not reachable");
+
+    // Nominal error: already_set is classified as success for idempotent commands
+    CHECK(tk::is_nominal_already_set("already_set"));
+    CHECK(!tk::is_nominal_already_set("complete"));
+    CHECK(!tk::is_nominal_already_set(""));
+    CHECK(!tk::is_nominal_already_set("not_already_set"));
+    CHECK(!tk::is_nominal_already_set("already_set_suffix"));
+    CHECK(!tk::is_nominal_already_set("foo_already_set_bar"));
+    CHECK_STR(tk::command_result_text(false, "already_set"), "command executed successfully");
+
+    // Soft-desync link backstop: which failures prove contact, which are local, which count
+    // toward the drop-and-resync streak (tk::classify_command_failure, make_result_cb_).
+    using FailureOrigin = tk::CommandFailureOrigin;
+    CHECK(tk::classify_command_failure("vehicle asleep") == FailureOrigin::LocalPolicy);
+    CHECK(tk::classify_command_failure("signed message authentication failed") == FailureOrigin::VehicleResponse);
+    CHECK(tk::classify_command_failure("VCSEC authentication failed") == FailureOrigin::VehicleResponse);
+    CHECK(tk::classify_command_failure("authentication failed") == FailureOrigin::VehicleResponse);
+    CHECK(tk::classify_command_failure("key not on whitelist - pairing required") == FailureOrigin::VehicleResponse);
+    CHECK(tk::classify_command_failure("command rejected by vehicle") == FailureOrigin::VehicleResponse);
+    CHECK(tk::classify_command_failure("Infotainment action failed: could_not_reach_service") ==
+          FailureOrigin::VehicleResponse);
+    CHECK(tk::classify_command_failure("Infotainment action failed") == FailureOrigin::VehicleResponse);
+    CHECK(tk::classify_command_failure("action failed: charging_port_closed") == FailureOrigin::VehicleResponse);
+    CHECK(tk::classify_command_failure("failed with error status") == FailureOrigin::VehicleResponse);
+    CHECK(tk::classify_command_failure("VCSEC command failed with error status") == FailureOrigin::VehicleResponse);
+    CHECK(tk::classify_command_failure("VCSEC command failed") == FailureOrigin::VehicleResponse);
+    CHECK(tk::classify_command_failure("command response timeout; max retries exceeded") ==
+          FailureOrigin::TransportOrTimeout);
+    CHECK(tk::classify_command_failure("authentication / wake timeout; max retries exceeded") ==
+          FailureOrigin::TransportOrTimeout);
+    CHECK(tk::classify_command_failure("Payload build failed") == FailureOrigin::TransportOrTimeout);
+    CHECK(tk::classify_command_failure("connection lost") == FailureOrigin::TransportOrTimeout);
+    CHECK(tk::classify_command_failure("") == FailureOrigin::TransportOrTimeout);
+
+    // Protocol Invariant Gate: command table integrity & role boundaries.
+    // Every registered command must have:
+    // 1. Non-empty description if MCP tool is exposed.
+    // 2. Strict type assignment for every argument.
+    // 3. Role-denied commands (DoorLock..ClimateStop) MUST NOT be exposed as MCP tools
+    //    (mcp_name must be nullptr, protecting models from sending commands the car refuses).
+    for (const auto& cmd : tk::kCommands) {
+        if (cmd.mcp_name) {
+            CHECK(cmd.mcp_desc != nullptr && std::strlen(cmd.mcp_desc) > 0);
+            CHECK(cmd.kind != tk::CmdKind::DoorLock &&
+                  cmd.kind != tk::CmdKind::DoorUnlock &&
+                  cmd.kind != tk::CmdKind::FlashLights &&
+                  cmd.kind != tk::CmdKind::HonkHorn &&
+                  cmd.kind != tk::CmdKind::SetSentryMode &&
+                  cmd.kind != tk::CmdKind::ClimateStart &&
+                  cmd.kind != tk::CmdKind::ClimateStop);
+        }
+        for (int a = 0; a < tk::kCmdMaxArgs; ++a) {
+            const auto& arg = cmd.args[a];
+            if (arg.type == tk::CmdArgType::None) {
+                CHECK(arg.api_key == nullptr && arg.mcp_key == nullptr);
+            } else {
+                CHECK(arg.api_key != nullptr || arg.mcp_key != nullptr);
+                if (arg.type == tk::CmdArgType::Int) {
+                    CHECK(arg.lo <= arg.hi);
+                }
+            }
+        }
+    }
+
 }
 
 // ─── Charging-current ACK/readback + active-cache freshness ───────────────────
@@ -3007,25 +3084,35 @@ static void test_wake_poll() {
         st.note_bootstrap(false, false);
         CHECK(st.armed == false);
         CHECK(st.bootstrap_dispatched == false);
+        CHECK(st.episode_fresh == false);
 
-        // Connected + valid cache: does not arm
+        // Connected + valid cache: does not arm, latches episode_fresh (issue #308)
         st.note_bootstrap(true, true);
         CHECK(st.armed == false);
         CHECK(st.bootstrap_dispatched == false);
+        CHECK(st.episode_fresh == true);
 
-        // Connected + invalid cache: arms
-        st.note_bootstrap(true, false);
-        CHECK(st.armed == true);
-        CHECK(st.bootstrap_dispatched == true);
-
-        // Second call while connected does not re-arm
-        st.armed = false;
+        // Once episode_fresh is latched, subsequent stale cache on same connection does not arm
         st.note_bootstrap(true, false);
         CHECK(st.armed == false);
-
-        // Disconnect resets dispatch flag
-        st.note_disconnected();
         CHECK(st.bootstrap_dispatched == false);
+
+        // Clean state: connected + invalid cache arms bootstrap
+        WakePollState st_stale{};
+        st_stale.note_bootstrap(true, false);
+        CHECK(st_stale.armed == true);
+        CHECK(st_stale.bootstrap_dispatched == true);
+        CHECK(st_stale.episode_fresh == false);
+
+        // Second call while connected does not re-arm
+        st_stale.armed = false;
+        st_stale.note_bootstrap(true, false);
+        CHECK(st_stale.armed == false);
+
+        // Disconnect resets dispatch and episode flags
+        st_stale.note_disconnected();
+        CHECK(st_stale.bootstrap_dispatched == false);
+        CHECK(st_stale.episode_fresh == false);
     }
 
     // Direct loop wiring simulation: wake_poll_update followed by charge_poll_should_fire
@@ -3047,6 +3134,267 @@ static void test_wake_poll() {
         CHECK(st.pending == true);
         CHECK(charge_poll_should_fire({true, false, true, false /* idle */}, st) == true);
         CHECK(st.pending == false);
+    }
+
+    // Issue #301: Bootstrap latch on success rather than dispatch.
+    // Device reboots with invalid cache, car is AWAKE.
+    // 1. Initial attempt fires at now_s = 0
+    // 2. Poll in flight, times out at now_s = 25 (cache remains invalid)
+    // 3. Before backoff elapsed (now_s = 29), does not re-fire
+    // 4. Once backoff expires (now_s = 30), re-arms and fires retry
+    // 5. Retry in flight, times out (cache remains invalid)
+    // 6. Exponential backoff (now 60s): does not re-fire at now_s = 89; fires at now_s = 90
+    // 7. Success at now_s = 92: cache becomes valid. Future cycles (even after backoff) do NOT fire!
+    {
+        WakePollState st{};
+        // Cycle 1 at now_s = 0: car is AWAKE, cache invalid -> fires first attempt
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, false, 0, 0}) == true);
+        CHECK(st.bootstrap_dispatched == true);
+        CHECK(st.bootstrap_backoff_s == kBootstrapInitialBackoffS);
+        CHECK(st.next_bootstrap_retry_s == 30);
+
+        // While in-flight and before backoff expiry: does not re-fire
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, false, 0, 10}) == false);
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, false, 0, 25}) == false); // timeout point
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, false, 0, 29}) == false);
+
+        // At backoff expiry (now_s = 30): re-arms and fires retry!
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, false, 0, 30}) == true);
+        CHECK(st.bootstrap_backoff_s == 60);
+        CHECK(st.next_bootstrap_retry_s == 90);
+
+        // Second attempt also times out at 55; before 90 does not fire
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, false, 0, 55}) == false);
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, false, 0, 89}) == false);
+
+        // At now_s = 90 (30 + 60): fires third attempt!
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, false, 0, 90}) == true);
+        CHECK(st.bootstrap_backoff_s == 120);
+        CHECK(st.next_bootstrap_retry_s == 210);
+
+        // Third attempt succeeds at now_s = 92: cache becomes valid!
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, true, 0, 92}) == false);
+        CHECK(st.bootstrap_backoff_s == 0);
+        CHECK(st.next_bootstrap_retry_s == 0);
+
+        // Long after initial backoff and subsequent backoffs, cache remains valid -> no more polls
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, true, 0, 215}) == false);
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, true, 0, 1000}) == false);
+    }
+
+    // ── Issue #300: Stale-cache bootstrap on age rather than validity ──
+
+    // Freshness predicate boundary checks:
+    {
+        // Missing cache is never fresh
+        CHECK(charge_cache_fresh({WakeSample::Awake, false, true, false /* have_cache */, 0}) == false);
+
+        // Present cache strictly younger than kChargeCacheFreshS is fresh
+        CHECK(charge_cache_fresh({WakeSample::Awake, false, true, true, kChargeCacheFreshS - 1}) == true);
+        CHECK(charge_cache_fresh({WakeSample::Awake, false, true, true, kChargeCacheFreshS}) == false);
+        CHECK(charge_cache_fresh({WakeSample::Awake, false, true, true, kChargeCacheFreshS + 1}) == false);
+        CHECK(charge_cache_fresh({WakeSample::Awake, false, true, true, 28800}) == false);
+    }
+
+    // Post-drive regression (common daily case):
+    // Car was parked and asleep, cache was valid but hours old (e.g. 8 hours = 28800 s).
+    // Car wakes and departs (BLE disconnects -> UNKNOWN sleep).
+    // Car returns and plugs in: BLE reconnects with UNKNOWN->AWAKE transition (no wake edge).
+    // Stale-cache bootstrap must fire to refresh the pre-drive SoC.
+    {
+        WakePollState st{};
+
+        // Car departs: BLE drops
+        wake_poll_update(st, {WakeSample::Unknown, false, false /* disconnected */, true, 28800, 100});
+        CHECK(st.bootstrap_dispatched == false);
+
+        // Car arrives and reconnects: AWAKE with 8-hour-old cache
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true /* connected */, true, 28800, 101}) == true);
+        CHECK(st.bootstrap_dispatched == true);
+
+        // While cache is still stale (poll in-flight), does not re-fire immediately
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, true, 28800, 102}) == false);
+
+        // Poll completes successfully, cache is now fresh (age 0 s)
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, true, 0, 105}) == false);
+
+        // Car stays parked and awake; no further polls
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, true, 10, 115}) == false);
+    }
+
+    // Short hop: car leaves for 30 seconds (< kChargeCacheFreshS) and reconnects AWAKE.
+    // Cache is still fresh, so it must NOT re-arm bootstrap poll.
+    {
+        WakePollState st{};
+        // Disconnect on departure
+        wake_poll_update(st, {WakeSample::Unknown, false, false, true, 10, 50});
+
+        // Reconnect after 30s drive: cache age is 40s (< 60s)
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, true, 40, 80}) == false);
+        CHECK(st.armed == false);
+        CHECK(st.pending == false);
+    }
+
+    // Boundary check on reconnect: exactly at kChargeCacheFreshS arms, at kChargeCacheFreshS - 1 does not
+    {
+        WakePollState st_just_fresh{};
+        wake_poll_update(st_just_fresh, {WakeSample::Unknown, false, false, true, 0, 0});
+        CHECK(wake_edge_should_poll(st_just_fresh, {WakeSample::Awake, false, true, true, kChargeCacheFreshS - 1, 10}) == false);
+
+        WakePollState st_stale{};
+        wake_poll_update(st_stale, {WakeSample::Unknown, false, false, true, 0, 0});
+        CHECK(wake_edge_should_poll(st_stale, {WakeSample::Awake, false, true, true, kChargeCacheFreshS, 10}) == true);
+    }
+
+    // Stale-cache bootstrap combined with retry backoff (#300 + #301):
+    // Reconnect with stale cache, but CarServer poll times out. Backoff must govern retries.
+    {
+        WakePollState st{};
+        // Reconnect at now_s = 200 with stale cache (age 3600s) -> fires attempt 1
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, true, 3600, 200}) == true);
+
+        // In flight / timeout at 225, cache still stale (age 3625s) -> within 30s backoff
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, true, 3625, 225}) == false);
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, true, 3629, 229}) == false);
+
+        // Backoff expires at now_s = 230 -> retry fires
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, true, 3630, 230}) == true);
+
+        // Retry succeeds at now_s = 232 -> cache becomes fresh (age = 0)
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, true, 0, 232}) == false);
+
+        // Stays quiet even after subsequent backoff deadlines
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, true, 10, 300}) == false);
+    }
+
+    // Pending poll must NOT survive BLE disconnect into a new connection where the car is ASLEEP.
+    {
+        WakePollState st{};
+        // Awake with invalid cache, but channel is busy
+        wake_poll_update(st, {WakeSample::Awake, false, true, false, 0, 0});
+        CHECK(st.pending == true);
+
+        // BLE disconnects before command could be sent
+        wake_poll_update(st, {WakeSample::Unknown, false, false, false, 0, 1});
+        // Disconnect must clear pending!
+        CHECK(st.pending == false);
+
+        // BLE reconnects while car is ASLEEP (not stably asleep)
+        wake_poll_update(st, {WakeSample::Asleep, false, true, false, 0, 2});
+        // Must NOT poll a sleeping car on reconnect!
+        CHECK(charge_poll_should_fire({true, false, true, false, 2}, st) == false);
+    }
+
+    // Issue #308: Continuous awake quiescence latch.
+    // When connected with a fresh cache (or once fresh cache is acquired during an awake episode),
+    // the system MUST remain quiescent even after charge_cache_age_s exceeds kChargeCacheFreshS (60s).
+    // It must NOT periodically re-arm a bootstrap poll every 60 seconds while the vehicle stays awake.
+    {
+        WakePollState st{};
+        // Connect at t = 0 with fresh cache (age = 10s < kChargeCacheFreshS) -> no poll
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, true, 10, 0}) == false);
+        CHECK(st.bootstrap_dispatched == false);
+        CHECK(st.episode_fresh == true);
+
+        // At t = 49 (age = 59s < 60s): still fresh -> no poll
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, true, 59, 49}) == false);
+
+        // At t = 50 (age = 60s = kChargeCacheFreshS): cache age exceeds threshold, but
+        // episode_fresh is latched -> remains completely quiescent (does NOT fire)!
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, true, 60, 50}) == false);
+        CHECK(st.armed == false);
+        CHECK(st.pending == false);
+        CHECK(st.bootstrap_dispatched == false);
+
+        // Long-term awake quiescence: vehicle remains parked and connected without commands or charging
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, true, 110, 100}) == false);
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, true, 310, 300}) == false);
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, true, 610, 600}) == false);
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, true, 1810, 1800}) == false);
+    }
+
+    // Multi-cycle steady-state simulation (Issue #308 + Section 3a of $add-logic-test):
+    // Verifies the complete lifecycle across multiple sleep/wake/disconnect/drive episodes:
+    //   Cycle 1: Stably asleep -> wake-edge poll -> fresh cache latched -> 15 min awake quiescence.
+    //   Transition: Enters stable sleep -> episode latch clears -> armed for next wake edge.
+    //   Cycle 2: Second wake-edge poll -> poll times out -> retry backoff -> retry succeeds -> quiescent.
+    //   Cycle 3: Drive away (disconnect) -> reconnect with stale cache -> bootstrap fires -> succeeds -> quiescent.
+    {
+        WakePollState st{};
+
+        // ── Cycle 1: Stable sleep to wake-edge poll and long awake quiescence ──
+        // Car is stably asleep
+        CHECK(wake_edge_should_poll(st, {WakeSample::Asleep, true, true, true, 3600, 0}) == false);
+        CHECK(st.armed == true);
+        CHECK(st.episode_fresh == false);
+
+        // Car wakes up (plugged in): wake-edge poll fires once
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, true, 3600, 1}) == true);
+        CHECK(st.armed == false);
+        CHECK(st.pending == false);
+
+        // In-flight (now_s = 2): no duplicate poll
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, true, 3601, 2}) == false);
+
+        // Poll completes at now_s = 3: fresh charge cache received (age = 0s)
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, true, 0, 3}) == false);
+        CHECK(st.episode_fresh == true);
+
+        // Vehicle stays parked and awake for 15 minutes (900s) without charging or commands.
+        // Simulate periodic checks every 30 seconds: 0 polls must fire!
+        for (uint32_t t = 30; t <= 900; t += 30) {
+            uint32_t age = t - 3; // cache ages naturally
+            CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, true, age, t}) == false);
+        }
+
+        // ── Transition: Car goes to sleep ──
+        // COP flap (unstable asleep) must NOT clear episode latch
+        CHECK(wake_edge_should_poll(st, {WakeSample::Asleep, false, true, true, 905, 908}) == false);
+        CHECK(st.episode_fresh == true);
+
+        // Stable asleep (> kAsleepDebounceS) ends the awake episode, clears latch, arms next wake edge
+        CHECK(wake_edge_should_poll(st, {WakeSample::Asleep, true, true, true, 915, 918}) == false);
+        CHECK(st.armed == true);
+        CHECK(st.episode_fresh == false);
+
+        // ── Cycle 2: Second wake episode with timeout and retry backoff ──
+        // Car wakes up: wake-edge fires attempt 1
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, true, 1200, 1200}) == true);
+        CHECK(st.armed == false);
+
+        // Attempt 1 times out at 1225 (cache remains stale age 1225s)
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, true, 1225, 1225}) == false);
+        // Before 30s backoff (1200 + 30 = 1230), does NOT re-fire
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, true, 1229, 1229}) == false);
+
+        // At backoff expiry (now_s = 1230): retry fires!
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, true, 1230, 1230}) == true);
+
+        // Retry succeeds at now_s = 1232: fresh cache acquired
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, true, 0, 1232}) == false);
+        CHECK(st.episode_fresh == true);
+
+        // Quiescence resumes while awake: no polls even after cache reaches 60s, 100s, 300s
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, true, 70, 1302}) == false);
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, true, 200, 1432}) == false);
+
+        // ── Cycle 3: Car drives away and returns (reconnect with stale cache) ──
+        // Departure: BLE disconnects
+        wake_poll_update(st, {WakeSample::Unknown, false, false, true, 300, 1500});
+        CHECK(st.episode_fresh == false);
+        CHECK(st.bootstrap_dispatched == false);
+
+        // Return from 2-hour drive: reconnects AWAKE with 7200s old cache
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, true, 7200, 8700}) == true);
+        CHECK(st.bootstrap_dispatched == true);
+
+        // Bootstrap poll succeeds at now_s = 8702: fresh cache acquired
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, true, 0, 8702}) == false);
+        CHECK(st.episode_fresh == true);
+
+        // Quiescent indefinitely while parked and connected
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, true, 100, 8802}) == false);
+        CHECK(wake_edge_should_poll(st, {WakeSample::Awake, false, true, true, 1000, 9702}) == false);
     }
 }
 
@@ -3792,6 +4140,7 @@ static void test_health_gate() {
         CHECK(!tk::identity_mutation_may_start(O::Stable, G::IdentityMutation, entry));
         CHECK(!tk::identity_mutation_may_start(O::Stable, G::FaultRestart, entry));
         CHECK(!tk::identity_mutation_may_start(O::Stable, G::HealthCommit, entry));
+        CHECK(!tk::identity_mutation_may_start(O::Stable, G::ConfigRestart, entry));
         CHECK(!tk::identity_mutation_may_start(O::PendingVerify, G::Idle, entry));
         CHECK(!tk::identity_mutation_may_start(O::Unknown, G::Idle, entry));
     }
@@ -3800,6 +4149,7 @@ static void test_health_gate() {
     CHECK(!tk::ota_operation_may_start(G::IdentityMutation));
     CHECK(!tk::ota_operation_may_start(G::FaultRestart));
     CHECK(!tk::ota_operation_may_start(G::HealthCommit));
+    CHECK(!tk::ota_operation_may_start(G::ConfigRestart));
 
     // Exercise the exact atomic CAS seam used by the firmware, not only its admission predicates.
     // Every owner blocks both peers; an owner-mismatched cleanup cannot clear the winner.
@@ -3812,6 +4162,7 @@ static void test_health_gate() {
     CHECK(!operation.try_begin(G::IdentityMutation));
     CHECK(!operation.try_begin(G::FaultRestart));
     CHECK(!operation.try_begin(G::HealthCommit));
+    CHECK(!operation.try_begin(G::ConfigRestart));
     CHECK(!operation.finish(G::IdentityMutation));
     CHECK(operation.state() == G::Ota);
     CHECK(operation.finish(G::Ota));
@@ -3820,6 +4171,7 @@ static void test_health_gate() {
     CHECK(!operation.try_begin(G::Ota));
     CHECK(!operation.try_begin(G::FaultRestart));
     CHECK(!operation.try_begin(G::HealthCommit));
+    CHECK(!operation.try_begin(G::ConfigRestart));
     CHECK(operation.finish(G::IdentityMutation));
 
     // Persistence failure: FaultRestart releases its own owner, so a postponed OTA or identity
@@ -3828,12 +4180,24 @@ static void test_health_gate() {
     CHECK(!operation.try_begin(G::Ota));
     CHECK(!operation.try_begin(G::IdentityMutation));
     CHECK(!operation.try_begin(G::HealthCommit));
+    CHECK(!operation.try_begin(G::ConfigRestart));
     CHECK(operation.finish(G::FaultRestart));
     CHECK(operation.try_begin(G::HealthCommit));
     CHECK(!operation.try_begin(G::Ota));
     CHECK(!operation.try_begin(G::IdentityMutation));
     CHECK(!operation.try_begin(G::FaultRestart));
+    CHECK(!operation.try_begin(G::ConfigRestart));
     CHECK(operation.finish(G::HealthCommit));
+
+    // ConfigRestart: blocks OTA and IdentityMutation, and releases on failure or persists through reboot.
+    CHECK(operation.try_begin(G::ConfigRestart));
+    CHECK(!operation.try_begin(G::ConfigRestart));
+    CHECK(!operation.try_begin(G::Ota));
+    CHECK(!operation.try_begin(G::IdentityMutation));
+    CHECK(!operation.try_begin(G::FaultRestart));
+    CHECK(!operation.try_begin(G::HealthCommit));
+    CHECK(operation.finish(G::ConfigRestart));
+
     CHECK(operation.try_begin(G::Ota));
     CHECK(operation.finish(G::Ota));
     CHECK(operation.try_begin(G::IdentityMutation));
@@ -3966,6 +4330,32 @@ static void test_http_origin() {
     CHECK(!tk::mutation_origin_required(false, "/diag?next=clear=1"));
     CHECK(!tk::mutation_origin_required(false, "/coredump"));
     CHECK(!tk::mutation_origin_required(false, "/ota/status"));
+
+    // esp_http_server matches a query KEY case-insensitively (strncasecmp on an exact-length
+    // match), so the handler acts on ?CLEAR=1 exactly as on ?clear=1. Classifying only the
+    // lowercase spelling left every one of these mutating GETs ungated — the core-dump erase
+    // included. The classifier must agree with the parser it guards.
+    CHECK(tk::mutation_origin_required(false, "/diag?CLEAR=1"));
+    CHECK(tk::mutation_origin_required(false, "/diag?Clear=1"));
+    CHECK(tk::mutation_origin_required(false, "/diag?VERBOSE=1"));
+    CHECK(tk::mutation_origin_required(false, "/diag?Verbose=0"));
+    CHECK(tk::mutation_origin_required(false, "/coredump?CLEAR=1"));
+    CHECK(tk::mutation_origin_required(false, "/diag?redact=1&VERBOSE=0"));
+    // IDF stops at the FIRST case-insensitive key hit, so ?CLEAR=1&clear=0 mutates. Classifying
+    // on any matching occurrence is a superset of what the handler acts on, which fails closed.
+    CHECK(tk::mutation_origin_required(false, "/diag?CLEAR=1&clear=0"));
+    CHECK(tk::mutation_origin_required(false, "/diag?clear=0&CLEAR=1"));
+
+    // The VALUE half stays exact: IDF copies it verbatim (no case folding, no percent-decoding)
+    // and query_param_is() strcmp()s it, so these must remain unclassified — folding the value
+    // would gate requests the handler ignores, and inverting this pair is the original bug.
+    CHECK(!tk::mutation_origin_required(false, "/diag?CLEAR=0"));
+    CHECK(!tk::mutation_origin_required(false, "/diag?clear=%31"));
+    CHECK(!tk::mutation_origin_required(false, "/diag?CLEAR=TRUE"));
+    CHECK(!tk::mutation_origin_required(false, "/coredump?CLEAR=0"));
+    // A key that merely CONTAINS the name is still a different parameter on both sides.
+    CHECK(!tk::mutation_origin_required(false, "/diag?XCLEAR=1"));
+    CHECK(!tk::mutation_origin_required(false, "/diag?CLEARED=1"));
 }
 
 // ─── Negotiated ATT payload size (logic/ble_chunk.hpp) ────────────────────────────────────────
@@ -4380,8 +4770,21 @@ static void test_redact() {
     CHECK(ip_eth.find("192.168.1.42") == std::string::npos);
     CHECK(ip_eth.find("net: IP: ") != std::string::npos);
 
-    CHECK(tk::kDiagRedactionCount == 17);
-    CHECK(tk::kRedactedStatusFields == 6);
+    // Interrupted VIN transition recovery log line in main.cpp:
+    // "interrupted VIN change detected before key commit — restoring %s"
+    const std::string vin_restored = tk::redact_diag_line(
+        "W (123) main: interrupted VIN change detected before key commit — restoring 5YJ3E1EA7KF000316\n");
+    CHECK(vin_restored.find("5YJ3E1EA7KF000316") == std::string::npos);
+    CHECK(vin_restored.find("restoring ") != std::string::npos);
+    CHECK(vin_restored.back() == '\n');
+
+    const std::string vin_unconf = tk::redact_diag_line(
+        "W (123) main: interrupted VIN change detected before key commit — restoring unconfigured VIN\n");
+    CHECK(vin_unconf.find("restoring <redacted>") != std::string::npos);
+    CHECK(vin_unconf.back() == '\n');
+
+    CHECK(tk::kDiagRedactionCount == 18);
+    CHECK(tk::kRedactedStatusFields == 7);
 }
 
 // ─── Captive-portal reply policy ──────────────────────────────────────────────
@@ -4553,6 +4956,7 @@ static void test_status_sys_and_redaction() {
 
     // A scanned NEIGHBOUR's MAC is other people's hardware in the reporter's home, so it is
     // redacted for the same reason the car's own is.
+    // Advert names (S<hash>C) are derived from the VIN, so they are redacted too.
     Inputs d;
     d.redact = true;
     tk::status::BleDevice dev;
@@ -4561,6 +4965,9 @@ static void test_status_sys_and_redaction() {
     CollectEmitter ed;
     tk::status::emit_status(d, ed);
     CHECK(ed.out.find("11:22:33:44:55:66") == std::string::npos);
+    CHECK(ed.out.find("SomeCar") == std::string::npos);
+    CHECK(ed.out.find("ble.devices.0.name=\"<redacted>\"") != std::string::npos);
+    CHECK(ed.out.find("ble.devices.0.addr=\"<redacted>\"") != std::string::npos);
 
     // The UNREDACTED payload is what the dashboard polls: redaction is opt-in per request, and a
     // default-on version would silently break the UI it shares a builder with.
@@ -4598,9 +5005,1898 @@ static void test_vehicle_data_logic() {
     // Only usable present
     cs.has_battery_level = false;
     CHECK_NEAR(tk::effective_usable_soc(cs), 71.0);
+
+    // Identity epoch gating: snapshot taken before pairing cleanup must not publish
+    CHECK(tk::telemetry_epoch_matches(0, 0));
+    CHECK(tk::telemetry_epoch_matches(42, 42));
+    CHECK(!tk::telemetry_epoch_matches(0, 1));
+    CHECK(!tk::telemetry_epoch_matches(1, 0));
+    CHECK(!tk::telemetry_epoch_matches(42, 43));
+}
+
+// ─── BLE RX framing (teslamotors/vehicle-command ble.go:67-105) ─────────────
+static void test_rx_framing() {
+    // 1. Happy path: single complete frame in one chunk
+    {
+        tk::RxFramer framer;
+        const uint8_t chunk[] = {0x00, 0x04, 't', 'e', 's', 't'};
+        std::vector<std::vector<uint8_t>> frames;
+        size_t n = framer.push_chunk(chunk, sizeof(chunk), 100, [&](const uint8_t* p, size_t len) {
+            frames.emplace_back(p, p + len);
+        });
+        CHECK(n == 1);
+        CHECK(frames.size() == 1);
+        CHECK(frames[0].size() == 4);
+        CHECK(frames[0][0] == 't' && frames[0][3] == 't');
+        CHECK(framer.buffered_bytes() == 0);
+        CHECK(framer.stats().frames_completed == 1);
+    }
+
+    // 2. Split frame across multiple notifications
+    {
+        tk::RxFramer framer;
+        std::vector<std::vector<uint8_t>> frames;
+        auto on_frame = [&](const uint8_t* p, size_t len) {
+            frames.emplace_back(p, p + len);
+        };
+
+        const uint8_t chunk1[] = {0x00, 0x06, 0x10, 0x20}; // header + 2 bytes (needs 4 more)
+        size_t n1 = framer.push_chunk(chunk1, sizeof(chunk1), 100, on_frame);
+        CHECK(n1 == 0);
+        CHECK(frames.empty());
+        CHECK(framer.buffered_bytes() == 4);
+
+        const uint8_t chunk2[] = {0x30, 0x40, 0x50, 0x60}; // remaining 4 bytes
+        size_t n2 = framer.push_chunk(chunk2, sizeof(chunk2), 250, on_frame);
+        CHECK(n2 == 1);
+        CHECK(frames.size() == 1);
+        CHECK(frames[0].size() == 6);
+        CHECK(frames[0][0] == 0x10 && frames[0][5] == 0x60);
+        CHECK(framer.buffered_bytes() == 0);
+        CHECK(framer.stats().frames_completed == 1);
+    }
+
+    // 3. Several frames in one single notification (back-to-back)
+    {
+        tk::RxFramer framer;
+        std::vector<std::vector<uint8_t>> frames;
+        const uint8_t multi[] = {
+            0x00, 0x03, 1, 2, 3,       // frame 1 (len=3)
+            0x00, 0x02, 10, 20,        // frame 2 (len=2)
+            0x00, 0x01, 99             // frame 3 (len=1)
+        };
+        size_t n = framer.push_chunk(multi, sizeof(multi), 100, [&](const uint8_t* p, size_t len) {
+            frames.emplace_back(p, p + len);
+        });
+        CHECK(n == 3);
+        CHECK(frames.size() == 3);
+        CHECK(frames[0].size() == 3 && frames[0][0] == 1);
+        CHECK(frames[1].size() == 2 && frames[1][0] == 10);
+        CHECK(frames[2].size() == 1 && frames[2][0] == 99);
+        CHECK(framer.buffered_bytes() == 0);
+        CHECK(framer.stats().frames_completed == 3);
+    }
+
+    // 4. Corrupt length before a split frame
+    {
+        tk::RxFramer framer;
+        std::vector<std::vector<uint8_t>> frames;
+        tk::RxFramerDropReason last_reason = tk::RxFramerDropReason::None;
+        size_t last_dropped = 0;
+        auto on_drop = [&](tk::RxFramerDropReason r, size_t d) {
+            last_reason = r;
+            last_dropped = d;
+        };
+
+        // Chunk with corrupt length (> 2048)
+        const uint8_t corrupt[] = {0x10, 0x00, 0xAA, 0xBB}; // 4096 bytes > 2048
+        size_t nc = framer.push_chunk(corrupt, sizeof(corrupt), 100,
+            [&](const uint8_t* p, size_t len) { frames.emplace_back(p, p + len); },
+            on_drop);
+        CHECK(nc == 0);
+        CHECK(frames.empty());
+        CHECK(last_reason == tk::RxFramerDropReason::CorruptLength);
+        CHECK(last_dropped == 4);
+        CHECK(framer.buffered_bytes() == 0);
+        CHECK(framer.stats().corrupt_length_drops == 1);
+
+        // Next chunk is valid: should be accepted cleanly
+        const uint8_t valid[] = {0x00, 0x02, 0x11, 0x22};
+        size_t nv = framer.push_chunk(valid, sizeof(valid), 150,
+            [&](const uint8_t* p, size_t len) { frames.emplace_back(p, p + len); },
+            on_drop);
+        CHECK(nv == 1);
+        CHECK(frames.size() == 1);
+        CHECK(frames[0].size() == 2);
+        CHECK(framer.buffered_bytes() == 0);
+    }
+
+    // 5. Zero length is treated as corrupt (Tesla messages are never 0 bytes)
+    {
+        tk::RxFramer framer;
+        tk::RxFramerDropReason last_reason = tk::RxFramerDropReason::None;
+        const uint8_t zero_len[] = {0x00, 0x00, 0x01, 0x02};
+        framer.push_chunk(zero_len, sizeof(zero_len), 100,
+            [](const uint8_t*, size_t) {},
+            [&](tk::RxFramerDropReason r, size_t) { last_reason = r; });
+        CHECK(last_reason == tk::RxFramerDropReason::CorruptLength);
+        CHECK(framer.buffered_bytes() == 0);
+    }
+
+    // 6. Max payload boundary (2048 is valid, 2049 is corrupt)
+    {
+        tk::RxFramer framer;
+        const uint8_t max_valid[] = {0x08, 0x00}; // 2048
+        framer.push_chunk(max_valid, sizeof(max_valid), 100, [](const uint8_t*, size_t) {});
+        CHECK(framer.buffered_bytes() == 2); // awaiting 2048 payload bytes
+
+        framer.reset();
+        CHECK(framer.buffered_bytes() == 0);
+
+        tk::RxFramerDropReason last_reason = tk::RxFramerDropReason::None;
+        const uint8_t overflow_len[] = {0x08, 0x01}; // 2049 > 2048
+        framer.push_chunk(overflow_len, sizeof(overflow_len), 100,
+            [](const uint8_t*, size_t) {},
+            [&](tk::RxFramerDropReason r, size_t) { last_reason = r; });
+        CHECK(last_reason == tk::RxFramerDropReason::CorruptLength);
+        CHECK(framer.buffered_bytes() == 0);
+    }
+
+    // 7. Inter-chunk timeout drops stale incomplete buffer
+    {
+        tk::RxFramer framer;
+        tk::RxFramerDropReason last_reason = tk::RxFramerDropReason::None;
+        size_t last_dropped = 0;
+        auto on_drop = [&](tk::RxFramerDropReason r, size_t d) {
+            last_reason = r;
+            last_dropped = d;
+        };
+
+        const uint8_t partial[] = {0x00, 0x10, 1, 2, 3}; // needs 16, got 3
+        framer.push_chunk(partial, sizeof(partial), 1000, [](const uint8_t*, size_t) {}, on_drop);
+        CHECK(framer.buffered_bytes() == 5);
+        CHECK(last_reason == tk::RxFramerDropReason::None);
+
+        // Next chunk arrives after 1001 ms (> 1000 ms timeout)
+        std::vector<std::vector<uint8_t>> frames;
+        const uint8_t next_valid[] = {0x00, 0x02, 7, 8};
+        size_t n = framer.push_chunk(next_valid, sizeof(next_valid), 2001,
+            [&](const uint8_t* p, size_t len) { frames.emplace_back(p, p + len); },
+            on_drop);
+        CHECK(last_reason == tk::RxFramerDropReason::InterChunkTimeout);
+        CHECK(last_dropped == 5);
+        CHECK(n == 1);
+        CHECK(frames.size() == 1);
+        CHECK(frames[0].size() == 2 && frames[0][0] == 7);
+        CHECK(framer.buffered_bytes() == 0);
+        CHECK(framer.stats().timeout_drops == 1);
+    }
+
+    // 8. Null and empty chunks are safe no-ops
+    {
+        tk::RxFramer framer;
+        CHECK(framer.push_chunk(nullptr, 0, 100, [](const uint8_t*, size_t) {}) == 0);
+        const uint8_t d[] = {1};
+        CHECK(framer.push_chunk(d, 0, 100, [](const uint8_t*, size_t) {}) == 0);
+        CHECK(framer.buffered_bytes() == 0);
+    }
+
+    // 9. Standalone check_timeout() drops stale incomplete buffer without incoming chunks
+    {
+        tk::RxFramer framer;
+        tk::RxFramerDropReason reason = tk::RxFramerDropReason::None;
+        size_t dropped = 0;
+        const uint8_t partial[] = {0x00, 0x0A, 1, 2}; // needs 10 bytes, got 2
+        framer.push_chunk(partial, sizeof(partial), 1000, [](const uint8_t*, size_t) {});
+        CHECK(framer.buffered_bytes() == 4);
+
+        // Tick before timeout: no drop
+        CHECK(!framer.check_timeout(1999, [&](tk::RxFramerDropReason r, size_t d) {
+            reason = r; dropped = d;
+        }));
+        CHECK(framer.buffered_bytes() == 4);
+        CHECK(reason == tk::RxFramerDropReason::None);
+
+        // Tick after timeout: drops stale buffer
+        CHECK(framer.check_timeout(2001, [&](tk::RxFramerDropReason r, size_t d) {
+            reason = r; dropped = d;
+        }));
+        CHECK(framer.buffered_bytes() == 0);
+        CHECK(reason == tk::RxFramerDropReason::InterChunkTimeout);
+        CHECK(dropped == 4);
+        CHECK(framer.stats().timeout_drops == 1);
+    }
+
+    // 10. Header split across notification chunks (1 byte in chunk 1, rest in chunk 2)
+    {
+        tk::RxFramer framer;
+        std::vector<std::vector<uint8_t>> frames;
+        const uint8_t chunk1[] = {0x00}; // first byte of 2-byte header
+        size_t n1 = framer.push_chunk(chunk1, sizeof(chunk1), 100, [&](const uint8_t* p, size_t len) {
+            frames.emplace_back(p, p + len);
+        });
+        CHECK(n1 == 0);
+        CHECK(frames.empty());
+        CHECK(framer.buffered_bytes() == 1);
+
+        const uint8_t chunk2[] = {0x03, 0xAA, 0xBB, 0xCC}; // second byte of header + 3 payload bytes
+        size_t n2 = framer.push_chunk(chunk2, sizeof(chunk2), 150, [&](const uint8_t* p, size_t len) {
+            frames.emplace_back(p, p + len);
+        });
+        CHECK(n2 == 1);
+        CHECK(frames.size() == 1);
+        CHECK(frames[0].size() == 3);
+        CHECK(frames[0][0] == 0xAA && frames[0][2] == 0xCC);
+        CHECK(framer.buffered_bytes() == 0);
+    }
+
+    // 11. Reentrant reset() called inside frame_cb terminates extraction cleanly without crash
+    {
+        tk::RxFramer framer;
+        // Concatenated frames: frame 1 and frame 2
+        const uint8_t multi[] = {0x00, 0x02, 1, 2, 0x00, 0x02, 3, 4};
+        size_t calls = 0;
+        size_t n = framer.push_chunk(multi, sizeof(multi), 100, [&](const uint8_t*, size_t) {
+            calls++;
+            framer.reset(); // reentrant reset on connection teardown
+        });
+        CHECK(calls == 1);
+        CHECK(n == 1);
+        CHECK(framer.buffered_bytes() == 0);
+    }
+
+    // 12. Integer overflow protection in buffer size + len check
+    {
+        tk::RxFramer framer;
+        tk::RxFramerDropReason reason = tk::RxFramerDropReason::None;
+        size_t dropped = 0;
+        const uint8_t dummy[1] = {0};
+        // Pass huge length that would wrap buffer.size() + len if unchecked
+        size_t huge_len = static_cast<size_t>(-10);
+        size_t n = framer.push_chunk(dummy, huge_len, 100,
+            [](const uint8_t*, size_t) {},
+            [&](tk::RxFramerDropReason r, size_t d) { reason = r; dropped = d; });
+        CHECK(n == 0);
+        CHECK(reason == tk::RxFramerDropReason::BufferOverflow);
+        CHECK(framer.stats().overflow_drops == 1);
+    }
+
+    // 13. Malformed payload inside frame delivers frame deterministically and continues
+    {
+        tk::RxFramer framer;
+        std::vector<std::vector<uint8_t>> frames;
+        // Two frames: first has corrupt/garbage protobuf payload (e.g. 0xFF, 0xFF), second has valid payload
+        const uint8_t multi[] = {
+            0x00, 0x02, 0xFF, 0xFF,
+            0x00, 0x02, 0x11, 0x22
+        };
+        size_t n = framer.push_chunk(multi, sizeof(multi), 100, [&](const uint8_t* p, size_t len) {
+            frames.emplace_back(p, p + len);
+        });
+        CHECK(n == 2);
+        CHECK(frames.size() == 2);
+        CHECK(frames[0].size() == 2 && frames[0][0] == 0xFF);
+        CHECK(frames[1].size() == 2 && frames[1][0] == 0x11);
+        CHECK(framer.buffered_bytes() == 0);
+    }
+
+    // 14. Duplicate fragment and duplicate frame arrival (L4)
+    {
+        // 14a. Duplicate fragment during split frame:
+        // When a middle fragment is duplicated, the stream contains unexpected extra bytes.
+        // The framer extracts the first frame of declared length L, and the duplicate
+        // remaining bytes either trigger a CorruptLength or BufferOverflow for the next frame.
+        tk::RxFramer framer;
+        std::vector<std::vector<uint8_t>> frames;
+        tk::RxFramerDropReason last_drop = tk::RxFramerDropReason::None;
+        auto on_frame = [&](const uint8_t* p, size_t len) { frames.emplace_back(p, p + len); };
+        auto on_drop = [&](tk::RxFramerDropReason r, size_t) { last_drop = r; };
+
+        const uint8_t chunk1[] = {0x00, 0x04, 0x01, 0x02}; // needs 4 bytes, got 2
+        framer.push_chunk(chunk1, sizeof(chunk1), 100, on_frame, on_drop);
+        CHECK(frames.empty());
+        CHECK(framer.buffered_bytes() == 4);
+
+        // Duplicate chunk1 arrives again:
+        framer.push_chunk(chunk1, sizeof(chunk1), 150, on_frame, on_drop);
+        // Now 6 bytes in buffer: 2-byte header (len=4), then 4 bytes (0x01, 0x02, 0x00, 0x04)
+        // This completes frame 1 with the duplicate bytes!
+        CHECK(frames.size() == 1);
+        CHECK(frames[0].size() == 4);
+        // Residual bytes {0x01, 0x02} remain in buffer
+        CHECK(framer.buffered_bytes() == 2);
+
+        // 14b. Exact duplicate frame notification:
+        // If the sender transmits an exact duplicate frame back-to-back, the framer
+        // deterministically extracts both complete frames. Upper layer (BleDispatcher)
+        // anti-replay detects and drops the second frame.
+        framer.reset();
+        frames.clear();
+        const uint8_t frame_bytes[] = {0x00, 0x03, 'A', 'B', 'C'};
+        framer.push_chunk(frame_bytes, sizeof(frame_bytes), 200, on_frame);
+        framer.push_chunk(frame_bytes, sizeof(frame_bytes), 250, on_frame);
+        CHECK(frames.size() == 2);
+        CHECK(frames[0] == frames[1]);
+        CHECK(framer.buffered_bytes() == 0);
+    }
+}
+
+static void test_ble_dispatcher() {
+    using D = tk::BleDomain;
+    using R = tk::DispatchDropReason;
+
+    // 1. Lifecycle and registration bounds
+    {
+        tk::BleDispatcher disp;
+        CHECK(disp.active_count() == 0);
+
+        tk::BleUuid uuid1 = {1, 2, 3, 4};
+        uint32_t id1 = disp.register_request(D::Infotainment, uuid1);
+        CHECK(id1 > 0);
+        CHECK(disp.has_request(id1));
+        CHECK(disp.active_count() == 1);
+
+        // Domain None rejected
+        CHECK(disp.register_request(D::None, uuid1) == 0);
+
+        // Unregister
+        CHECK(disp.unregister_request(id1));
+        CHECK(!disp.has_request(id1));
+        CHECK(disp.active_count() == 0);
+        CHECK(!disp.unregister_request(id1)); // Idempotent
+
+        // Fill up to capacity (kMaxRequests = 8)
+        std::vector<uint32_t> ids;
+        for (size_t i = 0; i < tk::BleDispatcher::kMaxRequests; ++i) {
+            tk::BleUuid u{};
+            u[0] = static_cast<uint8_t>(i + 1);
+            uint32_t id = disp.register_request(D::Infotainment, u);
+            CHECK(id > 0);
+            ids.push_back(id);
+        }
+        CHECK(disp.active_count() == tk::BleDispatcher::kMaxRequests);
+        // Exceeded capacity rejected safely
+        tk::BleUuid extra{};
+        extra[0] = 99;
+        CHECK(disp.register_request(D::Infotainment, extra) == 0);
+
+        disp.reset();
+        CHECK(disp.active_count() == 0);
+    }
+
+    // 2. Missing source domain and invalid UUID length drops
+    {
+        tk::BleDispatcher disp;
+        tk::BleUuid uuid = {1, 2, 3};
+        disp.register_request(D::Infotainment, uuid);
+
+        // Missing source (domain None)
+        auto o1 = disp.dispatch(D::None, uuid.data(), uuid.size(), false, 0);
+        CHECK(!o1.routed);
+        CHECK(o1.drop_reason == R::MissingSource);
+        CHECK(disp.stats().missing_source_drops == 1);
+
+        // Invalid UUID length (e.g. 5 bytes instead of 0 or 16)
+        uint8_t short_uuid[5] = {1, 2, 3, 4, 5};
+        auto o2 = disp.dispatch(D::Infotainment, short_uuid, sizeof(short_uuid), false, 0);
+        CHECK(!o2.routed);
+        CHECK(o2.drop_reason == R::InvalidUuidLength);
+        CHECK(disp.stats().invalid_uuid_drops == 1);
+    }
+
+    // 3. Infotainment UUID matching
+    {
+        tk::BleDispatcher disp;
+        tk::BleUuid uuid_a = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16};
+        tk::BleUuid uuid_b = {9, 8, 7, 6, 5, 4, 3, 2, 1, 0,  1,  2,  3,  4,  5,  6};
+        uint32_t id_a = disp.register_request(D::Infotainment, uuid_a);
+        uint32_t id_b = disp.register_request(D::Infotainment, uuid_b);
+
+        // Empty UUID on Infotainment does not match
+        auto o0 = disp.dispatch(D::Infotainment, nullptr, 0, true, 1);
+        CHECK(!o0.routed);
+        CHECK(o0.drop_reason == R::Unmatched);
+
+        // Non-existent UUID
+        tk::BleUuid uuid_unknown = {0xFF};
+        auto o_un = disp.dispatch(D::Infotainment, uuid_unknown.data(), uuid_unknown.size(), true, 1);
+        CHECK(!o_un.routed);
+        CHECK(o_un.drop_reason == R::Unmatched);
+
+        // Matching UUID A routes to id_a
+        auto o_a = disp.dispatch(D::Infotainment, uuid_a.data(), uuid_a.size(), true, 1);
+        CHECK(o_a.routed);
+        CHECK(o_a.drop_reason == R::None);
+        CHECK(o_a.request_id == id_a);
+
+        // Matching UUID B routes to id_b
+        auto o_b = disp.dispatch(D::Infotainment, uuid_b.data(), uuid_b.size(), true, 1);
+        CHECK(o_b.routed);
+        CHECK(o_b.drop_reason == R::None);
+        CHECK(o_b.request_id == id_b);
+    }
+
+    // 4. VCSEC UUID match exemption & multi-request precedence (modelled on dispatcher.go:259-261)
+    {
+        tk::BleDispatcher disp;
+        tk::BleUuid vcsec_req_uuid_a = {0xAA, 0x11};
+        tk::BleUuid vcsec_req_uuid_b = {0xBB, 0x22};
+        uint32_t vcsec_id_a = disp.register_request(D::VehicleSecurity, vcsec_req_uuid_a);
+        uint32_t vcsec_id_b = disp.register_request(D::VehicleSecurity, vcsec_req_uuid_b);
+        CHECK(vcsec_id_a > 0);
+        CHECK(vcsec_id_b > 0);
+        CHECK(vcsec_id_a != vcsec_id_b);
+
+        // Case A: Response with UUID B must route to Request B (exact UUID takes precedence)
+        auto ob = disp.dispatch(D::VehicleSecurity, vcsec_req_uuid_b.data(), vcsec_req_uuid_b.size(), false, 0);
+        CHECK(ob.routed);
+        CHECK(ob.request_id == vcsec_id_b);
+
+        // Case B: Response with UUID A must route to Request A (exact UUID takes precedence)
+        auto oa = disp.dispatch(D::VehicleSecurity, vcsec_req_uuid_a.data(), vcsec_req_uuid_a.size(), false, 0);
+        CHECK(oa.routed);
+        CHECK(oa.request_id == vcsec_id_a);
+
+        // Subsequent plaintext to same slots is correctly dropped as replay
+        auto oa_dup = disp.dispatch(D::VehicleSecurity, vcsec_req_uuid_a.data(), vcsec_req_uuid_a.size(), false, 0);
+        CHECK(!oa_dup.routed);
+        CHECK(oa_dup.drop_reason == R::Replay);
+
+        // Case C: Empty UUID (len 0) falls back to VCSEC exemption on fresh request
+        disp.reset();
+        uint32_t vcsec_id_c = disp.register_request(D::VehicleSecurity, vcsec_req_uuid_a);
+        CHECK(vcsec_id_c > 0);
+        auto o_empty = disp.dispatch(D::VehicleSecurity, nullptr, 0, false, 0);
+        CHECK(o_empty.routed);
+        CHECK(o_empty.request_id == vcsec_id_c);
+
+        // Case D: Non-matching 16-byte UUID on VCSEC is dropped as Unmatched (M2)
+        disp.reset();
+        uint32_t vcsec_id_d = disp.register_request(D::VehicleSecurity, vcsec_req_uuid_a);
+        CHECK(vcsec_id_d > 0);
+        tk::BleUuid different_uuid = {0x99, 0x88};
+        auto o_diff = disp.dispatch(D::VehicleSecurity, different_uuid.data(), different_uuid.size(), false, 0);
+        CHECK(!o_diff.routed);
+        CHECK(o_diff.drop_reason == R::Unmatched);
+        CHECK(disp.stats().unmatched_drops == 1);
+
+        // Unregister -> unmatched
+        disp.unregister_request(vcsec_id_d);
+        auto o_none = disp.dispatch(D::VehicleSecurity, nullptr, 0, false, 0);
+        CHECK(!o_none.routed);
+        CHECK(o_none.drop_reason == R::Unmatched);
+    }
+
+    // 5. Per-request anti-replay window (authenticated responses)
+    {
+        tk::BleDispatcher disp;
+        tk::BleUuid uuid = {0x10};
+        uint32_t id = disp.register_request(D::Infotainment, uuid);
+        CHECK(id > 0);
+
+        // First response with counter 100: accepted
+        auto o1 = disp.dispatch(D::Infotainment, uuid.data(), uuid.size(), true, 100);
+        CHECK(o1.routed);
+        CHECK(o1.drop_reason == R::None);
+
+        // Duplicate counter 100: dropped as replay
+        auto o2 = disp.dispatch(D::Infotainment, uuid.data(), uuid.size(), true, 100);
+        CHECK(!o2.routed);
+        CHECK(o2.drop_reason == R::Replay);
+
+        // Higher counter 105: accepted
+        auto o3 = disp.dispatch(D::Infotainment, uuid.data(), uuid.size(), true, 105);
+        CHECK(o3.routed);
+
+        // Out-of-order counter 102 (within 64-bit window): accepted
+        auto o4 = disp.dispatch(D::Infotainment, uuid.data(), uuid.size(), true, 102);
+        CHECK(o4.routed);
+
+        // Duplicate of out-of-order counter 102: dropped as replay
+        auto o5 = disp.dispatch(D::Infotainment, uuid.data(), uuid.size(), true, 102);
+        CHECK(!o5.routed);
+        CHECK(o5.drop_reason == R::Replay);
+
+        // Counter 40 (more than 64 behind highest 105): dropped as replay
+        auto o6 = disp.dispatch(D::Infotainment, uuid.data(), uuid.size(), true, 40);
+        CHECK(!o6.routed);
+        CHECK(o6.drop_reason == R::Replay);
+
+        // Counter 0: initial counter 0 is accepted, duplicate counter 0 is dropped as replay
+        disp.reset();
+        id = disp.register_request(D::Infotainment, uuid);
+        CHECK(id > 0);
+        auto o_z1 = disp.dispatch(D::Infotainment, uuid.data(), uuid.size(), true, 0);
+        CHECK(o_z1.routed);
+        auto o_z2 = disp.dispatch(D::Infotainment, uuid.data(), uuid.size(), true, 0);
+        CHECK(!o_z2.routed);
+        CHECK(o_z2.drop_reason == R::Replay);
+    }
+
+    // 6. Anti-replay protection for plaintext / unauthenticated responses (counter 0 / no counter)
+    {
+        tk::BleDispatcher disp;
+        tk::BleUuid uuid = {0x20};
+        uint32_t id = disp.register_request(D::Infotainment, uuid);
+        CHECK(id > 0);
+
+        // First plaintext response without counter: accepted
+        auto o1 = disp.dispatch(D::Infotainment, uuid.data(), uuid.size(), false, 0);
+        CHECK(o1.routed);
+        CHECK(o1.drop_reason == R::None);
+
+        // Second plaintext response without counter: dropped as replay!
+        auto o2 = disp.dispatch(D::Infotainment, uuid.data(), uuid.size(), false, 0);
+        CHECK(!o2.routed);
+        CHECK(o2.drop_reason == R::Replay);
+        CHECK(disp.stats().replay_drops > 0);
+    }
+
+    // 7. Duplicate registration prevention and capacity exhaustion
+    {
+        tk::BleDispatcher disp;
+        tk::BleUuid uuid = {0x33};
+        uint32_t id1 = disp.register_request(D::Infotainment, uuid);
+        CHECK(id1 > 0);
+        // Duplicate registration for same domain and UUID is rejected
+        uint32_t id_dup = disp.register_request(D::Infotainment, uuid);
+        CHECK(id_dup == 0);
+        CHECK(disp.active_count() == 1);
+
+        // Different domain with same UUID is allowed
+        uint32_t id_diff_domain = disp.register_request(D::VehicleSecurity, uuid);
+        CHECK(id_diff_domain > 0);
+        CHECK(disp.active_count() == 2);
+
+        // Fill remaining 6 slots
+        for (uint8_t i = 3; i <= 8; ++i) {
+            tk::BleUuid u = {i, 0x55};
+            uint32_t id = disp.register_request(D::Infotainment, u);
+            CHECK(id > 0);
+        }
+        CHECK(disp.active_count() == 8);
+
+        // 9th request must fail with capacity exhausted (0)
+        tk::BleUuid u9 = {0x99};
+        uint32_t id9 = disp.register_request(D::Infotainment, u9);
+        CHECK(id9 == 0);
+
+        // Unregister one slot and register again -> succeeds
+        CHECK(disp.unregister_request(id1));
+        CHECK(disp.active_count() == 7);
+        uint32_t id_retry = disp.register_request(D::Infotainment, u9);
+        CHECK(id_retry > 0);
+        CHECK(disp.active_count() == 8);
+    }
+}
+
+static void test_session_state() {
+    using S = tk::SessionState;
+
+    // 1. Initial unauthenticated state
+    {
+        tk::SessionTracker session;
+        CHECK(session.state() == S::Unauthenticated);
+        CHECK(!session.is_authenticated());
+        CHECK(session.counter() == 0);
+        CHECK(session.clock_time() == 0);
+        const std::array<uint8_t, 16> empty_epoch{};
+        CHECK(session.epoch() == empty_epoch);
+    }
+
+    // 2. Establishment and Monotonic Counter Alignment per signer.go: max(local, reported)
+    {
+        tk::SessionTracker session;
+        std::array<uint8_t, 16> epoch_a = {0x0A, 0x01};
+        session.set_established(epoch_a, 50, 1000);
+        CHECK(session.state() == S::Established);
+        CHECK(session.is_authenticated());
+        CHECK(session.epoch() == epoch_a);
+        CHECK(session.counter() == 50);
+        CHECK(session.clock_time() == 1000);
+
+        // Vehicle reports counter below ours (e.g. 20) with advanced clock (1010).
+        // Per signer.go UpdateSessionInfo: counter = max(local, reported).
+        // Maintains 50, does NOT drop to 20!
+        session.set_established(epoch_a, 20, 1010);
+        CHECK(session.counter() == 50);
+        CHECK(session.clock_time() == 1010);
+
+        // Vehicle reports higher counter (80) -> advances to 80
+        session.set_established(epoch_a, 80, 1020);
+        CHECK(session.counter() == 80);
+        CHECK(session.clock_time() == 1020);
+
+        // New epoch (epoch_b): signer.go maintains monotonic counter progression max(local, reported)
+        // If reported counter is 15 (< 80), local counter 80 is preserved!
+        std::array<uint8_t, 16> epoch_b = {0x0B, 0x02};
+        session.set_established(epoch_b, 15, 1030);
+        CHECK(session.epoch() == epoch_b);
+        CHECK(session.counter() == 80); // Preserved >= 80 per signer.go UpdateSessionInfo
+        CHECK(session.clock_time() == 1030);
+
+        // If new epoch reports higher counter (120), advances to 120
+        session.set_established(epoch_b, 120, 1040);
+        CHECK(session.counter() == 120);
+        CHECK(session.clock_time() == 1040);
+    }
+
+    // 3. Reset clears session and counter
+    {
+        tk::SessionTracker session;
+        session.set_established({1, 2, 3}, 42, 9999);
+        CHECK(session.is_authenticated());
+        session.reset();
+        CHECK(!session.is_authenticated());
+        CHECK(session.state() == S::Unauthenticated);
+        CHECK(session.counter() == 0);
+        CHECK(session.clock_time() == 0);
+        const std::array<uint8_t, 16> empty_epoch{};
+        CHECK(session.epoch() == empty_epoch);
+    }
+}
+
+static void test_command_runner() {
+    using namespace tk;
+
+    // 1. Enqueue & FIFO ordering and queue saturation
+    {
+        CommandRunner runner;
+        CHECK(!runner.has_active_command());
+        CHECK(runner.queue_size() == 0);
+        CHECK(!runner.is_queue_full());
+
+        // Enqueue up to capacity (kMaxQueueSize = 8)
+        for (uint32_t i = 0; i < CommandRunner::kMaxQueueSize; ++i) {
+            std::string name = "Cmd_" + std::to_string(i);
+            uint32_t id = runner.enqueue(name, BleDomain::VehicleSecurity, WakePolicy::WakeIfNeeded, 20000, 1000);
+            CHECK(id == i + 1);
+            CHECK(runner.queue_size() == i + 1);
+        }
+        CHECK(runner.is_queue_full());
+
+        // 9th enqueue must be rejected
+        uint32_t rej = runner.enqueue("Cmd_Overflow", BleDomain::VehicleSecurity, WakePolicy::WakeIfNeeded, 20000, 1000);
+        CHECK(rej == 0);
+        CHECK(runner.queue_size() == CommandRunner::kMaxQueueSize);
+
+        // Verify FIFO front is Cmd_0 with ID 1
+        CommandRequest* front = runner.current_command();
+        CHECK(front != nullptr);
+        CHECK(front->id == 1);
+        CHECK(front->name == "Cmd_0");
+
+        // Pop front command
+        runner.pop_current();
+        CHECK(runner.queue_size() == CommandRunner::kMaxQueueSize - 1);
+        front = runner.current_command();
+        CHECK(front != nullptr);
+        CHECK(front->id == 2);
+        CHECK(front->name == "Cmd_1");
+
+        // Clear all
+        runner.clear();
+        CHECK(runner.queue_size() == 0);
+        CHECK(!runner.has_active_command());
+        CHECK(runner.current_command() == nullptr);
+    }
+
+    // 2. Wake-up Policy Coordination
+    {
+        // 2a. NoWakeSkip when vehicle is asleep
+        {
+            CommandRunner runner;
+            // Pre-authenticate VCSEC so it reaches the wake check
+            runner.vcsec_session().set_established({1}, 10, 1000);
+
+            bool completed_called = false;
+            bool success_val = true;
+            std::string err_val;
+            runner.enqueue("ChargePoll", BleDomain::Infotainment, WakePolicy::NoWakeSkip, 20000, 1000, {},
+                           [&](bool ok, const std::string& err) {
+                               completed_called = true;
+                               success_val = ok;
+                               err_val = err;
+                           });
+
+            TxAction act = runner.tick(1000, true /* connected */, false /* awake */, true /* asleep */);
+            CHECK(act == TxAction::None);
+
+            CommandRequest* cmd = runner.current_command();
+            CHECK(cmd != nullptr);
+            CHECK(cmd->is_completed);
+            CHECK(!cmd->is_success);
+            CHECK(cmd->state == CommandState::Skipped);
+            CHECK(cmd->terminal_reason == TerminalReason::VehicleAsleep);
+            CHECK(completed_called);
+            CHECK(!success_val);
+            CHECK(err_val == "vehicle asleep");
+        }
+
+        // 2b. NoWakeFail when vehicle is asleep
+        {
+            CommandRunner runner;
+            runner.vcsec_session().set_established({1}, 10, 1000);
+
+            runner.enqueue("ChargeCmd", BleDomain::Infotainment, WakePolicy::NoWakeFail, 20000, 1000);
+            TxAction act = runner.tick(1000, true, false /* awake */, true /* asleep */);
+            CHECK(act == TxAction::None);
+
+            CommandRequest* cmd = runner.current_command();
+            CHECK(cmd != nullptr);
+            CHECK(cmd->is_completed);
+            CHECK(!cmd->is_success);
+            CHECK(cmd->state == CommandState::Failed);
+            CHECK(cmd->terminal_reason == TerminalReason::VehicleAsleep);
+        }
+
+        // 2c. WakeIfNeeded when vehicle is asleep -> coordinates wake sequence
+        {
+            CommandRunner runner;
+            runner.vcsec_session().set_established({1}, 10, 1000);
+
+            runner.enqueue("ChargeStart", BleDomain::Infotainment, WakePolicy::WakeIfNeeded, 20000, 1000);
+            TxAction act = runner.tick(1000, true, false /* awake */, true /* asleep */);
+            CHECK(act == TxAction::SendWake);
+
+            CommandRequest* cmd = runner.current_command();
+            CHECK(cmd != nullptr);
+            CHECK(!cmd->is_completed);
+            CHECK(cmd->state == CommandState::WaitingWake);
+            CHECK(cmd->phase == CommandPhase::EnsuringAwake);
+
+            // Notify vehicle is now awake
+            runner.notify_vehicle_awake(true);
+
+            // Now vehicle is awake, but infotainment session not established yet -> needs info session
+            act = runner.tick(1100, true, true /* awake */, false /* asleep */);
+            CHECK(act == TxAction::SendInfoSessionInfoRequest);
+            CHECK(cmd->state == CommandState::WaitingInfoAuth);
+            CHECK(cmd->phase == CommandPhase::EnsuringInfotainmentSession);
+        }
+
+        // 2d. WakeIfNeeded when vehicle is already awake -> skips wake sequence directly
+        {
+            CommandRunner runner;
+            runner.vcsec_session().set_established({1}, 10, 1000);
+            runner.info_session().set_established({2}, 20, 1000);
+
+            runner.enqueue("ChargeStart", BleDomain::Infotainment, WakePolicy::WakeIfNeeded, 20000, 1000);
+            TxAction act = runner.tick(1000, true, true /* awake */, false /* asleep */);
+            CHECK(act == TxAction::SendCommandPayload);
+
+            CommandRequest* cmd = runner.current_command();
+            CHECK(cmd != nullptr);
+            CHECK(cmd->state == CommandState::Ready);
+            CHECK(cmd->phase == CommandPhase::SendingRequest);
+        }
+
+        // 2e. NoWakeSkip when sleep state is Unknown -> does NOT skip, proceeds to infotainment auth
+        {
+            CommandRunner runner;
+            runner.vcsec_session().set_established({1}, 10, 1000);
+
+            runner.enqueue("ChargePoll", BleDomain::Infotainment, WakePolicy::NoWakeSkip, 20000, 1000);
+            // Neither awake nor asleep -> Unknown
+            TxAction act = runner.tick(1000, true /* connected */, false /* awake */, false /* asleep */);
+            CHECK(act == TxAction::SendInfoSessionInfoRequest);
+
+            CommandRequest* cmd = runner.current_command();
+            CHECK(cmd != nullptr);
+            CHECK(!cmd->is_completed);
+            CHECK(cmd->state == CommandState::WaitingInfoAuth);
+        }
+
+        // 2f. NoWakeFail when sleep state is Unknown -> does NOT fail, proceeds to infotainment auth
+        {
+            CommandRunner runner;
+            runner.vcsec_session().set_established({1}, 10, 1000);
+
+            runner.enqueue("ChargeCmd", BleDomain::Infotainment, WakePolicy::NoWakeFail, 20000, 1000);
+            TxAction act = runner.tick(1000, true, false /* awake */, false /* asleep */);
+            CHECK(act == TxAction::SendInfoSessionInfoRequest);
+
+            CommandRequest* cmd = runner.current_command();
+            CHECK(cmd != nullptr);
+            CHECK(!cmd->is_completed);
+            CHECK(cmd->state == CommandState::WaitingInfoAuth);
+        }
+
+        // 2g. WakeIfNeeded when sleep state is Unknown -> coordinates wake
+        {
+            CommandRunner runner;
+            runner.vcsec_session().set_established({1}, 10, 1000);
+
+            runner.enqueue("ChargeStart", BleDomain::Infotainment, WakePolicy::WakeIfNeeded, 20000, 1000);
+            TxAction act = runner.tick(1000, true, false /* awake */, false /* asleep */);
+            CHECK(act == TxAction::SendWake);
+
+            CommandRequest* cmd = runner.current_command();
+            CHECK(cmd != nullptr);
+            CHECK(cmd->state == CommandState::WaitingWake);
+
+            // On next tick without explicit notify, if is_awake becomes true, advances immediately without timeout
+            act = runner.tick(1050, true, true /* now awake */, false /* asleep */);
+            CHECK(act == TxAction::SendInfoSessionInfoRequest);
+            CHECK(cmd->state == CommandState::WaitingInfoAuth);
+        }
+
+        // 2h. F1a: Stale AWAKE during WaitingVcsecAuth must NOT prematurely confirm wake
+        // If an AWAKE arrives while awaiting VCSEC session auth, wake_confirmed must remain false.
+        // Once VCSEC session is established, if the vehicle is asleep, tick must emit SendWake.
+        {
+            CommandRunner runner;
+            runner.enqueue("ClimateOn", BleDomain::Infotainment, WakePolicy::WakeIfNeeded, 20000, 1000);
+
+            // Tick 1: Infotainment needs VCSEC session first
+            TxAction act = runner.tick(1000, true /* connected */, false /* awake */, false /* asleep */);
+            CHECK(act == TxAction::SendVcsecSessionInfoRequest);
+            CommandRequest* cmd = runner.current_command();
+            CHECK(cmd != nullptr);
+            CHECK(cmd->state == CommandState::WaitingVcsecAuth);
+            CHECK(!cmd->wake_confirmed);
+
+            // Stale AWAKE arrives while command is in WaitingVcsecAuth
+            act = runner.tick(1050, true /* connected */, true /* awake */, false /* asleep */);
+            CHECK(act == TxAction::None);
+            CHECK(cmd->state == CommandState::WaitingVcsecAuth);
+            // Critical check: wake_confirmed must NOT be set during WaitingVcsecAuth!
+            CHECK(!cmd->wake_confirmed);
+
+            // VCSEC auth completes
+            runner.vcsec_session().set_established({1, 2, 3}, 5, 1100);
+            cmd->state = CommandState::Idle;
+
+            // Vehicle reports ASLEEP: because wake_confirmed was not prematurely set,
+            // tick correctly emits SendWake rather than skipping to infotainment auth.
+            act = runner.tick(1100, true /* connected */, false /* awake */, true /* asleep */);
+            CHECK(act == TxAction::SendWake);
+            CHECK(cmd->state == CommandState::WaitingWake);
+            CHECK(cmd->phase == CommandPhase::EnsuringAwake);
+        }
+    }
+
+    // 3. Prerequisite Phase Progression (VCSEC Auth -> Wake -> Infotainment Auth -> Ready)
+    {
+        CommandRunner runner;
+        // Unauthenticated initial state
+        CHECK(!runner.vcsec_session().is_authenticated());
+        CHECK(!runner.info_session().is_authenticated());
+
+        runner.enqueue("ClimateOn", BleDomain::Infotainment, WakePolicy::WakeIfNeeded, 20000, 1000);
+
+        // Step 1: Infotainment requires VCSEC session first
+        TxAction act = runner.tick(1000, true, true);
+        CHECK(act == TxAction::SendVcsecSessionInfoRequest);
+        CHECK(runner.current_command()->state == CommandState::WaitingVcsecAuth);
+        CHECK(runner.current_command()->phase == CommandPhase::EnsuringVcsecSession);
+
+        // Provide VCSEC SessionInfo response via set_established
+        runner.vcsec_session().set_established({1, 2, 3}, 5, 1000);
+        runner.current_command()->state = CommandState::Idle;
+        CHECK(runner.vcsec_session().is_authenticated());
+
+        // Step 2: Now VCSEC is satisfied, Infotainment session is needed
+        act = runner.tick(1100, true, true);
+        CHECK(act == TxAction::SendInfoSessionInfoRequest);
+        CHECK(runner.current_command()->state == CommandState::WaitingInfoAuth);
+        CHECK(runner.current_command()->phase == CommandPhase::EnsuringInfotainmentSession);
+
+        // Provide Infotainment SessionInfo response via set_established
+        runner.info_session().set_established({4, 5, 6}, 12, 1000);
+        runner.current_command()->state = CommandState::Idle;
+        CHECK(runner.info_session().is_authenticated());
+
+        // Step 3: All prerequisites satisfied -> Ready to send command
+        act = runner.tick(1200, true, true);
+        CHECK(act == TxAction::SendCommandPayload);
+        CHECK(runner.current_command()->state == CommandState::Ready);
+        CHECK(runner.current_command()->phase == CommandPhase::SendingRequest);
+    }
+
+    // 4. "Whitelist Add Key" Session Bypass
+    {
+        CommandRunner runner;
+        CHECK(!runner.vcsec_session().is_authenticated());
+
+        runner.enqueue("Whitelist Add Key", BleDomain::VehicleSecurity, WakePolicy::WakeIfNeeded, 20000, 1000);
+
+        // Bypass session auth directly
+        TxAction act = runner.tick(1000, true, false);
+        CHECK(act == TxAction::SendCommandPayload);
+        CHECK(runner.current_command()->state == CommandState::Ready);
+        CHECK(runner.current_command()->phase == CommandPhase::SendingRequest);
+    }
+
+    // 4b. "Wake" Session Flow and Vehicle Confirmation (N1)
+    {
+        CommandRunner runner;
+        CHECK(!runner.vcsec_session().is_authenticated());
+
+        bool completed = false;
+        bool success_res = false;
+        runner.enqueue("Wake", BleDomain::VehicleSecurity, WakePolicy::NoWakeFail, 9000, 1000, {},
+                       [&](bool ok, const std::string&) {
+                           completed = true;
+                           success_res = ok;
+                       });
+
+        // "Wake" requires VCSEC session authentication to encrypt the RKE action payload
+        TxAction act = runner.tick(1000, true /* connected */, false /* awake */, true /* asleep */);
+        CHECK(act == TxAction::SendVcsecSessionInfoRequest);
+        CHECK(runner.current_command()->state == CommandState::WaitingVcsecAuth);
+        CHECK(runner.current_command()->phase == CommandPhase::EnsuringVcsecSession);
+
+        // Simulate session info arrival via set_established
+        runner.vcsec_session().set_established({1, 2, 3}, 1, 1000);
+        runner.current_command()->state = CommandState::Idle;
+        CHECK(runner.vcsec_session().is_authenticated());
+
+        act = runner.tick(1020, true, false, true);
+        CHECK(act == TxAction::SendCommandPayload);
+        CHECK(runner.current_command()->state == CommandState::Ready);
+        CHECK(runner.current_command()->phase == CommandPhase::SendingRequest);
+
+        // Notifying TX completion finishes Wake immediately with success
+        // (Wake action has no commandStatus acknowledgement from Tesla; transmission completes it)
+        runner.notify_tx_complete(1050);
+        CHECK(completed);
+        CHECK(success_res);
+        CHECK(runner.current_command()->is_completed);
+        CHECK(runner.current_command()->is_success);
+        CHECK(runner.current_command()->terminal_reason == TerminalReason::Success);
+    }
+
+    // 5. BleDispatcher Integration, Routing & Anti-Replay
+    {
+        CommandRunner runner;
+        runner.vcsec_session().set_established({1}, 10, 1000);
+        runner.info_session().set_established({2}, 20, 1000);
+
+        BleUuid cmd_uuid = {0xAA, 0xBB, 0xCC, 0xDD, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12};
+        runner.enqueue("Lock", BleDomain::VehicleSecurity, WakePolicy::WakeIfNeeded, 20000, 1000, cmd_uuid);
+
+        TxAction act = runner.tick(1000, true, true);
+        CHECK(act == TxAction::SendCommandPayload);
+
+        // Confirm TX complete: registers with dispatcher
+        runner.notify_tx_complete(1050);
+        CommandRequest* cmd = runner.current_command();
+        CHECK(cmd->state == CommandState::AwaitingResponse);
+        CHECK(cmd->phase == CommandPhase::AwaitingResponse);
+        CHECK(cmd->dispatcher_request_id != 0);
+        CHECK(runner.dispatcher().has_request(cmd->dispatcher_request_id));
+
+        // 5a. Route response matching UUID
+        auto outcome = runner.handle_response(BleDomain::VehicleSecurity, cmd_uuid.data(), cmd_uuid.size(),
+                                             true, 100, true, "");
+        CHECK(outcome.routed);
+        CHECK(cmd->is_completed);
+        CHECK(cmd->is_success);
+        CHECK(cmd->terminal_reason == TerminalReason::Success);
+        // Request unregistered from dispatcher
+        CHECK(!runner.dispatcher().has_request(cmd->dispatcher_request_id));
+
+        // 5b. Replay check: second response with same counter is dropped
+        auto replay_outcome = runner.dispatcher().dispatch(BleDomain::VehicleSecurity, cmd_uuid.data(), cmd_uuid.size(),
+                                                           true, 100);
+        // Dispatcher slot was unregistered or duplicate
+        CHECK(!replay_outcome.routed);
+    }
+
+    // 6. Outcome Classification: is_nominal_already_set mapping
+    {
+        CommandRunner runner;
+        runner.vcsec_session().set_established({1}, 10, 1000);
+
+        BleUuid cmd_uuid = {0x11, 0x22, 0x33, 0x44};
+        runner.enqueue("DoorLock", BleDomain::VehicleSecurity, WakePolicy::WakeIfNeeded, 20000, 1000, cmd_uuid);
+        runner.tick(1000, true, true);
+        runner.notify_tx_complete(1010);
+
+        // Vehicle replies with normative already_set error (e.g. door is already locked)
+        auto outcome = runner.handle_response(BleDomain::VehicleSecurity, cmd_uuid.data(), cmd_uuid.size(),
+                                             false, 0, false, "already_set");
+        CHECK(outcome.routed);
+        CommandRequest* cmd = runner.current_command();
+        CHECK(cmd->is_completed);
+        CHECK(cmd->is_success); // Treated as idempotent success!
+        CHECK(cmd->is_already_set);
+        CHECK(cmd->terminal_reason == TerminalReason::AlreadySet);
+        CHECK(cmd->error_message == "command executed successfully");
+    }
+
+    // 7. Generic Error Outcome
+    {
+        CommandRunner runner;
+        runner.vcsec_session().set_established({1}, 10, 1000);
+
+        BleUuid cmd_uuid = {0x55, 0x66, 0x77, 0x88};
+        runner.enqueue("Honk", BleDomain::VehicleSecurity, WakePolicy::WakeIfNeeded, 20000, 1000, cmd_uuid);
+        runner.tick(1000, true, true);
+        runner.notify_tx_complete(1010);
+
+        auto outcome = runner.handle_response(BleDomain::VehicleSecurity, cmd_uuid.data(), cmd_uuid.size(),
+                                             false, 0, false, "remote_access_disabled");
+        CHECK(outcome.routed);
+        CommandRequest* cmd = runner.current_command();
+        CHECK(cmd->is_completed);
+        CHECK(!cmd->is_success);
+        CHECK(!cmd->is_already_set);
+        CHECK(cmd->error_message == "remote_access_disabled");
+        CHECK(cmd->terminal_reason == TerminalReason::AuthenticationFailed);
+    }
+
+    // 8. Response Timeout and Retry Arbitration (with exponential backoff)
+    {
+        CommandRunner runner;
+        runner.vcsec_session().set_established({1}, 10, 1000);
+
+        runner.enqueue("Flash", BleDomain::VehicleSecurity, WakePolicy::WakeIfNeeded, 40000, 1000);
+        runner.tick(1000, true, true);
+        runner.notify_tx_complete(1010);
+
+        CommandRequest* cmd = runner.current_command();
+        CHECK(cmd->state == CommandState::AwaitingResponse);
+        CHECK(cmd->retry_count == 0);
+
+        // Advance past response timeout (7000ms): 1010 + 7000 = 8010.
+        // At 8015: timeout triggers, enters backoff (500ms delay), returns None
+        TxAction act = runner.tick(8015, true, true);
+        CHECK(act == TxAction::None);
+        CHECK(cmd->state == CommandState::Ready);
+        CHECK(cmd->retry_count == 1);
+        CHECK(cmd->next_retry_delay_ms == 500);
+
+        // During backoff delay (8200ms < 8015 + 500), tick returns None
+        CHECK(runner.tick(8200, true, true) == TxAction::None);
+
+        // At 8515ms (8015 + 500), backoff expires -> emits SendCommandPayload (Retry #1)
+        act = runner.tick(8515, true, true);
+        CHECK(act == TxAction::SendCommandPayload);
+        runner.notify_tx_complete(8520);
+
+        // Advance for retry #2: 8520 + 7000 = 15520.
+        // At 15525: timeout triggers, enters backoff (1000ms delay), returns None
+        act = runner.tick(15525, true, true);
+        CHECK(act == TxAction::None);
+        CHECK(cmd->retry_count == 2);
+        CHECK(cmd->next_retry_delay_ms == 1000);
+
+        // At 16525 (15525 + 1000), backoff expires -> emits SendCommandPayload (Retry #2)
+        act = runner.tick(16525, true, true);
+        CHECK(act == TxAction::SendCommandPayload);
+        runner.notify_tx_complete(16530);
+
+        // Advance for retry #3: 16530 + 7000 = 23530.
+        // At 23535: timeout triggers, enters backoff (2000ms delay), returns None
+        act = runner.tick(23535, true, true);
+        CHECK(act == TxAction::None);
+        CHECK(cmd->retry_count == 3);
+        CHECK(cmd->next_retry_delay_ms == 2000);
+
+        // At 25535 (23535 + 2000), backoff expires -> emits SendCommandPayload (Retry #3)
+        act = runner.tick(25535, true, true);
+        CHECK(act == TxAction::SendCommandPayload);
+        runner.notify_tx_complete(25540);
+
+        // Next timeout exceeds max_retries: 25540 + 7000 = 32540 -> fails permanently
+        act = runner.tick(32545, true, true);
+        CHECK(act == TxAction::None);
+        CHECK(cmd->is_completed);
+        CHECK(!cmd->is_success);
+        CHECK(cmd->state == CommandState::Failed);
+        CHECK(cmd->terminal_reason == TerminalReason::MaxRetriesExceeded);
+    }
+
+    // 8b. Infotainment Payload Response Timeout with is_asleep == true (P1 regression test)
+    {
+        CommandRunner runner;
+        runner.vcsec_session().set_established({1}, 10, 1000);
+        runner.info_session().set_established({2}, 20, 1000);
+
+        runner.enqueue("FlashLights", BleDomain::Infotainment, WakePolicy::WakeIfNeeded, 40000, 1000);
+        // Vehicle is initially reported asleep; tick returns SendWake
+        TxAction act = runner.tick(1000, true /* connected */, false /* is_awake */, true /* is_asleep */);
+        CHECK(act == TxAction::SendWake);
+        CHECK(runner.current_command()->state == CommandState::WaitingWake);
+
+        // Wake is confirmed awake
+        runner.notify_vehicle_awake(true);
+        CHECK(runner.current_command()->wake_confirmed);
+
+        // Next tick sends Infotainment payload
+        act = runner.tick(1050, true, true /* is_awake */, false /* is_asleep */);
+        CHECK(act == TxAction::SendCommandPayload);
+        runner.notify_tx_complete(1060);
+        CommandRequest* cmd = runner.current_command();
+        CHECK(cmd->state == CommandState::AwaitingResponse);
+        CHECK(cmd->retry_count == 0);
+
+        // Response timeout occurs (1060 + 7000 = 8060).
+        // At 8065: tick with is_asleep == true (e.g. VCSEC telemetry still reports ASLEEP).
+        // The in-flight command already sent its payload and was confirmed awake;
+        // it must retry the payload with exponential backoff, NOT regress into SendWake!
+        act = runner.tick(8065, true /* connected */, false /* is_awake */, true /* is_asleep */);
+        CHECK(act == TxAction::None);
+        CHECK(cmd->state == CommandState::Ready);
+        CHECK(cmd->retry_count == 1);
+        CHECK(cmd->next_retry_delay_ms == 500);
+        CHECK(cmd->wake_confirmed); // Must remain true!
+
+        // During backoff delay (8200ms < 8065 + 500), tick returns None
+        CHECK(runner.tick(8200, true, false, true) == TxAction::None);
+
+        // At 8565 (8065 + 500), backoff expires -> must emit SendCommandPayload, NOT SendWake!
+        act = runner.tick(8565, true /* connected */, false /* is_awake */, true /* is_asleep */);
+        CHECK(act == TxAction::SendCommandPayload);
+    }
+
+    // 9. Overall Command Deadline Exhaustion
+    {
+        CommandRunner runner;
+        runner.vcsec_session().set_established({1}, 10, 1000);
+
+        runner.enqueue("TestDeadline", BleDomain::VehicleSecurity, WakePolicy::WakeIfNeeded, 5000, 1000);
+        TxAction act = runner.tick(1000, true, true);
+        CHECK(act == TxAction::SendCommandPayload);
+        runner.notify_tx_complete(1050);
+
+        // Tick after deadline (1000 + 5000 = 6000)
+        act = runner.tick(6001, true, true);
+        CHECK(act == TxAction::None);
+        CommandRequest* cmd = runner.current_command();
+        CHECK(cmd->is_completed);
+        CHECK(!cmd->is_success);
+        CHECK(cmd->terminal_reason == TerminalReason::DeadlineExceeded);
+    }
+
+    // 10. Disconnection during waiting
+    {
+        CommandRunner runner;
+        runner.vcsec_session().set_established({1}, 10, 1000);
+
+        runner.enqueue("TestDisconnect", BleDomain::VehicleSecurity, WakePolicy::WakeIfNeeded, 5000, 1000);
+        runner.tick(1000, true, true);
+        runner.notify_tx_complete(1050);
+
+        // Disconnected at 2000ms: within deadline, runner waits
+        TxAction act = runner.tick(2000, false /* disconnected */, true);
+        CHECK(act == TxAction::None);
+        CHECK(!runner.current_command()->is_completed);
+
+        // Disconnected past deadline (6001ms): deadline exhausted
+        act = runner.tick(6001, false, true);
+        CHECK(act == TxAction::None);
+        CHECK(runner.current_command()->is_completed);
+        CHECK(!runner.current_command()->is_success);
+        CHECK(runner.current_command()->terminal_reason == TerminalReason::DeadlineExceeded);
+        CHECK(runner.current_command()->error_message == "connection lost; command deadline exhausted");
+    }
+
+    // 10b. Disconnection while in Idle state (enqueued while offline) exhausts deadline
+    {
+        CommandRunner runner;
+        runner.enqueue("OfflineEnqueue", BleDomain::VehicleSecurity, WakePolicy::WakeIfNeeded, 5000, 1000);
+        CHECK(runner.current_command()->state == CommandState::Idle);
+
+        // Before deadline (3000ms < 1000 + 5000): waiting
+        TxAction act = runner.tick(3000, false /* disconnected */, false);
+        CHECK(act == TxAction::None);
+        CHECK(!runner.current_command()->is_completed);
+
+        // Past deadline (6001ms): must fail with DeadlineExceeded, not hang in Idle!
+        act = runner.tick(6001, false /* disconnected */, false);
+        CHECK(act == TxAction::None);
+        CHECK(runner.current_command()->is_completed);
+        CHECK(!runner.current_command()->is_success);
+        CHECK(runner.current_command()->terminal_reason == TerminalReason::DeadlineExceeded);
+        CHECK(runner.current_command()->error_message == "connection lost; command deadline exhausted");
+    }
+
+    // 10c. Disconnection while in Ready state (during retry backoff delay) exhausts deadline
+    {
+        CommandRunner runner;
+        runner.vcsec_session().set_established({1}, 10, 1000);
+        runner.enqueue("BackoffDisconnect", BleDomain::VehicleSecurity, WakePolicy::WakeIfNeeded, 10000, 1000);
+        runner.tick(1000, true, true);
+        runner.notify_tx_complete(1050);
+
+        // Response timeout at 8060 (1050 + 7000) transitions to Ready with backoff delay
+        runner.tick(8060, true, true);
+        CHECK(runner.current_command()->state == CommandState::Ready);
+        CHECK(runner.current_command()->next_retry_delay_ms == 500);
+
+        // Disconnected at 8200ms while still in backoff: waits
+        TxAction act = runner.tick(8200, false /* disconnected */, true);
+        CHECK(act == TxAction::None);
+        CHECK(!runner.current_command()->is_completed);
+
+        // Past overall deadline (11001ms >= 1000 + 10000): must fail with DeadlineExceeded!
+        act = runner.tick(11001, false /* disconnected */, true);
+        CHECK(act == TxAction::None);
+        CHECK(runner.current_command()->is_completed);
+        CHECK(!runner.current_command()->is_success);
+        CHECK(runner.current_command()->terminal_reason == TerminalReason::DeadlineExceeded);
+        CHECK(runner.current_command()->error_message == "connection lost; command deadline exhausted");
+    }
+
+    // 11. RxFramer Integration in CommandRunner
+    {
+        CommandRunner runner;
+        CHECK(runner.rx_framer().timeout_ms() == 3000);
+        std::vector<uint8_t> received;
+
+        // Valid frame: 2-byte length 4, followed by 4 payload bytes
+        std::vector<uint8_t> chunk = {0x00, 0x04, 0xDE, 0xAD, 0xBE, 0xEF};
+        size_t extracted = runner.push_rx_chunk(
+            chunk.data(), chunk.size(), 1000,
+            [&](const uint8_t* payload, size_t len) {
+                received.assign(payload, payload + len);
+            },
+            [](RxFramerDropReason, size_t) {});
+
+        CHECK(extracted == 1);
+        CHECK(received.size() == 4);
+        CHECK(received[0] == 0xDE && received[3] == 0xEF);
+
+        // Incomplete chunk: 2-byte header + 2 payload bytes (needs 4 payload bytes)
+        std::vector<uint8_t> partial = {0x00, 0x04, 0xAA, 0xBB};
+        runner.push_rx_chunk(partial.data(), partial.size(), 1000,
+                             [](const uint8_t*, size_t) {},
+                             [](RxFramerDropReason, size_t) {});
+        CHECK(runner.rx_framer().buffered_bytes() == 4);
+
+        // At t = 3500 (elapsed = 2500ms <= 3000ms), timeout must not drop
+        bool dropped_early = false;
+        runner.rx_framer().check_timeout(3500, [&](RxFramerDropReason, size_t) {
+            dropped_early = true;
+        });
+        CHECK(!dropped_early);
+        CHECK(runner.rx_framer().buffered_bytes() == 4);
+
+        // At t = 4001 (elapsed = 3001ms > 3000ms), timeout drops
+        RxFramerDropReason drop_reason = RxFramerDropReason::None;
+        size_t dropped_bytes = 0;
+        runner.rx_framer().check_timeout(4001, [&](RxFramerDropReason reason, size_t dropped) {
+            drop_reason = reason;
+            dropped_bytes = dropped;
+        });
+        CHECK(drop_reason == RxFramerDropReason::InterChunkTimeout);
+        CHECK(dropped_bytes == 4);
+        CHECK(runner.rx_framer().buffered_bytes() == 0);
+    }
+}
+
+static void test_command_runner_link_loss_and_faults() {
+    using namespace tk;
+
+    // R1: a VehicleStatus with closureStatuses confirms the wake while the raw VCSEC flag still
+    // reads ASLEEP. The command then proceeds to the infotainment session instead of re-sending
+    // Wake on every status reply (upstream v5.2.0 semantics; the loop sent one Wake per reply).
+    {
+        CommandRunner runner;
+        runner.vcsec_session().set_established({1}, 10, 1000);
+        runner.enqueue("Set Charging Amps", BleDomain::Infotainment, WakePolicy::WakeIfNeeded, 30000, 0);
+        CHECK(runner.tick(0, true, false, true) == TxAction::SendWake);
+        runner.notify_tx_complete(0);
+        CHECK(runner.current_command()->state == CommandState::WaitingWake);
+        CHECK(!runner.current_command()->wake_confirmed);
+
+        runner.notify_vehicle_awake(true);   // VehicleStatus{ASLEEP, closureStatuses}
+        CHECK(runner.current_command()->wake_confirmed);
+        CHECK(runner.tick(350, true, false, true) == TxAction::SendInfoSessionInfoRequest);
+        runner.notify_vehicle_awake(true);   // further status replies change nothing
+        CHECK(runner.current_command()->state == CommandState::WaitingInfoAuth);
+        CHECK(runner.tick(700, true, false, true) == TxAction::None);
+        CHECK(runner.current_command()->retry_count == 0);
+
+        // After the infotainment session is up, the payload goes out despite the ASLEEP flag.
+        runner.info_session().set_established({2}, 20, 1000);
+        runner.current_command()->state = CommandState::Idle;
+        CHECK(runner.tick(900, true, false, true) == TxAction::SendCommandPayload);
+    }
+    // A confirmed VCSEC AWAKE while waiting for the wake is final as well.
+    {
+        CommandRunner runner;
+        runner.vcsec_session().set_established({1}, 10, 1000);
+        runner.enqueue("Start Charging", BleDomain::Infotainment, WakePolicy::WakeIfNeeded, 30000, 0);
+        CHECK(runner.tick(0, true, false, false) == TxAction::SendWake);   // sleep state unknown
+        runner.notify_tx_complete(0);
+        CHECK(runner.tick(300, true, true, false) == TxAction::SendInfoSessionInfoRequest);
+        CHECK(runner.current_command()->wake_confirmed);
+    }
+    // Status frames arriving early while waiting for VCSEC auth must not confirm wake
+    // when car is reported asleep: after VCSEC auth, tick emits SendWake.
+    {
+        CommandRunner runner;
+        // VCSEC session not yet established
+        runner.enqueue("Set Charge Limit", BleDomain::Infotainment, WakePolicy::WakeIfNeeded, 30000, 0);
+        CHECK(runner.tick(0, true, false, true) == TxAction::SendVcsecSessionInfoRequest);
+        CHECK(runner.current_command()->state == CommandState::WaitingVcsecAuth);
+        CHECK(!runner.current_command()->wake_confirmed);
+
+        // VehicleStatus arrives with closureStatuses while still waiting for VCSEC session
+        runner.notify_vehicle_awake(true);
+        // Not in WaitingWake or EnsuringAwake, so wake is not confirmed
+        CHECK(!runner.current_command()->wake_confirmed);
+        CHECK(runner.current_command()->state == CommandState::WaitingVcsecAuth);
+
+        // VCSEC session finishes authentication
+        runner.vcsec_session().set_established({1}, 10, 1000);
+        runner.current_command()->state = CommandState::Idle;
+
+        // Vehicle is asleep, so tick emits SendWake rather than advancing to infotainment auth
+        CHECK(runner.tick(500, true, false, true) == TxAction::SendWake);
+        CHECK(runner.current_command()->state == CommandState::WaitingWake);
+    }
+
+    // S1: Step timeout on info auth on asleep car resets wake_confirmed and emits SendWake
+    {
+        CommandRunner runner;
+        runner.vcsec_session().set_established({1}, 10, 1000);
+        runner.enqueue("Set Charge Limit", BleDomain::Infotainment, WakePolicy::WakeIfNeeded, 30000, 0);
+
+        // Step 1: Car is asleep, tick emits SendWake
+        CHECK(runner.tick(0, true, false, true) == TxAction::SendWake);
+        runner.notify_tx_complete(0);
+        CHECK(runner.current_command()->state == CommandState::WaitingWake);
+
+        // Wake confirmed while waiting for wake
+        runner.notify_vehicle_awake(true);
+        CHECK(runner.current_command()->wake_confirmed);
+
+        // Step 2: Advances to SendInfoSessionInfoRequest at t=100
+        CHECK(runner.tick(100, true, false, true) == TxAction::SendInfoSessionInfoRequest);
+        runner.notify_tx_complete(100);
+        CHECK(runner.current_command()->state == CommandState::WaitingInfoAuth);
+        CHECK(runner.current_command()->wake_confirmed);
+
+        // Step 3: Timeout waiting for info auth at t = 100 + kDefaultStepTimeoutMs (5000) = 5100 ms
+        // On step timeout, retry_count increments, wake_confirmed resets to false, state resets to Idle
+        CHECK(runner.tick(5100, true, false, true) == TxAction::None);
+        CHECK(!runner.current_command()->wake_confirmed);
+        CHECK(runner.current_command()->retry_count == 1);
+        CHECK(runner.current_command()->state == CommandState::Idle);
+
+        // Step 4: Next tick on asleep car re-evaluates sleep and emits SendWake
+        CHECK(runner.tick(5150, true, false, true) == TxAction::SendWake);
+        CHECK(runner.current_command()->state == CommandState::WaitingWake);
+    }
+
+    // TX write failure on infotainment command resets wake_confirmed and re-evaluates wake
+    {
+        CommandRunner runner;
+        runner.vcsec_session().set_established({1}, 10, 1000);
+        runner.info_session().set_established({2}, 10, 1000);
+        runner.enqueue("Set Charge Limit", BleDomain::Infotainment, WakePolicy::WakeIfNeeded, 30000, 0);
+
+        // Vehicle is asleep, first tick emits SendWake
+        CHECK(runner.tick(0, true, false, true) == TxAction::SendWake);
+        runner.notify_tx_complete(0);
+        runner.notify_vehicle_awake(true);
+        CHECK(runner.current_command()->wake_confirmed);
+
+        // Next tick emits SendCommandPayload
+        CHECK(runner.tick(100, true, false, true) == TxAction::SendCommandPayload);
+
+        // TX failure occurs during transmission
+        runner.notify_tx_failed("BLE write failed");
+        CHECK(!runner.current_command()->wake_confirmed);
+        CHECK(runner.current_command()->state == CommandState::Idle);
+        CHECK(runner.current_command()->retry_count == 1);
+
+        // Next tick re-evaluates sleep and emits SendWake
+        CHECK(runner.tick(150, true, false, true) == TxAction::SendWake);
+        CHECK(runner.current_command()->state == CommandState::WaitingWake);
+    }
+
+    // F4: Retry timing and backoff enforcement (at t7000 returns None, during backoff 500ms returns None, at t7500 emits SendCommandPayload)
+    {
+        CommandRunner runner;
+        runner.vcsec_session().set_established({1}, 10, 1000);
+        runner.enqueue("Flash", BleDomain::VehicleSecurity, WakePolicy::WakeIfNeeded, 30000, 0);
+
+        CHECK(runner.tick(0, true, true) == TxAction::SendCommandPayload);
+        runner.notify_tx_complete(0);
+        CHECK(runner.current_command()->state == CommandState::AwaitingResponse);
+        CHECK(runner.current_command()->retry_count == 0);
+
+        // At t = 7000ms: response timeout occurs (elapsed >= 7000). Enters Ready, backoff 500ms. Returns None.
+        CHECK(runner.tick(7000, true, true) == TxAction::None);
+        CHECK(runner.current_command()->state == CommandState::Ready);
+        CHECK(runner.current_command()->retry_count == 1);
+        CHECK(runner.current_command()->next_retry_delay_ms == 500);
+
+        // During backoff (e.g. t = 7250ms < 7000 + 500), returns None
+        CHECK(runner.tick(7250, true, true) == TxAction::None);
+
+        // At t = 7500ms (7000 + 500), backoff expires -> emits SendCommandPayload
+        CHECK(runner.tick(7500, true, true) == TxAction::SendCommandPayload);
+    }
+    // No confirmation: an asleep car still gets the wake policy (unchanged), and a NoWakeFail
+    // command still fails locally with the text the link backstop classifies as LocalPolicy.
+    {
+        CommandRunner runner;
+        runner.vcsec_session().set_established({1}, 10, 1000);
+        runner.enqueue("Charge State Poll", BleDomain::Infotainment, WakePolicy::NoWakeFail, 10000, 0);
+        CHECK(runner.tick(0, true, false, true) == TxAction::None);
+        CHECK(runner.current_command()->terminal_reason == TerminalReason::VehicleAsleep);
+        CHECK(tk::classify_command_failure(runner.current_command()->error_message) ==
+              tk::CommandFailureOrigin::LocalPolicy);
+    }
+
+    // M1: Link loss fails command immediately
+    {
+        CommandRunner runner;
+        runner.vcsec_session().set_established({1}, 10, 1000);
+        runner.enqueue("FlashLights", BleDomain::VehicleSecurity, WakePolicy::WakeIfNeeded, 20000, 1000);
+        runner.tick(1000, true, true, false);
+        runner.notify_tx_complete(1050);
+        CHECK(runner.has_active_command());
+        CHECK(runner.current_command()->state == CommandState::AwaitingResponse);
+
+        // Notify link loss
+        runner.notify_link_lost("connection lost");
+        CommandRequest* cmd = runner.current_command();
+        CHECK(cmd->is_completed);
+        CHECK(!cmd->is_success);
+        CHECK(cmd->terminal_reason == TerminalReason::BleDisconnected);
+        CHECK(cmd->error_message == "connection lost");
+    }
+
+    // M1: Signed message fault (not session error) fails command immediately
+    {
+        CommandRunner runner;
+        runner.vcsec_session().set_established({1}, 10, 1000);
+        runner.enqueue("HonkHorn", BleDomain::VehicleSecurity, WakePolicy::WakeIfNeeded, 20000, 1000);
+        runner.tick(1000, true, true, false);
+        runner.notify_tx_complete(1050);
+
+        runner.notify_signed_message_fault(false, "signed message authentication failed");
+        CommandRequest* cmd = runner.current_command();
+        CHECK(cmd->is_completed);
+        CHECK(!cmd->is_success);
+        CHECK(cmd->terminal_reason == TerminalReason::AuthenticationFailed);
+        CHECK(cmd->error_message == "signed message authentication failed");
+    }
+
+    // M1: Signed message fault (session error) triggers retry up to max_retries
+    {
+        CommandRunner runner;
+        runner.vcsec_session().set_established({1}, 10, 1000);
+        runner.enqueue("HonkHorn", BleDomain::VehicleSecurity, WakePolicy::WakeIfNeeded, 20000, 1000);
+        runner.tick(1000, true, true, false);
+        runner.notify_tx_complete(1050);
+        CommandRequest* cmd = runner.current_command();
+        CHECK(cmd->retry_count == 0);
+
+        // Retry 1
+        runner.notify_signed_message_fault(true, "session error");
+        CHECK(!cmd->is_completed);
+        CHECK(cmd->retry_count == 1);
+        CHECK(cmd->state == CommandState::Idle);
+
+        // Advance to AwaitingResponse again
+        runner.tick(1100, true, true, false);
+        runner.notify_tx_complete(1150);
+
+        // Retry 2
+        runner.notify_signed_message_fault(true, "session error");
+        CHECK(!cmd->is_completed);
+        CHECK(cmd->retry_count == 2);
+
+        runner.tick(1200, true, true, false);
+        runner.notify_tx_complete(1250);
+
+        // Retry 3
+        runner.notify_signed_message_fault(true, "session error");
+        CHECK(!cmd->is_completed);
+        CHECK(cmd->retry_count == 3);
+
+        runner.tick(1300, true, true, false);
+        runner.notify_tx_complete(1350);
+
+        // 4th session error exceeds max_retries -> fails
+        runner.notify_signed_message_fault(true, "session error");
+        CHECK(cmd->is_completed);
+        CHECK(!cmd->is_success);
+        CHECK(cmd->terminal_reason == TerminalReason::AuthenticationFailed);
+        CHECK(cmd->error_message == "session error; max retries exceeded");
+    }
+
+    // N1/N2: VCSEC commands run even while vehicle is asleep
+    {
+        CommandRunner runner;
+        runner.vcsec_session().set_established({1}, 10, 1000);
+        runner.enqueue("VCSEC Health Poll", BleDomain::VehicleSecurity, WakePolicy::NoWakeFail, 20000, 1000);
+
+        // Tick while vehicle is ASLEEP: must NOT fail with "vehicle asleep"!
+        TxAction act = runner.tick(1000, true /* connected */, false /* awake */, true /* asleep */);
+        CHECK(act == TxAction::SendCommandPayload);
+        CommandRequest* cmd = runner.current_command();
+        CHECK(cmd->state == CommandState::Ready);
+        CHECK(!cmd->is_completed);
+    }
+}
+
+static void test_command_runner_telemetry_filter_logic() {
+    // 1. is_session_info_uuid_matching
+    {
+        const uint8_t exp[16] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16};
+        const uint8_t same[16] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16};
+        const uint8_t diff[16] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 99};
+        const uint8_t short_uuid[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+
+        // Empty/omitted UUID in response is valid (matches)
+        CHECK(tk::is_session_info_uuid_matching(nullptr, 0, exp, sizeof(exp)));
+        CHECK(tk::is_session_info_uuid_matching(same, 0, exp, sizeof(exp)));
+
+        // Matching 16-byte UUID
+        CHECK(tk::is_session_info_uuid_matching(same, sizeof(same), exp, sizeof(exp)));
+
+        // Mismatched byte in 16-byte UUID
+        CHECK(!tk::is_session_info_uuid_matching(diff, sizeof(diff), exp, sizeof(exp)));
+
+        // Mismatched length
+        CHECK(!tk::is_session_info_uuid_matching(short_uuid, sizeof(short_uuid), exp, sizeof(exp)));
+        CHECK(!tk::is_session_info_uuid_matching(same, sizeof(same), short_uuid, sizeof(short_uuid)));
+
+        // Nullptr handling with non-zero length
+        CHECK(!tk::is_session_info_uuid_matching(nullptr, 16, exp, sizeof(exp)));
+        CHECK(!tk::is_session_info_uuid_matching(same, sizeof(same), nullptr, 16));
+    }
+
+    // 2. is_command_awaiting_session_auth
+    {
+        using CS = tk::CommandState;
+        using BD = tk::BleDomain;
+
+        // Inactive / completed commands are never awaiting auth
+        CHECK(!tk::is_command_awaiting_session_auth(false, false, CS::WaitingVcsecAuth, BD::VehicleSecurity));
+        CHECK(!tk::is_command_awaiting_session_auth(true, true, CS::WaitingVcsecAuth, BD::VehicleSecurity));
+
+        // VehicleSecurity session auth gate
+        CHECK(tk::is_command_awaiting_session_auth(true, false, CS::WaitingVcsecAuth, BD::VehicleSecurity));
+        CHECK(!tk::is_command_awaiting_session_auth(true, false, CS::WaitingInfoAuth, BD::VehicleSecurity));
+        CHECK(!tk::is_command_awaiting_session_auth(true, false, CS::Idle, BD::VehicleSecurity));
+        CHECK(!tk::is_command_awaiting_session_auth(true, false, CS::Ready, BD::VehicleSecurity));
+
+        // Infotainment session auth gate
+        CHECK(tk::is_command_awaiting_session_auth(true, false, CS::WaitingInfoAuth, BD::Infotainment));
+        CHECK(!tk::is_command_awaiting_session_auth(true, false, CS::WaitingVcsecAuth, BD::Infotainment));
+        CHECK(!tk::is_command_awaiting_session_auth(true, false, CS::Idle, BD::Infotainment));
+        CHECK(!tk::is_command_awaiting_session_auth(true, false, CS::Ready, BD::Infotainment));
+
+        // None / Broadcast domain never awaits session auth
+        CHECK(!tk::is_command_awaiting_session_auth(true, false, CS::WaitingVcsecAuth, BD::None));
+        CHECK(!tk::is_command_awaiting_session_auth(true, false, CS::WaitingInfoAuth, BD::Broadcast));
+    }
+
+    // 3. is_fault_domain_matching
+    {
+        using CS = tk::CommandState;
+        using BD = tk::BleDomain;
+
+        // Broadcast faults match any command regardless of domain or state
+        CHECK(tk::is_fault_domain_matching(BD::Broadcast, BD::VehicleSecurity, CS::Ready));
+        CHECK(tk::is_fault_domain_matching(BD::Broadcast, BD::Infotainment, CS::Ready));
+        // Unknown domain (None) must NOT match any command (fail-closed)
+        CHECK(!tk::is_fault_domain_matching(BD::None, BD::VehicleSecurity, CS::Idle));
+        CHECK(!tk::is_fault_domain_matching(BD::None, BD::Infotainment, CS::Ready));
+
+        // VehicleSecurity faults match VCSEC commands in any state
+        CHECK(tk::is_fault_domain_matching(BD::VehicleSecurity, BD::VehicleSecurity, CS::Ready));
+        CHECK(tk::is_fault_domain_matching(BD::VehicleSecurity, BD::VehicleSecurity, CS::WaitingVcsecAuth));
+        CHECK(tk::is_fault_domain_matching(BD::VehicleSecurity, BD::VehicleSecurity, CS::AwaitingResponse));
+
+        // VehicleSecurity faults match Infotainment commands ONLY if in WaitingVcsecAuth
+        CHECK(tk::is_fault_domain_matching(BD::VehicleSecurity, BD::Infotainment, CS::WaitingVcsecAuth));
+        CHECK(!tk::is_fault_domain_matching(BD::VehicleSecurity, BD::Infotainment, CS::WaitingInfoAuth));
+        CHECK(!tk::is_fault_domain_matching(BD::VehicleSecurity, BD::Infotainment, CS::Ready));
+        CHECK(!tk::is_fault_domain_matching(BD::VehicleSecurity, BD::Infotainment, CS::AwaitingResponse));
+
+        // Infotainment faults match Infotainment commands only in Infotainment execution phases,
+        // and must NOT match during prerequisite VCSEC auth, wake, or idle phases
+        CHECK(tk::is_fault_domain_matching(BD::Infotainment, BD::Infotainment, CS::WaitingInfoAuth));
+        CHECK(tk::is_fault_domain_matching(BD::Infotainment, BD::Infotainment, CS::Ready));
+        CHECK(tk::is_fault_domain_matching(BD::Infotainment, BD::Infotainment, CS::AwaitingResponse));
+        CHECK(!tk::is_fault_domain_matching(BD::Infotainment, BD::Infotainment, CS::WaitingVcsecAuth));
+        CHECK(!tk::is_fault_domain_matching(BD::Infotainment, BD::Infotainment, CS::WaitingWake));
+        CHECK(!tk::is_fault_domain_matching(BD::Infotainment, BD::Infotainment, CS::Idle));
+        CHECK(!tk::is_fault_domain_matching(BD::Infotainment, BD::VehicleSecurity, CS::Ready));
+        CHECK(!tk::is_fault_domain_matching(BD::Infotainment, BD::VehicleSecurity, CS::WaitingVcsecAuth));
+    }
+
+    // 4. evaluate_vcsec_operation_status
+    {
+        auto d_ok = tk::evaluate_vcsec_operation_status(0);
+        CHECK(d_ok.action == tk::VcsecOpStatusAction::CompleteOk);
+        CHECK(d_ok.is_ok);
+        CHECK(std::string(d_ok.error_message).empty());
+
+        auto d_wait = tk::evaluate_vcsec_operation_status(1);
+        CHECK(d_wait.action == tk::VcsecOpStatusAction::Wait);
+        CHECK(!d_wait.is_ok);
+        CHECK(std::string(d_wait.error_message).empty());
+
+        auto d_err = tk::evaluate_vcsec_operation_status(2);
+        CHECK(d_err.action == tk::VcsecOpStatusAction::Error);
+        CHECK(!d_err.is_ok);
+        CHECK(std::string(d_err.error_message) == "VCSEC command failed with error status");
+
+        auto d_unknown = tk::evaluate_vcsec_operation_status(99);
+        CHECK(d_unknown.action == tk::VcsecOpStatusAction::Error);
+        CHECK(!d_unknown.is_ok);
+        CHECK(std::string(d_unknown.error_message) == "VCSEC command failed with error status");
+    }
+
+    // 5. CommandRunner wrapper methods: is_awaiting_session_auth & should_notify_signed_message_fault
+    {
+        tk::CommandRunner runner;
+        // Empty queue: neither auth query is active
+        CHECK(!runner.is_awaiting_session_auth(tk::BleDomain::VehicleSecurity));
+        CHECK(!runner.is_awaiting_session_auth(tk::BleDomain::Infotainment));
+        CHECK(!runner.should_notify_signed_message_fault(tk::BleDomain::VehicleSecurity));
+        CHECK(!runner.should_notify_signed_message_fault(tk::BleDomain::Infotainment));
+
+        // Enqueue Infotainment command: starts in WaitingVcsecAuth on tick
+        runner.enqueue("Climate", tk::BleDomain::Infotainment, tk::WakePolicy::WakeIfNeeded, 20000, 1000);
+        runner.tick(1000, true, true);
+        CHECK(runner.current_command()->state == tk::CommandState::WaitingVcsecAuth);
+
+        // While awaiting VCSEC auth:
+        CHECK(runner.is_awaiting_session_auth(tk::BleDomain::VehicleSecurity));
+        CHECK(!runner.is_awaiting_session_auth(tk::BleDomain::Infotainment));
+        CHECK(runner.should_notify_signed_message_fault(tk::BleDomain::VehicleSecurity));
+        // Infotainment faults must NOT notify command while in VCSEC auth prerequisite
+        CHECK(!runner.should_notify_signed_message_fault(tk::BleDomain::Infotainment));
+        CHECK(runner.should_notify_signed_message_fault(tk::BleDomain::Broadcast));
+
+        // VCSEC auth succeeds, advance to WaitingInfoAuth
+        runner.vcsec_session().set_established({1, 2, 3}, 1, 1000);
+        runner.current_command()->state = tk::CommandState::Idle;
+        runner.tick(1100, true, true);
+        CHECK(runner.current_command()->state == tk::CommandState::WaitingInfoAuth);
+
+        // While awaiting Infotainment auth:
+        CHECK(!runner.is_awaiting_session_auth(tk::BleDomain::VehicleSecurity));
+        CHECK(runner.is_awaiting_session_auth(tk::BleDomain::Infotainment));
+        CHECK(!runner.should_notify_signed_message_fault(tk::BleDomain::VehicleSecurity));
+        CHECK(runner.should_notify_signed_message_fault(tk::BleDomain::Infotainment));
+
+        // Infotainment auth succeeds, advance to Ready/AwaitingResponse
+        runner.info_session().set_established({4, 5, 6}, 2, 1000);
+        runner.current_command()->state = tk::CommandState::Idle;
+        runner.tick(1200, true, true);
+        runner.notify_tx_complete(1250);
+        CHECK(runner.current_command()->state == tk::CommandState::AwaitingResponse);
+
+        CHECK(!runner.is_awaiting_session_auth(tk::BleDomain::VehicleSecurity));
+        CHECK(!runner.is_awaiting_session_auth(tk::BleDomain::Infotainment));
+        CHECK(!runner.should_notify_signed_message_fault(tk::BleDomain::VehicleSecurity));
+        CHECK(runner.should_notify_signed_message_fault(tk::BleDomain::Infotainment));
+
+        // Pop / complete command -> all false
+        runner.complete_current_command(true);
+        CHECK(!runner.is_awaiting_session_auth(tk::BleDomain::Infotainment));
+        CHECK(!runner.should_notify_signed_message_fault(tk::BleDomain::Infotainment));
+    }
+}
+
+static void test_tx_wire_framing() {
+    // B1: the TX path writes the builder's frame unchanged (tk::build_ble_tx_frame) and refuses a
+    // malformed frame (tk::is_well_formed_ble_frame) — the exact helpers drive_command_runner_()
+    // calls. tesla-ble builders already emit [len_hi len_lo][RoutableMessage]; the same helpers run
+    // against the real library in test/test_tesla_ble_harness.cpp.
+    // Stand-in builder output shaped like a real RoutableMessage (field 6 to_destination first).
+    const std::vector<uint8_t> proto = {0x32, 0x02, 0x08, 0x02, 0x3a, 0x00};
+    auto prefixed_builder = [&](uint8_t* buf, size_t* len) -> int {
+        if (*len < proto.size() + 2) return -7;
+        buf[0] = static_cast<uint8_t>(proto.size() >> 8);
+        buf[1] = static_cast<uint8_t>(proto.size() & 0xFF);
+        std::memcpy(buf + 2, proto.data(), proto.size());
+        *len = proto.size() + 2;
+        return 0;
+    };
+
+    std::vector<uint8_t> wire;
+    CHECK(tk::build_ble_tx_frame(wire, tk::RxFramer::kMaxFrameLength, prefixed_builder) == 0);
+    CHECK(wire.size() == proto.size() + 2);
+    CHECK(wire[0] == 0x00 && wire[1] == proto.size());
+    CHECK(std::memcmp(wire.data() + 2, proto.data(), proto.size()) == 0);  // no extra header
+    CHECK(tk::is_well_formed_ble_frame(wire));
+
+    // The B1 regression — a second length prefix in front of the builder frame — is refused.
+    std::vector<uint8_t> doubled = {0x00, static_cast<uint8_t>(wire.size())};
+    doubled.insert(doubled.end(), wire.begin(), wire.end());
+    CHECK(!tk::is_well_formed_ble_frame(doubled));
+    // Also for inner lengths >= 256: the high byte 0x01/0x02 still decodes as field number 0.
+    for (uint8_t hi : {uint8_t{0x01}, uint8_t{0x02}}) {
+        std::vector<uint8_t> big(2 + 2 + 300, 0x00);
+        const size_t outer = big.size() - 2;
+        big[0] = static_cast<uint8_t>(outer >> 8);
+        big[1] = static_cast<uint8_t>(outer & 0xFF);
+        big[2] = hi;
+        big[3] = 0x2C;
+        CHECK(!tk::is_well_formed_ble_frame(big));
+    }
+
+    // Builder errors, empty and oversized outputs leave the buffer empty.
+    CHECK(tk::build_ble_tx_frame(wire, 4, prefixed_builder) == -7);
+    CHECK(wire.empty());
+    CHECK(tk::build_ble_tx_frame(wire, 16, [](uint8_t*, size_t* len) { *len = 0; return 0; }) == -1);
+    CHECK(wire.empty());
+    CHECK(tk::build_ble_tx_frame(wire, 16, [](uint8_t*, size_t* len) { *len = 17; return 0; }) == -1);
+    CHECK(wire.empty());
+
+    // Structural checks: the length must cover exactly the rest; the first tag needs field >= 1
+    // and a known wire type; a multi-byte tag is decoded as a varint.
+    CHECK(!tk::is_well_formed_ble_frame(nullptr, 0));
+    const uint8_t short_len[] = {0x00, 0x05, 0x32, 0x00};            // declares 5, carries 2
+    CHECK(!tk::is_well_formed_ble_frame(short_len, sizeof(short_len)));
+    const uint8_t zero_field[] = {0x00, 0x02, 0x02, 0x00};           // field 0, wire type 2
+    CHECK(!tk::is_well_formed_ble_frame(zero_field, sizeof(zero_field)));
+    const uint8_t group_wire[] = {0x00, 0x02, 0x33, 0x00};           // field 6, wire type 3
+    CHECK(!tk::is_well_formed_ble_frame(group_wire, sizeof(group_wire)));
+    const uint8_t multibyte_tag[] = {0x00, 0x03, 0x92, 0x03, 0x00};  // field 50, wire type 2
+    CHECK(tk::is_well_formed_ble_frame(multibyte_tag, sizeof(multibyte_tag)));
+    const uint8_t truncated_tag[] = {0x00, 0x01, 0x92};              // continuation, no next byte
+    CHECK(!tk::is_well_formed_ble_frame(truncated_tag, sizeof(truncated_tag)));
+}
+
+namespace {
+// Stand-in for the tesla-ble Client key contract used by tk::regenerate_private_key(): a PEM
+// export needs `pem_len` bytes (mbedtls_pk_write_key_pem fails on a smaller buffer).
+struct FakeKeyClient {
+    std::string key;            // current in-memory key ("" = none)
+    std::string next = "NEW";   // key produced by the next create_private_key()
+    size_t pem_len = 228;       // exported length including the NUL
+    bool fail_create = false;
+    bool fail_export_after_create = false;
+    bool created = false;
+    int loads = 0;
+
+    bool has_private_key() const { return !key.empty(); }
+    int get_private_key(uint8_t* buf, size_t cap, size_t* out) {
+        if (key.empty() || (created && fail_export_after_create)) return -1;
+        if (cap < pem_len) return -2;
+        std::memset(buf, 0, pem_len);
+        std::memcpy(buf, key.data(), std::min(key.size(), pem_len - 1));
+        *out = pem_len;
+        return 0;
+    }
+    int create_private_key() {
+        if (fail_create) return -3;
+        key = next;
+        created = true;
+        return 0;
+    }
+    int load_private_key(const uint8_t* buf, size_t len) {
+        ++loads;
+        const char* text = reinterpret_cast<const char*>(buf);
+        key.assign(text, static_cast<size_t>(std::find(text, text + len, '\0') - text));
+        return 0;
+    }
+};
+}  // namespace
+
+static void test_key_regeneration_contract() {
+    // B2: tk::regenerate_private_key() is the transaction behind regenerate_key_native_(); the
+    // real-library run is test/test_tesla_ble_harness.cpp. Branches here use a fake client.
+    using R = tk::KeyRegenerationResult;
+    CHECK(tk::kPrivateKeyPemCapacity >= 228);  // P-256 SEC1 PEM incl. NUL
+    std::string stored;
+    bool fail_persist = false;
+    auto persist = [&](const std::vector<uint8_t>& pem) {
+        if (fail_persist) return false;
+        stored.assign(reinterpret_cast<const char*>(pem.data()));
+        return true;
+    };
+
+    {   // success: RAM key and storage both hold the new key
+        FakeKeyClient c;
+        c.key = "OLD";
+        stored = "OLD";
+        CHECK(tk::regenerate_private_key(c, persist) == R::Committed);
+        CHECK(c.key == "NEW" && stored == "NEW" && c.loads == 0);
+    }
+    {   // persistence failure: previous key restored in RAM, storage untouched
+        FakeKeyClient c;
+        c.key = "OLD";
+        stored = "OLD";
+        fail_persist = true;
+        CHECK(tk::regenerate_private_key(c, persist) == R::PersistFailed);
+        CHECK(c.key == "OLD" && stored == "OLD" && c.loads == 1);
+        fail_persist = false;
+    }
+    {   // the B2 defect (32-byte export buffer) fails closed before any mutation
+        FakeKeyClient c;
+        c.key = "OLD";
+        CHECK(tk::regenerate_private_key(c, persist, 32) == R::ExportExistingFailed);
+        CHECK(c.key == "OLD" && !c.created);
+    }
+    {   // creation failure keeps the previous key
+        FakeKeyClient c;
+        c.key = "OLD";
+        c.fail_create = true;
+        CHECK(tk::regenerate_private_key(c, persist) == R::CreateFailed);
+        CHECK(c.key == "OLD");
+    }
+    {   // export of the new key fails: previous key restored
+        FakeKeyClient c;
+        c.key = "OLD";
+        c.fail_export_after_create = true;
+        CHECK(tk::regenerate_private_key(c, persist) == R::ExportNewFailed);
+        CHECK(c.key == "OLD" && c.loads == 1);
+    }
+    {   // first boot (no key yet): commits the new key
+        FakeKeyClient c;
+        stored.clear();
+        CHECK(tk::regenerate_private_key(c, persist) == R::Committed);
+        CHECK(c.key == "NEW" && stored == "NEW");
+    }
+    {   // first boot + persistence failure: nothing to restore; caller treats it as CommitUnknown
+        FakeKeyClient c;
+        stored.clear();
+        fail_persist = true;
+        CHECK(tk::regenerate_private_key(c, persist) == R::PersistFailed);
+        CHECK(c.key == "NEW" && stored.empty() && c.loads == 0);
+        fail_persist = false;
+    }
+}
+
+static void test_telemetry_dispatch_routing_order() {
+    // H1: Responses must be routed before delivering telemetry.
+    // A CarServer response with a foreign (unmatched) request UUID must NOT invoke telemetry callbacks.
+    tk::CommandRunner runner;
+    runner.vcsec_session().set_established({1}, 10, 1000);
+    runner.info_session().set_established({2}, 20, 1000);
+
+    tk::BleUuid our_uuid{}; our_uuid.fill(0x11);
+    uint32_t cmd_id = runner.enqueue("Verify Amps", tk::BleDomain::Infotainment,
+                                     tk::WakePolicy::WakeIfNeeded, 20000, 1000, our_uuid);
+    CHECK(cmd_id > 0);
+    runner.tick(1000, true, true, false);
+    runner.notify_tx_complete(1050);
+
+    bool callback_invoked = false;
+    auto charge_state_callback = [&]() { callback_invoked = true; };
+
+    // Simulate arrival of response with FOREIGN request UUID:
+    tk::BleUuid foreign_uuid{}; foreign_uuid.fill(0xAB);
+    auto outcome = runner.handle_response(tk::BleDomain::Infotainment, foreign_uuid.data(), foreign_uuid.size(),
+                                          true, 100, true, "");
+    CHECK(!outcome.routed);
+    CHECK(outcome.drop_reason == tk::DispatchDropReason::Unmatched);
+
+    // Because outcome was not routed to our request, callback is NOT invoked
+    if (outcome.routed) {
+        charge_state_callback();
+    }
+    CHECK(!callback_invoked);
+
+    // Simulate arrival of response with MATCHING request UUID:
+    outcome = runner.handle_response(tk::BleDomain::Infotainment, our_uuid.data(), our_uuid.size(),
+                                     true, 101, true, "");
+    CHECK(outcome.routed);
+    CHECK(outcome.drop_reason == tk::DispatchDropReason::None);
+    if (outcome.routed) {
+        charge_state_callback();
+    }
+    CHECK(callback_invoked);
 }
 
 int main() {
+    test_rx_framing();
+    test_ble_dispatcher();
+    test_session_state();
+    test_command_runner();
+    test_command_runner_link_loss_and_faults();
+    test_command_runner_telemetry_filter_logic();
+    test_tx_wire_framing();
+    test_key_regeneration_contract();
+    test_telemetry_dispatch_routing_order();
     test_vin();
     test_wifi_credentials();
     test_key_rotation();

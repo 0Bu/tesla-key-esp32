@@ -50,6 +50,52 @@ gate_feature_docs_relevant() {
   grep -Eq '^(main/|test/|sdkconfig\.defaults($|\.)|partitions\.csv$|AGENTS\.md$|\.agents/|\.github/PULL_REQUEST_TEMPLATE\.md$|tools/agent-hooks/|tools/agent-config/|docs/(index\.html|installer-bootstrap\.mjs|serial-port-release\.mjs|web-installer\.mjs|vendor/)|\.github/workflows/(build|signed-pr-preview|pr-preview-cleanup|pr-policy|bench-acceptance)\.yml$|scripts/release-relevance\.sh$)'
 }
 
+# gate_is_renovate_maintenance [files_file]
+#   Succeeds (rc=0) only when the non-empty changed-files input contains exclusively
+#   Renovate maintenance files (.github/workflows/renovate.yaml and/or .github/renovate.json).
+#   Any other file (e.g. esp-idf-toolchain.txt, main/idf_component.yml, docs/index.html,
+#   firmware logic, other workflows) fails closed (rc=1). If a path argument is provided,
+#   it reads from that file; otherwise it reads lines from stdin.
+gate_is_renovate_maintenance() {
+  local target="${1:-}" count=0 line
+  if [ -n "$target" ]; then
+    [ -f "$target" ] && [ -r "$target" ] && [ ! -L "$target" ] || return 1
+    while IFS= read -r line || [ -n "$line" ]; do
+      [ -n "$line" ] || continue
+      case "$line" in
+        .github/workflows/renovate.yaml|.github/renovate.json)
+          count=$((count + 1))
+          ;;
+        *)
+          return 1
+          ;;
+      esac
+    done < "$target"
+  else
+    while IFS= read -r line || [ -n "$line" ]; do
+      [ -n "$line" ] || continue
+      case "$line" in
+        .github/workflows/renovate.yaml|.github/renovate.json)
+          count=$((count + 1))
+          ;;
+        *)
+          return 1
+          ;;
+      esac
+    done
+  fi
+  [ "$count" -gt 0 ] || return 1
+  return 0
+}
+
+# gate_vehicle_command_relevant
+#   Reads repo-relative changed paths on stdin and succeeds when vehicle command dispatch,
+#   BLE protocol client, command registry, or pinned tesla-ble dependencies can have moved.
+gate_vehicle_command_relevant() {
+  grep -Eq '^(main/(vehicle_commands\.cpp|vehicle_ctrl\.(cpp|hpp)|vehicle_ctrl_internal\.hpp|vehicle_telemetry\.cpp|vehicle_pairing\.cpp|ble_client\.(cpp|hpp)|logic/command_registry\.hpp|idf_component\.yml)|patches/tesla-ble/|\.agents/skills/vehicle-command-audit/)'
+}
+
+
 # gate_checkbox_status <content> <key>
 #   Prints exactly one of:  "checked <sha>" | "checked" | "unchecked" | "absent" | "ambiguous"
 #   A match is one complete canonical Markdown task-list line. Its leading checkbox is followed by
@@ -60,7 +106,7 @@ gate_feature_docs_relevant() {
 #   inspected.
 gate_checkbox_status() {
   local content="$1" key="$2"
-  printf '%s' "$key" | grep -Eq '^(skill-audit|project-review|feature-docs|pr-hygiene)$' \
+  printf '%s' "$key" | grep -Eq '^(skill-audit|project-review|feature-docs|pr-hygiene|vehicle-command-audit)$' \
     || { printf 'absent\n'; return 0; }
   printf '%s' "$content" | python3 -c '
 import re, sys
@@ -71,6 +117,7 @@ spec = {
     "project-review": ("clean", "merge gate"),
     "feature-docs": ("synced", "merge gate"),
     "pr-hygiene": ("clean", "content gate"),
+    "vehicle-command-audit": ("clean", "merge gate"),
 }[key]
 fence_char = None
 fence_length = 0

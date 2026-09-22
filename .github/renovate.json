@@ -3,7 +3,7 @@
   "customManagers": [
     {
       "customType": "regex",
-      "description": "Bump the yoziru/tesla-ble git dependency pinned in idf_component.yml",
+      "description": "Bump the yoziru/tesla-ble git dependency pinned in idf_component.yml. Upgrades across the 5.x line require manual review and patch rebase per #304; closed PR #303 was superseded by #305 and remote branch deleted so future tags (> v5.2.0) are proposed as fresh PRs.",
       "managerFilePatterns": ["/^main/idf_component\\.yml$/"],
       "matchStrings": [
         "git:\\s*\"https://github\\.com/yoziru/tesla-ble\\.git\"\\s+version:\\s*\"(?<currentValue>v[0-9]+\\.[0-9]+\\.[0-9]+)\""
@@ -48,6 +48,14 @@
       "allowedVersions": "<6.0.0",
       "prBodyNotes": [
         "⚠️ **Before merging — verify `yoziru/tesla-ble` compatibility.** Renovate intentionally restricts ESP-IDF updates to 5.x. Do not widen `allowedVersions` as a routine dependency bump: IDF 6 requires the deliberate Mbed TLS 4 / PSA Crypto migration tracked in #61 and docs/adr/0002-idf6-mbedtls4-crypto-seam.md."
+      ]
+    },
+    {
+      "description": "Only renovatebot/github-action in renovate.yaml is managed by Renovate; build and release workflow actions are pinned security boundaries audited in scripts/check-workflow-policy.py.",
+      "matchManagers": ["github-actions"],
+      "enabled": false,
+      "matchDepNames": [
+        "!renovatebot/github-action"
       ]
     }
   ]

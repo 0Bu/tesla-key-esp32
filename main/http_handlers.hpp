@@ -34,9 +34,7 @@ extern NvsStorageAdapter* g_config;
 // registration impossible by construction.
 struct GuardedReq { httpd_req_t* req; };
 
-// Defined in main.cpp: true once SNTP has synced this boot. The browser /set_time
-// fallback only applies the client clock while this is false (NTP is authoritative).
-bool clock_synced_via_ntp();
+#include "time_sync.hpp"
 
 // Link state, the active netif and the WiFi-only readings all come from the transport seam
 // (net.hpp): tk::net_is_up(), tk::net_active_netif(), tk::net_wifi_signal(). Handlers must not
@@ -56,6 +54,18 @@ cJSON* make_response(bool result, const char* command, const char* vin, const ch
 // MUST use this form so empty/failed/OOM input can never be mistaken for an explicit JSON "" that
 // disables a service.  `data` is malloc-owned on Ok and must be freed by the caller.
 tk::BodyReadResult read_body_result(httpd_req_t* req);
+
+// Buffer size allocated for HTTP query strings.
+inline constexpr size_t kQueryBufBytes = 128;
+#if defined(CONFIG_HTTPD_MAX_URI_LEN)
+static_assert(kQueryBufBytes <= CONFIG_HTTPD_MAX_URI_LEN,
+              "kQueryBufBytes must not exceed CONFIG_HTTPD_MAX_URI_LEN");
+#endif
+
+// Validates that if a query string is present on req, it fits within kQueryBufBytes (128 bytes)
+// and can be retrieved without truncation. Returns ESP_OK if no query or valid query,
+// or ESP_ERR_HTTPD_RESULT_TRUNC on overflow.
+esp_err_t validate_query_string(httpd_req_t* req);
 
 // True only if query parameter `key` is present AND equals `want` exactly. Replaces
 // strstr(uri,"force=1")-style checks, which also fire on "force=10", "xforce=1", or the

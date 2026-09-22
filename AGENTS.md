@@ -40,13 +40,15 @@ task touches them:
 - [`esp-idf-toolchain.txt`](esp-idf-toolchain.txt) pins ESP-IDF **v5.5.5** and its container digest.
   Use the repository wrappers; do not substitute a host IDF or move to ESP-IDF 6 as part of an
   unrelated task.
-- [`main/idf_component.yml`](main/idf_component.yml) pins `yoziru/tesla-ble` **v5.1.3**.
+- [`main/idf_component.yml`](main/idf_component.yml) pins `yoziru/tesla-ble` **v5.2.0**.
   [`patches/tesla-ble/`](patches/tesla-ble/) is an ordered, hash-checked, fail-closed local series:
-  the anti-replay response-counter fix, key-regeneration/persistence API adaptation, bounded
-  RX-framing recovery logging, unused Parental Controls trim, and signer.go session-counter
-  replay alignment are current contracts, not obsolete C5 workarounds. Do not edit the
-  pin, patch order, wire behavior, key compatibility or log-flood throttle without a separately
+  unused Parental Controls trim and signer.go session-counter replay alignment (earlier patches
+  0001-0003 are retired in favor of native `main/logic/` orchestration). Do not edit the
+  pin, patch order, wire behavior, key compatibility or size trims without a separately
   authorized dependency migration and protocol-vector review.
+- `teslamotors/vehicle-command` is the normative reference for vehicle BLE protocol behaviour (see
+  [`docs/adr/0005-tesla-ble-seam.md`](docs/adr/0005-tesla-ble-seam.md)). Every departure from upstream
+  or reference must be documented in ADR-0005 and recorded in its departure list. No silent workarounds.
 - ESP-IDF 6/Mbed TLS 4/PSA work is intentionally separate. Preserve P-256 ECDH byte order,
   `SHA1(shared-secret)[:16]`, HMAC/session derivation, AES-GCM nonce/AAD/tag layout, Tesla key-ID
   derivation and PEM/NVS key reuse. See
@@ -146,9 +148,9 @@ ESP HTTP, NimBLE, NVS, OTA or FreeRTOS shells.
 - A live read is not automatically harmless: connecting or requesting stale data can wake the
   vehicle. Default diagnosis uses already-collected/local evidence. Do not contact a vehicle,
   evcc endpoint or device unless the user explicitly authorizes the live boundary and target.
-- Live evcc end-to-end checks are host/cluster operations provided by the global
-  `$tesla-key-e2e-evcc` skill. They do not belong to this versioned project skill set and retain
-  their own explicit read, command, and charge-toggle authorization boundaries.
+- Live evcc end-to-end checks are host/cluster operations provided by `scripts/e2e_evcc.sh` (and
+  orchestrated by `$deploy`). They exercise the live pod-to-vehicle path and retain their own
+  explicit read, command, and charge-toggle authorization boundaries.
 - Never send a vehicle command, pair, regenerate keys, change VIN, modify charge current, wake the
   car, reboot the board, flash, OTA or clear a crash/NVS artifact from a review or diagnosis task.
 - Background telemetry, display and status code must consume cached state and must not introduce a
@@ -183,10 +185,15 @@ configuration and subagent manifests in `.agents/`.
   merge. `$pr-hygiene` is required at PR creation, every push, and every merge — it screens the PR
   title/body, commit messages and touched documentation for personal/private information (LAN IPs,
   MAC addresses, VINs, WiFi network names, hostnames, emails) and for content not written in
-  English; it is not a subset of `$project-review` or `$skill-audit`. `$feature-docs` is
-  conditionally required when the cataloged feature surface changes, including the PR-policy and
-  bench-acceptance workflows. Records are bound to the exact current PR head and become stale after
-  any push.
+  English; it is not a subset of `$project-review` or `$skill-audit`. Automated Renovate
+  maintenance PRs whose diff is strictly limited to `.github/workflows/renovate.yaml` or
+  `.github/renovate.json` (`gate_is_renovate_maintenance`) are exempt from manual gate records
+  at merge/check. `$feature-docs` is conditionally required when the cataloged feature surface
+  changes, including the PR-policy and bench-acceptance workflows. `$vehicle-command-audit` is
+  conditionally required when vehicle-command/BLE paths change (`main/vehicle_*`, `main/ble_client.*`,
+  `main/logic/command_registry.hpp`, `patches/tesla-ble/`, `main/idf_component.yml`). Records are
+  bound to the exact current PR head and become stale after any push.
+
 - Reviewers report actionable findings with path/line, cause, impact and evidence. A green build is
   not review proof. Resolve P1/P2 findings and rerun the affected independent review after edits.
 - The only accepted merge shape is:

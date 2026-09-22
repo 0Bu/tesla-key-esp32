@@ -52,6 +52,7 @@ ota_signing_key.pem
 
 # Mock build variant
 /build_mock/
+/build_harness/
 
 # GitHub Pages site assembled by scripts/build-pages.sh
 /_site/

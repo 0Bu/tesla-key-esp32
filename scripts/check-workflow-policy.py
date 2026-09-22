@@ -137,9 +137,7 @@ EXPECTED_ACTIONS = {
     ("pr-preview-cleanup.yml", "reconcile-stale"): (
         "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
     ),
-    ("renovate.yaml", "renovate"): (
-        "renovatebot/github-action@37beffda261423addd537c33f2d126df7f6ffbab",
-    ),
+    # Note: ("renovate.yaml", "renovate") is dynamic: validated in validate() against PINNED_ACTION.
     ("signed-pr-preview.yml", "validate"): (),
     ("signed-pr-preview.yml", "trusted-rebuild"): (
         "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
@@ -176,9 +174,9 @@ SIGNING_ENVIRONMENT_JOBS = {
 # reviewed allowlists: step order plus every name/uses/with/env/if/run byte is pinned.  Semantic
 # checks below keep failures explanatory; this final digest closes gaps in the narrow scanner.
 EXPECTED_PRIVILEGED_JOB_SHA256 = {
-    ("build.yml", "publish"): "fa8acc9cd7caebc1ed0de9dd6560108d8e0cc2321e99982ada7ee769623f707b",
-    ("build.yml", "deploy"): "cf1d70d6cf11600e3940ff58983a7101b75b191b8cdf10b8cfaebf60b20f2092",
-    ("signed-pr-preview.yml", "sign-preview"): "24b664bb2ec5aa6220bdca95568781b8c25e8d2ff53c617956ee90ca07c4b22d",
+    ("build.yml", "publish"): "951df7adbd88171956b416269199705ea3abe151a10969f40cad2605d0283a24",
+    ("build.yml", "deploy"): "d6e78adf09157e537268ffcfe341eb5425ff2d0e655921973c4ed048710d8d04",
+    ("signed-pr-preview.yml", "sign-preview"): "18d34f6a9aae2add8b5af9cb69c3af3c391205cb2b795e45f62a150674cce4a7",
 }
 TRUSTED_DEFAULT_ENV = "TRUSTED_DEFAULT_SHA: ${{ github.sha }}"
 TRUSTED_DEFAULT_FETCH = "git fetch --no-tags origin"
@@ -353,10 +351,19 @@ def validate(root: Path) -> None:
                 f"{name}:{job_name}: permissions must match the exact reviewed inventory: "
                 f"{EXPECTED_JOB_PERMISSIONS[key]}",
             )
-            require(
-                tuple(ACTION.findall(job)) == EXPECTED_ACTIONS[key],
-                f"{name}:{job_name}: action inventory drift",
-            )
+            if key == ("renovate.yaml", "renovate"):
+                actions = tuple(ACTION.findall(job))
+                require(
+                    len(actions) == 1
+                    and actions[0].startswith("renovatebot/github-action@")
+                    and PINNED_ACTION.fullmatch(actions[0]) is not None,
+                    f"{name}:{job_name}: action inventory drift",
+                )
+            else:
+                require(
+                    tuple(ACTION.findall(job)) == EXPECTED_ACTIONS[key],
+                    f"{name}:{job_name}: action inventory drift",
+                )
             actual_secrets = Counter(re.findall(r"\bsecrets\.([A-Za-z_][A-Za-z0-9_]*)", job))
             require(
                 actual_secrets == EXPECTED_SECRET_REFERENCES.get(key, Counter()),
@@ -1109,6 +1116,13 @@ def replace_once(path: Path, old: str, new: str) -> None:
 
 def self_test(root: Path) -> None:
     validate(root)
+    renovate_workflow = (root / ".github/workflows/renovate.yaml").read_text(encoding="utf-8")
+    renovate_actions = ACTION.findall(renovate_workflow)
+    require(
+        len(renovate_actions) == 1 and renovate_actions[0].startswith("renovatebot/github-action@"),
+        "renovate.yaml: expected single renovatebot/github-action action",
+    )
+    current_renovate_action = renovate_actions[0]
     mutations = [
         ("action-pin", "build.yml", "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
          "actions/checkout@main", "40-hex"),
@@ -1120,8 +1134,19 @@ def self_test(root: Path) -> None:
          "espressif/esp-idf-ci-action@e6f5c74232b1ccd4c97ed641f1e48553853f1fd5",
          "espressif/esp-idf-ci-action@0123456789abcdef0123456789abcdef01234567",
          "action inventory drift"),
+        ("renovate-action-pin", "renovate.yaml",
+         current_renovate_action,
+         "renovatebot/github-action@main", "40-hex"),
+        ("renovate-action-owner", "renovate.yaml",
+         current_renovate_action,
+         current_renovate_action.replace("renovatebot/", "attacker/", 1),
+         "action inventory drift"),
+        ("renovate-extra-action", "renovate.yaml",
+         "          token: ${{ secrets.RENOVATE_TOKEN }}\n",
+         "          token: ${{ secrets.RENOVATE_TOKEN }}\n      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1\n",
+         "action inventory drift"),
         ("extra-build-job", "build.yml", "jobs:\n",
-         "jobs:\n  exfiltrate:\n    runs-on: ubuntu-latest\n"
+         "jobs:\n  exfiltrate:\n    runs-on: ubuntu-26.04\n"
          "    timeout-minutes: 1\n    permissions:\n      contents: write\n"
          "    steps:\n      - run: true\n",
          "job inventory drift"),
@@ -1153,8 +1178,8 @@ def self_test(root: Path) -> None:
          "      contents: read\n    environment: firmware-signing\n    steps:\n",
          "protected Environment inventory drift"),
         ("unprivileged-write", "build.yml",
-         "  logic-test:\n    runs-on: ubuntu-latest\n    timeout-minutes: 10\n    permissions:\n      contents: read",
-         "  logic-test:\n    runs-on: ubuntu-latest\n    timeout-minutes: 10\n    permissions:\n      contents: write",
+         "  logic-test:\n    runs-on: ubuntu-26.04\n    timeout-minutes: 10\n    permissions:\n      contents: read",
+         "  logic-test:\n    runs-on: ubuntu-26.04\n    timeout-minutes: 10\n    permissions:\n      contents: write",
          "permissions must match the exact reviewed inventory"),
         ("unprivileged-arbitrary-write", "build.yml",
          "      contents: read\n    steps:\n",
@@ -1454,7 +1479,7 @@ def self_test(root: Path) -> None:
          "      - name: Materialize inert report input\n",
          "step inventory must be exact"),
         ("bench-extra-job", "bench-acceptance.yml", "jobs:\n",
-         "jobs:\n  contact-device:\n    runs-on: ubuntu-latest\n    timeout-minutes: 1\n    steps:\n      - run: true\n",
+         "jobs:\n  contact-device:\n    runs-on: ubuntu-26.04\n    timeout-minutes: 1\n    steps:\n      - run: true\n",
          "job inventory drift"),
         ("bench-local-producer", "bench-acceptance.yml", "      report-json:\n",
          "      report-body:\n", "report-json dispatch input"),
@@ -1502,6 +1527,16 @@ def self_test(root: Path) -> None:
             else:
                 raise PolicyError(f"self-test accepted mutation: {name}")
 
+    with tempfile.TemporaryDirectory(prefix="workflow-policy-renovate-bump-") as directory:
+        fixture = Path(directory)
+        shutil.copytree(root / ".github/workflows", fixture / ".github/workflows")
+        replace_once(
+            fixture / ".github/workflows/renovate.yaml",
+            current_renovate_action,
+            "renovatebot/github-action@0123456789abcdef0123456789abcdef01234567",
+        )
+        validate(fixture)
+
     # Move the real local Pages assembly/bind block after the real Actions artifact upload.  This
     # is an order mutation, not a deleted-token canary: all stages remain present and only their
     # external-publication ordering must make the policy red.
@@ -1538,7 +1573,7 @@ def self_test(root: Path) -> None:
         shutil.copytree(root / ".github/workflows", fixture / ".github/workflows")
         (fixture / ".github/workflows/exfiltrate.yml").write_text(
             "name: exfiltrate\non: push\npermissions:\n  contents: write\njobs:\n"
-            "  exfiltrate:\n    runs-on: ubuntu-latest\n    timeout-minutes: 1\n"
+            "  exfiltrate:\n    runs-on: ubuntu-26.04\n    timeout-minutes: 1\n"
             "    permissions:\n      contents: write\n    environment: firmware-signing\n"
             "    steps:\n      - run: true\n        env:\n"
             "          LEAK: ${{ secrets.OTA_SIGNING_KEY }}\n",

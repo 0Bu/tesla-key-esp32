@@ -36,18 +36,16 @@ keys; it no longer truncates an unknown key. This includes the pinned tesla-ble 
 NVS calls in every shipped source/header/inline fragment and the operator-facing retention mirror is
 in `docs/README.md`.
 
-**BLE response anti-replay:** the pinned `yoziru/tesla-ble` v5.1.3 detects an invalid
-CarServer response counter but, upstream, still dispatches that response to telemetry callbacks
-and the command FIFO. The repository applies `patches/tesla-ble/` to every target at build time
-so a rejected counter is logged and dropped before it can update state or complete a newer
-command. Charging-current writes additionally require a fresh exact `ChargeState` readback;
+**BLE response anti-replay and deterministic framing:** The native orchestration layer
+(`main/logic/ble_dispatcher.hpp`, `main/logic/rx_framing.hpp`, `main/logic/command_runner.hpp`)
+implements deterministic 2-byte BE length prefix framing without heuristic recovery loops,
+and routes every CarServer response strictly by Request UUID before delivering telemetry callbacks.
+Responses with replayed counters or foreign UUIDs are dropped fail-closed.
+Charging-current writes additionally require a fresh exact `ChargeState` readback;
 an action acknowledgement alone is not reported as success.
-All six RX framing/recovery callsites also use the third patch's rate-limited helper: warning and
-error clocks are independent, the shared suppression count saturates rather than wrapping, and
-only the severe-corruption path explicitly selects error severity.
 `test/tesla_protocol_vectors.test.mjs` independently pins the public VIN-advertisement vector,
 P-256 ECDH byte order, `SHA1(shared-secret)[:16]`, the `session info` HMAC label, AES-GCM
-metadata/AAD/nonce/tag layout and all five local patch invariants, including signer.go session-counter
+metadata/AAD/nonce/tag layout and local patch invariants, including signer.go session-counter
 replay alignment. It uses public test keys only and never reads device or vehicle identity material.
 
 ## Current device state (factory ESP32-S3)
@@ -100,7 +98,11 @@ whose authority differs from `Host`, whose `Host` is neither the device name nor
 or whose `Sec-Fetch-Site` is `cross-site`, receives `403` before route dispatch. Binding `Host` to
 a device-owned authority also closes the usual DNS-rebinding bypass where attacker-controlled
 `Host` and `Origin` match. The gate covers every POST plus the legacy state-changing GET forms
-`/ota/check`, `/diag?clear=1`, `/diag?verbose=0|1` and `/coredump?clear=1`. Same-origin UI requests
+`/ota/check`, `/diag?clear=1`, `/diag?verbose=0|1` and `/coredump?clear=1`. Those query **keys are
+matched case-insensitively**, because `esp_http_server` matches them that way when the handler
+reads them: `?CLEAR=1` is the same request as `?clear=1` and is gated identically. The **values**
+stay exact — ESP-IDF copies them verbatim, with no percent-decoding — so `?clear=%31` is not
+`?clear=1` on either side. Same-origin UI requests
 continue to work, and headerless clients such as evcc and curl remain compatible. If either
 `Origin` or `Sec-Fetch-Site` is present, the device-owned `Host` check applies; this covers
 same-origin browser GETs that legitimately omit `Origin`. This is **not authentication**: a raw

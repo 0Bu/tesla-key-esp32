@@ -42,7 +42,10 @@ that separate authority through the appropriate workflow.
 1. **Read the diff.** `git diff origin/main...HEAD --stat`, then the files that matter.
 
 2. **Decide whether a technical feature moved.** It did if the change:
-   - adds/removes an ESP-IDF component (`main/idf_component.yml`, `REQUIRES` in `main/CMakeLists.txt`)
+   - adds/removes or upgrades an ESP-IDF component (`main/idf_component.yml`, `REQUIRES` in
+     `main/CMakeLists.txt`) that introduces observable behavioral changes, altered error/status
+     handling (e.g. command idempotency via `already_set`), new timeout/failure modes, or modified
+     wire-level dispatch rules (inspect upstream commit diff `git diff <old>..<new>` to identify such changes)
    - adds/changes an `sdkconfig.defaults*` capability (watchdogs, coredump, security, TLS, PSRAM…)
    - adds/changes an HTTP route, an OTA rule, a security mechanism, a network behaviour or a
      diagnostic surface

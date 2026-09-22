@@ -112,6 +112,21 @@ static void test_example() {
 // …and add `test_example();` inside main().
 ```
 
+### 3a. State machines, timers, and long-term quiescence
+
+When implementing or modifying state machines with retries, backoffs, freshness timers, or edge triggers (such as `wake_poll`, reconnect watchdogs, or sleep arbitration):
+- Do not only test individual state transitions and edge triggers (Reboot, Wake, Timeout, Error).
+- Write multi-cycle simulation tests that advance simulated time over multiple intervals (e.g. 5–15 minutes) under **steady-state conditions** (e.g. vehicle continuously awake with active window closed and fresh cache).
+- Explicitly assert **quiescence**: verify that the state machine does not repeatedly re-trigger actions (such as recurring 60s poll loops) when inputs remain invariant.
+- Test the interaction when multiple timers or freshness gates coexist (e.g. cache freshness expiry vs retry backoff intervals).
+
+### 3b. Register the unit in `test/logic_test_ownership.json`
+
+Every pure-logic header in `main/logic/` must be registered in
+[`test/logic_test_ownership.json`](../../../test/logic_test_ownership.json) with its test file and
+evidence token (e.g. `"test": "test/test_logic.cpp", "evidence": "test_<name>("`).
+`scripts/repo-lint.sh` enforces this mapping offline; omitting it fails CI and pre-commit checks.
+
 ### 4. Run the mock build — it must print `OK`
 
 ```bash

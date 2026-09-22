@@ -51,6 +51,9 @@ Work in this order—it is a **single read-only pass**: enumerate → check → 
    safe host checks. Never contact a live device/vehicle or perform a mutation to prove an audit
    claim. Local tests that create ignored build output run only when the review scope requests
    them and are reported separately from CI/hardware evidence.
+   Explicitly cross-check that any external dependency version or commit cited across skills or
+   reviewer agents (in particular `yoziru/tesla-ble` in `$vehicle-command-audit`, `$project-review`,
+   `$skill-audit`, and `.codex/agents/*.toml`) strictly agrees with the active pin in `main/idf_component.yml`.
 4. **Report, do not correct.** Every canonical skill and reviewer gets a ✓ or a
    `SKILL-DRIFT` finding with the exact proposed change. An audit request never authorizes applying
    that proposal.
@@ -104,7 +107,7 @@ the authority for the per-sibling drift check; `$project-review` defers the mech
   USB gets only a short bounded boot/reachability retry, never that OTA probation wait.
 - **`$vehicle-command-audit`** — compares the firmware against upstream `teslamotors/vehicle-command`,
   gated by what `yoziru/tesla-ble` can do. Verify the tesla-ble **pin** in its source map
-  (`v5.1.3`) still matches `main/idf_component.yml`, every repository-owned patch under
+  (`v5.2.0`) still matches `main/idf_component.yml`, every repository-owned patch under
   `patches/tesla-ble/` is applied lexically/idempotently/fail-closed, and the complete patch series
   applies through root CMake to the one materialised managed-component tree; its upstream paths resolve
   (e.g. `pkg/vehicle/charge.go`), and its "worked findings" don't assert drift already fixed.
@@ -113,6 +116,11 @@ the authority for the per-sibling drift check; `$project-review` defers the mech
   (`.github/workflows/build.yml`), the `stop-logic-tests` handler in
   `tools/agent-hooks/agent_hook.py` wired by `.agents/hooks.json`,
   the `CHECK`/`CHECK_STR`/`CHECK_NEAR` macro set, and the `static_assert` lock pattern.
+- **`$mock-test`** — fast host-side logic, mock, and sanitizer test runner. Verify against
+  `scripts/run-fast-tests.sh` (`--logic`, `--nvs`, `--boundary`, `--sanitizers`, `--all`),
+  `scripts/run-mock-tests.sh` (host suite, parity checks, `--require-all` CI mode), and
+  `scripts/run-sanitizer-tests.sh` (Linux ASan/UBSan/LSan tripwires). It is read-only and
+  reports host test evidence distinct from IDF/Docker/hardware boundaries.
 - **`$pr-hygiene`** — screens the PR title/body, commit messages and touched documentation for
   personal/private information (`PRIVACY-LEAK`: LAN IPs, MAC addresses, VINs, WiFi network names,
   hostnames, emails) and content not written in English (`LANGUAGE`). Verify it against
