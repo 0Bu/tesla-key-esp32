@@ -127,7 +127,9 @@ inline bool is_command_awaiting_session_auth(bool has_active_command, bool is_co
 // Evaluates whether a signed message fault domain matches an in-flight command.
 // Signed message faults do not carry request UUIDs and are filtered by domain.
 // Broadcast faults match any command; VehicleSecurity faults match VCSEC commands
-// or commands awaiting VCSEC auth; Infotainment faults match Infotainment commands.
+// or commands awaiting VCSEC auth; Infotainment faults match Infotainment commands
+// in their Infotainment execution phases (WaitingInfoAuth, Ready, AwaitingResponse)
+// and must NOT match during prerequisite VCSEC auth or Wake phases.
 inline bool is_fault_domain_matching(BleDomain fault_domain, BleDomain cmd_domain, CommandState cmd_state) noexcept {
     if (fault_domain == BleDomain::Broadcast || fault_domain == BleDomain::None) {
         return true;
@@ -137,7 +139,10 @@ inline bool is_fault_domain_matching(BleDomain fault_domain, BleDomain cmd_domai
                (cmd_state == CommandState::WaitingVcsecAuth);
     }
     if (fault_domain == BleDomain::Infotainment) {
-        return (cmd_domain == BleDomain::Infotainment);
+        return (cmd_domain == BleDomain::Infotainment) &&
+               (cmd_state == CommandState::WaitingInfoAuth ||
+                cmd_state == CommandState::Ready ||
+                cmd_state == CommandState::AwaitingResponse);
     }
     return false;
 }

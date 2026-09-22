@@ -6594,9 +6594,14 @@ static void test_command_runner_telemetry_filter_logic() {
         CHECK(!tk::is_fault_domain_matching(BD::VehicleSecurity, BD::Infotainment, CS::Ready));
         CHECK(!tk::is_fault_domain_matching(BD::VehicleSecurity, BD::Infotainment, CS::AwaitingResponse));
 
-        // Infotainment faults match Infotainment commands, but not VehicleSecurity commands
+        // Infotainment faults match Infotainment commands only in Infotainment execution phases,
+        // and must NOT match during prerequisite VCSEC auth, wake, or idle phases
+        CHECK(tk::is_fault_domain_matching(BD::Infotainment, BD::Infotainment, CS::WaitingInfoAuth));
         CHECK(tk::is_fault_domain_matching(BD::Infotainment, BD::Infotainment, CS::Ready));
         CHECK(tk::is_fault_domain_matching(BD::Infotainment, BD::Infotainment, CS::AwaitingResponse));
+        CHECK(!tk::is_fault_domain_matching(BD::Infotainment, BD::Infotainment, CS::WaitingVcsecAuth));
+        CHECK(!tk::is_fault_domain_matching(BD::Infotainment, BD::Infotainment, CS::WaitingWake));
+        CHECK(!tk::is_fault_domain_matching(BD::Infotainment, BD::Infotainment, CS::Idle));
         CHECK(!tk::is_fault_domain_matching(BD::Infotainment, BD::VehicleSecurity, CS::Ready));
         CHECK(!tk::is_fault_domain_matching(BD::Infotainment, BD::VehicleSecurity, CS::WaitingVcsecAuth));
     }
@@ -6642,7 +6647,8 @@ static void test_command_runner_telemetry_filter_logic() {
         CHECK(runner.is_awaiting_session_auth(tk::BleDomain::VehicleSecurity));
         CHECK(!runner.is_awaiting_session_auth(tk::BleDomain::Infotainment));
         CHECK(runner.should_notify_signed_message_fault(tk::BleDomain::VehicleSecurity));
-        CHECK(runner.should_notify_signed_message_fault(tk::BleDomain::Infotainment));
+        // Infotainment faults must NOT notify command while in VCSEC auth prerequisite
+        CHECK(!runner.should_notify_signed_message_fault(tk::BleDomain::Infotainment));
         CHECK(runner.should_notify_signed_message_fault(tk::BleDomain::Broadcast));
 
         // VCSEC auth succeeds, advance to WaitingInfoAuth

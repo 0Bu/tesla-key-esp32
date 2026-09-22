@@ -740,7 +740,8 @@ void VehicleController::handle_signed_message_fault_(const UniversalMessage_Rout
         msg.from_destination.which_sub_destination == UniversalMessage_Destination_domain_tag) {
         err_domain = msg.from_destination.sub_destination.domain;
     } else if (cmd) {
-        err_domain = (cmd->domain == tk::BleDomain::VehicleSecurity)
+        err_domain = (cmd->domain == tk::BleDomain::VehicleSecurity ||
+                      cmd->state == tk::CommandState::WaitingVcsecAuth)
             ? UniversalMessage_Domain_DOMAIN_VEHICLE_SECURITY : UniversalMessage_Domain_DOMAIN_INFOTAINMENT;
     }
     auto fault = msg.signedMessageStatus.signed_message_fault;
