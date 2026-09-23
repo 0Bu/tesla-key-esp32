@@ -16,7 +16,7 @@ enum class BleDeferredEventKind : std::uint8_t {
 
 // LinkDown events are ordered barriers in the fixed FIFO and must be applied even when the host
 // has already published a later generation: the following LinkUp then rebuilds library state in
-// order. LinkUp/Rx may only touch the Vehicle instance for the exact current stable generation.
+// order. LinkUp/Rx may only touch the VehicleController instance for the exact current stable generation.
 inline constexpr bool ble_deferred_event_may_apply(BleDeferredEventKind kind,
                                                     std::uint32_t event_generation,
                                                     std::uint32_t current_generation) {

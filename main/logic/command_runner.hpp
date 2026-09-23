@@ -201,6 +201,9 @@ struct CommandRequest {
     bool wake_confirmed{false};
     std::string error_message{};
     TerminalReason terminal_reason{TerminalReason::None};
+    // True for commands whose transmission over BLE constitutes completion (e.g. Wake).
+    // Prerequisite transmissions (like SessionInfoRequest) do NOT complete the command.
+    bool completes_on_transmit{false};
 
     // User completion callback
     std::function<void(bool success, const std::string& err)> on_complete{nullptr};
@@ -221,7 +224,7 @@ public:
     // Reset all internal state, dispatcher, sessions, and active commands.
     // framer is optionally reset (defaults to true for standalone use/tests; pass false when
     // reset from non-loop tasks so RxFramer remains strictly single-owner on vehicle_loop).
-    void reset(bool reset_framer = true) noexcept {
+    void reset(bool reset_framer = true) {
         if (reset_framer) {
             rx_framer_.reset();
         }
@@ -247,10 +250,11 @@ public:
     }
 
     // Enqueue a new command. Returns command ID > 0 on success, or 0 if queue is full.
-    uint32_t enqueue(std::string name, BleDomain domain, WakePolicy wake_policy,
+    uint32_t enqueue(std::string_view name, BleDomain domain, WakePolicy wake_policy,
                      uint32_t timeout_ms = kDefaultCommandTimeoutMs, uint32_t now_ms = 0,
-                     BleUuid uuid = {},
-                     std::function<void(bool, const std::string&)> on_complete = nullptr) {
+                     const BleUuid& uuid = {},
+                     std::function<void(bool, const std::string&)> on_complete = nullptr,
+                     bool completes_on_transmit = false) {
         if (queue_count_ >= kMaxQueueSize) {
             return 0; // Queue full
         }
@@ -260,7 +264,7 @@ public:
         cmd = CommandRequest{};
         cmd.id = next_cmd_id_++;
         if (next_cmd_id_ == 0) next_cmd_id_ = 1;
-        cmd.name = std::move(name);
+        cmd.name = std::string(name);
         cmd.domain = domain;
         cmd.wake_policy = wake_policy;
         cmd.uuid = uuid;
@@ -270,6 +274,7 @@ public:
         cmd.on_complete = std::move(on_complete);
         cmd.state = CommandState::Idle;
         cmd.phase = CommandPhase::Queued;
+        cmd.completes_on_transmit = completes_on_transmit;
 
         queue_count_++;
         return cmd.id;
@@ -289,7 +294,7 @@ public:
     }
 
     // Cancel all commands in the queue
-    void clear() noexcept {
+    void clear() {
         while (queue_count_ > 0) {
             cancel_current(TerminalReason::Cancelled);
             pop_current();
@@ -299,7 +304,7 @@ public:
     }
 
     // Cancel currently active command
-    void cancel_current(TerminalReason reason = TerminalReason::Cancelled) noexcept {
+    void cancel_current(TerminalReason reason = TerminalReason::Cancelled) {
         CommandRequest* cmd = current_command();
         if (!cmd) return;
         if (!cmd->is_completed) {
@@ -320,7 +325,7 @@ public:
     }
 
     // Complete currently active command with outcome
-    void complete_current_command(bool success, const std::string& err = "", bool already_set = false) noexcept {
+    void complete_current_command(bool success, const std::string& err = "", bool already_set = false) {
         CommandRequest* cmd = current_command();
         if (!cmd) return;
         if (already_set || is_nominal_already_set(err)) {
@@ -529,14 +534,17 @@ public:
     }
 
     // Call after TX action was successfully transmitted over BLE
-    void notify_tx_complete(uint32_t now_ms) noexcept {
+    void notify_tx_complete(TxAction action, uint32_t now_ms) {
         CommandRequest* cmd = current_command();
         if (!cmd) return;
 
         cmd->last_tx_ms = now_ms;
-        if (cmd->name == "Wake") {
-            // Wake action has no commandStatus acknowledgement from Tesla; transmission completes it.
-            finish_command_(cmd, true, "wake transmitted", TerminalReason::Success);
+        if (cmd->completes_on_transmit) {
+            // Wake action has no commandStatus acknowledgement from Tesla; its payload transmission completes it.
+            // A prerequisite transmission (e.g. SessionInfoRequest) must NOT complete the Wake command prematurely.
+            if (action == TxAction::SendCommandPayload) {
+                finish_command_(cmd, true, "payload transmitted", TerminalReason::Success);
+            }
             return;
         }
         if (cmd->state == CommandState::Ready) {
@@ -552,8 +560,16 @@ public:
         }
     }
 
+    void notify_tx_complete(uint32_t now_ms) {
+        CommandRequest* cmd = current_command();
+        TxAction action = (cmd && cmd->state == CommandState::Ready)
+                              ? TxAction::SendCommandPayload
+                              : TxAction::None;
+        notify_tx_complete(action, now_ms);
+    }
+
     // Call if TX action transmission failed
-    void notify_tx_failed(const char* reason = "BLE write failed") noexcept {
+    void notify_tx_failed(const char* reason = "BLE write failed") {
         CommandRequest* cmd = current_command();
         if (!cmd) return;
         if (cmd->retry_count < cmd->max_retries) {
@@ -567,14 +583,10 @@ public:
     }
 
     // Notify that vehicle wake status was confirmed
-    void notify_vehicle_awake(bool awake) noexcept {
+    void notify_vehicle_awake(bool awake) {
         CommandRequest* cmd = current_command();
         if (!cmd) return;
         if (awake) {
-            if (cmd->name == "Wake") {
-                finish_command_(cmd, true, "", TerminalReason::Success);
-                return;
-            }
             if (cmd->state == CommandState::WaitingWake || cmd->phase == CommandPhase::EnsuringAwake) {
                 cmd->wake_confirmed = true;
                 // Advance to infotainment session or ready; the wake is not re-sent afterwards
@@ -584,7 +596,7 @@ public:
     }
 
     // Notify link loss: fail in-flight command immediately
-    void notify_link_lost(const char* reason = "connection lost") noexcept {
+    void notify_link_lost(const char* reason = "connection lost") {
         CommandRequest* cmd = current_command();
         if (!cmd) return;
         finish_command_(cmd, false, reason, TerminalReason::BleDisconnected);
@@ -592,7 +604,7 @@ public:
 
     // Notify signed message fault: retry if session error, otherwise fail immediately
     void notify_signed_message_fault(bool is_session_error,
-                                     const char* reason = "signed message authentication failed") noexcept {
+                                     const char* reason = "signed message authentication failed") {
         CommandRequest* cmd = current_command();
         if (!cmd) return;
         if (is_session_error) {
@@ -655,7 +667,7 @@ public:
 
 private:
     [[gnu::noinline]] void finish_command_(CommandRequest* cmd, bool success, const char* err,
-                                          TerminalReason reason) noexcept {
+                                          TerminalReason reason) {
         if (!cmd || cmd->is_completed) return;
         cmd->is_completed = true;
         cmd->is_success = success;

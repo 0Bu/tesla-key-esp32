@@ -105,6 +105,7 @@ the authority for the per-sibling drift check; `$project-review` defers the mech
   device uptime is insufficient and hidden reboots or an unconfirmed rollback cancellation must
   fail closed.
   USB gets only a short bounded boot/reachability retry, never that OTA probation wait.
+- **`$deploy`** — end-to-end delivery lifecycle (commit, push, PR creation, gate verification, canonical squash merge, GitHub Release monitoring, OTA update, and 3-tiered verification). Verify against canonical PR gate rules, standalone merge syntax, RFC 5737 doc IP addresses, and fail-closed gate verification via `scripts/stamp-pr-gates.sh`.
 - **`$vehicle-command-audit`** — compares the firmware against upstream `teslamotors/vehicle-command`,
   gated by what `yoziru/tesla-ble` can do. Verify the tesla-ble **pin** in its source map
   (`v5.2.0`) still matches `main/idf_component.yml`, every repository-owned patch under

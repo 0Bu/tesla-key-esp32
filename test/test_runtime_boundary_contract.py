@@ -334,7 +334,7 @@ REVIEWED_DELEGATED_HELPERS = {
         "syslog_send": {"sv", "find", "memcpy", "load", "xQueueSend"},
     },
     "ble_link_event_cb_": {
-        "enqueue_ble_link_event_": {"fetch_add", "store", "xQueueSend"},
+        "enqueue_ble_link_event_": {"store", "xQueueSend"},
     },
     "ble_rx_event_cb_": {
         "enqueue_ble_rx_event_": {"store", "static_cast", "data", "memcpy", "xQueueSend"},
@@ -467,7 +467,6 @@ def callback_inventory(text: str) -> set[str]:
     # These are synchronous tesla-ble std::function setters/helpers, not C ABI callback
     # boundaries. Their inline adapters are separately pinned to named helpers below.
     reviewed_cpp_callback_calls = {
-        "install_state_callbacks_",
         "set_charge_state_callback",
         "set_climate_state_callback",
         "set_closures_state_callback",

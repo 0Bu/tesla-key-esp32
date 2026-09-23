@@ -84,8 +84,6 @@
           "/COMPONENT_MAIN_DIR/syslog.cpp :: void syslog_task(void*)": 480
         },
         "CMakeFiles/__idf_main.dir/vehicle_commands.cpp.su": {
-          "/COMPONENT_MAIN_DIR/vehicle_commands.cpp :: VehicleController::CommandOutcome VehicleController::send_infotainment_locked_(const std::string&, Builder, uint32_t, WakePolicy)": 256,
-          "/COMPONENT_MAIN_DIR/vehicle_commands.cpp :: VehicleController::CommandOutcome VehicleController::send_vcsec_locked_(const std::string&, Builder, WakePolicy, uint32_t, tk::ConnectOrigin, bool, tk::CompletionTimeoutPolicy)": 272,
           "/COMPONENT_MAIN_DIR/vehicle_commands.cpp :: bool VehicleController::set_charging_amps(int, int)": 480
         },
         "CMakeFiles/__idf_main.dir/vehicle_ctrl.cpp.su": {
@@ -189,8 +187,6 @@
           "/COMPONENT_MAIN_DIR/syslog.cpp :: void syslog_task(void*)": 480
         },
         "CMakeFiles/__idf_main.dir/vehicle_commands.cpp.su": {
-          "/COMPONENT_MAIN_DIR/vehicle_commands.cpp :: VehicleController::CommandOutcome VehicleController::send_infotainment_locked_(const std::string&, Builder, uint32_t, WakePolicy)": 256,
-          "/COMPONENT_MAIN_DIR/vehicle_commands.cpp :: VehicleController::CommandOutcome VehicleController::send_vcsec_locked_(const std::string&, Builder, WakePolicy, uint32_t, tk::ConnectOrigin, bool, tk::CompletionTimeoutPolicy)": 272,
           "/COMPONENT_MAIN_DIR/vehicle_commands.cpp :: bool VehicleController::set_charging_amps(int, int)": 480
         },
         "CMakeFiles/__idf_main.dir/vehicle_ctrl.cpp.su": {

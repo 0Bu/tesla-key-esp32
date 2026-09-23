@@ -191,8 +191,13 @@ configuration and subagent manifests in `.agents/`.
   at merge/check. `$feature-docs` is conditionally required when the cataloged feature surface
   changes, including the PR-policy and bench-acceptance workflows. `$vehicle-command-audit` is
   conditionally required when vehicle-command/BLE paths change (`main/vehicle_*`, `main/ble_client.*`,
-  `main/logic/command_registry.hpp`, `patches/tesla-ble/`, `main/idf_component.yml`). Records are
-  bound to the exact current PR head and become stale after any push.
+  `main/logic/{command_registry,command_runner,ble_dispatcher,rx_framing,session_state,command_result,key_rotation,ble_chunk,ble_deferred_event,wake_poll,active_window}.hpp`,
+  `patches/tesla-ble/`, `main/idf_component.yml`, `test/test_tesla_ble_harness.cpp`,
+  `scripts/test-tesla-ble-harness.sh`, `docs/adr/0005-tesla-ble-seam.md`,
+  `.agents/skills/vehicle-command-audit/`). Records are
+  bound to the exact current PR head and become stale after any push. Gate records in PR descriptions
+  are local, advisory agent checks enforced by local pre-push hooks and scripts rather than GitHub
+  server-side branch protection.
 
 - Reviewers report actionable findings with path/line, cause, impact and evidence. A green build is
   not review proof. Resolve P1/P2 findings and rerun the affected independent review after edits.
