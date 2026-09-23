@@ -5919,7 +5919,7 @@ static void test_command_runner() {
                        [&](bool ok, const std::string&) {
                            completed = true;
                            success_res = ok;
-                       });
+                       }, true /* completes_on_transmit */);
 
         // "Wake" requires VCSEC session authentication to encrypt the RKE action payload
         TxAction act = runner.tick(1000, true /* connected */, false /* awake */, true /* asleep */);
@@ -5963,7 +5963,7 @@ static void test_command_runner() {
                        [&](bool ok, const std::string&) {
                            completed = true;
                            success_res = ok;
-                       });
+                       }, true /* completes_on_transmit */);
 
         int session_requests = 0;
         int payload_frames = 0;
@@ -6008,7 +6008,7 @@ static void test_command_runner() {
         runner.enqueue("Wake", BleDomain::VehicleSecurity, WakePolicy::NoWakeFail, 9000, 1000, {},
                        [&](bool, const std::string&) {
                            completed = true;
-                       });
+                       }, true /* completes_on_transmit */);
 
         // Tick returns SendVcsecSessionInfoRequest
         TxAction a = runner.tick(1000, true, false, true);

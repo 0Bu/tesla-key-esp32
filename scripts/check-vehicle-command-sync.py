@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Vehicle-command protocol sync and conformance checker.
 
-Validates the local command table in main/logic/command_registry.hpp and vehicle_commands.cpp
-against the protocol invariants of teslamotors/vehicle-command and the capabilities of yoziru/tesla-ble.
+Validates the local command table in main/logic/command_registry.hpp against the
+protocol invariants of teslamotors/vehicle-command.
 
 Modes:
   --self-test         Offline verification of local protocol invariants and mutation canaries.
@@ -21,28 +21,29 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 
-# Pinned protocol constants from teslamotors/vehicle-command & yoziru/tesla-ble
+# Pinned protocol constants from teslamotors/vehicle-command
+PINNED_UPSTREAM_REF = "v0.3.4"
 PINNED_BLE_SERVICE_UUID = "00000211-b2d1-43f0-9b88-960cebf8b91e"
 PINNED_BLE_WRITE_UUID = "00000212-b2d1-43f0-9b88-960cebf8b91e"
 PINNED_BLE_NOTIFY_UUID = "00000213-b2d1-43f0-9b88-960cebf8b91e"
 
 # Expected REST / MCP command surface mapping and argument bounds
 EXPECTED_COMMANDS = {
-    "wake_up": {"mcp": "wake_up", "role_allowed": True},
-    "charge_start": {"mcp": "charge_start", "role_allowed": True},
-    "charge_stop": {"mcp": "charge_stop", "role_allowed": True},
-    "charge_port_door_open": {"mcp": "charge_port_open", "role_allowed": True},
-    "charge_port_door_close": {"mcp": "charge_port_close", "role_allowed": True},
-    "set_charging_amps": {"mcp": "set_charging_amps", "role_allowed": True, "lo": 0, "hi": 48},
-    "set_charge_limit": {"mcp": "set_charge_limit", "role_allowed": True, "lo": 50, "hi": 100},
-    "set_scheduled_charging": {"mcp": "set_scheduled_charging", "role_allowed": True, "start_lo": 0, "start_hi": 1439},
-    "door_lock": {"mcp": None, "role_allowed": False},
-    "door_unlock": {"mcp": None, "role_allowed": False},
-    "flash_lights": {"mcp": None, "role_allowed": False},
-    "honk_horn": {"mcp": None, "role_allowed": False},
-    "set_sentry_mode": {"mcp": None, "role_allowed": False},
-    "auto_conditioning_start": {"mcp": None, "role_allowed": False},
-    "auto_conditioning_stop": {"mcp": None, "role_allowed": False},
+    "wake_up": {"mcp": "wake_up"},
+    "charge_start": {"mcp": "charge_start"},
+    "charge_stop": {"mcp": "charge_stop"},
+    "charge_port_door_open": {"mcp": "charge_port_open"},
+    "charge_port_door_close": {"mcp": "charge_port_close"},
+    "set_charging_amps": {"mcp": "set_charging_amps", "lo": 0, "hi": 48},
+    "set_charge_limit": {"mcp": "set_charge_limit", "lo": 50, "hi": 100},
+    "set_scheduled_charging": {"mcp": "set_scheduled_charging", "start_lo": 0, "start_hi": 1439},
+    "door_lock": {"mcp": None},
+    "door_unlock": {"mcp": None},
+    "flash_lights": {"mcp": None},
+    "honk_horn": {"mcp": None},
+    "set_sentry_mode": {"mcp": None},
+    "auto_conditioning_start": {"mcp": None},
+    "auto_conditioning_stop": {"mcp": None},
 }
 
 
@@ -64,10 +65,6 @@ def parse_local_command_registry(registry_header: Path) -> dict[str, dict]:
     text = registry_header.read_text(encoding="utf-8")
     commands: dict[str, dict] = {}
 
-    row_pattern = re.compile(
-        r'\{\s*CmdKind::(?P<kind>[A-Za-z0-9_]+)\s*,\s*(?P<api_name>"[^"]*"|nullptr)\s*,\s*(?P<mcp_name>"[^"]*"|nullptr)\s*,\s*(?P<doc>"[^"]*"|nullptr)\s*,\s*\{\s*(?P<args>.*?)\s*\}\s*\},?',
-        re.DOTALL
-    )
     arg_pattern = re.compile(
         r'\{\s*"[^"]*"\s*,\s*(?:"[^"]*"|nullptr)\s*,\s*CmdArgType::(?P<type>[A-Za-z]+)\s*,\s*(?:true|false)\s*,\s*(?:true|false)\s*,\s*(?P<dflt>-?\d+)\s*,\s*(?P<min>-?\d+)\s*,\s*(?P<max>-?\d+)\s*\}'
     )
@@ -155,7 +152,7 @@ def verify_local_invariants(root: Path) -> list[str]:
 
 def fetch_upstream_charge_go() -> str | None:
     """Fetch raw pkg/vehicle/charge.go from upstream repo."""
-    url = "https://raw.githubusercontent.com/teslamotors/vehicle-command/main/pkg/vehicle/charge.go"
+    url = f"https://raw.githubusercontent.com/teslamotors/vehicle-command/{PINNED_UPSTREAM_REF}/pkg/vehicle/charge.go"
     req = urllib.request.Request(url, headers={"User-Agent": "tesla-key-esp32-conformance-check"})
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:

@@ -99,19 +99,23 @@ fi
 hdr "2. GET vehicle_data?endpoints=charge_state  (${ITER}× — evcc's poll)"
 RES="$(kex '
 VIN='"$ESC_VIN"'; BASE='"$ESC_BASE"'; N='"$ITER"'; TO='"$TIMEOUT"'
+host=$(echo "$BASE" | sed -e "s,^http://,," -e "s,/.*$,," -e "s,:.*$,,"); port=$(echo "$BASE" | sed -n "s,^http://[^:]*:\([0-9]*\).*,\1,p"); [ -z "$port" ] && port=80
 f=0; stale=0; mx=0; sum=0
 for i in $(seq 1 $N); do
   s=$(date +%s%3N)
-  b=$(wget -qO- --timeout=$TO "$BASE/api/1/vehicles/$VIN/vehicle_data?endpoints=charge_state" 2>/dev/null); rc=$?
+  raw=$(printf "GET /api/1/vehicles/%s/vehicle_data?endpoints=charge_state HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n" "$VIN" "$host" | nc -w $TO "$host" "$port" 2>/dev/null)
+  code=$(echo "$raw" | head -n1 | cut -d" " -f2)
+  b=$(echo "$raw" | sed -e "1,/^\r\{0,1\}$/d")
   e=$(date +%s%3N); d=$((e-s)); sum=$((sum+d)); [ $d -gt $mx ] && mx=$d
-  # A real failure is a transport error/timeout OR a body missing the charge_state evcc
-  # parses. A well-formed body with "result":false is NOT a failure: it is the honest
-  # stale-cache response while the car is asleep (served in ~0ms; evcc reads
+  # A real failure is a transport error/timeout OR an unexpected HTTP status code
+  # (neither 200 nor 503) OR a body missing the charge_state evcc parses.
+  # A well-formed body with HTTP 503 or "result":false is the honest stale-cache
+  # response while the car is asleep (served in ~0ms; evcc reads
   # .response.response.charge_state.* and never checks .response.result), so count it
   # separately as "stale" rather than conflating it with a timeout.
-  if [ $rc -ne 0 ] || ! echo "$b" | grep -q "\"charge_state\""; then
+  if [ -z "$b" ] || [ -z "$code" ] || { [ "$code" != "200" ] && [ "$code" != "503" ]; } || ! echo "$b" | grep -q "\"charge_state\""; then
     f=$((f+1))
-  elif ! echo "$b" | grep -q "\"result\":true"; then
+  elif [ "$code" = "503" ] || ! echo "$b" | grep -q "\"result\":true"; then
     stale=$((stale+1))
   fi
 done
@@ -131,7 +135,7 @@ for fld in charging_state battery_level charge_limit_soc charger_power charge_ra
   echo "$SAMPLE" | grep -q "\"$fld\"" && ok "field present: $fld" || bad "field MISSING: $fld"
 done
 
-# ── 3. body_controller_state — live VCSEC BLE read ──────────────────────────
+# ── 3. body_controller_state — live BLE read ──────────────────────────
 hdr "3. GET body_controller_state  (live BLE, no-wake)"
 BC="$(kex "s=\$(date +%s%3N); b=\$(wget -qO- --timeout=$TIMEOUT '$ESC_BASE/api/1/vehicles/$ESC_VIN/body_controller_state' 2>/dev/null); e=\$(date +%s%3N); echo \"\$((e-s))ms \$b\"")"
 echo "  $BC"
@@ -145,12 +149,14 @@ echo "$BC" | grep -q '"result":true' && ok "body_controller_state ok" || echo " 
 #     "soft"   — `result:false` is a NOTE, not a FAIL: charge_start/charge_stop (and the
 #                extended sweep) legitimately depend on live state (a "Complete"/at-limit
 #                car refuses to start — same as the official Fleet API).
-#     "reject" — inverted: the command MUST be refused. NOTE the firmware always answers
-#                HTTP 200 even when the car is unreachable (result:false, reason="vehicle not
-#                reachable"), so result:false alone does NOT prove a refusal. PASS only on a
-#                car-side refusal (result:false with a non-reachability reason); result:true is
-#                a security regression (FAIL); a reachability/timeout reason is FAIL "can't
-#                confirm — re-run awake". This is what stops a sleeping car from false-PASSing.
+#     "reject" — inverted: the command MUST be refused. NOTE the firmware does not
+#                always return 200: it returns HTTP 502 with result:false on command rejection
+#                or reachability error (reason="vehicle not reachable"), and HTTP 503 on
+#                unavailable charge state. Therefore, result:false alone does NOT prove a
+#                successful refusal. PASS only on a car-side refusal (result:false with a
+#                non-reachability reason); result:true is a security regression (FAIL);
+#                a reachability/timeout reason is FAIL "can't confirm — re-run awake".
+#                This is what stops a sleeping car from false-PASSing.
 cmd() {
   local name="$1" suf="$2" body="${3:-}" mode="${4:-}"
   local out d r
@@ -166,7 +172,7 @@ cmd() {
       ok "$name executed"
     fi
   elif [ "$mode" = reject ]; then
-    # The firmware answers (HTTP 200) even when the car is unreachable, with result:false
+    # The firmware answers (HTTP 502) even when the car is unreachable, with result:false
     # reason="vehicle not reachable" (http_api.cpp). So result:false alone is ambiguous:
     # treat a reachability reason (or an empty body) as "can't confirm" (FAIL), and any other
     # car-side reason as a genuine refusal (PASS) — so an asleep car can't false-PASS.

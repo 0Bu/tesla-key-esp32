@@ -122,13 +122,17 @@ void mark_clock_authoritative() noexcept { s_clock_authoritative.store(true, std
 // Seed the wall clock from the NVS cache written by on_time_sync, so we never sit at 1970
 // waiting for NTP (or forever, if the network blocks it and no browser ever visits). Called
 // early in app_main — before VehicleController::init, so the system clock is set to real Unix
-// time and stale stored sessions are rejected fail-closed (see ARCHITECTURE.md). Network-free by design:
-// it must be usable before esp_netif exists. Refined by NTP as soon as the link is up.
+// time (~1.79 billion s). load_nvs_sessions_() in vehicle_telemetry.cpp computes
+// (unix_now - session.clock_time) against vehicle uptime/epoch rather than Unix time (ADR-0005 §2),
+// so once the wall clock is restored to Unix time (~1.79·10⁹ s), *every* stored session is
+// rejected regardless of age (rather than performing a real freshness check). Restoring the clock
+// ensures fail-closed session rejection at startup. Network-free by design: it must be usable
+// before esp_netif exists. Refined by NTP as soon as the link is up.
 static void restore_clock_from_nvs(NvsStorageAdapter& config_store) {
     std::string last_time;
     if (!config_store.load_str(tk::nvs_contract::kLastTime, last_time) || last_time.empty()) {
-        ESP_LOGW(TAG, "no cached clock in NVS — starting at 1970 until NTP syncs; persisted "
-                      "BLE session age cannot be verified until clock is synchronized");
+        ESP_LOGW(TAG, "no cached clock in NVS — starting at 1970 until NTP syncs; stored "
+                      "BLE sessions will not be rejected fail-closed until clock is synchronized");
         return;
     }
     struct timeval tv = { (time_t)atoll(last_time.c_str()), 0 };
@@ -470,18 +474,20 @@ extern "C" void app_main() {
 
     // Wall clock, restored from NVS — BEFORE VehicleController::init below, which is the whole
     // point of doing it here rather than next to the SNTP setup after WiFi (where it used to
-    // live). init() hands persisted BLE sessions to tesla-ble, whose age check computes
-    // (unix_now - session.clock_time) against vehicle uptime/epoch rather than Unix time (ADR-0005 §2).
-    // Restoring the clock to Unix time (~1.77 billion s) causes the computed age to far exceed
-    // 3600 s, so stored sessions are rejected once the clock is set. A 1970 clock (before time sync)
+    // live). Since #306, VehicleController::init() uses the firmware's own load_nvs_sessions_()
+    // (main/vehicle_telemetry.cpp), whose age check computes (unix_now - session.clock_time)
+    // against vehicle uptime/epoch rather than Unix time (ADR-0005 §2). Restoring the wall clock to
+    // Unix time (~1.79·10⁹ s) causes (unix_now - session.clock_time) to far exceed 3600 s, so
+    // *every* stored session is rejected regardless of age (stating "stale sessions are rejected"
+    // is inaccurate since no session can pass once Unix time is set). A 1970 clock (before time sync)
     // produces a negative age and would keep stored sessions; restoring last_time from NVS before
-    // init() ensures the clock is set to real Unix time so stale sessions from an uninitialized
-    // clock are rejected fail-closed (see docs/ARCHITECTURE.md).
+    // init() ensures the clock is set to real Unix time so every stored session is rejected
+    // fail-closed (see docs/ARCHITECTURE.md).
     //
     // Needs no network (unlike SNTP, which stays below with the rest of the post-WiFi setup),
     // so there is nothing keeping it down there. NTP refines this within seconds of the link
-    // coming up; until then a cached-but-slightly-stale clock beats 1970 for the consumers that
-    // only need a plausible ordering — session ages here, and TLS cert validity for OTA.
+    // coming up; until then a cached-but-slightly-stale clock beats 1970 for TLS cert validity
+    // for OTA and ensuring stored sessions are rejected fail-closed.
     //
     // It is deliberately NOT good enough for a DURABLE wall-clock stamp. A restored clock reads
     // the time of the PREVIOUS sync, so writing key_created or paired_at from it dates a fresh

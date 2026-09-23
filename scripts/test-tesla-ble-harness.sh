@@ -48,21 +48,38 @@ clone_or_fail() {
 }
 
 # 1. Locate or clone dependencies
-EXPECTED_TB_VER="$(sed -n 's/.*version:[[:space:]]*"\([^"]*\)".*/\1/p' "$ROOT_DIR/main/idf_component.yml" | head -n1)"
+EXPECTED_TB_VER="$(ruby -ryaml -e 'puts YAML.load_file("'"$ROOT_DIR/main/idf_component.yml"'")["dependencies"]["yoziru/tesla-ble"]["version"]' 2>/dev/null || awk '/dependencies:/{in_deps=1} in_deps && /yoziru\/tesla-ble:/{in_tb=1} in_tb && /^[[:space:]]*version:/{sub(/.*version:[[:space:]]*"?/, ""); sub(/".*/, ""); print; exit}' "$ROOT_DIR/main/idf_component.yml")"
 [ -n "$EXPECTED_TB_VER" ] || { echo "[harness] ERROR: cannot read yoziru/tesla-ble version from main/idf_component.yml" >&2; exit 1; }
 
 if [ -d "$ROOT_DIR/managed_components/yoziru__tesla-ble" ]; then
     TB_DIR="$ROOT_DIR/managed_components/yoziru__tesla-ble"
-    if [ -f "$TB_DIR/idf_component.yml" ]; then
-        LOCAL_VER="$(sed -n 's/^version:[[:space:]]*"\([^"]*\)".*/\1/p' "$TB_DIR/idf_component.yml" 2>/dev/null || true)"
-        if [ -n "$LOCAL_VER" ] && [ "$LOCAL_VER" != "${EXPECTED_TB_VER#v}" ] && [ "$LOCAL_VER" != "$EXPECTED_TB_VER" ]; then
-            echo "[harness] ERROR: managed_components/yoziru__tesla-ble ($LOCAL_VER) does not match expected version ($EXPECTED_TB_VER)" >&2
-            exit 1
-        fi
+    if [ ! -f "$TB_DIR/idf_component.yml" ]; then
+        echo "[harness] ERROR: $TB_DIR exists but idf_component.yml is missing" >&2
+        exit 1
+    fi
+    LOCAL_VER="$(sed -n 's/^version:[[:space:]]*"\([^"]*\)".*/\1/p' "$TB_DIR/idf_component.yml" 2>/dev/null || true)"
+    if [ -z "$LOCAL_VER" ]; then
+        echo "[harness] ERROR: cannot read version from $TB_DIR/idf_component.yml" >&2
+        exit 1
+    fi
+    if [ "$LOCAL_VER" != "${EXPECTED_TB_VER#v}" ] && [ "$LOCAL_VER" != "$EXPECTED_TB_VER" ]; then
+        echo "[harness] ERROR: managed_components/yoziru__tesla-ble ($LOCAL_VER) does not match expected version ($EXPECTED_TB_VER)" >&2
+        exit 1
     fi
 else
     TB_DIR="$CACHE_DIR/tb"
-    clone_or_fail "yoziru/tesla-ble" "$EXPECTED_TB_VER" "https://github.com/yoziru/tesla-ble.git" "$TB_DIR"
+    if [ -d "$TB_DIR" ]; then
+        TB_CACHED_VER=""
+        if [ -f "$TB_DIR/idf_component.yml" ]; then
+            TB_CACHED_VER="$(sed -n 's/^version:[[:space:]]*"\([^"]*\)".*/\1/p' "$TB_DIR/idf_component.yml" 2>/dev/null || true)"
+        fi
+        if [ -z "$TB_CACHED_VER" ] || { [ "$TB_CACHED_VER" != "${EXPECTED_TB_VER#v}" ] && [ "$TB_CACHED_VER" != "$EXPECTED_TB_VER" ]; }; then
+            echo "[harness] ERROR: cached tesla-ble in $TB_DIR has version '$TB_CACHED_VER', expected pinned '$EXPECTED_TB_VER'" >&2
+            exit 1
+        fi
+    else
+        clone_or_fail "yoziru/tesla-ble" "$EXPECTED_TB_VER" "https://github.com/yoziru/tesla-ble.git" "$TB_DIR"
+    fi
 fi
 
 echo "[harness] Applying repository patches to tesla-ble ($TB_DIR)..."
@@ -103,6 +120,15 @@ for f in "$NANOPB_DIR"/pb_common.c "$NANOPB_DIR"/pb_decode.c "$NANOPB_DIR"/pb_en
         "$CC" -O2 -w -c "$f" -I "$NANOPB_DIR" -o "$obj"
     fi
 done
+if [ -f "$BUILD_DIR/obj/tb/.version" ]; then
+    CACHED_OBJ_VER="$(cat "$BUILD_DIR/obj/tb/.version" 2>/dev/null || true)"
+    if [ "$CACHED_OBJ_VER" != "$EXPECTED_TB_VER" ]; then
+        echo "[harness] tesla-ble version changed ($CACHED_OBJ_VER -> $EXPECTED_TB_VER); invalidating object cache..."
+        rm -rf "$BUILD_DIR/obj/tb"
+        mkdir -p "$BUILD_DIR/obj/tb"
+    fi
+fi
+echo "$EXPECTED_TB_VER" > "$BUILD_DIR/obj/tb/.version"
 
 echo "[harness] Compiling tesla-ble protobuf descriptors..."
 while IFS= read -r -d '' f; do

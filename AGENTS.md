@@ -191,7 +191,7 @@ configuration and subagent manifests in `.agents/`.
   at merge/check. `$feature-docs` is conditionally required when the cataloged feature surface
   changes, including the PR-policy and bench-acceptance workflows. `$vehicle-command-audit` is
   conditionally required when vehicle-command/BLE paths change (`main/vehicle_*`, `main/ble_client.*`,
-  `main/logic/{command_registry,command_runner,ble_dispatcher,rx_framing,session_state,command_result,key_rotation,ble_chunk,ble_deferred_event}.hpp`,
+  `main/logic/{command_registry,command_runner,ble_dispatcher,rx_framing,session_state,command_result,key_rotation,ble_chunk,ble_deferred_event,wake_poll,active_window}.hpp`,
   `patches/tesla-ble/`, `main/idf_component.yml`, `test/test_tesla_ble_harness.cpp`,
   `scripts/test-tesla-ble-harness.sh`, `docs/adr/0005-tesla-ble-seam.md`,
   `.agents/skills/vehicle-command-audit/`). Records are

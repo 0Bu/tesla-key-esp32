@@ -811,7 +811,19 @@ __attribute__((noinline)) std::string VehicleController::compute_key_fingerprint
     std::vector<uint8_t> pem;
     if (!storage_->load(tk::nvs_contract::kPrivateKey, pem) || pem.empty()) return "";
     // mbedtls expects the PEM buffer to be NUL-terminated and the length to include it.
-    if (pem.back() != '\0') pem.push_back('\0');
+    // Ensure pem capacity is reserved (pem.reserve(kPemSize)) before pem.push_back('\0')
+    // so reallocation does not orphan an unwiped memory block.
+    if (pem.back() != '\0') {
+        constexpr size_t kPemSize = tk::kPrivateKeyPemCapacity;
+        std::vector<uint8_t> padded;
+        padded.reserve(kPemSize);
+        padded.assign(pem.begin(), pem.end());
+        volatile uint8_t* p = pem.data();
+        for (size_t i = 0; i < pem.size(); ++i) p[i] = 0;
+        pem = std::move(padded);
+        pem.reserve(kPemSize);
+        pem.push_back('\0');
+    }
 
     mbedtls_pk_context     pk;   mbedtls_pk_init(&pk);
     mbedtls_entropy_context ent; mbedtls_entropy_init(&ent);

@@ -8,8 +8,9 @@ cd "$root"
 
 lib="$root/tools/agent-hooks/pr-gate-lib.sh"
 # shellcheck source=/dev/null
-if [ -f "$lib" ]; then
-    . "$lib"
+if [ ! -f "$lib" ] || ! . "$lib" 2>/dev/null; then
+    echo "BLOCKED by pre-push: runner-neutral PR gate library could not be loaded: $lib" >&2
+    exit 1
 fi
 
 # Allow emergency bypass if explicitly requested

@@ -334,7 +334,7 @@ REVIEWED_DELEGATED_HELPERS = {
         "syslog_send": {"sv", "find", "memcpy", "load", "xQueueSend"},
     },
     "ble_link_event_cb_": {
-        "enqueue_ble_link_event_": {"fetch_add", "store", "xQueueSend"},
+        "enqueue_ble_link_event_": {"store", "xQueueSend"},
     },
     "ble_rx_event_cb_": {
         "enqueue_ble_rx_event_": {"store", "static_cast", "data", "memcpy", "xQueueSend"},

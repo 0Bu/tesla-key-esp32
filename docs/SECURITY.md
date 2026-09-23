@@ -162,16 +162,17 @@ Three non-auth hardening measures remain in place:
 
 ## Syslog and diagnostic export
 
-The optional syslog forwarder (`main/syslog.cpp`, configured via `POST /set_syslog` or NVS `syslog_uri`) transmits log records over **plaintext UDP (RFC 5424)** on port 514 without encryption or authentication.
-- Anyone with packet-capture capabilities on the LAN path between the ESP32 and the syslog server can read operational logs, including connection events, battery state, and non-sensitive diagnostic messages.
-- Diagnostic logs deliberately redact and never print NVS private keys, session tokens, or WiFi passwords.
-- Users deploying the firmware on untrusted networks should leave syslog disabled or restrict traffic to a trusted host on a segmented VLAN.
+The optional syslog forwarder (`main/syslog.cpp`, configured via `POST /set_syslog` or NVS `syslog_uri`) forwards unredacted logs over **cleartext UDP (RFC 5424)** on a configurable port (default 514) without encryption or authentication.
+- Anyone with packet-capture capabilities on the LAN path between the ESP32 and the syslog server can read operational logs.
+- Syslog forwards unredacted logs: runtime redaction rules from `/diag?redact=1` do not apply to Syslog. It includes the VIN on every REST command, at boot, and at startup, as well as vehicle BLE MAC and SSID during setup. While raw private keys and WiFi passwords are never deliberately logged, operational metadata and identifiers are transmitted in the clear.
+- Recommend forwarding only to trusted collectors on a secure/isolated VLAN; leave syslog disabled on untrusted or shared networks.
 
 ## Core dump privacy invariant
 
-Crash dumps are enabled to flash (`CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y`, `CONFIG_ESP_COREDUMP_DATA_FORMAT_ELF=y`) in the `coredump` partition and exposed offline via `GET /coredump`.
-- To prevent leaking sensitive secrets from heap memory, `CONFIG_ESP_COREDUMP_CAPTURE_DRAM` is **strictly kept disabled** (`=n`).
-- The core dump captures only CPU registers and task stack memory necessary for offline backtrace decoding, ensuring that decrypted private keys, TLS session state, and stored credentials residing in DRAM are never written to the flash dump or exported via HTTP.
+Crash dumps are enabled to flash (`CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y`, `CONFIG_ESP_COREDUMP_DATA_FORMAT_ELF=y`) in the `coredump` partition and exposed via `GET /coredump`.
+- `CONFIG_ESP_COREDUMP_CAPTURE_DRAM` is kept disabled (`=n`) to avoid dumping the general heap.
+- Task stacks live at crash time are included and can contain transient secrets/key contexts in memory at crash time (e.g., intermediate key exchange values, session state, or decrypted buffers on the stack).
+- Core dumps are served unauthenticated over LAN via `GET /coredump` and must never be attached to public issue trackers or shared publicly. Access should be restricted via network segmentation or reverse proxy authentication.
 
 ## OTA self-update
 

@@ -114,7 +114,7 @@ const usbOtaNotStateChanging = /GET \/ota\/check[^.!?]*(?:is not|isn't|not) stat
 const usbAbsentApprovalProceeds = /(?:(?:approval|authorization)[^.!?]*(?:absent|missing|not obtained)|without (?:separate )?(?:approval|authorization))[^.!?]*(?:continue|proceed|run|contact|send|request)/i;
 const reviewedSkillSha256 = new Map([
   ["add-logic-test", "5bc6af893a1f95a5b4b1d2302da43c1e5e8de11d5e65e1c62d342e0dbfe6a327"],
-  ["deploy", "57153d8f689fa83f310834a4285e5972467cc4d479fda449dd3f0d88c266b181"],
+  ["deploy", "c234b378f9cafa8f0d8875bb66b858b5a9c328809a430341d5cecbe6d61ca14d"],
   ["device-diag", "d524b5dee5d58be5bfda8630099ab36ada9dd4a77500cc6cc9126970efc376cb"],
   ["display-preview", "4bff95d0314d50ce29d67beac7ef4f9db1ebcbb2fa609335e560e162f5a1ed46"],
   ["feature-docs", "0255c6c85753efb851833a20e8da9519c8a61c58d4bb52f9f061cfe609d6e20a"],
@@ -321,7 +321,7 @@ for (const [relative, contracts] of new Map([
     "`$pr-hygiene` clean — content gate @ <full-40-hex-sha>",
   ]],
   ["docs/FEATURES.md", [
-    "Runner-neutral agent policy and four SHA-bound PR gates",
+    "Runner-neutral agent policy and five SHA-bound PR gates",
     "publishing personal/private identifiers or non-English PR/docs content",
   ]],
 ])) {

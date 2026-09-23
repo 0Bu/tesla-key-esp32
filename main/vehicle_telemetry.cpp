@@ -1192,6 +1192,9 @@ void VehicleController::drive_command_runner_() {
 
     if (res == 0 && tk::is_well_formed_ble_frame(tx_buffer_)) {
         if (ble_ && ble_->write(tx_buffer_)) {
+            if (action == tk::TxAction::SendCommandPayload && cmd->completes_on_transmit) {
+                ESP_LOGI(TAG, "Sent payload for '%s' (completes on transmit)", cmd->name.c_str());
+            }
             command_runner_.notify_tx_complete(action, now_ms);
         } else {
             ESP_LOGW(TAG, "BLE write failed for action %d", static_cast<int>(action));
@@ -1726,6 +1729,8 @@ bool VehicleController::get_vehicle_status(VehicleStatusResult& out, tk::Connect
 
     struct StatusCompletion {
         SemaphoreHandle_t sem{xSemaphoreCreateBinary()};
+        bool completed{false};
+        bool success{false};
         int32_t lock_state{0};
         int32_t sleep_status{0};
         int32_t user_presence{0};
@@ -1747,6 +1752,8 @@ bool VehicleController::get_vehicle_status(VehicleStatusResult& out, tk::Connect
         completion->lock_state = static_cast<int32_t>(vs.vehicleLockState);
         completion->sleep_status = static_cast<int32_t>(vs.vehicleSleepStatus);
         completion->user_presence = static_cast<int32_t>(vs.userPresence);
+        completion->completed = true;
+        completion->success = true;
         if (command_generation_.load() == generation) xSemaphoreGive(completion->sem);
     };
 
@@ -1755,9 +1762,15 @@ bool VehicleController::get_vehicle_status(VehicleStatusResult& out, tk::Connect
         vehicle_status_callback_ = std::move(callback);
         const uint32_t now_ms = pdTICKS_TO_MS(xTaskGetTickCount());
         const uint32_t timeout_ms = remaining_ms_(deadline);
+        auto on_complete = [completion](bool ok, const std::string&) {
+            if (!ok && !completion->completed) {
+                completion->completed = true;
+                xSemaphoreGive(completion->sem);
+            }
+        };
         const uint32_t cmd_id = command_runner_.enqueue(
             "VCSEC Status Poll", tk::BleDomain::VehicleSecurity, tk::WakePolicy::NoWakeSkip,
-            timeout_ms, now_ms, {}, nullptr);
+            timeout_ms, now_ms, {}, std::move(on_complete));
         if (cmd_id == 0) {
             vehicle_status_callback_ = nullptr;
             return false;
@@ -1781,15 +1794,20 @@ bool VehicleController::get_vehicle_status(VehicleStatusResult& out, tk::Connect
         return false;
     }
 
-    bool ok = xSemaphoreTake(completion->sem, ticks_until_(deadline)) == pdTRUE &&
-              command_generation_.load() == generation;
+    const bool ok = (xSemaphoreTake(completion->sem, ticks_until_(deadline)) == pdTRUE) &&
+                    (command_generation_.load() == generation) &&
+                    completion->success;
     if (!ok) {
-        note_completion_timeout_(
-            "VCSEC Status Poll",
-            origin == tk::ConnectOrigin::Foreground
-                ? tk::CompletionTimeoutPolicy::ForegroundWarn
-                : tk::CompletionTimeoutPolicy::ExpectedSilent);
-        invalidate_and_flush_(generation);
+        if (!completion->completed) {
+            note_completion_timeout_(
+                "VCSEC Status Poll",
+                origin == tk::ConnectOrigin::Foreground
+                    ? tk::CompletionTimeoutPolicy::ForegroundWarn
+                    : tk::CompletionTimeoutPolicy::ExpectedSilent);
+            invalidate_and_flush_(generation);
+        } else {
+            ESP_LOGD(TAG, "vehicle-status poll cancelled before deadline (e.g. link lost)");
+        }
     }
     {
         tk::SemGuard g(vehicle_mutex_);

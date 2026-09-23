@@ -370,7 +370,10 @@ VehicleController::CommandOutcome VehicleController::send_vcsec_locked_(
         out.error = "command deadline exhausted";
         return out;
     }
-    if (!ensure_connected_until_(capped_deadline_(deadline, 10000), origin)) return out;
+    if (!ensure_connected_until_(capped_deadline_(deadline, 10000), origin)) {
+        out.error = "vehicle not reachable";
+        return out;
+    }
     if (remaining_ms_(deadline) <= 0) {
         out.error = "command deadline exhausted";
         return out;
@@ -400,8 +403,10 @@ VehicleController::CommandOutcome VehicleController::send_vcsec_locked_(
                         tk::CommandError::Outcome::DefinitelyFailed)));
             }
         };
+        const bool completes_on_transmit = (name == "Wake");
         cmd_id = command_runner_.enqueue(
-            name, tk::BleDomain::VehicleSecurity, wp, timeout_ms, now_ms, {}, std::move(on_done));
+            name, tk::BleDomain::VehicleSecurity, wp, timeout_ms, now_ms, {}, std::move(on_done),
+            completes_on_transmit);
         if (cmd_id == 0) {
             out.error = "command queue full";
             return out;
@@ -420,7 +425,7 @@ VehicleController::CommandOutcome VehicleController::send_vcsec_locked_(
         out.error = "command enqueue failed";
         return out;
     }
-    CommandOutcome outcome = await_completion_(completion, generation, deadline, name.c_str(), timeout_policy);
+    out = await_completion_(completion, generation, deadline, name.c_str(), timeout_policy);
     {
         tk::SemGuard g(vehicle_mutex_);
         auto* cmd = command_runner_.current_command();
@@ -429,7 +434,7 @@ VehicleController::CommandOutcome VehicleController::send_vcsec_locked_(
             command_runner_.pop_current();
         }
     }
-    return outcome;
+    return out;
 }
 
 bool VehicleController::send_infotainment_(const std::string& name, Builder builder,
@@ -467,7 +472,10 @@ VehicleController::CommandOutcome VehicleController::send_infotainment_locked_(
         return out;
     }
     if (!ensure_connected_until_(capped_deadline_(deadline, 10000),
-                                 tk::ConnectOrigin::Foreground)) return out;
+                                 tk::ConnectOrigin::Foreground)) {
+        out.error = "vehicle not reachable";
+        return out;
+    }
     if (remaining_ms_(deadline) <= 0) {
         out.error = "command deadline exhausted";
         return out;
@@ -515,8 +523,8 @@ VehicleController::CommandOutcome VehicleController::send_infotainment_locked_(
         out.error = "command enqueue failed";
         return out;
     }
-    CommandOutcome outcome = await_completion_(completion, generation, deadline, name.c_str(),
-                                               tk::CompletionTimeoutPolicy::ForegroundWarn);
+    out = await_completion_(completion, generation, deadline, name.c_str(),
+                            tk::CompletionTimeoutPolicy::ForegroundWarn);
     {
         tk::SemGuard g(vehicle_mutex_);
         auto* cmd = command_runner_.current_command();
@@ -525,7 +533,7 @@ VehicleController::CommandOutcome VehicleController::send_infotainment_locked_(
             command_runner_.pop_current();
         }
     }
-    return outcome;
+    return out;
 }
 
 // ─── Commands ─────────────────────────────────────────────────────────────────
