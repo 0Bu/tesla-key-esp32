@@ -74,7 +74,7 @@ price, and on a status panel it is not a visible one.
 
 A rotating background poll in `loop_task_fn_` (one domain per ~30 s cycle: climate →
 drive → tires → closures, full set ~120 s) refreshes per-domain caches via the
-`set_*_state_callback` hooks in `vehicle_telemetry.cpp`. All polls are `NO_WAKE_SKIP`
+native `on_*_state_` handlers in `vehicle_telemetry.cpp`. All polls are `NO_WAKE_SKIP`
 (read-only, never wake the car) and feed the MQTT/HA bridge — evcc/pairing are unaffected.
 Vehicle telemetry callbacks run synchronously while `vehicle_mutex_` processes incoming BLE frames in `vehicle_loop`, so the
 hooks copy only trivially-copyable nanopb state into fixed latest-value slots under a short
@@ -1437,7 +1437,7 @@ through the guard so the lock is released during stack unwinding, never left hel
 
 | Primitive | Kind | Protects |
 |---|---|---|
-| `command_mutex_` | mutex, RAII | one whole command/query transaction and tesla-ble FIFO generation; for `set_charging_amps`, the action and verifying ChargeState poll are one transaction |
+| `command_mutex_` | mutex, RAII | one whole command/query transaction and command FIFO generation; for `set_charging_amps`, the action and verifying ChargeState poll are one transaction |
 | `vehicle_mutex_` | mutex, RAII (`SemGuard`) | **every** call into `client_` and command runner state (payload build/dispatch, `drive_command_runner_`, `process_rx_frame_`) |
 | `cache_mutex_` | mutex, RAII, leaf | the `last_known_*` caches (`std::string` members ⇒ an unlocked copy is torn-read UB) |
 | `result_mutex_` | mutex, RAII, leaf | the externally visible `last_error_` snapshot read by HTTP/MCP after a foreground command returns |
