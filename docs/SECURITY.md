@@ -160,6 +160,19 @@ Three non-auth hardening measures remain in place:
   including large-response print growth, is exercised against the exact pinned cJSON source with
   sanitizer runs.
 
+## Syslog and diagnostic export
+
+The optional syslog forwarder (`main/syslog.cpp`, configured via `POST /set_syslog` or NVS `syslog_uri`) transmits log records over **plaintext UDP (RFC 5424)** on port 514 without encryption or authentication.
+- Anyone with packet-capture capabilities on the LAN path between the ESP32 and the syslog server can read operational logs, including connection events, battery state, and non-sensitive diagnostic messages.
+- Diagnostic logs deliberately redact and never print NVS private keys, session tokens, or WiFi passwords.
+- Users deploying the firmware on untrusted networks should leave syslog disabled or restrict traffic to a trusted host on a segmented VLAN.
+
+## Core dump privacy invariant
+
+Crash dumps are enabled to flash (`CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y`, `CONFIG_ESP_COREDUMP_DATA_FORMAT_ELF=y`) in the `coredump` partition and exposed offline via `GET /coredump`.
+- To prevent leaking sensitive secrets from heap memory, `CONFIG_ESP_COREDUMP_CAPTURE_DRAM` is **strictly kept disabled** (`=n`).
+- The core dump captures only CPU registers and task stack memory necessary for offline backtrace decoding, ensuring that decrypted private keys, TLS session state, and stored credentials residing in DRAM are never written to the flash dump or exported via HTTP.
+
 ## OTA self-update
 
 The device can update itself **pull-based**: it fetches `manifest.json` and its per-target

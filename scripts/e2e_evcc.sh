@@ -153,10 +153,10 @@ echo "$BC" | grep -q '"result":true' && ok "body_controller_state ok" || echo " 
 #                confirm — re-run awake". This is what stops a sleeping car from false-PASSing.
 cmd() {
   local name="$1" suf="$2" body="${3:-}" mode="${4:-}"
-  local dataflag="--post-data=''"
-  [ -n "$body" ] && dataflag="--header=Content-Type:application/json --post-data='$body'"
   local out d r
-  out="$(kex "s=\$(date +%s%3N); r=\$(wget -qO- --timeout=$TIMEOUT $dataflag '$ESC_BASE/api/1/vehicles/$ESC_VIN/command/$suf' 2>/dev/null); if [ -z \"\$r\" ]; then host=\$(echo '$ESC_BASE' | sed -e 's,^http://,,' -e 's,/.*$,,' -e 's,:.*$,,'); port=\$(echo '$ESC_BASE' | sed -n 's,^http://[^:]*:\([0-9]*\).*,\1,p'); [ -z \"\$port\" ] && port=80; r=\$(printf 'POST /api/1/vehicles/$ESC_VIN/command/$suf HTTP/1.1\r\nHost: %s\r\nContent-Type: application/json\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s' \"\$host\" \"${#body}\" '$body' | nc -w $TIMEOUT \"\$host\" \"\$port\" 2>/dev/null | sed -e '1,/^\r\{0,1\}$/d'); fi; e=\$(date +%s%3N); echo \"\$((e-s))|\$r\"")"
+  # Use a single nc request so that 5xx/4xx errors are not double-sent (wget -qO- discards
+  # non-200 responses and caused unintentional duplicate command execution on failures).
+  out="$(kex "s=\$(date +%s%3N); host=\$(echo '$ESC_BASE' | sed -e 's,^http://,,' -e 's,/.*$,,' -e 's,:.*$,,'); port=\$(echo '$ESC_BASE' | sed -n 's,^http://[^:]*:\([0-9]*\).*,\1,p'); [ -z \"\$port\" ] && port=80; r=\$(printf 'POST /api/1/vehicles/$ESC_VIN/command/$suf HTTP/1.1\r\nHost: %s\r\nContent-Type: application/json\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s' \"\$host\" \"${#body}\" '$body' | nc -w $TIMEOUT \"\$host\" \"\$port\" 2>/dev/null | sed -e '1,/^\r\{0,1\}$/d'); e=\$(date +%s%3N); echo \"\$((e-s))|\$r\"")"
   d="${out%%|*}"; r="${out#*|}"
   echo "  ${name}: ${d}ms  ->  $r"
   if echo "$r" | grep -q '"result":true'; then

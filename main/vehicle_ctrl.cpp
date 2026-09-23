@@ -39,14 +39,6 @@ bool VehicleController::ble_scan(int ms) {
     return true;
 }
 
-// ─── Custom no-op shared_ptr deleters ────────────────────────────────────────
-// Vehicle needs shared_ptr<BleAdapter> and shared_ptr<StorageAdapter>.
-// We own the objects externally, so we provide deleters that do nothing.
-struct NoDelete {
-    void operator()(TeslaBLE::BleAdapter*)    const {}
-    void operator()(TeslaBLE::StorageAdapter*)const {}
-};
-
 bool VehicleController::ble_link_event_cb_(void* context, bool connected,
                                            uint16_t conn_handle,
                                            uint32_t generation) noexcept {
@@ -63,9 +55,6 @@ bool VehicleController::ble_rx_event_cb_(void* context, const uint8_t* data, siz
 bool VehicleController::enqueue_ble_link_event_(bool connected, uint16_t conn_handle,
                                                 uint32_t generation) noexcept {
     if (!connected) {
-        // Invalidate the active waiter before deferred Vehicle cleanup: a physical link loss can
-        // never complete or be adopted by a later request while the FIFO is waiting for its task.
-        command_generation_.fetch_add(1, std::memory_order_acq_rel);
         auth_fail_streak_.store(0, std::memory_order_release);
     }
     BleHostEvent event{};
@@ -194,6 +183,8 @@ bool VehicleController::init(const std::string& vin,
         std::vector<uint8_t> key_bytes;
         if (storage_->load(tk::nvs_contract::kPrivateKey, key_bytes) && !key_bytes.empty()) {
             client_->load_private_key(key_bytes.data(), key_bytes.size());
+            volatile uint8_t* p = key_bytes.data();
+            for (size_t i = 0; i < key_bytes.size(); ++i) p[i] = 0;
         }
     }
     // A blob's mere presence does not prove that the library parsed it. Commands may use the
@@ -212,10 +203,6 @@ bool VehicleController::init(const std::string& vin,
     // The NimBLE host never calls Client, allocates, waits on a shared mutex, logs or touches NVS.
     ble_->set_connected_cb(&VehicleController::ble_link_event_cb_, this);
     ble_->set_rx_data_cb(&VehicleController::ble_rx_event_cb_, this);
-
-    // Persistent charge-state + read-only telemetry cache callbacks (installed once,
-    // never cleared) — defined in vehicle_telemetry.cpp next to the parsers they use.
-    install_state_callbacks_();
 
     // Seed the active window open at boot so evcc gets a warm cache for the first few
     // minutes after start; it then backs off if the car stays idle (no command, not charging).

@@ -48,11 +48,25 @@ clone_or_fail() {
 }
 
 # 1. Locate or clone dependencies
-TB_DIR="$ROOT_DIR/managed_components/yoziru__tesla-ble"
-if [ ! -d "$TB_DIR" ]; then
+EXPECTED_TB_VER="$(sed -n 's/.*version:[[:space:]]*"\([^"]*\)".*/\1/p' "$ROOT_DIR/main/idf_component.yml" | head -n1)"
+[ -n "$EXPECTED_TB_VER" ] || { echo "[harness] ERROR: cannot read yoziru/tesla-ble version from main/idf_component.yml" >&2; exit 1; }
+
+if [ -d "$ROOT_DIR/managed_components/yoziru__tesla-ble" ]; then
+    TB_DIR="$ROOT_DIR/managed_components/yoziru__tesla-ble"
+    if [ -f "$TB_DIR/idf_component.yml" ]; then
+        LOCAL_VER="$(sed -n 's/^version:[[:space:]]*"\([^"]*\)".*/\1/p' "$TB_DIR/idf_component.yml" 2>/dev/null || true)"
+        if [ -n "$LOCAL_VER" ] && [ "$LOCAL_VER" != "${EXPECTED_TB_VER#v}" ] && [ "$LOCAL_VER" != "$EXPECTED_TB_VER" ]; then
+            echo "[harness] ERROR: managed_components/yoziru__tesla-ble ($LOCAL_VER) does not match expected version ($EXPECTED_TB_VER)" >&2
+            exit 1
+        fi
+    fi
+else
     TB_DIR="$CACHE_DIR/tb"
-    clone_or_fail "yoziru/tesla-ble" "v5.2.0" "https://github.com/yoziru/tesla-ble.git" "$TB_DIR"
+    clone_or_fail "yoziru/tesla-ble" "$EXPECTED_TB_VER" "https://github.com/yoziru/tesla-ble.git" "$TB_DIR"
 fi
+
+echo "[harness] Applying repository patches to tesla-ble ($TB_DIR)..."
+TESLA_BLE_COMPONENT_DIR="$TB_DIR" "$ROOT_DIR/scripts/apply-tesla-ble-patches.sh"
 
 NANOPB_DIR="$ROOT_DIR/build/_deps/nanopb-src"
 if [ ! -d "$NANOPB_DIR" ]; then

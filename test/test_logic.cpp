@@ -5927,6 +5927,13 @@ static void test_command_runner() {
         CHECK(runner.current_command()->state == CommandState::WaitingVcsecAuth);
         CHECK(runner.current_command()->phase == CommandPhase::EnsuringVcsecSession);
 
+        // Shell-faithful: after transmitting the prerequisite SessionInfoRequest, the shell
+        // calls notify_tx_complete(act, now). This must NOT prematurely complete the Wake command!
+        runner.notify_tx_complete(act, 1005);
+        CHECK(!completed);
+        CHECK(runner.current_command()->state == CommandState::WaitingVcsecAuth);
+        CHECK(!runner.current_command()->is_completed);
+
         // Simulate session info arrival via set_established
         runner.vcsec_session().set_established({1, 2, 3}, 1, 1000);
         runner.current_command()->state = CommandState::Idle;
@@ -5939,11 +5946,94 @@ static void test_command_runner() {
 
         // Notifying TX completion finishes Wake immediately with success
         // (Wake action has no commandStatus acknowledgement from Tesla; transmission completes it)
-        runner.notify_tx_complete(1050);
+        runner.notify_tx_complete(act, 1050);
         CHECK(completed);
         CHECK(success_res);
         CHECK(runner.current_command()->is_completed);
         CHECK(runner.current_command()->is_success);
+        CHECK(runner.current_command()->terminal_reason == TerminalReason::Success);
+    }
+
+    // 4c. Shell-faithful Driver: Wake does not complete on prerequisite SessionInfoRequest TX (F1 regression)
+    {
+        CommandRunner runner;
+        bool completed = false;
+        bool success_res = false;
+        runner.enqueue("Wake", BleDomain::VehicleSecurity, WakePolicy::NoWakeFail, 9000, 1000, {},
+                       [&](bool ok, const std::string&) {
+                           completed = true;
+                           success_res = ok;
+                       });
+
+        int session_requests = 0;
+        int payload_frames = 0;
+
+        // Drive without an established session
+        for (uint32_t now = 1000; now < 1200 && !completed; now += 50) {
+            TxAction a = runner.tick(now, true, false, true);
+            if (a == TxAction::None) continue;
+            if (a == TxAction::SendVcsecSessionInfoRequest) ++session_requests;
+            if (a == TxAction::SendCommandPayload) ++payload_frames;
+            runner.notify_tx_complete(a, now);
+        }
+
+        // Must have sent SessionInfoRequest, but NEVER completed prematurely
+        CHECK(session_requests == 1);
+        CHECK(payload_frames == 0);
+        CHECK(!completed);
+        CHECK(!runner.current_command()->is_completed);
+
+        // Now session arrives
+        runner.vcsec_session().set_established({1, 2, 3}, 1, 1200);
+        runner.current_command()->state = CommandState::Idle;
+
+        // Next tick sends the payload
+        TxAction a = runner.tick(1250, true, false, true);
+        CHECK(a == TxAction::SendCommandPayload);
+        ++payload_frames;
+        runner.notify_tx_complete(a, 1250);
+
+        // Now and only now is Wake completed
+        CHECK(completed);
+        CHECK(success_res);
+        CHECK(payload_frames == 1);
+        CHECK(runner.current_command()->is_completed);
+        CHECK(runner.current_command()->terminal_reason == TerminalReason::Success);
+    }
+
+    // 4d. Unsolicited vehicle awake notification does not prematurely complete Wake before payload TX
+    {
+        CommandRunner runner;
+        bool completed = false;
+        runner.enqueue("Wake", BleDomain::VehicleSecurity, WakePolicy::NoWakeFail, 9000, 1000, {},
+                       [&](bool, const std::string&) {
+                           completed = true;
+                       });
+
+        // Tick returns SendVcsecSessionInfoRequest
+        TxAction a = runner.tick(1000, true, false, true);
+        CHECK(a == TxAction::SendVcsecSessionInfoRequest);
+        runner.notify_tx_complete(a, 1010);
+        CHECK(!completed);
+
+        // VCSEC sends unsolicited VehicleStatus reporting body controller is awake
+        runner.notify_vehicle_awake(true);
+        CHECK(!completed);
+        CHECK(!runner.current_command()->is_completed);
+
+        // Session establishes
+        runner.vcsec_session().set_established({1, 2, 3}, 1, 1050);
+        runner.current_command()->state = CommandState::Idle;
+
+        // Next tick returns SendCommandPayload (wake frame must be sent)
+        a = runner.tick(1060, true, false, true);
+        CHECK(a == TxAction::SendCommandPayload);
+        CHECK(!completed);
+
+        // Transmitting the wake frame completes the Wake command
+        runner.notify_tx_complete(a, 1070);
+        CHECK(completed);
+        CHECK(runner.current_command()->is_completed);
         CHECK(runner.current_command()->terminal_reason == TerminalReason::Success);
     }
 

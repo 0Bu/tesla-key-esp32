@@ -99,7 +99,7 @@ void VehicleController::auto_pair_task_fn_(void* arg) {
         }
 
         // regenerate_key() returned without confirming whether its NVS commit landed. Do not
-        // let pairing_lost_ authorize another rotation: only a reboot can reconstruct Vehicle
+        // let pairing_lost_ authorize another rotation: only a reboot can reconstruct client state
         // from storage and classify the durable fingerprint.
         if (self->key_reload_required_.load()) {
             self->key_runtime_safe_.store(false);
@@ -461,7 +461,7 @@ tk::KeyRotationResult VehicleController::generate_key_locked_() {
         ESP_LOGE(TAG, "key generation/persistence outcome is ambiguous — runtime key is untrusted; reboot required");
         invalidate_and_flush_(command_generation_.load());
         // Keep key_rotate armed. A reboot erases every potentially mismatched session before it
-        // constructs Vehicle, regardless of whether the failed commit left the old or new key.
+        // initializes the vehicle client, regardless of whether the failed commit left the old or new key.
         return tk::KeyRotationResult::CommitUnknown;
     }
     pairing_cleanup_pending_.store(true);
@@ -687,7 +687,7 @@ VehicleController::NewVehicleResetResult VehicleController::reset_for_new_vehicl
     }
 
     // This gate stays asserted until the mandatory reboot. Even a successful rotation leaves
-    // this Vehicle object bound to its old VIN, so no signing or automatic generation is valid
+    // this VehicleController instance bound to its old VIN, so no signing or automatic generation is valid
     // in the controller→HTTP journal hand-off window.
     vin_transition_pending_.store(true);
     bool staged = false;
@@ -841,6 +841,11 @@ __attribute__((noinline)) std::string VehicleController::compute_key_fingerprint
         }
         mbedtls_ecp_point_free(&Q);
         mbedtls_ecp_group_free(&grp);
+    }
+
+    if (!pem.empty()) {
+        volatile uint8_t* p = pem.data();
+        for (size_t i = 0; i < pem.size(); ++i) p[i] = 0;
     }
 
     mbedtls_pk_free(&pk);

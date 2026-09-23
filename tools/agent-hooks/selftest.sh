@@ -300,13 +300,15 @@ fi
 
 if printf '%s\n' 'main/vehicle_commands.cpp' | gate_vehicle_command_relevant \
    && printf '%s\n' 'main/logic/command_registry.hpp' | gate_vehicle_command_relevant \
+   && printf '%s\n' 'main/logic/command_runner.hpp' | gate_vehicle_command_relevant \
    && printf '%s\n' 'patches/tesla-ble/0001-fix.patch' | gate_vehicle_command_relevant; then
   pass_case 'vehicle-command files are vehicle-command relevant'
 else
   fail_case 'vehicle-command file relevance'
 fi
 if printf '%s\n' 'docs/README.md' | gate_vehicle_command_relevant \
-   || printf '%s\n' 'main/display.cpp' | gate_vehicle_command_relevant; then
+   || printf '%s\n' 'main/display.cpp' | gate_vehicle_command_relevant \
+   || printf '%s\n' 'main/logic/soc_gradient.hpp' | gate_vehicle_command_relevant; then
   fail_case 'unrelated files match vehicle-command relevance'
 else
   pass_case 'unrelated files do not match vehicle-command relevance'

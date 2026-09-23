@@ -6,6 +6,12 @@ set -euo pipefail
 root="$(git rev-parse --show-toplevel)"
 cd "$root"
 
+lib="$root/tools/agent-hooks/pr-gate-lib.sh"
+# shellcheck source=/dev/null
+if [ -f "$lib" ]; then
+    . "$lib"
+fi
+
 # Allow emergency bypass if explicitly requested
 if [ "${AGENT_PR_GATES_SKIP:-0}" = "1" ]; then
     echo "WARNING: AGENT_PR_GATES_SKIP=1 set; bypassing pre-push PR policy checks." >&2
@@ -89,7 +95,7 @@ for update in "${updates[@]}"; do
   if printf '%s\n' "$changed_files" | grep -Eq '^(main/|CMakeLists\.txt$|sdkconfig|partitions\.csv$|scripts/ci-build-all\.sh$)'; then
     has_firmware_changes=1
   fi
-  if printf '%s\n' "$changed_files" | grep -Eq '^(main/(vehicle_commands\.cpp|vehicle_ctrl\.(cpp|hpp)|vehicle_ctrl_internal\.hpp|vehicle_telemetry\.cpp|vehicle_pairing\.cpp|ble_client\.(cpp|hpp)|logic/command_registry\.hpp|idf_component\.yml)|patches/tesla-ble/|\.agents/skills/vehicle-command-audit/)'; then
+  if printf '%s\n' "$changed_files" | gate_vehicle_command_relevant; then
     has_vehicle_changes=1
   fi
 

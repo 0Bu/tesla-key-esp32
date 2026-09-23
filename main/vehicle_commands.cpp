@@ -114,6 +114,15 @@ std::string VehicleController::last_command_error() const {
     return last_error_;
 }
 
+void VehicleController::set_last_command_error(const std::string& err) {
+    if (!result_mutex_) {
+        last_error_ = err;
+        return;
+    }
+    tk::SemGuard g(result_mutex_);
+    last_error_ = err;
+}
+
 void VehicleController::publish_command_outcome_(const CommandOutcome& outcome) {
     if (!result_mutex_) {
         last_error_ = outcome.success ? std::string{} : outcome.error;
@@ -615,7 +624,7 @@ bool VehicleController::set_charging_amps(int amps, int timeout_ms) {
 
     // Keep the action ACK and the independent ChargeState readback in one serialized
     // transaction. cmd_in_flight_ prevents the background task from adding a telemetry
-    // poll to tesla-ble's single FIFO while we verify the safety-critical current limit.
+    // poll to the native command FIFO while we verify the safety-critical current limit.
     tk::SemGuard cmd_guard(command_mutex_, ticks_until_(deadline));
     if (!cmd_guard) {
         outcome.error = "command deadline exhausted waiting for another request";
@@ -716,6 +725,9 @@ bool VehicleController::set_charge_limit(int percent, int timeout_ms) {
     // already validate this range; keep the controller boundary strict as defense in depth.
     if (percent < 50 || percent > 100) {
         ESP_LOGE(TAG, "Set Charge Limit rejected: %d is outside 50-100", percent);
+        CommandOutcome out;
+        out.error = "charge limit out of range (50-100)";
+        publish_command_outcome_(out);
         return false;
     }
     int32_t pct32 = (int32_t)percent;
