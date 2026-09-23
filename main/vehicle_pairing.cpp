@@ -814,14 +814,12 @@ __attribute__((noinline)) std::string VehicleController::compute_key_fingerprint
     // Ensure pem capacity is reserved (pem.reserve(kPemSize)) before pem.push_back('\0')
     // so reallocation does not orphan an unwiped memory block.
     if (pem.back() != '\0') {
-        constexpr size_t kPemSize = tk::kPrivateKeyPemCapacity;
         std::vector<uint8_t> padded;
-        padded.reserve(kPemSize);
+        padded.reserve(pem.size() + 1);
         padded.assign(pem.begin(), pem.end());
         volatile uint8_t* p = pem.data();
         for (size_t i = 0; i < pem.size(); ++i) p[i] = 0;
         pem = std::move(padded);
-        pem.reserve(kPemSize);
         pem.push_back('\0');
     }
 

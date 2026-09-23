@@ -119,14 +119,15 @@ Before committing or pushing, verify workspace cleanliness, code style, unit tes
    ```
 2. **Audit & Stamp PR Gates**:
    Run the respective audit skills (`$project-review`, `$feature-docs`, `$vehicle-command-audit`) against the current HEAD.
-   Once each audit passes cleanly, stamp the verified gates on the PR using confirmation tokens:
+   Once each audit passes cleanly, stamp the verified gates on the PR using confirmation tokens naming the audit results and SHA:
    ```bash
+   HEAD=$(git rev-parse HEAD)
    ./scripts/stamp-pr-gates.sh --update-pr "$PR" \
-     --gate skill-audit="passed" \
-     --gate pr-hygiene="passed" \
-     --gate project-review="passed" \
-     --gate feature-docs="synced" \
-     --gate vehicle-command-audit="passed"
+     --gate skill-audit="tools/agent-config/check.mjs @ $HEAD" \
+     --gate pr-hygiene="clean @ $HEAD" \
+     --gate project-review="0 findings @ $HEAD" \
+     --gate feature-docs="docs/FEATURES.md @ $HEAD" \
+     --gate vehicle-command-audit="scripts/test-tesla-ble-harness.sh @ $HEAD"
    ```
    (Only include conditional gates `--gate feature-docs=...` or `--gate vehicle-command-audit=...` if relevant to the changed paths.)
 3. **Fix & Re-Check Loop**:
@@ -146,8 +147,8 @@ Before committing or pushing, verify workspace cleanliness, code style, unit tes
      Run `$skill-audit` and `$pr-hygiene` locally to verify they pass cleanly (do not stamp without running). The pre-push hook requires current `$skill-audit` and `$pr-hygiene` records on the PR before allowing a push to an open PR. Stamp them first:
      ```bash
      ./scripts/stamp-pr-gates.sh --update-pr "$PR" --head "$NEW_HEAD" \
-       --gate skill-audit="passed" \
-       --gate pr-hygiene="passed"
+       --gate skill-audit="tools/agent-config/check.mjs @ $NEW_HEAD" \
+       --gate pr-hygiene="clean @ $NEW_HEAD"
      ```
    - Push the fix:
      ```bash
@@ -157,9 +158,9 @@ Before committing or pushing, verify workspace cleanliness, code style, unit tes
      Re-run the relevant audit skills (`$skill-audit`, `$pr-hygiene`, `$project-review`, plus any applicable conditional audit skills `$feature-docs` or `$vehicle-command-audit`) against `$NEW_HEAD`. Only after each audit passes cleanly, re-stamp all gates on the PR:
      ```bash
      ./scripts/stamp-pr-gates.sh --update-pr "$PR" --head "$NEW_HEAD" \
-       --gate skill-audit="passed" \
-       --gate pr-hygiene="passed" \
-       --gate project-review="passed"
+       --gate skill-audit="tools/agent-config/check.mjs @ $NEW_HEAD" \
+       --gate pr-hygiene="clean @ $NEW_HEAD" \
+       --gate project-review="0 findings @ $NEW_HEAD"
      ```
      (Include conditional `--gate feature-docs=...` or `--gate vehicle-command-audit=...` if relevant.)
    - Repeat until all PR checks are green and all gates are satisfied.

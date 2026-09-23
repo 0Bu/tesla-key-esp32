@@ -132,7 +132,7 @@ static void restore_clock_from_nvs(NvsStorageAdapter& config_store) {
     std::string last_time;
     if (!config_store.load_str(tk::nvs_contract::kLastTime, last_time) || last_time.empty()) {
         ESP_LOGW(TAG, "no cached clock in NVS — starting at 1970 until NTP syncs; stored "
-                      "BLE sessions will not be rejected fail-closed until clock is synchronized");
+                      "BLE sessions loaded during init will not be rejected fail-closed");
         return;
     }
     struct timeval tv = { (time_t)atoll(last_time.c_str()), 0 };
@@ -478,8 +478,7 @@ extern "C" void app_main() {
     // (main/vehicle_telemetry.cpp), whose age check computes (unix_now - session.clock_time)
     // against vehicle uptime/epoch rather than Unix time (ADR-0005 §2). Restoring the wall clock to
     // Unix time (~1.79·10⁹ s) causes (unix_now - session.clock_time) to far exceed 3600 s, so
-    // *every* stored session is rejected regardless of age (stating "stale sessions are rejected"
-    // is inaccurate since no session can pass once Unix time is set). A 1970 clock (before time sync)
+    // *every* stored session is rejected fail-closed at startup. A 1970 clock (before time sync)
     // produces a negative age and would keep stored sessions; restoring last_time from NVS before
     // init() ensures the clock is set to real Unix time so every stored session is rejected
     // fail-closed (see docs/ARCHITECTURE.md).

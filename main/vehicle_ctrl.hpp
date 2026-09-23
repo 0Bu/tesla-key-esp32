@@ -443,7 +443,8 @@ private:
                      tk::ConnectOrigin origin = tk::ConnectOrigin::Foreground,
                      bool auth_fail_is_revocation = false,
                      tk::CompletionTimeoutPolicy timeout_policy =
-                         tk::CompletionTimeoutPolicy::ForegroundWarn);
+                         tk::CompletionTimeoutPolicy::ForegroundWarn,
+                     bool completes_on_transmit = false);
     bool send_infotainment_(const std::string& name, Builder builder, int timeout_ms,
                             WakePolicy wp = WakePolicy::WakeIfNeeded);
     // Same runner with command_mutex_ + cmd_in_flight_ already held. The absolute deadline
@@ -456,7 +457,8 @@ private:
     CommandOutcome send_vcsec_locked_(const std::string& name, Builder builder,
                                       WakePolicy wp, uint32_t deadline,
                                       tk::ConnectOrigin origin, bool auth_fail_is_revocation,
-                                      tk::CompletionTimeoutPolicy timeout_policy);
+                                      tk::CompletionTimeoutPolicy timeout_policy,
+                                      bool completes_on_transmit = false);
 
     // Build the per-command result callback. auth_fail_is_revocation gates whether an
     // "authentication failed" reply may count toward the two-strike pairing_lost_ heuristic

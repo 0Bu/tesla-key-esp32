@@ -250,7 +250,7 @@ public:
     }
 
     // Enqueue a new command. Returns command ID > 0 on success, or 0 if queue is full.
-    uint32_t enqueue(const std::string& name, BleDomain domain, WakePolicy wake_policy,
+    uint32_t enqueue(std::string_view name, BleDomain domain, WakePolicy wake_policy,
                      uint32_t timeout_ms = kDefaultCommandTimeoutMs, uint32_t now_ms = 0,
                      const BleUuid& uuid = {},
                      std::function<void(bool, const std::string&)> on_complete = nullptr,
@@ -264,37 +264,7 @@ public:
         cmd = CommandRequest{};
         cmd.id = next_cmd_id_++;
         if (next_cmd_id_ == 0) next_cmd_id_ = 1;
-        cmd.name = name;
-        cmd.domain = domain;
-        cmd.wake_policy = wake_policy;
-        cmd.uuid = uuid;
-        cmd.enqueued_at_ms = now_ms;
-        cmd.phase_started_at_ms = now_ms;
-        cmd.timeout_ms = timeout_ms;
-        cmd.on_complete = std::move(on_complete);
-        cmd.state = CommandState::Idle;
-        cmd.phase = CommandPhase::Queued;
-        cmd.completes_on_transmit = completes_on_transmit;
-
-        queue_count_++;
-        return cmd.id;
-    }
-
-    uint32_t enqueue(const char* name, BleDomain domain, WakePolicy wake_policy,
-                     uint32_t timeout_ms = kDefaultCommandTimeoutMs, uint32_t now_ms = 0,
-                     const BleUuid& uuid = {},
-                     std::function<void(bool, const std::string&)> on_complete = nullptr,
-                     bool completes_on_transmit = false) {
-        if (queue_count_ >= kMaxQueueSize) {
-            return 0; // Queue full
-        }
-
-        const size_t tail = (queue_head_ + queue_count_) % kMaxQueueSize;
-        CommandRequest& cmd = queue_[tail];
-        cmd = CommandRequest{};
-        cmd.id = next_cmd_id_++;
-        if (next_cmd_id_ == 0) next_cmd_id_ = 1;
-        cmd.name = name ? name : "";
+        cmd.name = std::string(name);
         cmd.domain = domain;
         cmd.wake_policy = wake_policy;
         cmd.uuid = uuid;

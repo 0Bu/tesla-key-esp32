@@ -1729,8 +1729,9 @@ bool VehicleController::get_vehicle_status(VehicleStatusResult& out, tk::Connect
 
     struct StatusCompletion {
         SemaphoreHandle_t sem{xSemaphoreCreateBinary()};
-        bool completed{false};
-        bool success{false};
+        std::atomic<bool> completed{false};
+        std::atomic<bool> success{false};
+        std::string error{};
         int32_t lock_state{0};
         int32_t sleep_status{0};
         int32_t user_presence{0};
@@ -1752,8 +1753,8 @@ bool VehicleController::get_vehicle_status(VehicleStatusResult& out, tk::Connect
         completion->lock_state = static_cast<int32_t>(vs.vehicleLockState);
         completion->sleep_status = static_cast<int32_t>(vs.vehicleSleepStatus);
         completion->user_presence = static_cast<int32_t>(vs.userPresence);
-        completion->completed = true;
-        completion->success = true;
+        completion->success.store(true);
+        completion->completed.store(true);
         if (command_generation_.load() == generation) xSemaphoreGive(completion->sem);
     };
 
@@ -1762,9 +1763,10 @@ bool VehicleController::get_vehicle_status(VehicleStatusResult& out, tk::Connect
         vehicle_status_callback_ = std::move(callback);
         const uint32_t now_ms = pdTICKS_TO_MS(xTaskGetTickCount());
         const uint32_t timeout_ms = remaining_ms_(deadline);
-        auto on_complete = [completion](bool ok, const std::string&) {
-            if (!ok && !completion->completed) {
-                completion->completed = true;
+        auto on_complete = [completion](bool ok, const std::string& err) {
+            if (!ok && !completion->completed.load()) {
+                completion->error = err;
+                completion->completed.store(true);
                 xSemaphoreGive(completion->sem);
             }
         };
@@ -1796,9 +1798,9 @@ bool VehicleController::get_vehicle_status(VehicleStatusResult& out, tk::Connect
 
     const bool ok = (xSemaphoreTake(completion->sem, ticks_until_(deadline)) == pdTRUE) &&
                     (command_generation_.load() == generation) &&
-                    completion->success;
+                    completion->success.load();
     if (!ok) {
-        if (!completion->completed) {
+        if (!completion->completed.load()) {
             note_completion_timeout_(
                 "VCSEC Status Poll",
                 origin == tk::ConnectOrigin::Foreground
@@ -1806,7 +1808,13 @@ bool VehicleController::get_vehicle_status(VehicleStatusResult& out, tk::Connect
                     : tk::CompletionTimeoutPolicy::ExpectedSilent);
             invalidate_and_flush_(generation);
         } else {
-            ESP_LOGD(TAG, "vehicle-status poll cancelled before deadline (e.g. link lost)");
+            if (origin == tk::ConnectOrigin::Foreground) {
+                ESP_LOGW(TAG, "vehicle-status poll failed before deadline: %s",
+                         completion->error.empty() ? "cancelled (e.g. link lost)" : completion->error.c_str());
+            } else {
+                ESP_LOGD(TAG, "vehicle-status poll cancelled before deadline (e.g. link lost): %s",
+                         completion->error.c_str());
+            }
         }
     }
     {

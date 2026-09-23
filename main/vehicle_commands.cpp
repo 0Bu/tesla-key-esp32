@@ -331,7 +331,8 @@ VehicleController::ResultCb VehicleController::make_result_cb_(
 bool VehicleController::send_vcsec_(const std::string& name, Builder builder,
                                      WakePolicy wp, int timeout_ms,
                                      tk::ConnectOrigin origin, bool auth_fail_is_revocation,
-                                     tk::CompletionTimeoutPolicy timeout_policy) {
+                                     tk::CompletionTimeoutPolicy timeout_policy,
+                                     bool completes_on_transmit) {
     const bool foreground = origin == tk::ConnectOrigin::Foreground;
     CommandOutcome out;
     if (timeout_ms <= 0) {
@@ -352,7 +353,8 @@ bool VehicleController::send_vcsec_(const std::string& name, Builder builder,
     // car never gets to idle/sleep).
     if (foreground) last_cmd_ticks_.store(xTaskGetTickCount());
     out = send_vcsec_locked_(name, std::move(builder), wp, deadline,
-                             origin, auth_fail_is_revocation, timeout_policy);
+                             origin, auth_fail_is_revocation, timeout_policy,
+                             completes_on_transmit);
     if (foreground) publish_command_outcome_(out);
     return out.success;
 }
@@ -360,7 +362,8 @@ bool VehicleController::send_vcsec_(const std::string& name, Builder builder,
 VehicleController::CommandOutcome VehicleController::send_vcsec_locked_(
         const std::string& name, Builder builder, WakePolicy wp,
         uint32_t deadline, tk::ConnectOrigin origin, bool auth_fail_is_revocation,
-        tk::CompletionTimeoutPolicy timeout_policy) {
+        tk::CompletionTimeoutPolicy timeout_policy,
+        bool completes_on_transmit) {
     CommandOutcome out;
     if (!command_identity_ready_()) {
         out.error = "runtime key is not verified; reboot or regenerate required";
@@ -403,7 +406,6 @@ VehicleController::CommandOutcome VehicleController::send_vcsec_locked_(
                         tk::CommandError::Outcome::DefinitelyFailed)));
             }
         };
-        const bool completes_on_transmit = (name == "Wake");
         cmd_id = command_runner_.enqueue(
             name, tk::BleDomain::VehicleSecurity, wp, timeout_ms, now_ms, {}, std::move(on_done),
             completes_on_transmit);
@@ -570,7 +572,8 @@ bool VehicleController::wake_up(int timeout_ms) {
     if (wake_budget_ms > 0) {
         (void)send_vcsec_("Wake", [](TeslaBLE::Client* c, uint8_t* b, size_t* l) {
             return c->build_vcsec_action_message(VCSEC_RKEAction_E_RKE_ACTION_WAKE_VEHICLE, b, l);
-        }, WakePolicy::NoWakeFail, wake_budget_ms);
+        }, WakePolicy::NoWakeFail, wake_budget_ms, tk::ConnectOrigin::Foreground, false,
+           tk::CompletionTimeoutPolicy::ForegroundWarn, true /* completes_on_transmit */);
     }
 
     // Confirm the infotainment actually woke by waiting for live charge telemetry: loop_task

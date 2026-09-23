@@ -164,7 +164,7 @@ Three non-auth hardening measures remain in place:
 
 The optional syslog forwarder (`main/syslog.cpp`, configured via `POST /set_syslog` or NVS `syslog_uri`) forwards unredacted logs over **cleartext UDP (RFC 5424)** on a configurable port (default 514) without encryption or authentication.
 - Anyone with packet-capture capabilities on the LAN path between the ESP32 and the syslog server can read operational logs.
-- Syslog forwards unredacted logs: runtime redaction rules from `/diag?redact=1` do not apply to Syslog. It includes the VIN on every REST command, at boot, and at startup, as well as vehicle BLE MAC and SSID during setup. While raw private keys and WiFi passwords are never deliberately logged, operational metadata and identifiers are transmitted in the clear.
+- Syslog forwards unredacted logs: runtime redaction rules from `/diag?redact=1` do not apply to Syslog. It includes the VIN on every REST command; VIN, vehicle BLE MAC and board MAC at boot; the WiFi SSID on connect. While raw private keys and WiFi passwords are never deliberately logged, operational metadata and identifiers are transmitted in the clear.
 - Recommend forwarding only to trusted collectors on a secure/isolated VLAN; leave syslog disabled on untrusted or shared networks.
 
 ## Core dump privacy invariant

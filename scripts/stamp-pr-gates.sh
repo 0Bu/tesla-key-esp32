@@ -17,13 +17,14 @@ fi
 cd "$root" || exit 2
 
 apply_gate_stamps() {
-  local body="$1" sha="$2" gates_arg="$3"
-  python3 - "$body" "$sha" "$gates_arg" <<'PY'
+  local body="$1" sha="$2"
+  shift 2
+  python3 - "$body" "$sha" "$@" <<'PY'
 import re, sys
 
 body = sys.argv[1]
 sha = sys.argv[2]
-raw_gates = sys.argv[3].split(",") if sys.argv[3] else []
+raw_gates = sys.argv[3:]
 only_confirmed = not body
 
 # Parse existing evidence comments associated with each gate
@@ -48,6 +49,8 @@ for item in raw_gates:
         continue
     if "=" in item:
         k, v = item.split("=", 1)
+        if any(c in v for c in ("\r", "\n")) or "-->" in v:
+            raise ValueError(f"evidence token contains forbidden characters: {v!r}")
         evidence_map[k] = v
     else:
         evidence_map[item] = existing_evidence.get(item, "passed")
@@ -127,9 +130,9 @@ BODY
     exit 1
   fi
 
-  # 2. Canary: selective gate confirmation
+  # 2. Canary: selective gate confirmation with comma in token
   local partial
-  partial="$(apply_gate_stamps "$sample_body" "$sha" "skill-audit=passed,pr-hygiene=passed")"
+  partial="$(apply_gate_stamps "$sample_body" "$sha" "skill-audit=report.md, 0 findings @ $sha" "pr-hygiene=clean")"
 
   local status
   status="$(gate_checkbox_status "$partial" "skill-audit")"
@@ -143,21 +146,25 @@ BODY
   status="$(gate_checkbox_status "$partial" "vehicle-command-audit")"
   [ "$status" = "absent" ] || { echo "self-test failed on unconfirmed vehicle-command-audit: $status" >&2; exit 1; }
 
-  # Verify evidence comments exist and re-stamping does not duplicate them
-  if ! echo "$partial" | grep -q "<!-- evidence: passed -->"; then
-    echo "self-test failed: evidence comment missing in partial stamp" >&2
+  # Verify evidence comments exist with preserved commas and re-stamping does not duplicate them
+  if ! echo "$partial" | grep -q "<!-- evidence: report.md, 0 findings @ $sha -->"; then
+    echo "self-test failed: evidence comment with comma missing or corrupted in partial stamp" >&2
     exit 1
   fi
   local restamped
-  restamped="$(apply_gate_stamps "$partial" "$sha" "skill-audit=passed,pr-hygiene=passed")"
+  restamped="$(apply_gate_stamps "$partial" "$sha" "skill-audit=report.md, 0 findings @ $sha" "pr-hygiene=clean")"
   local count
-  count="$(echo "$restamped" | grep -c "<!-- evidence: passed -->" || true)"
+  count="$(echo "$restamped" | grep -c "<!-- evidence: " || true)"
   [ "$count" -eq 2 ] || { echo "self-test failed: re-stamping duplicated evidence comments (count=$count)" >&2; exit 1; }
 
   # 3. All gates confirmed
-  local full_gates="skill-audit=passed,project-review=passed,pr-hygiene=passed,feature-docs=synced,vehicle-command-audit=passed"
   local all_stamped
-  all_stamped="$(apply_gate_stamps "$sample_body" "$sha" "$full_gates")"
+  all_stamped="$(apply_gate_stamps "$sample_body" "$sha" \
+    "skill-audit=passed" \
+    "project-review=passed" \
+    "pr-hygiene=passed" \
+    "feature-docs=synced" \
+    "vehicle-command-audit=passed")"
 
   status="$(gate_checkbox_status "$all_stamped" "skill-audit")"
   [ "$status" = "checked $sha" ] || { echo "self-test failed on skill-audit: $status" >&2; exit 1; }
@@ -169,6 +176,16 @@ BODY
   [ "$status" = "checked $sha" ] || { echo "self-test failed on feature-docs: $status" >&2; exit 1; }
   status="$(gate_checkbox_status "$all_stamped" "vehicle-command-audit")"
   [ "$status" = "checked $sha" ] || { echo "self-test failed on vehicle-command-audit: $status" >&2; exit 1; }
+
+  # 4. Canary: token injection attempts fail closed
+  if "$root/scripts/stamp-pr-gates.sh" --head "$sha" --gate "pr-hygiene=bad"$'\n'"token" >/dev/null 2>&1; then
+    echo "self-test failed: stamp-pr-gates accepted token with newline" >&2
+    exit 1
+  fi
+  if "$root/scripts/stamp-pr-gates.sh" --head "$sha" --gate "pr-hygiene=bad-->token" >/dev/null 2>&1; then
+    echo "self-test failed: stamp-pr-gates accepted token with -->" >&2
+    exit 1
+  fi
 
   echo "stamp-pr-gates: self-test PASS"
 }
@@ -193,6 +210,10 @@ parse_gate_arg() {
   esac
   if [ -z "$token" ]; then
     echo "stamp-pr-gates: empty evidence token for gate: $name" >&2
+    exit 2
+  fi
+  if [[ "$token" =~ [$'\r\n'] ]] || [[ "$token" == *"-->"* ]]; then
+    echo "stamp-pr-gates: evidence token must not contain newlines or HTML comment delimiters (-->)" >&2
     exit 2
   fi
   confirmed_gates+=("$name")
@@ -229,15 +250,12 @@ if ! printf '%s' "$target_head" | grep -Eq '^[0-9a-f]{40}$'; then
   exit 2
 fi
 
-# Build joined list of confirmed gates with evidence
-joined_gates="$(IFS=,; echo "${gate_entries[*]}")"
-
 if [ -n "$update_pr" ]; then
   command -v gh >/dev/null 2>&1 || { echo "stamp-pr-gates: gh CLI required for --update-pr" >&2; exit 2; }
   current_body="$(gh pr view "$update_pr" --repo 0Bu/tesla-key-esp32 --json body -q .body)"
-  updated_body="$(apply_gate_stamps "$current_body" "$target_head" "$joined_gates")"
+  updated_body="$(apply_gate_stamps "$current_body" "$target_head" "${gate_entries[@]}")"
   gh pr edit "$update_pr" --repo 0Bu/tesla-key-esp32 --body "$updated_body"
   echo "stamp-pr-gates: updated PR #$update_pr with confirmed gates for $target_head"
 else
-  apply_gate_stamps "" "$target_head" "$joined_gates"
+  apply_gate_stamps "" "$target_head" "${gate_entries[@]}"
 fi
