@@ -1,5 +1,5 @@
-// Telemetry caches: the protobuf→struct parsers, the persistent cache callbacks
-// (install_state_callbacks_), the background poll / sleep-gating loop (loop_task_fn_)
+// Telemetry caches: the protobuf→struct parsers,
+// the background poll / sleep-gating loop (loop_task_fn_)
 // and the data queries serving cached readings (get_charge_state, get_vehicle_status).
 // Part of the VehicleController implementation split — see vehicle_ctrl_internal.hpp.
 
@@ -307,13 +307,6 @@ void parse_closures_state(const CarServer_ClosuresState& c, ClosuresStateResult&
     }
 }
 } // namespace
-
-// ─── Cache callbacks (installed once from init) ───────────────────────────────
-
-void VehicleController::install_state_callbacks_() {
-    // With native orchestration layer, incoming telemetry responses are
-    // dispatched directly by process_rx_frame_ to on_*_state_ handlers.
-}
 
 static_assert(std::is_trivially_copyable_v<CarServer_ChargeState>);
 static_assert(std::is_trivially_copyable_v<CarServer_ClimateState>);
@@ -1165,7 +1158,7 @@ void VehicleController::drive_command_runner_() {
                     return client_->build_session_info_request_message(
                         UniversalMessage_Domain_DOMAIN_VEHICLE_SECURITY, buf, len);
                 case tk::TxAction::SendWake:
-                    ESP_LOGD(TAG, "Sending VCSEC Wake action");
+                    ESP_LOGI(TAG, "Sending VCSEC Wake action");
                     return client_->build_vcsec_action_message(
                         VCSEC_RKEAction_E_RKE_ACTION_WAKE_VEHICLE, buf, len);
                 case tk::TxAction::SendInfoSessionInfoRequest:
@@ -1199,7 +1192,10 @@ void VehicleController::drive_command_runner_() {
 
     if (res == 0 && tk::is_well_formed_ble_frame(tx_buffer_)) {
         if (ble_ && ble_->write(tx_buffer_)) {
-            command_runner_.notify_tx_complete(now_ms);
+            if (action == tk::TxAction::SendCommandPayload && cmd->completes_on_transmit) {
+                ESP_LOGI(TAG, "Sent payload for '%s' (completes on transmit)", cmd->name.c_str());
+            }
+            command_runner_.notify_tx_complete(action, now_ms);
         } else {
             ESP_LOGW(TAG, "BLE write failed for action %d", static_cast<int>(action));
             command_runner_.notify_tx_failed("BLE write failed");
@@ -1580,7 +1576,7 @@ void VehicleController::loop_task_fn_(void* arg) {
 
         // Background telemetry refresh (paired + window + connected): one domain per cycle,
         // rotating climate → drive → tires → closures so the full set refreshes every ~120 s
-        // without flooding the single FIFO command queue. These feed only the web UI / MQTT
+        // without flooding the command queue. These feed only the web UI / MQTT
         // (slow-changing: cabin temp, tyre pressure, odometer), so a relaxed 30 s cadence
         // costs nothing visible while cutting how often the BLE radio is active — each poll
         // on a weak link can desync into a multi-second retry burst that, via WiFi/BT radio
@@ -1733,6 +1729,9 @@ bool VehicleController::get_vehicle_status(VehicleStatusResult& out, tk::Connect
 
     struct StatusCompletion {
         SemaphoreHandle_t sem{xSemaphoreCreateBinary()};
+        std::atomic<bool> completed{false};
+        std::atomic<bool> success{false};
+        std::string error{};
         int32_t lock_state{0};
         int32_t sleep_status{0};
         int32_t user_presence{0};
@@ -1754,6 +1753,8 @@ bool VehicleController::get_vehicle_status(VehicleStatusResult& out, tk::Connect
         completion->lock_state = static_cast<int32_t>(vs.vehicleLockState);
         completion->sleep_status = static_cast<int32_t>(vs.vehicleSleepStatus);
         completion->user_presence = static_cast<int32_t>(vs.userPresence);
+        completion->success.store(true);
+        completion->completed.store(true);
         if (command_generation_.load() == generation) xSemaphoreGive(completion->sem);
     };
 
@@ -1762,9 +1763,16 @@ bool VehicleController::get_vehicle_status(VehicleStatusResult& out, tk::Connect
         vehicle_status_callback_ = std::move(callback);
         const uint32_t now_ms = pdTICKS_TO_MS(xTaskGetTickCount());
         const uint32_t timeout_ms = remaining_ms_(deadline);
+        auto on_complete = [completion](bool ok, const std::string& err) {
+            if (!ok && !completion->completed.load()) {
+                completion->error = err;
+                completion->completed.store(true);
+                xSemaphoreGive(completion->sem);
+            }
+        };
         const uint32_t cmd_id = command_runner_.enqueue(
             "VCSEC Status Poll", tk::BleDomain::VehicleSecurity, tk::WakePolicy::NoWakeSkip,
-            timeout_ms, now_ms, {}, nullptr);
+            timeout_ms, now_ms, {}, std::move(on_complete));
         if (cmd_id == 0) {
             vehicle_status_callback_ = nullptr;
             return false;
@@ -1788,15 +1796,26 @@ bool VehicleController::get_vehicle_status(VehicleStatusResult& out, tk::Connect
         return false;
     }
 
-    bool ok = xSemaphoreTake(completion->sem, ticks_until_(deadline)) == pdTRUE &&
-              command_generation_.load() == generation;
+    const bool ok = (xSemaphoreTake(completion->sem, ticks_until_(deadline)) == pdTRUE) &&
+                    (command_generation_.load() == generation) &&
+                    completion->success.load();
     if (!ok) {
-        note_completion_timeout_(
-            "VCSEC Status Poll",
-            origin == tk::ConnectOrigin::Foreground
-                ? tk::CompletionTimeoutPolicy::ForegroundWarn
-                : tk::CompletionTimeoutPolicy::ExpectedSilent);
-        invalidate_and_flush_(generation);
+        if (!completion->completed.load()) {
+            note_completion_timeout_(
+                "VCSEC Status Poll",
+                origin == tk::ConnectOrigin::Foreground
+                    ? tk::CompletionTimeoutPolicy::ForegroundWarn
+                    : tk::CompletionTimeoutPolicy::ExpectedSilent);
+            invalidate_and_flush_(generation);
+        } else {
+            if (origin == tk::ConnectOrigin::Foreground) {
+                ESP_LOGW(TAG, "vehicle-status poll failed before deadline: %s",
+                         completion->error.empty() ? "cancelled (e.g. link lost)" : completion->error.c_str());
+            } else {
+                ESP_LOGD(TAG, "vehicle-status poll cancelled before deadline (e.g. link lost): %s",
+                         completion->error.c_str());
+            }
+        }
     }
     {
         tk::SemGuard g(vehicle_mutex_);

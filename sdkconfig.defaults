@@ -136,6 +136,8 @@ CONFIG_FREERTOS_WATCHPOINT_END_OF_STACK=y
 # (docs/adr/0004-drop-esp32c5-target.md).
 CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y
 CONFIG_ESP_COREDUMP_DATA_FORMAT_ELF=y
+# CONFIG_ESP_COREDUMP_CAPTURE_DRAM must remain off so core dumps capture only task stacks, never
+# full DRAM (which could contain decrypted private keys or credentials).
 
 # ── Task Watchdog Timer (TWDT) ──
 # Turn a genuinely-wedged task into a clean, automatic reboot instead of a silent hang. The heap

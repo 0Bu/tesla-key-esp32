@@ -202,7 +202,7 @@ public:
     // callback persists the VIN journal + complete ConfigBlob while command_mutex_ still binds
     // `previous_key_id`; auto-rekey therefore cannot change the fingerprint between staging,
     // rotation and result classification. Any staged attempt gates all signing until the caller
-    // reboots, because this Vehicle instance still owns the old in-memory VIN.
+    // reboots, because this VehicleController instance still owns the old in-memory VIN.
     NewVehicleResetResult reset_for_new_vehicle(const VinTransitionStager& stage);
 
     const std::string& vin() const { return vin_; }
@@ -263,6 +263,7 @@ public:
     // if it succeeded or got no response at all (car unreachable / timed out). Lets the
     // UI tell "the car rejected this" apart from "the car couldn't be reached".
     std::string last_command_error() const;
+    void set_last_command_error(const std::string& err);
 
     // NOTE: generic runtime-config persistence deliberately does NOT live here. The HTTP
     // layer talks to the tesla_cfg store directly (g_config in http_handlers.hpp) — the
@@ -317,8 +318,8 @@ private:
     QueueHandle_t ble_event_queue_{nullptr};
     std::atomic<bool> ble_event_overflow_{false};
 
-    // tesla-ble invokes telemetry callbacks synchronously while Vehicle is serialized by
-    // vehicle_mutex_. The callbacks therefore copy only nanopb POD into these latest-value slots;
+    // Native telemetry dispatch runs synchronously while serialized by
+    // vehicle_mutex_. The handlers therefore copy only nanopb POD into these latest-value slots;
     // vehicle_loop parses strings and updates the public caches after releasing vehicle_mutex_.
     enum PendingTelemetry : uint32_t {
         PendingCharge   = 1u << 0,
@@ -404,11 +405,6 @@ private:
         std::string error;
     };
 
-    // Install the persistent set_*_state_callback hooks that keep the last_known_*
-    // caches fresh (charge + the read-only telemetry domains). Called once from init();
-    // lives in vehicle_telemetry.cpp next to the protobuf→struct parsers it uses.
-    void install_state_callbacks_();
-
     bool ensure_connected_until_(uint32_t deadline, tk::ConnectOrigin origin);
 
     // Drop the BLE link, reset the in-memory peer sessions, erase the
@@ -447,7 +443,8 @@ private:
                      tk::ConnectOrigin origin = tk::ConnectOrigin::Foreground,
                      bool auth_fail_is_revocation = false,
                      tk::CompletionTimeoutPolicy timeout_policy =
-                         tk::CompletionTimeoutPolicy::ForegroundWarn);
+                         tk::CompletionTimeoutPolicy::ForegroundWarn,
+                     bool completes_on_transmit = false);
     bool send_infotainment_(const std::string& name, Builder builder, int timeout_ms,
                             WakePolicy wp = WakePolicy::WakeIfNeeded);
     // Same runner with command_mutex_ + cmd_in_flight_ already held. The absolute deadline
@@ -460,7 +457,8 @@ private:
     CommandOutcome send_vcsec_locked_(const std::string& name, Builder builder,
                                       WakePolicy wp, uint32_t deadline,
                                       tk::ConnectOrigin origin, bool auth_fail_is_revocation,
-                                      tk::CompletionTimeoutPolicy timeout_policy);
+                                      tk::CompletionTimeoutPolicy timeout_policy,
+                                      bool completes_on_transmit = false);
 
     // Build the per-command result callback. auth_fail_is_revocation gates whether an
     // "authentication failed" reply may count toward the two-strike pairing_lost_ heuristic
@@ -517,7 +515,7 @@ private:
 
     SemaphoreHandle_t vehicle_mutex_{nullptr};
     // Serializes a whole command/query cycle so concurrent HTTP requests and the automatic
-    // health/pairing task cannot interleave entries in tesla-ble's single FIFO.
+    // health/pairing task cannot interleave entries in the command FIFO.
     SemaphoreHandle_t command_mutex_{nullptr};
     // Guards the last_known_* caches below: they hold std::string members written by
     // vehicle_loop after deferred parsing and read by HTTP/MQTT tasks, so an unlocked
@@ -592,13 +590,9 @@ private:
     std::atomic<uint32_t> last_cmd_ticks_{0};  // ticks of the last real command (0 = never)
     static constexpr uint32_t kActiveWindowMs = 300000;  // 5 min command-recency window
 
-    // Set when a library call (BLE rx parse or loop()) throws an uncaught C++ exception on
-    // corrupt RX. The tesla-ble framer parses Tesla's length-prefixed messages out of the
-    // BLE stream; a lossy link desyncs the framing and some corrupt inputs make it throw
-    // (out_of_range / bad_alloc). Exceptions are enabled but the library never catches, so an
-    // escaping throw → std::terminate → abort() → reboot (observed on a parked, awake car).
-    // We catch at our call boundary and set this; loop_task then drops the BLE link once to
-    // clear the library's rx_buffer and re-sync, turning the reboot into a brief reconnect.
+    // Set when an unexpected error occurs during BLE rx framing or processing.
+    // Exceptions are caught at our boundary and set this; loop_task then drops the BLE link once to
+    // reset RX framing and re-sync sessions, turning an error into a brief reconnect.
     std::atomic<bool> ble_fault_{false};
 
     // True while a serialized command/query (including the VCSEC health probe) is enqueued and
@@ -623,12 +617,10 @@ private:
     tk::CompletionTimeoutState completion_timeout_{};
 
     // Consecutive failed signed round-trips seen in make_result_cb_ (foreground commands +
-    // the VCSEC health poll). On an awake, busy link the tesla-ble framer's single rx buffer
-    // can desync ("buffer recovery failed") and most ops time out, but the library RECOVERS
-    // internally WITHOUT throwing — so ble_fault_ above never fires and the storm can persist
-    // for minutes (stale telemetry + multi-second command latency). After kCmdFailDropStreak
+    // the VCSEC health poll). On an awake, busy link an unrecoverable desync or repeated auth
+    // failure can cause consecutive timeouts. After kCmdFailDropStreak
     // failures in a row, while paired, we proactively raise ble_fault_ to drop the link once:
-    // the same clean rx-buffer/session resync, just driven by soft failures instead of a
+    // a clean link and session resync, driven by soft failures instead of a
     // throw. Reset on any success. Paired-gated so it can't disturb the enrolment handshake
     // (where command failures are expected). Background telemetry-poll failures do NOT reach
     // make_result_cb_, so this counts commands + health poll only — a deliberate backstop.

@@ -73,9 +73,11 @@ Before committing or pushing, verify workspace cleanliness, code style, unit tes
 
 ## Phase 2: Commit, Push & PR Creation
 
-1. **PR Hygiene Screen (`$pr-hygiene`)**:
-   - Ensure all commit messages, PR titles, and PR descriptions are strictly written in **English**.
-   - Verify that no private IP addresses (use RFC 5737/3849 documentation addresses if needed), real MAC addresses, or real vehicle VINs are committed.
+1. **Pre-PR Screen (`$skill-audit` & `$pr-hygiene`)**:
+   - Run `$skill-audit` locally to ensure all canonical skills and subagent manifests match repository conventions.
+   - Run `$pr-hygiene` screen:
+     - Ensure all commit messages, PR titles, and PR descriptions are strictly written in **English**.
+     - Verify that no private IP addresses (use RFC 5737/3849 documentation addresses if needed), real MAC addresses, or real vehicle VINs are committed.
 2. **Commit Changes**:
    Stage only the relevant files and commit using conventional commit format:
    ```bash
@@ -87,18 +89,19 @@ Before committing or pushing, verify workspace cleanliness, code style, unit tes
    BRANCH=$(git rev-parse --abbrev-ref HEAD)
    git push -u origin "$BRANCH"
    ```
-4. **Create PR with Canonical Gate Stamps**:
+4. **Create PR with Canonical Gate Checkboxes**:
    Determine the current HEAD SHA via `HEAD_SHA=$(git rev-parse HEAD)`.
-   Generate the PR body including the 4 canonical gate checkboxes:
+   Generate the PR body including the 5 canonical gate checkboxes. Note that `$skill-audit` and `$pr-hygiene` must actually be executed and pass cleanly for the current commit prior to PR creation (do not pre-tick without running):
    ```markdown
    ## Summary
    <Concise description of changes in English>
 
    ## PR Gates
    - [x] `$skill-audit` clean — PR create/push gate @ <FULL_40_HEX_HEAD_SHA>
-   - [x] `$project-review` clean — merge gate @ <FULL_40_HEX_HEAD_SHA>
+   - [ ] `$project-review` clean — merge gate @ <full-40-hex-sha>
    - [x] `$pr-hygiene` clean — content gate @ <FULL_40_HEX_HEAD_SHA>
-   - [x] `$feature-docs` synced — merge gate @ <FULL_40_HEX_HEAD_SHA>
+   - [ ] `$feature-docs` synced — merge gate @ <full-40-hex-sha>
+   - [ ] `$vehicle-command-audit` clean — merge gate @ <full-40-hex-sha>
    ```
    Submit the pull request:
    ```bash
@@ -115,10 +118,18 @@ Before committing or pushing, verify workspace cleanliness, code style, unit tes
    gh pr checks "$PR" --watch
    ```
 2. **Audit & Stamp PR Gates**:
-   Ensure all gate records in the PR body match the exact current HEAD SHA:
+   Run the respective audit skills (`$project-review`, `$feature-docs`, `$vehicle-command-audit`) against the current HEAD.
+   Once each audit passes cleanly, stamp the verified gates on the PR using confirmation tokens naming the audit results and SHA:
    ```bash
-   ./scripts/stamp-pr-gates.sh --update-pr "$PR"
+   HEAD=$(git rev-parse HEAD)
+   ./scripts/stamp-pr-gates.sh --update-pr "$PR" \
+     --gate skill-audit="tools/agent-config/check.mjs @ $HEAD" \
+     --gate pr-hygiene="clean @ $HEAD" \
+     --gate project-review="0 findings @ $HEAD" \
+     --gate feature-docs="docs/FEATURES.md @ $HEAD" \
+     --gate vehicle-command-audit="scripts/test-tesla-ble-harness.sh @ $HEAD"
    ```
+   (Only include conditional gates `--gate feature-docs=...` or `--gate vehicle-command-audit=...` if relevant to the changed paths.)
 3. **Fix & Re-Check Loop**:
    - If any CI job fails, inspect the failure logs:
      ```bash
@@ -126,16 +137,32 @@ Before committing or pushing, verify workspace cleanliness, code style, unit tes
      ```
    - Implement the necessary fix locally.
    - Re-run all Phase 1 checks locally.
-   - Commit and push the fix:
+   - Commit the fix locally:
      ```bash
      git add <modified-files>
      git commit -m "fix: resolve CI failure"
+     NEW_HEAD=$(git rev-parse HEAD)
+     ```
+   - Re-run `$skill-audit` and `$pr-hygiene` against the new commit before updating PR gates for the push:
+     Run `$skill-audit` and `$pr-hygiene` locally to verify they pass cleanly (do not stamp without running). The pre-push hook requires current `$skill-audit` and `$pr-hygiene` records on the PR before allowing a push to an open PR. Stamp them first:
+     ```bash
+     ./scripts/stamp-pr-gates.sh --update-pr "$PR" --head "$NEW_HEAD" \
+       --gate skill-audit="tools/agent-config/check.mjs @ $NEW_HEAD" \
+       --gate pr-hygiene="clean @ $NEW_HEAD"
+     ```
+   - Push the fix:
+     ```bash
      git push origin "$BRANCH"
      ```
-   - Re-stamp the PR gates for the new HEAD commit:
+   - Re-audit and stamp the merge gates for the new HEAD commit:
+     Re-run the relevant audit skills (`$skill-audit`, `$pr-hygiene`, `$project-review`, plus any applicable conditional audit skills `$feature-docs` or `$vehicle-command-audit`) against `$NEW_HEAD`. Only after each audit passes cleanly, re-stamp all gates on the PR:
      ```bash
-     ./scripts/stamp-pr-gates.sh --update-pr "$PR"
+     ./scripts/stamp-pr-gates.sh --update-pr "$PR" --head "$NEW_HEAD" \
+       --gate skill-audit="tools/agent-config/check.mjs @ $NEW_HEAD" \
+       --gate pr-hygiene="clean @ $NEW_HEAD" \
+       --gate project-review="0 findings @ $NEW_HEAD"
      ```
+     (Include conditional `--gate feature-docs=...` or `--gate vehicle-command-audit=...` if relevant.)
    - Repeat until all PR checks are green and all gates are satisfied.
 
 ---
@@ -143,16 +170,20 @@ Before committing or pushing, verify workspace cleanliness, code style, unit tes
 ## Phase 4: Canonical Merge, Release & OTA Deployment
 
 ### 1. Canonical Squash Merge
-Once all PR checks pass and gates are stamped, execute the canonical squash merge:
+Once all PR checks pass and gates are stamped, obtain and verify the PR head SHA:
 ```bash
-set -euo pipefail
 PR_HEAD=$(gh pr view "$PR" --json headRefOid -q .headRefOid)
 [[ "$PR_HEAD" =~ ^[0-9a-f]{40}$ ]] || { echo "REFUSING: invalid PR head SHA" >&2; exit 1; }
+```
 
-gh --repo github.com/0Bu/tesla-key-esp32 pr merge "$PR" \
-  --match-head-commit "$PR_HEAD" --squash
+Execute the single standalone canonical squash merge command using literal `<numeric_pr>` and `<full_40_hex_head_sha>` (never compounded, chained, or using shell variables):
+```bash
+gh --repo github.com/0Bu/tesla-key-esp32 pr merge <numeric_pr> --match-head-commit <full_40_hex_head_sha> --squash
+```
 
-MERGE_SHA=$(gh pr view "$PR" --json mergeCommit -q .mergeCommit.oid)
+Then retrieve the merge commit SHA:
+```bash
+MERGE_SHA=$(gh pr view <numeric_pr> --json mergeCommit -q .mergeCommit.oid)
 [[ "$MERGE_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "REFUSING: invalid merge commit SHA" >&2; exit 1; }
 ```
 
@@ -178,7 +209,7 @@ echo "Published Release: $LATEST_TAG (version: $RELEASE_VERSION)"
 ```
 
 ### 3. OTA Update on Target Board
-Target device address defaults to `tesla-key-esp32.local` (with optional `DEVICE_IP` override, e.g. `192.168.1.163`):
+Target device address defaults to `tesla-key-esp32.local` (with optional `DEVICE_IP` override, e.g. `192.0.2.100`):
 ```bash
 set -euo pipefail
 TARGET_HOST="${DEVICE_IP:-tesla-key-esp32.local}"

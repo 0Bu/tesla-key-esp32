@@ -53,9 +53,10 @@ docs for personal/private information and non-English content. Neither $project-
 $skill-audit being clean establishes it; run $pr-hygiene separately.
 
 $vehicle-command-audit only arms when the diff reaches vehicle-command/BLE paths:
-main/vehicle_*, main/ble_client.*, main/logic/command_registry.hpp, patches/tesla-ble/,
-main/idf_component.yml, or .agents/skills/vehicle-command-audit/ — delete its line on PRs
-not touching the vehicle command protocol.
+main/vehicle_*, main/ble_client.*, main/logic/{command_registry,command_runner,ble_dispatcher,rx_framing,session_state,command_result,key_rotation,ble_chunk,ble_deferred_event,wake_poll,active_window}.hpp,
+patches/tesla-ble/, main/idf_component.yml, test/test_tesla_ble_harness.cpp,
+scripts/test-tesla-ble-harness.sh, docs/adr/0005-tesla-ble-seam.md, or .agents/skills/vehicle-command-audit/ —
+delete its line on PRs not touching the vehicle command protocol.
 -->
 - [ ] `$skill-audit` clean — PR create/push gate @ <full-40-hex-sha>
 - [ ] `$project-review` clean — merge gate @ <full-40-hex-sha>

@@ -141,7 +141,7 @@ constexpr KeyRotationMarkerProbe classify_key_rotation_marker_probe(bool probe_o
 
 // Pure boot-recovery contract used by VehicleController::init(). A pending marker may only be
 // retired after every persisted session record was erased successfully. A torn/failed cleanup
-// therefore leaves init blocked; the Vehicle object is never constructed and cannot load/sign
+// therefore leaves init blocked; the controller cannot complete initialization and cannot load/sign
 // with a key/session combination whose transaction did not reach its durable terminal state.
 constexpr KeyRotationBootState decide_key_rotation_boot(bool marker_present,
                                                          bool cleanup_attempted,
@@ -175,7 +175,17 @@ enum class KeyRegenerationResult : uint8_t {
 template <typename Client, typename Persist>
 KeyRegenerationResult regenerate_private_key(Client& client, Persist&& persist,
                                              size_t capacity = kPrivateKeyPemCapacity) {
+    struct SecureWipe {
+        std::vector<uint8_t>& buf;
+        ~SecureWipe() {
+            if (!buf.empty()) {
+                volatile uint8_t* p = buf.data();
+                for (size_t i = 0; i < buf.size(); ++i) p[i] = 0;
+            }
+        }
+    };
     std::vector<uint8_t> old_key;
+    SecureWipe wipe_old{old_key};
     bool had_old = false;
     if (client.has_private_key()) {
         old_key.resize(capacity);
@@ -195,6 +205,7 @@ KeyRegenerationResult regenerate_private_key(Client& client, Persist&& persist,
         return KeyRegenerationResult::CreateFailed;
     }
     std::vector<uint8_t> new_key(capacity);
+    SecureWipe wipe_new{new_key};
     size_t new_len = new_key.size();
     if (client.get_private_key(new_key.data(), new_key.size(), &new_len) != 0 ||
         new_len == 0 || new_len > new_key.size()) {
