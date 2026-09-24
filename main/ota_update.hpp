@@ -20,29 +20,32 @@ struct OtaStatus {
     std::string available;         // latest version seen by the last check (if any)
     bool        update_available;  // last check found a newer version
     std::string current;           // running version at the last check
+    unsigned    target_pr{0};      // 0 for main channel, >0 if PR preview channel
 };
 
 struct OtaCheckResult {
     bool        ok;                 // check completed (manifest fetched + parsed)
-    bool        update_available;   // available > current
+    bool        update_available;   // eligible update available
     std::string current;
     std::string available;
     std::string reason;
+    unsigned    target_pr{0};
 };
 
 // Fetch the manifest and compare versions. Blocking (HTTPS GET, a few seconds) —
 // runs inside the background task spawned by ota_check_start(), not on the HTTP task.
-OtaCheckResult ota_check();
+// pr_number == 0 checks main channel; pr_number > 0 checks PR preview channel.
+OtaCheckResult ota_check(unsigned pr_number = 0);
 
 // Kick off a background version check (HTTPS manifest fetch). Returns false if a
 // check or update is already running. Poll ota_get_status(): state goes Checking →
 // Idle (then read update_available/available/current) or Error. Keeps the slow TLS
 // fetch off the HTTP server task so the UI and evcc stay responsive.
-bool ota_check_start();
+bool ota_check_start(unsigned pr_number = 0);
 
 // Kick off a background download+install task. Returns false if one is already
 // running. On success the device reboots into the new image.
-bool ota_start();
+bool ota_start(unsigned pr_number = 0);
 
 // Snapshot of the current OTA state (for GET /ota/status polling).
 OtaStatus ota_get_status();

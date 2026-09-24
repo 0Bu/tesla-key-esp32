@@ -847,6 +847,60 @@ static void test_ota_contract() {
     CHECK(tk::compare_ota_versions("1.2.3-dev", "1.2.3") == Order::Equal);
     CHECK(tk::compare_ota_versions("01.2.3", "1.2.2") == Order::Invalid);
 
+    // PR suffix parsing and targeted OTA availability
+    CHECK(tk::parse_pr_suffix("PR-326") == 326);
+    CHECK(tk::parse_pr_suffix("PR-1") == 1);
+    CHECK(tk::parse_pr_suffix("PR-9999999") == 9999999);
+    CHECK(tk::parse_pr_suffix("PR-0") == 0);
+    CHECK(tk::parse_pr_suffix("PR-") == 0);
+    CHECK(tk::parse_pr_suffix("PR-abc") == 0);
+    CHECK(tk::parse_pr_suffix("dev") == 0);
+    CHECK(tk::parse_pr_suffix("") == 0);
+
+    CHECK(tk::parse_version_pr("1.5.4-PR-326") == 326);
+    CHECK(tk::parse_version_pr("1.5.4") == 0);
+    CHECK(tk::parse_version_pr("invalid") == 0);
+
+    CHECK(tk::parse_pr_query("326") == 326);
+    CHECK(tk::parse_pr_query("0") == 0);
+    CHECK(tk::parse_pr_query("01") == 0);
+    CHECK(tk::parse_pr_query("-1") == 0);
+    CHECK(tk::parse_pr_query("abc") == 0);
+    CHECK(tk::parse_pr_query("") == 0);
+
+    char url_buf[128];
+    CHECK(tk::format_pr_manifest_url(326, url_buf, sizeof(url_buf)));
+    CHECK(std::string_view(url_buf) == "https://0bu.github.io/tesla-key-esp32/PR/326/manifest.json");
+    CHECK(!tk::format_pr_manifest_url(0, url_buf, sizeof(url_buf)));
+    CHECK(!tk::format_pr_manifest_url(326, url_buf, 30));
+
+    CHECK(tk::format_pr_firmware_url(326, "", url_buf, sizeof(url_buf)));
+    CHECK(std::string_view(url_buf) == "https://0bu.github.io/tesla-key-esp32/PR/326/tesla-key-esp32.bin");
+    CHECK(tk::format_pr_firmware_url(326, "-s3", url_buf, sizeof(url_buf)));
+    CHECK(std::string_view(url_buf) == "https://0bu.github.io/tesla-key-esp32/PR/326/tesla-key-esp32-s3.bin");
+    CHECK(!tk::format_pr_firmware_url(326, "-invalid", url_buf, sizeof(url_buf)));
+    CHECK(!tk::format_pr_firmware_url(0, "", url_buf, sizeof(url_buf)));
+
+    // Standard channel (target_pr == 0)
+    CHECK(tk::is_ota_update_available("1.5.5", "1.5.4", 0));
+    CHECK(!tk::is_ota_update_available("1.5.4", "1.5.4", 0));
+    CHECK(!tk::is_ota_update_available("1.5.3", "1.5.4", 0));
+    // Returning from PR build to stable release of same core
+    CHECK(tk::is_ota_update_available("1.5.4", "1.5.4-PR-326", 0));
+    // PR candidate not accepted on standard channel
+    CHECK(!tk::is_ota_update_available("1.5.4-PR-326", "1.5.4", 0));
+
+    // Targeted PR channel (target_pr == 326)
+    CHECK(tk::is_ota_update_available("1.5.4-PR-326", "1.5.4", 326));
+    CHECK(tk::is_ota_update_available("1.5.4-PR-326", "1.5.4-PR-326", 326));
+    CHECK(tk::is_ota_update_available("1.5.5-PR-326", "1.5.4", 326));
+    // Wrong PR candidate rejected
+    CHECK(!tk::is_ota_update_available("1.5.4-PR-227", "1.5.4", 326));
+    // Downgrade to older core rejected
+    CHECK(!tk::is_ota_update_available("1.4.30-PR-326", "1.5.4", 326));
+    // Candidate without PR suffix rejected on PR channel
+    CHECK(!tk::is_ota_update_available("1.5.4", "1.5.4", 326));
+
     char unterminated[32];
     std::memset(unterminated, '1', sizeof(unterminated));
     const auto unterminated_view = tk::bounded_c_string_view(unterminated);

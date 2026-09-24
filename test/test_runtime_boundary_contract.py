@@ -2089,7 +2089,7 @@ def require_ota_fetch_contract(ota_source: str, ota_logic: str,
         raise AssertionError("OTA manifest transport added an unbounded secondary allocation")
 
     required_check_tokens = (
-        "http_get_to_buffer(CONFIG_TESLA_OTA_MANIFEST_URL, body)",
+        "http_get_to_buffer(manifest_url, body)",
         "tk::json_materialize<cJSON>",
         "cJSON_ParseWithLengthOpts(",
         "tk::inspect_ota_manifest(j.get())",
@@ -2099,20 +2099,20 @@ def require_ota_fetch_contract(ota_source: str, ota_logic: str,
         "tk::canonical_ota_version(available)",
         "tk::canonical_ota_version(res.current)",
         "res.available.assign(available.data(), available.size());",
-        "tk::compare_ota_versions(res.available, res.current)",
+        "tk::is_ota_update_available(res.available, res.current, pr_number)",
     )
     for token in required_check_tokens:
         if token not in check:
             raise AssertionError(f"OTA manifest integration contract missing {token!r}")
     ordered = (
-        "http_get_to_buffer(CONFIG_TESLA_OTA_MANIFEST_URL, body)",
+        "http_get_to_buffer(manifest_url, body)",
         "tk::json_materialize<cJSON>",
         "tk::inspect_ota_manifest(j.get())",
         "parse_end != body.c_str() + body.size()",
         "std::string{}.swap(body);",
         "tk::canonical_ota_version(available)",
         "res.available.assign(available.data(), available.size());",
-        "tk::compare_ota_versions(res.available, res.current)",
+        "tk::is_ota_update_available(res.available, res.current, pr_number)",
     )
     for before, after in zip(ordered, ordered[1:]):
         require_before("OTA validate/release/copy ordering", check, before, after)

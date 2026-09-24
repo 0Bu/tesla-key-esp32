@@ -426,3 +426,63 @@ test("editVin, editMqtt, editSyslog render server reason on HTTP 4xx/5xx", async
   assert.equal(messages.at(-1).kind, "err");
   assert.equal(messages.at(-1).message, "invalid syslog port");
 });
+
+test("getTargetPr extracts PR number from search query or hash and validates bounds", () => {
+  const { context } = loadUi();
+  assert.equal(context.getTargetPr(), 0);
+
+  context.location.search = "?pr=326";
+  assert.equal(context.getTargetPr(), 326);
+
+  context.location.search = "?foo=bar&pr=42";
+  assert.equal(context.getTargetPr(), 42);
+
+  context.location.search = "?pr=0";
+  assert.equal(context.getTargetPr(), 0);
+
+  context.location.search = "?pr=-5";
+  assert.equal(context.getTargetPr(), 0);
+
+  context.location.search = "?pr=abc";
+  assert.equal(context.getTargetPr(), 0);
+
+  context.location.search = "";
+  context.location.hash = "#326";
+  assert.equal(context.getTargetPr(), 326);
+
+  context.location.hash = "#pr=123";
+  assert.equal(context.getTargetPr(), 123);
+
+  context.location.hash = "#invalid";
+  assert.equal(context.getTargetPr(), 0);
+});
+
+test("OTA check and render incorporate target PR when set", async () => {
+  const { context, element } = loadUi();
+  context.location.search = "?pr=326";
+
+  context.render({
+    ip: "192.0.2.100",
+    version: "1.5.4",
+    key_present: false
+  });
+
+  const vl = element("verLink");
+  assert.equal(vl.textContent, "v1.5.4 [PR #326]");
+  assert.equal(vl.title, "Tap to check for PR #326 updates");
+  assert.equal(vl["aria-label"], "Check for PR #326 firmware updates");
+
+  let requestedUrl = null;
+  context.fetch = async (url) => {
+    requestedUrl = url;
+    return {
+      ok: true,
+      status: 200,
+      async json() { return { started: true }; }
+    };
+  };
+
+  context.otaCheckPoll = () => {};
+  await context.otaCheck();
+  assert.match(requestedUrl, /\/ota\/check\?ms=\d+&pr=326/);
+});

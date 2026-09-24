@@ -223,6 +223,7 @@ struct OtaStatusPod {
     OtaState state{OtaState::Idle};
     int progress{0};
     bool update_available{false};
+    unsigned target_pr{0};
     std::array<char, kOtaStatusMessageCapacity> message{};
     std::array<char, kOtaStatusVersionCapacity> available{};
     std::array<char, kOtaStatusVersionCapacity> current{};
@@ -237,6 +238,7 @@ static OtaStatusPod initial_status() noexcept {
 static std::atomic<SemaphoreHandle_t> s_lock{nullptr};
 static OtaStatusPod                   s_status = initial_status();
 static std::atomic<bool>              s_running{false};    // a check or download task is active
+static std::atomic<unsigned>          s_target_pr{0};      // target PR for current check/update session
 
 static SemaphoreHandle_t ensure_lock() {
     SemaphoreHandle_t lock = s_lock.load(std::memory_order_acquire);
@@ -260,9 +262,10 @@ static void set_state(OtaState st, int pct, const char* msg) {
     if (!lock) return;
     tk::SemGuard g(lock);
     if (!g) return;
-    s_status.state    = st;
-    s_status.progress = pct;
-    s_status.message  = message;
+    s_status.state     = st;
+    s_status.progress  = pct;
+    s_status.target_pr = s_target_pr.load(std::memory_order_relaxed);
+    s_status.message   = message;
 }
 
 static OtaStatus unavailable_status_snapshot() {
@@ -284,7 +287,8 @@ OtaStatus ota_get_status() {
     // Any allocation happens after releasing the status lock. A failed materialization is caught
     // by the HTTP/task boundary and cannot leave a partially published shared generation.
     return {snapshot.state, snapshot.progress, snapshot.message.data(),
-            snapshot.available.data(), snapshot.update_available, snapshot.current.data()};
+            snapshot.available.data(), snapshot.update_available, snapshot.current.data(),
+            snapshot.target_pr};
 }
 
 bool ota_is_busy() {
@@ -390,15 +394,29 @@ static bool http_get_to_buffer(const char* url, std::string& out) {
 
 // ─── Check for a newer release ──────────────────────────────────────────────────
 
-OtaCheckResult ota_check() {
+[[gnu::noinline]] static std::string resolve_manifest_url(unsigned pr_number) {
+    if (pr_number > 0) {
+        char buf[80];
+        if (tk::format_pr_manifest_url(pr_number, buf, sizeof(buf))) {
+            return std::string(buf);
+        }
+    }
+    return std::string(CONFIG_TESLA_OTA_MANIFEST_URL);
+}
+
+OtaCheckResult ota_check(unsigned pr_number) {
     OtaCheckResult res{};
+    res.target_pr = pr_number;
     const std::string_view current = running_version();
     res.current.assign(current.data(), current.size());
 
-    ESP_LOGI(TAG, "checking %s (running %s)", CONFIG_TESLA_OTA_MANIFEST_URL, res.current.c_str());
+    const std::string manifest_url_holder = resolve_manifest_url(pr_number);
+    const char* manifest_url = manifest_url_holder.c_str();
+
+    ESP_LOGI(TAG, "checking %s (running %s)", manifest_url, res.current.c_str());
 
     std::string body;
-    if (!http_get_to_buffer(CONFIG_TESLA_OTA_MANIFEST_URL, body)) {
+    if (!http_get_to_buffer(manifest_url, body)) {
         res.ok     = false;
         res.reason = "could not reach update server";
         return res;
@@ -444,8 +462,7 @@ OtaCheckResult ota_check() {
     res.available.assign(available.data(), available.size());
 
     res.ok               = true;
-    res.update_available = tk::compare_ota_versions(res.available, res.current) ==
-                           tk::OtaVersionOrder::Newer;
+    res.update_available = tk::is_ota_update_available(res.available, res.current, pr_number);
     res.reason           = res.update_available ? "update available" : "up to date";
     ESP_LOGI(TAG, "available %s — %s", res.available.c_str(), res.reason.c_str());
     return res;
@@ -457,6 +474,7 @@ static void set_check_done(const OtaCheckResult& r) {
     candidate.state = r.ok ? OtaState::Idle : OtaState::Error;
     candidate.progress = 0;
     candidate.update_available = r.update_available;
+    candidate.target_pr = r.target_pr;
     copy_status_text(candidate.message, r.reason.c_str());
     copy_status_text(candidate.available, r.available.c_str());
     copy_status_text(candidate.current, r.current.c_str());
@@ -469,7 +487,8 @@ static void ota_check_task(void*) {
         // result std::string ops can all bad_alloc) as a terminal Error state — NEVER let it unwind
         // into the FreeRTOS C trampoline and reboot the device mid-check (issue #204).
         try {
-            OtaCheckResult r = ota_check();   // blocking HTTPS GET, runs off the HTTP task
+            const unsigned pr = s_target_pr.load(std::memory_order_acquire);
+            OtaCheckResult r = ota_check(pr);   // blocking HTTPS GET, runs off the HTTP task
             set_check_done(r);
         } catch (const std::exception& e) {
             ESP_LOGE(TAG, "OTA check task exception: %s", e.what());
@@ -491,7 +510,7 @@ static void ota_check_task(void*) {
     }
 }
 
-bool ota_check_start() {
+bool ota_check_start(unsigned pr_number) {
     if (!ensure_lock()) return false;
     // Acquire the cross-domain gate before publishing/starting the worker. This atomically loses
     // to an in-flight key/VIN transaction instead of sampling a separate busy flag and racing it.
@@ -500,8 +519,9 @@ bool ota_check_start() {
         finish_operation(tk::OtaIdentityGateState::Ota);
         return false;
     }
+    s_target_pr.store(pr_number, std::memory_order_release);
     try {
-        set_state(OtaState::Checking, 0, "checking for updates");
+        set_state(OtaState::Checking, 0, pr_number > 0 ? "checking for PR preview" : "checking for updates");
     } catch (...) {
         s_running.store(false, std::memory_order_release);
         finish_operation(tk::OtaIdentityGateState::Ota);
@@ -520,36 +540,58 @@ bool ota_check_start() {
 
 // ─── Background download + install ──────────────────────────────────────────────
 
+[[gnu::noinline]] static std::string resolve_firmware_url(unsigned target_pr) {
+    if (target_pr > 0) {
+        char buf[96];
+        if (tk::format_pr_firmware_url(target_pr, TESLA_OTA_IMG_SUFFIX, buf, sizeof(buf))) {
+            return std::string(buf);
+        }
+    }
+    return std::string(CONFIG_TESLA_OTA_FIRMWARE_BASE_URL "tesla-key-esp32" TESLA_OTA_IMG_SUFFIX ".bin");
+}
+
+[[gnu::noinline]] static bool precheck_manifest_for_update(unsigned target_pr,
+                                                           char* available_version,
+                                                           size_t max_len) {
+    const OtaCheckResult pre = ota_check(target_pr);
+    if (!pre.ok) {
+        ESP_LOGE(TAG, "OTA refused: %s", pre.reason.c_str());
+        set_state(OtaState::Error, 0, pre.reason.c_str());
+        return false;
+    }
+    if (!pre.update_available) {
+        ESP_LOGW(TAG, "OTA refused: manifest %s is not acceptable for running %s (target_pr=%u)",
+                 pre.available.c_str(), pre.current.c_str(), target_pr);
+        set_state(OtaState::Error, 0, "no newer version available");
+        return false;
+    }
+    if (available_version && max_len > 0) {
+        snprintf(available_version, max_len, "%s", pre.available.c_str());
+    }
+    return true;
+}
+
 static void ota_task_impl() {
     // Re-fetch the manifest HERE rather than trusting whatever a previous /ota/check left in the
     // shared status. Two independent reasons: POST /ota/update is reachable on its own, so gating
     // only inside the check would mean no gate at all for a direct caller; and the manifest could
     // have moved between the check and the confirmation. Costs one small HTTPS GET on this task —
     // never on a request path.
-    const OtaCheckResult pre = ota_check();
-    if (!pre.ok) {
-        ESP_LOGE(TAG, "OTA refused: %s", pre.reason.c_str());
-        set_state(OtaState::Error, 0, pre.reason.c_str());
-        return;
-    }
-    if (!pre.update_available) {
-        ESP_LOGW(TAG, "OTA refused: manifest %s is not newer than running %s",
-                 pre.available.c_str(), pre.current.c_str());
-        set_state(OtaState::Error, 0, "no newer version available");
+    const unsigned target_pr = s_target_pr.load(std::memory_order_acquire);
+    char expected_version[32] = {};
+    if (!precheck_manifest_for_update(target_pr, expected_version, sizeof(expected_version))) {
         return;
     }
 
-    // One channel, per-target image: base URL + this chip's short image suffix. The literals
-    // concatenate at compile time (TESLA_OTA_IMG_SUFFIX is a string literal), so this is a
-    // fixed string with no allocation. esp_https_ota also verifies the image chip-id, so a
-    // wrong-target image (e.g. an esp32s3 build pulled by an esp32) is refused, not flashed.
-    static constexpr const char* kFwUrl =
-        CONFIG_TESLA_OTA_FIRMWARE_BASE_URL "tesla-key-esp32" TESLA_OTA_IMG_SUFFIX ".bin";
+    // One channel, per-target image: base URL + this chip's short image suffix.
+    // When target_pr > 0, pulls from the official per-PR preview directory on GitHub Pages.
+    const std::string fw_url_holder = resolve_firmware_url(target_pr);
+    const char* fw_url = fw_url_holder.c_str();
     ESP_LOGI(TAG, "OTA starting from %s (free heap %u)",
-             kFwUrl, (unsigned)esp_get_free_heap_size());
+             fw_url, (unsigned)esp_get_free_heap_size());
 
     esp_http_client_config_t http_cfg = {};
-    http_cfg.url               = kFwUrl;
+    http_cfg.url               = fw_url;
     http_cfg.crt_bundle_attach = esp_crt_bundle_attach;
     http_cfg.timeout_ms        = 20000;
     http_cfg.keep_alive_enable = true;
@@ -599,9 +641,8 @@ static void ota_task_impl() {
         set_state(OtaState::Error, 0, "invalid firmware version");
         return;
     }
-    if (tk::compare_ota_versions(new_version, current_version) !=
-        tk::OtaVersionOrder::Newer) {
-        ESP_LOGW(TAG, "OTA refused: image %.*s not newer than running %.*s (downgrade blocked)",
+    if (!tk::is_ota_update_available(new_version, current_version, target_pr)) {
+        ESP_LOGW(TAG, "OTA refused: image %.*s not acceptable for running %.*s (downgrade/mismatch blocked)",
                  static_cast<int>(new_version.size()), new_version.data(),
                  static_cast<int>(current_version.size()), current_version.data());
         set_state(OtaState::Error, 0, "no newer version available");
@@ -618,10 +659,10 @@ static void ota_task_impl() {
     // to match exactly turns "the newest thing the host is willing to serve" back into "the build
     // the release actually is". Also catches the ordinary, far more likely case: a publish that
     // wrote a new manifest beside a stale image.
-    if (std::string_view(pre.available) != new_version) {
+    if (std::string_view(expected_version) != new_version) {
         ESP_LOGE(TAG, "OTA refused: manifest advertises %s but the image is %.*s — the manifest and "
                       "the image disagree, so neither can be trusted to be the published release",
-                 pre.available.c_str(), static_cast<int>(new_version.size()), new_version.data());
+                 expected_version, static_cast<int>(new_version.size()), new_version.data());
         set_state(OtaState::Error, 0, "manifest and image versions disagree");
         return;
     }
@@ -677,7 +718,7 @@ static void ota_task(void*) {
     }
 }
 
-bool ota_start() {
+bool ota_start(unsigned pr_number) {
     if (!ensure_lock()) return false;
     // The same owner word excludes both a second OTA and every identity transaction. On a
     // successful install it remains owned until esp_restart(); on every returning path the task
@@ -686,6 +727,9 @@ bool ota_start() {
     if (s_running.exchange(true, std::memory_order_acq_rel)) {
         finish_operation(tk::OtaIdentityGateState::Ota);
         return false;
+    }
+    if (pr_number > 0) {
+        s_target_pr.store(pr_number, std::memory_order_release);
     }
     try {
         set_state(OtaState::Downloading, 0, "starting download");
