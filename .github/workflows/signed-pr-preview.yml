@@ -90,12 +90,6 @@ jobs:
           (( ${#version} <= 31 ))
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
-      - name: Read trusted pinned ESP-IDF toolchain
-        id: toolchain
-        run: |
-          echo "image-version=$(./scripts/idf-version.sh --image-version)" >> "$GITHUB_OUTPUT"
-          echo "ESP-IDF image: $(./scripts/idf-version.sh --image)"
-
       # Switch the same checkout root to the exact PR only after all trusted policy inputs have
       # been captured. Matching the producer's root path avoids path-dependent ELF/map drift.
       - name: Check out exact PR head for isolated rebuild
@@ -104,6 +98,12 @@ jobs:
           ref: ${{ needs.validate.outputs.head-sha }}
           fetch-depth: 0
           persist-credentials: false
+
+      - name: Read pinned ESP-IDF toolchain
+        id: toolchain
+        run: |
+          echo "image-version=$(./scripts/idf-version.sh --image-version)" >> "$GITHUB_OUTPUT"
+          echo "ESP-IDF image: $(./scripts/idf-version.sh --image)"
 
       - name: Apply trusted exact preview-version stamp
         env:

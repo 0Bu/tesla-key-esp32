@@ -16,6 +16,7 @@ inline constexpr std::size_t kOtaManifestMaxBytes = 8192;
 
 struct OtaVersionParts {
     std::array<std::string_view, 3> core{};
+    std::string_view suffix{};
 };
 
 inline constexpr bool ota_ascii_digit(char value) {
@@ -55,16 +56,113 @@ inline bool parse_ota_version(std::string_view input, OtaVersionParts& out) {
 
     if (position == input.size()) return true;
     if (input[position] != '-' || ++position == input.size()) return false;
+    const std::size_t suffix_begin = position;
     while (position < input.size()) {
         if (!ota_suffix_char(input[position])) return false;
         ++position;
     }
+    out.suffix = input.substr(suffix_begin, position - suffix_begin);
     return true;
 }
 
 inline bool canonical_ota_version(std::string_view input) {
     OtaVersionParts ignored{};
     return parse_ota_version(input, ignored);
+}
+
+// Returns the PR number if the suffix is "PR-<number>" with 1-7 digits and > 0, else 0.
+inline unsigned parse_pr_suffix(std::string_view suffix) {
+    if (suffix.size() < 4 || suffix.substr(0, 3) != "PR-") return 0;
+    std::string_view digits = suffix.substr(3);
+    if (digits.empty() || digits.size() > 7) return 0;
+    if (digits[0] == '0') return 0; // PR numbers are positive, without leading zero
+    unsigned result = 0;
+    for (char c : digits) {
+        if (!ota_ascii_digit(c)) return 0;
+        result = result * 10 + static_cast<unsigned>(c - '0');
+    }
+    return result;
+}
+
+inline unsigned parse_version_pr(std::string_view version) {
+    OtaVersionParts parts{};
+    if (!parse_ota_version(version, parts)) return 0;
+    return parse_pr_suffix(parts.suffix);
+}
+
+// Parse a positive numeric PR query string parameter (e.g. from ?pr=326).
+inline unsigned parse_pr_query(std::string_view query_val) {
+    if (query_val.empty() || query_val.size() > 7) return 0;
+    if (query_val[0] == '0') return 0;
+    unsigned val = 0;
+    for (char c : query_val) {
+        if (!ota_ascii_digit(c)) return 0;
+        val = val * 10 + static_cast<unsigned>(c - '0');
+    }
+    return val;
+}
+
+// Format the official GitHub Pages PR manifest URL safely without heap allocation.
+// URL format: "https://0bu.github.io/tesla-key-esp32/PR/<pr>/manifest.json"
+inline bool format_pr_manifest_url(unsigned pr_number, char* buf, std::size_t buf_len) {
+    if (pr_number == 0 || pr_number > 9999999 || buf == nullptr) return false;
+    char num_buf[16];
+    std::size_t num_len = 0;
+    unsigned temp = pr_number;
+    while (temp > 0) {
+        num_buf[num_len++] = static_cast<char>('0' + (temp % 10));
+        temp /= 10;
+    }
+    for (std::size_t i = 0; i < num_len / 2; ++i) {
+        char t = num_buf[i];
+        num_buf[i] = num_buf[num_len - 1 - i];
+        num_buf[num_len - 1 - i] = t;
+    }
+    static constexpr std::string_view kPrefix = "https://0bu.github.io/tesla-key-esp32/PR/";
+    static constexpr std::string_view kSuffix = "/manifest.json";
+    const std::size_t total_len = kPrefix.size() + num_len + kSuffix.size();
+    if (buf_len < total_len + 1) return false;
+    std::size_t offset = 0;
+    for (char c : kPrefix) buf[offset++] = c;
+    for (std::size_t i = 0; i < num_len; ++i) buf[offset++] = num_buf[i];
+    for (char c : kSuffix) buf[offset++] = c;
+    buf[offset] = '\0';
+    return true;
+}
+
+// Format the official GitHub Pages PR firmware URL safely without heap allocation.
+// URL format: "https://0bu.github.io/tesla-key-esp32/PR/<pr>/tesla-key-esp32<chip_suffix>.bin"
+inline bool format_pr_firmware_url(unsigned pr_number, std::string_view chip_suffix,
+                                   char* buf, std::size_t buf_len) {
+    if (pr_number == 0 || pr_number > 9999999 || buf == nullptr) return false;
+    if (!chip_suffix.empty() && chip_suffix != "-s3" && chip_suffix != "-c3" && chip_suffix != "-c6") {
+        return false;
+    }
+    char num_buf[16];
+    std::size_t num_len = 0;
+    unsigned temp = pr_number;
+    while (temp > 0) {
+        num_buf[num_len++] = static_cast<char>('0' + (temp % 10));
+        temp /= 10;
+    }
+    for (std::size_t i = 0; i < num_len / 2; ++i) {
+        char t = num_buf[i];
+        num_buf[i] = num_buf[num_len - 1 - i];
+        num_buf[num_len - 1 - i] = t;
+    }
+    static constexpr std::string_view kPrefix = "https://0bu.github.io/tesla-key-esp32/PR/";
+    static constexpr std::string_view kMid = "/tesla-key-esp32";
+    static constexpr std::string_view kExt = ".bin";
+    const std::size_t total_len = kPrefix.size() + num_len + kMid.size() + chip_suffix.size() + kExt.size();
+    if (buf_len < total_len + 1) return false;
+    std::size_t offset = 0;
+    for (char c : kPrefix) buf[offset++] = c;
+    for (std::size_t i = 0; i < num_len; ++i) buf[offset++] = num_buf[i];
+    for (char c : kMid) buf[offset++] = c;
+    for (char c : chip_suffix) buf[offset++] = c;
+    for (char c : kExt) buf[offset++] = c;
+    buf[offset] = '\0';
+    return true;
 }
 
 enum class OtaVersionOrder : std::int8_t {
@@ -95,6 +193,41 @@ inline OtaVersionOrder compare_ota_versions(std::string_view candidate,
         if (order != 0) return order > 0 ? OtaVersionOrder::Newer : OtaVersionOrder::Older;
     }
     return OtaVersionOrder::Equal;
+}
+
+// Evaluates whether candidate firmware is eligible for OTA update given the running version
+// and an optional target PR number (0 = standard main release).
+[[gnu::noinline]] inline bool is_ota_update_available(std::string_view candidate,
+                                                     std::string_view current,
+                                                     unsigned target_pr = 0) {
+    OtaVersionParts candidate_parts{};
+    OtaVersionParts current_parts{};
+    if (!parse_ota_version(candidate, candidate_parts) ||
+        !parse_ota_version(current, current_parts)) {
+        return false;
+    }
+
+    const OtaVersionOrder order = compare_ota_versions(candidate, current);
+    if (order == OtaVersionOrder::Invalid) return false;
+
+    if (target_pr == 0) {
+        if (order == OtaVersionOrder::Newer) return true;
+        if (order == OtaVersionOrder::Equal) {
+            // Allow returning from a PR or pre-release build to the official stable release of the same core
+            return candidate_parts.suffix.empty() && !current_parts.suffix.empty();
+        }
+        return false;
+    }
+
+    // Targeted PR update (target_pr > 0):
+    // 1. Candidate must carry the matching PR suffix
+    const unsigned cand_pr = parse_pr_suffix(candidate_parts.suffix);
+    if (cand_pr != target_pr) return false;
+
+    // 2. Candidate core must not be older than the running core
+    if (order == OtaVersionOrder::Older) return false;
+
+    return true;
 }
 
 template <std::size_t N>
