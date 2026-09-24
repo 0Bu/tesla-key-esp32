@@ -1,0 +1,426 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'sha256-0niK5V1ZqALRVwC3GwNl6fk5YQWIk+PpQX2mrLriz98='; connect-src 'self'; img-src 'self' data:; font-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-src 'none'; worker-src 'none'">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#e82127">
+<title>Install tesla-key-esp32</title>
+<style>
+:root {
+  color-scheme:light dark;
+  --brand:#e82127; --brand-strong:#bd151b; --brand-tint:#fff0f1;
+  --bg:#f6f7f9; --card:#fff; --fg:#1a1d21; --muted:#5b626b; --line:#e6e8ec; --soft:#f1f3f5;
+  --success:#18794e; --success-bg:#eef9f2; --success-line:#b9e2c9;
+  --warn:#c9740a; --err:#d23b3b; --terminal:#111820; --terminal-head:#18212a;
+  --focus-ring:rgba(232,33,39,.22);
+  --shadow-logo:0 2px 8px rgba(232,33,39,.35); --shadow-cta:0 3px 12px rgba(232,33,39,.3);
+  --shadow-card:0 1px 2px rgba(16,20,28,.05),0 7px 22px rgba(16,20,28,.07);
+  --r-card:18px; --r-tile:12px; --r-input:12px; --r-logo:11px; --installer-rail-width:214px;
+  --font-sans:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  --font-mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme:dark) {
+  :root {
+    --brand:#ff5a5f; --brand-strong:#e82127; --brand-tint:#2d171a;
+    --bg:#0f1115; --card:#171a20; --fg:#f2f3f5; --muted:#9aa1ab; --line:#262a31; --soft:#1f242c;
+    --success:#70d5a0; --success-bg:#163326; --success-line:#2d6b49;
+    --warn:#e08a2b; --err:#ea5a5a;
+    --shadow-card:0 1px 2px rgba(0,0,0,.5),0 10px 28px rgba(0,0,0,.45);
+  }
+}
+*{box-sizing:border-box}
+html,body{margin:0}
+body{
+  min-width:320px; padding:20px; background:var(--bg); color:var(--fg);
+  font:15px/1.5 var(--font-sans); -webkit-font-smoothing:antialiased;
+}
+[hidden]{display:none!important}
+button,input{font:inherit}
+button:focus-visible,input:focus-visible+span{outline:3px solid var(--focus-ring);outline-offset:2px}
+a{color:var(--brand);text-decoration:none;font-weight:650}
+a:hover{color:var(--brand-strong)}
+
+.installer-shell{
+  width:min(100%,980px); margin:0 auto; overflow:hidden; background:var(--bg);
+  border:1px solid var(--line); border-radius:22px; box-shadow:0 18px 55px rgba(16,20,28,.13);
+}
+.installer-topbar{
+  min-height:66px; display:flex; align-items:center; justify-content:space-between; gap:18px;
+  padding:13px 22px; background:var(--card); border-bottom:1px solid var(--line);
+}
+.installer-brand{display:flex;align-items:center;gap:11px;min-width:0}
+.installer-logo{
+  width:38px; height:38px; flex:none; display:grid; place-items:center; color:#fff;
+  border-radius:var(--r-logo); background:var(--brand); box-shadow:var(--shadow-logo);
+}
+.installer-logo svg{width:21px;height:21px;fill:currentColor}
+.installer-product{
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+  font:600 14px/1.25 var(--font-mono); letter-spacing:.1px;
+}
+.installer-connection{
+  display:inline-flex; align-items:center; gap:8px; color:var(--muted);
+  font-size:13px; font-weight:650; white-space:nowrap;
+}
+.installer-connection-dot{width:9px;height:9px;border-radius:50%;background:#8b96a3;box-shadow:0 0 0 4px var(--soft)}
+.installer-shell[data-connected="true"] .installer-connection{color:var(--success)}
+.installer-shell[data-connected="true"] .installer-connection-dot{background:#29a56c;box-shadow:0 0 0 4px var(--success-bg)}
+
+.installer-layout{display:grid;grid-template-columns:var(--installer-rail-width) minmax(0,1fr);min-height:640px}
+.installer-rail{padding:28px 20px;background:var(--brand-tint);border-right:1px solid var(--line)}
+.installer-rail-title{
+  margin:0 0 20px; color:var(--muted); font-size:11px; font-weight:750;
+  letter-spacing:.09em; text-transform:uppercase;
+}
+.installer-step{
+  position:relative; display:grid; grid-template-columns:29px minmax(0,1fr); gap:10px;
+  align-items:start; padding:0 0 28px; color:var(--muted);
+}
+.installer-step:not(:last-child)::after{
+  content:"";position:absolute;left:14px;top:31px;bottom:3px;width:1px;background:var(--line);
+}
+.installer-step-index{
+  position:relative; z-index:1; width:29px; height:29px; display:grid; place-items:center;
+  border:1px solid var(--line); border-radius:50%; background:var(--card);
+  color:inherit; font-size:12px; font-weight:750;
+}
+.installer-step[data-state="active"]{color:var(--brand-strong)}
+.installer-step[data-state="active"] .installer-step-index{
+  color:#fff;border-color:var(--brand);background:var(--brand);box-shadow:0 0 0 4px var(--focus-ring);
+}
+.installer-step[data-state="done"]{color:var(--success)}
+.installer-step[data-state="done"] .installer-step-index{color:#fff;border-color:#29a56c;background:#29a56c}
+.installer-step-name{display:block;margin-top:3px;color:var(--fg);font-size:13px;font-weight:700}
+.installer-step-note{display:block;margin-top:2px;font-size:11.5px;line-height:1.35}
+
+.installer-main{min-width:0;padding:32px clamp(22px,5vw,54px) 38px}
+.installer-channel{
+  display:inline-flex; align-items:center; gap:7px; margin-bottom:13px;
+  color:var(--success); font-size:12px; font-weight:750; letter-spacing:.02em;
+}
+.installer-channel::before{content:"";width:7px;height:7px;border-radius:50%;background:currentColor}
+.installer-channel[data-kind="preview"]{color:var(--warn)}
+h1{margin:0;color:var(--fg);font-size:clamp(26px,4vw,36px);line-height:1.12;letter-spacing:-.035em;font-weight:720}
+.installer-intro{max-width:590px;margin:10px 0 25px;color:var(--muted);font-size:15px}
+
+.installer-preview{
+  display:flex; align-items:flex-start; gap:11px; margin:0 0 14px; padding:13px 14px;
+  border:1px solid var(--warn); border-left-width:4px; border-radius:14px; background:var(--card);
+  color:var(--muted); font-size:12.5px;
+}
+.installer-preview strong{color:var(--fg)}
+.installer-preview-icon{
+  flex:none; width:21px; height:21px; display:grid; place-items:center; margin-top:1px;
+  border-radius:50%; background:var(--warn); color:#fff; font-weight:750;
+}
+.installer-card{
+  padding:20px; border:1px solid var(--line); border-radius:16px;
+  background:var(--card); box-shadow:var(--shadow-card);
+}
+.installer-usb-stack,.installer-card+.installer-card,.installer-usb-stack+.installer-card{margin-top:14px}
+.installer-usb-stack{position:relative;margin-top:0}
+.installer-usb-card{position:relative;z-index:2}
+.installer-card-head{display:flex;justify-content:space-between;gap:18px;align-items:flex-start}
+.installer-card-kicker{
+  display:block;color:var(--muted);font-size:11px;font-weight:750;letter-spacing:.08em;text-transform:uppercase;
+}
+.installer-card-title{display:block;margin-top:3px;font-size:17px;font-weight:720}
+.installer-version{
+  flex:none; color:var(--fg); font:650 12px/1.3 var(--font-mono);
+  background:var(--soft); border:1px solid var(--line); border-radius:7px; padding:5px 8px;
+}
+.installer-version a{color:inherit;text-decoration:underline;text-underline-offset:2px}
+.installer-action-row{display:flex;align-items:center;gap:14px;margin-top:20px;flex-wrap:wrap}
+.installer-primary,.installer-secondary,.installer-release{
+  min-height:44px; display:inline-flex; align-items:center; justify-content:center; gap:8px;
+  border-radius:var(--r-input); padding:10px 17px; font-weight:720; cursor:pointer;
+  transition:transform .15s ease,background .15s ease,opacity .15s ease;
+}
+.installer-primary{color:#fff;border:1px solid var(--brand);background:var(--brand);box-shadow:var(--shadow-cta)}
+.installer-primary:hover:not(:disabled){background:var(--brand-strong);transform:translateY(-1px)}
+.installer-secondary,.installer-release{color:var(--fg);border:1px solid var(--line);background:var(--card);box-shadow:none}
+.installer-secondary:hover:not(:disabled),.installer-release:hover:not(:disabled){background:var(--soft)}
+button:disabled{cursor:default;opacity:.55;transform:none}
+.installer-device-actions{
+  display:grid; grid-template-columns:minmax(0,1.25fr) minmax(0,.72fr) minmax(0,.9fr);
+  align-items:start; gap:10px;
+}
+.installer-device-actions>button{width:100%}
+.installer-device-actions button{padding-inline:12px;white-space:nowrap}
+.installer-browser-note{color:var(--muted);font-size:12px}
+.installer-page-status{margin:12px 0 0;color:var(--muted);font-size:12px}
+.installer-page-status[data-kind="success"]{color:var(--success)}
+.installer-page-status[data-kind="error"],.installer-unsupported{color:var(--err)}
+.installer-usb-release{margin-top:14px;padding-top:12px;border-top:1px solid var(--line)}
+.installer-usb-release .release-help{margin:6px 0 0}
+.installer-usb-release-status{margin:8px 0 0}
+
+.installer-device{
+  display:none; grid-template-columns:minmax(0,.9fr) minmax(0,1.25fr) minmax(0,.9fr);
+  gap:10px; margin-top:18px; padding-top:16px; border-top:1px solid var(--line);
+}
+.installer-shell[data-connected="true"] .installer-device{display:grid}
+.installer-device-item{min-width:0;padding:10px 11px;border:0;border-radius:10px;background:var(--soft);text-align:left}
+.installer-device-label{
+  display:block;color:var(--muted);font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;
+}
+.installer-device-value{
+  display:block; margin-top:3px; overflow:hidden; color:var(--fg); font-size:13px; font-weight:680;
+  text-overflow:ellipsis; white-space:nowrap;
+}
+.installer-device-monitor{width:100%;display:block;color:inherit;cursor:pointer;transition:background .16s ease,box-shadow .16s ease}
+.installer-device-monitor:hover:not(:disabled),.installer-shell[data-monitor="open"] .installer-device-monitor{
+  background:var(--brand-tint);box-shadow:inset 0 0 0 1px var(--brand);
+}
+.installer-device-monitor-value{
+  width:100%; display:flex; align-items:center; justify-content:space-between; gap:14px;
+  margin-top:3px; color:var(--fg); font-size:13px; font-weight:720;
+}
+.installer-device-monitor-name{min-width:0;display:inline-flex;align-items:center;gap:7px;white-space:nowrap}
+.installer-monitor-chevron{flex:none;margin-left:auto;margin-right:3px;transition:transform .18s ease}
+.installer-shell[data-monitor="open"] .installer-monitor-chevron{transform:rotate(180deg)}
+
+.installer-monitor{
+  position:relative; z-index:1; max-height:0; margin:0 18px; overflow:hidden;
+  border:0 solid var(--line); border-radius:0 0 14px 14px; background:var(--terminal);
+  opacity:0; transform:translateY(-24px); pointer-events:none;
+  transition:max-height .28s ease,opacity .18s ease,transform .28s ease,border-width .01s linear .27s,box-shadow .2s ease;
+}
+.installer-shell[data-monitor="open"] .installer-monitor{
+  max-height:270px; border-width:0 1px 1px; opacity:1; transform:translateY(0); pointer-events:auto;
+  box-shadow:0 12px 22px rgba(16,20,28,.18);
+  transition:max-height .3s ease,opacity .18s ease .05s,transform .3s ease,border-width .01s linear,box-shadow .2s ease .06s;
+}
+.installer-monitor-head{
+  display:flex; align-items:center; justify-content:space-between; gap:12px; padding:8px 11px;
+  color:#aeb9c5; border-bottom:1px solid #29333e; background:var(--terminal-head);
+  font-size:10.5px; font-weight:700; letter-spacing:.05em; text-transform:uppercase;
+}
+.installer-monitor-live{display:inline-flex;align-items:center;gap:6px;color:#95a1af}
+.installer-monitor-live::before{content:"";width:6px;height:6px;border-radius:50%;background:#75808b}
+.installer-monitor-live[data-state="live"]{color:#70d5a0}
+.installer-monitor-live[data-state="live"]::before{background:#45c57f;box-shadow:0 0 0 3px rgba(69,197,127,.12)}
+.installer-monitor-live[data-state="connecting"]{color:#f2a444}
+.installer-monitor-live[data-state="connecting"]::before{background:#f2a444}
+.installer-monitor-live[data-state="error"]{color:#f08080}
+.installer-monitor-live[data-state="error"]::before{background:#ea5a5a}
+.installer-monitor-output{
+  box-sizing:border-box; width:100%; min-width:0; min-height:150px; max-height:220px;
+  margin:0; padding:12px 13px 14px; overflow-x:auto; overflow-y:auto;
+  color:#c8d4df; font:11.5px/1.58 var(--font-mono); white-space:pre; overflow-wrap:normal;
+}
+.installer-monitor-line-warning{color:#f2a444}
+.installer-monitor-line-error{color:#ff6b6b}
+
+.installer-options{display:none}
+.installer-shell[data-connected="true"] .installer-options{display:block}
+.installer-choice-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-top:16px}
+.installer-choice{position:relative;display:block;cursor:pointer}
+.installer-choice input{position:absolute;opacity:0;pointer-events:none}
+.installer-choice-body{display:block;min-height:108px;padding:14px;border:1px solid var(--line);border-radius:12px;background:var(--soft)}
+.installer-choice input:checked+.installer-choice-body{border-color:var(--brand);background:var(--brand-tint);box-shadow:inset 0 0 0 1px var(--brand)}
+.installer-choice-name{display:flex;justify-content:space-between;gap:10px;font-size:14px;font-weight:730}
+.installer-recommended{color:var(--brand-strong);font-size:10px;font-weight:780;letter-spacing:.04em;text-transform:uppercase}
+.installer-choice-text{display:block;margin-top:6px;color:var(--muted);font-size:12px;line-height:1.4}
+.installer-progress-wrap{display:none;margin-top:22px}
+.installer-shell[data-flashing="true"] .installer-progress-wrap,.installer-shell[data-finished="true"] .installer-progress-wrap{display:block}
+.installer-progress-labels{display:flex;justify-content:space-between;gap:16px;margin-bottom:8px;font-size:12px;font-weight:700}
+.installer-progress-percent{color:var(--brand-strong);font-family:var(--font-mono)}
+.installer-progress-track{height:9px;overflow:hidden;border-radius:99px;background:var(--soft)}
+.installer-progress-fill{width:0;height:100%;border-radius:inherit;background:linear-gradient(90deg,var(--brand),#ff686d);transition:width .24s ease}
+.installer-shell[data-finished="true"] .installer-progress-fill{background:#29a56c}
+.installer-success{
+  display:none; align-items:flex-start; gap:12px; margin-top:16px; padding:13px 14px;
+  border:1px solid var(--success-line); border-radius:12px; background:var(--success-bg); color:var(--success);
+}
+.installer-shell[data-finished="true"] .installer-success{display:flex}
+.installer-success-icon{font-size:20px;line-height:1}
+.installer-success strong{display:block}
+.installer-success span span{display:block;margin-top:2px;font-size:12px}
+
+.serial-release{margin:0}
+.installer-release{min-height:36px;padding:7px 11px;color:var(--muted);font-size:12px}
+.release-help,.serial-status{margin:5px 0 0;color:var(--muted);font-size:11.5px}
+.serial-status[data-kind="success"]{color:var(--success)}
+.serial-status[data-kind="error"]{color:var(--err)}
+
+.installer-after{margin-top:14px}
+.installer-after-list{list-style:none;margin:7px 0 0;padding:0;counter-reset:after-step}
+.installer-after-list li{display:flex;gap:12px;padding:11px 0;border-top:1px solid var(--line);color:var(--muted);font-size:13px}
+.installer-after-list li::before{
+  counter-increment:after-step; content:counter(after-step); flex:none; width:22px; height:22px;
+  border-radius:50%; background:var(--brand-tint); color:var(--brand-strong); border:1px solid var(--line);
+  font-size:12px; font-weight:700; line-height:20px; text-align:center;
+}
+.installer-help{margin:7px 0 0;color:var(--muted);font-size:13px}
+code{font-family:var(--font-mono);font-size:.88em;background:var(--soft);border:1px solid var(--line);border-radius:6px;padding:1px 6px;overflow-wrap:anywhere}
+.installer-links{margin:15px 2px 0;color:var(--muted);font-size:13px}
+.installer-footer{
+  color:var(--muted); font-size:12px; text-align:center; padding:0 20px 26px;
+  background:linear-gradient(to right,
+    var(--brand-tint) 0 calc(var(--installer-rail-width) - 1px),
+    var(--line) calc(var(--installer-rail-width) - 1px) var(--installer-rail-width),
+    transparent var(--installer-rail-width));
+}
+
+@media (max-width:780px){
+  body{padding:10px}
+  .installer-layout{grid-template-columns:1fr}
+  .installer-rail{display:flex;gap:7px;padding:15px 16px;overflow-x:auto;border-right:0;border-bottom:1px solid var(--line)}
+  .installer-footer{background:transparent}
+  .installer-rail-title,.installer-step-note,.installer-step:not(:last-child)::after{display:none}
+  .installer-step{flex:none;grid-template-columns:25px auto;gap:6px;padding:0 12px 0 0}
+  .installer-step-index{width:25px;height:25px}
+  .installer-step-name{font-size:12px}
+  .installer-main{padding:25px 18px 30px}
+}
+@media (max-width:520px){
+  body{padding:0}
+  .installer-shell{border-radius:0;border-left:0;border-right:0}
+  .installer-topbar{padding:11px 14px}
+  .installer-connection span:last-child{display:none}
+  .installer-rail{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:4px;overflow:visible}
+  .installer-step{grid-template-columns:1fr;justify-items:center;gap:3px;padding:0;text-align:center}
+  .installer-step-name{margin-top:0;font-size:11px}
+  .installer-card-head{display:block}
+  .installer-version{display:inline-block;margin-top:10px}
+  .installer-action-row{align-items:stretch;flex-direction:column}
+  .installer-device-actions{grid-template-columns:1fr}
+  .installer-browser-note{text-align:center}
+  .installer-choice-grid,.installer-device{grid-template-columns:1fr}
+  .installer-device{gap:7px}
+  .installer-monitor{margin:0 12px}
+}
+</style>
+</head>
+<body>
+<div class="installer-shell" id="web-installer" data-connected="false" data-monitor="closed" data-flashing="false" data-finished="false">
+  <header class="installer-topbar">
+    <div class="installer-brand">
+      <span class="installer-logo" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M13 2 4 14h6l-1 8 9-12h-6l1-8z"/></svg></span>
+      <span class="installer-product">tesla-key-esp32</span>
+    </div>
+    <div class="installer-connection" aria-live="polite">
+      <span class="installer-connection-dot"></span>
+      <span id="connection-label">Not connected</span>
+    </div>
+  </header>
+
+  <div class="installer-layout">
+    <aside class="installer-rail" aria-label="Installation steps">
+      <p class="installer-rail-title">Installation</p>
+      <div class="installer-step" data-state="active"><span class="installer-step-index">1</span><span><span class="installer-step-name">Connect</span><span class="installer-step-note">Select USB device</span></span></div>
+      <div class="installer-step"><span class="installer-step-index">2</span><span><span class="installer-step-name">Check</span><span class="installer-step-note">Chip and firmware</span></span></div>
+      <div class="installer-step"><span class="installer-step-index">3</span><span><span class="installer-step-name">Install</span><span class="installer-step-note">Write safely to flash</span></span></div>
+      <div class="installer-step"><span class="installer-step-index">4</span><span><span class="installer-step-name">Done</span><span class="installer-step-note">Restart and pair</span></span></div>
+    </aside>
+
+    <main class="installer-main">
+      <span class="installer-channel" id="build-channel">Main build</span>
+      <h1>Install firmware</h1>
+      <p class="installer-intro">Connect your board, verify the detected ESP target, choose what to preserve, and follow the real flash progress and boot log on this page.</p>
+
+      <div class="installer-preview" id="preview-note" hidden>
+        <span class="installer-preview-icon">!</span>
+        <span id="preview-note-text"></span>
+      </div>
+
+      <div class="installer-usb-stack">
+        <section class="installer-card installer-usb-card" aria-labelledby="connect-title">
+          <div class="installer-card-head">
+            <div><span class="installer-card-kicker">USB connection</span><strong class="installer-card-title" id="connect-title">Connect ESP board</strong></div>
+            <span class="installer-version" id="firmware-version" hidden>Version <span id="firmware-version-value"></span> · <a id="firmware-source-link" hidden><span id="firmware-source-value"></span></a></span>
+          </div>
+
+          <div class="installer-action-row">
+            <button class="installer-primary" type="button" id="connect-button" disabled>
+              <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M12 2v14M8 6l4-4 4 4M8 16h8a3 3 0 0 1 3 3v2H5v-2a3 3 0 0 1 3-3Z"/></svg>
+              Select USB device
+            </button>
+            <span class="installer-browser-note">Prefer the native ESP USB port; only the browser's port picker opens.</span>
+          </div>
+          <p class="installer-unsupported" id="serial-unsupported" hidden>This browser cannot use Web Serial. Use Chrome or Edge on a desktop.</p>
+          <p class="installer-page-status" id="page-status" role="status" aria-live="polite" hidden></p>
+
+          <div class="serial-release installer-usb-release" id="serial-release" hidden>
+            <button class="installer-release" id="release-serial-port" type="button" aria-describedby="release-port-help serial-release-status">Remove browser permission</button>
+            <p class="release-help" id="release-port-help">Removes this port's “paired” permission from the site.</p>
+          </div>
+          <p class="serial-status installer-usb-release-status" id="serial-release-status" role="status" aria-live="polite" hidden></p>
+
+          <div class="installer-device" aria-live="polite">
+            <div class="installer-device-item"><span class="installer-device-label">Device</span><span class="installer-device-value" id="device-value">—</span></div>
+            <button class="installer-device-item installer-device-monitor" type="button" id="serial-monitor-button" aria-controls="serial-monitor" aria-expanded="false" disabled>
+              <span class="installer-device-label">Connection</span>
+              <span class="installer-device-monitor-value">
+                <span class="installer-device-monitor-name"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m7 8 4 4-4 4M13 16h4"/><rect x="3" y="4" width="18" height="16" rx="2"/></svg><span id="connection-value">Serial monitor</span></span>
+                <svg class="installer-monitor-chevron" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+              </span>
+            </button>
+            <div class="installer-device-item"><span class="installer-device-label">Compatibility</span><span class="installer-device-value" id="compatibility-value">—</span></div>
+          </div>
+        </section>
+
+        <div class="installer-monitor" id="serial-monitor" aria-label="Serial monitor history" aria-hidden="true">
+          <div class="installer-monitor-head"><span>USB Serial · 115200 baud</span><span class="installer-monitor-live" id="serial-monitor-live" data-state="stopped">Stopped</span></div>
+          <pre class="installer-monitor-output" id="serial-monitor-output"></pre>
+        </div>
+      </div>
+
+      <section class="installer-card installer-options" aria-labelledby="install-mode-title">
+        <span class="installer-card-kicker">Installation type</span>
+        <strong class="installer-card-title" id="install-mode-title">What should be preserved?</strong>
+
+        <div class="installer-choice-grid">
+          <label class="installer-choice">
+            <input type="radio" name="install-mode" value="keep" checked>
+            <span class="installer-choice-body"><span class="installer-choice-name">Keep configuration <span class="installer-recommended" id="keep-recommended">Recommended for updates</span></span><span class="installer-choice-text">WiFi, VIN, MQTT, pairing key and BLE sessions stay intact. Use only after the dual-OTA layout is already installed.</span></span>
+          </label>
+          <label class="installer-choice">
+            <input type="radio" name="install-mode" value="erase">
+            <span class="installer-choice-body"><span class="installer-choice-name">Erase everything <span class="installer-recommended" id="erase-recommended" hidden>Recommended for first install</span></span><span class="installer-choice-text">Full factory reset. WiFi setup and vehicle pairing are required again.</span></span>
+          </label>
+        </div>
+
+        <div class="installer-action-row installer-device-actions">
+          <button class="installer-primary" type="button" id="install-button" disabled>Install firmware</button>
+          <button class="installer-secondary" type="button" id="reset-button" disabled>
+            <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.34 5.66M20 4v7h-7"/></svg>
+            Reset
+          </button>
+          <button class="installer-secondary" type="button" id="disconnect-button" disabled>Disconnect</button>
+        </div>
+
+        <div class="installer-progress-wrap" aria-live="polite">
+          <div class="installer-progress-labels"><span id="progress-stage">Preparing</span><span class="installer-progress-percent" id="progress-percent">0%</span></div>
+          <div class="installer-progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="progress-track"><div class="installer-progress-fill" id="progress-fill"></div></div>
+        </div>
+
+        <div class="installer-success"><span class="installer-success-icon" aria-hidden="true">✓</span><span><strong>Firmware installed successfully</strong><span>The expected version was observed during boot and the USB port is ready again.</span></span></div>
+      </section>
+
+      <section class="installer-card installer-after" aria-labelledby="after-title">
+        <span class="installer-card-kicker">After flashing</span>
+        <strong class="installer-card-title" id="after-title">Bring the key online</strong>
+        <ol class="installer-after-list">
+          <li><span>On a first install or after choosing Erase, join <code>tesla-key-esp32-setup</code>. The captive portal opens automatically; enter WiFi and the Tesla VIN. An update without Erase reconnects with the saved WiFi.</span></li>
+          <li><span>Once it joins your network, open <code>http://tesla-key-esp32.local</code>. Generate the security key there and complete the pairing request in the Tesla.</span></li>
+          <li><span>Future releases install over the air: tap the firmware version in the device page. USB is only needed for recovery or partition-layout changes.</span></li>
+        </ol>
+        <p class="installer-links"><a href="https://github.com/0Bu/tesla-key-esp32#readme">README</a> · <a href="https://github.com/0Bu/tesla-key-esp32/tree/main/docs">docs</a> · <a href="https://github.com/0Bu/tesla-key-esp32/releases/latest">latest release</a></p>
+      </section>
+
+      <section class="installer-card" aria-labelledby="usb-help-title">
+        <span class="installer-card-kicker">USB port choice</span>
+        <strong class="installer-card-title" id="usb-help-title">Two ports? Use native USB</strong>
+        <p class="installer-help">If a board exposes both a USB-to-UART bridge and the ESP chip's own USB port, select the port named <code>USB JTAG/serial debug unit</code> or <code>ESP32</code>. A CH340, CH343, CP210x or FTDI bridge may fail with <code>Failed to connect with the device</code> or stop part-way through. Retry with the socket labelled <b>USB</b>/<b>native</b>, not <b>UART</b>/<b>COM</b>.</p>
+      </section>
+    </main>
+  </div>
+  <footer class="installer-footer">MIT · not affiliated with Tesla, Inc.</footer>
+</div>
+
+<script type="module" src="./installer-bootstrap.mjs"></script>
+</body>
+</html>
