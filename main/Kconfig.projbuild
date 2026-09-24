@@ -107,17 +107,20 @@ menu "Tesla Key Configuration"
 
     # ── Ethernet (W5500 over SPI — supported ESP32-S3 Ethernet boards) ───────────────────────
     # OFF by default and enabled per target, for two independent reasons. (1) Flash: compiling
-    # in esp_eth + the W5500 driver costs tens of KB, and esp32c6 has only ~92 KB of headroom
-    # under the ci-build-all.sh size gate, where growth is quantised to 64 KB Secure-Boot blocks.
+    # in esp_eth + the W5500 driver costs tens of KB, and esp32c6 has the least headroom under the
+    # ci-build-all.sh size gate (see its size-*.md report), where growth is quantised to 64 KB
+    # Secure-Boot blocks.
     # (2) Pins: the probe drives SPI on real GPIOs, which is only safe on a board known not to
     # have something else there. It is enabled for esp32s3 (sdkconfig.defaults.esp32s3), whose
     # ONE image also serves the T-Dongle-S3 — net.cpp refuses to probe on that board because its
     # panel clock IS the W5500's SCK pin (see tk::board_is_t_dongle_s3()).
+    # ESP-IDF 6 ships the W5500 MAC/PHY driver as the espressif/w5500 managed component, which
+    # main/idf_component.yml resolves for esp32s3 only; the option therefore exists only there.
     config TESLA_ETH_ENABLED
         bool "Enable Ethernet (W5500 over SPI)"
+        depends on IDF_TARGET_ESP32S3
         default n
         select ETH_USE_SPI_ETHERNET
-        select ETH_SPI_ETHERNET_W5500
         help
             Compile in an SPI Ethernet transport (WIZnet W5500 in MAC-RAW mode) as an
             alternative to WiFi. At boot the firmware probes for the controller; only a board

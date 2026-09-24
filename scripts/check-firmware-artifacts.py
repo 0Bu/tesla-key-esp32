@@ -499,7 +499,7 @@ def self_test() -> None:
 
         signed.write_bytes(fake_sign(app.read_bytes()))
 
-        # Software-only TOFU in ESP-IDF v5.5 trusts only position zero. A second block must not be
+        # Software-only TOFU (ESP-IDF v5.5, unchanged in v6.1) trusts only position zero. A second block must not be
         # accepted as a pretend OTA key-rotation bridge; that transition is explicitly USB-only.
         extra_signature = bytearray(signed.read_bytes())
         extra_signature[-SIGNATURE_SECTOR + SIGNATURE_BLOCK_SIZE] = SECURE_BOOT_V2_BLOCK_MAGIC

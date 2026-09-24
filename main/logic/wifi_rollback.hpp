@@ -74,7 +74,7 @@ enum class DiscoClass : uint8_t {
 // IDF header and the host test can drive every branch directly. The numeric values are PINNED in
 // the comments on purpose: an enum this file cannot see is an enum that could be renumbered
 // without breaking a build, so a reader has to be able to check them against esp_wifi_types.h by
-// eye. Verified against ESP-IDF 5.x.
+// eye. Verified against ESP-IDF 5.x and 6.1.
 //
 // Reason 2 (AUTH_EXPIRE) is the ambiguous member of the auth class and worth naming as such: an
 // AP also sends it on a routine idle deauth, so on its own it is not proof of a bad password.

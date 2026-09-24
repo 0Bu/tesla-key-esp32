@@ -22,12 +22,9 @@
 #include <vcsec.pb.h>
 #include <keys.pb.h>
 
-// mbedtls for deriving the public-key fingerprint from the stored PEM key
+// Mbed TLS PK parses the stored PEM key; PSA Crypto derives the public-key fingerprint from it.
 #include <mbedtls/pk.h>
-#include <mbedtls/ecp.h>
-#include <mbedtls/sha1.h>
-#include <mbedtls/entropy.h>
-#include <mbedtls/ctr_drbg.h>
+#include <psa/crypto.h>
 
 static const char* TAG = "vehicle_ctrl";
 
@@ -823,34 +820,38 @@ __attribute__((noinline)) std::string VehicleController::compute_key_fingerprint
         pem.push_back('\0');
     }
 
-    mbedtls_pk_context     pk;   mbedtls_pk_init(&pk);
-    mbedtls_entropy_context ent; mbedtls_entropy_init(&ent);
-    mbedtls_ctr_drbg_context drbg; mbedtls_ctr_drbg_init(&drbg);
+    // Mbed TLS 4 keeps PK only for encodings: the parsed key moves into a short-lived volatile
+    // PSA key, whose export is the uncompressed P-256 point (0x04 || X || Y) that tesla-ble's
+    // generate_key_id() hashes too. ESP-IDF initialises PSA Crypto during startup.
+    mbedtls_pk_context pk;
+    mbedtls_pk_init(&pk);
+    mbedtls_svc_key_id_t key_id = MBEDTLS_SVC_KEY_ID_INIT;
     std::string fp;
 
-    if (mbedtls_ctr_drbg_seed(&drbg, mbedtls_entropy_func, &ent, nullptr, 0) == 0 &&
-        mbedtls_pk_parse_key(&pk, pem.data(), pem.size(), nullptr, 0,
-                             mbedtls_ctr_drbg_random, &drbg) == 0 &&
-        mbedtls_pk_get_type(&pk) == MBEDTLS_PK_ECKEY) {
-        mbedtls_ecp_keypair* kp = mbedtls_pk_ec(pk);
-        mbedtls_ecp_group grp;  mbedtls_ecp_group_init(&grp);
-        mbedtls_ecp_point Q;    mbedtls_ecp_point_init(&Q);
-        uint8_t pub[65];
-        size_t  publen = 0;
-        if (mbedtls_ecp_export(kp, &grp, nullptr, &Q) == 0 &&
-            mbedtls_ecp_point_write_binary(&grp, &Q, MBEDTLS_ECP_PF_UNCOMPRESSED,
-                                           &publen, pub, sizeof(pub)) == 0) {
-            // Tesla key id = first 4 bytes of SHA-1 over the uncompressed public point.
-            uint8_t sha[20];
-            if (mbedtls_sha1(pub, publen, sha) == 0) {
-                char buf[16];
-                snprintf(buf, sizeof(buf), "%02X:%02X:%02X:%02X",
-                         sha[0], sha[1], sha[2], sha[3]);
-                fp = buf;
+    if (mbedtls_pk_parse_key(&pk, pem.data(), pem.size(), nullptr, 0) == 0) {
+        psa_key_attributes_t attributes = PSA_KEY_ATTRIBUTES_INIT;
+        if (mbedtls_pk_get_psa_attributes(&pk, PSA_KEY_USAGE_DERIVE, &attributes) == 0 &&
+            psa_get_key_type(&attributes) ==
+                PSA_KEY_TYPE_ECC_KEY_PAIR(PSA_ECC_FAMILY_SECP_R1) &&
+            psa_get_key_bits(&attributes) == 256 &&
+            mbedtls_pk_import_into_psa(&pk, &attributes, &key_id) == 0) {
+            uint8_t pub[65];
+            size_t  publen = 0;
+            if (psa_export_public_key(key_id, pub, sizeof(pub), &publen) == PSA_SUCCESS) {
+                // Tesla key id = first 4 bytes of SHA-1 over the uncompressed public point.
+                uint8_t sha[20];
+                size_t  shalen = 0;
+                if (psa_hash_compute(PSA_ALG_SHA_1, pub, publen, sha, sizeof(sha), &shalen) ==
+                        PSA_SUCCESS &&
+                    shalen == sizeof(sha)) {
+                    char buf[16];
+                    snprintf(buf, sizeof(buf), "%02X:%02X:%02X:%02X",
+                             sha[0], sha[1], sha[2], sha[3]);
+                    fp = buf;
+                }
             }
         }
-        mbedtls_ecp_point_free(&Q);
-        mbedtls_ecp_group_free(&grp);
+        psa_reset_key_attributes(&attributes);
     }
 
     if (!pem.empty()) {
@@ -858,9 +859,8 @@ __attribute__((noinline)) std::string VehicleController::compute_key_fingerprint
         for (size_t i = 0; i < pem.size(); ++i) p[i] = 0;
     }
 
+    psa_destroy_key(key_id);  // PSA_SUCCESS no-op for the null id
     mbedtls_pk_free(&pk);
-    mbedtls_ctr_drbg_free(&drbg);
-    mbedtls_entropy_free(&ent);
     return fp;
 }
 

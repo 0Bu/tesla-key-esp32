@@ -15,7 +15,7 @@
     },
     {
       "id": "toolchain-pin",
-      "pattern": "ESP-IDF[\\s\\S]{0,40}v?5\\.5\\.5"
+      "pattern": "ESP-IDF[\\s\\S]{0,40}v?6\\.1(?![.0-9])"
     },
     {
       "id": "tesla-ble-pin",

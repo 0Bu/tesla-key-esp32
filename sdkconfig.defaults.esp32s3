@@ -40,8 +40,10 @@ CONFIG_TESLA_DISPLAY_BL=38
 # the PoE base's SPI SCLK — so net_eth_probe() refuses to probe once tk::board_is_t_dongle_s3()
 # says yes. That shared detector is why the probe is safe to compile in unconditionally here.
 #
-# NOT enabled for esp32/esp32c3/esp32c6: no board in use has a W5500, and esp32c6 has only ~92 KB
-# under the ci-build-all.sh size gate, where growth is quantised to 64 KB Secure-Boot blocks.
+# NOT enabled for esp32/esp32c3/esp32c6: no board in use has a W5500, and esp32c6 has the least
+# headroom under the ci-build-all.sh size gate, where growth is quantised to 64 KB Secure-Boot
+# blocks. On ESP-IDF 6 the option exists only here: the espressif/w5500 driver is resolved for
+# esp32s3 only (main/idf_component.yml).
 CONFIG_TESLA_ETH_ENABLED=y
 CONFIG_TESLA_ETH_SPI_SCLK=5
 CONFIG_TESLA_ETH_SPI_CS=6
@@ -51,6 +53,7 @@ CONFIG_TESLA_ETH_SPI_MOSI=8
 # but these stack-through headers are short unshielded runs.
 CONFIG_TESLA_ETH_SPI_CLOCK_MHZ=20
 # The ATOMIC PoE Base routes only SCLK/CS/MISO/MOSI + power — no INT line — so the driver polls.
-# ESP-IDF ships a CI configuration for exactly this (sdkconfig.ci.poll_w5500, also 10 ms).
+# Polling is a first-class mode of the espressif/w5500 driver, which accepts exactly one of an
+# interrupt GPIO or a poll period (esp_eth_mac_new_w5500).
 CONFIG_TESLA_ETH_POLL_MS=10
 CONFIG_TESLA_ETH_WAIT_S=20

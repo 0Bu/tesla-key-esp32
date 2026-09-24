@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Host-side integration harness test against the real yoziru/tesla-ble v5.2.0 library,
-# Nanopb, and Mbed TLS.
+# Host-side integration harness test against the real yoziru/tesla-ble v5.2.0 library (with the
+# repository patch series, including the PSA port), Nanopb, and the exact Espressif Mbed TLS 4.1 /
+# TF-PSA-Crypto commit that the pinned ESP-IDF v6.1 builds into the firmware.
 #
 # Runs the production helpers from main/logic/ (not copies) against the real library:
 # - B1: tk::build_ble_tx_frame / tk::is_well_formed_ble_frame (the drive_command_runner_() TX path)
@@ -8,6 +9,9 @@
 # - B2: tk::regenerate_private_key (behind regenerate_key_native_()): round trip, 2048 B PEM
 #       export, fail-closed rollback
 # - H1: CommandRunner/BleDispatcher routing contract for foreign-UUID CarServer responses
+# - V1: protocol-vector known answers (vehicle-command protocol.md) through the patched PSA crypto
+#       bindings: P-256 key import, ECDH session key, session-info HMAC, AES-GCM, VIN BLE name,
+#       PEM round trip and the firmware key-fingerprint derivation
 #
 # Usage: ./scripts/test-tesla-ble-harness.sh [--clean]
 
@@ -29,7 +33,7 @@ for arg in "$@"; do
     fi
 done
 
-mkdir -p "$BUILD_DIR/obj/mbedtls" "$BUILD_DIR/obj/nanopb" "$BUILD_DIR/obj/tb" "$CACHE_DIR"
+mkdir -p "$BUILD_DIR/obj/nanopb" "$BUILD_DIR/obj/tb" "$CACHE_DIR"
 
 clone_or_fail() {
     local name="$1" branch="$2" url="$3" dest="$4"
@@ -44,6 +48,28 @@ clone_or_fail() {
                 exit 0
             fi
         fi
+    fi
+}
+
+# Fetch one exact commit (a moving branch would let the host crypto drift from the firmware's).
+fetch_commit_or_fail() {
+    local name="$1" commit="$2" url="$3" dest="$4"
+    if [ -d "$dest" ] && [ "$(git -C "$dest" rev-parse HEAD 2>/dev/null)" = "$commit" ]; then
+        return 0
+    fi
+    rm -rf "$dest"
+    echo "[harness] Fetching $name ($commit)..."
+    if ! { git init -q "$dest" &&
+           git -C "$dest" fetch -q --depth 1 "$url" "$commit" &&
+           git -C "$dest" checkout -q FETCH_HEAD &&
+           [ "$(git -C "$dest" rev-parse HEAD)" = "$commit" ]; }; then
+        rm -rf "$dest"
+        if [ "$REQUIRE_ALL" = 1 ] || [ "${CI:-}" = "true" ]; then
+            echo "[harness] ERROR: failed to fetch $name in fail-closed mode" >&2
+            exit 1
+        fi
+        echo "[harness] offline / network fetch failed for $name — skipping integration harness"
+        exit 0
     fi
 }
 
@@ -91,8 +117,11 @@ if [ ! -d "$NANOPB_DIR" ]; then
     clone_or_fail "nanopb" "0.4.9.1" "https://github.com/nanopb/nanopb.git" "$NANOPB_DIR"
 fi
 
-MBEDTLS_DIR="$CACHE_DIR/mbedtls"
-clone_or_fail "mbedtls" "mbedtls-3.6.6-idf" "https://github.com/espressif/mbedtls.git" "$MBEDTLS_DIR"
+# The components/mbedtls/mbedtls submodule commit of ESP-IDF v6.1 (Mbed TLS 4.1.0 + TF-PSA-Crypto
+# 1.1.0, Espressif fork). Keep it equal to the pinned toolchain's submodule on every IDF bump.
+MBEDTLS_REF="a2b32072ea898afc1ed5b6caf6931e36028c91d6"
+MBEDTLS_DIR="$CACHE_DIR/mbedtls-$MBEDTLS_REF"
+fetch_commit_or_fail "espressif/mbedtls" "$MBEDTLS_REF" "https://github.com/espressif/mbedtls.git" "$MBEDTLS_DIR"
 
 CC="${CC:-clang}"
 CXX="${CXX:-clang++}"
@@ -103,32 +132,42 @@ if ! command -v "$CXX" >/dev/null 2>&1; then
     CXX=g++
 fi
 
-echo "[harness] Compiling Mbed TLS..."
-for f in "$MBEDTLS_DIR"/library/*.c; do
-    obj="$BUILD_DIR/obj/mbedtls/$(basename "$f" .c).o"
-    if [ ! -f "$obj" ] || [ "$f" -nt "$obj" ]; then
-        "$CC" -O2 -w -c "$f" -I "$MBEDTLS_DIR/include" -I "$MBEDTLS_DIR/library" -o "$obj"
-    fi
-done
-ar rcs "$BUILD_DIR/libmbedtls.a" "$BUILD_DIR"/obj/mbedtls/*.o
+# Espressif's fork commits its generated sources (GEN_FILES=OFF) and includes ESP-IDF's public
+# mbedtls/bignum.h and ecp.h wrappers from its builtin drivers; test/stubs/mbedtls-idf stands in
+# for those two ESP-IDF port headers on the host.
+command -v cmake >/dev/null 2>&1 || { echo "[harness] ERROR: cmake is required to build Mbed TLS 4" >&2; exit 1; }
+MBEDTLS_BUILD="$BUILD_DIR/mbedtls-$MBEDTLS_REF"
+if [ ! -f "$MBEDTLS_BUILD/tf-psa-crypto/core/libtfpsacrypto.a" ]; then
+    echo "[harness] Building Mbed TLS 4 / TF-PSA-Crypto..."
+    rm -rf "$MBEDTLS_BUILD"
+    cmake -S "$MBEDTLS_DIR" -B "$MBEDTLS_BUILD" -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_C_COMPILER="$CC" -DCMAKE_C_FLAGS="-I $ROOT_DIR/test/stubs/mbedtls-idf" \
+        -DGEN_FILES=OFF -DENABLE_TESTING=OFF -DENABLE_PROGRAMS=OFF \
+        -DMBEDTLS_FATAL_WARNINGS=OFF -DTF_PSA_CRYPTO_FATAL_WARNINGS=OFF >/dev/null
+    cmake --build "$MBEDTLS_BUILD" --target tfpsacrypto -j "$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 2)" >/dev/null
+fi
+MBEDTLS_LIB="$MBEDTLS_BUILD/tf-psa-crypto/core/libtfpsacrypto.a"
+MBEDTLS_INC="-I $MBEDTLS_DIR/include -I $MBEDTLS_DIR/tf-psa-crypto/include -I $MBEDTLS_DIR/tf-psa-crypto/drivers/builtin/include"
 
 echo "[harness] Compiling Nanopb..."
-INC="-I $TB_DIR/include -I $TB_DIR/generated/include -I $NANOPB_DIR -I $MBEDTLS_DIR/include -I $ROOT_DIR/main"
+INC="-I $TB_DIR/include -I $TB_DIR/generated/include -I $NANOPB_DIR $MBEDTLS_INC -I $ROOT_DIR/main"
 for f in "$NANOPB_DIR"/pb_common.c "$NANOPB_DIR"/pb_decode.c "$NANOPB_DIR"/pb_encode.c; do
     obj="$BUILD_DIR/obj/nanopb/$(basename "$f" .c).o"
     if [ ! -f "$obj" ] || [ "$f" -nt "$obj" ]; then
         "$CC" -O2 -w -c "$f" -I "$NANOPB_DIR" -o "$obj"
     fi
 done
+# tesla-ble objects depend on both the library version and the Mbed TLS headers they compiled against.
+OBJ_KEY="$EXPECTED_TB_VER mbedtls-$MBEDTLS_REF"
 if [ -f "$BUILD_DIR/obj/tb/.version" ]; then
     CACHED_OBJ_VER="$(cat "$BUILD_DIR/obj/tb/.version" 2>/dev/null || true)"
-    if [ "$CACHED_OBJ_VER" != "$EXPECTED_TB_VER" ]; then
-        echo "[harness] tesla-ble version changed ($CACHED_OBJ_VER -> $EXPECTED_TB_VER); invalidating object cache..."
+    if [ "$CACHED_OBJ_VER" != "$OBJ_KEY" ]; then
+        echo "[harness] tesla-ble/Mbed TLS inputs changed ($CACHED_OBJ_VER -> $OBJ_KEY); invalidating object cache..."
         rm -rf "$BUILD_DIR/obj/tb"
         mkdir -p "$BUILD_DIR/obj/tb"
     fi
 fi
-echo "$EXPECTED_TB_VER" > "$BUILD_DIR/obj/tb/.version"
+echo "$OBJ_KEY" > "$BUILD_DIR/obj/tb/.version"
 
 echo "[harness] Compiling tesla-ble protobuf descriptors..."
 while IFS= read -r -d '' f; do
@@ -154,9 +193,10 @@ done
 ar rcs "$BUILD_DIR/libtb.a" "$BUILD_DIR"/obj/tb/*.o "$BUILD_DIR"/obj/nanopb/*.o
 
 echo "[harness] Compiling test_tesla_ble_harness..."
+# tests/test_constants.h carries the official vehicle-command protocol test keys (never production).
 "$CXX" -std=c++17 -O2 -Wall -Wextra \
     "$ROOT_DIR/test/test_tesla_ble_harness.cpp" \
-    $INC "$BUILD_DIR/libtb.a" "$BUILD_DIR/libmbedtls.a" \
+    $INC -I "$TB_DIR/tests" "$BUILD_DIR/libtb.a" "$MBEDTLS_LIB" \
     -o "$BUILD_DIR/test_tesla_ble_harness"
 
 echo "[harness] Executing integration harness..."

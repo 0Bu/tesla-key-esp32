@@ -3,7 +3,7 @@
 #include <atomic>
 #include <cstdint>
 
-// Pure boot-time acknowledgement gate for the NimBLE host task. ESP-IDF 5.5's
+// Pure boot-time acknowledgement gate for the NimBLE host task. ESP-IDF's (5.5, unchanged in 6.1)
 // nimble_port_freertos_init() does not expose xTaskCreatePinnedToCore() failure to its caller, so
 // successful return from that void wrapper is not evidence that a host task exists. The first
 // on_sync callback is the positive acknowledgement. A timeout is terminal: a callback arriving

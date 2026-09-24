@@ -77,7 +77,7 @@ together, which matters more here than in a normal flash since a wrong guess wri
 
 | Region          | Offset                         | Size      | Recovery action                                   |
 |-----------------|--------------------------------|-----------|---------------------------------------------------|
-| bootloader      | `0x1000` esp32 / `0x0` s3·c3·c6 | —         | leave alone (never signature-checked); rewrite only if also damaged |
+| bootloader      | `0x1000` esp32 / `0x0` s3·c3·c6 | —         | leave alone (never signature-checked); rewrite only if also damaged; read once in step 3, because its ESP-IDF version bounds the app |
 | partition-table | `0x8000`                       | —         | leave alone; rewrite only if also damaged         |
 | **nvs**         | `0x9000`                       | `0x6000`  | **NEVER touch** — holds pairing / key / VIN / WiFi |
 | **otadata**     | `0xf000`                       | `0x2000`  | **ERASE** — a blank `otadata` cleanly boots `ota_0` |
@@ -376,6 +376,57 @@ fi
 
 This explicit-port cross-check is not optional. With two boards on USB, a naive first-responder
 pick can select the wrong device even when both share the same chip family.
+
+**ESP-IDF compatibility with the bootloader that stays.** ESP-IDF's bootloader boots apps built by
+the same or a newer ESP-IDF, never by an older one (ESP-IDF v6.1 `api-guides/bootloader.rst`,
+"Bootloader Compatibility"). The minimal flow keeps the installed bootloader, so a board installed
+from a v6.1-built release (web installer or merged image) must not receive a 5.x-built app, however
+valid its provenance; a board that was only ever OTA-updated keeps its older bootloader. Read the
+bootloader region — read-only, and it ends below the partition table, far from `nvs@0x9000` — and
+compare both ESP-IDF versions; with the step-2 support bootloader in the write set, compare against
+that one instead. A board with no auto-reset needs BOOT held and
+`RESET_ARGS=(--before no-reset --after no-reset)`:
+
+```bash
+set -euo pipefail
+: "${APP:?select and validate Option A or B first}"
+: "${PORT:?run the explicit-port probe first}"
+[ -n "${RESET_ARGS+x}" ] || RESET_ARGS=()
+# Capture image-info whole: `esptool … | grep -q` lets grep close the pipe early, and under
+# pipefail esptool's broken pipe would turn a match into a refusal.
+idf_version_of() {  # "major minor patch" from esptool image-info's "ESP-IDF: vX.Y[.Z]" line
+  local info re=$'(^|\n)ESP-IDF: v([0-9]+)\\.([0-9]+)(\\.([0-9]+))?'
+  info=$(esptool image-info "$1" 2>/dev/null) || return 1
+  [[ "$info" =~ $re ]] || return 1
+  printf '%s %s %s\n' "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]}" "${BASH_REMATCH[5]:-0}"
+}
+if [ -n "${BOOTLOADER:-}" ]; then
+  BOOT_IMAGE="$BOOTLOADER"  # step 2 writes the same run's bootloader
+else
+  INSTALLED_BOOT_OFFSET=0x0; INSTALLED_BOOT_LEN=0x8000
+  [ "$TARGET" != esp32 ] || { INSTALLED_BOOT_OFFSET=0x1000; INSTALLED_BOOT_LEN=0x7000; }
+  BOOT_IMAGE="$(mktemp -d "${TMPDIR:-/tmp}/tesla-recovery-boot.XXXXXX")/installed-bootloader.bin"
+  esptool --chip "$TARGET" -p "$PORT" ${RESET_ARGS[@]+"${RESET_ARGS[@]}"} \
+    read_flash "$INSTALLED_BOOT_OFFSET" "$INSTALLED_BOOT_LEN" "$BOOT_IMAGE"
+  BOOT_INFO=$(esptool image-info "$BOOT_IMAGE" 2>/dev/null) || BOOT_INFO=""
+  printf '%s\n' "$BOOT_INFO" | grep -qx "Detected image type: $FAMILY" || {
+    echo "REFUSING: the installed bootloader is not a readable $FAMILY image;" \
+      "present that evidence and seek the separate step-2 approval" >&2; exit 1;
+  }
+fi
+BOOT_IDF=$(idf_version_of "$BOOT_IMAGE") || {
+  echo "REFUSING: the bootloader carries no ESP-IDF version; stop and ask the user" >&2; exit 1;
+}
+APP_IDF=$(idf_version_of "$APP") || { echo "REFUSING: the app carries no ESP-IDF version" >&2; exit 1; }
+read -r BOOT_MAJ BOOT_MIN BOOT_PAT <<< "$BOOT_IDF"
+read -r APP_MAJ APP_MIN APP_PAT <<< "$APP_IDF"
+echo "bootloader ESP-IDF $BOOT_MAJ.$BOOT_MIN.$BOOT_PAT, app ESP-IDF $APP_MAJ.$APP_MIN.$APP_PAT"
+if (( APP_MAJ < BOOT_MAJ || (APP_MAJ == BOOT_MAJ && (APP_MIN < BOOT_MIN ||
+      (APP_MIN == BOOT_MIN && APP_PAT < BOOT_PAT))) )); then
+  echo "REFUSING: the app was built by an older ESP-IDF than the bootloader that would boot it;" \
+    "choose a release built by ESP-IDF $BOOT_MAJ.$BOOT_MIN or newer" >&2; exit 1
+fi
+```
 
 **s3 / c3 / c6 / classic esp32** (auto-reset works):
 

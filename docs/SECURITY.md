@@ -18,7 +18,9 @@ Relevant attackers:
 
 **First-boot key entropy:** the P-256 key is generated under `bootloader_random_enable()`
 (SAR-ADC hardware entropy) *before* WiFi/BLE start, so it draws from a true entropy source
-rather than the RF-off pseudo-random RNG. Devices first-keyed before the entropy fix should
+rather than the RF-off pseudo-random RNG. On ESP-IDF 6 the PSA RNG has no DRBG of its own
+(`MBEDTLS_PSA_CRYPTO_EXTERNAL_RNG`): every draw reads the hardware RNG at call time, so key
+generation consumes that entropy directly. Devices first-keyed before the entropy fix should
 re-key + re-pair (`/gen_keys?force=1`, then re-enrol).
 
 **Fail-closed key rotation:** the tesla-ble patch series reports key-generation and NVS
@@ -523,9 +525,9 @@ offline and sign on a trusted machine / KMS instead of in CI (no device-workflow
 ### Key rotation
 
 This project's `CONFIG_SECURE_SIGNED_ON_UPDATE_NO_SECURE_BOOT` mode deliberately supports exactly
-one valid signature block in position zero. ESP-IDF v5.5 uses only that first running-app key to
-verify the next OTA image; appending old and new signatures therefore **does not provide an OTA key
-rotation path**. The validator rejects additional blocks so CI cannot imply otherwise.
+one valid signature block in position zero. ESP-IDF (v5.5, and unchanged in v6.1) uses only that
+first running-app key to verify the next OTA image; appending old and new signatures therefore
+**does not provide an OTA key rotation path**. The validator rejects additional blocks so CI cannot imply otherwise.
 
 Changing `OTA_SIGNING_KEY` or `scripts/ota-signing-public-key.sha256` alone would strand every
 device anchored to the old key. A rotation requires a separately reviewed fleet migration: retain

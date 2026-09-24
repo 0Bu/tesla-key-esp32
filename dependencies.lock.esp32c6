@@ -1,6 +1,6 @@
 dependencies:
-  espressif/mdns:
-    component_hash: e81ca7a7f53ea34e78274df054da692c272e1315572876b237b1748e267c013b
+  espressif/cjson:
+    component_hash: e788323270d90738662d66fffa910bfe1fba019bba087f01557e70c40485b469
     dependencies:
     - name: idf
       require: private
@@ -8,11 +8,31 @@ dependencies:
     source:
       registry_url: https://components.espressif.com/
       type: service
-    version: 1.11.3
+    version: 1.7.19~2
+  espressif/mdns:
+    component_hash: 424ec62b386bdfc522466053dab9b06ff389539bfa3da7632f32ef033874ef80
+    dependencies:
+    - name: idf
+      version: '>=5.0'
+    source:
+      git: https://github.com/espressif/esp-protocols.git
+      path: components/mdns
+      type: git
+    version: d61a590e07e0df4c66e7ac43feeceb0f1e0866f9
+  espressif/mqtt:
+    component_hash: fb18bc3b65aa8c94693a9811ffc322cca8a65d92d5ec84983d3e385080e3969c
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=5.3'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 1.1.0
   idf:
     source:
       type: idf
-    version: 5.5.5
+    version: 6.1.0
   yoziru/tesla-ble:
     component_hash: fb55938820781e8a731fc1557c0c4542bbf6833729062cfdb86a978b07016025
     dependencies:
@@ -29,9 +49,11 @@ dependencies:
     - esp32c6
     version: 07a4ef503a52f736009fdeba953f185aecc863f3
 direct_dependencies:
+- espressif/cjson
 - espressif/mdns
+- espressif/mqtt
 - idf
 - yoziru/tesla-ble
-manifest_hash: 237ea7c60435890a8296d77775999b9332cee898da572911ff4a75da4d33712f
+manifest_hash: 53e09d74068ad481d414bea246a46413be72e4638f19fa7733365f82bd057615
 target: esp32c6
-version: 2.0.0
+version: 3.0.0

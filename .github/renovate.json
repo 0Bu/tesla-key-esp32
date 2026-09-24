@@ -16,7 +16,7 @@
       "description": "Bump the tag and immutable digest of the shared ESP-IDF build image",
       "managerFilePatterns": ["/^esp-idf-toolchain\\.txt$/"],
       "matchStrings": [
-        "(?<currentValue>v[0-9]+\\.[0-9]+\\.[0-9]+)@(?<currentDigest>sha256:[0-9a-f]{64})"
+        "(?<currentValue>v[0-9]+\\.[0-9]+(?:\\.[0-9]+)?)@(?<currentDigest>sha256:[0-9a-f]{64})"
       ],
       "datasourceTemplate": "docker",
       "depNameTemplate": "espressif/idf"
@@ -43,11 +43,11 @@
       "automerge": false
     },
     {
-      "description": "Keep ESP-IDF on 5.x until the deliberate IDF 6 / Mbed TLS 4 migration is complete, and remind maintainers to re-check yoziru/tesla-ble on allowed updates.",
+      "description": "Keep ESP-IDF on 6.x, and remind maintainers that an IDF bump also moves the Mbed TLS / TF-PSA-Crypto the PSA patch and host harness are pinned against.",
       "matchDepNames": ["espressif/idf"],
-      "allowedVersions": "<6.0.0",
+      "allowedVersions": "<7.0.0",
       "prBodyNotes": [
-        "⚠️ **Before merging — verify `yoziru/tesla-ble` compatibility.** Renovate intentionally restricts ESP-IDF updates to 5.x. Do not widen `allowedVersions` as a routine dependency bump: IDF 6 requires the deliberate Mbed TLS 4 / PSA Crypto migration tracked in #61 and docs/adr/0002-idf6-mbedtls4-crypto-seam.md."
+        "⚠️ **Before merging — re-verify the tesla-ble PSA port.** An ESP-IDF bump changes the Mbed TLS / TF-PSA-Crypto the firmware links, and the firmware build fails closed until `MBEDTLS_REF` in scripts/test-tesla-ble-harness.sh and `MBEDTLS_COMMIT` in scripts/check-dependency-contract.py name the new image's components/mbedtls/mbedtls commit. Update both, rerun the V1 protocol vectors, and re-check patches/tesla-ble/0006-port-crypto-bindings-to-psa.patch (docs/adr/0002-idf6-mbedtls4-crypto-seam.md). Do not widen `allowedVersions` to 7.x as a routine bump."
       ]
     },
     {

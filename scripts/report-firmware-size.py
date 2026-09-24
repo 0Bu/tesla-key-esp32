@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-"""Render ESP-IDF 5.x legacy JSON size output as a compact Markdown budget report."""
+"""Render ESP-IDF 6 esp-idf-size `json2` output as a compact Markdown budget report."""
 
 from __future__ import annotations
 
 import argparse
 import json
-import math
 import pathlib
 import sys
 import tempfile
@@ -35,137 +34,101 @@ class ImageUsage:
     flash_code_rodata: int
 
 
-def integer(data: dict[str, Any], key: str) -> int:
+# esp-idf-size 2.x (`--format json2`) reports named memory regions. Region names differ per chip
+# (the C3 names its shared D/IRAM "DRAM", the S3 and C6 "DIRAM"), so each target's static-RAM and
+# IRAM regions are bound explicitly: a renamed or missing region fails closed instead of silently
+# reporting zero. Flash regions have no capacity (total == free == 0).
+TARGET_REGIONS: dict[str, tuple[str, str, str | None, tuple[str, ...]]] = {
+    # target: (memory model, static RAM region, IRAM region, flash regions)
+    "esp32": ("split", "DRAM", "IRAM", ("Flash Code", "Flash Data")),
+    "esp32s3": ("unified", "DIRAM", "IRAM", ("Flash Code", "Flash Data")),
+    "esp32c3": ("unified", "DRAM", None, ("Flash Code", "Flash Data")),
+    "esp32c6": ("unified", "DIRAM", None, ("Flash Code",)),
+}
+
+
+def integer(data: dict[str, Any], key: str, label: str) -> int:
     value = data.get(key)
-    if isinstance(value, bool) or not isinstance(value, int):
-        raise ValueError(f"{key} must be an integer in ESP-IDF size JSON")
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"{label}.{key} must be a non-negative integer in ESP-IDF size JSON")
     return value
 
 
-def non_negative_integer(data: dict[str, Any], key: str) -> int:
-    value = integer(data, key)
-    if value < 0:
-        raise ValueError(f"{key} must be a non-negative integer in ESP-IDF size JSON")
-    return value
+def regions(data: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Validate every json2 region and index it by name."""
+    if data.get("version") != "1.2":
+        raise ValueError("ESP-IDF size JSON must be esp-idf-size json2 version 1.2")
+    layout = data.get("layout")
+    if not isinstance(layout, list) or not layout:
+        raise ValueError("ESP-IDF size JSON layout must be a non-empty list")
+    indexed: dict[str, dict[str, Any]] = {}
+    for region in layout:
+        if not isinstance(region, dict) or set(region) != {"name", "total", "used", "free", "parts"}:
+            raise ValueError("ESP-IDF size region fields must be exactly name/total/used/free/parts")
+        name = region["name"]
+        if not isinstance(name, str) or not name or name in indexed:
+            raise ValueError(f"ESP-IDF size region name is invalid or duplicated: {name!r}")
+        total = integer(region, "total", name)
+        used = integer(region, "used", name)
+        free = integer(region, "free", name)
+        parts = region["parts"]
+        if not isinstance(parts, dict):
+            raise ValueError(f"{name}.parts must be an object in ESP-IDF size JSON")
+        part_sum = 0
+        for part_name, part in parts.items():
+            if not isinstance(part, dict) or set(part) != {"size"}:
+                raise ValueError(f"{name}.parts[{part_name!r}] must be exactly {{size}}")
+            part_sum += integer(part, "size", f"{name}.parts[{part_name!r}]")
+        if used != part_sum:
+            raise ValueError(f"{name}.used must equal the sum of its section sizes")
+        if total:
+            if used > total:
+                raise ValueError(f"{name} used bytes cannot exceed its total")
+            if free != total - used:
+                raise ValueError(f"{name}.free must equal total - used")
+        elif free:
+            raise ValueError(f"{name} has no capacity, so free must be 0")
+        indexed[name] = region
+    integer(data, "total_size", "size report")
+    return indexed
 
 
-def ratio(data: dict[str, Any], key: str) -> float:
-    value = data.get(key)
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise ValueError(f"{key} must be a finite non-negative number in ESP-IDF size JSON")
-    result = float(value)
-    if not math.isfinite(result) or result < 0:
-        raise ValueError(f"{key} must be a finite non-negative number in ESP-IDF size JSON")
-    return result
+def target_region(indexed: dict[str, dict[str, Any]], name: str, target: str) -> dict[str, Any]:
+    region = indexed.get(name)
+    if region is None:
+        raise ValueError(f"{target} size report has no {name!r} region")
+    return region
 
 
-def validate_region(
-    data: dict[str, Any],
-    name: str,
-    part_keys: tuple[str, ...],
-    used_key: str,
-    total_key: str,
-    remain_key: str,
-    ratio_key: str,
-) -> tuple[int, int]:
-    parts = [non_negative_integer(data, key) for key in part_keys]
-    used = non_negative_integer(data, used_key)
-    total = non_negative_integer(data, total_key)
-    remain = non_negative_integer(data, remain_key)
-    reported_ratio = ratio(data, ratio_key)
-    part_sum = sum(parts)
-    if used != part_sum:
-        raise ValueError(f"{used_key} must equal the sum of {name} section fields")
-    if used > total:
-        raise ValueError(f"{name} used bytes cannot exceed {total_key}")
-    if remain != total - used:
-        raise ValueError(f"{remain_key} must equal {total_key} - {used_key}")
-    expected_ratio = used / total if total else 0.0
-    if not math.isclose(reported_ratio, expected_ratio, rel_tol=1e-12, abs_tol=1e-12):
-        raise ValueError(f"{ratio_key} does not match {used_key} / {total_key}")
-    return used, total
-
-
-def validate_idf_size_json(data: dict[str, Any]) -> None:
-    dram_used, dram_total = validate_region(
-        data,
-        "DRAM",
-        ("dram_data", "dram_bss", "dram_rodata", "dram_other"),
-        "used_dram",
-        "dram_total",
-        "dram_remain",
-        "used_dram_ratio",
-    )
-    validate_region(
-        data,
-        "IRAM",
-        ("iram_vectors", "iram_text", "iram_other"),
-        "used_iram",
-        "iram_total",
-        "iram_remain",
-        "used_iram_ratio",
-    )
-    _, diram_total = validate_region(
-        data,
-        "D/IRAM",
-        (
-            "diram_data",
-            "diram_bss",
-            "diram_text",
-            "diram_vectors",
-            "diram_rodata",
-            "diram_other",
-        ),
-        "used_diram",
-        "diram_total",
-        "diram_remain",
-        "used_diram_ratio",
-    )
-    if diram_total and (dram_used or dram_total):
-        raise ValueError("unified D/IRAM reports must not also claim a split DRAM region")
-
-    flash_code = non_negative_integer(data, "flash_code")
-    flash_rodata = non_negative_integer(data, "flash_rodata")
-    flash_other = non_negative_integer(data, "flash_other")
-    used_flash = non_negative_integer(data, "used_flash_non_ram")
-    if used_flash != flash_code + flash_rodata + flash_other:
-        raise ValueError(
-            "used_flash_non_ram must equal flash_code + flash_rodata + flash_other"
-        )
-    total_size = non_negative_integer(data, "total_size")
-    if used_flash > total_size:
-        raise ValueError("used_flash_non_ram cannot exceed total_size")
+def part_size(region: dict[str, Any], part: str) -> int:
+    entry = region["parts"].get(part)
+    return 0 if entry is None else entry["size"]
 
 
 def kib(value: int) -> str:
     return f"{value / 1024:.1f} KiB"
 
 
-def memory_usage(data: dict[str, Any]) -> MemoryUsage:
-    validate_idf_size_json(data)
-    diram_total = integer(data, "diram_total")
-    iram_total = integer(data, "iram_total")
-    if diram_total:
-        usage = MemoryUsage(
-            "unified",
-            integer(data, "used_diram"),
-            diram_total,
-            integer(data, "diram_bss"),
-            integer(data, "used_iram"),
-            iram_total,
-        )
-    else:
-        usage = MemoryUsage(
-            "split",
-            integer(data, "used_dram"),
-            integer(data, "dram_total"),
-            integer(data, "dram_bss"),
-            integer(data, "used_iram"),
-            iram_total,
-        )
-    if not 0 <= usage.bss <= usage.static_used <= usage.static_capacity:
+def memory_usage(data: dict[str, Any], target: str) -> MemoryUsage:
+    if target not in TARGET_REGIONS:
+        raise ValueError(f"unsupported target: {target}")
+    model, static_name, iram_name, _flash = TARGET_REGIONS[target]
+    indexed = regions(data)
+    static = target_region(indexed, static_name, target)
+    iram = target_region(indexed, iram_name, target) if iram_name else None
+    if model == "split" and part_size(static, ".text"):
+        raise ValueError(f"{target} split {static_name} region must not hold code")
+    usage = MemoryUsage(
+        model,
+        static["used"],
+        static["total"],
+        part_size(static, ".bss"),
+        iram["used"] if iram else 0,
+        iram["total"] if iram else 0,
+    )
+    if not 0 <= usage.bss <= usage.static_used <= usage.static_capacity or not usage.static_capacity:
         raise ValueError(
-            "static memory values must satisfy 0 <= bss <= used <= capacity "
+            "static memory values must satisfy 0 <= bss <= used <= capacity (capacity > 0) "
             f"(got {usage.bss}, {usage.static_used}, {usage.static_capacity})"
         )
     if not 0 <= usage.iram_used <= usage.iram_capacity:
@@ -176,19 +139,22 @@ def memory_usage(data: dict[str, Any]) -> MemoryUsage:
     return usage
 
 
-def image_usage(data: dict[str, Any], unsigned_size: int) -> ImageUsage:
-    validate_idf_size_json(data)
+def image_usage(data: dict[str, Any], target: str, unsigned_size: int) -> ImageUsage:
+    if target not in TARGET_REGIONS:
+        raise ValueError(f"unsupported target: {target}")
+    indexed = regions(data)
     if isinstance(unsigned_size, bool) or not isinstance(unsigned_size, int) or unsigned_size <= 0:
         raise ValueError("unsigned app size must be a positive integer")
-    total = integer(data, "total_size")
-    flash_code = integer(data, "flash_code")
-    flash_rodata = integer(data, "flash_rodata")
-    if min(total, flash_code, flash_rodata) < 0:
-        raise ValueError("ELF total, flash code and flash rodata sizes must be non-negative")
-    flash_code_rodata = flash_code + flash_rodata
+    flash_code_rodata = 0
+    for name in TARGET_REGIONS[target][3]:
+        region = target_region(indexed, name, target)
+        if region["total"]:
+            raise ValueError(f"{target} {name} region must not report a capacity")
+        flash_code_rodata += region["used"]
+    total = data["total_size"]
     if flash_code_rodata > total:
         raise ValueError(
-            "ESP-IDF total_size must include flash_code + flash_rodata: "
+            "ESP-IDF total_size must include every flash region: "
             f"total={total} flash={flash_code_rodata}"
         )
     if total > unsigned_size:
@@ -206,8 +172,8 @@ def load_budget(path: pathlib.Path, target: str) -> dict[str, Any]:
         raise ValueError(f"firmware size baseline fields must be exactly {sorted(expected_top)}")
     if root.get("schemaVersion") != 2 or root.get("baselineKind") != "reviewed-maxima":
         raise ValueError("firmware size baseline must be schemaVersion 2 reviewed-maxima")
-    if root.get("toolchain") != "ESP-IDF v5.5.5":
-        raise ValueError("firmware size baseline must be bound to ESP-IDF v5.5.5")
+    if root.get("toolchain") != "ESP-IDF v6.1":
+        raise ValueError("firmware size baseline must be bound to ESP-IDF v6.1")
     targets = root.get("targets")
     if not isinstance(targets, dict) or set(targets) != set(TARGETS):
         raise ValueError("firmware size baseline must contain exactly the four supported targets")
@@ -253,10 +219,10 @@ def load_budget(path: pathlib.Path, target: str) -> dict[str, Any]:
 
 
 def budget_failures(
-    data: dict[str, Any], unsigned_size: int, budget: dict[str, Any]
+    data: dict[str, Any], target: str, unsigned_size: int, budget: dict[str, Any]
 ) -> list[str]:
-    memory = memory_usage(data)
-    image = image_usage(data, unsigned_size)
+    memory = memory_usage(data, target)
+    image = image_usage(data, target, unsigned_size)
     failures: list[str] = []
     if memory.model != budget["memoryModel"]:
         failures.append(f"memory model changed from {budget['memoryModel']} to {memory.model}")
@@ -299,7 +265,7 @@ def render(
             "projected signed size must exactly equal minimal Secure Boot v2 padding plus its "
             f"signature sector: expected {expected_signed_size}, got {projected_signed_size}"
         )
-    image = image_usage(data, unsigned_size)
+    image = image_usage(data, target, unsigned_size)
     margin = policy_limit - projected_signed_size
     state = "PASS" if margin >= 0 else "FAIL"
     rows = [
@@ -313,7 +279,7 @@ def render(
     ]
     # Xtensa ESP32 reports split DRAM/IRAM, while S3 and RISC-V targets primarily report a
     # unified D/IRAM region. Never print plausible-looking zero rows for the wrong memory model.
-    usage = memory_usage(data)
+    usage = memory_usage(data, target)
     if usage.model == "unified":
         rows.extend(
             [
@@ -363,7 +329,7 @@ def render(
             f"| Flash code + rodata | {kib(image.flash_code_rodata)} | — | — |",
             "",
             "The policy row projects Secure Boot v2 padding plus its signature sector. Signing is",
-            "performed later in a trusted job; the JSON artifact retains the IDF 5.x raw fields.",
+            "performed later in a trusted job; the JSON artifact retains the raw json2 regions.",
             "Raw image and static-memory baseline growth is fail-closed and requires an explicit reviewed baseline update.",
             "",
         ]
@@ -371,76 +337,63 @@ def render(
     return "\n".join(rows)
 
 
-def self_test() -> None:
-    fixture = {
-        "dram_data": 1000,
-        "dram_bss": 12000,
-        "dram_rodata": 16000,
-        "dram_other": 1000,
-        "used_dram": 30000,
-        "dram_total": 100000,
-        "used_dram_ratio": 0.3,
-        "dram_remain": 70000,
-        "iram_vectors": 1000,
-        "iram_text": 18000,
-        "iram_other": 1000,
-        "used_iram": 20000,
-        "iram_total": 50000,
-        "used_iram_ratio": 0.4,
-        "iram_remain": 30000,
-        "diram_data": 0,
-        "diram_bss": 0,
-        "diram_text": 0,
-        "diram_vectors": 0,
-        "diram_rodata": 0,
-        "diram_other": 0,
-        "diram_total": 0,
-        "used_diram": 0,
-        "used_diram_ratio": 0,
-        "diram_remain": 0,
-        "flash_code": 120000,
-        "flash_rodata": 40000,
-        "flash_other": 5000,
-        "used_flash_non_ram": 165000,
-        "total_size": 173000,
+def region(name: str, total: int, parts: dict[str, int]) -> dict[str, Any]:
+    used = sum(parts.values())
+    return {
+        "name": name,
+        "total": total,
+        "used": used,
+        "free": total - used if total else 0,
+        "parts": {part: {"size": size} for part, size in parts.items()},
     }
-    report = render(fixture, 180000, 200704, 204800, "esp32c6")
+
+
+def size_report(total_size: int, *layout: dict[str, Any]) -> dict[str, Any]:
+    return {"version": "1.2", "total_size": total_size, "layout": list(layout)}
+
+
+def with_region(data: dict[str, Any], name: str, **changes: Any) -> dict[str, Any]:
+    copy = json.loads(json.dumps(data))
+    for entry in copy["layout"]:
+        if entry["name"] == name:
+            entry.update(changes)
+            return copy
+    raise AssertionError(f"self-test fixture has no {name} region")
+
+
+def self_test() -> None:
+    # esp32-shaped split report: code in IRAM, data/bss in DRAM, two flash regions.
+    fixture = size_report(
+        173000,
+        region("Flash Code", 0, {".text": 120000}),
+        region("Flash Data", 0, {".rodata": 36000, ".eh_frame": 4000}),
+        region("IRAM", 50000, {".text": 19000, ".vectors": 1000}),
+        region("DRAM", 100000, {".bss": 12000, ".data": 17000, ".noinit": 1000}),
+    )
+    report = render(fixture, 180000, 200704, 204800, "esp32")
     assert "Projected signed app (PASS)" in report
     assert "4.0 KiB" in report
     assert "DRAM `.bss` | 11.7 KiB" in report
     assert "Flash code + rodata | 156.2 KiB" in report
-    unified = dict(
-        fixture,
-        dram_data=0,
-        dram_bss=0,
-        dram_rodata=0,
-        dram_other=0,
-        used_dram=0,
-        dram_total=0,
-        used_dram_ratio=0,
-        dram_remain=0,
-        iram_vectors=0,
-        iram_text=0,
-        iram_other=0,
-        used_iram=0,
-        iram_total=0,
-        used_iram_ratio=0,
-        iram_remain=0,
-        diram_data=10000,
-        diram_bss=45000,
-        diram_text=90000,
-        diram_vectors=1000,
-        diram_rodata=3000,
-        diram_other=1000,
-        diram_total=300000,
-        used_diram=150000,
-        used_diram_ratio=0.5,
-        diram_remain=150000,
+    # esp32c6-shaped unified report: one flash region, shared D/IRAM named DIRAM.
+    unified = size_report(
+        173000,
+        region("Flash Code", 0, {".text": 120000, ".rodata": 40000}),
+        region("DIRAM", 300000, {".text": 90000, ".bss": 45000, ".data": 14000, ".noinit": 1000}),
+        region("LP SRAM", 16384, {".rtc_reserved": 24}),
     )
     unified_report = render(unified, 180000, 200704, 204800, "esp32c6")
     assert "Unified D/IRAM | 146.5 KiB" in unified_report
     assert "| DRAM |" not in unified_report
-    failed = render(fixture, 180000, 200704, 200000, "esp32c6")
+    # esp32c3 names its shared D/IRAM "DRAM"; it is still the unified model.
+    c3 = size_report(
+        173000,
+        region("Flash Code", 0, {".text": 120000}),
+        region("Flash Data", 0, {".rodata": 40000}),
+        region("DRAM", 300000, {".text": 90000, ".bss": 45000, ".data": 15000}),
+    )
+    assert memory_usage(c3, "esp32c3").model == "unified"
+    failed = render(fixture, 180000, 200704, 200000, "esp32")
     assert "Projected signed app (FAIL)" in failed
 
     budget = {
@@ -454,7 +407,7 @@ def self_test() -> None:
         "maxElfTotal": 173000,
         "maxFlashCodeAndRodata": 160000,
     }
-    assert budget_failures(fixture, 180000, budget) == []
+    assert budget_failures(fixture, "esp32", 180000, budget) == []
     assert "Static RAM reviewed baseline (PASS)" in render(
         fixture, 180000, 200704, 204800, "esp32", budget
     )
@@ -466,7 +419,7 @@ def self_test() -> None:
         only_elf_grown, 180000, 200704, 204800, "esp32", budget
     )
     assert "ELF total reviewed baseline (FAIL)" in only_elf_report
-    assert budget_failures(only_elf_grown, 180000, budget) == [
+    assert budget_failures(only_elf_grown, "esp32", 180000, budget) == [
         "ELF image footprint grew beyond reviewed baseline: max=173000 actual=173001"
     ]
     for unaffected in (
@@ -479,27 +432,19 @@ def self_test() -> None:
         assert unaffected in only_elf_report, (
             f"unrelated baseline row inherited ELF failure: {unaffected}"
         )
-    changed_capacity = dict(
-        fixture,
-        dram_total=100001,
-        dram_remain=70001,
-        used_dram_ratio=30000 / 100001,
-    )
+    changed_capacity = with_region(fixture, "DRAM", total=100001, free=70001)
     changed_capacity_report = render(
         changed_capacity, 180000, 200704, 204800, "esp32", budget
     )
     assert "Static RAM capacity identity (FAIL)" in changed_capacity_report
     assert "Static RAM reviewed baseline (PASS)" in changed_capacity_report
-    grown = dict(
-        fixture,
-        dram_bss=12001,
-        used_dram=30001,
-        dram_remain=69999,
-        used_dram_ratio=30001 / 100000,
+    grown = with_region(
+        fixture, "DRAM", used=30001, free=69999,
+        parts={".bss": {"size": 12001}, ".data": {"size": 17000}, ".noinit": {"size": 1000}},
     )
     assert any(
         "static .bss grew" in failure
-        for failure in budget_failures(grown, 180000, budget)
+        for failure in budget_failures(grown, "esp32", 180000, budget)
     )
 
     # Growth mutation canaries for the three raw-image dimensions. These remain deliberately
@@ -509,99 +454,89 @@ def self_test() -> None:
         (fixture, 180001, "unsigned app binary grew"),
         (dict(fixture, total_size=173001), 180000, "ELF image footprint grew"),
         (
-            dict(fixture, flash_code=120001, used_flash_non_ram=165001),
+            with_region(fixture, "Flash Code", used=120001, parts={".text": {"size": 120001}}),
             180000,
             "flash code + rodata grew",
         ),
     )
     for mutated, mutated_unsigned, expected_message in growth_mutations:
-        failures = budget_failures(mutated, mutated_unsigned, budget)
+        failures = budget_failures(mutated, "esp32", mutated_unsigned, budget)
         assert any(expected_message in failure for failure in failures), (
             f"growth mutation escaped reviewed baseline: {expected_message}"
         )
 
-    raw_integer_fields = (
-        "dram_data",
-        "dram_bss",
-        "dram_rodata",
-        "dram_other",
-        "used_dram",
-        "dram_total",
-        "dram_remain",
-        "iram_vectors",
-        "iram_text",
-        "iram_other",
-        "used_iram",
-        "iram_total",
-        "iram_remain",
-        "diram_data",
-        "diram_bss",
-        "diram_text",
-        "diram_vectors",
-        "diram_rodata",
-        "diram_other",
-        "used_diram",
-        "diram_total",
-        "diram_remain",
-        "flash_code",
-        "flash_rodata",
-        "flash_other",
-        "used_flash_non_ram",
-        "total_size",
-    )
-    for key in raw_integer_fields:
-        source = unified if key.startswith("diram_") or key == "used_diram" else fixture
-        for invalid_value in (-1, 0.5, True):
-            invalid = dict(source, **{key: invalid_value})
-            try:
-                budget_failures(invalid, 180000, budget)
-            except ValueError as exc:
-                assert key in str(exc)
-            else:
-                raise AssertionError(
-                    f"invalid raw IDF size field reached baseline comparison: "
-                    f"{key}={invalid_value!r}"
-                )
+    # Every raw json2 number must be a non-negative integer before it reaches a baseline.
+    for name in ("Flash Code", "IRAM", "DRAM"):
+        for key in ("total", "used", "free"):
+            for invalid_value in (-1, 0.5, True):
+                invalid = with_region(fixture, name, **{key: invalid_value})
+                try:
+                    budget_failures(invalid, "esp32", 180000, budget)
+                except ValueError as exc:
+                    assert f"{name}.{key}" in str(exc), exc
+                else:
+                    raise AssertionError(
+                        f"invalid raw IDF size field reached baseline comparison: "
+                        f"{name}.{key}={invalid_value!r}"
+                    )
+    for invalid_value in (-1, 0.5, True):
+        try:
+            budget_failures(dict(fixture, total_size=invalid_value), "esp32", 180000, budget)
+        except ValueError as exc:
+            assert "total_size" in str(exc)
+        else:
+            raise AssertionError(f"invalid total_size reached baseline: {invalid_value!r}")
 
     raw_identity_canaries = (
-        (dict(fixture, used_dram=30001), "used_dram must equal"),
-        (dict(fixture, used_iram=20001), "used_iram must equal"),
-        (dict(unified, used_diram=150001), "used_diram must equal"),
-        (dict(fixture, used_flash_non_ram=165001), "used_flash_non_ram must equal"),
-        (dict(fixture, dram_remain=70001), "dram_remain"),
-        (dict(fixture, iram_remain=30001), "iram_remain"),
-        (dict(unified, diram_remain=150001), "diram_remain"),
-        (dict(fixture, used_dram_ratio=0.31), "used_dram_ratio"),
+        (with_region(fixture, "DRAM", used=30001, free=69999), "DRAM.used must equal"),
+        (with_region(fixture, "IRAM", used=20001, free=29999), "IRAM.used must equal"),
+        (with_region(unified, "DIRAM", used=150001, free=149999), "DIRAM.used must equal"),
+        (with_region(fixture, "DRAM", free=70001), "DRAM.free must equal"),
+        (with_region(fixture, "Flash Data", free=1), "free must be 0"),
+        (with_region(fixture, "Flash Code", total=1000000, free=880000), "must not report a capacity"),
+        (dict(fixture, version="1.1"), "json2 version 1.2"),
+        (dict(fixture, layout=fixture["layout"][:3]), "no 'DRAM' region"),
+        (dict(fixture, layout=fixture["layout"] + [fixture["layout"][0]]), "duplicated"),
+        (with_region(fixture, "DRAM", used=129000, free=-1,
+                     parts={".bss": {"size": 12000}, ".data": {"size": 17000},
+                            ".noinit": {"size": 1000}, ".text": {"size": 99000}}),
+         "DRAM.free"),
     )
     for invalid, expected_message in raw_identity_canaries:
         try:
-            budget_failures(invalid, 180000, budget)
+            budget_failures(invalid, "esp32", 180000, budget)
         except ValueError as exc:
-            assert expected_message in str(exc)
+            assert expected_message in str(exc), exc
         else:
             raise AssertionError(
                 f"invalid raw IDF size field reached baseline comparison: {expected_message}"
             )
+    split_with_code = with_region(
+        fixture, "DRAM", used=31000, free=69000,
+        parts={".bss": {"size": 12000}, ".data": {"size": 17000}, ".noinit": {"size": 1000},
+               ".text": {"size": 1000}},
+    )
+    try:
+        memory_usage(split_with_code, "esp32")
+    except ValueError as exc:
+        assert "must not hold code" in str(exc)
+    else:
+        raise AssertionError("split DRAM holding code was accepted")
 
     invalid_fixtures = (
         (
-            dict(
-                fixture,
-                dram_rodata=87000,
-                used_dram=101000,
-                dram_remain=0,
-                used_dram_ratio=1.01,
-            ),
+            with_region(fixture, "DRAM", used=101000, free=0,
+                        parts={".bss": {"size": 12000}, ".data": {"size": 88000},
+                               ".noinit": {"size": 1000}}),
             "cannot exceed",
         ),
-        (dict(fixture, total_size=-1), "non-negative"),
-        (dict(fixture, total_size=159999), "used_flash_non_ram"),
+        (dict(fixture, total_size=159999), "must include every flash region"),
     )
     for invalid, expected_message in invalid_fixtures:
         try:
             render(invalid, 180000, 200704, 204800, "esp32")
         except ValueError as exc:
-            assert expected_message in str(exc)
+            assert expected_message in str(exc), exc
         else:
             raise AssertionError(f"physically impossible size fixture was accepted: {invalid}")
     try:
@@ -620,7 +555,7 @@ def self_test() -> None:
     with tempfile.TemporaryDirectory() as temp_dir:
         path = pathlib.Path(temp_dir) / "size.json"
         path.write_text(json.dumps(fixture), encoding="utf-8")
-        assert integer(json.loads(path.read_text(encoding="utf-8")), "total_size") == 173000
+        assert image_usage(json.loads(path.read_text(encoding="utf-8")), "esp32", 180000).elf_total == 173000
         baseline = pathlib.Path(temp_dir) / "baseline.json"
         targets = {target: dict(budget) for target in TARGETS}
         baseline.write_text(
@@ -628,7 +563,7 @@ def self_test() -> None:
                 {
                     "schemaVersion": 2,
                     "baselineKind": "reviewed-maxima",
-                    "toolchain": "ESP-IDF v5.5.5",
+                    "toolchain": "ESP-IDF v6.1",
                     "targets": targets,
                 }
             ),
@@ -636,7 +571,7 @@ def self_test() -> None:
         )
         assert load_budget(baseline, "esp32") == budget
         wrong_toolchain = json.loads(baseline.read_text(encoding="utf-8"))
-        wrong_toolchain["toolchain"] = "ESP-IDF v6.0"
+        wrong_toolchain["toolchain"] = "ESP-IDF v5.5.5"
         baseline.write_text(json.dumps(wrong_toolchain), encoding="utf-8")
         try:
             load_budget(baseline, "esp32")
@@ -649,7 +584,7 @@ def self_test() -> None:
                 {
                     "schemaVersion": 2,
                     "baselineKind": "reviewed-maxima",
-                    "toolchain": "ESP-IDF v5.5.5",
+                    "toolchain": "ESP-IDF v6.1",
                     "targets": targets,
                 }
             )
@@ -721,7 +656,7 @@ def main() -> int:
         print("projected signed application exceeds policy limit", file=sys.stderr)
         return 1
     if args.enforce_budget and budget is not None:
-        failures = budget_failures(data, unsigned_size, budget)
+        failures = budget_failures(data, args.target, unsigned_size, budget)
         if failures:
             for failure in failures:
                 print(f"firmware size baseline failed: {failure}", file=sys.stderr)

@@ -47,11 +47,11 @@ idf_component_register(
         app_update
         esp_http_client
         esp-tls
+        mbedtls
         bt
-        json
         lwip
-        driver
-        mqtt
+        esp_driver_gpio
+        esp_driver_spi
         esp_timer
         bootloader_support
         espcoredump

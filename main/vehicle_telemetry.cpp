@@ -927,6 +927,7 @@ void VehicleController::handle_vcsec_frame_(const UniversalMessage_RoutableMessa
                     sig_data->sig_type.AES_GCM_Response_data.nonce,
                     sig_data->sig_type.AES_GCM_Response_data.tag,
                     req_hash, req_hash_len, msg.flags, fault,
+                    sig_data->sig_type.AES_GCM_Response_data.counter,  // VCSEC counts its responses
                     decrypt_buffer.bytes, sizeof(decrypt_buffer.bytes), &dec_len);
                 if (ret == 0) {
                     decrypt_buffer.size = dec_len;

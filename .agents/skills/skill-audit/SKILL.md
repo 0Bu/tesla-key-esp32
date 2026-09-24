@@ -193,8 +193,9 @@ the authority for the per-sibling drift check; `$project-review` defers the mech
   `nvs@0x9000/0x6000` never touched, `ota_1@0x210000`), per-target bootloader offset, the
   signed-image requirement (`CONFIG_SECURE_BOOT_BUILD_SIGNED_BINARIES=n`), exact Release-byte ↔
   source-SHA-bound main-artifact match or exact signed main artifact (never Pages), the `-merged.bin`
-  NVS-wipe warning, explicit unambiguous port / no-auto-reset / ROM-node handling, and bounded
-  post-reset verification of exact version/platform plus `paired:true`.
+  NVS-wipe warning, explicit unambiguous port / no-auto-reset / ROM-node handling, the read-only
+  bootloader check that refuses an app built by an older ESP-IDF than the bootloader that stays, and
+  bounded post-reset verification of exact version/platform plus `paired:true`.
 
 **Reviewers** (`.agents/subagents.json`) — audit these the same way; two duplicate content `$project-review`
 owns and must stay in sync with it:

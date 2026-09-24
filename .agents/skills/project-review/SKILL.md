@@ -11,12 +11,13 @@ description: "Read-only whole-project coherence review of tesla-key-esp32 for bu
 
 # project-review — holistic coherence audit of tesla-key-esp32
 
-This project is an **ESP-IDF 5.x C++ firmware** for the **ESP32 family** — one source tree
+This project is an **ESP-IDF 6.x C++ firmware** for the **ESP32 family** — one source tree
 builds for esp32 / esp32s3 / esp32c3 / esp32c6 — exactly the four targets yoziru/tesla-ble
 supports, which the ESP-IDF Component Manager enforces at dependency resolution. All four receive
 the complete ordered repository patch series in `patches/tesla-ble/` via root CMake: the
-trim of unused Parental Controls actions, and signer.go session-counter replay alignment that
-keeps esp32c6 under the app-size policy (native orchestration in `main/logic/` handles framing,
+trim of unused Parental Controls actions, signer.go session-counter replay alignment that
+keeps esp32c6 under the app-size policy, and the PSA Crypto port of the crypto bindings that
+Mbed TLS 4 requires (native orchestration in `main/logic/` handles framing,
 dispatch, monotonic session progression, and transactional key regeneration). The firmware acts as a **BLE↔HTTP proxy for a Tesla
 vehicle**, API-compatible with TeslaBleHttpProxy,
 so it works as an **evcc** BLE vehicle. It is small but dense with **non-local invariants**:
@@ -184,7 +185,9 @@ Treat a violation of any of these as a real finding.
   and exact current-build generated-source allowlist, forced include/macro files, compiler
   plugins/specs, preprocessor pass-through or prefix/sysroot forms, a compiler wrapper/environment,
   macro/`include_next` source directives, a main source outside `__idf_main`, missing
-  `-fstack-usage`, or anything other than exactly `-Og` is a gate bypass. External reproducibility
+  `-fstack-usage`, or anything other than exactly `-Og` is a gate bypass. (The Mbed TLS /
+  TF-PSA-Crypto libraries are the one pinned component-private `-Os` exception outside
+  `__idf_main`; `check-build-semantics.py` requires `CONFIG_MBEDTLS_COMPILER_OPTIMIZATION_SIZE=y`.) External reproducibility
   build directories must still pass the same closed generated-source classification.
 - **Those guards all mean "recover and continue", which is right for a TRANSIENT shortage and
   wedges the device on a permanent one** (2026-07-18: `bad_alloc` out of `loop()` ~20×/s for ten
@@ -436,6 +439,13 @@ that describe it. When reviewing a change (or the repo as a whole), check these 
   7. Renovate lifecycle: when closing an automated dependency PR manually, document in `.github/renovate.json`
      that it was abandoned and that `currentValue` will track future releases. Never hand-edit or commit
      `managed_components/`; the configure-time patch script owns generated checkout changes.
+- **ESP-IDF image bump** → `esp-idf-toolchain.txt` **and** all four locks regenerated in the new image
+  **and** `scripts/check-dependency-contract.py` (toolchain, IDF version, digests, `MBEDTLS_COMMIT`)
+  **and** the harness `MBEDTLS_REF`, which the in-image dependency gate binds to ESP-IDF's mbedtls
+  submodule. Rerun the V1 vectors against patch 0006, the build-semantics contract and the size/stack
+  baselines, and keep `docs/adr/0002-idf6-mbedtls4-crypto-seam.md` current. Older bootloaders boot
+  newer-IDF apps (the OTA path), not the reverse: a device installed with a newer ESP-IDF bootloader
+  must not be downgraded to an older-IDF release.
 
 ## Reviewing the skills (meta-coherence)
 
@@ -608,7 +618,8 @@ what each must stay true to:
   `0x20000` + erase `otadata`, NVS preserved. Re-verify its
   partition map against `partitions.csv` (app `@0x20000`, `otadata@0xf000/0x2000`, `nvs@0x9000`
   untouched), the signed-image requirement, the `-merged.bin` warning, and the no-auto-reset
-  gotchas. Post-reset verification uses a short bounded reachability retry and requires exact
+  gotchas. Its read-only bootloader check must refuse an app built by an older ESP-IDF than the
+  bootloader that stays (a v6.1 bootloader does not boot a 5.x-built app). Post-reset verification uses a short bounded reachability retry and requires exact
   version/platform plus `paired:true`. It is the
   recovery counterpart to `$flash-esp32`/`$ship`, not a build path.
 The review subagents in `.agents/subagents.json` — audit these the same way (they are the targeted
@@ -630,8 +641,12 @@ lenses this skill delegates to; keep them complementary, not contradictory):
   targets built from one tree). Re-verify its facts against the *Cross-cutting consistency*
   section and the build wiring: the target set (esp32/s3/c3/c6), per-target bootloader offsets
   (`0x1000`/`0x0`), the image-suffix map (`ci-sign-artifacts.sh`/`build-pages.sh`/
-  `ota_update.cpp` `TESLA_OTA_IMG_SUFFIX`), the app-size gate (`slot − 32 KB`), the single git
-  `main/idf_component.yml` dependency, plus the
+  `ota_update.cpp` `TESLA_OTA_IMG_SUFFIX`), the app-size gate (`slot − 32 KB`), the
+  `main/idf_component.yml` dependency set (commit-pinned Git sources for tesla-ble, mdns and w5500;
+  exact registry releases for cjson and mqtt, whose Git trees carry submodules), the one intended
+  per-target lock divergence (`espressif/w5500` resolves for esp32s3 only, matching
+  `CONFIG_TESLA_ETH_ENABLED depends on IDF_TARGET_ESP32S3`), the pinned Mbed TLS `-Os` exception
+  (`CONFIG_MBEDTLS_COMPILER_OPTIMIZATION_SIZE`, which the esp32c6 slot budget depends on), plus the
   all-target source-patch path (`patches/tesla-ble/` + apply script + root CMake). Keep it
   complementary to this skill, not a firmware-logic reviewer.
 - **Any skill or agent added since this was written** must be audited too — and added to this list.
