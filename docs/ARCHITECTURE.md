@@ -252,8 +252,8 @@ sized to fill 4 MB (the smallest supported flash; a larger one leaves the top
 unused) so ONE table serves every target; app at `0x20000`. The `ci-build-all.sh` **app-size gate**
 sits at `slot − 32 KB` (0x1e8000): each image's code rounds up to a 64 KB Secure-Boot boundary + a
 4 KB signature. Firmware-size baseline schema v2 records reviewed per-target maxima for the raw
-unsigned app, ELF `total_size`, `flash_code + flash_rodata`, static memory, `.bss` and IRAM, and
-rejects growth in any dimension. That review baseline is deliberately separate from the unchanged
+unsigned app, ELF `total_size`, the flash code + rodata regions, static memory, `.bss` and IRAM
+(read from esp-idf-size `json2` regions bound per target), and rejects growth in any dimension. That review baseline is deliberately separate from the unchanged
 projected-signed hard gate at the slot policy: growth inside one 64 KiB signing bucket still needs
 review, while signed padding/slot overflow remains an independent failure. The generated report,
 rather than a copied number in this narrative, is the source for current target headroom.
