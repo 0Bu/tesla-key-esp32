@@ -531,9 +531,18 @@ preserves the `PR/` tree). Constraints:
   the *latest stable release* (not `next` or a prerelease core) guarantees a later main release compares strictly-newer → the
   PR-flashed device OTA-updates forward to main; a `next` base would collide with the number
   the merge cuts and stall OTA.
-- **OTA stays on main.** `CONFIG_TESLA_OTA_MANIFEST_URL` is compile-time and unchanged in PR
-  builds, so a PR-flashed device checks OTA against the **main** manifest, never its own
-  preview. The real-key signature anchors trust so the main release is accepted.
+- **OTA defaults to main, with targeted PR previews.** `CONFIG_TESLA_OTA_MANIFEST_URL` is
+  compile-time and unchanged in PR builds, so default OTA checks query the **main** manifest,
+  ensuring devices automatically stay on or forward-upgrade to stable releases. Devices can also
+  explicitly target an in-progress PR channel via `/ota/check?pr=<N>` and `/ota/update?pr=<N>` (or
+  by appending `?pr=<N>` to the web UI URL). When targeting PR `<N>`, the firmware fetches that
+  PR's preview manifest (`https://0bu.github.io/tesla-key-esp32/PR/<N>/manifest.json`) and downloads
+  its signed binary. Returning to main release happens automatically on the next unparameterized
+  OTA check once candidate core version is `>=` running core.
+- **Toolchain pin isolation in PR preview rebuilds.** The `trusted-rebuild` job in
+  `.github/workflows/signed-pr-preview.yml` checks out the PR head commit before reading
+  `esp-idf-toolchain.txt`, ensuring PRs that update the ESP-IDF toolchain pin are rebuilt with
+  their own container digest rather than `main`'s toolchain pin.
 - **Cleanup and reconciliation.** Signing and deletion share the same per-PR concurrency group. A
   close, force-push or `signed-preview` label removal deletes the old tree and cancels an in-flight
   publisher. The event cleanup is a trusted-base `pull_request_target` workflow and checks out the

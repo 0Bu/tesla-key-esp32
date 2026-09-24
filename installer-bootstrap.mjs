@@ -22,7 +22,7 @@ function configurePreview(documentImpl, locationImpl) {
   link.textContent = "View pull request while source metadata loads";
   text.append(
     strong,
-    "This page flashes that PR's signed build; the device still checks OTA against main. ",
+    `This page flashes that PR's signed build. Installed devices can update over the air by opening their web UI with ?pr=${number}. `,
     link,
     "."
   );
