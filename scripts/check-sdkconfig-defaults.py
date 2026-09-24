@@ -12,6 +12,11 @@ import tempfile
 
 ASSIGNMENT = re.compile(r"^(CONFIG_[A-Za-z0-9_]+)=(.*)$")
 NOT_SET = re.compile(r"^# (CONFIG_[A-Za-z0-9_]+) is not set$")
+# ESP-IDF 6 writes a generated alias block for renamed options at the end of sdkconfig and can
+# list one legacy alias twice there (two sdkconfig.rename sources for the Wi-Fi names). Only inside
+# that block is an identical repeat tolerated; a conflicting repeat still fails.
+DEPRECATED_BEGIN = "# Deprecated options for backward compatibility"
+DEPRECATED_END = "# End of deprecated options"
 TARGET = re.compile(r"^esp32(?:s3|c3|c6)?$")
 
 
@@ -21,8 +26,20 @@ class ConfigError(ValueError):
 
 def parse_config(path: pathlib.Path) -> dict[str, str]:
     values: dict[str, str] = {}
+    deprecated_keys: set[str] = set()
+    in_deprecated = False
     for line_no, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
         line = raw.strip()
+        if line == DEPRECATED_BEGIN:
+            if in_deprecated:
+                raise ConfigError(f"{path}:{line_no}: nested deprecated-options block")
+            in_deprecated = True
+            continue
+        if line == DEPRECATED_END:
+            if not in_deprecated:
+                raise ConfigError(f"{path}:{line_no}: unmatched end of deprecated-options block")
+            in_deprecated = False
+            continue
         if not line or (line.startswith("#") and not NOT_SET.fullmatch(line)):
             continue
         match = ASSIGNMENT.fullmatch(line)
@@ -37,8 +54,14 @@ def parse_config(path: pathlib.Path) -> dict[str, str]:
             else:
                 continue
         if key in values:
-            raise ConfigError(f"{path}:{line_no}: duplicate assignment for {key}")
+            if not (in_deprecated and key in deprecated_keys and values[key] == value):
+                raise ConfigError(f"{path}:{line_no}: duplicate assignment for {key}")
+            continue
         values[key] = value
+        if in_deprecated:
+            deprecated_keys.add(key)
+    if in_deprecated:
+        raise ConfigError(f"{path}: unterminated deprecated-options block")
     return values
 
 
@@ -106,6 +129,31 @@ def self_test() -> None:
         errors, _ = check(common, generated, "esp32c3")
         assert any("CONFIG_SHARED: generated n, expected y" in error for error in errors)
         assert any("CONFIG_TARGET_ONLY: missing" in error for error in errors)
+
+        # A generated legacy alias repeated with the same value inside the deprecated block is
+        # tolerated; a conflicting repeat, or any repeat outside that block, is not.
+        generated.write_text(
+            "CONFIG_IDF_TARGET_ESP32C3=y\nCONFIG_SHARED=y\nCONFIG_OVERRIDE=y\n"
+            "CONFIG_TARGET_ONLY=7\n# CONFIG_OFF is not set\n"
+            f"{DEPRECATED_BEGIN}\nCONFIG_LEGACY=10\n# CONFIG_LEGACY_OFF is not set\n"
+            f"CONFIG_LEGACY=10\n# CONFIG_LEGACY_OFF is not set\n{DEPRECATED_END}\n",
+            encoding="utf-8",
+        )
+        assert check(common, generated, "esp32c3") == ([], 4)
+        for body, message in (
+            (f"{DEPRECATED_BEGIN}\nCONFIG_LEGACY=10\nCONFIG_LEGACY=11\n{DEPRECATED_END}\n",
+             "duplicate assignment"),
+            (f"CONFIG_LEGACY=10\n{DEPRECATED_BEGIN}\nCONFIG_LEGACY=10\n{DEPRECATED_END}\n",
+             "duplicate assignment"),
+            (f"{DEPRECATED_BEGIN}\nCONFIG_LEGACY=10\n", "unterminated deprecated-options block"),
+        ):
+            generated.write_text(body, encoding="utf-8")
+            try:
+                parse_config(generated)
+            except ConfigError as error:
+                assert message in str(error), error
+            else:
+                raise AssertionError(f"accepted malformed deprecated block: {body!r}")
 
         common.write_text("CONFIG_DUP=y\nCONFIG_DUP=n\n", encoding="utf-8")
         try:

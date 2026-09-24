@@ -208,7 +208,8 @@ bool BleClient::start() {
     // service sources when the peripheral role is disabled, so referencing them
     // would fail to link.
 
-    // ESP-IDF v5.5's wrapper ignores the hidden xTaskCreatePinnedToCore() result and returns void.
+    // ESP-IDF's wrapper (v5.5, unchanged in v6.1) ignores the hidden xTaskCreatePinnedToCore()
+    // result and returns void.
     // Therefore the wrapper returning is not an essential-service success signal. Wait for the
     // host's real sync callback, with a bounded boot delay; a missing host task otherwise lets
     // app_main publish RuntimeAdmission::Ready and later spend OTA rollback on a partial image.

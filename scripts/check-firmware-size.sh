@@ -126,36 +126,36 @@ for target in "${target_list[@]}"; do
 
   # Run size reporter
   if [[ "$update_baseline" -eq 1 ]]; then
-    python3 - "$target" "$size_json" "$unsigned_size" "$repo_root/scripts/firmware-size-baseline.json" <<'PY'
-import json, sys
+    python3 - "$target" "$size_json" "$unsigned_size" "$repo_root/scripts/firmware-size-baseline.json" \
+        "$repo_root/scripts/report-firmware-size.py" <<'PY'
+import importlib.util, json, sys
 target = sys.argv[1]
 size_json = sys.argv[2]
 unsigned_size = int(sys.argv[3])
 baseline_path = sys.argv[4]
 
+# Measure with the reporter's own esp-idf-size json2 region binding, so the update and the budget
+# check read identical numbers and a renamed/missing region fails closed instead of reading zero.
+spec = importlib.util.spec_from_file_location("report_firmware_size", sys.argv[5])
+reporter = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = reporter  # dataclasses resolve their defining module through sys.modules
+spec.loader.exec_module(reporter)
+
 with open(size_json, "r", encoding="utf-8") as f:
     observed = json.load(f)
+memory = reporter.memory_usage(observed, target)
+image = reporter.image_usage(observed, target, unsigned_size)
 
 with open(baseline_path, "r", encoding="utf-8") as f:
     baseline = json.load(f)
 
 tgt_budget = baseline["targets"][target]
-flash_code = observed.get("flash_code", 0)
-flash_rodata = observed.get("flash_rodata", 0)
-flash_code_rodata = flash_code + flash_rodata
-total_size = observed.get("total_size", 0)
-
-tgt_budget["maxUnsignedApp"] = max(tgt_budget["maxUnsignedApp"], unsigned_size)
-tgt_budget["maxElfTotal"] = max(tgt_budget["maxElfTotal"], total_size)
-tgt_budget["maxFlashCodeAndRodata"] = max(tgt_budget["maxFlashCodeAndRodata"], flash_code_rodata)
-
-if tgt_budget["memoryModel"] == "unified":
-    tgt_budget["maxStaticUsed"] = max(tgt_budget["maxStaticUsed"], observed.get("used_diram", 0))
-    tgt_budget["maxBss"] = max(tgt_budget["maxBss"], observed.get("diram_bss", 0))
-else:
-    tgt_budget["maxStaticUsed"] = max(tgt_budget["maxStaticUsed"], observed.get("used_dram", 0))
-    tgt_budget["maxBss"] = max(tgt_budget["maxBss"], observed.get("dram_bss", 0))
-    tgt_budget["maxIramUsed"] = max(tgt_budget.get("maxIramUsed", 0), observed.get("used_iram", 0))
+tgt_budget["maxUnsignedApp"] = max(tgt_budget["maxUnsignedApp"], image.unsigned_app)
+tgt_budget["maxElfTotal"] = max(tgt_budget["maxElfTotal"], image.elf_total)
+tgt_budget["maxFlashCodeAndRodata"] = max(tgt_budget["maxFlashCodeAndRodata"], image.flash_code_rodata)
+tgt_budget["maxStaticUsed"] = max(tgt_budget["maxStaticUsed"], memory.static_used)
+tgt_budget["maxBss"] = max(tgt_budget["maxBss"], memory.bss)
+tgt_budget["maxIramUsed"] = max(tgt_budget["maxIramUsed"], memory.iram_used)
 
 with open(baseline_path, "w", encoding="utf-8") as f:
     json.dump(baseline, f, indent=2)

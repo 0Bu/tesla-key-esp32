@@ -253,10 +253,11 @@ bool VehicleController::init_safe_mode(const std::string& vin,
 
     // Deliberately NO fingerprint pre-warm here, unlike init(). Two reasons, both specific to
     // safe mode:
-    //   * compute_key_fingerprint_() loads the private-key PEM and runs mbedtls_ctr_drbg_seed()
-    //     + mbedtls_pk_parse_key(). app_main only enables SAR-ADC entropy (bootloader_random_*)
-    //     around the NORMAL controller path, and WiFi/BLE are not up yet, so seeding here would
-    //     sit outside the one window main.cpp documents as covering every boot-time key load.
+    //   * compute_key_fingerprint_() loads the private-key PEM through mbedtls_pk_parse_key(),
+    //     which can draw PSA randomness straight from the hardware RNG. app_main only enables
+    //     SAR-ADC entropy (bootloader_random_*) around the NORMAL controller path, and WiFi/BLE
+    //     are not up yet, so a draw here would sit outside the one window main.cpp documents as
+    //     covering every boot-time key load.
     //   * safe mode exists so a board that keeps crashing stays fixable in a browser. That parse
     //     allocates and can throw, and a throw on this path unwinds to app_main's boundary and
     //     halts boot — taking down the recovery web UI, the one thing safe mode must deliver.

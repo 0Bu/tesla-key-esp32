@@ -23,7 +23,21 @@ from typing import Any
 TARGETS = ("esp32", "esp32s3", "esp32c3", "esp32c6")
 COMPILE_SUFFIXES = {".c", ".cc", ".cpp", ".cxx", ".s"}
 MAIN_SOURCE_SUFFIXES = {".c", ".cc", ".cpp", ".cxx"}
-MANAGED_COMPONENTS = {"espressif__mdns", "yoziru__tesla-ble"}
+MANAGED_COMPONENTS = {
+    "espressif__cjson",
+    "espressif__mdns",
+    "espressif__mqtt",
+    "espressif__w5500",
+    "yoziru__tesla-ble",
+}
+# esp-mqtt builds two helper static libraries inside its component (lib/mqtt_utils, lib/mqtt_outbox)
+# and links them into the component library; their objects are owned by those exact CMake targets.
+MANAGED_SUBLIBRARY_OBJECT_DIRS = {
+    "espressif__mqtt": (
+        "/esp-idf/espressif__mqtt/lib/mqtt_utils/CMakeFiles/mqtt_utils_lib.dir/",
+        "/esp-idf/espressif__mqtt/lib/mqtt_outbox/CMakeFiles/mqtt_outbox_lib.dir/",
+    ),
+}
 NANOPB_GENERATED_SOURCES = {
     "_deps/nanopb-src/pb_common.c":
         "8d2ec28baaaf2b7a5e90e4cb2fa9700d21cef7f826f051a637c30b7a1e6a0516",
@@ -32,7 +46,8 @@ NANOPB_GENERATED_SOURCES = {
     "_deps/nanopb-src/pb_encode.c":
         "d8dff2a1acc58683095a41b0dc3103ba46248e4a8d8c4e20f5810be04127b650",
 }
-X509_BUNDLE_SHA256 = "d47b6376ca09b7c17d379e1e828aff8e28c4c0fb689e9e3128c7a3c063912592"
+# ESP-IDF v6.1 default full bundle: gen_crt_bundle.py over its cacrt_all.pem + cacrt_local.pem.
+X509_BUNDLE_SHA256 = "b3e27ad072b398df1404c73493e6441ef4929e523f944cc37423e0e4b86c6fb0"
 FORBIDDEN_FIRMWARE_FLAG_PREFIXES = (
     "-include",
     "-imacros",
@@ -91,6 +106,13 @@ CommandLoader = Callable[[Path, tuple[str, ...]], dict[str, tuple[str, ...]]]
 GraphValidator = Callable[
     [Path, str, Path, Path | None, Path, dict[str, Path], CommandLoader], None
 ]
+SpecsValidator = Callable[[Path, Path], None]
+# ESP-IDF 6 builds against Picolibc and passes one compiler specs file to every compile: the pinned
+# toolchain's own picolibc.specs, copied into the build tree with `--gc-sections` removed
+# (components/esp_libc/project_include.cmake). A specs file can rewrite include paths and link
+# inputs, so only that exact build-tree path is accepted, and its bytes are re-derived from the
+# toolchain before the build is trusted.
+PICOLIBC_SPECS_RELATIVE = Path("specs/picolibc.specs")
 NINJA_DEPENDENCY_FLAGS = ("-MD", "-MT", "{output}", "-MF", "{output}.d")
 BUILD_INJECTION_ENV = (
     "CPATH", "CPLUS_INCLUDE_PATH", "C_INCLUDE_PATH", "OBJC_INCLUDE_PATH",
@@ -687,6 +709,7 @@ def validate_firmware_compile_boundary(
     tokens: list[str],
     target: str,
     source_suffix: str,
+    allowed_specs: str | None = None,
 ) -> None:
     compiler_raw = Path(tokens[0]) if tokens else Path()
     compiler = compiler_raw.resolve(strict=False)
@@ -704,10 +727,40 @@ def validate_firmware_compile_boundary(
             f"{file_name} compile command must invoke the pinned target compiler directly"
         )
     for token in tokens:
+        if allowed_specs is not None and token == allowed_specs:
+            continue
         if token.startswith(FORBIDDEN_FIRMWARE_FLAG_PREFIXES):
             raise SemanticsError(
                 f"{file_name} uses forbidden source-injection compiler flag: {token}"
             )
+    if allowed_specs is not None and tokens.count(allowed_specs) > 1:
+        raise SemanticsError(f"{file_name} repeats the Picolibc specs flag")
+
+
+def validate_picolibc_specs(
+    build_root: Path, compiler: Path, toolchain_root: Path = Path("/opt/esp/tools")
+) -> None:
+    """Bind the build-tree Picolibc specs to the pinned toolchain's own file."""
+    specs = canonical_regular_file(build_root / PICOLIBC_SPECS_RELATIVE, "generated Picolibc specs")
+    try:
+        completed = subprocess.run(
+            [str(compiler), "--print-file-name=picolibc.specs"], check=False,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise SemanticsError(f"cannot locate the toolchain Picolibc specs: {exc}") from exc
+    located = Path(completed.stdout.strip())
+    if completed.returncode != 0 or not located.is_absolute():
+        raise SemanticsError("pinned compiler did not report an absolute Picolibc specs path")
+    toolchain_specs = canonical_regular_file(located, "toolchain Picolibc specs")
+    if relative_to(toolchain_specs, toolchain_root.resolve(strict=False)) is None:
+        raise SemanticsError(f"toolchain Picolibc specs is outside the pinned toolchain: {located}")
+    expected = toolchain_specs.read_bytes().replace(b"--gc-sections", b"")
+    if specs.read_bytes() != expected:
+        raise SemanticsError(
+            "build-tree Picolibc specs differs from the pinned toolchain's picolibc.specs "
+            "minus --gc-sections"
+        )
 
 
 def validate_compile_include_paths(
@@ -782,9 +835,12 @@ def validate_local_non_main_source(
     if relative is not None and relative.parts and relative.parts[0] == "managed_components":
         if len(relative.parts) < 3 or relative.parts[1] not in MANAGED_COMPONENTS:
             raise SemanticsError(f"unreviewed managed component source: {file_name}")
-        if output is None or f"/esp-idf/{relative.parts[1]}/CMakeFiles/__idf_{relative.parts[1]}.dir/" not in (
-            "/" + output.replace("\\", "/").lstrip("/")
-        ):
+        owners = (
+            f"/esp-idf/{relative.parts[1]}/CMakeFiles/__idf_{relative.parts[1]}.dir/",
+            *MANAGED_SUBLIBRARY_OBJECT_DIRS.get(relative.parts[1], ()),
+        )
+        normalized_output = "/" + (output or "").replace("\\", "/").lstrip("/")
+        if output is None or not any(normalized_output.startswith(owner) for owner in owners):
             raise SemanticsError(f"managed component source has unexpected output owner: {file_name}")
         return
 
@@ -1126,9 +1182,32 @@ def validate_generated_producer_commands(
     ))
 
 
+MBEDTLS_TLS_ARCHIVE = "esp-idf/mbedtls/mbedtls/library/libmbedtls.a"
+
+
+def mbedtls_crypto_copy_tail(build_root: Path, cmake: str) -> tuple[str, ...]:
+    """Mbed TLS 4's CMake copies the TF-PSA-Crypto archive beside libmbedtls.a after archiving it
+    (compatibility names libtfpsacrypto.a/libmbedcrypto.a). The final link consumes the original
+    tf-psa-crypto/core archive, never these copies."""
+    library = build_root / "esp-idf/mbedtls/mbedtls/library"
+    crypto = build_root / "esp-idf/mbedtls/mbedtls/tf-psa-crypto/core/libtfpsacrypto.a"
+    return (
+        "&&", "cd", str(library),
+        "&&", cmake, "-E", "copy_if_different", str(crypto), "libtfpsacrypto.a",
+        "&&", cmake, "-E", "copy_if_different", str(crypto), "libmbedcrypto.a",
+    )
+
+
 def validate_archive_command(
-    archive: str, tokens: tuple[str, ...], firmware_outputs: set[str], target: str
+    archive: str, tokens: tuple[str, ...], firmware_outputs: set[str], target: str,
+    build_root: Path | None = None,
 ) -> set[str]:
+    if archive == MBEDTLS_TLS_ARCHIVE and build_root is not None and len(tokens) > 4 \
+            and tokens[-1] != ":":
+        tail = mbedtls_crypto_copy_tail(build_root, tokens[2])
+        if tuple(tokens[-len(tail):]) != tail:
+            raise SemanticsError(f"archive post-build copy drifted: {archive}")
+        tokens = (*tokens[:-len(tail)], "&&", ":")
     if tokens[:2] != (":", "&&") or tokens[-2:] != ("&&", ":"):
         raise SemanticsError(f"archive command has pre/post launcher chain: {archive}")
     body = tokens[2:-2]
@@ -1165,13 +1244,16 @@ def validate_linker_script(path: Path, build_root: Path, idf_root: Path) -> None
 
 
 def validate_wl_option(token: str, build_root: Path, target: str) -> None:
-    """Allow only the literal, non-input-bearing GNU-ld options emitted by pinned IDF 5.5.5."""
+    """Allow only the literal, non-input-bearing GNU-ld options emitted by pinned IDF 6.1."""
+    # ESP-IDF 6 turns orphan sections into link errors and wraps Picolibc's stdio buffer setup;
+    # the longjmp wrap is emitted for the Xtensa targets only.
     allowed = {
         "-Wl,--cref",
         "-Wl,--no-warn-rwx-segments",
-        "-Wl,--orphan-handling=warn",
+        "-Wl,--orphan-handling=error",
         "-Wl,--gc-sections",
         "-Wl,--warn-common",
+        "-Wl,--wrap=__bufio_setvbuf",
         "-Wl,--wrap=longjmp",
         "-Wl,--undefined=FreeRTOS_openocd_params",
         f"-Wl,--defsym=IDF_TARGET_{target.upper()}=0",
@@ -1276,7 +1358,12 @@ def validate_link_and_archives(
     if any(token.startswith("@") for token in body):
         raise SemanticsError("final ELF link contains an unexpanded response file")
     forbidden = ("-fplugin", "-specs", "--specs", "-wrapper", "-B", "-Xlinker", "-R")
-    if any(token.startswith(forbidden) for token in body):
+    # The Picolibc specs reach the link through the same toolchain flags as every compile, where
+    # validate() has already re-derived their bytes from the pinned toolchain.
+    picolibc_specs = f"-specs={build_root / PICOLIBC_SPECS_RELATIVE}"
+    if body.count(picolibc_specs) > 1:
+        raise SemanticsError("final ELF link repeats the Picolibc specs flag")
+    if any(token.startswith(forbidden) and token != picolibc_specs for token in body):
         raise SemanticsError("final ELF link contains a forbidden injection option")
     output_positions = [index for index, token in enumerate(body) if token == "-o"]
     if len(output_positions) != 1 or output_positions[0] + 1 >= len(body) or \
@@ -1392,7 +1479,7 @@ def validate_link_and_archives(
     archive_owner: dict[str, str] = {}
     for archive in sorted(archives):
         members = validate_archive_command(
-            archive, archive_commands[archive], set(firmware_outputs), target
+            archive, archive_commands[archive], set(firmware_outputs), target, build_root
         )
         for member in members:
             previous = archive_owner.get(member)
@@ -1471,7 +1558,7 @@ def validate_app_binary_producer(
     if min_revision_full < 0 or max_revision_full < min_revision_full:
         raise SemanticsError("target revision bounds are invalid")
 
-    # ESP-IDF 5.5.5 retains the legacy image-header --min-rev only for ESP32 (major revision)
+    # ESP-IDF 6.1 retains the legacy image-header --min-rev only for ESP32 (major revision)
     # and ESP32-C3 (minor revision), deriving both from the canonical full revision. Other
     # supported targets carry only the full min/max pair. Mirror that exact pinned producer.
     legacy_min_revision = 0
@@ -1486,11 +1573,14 @@ def validate_app_binary_producer(
         "--min-rev-full", str(min_revision_full),
         "--max-rev-full", str(max_revision_full),
     ))
+    # esptool v5 (ESP-IDF 6) runs as the pinned environment's module with hyphenated options and
+    # states the 64 KiB flash MMU page size that every supported target's image is laid out for.
     expected_elf2image = [
-        python, str(idf_root / "components/esptool_py/esptool/esptool.py"),
-        "--chip", target, "elf2image", "--flash_mode", "dio",
-        "--flash_freq", expected_flash_frequency,
-        "--flash_size", "4MB", "--elf-sha256-offset", "0xb0", "--secure-pad-v2",
+        python, "-m", "esptool",
+        "--chip", target, "elf2image", "--flash-mode", "dio",
+        "--flash-freq", expected_flash_frequency,
+        "--flash-size", "4MB", "--elf-sha256-offset", "0xb0",
+        "--flash-mmu-page-size", "64KB", "--secure-pad-v2",
         *revision_args, "-o", str(build_root / "tesla-key-esp32.bin"),
         str(build_root / "tesla-key-esp32.elf"),
     ]
@@ -1569,17 +1659,16 @@ def validate_default_app_command_inventory(
     pinned_tool(python, Path("/opt/esp/python_env"), "python", "default app Python")
     pinned_tool(cmake, Path("/opt/esp/tools/cmake"), "cmake", "default app CMake")
     size_check = (
-        "cd", str(build_root / "esp-idf/esptool_py"), "&&", python,
+        "cd", str(build_root), "&&", python,
         str(idf_root / "components/partition_table/check_sizes.py"),
         "--offset", "0x8000", "partition", "--type", "app",
         str(build_root / "partition_table/partition-table.bin"), app,
     )
     unsigned_notice = (
         "cd", str(build_root), "&&", cmake, "-E", "echo",
-        "App built but not signed. Sign app before flashing", "&&", cmake, "-E", "echo",
-        "\t" + python + " "
-        + str(idf_root / "components/esptool_py/esptool/espsecure.py")
-        + " sign_data --keyfile KEYFILE --version 2                 " + app,
+        "App built but not signed. Sign app before flashing.", "&&", cmake, "-E", "echo",
+        "\t" + python + " -m espsecure sign-data --keyfile KEYFILE --version 2                 "
+        + app,
     )
     expected = Counter((producer, size_check, unsigned_notice))
     if Counter(relevant) != expected:
@@ -1615,6 +1704,7 @@ def validate(
     dependency_loader: DependencyLoader = load_ninja_dependencies,
     command_loader: CommandLoader = load_ninja_commands,
     graph_validator: GraphValidator | None = validate_build_graph_provenance,
+    specs_validator: SpecsValidator = validate_picolibc_specs,
 ) -> int:
     injected = [name for name in BUILD_INJECTION_ENV if name in os.environ]
     if injected:
@@ -1637,6 +1727,13 @@ def validate(
     ):
         if config.get(key) == "y":
             raise SemanticsError(f"effective sdkconfig unexpectedly enables {key}")
+    # ESP-IDF 6 builds Mbed TLS / TF-PSA-Crypto with a component-private optimization level. The
+    # esp32c6 slot budget depends on its -Os (sdkconfig.defaults), so a flip must fail here instead
+    # of surfacing as an unexplained size overflow or an unreviewed crypto-library build.
+    if config.get("CONFIG_MBEDTLS_COMPILER_OPTIMIZATION_SIZE") != "y":
+        raise SemanticsError(
+            "effective sdkconfig does not select CONFIG_MBEDTLS_COMPILER_OPTIMIZATION_SIZE=y"
+        )
 
     try:
         database = json.loads(compile_commands.read_text(encoding="utf-8"))
@@ -1647,6 +1744,9 @@ def validate(
 
     source_root = source_root.resolve(strict=False)
     build_root = compile_commands.parent.resolve(strict=False)
+    picolibc = config.get("CONFIG_LIBC_PICOLIBC") == "y"
+    allowed_specs = f"-specs={build_root / PICOLIBC_SPECS_RELATIVE}" if picolibc else None
+    specs_compilers: set[Path] = set()
     expected_main_sources = literal_main_sources(source_root)
     observed_main_sources: dict[Path, int] = {}
     main_outputs: dict[str, Path] = {}
@@ -1715,7 +1815,11 @@ def validate(
 
         raw_tokens = command_tokens(entry)
         tokens = expand_response_files(raw_tokens, Path(directory_text))
-        validate_firmware_compile_boundary(file_name, tokens, target, source.suffix.lower())
+        validate_firmware_compile_boundary(
+            file_name, tokens, target, source.suffix.lower(), allowed_specs
+        )
+        if allowed_specs is not None and allowed_specs in tokens:
+            specs_compilers.add(Path(tokens[0]))
         validate_compile_include_paths(
             file_name, tokens, Path(directory_text), source_root, build_root, idf_root, target
         )
@@ -1745,6 +1849,8 @@ def validate(
         raise SemanticsError(
             f"compile database main inventory mismatch: missing={missing!r}, extra={extra!r}"
         )
+    for compiler in sorted(specs_compilers):
+        specs_validator(build_root, compiler)
     firmware_output_names = tuple(sorted(firmware_outputs))
     validate_actual_compile_commands(
         command_loader(build_root, firmware_output_names),
@@ -1961,6 +2067,87 @@ def self_test_build_graph_contract(repository_root: Path) -> None:
 
         validate_link()  # Positive build-root -l archive fixture.
 
+        # Mbed TLS 4 copies its TF-PSA-Crypto archive beside libmbedtls.a after archiving it. Only
+        # that exact copy tail, and only on that archive, is accepted.
+        mbedtls_member = "esp-idf/mbedtls/mbedtls/library/CMakeFiles/mbedtls.dir/ssl_tls.c.obj"
+        copy_tail = mbedtls_crypto_copy_tail(build_root, cmake)
+        mbedtls_archive = (
+            *archive_command(MBEDTLS_TLS_ARCHIVE, (mbedtls_member,))[:-2], *copy_tail
+        )
+        assert validate_archive_command(
+            MBEDTLS_TLS_ARCHIVE, mbedtls_archive, {mbedtls_member}, "esp32c3", build_root
+        ) == {mbedtls_member}
+        rejected(
+            "Mbed TLS archive copy-tail drift canary",
+            "archive post-build copy drifted",
+            lambda: validate_archive_command(
+                MBEDTLS_TLS_ARCHIVE, (*mbedtls_archive[:-1], "libevil.a"),
+                {mbedtls_member}, "esp32c3", build_root,
+            ),
+        )
+        rejected(
+            "copy tail on another archive canary",
+            "pre/post launcher chain",
+            lambda: validate_archive_command(
+                library_archive,
+                (*archive_command(library_archive, (dependency_object,))[:-2], *copy_tail),
+                set(firmware_outputs), "esp32c3", build_root,
+            ),
+        )
+
+        # esp-mqtt's helper libraries own their objects; no other component or directory may.
+        mqtt_relative = Path("managed_components/espressif__mqtt/lib/mqtt_utils/mqtt_utils.c")
+        mqtt_output = "esp-idf/espressif__mqtt/lib/mqtt_utils/CMakeFiles/mqtt_utils_lib.dir/mqtt_utils.c.obj"
+        validate_local_non_main_source(
+            str(mqtt_relative), fixture_root / mqtt_relative, mqtt_output, mqtt_relative,
+            "esp32c3", build_root,
+        )
+        rejected(
+            "unlisted managed sub-library owner canary",
+            "unexpected output owner",
+            lambda: validate_local_non_main_source(
+                str(mqtt_relative), fixture_root / mqtt_relative,
+                "esp-idf/espressif__mqtt/lib/evil/CMakeFiles/evil.dir/mqtt_utils.c.obj",
+                mqtt_relative, "esp32c3", build_root,
+            ),
+        )
+        mdns_relative = Path("managed_components/espressif__mdns/mdns_utils.c")
+        rejected(
+            "borrowed managed sub-library owner canary",
+            "unexpected output owner",
+            lambda: validate_local_non_main_source(
+                str(mdns_relative), fixture_root / mdns_relative, mqtt_output, mdns_relative,
+                "esp32c3", build_root,
+            ),
+        )
+
+        # The build-tree Picolibc specs must be the toolchain's picolibc.specs minus --gc-sections.
+        toolchain_root = fixture_root / "toolchain"
+        toolchain_specs = toolchain_root / "lib/picolibc.specs"
+        toolchain_specs.parent.mkdir(parents=True)
+        toolchain_specs.write_bytes(b"*link:\n--gc-sections -Tpicolibc.ld\n")
+        fake_compiler = toolchain_root / "bin/fake-gcc"
+        fake_compiler.parent.mkdir(parents=True)
+        fake_compiler.write_text(f"#!/bin/sh\necho {toolchain_specs}\n", encoding="utf-8")
+        fake_compiler.chmod(0o755)
+        built_specs = build_root / PICOLIBC_SPECS_RELATIVE
+        built_specs.parent.mkdir(parents=True, exist_ok=True)
+        built_specs.write_bytes(b"*link:\n -Tpicolibc.ld\n")
+        validate_picolibc_specs(build_root, fake_compiler, toolchain_root)
+        built_specs.write_bytes(b"*link:\n -Tpicolibc.ld -L/tmp/unreviewed\n")
+        rejected(
+            "Picolibc specs byte-drift canary",
+            "differs from the pinned toolchain",
+            lambda: validate_picolibc_specs(build_root, fake_compiler, toolchain_root),
+        )
+        built_specs.write_bytes(b"*link:\n -Tpicolibc.ld\n")
+        rejected(
+            "Picolibc specs outside the pinned toolchain canary",
+            "outside the pinned toolchain",
+            lambda: validate_picolibc_specs(build_root, fake_compiler, fixture_root / "elsewhere"),
+        )
+        built_specs.unlink()
+
         def changed_link(command: tuple[str, ...]) -> dict[str, tuple[str, ...]]:
             return {**base_commands, "tesla-key-esp32.elf": command}
 
@@ -2105,13 +2292,13 @@ def self_test_build_graph_contract(repository_root: Path) -> None:
         timestamp.write_bytes(
             f"{hashlib.md5(app_bytes).hexdigest()}  {app}\n".encode("ascii")
         )
-        python = "/opt/esp/python_env/idf5.5_py3.12_env/bin/python"
+        python = "/opt/esp/python_env/idf6.1_py3.12_env/bin/python"
         app_cmake = "/opt/esp/tools/cmake/fixture/bin/cmake"
         producer = (
-            "cd", str(build_root), "&&", python,
-            str(idf_root / "components/esptool_py/esptool/esptool.py"),
-            "--chip", "esp32c3", "elf2image", "--flash_mode", "dio",
-            "--flash_freq", "80m", "--flash_size", "4MB", "--elf-sha256-offset", "0xb0",
+            "cd", str(build_root), "&&", python, "-m", "esptool",
+            "--chip", "esp32c3", "elf2image", "--flash-mode", "dio",
+            "--flash-freq", "80m", "--flash-size", "4MB", "--elf-sha256-offset", "0xb0",
+            "--flash-mmu-page-size", "64KB",
             "--secure-pad-v2", "--min-rev", "3", "--min-rev-full", "3",
             "--max-rev-full", "199", "-o", str(app), str(elf), "&&",
             app_cmake, "-E", "echo", f"Generated {app}", "&&",
@@ -2157,6 +2344,13 @@ def self_test_build_graph_contract(repository_root: Path) -> None:
             "elf2image command/arguments drifted",
             lambda: validate_producer(tuple(changed_revision)),
         )
+        changed_page_size = list(producer)
+        changed_page_size[changed_page_size.index("64KB")] = "32KB"
+        rejected(
+            "altered flash MMU page-size canary",
+            "elf2image command/arguments drifted",
+            lambda: validate_producer(tuple(changed_page_size)),
+        )
         app_sdkconfig.write_text(
             app_sdkconfig_text.replace('FLASHFREQ="80m"', 'FLASHFREQ="40m"'),
             encoding="utf-8",
@@ -2186,17 +2380,16 @@ def self_test_build_graph_contract(repository_root: Path) -> None:
         app.write_bytes(app_bytes)
 
         size_check = (
-            "cd", str(build_root / "esp-idf/esptool_py"), "&&", python,
+            "cd", str(build_root), "&&", python,
             str(idf_root / "components/partition_table/check_sizes.py"),
             "--offset", "0x8000", "partition", "--type", "app",
             str(build_root / "partition_table/partition-table.bin"), str(app),
         )
         unsigned_notice = (
             "cd", str(build_root), "&&", app_cmake, "-E", "echo",
-            "App built but not signed. Sign app before flashing", "&&", app_cmake, "-E", "echo",
-            "\t" + python + " "
-            + str(idf_root / "components/esptool_py/esptool/espsecure.py")
-            + " sign_data --keyfile KEYFILE --version 2                 " + str(app),
+            "App built but not signed. Sign app before flashing.", "&&", app_cmake, "-E", "echo",
+            "\t" + python + " -m espsecure sign-data --keyfile KEYFILE --version 2                 "
+            + str(app),
         )
         default_commands = (producer, size_check, unsigned_notice)
         validate_default_app_command_inventory(
@@ -2230,7 +2423,8 @@ def self_test() -> None:
         )
         sdkconfig = root / "sdkconfig"
         sdkconfig.write_text(
-            'CONFIG_IDF_TARGET="esp32c3"\nCONFIG_COMPILER_OPTIMIZATION_DEBUG=y\n',
+            'CONFIG_IDF_TARGET="esp32c3"\nCONFIG_COMPILER_OPTIMIZATION_DEBUG=y\n'
+            "CONFIG_MBEDTLS_COMPILER_OPTIMIZATION_SIZE=y\n",
             encoding="utf-8",
         )
         (root / "build").mkdir()
@@ -2253,7 +2447,8 @@ def self_test() -> None:
             config_header.write_text(
                 "#pragma once\n"
                 '#define CONFIG_IDF_TARGET "esp32c3"\n'
-                "#define CONFIG_COMPILER_OPTIMIZATION_DEBUG 1\n",
+                "#define CONFIG_COMPILER_OPTIMIZATION_DEBUG 1\n"
+                "#define CONFIG_MBEDTLS_COMPILER_OPTIMIZATION_SIZE 1\n",
                 encoding="utf-8",
             )
             payload = json.loads((build_root / "compile_commands.json").read_text(encoding="utf-8"))
@@ -2279,6 +2474,7 @@ def self_test() -> None:
             loader: DependencyLoader = fixture_dependency_loader,
             actual_loader: CommandLoader | None = None,
             fixture_graph_validator: GraphValidator | None = None,
+            specs_validator: SpecsValidator = validate_picolibc_specs,
         ) -> int:
             def commands_from_fixture(
                 _build_root: Path, outputs: tuple[str, ...]
@@ -2303,6 +2499,7 @@ def self_test() -> None:
                 dependency_loader=loader,
                 command_loader=actual_loader or commands_from_fixture,
                 graph_validator=fixture_graph_validator,
+                specs_validator=specs_validator,
             )
 
         commands.write_text(
@@ -2739,6 +2936,56 @@ def self_test() -> None:
             else:
                 raise AssertionError(f"{label} compile mutation was accepted")
 
+        # With Picolibc selected, exactly the build-tree specs file is accepted, once per command,
+        # and every compiler that used it re-derives its bytes; without Picolibc it stays forbidden.
+        picolibc_token = f"-specs={(root / 'build').resolve() / PICOLIBC_SPECS_RELATIVE}"
+        specs_checks: list[Path] = []
+        picolibc_sdkconfig = root / "sdkconfig.picolibc"
+        picolibc_sdkconfig.write_text(
+            sdkconfig.read_text(encoding="utf-8") + "CONFIG_LIBC_PICOLIBC=y\n", encoding="utf-8"
+        )
+        def picolibc_dependency_loader(
+            build_root: Path, outputs: tuple[str, ...]
+        ) -> dict[str, tuple[Path, ...]]:
+            records = fixture_dependency_loader(build_root, outputs)
+            header = build_root / "config" / "sdkconfig.h"
+            header.write_text(
+                header.read_text(encoding="utf-8") + "#define CONFIG_LIBC_PICOLIBC 1\n",
+                encoding="utf-8",
+            )
+            return records
+
+        for specs_tokens, config, expected in (
+            ([picolibc_token], picolibc_sdkconfig, None),
+            ([picolibc_token, picolibc_token], picolibc_sdkconfig, "repeats the Picolibc specs"),
+            ([picolibc_token], sdkconfig, "forbidden source-injection compiler flag"),
+        ):
+            commands.write_text(
+                json.dumps([{
+                    "file": str(source),
+                    "output": sample_output,
+                    "arguments": [
+                        sample_compiler, "-Og", "-fstack-usage", *specs_tokens,
+                        "-o", sample_output, "-c", str(source),
+                    ],
+                }]),
+                encoding="utf-8",
+            )
+            try:
+                fixture_validate(
+                    "esp32c3", config, commands, root,
+                    loader=(
+                        picolibc_dependency_loader if config == picolibc_sdkconfig
+                        else fixture_dependency_loader
+                    ),
+                    specs_validator=lambda _build, compiler: specs_checks.append(compiler),
+                )
+            except SemanticsError as exc:
+                assert expected is not None and expected in str(exc), (specs_tokens, exc)
+            else:
+                assert expected is None, f"Picolibc specs mutation was accepted: {specs_tokens}"
+        assert specs_checks == [Path(sample_compiler)], specs_checks
+
         commands.write_text(
             json.dumps([{
                 "file": str(source),
@@ -2907,7 +3154,20 @@ def self_test() -> None:
             raise AssertionError("missing -fstack-usage was accepted")
 
         sdkconfig.write_text(
-            'CONFIG_IDF_TARGET="esp32c6"\nCONFIG_COMPILER_OPTIMIZATION_DEBUG=y\n',
+            'CONFIG_IDF_TARGET="esp32c3"\nCONFIG_COMPILER_OPTIMIZATION_DEBUG=y\n',
+            encoding="utf-8",
+        )
+        try:
+            fixture_validate("esp32c3", sdkconfig, commands, root)
+        except SemanticsError as exc:
+            if "CONFIG_MBEDTLS_COMPILER_OPTIMIZATION_SIZE" not in str(exc):
+                raise AssertionError(f"Mbed TLS optimization canary failed for the wrong reason: {exc}")
+        else:
+            raise AssertionError("Mbed TLS built without its pinned -Os was accepted")
+
+        sdkconfig.write_text(
+            'CONFIG_IDF_TARGET="esp32c6"\nCONFIG_COMPILER_OPTIMIZATION_DEBUG=y\n'
+            "CONFIG_MBEDTLS_COMPILER_OPTIMIZATION_SIZE=y\n",
             encoding="utf-8",
         )
         try:

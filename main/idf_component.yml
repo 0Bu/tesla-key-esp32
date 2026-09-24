@@ -1,8 +1,37 @@
 dependencies:
-  # IDF 6 moves the crypto surface to Mbed TLS 4 / PSA. The pinned tesla-ble v5.2.0 still uses
-  # the legacy Mbed TLS API; docs/adr/0002-idf6-mbedtls4-crypto-seam.md owns that migration gate.
-  idf: ">=5.5,<6.0"
-  espressif/mdns: "^1.2.0"
+  # ESP-IDF 6 carries Mbed TLS 4 / TF-PSA-Crypto. The pinned tesla-ble v5.2.0 still uses the legacy
+  # Mbed TLS API, so patches/tesla-ble/0006-port-crypto-bindings-to-psa.patch ports its crypto
+  # bindings to PSA; docs/adr/0002-idf6-mbedtls4-crypto-seam.md owns that migration.
+  idf: ">=6.1,<7.0"
+
+  # Espressif's own components come from their GitHub release sources, like tesla-ble below, so
+  # every resolution is a reviewable Git commit pinned with its component hash in the per-target
+  # lockfile. ESP-IDF 6 removed the built-in `json` and `mqtt` components (same headers and API:
+  # cJSON.h, mqtt_client.h) and moved the SPI Ethernet drivers to esp-eth-drivers.
+  espressif/mdns:
+    git: "https://github.com/espressif/esp-protocols.git"
+    path: "components/mdns"
+    version: "mdns-v1.13.1"
+  # cjson and mqtt are the exceptions: each carries a Git submodule (upstream cJSON; the paho
+  # MQTT test broker), and a Git resolution hashes that submodule's `.git` gitlink, whose
+  # `gitdir:` path depends on where the Component Manager cache sits relative to the project.
+  # Such a lock hash only verifies on the machine that wrote it; everywhere else the build rejects
+  # the checkout as corrupted. Their registry releases are fixed archives built from the same
+  # sources (cjson: idf-extra-components 1387cec, cjson/ unchanged since 0f5afa2; mqtt: esp-mqtt
+  # v1.1.0 = 1a1e578), pinned by exact version and component hash in every lockfile.
+  espressif/cjson:
+    version: "==1.7.19~2"
+  espressif/mqtt:
+    version: "==1.1.0"
+  # Tag w5500@v1.0.1. Only esp32s3 compiles the W5500 transport (CONFIG_TESLA_ETH_ENABLED, see
+  # main/Kconfig.projbuild), so only its lockfile resolves the driver. 1.x keeps the flat
+  # eth_w5500_config_t the firmware uses; 2.x nests it and adds a wiznet_common dependency.
+  espressif/w5500:
+    git: "https://github.com/espressif/esp-eth-drivers.git"
+    path: "w5500"
+    version: "1f19456ec90b60424583a4138c075a78e1ab2297"
+    rules:
+      - if: "target == esp32s3"
 
   # Pinned upstream yoziru/tesla-ble from git, for every target this project builds.
   # After the Component Manager materialises the source, root CMake applies the

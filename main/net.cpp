@@ -37,7 +37,9 @@
 #if CONFIG_TESLA_ETH_ENABLED
 #include "driver/spi_master.h"
 #include "esp_eth.h"
-#include "esp_eth_mac_spi.h"
+// ESP-IDF 6 moved the W5500 driver into the espressif/w5500 managed component.
+#include "esp_eth_mac_w5500.h"
+#include "esp_eth_phy_w5500.h"
 #endif
 
 #include "board.hpp"
@@ -67,8 +69,8 @@ static void net_boot_require(esp_err_t err, const char* component) {
 
 // The public initializer remains fail-closed, but Ethernet needs the error before parking so it
 // can release the SPI bus retained by its early hardware probe.  esp_netif itself cannot be
-// deinitialized in IDF 5.5; this helper only makes the failure observable to the caller before
-// the common boot-fatal boundary is entered.
+// deinitialized in ESP-IDF (5.5, unchanged in 6.1); this helper only makes the failure observable
+// to the caller before the common boot-fatal boundary is entered.
 static esp_err_t net_init_substrate(const char** failed_component) {
     esp_err_t err = esp_netif_init();
     if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
@@ -788,9 +790,10 @@ bool net_start_eth() {
     eth_w5500_config_t w5500_cfg = ETH_W5500_DEFAULT_CONFIG(eth_spi_host(), &devcfg);
     // POLLING mode. The ATOMIC PoE Base routes only SCLK/CS/MISO/MOSI + power, so there is no
     // interrupt line to wire; -1 selects polling and poll_period_ms sets the cadence. This is a
-    // supported configuration, not a workaround — ESP-IDF ships a CI config for exactly it
-    // (components/esp_eth/test_apps/sdkconfig.ci.poll_w5500, also at 10 ms). It bounds RX
-    // LATENCY, not throughput: each poll drains everything queued in the W5500's 16 KB buffer.
+    // supported configuration, not a workaround — the espressif/w5500 driver accepts exactly one
+    // of an interrupt GPIO or a poll period and rejects any other combination at construction
+    // (esp_eth_mac_new_w5500). It bounds RX LATENCY, not throughput: each poll drains everything
+    // queued in the W5500's 16 KB buffer.
     w5500_cfg.int_gpio_num   = -1;
     w5500_cfg.poll_period_ms = CONFIG_TESLA_ETH_POLL_MS;
 

@@ -129,7 +129,7 @@ validate_inputs "$version" "$source_sha"
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 unset IDF_TARGET
-# GCC's -fstack-usage sidecars are diagnostic-only and do not alter firmware bytes. ESP-IDF 5.5
+# GCC's -fstack-usage sidecars are diagnostic-only and do not alter firmware bytes. ESP-IDF 6.1
 # deliberately exposes EXTRA_CFLAGS/EXTRA_CXXFLAGS for high-priority additions; ordinary CFLAGS
 # are replaced by its response-file toolchain and would silently produce no sidecars.  Overwrite
 # rather than append any caller value so the only effective addition is the reviewed diagnostic.
@@ -137,8 +137,9 @@ export EXTRA_CFLAGS="-fstack-usage"
 export EXTRA_CXXFLAGS="-fstack-usage"
 
 # Validate the immutable source layout before spending time in the compiler. The generated binary
-# is checked against the same exact contract for every target below.
-python3 scripts/check-dependency-contract.py --root .
+# is checked against the same exact contract for every target below. --idf-path also proves that the
+# image's Mbed TLS is the commit the host tesla-ble harness verifies the PSA port against.
+python3 scripts/check-dependency-contract.py --root . --idf-path "${IDF_PATH:?ci-build-all.sh must run in the pinned ESP-IDF image}"
 python3 scripts/check-partition-contract.py --csv partitions.csv
 
 echo "ccache disabled for effective-compiler/dependency gate visibility"
@@ -222,7 +223,7 @@ for target in $TARGETS; do
   cp build/tesla-key-esp32.map "$diagnostic/tesla-key-esp32-$target.map"
   cp sdkconfig "$diagnostic/sdkconfig.$target"
   cp "$lock" "$diagnostic/$lock"
-  python -m esp_idf_size --format json build/tesla-key-esp32.map \
+  python -m esp_idf_size --format json2 build/tesla-key-esp32.map \
     > "$diagnostic/size-$target.json"
   printf '%s\n' "$projected_signed_size" > "$diagnostic/projected-signed-size.txt"
   python3 scripts/report-firmware-size.py \

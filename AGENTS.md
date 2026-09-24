@@ -37,21 +37,27 @@ task touches them:
 
 - Supported targets are exactly `esp32`, `esp32s3`, `esp32c3` and `esp32c6`. Do not add, drop or
   silently skip one. `scripts/ci-build-all.sh` is the four-target CI entry point.
-- [`esp-idf-toolchain.txt`](esp-idf-toolchain.txt) pins ESP-IDF **v5.5.5** and its container digest.
-  Use the repository wrappers; do not substitute a host IDF or move to ESP-IDF 6 as part of an
-  unrelated task.
+- [`esp-idf-toolchain.txt`](esp-idf-toolchain.txt) pins ESP-IDF **v6.1** and its container digest.
+  Use the repository wrappers; do not substitute a host IDF or move to another ESP-IDF line as part
+  of an unrelated task. ESP-IDF 6 no longer bundles cJSON, MQTT or the W5500 driver: W5500 and
+  mDNS are commit-pinned Espressif Git components, while cJSON and MQTT, whose Git trees carry
+  submodules, are exact registry releases, all pinned by component hash in the same manifest and
+  per-target lockfiles.
 - [`main/idf_component.yml`](main/idf_component.yml) pins `yoziru/tesla-ble` **v5.2.0**.
   [`patches/tesla-ble/`](patches/tesla-ble/) is an ordered, hash-checked, fail-closed local series:
-  unused Parental Controls trim and signer.go session-counter replay alignment (earlier patches
-  0001-0003 are retired in favor of native `main/logic/` orchestration). Do not edit the
+  unused Parental Controls trim, signer.go session-counter replay alignment and the PSA Crypto
+  port of the crypto bindings for Mbed TLS 4 (earlier patches 0001-0003 are retired in favor of
+  native `main/logic/` orchestration). Do not edit the
   pin, patch order, wire behavior, key compatibility or size trims without a separately
   authorized dependency migration and protocol-vector review.
 - `teslamotors/vehicle-command` is the normative reference for vehicle BLE protocol behaviour (see
   [`docs/adr/0005-tesla-ble-seam.md`](docs/adr/0005-tesla-ble-seam.md)). Every departure from upstream
   or reference must be documented in ADR-0005 and recorded in its departure list. No silent workarounds.
-- ESP-IDF 6/Mbed TLS 4/PSA work is intentionally separate. Preserve P-256 ECDH byte order,
-  `SHA1(shared-secret)[:16]`, HMAC/session derivation, AES-GCM nonce/AAD/tag layout, Tesla key-ID
-  derivation and PEM/NVS key reuse. See
+- Any change to the PSA crypto seam (patch 0006, `main/vehicle_pairing.cpp`) must preserve P-256
+  ECDH byte order, `SHA1(shared-secret)[:16]`, HMAC/session derivation, AES-GCM nonce/AAD/tag
+  layout, response-tag verification against the counter the response carries, Tesla key-ID
+  derivation and PEM/NVS key reuse, proven by the V1 vectors in `test/test_tesla_ble_harness.cpp`
+  (the key ID through a host mirror of `compute_key_fingerprint_()`). See
   [`docs/adr/0002-idf6-mbedtls4-crypto-seam.md`](docs/adr/0002-idf6-mbedtls4-crypto-seam.md).
 - Do not change BLE wire formats, pairing/session semantics, command meaning, dependency locks,
   target set or firmware behavior during agent/configuration-only work.
