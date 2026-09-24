@@ -596,10 +596,11 @@ function render(s){
   // header meta line: IP · version (IP first)
   $("ipline").innerHTML = s.ip ? esc(s.ip)+'&nbsp;·&nbsp;' : '';   // nbsp: overflow:hidden trims plain trailing spaces
   var vl=$("verLink");
-  vl.textContent='v'+(s.version||'?');
+  var prTarget=getTargetPr();
+  vl.textContent='v'+(s.version||'?')+(prTarget>0?' [PR #'+prTarget+']':'');
   vl.className='verlink';   // always grey — never the accent-red highlight
-  vl.title=otaAvail?('Update '+otaAvail+' available — tap to install'):'Tap to check for updates';
-  vl.setAttribute('aria-label',otaAvail?('Install firmware update '+otaAvail):'Check for firmware updates');
+  vl.title=otaAvail?('Update '+otaAvail+' available — tap to install'):(prTarget>0?('Tap to check for PR #'+prTarget+' updates'):'Tap to check for updates');
+  vl.setAttribute('aria-label',otaAvail?('Install firmware update '+otaAvail):(prTarget>0?('Check for PR #'+prTarget+' firmware updates'):'Check for firmware updates'));
 
   // key
   if(s.key_present){
@@ -815,6 +816,29 @@ function otaSchedule(fn,delay){
   otaFail(otaPhase==='check'?'check timed out':'update timed out');
 }
 function otaVersion(v){return typeof v==='string'&&v.length<=31&&/^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?$/.test(v)}
+function getTargetPr(){
+  try {
+    if(typeof location==='undefined') return 0;
+    var p=null;
+    if(location.search){
+      if(typeof URLSearchParams!=='undefined'){
+        p=new URLSearchParams(location.search).get('pr');
+      } else {
+        var sm=location.search.match(/[?&]pr=([0-9]+)/);
+        if(sm) p=sm[1];
+      }
+    }
+    if(!p&&location.hash){
+      var hm=location.hash.match(/^#(?:pr=)?([1-9][0-9]{0,6})$/i);
+      if(hm) p=hm[1];
+    }
+    if(p&&/^[1-9][0-9]{0,6}$/.test(p)){
+      var n=parseInt(p,10);
+      if(n>0&&n<=2147483647) return n;
+    }
+  }catch(e){}
+  return 0;
+}
 function otaStatus(){
   return requestJsonWithTimeout('/ota/status',{cache:'no-store'},OTA_HTTP_TIMEOUT_MS).then(function(o){
     var valid=o&&['idle','checking','downloading','done','error'].indexOf(o.state)>=0&&
@@ -830,7 +854,9 @@ function otaCheck(){
   otaBusy=true;
   otaBegin('check',OTA_CHECK_TIMEOUT_MS);
   otaInline(otaMiniRing(0,true,'currentColor'));   // checking — spinning ring only, no label
-  return requestJsonWithTimeout('/ota/check?ms='+Date.now(),{},OTA_HTTP_TIMEOUT_MS).then(function(j){
+  var pr=getTargetPr();
+  var checkUrl='/ota/check?ms='+Date.now()+(pr>0?'&pr='+pr:'');
+  return requestJsonWithTimeout(checkUrl,{},OTA_HTTP_TIMEOUT_MS).then(function(j){
     if(!j||j.started!==true) throw new Error((j&&j.reason)||'check did not start');
     otaCheckPoll();
   }).catch(function(){ otaFail('check failed'); });
@@ -846,18 +872,24 @@ function otaCheckPoll(){
     if(o.state!=='idle'){ otaFail('invalid check state'); return; }
     if(o.update_available){
       otaAvail=o.available||''; if(state)render(state); otaInline('');         // clear while the dialog is up
-      if(confirm('New version '+(o.available||'')+' available — update now?\n\nYou’re on v'+(o.current||'')+'. The device downloads the firmware and reboots when done.')){
+      var pr=getTargetPr();
+      var msg=pr>0
+        ? ('PR #'+pr+' update '+(o.available||'')+' available — update now?\n\nYou’re on v'+(o.current||'')+'. The device downloads the PR firmware and reboots when done.')
+        : ('New version '+(o.available||'')+' available — update now?\n\nYou’re on v'+(o.current||'')+'. The device downloads the firmware and reboots when done.');
+      if(confirm(msg)){
         otaExpectedVersion=o.available||null;
         otaBegin('update',OTA_UPDATE_TIMEOUT_MS);
         otaInline(otaMiniRing(0,true,'currentColor')+'<span>starting…</span>');
-        return requestJsonWithTimeout('/ota/update',{method:'POST'},OTA_HTTP_TIMEOUT_MS).then(function(j){
+        var updateUrl='/ota/update'+(pr>0?'?pr='+pr:'');
+        return requestJsonWithTimeout(updateUrl,{method:'POST'},OTA_HTTP_TIMEOUT_MS).then(function(j){
           if(!j||j.result!==true) throw new Error((j&&j.reason)||'update did not start');
           otaPoll();
         }).catch(function(){ otaFail('update failed to start'); });
       } else { otaAvail=null; if(state)render(state); otaReset(); }   // cancelled → version back to grey
     } else {
       otaAvail=null; if(state)render(state); otaReset();
-      otaInline('<span>up to date</span>'); otaInlineClear(3500);
+      var prChecked=getTargetPr();
+      otaInline(prChecked>0?'<span>PR #'+prChecked+' up to date</span>':'<span>up to date</span>'); otaInlineClear(3500);
     }
   }).catch(function(){ otaFail('check failed'); });
 }

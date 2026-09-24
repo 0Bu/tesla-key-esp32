@@ -6,6 +6,7 @@
 
 #include "http_handlers.hpp"
 #include "ota_update.hpp"
+#include "logic/ota_contract.hpp"
 #include <esp_log.h>
 #include <cstdlib>
 
@@ -36,7 +37,7 @@ static void apply_browser_time_query_(httpd_req_t* req) {
     ESP_LOGI(TAG, "clock set from browser (ota query): %lld", sec);
 }
 
-// GET /ota/check[?ms=<epoch>] — start a background version check, return at once.
+// GET /ota/check[?ms=<epoch>][&pr=<N>] — start a background version check, return at once.
 // The slow HTTPS manifest fetch runs in its own task (see ota_check_start) so it
 // never ties up the HTTP server; the UI polls /ota/status for the result.
 esp_err_t handle_ota_check(GuardedReq rq) {
@@ -45,7 +46,15 @@ esp_err_t handle_ota_check(GuardedReq rq) {
         return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid query string");
     }
     apply_browser_time_query_(req);
-    bool started = ota_check_start();
+    unsigned pr = 0;
+    char q[kQueryBufBytes];
+    if (httpd_req_get_url_query_str(req, q, sizeof(q)) == ESP_OK) {
+        char pr_str[16];
+        if (httpd_query_key_value(q, "pr", pr_str, sizeof(pr_str)) == ESP_OK) {
+            pr = tk::parse_pr_query(pr_str);
+        }
+    }
+    bool started = ota_check_start(pr);
     tk::JsonBuilder json;
     json.boolean(json.root(), "started", started);
     if (!started)
@@ -53,10 +62,21 @@ esp_err_t handle_ota_check(GuardedReq rq) {
     return send_json(req, started ? 200 : 409, json.release());
 }
 
-// POST /ota/update — start the background download+install, return immediately.
+// POST /ota/update[?pr=<N>] — start the background download+install, return immediately.
 esp_err_t handle_ota_update(GuardedReq rq) {
     httpd_req_t* req = rq.req;
-    bool started = ota_start();
+    if (validate_query_string(req) != ESP_OK) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid query string");
+    }
+    unsigned pr = 0;
+    char q[kQueryBufBytes];
+    if (httpd_req_get_url_query_str(req, q, sizeof(q)) == ESP_OK) {
+        char pr_str[16];
+        if (httpd_query_key_value(q, "pr", pr_str, sizeof(pr_str)) == ESP_OK) {
+            pr = tk::parse_pr_query(pr_str);
+        }
+    }
+    bool started = ota_start(pr);
     tk::JsonBuilder json;
     json.boolean(json.root(), "result", started);
     json.string(json.root(), "reason",
@@ -76,5 +96,8 @@ esp_err_t handle_ota_status(GuardedReq rq) {
     json.string(json.root(), "available", s.available.c_str());
     json.boolean(json.root(), "update_available", s.update_available);
     json.string(json.root(), "current", s.current.c_str());
+    if (s.target_pr > 0) {
+        json.number(json.root(), "pr", s.target_pr);
+    }
     return send_json(req, 200, json.release());
 }
