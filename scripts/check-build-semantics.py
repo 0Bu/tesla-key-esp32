@@ -1727,6 +1727,13 @@ def validate(
     ):
         if config.get(key) == "y":
             raise SemanticsError(f"effective sdkconfig unexpectedly enables {key}")
+    # ESP-IDF 6 builds Mbed TLS / TF-PSA-Crypto with a component-private optimization level. The
+    # esp32c6 slot budget depends on its -Os (sdkconfig.defaults), so a flip must fail here instead
+    # of surfacing as an unexplained size overflow or an unreviewed crypto-library build.
+    if config.get("CONFIG_MBEDTLS_COMPILER_OPTIMIZATION_SIZE") != "y":
+        raise SemanticsError(
+            "effective sdkconfig does not select CONFIG_MBEDTLS_COMPILER_OPTIMIZATION_SIZE=y"
+        )
 
     try:
         database = json.loads(compile_commands.read_text(encoding="utf-8"))
@@ -2416,7 +2423,8 @@ def self_test() -> None:
         )
         sdkconfig = root / "sdkconfig"
         sdkconfig.write_text(
-            'CONFIG_IDF_TARGET="esp32c3"\nCONFIG_COMPILER_OPTIMIZATION_DEBUG=y\n',
+            'CONFIG_IDF_TARGET="esp32c3"\nCONFIG_COMPILER_OPTIMIZATION_DEBUG=y\n'
+            "CONFIG_MBEDTLS_COMPILER_OPTIMIZATION_SIZE=y\n",
             encoding="utf-8",
         )
         (root / "build").mkdir()
@@ -2439,7 +2447,8 @@ def self_test() -> None:
             config_header.write_text(
                 "#pragma once\n"
                 '#define CONFIG_IDF_TARGET "esp32c3"\n'
-                "#define CONFIG_COMPILER_OPTIMIZATION_DEBUG 1\n",
+                "#define CONFIG_COMPILER_OPTIMIZATION_DEBUG 1\n"
+                "#define CONFIG_MBEDTLS_COMPILER_OPTIMIZATION_SIZE 1\n",
                 encoding="utf-8",
             )
             payload = json.loads((build_root / "compile_commands.json").read_text(encoding="utf-8"))
@@ -3145,7 +3154,20 @@ def self_test() -> None:
             raise AssertionError("missing -fstack-usage was accepted")
 
         sdkconfig.write_text(
-            'CONFIG_IDF_TARGET="esp32c6"\nCONFIG_COMPILER_OPTIMIZATION_DEBUG=y\n',
+            'CONFIG_IDF_TARGET="esp32c3"\nCONFIG_COMPILER_OPTIMIZATION_DEBUG=y\n',
+            encoding="utf-8",
+        )
+        try:
+            fixture_validate("esp32c3", sdkconfig, commands, root)
+        except SemanticsError as exc:
+            if "CONFIG_MBEDTLS_COMPILER_OPTIMIZATION_SIZE" not in str(exc):
+                raise AssertionError(f"Mbed TLS optimization canary failed for the wrong reason: {exc}")
+        else:
+            raise AssertionError("Mbed TLS built without its pinned -Os was accepted")
+
+        sdkconfig.write_text(
+            'CONFIG_IDF_TARGET="esp32c6"\nCONFIG_COMPILER_OPTIMIZATION_DEBUG=y\n'
+            "CONFIG_MBEDTLS_COMPILER_OPTIMIZATION_SIZE=y\n",
             encoding="utf-8",
         )
         try:

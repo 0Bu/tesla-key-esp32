@@ -790,9 +790,10 @@ bool net_start_eth() {
     eth_w5500_config_t w5500_cfg = ETH_W5500_DEFAULT_CONFIG(eth_spi_host(), &devcfg);
     // POLLING mode. The ATOMIC PoE Base routes only SCLK/CS/MISO/MOSI + power, so there is no
     // interrupt line to wire; -1 selects polling and poll_period_ms sets the cadence. This is a
-    // supported configuration, not a workaround — ESP-IDF ships a CI config for exactly it
-    // (components/esp_eth/test_apps/sdkconfig.ci.poll_w5500, also at 10 ms). It bounds RX
-    // LATENCY, not throughput: each poll drains everything queued in the W5500's 16 KB buffer.
+    // supported configuration, not a workaround — the espressif/w5500 driver accepts exactly one
+    // of an interrupt GPIO or a poll period and rejects any other combination at construction
+    // (esp_eth_mac_new_w5500). It bounds RX LATENCY, not throughput: each poll drains everything
+    // queued in the W5500's 16 KB buffer.
     w5500_cfg.int_gpio_num   = -1;
     w5500_cfg.poll_period_ms = CONFIG_TESLA_ETH_POLL_MS;
 

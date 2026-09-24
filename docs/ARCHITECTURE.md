@@ -263,7 +263,11 @@ next 64 KiB signing boundary without weakening client certificate verification.
 **esp32s3 carries the extra on-device display code and still fits at the base `-Og`** like every
 target: the Package A size levers
 (#154) freed the ~64 KB the display needs, so no `-Os` (which hard-freezes under load — rejected
-Package B) is required. **Migration:** a device on the old single-`factory` layout must be USB-reflashed
+Package B) is required. One component-private exception exists since ESP-IDF 6: its default builds
+the Mbed TLS / TF-PSA-Crypto libraries at `-Os` (`CONFIG_MBEDTLS_COMPILER_OPTIMIZATION_SIZE`), which
+`sdkconfig.defaults` pins and `scripts/check-build-semantics.py` enforces, because at `-Og` esp32c6
+reaches a projected signed `0x1f1000`, past the policy limit and the slot. `main/` and every other
+component stay at `-Og`. **Migration:** a device on the old single-`factory` layout must be USB-reflashed
 once via the web installer (full erase → WiFi/VIN/key reset, re-pair). After that, all
 updates are OTA and preserve NVS. (Existing 8 MB-table S3 devices keep OTA-updating without
 a reflash — OTA writes follow the INSTALLED table, and `ota_0` stays at `0x20000`.)

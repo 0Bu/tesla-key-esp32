@@ -184,6 +184,14 @@ CONFIG_MBEDTLS_TLS_CLIENT_ONLY=y
 # No filesystem: certs/keys come from the CA bundle and NVS, never a VFS path. ~1.2 KB.
 CONFIG_MBEDTLS_FS_IO=n
 
+# ESP-IDF 6 compiles the Mbed TLS / TF-PSA-Crypto libraries at `-Os` by default, as a PRIVATE option
+# on those library targets only. Pinned deliberately rather than inherited: built at the global `-Og`
+# instead (as ESP-IDF 5.5 did), the esp32c6 app grows to an unsigned 0x1f0000 and a projected signed
+# 0x1f1000, past both the 0x1e8000 policy and the 0x1f0000 OTA slot. This is not the rejected
+# whole-build `-Os` (docs/ARCHITECTURE.md, ADR-0004): main/ and every other component stay at `-Og`.
+# scripts/check-build-semantics.py fails closed if the effective value ever differs.
+CONFIG_MBEDTLS_COMPILER_OPTIMIZATION_SIZE=y
+
 # Drop unneeded elliptic curves: Tesla BLE strictly uses NIST P-256 (SECP256R1), while Web PKI /
 # TLS uses P-256, P-384, P-521, or X25519. Dropping Brainpool (BP256/384/512) and secp256k1 saves
 # flash across all targets with zero runtime risk. The small SECP192/224 curves need no line:

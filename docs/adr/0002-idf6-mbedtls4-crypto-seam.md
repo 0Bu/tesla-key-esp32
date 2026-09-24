@@ -112,16 +112,38 @@ upstream. The evaluation recorded in #61 found no reason for a fork:
   bootloader, which is the OTA path from 5.5.5 firmware; the chip-revision bounds and the 64 KiB
   flash MMU page layout are unchanged. The reverse is not supported: a device installed with the
   v6.1 bootloader must not be downgraded to a 5.x-built release.
-- **Still to prove on hardware.** Pairing and key reuse on an already-paired device, signed
-  commands, telemetry, OTA from a 5.5.5 build with its old bootloader, and sleep/wake behaviour
-  are not covered by host tests or builds. The draft PR stays unmerged until they are.
-- **Pre-merge hardware test path.** The signed PR preview rebuilds with the toolchain pinned on
-  the default branch, so it cannot produce a production-signed image of a PR that moves that pin;
-  this is the intended trust boundary, not a gap to work around. Before merge, an app-only USB
-  flash (`$flash-esp32`: app at `0x20000`, otadata erase, a development signing key) keeps the
-  5.5.5 bootloader and NVS and proves that bootloader starting the v6.1 app, key reuse, BLE and
-  sleep/wake; restoring the production-signed release app afterwards re-anchors OTA trust. The
-  production OTA download from 5.5.5 is proven with the first v6.1 release.
+- **Bench evidence (2026-09-24).** A bench esp32s3 as installed in the field (v5.5.5
+  second-stage bootloader, pre-coredump partition table, a key in NVS that is not enrolled in the
+  car). OTA URLs are compile-time and the signed PR preview rebuilds with the pin on the default
+  branch (the intended trust boundary), so a real OTA from 5.5.5 used a bench channel: a v5.5.5
+  build of the default branch whose manifest URL points at a local HTTPS server, with a throwaway
+  CA appended to the bundle. Every image was signed with the production key and verified against
+  `scripts/ota-signing-public-key.sha256`; bench versions sat below the current release so the
+  board returned to production over the real Pages channel. Proven: OTA 5.5.5 → 6.1 with the
+  v5.5.5 bootloader booting the v6.1 app and the health gate committing it; OTA 6.1 → 6.1;
+  `/ota/check` against Pages and OTA 6.1 → the production release; signature enforcement on 6.1
+  (a throwaway-key-signed and an unsigned image are both rejected); key fingerprint, key creation
+  time, VIN and Wi-Fi unchanged through every step; BLE finds the car by its VIN-derived name.
+- **Live acceptance after merge (owner decision, 2026-09-24).** The owner merged before the
+  enrolled-key checks and runs them on the production esp32s3 W5500 board, by OTA from the first
+  v6.1 release: BLE session setup with the existing enrolled key, signed commands, telemetry, the
+  evcc end-to-end path, sleep/wake, and the W5500 Ethernet path, which no bench board covers. An
+  image that never gets a lease stays pending under the health gate, and the next power cycle
+  rolls the board back to the previous release. esp32, esp32c3 and esp32c6 are covered by builds
+  only.
+- **Mbed TLS optimization.** ESP-IDF 6 builds the Mbed TLS / TF-PSA-Crypto libraries at `-Os` by
+  default, as a component-private option. `sdkconfig.defaults` pins it and
+  `scripts/check-build-semantics.py` enforces it: at `-Og` esp32c6 reaches a projected signed
+  `0x1f1000`, past the `0x1e8000` policy and the slot. It is not the rejected whole-build `-Os`
+  (ADR-0004); the live acceptance runs under the evcc + BLE load that froze whole-build `-Os`.
+- **Other ESP-IDF 6.1 defaults the firmware inherits.** Picolibc replaces newlib (the
+  double-precision `printf`/`scanf` variants are linked, so cJSON number output is unchanged);
+  `CONFIG_FREERTOS_IN_IRAM` is off (ISR-context FreeRTOS functions stay in IRAM, and the firmware
+  installs no ISR of its own); `CONFIG_MBEDTLS_THREADING_C` is on (PSA key-store locking);
+  `CONFIG_MBEDTLS_SSL_KEEP_PEER_CERTIFICATE` is off; `CONFIG_HTTPD_ENABLE_EVENTS`,
+  `CONFIG_ESP_HTTP_CLIENT_STRICT_HEADER_BUFFER` and `CONFIG_ESP_HTTPS_OTA_VERIFY_SPI_MODE` are on.
+  Assertions stay enabled in silent mode, so `CONFIG_COMPILER_ASSERT_NDEBUG_EVALUATE=n` has no
+  effect, and `CONFIG_FREERTOS_ISR_STACKSIZE` stays 2096 because the core dump is enabled.
 
 ## Consequences
 

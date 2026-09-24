@@ -185,7 +185,9 @@ Treat a violation of any of these as a real finding.
   and exact current-build generated-source allowlist, forced include/macro files, compiler
   plugins/specs, preprocessor pass-through or prefix/sysroot forms, a compiler wrapper/environment,
   macro/`include_next` source directives, a main source outside `__idf_main`, missing
-  `-fstack-usage`, or anything other than exactly `-Og` is a gate bypass. External reproducibility
+  `-fstack-usage`, or anything other than exactly `-Og` is a gate bypass. (The Mbed TLS /
+  TF-PSA-Crypto libraries are the one pinned component-private `-Os` exception outside
+  `__idf_main`; `check-build-semantics.py` requires `CONFIG_MBEDTLS_COMPILER_OPTIMIZATION_SIZE=y`.) External reproducibility
   build directories must still pass the same closed generated-source classification.
 - **Those guards all mean "recover and continue", which is right for a TRANSIENT shortage and
   wedges the device on a permanent one** (2026-07-18: `bad_alloc` out of `loop()` ~20×/s for ten
@@ -638,8 +640,12 @@ lenses this skill delegates to; keep them complementary, not contradictory):
   targets built from one tree). Re-verify its facts against the *Cross-cutting consistency*
   section and the build wiring: the target set (esp32/s3/c3/c6), per-target bootloader offsets
   (`0x1000`/`0x0`), the image-suffix map (`ci-sign-artifacts.sh`/`build-pages.sh`/
-  `ota_update.cpp` `TESLA_OTA_IMG_SUFFIX`), the app-size gate (`slot − 32 KB`), the single git
-  `main/idf_component.yml` dependency, plus the
+  `ota_update.cpp` `TESLA_OTA_IMG_SUFFIX`), the app-size gate (`slot − 32 KB`), the
+  `main/idf_component.yml` dependency set (commit-pinned Git sources for tesla-ble, mdns and w5500;
+  exact registry releases for cjson and mqtt, whose Git trees carry submodules), the one intended
+  per-target lock divergence (`espressif/w5500` resolves for esp32s3 only, matching
+  `CONFIG_TESLA_ETH_ENABLED depends on IDF_TARGET_ESP32S3`), the pinned Mbed TLS `-Os` exception
+  (`CONFIG_MBEDTLS_COMPILER_OPTIMIZATION_SIZE`, which the esp32c6 slot budget depends on), plus the
   all-target source-patch path (`patches/tesla-ble/` + apply script + root CMake). Keep it
   complementary to this skill, not a firmware-logic reviewer.
 - **Any skill or agent added since this was written** must be audited too — and added to this list.
