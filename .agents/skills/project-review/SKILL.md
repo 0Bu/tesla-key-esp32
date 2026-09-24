@@ -618,7 +618,8 @@ what each must stay true to:
   `0x20000` + erase `otadata`, NVS preserved. Re-verify its
   partition map against `partitions.csv` (app `@0x20000`, `otadata@0xf000/0x2000`, `nvs@0x9000`
   untouched), the signed-image requirement, the `-merged.bin` warning, and the no-auto-reset
-  gotchas. Post-reset verification uses a short bounded reachability retry and requires exact
+  gotchas. Its read-only bootloader check must refuse an app built by an older ESP-IDF than the
+  bootloader that stays (a v6.1 bootloader does not boot a 5.x-built app). Post-reset verification uses a short bounded reachability retry and requires exact
   version/platform plus `paired:true`. It is the
   recovery counterpart to `$flash-esp32`/`$ship`, not a build path.
 The review subagents in `.agents/subagents.json` — audit these the same way (they are the targeted

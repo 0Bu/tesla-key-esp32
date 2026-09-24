@@ -52,9 +52,12 @@ calls the production helpers themselves — `tk::build_ble_tx_frame` / `tk::is_w
 (the `drive_command_runner_()` TX path) and `tk::regenerate_private_key()` (the transaction
 behind `regenerate_key_native_()`) — so a regression in them fails there, not only in a copy. Its
 V1 known-answer tests pin the PSA crypto port (patch 0006) to the protocol bytes: the official
-client key and ECDH session key, the session-info HMAC, a reference AES-GCM vector and
-`Peer::encrypt` output, response tamper refusal, the VIN BLE name, a PEM export byte-identical to
-the Mbed TLS 3.6 one kept in NVS, P-384/garbage key refusal and the firmware key fingerprint.
+client key and ECDH session key, the session-info HMAC and the official session-info tag, a
+reference AES-GCM vector and `Peer::encrypt` output, response metadata serialized from protocol.md
+with a response counter that differs from the request counter (an AAD from the request counter
+and a tampered tag are both refused), the VIN BLE name, a PEM export byte-identical to the Mbed TLS
+3.6 one kept in NVS, and P-384/garbage key refusal. The firmware key fingerprint is checked through a
+host mirror of `compute_key_fingerprint_()`, which is IDF code and not compiled on the host.
 
 ## What's covered
 

@@ -445,7 +445,11 @@ ECDH uses `psa_raw_key_agreement`, AES-128-GCM uses `psa_aead_*`, SHA-1/SHA-256 
 HMAC-SHA256 uses `psa_mac_compute` and randomness comes from `psa_generate_random`, while `mbedtls_pk` still
 parses and writes the PEM kept in NVS. Wire bytes, session derivation and the stored key format are unchanged; the V1 protocol vectors in
 `test/test_tesla_ble_harness.cpp` prove it against the pinned Mbed TLS 4 (see
-[`adr/0002-idf6-mbedtls4-crypto-seam.md`](adr/0002-idf6-mbedtls4-crypto-seam.md)).
+[`adr/0002-idf6-mbedtls4-crypto-seam.md`](adr/0002-idf6-mbedtls4-crypto-seam.md)). One behaviour does change:
+the AES-GCM tag of an encrypted vehicle response is now verified (upstream computed it and never compared
+it), and the response metadata carries the counter the response itself sends, as vehicle-command's
+`Signer.Decrypt` does, rather than the request counter. A response that fails authentication is dropped
+(ADR-0005, §2).
 
 All four images use the same tesla-ble revision and ordered patch-series behavior. The wider orchestration seam
 and reference alignment is [`adr/0005-tesla-ble-seam.md`](adr/0005-tesla-ble-seam.md)

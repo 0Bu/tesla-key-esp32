@@ -55,8 +55,9 @@ task touches them:
   or reference must be documented in ADR-0005 and recorded in its departure list. No silent workarounds.
 - Any change to the PSA crypto seam (patch 0006, `main/vehicle_pairing.cpp`) must preserve P-256
   ECDH byte order, `SHA1(shared-secret)[:16]`, HMAC/session derivation, AES-GCM nonce/AAD/tag
-  layout, Tesla key-ID derivation and PEM/NVS key reuse, proven by the V1 vectors in
-  `test/test_tesla_ble_harness.cpp`. See
+  layout, response-tag verification against the counter the response carries, Tesla key-ID
+  derivation and PEM/NVS key reuse, proven by the V1 vectors in `test/test_tesla_ble_harness.cpp`
+  (the key ID through a host mirror of `compute_key_fingerprint_()`). See
   [`docs/adr/0002-idf6-mbedtls4-crypto-seam.md`](docs/adr/0002-idf6-mbedtls4-crypto-seam.md).
 - Do not change BLE wire formats, pairing/session semantics, command meaning, dependency locks,
   target set or firmware behavior during agent/configuration-only work.

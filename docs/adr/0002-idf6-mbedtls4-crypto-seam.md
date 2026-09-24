@@ -19,10 +19,10 @@ this firmware, pinned at v5.2.0 in `main/idf_component.yml` — implements Tesla
 AES-128-GCM directly against that legacy surface: legacy `mbedtls_pk_*` key handling, low-level
 `mbedtls_ecp_mul` with `MBEDTLS_PRIVATE` struct-field access, legacy `mbedtls_gcm_*` streaming,
 CTR-DRBG/entropy contexts. Issue #61 documents every call site with sources. As of the last check
-(2026-09-23, tesla-ble v5.2.0) there is still no upstream PSA branch, PR or release, so **no
-version bump restores an IDF-6 build**; this project deliberately holds on ESP-IDF 5.x (Mbed TLS
-3.6 LTS — supported, not EOL). The hold is safe today but has a clock on it: IDF 5.x support
-ends on Espressif's schedule whether or not upstream moves.
+(2026-09-23, tesla-ble v5.2.0) there was still no upstream PSA branch, PR or release, so **no
+version bump restores an IDF-6 build**. Until the port recorded in "Execution", this project
+deliberately held on ESP-IDF 5.x (Mbed TLS 3.6 LTS — supported, not EOL). The hold was safe but
+had a clock on it: IDF 5.x support ends on Espressif's schedule whether or not upstream moves.
 
 ## Options considered
 
@@ -34,16 +34,18 @@ ends on Espressif's schedule whether or not upstream moves.
 
 ## Decision
 
-**B with a deadline, then A.** (Kept as decided; "Execution" below records that A was carried out
-on 2026-09-24, before the trigger fired.)
+**B with a deadline, then A.** (Kept as decided on 2026-07-08. "Execution" below records that A
+was carried out on 2026-09-24, before the trigger fired; it supersedes "Now" and the trigger, and
+the Renovate note on `espressif/idf` PRs now asks for the Mbed TLS pins instead, see
+"Consequences".)
 
-- **Now:** stay on ESP-IDF 5.x and the pinned tesla-ble (v5.2.0). Re-check upstream
-  (`yoziru/tesla-ble` branches/PRs/releases for PSA / Mbed TLS 4 / IDF-6 work) on **every
-  Renovate `espressif/idf` image PR** — the `.github/renovate.json` `prBodyNotes` reminder on
-  those PRs is the recurring checkpoint; it points at #61 and at this ADR's trigger. The pinned
+- **Now** (superseded by "Execution")**:** stay on ESP-IDF 5.x and the pinned tesla-ble (v5.2.0).
+  Re-check upstream (`yoziru/tesla-ble` branches/PRs/releases for PSA / Mbed TLS 4 / IDF-6 work)
+  on **every Renovate `espressif/idf` image PR** — the `.github/renovate.json` `prBodyNotes`
+  reminder on those PRs was the recurring checkpoint; it pointed at #61 and at this ADR's trigger. The pinned
   v5.5 line is in its maintenance period, so those PRs are infrequent; re-check on the dated
   trigger below as well.
-- **Trigger to start A:** ESP-IDF 5.x (the line pinned by tag+digest in
+- **Trigger to start A** (moot since "Execution")**:** ESP-IDF 5.x (the line pinned by tag+digest in
   `esp-idf-toolchain.txt`) enters its **final 12 months of Espressif support** with no
   usable upstream Mbed TLS 4 support released or imminent. For v5.5 (first released
   2025-07-21), the 30-month window in Espressif's `SUPPORT_POLICY.md` puts end of support at
@@ -87,14 +89,30 @@ upstream. The evaluation recorded in #61 found no reason for a fork:
   `psa_export_public_key`), AES-128-GCM and HMAC-SHA256 use `psa_aead_*`/`psa_mac_compute`,
   SHA-1/SHA-256 use `psa_hash_compute`, and `psa_generate_random` replaces CTR-DRBG.
   `mbedtls_pk` remains only for SEC1 PEM import/export, so stored keys and pairings survive. The
-  firmware's key-fingerprint helper moved to the same public PK→PSA path.
+  firmware's key-fingerprint helper moved to the same public PK→PSA path. A failed RNG read for a
+  GCM nonce now fails `encrypt` instead of encrypting under an unfilled nonce.
+- **Response authentication — the one behaviour change.** Upstream computes the AES-GCM tag of an
+  encrypted response (`mbedtls_gcm_finish`) and never compares it, so the ESP-IDF 5 firmware
+  accepted any response tag. `psa_aead_verify` compares it, and 0006 keeps that, as
+  vehicle-command's `Signer.Decrypt` does. Verifying the tag exposed an upstream departure the
+  unchecked tag had hidden: tesla-ble built the response metadata from its own request counter,
+  while protocol.md and `Signer.Decrypt` bind `TAG_COUNTER` to the counter the response carries
+  (the vehicle counts responses per request; VCSEC sends up to three). 0006 follows the reference:
+  `Peer::decrypt_response` takes the response's counter, `construct_response_ad_buffer` builds
+  the response metadata, `construct_ad_buffer` refuses the response type, and all three call
+  sites (tesla-ble `client.cpp` and `vehicle.cpp`, `VehicleController::handle_vcsec_frame_()`)
+  pass it. ADR-0005 lists the departure.
 - **Wire and key invariants, with evidence.** `test/test_tesla_ble_harness.cpp` part V1 runs the
-  vehicle-command protocol vectors through the patched library, built against the exact Mbed TLS
-  commit ESP-IDF v6.1 pins (`MBEDTLS_REF` in `scripts/test-tesla-ble-harness.sh`): official
-  client public key, ECDH session key `SHA1(X)[:16]`, session-info HMAC, AES-GCM request bytes
-  and tag against an independent one-shot reference, tampered-tag rejection with plaintext
-  wiping, VIN BLE name, a PEM export byte-identical to the Mbed TLS 3.6 export, and the firmware
-  fingerprint equal to tesla-ble's key id.
+  vehicle-command protocol vectors through the patched library, built against the Mbed TLS commit
+  ESP-IDF v6.1 pins (`MBEDTLS_REF` in `scripts/test-tesla-ble-harness.sh`; the host builds its
+  builtin software drivers, while the firmware sends AES-GCM through the ESP PSA driver): official
+  client public key, ECDH session key `SHA1(X)[:16]`, session-info HMAC and the official
+  session-info tag, AES-GCM request bytes and tag against an independent one-shot reference,
+  response metadata serialized independently from protocol.md with a response counter that
+  differs from the request counter (an AAD from the request counter is refused), tampered-tag
+  rejection with plaintext wiping, VIN BLE name, a PEM export byte-identical to the Mbed TLS 3.6
+  export, and a host mirror of the firmware fingerprint (`compute_key_fingerprint_()` itself is
+  IDF code) equal to tesla-ble's key id.
 - **Randomness.** ESP-IDF 6 configures `MBEDTLS_PSA_CRYPTO_EXTERNAL_RNG`: every PSA random draw
   (key generation, key-parse blinding, GCM nonces) reads the hardware RNG at call time; there is
   no DRBG seeded once. `main/main.cpp` keeps SAR-ADC entropy enabled across key load and
@@ -124,18 +142,23 @@ upstream. The evaluation recorded in #61 found no reason for a fork:
   `/ota/check` against Pages and OTA 6.1 → the production release; signature enforcement on 6.1
   (a throwaway-key-signed and an unsigned image are both rejected); key fingerprint, key creation
   time, VIN and Wi-Fi unchanged through every step; BLE finds the car by its VIN-derived name.
-- **Live acceptance after merge (owner decision, 2026-09-24).** The owner merged before the
-  enrolled-key checks and runs them on the production esp32s3 W5500 board, by OTA from the first
-  v6.1 release: BLE session setup with the existing enrolled key, signed commands, telemetry, the
-  evcc end-to-end path, sleep/wake, and the W5500 Ethernet path, which no bench board covers. An
-  image that never gets a lease stays pending under the health gate, and the next power cycle
-  rolls the board back to the previous release. esp32, esp32c3 and esp32c6 are covered by builds
-  only.
+- **Live acceptance before merge (owner decision, 2026-09-24).** The enrolled-key checks run on
+  the production esp32s3 W5500 board: BLE session setup with the existing enrolled key, signed
+  commands, telemetry, the evcc end-to-end path, sleep/wake, and the W5500 Ethernet path, which
+  no bench board covers. Once #327 added OTA from signed PR preview channels, the owner moved them
+  ahead of the merge: the board installs this PR's signed preview (`/ota/check?pr=<N>`,
+  `/ota/update?pr=<N>`), whose `<release>-PR-<N>` version a plain update check replaces with the
+  stable release of the same core. An image that never gets a lease stays pending under the
+  health gate, and the next power cycle rolls the board back. The health gate does not look at
+  BLE, so the BLE and command checks are the acceptance, not the gate. esp32, esp32c3 and esp32c6
+  are covered by builds only.
 - **Mbed TLS optimization.** ESP-IDF 6 builds the Mbed TLS / TF-PSA-Crypto libraries at `-Os` by
   default, as a component-private option. `sdkconfig.defaults` pins it and
   `scripts/check-build-semantics.py` enforces it: at `-Og` esp32c6 reaches a projected signed
   `0x1f1000`, past the `0x1e8000` policy and the slot. It is not the rejected whole-build `-Os`
   (ADR-0004); the live acceptance runs under the evcc + BLE load that froze whole-build `-Os`.
+- **USB recovery.** Because a v6.1 bootloader does not boot a 5.x-built app, `$usb-recovery`
+  reads the installed bootloader's ESP-IDF version and refuses an app built by an older one.
 - **Other ESP-IDF 6.1 defaults the firmware inherits.** Picolibc replaces newlib (the
   double-precision `printf`/`scanf` variants are linked, so cJSON number output is unchanged);
   `CONFIG_FREERTOS_IN_IRAM` is off (ISR-context FreeRTOS functions stay in IRAM, and the firmware
@@ -147,11 +170,12 @@ upstream. The evaluation recorded in #61 found no reason for a fork:
 
 ## Consequences
 
-- No effort is spent while upstream may still solve it — but the decision, the trigger and
-  the execution sketch survive context loss (this ADR), so the port starts on schedule, not
-  in a panic when IDF 5.x support ends.
-- The Renovate reminder gains a concrete question to answer ("has the trigger fired?")
-  instead of a vague caution.
+- Decision-time (superseded by "Execution"): no effort was spent while upstream might still
+  solve it, and the decision, the trigger and the execution sketch survived context loss (this
+  ADR), so the port could start on schedule rather than in a panic when IDF 5.x support ends.
+- Decision-time: the Renovate reminder on `espressif/idf` PRs asked a concrete question ("has
+  the trigger fired?"). Since the execution it asks instead to move `MBEDTLS_REF` and
+  `MBEDTLS_COMMIT` and rerun the V1 vectors (last consequence below).
 - Accepting a temporary local copy of the crypto bindings (option A, delivered as patch 0006)
   is a conscious trade: protocol correctness stays upstream's; only the crypto *bindings* are
   ported, and the patch is retired the moment upstream ships equivalent support.

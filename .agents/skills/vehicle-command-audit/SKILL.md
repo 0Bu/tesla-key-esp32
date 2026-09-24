@@ -166,7 +166,9 @@ re-confirm it against the *current* tree and catch anything that drifted since. 
     patch 0001 and ADR-0003. Verify the current 3 repository patches under `patches/tesla-ble/` (0004 parental
     controls trim, 0005 session counter replay and 0006 PSA crypto-binding port) apply lexically/idempotently
     through root CMake to the managed dependency tree, and are rebased explicitly on every pin bump; 0006 must
-    keep the V1 vectors in `test/test_tesla_ble_harness.cpp` byte-identical.
+    keep the V1 vectors in `test/test_tesla_ble_harness.cpp` byte-identical and keep verifying response tags
+    against response metadata bound to the counter the response carries (`Signer.Decrypt`), never the
+    request counter: every `Peer::decrypt_response` call site passes `AES_GCM_Response_data.counter`.
 9b. **ADRs and cryptographic / protocol boundary claims** — when an ADR or architecture doc makes
     claims about protocol vulnerabilities, replays, or countermeasures:
     - Cryptographically verify the claims against `teslamotors/vehicle-command` Go reference sources
