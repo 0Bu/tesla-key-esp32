@@ -100,8 +100,13 @@ upstream. The evaluation recorded in #61 found no reason for a fork:
   no DRBG seeded once. `main/main.cpp` keeps SAR-ADC entropy enabled across key load and
   first-boot key generation, before Wi-Fi/BLE supply RF entropy.
 - **Toolchain.** ESP-IDF v6.1 (Mbed TLS 4.1.0 / TF-PSA-Crypto 1.1.0, GCC 15.2, Picolibc), with
-  `espressif/cjson`, `espressif/mqtt`, `espressif/mdns` and `espressif/w5500` (esp32s3 only)
-  taken from their Git release sources and pinned per target in `dependencies.lock.*`.
+  `espressif/mdns` and `espressif/w5500` (esp32s3 only) taken from their Git release sources,
+  and `espressif/cjson` 1.7.19~2 and `espressif/mqtt` 1.1.0 from the component registry, all
+  pinned per target in `dependencies.lock.*`. The two registry components carry Git submodules
+  (upstream cJSON; the paho MQTT test broker); a Git resolution hashes the submodule's `.git`
+  gitlink, whose `gitdir:` path depends on where the Component Manager cache sits, so such a
+  lock hash only verifies on the machine that wrote it. The registry archives are fixed bytes
+  built from the same sources.
   `esp_https_ota` partial download is not used, so its new opt-in stays off.
 - **Bootloader compatibility.** ESP-IDF supports booting apps built by a newer IDF with an older
   bootloader, which is the OTA path from 5.5.5 firmware; the chip-revision bounds and the 64 KiB

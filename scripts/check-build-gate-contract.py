@@ -773,17 +773,17 @@ def validate(root: Path) -> None:
         (cjson_test, "run-cjson-oom-tests.sh", "CJSON_OOM_SANITIZE"),
         (mqtt_json_test, "run-mqtt-json-publish-tests.sh", "MQTT_JSON_SANITIZE"),
     ):
-        # ESP-IDF 6 dropped its bundled cJSON: the gates must compile the espressif/cjson commit
-        # that all four target lockfiles pin, through its upstream submodule gitlink.
+        # ESP-IDF 6 dropped its bundled cJSON: the gates must compile the espressif/cjson registry
+        # release that all four target lockfiles pin, re-hashed against the locked component hash.
         require('(root / f"dependencies.lock.{target}")' in text and
                 'for target in ("esp32", "esp32s3", "esp32c3", "esp32c6"):' in text and
                 '^  espressif/cjson:' in text and
-                'cjson_repo="https://github.com/espressif/idf-extra-components.git"' in text and
-                'cjson_upstream="https://github.com/DaveGamble/cJSON.git"' in text and
-                '--get submodule.cjson/cJSON.url' in text and
-                '[ "$(git -C "$cjson_cache/cJSON" rev-parse HEAD)" != "$cjson_submodule_commit" ]'
-                in text and
-                'cjson_dir="$cjson_cache/cJSON"' in text and variable in text,
+                'cjson_registry="https://components.espressif.com/"' in text and
+                'https://components-file.espressif.com/components/espressif/cjson/' in text and
+                'entries[0].get("component_hash") != expected' in text and
+                '".." in name.parts' in text and
+                'if component_hash(component) != expected:' in text and
+                'cjson_dir="$cjson_cache/component/cJSON"' in text and variable in text,
                 f"{label}: exact locked-cJSON source/sanitizer contract drifted")
     require(release_test.count(EXACT_TARGET_LOOP) == 1,
             "test-release-contract.sh: signer verification loop must cover exactly four targets")
@@ -1483,8 +1483,11 @@ def self_test(root: Path) -> None:
          "MQTT_JSON_SANITIZE=1 bash ./test/run-mqtt-json-publish-tests.sh",
          "true", "required stage is missing"),
         ("cjson-pin", "test/run-cjson-oom-tests.sh",
-         'cjson_upstream="https://github.com/DaveGamble/cJSON.git"',
-         'cjson_upstream="https://example.invalid/cJSON.git"', "locked-cJSON source"),
+         'cjson_registry="https://components.espressif.com/"',
+         'cjson_registry="https://example.invalid/"', "locked-cJSON source"),
+        ("cjson-hash-bind", "test/run-mqtt-json-publish-tests.sh",
+         'if component_hash(component) != expected:',
+         'if False:', "locked-cJSON source"),
     )
     for name, relative, old, new, expected in mutations:
         with tempfile.TemporaryDirectory(prefix=f"build-gate-{name}-") as directory:

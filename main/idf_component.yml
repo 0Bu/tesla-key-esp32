@@ -12,14 +12,17 @@ dependencies:
     git: "https://github.com/espressif/esp-protocols.git"
     path: "components/mdns"
     version: "mdns-v1.13.1"
-  # idf-extra-components publishes cjson without Git tags; this commit is the 1.7.19~2 release.
+  # cjson and mqtt are the exceptions: each carries a Git submodule (upstream cJSON; the paho
+  # MQTT test broker), and a Git resolution hashes that submodule's `.git` gitlink, whose
+  # `gitdir:` path depends on where the Component Manager cache sits relative to the project.
+  # Such a lock hash only verifies on the machine that wrote it; everywhere else the build rejects
+  # the checkout as corrupted. Their registry releases are fixed archives built from the same
+  # sources (cjson: idf-extra-components 1387cec, cjson/ unchanged since 0f5afa2; mqtt: esp-mqtt
+  # v1.1.0 = 1a1e578), pinned by exact version and component hash in every lockfile.
   espressif/cjson:
-    git: "https://github.com/espressif/idf-extra-components.git"
-    path: "cjson"
-    version: "0f5afa2f5be33f4f4979238041d5c38f3694ed13"
+    version: "==1.7.19~2"
   espressif/mqtt:
-    git: "https://github.com/espressif/esp-mqtt.git"
-    version: "v1.1.0"
+    version: "==1.1.0"
   # Tag w5500@v1.0.1. Only esp32s3 compiles the W5500 transport (CONFIG_TESLA_ETH_ENABLED, see
   # main/Kconfig.projbuild), so only its lockfile resolves the driver. 1.x keeps the flat
   # eth_w5500_config_t the firmware uses; 2.x nests it and adds a wiznet_common dependency.

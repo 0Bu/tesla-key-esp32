@@ -39,8 +39,10 @@ task touches them:
   silently skip one. `scripts/ci-build-all.sh` is the four-target CI entry point.
 - [`esp-idf-toolchain.txt`](esp-idf-toolchain.txt) pins ESP-IDF **v6.1** and its container digest.
   Use the repository wrappers; do not substitute a host IDF or move to another ESP-IDF line as part
-  of an unrelated task. ESP-IDF 6 no longer bundles cJSON, MQTT or the W5500 driver: they are
-  commit-pinned Espressif Git components in the same manifest and per-target lockfiles.
+  of an unrelated task. ESP-IDF 6 no longer bundles cJSON, MQTT or the W5500 driver: W5500 and
+  mDNS are commit-pinned Espressif Git components, while cJSON and MQTT, whose Git trees carry
+  submodules, are exact registry releases, all pinned by component hash in the same manifest and
+  per-target lockfiles.
 - [`main/idf_component.yml`](main/idf_component.yml) pins `yoziru/tesla-ble` **v5.2.0**.
   [`patches/tesla-ble/`](patches/tesla-ble/) is an ordered, hash-checked, fail-closed local series:
   unused Parental Controls trim, signer.go session-counter replay alignment and the PSA Crypto

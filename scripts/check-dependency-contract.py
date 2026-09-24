@@ -24,7 +24,7 @@ TESLA_GIT = "https://github.com/yoziru/tesla-ble.git"
 TESLA_VERSION = "v5.2.0"
 TESLA_RESOLVED_COMMIT = "07a4ef503a52f736009fdeba953f185aecc863f3"
 TESLA_COMPONENT_HASH = "fb55938820781e8a731fc1557c0c4542bbf6833729062cfdb86a978b07016025"
-LOCK_MANIFEST_HASH = "f8c6e2e53ea622a8ae4c853930386a416ed5d99e23bea38862add71af5538228"
+LOCK_MANIFEST_HASH = "53e09d74068ad481d414bea246a46413be72e4638f19fa7733365f82bd057615"
 # The host harness proves the PSA crypto port (patch 0006) against the exact Mbed TLS the firmware
 # links. Its literal must equal this pin, and inside the pinned image (--idf-path) so must ESP-IDF's
 # mbedtls submodule, so an IDF bump cannot leave that proof running on stale crypto.
@@ -37,11 +37,11 @@ IDF_MBEDTLS_SUBMODULE = "components/mbedtls/mbedtls"
 # silently rewrite an otherwise semantically plausible lock.
 FILE_DIGESTS = {
     "esp-idf-toolchain.txt": "6ef2f1d9c15bb269430cbb4530d689022d914b12ac8610b539d4ac00d148d84f",
-    "main/idf_component.yml": "38f04c6bad575380fb74e8332b6e83c9364fd3fe4d7faadc54c0bd2807bee0ea",
-    "dependencies.lock.esp32": "716df297cd741f29817238c8906f0726ed857108e487ac0588b480fee51bb04b",
-    "dependencies.lock.esp32s3": "588529fc1fff40308be491e46793a8866b4c5bb9dd6e174df1ea292531260746",
-    "dependencies.lock.esp32c3": "1b4930f5bccdcbfd0b934e15a3c98256ceabe9bf5962cf8115709e52988851b0",
-    "dependencies.lock.esp32c6": "97918b2afccf62097cf06b8d1762a110e5cad911d119a76d1c133e8675acdead",
+    "main/idf_component.yml": "3a67e0bf4d5896ab0a3336b14379e3208a3e9ca712e4b00dbc465b27015820ab",
+    "dependencies.lock.esp32": "fb26215222e0d3330e72145588e7130996526b8f50008955c95ff18b8280fedc",
+    "dependencies.lock.esp32s3": "e6f38bc6ceb30c8b5daa0013e3b00113beb2306e4eb9d52e5024ad2f91104a04",
+    "dependencies.lock.esp32c3": "a125473e8928fb944eec32112d62b0a74be6a85d51cb8ba439ca6a6a48f244ac",
+    "dependencies.lock.esp32c6": "d2178f0834e6091199c6b7595d4bce38f9a211a9edfbbe9541da1ed96d1bf549",
 }
 PATCH_INVENTORY = (
     (
@@ -60,18 +60,24 @@ PATCH_INVENTORY = (
 # Espressif components resolved from their GitHub release sources: (name, repository, path in the
 # repository, manifest ref, resolved commit, component hash, IDF requirement, targets).
 ESPRESSIF_COMPONENTS = (
-    ("espressif/cjson", "https://github.com/espressif/idf-extra-components.git", "cjson",
-     "0f5afa2f5be33f4f4979238041d5c38f3694ed13", "0f5afa2f5be33f4f4979238041d5c38f3694ed13",
-     "0963dafe0178ec0a1d423d309d944268bba434441741d667c78dc6043f113519", ">=5.0", TARGETS),
     ("espressif/mdns", "https://github.com/espressif/esp-protocols.git", "components/mdns",
      "mdns-v1.13.1", "d61a590e07e0df4c66e7ac43feeceb0f1e0866f9",
      "424ec62b386bdfc522466053dab9b06ff389539bfa3da7632f32ef033874ef80", ">=5.0", TARGETS),
-    ("espressif/mqtt", "https://github.com/espressif/esp-mqtt.git", ".",
-     "v1.1.0", "1a1e5788a5cf57a0f44a3c6c061407f6c9be1026",
-     "8ffa5f4b6e2c522df53b552acfd31abb38215ec9432680ea196442f54ff960ec", ">=5.3", TARGETS),
     ("espressif/w5500", "https://github.com/espressif/esp-eth-drivers.git", "w5500",
      "1f19456ec90b60424583a4138c075a78e1ab2297", "1f19456ec90b60424583a4138c075a78e1ab2297",
      "ef3e00d7f747f8a7b1792a3d3987122bb47dc33f948417b914e494986cb16322", ">=6.0", ("esp32s3",)),
+)
+# Espressif components that carry a Git submodule resolve from the component registry instead: a
+# Git resolution hashes the submodule's `.git` gitlink, whose `gitdir:` path depends on where the
+# Component Manager cache sits, so its lock hash verifies only on the machine that wrote it. The
+# registry archive is fixed bytes. (name, resolved version, component hash, IDF requirement,
+# targets); the manifest pins each as "==<version>".
+REGISTRY_URL = "https://components.espressif.com/"
+ESPRESSIF_REGISTRY_COMPONENTS = (
+    ("espressif/cjson", "1.7.19~2",
+     "e788323270d90738662d66fffa910bfe1fba019bba087f01557e70c40485b469", ">=5.0", TARGETS),
+    ("espressif/mqtt", "1.1.0",
+     "fb18bc3b65aa8c94693a9811ffc322cca8a65d92d5ec84983d3e385080e3969c", ">=5.3", TARGETS),
 )
 MANIFEST_LOGICAL_LINES = (
     "dependencies:",
@@ -81,12 +87,9 @@ MANIFEST_LOGICAL_LINES = (
     '    path: "components/mdns"',
     '    version: "mdns-v1.13.1"',
     "  espressif/cjson:",
-    '    git: "https://github.com/espressif/idf-extra-components.git"',
-    '    path: "cjson"',
-    '    version: "0f5afa2f5be33f4f4979238041d5c38f3694ed13"',
+    '    version: "==1.7.19~2"',
     "  espressif/mqtt:",
-    '    git: "https://github.com/espressif/esp-mqtt.git"',
-    '    version: "v1.1.0"',
+    '    version: "==1.1.0"',
     "  espressif/w5500:",
     '    git: "https://github.com/espressif/esp-eth-drivers.git"',
     '    path: "w5500"',
@@ -134,9 +137,25 @@ def espressif_lock_block(name: str, git: str, path: str, commit: str, component_
     )
 
 
+def registry_lock_block(name: str, version: str, component_hash: str, idf_requirement: str) -> str:
+    return (
+        f"  {name}:\n"
+        f"    component_hash: {component_hash}\n"
+        "    dependencies:\n"
+        "    - name: idf\n"
+        "      require: private\n"
+        f"      version: '{idf_requirement}'\n"
+        "    source:\n"
+        f"      registry_url: {REGISTRY_URL}\n"
+        "      type: service\n"
+        f"    version: {version}\n"
+    )
+
+
 def direct_dependencies(target: str) -> str:
     names = sorted(
         [name for name, *_, targets in ESPRESSIF_COMPONENTS if target in targets]
+        + [name for name, *_, targets in ESPRESSIF_REGISTRY_COMPONENTS if target in targets]
         + ["idf", "yoziru/tesla-ble"]
     )
     return "direct_dependencies:\n" + "".join(f"- {name}\n" for name in names)
@@ -246,6 +265,15 @@ def validate(root: Path) -> None:
             else:
                 require(f"  {name}:\n" not in lock_text,
                         f"{relative}: {name} must resolve only for {', '.join(targets)}")
+        for name, version, component_hash, idf_requirement, targets in (
+                ESPRESSIF_REGISTRY_COMPONENTS):
+            block = registry_lock_block(name, version, component_hash, idf_requirement)
+            if target in targets:
+                require(lock_text.count(block) == 1,
+                        f"{relative}: {name} resolved version/component hash/registry source drifted")
+            else:
+                require(f"  {name}:\n" not in lock_text,
+                        f"{relative}: {name} must resolve only for {', '.join(targets)}")
         require(lock_text.count(f"target: {target}\n") == 1,
                 f"{relative}: lock target must be exactly {target}")
         require(lock_text.count(f"manifest_hash: {LOCK_MANIFEST_HASH}\n") == 1,
@@ -329,6 +357,20 @@ def self_test(root: Path) -> None:
                                   "https://github.com/espressif/esp-eth-drivers.git",
                                   "https://example.invalid/esp-eth-drivers.git"),
          "espressif/w5500 resolved commit"),
+        ("manifest-registry-version", text("main/idf_component.yml", '"==1.7.19~2"',
+                                           '"^1.7.19"'), "Espressif-component"),
+        ("registry-version", text("dependencies.lock.esp32", "version: 1.7.19~2\n",
+                                  "version: 1.7.19~1\n"), "espressif/cjson resolved version"),
+        ("registry-hash", text("dependencies.lock.esp32c6",
+                               "fb18bc3b65aa8c94693a9811ffc322cca8a65d92d5ec84983d3e385080e3969c",
+                               "0" * 64), "espressif/mqtt resolved version"),
+        ("registry-to-git", text("dependencies.lock.esp32s3",
+                                 f"      registry_url: {REGISTRY_URL}\n      type: service\n"
+                                 "    version: 1.1.0\n",
+                                 "      git: https://github.com/espressif/esp-mqtt.git\n"
+                                 "      path: .\n      type: git\n"
+                                 "    version: 1a1e5788a5cf57a0f44a3c6c061407f6c9be1026\n"),
+         "espressif/mqtt resolved version"),
         ("w5500-other-target", text("dependencies.lock.esp32c6", "  idf:\n",
                                     "  espressif/w5500:\n    version: 1\n  idf:\n"),
          "espressif/w5500 must resolve only for esp32s3"),
@@ -404,7 +446,8 @@ def main() -> int:
     print(
         "dependency-contract: PASS "
         f"(ESP-IDF v6.1, {len(TARGETS)} locks, tesla-ble {TESLA_VERSION}, "
-        f"{len(ESPRESSIF_COMPONENTS)} Espressif Git components, "
+        f"{len(ESPRESSIF_COMPONENTS)} Espressif Git + "
+        f"{len(ESPRESSIF_REGISTRY_COMPONENTS)} registry components, "
         f"{len(PATCH_INVENTORY)} patches"
         + (", image Mbed TLS = harness" if args.idf_path is not None else "")
         + (", mutation canaries" if args.self_test else "")

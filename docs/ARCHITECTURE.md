@@ -1340,7 +1340,8 @@ until all stack emitters have unwound, then discards the whole tree instead of l
 HTTP-200/MCP result. REST and MCP serialize through the same `json_http_reply` production seam;
 it does not apply a success status or send until printing completed, and print OOM sets 503 before
 the one fixed fallback send. `test/run-cjson-oom-tests.sh` compiles the exact cJSON source of the
-`espressif/cjson` commit the target lockfiles pin (ESP-IDF 6 no longer bundles cJSON) and fails every
+`espressif/cjson` registry release the target lockfiles pin, re-hashed against the locked component
+hash (ESP-IDF 6 no longer bundles cJSON), and fails every
 allocation in the production status emitter, representative
 REST/MCP envelopes, their shared reply seam and the parser;
 the MQTT companion does the same for retained discovery/state payloads and broker failures. The

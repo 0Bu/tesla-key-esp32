@@ -183,8 +183,8 @@ The suite also has gates outside the single pure-logic translation unit:
   `LIBRARY_PATH` are rejected by presence even when empty; extra flags are overwritten, every
   caller `CCACHE_*` is rejected and IDF ccache is forced to exactly `0` before self-test.
 - `test/run-cjson-oom-tests.sh` compiles the exact cJSON source the firmware links (the
-  `espressif/cjson` commit all four lockfiles pin, and the upstream cJSON commit its submodule
-  gitlink names; ESP-IDF 6 no longer bundles cJSON) and injects every
+  `espressif/cjson` registry release all four lockfiles pin, fetched and re-hashed against the
+  locked component hash on every run; ESP-IDF 6 no longer bundles cJSON) and injects every
   nth allocation failure through the production `/status` emitter, representative REST/MCP
   envelopes, the real `tools/list` and vehicle-state double-print producers, their shared production
   print/send seam and the parser. It proves bounded status-emitter depth/underflow/finalization,
@@ -223,8 +223,9 @@ The suite also has gates outside the single pure-logic translation unit:
   1024 B when present. Missing-task and one-byte-headroom mutations prove these are enforced policy
   margins, not implied hardware evidence.
 - `scripts/check-dependency-contract.py` byte-pins the IDF image, four lockfiles, resolved
-  tesla-ble identity, the commit-pinned Espressif Git components (cJSON, mDNS, MQTT, and W5500 on
-  esp32s3 only) and ordered patch series. It also pins the harness `MBEDTLS_REF`; inside the pinned
+  tesla-ble identity, the commit-pinned Espressif Git components (mDNS, and W5500 on esp32s3
+  only), the exact registry releases of cJSON and MQTT (their Git trees carry submodules, whose
+  gitlinks make a Git lock hash machine-specific) and ordered patch series. It also pins the harness `MBEDTLS_REF`; inside the pinned
   image (`--idf-path`, from `ci-build-all.sh`) ESP-IDF's mbedtls submodule must be that commit. `scripts/check-otadata-contract.py` requires the
   initial OTA partition to be exactly `0x2000` erased bytes; the merged-layout gate additionally
   rejects overlaps, non-erased gaps (including NVS), trailing bytes and any skipped target loop.
