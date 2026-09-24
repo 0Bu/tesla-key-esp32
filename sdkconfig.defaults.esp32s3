@@ -53,6 +53,7 @@ CONFIG_TESLA_ETH_SPI_MOSI=8
 # but these stack-through headers are short unshielded runs.
 CONFIG_TESLA_ETH_SPI_CLOCK_MHZ=20
 # The ATOMIC PoE Base routes only SCLK/CS/MISO/MOSI + power — no INT line — so the driver polls.
-# ESP-IDF ships a CI configuration for exactly this (sdkconfig.ci.poll_w5500, also 10 ms).
+# Polling is a first-class mode of the espressif/w5500 driver, which accepts exactly one of an
+# interrupt GPIO or a poll period (esp_eth_mac_new_w5500).
 CONFIG_TESLA_ETH_POLL_MS=10
 CONFIG_TESLA_ETH_WAIT_S=20

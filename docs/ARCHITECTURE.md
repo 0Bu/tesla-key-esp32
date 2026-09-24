@@ -970,8 +970,8 @@ INT line and no RST line to wire — so the driver polls at `CONFIG_TESLA_ETH_PO
 the PHY is reset over SPI (the W5500's `MR` register) instead of by a strobe. Waveshare exposes
 INT/RST, but this shared path leaves those auxiliary lines untouched. Any future candidate must
 audit every SPI and auxiliary pin against earlier candidates before it may join the ordered probe.
-ESP-IDF ships a CI configuration for exactly this polling shape
-(`components/esp_eth/test_apps/sdkconfig.ci.poll_w5500`, also 10 ms at 20 MHz). The poll period
+Polling is a first-class driver mode: the `espressif/w5500` constructor (`esp_eth_mac_new_w5500`)
+accepts exactly one of an interrupt GPIO or a poll period and rejects any other combination. The poll period
 bounds RX *latency*, not throughput: each poll drains everything queued in the W5500's 16 KB
 buffer. ESP-IDF **6 moved the SPI Ethernet drivers out of the core** into `esp-eth-drivers`: the
 W5500 MAC/PHY now comes from the `espressif/w5500` component, which `main/idf_component.yml` pins to a
