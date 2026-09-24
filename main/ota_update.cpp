@@ -394,25 +394,23 @@ static bool http_get_to_buffer(const char* url, std::string& out) {
 
 // ─── Check for a newer release ──────────────────────────────────────────────────
 
-[[gnu::noinline]] static std::string resolve_manifest_url(unsigned pr_number) {
+[[gnu::noinline]] static const char* resolve_manifest_url_into(unsigned pr_number, std::string& out) {
     if (pr_number > 0) {
         char buf[80];
         if (tk::format_pr_manifest_url(pr_number, buf, sizeof(buf))) {
-            return std::string(buf);
+            out = buf;
+            return out.c_str();
         }
     }
-    return std::string(CONFIG_TESLA_OTA_MANIFEST_URL);
+    return CONFIG_TESLA_OTA_MANIFEST_URL;
 }
 
 OtaCheckResult ota_check(unsigned pr_number) {
     OtaCheckResult res{};
     res.target_pr = pr_number;
-    const std::string_view current = running_version();
-    res.current.assign(current.data(), current.size());
+    res.current = running_version();
 
-    const std::string manifest_url_holder = resolve_manifest_url(pr_number);
-    const char* manifest_url = manifest_url_holder.c_str();
-
+    const char* manifest_url = resolve_manifest_url_into(pr_number, res.reason);
     ESP_LOGI(TAG, "checking %s (running %s)", manifest_url, res.current.c_str());
 
     std::string body;
