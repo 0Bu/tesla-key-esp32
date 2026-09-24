@@ -1148,7 +1148,7 @@ def run_build_efficiency(args: argparse.Namespace) -> int:
     print("<build-efficiency-context>")
     print("Report-only: inspect the latest completed main build for cache hit rate, duration, artifacts, and target sizes.")
     print("SessionStart must not create issues, branches, commits, or draft PRs; any mutation needs an explicit user request.")
-    print("Use the pinned ESP-IDF 5.5.5 Docker entrypoints and keep esp32/esp32s3/esp32c3/esp32c6/esp32c5 evidence separate.")
+    print("Use the pinned ESP-IDF 5.5.5 Docker entrypoints and keep esp32/esp32s3/esp32c3/esp32c6 evidence separate.")
     print("</build-efficiency-context>")
     return 0
 

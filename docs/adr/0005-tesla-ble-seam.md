@@ -74,12 +74,12 @@ The native `tk::RxFramer` reassembly implementation covers the critical framing 
 
 ADR-0003 introduced patch 0001 to drop replayed CarServer responses. However, as noted in Issue #306, ADR-0003 only blocked replayed messages where `response_counter > 0`. Plaintext or unauthenticated CarServer responses (`response_counter == 0`) remained open to attribution confusion in `vehicle.cpp`. Under the new dispatcher model, every response must match an active request by UUID (or be an allowed empty-UUID VCSEC broadcast). Thus, ADR-0003 is formally **superseded** by this ADR.
 
-### 4. Relationship to ADR-0002 and Issues #61 / #65
+### 4. Relationship to ADR-0002 and Issue #61
 
 This architecture leaves `crypto_context.cpp` and `peer.cpp` upstream in `yoziru/tesla-ble`. It does not move cryptographic operations into the firmware. Consequently:
-- It is fully complementary to ADR-0002 and Issues #61/#65 (the future ESP-IDF 6.x / Mbed TLS 4 / PSA crypto migration).
-- Dropping `vehicle.cpp` simplifies any future PSA bridge fork by reducing the patch footprint.
-- Issues #61 and #65 remain **OPEN** and tracking the upstream crypto seam.
+- It is fully complementary to ADR-0002 and Issue #61 (the future ESP-IDF 6.x / Mbed TLS 4 / PSA crypto migration).
+- Dropping `vehicle.cpp` simplifies any future PSA bridge (a fork or a repository-owned patch in `patches/tesla-ble/`) by reducing the patch footprint.
+- Issue #61 remains **OPEN** and tracks the upstream crypto seam. Issue #65 (the PSA-port evaluation) was closed as not planned on 2026-09-23; its findings are folded into #61.
 
 ### 5. Delivered Architecture and Patch Retirement
 
