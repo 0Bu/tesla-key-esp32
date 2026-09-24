@@ -25,8 +25,9 @@ TESLA_VERSION = "v5.2.0"
 TESLA_RESOLVED_COMMIT = "07a4ef503a52f736009fdeba953f185aecc863f3"
 TESLA_COMPONENT_HASH = "fb55938820781e8a731fc1557c0c4542bbf6833729062cfdb86a978b07016025"
 LOCK_MANIFEST_HASH = "53e09d74068ad481d414bea246a46413be72e4638f19fa7733365f82bd057615"
-# The host harness proves the PSA crypto port (patch 0006) against the exact Mbed TLS the firmware
-# links. Its literal must equal this pin, and inside the pinned image (--idf-path) so must ESP-IDF's
+# The host harness proves the PSA crypto port (patch 0006) against the Mbed TLS commit the firmware
+# links (the host builds its builtin software drivers; the firmware sends AES-GCM through the ESP PSA
+# driver). Its literal must equal this pin, and inside the pinned image (--idf-path) so must ESP-IDF's
 # mbedtls submodule, so an IDF bump cannot leave that proof running on stale crypto.
 MBEDTLS_COMMIT = "a2b32072ea898afc1ed5b6caf6931e36028c91d6"
 HARNESS_SCRIPT = "scripts/test-tesla-ble-harness.sh"
@@ -54,7 +55,7 @@ PATCH_INVENTORY = (
     ),
     (
         "0006-port-crypto-bindings-to-psa.patch",
-        "eaf4b76ad7c192e385f7c2f8c1867bc64d0c61e7e2ae8ed7a67d14a34f0d2a2d",
+        "bbb6286e87da20dc2778d6de9f19ae25292ab786d246e5120831db5cc6273886",
     ),
 )
 # Espressif components resolved from their GitHub release sources: (name, repository, path in the

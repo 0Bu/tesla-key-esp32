@@ -302,7 +302,7 @@
           "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: static void VehicleController::loop_task_fn_(void*)": 576,
           "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: void VehicleController::handle_carserver_frame_(const UniversalMessage_RoutableMessage&)": 2048,
           "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: void VehicleController::handle_session_info_frame_(const UniversalMessage_RoutableMessage&)": 272,
-          "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: void VehicleController::handle_vcsec_frame_(const UniversalMessage_RoutableMessage&)": 800,
+          "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: void VehicleController::handle_vcsec_frame_(const UniversalMessage_RoutableMessage&)": 816,
           "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: void VehicleController::process_ble_host_events_()": 544,
           "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: void VehicleController::process_pending_telemetry_()": 1408,
           "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: void VehicleController::process_rx_frame_(const uint8_t*, size_t)": 800
@@ -403,7 +403,7 @@
           "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: static void VehicleController::loop_task_fn_(void*)": 576,
           "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: void VehicleController::handle_carserver_frame_(const UniversalMessage_RoutableMessage&)": 2048,
           "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: void VehicleController::handle_session_info_frame_(const UniversalMessage_RoutableMessage&)": 272,
-          "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: void VehicleController::handle_vcsec_frame_(const UniversalMessage_RoutableMessage&)": 800,
+          "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: void VehicleController::handle_vcsec_frame_(const UniversalMessage_RoutableMessage&)": 816,
           "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: void VehicleController::process_ble_host_events_()": 544,
           "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: void VehicleController::process_pending_telemetry_()": 1408,
           "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: void VehicleController::process_rx_frame_(const uint8_t*, size_t)": 800

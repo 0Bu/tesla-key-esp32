@@ -15,8 +15,11 @@
 //              by test/tesla_protocol_vectors.test.mjs.
 // Part D (V1): protocol-vector known answers from teslamotors/vehicle-command pkg/protocol
 //              protocol.md, run through the PSA-ported crypto bindings the firmware links: P-256
-//              key import, ECDH session key, session-info HMAC, AES-GCM request/response, the VIN
-//              BLE name, PEM round trips (the NVS key format) and the firmware key fingerprint.
+//              key import, ECDH session key, session-info HMAC and tag, AES-GCM request/response
+//              (response metadata bound to the response's own counter), the VIN BLE name, PEM
+//              round trips (the NVS key format) and the firmware key fingerprint. The fingerprint
+//              runs through a mirror of VehicleController::compute_key_fingerprint_(), which is IDF
+//              code; the helpers listed above for parts A and B are the production ones.
 //              test/tesla_protocol_vectors.test.mjs pins the same vectors independently of the
 //              library; this part proves the patched library reproduces them.
 
@@ -160,6 +163,13 @@ constexpr const char* kPlaintext = "120452020801";
 constexpr const char* kCiphertext = "38038e8c0f2e";
 constexpr const char* kTag = "c228e0ff64991481db3a7bbc133696c5";
 constexpr const char* kSessionInfoKey = "fceb679ee7bca756fcd441bf238bf2f338629b41d9eb9c67be1b32c9672ce300";
+// protocol.md, "Session info" example response: the serialized SessionInfo, the request UUID it
+// answers, and the HMAC-SHA256 session_info_tag the vehicle sends with it.
+constexpr const char* kSessionInfo =
+    "0806124104c7a1f47138486aa4729971494878d33b1a24e39571f748a6e16c5955b3d877d3a6aaa0e955166474af5d32c410f439a22341"
+    "37ad1bb085fd4e8813c958f11d971a104c463f9cc0d3d26906e982ed224adde6255a0a0000";
+constexpr const char* kSessionInfoRequestUuid = "1588d5a30eabc6f8fc9a951b11f6fd11";
+constexpr const char* kSessionInfoTag = "996c1fe38331be138f8039c194b14db2198846ed7d8251e6749284d7b32ea002";
 
 std::vector<uint8_t> unhex(const char* text) {
     std::vector<uint8_t> out;
@@ -522,31 +532,68 @@ int main() {
                "Peer::encrypt diverges from reference AES-GCM");
     }
     {
+        // A response sealed the way the vehicle seals it: the metadata of protocol.md "Response
+        // metadata", serialized here independently of the library, carries the RESPONSE's counter.
+        // The vehicle counts responses per request (VCSEC sends up to three), so that counter need not
+        // equal the request counter the peer holds; vehicle-command's Signer.Decrypt binds the AAD to
+        // the counter the response carries. Response 4 answers while the peer's request counter is 7.
         auto context = kat::loaded_client_context();
         Peer peer(UniversalMessage_Domain_DOMAIN_INFOTAINMENT, context, tc::TEST_VIN);
         const uint8_t request_hash[17] = {0x05, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16};
         const uint32_t flags = 1;
         const uint32_t fault = 0;
+        const uint32_t response_counter = 4;
+        const uint32_t request_counter = 7;
+        const char* const expected_metadata =
+            "000109"                                  // TAG_SIGNATURE_TYPE: SIGNATURE_TYPE_AES_GCM_RESPONSE
+            "010103"                                  // TAG_DOMAIN: DOMAIN_INFOTAINMENT
+            "021135594a3330313233343536373839414243"  // TAG_PERSONALIZATION: the VIN
+            "050400000004"                            // TAG_COUNTER: the response's own counter
+            "070400000001"                            // TAG_FLAGS: the response's flags, always present
+            "081105010203040506070809"                // TAG_REQUEST_HASH: method byte + request tag
+            "0a0b0c0d0e0f10"
+            "090400000000"                            // TAG_FAULT
+            "ff";                                     // TAG_END
+        bool ready = context && peer.load_tesla_key(tc::EXPECTED_VEHICLE_PUBLIC_KEY, 65) == TeslaBLE_Status_E_OK;
+        peer.set_counter(request_counter);
         uint8_t ad[80];
         size_t ad_size = 0;
-        const bool ready =
-            context && peer.load_tesla_key(tc::EXPECTED_VEHICLE_PUBLIC_KEY, 65) == TeslaBLE_Status_E_OK &&
-            peer.construct_ad_buffer(Signatures_SignatureType_SIGNATURE_TYPE_AES_GCM_RESPONSE, tc::TEST_VIN, 0,
-                                     ad, &ad_size, flags, request_hash, sizeof request_hash, fault) == 0;
+        ready = ready && peer.get_counter() == request_counter &&
+                peer.construct_response_ad_buffer(response_counter, ad, &ad_size, flags, request_hash,
+                                                  sizeof request_hash, fault) == TeslaBLE_Status_E_OK;
+        expect(ready && kat::hex(ad, ad_size) == expected_metadata,
+               "response metadata matches protocol.md and carries the response's own counter",
+               "response metadata diverges from protocol.md");
+        expect(peer.construct_ad_buffer(Signatures_SignatureType_SIGNATURE_TYPE_AES_GCM_RESPONSE, tc::TEST_VIN, 0,
+                                        ad, &ad_size, flags, request_hash, sizeof request_hash,
+                                        fault) == TeslaBLE_Status_E_ERROR_INVALID_PARAMS,
+               "request metadata builder refuses the response type (no request counter in a response AAD)",
+               "request metadata builder still builds response metadata from the request counter");
+
         const auto nonce = kat::unhex("0102030405060708090a0b0c");
         const auto response = kat::unhex("0a0548656c6c6f1001");
-        const auto sealed = kat::gcm_encrypt(tc::EXPECTED_SESSION_KEY, nonce,
-                                             kat::sha256(std::vector<uint8_t>(ad, ad + ad_size)), response);
+        const auto sealed =
+            kat::gcm_encrypt(tc::EXPECTED_SESSION_KEY, nonce, kat::sha256(kat::unhex(expected_metadata)), response);
         uint8_t out[64];
         size_t out_size = 0;
         const bool opened =
             ready && sealed.size() == response.size() + 16 &&
             peer.decrypt_response(sealed.data(), response.size(), nonce.data(), sealed.data() + response.size(),
-                                  request_hash, sizeof request_hash, flags, fault, out, sizeof out,
+                                  request_hash, sizeof request_hash, flags, fault, response_counter, out, sizeof out,
                                   &out_size) == TeslaBLE_Status_E_OK &&
             out_size == response.size() && std::memcmp(out, response.data(), response.size()) == 0;
-        expect(opened, "decrypt_response opens a reference-sealed response",
-               "decrypt_response rejected a reference-sealed response");
+        expect(opened, "decrypt_response opens a vehicle-sealed response whose counter differs from the request's",
+               "decrypt_response rejected a vehicle-sealed response");
+
+        // The unported library built this AAD from its own request counter. With the tag now
+        // verified, that choice refuses the same authentic response.
+        const bool request_counter_refused =
+            ready && peer.decrypt_response(sealed.data(), response.size(), nonce.data(),
+                                           sealed.data() + response.size(), request_hash, sizeof request_hash, flags,
+                                           fault, request_counter, out, sizeof out,
+                                           &out_size) == TeslaBLE_Status_E_ERROR_DECRYPT;
+        expect(request_counter_refused, "an AAD built from the request counter does not verify that response",
+               "an AAD built from the request counter verified a response sealed with another counter");
 
         std::vector<uint8_t> bad_tag(sealed.begin() + static_cast<std::ptrdiff_t>(response.size()), sealed.end());
         if (!bad_tag.empty()) bad_tag[0] ^= 0x01;
@@ -554,12 +601,35 @@ int main() {
         const bool refused =
             ready && bad_tag.size() == 16 &&
             peer.decrypt_response(sealed.data(), response.size(), nonce.data(), bad_tag.data(), request_hash,
-                                  sizeof request_hash, flags, fault, out, sizeof out,
+                                  sizeof request_hash, flags, fault, response_counter, out, sizeof out,
                                   &out_size) == TeslaBLE_Status_E_ERROR_DECRYPT;
         bool wiped = true;
         for (size_t i = 0; i < response.size(); ++i) wiped = wiped && out[i] == 0;
         expect(refused && wiped, "tampered tag is refused and no unauthenticated plaintext is left behind",
                "tampered tag was accepted or left plaintext in the output buffer");
+    }
+    {
+        // protocol.md's session-info example through the library's own verification path: ECDH with
+        // the vehicle key in SessionInfo, the session-info key, and HMAC-SHA256 over the HMAC
+        // metadata (VIN, request UUID as challenge) followed by the serialized SessionInfo.
+        Client client;
+        client.set_vin(tc::TEST_VIN);
+        const auto info_bytes = kat::unhex(kat::kSessionInfo);
+        const auto uuid = kat::unhex(kat::kSessionInfoRequestUuid);
+        auto tag = kat::unhex(kat::kSessionInfoTag);
+        Signatures_SessionInfo info = Signatures_SessionInfo_init_default;
+        pb_istream_t in = pb_istream_from_buffer(info_bytes.data(), info_bytes.size());
+        const bool decoded = client.load_private_key(kat::client_pem(), kat::client_pem_size()) == 0 &&
+                             pb_decode(&in, Signatures_SessionInfo_fields, &info);
+        const bool accepted = decoded && client.verify_session_info_tag(info, info_bytes.data(), info_bytes.size(),
+                                                                        uuid.data(), uuid.size(), tag.data(),
+                                                                        tag.size());
+        tag[0] ^= 0x01;
+        const bool refused = decoded && !client.verify_session_info_tag(info, info_bytes.data(), info_bytes.size(),
+                                                                        uuid.data(), uuid.size(), tag.data(),
+                                                                        tag.size());
+        expect(accepted && refused, "session-info tag verifies against the official vector; a flipped bit is refused",
+               "session-info tag verification diverges from the official vector");
     }
     expect(get_vin_advertisement_name("5YJS0000000000000") == "S1a87a5a75f3df858C",
            "VIN BLE name matches the official vector", "VIN BLE name does not match the official vector");

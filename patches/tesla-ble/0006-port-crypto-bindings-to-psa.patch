@@ -94,6 +94,77 @@ index 5d5a808..0705521 100644
  
    /**
     * @brief Calculate SHA1 hash
+diff --git a/include/peer.h b/include/peer.h
+index 04bcc4a..38077c9 100644
+--- a/include/peer.h
++++ b/include/peer.h
+@@ -83,7 +83,7 @@ class Peer {
+ 
+   // Session operations
+   uint32_t generate_expires_at(int seconds) const;
+-  void generate_nonce(pb_byte_t *nonce) const;
++  int generate_nonce(pb_byte_t *nonce) const;
+   int load_tesla_key(const uint8_t *public_key_buffer, size_t public_key_size);
+   int update_session(Signatures_SessionInfo *session_info);
+ 
+@@ -108,11 +108,20 @@ class Peer {
+   void set_is_valid(bool valid) { is_valid_ = valid; }
+ 
+   // Cryptographic operations
++  // Request metadata: TAG_COUNTER is this peer's request counter. A response type is refused, because
++  // response metadata carries the counter from the response itself (construct_response_ad_buffer).
+   int construct_ad_buffer(Signatures_SignatureType signature_type, const char *vin, uint32_t expires_at,
+                           pb_byte_t *output_buffer, size_t *output_length, uint32_t flags = 0,
+                           const pb_byte_t *request_hash = nullptr, size_t request_hash_length = 0,
+                           uint32_t fault = 0) const;
+ 
++  // Response metadata (protocol.md "Response metadata"), bound to the counter the response carries in
++  // AES_GCM_Response_data.counter, as vehicle-command's Signer.Decrypt does. The vehicle keeps a
++  // response counter per request, so it need not equal the counter of the request it answers.
++  int construct_response_ad_buffer(uint32_t response_counter, pb_byte_t *output_buffer, size_t *output_length,
++                                   uint32_t flags, const pb_byte_t *request_hash, size_t request_hash_length,
++                                   uint32_t fault) const;
++
+   int encrypt(pb_byte_t *input_buffer, size_t input_buffer_length, pb_byte_t *output_buffer,
+               size_t output_buffer_length, size_t *output_length, pb_byte_t *signature_buffer, pb_byte_t *ad_buffer,
+               size_t ad_buffer_length, pb_byte_t nonce[NONCE_SIZE_BYTES]) const;
+@@ -121,9 +130,11 @@ class Peer {
+   int construct_request_hash(Signatures_SignatureType auth_type, const pb_byte_t *auth_tag, size_t auth_tag_length,
+                              pb_byte_t *request_hash, size_t *request_hash_length) const;
+ 
++  // counter is the response's AES_GCM_Response_data.counter; the tag is verified against it.
+   int decrypt_response(const pb_byte_t *input_buffer, size_t input_length, const pb_byte_t *nonce, const pb_byte_t *tag,
+                        const pb_byte_t *request_hash, size_t request_hash_length, uint32_t flags, uint32_t fault,
+-                       pb_byte_t *output_buffer, size_t output_buffer_length, size_t *output_length) const;
++                       uint32_t counter, pb_byte_t *output_buffer, size_t output_buffer_length,
++                       size_t *output_length) const;
+ 
+   /**
+    * @brief Validate a response counter using sliding window anti-replay
+@@ -146,6 +157,10 @@ class Peer {
+   void reset();
+ 
+  private:
++  int build_ad_buffer_(Signatures_SignatureType signature_type, const char *vin, uint32_t expires_at, uint32_t counter,
++                       pb_byte_t *output_buffer, size_t *output_length, uint32_t flags, const pb_byte_t *request_hash,
++                       size_t request_hash_length, uint32_t fault) const;
++
+   static void write_uint32_be(pb_byte_t *buffer, uint32_t value) {
+     buffer[0] = (value >> 24) & 0xFF;
+     buffer[1] = (value >> 16) & 0xFF;
+diff --git a/src/client.cpp b/src/client.cpp
+index 2c08206..5ffbd19 100644
+--- a/src/client.cpp
++++ b/src/client.cpp
+@@ -347,7 +347,7 @@ int Client::parse_payload_car_server_response(
+         int return_code = session->decrypt_response(
+             input_buffer->bytes, input_buffer->size, signature_data->sig_type.AES_GCM_Response_data.nonce,
+             signature_data->sig_type.AES_GCM_Response_data.tag, last_request_hash_.data(),
+-            this->last_request_hash_length_, response_flags, signed_message_fault, decrypt_buffer.bytes,
++            this->last_request_hash_length_, response_flags, signed_message_fault, counter, decrypt_buffer.bytes,
+             sizeof(decrypt_buffer.bytes), &decrypt_length);
+         if (return_code != 0) {
+           LOG_ERROR("[parse_payload_car_server_response] Failed to decrypt response");
 diff --git a/src/crypto_context.cpp b/src/crypto_context.cpp
 index f2663cb..39412b9 100644
 --- a/src/crypto_context.cpp
@@ -613,7 +684,7 @@ index f2663cb..39412b9 100644
      return TeslaBLE_Status_E_ERROR_CRYPTO;
    }
 diff --git a/src/peer.cpp b/src/peer.cpp
-index 67f532d..24b4d93 100644
+index 67f532d..7059e6d 100644
 --- a/src/peer.cpp
 +++ b/src/peer.cpp
 @@ -20,18 +20,39 @@
@@ -663,7 +734,75 @@ index 67f532d..24b4d93 100644
  Peer::Peer(UniversalMessage_Domain domain, std::shared_ptr<CryptoContext> crypto_context, std::string vin)
      : domain_(domain), vin_(std::move(vin)), crypto_context_(std::move(crypto_context)) {}
  
-@@ -457,22 +478,12 @@ int Peer::decrypt_response(const pb_byte_t *input_buffer, size_t input_length, c
+@@ -121,16 +142,17 @@ uint32_t Peer::generate_expires_at(int seconds) const {
+   return clock_time_ + static_cast<uint32_t>(elapsed) + static_cast<uint32_t>(seconds);
+ }
+ 
+-void Peer::generate_nonce(pb_byte_t *nonce) const {
++int Peer::generate_nonce(pb_byte_t *nonce) const {
+   if (nonce == nullptr || crypto_context_ == nullptr) {
+     LOG_ERROR("Invalid nonce buffer or crypto context");
+-    return;
++    return TeslaBLE_Status_E_ERROR_INVALID_PARAMS;
+   }
+ 
+   int result = crypto_context_->generate_random_bytes(nonce, NONCE_SIZE_BYTES);
+   if (result != TeslaBLE_Status_E_OK) {
+     LOG_ERROR("Failed to generate nonce: %d", result);
+   }
++  return result;
+ }
+ 
+ int Peer::load_tesla_key(const uint8_t *public_key_buffer, size_t public_key_size) {
+@@ -306,6 +328,26 @@ int Peer::force_update_session(Signatures_SessionInfo *session_info) {
+ int Peer::construct_ad_buffer(Signatures_SignatureType signature_type, const char *vin, uint32_t expires_at,
+                               pb_byte_t *output_buffer, size_t *output_length, uint32_t flags,
+                               const pb_byte_t *request_hash, size_t request_hash_length, uint32_t fault) const {
++  if (signature_type == Signatures_SignatureType_SIGNATURE_TYPE_AES_GCM_RESPONSE) {
++    LOG_ERROR("Response metadata needs the response's own counter (construct_response_ad_buffer)");
++    return TeslaBLE_Status_E_ERROR_INVALID_PARAMS;
++  }
++  return build_ad_buffer_(signature_type, vin, expires_at, counter_, output_buffer, output_length, flags, request_hash,
++                          request_hash_length, fault);
++}
++
++int Peer::construct_response_ad_buffer(uint32_t response_counter, pb_byte_t *output_buffer, size_t *output_length,
++                                       uint32_t flags, const pb_byte_t *request_hash, size_t request_hash_length,
++                                       uint32_t fault) const {
++  return build_ad_buffer_(Signatures_SignatureType_SIGNATURE_TYPE_AES_GCM_RESPONSE, vin_.c_str(),
++                          0,  // expires_at is not part of response metadata
++                          response_counter, output_buffer, output_length, flags, request_hash, request_hash_length,
++                          fault);
++}
++
++int Peer::build_ad_buffer_(Signatures_SignatureType signature_type, const char *vin, uint32_t expires_at,
++                           uint32_t counter, pb_byte_t *output_buffer, size_t *output_length, uint32_t flags,
++                           const pb_byte_t *request_hash, size_t request_hash_length, uint32_t fault) const {
+   if (output_buffer == nullptr || output_length == nullptr || vin == nullptr) {
+     LOG_ERROR("Invalid parameters for AD buffer construction");
+     return TeslaBLE_Status_E_ERROR_INVALID_PARAMS;
+@@ -367,9 +409,9 @@ int Peer::construct_ad_buffer(Signatures_SignatureType signature_type, const cha
+     }
+   }
+ 
+-  // Counter (TLV format)
++  // Counter (TLV format): the request counter, or the counter a response carries
+   pb_byte_t counter_bytes[4];
+-  write_uint32_be(counter_bytes, counter_);
++  write_uint32_be(counter_bytes, counter);
+   if (!append_tlv(Signatures_Tag_TAG_COUNTER, counter_bytes, sizeof(counter_bytes))) {
+     LOG_ERROR("Failed to append counter to AD buffer");
+     return TeslaBLE_Status_E_ERROR_INVALID_PARAMS;
+@@ -450,29 +492,18 @@ int Peer::construct_request_hash(Signatures_SignatureType auth_type, const pb_by
+ 
+ int Peer::decrypt_response(const pb_byte_t *input_buffer, size_t input_length, const pb_byte_t *nonce,
+                            const pb_byte_t *tag, const pb_byte_t *request_hash, size_t request_hash_length,
+-                           uint32_t flags, uint32_t fault, pb_byte_t *output_buffer, size_t output_buffer_length,
+-                           size_t *output_length) const {
++                           uint32_t flags, uint32_t fault, uint32_t counter, pb_byte_t *output_buffer,
++                           size_t output_buffer_length, size_t *output_length) const {
+   if (!is_private_key_initialized()) {
+     LOG_ERROR("[DecryptResponse] Private key not initialized");
      return TeslaBLE_Status_E_ERROR_PRIVATE_KEY_NOT_INITIALIZED;
    }
  
@@ -677,19 +816,19 @@ index 67f532d..24b4d93 100644
 -    return TeslaBLE_Status_E_ERROR_DECRYPT;
 -  }
 -
-   // Construct AD buffer for response (max 79 bytes)
+-  // Construct AD buffer for response (max 79 bytes)
++  // Construct AD buffer for response (max 79 bytes), bound to the response's own counter
    pb_byte_t ad_buffer[80];
    size_t ad_length;
 -  return_code = construct_ad_buffer(Signatures_SignatureType_SIGNATURE_TYPE_AES_GCM_RESPONSE, vin_.c_str(),
 -                                    0,  // expires_at not used for responses
 -                                    ad_buffer, &ad_length, flags, request_hash, request_hash_length, fault);
-+  int return_code = construct_ad_buffer(Signatures_SignatureType_SIGNATURE_TYPE_AES_GCM_RESPONSE, vin_.c_str(),
-+                                        0,  // expires_at not used for responses
-+                                        ad_buffer, &ad_length, flags, request_hash, request_hash_length, fault);
++  int return_code = construct_response_ad_buffer(counter, ad_buffer, &ad_length, flags, request_hash,
++                                                 request_hash_length, fault);
  
    if (return_code != 0) {
      LOG_ERROR("[DecryptResponse] Failed to construct AD buffer");
-@@ -481,43 +492,50 @@ int Peer::decrypt_response(const pb_byte_t *input_buffer, size_t input_length, c
+@@ -481,43 +512,50 @@ int Peer::decrypt_response(const pb_byte_t *input_buffer, size_t input_length, c
  
    // Hash the AD buffer
    unsigned char ad_hash[32];
@@ -737,11 +876,11 @@ index 67f532d..24b4d93 100644
 +  if (status == PSA_SUCCESS) {
 +    status = psa_aead_update(&operation, input_buffer, input_length, output_buffer, output_buffer_length,
 +                             &update_length);
-   }
++  }
 +  if (status == PSA_SUCCESS) {
 +    status = psa_aead_verify(&operation, output_buffer + update_length, output_buffer_length - update_length,
 +                             &verify_length, tag, 16);  // tag is always 16 bytes
-+  }
+   }
 +  psa_aead_abort(&operation);
 +  psa_destroy_key(key_id);
  
@@ -766,7 +905,7 @@ index 67f532d..24b4d93 100644
    return TeslaBLE_Status_E_OK;
  }
  
-@@ -529,64 +547,60 @@ int Peer::encrypt(pb_byte_t *input_buffer, size_t input_buffer_length, pb_byte_t
+@@ -529,64 +567,63 @@ int Peer::encrypt(pb_byte_t *input_buffer, size_t input_buffer_length, pb_byte_t
      return TeslaBLE_Status_E_ERROR_PRIVATE_KEY_NOT_INITIALIZED;
    }
  
@@ -781,16 +920,19 @@ index 67f532d..24b4d93 100644
 -    return TeslaBLE_Status_E_ERROR_ENCRYPT;
 -  }
 -
-   // Generate a new nonce for each encryption
-   generate_nonce(nonce);
- 
+-  // Generate a new nonce for each encryption
+-  generate_nonce(nonce);
+-
 -  return_code = mbedtls_gcm_starts(&aes_context, MBEDTLS_GCM_ENCRYPT, nonce, 12);
 -  if (return_code != 0) {
 -    LOG_ERROR("[Encrypt] GCM start error: -0x%04x", (unsigned int) -return_code);
 -    mbedtls_gcm_free(&aes_context);
--    return TeslaBLE_Status_E_ERROR_ENCRYPT;
--  }
--
++  // Generate a new nonce for each encryption; never encrypt under an unfilled nonce
++  if (generate_nonce(nonce) != TeslaBLE_Status_E_OK) {
++    LOG_ERROR("[Encrypt] Nonce generation failed");
+     return TeslaBLE_Status_E_ERROR_ENCRYPT;
+   }
+ 
    // Hash the AD buffer to create the AAD as per the protocol
    unsigned char ad_hash[32];
 -  return_code = mbedtls_sha256(ad_buffer, ad_buffer_length, ad_hash, 0);
@@ -865,6 +1007,20 @@ index 67f532d..24b4d93 100644
  
    LOG_VERBOSE("[Encrypt] Nonce: %s, Ciphertext: %s, Tag: %s", format_hex(nonce, 12).c_str(),
                format_hex(output_buffer, *output_length).c_str(), format_hex(signature_buffer, 16).c_str());
+diff --git a/src/vehicle.cpp b/src/vehicle.cpp
+index c933ee5..6323d90 100644
+--- a/src/vehicle.cpp
++++ b/src/vehicle.cpp
+@@ -869,7 +869,8 @@ void TeslaBLE::Vehicle::handle_vcsec_message_(const UniversalMessage_RoutableMes
+     int return_code = session->decrypt_response(
+         payload->bytes, payload->size, sig_data->sig_type.AES_GCM_Response_data.nonce,
+         sig_data->sig_type.AES_GCM_Response_data.tag, request_hash, request_hash_length, msg.flags, fault,
+-        decrypt_buffer.bytes, sizeof(decrypt_buffer.bytes), &decrypt_length);
++        sig_data->sig_type.AES_GCM_Response_data.counter, decrypt_buffer.bytes, sizeof(decrypt_buffer.bytes),
++        &decrypt_length);
+     if (return_code != 0) {
+       LOG_ERROR("Failed to decrypt VCSEC response: %d", return_code);
+       return;
 diff --git a/src/vin_utils.cpp b/src/vin_utils.cpp
 index 4728a29..d5d22db 100644
 --- a/src/vin_utils.cpp
