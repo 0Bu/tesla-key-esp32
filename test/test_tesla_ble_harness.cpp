@@ -609,6 +609,30 @@ int main() {
         for (size_t i = 0; i < response.size(); ++i) wiped = wiped && out[i] == 0;
         expect(refused && wiped, "tampered tag is refused and no unauthenticated plaintext is left behind",
                "tampered tag was accepted or left plaintext in the output buffer");
+
+        const bool invalid_params_refused =
+            ready &&
+            peer.decrypt_response(nullptr, response.size(), nonce.data(), sealed.data() + response.size(),
+                                  request_hash, sizeof request_hash, flags, fault, response_counter, out, sizeof out,
+                                  &out_size) == TeslaBLE_Status_E_ERROR_INVALID_PARAMS &&
+            peer.decrypt_response(sealed.data(), response.size(), nullptr, sealed.data() + response.size(),
+                                  request_hash, sizeof request_hash, flags, fault, response_counter, out, sizeof out,
+                                  &out_size) == TeslaBLE_Status_E_ERROR_INVALID_PARAMS &&
+            peer.decrypt_response(sealed.data(), response.size(), nonce.data(), nullptr,
+                                  request_hash, sizeof request_hash, flags, fault, response_counter, out, sizeof out,
+                                  &out_size) == TeslaBLE_Status_E_ERROR_INVALID_PARAMS &&
+            peer.decrypt_response(sealed.data(), response.size(), nonce.data(), sealed.data() + response.size(),
+                                  request_hash, sizeof request_hash, flags, fault, response_counter, nullptr, sizeof out,
+                                  &out_size) == TeslaBLE_Status_E_ERROR_INVALID_PARAMS &&
+            peer.decrypt_response(sealed.data(), response.size(), nonce.data(), sealed.data() + response.size(),
+                                  request_hash, sizeof request_hash, flags, fault, response_counter, out, sizeof out,
+                                  nullptr) == TeslaBLE_Status_E_ERROR_INVALID_PARAMS &&
+            peer.decrypt_response(sealed.data(), response.size(), nonce.data(), sealed.data() + response.size(),
+                                  request_hash, sizeof request_hash, flags, fault, response_counter, out,
+                                  response.size() - 1, &out_size) == TeslaBLE_Status_E_ERROR_INVALID_PARAMS;
+        expect(invalid_params_refused,
+               "null pointers and undersized output buffer in decrypt_response are refused with INVALID_PARAMS",
+               "decrypt_response accepted null pointer or undersized buffer or returned wrong error code");
     }
     {
         // protocol.md's session-info example through the library's own verification path: ECDH with
