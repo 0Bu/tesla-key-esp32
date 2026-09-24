@@ -46,10 +46,15 @@ tripwires, deterministic fuzzing, protocol vectors and a real Chrome/Chromium pa
 same job before the pinned four-target firmware build.
 
 `scripts/test-tesla-ble-harness.sh --require-all` (same CI job) builds the real `yoziru/tesla-ble`
-v5.2.0 with Nanopb and Mbed TLS on the host and runs `test/test_tesla_ble_harness.cpp`. It calls
-the production helpers themselves — `tk::build_ble_tx_frame` / `tk::is_well_formed_ble_frame`
+v5.2.0 with the repository patch series, Nanopb and the exact Mbed TLS 4 / TF-PSA-Crypto commit of
+the pinned ESP-IDF image (`MBEDTLS_REF`) on the host and runs `test/test_tesla_ble_harness.cpp`. It
+calls the production helpers themselves — `tk::build_ble_tx_frame` / `tk::is_well_formed_ble_frame`
 (the `drive_command_runner_()` TX path) and `tk::regenerate_private_key()` (the transaction
-behind `regenerate_key_native_()`) — so a regression in them fails there, not only in a copy.
+behind `regenerate_key_native_()`) — so a regression in them fails there, not only in a copy. Its
+V1 known-answer tests pin the PSA crypto port (patch 0006) to the protocol bytes: the official
+client key and ECDH session key, the session-info HMAC, a reference AES-GCM vector and
+`Peer::encrypt` output, response tamper refusal, the VIN BLE name, a PEM export byte-identical to
+the Mbed TLS 3.6 one kept in NVS, P-384/garbage key refusal and the firmware key fingerprint.
 
 ## What's covered
 
@@ -177,7 +182,9 @@ The suite also has gates outside the single pure-logic translation unit:
   digraph and trigraph mutations also fail. Compiler include/dependency/search variables including
   `LIBRARY_PATH` are rejected by presence even when empty; extra flags are overwritten, every
   caller `CCACHE_*` is rejected and IDF ccache is forced to exactly `0` before self-test.
-- `test/run-cjson-oom-tests.sh` compiles the exact ESP-IDF v5.5.5 cJSON source and injects every
+- `test/run-cjson-oom-tests.sh` compiles the exact cJSON source the firmware links (the
+  `espressif/cjson` commit all four lockfiles pin, and the upstream cJSON commit its submodule
+  gitlink names; ESP-IDF 6 no longer bundles cJSON) and injects every
   nth allocation failure through the production `/status` emitter, representative REST/MCP
   envelopes, the real `tools/list` and vehicle-state double-print producers, their shared production
   print/send seam and the parser. It proves bounded status-emitter depth/underflow/finalization,
@@ -216,7 +223,9 @@ The suite also has gates outside the single pure-logic translation unit:
   1024 B when present. Missing-task and one-byte-headroom mutations prove these are enforced policy
   margins, not implied hardware evidence.
 - `scripts/check-dependency-contract.py` byte-pins the IDF image, four lockfiles, resolved
-  tesla-ble identity and ordered patch series. `scripts/check-otadata-contract.py` requires the
+  tesla-ble identity, the commit-pinned Espressif Git components (cJSON, mDNS, MQTT, and W5500 on
+  esp32s3 only) and ordered patch series. It also pins the harness `MBEDTLS_REF`; inside the pinned
+  image (`--idf-path`, from `ci-build-all.sh`) ESP-IDF's mbedtls submodule must be that commit. `scripts/check-otadata-contract.py` requires the
   initial OTA partition to be exactly `0x2000` erased bytes; the merged-layout gate additionally
   rejects overlaps, non-erased gaps (including NVS), trailing bytes and any skipped target loop.
 - `scripts/prepare-reused-release.py` mutation-tests the key-free recovery path for a stale Pages

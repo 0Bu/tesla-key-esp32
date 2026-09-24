@@ -526,11 +526,14 @@ extern "C" void app_main() {
         vehicle_task_phase = tk::VehicleTaskStartPhase::IdentityResolved;
     } else {
 
-        // TeslaBLE constructs its crypto context while loading an existing private key. The DRBG is
-        // seeded exactly once at that point, so enabling hardware entropy only in the no-key branch
-        // is too late for every already-provisioned device. Keep SAR-ADC entropy active across BOTH
-        // controller construction/key load and a possible first-boot key generation; WiFi/BLE are not
-        // running yet and therefore cannot supply RF entropy themselves.
+        // TeslaBLE loads an existing private key while constructing its crypto context, and the
+        // first-boot branch below may generate one. ESP-IDF 6 routes every PSA random draw (key
+        // generation, key-parse blinding) straight to the hardware RNG (MBEDTLS_PSA_CRYPTO_EXTERNAL_RNG),
+        // so each draw is only as good as the entropy source at that moment; enabling it only in the
+        // no-key branch would leave every already-provisioned device's key load uncovered. Keep
+        // SAR-ADC entropy active across BOTH controller construction/key load and a possible
+        // first-boot key generation; WiFi/BLE are not running yet and therefore cannot supply RF
+        // entropy themselves.
         bootloader_random_enable();
         // init() wires the connected + rx callbacks onto ble_client and passes the
         // config_store so it can save the discovered MAC. ESSENTIAL: without the controller

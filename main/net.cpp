@@ -37,7 +37,9 @@
 #if CONFIG_TESLA_ETH_ENABLED
 #include "driver/spi_master.h"
 #include "esp_eth.h"
-#include "esp_eth_mac_spi.h"
+// ESP-IDF 6 moved the W5500 driver into the espressif/w5500 managed component.
+#include "esp_eth_mac_w5500.h"
+#include "esp_eth_phy_w5500.h"
 #endif
 
 #include "board.hpp"
@@ -67,8 +69,8 @@ static void net_boot_require(esp_err_t err, const char* component) {
 
 // The public initializer remains fail-closed, but Ethernet needs the error before parking so it
 // can release the SPI bus retained by its early hardware probe.  esp_netif itself cannot be
-// deinitialized in IDF 5.5; this helper only makes the failure observable to the caller before
-// the common boot-fatal boundary is entered.
+// deinitialized in ESP-IDF (5.5, unchanged in 6.1); this helper only makes the failure observable
+// to the caller before the common boot-fatal boundary is entered.
 static esp_err_t net_init_substrate(const char** failed_component) {
     esp_err_t err = esp_netif_init();
     if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate the exact pinned ESP-IDF/tesla-ble dependency and patch contract."""
+"""Validate the exact pinned ESP-IDF/tesla-ble/Espressif-component dependency and patch contract."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ import hashlib
 from pathlib import Path
 import shutil
 import stat
+import subprocess
 import sys
 import tempfile
 from collections.abc import Callable
@@ -15,25 +16,32 @@ from collections.abc import Callable
 
 TARGETS = ("esp32", "esp32s3", "esp32c3", "esp32c6")
 TOOLCHAIN = (
-    "v5.5.5@sha256:"
-    "a9231d0697ab8f7517cc072e93b7c83e04907bfbfba80b6440d7dbbf90665cf2\n"
+    "v6.1@sha256:"
+    "81893c71bb5e570088901f21def8684c25cd2a9020281bd01b843a7655edb18c\n"
 )
+IDF_VERSION = "6.1.0"
 TESLA_GIT = "https://github.com/yoziru/tesla-ble.git"
 TESLA_VERSION = "v5.2.0"
 TESLA_RESOLVED_COMMIT = "07a4ef503a52f736009fdeba953f185aecc863f3"
 TESLA_COMPONENT_HASH = "fb55938820781e8a731fc1557c0c4542bbf6833729062cfdb86a978b07016025"
-LOCK_MANIFEST_HASH = "237ea7c60435890a8296d77775999b9332cee898da572911ff4a75da4d33712f"
+LOCK_MANIFEST_HASH = "f8c6e2e53ea622a8ae4c853930386a416ed5d99e23bea38862add71af5538228"
+# The host harness proves the PSA crypto port (patch 0006) against the exact Mbed TLS the firmware
+# links. Its literal must equal this pin, and inside the pinned image (--idf-path) so must ESP-IDF's
+# mbedtls submodule, so an IDF bump cannot leave that proof running on stale crypto.
+MBEDTLS_COMMIT = "a2b32072ea898afc1ed5b6caf6931e36028c91d6"
+HARNESS_SCRIPT = "scripts/test-tesla-ble-harness.sh"
+IDF_MBEDTLS_SUBMODULE = "components/mbedtls/mbedtls"
 
 # These digests deliberately cover comments, ordering and every transitive resolution. A reviewed
 # dependency update changes this validator together with the lockfiles; a normal build may not
 # silently rewrite an otherwise semantically plausible lock.
 FILE_DIGESTS = {
-    "esp-idf-toolchain.txt": "92d5b9212bb54c107927f58ffd51511a00bd72d65836edf20cb3d23b8533d962",
-    "main/idf_component.yml": "0924f7d5bb4e31165cbfbfc40c09a3b4643675e02dcb4770b71069d6df2dd857",
-    "dependencies.lock.esp32": "50639308f06156f8dc5a733912846e5c8de2939a54519b0efb6fdef35b98f62f",
-    "dependencies.lock.esp32s3": "944323fb0d8967bb031649e5e3c80c66f84818002e915d4debeea1e965d18c7b",
-    "dependencies.lock.esp32c3": "8c3fbd5b84c9bb1ebe6a652debd06fab5f75a5989ae4b612e1dcdc62f687babe",
-    "dependencies.lock.esp32c6": "14c14fd71331b6225bd24b984a1a7329736539856870edb5c7c84d43bdf03dc5",
+    "esp-idf-toolchain.txt": "6ef2f1d9c15bb269430cbb4530d689022d914b12ac8610b539d4ac00d148d84f",
+    "main/idf_component.yml": "38f04c6bad575380fb74e8332b6e83c9364fd3fe4d7faadc54c0bd2807bee0ea",
+    "dependencies.lock.esp32": "716df297cd741f29817238c8906f0726ed857108e487ac0588b480fee51bb04b",
+    "dependencies.lock.esp32s3": "588529fc1fff40308be491e46793a8866b4c5bb9dd6e174df1ea292531260746",
+    "dependencies.lock.esp32c3": "1b4930f5bccdcbfd0b934e15a3c98256ceabe9bf5962cf8115709e52988851b0",
+    "dependencies.lock.esp32c6": "97918b2afccf62097cf06b8d1762a110e5cad911d119a76d1c133e8675acdead",
 }
 PATCH_INVENTORY = (
     (
@@ -44,11 +52,47 @@ PATCH_INVENTORY = (
         "0005-align-session-counter-replay-with-signer-go.patch",
         "60fe7ee4533d89c160a7a757692bec51aba8b82f312d5352d9c720d2057f36b0",
     ),
+    (
+        "0006-port-crypto-bindings-to-psa.patch",
+        "eaf4b76ad7c192e385f7c2f8c1867bc64d0c61e7e2ae8ed7a67d14a34f0d2a2d",
+    ),
+)
+# Espressif components resolved from their GitHub release sources: (name, repository, path in the
+# repository, manifest ref, resolved commit, component hash, IDF requirement, targets).
+ESPRESSIF_COMPONENTS = (
+    ("espressif/cjson", "https://github.com/espressif/idf-extra-components.git", "cjson",
+     "0f5afa2f5be33f4f4979238041d5c38f3694ed13", "0f5afa2f5be33f4f4979238041d5c38f3694ed13",
+     "0963dafe0178ec0a1d423d309d944268bba434441741d667c78dc6043f113519", ">=5.0", TARGETS),
+    ("espressif/mdns", "https://github.com/espressif/esp-protocols.git", "components/mdns",
+     "mdns-v1.13.1", "d61a590e07e0df4c66e7ac43feeceb0f1e0866f9",
+     "424ec62b386bdfc522466053dab9b06ff389539bfa3da7632f32ef033874ef80", ">=5.0", TARGETS),
+    ("espressif/mqtt", "https://github.com/espressif/esp-mqtt.git", ".",
+     "v1.1.0", "1a1e5788a5cf57a0f44a3c6c061407f6c9be1026",
+     "8ffa5f4b6e2c522df53b552acfd31abb38215ec9432680ea196442f54ff960ec", ">=5.3", TARGETS),
+    ("espressif/w5500", "https://github.com/espressif/esp-eth-drivers.git", "w5500",
+     "1f19456ec90b60424583a4138c075a78e1ab2297", "1f19456ec90b60424583a4138c075a78e1ab2297",
+     "ef3e00d7f747f8a7b1792a3d3987122bb47dc33f948417b914e494986cb16322", ">=6.0", ("esp32s3",)),
 )
 MANIFEST_LOGICAL_LINES = (
     "dependencies:",
-    '  idf: ">=5.5,<6.0"',
-    '  espressif/mdns: "^1.2.0"',
+    '  idf: ">=6.1,<7.0"',
+    "  espressif/mdns:",
+    '    git: "https://github.com/espressif/esp-protocols.git"',
+    '    path: "components/mdns"',
+    '    version: "mdns-v1.13.1"',
+    "  espressif/cjson:",
+    '    git: "https://github.com/espressif/idf-extra-components.git"',
+    '    path: "cjson"',
+    '    version: "0f5afa2f5be33f4f4979238041d5c38f3694ed13"',
+    "  espressif/mqtt:",
+    '    git: "https://github.com/espressif/esp-mqtt.git"',
+    '    version: "v1.1.0"',
+    "  espressif/w5500:",
+    '    git: "https://github.com/espressif/esp-eth-drivers.git"',
+    '    path: "w5500"',
+    '    version: "1f19456ec90b60424583a4138c075a78e1ab2297"',
+    "    rules:",
+    '      - if: "target == esp32s3"',
     "  yoziru/tesla-ble:",
     f'    git: "{TESLA_GIT}"',
     f'    version: "{TESLA_VERSION}"',
@@ -70,6 +114,32 @@ LOCK_TESLA_BLOCK = (
     "    - esp32c6\n"
     f"    version: {TESLA_RESOLVED_COMMIT}\n"
 )
+
+
+
+
+def espressif_lock_block(name: str, git: str, path: str, commit: str, component_hash: str,
+                         idf_requirement: str) -> str:
+    return (
+        f"  {name}:\n"
+        f"    component_hash: {component_hash}\n"
+        "    dependencies:\n"
+        "    - name: idf\n"
+        f"      version: '{idf_requirement}'\n"
+        "    source:\n"
+        f"      git: {git}\n"
+        f"      path: {path}\n"
+        "      type: git\n"
+        f"    version: {commit}\n"
+    )
+
+
+def direct_dependencies(target: str) -> str:
+    names = sorted(
+        [name for name, *_, targets in ESPRESSIF_COMPONENTS if target in targets]
+        + ["idf", "yoziru/tesla-ble"]
+    )
+    return "direct_dependencies:\n" + "".join(f"- {name}\n" for name in names)
 
 
 class DependencyError(RuntimeError):
@@ -113,17 +183,45 @@ def logical_yaml_lines(text: str) -> tuple[str, ...]:
     )
 
 
+def git_output(repository: Path, *args: str) -> str:
+    try:
+        completed = subprocess.run(
+            ["git", "-c", f"safe.directory={repository}", "-C", str(repository), *args],
+            check=True, capture_output=True, text=True, timeout=60,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise DependencyError(f"cannot read ESP-IDF Git metadata in {repository}: {exc}") from exc
+    return completed.stdout
+
+
+def check_idf_mbedtls(gitlink: str, submodule_head: str, expected: str = MBEDTLS_COMMIT) -> None:
+    require(gitlink == f"160000 commit {expected}\t{IDF_MBEDTLS_SUBMODULE}\n",
+            f"ESP-IDF {IDF_MBEDTLS_SUBMODULE} gitlink is not the harness Mbed TLS commit {expected}; "
+            f"update MBEDTLS_REF in {HARNESS_SCRIPT} and rerun the V1 vectors")
+    require(submodule_head == f"{expected}\n",
+            f"ESP-IDF {IDF_MBEDTLS_SUBMODULE} checkout is not the harness Mbed TLS commit {expected}")
+
+
+def validate_idf_mbedtls(idf_path: Path) -> None:
+    require(idf_path.is_dir() and (idf_path / "tools/idf.py").is_file(),
+            f"--idf-path is not an ESP-IDF checkout: {idf_path}")
+    check_idf_mbedtls(
+        git_output(idf_path, "ls-tree", "HEAD", "--", IDF_MBEDTLS_SUBMODULE),
+        git_output(idf_path / IDF_MBEDTLS_SUBMODULE, "rev-parse", "HEAD"),
+    )
+
+
 def validate(root: Path) -> None:
     require(root.is_dir() and not root.is_symlink(), f"dependency root is missing/unsafe: {root}")
 
     toolchain_data = read_regular(root / "esp-idf-toolchain.txt")
     require(decode(toolchain_data, "esp-idf-toolchain.txt") == TOOLCHAIN,
-            "esp-idf-toolchain.txt must pin exact ESP-IDF v5.5.5 and image digest")
+            "esp-idf-toolchain.txt must pin exact ESP-IDF v6.1 and image digest")
 
     manifest_data = read_regular(root / "main/idf_component.yml")
     manifest_text = decode(manifest_data, "main/idf_component.yml")
     require(logical_yaml_lines(manifest_text) == MANIFEST_LOGICAL_LINES,
-            "main/idf_component.yml exact IDF/mdns/tesla-ble v5.2.0 Git contract drifted")
+            "main/idf_component.yml exact IDF/Espressif-component/tesla-ble v5.2.0 Git contract drifted")
 
     actual_locks = tuple(sorted(path.name for path in root.glob("dependencies.lock.*")))
     expected_locks = tuple(f"dependencies.lock.{target}" for target in TARGETS)
@@ -136,21 +234,24 @@ def validate(root: Path) -> None:
         lock_text = decode(lock_data, relative)
         require(lock_text.count(LOCK_TESLA_BLOCK) == 1,
                 f"{relative}: tesla-ble resolved commit/component hash/Git/targets drifted")
-        require(lock_text.count("  idf:\n    source:\n      type: idf\n    version: 5.5.5\n") == 1,
-                f"{relative}: resolved ESP-IDF version must be exactly 5.5.5")
+        require(
+            lock_text.count(f"  idf:\n    source:\n      type: idf\n    version: {IDF_VERSION}\n") == 1,
+            f"{relative}: resolved ESP-IDF version must be exactly {IDF_VERSION}")
+        for name, git, path, _ref, commit, component_hash, idf_requirement, targets in (
+                ESPRESSIF_COMPONENTS):
+            block = espressif_lock_block(name, git, path, commit, component_hash, idf_requirement)
+            if target in targets:
+                require(lock_text.count(block) == 1,
+                        f"{relative}: {name} resolved commit/component hash/Git source drifted")
+            else:
+                require(f"  {name}:\n" not in lock_text,
+                        f"{relative}: {name} must resolve only for {', '.join(targets)}")
         require(lock_text.count(f"target: {target}\n") == 1,
                 f"{relative}: lock target must be exactly {target}")
         require(lock_text.count(f"manifest_hash: {LOCK_MANIFEST_HASH}\n") == 1,
                 f"{relative}: manifest hash drifted")
-        require(
-            lock_text.count(
-                "direct_dependencies:\n"
-                "- espressif/mdns\n"
-                "- idf\n"
-                "- yoziru/tesla-ble\n"
-            ) == 1,
-            f"{relative}: direct dependency inventory/order drifted",
-        )
+        require(lock_text.count(direct_dependencies(target)) == 1,
+                f"{relative}: direct dependency inventory/order drifted")
 
     patch_dir = root / "patches/tesla-ble"
     require(patch_dir.is_dir() and not patch_dir.is_symlink(),
@@ -169,9 +270,14 @@ def validate(root: Path) -> None:
         require(actual_digest == expected_digest,
                 f"reviewed dependency file byte digest drifted: {relative}")
 
+    harness_text = decode(read_regular(root / HARNESS_SCRIPT), HARNESS_SCRIPT)
+    require(harness_text.count("MBEDTLS_REF=") == 1 and
+            harness_text.count(f'\nMBEDTLS_REF="{MBEDTLS_COMMIT}"\n') == 1,
+            f"{HARNESS_SCRIPT}: harness Mbed TLS commit must be exactly {MBEDTLS_COMMIT}")
+
 
 def copy_fixture(root: Path, destination: Path) -> None:
-    for relative in FILE_DIGESTS:
+    for relative in (*FILE_DIGESTS, HARNESS_SCRIPT):
         target = destination / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(root / relative, target)
@@ -194,14 +300,18 @@ def self_test(root: Path) -> None:
         return lambda fixture: mutate_text(fixture / relative, old, new)
 
     mutations: tuple[tuple[str, Callable[[Path], None], str], ...] = (
-        ("toolchain-version", text("esp-idf-toolchain.txt", "v5.5.5", "v5.5.4"),
-         "exact ESP-IDF v5.5.5"),
-        ("toolchain-image", text("esp-idf-toolchain.txt", "a9231", "b9231"),
-         "exact ESP-IDF v5.5.5"),
+        ("toolchain-version", text("esp-idf-toolchain.txt", "v6.1", "v6.0"),
+         "exact ESP-IDF v6.1"),
+        ("toolchain-image", text("esp-idf-toolchain.txt", "81893", "91893"),
+         "exact ESP-IDF v6.1"),
         ("manifest-version", text("main/idf_component.yml", 'version: "v5.2.0"',
                                   'version: "v5.1.0"'), "v5.2.0 Git contract"),
         ("manifest-git", text("main/idf_component.yml", TESLA_GIT,
                               "https://example.invalid/tesla-ble.git"), "v5.2.0 Git contract"),
+        ("manifest-component-ref", text("main/idf_component.yml", '"mdns-v1.13.1"',
+                                        '"mdns-v1.13.0"'), "Espressif-component"),
+        ("manifest-w5500-rule", text("main/idf_component.yml", "target == esp32s3",
+                                     "target != esp32s3"), "Espressif-component"),
         ("resolved-commit", text("dependencies.lock.esp32", TESLA_RESOLVED_COMMIT,
                                  "0" * 40), "resolved commit/component hash"),
         ("component-hash", text("dependencies.lock.esp32s3", TESLA_COMPONENT_HASH,
@@ -210,8 +320,20 @@ def self_test(root: Path) -> None:
          "resolved commit/component hash"),
         ("lock-target", text("dependencies.lock.esp32c6", "target: esp32c6",
                              "target: esp32c5"), "lock target must be exactly"),
-        ("transitive-drift", text("dependencies.lock.esp32", "version: 1.11.3",
-                                  "version: 1.11.2"), "file byte digest drifted"),
+        ("lock-idf", text("dependencies.lock.esp32s3", f"version: {IDF_VERSION}\n",
+                          "version: 6.1.1\n"), "resolved ESP-IDF version"),
+        ("component-commit", text("dependencies.lock.esp32c3",
+                                  "d61a590e07e0df4c66e7ac43feeceb0f1e0866f9", "1" * 40),
+         "espressif/mdns resolved commit"),
+        ("component-source", text("dependencies.lock.esp32s3",
+                                  "https://github.com/espressif/esp-eth-drivers.git",
+                                  "https://example.invalid/esp-eth-drivers.git"),
+         "espressif/w5500 resolved commit"),
+        ("w5500-other-target", text("dependencies.lock.esp32c6", "  idf:\n",
+                                    "  espressif/w5500:\n    version: 1\n  idf:\n"),
+         "espressif/w5500 must resolve only for esp32s3"),
+        ("transitive-drift", text("dependencies.lock.esp32", "version: 3.0.0",
+                                  "version: 2.0.0"), "file byte digest drifted"),
         ("patch-byte", text("patches/tesla-ble/0004-drop-unused-parental-controls-actions.patch",
                             "CarServer", "Carserver"), "patch digest drifted"),
         ("missing-lock", lambda fixture: (fixture / "dependencies.lock.esp32c6").unlink(),
@@ -226,6 +348,11 @@ def self_test(root: Path) -> None:
         ("extra-patch", lambda fixture: shutil.copy2(
             fixture / "patches/tesla-ble" / PATCH_INVENTORY[0][0],
             fixture / "patches/tesla-ble/0006-extra.patch"), "patch filename inventory drifted"),
+        ("harness-mbedtls", text(HARNESS_SCRIPT, MBEDTLS_COMMIT, "0" * 40),
+         "harness Mbed TLS commit"),
+        ("harness-mbedtls-override", text(HARNESS_SCRIPT, 'MBEDTLS_DIR="',
+                                          'MBEDTLS_REF="main"\nMBEDTLS_DIR="'),
+         "harness Mbed TLS commit"),
     )
 
     for name, mutate, expected in mutations:
@@ -241,15 +368,34 @@ def self_test(root: Path) -> None:
             else:
                 raise DependencyError(f"self-test accepted dependency mutation: {name}")
 
+    good_gitlink = f"160000 commit {MBEDTLS_COMMIT}\t{IDF_MBEDTLS_SUBMODULE}\n"
+    check_idf_mbedtls(good_gitlink, f"{MBEDTLS_COMMIT}\n")
+    for name, gitlink, head in (
+        ("idf-gitlink", good_gitlink.replace(MBEDTLS_COMMIT, "1" * 40), f"{MBEDTLS_COMMIT}\n"),
+        ("idf-gitlink-missing", "", f"{MBEDTLS_COMMIT}\n"),
+        ("idf-checkout", good_gitlink, f"{'2' * 40}\n"),
+    ):
+        try:
+            check_idf_mbedtls(gitlink, head)
+        except DependencyError as exc:
+            require("harness Mbed TLS commit" in str(exc),
+                    f"self-test {name} failed for the wrong reason: {exc}")
+        else:
+            raise DependencyError(f"self-test accepted ESP-IDF Mbed TLS drift: {name}")
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parent.parent)
     parser.add_argument("--self-test", action="store_true")
+    parser.add_argument("--idf-path", type=Path,
+                        help="pinned ESP-IDF checkout whose mbedtls submodule must match the harness")
     args = parser.parse_args()
     root = args.root.absolute()
     try:
         validate(root)
+        if args.idf_path is not None:
+            validate_idf_mbedtls(args.idf_path.absolute())
         if args.self_test:
             self_test(root)
     except (DependencyError, OSError, UnicodeError) as exc:
@@ -257,8 +403,10 @@ def main() -> int:
         return 1
     print(
         "dependency-contract: PASS "
-        f"(ESP-IDF v5.5.5, {len(TARGETS)} locks, tesla-ble {TESLA_VERSION}, "
+        f"(ESP-IDF v6.1, {len(TARGETS)} locks, tesla-ble {TESLA_VERSION}, "
+        f"{len(ESPRESSIF_COMPONENTS)} Espressif Git components, "
         f"{len(PATCH_INVENTORY)} patches"
+        + (", image Mbed TLS = harness" if args.idf_path is not None else "")
         + (", mutation canaries" if args.self_test else "")
         + ")"
     )

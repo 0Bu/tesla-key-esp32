@@ -15,7 +15,7 @@
 // header must not include esp_system.h — the host mock build compiles it with the system
 // toolchain and no ESP-IDF exists there — so it cannot name esp_reset_reason_t and instead
 // MIRRORS that enum's numeric values below. That mirror is the load-bearing assumption: it is
-// pinned to ESP-IDF 5.x, where the enumerators are
+// pinned to ESP-IDF 5.x and re-verified unchanged on 6.1, where the enumerators are
 //   UNKNOWN=0 POWERON=1 EXT=2 SW=3 PANIC=4 INT_WDT=5 TASK_WDT=6 WDT=7
 //   DEEPSLEEP=8 BROWNOUT=9 SDIO=10 USB=11 JTAG=12 EFUSE=13 PWR_GLITCH=14 CPU_LOCKUP=15
 // and the .cpp that calls this should static_assert the handful it depends on against the IDF
@@ -30,8 +30,8 @@
 
 namespace tk {
 
-// Numeric mirror of ESP-IDF 5.x esp_reset_reason_t — see the pinning note above. Scoped, with an
-// explicit int underlying type, so casting ANY int into it is well defined and the switch below
+// Numeric mirror of ESP-IDF 5.x/6.1 esp_reset_reason_t — see the pinning note above. Scoped, with
+// an explicit int underlying type, so casting ANY int into it is well defined and the switch below
 // can fall through to "unknown" for a value this table has never heard of.
 enum class ResetCode : int {
     Unknown    = 0,

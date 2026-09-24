@@ -23,9 +23,9 @@ source_sha="${2:?usage: ci-build-verify.sh <display-version> <source-sha>}"
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 cd "$repo_root"
 
-# These tests compile against the exact cJSON sources under the pinned ESP-IDF's IDF_PATH. Run
-# their sanitizer modes once before spending time on eight target builds (four primary + four
-# isolated reproducibility rebuilds).
+# These tests compile against the exact cJSON sources of the espressif/cjson commit the target
+# lockfiles pin. Run their sanitizer modes once before spending time on eight target builds (four
+# primary + four isolated reproducibility rebuilds).
 if [[ -z "$target_override" ]]; then
   CJSON_OOM_SANITIZE=1 bash ./test/run-cjson-oom-tests.sh
   MQTT_JSON_SANITIZE=1 bash ./test/run-mqtt-json-publish-tests.sh

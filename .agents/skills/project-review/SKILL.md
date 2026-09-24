@@ -11,12 +11,13 @@ description: "Read-only whole-project coherence review of tesla-key-esp32 for bu
 
 # project-review — holistic coherence audit of tesla-key-esp32
 
-This project is an **ESP-IDF 5.x C++ firmware** for the **ESP32 family** — one source tree
+This project is an **ESP-IDF 6.x C++ firmware** for the **ESP32 family** — one source tree
 builds for esp32 / esp32s3 / esp32c3 / esp32c6 — exactly the four targets yoziru/tesla-ble
 supports, which the ESP-IDF Component Manager enforces at dependency resolution. All four receive
 the complete ordered repository patch series in `patches/tesla-ble/` via root CMake: the
-trim of unused Parental Controls actions, and signer.go session-counter replay alignment that
-keeps esp32c6 under the app-size policy (native orchestration in `main/logic/` handles framing,
+trim of unused Parental Controls actions, signer.go session-counter replay alignment that
+keeps esp32c6 under the app-size policy, and the PSA Crypto port of the crypto bindings that
+Mbed TLS 4 requires (native orchestration in `main/logic/` handles framing,
 dispatch, monotonic session progression, and transactional key regeneration). The firmware acts as a **BLE↔HTTP proxy for a Tesla
 vehicle**, API-compatible with TeslaBleHttpProxy,
 so it works as an **evcc** BLE vehicle. It is small but dense with **non-local invariants**:
@@ -436,6 +437,13 @@ that describe it. When reviewing a change (or the repo as a whole), check these 
   7. Renovate lifecycle: when closing an automated dependency PR manually, document in `.github/renovate.json`
      that it was abandoned and that `currentValue` will track future releases. Never hand-edit or commit
      `managed_components/`; the configure-time patch script owns generated checkout changes.
+- **ESP-IDF image bump** → `esp-idf-toolchain.txt` **and** all four locks regenerated in the new image
+  **and** `scripts/check-dependency-contract.py` (toolchain, IDF version, digests, `MBEDTLS_COMMIT`)
+  **and** the harness `MBEDTLS_REF`, which the in-image dependency gate binds to ESP-IDF's mbedtls
+  submodule. Rerun the V1 vectors against patch 0006, the build-semantics contract and the size/stack
+  baselines, and keep `docs/adr/0002-idf6-mbedtls4-crypto-seam.md` current. Older bootloaders boot
+  newer-IDF apps (the OTA path), not the reverse: a device installed with a newer ESP-IDF bootloader
+  must not be downgraded to an older-IDF release.
 
 ## Reviewing the skills (meta-coherence)
 

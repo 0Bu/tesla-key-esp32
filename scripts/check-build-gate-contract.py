@@ -146,6 +146,7 @@ REQUIRED_FILES = (
     "dependencies.lock.esp32c6",
     "patches/tesla-ble/0004-drop-unused-parental-controls-actions.patch",
     "patches/tesla-ble/0005-align-session-counter-replay-with-signer-go.patch",
+    "patches/tesla-ble/0006-port-crypto-bindings-to-psa.patch",
     "test/run-cjson-oom-tests.sh",
     "test/run-mqtt-json-publish-tests.sh",
 )
@@ -648,6 +649,8 @@ def validate(root: Path) -> None:
         ("check-dependency-contract.py --root .", "check-partition-contract.py --csv partitions.csv",
          "# EXACT_FOUR_TARGETS_BEGIN build"),
     )
+    require(build_all.count('python3 scripts/check-dependency-contract.py --root . --idf-path "${IDF_PATH:?') == 1,
+            "ci-build-all.sh: dependency preflight must bind the image Mbed TLS to the harness pin")
     require(build_all.count('-D "PROJECT_VER=$version"') == 2,
             "ci-build-all.sh: display version must bind both target configuration invocations")
     require(reproducible.count('-D "PROJECT_VER=$version"') == 2,
@@ -770,10 +773,18 @@ def validate(root: Path) -> None:
         (cjson_test, "run-cjson-oom-tests.sh", "CJSON_OOM_SANITIZE"),
         (mqtt_json_test, "run-mqtt-json-publish-tests.sh", "MQTT_JSON_SANITIZE"),
     ):
-        require(': "${IDF_PATH:?' in text and
-                '$IDF_PATH/components/json/cJSON' in text and
-                '"v5.5.5"' in text and variable in text,
-                f"{label}: exact ESP-IDF v5.5.5 cJSON/sanitizer contract drifted")
+        # ESP-IDF 6 dropped its bundled cJSON: the gates must compile the espressif/cjson commit
+        # that all four target lockfiles pin, through its upstream submodule gitlink.
+        require('(root / f"dependencies.lock.{target}")' in text and
+                'for target in ("esp32", "esp32s3", "esp32c3", "esp32c6"):' in text and
+                '^  espressif/cjson:' in text and
+                'cjson_repo="https://github.com/espressif/idf-extra-components.git"' in text and
+                'cjson_upstream="https://github.com/DaveGamble/cJSON.git"' in text and
+                '--get submodule.cjson/cJSON.url' in text and
+                '[ "$(git -C "$cjson_cache/cJSON" rev-parse HEAD)" != "$cjson_submodule_commit" ]'
+                in text and
+                'cjson_dir="$cjson_cache/cJSON"' in text and variable in text,
+                f"{label}: exact locked-cJSON source/sanitizer contract drifted")
     require(release_test.count(EXACT_TARGET_LOOP) == 1,
             "test-release-contract.sh: signer verification loop must cover exactly four targets")
     marked_target_loop(
@@ -1202,6 +1213,9 @@ def self_test(root: Path) -> None:
         ("dependency-build-wiring", "scripts/ci-build-all.sh",
          "python3 scripts/check-dependency-contract.py --root .",
          "python3 scripts/missing-dependency-contract.py --root .", "required stage is missing"),
+        ("dependency-idf-mbedtls-wiring", "scripts/ci-build-all.sh",
+         ' --idf-path "${IDF_PATH:?', ' --unbound "${IDF_PATH:?',
+         "bind the image Mbed TLS to the harness pin"),
         ("dependency-signer-wiring", "scripts/ci-sign-artifacts.sh",
          'python3 scripts/check-dependency-contract.py --root "$source_root"',
          'python3 scripts/missing-dependency-contract.py --root "$source_root"',
@@ -1468,8 +1482,9 @@ def self_test(root: Path) -> None:
         ("mqtt-json-wiring", "scripts/ci-build-verify.sh",
          "MQTT_JSON_SANITIZE=1 bash ./test/run-mqtt-json-publish-tests.sh",
          "true", "required stage is missing"),
-        ("cjson-pin", "test/run-cjson-oom-tests.sh", '"v5.5.5"', '"v6.0.0"',
-         "v5.5.5 cJSON"),
+        ("cjson-pin", "test/run-cjson-oom-tests.sh",
+         'cjson_upstream="https://github.com/DaveGamble/cJSON.git"',
+         'cjson_upstream="https://example.invalid/cJSON.git"', "locked-cJSON source"),
     )
     for name, relative, old, new, expected in mutations:
         with tempfile.TemporaryDirectory(prefix=f"build-gate-{name}-") as directory:

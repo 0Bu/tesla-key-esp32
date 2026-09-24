@@ -417,7 +417,8 @@ native, hardware-free pure-logic orchestration in `main/logic/`:
 - **Native Transactional Key Regeneration** (`logic/key_rotation.hpp` `tk::regenerate_private_key()`, called from `main/vehicle_pairing.cpp`): Transactional private-key generation with a 2048 B PEM export and automatic rollback on NVS failure, replacing patch 0002; `test/test_tesla_ble_harness.cpp` runs it against the real tesla-ble. The host-tested `logic/key_rotation.hpp` contract keeps `tesla_ble/key_rotate` armed across power loss and blocks vehicle construction/signing until that cleanup reaches its durable terminal state; an NVS probe error blocks too and cannot be mistaken for an absent marker. A VIN transition is also journalled as `tesla_cfg/vin_txn`; the host-tested recovery decision lives in `logic/vin_transition.hpp`, so power loss cannot silently combine a new VIN with the old key/session state.
 - **Native Command FIFO & Request Runner** (`logic/command_runner.hpp`): Bounded FIFO queue (8 slots) arbitrating multi-phase prerequisites (VCSEC auth -> wake -> infotainment session auth -> payload execution) with exponential backoff and nominal `already_set` outcome evaluation.
 
-As a result, patches 0001-0003 were retired. The remaining patch series consists of two surgical patches:
+As a result, patches 0001-0003 were retired. The remaining patch series consists of two surgical patches
+and one crypto-binding port:
 
 The first patch (`0004-drop-unused-parental-controls-actions.patch`) drops the five Parental Controls arms that
 v5.1.2 added to the `CarServer_VehicleAction` oneof, together with their nanopb message descriptors. The
@@ -434,9 +435,17 @@ a lower counter, keep `max(local, reported)` and still apply epoch/time, instead
 which breaks anti-replay monotonicity; removing the call site in `src/peer.cpp` also lets `--gc-sections` drop
 the otherwise-dead `force_update_session` and keeps esp32c6 inside the OTA slot budget.
 
+The third patch (`0006-port-crypto-bindings-to-psa.patch`) moves the library's crypto bindings from the
+legacy Mbed TLS 3 API, which ESP-IDF 6's Mbed TLS 4 removed, to PSA Crypto: P-256 keys live as PSA keys,
+ECDH uses `psa_raw_key_agreement`, AES-128-GCM uses `psa_aead_*`, SHA-1/SHA-256 use `psa_hash_compute`,
+HMAC-SHA256 uses `psa_mac_compute` and randomness comes from `psa_generate_random`, while `mbedtls_pk` still
+parses and writes the PEM kept in NVS. Wire bytes, session derivation and the stored key format are unchanged; the V1 protocol vectors in
+`test/test_tesla_ble_harness.cpp` prove it against the pinned Mbed TLS 4 (see
+[`adr/0002-idf6-mbedtls4-crypto-seam.md`](adr/0002-idf6-mbedtls4-crypto-seam.md)).
+
 All four images use the same tesla-ble revision and ordered patch-series behavior. The wider orchestration seam
 and reference alignment is [`adr/0005-tesla-ble-seam.md`](adr/0005-tesla-ble-seam.md)
-(and for the IDF-6 / Mbed TLS 4 crypto seam, issue #61, [`adr/0002-idf6-mbedtls4-crypto-seam.md`](adr/0002-idf6-mbedtls4-crypto-seam.md)).
+(and for the ESP-IDF 6 / Mbed TLS 4 crypto seam, issue #61, [`adr/0002-idf6-mbedtls4-crypto-seam.md`](adr/0002-idf6-mbedtls4-crypto-seam.md)).
 
 **On-device ST7735 display (LilyGO T-Dongle-S3).** The dongle carries a
 0.96" ST7735 LCD and it IS driven — see `main/display.cpp` (a status panel: WiFi/BLE header + a
@@ -960,9 +969,9 @@ audit every SPI and auxiliary pin against earlier candidates before it may join 
 ESP-IDF ships a CI configuration for exactly this polling shape
 (`components/esp_eth/test_apps/sdkconfig.ci.poll_w5500`, also 10 ms at 20 MHz). The poll period
 bounds RX *latency*, not throughput: each poll drains everything queued in the W5500's 16 KB
-buffer. Note that ESP-IDF **6.0 moves the SPI Ethernet drivers out of the core** into the
-`esp-eth-drivers` component — one `idf_component.yml` line whenever the IDF-6 work
-([ADR-0002](adr/0002-idf6-mbedtls4-crypto-seam.md)) happens.
+buffer. ESP-IDF **6 moved the SPI Ethernet drivers out of the core** into `esp-eth-drivers`: the
+W5500 MAC/PHY now comes from the `espressif/w5500` component, which `main/idf_component.yml` pins to a
+Git commit and resolves for esp32s3 only, so `CONFIG_TESLA_ETH_ENABLED` exists only on that target.
 
 **The wire is made to win the default route — lwIP does not do it on its own.** ESP-IDF ships
 `WIFI_STA_DEF` at `route_prio` **100** and `ETH_DEF` at **50** (`esp_netif_defaults.h`), i.e. the
@@ -1330,8 +1339,9 @@ Responses use `JsonBuilder`, whose failure bit is sticky: a failed Create/Add re
 until all stack emitters have unwound, then discards the whole tree instead of leaking a partial
 HTTP-200/MCP result. REST and MCP serialize through the same `json_http_reply` production seam;
 it does not apply a success status or send until printing completed, and print OOM sets 503 before
-the one fixed fallback send. `test/run-cjson-oom-tests.sh` compiles the exact cJSON source from
-pinned ESP-IDF v5.5.5 and fails every allocation in the production status emitter, representative
+the one fixed fallback send. `test/run-cjson-oom-tests.sh` compiles the exact cJSON source of the
+`espressif/cjson` commit the target lockfiles pin (ESP-IDF 6 no longer bundles cJSON) and fails every
+allocation in the production status emitter, representative
 REST/MCP envelopes, their shared reply seam and the parser;
 the MQTT companion does the same for retained discovery/state payloads and broker failures. The
 tests prove ownership and response policy behind deterministic transport/publish seams. Only the

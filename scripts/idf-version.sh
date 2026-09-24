@@ -7,7 +7,9 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 contract="$repo_root/esp-idf-toolchain.txt"
 value="$(tr -d '[:space:]' < "$contract")"
 
-if ! [[ "$value" =~ ^v[0-9]+\.[0-9]+\.[0-9]+@sha256:[0-9a-f]{64}$ ]]; then
+# ESP-IDF tags a minor release without a patch component (v6.1), its bugfix releases with one
+# (v6.1.1); both are accepted, always bound to the immutable manifest-list digest.
+if ! [[ "$value" =~ ^v[0-9]+\.[0-9]+(\.[0-9]+)?@sha256:[0-9a-f]{64}$ ]]; then
   echo "idf-version: invalid toolchain contract in $contract" >&2
   exit 1
 fi

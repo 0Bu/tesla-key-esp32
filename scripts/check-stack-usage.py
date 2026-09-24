@@ -165,7 +165,7 @@ def baseline_document(targets: dict[str, FrameInventory]) -> dict[str, Any]:
     return {
         "schemaVersion": 2,
         "baselineKind": "reviewed-large-frames",
-        "toolchain": "ESP-IDF v5.5.5",
+        "toolchain": "ESP-IDF v6.1",
         "absoluteMaxBytes": ABSOLUTE_MAX_BYTES,
         "reviewThresholdBytes": REVIEW_THRESHOLD_BYTES,
         "targets": {
@@ -188,8 +188,8 @@ def load_baseline(path: Path, target: str) -> dict[str, Any]:
         raise StackUsageError(f"stack baseline fields must be exactly {sorted(expected_top)}")
     if root.get("schemaVersion") != 2 or root.get("baselineKind") != "reviewed-large-frames":
         raise StackUsageError("stack baseline must be schemaVersion 2 reviewed-large-frames")
-    if root.get("toolchain") != "ESP-IDF v5.5.5":
-        raise StackUsageError("stack baseline must be bound to ESP-IDF v5.5.5")
+    if root.get("toolchain") != "ESP-IDF v6.1":
+        raise StackUsageError("stack baseline must be bound to ESP-IDF v6.1")
     if root.get("absoluteMaxBytes") != ABSOLUTE_MAX_BYTES:
         raise StackUsageError(
             f"stack baseline absolute maximum must be {ABSOLUTE_MAX_BYTES} bytes"

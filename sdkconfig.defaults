@@ -122,12 +122,10 @@ CONFIG_FREERTOS_WATCHPOINT_END_OF_STACK=y
 # 0x12000..0x20000 hole, so it costs no OTA headroom). main/diag_crash.cpp reads only the SUMMARY
 # at the next boot (esp_core_dump_get_summary: task / PC / backtrace / app-elf-sha) and never
 # re-parses it on a request path; GET /coredump streams the raw image for offline symbolisation.
-# ENABLE_TO_FLASH is the line that does the work — it select-s ESP_COREDUMP_ENABLE. The ELF format
-# is spelled out rather than left to the default because the offline decoder
+# ENABLE_TO_FLASH is the line that does the work — it select-s ESP_COREDUMP_ENABLE. ESP-IDF 6 removed
+# the binary format and the CRC32 checksum, so ELF + SHA-256 — what the offline decoder
 # (`esp-coredump info_corefile -c coredump.bin build/tesla-key-esp32.elf`, shipped with ESP-IDF)
-# and espcoredump's SHA-256 image match both assume it; on IDF v6 the symbol disappears (ELF
-# becomes the only format), so a future IDF bump should DELETE that line rather than carry it
-# inert.
+# and espcoredump's image match assume — is the only layout and needs no Kconfig line of its own.
 # Size note: the coredump component + the summary parser cost a few KB of app flash. Re-measure on
 # the LARGEST target (currently esp32c6) rather than
 # on esp32s3, and measure against the 64 KB Secure-Boot padding boundary rather than the gate: an
@@ -135,7 +133,6 @@ CONFIG_FREERTOS_WATCHPOINT_END_OF_STACK=y
 # That is exactly what pushed esp32c5 past its OTA slot and got the target dropped
 # (docs/adr/0004-drop-esp32c5-target.md).
 CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y
-CONFIG_ESP_COREDUMP_DATA_FORMAT_ELF=y
 # CONFIG_ESP_COREDUMP_CAPTURE_DRAM must remain off so core dumps capture only task stacks, never
 # full DRAM (which could contain decrypted private keys or credentials).
 
@@ -187,16 +184,13 @@ CONFIG_MBEDTLS_TLS_CLIENT_ONLY=y
 # No filesystem: certs/keys come from the CA bundle and NVS, never a VFS path. ~1.2 KB.
 CONFIG_MBEDTLS_FS_IO=n
 
-# Drop obsolete and unneeded elliptic curves: Tesla BLE strictly uses NIST P-256 (SECP256R1),
-# while Web PKI / TLS uses P-256, P-384, P-521, or X25519. Dropping Brainpool (BP256/384/512)
-# and obsolete small curves (SECP192/224) saves flash across all targets with zero runtime risk.
+# Drop unneeded elliptic curves: Tesla BLE strictly uses NIST P-256 (SECP256R1), while Web PKI /
+# TLS uses P-256, P-384, P-521, or X25519. Dropping Brainpool (BP256/384/512) and secp256k1 saves
+# flash across all targets with zero runtime risk. The small SECP192/224 curves need no line:
+# Mbed TLS 4 removed them, and ESP-IDF 6 no longer defines their Kconfig symbols.
 CONFIG_MBEDTLS_ECP_DP_BP256R1_ENABLED=n
 CONFIG_MBEDTLS_ECP_DP_BP384R1_ENABLED=n
 CONFIG_MBEDTLS_ECP_DP_BP512R1_ENABLED=n
-CONFIG_MBEDTLS_ECP_DP_SECP192R1_ENABLED=n
-CONFIG_MBEDTLS_ECP_DP_SECP224R1_ENABLED=n
-CONFIG_MBEDTLS_ECP_DP_SECP192K1_ENABLED=n
-CONFIG_MBEDTLS_ECP_DP_SECP224K1_ENABLED=n
 CONFIG_MBEDTLS_ECP_DP_SECP256K1_ENABLED=n
 
 # Drop unused X.509 parsing: the firmware only verifies server certificates against the Mozilla

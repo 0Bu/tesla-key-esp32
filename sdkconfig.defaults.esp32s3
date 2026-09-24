@@ -40,8 +40,10 @@ CONFIG_TESLA_DISPLAY_BL=38
 # the PoE base's SPI SCLK — so net_eth_probe() refuses to probe once tk::board_is_t_dongle_s3()
 # says yes. That shared detector is why the probe is safe to compile in unconditionally here.
 #
-# NOT enabled for esp32/esp32c3/esp32c6: no board in use has a W5500, and esp32c6 has only ~92 KB
-# under the ci-build-all.sh size gate, where growth is quantised to 64 KB Secure-Boot blocks.
+# NOT enabled for esp32/esp32c3/esp32c6: no board in use has a W5500, and esp32c6 has the least
+# headroom under the ci-build-all.sh size gate, where growth is quantised to 64 KB Secure-Boot
+# blocks. On ESP-IDF 6 the option exists only here: the espressif/w5500 driver is resolved for
+# esp32s3 only (main/idf_component.yml).
 CONFIG_TESLA_ETH_ENABLED=y
 CONFIG_TESLA_ETH_SPI_SCLK=5
 CONFIG_TESLA_ETH_SPI_CS=6
