@@ -22,13 +22,6 @@ fi
 remote_name="${1:-origin}"
 remote_url="${2:-}"
 
-# 1. Prevent direct pushes from main branch
-current_branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")"
-if [ "$current_branch" = "main" ]; then
-    echo "BLOCKED by pre-push: direct push to main branch is prohibited; open a pull request instead." >&2
-    exit 1
-fi
-
 # Read standard pre-push stdin: <local_ref> <local_sha> <remote_ref> <remote_sha>
 has_firmware_changes=0
 has_vehicle_changes=0
@@ -41,10 +34,16 @@ if [ ! -t 0 ]; then
   done
 fi
 
+current_branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")"
+
 # If invoked without stdin lines (e.g. manual verification)
 if [ "${#updates[@]}" -eq 0 ]; then
   if [ -z "$current_branch" ] || [ "$current_branch" = "HEAD" ]; then
     echo "BLOCKED by pre-push: cannot determine branch to verify from detached HEAD." >&2
+    exit 1
+  fi
+  if [ "$current_branch" = "main" ]; then
+    echo "BLOCKED by pre-push: direct push to main branch is prohibited; open a pull request instead." >&2
     exit 1
   fi
   head_sha="$(git rev-parse HEAD 2>/dev/null || echo "")"
@@ -60,6 +59,12 @@ for update in "${updates[@]}"; do
   # Block any attempt to update destination main branch
   if [[ "$remote_ref" == "refs/heads/main" || "$remote_ref" == "main" ]]; then
     echo "BLOCKED by pre-push: direct push to destination main branch is prohibited; open a pull request instead." >&2
+    exit 1
+  fi
+
+  # Block any attempt to push from local main branch
+  if [[ "$local_ref" == "refs/heads/main" || "$local_ref" == "main" ]]; then
+    echo "BLOCKED by pre-push: direct push to main branch is prohibited; open a pull request instead." >&2
     exit 1
   fi
 
