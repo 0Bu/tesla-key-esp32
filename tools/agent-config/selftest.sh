@@ -300,6 +300,7 @@ for skill in project-review skill-audit; do
   baseline_canary "$skill-report-sha" "$skill" 's/Reviewed SHA: <full-40-hex HEAD>/Reviewed: HEAD/g'
 done
 baseline_canary "project-review-pr-head" project-review 's/--json headRefOid/--json headRefName/g'
+baseline_canary "project-review-stale-pr-base" project-review 's/withhold the merge-gate record/still stamp the merge-gate record/g'
 baseline_canary "skill-audit-equality" skill-audit 's/Pin by ancestry, not equality/Pin by equality/g'
 
 fixture="$WORK/safety"; make_fixture "$fixture"

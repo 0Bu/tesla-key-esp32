@@ -122,7 +122,7 @@ const reviewedSkillSha256 = new Map([
   ["mock-test", "8cfaaa7d4d7fdbda24375ca743f9954ee39c6db053684000fac1bf1bce00ac0f"],
   ["ota-release-verify", "1504ad6c0d781bbfef36c3eca75813faff6e4a5896a5f1bac04507a4e77456e8"],
   ["pr-hygiene", "0b73adc70cb8185d19fe868a2aa8dc195e1d2eec792ae7b498672f2bb6e99459"],
-  ["project-review", "b122bfda1f76fb05c6a20a7ad358d85857bdf820771991b63db1ab480b7aa61b"],
+  ["project-review", "c430846321a9c881301f3a05de6e7fdd19dcd536cd0e5ba63b40ce8894745c32"],
   ["ship", "47f0e4d2408af37cb127404638e5c1294b335745c249f751d6acc3f3a8210d46"],
   ["skill-audit", "3b207063ba5825e707656c27ad562ed8f100123257f3c5b851ef2ae7f3daf643"],
   ["usb-recovery", "6694f24ac6b7c3330bbfb100339c9646865b771f9201e9eba127cb8108ab8bb5"],
@@ -317,7 +317,10 @@ for (const name of canonicalSkills) {
       "instead of a findings list",
       "reviewed sha: <full-40-hex head>",
     ];
-    if (name === "project-review") baselineTokens.push("`gh pr view <n> --json headrefoid`");
+    if (name === "project-review") {
+      baselineTokens.push("`gh pr view <n> --json headrefoid`",
+        "withhold the merge-gate record until the pr contains current main");
+    }
     if (name === "skill-audit") baselineTokens.push("pin by ancestry, not equality");
     for (const token of baselineTokens) {
       if (!textLower.includes(token)) {

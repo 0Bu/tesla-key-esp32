@@ -577,7 +577,11 @@ fixture="$tmp/prepush-fixture"
 mkdir -p "$fixture/.githooks" "$fixture/tools"
 cp "$root/.githooks/pre-push" "$fixture/.githooks/pre-push"
 cp -R "$root/tools/agent-hooks" "$fixture/tools/agent-hooks"
-fixture_git(){ "$real_git" -C "$fixture" -c user.name=selftest -c user.email=selftest@example.invalid \
+# Inherited GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE (set inside Git hooks) would redirect -C into the
+# real repository, so every fixture command runs with those repository selectors cleared.
+fixture_env=(env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_COMMON_DIR -u GIT_OBJECT_DIRECTORY
+  -u GIT_ALTERNATE_OBJECT_DIRECTORIES -u GIT_NAMESPACE -u GIT_CEILING_DIRECTORIES)
+fixture_git(){ "${fixture_env[@]}" "$real_git" -C "$fixture" -c user.name=selftest -c user.email=selftest@example.invalid \
   -c commit.gpgsign=false -c core.hooksPath=/dev/null "$@"; }
 fixture_ready=1
 {
@@ -592,7 +596,7 @@ fixture_sha="$(fixture_git rev-parse HEAD 2>/dev/null || true)"
 [ "$fixture_ready" = 1 ] && [ -n "$fixture_sha" ] && pass_case 'pre-push fixture repository created' \
   || fail_case 'pre-push fixture repository created'
 fixture_body="$(printf '%s\n' '- [x] $skill-audit clean — PR create/push gate @ '"$fixture_sha" '- [x] $pr-hygiene clean — content gate @ '"$fixture_sha")"
-fixture_hook(){ ( cd "$fixture" && env -u TEST_BRANCH -u TEST_ROOT PATH="$tmp/bin:$PATH" TEST_HEAD="$fixture_sha" "$@" ./.githooks/pre-push origin </dev/null ); }
+fixture_hook(){ ( cd "$fixture" && "${fixture_env[@]}" -u TEST_BRANCH -u TEST_ROOT PATH="$tmp/bin:$PATH" TEST_HEAD="$fixture_sha" "$@" ./.githooks/pre-push origin </dev/null ); }
 
 # Acceptance: a named branch with current records passes. The pre-fix four-element fallback fails
 # here with "commit () does not match local HEAD", so this case is the R1 negative control.

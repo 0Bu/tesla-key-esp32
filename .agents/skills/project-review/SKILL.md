@@ -45,9 +45,11 @@ Work in this order — it's what makes the review catch *drift* rather than just
    - Whole-project review: require `HEAD` to equal `origin/main`.
    - PR review: require `HEAD` to equal the PR head reported by `gh pr view <N> --json headRefOid`
      (not `origin/<branch>`, which does not exist for fork PRs and is only as fresh as its last
-     fetch). Report `git merge-base origin/main HEAD`; when
-     `git merge-base --is-ancestor origin/main HEAD` fails, also report how far the PR base is
-     behind (`git rev-list --count HEAD..origin/main`).
+     fetch). Report `git merge-base origin/main HEAD`. When
+     `git merge-base --is-ancestor origin/main HEAD` fails, the PR does not contain current
+     main: report how far its base is behind (`git rev-list --count HEAD..origin/main`), scope
+     the findings to the PR head as reviewed, and withhold the merge-gate record until the PR
+     contains current main and is reviewed again.
    - On any other mismatch, stop and report **stale or divergent baseline** with those SHAs
      instead of a findings list. A commit count alone hides divergence;
      `merge-base --is-ancestor` exposes it.

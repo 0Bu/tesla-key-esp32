@@ -1673,13 +1673,16 @@ def require_vin_transition_cleanup_contract(main_source: str) -> None:
         raise AssertionError("app_main: VIN cleanup predicate is not a direct CompleteNewIdentity statement")
     gate_open = predicate[0].end() - 1
     gate_close = balanced_end(branch, gate_open, "{", "}", "VIN cleanup predicate failure block")
-    if not re.search(r"\bboot_fatal\s*\(", branch[gate_open:gate_close]):
-        raise AssertionError("app_main: VIN cleanup predicate failure must boot_fatal")
+    if not any(innermost_block_opening(branch, fatal.start(), "VIN cleanup halt") == gate_open
+               and branch[: fatal.start()].rstrip()[-1:] in (";", "{", "}")
+               for fatal in re.compile(r"\bboot_fatal\s*\(").finditer(branch, gate_open, gate_close)):
+        raise AssertionError("app_main: VIN cleanup predicate failure must boot_fatal unconditionally")
 
-    marker = list(re.finditer(
-        r"config_store\.remove\(\s*tk::nvs_contract::kVinTransition\s*\)", branch))
-    if len(marker) != 1:
-        raise AssertionError("app_main: CompleteNewIdentity must remove the VIN marker exactly once")
+    marker = list(re.finditer(r"\bkVinTransition\b", branch))
+    if len(marker) != 1 or not re.search(
+            r"\bconfig_store\.remove\(\s*tk::nvs_contract::$", branch[: marker[0].start()]):
+        raise AssertionError("app_main: CompleteNewIdentity must name the VIN marker exactly once, "
+                             "in config_store.remove(tk::nvs_contract::kVinTransition)")
     if marker[0].start() < gate_close:
         raise AssertionError("app_main: VIN transition marker removed before the cleanup predicate gate")
     restart = branch.rfind("esp_restart();")
@@ -1709,6 +1712,11 @@ def require_telemetry_epoch_cache_contract(telemetry_source: str) -> None:
         occurrences = list(assignment.finditer(body))
         if not occurrences:
             raise AssertionError(f"process_pending_telemetry_ missing publication of last_known_{kind}_")
+        if len(re.findall(rf"\blast_known_{kind}_\b", body)) != len(occurrences):
+            raise AssertionError(
+                f"process_pending_telemetry_ touches last_known_{kind}_ other than by a checked "
+                "assignment (swap, alias, memcpy or read)"
+            )
         if len(list(assignment.finditer(scrubbed_file))) != len(occurrences):
             raise AssertionError(
                 f"vehicle_telemetry.cpp assigns last_known_{kind}_ outside process_pending_telemetry_"
@@ -1741,7 +1749,12 @@ PAIRING_CACHE_FIELDS = (
 
 def require_pairing_cleanup_epoch_contract(pairing_source: str) -> None:
     body = scrub_cpp_preserving_layout(function_body_in(pairing_source, "clear_session_and_cache_"))
-    epoch = [m.start() for m in re.finditer(r"\bidentity_epoch_\.fetch_add\s*\(", body)]
+    epoch = [m.start() for m in re.finditer(r"\bidentity_epoch_\b", body)]
+    if len(epoch) != 1 or not re.match(
+            r"identity_epoch_\.fetch_add\(\s*1\s*,\s*std::memory_order_acq_rel\s*\)\s*;",
+            body[epoch[0]:]):
+        raise AssertionError(
+            "clear_session_and_cache_ must bump identity_epoch_ once with fetch_add(1, acq_rel)")
     pending = [m.start() for m in re.finditer(r"\btelemetry_pending_mask_\s*=\s*0\s*;", body)]
     guards = list(CACHE_MUTEX_GUARD.finditer(body))
     if len(epoch) != 1:
@@ -1752,6 +1765,10 @@ def require_pairing_cleanup_epoch_contract(pairing_source: str) -> None:
         raise AssertionError("clear_session_and_cache_ must take tk::MutexGuard(cache_mutex_) exactly once")
     if not epoch[0] < pending[0]:
         raise AssertionError("pairing cleanup must bump identity epoch before discarding pending telemetry")
+    enter = body.rfind("portENTER_CRITICAL(&telemetry_pending_mux_);", 0, pending[0])
+    leave = body.find("portEXIT_CRITICAL(&telemetry_pending_mux_);", pending[0])
+    if enter < 0 or leave < 0 or body.find("portEXIT_CRITICAL(", enter, pending[0]) >= 0:
+        raise AssertionError("pairing cleanup must discard pending telemetry inside telemetry_pending_mux_")
     guard = guards[0]
     if not pending[0] < guard.start():
         raise AssertionError("pairing cleanup must discard pending telemetry before the cache reset")
@@ -5785,6 +5802,13 @@ def self_test_canaries(tasks: set[str], callbacks: set[str]) -> None:
             (vin_args, "true, true, true, true)"),)),
         ("VIN transition predicate fed a duplicated removal result", (
             (vin_args, "vcsec_removed, vcsec_removed, paired_removed, mac_removed)"),)),
+        ("VIN transition marker removed through an alternate spelling first", (
+            ("if (!tk::vin_transition_cleanup_ready_for_marker_removal(",
+             "(void)config_store.remove(nvs_contract::kVinTransition);\n"
+             "            if (!tk::vin_transition_cleanup_ready_for_marker_removal("),)),
+        ("VIN transition predicate failure halts only conditionally", (
+            ("boot_fatal(\"VIN transition completion\");",
+             "if (verbose) boot_fatal(\"VIN transition completion\");"),)),
         ("VIN transition predicate failure no longer halts", (
             ("boot_fatal(\"VIN transition completion\");",
              "ESP_LOGW(TAG, \"VIN transition completion\");"),)),
@@ -5825,6 +5849,9 @@ def self_test_canaries(tasks: set[str], callbacks: set[str]) -> None:
              "        }\n"
              "        last_known_drive_ = std::move(parsed);\n"
              "    }\n"),)),
+        ("telemetry cache written through std::swap", (
+            ("last_known_drive_ = std::move(parsed);",
+             "last_known_drive_ = std::move(parsed);\n                std::swap(last_known_drive_, parsed);"),)),
         ("telemetry second unchecked publication in process_pending_telemetry_", (
             ("    if (pending & PendingCharge) {\n        ChargeStateResult parsed{};",
              "    last_known_tires_ = {};\n"
@@ -5854,6 +5881,12 @@ def self_test_canaries(tasks: set[str], callbacks: set[str]) -> None:
              "    portEXIT_CRITICAL(&telemetry_pending_mux_);\n"
              "    identity_epoch_.fetch_add(1, std::memory_order_acq_rel);\n"
              "    portENTER_CRITICAL(&telemetry_pending_mux_);"),)),
+        ("pairing cleanup epoch bump that does not advance", (
+            ("identity_epoch_.fetch_add(1, std::memory_order_acq_rel);",
+             "identity_epoch_.fetch_add(0, std::memory_order_acq_rel);"),)),
+        ("pairing cleanup pending discard outside its critical section", (
+            ("    portENTER_CRITICAL(&telemetry_pending_mux_);\n    telemetry_pending_mask_ = 0;\n",
+             "    telemetry_pending_mask_ = 0;\n    portENTER_CRITICAL(&telemetry_pending_mux_);\n"),)),
         ("pairing cleanup missing cache field reset", (
             ("last_known_status_   = {};\n", ""),)),
         ("pairing cleanup cache MutexGuard removed (comment still names cache_mutex_)", (
