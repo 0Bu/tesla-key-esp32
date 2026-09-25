@@ -286,6 +286,22 @@ perl -0pi -e 's/Step 0 — pin the baseline/Step 0 — unpinned baseline/' \
   "$fixture/.agents/skills/skill-audit/SKILL.md"
 expect_failure "skill-audit baseline pin contract" "$fixture" "missing baseline pinning contract"
 
+# #329 P1: each Step 0 element is load-bearing, not only the heading.
+baseline_canary(){ # <label> <skill> <perl-substitution>
+  fixture="$WORK/baseline-$1"; make_fixture "$fixture"
+  perl -0pi -e "$3" "$fixture/.agents/skills/$2/SKILL.md"
+  expect_failure "$2 baseline pin: $1" "$fixture" "missing baseline pinning contract"
+}
+for skill in project-review skill-audit; do
+  baseline_canary "$skill-ancestry" "$skill" 's/merge-base --is-ancestor/merge-base/g'
+  baseline_canary "$skill-stop" "$skill" 's/stale or divergent baseline/unusual baseline/g'
+  baseline_canary "$skill-no-findings" "$skill" 's/instead of a\s+findings list/alongside the findings/g'
+  baseline_canary "$skill-clean-tree" "$skill" 's/git status --porcelain/git status/g'
+  baseline_canary "$skill-report-sha" "$skill" 's/Reviewed SHA: <full-40-hex HEAD>/Reviewed: HEAD/g'
+done
+baseline_canary "project-review-pr-head" project-review 's/--json headRefOid/--json headRefName/g'
+baseline_canary "skill-audit-equality" skill-audit 's/Pin by ancestry, not equality/Pin by equality/g'
+
 fixture="$WORK/safety"; make_fixture "$fixture"
 python3 - "$fixture/tools/agent-config/safety-invariants.json" <<'PY'
 import json, pathlib, sys

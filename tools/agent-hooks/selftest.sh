@@ -568,22 +568,56 @@ else
   fail_case 'pre-push hook fails closed on unresolvable diff range'
 fi
 
-cur_checkout="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")"
-out_detached="$("$root/.githooks/pre-push" origin </dev/null 2>&1 || true)"
-if [ "$cur_checkout" = "HEAD" ] || [ -z "$cur_checkout" ]; then
-  if printf '%s\n' "$out_detached" | grep -q 'BLOCKED by pre-push: cannot determine branch to verify from detached HEAD'; then
-    pass_case 'pre-push hook blocks detached HEAD without stdin'
-  else
-    fail_case 'pre-push hook blocks detached HEAD without stdin'
-  fi
+# The no-stdin fallback must not depend on the ambient checkout: Actions checks pull requests out
+# as detached HEAD, developers usually sit on a named branch. Run the working-tree hook and gate
+# library inside a throwaway repository whose branch state each case sets explicitly (#329 R1).
+# Its origin names the real GitHub repository but is never contacted: the gh double above answers
+# the open-PR lookup, and the diff base is the fixture's own HEAD~1.
+fixture="$tmp/prepush-fixture"
+mkdir -p "$fixture/.githooks" "$fixture/tools"
+cp "$root/.githooks/pre-push" "$fixture/.githooks/pre-push"
+cp -R "$root/tools/agent-hooks" "$fixture/tools/agent-hooks"
+fixture_git(){ "$real_git" -C "$fixture" -c user.name=selftest -c user.email=selftest@example.invalid \
+  -c commit.gpgsign=false -c core.hooksPath=/dev/null "$@"; }
+fixture_ready=1
+{
+  fixture_git init -q &&
+  fixture_git add -A && fixture_git commit -q -m fixture-base &&
+  printf 'docs-only change\n' >"$fixture/NOTES.md" &&
+  fixture_git add NOTES.md && fixture_git commit -q -m fixture-change &&
+  fixture_git checkout -q -B selftest-branch &&
+  fixture_git remote add origin https://github.com/0Bu/tesla-key-esp32.git
+} >/dev/null 2>&1 || fixture_ready=0
+fixture_sha="$(fixture_git rev-parse HEAD 2>/dev/null || true)"
+[ "$fixture_ready" = 1 ] && [ -n "$fixture_sha" ] && pass_case 'pre-push fixture repository created' \
+  || fail_case 'pre-push fixture repository created'
+fixture_body="$(printf '%s\n' '- [x] $skill-audit clean — PR create/push gate @ '"$fixture_sha" '- [x] $pr-hygiene clean — content gate @ '"$fixture_sha")"
+fixture_hook(){ ( cd "$fixture" && env -u TEST_BRANCH -u TEST_ROOT PATH="$tmp/bin:$PATH" TEST_HEAD="$fixture_sha" "$@" ./.githooks/pre-push origin </dev/null ); }
+
+# Acceptance: a named branch with current records passes. The pre-fix four-element fallback fails
+# here with "commit () does not match local HEAD", so this case is the R1 negative control.
+if out="$(fixture_hook TEST_BODY="$fixture_body" 2>&1)"; then
+  pass_case 'pre-push hook on named branch without stdin accepts current PR records'
 else
-  if printf '%s\n' "$out_detached" | grep -q "commit () does not match local HEAD"; then
-    fail_case 'pre-push hook on named branch without stdin parses HEAD and evaluates PR gates'
-  elif printf '%s\n' "$out_detached" | grep -Eq 'BLOCKED by pre-push: (PR policy gates not satisfied|direct push to)'; then
-    pass_case 'pre-push hook on named branch without stdin parses HEAD and evaluates PR gates'
-  else
-    fail_case 'pre-push hook on named branch without stdin parses HEAD and evaluates PR gates'
-  fi
+  fail_case "pre-push hook on named branch without stdin accepts current PR records ($(printf '%s' "$out" | tail -c 300))"
+fi
+out="$(fixture_hook TEST_NO_PR=1 2>&1)" && pass_case 'pre-push hook on named branch without stdin and no open PR passes' \
+  || fail_case "pre-push hook on named branch without stdin and no open PR passes ($(printf '%s' "$out" | tail -c 300))"
+# Evaluation: the same branch reaches the PR gate and is refused for a missing record.
+out="$(fixture_hook TEST_BODY="$(printf '%s\n' "$fixture_body" | grep -v pr-hygiene)" 2>&1)"; rc=$?
+if [ "$rc" -ne 0 ] && printf '%s\n' "$out" | grep -q 'BLOCKED by pre-push: PR policy gates not satisfied' \
+  && ! printf '%s\n' "$out" | grep -q 'does not match local HEAD'; then
+  pass_case 'pre-push hook on named branch without stdin evaluates PR gates'
+else
+  fail_case "pre-push hook on named branch without stdin evaluates PR gates (rc=$rc: $(printf '%s' "$out" | tail -c 300))"
+fi
+# Detached HEAD, as in Actions, still fails closed for its own stated reason.
+fixture_git checkout -q --detach >/dev/null 2>&1
+out="$(fixture_hook TEST_BODY="$fixture_body" 2>&1)"; rc=$?
+if [ "$rc" -ne 0 ] && printf '%s\n' "$out" | grep -q 'BLOCKED by pre-push: cannot determine branch to verify from detached HEAD'; then
+  pass_case 'pre-push hook blocks detached HEAD without stdin'
+else
+  fail_case "pre-push hook blocks detached HEAD without stdin (rc=$rc)"
 fi
 
 if printf 'refs/heads/%s %s refs/heads/%s %s\n' "$push_branch" "$sha" "$push_branch" "$sha" | \
@@ -595,11 +629,13 @@ else
   fail_case 'pre-push hook accepts valid push with verified gates and clean diff'
 fi
 
+# #329 R4: one sample per firmware-size input class, each checked on its own.
 size_relevant_samples=(
   "main/main.cpp"
   "main/logic/config_request.hpp"
   "CMakeLists.txt"
   "sdkconfig.defaults"
+  "sdkconfig.defaults.esp32c6"
   "partitions.csv"
   "patches/tesla-ble/0006-port-crypto-bindings-to-psa.patch"
   "dependencies.lock.esp32"
@@ -610,26 +646,51 @@ size_relevant_samples=(
   "scripts/apply-tesla-ble-patches.sh"
   "scripts/ci-build-all.sh"
   "scripts/idf-docker.sh"
+  "scripts/idf-version.sh"
+  "scripts/check-firmware-size.sh"
+  "scripts/report-firmware-size.py"
+  "scripts/check-stack-usage.py"
   "scripts/firmware-size-baseline.json"
   "scripts/firmware-stack-baseline.json"
 )
-size_classifier_failed=0
+size_misses=""
 for path in "${size_relevant_samples[@]}"; do
-  if ! printf '%s\n' "$path" | gate_firmware_size_relevant; then
-    size_classifier_failed=1
-    break
-  fi
+  printf '%s\n' "$path" | gate_firmware_size_relevant || size_misses="$size_misses $path"
 done
-if [ "$size_classifier_failed" -eq 0 ]; then
-  pass_case 'gate_firmware_size_relevant classifies all firmware-size inputs'
-else
-  fail_case 'gate_firmware_size_relevant classifies all firmware-size inputs'
-fi
+[ -z "$size_misses" ] && pass_case 'gate_firmware_size_relevant classifies all firmware-size inputs' \
+  || fail_case "gate_firmware_size_relevant classifies all firmware-size inputs (missed:$size_misses)"
 
-if printf '%s\n' "docs/README.md" "test/test_logic.cpp" ".agents/rules/ble.md" | gate_firmware_size_relevant; then
-  fail_case 'gate_firmware_size_relevant rejects docs and host test changes'
+size_irrelevant_samples=(
+  "docs/README.md" "test/test_logic.cpp" ".agents/rules/ble.md" "version.txt"
+  "sdkconfig" "sdkconfig.old" "test/stubs/sdkconfig.h" "scripts/check-sdkconfig-defaults.py.orig"
+  "dependencies.lock.esp32.bak/x" "scripts/build-pages.sh"
+)
+size_false=""
+for path in "${size_irrelevant_samples[@]}"; do
+  printf '%s\n' "$path" | gate_firmware_size_relevant && size_false="$size_false $path"
+done
+[ -z "$size_false" ] && pass_case 'gate_firmware_size_relevant rejects docs, host tests, build outputs and release-only scripts' \
+  || fail_case "gate_firmware_size_relevant rejects docs, host tests, build outputs and release-only scripts (matched:$size_false)"
+
+# Drift guard: every tracked path that release-relevance.sh treats as release-relevant either
+# triggers the local size gate or is exempted here with a reason. A new firmware input added to
+# RELEVANT_RE therefore fails this case until it is classified one way or the other.
+#   docs/ web installer and .github/workflows/: shipped Pages/CI plumbing, not image bytes;
+#   version.txt: the local gate stamps PROJECT_VER=local (ci-build-all.sh), so it cannot move;
+#   release, signing and Pages scripts/keys: run after the unsigned image exists.
+size_exempt_re='^(docs/|\.github/workflows/|version\.txt$|scripts/ota-signing-public-key\.sha256$|scripts/(build-pages|ci-build-verify|ci-sign-artifacts|next-version|select-release-version|release-relevance|test-release-contract|check-reproducible-build|publish-pages-branch)\.sh$|scripts/(check-build-gate-contract|check-pages-manifest|check-pages-source|check-release-pages-bytes|check-release-assets|check-signed-root-inventory|prepare-reused-release|check-published-release)\.py$)'
+release_re="$(sed -n "s/^RELEVANT_RE='\(.*\)'\$/\1/p" "$root/scripts/release-relevance.sh")"
+tracked_relevant="$(git -C "$root" ls-files 2>/dev/null | grep -E "$release_re" || true)"
+size_drift=""
+while IFS= read -r path; do
+  [ -n "$path" ] || continue
+  printf '%s\n' "$path" | grep -Eq "$size_exempt_re" && continue
+  printf '%s\n' "$path" | gate_firmware_size_relevant || size_drift="$size_drift $path"
+done <<< "$tracked_relevant"
+if [ -n "$release_re" ] && printf '%s\n' "$tracked_relevant" | grep -q '^patches/tesla-ble/' && [ -z "$size_drift" ]; then
+  pass_case 'gate_firmware_size_relevant covers every release-relevant firmware input'
 else
-  pass_case 'gate_firmware_size_relevant rejects docs and host test changes'
+  fail_case "gate_firmware_size_relevant covers every release-relevant firmware input (unclassified:${size_drift:- RELEVANT_RE unreadable})"
 fi
 
 ( GATE_PROJ="$root"; PATH="$tmp/bin:$PATH" TEST_REAL_GIT="$real_git" TEST_HEAD="$sha" TEST_CHANGED=2 gate_pr_changed_files 123 >/dev/null 2>&1 )

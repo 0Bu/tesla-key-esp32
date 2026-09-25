@@ -122,9 +122,9 @@ const reviewedSkillSha256 = new Map([
   ["mock-test", "8cfaaa7d4d7fdbda24375ca743f9954ee39c6db053684000fac1bf1bce00ac0f"],
   ["ota-release-verify", "1504ad6c0d781bbfef36c3eca75813faff6e4a5896a5f1bac04507a4e77456e8"],
   ["pr-hygiene", "0b73adc70cb8185d19fe868a2aa8dc195e1d2eec792ae7b498672f2bb6e99459"],
-  ["project-review", "94a8db814ab58f9de398c7d3f1f86d47ab387541ff25b4b26c864cee073ea771"],
+  ["project-review", "b122bfda1f76fb05c6a20a7ad358d85857bdf820771991b63db1ab480b7aa61b"],
   ["ship", "47f0e4d2408af37cb127404638e5c1294b335745c249f751d6acc3f3a8210d46"],
-  ["skill-audit", "456932af52005cbba6609faf86a9b1b685391174f93171d379d9ea973b131786"],
+  ["skill-audit", "3b207063ba5825e707656c27ad562ed8f100123257f3c5b851ef2ae7f3daf643"],
   ["usb-recovery", "6694f24ac6b7c3330bbfb100339c9646865b771f9201e9eba127cb8108ab8bb5"],
   ["vehicle-command-audit", "fb6840d7987a6febc8cc4432d58e4d94d904bb87971500c9e8eeb879b62cbf3b"],
 ]);
@@ -304,13 +304,22 @@ for (const name of canonicalSkills) {
     }
   }
   if (["project-review", "skill-audit"].includes(name)) {
-    const textLower = canonical.text.toLowerCase();
-    for (const token of [
+    // #329 P1: pin the substance of Step 0, not only its heading. Markdown wraps prose freely.
+    const textLower = canonical.text.toLowerCase().replace(/\s+/g, " ");
+    const baselineTokens = [
       "step 0 — pin the baseline",
-      "git fetch origin",
-      "fail-fast on divergence",
-      "state reviewed sha in report",
-    ]) {
+      "`git fetch origin`",
+      "`git rev-parse head origin/main`",
+      "`git status --porcelain`",
+      "`git merge-base --is-ancestor origin/main head`",
+      "`git merge-base origin/main head`",
+      "stale or divergent baseline",
+      "instead of a findings list",
+      "reviewed sha: <full-40-hex head>",
+    ];
+    if (name === "project-review") baselineTokens.push("`gh pr view <n> --json headrefoid`");
+    if (name === "skill-audit") baselineTokens.push("pin by ancestry, not equality");
+    for (const token of baselineTokens) {
       if (!textLower.includes(token)) {
         die(1, `canonical ${name} is missing baseline pinning contract: ${token}`);
       }

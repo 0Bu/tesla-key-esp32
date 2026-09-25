@@ -39,11 +39,19 @@ should, do the config/build/version all agree, and do the runtime invariants sti
 
 Work in this order — it's what makes the review catch *drift* rather than just style:
 
-0. **Step 0 — pin the baseline.**
-   Ensure the inspection branch is current before auditing. Run `git fetch origin` and verify
-   `HEAD` matches `origin/main` (for a main audit) or the exact target PR head commit (`HEAD == origin/<branch>`).
-   Fail-fast on divergence or uncommitted local changes — never review a stale or drifting worktree.
-   State reviewed SHA in report.
+0. **Step 0 — pin the baseline.** Findings are valid only for the exact commit reviewed.
+   - Run `git fetch origin`, then print `git rev-parse HEAD origin/main`. Require a clean
+     worktree (`git status --porcelain` prints nothing): uncommitted edits belong to no SHA.
+   - Whole-project review: require `HEAD` to equal `origin/main`.
+   - PR review: require `HEAD` to equal the PR head reported by `gh pr view <N> --json headRefOid`
+     (not `origin/<branch>`, which does not exist for fork PRs and is only as fresh as its last
+     fetch). Report `git merge-base origin/main HEAD`; when
+     `git merge-base --is-ancestor origin/main HEAD` fails, also report how far the PR base is
+     behind (`git rev-list --count HEAD..origin/main`).
+   - On any other mismatch, stop and report **stale or divergent baseline** with those SHAs
+     instead of a findings list. A commit count alone hides divergence;
+     `merge-base --is-ancestor` exposes it.
+   - State the reviewed SHA in the report header.
 1. **Build the intended model from the docs first.**
    [`AGENTS.md`](../../../AGENTS.md) owns runner policy, authorization, safety, evidence, build, and review contracts.
    [`docs/README.md`](../../../docs/README.md) owns hardware, HTTP API, and commands.
@@ -688,6 +696,8 @@ Produce a single report in this shape:
 
 ```
 # Project review — tesla-key-esp32 (<date>)
+
+Reviewed SHA: <full-40-hex HEAD> · origin/main: <sha> · merge-base: <sha> (Step 0)
 
 ## Summary
 <2–4 sentences: overall coherence, how many findings by severity, headline risks.>

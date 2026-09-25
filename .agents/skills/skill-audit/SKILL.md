@@ -41,10 +41,19 @@ finding must name the project fact it contradicts; otherwise omit it.
 
 Work in this order—it is a **single read-only pass**: pin baseline → enumerate → check → report → stop.
 
-0. **Step 0 — pin the baseline.**
-   Ensure the local repository is synchronized before auditing. Run `git fetch origin` and verify
-   `HEAD` matches `origin/main` (or the target PR head commit). Fail-fast on divergence or untracked
-   local drift — never audit an unpinned or stale baseline. State reviewed SHA in report.
+0. **Step 0 — pin the baseline.** The gate record stamps a SHA, so the audit covers exactly that
+   commit.
+   - Run `git fetch origin`, then print `git rev-parse HEAD origin/main`. Require a clean
+     worktree (`git status --porcelain` prints nothing): uncommitted edits are not part of the
+     stamped SHA.
+   - Pin by ancestry, not equality. The audit runs before PR creation or push, when `HEAD` is a
+     local commit that is neither `origin/main` nor the published PR head. Require
+     `git merge-base --is-ancestor origin/main HEAD` (the branch contains current main); a
+     standalone audit of main requires `HEAD` to equal `origin/main`.
+   - Report `HEAD`, `origin/main` and `git merge-base origin/main HEAD`. The reviewed SHA is
+     `HEAD`, the same SHA the gate record carries.
+   - Otherwise stop and report **stale or divergent baseline** with those SHAs instead of a
+     findings list.
 1. **Enumerate—discover, do not hardcode.** Read every `.agents/skills/*/SKILL.md` and every
    `.agents/subagents.json` reviewer. Inventory `AGENTS.md`, `.agents/hooks.json`, `tools/agent-hooks/`,
    `scripts/`, `main/`, `partitions.csv`, `main/idf_component.yml`, and `version.txt`. Host/cluster
@@ -271,6 +280,8 @@ readiness for both records, while `$skill-audit` establishes only its own.
 
 ```
 # Skill audit — tesla-key-esp32 (<date>)
+
+Reviewed SHA: <full-40-hex HEAD> · origin/main: <sha> · merge-base: <sha> (Step 0)
 
 ## Summary
 <1–3 sentences: how many canonical skills and reviewers were checked; how many drifted.>

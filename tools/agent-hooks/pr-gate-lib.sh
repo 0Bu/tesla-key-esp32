@@ -96,10 +96,14 @@ gate_vehicle_command_relevant() {
 }
 
 # gate_firmware_size_relevant
-#   Reads repo-relative changed paths on stdin and succeeds when firmware binary size
-#   or stack/size baseline inputs can have moved.
+#   Reads repo-relative changed paths on stdin and succeeds when the local firmware-size gate
+#   (scripts/check-firmware-size.sh) can report a different result: an image input (sources,
+#   sdkconfig defaults, partitions, patch series, lockfiles, toolchain pin and the scripts that
+#   resolve it), a reviewed size/stack baseline, or a script that gate run itself executes.
+#   tools/agent-hooks/selftest.sh cross-checks this list against RELEVANT_RE in
+#   scripts/release-relevance.sh so a new release-relevant firmware input cannot be missed.
 gate_firmware_size_relevant() {
-  grep -Eq '^(main/|CMakeLists\.txt$|sdkconfig|partitions\.csv$|patches/tesla-ble/|dependencies\.lock\.|esp-idf-toolchain\.txt$|scripts/(apply-tesla-ble-patches\.sh|ci-build-all\.sh|idf-docker\.sh|firmware-size-baseline\.json|firmware-stack-baseline\.json)$)'
+  grep -Eq '^(main/|CMakeLists\.txt$|sdkconfig\.defaults(\.[a-z0-9]+)?$|partitions\.csv$|patches/tesla-ble/|dependencies\.lock\.[a-z0-9]+$|esp-idf-toolchain\.txt$|scripts/(apply-tesla-ble-patches|ci-build-all|idf-docker|idf-version|check-firmware-size)\.sh$|scripts/(check-build-artifact-inventory|check-build-semantics|check-dependency-contract|check-firmware-artifacts|check-otadata-contract|check-partition-contract|check-sdkconfig-defaults|check-stack-usage|report-firmware-size)\.py$|scripts/firmware-(size|stack)-baseline\.json$)'
 }
 
 
