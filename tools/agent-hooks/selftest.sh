@@ -533,34 +533,96 @@ expect_rc 0 'git push to open PR accepts current skill-audit and pr-hygiene' env
 no_hygiene_push_body="$(printf '%s\n' '- [x] $skill-audit clean — PR create/push gate @ '"$sha")"
 expect_rc 2 'git push to open PR requires pr-hygiene' env PATH="$tmp/bin:$PATH" TEST_ROOT="$root" TEST_BRANCH="$push_branch" TEST_REAL_GIT="$real_git" TEST_HEAD="$sha" TEST_BODY="$no_hygiene_push_body" "$gate" --project-dir "$root" --payload-file "$tmp/push.json"
 
-if printf 'refs/heads/feature %s refs/heads/main 0000000000000000000000000000000000000000\n' "$sha" | "$root/.githooks/pre-push" origin >/dev/null 2>&1; then
-  fail_case 'pre-push hook accepts push to destination main'
-else
+out_dest_main="$(printf 'refs/heads/feature %s refs/heads/main 0000000000000000000000000000000000000000\n' "$sha" | "$root/.githooks/pre-push" origin 2>&1 || true)"
+if printf '%s\n' "$out_dest_main" | grep -q 'BLOCKED by pre-push: direct push to destination main branch is prohibited'; then
   pass_case 'pre-push hook blocks push to destination main'
+else
+  fail_case 'pre-push hook blocks push to destination main'
 fi
 
-if printf 'refs/heads/feature 0000000000000000000000000000000000000000 refs/heads/main 0000000000000000000000000000000000000000\n' | "$root/.githooks/pre-push" origin >/dev/null 2>&1; then
-  fail_case 'pre-push hook accepts deletion of main branch'
-else
+out_del_main="$(printf 'refs/heads/feature 0000000000000000000000000000000000000000 refs/heads/main 0000000000000000000000000000000000000000\n' | "$root/.githooks/pre-push" origin 2>&1 || true)"
+if printf '%s\n' "$out_del_main" | grep -q 'BLOCKED by pre-push: direct push to destination main branch is prohibited'; then
   pass_case 'pre-push hook blocks deletion of main branch'
+else
+  fail_case 'pre-push hook blocks deletion of main branch'
 fi
 
-if printf 'refs/heads/feature %s refs/heads/feature 0000000000000000000000000000000000000000\n' "$sha" | "$root/.githooks/pre-push" foreign >/dev/null 2>&1; then
-  fail_case 'pre-push hook accepts push to foreign remote'
-else
+out_foreign="$(printf 'refs/heads/feature %s refs/heads/feature 0000000000000000000000000000000000000000\n' "$sha" | "$root/.githooks/pre-push" foreign 2>&1 || true)"
+if printf '%s\n' "$out_foreign" | grep -q 'BLOCKED by pre-push:'; then
   pass_case 'pre-push hook blocks push to foreign remote'
+else
+  fail_case 'pre-push hook blocks push to foreign remote'
 fi
 
-if printf 'refs/heads/feature %s refs/heads/feature 1111111111111111111111111111111111111111\n' "$sha" | "$root/.githooks/pre-push" origin >/dev/null 2>&1; then
-  fail_case 'pre-push hook accepts unresolvable diff range'
-else
+out_diff="$(printf 'refs/heads/feature %s refs/heads/feature 1111111111111111111111111111111111111111\n' "$sha" | "$root/.githooks/pre-push" origin 2>&1 || true)"
+if printf '%s\n' "$out_diff" | grep -q 'BLOCKED by pre-push: unable to determine diff'; then
   pass_case 'pre-push hook fails closed on unresolvable diff range'
+else
+  fail_case 'pre-push hook fails closed on unresolvable diff range'
 fi
 
-if "$root/.githooks/pre-push" origin </dev/null >/dev/null 2>&1; then
-  fail_case 'pre-push hook accepts detached HEAD without stdin'
+cur_checkout="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")"
+out_detached="$("$root/.githooks/pre-push" origin </dev/null 2>&1 || true)"
+if [ "$cur_checkout" = "HEAD" ] || [ -z "$cur_checkout" ]; then
+  if printf '%s\n' "$out_detached" | grep -q 'BLOCKED by pre-push: cannot determine branch to verify from detached HEAD'; then
+    pass_case 'pre-push hook blocks detached HEAD without stdin'
+  else
+    fail_case 'pre-push hook blocks detached HEAD without stdin'
+  fi
 else
-  pass_case 'pre-push hook blocks detached HEAD without stdin'
+  if printf '%s\n' "$out_detached" | grep -q "commit () does not match local HEAD"; then
+    fail_case 'pre-push hook on named branch without stdin parses HEAD and evaluates PR gates'
+  elif printf '%s\n' "$out_detached" | grep -Eq 'BLOCKED by pre-push: (PR policy gates not satisfied|direct push to)'; then
+    pass_case 'pre-push hook on named branch without stdin parses HEAD and evaluates PR gates'
+  else
+    fail_case 'pre-push hook on named branch without stdin parses HEAD and evaluates PR gates'
+  fi
+fi
+
+if printf 'refs/heads/%s %s refs/heads/%s %s\n' "$push_branch" "$sha" "$push_branch" "$sha" | \
+  env PATH="$tmp/bin:$PATH" TEST_ROOT="$root" TEST_BRANCH="$push_branch" TEST_REAL_GIT="$real_git" TEST_HEAD="$sha" TEST_BODY="$push_body" \
+  "$root/.githooks/pre-push" origin >"$tmp/pre_push_accept.log" 2>&1; then
+  pass_case 'pre-push hook accepts valid push with verified gates and clean diff'
+else
+  printf 'pre-push accept output: %s\n' "$(cat "$tmp/pre_push_accept.log" 2>/dev/null || true)"
+  fail_case 'pre-push hook accepts valid push with verified gates and clean diff'
+fi
+
+size_relevant_samples=(
+  "main/main.cpp"
+  "main/logic/config_request.hpp"
+  "CMakeLists.txt"
+  "sdkconfig.defaults"
+  "partitions.csv"
+  "patches/tesla-ble/0006-port-crypto-bindings-to-psa.patch"
+  "dependencies.lock.esp32"
+  "dependencies.lock.esp32s3"
+  "dependencies.lock.esp32c3"
+  "dependencies.lock.esp32c6"
+  "esp-idf-toolchain.txt"
+  "scripts/apply-tesla-ble-patches.sh"
+  "scripts/ci-build-all.sh"
+  "scripts/idf-docker.sh"
+  "scripts/firmware-size-baseline.json"
+  "scripts/firmware-stack-baseline.json"
+)
+size_classifier_failed=0
+for path in "${size_relevant_samples[@]}"; do
+  if ! printf '%s\n' "$path" | gate_firmware_size_relevant; then
+    size_classifier_failed=1
+    break
+  fi
+done
+if [ "$size_classifier_failed" -eq 0 ]; then
+  pass_case 'gate_firmware_size_relevant classifies all firmware-size inputs'
+else
+  fail_case 'gate_firmware_size_relevant classifies all firmware-size inputs'
+fi
+
+if printf '%s\n' "docs/README.md" "test/test_logic.cpp" ".agents/rules/ble.md" | gate_firmware_size_relevant; then
+  fail_case 'gate_firmware_size_relevant rejects docs and host test changes'
+else
+  pass_case 'gate_firmware_size_relevant rejects docs and host test changes'
 fi
 
 ( GATE_PROJ="$root"; PATH="$tmp/bin:$PATH" TEST_REAL_GIT="$real_git" TEST_HEAD="$sha" TEST_CHANGED=2 gate_pr_changed_files 123 >/dev/null 2>&1 )

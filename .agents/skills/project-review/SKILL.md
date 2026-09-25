@@ -39,6 +39,11 @@ should, do the config/build/version all agree, and do the runtime invariants sti
 
 Work in this order — it's what makes the review catch *drift* rather than just style:
 
+0. **Step 0 — pin the baseline.**
+   Ensure the inspection branch is current before auditing. Run `git fetch origin` and verify
+   `HEAD` matches `origin/main` (for a main audit) or the exact target PR head commit (`HEAD == origin/<branch>`).
+   Fail-fast on divergence or uncommitted local changes — never review a stale or drifting worktree.
+   State reviewed SHA in report.
 1. **Build the intended model from the docs first.**
    [`AGENTS.md`](../../../AGENTS.md) owns runner policy, authorization, safety, evidence, build, and review contracts.
    [`docs/README.md`](../../../docs/README.md) owns hardware, HTTP API, and commands.
