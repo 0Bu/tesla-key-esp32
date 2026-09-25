@@ -55,7 +55,7 @@ PATCH_INVENTORY = (
     ),
     (
         "0006-port-crypto-bindings-to-psa.patch",
-        "bbb6286e87da20dc2778d6de9f19ae25292ab786d246e5120831db5cc6273886",
+        "f5248e6529756e61ae3318aa2c8736a5ad28e68ec7e7a3a346dc3f3d970c41bd",
     ),
 )
 # Espressif components resolved from their GitHub release sources: (name, repository, path in the

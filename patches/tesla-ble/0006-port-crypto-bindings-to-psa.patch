@@ -793,7 +793,7 @@ index 67f532d..7059e6d 100644
    if (!append_tlv(Signatures_Tag_TAG_COUNTER, counter_bytes, sizeof(counter_bytes))) {
      LOG_ERROR("Failed to append counter to AD buffer");
      return TeslaBLE_Status_E_ERROR_INVALID_PARAMS;
-@@ -450,29 +492,18 @@ int Peer::construct_request_hash(Signatures_SignatureType auth_type, const pb_by
+@@ -450,29 +492,28 @@ int Peer::construct_request_hash(Signatures_SignatureType auth_type, const pb_by
  
  int Peer::decrypt_response(const pb_byte_t *input_buffer, size_t input_length, const pb_byte_t *nonce,
                             const pb_byte_t *tag, const pb_byte_t *request_hash, size_t request_hash_length,
@@ -801,6 +801,16 @@ index 67f532d..7059e6d 100644
 -                           size_t *output_length) const {
 +                           uint32_t flags, uint32_t fault, uint32_t counter, pb_byte_t *output_buffer,
 +                           size_t output_buffer_length, size_t *output_length) const {
++  if (!output_buffer || !output_length || !input_buffer || !nonce || !tag) {
++    LOG_ERROR("[DecryptResponse] Invalid null pointer parameter");
++    return TeslaBLE_Status_E_ERROR_INVALID_PARAMS;
++  }
++
++  if (output_buffer_length < input_length) {
++    LOG_ERROR("[DecryptResponse] Output buffer too small: %zu < %zu", output_buffer_length, input_length);
++    return TeslaBLE_Status_E_ERROR_INVALID_PARAMS;
++  }
++
    if (!is_private_key_initialized()) {
      LOG_ERROR("[DecryptResponse] Private key not initialized");
      return TeslaBLE_Status_E_ERROR_PRIVATE_KEY_NOT_INITIALIZED;
@@ -828,7 +838,7 @@ index 67f532d..7059e6d 100644
  
    if (return_code != 0) {
      LOG_ERROR("[DecryptResponse] Failed to construct AD buffer");
-@@ -481,43 +512,50 @@ int Peer::decrypt_response(const pb_byte_t *input_buffer, size_t input_length, c
+@@ -481,43 +522,50 @@ int Peer::decrypt_response(const pb_byte_t *input_buffer, size_t input_length, c
  
    // Hash the AD buffer
    unsigned char ad_hash[32];
@@ -905,7 +915,7 @@ index 67f532d..7059e6d 100644
    return TeslaBLE_Status_E_OK;
  }
  
-@@ -529,64 +567,63 @@ int Peer::encrypt(pb_byte_t *input_buffer, size_t input_buffer_length, pb_byte_t
+@@ -529,64 +577,63 @@ int Peer::encrypt(pb_byte_t *input_buffer, size_t input_buffer_length, pb_byte_t
      return TeslaBLE_Status_E_ERROR_PRIVATE_KEY_NOT_INITIALIZED;
    }
  
