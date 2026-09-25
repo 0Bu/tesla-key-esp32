@@ -48,7 +48,7 @@ if [ "${#updates[@]}" -eq 0 ]; then
     exit 1
   fi
   head_sha="$(git rev-parse HEAD 2>/dev/null || echo "")"
-  updates+=("refs/heads/$current_branch" "$head_sha" "refs/heads/$current_branch" "$zero_sha")
+  updates+=("refs/heads/$current_branch $head_sha refs/heads/$current_branch $zero_sha")
 fi
 
 head_sha="$(git rev-parse HEAD 2>/dev/null || echo "")"
@@ -93,7 +93,7 @@ for update in "${updates[@]}"; do
     echo "BLOCKED by pre-push: unable to determine diff for range '$diff_range'." >&2
     exit 1
   fi
-  if printf '%s\n' "$changed_files" | grep -Eq '^(main/|CMakeLists\.txt$|sdkconfig|partitions\.csv$|scripts/ci-build-all\.sh$)'; then
+  if printf '%s\n' "$changed_files" | gate_firmware_size_relevant; then
     has_firmware_changes=1
   fi
   if printf '%s\n' "$changed_files" | gate_vehicle_command_relevant; then

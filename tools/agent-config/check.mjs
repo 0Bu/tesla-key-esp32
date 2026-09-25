@@ -122,9 +122,9 @@ const reviewedSkillSha256 = new Map([
   ["mock-test", "8cfaaa7d4d7fdbda24375ca743f9954ee39c6db053684000fac1bf1bce00ac0f"],
   ["ota-release-verify", "1504ad6c0d781bbfef36c3eca75813faff6e4a5896a5f1bac04507a4e77456e8"],
   ["pr-hygiene", "0b73adc70cb8185d19fe868a2aa8dc195e1d2eec792ae7b498672f2bb6e99459"],
-  ["project-review", "2a47f632cc41c8b5a38c2be947c9ebc2ad3b929a62a4230a489f1fd8bad364b9"],
+  ["project-review", "94a8db814ab58f9de398c7d3f1f86d47ab387541ff25b4b26c864cee073ea771"],
   ["ship", "47f0e4d2408af37cb127404638e5c1294b335745c249f751d6acc3f3a8210d46"],
-  ["skill-audit", "e5fc0d95bb44c85d9484da4e24edfe9bcb5907f6f7526c24fd1e87fb9da0c201"],
+  ["skill-audit", "456932af52005cbba6609faf86a9b1b685391174f93171d379d9ea973b131786"],
   ["usb-recovery", "6694f24ac6b7c3330bbfb100339c9646865b771f9201e9eba127cb8108ab8bb5"],
   ["vehicle-command-audit", "fb6840d7987a6febc8cc4432d58e4d94d904bb87971500c9e8eeb879b62cbf3b"],
 ]);
@@ -301,6 +301,19 @@ for (const name of canonicalSkills) {
   if (["vehicle-command-audit", "skill-audit", "project-review"].includes(name)) {
     if (teslaBlePinMatch && !canonical.text.includes(teslaBlePinMatch[1])) {
       die(1, `canonical ${name} pin assertion does not match idf_component.yml pin (${teslaBlePinMatch[1]})`);
+    }
+  }
+  if (["project-review", "skill-audit"].includes(name)) {
+    const textLower = canonical.text.toLowerCase();
+    for (const token of [
+      "step 0 — pin the baseline",
+      "git fetch origin",
+      "fail-fast on divergence",
+      "state reviewed sha in report",
+    ]) {
+      if (!textLower.includes(token)) {
+        die(1, `canonical ${name} is missing baseline pinning contract: ${token}`);
+      }
     }
   }
   if (readOnlySkills.has(name) && !/read-only|does not (?:edit|modify)|must not (?:edit|modify)/is.test(canonical.text)) {
