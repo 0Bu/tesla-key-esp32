@@ -702,7 +702,10 @@ def is_exact_espsecure_sign(command: str) -> bool:
     key_index = key_flags[0] + 1
     key_path = tokens[key_index]
     key_reference = key_path in {"$OTA_SIGNING_KEY_FILE", "${OTA_SIGNING_KEY_FILE}"}
-    if basename(key_path) != "ota_signing_key.pem" and not key_reference:
+    if (
+        basename(key_path) not in {"ota_signing_key.pem", "tesla_ota_signing_key.pem"}
+        and not key_reference
+    ):
         return False
 
     # The private key path is allowed in exactly one semantic position: the value of --keyfile.
