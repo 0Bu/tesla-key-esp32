@@ -39,8 +39,12 @@ finding must name the project fact it contradicts; otherwise omit it.
 
 ## How to run the audit
 
-Work in this order—it is a **single read-only pass**: enumerate → check → report → stop.
+Work in this order—it is a **single read-only pass**: pin baseline → enumerate → check → report → stop.
 
+0. **Step 0 — pin the baseline.**
+   Ensure the local repository is synchronized before auditing. Run `git fetch origin` and verify
+   `HEAD` matches `origin/main` (or the target PR head commit). Fail-fast on divergence or untracked
+   local drift — never audit an unpinned or stale baseline. State reviewed SHA in report.
 1. **Enumerate—discover, do not hardcode.** Read every `.agents/skills/*/SKILL.md` and every
    `.agents/subagents.json` reviewer. Inventory `AGENTS.md`, `.agents/hooks.json`, `tools/agent-hooks/`,
    `scripts/`, `main/`, `partitions.csv`, `main/idf_component.yml`, and `version.txt`. Host/cluster

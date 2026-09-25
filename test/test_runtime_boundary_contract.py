@@ -1595,6 +1595,130 @@ def require_vehicle_task_start_contract(vehicle_source: str, telemetry_source: s
                    "self->await_task_start_()", "TaskWatchdogSubscription watchdog;")
 
 
+def require_vin_transition_cleanup_contract(main_source: str) -> None:
+    marker = "recovery == tk::VinTransitionRecovery::CompleteNewIdentity"
+    start = main_source.find(marker)
+    if start < 0:
+        raise AssertionError("main: CompleteNewIdentity VIN transition branch missing")
+    end = main_source.find("esp_restart();", start)
+    if end < 0:
+        raise AssertionError("main: CompleteNewIdentity branch missing esp_restart()")
+    branch = main_source[start : end + len("esp_restart();")]
+    for storage_key in (
+        "tk::nvs_contract::kSessionVcsec",
+        "tk::nvs_contract::kSessionInfotainment",
+        "tk::nvs_contract::kPairedAt",
+        "tk::nvs_contract::kBleMac",
+    ):
+        if storage_key not in branch:
+            raise AssertionError(f"main: CompleteNewIdentity missing removal of {storage_key}")
+    require_before(
+        "VIN transition cleanup check before marker removal",
+        branch,
+        "tk::vin_transition_cleanup_ready_for_marker_removal(",
+        "config_store.remove(tk::nvs_contract::kVinTransition)",
+    )
+    require_before(
+        "VIN transition completion gate before marker removal",
+        branch,
+        'boot_fatal("VIN transition completion")',
+        "config_store.remove(tk::nvs_contract::kVinTransition)",
+    )
+    require_before(
+        "VIN transition marker removal before restart",
+        branch,
+        "config_store.remove(tk::nvs_contract::kVinTransition)",
+        "esp_restart();",
+    )
+
+
+def require_telemetry_epoch_cache_contract(telemetry_source: str) -> None:
+    body = function_body_in(telemetry_source, "process_pending_telemetry_")
+    critical_end = body.find("portEXIT_CRITICAL(&telemetry_pending_mux_);")
+    if critical_end < 0:
+        raise AssertionError("process_pending_telemetry_ missing portEXIT_CRITICAL")
+    processing_body = body[critical_end:]
+    kinds = (
+        ("charge", "PendingCharge", "charge_epoch", "last_known_charge_"),
+        ("climate", "PendingClimate", "climate_epoch", "last_known_climate_"),
+        ("drive", "PendingDrive", "drive_epoch", "last_known_drive_"),
+        ("tires", "PendingTires", "tires_epoch", "last_known_tires_"),
+        ("closures", "PendingClosures", "closures_epoch", "last_known_closures_"),
+    )
+    for name, flag, epoch_var, target in kinds:
+        flag_pos = processing_body.find(f"pending & {flag}")
+        if flag_pos < 0:
+            raise AssertionError(f"process_pending_telemetry_ missing handler for {flag}")
+        next_pos = len(processing_body)
+        for _, other_flag, _, _ in kinds:
+            if other_flag == flag:
+                continue
+            pos = processing_body.find(f"pending & {other_flag}", flag_pos + len(flag))
+            if 0 <= pos < next_pos:
+                next_pos = pos
+        block = processing_body[flag_pos:next_pos]
+
+        mutex_match = re.search(r"tk::MutexGuard\s+\w+\(cache_mutex_\);", block)
+        if not mutex_match:
+            raise AssertionError(f"process_pending_telemetry_ {name} missing cache_mutex_ guard")
+
+        target_pos = block.find(f"{target} =")
+        if target_pos < 0:
+            raise AssertionError(f"process_pending_telemetry_ {name} missing assignment to {target}")
+
+        if mutex_match.start() >= target_pos:
+            raise AssertionError(f"process_pending_telemetry_ {name} assignment {target} outside cache_mutex_")
+
+        mutex_body = block[mutex_match.end():]
+        epoch_check = f"tk::telemetry_epoch_matches({epoch_var}"
+        epoch_pos = mutex_body.find(epoch_check)
+        if epoch_pos < 0:
+            raise AssertionError(
+                f"process_pending_telemetry_ {name} missing epoch check {epoch_check!r} under cache_mutex_"
+            )
+        target_in_mutex = mutex_body.find(f"{target} =")
+        if target_in_mutex < 0 or epoch_pos >= target_in_mutex:
+            raise AssertionError(
+                f"process_pending_telemetry_ {name} epoch check must precede {target} under cache_mutex_"
+            )
+
+
+def require_pairing_cleanup_epoch_contract(pairing_source: str) -> None:
+    body = function_body_in(pairing_source, "clear_session_and_cache_")
+    require_before(
+        "pairing cleanup identity epoch before pending telemetry reset",
+        body,
+        "identity_epoch_.fetch_add",
+        "telemetry_pending_mask_ = 0;",
+    )
+    require_before(
+        "pairing cleanup pending telemetry reset before cache mutex",
+        body,
+        "telemetry_pending_mask_ = 0;",
+        "cache_mutex_",
+    )
+    cache_block_start = body.find("cache_mutex_")
+    if cache_block_start < 0:
+        raise AssertionError("clear_session_and_cache_ missing cache_mutex_ guard")
+    cache_block = body[cache_block_start:]
+    for field in (
+        "last_known_charge_",
+        "last_known_status_",
+        "last_known_climate_",
+        "last_known_drive_",
+        "last_known_tires_",
+        "last_known_closures_",
+    ):
+        if not re.search(r"\b" + re.escape(field) + r"\s*=\s*\{\};", cache_block):
+            raise AssertionError(f"clear_session_and_cache_ missing reset of {field}")
+        require_before(
+            f"pairing cleanup cache mutex before {field} reset",
+            body,
+            "cache_mutex_",
+            field,
+        )
+
+
 def require_runtime_admission_contract(logic_header: str, facade_header: str,
                                        facade_source: str, main_source: str,
                                        http_route_header: str, dispatch: str) -> None:
@@ -3423,6 +3547,9 @@ def require_runtime_source_contracts() -> None:
         SOURCES["vehicle_telemetry.cpp"],
         SOURCES["vehicle_pairing.cpp"],
     )
+    require_vin_transition_cleanup_contract(SOURCES["main.cpp"])
+    require_telemetry_epoch_cache_contract(SOURCES["vehicle_telemetry.cpp"])
+    require_pairing_cleanup_epoch_contract(SOURCES["vehicle_pairing.cpp"])
     require_runtime_admission_contract(
         (MAIN / "logic/runtime_admission.hpp").read_text(encoding="utf-8"),
         (MAIN / "runtime_admission.hpp").read_text(encoding="utf-8"),
@@ -5559,6 +5686,89 @@ def self_test_canaries(tasks: set[str], callbacks: set[str]) -> None:
             pass
         else:
             raise AssertionError(f"health commit {label} bypass passed unexpectedly")
+
+    main_source = SOURCES["main.cpp"]
+    telemetry_source = SOURCES["vehicle_telemetry.cpp"]
+    pairing_source = SOURCES["vehicle_pairing.cpp"]
+
+    # F01: VIN transition cleanup ordering mutations in app_main
+    vin_cleanup_inverted = main_source.replace(
+        "if (!tk::vin_transition_cleanup_ready_for_marker_removal(",
+        "if (!config_store.remove(tk::nvs_contract::kVinTransition)) {\n"
+        "                bootloader_random_disable();\n"
+        "                boot_fatal(\"VIN transition marker cleanup\");\n"
+        "            }\n"
+        "            if (!tk::vin_transition_cleanup_ready_for_marker_removal(",
+        1,
+    )
+    if vin_cleanup_inverted == main_source:
+        raise AssertionError("VIN cleanup inverted mutation did not apply")
+    require_mutation_rejected(
+        "VIN transition marker removal before cleanup check",
+        lambda: require_vin_transition_cleanup_contract(vin_cleanup_inverted),
+    )
+
+    vin_cleanup_missing_key = main_source.replace(
+        "const bool vcsec_removed = tesla_store.remove(tk::nvs_contract::kSessionVcsec);",
+        "const bool vcsec_removed = true;",
+        1,
+    )
+    if vin_cleanup_missing_key == main_source:
+        raise AssertionError("VIN cleanup missing key mutation did not apply")
+    require_mutation_rejected(
+        "VIN transition cleanup missing storage key removal",
+        lambda: require_vin_transition_cleanup_contract(vin_cleanup_missing_key),
+    )
+
+    # F07: Telemetry epoch check + cache mutex mutations in process_pending_telemetry_
+    telemetry_no_mutex = telemetry_source.replace(
+        "tk::MutexGuard g(cache_mutex_);\n            if (tk::telemetry_epoch_matches(climate_epoch",
+        "if (tk::telemetry_epoch_matches(climate_epoch",
+        1,
+    )
+    if telemetry_no_mutex == telemetry_source:
+        raise AssertionError("telemetry no-mutex mutation did not apply")
+    require_mutation_rejected(
+        "telemetry cache update without cache_mutex_",
+        lambda: require_telemetry_epoch_cache_contract(telemetry_no_mutex),
+    )
+
+    telemetry_no_epoch = telemetry_source.replace(
+        "if (tk::telemetry_epoch_matches(drive_epoch, identity_epoch_.load(std::memory_order_acquire))) {\n                last_known_drive_ = std::move(parsed);",
+        "last_known_drive_ = std::move(parsed);",
+        1,
+    )
+    if telemetry_no_epoch == telemetry_source:
+        raise AssertionError("telemetry no-epoch mutation did not apply")
+    require_mutation_rejected(
+        "telemetry cache update without epoch check under cache_mutex_",
+        lambda: require_telemetry_epoch_cache_contract(telemetry_no_epoch),
+    )
+
+    # F07: Pairing cleanup ordering in clear_session_and_cache_
+    pairing_inverted_epoch = pairing_source.replace(
+        "identity_epoch_.fetch_add(1, std::memory_order_acq_rel);\n    portENTER_CRITICAL(&telemetry_pending_mux_);\n    telemetry_pending_mask_ = 0;",
+        "portENTER_CRITICAL(&telemetry_pending_mux_);\n    telemetry_pending_mask_ = 0;\n    portEXIT_CRITICAL(&telemetry_pending_mux_);\n    identity_epoch_.fetch_add(1, std::memory_order_acq_rel);\n    portENTER_CRITICAL(&telemetry_pending_mux_);",
+        1,
+    )
+    if pairing_inverted_epoch == pairing_source:
+        raise AssertionError("pairing inverted epoch mutation did not apply")
+    require_mutation_rejected(
+        "pairing cleanup pending reset before identity epoch bump",
+        lambda: require_pairing_cleanup_epoch_contract(pairing_inverted_epoch),
+    )
+
+    pairing_missing_cache_reset = pairing_source.replace(
+        "last_known_status_   = {};\n",
+        "",
+        1,
+    )
+    if pairing_missing_cache_reset == pairing_source:
+        raise AssertionError("pairing missing cache reset mutation did not apply")
+    require_mutation_rejected(
+        "pairing cleanup missing cache field reset",
+        lambda: require_pairing_cleanup_epoch_contract(pairing_missing_cache_reset),
+    )
 
 
 def main() -> int:

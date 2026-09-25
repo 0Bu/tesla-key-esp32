@@ -276,6 +276,16 @@ perl -0pi -e 's/scripts\/release-relevance\.sh/scripts\/release-relevance-missin
   "$fixture/.agents/skills/skill-audit/SKILL.md"
 expect_failure "skill-audit release relevance path" "$fixture" "omits a relevance-scope path"
 
+fixture="$WORK/project-review-baseline-pin"; make_fixture "$fixture"
+perl -0pi -e 's/Step 0 — pin the baseline/Step 0 — unpinned baseline/' \
+  "$fixture/.agents/skills/project-review/SKILL.md"
+expect_failure "project-review baseline pin contract" "$fixture" "missing baseline pinning contract"
+
+fixture="$WORK/skill-audit-baseline-pin"; make_fixture "$fixture"
+perl -0pi -e 's/Step 0 — pin the baseline/Step 0 — unpinned baseline/' \
+  "$fixture/.agents/skills/skill-audit/SKILL.md"
+expect_failure "skill-audit baseline pin contract" "$fixture" "missing baseline pinning contract"
+
 fixture="$WORK/safety"; make_fixture "$fixture"
 python3 - "$fixture/tools/agent-config/safety-invariants.json" <<'PY'
 import json, pathlib, sys
