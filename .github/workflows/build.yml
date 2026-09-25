@@ -5,9 +5,23 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
-  # Unprivileged rebuild/test of latest main only. Manual runs never sign, release or republish
-  # the Release-bound Pages channel.
+  # Manual workflow dispatch with optional release cutting.
   workflow_dispatch:
+    inputs:
+      release:
+        description: "Cut a RELEASE (tag v*, GitHub Release, publish the release channel)"
+        type: boolean
+        default: false
+      bump:
+        description: "Which version segment the release bumps (ignored unless release is checked)"
+        type: choice
+        options: [patch, minor, major]
+        default: patch
+      release_version:
+        description: "Exact X.Y.Z to resume a partial release (blank derives the next version)"
+        type: string
+        required: false
+        default: ""
 
 concurrency:
   group: build-${{ github.ref }}
@@ -28,6 +42,9 @@ jobs:
     outputs:
       release-version: ${{ steps.version.outputs.version }}
       latest-published-stable: ${{ steps.version.outputs.latest }}
+      mode: ${{ steps.mode.outputs.mode }}
+      bump: ${{ steps.mode.outputs.bump }}
+      exact-version: ${{ steps.mode.outputs.exact-version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -62,6 +79,34 @@ jobs:
       - name: Test the PR-gate command matcher
         run: ./scripts/test-pr-gates.sh
 
+      - name: Decide the run mode
+        id: mode
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          IS_RELEASE: ${{ inputs.release }}
+          BUMP: ${{ inputs.bump }}
+          REQUESTED_RELEASE_VERSION: ${{ inputs.release_version }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            if [ "$IS_RELEASE" = "true" ]; then
+              mode=release
+            else
+              mode=test
+            fi
+          elif [ "$EVENT_NAME" = "push" ] && [ "$REF" = "refs/heads/main" ]; then
+            mode=dev
+          elif [ "$EVENT_NAME" = "pull_request" ]; then
+            mode=pr
+          else
+            mode=test
+          fi
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+          echo "bump=$BUMP" >> "$GITHUB_OUTPUT"
+          echo "exact-version=$REQUESTED_RELEASE_VERSION" >> "$GITHUB_OUTPUT"
+          echo "run mode: $mode"
+
       - name: Compute release version
         id: version
         env:
@@ -69,10 +114,17 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          MODE: ${{ steps.mode.outputs.mode }}
+          BUMP: ${{ steps.mode.outputs.bump }}
+          REQUESTED_RELEASE_VERSION: ${{ steps.mode.outputs.exact-version }}
         run: |
           git fetch --tags --force
-          if [ "$EVENT_NAME" = push ] && [ "${{ github.ref }}" = refs/heads/main ]; then
+          if [ "$MODE" = pr ]; then
+            release="$(./scripts/select-release-version.sh)"
+          elif [ "$MODE" = release ]; then
             release="$(./scripts/select-release-version.sh --select-main "$SOURCE_SHA")"
+          elif [ "$MODE" = dev ]; then
+            release="$(./scripts/next-version.sh --dev)"
           else
             release="$(./scripts/select-release-version.sh)"
           fi
@@ -131,7 +183,6 @@ jobs:
           echo "version=$(./scripts/idf-version.sh)" >> "$GITHUB_OUTPUT"
           echo "image-version=$(./scripts/idf-version.sh --image-version)" >> "$GITHUB_OUTPUT"
           echo "ESP-IDF image: $(./scripts/idf-version.sh --image)"
-
       - name: Stamp firmware version
         if: steps.changes.outputs.firmware == 'yes'
         id: stamp
@@ -151,7 +202,7 @@ jobs:
         if: steps.changes.outputs.firmware == 'yes'
         uses: espressif/esp-idf-ci-action@e6f5c74232b1ccd4c97ed641f1e48553853f1fd5 # v1.2.0
         env:
-          CI_SKIP_REPRO: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && '1' || '0' }}
+          CI_SKIP_REPRO: ${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main' && '1' || '0' }}
         with:
           esp_idf_version: ${{ steps.toolchain.outputs.image-version }}
           target: esp32
@@ -185,6 +236,9 @@ jobs:
       display-version: ${{ steps.stamp.outputs.disp }}
       release-version: ${{ needs.logic-test.outputs.release-version }}
       firmware: ${{ steps.changes.outputs.firmware }}
+      mode: ${{ needs.logic-test.outputs.mode }}
+      bump: ${{ needs.logic-test.outputs.bump }}
+      exact-version: ${{ needs.logic-test.outputs.exact-version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -289,7 +343,11 @@ jobs:
     # signing environment or a cache restored from the producer. PR preview trust does not use
     # this PR-controlled workflow definition; signed-pr-preview.yml owns its workflow_run rebuild.
     needs: build
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.build.outputs.firmware == 'yes'
+    if: >-
+      github.ref == 'refs/heads/main'
+      && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+      && needs.build.outputs.mode != 'test'
+      && needs.build.outputs.firmware == 'yes'
     runs-on: ubuntu-26.04
     timeout-minutes: 60
     permissions:
@@ -332,7 +390,8 @@ jobs:
     needs: [build, independent-rebuild]
     if: >-
       github.ref == 'refs/heads/main'
-      && github.event_name == 'push'
+      && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+      && needs.build.outputs.mode != 'test'
       && needs.build.outputs.firmware == 'yes'
     runs-on: ubuntu-26.04
     timeout-minutes: 20
@@ -341,6 +400,9 @@ jobs:
       contents: write
       pages: read
       actions: read
+    env:
+      BUMP: ${{ needs.build.outputs.bump }}
+      REQUESTED_RELEASE_VERSION: ${{ needs.build.outputs.exact-version }}
     steps:
       # Checkout only the exact main commit that produced the unsigned data artifact.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -424,23 +486,28 @@ jobs:
           DISPLAY_VERSION: ${{ needs.build.outputs.display-version }}
           RELEASE_VERSION: ${{ needs.build.outputs.release-version }}
           SOURCE_SHA: ${{ github.sha }}
+          BUILD_MODE: ${{ needs.build.outputs.mode }}
         run: |
           set -euo pipefail
-          release_json="$(mktemp)"
-          api_error="$(mktemp)"
-          trap 'rm -f "$release_json" "$api_error"' EXIT
-          if gh api "repos/$GITHUB_REPOSITORY/releases/tags/v$RELEASE_VERSION" \
-              > "$release_json" 2> "$api_error"; then
-            python3 scripts/check-release-assets.py "$release_json" \
-              --metadata-only --version "$DISPLAY_VERSION" --source-sha "$SOURCE_SHA" \
-              --expect-state published-immutable
-            mode=reuse
-          elif grep -Eq '\(HTTP 404\)' "$api_error"; then
-            mode=create
+          if [ "$BUILD_MODE" = dev ]; then
+            mode=dev
           else
-            echo "cannot classify GitHub Release state" >&2
-            sed -n '1,5p' "$api_error" >&2
-            exit 1
+            release_json="$(mktemp)"
+            api_error="$(mktemp)"
+            trap 'rm -f "$release_json" "$api_error"' EXIT
+            if gh api "repos/$GITHUB_REPOSITORY/releases/tags/v$RELEASE_VERSION" \
+                > "$release_json" 2> "$api_error"; then
+              python3 scripts/check-release-assets.py "$release_json" \
+                --metadata-only --version "$DISPLAY_VERSION" --source-sha "$SOURCE_SHA" \
+                --expect-state published-immutable
+              mode=reuse
+            elif grep -Eq '\(HTTP 404\)' "$api_error"; then
+              mode=create
+            else
+              echo "cannot classify GitHub Release state" >&2
+              sed -n '1,5p' "$api_error" >&2
+              exit 1
+            fi
           fi
           echo "mode=$mode" >> "$GITHUB_OUTPUT"
           echo "Release publication mode: $mode"
@@ -489,7 +556,7 @@ jobs:
           }
 
       - name: Provision OTA signing key
-        if: steps.release-mode.outputs.mode == 'create'
+        if: steps.release-mode.outputs.mode == 'create' || steps.release-mode.outputs.mode == 'dev'
         env:
           OTA_SIGNING_KEY: ${{ secrets.OTA_SIGNING_KEY }}
         run: |
@@ -503,7 +570,7 @@ jobs:
       # Only trusted main scripts and the digest-pinned ESP-IDF image see the key. No PR source is
       # compiled or executed in this job; the input artifact is handled strictly as binary data.
       - name: Sign and stage release artifacts
-        if: steps.release-mode.outputs.mode == 'create'
+        if: steps.release-mode.outputs.mode == 'create' || steps.release-mode.outputs.mode == 'dev'
         env:
           DISPLAY_VERSION: ${{ needs.build.outputs.display-version }}
           SOURCE_SHA: ${{ github.sha }}
@@ -512,7 +579,7 @@ jobs:
           "$DISPLAY_VERSION" _unsigned "$SOURCE_SHA" . _ci-independent
 
       - name: Remove OTA signing key
-        if: always() && steps.release-mode.outputs.mode == 'create'
+        if: always() && (steps.release-mode.outputs.mode == 'create' || steps.release-mode.outputs.mode == 'dev')
         run: rm -f ota_signing_key.pem
 
       # Create mode must prove that the protected secret is still the production authority;
@@ -552,7 +619,7 @@ jobs:
           release_dir=.
           if [ "$RELEASE_MODE" = reuse ]; then
             release_dir=_release-reuse-download
-          elif [ "$RELEASE_MODE" != create ]; then
+          elif [ "$RELEASE_MODE" != create ] && [ "$RELEASE_MODE" != dev ]; then
             echo "invalid Release publication mode: $RELEASE_MODE" >&2
             exit 1
           fi
@@ -720,7 +787,8 @@ jobs:
     needs: [build, publish]
     if: >-
       github.ref == 'refs/heads/main'
-      && github.event_name == 'push'
+      && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+      && needs.build.outputs.mode != 'test'
       && needs.build.outputs.firmware == 'yes'
     runs-on: ubuntu-26.04
     timeout-minutes: 20
@@ -755,6 +823,7 @@ jobs:
             ./_deploy-input/_site ./_deploy-input --version "$DISPLAY_VERSION"
 
       - name: Revalidate branch-backed Pages authority immediately before deployment
+        if: needs.build.outputs.mode == 'release'
         env:
           GH_TOKEN: ${{ github.token }}
           DISPLAY_VERSION: ${{ needs.build.outputs.display-version }}
@@ -775,11 +844,13 @@ jobs:
             --expected-public-key-digest scripts/ota-signing-public-key.sha256
 
       - name: Deploy root site to gh-pages
+        if: needs.build.outputs.mode == 'release'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: ./scripts/publish-pages-branch.sh root ./_deploy-input/_site
 
       - name: Accept branch-served Pages against immutable Release bytes
+        if: needs.build.outputs.mode == 'release'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           DISPLAY_VERSION: ${{ needs.build.outputs.display-version }}
@@ -797,6 +868,28 @@ jobs:
             --pages-base-url "$pages_base_url" \
             --release-base-url "https://github.com/$GITHUB_REPOSITORY/releases/download/v$RELEASE_VERSION" \
             --release-json "$release_json" \
+            --version "$DISPLAY_VERSION" \
+            --source-sha "$SOURCE_SHA" \
+            --attempts 6 --interval 10 --timeout 15
+
+      - name: Deploy dev site to gh-pages
+        if: needs.build.outputs.mode == 'dev'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: ./scripts/publish-pages-branch.sh dev ./_deploy-input/_site
+
+      - name: Accept branch-served Pages against dev build artifacts
+        if: needs.build.outputs.mode == 'dev'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DISPLAY_VERSION: ${{ needs.build.outputs.display-version }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          pages_base_url="$(gh api "repos/$GITHUB_REPOSITORY/pages" --jq '.html_url | rtrimstr("/")')"
+          python3 scripts/check-dev-pages.py \
+            --pages-base-url "$pages_base_url" \
+            --staged-site ./_deploy-input/_site \
             --version "$DISPLAY_VERSION" \
             --source-sha "$SOURCE_SHA" \
             --attempts 6 --interval 10 --timeout 15

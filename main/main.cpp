@@ -365,6 +365,13 @@ extern "C" void app_main() {
         (void)tk::cfg_load(config_store, cfg_blob);
     }
 
+    if (cfg_blob.has_ota) {
+        ota_set_channel(tk::ota_channel_from_int(cfg_blob.ota_channel));
+    } else {
+        const esp_app_desc_t* desc = esp_app_get_description();
+        ota_set_channel(tk::default_ota_channel_for_version(desc ? desc->version : ""));
+    }
+
     // Did WE end the last boot on purpose? esp_reset_reason() cannot tell a deliberate
     // esp_restart() apart from a user power-cycle — both read SW/POWERON — so the heap watchdog
     // leaves a breadcrumb in NVS on its way out. Take it (read + clear) before anything else can

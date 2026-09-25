@@ -1,6 +1,7 @@
 #pragma once
 
 #include "logic/health_gate.hpp"
+#include "logic/ota_contract.hpp"
 
 #include <string>
 
@@ -20,6 +21,7 @@ struct OtaStatus {
     std::string available;         // latest version seen by the last check (if any)
     bool        update_available;  // last check found a newer version
     std::string current;           // running version at the last check
+    std::string channel;           // active update channel ("release" or "dev")
     unsigned    target_pr{0};      // 0 for main channel, >0 if PR preview channel
 };
 
@@ -49,6 +51,13 @@ bool ota_start(unsigned pr_number = 0);
 
 // Snapshot of the current OTA state (for GET /ota/status polling).
 OtaStatus ota_get_status();
+
+// Active OTA feed channel ("release" or "dev").
+tk::OtaChannel ota_get_channel();
+void ota_set_channel(tk::OtaChannel channel);
+
+// Retrieve latest changelog text for offered update (returns true if available).
+bool ota_get_changelog(std::string& out);
 
 // Is a check or download task running right now? Deliberately separate from ota_get_status():
 // that one copies std::strings, so on an exhausted heap it can THROW — unusable for the heap

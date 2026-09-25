@@ -56,6 +56,7 @@
 #include "logic/heap_json_stream.hpp"
 #include "logic/heap_watchdog.hpp"
 #include "logic/ota_contract.hpp"
+#include "logic/ota_changelog_range.hpp"
 #include "logic/task_start_gate.hpp"
 #include "logic/nimble_start_gate.hpp"
 #include "logic/ping_probe.hpp"
@@ -966,6 +967,224 @@ static void test_ota_contract() {
     const std::string trailing = "{\"version\":\"1.2.3\"}junk";
     CHECK(tk::json_syntax_status(trailing.data(), trailing.size()) ==
           tk::JsonSyntaxStatus::Malformed);
+}
+
+// ─── OTA update channel selection & URL routing ──────────────────────────────
+static void test_ota_channel() {
+    using tk::OtaChannel;
+
+    // Names and validation
+    CHECK(std::string(tk::ota_channel_name(OtaChannel::Release)) == "release");
+    CHECK(std::string(tk::ota_channel_name(OtaChannel::Dev)) == "dev");
+    CHECK(tk::ota_channel_valid("release"));
+    CHECK(tk::ota_channel_valid("dev"));
+    CHECK(!tk::ota_channel_valid(""));
+    CHECK(!tk::ota_channel_valid("main"));
+    CHECK(!tk::ota_channel_valid("beta"));
+    CHECK(!tk::ota_channel_valid("RELEASE"));
+    CHECK(!tk::ota_channel_valid("dev\n"));
+
+    // Parsing
+    CHECK(tk::ota_channel_parse("release") == OtaChannel::Release);
+    CHECK(tk::ota_channel_parse("dev") == OtaChannel::Dev);
+    CHECK(tk::ota_channel_parse("unknown", OtaChannel::Release) == OtaChannel::Release);
+    CHECK(tk::ota_channel_parse("unknown", OtaChannel::Dev) == OtaChannel::Dev);
+
+    // Int conversion for config blob v2
+    CHECK(tk::ota_channel_to_int(OtaChannel::Release) == 0);
+    CHECK(tk::ota_channel_to_int(OtaChannel::Dev) == 1);
+    CHECK(tk::ota_channel_from_int(0) == OtaChannel::Release);
+    CHECK(tk::ota_channel_from_int(1) == OtaChannel::Dev);
+    CHECK(tk::ota_channel_from_int(99) == OtaChannel::Release);
+
+    // URL joining
+    CHECK(tk::ota_url_join("", "manifest.json").empty());
+    CHECK(tk::ota_url_join("https://example.com/ota", "") == "https://example.com/ota");
+    CHECK(tk::ota_url_join("https://example.com/ota", "manifest.json") ==
+          "https://example.com/ota/manifest.json");
+    CHECK(tk::ota_url_join("https://example.com/ota/", "manifest.json") ==
+          "https://example.com/ota/manifest.json");
+
+    // Manifest URL construction per channel
+    const std::string rel_manifest = "https://0bu.github.io/tesla-key-esp32/manifest.json";
+    const std::string fw_base      = "https://0bu.github.io/tesla-key-esp32";
+    const std::string fw_base_slash= "https://0bu.github.io/tesla-key-esp32/";
+
+    CHECK(tk::ota_channel_manifest_url(rel_manifest, fw_base, OtaChannel::Release) == rel_manifest);
+    CHECK(tk::ota_channel_manifest_url(rel_manifest, fw_base, OtaChannel::Dev) ==
+          "https://0bu.github.io/tesla-key-esp32/dev/manifest.json");
+    CHECK(tk::ota_channel_manifest_url(rel_manifest, fw_base_slash, OtaChannel::Dev) ==
+          "https://0bu.github.io/tesla-key-esp32/dev/manifest.json");
+
+    // Firmware binary URL construction per channel
+    CHECK(tk::ota_channel_firmware_url(fw_base, OtaChannel::Release, "tesla-key-esp32s3.bin") ==
+          "https://0bu.github.io/tesla-key-esp32/tesla-key-esp32s3.bin");
+    CHECK(tk::ota_channel_firmware_url(fw_base, OtaChannel::Dev, "tesla-key-esp32s3.bin") ==
+          "https://0bu.github.io/tesla-key-esp32/dev/tesla-key-esp32s3.bin");
+    CHECK(tk::ota_channel_firmware_url(fw_base_slash, OtaChannel::Dev, "tesla-key-esp32s3.bin") ==
+          "https://0bu.github.io/tesla-key-esp32/dev/tesla-key-esp32s3.bin");
+
+    // Static buffer zero-alloc formatters for dev channel
+    char dev_manifest_buf[128]{};
+    CHECK(tk::format_dev_manifest_url(dev_manifest_buf, sizeof(dev_manifest_buf)));
+    CHECK(std::string(dev_manifest_buf) == "https://0bu.github.io/tesla-key-esp32/dev/manifest.json");
+    CHECK(!tk::format_dev_manifest_url(dev_manifest_buf, 10));
+
+    char dev_fw_buf[128]{};
+    CHECK(tk::format_dev_firmware_url("-s3", dev_fw_buf, sizeof(dev_fw_buf)));
+    CHECK(std::string(dev_fw_buf) == "https://0bu.github.io/tesla-key-esp32/dev/tesla-key-esp32-s3.bin");
+    CHECK(tk::format_dev_firmware_url("", dev_fw_buf, sizeof(dev_fw_buf)));
+    CHECK(std::string(dev_fw_buf) == "https://0bu.github.io/tesla-key-esp32/dev/tesla-key-esp32.bin");
+    CHECK(!tk::format_dev_firmware_url("-invalid", dev_fw_buf, sizeof(dev_fw_buf)));
+
+    // Dev version classification & channel default
+    CHECK(tk::parse_dev_suffix("dev") == 0);
+    CHECK(tk::parse_dev_suffix("dev.1") == 1);
+    CHECK(tk::parse_dev_suffix("dev.42") == 42);
+    CHECK(tk::parse_dev_suffix("") == -1);
+    CHECK(tk::parse_dev_suffix("PR-1") == -1);
+    CHECK(tk::parse_dev_suffix("rc.1") == -1);
+
+    CHECK(tk::ota_version_is_dev("1.4.84-dev"));
+    CHECK(tk::ota_version_is_dev("1.4.84-dev.1"));
+    CHECK(tk::ota_version_is_dev("1.4.84-dev.12"));
+    CHECK(!tk::ota_version_is_dev("1.4.84"));
+    CHECK(!tk::ota_version_is_dev("1.4.84-rc.1"));
+    CHECK(!tk::ota_version_is_dev("1.4.84-PR-42"));
+    CHECK(!tk::ota_version_is_dev(""));
+
+    CHECK(tk::default_ota_channel_for_version("1.4.84") == OtaChannel::Release);
+    CHECK(tk::default_ota_channel_for_version("1.4.84-dev.5") == OtaChannel::Dev);
+
+    // Canonical version parsing and version comparison
+    CHECK(tk::canonical_ota_version("1.2.3"));
+    CHECK(tk::canonical_ota_version("1.2.3-dev.1"));
+    CHECK(!tk::canonical_ota_version("1.2"));
+    CHECK(!tk::canonical_ota_version("v1.2.3"));
+    CHECK(!tk::canonical_ota_version(""));
+
+    CHECK(tk::compare_ota_versions("1.2.4", "1.2.3") == tk::OtaVersionOrder::Newer);
+    CHECK(tk::compare_ota_versions("1.2.3", "1.2.4") == tk::OtaVersionOrder::Older);
+    CHECK(tk::compare_ota_versions("1.2.3", "1.2.3") == tk::OtaVersionOrder::Equal);
+
+    // is_ota_update_available: Release channel
+    // Release channel requires official release candidate (no suffix)
+    CHECK(!tk::is_ota_update_available("1.2.4-dev.1", "1.2.3", 0, OtaChannel::Release));
+    // Release channel: newer stable version is accepted
+    CHECK(tk::is_ota_update_available("1.2.4", "1.2.3", 0, OtaChannel::Release));
+    // Release channel: older stable version is rejected
+    CHECK(!tk::is_ota_update_available("1.2.2", "1.2.3", 0, OtaChannel::Release));
+    CHECK(!tk::is_ota_update_available("1.2.3", "1.2.3", 0, OtaChannel::Release));
+    // Release channel: switching Dev -> Release allows installing stable release (downgrade allowed)
+    CHECK(tk::is_ota_update_available("1.2.0", "1.2.4-dev.5", 0, OtaChannel::Release));
+    CHECK(tk::is_ota_update_available("1.2.4", "1.2.4-dev.5", 0, OtaChannel::Release));
+    // Release channel: PR or other non-dev pre-release build can return to stable of same core
+    CHECK(tk::is_ota_update_available("1.2.3", "1.2.3-PR-42", 0, OtaChannel::Release));
+
+    // is_ota_update_available: Dev channel
+    // Candidate must be a dev build
+    CHECK(!tk::is_ota_update_available("1.2.4", "1.2.3", 0, OtaChannel::Dev));
+    // Newer core version dev build is accepted
+    CHECK(tk::is_ota_update_available("1.3.0-dev.1", "1.2.3-dev.50", 0, OtaChannel::Dev));
+    // Same core: monotonic dev updates
+    CHECK(tk::is_ota_update_available("1.2.3-dev.6", "1.2.3-dev.5", 0, OtaChannel::Dev));
+    // Same core: equal dev version rejected
+    CHECK(!tk::is_ota_update_available("1.2.3-dev.5", "1.2.3-dev.5", 0, OtaChannel::Dev));
+    // Downgrade between dev builds is REJECTED
+    CHECK(!tk::is_ota_update_available("1.2.3-dev.4", "1.2.3-dev.5", 0, OtaChannel::Dev));
+    CHECK(!tk::is_ota_update_available("1.2.2-dev.99", "1.2.3-dev.1", 0, OtaChannel::Dev));
+    // Current is stable release: dev build of same or newer core is accepted
+    CHECK(tk::is_ota_update_available("1.2.3-dev.1", "1.2.3", 0, OtaChannel::Dev));
+    CHECK(tk::is_ota_update_available("1.2.4-dev.1", "1.2.3", 0, OtaChannel::Dev));
+    CHECK(!tk::is_ota_update_available("1.2.2-dev.1", "1.2.3", 0, OtaChannel::Dev));
+
+    // is_ota_update_available: PR preview
+    CHECK(tk::is_ota_update_available("1.2.3-PR-331", "1.2.3", 331));
+    CHECK(!tk::is_ota_update_available("1.2.3-PR-332", "1.2.3", 331)); // mismatched PR
+    CHECK(!tk::is_ota_update_available("1.2.2-PR-331", "1.2.3", 331)); // older core
+}
+
+// ─── OTA changelog parsing and range selection ──────────────────────────────
+static void test_ota_changelog_range() {
+    using Result = tk::OtaChangelogRangeResult;
+
+    // ota_manifest_sibling_url
+    char sibling[128] = {};
+    CHECK(tk::ota_manifest_sibling_url("https://example.com/manifest.json", "changelog.json", sibling, sizeof(sibling)));
+    CHECK_STR(sibling, "https://example.com/changelog.json");
+
+    CHECK(tk::ota_manifest_sibling_url("https://example.com/dev/manifest.json", "changelog.json", sibling, sizeof(sibling)));
+    CHECK_STR(sibling, "https://example.com/dev/changelog.json");
+
+    CHECK(tk::ota_manifest_sibling_url("https://0bu.github.io/tesla-key-esp32/PR/42/manifest.json", "changelog.json", sibling, sizeof(sibling)));
+    CHECK_STR(sibling, "https://0bu.github.io/tesla-key-esp32/PR/42/changelog.json");
+
+    CHECK(!tk::ota_manifest_sibling_url("", "changelog.json", sibling, sizeof(sibling)));
+    CHECK(!tk::ota_manifest_sibling_url("invalid_url_without_slash", "changelog.json", sibling, sizeof(sibling)));
+    CHECK(!tk::ota_manifest_sibling_url("https://example.com/manifest.json", "", sibling, sizeof(sibling)));
+    CHECK(!tk::ota_manifest_sibling_url("https://example.com/manifest.json", "changelog.json", sibling, 10)); // too small
+
+    // compare_ota_full_versions
+    CHECK(tk::compare_ota_full_versions("1.2.0", "1.2.1") == -1);
+    CHECK(tk::compare_ota_full_versions("1.2.1", "1.2.0") == 1);
+    CHECK(tk::compare_ota_full_versions("1.2.1", "1.2.1") == 0);
+    CHECK(tk::compare_ota_full_versions("1.2.1-dev.3", "1.2.1-dev.5") == -1);
+    CHECK(tk::compare_ota_full_versions("1.2.1-dev.12", "1.2.1-dev.5") == 1);
+    CHECK(tk::compare_ota_full_versions("1.2.1-dev.5", "1.2.1") == -1);
+    CHECK(tk::compare_ota_full_versions("1.2.1", "1.2.1-dev.5") == 1);
+    CHECK(tk::compare_ota_full_versions("invalid", "1.2.1") == -2);
+
+    // manifest_changelog JSON parsing
+    const char valid_json[] = "{\"version\":\"1.2.3\",\"changelog\":\"First change\\nSecond change\\\"escaped\\\"\"}";
+    char decoded[256] = {};
+    CHECK(tk::manifest_changelog(valid_json, std::strlen(valid_json), "1.2.3", decoded, sizeof(decoded)));
+    CHECK_STR(decoded, "First change\nSecond change\"escaped\"");
+
+    // Mismatched version fails closed
+    char fail_buf[256] = {};
+    CHECK(!tk::manifest_changelog(valid_json, std::strlen(valid_json), "1.2.4", fail_buf, sizeof(fail_buf)));
+    CHECK(fail_buf[0] == '\0');
+
+    // Unknown top-level fields fail closed
+    const char extra_field_json[] = "{\"version\":\"1.2.3\",\"changelog\":\"note\",\"extra\":\"bad\"}";
+    CHECK(!tk::manifest_changelog(extra_field_json, std::strlen(extra_field_json), "1.2.3", fail_buf, sizeof(fail_buf)));
+
+    // ota_changelog_select_range: legacy notes
+    char legacy_buf[256] = "Maintenance and reliability improvements.\nFix corner case.";
+    CHECK(tk::ota_changelog_select_range(legacy_buf, "1.2.0", "1.2.1") == Result::Legacy);
+    CHECK_STR(legacy_buf, "Maintenance and reliability improvements.\nFix corner case.");
+
+    // ota_changelog_select_range: versioned notes
+    char versioned_buf[512] =
+        "v1.2.1-dev.1 — Initial dev work\n"
+        "v1.2.1-dev.2 — Fix heap issue\n"
+        "v1.2.1-dev.3 — Add release channel";
+
+    // Running 1.2.1-dev.1, target 1.2.1-dev.3 -> keeps dev.2 and dev.3
+    CHECK(tk::ota_changelog_select_range(versioned_buf, "1.2.1-dev.1", "1.2.1-dev.3") == Result::Selected);
+    CHECK_STR(versioned_buf, "v1.2.1-dev.2 — Fix heap issue\nv1.2.1-dev.3 — Add release channel");
+
+    // Running 1.2.0 (older stable), target 1.2.1-dev.3 -> keeps all dev notes
+    char all_dev_buf[512] =
+        "v1.2.1-dev.1 — Initial dev work\n"
+        "v1.2.1-dev.2 — Fix heap issue\n"
+        "v1.2.1-dev.3 — Add release channel";
+    CHECK(tk::ota_changelog_select_range(all_dev_buf, "1.2.0", "1.2.1-dev.3") == Result::Selected);
+    CHECK_STR(all_dev_buf, "v1.2.1-dev.1 — Initial dev work\nv1.2.1-dev.2 — Fix heap issue\nv1.2.1-dev.3 — Add release channel");
+
+    // Target mismatch with last entry -> Invalid
+    char mismatch_buf[512] =
+        "v1.2.1-dev.1 — Initial dev work\n"
+        "v1.2.1-dev.2 — Fix heap issue";
+    CHECK(tk::ota_changelog_select_range(mismatch_buf, "1.2.1-dev.1", "1.2.1-dev.3") == Result::Invalid);
+    CHECK(mismatch_buf[0] == '\0');
+
+    // Running >= target -> Invalid
+    char downgrade_buf[512] =
+        "v1.2.1-dev.1 — Initial dev work\n"
+        "v1.2.1-dev.2 — Fix heap issue";
+    CHECK(tk::ota_changelog_select_range(downgrade_buf, "1.2.1-dev.2", "1.2.1-dev.2") == Result::Invalid);
+    CHECK(downgrade_buf[0] == '\0');
 }
 
 // ─── atomic two-task start / second-create fault injection ───────────────────
@@ -2081,6 +2300,20 @@ static void test_status_model() {
     CollectEmitter epn;
     tk::status::emit_status(pn, epn);
     CHECK(epn.out.find("ble.phase") == std::string::npos);
+
+    // ── OTA update channel presence rules ─────────────────────────────────────────────
+    Inputs ota_dev;
+    ota_dev.vin = "UNKNOWN"; ota_dev.version = "1.4.2";
+    ota_dev.ota_channel = "dev";
+    CollectEmitter e_ota_dev;
+    tk::status::emit_status(ota_dev, e_ota_dev);
+    CHECK(e_ota_dev.out.find("ota{\nota.channel=\"dev\"\n") != std::string::npos);
+
+    Inputs ota_none;
+    ota_none.vin = "UNKNOWN"; ota_none.version = "1.4.2";
+    CollectEmitter e_ota_none;
+    tk::status::emit_status(ota_none, e_ota_none);
+    CHECK(e_ota_none.out.find("ota{") == std::string::npos);
 }
 
 // ─── GET /api/1/vehicles/{VIN}/vehicle_data charge_state contract ─────────────
@@ -3919,7 +4152,7 @@ static void test_http_route() {
     using tk::HttpRoute;
     using tk::HttpVerb;
 
-    static_assert(tk::kFixedHttpRoutes.size() == 21,
+    static_assert(tk::kFixedHttpRoutes.size() == 23,
                   "extend the complete fixed-route matrix when a route is added");
     for (const tk::FixedHttpRoute& fixed : tk::kFixedHttpRoutes) {
         CHECK(tk::classify_http_route(fixed.verb, fixed.path) == fixed.route);
@@ -3979,6 +4212,7 @@ static void test_http_route() {
               HttpVerb::Get, tk::http_path_only("/unknown?next=/status")) ==
           HttpRoute::NotFound);
     CHECK(tk::classify_http_route(HttpVerb::Get, "/ota/status") == HttpRoute::OtaStatus);
+    CHECK(tk::classify_http_route(HttpVerb::Post, "/set_ota") == HttpRoute::SetOta);
     CHECK(tk::classify_http_route(HttpVerb::Get, "/status") == HttpRoute::Status);
     CHECK(tk::classify_http_route(HttpVerb::Other, "/status") == HttpRoute::NotFound);
     CHECK(tk::classify_http_route(HttpVerb::Other, base + "/vehicle_data") ==
@@ -3994,12 +4228,12 @@ static void test_http_route() {
     }};
     for (HttpRoute route : gated) CHECK(tk::http_route_requires_vehicle_runtime(route));
 
-    constexpr std::array<HttpRoute, 15> recovery{{
+    constexpr std::array<HttpRoute, 16> recovery{{
         HttpRoute::NotFound, HttpRoute::OtaCheck, HttpRoute::OtaUpdate,
         HttpRoute::OtaStatus, HttpRoute::SetTime, HttpRoute::SetMqtt,
-        HttpRoute::SetSyslog, HttpRoute::SetWifi, HttpRoute::Coredump,
-        HttpRoute::CrashDismiss, HttpRoute::Heap, HttpRoute::McpGet,
-        HttpRoute::Version, HttpRoute::Status, HttpRoute::Diag,
+        HttpRoute::SetSyslog, HttpRoute::SetWifi, HttpRoute::SetOta,
+        HttpRoute::Coredump, HttpRoute::CrashDismiss, HttpRoute::Heap,
+        HttpRoute::McpGet, HttpRoute::Version, HttpRoute::Status, HttpRoute::Diag,
     }};
     for (HttpRoute route : recovery) CHECK(!tk::http_route_requires_vehicle_runtime(route));
     CHECK(!tk::http_route_requires_vehicle_runtime(HttpRoute::Index));
@@ -4871,6 +5105,8 @@ static void test_config_store() {
     in.wifi_rollback_active = true; in.wifi_rolled_back = false;
     in.vin = "5YJ3E1EA7KF000316"; in.mqtt_uri = "192.168.1.5:1883";
     in.syslog_uri = "192.168.1.9:514";
+    in.ota_channel = 1;
+    in.has_ota = true;
 
     tk::ConfigBlobBuffer buf{};
     const size_t n = tk::config_blob_encode(in, buf.data(), buf.size());
@@ -4887,6 +5123,8 @@ static void test_config_store() {
     CHECK(out.vin == in.vin);
     CHECK(out.mqtt_uri == in.mqtt_uri);
     CHECK(out.syslog_uri == in.syslog_uri);
+    CHECK(out.ota_channel == in.ota_channel);
+    CHECK(out.has_ota);
 
     // An EMPTY value is a real value here — "" is how MQTT and syslog are DISABLED — so it must
     // survive a round trip rather than reading back as "unset".
@@ -4937,6 +5175,114 @@ static void test_config_store() {
     // An undersized output buffer writes NOTHING.
     tk::ConfigBlobBuffer b4{};
     CHECK(tk::config_blob_encode(in, b4.data(), 8) == 0);
+
+    // v1 backward compatibility & downgrade safety:
+    // config_blob_encode ALWAYS produces a version 1 blob with ota_channel packed in flags bits 2 and 3,
+    // so any older build (e.g. v1.5.7) that only reads v1 can decode it without wiping configuration.
+    tk::ConfigBlob v1_src;
+    v1_src.wifi_ssid = "V1Net";
+    v1_src.wifi_pass = "v1pass";
+    v1_src.vin = "5YJ3E1EA7KF000316";
+    v1_src.mqtt_uri = "broker:1883";
+    v1_src.syslog_uri = "syslog:514";
+    CHECK(!v1_src.has_ota);
+    tk::ConfigBlobBuffer v1_buf{};
+    const size_t v1_sz = tk::config_blob_encode(v1_src, v1_buf.data(), v1_buf.size());
+    CHECK(v1_sz > 0);
+    CHECK(v1_buf[4] == 1);  // always version 1
+
+    tk::ConfigBlob v1_out;
+    CHECK(tk::config_blob_decode(v1_buf.data(), v1_sz, v1_out));
+    CHECK(v1_out.wifi_ssid == "V1Net");
+    CHECK(v1_out.vin == "5YJ3E1EA7KF000316");
+    CHECK(!v1_out.has_ota);
+    CHECK(v1_out.ota_channel == 0);
+
+    // When has_ota is true and ota_channel is 0 (Release):
+    tk::ConfigBlob rel_src = v1_src;
+    rel_src.has_ota = true;
+    rel_src.ota_channel = 0;
+    tk::ConfigBlobBuffer rel_buf{};
+    const size_t rel_sz = tk::config_blob_encode(rel_src, rel_buf.data(), rel_buf.size());
+    CHECK(rel_sz > 0);
+    CHECK(rel_buf[4] == 1);  // still version 1
+    tk::ConfigBlob rel_out;
+    CHECK(tk::config_blob_decode(rel_buf.data(), rel_sz, rel_out));
+    CHECK(rel_out.has_ota);
+    CHECK(rel_out.ota_channel == 0);
+    CHECK(rel_out.wifi_ssid == "V1Net");
+
+    // When has_ota is true and ota_channel is 1 (Dev):
+    tk::ConfigBlob dev_src = v1_src;
+    dev_src.has_ota = true;
+    dev_src.ota_channel = 1;
+    tk::ConfigBlobBuffer dev_buf{};
+    const size_t dev_sz = tk::config_blob_encode(dev_src, dev_buf.data(), dev_buf.size());
+    CHECK(dev_sz > 0);
+    CHECK(dev_buf[4] == 1);  // still version 1
+    tk::ConfigBlob dev_out;
+    CHECK(tk::config_blob_decode(dev_buf.data(), dev_sz, dev_out));
+    CHECK(dev_out.has_ota);
+    CHECK(dev_out.ota_channel == 1);
+    CHECK(dev_out.wifi_ssid == "V1Net");
+
+    // Legacy v1 blob from older firmware where flags only had bits 0 and 1:
+    // Must decode cleanly with has_ota = false, ota_channel = 0.
+    tk::ConfigBlob leg_src = v1_src;
+    leg_src.wifi_rollback_active = true;
+    leg_src.wifi_rolled_back = true;
+    tk::ConfigBlobBuffer leg_buf{};
+    const size_t leg_sz = tk::config_blob_encode(leg_src, leg_buf.data(), leg_buf.size());
+    CHECK(leg_sz > 0);
+    tk::ConfigBlob leg_out;
+    CHECK(tk::config_blob_decode(leg_buf.data(), leg_sz, leg_out));
+    CHECK(leg_out.wifi_rollback_active);
+    CHECK(leg_out.wifi_rolled_back);
+    CHECK(!leg_out.has_ota);
+    CHECK(leg_out.ota_channel == 0);
+
+    // Simulated v2 blob (version=2 with trailing byte):
+    // 1) v2 with raw = 0x01 decodes as has_ota = true, ota_channel = 1
+    // 2) v2 with raw = 0xFF decodes as has_ota = false, ota_channel = 0
+    // Synthesize a v2 blob by appending a byte and updating version and CRC.
+    tk::ConfigBlobBuffer v2_syn{};
+    memcpy(v2_syn.data(), dev_buf.data(), dev_sz - 4); // body without CRC
+    v2_syn[4] = 2; // version 2
+    v2_syn[dev_sz - 4] = 1; // v2 trailing byte: ota_channel = 1
+    const size_t v2_sz = dev_sz + 1;
+    const uint32_t v2_crc = tk::config_crc32(v2_syn.data(), v2_sz - 4);
+    v2_syn[v2_sz - 4] = static_cast<uint8_t>(v2_crc & 0xFF);
+    v2_syn[v2_sz - 3] = static_cast<uint8_t>((v2_crc >> 8) & 0xFF);
+    v2_syn[v2_sz - 2] = static_cast<uint8_t>((v2_crc >> 16) & 0xFF);
+    v2_syn[v2_sz - 1] = static_cast<uint8_t>((v2_crc >> 24) & 0xFF);
+    tk::ConfigBlob v2_out;
+    CHECK(tk::config_blob_decode(v2_syn.data(), v2_sz, v2_out));
+    CHECK(v2_out.has_ota);
+    CHECK(v2_out.ota_channel == 1);
+    CHECK(v2_out.wifi_ssid == "V1Net");
+
+    // Re-saving a decoded v2 blob produces a v1 blob that preserves channel settings
+    tk::ConfigBlobBuffer v2_mig_buf{};
+    const size_t v2_mig_sz = tk::config_blob_encode(v2_out, v2_mig_buf.data(), v2_mig_buf.size());
+    CHECK(v2_mig_sz > 0);
+    CHECK(v2_mig_buf[4] == 1); // migrated to version 1
+    tk::ConfigBlob v2_mig_out;
+    CHECK(tk::config_blob_decode(v2_mig_buf.data(), v2_mig_sz, v2_mig_out));
+    CHECK(v2_mig_out.has_ota);
+    CHECK(v2_mig_out.ota_channel == 1);
+    CHECK(v2_mig_out.wifi_ssid == "V1Net");
+
+    // v2 with 0xFF decodes as has_ota = false
+    v2_syn[dev_sz - 4] = 0xFF;
+    const uint32_t v2_ff_crc = tk::config_crc32(v2_syn.data(), v2_sz - 4);
+    v2_syn[v2_sz - 4] = static_cast<uint8_t>(v2_ff_crc & 0xFF);
+    v2_syn[v2_sz - 3] = static_cast<uint8_t>((v2_ff_crc >> 8) & 0xFF);
+    v2_syn[v2_sz - 2] = static_cast<uint8_t>((v2_ff_crc >> 16) & 0xFF);
+    v2_syn[v2_sz - 1] = static_cast<uint8_t>((v2_ff_crc >> 24) & 0xFF);
+    tk::ConfigBlob v2_ff_out;
+    CHECK(tk::config_blob_decode(v2_syn.data(), v2_sz, v2_ff_out));
+    CHECK(!v2_ff_out.has_ota);
+    CHECK(v2_ff_out.ota_channel == 0);
 }
 
 // ─── /status: the sys block, the crash block and redaction ────────────────────
@@ -7055,6 +7401,8 @@ int main() {
     test_link_state_strings();
     test_target();
     test_ota_contract();
+    test_ota_channel();
+    test_ota_changelog_range();
     test_task_start_gate();
     test_runtime_admission();
     test_ota_confirm_runtime_admission_matrix();

@@ -507,11 +507,21 @@ Compilation and signing are separate trust domains:
    preview whose PR is no longer open, same-repository, labelled and at the manifest's `sourceSha`.
 
 Pages has exactly one serving authority: GitHub's branch-backed legacy mode with source
-`gh-pages:/`, holding both root and `PR/<N>/`. The workflows do not upload or deploy a Pages Actions
-artifact. `scripts/check-pages-source.py` validates the Pages API mode/source and HTTPS URL before
-protected signing, in the separate main deploy job and preview paths immediately before every branch
-publication/deletion, and again when deriving the live URL for acceptance. A repository switched to Actions mode or another branch/path therefore
-fails before key use or branch mutation instead of silently creating a second publication model.
+`gh-pages:/`, holding root (Release channel), `dev/` (Dev channel), and `PR/<N>/` (PR previews).
+The workflows do not upload or deploy a Pages Actions artifact. `scripts/check-pages-source.py`
+validates the Pages API mode/source and HTTPS URL before protected signing, in the separate main deploy
+job and preview paths immediately before every branch publication/deletion, and again when deriving the
+live URL for acceptance. A repository switched to Actions mode or another branch/path therefore fails
+before key use or branch mutation instead of silently creating a second publication model.
+
+**Dev-feed and manual release trust model:** Automated pushes to `main` produce development channel
+builds (`mode=dev`) signed by the protected key and deployed to `/dev/` Pages. Official tagged production
+releases are cut manually via `workflow_dispatch` with `release: true` (with optional `bump: patch|minor|major`
+or `release_version: x.y.z`), creating the tagged immutable Release and deploying to root Pages. The deploy
+job validates the served `/dev/` files against local staged artifacts via `scripts/check-dev-pages.py`.
+Furthermore, unprivileged manual `workflow_dispatch` runs without `release: true` execute in test mode
+(`mode == 'test'`), which never enters the protected signing or publishing jobs, preventing unauthorized
+dev or release artifact generation.
 
 These gates prove a closed, deterministic source-to-artifact relationship under the pinned build
 contract; they do not prove that reviewed source is safe, that GitHub-hosted runners are trustworthy,

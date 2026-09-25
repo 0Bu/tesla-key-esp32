@@ -114,6 +114,12 @@ struct ConfigBlob {
     // an empty string is a stored value here, never an absent field.
     std::string mqtt_uri;
     std::string syslog_uri;
+    // ── v2: the OTA update channel (logic/ota_channel.hpp; 0 = release, 1 = dev) ─────────────────
+    // Here for the same reason: ONE writer (the httpd task, POST /set_ota). Which feed a device
+    // follows is a persistent user choice — a board put on the dev channel must still be on it after a reboot.
+    int32_t ota_channel = 0;
+    // FALSE when the decoded blob predates v2 (no channel byte).
+    bool has_ota = false;
 };
 
 // The NVS key inside the `tesla_cfg` namespace is owned by the exact persistence registry.
@@ -152,7 +158,7 @@ inline constexpr uint8_t kConfigBlobMagic3 = '1';
 // flash-back to an older image, two branches that both invent "v2") loses the user's settings
 // without losing the bytes. Two parallel branches must not claim the same version number: the
 // one that ships second takes the later number.
-inline constexpr uint8_t kConfigBlobVersion    = 1;
+inline constexpr uint8_t kConfigBlobVersion    = 2;
 inline constexpr uint8_t kConfigBlobVersionMin = 1;
 
 // ── FIELD BOUNDS ──────────────────────────────────────────────────────────────────────────────
@@ -192,6 +198,7 @@ inline constexpr size_t kConfigBlobEncodedMax =
     detail::blob_str_bytes(kConfigMaxVinLen) +         // vin
     detail::blob_str_bytes(kConfigMaxUriLen) +         // mqtt_uri
     detail::blob_str_bytes(kConfigMaxUriLen) +         // syslog_uri
+    1 +                                                // v2: ota_channel
     detail::kBlobCrcBytes;
 
 // The buffer size callers allocate. Headroom over the current layout so a small v2 field does
@@ -201,7 +208,7 @@ inline constexpr size_t kConfigBlobEncodedMax =
 // save path deliberately makes no heap allocation at all.
 inline constexpr size_t kConfigBlobCapBytes = 384;
 
-static_assert(kConfigBlobEncodedMax == 361,
+static_assert(kConfigBlobEncodedMax == 362,
               "the serialized layout moved — if that was intended, bump kConfigBlobVersion and "
               "update this number and the layout comment together");
 static_assert(kConfigBlobEncodedMax <= kConfigBlobCapBytes,
@@ -278,14 +285,21 @@ inline size_t config_blob_encode(const ConfigBlob& c, uint8_t* out, size_t cap) 
     w.put_u8(kConfigBlobMagic1);
     w.put_u8(kConfigBlobMagic2);
     w.put_u8(kConfigBlobMagic3);
-    w.put_u8(kConfigBlobVersion);
+    const uint8_t write_version = 1;
+    w.put_u8(write_version);
     w.put_str(c.wifi_ssid,        kConfigMaxSsidLen);
     w.put_str(c.wifi_pass,        kConfigMaxWifiPassLen);
     w.put_str(c.wifi_ssid_backup, kConfigMaxSsidLen);
     w.put_str(c.wifi_pass_backup, kConfigMaxWifiPassLen);
-    // Two booleans in one byte, so a future flag costs nothing and cannot move the layout.
+    // Flags byte: bit0 = wifi_rollback_active, bit1 = wifi_rolled_back.
+    // To preserve 100% backward compatibility for downgrades to older builds (which only read v1),
+    // OTA channel configuration is packed in the reserved bits of the v1 flags byte:
+    // bit2 = has_ota (explicitly set channel), bit3 = ota_channel (0 = release, 1 = dev).
+    // Older builds ignore bits 2..7, ensuring all credentials survive downgrade without NVS wipe.
     w.put_u8(static_cast<uint8_t>((c.wifi_rollback_active ? 1u : 0u) |
-                                  (c.wifi_rolled_back     ? 2u : 0u)));
+                                  (c.wifi_rolled_back     ? 2u : 0u) |
+                                  (c.has_ota              ? 4u : 0u) |
+                                  ((c.ota_channel != 0)   ? 8u : 0u)));
     w.put_str(c.vin,        kConfigMaxVinLen);
     w.put_str(c.mqtt_uri,   kConfigMaxUriLen);
     w.put_str(c.syslog_uri, kConfigMaxUriLen);
@@ -336,7 +350,20 @@ inline bool config_blob_decode(const uint8_t* in, size_t len, ConfigBlob& out) {
     if (p + 1 > body_end) return false;
     const uint8_t flags = in[p++];
     if (!get_str(c.vin) || !get_str(c.mqtt_uri) || !get_str(c.syslog_uri)) return false;
-    // (A version 2 block is read here, guarded by `if (version >= 2)`.)
+    if (version >= 2) {
+        if (p + 1 > body_end) return false;
+        const uint8_t raw = in[p++];
+        if (raw == 0xFF) {
+            c.has_ota     = false;
+            c.ota_channel = 0;
+        } else {
+            c.has_ota     = true;
+            c.ota_channel = static_cast<int32_t>(raw);
+        }
+    } else {
+        c.has_ota     = (flags & 4u) != 0;
+        c.ota_channel = (flags & 8u) != 0 ? 1 : 0;
+    }
 
     // Exact per version: a v1 blob must END right here. Accepting a prefix and ignoring the rest
     // would let a TRUNCATED future blob decode as a valid v1 whose newer fields silently take

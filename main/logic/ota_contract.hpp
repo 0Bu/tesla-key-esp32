@@ -3,6 +3,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <string>
 #include <string_view>
 
 // Pure, hardware-free logic shared by the firmware and the host-side mock build
@@ -165,6 +166,121 @@ inline bool format_pr_firmware_url(unsigned pr_number, std::string_view chip_suf
     return true;
 }
 
+enum class OtaChannel : uint8_t {
+    Release = 0,
+    Dev = 1,
+};
+
+inline constexpr const char* kOtaDevSubdir = "dev";
+
+inline const char* ota_channel_name(OtaChannel c) {
+    return c == OtaChannel::Dev ? "dev" : "release";
+}
+
+// Accepts only the two names /status and POST /set_ota document. Anything else is REFUSED.
+inline bool ota_channel_valid(std::string_view s) {
+    return s == "release" || s == "dev";
+}
+
+// Parse a stored/POSTed channel name, falling back to `def` for anything unrecognised.
+inline OtaChannel ota_channel_parse(std::string_view s, OtaChannel def = OtaChannel::Release) {
+    if (s == "dev") return OtaChannel::Dev;
+    if (s == "release") return OtaChannel::Release;
+    return def;
+}
+
+// On-flash encoding (logic/config_store.hpp).
+inline int32_t ota_channel_to_int(OtaChannel c) {
+    return c == OtaChannel::Dev ? 1 : 0;
+}
+
+inline OtaChannel ota_channel_from_int(int32_t v) {
+    return v == 1 ? OtaChannel::Dev : OtaChannel::Release;
+}
+
+// Returns the dev counter if the suffix is "dev" (returns 0) or "dev.<number>" (returns number), else -1.
+inline int parse_dev_suffix(std::string_view suffix) {
+    if (suffix == "dev") return 0;
+    if (suffix.size() < 5 || suffix.substr(0, 4) != "dev.") return -1;
+    std::string_view digits = suffix.substr(4);
+    if (digits.empty() || digits.size() > 9) return -1;
+    int result = 0;
+    for (char c : digits) {
+        if (!ota_ascii_digit(c)) return -1;
+        result = result * 10 + static_cast<int>(c - '0');
+    }
+    return result;
+}
+
+// Does this version string come from the dev feed? CI stamps dev builds as "<next release>-dev.<n>".
+inline bool ota_version_is_dev(std::string_view v) {
+    OtaVersionParts parts{};
+    if (!parse_ota_version(v, parts)) return false;
+    return parse_dev_suffix(parts.suffix) >= 0;
+}
+
+inline OtaChannel default_ota_channel_for_version(std::string_view v) {
+    return ota_version_is_dev(v) ? OtaChannel::Dev : OtaChannel::Release;
+}
+
+// Join `rest` onto `base` with exactly one '/' between them. An EMPTY base yields an empty string.
+inline std::string ota_url_join(std::string_view base, std::string_view rest) {
+    if (base.empty()) return "";
+    if (rest.empty()) return std::string(base);
+    std::string out(base);
+    if (out.back() != '/') out += '/';
+    out.append(rest.data(), rest.size());
+    return out;
+}
+
+// The manifest to check for THIS channel. The release channel uses the configured manifest URL
+// verbatim; the dev channel is always <firmware base>/dev/manifest.json.
+inline std::string ota_channel_manifest_url(std::string_view release_manifest_url,
+                                            std::string_view firmware_base_url,
+                                            OtaChannel c) {
+    if (c == OtaChannel::Release) return std::string(release_manifest_url);
+    return ota_url_join(ota_url_join(firmware_base_url, kOtaDevSubdir), "manifest.json");
+}
+
+// The image to download for THIS channel. `image` is the per-target file name (e.g. tesla-key-esp32.bin).
+inline std::string ota_channel_firmware_url(std::string_view firmware_base_url,
+                                            OtaChannel c,
+                                            std::string_view image) {
+    const std::string dir = (c == OtaChannel::Dev)
+        ? ota_url_join(firmware_base_url, kOtaDevSubdir)
+        : std::string(firmware_base_url);
+    return ota_url_join(dir, image);
+}
+
+// Format the official GitHub Pages Dev manifest URL safely without heap allocation.
+// URL format: "https://0bu.github.io/tesla-key-esp32/dev/manifest.json"
+inline bool format_dev_manifest_url(char* buf, std::size_t buf_len) {
+    static constexpr std::string_view kUrl = "https://0bu.github.io/tesla-key-esp32/dev/manifest.json";
+    if (buf == nullptr || buf_len < kUrl.size() + 1) return false;
+    for (std::size_t i = 0; i < kUrl.size(); ++i) buf[i] = kUrl[i];
+    buf[kUrl.size()] = '\0';
+    return true;
+}
+
+// Format the official GitHub Pages Dev firmware URL safely without heap allocation.
+// URL format: "https://0bu.github.io/tesla-key-esp32/dev/tesla-key-esp32<chip_suffix>.bin"
+inline bool format_dev_firmware_url(std::string_view chip_suffix, char* buf, std::size_t buf_len) {
+    if (buf == nullptr) return false;
+    if (!chip_suffix.empty() && chip_suffix != "-s3" && chip_suffix != "-c3" && chip_suffix != "-c6") {
+        return false;
+    }
+    static constexpr std::string_view kPrefix = "https://0bu.github.io/tesla-key-esp32/dev/tesla-key-esp32";
+    static constexpr std::string_view kExt = ".bin";
+    const std::size_t total_len = kPrefix.size() + chip_suffix.size() + kExt.size();
+    if (buf_len < total_len + 1) return false;
+    std::size_t offset = 0;
+    for (char c : kPrefix) buf[offset++] = c;
+    for (char c : chip_suffix) buf[offset++] = c;
+    for (char c : kExt) buf[offset++] = c;
+    buf[offset] = '\0';
+    return true;
+}
+
 enum class OtaVersionOrder : std::int8_t {
     Invalid = -2,
     Older = -1,
@@ -195,11 +311,12 @@ inline OtaVersionOrder compare_ota_versions(std::string_view candidate,
     return OtaVersionOrder::Equal;
 }
 
-// Evaluates whether candidate firmware is eligible for OTA update given the running version
-// and an optional target PR number (0 = standard main release).
+// Evaluates whether candidate firmware is eligible for OTA update given the running version,
+// an optional target PR number (0 = standard channel), and the selected update channel.
 [[gnu::noinline]] inline bool is_ota_update_available(std::string_view candidate,
                                                      std::string_view current,
-                                                     unsigned target_pr = 0) {
+                                                     unsigned target_pr = 0,
+                                                     OtaChannel channel = OtaChannel::Release) {
     OtaVersionParts candidate_parts{};
     OtaVersionParts current_parts{};
     if (!parse_ota_version(candidate, candidate_parts) ||
@@ -207,27 +324,54 @@ inline OtaVersionOrder compare_ota_versions(std::string_view candidate,
         return false;
     }
 
-    const OtaVersionOrder order = compare_ota_versions(candidate, current);
-    if (order == OtaVersionOrder::Invalid) return false;
+    if (target_pr > 0) {
+        // Targeted PR update (target_pr > 0):
+        // 1. Candidate must carry the matching PR suffix
+        const unsigned cand_pr = parse_pr_suffix(candidate_parts.suffix);
+        if (cand_pr != target_pr) return false;
 
-    if (target_pr == 0) {
-        if (order == OtaVersionOrder::Newer) return true;
-        if (order == OtaVersionOrder::Equal) {
+        // 2. Candidate core must not be older than the running core
+        const OtaVersionOrder order = compare_ota_versions(candidate, current);
+        if (order == OtaVersionOrder::Invalid || order == OtaVersionOrder::Older) return false;
+
+        return true;
+    }
+
+    const OtaVersionOrder core_order = compare_ota_versions(candidate, current);
+    if (core_order == OtaVersionOrder::Invalid) return false;
+
+    if (channel == OtaChannel::Release) {
+        // Release feed candidates must be official stable releases (no suffix)
+        if (!candidate_parts.suffix.empty()) return false;
+
+        // Dev -> Release downgrade: switching from Dev channel to Release channel allows installing stable release
+        if (parse_dev_suffix(current_parts.suffix) >= 0) {
+            return true;
+        }
+
+        if (core_order == OtaVersionOrder::Newer) return true;
+        if (core_order == OtaVersionOrder::Equal) {
             // Allow returning from a PR or pre-release build to the official stable release of the same core
-            return candidate_parts.suffix.empty() && !current_parts.suffix.empty();
+            return !current_parts.suffix.empty();
         }
         return false;
     }
 
-    // Targeted PR update (target_pr > 0):
-    // 1. Candidate must carry the matching PR suffix
-    const unsigned cand_pr = parse_pr_suffix(candidate_parts.suffix);
-    if (cand_pr != target_pr) return false;
+    // Dev channel: candidate must be a dev build
+    const int cand_dev = parse_dev_suffix(candidate_parts.suffix);
+    if (cand_dev < 0) return false;
 
-    // 2. Candidate core must not be older than the running core
-    if (order == OtaVersionOrder::Older) return false;
+    if (core_order == OtaVersionOrder::Newer) return true;
+    if (core_order == OtaVersionOrder::Equal) {
+        const int curr_dev = parse_dev_suffix(current_parts.suffix);
+        if (curr_dev < 0) {
+            // Current is not a dev build: dev build of same core is acceptable
+            return true;
+        }
+        return cand_dev > curr_dev;
+    }
 
-    return true;
+    return false;
 }
 
 template <std::size_t N>

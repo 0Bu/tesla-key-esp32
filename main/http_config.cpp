@@ -694,3 +694,48 @@ esp_err_t handle_set_wifi(GuardedReq rq) {
     }
     return r;
 }
+
+// ─── POST /set_ota — update the OTA update channel (live, no reboot) ─────────────
+// Body: {"channel":"release"|"dev"}
+// Persists the channel selection in NVS (ConfigBlob v2) and updates the active channel.
+esp_err_t handle_set_ota(GuardedReq rq) {
+    httpd_req_t* req = rq.req;
+    const tk::ConfigStringSubmission submitted = parse_string_submission_(req, "channel");
+    if (submitted.status != tk::ConfigSubmissionStatus::Ready) {
+        return send_json(req, tk::config_submission_http_status(submitted.status),
+                         make_response(false, "set_ota", "",
+                                       tk::config_submission_reason(submitted.status)));
+    }
+
+    const std::string& channel = submitted.value;
+    if (!tk::ota_channel_valid(channel)) {
+        return send_json(req, 400, make_response(false, "set_ota", "", "invalid channel (use release or dev)"));
+    }
+
+    tk::ConfigBlob cfg;
+    tk::cfg_load(*g_config, cfg);
+    const tk::OtaChannel want = tk::ota_channel_parse(channel);
+    if (cfg.has_ota && tk::ota_channel_from_int(cfg.ota_channel) == want) {
+        ota_set_channel(want);
+        tk::JsonBuilder resp;
+        resp.boolean(resp.root(), "ok", true);
+        resp.boolean(resp.root(), "result", true);
+        resp.string(resp.root(), "channel", tk::ota_channel_name(want));
+        return send_json(req, 200, resp.release());
+    }
+
+    cfg.ota_channel = tk::ota_channel_to_int(want);
+    cfg.has_ota = true;
+    if (!tk::cfg_save(*g_config, cfg)) {
+        return send_json(req, 500, make_response(false, "set_ota", "", "failed to save config"));
+    }
+
+    ota_set_channel(want);
+    ESP_LOGI(TAG, "OTA channel set to %s", tk::ota_channel_name(want));
+
+    tk::JsonBuilder resp;
+    resp.boolean(resp.root(), "ok", true);
+    resp.boolean(resp.root(), "result", true);
+    resp.string(resp.root(), "channel", tk::ota_channel_name(want));
+    return send_json(req, 200, resp.release());
+}

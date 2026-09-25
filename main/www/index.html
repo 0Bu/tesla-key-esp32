@@ -17,7 +17,7 @@
     <div class="logo"><svg viewBox="0 0 24 24"><path d="M13 2 4 14h6l-1 8 9-12h-6l1-8z"/></svg></div>
     <div class="ttl">
       <h1>tesla-key-esp32</h1>
-      <div class="sub"><span id="ipline"></span><button type="button" class="verlink" id="verLink" onclick="otaCheck()" title="Check for firmware updates" aria-label="Check for firmware updates" style="border:0;padding:0;background:transparent;font:inherit;color:inherit">&mdash;</button><span class="otastat" id="otaStat" role="status" aria-live="polite" aria-atomic="true"></span></div>
+      <div class="sub"><span id="ipline"></span><button type="button" class="verlink" id="verLink" onclick="otaCheck()" title="Check for firmware updates" aria-label="Check for firmware updates" style="border:0;padding:0;background:transparent;font:inherit;color:inherit">&mdash;</button><span class="chan-wrap"><button type="button" class="chan-btn" id="chanBtn" onclick="toggleChanMenu(event)" onkeydown="handleChanBtnKey(event)" aria-label="Update channel" title="Update channel" aria-haspopup="true" aria-expanded="false"><svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></button><div class="chan-menu hide" id="chanMenu" role="menu" aria-label="Update channel" onkeydown="handleChanKey(event)"><button type="button" class="chan-opt sel" id="optRelease" role="menuitemradio" aria-checked="true" aria-label="Release channel" onclick="setChannel('release')"><span class="chk">✓</span>Release</button><button type="button" class="chan-opt" id="optDev" role="menuitemradio" aria-checked="false" aria-label="Development channel" onclick="setChannel('dev')"><span class="chk"></span>Development</button></div></span><span class="otastat" id="otaStat" role="status" aria-live="polite" aria-atomic="true"></span></div>
     </div>
   </header>
 
@@ -72,6 +72,25 @@
     </div>
   </div>
 
+</div>
+
+<div class="modal hide" id="otaModal" role="dialog" aria-modal="true" aria-labelledby="otaModalTitle" aria-describedby="otaHelp">
+  <div class="modal-backdrop" id="otaBackdrop"></div>
+  <div class="modal-card ota-modal-card">
+    <div class="card-title" id="otaModalTitle">Firmware update</div>
+    <div class="ota-offer">
+      <div class="ota-version-line mono" id="otaVersionLine"></div>
+      <span class="ota-channel" id="otaChannel"></span>
+    </div>
+    <div class="ota-changes-title">Changes in this update</div>
+    <ul class="ota-changes" id="otaChanges"></ul>
+    <p class="hint ota-no-changes" id="otaNoChanges" hidden>No changelog was supplied for this update.</p>
+    <p class="hint ota-help" id="otaHelp">The device downloads the firmware and reboots when done.</p>
+    <div class="modal-actions">
+      <button class="btn secondary" type="button" id="otaCancel">Cancel</button>
+      <button class="btn primary" type="button" id="otaInstall">Install update</button>
+    </div>
+  </div>
 </div>
 
 <div class="toasts" id="toasts" role="status" aria-live="polite" aria-atomic="true"></div>

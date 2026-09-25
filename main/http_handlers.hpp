@@ -113,6 +113,7 @@ esp_err_t handle_heap(GuardedReq rq);             // GET  /heap
 esp_err_t handle_ota_check(GuardedReq rq);        // GET  /ota/check[?ms=<epoch>]
 esp_err_t handle_ota_update(GuardedReq rq);       // POST /ota/update
 esp_err_t handle_ota_status(GuardedReq rq);       // GET  /ota/status
+esp_err_t handle_ota_changelog(GuardedReq rq);    // GET  /ota/changelog
 
 // http_config.cpp — setup / pairing / persisted-config endpoints
 esp_err_t handle_gen_keys(GuardedReq rq);         // POST /gen_keys[?force=1]
@@ -122,6 +123,7 @@ esp_err_t handle_set_vin(GuardedReq rq);          // POST /set_vin
 esp_err_t handle_set_mqtt(GuardedReq rq);         // POST /set_mqtt
 esp_err_t handle_set_syslog(GuardedReq rq);       // POST /set_syslog
 esp_err_t handle_set_wifi(GuardedReq rq);         // POST /set_wifi
+esp_err_t handle_set_ota(GuardedReq rq);          // POST /set_ota
 
 // mcp_server.cpp — MCP endpoint (Streamable HTTP, stateless JSON-RPC 2.0; docs/MCP.md)
 esp_err_t mcp_handle_post(GuardedReq rq);         // POST /mcp

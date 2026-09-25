@@ -935,8 +935,9 @@ def validate(root: Path) -> None:
         and build_workflow.count("  deploy:") == 1
         and "needs: [build, independent-rebuild]" in build_workflow
         and "needs: [build, publish]" in build_workflow
-        and "if: github.event_name == 'push' && github.ref == 'refs/heads/main'"
+        and "(github.event_name == 'push' || github.event_name == 'workflow_dispatch')"
         in build_workflow
+        and "github.ref == 'refs/heads/main'" in build_workflow
         and "ref: ${{ github.sha }}" in build_workflow
         and "name: firmware-independent-rebuild" in build_workflow
         and "Independently rebuild all four targets" in build_workflow
