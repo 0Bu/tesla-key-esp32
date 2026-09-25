@@ -322,6 +322,13 @@ real_git="$(command -v git)"
 cat >"$tmp/bin/git" <<SH
 #!/usr/bin/env bash
 set -u
+if [ -n "\${TEST_BRANCH:-}" ]; then
+  case "\$*" in
+    *"rev-parse"*"--abbrev-ref"*)
+      printf '%s\\n' "\$TEST_BRANCH"
+      exit 0 ;;
+  esac
+fi
 if [ "\$#" -ge 3 ] && [ "\$1" = -C ] && [ "\$2" = "$root" ]; then
   case "\${*:3}" in
     *"remote get-url"*)
