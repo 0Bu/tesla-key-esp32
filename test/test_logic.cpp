@@ -1010,6 +1010,18 @@ static void test_ota_channel() {
     CHECK(std::string(dev_fw_buf) == "https://0bu.github.io/tesla-key-esp32/dev/tesla-key-esp32.bin");
     CHECK(!tk::format_dev_firmware_url("-invalid", dev_fw_buf, sizeof(dev_fw_buf)));
 
+    // resolve_manifest_url_into
+    std::string res_out;
+    const char* default_manifest = "https://example.com/manifest.json";
+    CHECK_STR(tk::resolve_manifest_url_into(0, OtaChannel::Release, default_manifest, res_out),
+              default_manifest);
+    CHECK_STR(tk::resolve_manifest_url_into(0, OtaChannel::Dev, default_manifest, res_out),
+              "https://0bu.github.io/tesla-key-esp32/dev/manifest.json");
+    CHECK_STR(tk::resolve_manifest_url_into(331, OtaChannel::Dev, default_manifest, res_out),
+              "https://0bu.github.io/tesla-key-esp32/PR/331/manifest.json");
+    CHECK_STR(tk::resolve_manifest_url_into(331, OtaChannel::Release, default_manifest, res_out),
+              "https://0bu.github.io/tesla-key-esp32/PR/331/manifest.json");
+
     // Dev version classification & channel default
     CHECK(tk::parse_dev_suffix("dev") == 0);
     CHECK(tk::parse_dev_suffix("dev.1") == 1);
