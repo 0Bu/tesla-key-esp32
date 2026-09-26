@@ -70,7 +70,7 @@
         },
         "CMakeFiles/__idf_main.dir/nvs_storage.cpp.su": {},
         "CMakeFiles/__idf_main.dir/ota_update.cpp.su": {
-          "/COMPONENT_MAIN_DIR/ota_update.cpp :: OtaCheckResult ota_check(unsigned int)": 1568,
+          "/COMPONENT_MAIN_DIR/ota_update.cpp :: OtaCheckResult ota_check(unsigned int)": 1584,
           "/COMPONENT_MAIN_DIR/ota_update.cpp :: bool http_get_to_buffer(const char*, std::string&)": 736,
           "/COMPONENT_MAIN_DIR/ota_update.cpp :: void ota_task_impl()": 592
         },
@@ -178,7 +178,7 @@
         },
         "CMakeFiles/__idf_main.dir/nvs_storage.cpp.su": {},
         "CMakeFiles/__idf_main.dir/ota_update.cpp.su": {
-          "/COMPONENT_MAIN_DIR/ota_update.cpp :: OtaCheckResult ota_check(unsigned int)": 1568,
+          "/COMPONENT_MAIN_DIR/ota_update.cpp :: OtaCheckResult ota_check(unsigned int)": 1584,
           "/COMPONENT_MAIN_DIR/ota_update.cpp :: bool http_get_to_buffer(const char*, std::string&)": 736,
           "/COMPONENT_MAIN_DIR/ota_update.cpp :: void ota_task_impl()": 592
         },
@@ -282,7 +282,7 @@
         },
         "CMakeFiles/__idf_main.dir/nvs_storage.cpp.su": {},
         "CMakeFiles/__idf_main.dir/ota_update.cpp.su": {
-          "/COMPONENT_MAIN_DIR/ota_update.cpp :: OtaCheckResult ota_check(unsigned int)": 1440,
+          "/COMPONENT_MAIN_DIR/ota_update.cpp :: OtaCheckResult ota_check(unsigned int)": 1456,
           "/COMPONENT_MAIN_DIR/ota_update.cpp :: bool http_get_to_buffer(const char*, std::string&)": 736,
           "/COMPONENT_MAIN_DIR/ota_update.cpp :: void ota_task_impl()": 592
         },
