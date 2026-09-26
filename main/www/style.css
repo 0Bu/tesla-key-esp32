@@ -207,6 +207,7 @@ svg{display:block}
 
 /* sheets / dialogs */
 .modal{position:fixed; inset:0; z-index:20; display:flex; align-items:flex-end; justify-content:center}
+#askModal{z-index:21} /* a sheet always sits above the OTA dialog, see syncModal() */
 .modal-backdrop{position:absolute; inset:0; background:var(--scrim); animation:fade .15s ease}
 .sheet{position:relative; width:100%; max-width:480px; max-height:92%; overflow:auto; background:var(--card);
   border-radius:22px 22px 0 0; box-shadow:0 20px 60px rgba(0,0,0,.3); padding:10px 18px calc(18px + env(safe-area-inset-bottom));

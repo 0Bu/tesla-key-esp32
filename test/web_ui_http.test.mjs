@@ -718,6 +718,24 @@ test("an open sheet or OTA dialog makes the page behind it inert until both are 
   assert.equal(context.document.activeElement, element("verLink"), "focus returns once the page is live again");
 });
 
+test("an OTA dialog that pops up over an open sheet never takes its focus, and focus stays reachable", async () => {
+  const { context, element } = loadUi();
+  element("askModal").classList.add("hide");
+  element("otaModal").classList.add("hide");
+  element("wrap").appendChild(element("vinBtn"));
+  element("vinBtn").focus();
+  const answer = context.askText({ title: "Vehicle VIN" });
+  assert.equal(context.document.activeElement, element("askInput"));
+  const decision = context.askOtaInstall({ current: "1.5.0", available: "1.5.1" }, "");
+  assert.equal(context.document.activeElement, element("askInput"), "the sheet on top keeps focus");
+  context.askClose(context.askCancelValue);
+  assert.equal(await answer, null);
+  assert.equal(context.document.activeElement, element("otaInstall"), "not the inert page behind the dialog");
+  context.closeOtaModal(false);
+  assert.equal(await decision, false);
+  assert.equal(context.document.activeElement, element("verLink"));
+});
+
 test("a destructive confirmation starts on Cancel and an indeterminate OTA phase shows no fake progress", () => {
   const { context, element } = loadUi();
   context.askConfirm({ title: "Regenerate the security key?", destructive: true });

@@ -114,8 +114,7 @@ function emptyBarsHTML(){
    arrives with each 4 s poll, so the remaining time is ticked down locally in between and the
    polled value is treated as the clock to resync against.
 
-   The time sits at the row's right edge, in the column the tiles put their edit pencil in,
-   and is painted with textContent into a dedicated node — NOT rebuilt through setHTML with
+   The time sits at the end of the row's status line, and is painted with textContent into a dedicated node — NOT rebuilt through setHTML with
    the rest of the row, since rewriting the row's innerHTML every second would re-create the
    bar <rect>s and restart their CSS fill animation on every tick. */
 var cdKind=null, cdEndMs=0;
@@ -341,12 +340,12 @@ function fmtAgo(sec){
 /* ---------- sections: car | setup | net | fw, shown by CSS keyed off .wrap[data-tab] ---------- */
 var uiTab='car';
 var TAB_TITLE={car:'tesla-key-esp32', setup:'Setup', net:'Network', fw:'Firmware'};
+var TAB_BTN={car:'tabCar', setup:'tabSetup', net:'tabNet', fw:'tabFw'};
 function setTab(t){
   if(!TAB_TITLE[t]) return;
   uiTab=t;
   var w=$("wrap"); if(w) w.setAttribute('data-tab',t);
-  var ids={car:'tabCar',setup:'tabSetup',net:'tabNet',fw:'tabFw'};
-  for(var k in ids){ var b=$(ids[k]); if(!b) continue; if(k===t) b.setAttribute('aria-current','page'); else if(b.removeAttribute) b.removeAttribute('aria-current'); }
+  for(var k in TAB_BTN){ var b=$(TAB_BTN[k]); if(!b) continue; if(k===t) b.setAttribute('aria-current','page'); else if(b.removeAttribute) b.removeAttribute('aria-current'); }
   var pt=$("paneTitle"); if(pt) pt.textContent=TAB_TITLE[t];
 }
 function setBadge(id,on){ var b=$(id); if(b&&b.classList) b.classList.toggle('hide',!on); }
@@ -689,8 +688,11 @@ var askResolve=null, askCancelValue=null, askReturnFocus=null, askHintFn=null;
 // stops Tab from walking into the dock and panes nor keeps screen readers inside the dialog.
 // Derived from both dialogs, so closing one while the other is still up keeps the page locked.
 // Call it after showing/hiding a dialog and before moving focus back: an inert node can't take it.
+// Both can be open at once (an OTA check finishing while a sheet is up). The sheet is always the
+// top layer (CSS z-index), so Escape closes it first, and the OTA dialog never takes its focus.
+function isOpen(id){ var m=$(id); return !!(m&&m.classList&&!m.classList.contains('hide')); }
 function syncModal(){
-  var open=['askModal','otaModal'].some(function(id){ var m=$(id); return !!(m&&m.classList&&!m.classList.contains('hide')); });
+  var open=isOpen('askModal')||isOpen('otaModal');
   if(typeof document!=='undefined'&&document.body&&document.body.classList) document.body.classList.toggle('modal-open',open);
   var w=$("wrap"); if(w) w.inert=open;
 }
@@ -734,6 +736,10 @@ function askClose(value){
   syncModal();
   var r=askResolve; askResolve=null;
   var back=askReturnFocus; askReturnFocus=null;
+  // Back to where the sheet was opened from — unless that is on the page and the OTA dialog is
+  // still up (the page is inert then): focus that dialog instead of losing focus to <body>.
+  var w=$("wrap"), onPage=!!(back&&w&&typeof w.contains==='function'&&w.contains(back));
+  if(isOpen('otaModal')&&(!back||onPage)) back=$("otaInstall");
   if(back&&typeof back.focus==='function') back.focus();
   if(r) r(value);
 }
@@ -1026,9 +1032,12 @@ function closeOtaModal(decision){
   var m = $("otaModal");
   if(m && m.classList) m.classList.add('hide');
   syncModal();
-  // Still inert when a sheet is open on top; focus then stays inside that sheet.
-  var vl = $("verLink"), w = $("wrap");
-  if(vl && typeof vl.focus === 'function' && !(w && w.inert)) vl.focus();
+  // With a sheet still open on top, focus is already in that sheet (the dialog never took it).
+  // Otherwise back to Check for updates — or, when the dialog opened over another section
+  // (the Firmware pane is hidden on phones), to that section's tab.
+  var vl = $("verLink");
+  if(vl && typeof vl.getClientRects === 'function' && !vl.getClientRects().length) vl = $(TAB_BTN[uiTab]);
+  if(vl && typeof vl.focus === 'function' && !isOpen('askModal')) vl.focus();
   if(otaDecisionResolve){
     var r = otaDecisionResolve;
     otaDecisionResolve = null;
@@ -1085,7 +1094,7 @@ function askOtaInstall(status, changelog){
   if(m && m.classList) m.classList.remove('hide');
   syncModal();
   var installBtn = $("otaInstall");
-  if(installBtn && typeof installBtn.focus === 'function') installBtn.focus();
+  if(installBtn && typeof installBtn.focus === 'function' && !isOpen('askModal')) installBtn.focus();
   return new Promise(function(resolve){
     otaDecisionResolve = resolve;
   });
