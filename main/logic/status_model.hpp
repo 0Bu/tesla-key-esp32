@@ -90,6 +90,9 @@ struct Inputs {
     int         syslog_port{0};
     std::string syslog_error;     // empty = omit
 
+    // OTA update channel ("release" or "dev"). Empty = omitted.
+    std::string ota_channel;
+
     // BLE link / discovery.
     bool                   ble_connected{false}, ble_scanning{false};
     bool                   have_ble_rssi{false};
@@ -254,6 +257,13 @@ inline void emit_status(const Inputs& in, E& e) {
     }
     if (!in.syslog_error.empty()) e.str("error", in.syslog_error.c_str());
     e.obj_end();
+
+    // ── ota ───────────────────────────────────────────────────────────────────
+    if (!in.ota_channel.empty()) {
+        e.obj_begin("ota");
+        e.str("channel", in.ota_channel.c_str());
+        e.obj_end();
+    }
 
     // ── tele — read-only telemetry caches, emitted only while the BLE link is up
     // (root-level sibling BEFORE "ble", mirroring the historical insertion order). ──

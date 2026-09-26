@@ -155,7 +155,7 @@ EXPECTED_ACTIONS = {
 
 EXPECTED_SECRET_REFERENCES = {
     ("build.yml", "publish"): Counter({"OTA_SIGNING_KEY": 1}),
-    ("build.yml", "deploy"): Counter({"GITHUB_TOKEN": 2}),
+    ("build.yml", "deploy"): Counter({"GITHUB_TOKEN": 3}),
     ("pr-preview-cleanup.yml", "cleanup-event"): Counter({"GITHUB_TOKEN": 1}),
     ("pr-preview-cleanup.yml", "discover-stale"): Counter({"GITHUB_TOKEN": 1}),
     ("pr-preview-cleanup.yml", "reconcile-stale"): Counter({"GITHUB_TOKEN": 2}),
@@ -174,8 +174,8 @@ SIGNING_ENVIRONMENT_JOBS = {
 # reviewed allowlists: step order plus every name/uses/with/env/if/run byte is pinned.  Semantic
 # checks below keep failures explanatory; this final digest closes gaps in the narrow scanner.
 EXPECTED_PRIVILEGED_JOB_SHA256 = {
-    ("build.yml", "publish"): "951df7adbd88171956b416269199705ea3abe151a10969f40cad2605d0283a24",
-    ("build.yml", "deploy"): "d6e78adf09157e537268ffcfe341eb5425ff2d0e655921973c4ed048710d8d04",
+    ("build.yml", "publish"): "7282303dac6098fa7fc04f44c6abb115d838f69dd3aea9c58f4aa1de22ec2a1f",
+    ("build.yml", "deploy"): "b1f098f9a5298e1142872a67119baf2c8f5a620aa512bacb5a8918c23a42bb2b",
     ("signed-pr-preview.yml", "sign-preview"): "18d34f6a9aae2add8b5af9cb69c3af3c391205cb2b795e45f62a150674cce4a7",
 }
 TRUSTED_DEFAULT_ENV = "TRUSTED_DEFAULT_SHA: ${{ github.sha }}"
@@ -448,8 +448,9 @@ def validate(root: Path) -> None:
         and "printf '%s\\n' \"$DISPLAY_VERSION\" > version.txt" in build["independent-rebuild"]
         and '"${{ github.sha }}"' in build["independent-rebuild"]
         and "name: firmware-independent-rebuild" in build["independent-rebuild"]
-        and "if: github.event_name == 'push' && github.ref == 'refs/heads/main'"
+        and "(github.event_name == 'push' || github.event_name == 'workflow_dispatch')"
         in build["independent-rebuild"]
+        and "github.ref == 'refs/heads/main'" in build["independent-rebuild"]
         and "environment:" not in build["independent-rebuild"]
         and "contents: write" not in build["independent-rebuild"]
         and "actions/cache@" not in build["independent-rebuild"],
@@ -465,7 +466,7 @@ def validate(root: Path) -> None:
     require("id-token" not in build["publish"],
             "build.yml:publish must not retain an unused OIDC permission")
     require("github.ref == 'refs/heads/main'" in build["publish"] and
-            "github.event_name == 'push'" in build["publish"],
+            "(github.event_name == 'push' || github.event_name == 'workflow_dispatch')" in build["publish"],
             "build.yml:publish must remain main-push-only")
     publish_refs = re.findall(r"^\s+ref:\s*([^\n#]+?)\s*$", build["publish"], re.MULTILINE)
     require(
@@ -483,7 +484,7 @@ def validate(root: Path) -> None:
     )
     require(
         "github.ref == 'refs/heads/main'" in build["deploy"]
-        and "github.event_name == 'push'" in build["deploy"],
+        and "(github.event_name == 'push' || github.event_name == 'workflow_dispatch')" in build["deploy"],
         "build.yml:deploy must remain main-push-only",
     )
     deploy_refs = re.findall(r"^\s+ref:\s*([^\n#]+?)\s*$", build["deploy"], re.MULTILINE)
@@ -575,8 +576,9 @@ def validate(root: Path) -> None:
     )
     require(
         build["publish"].count("if: steps.release-mode.outputs.mode == 'create'") == 7
+        and build["publish"].count("if: steps.release-mode.outputs.mode == 'create' || steps.release-mode.outputs.mode == 'dev'") == 2
         and build["publish"].count("if: steps.release-mode.outputs.mode == 'reuse'") == 1
-        and "if: always() && steps.release-mode.outputs.mode == 'create'" in build["publish"]
+        and "if: always() && (steps.release-mode.outputs.mode == 'create' || steps.release-mode.outputs.mode == 'dev')" in build["publish"]
         and "Release appeared after create-mode classification; refusing key provisioning"
         in build["publish"],
         "build.yml:publish key/sign/Release mutation must be create-only and reuse must remain key-free",
@@ -694,7 +696,7 @@ def validate(root: Path) -> None:
         "name: tesla-key-esp32-${{ needs.build.outputs.display-version }}-${{ github.sha }}"
         in deploy
         and "path: _deploy-input" in deploy
-        and deploy.count(pages_source_check) == 2
+        and deploy.count(pages_source_check) == 3
         and "./scripts/select-release-version.sh --require-published-release" in deploy
         and 'python3 scripts/check-release-assets.py "$release_json" ./_deploy-input'
         in deploy
@@ -732,6 +734,13 @@ def validate(root: Path) -> None:
         and deploy.index(deploy_push) < deploy.rindex(final_release_api)
         < deploy.index(final_release_check),
         "build.yml:deploy must fetch fresh immutable Release metadata after branch publication",
+    )
+    require(
+        "Deploy dev site to gh-pages" in deploy
+        and "./scripts/publish-pages-branch.sh dev ./_deploy-input/_site" in deploy
+        and "if: needs.build.outputs.mode == 'dev'" in deploy
+        and "python3 scripts/check-dev-pages.py" in deploy,
+        "build.yml:deploy must include dev branch publication",
     )
     require("contents: write" not in build["logic-test"] and "contents: write" not in build["build"],
             "build.yml: untrusted build jobs must not write repository contents")

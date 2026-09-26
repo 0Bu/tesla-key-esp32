@@ -19,6 +19,8 @@ python3 "$repo_root/scripts/check-signed-root-inventory.py" --self-test
 python3 "$repo_root/scripts/prepare-reused-release.py" --self-test
 python3 "$repo_root/scripts/check-published-release.py" --self-test
 python3 "$repo_root/scripts/check-pages-source.py" --self-test
+python3 "$repo_root/scripts/check-dev-pages.py" --self-test
+python3 "$repo_root/scripts/generate-ota-changelog.py" --self-test
 python3 "$repo_root/scripts/check-stack-usage.py" --self-test
 python3 "$repo_root/scripts/check-build-gate-contract.py" --self-test
 temp="$(mktemp -d)"

@@ -12,7 +12,8 @@
 # PR/<N>/ (open the URL directly, or from the link on the PR) — there is no root version picker,
 # so no cross-PR index file is maintained.
 #
-#   root <srcdir>       sync <srcdir> into the gh-pages ROOT, preserving the PR/ preview tree
+#   root <srcdir>       sync <srcdir> into the gh-pages ROOT, preserving the PR/ preview tree and dev/
+#   dev  <srcdir>       sync <srcdir> into gh-pages dev/, preserving root and PR/
 #   pr   <srcdir> <N>   replace gh-pages PR/<N>/ with <srcdir>   (N = PR number, digits)
 #   rm   <N>            remove gh-pages PR/<N>/
 #
@@ -23,7 +24,7 @@
 # Env (CI): GITHUB_TOKEN (contents:write), GITHUB_REPOSITORY, optionally GITHUB_SERVER_URL.
 set -euo pipefail
 
-mode="${1:?usage: publish-pages-branch.sh root <srcdir> | pr <srcdir> <N> | rm <N>}"
+mode="${1:?usage: publish-pages-branch.sh root <srcdir> | dev <srcdir> | pr <srcdir> <N> | rm <N>}"
 : "${GITHUB_TOKEN:?GITHUB_TOKEN required}"
 : "${GITHUB_REPOSITORY:?GITHUB_REPOSITORY required}"
 
@@ -34,6 +35,7 @@ remote="https://x-access-token:${GITHUB_TOKEN}@${server#https://}/${GITHUB_REPOS
 src=""; num=""
 case "$mode" in
   root) src="${2:?root needs <srcdir>}" ;;
+  dev)  src="${2:?dev needs <srcdir>}" ;;
   pr)   src="${2:?pr needs <srcdir>}"; num="${3:?pr needs <N>}" ;;
   rm)   num="${2:?rm needs <N>}" ;;
   *)    echo "unknown mode '$mode'" >&2; exit 1 ;;
@@ -48,9 +50,12 @@ apply_changes() {
   local work="$1"
   case "$mode" in
     root)
-      # Root files only — NEVER delete the PR/ preview tree (PR-owned). A stale previews.json left
-      # by the old root version picker is no longer excluded, so it is pruned on the next root sync.
-      rsync -a --delete --exclude='.git/' --exclude='PR/' "$src"/ "$work"/
+      # Root files only — NEVER delete the PR/ preview tree (PR-owned) or the dev/ channel.
+      rsync -a --delete --exclude='.git/' --exclude='PR/' --exclude='dev/' "$src"/ "$work"/
+      ;;
+    dev)
+      mkdir -p "$work/dev"
+      rsync -a --delete --exclude='.git/' "$src"/ "$work/dev"/
       ;;
     pr)
       rm -rf "${work:?}/PR/$num"
@@ -66,6 +71,7 @@ apply_changes() {
 commit_msg() {
   case "$mode" in
     root) echo "pages: publish site (root)" ;;
+    dev)  echo "pages: publish site (dev channel)" ;;
     pr)   echo "pages: publish PR $num preview" ;;
     rm)   echo "pages: remove PR $num preview" ;;
   esac

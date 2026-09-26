@@ -177,4 +177,36 @@ JSON
 
 python3 "$repo_root/scripts/check-pages-manifest.py" "$out" \
   --source-sha "$source_sha" --version "$version"
+
+channel="${PAGES_CHANNEL:-}"
+if [[ -z "$channel" ]]; then
+  if [[ "$version" =~ -dev ]]; then
+    channel="dev"
+  else
+    channel="release"
+  fi
+fi
+
+if [[ -f "$repo_root/scripts/generate-ota-changelog.py" ]]; then
+  published_ref_args=()
+  if ! git -C "$repo_root" rev-parse --verify --quiet origin/gh-pages > /dev/null 2>&1; then
+    if git -C "$repo_root" remote get-url origin >/dev/null 2>&1; then
+      if git -C "$repo_root" ls-remote --heads origin gh-pages 2>/dev/null | grep -q gh-pages; then
+        if ! git -C "$repo_root" fetch origin gh-pages:refs/remotes/origin/gh-pages --depth=1; then
+          echo "warning: failed to fetch origin/gh-pages; changelog will fallback to Git tags" >&2
+        fi
+      fi
+    fi
+  fi
+  if git -C "$repo_root" rev-parse --verify --quiet origin/gh-pages > /dev/null 2>&1; then
+    published_ref_args=(--published-ref origin/gh-pages)
+  fi
+  python3 "$repo_root/scripts/generate-ota-changelog.py" \
+    --channel "$channel" \
+    --version "$version" \
+    --source-sha "$source_sha" \
+    "${published_ref_args[@]}" \
+    --output "$out/changelog.json"
+fi
+
 echo "Built verified Pages site in '$out' for version $version from $source_sha"

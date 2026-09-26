@@ -39,6 +39,7 @@
     "mqtt_uri.hpp": {"test": "test/test_logic.cpp", "evidence": "test_mqtt_uri("},
     "net_link.hpp": {"test": "test/test_logic.cpp", "evidence": "test_net_link("},
     "nimble_start_gate.hpp": {"test": "test/test_logic.cpp", "evidence": "test_nimble_start_gate("},
+    "ota_changelog_range.hpp": {"test": "test/test_logic.cpp", "evidence": "test_ota_changelog_range("},
     "ota_contract.hpp": {"test": "test/test_logic.cpp", "evidence": "test_ota_contract("},
     "ping_probe.hpp": {"test": "test/test_logic.cpp", "evidence": "test_ping_probe_generation("},
     "nvs_blob_load.hpp": {"test": "test/test_nvs_storage.cpp", "evidence": "test_nvs_blob_load("},

@@ -2223,7 +2223,7 @@ def require_ota_fetch_contract(ota_source: str, ota_logic: str,
         "tk::canonical_ota_version(available)",
         "tk::canonical_ota_version(res.current)",
         "res.available.assign(available.data(), available.size());",
-        "tk::is_ota_update_available(res.available, res.current, pr_number)",
+        "tk::is_ota_update_available(res.available, res.current, pr_number, channel)",
     )
     for token in required_check_tokens:
         if token not in check:
@@ -2236,7 +2236,7 @@ def require_ota_fetch_contract(ota_source: str, ota_logic: str,
         "std::string{}.swap(body);",
         "tk::canonical_ota_version(available)",
         "res.available.assign(available.data(), available.size());",
-        "tk::is_ota_update_available(res.available, res.current, pr_number)",
+        "tk::is_ota_update_available(res.available, res.current, pr_number, channel)",
     )
     for before, after in zip(ordered, ordered[1:]):
         require_before("OTA validate/release/copy ordering", check, before, after)
@@ -2653,7 +2653,7 @@ def require_ota_status_lock_contract(ota_source: str, runtime_tests: str) -> Non
     unavailable = function_body_in(ota_source, "unavailable_status_snapshot")
     if "s_status" in scrub_cpp(unavailable):
         raise AssertionError("OTA unavailable snapshot reads shared status without a lock")
-    if 'return {OtaState::Error, 0, "unavailable", "", false, ""};' not in unavailable:
+    if 'return {OtaState::Error, 0, "unavailable", "", false, "", tk::ota_channel_name(ota_get_channel())};' not in unavailable:
         raise AssertionError("OTA lock failure lost its independent unavailable snapshot")
 
     reader = function_body_in(ota_source, "ota_get_status")
@@ -3309,6 +3309,7 @@ HTTP_ROUTE_DISPATCH = {
     "OtaCheck": "handle_ota_check",
     "OtaUpdate": "handle_ota_update",
     "OtaStatus": "handle_ota_status",
+    "OtaChangelog": "handle_ota_changelog",
     "GenKeys": "handle_gen_keys",
     "SendKey": "handle_send_key",
     "SetTime": "handle_set_time",
@@ -3316,6 +3317,7 @@ HTTP_ROUTE_DISPATCH = {
     "SetMqtt": "handle_set_mqtt",
     "SetSyslog": "handle_set_syslog",
     "SetWifi": "handle_set_wifi",
+    "SetOta": "handle_set_ota",
     "Scan": "handle_scan",
     "Coredump": "handle_coredump",
     "CrashDismiss": "handle_crash_dismiss",

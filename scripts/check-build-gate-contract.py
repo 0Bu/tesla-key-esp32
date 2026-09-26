@@ -357,6 +357,12 @@ def validate(root: Path) -> None:
                 'python3 "$repo_root/scripts/check-pages-source.py" --self-test') == 1,
             "test-build-contracts.sh: branch-backed Pages source self-test is not wired")
     require(build_contracts.count(
+                'python3 "$repo_root/scripts/check-dev-pages.py" --self-test') == 1,
+            "test-build-contracts.sh: dev Pages acceptance self-test is not wired")
+    require(build_contracts.count(
+                'python3 "$repo_root/scripts/generate-ota-changelog.py" --self-test') == 1,
+            "test-build-contracts.sh: OTA changelog generator self-test is not wired")
+    require(build_contracts.count(
                 'python3 "$repo_root/scripts/check-dependency-contract.py" --self-test') == 1,
             "test-build-contracts.sh: dependency contract self-test is not wired")
     require(build_contracts.count(
@@ -935,8 +941,9 @@ def validate(root: Path) -> None:
         and build_workflow.count("  deploy:") == 1
         and "needs: [build, independent-rebuild]" in build_workflow
         and "needs: [build, publish]" in build_workflow
-        and "if: github.event_name == 'push' && github.ref == 'refs/heads/main'"
+        and "(github.event_name == 'push' || github.event_name == 'workflow_dispatch')"
         in build_workflow
+        and "github.ref == 'refs/heads/main'" in build_workflow
         and "ref: ${{ github.sha }}" in build_workflow
         and "name: firmware-independent-rebuild" in build_workflow
         and "Independently rebuild all four targets" in build_workflow
@@ -998,9 +1005,9 @@ def validate(root: Path) -> None:
         "build.yml Draft upload must be preceded by the exact signed root inventory gate",
     )
     require(
-        build_workflow.count(PAGES_SOURCE_CHECK) == 3
+        build_workflow.count(PAGES_SOURCE_CHECK) == 4
         and publish_section.count(PAGES_SOURCE_CHECK) == 1
-        and deploy_section.count(PAGES_SOURCE_CHECK) == 2
+        and deploy_section.count(PAGES_SOURCE_CHECK) == 3
         and "Revalidate current Release candidate immediately before signed artifact upload"
         in build_workflow
         and "actions/configure-pages@" not in build_workflow
@@ -1405,6 +1412,12 @@ def self_test(root: Path) -> None:
         ("pages-source-selftest-wiring", "scripts/test-build-contracts.sh",
          'python3 "$repo_root/scripts/check-pages-source.py" --self-test\n', "",
          "Pages source self-test is not wired"),
+        ("dev-pages-selftest-wiring", "scripts/test-build-contracts.sh",
+         'python3 "$repo_root/scripts/check-dev-pages.py" --self-test\n', "",
+         "dev Pages acceptance self-test is not wired"),
+        ("changelog-selftest-wiring", "scripts/test-build-contracts.sh",
+         'python3 "$repo_root/scripts/generate-ota-changelog.py" --self-test\n', "",
+         "OTA changelog generator self-test is not wired"),
         ("release-reuse-selftest-wiring", "scripts/test-build-contracts.sh",
          'python3 "$repo_root/scripts/prepare-reused-release.py" --self-test\n', "",
          "immutable Release reuse self-test is not wired"),

@@ -116,7 +116,9 @@ latest_published_stable_version() {
 }
 
 select_version() {
-  local repo_root="$1" source_sha="$2" current_main_sha="$3" tag version latest_tag tag_rows resolved
+  local repo_root="$1" source_sha="$2" current_main_sha="$3"
+  shift 3
+  local tag version latest_tag tag_rows resolved
   local -a matching=()
 
   validate_current_main "$repo_root" "$source_sha" "$current_main_sha" || return
@@ -144,7 +146,20 @@ select_version() {
     return 0
   fi
 
-  "$repo_root/scripts/next-version.sh"
+  local -a args=("$@")
+  if ((${#args[@]} == 0)); then
+    if [[ -n "${REQUESTED_RELEASE_VERSION:-}" ]]; then
+      args=(--exact "$REQUESTED_RELEASE_VERSION")
+    elif [[ -n "${BUMP:-}" ]]; then
+      args=("$BUMP")
+    fi
+  fi
+
+  if ((${#args[@]} > 0)); then
+    REPO_ROOT="$repo_root" "$repo_root/scripts/next-version.sh" "${args[@]}"
+  else
+    REPO_ROOT="$repo_root" "$repo_root/scripts/next-version.sh"
+  fi
 }
 
 require_current_release() {
@@ -224,11 +239,22 @@ require_published_release() {
 }
 
 require_release_candidate() {
-  local repo_root="$1" source_sha="$2" current_main_sha="$3" version="$4" selected
+  local repo_root="$1" source_sha="$2" current_main_sha="$3" version="$4"
+  shift 4
+  local selected
+  if [[ "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)-dev\.[0-9]+$ ]]; then
+    validate_current_main "$repo_root" "$source_sha" "$current_main_sha" || return
+    selected="$(REPO_ROOT="$repo_root" "$repo_root/scripts/next-version.sh" --dev)" || return
+    [[ "$selected" == "$version" ]] || {
+      echo "stale dev candidate: selected=$version current-authorized=$selected" >&2
+      return 2
+    }
+    return 0
+  fi
   valid_stable_version "$version" || {
     echo "invalid or overlong release version: $version" >&2; return 2;
   }
-  selected="$(select_version "$repo_root" "$source_sha" "$current_main_sha")" || return
+  selected="$(select_version "$repo_root" "$source_sha" "$current_main_sha" "$@")" || return
   [[ "$selected" == "$version" ]] || {
     echo "stale release candidate: selected=$version current-authorized=$selected" >&2
     return 2
@@ -277,8 +303,16 @@ self_test() {
   got="$(select_version "$tmp" "$sha_b" "$sha_b")"
   [[ "$got" == 1.2.1 ]] || { echo "next-version selection failed: $got" >&2; return 1; }
   require_release_candidate "$tmp" "$sha_b" "$sha_b" 1.2.1
+  require_release_candidate "$tmp" "$sha_b" "$sha_b" 1.3.0 minor
+  require_release_candidate "$tmp" "$sha_b" "$sha_b" 2.0.0 major
+  require_release_candidate "$tmp" "$sha_b" "$sha_b" 1.5.0 --exact 1.5.0
   if require_release_candidate "$tmp" "$sha_b" "$sha_b" 1.2.2 >/dev/null 2>&1; then
     echo "wrong release candidate was accepted" >&2
+    return 1
+  fi
+  require_release_candidate "$tmp" "$sha_b" "$sha_b" 1.2.1-dev.1
+  if require_release_candidate "$tmp" "$sha_b" "$sha_b" 1.2.1-dev.2 >/dev/null 2>&1; then
+    echo "wrong dev candidate was accepted" >&2
     return 1
   fi
 
@@ -488,10 +522,11 @@ case "${1:-}" in
     latest_published_stable_version "$repo_root"
     ;;
   --select-main)
-    [[ $# -eq 2 ]] || { echo "usage: $0 --select-main SOURCE_SHA" >&2; exit 2; }
+    [ "$#" -ge 2 ] || { echo "usage: $0 --select-main SOURCE_SHA [BUMP_OR_EXACT...]" >&2; exit 2; }
+    sha="$2"; shift 2
     fetch_tags "$repo_root" || exit
     current_main="$(fetch_current_main "$repo_root")" || exit
-    select_version "$repo_root" "$2" "$current_main"
+    select_version "$repo_root" "$sha" "$current_main" "$@"
     ;;
   --require-current-main)
     [[ $# -eq 2 ]] || { echo "usage: $0 --require-current-main SOURCE_SHA" >&2; exit 2; }
@@ -499,10 +534,11 @@ case "${1:-}" in
     validate_current_main "$repo_root" "$2" "$current_main"
     ;;
   --require-release-candidate)
-    [[ $# -eq 3 ]] || { echo "usage: $0 --require-release-candidate SOURCE_SHA VERSION" >&2; exit 2; }
+    [ "$#" -ge 3 ] || { echo "usage: $0 --require-release-candidate SOURCE_SHA VERSION [BUMP_OR_EXACT...]" >&2; exit 2; }
+    sha="$2"; ver="$3"; shift 3
     fetch_tags "$repo_root" || exit
     current_main="$(fetch_current_main "$repo_root")" || exit
-    require_release_candidate "$repo_root" "$2" "$current_main" "$3"
+    require_release_candidate "$repo_root" "$sha" "$current_main" "$ver" "$@"
     ;;
   --require-current-release)
     [[ $# -eq 3 ]] || { echo "usage: $0 --require-current-release SOURCE_SHA VERSION" >&2; exit 2; }
@@ -518,7 +554,17 @@ case "${1:-}" in
     ;;
   '')
     [[ $# -eq 0 ]] || exit 2
-    "$repo_root/scripts/next-version.sh"
+    default_args=()
+    if [[ -n "${REQUESTED_RELEASE_VERSION:-}" ]]; then
+      default_args=(--exact "$REQUESTED_RELEASE_VERSION")
+    elif [[ -n "${BUMP:-}" ]]; then
+      default_args=("$BUMP")
+    fi
+    if ((${#default_args[@]} > 0)); then
+      "$repo_root/scripts/next-version.sh" "${default_args[@]}"
+    else
+      "$repo_root/scripts/next-version.sh"
+    fi
     ;;
   *) echo "usage: $0 [--self-test|--select-main SHA|--require-current-main SHA|--require-release-candidate SHA VERSION|--require-current-release SHA VERSION|--require-published-release SHA VERSION]" >&2; exit 2 ;;
 esac

@@ -138,9 +138,10 @@ ESP HTTP, NimBLE, NVS, OTA or FreeRTOS shells.
   no wrapper, pipe, redirect, copy, print, archive, upload or compound command is allowed.
 - Preserve CI's split: unprivileged build emits unsigned bytes and provenance; protected publish
   revalidates the exact main/release candidate before provisioning the key, signs already-built
-  bytes, removes the key, and binds signed Release/Pages artifacts. Every production app must pass
-  RSA-PSS verification against `scripts/ota-signing-public-key.sha256`; changing the key/pin is a
-  separately reviewed USB fleet migration because software-only TOFU cannot rotate keys over OTA.
+  bytes, removes the key, and binds signed Release/Pages artifacts (Dev channel builds on `main` push to
+  `dev/` Pages; official tagged Releases manually triggered via `workflow_dispatch` with `release: true`).
+  Every production app must pass RSA-PSS verification against `scripts/ota-signing-public-key.sha256`;
+  changing the key/pin is a separately reviewed USB fleet migration because software-only TOFU cannot rotate keys over OTA.
   A same-SHA retry with an exact immutable Release must use the key-free byte-verified reuse path;
   it must never sign, re-upload or mutate that Release again, but it does publish one new
   SHA-bound Actions recovery artifact from the verified bytes. Do not weaken action/privileged-job

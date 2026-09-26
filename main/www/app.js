@@ -7,7 +7,7 @@ var $=function(id){return document.getElementById(id)};
 // the write when nothing changed keeps the same nodes alive so the animation runs on.
 function setHTML(el,html){ if(el && el.__h!==html){ el.__h=html; el.innerHTML=html; } }
 var state=null, otaTimer=null, otaAvail=null, waking=false, wakeTimeout=null, chgBusy=false, feedOk=false;
-var otaPhase=null, otaDeadline=0, otaExpectedVersion=null;
+var otaPhase=null, otaDeadline=0, otaExpectedVersion=null, otaChannel='release', otaChannelInitialSet=false;
 
 // Quotes are escaped too so esc() is safe in attribute values (title="…"), not just element content.
 function esc(s){return String(s).replace(/[&<>"']/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]})}
@@ -461,20 +461,22 @@ function render(s){
       // paired, BLE may be up, but link_state is 'unknown' (nothing heard since boot — the
       // on-demand link hasn't completed a signed round-trip yet) or 'unreachable' (heard
       // before, now stale: drove off / out of range / deep sleep).
-      var ureach=s.link==='unreachable'||s.link==='unknown';
-      if(ureach){
-        $("hero").classList.add('hide');
+      if(s.link==='unreachable'){
+        hicHTML=ringSVG(0,true)+'<div class="glyph">'+BOLT+'</div>';
+        setHTML(hl,'<span>Vehicle unreachable</span>');
+        hs.textContent='Bring the device within Bluetooth range.';
+        var uls=s.last||{}, ulsoc=(uls.usable_soc!=null)?Math.round(uls.usable_soc):((uls.soc!=null)?Math.round(uls.soc):null), uago=fmtAgo(s.last_seen_s), uchips=[];
+        if(ulsoc!=null) uchips.push(stat('Battery','<span style="color:'+socColor(ulsoc)+'">'+ulsoc+'</span>','%'));
+        if(uago)        uchips.push(stat('Idle', uago, ''));
+        hst.innerHTML=uchips.join('');
       } else {
-        hicHTML=ringSVG(0,true)+'<div class="glyph">'+BT+'</div>';
-        // Only link==='awake' reaches here: the ureach test above already took unknown and
-        // unreachable. It lands here transiently when the freshness stamp arrived from a
-        // non-charge poll before the first charge poll filled the cache (no s.vehicle yet),
-        // so the link is clearly up — "Checking status…", never "Connecting…".
-        setHTML(hl,'<span>Checking status…</span>');
+        // link==='unknown' (fresh boot before first poll) lands here to render "Checking status…".
         // Only claim "Bluetooth connected" when the momentary GATT link is actually up
         // (linked). The on-demand link is dropped between polls, so link==='unknown'
         // routinely coexists with ble.connected===false — in which case the BLE row reads
         // "Disconnected" and a "Bluetooth connected" subtitle would contradict it.
+        hicHTML=ringSVG(0,true)+'<div class="glyph">'+BT+'</div>';
+        setHTML(hl,'<span>Checking status…</span>');
         hs.textContent=linked ? 'Bluetooth connected — checking status…'
                               : 'Reaching your Tesla over Bluetooth…';
         var uls=s.last||{}, ulsoc=(uls.usable_soc!=null)?Math.round(uls.usable_soc):((uls.soc!=null)?Math.round(uls.soc):null), uago=fmtAgo(s.last_seen_s), uchips=[];
@@ -601,6 +603,16 @@ function render(s){
   vl.className='verlink';   // always grey — never the accent-red highlight
   vl.title=otaAvail?('Update '+otaAvail+' available — tap to install'):(prTarget>0?('Tap to check for PR #'+prTarget+' updates'):'Tap to check for updates');
   vl.setAttribute('aria-label',otaAvail?('Install firmware update '+otaAvail):(prTarget>0?('Check for PR #'+prTarget+' firmware updates'):'Check for firmware updates'));
+
+  if(s.ota && typeof s.ota.channel === 'string'){
+    otaChannel = s.ota.channel === 'dev' ? 'dev' : 'release';
+    otaChannelInitialSet = true;
+    renderChanMenu();
+  } else if(!otaChannelInitialSet && s.version){
+    otaChannel = /-dev/i.test(s.version) ? 'dev' : 'release';
+    otaChannelInitialSet = true;
+    renderChanMenu();
+  }
 
   // key
   if(s.key_present){
@@ -849,6 +861,189 @@ function otaStatus(){
     return o;
   });
 }
+/* ---------- update channel menu ---------- */
+function toggleChanMenu(e){
+  if(e&&e.stopPropagation) e.stopPropagation();
+  var m=$("chanMenu"), b=$("chanBtn"); if(!m||!b) return;
+  var isHidden = m.classList ? (typeof m.classList.contains === 'function' ? m.classList.contains('hide') : false) : false;
+  if(isHidden){ openChanMenu(); }
+  else { closeChanMenu(true); }
+}
+function openChanMenu(){
+  var m=$("chanMenu"), b=$("chanBtn"); if(!m||!b) return;
+  renderChanMenu();
+  if(m.classList) m.classList.remove('hide');
+  if(b.classList) b.classList.add('active');
+  b.setAttribute('aria-expanded','true');
+  var activeOpt = (otaChannel === 'dev') ? $("optDev") : $("optRelease");
+  if(activeOpt && typeof activeOpt.focus === 'function') activeOpt.focus();
+}
+function closeChanMenu(restoreFocus){
+  var m=$("chanMenu"), b=$("chanBtn"); if(!m||!b) return;
+  if(m.classList) m.classList.add('hide');
+  if(b.classList) b.classList.remove('active');
+  b.setAttribute('aria-expanded','false');
+  if(restoreFocus && b && typeof b.focus === 'function') b.focus();
+}
+function renderChanMenu(){
+  var r=$("optRelease"), d=$("optDev"); if(!r||!d) return;
+  var isDev = (otaChannel === 'dev');
+  r.className = 'chan-opt' + (!isDev ? ' sel' : '');
+  r.setAttribute('aria-checked', !isDev ? 'true' : 'false');
+  r.innerHTML = (!isDev ? '<span class="chk">✓</span>' : '<span class="chk"></span>') + 'Release';
+  d.className = 'chan-opt' + (isDev ? ' sel' : '');
+  d.setAttribute('aria-checked', isDev ? 'true' : 'false');
+  d.innerHTML = (isDev ? '<span class="chk">✓</span>' : '<span class="chk"></span>') + 'Development';
+}
+function handleChanBtnKey(e){
+  if(e.key === 'ArrowDown' || e.key === 'ArrowUp'){
+    e.preventDefault();
+    openChanMenu();
+  }
+}
+function handleChanKey(e){
+  var m=$("chanMenu");
+  if(!m || !m.classList || (typeof m.classList.contains === 'function' && m.classList.contains('hide'))) return;
+  var r=$("optRelease"), d=$("optDev");
+  if(e.key === 'ArrowDown' || e.key === 'ArrowUp'){
+    e.preventDefault();
+    var cur = (typeof document !== 'undefined') ? document.activeElement : null;
+    var target = (cur === r) ? d : r;
+    if(target && typeof target.focus === 'function') target.focus();
+  } else if(e.key === 'Escape'){
+    e.preventDefault();
+    closeChanMenu(true);
+  }
+}
+function setChannel(chan){
+  var prevChan = otaChannel;
+  var changed = (otaChannel !== chan);
+  closeChanMenu(true);
+  if(chan!=='release'&&chan!=='dev') return Promise.resolve();
+  if(!changed) return Promise.resolve();
+  otaChannel = chan;
+  otaChannelInitialSet = true;
+  renderChanMenu();
+  return requestJson('/set_ota', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ channel: chan })
+  }).then(function(){
+    var label = (chan === 'dev' ? 'Development' : 'Release');
+    toast('Update channel set to ' + label, 'ok');
+    return otaCheck();
+  }).catch(function(){
+    otaChannel = prevChan;
+    renderChanMenu();
+    toast('Failed to set update channel', 'err');
+  });
+}
+
+var otaDecisionResolve = null;
+
+function closeOtaModal(decision){
+  var m = $("otaModal");
+  if(m && m.classList) m.classList.add('hide');
+  if(typeof document !== 'undefined' && document.body && document.body.classList){
+    document.body.classList.remove('modal-open');
+  }
+  var vl = $("verLink");
+  if(vl && typeof vl.focus === 'function') vl.focus();
+  if(otaDecisionResolve){
+    var r = otaDecisionResolve;
+    otaDecisionResolve = null;
+    r(decision === true);
+  }
+}
+
+function loadOtaChangelog(){
+  var ctl = typeof AbortController !== 'undefined' ? new AbortController() : null;
+  var timer = setTimeout(function(){ if(ctl) ctl.abort(); }, OTA_HTTP_TIMEOUT_MS);
+  return fetch('/ota/changelog', {cache: 'no-store', signal: ctl ? ctl.signal : undefined})
+    .then(function(r){
+      clearTimeout(timer);
+      if(!r || !r.ok || r.status === 204) return '';
+      return r.text();
+    })
+    .catch(function(){
+      clearTimeout(timer);
+      return '';
+    });
+}
+
+function askOtaInstall(status, changelog){
+  if(otaDecisionResolve) closeOtaModal(false);
+  var prTarget = getTargetPr();
+  var title = $("otaModalTitle");
+  if(title) title.textContent = prTarget > 0 ? ('PR #' + prTarget + ' update') : 'Firmware update';
+  var verLine = $("otaVersionLine");
+  if(verLine) verLine.textContent = 'v' + (status.current || '?') + ' → v' + (status.available || '?');
+  var chanEl = $("otaChannel");
+  if(chanEl){
+    if(prTarget > 0){
+      chanEl.textContent = 'PR #' + prTarget;
+    } else {
+      chanEl.textContent = (status.channel === 'dev' || otaChannel === 'dev') ? 'Development' : 'Release';
+    }
+  }
+  var list = $("otaChanges");
+  var count = 0;
+  if(list){
+    list.textContent = '';
+    var notes = String(changelog || '').split(/\r?\n/).map(function(s){ return s.trim(); }).filter(Boolean);
+    count = notes.length;
+    for(var i = 0; i < count; i++){
+      var item = document.createElement('li');
+      item.textContent = notes[i];
+      list.appendChild(item);
+    }
+    list.hidden = (count === 0);
+  }
+  var noChanges = $("otaNoChanges");
+  if(noChanges) noChanges.hidden = (count > 0);
+  var m = $("otaModal");
+  if(m && m.classList) m.classList.remove('hide');
+  if(typeof document !== 'undefined' && document.body && document.body.classList){
+    document.body.classList.add('modal-open');
+  }
+  var installBtn = $("otaInstall");
+  if(installBtn && typeof installBtn.focus === 'function') installBtn.focus();
+  return new Promise(function(resolve){
+    otaDecisionResolve = resolve;
+  });
+}
+
+if(typeof document!=='undefined' && typeof document.addEventListener==='function'){
+  document.addEventListener('click', function(e){
+    var m=$("chanMenu"), b=$("chanBtn");
+    if(m && m.classList && typeof m.classList.contains==='function' && !m.classList.contains('hide') &&
+       !m.contains(e.target) && (!b || !b.contains(e.target))){
+      closeChanMenu(false);
+    }
+    var modalBackdrop = $("otaBackdrop");
+    if(modalBackdrop && e.target === modalBackdrop){
+      closeOtaModal(false);
+    }
+  });
+  document.addEventListener('keydown', function(e){
+    if(e.key==='Escape'){
+      var m=$("chanMenu");
+      if(m && m.classList && typeof m.classList.contains==='function' && !m.classList.contains('hide')){
+        closeChanMenu(true);
+        return;
+      }
+      var modal = $("otaModal");
+      if(modal && modal.classList && typeof modal.classList.contains==='function' && !modal.classList.contains('hide')){
+        closeOtaModal(false);
+      }
+    }
+  });
+  var cancelBtn = $("otaCancel");
+  if(cancelBtn) cancelBtn.onclick = function(){ closeOtaModal(false); };
+  var installBtn = $("otaInstall");
+  if(installBtn) installBtn.onclick = function(){ closeOtaModal(true); };
+}
+
 function otaCheck(){
   if(otaBusy) return;              // a check/update is already running
   otaBusy=true;
@@ -873,19 +1068,22 @@ function otaCheckPoll(){
     if(o.update_available){
       otaAvail=o.available||''; if(state)render(state); otaInline('');         // clear while the dialog is up
       var pr=getTargetPr();
-      var msg=pr>0
-        ? ('PR #'+pr+' update '+(o.available||'')+' available — update now?\n\nYou’re on v'+(o.current||'')+'. The device downloads the PR firmware and reboots when done.')
-        : ('New version '+(o.available||'')+' available — update now?\n\nYou’re on v'+(o.current||'')+'. The device downloads the firmware and reboots when done.');
-      if(confirm(msg)){
-        otaExpectedVersion=o.available||null;
-        otaBegin('update',OTA_UPDATE_TIMEOUT_MS);
-        otaInline(otaMiniRing(0,true,'currentColor')+'<span>starting…</span>');
-        var updateUrl='/ota/update'+(pr>0?'?pr='+pr:'');
-        return requestJsonWithTimeout(updateUrl,{method:'POST'},OTA_HTTP_TIMEOUT_MS).then(function(j){
-          if(!j||j.result!==true) throw new Error((j&&j.reason)||'update did not start');
-          otaPoll();
-        }).catch(function(){ otaFail('update failed to start'); });
-      } else { otaAvail=null; if(state)render(state); otaReset(); }   // cancelled → version back to grey
+      return loadOtaChangelog().then(function(notes){
+        return askOtaInstall(o, notes);
+      }).then(function(installed){
+        if(installed){
+          otaExpectedVersion=o.available||null;
+          otaBegin('update',OTA_UPDATE_TIMEOUT_MS);
+          otaInline(otaMiniRing(0,true,'currentColor')+'<span>starting…</span>');
+          var updateUrl='/ota/update'+(pr>0?'?pr='+pr:'');
+          return requestJsonWithTimeout(updateUrl,{method:'POST'},OTA_HTTP_TIMEOUT_MS).then(function(j){
+            if(!j||j.result!==true) throw new Error((j&&j.reason)||'update did not start');
+            otaPoll();
+          }).catch(function(){ otaFail('update failed to start'); });
+        } else {
+          otaAvail=null; if(state)render(state); otaReset();
+        }
+      });
     } else {
       otaAvail=null; if(state)render(state); otaReset();
       var prChecked=getTargetPr();

@@ -19,6 +19,7 @@
 #include "logic/redact.hpp"
 #include "logic/heap_json_stream.hpp"
 #include "config_blob.hpp"
+#include "ota_update.hpp"
 #include "syslog.hpp"
 #include "stack_watch.hpp"
 #include "status_json_emitter.hpp"
@@ -128,6 +129,7 @@ static cJSON* build_status_object(bool redact) {
         return cb.wifi_rolled_back;
     }();
     in.wifi_rolled_back = s_rolled_back;
+    in.ota_channel = tk::ota_channel_name(ota_get_channel());
 
     in.mqtt_configured = mqtt_ha_configured();
     in.mqtt_connected  = mqtt_ha_connected();

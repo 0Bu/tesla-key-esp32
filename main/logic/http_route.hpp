@@ -15,6 +15,7 @@ enum class HttpRoute {
     OtaCheck,
     OtaUpdate,
     OtaStatus,
+    OtaChangelog,
     GenKeys,
     SendKey,
     SetTime,
@@ -22,6 +23,7 @@ enum class HttpRoute {
     SetMqtt,
     SetSyslog,
     SetWifi,
+    SetOta,
     Scan,
     Coredump,
     CrashDismiss,
@@ -40,10 +42,11 @@ struct FixedHttpRoute {
     HttpRoute route;
 };
 
-inline constexpr std::array<FixedHttpRoute, 21> kFixedHttpRoutes{{
+inline constexpr std::array<FixedHttpRoute, 23> kFixedHttpRoutes{{
     {HttpVerb::Get,  "/ota/check",           HttpRoute::OtaCheck},
     {HttpVerb::Post, "/ota/update",          HttpRoute::OtaUpdate},
     {HttpVerb::Get,  "/ota/status",          HttpRoute::OtaStatus},
+    {HttpVerb::Get,  "/ota/changelog",       HttpRoute::OtaChangelog},
     {HttpVerb::Post, "/gen_keys",            HttpRoute::GenKeys},
     {HttpVerb::Post, "/send_key",            HttpRoute::SendKey},
     {HttpVerb::Post, "/set_time",            HttpRoute::SetTime},
@@ -51,6 +54,7 @@ inline constexpr std::array<FixedHttpRoute, 21> kFixedHttpRoutes{{
     {HttpVerb::Post, "/set_mqtt",            HttpRoute::SetMqtt},
     {HttpVerb::Post, "/set_syslog",          HttpRoute::SetSyslog},
     {HttpVerb::Post, "/set_wifi",            HttpRoute::SetWifi},
+    {HttpVerb::Post, "/set_ota",             HttpRoute::SetOta},
     {HttpVerb::Post, "/scan",                HttpRoute::Scan},
     {HttpVerb::Get,  "/coredump",            HttpRoute::Coredump},
     {HttpVerb::Post, "/crash/dismiss",       HttpRoute::CrashDismiss},
@@ -130,10 +134,12 @@ inline constexpr bool http_route_requires_vehicle_runtime(HttpRoute route) noexc
         case HttpRoute::OtaCheck:
         case HttpRoute::OtaUpdate:
         case HttpRoute::OtaStatus:
+        case HttpRoute::OtaChangelog:
         case HttpRoute::SetTime:
         case HttpRoute::SetMqtt:
         case HttpRoute::SetSyslog:
         case HttpRoute::SetWifi:
+        case HttpRoute::SetOta:
         case HttpRoute::Coredump:
         case HttpRoute::CrashDismiss:
         case HttpRoute::Heap:

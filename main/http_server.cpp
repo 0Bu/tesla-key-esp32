@@ -113,6 +113,7 @@ static esp_err_t handle_all_dispatch(httpd_req_t* req) {
         case tk::HttpRoute::OtaCheck:       return handle_ota_check({req});
         case tk::HttpRoute::OtaUpdate:      return handle_ota_update({req});
         case tk::HttpRoute::OtaStatus:      return handle_ota_status({req});
+        case tk::HttpRoute::OtaChangelog:   return handle_ota_changelog({req});
         case tk::HttpRoute::GenKeys:        return handle_gen_keys({req});
         case tk::HttpRoute::SendKey:        return handle_send_key({req});
         case tk::HttpRoute::SetTime:        return handle_set_time({req});
@@ -120,6 +121,7 @@ static esp_err_t handle_all_dispatch(httpd_req_t* req) {
         case tk::HttpRoute::SetMqtt:        return handle_set_mqtt({req});
         case tk::HttpRoute::SetSyslog:      return handle_set_syslog({req});
         case tk::HttpRoute::SetWifi:        return handle_set_wifi({req});
+        case tk::HttpRoute::SetOta:         return handle_set_ota({req});
         case tk::HttpRoute::Scan:           return handle_scan({req});
         case tk::HttpRoute::Coredump:       return handle_coredump({req});
         case tk::HttpRoute::CrashDismiss:   return handle_crash_dismiss({req});
