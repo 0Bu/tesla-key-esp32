@@ -197,9 +197,7 @@ function socColor(p){
   var ch=function(j){ return Math.round(a[j]+(b[j]-a[j])*t); };
   return 'rgb('+ch(1)+','+ch(2)+','+ch(3)+')';
 }
-/* ---------- icons ----------
-   One 2px-stroke outline set (round caps/joins); the stroke/fill styling lives in CSS, so these
-   are just the shapes. Used inside the hero gauge and the primary action button. */
+/* ---------- icons (2px outline shapes; stroke styling lives in CSS) ---------- */
 var ICON={
   bolt:'<path d="M13 2 4 14h6l-1 8 9-12h-6l1-8z"/>',
   moon:'<path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/>',
@@ -214,11 +212,9 @@ var ICON={
 function iconSVG(name){ return '<svg viewBox="0 0 24 24" aria-hidden="true">'+(ICON[name]||'')+'</svg>'; }
 
 /* ---------- battery gauge ----------
-   Drawn in a fixed 240-unit box and scaled by CSS (--gs), so one markup serves every width.
-   mode: 'soc' (static arc), 'charging' (arc + a light segment flowing along it), 'complete',
-   'sleep' (muted arc of the last-known level, slow pulse), 'waking' (fast pulse + spinner),
-   'checking' (spinner only), 'empty'/'neutral' (track only). The markup is a pure function of
-   its inputs, so setHTML() keeps the live nodes (and their running animation) between polls. */
+   A fixed 240-unit box scaled by CSS (--gs). mode: soc | charging (flowing segment) | complete |
+   sleep (muted last-known arc) | waking | checking | empty | neutral. Pure markup, so setHTML()
+   keeps the live nodes and their running animation between polls. */
 function gaugeHTML(o){
   var S=240, sw=14, c=S/2, r=c-sw/2-3, C=2*Math.PI*r;
   var pct=(o.pct==null)?null:Math.max(0,Math.min(100,o.pct)), mode=o.mode;
@@ -254,8 +250,7 @@ function gaugeHTML(o){
   return s+'<span class="gcenter">'+center+'</span>';
 }
 
-/* hero detail chips (Power/Current while charging, Battery/Idle from the retained cache while the
-   car sleeps, Overheat/Defrost AC draw while awake). tone: ok | warn | info | '' */
+// hero detail chips; tone: ok | warn | info | ''
 function stat(k,val,unit,tone){
   return '<div class="stat'+(tone?' '+tone:'')+'"><div class="k">'+k+'</div><div class="v">'+val+
          (unit?'<small>'+unit+'</small>':'')+'</div></div>';
@@ -343,10 +338,7 @@ function fmtAgo(sec){
   return Math.floor(h/24)+' d';
 }
 
-/* ---------- sections ----------
-   Four tabs: car, setup, net, fw. On phones only the selected pane shows (the dock sits at the
-   bottom); from 900 px the car pane stays in the left column and the tab picks the right one —
-   'car' then shows the network pane. All of that is CSS keyed off .wrap[data-tab]. */
+/* ---------- sections: car | setup | net | fw, shown by CSS keyed off .wrap[data-tab] ---------- */
 var uiTab='car';
 var TAB_TITLE={car:'tesla-key-esp32', setup:'Setup', net:'Network', fw:'Firmware'};
 function setTab(t){
@@ -359,8 +351,7 @@ function setTab(t){
 }
 function setBadge(id,on){ var b=$(id); if(b&&b.classList) b.classList.toggle('hide',!on); }
 
-/* The hero's one primary action (charge / stop / wake / add VIN / generate key). render() picks it;
-   the gauge button and the action pill both call heroTap(). */
+// The hero's one primary action, picked by render(); the gauge and the pill both call heroTap().
 var heroActFn=null;
 function heroTap(){ if(heroActFn) return heroActFn(); }
 function setHeroAct(label,icon,fn,busyText){
@@ -379,8 +370,7 @@ var bannerFn=null;
 function bannerAction(){ if(bannerFn) return bannerFn(); }
 
 /* ---------- render ---------- */
-// Status-line tones for the connection rows: the dot on the row icon, the status line colour and
-// the signal-glyph colour all follow it. '' = neutral (not configured / disconnected).
+// Connection row: tone ('ok' | 'warn' | '') colours the icon dot, status line and signal glyph.
 function setRow(key,tone,valueHTML,statusHTML,barsMarkup){
   var d=$(key+'Dot'); if(d) d.className='dot'+(tone?' '+tone:'');
   setHTML($(key+'Val'),valueHTML);
@@ -429,11 +419,11 @@ function render(s){
   var rb=$("reauthBanner"), ba=$("bannerAct");
   if(s.reauth && !paired){
     rb.classList.add('show');
-    rb.querySelector('.bt').innerHTML='<b>Key was reset</b> — The vehicle removed this device’s key, so a fresh one was generated automatically. Approve the new pairing on your Tesla’s touchscreen.';
+    setHTML(rb.querySelector('.bt'),'<b>Key was reset</b> — The vehicle removed this device’s key, so a fresh one was generated automatically. Approve the new pairing on your Tesla’s touchscreen.');
     if(ba) ba.textContent='Open setup'; bannerFn=function(){ setTab('setup'); };
   } else if(safe){
     rb.classList.add('show');
-    rb.querySelector('.bt').innerHTML='<b>Safe Mode active</b> — Vehicle Bluetooth, commands, and telemetry are stopped. Use this recovery dashboard to inspect diagnostics or update firmware.';
+    setHTML(rb.querySelector('.bt'),'<b>Safe Mode active</b> — Vehicle Bluetooth, commands, and telemetry are stopped. Use this recovery dashboard to inspect diagnostics or update firmware.');
     if(ba) ba.textContent='Check for update'; bannerFn=otaCheck;
   } else { rb.classList.remove('show'); bannerFn=null; }
 
@@ -519,13 +509,14 @@ function render(s){
   }
   // Safe Mode stops Bluetooth and commands, so it never offers a vehicle action.
   if(safe){ act=null; busyText=null; }
-  var gm=gaugeHTML(g);
-  setHTML(hic, act ? '<button type="button" class="gbtn" onclick="heroTap()" aria-label="'+esc(actLabel)+'" title="'+esc(actLabel)+'">'+gm+'</button>'
-                   : (busyText ? '<button type="button" class="gbtn" disabled aria-label="'+esc(busyText)+'">'+gm+'</button>' : gm));
+  // The gauge button's label replaces its content for screen readers, so it carries the level.
+  var gm=gaugeHTML(g), lvl=(g.pct!=null)?' · battery '+Math.round(g.pct)+' %':'';
+  setHTML(hic, act ? '<button type="button" class="gbtn" onclick="heroTap()" aria-label="'+esc(actLabel+lvl)+'" title="'+esc(actLabel)+'">'+gm+'</button>'
+                   : (busyText ? '<button type="button" class="gbtn" disabled aria-label="'+esc(busyText+lvl)+'">'+gm+'</button>' : gm));
   setHTML(hl,'<span>'+esc(head)+'</span>');
   hs.textContent=sub;
   hs.style.display=sub?'':'none';
-  hst.innerHTML=chips;
+  setHTML(hst,chips);
   setHeroAct(actLabel,actIcon,act,busyText);
 
   // setup tiles ----------------------------------------------------
@@ -618,20 +609,19 @@ function render(s){
   renderFwSub();
 
   // key
-  var ks=$("keySub"), kb=$("keyBtnTx");
+  var kb=$("keyBtnTx");
   if(s.key_present){
     $("keyVal").innerHTML=esc(s.key_fingerprint||'');
     var created=s.key_created?('Created '+new Date(s.key_created*1000).toLocaleDateString(undefined,{year:'numeric',month:'short',day:'numeric'})):'';
-    if(s.reauth&&!paired) setSub("keySub",'Rejected by the car — approve the new pairing','warn');
+    if(s.reauth&&!paired) setSub("keySub",'New key — approve it on the touchscreen','warn');
     else if(paired) setSub("keySub",created?created+' · paired':'Paired with the vehicle','ok');
-    else setSub("keySub",(created?created+' · ':'')+'waiting for approval in the car','warn');
+    else setSub("keySub",(created?created+' · ':'')+'not paired yet','');
     if(kb) kb.textContent='Regenerate key';
   } else {
     $("keyVal").innerHTML='<span class="ph">Not generated</span>';
     setSub("keySub",'No key yet','');
     if(kb) kb.textContent='Generate key';
   }
-  if(ks&&!ks.className) ks.className='sub strong';
 
   setBadge('badgeSetup', !configured || !!(s.reauth&&!paired));
   setBadge('badgeNet', netWarn);
@@ -691,11 +681,9 @@ function chargeFailMsg(reason,isCharging){
   return {msg:(isCharging?'Couldn’t stop charging':'Couldn’t start charging')+(bare?' — '+bare:''), type:'err'};
 }
 
-/* ---------- sheets: text entry + confirmation ----------
-   Replace the native prompt()/confirm() with the page's own bottom sheet (a centered dialog on
-   wide screens). Both return a Promise: askText → the entered string, or null when cancelled;
-   askConfirm → true/false. Only one sheet is open at a time; opening another settles the first
-   as cancelled. */
+/* ---------- sheets (replace prompt()/confirm()) ----------
+   askText → Promise<string|null>, askConfirm → Promise<boolean>. One sheet at a time; opening
+   another settles the first as cancelled. */
 var askResolve=null, askCancelValue=null, askReturnFocus=null, askHintFn=null;
 function askOpen(o,cancelValue){
   if(askResolve) askClose(askCancelValue);
@@ -751,11 +739,11 @@ function askConfirm(o){ return askOpen(o,false); }
 function vinValid(v){return /^[A-HJ-NPR-Z0-9]{17}$/i.test(v)}
 function editVin(){
   var cur=(state&&state.vin&&state.vin!=='UNKNOWN')?state.vin:'';
-  var keyKnown = state && typeof state.key_present === 'boolean';
-  var hasKey = keyKnown ? state.key_present : true;
+  var hasKey=!(state&&state.key_present===false);
   var v;
+  // No maxlength: a pasted VIN with stray spaces is trimmed below instead of silently cut short.
   return askText({
-    title:'Vehicle VIN', label:'VIN', value:cur, placeholder:'17 characters', mono:true, maxLength:17,
+    title:'Vehicle VIN', label:'VIN', value:cur, placeholder:'17 characters', mono:true,
     hint:function(x){ return x.trim().length+' / 17'; },
     note:hasKey?'Changing the VIN generates a new security key and clears the stored pairing.'
                :'The 17-character VIN is shown on the Tesla touchscreen under Controls → Software.',
@@ -765,7 +753,8 @@ function editVin(){
     v=input.trim().toUpperCase();
     if(!vinValid(v)){ toast('Invalid VIN — must be 17 characters','err'); return false; }
     if(v===(state&&state.vin)){ toast('VIN unchanged','info'); return false; }
-    if(!hasKey) return true;
+    // The page kept polling while the sheet was open: decide on the key from the current state.
+    if(state&&state.key_present===false) return true;
     return askConfirm({
       title:'Change the VIN?', destructive:true,
       text:'This generates a new security key and clears the stored pairing. You must re-pair with the vehicle.',
@@ -933,7 +922,7 @@ function otaInline(html,cls,pct){
   var bar=$("otaBar"), fill=$("otaFill");
   if(bar&&bar.classList) bar.classList.toggle('hide',pct==null);
   if(fill&&fill.style&&pct!=null) fill.style.width=(pct==='indet'?15:Math.max(0,Math.min(100,pct)))+'%';
-  setBadge('badgeFw', !!otaAvail || !!html);
+  setBadge('badgeFw', !!otaAvail || otaBusy);
 }
 function otaInlineClear(delay){ clearTimeout(otaClearTimer); otaClearTimer=setTimeout(function(){ otaClearTimer=null; otaInline(''); }, delay||3000); }
 function otaBegin(phase,timeout){ clearTimeout(otaClearTimer); otaClearTimer=null; otaPhase=phase; otaDeadline=Date.now()+timeout; }

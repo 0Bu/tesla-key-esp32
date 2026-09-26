@@ -674,3 +674,49 @@ test("askOtaInstall handles empty changelog by showing no-changes hint", async (
   const result = await decisionPromise;
   assert.equal(result, false);
 });
+
+test("askText resolves the entered text on submit and null on cancel", async () => {
+  const { context, element } = loadUi();
+  const typed = context.askText({ title: "Syslog server", value: "192.0.2.30:514" });
+  assert.equal(element("askModal").classList.contains("hide"), false);
+  assert.equal(element("askInput").value, "192.0.2.30:514");
+  element("askInput").value = " 192.0.2.31:514 ";
+  context.askSubmit();
+  assert.equal(await typed, " 192.0.2.31:514 ");
+  assert.equal(element("askModal").classList.contains("hide"), true);
+
+  const cancelled = context.askText({ title: "MQTT broker" });
+  context.askClose(context.askCancelValue);
+  assert.equal(await cancelled, null);
+});
+
+test("askConfirm resolves true on confirm, false on cancel, and a new sheet cancels the old one", async () => {
+  const { context } = loadUi();
+  const yes = context.askConfirm({ title: "Regenerate the security key?" });
+  context.askSubmit();
+  assert.equal(await yes, true);
+
+  const first = context.askConfirm({ title: "first" });
+  const second = context.askText({ title: "second" });
+  assert.equal(await first, false, "opening a second sheet settles the first as cancelled");
+  context.askClose(context.askCancelValue);
+  assert.equal(await second, null);
+});
+
+test("VIN change decides on confirmation from the state current after input", async () => {
+  const { context } = loadUi();
+  let confirmCalled = false;
+  let fetchCalled = false;
+  context.state = { vin: "UNKNOWN", key_present: true };
+  context.askText = async () => { context.state = { vin: "UNKNOWN", key_present: false }; return "5YJ3E1EA1JF000001"; };
+  context.askConfirm = async () => { confirmCalled = true; return false; };
+  context.fetch = async () => {
+    fetchCalled = true;
+    return { ok: true, async json() { return { response: { result: true, reason: "saved" } }; } };
+  };
+
+  await context.editVin();
+
+  assert.equal(confirmCalled, false, "no key any more, so nothing to confirm");
+  assert.equal(fetchCalled, true);
+});
