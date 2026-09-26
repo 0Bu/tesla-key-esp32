@@ -144,7 +144,7 @@ a save button and a short explanation. Each variant should include its version o
 Use only these placeholder values (documentation ranges, no real identifiers):
 
 - Device: `tesla-key.local` · `192.0.2.10` · firmware `1.9.0` · channel Release.
-- VIN: `5YJ3E1EA0KF000000`; key fingerprint: `a1b2 c3d4 e5f6 0718`.
+- VIN: `SAMPLEVIN00000000` (deliberately synthetic; never use a real VIN); key fingerprint: `a1b2 c3d4 e5f6 0718`.
 - Wi-Fi: `HomeNetwork`, −58 dBm, 3 of 4 bars. Ethernet alternative: `100 Mbit/s`.
 - MQTT: `192.0.2.20:1883`, connected. Syslog: `192.0.2.30:514`.
 - Charging: SOC 64 %, limit 80 %, 11 kW, 16 A. Asleep: last SOC 72 %, idle 3 h.
@@ -260,7 +260,7 @@ prefers-color-scheme, responsive from 320 px to desktop, WCAG 2.2 AA contrast, 4
 targets, visible focus rings, never color-only status, subtle CSS-only motion that respects
 prefers-reduced-motion, no layout shift when data refreshes every 4 s.
 
-Sample data: tesla-key.local, 192.0.2.10, firmware 1.9.0, VIN 5YJ3E1EA0KF000000, key
+Sample data: tesla-key.local, 192.0.2.10, firmware 1.9.0, VIN SAMPLEVIN00000000, key
 fingerprint a1b2 c3d4 e5f6 0718, Wi-Fi "HomeNetwork" -58 dBm, MQTT 192.0.2.20:1883, Syslog
 192.0.2.30:514, charging 64 % (limit 80 %) at 11 kW / 16 A, asleep 72 % idle 3 h.
 
