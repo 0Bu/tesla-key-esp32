@@ -114,11 +114,11 @@ struct ConfigBlob {
     // an empty string is a stored value here, never an absent field.
     std::string mqtt_uri;
     std::string syslog_uri;
-    // ── v2: the OTA update channel (logic/ota_channel.hpp; 0 = release, 1 = dev) ─────────────────
+    // The OTA update channel (0 = release, 1 = dev), packed in reserved flags bits 2 and 3.
     // Here for the same reason: ONE writer (the httpd task, POST /set_ota). Which feed a device
     // follows is a persistent user choice — a board put on the dev channel must still be on it after a reboot.
     int32_t ota_channel = 0;
-    // FALSE when the decoded blob predates v2 (no channel byte).
+    // FALSE when not explicitly configured (flags bit 2 unset).
     bool has_ota = false;
 };
 
@@ -156,9 +156,11 @@ inline constexpr uint8_t kConfigBlobMagic3 = '1';
 // the legacy per-key fallback is empty on a blob-era device, and the board comes up in the setup
 // AP with its credentials intact in flash and unread. So a downgrade (an OTA rollback, a
 // flash-back to an older image, two branches that both invent "v2") loses the user's settings
-// without losing the bytes. Two parallel branches must not claim the same version number: the
+// without losing the bytes. Because the Dev → Release channel switch now makes firmware downgrade
+// routine, any future real blob-version bump will wipe configuration on downgrade unless backward
+// compatibility is preserved. Two parallel branches must not claim the same version number: the
 // one that ships second takes the later number.
-inline constexpr uint8_t kConfigBlobVersion    = 2;
+inline constexpr uint8_t kConfigBlobVersion    = 1;
 inline constexpr uint8_t kConfigBlobVersionMin = 1;
 
 // ── FIELD BOUNDS ──────────────────────────────────────────────────────────────────────────────
@@ -198,7 +200,6 @@ inline constexpr size_t kConfigBlobEncodedMax =
     detail::blob_str_bytes(kConfigMaxVinLen) +         // vin
     detail::blob_str_bytes(kConfigMaxUriLen) +         // mqtt_uri
     detail::blob_str_bytes(kConfigMaxUriLen) +         // syslog_uri
-    1 +                                                // v2: ota_channel
     detail::kBlobCrcBytes;
 
 // The buffer size callers allocate. Headroom over the current layout so a small v2 field does
@@ -208,7 +209,7 @@ inline constexpr size_t kConfigBlobEncodedMax =
 // save path deliberately makes no heap allocation at all.
 inline constexpr size_t kConfigBlobCapBytes = 384;
 
-static_assert(kConfigBlobEncodedMax == 362,
+static_assert(kConfigBlobEncodedMax == 361,
               "the serialized layout moved — if that was intended, bump kConfigBlobVersion and "
               "update this number and the layout comment together");
 static_assert(kConfigBlobEncodedMax <= kConfigBlobCapBytes,
@@ -268,7 +269,8 @@ struct BlobWriter {
 //     .   2+n  wifi_pass
 //     .   2+n  wifi_ssid_backup
 //     .   2+n  wifi_pass_backup
-//     .     1  flags: bit0 = wifi_rollback_active, bit1 = wifi_rolled_back (others reserved 0)
+//     .     1  flags: bit0 = wifi_rollback_active, bit1 = wifi_rolled_back,
+//                     bit2 = has_ota, bit3 = ota_channel (0 = release, 1 = dev; others reserved 0)
 //     .   2+n  vin
 //     .   2+n  mqtt_uri
 //     .   2+n  syslog_uri
@@ -285,8 +287,7 @@ inline size_t config_blob_encode(const ConfigBlob& c, uint8_t* out, size_t cap) 
     w.put_u8(kConfigBlobMagic1);
     w.put_u8(kConfigBlobMagic2);
     w.put_u8(kConfigBlobMagic3);
-    const uint8_t write_version = 1;
-    w.put_u8(write_version);
+    w.put_u8(kConfigBlobVersion);
     w.put_str(c.wifi_ssid,        kConfigMaxSsidLen);
     w.put_str(c.wifi_pass,        kConfigMaxWifiPassLen);
     w.put_str(c.wifi_ssid_backup, kConfigMaxSsidLen);
@@ -350,20 +351,8 @@ inline bool config_blob_decode(const uint8_t* in, size_t len, ConfigBlob& out) {
     if (p + 1 > body_end) return false;
     const uint8_t flags = in[p++];
     if (!get_str(c.vin) || !get_str(c.mqtt_uri) || !get_str(c.syslog_uri)) return false;
-    if (version >= 2) {
-        if (p + 1 > body_end) return false;
-        const uint8_t raw = in[p++];
-        if (raw == 0xFF) {
-            c.has_ota     = false;
-            c.ota_channel = 0;
-        } else {
-            c.has_ota     = true;
-            c.ota_channel = static_cast<int32_t>(raw);
-        }
-    } else {
-        c.has_ota     = (flags & 4u) != 0;
-        c.ota_channel = (flags & 8u) != 0 ? 1 : 0;
-    }
+    c.has_ota     = (flags & 4u) != 0;
+    c.ota_channel = (flags & 8u) != 0 ? 1 : 0;
 
     // Exact per version: a v1 blob must END right here. Accepting a prefix and ignoring the rest
     // would let a TRUNCATED future blob decode as a valid v1 whose newer fields silently take

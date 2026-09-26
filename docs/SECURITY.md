@@ -519,6 +519,10 @@ builds (`mode=dev`) signed by the protected key and deployed to `/dev/` Pages. O
 releases are cut manually via `workflow_dispatch` with `release: true` (with optional `bump: patch|minor|major`
 or `release_version: x.y.z`), creating the tagged immutable Release and deploying to root Pages. The deploy
 job validates the served `/dev/` files against local staged artifacts via `scripts/check-dev-pages.py`.
+Unlike immutable tagged Releases which reuse byte-identical release binaries on retry without key access, dev
+builds on `main` push do not produce GitHub Release assets and deploy directly to `/dev/` on the Pages branch;
+a re-run of a `main` push executes randomized RSA-PSS signing under the protected key and publishes fresh
+signed bytes to `/dev/`.
 Furthermore, unprivileged manual `workflow_dispatch` runs without `release: true` execute in test mode
 (`mode == 'test'`), which never enters the protected signing or publishing jobs, preventing unauthorized
 dev or release artifact generation.

@@ -999,9 +999,9 @@ def validate(root: Path) -> None:
         "build.yml Draft upload must be preceded by the exact signed root inventory gate",
     )
     require(
-        build_workflow.count(PAGES_SOURCE_CHECK) == 3
+        build_workflow.count(PAGES_SOURCE_CHECK) == 4
         and publish_section.count(PAGES_SOURCE_CHECK) == 1
-        and deploy_section.count(PAGES_SOURCE_CHECK) == 2
+        and deploy_section.count(PAGES_SOURCE_CHECK) == 3
         and "Revalidate current Release candidate immediately before signed artifact upload"
         in build_workflow
         and "actions/configure-pages@" not in build_workflow

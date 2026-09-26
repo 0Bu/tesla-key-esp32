@@ -61,13 +61,13 @@ inline int compare_ota_full_versions(std::string_view a, std::string_view b) {
 }
 
 // Derive a sibling URL (e.g. changelog.json) from manifest_url without heap allocation.
-inline bool ota_manifest_sibling_url(const std::string& manifest_url, const char* sibling,
+inline bool ota_manifest_sibling_url(std::string_view manifest_url, const char* sibling,
                                      char* out, size_t outlen) {
     if (!out || outlen == 0) return false;
     out[0] = '\0';
     if (manifest_url.empty() || !sibling || sibling[0] == '\0') return false;
     const auto slash = manifest_url.rfind('/');
-    if (slash == std::string::npos) return false;
+    if (slash == std::string_view::npos) return false;
     const size_t prefix_len = slash + 1;
     const size_t sibling_len = std::strlen(sibling);
     if (prefix_len + sibling_len >= outlen) return false;

@@ -15,7 +15,8 @@
         "CMakeFiles/__idf_main.dir/board.cpp.su": {},
         "CMakeFiles/__idf_main.dir/command_exec.cpp.su": {},
         "CMakeFiles/__idf_main.dir/config_blob.cpp.su": {
-          "/COMPONENT_MAIN_DIR/config_blob.cpp :: bool tk::cfg_save(NvsStorageAdapter&, const ConfigBlob&)": 416
+          "/COMPONENT_MAIN_DIR/config_blob.cpp :: bool tk::cfg_save(NvsStorageAdapter&, const ConfigBlob&)": 416,
+          "/COMPONENT_MAIN_DIR/logic/config_store.hpp :: bool tk::config_blob_decode(const uint8_t*, size_t, ConfigBlob&)": 256
         },
         "CMakeFiles/__idf_main.dir/diag_crash.cpp.su": {},
         "CMakeFiles/__idf_main.dir/diag_log.cpp.su": {
@@ -31,18 +32,21 @@
         "CMakeFiles/__idf_main.dir/http_common.cpp.su": {},
         "CMakeFiles/__idf_main.dir/http_config.cpp.su": {
           "/COMPONENT_MAIN_DIR/http_config.cpp :: esp_err_t handle_set_mqtt(GuardedReq)": 288,
+          "/COMPONENT_MAIN_DIR/http_config.cpp :: esp_err_t handle_set_ota(GuardedReq)": 320,
           "/COMPONENT_MAIN_DIR/http_config.cpp :: esp_err_t handle_set_syslog(GuardedReq)": 288,
-          "/COMPONENT_MAIN_DIR/http_config.cpp :: esp_err_t handle_set_vin(GuardedReq)": 576,
+          "/COMPONENT_MAIN_DIR/http_config.cpp :: esp_err_t handle_set_vin(GuardedReq)": 592,
           "/COMPONENT_MAIN_DIR/http_config.cpp :: esp_err_t handle_set_wifi(GuardedReq)": 320,
           "/COMPONENT_MAIN_DIR/http_config.cpp :: tk::MqttProbeResult mqtt_probe_broker(const std::string&)": 288
         },
-        "CMakeFiles/__idf_main.dir/http_ota.cpp.su": {},
+        "CMakeFiles/__idf_main.dir/http_ota.cpp.su": {
+          "/COMPONENT_MAIN_DIR/http_ota.cpp :: esp_err_t handle_ota_changelog(GuardedReq)": 1072
+        },
         "CMakeFiles/__idf_main.dir/http_server.cpp.su": {
           "/COMPONENT_MAIN_DIR/http_server.cpp :: bool browser_mutation_allowed(httpd_req_t*)": 464,
           "/COMPONENT_MAIN_DIR/http_server.cpp :: esp_err_t handle_all_dispatch(httpd_req_t*)": 336
         },
         "CMakeFiles/__idf_main.dir/http_status.cpp.su": {
-          "/COMPONENT_MAIN_DIR/http_status.cpp :: cJSON* build_status_object(bool)": 1584,
+          "/COMPONENT_MAIN_DIR/http_status.cpp :: cJSON* build_status_object(bool)": 1600,
           "/COMPONENT_MAIN_DIR/http_status.cpp :: esp_err_t handle_coredump(GuardedReq)": 1104,
           "/COMPONENT_MAIN_DIR/http_status.cpp :: esp_err_t handle_diag(GuardedReq)": 880,
           "/COMPONENT_MAIN_DIR/http_status.cpp :: esp_err_t handle_heap(GuardedReq)": 1232,
@@ -66,11 +70,13 @@
         },
         "CMakeFiles/__idf_main.dir/nvs_storage.cpp.su": {},
         "CMakeFiles/__idf_main.dir/ota_update.cpp.su": {
+          "/COMPONENT_MAIN_DIR/ota_update.cpp :: OtaCheckResult ota_check(unsigned int)": 1568,
           "/COMPONENT_MAIN_DIR/ota_update.cpp :: bool http_get_to_buffer(const char*, std::string&)": 736,
-          "/COMPONENT_MAIN_DIR/ota_update.cpp :: void ota_task_impl()": 624
+          "/COMPONENT_MAIN_DIR/ota_update.cpp :: bool ota_get_changelog(std::string&)": 1072,
+          "/COMPONENT_MAIN_DIR/ota_update.cpp :: void ota_task_impl()": 592
         },
         "CMakeFiles/__idf_main.dir/provisioning.cpp.su": {
-          "/COMPONENT_MAIN_DIR/provisioning.cpp :: esp_err_t save_post_impl(httpd_req_t*)": 1456,
+          "/COMPONENT_MAIN_DIR/provisioning.cpp :: esp_err_t save_post_impl(httpd_req_t*)": 1472,
           "/COMPONENT_MAIN_DIR/provisioning.cpp :: void dns_task(void*)": 592,
           "/COMPONENT_MAIN_DIR/provisioning.cpp :: void provisioning_run(NvsStorageAdapter&)": 528
         },
@@ -79,7 +85,7 @@
         "CMakeFiles/__idf_main.dir/stack_watch.cpp.su": {},
         "CMakeFiles/__idf_main.dir/syslog.cpp.su": {
           "/COMPONENT_MAIN_DIR/syslog.cpp :: SendResult syslog_sendto(const sockaddr_in&, const char*, size_t, int*)": 352,
-          "/COMPONENT_MAIN_DIR/syslog.cpp :: bool syslog_start_impl(NvsStorageAdapter&)": 336,
+          "/COMPONENT_MAIN_DIR/syslog.cpp :: bool syslog_start_impl(NvsStorageAdapter&)": 352,
           "/COMPONENT_MAIN_DIR/syslog.cpp :: void syslog_send(const char*, size_t)": 304,
           "/COMPONENT_MAIN_DIR/syslog.cpp :: void syslog_task(void*)": 480
         },
@@ -117,7 +123,8 @@
         "CMakeFiles/__idf_main.dir/board.cpp.su": {},
         "CMakeFiles/__idf_main.dir/command_exec.cpp.su": {},
         "CMakeFiles/__idf_main.dir/config_blob.cpp.su": {
-          "/COMPONENT_MAIN_DIR/config_blob.cpp :: bool tk::cfg_save(NvsStorageAdapter&, const ConfigBlob&)": 416
+          "/COMPONENT_MAIN_DIR/config_blob.cpp :: bool tk::cfg_save(NvsStorageAdapter&, const ConfigBlob&)": 416,
+          "/COMPONENT_MAIN_DIR/logic/config_store.hpp :: bool tk::config_blob_decode(const uint8_t*, size_t, ConfigBlob&)": 256
         },
         "CMakeFiles/__idf_main.dir/diag_crash.cpp.su": {},
         "CMakeFiles/__idf_main.dir/diag_log.cpp.su": {
@@ -133,18 +140,21 @@
         "CMakeFiles/__idf_main.dir/http_common.cpp.su": {},
         "CMakeFiles/__idf_main.dir/http_config.cpp.su": {
           "/COMPONENT_MAIN_DIR/http_config.cpp :: esp_err_t handle_set_mqtt(GuardedReq)": 288,
+          "/COMPONENT_MAIN_DIR/http_config.cpp :: esp_err_t handle_set_ota(GuardedReq)": 320,
           "/COMPONENT_MAIN_DIR/http_config.cpp :: esp_err_t handle_set_syslog(GuardedReq)": 288,
-          "/COMPONENT_MAIN_DIR/http_config.cpp :: esp_err_t handle_set_vin(GuardedReq)": 576,
+          "/COMPONENT_MAIN_DIR/http_config.cpp :: esp_err_t handle_set_vin(GuardedReq)": 592,
           "/COMPONENT_MAIN_DIR/http_config.cpp :: esp_err_t handle_set_wifi(GuardedReq)": 320,
           "/COMPONENT_MAIN_DIR/http_config.cpp :: tk::MqttProbeResult mqtt_probe_broker(const std::string&)": 288
         },
-        "CMakeFiles/__idf_main.dir/http_ota.cpp.su": {},
+        "CMakeFiles/__idf_main.dir/http_ota.cpp.su": {
+          "/COMPONENT_MAIN_DIR/http_ota.cpp :: esp_err_t handle_ota_changelog(GuardedReq)": 1072
+        },
         "CMakeFiles/__idf_main.dir/http_server.cpp.su": {
           "/COMPONENT_MAIN_DIR/http_server.cpp :: bool browser_mutation_allowed(httpd_req_t*)": 464,
           "/COMPONENT_MAIN_DIR/http_server.cpp :: esp_err_t handle_all_dispatch(httpd_req_t*)": 336
         },
         "CMakeFiles/__idf_main.dir/http_status.cpp.su": {
-          "/COMPONENT_MAIN_DIR/http_status.cpp :: cJSON* build_status_object(bool)": 1584,
+          "/COMPONENT_MAIN_DIR/http_status.cpp :: cJSON* build_status_object(bool)": 1600,
           "/COMPONENT_MAIN_DIR/http_status.cpp :: esp_err_t handle_coredump(GuardedReq)": 1104,
           "/COMPONENT_MAIN_DIR/http_status.cpp :: esp_err_t handle_diag(GuardedReq)": 880,
           "/COMPONENT_MAIN_DIR/http_status.cpp :: esp_err_t handle_heap(GuardedReq)": 1232,
@@ -169,11 +179,13 @@
         },
         "CMakeFiles/__idf_main.dir/nvs_storage.cpp.su": {},
         "CMakeFiles/__idf_main.dir/ota_update.cpp.su": {
+          "/COMPONENT_MAIN_DIR/ota_update.cpp :: OtaCheckResult ota_check(unsigned int)": 1568,
           "/COMPONENT_MAIN_DIR/ota_update.cpp :: bool http_get_to_buffer(const char*, std::string&)": 736,
-          "/COMPONENT_MAIN_DIR/ota_update.cpp :: void ota_task_impl()": 624
+          "/COMPONENT_MAIN_DIR/ota_update.cpp :: bool ota_get_changelog(std::string&)": 1072,
+          "/COMPONENT_MAIN_DIR/ota_update.cpp :: void ota_task_impl()": 592
         },
         "CMakeFiles/__idf_main.dir/provisioning.cpp.su": {
-          "/COMPONENT_MAIN_DIR/provisioning.cpp :: esp_err_t save_post_impl(httpd_req_t*)": 1456,
+          "/COMPONENT_MAIN_DIR/provisioning.cpp :: esp_err_t save_post_impl(httpd_req_t*)": 1472,
           "/COMPONENT_MAIN_DIR/provisioning.cpp :: void dns_task(void*)": 592,
           "/COMPONENT_MAIN_DIR/provisioning.cpp :: void provisioning_run(NvsStorageAdapter&)": 528
         },
@@ -182,7 +194,7 @@
         "CMakeFiles/__idf_main.dir/stack_watch.cpp.su": {},
         "CMakeFiles/__idf_main.dir/syslog.cpp.su": {
           "/COMPONENT_MAIN_DIR/syslog.cpp :: SendResult syslog_sendto(const sockaddr_in&, const char*, size_t, int*)": 352,
-          "/COMPONENT_MAIN_DIR/syslog.cpp :: bool syslog_start_impl(NvsStorageAdapter&)": 336,
+          "/COMPONENT_MAIN_DIR/syslog.cpp :: bool syslog_start_impl(NvsStorageAdapter&)": 352,
           "/COMPONENT_MAIN_DIR/syslog.cpp :: void syslog_send(const char*, size_t)": 304,
           "/COMPONENT_MAIN_DIR/syslog.cpp :: void syslog_task(void*)": 480
         },
@@ -236,18 +248,21 @@
         "CMakeFiles/__idf_main.dir/http_common.cpp.su": {},
         "CMakeFiles/__idf_main.dir/http_config.cpp.su": {
           "/COMPONENT_MAIN_DIR/http_config.cpp :: esp_err_t handle_set_mqtt(GuardedReq)": 272,
+          "/COMPONENT_MAIN_DIR/http_config.cpp :: esp_err_t handle_set_ota(GuardedReq)": 256,
           "/COMPONENT_MAIN_DIR/http_config.cpp :: esp_err_t handle_set_syslog(GuardedReq)": 272,
-          "/COMPONENT_MAIN_DIR/http_config.cpp :: esp_err_t handle_set_vin(GuardedReq)": 560,
-          "/COMPONENT_MAIN_DIR/http_config.cpp :: esp_err_t handle_set_wifi(GuardedReq)": 256,
+          "/COMPONENT_MAIN_DIR/http_config.cpp :: esp_err_t handle_set_vin(GuardedReq)": 576,
+          "/COMPONENT_MAIN_DIR/http_config.cpp :: esp_err_t handle_set_wifi(GuardedReq)": 272,
           "/COMPONENT_MAIN_DIR/http_config.cpp :: tk::MqttProbeResult mqtt_probe_broker(const std::string&)": 272
         },
-        "CMakeFiles/__idf_main.dir/http_ota.cpp.su": {},
+        "CMakeFiles/__idf_main.dir/http_ota.cpp.su": {
+          "/COMPONENT_MAIN_DIR/http_ota.cpp :: esp_err_t handle_ota_changelog(GuardedReq)": 1056
+        },
         "CMakeFiles/__idf_main.dir/http_server.cpp.su": {
           "/COMPONENT_MAIN_DIR/http_server.cpp :: bool browser_mutation_allowed(httpd_req_t*)": 400,
           "/COMPONENT_MAIN_DIR/http_server.cpp :: esp_err_t handle_all_dispatch(httpd_req_t*)": 304
         },
         "CMakeFiles/__idf_main.dir/http_status.cpp.su": {
-          "/COMPONENT_MAIN_DIR/http_status.cpp :: cJSON* build_status_object(bool)": 1552,
+          "/COMPONENT_MAIN_DIR/http_status.cpp :: cJSON* build_status_object(bool)": 1584,
           "/COMPONENT_MAIN_DIR/http_status.cpp :: esp_err_t handle_coredump(GuardedReq)": 1088,
           "/COMPONENT_MAIN_DIR/http_status.cpp :: esp_err_t handle_diag(GuardedReq)": 864,
           "/COMPONENT_MAIN_DIR/http_status.cpp :: esp_err_t handle_heap(GuardedReq)": 1232
@@ -261,7 +276,7 @@
           "/COMPONENT_MAIN_DIR/mcp_server.cpp :: tk::JsonOwner vehicle_state_result_()": 304
         },
         "CMakeFiles/__idf_main.dir/mqtt_ha.cpp.su": {
-          "/COMPONENT_MAIN_DIR/mqtt_ha.cpp :: bool mqtt_ha_start_impl(VehicleController&, NvsStorageAdapter&)": 784,
+          "/COMPONENT_MAIN_DIR/mqtt_ha.cpp :: bool mqtt_ha_start_impl(VehicleController&, NvsStorageAdapter&)": 800,
           "/COMPONENT_MAIN_DIR/mqtt_ha.cpp :: bool publish_state()": 496
         },
         "CMakeFiles/__idf_main.dir/net.cpp.su": {
@@ -269,11 +284,13 @@
         },
         "CMakeFiles/__idf_main.dir/nvs_storage.cpp.su": {},
         "CMakeFiles/__idf_main.dir/ota_update.cpp.su": {
+          "/COMPONENT_MAIN_DIR/ota_update.cpp :: OtaCheckResult ota_check(unsigned int)": 1440,
           "/COMPONENT_MAIN_DIR/ota_update.cpp :: bool http_get_to_buffer(const char*, std::string&)": 736,
+          "/COMPONENT_MAIN_DIR/ota_update.cpp :: bool ota_get_changelog(std::string&)": 1056,
           "/COMPONENT_MAIN_DIR/ota_update.cpp :: void ota_task_impl()": 592
         },
         "CMakeFiles/__idf_main.dir/provisioning.cpp.su": {
-          "/COMPONENT_MAIN_DIR/provisioning.cpp :: esp_err_t save_post_impl(httpd_req_t*)": 1360,
+          "/COMPONENT_MAIN_DIR/provisioning.cpp :: esp_err_t save_post_impl(httpd_req_t*)": 1376,
           "/COMPONENT_MAIN_DIR/provisioning.cpp :: void dns_task(void*)": 576,
           "/COMPONENT_MAIN_DIR/provisioning.cpp :: void provisioning_run(NvsStorageAdapter&)": 496
         },
@@ -282,7 +299,7 @@
         "CMakeFiles/__idf_main.dir/stack_watch.cpp.su": {},
         "CMakeFiles/__idf_main.dir/syslog.cpp.su": {
           "/COMPONENT_MAIN_DIR/syslog.cpp :: SendResult syslog_sendto(const sockaddr_in&, const char*, size_t, int*)": 352,
-          "/COMPONENT_MAIN_DIR/syslog.cpp :: bool syslog_start_impl(NvsStorageAdapter&)": 304,
+          "/COMPONENT_MAIN_DIR/syslog.cpp :: bool syslog_start_impl(NvsStorageAdapter&)": 320,
           "/COMPONENT_MAIN_DIR/syslog.cpp :: void syslog_send(const char*, size_t)": 288,
           "/COMPONENT_MAIN_DIR/syslog.cpp :: void syslog_task(void*)": 464
         },
@@ -319,8 +336,7 @@
         "CMakeFiles/__idf_main.dir/board.cpp.su": {},
         "CMakeFiles/__idf_main.dir/command_exec.cpp.su": {},
         "CMakeFiles/__idf_main.dir/config_blob.cpp.su": {
-          "/COMPONENT_MAIN_DIR/config_blob.cpp :: bool tk::cfg_save(NvsStorageAdapter&, const ConfigBlob&)": 400,
-          "/COMPONENT_MAIN_DIR/logic/config_store.hpp :: bool tk::config_blob_decode(const uint8_t*, size_t, ConfigBlob&)": 256
+          "/COMPONENT_MAIN_DIR/config_blob.cpp :: bool tk::cfg_save(NvsStorageAdapter&, const ConfigBlob&)": 400
         },
         "CMakeFiles/__idf_main.dir/diag_crash.cpp.su": {},
         "CMakeFiles/__idf_main.dir/diag_log.cpp.su": {
@@ -342,7 +358,9 @@
           "/COMPONENT_MAIN_DIR/http_config.cpp :: esp_err_t handle_set_wifi(GuardedReq)": 320,
           "/COMPONENT_MAIN_DIR/http_config.cpp :: tk::MqttProbeResult mqtt_probe_broker(const std::string&)": 272
         },
-        "CMakeFiles/__idf_main.dir/http_ota.cpp.su": {},
+        "CMakeFiles/__idf_main.dir/http_ota.cpp.su": {
+          "/COMPONENT_MAIN_DIR/http_ota.cpp :: esp_err_t handle_ota_changelog(GuardedReq)": 1056
+        },
         "CMakeFiles/__idf_main.dir/http_server.cpp.su": {
           "/COMPONENT_MAIN_DIR/http_server.cpp :: bool browser_mutation_allowed(httpd_req_t*)": 432,
           "/COMPONENT_MAIN_DIR/http_server.cpp :: esp_err_t handle_all_dispatch(httpd_req_t*)": 320
@@ -371,8 +389,9 @@
         },
         "CMakeFiles/__idf_main.dir/nvs_storage.cpp.su": {},
         "CMakeFiles/__idf_main.dir/ota_update.cpp.su": {
-          "/COMPONENT_MAIN_DIR/ota_update.cpp :: OtaCheckResult ota_check(unsigned int)": 1568,
+          "/COMPONENT_MAIN_DIR/ota_update.cpp :: OtaCheckResult ota_check(unsigned int)": 1552,
           "/COMPONENT_MAIN_DIR/ota_update.cpp :: bool http_get_to_buffer(const char*, std::string&)": 736,
+          "/COMPONENT_MAIN_DIR/ota_update.cpp :: bool ota_get_changelog(std::string&)": 1056,
           "/COMPONENT_MAIN_DIR/ota_update.cpp :: void ota_task_impl()": 592
         },
         "CMakeFiles/__idf_main.dir/provisioning.cpp.su": {

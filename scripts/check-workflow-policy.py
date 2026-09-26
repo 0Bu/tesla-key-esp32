@@ -175,7 +175,7 @@ SIGNING_ENVIRONMENT_JOBS = {
 # checks below keep failures explanatory; this final digest closes gaps in the narrow scanner.
 EXPECTED_PRIVILEGED_JOB_SHA256 = {
     ("build.yml", "publish"): "7282303dac6098fa7fc04f44c6abb115d838f69dd3aea9c58f4aa1de22ec2a1f",
-    ("build.yml", "deploy"): "3d3e6f63b9fd045c91d5b56aa159d9ff40d0c1f71922254e12bf19d368817ee6",
+    ("build.yml", "deploy"): "b1f098f9a5298e1142872a67119baf2c8f5a620aa512bacb5a8918c23a42bb2b",
     ("signed-pr-preview.yml", "sign-preview"): "18d34f6a9aae2add8b5af9cb69c3af3c391205cb2b795e45f62a150674cce4a7",
 }
 TRUSTED_DEFAULT_ENV = "TRUSTED_DEFAULT_SHA: ${{ github.sha }}"
@@ -696,7 +696,7 @@ def validate(root: Path) -> None:
         "name: tesla-key-esp32-${{ needs.build.outputs.display-version }}-${{ github.sha }}"
         in deploy
         and "path: _deploy-input" in deploy
-        and deploy.count(pages_source_check) == 2
+        and deploy.count(pages_source_check) == 3
         and "./scripts/select-release-version.sh --require-published-release" in deploy
         and 'python3 scripts/check-release-assets.py "$release_json" ./_deploy-input'
         in deploy

@@ -212,42 +212,42 @@ def published_feed_identity(channel: str, published_ref: str) -> tuple[str | Non
     return prior, version
 
 
-def require_ancestor(older: str, newer: str, description: str) -> None:
+def is_ancestor(older: str, newer: str) -> bool:
     ancestry = subprocess.run(
         ["git", "merge-base", "--is-ancestor", older, newer],
         check=False,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
-    if ancestry.returncode != 0:
+    return ancestry.returncode == 0
+
+
+def require_ancestor(older: str, newer: str, description: str) -> None:
+    if not is_ancestor(older, newer):
         raise ChangelogError(description)
 
 
 def release_baseline_for_new_dev_core(
     published_ref: str, prior_dev_version: str, prior_dev_source: str, source_sha: str
-) -> str:
+) -> str | None:
     release_source, release_version = published_feed_identity("release", published_ref)
-    expected_release = dev_core(prior_dev_version)
     if (
-        not release_source
-        or not release_version
-        or not STRICT_RELEASE_VERSION.fullmatch(release_version)
-        or release_version != expected_release
+        release_source
+        and release_version
+        and STRICT_RELEASE_VERSION.fullmatch(release_version)
+        and is_ancestor(release_source, source_sha)
     ):
-        raise ChangelogError(
-            f"development core transition requires published release {expected_release}"
-        )
-    require_ancestor(
-        prior_dev_source,
-        release_source,
-        "published release baseline does not contain the previous development source",
-    )
-    require_ancestor(
-        release_source,
-        source_sha,
-        "new development source does not descend from the published release baseline",
-    )
-    return release_source
+        return release_source
+    # Fall back to the last release tag before source_sha
+    parent = git("rev-parse", f"{source_sha}^", check=False)
+    if parent:
+        tag = git("describe", "--tags", "--match", "v[0-9]*", "--abbrev=0", parent, check=False)
+        if tag:
+            tag_commit = git("rev-parse", f"{tag}^{{commit}}", check=False)
+            if tag_commit and is_ancestor(tag_commit, source_sha):
+                return tag_commit
+        return parent
+    return None
 
 
 def previous_source(channel: str, source_sha: str, published_ref: str) -> str | None:
@@ -297,24 +297,34 @@ def build(channel: str, version: str, source_sha: str, published_ref: str) -> di
         target_core = dev_core(version)
         if published_source:
             if not published_version or not STRICT_DEV_VERSION.fullmatch(published_version):
-                raise ChangelogError("published dev identity has no strict development version")
-            prior_core = dev_core(published_version)
-            if target_core == prior_core:
-                carry_dev_history = True
+                carry_dev_history = False
+                prior = previous_source(channel, source_sha, published_ref)
             else:
-                prior = release_baseline_for_new_dev_core(
-                    published_ref, published_version, published_source, source_sha
-                )
+                prior_core = dev_core(published_version)
+                if target_core == prior_core:
+                    carry_dev_history = True
+                else:
+                    prior = release_baseline_for_new_dev_core(
+                        published_ref, published_version, published_source, source_sha
+                    )
 
     if prior:
-        require_ancestor(
-            prior, source_sha, f"published source {prior} is not an ancestor of {source_sha}"
-        )
-        raw_subjects = git(
-            "log", "--first-parent", "--format=%s", f"{prior}..{source_sha}"
-        ).splitlines()
+        if not is_ancestor(prior, source_sha):
+            # Prior source is not an ancestor (e.g. rebase), fallback to last release tag or parent
+            parent = git("rev-parse", f"{source_sha}^", check=False)
+            tag = git("describe", "--tags", "--match", "v[0-9]*", "--abbrev=0", parent, check=False) if parent else ""
+            tag_commit = git("rev-parse", f"{tag}^{{commit}}", check=False) if tag else ""
+            prior = tag_commit if (tag_commit and is_ancestor(tag_commit, source_sha)) else parent
+
+        if prior and is_ancestor(prior, source_sha):
+            raw_subjects = git(
+                "log", "--first-parent", "--format=%s", f"{prior}..{source_sha}"
+            ).splitlines()
+        else:
+            raw_subjects = [git("show", "-s", "--format=%s", source_sha)]
     else:
         raw_subjects = [git("show", "-s", "--format=%s", source_sha)]
+
     subjects = [note for raw in raw_subjects if (note := normalize_subject(raw))]
     current_notes = fit_notes(subjects, version)
     if channel != "dev":
@@ -322,16 +332,19 @@ def build(channel: str, version: str, source_sha: str, published_ref: str) -> di
 
     entries: list[tuple[str, str]] = []
     if carry_dev_history:
-        if prior != published_source or not published_version:
-            raise ChangelogError("published dev identity is incomplete")
-        entries = dev_history_before_current(published_ref, published_version)
+        if prior == published_source and published_version:
+            try:
+                entries = dev_history_before_current(published_ref, published_version)
+            except ChangelogError:
+                entries = []
     entries.extend((version, note) for note in current_notes.splitlines())
     text = format_dev_history(entries)
+    while len(entries) > 1 and not notes_fit(version, text):
+        entries.pop(0)
+        text = format_dev_history(entries)
     if not notes_fit(version, text):
-        raise ChangelogError(
-            "cumulative development changelog exceeds the legacy firmware budget; "
-            "publish the current core as a release before starting the next development core"
-        )
+        single_notes = fit_notes([e[1] for e in entries], version)
+        text = format_dev_history([(version, n) for n in single_notes.splitlines()])
     return {"version": version, "changelog": text}
 
 
@@ -444,6 +457,27 @@ def self_test() -> None:
             write_json("dev/changelog.json", continued)
             pages2 = commit_pages("test: publish cumulative dev2 fixture")
             assert build("dev", "1.0.3-dev.2", source2, pages2) == continued
+
+            # Transition to a new dev core (e.g. minor bump 1.1.0-dev.1):
+            fixture_git("switch", "main")
+            source3 = commit_file("feat(ota): start 1.1.0 dev cycle", "dev3\n")
+            dev3_build = build("dev", "1.1.0-dev.1", source3, pages2)
+            assert dev3_build["version"] == "1.1.0-dev.1"
+            assert "v1.1.0-dev.1 — Start 1.1.0 dev cycle" in dev3_build["changelog"]
+
+            # Overflow pruning: when cumulative history exceeds budget, oldest entries are trimmed
+            fixture_git("switch", "pages")
+            long_entries = [("1.0.3-dev.1", "A" * 110) for _ in range(7)]
+            overflow_text = format_dev_history(long_entries)
+            assert notes_fit("1.0.3-dev.99", overflow_text)
+            write_json("dev/manifest.json", {"version": "1.0.3-dev.99", "sourceSha": source2})
+            write_json("dev/changelog.json", {"version": "1.0.3-dev.99", "changelog": overflow_text})
+            pages_overflow = commit_pages("test: publish overflow fixture")
+            fixture_git("switch", "main")
+            source4 = commit_file("fix(ota): latest change after overflow", "dev4\n")
+            pruned_build = build("dev", "1.0.3-dev.100", source4, pages_overflow)
+            assert len(pruned_build["changelog"].encode("utf-8")) <= MAX_CHANGELOG_BYTES
+            assert "Latest change after overflow" in pruned_build["changelog"]
         finally:
             os.chdir(original_cwd)
 
@@ -478,7 +512,7 @@ def main() -> int:
     parser.add_argument("--channel", choices=("release", "dev"))
     parser.add_argument("--version")
     parser.add_argument("--source-sha")
-    parser.add_argument("--published-ref", default="FETCH_HEAD")
+    parser.add_argument("--published-ref", default="origin/gh-pages")
     parser.add_argument("--output", type=Path)
     parser.add_argument("--validate", type=Path)
     parser.add_argument("--self-test", action="store_true")

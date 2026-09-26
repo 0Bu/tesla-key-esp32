@@ -57,6 +57,7 @@ tk::OtaChannel ota_get_channel();
 void ota_set_channel(tk::OtaChannel channel);
 
 // Retrieve latest changelog text for offered update (returns true if available).
+bool ota_get_changelog(char* out, size_t max_len, size_t& out_len);
 bool ota_get_changelog(std::string& out);
 
 // Is a check or download task running right now? Deliberately separate from ota_get_status():

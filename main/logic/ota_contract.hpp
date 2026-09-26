@@ -223,35 +223,6 @@ inline OtaChannel default_ota_channel_for_version(std::string_view v) {
     return ota_version_is_dev(v) ? OtaChannel::Dev : OtaChannel::Release;
 }
 
-// Join `rest` onto `base` with exactly one '/' between them. An EMPTY base yields an empty string.
-inline std::string ota_url_join(std::string_view base, std::string_view rest) {
-    if (base.empty()) return "";
-    if (rest.empty()) return std::string(base);
-    std::string out(base);
-    if (out.back() != '/') out += '/';
-    out.append(rest.data(), rest.size());
-    return out;
-}
-
-// The manifest to check for THIS channel. The release channel uses the configured manifest URL
-// verbatim; the dev channel is always <firmware base>/dev/manifest.json.
-inline std::string ota_channel_manifest_url(std::string_view release_manifest_url,
-                                            std::string_view firmware_base_url,
-                                            OtaChannel c) {
-    if (c == OtaChannel::Release) return std::string(release_manifest_url);
-    return ota_url_join(ota_url_join(firmware_base_url, kOtaDevSubdir), "manifest.json");
-}
-
-// The image to download for THIS channel. `image` is the per-target file name (e.g. tesla-key-esp32.bin).
-inline std::string ota_channel_firmware_url(std::string_view firmware_base_url,
-                                            OtaChannel c,
-                                            std::string_view image) {
-    const std::string dir = (c == OtaChannel::Dev)
-        ? ota_url_join(firmware_base_url, kOtaDevSubdir)
-        : std::string(firmware_base_url);
-    return ota_url_join(dir, image);
-}
-
 // Format the official GitHub Pages Dev manifest URL safely without heap allocation.
 // URL format: "https://0bu.github.io/tesla-key-esp32/dev/manifest.json"
 inline bool format_dev_manifest_url(char* buf, std::size_t buf_len) {

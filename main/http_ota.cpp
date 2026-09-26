@@ -107,12 +107,13 @@ esp_err_t handle_ota_status(GuardedReq rq) {
 // Returns text/plain with line-by-line changelog points (or 204 No Content if none).
 esp_err_t handle_ota_changelog(GuardedReq rq) {
     httpd_req_t* req = rq.req;
-    std::string notes;
-    if (!ota_get_changelog(notes) || notes.empty()) {
+    char notes[1025];
+    size_t len = 0;
+    if (!ota_get_changelog(notes, sizeof(notes), len) || len == 0) {
         httpd_resp_set_status(req, "204 No Content");
         return httpd_resp_send(req, nullptr, 0);
     }
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     httpd_resp_set_type(req, "text/plain; charset=utf-8");
-    return httpd_resp_send(req, notes.data(), notes.size());
+    return httpd_resp_send(req, notes, len);
 }

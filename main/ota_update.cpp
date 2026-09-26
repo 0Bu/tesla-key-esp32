@@ -325,15 +325,30 @@ static void set_changelog_locked(const char* text) {
     s_changelog_len = copy_len;
 }
 
-bool ota_get_changelog(std::string& out) {
+bool ota_get_changelog(char* out, size_t max_len, size_t& out_len) {
+    out_len = 0;
+    if (!out || max_len == 0) return false;
     SemaphoreHandle_t lock = ensure_lock();
     if (!lock) return false;
     tk::SemGuard g(lock);
     if (!g || s_changelog_len == 0) {
+        return false;
+    }
+    const size_t copy_len = (s_changelog_len < max_len - 1) ? s_changelog_len : (max_len - 1);
+    std::memcpy(out, s_changelog.data(), copy_len);
+    out[copy_len] = '\0';
+    out_len = copy_len;
+    return true;
+}
+
+bool ota_get_changelog(std::string& out) {
+    char buf[kOtaChangelogCapacity + 1];
+    size_t len = 0;
+    if (!ota_get_changelog(buf, sizeof(buf), len) || len == 0) {
         out.clear();
         return false;
     }
-    out.assign(s_changelog.data(), s_changelog_len);
+    out.assign(buf, len);
     return true;
 }
 
@@ -458,6 +473,14 @@ OtaCheckResult ota_check(unsigned pr_number) {
     res.target_pr = pr_number;
     res.current = running_version();
     const tk::OtaChannel channel = ota_get_channel();
+
+    {
+        SemaphoreHandle_t lock = ensure_lock();
+        if (lock) {
+            tk::SemGuard g(lock);
+            if (g) set_changelog_locked(nullptr);
+        }
+    }
 
     const char* manifest_url = resolve_manifest_url_into(pr_number, res.reason);
     ESP_LOGI(TAG, "checking %s (channel %s, running %s)", manifest_url,

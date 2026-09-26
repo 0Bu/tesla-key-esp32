@@ -886,7 +886,10 @@ jobs:
           SOURCE_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          pages_base_url="$(gh api "repos/$GITHUB_REPOSITORY/pages" --jq '.html_url | rtrimstr("/")')"
+          pages_json="$(mktemp)"
+          trap 'rm -f "$pages_json"' EXIT
+          gh api "repos/$GITHUB_REPOSITORY/pages" > "$pages_json"
+          pages_base_url="$(python3 scripts/check-pages-source.py "$pages_json" --print-url)"
           python3 scripts/check-dev-pages.py \
             --pages-base-url "$pages_base_url" \
             --staged-site ./_deploy-input/_site \

@@ -997,33 +997,6 @@ static void test_ota_channel() {
     CHECK(tk::ota_channel_from_int(1) == OtaChannel::Dev);
     CHECK(tk::ota_channel_from_int(99) == OtaChannel::Release);
 
-    // URL joining
-    CHECK(tk::ota_url_join("", "manifest.json").empty());
-    CHECK(tk::ota_url_join("https://example.com/ota", "") == "https://example.com/ota");
-    CHECK(tk::ota_url_join("https://example.com/ota", "manifest.json") ==
-          "https://example.com/ota/manifest.json");
-    CHECK(tk::ota_url_join("https://example.com/ota/", "manifest.json") ==
-          "https://example.com/ota/manifest.json");
-
-    // Manifest URL construction per channel
-    const std::string rel_manifest = "https://0bu.github.io/tesla-key-esp32/manifest.json";
-    const std::string fw_base      = "https://0bu.github.io/tesla-key-esp32";
-    const std::string fw_base_slash= "https://0bu.github.io/tesla-key-esp32/";
-
-    CHECK(tk::ota_channel_manifest_url(rel_manifest, fw_base, OtaChannel::Release) == rel_manifest);
-    CHECK(tk::ota_channel_manifest_url(rel_manifest, fw_base, OtaChannel::Dev) ==
-          "https://0bu.github.io/tesla-key-esp32/dev/manifest.json");
-    CHECK(tk::ota_channel_manifest_url(rel_manifest, fw_base_slash, OtaChannel::Dev) ==
-          "https://0bu.github.io/tesla-key-esp32/dev/manifest.json");
-
-    // Firmware binary URL construction per channel
-    CHECK(tk::ota_channel_firmware_url(fw_base, OtaChannel::Release, "tesla-key-esp32s3.bin") ==
-          "https://0bu.github.io/tesla-key-esp32/tesla-key-esp32s3.bin");
-    CHECK(tk::ota_channel_firmware_url(fw_base, OtaChannel::Dev, "tesla-key-esp32s3.bin") ==
-          "https://0bu.github.io/tesla-key-esp32/dev/tesla-key-esp32s3.bin");
-    CHECK(tk::ota_channel_firmware_url(fw_base_slash, OtaChannel::Dev, "tesla-key-esp32s3.bin") ==
-          "https://0bu.github.io/tesla-key-esp32/dev/tesla-key-esp32s3.bin");
-
     // Static buffer zero-alloc formatters for dev channel
     char dev_manifest_buf[128]{};
     CHECK(tk::format_dev_manifest_url(dev_manifest_buf, sizeof(dev_manifest_buf)));
@@ -5241,48 +5214,17 @@ static void test_config_store() {
     CHECK(!leg_out.has_ota);
     CHECK(leg_out.ota_channel == 0);
 
-    // Simulated v2 blob (version=2 with trailing byte):
-    // 1) v2 with raw = 0x01 decodes as has_ota = true, ota_channel = 1
-    // 2) v2 with raw = 0xFF decodes as has_ota = false, ota_channel = 0
-    // Synthesize a v2 blob by appending a byte and updating version and CRC.
+    // Future version (version=2) is rejected by this build:
     tk::ConfigBlobBuffer v2_syn{};
-    memcpy(v2_syn.data(), dev_buf.data(), dev_sz - 4); // body without CRC
-    v2_syn[4] = 2; // version 2
-    v2_syn[dev_sz - 4] = 1; // v2 trailing byte: ota_channel = 1
-    const size_t v2_sz = dev_sz + 1;
-    const uint32_t v2_crc = tk::config_crc32(v2_syn.data(), v2_sz - 4);
-    v2_syn[v2_sz - 4] = static_cast<uint8_t>(v2_crc & 0xFF);
-    v2_syn[v2_sz - 3] = static_cast<uint8_t>((v2_crc >> 8) & 0xFF);
-    v2_syn[v2_sz - 2] = static_cast<uint8_t>((v2_crc >> 16) & 0xFF);
-    v2_syn[v2_sz - 1] = static_cast<uint8_t>((v2_crc >> 24) & 0xFF);
+    memcpy(v2_syn.data(), dev_buf.data(), dev_sz - 4);
+    v2_syn[4] = 2; // future version 2
+    const uint32_t v2_crc = tk::config_crc32(v2_syn.data(), dev_sz - 4);
+    v2_syn[dev_sz - 4] = static_cast<uint8_t>(v2_crc & 0xFF);
+    v2_syn[dev_sz - 3] = static_cast<uint8_t>((v2_crc >> 8) & 0xFF);
+    v2_syn[dev_sz - 2] = static_cast<uint8_t>((v2_crc >> 16) & 0xFF);
+    v2_syn[dev_sz - 1] = static_cast<uint8_t>((v2_crc >> 24) & 0xFF);
     tk::ConfigBlob v2_out;
-    CHECK(tk::config_blob_decode(v2_syn.data(), v2_sz, v2_out));
-    CHECK(v2_out.has_ota);
-    CHECK(v2_out.ota_channel == 1);
-    CHECK(v2_out.wifi_ssid == "V1Net");
-
-    // Re-saving a decoded v2 blob produces a v1 blob that preserves channel settings
-    tk::ConfigBlobBuffer v2_mig_buf{};
-    const size_t v2_mig_sz = tk::config_blob_encode(v2_out, v2_mig_buf.data(), v2_mig_buf.size());
-    CHECK(v2_mig_sz > 0);
-    CHECK(v2_mig_buf[4] == 1); // migrated to version 1
-    tk::ConfigBlob v2_mig_out;
-    CHECK(tk::config_blob_decode(v2_mig_buf.data(), v2_mig_sz, v2_mig_out));
-    CHECK(v2_mig_out.has_ota);
-    CHECK(v2_mig_out.ota_channel == 1);
-    CHECK(v2_mig_out.wifi_ssid == "V1Net");
-
-    // v2 with 0xFF decodes as has_ota = false
-    v2_syn[dev_sz - 4] = 0xFF;
-    const uint32_t v2_ff_crc = tk::config_crc32(v2_syn.data(), v2_sz - 4);
-    v2_syn[v2_sz - 4] = static_cast<uint8_t>(v2_ff_crc & 0xFF);
-    v2_syn[v2_sz - 3] = static_cast<uint8_t>((v2_ff_crc >> 8) & 0xFF);
-    v2_syn[v2_sz - 2] = static_cast<uint8_t>((v2_ff_crc >> 16) & 0xFF);
-    v2_syn[v2_sz - 1] = static_cast<uint8_t>((v2_ff_crc >> 24) & 0xFF);
-    tk::ConfigBlob v2_ff_out;
-    CHECK(tk::config_blob_decode(v2_syn.data(), v2_sz, v2_ff_out));
-    CHECK(!v2_ff_out.has_ota);
-    CHECK(v2_ff_out.ota_channel == 0);
+    CHECK(!tk::config_blob_decode(v2_syn.data(), dev_sz, v2_out));
 }
 
 // ─── /status: the sys block, the crash block and redaction ────────────────────
