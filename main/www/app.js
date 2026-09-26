@@ -685,6 +685,15 @@ function chargeFailMsg(reason,isCharging){
    askText → Promise<string|null>, askConfirm → Promise<boolean>. One sheet at a time; opening
    another settles the first as cancelled. */
 var askResolve=null, askCancelValue=null, askReturnFocus=null, askHintFn=null;
+// While a sheet or the OTA dialog is open the page behind it is inert: aria-modal alone neither
+// stops Tab from walking into the dock and panes nor keeps screen readers inside the dialog.
+// Derived from both dialogs, so closing one while the other is still up keeps the page locked.
+// Call it after showing/hiding a dialog and before moving focus back: an inert node can't take it.
+function syncModal(){
+  var open=['askModal','otaModal'].some(function(id){ var m=$(id); return !!(m&&m.classList&&!m.classList.contains('hide')); });
+  if(typeof document!=='undefined'&&document.body&&document.body.classList) document.body.classList.toggle('modal-open',open);
+  var w=$("wrap"); if(w) w.inert=open;
+}
 function askOpen(o,cancelValue){
   if(askResolve) askClose(askCancelValue);
   askReturnFocus=(typeof document!=='undefined')?document.activeElement:null;
@@ -710,7 +719,7 @@ function askOpen(o,cancelValue){
     askPaintHint();
   }
   var m=$("askModal"); if(m&&m.classList) m.classList.remove('hide');
-  if(typeof document!=='undefined'&&document.body&&document.body.classList) document.body.classList.add('modal-open');
+  syncModal();
   var target=text?inp:ok;
   if(target&&typeof target.focus==='function') target.focus();
   return new Promise(function(resolve){ askResolve=resolve; });
@@ -721,7 +730,7 @@ function askPaintHint(){
 }
 function askClose(value){
   var m=$("askModal"); if(m&&m.classList) m.classList.add('hide');
-  if(typeof document!=='undefined'&&document.body&&document.body.classList) document.body.classList.remove('modal-open');
+  syncModal();
   var r=askResolve; askResolve=null;
   var back=askReturnFocus; askReturnFocus=null;
   if(back&&typeof back.focus==='function') back.focus();
@@ -1015,9 +1024,7 @@ var otaDecisionResolve = null;
 function closeOtaModal(decision){
   var m = $("otaModal");
   if(m && m.classList) m.classList.add('hide');
-  if(typeof document !== 'undefined' && document.body && document.body.classList){
-    document.body.classList.remove('modal-open');
-  }
+  syncModal();
   var vl = $("verLink");
   if(vl && typeof vl.focus === 'function') vl.focus();
   if(otaDecisionResolve){
@@ -1074,9 +1081,7 @@ function askOtaInstall(status, changelog){
   if(noChanges) noChanges.hidden = (count > 0);
   var m = $("otaModal");
   if(m && m.classList) m.classList.remove('hide');
-  if(typeof document !== 'undefined' && document.body && document.body.classList){
-    document.body.classList.add('modal-open');
-  }
+  syncModal();
   var installBtn = $("otaInstall");
   if(installBtn && typeof installBtn.focus === 'function') installBtn.focus();
   return new Promise(function(resolve){

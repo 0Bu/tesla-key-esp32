@@ -703,6 +703,21 @@ test("askConfirm resolves true on confirm, false on cancel, and a new sheet canc
   assert.equal(await second, null);
 });
 
+test("an open sheet or OTA dialog makes the page behind it inert until both are closed", async () => {
+  const { context, element } = loadUi();
+  element("askModal").classList.add("hide");
+  element("otaModal").classList.add("hide");
+  const answer = context.askText({ title: "MQTT broker" });
+  assert.equal(element("wrap").inert, true, "Tab and screen readers stay inside the sheet");
+  context.askOtaInstall({ current: "1.5.0", available: "1.5.1" }, "");
+  context.askClose(context.askCancelValue);
+  assert.equal(await answer, null);
+  assert.equal(element("wrap").inert, true, "the OTA dialog is still open");
+  context.closeOtaModal(false);
+  assert.equal(element("wrap").inert, false);
+  assert.equal(context.document.activeElement, element("verLink"), "focus returns once the page is live again");
+});
+
 test("VIN change decides on confirmation from the state current after input", async () => {
   const { context } = loadUi();
   let confirmCalled = false;
