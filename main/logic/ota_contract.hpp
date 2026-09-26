@@ -233,6 +233,27 @@ inline bool format_dev_manifest_url(char* buf, std::size_t buf_len) {
     return true;
 }
 
+// Resolve the manifest URL for an OTA check.
+inline const char* resolve_manifest_url_into(unsigned pr_number, OtaChannel channel,
+                                             const char* default_manifest_url,
+                                             std::string& out) {
+    if (pr_number > 0) {
+        char buf[80];
+        if (format_pr_manifest_url(pr_number, buf, sizeof(buf))) {
+            out = buf;
+            return out.c_str();
+        }
+    }
+    if (channel == OtaChannel::Dev) {
+        char buf[80];
+        if (format_dev_manifest_url(buf, sizeof(buf))) {
+            out = buf;
+            return out.c_str();
+        }
+    }
+    return default_manifest_url;
+}
+
 // Format the official GitHub Pages Dev firmware URL safely without heap allocation.
 // URL format: "https://0bu.github.io/tesla-key-esp32/dev/tesla-key-esp32<chip_suffix>.bin"
 inline bool format_dev_firmware_url(std::string_view chip_suffix, char* buf, std::size_t buf_len) {

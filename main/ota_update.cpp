@@ -438,25 +438,6 @@ static bool http_get_to_buffer(const char* url, std::string& out) {
 
 // ─── Check for a newer release ──────────────────────────────────────────────────
 
-[[gnu::noinline]] static const char* resolve_manifest_url_into(unsigned pr_number, std::string& out) {
-    if (pr_number > 0) {
-        char buf[80];
-        if (tk::format_pr_manifest_url(pr_number, buf, sizeof(buf))) {
-            out = buf;
-            return out.c_str();
-        }
-    }
-    const tk::OtaChannel channel = ota_get_channel();
-    if (channel == tk::OtaChannel::Dev) {
-        char buf[80];
-        if (tk::format_dev_manifest_url(buf, sizeof(buf))) {
-            out = buf;
-            return out.c_str();
-        }
-    }
-    return CONFIG_TESLA_OTA_MANIFEST_URL;
-}
-
 OtaCheckResult ota_check(unsigned pr_number) {
     OtaCheckResult res{};
     res.target_pr = pr_number;
@@ -471,7 +452,9 @@ OtaCheckResult ota_check(unsigned pr_number) {
         }
     }
 
-    const char* manifest_url = resolve_manifest_url_into(pr_number, res.reason);
+    std::string manifest_url_storage;
+    const char* manifest_url = tk::resolve_manifest_url_into(
+        pr_number, channel, CONFIG_TESLA_OTA_MANIFEST_URL, manifest_url_storage);
     ESP_LOGI(TAG, "checking %s (channel %s, running %s)", manifest_url,
              tk::ota_channel_name(channel), res.current.c_str());
 
