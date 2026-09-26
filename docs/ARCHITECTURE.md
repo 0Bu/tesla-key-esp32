@@ -1135,9 +1135,8 @@ reached the car yet) it keeps the card but states the gap: **"Vehicle unreachabl
 **"Checking status…"** over an empty gauge, with the retained battery percentage and idle time
 only as labelled last-known chips and no action. Neither state makes a sleep claim or dresses
 retained data up as a live reading. In that same
-unknown/unreachable state the BLE connection row drops its green and animates an orange
-ping-pong across the signal bars (a darker-orange crest bouncing edge→edge over a light-orange
-base) with an orange MAC, flagging "connected but stateless" at a glance. The momentary BLE row
+unknown/unreachable state the BLE connection row drops its green and ripples an amber
+wave across the signal bars, with an amber status dot and status line, flagging "connected but stateless" at a glance. The momentary BLE row
 reading "Disconnected" is normal (the link is dropped between polls by design) and is not used
 to drive the hero — only `link` is.
 

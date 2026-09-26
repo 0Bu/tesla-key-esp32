@@ -154,7 +154,7 @@ Treat a violation of any of these as a real finding.
   (no signed BLE round-trip for ≥ `kReachableMaxAgeS` = 150 s, spanning two ~30 s probe cycles plus miss headroom, or answers nothing over BLE). Nothing heard since boot/re-pair ⇒ MQTT sleep_state **omitted**
   (HA shows "unknown"); the web UI keeps the hero card but says so — **"Vehicle unreachable"** /
   **"Checking status…"** over an empty gauge, retained battery/idle only as last-known chips, no
-  action — and a connected-but-stateless BLE row shows orange ping-pong bars. Never a sleep claim.
+  action — and a connected-but-stateless BLE row shows an amber wave across its bars. Never a sleep claim.
 - **Asymmetry — do not break it:** trust the *debounced ASLEEP* VCSEC flag as proof of sleep,
   but **never** trust VCSEC `AWAKE` to claim AWAKE. A parked car reports VCSEC `AWAKE` while
   its infotainment sleeps (the old `wake_up()` trap); AWAKE always requires live infotainment

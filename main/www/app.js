@@ -175,8 +175,8 @@ function bleRowFromStatus(s){
 /* BLE_ROW_END */
 // "status unknown" glyph — same geometry as barsHTML, all four bars fully lit (the link
 // is up; signal strength is real and shown as dBm next to it). Each bar carries a .wbN
-// class; its own @keyframes (wbpN) fades it between dark and light orange so a light crest
-// ping-pongs edge→edge across the bars. The markup is rssi-independent so it stays
+// class; one @keyframes wave with staggered delays ripples an amber wave left→right
+// across the bars. The markup is rssi-independent so it stays
 // byte-identical across polls — setHTML keeps the nodes, so the animation never restarts.
 function waveBarsHTML(){
   var H=[4,7,10,13], s='<svg class="bars wave" width="24" height="15" viewBox="0 0 21 13"><title>Vehicle status unknown</title>';
@@ -695,6 +695,8 @@ function syncModal(){
   var open=isOpen('askModal')||isOpen('otaModal');
   if(typeof document!=='undefined'&&document.body&&document.body.classList) document.body.classList.toggle('modal-open',open);
   var w=$("wrap"); if(w) w.inert=open;
+  // The OTA dialog sits under an open sheet: keep Tab from reaching its Install button.
+  var om=$("otaModal"); if(om) om.inert=isOpen('askModal');
 }
 function askOpen(o,cancelValue){
   if(askResolve) askClose(askCancelValue);
