@@ -68,6 +68,8 @@ jobs:
           ./scripts/select-release-version.sh --self-test
           python3 scripts/check-sdkconfig-defaults.py --self-test
           python3 scripts/report-firmware-size.py --self-test
+          python3 scripts/check-dev-pages.py --self-test
+          python3 scripts/generate-ota-changelog.py --self-test
           python3 scripts/check-build-gate-contract.py --self-test
           python3 tools/agent-hooks/agent_hook.py build-efficiency --self-test
           test "$(./scripts/idf-version.sh)" = v6.1
@@ -162,7 +164,7 @@ jobs:
               changed=yes
             fi
           elif [ "${{ github.event_name }}" = push ] && [ "${{ github.ref }}" = refs/heads/main ]; then
-            if ! changed="$(./scripts/release-relevance.sh --changed "$SOURCE_SHA")"; then
+            if ! changed="$(./scripts/release-relevance.sh --changed-dev "$SOURCE_SHA")"; then
               echo "release relevance check failed; scheduling publication reconciliation" >&2
               changed=yes
             fi
@@ -267,7 +269,7 @@ jobs:
               changed=yes
             fi
           elif [ "${{ github.event_name }}" = push ] && [ "${{ github.ref }}" = refs/heads/main ]; then
-            if ! changed="$(./scripts/release-relevance.sh --changed "$SOURCE_SHA")"; then
+            if ! changed="$(./scripts/release-relevance.sh --changed-dev "$SOURCE_SHA")"; then
               echo "release relevance check failed; scheduling publication reconciliation" >&2
               changed=yes
             fi

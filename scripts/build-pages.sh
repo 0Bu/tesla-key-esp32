@@ -192,7 +192,9 @@ if [[ -f "$repo_root/scripts/generate-ota-changelog.py" ]]; then
   if ! git -C "$repo_root" rev-parse --verify --quiet origin/gh-pages > /dev/null 2>&1; then
     if git -C "$repo_root" remote get-url origin >/dev/null 2>&1; then
       if git -C "$repo_root" ls-remote --heads origin gh-pages 2>/dev/null | grep -q gh-pages; then
-        git -C "$repo_root" fetch origin gh-pages:refs/remotes/origin/gh-pages --depth=1 2>/dev/null || true
+        if ! git -C "$repo_root" fetch origin gh-pages:refs/remotes/origin/gh-pages --depth=1; then
+          echo "warning: failed to fetch origin/gh-pages; changelog will fallback to Git tags" >&2
+        fi
       fi
     fi
   fi

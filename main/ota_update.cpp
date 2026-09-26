@@ -341,17 +341,6 @@ bool ota_get_changelog(char* out, size_t max_len, size_t& out_len) {
     return true;
 }
 
-bool ota_get_changelog(std::string& out) {
-    char buf[kOtaChangelogCapacity + 1];
-    size_t len = 0;
-    if (!ota_get_changelog(buf, sizeof(buf), len) || len == 0) {
-        out.clear();
-        return false;
-    }
-    out.assign(buf, len);
-    return true;
-}
-
 // ─── Canonical, bounded version input ──────────────────────────────────────────
 
 static std::string_view running_version() {
