@@ -286,8 +286,8 @@ matching build and reports real cross-part progress in-page. Each build has exac
 length/SHA-256-bound parts in semantic order: bootloader, partition table, signed app and
 `ota_data_initial`. All downloads are verified before the first erase/write; the first three parts
 are written before otadata is written separately and last at `0xf000`, so activation cannot precede
-a complete verified flash. OTA is a single channel
-where each device pulls its own
+a complete verified flash. OTA supports multi-channel updates (`Release` from root, `Dev` from `/dev/`,
+and ephemeral PR previews from `/PR/<N>/`), where each device pulls its own
 `tesla-key-esp32<suffix>.bin` (`tesla-key-esp32.bin` for the classic esp32, `-s3`/`-c3`/`-c6`
 otherwise). The per-target bootloader offset (0x1000 on the classic esp32, 0x0 on s3/c3/c6) is
 owned exclusively by trusted signer constants and checked against the resulting merged image and
@@ -548,14 +548,29 @@ preserves the `PR/` tree). Constraints:
   the *latest stable release* (not `next` or a prerelease core) guarantees a later main release compares strictly-newer → the
   PR-flashed device OTA-updates forward to main; a `next` base would collide with the number
   the merge cuts and stall OTA.
-- **OTA defaults to main, with targeted PR previews.** `CONFIG_TESLA_OTA_MANIFEST_URL` is
-  compile-time and unchanged in PR builds, so default OTA checks query the **main** manifest,
-  ensuring devices automatically stay on or forward-upgrade to stable releases. Devices can also
-  explicitly target an in-progress PR channel via `/ota/check?pr=<N>` and `/ota/update?pr=<N>` (or
-  by appending `?pr=<N>` to the web UI URL). When targeting PR `<N>`, the firmware fetches that
-  PR's preview manifest (`https://0bu.github.io/tesla-key-esp32/PR/<N>/manifest.json`) and downloads
-  its signed binary. Returning to main release happens automatically on the next unparameterized
-  OTA check once candidate core version is `>=` running core.
+- **OTA channels and targeted PR previews.** Devices can be configured for `Release` (default)
+  or `Dev` channel via the web UI or `POST /set_ota` with JSON body `{"channel":"dev"}` (or `{"channel":"release"}`).
+  The active channel is reported by `GET /status` in `ota.channel`. Targeted previews can be queried via
+  `/ota/check?pr=<N>` and `/ota/update?pr=<N>` (or appending `?pr=<N>` to the web UI).
+  - **Release channel** checks the root manifest (`https://0bu.github.io/tesla-key-esp32/manifest.json`)
+    and requires official release candidate builds (no prerelease suffix). Newer versions are accepted;
+    older versions are rejected. Switching from `Dev` to `Release` channel permits downgrading to
+    the stable release so devices can always return to production firmware safely.
+  - **Dev channel** checks the dev manifest (`https://0bu.github.io/tesla-key-esp32/dev/manifest.json`)
+    and accepts dev prerelease builds (`x.y.z-dev.N`). Monotonic increments in the dev build number
+    are required for updates on the same core version; downgrades between dev builds are rejected.
+  - **PR previews** fetch `https://0bu.github.io/tesla-key-esp32/PR/<N>/manifest.json` and download
+    the signed PR preview binary. Returning to the main release happens automatically on the next
+    unparameterized OTA check once the candidate core version is `>=` the running core.
+  - **Downgrade safety & config persistence.** Channel settings are packed into reserved bits 2 and 3
+    of the v1 `ConfigBlob` flags byte (`has_ota` and `ota_channel`). Writing always outputs a v1 blob,
+    ensuring older firmware builds (such as v1.5.7) decode the configuration cleanly without triggering
+    an unknown-version wipe to the setup AP. Unrelated config saves preserve `has_ota=false` so dev
+    builds without explicit channel selection continue defaulting to the Dev channel on boot.
+  - **OTA changelog endpoint.** `GET /ota/changelog` returns `text/plain` changelog notes for the
+    currently offered update (or HTTP 204 if none). When an update is available, `ota_check` fetches the
+    sibling `changelog.json` relative to the manifest, decodes the text, and filters the notes to the range
+    applicable between the running and offered candidate versions using `tk::ota_changelog_select_range()`.
 - **Toolchain pin isolation in PR preview rebuilds.** The `trusted-rebuild` job in
   `.github/workflows/signed-pr-preview.yml` checks out the PR head commit before reading
   `esp-idf-toolchain.txt`, ensuring PRs that update the ESP-IDF toolchain pin are rebuilt with
