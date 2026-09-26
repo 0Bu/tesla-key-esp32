@@ -533,7 +533,7 @@ test("editVin, editMqtt, editSyslog render server reason on HTTP 4xx/5xx", async
 
   // editMqtt HTTP 400
   context.state = { mqtt: { broker: "" } };
-  context.askText = async () => "192.168.1.50:1883";
+  context.askText = async () => "192.0.2.50:1883";
   context.fetch = async () => ({
     ok: false,
     status: 400,
@@ -547,7 +547,7 @@ test("editVin, editMqtt, editSyslog render server reason on HTTP 4xx/5xx", async
 
   // editSyslog HTTP 400
   context.state = { syslog: { host: "" } };
-  context.askText = async () => "192.168.1.50:514";
+  context.askText = async () => "192.0.2.50:514";
   context.fetch = async () => ({
     ok: false,
     status: 400,

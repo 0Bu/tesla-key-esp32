@@ -612,7 +612,7 @@ using HA's MQTT-Discovery convention, so every entity auto-appears in Home Assis
 grouped under one device. **Read-only by design** — no command topics are subscribed
 (the car is never controlled or woken from HA). Independent of evcc/BLE/pairing.
 
-- **Config:** broker URI from NVS `mqtt_uri` (web UI: Connections → MQTT, stores `host:port`)
+- **Config:** broker URI from NVS `mqtt_uri` (web UI: Network tab → MQTT row, stores `host:port`)
   overriding `CONFIG_TESLA_MQTT_BROKER_URI`; empty = disabled (bridge is a no-op).
   Optional `CONFIG_TESLA_MQTT_USERNAME`/`PASSWORD`, `CONFIG_TESLA_MQTT_DISCOVERY_PREFIX`
   (default `homeassistant`), `CONFIG_TESLA_MQTT_BASE_TOPIC` (default `tesla-key`),
@@ -714,8 +714,8 @@ independently redacted fragments.
 
 - **Config:** one NVS string, `syslog_uri` (`tesla_cfg` namespace) — a bare `"host:port"`, no
   scheme (a bare host defaults to port 514); `""` disables forwarding. Falls back to
-  `CONFIG_TESLA_SYSLOG_SERVER` (Kconfig, default empty). Set from the web UI (Connections →
-  Syslog card, pencil icon → `POST /set_syslog`, `{"server":"host:port"}`) or NVS/Kconfig
+  `CONFIG_TESLA_SYSLOG_SERVER` (Kconfig, default empty). Set from the web UI (Network tab →
+  Syslog row, pencil icon → `POST /set_syslog`, `{"server":"host:port"}`) or NVS/Kconfig
   directly. Resolved **once**, at `syslog_start()` (called early in `app_main`, before WiFi) —
   like the MQTT bridge, a config change persists then reboots to apply, so there is nothing to
   re-read at runtime.
@@ -750,7 +750,7 @@ independently redacted fragments.
   own "send failed" diagnostics would themselves be queued for (failing) delivery, feeding the
   exact storm the paragraph above avoids.
 - **Status:** `syslog_status()` → `/status.syslog` (`configured`/`resolved`/`reachable`/`host`/
-  `port`/`error`), read by the web UI's Connections card exactly like the MQTT row.
+  `port`/`error`), read by the web UI's Network tab exactly like the MQTT row.
 
 ## Heap-exhaustion watchdog (the last-resort escalation)
 
@@ -1131,10 +1131,10 @@ The web UI mirrors this exactly: it shows the "Vehicle asleep" hero (with the wa
 **only** when `ASLEEP` is a proven fact; for `IDLE` it shows a neutral **"Parked"**
 card (last-known SOC + idle time + the same wake button) that makes no sleep claim; and for both
 `UNREACHABLE` *and* the unknown state (nothing heard since boot — the on-demand BLE link hasn't
-reached the car yet) it **hides the hero card entirely**. Both states know nothing current about the
-car, and a hero filled with a retained battery percentage and an idle timer reads as live status;
-withholding the card is the honest form, and the state is still signalled — never as a sleep claim —
-on the BLE row. In that same
+reached the car yet) it keeps the card but states the gap: **"Vehicle unreachable"** or
+**"Checking status…"** over an empty gauge, with the retained battery percentage and idle time
+only as labelled last-known chips and no action. Neither state makes a sleep claim or dresses
+retained data up as a live reading. In that same
 unknown/unreachable state the BLE connection row drops its green and animates an orange
 ping-pong across the signal bars (a darker-orange crest bouncing edge→edge over a light-orange
 base) with an orange MAC, flagging "connected but stateless" at a glance. The momentary BLE row
