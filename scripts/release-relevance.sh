@@ -9,7 +9,7 @@ set -euo pipefail
 contract_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 VERSION_RE='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
 SELF_TEST_PYTHON=""  # Set only by this script's isolated --self-test fixture.
-RELEVANT_RE='^(main/|patches/tesla-ble/|docs/(index\.html|installer-bootstrap\.mjs|serial-port-release\.mjs|web-installer\.mjs|vendor/)|CMakeLists\.txt$|sdkconfig\.defaults(\.[a-z0-9]+)?$|dependencies\.lock\.[a-z0-9]+$|esp-idf-toolchain\.txt$|partitions\.csv$|version\.txt$|\.github/workflows/(build|signed-pr-preview|pr-preview-cleanup)\.yml$|scripts/firmware-(size|stack)-baseline\.json$|scripts/ota-signing-public-key\.sha256$|scripts/(ci-build-all|ci-build-verify|ci-sign-artifacts|next-version|select-release-version|release-relevance|test-release-contract|check-reproducible-build|idf-docker|idf-version|build-pages|publish-pages-branch|apply-tesla-ble-patches)\.sh$|scripts/(check-build-artifact-inventory|check-build-gate-contract|check-pages-manifest|check-pages-source|check-release-pages-bytes|check-release-assets|check-signed-root-inventory|prepare-reused-release|check-published-release|check-firmware-artifacts|check-partition-contract|check-dependency-contract|check-otadata-contract|check-build-semantics|check-stack-usage|check-sdkconfig-defaults|report-firmware-size)\.py$)'
+RELEVANT_RE='^(main/|patches/tesla-ble/|docs/(index\.html|installer-bootstrap\.mjs|serial-port-release\.mjs|web-installer\.mjs|vendor/)|CMakeLists\.txt$|sdkconfig\.defaults(\.[a-z0-9]+)?$|dependencies\.lock\.[a-z0-9]+$|esp-idf-toolchain\.txt$|partitions\.csv$|version\.txt$|\.github/workflows/(build|signed-pr-preview|pr-preview-cleanup)\.yml$|scripts/firmware-(size|stack)-baseline\.json$|scripts/ota-signing-public-key\.sha256$|scripts/(ci-build-all|ci-build-verify|ci-sign-artifacts|next-version|select-release-version|release-relevance|test-release-contract|check-reproducible-build|idf-docker|idf-version|build-pages|publish-pages-branch|apply-tesla-ble-patches)\.sh$|scripts/(check-build-artifact-inventory|check-build-gate-contract|check-pages-manifest|check-pages-source|check-dev-pages|check-release-pages-bytes|check-release-assets|check-signed-root-inventory|prepare-reused-release|check-published-release|check-firmware-artifacts|check-partition-contract|check-dependency-contract|check-otadata-contract|check-build-semantics|check-stack-usage|check-sdkconfig-defaults|report-firmware-size|generate-ota-changelog)\.py$)'
 
 validate_sha() {
   local repo_root="$1" sha="$2"
@@ -155,6 +155,85 @@ changed_since_release() {
   fi
 }
 
+# find_published_dev_baseline <repo> <current-sha>
+# Print a source SHA only when ALL dev authorities agree:
+#   * gh-pages dev/manifest.json identity (layout/version/sourceSha),
+#   * the same identity from the live URL returned by the repository Pages API (/dev/manifest.json),
+#   * and ancestry of that source SHA in the current main snapshot.
+# Any missing, stale or unreadable authority fails so the caller can fall back to the Release baseline.
+find_published_dev_baseline() {
+  local repo_root="$1" current_sha="$2" repository manifest identity source_sha version
+  local pages_json live_base live_url live_manifest live_identity live_source live_version
+  local python_cmd dev_version_re
+  python_cmd="${SELF_TEST_PYTHON:-python3}"
+  dev_version_re='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$'
+  validate_sha "$repo_root" "$current_sha" || return 2
+  command -v jq >/dev/null 2>&1 && command -v gh >/dev/null 2>&1 \
+    && command -v curl >/dev/null 2>&1 || return 2
+  repository="${GITHUB_REPOSITORY:-}"
+  [[ "$repository" =~ ^[0-9A-Za-z_.-]+/[0-9A-Za-z_.-]+$ ]] || return 2
+
+  git -C "$repo_root" fetch --quiet --tags --force --prune --prune-tags origin || return 2
+  git -C "$repo_root" fetch --quiet --no-tags --force origin \
+    refs/heads/gh-pages:refs/remotes/origin/gh-pages || return 2
+  manifest="$(git -C "$repo_root" show refs/remotes/origin/gh-pages:dev/manifest.json 2>/dev/null)" \
+    || return 2
+  identity="$(printf '%s' "$manifest" | jq -er '
+    select(type == "object" and .name == "tesla-key-esp32" and .layoutVersion == 2 and
+           (.builds | type == "array" and length == 4)) |
+    [.sourceSha, .version] | select(all(.[]; type == "string")) | @tsv
+  ' 2>/dev/null)" || return 2
+  source_sha="${identity%%$'\t'*}"
+  version="${identity#*$'\t'}"
+  validate_sha "$repo_root" "$source_sha" || return 2
+  [[ "$version" =~ $dev_version_re ]] || return 2
+  git -C "$repo_root" merge-base --is-ancestor "$source_sha" "$current_sha" || return 2
+
+  pages_json="$(gh api "repos/$repository/pages" 2>/dev/null)" || return 2
+  printf '%s' "$pages_json" \
+    | "$python_cmd" "$contract_root/scripts/check-pages-source.py" - >/dev/null || return 2
+  live_base="$(printf '%s' "$pages_json" | jq -er '
+    .html_url | strings | select(test("^https://[^[:space:]?#]+/?$"))
+  ' 2>/dev/null)" || return 2
+  live_url="${live_base%/}/dev/manifest.json?release-relevance=$current_sha"
+  live_manifest="$(curl --fail --location --silent --show-error --max-time 20 \
+    --retry 2 --retry-all-errors -H 'Cache-Control: no-cache' "$live_url" 2>/dev/null)" || return 2
+  live_identity="$(printf '%s' "$live_manifest" | jq -er '
+    select(type == "object" and .name == "tesla-key-esp32" and .layoutVersion == 2 and
+           (.builds | type == "array" and length == 4)) |
+    [.sourceSha, .version] | select(all(.[]; type == "string")) | @tsv
+  ' 2>/dev/null)" || return 2
+  live_source="${live_identity%%$'\t'*}"
+  live_version="${live_identity#*$'\t'}"
+  [[ "$live_source" == "$source_sha" && "$live_version" == "$version" ]] || return 2
+
+  printf '%s\n' "$source_sha"
+}
+
+changed_since_dev() {
+  local repo_root="$1" current_sha="$2" baseline files
+  validate_sha "$repo_root" "$current_sha" || {
+    echo "invalid current source SHA: $current_sha" >&2
+    return 2
+  }
+  if ! baseline="$(find_published_dev_baseline "$repo_root" "$current_sha")"; then
+    echo "no authoritative dev/Pages baseline; falling back to Release/Pages baseline" >&2
+    changed_since_release "$repo_root" "$current_sha"
+    return $?
+  fi
+  # Disable rename folding so both the deletion and addition paths are considered.
+  files="$(git -C "$repo_root" diff --name-only --no-renames "$baseline" "$current_sha")" || {
+    echo "cannot diff dev/Pages baseline $baseline to $current_sha" >&2
+    printf 'yes\n'
+    return 0
+  }
+  if printf '%s\n' "$files" | grep -Eq "$RELEVANT_RE"; then
+    printf 'yes\n'
+  else
+    printf 'no\n'
+  fi
+}
+
 changed_for_pr() {
   local repo_root="$1" base_sha="$2" head_sha="$3" files
   validate_sha "$repo_root" "$base_sha" || {
@@ -257,7 +336,9 @@ self_test() {
     '  *) exit 1 ;;' \
     'esac' > "$fakebin/gh"
   chmod +x "$fakebin/gh"
-  printf '%s\n' '#!/usr/bin/env bash' 'set -eu' 'cat "$GH_FAKE_LIVE"' > "$fakebin/curl"
+  printf '%s\n' '#!/usr/bin/env bash' 'set -eu' \
+    'for arg; do if [[ "$arg" == */dev/manifest.json* ]] && [ -n "${GH_FAKE_LIVE_DEV:-}" ]; then cat "$GH_FAKE_LIVE_DEV"; exit 0; fi; done' \
+    'cat "$GH_FAKE_LIVE"' > "$fakebin/curl"
   chmod +x "$fakebin/curl"
   cat > "$fakebin/python3" <<'PYTHON_WRAPPER'
 #!/usr/bin/env bash
@@ -508,22 +589,94 @@ PYTHON_WRAPPER
   got="$(changed_for_pr "$tmp" "bad-sha" "$sha_pr_fw" 2>/dev/null)"
   [[ "$got" == yes ]] || { echo "invalid PR SHA expected yes, got: $got" >&2; return 1; }
 
+  # Dev channel relevance tests
+  # 1. When dev/manifest.json does not exist yet on gh-pages, changed_since_dev falls back to release baseline
+  got="$(PATH="$fakebin:$PATH" GITHUB_REPOSITORY=owner/repo GH_FAKE_RELEASE="$fake_release" \
+    GH_FAKE_LIVE="$fake_live" changed_since_dev "$tmp" "$sha_b")"
+  [[ "$got" == no ]] || {
+    echo "dev fallback to published Release baseline expected no for docs B, got: $got" >&2; return 1;
+  }
+
+  # 2. Publish dev manifest on gh-pages at sha_c
+  fake_live_dev="$tmp/fake-live-dev-manifest.json"
+  git -C "$tmp" checkout -q gh-pages
+  mkdir -p "$tmp/dev"
+  write_pages_manifest "$tmp/dev/manifest.json" "1.0.1-dev.1" "$sha_c"
+  git -C "$tmp" add dev/manifest.json
+  git -C "$tmp" commit -qm "dev-pages-c"
+  git -C "$tmp" push -q origin gh-pages
+  git -C "$tmp" checkout -q main
+  write_pages_manifest "$fake_live_dev" "1.0.1-dev.1" "$sha_c"
+
+  # Now docs-only commit D on main should be NOT relevant for dev, but WOULD be relevant for release
+  printf 'docs-d\n' >> "$tmp/docs/README.md"
+  git -C "$tmp" add docs/README.md
+  git -C "$tmp" commit -qm docs-d
+  sha_d="$(git -C "$tmp" rev-parse HEAD)"
+  got_rel="$(PATH="$fakebin:$PATH" GITHUB_REPOSITORY=owner/repo GH_FAKE_RELEASE="$fake_release" \
+    GH_FAKE_LIVE="$fake_live" changed_since_release "$tmp" "$sha_d")"
+  [[ "$got_rel" == yes ]] || {
+    echo "docs-only D against published Release baseline expected yes (due to earlier firmware change in C), got: $got_rel" >&2; return 1;
+  }
+  got="$(PATH="$fakebin:$PATH" GITHUB_REPOSITORY=owner/repo GH_FAKE_RELEASE="$fake_release" \
+    GH_FAKE_LIVE="$fake_live" GH_FAKE_LIVE_DEV="$fake_live_dev" changed_since_dev "$tmp" "$sha_d")"
+  [[ "$got" == no ]] || {
+    echo "docs-only D against published dev baseline expected no, got: $got" >&2; return 1;
+  }
+
+  # 3. New firmware commit E on main should be relevant for dev
+  mkdir -p "$tmp/main"
+  printf 'firmware-e\n' > "$tmp/main/firmware.cpp"
+  git -C "$tmp" add main/firmware.cpp
+  git -C "$tmp" commit -qm firmware-e
+  sha_e="$(git -C "$tmp" rev-parse HEAD)"
+  got="$(PATH="$fakebin:$PATH" GITHUB_REPOSITORY=owner/repo GH_FAKE_RELEASE="$fake_release" \
+    GH_FAKE_LIVE="$fake_live" GH_FAKE_LIVE_DEV="$fake_live_dev" changed_since_dev "$tmp" "$sha_e")"
+  [[ "$got" == yes ]] || {
+    echo "firmware commit E against published dev baseline expected yes, got: $got" >&2; return 1;
+  }
+
+  # 4. Changes to check-dev-pages.py and generate-ota-changelog.py must be relevant
+  printf '# check-dev-pages\n' > "$tmp/scripts/check-dev-pages.py"
+  git -C "$tmp" add scripts/check-dev-pages.py
+  git -C "$tmp" commit -qm check-dev-pages-contract
+  sha_contract_dev="$(git -C "$tmp" rev-parse HEAD)"
+  got="$(PATH="$fakebin:$PATH" GITHUB_REPOSITORY=owner/repo GH_FAKE_RELEASE="$fake_release" \
+    GH_FAKE_LIVE="$fake_live" GH_FAKE_LIVE_DEV="$fake_live_dev" changed_since_dev "$tmp" "$sha_contract_dev")"
+  [[ "$got" == yes ]] || {
+    echo "check-dev-pages script change was not dev-relevant: $got" >&2; return 1;
+  }
+
+  printf '# generate-ota-changelog\n' > "$tmp/scripts/generate-ota-changelog.py"
+  git -C "$tmp" add scripts/generate-ota-changelog.py
+  git -C "$tmp" commit -qm generate-ota-changelog-contract
+  sha_contract_cl="$(git -C "$tmp" rev-parse HEAD)"
+  got="$(PATH="$fakebin:$PATH" GITHUB_REPOSITORY=owner/repo GH_FAKE_RELEASE="$fake_release" \
+    GH_FAKE_LIVE="$fake_live" GH_FAKE_LIVE_DEV="$fake_live_dev" changed_since_dev "$tmp" "$sha_contract_cl")"
+  [[ "$got" == yes ]] || {
+    echo "generate-ota-changelog script change was not dev-relevant: $got" >&2; return 1;
+  }
+
   echo "release relevance self-test: PASS"
 }
 
 repo_root="$contract_root"
 case "${1:-}" in
   --changed)
-    [[ $# -eq 2 ]] || { echo "usage: $0 --changed CURRENT_SHA | --changed-pr BASE_SHA HEAD_SHA | --self-test" >&2; exit 2; }
+    [[ $# -eq 2 ]] || { echo "usage: $0 --changed CURRENT_SHA | --changed-dev CURRENT_SHA | --changed-pr BASE_SHA HEAD_SHA | --self-test" >&2; exit 2; }
     changed_since_release "$repo_root" "$2"
     ;;
+  --changed-dev)
+    [[ $# -eq 2 ]] || { echo "usage: $0 --changed CURRENT_SHA | --changed-dev CURRENT_SHA | --changed-pr BASE_SHA HEAD_SHA | --self-test" >&2; exit 2; }
+    changed_since_dev "$repo_root" "$2"
+    ;;
   --changed-pr)
-    [[ $# -eq 3 ]] || { echo "usage: $0 --changed CURRENT_SHA | --changed-pr BASE_SHA HEAD_SHA | --self-test" >&2; exit 2; }
+    [[ $# -eq 3 ]] || { echo "usage: $0 --changed CURRENT_SHA | --changed-dev CURRENT_SHA | --changed-pr BASE_SHA HEAD_SHA | --self-test" >&2; exit 2; }
     changed_for_pr "$repo_root" "$2" "$3"
     ;;
   --self-test)
-    [[ $# -eq 1 ]] || { echo "usage: $0 --changed CURRENT_SHA | --changed-pr BASE_SHA HEAD_SHA | --self-test" >&2; exit 2; }
+    [[ $# -eq 1 ]] || { echo "usage: $0 --changed CURRENT_SHA | --changed-dev CURRENT_SHA | --changed-pr BASE_SHA HEAD_SHA | --self-test" >&2; exit 2; }
     self_test
     ;;
-  *) echo "usage: $0 --changed CURRENT_SHA | --changed-pr BASE_SHA HEAD_SHA | --self-test" >&2; exit 2 ;;
+  *) echo "usage: $0 --changed CURRENT_SHA | --changed-dev CURRENT_SHA | --changed-pr BASE_SHA HEAD_SHA | --self-test" >&2; exit 2 ;;
 esac

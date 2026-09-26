@@ -31,11 +31,26 @@ code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
 .ttl h1{margin:0; font-size:21px; font-weight:650; letter-spacing:-.2px}
 /* flex (not inline text) so the OTA ring centers within the text line-box and never
    grows the line height — keeps the cards below from shifting when the ring appears */
-.ttl .sub{font-size:15px; color:var(--muted); font-variant-numeric:tabular-nums; display:flex; align-items:center; min-width:0; overflow:hidden; white-space:nowrap}
+.ttl .sub{font-size:15px; color:var(--muted); font-variant-numeric:tabular-nums; display:flex; align-items:center; min-width:0; white-space:nowrap}
 .ttl .sub #ipline{overflow:hidden; text-overflow:ellipsis; min-width:0}
-.ttl .sub .verlink,.ttl .sub .otastat{flex:none}
+.ttl .sub .verlink,.ttl .sub .chan-wrap,.ttl .sub .otastat{flex:none}
 .verlink{cursor:pointer; white-space:nowrap}
 .verlink:hover{color:var(--fg); text-decoration:underline}
+/* update channel dropdown */
+.chan-wrap{position:relative; display:inline-flex; align-items:center}
+.chan-btn{display:inline-flex; align-items:center; justify-content:center; width:18px; height:18px; padding:0; margin-left:3px; border:0; border-radius:4px; background:transparent; color:var(--muted); cursor:pointer; -webkit-tap-highlight-color:transparent; transition:color .15s ease, background .15s ease}
+.chan-btn:hover{color:var(--fg); background:var(--soft)}
+.chan-btn.active,.chan-btn:focus-visible{color:var(--fg); outline:2px solid #38bdf8; outline-offset:1px}
+.chan-btn svg{display:block; transition:transform .15s ease}
+.chan-btn.active svg{transform:rotate(180deg)}
+.chan-menu{position:absolute; top:calc(100% + 5px); left:50%; transform:translateX(-50%); min-width:140px; background:var(--card); border:1px solid var(--border); border-radius:8px; box-shadow:var(--shadow), 0 4px 16px rgba(0,0,0,.15); padding:4px; display:flex; flex-direction:column; gap:2px; z-index:100}
+.chan-menu.hide{display:none}
+.chan-opt{display:flex; align-items:center; gap:6px; width:100%; padding:7px 12px; border:0; border-radius:6px; background:transparent; color:var(--fg); font-size:13.5px; font-weight:500; text-align:left; cursor:pointer; -webkit-tap-highlight-color:transparent; transition:background .1s ease, color .1s ease}
+.chan-opt:hover{background:var(--soft)}
+.chan-opt:focus-visible{outline:2px solid #38bdf8; outline-offset:-2px}
+.chan-opt.sel{background:#2563eb; color:#fff; font-weight:600}
+.chan-opt.sel:hover{background:#1d4ed8}
+.chan-opt .chk{font-size:13px; font-weight:700; width:14px; display:inline-block}
 /* inline OTA progress in the meta line (ring + status text), replaces the bottom popup */
 .otastat{display:inline-flex; align-items:center; gap:5px; margin-left:9px; white-space:nowrap; color:var(--muted)}
 .otastat:empty{display:none}
@@ -197,7 +212,7 @@ code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
 @keyframes sb3{0%,40%{opacity:.25} 54%,88%{opacity:1} 100%{opacity:.25}}
 @keyframes sb4{0%,62%{opacity:.25} 76%,88%{opacity:1} 100%{opacity:.25}}
 /* BLE "vehicle status unknown" glyph — the link is up but we have no fresh telemetry
-   (link_state unknown/unreachable; the hero card is hidden entirely). All four bars are
+   (link_state unknown/unreachable; the hero card stays visible). All four bars are
    orange — the same amber family as the setup/connection states — and over a light-orange
    base a DARKER-orange crest ping-pongs edge→edge (bar1→4→1), so a connected-but-stateless
    link reads as "checking" rather than a healthy green link. Each bar's own keyframe bakes
@@ -263,5 +278,39 @@ code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
 .toast.leaving{animation:tout .22s ease forwards}
 @keyframes tin{from{opacity:0; transform:translateY(12px)}to{opacity:1; transform:none}}
 @keyframes tout{to{opacity:0; transform:translateY(12px)}}
+
+/* modal */
+html.modal-open, body.modal-open{overflow:hidden; overscroll-behavior:none}
+.modal{position:fixed; inset:0; z-index:150; display:grid; place-items:center; overflow-y:auto;
+  padding:max(16px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right))
+          max(16px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left))}
+.modal-backdrop{position:fixed; inset:0; background:rgba(0,0,0,.5); backdrop-filter:blur(2px)}
+.modal-card{position:relative; width:100%; max-width:440px; margin:auto;
+  background:var(--card); border:1px solid var(--border); border-radius:var(--radius);
+  box-shadow:var(--shadow), 0 8px 32px rgba(0,0,0,.25); padding:22px;
+  animation:tin .22s cubic-bezier(.2,.7,.3,1)}
+.modal-card.ota-modal-card{max-width:520px}
+.card-title{font-size:18px; font-weight:650; letter-spacing:-.2px; margin-bottom:14px}
+.ota-offer{display:flex; align-items:center; justify-content:space-between; gap:10px 14px; flex-wrap:wrap;
+  margin:2px 0 16px; padding:12px 14px; border:1px solid var(--border); border-radius:12px; background:var(--soft)}
+.ota-version-line{min-width:0; color:var(--fg); font-size:15px; font-weight:650; overflow-wrap:anywhere}
+.ota-channel{flex:none; border:1px solid #2563eb; border-radius:999px; padding:3px 8px;
+  color:#2563eb; font-size:11px; font-weight:700; letter-spacing:.45px; text-transform:uppercase}
+@media (prefers-color-scheme:dark){.ota-channel{color:#60a5fa; border-color:#60a5fa}}
+.ota-changes-title{font-size:12.5px; font-weight:600; letter-spacing:.5px; text-transform:uppercase; color:var(--muted); margin-bottom:8px}
+.ota-changes{margin:0; padding-left:20px; color:var(--fg); font-size:14.5px; line-height:1.5}
+.ota-changes li{margin:5px 0; padding-left:2px; overflow-wrap:anywhere}
+.ota-no-changes{margin:0; font-style:italic; color:var(--muted); font-size:14px}
+.ota-help{margin-top:16px; padding-top:14px; border-top:1px solid var(--border); color:var(--muted); font-size:13.5px; line-height:1.45}
+.modal-actions{display:flex; gap:10px; margin-top:20px}
+.modal-actions .btn{flex:1}
+.btn{font:inherit; font-weight:600; font-size:15px; padding:10px 16px; border-radius:10px; border:1px solid transparent;
+  cursor:pointer; display:inline-flex; align-items:center; justify-content:center; gap:8px;
+  transition:background .15s ease, border-color .15s ease, color .15s ease; -webkit-tap-highlight-color:transparent}
+.btn.primary{background:#2563eb; color:#fff}
+.btn.primary:hover{background:#1d4ed8}
+.btn.secondary{background:var(--card); color:var(--fg); border-color:var(--border)}
+.btn.secondary:hover{background:var(--soft); color:var(--fg)}
+.btn:disabled{opacity:.6; cursor:default}
 
 .hide{display:none!important}

@@ -17,6 +17,7 @@
 #include "logic/heap_watchdog.hpp"
 #include "logic/json_syntax.hpp"
 #include "logic/ota_contract.hpp"
+#include "logic/ota_changelog_range.hpp"
 #include "ble_client.hpp"
 #include "ota_manifest.hpp"
 #include "platform.hpp"
@@ -272,7 +273,17 @@ static OtaStatus unavailable_status_snapshot() {
     // This object is built independently of s_status. It may still throw if the standard library
     // cannot represent even these short strings under total OOM (callers already contain that),
     // but it can never race a writer or copy a concurrently-reallocated std::string buffer.
-    return {OtaState::Error, 0, "unavailable", "", false, ""};
+    return {OtaState::Error, 0, "unavailable", "", false, "", tk::ota_channel_name(ota_get_channel())};
+}
+
+static std::atomic<tk::OtaChannel> s_ota_channel{tk::OtaChannel::Release};
+
+tk::OtaChannel ota_get_channel() {
+    return s_ota_channel.load(std::memory_order_acquire);
+}
+
+void ota_set_channel(tk::OtaChannel channel) {
+    s_ota_channel.store(channel, std::memory_order_release);
 }
 
 OtaStatus ota_get_status() {
@@ -288,13 +299,46 @@ OtaStatus ota_get_status() {
     // by the HTTP/task boundary and cannot leave a partially published shared generation.
     return {snapshot.state, snapshot.progress, snapshot.message.data(),
             snapshot.available.data(), snapshot.update_available, snapshot.current.data(),
-            snapshot.target_pr};
+            tk::ota_channel_name(ota_get_channel()), snapshot.target_pr};
 }
 
 bool ota_is_busy() {
     return s_running.load(std::memory_order_acquire) ||
            s_operation_gate.state() ==
                tk::OtaIdentityGateState::Ota;
+}
+
+static constexpr size_t kOtaChangelogCapacity = 1024;
+static std::array<char, kOtaChangelogCapacity + 1> s_changelog{};
+static size_t s_changelog_len = 0;
+
+static void set_changelog_locked(const char* text) {
+    if (!text || text[0] == '\0') {
+        s_changelog[0] = '\0';
+        s_changelog_len = 0;
+        return;
+    }
+    const size_t len = std::strlen(text);
+    const size_t copy_len = len < kOtaChangelogCapacity ? len : kOtaChangelogCapacity;
+    std::memcpy(s_changelog.data(), text, copy_len);
+    s_changelog[copy_len] = '\0';
+    s_changelog_len = copy_len;
+}
+
+bool ota_get_changelog(char* out, size_t max_len, size_t& out_len) {
+    out_len = 0;
+    if (!out || max_len == 0) return false;
+    SemaphoreHandle_t lock = ensure_lock();
+    if (!lock) return false;
+    tk::SemGuard g(lock);
+    if (!g || s_changelog_len == 0) {
+        return false;
+    }
+    const size_t copy_len = (s_changelog_len < max_len - 1) ? s_changelog_len : (max_len - 1);
+    std::memcpy(out, s_changelog.data(), copy_len);
+    out[copy_len] = '\0';
+    out_len = copy_len;
+    return true;
 }
 
 // ─── Canonical, bounded version input ──────────────────────────────────────────
@@ -402,6 +446,14 @@ static bool http_get_to_buffer(const char* url, std::string& out) {
             return out.c_str();
         }
     }
+    const tk::OtaChannel channel = ota_get_channel();
+    if (channel == tk::OtaChannel::Dev) {
+        char buf[80];
+        if (tk::format_dev_manifest_url(buf, sizeof(buf))) {
+            out = buf;
+            return out.c_str();
+        }
+    }
     return CONFIG_TESLA_OTA_MANIFEST_URL;
 }
 
@@ -409,9 +461,19 @@ OtaCheckResult ota_check(unsigned pr_number) {
     OtaCheckResult res{};
     res.target_pr = pr_number;
     res.current = running_version();
+    const tk::OtaChannel channel = ota_get_channel();
+
+    {
+        SemaphoreHandle_t lock = ensure_lock();
+        if (lock) {
+            tk::SemGuard g(lock);
+            if (g) set_changelog_locked(nullptr);
+        }
+    }
 
     const char* manifest_url = resolve_manifest_url_into(pr_number, res.reason);
-    ESP_LOGI(TAG, "checking %s (running %s)", manifest_url, res.current.c_str());
+    ESP_LOGI(TAG, "checking %s (channel %s, running %s)", manifest_url,
+             tk::ota_channel_name(channel), res.current.c_str());
 
     std::string body;
     if (!http_get_to_buffer(manifest_url, body)) {
@@ -460,9 +522,30 @@ OtaCheckResult ota_check(unsigned pr_number) {
     res.available.assign(available.data(), available.size());
 
     res.ok               = true;
-    res.update_available = tk::is_ota_update_available(res.available, res.current, pr_number);
+    res.update_available = tk::is_ota_update_available(res.available, res.current, pr_number, channel);
     res.reason           = res.update_available ? "update available" : "up to date";
     ESP_LOGI(TAG, "available %s — %s", res.available.c_str(), res.reason.c_str());
+
+    if (res.update_available) {
+        char changelog_url[256];
+        if (tk::ota_manifest_sibling_url(manifest_url, "changelog.json", changelog_url, sizeof(changelog_url))) {
+            std::string changelog_body;
+            if (http_get_to_buffer(changelog_url, changelog_body)) {
+                char decoded[kOtaChangelogCapacity + 1];
+                if (tk::manifest_changelog(changelog_body.data(), changelog_body.size(),
+                                           res.available.c_str(), decoded, sizeof(decoded))) {
+                    if (tk::ota_changelog_select_range(decoded, res.current.c_str(), res.available.c_str()) !=
+                        tk::OtaChangelogRangeResult::Invalid) {
+                        SemaphoreHandle_t lock = ensure_lock();
+                        if (lock) {
+                            tk::SemGuard g(lock);
+                            if (g) set_changelog_locked(decoded);
+                        }
+                    }
+                }
+            }
+        }
+    }
     return res;
 }
 
@@ -477,6 +560,13 @@ static void set_check_done(const OtaCheckResult& r) {
     copy_status_text(candidate.available, r.available.c_str());
     copy_status_text(candidate.current, r.current.c_str());
     publish_check_status(candidate);
+    if (!r.ok || !r.update_available) {
+        SemaphoreHandle_t lock = ensure_lock();
+        if (lock) {
+            tk::SemGuard g(lock);
+            if (g) set_changelog_locked(nullptr);
+        }
+    }
 }
 
 static void ota_check_task(void*) {
@@ -545,6 +635,13 @@ bool ota_check_start(unsigned pr_number) {
             return std::string(buf);
         }
     }
+    const tk::OtaChannel channel = ota_get_channel();
+    if (channel == tk::OtaChannel::Dev) {
+        char buf[96];
+        if (tk::format_dev_firmware_url(TESLA_OTA_IMG_SUFFIX, buf, sizeof(buf))) {
+            return std::string(buf);
+        }
+    }
     return std::string(CONFIG_TESLA_OTA_FIRMWARE_BASE_URL "tesla-key-esp32" TESLA_OTA_IMG_SUFFIX ".bin");
 }
 
@@ -581,12 +678,11 @@ static void ota_task_impl() {
         return;
     }
 
-    // One channel, per-target image: base URL + this chip's short image suffix.
-    // When target_pr > 0, pulls from the official per-PR preview directory on GitHub Pages.
+    const tk::OtaChannel channel = ota_get_channel();
     const std::string fw_url_holder = resolve_firmware_url(target_pr);
     const char* fw_url = fw_url_holder.c_str();
-    ESP_LOGI(TAG, "OTA starting from %s (free heap %u)",
-             fw_url, (unsigned)esp_get_free_heap_size());
+    ESP_LOGI(TAG, "OTA starting from %s (channel %s, free heap %u)",
+             fw_url, tk::ota_channel_name(channel), (unsigned)esp_get_free_heap_size());
 
     esp_http_client_config_t http_cfg = {};
     http_cfg.url               = fw_url;
@@ -639,7 +735,7 @@ static void ota_task_impl() {
         set_state(OtaState::Error, 0, "invalid firmware version");
         return;
     }
-    if (!tk::is_ota_update_available(new_version, current_version, target_pr)) {
+    if (!tk::is_ota_update_available(new_version, current_version, target_pr, channel)) {
         ESP_LOGW(TAG, "OTA refused: image %.*s not acceptable for running %.*s (downgrade/mismatch blocked)",
                  static_cast<int>(new_version.size()), new_version.data(),
                  static_cast<int>(current_version.size()), current_version.data());

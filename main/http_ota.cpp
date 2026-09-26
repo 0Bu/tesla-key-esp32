@@ -96,8 +96,24 @@ esp_err_t handle_ota_status(GuardedReq rq) {
     json.string(json.root(), "available", s.available.c_str());
     json.boolean(json.root(), "update_available", s.update_available);
     json.string(json.root(), "current", s.current.c_str());
+    json.string(json.root(), "channel", s.channel.c_str());
     if (s.target_pr > 0) {
         json.number(json.root(), "pr", s.target_pr);
     }
     return send_json(req, 200, json.release());
+}
+
+// GET /ota/changelog — fetch notes for the currently offered update.
+// Returns text/plain with line-by-line changelog points (or 204 No Content if none).
+esp_err_t handle_ota_changelog(GuardedReq rq) {
+    httpd_req_t* req = rq.req;
+    char notes[1025];
+    size_t len = 0;
+    if (!ota_get_changelog(notes, sizeof(notes), len) || len == 0) {
+        httpd_resp_set_status(req, "204 No Content");
+        return httpd_resp_send(req, nullptr, 0);
+    }
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    httpd_resp_set_type(req, "text/plain; charset=utf-8");
+    return httpd_resp_send(req, notes, len);
 }
