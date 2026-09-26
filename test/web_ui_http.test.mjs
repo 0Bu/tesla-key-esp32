@@ -107,8 +107,8 @@ test("configuration network failure is reported as failure, never saved", async 
   const { context } = loadUi();
   const messages = [];
   context.state = { vin: "UNKNOWN" };
-  context.prompt = () => "5YJ3E1EA1JF000001";
-  context.confirm = () => true;
+  context.askText = async () => "5YJ3E1EA1JF000001";
+  context.askConfirm = async () => true;
   context.fetch = async () => { throw new Error("offline"); };
   context.toast = (message, kind) => messages.push({ message, kind });
 
@@ -123,8 +123,8 @@ test("configuration success requires the command response schema", async () => {
   const { context } = loadUi();
   const messages = [];
   context.state = { vin: "UNKNOWN" };
-  context.prompt = () => "5YJ3E1EA1JF000001";
-  context.confirm = () => true;
+  context.askText = async () => "5YJ3E1EA1JF000001";
+  context.askConfirm = async () => true;
   context.fetch = async () => ({ ok: true, status: 200, async json() { return { response: { result: "true", reason: "saved" } }; } });
   context.toast = (message, kind) => messages.push({ message, kind });
 
@@ -139,8 +139,8 @@ test("VIN change requires confirmation when key is present or unknown", async ()
   let confirmed = false;
   let fetchCalled = false;
   context.state = { vin: "UNKNOWN" };
-  context.prompt = () => "5YJ3E1EA1JF000001";
-  context.confirm = () => { confirmed = true; return false; };
+  context.askText = async () => "5YJ3E1EA1JF000001";
+  context.askConfirm = async () => { confirmed = true; return false; };
   context.fetch = async () => { fetchCalled = true; return { ok: true, async json() { return {}; } }; };
 
   await context.editVin();
@@ -154,8 +154,8 @@ test("VIN change skips confirmation when key is known absent", async () => {
   let confirmCalled = false;
   let fetchCalled = false;
   context.state = { vin: "UNKNOWN", key_present: false };
-  context.prompt = () => "5YJ3E1EA1JF000001";
-  context.confirm = () => { confirmCalled = true; return true; };
+  context.askText = async () => "5YJ3E1EA1JF000001";
+  context.askConfirm = async () => { confirmCalled = true; return true; };
   context.fetch = async () => {
     fetchCalled = true;
     return { ok: true, async json() { return { response: { result: true, reason: "saved" } }; } };
@@ -172,7 +172,7 @@ test("key generation requires confirmation and omits force when state is null", 
   let confirmed = false;
   let requestedUrl = null;
   context.state = null;
-  context.confirm = () => { confirmed = true; return true; };
+  context.askConfirm = async () => { confirmed = true; return true; };
   context.fetch = async (url) => {
     requestedUrl = url;
     return {
@@ -200,7 +200,7 @@ test("key generation aborts when user cancels confirmation", async () => {
   const { context } = loadUi();
   let fetchCalled = false;
   context.state = null;
-  context.confirm = () => false;
+  context.askConfirm = async () => false;
   context.fetch = async () => { fetchCalled = true; return { ok: true, async json() { return { result: true }; } }; };
 
   await context.genKey();
@@ -212,7 +212,7 @@ test("key generation sends force=1 only when key is known to be present", async 
   const { context } = loadUi();
   let requestedUrl = null;
   context.state = { key_present: true };
-  context.confirm = () => true;
+  context.askConfirm = async () => true;
   context.fetch = async (url) => {
     if (url.startsWith("/gen_keys")) requestedUrl = url;
     return { ok: true, status: 200, async json() { return { result: true }; } };
@@ -228,7 +228,7 @@ test("key generation skips confirmation and omits force when key is known absent
   let confirmCalled = false;
   let requestedUrl = null;
   context.state = { key_present: false };
-  context.confirm = () => { confirmCalled = true; return true; };
+  context.askConfirm = async () => { confirmCalled = true; return true; };
   context.fetch = async (url) => {
     if (url.startsWith("/gen_keys")) requestedUrl = url;
     return { ok: true, status: 200, async json() { return { result: true }; } };
@@ -317,21 +317,25 @@ test("setup form enforces the shared WiFi credential contract without optimistic
   assert.doesNotMatch(html, /setTimeout\(function\(\)\{ \$\("form"\)\.classList\.add\('hide'\)/);
 });
 
-test("header exposes update channel dropdown button and menu with accessible semantics", () => {
+test("firmware pane exposes the update channel as an accessible radio group", () => {
   const html = fs.readFileSync(new URL("../main/www/index.html", import.meta.url), "utf8");
-  assert.match(html, /<button[^>]+id="chanBtn"[^>]+aria-label="Update channel"/);
-  assert.match(html, /id="chanBtn"[^>]+aria-haspopup="true"/);
-  assert.match(html, /id="chanBtn"[^>]+aria-expanded="false"/);
-  assert.match(html, /id="chanMenu"[^>]+role="menu"/);
-  assert.match(html, /id="optRelease"[^>]+role="menuitemradio"/);
-  assert.match(html, /id="optRelease"[^>]+aria-checked="true"/);
-  assert.match(html, /id="optDev"[^>]+role="menuitemradio"/);
-  assert.match(html, /id="optDev"[^>]+aria-checked="false"/);
-  assert.match(html, /id="verLink"[\s\S]*?id="chanBtn"/);
-  assert.doesNotMatch(html, /id="hero"[\s\S]*?id="chanBtn"/);
+  assert.match(html, /role="radiogroup"[^>]+aria-label="Update channel"/);
+  assert.match(html, /id="optRelease"[^>]+role="radio"[^>]+aria-checked="true"/);
+  assert.match(html, /id="optDev"[^>]+role="radio"[^>]+aria-checked="false"/);
+  assert.match(html, /id="fwVer"[\s\S]*?id="verLink"[\s\S]*?id="optRelease"/);
 });
 
-test("update channel menu toggles and updates channel selection with OTA check", async () => {
+test("section tabs switch the visible pane and mark the current tab", () => {
+  const { context, element } = loadUi();
+  context.setTab("fw");
+  assert.equal(element("wrap")["data-tab"], "fw");
+  assert.equal(element("tabFw")["aria-current"], "page");
+  assert.equal(element("paneTitle").textContent, "Firmware");
+  context.setTab("bogus");
+  assert.equal(element("wrap")["data-tab"], "fw");
+});
+
+test("update channel control updates channel selection with OTA check", async () => {
   const { context, element } = loadUi();
   const fetchCalls = [];
   context.fetch = async (url, opts) => {
@@ -355,34 +359,13 @@ test("update channel menu toggles and updates channel selection with OTA check",
     return { ok: true, status: 200, async json() { return {}; } };
   };
 
-  const menu = element("chanMenu");
-  const btn = element("chanBtn");
-  menu.classList.add("hide");
-
-  context.toggleChanMenu();
-  assert.equal(menu.classList.contains("hide"), false);
-  assert.equal(btn["aria-expanded"], "true");
-  assert.equal(context.document.activeElement, element("optRelease"));
-
-  context.toggleChanMenu();
-  assert.equal(menu.classList.contains("hide"), true);
-  assert.equal(btn["aria-expanded"], "false");
-  assert.equal(context.document.activeElement, btn);
-
-  // Keyboard navigation: ArrowDown on button opens menu
-  context.handleChanBtnKey({ key: "ArrowDown", preventDefault() {} });
-  assert.equal(menu.classList.contains("hide"), false);
-
-  // ArrowDown/ArrowUp toggles focus between release and dev
-  context.handleChanKey({ key: "ArrowDown", preventDefault() {} });
+  // Arrow keys move focus between the two options without selecting
+  context.document.activeElement = element("optRelease");
+  context.handleChanKey({ key: "ArrowRight", preventDefault() {} });
   assert.equal(context.document.activeElement, element("optDev"));
-  context.handleChanKey({ key: "ArrowUp", preventDefault() {} });
+  context.handleChanKey({ key: "ArrowLeft", preventDefault() {} });
   assert.equal(context.document.activeElement, element("optRelease"));
-
-  // Escape closes menu and returns focus to button
-  context.handleChanKey({ key: "Escape", preventDefault() {} });
-  assert.equal(menu.classList.contains("hide"), true);
-  assert.equal(context.document.activeElement, btn);
+  assert.equal(fetchCalls.length, 0, "focus movement alone never changes the channel");
 
   // Re-selecting current channel (release) is a no-op
   const countBefore = fetchCalls.length;
@@ -396,7 +379,6 @@ test("update channel menu toggles and updates channel selection with OTA check",
   assert.equal(element("optDev")["aria-checked"], "true");
   assert.doesNotMatch(element("optRelease").className, /sel/);
   assert.equal(element("optRelease")["aria-checked"], "false");
-  assert.match(element("optDev").innerHTML, /✓/);
 
   // Check that POST /set_ota and /ota/check?channel=dev were requested
   const setOta = fetchCalls.find(c => c.url === "/set_ota");
@@ -414,7 +396,6 @@ test("update channel menu toggles and updates channel selection with OTA check",
   assert.equal(element("optRelease")["aria-checked"], "true");
   assert.doesNotMatch(element("optDev").className, /sel/);
   assert.equal(element("optDev")["aria-checked"], "false");
-  assert.match(element("optRelease").innerHTML, /✓/);
 });
 
 test("render initializes channel state from running version or status ota channel", () => {
@@ -537,8 +518,8 @@ test("editVin, editMqtt, editSyslog render server reason on HTTP 4xx/5xx", async
 
   // editVin HTTP 409
   context.state = { vin: "UNKNOWN" };
-  context.prompt = () => "5YJ3E1EA1JF000001";
-  context.confirm = () => true;
+  context.askText = async () => "5YJ3E1EA1JF000001";
+  context.askConfirm = async () => true;
   context.fetch = async () => ({
     ok: false,
     status: 409,
@@ -552,7 +533,7 @@ test("editVin, editMqtt, editSyslog render server reason on HTTP 4xx/5xx", async
 
   // editMqtt HTTP 400
   context.state = { mqtt: { broker: "" } };
-  context.prompt = () => "192.168.1.50:1883";
+  context.askText = async () => "192.168.1.50:1883";
   context.fetch = async () => ({
     ok: false,
     status: 400,
@@ -566,7 +547,7 @@ test("editVin, editMqtt, editSyslog render server reason on HTTP 4xx/5xx", async
 
   // editSyslog HTTP 400
   context.state = { syslog: { host: "" } };
-  context.prompt = () => "192.168.1.50:514";
+  context.askText = async () => "192.168.1.50:514";
   context.fetch = async () => ({
     ok: false,
     status: 400,
@@ -620,7 +601,7 @@ test("OTA check and render incorporate target PR when set", async () => {
   });
 
   const vl = element("verLink");
-  assert.equal(vl.textContent, "v1.5.4 [PR #326]");
+  assert.equal(element("fwVer").textContent, "v1.5.4 [PR #326]");
   assert.equal(vl.title, "Tap to check for PR #326 updates");
   assert.equal(vl["aria-label"], "Check for PR #326 firmware updates");
 

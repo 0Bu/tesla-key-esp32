@@ -88,7 +88,7 @@ The device can publish everything it reads — battery, charge, climate, tyre pr
 doors/locks, odometer, and its own WiFi/Bluetooth health — straight into Home Assistant
 over MQTT. It's read-only (HA only *sees* the data; it never sends commands or wakes the car).
 
-1. In the web UI, open the **Connections** panel and tap the **MQTT** row.
+1. In the web UI, open the **Network** tab and tap the pencil on the **MQTT** row.
 2. Enter your broker as `IP:PORT` (e.g. `192.0.2.1:1883`) and save. The device reboots.
 3. With the [Home Assistant MQTT integration](https://www.home-assistant.io/integrations/mqtt/)
    enabled, a **Tesla Key** device appears automatically with all sensors — no YAML needed
@@ -106,7 +106,7 @@ The device can forward its console log (the same output served at `GET /diag`) t
 Syslog collector — handy for watching a pairing or reconnect live, or for keeping history
 past a reboot.
 
-1. In the web UI, open the **Connections** panel and tap the **Syslog** row.
+1. In the web UI, open the **Network** tab and tap the pencil on the **Syslog** row.
 2. Enter your collector as `IP:PORT` (e.g. `192.0.2.1:514`) and save. The device reboots.
 3. Leave the field empty to turn Syslog off again.
 
