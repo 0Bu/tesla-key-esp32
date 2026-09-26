@@ -196,6 +196,9 @@ svg{display:block}
 .fwver{font-size:22px; overflow-wrap:anywhere}
 .otabar{height:8px; border-radius:4px; background:var(--soft); overflow:hidden}
 .otafill{height:100%; width:0; background:var(--accent); transition:width .3s}
+/* no measurable progress yet (checking, starting): a sliding sliver, never a static fill that reads as 15 % */
+.otabar.indet .otafill{width:30%!important; animation:otaslide 1.2s ease-in-out infinite alternate}
+@keyframes otaslide{from{transform:translateX(-20%)}to{transform:translateX(253%)}}
 .chan{display:flex; flex-direction:column; gap:6px}
 .seg{display:grid; grid-template-columns:1fr 1fr; padding:3px; border-radius:12px; background:var(--soft)}
 .seg-opt{min-height:44px; border:0; border-radius:10px; background:transparent; font-size:14px; font-weight:650}
@@ -279,4 +282,5 @@ svg{display:block}
 }
 @media (prefers-reduced-motion:reduce){
   *,*::before,*::after{animation:none!important; transition:none!important}
+  .otabar.indet .otafill{width:100%!important; opacity:.35}
 }

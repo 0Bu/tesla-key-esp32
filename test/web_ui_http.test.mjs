@@ -718,6 +718,23 @@ test("an open sheet or OTA dialog makes the page behind it inert until both are 
   assert.equal(context.document.activeElement, element("verLink"), "focus returns once the page is live again");
 });
 
+test("a destructive confirmation starts on Cancel and an indeterminate OTA phase shows no fake progress", () => {
+  const { context, element } = loadUi();
+  context.askConfirm({ title: "Regenerate the security key?", destructive: true });
+  assert.equal(context.document.activeElement, element("askCancel"));
+  context.askClose(false);
+  context.askConfirm({ title: "Keep going?" });
+  assert.equal(context.document.activeElement, element("askOk"));
+  context.askClose(false);
+
+  context.otaInline("", "", "indet");
+  assert.equal(element("otaBar").classList.contains("indet"), true);
+  assert.equal(element("otaFill").style.width, undefined, "no static width is painted for an unknown amount");
+  context.otaInline("", "", 42);
+  assert.equal(element("otaBar").classList.contains("indet"), false);
+  assert.equal(element("otaFill").style.width, "42%");
+});
+
 test("VIN change decides on confirmation from the state current after input", async () => {
   const { context } = loadUi();
   let confirmCalled = false;

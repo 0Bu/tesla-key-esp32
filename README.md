@@ -118,8 +118,8 @@ past a reboot.
 - The first command after idle takes a few seconds (Bluetooth reconnect); later ones are fast.
   evcc reads (state of charge) are always served instantly from cache, but a charge-current
   change sent in that cold window may only take effect on evcc's next retry once the link is warm.
-- **Updates are over-the-air:** open `http://tesla-key-esp32.local`, tap the firmware version
-  (top line) to check for a new release, confirm, and the device updates itself and reboots —
+- **Updates are over-the-air:** open `http://tesla-key-esp32.local`, open the **Firmware** tab and tap
+  **Check for updates**, confirm, and the device updates itself and reboots —
   WiFi, VIN and key are preserved.
 - The [web installer](https://0bu.github.io/tesla-key-esp32/) is only needed for the very first
   install (or to recover a device). It does a full erase, so WiFi/VIN/key are reset and you

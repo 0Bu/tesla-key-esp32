@@ -191,7 +191,7 @@ a card there, then confirm on screen within ~45 s. No Pair button in the web UI,
 card is required to authorise the enrolment.
 
 - Key fingerprint = `SHA-1(pubkey)[:4]` (e.g. `0E:8A:1D:BE`); shown in the web UI.
-- Regenerate: tap the fingerprint in the UI, or `POST /gen_keys?force=1`. Without `force`,
+- Regenerate: **Regenerate key** in the web UI's Setup tab, or `POST /gen_keys?force=1`. Without `force`,
   `/gen_keys` returns `409`. Regenerating un-pairs the vehicle.
 - Manual trigger: `POST /send_key` → `{"result":true,"role":"charging_manager",
   "reason":"key sent — confirm the pairing request on the car's screen"}`.

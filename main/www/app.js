@@ -720,7 +720,8 @@ function askOpen(o,cancelValue){
   }
   var m=$("askModal"); if(m&&m.classList) m.classList.remove('hide');
   syncModal();
-  var target=text?inp:ok;
+  // A destructive confirmation starts on Cancel, so a held or repeated Enter can't confirm it.
+  var target=text?inp:(o.destructive?cc:ok);
   if(target&&typeof target.focus==='function') target.focus();
   return new Promise(function(resolve){ askResolve=resolve; });
 }
@@ -903,8 +904,8 @@ function genKey(){
 }
 
 /* ---------- OTA ---------- */
-// Status shows inline in the header meta line (progress ring + text), next to the
-// version — no bottom popup. A tiny ring sized for the 13.5px meta line.
+// Status shows inline in the header (progress ring + text) and mirrors into the Firmware pane's
+// bar — no bottom popup. A tiny ring sized for the header's status line.
 var otaBusy=false;
 var OTA_CHECK_TIMEOUT_MS=60000, OTA_UPDATE_TIMEOUT_MS=480000, OTA_HTTP_TIMEOUT_MS=5000;
 var otaClearTimer=null;
@@ -929,8 +930,8 @@ function otaInline(html,cls,pct){
   var el=$("otaStat"); if(!el)return;
   el.innerHTML=html||''; el.className='otastat'+(cls?' '+cls:'');
   var bar=$("otaBar"), fill=$("otaFill");
-  if(bar&&bar.classList) bar.classList.toggle('hide',pct==null);
-  if(fill&&fill.style&&pct!=null) fill.style.width=(pct==='indet'?15:Math.max(0,Math.min(100,pct)))+'%';
+  if(bar&&bar.classList){ bar.classList.toggle('hide',pct==null); bar.classList.toggle('indet',pct==='indet'); }
+  if(fill&&fill.style&&pct!=null&&pct!=='indet') fill.style.width=Math.max(0,Math.min(100,pct))+'%';
   setBadge('badgeFw', !!otaAvail || otaBusy);
 }
 function otaInlineClear(delay){ clearTimeout(otaClearTimer); otaClearTimer=setTimeout(function(){ otaClearTimer=null; otaInline(''); }, delay||3000); }
@@ -1025,8 +1026,9 @@ function closeOtaModal(decision){
   var m = $("otaModal");
   if(m && m.classList) m.classList.add('hide');
   syncModal();
-  var vl = $("verLink");
-  if(vl && typeof vl.focus === 'function') vl.focus();
+  // Still inert when a sheet is open on top; focus then stays inside that sheet.
+  var vl = $("verLink"), w = $("wrap");
+  if(vl && typeof vl.focus === 'function' && !(w && w.inert)) vl.focus();
   if(otaDecisionResolve){
     var r = otaDecisionResolve;
     otaDecisionResolve = null;

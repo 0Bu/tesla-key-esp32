@@ -1330,7 +1330,7 @@ This is the *design*
 that stops the device whitelisting its Charging-Manager key onto an arbitrary nearby Tesla — it
 no longer depends on the `"UNKNOWN"` placeholder hashing to a name that happens never to
 collide (the placeholder is kept out of the matching path). The web UI already shows "Add the
-vehicle VIN below to begin." when no VIN is set, so it never implies pairing without one.
+vehicle VIN in Setup to begin." when no VIN is set, so it never implies pairing without one.
 
 ## HTTP request-body and allocator-failure contract
 
