@@ -52,7 +52,7 @@ once for the first paint (the hero card ships hidden and only `render()` reveals
 first call the page would sit on an empty skeleton for a whole interval) and then every **4 s** via
 `setInterval`. `poll()` fetches `/status?ms=<now>` with `cache:'no-store'` — the URL is cache-busted
 because a live page polls forever and one cached copy would freeze the hero on a stale state (e.g. a
-transient orange "Unreachable") until a manual reload. The response is exactly what
+transient "Vehicle unreachable") until a manual reload. The response is exactly what
 `build_status_object()` (`http_status.cpp`) builds, and the client hands it straight to `render()`
 (no envelope).
 
@@ -1209,14 +1209,14 @@ advert is heard but the BLE link won't come up after repeated tries, `/status.bl
 **non-connectable** ⇒ it is at its ~3-device BLE-connection limit — mirroring tesla-ble's
 upstream `vehicle-command`, whose BLE transport raises `ErrMaxConnectionsExceeded` off the same
 `Connectable` flag (the *connect timeout itself* carries no reason). The web UI shows a
-"Connection failed" hero (orange Bluetooth glyph) — "too many Bluetooth devices connected" when
+"Connection failed" hero (Bluetooth glyph over an empty gauge) — "too many Bluetooth devices connected" when
 `car_connectable=false`, else "move closer / disconnect other devices" — in **both** the setup
 flow *and* the paired state (a paired device that can't get a slot says so instead of hiding the
 hero). The signal windows are 90 s so they stay stable across a paired device's ~30-40 s
 health-probe cadence. `/status.ble.devices[]` also carries per-device `connectable`, and the
 no-VIN screen lists nearby Teslas (bars · dBm · MAC, sorted by signal) from the periodic
-listing-only scan. Hero glyphs: grey Bluetooth = "Set up needed", grey NFC-card = "Pairing",
-orange Bluetooth = "Connection failed".
+listing-only scan. Hero glyphs (all muted grey): key or pencil = "Set up needed", link =
+"Pairing", Bluetooth = "Connection failed", bolt = "Vehicle unreachable".
 
 **The same three-way verdict decides what a failed connect LOGS** (`logic/connect_outcome.hpp`,
 host-tested). `ensure_connected_()` used to end every unsuccessful attempt with one line —
