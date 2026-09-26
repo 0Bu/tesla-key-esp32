@@ -133,7 +133,7 @@ function cdLeft(){ return Math.max(0,Math.ceil((cdEndMs-Date.now())/1000)); }
 // Paint into the row's .cd node if the current row has one. The node declares (data-p) the one
 // countdown it renders and a mismatch paints nothing. At 0 the phase is over but the next push
 // hasn't landed yet, so say what is about to happen rather than dropping the text and leaving
-// the row's right edge empty for a beat.
+// the status line cut off for a beat.
 function paintCd(){
   var el=document.querySelector('#bleConn .cd'); if(!el) return;
   var on=cdKind&&el.getAttribute('data-p')===cdKind;
