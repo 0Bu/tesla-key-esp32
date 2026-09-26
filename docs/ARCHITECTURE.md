@@ -33,6 +33,18 @@ build, dependency/patch chain, partition geometry, signing boundary, OTA format,
 state, or vehicle-command behavior. Reviews and diagnosis are read-only by default; implementation
 does not imply commit, push, merge, release, hardware, or vehicle authorization.
 
+## Web UI layout
+
+The device page (`main/www/`, inlined into one gzipped document at build time) is a four-section
+**dock** layout: **Car** (battery gauge, status, detail chips and the one primary action),
+**Setup** (VIN and security key), **Network** (Wi-Fi/Ethernet, Bluetooth, MQTT, Syslog rows) and
+**Firmware** (version, update check, Release/Development channel). Phones show one section at a
+time with a bottom tab dock and a floating primary-action pill; from 900 px a left rail keeps the
+Car pane in the left column and shows the selected section beside it. Switching is pure CSS keyed
+off `.wrap[data-tab]` (`setTab()`); nothing is re-fetched. Text entry and destructive confirmations
+use the page's own sheet (`askText()` / `askConfirm()`, Promise-based) instead of the native
+`prompt()`/`confirm()`, with the same validation, confirmation and fail-closed save handling.
+
 ## Web UI live feed (`GET /status`)
 
 The web UI's live data is a **browser-side interval poll**. `main/www/app.js` `boot()` calls `poll()`
@@ -176,7 +188,7 @@ esp32/esp32s3/esp32c3/esp32c6, picked at compile time by `TESLA_OTA_IMG_SUFFIX` 
 `CONFIG_IDF_TARGET_*`) via `esp_https_ota` into the inactive OTA slot, then reboots.
 `esp_https_ota` verifies the image chip-id, so a wrong-target image is refused (never
 flashed); one manifest `version` covers all targets (CI builds them from one commit).
-Triggered from the web UI by tapping the firmware version in the top meta line.
+Triggered from the web UI by **Check for updates** in the **Firmware** tab (or the Safe Mode banner).
 Implemented in `main/ota_update.cpp`.
 
 **Manifest intake is a bounded, exact protocol.** The HTTPS body is capped at 8192 bytes. A
@@ -1170,9 +1182,8 @@ jumping around. `phase === "connecting"` is now the ONE thing that says "Searchi
 else is "Disconnected". Each row's countdown node names the single phase it will render, so a
 mismatch shows nothing rather than a foreign number.
 
-The time sits at the row's **right edge** (`margin-left:auto`), in the column the tile rows put
-their edit pencil in, and stays muted in every phase so it reads as one steady right-hand column
-instead of recolouring with the label. The disconnected row draws **outlined, unfilled** signal
+The time sits at the end of the row's status line (`Connecting · 12s left`, `Waiting · retry in
+30s`) in its own `.cd` node, so the 1 s tick only rewrites that text and never the bar glyph. The disconnected row draws **outlined, unfilled** signal
 bars — an empty gauge rather than a dimmed reading; the searching row uses the same amber
 (`--warn-base`) the "link up, nothing known yet" bars already use, so the BLE row
 has one amber "in-between" language. Wi-Fi's own search stays green.

@@ -1,316 +1,282 @@
+/* tesla-key-esp32 device page — "Dock" layout: a bottom tab dock on phones, a left rail with a
+   two-column board from 900 px. Tokens follow docs/design (Variant G); dark mode is automatic. */
 :root{
-  --bg:#f6f7f9; --card:#fff; --fg:#1a1d21; --muted:#5b626b; --border:#e6e8ec;
-  --faint:#c3c9d2;   /* lighter than --muted: the outlined, empty signal bars */
-  --soft:#f1f3f5; --accent:#e82127; --ok:#16a34a; --warn:#d97706;
-  --warn-base:#f59e0b; --warn-lite:#fdba74; --radius:18px;  /* BLE "status unknown" ping-pong: less-dark base + light crest */
-  --shadow:0 1px 2px rgba(16,20,28,.04), 0 6px 20px rgba(16,20,28,.06);
+  --bg:#f6f7f9; --card:#fff; --soft:#f1f3f5; --border:#e6e8ec; --fg:#1a1d21; --muted:#5b626b;
+  --faint:#c3c9d2;
+  --accent:#e82127; --accent-text:#c3151b; --ok:#16a34a; --ok-text:#127a37;
+  --warn:#d97706; --warn-text:#9a5204; --info:#2563eb; --info-text:#1d4fc4; --focus:#e82127;
+  --warn-base:#f59e0b; --warn-lite:#fdba74;
+  --scrim:rgba(16,20,28,.4); --dock:rgba(255,255,255,.96);
+  --shadow:0 1px 2px rgba(16,20,28,.04),0 6px 20px rgba(16,20,28,.06);
+  --shadow-cta:0 6px 20px rgba(232,33,39,.35);
+  --r-card:18px; --r-tile:14px; --dock-h:64px; --rail-w:92px;
+  --ease:cubic-bezier(.2,.7,.3,1);
+  --sans:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  --gs:220px;   /* battery gauge size */
 }
 @media (prefers-color-scheme:dark){
   :root{
-    --bg:#0f1115; --card:#171a20; --fg:#f2f3f5; --muted:#9aa1ab; --border:#262a31; --faint:#3c434d;
-    --soft:#1f242c; --shadow:0 1px 2px rgba(0,0,0,.4), 0 8px 24px rgba(0,0,0,.35);
+    --bg:#0f1115; --card:#171a20; --soft:#1f242c; --border:#2a2f38; --fg:#f1f3f5; --muted:#a3aab4;
+    --faint:#3c434d; --accent-text:#ff6b70; --ok:#22c55e; --ok-text:#4ade80; --warn:#f59e0b;
+    --warn-text:#fbbf24; --info:#3b82f6; --info-text:#93b8ff; --focus:#ff5a5f;
+    --scrim:rgba(0,0,0,.65); --dock:rgba(23,26,32,.97);
+    --shadow:0 1px 2px rgba(0,0,0,.3),0 8px 24px rgba(0,0,0,.35);
   }
 }
 *{box-sizing:border-box}
 html,body{margin:0}
-body{
-  font:17px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
-  background:var(--bg); color:var(--fg); -webkit-font-smoothing:antialiased;
-  padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
-}
-.wrap{max-width:540px; margin:0 auto; padding:18px 16px 36px}
-button{font:inherit; cursor:pointer; color:inherit}
-code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+body{font:16px/1.4 var(--sans); background:var(--bg); color:var(--fg); -webkit-font-smoothing:antialiased}
+body.modal-open{overflow:hidden}
+button{font:inherit; color:inherit; cursor:pointer}
+button:disabled{cursor:default}
+:focus-visible{outline:3px solid var(--focus); outline-offset:2px}
+svg{display:block}
+.mono{font-family:var(--mono)}
+.hide{display:none!important}
 
-/* header */
-.top{display:flex; align-items:center; gap:12px; padding:4px 2px 16px}
-.logo{width:40px; height:40px; border-radius:12px; background:var(--accent); flex:none;
-  display:grid; place-items:center; box-shadow:0 2px 8px rgba(232,33,39,.35)}
-.logo svg{width:21px; height:21px; fill:#fff}
-.ttl{flex:1; min-width:0}
-.ttl h1{margin:0; font-size:21px; font-weight:650; letter-spacing:-.2px}
-/* flex (not inline text) so the OTA ring centers within the text line-box and never
-   grows the line height — keeps the cards below from shifting when the ring appears */
-.ttl .sub{font-size:15px; color:var(--muted); font-variant-numeric:tabular-nums; display:flex; align-items:center; min-width:0; white-space:nowrap}
-.ttl .sub #ipline{overflow:hidden; text-overflow:ellipsis; min-width:0}
-.ttl .sub .verlink,.ttl .sub .chan-wrap,.ttl .sub .otastat{flex:none}
-.verlink{cursor:pointer; white-space:nowrap}
-.verlink:hover{color:var(--fg); text-decoration:underline}
-/* update channel dropdown */
-.chan-wrap{position:relative; display:inline-flex; align-items:center}
-.chan-btn{display:inline-flex; align-items:center; justify-content:center; width:18px; height:18px; padding:0; margin-left:3px; border:0; border-radius:4px; background:transparent; color:var(--muted); cursor:pointer; -webkit-tap-highlight-color:transparent; transition:color .15s ease, background .15s ease}
-.chan-btn:hover{color:var(--fg); background:var(--soft)}
-.chan-btn.active,.chan-btn:focus-visible{color:var(--fg); outline:2px solid #38bdf8; outline-offset:1px}
-.chan-btn svg{display:block; transition:transform .15s ease}
-.chan-btn.active svg{transform:rotate(180deg)}
-.chan-menu{position:absolute; top:calc(100% + 5px); left:50%; transform:translateX(-50%); min-width:140px; background:var(--card); border:1px solid var(--border); border-radius:8px; box-shadow:var(--shadow), 0 4px 16px rgba(0,0,0,.15); padding:4px; display:flex; flex-direction:column; gap:2px; z-index:100}
-.chan-menu.hide{display:none}
-.chan-opt{display:flex; align-items:center; gap:6px; width:100%; padding:7px 12px; border:0; border-radius:6px; background:transparent; color:var(--fg); font-size:13.5px; font-weight:500; text-align:left; cursor:pointer; -webkit-tap-highlight-color:transparent; transition:background .1s ease, color .1s ease}
-.chan-opt:hover{background:var(--soft)}
-.chan-opt:focus-visible{outline:2px solid #38bdf8; outline-offset:-2px}
-.chan-opt.sel{background:#2563eb; color:#fff; font-weight:600}
-.chan-opt.sel:hover{background:#1d4ed8}
-.chan-opt .chk{font-size:13px; font-weight:700; width:14px; display:inline-block}
-/* inline OTA progress in the meta line (ring + status text), replaces the bottom popup */
-.otastat{display:inline-flex; align-items:center; gap:5px; margin-left:9px; white-space:nowrap; color:var(--muted)}
+/* shell */
+.wrap{display:flex; min-height:100vh}
+.col{flex:1; min-width:0; display:flex; flex-direction:column}
+.top{display:flex; align-items:center; justify-content:space-between; gap:10px;
+  padding:calc(12px + env(safe-area-inset-top)) max(18px,env(safe-area-inset-right)) 8px max(18px,env(safe-area-inset-left))}
+.brand{display:flex; align-items:center; gap:10px; min-width:0}
+.ttl{display:flex; flex-direction:column; line-height:1.15; min-width:0}
+.ttl h1{margin:0; font-size:17px; font-weight:650}
+.ttl .wide-title{display:none}
+.host{font-size:12px; color:var(--muted); overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+.logo{display:grid; place-items:center; flex:none; width:28px; height:28px; border-radius:9px; background:var(--accent);
+  box-shadow:0 2px 8px rgba(232,33,39,.35)}
+.logo svg{width:58%; height:58%; fill:#fff}
+.logo.big{width:44px; height:44px; border-radius:13px}
+.rail-logo{display:none}
+
+/* OTA status in the header (ring + short text) */
+.otastat{display:flex; align-items:center; gap:6px; font-size:13px; font-weight:600; white-space:nowrap;
+  font-variant-numeric:tabular-nums; color:var(--accent-text)}
 .otastat:empty{display:none}
-.otastat svg{display:block; flex:none}
-.otaspin{animation:otaspin .9s linear infinite; transform-origin:50% 50%}
-@keyframes otaspin{to{transform:rotate(360deg)}}
+.otastat.err{color:var(--accent-text)}
+.otaspin{animation:spin 1s linear infinite}
 
-/* banners */
-.banner{display:none; align-items:flex-start; gap:11px; padding:13px 15px; border-radius:14px;
-  margin-bottom:12px; font-size:15px; line-height:1.45; box-shadow:var(--shadow)}
+/* panes: phones show the selected tab; from 900 px the car stays left and the tab picks the right */
+.grid{flex:1; width:100%; max-width:1100px; display:grid; grid-template-columns:minmax(0,1fr); gap:18px; align-content:start;
+  padding:6px max(16px,env(safe-area-inset-right)) 100px max(16px,env(safe-area-inset-left))}
+.wrap[data-tab=car] .grid{padding-bottom:170px}
+.wrap .pane{display:none}
+.wrap[data-tab=car] .pane-car,.wrap[data-tab=setup] .pane-setup,.wrap[data-tab=net] .pane-net,.wrap[data-tab=fw] .pane-fw{display:flex}
+.stack{flex-direction:column; gap:12px}
+.card{background:var(--card); border:1px solid var(--border); border-radius:var(--r-card); box-shadow:var(--shadow);
+  padding:16px; display:flex; flex-direction:column; gap:10px; min-width:0}
+.lbl{font-size:11px; font-weight:650; letter-spacing:.6px; text-transform:uppercase; color:var(--muted)}
+.val{font-size:19px; overflow-wrap:anywhere}
+.val.vin{letter-spacing:.8px}
+.sub{font-size:14px; color:var(--muted)}
+.sub.strong{font-weight:600}
+.sub.ok{color:var(--ok-text)} .sub.warn{color:var(--warn-text)}
+.ph{color:var(--muted)}
+
+/* dock / rail */
+.dock{position:fixed; left:0; right:0; bottom:0; z-index:10; background:var(--dock); border-top:1px solid var(--border);
+  padding:0 6px env(safe-area-inset-bottom); display:grid; grid-template-columns:repeat(4,1fr)}
+.tab{min-height:var(--dock-h); border:0; background:none; color:var(--muted); font-size:11.5px; font-weight:650;
+  display:flex; flex-direction:column; align-items:center; justify-content:center; gap:4px; -webkit-tap-highlight-color:transparent}
+.tab[aria-current=page]{color:var(--accent-text)}
+.ti{position:relative; width:24px; height:24px}
+.ti svg,.ri svg,.ib svg,.pill svg,.cta .ci svg,.bi svg,.warnic svg{width:100%; height:100%; fill:none; stroke:currentColor;
+  stroke-width:2; stroke-linecap:round; stroke-linejoin:round}
+.badge{position:absolute; top:-3px; right:-6px; width:10px; height:10px; border-radius:50%; border:2px solid var(--card)}
+.badge.acc{background:var(--accent)} .badge.warn{background:var(--warn)} .badge.info{background:var(--info)}
+
+/* banner */
+.banner{display:none; grid-column:1/-1; flex-wrap:wrap; align-items:center; gap:10px 12px; padding:12px 14px;
+  border-radius:var(--r-tile); background:color-mix(in srgb,var(--warn) 12%,var(--card));
+  border:1px solid color-mix(in srgb,var(--warn) 35%,var(--border))}
 .banner.show{display:flex}
-.banner .bi{flex:none; width:22px; height:22px; border-radius:50%; display:grid; place-items:center;
-  color:#fff; font-size:13px; font-weight:700; margin-top:1px}
-.banner b{font-weight:650}
-.banner.warn{background:rgba(217,119,6,.1); border:1px solid rgba(217,119,6,.28); color:var(--fg)}
-.banner.warn .bi{background:var(--warn)}
+.banner .bi{width:22px; height:22px; flex:none; color:var(--warn-text)}
+.banner .bt{flex:1 1 220px; font-size:14px}
+.banner .bt b{font-weight:650}
+
+/* buttons */
+.pill{align-self:flex-start; min-height:44px; padding:0 16px; border-radius:999px; border:1px solid var(--border);
+  background:none; font-size:15px; font-weight:650; display:inline-flex; align-items:center; justify-content:center; gap:8px}
+.pill svg{width:16px; height:16px; flex:none}
+.pill.soft{background:var(--soft)}
+.pill.soft:hover{background:color-mix(in srgb,var(--fg) 8%,var(--soft))}
+.pill.danger{color:var(--accent-text); border-color:color-mix(in srgb,var(--accent) 45%,var(--border))}
+.pill.sm{font-size:14px; padding:0 14px; background:var(--card)}
+.pill.wide-btn{align-self:stretch; min-height:46px}
+.pill:active,.btn:active,.cta:active{transform:scale(.985)}
+.ib{width:44px; height:44px; flex:none; border:0; border-radius:12px; background:none; color:var(--muted); display:grid; place-items:center}
+.ib:hover{background:var(--soft)}
+.ib svg{width:18px; height:18px}
+.btn{min-height:50px; border-radius:999px; font-weight:650; border:1px solid var(--border); background:none}
+.btn.primary{border:0; background:var(--accent); color:#fff}
+.btn.primary:hover{filter:brightness(1.05)}
 
 /* hero */
-.hero{background:var(--card); border:1px solid var(--border); border-radius:var(--radius);
-  box-shadow:var(--shadow); padding:20px; margin-top:10px; display:flex; align-items:center; gap:20px}
-.hicon{position:relative; flex:none; width:104px; height:104px; line-height:0}
-.hicon .pct{position:absolute; inset:0; display:grid; place-items:center; text-align:center; line-height:1; pointer-events:none}
-.hicon .pct b{font-size:30px; font-weight:650; letter-spacing:-.5px}
-.hicon .pct b small{font-size:11px; font-weight:600; opacity:.55}
-.hicon .glyph{position:absolute; inset:0; display:grid; place-items:center; font-size:38px}
-.hicon .wakebtn{position:absolute; inset:0; padding:0; border:0; border-radius:50%; background:transparent; color:inherit;
-  cursor:pointer; -webkit-tap-highlight-color:transparent; line-height:0;
-  transition:transform .1s ease, background .15s ease, box-shadow .1s ease}
-.hicon .wakebtn:hover{background:color-mix(in srgb,var(--fg) 6%,transparent)}
-.hicon .wakebtn:active{transform:scale(.93); background:color-mix(in srgb,var(--fg) 10%,transparent); box-shadow:inset 0 2px 9px rgba(0,0,0,.20)}
-.hicon .wakebtn:disabled{cursor:default}
-/* ring SVGs (generated by JS) always fill their container, so the centered
-   percentage / glyph stays aligned regardless of the .hicon size. The bolt
-   glyph lives inside .glyph and is intentionally not matched here. */
-.hicon>svg,.hicon .wakebtn>svg{width:100%; height:100%; display:block}
-.hicon svg.ringrot{animation:ringpulse 3.2s ease-in-out infinite}
-@keyframes ringpulse{0%,100%{opacity:1}50%{opacity:.35}}
-/* while waking, only the (still grey) ring pulses a little faster — no colour change */
-.hicon svg.ringrot.waking{animation-duration:2s}
-.hicon .wakebtn .glyph{pointer-events:none}
-/* alarm-clock waking glyph: a gentle, continuous tremble — stays grey */
-.hicon .glyph .wecker{transform-origin:50% 50%; animation:wecker .42s ease-in-out infinite}
-@keyframes wecker{0%,100%{transform:translateY(0) rotate(-3deg)}50%{transform:translateY(-.5px) rotate(3deg)}}
-.hbody{flex:1; min-width:0}
-.hlabel{font-size:28px; font-weight:650; letter-spacing:-.4px; display:flex; align-items:center; gap:9px}
-.hsub{font-size:16px; color:var(--muted); margin-top:6px; line-height:1.45}
-.hstats{display:flex; flex-wrap:wrap; gap:7px; margin-top:12px}  /* chips are content-sized; equalizeChips() then sets them all to the widest one's width */
+.hero{flex-direction:column; align-items:center; gap:14px; padding:14px 0 0; text-align:center; min-width:0}
+.gauge{position:relative; width:var(--gs); height:var(--gs); flex:none}
+.gauge>svg,.gauge .gbtn>svg{position:absolute; inset:0; width:100%; height:100%}
+.gauge .gbtn{position:absolute; inset:0; padding:0; border:0; border-radius:50%; background:none; -webkit-tap-highlight-color:transparent;
+  transition:transform .08s ease}
+.gauge .gbtn:active{transform:scale(.97)}
+.gauge .gbtn:disabled{cursor:default}
+.garc{transition:stroke-dashoffset .6s ease,stroke .6s ease}
+.gcenter{position:absolute; inset:0; display:grid; place-items:center; pointer-events:none}
+.gnum{display:flex; flex-direction:column; align-items:center; line-height:1}
+.gnum b{display:flex; align-items:baseline; gap:2px; font-size:calc(var(--gs)*.25); font-weight:650; letter-spacing:-1px; font-variant-numeric:tabular-nums}
+.gnum b small{font-size:.42em; font-weight:600; color:var(--muted); letter-spacing:0}
+.gnum i{margin-top:6px; font-style:normal; font-size:12px; font-weight:600; letter-spacing:.5px; text-transform:uppercase; color:var(--muted)}
+.gglyph{width:calc(var(--gs)*.3); height:calc(var(--gs)*.3); color:var(--muted)}
+.gglyph svg{width:100%; height:100%; fill:none; stroke:currentColor; stroke-width:1.75; stroke-linecap:round; stroke-linejoin:round}
+.gglyph.shake{animation:tremble .6s ease-in-out infinite}
+.gspin{animation:spin 1.3s linear infinite}
+.gspin.fast{animation-duration:.9s}
+.pulse{animation:pulse 3.2s ease-in-out infinite}
+.pulse.slow{animation-duration:4.5s}
+.pulse.fast{animation-duration:1.1s}
+.gflow{animation:flow 2.4s cubic-bezier(.4,0,.6,1) infinite}
+.htext{display:flex; flex-direction:column; gap:4px; align-items:center}
+.hlabel{margin:0; font-size:26px; font-weight:650; letter-spacing:-.5px; line-height:1.15; text-wrap:balance}
+.hsub{margin:0; font-size:15px; color:var(--muted); max-width:32ch; text-wrap:pretty}
+.hstats{display:flex; gap:10px; width:100%; max-width:420px}
 .hstats:empty{display:none}
-.stat{display:flex; flex-direction:column; gap:1px; background:var(--soft); border-radius:10px; padding:6px 11px}
-.stat .k{font-size:12px; font-weight:600; letter-spacing:.4px; text-transform:uppercase; color:var(--muted)}
-.stat .v{font-size:19px; font-weight:650; font-variant-numeric:tabular-nums; letter-spacing:-.2px}
-.stat .v small{font-size:13px; font-weight:500; color:var(--muted); margin-left:2px}
-.stat.acc .v{color:var(--ok)}
-.stat.cop.on .v{color:var(--warn); white-space:nowrap}        /* overheat-protection AC draw, amber */
-.stat.defrost.on .v{color:#2563eb; white-space:nowrap}        /* defrost AC draw, blue (ice) */
-@media (max-width:430px){
-  body{font-size:18px}
-  .wrap{padding:16px 14px 40px}
-  .ttl h1{font-size:22px}
-  .ttl .sub{font-size:15.5px}
-  /* tighter hero padding + gap buys the wider label enough room to stay on one
-     line beside the 104px ring (no wrap down to ~375px viewports) */
-  .hero{gap:14px; padding:18px 14px}
-  .hicon{width:104px; height:104px}
-  .hicon .pct b{font-size:30px}
-  .hlabel{font-size:27px}
-  .hsub{font-size:16.5px}
-  .stat{padding:6px 11px}
-  .stat .v{font-size:19.5px}
-  .tlabel{font-size:13.5px}
-  .tval{font-size:20.5px}
-  .tval.mono{font-size:17px}
-  .tsub{font-size:15.5px}
-}
-/* very narrow phones (iPhone SE / mini, ~360px) — shrink the ring a touch and
-   ease the label down so it still stays on one line without overflow */
-@media (max-width:360px){
-  .hicon{width:90px; height:90px}
-  .hicon .pct b{font-size:26px}
-  .hlabel{font-size:24px}
-}
-/* tablet / desktop — on a big screen (iPad) the phone-width column wastes most of
-   the display, so widen the container and scale the type, hero and symbols up to
-   fill it. Same single-column stack, just larger. */
-@media (min-width:680px){
-  body{font-size:19px}
-  .wrap{max-width:860px; width:92%; padding:30px 26px 64px}
-  .top{gap:14px; padding:6px 2px 22px}
-  .logo{width:46px; height:46px; border-radius:14px}
-  .logo svg{width:24px; height:24px}
-  .ttl h1{font-size:26px}
-  .ttl .sub{font-size:17px}
+.stat{flex:1 1 0; min-width:0; background:var(--card); border:1px solid var(--border); border-radius:var(--r-tile);
+  padding:10px 12px; display:flex; flex-direction:column; gap:2px; text-align:left}
+.stat .k{display:flex; align-items:center; gap:6px; font-size:11px; font-weight:650; letter-spacing:.5px; text-transform:uppercase; color:var(--muted)}
+.stat .k:before{content:""; width:7px; height:7px; border-radius:50%; background:var(--muted); flex:none}
+.stat .v{font-size:22px; font-weight:650; letter-spacing:-.3px; font-variant-numeric:tabular-nums; white-space:nowrap}
+.stat .v small{font-size:13px; margin-left:2px}
+.stat.ok .v{color:var(--ok-text)} .stat.ok .k:before{background:var(--ok)}
+.stat.warn .v{color:var(--warn-text)} .stat.warn .k:before{background:var(--warn)}
+.stat.info .v{color:var(--info-text)} .stat.info .k:before{background:var(--info)}
 
-  .grid{gap:14px}
-  .tile{padding:20px 22px; border-radius:18px}
-  .tlabel{font-size:14px}
-  .tval{font-size:23px}
-  .tval.mono{font-size:19px}
-  .tsub{font-size:16.5px}
-  .tsub .mac{font-size:15px}
-  .tedit{width:17px; height:17px; top:16px; right:16px}
-  .crow{padding:12px 0}
-  .crow .ck{width:100px; font-size:13px}
-  .crow .cv{font-size:18px}
-  .crow .cv .mac{font-size:15px}
-  .crow .cv .dbm{font-size:15px}
-  .crow.tap{padding-right:28px}
-  .bars{width:28px; height:18px}
+/* primary action: a floating pill above the dock on phones, inline in the hero card on wide screens */
+.cta{position:fixed; z-index:9; left:50%; transform:translateX(-50%); bottom:calc(var(--dock-h) + 14px + env(safe-area-inset-bottom));
+  width:calc(100% - 32px); max-width:420px; min-height:56px; border:0; border-radius:999px; background:var(--accent); color:#fff;
+  font-size:17px; font-weight:650; display:flex; align-items:center; justify-content:center; gap:10px; box-shadow:var(--shadow-cta)}
+.cta:active{transform:translateX(-50%) scale(.985)}
+.cta .ci{width:20px; height:20px}
+.cta.busy{background:var(--card); color:var(--muted); border:1px solid var(--border); box-shadow:none}
+.wrap:not([data-tab=car]) .cta{display:none}
 
-  .hero{gap:30px; padding:30px 32px; margin-top:14px}
-  .hicon{width:132px; height:132px}
-  .hicon .pct b{font-size:38px}
-  .hicon .pct b small{font-size:13px}
-  .hicon .glyph{font-size:48px}
-  .hicon .glyph svg{width:46px; height:46px}
-  .hicon .glyph svg.glyphbig{width:62px; height:62px}   /* moon / alarm sit larger in the ring than the setup bolt */
-  .hlabel{font-size:33px}
-  .hlabel svg{width:26px; height:26px}
-  .hsub{font-size:18px}
-  .stat{padding:8px 14px; border-radius:12px}
-  .stat .k{font-size:13px}
-  .stat .v{font-size:23px}
-  .stat .v small{font-size:14px}
-}
+/* connection rows */
+.rows{padding:0; gap:0; overflow:hidden; align-self:start}
+.row{display:flex; align-items:center; gap:12px; min-height:64px; padding:8px 8px 8px 16px}
+.row+.row{border-top:1px solid var(--border)}
+.ri{position:relative; flex:none; width:36px; height:36px; border-radius:10px; background:var(--soft); display:grid; place-items:center}
+.ri svg{width:19px; height:19px}
+.dot{position:absolute; right:-2px; bottom:-2px; width:10px; height:10px; border-radius:50%; border:2px solid var(--card); background:var(--muted)}
+.dot.ok{background:var(--ok)} .dot.warn{background:var(--warn)} .dot.err{background:var(--accent)}
+.rb{flex:1; min-width:0; display:flex; flex-direction:column}
+.rl{font-weight:650}
+.rv{font-size:13.5px; color:var(--muted); overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+.rv.mono{font-family:var(--mono)}
+.rs{font-size:12.5px; font-weight:600; color:var(--muted); font-variant-numeric:tabular-nums}
+.rs.ok{color:var(--ok-text)} .rs.warn{color:var(--warn-text)}
+.rs:empty{display:none}
+.rbar{flex:none; padding-right:8px; color:var(--muted)}
+.rbar:empty{display:none}
+.rbar.ok{color:var(--ok)} .rbar.warn{color:var(--warn)}
+.btlist{display:flex; flex-direction:column; gap:2px; margin-top:2px}
+.btlist span{font-family:var(--mono); font-size:12.5px; color:var(--muted)}
+.cd.off{display:none}
+/* signal glyphs: static bars, "searching" fill loop, empty outline, and the amber "status unknown" wave */
+.bars rect{fill:currentColor}
+.bars.empty rect{fill:none; stroke:var(--faint); stroke-width:.9}
+.bars.search rect{animation:sbfill 1.6s ease-in-out infinite; opacity:.25}
+.bars.search .sb2{animation-delay:.2s} .bars.search .sb3{animation-delay:.4s} .bars.search .sb4{animation-delay:.6s}
+.bars.wave rect{fill:var(--warn-base); animation:wave 1.6s ease-in-out infinite}
+.bars.wave .wb2{animation-delay:.15s} .bars.wave .wb3{animation-delay:.3s} .bars.wave .wb4{animation-delay:.45s}
 
-/* status grid */
-.grid{display:grid; grid-template-columns:1fr; gap:10px}
-.tile{position:relative; background:var(--card); border:1px solid var(--border); border-radius:14px;
-  box-shadow:var(--shadow); padding:15px 16px; text-align:left; font:inherit; color:inherit; min-width:0; width:100%;
-  display:flex; flex-direction:column; align-items:stretch; justify-content:flex-start}
-.tile.wide{grid-column:1 / -1}
-.tile.tap{cursor:pointer; -webkit-tap-highlight-color:transparent}
-.tile.tap:active{background:var(--soft)}
-.tlabel{font-size:13px; font-weight:600; letter-spacing:.5px; text-transform:uppercase; color:var(--muted)}
-.tval{font-size:20px; font-weight:600; margin-top:6px; word-break:break-all}
-.tval.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:16.5px; letter-spacing:.2px}
-.tval .ph{color:var(--muted); font-weight:400}
-.tsub{font-size:15px; color:var(--muted); margin-top:3px; display:flex; align-items:center; gap:7px; min-height:18px}
-.tsub.ok{color:var(--ok)} .tsub.warn{color:var(--warn)} .tsub.acc{color:var(--accent)}
-.tsub .mac{font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:13.5px; letter-spacing:.2px}
-.tsub .mac+span{color:var(--muted)}
-.tedit{position:absolute; top:13px; right:13px; width:15px; height:15px; color:var(--muted); opacity:.38;
-  fill:none; stroke:currentColor; stroke-width:2; stroke-linecap:round; stroke-linejoin:round}
-.tile.tap:active .tedit{opacity:.7}
-.bars{vertical-align:-2px}
-.hbars{color:var(--ok)}
-/* BLE "searching…" glyph — the four signal bars fill up green one after another
-   (smallest first), bars not yet reached stay light green, then all reset and it
-   loops until the link is up. Replaces the old spinner ring. */
-.bars.search{color:var(--ok)}
-.bars.search.warm{color:var(--warn-base)}   /* hunting for the car — same amber as the "link up, nothing known" wave */
-.bars.search rect{opacity:.25}
-.bars.search .sb1{animation:sb1 1.6s ease-in-out infinite}
-.bars.search .sb2{animation:sb2 1.6s ease-in-out infinite}
-.bars.search .sb3{animation:sb3 1.6s ease-in-out infinite}
-.bars.search .sb4{animation:sb4 1.6s ease-in-out infinite}
-@keyframes sb1{0%{opacity:.25} 10%,88%{opacity:1} 100%{opacity:.25}}
-@keyframes sb2{0%,18%{opacity:.25} 32%,88%{opacity:1} 100%{opacity:.25}}
-@keyframes sb3{0%,40%{opacity:.25} 54%,88%{opacity:1} 100%{opacity:.25}}
-@keyframes sb4{0%,62%{opacity:.25} 76%,88%{opacity:1} 100%{opacity:.25}}
-/* BLE "vehicle status unknown" glyph — the link is up but we have no fresh telemetry
-   (link_state unknown/unreachable; the hero card stays visible). All four bars are
-   orange — the same amber family as the setup/connection states — and over a light-orange
-   base a DARKER-orange crest ping-pongs edge→edge (bar1→4→1), so a connected-but-stateless
-   link reads as "checking" rather than a healthy green link. Each bar's own keyframe bakes
-   in the phase(s) it carries the dark crest over the 6-step bounce period (1,2,3,4,3,2): the
-   two edge bars darken once, the two middle bars twice. No stagger — the phase is in the %s. */
-.bars.wave rect{fill:var(--warn-lite)}
-.bars.wave .wb1{animation:wbp1 2.4s ease-in-out infinite}
-.bars.wave .wb2{animation:wbp2 2.4s ease-in-out infinite}
-.bars.wave .wb3{animation:wbp3 2.4s ease-in-out infinite}
-.bars.wave .wb4{animation:wbp4 2.4s ease-in-out infinite}
-@keyframes wbp1{0%,100%{fill:var(--warn-base)} 16.7%,83.3%{fill:var(--warn-lite)}}
-@keyframes wbp2{0%,33.3%,66.7%,100%{fill:var(--warn-lite)} 16.7%,83.3%{fill:var(--warn-base)}}
-@keyframes wbp3{0%,16.7%,50%,83.3%,100%{fill:var(--warn-lite)} 33.3%,66.7%{fill:var(--warn-base)}}
-@keyframes wbp4{0%,33.3%,66.7%,100%{fill:var(--warn-lite)} 50%{fill:var(--warn-base)}}
+/* firmware */
+.fw{align-self:start; gap:14px}
+.fwhead{display:flex; align-items:center; gap:12px}
+.fwv{display:flex; flex-direction:column; min-width:0}
+.fwver{font-size:22px; overflow-wrap:anywhere}
+.otabar{height:8px; border-radius:4px; background:var(--soft); overflow:hidden}
+.otafill{height:100%; width:0; background:var(--accent); transition:width .3s}
+.chan{display:flex; flex-direction:column; gap:6px}
+.seg{display:grid; grid-template-columns:1fr 1fr; padding:3px; border-radius:12px; background:var(--soft)}
+.seg-opt{min-height:44px; border:0; border-radius:10px; background:transparent; font-size:14px; font-weight:650}
+.seg-opt.sel{background:var(--card); box-shadow:0 1px 3px rgba(0,0,0,.12)}
+.meta{font-size:12.5px; color:var(--muted); overflow-wrap:anywhere}
 
-/* connection rows (Wi-Fi / Bluetooth / MQTT) */
-.conn{display:flex; flex-direction:column; margin-top:8px}
-.crow{display:flex; align-items:center; gap:10px; width:100%; padding:9px 0; text-align:left;
-  background:none; border:0; border-top:1px solid var(--border); font:inherit; color:inherit; position:relative}
-.crow:first-child{border-top:0; padding-top:2px}
-.crow .ck{flex:none; width:80px; font-size:12px; font-weight:600; letter-spacing:.5px; text-transform:uppercase; color:var(--muted)}
-.crow .cv{flex:1; min-width:0; font-size:16px; display:flex; align-items:center; gap:6px; flex-wrap:nowrap;
-  font-variant-numeric:tabular-nums}
-.crow .cv.ok{color:var(--ok)} .crow .cv.warn{color:var(--warn)} .crow .cv.unkn{color:var(--warn-base)} .crow .cv.dis{color:var(--muted)}
-/* empty signal glyph on a disconnected row: outlined bars, no fill — an unfilled gauge
-   rather than a dimmed reading, and lighter than the "Disconnected" label beside it */
-.bars.empty rect{fill:var(--soft); stroke:var(--faint); stroke-width:1; vector-effect:non-scaling-stroke}
-
-/* phase countdown ("retry in 12s" / "7s left") — pushed to the row's right edge with
-   margin-left:auto so it lands in the same column the tile rows put their edit pencil in,
-   and stays muted in every phase so it reads as one steady right-hand column rather than
-   recolouring with the label. Its own node, so the per-second text update never touches the
-   animated bars beside it. */
-.crow .cv .cd{margin-left:auto; padding-left:12px; flex:none; font-size:13px;
-  white-space:nowrap; color:var(--muted); font-variant-numeric:tabular-nums}
-.crow .cv .cd.off{display:none}
-/* connection-row MAC is a touch smaller than the tile MAC so bars + dBm + the full
-   17-char address all fit one line on a phone (desktop bumps it back up to 15px) */
-.crow .cv .mac{font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12.5px; letter-spacing:.2px}
-.crow .cv .ph{color:var(--muted); font-weight:400}
-.crow .cv .bars{flex:none}
-/* signal reading (e.g. "-67 dBm") — compact, muted, never breaks internally */
-.crow .cv .dbm{flex:none; font-size:13px; font-weight:500; color:var(--muted); white-space:nowrap}
-/* SSID / MAC takes the rest; ellipsis (not wrap) is the narrow-phone fallback */
-.crow .cv .nm{flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
-/* no-VIN nearby-Tesla list under the BLE row: one line per car, sorted by signal */
-.crow .cv .btlist{display:flex; flex-direction:column; gap:7px; width:100%}
-.crow .cv .btrow{display:flex; align-items:center; gap:6px; width:100%}
-.crow.tap{cursor:pointer; -webkit-tap-highlight-color:transparent; padding-right:24px}
-.crow.tap:active{background:var(--soft)}
-.crow .cedit{position:absolute; right:2px; top:50%; transform:translateY(-50%); width:15px; height:15px;
-  color:var(--muted); opacity:.4; fill:none; stroke:currentColor; stroke-width:2; stroke-linecap:round; stroke-linejoin:round}
-.crow.tap:active .cedit{opacity:.75}
+/* sheets / dialogs */
+.modal{position:fixed; inset:0; z-index:20; display:flex; align-items:flex-end; justify-content:center}
+.modal-backdrop{position:absolute; inset:0; background:var(--scrim); animation:fade .15s ease}
+.sheet{position:relative; width:100%; max-width:480px; max-height:92%; overflow:auto; background:var(--card);
+  border-radius:22px 22px 0 0; box-shadow:0 20px 60px rgba(0,0,0,.3); padding:10px 18px calc(18px + env(safe-area-inset-bottom));
+  display:flex; flex-direction:column; gap:14px; animation:sheet .26s var(--ease)}
+.grab{width:40px; height:5px; border-radius:3px; background:var(--border); align-self:center}
+.sheet-title{margin:0; font-size:22px; font-weight:650; letter-spacing:-.4px; line-height:1.2}
+.sheet p{margin:0}
+.note{font-size:14px; color:var(--muted)}
+.note.danger{color:var(--accent-text)}
+.warnic{width:48px; height:48px; border-radius:50%; display:grid; place-items:center; color:var(--accent-text);
+  background:color-mix(in srgb,var(--accent) 14%,var(--card))}
+.warnic svg{width:24px; height:24px}
+.detail{padding:10px 12px; border-radius:12px; background:var(--soft); font-size:13.5px; overflow-wrap:anywhere}
+.field{display:flex; flex-direction:column; gap:6px}
+.field-top{display:flex; justify-content:space-between; gap:8px; font-size:11px; font-weight:650; letter-spacing:.6px; text-transform:uppercase; color:var(--muted)}
+.field-hint{text-transform:none; letter-spacing:0; font-weight:500; font-variant-numeric:tabular-nums}
+.field input{width:100%; min-height:48px; padding:0 14px; border-radius:12px; border:1px solid var(--border); background:var(--soft);
+  color:var(--fg); font:inherit; font-size:16px; outline:none}
+.field input.mono{font-family:var(--mono); letter-spacing:.5px}
+.field input:focus{background:var(--card); border-color:var(--accent); box-shadow:0 0 0 3px rgba(232,33,39,.14)}
+.actions{display:grid; grid-template-columns:1fr 1fr; gap:10px}
+.ota-head{display:flex; align-items:center; justify-content:space-between; gap:10px}
+.chip-badge{padding:3px 10px; border-radius:999px; font-size:12px; font-weight:650; color:var(--accent-text);
+  background:color-mix(in srgb,var(--accent) 12%,var(--card))}
+.ota-version{font-size:24px; font-variant-numeric:tabular-nums; overflow-wrap:anywhere}
+.ota-changes{margin:0; padding-left:20px; display:flex; flex-direction:column; gap:4px}
 
 /* toasts */
-.toasts{position:fixed; left:0; right:0; bottom:calc(16px + env(safe-area-inset-bottom)); z-index:60;
-  display:flex; flex-direction:column; align-items:center; gap:8px; padding:0 14px; pointer-events:none}
-.toast{pointer-events:auto; max-width:480px; width:100%; display:flex; align-items:center; gap:11px;
-  background:var(--card); border:1px solid var(--border); border-radius:13px; padding:12px 15px;
-  box-shadow:var(--shadow); font-size:15px; font-weight:500; animation:tin .24s cubic-bezier(.2,.7,.3,1)}
-.toast .ic{width:22px; height:22px; flex:none; border-radius:50%; display:grid; place-items:center; color:#fff; font-size:13px; font-weight:700}
-.toast.ok .ic{background:var(--ok)} .toast.err .ic{background:var(--accent)} .toast.info .ic{background:var(--muted)}
-.toast.leaving{animation:tout .22s ease forwards}
-@keyframes tin{from{opacity:0; transform:translateY(12px)}to{opacity:1; transform:none}}
-@keyframes tout{to{opacity:0; transform:translateY(12px)}}
+.toasts{position:fixed; left:0; right:0; z-index:30; bottom:calc(var(--dock-h) + 14px + env(safe-area-inset-bottom));
+  display:flex; flex-direction:column; align-items:center; gap:8px; padding:0 16px; pointer-events:none}
+.wrap[data-tab=car].has-cta~.toasts{bottom:calc(var(--dock-h) + 84px + env(safe-area-inset-bottom))}
+.toast{display:flex; align-items:center; gap:10px; width:100%; max-width:420px; background:var(--fg); color:var(--bg);
+  border-radius:14px; padding:11px 14px; font-size:15px; font-weight:600; box-shadow:0 8px 24px rgba(0,0,0,.2); animation:tin .24s var(--ease)}
+.toast .ic{width:24px; height:24px; border-radius:50%; flex:none; display:grid; place-items:center; color:#fff; font-size:13px; font-weight:700; background:var(--muted)}
+.toast.ok .ic{background:var(--ok)} .toast.err .ic{background:var(--accent)}
+.toast.leaving{opacity:0; transform:translateY(8px); transition:opacity .22s ease,transform .22s ease}
 
-/* modal */
-html.modal-open, body.modal-open{overflow:hidden; overscroll-behavior:none}
-.modal{position:fixed; inset:0; z-index:150; display:grid; place-items:center; overflow-y:auto;
-  padding:max(16px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right))
-          max(16px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left))}
-.modal-backdrop{position:fixed; inset:0; background:rgba(0,0,0,.5); backdrop-filter:blur(2px)}
-.modal-card{position:relative; width:100%; max-width:440px; margin:auto;
-  background:var(--card); border:1px solid var(--border); border-radius:var(--radius);
-  box-shadow:var(--shadow), 0 8px 32px rgba(0,0,0,.25); padding:22px;
-  animation:tin .22s cubic-bezier(.2,.7,.3,1)}
-.modal-card.ota-modal-card{max-width:520px}
-.card-title{font-size:18px; font-weight:650; letter-spacing:-.2px; margin-bottom:14px}
-.ota-offer{display:flex; align-items:center; justify-content:space-between; gap:10px 14px; flex-wrap:wrap;
-  margin:2px 0 16px; padding:12px 14px; border:1px solid var(--border); border-radius:12px; background:var(--soft)}
-.ota-version-line{min-width:0; color:var(--fg); font-size:15px; font-weight:650; overflow-wrap:anywhere}
-.ota-channel{flex:none; border:1px solid #2563eb; border-radius:999px; padding:3px 8px;
-  color:#2563eb; font-size:11px; font-weight:700; letter-spacing:.45px; text-transform:uppercase}
-@media (prefers-color-scheme:dark){.ota-channel{color:#60a5fa; border-color:#60a5fa}}
-.ota-changes-title{font-size:12.5px; font-weight:600; letter-spacing:.5px; text-transform:uppercase; color:var(--muted); margin-bottom:8px}
-.ota-changes{margin:0; padding-left:20px; color:var(--fg); font-size:14.5px; line-height:1.5}
-.ota-changes li{margin:5px 0; padding-left:2px; overflow-wrap:anywhere}
-.ota-no-changes{margin:0; font-style:italic; color:var(--muted); font-size:14px}
-.ota-help{margin-top:16px; padding-top:14px; border-top:1px solid var(--border); color:var(--muted); font-size:13.5px; line-height:1.45}
-.modal-actions{display:flex; gap:10px; margin-top:20px}
-.modal-actions .btn{flex:1}
-.btn{font:inherit; font-weight:600; font-size:15px; padding:10px 16px; border-radius:10px; border:1px solid transparent;
-  cursor:pointer; display:inline-flex; align-items:center; justify-content:center; gap:8px;
-  transition:background .15s ease, border-color .15s ease, color .15s ease; -webkit-tap-highlight-color:transparent}
-.btn.primary{background:#2563eb; color:#fff}
-.btn.primary:hover{background:#1d4ed8}
-.btn.secondary{background:var(--card); color:var(--fg); border-color:var(--border)}
-.btn.secondary:hover{background:var(--soft); color:var(--fg)}
-.btn:disabled{opacity:.6; cursor:default}
+@keyframes spin{to{transform:rotate(360deg)}}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+@keyframes tremble{0%,100%{transform:rotate(0)}20%{transform:rotate(-9deg)}40%{transform:rotate(9deg)}60%{transform:rotate(-6deg)}80%{transform:rotate(6deg)}}
+@keyframes flow{from{stroke-dashoffset:0}to{stroke-dashoffset:var(--flow-end)}}
+@keyframes tin{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:none}}
+@keyframes fade{from{opacity:0}to{opacity:1}}
+@keyframes sheet{from{transform:translateY(24px);opacity:0}to{transform:none;opacity:1}}
+@keyframes sbfill{0%,15%{opacity:.25}35%,80%{opacity:1}100%{opacity:.25}}
+@keyframes wave{0%,100%{fill:var(--warn-base)}50%{fill:var(--warn-lite)}}
 
-.hide{display:none!important}
+@media (max-width:359px){ :root{--gs:190px} }
+
+/* wide: left rail, two columns, centered dialogs */
+@media (min-width:900px){
+  :root{--gs:240px}
+  .dock{position:sticky; top:0; align-self:flex-start; height:100vh; width:var(--rail-w); flex:none; display:flex; flex-direction:column;
+    align-items:center; gap:6px; padding:18px 0; border-top:0; border-right:1px solid var(--border); background:var(--card)}
+  .rail-logo{display:grid; width:36px; height:36px; border-radius:11px; margin-bottom:14px}
+  .top-logo,.ttl #paneTitle{display:none}
+  .ttl .wide-title{display:inline}
+  .tab{width:72px; min-height:64px; border-radius:14px; font-size:12px; gap:5px}
+  .tab:hover{background:var(--soft)}
+  .tab[aria-current=page]{background:color-mix(in srgb,var(--accent) 10%,transparent)}
+  .ti{width:22px; height:22px}
+  .grid{grid-template-columns:minmax(0,1.1fr) minmax(0,1fr); padding:6px 16px 32px}
+  .wrap[data-tab] .grid{padding-bottom:32px}
+  .wrap .pane-car{display:flex}
+  .wrap[data-tab=car] .pane-net{display:flex}
+  .hero{padding:28px 20px; background:var(--card); border:1px solid var(--border); border-radius:var(--r-card); box-shadow:var(--shadow)}
+  .cta,.cta:active{position:static; transform:none; width:auto; min-width:240px; min-height:50px; padding:0 24px; font-size:16px; box-shadow:var(--shadow-cta)}
+  .wrap:not([data-tab=car]) .cta:not(.hide){display:flex}
+  .modal{align-items:center}
+  .sheet{border-radius:20px; padding:20px 20px 18px}
+  .grab{display:none}
+  .toasts,.wrap[data-tab=car].has-cta~.toasts{bottom:24px}
+}
+@media (prefers-reduced-motion:reduce){
+  *,*::before,*::after{animation:none!important; transition:none!important}
+}
