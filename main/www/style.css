@@ -260,7 +260,7 @@ html.modal-open, body.modal-open{overflow:hidden; overscroll-behavior:none}
 .btn.small.secondary{background:var(--soft); color:var(--muted); border:1px solid var(--border)}
 .pr-list-wrap{display:flex; flex-direction:column; gap:6px}
 .pr-rows{display:flex; flex-direction:column; gap:4px; max-height:280px; overflow-y:auto; overscroll-behavior:contain; -webkit-overflow-scrolling:touch}
-.pr-row{display:flex; align-items:center; gap:8px; padding:6px 10px; border-radius:10px; background:var(--soft); font-size:13px; line-height:1.2; cursor:pointer; transition:background .15s ease}
+.pr-row{display:flex; align-items:center; gap:8px; padding:6px 10px; border-radius:10px; min-height:44px; box-sizing:border-box; background:var(--soft); font-size:13px; line-height:1.2; cursor:pointer; transition:background .15s ease}
 .pr-row:hover{background:color-mix(in srgb,var(--fg) 5%,var(--soft))}
 .pr-row.sel{background:color-mix(in srgb,var(--accent) 8%,var(--card)); outline:1px solid color-mix(in srgb,var(--accent) 30%,transparent)}
 .pr-row-num{font-size:12px; font-weight:700; flex:none; min-width:40px; color:var(--muted)}

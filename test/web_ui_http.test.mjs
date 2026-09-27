@@ -930,7 +930,7 @@ test("getInstalledChangelogUrl targets directory matching running version", () =
 test("loadInstalledChangelog does not fall back to /ota/changelog when remote fetch fails", async () => {
   const { context, element } = loadUi();
   context.fetch = async (url) => {
-    if (url.startsWith("https://0bu.github.io/")) {
+    if (url === "https://0bu.github.io/tesla-key-esp32/changelog.json") {
       throw new Error("offline");
     }
     if (url === "/ota/changelog") {
@@ -1463,11 +1463,15 @@ test("PR preview FW is only offered when matching PRs exist, and inline list ins
   assert.match(element("otaModalTitle").textContent, /PR #337/);
   assert.equal(element("otaVersionLine").textContent, "v1.6.0 → v1.6.0-pr-337");
 
-  // Confirming OTA install kicks off POST /ota/update?pr=337
+  // Confirming OTA install kicks off POST /ota/update?pr=337 and waitReboot
+  let rebootArgs = null;
+  context.waitReboot = (expected) => { rebootArgs = { expected }; };
   context.closeOtaModal(true);
   await installPromise;
   const otaUpdateCall = fetchCalls.find(c => c.url.includes("/ota/update?pr=337"));
   assert.ok(otaUpdateCall, "POST /ota/update?pr=337 was called");
+  assert.equal(context.otaExpectedVersion, "1.6.0-pr-337");
+  assert.deepEqual(rebootArgs, { expected: "1.6.0-pr-337" });
 
   // Switching back to release clears activePr, hides prListWrap, restores verLink, and POSTs /set_ota
   fetchCalls.length = 0;
@@ -1592,7 +1596,9 @@ test("PR discovery loads from GitHub API, caches in sessionStorage, and probes r
   };
 
   context.fetch = async (url, opts) => {
-    if (typeof url === "string" && url.startsWith("https://api.github.com/")) {
+    let origin = "";
+    try { origin = new URL(url).origin; } catch {}
+    if (origin === "https://api.github.com") {
       return {
         ok: true,
         status: 200,
