@@ -53,7 +53,7 @@ svg{display:block}
 .rail-logo{display:none}
 
 /* OTA status in the header: visually hidden from viewport, retained in DOM and accessible tree */
-.otastat{position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; border:0}
+.otastat{display:none}
 .otaspin{animation:spin 1s linear infinite}
 
 /* panes: phones show the selected tab; from 900 px the car stays left and the tab picks the right */
@@ -102,7 +102,7 @@ svg{display:block}
 .pill:active,.btn:active,.cta:active{transform:scale(.985)}
 .ib{width:44px; height:44px; flex:none; border:0; border-radius:12px; background:none; color:var(--muted); display:grid; place-items:center}
 .ib:hover{background:var(--soft)}
-.ib.danger{color:var(--accent)}
+.ib.danger{color:var(--accent-text)}
 .ib.danger:hover{background:color-mix(in srgb,var(--accent) 12%,var(--soft))}
 .ib svg{width:18px; height:18px}
 .btn{min-height:50px; border-radius:999px; font-weight:650; border:1px solid var(--border); background:none}
@@ -260,12 +260,11 @@ html.modal-open, body.modal-open{overflow:hidden; overscroll-behavior:none}
 .btn.small.secondary{background:var(--soft); color:var(--muted); border:1px solid var(--border)}
 .pr-list-wrap{display:flex; flex-direction:column; gap:6px}
 .pr-rows{display:flex; flex-direction:column; gap:4px; max-height:280px; overflow-y:auto; overscroll-behavior:contain; -webkit-overflow-scrolling:touch}
-.pr-row{display:flex; align-items:center; gap:8px; padding:6px 10px; border-radius:10px; min-height:44px; box-sizing:border-box; background:var(--soft); font-size:13px; line-height:1.2; cursor:pointer; transition:background .15s ease}
-.pr-row:hover{background:color-mix(in srgb,var(--fg) 5%,var(--soft))}
+.pr-row{display:flex; align-items:center; gap:8px; padding:4px 4px 4px 10px; border-radius:10px; min-height:52px; box-sizing:border-box; background:var(--soft); font-size:13px; line-height:1.2}
 .pr-row.sel{background:color-mix(in srgb,var(--accent) 8%,var(--card)); outline:1px solid color-mix(in srgb,var(--accent) 30%,transparent)}
 .pr-row-num{font-size:12px; font-weight:700; flex:none; min-width:40px; color:var(--muted)}
 .pr-row-title{flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-weight:550}
-.pr-row-btn{flex:none}
+.pr-row-btn{flex:none; min-height:44px; min-width:64px}
 .pr-row-btn:disabled{opacity:.4; cursor:not-allowed}
 .pr-loading{padding:12px; text-align:center; font-size:12.5px; color:var(--muted)}
 

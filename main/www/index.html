@@ -50,7 +50,7 @@
         <span class="logo top-logo" aria-hidden="true"><svg viewBox="0 0 24 24"><use href="#ic-bolt"/></svg></span>
         <div class="ttl"><h1><span id="paneTitle">tesla-key-esp32</span><span class="wide-title">tesla-key-esp32</span></h1><span class="host mono" id="ipline"></span></div>
       </div>
-      <span class="otastat" id="otaStat" role="status" aria-live="polite" aria-atomic="true"></span>
+      <span class="otastat" id="otaStat" aria-hidden="true"></span>
     </header>
 
     <main class="grid">
@@ -139,6 +139,7 @@
           </div>
           <div class="pr-rows" id="prRows"></div>
           <p class="note hide" id="prEmpty">No pull requests with preview firmware available.</p>
+          <p class="note" id="prNote">Installs a one-off test build. The device stays subscribed to its Release or Development channel.</p>
         </div>
         <details class="fw-changelog-details" id="fwChangelogDetails" open>
           <summary class="lbl fw-changelog-summary">Changelog</summary>

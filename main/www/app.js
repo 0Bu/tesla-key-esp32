@@ -137,8 +137,18 @@ function poll(){
   // freeze the hero on an old state (e.g. a transient orange "Unreachable") until a manual
   // reload — the very bug a fresh document hides. Same guard waitReboot() already uses.
   return requestJson('/status?ms='+Date.now(),{cache:'no-store'})
-    .then(function(s){ feedOk=true; render(s); })
+    .then(function(s){ feedOk=true; render(s); settleWakeToast(); })
     .catch(function(){ feedOk=false; });
+}
+// render() ends `waking` once the car reports data; the sticky "waiting for the car" toast is
+// resolved here, in the poll path, so the renderer stays a pure state→DOM function.
+function settleWakeToast(){
+  if(waking) return;
+  var c=$("toasts"); if(!c||!c.children) return;
+  for(var i=0;i<c.children.length;i++){
+    var el=c.children[i];
+    if(el.dataset&&el.dataset.key==='wake'&&/\bload\b/.test(el.className||'')){ toast('Car is awake','ok','wake'); return; }
+  }
 }
 
 /* ---------- signal glyph ---------- */
@@ -983,6 +993,11 @@ function wireModalFieldSelection(doc){
 }
 
 /* ---------- config actions ---------- */
+// Byte length as the firmware counts it (UTF-8), not UTF-16 code units.
+function utf8Len(v){
+  if(typeof TextEncoder!=='undefined') return new TextEncoder().encode(v).length;
+  return unescape(encodeURIComponent(v)).length;
+}
 function vinValid(v){return /^[A-HJ-NPR-Z0-9]{17}$/i.test(v)}
 function editVin(){
   var cur=(state&&state.vin&&state.vin!=='UNKNOWN')?state.vin:'';
@@ -1042,8 +1057,8 @@ function editMqtt(){
     validate:function(x){
       var v=(x||'').trim();
       if(!v) return null;
-      if(v.indexOf(' ')>=0) return 'Invalid broker — spaces not allowed';
-      if(v.length>120) return 'Broker too long (max 120 characters)';
+      if(/[ \t\r\n]/.test(v)) return 'Invalid broker — spaces not allowed';
+      if(utf8Len(v)>120) return 'Broker too long (max 120 bytes)';
       var auth=v, scheme=auth.indexOf('://');
       if(scheme>=0) auth=auth.slice(scheme+3);
       var colon=auth.lastIndexOf(':');
@@ -1085,8 +1100,8 @@ function editSyslog(){
     validate:function(x){
       var v=(x||'').trim();
       if(!v) return null;
-      if(v.indexOf(' ')>=0) return 'Invalid server — spaces not allowed';
-      if(v.length>120) return 'Server too long (max 120 characters)';
+      if(/[ \t\r\n]/.test(v)) return 'Invalid server — spaces not allowed';
+      if(utf8Len(v)>120) return 'Server too long (max 120 bytes)';
       if(/^[a-zA-Z]+:\/\//.test(v)) return 'Invalid server — no scheme allowed';
       var colon=v.lastIndexOf(':');
       if(colon>=0){
@@ -1255,14 +1270,13 @@ function getInstalledPr(){
   return (state && state.version) ? parsePrNumber(state.version) : 0;
 }
 
+// The OTA check target: only an explicit choice (Install on a PR row, the PR segment, or ?pr=/#pr=).
+// The installed PR build is never a target by itself, because a PR-targeted check accepts only that PR's
+// builds, and a device running one must still reach the next release through its channel.
 function getTargetPr(){
   if(activePr > 0) return activePr;
   var urlPr = parseTargetPr();
   if(urlPr > 0) return urlPr;
-  if(!activePrExplicitlyCleared){
-    var inst = getInstalledPr();
-    if(inst > 0) return inst;
-  }
   return 0;
 }
 
@@ -1295,16 +1309,9 @@ function renderPrRows(){
 
 function createPrRow(pr){
   var row = document.createElement('div');
+  // A plain row: its Install button is the one action (a clickable row around a button would
+  // nest interactive controls, and selecting a PR alone changes nothing on the device).
   row.className = 'pr-row' + (pr.number === activePr ? ' sel' : '');
-  row.setAttribute('role', 'button');
-  row.tabIndex = 0;
-  row.setAttribute('aria-label', 'Select PR #' + pr.number + (pr.title ? (': ' + pr.title) : ''));
-  row.onkeydown = function(e){
-    if(e.key === 'Enter' || e.key === ' '){
-      e.preventDefault();
-      selectPr(pr.number);
-    }
-  };
 
   var num = document.createElement('span');
   num.className = 'pr-row-num mono';
@@ -1336,9 +1343,6 @@ function createPrRow(pr){
   }
   row.appendChild(btn);
 
-  row.onclick = function(){
-    selectPr(pr.number);
-  };
   return row;
 }
 
@@ -1391,24 +1395,17 @@ function loadPrList(force){
   if(!force && prLoadPromise) return prLoadPromise;
   if(loading) loading.classList.remove('hide');
 
-  var indexUrl = 'https://0bu.github.io/tesla-key-esp32/PR/index.json';
   var ghUrl = 'https://api.github.com/repos/0Bu/tesla-key-esp32/pulls?state=open&sort=updated&direction=desc&per_page=10';
-  prLoadPromise = fetch(indexUrl, { cache: 'no-store' })
-    .then(function(res){
-      if(res.ok) return res.json();
-      throw new Error('no_index');
-    })
-    .catch(function(){
-      return fetch(ghUrl, {
-        headers: { 'Accept': 'application/vnd.github.v3+json' }
-      }).then(function(res){
-        if(res.status === 403){
-          if(rateLimitBanner) rateLimitBanner.classList.remove('hide');
-          throw new Error('rate_limited');
-        }
-        if(!res.ok) throw new Error('github_error_' + res.status);
-        return res.json();
-      });
+  prLoadPromise = fetch(ghUrl, {
+      headers: { 'Accept': 'application/vnd.github.v3+json' }
+    }).then(function(res){
+      var remaining = (res.headers && typeof res.headers.get === 'function') ? res.headers.get('x-ratelimit-remaining') : null;
+      if(res.status === 429 || (res.status === 403 && remaining === '0')){
+        if(rateLimitBanner) rateLimitBanner.classList.remove('hide');
+        throw new Error('rate_limited');
+      }
+      if(!res.ok) throw new Error('github_error_' + res.status);
+      return res.json();
     })
     .then(function(rawPrs){
     if(!Array.isArray(rawPrs)) throw new Error('invalid_pr_list');
@@ -1463,7 +1460,7 @@ function otaStatus(){
 /* ---------- update channel (segmented control in the Firmware pane) ---------- */
 function renderChanMenu(){
   var r=$("optRelease"), d=$("optDev"), p=$("optPr"); if(!r||!d) return;
-  var hasMatchingPrs = (prList && prList.length > 0) || (getTargetPr() > 0) || (activePr > 0);
+  var hasMatchingPrs = (prList && prList.length > 0) || (getTargetPr() > 0) || (getInstalledPr() > 0);
   if(p){
     p.classList.toggle('hide', !hasMatchingPrs);
   }
@@ -1578,29 +1575,6 @@ function setChannel(chan){
   });
 }
 
-function selectPr(num){
-  var n = parseInt(num, 10);
-  if(!n || n <= 0 || n > 2147483647) return Promise.resolve();
-  activePr = n;
-  prMode = true;
-  activePrExplicitlyCleared = false;
-  if(typeof location !== 'undefined'){
-    try {
-      if(typeof history !== 'undefined' && history.replaceState && location.search && /[?&]pr=[0-9]+/i.test(location.search)){
-        var cleanSearch = location.search.replace(/([?&])pr=[0-9]+(&|$)/i, function(m, p, s){ return s === '&' ? p : ''; }).replace(/[?&]$/, '');
-        var cleanPath = (location.pathname || '') + cleanSearch + '#pr=' + n;
-        history.replaceState(null, '', cleanPath);
-      } else {
-        location.hash = '#pr=' + n;
-      }
-    } catch(e){
-      location.hash = '#pr=' + n;
-    }
-  }
-  renderChanMenu();
-  return Promise.resolve();
-}
-
 function installPr(num){
   if(otaBusy) return Promise.resolve();
   var n = parseInt(num, 10);
@@ -1675,17 +1649,18 @@ function parseInstalledChangelog(data, curVer, isDev){
         matched.push(l.substring(prefix.length).trim());
       }
     }
-    if(matched.length) return matched.join('\n');
+    return matched.join('\n');
   }
-  if(!data.version || !curVer || data.version === curVer || isDev){
-    return text;
-  }
-  return '';
+  // Only notes that provably belong to the running build: an exact version match, never a
+  // neighbouring release's or the whole history.
+  return (curVer && data.version === curVer) ? text : '';
 }
 
-function loadInstalledChangelog(){
+// {ok, text}: ok=false only when the feed could not be read (network, HTTP error, bad JSON), so the
+// caller can tell "retry later" from "read fine, no notes for this build".
+function fetchInstalledChangelog(){
   var curVer = (state && state.version) ? String(state.version).trim() : '';
-  if(!curVer) return Promise.resolve('');
+  if(!curVer) return Promise.resolve({ok: true, text: ''});
   var url = getInstalledChangelogUrl();
   var ctl = typeof AbortController !== 'undefined' ? new AbortController() : null;
   var timer = setTimeout(function(){ if(ctl) ctl.abort(); }, OTA_HTTP_TIMEOUT_MS);
@@ -1693,17 +1668,21 @@ function loadInstalledChangelog(){
   return fetch(url, {cache: 'no-store', signal: ctl ? ctl.signal : undefined})
     .then(function(r){
       clearTimeout(timer);
-      if(!r || !r.ok || r.status === 204) return '';
+      if(r && r.status === 204) return {ok: true, text: ''};
+      if(!r || !r.ok) return {ok: false, text: ''};
       return r.json().then(function(data){
-        return parseInstalledChangelog(data, curVer, isDev);
+        return {ok: true, text: parseInstalledChangelog(data, curVer, isDev)};
       }).catch(function(){
-        return '';
+        return {ok: false, text: ''};
       });
     })
     .catch(function(){
       clearTimeout(timer);
-      return '';
+      return {ok: false, text: ''};
     });
+}
+function loadInstalledChangelog(){
+  return fetchInstalledChangelog().then(function(r){ return r.text; });
 }
 
 function renderInstalledChangelog(changelog){
@@ -1724,23 +1703,31 @@ function renderInstalledChangelog(changelog){
   if(noChanges) noChanges.hidden = (count > 0);
 }
 
+// render() calls this on every /status frame. A feed that was read is cached per running version
+// (even when it has no notes for it); an unreadable one is retried at most once a minute, and one
+// fetch at a time, so a device UI without internet does not poll Pages every 4 s.
+var installedChangelogPending = null, installedChangelogRetryAt = 0;
+var INSTALLED_CHANGELOG_RETRY_MS = 60000;
 function updateInstalledChangelog(force){
   var currentKey = (state && state.version) ? String(state.version).trim() : '';
   if(!currentKey) return Promise.resolve();
-  if(!force && installedChangelogKey === currentKey) return Promise.resolve();
-  return loadInstalledChangelog().then(function(text){
-    if(text){
+  if(!force){
+    if(installedChangelogKey === currentKey || installedChangelogPending === currentKey) return Promise.resolve();
+    if(Date.now() < installedChangelogRetryAt) return Promise.resolve();
+  }
+  installedChangelogPending = currentKey;
+  return fetchInstalledChangelog().then(function(r){
+    if(installedChangelogPending === currentKey) installedChangelogPending = null;
+    var stillRunning = state && state.version && String(state.version).trim() === currentKey;
+    if(r.ok){
       installedChangelogKey = currentKey;
-      renderInstalledChangelog(text);
+      installedChangelogRetryAt = 0;
     } else {
       installedChangelogKey = null;
-      renderInstalledChangelog('');
+      installedChangelogRetryAt = Date.now() + INSTALLED_CHANGELOG_RETRY_MS;
     }
-    return text;
-  }).catch(function(){
-    installedChangelogKey = null;
-    renderInstalledChangelog('');
-    return '';
+    if(stillRunning) renderInstalledChangelog(r.text);
+    return r.text;
   });
 }
 

@@ -309,7 +309,9 @@ test("OTA versions use the canonical 31-byte firmware descriptor grammar", () =>
 test("device page exposes keyboard and live-region semantics", () => {
   const html = fs.readFileSync(new URL("../main/www/index.html", import.meta.url), "utf8");
   assert.match(html, /<button[^>]+id="verLink"[^>]+aria-label="Check for firmware updates"/);
-  assert.match(html, /id="otaStat"[^>]+role="status"[^>]+aria-live="polite"/);
+  // #toasts is the single live region; #otaStat must not announce the same OTA text twice.
+  assert.match(html, /id="otaStat"[^>]+aria-hidden="true"/);
+  assert.doesNotMatch(html, /id="otaStat"[^>]+aria-live/);
   assert.match(html, /id="toasts"[^>]+role="status"[^>]+aria-live="polite"/);
 });
 
@@ -595,6 +597,44 @@ test("getTargetPr extracts PR number from search query or hash and validates bou
   assert.equal(context.getTargetPr(), 0);
 });
 
+test("a device running a PR build still checks its own channel unless a PR is chosen", async () => {
+  const { context, element } = loadUi();
+  context.render({ ip: "192.0.2.100", version: "1.6.0-PR-337", key_present: false });
+
+  assert.equal(context.getTargetPr(), 0);
+  assert.notEqual(context.getActiveChannel(), "pr");
+  assert.equal(element("optPr").classList.contains("hide"), false, "PR Preview stays offered on a PR build");
+
+  let requestedUrl = null;
+  context.fetch = async (url) => {
+    if (String(url).includes("/ota/check")) requestedUrl = url;
+    return { ok: true, status: 200, async json() { return { started: true }; } };
+  };
+  context.otaCheckPoll = () => {};
+  await context.otaCheck();
+  assert.match(requestedUrl, /\/ota\/check\?ms=\d+$/, "unparameterized check reaches the next release");
+});
+
+test("broker and syslog validation mirror the firmware whitespace set and byte length", async () => {
+  const { context, element } = loadUi();
+  const check = async (open, value) => {
+    const p = open();
+    element("askInput").value = value;
+    context.askValidate();
+    const err = element("askErr").classList.contains("hide") ? "" : element("askErr").textContent;
+    context.askClose(null);
+    await p.catch(() => {});
+    return err;
+  };
+  context.state = {};
+  assert.match(await check(() => context.editMqtt(), "192.0.2.20:\t1883"), /spaces/);
+  assert.match(await check(() => context.editSyslog(), "192.0.2.30\n:514"), /spaces/);
+  // 60 two-byte characters: 60 UTF-16 units but 120+ bytes on the device
+  assert.match(await check(() => context.editMqtt(), "\u00e4".repeat(60) + ":1883"), /too long/);
+  assert.equal(await check(() => context.editMqtt(), "192.0.2.20:1883"), "");
+  assert.equal(await check(() => context.editSyslog(), "192.0.2.30"), "");
+});
+
 test("OTA check and render incorporate target PR when set", async () => {
   const { context, element } = loadUi();
   context.location.search = "?pr=326";
@@ -747,7 +787,7 @@ test("modal field selection selects content on first activation and preserves na
   let selected = 0;
   const selectableField = {
     matches: (sel) => sel.includes(".sheet input") || sel.includes(".modal-card input"),
-    value: "LRW3E7FS4TC656735",
+    value: "5YJ3E1EA1JF000001",
     selectionStart: 17,
     selectionEnd: 17,
     select: () => {
@@ -915,6 +955,46 @@ test("loadInstalledChangelog filters dev entries by running version on dev chann
   assert.equal(list.children[0].textContent, "Dev note 1");
 });
 
+test("installed changelog shows only notes that exactly match the running version", async () => {
+  const { context } = loadUi();
+  const feed = {};
+  context.fetch = async (url) => ({ ok: true, status: 200, async json() { return feed[url]; } });
+
+  // Dev build absent from the dev feed: nothing, never the whole dev history
+  feed["https://0bu.github.io/tesla-key-esp32/dev/changelog.json"] = {
+    version: "1.5.9-dev.3", changelog: "v1.5.9-dev.2 — Dev note 2\nv1.5.9-dev.3 — Dev note 3"
+  };
+  context.state = { version: "1.5.9-dev.1" };
+  assert.equal(await context.loadInstalledChangelog(), "");
+
+  // Release feed for another version, or without a version: nothing
+  feed["https://0bu.github.io/tesla-key-esp32/changelog.json"] = { version: "1.6.1", changelog: "Newer note" };
+  context.state = { version: "1.6.0" };
+  assert.equal(await context.loadInstalledChangelog(), "");
+  feed["https://0bu.github.io/tesla-key-esp32/changelog.json"] = { changelog: "Unversioned note" };
+  assert.equal(await context.loadInstalledChangelog(), "");
+  feed["https://0bu.github.io/tesla-key-esp32/changelog.json"] = { version: "1.6.0", changelog: "Exact note" };
+  assert.equal(await context.loadInstalledChangelog(), "Exact note");
+});
+
+test("the sticky wake toast resolves from the poll path once the car reports data", async () => {
+  const { context, element } = loadUi();
+  context.toast("Wake sent · waiting for the car…", "load", "wake");
+  context.waking = true;
+  context.settleWakeToast();
+  assert.match(element("toasts").children[0].className, /\bload\b/, "still waiting while waking");
+
+  context.waking = false;     // render() clears it when vehicle data arrives
+  context.settleWakeToast();
+  const t = element("toasts").children[0];
+  assert.match(t.className, /\bok\b/);
+  assert.match(t.innerHTML, /Car is awake/);
+
+  // No pending wake toast: nothing is announced
+  context.settleWakeToast();
+  assert.equal(element("toasts").children.length, 1);
+});
+
 test("getInstalledChangelogUrl targets directory matching running version", () => {
   const { context } = loadUi();
   context.state = { version: "1.4.0-PR-42" };
@@ -974,6 +1054,43 @@ test("updateInstalledChangelog avoids duplicate fetch when key is unchanged unle
   assert.equal(fetchCount, 2, "fetched when forced");
 });
 
+test("installed changelog is not refetched every poll: no-match is cached, failures back off", async () => {
+  const { context } = loadUi();
+  let fetchCount = 0;
+  let mode = "nomatch";
+  context.fetch = async () => {
+    fetchCount++;
+    if (mode === "offline") throw new TypeError("offline");
+    return { ok: true, status: 200, async json() { return { version: "1.6.1", changelog: "Other build" }; } };
+  };
+
+  // Read fine, but no notes for the running build: cached like a hit
+  context.state = { version: "1.6.0" };
+  assert.equal(await context.updateInstalledChangelog(false), "");
+  await context.updateInstalledChangelog(false);
+  assert.equal(fetchCount, 1);
+
+  // Unreadable feed: one attempt, then quiet until the retry window passes
+  mode = "offline";
+  context.state = { version: "1.6.2" };
+  await context.updateInstalledChangelog(false);
+  await context.updateInstalledChangelog(false);
+  await context.updateInstalledChangelog(false);
+  assert.equal(fetchCount, 2);
+  context.installedChangelogRetryAt = Date.now() - 1;
+  await context.updateInstalledChangelog(false);
+  assert.equal(fetchCount, 3);
+
+  // Concurrent render frames share one in-flight fetch
+  mode = "nomatch";
+  context.state = { version: "1.6.3" };
+  context.installedChangelogRetryAt = 0;
+  const a = context.updateInstalledChangelog(false);
+  const b = context.updateInstalledChangelog(false);
+  await Promise.all([a, b]);
+  assert.equal(fetchCount, 4);
+});
+
 test("render triggers updateInstalledChangelog and populates fwChanges", async () => {
   const { context, element } = loadUi();
   context.fetch = async (url) => {
@@ -1020,12 +1137,15 @@ test("loadInstalledChangelog handles 204 and network errors gracefully", async (
   assert.equal(list.hidden, true);
   assert.equal(noChanges.hidden, false);
 
-  // Proves F8: failure is not cached forever; subsequent updateInstalledChangelog retries
+  // Proves F8: failure is not cached forever; once the retry window has passed the next render retries
   context.fetch = async () => ({
     ok: true,
     status: 200,
     async json() { return { version: "1.6.0", changelog: "Recovered changelog note" }; }
   });
+  await context.updateInstalledChangelog(false);
+  assert.equal(list.hidden, true, "no immediate refetch inside the retry window");
+  context.installedChangelogRetryAt = Date.now() - 1;
   await context.updateInstalledChangelog(false);
   assert.equal(list.hidden, false);
   assert.equal(list.children.length, 1);
@@ -1291,7 +1411,7 @@ test("askOpen uses adaptive focus: input on desktop pointer:fine, card container
   context.window.matchMedia = (query) => ({
     matches: query === "(pointer: fine)"
   });
-  context.askText({ title: "Edit VIN", value: "LRW3E7FS4TC656735" });
+  context.askText({ title: "Edit VIN", value: "5YJ3E1EA1JF000001" });
   assert.equal(context.document.activeElement, element("askInput"), "desktop focuses askInput");
   assert.equal(selected, true, "desktop selects askInput content immediately");
   context.askClose(null);
@@ -1302,7 +1422,7 @@ test("askOpen uses adaptive focus: input on desktop pointer:fine, card container
     matches: false
   });
   const card = element("askModal").querySelector(".modal-card");
-  context.askText({ title: "Edit VIN", value: "LRW3E7FS4TC656735" });
+  context.askText({ title: "Edit VIN", value: "5YJ3E1EA1JF000001" });
   assert.equal(context.document.activeElement, card, "touch keeps container focus");
   assert.equal(selected, false, "touch does not select input text or jump keyboard");
   context.askClose(null);
@@ -1394,12 +1514,12 @@ test("PR preview FW is only offered when matching PRs exist, and inline list ins
           update_available: context.activePr === 337,
           progress: 0,
           message: context.activePr === 337 ? "update available" : "up to date",
-          available: context.activePr === 337 ? "1.6.0-pr-337" : "1.6.0",
+          available: context.activePr === 337 ? "1.6.0-PR-337" : "1.6.0",
           current: "1.6.0"
         };
       }
     };
-    if (url === "https://0bu.github.io/tesla-key-esp32/PR/337/manifest.json") return { ok: true, status: 200, async json() { return { version: "1.6.0-pr-337" }; } };
+    if (url === "https://0bu.github.io/tesla-key-esp32/PR/337/manifest.json") return { ok: true, status: 200, async json() { return { version: "1.6.0-PR-337" }; } };
     if (url === "https://0bu.github.io/tesla-key-esp32/PR/337/changelog.json") return { ok: true, status: 200, async text() { return "PR 337 changes"; } };
     if (url.startsWith("/ota/update")) return { ok: true, status: 200, async json() { return { result: true }; } };
     return { ok: true, status: 200, async json() { return {}; } };
@@ -1461,7 +1581,7 @@ test("PR preview FW is only offered when matching PRs exist, and inline list ins
   await new Promise(r => setTimeout(r, 10));
   assert.equal(element("otaModal").classList.contains("hide"), false);
   assert.match(element("otaModalTitle").textContent, /PR #337/);
-  assert.equal(element("otaVersionLine").textContent, "v1.6.0 → v1.6.0-pr-337");
+  assert.equal(element("otaVersionLine").textContent, "v1.6.0 → v1.6.0-PR-337");
 
   // Confirming OTA install kicks off POST /ota/update?pr=337 and waitReboot
   let rebootArgs = null;
@@ -1470,8 +1590,8 @@ test("PR preview FW is only offered when matching PRs exist, and inline list ins
   await installPromise;
   const otaUpdateCall = fetchCalls.find(c => c.url.includes("/ota/update?pr=337"));
   assert.ok(otaUpdateCall, "POST /ota/update?pr=337 was called");
-  assert.equal(context.otaExpectedVersion, "1.6.0-pr-337");
-  assert.deepEqual(rebootArgs, { expected: "1.6.0-pr-337" });
+  assert.equal(context.otaExpectedVersion, "1.6.0-PR-337");
+  assert.deepEqual(rebootArgs, { expected: "1.6.0-PR-337" });
 
   // Switching back to release clears activePr, hides prListWrap, restores verLink, and POSTs /set_ota
   fetchCalls.length = 0;
@@ -1595,7 +1715,9 @@ test("PR discovery loads from GitHub API, caches in sessionStorage, and probes r
     clear() { storage.clear(); }
   };
 
+  const requested = [];
   context.fetch = async (url, opts) => {
+    requested.push(url);
     let origin = "";
     try { origin = new URL(url).origin; } catch {}
     if (origin === "https://api.github.com") {
@@ -1627,9 +1749,24 @@ test("PR discovery loads from GitHub API, caches in sessionStorage, and probes r
 
   // Cached in sessionStorage
   assert.ok(storage.has("tk_pr_cache"));
+  // One API request plus one HEAD per listed PR; no request for an index CI never publishes
+  assert.equal(requested.length, 3);
+  assert.equal(requested.some((u) => u.endsWith("/PR/index.json")), false);
 
-  // Handling 403 rate limit
-  context.fetch = async () => ({ ok: false, status: 403 });
+  // A plain 403 (forbidden, not a quota) is an error, not the rate-limit banner
+  const headers = (remaining) => ({ get(k) { return k.toLowerCase() === "x-ratelimit-remaining" ? remaining : null; } });
+  context.fetch = async () => ({ ok: false, status: 403, headers: headers("12") });
+  await context.loadPrList(true);
+  assert.equal(element("prRateLimitBanner").classList.contains("hide"), true);
+
+  // Primary rate limit: 403 with an exhausted quota
+  context.fetch = async () => ({ ok: false, status: 403, headers: headers("0") });
+  await context.loadPrList(true);
+  assert.equal(element("prRateLimitBanner").classList.contains("hide"), false);
+
+  // Secondary rate limit: 429
+  element("prRateLimitBanner").classList.add("hide");
+  context.fetch = async () => ({ ok: false, status: 429, headers: headers(null) });
   await context.loadPrList(true);
   assert.equal(element("prRateLimitBanner").classList.contains("hide"), false);
 });
@@ -1691,7 +1828,7 @@ test("channel switching is responsive and immune to intermediate polling race co
 
 test("askModal live validation enforces valid input, shows errors, and blocks save", async () => {
   const { context, element } = loadUi();
-  context.state = { vin: "LRW3E7FS4TC656735", key_present: true };
+  context.state = { vin: "5YJ3E1EA1JF000001", key_present: true };
 
   // 1. editVin validation
   let vinSaved = null;
@@ -1699,12 +1836,12 @@ test("askModal live validation enforces valid input, shows errors, and blocks sa
 
   // Initially opened with valid current VIN
   assert.equal(element("askModal").classList.contains("hide"), false);
-  assert.equal(element("askInput").value, "LRW3E7FS4TC656735");
+  assert.equal(element("askInput").value, "5YJ3E1EA1JF000001");
   assert.equal(element("askOk").disabled, false);
   assert.equal(element("askErr").classList.contains("hide"), true);
 
   // User deletes characters -> 16 chars (invalid)
-  element("askInput").value = "LRW3E7FS4TC65673";
+  element("askInput").value = "5YJ3E1EA1JF00000";
   context.askValidate();
   assert.equal(element("askOk").disabled, true);
   assert.equal(element("askErr").classList.contains("hide"), false);
@@ -1716,7 +1853,7 @@ test("askModal live validation enforces valid input, shows errors, and blocks sa
   assert.equal(element("askModal").classList.contains("hide"), false);
 
   // User enters invalid character (e.g. letter 'I')
-  element("askInput").value = "LRW3E7FS4TC65673I";
+  element("askInput").value = "5YJ3E1EA1JF00000I";
   context.askValidate();
   assert.equal(element("askOk").disabled, true);
   assert.equal(element("askErr").classList.contains("hide"), false);
