@@ -823,7 +823,7 @@ function chargeFailMsg(reason,isCharging){
 /* ---------- sheets (replace prompt()/confirm()) ----------
    askText → Promise<string|null>, askConfirm → Promise<boolean>. One sheet at a time; opening
    another settles the first as cancelled. */
-var askResolve=null, askCancelValue=null, askReturnFocus=null, askHintFn=null;
+var askResolve=null, askCancelValue=null, askReturnFocus=null, askHintFn=null, askValidateFn=null;
 // While a sheet or the OTA dialog is open the page behind it is inert: aria-modal alone neither
 // stops Tab from walking into the dock and panes nor keeps screen readers inside the dialog.
 // Derived from both dialogs, so closing one while the other is still up keeps the page locked.
@@ -844,6 +844,22 @@ function syncModal(){
   // The OTA dialog sits under an open sheet: keep Tab from reaching its buttons.
   var om=$("otaModal"); if(om) om.inert=isOpen('askModal');
 }
+function askValidate(){
+  var inp=$("askInput"), ok=$("askOk"), err=$("askErr");
+  askPaintHint();
+  if(!inp) return true;
+  var msg=(askValidateFn&&typeof askValidateFn==='function')?askValidateFn(inp.value||''):null;
+  var bad=!!msg;
+  if(err){
+    err.textContent=bad?msg:'';
+    err.classList.toggle('hide',!bad);
+  }
+  inp.classList.toggle('invalid',bad);
+  if(bad) inp.setAttribute('aria-invalid','true');
+  else if(inp.removeAttribute) inp.removeAttribute('aria-invalid');
+  if(ok) ok.disabled=bad;
+  return !bad;
+}
 function askOpen(o,cancelValue){
   if(askResolve) askClose(askCancelValue);
   askReturnFocus=(typeof document!=='undefined')?document.activeElement:null;
@@ -859,6 +875,7 @@ function askOpen(o,cancelValue){
   var cc=$("askCancel"); if(cc) cc.textContent=o.cancelLabel||'Cancel';
   var inp=$("askInput");
   askHintFn=null;
+  askValidateFn=null;
   if(text&&inp){
     $("askLabel").textContent=o.label||'';
     inp.value=o.value||'';
@@ -866,7 +883,10 @@ function askOpen(o,cancelValue){
     inp.className=o.mono?'mono':'';
     if(o.maxLength) inp.setAttribute('maxlength',String(o.maxLength)); else if(inp.removeAttribute) inp.removeAttribute('maxlength');
     askHintFn=o.hint||null;
-    askPaintHint();
+    askValidateFn=o.validate||null;
+    askValidate();
+  } else if(ok){
+    ok.disabled=false;
   }
   var m=$("askModal"); if(m&&m.classList) m.classList.remove('hide');
   syncModal();
@@ -896,6 +916,11 @@ function askPaintHint(){
 function askClose(value){
   var m=$("askModal"); if(m&&m.classList) m.classList.add('hide');
   syncModal();
+  askValidateFn=null;
+  var err=$("askErr"), inp=$("askInput"), ok=$("askOk");
+  if(err){ err.textContent=''; err.classList.add('hide'); }
+  if(inp){ inp.classList.remove('invalid'); if(inp.removeAttribute) inp.removeAttribute('aria-invalid'); }
+  if(ok) ok.disabled=false;
   var r=askResolve; askResolve=null;
   var back=askReturnFocus; askReturnFocus=null;
   // Back to where the sheet was opened from — unless that is on the page and the OTA dialog is
@@ -908,6 +933,11 @@ function askClose(value){
 function askSubmit(){
   if(!askResolve) return;
   if(askCancelValue===false){ askClose(true); return; }
+  if(!askValidate()){
+    var inp=$("askInput");
+    if(inp && typeof inp.focus==='function') inp.focus();
+    return;
+  }
   var inp=$("askInput"); askClose(inp?String(inp.value):'');
 }
 function askText(o){ o.input=true; return askOpen(o,null); }
@@ -962,6 +992,15 @@ function editVin(){
   return askText({
     title:'Vehicle VIN', label:'VIN', value:cur, placeholder:'17 characters', mono:true,
     hint:function(x){ return x.trim().length+' / 17'; },
+    validate:function(x){
+      var s=(x||'').trim();
+      if(!s) return 'VIN is required (17 characters)';
+      if(s.length!==17) return 'Must be exactly 17 characters ('+s.length+' / 17)';
+      if(/[IOQ]/i.test(s)) return 'Letters I, O, Q are not allowed in VINs';
+      if(!/^[A-Za-z0-9]+$/.test(s)) return 'Only letters and digits are allowed';
+      if(!vinValid(s)) return 'Invalid VIN format';
+      return null;
+    },
     note:hasKey?'Changing the VIN generates a new security key and clears the stored pairing.'
                :'The 17-character VIN is shown on the Tesla touchscreen under Controls → Software.',
     destructive:hasKey&&!!cur, okLabel:'Save VIN'
@@ -1000,6 +1039,21 @@ function editMqtt(){
   return askText({
     title:'MQTT broker', label:'Broker (IP:PORT or URI)', value:cur, placeholder:'192.0.2.20:1883', mono:true,
     hint:function(){ return 'Empty disables MQTT'; },
+    validate:function(x){
+      var v=(x||'').trim();
+      if(!v) return null;
+      if(v.indexOf(' ')>=0) return 'Invalid broker — spaces not allowed';
+      if(v.length>120) return 'Broker too long (max 120 characters)';
+      var auth=v, scheme=auth.indexOf('://');
+      if(scheme>=0) auth=auth.slice(scheme+3);
+      var colon=auth.lastIndexOf(':');
+      if(colon<=0) return 'Invalid broker — use host:port';
+      var host=auth.slice(0,colon), port=auth.slice(colon+1);
+      if(!host||!port||!/^\d{1,5}$/.test(port)) return 'Invalid port (1–65535)';
+      var p=parseInt(port,10);
+      if(p<1||p>65535) return 'Port out of range (1–65535)';
+      return null;
+    },
     note:'For Home Assistant. Saved credentials stay hidden; leaving the shown host unchanged keeps them.',
     okLabel:'Save & connect'
   }).then(function(v){
@@ -1028,6 +1082,21 @@ function editSyslog(){
   return askText({
     title:'Syslog server', label:'Server (IP:PORT)', value:cur, placeholder:'192.0.2.30:514', mono:true,
     hint:function(){ return 'Empty disables it'; },
+    validate:function(x){
+      var v=(x||'').trim();
+      if(!v) return null;
+      if(v.indexOf(' ')>=0) return 'Invalid server — spaces not allowed';
+      if(v.length>120) return 'Server too long (max 120 characters)';
+      if(/^[a-zA-Z]+:\/\//.test(v)) return 'Invalid server — no scheme allowed';
+      var colon=v.lastIndexOf(':');
+      if(colon>=0){
+        var host=v.slice(0,colon), port=v.slice(colon+1);
+        if(!host||!port||!/^\d{1,5}$/.test(port)) return 'Invalid port (1–65535)';
+        var p=parseInt(port,10);
+        if(p<1||p>65535) return 'Port out of range (1–65535)';
+      }
+      return null;
+    },
     note:'The diagnostic log is sent over UDP to this server.',
     okLabel:'Save'
   }).then(function(v){
@@ -1750,7 +1819,7 @@ if(typeof document!=='undefined' && typeof document.addEventListener==='function
   var askOkBtn = $("askOk");
   if(askOkBtn) askOkBtn.onclick = askSubmit;
   var askIn = $("askInput");
-  if(askIn) askIn.oninput = askPaintHint;
+  if(askIn) askIn.oninput = askValidate;
 }
 
 function otaCheck(){

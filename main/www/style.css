@@ -30,6 +30,7 @@ body{font:16px/1.4 var(--sans); background:var(--bg); color:var(--fg); -webkit-f
 body.modal-open{overflow:hidden}
 button{font:inherit; color:inherit; cursor:pointer}
 button:disabled{cursor:default}
+.btn:disabled{opacity:.45; cursor:not-allowed; pointer-events:none}
 :focus-visible{outline:3px solid var(--focus); outline-offset:2px}
 svg{display:block}
 .mono{font-family:var(--mono)}
@@ -244,6 +245,8 @@ html.modal-open, body.modal-open{overflow:hidden; overscroll-behavior:none}
   color:var(--fg); font:inherit; font-size:16px; outline:none}
 .field input.mono{font-family:var(--mono); letter-spacing:.5px}
 .field input:focus{background:var(--card); border-color:var(--accent); box-shadow:0 0 0 3px rgba(232,33,39,.14)}
+.field input.invalid{border-color:var(--accent); box-shadow:0 0 0 3px rgba(232,33,39,.14)}
+.field-err{font-size:12px; font-weight:550; color:var(--accent-text); margin-top:2px; line-height:1.3}
 .actions{display:grid; grid-template-columns:1fr 1fr; gap:10px}
 .ota-head{display:flex; align-items:center; justify-content:space-between; gap:10px}
 .chip-badge{padding:3px 10px; border-radius:999px; font-size:12px; font-weight:650; color:var(--accent-text);

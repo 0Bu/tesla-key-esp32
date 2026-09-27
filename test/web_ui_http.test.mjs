@@ -1682,3 +1682,103 @@ test("channel switching is responsive and immune to intermediate polling race co
   assert.equal(context.otaChannelTarget, null);
   assert.equal(element("optRelease")["aria-checked"], "true");
 });
+
+test("askModal live validation enforces valid input, shows errors, and blocks save", async () => {
+  const { context, element } = loadUi();
+  context.state = { vin: "LRW3E7FS4TC656735", key_present: true };
+
+  // 1. editVin validation
+  let vinSaved = null;
+  const vinPromise = context.editVin();
+
+  // Initially opened with valid current VIN
+  assert.equal(element("askModal").classList.contains("hide"), false);
+  assert.equal(element("askInput").value, "LRW3E7FS4TC656735");
+  assert.equal(element("askOk").disabled, false);
+  assert.equal(element("askErr").classList.contains("hide"), true);
+
+  // User deletes characters -> 16 chars (invalid)
+  element("askInput").value = "LRW3E7FS4TC65673";
+  context.askValidate();
+  assert.equal(element("askOk").disabled, true);
+  assert.equal(element("askErr").classList.contains("hide"), false);
+  assert.match(element("askErr").textContent, /17 characters/i);
+  assert.equal(element("askInput").classList.contains("invalid"), true);
+
+  // Calling askSubmit() while invalid MUST NOT close or save
+  context.askSubmit();
+  assert.equal(element("askModal").classList.contains("hide"), false);
+
+  // User enters invalid character (e.g. letter 'I')
+  element("askInput").value = "LRW3E7FS4TC65673I";
+  context.askValidate();
+  assert.equal(element("askOk").disabled, true);
+  assert.equal(element("askErr").classList.contains("hide"), false);
+  assert.match(element("askErr").textContent, /I, O, Q/i);
+
+  // User enters valid new VIN
+  element("askInput").value = "5YJ3E1EA1JF000001";
+  context.askValidate();
+  assert.equal(element("askOk").disabled, false);
+  assert.equal(element("askErr").classList.contains("hide"), true);
+  assert.equal(element("askInput").classList.contains("invalid"), false);
+
+  // Close with cancel to clean up
+  context.askClose(null);
+  await vinPromise;
+  assert.equal(element("askModal").classList.contains("hide"), true);
+  assert.equal(element("askOk").disabled, false);
+
+  // 2. editMqtt validation
+  const mqttPromise = context.editMqtt();
+  assert.equal(element("askModal").classList.contains("hide"), false);
+
+  // Empty broker is valid (disables MQTT)
+  element("askInput").value = "";
+  context.askValidate();
+  assert.equal(element("askOk").disabled, false);
+  assert.equal(element("askErr").classList.contains("hide"), true);
+
+  // Invalid broker with space
+  element("askInput").value = "192.0.2.20 1883";
+  context.askValidate();
+  assert.equal(element("askOk").disabled, true);
+  assert.equal(element("askErr").classList.contains("hide"), false);
+  assert.match(element("askErr").textContent, /spaces not allowed/i);
+
+  // Invalid broker missing port
+  element("askInput").value = "192.0.2.20";
+  context.askValidate();
+  assert.equal(element("askOk").disabled, true);
+  assert.equal(element("askErr").classList.contains("hide"), false);
+  assert.match(element("askErr").textContent, /host:port/i);
+
+  // Valid broker
+  element("askInput").value = "192.0.2.20:1883";
+  context.askValidate();
+  assert.equal(element("askOk").disabled, false);
+  assert.equal(element("askErr").classList.contains("hide"), true);
+
+  context.askClose(null);
+  await mqttPromise;
+
+  // 3. editSyslog validation
+  const syslogPromise = context.editSyslog();
+  assert.equal(element("askModal").classList.contains("hide"), false);
+
+  // Invalid scheme
+  element("askInput").value = "udp://192.0.2.30:514";
+  context.askValidate();
+  assert.equal(element("askOk").disabled, true);
+  assert.equal(element("askErr").classList.contains("hide"), false);
+  assert.match(element("askErr").textContent, /no scheme/i);
+
+  // Valid syslog
+  element("askInput").value = "192.0.2.30:514";
+  context.askValidate();
+  assert.equal(element("askOk").disabled, false);
+  assert.equal(element("askErr").classList.contains("hide"), true);
+
+  context.askClose(null);
+  await syslogPromise;
+});
