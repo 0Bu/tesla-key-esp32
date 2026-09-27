@@ -37,7 +37,12 @@ function loadUi() {
         querySelector(sel) {
           if (!this._subs) this._subs = new Map();
           if (!this._subs.has(sel)) {
-            this._subs.set(sel, { innerHTML: "", textContent: "", className: "" });
+            this._subs.set(sel, {
+              innerHTML: "",
+              textContent: "",
+              className: "",
+              focus() { if (context.document) context.document.activeElement = this; }
+            });
           }
           return this._subs.get(sel);
         }
@@ -607,7 +612,7 @@ test("OTA check and render incorporate target PR when set", async () => {
 
   let requestedUrl = null;
   context.fetch = async (url) => {
-    requestedUrl = url;
+    if (String(url).includes("/ota/check")) requestedUrl = url;
     return {
       ok: true,
       status: 200,
@@ -725,15 +730,68 @@ test("an OTA dialog that pops up over an open sheet never takes its focus, and f
   element("wrap").appendChild(element("vinBtn"));
   element("vinBtn").focus();
   const answer = context.askText({ title: "Vehicle VIN" });
-  assert.equal(context.document.activeElement, element("askInput"));
+  assert.notEqual(context.document.activeElement, element("askInput"), "no auto-focus in the field");
+  const sheet = element("askModal").querySelector(".sheet");
+  assert.equal(context.document.activeElement, sheet, "the sheet on top receives focus without auto-focusing the input");
   const decision = context.askOtaInstall({ current: "1.5.0", available: "1.5.1" }, "");
-  assert.equal(context.document.activeElement, element("askInput"), "the sheet on top keeps focus");
+  assert.equal(context.document.activeElement, sheet, "the sheet on top keeps focus");
   context.askClose(context.askCancelValue);
   assert.equal(await answer, null);
   assert.equal(context.document.activeElement, element("otaInstall"), "not the inert page behind the dialog");
   context.closeOtaModal(false);
   assert.equal(await decision, false);
   assert.equal(context.document.activeElement, element("verLink"));
+});
+
+test("modal field selection selects content on first activation and preserves native caret on subsequent clicks", () => {
+  const { context } = loadUi();
+  let selected = 0;
+  const selectableField = {
+    matches: (sel) => sel.includes(".sheet input") || sel.includes(".modal-card input"),
+    value: "LRW3E7FS4TC656735",
+    selectionStart: 17,
+    selectionEnd: 17,
+    select: () => {
+      selected++;
+      selectableField.selectionStart = 0;
+      selectableField.selectionEnd = selectableField.value.length;
+    },
+    setSelectionRange: (start, end) => {
+      selectableField.selectionStart = start;
+      selectableField.selectionEnd = end;
+    },
+  };
+  const otherField = {};
+  const listeners = {};
+  const doc = {
+    activeElement: otherField,
+    addEventListener: (name, fn) => { listeners[name] = fn; }
+  };
+  context.wireModalFieldSelection(doc);
+
+  // First tap: inactive field -> pointerdown, focusin, click selects all
+  listeners.pointerdown({ target: selectableField });
+  doc.activeElement = selectableField;
+  listeners.focusin({ target: selectableField });
+  listeners.click({ target: selectableField });
+  assert.equal(selected, 2, "activating an inactive modal field leaves complete content selected");
+
+  // Second tap while active: preserves native caret placement
+  listeners.pointerdown({ target: selectableField });
+  listeners.click({ target: selectableField });
+  assert.equal(selected, 2, "clicking an already-active modal field must not re-select");
+  assert.equal(selectableField.selectionStart, selectableField.value.length,
+    "previous selection collapses before native caret placement on second tap");
+  assert.equal(selectableField.selectionEnd, selectableField.selectionStart,
+    "second tap leaves a collapsed caret instead of full selection");
+
+  // Once blurred, next tap is a new activation and selects all again
+  doc.activeElement = otherField;
+  listeners.pointerdown({ target: selectableField });
+  doc.activeElement = selectableField;
+  listeners.focusin({ target: selectableField });
+  listeners.click({ target: selectableField });
+  assert.equal(selected, 4, "first tap after blur selects complete content again");
 });
 
 test("a destructive confirmation starts on Cancel and an indeterminate OTA phase shows no fake progress", () => {
@@ -769,4 +827,222 @@ test("VIN change decides on confirmation from the state current after input", as
 
   assert.equal(confirmCalled, false, "no key any more, so nothing to confirm");
   assert.equal(fetchCalled, true);
+});
+
+test("firmware pane replaces fwHost with changelog section", () => {
+  const html = fs.readFileSync(new URL("../main/www/index.html", import.meta.url), "utf8");
+  assert.doesNotMatch(html, /id="fwHost"/);
+  assert.match(html, /id="fwChangelog"/);
+  assert.match(html, /id="fwChanges"[^>]+hidden/);
+  assert.match(html, /id="fwNoChanges"[^>]+hidden/);
+  assert.match(html, /id="optRelease"[\s\S]*?id="optDev"[\s\S]*?id="fwChangelog"/);
+});
+
+test("renderInstalledChangelog populates fwChanges and toggles fwNoChanges", () => {
+  const { context, element } = loadUi();
+  const list = element("fwChanges");
+  const noChanges = element("fwNoChanges");
+
+  context.renderInstalledChangelog("• Improved BLE pairing\n• Web UI enhancements");
+  assert.equal(list.hidden, false);
+  assert.equal(noChanges.hidden, true);
+  assert.equal(list.children.length, 2);
+  assert.equal(list.children[0].textContent, "• Improved BLE pairing");
+  assert.equal(list.children[1].textContent, "• Web UI enhancements");
+
+  context.renderInstalledChangelog("");
+  assert.equal(list.hidden, true);
+  assert.equal(noChanges.hidden, false);
+  assert.equal(list.children.length, 0);
+});
+
+test("loadInstalledChangelog fetches remote changelog.json on release channel when matching version", async () => {
+  const { context, element } = loadUi();
+  let requestedUrl = null;
+  context.fetch = async (url) => {
+    requestedUrl = url;
+    if (url === "https://0bu.github.io/tesla-key-esp32/changelog.json") {
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return { version: "1.6.0", changelog: "Release feature note" };
+        }
+      };
+    }
+    throw new Error("unexpected URL: " + url);
+  };
+
+  context.state = { version: "1.6.0" };
+  context.otaChannel = "release";
+  const text = await context.loadInstalledChangelog();
+  assert.equal(requestedUrl, "https://0bu.github.io/tesla-key-esp32/changelog.json");
+  assert.equal(text, "Release feature note");
+
+  await context.updateInstalledChangelog(true);
+  const list = element("fwChanges");
+  assert.equal(list.hidden, false);
+  assert.equal(list.children.length, 1);
+  assert.equal(list.children[0].textContent, "Release feature note");
+});
+
+test("loadInstalledChangelog filters dev entries by running version on dev channel", async () => {
+  const { context, element } = loadUi();
+  context.fetch = async (url) => {
+    if (url === "https://0bu.github.io/tesla-key-esp32/dev/changelog.json") {
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return {
+            version: "1.5.9-dev.2",
+            changelog: "v1.5.9-dev.1 — Dev note 1\nv1.5.9-dev.2 — Dev note 2"
+          };
+        }
+      };
+    }
+    throw new Error("unexpected URL: " + url);
+  };
+
+  context.state = { version: "1.5.9-dev.1" };
+  context.otaChannel = "dev";
+  const text = await context.loadInstalledChangelog();
+  assert.equal(text, "Dev note 1");
+
+  await context.updateInstalledChangelog(true);
+  const list = element("fwChanges");
+  assert.equal(list.hidden, false);
+  assert.equal(list.children.length, 1);
+  assert.equal(list.children[0].textContent, "Dev note 1");
+});
+
+test("getInstalledChangelogUrl targets PR directory when target PR is active", () => {
+  const { context } = loadUi();
+  context.location.search = "?pr=42";
+  assert.equal(context.getInstalledChangelogUrl(), "https://0bu.github.io/tesla-key-esp32/PR/42/changelog.json");
+
+  context.location.search = "";
+  context.otaChannel = "dev";
+  assert.equal(context.getInstalledChangelogUrl(), "https://0bu.github.io/tesla-key-esp32/dev/changelog.json");
+
+  context.otaChannel = "release";
+  assert.equal(context.getInstalledChangelogUrl(), "https://0bu.github.io/tesla-key-esp32/changelog.json");
+});
+
+test("loadInstalledChangelog falls back to /ota/changelog when remote fetch fails", async () => {
+  const { context, element } = loadUi();
+  context.fetch = async (url) => {
+    if (url.startsWith("https://0bu.github.io")) {
+      throw new Error("offline");
+    }
+    if (url === "/ota/changelog") {
+      return {
+        ok: true,
+        status: 200,
+        async text() { return "Fallback local note"; }
+      };
+    }
+    throw new Error("unexpected URL: " + url);
+  };
+
+  context.state = { version: "1.6.0" };
+  context.otaChannel = "release";
+  const text = await context.loadInstalledChangelog();
+  assert.equal(text, "Fallback local note");
+
+  await context.updateInstalledChangelog(true);
+  const list = element("fwChanges");
+  assert.equal(list.hidden, false);
+  assert.equal(list.children.length, 1);
+  assert.equal(list.children[0].textContent, "Fallback local note");
+});
+
+test("updateInstalledChangelog avoids duplicate fetch when key is unchanged unless forced", async () => {
+  const { context } = loadUi();
+  let fetchCount = 0;
+  context.fetch = async () => {
+    fetchCount++;
+    return { ok: true, status: 200, async json() { return { version: "1.6.0", changelog: "Note" }; } };
+  };
+
+  context.state = { version: "1.6.0" };
+  context.otaChannel = "release";
+
+  await context.updateInstalledChangelog(false);
+  assert.equal(fetchCount, 1);
+
+  await context.updateInstalledChangelog(false);
+  assert.equal(fetchCount, 1, "did not fetch second time because key was unchanged");
+
+  await context.updateInstalledChangelog(true);
+  assert.equal(fetchCount, 2, "fetched when forced");
+});
+
+test("render triggers updateInstalledChangelog and populates fwChanges", async () => {
+  const { context, element } = loadUi();
+  context.fetch = async (url) => {
+    return {
+      ok: true,
+      status: 200,
+      async json() {
+        return { version: "1.6.0", changelog: "Line A\nLine B" };
+      }
+    };
+  };
+
+  context.render({
+    version: "1.6.0",
+    ota: { channel: "release" }
+  });
+
+  await new Promise(resolve => setTimeout(resolve, 10));
+
+  const list = element("fwChanges");
+  assert.equal(list.hidden, false);
+  assert.equal(list.children.length, 2);
+  assert.equal(list.children[0].textContent, "Line A");
+  assert.equal(list.children[1].textContent, "Line B");
+  assert.equal(element("fwNoChanges").hidden, true);
+});
+
+test("loadInstalledChangelog handles 204 and network errors gracefully", async () => {
+  const { context, element } = loadUi();
+  context.fetch = async () => ({ ok: true, status: 204, async text() { return ""; } });
+
+  context.state = { version: "1.6.0" };
+  context.otaChannel = "release";
+  await context.updateInstalledChangelog(true);
+
+  const list = element("fwChanges");
+  const noChanges = element("fwNoChanges");
+  assert.equal(list.hidden, true);
+  assert.equal(noChanges.hidden, false);
+
+  // Network error path
+  context.fetch = async () => { throw new Error("network down"); };
+  await context.updateInstalledChangelog(true);
+  assert.equal(list.hidden, true);
+  assert.equal(noChanges.hidden, false);
+});
+
+test("setChannel reloads installed changelog on channel change", async () => {
+  const { context, element } = loadUi();
+  let devChangelogFetched = false;
+  context.fetch = async (url) => {
+    if (url === "https://0bu.github.io/tesla-key-esp32/dev/changelog.json") {
+      devChangelogFetched = true;
+      return { ok: true, status: 200, async json() { return { version: "1.6.0", changelog: "Dev changelog note" }; } };
+    }
+    return { ok: true, status: 200, async json() { return { result: true }; } };
+  };
+  context.otaCheck = () => Promise.resolve();
+
+  context.otaChannel = "release";
+  await context.setChannel("dev");
+
+  assert.equal(context.otaChannel, "dev");
+  assert.equal(devChangelogFetched, true);
+  const list = element("fwChanges");
+  assert.equal(list.hidden, false);
+  assert.equal(list.children[0].textContent, "Dev changelog note");
 });

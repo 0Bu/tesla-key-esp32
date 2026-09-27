@@ -522,7 +522,9 @@ function render(s){
   $("vehVal").innerHTML=hasVin?esc(s.vin):'<span class="ph">Not set</span>';
   var pairedTxt=s.paired_at?('Paired '+new Date(s.paired_at*1000).toLocaleDateString(undefined,{year:'numeric',month:'short',day:'numeric'})):'Paired with the vehicle';
   setSub("vehSub", paired?pairedTxt:(hasVin?'Not paired yet':'Add the VIN to begin'), '');
-  var vbt=$("vinBtnTx"); if(vbt) vbt.textContent=hasVin?'Change VIN':'Add VIN';
+  var vinTx=hasVin?'Change VIN':'Add VIN';
+  var vb=$("vinBtn"); if(vb){ vb.setAttribute('aria-label',vinTx); vb.setAttribute('title',vinTx); }
+  var vbt=$("vinBtnTx"); if(vbt) vbt.textContent=vinTx;
 
   // bluetooth — link to the car. WHICH state to show is decided by bleRowFromStatus() above (the
   // JS half of main/logic/ble_row.hpp, kept honest by scripts/check-ble-row-parity.sh); this
@@ -589,7 +591,6 @@ function render(s){
   // header + firmware pane
   var host=(typeof location!=='undefined'&&location.host)?location.host:'';
   $("ipline").textContent = s.ip || host;
-  var fh=$("fwHost"); if(fh) fh.textContent = [host, (s.ip&&s.ip!==host)?s.ip:''].filter(Boolean).join(' · ');
   var prTarget=getTargetPr();
   var fv=$("fwVer"); if(fv) fv.textContent='v'+(s.version||'?')+(prTarget>0?' [PR #'+prTarget+']':'');
   var vl=$("verLink");
@@ -606,20 +607,23 @@ function render(s){
     renderChanMenu();
   }
   renderFwSub();
+  updateInstalledChangelog(false);
 
   // key
+  var keyTx=s.key_present?'Regenerate key':'Generate key';
+  var kbBtn=$("keyBtn");
+  if(kbBtn){ kbBtn.setAttribute('aria-label',keyTx); kbBtn.setAttribute('title',keyTx); }
   var kb=$("keyBtnTx");
+  if(kb) kb.textContent=keyTx;
   if(s.key_present){
     $("keyVal").innerHTML=esc(s.key_fingerprint||'');
     var created=s.key_created?('Created '+new Date(s.key_created*1000).toLocaleDateString(undefined,{year:'numeric',month:'short',day:'numeric'})):'';
     if(s.reauth&&!paired) setSub("keySub",'New key — approve it on the touchscreen','warn');
     else if(paired) setSub("keySub",created?created+' · paired':'Paired with the vehicle','ok');
     else setSub("keySub",(created?created+' · ':'')+'not paired yet','');
-    if(kb) kb.textContent='Regenerate key';
   } else {
     $("keyVal").innerHTML='<span class="ph">Not generated</span>';
     setSub("keySub",'No key yet','');
-    if(kb) kb.textContent='Generate key';
   }
 
   setBadge('badgeSetup', !configured || !!(s.reauth&&!paired));
@@ -693,7 +697,10 @@ var askResolve=null, askCancelValue=null, askReturnFocus=null, askHintFn=null;
 function isOpen(id){ var m=$(id); return !!(m&&m.classList&&!m.classList.contains('hide')); }
 function syncModal(){
   var open=isOpen('askModal')||isOpen('otaModal');
-  if(typeof document!=='undefined'&&document.body&&document.body.classList) document.body.classList.toggle('modal-open',open);
+  if(typeof document!=='undefined'){
+    if(document.documentElement&&document.documentElement.classList) document.documentElement.classList.toggle('modal-open',open);
+    if(document.body&&document.body.classList) document.body.classList.toggle('modal-open',open);
+  }
   var w=$("wrap"); if(w) w.inert=open;
   // The OTA dialog sits under an open sheet: keep Tab from reaching its Install button.
   var om=$("otaModal"); if(om) om.inert=isOpen('askModal');
@@ -724,9 +731,16 @@ function askOpen(o,cancelValue){
   }
   var m=$("askModal"); if(m&&m.classList) m.classList.remove('hide');
   syncModal();
-  // A destructive confirmation starts on Cancel, so a held or repeated Enter can't confirm it.
-  var target=text?inp:(o.destructive?cc:ok);
-  if(target&&typeof target.focus==='function') target.focus();
+  // No auto focus in the field: focusing the dialog card keeps the modal announced to
+  // screen readers without popping up the software keyboard or selecting text prematurely.
+  if(text){
+    var card=m?(m.querySelector?m.querySelector('.sheet'):null):null;
+    if(!card) card=m;
+    if(card&&typeof card.focus==='function') card.focus({preventScroll:true});
+  } else {
+    var target=o.destructive?cc:ok;
+    if(target&&typeof target.focus==='function') target.focus();
+  }
   return new Promise(function(resolve){ askResolve=resolve; });
 }
 function askPaintHint(){
@@ -752,6 +766,43 @@ function askSubmit(){
 }
 function askText(o){ o.input=true; return askOpen(o,null); }
 function askConfirm(o){ return askOpen(o,false); }
+
+// Popup editing contract (matching Daikin FW): activating an INACTIVE text field selects its complete
+// value, so replacing a VIN, broker or server is one paste. A tap/click in the ALREADY ACTIVE field
+// keeps native caret placement.
+function selectModalFieldContents(target){
+  if(!target || typeof target.matches !== 'function' || typeof target.select !== 'function') return false;
+  if(!target.matches('.modal-card textarea, .modal-card input:not([type="checkbox"]):not([type="radio"]):not([type="file"]), .sheet textarea, .sheet input:not([type="checkbox"]):not([type="radio"]):not([type="file"])'))
+    return false;
+  try { target.select(); return true; } catch(e){ return false; }
+}
+
+function selectModalFieldOnActivation(target, wasActive){
+  return !wasActive && selectModalFieldContents(target);
+}
+
+function wireModalFieldSelection(doc){
+  if(!doc || typeof doc.addEventListener !== 'function') return;
+  var pointerTarget = null;
+  var pointerWasActive = false;
+  doc.addEventListener('pointerdown', function(event){
+    pointerTarget = event.target;
+    pointerWasActive = (doc.activeElement === event.target);
+    if(pointerWasActive && event.target && typeof event.target.setSelectionRange === 'function'
+       && event.target.selectionStart !== event.target.selectionEnd){
+      var caret = (event.target.selectionEnd != null) ? event.target.selectionEnd : (event.target.value ? event.target.value.length : 0);
+      try { event.target.setSelectionRange(caret, caret); } catch(e){}
+    }
+  });
+  doc.addEventListener('focusin', function(event){
+    selectModalFieldOnActivation(event.target, false);
+  });
+  doc.addEventListener('click', function(event){
+    if(event.target === pointerTarget)
+      selectModalFieldOnActivation(event.target, pointerWasActive);
+    pointerTarget = null;
+  });
+}
 
 /* ---------- config actions ---------- */
 function vinValid(v){return /^[A-HJ-NPR-Z0-9]{17}$/i.test(v)}
@@ -1013,6 +1064,7 @@ function setChannel(chan){
   otaChannel = chan;
   otaChannelInitialSet = true;
   renderChanMenu();
+  updateInstalledChangelog(true);
   return requestJson('/set_ota', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -1024,6 +1076,7 @@ function setChannel(chan){
   }).catch(function(){
     otaChannel = prevChan;
     renderChanMenu();
+    updateInstalledChangelog(true);
     toast('Failed to set update channel', 'err');
   });
 }
@@ -1060,6 +1113,93 @@ function loadOtaChangelog(){
       clearTimeout(timer);
       return '';
     });
+}
+
+var installedChangelogKey = null;
+
+function getInstalledChangelogUrl(){
+  var pr = getTargetPr();
+  var base = 'https://0bu.github.io/tesla-key-esp32/';
+  if(pr > 0) return base + 'PR/' + pr + '/changelog.json';
+  if(otaChannel === 'dev') return base + 'dev/changelog.json';
+  return base + 'changelog.json';
+}
+
+function parseInstalledChangelog(data, curVer, chan){
+  if(!data || typeof data.changelog !== 'string' || !data.changelog.trim()) return '';
+  var text = data.changelog.trim();
+  if(chan === 'dev' && curVer){
+    var lines = text.split(/\r?\n/);
+    var prefix = 'v' + curVer + ' — ';
+    var matched = [];
+    for(var i = 0; i < lines.length; i++){
+      var l = lines[i].trim();
+      if(l.indexOf(prefix) === 0){
+        matched.push(l.substring(prefix.length).trim());
+      }
+    }
+    if(matched.length) return matched.join('\n');
+  }
+  if(!data.version || !curVer || data.version === curVer || chan === 'dev' || getTargetPr() > 0){
+    return text;
+  }
+  return '';
+}
+
+function loadInstalledChangelog(){
+  var url = getInstalledChangelogUrl();
+  var ctl = typeof AbortController !== 'undefined' ? new AbortController() : null;
+  var timer = setTimeout(function(){ if(ctl) ctl.abort(); }, OTA_HTTP_TIMEOUT_MS);
+  var curVer = (state && state.version) ? String(state.version).trim() : '';
+  var chan = otaChannel;
+  return fetch(url, {cache: 'no-store', signal: ctl ? ctl.signal : undefined})
+    .then(function(r){
+      clearTimeout(timer);
+      if(!r || !r.ok || r.status === 204) throw new Error('remote changelog unavailable');
+      return r.json().then(function(data){
+        return parseInstalledChangelog(data, curVer, chan);
+      }).catch(function(){
+        return r.text ? r.text() : '';
+      });
+    })
+    .then(function(text){
+      if(text && text.trim()) return text.trim();
+      return loadOtaChangelog();
+    })
+    .catch(function(){
+      clearTimeout(timer);
+      return loadOtaChangelog();
+    });
+}
+
+function renderInstalledChangelog(changelog){
+  var list = $("fwChanges");
+  var noChanges = $("fwNoChanges");
+  if(!list) return;
+  list.textContent = '';
+  if(typeof list.replaceChildren === 'function') list.replaceChildren();
+  else if(list.children) list.children.length = 0;
+  var notes = String(changelog || '').split(/\r?\n/).map(function(s){ return s.trim(); }).filter(Boolean);
+  var count = notes.length;
+  for(var i = 0; i < count; i++){
+    var item = document.createElement('li');
+    item.textContent = notes[i];
+    list.appendChild(item);
+  }
+  list.hidden = (count === 0);
+  if(noChanges) noChanges.hidden = (count > 0);
+}
+
+function updateInstalledChangelog(force){
+  var currentKey = (state && state.version ? state.version : '') + ':' + otaChannel + ':' + getTargetPr();
+  if(!force && installedChangelogKey === currentKey) return Promise.resolve();
+  installedChangelogKey = currentKey;
+  return loadInstalledChangelog().then(function(text){
+    if(installedChangelogKey === currentKey){
+      renderInstalledChangelog(text);
+    }
+    return text;
+  });
 }
 
 function askOtaInstall(status, changelog){
@@ -1103,6 +1243,7 @@ function askOtaInstall(status, changelog){
 }
 
 if(typeof document!=='undefined' && typeof document.addEventListener==='function'){
+  wireModalFieldSelection(document);
   document.addEventListener('click', function(e){
     var modalBackdrop = $("otaBackdrop");
     if(modalBackdrop && e.target === modalBackdrop){

@@ -44,8 +44,8 @@
       "iramCapacity": 0,
       "maxIramUsed": 0,
       "maxUnsignedApp": 1966080,
-      "maxElfTotal": 1952282,
-      "maxFlashCodeAndRodata": 1815032
+      "maxElfTotal": 1953762,
+      "maxFlashCodeAndRodata": 1816512
     }
   }
 }

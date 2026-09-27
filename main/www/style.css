@@ -67,6 +67,8 @@ svg{display:block}
 .stack{flex-direction:column; gap:12px}
 .card{background:var(--card); border:1px solid var(--border); border-radius:var(--r-card); box-shadow:var(--shadow);
   padding:16px; display:flex; flex-direction:column; gap:10px; min-width:0}
+.card-action{flex-direction:row; align-items:center; justify-content:space-between; gap:12px}
+.card-main{display:flex; flex-direction:column; gap:4px; min-width:0; flex:1}
 .lbl{font-size:11px; font-weight:650; letter-spacing:.6px; text-transform:uppercase; color:var(--muted)}
 .val{font-size:19px; overflow-wrap:anywhere}
 .val.vin{letter-spacing:.8px}
@@ -203,16 +205,24 @@ svg{display:block}
 .seg{display:grid; grid-template-columns:1fr 1fr; padding:3px; border-radius:12px; background:var(--soft)}
 .seg-opt{min-height:44px; border:0; border-radius:10px; background:transparent; font-size:14px; font-weight:650}
 .seg-opt.sel{background:var(--card); box-shadow:0 1px 3px rgba(0,0,0,.12)}
-.meta{font-size:12.5px; color:var(--muted); overflow-wrap:anywhere}
+.fw-changelog-wrap{display:flex; flex-direction:column; gap:6px}
+.fw-changes{font-size:13.5px; line-height:1.45; color:var(--fg); padding-left:18px}
+.fw-changes li{word-break:break-word}
 
 /* sheets / dialogs */
-.modal{position:fixed; inset:0; z-index:20; display:flex; align-items:flex-end; justify-content:center}
+html.modal-open, body.modal-open{overflow:hidden; overscroll-behavior:none}
+.modal{position:fixed; inset:0; z-index:20; display:grid; place-items:center;
+  grid-template-rows:minmax(0,1fr); overflow:hidden; height:100vh; height:100dvh;
+  padding:max(18px,env(safe-area-inset-top)) max(18px,env(safe-area-inset-right))
+          max(18px,env(safe-area-inset-bottom)) max(18px,env(safe-area-inset-left))}
 #askModal{z-index:21} /* a sheet always sits above the OTA dialog, see syncModal() */
 .modal-backdrop{position:absolute; inset:0; background:var(--scrim); animation:fade .15s ease}
-.sheet{position:relative; width:100%; max-width:480px; max-height:92%; overflow:auto; background:var(--card);
-  border-radius:22px 22px 0 0; box-shadow:0 20px 60px rgba(0,0,0,.3); padding:10px 18px calc(18px + env(safe-area-inset-bottom));
-  display:flex; flex-direction:column; gap:14px; animation:sheet .26s var(--ease)}
-.grab{width:40px; height:5px; border-radius:3px; background:var(--border); align-self:center}
+.sheet, .modal-card{position:relative; width:100%; max-width:440px; min-height:0; max-height:100%; overflow-y:auto;
+  overscroll-behavior:contain; -webkit-overflow-scrolling:touch; background:var(--card);
+  border:1px solid var(--border); border-radius:20px; box-shadow:0 8px 32px rgba(0,0,0,.25); padding:20px 20px 18px;
+  display:flex; flex-direction:column; gap:14px; animation:tin .22s var(--ease)}
+.sheet[tabindex="-1"]:focus, .modal-card[tabindex="-1"]:focus{outline:none}
+.grab{display:none}
 .sheet-title{margin:0; font-size:22px; font-weight:650; letter-spacing:-.4px; line-height:1.2}
 .sheet p{margin:0}
 .note{font-size:14px; color:var(--muted)}
@@ -276,9 +286,6 @@ svg{display:block}
   .hero{padding:28px 20px; background:var(--card); border:1px solid var(--border); border-radius:var(--r-card); box-shadow:var(--shadow)}
   .cta,.cta:active{position:static; transform:none; width:auto; min-width:240px; min-height:50px; padding:0 24px; font-size:16px; box-shadow:var(--shadow-cta)}
   .wrap:not([data-tab=car]) .cta:not(.hide){display:flex}
-  .modal{align-items:center}
-  .sheet{border-radius:20px; padding:20px 20px 18px}
-  .grab{display:none}
   .toasts,.wrap[data-tab=car].has-cta~.toasts{bottom:24px}
 }
 @media (prefers-reduced-motion:reduce){
