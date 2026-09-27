@@ -57,7 +57,7 @@ Work in this order—it is a **single read-only pass**: pin baseline → enumera
    them and are reported separately from CI/hardware evidence.
    Explicitly cross-check that any external dependency version or commit cited across skills or
    reviewer agents (in particular `yoziru/tesla-ble` in `$vehicle-command-audit`, `$project-review`,
-   `$skill-audit`, and `.codex/agents/*.toml`) strictly agrees with the active pin in `main/idf_component.yml`.
+   `$skill-audit`, and `.agents/subagents.json`) strictly agrees with the active pin in `main/idf_component.yml`.
 4. **Report, do not correct.** Every canonical skill and reviewer gets a ✓ or a
    `SKILL-DRIFT` finding with the exact proposed change. An audit request never authorizes applying
    that proposal.

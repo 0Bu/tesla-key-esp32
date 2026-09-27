@@ -21,7 +21,7 @@ struct SyslogStatus {
     std::string error;
 };
 
-// Start the forwarder task. Reads NVS "syslog_uri" (web UI: Connections -> Syslog,
+// Start the forwarder task. Reads NVS "syslog_uri" (web UI: Network tab -> Syslog row,
 // POST /set_syslog), falling back to CONFIG_TESLA_SYSLOG_SERVER. "" disables
 // forwarding (the task idles, draining and dropping whatever is queued). Config is
 // resolved once here, at boot — like the MQTT bridge, /set_syslog reboots to apply
@@ -41,5 +41,5 @@ bool syslog_start(NvsStorageAdapter& config_store);
 // stall the caller. Called from diag_log.cpp's esp_log capture hook.
 void syslog_send(const char* msg, size_t len);
 
-// Snapshot for GET /status (the web-UI Connections card).
+// Snapshot for GET /status (the web UI's Network tab).
 SyslogStatus syslog_status();
