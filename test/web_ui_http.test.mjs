@@ -731,10 +731,10 @@ test("an OTA dialog that pops up over an open sheet never takes its focus, and f
   element("vinBtn").focus();
   const answer = context.askText({ title: "Vehicle VIN" });
   assert.notEqual(context.document.activeElement, element("askInput"), "no auto-focus in the field");
-  const sheet = element("askModal").querySelector(".sheet");
-  assert.equal(context.document.activeElement, sheet, "the sheet on top receives focus without auto-focusing the input");
+  const card = element("askModal").querySelector(".modal-card");
+  assert.equal(context.document.activeElement, card, "the modal card on top receives focus without auto-focusing the input");
   const decision = context.askOtaInstall({ current: "1.5.0", available: "1.5.1" }, "");
-  assert.equal(context.document.activeElement, sheet, "the sheet on top keeps focus");
+  assert.equal(context.document.activeElement, card, "the modal card on top keeps focus");
   context.askClose(context.askCancelValue);
   assert.equal(await answer, null);
   assert.equal(context.document.activeElement, element("otaInstall"), "not the inert page behind the dialog");
@@ -932,7 +932,7 @@ test("getInstalledChangelogUrl targets PR directory when target PR is active", (
 test("loadInstalledChangelog falls back to /ota/changelog when remote fetch fails", async () => {
   const { context, element } = loadUi();
   context.fetch = async (url) => {
-    if (url.startsWith("https://0bu.github.io")) {
+    if (url.startsWith("https://0bu.github.io/")) {
       throw new Error("offline");
     }
     if (url === "/ota/changelog") {
@@ -1044,5 +1044,215 @@ test("setChannel reloads installed changelog on channel change", async () => {
   assert.equal(devChangelogFetched, true);
   const list = element("fwChanges");
   assert.equal(list.hidden, false);
+  assert.equal(list.children.length, 1);
   assert.equal(list.children[0].textContent, "Dev changelog note");
+});
+
+test("toast enforces single popup policy, load spinner icon, in-place transition, and cleans up timers and keys", () => {
+  const { context, element } = loadUi();
+  const c = element("toasts");
+
+  // Mock timer infrastructure to test the leaving lifecycle
+  const timers = new Map();
+  let nextId = 1;
+  context.setTimeout = (fn, delay) => {
+    const id = nextId++;
+    timers.set(id, { fn, delay });
+    return id;
+  };
+  context.clearTimeout = (id) => {
+    timers.delete(id);
+  };
+  const fireTimers = (predicate) => {
+    for (const [id, entry] of Array.from(timers.entries())) {
+      if (!predicate || predicate(entry)) {
+        timers.delete(id);
+        entry.fn();
+      }
+    }
+  };
+
+  // Initial loading toast
+  const t1 = context.toast("Checking for updates…", "load", "ota");
+  assert.equal(c.children.length, 1);
+  assert.match(t1.className, /toast load/);
+  assert.match(t1.innerHTML, /class="otaspin"/);
+  assert.match(t1.innerHTML, /Checking for updates…/);
+  assert.equal(t1.dataset.key, "ota");
+
+  // In-place transition to success
+  const t2 = context.toast("Up to date", "ok", "ota");
+  assert.equal(c.children.length, 1);
+  assert.equal(t1, t2, "same DOM element updated in-place");
+  assert.match(t2.className, /toast ok/);
+  assert.match(t2.innerHTML, /✓/);
+  assert.match(t2.innerHTML, /Up to date/);
+  assert.equal(t2.dataset.key, "ota");
+
+  // A different action replaces the popup smoothly
+  const t3 = context.toast("Saving VIN…", "load", "vin");
+  assert.equal(c.children.length, 1);
+  assert.equal(t2, t3, "same single popup updated in-place for new action");
+  assert.match(t3.className, /toast load/);
+  assert.match(t3.innerHTML, /Saving VIN…/);
+  assert.equal(t3.dataset.key, "vin");
+
+  // Action without key clears dataset.key on reused element
+  const t4 = context.toast("Network restored", "ok");
+  assert.equal(t4, t3);
+  assert.equal(t4.dataset.key, undefined, "stale key is cleared when omitted");
+
+  // Test leaving race condition:
+  // 1) 3000ms timer fires -> t4 gets class 'leaving' and schedules 230ms removal timer
+  fireTimers(e => e.delay === 3000);
+  assert.equal(t4.classList.contains("leaving"), true);
+  assert.equal(timers.size, 1);
+
+  // 2) Rapid toast arrives during leaving animation
+  const t5 = context.toast("Immediate new alert", "info");
+  assert.equal(t5, t4, "reused during leaving");
+  assert.equal(t5.classList.contains("leaving"), false);
+
+  // 3) Fire any old timers (the old 230ms should have been cleared!)
+  fireTimers(e => e.delay === 230);
+  assert.equal(c.children.length, 1, "toast was not prematurely removed by cancelled leaving timer");
+  assert.equal(t5.parentNode, c, "toast remains attached in DOM");
+
+  // 4) New 3000ms and 230ms cycle completes normally
+  fireTimers(e => e.delay === 3000);
+  assert.equal(t5.classList.contains("leaving"), true);
+  fireTimers(e => e.delay === 230);
+  assert.equal(c.children.length, 0, "toast successfully removed after full cycle");
+});
+
+test("otaCheck triggers load toast and resolves to up to date toast when idle", async () => {
+  const { context, element } = loadUi();
+  context.fetch = async (url) => {
+    if (url.startsWith("/ota/check")) return { ok: true, status: 200, async json() { return { started: true }; } };
+    if (url.startsWith("/ota/status")) return {
+      ok: true, status: 200, async json() {
+        return {
+          state: "idle",
+          update_available: false,
+          progress: 0,
+          message: "idle",
+          available: "1.6.0",
+          current: "1.6.0"
+        };
+      }
+    };
+    return { ok: true, status: 200, async json() { return {}; } };
+  };
+
+  await context.otaCheck();
+
+  const toasts = element("toasts");
+  assert.equal(toasts.children.length, 1);
+  const toastEl = toasts.children[0];
+  assert.match(toastEl.className, /toast ok/);
+  assert.match(toastEl.innerHTML, /Firmware is up to date/);
+});
+
+test("index.html defines SVG symbols, harmonizes setup rows, and drops dead button labels", () => {
+  const html = fs.readFileSync(new URL("../main/www/index.html", import.meta.url), "utf8");
+  // SVG defs and symbols
+  assert.match(html, /<svg style="display:none"[^>]*>\s*<defs>/);
+  assert.match(html, /<symbol id="ic-bolt"/);
+  assert.match(html, /<symbol id="ic-pencil"/);
+  assert.match(html, /<symbol id="ic-car"/);
+  assert.match(html, /<symbol id="ic-key"/);
+  assert.match(html, /<symbol id="ic-wifi"/);
+  assert.match(html, /<symbol id="ic-warn"/);
+  assert.match(html, /<symbol id="ic-bt"/);
+
+  // use href references
+  assert.match(html, /<use href="#ic-bolt"/);
+  assert.match(html, /<use href="#ic-pencil"/);
+  assert.match(html, /<use href="#ic-car"/);
+  assert.match(html, /<use href="#ic-key"/);
+  assert.match(html, /<use href="#ic-wifi"/);
+
+  // Dead text spans removed
+  assert.doesNotMatch(html, /id="vinBtnTx"/);
+  assert.doesNotMatch(html, /id="keyBtnTx"/);
+
+  // Harmonized setup tab
+  assert.match(html, /<section class="pane pane-setup card rows" aria-label="Setup">/);
+  assert.match(html, /<div class="row" id="rowVeh">[\s\S]*?id="vehVal"[\s\S]*?id="vinBtn"/);
+  assert.match(html, /<div class="row" id="rowKey">[\s\S]*?id="keyVal"[\s\S]*?id="keyBtn"/);
+});
+
+test("askOpen uses adaptive focus: input on desktop pointer:fine, card container on mobile", async () => {
+  const { context, element } = loadUi();
+  let selected = false;
+  element("askInput").select = () => { selected = true; };
+
+  // Desktop environment: pointer: fine
+  context.window.matchMedia = (query) => ({
+    matches: query === "(pointer: fine)"
+  });
+  context.askText({ title: "Edit VIN", value: "LRW3E7FS4TC656735" });
+  assert.equal(context.document.activeElement, element("askInput"), "desktop focuses askInput");
+  assert.equal(selected, true, "desktop selects askInput content immediately");
+  context.askClose(null);
+
+  // Touch/mobile environment: pointer: coarse / not fine
+  selected = false;
+  context.window.matchMedia = (query) => ({
+    matches: false
+  });
+  const card = element("askModal").querySelector(".modal-card");
+  context.askText({ title: "Edit VIN", value: "LRW3E7FS4TC656735" });
+  assert.equal(context.document.activeElement, card, "touch keeps container focus");
+  assert.equal(selected, false, "touch does not select input text or jump keyboard");
+  context.askClose(null);
+});
+
+test("otaProgress throttles download toasts to 10% milestones while maintaining smooth inline progress", () => {
+  const { context, element } = loadUi();
+  const c = element("toasts");
+
+  context.otaBegin("update", 60000);
+
+  // 0% -> initial download toast
+  context.otaProgress({ state: "downloading", progress: 0 });
+  assert.equal(c.children.length, 1);
+  assert.match(c.children[0].innerHTML, /Downloading update… 0%/);
+  assert.equal(element("otaFill").style.width, "0%");
+
+  // 4% -> inline bar updates smoothly, toast does NOT update
+  context.otaProgress({ state: "downloading", progress: 4 });
+  assert.match(c.children[0].innerHTML, /Downloading update… 0%/);
+  assert.equal(element("otaFill").style.width, "4%");
+
+  // 8% -> toast still at 0%, inline bar at 8%
+  context.otaProgress({ state: "downloading", progress: 8 });
+  assert.match(c.children[0].innerHTML, /Downloading update… 0%/);
+  assert.equal(element("otaFill").style.width, "8%");
+
+  // 10% -> 10% milestone triggers toast update
+  context.otaProgress({ state: "downloading", progress: 10 });
+  assert.match(c.children[0].innerHTML, /Downloading update… 10%/);
+  assert.equal(element("otaFill").style.width, "10%");
+
+  // 17% -> toast still at 10%, inline bar at 17%
+  context.otaProgress({ state: "downloading", progress: 17 });
+  assert.match(c.children[0].innerHTML, /Downloading update… 10%/);
+  assert.equal(element("otaFill").style.width, "17%");
+
+  // 25% -> 20% milestone triggers toast update
+  context.otaProgress({ state: "downloading", progress: 25 });
+  assert.match(c.children[0].innerHTML, /Downloading update… 20%/);
+  assert.equal(element("otaFill").style.width, "25%");
+
+  // 105% (out-of-bounds progress) -> clamps to 100% milestone and width
+  context.otaProgress({ state: "downloading", progress: 105 });
+  assert.match(c.children[0].innerHTML, /Downloading update… 100%/);
+  assert.equal(element("otaFill").style.width, "100%");
+
+  // Phase transition: 'done'
+  context.otaExpectedVersion = "1.6.0";
+  context.otaProgress({ state: "done" });
+  assert.match(c.children[0].innerHTML, /Verifying &amp; rebooting…/);
+  assert.equal(element("otaFill").style.width, "100%");
 });

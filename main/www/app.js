@@ -51,13 +51,62 @@ function commandResponse(j){
 }
 
 /* ---------- toasts ---------- */
-function toast(msg,type){
-  type=type||'info'; var c=$("toasts"); if(!c)return;
-  while(c.children.length>2) c.removeChild(c.firstChild);
-  var t=document.createElement('div'); t.className='toast '+type;
-  t.innerHTML='<span class="ic">'+(type==='ok'?'✓':type==='err'?'!':'i')+'</span><span>'+esc(msg)+'</span>';
-  c.appendChild(t);
-  setTimeout(function(){ t.classList.add('leaving'); setTimeout(function(){if(t.parentNode)t.parentNode.removeChild(t)},230); }, type==='err'?5200:3000);
+var activeToast = null;
+var activeToastTimer = null;
+var activeToastLeavingTimer = null;
+
+function toast(msg, type, key){
+  type = type || 'info';
+  var c = $("toasts");
+  if(!c) return null;
+  clearTimeout(activeToastTimer);
+  activeToastTimer = null;
+  clearTimeout(activeToastLeavingTimer);
+  activeToastLeavingTimer = null;
+
+  var t = activeToast;
+  if(!t || !t.parentNode){
+    while(c.firstChild) c.removeChild(c.firstChild);
+    t = document.createElement('div');
+    c.appendChild(t);
+    activeToast = t;
+  } else {
+    t.classList.remove('leaving');
+  }
+
+  t.className = 'toast ' + type;
+  if(key) t.dataset.key = key;
+  else if(t.dataset && t.dataset.key) delete t.dataset.key;
+
+  var iconHtml = '';
+  if(type === 'load'){
+    iconHtml = '<svg class="otaspin" width="14" height="14" viewBox="0 0 16 16">' +
+      '<circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-dasharray="11 38"/>' +
+      '</svg>';
+  } else if(type === 'ok'){
+    iconHtml = '✓';
+  } else if(type === 'err'){
+    iconHtml = '!';
+  } else {
+    iconHtml = 'i';
+  }
+
+  t.innerHTML = '<span class="ic">' + iconHtml + '</span><span>' + esc(msg) + '</span>';
+
+  if(type !== 'load'){
+    var dur = type === 'err' ? 5200 : 3000;
+    activeToastTimer = setTimeout(function(){
+      activeToastTimer = null;
+      t.classList.add('leaving');
+      activeToastLeavingTimer = setTimeout(function(){
+        activeToastLeavingTimer = null;
+        if(t.parentNode) t.parentNode.removeChild(t);
+        if(activeToast === t) activeToast = null;
+      }, 230);
+    }, dur);
+  }
+
+  return t;
 }
 
 /* ---------- net ----------
@@ -198,13 +247,13 @@ function socColor(p){
 }
 /* ---------- icons (2px outline shapes; stroke styling lives in CSS) ---------- */
 var ICON={
-  bolt:'<path d="M13 2 4 14h6l-1 8 9-12h-6l1-8z"/>',
+  bolt:'<use href="#ic-bolt"/>',
   moon:'<path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/>',
-  car:'<path d="M19 17h2a1 1 0 0 0 1-1v-3a2 2 0 0 0-1.5-1.9L16 10l-2.2-2.3A2.5 2.5 0 0 0 12 7H5a1.6 1.6 0 0 0-1.4.9l-1.4 2.9A3.7 3.7 0 0 0 2 12v4a1 1 0 0 0 1 1h2"/><path d="M9 17h6"/><circle cx="7" cy="17" r="2"/><circle cx="17" cy="17" r="2"/>',
+  car:'<use href="#ic-car"/>',
   alarm:'<circle cx="12" cy="13" r="8"/><path d="M12 9v4l2 2"/><path d="M5 3 2 6"/><path d="m22 6-3-3"/>',
-  bluetooth:'<path d="m7 7 10 10-5 5V2l5 5L7 17"/>',
-  pencil:'<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/>',
-  key:'<circle cx="7.5" cy="15.5" r="5.5"/><path d="m21 2-9.6 9.6"/><path d="m15.5 7.5 3 3L22 7l-3-3"/>',
+  bluetooth:'<use href="#ic-bt"/>',
+  pencil:'<use href="#ic-pencil"/>',
+  key:'<use href="#ic-key"/>',
   link:'<path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7"/><path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7"/>',
   search:'<circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/>'
 };
@@ -434,7 +483,7 @@ function render(s){
   var act=null, actLabel='', actIcon='bolt', busyText=null;
   $("hero").classList.remove('hide');
   if(paired&&v){
-    if(waking){ waking=false; clearTimeout(wakeTimeout); }   // car is awake & reporting — stop the spinner
+    if(waking){ waking=false; clearTimeout(wakeTimeout); toast('Car is awake', 'ok', 'wake'); }   // car is awake & reporting — stop the spinner
     var soc=(v.usable_soc!=null?num(v.usable_soc):num(v.soc))||0;
     // "Charge complete" = battery reached its target and not charging; the start tap is gated
     // (the car would only reject a charge_start here as "complete"). See chargeComplete().
@@ -524,7 +573,6 @@ function render(s){
   setSub("vehSub", paired?pairedTxt:(hasVin?'Not paired yet':'Add the VIN to begin'), '');
   var vinTx=hasVin?'Change VIN':'Add VIN';
   var vb=$("vinBtn"); if(vb){ vb.setAttribute('aria-label',vinTx); vb.setAttribute('title',vinTx); }
-  var vbt=$("vinBtnTx"); if(vbt) vbt.textContent=vinTx;
 
   // bluetooth — link to the car. WHICH state to show is decided by bleRowFromStatus() above (the
   // JS half of main/logic/ble_row.hpp, kept honest by scripts/check-ble-row-parity.sh); this
@@ -613,8 +661,6 @@ function render(s){
   var keyTx=s.key_present?'Regenerate key':'Generate key';
   var kbBtn=$("keyBtn");
   if(kbBtn){ kbBtn.setAttribute('aria-label',keyTx); kbBtn.setAttribute('title',keyTx); }
-  var kb=$("keyBtnTx");
-  if(kb) kb.textContent=keyTx;
   if(s.key_present){
     $("keyVal").innerHTML=esc(s.key_fingerprint||'');
     var created=s.key_created?('Created '+new Date(s.key_created*1000).toLocaleDateString(undefined,{year:'numeric',month:'short',day:'numeric'})):'';
@@ -630,7 +676,7 @@ function render(s){
   setBadge('badgeNet', netWarn);
   setBadge('badgeFw', !!otaAvail || otaBusy);
 }
-function setSub(id,txt,cls){ var e=$(id); e.className='sub strong'+(cls?' '+cls:''); e.textContent=txt; }
+function setSub(id,txt,cls){ var e=$(id); if(e){ e.className='rs'+(cls?' '+cls:''); e.textContent=txt; } }
 function renderFwSub(){
   var f=$("fwSub"); if(!f) return;
   var ch=(otaChannel==='dev')?'Development':'Release';
@@ -647,23 +693,23 @@ function toggleCharge(){
   if(chargeComplete(v,isCharging)){ toast('Battery is already fully charged','info'); return; }
   var cmd=isCharging?'charge_stop':'charge_start';
   chgBusy=true; if(state)render(state);
-  toast(isCharging?'Stopping charge…':'Starting charge…','info');
+  toast(isCharging?'Stopping charge…':'Starting charge…', 'load', 'charge');
   return requestJsonResult('/api/1/vehicles/'+encodeURIComponent(vin)+'/command/'+cmd,{method:'POST'})
     .then(function(res){
       var j=res.json;
       if(j && j.response && typeof j.response.result === 'boolean'){
-        if(j.response.result){ toast(isCharging?'Charging stopped':'Charging started','ok'); return; }
+        if(j.response.result){ toast(isCharging?'Charging stopped':'Charging started', 'ok', 'charge'); return; }
         var f=chargeFailMsg((j.response.reason)||'', isCharging);
-        toast(f.msg, f.type);
+        toast(f.msg, f.type, 'charge');
         return;
       }
       if(!res.ok && res.status){
-        toast('Command failed (HTTP '+res.status+')','err');
+        toast('Command failed (HTTP '+res.status+')', 'err', 'charge');
         return;
       }
-      toast('Command failed — is the car in range?','err');
+      toast('Command failed — is the car in range?', 'err', 'charge');
     })
-    .catch(function(){ toast('Command failed — is the car in range?','err'); })
+    .catch(function(){ toast('Command failed — is the car in range?', 'err', 'charge'); })
     .then(function(){ chgBusy=false; poll(); });
 }
 // turn the device's failure reason into a clear message; the car rejecting a command
@@ -731,12 +777,19 @@ function askOpen(o,cancelValue){
   }
   var m=$("askModal"); if(m&&m.classList) m.classList.remove('hide');
   syncModal();
-  // No auto focus in the field: focusing the dialog card keeps the modal announced to
-  // screen readers without popping up the software keyboard or selecting text prematurely.
+  // Adaptive focus: on desktop (pointer: fine), focus the input immediately and select text
+  // so typing and Enter work right away. On mobile/touch, focus the card container so
+  // the virtual keyboard does not jump.
   if(text){
-    var card=m?(m.querySelector?m.querySelector('.sheet'):null):null;
-    if(!card) card=m;
-    if(card&&typeof card.focus==='function') card.focus({preventScroll:true});
+    var isDesktop = typeof window !== 'undefined' && typeof window.matchMedia === 'function' && window.matchMedia('(pointer: fine)').matches;
+    if(isDesktop && inp && typeof inp.focus === 'function'){
+      inp.focus();
+      if(typeof inp.select === 'function') inp.select();
+    } else {
+      var card=m?(m.querySelector?m.querySelector('.modal-card'):null):null;
+      if(!card) card=m;
+      if(card&&typeof card.focus==='function') card.focus({preventScroll:true});
+    }
   } else {
     var target=o.destructive?cc:ok;
     if(target&&typeof target.focus==='function') target.focus();
@@ -772,7 +825,7 @@ function askConfirm(o){ return askOpen(o,false); }
 // keeps native caret placement.
 function selectModalFieldContents(target){
   if(!target || typeof target.matches !== 'function' || typeof target.select !== 'function') return false;
-  if(!target.matches('.modal-card textarea, .modal-card input:not([type="checkbox"]):not([type="radio"]):not([type="file"]), .sheet textarea, .sheet input:not([type="checkbox"]):not([type="radio"]):not([type="file"])'))
+  if(!target.matches('.modal-card textarea, .modal-card input:not([type="checkbox"]):not([type="radio"]):not([type="file"])'))
     return false;
   try { target.select(); return true; } catch(e){ return false; }
 }
@@ -831,20 +884,20 @@ function editVin(){
     });
   }).then(function(go){
     if(!go) return;
-    toast('Saving VIN…','info');
+    toast('Saving VIN…', 'load', 'vin');
     return requestJsonResult('/set_vin',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({vin:v})})
       .then(function(res){
         var o=res.json&&res.json.response;
         if(o && typeof o.result === 'boolean' && typeof o.reason === 'string'){
-          if(!o.result){ toast(o.reason||'Failed to save VIN','err'); return; }
-          if(/no reboot|unchanged/i.test(o.reason||'')){ toast('VIN unchanged','info'); return; }
-          toast('VIN saved · rebooting','ok');
+          if(!o.result){ toast(o.reason||'Failed to save VIN', 'err', 'vin'); return; }
+          if(/no reboot|unchanged/i.test(o.reason||'')){ toast('VIN unchanged', 'info', 'vin'); return; }
+          toast('VIN saved · rebooting', 'ok', 'vin');
           return;
         }
         var msg=(!res.ok && res.status)?('Failed to save VIN (HTTP '+res.status+')'):'Failed to save VIN — no change was confirmed';
-        toast(msg,'err');
+        toast(msg, 'err', 'vin');
       })
-      .catch(function(){toast('Failed to save VIN — no change was confirmed','err')});
+      .catch(function(){toast('Failed to save VIN — no change was confirmed', 'err', 'vin')});
   });
 }
 function editMqtt(){
@@ -857,22 +910,22 @@ function editMqtt(){
   }).then(function(v){
     if(v==null) return;
     v=v.trim();
-    if(v && v.indexOf(' ')>=0){ toast('Invalid broker — use IP:PORT','err'); return; }
-    if(v===cur){ toast(v?'MQTT broker unchanged':'MQTT already disabled','info'); return; }
-    toast(v?'Saving MQTT broker…':'Disabling MQTT…','info');
+    if(v && v.indexOf(' ')>=0){ toast('Invalid broker — use IP:PORT', 'err', 'mqtt'); return; }
+    if(v===cur){ toast(v?'MQTT broker unchanged':'MQTT already disabled', 'info', 'mqtt'); return; }
+    toast(v?'Saving MQTT broker…':'Disabling MQTT…', 'load', 'mqtt');
     return requestJsonResult('/set_mqtt',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({broker:v})})
       .then(function(res){
         var o=res.json&&res.json.response;
         if(o && typeof o.result === 'boolean' && typeof o.reason === 'string'){
-          if(!o.result){ toast(o.reason||'Failed to save MQTT broker','err'); return; }
-          if(/no reboot|unchanged|already/i.test(o.reason||'')){ toast(v?'MQTT broker unchanged':'MQTT already disabled','info'); return; }
-          toast('Saved · rebooting','ok');
+          if(!o.result){ toast(o.reason||'Failed to save MQTT broker', 'err', 'mqtt'); return; }
+          if(/no reboot|unchanged|already/i.test(o.reason||'')){ toast(v?'MQTT broker unchanged':'MQTT already disabled', 'info', 'mqtt'); return; }
+          toast('Saved · rebooting', 'ok', 'mqtt');
           return;
         }
         var msg=(!res.ok && res.status)?('Failed to save MQTT broker (HTTP '+res.status+')'):'Failed to save MQTT broker — no change was confirmed';
-        toast(msg,'err');
+        toast(msg, 'err', 'mqtt');
       })
-      .catch(function(){toast('Failed to save MQTT broker — no change was confirmed','err')});
+      .catch(function(){toast('Failed to save MQTT broker — no change was confirmed', 'err', 'mqtt')});
   });
 }
 function editSyslog(){
@@ -885,22 +938,22 @@ function editSyslog(){
   }).then(function(v){
     if(v==null) return;
     v=v.trim();
-    if(v && v.indexOf(' ')>=0){ toast('Invalid server — use IP:PORT','err'); return; }
-    if(v===cur){ toast(v?'Syslog server unchanged':'Syslog already disabled','info'); return; }
-    toast(v?'Saving Syslog server…':'Disabling Syslog…','info');
+    if(v && v.indexOf(' ')>=0){ toast('Invalid server — use IP:PORT', 'err', 'syslog'); return; }
+    if(v===cur){ toast(v?'Syslog server unchanged':'Syslog already disabled', 'info', 'syslog'); return; }
+    toast(v?'Saving Syslog server…':'Disabling Syslog…', 'load', 'syslog');
     return requestJsonResult('/set_syslog',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({server:v})})
       .then(function(res){
         var o=res.json&&res.json.response;
         if(o && typeof o.result === 'boolean' && typeof o.reason === 'string'){
-          if(!o.result){ toast(o.reason||'Failed to save Syslog server','err'); return; }
-          if(/no reboot|unchanged|already/i.test(o.reason||'')){ toast(v?'Syslog server unchanged':'Syslog already disabled','info'); return; }
-          toast('Saved · rebooting','ok');
+          if(!o.result){ toast(o.reason||'Failed to save Syslog server', 'err', 'syslog'); return; }
+          if(/no reboot|unchanged|already/i.test(o.reason||'')){ toast(v?'Syslog server unchanged':'Syslog already disabled', 'info', 'syslog'); return; }
+          toast('Saved · rebooting', 'ok', 'syslog');
           return;
         }
         var msg=(!res.ok && res.status)?('Failed to save Syslog server (HTTP '+res.status+')'):'Failed to save Syslog server — no change was confirmed';
-        toast(msg,'err');
+        toast(msg, 'err', 'syslog');
       })
-      .catch(function(){toast('Failed to save Syslog server — no change was confirmed','err')});
+      .catch(function(){toast('Failed to save Syslog server — no change was confirmed', 'err', 'syslog')});
   });
 }
 function wakeStop(){ waking=false; clearTimeout(wakeTimeout); }
@@ -911,28 +964,28 @@ function wakeCar(){
   waking=true; if(state)render(state);                       // ring starts spinning immediately
   clearTimeout(wakeTimeout);
   // safety net: stop spinning if no charge data shows up in time
-  wakeTimeout=setTimeout(function(){ if(waking){ wakeStop(); toast('Still asleep — try again','info'); poll(); } }, 90000);
-  toast('Waking the car…','info');
+  wakeTimeout=setTimeout(function(){ if(waking){ wakeStop(); toast('Still asleep — try again', 'info', 'wake'); poll(); } }, 90000);
+  toast('Waking the car…', 'load', 'wake');
   return requestJsonResult('/api/1/vehicles/'+encodeURIComponent(vin)+'/command/wake_up',{method:'POST'})
     .then(function(res){
       var j=res.json;
       if(j && j.response && typeof j.response.result === 'boolean'){
         if(j.response.result){
-          toast('Wake sent · waiting for the car…','ok');
+          toast('Wake sent · waiting for the car…', 'load', 'wake');
         } else {
           wakeStop();
           var r=(j.response.reason||'').trim();
-          toast(r?('Wake failed — '+r):'Wake failed — is the car in range?','err');
+          toast(r?('Wake failed — '+r):'Wake failed — is the car in range?', 'err', 'wake');
         }
         poll();
         return;
       }
       wakeStop();
       var msg=(!res.ok && res.status)?('Wake failed (HTTP '+res.status+')'):'Wake failed — is the car in range?';
-      toast(msg,'err');
+      toast(msg, 'err', 'wake');
       poll();
     })
-    .catch(function(){ wakeStop(); toast('Wake failed — is the car in range?','err'); poll(); });
+    .catch(function(){ wakeStop(); toast('Wake failed — is the car in range?', 'err', 'wake'); poll(); });
 }
 function genKey(){
   var keyKnown = state && typeof state.key_present === 'boolean';
@@ -944,21 +997,21 @@ function genKey(){
   }) : Promise.resolve(true);
   return ask.then(function(go){
     if(!go) return;
-    toast('Generating new key…','info');
+    toast('Generating new key…', 'load', 'key');
     var query = (keyKnown && state.key_present) ? '?force=1' : '';
     return requestJsonResult('/gen_keys' + query, {method: 'POST'})
       .then(function(res){
         var j = res.json;
         if(!res.ok){
           var msg = (j && j.reason) ? j.reason : ('HTTP ' + res.status);
-          toast(msg, 'err');
+          toast(msg, 'err', 'key');
           return;
         }
         if(!j || typeof j.result !== 'boolean') throw new Error('invalid key response');
-        if(!j.result){ toast(j.reason || 'Key generation failed', 'err'); return; }
-        toast('New key generated · re-pair with the vehicle', 'ok'); poll();
+        if(!j.result){ toast(j.reason || 'Key generation failed', 'err', 'key'); return; }
+        toast('New key generated · re-pair with the vehicle', 'ok', 'key'); poll();
       })
-      .catch(function(){ toast('Key generation failed', 'err'); });
+      .catch(function(){ toast('Key generation failed', 'err', 'key'); });
   });
 }
 
@@ -968,6 +1021,7 @@ function genKey(){
 var otaBusy=false;
 var OTA_CHECK_TIMEOUT_MS=60000, OTA_UPDATE_TIMEOUT_MS=480000, OTA_HTTP_TIMEOUT_MS=5000;
 var otaClearTimer=null;
+var otaLastToastMilestone=null;
 // var(--ok) so it matches the green signal bars while keeping the exact OTA ring geometry.
 function otaMiniRing(pct,indet,col){
   var sz=16,c=sz/2,r=6,sw=2.6,circ=2*Math.PI*r; col=col||'var(--accent)';
@@ -994,9 +1048,9 @@ function otaInline(html,cls,pct){
   setBadge('badgeFw', !!otaAvail || otaBusy);
 }
 function otaInlineClear(delay){ clearTimeout(otaClearTimer); otaClearTimer=setTimeout(function(){ otaClearTimer=null; otaInline(''); }, delay||3000); }
-function otaBegin(phase,timeout){ clearTimeout(otaClearTimer); otaClearTimer=null; otaPhase=phase; otaDeadline=Date.now()+timeout; }
-function otaReset(){ clearTimeout(otaTimer); clearTimeout(otaClearTimer); otaClearTimer=null; otaBusy=false; otaPhase=null; otaDeadline=0; otaExpectedVersion=null; }
-function otaFail(message){ otaReset(); otaInline('<span>'+esc(message)+'</span>','err'); otaInlineClear(6000); }
+function otaBegin(phase,timeout){ clearTimeout(otaClearTimer); otaClearTimer=null; otaPhase=phase; otaDeadline=Date.now()+timeout; otaLastToastMilestone=null; }
+function otaReset(){ clearTimeout(otaTimer); clearTimeout(otaClearTimer); otaClearTimer=null; otaBusy=false; otaPhase=null; otaDeadline=0; otaExpectedVersion=null; otaLastToastMilestone=null; }
+function otaFail(message){ otaReset(); toast(message, 'err', 'ota'); otaInline('<span>'+esc(message)+'</span>','err'); otaInlineClear(6000); }
 function otaSchedule(fn,delay){
   if(!otaDeadline||Date.now()<otaDeadline){ otaTimer=setTimeout(fn,delay); return; }
   otaFail(otaPhase==='check'?'check timed out':'update timed out');
@@ -1071,13 +1125,13 @@ function setChannel(chan){
     body: JSON.stringify({ channel: chan })
   }).then(function(){
     var label = (chan === 'dev' ? 'Development' : 'Release');
-    toast('Update channel set to ' + label, 'ok');
+    toast('Update channel set to ' + label, 'ok', 'channel');
     return otaCheck();
   }).catch(function(){
     otaChannel = prevChan;
     renderChanMenu();
     updateInstalledChangelog(true);
-    toast('Failed to set update channel', 'err');
+    toast('Failed to set update channel', 'err', 'channel');
   });
 }
 
@@ -1284,12 +1338,13 @@ function otaCheck(){
   if(otaBusy) return;              // a check/update is already running
   otaBusy=true;
   otaBegin('check',OTA_CHECK_TIMEOUT_MS);
+  toast('Checking for updates…', 'load', 'ota');
   otaInline(otaMiniRing(0,true,'currentColor'),'','indet');   // checking — spinning ring only, no label
   var pr=getTargetPr();
   var checkUrl='/ota/check?ms='+Date.now()+(pr>0?'&pr='+pr:'');
   return requestJsonWithTimeout(checkUrl,{},OTA_HTTP_TIMEOUT_MS).then(function(j){
     if(!j||j.started!==true) throw new Error((j&&j.reason)||'check did not start');
-    otaCheckPoll();
+    return otaCheckPoll();
   }).catch(function(){ otaFail('check failed'); });
 }
 function otaCheckPoll(){
@@ -1303,6 +1358,7 @@ function otaCheckPoll(){
     if(o.state!=='idle'){ otaFail('invalid check state'); return; }
     if(o.update_available){
       otaAvail=o.available||''; if(state)render(state); renderFwSub(); otaInline('');         // clear while the dialog is up
+      toast('Update available: v' + o.available, 'ok', 'ota');
       var pr=getTargetPr();
       return loadOtaChangelog().then(function(notes){
         return askOtaInstall(o, notes);
@@ -1310,6 +1366,7 @@ function otaCheckPoll(){
         if(installed){
           otaExpectedVersion=o.available||null;
           otaBegin('update',OTA_UPDATE_TIMEOUT_MS);
+          toast('Starting update…', 'load', 'ota');
           otaInline(otaMiniRing(0,true,'currentColor')+'<span>starting…</span>','','indet');
           var updateUrl='/ota/update'+(pr>0?'?pr='+pr:'');
           return requestJsonWithTimeout(updateUrl,{method:'POST'},OTA_HTTP_TIMEOUT_MS).then(function(j){
@@ -1323,6 +1380,8 @@ function otaCheckPoll(){
     } else {
       otaAvail=null; if(state)render(state); otaReset();
       var prChecked=getTargetPr();
+      var upMsg = prChecked>0 ? ('PR #' + prChecked + ' up to date') : 'Firmware is up to date';
+      toast(upMsg, 'ok', 'ota');
       otaInline(prChecked>0?'<span>PR #'+prChecked+' up to date</span>':'<span>up to date</span>'); otaInlineClear(3500);
     }
   }).catch(function(){ otaFail('check failed'); });
@@ -1334,10 +1393,20 @@ function otaPoll(){
 }
 function otaProgress(o){
   otaBusy=true;
-  if(o.state==='downloading'){ var p=num(o.progress)||0; otaInline(otaMiniRing(p,false,'currentColor')+'<span>'+p+'%</span>','',p); otaSchedule(otaPoll,800); }
+  if(o.state==='downloading'){
+    var p=Math.min(100, Math.max(0, num(o.progress)||0));
+    var milestone=Math.floor(p/10)*10;
+    if(otaLastToastMilestone===null || milestone>otaLastToastMilestone){
+      otaLastToastMilestone=milestone;
+      toast('Downloading update… ' + milestone + '%', 'load', 'ota');
+    }
+    otaInline(otaMiniRing(p,false,'currentColor')+'<span>'+p+'%</span>','',p);
+    otaSchedule(otaPoll,800);
+  }
   else if(o.state==='done'){
     if(!otaVersion(otaExpectedVersion)){ otaFail('update target version is missing'); return; }
     clearTimeout(otaTimer); otaPhase='reboot';
+    toast('Verifying & rebooting…', 'load', 'ota');
     otaInline(otaMiniRing(100,false,'currentColor')+'<span>verifying…</span>','',100);
     setTimeout(function(){waitReboot(otaExpectedVersion)},1200);
   }
@@ -1346,7 +1415,9 @@ function otaProgress(o){
     // The 1.2 s "done" state can be missed in a background tab. Verify the target version instead
     // of polling a fresh boot's idle state forever or treating idle as success.
     if(!otaVersion(otaExpectedVersion)){ otaFail('update target version is missing'); return; }
-    otaPhase='reboot'; otaInline(otaMiniRing(100,false,'currentColor')+'<span>verifying…</span>','',100);
+    otaPhase='reboot';
+    toast('Verifying & rebooting…', 'load', 'ota');
+    otaInline(otaMiniRing(100,false,'currentColor')+'<span>verifying…</span>','',100);
     waitReboot(otaExpectedVersion);
   }
   else if(o.state==='checking'){ otaSchedule(otaPoll,1000); }
@@ -1366,11 +1437,16 @@ function resumeOta(){
 function waitReboot(expectedVer){
   if(!otaVersion(expectedVer)){ otaFail('update target version is missing'); return; }
   var started=Date.now();
+  toast('Rebooting… waiting for device', 'load', 'ota');
   (function probe(){
     requestJsonWithTimeout('/status?ms='+Date.now(),{cache:'no-store'},3000)
       .then(function(o){
         if(!o||typeof o.version!=='string') throw new Error('invalid status response');
-        if(o.version===expectedVer){ location.reload(); return; }
+        if(o.version===expectedVer){
+          toast('Updated to v' + expectedVer, 'ok', 'ota');
+          setTimeout(function(){ location.reload(); }, 1200);
+          return;
+        }
         next();
       })
       .catch(next);
