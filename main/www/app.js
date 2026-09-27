@@ -640,10 +640,8 @@ function render(s){
   var host=(typeof location!=='undefined'&&location.host)?location.host:'';
   $("ipline").textContent = s.ip || host;
   var prTarget=getTargetPr();
+  if(!activePr && prTarget > 0 && !activePrExplicitlyCleared) activePr = prTarget;
   var fv=$("fwVer"); if(fv) fv.textContent='v'+(s.version||'?')+(prTarget>0?' [PR #'+prTarget+']':'');
-  var vl=$("verLink");
-  vl.title=otaAvail?('Update '+otaAvail+' available — tap to install'):(prTarget>0?('Tap to check for PR #'+prTarget+' updates'):'Tap to check for updates');
-  vl.setAttribute('aria-label',otaAvail?('Install firmware update '+otaAvail):(prTarget>0?('Check for PR #'+prTarget+' firmware updates'):'Check for firmware updates'));
 
   if(s.ota && typeof s.ota.channel === 'string'){
     otaChannel = s.ota.channel === 'dev' ? 'dev' : 'release';
@@ -653,8 +651,11 @@ function render(s){
     otaChannel = /-dev/i.test(s.version) ? 'dev' : 'release';
     otaChannelInitialSet = true;
     renderChanMenu();
+  } else {
+    renderChanMenu();
   }
   renderFwSub();
+  renderVerLink();
   updateInstalledChangelog(false);
 
   // key
@@ -679,8 +680,43 @@ function render(s){
 function setSub(id,txt,cls){ var e=$(id); if(e){ e.className='rs'+(cls?' '+cls:''); e.textContent=txt; } }
 function renderFwSub(){
   var f=$("fwSub"); if(!f) return;
-  var ch=(otaChannel==='dev')?'Development':'Release';
-  f.textContent = otaAvail ? ('Update v'+otaAvail+' available · '+ch) : (ch+' channel');
+  var pr = getTargetPr();
+  var ch = (pr > 0) ? ('PR #' + pr) : ((otaChannel === 'dev') ? 'Development' : 'Release');
+  f.textContent = otaAvail ? ('Update v' + otaAvail + ' available · ' + ch) : (ch + ' channel');
+}
+function renderVerLink(){
+  var vl = $("verLink");
+  var tx = $("verLinkText");
+  if(!vl) return;
+  var pr = getTargetPr();
+  var isAvail = !!otaAvail;
+  if(isAvail){
+    vl.className = 'pill primary wide-btn avail';
+    if(tx) tx.textContent = pr > 0 ? ('Install PR #' + pr) : ('Install v' + otaAvail);
+    vl.title = pr > 0 ? ('PR #' + pr + ' update ' + otaAvail + ' available — tap to install') : ('Update ' + otaAvail + ' available — tap to install');
+    vl.setAttribute('aria-label', pr > 0 ? ('Install PR #' + pr + ' firmware update ' + otaAvail) : ('Install firmware update ' + otaAvail));
+  } else {
+    vl.className = 'pill soft wide-btn';
+    if(tx) tx.textContent = pr > 0 ? 'Check PR Updates' : 'Check for updates';
+    vl.title = pr > 0 ? ('Tap to check for PR #' + pr + ' updates') : 'Tap to check for updates';
+    vl.setAttribute('aria-label', pr > 0 ? ('Check for PR #' + pr + ' firmware updates') : 'Check for firmware updates');
+  }
+  var fb = $("fwBadge");
+  if(fb){
+    if(isAvail){
+      fb.textContent = 'Update available';
+      fb.className = 'fw-badge avail';
+    } else if(otaPhase === 'update'){
+      fb.textContent = 'Updating…';
+      fb.className = 'fw-badge busy';
+    } else if(otaBusy || otaPhase === 'check'){
+      fb.textContent = 'Checking…';
+      fb.className = 'fw-badge busy';
+    } else {
+      fb.textContent = 'Up to date';
+      fb.className = 'fw-badge ok';
+    }
+  }
 }
 
 // tap the SOC ring to start/stop charging
@@ -740,16 +776,23 @@ var askResolve=null, askCancelValue=null, askReturnFocus=null, askHintFn=null;
 // Call it after showing/hiding a dialog and before moving focus back: an inert node can't take it.
 // Both can be open at once (an OTA check finishing while a sheet is up). The sheet is always the
 // top layer (CSS z-index), so Escape closes it first, and the OTA dialog never takes its focus.
-function isOpen(id){ var m=$(id); return !!(m&&m.classList&&!m.classList.contains('hide')); }
+var prModalOpen = false;
+function isOpen(id){
+  var m=$(id);
+  if(!m||!m.classList) return false;
+  if(id==='prModal') return prModalOpen && !m.classList.contains('hide');
+  return !m.classList.contains('hide');
+}
 function syncModal(){
-  var open=isOpen('askModal')||isOpen('otaModal');
+  var open=isOpen('askModal')||isOpen('otaModal')||isOpen('prModal');
   if(typeof document!=='undefined'){
     if(document.documentElement&&document.documentElement.classList) document.documentElement.classList.toggle('modal-open',open);
     if(document.body&&document.body.classList) document.body.classList.toggle('modal-open',open);
   }
   var w=$("wrap"); if(w) w.inert=open;
-  // The OTA dialog sits under an open sheet: keep Tab from reaching its Install button.
+  // The OTA and PR dialogs sit under an open sheet: keep Tab from reaching their buttons.
   var om=$("otaModal"); if(om) om.inert=isOpen('askModal');
+  var pm=$("prModal"); if(pm) pm.inert=isOpen('askModal');
 }
 function askOpen(o,cancelValue){
   if(askResolve) askClose(askCancelValue);
@@ -1048,15 +1091,22 @@ function otaInline(html,cls,pct){
   setBadge('badgeFw', !!otaAvail || otaBusy);
 }
 function otaInlineClear(delay){ clearTimeout(otaClearTimer); otaClearTimer=setTimeout(function(){ otaClearTimer=null; otaInline(''); }, delay||3000); }
-function otaBegin(phase,timeout){ clearTimeout(otaClearTimer); otaClearTimer=null; otaPhase=phase; otaDeadline=Date.now()+timeout; otaLastToastMilestone=null; }
-function otaReset(){ clearTimeout(otaTimer); clearTimeout(otaClearTimer); otaClearTimer=null; otaBusy=false; otaPhase=null; otaDeadline=0; otaExpectedVersion=null; otaLastToastMilestone=null; }
+function otaBegin(phase,timeout){ clearTimeout(otaClearTimer); otaClearTimer=null; otaPhase=phase; otaDeadline=Date.now()+timeout; otaLastToastMilestone=null; renderVerLink(); }
+function otaReset(){ clearTimeout(otaTimer); clearTimeout(otaClearTimer); otaClearTimer=null; otaBusy=false; otaPhase=null; otaDeadline=0; otaExpectedVersion=null; otaLastToastMilestone=null; renderVerLink(); }
 function otaFail(message){ otaReset(); toast(message, 'err', 'ota'); otaInline('<span>'+esc(message)+'</span>','err'); otaInlineClear(6000); }
 function otaSchedule(fn,delay){
   if(!otaDeadline||Date.now()<otaDeadline){ otaTimer=setTimeout(fn,delay); return; }
   otaFail(otaPhase==='check'?'check timed out':'update timed out');
 }
 function otaVersion(v){return typeof v==='string'&&v.length<=31&&/^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?$/.test(v)}
-function getTargetPr(){
+var activePr = 0;
+var activePrExplicitlyCleared = false;
+var prList = [];
+var prCacheKey = 'tk_pr_cache';
+var PR_CACHE_TTL_MS = 5 * 60 * 1000;
+var prLoadPromise = null;
+
+function parseTargetPr(){
   try {
     if(typeof location==='undefined') return 0;
     var p=null;
@@ -1079,6 +1129,67 @@ function getTargetPr(){
   }catch(e){}
   return 0;
 }
+
+function getTargetPr(){
+  if(activePr > 0) return activePr;
+  return parseTargetPr();
+}
+
+function getActiveChannel(){
+  return (activePr > 0) ? 'pr' : otaChannel;
+}
+
+function renderPrDrawer(){
+  var dr = $("prDrawer");
+  if(!dr) return;
+  var pr = getTargetPr();
+  var numEl = $("prCardNum");
+  var badgeEl = $("prCardBadge");
+  var titleEl = $("prCardTitle");
+  var metaEl = $("prCardMeta");
+  var btn = $("prCardBtn");
+  if(numEl) numEl.textContent = pr > 0 ? ('PR #' + pr) : 'PR #—';
+  var prInfo = null;
+  if(pr > 0 && Array.isArray(prList)){
+    for(var i = 0; i < prList.length; i++){
+      if(prList[i].number === pr){ prInfo = prList[i]; break; }
+    }
+  }
+  if(badgeEl){
+    if(prInfo){
+      badgeEl.textContent = prInfo.ready ? 'Preview ready' : 'No preview build';
+      badgeEl.className = 'chip-badge pr-card-badge ' + (prInfo.ready ? 'ok' : 'warn');
+    } else if(pr > 0){
+      badgeEl.textContent = 'PR Preview';
+      badgeEl.className = 'chip-badge pr-card-badge';
+    } else {
+      badgeEl.textContent = 'Select PR';
+      badgeEl.className = 'chip-badge pr-card-badge';
+    }
+  }
+  if(titleEl){
+    if(prInfo && prInfo.title) titleEl.textContent = prInfo.title;
+    else if(pr > 0) titleEl.textContent = 'Pull request #' + pr;
+    else titleEl.textContent = 'No pull request selected';
+  }
+  if(metaEl){
+    if(prInfo){
+      var author = (prInfo.user && prInfo.user.login) ? ('@' + prInfo.user.login) : 'unknown';
+      var age = formatPrAge(prInfo.updated_at || prInfo.created_at);
+      metaEl.textContent = 'by ' + author + (age ? (' · ' + age) : '');
+    } else if(pr > 0){
+      metaEl.textContent = 'Tap to change selected PR';
+    } else {
+      metaEl.textContent = 'Tap to select an open PR';
+    }
+  }
+  if(btn){
+    var btnDesc = pr > 0 ? ('Change pull request preview (currently PR #' + pr + ')') : 'Select pull request preview';
+    btn.setAttribute('aria-label', btnDesc);
+    btn.setAttribute('title', btnDesc);
+  }
+}
+
 function otaStatus(){
   return requestJsonWithTimeout('/ota/status',{cache:'no-store'},OTA_HTTP_TIMEOUT_MS).then(function(o){
     var valid=o&&['idle','checking','downloading','done','error'].indexOf(o.state)>=0&&
@@ -1089,30 +1200,79 @@ function otaStatus(){
     return o;
   });
 }
+
 /* ---------- update channel (segmented control in the Firmware pane) ---------- */
 function renderChanMenu(){
-  var r=$("optRelease"), d=$("optDev"); if(!r||!d) return;
-  var isDev = (otaChannel === 'dev');
-  r.className = 'seg-opt' + (!isDev ? ' sel' : '');
-  r.setAttribute('aria-checked', !isDev ? 'true' : 'false');
-  d.className = 'seg-opt' + (isDev ? ' sel' : '');
-  d.setAttribute('aria-checked', isDev ? 'true' : 'false');
+  var r=$("optRelease"), d=$("optDev"), p=$("optPr"); if(!r||!d) return;
+  var act = getActiveChannel();
+  r.className = 'seg-opt' + (act === 'release' ? ' sel' : '');
+  r.setAttribute('aria-checked', act === 'release' ? 'true' : 'false');
+  d.className = 'seg-opt' + (act === 'dev' ? ' sel' : '');
+  d.setAttribute('aria-checked', act === 'dev' ? 'true' : 'false');
+  if(p){
+    p.className = 'seg-opt' + (act === 'pr' ? ' sel' : '');
+    p.setAttribute('aria-checked', act === 'pr' ? 'true' : 'false');
+  }
+  var dr = $("prDrawer");
+  if(dr && dr.classList){
+    dr.classList.toggle('hide', act !== 'pr');
+  }
+  renderPrDrawer();
   renderFwSub();
+  renderVerLink();
 }
-// Arrow keys move focus between the two options; Space/Enter (a normal button press) selects.
-// Selecting changes the device's update channel and starts a check, so it is never done by focus
-// movement alone.
+
+// Arrow keys move focus between the options; Home/End focus first/last; Space/Enter selects.
 function handleChanKey(e){
+  var opts = [$('optRelease'), $('optDev'), $('optPr')].filter(Boolean);
+  if(!opts.length) return;
+  if(e.key === 'Home'){
+    e.preventDefault();
+    if(typeof opts[0].focus === 'function') opts[0].focus();
+    return;
+  }
+  if(e.key === 'End'){
+    e.preventDefault();
+    if(typeof opts[opts.length - 1].focus === 'function') opts[opts.length - 1].focus();
+    return;
+  }
   if(['ArrowLeft','ArrowRight','ArrowUp','ArrowDown'].indexOf(e.key)<0) return;
   e.preventDefault();
-  var r=$("optRelease"), d=$("optDev");
-  var cur=(typeof document!=='undefined')?document.activeElement:null;
-  var target=(cur===r)?d:r;
-  if(target&&typeof target.focus==='function') target.focus();
+  var cur = (typeof document!=='undefined') ? document.activeElement : null;
+  var idx = opts.indexOf(cur);
+  if(idx < 0) idx = 0;
+  var delta = (e.key === 'ArrowLeft' || e.key === 'ArrowUp') ? -1 : 1;
+  var target = opts[(idx + delta + opts.length) % opts.length];
+  if(target && typeof target.focus === 'function') target.focus();
 }
+
 function setChannel(chan){
+  if(chan === 'pr'){
+    openPrModal();
+    return Promise.resolve();
+  }
+  var hadPr = activePr > 0;
+  activePr = 0;
+  activePrExplicitlyCleared = true;
+  if(typeof location !== 'undefined'){
+    try {
+      if(typeof history !== 'undefined' && history.replaceState){
+        var cleanSearch = '';
+        if(location.search){
+          cleanSearch = location.search.replace(/([?&])pr=[0-9]+(&|$)/i, function(m, p, s){
+            return s === '&' ? p : '';
+          }).replace(/[?&]$/, '');
+        }
+        var cleanPath = (location.pathname || '') + cleanSearch;
+        history.replaceState(null, '', cleanPath || location.pathname || '/');
+      }
+      if(location.hash && /#(?:pr=)?[0-9]+/i.test(location.hash)){
+        location.hash = '';
+      }
+    } catch(e){}
+  }
   var prevChan = otaChannel;
-  var changed = (otaChannel !== chan);
+  var changed = (otaChannel !== chan) || hadPr;
   if(chan!=='release'&&chan!=='dev') return Promise.resolve();
   if(!changed) return Promise.resolve();
   otaChannel = chan;
@@ -1133,6 +1293,254 @@ function setChannel(chan){
     updateInstalledChangelog(true);
     toast('Failed to set update channel', 'err', 'channel');
   });
+}
+
+function selectPr(num){
+  var n = parseInt(num, 10);
+  if(!n || n <= 0 || n > 2147483647) return Promise.resolve();
+  activePr = n;
+  activePrExplicitlyCleared = false;
+  if(typeof location !== 'undefined'){
+    try {
+      if(typeof history !== 'undefined' && history.replaceState && location.search && /[?&]pr=[0-9]+/i.test(location.search)){
+        var cleanSearch = location.search.replace(/([?&])pr=[0-9]+(&|$)/i, function(m, p, s){ return s === '&' ? p : ''; }).replace(/[?&]$/, '');
+        var cleanPath = (location.pathname || '') + cleanSearch + '#pr=' + n;
+        history.replaceState(null, '', cleanPath);
+      } else {
+        location.hash = '#pr=' + n;
+      }
+    } catch(e){
+      location.hash = '#pr=' + n;
+    }
+  }
+  renderChanMenu();
+  closePrModal();
+  updateInstalledChangelog(true);
+  return otaCheck();
+}
+
+var prReturnFocus = null;
+
+function openPrModal(){
+  var m = $("prModal");
+  if(!m) return;
+  prReturnFocus = (typeof document !== 'undefined') ? document.activeElement : null;
+  prModalOpen = true;
+  m.classList.remove('hide');
+  syncModal();
+  var filter = $("prFilter");
+  if(filter && typeof filter.focus === 'function' && !isOpen('askModal')){
+    filter.focus();
+  }
+  loadPrList(false);
+}
+
+function closePrModal(){
+  var m = $("prModal");
+  prModalOpen = false;
+  if(m && m.classList) m.classList.add('hide');
+  syncModal();
+  var rf = prReturnFocus || $("optPr") || $("prCardBtn");
+  if(rf && typeof rf.focus === 'function' && !isOpen('askModal') && !isOpen('otaModal')){
+    rf.focus();
+  }
+  prReturnFocus = null;
+}
+
+function submitManualPr(){
+  var inp = $("prManualNum");
+  if(!inp) return;
+  var val = (inp.value || '').trim();
+  if(/^[1-9][0-9]{0,6}$/.test(val)){
+    var n = parseInt(val, 10);
+    if(n > 0 && n <= 2147483647){
+      inp.value = '';
+      selectPr(n);
+      return;
+    }
+  }
+  toast('Please enter a valid PR number', 'err', 'pr');
+  if(typeof inp.focus === 'function') inp.focus();
+}
+
+function formatPrAge(dateStr){
+  if(!dateStr) return '';
+  try {
+    var dt = new Date(dateStr);
+    var diffMs = Date.now() - dt.getTime();
+    if(diffMs < 0 || isNaN(diffMs)) return '';
+    var mins = Math.floor(diffMs / 60000);
+    if(mins < 60) return mins <= 1 ? 'just now' : (mins + 'm ago');
+    var hours = Math.floor(mins / 60);
+    if(hours < 24) return hours + 'h ago';
+    var days = Math.floor(hours / 24);
+    if(days < 30) return days + 'd ago';
+    var months = Math.floor(days / 30);
+    return months + 'mo ago';
+  } catch(e){
+    return '';
+  }
+}
+
+function probePrReadiness(prs){
+  var probes = prs.map(function(pr){
+    var url = 'https://0bu.github.io/tesla-key-esp32/PR/' + pr.number + '/manifest.json';
+    return fetch(url, { method: 'HEAD' })
+      .then(function(res){
+        pr.ready = !!(res && res.ok && res.status === 200);
+        return pr;
+      })
+      .catch(function(){
+        pr.ready = false;
+        return pr;
+      });
+  });
+  return Promise.all(probes).then(function(){
+    prs.sort(function(a, b){
+      if(a.ready !== b.ready) return a.ready ? -1 : 1;
+      var aTime = a.updated_at ? new Date(a.updated_at).getTime() : 0;
+      var bTime = b.updated_at ? new Date(b.updated_at).getTime() : 0;
+      if(aTime !== bTime) return bTime - aTime;
+      return b.number - a.number;
+    });
+    return prs;
+  });
+}
+
+function createPrItemElement(pr){
+  var btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'pr-item' + (pr.number === activePr ? ' sel' : '');
+  var author = (pr.user && pr.user.login) ? ('@' + pr.user.login) : 'unknown';
+  btn.setAttribute('aria-label', 'PR #' + pr.number + ': ' + (pr.title || '') + ' by ' + author);
+  var top = document.createElement('div');
+  top.className = 'pr-item-top';
+  var num = document.createElement('span');
+  num.className = 'pr-item-num mono';
+  num.textContent = 'PR #' + pr.number;
+  top.appendChild(num);
+  var badge = document.createElement('span');
+  badge.className = 'chip-badge pr-item-badge ' + (pr.ready ? 'ok' : 'warn');
+  badge.textContent = pr.ready ? 'Preview ready' : 'No preview build';
+  top.appendChild(badge);
+  btn.appendChild(top);
+  var title = document.createElement('div');
+  title.className = 'pr-item-title';
+  title.textContent = pr.title || 'Untitled PR';
+  btn.appendChild(title);
+  var meta = document.createElement('div');
+  meta.className = 'pr-item-meta';
+  var age = formatPrAge(pr.updated_at || pr.created_at);
+  meta.textContent = author + (age ? (' · ' + age) : '');
+  btn.appendChild(meta);
+  btn.onclick = function(){
+    selectPr(pr.number);
+  };
+  return btn;
+}
+
+function renderPrItems(query){
+  var container = $("prItems");
+  var noMatches = $("prNoMatches");
+  if(!container) return;
+  if(typeof container.replaceChildren === 'function'){
+    container.replaceChildren();
+  } else {
+    container.textContent = '';
+    if(Array.isArray(container.children)) container.children.length = 0;
+    while(container.firstChild) container.removeChild(container.firstChild);
+  }
+  var filtered = prList;
+  if(query){
+    filtered = prList.filter(function(pr){
+      var numStr = String(pr.number);
+      var title = (pr.title || '').toLowerCase();
+      var author = (pr.user && pr.user.login ? pr.user.login : '').toLowerCase();
+      return numStr.indexOf(query) >= 0 || title.indexOf(query) >= 0 || author.indexOf(query) >= 0;
+    });
+  }
+  if(noMatches && noMatches.classList){
+    noMatches.classList.toggle('hide', filtered.length > 0 || prList.length === 0);
+  }
+  for(var i = 0; i < filtered.length; i++){
+    container.appendChild(createPrItemElement(filtered[i]));
+  }
+}
+
+function filterPrList(){
+  var inp = $("prFilter");
+  var q = (inp && inp.value != null) ? String(inp.value).trim().toLowerCase() : '';
+  renderPrItems(q);
+}
+
+function loadPrList(force){
+  var loading = $("prLoading");
+  var rateLimitBanner = $("prRateLimitBanner");
+  if(rateLimitBanner) rateLimitBanner.classList.add('hide');
+
+  if(!force && typeof sessionStorage !== 'undefined'){
+    try {
+      var cached = sessionStorage.getItem(prCacheKey);
+      if(cached){
+        var parsed = JSON.parse(cached);
+        if(parsed && parsed.timestamp && (Date.now() - parsed.timestamp < PR_CACHE_TTL_MS) && Array.isArray(parsed.prs)){
+          prList = parsed.prs;
+          filterPrList();
+          renderPrDrawer();
+          return Promise.resolve(prList);
+        }
+      }
+    } catch(e){}
+  }
+
+  if(!force && prLoadPromise) return prLoadPromise;
+  if(loading) loading.classList.remove('hide');
+
+  var ghUrl = 'https://api.github.com/repos/0Bu/tesla-key-esp32/pulls?state=open&sort=updated&direction=desc&per_page=30';
+  prLoadPromise = fetch(ghUrl, {
+    headers: { 'Accept': 'application/vnd.github.v3+json' }
+  }).then(function(res){
+    if(res.status === 403){
+      if(rateLimitBanner) rateLimitBanner.classList.remove('hide');
+      throw new Error('rate_limited');
+    }
+    if(!res.ok) throw new Error('github_error_' + res.status);
+    return res.json();
+  }).then(function(rawPrs){
+    if(!Array.isArray(rawPrs)) throw new Error('invalid_pr_list');
+    var cleaned = rawPrs.map(function(p){
+      return {
+        number: p.number,
+        title: p.title || '',
+        updated_at: p.updated_at,
+        created_at: p.created_at,
+        user: { login: (p.user && p.user.login) ? p.user.login : 'unknown' },
+        ready: false
+      };
+    });
+    return probePrReadiness(cleaned);
+  }).then(function(readyPrs){
+    prList = readyPrs;
+    if(typeof sessionStorage !== 'undefined'){
+      try {
+        sessionStorage.setItem(prCacheKey, JSON.stringify({ timestamp: Date.now(), prs: prList }));
+      } catch(e){}
+    }
+    if(loading) loading.classList.add('hide');
+    filterPrList();
+    renderPrDrawer();
+    prLoadPromise = null;
+    return prList;
+  }).catch(function(err){
+    if(loading) loading.classList.add('hide');
+    filterPrList();
+    if(err && err.message !== 'rate_limited'){
+      toast('Failed to load pull requests', 'err', 'pr');
+    }
+    prLoadPromise = null;
+    return prList;
+  });
+  return prLoadPromise;
 }
 
 var otaDecisionResolve = null;
@@ -1303,6 +1711,10 @@ if(typeof document!=='undefined' && typeof document.addEventListener==='function
     if(modalBackdrop && e.target === modalBackdrop){
       closeOtaModal(false);
     }
+    var prBackdrop = $("prBackdrop");
+    if(prBackdrop && e.target === prBackdrop){
+      closePrModal();
+    }
     var askBackdrop = $("askBackdrop");
     if(askBackdrop && e.target === askBackdrop){
       askClose(askCancelValue);
@@ -1313,6 +1725,7 @@ if(typeof document!=='undefined' && typeof document.addEventListener==='function
     var askOpenNow = am && am.classList && typeof am.classList.contains==='function' && !am.classList.contains('hide');
     if(e.key==='Escape'){
       if(askOpenNow){ askClose(askCancelValue); return; }
+      if(isOpen('prModal')){ closePrModal(); return; }
       var modal = $("otaModal");
       if(modal && modal.classList && typeof modal.classList.contains==='function' && !modal.classList.contains('hide')){
         closeOtaModal(false);
@@ -1326,6 +1739,19 @@ if(typeof document!=='undefined' && typeof document.addEventListener==='function
   if(cancelBtn) cancelBtn.onclick = function(){ closeOtaModal(false); };
   var installBtn = $("otaInstall");
   if(installBtn) installBtn.onclick = function(){ closeOtaModal(true); };
+  var prCancelBtn = $("prCancel");
+  if(prCancelBtn) prCancelBtn.onclick = function(){ closePrModal(); };
+  var prManualBtn = $("prManualBtn");
+  if(prManualBtn) prManualBtn.onclick = submitManualPr;
+  var prManualInp = $("prManualNum");
+  if(prManualInp){
+    prManualInp.onkeydown = function(e){
+      if(e.key === 'Enter'){
+        e.preventDefault();
+        submitManualPr();
+      }
+    };
+  }
   var askCancelBtn = $("askCancel");
   if(askCancelBtn) askCancelBtn.onclick = function(){ askClose(askCancelValue); };
   var askOkBtn = $("askOk");

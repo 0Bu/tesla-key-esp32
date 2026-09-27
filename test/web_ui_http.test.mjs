@@ -1256,3 +1256,331 @@ test("otaProgress throttles download toasts to 10% milestones while maintaining 
   assert.match(c.children[0].innerHTML, /Verifying &amp; rebooting…/);
   assert.equal(element("otaFill").style.width, "100%");
 });
+
+test("3-way update channel switching, PR drawer display, and keyboard navigation", async () => {
+  const { context, element } = loadUi();
+  const fetchCalls = [];
+  context.fetch = async (url, opts) => {
+    fetchCalls.push({ url, opts });
+    if (url === "/set_ota") return { ok: true, status: 200, async json() { return { ok: true }; } };
+    if (url.startsWith("/ota/check")) return { ok: true, status: 200, async json() { return { started: true }; } };
+    if (url.startsWith("/ota/status")) return {
+      ok: true,
+      status: 200,
+      async json() {
+        return {
+          state: "idle",
+          update_available: false,
+          progress: 0,
+          message: "up to date",
+          available: "1.6.0",
+          current: "1.6.0"
+        };
+      }
+    };
+    return { ok: true, status: 200, async json() { return {}; } };
+  };
+
+  // Initialize channel menu in mock DOM
+  context.renderChanMenu();
+
+  // Keyboard navigation cycles through Release -> Development -> PR Preview -> Release
+  context.document.activeElement = element("optRelease");
+  context.handleChanKey({ key: "ArrowRight", preventDefault() {} });
+  assert.equal(context.document.activeElement, element("optDev"));
+  context.handleChanKey({ key: "ArrowRight", preventDefault() {} });
+  assert.equal(context.document.activeElement, element("optPr"));
+  context.handleChanKey({ key: "ArrowRight", preventDefault() {} });
+  assert.equal(context.document.activeElement, element("optRelease"));
+  context.handleChanKey({ key: "ArrowLeft", preventDefault() {} });
+  assert.equal(context.document.activeElement, element("optPr"));
+  context.handleChanKey({ key: "ArrowLeft", preventDefault() {} });
+  assert.equal(context.document.activeElement, element("optDev"));
+  context.handleChanKey({ key: "End", preventDefault() {} });
+  assert.equal(context.document.activeElement, element("optPr"));
+  context.handleChanKey({ key: "Home", preventDefault() {} });
+  assert.equal(context.document.activeElement, element("optRelease"));
+
+  // Initially in release channel, PR drawer is hidden
+  assert.equal(context.getActiveChannel(), "release");
+  assert.equal(element("optRelease")["aria-checked"], "true");
+  assert.equal(element("prDrawer").classList.contains("hide"), true);
+
+  // Calling setChannel('pr') opens PR modal
+  await context.setChannel("pr");
+  assert.equal(element("prModal").classList.contains("hide"), false);
+
+  // Selecting a PR sets activePr, updates hash, marks optPr sel, reveals prDrawer, and triggers otaCheck with ?pr=
+  await context.selectPr(337);
+  assert.equal(context.activePr, 337);
+  assert.equal(context.getTargetPr(), 337);
+  assert.equal(context.getActiveChannel(), "pr");
+  assert.equal(element("optPr")["aria-checked"], "true");
+  assert.match(element("optPr").className, /sel/);
+  assert.equal(element("optRelease")["aria-checked"], "false");
+  assert.doesNotMatch(element("optRelease").className, /sel/);
+  assert.equal(element("prDrawer").classList.contains("hide"), false);
+  assert.equal(element("prCardNum").textContent, "PR #337");
+  assert.equal(element("prModal").classList.contains("hide"), true);
+  assert.equal(context.location.hash, "#pr=337");
+
+  const prCheck = fetchCalls.find(c => c.url.includes("/ota/check") && c.url.includes("pr=337"));
+  assert.ok(prCheck, "/ota/check called with pr=337");
+
+  // Switching back to release clears activePr, hides prDrawer, and POSTs /set_ota
+  fetchCalls.length = 0;
+  await context.setChannel("release");
+  assert.equal(context.activePr, 0);
+  assert.equal(context.getActiveChannel(), "release");
+  assert.equal(element("optRelease")["aria-checked"], "true");
+  assert.match(element("optRelease").className, /sel/);
+  assert.equal(element("optPr")["aria-checked"], "false");
+  assert.doesNotMatch(element("optPr").className, /sel/);
+  assert.equal(element("prDrawer").classList.contains("hide"), true);
+  const setOtaRelease = fetchCalls.find(c => c.url === "/set_ota");
+  assert.ok(setOtaRelease, "POST /set_ota requested on channel switch");
+});
+
+test("PR modal opening, closing, direct manual entry, and filtering", async () => {
+  const { context, element } = loadUi();
+  element("askModal").classList.add("hide");
+  element("otaModal").classList.add("hide");
+  element("prModal").classList.add("hide");
+
+  context.fetch = async (url) => {
+    if (url.startsWith("/ota/check")) return { ok: true, status: 200, async json() { return { started: true }; } };
+    if (url.startsWith("/ota/status")) return {
+      ok: true,
+      status: 200,
+      async json() {
+        return {
+          state: "idle",
+          update_available: false,
+          progress: 0,
+          message: "up to date",
+          available: "1.6.0",
+          current: "1.6.0"
+        };
+      }
+    };
+    return { ok: true, status: 200, async json() { return []; } };
+  };
+
+  // Open modal
+  context.openPrModal();
+  assert.equal(element("prModal").classList.contains("hide"), false);
+  assert.equal(context.prModalOpen, true);
+  assert.equal(element("wrap").inert, true);
+
+  // Close modal
+  context.closePrModal();
+  assert.equal(element("prModal").classList.contains("hide"), true);
+  assert.equal(context.prModalOpen, false);
+  assert.equal(element("wrap").inert, false);
+
+  // Manual entry validation
+  element("prManualNum").value = "invalid";
+  context.submitManualPr();
+  assert.equal(context.activePr, 0, "invalid manual entry rejected");
+
+  element("prManualNum").value = "42foo";
+  context.submitManualPr();
+  assert.equal(context.activePr, 0, "trailing chars rejected");
+
+  element("prManualNum").value = "1.5";
+  context.submitManualPr();
+  assert.equal(context.activePr, 0, "floating points rejected");
+
+  element("prManualNum").value = "0";
+  context.submitManualPr();
+  assert.equal(context.activePr, 0, "zero rejected");
+
+  element("prManualNum").value = "42";
+  await context.submitManualPr();
+  assert.equal(context.activePr, 42);
+  assert.equal(element("prManualNum").value, "");
+  assert.equal(element("prModal").classList.contains("hide"), true);
+
+  // Filtering PR items
+  context.prList = [
+    { number: 10, title: "Fix BLE handshake", user: { login: "alice" }, ready: true },
+    { number: 20, title: "Add MCP diagnostics", user: { login: "bob" }, ready: false },
+    { number: 30, title: "UI styling tweaks", user: { login: "carol" }, ready: true }
+  ];
+
+  // Filter by title
+  element("prFilter").value = "BLE";
+  context.filterPrList();
+  assert.equal(element("prItems").children.length, 1);
+  assert.match(element("prItems").children[0]["aria-label"], /Fix BLE handshake/);
+  assert.equal(element("prItems").children[0].children[1].textContent, "Fix BLE handshake");
+
+  // Filter by author
+  element("prFilter").value = "bob";
+  context.filterPrList();
+  assert.equal(element("prItems").children.length, 1);
+  assert.match(element("prItems").children[0]["aria-label"], /by @bob/);
+  assert.equal(element("prItems").children[0].children[1].textContent, "Add MCP diagnostics");
+
+  // Filter by number
+  element("prFilter").value = "30";
+  context.filterPrList();
+  assert.equal(element("prItems").children.length, 1);
+  assert.match(element("prItems").children[0]["aria-label"], /PR #30/);
+  assert.equal(element("prItems").children[0].children[0].children[0].textContent, "PR #30");
+
+  // Filter with no matches shows note
+  element("prFilter").value = "nonexistent";
+  context.filterPrList();
+  assert.equal(element("prItems").children.length, 0);
+  assert.equal(element("prNoMatches").classList.contains("hide"), false);
+});
+
+test("state preservation across periodic /status polls in PR preview mode", async () => {
+  const { context, element } = loadUi();
+  context.activePr = 337;
+
+  // Simulate periodic status poll reporting release channel from device
+  context.render({
+    ip: "192.0.2.1",
+    version: "1.6.0",
+    ota: { channel: "release" },
+    key_present: true
+  });
+
+  // PR preview channel state remains decoupled and preserved
+  assert.equal(context.getActiveChannel(), "pr");
+  assert.equal(element("optPr")["aria-checked"], "true");
+  assert.match(element("optPr").className, /sel/);
+  assert.equal(element("optRelease")["aria-checked"], "false");
+  assert.doesNotMatch(element("optRelease").className, /sel/);
+  assert.equal(element("prDrawer").classList.contains("hide"), false);
+  assert.match(element("fwVer").textContent, /\[PR #337\]/);
+
+  // Now simulate page loaded with query param ?pr=42, user switching to release, and subsequent status poll
+  context.location.search = "?pr=42";
+  context.fetch = async () => ({ ok: true, status: 200, async json() { return { ok: true }; } });
+  await context.setChannel("release");
+  assert.equal(context.activePr, 0);
+  assert.equal(context.getActiveChannel(), "release");
+
+  // Subsequent background poll must NOT resurrect activePr=42 from location.search
+  context.render({
+    ip: "192.0.2.1",
+    version: "1.6.0",
+    ota: { channel: "release" },
+    key_present: true
+  });
+  assert.equal(context.activePr, 0);
+  assert.equal(context.getActiveChannel(), "release");
+  assert.equal(element("optRelease")["aria-checked"], "true");
+  assert.equal(element("optPr")["aria-checked"], "false");
+});
+
+test("adaptive action button #verLink and #fwBadge display based on otaAvail and activePr", () => {
+  const { context, element } = loadUi();
+  const vl = element("verLink");
+  const tx = element("verLinkText");
+  const fb = element("fwBadge");
+
+  // Idle state without PR
+  context.otaAvail = null;
+  context.activePr = 0;
+  context.renderVerLink();
+  assert.equal(tx.textContent, "Check for updates");
+  assert.equal(fb.textContent, "Up to date");
+  assert.doesNotMatch(vl.className, /avail/);
+
+  // Idle state with PR 337
+  context.activePr = 337;
+  context.renderVerLink();
+  assert.equal(tx.textContent, "Check PR Updates");
+  assert.equal(fb.textContent, "Up to date");
+  assert.doesNotMatch(vl.className, /avail/);
+
+  // Checking phase
+  context.otaBusy = true;
+  context.renderVerLink();
+  assert.equal(fb.textContent, "Checking…");
+  assert.equal(fb.className, "fw-badge busy");
+
+  // Update available without PR
+  context.otaBusy = false;
+  context.activePr = 0;
+  context.otaAvail = "1.7.0";
+  context.renderVerLink();
+  assert.equal(tx.textContent, "Install v1.7.0");
+  assert.match(vl.className, /avail/);
+  assert.equal(fb.textContent, "Update available");
+  assert.equal(fb.className, "fw-badge avail");
+
+  // Update available with PR 337
+  context.activePr = 337;
+  context.renderVerLink();
+  assert.equal(tx.textContent, "Install PR #337");
+  assert.match(vl.className, /avail/);
+  assert.equal(fb.textContent, "Update available");
+
+  // Live lifecycle transitions update badge directly without manual renderVerLink
+  context.otaAvail = null;
+  context.otaBegin("check", 10000);
+  assert.equal(fb.textContent, "Checking…");
+  assert.equal(fb.className, "fw-badge busy");
+
+  context.otaBegin("update", 10000);
+  assert.equal(fb.textContent, "Updating…");
+  assert.equal(fb.className, "fw-badge busy");
+
+  context.otaReset();
+  assert.equal(fb.textContent, "Up to date");
+  assert.equal(fb.className, "fw-badge ok");
+});
+
+test("PR discovery loads from GitHub API, caches in sessionStorage, and probes readiness", async () => {
+  const { context, element } = loadUi();
+  const storage = new Map();
+  context.sessionStorage = {
+    getItem(k) { return storage.get(k) ?? null; },
+    setItem(k, v) { storage.set(k, String(v)); },
+    removeItem(k) { storage.delete(k); },
+    clear() { storage.clear(); }
+  };
+
+  context.fetch = async (url, opts) => {
+    if (url.includes("api.github.com")) {
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return [
+            { number: 101, title: "Feature A", updated_at: "2026-09-20T10:00:00Z", user: { login: "dev1" } },
+            { number: 102, title: "Feature B", updated_at: "2026-09-21T10:00:00Z", user: { login: "dev2" } }
+          ];
+        }
+      };
+    }
+    if (url.includes("/PR/101/manifest.json")) {
+      return { ok: true, status: 200 };
+    }
+    if (url.includes("/PR/102/manifest.json")) {
+      return { ok: false, status: 404 };
+    }
+    return { ok: false, status: 500 };
+  };
+
+  const list = await context.loadPrList(true);
+  assert.equal(list.length, 2);
+  // Ready PR 101 is sorted first even though 102 has later updated_at
+  assert.equal(list[0].number, 101);
+  assert.equal(list[0].ready, true);
+  assert.equal(list[1].number, 102);
+  assert.equal(list[1].ready, false);
+
+  // Cached in sessionStorage
+  assert.ok(storage.has("tk_pr_cache"));
+
+  // Handling 403 rate limit
+  context.fetch = async () => ({ ok: false, status: 403 });
+  await context.loadPrList(true);
+  assert.equal(element("prRateLimitBanner").classList.contains("hide"), false);
+});

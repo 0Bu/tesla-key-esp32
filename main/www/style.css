@@ -184,18 +184,45 @@ svg{display:block}
 /* firmware */
 .fw{align-self:start; gap:14px}
 .fwhead{display:flex; align-items:center; gap:12px}
-.fwv{display:flex; flex-direction:column; min-width:0}
+.fw-icon{width:44px; height:44px; border-radius:12px; background:var(--soft); color:var(--fg); display:grid; place-items:center; flex:none}
+.fw-icon svg{width:24px; height:24px}
+.fwv{display:flex; flex-direction:column; min-width:0; gap:2px}
+.fw-ver-row{display:flex; align-items:center; gap:8px; flex-wrap:wrap}
 .fwver{font-size:22px; overflow-wrap:anywhere}
+.fw-badge{display:inline-flex; align-items:center; padding:2px 8px; border-radius:999px; font-size:11.5px; font-weight:650; line-height:1.2}
+.fw-badge.ok{background:color-mix(in srgb,var(--ok) 14%,var(--card)); color:var(--ok)}
+.fw-badge.avail{background:color-mix(in srgb,var(--accent) 14%,var(--card)); color:var(--accent-text)}
+.fw-badge.busy{background:var(--soft); color:var(--muted)}
 .otabar{height:8px; border-radius:4px; background:var(--soft); overflow:hidden}
 .otafill{height:100%; width:0; background:var(--accent); transition:width .3s}
 /* no measurable progress yet (checking, starting): a sliding sliver, never a static fill that reads as 15 % */
 .otabar.indet .otafill{width:30%!important; animation:otaslide 1.2s ease-in-out infinite alternate}
 @keyframes otaslide{from{transform:translateX(-20%)}to{transform:translateX(253%)}}
+#verLink.avail{background:var(--accent); color:#fff; font-weight:650}
+#verLink.avail svg{stroke:#fff}
+.ver-link-icon{width:20px; height:20px; flex:none}
 .chan{display:flex; flex-direction:column; gap:6px}
-.seg{display:grid; grid-template-columns:1fr 1fr; padding:3px; border-radius:12px; background:var(--soft)}
-.seg-opt{min-height:44px; border:0; border-radius:10px; background:transparent; font-size:14px; font-weight:650}
+.seg{display:grid; grid-template-columns:repeat(3, 1fr); padding:3px; border-radius:12px; background:var(--soft)}
+.seg-opt{min-height:44px; border:0; border-radius:10px; background:transparent; font-size:13.5px; font-weight:650; padding:0 4px}
 .seg-opt.sel{background:var(--card); box-shadow:0 1px 3px rgba(0,0,0,.12)}
-.fw-changelog-wrap{display:flex; flex-direction:column; gap:6px}
+.pr-drawer{display:flex; flex-direction:column; gap:6px}
+.pr-card-btn{width:100%; border:1px solid var(--border); border-radius:14px; background:var(--soft); color:inherit;
+  padding:12px 14px; text-align:left; display:flex; align-items:center; justify-content:space-between; gap:12px;
+  cursor:pointer; font:inherit; transition:background .15s ease, border-color .15s ease}
+.pr-card-btn:hover{background:var(--card); border-color:var(--faint)}
+.pr-card-btn:focus-visible{outline:none; border-color:var(--accent); box-shadow:0 0 0 3px rgba(232,33,39,.14)}
+.pr-card-main{display:flex; flex-direction:column; gap:4px; min-width:0; flex:1}
+.pr-card-head{display:flex; align-items:center; gap:8px}
+.pr-card-num{font-size:13px; font-weight:700}
+.pr-card-badge{font-size:11px}
+.pr-card-title{font-size:14px; font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+.pr-card-meta{font-size:12px; color:var(--muted)}
+.pr-card-chevron{flex:none; color:var(--muted); display:grid; place-items:center}
+.pr-card-chevron svg{width:20px; height:20px; stroke:currentColor; stroke-width:2; fill:none}
+.fw-changelog-details{display:flex; flex-direction:column; gap:6px}
+.fw-changelog-summary{cursor:pointer; list-style:none; user-select:none; display:flex; align-items:center; gap:6px}
+.fw-changelog-summary::-webkit-details-marker{display:none}
+.fw-changelog-wrap{display:flex; flex-direction:column; gap:6px; max-height:180px; overflow-y:auto; overscroll-behavior:contain; -webkit-overflow-scrolling:touch}
 .fw-changes{font-size:13.5px; line-height:1.45; color:var(--fg); padding-left:18px}
 .fw-changes li{word-break:break-word}
 
@@ -231,8 +258,35 @@ html.modal-open, body.modal-open{overflow:hidden; overscroll-behavior:none}
 .ota-head{display:flex; align-items:center; justify-content:space-between; gap:10px}
 .chip-badge{padding:3px 10px; border-radius:999px; font-size:12px; font-weight:650; color:var(--accent-text);
   background:color-mix(in srgb,var(--accent) 12%,var(--card))}
+.chip-badge.ok{color:var(--ok); background:color-mix(in srgb,var(--ok) 14%,var(--card))}
+.chip-badge.warn{color:var(--muted); background:var(--soft)}
 .ota-version{font-size:24px; font-variant-numeric:tabular-nums; overflow-wrap:anywhere}
 .ota-changes{margin:0; padding-left:20px; display:flex; flex-direction:column; gap:4px}
+.pr-modal-card{max-width:480px; gap:12px}
+.pr-modal-head{display:flex; align-items:center; justify-content:space-between; gap:10px}
+.pr-search-field input{min-height:42px; font-size:14.5px}
+.pr-list-container{display:flex; flex-direction:column; gap:6px; max-height:260px; overflow-y:auto;
+  overscroll-behavior:contain; -webkit-overflow-scrolling:touch; padding-right:2px}
+.pr-loading{padding:18px; text-align:center; font-size:13.5px; color:var(--muted)}
+.pr-items{display:flex; flex-direction:column; gap:6px}
+.pr-item{width:100%; border:1px solid var(--border); border-radius:12px; background:var(--card); color:inherit;
+  padding:10px 12px; text-align:left; display:flex; flex-direction:column; gap:3px; cursor:pointer; font:inherit;
+  transition:background .15s ease, border-color .15s ease}
+.pr-item:hover{background:var(--soft)}
+.pr-item.sel{border-color:var(--accent); background:color-mix(in srgb,var(--accent) 8%,var(--card))}
+.pr-item:focus-visible{outline:none; border-color:var(--accent); box-shadow:0 0 0 3px rgba(232,33,39,.14)}
+.pr-item-top{display:flex; align-items:center; justify-content:space-between; gap:8px}
+.pr-item-num{font-size:13px; font-weight:700}
+.pr-item-badge{font-size:11px}
+.pr-item-title{font-size:13.5px; font-weight:600; line-height:1.3; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+.pr-item-meta{font-size:12px; color:var(--muted)}
+.pr-manual-section{display:flex; flex-direction:column; gap:6px; padding-top:8px; border-top:1px solid var(--border)}
+.pr-manual-row{display:flex; gap:8px}
+.pr-manual-row input{flex:1; min-height:42px; padding:0 12px; border-radius:12px; border:1px solid var(--border);
+  background:var(--soft); color:var(--fg); font:inherit; font-size:15px; outline:none}
+.pr-manual-row input:focus{background:var(--card); border-color:var(--accent); box-shadow:0 0 0 3px rgba(232,33,39,.14)}
+.pr-manual-row button{flex:none; min-width:80px}
+.pr-modal-card .actions{display:flex; justify-content:flex-end}
 
 /* toasts */
 .toasts{position:fixed; left:0; right:0; z-index:30; bottom:calc(var(--dock-h) + 14px + env(safe-area-inset-bottom));
