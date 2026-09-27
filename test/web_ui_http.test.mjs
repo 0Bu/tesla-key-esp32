@@ -1019,13 +1019,24 @@ test("loadInstalledChangelog handles 204 and network errors gracefully", async (
   await context.updateInstalledChangelog(true);
   assert.equal(list.hidden, true);
   assert.equal(noChanges.hidden, false);
+
+  // Proves F8: failure is not cached forever; subsequent updateInstalledChangelog retries
+  context.fetch = async () => ({
+    ok: true,
+    status: 200,
+    async json() { return { version: "1.6.0", changelog: "Recovered changelog note" }; }
+  });
+  await context.updateInstalledChangelog(false);
+  assert.equal(list.hidden, false);
+  assert.equal(list.children.length, 1);
+  assert.equal(list.children[0].textContent, "Recovered changelog note");
 });
 
 test("setChannel preserves installed changelog and does not reload on channel change", async () => {
   const { context, element } = loadUi();
   let changelogFetchCount = 0;
   context.fetch = async (url) => {
-    if (url.startsWith("https://0bu.github.io/")) {
+    if (url.includes("changelog.json")) {
       changelogFetchCount++;
       return { ok: true, status: 200, async json() { return { version: "1.6.0", changelog: "Installed note" }; } };
     }
@@ -1042,7 +1053,10 @@ test("setChannel preserves installed changelog and does not reload on channel ch
 
   await context.setChannel("dev");
   assert.equal(context.otaChannel, "dev");
-  assert.equal(changelogFetchCount, 1, "did not refetch changelog on channel change");
+  assert.equal(changelogFetchCount, 1, "did not refetch changelog on channel change to dev");
+
+  await context.setChannel("pr");
+  assert.equal(changelogFetchCount, 1, "did not refetch changelog on channel change to pr");
 });
 
 test("toast enforces single popup policy, load spinner icon, in-place transition, and cleans up timers and keys", () => {
@@ -1094,6 +1108,10 @@ test("toast enforces single popup policy, load spinner icon, in-place transition
   assert.match(t3.innerHTML, /Saving VIN…/);
   assert.equal(t3.dataset.key, "vin");
 
+  // Action completes successfully
+  const t3b = context.toast("VIN saved", "ok", "vin");
+  assert.equal(t3b, t3);
+
   // Action without key clears dataset.key on reused element
   const t4 = context.toast("Network restored", "ok");
   assert.equal(t4, t3);
@@ -1120,6 +1138,91 @@ test("toast enforces single popup policy, load spinner icon, in-place transition
   assert.equal(t5.classList.contains("leaving"), true);
   fireTimers(e => e.delay === 230);
   assert.equal(c.children.length, 0, "toast successfully removed after full cycle");
+});
+
+test("keyed toasts protect active loading toast from premature dismissal by unrelated toasts", () => {
+  const { context, element } = loadUi();
+  const c = element("toasts");
+
+  const timers = new Map();
+  let nextId = 1;
+  context.setTimeout = (fn, delay) => {
+    const id = nextId++;
+    timers.set(id, { fn, delay });
+    return id;
+  };
+  context.clearTimeout = (id) => {
+    timers.delete(id);
+  };
+  const fireTimers = (predicate) => {
+    for (const [id, entry] of Array.from(timers.entries())) {
+      if (!predicate || predicate(entry)) {
+        timers.delete(id);
+        entry.fn();
+      }
+    }
+  };
+
+  // 1) Start sticky loading toast with key 'ota'
+  const otaLoad = context.toast("Downloading update… 20%", "load", "ota");
+  assert.equal(c.children.length, 1);
+  assert.equal(otaLoad.dataset.key, "ota");
+  assert.match(otaLoad.className, /toast load/);
+
+  // 2) Unrelated transient toast arrives with key 'channel'
+  const chanToast = context.toast("Update channel set to Development", "ok", "channel");
+  // Sticky ota toast must NOT be overwritten or dismissed! Both coexist in #toasts.
+  assert.equal(c.children.length, 2);
+  assert.equal(otaLoad.parentNode, c, "ota loading toast preserved");
+  assert.equal(chanToast.parentNode, c, "channel toast attached");
+  assert.notEqual(otaLoad, chanToast);
+
+  // 3) Channel toast auto-dismisses after 3000ms + 230ms leaving
+  fireTimers(e => e.delay === 3000);
+  assert.equal(chanToast.classList.contains("leaving"), true);
+  assert.equal(otaLoad.classList.contains("leaving"), false, "ota toast not leaving");
+  fireTimers(e => e.delay === 230);
+  assert.equal(c.children.length, 1);
+  assert.equal(c.children[0], otaLoad, "only sticky ota toast remains");
+
+  // 4) Keyed progress update updates the sticky toast in-place
+  const otaProgress = context.toast("Downloading update… 50%", "load", "ota");
+  assert.equal(c.children.length, 1);
+  assert.equal(otaProgress, otaLoad, "updated in-place");
+  assert.match(otaProgress.innerHTML, /50%/);
+
+  // 5) OTA finishes: in-place transition to success, then auto-dismiss
+  const otaDone = context.toast("Updated to v1.6.0", "ok", "ota");
+  assert.equal(otaDone, otaLoad);
+  assert.match(otaDone.className, /toast ok/);
+  fireTimers(e => e.delay === 3000);
+  assert.equal(otaDone.classList.contains("leaving"), true);
+  fireTimers(e => e.delay === 230);
+  assert.equal(c.children.length, 0, "all toasts cleared after full cycle");
+});
+
+test("render during waking state stops waking spinner without firing toast side-effect", () => {
+  const { context } = loadUi();
+  let toastCalls = [];
+  context.toast = (msg, type, key) => { toastCalls.push({ msg, type, key }); };
+
+  context.waking = true;
+  let cleared = false;
+  context.wakeTimeout = 999;
+  context.clearTimeout = (id) => { if (id === 999) cleared = true; };
+
+  context.render({
+    paired: true,
+    vin: "5YJ3E1EB8NF123456",
+    vehicle: {
+      soc: 80,
+      status: "Online"
+    }
+  });
+
+  assert.equal(context.waking, false, "waking cleared");
+  assert.equal(cleared, true, "wake timeout cleared");
+  assert.equal(toastCalls.length, 0, "no toast fired during render");
 });
 
 test("otaCheck triggers load toast and resolves to up to date toast when idle", async () => {

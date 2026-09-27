@@ -252,7 +252,7 @@ html.modal-open, body.modal-open{overflow:hidden; overscroll-behavior:none}
 .chip-badge.warn{color:var(--muted); background:var(--soft)}
 .ota-version{font-size:24px; font-variant-numeric:tabular-nums; overflow-wrap:anywhere}
 .ota-changes{margin:0; padding-left:20px; display:flex; flex-direction:column; gap:4px}
-.btn.small{min-height:28px; padding:0 12px; font-size:12px; border-radius:8px}
+.btn.small{min-height:34px; padding:0 12px; font-size:12px; border-radius:8px}
 .btn.small.primary{border:0; background:var(--accent); color:#fff}
 .btn.small.secondary{background:var(--soft); color:var(--muted); border:1px solid var(--border)}
 .pr-list-wrap{display:flex; flex-direction:column; gap:6px}

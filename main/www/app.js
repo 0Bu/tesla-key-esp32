@@ -52,28 +52,45 @@ function commandResponse(j){
 }
 
 /* ---------- toasts ---------- */
-var activeToast = null;
-var activeToastTimer = null;
-var activeToastLeavingTimer = null;
-
 function toast(msg, type, key){
   type = type || 'info';
   var c = $("toasts");
   if(!c) return null;
-  clearTimeout(activeToastTimer);
-  activeToastTimer = null;
-  clearTimeout(activeToastLeavingTimer);
-  activeToastLeavingTimer = null;
 
-  var t = activeToast;
-  if(!t || !t.parentNode){
-    while(c.firstChild) c.removeChild(c.firstChild);
+  var t = null;
+  // 1. If key is provided, find any existing toast element with this key
+  if(key){
+    for(var i = 0; i < c.children.length; i++){
+      var item = c.children[i];
+      if(item.dataset && item.dataset.key === key){
+        t = item;
+        break;
+      }
+    }
+  }
+
+  // 2. If not found by key, try to reuse an existing non-load toast
+  if(!t){
+    for(var j = 0; j < c.children.length; j++){
+      var el = c.children[j];
+      var isLoad = el.className ? (/\bload\b/.test(el.className)) : (el.classList && el.classList.contains('load'));
+      if(!isLoad){
+        t = el;
+        break;
+      }
+    }
+  }
+
+  // 3. Otherwise create a new toast element so active load toasts are not destroyed
+  if(!t){
     t = document.createElement('div');
     c.appendChild(t);
-    activeToast = t;
   } else {
     t.classList.remove('leaving');
   }
+
+  if(t._toastTimer){ clearTimeout(t._toastTimer); t._toastTimer = null; }
+  if(t._toastLeavingTimer){ clearTimeout(t._toastLeavingTimer); t._toastLeavingTimer = null; }
 
   t.className = 'toast ' + type;
   if(key) t.dataset.key = key;
@@ -96,13 +113,12 @@ function toast(msg, type, key){
 
   if(type !== 'load'){
     var dur = type === 'err' ? 5200 : 3000;
-    activeToastTimer = setTimeout(function(){
-      activeToastTimer = null;
+    t._toastTimer = setTimeout(function(){
+      t._toastTimer = null;
       t.classList.add('leaving');
-      activeToastLeavingTimer = setTimeout(function(){
-        activeToastLeavingTimer = null;
+      t._toastLeavingTimer = setTimeout(function(){
+        t._toastLeavingTimer = null;
         if(t.parentNode) t.parentNode.removeChild(t);
-        if(activeToast === t) activeToast = null;
       }, 230);
     }, dur);
   }
@@ -485,7 +501,7 @@ function render(s){
   var act=null, actLabel='', actIcon='bolt', busyText=null;
   $("hero").classList.remove('hide');
   if(paired&&v){
-    if(waking){ waking=false; clearTimeout(wakeTimeout); toast('Car is awake', 'ok', 'wake'); }   // car is awake & reporting — stop the spinner
+    if(waking){ waking=false; clearTimeout(wakeTimeout); }   // car is awake & reporting — stop the spinner
     var soc=(v.usable_soc!=null?num(v.usable_soc):num(v.soc))||0;
     // "Charge complete" = battery reached its target and not charging; the start tap is gated
     // (the car would only reject a charge_start here as "complete"). See chargeComplete().
@@ -1441,7 +1457,6 @@ function setChannel(chan){
       activePr = parseTargetPr();
     }
     renderChanMenu();
-    updateInstalledChangelog(true);
     return loadPrList(false);
   }
   var hadPr = (activePr > 0) || prMode;
@@ -1642,13 +1657,21 @@ function renderInstalledChangelog(changelog){
 
 function updateInstalledChangelog(force){
   var currentKey = (state && state.version) ? String(state.version).trim() : '';
+  if(!currentKey) return Promise.resolve();
   if(!force && installedChangelogKey === currentKey) return Promise.resolve();
-  installedChangelogKey = currentKey;
   return loadInstalledChangelog().then(function(text){
-    if(installedChangelogKey === currentKey){
+    if(text){
+      installedChangelogKey = currentKey;
       renderInstalledChangelog(text);
+    } else {
+      installedChangelogKey = null;
+      renderInstalledChangelog('');
     }
     return text;
+  }).catch(function(){
+    installedChangelogKey = null;
+    renderInstalledChangelog('');
+    return '';
   });
 }
 
