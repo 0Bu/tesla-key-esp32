@@ -127,24 +127,17 @@
           <div class="seg" role="radiogroup" aria-label="Update channel" onkeydown="handleChanKey(event)">
             <button type="button" class="seg-opt sel" id="optRelease" role="radio" aria-checked="true" onclick="setChannel('release')">Release</button>
             <button type="button" class="seg-opt" id="optDev" role="radio" aria-checked="false" onclick="setChannel('dev')">Development</button>
-            <button type="button" class="seg-opt" id="optPr" role="radio" aria-checked="false" onclick="setChannel('pr')">PR Preview</button>
+            <button type="button" class="seg-opt hide" id="optPr" role="radio" aria-checked="false" onclick="setChannel('pr')">PR Preview</button>
           </div>
         </div>
-        <div class="pr-drawer hide" id="prDrawer">
-          <span class="lbl">Target PR</span>
-          <button type="button" class="pr-card-btn" id="prCardBtn" onclick="openPrModal()" aria-label="Select pull request preview" title="Select pull request preview">
-            <div class="pr-card-main">
-              <div class="pr-card-head">
-                <span class="pr-card-num mono" id="prCardNum">PR #—</span>
-                <span class="chip-badge pr-card-badge" id="prCardBadge">Select PR</span>
-              </div>
-              <div class="pr-card-title" id="prCardTitle">No pull request selected</div>
-              <div class="pr-card-meta" id="prCardMeta">Tap to select an open PR</div>
-            </div>
-            <span class="pr-card-chevron" aria-hidden="true">
-              <svg viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></svg>
-            </span>
-          </button>
+        <div class="pr-list-wrap hide" id="prListWrap">
+          <div class="pr-loading hide" id="prLoading">Loading pull requests…</div>
+          <div class="banner hide" id="prRateLimitBanner">
+            <span class="bi" aria-hidden="true"><svg viewBox="0 0 24 24"><use href="#ic-warn"/></svg></span>
+            <span class="bt">GitHub API rate limit reached.</span>
+          </div>
+          <div class="pr-rows" id="prRows"></div>
+          <p class="note hide" id="prEmpty">No pull requests with preview firmware available.</p>
         </div>
         <details class="fw-changelog-details" id="fwChangelogDetails" open>
           <summary class="lbl fw-changelog-summary">Changelog</summary>
@@ -193,39 +186,6 @@
   </div>
 </div>
 
-<div class="modal hide" id="prModal" role="dialog" aria-modal="true" aria-labelledby="prModalTitle">
-  <div class="modal-backdrop" id="prBackdrop"></div>
-  <div class="modal-card pr-modal-card" tabindex="-1">
-    <div class="pr-modal-head">
-      <h2 class="sheet-title" id="prModalTitle">Select PR Preview</h2>
-      <button type="button" class="ib" id="prRefreshBtn" onclick="loadPrList(true)" aria-label="Refresh PR list" title="Refresh PR list">
-        <svg viewBox="0 0 24 24"><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/><path d="M16 16h5v5"/></svg>
-      </button>
-    </div>
-    <div class="field pr-search-field">
-      <input type="search" id="prFilter" placeholder="Filter PRs by title, author, or #…" autocomplete="off" autocapitalize="off" spellcheck="false" oninput="filterPrList()">
-    </div>
-    <div class="banner hide" id="prRateLimitBanner">
-      <span class="bi" aria-hidden="true"><svg viewBox="0 0 24 24"><use href="#ic-warn"/></svg></span>
-      <span class="bt">GitHub API rate limit reached. Enter PR # manually below.</span>
-    </div>
-    <div class="pr-list-container" id="prListContainer">
-      <div class="pr-loading hide" id="prLoading">Loading pull requests…</div>
-      <div class="pr-items" id="prItems"></div>
-      <p class="note hide" id="prNoMatches">No pull requests match the filter.</p>
-    </div>
-    <div class="pr-manual-section">
-      <span class="lbl">Direct PR entry</span>
-      <div class="pr-manual-row">
-        <input type="number" id="prManualNum" class="mono" placeholder="PR #" min="1" max="2147483647">
-        <button type="button" class="btn secondary" id="prManualBtn" onclick="submitManualPr()">Select</button>
-      </div>
-    </div>
-    <div class="actions">
-      <button type="button" class="btn secondary" id="prCancel" onclick="closePrModal()">Cancel</button>
-    </div>
-  </div>
-</div>
 
 <div class="toasts" id="toasts" role="status" aria-live="polite" aria-atomic="true"></div>
 

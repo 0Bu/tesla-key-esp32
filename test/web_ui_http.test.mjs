@@ -605,10 +605,9 @@ test("OTA check and render incorporate target PR when set", async () => {
     key_present: false
   });
 
-  const vl = element("verLink");
-  assert.equal(element("fwVer").textContent, "v1.5.4 [PR #326]");
-  assert.equal(vl.title, "Tap to check for PR #326 updates");
-  assert.equal(vl["aria-label"], "Check for PR #326 firmware updates");
+  assert.equal(element("fwVer").textContent, "v1.5.4-pr-326");
+  assert.equal(element("ipline").textContent, "192.0.2.100 · v1.5.4-pr-326");
+  assert.equal(element("verLink").classList.contains("hide"), true);
 
   let requestedUrl = null;
   context.fetch = async (url) => {
@@ -1257,7 +1256,34 @@ test("otaProgress throttles download toasts to 10% milestones while maintaining 
   assert.equal(element("otaFill").style.width, "100%");
 });
 
-test("3-way update channel switching, PR drawer display, and keyboard navigation", async () => {
+test("firmware version formatting and header ipline display", () => {
+  const { context, element } = loadUi();
+
+  // 1. Release version
+  assert.equal(context.formatFwVersion("1.6.0", 0, "release"), "v1.6.0");
+  assert.equal(context.formatFwVersion("v1.6.0", 0, "release"), "v1.6.0");
+
+  // 2. Dev version
+  assert.equal(context.formatFwVersion("1.5.9-dev-1", 0, "dev"), "v1.5.9-dev-1");
+  assert.equal(context.formatFwVersion("1.5.9-dev.1", 0, "dev"), "v1.5.9-dev-1");
+  assert.equal(context.formatFwVersion("1.5.9", 0, "dev"), "v1.5.9-dev-1");
+
+  // 3. PR version
+  assert.equal(context.formatFwVersion("1.6.0-pr-333", 333, "pr"), "v1.6.0-pr-333");
+  assert.equal(context.formatFwVersion("1.6.0", 333, "pr"), "v1.6.0-pr-333");
+  assert.equal(context.formatFwVersion("1.6.0-PR-333", 0, "pr"), "v1.6.0-pr-333");
+
+  // Header ipline rendering: <ip> · <version>
+  context.render({
+    ip: "192.0.2.1",
+    version: "1.6.0",
+    key_present: false
+  });
+  assert.equal(element("ipline").textContent, "192.0.2.1 · v1.6.0");
+  assert.equal(element("fwVer").textContent, "v1.6.0");
+});
+
+test("PR preview FW is only offered when matching PRs exist, and inline list installs PR FW", async () => {
   const { context, element } = loadUi();
   const fetchCalls = [];
   context.fetch = async (url, opts) => {
@@ -1278,166 +1304,91 @@ test("3-way update channel switching, PR drawer display, and keyboard navigation
         };
       }
     };
+    if (url.includes("/PR/337/manifest.json")) return { ok: true, status: 200, async json() { return { version: "1.6.0-pr-337" }; } };
+    if (url.includes("/PR/337/changelog.json")) return { ok: true, status: 200, async text() { return "PR 337 changes"; } };
+    if (url.startsWith("/ota/update")) return { ok: true, status: 200, async json() { return { result: true }; } };
     return { ok: true, status: 200, async json() { return {}; } };
   };
 
-  // Initialize channel menu in mock DOM
+  // Initially, no PRs in prList and running release firmware: PR Preview is NOT offered
+  context.prList = [];
   context.renderChanMenu();
+  assert.equal(element("optPr").classList.contains("hide"), true, "optPr is hidden when no PRs exist");
+  assert.equal(element("prListWrap").classList.contains("hide"), true);
 
-  // Keyboard navigation cycles through Release -> Development -> PR Preview -> Release
+  // Keyboard navigation only cycles through visible options (Release <-> Development)
   context.document.activeElement = element("optRelease");
   context.handleChanKey({ key: "ArrowRight", preventDefault() {} });
   assert.equal(context.document.activeElement, element("optDev"));
   context.handleChanKey({ key: "ArrowRight", preventDefault() {} });
+  assert.equal(context.document.activeElement, element("optRelease"), "ArrowRight skips hidden optPr");
+
+  // When matching PRs with preview builds exist, optPr is offered
+  context.prList = [
+    { number: 337, title: "Feature PR 337", ready: true }
+  ];
+  context.renderChanMenu();
+  assert.equal(element("optPr").classList.contains("hide"), false, "optPr is visible when matching PR exists");
+
+  // Keyboard navigation now cycles through all 3 options
+  context.document.activeElement = element("optDev");
+  context.handleChanKey({ key: "ArrowRight", preventDefault() {} });
   assert.equal(context.document.activeElement, element("optPr"));
   context.handleChanKey({ key: "ArrowRight", preventDefault() {} });
   assert.equal(context.document.activeElement, element("optRelease"));
-  context.handleChanKey({ key: "ArrowLeft", preventDefault() {} });
-  assert.equal(context.document.activeElement, element("optPr"));
-  context.handleChanKey({ key: "ArrowLeft", preventDefault() {} });
-  assert.equal(context.document.activeElement, element("optDev"));
-  context.handleChanKey({ key: "End", preventDefault() {} });
-  assert.equal(context.document.activeElement, element("optPr"));
-  context.handleChanKey({ key: "Home", preventDefault() {} });
-  assert.equal(context.document.activeElement, element("optRelease"));
 
-  // Initially in release channel, PR drawer is hidden
-  assert.equal(context.getActiveChannel(), "release");
-  assert.equal(element("optRelease")["aria-checked"], "true");
-  assert.equal(element("prDrawer").classList.contains("hide"), true);
-
-  // Calling setChannel('pr') opens PR modal
+  // Selecting PR Preview channel reveals inline list and hides verLink
   await context.setChannel("pr");
-  assert.equal(element("prModal").classList.contains("hide"), false);
-
-  // Selecting a PR sets activePr, updates hash, marks optPr sel, reveals prDrawer, and triggers otaCheck with ?pr=
-  await context.selectPr(337);
-  assert.equal(context.activePr, 337);
-  assert.equal(context.getTargetPr(), 337);
   assert.equal(context.getActiveChannel(), "pr");
   assert.equal(element("optPr")["aria-checked"], "true");
   assert.match(element("optPr").className, /sel/);
-  assert.equal(element("optRelease")["aria-checked"], "false");
-  assert.doesNotMatch(element("optRelease").className, /sel/);
-  assert.equal(element("prDrawer").classList.contains("hide"), false);
-  assert.equal(element("prCardNum").textContent, "PR #337");
-  assert.equal(element("prModal").classList.contains("hide"), true);
-  assert.equal(context.location.hash, "#pr=337");
+  assert.equal(element("prListWrap").classList.contains("hide"), false);
+  assert.equal(element("verLink").classList.contains("hide"), true, "verLink is hidden in PR mode");
 
-  const prCheck = fetchCalls.find(c => c.url.includes("/ota/check") && c.url.includes("pr=337"));
-  assert.ok(prCheck, "/ota/check called with pr=337");
+  // PR rows rendered with install button
+  const rows = element("prRows").children;
+  assert.equal(rows.length, 1);
+  const row = rows[0];
+  assert.equal(row.children[0].textContent, "#337");
+  assert.equal(row.children[1].textContent, "Feature PR 337");
+  const installBtn = row.children[2];
+  assert.equal(installBtn.textContent, "Install");
+  assert.equal(!installBtn.disabled, true);
 
-  // Switching back to release clears activePr, hides prDrawer, and POSTs /set_ota
+  // Modal dialog #prModal is completely absent from DOM
+  const indexHtml = fs.readFileSync(new URL("../main/www/index.html", import.meta.url), "utf8");
+  assert.equal(indexHtml.includes('id="prModal"'), false, "prModal dialog has been removed from index.html");
+
+  // Clicking Install triggers askOtaInstall modal
+  context.state = { version: "1.6.0" };
+  let installPromise = context.installPr(337);
+  // Wait microtask
+  await new Promise(r => setTimeout(r, 10));
+  assert.equal(element("otaModal").classList.contains("hide"), false);
+  assert.match(element("otaModalTitle").textContent, /PR #337/);
+  assert.equal(element("otaVersionLine").textContent, "v1.6.0 → v1.6.0-pr-337");
+
+  // Confirming OTA install kicks off POST /ota/update?pr=337
+  context.closeOtaModal(true);
+  await installPromise;
+  const otaUpdateCall = fetchCalls.find(c => c.url.includes("/ota/update?pr=337"));
+  assert.ok(otaUpdateCall, "POST /ota/update?pr=337 was called");
+
+  // Switching back to release clears activePr, hides prListWrap, restores verLink, and POSTs /set_ota
   fetchCalls.length = 0;
   await context.setChannel("release");
   assert.equal(context.activePr, 0);
   assert.equal(context.getActiveChannel(), "release");
   assert.equal(element("optRelease")["aria-checked"], "true");
-  assert.match(element("optRelease").className, /sel/);
-  assert.equal(element("optPr")["aria-checked"], "false");
-  assert.doesNotMatch(element("optPr").className, /sel/);
-  assert.equal(element("prDrawer").classList.contains("hide"), true);
+  assert.equal(element("prListWrap").classList.contains("hide"), true);
+  assert.equal(element("verLink").classList.contains("hide"), false);
   const setOtaRelease = fetchCalls.find(c => c.url === "/set_ota");
   assert.ok(setOtaRelease, "POST /set_ota requested on channel switch");
 });
 
-test("PR modal opening, closing, direct manual entry, and filtering", async () => {
-  const { context, element } = loadUi();
-  element("askModal").classList.add("hide");
-  element("otaModal").classList.add("hide");
-  element("prModal").classList.add("hide");
-
-  context.fetch = async (url) => {
-    if (url.startsWith("/ota/check")) return { ok: true, status: 200, async json() { return { started: true }; } };
-    if (url.startsWith("/ota/status")) return {
-      ok: true,
-      status: 200,
-      async json() {
-        return {
-          state: "idle",
-          update_available: false,
-          progress: 0,
-          message: "up to date",
-          available: "1.6.0",
-          current: "1.6.0"
-        };
-      }
-    };
-    return { ok: true, status: 200, async json() { return []; } };
-  };
-
-  // Open modal
-  context.openPrModal();
-  assert.equal(element("prModal").classList.contains("hide"), false);
-  assert.equal(context.prModalOpen, true);
-  assert.equal(element("wrap").inert, true);
-
-  // Close modal
-  context.closePrModal();
-  assert.equal(element("prModal").classList.contains("hide"), true);
-  assert.equal(context.prModalOpen, false);
-  assert.equal(element("wrap").inert, false);
-
-  // Manual entry validation
-  element("prManualNum").value = "invalid";
-  context.submitManualPr();
-  assert.equal(context.activePr, 0, "invalid manual entry rejected");
-
-  element("prManualNum").value = "42foo";
-  context.submitManualPr();
-  assert.equal(context.activePr, 0, "trailing chars rejected");
-
-  element("prManualNum").value = "1.5";
-  context.submitManualPr();
-  assert.equal(context.activePr, 0, "floating points rejected");
-
-  element("prManualNum").value = "0";
-  context.submitManualPr();
-  assert.equal(context.activePr, 0, "zero rejected");
-
-  element("prManualNum").value = "42";
-  await context.submitManualPr();
-  assert.equal(context.activePr, 42);
-  assert.equal(element("prManualNum").value, "");
-  assert.equal(element("prModal").classList.contains("hide"), true);
-
-  // Filtering PR items
-  context.prList = [
-    { number: 10, title: "Fix BLE handshake", user: { login: "alice" }, ready: true },
-    { number: 20, title: "Add MCP diagnostics", user: { login: "bob" }, ready: false },
-    { number: 30, title: "UI styling tweaks", user: { login: "carol" }, ready: true }
-  ];
-
-  // Filter by title
-  element("prFilter").value = "BLE";
-  context.filterPrList();
-  assert.equal(element("prItems").children.length, 1);
-  assert.match(element("prItems").children[0]["aria-label"], /Fix BLE handshake/);
-  assert.equal(element("prItems").children[0].children[1].textContent, "Fix BLE handshake");
-
-  // Filter by author
-  element("prFilter").value = "bob";
-  context.filterPrList();
-  assert.equal(element("prItems").children.length, 1);
-  assert.match(element("prItems").children[0]["aria-label"], /by @bob/);
-  assert.equal(element("prItems").children[0].children[1].textContent, "Add MCP diagnostics");
-
-  // Filter by number
-  element("prFilter").value = "30";
-  context.filterPrList();
-  assert.equal(element("prItems").children.length, 1);
-  assert.match(element("prItems").children[0]["aria-label"], /PR #30/);
-  assert.equal(element("prItems").children[0].children[0].children[0].textContent, "PR #30");
-
-  // Filter with no matches shows note
-  element("prFilter").value = "nonexistent";
-  context.filterPrList();
-  assert.equal(element("prItems").children.length, 0);
-  assert.equal(element("prNoMatches").classList.contains("hide"), false);
-});
-
 test("state preservation across periodic /status polls in PR preview mode", async () => {
   const { context, element } = loadUi();
+  context.prList = [{ number: 337, title: "PR 337", ready: true }];
   context.activePr = 337;
 
   // Simulate periodic status poll reporting release channel from device
@@ -1453,9 +1404,8 @@ test("state preservation across periodic /status polls in PR preview mode", asyn
   assert.equal(element("optPr")["aria-checked"], "true");
   assert.match(element("optPr").className, /sel/);
   assert.equal(element("optRelease")["aria-checked"], "false");
-  assert.doesNotMatch(element("optRelease").className, /sel/);
-  assert.equal(element("prDrawer").classList.contains("hide"), false);
-  assert.match(element("fwVer").textContent, /\[PR #337\]/);
+  assert.equal(element("fwVer").textContent, "v1.6.0-pr-337");
+  assert.equal(element("ipline").textContent, "192.0.2.1 · v1.6.0-pr-337");
 
   // Now simulate page loaded with query param ?pr=42, user switching to release, and subsequent status poll
   context.location.search = "?pr=42";
@@ -1569,12 +1519,10 @@ test("PR discovery loads from GitHub API, caches in sessionStorage, and probes r
   };
 
   const list = await context.loadPrList(true);
-  assert.equal(list.length, 2);
-  // Ready PR 101 is sorted first even though 102 has later updated_at
+  // Only PR 101 with ready preview build is offered; PR 102 (no build) is filtered out
+  assert.equal(list.length, 1);
   assert.equal(list[0].number, 101);
   assert.equal(list[0].ready, true);
-  assert.equal(list[1].number, 102);
-  assert.equal(list[1].ready, false);
 
   // Cached in sessionStorage
   assert.ok(storage.has("tk_pr_cache"));

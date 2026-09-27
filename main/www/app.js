@@ -637,11 +637,10 @@ function render(s){
   else { netWarn=true; setRow('syslog','warn','Resolving…','Resolving'); }
 
   // header + firmware pane
-  var host=(typeof location!=='undefined'&&location.host)?location.host:'';
-  $("ipline").textContent = s.ip || host;
   var prTarget=getTargetPr();
   if(!activePr && prTarget > 0 && !activePrExplicitlyCleared) activePr = prTarget;
-  var fv=$("fwVer"); if(fv) fv.textContent='v'+(s.version||'?')+(prTarget>0?' [PR #'+prTarget+']':'');
+  renderIpLine();
+  renderFwVer();
 
   if(s.ota && typeof s.ota.channel === 'string'){
     otaChannel = s.ota.channel === 'dev' ? 'dev' : 'release';
@@ -678,6 +677,51 @@ function render(s){
   setBadge('badgeFw', !!otaAvail || otaBusy);
 }
 function setSub(id,txt,cls){ var e=$(id); if(e){ e.className='rs'+(cls?' '+cls:''); e.textContent=txt; } }
+
+function parsePrNumber(suffix){
+  if(!suffix) return 0;
+  var m = String(suffix).match(/pr[-.]?([1-9][0-9]{0,6})/i);
+  return m ? parseInt(m[1], 10) : 0;
+}
+
+function formatFwVersion(v, pr, chan){
+  var raw = String(v || '').trim();
+  if(!raw) return '';
+  var hasV = (raw.charAt(0) === 'v' || raw.charAt(0) === 'V');
+  var numStr = hasV ? raw.substring(1) : raw;
+  var parts = numStr.split('-');
+  var core = parts[0] || '1.6.0';
+  var suffix = parts.slice(1).join('-');
+
+  if(chan === 'pr' || pr > 0){
+    var prNum = pr > 0 ? pr : (parsePrNumber(suffix) || 333);
+    return 'v' + core + '-pr-' + prNum;
+  }
+  if(chan === 'dev' || /dev/i.test(suffix)){
+    var devCount = '1';
+    var dm = suffix.match(/dev[.-]?([0-9]+)/i);
+    if(dm) devCount = dm[1];
+    return 'v' + core + '-dev-' + devCount;
+  }
+  return 'v' + core;
+}
+
+function renderIpLine(){
+  var el = $("ipline");
+  if(!el) return;
+  var host = (typeof location !== 'undefined' && location.host) ? location.host : '';
+  var ip = (state && state.ip) ? state.ip : host;
+  var ver = formatFwVersion(state && state.version, getTargetPr(), getActiveChannel());
+  el.textContent = ip + (ver ? (' · ' + ver) : '');
+}
+
+function renderFwVer(){
+  var fv = $("fwVer");
+  if(!fv) return;
+  var ver = formatFwVersion(state && state.version, getTargetPr(), getActiveChannel());
+  fv.textContent = ver || '—';
+}
+
 function renderFwSub(){
   var f=$("fwSub"); if(!f) return;
   var pr = getTargetPr();
@@ -688,15 +732,17 @@ function renderVerLink(){
   var vl = $("verLink");
   var tx = $("verLinkText");
   if(!vl) return;
+  var act = getActiveChannel();
+  vl.classList.toggle('hide', act === 'pr');
   var pr = getTargetPr();
   var isAvail = !!otaAvail;
   if(isAvail){
-    vl.className = 'pill primary wide-btn avail';
+    vl.className = 'pill primary wide-btn avail' + (act === 'pr' ? ' hide' : '');
     if(tx) tx.textContent = pr > 0 ? ('Install PR #' + pr) : ('Install v' + otaAvail);
     vl.title = pr > 0 ? ('PR #' + pr + ' update ' + otaAvail + ' available — tap to install') : ('Update ' + otaAvail + ' available — tap to install');
     vl.setAttribute('aria-label', pr > 0 ? ('Install PR #' + pr + ' firmware update ' + otaAvail) : ('Install firmware update ' + otaAvail));
   } else {
-    vl.className = 'pill soft wide-btn';
+    vl.className = 'pill soft wide-btn' + (act === 'pr' ? ' hide' : '');
     if(tx) tx.textContent = pr > 0 ? 'Check PR Updates' : 'Check for updates';
     vl.title = pr > 0 ? ('Tap to check for PR #' + pr + ' updates') : 'Tap to check for updates';
     vl.setAttribute('aria-label', pr > 0 ? ('Check for PR #' + pr + ' firmware updates') : 'Check for firmware updates');
@@ -776,23 +822,19 @@ var askResolve=null, askCancelValue=null, askReturnFocus=null, askHintFn=null;
 // Call it after showing/hiding a dialog and before moving focus back: an inert node can't take it.
 // Both can be open at once (an OTA check finishing while a sheet is up). The sheet is always the
 // top layer (CSS z-index), so Escape closes it first, and the OTA dialog never takes its focus.
-var prModalOpen = false;
 function isOpen(id){
   var m=$(id);
-  if(!m||!m.classList) return false;
-  if(id==='prModal') return prModalOpen && !m.classList.contains('hide');
-  return !m.classList.contains('hide');
+  return !!(m && m.classList && !m.classList.contains('hide'));
 }
 function syncModal(){
-  var open=isOpen('askModal')||isOpen('otaModal')||isOpen('prModal');
+  var open=isOpen('askModal')||isOpen('otaModal');
   if(typeof document!=='undefined'){
     if(document.documentElement&&document.documentElement.classList) document.documentElement.classList.toggle('modal-open',open);
     if(document.body&&document.body.classList) document.body.classList.toggle('modal-open',open);
   }
   var w=$("wrap"); if(w) w.inert=open;
-  // The OTA and PR dialogs sit under an open sheet: keep Tab from reaching their buttons.
+  // The OTA dialog sits under an open sheet: keep Tab from reaching its buttons.
   var om=$("otaModal"); if(om) om.inert=isOpen('askModal');
-  var pm=$("prModal"); if(pm) pm.inert=isOpen('askModal');
 }
 function askOpen(o,cancelValue){
   if(askResolve) askClose(askCancelValue);
@@ -1130,64 +1172,184 @@ function parseTargetPr(){
   return 0;
 }
 
+function getInstalledPr(){
+  return (state && state.version) ? parsePrNumber(state.version) : 0;
+}
+
 function getTargetPr(){
   if(activePr > 0) return activePr;
-  return parseTargetPr();
+  var urlPr = parseTargetPr();
+  if(urlPr > 0) return urlPr;
+  if(!activePrExplicitlyCleared){
+    var inst = getInstalledPr();
+    if(inst > 0) return inst;
+  }
+  return 0;
 }
+
+var prMode = false;
 
 function getActiveChannel(){
-  return (activePr > 0) ? 'pr' : otaChannel;
+  return (prMode || activePr > 0) ? 'pr' : otaChannel;
 }
 
-function renderPrDrawer(){
-  var dr = $("prDrawer");
-  if(!dr) return;
-  var pr = getTargetPr();
-  var numEl = $("prCardNum");
-  var badgeEl = $("prCardBadge");
-  var titleEl = $("prCardTitle");
-  var metaEl = $("prCardMeta");
-  var btn = $("prCardBtn");
-  if(numEl) numEl.textContent = pr > 0 ? ('PR #' + pr) : 'PR #—';
-  var prInfo = null;
-  if(pr > 0 && Array.isArray(prList)){
-    for(var i = 0; i < prList.length; i++){
-      if(prList[i].number === pr){ prInfo = prList[i]; break; }
+function renderPrRows(){
+  var container = $("prRows");
+  var emptyNote = $("prEmpty");
+  if(!container) return;
+  if(typeof container.replaceChildren === 'function'){
+    container.replaceChildren();
+  } else {
+    container.textContent = '';
+    if(Array.isArray(container.children)) container.children.length = 0;
+    while(container.firstChild) container.removeChild(container.firstChild);
+  }
+  var loading = $("prLoading");
+  var isLoading = loading && !loading.classList.contains('hide');
+  if(emptyNote){
+    emptyNote.classList.toggle('hide', prList.length > 0 || isLoading);
+  }
+  for(var i = 0; i < prList.length; i++){
+    container.appendChild(createPrRow(prList[i]));
+  }
+}
+
+function createPrRow(pr){
+  var row = document.createElement('div');
+  row.className = 'pr-row' + (pr.number === activePr ? ' sel' : '');
+
+  var num = document.createElement('span');
+  num.className = 'pr-row-num mono';
+  num.textContent = '#' + pr.number;
+  row.appendChild(num);
+
+  var title = document.createElement('span');
+  title.className = 'pr-row-title';
+  title.textContent = pr.title || 'Untitled PR';
+  title.title = '#' + pr.number + ': ' + (pr.title || '');
+  row.appendChild(title);
+
+  var btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'btn small pr-row-btn ' + (pr.ready ? 'primary' : 'secondary');
+  if(pr.ready){
+    btn.textContent = 'Install';
+    btn.setAttribute('aria-label', 'Install PR #' + pr.number);
+    btn.title = 'Install PR #' + pr.number;
+    btn.onclick = function(e){
+      if(e && e.stopPropagation) e.stopPropagation();
+      installPr(pr.number);
+    };
+  } else {
+    btn.textContent = 'No build';
+    btn.disabled = true;
+    btn.setAttribute('aria-label', 'No preview build available for PR #' + pr.number);
+    btn.title = 'No preview build available for PR #' + pr.number;
+  }
+  row.appendChild(btn);
+
+  row.onclick = function(){
+    selectPr(pr.number);
+  };
+  return row;
+}
+
+function probePrReadiness(prs){
+  var probes = prs.map(function(pr){
+    var url = 'https://0bu.github.io/tesla-key-esp32/PR/' + pr.number + '/manifest.json';
+    return fetch(url, { method: 'HEAD' })
+      .then(function(res){
+        pr.ready = !!(res && res.ok && res.status === 200);
+        return pr;
+      })
+      .catch(function(){
+        pr.ready = false;
+        return pr;
+      });
+  });
+  return Promise.all(probes).then(function(){
+    prs.sort(function(a, b){
+      if(a.ready !== b.ready) return a.ready ? -1 : 1;
+      var aTime = a.updated_at ? new Date(a.updated_at).getTime() : 0;
+      var bTime = b.updated_at ? new Date(b.updated_at).getTime() : 0;
+      if(aTime !== bTime) return bTime - aTime;
+      return b.number - a.number;
+    });
+    return prs;
+  });
+}
+
+function loadPrList(force){
+  var loading = $("prLoading");
+  var rateLimitBanner = $("prRateLimitBanner");
+  var emptyNote = $("prEmpty");
+  if(rateLimitBanner) rateLimitBanner.classList.add('hide');
+  if(emptyNote) emptyNote.classList.add('hide');
+
+  if(!force && typeof sessionStorage !== 'undefined'){
+    try {
+      var cached = sessionStorage.getItem(prCacheKey);
+      if(cached){
+        var parsed = JSON.parse(cached);
+        if(parsed && parsed.timestamp && (Date.now() - parsed.timestamp < PR_CACHE_TTL_MS) && Array.isArray(parsed.prs)){
+          prList = parsed.prs.slice(0, 10);
+          renderChanMenu();
+          return Promise.resolve(prList);
+        }
+      }
+    } catch(e){}
+  }
+
+  if(!force && prLoadPromise) return prLoadPromise;
+  if(loading) loading.classList.remove('hide');
+
+  var ghUrl = 'https://api.github.com/repos/0Bu/tesla-key-esp32/pulls?state=open&sort=updated&direction=desc&per_page=10';
+  prLoadPromise = fetch(ghUrl, {
+    headers: { 'Accept': 'application/vnd.github.v3+json' }
+  }).then(function(res){
+    if(res.status === 403){
+      if(rateLimitBanner) rateLimitBanner.classList.remove('hide');
+      throw new Error('rate_limited');
     }
-  }
-  if(badgeEl){
-    if(prInfo){
-      badgeEl.textContent = prInfo.ready ? 'Preview ready' : 'No preview build';
-      badgeEl.className = 'chip-badge pr-card-badge ' + (prInfo.ready ? 'ok' : 'warn');
-    } else if(pr > 0){
-      badgeEl.textContent = 'PR Preview';
-      badgeEl.className = 'chip-badge pr-card-badge';
-    } else {
-      badgeEl.textContent = 'Select PR';
-      badgeEl.className = 'chip-badge pr-card-badge';
+    if(!res.ok) throw new Error('github_error_' + res.status);
+    return res.json();
+  }).then(function(rawPrs){
+    if(!Array.isArray(rawPrs)) throw new Error('invalid_pr_list');
+    var max10 = rawPrs.slice(0, 10);
+    var cleaned = max10.map(function(p){
+      return {
+        number: p.number,
+        title: p.title || '',
+        updated_at: p.updated_at,
+        created_at: p.created_at,
+        user: { login: (p.user && p.user.login) ? p.user.login : 'unknown' },
+        ready: false
+      };
+    });
+    return probePrReadiness(cleaned);
+  }).then(function(readyPrs){
+    // Keep ONLY PRs with ready preview builds ("passende PRs mit existierender Preview FW")
+    var matching = readyPrs.filter(function(p){ return p.ready; });
+    prList = matching.slice(0, 10);
+    if(typeof sessionStorage !== 'undefined'){
+      try {
+        sessionStorage.setItem(prCacheKey, JSON.stringify({ timestamp: Date.now(), prs: prList }));
+      } catch(e){}
     }
-  }
-  if(titleEl){
-    if(prInfo && prInfo.title) titleEl.textContent = prInfo.title;
-    else if(pr > 0) titleEl.textContent = 'Pull request #' + pr;
-    else titleEl.textContent = 'No pull request selected';
-  }
-  if(metaEl){
-    if(prInfo){
-      var author = (prInfo.user && prInfo.user.login) ? ('@' + prInfo.user.login) : 'unknown';
-      var age = formatPrAge(prInfo.updated_at || prInfo.created_at);
-      metaEl.textContent = 'by ' + author + (age ? (' · ' + age) : '');
-    } else if(pr > 0){
-      metaEl.textContent = 'Tap to change selected PR';
-    } else {
-      metaEl.textContent = 'Tap to select an open PR';
+    if(loading) loading.classList.add('hide');
+    renderChanMenu();
+    prLoadPromise = null;
+    return prList;
+  }).catch(function(err){
+    if(loading) loading.classList.add('hide');
+    renderChanMenu();
+    if(err && err.message !== 'rate_limited' && (force || getActiveChannel() === 'pr')){
+      toast('Failed to load pull requests', 'err', 'pr');
     }
-  }
-  if(btn){
-    var btnDesc = pr > 0 ? ('Change pull request preview (currently PR #' + pr + ')') : 'Select pull request preview';
-    btn.setAttribute('aria-label', btnDesc);
-    btn.setAttribute('title', btnDesc);
-  }
+    prLoadPromise = null;
+    return prList;
+  });
+  return prLoadPromise;
 }
 
 function otaStatus(){
@@ -1204,27 +1366,40 @@ function otaStatus(){
 /* ---------- update channel (segmented control in the Firmware pane) ---------- */
 function renderChanMenu(){
   var r=$("optRelease"), d=$("optDev"), p=$("optPr"); if(!r||!d) return;
+  var hasMatchingPrs = (prList && prList.length > 0) || (getTargetPr() > 0) || (activePr > 0);
+  if(p){
+    p.classList.toggle('hide', !hasMatchingPrs);
+  }
+  if(!hasMatchingPrs && prMode){
+    prMode = false;
+  }
   var act = getActiveChannel();
   r.className = 'seg-opt' + (act === 'release' ? ' sel' : '');
   r.setAttribute('aria-checked', act === 'release' ? 'true' : 'false');
   d.className = 'seg-opt' + (act === 'dev' ? ' sel' : '');
   d.setAttribute('aria-checked', act === 'dev' ? 'true' : 'false');
   if(p){
-    p.className = 'seg-opt' + (act === 'pr' ? ' sel' : '');
+    p.className = 'seg-opt' + (act === 'pr' ? ' sel' : '') + (!hasMatchingPrs ? ' hide' : '');
     p.setAttribute('aria-checked', act === 'pr' ? 'true' : 'false');
   }
-  var dr = $("prDrawer");
-  if(dr && dr.classList){
-    dr.classList.toggle('hide', act !== 'pr');
+  var listWrap = $("prListWrap");
+  if(listWrap && listWrap.classList){
+    listWrap.classList.toggle('hide', act !== 'pr');
   }
-  renderPrDrawer();
+  renderFwVer();
+  renderIpLine();
   renderFwSub();
   renderVerLink();
+  if(act === 'pr'){
+    renderPrRows();
+  }
 }
 
 // Arrow keys move focus between the options; Home/End focus first/last; Space/Enter selects.
 function handleChanKey(e){
-  var opts = [$('optRelease'), $('optDev'), $('optPr')].filter(Boolean);
+  var opts = [$('optRelease'), $('optDev'), $('optPr')].filter(function(el){
+    return el && !el.classList.contains('hide');
+  });
   if(!opts.length) return;
   if(e.key === 'Home'){
     e.preventDefault();
@@ -1248,9 +1423,16 @@ function handleChanKey(e){
 
 function setChannel(chan){
   if(chan === 'pr'){
-    openPrModal();
-    return Promise.resolve();
+    prMode = true;
+    activePrExplicitlyCleared = false;
+    if(activePr <= 0 && parseTargetPr() > 0){
+      activePr = parseTargetPr();
+    }
+    renderChanMenu();
+    updateInstalledChangelog(true);
+    return loadPrList(false);
   }
+  prMode = false;
   var hadPr = activePr > 0;
   activePr = 0;
   activePrExplicitlyCleared = true;
@@ -1299,6 +1481,7 @@ function selectPr(num){
   var n = parseInt(num, 10);
   if(!n || n <= 0 || n > 2147483647) return Promise.resolve();
   activePr = n;
+  prMode = true;
   activePrExplicitlyCleared = false;
   if(typeof location !== 'undefined'){
     try {
@@ -1314,233 +1497,61 @@ function selectPr(num){
     }
   }
   renderChanMenu();
-  closePrModal();
   updateInstalledChangelog(true);
-  return otaCheck();
+  return Promise.resolve();
 }
 
-var prReturnFocus = null;
+function installPr(num){
+  var n = parseInt(num, 10);
+  if(!n || n <= 0 || n > 2147483647) return Promise.resolve();
+  activePr = n;
+  prMode = true;
+  activePrExplicitlyCleared = false;
+  renderChanMenu();
+  updateInstalledChangelog(true);
 
-function openPrModal(){
-  var m = $("prModal");
-  if(!m) return;
-  prReturnFocus = (typeof document !== 'undefined') ? document.activeElement : null;
-  prModalOpen = true;
-  m.classList.remove('hide');
-  syncModal();
-  var filter = $("prFilter");
-  if(filter && typeof filter.focus === 'function' && !isOpen('askModal')){
-    filter.focus();
-  }
-  loadPrList(false);
-}
+  toast('Loading PR #' + n + ' details…', 'load', 'ota');
+  var manifestUrl = 'https://0bu.github.io/tesla-key-esp32/PR/' + n + '/manifest.json';
+  var changelogUrl = 'https://0bu.github.io/tesla-key-esp32/PR/' + n + '/changelog.json';
 
-function closePrModal(){
-  var m = $("prModal");
-  prModalOpen = false;
-  if(m && m.classList) m.classList.add('hide');
-  syncModal();
-  var rf = prReturnFocus || $("optPr") || $("prCardBtn");
-  if(rf && typeof rf.focus === 'function' && !isOpen('askModal') && !isOpen('otaModal')){
-    rf.focus();
-  }
-  prReturnFocus = null;
-}
-
-function submitManualPr(){
-  var inp = $("prManualNum");
-  if(!inp) return;
-  var val = (inp.value || '').trim();
-  if(/^[1-9][0-9]{0,6}$/.test(val)){
-    var n = parseInt(val, 10);
-    if(n > 0 && n <= 2147483647){
-      inp.value = '';
-      selectPr(n);
-      return;
-    }
-  }
-  toast('Please enter a valid PR number', 'err', 'pr');
-  if(typeof inp.focus === 'function') inp.focus();
-}
-
-function formatPrAge(dateStr){
-  if(!dateStr) return '';
-  try {
-    var dt = new Date(dateStr);
-    var diffMs = Date.now() - dt.getTime();
-    if(diffMs < 0 || isNaN(diffMs)) return '';
-    var mins = Math.floor(diffMs / 60000);
-    if(mins < 60) return mins <= 1 ? 'just now' : (mins + 'm ago');
-    var hours = Math.floor(mins / 60);
-    if(hours < 24) return hours + 'h ago';
-    var days = Math.floor(hours / 24);
-    if(days < 30) return days + 'd ago';
-    var months = Math.floor(days / 30);
-    return months + 'mo ago';
-  } catch(e){
-    return '';
-  }
-}
-
-function probePrReadiness(prs){
-  var probes = prs.map(function(pr){
-    var url = 'https://0bu.github.io/tesla-key-esp32/PR/' + pr.number + '/manifest.json';
-    return fetch(url, { method: 'HEAD' })
-      .then(function(res){
-        pr.ready = !!(res && res.ok && res.status === 200);
-        return pr;
-      })
-      .catch(function(){
-        pr.ready = false;
-        return pr;
-      });
-  });
-  return Promise.all(probes).then(function(){
-    prs.sort(function(a, b){
-      if(a.ready !== b.ready) return a.ready ? -1 : 1;
-      var aTime = a.updated_at ? new Date(a.updated_at).getTime() : 0;
-      var bTime = b.updated_at ? new Date(b.updated_at).getTime() : 0;
-      if(aTime !== bTime) return bTime - aTime;
-      return b.number - a.number;
-    });
-    return prs;
-  });
-}
-
-function createPrItemElement(pr){
-  var btn = document.createElement('button');
-  btn.type = 'button';
-  btn.className = 'pr-item' + (pr.number === activePr ? ' sel' : '');
-  var author = (pr.user && pr.user.login) ? ('@' + pr.user.login) : 'unknown';
-  btn.setAttribute('aria-label', 'PR #' + pr.number + ': ' + (pr.title || '') + ' by ' + author);
-  var top = document.createElement('div');
-  top.className = 'pr-item-top';
-  var num = document.createElement('span');
-  num.className = 'pr-item-num mono';
-  num.textContent = 'PR #' + pr.number;
-  top.appendChild(num);
-  var badge = document.createElement('span');
-  badge.className = 'chip-badge pr-item-badge ' + (pr.ready ? 'ok' : 'warn');
-  badge.textContent = pr.ready ? 'Preview ready' : 'No preview build';
-  top.appendChild(badge);
-  btn.appendChild(top);
-  var title = document.createElement('div');
-  title.className = 'pr-item-title';
-  title.textContent = pr.title || 'Untitled PR';
-  btn.appendChild(title);
-  var meta = document.createElement('div');
-  meta.className = 'pr-item-meta';
-  var age = formatPrAge(pr.updated_at || pr.created_at);
-  meta.textContent = author + (age ? (' · ' + age) : '');
-  btn.appendChild(meta);
-  btn.onclick = function(){
-    selectPr(pr.number);
-  };
-  return btn;
-}
-
-function renderPrItems(query){
-  var container = $("prItems");
-  var noMatches = $("prNoMatches");
-  if(!container) return;
-  if(typeof container.replaceChildren === 'function'){
-    container.replaceChildren();
-  } else {
-    container.textContent = '';
-    if(Array.isArray(container.children)) container.children.length = 0;
-    while(container.firstChild) container.removeChild(container.firstChild);
-  }
-  var filtered = prList;
-  if(query){
-    filtered = prList.filter(function(pr){
-      var numStr = String(pr.number);
-      var title = (pr.title || '').toLowerCase();
-      var author = (pr.user && pr.user.login ? pr.user.login : '').toLowerCase();
-      return numStr.indexOf(query) >= 0 || title.indexOf(query) >= 0 || author.indexOf(query) >= 0;
-    });
-  }
-  if(noMatches && noMatches.classList){
-    noMatches.classList.toggle('hide', filtered.length > 0 || prList.length === 0);
-  }
-  for(var i = 0; i < filtered.length; i++){
-    container.appendChild(createPrItemElement(filtered[i]));
-  }
-}
-
-function filterPrList(){
-  var inp = $("prFilter");
-  var q = (inp && inp.value != null) ? String(inp.value).trim().toLowerCase() : '';
-  renderPrItems(q);
-}
-
-function loadPrList(force){
-  var loading = $("prLoading");
-  var rateLimitBanner = $("prRateLimitBanner");
-  if(rateLimitBanner) rateLimitBanner.classList.add('hide');
-
-  if(!force && typeof sessionStorage !== 'undefined'){
-    try {
-      var cached = sessionStorage.getItem(prCacheKey);
-      if(cached){
-        var parsed = JSON.parse(cached);
-        if(parsed && parsed.timestamp && (Date.now() - parsed.timestamp < PR_CACHE_TTL_MS) && Array.isArray(parsed.prs)){
-          prList = parsed.prs;
-          filterPrList();
-          renderPrDrawer();
-          return Promise.resolve(prList);
-        }
-      }
-    } catch(e){}
-  }
-
-  if(!force && prLoadPromise) return prLoadPromise;
-  if(loading) loading.classList.remove('hide');
-
-  var ghUrl = 'https://api.github.com/repos/0Bu/tesla-key-esp32/pulls?state=open&sort=updated&direction=desc&per_page=30';
-  prLoadPromise = fetch(ghUrl, {
-    headers: { 'Accept': 'application/vnd.github.v3+json' }
-  }).then(function(res){
-    if(res.status === 403){
-      if(rateLimitBanner) rateLimitBanner.classList.remove('hide');
-      throw new Error('rate_limited');
-    }
-    if(!res.ok) throw new Error('github_error_' + res.status);
-    return res.json();
-  }).then(function(rawPrs){
-    if(!Array.isArray(rawPrs)) throw new Error('invalid_pr_list');
-    var cleaned = rawPrs.map(function(p){
-      return {
-        number: p.number,
-        title: p.title || '',
-        updated_at: p.updated_at,
-        created_at: p.created_at,
-        user: { login: (p.user && p.user.login) ? p.user.login : 'unknown' },
-        ready: false
-      };
-    });
-    return probePrReadiness(cleaned);
-  }).then(function(readyPrs){
-    prList = readyPrs;
-    if(typeof sessionStorage !== 'undefined'){
+  return Promise.all([
+    fetch(manifestUrl, {cache: 'no-store'}).then(function(r){ return r.ok ? r.json() : null; }).catch(function(){ return null; }),
+    fetch(changelogUrl, {cache: 'no-store'}).then(function(r){ return r.ok ? r.text() : ''; }).catch(function(){ return ''; })
+  ]).then(function(results){
+    var manifest = results[0];
+    var changelogText = results[1] || '';
+    if(changelogText && changelogText.indexOf('{') === 0){
       try {
-        sessionStorage.setItem(prCacheKey, JSON.stringify({ timestamp: Date.now(), prs: prList }));
+        var parsed = JSON.parse(changelogText);
+        if(parsed && parsed.changelog) changelogText = parsed.changelog;
       } catch(e){}
     }
-    if(loading) loading.classList.add('hide');
-    filterPrList();
-    renderPrDrawer();
-    prLoadPromise = null;
-    return prList;
-  }).catch(function(err){
-    if(loading) loading.classList.add('hide');
-    filterPrList();
-    if(err && err.message !== 'rate_limited'){
-      toast('Failed to load pull requests', 'err', 'pr');
+    var availVer = (manifest && manifest.version) ? manifest.version : ('PR #' + n);
+    var curVer = (state && state.version) ? state.version : '';
+
+    return askOtaInstall({
+      current: curVer,
+      available: availVer,
+      channel: 'pr'
+    }, changelogText);
+  }).then(function(installed){
+    if(installed){
+      otaExpectedVersion = null;
+      otaBegin('update', OTA_UPDATE_TIMEOUT_MS);
+      toast('Starting update…', 'load', 'ota');
+      otaInline(otaMiniRing(0, true, 'currentColor') + '<span>starting…</span>', '', 'indet');
+      return requestJsonWithTimeout('/ota/update?pr=' + n, {method: 'POST'}, OTA_HTTP_TIMEOUT_MS)
+        .then(function(j){
+          if(!j || j.result !== true) throw new Error((j && j.reason) || 'update did not start');
+          otaPoll();
+        })
+        .catch(function(){ otaFail('update failed'); });
+    } else {
+      otaReset();
     }
-    prLoadPromise = null;
-    return prList;
+  }).catch(function(){
+    return otaCheck();
   });
-  return prLoadPromise;
 }
 
 var otaDecisionResolve = null;
@@ -1711,10 +1722,6 @@ if(typeof document!=='undefined' && typeof document.addEventListener==='function
     if(modalBackdrop && e.target === modalBackdrop){
       closeOtaModal(false);
     }
-    var prBackdrop = $("prBackdrop");
-    if(prBackdrop && e.target === prBackdrop){
-      closePrModal();
-    }
     var askBackdrop = $("askBackdrop");
     if(askBackdrop && e.target === askBackdrop){
       askClose(askCancelValue);
@@ -1725,7 +1732,6 @@ if(typeof document!=='undefined' && typeof document.addEventListener==='function
     var askOpenNow = am && am.classList && typeof am.classList.contains==='function' && !am.classList.contains('hide');
     if(e.key==='Escape'){
       if(askOpenNow){ askClose(askCancelValue); return; }
-      if(isOpen('prModal')){ closePrModal(); return; }
       var modal = $("otaModal");
       if(modal && modal.classList && typeof modal.classList.contains==='function' && !modal.classList.contains('hide')){
         closeOtaModal(false);
@@ -1739,19 +1745,6 @@ if(typeof document!=='undefined' && typeof document.addEventListener==='function
   if(cancelBtn) cancelBtn.onclick = function(){ closeOtaModal(false); };
   var installBtn = $("otaInstall");
   if(installBtn) installBtn.onclick = function(){ closeOtaModal(true); };
-  var prCancelBtn = $("prCancel");
-  if(prCancelBtn) prCancelBtn.onclick = function(){ closePrModal(); };
-  var prManualBtn = $("prManualBtn");
-  if(prManualBtn) prManualBtn.onclick = submitManualPr;
-  var prManualInp = $("prManualNum");
-  if(prManualInp){
-    prManualInp.onkeydown = function(e){
-      if(e.key === 'Enter'){
-        e.preventDefault();
-        submitManualPr();
-      }
-    };
-  }
   var askCancelBtn = $("askCancel");
   if(askCancelBtn) askCancelBtn.onclick = function(){ askClose(askCancelValue); };
   var askOkBtn = $("askOk");
@@ -1896,5 +1889,6 @@ function boot(){
   // still making claims about a device we are no longer hearing from.
   setInterval(function(){ if(feedOk) paintCd(); },1000);
   resumeOta();
+  loadPrList(false);
 }
 if(!(typeof window!=='undefined'&&window.__TESLA_UI_NO_BOOT__)) boot();

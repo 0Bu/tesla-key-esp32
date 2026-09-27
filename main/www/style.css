@@ -205,20 +205,7 @@ svg{display:block}
 .seg{display:grid; grid-template-columns:repeat(3, 1fr); padding:3px; border-radius:12px; background:var(--soft)}
 .seg-opt{min-height:44px; border:0; border-radius:10px; background:transparent; font-size:13.5px; font-weight:650; padding:0 4px}
 .seg-opt.sel{background:var(--card); box-shadow:0 1px 3px rgba(0,0,0,.12)}
-.pr-drawer{display:flex; flex-direction:column; gap:6px}
-.pr-card-btn{width:100%; border:1px solid var(--border); border-radius:14px; background:var(--soft); color:inherit;
-  padding:12px 14px; text-align:left; display:flex; align-items:center; justify-content:space-between; gap:12px;
-  cursor:pointer; font:inherit; transition:background .15s ease, border-color .15s ease}
-.pr-card-btn:hover{background:var(--card); border-color:var(--faint)}
-.pr-card-btn:focus-visible{outline:none; border-color:var(--accent); box-shadow:0 0 0 3px rgba(232,33,39,.14)}
-.pr-card-main{display:flex; flex-direction:column; gap:4px; min-width:0; flex:1}
-.pr-card-head{display:flex; align-items:center; gap:8px}
-.pr-card-num{font-size:13px; font-weight:700}
-.pr-card-badge{font-size:11px}
-.pr-card-title{font-size:14px; font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
-.pr-card-meta{font-size:12px; color:var(--muted)}
-.pr-card-chevron{flex:none; color:var(--muted); display:grid; place-items:center}
-.pr-card-chevron svg{width:20px; height:20px; stroke:currentColor; stroke-width:2; fill:none}
+
 .fw-changelog-details{display:flex; flex-direction:column; gap:6px}
 .fw-changelog-summary{cursor:pointer; list-style:none; user-select:none; display:flex; align-items:center; gap:6px}
 .fw-changelog-summary::-webkit-details-marker{display:none}
@@ -262,31 +249,19 @@ html.modal-open, body.modal-open{overflow:hidden; overscroll-behavior:none}
 .chip-badge.warn{color:var(--muted); background:var(--soft)}
 .ota-version{font-size:24px; font-variant-numeric:tabular-nums; overflow-wrap:anywhere}
 .ota-changes{margin:0; padding-left:20px; display:flex; flex-direction:column; gap:4px}
-.pr-modal-card{max-width:480px; gap:12px}
-.pr-modal-head{display:flex; align-items:center; justify-content:space-between; gap:10px}
-.pr-search-field input{min-height:42px; font-size:14.5px}
-.pr-list-container{display:flex; flex-direction:column; gap:6px; max-height:260px; overflow-y:auto;
-  overscroll-behavior:contain; -webkit-overflow-scrolling:touch; padding-right:2px}
-.pr-loading{padding:18px; text-align:center; font-size:13.5px; color:var(--muted)}
-.pr-items{display:flex; flex-direction:column; gap:6px}
-.pr-item{width:100%; border:1px solid var(--border); border-radius:12px; background:var(--card); color:inherit;
-  padding:10px 12px; text-align:left; display:flex; flex-direction:column; gap:3px; cursor:pointer; font:inherit;
-  transition:background .15s ease, border-color .15s ease}
-.pr-item:hover{background:var(--soft)}
-.pr-item.sel{border-color:var(--accent); background:color-mix(in srgb,var(--accent) 8%,var(--card))}
-.pr-item:focus-visible{outline:none; border-color:var(--accent); box-shadow:0 0 0 3px rgba(232,33,39,.14)}
-.pr-item-top{display:flex; align-items:center; justify-content:space-between; gap:8px}
-.pr-item-num{font-size:13px; font-weight:700}
-.pr-item-badge{font-size:11px}
-.pr-item-title{font-size:13.5px; font-weight:600; line-height:1.3; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
-.pr-item-meta{font-size:12px; color:var(--muted)}
-.pr-manual-section{display:flex; flex-direction:column; gap:6px; padding-top:8px; border-top:1px solid var(--border)}
-.pr-manual-row{display:flex; gap:8px}
-.pr-manual-row input{flex:1; min-height:42px; padding:0 12px; border-radius:12px; border:1px solid var(--border);
-  background:var(--soft); color:var(--fg); font:inherit; font-size:15px; outline:none}
-.pr-manual-row input:focus{background:var(--card); border-color:var(--accent); box-shadow:0 0 0 3px rgba(232,33,39,.14)}
-.pr-manual-row button{flex:none; min-width:80px}
-.pr-modal-card .actions{display:flex; justify-content:flex-end}
+.btn.small{min-height:28px; padding:0 12px; font-size:12px; border-radius:8px}
+.btn.small.primary{border:0; background:var(--accent); color:#fff}
+.btn.small.secondary{background:var(--soft); color:var(--muted); border:1px solid var(--border)}
+.pr-list-wrap{display:flex; flex-direction:column; gap:6px}
+.pr-rows{display:flex; flex-direction:column; gap:4px; max-height:280px; overflow-y:auto; overscroll-behavior:contain; -webkit-overflow-scrolling:touch}
+.pr-row{display:flex; align-items:center; gap:8px; padding:6px 10px; border-radius:10px; background:var(--soft); font-size:13px; line-height:1.2; cursor:pointer; transition:background .15s ease}
+.pr-row:hover{background:color-mix(in srgb,var(--fg) 5%,var(--soft))}
+.pr-row.sel{background:color-mix(in srgb,var(--accent) 8%,var(--card)); outline:1px solid color-mix(in srgb,var(--accent) 30%,transparent)}
+.pr-row-num{font-size:12px; font-weight:700; flex:none; min-width:40px; color:var(--muted)}
+.pr-row-title{flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-weight:550}
+.pr-row-btn{flex:none}
+.pr-row-btn:disabled{opacity:.4; cursor:not-allowed}
+.pr-loading{padding:12px; text-align:center; font-size:12.5px; color:var(--muted)}
 
 /* toasts */
 .toasts{position:fixed; left:0; right:0; z-index:30; bottom:calc(var(--dock-h) + 14px + env(safe-area-inset-bottom));

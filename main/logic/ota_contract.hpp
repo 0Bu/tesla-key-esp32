@@ -71,9 +71,11 @@ inline bool canonical_ota_version(std::string_view input) {
     return parse_ota_version(input, ignored);
 }
 
-// Returns the PR number if the suffix is "PR-<number>" with 1-7 digits and > 0, else 0.
+// Returns the PR number if the suffix is "PR-<number>" or "pr-<number>" with 1-7 digits and > 0, else 0.
 inline unsigned parse_pr_suffix(std::string_view suffix) {
-    if (suffix.size() < 4 || suffix.substr(0, 3) != "PR-") return 0;
+    if (suffix.size() < 4) return 0;
+    std::string_view prefix = suffix.substr(0, 3);
+    if (prefix != "PR-" && prefix != "pr-") return 0;
     std::string_view digits = suffix.substr(3);
     if (digits.empty() || digits.size() > 7) return 0;
     if (digits[0] == '0') return 0; // PR numbers are positive, without leading zero
@@ -198,10 +200,12 @@ inline OtaChannel ota_channel_from_int(int32_t v) {
     return v == 1 ? OtaChannel::Dev : OtaChannel::Release;
 }
 
-// Returns the dev counter if the suffix is "dev" (returns 0) or "dev.<number>" (returns number), else -1.
+// Returns the dev counter if the suffix is "dev" (returns 0), "dev.<number>", or "dev-<number>" (returns number), else -1.
 inline int parse_dev_suffix(std::string_view suffix) {
     if (suffix == "dev") return 0;
-    if (suffix.size() < 5 || suffix.substr(0, 4) != "dev.") return -1;
+    if (suffix.size() < 5) return -1;
+    std::string_view prefix = suffix.substr(0, 4);
+    if (prefix != "dev." && prefix != "dev-") return -1;
     std::string_view digits = suffix.substr(4);
     if (digits.empty() || digits.size() > 9) return -1;
     int result = 0;
