@@ -605,9 +605,9 @@ test("OTA check and render incorporate target PR when set", async () => {
     key_present: false
   });
 
-  assert.equal(element("fwVer").textContent, "v1.5.4-pr-326");
-  assert.equal(element("ipline").textContent, "192.0.2.100 · v1.5.4-pr-326");
-  assert.equal(element("verLink").classList.contains("hide"), true);
+  assert.equal(element("fwVer").textContent, "v1.5.4");
+  assert.equal(element("ipline").textContent, "192.0.2.100 · v1.5.4");
+  assert.equal(element("verLink").classList.contains("hide"), false);
 
   let requestedUrl = null;
   context.fetch = async (url) => {
@@ -915,20 +915,19 @@ test("loadInstalledChangelog filters dev entries by running version on dev chann
   assert.equal(list.children[0].textContent, "Dev note 1");
 });
 
-test("getInstalledChangelogUrl targets PR directory when target PR is active", () => {
+test("getInstalledChangelogUrl targets directory matching running version", () => {
   const { context } = loadUi();
-  context.location.search = "?pr=42";
+  context.state = { version: "1.4.0-PR-42" };
   assert.equal(context.getInstalledChangelogUrl(), "https://0bu.github.io/tesla-key-esp32/PR/42/changelog.json");
 
-  context.location.search = "";
-  context.otaChannel = "dev";
+  context.state = { version: "1.5.0-dev.1" };
   assert.equal(context.getInstalledChangelogUrl(), "https://0bu.github.io/tesla-key-esp32/dev/changelog.json");
 
-  context.otaChannel = "release";
+  context.state = { version: "1.6.0" };
   assert.equal(context.getInstalledChangelogUrl(), "https://0bu.github.io/tesla-key-esp32/changelog.json");
 });
 
-test("loadInstalledChangelog falls back to /ota/changelog when remote fetch fails", async () => {
+test("loadInstalledChangelog does not fall back to /ota/changelog when remote fetch fails", async () => {
   const { context, element } = loadUi();
   context.fetch = async (url) => {
     if (url.startsWith("https://0bu.github.io/")) {
@@ -945,15 +944,13 @@ test("loadInstalledChangelog falls back to /ota/changelog when remote fetch fail
   };
 
   context.state = { version: "1.6.0" };
-  context.otaChannel = "release";
   const text = await context.loadInstalledChangelog();
-  assert.equal(text, "Fallback local note");
+  assert.equal(text, "");
 
   await context.updateInstalledChangelog(true);
   const list = element("fwChanges");
-  assert.equal(list.hidden, false);
-  assert.equal(list.children.length, 1);
-  assert.equal(list.children[0].textContent, "Fallback local note");
+  assert.equal(list.hidden, true);
+  assert.equal(element("fwNoChanges").hidden, false);
 });
 
 test("updateInstalledChangelog avoids duplicate fetch when key is unchanged unless forced", async () => {
@@ -1024,27 +1021,28 @@ test("loadInstalledChangelog handles 204 and network errors gracefully", async (
   assert.equal(noChanges.hidden, false);
 });
 
-test("setChannel reloads installed changelog on channel change", async () => {
+test("setChannel preserves installed changelog and does not reload on channel change", async () => {
   const { context, element } = loadUi();
-  let devChangelogFetched = false;
+  let changelogFetchCount = 0;
   context.fetch = async (url) => {
-    if (url === "https://0bu.github.io/tesla-key-esp32/dev/changelog.json") {
-      devChangelogFetched = true;
-      return { ok: true, status: 200, async json() { return { version: "1.6.0", changelog: "Dev changelog note" }; } };
+    if (url.startsWith("https://0bu.github.io/")) {
+      changelogFetchCount++;
+      return { ok: true, status: 200, async json() { return { version: "1.6.0", changelog: "Installed note" }; } };
     }
-    return { ok: true, status: 200, async json() { return { result: true }; } };
+    if (url === "/set_ota") {
+      return { ok: true, status: 200, async json() { return { result: true }; } };
+    }
+    return { ok: true, status: 200, async json() { return {}; } };
   };
   context.otaCheck = () => Promise.resolve();
 
-  context.otaChannel = "release";
-  await context.setChannel("dev");
+  context.state = { version: "1.6.0" };
+  await context.updateInstalledChangelog(true);
+  assert.equal(changelogFetchCount, 1);
 
+  await context.setChannel("dev");
   assert.equal(context.otaChannel, "dev");
-  assert.equal(devChangelogFetched, true);
-  const list = element("fwChanges");
-  assert.equal(list.hidden, false);
-  assert.equal(list.children.length, 1);
-  assert.equal(list.children[0].textContent, "Dev changelog note");
+  assert.equal(changelogFetchCount, 1, "did not refetch changelog on channel change");
 });
 
 test("toast enforces single popup policy, load spinner icon, in-place transition, and cleans up timers and keys", () => {
@@ -1259,19 +1257,13 @@ test("otaProgress throttles download toasts to 10% milestones while maintaining 
 test("firmware version formatting and header ipline display", () => {
   const { context, element } = loadUi();
 
-  // 1. Release version
-  assert.equal(context.formatFwVersion("1.6.0", 0, "release"), "v1.6.0");
-  assert.equal(context.formatFwVersion("v1.6.0", 0, "release"), "v1.6.0");
-
-  // 2. Dev version
-  assert.equal(context.formatFwVersion("1.5.9-dev-1", 0, "dev"), "v1.5.9-dev-1");
-  assert.equal(context.formatFwVersion("1.5.9-dev.1", 0, "dev"), "v1.5.9-dev-1");
-  assert.equal(context.formatFwVersion("1.5.9", 0, "dev"), "v1.5.9-dev-1");
-
-  // 3. PR version
-  assert.equal(context.formatFwVersion("1.6.0-pr-333", 333, "pr"), "v1.6.0-pr-333");
-  assert.equal(context.formatFwVersion("1.6.0", 333, "pr"), "v1.6.0-pr-333");
-  assert.equal(context.formatFwVersion("1.6.0-PR-333", 0, "pr"), "v1.6.0-pr-333");
+  // Verbatim version formatting (F13: no invented suffixes)
+  assert.equal(context.formatVerVerbatim("1.6.0"), "v1.6.0");
+  assert.equal(context.formatVerVerbatim("v1.6.0"), "v1.6.0");
+  assert.equal(context.formatVerVerbatim("1.5.9-dev.1"), "v1.5.9-dev.1");
+  assert.equal(context.formatVerVerbatim("1.6.0-pr-333"), "v1.6.0-pr-333");
+  assert.equal(context.formatVerVerbatim(""), "");
+  assert.equal(context.formatVerVerbatim(null), "");
 
   // Header ipline rendering: <ip> · <version>
   context.render({
@@ -1296,16 +1288,16 @@ test("PR preview FW is only offered when matching PRs exist, and inline list ins
       async json() {
         return {
           state: "idle",
-          update_available: false,
+          update_available: context.activePr === 337,
           progress: 0,
-          message: "up to date",
-          available: "1.6.0",
+          message: context.activePr === 337 ? "update available" : "up to date",
+          available: context.activePr === 337 ? "1.6.0-pr-337" : "1.6.0",
           current: "1.6.0"
         };
       }
     };
-    if (url.includes("/PR/337/manifest.json")) return { ok: true, status: 200, async json() { return { version: "1.6.0-pr-337" }; } };
-    if (url.includes("/PR/337/changelog.json")) return { ok: true, status: 200, async text() { return "PR 337 changes"; } };
+    if (url === "https://0bu.github.io/tesla-key-esp32/PR/337/manifest.json") return { ok: true, status: 200, async json() { return { version: "1.6.0-pr-337" }; } };
+    if (url === "https://0bu.github.io/tesla-key-esp32/PR/337/changelog.json") return { ok: true, status: 200, async text() { return "PR 337 changes"; } };
     if (url.startsWith("/ota/update")) return { ok: true, status: 200, async json() { return { result: true }; } };
     return { ok: true, status: 200, async json() { return {}; } };
   };
@@ -1337,13 +1329,13 @@ test("PR preview FW is only offered when matching PRs exist, and inline list ins
   context.handleChanKey({ key: "ArrowRight", preventDefault() {} });
   assert.equal(context.document.activeElement, element("optRelease"));
 
-  // Selecting PR Preview channel reveals inline list and hides verLink
+  // Selecting PR Preview channel reveals inline list and keeps verLink visible
   await context.setChannel("pr");
   assert.equal(context.getActiveChannel(), "pr");
   assert.equal(element("optPr")["aria-checked"], "true");
   assert.match(element("optPr").className, /sel/);
   assert.equal(element("prListWrap").classList.contains("hide"), false);
-  assert.equal(element("verLink").classList.contains("hide"), true, "verLink is hidden in PR mode");
+  assert.equal(element("verLink").classList.contains("hide"), false, "verLink is visible in PR mode");
 
   // PR rows rendered with install button
   const rows = element("prRows").children;
@@ -1404,8 +1396,8 @@ test("state preservation across periodic /status polls in PR preview mode", asyn
   assert.equal(element("optPr")["aria-checked"], "true");
   assert.match(element("optPr").className, /sel/);
   assert.equal(element("optRelease")["aria-checked"], "false");
-  assert.equal(element("fwVer").textContent, "v1.6.0-pr-337");
-  assert.equal(element("ipline").textContent, "192.0.2.1 · v1.6.0-pr-337");
+  assert.equal(element("fwVer").textContent, "v1.6.0");
+  assert.equal(element("ipline").textContent, "192.0.2.1 · v1.6.0");
 
   // Now simulate page loaded with query param ?pr=42, user switching to release, and subsequent status poll
   context.location.search = "?pr=42";
@@ -1497,7 +1489,7 @@ test("PR discovery loads from GitHub API, caches in sessionStorage, and probes r
   };
 
   context.fetch = async (url, opts) => {
-    if (url.includes("api.github.com")) {
+    if (typeof url === "string" && url.startsWith("https://api.github.com/")) {
       return {
         ok: true,
         status: 200,
@@ -1509,10 +1501,10 @@ test("PR discovery loads from GitHub API, caches in sessionStorage, and probes r
         }
       };
     }
-    if (url.includes("/PR/101/manifest.json")) {
+    if (url === "https://0bu.github.io/tesla-key-esp32/PR/101/manifest.json") {
       return { ok: true, status: 200 };
     }
-    if (url.includes("/PR/102/manifest.json")) {
+    if (url === "https://0bu.github.io/tesla-key-esp32/PR/102/manifest.json") {
       return { ok: false, status: 404 };
     }
     return { ok: false, status: 500 };

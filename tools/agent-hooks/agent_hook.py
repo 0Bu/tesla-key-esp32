@@ -704,7 +704,6 @@ def is_exact_espsecure_sign(command: str) -> bool:
     key_reference = key_path in {"$OTA_SIGNING_KEY_FILE", "${OTA_SIGNING_KEY_FILE}"}
     if (
         basename(key_path) not in {"ota_signing_key.pem", "tesla_ota_signing_key.pem"}
-        and not basename(key_path).endswith("_ota_signing_key.pem")
         and not key_reference
     ):
         return False

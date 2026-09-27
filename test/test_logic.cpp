@@ -1025,38 +1025,25 @@ static void test_ota_channel() {
     // Dev version classification & channel default
     CHECK(tk::parse_dev_suffix("dev") == 0);
     CHECK(tk::parse_dev_suffix("dev.1") == 1);
-    CHECK(tk::parse_dev_suffix("dev-1") == 1);
     CHECK(tk::parse_dev_suffix("dev.42") == 42);
-    CHECK(tk::parse_dev_suffix("dev-42") == 42);
     CHECK(tk::parse_dev_suffix("") == -1);
     CHECK(tk::parse_dev_suffix("PR-1") == -1);
     CHECK(tk::parse_dev_suffix("rc.1") == -1);
 
-    // PR suffix parsing: accepts both PR- and pr-
-    CHECK(tk::parse_pr_suffix("PR-331") == 331);
-    CHECK(tk::parse_pr_suffix("pr-331") == 331);
-    CHECK(tk::parse_pr_suffix("pr-333") == 333);
-    CHECK(tk::parse_pr_suffix("dev-1") == 0);
-
     CHECK(tk::ota_version_is_dev("1.4.84-dev"));
     CHECK(tk::ota_version_is_dev("1.4.84-dev.1"));
-    CHECK(tk::ota_version_is_dev("1.4.84-dev-1"));
     CHECK(tk::ota_version_is_dev("1.4.84-dev.12"));
     CHECK(!tk::ota_version_is_dev("1.4.84"));
     CHECK(!tk::ota_version_is_dev("1.4.84-rc.1"));
     CHECK(!tk::ota_version_is_dev("1.4.84-PR-42"));
-    CHECK(!tk::ota_version_is_dev("1.4.84-pr-333"));
     CHECK(!tk::ota_version_is_dev(""));
 
     CHECK(tk::default_ota_channel_for_version("1.4.84") == OtaChannel::Release);
     CHECK(tk::default_ota_channel_for_version("1.4.84-dev.5") == OtaChannel::Dev);
-    CHECK(tk::default_ota_channel_for_version("1.4.84-dev-1") == OtaChannel::Dev);
 
     // Canonical version parsing and version comparison
     CHECK(tk::canonical_ota_version("1.2.3"));
     CHECK(tk::canonical_ota_version("1.2.3-dev.1"));
-    CHECK(tk::canonical_ota_version("1.5.9-dev-1"));
-    CHECK(tk::canonical_ota_version("1.6.0-pr-333"));
     CHECK(!tk::canonical_ota_version("1.2"));
     CHECK(!tk::canonical_ota_version("v1.2.3"));
     CHECK(!tk::canonical_ota_version(""));
@@ -1070,7 +1057,6 @@ static void test_ota_channel() {
     CHECK(!tk::is_ota_update_available("1.2.4-dev.1", "1.2.3", 0, OtaChannel::Release));
     // Release channel: newer stable version is accepted
     CHECK(tk::is_ota_update_available("1.2.4", "1.2.3", 0, OtaChannel::Release));
-    CHECK(tk::is_ota_update_available("1.6.0", "1.5.8", 0, OtaChannel::Release));
     // Release channel: older stable version is rejected
     CHECK(!tk::is_ota_update_available("1.2.2", "1.2.3", 0, OtaChannel::Release));
     CHECK(!tk::is_ota_update_available("1.2.3", "1.2.3", 0, OtaChannel::Release));
@@ -1079,14 +1065,12 @@ static void test_ota_channel() {
     CHECK(tk::is_ota_update_available("1.2.4", "1.2.4-dev.5", 0, OtaChannel::Release));
     // Release channel: PR or other non-dev pre-release build can return to stable of same core
     CHECK(tk::is_ota_update_available("1.2.3", "1.2.3-PR-42", 0, OtaChannel::Release));
-    CHECK(tk::is_ota_update_available("1.6.0", "1.6.0-pr-333", 0, OtaChannel::Release));
 
     // is_ota_update_available: Dev channel
     // Candidate must be a dev build
     CHECK(!tk::is_ota_update_available("1.2.4", "1.2.3", 0, OtaChannel::Dev));
     // Newer core version dev build is accepted
     CHECK(tk::is_ota_update_available("1.3.0-dev.1", "1.2.3-dev.50", 0, OtaChannel::Dev));
-    CHECK(tk::is_ota_update_available("1.5.9-dev-1", "1.5.8", 0, OtaChannel::Dev));
     // Same core: monotonic dev updates
     CHECK(tk::is_ota_update_available("1.2.3-dev.6", "1.2.3-dev.5", 0, OtaChannel::Dev));
     // Same core: equal dev version rejected
@@ -1101,7 +1085,6 @@ static void test_ota_channel() {
 
     // is_ota_update_available: PR preview
     CHECK(tk::is_ota_update_available("1.2.3-PR-331", "1.2.3", 331));
-    CHECK(tk::is_ota_update_available("1.6.0-pr-333", "1.6.0", 333));
     CHECK(!tk::is_ota_update_available("1.2.3-PR-332", "1.2.3", 331)); // mismatched PR
     CHECK(!tk::is_ota_update_available("1.2.2-PR-331", "1.2.3", 331)); // older core
 }

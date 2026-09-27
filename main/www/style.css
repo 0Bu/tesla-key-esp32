@@ -51,8 +51,8 @@ svg{display:block}
 .logo.big{width:52px; height:52px; border-radius:15px}
 .rail-logo{display:none}
 
-/* OTA status in the header: visually replaced by bottom popup, retained in DOM for accessibility */
-.otastat{display:none}
+/* OTA status in the header: visually hidden from viewport, retained in DOM and accessible tree */
+.otastat{position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; border:0}
 .otaspin{animation:spin 1s linear infinite}
 
 /* panes: phones show the selected tab; from 900 px the car stays left and the tab picks the right */
@@ -101,6 +101,8 @@ svg{display:block}
 .pill:active,.btn:active,.cta:active{transform:scale(.985)}
 .ib{width:44px; height:44px; flex:none; border:0; border-radius:12px; background:none; color:var(--muted); display:grid; place-items:center}
 .ib:hover{background:var(--soft)}
+.ib.danger{color:var(--accent)}
+.ib.danger:hover{background:color-mix(in srgb,var(--accent) 12%,var(--soft))}
 .ib svg{width:18px; height:18px}
 .btn{min-height:50px; border-radius:999px; font-weight:650; border:1px solid var(--border); background:none}
 .btn.primary{border:0; background:var(--accent); color:#fff}
@@ -289,26 +291,104 @@ html.modal-open, body.modal-open{overflow:hidden; overscroll-behavior:none}
 
 @media (max-width:359px){ :root{--gs:190px} }
 
-/* wide: left rail, two columns, centered dialogs */
+/* tablet and desktop: generous scaling for comfortable viewing and touch targets */
+@media (min-width:640px){
+  :root{
+    --r-card:22px; --r-tile:16px;
+  }
+  body{font-size:17.5px}
+  .top{padding:calc(20px + env(safe-area-inset-top)) max(28px,env(safe-area-inset-right)) 16px max(28px,env(safe-area-inset-left))}
+  .logo{width:52px; height:52px; border-radius:16px}
+  .ttl h1{font-size:30px; letter-spacing:-.4px}
+  .host{font-size:16px}
+  .card{padding:24px; border-radius:var(--r-card); gap:16px}
+  .lbl{font-size:12.5px; letter-spacing:.7px}
+  .sub{font-size:15.5px}
+  .row{min-height:76px; padding:12px 14px 12px 20px; gap:16px}
+  .ri{width:44px; height:44px; border-radius:12px}
+  .ri svg{width:22px; height:22px}
+  .dot{width:12px; height:12px; border-width:2.5px; right:-2px; bottom:-2px}
+  .rl{font-size:17.5px}
+  .rv{font-size:15px}
+  .rs{font-size:14px}
+  .ib{width:48px; height:48px; border-radius:14px}
+  .ib svg{width:20px; height:20px}
+  .rbar{padding-right:12px}
+  .fwhead{gap:16px}
+  .fw-icon{width:50px; height:50px; border-radius:14px}
+  .fw-icon svg{width:28px; height:28px}
+  .fwver{font-size:26px}
+  .fw-badge{font-size:13px; padding:3px 10px}
+  .seg{padding:4px; border-radius:14px; gap:6px}
+  .seg-opt{min-height:48px; font-size:15px; border-radius:11px}
+  #verLink{min-height:50px; font-size:16px}
+  .ver-link-icon{width:22px; height:22px}
+  .fw-changes{font-size:15px; line-height:1.5}
+  .fw-changelog-wrap{max-height:240px; gap:8px}
+  .pr-rows{max-height:340px; gap:6px}
+  .pr-row{padding:8px 12px; font-size:14.5px; border-radius:12px; gap:10px}
+  .pr-row-num{font-size:13.5px; min-width:46px}
+  .btn.small{min-height:32px; padding:0 14px; font-size:13px; border-radius:10px}
+  .field input{min-height:52px; font-size:17px; border-radius:14px; padding:0 16px}
+  .btn{min-height:52px; font-size:16.5px}
+  .pill{min-height:48px; padding:0 20px; font-size:16px}
+  .pill.sm{font-size:15px; padding:0 16px; min-height:42px}
+  .modal-card{max-width:500px; padding:26px 26px 22px; border-radius:24px; gap:18px}
+  .sheet-title{font-size:24px}
+  .warnic{width:54px; height:54px}
+  .warnic svg{width:28px; height:28px}
+  .banner{padding:14px 18px; border-radius:16px; font-size:15px}
+  .toast{max-width:460px; padding:13px 18px; font-size:16px; border-radius:16px}
+  .toast .ic{width:28px; height:28px}
+  .hlabel{font-size:clamp(32px, 5vw, 44px)}
+  .hsub{font-size:clamp(16px, 2.5vw, 20px); max-width:36ch}
+  .hstats{max-width:480px; gap:14px}
+  .stat{padding:12px 16px; border-radius:16px; gap:4px}
+  .stat .k{font-size:12px; letter-spacing:.6px}
+  .stat .v{font-size:26px}
+  .stat .v small{font-size:14px}
+}
+
+/* tablet portrait: keep bottom dock, center cards with max-width 640px */
+@media (min-width:640px) and (max-width:899px){
+  :root{--dock-h:80px}
+  .top{max-width:688px; margin:0 auto; width:100%}
+  .grid{display:flex; flex-direction:column; align-items:center; padding:12px 24px 120px}
+  .wrap[data-tab=car] .grid{display:flex; flex-direction:column; align-items:center; justify-content:flex-start; min-height:0; padding-bottom:190px}
+  .wrap .pane{width:100%; max-width:640px; margin:0 auto}
+  .wrap[data-tab=car] .hero{margin:auto auto; width:100%; max-width:640px}
+  .banner{width:100%; max-width:640px; margin:0 auto}
+  .dock{padding:0 16px env(safe-area-inset-bottom)}
+  .tab{min-height:80px; font-size:13.5px; gap:6px}
+  .ti{width:28px; height:28px}
+  .badge{width:11px; height:11px}
+  .cta{bottom:calc(var(--dock-h) + 16px + env(safe-area-inset-bottom)); min-height:60px; font-size:18px; max-width:480px}
+  .toasts{bottom:calc(var(--dock-h) + 18px + env(safe-area-inset-bottom))}
+  .wrap[data-tab=car].has-cta~.toasts{bottom:calc(var(--dock-h) + 90px + env(safe-area-inset-bottom))}
+}
+
+/* wide: left rail, two columns, anchored status card */
 @media (min-width:900px){
-  :root{--gs:240px}
+  :root{--rail-w:100px; --gs:clamp(260px, 28vw, 340px)}
   .dock{position:sticky; top:0; align-self:flex-start; height:100vh; width:var(--rail-w); flex:none; display:flex; flex-direction:column;
-    align-items:center; gap:6px; padding:18px 0; border-top:0; border-right:1px solid var(--border); background:var(--card)}
-  .rail-logo{display:grid; width:36px; height:36px; border-radius:11px; margin-bottom:14px}
+    align-items:center; gap:8px; padding:20px 0; border-top:0; border-right:1px solid var(--border); background:var(--card)}
+  .rail-logo{display:grid; width:44px; height:44px; border-radius:14px; margin-bottom:18px}
+  .top{max-width:1260px}
   .top-logo,.ttl #paneTitle{display:none}
   .ttl .wide-title{display:inline}
-  .tab{width:72px; min-height:64px; border-radius:14px; font-size:12px; gap:5px}
+  .tab{width:80px; min-height:70px; border-radius:16px; font-size:12.5px; gap:6px}
   .tab:hover{background:var(--soft)}
   .tab[aria-current=page]{background:color-mix(in srgb,var(--accent) 10%,transparent)}
-  .ti{width:22px; height:22px}
-  .grid{padding:6px 16px 32px}
-  .wrap[data-tab=car] .grid{display:grid; grid-template-columns:minmax(0,540px); justify-content:center; align-content:start}
+  .ti{width:26px; height:26px}
+  .grid{display:grid; grid-template-columns:minmax(0,1.15fr) minmax(0,1fr); align-content:start; gap:24px; padding:12px 28px 36px; max-width:1260px}
+  .wrap[data-tab=car] .grid{display:grid; grid-template-columns:minmax(0,1.15fr) minmax(0,1fr); justify-content:start}
   .wrap[data-tab=car] .hero{margin:0; width:auto}
-  .wrap:not([data-tab=car]) .grid{grid-template-columns:minmax(0,1.1fr) minmax(0,1fr)}
-  .wrap[data-tab] .grid{padding-bottom:32px}
+  .wrap[data-tab] .grid{padding-bottom:36px}
   .wrap .pane-car{display:flex}
-  .hero{padding:28px 20px; background:var(--card); border:1px solid var(--border); border-radius:var(--r-card); box-shadow:var(--shadow)}
-  .cta,.cta:active{position:static; transform:none; width:auto; min-width:240px; min-height:50px; padding:0 24px; font-size:16px; box-shadow:var(--shadow-cta)}
+  .wrap .pane{width:auto; max-width:none; margin:0}
+  .banner{grid-column:1/-1; width:auto; max-width:none; margin:0}
+  .hero{padding:32px 24px; background:var(--card); border:1px solid var(--border); border-radius:var(--r-card); box-shadow:var(--shadow)}
+  .cta,.cta:active{position:static; transform:none; width:auto; min-width:240px; min-height:52px; padding:0 24px; font-size:17px; box-shadow:var(--shadow-cta)}
   .wrap:not([data-tab=car]) .cta:not(.hide){display:flex}
   .toasts,.wrap[data-tab=car].has-cta~.toasts{bottom:24px}
 }

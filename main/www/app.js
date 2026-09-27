@@ -397,6 +397,7 @@ function setTab(t){
   var w=$("wrap"); if(w) w.setAttribute('data-tab',t);
   for(var k in TAB_BTN){ var b=$(TAB_BTN[k]); if(!b) continue; if(k===t) b.setAttribute('aria-current','page'); else if(b.removeAttribute) b.removeAttribute('aria-current'); }
   var pt=$("paneTitle"); if(pt) pt.textContent=TAB_TITLE[t];
+  if(t==='fw') loadPrList(false);
 }
 function setBadge(id,on){ var b=$(id); if(b&&b.classList) b.classList.toggle('hide',!on); }
 
@@ -692,26 +693,10 @@ function parsePrNumber(suffix){
   return m ? parseInt(m[1], 10) : 0;
 }
 
-function formatFwVersion(v, pr, chan){
+function formatVerVerbatim(v){
   var raw = String(v || '').trim();
   if(!raw) return '';
-  var hasV = (raw.charAt(0) === 'v' || raw.charAt(0) === 'V');
-  var numStr = hasV ? raw.substring(1) : raw;
-  var parts = numStr.split('-');
-  var core = parts[0] || '1.6.0';
-  var suffix = parts.slice(1).join('-');
-
-  if(chan === 'pr' || pr > 0){
-    var prNum = pr > 0 ? pr : (parsePrNumber(suffix) || 333);
-    return 'v' + core + '-pr-' + prNum;
-  }
-  if(chan === 'dev' || /dev/i.test(suffix)){
-    var devCount = '1';
-    var dm = suffix.match(/dev[.-]?([0-9]+)/i);
-    if(dm) devCount = dm[1];
-    return 'v' + core + '-dev-' + devCount;
-  }
-  return 'v' + core;
+  return (raw.charAt(0) === 'v' || raw.charAt(0) === 'V') ? raw : ('v' + raw);
 }
 
 function renderIpLine(){
@@ -719,14 +704,14 @@ function renderIpLine(){
   if(!el) return;
   var host = (typeof location !== 'undefined' && location.host) ? location.host : '';
   var ip = (state && state.ip) ? state.ip : host;
-  var ver = formatFwVersion(state && state.version, getTargetPr(), getActiveChannel());
+  var ver = formatVerVerbatim(state && state.version);
   el.textContent = ip + (ver ? (' · ' + ver) : '');
 }
 
 function renderFwVer(){
   var fv = $("fwVer");
   if(!fv) return;
-  var ver = formatFwVersion(state && state.version, getTargetPr(), getActiveChannel());
+  var ver = formatVerVerbatim(state && state.version);
   fv.textContent = ver || '—';
 }
 
@@ -741,16 +726,15 @@ function renderVerLink(){
   var tx = $("verLinkText");
   if(!vl) return;
   var act = getActiveChannel();
-  vl.classList.toggle('hide', act === 'pr');
   var pr = getTargetPr();
   var isAvail = !!otaAvail;
   if(isAvail){
-    vl.className = 'pill primary wide-btn avail' + (act === 'pr' ? ' hide' : '');
+    vl.className = 'pill primary wide-btn avail';
     if(tx) tx.textContent = pr > 0 ? ('Install PR #' + pr) : ('Install v' + otaAvail);
     vl.title = pr > 0 ? ('PR #' + pr + ' update ' + otaAvail + ' available — tap to install') : ('Update ' + otaAvail + ' available — tap to install');
     vl.setAttribute('aria-label', pr > 0 ? ('Install PR #' + pr + ' firmware update ' + otaAvail) : ('Install firmware update ' + otaAvail));
   } else {
-    vl.className = 'pill soft wide-btn' + (act === 'pr' ? ' hide' : '');
+    vl.className = 'pill soft wide-btn';
     if(tx) tx.textContent = pr > 0 ? 'Check PR Updates' : 'Check for updates';
     vl.title = pr > 0 ? ('Tap to check for PR #' + pr + ' updates') : 'Tap to check for updates';
     vl.setAttribute('aria-label', pr > 0 ? ('Check for PR #' + pr + ' firmware updates') : 'Check for firmware updates');
@@ -913,7 +897,7 @@ function askSubmit(){
 function askText(o){ o.input=true; return askOpen(o,null); }
 function askConfirm(o){ return askOpen(o,false); }
 
-// Popup editing contract (matching Daikin FW): activating an INACTIVE text field selects its complete
+// Popup editing contract: activating an INACTIVE text field selects its complete
 // value, so replacing a VIN, broker or server is one paste. A tap/click in the ALREADY ACTIVE field
 // keeps native caret placement.
 function selectModalFieldContents(target){
@@ -932,9 +916,11 @@ function wireModalFieldSelection(doc){
   var pointerTarget = null;
   var pointerWasActive = false;
   doc.addEventListener('pointerdown', function(event){
+    if(!event.target || typeof event.target.matches !== 'function' ||
+       !event.target.matches('.modal-card textarea, .modal-card input:not([type="checkbox"]):not([type="radio"]):not([type="file"])')) return;
     pointerTarget = event.target;
     pointerWasActive = (doc.activeElement === event.target);
-    if(pointerWasActive && event.target && typeof event.target.setSelectionRange === 'function'
+    if(pointerWasActive && typeof event.target.setSelectionRange === 'function'
        && event.target.selectionStart !== event.target.selectionEnd){
       var caret = (event.target.selectionEnd != null) ? event.target.selectionEnd : (event.target.value ? event.target.value.length : 0);
       try { event.target.setSelectionRange(caret, caret); } catch(e){}
@@ -1225,6 +1211,15 @@ function renderPrRows(){
 function createPrRow(pr){
   var row = document.createElement('div');
   row.className = 'pr-row' + (pr.number === activePr ? ' sel' : '');
+  row.setAttribute('role', 'button');
+  row.tabIndex = 0;
+  row.setAttribute('aria-label', 'Select PR #' + pr.number + (pr.title ? (': ' + pr.title) : ''));
+  row.onkeydown = function(e){
+    if(e.key === 'Enter' || e.key === ' '){
+      e.preventDefault();
+      selectPr(pr.number);
+    }
+  };
 
   var num = document.createElement('span');
   num.className = 'pr-row-num mono';
@@ -1311,17 +1306,26 @@ function loadPrList(force){
   if(!force && prLoadPromise) return prLoadPromise;
   if(loading) loading.classList.remove('hide');
 
+  var indexUrl = 'https://0bu.github.io/tesla-key-esp32/PR/index.json';
   var ghUrl = 'https://api.github.com/repos/0Bu/tesla-key-esp32/pulls?state=open&sort=updated&direction=desc&per_page=10';
-  prLoadPromise = fetch(ghUrl, {
-    headers: { 'Accept': 'application/vnd.github.v3+json' }
-  }).then(function(res){
-    if(res.status === 403){
-      if(rateLimitBanner) rateLimitBanner.classList.remove('hide');
-      throw new Error('rate_limited');
-    }
-    if(!res.ok) throw new Error('github_error_' + res.status);
-    return res.json();
-  }).then(function(rawPrs){
+  prLoadPromise = fetch(indexUrl, { cache: 'no-store' })
+    .then(function(res){
+      if(res.ok) return res.json();
+      throw new Error('no_index');
+    })
+    .catch(function(){
+      return fetch(ghUrl, {
+        headers: { 'Accept': 'application/vnd.github.v3+json' }
+      }).then(function(res){
+        if(res.status === 403){
+          if(rateLimitBanner) rateLimitBanner.classList.remove('hide');
+          throw new Error('rate_limited');
+        }
+        if(!res.ok) throw new Error('github_error_' + res.status);
+        return res.json();
+      });
+    })
+    .then(function(rawPrs){
     if(!Array.isArray(rawPrs)) throw new Error('invalid_pr_list');
     var max10 = rawPrs.slice(0, 10);
     var cleaned = max10.map(function(p){
@@ -1336,7 +1340,7 @@ function loadPrList(force){
     });
     return probePrReadiness(cleaned);
   }).then(function(readyPrs){
-    // Keep ONLY PRs with ready preview builds ("passende PRs mit existierender Preview FW")
+    // Keep only pull requests with verified ready preview firmware.
     var matching = readyPrs.filter(function(p){ return p.ready; });
     prList = matching.slice(0, 10);
     if(typeof sessionStorage !== 'undefined'){
@@ -1471,7 +1475,6 @@ function setChannel(chan){
   otaChannelInFlight = true;
   otaChannelInitialSet = true;
   renderChanMenu();
-  updateInstalledChangelog(true);
 
   return requestJson('/set_ota', {
     method: 'POST',
@@ -1487,7 +1490,6 @@ function setChannel(chan){
     otaChannelTarget = null;
     otaChannel = prevChan;
     renderChanMenu();
-    updateInstalledChangelog(true);
     toast('Failed to set update channel', 'err', 'channel');
   });
 }
@@ -1512,61 +1514,23 @@ function selectPr(num){
     }
   }
   renderChanMenu();
-  updateInstalledChangelog(true);
   return Promise.resolve();
 }
 
 function installPr(num){
+  if(otaBusy) return Promise.resolve();
   var n = parseInt(num, 10);
   if(!n || n <= 0 || n > 2147483647) return Promise.resolve();
   activePr = n;
   prMode = true;
   activePrExplicitlyCleared = false;
+  if(typeof location !== 'undefined'){
+    try {
+      location.hash = '#pr=' + n;
+    } catch(e){}
+  }
   renderChanMenu();
-  updateInstalledChangelog(true);
-
-  toast('Loading PR #' + n + ' details…', 'load', 'ota');
-  var manifestUrl = 'https://0bu.github.io/tesla-key-esp32/PR/' + n + '/manifest.json';
-  var changelogUrl = 'https://0bu.github.io/tesla-key-esp32/PR/' + n + '/changelog.json';
-
-  return Promise.all([
-    fetch(manifestUrl, {cache: 'no-store'}).then(function(r){ return r.ok ? r.json() : null; }).catch(function(){ return null; }),
-    fetch(changelogUrl, {cache: 'no-store'}).then(function(r){ return r.ok ? r.text() : ''; }).catch(function(){ return ''; })
-  ]).then(function(results){
-    var manifest = results[0];
-    var changelogText = results[1] || '';
-    if(changelogText && changelogText.indexOf('{') === 0){
-      try {
-        var parsed = JSON.parse(changelogText);
-        if(parsed && parsed.changelog) changelogText = parsed.changelog;
-      } catch(e){}
-    }
-    var availVer = (manifest && manifest.version) ? manifest.version : ('PR #' + n);
-    var curVer = (state && state.version) ? state.version : '';
-
-    return askOtaInstall({
-      current: curVer,
-      available: availVer,
-      channel: 'pr'
-    }, changelogText);
-  }).then(function(installed){
-    if(installed){
-      otaExpectedVersion = null;
-      otaBegin('update', OTA_UPDATE_TIMEOUT_MS);
-      toast('Starting update…', 'load', 'ota');
-      otaInline(otaMiniRing(0, true, 'currentColor') + '<span>starting…</span>', '', 'indet');
-      return requestJsonWithTimeout('/ota/update?pr=' + n, {method: 'POST'}, OTA_HTTP_TIMEOUT_MS)
-        .then(function(j){
-          if(!j || j.result !== true) throw new Error((j && j.reason) || 'update did not start');
-          otaPoll();
-        })
-        .catch(function(){ otaFail('update failed'); });
-    } else {
-      otaReset();
-    }
-  }).catch(function(){
-    return otaCheck();
-  });
+  return otaCheck();
 }
 
 var otaDecisionResolve = null;
@@ -1606,17 +1570,18 @@ function loadOtaChangelog(){
 var installedChangelogKey = null;
 
 function getInstalledChangelogUrl(){
-  var pr = getTargetPr();
+  var curVer = (state && state.version) ? String(state.version).trim() : '';
   var base = 'https://0bu.github.io/tesla-key-esp32/';
-  if(pr > 0) return base + 'PR/' + pr + '/changelog.json';
-  if(otaChannel === 'dev') return base + 'dev/changelog.json';
+  var prNum = parsePrNumber(curVer);
+  if(prNum > 0) return base + 'PR/' + prNum + '/changelog.json';
+  if(/dev/i.test(curVer)) return base + 'dev/changelog.json';
   return base + 'changelog.json';
 }
 
-function parseInstalledChangelog(data, curVer, chan){
+function parseInstalledChangelog(data, curVer, isDev){
   if(!data || typeof data.changelog !== 'string' || !data.changelog.trim()) return '';
   var text = data.changelog.trim();
-  if(chan === 'dev' && curVer){
+  if(isDev && curVer){
     var lines = text.split(/\r?\n/);
     var prefix = 'v' + curVer + ' — ';
     var matched = [];
@@ -1628,35 +1593,32 @@ function parseInstalledChangelog(data, curVer, chan){
     }
     if(matched.length) return matched.join('\n');
   }
-  if(!data.version || !curVer || data.version === curVer || chan === 'dev' || getTargetPr() > 0){
+  if(!data.version || !curVer || data.version === curVer || isDev){
     return text;
   }
   return '';
 }
 
 function loadInstalledChangelog(){
+  var curVer = (state && state.version) ? String(state.version).trim() : '';
+  if(!curVer) return Promise.resolve('');
   var url = getInstalledChangelogUrl();
   var ctl = typeof AbortController !== 'undefined' ? new AbortController() : null;
   var timer = setTimeout(function(){ if(ctl) ctl.abort(); }, OTA_HTTP_TIMEOUT_MS);
-  var curVer = (state && state.version) ? String(state.version).trim() : '';
-  var chan = otaChannel;
+  var isDev = /dev/i.test(curVer);
   return fetch(url, {cache: 'no-store', signal: ctl ? ctl.signal : undefined})
     .then(function(r){
       clearTimeout(timer);
-      if(!r || !r.ok || r.status === 204) throw new Error('remote changelog unavailable');
+      if(!r || !r.ok || r.status === 204) return '';
       return r.json().then(function(data){
-        return parseInstalledChangelog(data, curVer, chan);
+        return parseInstalledChangelog(data, curVer, isDev);
       }).catch(function(){
-        return r.text ? r.text() : '';
+        return '';
       });
-    })
-    .then(function(text){
-      if(text && text.trim()) return text.trim();
-      return loadOtaChangelog();
     })
     .catch(function(){
       clearTimeout(timer);
-      return loadOtaChangelog();
+      return '';
     });
 }
 
@@ -1679,7 +1641,7 @@ function renderInstalledChangelog(changelog){
 }
 
 function updateInstalledChangelog(force){
-  var currentKey = (state && state.version ? state.version : '') + ':' + otaChannel + ':' + getTargetPr();
+  var currentKey = (state && state.version) ? String(state.version).trim() : '';
   if(!force && installedChangelogKey === currentKey) return Promise.resolve();
   installedChangelogKey = currentKey;
   return loadInstalledChangelog().then(function(text){
@@ -1904,6 +1866,6 @@ function boot(){
   // still making claims about a device we are no longer hearing from.
   setInterval(function(){ if(feedOk) paintCd(); },1000);
   resumeOta();
-  loadPrList(false);
+  if(uiTab==='fw'||getTargetPr()>0) loadPrList(false);
 }
 if(!(typeof window!=='undefined'&&window.__TESLA_UI_NO_BOOT__)) boot();
