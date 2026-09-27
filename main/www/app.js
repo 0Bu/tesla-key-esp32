@@ -8,6 +8,7 @@ var $=function(id){return document.getElementById(id)};
 function setHTML(el,html){ if(el && el.__h!==html){ el.__h=html; el.innerHTML=html; } }
 var state=null, otaTimer=null, otaAvail=null, waking=false, wakeTimeout=null, chgBusy=false, feedOk=false;
 var otaPhase=null, otaDeadline=0, otaExpectedVersion=null, otaChannel='release', otaChannelInitialSet=false;
+var otaChannelInFlight=false, otaChannelTarget=null;
 
 // Quotes are escaped too so esc() is safe in attribute values (title="…"), not just element content.
 function esc(s){return String(s).replace(/[&<>"']/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]})}
@@ -643,8 +644,15 @@ function render(s){
   renderFwVer();
 
   if(s.ota && typeof s.ota.channel === 'string'){
-    otaChannel = s.ota.channel === 'dev' ? 'dev' : 'release';
-    otaChannelInitialSet = true;
+    var sChan = s.ota.channel === 'dev' ? 'dev' : 'release';
+    if(otaChannelInFlight || otaChannelTarget){
+      if(sChan === otaChannelTarget){
+        otaChannelTarget = null;
+      }
+    } else {
+      otaChannel = sChan;
+      otaChannelInitialSet = true;
+    }
     renderChanMenu();
   } else if(!otaChannelInitialSet && s.version){
     otaChannel = /-dev/i.test(s.version) ? 'dev' : 'release';
@@ -1432,8 +1440,8 @@ function setChannel(chan){
     updateInstalledChangelog(true);
     return loadPrList(false);
   }
+  var hadPr = (activePr > 0) || prMode;
   prMode = false;
-  var hadPr = activePr > 0;
   activePr = 0;
   activePrExplicitlyCleared = true;
   if(typeof location !== 'undefined'){
@@ -1457,19 +1465,26 @@ function setChannel(chan){
   var changed = (otaChannel !== chan) || hadPr;
   if(chan!=='release'&&chan!=='dev') return Promise.resolve();
   if(!changed) return Promise.resolve();
+
   otaChannel = chan;
+  otaChannelTarget = chan;
+  otaChannelInFlight = true;
   otaChannelInitialSet = true;
   renderChanMenu();
   updateInstalledChangelog(true);
+
   return requestJson('/set_ota', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ channel: chan })
   }).then(function(){
+    otaChannelInFlight = false;
     var label = (chan === 'dev' ? 'Development' : 'Release');
     toast('Update channel set to ' + label, 'ok', 'channel');
     return otaCheck();
   }).catch(function(){
+    otaChannelInFlight = false;
+    otaChannelTarget = null;
     otaChannel = prevChan;
     renderChanMenu();
     updateInstalledChangelog(true);

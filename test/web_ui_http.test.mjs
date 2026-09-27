@@ -1532,3 +1532,58 @@ test("PR discovery loads from GitHub API, caches in sessionStorage, and probes r
   await context.loadPrList(true);
   assert.equal(element("prRateLimitBanner").classList.contains("hide"), false);
 });
+
+test("channel switching is responsive and immune to intermediate polling race conditions", async () => {
+  const { context, element } = loadUi();
+  // Device starts on dev channel
+  context.render({ version: "1.6.0-dev-1", ota: { channel: "dev" } });
+  assert.equal(context.otaChannel, "dev");
+  assert.equal(element("optDev")["aria-checked"], "true");
+  assert.equal(element("optRelease")["aria-checked"], "false");
+
+  // User taps Release: setChannel initiated
+  let resolvePost;
+  context.fetch = async (url) => {
+    if (url === "/set_ota") {
+      return new Promise((r) => {
+        resolvePost = () => r({ ok: true, status: 200, async json() { return { response: { result: true } }; } });
+      });
+    }
+    if (url.startsWith("/ota/check")) {
+      return { ok: true, status: 200, async json() { return { started: true }; } };
+    }
+    if (url.startsWith("/ota/status")) {
+      return { ok: true, status: 200, async json() { return { state: "idle" }; } };
+    }
+    return { ok: true, status: 200, async json() { return {}; } };
+  };
+
+  const channelPromise = context.setChannel("release");
+
+  // Immediately, UI reflects release
+  assert.equal(context.otaChannel, "release");
+  assert.equal(context.otaChannelInFlight, true);
+  assert.equal(element("optRelease")["aria-checked"], "true");
+  assert.equal(element("optDev")["aria-checked"], "false");
+
+  // Concurrent /status poll arrives from device still reporting dev
+  context.render({ version: "1.6.0-dev-1", ota: { channel: "dev" } });
+
+  // UI MUST NOT revert back to dev
+  assert.equal(context.otaChannel, "release");
+  assert.equal(element("optRelease")["aria-checked"], "true");
+  assert.equal(element("optDev")["aria-checked"], "false");
+
+  // POST /set_ota finishes
+  resolvePost();
+  await channelPromise;
+
+  assert.equal(context.otaChannel, "release");
+  assert.equal(context.otaChannelInFlight, false);
+
+  // Subsequent status poll now reporting release clears target
+  context.render({ version: "1.6.0-dev-1", ota: { channel: "release" } });
+  assert.equal(context.otaChannel, "release");
+  assert.equal(context.otaChannelTarget, null);
+  assert.equal(element("optRelease")["aria-checked"], "true");
+});

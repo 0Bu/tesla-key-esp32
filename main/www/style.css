@@ -13,7 +13,7 @@
   --ease:cubic-bezier(.2,.7,.3,1);
   --sans:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
   --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
-  --gs:clamp(230px, 64vw, 280px);   /* battery gauge size */
+  --gs:clamp(230px, min(64vw, 38vh), 350px);   /* battery gauge size */
 }
 @media (prefers-color-scheme:dark){
   :root{
@@ -38,17 +38,17 @@ svg{display:block}
 /* shell */
 .wrap{display:flex; min-height:100vh}
 .col{flex:1; min-width:0; display:flex; flex-direction:column}
-.top{display:flex; align-items:center; justify-content:space-between; gap:12px;
-  padding:calc(14px + env(safe-area-inset-top)) max(18px,env(safe-area-inset-right)) 10px max(18px,env(safe-area-inset-left))}
-.brand{display:flex; align-items:center; gap:12px; min-width:0}
+.top{display:flex; align-items:center; justify-content:space-between; gap:14px;
+  padding:calc(16px + env(safe-area-inset-top)) max(20px,env(safe-area-inset-right)) 12px max(20px,env(safe-area-inset-left))}
+.brand{display:flex; align-items:center; gap:14px; min-width:0}
 .ttl{display:flex; flex-direction:column; line-height:1.2; min-width:0}
-.ttl h1{margin:0; font-size:20px; font-weight:700; letter-spacing:-.2px}
+.ttl h1{margin:0; font-size:clamp(20px, 3.8vw, 28px); font-weight:700; letter-spacing:-.3px}
 .ttl .wide-title{display:none}
-.host{font-size:13.5px; color:var(--muted); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; margin-top:2px}
-.logo{display:grid; place-items:center; flex:none; width:38px; height:38px; border-radius:11px; background:var(--accent);
-  box-shadow:0 3px 10px rgba(232,33,39,.35)}
+.host{font-size:clamp(13px, 2.2vw, 16px); color:var(--muted); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; margin-top:2px}
+.logo{display:grid; place-items:center; flex:none; width:clamp(38px, 6vw, 50px); height:clamp(38px, 6vw, 50px); border-radius:clamp(11px, 1.8vw, 15px); background:var(--accent);
+  box-shadow:0 3px 12px rgba(232,33,39,.35)}
 .logo svg{width:60%; height:60%; fill:#fff}
-.logo.big{width:48px; height:48px; border-radius:14px}
+.logo.big{width:52px; height:52px; border-radius:15px}
 .rail-logo{display:none}
 
 /* OTA status in the header: visually replaced by bottom popup, retained in DOM for accessibility */
@@ -130,8 +130,8 @@ svg{display:block}
 .pulse.fast{animation-duration:1.1s}
 .gflow{animation:flow 2.4s cubic-bezier(.4,0,.6,1) infinite}
 .htext{display:flex; flex-direction:column; gap:6px; align-items:center}
-.hlabel{margin:0; font-size:clamp(28px,7.5vw,34px); font-weight:700; letter-spacing:-.6px; line-height:1.15; text-wrap:balance}
-.hsub{margin:0; font-size:clamp(15px,4vw,16.5px); color:var(--muted); max-width:32ch; text-wrap:pretty}
+.hlabel{margin:0; font-size:clamp(28px, 7vw, 40px); font-weight:700; letter-spacing:-.6px; line-height:1.15; text-wrap:balance}
+.hsub{margin:0; font-size:clamp(15px, 3.5vw, 18px); color:var(--muted); max-width:34ch; text-wrap:pretty}
 .hstats{display:flex; gap:10px; width:100%; max-width:420px}
 .hstats:empty{display:none}
 .stat{flex:1 1 0; min-width:0; background:var(--card); border:1px solid var(--border); border-radius:var(--r-tile);
@@ -204,7 +204,7 @@ svg{display:block}
 .ver-link-icon{width:20px; height:20px; flex:none}
 .chan{display:flex; flex-direction:column; gap:6px}
 .seg{display:flex; gap:4px; padding:3px; border-radius:12px; background:var(--soft)}
-.seg-opt{flex:1 1 0; min-width:0; min-height:44px; border:0; border-radius:10px; background:transparent; font-size:13px; font-weight:650; padding:0 4px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; display:flex; align-items:center; justify-content:center}
+.seg-opt{flex:1 1 0; min-width:0; min-height:44px; border:0; border-radius:10px; background:transparent; font-size:13.5px; font-weight:650; padding:0 4px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; display:flex; align-items:center; justify-content:center; -webkit-tap-highlight-color:transparent; touch-action:manipulation; transition:background .15s ease, box-shadow .15s ease, color .15s ease}
 .seg-opt.sel{background:var(--card); box-shadow:0 1px 3px rgba(0,0,0,.12)}
 
 .fw-changelog-details{display:flex; flex-direction:column; gap:6px}
