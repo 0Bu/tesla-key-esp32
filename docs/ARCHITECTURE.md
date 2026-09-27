@@ -33,6 +33,18 @@ build, dependency/patch chain, partition geometry, signing boundary, OTA format,
 state, or vehicle-command behavior. Reviews and diagnosis are read-only by default; implementation
 does not imply commit, push, merge, release, hardware, or vehicle authorization.
 
+## Web UI layout
+
+The device page (`main/www/`, inlined into one gzipped document at build time) is a four-section
+**dock** layout: **Car** (battery gauge, status, detail chips and the one primary action),
+**Setup** (VIN and security key), **Network** (Wi-Fi/Ethernet, Bluetooth, MQTT, Syslog rows) and
+**Firmware** (version, update check, Release/Development channel). Phones show one section at a
+time with a bottom tab dock and a floating primary-action pill; from 900 px a left rail keeps the
+Car pane in the left column and shows the selected section beside it. Switching is pure CSS keyed
+off `.wrap[data-tab]` (`setTab()`); nothing is re-fetched. Text entry and destructive confirmations
+use the page's own sheet (`askText()` / `askConfirm()`, Promise-based) instead of the native
+`prompt()`/`confirm()`, with the same validation, confirmation and fail-closed save handling.
+
 ## Web UI live feed (`GET /status`)
 
 The web UI's live data is a **browser-side interval poll**. `main/www/app.js` `boot()` calls `poll()`
@@ -40,7 +52,7 @@ once for the first paint (the hero card ships hidden and only `render()` reveals
 first call the page would sit on an empty skeleton for a whole interval) and then every **4 s** via
 `setInterval`. `poll()` fetches `/status?ms=<now>` with `cache:'no-store'` — the URL is cache-busted
 because a live page polls forever and one cached copy would freeze the hero on a stale state (e.g. a
-transient orange "Unreachable") until a manual reload. The response is exactly what
+transient "Vehicle unreachable") until a manual reload. The response is exactly what
 `build_status_object()` (`http_status.cpp`) builds, and the client hands it straight to `render()`
 (no envelope).
 
@@ -176,7 +188,7 @@ esp32/esp32s3/esp32c3/esp32c6, picked at compile time by `TESLA_OTA_IMG_SUFFIX` 
 `CONFIG_IDF_TARGET_*`) via `esp_https_ota` into the inactive OTA slot, then reboots.
 `esp_https_ota` verifies the image chip-id, so a wrong-target image is refused (never
 flashed); one manifest `version` covers all targets (CI builds them from one commit).
-Triggered from the web UI by tapping the firmware version in the top meta line.
+Triggered from the web UI by **Check for updates** in the **Firmware** tab (or the Safe Mode banner).
 Implemented in `main/ota_update.cpp`.
 
 **Manifest intake is a bounded, exact protocol.** The HTTPS body is capped at 8192 bytes. A
@@ -600,7 +612,7 @@ using HA's MQTT-Discovery convention, so every entity auto-appears in Home Assis
 grouped under one device. **Read-only by design** — no command topics are subscribed
 (the car is never controlled or woken from HA). Independent of evcc/BLE/pairing.
 
-- **Config:** broker URI from NVS `mqtt_uri` (web UI: Connections → MQTT, stores `host:port`)
+- **Config:** broker URI from NVS `mqtt_uri` (web UI: Network tab → MQTT row, stores `host:port`)
   overriding `CONFIG_TESLA_MQTT_BROKER_URI`; empty = disabled (bridge is a no-op).
   Optional `CONFIG_TESLA_MQTT_USERNAME`/`PASSWORD`, `CONFIG_TESLA_MQTT_DISCOVERY_PREFIX`
   (default `homeassistant`), `CONFIG_TESLA_MQTT_BASE_TOPIC` (default `tesla-key`),
@@ -702,8 +714,8 @@ independently redacted fragments.
 
 - **Config:** one NVS string, `syslog_uri` (`tesla_cfg` namespace) — a bare `"host:port"`, no
   scheme (a bare host defaults to port 514); `""` disables forwarding. Falls back to
-  `CONFIG_TESLA_SYSLOG_SERVER` (Kconfig, default empty). Set from the web UI (Connections →
-  Syslog card, pencil icon → `POST /set_syslog`, `{"server":"host:port"}`) or NVS/Kconfig
+  `CONFIG_TESLA_SYSLOG_SERVER` (Kconfig, default empty). Set from the web UI (Network tab →
+  Syslog row, pencil icon → `POST /set_syslog`, `{"server":"host:port"}`) or NVS/Kconfig
   directly. Resolved **once**, at `syslog_start()` (called early in `app_main`, before WiFi) —
   like the MQTT bridge, a config change persists then reboots to apply, so there is nothing to
   re-read at runtime.
@@ -738,7 +750,7 @@ independently redacted fragments.
   own "send failed" diagnostics would themselves be queued for (failing) delivery, feeding the
   exact storm the paragraph above avoids.
 - **Status:** `syslog_status()` → `/status.syslog` (`configured`/`resolved`/`reachable`/`host`/
-  `port`/`error`), read by the web UI's Connections card exactly like the MQTT row.
+  `port`/`error`), read by the web UI's Network tab exactly like the MQTT row.
 
 ## Heap-exhaustion watchdog (the last-resort escalation)
 
@@ -1119,13 +1131,12 @@ The web UI mirrors this exactly: it shows the "Vehicle asleep" hero (with the wa
 **only** when `ASLEEP` is a proven fact; for `IDLE` it shows a neutral **"Parked"**
 card (last-known SOC + idle time + the same wake button) that makes no sleep claim; and for both
 `UNREACHABLE` *and* the unknown state (nothing heard since boot — the on-demand BLE link hasn't
-reached the car yet) it **hides the hero card entirely**. Both states know nothing current about the
-car, and a hero filled with a retained battery percentage and an idle timer reads as live status;
-withholding the card is the honest form, and the state is still signalled — never as a sleep claim —
-on the BLE row. In that same
-unknown/unreachable state the BLE connection row drops its green and animates an orange
-ping-pong across the signal bars (a darker-orange crest bouncing edge→edge over a light-orange
-base) with an orange MAC, flagging "connected but stateless" at a glance. The momentary BLE row
+reached the car yet) it keeps the card but states the gap: **"Vehicle unreachable"** or
+**"Checking status…"** over an empty gauge, with the retained battery percentage and idle time
+only as labelled last-known chips and no action. Neither state makes a sleep claim or dresses
+retained data up as a live reading. In that same
+unknown/unreachable state the BLE connection row drops its green and ripples an amber
+wave across the signal bars, with an amber status dot and status line, flagging "connected but stateless" at a glance. The momentary BLE row
 reading "Disconnected" is normal (the link is dropped between polls by design) and is not used
 to drive the hero — only `link` is.
 
@@ -1170,9 +1181,8 @@ jumping around. `phase === "connecting"` is now the ONE thing that says "Searchi
 else is "Disconnected". Each row's countdown node names the single phase it will render, so a
 mismatch shows nothing rather than a foreign number.
 
-The time sits at the row's **right edge** (`margin-left:auto`), in the column the tile rows put
-their edit pencil in, and stays muted in every phase so it reads as one steady right-hand column
-instead of recolouring with the label. The disconnected row draws **outlined, unfilled** signal
+The time sits at the end of the row's status line (`Connecting · 12s left`, `Waiting · retry in
+30s`) in its own `.cd` node, so the 1 s tick only rewrites that text and never the bar glyph. The disconnected row draws **outlined, unfilled** signal
 bars — an empty gauge rather than a dimmed reading; the searching row uses the same amber
 (`--warn-base`) the "link up, nothing known yet" bars already use, so the BLE row
 has one amber "in-between" language. Wi-Fi's own search stays green.
@@ -1199,14 +1209,14 @@ advert is heard but the BLE link won't come up after repeated tries, `/status.bl
 **non-connectable** ⇒ it is at its ~3-device BLE-connection limit — mirroring tesla-ble's
 upstream `vehicle-command`, whose BLE transport raises `ErrMaxConnectionsExceeded` off the same
 `Connectable` flag (the *connect timeout itself* carries no reason). The web UI shows a
-"Connection failed" hero (orange Bluetooth glyph) — "too many Bluetooth devices connected" when
+"Connection failed" hero (Bluetooth glyph over an empty gauge) — "too many Bluetooth devices connected" when
 `car_connectable=false`, else "move closer / disconnect other devices" — in **both** the setup
 flow *and* the paired state (a paired device that can't get a slot says so instead of hiding the
 hero). The signal windows are 90 s so they stay stable across a paired device's ~30-40 s
 health-probe cadence. `/status.ble.devices[]` also carries per-device `connectable`, and the
 no-VIN screen lists nearby Teslas (bars · dBm · MAC, sorted by signal) from the periodic
-listing-only scan. Hero glyphs: grey Bluetooth = "Set up needed", grey NFC-card = "Pairing",
-orange Bluetooth = "Connection failed".
+listing-only scan. Hero glyphs (all muted grey): key or pencil = "Set up needed", link =
+"Pairing", Bluetooth = "Connection failed", bolt = "Vehicle unreachable".
 
 **The same three-way verdict decides what a failed connect LOGS** (`logic/connect_outcome.hpp`,
 host-tested). `ensure_connected_()` used to end every unsuccessful attempt with one line —
@@ -1319,7 +1329,7 @@ This is the *design*
 that stops the device whitelisting its Charging-Manager key onto an arbitrary nearby Tesla — it
 no longer depends on the `"UNKNOWN"` placeholder hashing to a name that happens never to
 collide (the placeholder is kept out of the matching path). The web UI already shows "Add the
-vehicle VIN below to begin." when no VIN is set, so it never implies pairing without one.
+vehicle VIN in Setup to begin." when no VIN is set, so it never implies pairing without one.
 
 ## HTTP request-body and allocator-failure contract
 

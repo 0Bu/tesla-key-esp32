@@ -125,8 +125,9 @@ truth** shared with the MQTT bridge, so the hero and `sleep_state` can't drift:
 you may recall are the *MQTT* `sleep_state` values from `link_state_mqtt_str`, not `/status.link`.)
 Cold-start (nothing heard since boot) is a **distinct string `unknown`** — not `unreachable`, which
 means the car was heard once and then went silent (drove off / out of range / another device holds
-the link). Useful to you as a diagnosis, but the **UI treats both identically**: it hides the hero
-card and signals the state on the BLE row (orange ping-pong bars + orange MAC). Tell them apart from
+the link). Useful to you as a diagnosis; the UI shows **"Checking status…"** for `unknown` and
+**"Vehicle unreachable"** for `unreachable` (empty gauge, last-known chips only, no action), and a
+connected-but-stateless BLE row shows an amber wave across its bars. Tell them apart from
 `last_seen_s` — cold-start has none. **Asymmetry to remember:** a debounced VCSEC
 `ASLEEP` is trusted; a VCSEC `AWAKE` is **never** trusted to move `link` to `awake` (that needs live
 telemetry), so a wrong `vcsec_sleep:"AWAKE"` can only ever leave `link` at `idle`.

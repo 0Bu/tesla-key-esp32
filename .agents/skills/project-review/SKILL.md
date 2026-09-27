@@ -152,9 +152,9 @@ Treat a violation of any of these as a real finding.
   asleep** — we stopped polling infotainment to let it sleep and VCSEC hasn't confirmed →
   web UI shows the neutral **"Parked"** card, which makes **no** sleep claim), **UNREACHABLE**
   (no signed BLE round-trip for ≥ `kReachableMaxAgeS` = 150 s, spanning two ~30 s probe cycles plus miss headroom, or answers nothing over BLE). Nothing heard since boot/re-pair ⇒ MQTT sleep_state **omitted**
-  (HA shows "unknown"); the web UI **hides the hero card** for both `unreachable` and the
-  cold-start `unknown` — rather than fill it with stale battery/idle chips — and signals the state
-  on the BLE row instead (orange ping-pong bars + orange MAC). Never a sleep claim.
+  (HA shows "unknown"); the web UI keeps the hero card but says so — **"Vehicle unreachable"** /
+  **"Checking status…"** over an empty gauge, retained battery/idle only as last-known chips, no
+  action — and a connected-but-stateless BLE row shows an amber wave across its bars. Never a sleep claim.
 - **Asymmetry — do not break it:** trust the *debounced ASLEEP* VCSEC flag as proof of sleep,
   but **never** trust VCSEC `AWAKE` to claim AWAKE. A parked car reports VCSEC `AWAKE` while
   its infotainment sleeps (the old `wake_up()` trap); AWAKE always requires live infotainment
@@ -437,8 +437,8 @@ that describe it. When reviewing a change (or the repo as a whole), check these 
      Reflect any behavioral changes in `docs/ARCHITECTURE.md`, `docs/FEATURES.md`, and UI/API handlers (`main/www/app.js`).
   4. ADR accuracy: update or supersede affected ADRs (`docs/adr/0003-...`), accurately distinguishing
      AEAD Associated Data request binding from duplicate frame delivery under buffer recovery or plaintext frames.
-  5. Metadata sinks: update pin citations in `.codex/agents/*.toml`, `.agents/subagents.json`
-     (`export-subagents.py`), and skill source maps (`vehicle-command-audit`, `skill-audit`, `project-review`);
+  5. Metadata sinks: update pin citations in `.agents/subagents.json` and skill source maps
+     (`vehicle-command-audit`, `skill-audit`, `project-review`);
      recompute digests via `update-skill-digests.mjs --write`.
   6. Empirical evidence: record live hardware or high-fidelity mock verification traces for new behaviors in the PR description or the tracking issue (the former `docs/reviews/` directory was removed in #312).
   7. Renovate lifecycle: when closing an automated dependency PR manually, document in `.github/renovate.json`

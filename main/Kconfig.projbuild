@@ -102,7 +102,7 @@ menu "Tesla Key Configuration"
             UDP Syslog collector for the device's diagnostic log (the same output
             served by GET /diag and the serial console), e.g. "192.0.2.1:514". A
             bare host defaults to port 514. Leave empty to disable. Can be
-            set/changed at runtime in the web UI (Connections -> Syslog), which
+            set/changed at runtime in the web UI (Network tab -> Syslog row), which
             stores it in NVS ("syslog_uri") and overrides this.
 
     # ── Ethernet (W5500 over SPI — supported ESP32-S3 Ethernet boards) ───────────────────────

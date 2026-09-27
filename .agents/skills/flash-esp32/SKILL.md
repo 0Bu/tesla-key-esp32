@@ -20,8 +20,8 @@ including the embedded web UI (`main/www/` — `index.html` + `style.css` + `app
 one page at build time), which is compiled into the app binary. A successful local compile is not
 a flashable artifact: `CONFIG_SECURE_BOOT_BUILD_SIGNED_BINARIES=n` by design.
 
-> This flashes over **USB**. For a remote, no-cable update use OTA (tap the firmware
-> version in the web UI). USB flashing requires physical access and the board plugged in.
+> This flashes over **USB**. For a remote, no-cable update use OTA (**Check for updates**
+> in the web UI's **Firmware** tab). USB flashing requires physical access and the board plugged in.
 
 > **Authorization boundary.** A build request authorizes no signing-key use or USB write. A review,
 > merge, release, or prior flash authorizes no new flash. Before `write-flash`/`write_flash` or

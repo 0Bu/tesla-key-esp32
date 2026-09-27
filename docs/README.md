@@ -191,7 +191,7 @@ a card there, then confirm on screen within ~45 s. No Pair button in the web UI,
 card is required to authorise the enrolment.
 
 - Key fingerprint = `SHA-1(pubkey)[:4]` (e.g. `0E:8A:1D:BE`); shown in the web UI.
-- Regenerate: tap the fingerprint in the UI, or `POST /gen_keys?force=1`. Without `force`,
+- Regenerate: **Regenerate key** in the web UI's Setup tab, or `POST /gen_keys?force=1`. Without `force`,
   `/gen_keys` returns `409`. Regenerating un-pairs the vehicle.
 - Manual trigger: `POST /send_key` → `{"result":true,"role":"charging_manager",
   "reason":"key sent — confirm the pairing request on the car's screen"}`.
@@ -458,7 +458,7 @@ SOC read from `.response.response.charge_state.battery_level`, current from `…
 no command topics are subscribed; HA cannot control or wake the car. The bridge runs in its
 own task and is independent of evcc, BLE and pairing.
 
-**Enable:** set the broker in the web UI (Connections → MQTT, `IP:PORT`) — stored in NVS
+**Enable:** set the broker in the web UI (Network tab → MQTT row, pencil icon, `IP:PORT`) — stored in NVS
 (`mqtt_uri`) and applied after the reboot it triggers. Compile-time defaults / credentials
 live in `scripts/idf-docker.sh idf.py menuconfig` → *Tesla Key Configuration*:
 
@@ -505,7 +505,7 @@ the last-known retained values until the next active window.
 UDP Syslog collector (RFC 5424), best-effort. Useful to watch a pairing/reconnect live, or to
 keep history past the in-RAM ring's ~16 KB / a reboot.
 
-**Enable:** set the server in the web UI (Connections → Syslog, `IP:PORT`, e.g.
+**Enable:** set the server in the web UI (Network tab → Syslog row, pencil icon, `IP:PORT`, e.g.
 `192.0.2.1:514`; a bare host defaults to port 514) — stored in NVS (`syslog_uri`) and
 applied after the reboot it triggers. Leave empty to disable. Compile-time default:
 `CONFIG_TESLA_SYSLOG_SERVER` (`""`), overridden by the NVS value.
