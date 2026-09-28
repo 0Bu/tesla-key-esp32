@@ -734,7 +734,7 @@ esp_err_t handle_set_ota(GuardedReq rq) {
     tk::cfg_load(*g_config, cfg);
     const tk::OtaChannel want = tk::ota_channel_parse(channel);
     if (cfg.has_ota && tk::ota_channel_from_int(cfg.ota_channel) == want) {
-        ota_set_channel(want);
+        ota_set_channel(want, true);
         tk::JsonBuilder resp;
         resp.boolean(resp.root(), "ok", true);
         resp.boolean(resp.root(), "result", true);
@@ -748,7 +748,7 @@ esp_err_t handle_set_ota(GuardedReq rq) {
         return send_json(req, 500, make_response(false, "set_ota", "", "failed to save config"));
     }
 
-    ota_set_channel(want);
+    ota_set_channel(want, true);
     ESP_LOGI(TAG, "OTA channel set to %s", tk::ota_channel_name(want));
 
     tk::JsonBuilder resp;

@@ -277,13 +277,21 @@ static OtaStatus unavailable_status_snapshot() {
 }
 
 static std::atomic<tk::OtaChannel> s_ota_channel{tk::OtaChannel::Release};
+static std::atomic<bool> s_ota_channel_explicit{false};
 
 tk::OtaChannel ota_get_channel() {
     return s_ota_channel.load(std::memory_order_acquire);
 }
 
-void ota_set_channel(tk::OtaChannel channel) {
+bool ota_channel_is_explicit() {
+    return s_ota_channel_explicit.load(std::memory_order_acquire);
+}
+
+void ota_set_channel(tk::OtaChannel channel, bool explicit_user_set) {
     s_ota_channel.store(channel, std::memory_order_release);
+    if (explicit_user_set) {
+        s_ota_channel_explicit.store(true, std::memory_order_release);
+    }
 }
 
 OtaStatus ota_get_status() {
@@ -303,7 +311,7 @@ OtaStatus ota_get_status() {
     } else {
         const esp_app_desc_t* desc = esp_app_get_description();
         const unsigned running_pr = desc ? tk::parse_version_pr(desc->version) : 0;
-        if (running_pr > 0) {
+        if (running_pr > 0 && !ota_channel_is_explicit()) {
             chan = "pr";
         } else {
             chan = tk::ota_channel_name(ota_get_channel());

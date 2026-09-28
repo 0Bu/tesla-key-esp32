@@ -85,7 +85,7 @@ static void current_ip(char* out, size_t sz) {
 [[gnu::noinline]] static const char* active_ota_channel_name_() {
     const esp_app_desc_t* desc = esp_app_get_description();
     const unsigned running_pr = desc ? tk::parse_version_pr(desc->version) : 0;
-    return (running_pr > 0) ? "pr" : tk::ota_channel_name(ota_get_channel());
+    return (running_pr > 0 && !ota_channel_is_explicit()) ? "pr" : tk::ota_channel_name(ota_get_channel());
 }
 
 static cJSON* build_status_object(bool redact) {

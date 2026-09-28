@@ -48,7 +48,8 @@ static void apply_browser_time_query_(httpd_req_t* req) {
         }
     }
     const esp_app_desc_t* desc = esp_app_get_description();
-    return desc ? tk::parse_version_pr(desc->version) : 0;
+    const unsigned running_pr = desc ? tk::parse_version_pr(desc->version) : 0;
+    return (running_pr > 0 && !ota_channel_is_explicit()) ? running_pr : 0;
 }
 
 // GET /ota/check[?ms=<epoch>][&pr=<N>] — start a background version check, return at once.

@@ -54,7 +54,8 @@ OtaStatus ota_get_status();
 
 // Active OTA feed channel ("release" or "dev").
 tk::OtaChannel ota_get_channel();
-void ota_set_channel(tk::OtaChannel channel);
+void ota_set_channel(tk::OtaChannel channel, bool explicit_user_set = false);
+bool ota_channel_is_explicit();
 
 // Retrieve latest changelog text for offered update (returns true if available).
 bool ota_get_changelog(char* out, size_t max_len, size_t& out_len);

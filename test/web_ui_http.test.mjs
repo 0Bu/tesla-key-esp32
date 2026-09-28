@@ -1008,6 +1008,21 @@ test("PR firmware retains PR channel by default and checks for PR updates", asyn
   assert.equal(context.getActiveChannel(), "release");
   assert.equal(context.getTargetPr(), 0);
   assert.match(element("fwSub").textContent, /Release channel/);
+
+  // otaCheck on release channel checks without pr parameter
+  fetches.length = 0;
+  await context.otaCheck();
+  assert.ok(fetches.some(f => f.url.includes("/ota/check") && !f.url.includes("pr=")), "checks without pr parameter on release channel");
+
+  // Re-selecting PR preview in channel modal restores PR tracking
+  fetches.length = 0;
+  context.editChannel();
+  context.selectChannel("pr");
+  assert.equal(element("chanSave").textContent, "Check for updates");
+  await context.saveChannel();
+  assert.equal(context.getActiveChannel(), "pr");
+  assert.equal(context.getTargetPr(), 340);
+  assert.ok(fetches.some(f => f.url.includes("/ota/check") && f.url.includes("pr=340")), "checks with pr=340 when PR channel is restored");
 });
 
 test("UI disables settings and hides channel button during active OTA, closes open sheets on start, and prevents tampering", async () => {

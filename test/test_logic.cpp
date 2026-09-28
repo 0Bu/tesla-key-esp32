@@ -893,7 +893,8 @@ static void test_ota_contract() {
 
     // Targeted PR channel (target_pr == 326)
     CHECK(tk::is_ota_update_available("1.5.4-PR-326", "1.5.4", 326));
-    CHECK(tk::is_ota_update_available("1.5.4-PR-326", "1.5.4-PR-326", 326));
+    CHECK(!tk::is_ota_update_available("1.5.4-PR-326", "1.5.4-PR-326", 326));
+    CHECK(tk::is_ota_update_available("1.5.5-PR-326", "1.5.4-PR-326", 326));
     CHECK(tk::is_ota_update_available("1.5.5-PR-326", "1.5.4", 326));
     // Wrong PR candidate rejected
     CHECK(!tk::is_ota_update_available("1.5.4-PR-227", "1.5.4", 326));
@@ -1087,6 +1088,8 @@ static void test_ota_channel() {
     CHECK(tk::is_ota_update_available("1.2.3-PR-331", "1.2.3", 331));
     CHECK(!tk::is_ota_update_available("1.2.3-PR-332", "1.2.3", 331)); // mismatched PR
     CHECK(!tk::is_ota_update_available("1.2.2-PR-331", "1.2.3", 331)); // older core
+    CHECK(!tk::is_ota_update_available("1.2.3-PR-331", "1.2.3-PR-331", 331)); // same PR version is up to date
+    CHECK(tk::is_ota_update_available("1.2.4-PR-331", "1.2.3-PR-331", 331)); // newer core on same PR
 }
 
 // ─── OTA changelog parsing and range selection ──────────────────────────────
