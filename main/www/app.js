@@ -762,10 +762,17 @@ function askPaintHint(){
   h.textContent=(askHintFn&&inp)?askHintFn(inp.value||''):'';
 }
 function askClose(value){
-  var m=$("askModal"); if(m&&m.classList) m.classList.add('hide');
+  var m=$("askModal");
+  var open = (m && m.classList && typeof m.classList.contains === 'function' && !m.classList.contains('hide'));
+  if(!open && !askResolve) return;
+  if(m&&m.classList) m.classList.add('hide');
   syncModal();
   var r=askResolve; askResolve=null;
   var back=askReturnFocus; askReturnFocus=null;
+  if(typeof isOtaRunning === 'function' && isOtaRunning()){
+    if(r) r(value);
+    return;
+  }
   // Back to where the sheet was opened from — unless that is on the page and the OTA dialog is
   // still up (the page is inert then): focus that dialog instead of losing focus to <body>.
   var w=$("wrap"), onPage=!!(back&&w&&typeof w.contains==='function'&&w.contains(back));
@@ -956,8 +963,37 @@ function isOtaRunning(){
 }
 function syncOtaUi(){
   var running = isOtaRunning();
+  if(running){
+    if(typeof isOpen === 'function' && isOpen('chanModal')){
+      chanModalOpen = false;
+      if(chanChangelogAbort && typeof chanChangelogAbort.abort === 'function'){
+        try { chanChangelogAbort.abort(); } catch(e){}
+        chanChangelogAbort = null;
+      }
+      var cm = $("chanModal");
+      if(cm && cm.classList) cm.classList.add('hide');
+      syncModal();
+    }
+    if(typeof isOpen === 'function' && isOpen('otaModal')){
+      var om = $("otaModal");
+      if(om && om.classList) om.classList.add('hide');
+      syncModal();
+      if(otaDecisionResolve){
+        var r = otaDecisionResolve;
+        otaDecisionResolve = null;
+        r(false);
+      }
+    }
+    if(typeof isOpen === 'function' && isOpen('askModal')){
+      if(typeof askClose === 'function') askClose(null);
+    }
+  }
   var chanBtn = $("chanBtn");
   if(chanBtn && chanBtn.classList) chanBtn.classList.toggle('hide', running);
+  var chanSave = $("chanSave");
+  if(chanSave) chanSave.disabled = running;
+  var otaInstall = $("otaInstall");
+  if(otaInstall) otaInstall.disabled = running;
   var vl = $("verLink");
   if(vl){
     vl.disabled = running;
@@ -1197,6 +1233,7 @@ function renderPrRows(){
 }
 
 function selectPr(num){
+  if(otaBusy || (typeof isOtaRunning === 'function' && isOtaRunning())) return;
   var n = parseInt(num, 10);
   if(!n || n <= 0) return;
   selectedPr = n;
@@ -1280,7 +1317,7 @@ function createPrRow(pr){
 }
 
 function installPr(num){
-  if(otaBusy) return Promise.resolve();
+  if(otaBusy || (typeof isOtaRunning === 'function' && isOtaRunning())) return Promise.resolve();
   var n = parseInt(num, 10);
   if(!n || n <= 0 || n > 2147483647) return Promise.resolve();
   activePr = n;
@@ -1375,7 +1412,7 @@ function setChannel(chan){
     renderChanMenu();
     return loadPrList(false);
   }
-  var hadPr = (activePr > 0) || prMode;
+  var hadPr = (activePr > 0) || prMode || activePrExplicitlyCleared || (typeof getInstalledPr === 'function' && getInstalledPr() > 0);
   prMode = false;
   activePr = 0;
   activePrExplicitlyCleared = true;
@@ -1403,6 +1440,10 @@ function setChannel(chan){
 
   otaChannel = chan;
   otaChannelInitialSet = true;
+  if(state){
+    if(!state.ota) state.ota = {};
+    state.ota.channel = chan;
+  }
   renderChanMenu();
 
   return requestJson('/set_ota', {
@@ -1415,6 +1456,7 @@ function setChannel(chan){
     return otaCheck();
   }).catch(function(){
     otaChannel = prevChan;
+    if(state && state.ota) state.ota.channel = prevChan;
     renderChanMenu();
     toast('Failed to set update channel', 'err');
   });
@@ -1436,6 +1478,7 @@ function editChannel(){
 }
 
 function selectChannel(chan){
+  if(otaBusy || (typeof isOtaRunning === 'function' && isOtaRunning())) return;
   selectedChan = chan;
   if(chan === 'pr'){
     if(!selectedPr){
@@ -1575,19 +1618,20 @@ function closeChanModal(){
   chanModalOpen = false;
   selectedChan = null;
   selectedPr = 0;
+  var m = $("chanModal");
   if(chanChangelogAbort && typeof chanChangelogAbort.abort === 'function'){
     try { chanChangelogAbort.abort(); } catch(e){}
     chanChangelogAbort = null;
   }
-  var m = $("chanModal");
   if(m && m.classList) m.classList.add('hide');
   syncModal();
   renderChanMenu();
   var btn = $("chanBtn");
-  if(btn && typeof btn.focus === 'function') btn.focus();
+  if(btn && typeof btn.focus === 'function' && !(typeof isOtaRunning === 'function' && isOtaRunning())) btn.focus();
 }
 
 function saveChannel(){
+  if(otaBusy || (typeof isOtaRunning === 'function' && isOtaRunning())) return Promise.resolve();
   var c = selectedChan || 'release';
   if(c === 'pr'){
     var target = selectedPr || getTargetPr();
@@ -1596,6 +1640,10 @@ function saveChannel(){
     activePr = target;
     prMode = true;
     activePrExplicitlyCleared = false;
+    if(state){
+      if(!state.ota) state.ota = {};
+      state.ota.channel = 'pr';
+    }
     closeChanModal();
     if(state) render(state);
     if(target === instPr){
@@ -1682,6 +1730,8 @@ var otaDecisionResolve = null;
 
 function closeOtaModal(decision){
   var m = $("otaModal");
+  var open = (m && m.classList && typeof m.classList.contains === 'function' && !m.classList.contains('hide'));
+  if(!open && !otaDecisionResolve) return;
   if(m && m.classList) m.classList.add('hide');
   syncModal();
   // With a sheet still open on top, focus is already in that sheet (the dialog never took it).
@@ -1689,7 +1739,7 @@ function closeOtaModal(decision){
   // (the Firmware pane is hidden on phones), to that section's tab.
   var vl = $("verLink");
   if(vl && typeof vl.getClientRects === 'function' && !vl.getClientRects().length) vl = $(TAB_BTN[uiTab]);
-  if(vl && typeof vl.focus === 'function' && !isOpen('askModal')) vl.focus();
+  if(vl && typeof vl.focus === 'function' && !isOpen('askModal') && !(typeof isOtaRunning === 'function' && isOtaRunning())) vl.focus();
   if(otaDecisionResolve){
     var r = otaDecisionResolve;
     otaDecisionResolve = null;
@@ -1810,7 +1860,7 @@ if(typeof document!=='undefined' && typeof document.addEventListener==='function
 }
 
 function otaCheck(){
-  if(otaBusy) return;              // a check/update is already running
+  if(otaBusy || (typeof isOtaRunning === 'function' && isOtaRunning())) return Promise.resolve();
   otaBusy=true;
   otaBegin('check',OTA_CHECK_TIMEOUT_MS);
   otaInline(otaMiniRing(0,true,'currentColor'),'','indet');   // checking — spinning ring only, no label

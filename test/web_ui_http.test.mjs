@@ -1022,6 +1022,7 @@ test("PR firmware retains PR channel by default and checks for PR updates", asyn
   await context.saveChannel();
   assert.equal(context.getActiveChannel(), "pr");
   assert.equal(context.getTargetPr(), 340);
+  assert.equal(context.state.ota.channel, "pr");
   assert.ok(fetches.some(f => f.url.includes("/ota/check") && f.url.includes("pr=340")), "checks with pr=340 when PR channel is restored");
 });
 
@@ -1089,14 +1090,16 @@ test("UI disables settings and hides channel button during active OTA, closes op
   assert.equal(element("verLink").disabled, true);
   assert.equal(element("verLink").classList.contains("disabled"), true);
 
-  // 5. Pane settings is marked ota-busy and setting buttons disabled
+  // 5. Pane settings is marked ota-busy, modal actions and setting buttons disabled
   assert.equal(element("paneSettings").classList.contains("ota-busy"), true);
+  assert.equal(element("chanSave").disabled, true);
+  assert.equal(element("otaInstall").disabled, true);
   assert.equal(element("vinBtn").disabled, true);
   assert.equal(element("keyBtn").disabled, true);
   assert.equal(element("mqttBtn").disabled, true);
   assert.equal(element("syslogBtn").disabled, true);
 
-  // 6. Attempting to click settings or open modals does nothing
+  // 6. Attempting to click settings, manipulate channels, or open modals does nothing
   fetches.length = 0;
   await context.editVin();
   await context.genKey();
@@ -1104,11 +1107,21 @@ test("UI disables settings and hides channel button during active OTA, closes op
   await context.editSyslog();
   await context.editChannel();
   await context.openFwUpdate();
+  context.selectChannel('release');
+  context.selectPr(123);
+  await context.saveChannel();
+  await context.installPr(123);
+  await context.otaCheck();
   context.bannerAction();
   assert.equal(fetches.length, 0, "no network calls made while OTA is running");
   assert.equal(element("chanModal").classList.contains("hide"), true);
   assert.equal(element("otaModal").classList.contains("hide"), true);
   assert.equal(element("askModal").classList.contains("hide"), true);
+
+  // Background status indicating active OTA triggers syncOtaUi and keeps modals closed
+  element("chanModal").classList.remove("hide");
+  context.syncOtaUi();
+  assert.equal(element("chanModal").classList.contains("hide"), true);
 
   // 7. When OTA resets/finishes, UI returns to normal
   context.otaReset();

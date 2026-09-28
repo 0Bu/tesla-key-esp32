@@ -226,6 +226,9 @@ esp_err_t handle_send_key(GuardedReq rq) {
 // applied fallback time is persisted so a later offline reboot starts plausibly.
 esp_err_t handle_set_time(GuardedReq rq) {
     httpd_req_t* req = rq.req;
+    if (ota_is_busy()) {
+        return send_json(req, 409, make_response(false, "set_time", "", "an OTA update is in progress"));
+    }
     ParsedJsonBody parsed = parse_json_object_body_(req);
     if (!parsed) return send_config_body_error_(req, "set_time", parsed);
 
