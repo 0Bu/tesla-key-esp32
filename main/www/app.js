@@ -8,7 +8,6 @@ var $=function(id){return document.getElementById(id)};
 function setHTML(el,html){ if(el && el.__h!==html){ el.__h=html; el.innerHTML=html; } }
 var state=null, otaTimer=null, otaAvail=null, waking=false, wakeTimeout=null, chgBusy=false, feedOk=false;
 var otaPhase=null, otaDeadline=0, otaExpectedVersion=null, otaChannel='release', otaChannelInitialSet=false;
-var otaChannelInFlight=false, otaChannelTarget=null;
 
 // Quotes are escaped too so esc() is safe in attribute values (title="…"), not just element content.
 function esc(s){return String(s).replace(/[&<>"']/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]})}
@@ -52,78 +51,13 @@ function commandResponse(j){
 }
 
 /* ---------- toasts ---------- */
-function toast(msg, type, key){
-  type = type || 'info';
-  var c = $("toasts");
-  if(!c) return null;
-
-  var t = null;
-  // 1. If key is provided, find any existing toast element with this key
-  if(key){
-    for(var i = 0; i < c.children.length; i++){
-      var item = c.children[i];
-      if(item.dataset && item.dataset.key === key){
-        t = item;
-        break;
-      }
-    }
-  }
-
-  // 2. If not found by key, try to reuse an existing non-load toast
-  if(!t){
-    for(var j = 0; j < c.children.length; j++){
-      var el = c.children[j];
-      var isLoad = el.className ? (/\bload\b/.test(el.className)) : (el.classList && el.classList.contains('load'));
-      if(!isLoad){
-        t = el;
-        break;
-      }
-    }
-  }
-
-  // 3. Otherwise create a new toast element so active load toasts are not destroyed
-  if(!t){
-    t = document.createElement('div');
-    c.appendChild(t);
-  } else {
-    t.classList.remove('leaving');
-  }
-
-  if(t._toastTimer){ clearTimeout(t._toastTimer); t._toastTimer = null; }
-  if(t._toastLeavingTimer){ clearTimeout(t._toastLeavingTimer); t._toastLeavingTimer = null; }
-
-  t.className = 'toast ' + type;
-  if(key) t.dataset.key = key;
-  else if(t.dataset && t.dataset.key) delete t.dataset.key;
-
-  var iconHtml = '';
-  if(type === 'load'){
-    iconHtml = '<svg class="otaspin" width="14" height="14" viewBox="0 0 16 16">' +
-      '<circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-dasharray="11 38"/>' +
-      '</svg>';
-  } else if(type === 'ok'){
-    iconHtml = '✓';
-  } else if(type === 'err'){
-    iconHtml = '!';
-  } else {
-    iconHtml = 'i';
-  }
-
-  t.innerHTML = '<span class="ic">' + iconHtml + '</span><span>' + esc(msg) + '</span>';
-
-  if(type !== 'load'){
-    var dur = type === 'err' ? 5200 : 3000;
-    t._toastTimer = setTimeout(function(){
-      t._toastTimer = null;
-      t.classList.add('leaving');
-      t._toastLeavingTimer = setTimeout(function(){
-        t._toastLeavingTimer = null;
-        if(t.parentNode) t.parentNode.removeChild(t);
-      }, 230);
-    }, dur);
-  }
-
-  return t;
+function toast(msg,type){
+  type=type||'info'; var c=$("toasts"); if(!c)return;
+  while(c.children.length>2) c.removeChild(c.firstChild);
+  var t=document.createElement('div'); t.className='toast '+type;
+  t.innerHTML='<span class="ic">'+(type==='ok'?'✓':type==='err'?'!':'i')+'</span><span>'+esc(msg)+'</span>';
+  c.appendChild(t);
+  setTimeout(function(){ t.classList.add('leaving'); setTimeout(function(){if(t.parentNode)t.parentNode.removeChild(t)},230); }, type==='err'?5200:3000);
 }
 
 /* ---------- net ----------
@@ -137,18 +71,8 @@ function poll(){
   // freeze the hero on an old state (e.g. a transient orange "Unreachable") until a manual
   // reload — the very bug a fresh document hides. Same guard waitReboot() already uses.
   return requestJson('/status?ms='+Date.now(),{cache:'no-store'})
-    .then(function(s){ feedOk=true; render(s); settleWakeToast(); })
+    .then(function(s){ feedOk=true; render(s); })
     .catch(function(){ feedOk=false; });
-}
-// render() ends `waking` once the car reports data; the sticky "waiting for the car" toast is
-// resolved here, in the poll path, so the renderer stays a pure state→DOM function.
-function settleWakeToast(){
-  if(waking) return;
-  var c=$("toasts"); if(!c||!c.children) return;
-  for(var i=0;i<c.children.length;i++){
-    var el=c.children[i];
-    if(el.dataset&&el.dataset.key==='wake'&&/\bload\b/.test(el.className||'')){ toast('Car is awake','ok','wake'); return; }
-  }
 }
 
 /* ---------- signal glyph ---------- */
@@ -274,13 +198,13 @@ function socColor(p){
 }
 /* ---------- icons (2px outline shapes; stroke styling lives in CSS) ---------- */
 var ICON={
-  bolt:'<use href="#ic-bolt"/>',
+  bolt:'<path d="M13 2 4 14h6l-1 8 9-12h-6l1-8z"/>',
   moon:'<path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/>',
-  car:'<use href="#ic-car"/>',
+  car:'<path d="M19 17h2a1 1 0 0 0 1-1v-3a2 2 0 0 0-1.5-1.9L16 10l-2.2-2.3A2.5 2.5 0 0 0 12 7H5a1.6 1.6 0 0 0-1.4.9l-1.4 2.9A3.7 3.7 0 0 0 2 12v4a1 1 0 0 0 1 1h2"/><path d="M9 17h6"/><circle cx="7" cy="17" r="2"/><circle cx="17" cy="17" r="2"/>',
   alarm:'<circle cx="12" cy="13" r="8"/><path d="M12 9v4l2 2"/><path d="M5 3 2 6"/><path d="m22 6-3-3"/>',
-  bluetooth:'<use href="#ic-bt"/>',
-  pencil:'<use href="#ic-pencil"/>',
-  key:'<use href="#ic-key"/>',
+  bluetooth:'<path d="m7 7 10 10-5 5V2l5 5L7 17"/>',
+  pencil:'<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/>',
+  key:'<circle cx="7.5" cy="15.5" r="5.5"/><path d="m21 2-9.6 9.6"/><path d="m15.5 7.5 3 3L22 7l-3-3"/>',
   link:'<path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7"/><path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7"/>',
   search:'<circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/>'
 };
@@ -423,24 +347,16 @@ function setTab(t){
   var w=$("wrap"); if(w) w.setAttribute('data-tab',t);
   for(var k in TAB_BTN){ var b=$(TAB_BTN[k]); if(!b) continue; if(k===t) b.setAttribute('aria-current','page'); else if(b.removeAttribute) b.removeAttribute('aria-current'); }
   var pt=$("paneTitle"); if(pt) pt.textContent=TAB_TITLE[t];
-  if(t==='fw') loadPrList(false);
+  var el=$(t==='setup'?'rowVeh':t==='net'?'rowWifi':t==='fw'?'rowFw':'hero') || $(t==='setup'?'paneSetup':t==='net'?'paneNet':t==='fw'?'paneFw':'hero');
+  if(el&&el.scrollIntoView){ try{ el.scrollIntoView({behavior:'smooth'}); }catch(e){ el.scrollIntoView(); } }
 }
 function setBadge(id,on){ var b=$(id); if(b&&b.classList) b.classList.toggle('hide',!on); }
 
-// The hero's one primary action, picked by render(); the gauge and the pill both call heroTap().
+// The hero's one primary action, picked by render(); triggered directly by tapping the gauge.
 var heroActFn=null;
 function heroTap(){ if(heroActFn) return heroActFn(); }
 function setHeroAct(label,icon,fn,busyText){
-  var b=$("heroAct"), w=$("wrap");
   heroActFn=busyText?null:fn;
-  if(!b) return;
-  var show=!!(fn||busyText);
-  b.classList.toggle('hide',!show);
-  b.classList.toggle('busy',!!busyText);
-  b.disabled=!!busyText;
-  if(w&&w.classList) w.classList.toggle('has-cta',show);
-  var tx=$("heroActTx"); if(tx) tx.textContent=busyText||label||'';
-  var ic=$("heroActIc"); if(ic){ setHTML(ic,busyText?'':iconSVG(icon)); ic.style.display=busyText?'none':''; }
 }
 var bannerFn=null;
 function bannerAction(){ if(bannerFn) return bannerFn(); }
@@ -519,8 +435,16 @@ function render(s){
     g={mode:charging?'charging':(complete?'complete':'soc'), pct:soc, busy:chgBusy, limit:num(v.charge_limit)};
     head=complete?'Charge complete':(v.status||'Idle');
     chips=chargeStats(v,charging)+copChip(s)+defrostChip(s);
-    if(chgBusy) busyText='Sending command…';
-    else if(!complete){ act=toggleCharge; actLabel=charging?'Stop charging':'Start charging'; }
+    if(chgBusy){
+      busyText='Sending command…';
+      sub='Sending command…';
+    } else if(charging){
+      act=toggleCharge; actLabel='Stop charging';
+      sub='Tap the icon to stop charging.';
+    } else if(!complete){
+      act=toggleCharge; actLabel='Start charging';
+      sub='Tap the icon to start charging.';
+    }
   } else if(paired){
     var lk=lastChips(s);
     if(waking){
@@ -601,6 +525,7 @@ function render(s){
   setSub("vehSub", paired?pairedTxt:(hasVin?'Not paired yet':'Add the VIN to begin'), '');
   var vinTx=hasVin?'Change VIN':'Add VIN';
   var vb=$("vinBtn"); if(vb){ vb.setAttribute('aria-label',vinTx); vb.setAttribute('title',vinTx); }
+  var vd=$("vehDot"); if(vd) vd.className='dot'+(paired?' ok':(hasVin?' warn':''));
 
   // bluetooth — link to the car. WHICH state to show is decided by bleRowFromStatus() above (the
   // JS half of main/logic/ble_row.hpp, kept honest by scripts/check-ble-row-parity.sh); this
@@ -665,32 +590,29 @@ function render(s){
   else { netWarn=true; setRow('syslog','warn','Resolving…','Resolving'); }
 
   // header + firmware pane
+  var host=(typeof location!=='undefined'&&location.host)?location.host:'';
+  $("ipline").textContent = s.ip || host;
+  var fh=$("fwHost"); if(fh) fh.textContent = [host, (s.ip&&s.ip!==host)?s.ip:''].filter(Boolean).join(' · ');
   var prTarget=getTargetPr();
-  if(!activePr && prTarget > 0 && !activePrExplicitlyCleared) activePr = prTarget;
-  renderIpLine();
-  renderFwVer();
+  var verText='v'+(s.version||'?')+(prTarget>0?' [PR #'+prTarget+']':'');
+  var fv=$("fwVer"); if(fv) fv.textContent=verText;
+  var fvt=$("fwVerText"); if(fvt) fvt.textContent=verText;
+  var vl=$("verLink");
+  if(vl){
+    vl.title=otaAvail?('Update '+otaAvail+' available — tap to install'):(prTarget>0?('Tap to check for PR #'+prTarget+' updates'):'Tap to check for updates');
+    vl.setAttribute('aria-label',otaAvail?('Install firmware update '+otaAvail):(prTarget>0?('Check for PR #'+prTarget+' firmware updates'):'Check for firmware updates'));
+  }
 
   if(s.ota && typeof s.ota.channel === 'string'){
-    var sChan = s.ota.channel === 'dev' ? 'dev' : 'release';
-    if(otaChannelInFlight || otaChannelTarget){
-      if(sChan === otaChannelTarget){
-        otaChannelTarget = null;
-      }
-    } else {
-      otaChannel = sChan;
-      otaChannelInitialSet = true;
-    }
+    otaChannel = s.ota.channel === 'dev' ? 'dev' : 'release';
+    otaChannelInitialSet = true;
     renderChanMenu();
   } else if(!otaChannelInitialSet && s.version){
     otaChannel = /-dev/i.test(s.version) ? 'dev' : 'release';
     otaChannelInitialSet = true;
     renderChanMenu();
-  } else {
-    renderChanMenu();
   }
   renderFwSub();
-  renderVerLink();
-  updateInstalledChangelog(false);
 
   // key
   var keyTx=s.key_present?'Regenerate key':'Generate key';
@@ -706,81 +628,18 @@ function render(s){
     $("keyVal").innerHTML='<span class="ph">Not generated</span>';
     setSub("keySub",'No key yet','');
   }
+  var kd=$("keyDot"); if(kd) kd.className='dot'+(s.key_present?(paired?' ok':(s.reauth?' warn':'')):'');
 
   setBadge('badgeSetup', !configured || !!(s.reauth&&!paired));
   setBadge('badgeNet', netWarn);
   setBadge('badgeFw', !!otaAvail || otaBusy);
 }
 function setSub(id,txt,cls){ var e=$(id); if(e){ e.className='rs'+(cls?' '+cls:''); e.textContent=txt; } }
-
-function parsePrNumber(suffix){
-  if(!suffix) return 0;
-  var m = String(suffix).match(/pr[-.]?([1-9][0-9]{0,6})/i);
-  return m ? parseInt(m[1], 10) : 0;
-}
-
-function formatVerVerbatim(v){
-  var raw = String(v || '').trim();
-  if(!raw) return '';
-  return (raw.charAt(0) === 'v' || raw.charAt(0) === 'V') ? raw : ('v' + raw);
-}
-
-function renderIpLine(){
-  var el = $("ipline");
-  if(!el) return;
-  var host = (typeof location !== 'undefined' && location.host) ? location.host : '';
-  var ip = (state && state.ip) ? state.ip : host;
-  var ver = formatVerVerbatim(state && state.version);
-  el.textContent = ip + (ver ? (' · ' + ver) : '');
-}
-
-function renderFwVer(){
-  var fv = $("fwVer");
-  if(!fv) return;
-  var ver = formatVerVerbatim(state && state.version);
-  fv.textContent = ver || '—';
-}
-
 function renderFwSub(){
   var f=$("fwSub"); if(!f) return;
-  var pr = getTargetPr();
-  var ch = (pr > 0) ? ('PR #' + pr) : ((otaChannel === 'dev') ? 'Development' : 'Release');
-  f.textContent = otaAvail ? ('Update v' + otaAvail + ' available · ' + ch) : (ch + ' channel');
-}
-function renderVerLink(){
-  var vl = $("verLink");
-  var tx = $("verLinkText");
-  if(!vl) return;
-  var act = getActiveChannel();
-  var pr = getTargetPr();
-  var isAvail = !!otaAvail;
-  if(isAvail){
-    vl.className = 'pill primary wide-btn avail';
-    if(tx) tx.textContent = pr > 0 ? ('Install PR #' + pr) : ('Install v' + otaAvail);
-    vl.title = pr > 0 ? ('PR #' + pr + ' update ' + otaAvail + ' available — tap to install') : ('Update ' + otaAvail + ' available — tap to install');
-    vl.setAttribute('aria-label', pr > 0 ? ('Install PR #' + pr + ' firmware update ' + otaAvail) : ('Install firmware update ' + otaAvail));
-  } else {
-    vl.className = 'pill soft wide-btn';
-    if(tx) tx.textContent = pr > 0 ? 'Check PR Updates' : 'Check for updates';
-    vl.title = pr > 0 ? ('Tap to check for PR #' + pr + ' updates') : 'Tap to check for updates';
-    vl.setAttribute('aria-label', pr > 0 ? ('Check for PR #' + pr + ' firmware updates') : 'Check for firmware updates');
-  }
-  var fb = $("fwBadge");
-  if(fb){
-    if(isAvail){
-      fb.textContent = 'Update available';
-      fb.className = 'fw-badge avail';
-    } else if(otaPhase === 'update'){
-      fb.textContent = 'Updating…';
-      fb.className = 'fw-badge busy';
-    } else if(otaBusy || otaPhase === 'check'){
-      fb.textContent = 'Checking…';
-      fb.className = 'fw-badge busy';
-    } else {
-      fb.textContent = 'Up to date';
-      fb.className = 'fw-badge ok';
-    }
-  }
+  var ch=(otaChannel==='dev')?'Development':'Release';
+  f.textContent = otaAvail ? ('Update v'+otaAvail+' available · '+ch) : (ch+' channel');
+  var fd=$("fwDot"); if(fd) fd.className='dot'+(otaAvail?' warn':' ok');
 }
 
 // tap the SOC ring to start/stop charging
@@ -793,23 +652,23 @@ function toggleCharge(){
   if(chargeComplete(v,isCharging)){ toast('Battery is already fully charged','info'); return; }
   var cmd=isCharging?'charge_stop':'charge_start';
   chgBusy=true; if(state)render(state);
-  toast(isCharging?'Stopping charge…':'Starting charge…', 'load', 'charge');
+  toast(isCharging?'Stopping charge…':'Starting charge…','info');
   return requestJsonResult('/api/1/vehicles/'+encodeURIComponent(vin)+'/command/'+cmd,{method:'POST'})
     .then(function(res){
       var j=res.json;
       if(j && j.response && typeof j.response.result === 'boolean'){
-        if(j.response.result){ toast(isCharging?'Charging stopped':'Charging started', 'ok', 'charge'); return; }
+        if(j.response.result){ toast(isCharging?'Charging stopped':'Charging started','ok'); return; }
         var f=chargeFailMsg((j.response.reason)||'', isCharging);
-        toast(f.msg, f.type, 'charge');
+        toast(f.msg, f.type);
         return;
       }
       if(!res.ok && res.status){
-        toast('Command failed (HTTP '+res.status+')', 'err', 'charge');
+        toast('Command failed (HTTP '+res.status+')','err');
         return;
       }
-      toast('Command failed — is the car in range?', 'err', 'charge');
+      toast('Command failed — is the car in range?','err');
     })
-    .catch(function(){ toast('Command failed — is the car in range?', 'err', 'charge'); })
+    .catch(function(){ toast('Command failed — is the car in range?','err'); })
     .then(function(){ chgBusy=false; poll(); });
 }
 // turn the device's failure reason into a clear message; the car rejecting a command
@@ -833,42 +692,22 @@ function chargeFailMsg(reason,isCharging){
 /* ---------- sheets (replace prompt()/confirm()) ----------
    askText → Promise<string|null>, askConfirm → Promise<boolean>. One sheet at a time; opening
    another settles the first as cancelled. */
-var askResolve=null, askCancelValue=null, askReturnFocus=null, askHintFn=null, askValidateFn=null;
+var askResolve=null, askCancelValue=null, askReturnFocus=null, askHintFn=null;
 // While a sheet or the OTA dialog is open the page behind it is inert: aria-modal alone neither
 // stops Tab from walking into the dock and panes nor keeps screen readers inside the dialog.
 // Derived from both dialogs, so closing one while the other is still up keeps the page locked.
 // Call it after showing/hiding a dialog and before moving focus back: an inert node can't take it.
 // Both can be open at once (an OTA check finishing while a sheet is up). The sheet is always the
 // top layer (CSS z-index), so Escape closes it first, and the OTA dialog never takes its focus.
-function isOpen(id){
-  var m=$(id);
-  return !!(m && m.classList && !m.classList.contains('hide'));
-}
+var chanModalOpen = false;
+function isOpen(id){ var m=$(id); return !!(m&&m.classList&&!m.classList.contains('hide')); }
 function syncModal(){
-  var open=isOpen('askModal')||isOpen('otaModal');
-  if(typeof document!=='undefined'){
-    if(document.documentElement&&document.documentElement.classList) document.documentElement.classList.toggle('modal-open',open);
-    if(document.body&&document.body.classList) document.body.classList.toggle('modal-open',open);
-  }
+  var chanOpen = chanModalOpen && isOpen('chanModal');
+  var open = isOpen('askModal') || isOpen('otaModal') || chanOpen;
+  if(typeof document!=='undefined'&&document.body&&document.body.classList) document.body.classList.toggle('modal-open',open);
   var w=$("wrap"); if(w) w.inert=open;
-  // The OTA dialog sits under an open sheet: keep Tab from reaching its buttons.
-  var om=$("otaModal"); if(om) om.inert=isOpen('askModal');
-}
-function askValidate(){
-  var inp=$("askInput"), ok=$("askOk"), err=$("askErr");
-  askPaintHint();
-  if(!inp) return true;
-  var msg=(askValidateFn&&typeof askValidateFn==='function')?askValidateFn(inp.value||''):null;
-  var bad=!!msg;
-  if(err){
-    err.textContent=bad?msg:'';
-    err.classList.toggle('hide',!bad);
-  }
-  inp.classList.toggle('invalid',bad);
-  if(bad) inp.setAttribute('aria-invalid','true');
-  else if(inp.removeAttribute) inp.removeAttribute('aria-invalid');
-  if(ok) ok.disabled=bad;
-  return !bad;
+  // The OTA dialog sits under an open sheet: keep Tab from reaching its Install button.
+  var om=$("otaModal"); if(om) om.inert=isOpen('askModal') || chanOpen;
 }
 function askOpen(o,cancelValue){
   if(askResolve) askClose(askCancelValue);
@@ -885,7 +724,6 @@ function askOpen(o,cancelValue){
   var cc=$("askCancel"); if(cc) cc.textContent=o.cancelLabel||'Cancel';
   var inp=$("askInput");
   askHintFn=null;
-  askValidateFn=null;
   if(text&&inp){
     $("askLabel").textContent=o.label||'';
     inp.value=o.value||'';
@@ -893,30 +731,13 @@ function askOpen(o,cancelValue){
     inp.className=o.mono?'mono':'';
     if(o.maxLength) inp.setAttribute('maxlength',String(o.maxLength)); else if(inp.removeAttribute) inp.removeAttribute('maxlength');
     askHintFn=o.hint||null;
-    askValidateFn=o.validate||null;
-    askValidate();
-  } else if(ok){
-    ok.disabled=false;
+    askPaintHint();
   }
   var m=$("askModal"); if(m&&m.classList) m.classList.remove('hide');
   syncModal();
-  // Adaptive focus: on desktop (pointer: fine), focus the input immediately and select text
-  // so typing and Enter work right away. On mobile/touch, focus the card container so
-  // the virtual keyboard does not jump.
-  if(text){
-    var isDesktop = typeof window !== 'undefined' && typeof window.matchMedia === 'function' && window.matchMedia('(pointer: fine)').matches;
-    if(isDesktop && inp && typeof inp.focus === 'function'){
-      inp.focus();
-      if(typeof inp.select === 'function') inp.select();
-    } else {
-      var card=m?(m.querySelector?m.querySelector('.modal-card'):null):null;
-      if(!card) card=m;
-      if(card&&typeof card.focus==='function') card.focus({preventScroll:true});
-    }
-  } else {
-    var target=o.destructive?cc:ok;
-    if(target&&typeof target.focus==='function') target.focus();
-  }
+  // A destructive confirmation starts on Cancel, so a held or repeated Enter can't confirm it.
+  var target=text?inp:(o.destructive?cc:ok);
+  if(target&&typeof target.focus==='function') target.focus();
   return new Promise(function(resolve){ askResolve=resolve; });
 }
 function askPaintHint(){
@@ -926,11 +747,6 @@ function askPaintHint(){
 function askClose(value){
   var m=$("askModal"); if(m&&m.classList) m.classList.add('hide');
   syncModal();
-  askValidateFn=null;
-  var err=$("askErr"), inp=$("askInput"), ok=$("askOk");
-  if(err){ err.textContent=''; err.classList.add('hide'); }
-  if(inp){ inp.classList.remove('invalid'); if(inp.removeAttribute) inp.removeAttribute('aria-invalid'); }
-  if(ok) ok.disabled=false;
   var r=askResolve; askResolve=null;
   var back=askReturnFocus; askReturnFocus=null;
   // Back to where the sheet was opened from — unless that is on the page and the OTA dialog is
@@ -943,61 +759,12 @@ function askClose(value){
 function askSubmit(){
   if(!askResolve) return;
   if(askCancelValue===false){ askClose(true); return; }
-  if(!askValidate()){
-    var inp=$("askInput");
-    if(inp && typeof inp.focus==='function') inp.focus();
-    return;
-  }
   var inp=$("askInput"); askClose(inp?String(inp.value):'');
 }
 function askText(o){ o.input=true; return askOpen(o,null); }
 function askConfirm(o){ return askOpen(o,false); }
 
-// Popup editing contract: activating an INACTIVE text field selects its complete
-// value, so replacing a VIN, broker or server is one paste. A tap/click in the ALREADY ACTIVE field
-// keeps native caret placement.
-function selectModalFieldContents(target){
-  if(!target || typeof target.matches !== 'function' || typeof target.select !== 'function') return false;
-  if(!target.matches('.modal-card textarea, .modal-card input:not([type="checkbox"]):not([type="radio"]):not([type="file"])'))
-    return false;
-  try { target.select(); return true; } catch(e){ return false; }
-}
-
-function selectModalFieldOnActivation(target, wasActive){
-  return !wasActive && selectModalFieldContents(target);
-}
-
-function wireModalFieldSelection(doc){
-  if(!doc || typeof doc.addEventListener !== 'function') return;
-  var pointerTarget = null;
-  var pointerWasActive = false;
-  doc.addEventListener('pointerdown', function(event){
-    if(!event.target || typeof event.target.matches !== 'function' ||
-       !event.target.matches('.modal-card textarea, .modal-card input:not([type="checkbox"]):not([type="radio"]):not([type="file"])')) return;
-    pointerTarget = event.target;
-    pointerWasActive = (doc.activeElement === event.target);
-    if(pointerWasActive && typeof event.target.setSelectionRange === 'function'
-       && event.target.selectionStart !== event.target.selectionEnd){
-      var caret = (event.target.selectionEnd != null) ? event.target.selectionEnd : (event.target.value ? event.target.value.length : 0);
-      try { event.target.setSelectionRange(caret, caret); } catch(e){}
-    }
-  });
-  doc.addEventListener('focusin', function(event){
-    selectModalFieldOnActivation(event.target, false);
-  });
-  doc.addEventListener('click', function(event){
-    if(event.target === pointerTarget)
-      selectModalFieldOnActivation(event.target, pointerWasActive);
-    pointerTarget = null;
-  });
-}
-
 /* ---------- config actions ---------- */
-// Byte length as the firmware counts it (UTF-8), not UTF-16 code units.
-function utf8Len(v){
-  if(typeof TextEncoder!=='undefined') return new TextEncoder().encode(v).length;
-  return unescape(encodeURIComponent(v)).length;
-}
 function vinValid(v){return /^[A-HJ-NPR-Z0-9]{17}$/i.test(v)}
 function editVin(){
   var cur=(state&&state.vin&&state.vin!=='UNKNOWN')?state.vin:'';
@@ -1007,15 +774,6 @@ function editVin(){
   return askText({
     title:'Vehicle VIN', label:'VIN', value:cur, placeholder:'17 characters', mono:true,
     hint:function(x){ return x.trim().length+' / 17'; },
-    validate:function(x){
-      var s=(x||'').trim();
-      if(!s) return 'VIN is required (17 characters)';
-      if(s.length!==17) return 'Must be exactly 17 characters ('+s.length+' / 17)';
-      if(/[IOQ]/i.test(s)) return 'Letters I, O, Q are not allowed in VINs';
-      if(!/^[A-Za-z0-9]+$/.test(s)) return 'Only letters and digits are allowed';
-      if(!vinValid(s)) return 'Invalid VIN format';
-      return null;
-    },
     note:hasKey?'Changing the VIN generates a new security key and clears the stored pairing.'
                :'The 17-character VIN is shown on the Tesla touchscreen under Controls → Software.',
     destructive:hasKey&&!!cur, okLabel:'Save VIN'
@@ -1033,20 +791,20 @@ function editVin(){
     });
   }).then(function(go){
     if(!go) return;
-    toast('Saving VIN…', 'load', 'vin');
+    toast('Saving VIN…','info');
     return requestJsonResult('/set_vin',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({vin:v})})
       .then(function(res){
         var o=res.json&&res.json.response;
         if(o && typeof o.result === 'boolean' && typeof o.reason === 'string'){
-          if(!o.result){ toast(o.reason||'Failed to save VIN', 'err', 'vin'); return; }
-          if(/no reboot|unchanged/i.test(o.reason||'')){ toast('VIN unchanged', 'info', 'vin'); return; }
-          toast('VIN saved · rebooting', 'ok', 'vin');
+          if(!o.result){ toast(o.reason||'Failed to save VIN','err'); return; }
+          if(/no reboot|unchanged/i.test(o.reason||'')){ toast('VIN unchanged','info'); return; }
+          toast('VIN saved · rebooting','ok');
           return;
         }
         var msg=(!res.ok && res.status)?('Failed to save VIN (HTTP '+res.status+')'):'Failed to save VIN — no change was confirmed';
-        toast(msg, 'err', 'vin');
+        toast(msg,'err');
       })
-      .catch(function(){toast('Failed to save VIN — no change was confirmed', 'err', 'vin')});
+      .catch(function(){toast('Failed to save VIN — no change was confirmed','err')});
   });
 }
 function editMqtt(){
@@ -1054,42 +812,27 @@ function editMqtt(){
   return askText({
     title:'MQTT broker', label:'Broker (IP:PORT or URI)', value:cur, placeholder:'192.0.2.20:1883', mono:true,
     hint:function(){ return 'Empty disables MQTT'; },
-    validate:function(x){
-      var v=(x||'').trim();
-      if(!v) return null;
-      if(/[ \t\r\n]/.test(v)) return 'Invalid broker — spaces not allowed';
-      if(utf8Len(v)>120) return 'Broker too long (max 120 bytes)';
-      var auth=v, scheme=auth.indexOf('://');
-      if(scheme>=0) auth=auth.slice(scheme+3);
-      var colon=auth.lastIndexOf(':');
-      if(colon<=0) return 'Invalid broker — use host:port';
-      var host=auth.slice(0,colon), port=auth.slice(colon+1);
-      if(!host||!port||!/^\d{1,5}$/.test(port)) return 'Invalid port (1–65535)';
-      var p=parseInt(port,10);
-      if(p<1||p>65535) return 'Port out of range (1–65535)';
-      return null;
-    },
     note:'For Home Assistant. Saved credentials stay hidden; leaving the shown host unchanged keeps them.',
     okLabel:'Save & connect'
   }).then(function(v){
     if(v==null) return;
     v=v.trim();
-    if(v && v.indexOf(' ')>=0){ toast('Invalid broker — use IP:PORT', 'err', 'mqtt'); return; }
-    if(v===cur){ toast(v?'MQTT broker unchanged':'MQTT already disabled', 'info', 'mqtt'); return; }
-    toast(v?'Saving MQTT broker…':'Disabling MQTT…', 'load', 'mqtt');
+    if(v && v.indexOf(' ')>=0){ toast('Invalid broker — use IP:PORT','err'); return; }
+    if(v===cur){ toast(v?'MQTT broker unchanged':'MQTT already disabled','info'); return; }
+    toast(v?'Saving MQTT broker…':'Disabling MQTT…','info');
     return requestJsonResult('/set_mqtt',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({broker:v})})
       .then(function(res){
         var o=res.json&&res.json.response;
         if(o && typeof o.result === 'boolean' && typeof o.reason === 'string'){
-          if(!o.result){ toast(o.reason||'Failed to save MQTT broker', 'err', 'mqtt'); return; }
-          if(/no reboot|unchanged|already/i.test(o.reason||'')){ toast(v?'MQTT broker unchanged':'MQTT already disabled', 'info', 'mqtt'); return; }
-          toast('Saved · rebooting', 'ok', 'mqtt');
+          if(!o.result){ toast(o.reason||'Failed to save MQTT broker','err'); return; }
+          if(/no reboot|unchanged|already/i.test(o.reason||'')){ toast(v?'MQTT broker unchanged':'MQTT already disabled','info'); return; }
+          toast('Saved · rebooting','ok');
           return;
         }
         var msg=(!res.ok && res.status)?('Failed to save MQTT broker (HTTP '+res.status+')'):'Failed to save MQTT broker — no change was confirmed';
-        toast(msg, 'err', 'mqtt');
+        toast(msg,'err');
       })
-      .catch(function(){toast('Failed to save MQTT broker — no change was confirmed', 'err', 'mqtt')});
+      .catch(function(){toast('Failed to save MQTT broker — no change was confirmed','err')});
   });
 }
 function editSyslog(){
@@ -1097,42 +840,27 @@ function editSyslog(){
   return askText({
     title:'Syslog server', label:'Server (IP:PORT)', value:cur, placeholder:'192.0.2.30:514', mono:true,
     hint:function(){ return 'Empty disables it'; },
-    validate:function(x){
-      var v=(x||'').trim();
-      if(!v) return null;
-      if(/[ \t\r\n]/.test(v)) return 'Invalid server — spaces not allowed';
-      if(utf8Len(v)>120) return 'Server too long (max 120 bytes)';
-      if(/^[a-zA-Z]+:\/\//.test(v)) return 'Invalid server — no scheme allowed';
-      var colon=v.lastIndexOf(':');
-      if(colon>=0){
-        var host=v.slice(0,colon), port=v.slice(colon+1);
-        if(!host||!port||!/^\d{1,5}$/.test(port)) return 'Invalid port (1–65535)';
-        var p=parseInt(port,10);
-        if(p<1||p>65535) return 'Port out of range (1–65535)';
-      }
-      return null;
-    },
     note:'The diagnostic log is sent over UDP to this server.',
     okLabel:'Save'
   }).then(function(v){
     if(v==null) return;
     v=v.trim();
-    if(v && v.indexOf(' ')>=0){ toast('Invalid server — use IP:PORT', 'err', 'syslog'); return; }
-    if(v===cur){ toast(v?'Syslog server unchanged':'Syslog already disabled', 'info', 'syslog'); return; }
-    toast(v?'Saving Syslog server…':'Disabling Syslog…', 'load', 'syslog');
+    if(v && v.indexOf(' ')>=0){ toast('Invalid server — use IP:PORT','err'); return; }
+    if(v===cur){ toast(v?'Syslog server unchanged':'Syslog already disabled','info'); return; }
+    toast(v?'Saving Syslog server…':'Disabling Syslog…','info');
     return requestJsonResult('/set_syslog',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({server:v})})
       .then(function(res){
         var o=res.json&&res.json.response;
         if(o && typeof o.result === 'boolean' && typeof o.reason === 'string'){
-          if(!o.result){ toast(o.reason||'Failed to save Syslog server', 'err', 'syslog'); return; }
-          if(/no reboot|unchanged|already/i.test(o.reason||'')){ toast(v?'Syslog server unchanged':'Syslog already disabled', 'info', 'syslog'); return; }
-          toast('Saved · rebooting', 'ok', 'syslog');
+          if(!o.result){ toast(o.reason||'Failed to save Syslog server','err'); return; }
+          if(/no reboot|unchanged|already/i.test(o.reason||'')){ toast(v?'Syslog server unchanged':'Syslog already disabled','info'); return; }
+          toast('Saved · rebooting','ok');
           return;
         }
         var msg=(!res.ok && res.status)?('Failed to save Syslog server (HTTP '+res.status+')'):'Failed to save Syslog server — no change was confirmed';
-        toast(msg, 'err', 'syslog');
+        toast(msg,'err');
       })
-      .catch(function(){toast('Failed to save Syslog server — no change was confirmed', 'err', 'syslog')});
+      .catch(function(){toast('Failed to save Syslog server — no change was confirmed','err')});
   });
 }
 function wakeStop(){ waking=false; clearTimeout(wakeTimeout); }
@@ -1143,28 +871,28 @@ function wakeCar(){
   waking=true; if(state)render(state);                       // ring starts spinning immediately
   clearTimeout(wakeTimeout);
   // safety net: stop spinning if no charge data shows up in time
-  wakeTimeout=setTimeout(function(){ if(waking){ wakeStop(); toast('Still asleep — try again', 'info', 'wake'); poll(); } }, 90000);
-  toast('Waking the car…', 'load', 'wake');
+  wakeTimeout=setTimeout(function(){ if(waking){ wakeStop(); toast('Still asleep — try again','info'); poll(); } }, 90000);
+  toast('Waking the car…','info');
   return requestJsonResult('/api/1/vehicles/'+encodeURIComponent(vin)+'/command/wake_up',{method:'POST'})
     .then(function(res){
       var j=res.json;
       if(j && j.response && typeof j.response.result === 'boolean'){
         if(j.response.result){
-          toast('Wake sent · waiting for the car…', 'load', 'wake');
+          toast('Wake sent · waiting for the car…','ok');
         } else {
           wakeStop();
           var r=(j.response.reason||'').trim();
-          toast(r?('Wake failed — '+r):'Wake failed — is the car in range?', 'err', 'wake');
+          toast(r?('Wake failed — '+r):'Wake failed — is the car in range?','err');
         }
         poll();
         return;
       }
       wakeStop();
       var msg=(!res.ok && res.status)?('Wake failed (HTTP '+res.status+')'):'Wake failed — is the car in range?';
-      toast(msg, 'err', 'wake');
+      toast(msg,'err');
       poll();
     })
-    .catch(function(){ wakeStop(); toast('Wake failed — is the car in range?', 'err', 'wake'); poll(); });
+    .catch(function(){ wakeStop(); toast('Wake failed — is the car in range?','err'); poll(); });
 }
 function genKey(){
   var keyKnown = state && typeof state.key_present === 'boolean';
@@ -1176,21 +904,21 @@ function genKey(){
   }) : Promise.resolve(true);
   return ask.then(function(go){
     if(!go) return;
-    toast('Generating new key…', 'load', 'key');
+    toast('Generating new key…','info');
     var query = (keyKnown && state.key_present) ? '?force=1' : '';
     return requestJsonResult('/gen_keys' + query, {method: 'POST'})
       .then(function(res){
         var j = res.json;
         if(!res.ok){
           var msg = (j && j.reason) ? j.reason : ('HTTP ' + res.status);
-          toast(msg, 'err', 'key');
+          toast(msg, 'err');
           return;
         }
         if(!j || typeof j.result !== 'boolean') throw new Error('invalid key response');
-        if(!j.result){ toast(j.reason || 'Key generation failed', 'err', 'key'); return; }
-        toast('New key generated · re-pair with the vehicle', 'ok', 'key'); poll();
+        if(!j.result){ toast(j.reason || 'Key generation failed', 'err'); return; }
+        toast('New key generated · re-pair with the vehicle', 'ok'); poll();
       })
-      .catch(function(){ toast('Key generation failed', 'err', 'key'); });
+      .catch(function(){ toast('Key generation failed', 'err'); });
   });
 }
 
@@ -1200,7 +928,6 @@ function genKey(){
 var otaBusy=false;
 var OTA_CHECK_TIMEOUT_MS=60000, OTA_UPDATE_TIMEOUT_MS=480000, OTA_HTTP_TIMEOUT_MS=5000;
 var otaClearTimer=null;
-var otaLastToastMilestone=null;
 // var(--ok) so it matches the green signal bars while keeping the exact OTA ring geometry.
 function otaMiniRing(pct,indet,col){
   var sz=16,c=sz/2,r=6,sw=2.6,circ=2*Math.PI*r; col=col||'var(--accent)';
@@ -1227,9 +954,9 @@ function otaInline(html,cls,pct){
   setBadge('badgeFw', !!otaAvail || otaBusy);
 }
 function otaInlineClear(delay){ clearTimeout(otaClearTimer); otaClearTimer=setTimeout(function(){ otaClearTimer=null; otaInline(''); }, delay||3000); }
-function otaBegin(phase,timeout){ clearTimeout(otaClearTimer); otaClearTimer=null; otaPhase=phase; otaDeadline=Date.now()+timeout; otaLastToastMilestone=null; renderVerLink(); }
-function otaReset(){ clearTimeout(otaTimer); clearTimeout(otaClearTimer); otaClearTimer=null; otaBusy=false; otaPhase=null; otaDeadline=0; otaExpectedVersion=null; otaLastToastMilestone=null; renderVerLink(); }
-function otaFail(message){ otaReset(); toast(message, 'err', 'ota'); otaInline('<span>'+esc(message)+'</span>','err'); otaInlineClear(6000); }
+function otaBegin(phase,timeout){ clearTimeout(otaClearTimer); otaClearTimer=null; otaPhase=phase; otaDeadline=Date.now()+timeout; }
+function otaReset(){ clearTimeout(otaTimer); clearTimeout(otaClearTimer); otaClearTimer=null; otaBusy=false; otaPhase=null; otaDeadline=0; otaExpectedVersion=null; }
+function otaFail(message){ if(typeof closeOtaModal==='function') closeOtaModal(false); otaReset(); otaInline('<span>'+esc(message)+'</span>','err'); otaInlineClear(6000); }
 function otaSchedule(fn,delay){
   if(!otaDeadline||Date.now()<otaDeadline){ otaTimer=setTimeout(fn,delay); return; }
   otaFail(otaPhase==='check'?'check timed out':'update timed out');
@@ -1241,6 +968,10 @@ var prList = [];
 var prCacheKey = 'tk_pr_cache';
 var PR_CACHE_TTL_MS = 5 * 60 * 1000;
 var prLoadPromise = null;
+var prMode = false;
+var selectedChan = null;
+var chanChangelogCache = {};
+var chanChangelogAbort = null;
 
 function parseTargetPr(){
   try {
@@ -1266,13 +997,16 @@ function parseTargetPr(){
   return 0;
 }
 
+function parsePrNumber(suffix){
+  if(!suffix) return 0;
+  var m = String(suffix).match(/pr[-.]?([1-9][0-9]{0,6})/i);
+  return m ? parseInt(m[1], 10) : 0;
+}
+
 function getInstalledPr(){
   return (state && state.version) ? parsePrNumber(state.version) : 0;
 }
 
-// The OTA check target: only an explicit choice (Install on a PR row, the PR segment, or ?pr=/#pr=).
-// The installed PR build is never a target by itself, because a PR-targeted check accepts only that PR's
-// builds, and a device running one must still reach the next release through its channel.
 function getTargetPr(){
   if(activePr > 0) return activePr;
   var urlPr = parseTargetPr();
@@ -1280,70 +1014,8 @@ function getTargetPr(){
   return 0;
 }
 
-var prMode = false;
-
 function getActiveChannel(){
   return (prMode || activePr > 0) ? 'pr' : otaChannel;
-}
-
-function renderPrRows(){
-  var container = $("prRows");
-  var emptyNote = $("prEmpty");
-  if(!container) return;
-  if(typeof container.replaceChildren === 'function'){
-    container.replaceChildren();
-  } else {
-    container.textContent = '';
-    if(Array.isArray(container.children)) container.children.length = 0;
-    while(container.firstChild) container.removeChild(container.firstChild);
-  }
-  var loading = $("prLoading");
-  var isLoading = loading && !loading.classList.contains('hide');
-  if(emptyNote){
-    emptyNote.classList.toggle('hide', prList.length > 0 || isLoading);
-  }
-  for(var i = 0; i < prList.length; i++){
-    container.appendChild(createPrRow(prList[i]));
-  }
-}
-
-function createPrRow(pr){
-  var row = document.createElement('div');
-  // A plain row: its Install button is the one action (a clickable row around a button would
-  // nest interactive controls, and selecting a PR alone changes nothing on the device).
-  row.className = 'pr-row' + (pr.number === activePr ? ' sel' : '');
-
-  var num = document.createElement('span');
-  num.className = 'pr-row-num mono';
-  num.textContent = '#' + pr.number;
-  row.appendChild(num);
-
-  var title = document.createElement('span');
-  title.className = 'pr-row-title';
-  title.textContent = pr.title || 'Untitled PR';
-  title.title = '#' + pr.number + ': ' + (pr.title || '');
-  row.appendChild(title);
-
-  var btn = document.createElement('button');
-  btn.type = 'button';
-  btn.className = 'btn small pr-row-btn ' + (pr.ready ? 'primary' : 'secondary');
-  if(pr.ready){
-    btn.textContent = 'Install';
-    btn.setAttribute('aria-label', 'Install PR #' + pr.number);
-    btn.title = 'Install PR #' + pr.number;
-    btn.onclick = function(e){
-      if(e && e.stopPropagation) e.stopPropagation();
-      installPr(pr.number);
-    };
-  } else {
-    btn.textContent = 'No build';
-    btn.disabled = true;
-    btn.setAttribute('aria-label', 'No preview build available for PR #' + pr.number);
-    btn.title = 'No preview build available for PR #' + pr.number;
-  }
-  row.appendChild(btn);
-
-  return row;
 }
 
 function probePrReadiness(prs){
@@ -1385,6 +1057,7 @@ function loadPrList(force){
         var parsed = JSON.parse(cached);
         if(parsed && parsed.timestamp && (Date.now() - parsed.timestamp < PR_CACHE_TTL_MS) && Array.isArray(parsed.prs)){
           prList = parsed.prs.slice(0, 10);
+          updateChanModalUi();
           renderChanMenu();
           return Promise.resolve(prList);
         }
@@ -1408,42 +1081,118 @@ function loadPrList(force){
       return res.json();
     })
     .then(function(rawPrs){
-    if(!Array.isArray(rawPrs)) throw new Error('invalid_pr_list');
-    var max10 = rawPrs.slice(0, 10);
-    var cleaned = max10.map(function(p){
-      return {
-        number: p.number,
-        title: p.title || '',
-        updated_at: p.updated_at,
-        created_at: p.created_at,
-        user: { login: (p.user && p.user.login) ? p.user.login : 'unknown' },
-        ready: false
-      };
+      if(!Array.isArray(rawPrs)) throw new Error('invalid_pr_list');
+      var max10 = rawPrs.slice(0, 10);
+      var cleaned = max10.map(function(p){
+        return {
+          number: p.number,
+          title: p.title || '',
+          updated_at: p.updated_at,
+          created_at: p.created_at,
+          user: { login: (p.user && p.user.login) ? p.user.login : 'unknown' },
+          ready: false
+        };
+      });
+      return probePrReadiness(cleaned);
+    }).then(function(readyPrs){
+      // Keep only pull requests with verified ready preview firmware.
+      var matching = readyPrs.filter(function(p){ return p.ready; });
+      prList = matching.slice(0, 10);
+      if(typeof sessionStorage !== 'undefined'){
+        try {
+          sessionStorage.setItem(prCacheKey, JSON.stringify({ timestamp: Date.now(), prs: prList }));
+        } catch(e){}
+      }
+      if(loading) loading.classList.add('hide');
+      updateChanModalUi();
+      renderChanMenu();
+      prLoadPromise = null;
+      return prList;
+    }).catch(function(err){
+      if(loading) loading.classList.add('hide');
+      updateChanModalUi();
+      renderChanMenu();
+      if(err && err.message !== 'rate_limited' && (force || getActiveChannel() === 'pr')){
+        toast('Failed to load pull requests', 'err');
+      }
+      prLoadPromise = null;
+      return prList;
     });
-    return probePrReadiness(cleaned);
-  }).then(function(readyPrs){
-    // Keep only pull requests with verified ready preview firmware.
-    var matching = readyPrs.filter(function(p){ return p.ready; });
-    prList = matching.slice(0, 10);
-    if(typeof sessionStorage !== 'undefined'){
-      try {
-        sessionStorage.setItem(prCacheKey, JSON.stringify({ timestamp: Date.now(), prs: prList }));
-      } catch(e){}
-    }
-    if(loading) loading.classList.add('hide');
-    renderChanMenu();
-    prLoadPromise = null;
-    return prList;
-  }).catch(function(err){
-    if(loading) loading.classList.add('hide');
-    renderChanMenu();
-    if(err && err.message !== 'rate_limited' && (force || getActiveChannel() === 'pr')){
-      toast('Failed to load pull requests', 'err', 'pr');
-    }
-    prLoadPromise = null;
-    return prList;
-  });
   return prLoadPromise;
+}
+
+function renderPrRows(){
+  var container = $("prRows");
+  var emptyNote = $("prEmpty");
+  if(!container) return;
+  if(typeof container.replaceChildren === 'function'){
+    container.replaceChildren();
+  } else {
+    container.textContent = '';
+    while(container.firstChild) container.removeChild(container.firstChild);
+  }
+  var loading = $("prLoading");
+  var isLoading = loading && !loading.classList.contains('hide');
+  if(emptyNote){
+    emptyNote.classList.toggle('hide', prList.length > 0 || isLoading);
+  }
+  for(var i = 0; i < prList.length; i++){
+    container.appendChild(createPrRow(prList[i]));
+  }
+}
+
+function createPrRow(pr){
+  var row = document.createElement('div');
+  row.className = 'pr-row' + (pr.number === getTargetPr() ? ' sel' : '');
+
+  var num = document.createElement('span');
+  num.className = 'pr-row-num mono';
+  num.textContent = '#' + pr.number;
+  row.appendChild(num);
+
+  var title = document.createElement('span');
+  title.className = 'pr-row-title';
+  title.textContent = pr.title || 'Untitled PR';
+  title.title = '#' + pr.number + ': ' + (pr.title || '');
+  row.appendChild(title);
+
+  var btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'btn small pr-row-btn ' + (pr.ready ? 'primary' : 'secondary');
+  if(pr.ready){
+    btn.textContent = 'Install';
+    btn.setAttribute('aria-label', 'Install PR #' + pr.number);
+    btn.title = 'Install PR #' + pr.number;
+    btn.onclick = function(e){
+      if(e && e.stopPropagation) e.stopPropagation();
+      installPr(pr.number);
+    };
+  } else {
+    btn.textContent = 'No build';
+    btn.disabled = true;
+    btn.setAttribute('aria-label', 'No preview build available for PR #' + pr.number);
+    btn.title = 'No preview build available for PR #' + pr.number;
+  }
+  row.appendChild(btn);
+
+  return row;
+}
+
+function installPr(num){
+  if(otaBusy) return Promise.resolve();
+  var n = parseInt(num, 10);
+  if(!n || n <= 0 || n > 2147483647) return Promise.resolve();
+  activePr = n;
+  prMode = true;
+  activePrExplicitlyCleared = false;
+  if(typeof location !== 'undefined'){
+    try {
+      location.hash = '#pr=' + n;
+    } catch(e){}
+  }
+  closeChanModal();
+  if(state) render(state);
+  return otaCheck();
 }
 
 function otaStatus(){
@@ -1457,9 +1206,14 @@ function otaStatus(){
   });
 }
 
-/* ---------- update channel (segmented control in the Firmware pane) ---------- */
+/* ---------- update channel ---------- */
 function renderChanMenu(){
-  var r=$("optRelease"), d=$("optDev"), p=$("optPr"); if(!r||!d) return;
+  renderFwSub();
+  if(chanModalOpen){
+    updateChanModalUi();
+    return;
+  }
+  var r=$("optRelease"), d=$("optDev"), p=$("optPr");
   var hasMatchingPrs = (prList && prList.length > 0) || (getTargetPr() > 0) || (getInstalledPr() > 0);
   if(p){
     p.classList.toggle('hide', !hasMatchingPrs);
@@ -1468,28 +1222,20 @@ function renderChanMenu(){
     prMode = false;
   }
   var act = getActiveChannel();
-  r.className = 'seg-opt' + (act === 'release' ? ' sel' : '');
-  r.setAttribute('aria-checked', act === 'release' ? 'true' : 'false');
-  d.className = 'seg-opt' + (act === 'dev' ? ' sel' : '');
-  d.setAttribute('aria-checked', act === 'dev' ? 'true' : 'false');
+  if(r){
+    r.className = 'seg-opt' + (act === 'release' ? ' sel' : '');
+    r.setAttribute('aria-checked', act === 'release' ? 'true' : 'false');
+  }
+  if(d){
+    d.className = 'seg-opt' + (act === 'dev' ? ' sel' : '');
+    d.setAttribute('aria-checked', act === 'dev' ? 'true' : 'false');
+  }
   if(p){
     p.className = 'seg-opt' + (act === 'pr' ? ' sel' : '') + (!hasMatchingPrs ? ' hide' : '');
     p.setAttribute('aria-checked', act === 'pr' ? 'true' : 'false');
   }
-  var listWrap = $("prListWrap");
-  if(listWrap && listWrap.classList){
-    listWrap.classList.toggle('hide', act !== 'pr');
-  }
-  renderFwVer();
-  renderIpLine();
-  renderFwSub();
-  renderVerLink();
-  if(act === 'pr'){
-    renderPrRows();
-  }
 }
 
-// Arrow keys move focus between the options; Home/End focus first/last; Space/Enter selects.
 function handleChanKey(e){
   var opts = [$('optRelease'), $('optDev'), $('optPr')].filter(function(el){
     return el && !el.classList.contains('hide');
@@ -1552,8 +1298,6 @@ function setChannel(chan){
   if(!changed) return Promise.resolve();
 
   otaChannel = chan;
-  otaChannelTarget = chan;
-  otaChannelInFlight = true;
   otaChannelInitialSet = true;
   renderChanMenu();
 
@@ -1562,33 +1306,252 @@ function setChannel(chan){
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ channel: chan })
   }).then(function(){
-    otaChannelInFlight = false;
     var label = (chan === 'dev' ? 'Development' : 'Release');
-    toast('Update channel set to ' + label, 'ok', 'channel');
+    toast('Update channel set to ' + label, 'ok');
     return otaCheck();
   }).catch(function(){
-    otaChannelInFlight = false;
-    otaChannelTarget = null;
     otaChannel = prevChan;
     renderChanMenu();
-    toast('Failed to set update channel', 'err', 'channel');
+    toast('Failed to set update channel', 'err');
   });
 }
 
-function installPr(num){
-  if(otaBusy) return Promise.resolve();
-  var n = parseInt(num, 10);
-  if(!n || n <= 0 || n > 2147483647) return Promise.resolve();
-  activePr = n;
-  prMode = true;
-  activePrExplicitlyCleared = false;
+function editChannel(){
+  var pr = getTargetPr();
+  selectedChan = (pr > 0) ? 'pr' : (otaChannel || 'release');
+  chanModalOpen = true;
+  var m = $("chanModal");
+  if(m && m.classList) m.classList.remove('hide');
+  syncModal();
+  updateChanModalUi();
+  loadPrList(false);
+  var activeBtn = $(selectedChan === 'pr' ? 'optPr' : (selectedChan === 'dev' ? 'optDev' : 'optRelease'));
+  if(activeBtn && typeof activeBtn.focus === 'function') activeBtn.focus();
+}
+
+function selectChannel(chan){
+  selectedChan = chan;
+  if(chan === 'pr'){
+    loadPrList(false);
+  }
+  updateChanModalUi();
+}
+
+function updateChanModalUi(){
+  var r = $("optRelease"), d = $("optDev"), p = $("optPr");
+  var hasMatchingPrs = (prList && prList.length > 0) || (getTargetPr() > 0) || (getInstalledPr() > 0);
+  if(p){
+    p.classList.toggle('hide', !hasMatchingPrs);
+  }
+  if(!hasMatchingPrs && selectedChan === 'pr'){
+    selectedChan = 'release';
+  }
+  var c = selectedChan || (getTargetPr() > 0 ? 'pr' : (otaChannel || 'release'));
+  if(r){ r.className = 'seg-opt' + (c === 'release' ? ' sel' : ''); r.setAttribute('aria-checked', c === 'release' ? 'true' : 'false'); }
+  if(d){ d.className = 'seg-opt' + (c === 'dev' ? ' sel' : ''); d.setAttribute('aria-checked', c === 'dev' ? 'true' : 'false'); }
+  if(p){ p.className = 'seg-opt' + (c === 'pr' ? ' sel' : '') + (!hasMatchingPrs ? ' hide' : ''); p.setAttribute('aria-checked', c === 'pr' ? 'true' : 'false'); }
+
+  var listWrap = $("prListWrap");
+  if(listWrap && listWrap.classList){
+    listWrap.classList.toggle('hide', c !== 'pr');
+  }
+  if(c === 'pr'){
+    renderPrRows();
+  }
+
+  var clWrap = $("chanChangelogWrap");
+  if(clWrap && clWrap.classList){
+    clWrap.classList.toggle('hide', c === 'pr');
+  }
+  if(c === 'release' || c === 'dev'){
+    loadChanChangelog(c);
+  }
+}
+
+function loadChanChangelog(chan){
+  if(chan !== 'release' && chan !== 'dev'){
+    var wrap = $("chanChangelogWrap");
+    if(wrap && wrap.classList) wrap.classList.add('hide');
+    return Promise.resolve('');
+  }
+  var wrap = $("chanChangelogWrap");
+  if(wrap && wrap.classList) wrap.classList.remove('hide');
+
+  if(chanChangelogCache[chan] !== undefined){
+    renderChanChangelog(chanChangelogCache[chan]);
+    return Promise.resolve(chanChangelogCache[chan]);
+  }
+
+  var loading = $("chanChangelogLoading");
+  var box = $("chanChangelogBox");
+  var empty = $("chanChangelogEmpty");
+  if(loading && loading.classList) loading.classList.remove('hide');
+  if(box && box.classList) box.classList.add('hide');
+  if(empty && empty.classList) empty.classList.add('hide');
+
+  if(chanChangelogAbort && typeof chanChangelogAbort.abort === 'function'){
+    try { chanChangelogAbort.abort(); } catch(e){}
+  }
+  chanChangelogAbort = typeof AbortController !== 'undefined' ? new AbortController() : null;
+
+  var url = (chan === 'dev')
+    ? 'https://0bu.github.io/tesla-key-esp32/dev/changelog.json'
+    : 'https://0bu.github.io/tesla-key-esp32/changelog.json';
+
+  return fetch(url, {
+    cache: 'no-store',
+    signal: chanChangelogAbort ? chanChangelogAbort.signal : undefined
+  })
+    .then(function(r){
+      if(!r.ok) throw new Error('HTTP ' + r.status);
+      return r.json();
+    })
+    .then(function(data){
+      var text = (data && typeof data.changelog === 'string') ? data.changelog : '';
+      chanChangelogCache[chan] = text;
+      if(selectedChan === chan) renderChanChangelog(text);
+      return text;
+    })
+    .catch(function(err){
+      if(err && err.name === 'AbortError') return '';
+      if(chan === otaChannel){
+        return loadOtaChangelog().then(function(notes){
+          chanChangelogCache[chan] = notes || '';
+          if(selectedChan === chan) renderChanChangelog(notes || '');
+          return notes || '';
+        }).catch(function(){
+          chanChangelogCache[chan] = '';
+          if(selectedChan === chan) renderChanChangelog('');
+          return '';
+        });
+      }
+      chanChangelogCache[chan] = '';
+      if(selectedChan === chan) renderChanChangelog('');
+      return '';
+    });
+}
+
+function renderChanChangelog(text){
+  var loading = $("chanChangelogLoading");
+  var box = $("chanChangelogBox");
+  var list = $("chanChangelogList");
+  var empty = $("chanChangelogEmpty");
+  if(loading && loading.classList) loading.classList.add('hide');
+
+  var notes = String(text || '').split(/\r?\n/).map(function(s){ return s.trim(); }).filter(Boolean);
+  if(notes.length === 0){
+    if(box && box.classList) box.classList.add('hide');
+    if(empty && empty.classList) empty.classList.remove('hide');
+    if(list && list.dataset) list.dataset.renderedText = '';
+  } else {
+    if(empty && empty.classList) empty.classList.add('hide');
+    if(list){
+      var rendered = (list.dataset && list.dataset.renderedText) || '';
+      if(rendered !== text){
+        if(list.dataset) list.dataset.renderedText = text;
+        list.textContent = '';
+        for(var i = 0; i < notes.length; i++){
+          var li = document.createElement('li');
+          li.textContent = notes[i].replace(/^[-*]\s+/, '');
+          list.appendChild(li);
+        }
+      }
+    }
+    if(box && box.classList) box.classList.remove('hide');
+  }
+}
+
+function closeChanModal(){
+  chanModalOpen = false;
+  selectedChan = null;
+  if(chanChangelogAbort && typeof chanChangelogAbort.abort === 'function'){
+    try { chanChangelogAbort.abort(); } catch(e){}
+    chanChangelogAbort = null;
+  }
+  var m = $("chanModal");
+  if(m && m.classList) m.classList.add('hide');
+  syncModal();
+  renderChanMenu();
+  var btn = $("chanBtn");
+  if(btn && typeof btn.focus === 'function') btn.focus();
+}
+
+function saveChannel(){
+  var c = selectedChan || 'release';
+  if(c === 'pr'){
+    closeChanModal();
+    return Promise.resolve();
+  }
+  activePr = 0;
+  prMode = false;
+  activePrExplicitlyCleared = true;
   if(typeof location !== 'undefined'){
     try {
-      location.hash = '#pr=' + n;
+      if(typeof history !== 'undefined' && history.replaceState){
+        var cleanSearch = '';
+        if(location.search){
+          cleanSearch = location.search.replace(/([?&])pr=[0-9]+(&|$)/i, function(m, p, s){
+            return s === '&' ? p : '';
+          }).replace(/[?&]$/, '');
+        }
+        var cleanPath = (location.pathname || '') + cleanSearch;
+        history.replaceState(null, '', cleanPath || location.pathname || '/');
+      }
+      if(location.hash && /#(?:pr=)?[0-9]+/i.test(location.hash)){
+        location.hash = '';
+      }
     } catch(e){}
   }
-  renderChanMenu();
+  closeChanModal();
+  return setChannel(c);
+}
+
+function openFwUpdate(){
+  if(otaBusy) return Promise.resolve();
+  var curVer = (state && state.version) || '?';
+  if(otaAvail){
+    return loadOtaChangelog().then(function(notes){
+      return askOtaInstall({ current: curVer, available: otaAvail }, notes);
+    }).then(function(installed){
+      if(installed){
+        return startOtaUpdate(otaAvail);
+      } else {
+        otaAvail = null;
+        if(state) render(state);
+        otaReset();
+      }
+    });
+  }
+  var title = $("otaModalTitle");
+  if(title) title.textContent = 'Firmware update';
+  var verLine = $("otaVersionLine");
+  if(verLine) verLine.textContent = 'v' + curVer;
+  var chanEl = $("otaChannel");
+  if(chanEl){
+    var pr = getTargetPr();
+    chanEl.textContent = pr > 0 ? ('PR #' + pr) : (otaChannel === 'dev' ? 'Development' : 'Release');
+  }
+  var list = $("otaChanges"); if(list) list.hidden = true;
+  var noChanges = $("otaNoChanges");
+  if(noChanges){ noChanges.hidden = false; noChanges.textContent = 'Checking for updates…'; }
+  var installBtn = $("otaInstall"); if(installBtn) installBtn.classList.add('hide');
+  var m = $("otaModal"); if(m && m.classList) m.classList.remove('hide');
+  syncModal();
+
   return otaCheck();
+}
+
+function startOtaUpdate(availVer){
+  var ver = availVer || otaAvail;
+  otaExpectedVersion = ver || null;
+  otaBegin('update', OTA_UPDATE_TIMEOUT_MS);
+  otaInline(otaMiniRing(0, true, 'currentColor') + '<span>starting…</span>', '', 'indet');
+  var pr = getTargetPr();
+  var updateUrl = '/ota/update' + (pr > 0 ? '?pr=' + pr : '');
+  return requestJsonWithTimeout(updateUrl, { method: 'POST' }, OTA_HTTP_TIMEOUT_MS).then(function(j){
+    if(!j || j.result !== true) throw new Error((j && j.reason) || 'update did not start');
+    otaPoll();
+  }).catch(function(){ otaFail('update failed to start'); });
 }
 
 var otaDecisionResolve = null;
@@ -1625,112 +1588,6 @@ function loadOtaChangelog(){
     });
 }
 
-var installedChangelogKey = null;
-
-function getInstalledChangelogUrl(){
-  var curVer = (state && state.version) ? String(state.version).trim() : '';
-  var base = 'https://0bu.github.io/tesla-key-esp32/';
-  var prNum = parsePrNumber(curVer);
-  if(prNum > 0) return base + 'PR/' + prNum + '/changelog.json';
-  if(/dev/i.test(curVer)) return base + 'dev/changelog.json';
-  return base + 'changelog.json';
-}
-
-function parseInstalledChangelog(data, curVer, isDev){
-  if(!data || typeof data.changelog !== 'string' || !data.changelog.trim()) return '';
-  var text = data.changelog.trim();
-  if(isDev && curVer){
-    var lines = text.split(/\r?\n/);
-    var prefix = 'v' + curVer + ' — ';
-    var matched = [];
-    for(var i = 0; i < lines.length; i++){
-      var l = lines[i].trim();
-      if(l.indexOf(prefix) === 0){
-        matched.push(l.substring(prefix.length).trim());
-      }
-    }
-    return matched.join('\n');
-  }
-  // Only notes that provably belong to the running build: an exact version match, never a
-  // neighbouring release's or the whole history.
-  return (curVer && data.version === curVer) ? text : '';
-}
-
-// {ok, text}: ok=false only when the feed could not be read (network, HTTP error, bad JSON), so the
-// caller can tell "retry later" from "read fine, no notes for this build".
-function fetchInstalledChangelog(){
-  var curVer = (state && state.version) ? String(state.version).trim() : '';
-  if(!curVer) return Promise.resolve({ok: true, text: ''});
-  var url = getInstalledChangelogUrl();
-  var ctl = typeof AbortController !== 'undefined' ? new AbortController() : null;
-  var timer = setTimeout(function(){ if(ctl) ctl.abort(); }, OTA_HTTP_TIMEOUT_MS);
-  var isDev = /dev/i.test(curVer);
-  return fetch(url, {cache: 'no-store', signal: ctl ? ctl.signal : undefined})
-    .then(function(r){
-      clearTimeout(timer);
-      if(r && r.status === 204) return {ok: true, text: ''};
-      if(!r || !r.ok) return {ok: false, text: ''};
-      return r.json().then(function(data){
-        return {ok: true, text: parseInstalledChangelog(data, curVer, isDev)};
-      }).catch(function(){
-        return {ok: false, text: ''};
-      });
-    })
-    .catch(function(){
-      clearTimeout(timer);
-      return {ok: false, text: ''};
-    });
-}
-function loadInstalledChangelog(){
-  return fetchInstalledChangelog().then(function(r){ return r.text; });
-}
-
-function renderInstalledChangelog(changelog){
-  var list = $("fwChanges");
-  var noChanges = $("fwNoChanges");
-  if(!list) return;
-  list.textContent = '';
-  if(typeof list.replaceChildren === 'function') list.replaceChildren();
-  else if(list.children) list.children.length = 0;
-  var notes = String(changelog || '').split(/\r?\n/).map(function(s){ return s.trim(); }).filter(Boolean);
-  var count = notes.length;
-  for(var i = 0; i < count; i++){
-    var item = document.createElement('li');
-    item.textContent = notes[i];
-    list.appendChild(item);
-  }
-  list.hidden = (count === 0);
-  if(noChanges) noChanges.hidden = (count > 0);
-}
-
-// render() calls this on every /status frame. A feed that was read is cached per running version
-// (even when it has no notes for it); an unreadable one is retried at most once a minute, and one
-// fetch at a time, so a device UI without internet does not poll Pages every 4 s.
-var installedChangelogPending = null, installedChangelogRetryAt = 0;
-var INSTALLED_CHANGELOG_RETRY_MS = 60000;
-function updateInstalledChangelog(force){
-  var currentKey = (state && state.version) ? String(state.version).trim() : '';
-  if(!currentKey) return Promise.resolve();
-  if(!force){
-    if(installedChangelogKey === currentKey || installedChangelogPending === currentKey) return Promise.resolve();
-    if(Date.now() < installedChangelogRetryAt) return Promise.resolve();
-  }
-  installedChangelogPending = currentKey;
-  return fetchInstalledChangelog().then(function(r){
-    if(installedChangelogPending === currentKey) installedChangelogPending = null;
-    var stillRunning = state && state.version && String(state.version).trim() === currentKey;
-    if(r.ok){
-      installedChangelogKey = currentKey;
-      installedChangelogRetryAt = 0;
-    } else {
-      installedChangelogKey = null;
-      installedChangelogRetryAt = Date.now() + INSTALLED_CHANGELOG_RETRY_MS;
-    }
-    if(stillRunning) renderInstalledChangelog(r.text);
-    return r.text;
-  });
-}
-
 function askOtaInstall(status, changelog){
   if(otaDecisionResolve) closeOtaModal(false);
   var prTarget = getTargetPr();
@@ -1765,14 +1622,16 @@ function askOtaInstall(status, changelog){
   if(m && m.classList) m.classList.remove('hide');
   syncModal();
   var installBtn = $("otaInstall");
-  if(installBtn && typeof installBtn.focus === 'function' && !isOpen('askModal')) installBtn.focus();
+  if(installBtn){
+    installBtn.classList.remove('hide');
+    if(typeof installBtn.focus === 'function' && !isOpen('askModal')) installBtn.focus();
+  }
   return new Promise(function(resolve){
     otaDecisionResolve = resolve;
   });
 }
 
 if(typeof document!=='undefined' && typeof document.addEventListener==='function'){
-  wireModalFieldSelection(document);
   document.addEventListener('click', function(e){
     var modalBackdrop = $("otaBackdrop");
     if(modalBackdrop && e.target === modalBackdrop){
@@ -1782,12 +1641,20 @@ if(typeof document!=='undefined' && typeof document.addEventListener==='function
     if(askBackdrop && e.target === askBackdrop){
       askClose(askCancelValue);
     }
+    var chanBackdrop = $("chanBackdrop");
+    if(chanBackdrop && e.target === chanBackdrop){
+      closeChanModal();
+    }
   });
   document.addEventListener('keydown', function(e){
     var am = $("askModal");
     var askOpenNow = am && am.classList && typeof am.classList.contains==='function' && !am.classList.contains('hide');
     if(e.key==='Escape'){
       if(askOpenNow){ askClose(askCancelValue); return; }
+      var cm = $("chanModal");
+      if(cm && cm.classList && typeof cm.classList.contains==='function' && !cm.classList.contains('hide')){
+        closeChanModal(); return;
+      }
       var modal = $("otaModal");
       if(modal && modal.classList && typeof modal.classList.contains==='function' && !modal.classList.contains('hide')){
         closeOtaModal(false);
@@ -1806,14 +1673,13 @@ if(typeof document!=='undefined' && typeof document.addEventListener==='function
   var askOkBtn = $("askOk");
   if(askOkBtn) askOkBtn.onclick = askSubmit;
   var askIn = $("askInput");
-  if(askIn) askIn.oninput = askValidate;
+  if(askIn) askIn.oninput = askPaintHint;
 }
 
 function otaCheck(){
   if(otaBusy) return;              // a check/update is already running
   otaBusy=true;
   otaBegin('check',OTA_CHECK_TIMEOUT_MS);
-  toast('Checking for updates…', 'load', 'ota');
   otaInline(otaMiniRing(0,true,'currentColor'),'','indet');   // checking — spinning ring only, no label
   var pr=getTargetPr();
   var checkUrl='/ota/check?ms='+Date.now()+(pr>0?'&pr='+pr:'');
@@ -1833,31 +1699,22 @@ function otaCheckPoll(){
     if(o.state!=='idle'){ otaFail('invalid check state'); return; }
     if(o.update_available){
       otaAvail=o.available||''; if(state)render(state); renderFwSub(); otaInline('');         // clear while the dialog is up
-      toast('Update available: v' + o.available, 'ok', 'ota');
       var pr=getTargetPr();
       return loadOtaChangelog().then(function(notes){
         return askOtaInstall(o, notes);
       }).then(function(installed){
         if(installed){
-          otaExpectedVersion=o.available||null;
-          otaBegin('update',OTA_UPDATE_TIMEOUT_MS);
-          toast('Starting update…', 'load', 'ota');
-          otaInline(otaMiniRing(0,true,'currentColor')+'<span>starting…</span>','','indet');
-          var updateUrl='/ota/update'+(pr>0?'?pr='+pr:'');
-          return requestJsonWithTimeout(updateUrl,{method:'POST'},OTA_HTTP_TIMEOUT_MS).then(function(j){
-            if(!j||j.result!==true) throw new Error((j&&j.reason)||'update did not start');
-            otaPoll();
-          }).catch(function(){ otaFail('update failed to start'); });
+          return startOtaUpdate(o.available);
         } else {
           otaAvail=null; if(state)render(state); otaReset();
         }
       });
     } else {
+      if(typeof closeOtaModal==='function') closeOtaModal(false);
       otaAvail=null; if(state)render(state); otaReset();
       var prChecked=getTargetPr();
-      var upMsg = prChecked>0 ? ('PR #' + prChecked + ' up to date') : 'Firmware is up to date';
-      toast(upMsg, 'ok', 'ota');
       otaInline(prChecked>0?'<span>PR #'+prChecked+' up to date</span>':'<span>up to date</span>'); otaInlineClear(3500);
+      toast(prChecked>0?'PR #'+prChecked+' is up to date':'Firmware is up to date','ok');
     }
   }).catch(function(){ otaFail('check failed'); });
 }
@@ -1868,20 +1725,10 @@ function otaPoll(){
 }
 function otaProgress(o){
   otaBusy=true;
-  if(o.state==='downloading'){
-    var p=Math.min(100, Math.max(0, num(o.progress)||0));
-    var milestone=Math.floor(p/10)*10;
-    if(otaLastToastMilestone===null || milestone>otaLastToastMilestone){
-      otaLastToastMilestone=milestone;
-      toast('Downloading update… ' + milestone + '%', 'load', 'ota');
-    }
-    otaInline(otaMiniRing(p,false,'currentColor')+'<span>'+p+'%</span>','',p);
-    otaSchedule(otaPoll,800);
-  }
+  if(o.state==='downloading'){ var p=num(o.progress)||0; otaInline(otaMiniRing(p,false,'currentColor')+'<span>'+p+'%</span>','',p); otaSchedule(otaPoll,800); }
   else if(o.state==='done'){
     if(!otaVersion(otaExpectedVersion)){ otaFail('update target version is missing'); return; }
     clearTimeout(otaTimer); otaPhase='reboot';
-    toast('Verifying & rebooting…', 'load', 'ota');
     otaInline(otaMiniRing(100,false,'currentColor')+'<span>verifying…</span>','',100);
     setTimeout(function(){waitReboot(otaExpectedVersion)},1200);
   }
@@ -1890,9 +1737,7 @@ function otaProgress(o){
     // The 1.2 s "done" state can be missed in a background tab. Verify the target version instead
     // of polling a fresh boot's idle state forever or treating idle as success.
     if(!otaVersion(otaExpectedVersion)){ otaFail('update target version is missing'); return; }
-    otaPhase='reboot';
-    toast('Verifying & rebooting…', 'load', 'ota');
-    otaInline(otaMiniRing(100,false,'currentColor')+'<span>verifying…</span>','',100);
+    otaPhase='reboot'; otaInline(otaMiniRing(100,false,'currentColor')+'<span>verifying…</span>','',100);
     waitReboot(otaExpectedVersion);
   }
   else if(o.state==='checking'){ otaSchedule(otaPoll,1000); }
@@ -1912,16 +1757,11 @@ function resumeOta(){
 function waitReboot(expectedVer){
   if(!otaVersion(expectedVer)){ otaFail('update target version is missing'); return; }
   var started=Date.now();
-  toast('Rebooting… waiting for device', 'load', 'ota');
   (function probe(){
     requestJsonWithTimeout('/status?ms='+Date.now(),{cache:'no-store'},3000)
       .then(function(o){
         if(!o||typeof o.version!=='string') throw new Error('invalid status response');
-        if(o.version===expectedVer){
-          toast('Updated to v' + expectedVer, 'ok', 'ota');
-          setTimeout(function(){ location.reload(); }, 1200);
-          return;
-        }
+        if(o.version===expectedVer){ location.reload(); return; }
         next();
       })
       .catch(next);
@@ -1944,7 +1784,7 @@ function boot(){
   // frozen on its last frame, and a countdown that kept running would be the one element
   // still making claims about a device we are no longer hearing from.
   setInterval(function(){ if(feedOk) paintCd(); },1000);
+  loadPrList(false);
   resumeOta();
-  if(uiTab==='fw'||getTargetPr()>0) loadPrList(false);
 }
 if(!(typeof window!=='undefined'&&window.__TESLA_UI_NO_BOOT__)) boot();
