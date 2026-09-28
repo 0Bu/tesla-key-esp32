@@ -200,7 +200,7 @@ svg{display:block}
 .ver-btn:active{transform:scale(.98)}
 .ver-btn:disabled,.ver-btn.disabled{cursor:default; pointer-events:none}
 .ver-btn:disabled:hover .rv,.ver-btn.disabled:hover .rv{text-decoration:none; color:var(--muted)}
-.pane-settings.ota-busy .row:not(.row-fw) button{pointer-events:none; opacity:.45; cursor:default}
+.pane-settings.ota-busy .row:not(.row-fw) button,#paneSettings.ota-busy .row:not(.row-fw) button{pointer-events:none; opacity:.45; cursor:default}
 .chan-changelog-wrap{display:flex; flex-direction:column; gap:6px}
 .chan-changelog-box{max-height:220px; overflow-y:auto; overscroll-behavior:contain; -webkit-overflow-scrolling:touch;
   background:var(--soft); border:1px solid var(--border); border-radius:12px; padding:10px 14px; font-size:13px; line-height:1.45; box-sizing:border-box}
@@ -242,6 +242,8 @@ svg{display:block}
   color:var(--fg); font:inherit; font-size:16px; outline:none}
 .field input.mono{font-family:var(--mono); letter-spacing:.5px}
 .field input:focus{background:var(--card); border-color:var(--accent); box-shadow:0 0 0 3px rgba(232,33,39,.14)}
+.field input.invalid{border-color:var(--accent); box-shadow:0 0 0 3px rgba(232,33,39,.14)}
+.field-err{font-size:12px; font-weight:550; color:var(--accent-text); margin-top:2px; line-height:1.3}
 .actions{display:grid; grid-template-columns:1fr 1fr; gap:10px}
 .ota-head{display:flex; align-items:center; justify-content:space-between; gap:10px}
 .chip-badge{padding:3px 10px; border-radius:999px; font-size:12px; font-weight:650; color:var(--accent-text);
@@ -286,7 +288,7 @@ svg{display:block}
   }
   .banner{grid-column:1/-1}
   .hero{grid-column:1; position:sticky; top:16px}
-  .pane-settings{grid-column:2; width:100%}
+  .pane-settings,#paneSettings{grid-column:2; width:100%}
   .toasts{bottom:24px}
 }
 @media (prefers-reduced-motion:reduce){

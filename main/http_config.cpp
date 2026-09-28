@@ -185,7 +185,7 @@ esp_err_t handle_gen_keys(GuardedReq rq) {
 
 esp_err_t handle_send_key(GuardedReq rq) {
     httpd_req_t* req = rq.req;
-    if (ota_is_busy()) {
+    if (ota_is_updating()) {
         tk::JsonBuilder json;
         json.boolean(json.root(), "result", false);
         json.string(json.root(), "reason", "an OTA update is in progress");
@@ -226,7 +226,7 @@ esp_err_t handle_send_key(GuardedReq rq) {
 // applied fallback time is persisted so a later offline reboot starts plausibly.
 esp_err_t handle_set_time(GuardedReq rq) {
     httpd_req_t* req = rq.req;
-    if (ota_is_busy()) {
+    if (ota_is_updating()) {
         return send_json(req, 409, make_response(false, "set_time", "", "an OTA update is in progress"));
     }
     ParsedJsonBody parsed = parse_json_object_body_(req);
@@ -529,7 +529,7 @@ static tk::MqttProbeResult mqtt_probe_broker(const std::string& uri) {
 
 esp_err_t handle_set_mqtt(GuardedReq rq) {
     httpd_req_t* req = rq.req;
-    if (ota_is_busy()) {
+    if (ota_is_updating()) {
         return send_json(req, 409, make_response(false, "set_mqtt", "", "an OTA update is in progress"));
     }
     const tk::ConfigStringSubmission submitted = parse_string_submission_(req, "broker");
@@ -586,7 +586,7 @@ esp_err_t handle_set_mqtt(GuardedReq rq) {
 
 esp_err_t handle_set_syslog(GuardedReq rq) {
     httpd_req_t* req = rq.req;
-    if (ota_is_busy()) {
+    if (ota_is_updating()) {
         return send_json(req, 409, make_response(false, "set_syslog", "", "an OTA update is in progress"));
     }
     const tk::ConfigStringSubmission submitted = parse_string_submission_(req, "server");
@@ -645,7 +645,7 @@ esp_err_t handle_set_syslog(GuardedReq rq) {
 // its refusal spends them, while an absent SSID (a router still rebooting) is given minutes.
 esp_err_t handle_set_wifi(GuardedReq rq) {
     httpd_req_t* req = rq.req;
-    if (ota_is_busy()) {
+    if (ota_is_updating()) {
         return send_json(req, 409, make_response(false, "set_wifi", "", "an OTA update is in progress"));
     }
     ParsedJsonBody parsed = parse_json_object_body_(req);
@@ -718,7 +718,7 @@ esp_err_t handle_set_wifi(GuardedReq rq) {
 // Persists the channel selection in NVS (ConfigBlob v2) and updates the active channel.
 esp_err_t handle_set_ota(GuardedReq rq) {
     httpd_req_t* req = rq.req;
-    if (ota_is_busy()) {
+    if (ota_is_updating()) {
         return send_json(req, 409, make_response(false, "set_ota", "", "an OTA update is in progress"));
     }
     const tk::ConfigStringSubmission submitted = parse_string_submission_(req, "channel");
@@ -737,7 +737,7 @@ esp_err_t handle_set_ota(GuardedReq rq) {
     tk::cfg_load(*g_config, cfg);
     const tk::OtaChannel want = tk::ota_channel_parse(channel);
     if (cfg.has_ota && tk::ota_channel_from_int(cfg.ota_channel) == want) {
-        ota_set_channel(want, true);
+        ota_set_channel(want);
         tk::JsonBuilder resp;
         resp.boolean(resp.root(), "ok", true);
         resp.boolean(resp.root(), "result", true);
@@ -751,7 +751,7 @@ esp_err_t handle_set_ota(GuardedReq rq) {
         return send_json(req, 500, make_response(false, "set_ota", "", "failed to save config"));
     }
 
-    ota_set_channel(want, true);
+    ota_set_channel(want);
     ESP_LOGI(TAG, "OTA channel set to %s", tk::ota_channel_name(want));
 
     tk::JsonBuilder resp;

@@ -54,8 +54,7 @@ OtaStatus ota_get_status();
 
 // Active OTA feed channel ("release" or "dev").
 tk::OtaChannel ota_get_channel();
-void ota_set_channel(tk::OtaChannel channel, bool explicit_user_set = false);
-bool ota_channel_is_explicit();
+void ota_set_channel(tk::OtaChannel channel);
 
 // Retrieve latest changelog text for offered update (returns true if available).
 bool ota_get_changelog(char* out, size_t max_len, size_t& out_len);
@@ -65,6 +64,9 @@ bool ota_get_changelog(char* out, size_t max_len, size_t& out_len);
 // watchdog, whose whole job is to run when allocation is failing. This reads one atomic and
 // allocates nothing, so it is safe from any task at any heap level.
 bool ota_is_busy();
+
+// Is an active OTA download or flash-write installation running right now?
+bool ota_is_updating();
 
 // Safety gate for VIN/private-key mutations. A rollback-capable image may not write recovery
 // journals that the previous slot might interpret differently after an automatic rollback, and

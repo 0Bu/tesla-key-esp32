@@ -277,21 +277,13 @@ static OtaStatus unavailable_status_snapshot() {
 }
 
 static std::atomic<tk::OtaChannel> s_ota_channel{tk::OtaChannel::Release};
-static std::atomic<bool> s_ota_channel_explicit{false};
 
 tk::OtaChannel ota_get_channel() {
     return s_ota_channel.load(std::memory_order_acquire);
 }
 
-bool ota_channel_is_explicit() {
-    return s_ota_channel_explicit.load(std::memory_order_acquire);
-}
-
-void ota_set_channel(tk::OtaChannel channel, bool explicit_user_set) {
+void ota_set_channel(tk::OtaChannel channel) {
     s_ota_channel.store(channel, std::memory_order_release);
-    if (explicit_user_set) {
-        s_ota_channel_explicit.store(true, std::memory_order_release);
-    }
 }
 
 OtaStatus ota_get_status() {
@@ -305,26 +297,19 @@ OtaStatus ota_get_status() {
     }
     // Any allocation happens after releasing the status lock. A failed materialization is caught
     // by the HTTP/task boundary and cannot leave a partially published shared generation.
-    const char* chan = "release";
-    if (snapshot.target_pr > 0) {
-        chan = "pr";
-    } else {
-        const esp_app_desc_t* desc = esp_app_get_description();
-        const unsigned running_pr = desc ? tk::parse_version_pr(desc->version) : 0;
-        if (running_pr > 0 && !ota_channel_is_explicit()) {
-            chan = "pr";
-        } else {
-            chan = tk::ota_channel_name(ota_get_channel());
-        }
-    }
     return {snapshot.state, snapshot.progress, snapshot.message.data(),
             snapshot.available.data(), snapshot.update_available, snapshot.current.data(),
-            chan, snapshot.target_pr};
+            tk::ota_channel_name(ota_get_channel()), snapshot.target_pr};
 }
 
 bool ota_is_busy() {
     return s_running.load(std::memory_order_acquire) ||
            s_operation_gate.state() ==
+               tk::OtaIdentityGateState::Ota;
+}
+
+bool ota_is_updating() {
+    return s_operation_gate.state() ==
                tk::OtaIdentityGateState::Ota;
 }
 

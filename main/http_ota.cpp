@@ -7,7 +7,6 @@
 #include "http_handlers.hpp"
 #include "ota_update.hpp"
 #include "logic/ota_contract.hpp"
-#include <esp_app_desc.h>
 #include <esp_log.h>
 #include <cstdlib>
 
@@ -38,18 +37,15 @@ static void apply_browser_time_query_(httpd_req_t* req) {
     ESP_LOGI(TAG, "clock set from browser (ota query): %lld", sec);
 }
 
-[[gnu::noinline]] static unsigned parse_pr_param_(httpd_req_t* req) {
+static unsigned parse_pr_param_(httpd_req_t* req) {
     char q[kQueryBufBytes];
     if (httpd_req_get_url_query_str(req, q, sizeof(q)) == ESP_OK) {
         char pr_str[16];
         if (httpd_query_key_value(q, "pr", pr_str, sizeof(pr_str)) == ESP_OK) {
-            unsigned pr = tk::parse_pr_query(pr_str);
-            if (pr > 0) return pr;
+            return tk::parse_pr_query(pr_str);
         }
     }
-    const esp_app_desc_t* desc = esp_app_get_description();
-    const unsigned running_pr = desc ? tk::parse_version_pr(desc->version) : 0;
-    return (running_pr > 0 && !ota_channel_is_explicit()) ? running_pr : 0;
+    return 0;
 }
 
 // GET /ota/check[?ms=<epoch>][&pr=<N>] — start a background version check, return at once.
@@ -98,13 +94,8 @@ esp_err_t handle_ota_status(GuardedReq rq) {
     json.boolean(json.root(), "update_available", s.update_available);
     json.string(json.root(), "current", s.current.c_str());
     json.string(json.root(), "channel", s.channel.c_str());
-    unsigned pr = s.target_pr;
-    if (pr == 0 && s.channel == "pr") {
-        const esp_app_desc_t* desc = esp_app_get_description();
-        if (desc) pr = tk::parse_version_pr(desc->version);
-    }
-    if (pr > 0) {
-        json.number(json.root(), "pr", pr);
+    if (s.target_pr > 0) {
+        json.number(json.root(), "pr", s.target_pr);
     }
     return send_json(req, 200, json.release());
 }

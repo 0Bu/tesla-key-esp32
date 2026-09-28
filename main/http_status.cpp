@@ -82,12 +82,6 @@ static void current_ip(char* out, size_t sz) {
 // any cJSON is allocated — so a std::bad_alloc can't leak a partial tree; the emit that follows only
 // does cJSON allocs, which return NULL under pressure rather than throw. May return nullptr under
 // total OOM; the caller guards for it.
-[[gnu::noinline]] static const char* active_ota_channel_name_() {
-    const esp_app_desc_t* desc = esp_app_get_description();
-    const unsigned running_pr = desc ? tk::parse_version_pr(desc->version) : 0;
-    return (running_pr > 0 && !ota_channel_is_explicit()) ? "pr" : tk::ota_channel_name(ota_get_channel());
-}
-
 static cJSON* build_status_object(bool redact) {
     tk::status::Inputs in;
     in.redact = redact;
@@ -135,7 +129,7 @@ static cJSON* build_status_object(bool redact) {
         return cb.wifi_rolled_back;
     }();
     in.wifi_rolled_back = s_rolled_back;
-    in.ota_channel = active_ota_channel_name_();
+    in.ota_channel = tk::ota_channel_name(ota_get_channel());
 
     in.mqtt_configured = mqtt_ha_configured();
     in.mqtt_connected  = mqtt_ha_connected();
