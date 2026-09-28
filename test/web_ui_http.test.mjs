@@ -816,6 +816,13 @@ test("editChannel opens channel modal, selects options, and closes modal", () =>
   assert.match(element("optPr").className, /sel/);
   assert.equal(element("prListWrap").classList.contains("hide"), false);
   assert.equal(element("chanChangelogWrap").classList.contains("hide"), true);
+  assert.equal(element("chanSave").textContent, "Install PR #326");
+  assert.equal(element("chanSave").disabled, false);
+
+  // If running version is PR 326, button becomes Check for updates
+  context.state = { version: "1.6.1-pr.326.1" };
+  context.updateChanModalUi();
+  assert.equal(element("chanSave").textContent, "Check for updates");
 
   context.closeChanModal();
   assert.equal(element("chanModal").classList.contains("hide"), true);

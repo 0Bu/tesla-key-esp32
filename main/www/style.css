@@ -205,14 +205,14 @@ svg{display:block}
 .chan-changelog-list li{overflow-wrap:anywhere}
 .chan-changelog-loading{padding:10px; text-align:center; font-size:12.5px; color:var(--muted)}
 .pr-list-wrap{display:flex; flex-direction:column; gap:8px}
-.pr-rows{display:flex; flex-direction:column; gap:4px; max-height:240px; overflow-y:auto; overscroll-behavior:contain; -webkit-overflow-scrolling:touch}
-.pr-row{display:flex; align-items:center; gap:8px; padding:6px 6px 6px 10px; border-radius:10px; min-height:48px; box-sizing:border-box; background:var(--soft); font-size:13px; line-height:1.2}
-.pr-row.sel{background:color-mix(in srgb,var(--accent) 8%,var(--card)); outline:1px solid color-mix(in srgb,var(--accent) 30%,transparent)}
-.pr-row-num{font-size:12px; font-weight:700; flex:none; min-width:40px; color:var(--muted)}
+.pr-rows{display:flex; flex-direction:column; gap:6px; max-height:240px; overflow-y:auto; overscroll-behavior:contain; -webkit-overflow-scrolling:touch}
+.pr-row{display:flex; align-items:center; gap:10px; padding:10px 14px; border-radius:12px; min-height:48px; box-sizing:border-box; background:var(--soft); font-size:13px; line-height:1.25; cursor:pointer; user-select:none; border:1px solid transparent; transition:background .15s, border-color .15s}
+.pr-row:hover{background:color-mix(in srgb,var(--fg) 6%,var(--soft))}
+.pr-row:focus-visible{outline:2px solid var(--accent); outline-offset:1px}
+.pr-row.sel{background:color-mix(in srgb,var(--accent) 10%,var(--card)); border-color:color-mix(in srgb,var(--accent) 40%,transparent)}
+.pr-row-num{font-size:12.5px; font-weight:700; flex:none; min-width:42px; color:var(--muted)}
+.pr-row.sel .pr-row-num{color:var(--accent-text)}
 .pr-row-title{flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-weight:550}
-.pr-row-btn{flex:none; min-height:36px; min-width:64px; font-size:13px; padding:0 12px; border-radius:999px; border:1px solid var(--border); background:var(--card); cursor:pointer}
-.pr-row-btn.primary{background:var(--accent); color:#fff; border:0}
-.pr-row-btn:disabled{opacity:.4; cursor:not-allowed}
 .pr-loading{padding:12px; text-align:center; font-size:12.5px; color:var(--muted)}
 .meta{font-size:12.5px; color:var(--muted); overflow-wrap:anywhere}
 

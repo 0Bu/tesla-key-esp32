@@ -970,6 +970,7 @@ var PR_CACHE_TTL_MS = 5 * 60 * 1000;
 var prLoadPromise = null;
 var prMode = false;
 var selectedChan = null;
+var selectedPr = 0;
 var chanChangelogCache = {};
 var chanChangelogAbort = null;
 
@@ -1136,14 +1137,77 @@ function renderPrRows(){
   if(emptyNote){
     emptyNote.classList.toggle('hide', prList.length > 0 || isLoading);
   }
+  var instPr = getInstalledPr();
+  if(!selectedPr && prList.length > 0){
+    selectedPr = instPr || activePr || prList[0].number;
+  }
   for(var i = 0; i < prList.length; i++){
     container.appendChild(createPrRow(prList[i]));
+  }
+  updateChanSaveBtn();
+}
+
+function selectPr(num){
+  var n = parseInt(num, 10);
+  if(!n || n <= 0) return;
+  selectedPr = n;
+  var container = $("prRows");
+  var rows = (container && container.children) ? container.children : [];
+  for(var i = 0; i < rows.length; i++){
+    var r = rows[i];
+    var isSel = (r.dataset && parseInt(r.dataset.prNum, 10) === n);
+    if(r.classList){
+      r.classList.toggle('sel', isSel);
+    }
+    r.setAttribute('aria-checked', isSel ? 'true' : 'false');
+  }
+  updateChanSaveBtn();
+}
+
+function updateChanSaveBtn(){
+  var saveBtn = $("chanSave");
+  if(!saveBtn) return;
+  var c = selectedChan || (getTargetPr() > 0 ? 'pr' : (otaChannel || 'release'));
+  if(c === 'pr'){
+    var instPr = getInstalledPr();
+    if(!selectedPr && prList && prList.length > 0){
+      selectedPr = instPr || activePr || prList[0].number;
+    }
+    if(selectedPr > 0 && selectedPr === instPr){
+      saveBtn.textContent = 'Check for updates';
+      saveBtn.disabled = false;
+    } else if(selectedPr > 0){
+      saveBtn.textContent = 'Install PR #' + selectedPr;
+      saveBtn.disabled = false;
+    } else {
+      saveBtn.textContent = 'Select a PR';
+      saveBtn.disabled = true;
+    }
+  } else {
+    saveBtn.textContent = 'Save';
+    saveBtn.disabled = false;
   }
 }
 
 function createPrRow(pr){
   var row = document.createElement('div');
-  row.className = 'pr-row' + (pr.number === getTargetPr() ? ' sel' : '');
+  var isSel = (pr.number === selectedPr);
+  var isInstalled = (pr.number === getInstalledPr());
+  row.className = 'pr-row' + (isSel ? ' sel' : '');
+  row.setAttribute('role', 'radio');
+  row.setAttribute('aria-checked', isSel ? 'true' : 'false');
+  row.setAttribute('tabindex', '0');
+  if(row.dataset) row.dataset.prNum = String(pr.number);
+
+  row.onclick = function(){
+    selectPr(pr.number);
+  };
+  row.onkeydown = function(e){
+    if(e.key === 'Enter' || e.key === ' '){
+      e.preventDefault();
+      selectPr(pr.number);
+    }
+  };
 
   var num = document.createElement('span');
   num.className = 'pr-row-num mono';
@@ -1156,24 +1220,12 @@ function createPrRow(pr){
   title.title = '#' + pr.number + ': ' + (pr.title || '');
   row.appendChild(title);
 
-  var btn = document.createElement('button');
-  btn.type = 'button';
-  btn.className = 'btn small pr-row-btn ' + (pr.ready ? 'primary' : 'secondary');
-  if(pr.ready){
-    btn.textContent = 'Install';
-    btn.setAttribute('aria-label', 'Install PR #' + pr.number);
-    btn.title = 'Install PR #' + pr.number;
-    btn.onclick = function(e){
-      if(e && e.stopPropagation) e.stopPropagation();
-      installPr(pr.number);
-    };
-  } else {
-    btn.textContent = 'No build';
-    btn.disabled = true;
-    btn.setAttribute('aria-label', 'No preview build available for PR #' + pr.number);
-    btn.title = 'No preview build available for PR #' + pr.number;
+  if(isInstalled){
+    var badge = document.createElement('span');
+    badge.className = 'chip-badge';
+    badge.textContent = 'Installed';
+    row.appendChild(badge);
   }
-  row.appendChild(btn);
 
   return row;
 }
@@ -1183,6 +1235,7 @@ function installPr(num){
   var n = parseInt(num, 10);
   if(!n || n <= 0 || n > 2147483647) return Promise.resolve();
   activePr = n;
+  selectedPr = n;
   prMode = true;
   activePrExplicitlyCleared = false;
   if(typeof location !== 'undefined'){
@@ -1319,6 +1372,7 @@ function setChannel(chan){
 function editChannel(){
   var pr = getTargetPr();
   selectedChan = (pr > 0) ? 'pr' : (otaChannel || 'release');
+  selectedPr = pr || getInstalledPr() || 0;
   chanModalOpen = true;
   var m = $("chanModal");
   if(m && m.classList) m.classList.remove('hide');
@@ -1332,6 +1386,9 @@ function editChannel(){
 function selectChannel(chan){
   selectedChan = chan;
   if(chan === 'pr'){
+    if(!selectedPr){
+      selectedPr = getInstalledPr() || activePr || (prList[0] && prList[0].number) || 0;
+    }
     loadPrList(false);
   }
   updateChanModalUi();
@@ -1366,6 +1423,7 @@ function updateChanModalUi(){
   if(c === 'release' || c === 'dev'){
     loadChanChangelog(c);
   }
+  updateChanSaveBtn();
 }
 
 function loadChanChangelog(chan){
@@ -1464,6 +1522,7 @@ function renderChanChangelog(text){
 function closeChanModal(){
   chanModalOpen = false;
   selectedChan = null;
+  selectedPr = 0;
   if(chanChangelogAbort && typeof chanChangelogAbort.abort === 'function'){
     try { chanChangelogAbort.abort(); } catch(e){}
     chanChangelogAbort = null;
@@ -1479,8 +1538,17 @@ function closeChanModal(){
 function saveChannel(){
   var c = selectedChan || 'release';
   if(c === 'pr'){
-    closeChanModal();
-    return Promise.resolve();
+    if(!selectedPr || selectedPr <= 0) return Promise.resolve();
+    var instPr = getInstalledPr();
+    if(selectedPr === instPr){
+      closeChanModal();
+      activePr = selectedPr;
+      prMode = true;
+      activePrExplicitlyCleared = false;
+      if(state) render(state);
+      return otaCheck();
+    }
+    return installPr(selectedPr);
   }
   activePr = 0;
   prMode = false;
