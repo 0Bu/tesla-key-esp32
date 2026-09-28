@@ -88,11 +88,12 @@ console.error = function() {
       check(button.tabIndex >= 0 && !button.disabled, "button is not keyboard focusable");
     }
 
-    for (const id of ["otaStat", "toasts"]) {
-      const region = document.getElementById(id);
-      check(region && region.getAttribute("role") === "status", id + " status role");
-      check(region && region.getAttribute("aria-live") === "polite", id + " polite live region");
-    }
+    const liveRegion = document.getElementById("toasts");
+    check(liveRegion && liveRegion.getAttribute("role") === "status", "toasts status role");
+    check(liveRegion && liveRegion.getAttribute("aria-live") === "polite", "toasts polite live region");
+    const otaStat = document.getElementById("otaStat");
+    check(otaStat && !otaStat.hasAttribute("aria-live") && otaStat.getAttribute("aria-hidden") === "true",
+          "otaStat is not a second live region");
 
     check(typeof requestJson === "function" && typeof toast === "function" && typeof render === "function",
           "assembled application functions");
