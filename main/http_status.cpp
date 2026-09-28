@@ -129,7 +129,9 @@ static cJSON* build_status_object(bool redact) {
         return cb.wifi_rolled_back;
     }();
     in.wifi_rolled_back = s_rolled_back;
-    in.ota_channel = tk::ota_channel_name(ota_get_channel());
+    const esp_app_desc_t* desc = esp_app_get_description();
+    const unsigned running_pr = desc ? tk::parse_version_pr(desc->version) : 0;
+    in.ota_channel = (running_pr > 0) ? "pr" : tk::ota_channel_name(ota_get_channel());
 
     in.mqtt_configured = mqtt_ha_configured();
     in.mqtt_connected  = mqtt_ha_connected();

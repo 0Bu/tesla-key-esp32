@@ -593,24 +593,37 @@ function render(s){
   var host=(typeof location!=='undefined'&&location.host)?location.host:'';
   $("ipline").textContent = s.ip || host;
   var fh=$("fwHost"); if(fh) fh.textContent = [host, (s.ip&&s.ip!==host)?s.ip:''].filter(Boolean).join(' · ');
-  var prTarget=getTargetPr();
-  var verText='v'+(s.version||'?')+(prTarget>0?' [PR #'+prTarget+']':'');
-  var fv=$("fwVer"); if(fv) fv.textContent=verText;
-  var fvt=$("fwVerText"); if(fvt) fvt.textContent=verText;
-  var vl=$("verLink");
-  if(vl){
-    vl.title=otaAvail?('Update '+otaAvail+' available — tap to install'):(prTarget>0?('Tap to check for PR #'+prTarget+' updates'):'Tap to check for updates');
-    vl.setAttribute('aria-label',otaAvail?('Install firmware update '+otaAvail):(prTarget>0?('Check for PR #'+prTarget+' firmware updates'):'Check for firmware updates'));
-  }
 
+  var instPr = getInstalledPr();
+  if(!activePrExplicitlyCleared && instPr > 0 && activePr <= 0){
+    activePr = instPr;
+    prMode = true;
+  }
   if(s.ota && typeof s.ota.channel === 'string'){
-    otaChannel = s.ota.channel === 'dev' ? 'dev' : 'release';
+    if(s.ota.channel === 'pr'){
+      if(!activePrExplicitlyCleared && instPr > 0){
+        activePr = instPr;
+        prMode = true;
+      }
+    } else {
+      otaChannel = s.ota.channel === 'dev' ? 'dev' : 'release';
+    }
     otaChannelInitialSet = true;
     renderChanMenu();
   } else if(!otaChannelInitialSet && s.version){
     otaChannel = /-dev/i.test(s.version) ? 'dev' : 'release';
     otaChannelInitialSet = true;
     renderChanMenu();
+  }
+
+  var prTarget=getTargetPr();
+  var verText='v'+(s.version||'?')+(prTarget>0 && instPr!==prTarget?' [PR #'+prTarget+']':'');
+  var fv=$("fwVer"); if(fv) fv.textContent=verText;
+  var fvt=$("fwVerText"); if(fvt) fvt.textContent=verText;
+  var vl=$("verLink");
+  if(vl){
+    vl.title=otaAvail?('Update '+otaAvail+' available — tap to install'):(prTarget>0?('Tap to check for PR #'+prTarget+' updates'):'Tap to check for updates');
+    vl.setAttribute('aria-label',otaAvail?('Install firmware update '+otaAvail):(prTarget>0?('Check for PR #'+prTarget+' firmware updates'):'Check for firmware updates'));
   }
   renderFwSub();
 
@@ -637,7 +650,9 @@ function render(s){
 function setSub(id,txt,cls){ var e=$(id); if(e){ e.className='rs'+(cls?' '+cls:''); e.textContent=txt; } }
 function renderFwSub(){
   var f=$("fwSub"); if(!f) return;
-  var ch=(otaChannel==='dev')?'Development':'Release';
+  var act = getActiveChannel();
+  var curPr = getTargetPr();
+  var ch = (act === 'pr' && curPr > 0) ? ('PR #' + curPr) : ((otaChannel === 'dev') ? 'Development' : 'Release');
   f.textContent = otaAvail ? ('Update v'+otaAvail+' available · '+ch) : (ch+' channel');
   var fd=$("fwDot"); if(fd) fd.className='dot'+(otaAvail?' warn':' ok');
 }
@@ -1010,12 +1025,14 @@ function getInstalledPr(){
 
 function getTargetPr(){
   if(activePr > 0) return activePr;
+  if(!activePrExplicitlyCleared && getInstalledPr() > 0) return getInstalledPr();
   var urlPr = parseTargetPr();
   if(urlPr > 0) return urlPr;
   return 0;
 }
 
 function getActiveChannel(){
+  if(!activePrExplicitlyCleared && getInstalledPr() > 0) return 'pr';
   return (prMode || activePr > 0) ? 'pr' : otaChannel;
 }
 
@@ -1538,17 +1555,18 @@ function closeChanModal(){
 function saveChannel(){
   var c = selectedChan || 'release';
   if(c === 'pr'){
-    if(!selectedPr || selectedPr <= 0) return Promise.resolve();
+    var target = selectedPr || getTargetPr();
+    if(!target || target <= 0) return Promise.resolve();
     var instPr = getInstalledPr();
-    if(selectedPr === instPr){
-      closeChanModal();
-      activePr = selectedPr;
-      prMode = true;
-      activePrExplicitlyCleared = false;
-      if(state) render(state);
+    activePr = target;
+    prMode = true;
+    activePrExplicitlyCleared = false;
+    closeChanModal();
+    if(state) render(state);
+    if(target === instPr){
       return otaCheck();
     }
-    return installPr(selectedPr);
+    return installPr(target);
   }
   activePr = 0;
   prMode = false;
@@ -1662,11 +1680,20 @@ function askOtaInstall(status, changelog){
   var title = $("otaModalTitle");
   if(title) title.textContent = prTarget > 0 ? ('PR #' + prTarget + ' update') : 'Firmware update';
   var verLine = $("otaVersionLine");
-  if(verLine) verLine.textContent = 'v' + (status.current || '?') + ' → v' + (status.available || '?');
+  if(verLine){
+    if(status.current && status.available && status.current === status.available){
+      verLine.textContent = 'v' + status.available;
+    } else {
+      verLine.textContent = 'v' + (status.current || '?') + ' → v' + (status.available || '?');
+    }
+  }
   var chanEl = $("otaChannel");
   if(chanEl){
     if(prTarget > 0){
       chanEl.textContent = 'PR #' + prTarget;
+    } else if(status.channel === 'pr'){
+      var inst = getInstalledPr();
+      chanEl.textContent = inst > 0 ? ('PR #' + inst) : 'PR Preview';
     } else {
       chanEl.textContent = (status.channel === 'dev' || otaChannel === 'dev') ? 'Development' : 'Release';
     }

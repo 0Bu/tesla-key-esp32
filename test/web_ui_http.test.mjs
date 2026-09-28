@@ -953,3 +953,59 @@ test("openFwUpdate closes modal on check failure", async () => {
   assert.equal(element("otaModal").classList.contains("hide"), true, "modal is closed on failure");
   assert.equal(context.otaBusy, false);
 });
+
+test("PR firmware retains PR channel by default and checks for PR updates", async () => {
+  const { context, element } = loadUi();
+  const fetches = [];
+  context.fetch = async (url, opts) => {
+    fetches.push({ url, opts });
+    if (url.startsWith("/ota/check")) {
+      return { ok: true, status: 200, async json() { return { started: true }; } };
+    }
+    if (url.startsWith("/ota/status")) {
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return {
+            state: "idle",
+            update_available: false,
+            progress: 0,
+            message: "up to date",
+            available: "1.6.0-PR-340",
+            current: "1.6.0-PR-340",
+            channel: "pr",
+            pr: 340
+          };
+        }
+      };
+    }
+    return { ok: true, status: 200, async json() { return {}; } };
+  };
+
+  // Render with PR firmware
+  context.render({ version: "1.6.0-PR-340", ota: { channel: "pr" } });
+  assert.equal(context.getTargetPr(), 340);
+  assert.equal(context.getActiveChannel(), "pr");
+  assert.match(element("fwSub").textContent, /PR #340 channel/);
+  assert.equal(element("fwVer").textContent, "v1.6.0-PR-340");
+
+  // Open channel modal
+  context.editChannel();
+  assert.match(element("optPr").className, /sel/);
+  assert.equal(element("chanSave").textContent, "Check for updates");
+
+  // Clicking Check for updates in modal triggers check for PR 340
+  await context.saveChannel();
+  assert.ok(fetches.some(f => f.url.includes("/ota/check") && f.url.includes("pr=340")), "checks with pr=340");
+  assert.ok(!fetches.some(f => f.url.includes("/ota/check") && !f.url.includes("pr=")), "never checks without pr parameter");
+
+  // Switching explicitly to release clears PR
+  fetches.length = 0;
+  context.selectChannel("release");
+  assert.equal(element("chanSave").textContent, "Save");
+  await context.saveChannel();
+  assert.equal(context.getActiveChannel(), "release");
+  assert.equal(context.getTargetPr(), 0);
+  assert.match(element("fwSub").textContent, /Release channel/);
+});

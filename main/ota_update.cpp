@@ -297,9 +297,21 @@ OtaStatus ota_get_status() {
     }
     // Any allocation happens after releasing the status lock. A failed materialization is caught
     // by the HTTP/task boundary and cannot leave a partially published shared generation.
+    const char* chan = "release";
+    if (snapshot.target_pr > 0) {
+        chan = "pr";
+    } else {
+        const esp_app_desc_t* desc = esp_app_get_description();
+        const unsigned running_pr = desc ? tk::parse_version_pr(desc->version) : 0;
+        if (running_pr > 0) {
+            chan = "pr";
+        } else {
+            chan = tk::ota_channel_name(ota_get_channel());
+        }
+    }
     return {snapshot.state, snapshot.progress, snapshot.message.data(),
             snapshot.available.data(), snapshot.update_available, snapshot.current.data(),
-            tk::ota_channel_name(ota_get_channel()), snapshot.target_pr};
+            chan, snapshot.target_pr};
 }
 
 bool ota_is_busy() {
