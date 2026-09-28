@@ -198,6 +198,9 @@ svg{display:block}
 .ver-btn{background:none; border:0; padding:0; font:inherit; color:inherit; text-align:left; cursor:pointer; width:fit-content; border-radius:4px; display:inline-flex; align-items:center}
 .ver-btn:hover .rv{color:var(--fg); text-decoration:underline; text-decoration-color:var(--muted)}
 .ver-btn:active{transform:scale(.98)}
+.ver-btn:disabled,.ver-btn.disabled{cursor:default; pointer-events:none}
+.ver-btn:disabled:hover .rv,.ver-btn.disabled:hover .rv{text-decoration:none; color:var(--muted)}
+.pane-settings.ota-busy .row:not(.row-fw) button{pointer-events:none; opacity:.45; cursor:default}
 .chan-changelog-wrap{display:flex; flex-direction:column; gap:6px}
 .chan-changelog-box{max-height:220px; overflow-y:auto; overscroll-behavior:contain; -webkit-overflow-scrolling:touch;
   background:var(--soft); border:1px solid var(--border); border-radius:12px; padding:10px 14px; font-size:13px; line-height:1.45; box-sizing:border-box}

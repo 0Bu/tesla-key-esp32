@@ -1009,3 +1009,100 @@ test("PR firmware retains PR channel by default and checks for PR updates", asyn
   assert.equal(context.getTargetPr(), 0);
   assert.match(element("fwSub").textContent, /Release channel/);
 });
+
+test("UI disables settings and hides channel button during active OTA, closes open sheets on start, and prevents tampering", async () => {
+  const { context, element } = loadUi();
+  const fetches = [];
+  context.fetch = async (url, opts) => {
+    fetches.push({ url, opts });
+    if (url.includes("/ota/status")) {
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return {
+            state: "downloading",
+            update_available: false,
+            progress: 42,
+            message: "downloading firmware…",
+            available: "1.6.0-PR-340",
+            current: "1.6.0-PR-340",
+            channel: "pr",
+            pr: 340
+          };
+        }
+      };
+    }
+    if (url.includes("/ota/update")) {
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return { result: true, reason: "update started" };
+        }
+      };
+    }
+    return { ok: true, status: 200, async json() { return {}; } };
+  };
+
+  context.render({ version: "1.6.0-PR-340" });
+  assert.equal(context.isOtaRunning(), false);
+  assert.equal(element("chanBtn").classList.contains("hide"), false);
+  assert.equal(element("verLink").disabled, false);
+  assert.equal(element("paneSettings").classList.contains("ota-busy"), false);
+
+  // Open channel modal
+  context.editChannel();
+  assert.equal(element("chanModal").classList.contains("hide"), false);
+
+  // Trigger OTA update
+  await context.startOtaUpdate("1.6.0-PR-340");
+
+  // Upon starting update:
+  // 1. Modals/sheets are closed
+  assert.equal(element("chanModal").classList.contains("hide"), true);
+  assert.equal(element("otaModal").classList.contains("hide"), true);
+  assert.equal(element("askModal").classList.contains("hide"), true);
+
+  // 2. isOtaRunning() is true
+  assert.equal(context.isOtaRunning(), true);
+
+  // 3. Channel pencil button is hidden
+  assert.equal(element("chanBtn").classList.contains("hide"), true);
+
+  // 4. Version link is disabled
+  assert.equal(element("verLink").disabled, true);
+  assert.equal(element("verLink").classList.contains("disabled"), true);
+
+  // 5. Pane settings is marked ota-busy and setting buttons disabled
+  assert.equal(element("paneSettings").classList.contains("ota-busy"), true);
+  assert.equal(element("vinBtn").disabled, true);
+  assert.equal(element("keyBtn").disabled, true);
+  assert.equal(element("mqttBtn").disabled, true);
+  assert.equal(element("syslogBtn").disabled, true);
+
+  // 6. Attempting to click settings or open modals does nothing
+  fetches.length = 0;
+  await context.editVin();
+  await context.genKey();
+  await context.editMqtt();
+  await context.editSyslog();
+  await context.editChannel();
+  await context.openFwUpdate();
+  context.bannerAction();
+  assert.equal(fetches.length, 0, "no network calls made while OTA is running");
+  assert.equal(element("chanModal").classList.contains("hide"), true);
+  assert.equal(element("otaModal").classList.contains("hide"), true);
+  assert.equal(element("askModal").classList.contains("hide"), true);
+
+  // 7. When OTA resets/finishes, UI returns to normal
+  context.otaReset();
+  assert.equal(context.isOtaRunning(), false);
+  assert.equal(element("chanBtn").classList.contains("hide"), false);
+  assert.equal(element("verLink").disabled, false);
+  assert.equal(element("paneSettings").classList.contains("ota-busy"), false);
+  assert.equal(element("vinBtn").disabled, false);
+  assert.equal(element("keyBtn").disabled, false);
+  assert.equal(element("mqttBtn").disabled, false);
+  assert.equal(element("syslogBtn").disabled, false);
+});

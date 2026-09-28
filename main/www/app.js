@@ -359,7 +359,7 @@ function setHeroAct(label,icon,fn,busyText){
   heroActFn=busyText?null:fn;
 }
 var bannerFn=null;
-function bannerAction(){ if(bannerFn) return bannerFn(); }
+function bannerAction(){ if(typeof isOtaRunning === 'function' && isOtaRunning()) return; if(bannerFn) return bannerFn(); }
 
 /* ---------- render ---------- */
 // Connection row: tone ('ok' | 'warn' | '') colours the icon dot, status line and signal glyph.
@@ -646,6 +646,7 @@ function render(s){
   setBadge('badgeSetup', !configured || !!(s.reauth&&!paired));
   setBadge('badgeNet', netWarn);
   setBadge('badgeFw', !!otaAvail || otaBusy);
+  if(typeof syncOtaUi === 'function') syncOtaUi();
 }
 function setSub(id,txt,cls){ var e=$(id); if(e){ e.className='rs'+(cls?' '+cls:''); e.textContent=txt; } }
 function renderFwSub(){
@@ -725,6 +726,7 @@ function syncModal(){
   var om=$("otaModal"); if(om) om.inert=isOpen('askModal') || chanOpen;
 }
 function askOpen(o,cancelValue){
+  if(typeof isOtaRunning === 'function' && isOtaRunning()) return Promise.resolve(cancelValue);
   if(askResolve) askClose(askCancelValue);
   askReturnFocus=(typeof document!=='undefined')?document.activeElement:null;
   askCancelValue=cancelValue;
@@ -782,6 +784,7 @@ function askConfirm(o){ return askOpen(o,false); }
 /* ---------- config actions ---------- */
 function vinValid(v){return /^[A-HJ-NPR-Z0-9]{17}$/i.test(v)}
 function editVin(){
+  if(typeof isOtaRunning === 'function' && isOtaRunning()) return Promise.resolve();
   var cur=(state&&state.vin&&state.vin!=='UNKNOWN')?state.vin:'';
   var hasKey=!(state&&state.key_present===false);
   var v;
@@ -823,6 +826,7 @@ function editVin(){
   });
 }
 function editMqtt(){
+  if(typeof isOtaRunning === 'function' && isOtaRunning()) return Promise.resolve();
   var cur=(state&&state.mqtt&&state.mqtt.broker)?state.mqtt.broker:'';
   return askText({
     title:'MQTT broker', label:'Broker (IP:PORT or URI)', value:cur, placeholder:'192.0.2.20:1883', mono:true,
@@ -851,6 +855,7 @@ function editMqtt(){
   });
 }
 function editSyslog(){
+  if(typeof isOtaRunning === 'function' && isOtaRunning()) return Promise.resolve();
   var sy=state&&state.syslog, cur=(sy&&sy.host)?(sy.host+':'+(sy.port||514)):'';
   return askText({
     title:'Syslog server', label:'Server (IP:PORT)', value:cur, placeholder:'192.0.2.30:514', mono:true,
@@ -910,6 +915,7 @@ function wakeCar(){
     .catch(function(){ wakeStop(); toast('Wake failed — is the car in range?','err'); poll(); });
 }
 function genKey(){
+  if(typeof isOtaRunning === 'function' && isOtaRunning()) return Promise.resolve();
   var keyKnown = state && typeof state.key_present === 'boolean';
   var hasKey = keyKnown ? state.key_present : true;
   var ask = hasKey ? askConfirm({
@@ -943,6 +949,32 @@ function genKey(){
 var otaBusy=false;
 var OTA_CHECK_TIMEOUT_MS=60000, OTA_UPDATE_TIMEOUT_MS=480000, OTA_HTTP_TIMEOUT_MS=5000;
 var otaClearTimer=null;
+
+function isOtaRunning(){
+  return (otaPhase === 'update' || otaPhase === 'reboot') ||
+         !!(state && state.ota && (state.ota.state === 'downloading' || state.ota.state === 'done'));
+}
+function syncOtaUi(){
+  var running = isOtaRunning();
+  var chanBtn = $("chanBtn");
+  if(chanBtn && chanBtn.classList) chanBtn.classList.toggle('hide', running);
+  var vl = $("verLink");
+  if(vl){
+    vl.disabled = running;
+    if(vl.classList) vl.classList.toggle('disabled', running);
+  }
+  var paneSettings = $("paneSettings");
+  if(paneSettings && paneSettings.classList) paneSettings.classList.toggle('ota-busy', running);
+  var btns = [$('vinBtn'), $('keyBtn'), $('mqttBtn'), $('syslogBtn'), $('bannerAct')];
+  if(paneSettings && typeof paneSettings.querySelectorAll === 'function'){
+    var rowBtns = paneSettings.querySelectorAll('.row:not(.row-fw) button');
+    for(var i = 0; i < rowBtns.length; i++) btns.push(rowBtns[i]);
+  }
+  for(var j = 0; j < btns.length; j++){
+    if(btns[j] && typeof btns[j] === 'object') btns[j].disabled = running;
+  }
+}
+
 // var(--ok) so it matches the green signal bars while keeping the exact OTA ring geometry.
 function otaMiniRing(pct,indet,col){
   var sz=16,c=sz/2,r=6,sw=2.6,circ=2*Math.PI*r; col=col||'var(--accent)';
@@ -969,8 +1001,8 @@ function otaInline(html,cls,pct){
   setBadge('badgeFw', !!otaAvail || otaBusy);
 }
 function otaInlineClear(delay){ clearTimeout(otaClearTimer); otaClearTimer=setTimeout(function(){ otaClearTimer=null; otaInline(''); }, delay||3000); }
-function otaBegin(phase,timeout){ clearTimeout(otaClearTimer); otaClearTimer=null; otaPhase=phase; otaDeadline=Date.now()+timeout; }
-function otaReset(){ clearTimeout(otaTimer); clearTimeout(otaClearTimer); otaClearTimer=null; otaBusy=false; otaPhase=null; otaDeadline=0; otaExpectedVersion=null; }
+function otaBegin(phase,timeout){ clearTimeout(otaClearTimer); otaClearTimer=null; otaBusy=true; otaPhase=phase; otaDeadline=Date.now()+timeout; syncOtaUi(); }
+function otaReset(){ clearTimeout(otaTimer); clearTimeout(otaClearTimer); otaClearTimer=null; otaBusy=false; otaPhase=null; otaDeadline=0; otaExpectedVersion=null; syncOtaUi(); }
 function otaFail(message){ if(typeof closeOtaModal==='function') closeOtaModal(false); otaReset(); otaInline('<span>'+esc(message)+'</span>','err'); otaInlineClear(6000); }
 function otaSchedule(fn,delay){
   if(!otaDeadline||Date.now()<otaDeadline){ otaTimer=setTimeout(fn,delay); return; }
@@ -1281,6 +1313,7 @@ function renderChanMenu(){
   renderFwSub();
   if(chanModalOpen){
     updateChanModalUi();
+    if(typeof syncOtaUi === 'function') syncOtaUi();
     return;
   }
   var r=$("optRelease"), d=$("optDev"), p=$("optPr");
@@ -1304,6 +1337,7 @@ function renderChanMenu(){
     p.className = 'seg-opt' + (act === 'pr' ? ' sel' : '') + (!hasMatchingPrs ? ' hide' : '');
     p.setAttribute('aria-checked', act === 'pr' ? 'true' : 'false');
   }
+  if(typeof syncOtaUi === 'function') syncOtaUi();
 }
 
 function handleChanKey(e){
@@ -1387,6 +1421,7 @@ function setChannel(chan){
 }
 
 function editChannel(){
+  if(otaBusy || (typeof isOtaRunning === 'function' && isOtaRunning())) return;
   var pr = getTargetPr();
   selectedChan = (pr > 0) ? 'pr' : (otaChannel || 'release');
   selectedPr = pr || getInstalledPr() || 0;
@@ -1593,7 +1628,7 @@ function saveChannel(){
 }
 
 function openFwUpdate(){
-  if(otaBusy) return Promise.resolve();
+  if(otaBusy || (typeof isOtaRunning === 'function' && isOtaRunning())) return Promise.resolve();
   var curVer = (state && state.version) || '?';
   if(otaAvail){
     return loadOtaChangelog().then(function(notes){
@@ -1628,6 +1663,9 @@ function openFwUpdate(){
 }
 
 function startOtaUpdate(availVer){
+  if(typeof closeChanModal === 'function') closeChanModal();
+  if(typeof closeOtaModal === 'function') closeOtaModal(false);
+  if(typeof askClose === 'function') askClose(null);
   var ver = availVer || otaAvail;
   otaExpectedVersion = ver || null;
   otaBegin('update', OTA_UPDATE_TIMEOUT_MS);
@@ -1820,10 +1858,12 @@ function otaPoll(){
 }
 function otaProgress(o){
   otaBusy=true;
+  if(typeof syncOtaUi === 'function') syncOtaUi();
   if(o.state==='downloading'){ var p=num(o.progress)||0; otaInline(otaMiniRing(p,false,'currentColor')+'<span>'+p+'%</span>','',p); otaSchedule(otaPoll,800); }
   else if(o.state==='done'){
     if(!otaVersion(otaExpectedVersion)){ otaFail('update target version is missing'); return; }
     clearTimeout(otaTimer); otaPhase='reboot';
+    if(typeof syncOtaUi === 'function') syncOtaUi();
     otaInline(otaMiniRing(100,false,'currentColor')+'<span>verifying…</span>','',100);
     setTimeout(function(){waitReboot(otaExpectedVersion)},1200);
   }
@@ -1832,7 +1872,9 @@ function otaProgress(o){
     // The 1.2 s "done" state can be missed in a background tab. Verify the target version instead
     // of polling a fresh boot's idle state forever or treating idle as success.
     if(!otaVersion(otaExpectedVersion)){ otaFail('update target version is missing'); return; }
-    otaPhase='reboot'; otaInline(otaMiniRing(100,false,'currentColor')+'<span>verifying…</span>','',100);
+    otaPhase='reboot';
+    if(typeof syncOtaUi === 'function') syncOtaUi();
+    otaInline(otaMiniRing(100,false,'currentColor')+'<span>verifying…</span>','',100);
     waitReboot(otaExpectedVersion);
   }
   else if(o.state==='checking'){ otaSchedule(otaPoll,1000); }
@@ -1881,5 +1923,9 @@ function boot(){
   setInterval(function(){ if(feedOk) paintCd(); },1000);
   loadPrList(false);
   resumeOta();
+}
+if(typeof window!=='undefined'){
+  window.isOtaRunning = isOtaRunning;
+  window.syncOtaUi = syncOtaUi;
 }
 if(!(typeof window!=='undefined'&&window.__TESLA_UI_NO_BOOT__)) boot();
