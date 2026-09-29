@@ -22,7 +22,6 @@
     --scrim:rgba(0,0,0,.65);
     --shadow:0 1px 2px rgba(0,0,0,.3),0 8px 24px rgba(0,0,0,.35);
   }
-  .chan-select{background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23a3aab4' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E")}
 }
 *{box-sizing:border-box}
 html,body{margin:0}
@@ -44,7 +43,6 @@ svg{display:block}
 .brand{display:flex; align-items:center; gap:10px; min-width:0}
 .ttl{display:flex; flex-direction:column; line-height:1.15; min-width:0}
 .ttl h1{margin:0; font-size:17px; font-weight:650}
-.ttl .wide-title{display:none}
 .host{font-size:12px; color:var(--muted); overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
 .logo{display:grid; place-items:center; flex:none; width:28px; height:28px; border-radius:9px; background:var(--accent);
   box-shadow:0 2px 8px rgba(232,33,39,.35)}
@@ -64,7 +62,7 @@ svg{display:block}
   padding:6px max(16px,env(safe-area-inset-right)) 48px max(16px,env(safe-area-inset-left))}
 .pane{display:flex; width:100%}
 .pane.hide{display:none!important}
-.pane-setup,.pane-settings{display:flex; flex-direction:column; width:100%}
+.pane-setup{display:flex; flex-direction:column; width:100%}
 .stack{flex-direction:column; gap:14px}
 .card{background:var(--card); border:1px solid var(--border); border-radius:var(--r-card); box-shadow:var(--shadow);
   padding:16px; display:flex; flex-direction:column; gap:10px; width:100%; min-width:0}
@@ -77,7 +75,7 @@ svg{display:block}
 .ph{color:var(--muted)}
 
 .ti{position:relative; width:24px; height:24px}
-.ti svg,.ri svg,.ib svg,.pill svg,.cta .ci svg,.bi svg,.warnic svg{width:100%; height:100%; fill:none; stroke:currentColor;
+.ti svg,.ri svg,.ib svg,.pill svg,.bi svg,.warnic svg{width:100%; height:100%; fill:none; stroke:currentColor;
   stroke-width:2; stroke-linecap:round; stroke-linejoin:round}
 .badge{position:absolute; top:-3px; right:-6px; width:10px; height:10px; border-radius:50%; border:2px solid var(--card)}
 .badge.acc{background:var(--accent)} .badge.warn{background:var(--warn)} .badge.info{background:var(--info)}
@@ -100,7 +98,7 @@ svg{display:block}
 .pill.danger{color:var(--accent-text); border-color:color-mix(in srgb,var(--accent) 45%,var(--border))}
 .pill.sm{font-size:14px; padding:0 14px; background:var(--card)}
 .pill.wide-btn{align-self:stretch; min-height:46px}
-.pill:active,.btn:active,.cta:active{transform:scale(.985)}
+.pill:active,.btn:active{transform:scale(.985)}
 .ib{width:44px; height:44px; flex:none; border:0; border-radius:12px; background:none; color:var(--muted); display:grid; place-items:center}
 .ib:hover{background:var(--soft)}
 .ib.danger{color:var(--accent-text)}
@@ -181,22 +179,11 @@ svg{display:block}
 .bars.wave .wb2{animation-delay:.15s} .bars.wave .wb3{animation-delay:.3s} .bars.wave .wb4{animation-delay:.45s}
 
 /* firmware */
-.fw{width:100%; gap:14px}
-.fwhead{display:flex; align-items:center; gap:12px}
-.fwv{display:flex; flex-direction:column; min-width:0}
-.fwver{font-size:22px; overflow-wrap:anywhere}
 .otabar{height:8px; border-radius:4px; background:var(--soft); overflow:hidden}
 .otafill{height:100%; width:0; background:var(--accent); transition:width .3s}
 /* no measurable progress yet (checking, starting): a sliding sliver, never a static fill that reads as 15 % */
 .otabar.indet .otafill{width:30%!important; animation:otaslide 1.2s ease-in-out infinite alternate}
 @keyframes otaslide{from{transform:translateX(-20%)}to{transform:translateX(253%)}}
-.chan-select{height:36px; padding:0 28px 0 12px; border-radius:10px; border:1px solid var(--border); background:var(--soft);
-  color:var(--fg); font:inherit; font-size:13.5px; font-weight:600; cursor:pointer; outline:none; appearance:none; -webkit-appearance:none;
-  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%235b626b' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
-  background-repeat:no-repeat; background-position:right 8px center; flex:none}
-.chan-select:hover{background-color:color-mix(in srgb,var(--fg) 6%,var(--soft))}
-.chan-select:focus-visible{border-color:var(--focus); outline:2px solid var(--focus); outline-offset:1px}
-.chan-select:disabled,.chan-select.disabled{cursor:default; pointer-events:none; opacity:.45}
 .row-fw{position:relative}
 .row-fw .otabar{position:absolute; bottom:0; left:0; right:0; height:3px; border-radius:0}
 .ver-btn{background:none; border:0; padding:2px 6px; margin:-2px -6px; font:inherit; color:inherit; text-align:left; cursor:pointer; width:fit-content; border-radius:6px; display:inline-flex; flex-direction:column; align-items:flex-start; gap:2px; -webkit-tap-highlight-color:transparent; transition:background .15s ease}
@@ -221,19 +208,16 @@ svg{display:block}
 .chan-opt-title{font-size:16px; font-weight:650}
 .chan-opt-desc{font-size:13px; color:var(--muted); line-height:1.35}
 .chip-badge.ok{color:var(--ok-text); background:color-mix(in srgb,var(--ok) 16%,var(--card))}
-.pane-settings.ota-busy button,#paneSettings.ota-busy button,
-.pane-settings.ota-busy .row:not(.row-fw) button,#paneSettings.ota-busy .row:not(.row-fw) button,
-.pane-settings.ota-busy .chan-select,#paneSettings.ota-busy .chan-select{pointer-events:none; opacity:.45; cursor:default}
+#paneSettings.ota-busy button{pointer-events:none; opacity:.45; cursor:default}
 .meta{font-size:12.5px; color:var(--muted); overflow-wrap:anywhere}
 
 /* sheets / dialogs: vertically and horizontally centered on all devices (mobile, tablet, desktop) */
 .modal{position:fixed; inset:0; z-index:20; display:flex; align-items:center; justify-content:center; padding:16px; box-sizing:border-box}
 #askModal,#chanModal{z-index:21} /* sheets sit above the OTA dialog, see syncModal() */
 .modal-backdrop{position:absolute; inset:0; background:var(--scrim); animation:fade .15s ease}
-.sheet{position:relative; width:100%; max-width:460px; max-height:calc(100vh - 32px); overflow:auto; background:var(--card);
+.sheet{position:relative; width:100%; max-width:460px; max-height:calc(100vh - 32px); max-height:calc(100dvh - 32px); overflow:auto; background:var(--card);
   border-radius:20px; box-shadow:0 20px 60px rgba(0,0,0,.3); padding:20px;
   display:flex; flex-direction:column; gap:14px; animation:sheet .22s var(--ease); box-sizing:border-box}
-.grab{display:none!important}
 .sheet-title{margin:0; font-size:22px; font-weight:650; letter-spacing:-.4px; line-height:1.2}
 .sheet p{margin:0}
 .note{font-size:14px; color:var(--muted)}
@@ -297,7 +281,7 @@ svg{display:block}
   }
   .banner{grid-column:1/-1}
   .hero{grid-column:1; position:sticky; top:16px}
-  .pane-settings,#paneSettings{grid-column:2; width:100%}
+  #paneSettings{grid-column:2; width:100%}
   .toasts{bottom:24px}
 }
 @media (prefers-reduced-motion:reduce){

@@ -9,6 +9,7 @@ function setHTML(el,html){ if(el && el.__h!==html){ el.__h=html; el.innerHTML=ht
 var state=null, otaTimer=null, otaAvail=null, waking=false, wakeTimeout=null, chgBusy=false, feedOk=false;
 var otaBusy=false, otaPhase=null, otaPollState=null, otaDeadline=0, otaExpectedVersion=null, otaChannel='release', otaChannelInitialSet=false;
 var otaChannelInFlight=false, otaChannelTarget=null;
+var fwFocusId=null;   // control that started the running check/channel change; refocused once the UI is idle again
 
 function isOtaRunning(){
   if(otaPhase === 'update' || otaPhase === 'reboot') return true;
@@ -422,10 +423,7 @@ function fmtAgo(sec){
   return Math.floor(h/24)+' d';
 }
 
-/* ---------- sections: car | setup | net | fw, shown by CSS keyed off .wrap[data-tab] ---------- */
-var uiTab='car';
-var TAB_TITLE={car:'tesla-key-esp32', setup:'Setup', net:'Network', fw:'Firmware'};
-var TAB_BTN={car:'tabCar', setup:'tabSetup', net:'tabNet', fw:'tabFw'};
+/* ---------- setup shortcuts ---------- */
 function scrollToKey(){
   var el = $("rowKey") || $("paneSettings");
   if(el && typeof el.scrollIntoView === 'function'){
@@ -434,18 +432,6 @@ function scrollToKey(){
   var btn = $("keyBtn");
   if(btn && typeof btn.focus === 'function') btn.focus();
 }
-
-function setTab(t){
-  if(!TAB_TITLE[t]) return;
-  uiTab=t;
-  var w=$("wrap"); if(w) w.setAttribute('data-tab',t);
-  for(var k in TAB_BTN){ var b=$(TAB_BTN[k]); if(!b) continue; if(k===t) b.setAttribute('aria-current','page'); else if(b.removeAttribute) b.removeAttribute('aria-current'); }
-  var pt=$("paneTitle"); if(pt) pt.textContent=TAB_TITLE[t];
-  if(t==='setup') scrollToKey();
-  else if(t==='net'){ var n = $('rowWifi'); if(n && typeof n.scrollIntoView === 'function') try { n.scrollIntoView({ behavior: 'smooth' }); } catch(e){ n.scrollIntoView(); } }
-  else if(t==='fw'){ var f = $('rowFw'); if(f && typeof f.scrollIntoView === 'function') try { f.scrollIntoView({ behavior: 'smooth' }); } catch(e){ f.scrollIntoView(); } }
-}
-function setBadge(id,on){ var b=$(id); if(b&&b.classList) b.classList.toggle('hide',!on); }
 
 // The hero's one primary action, picked by render(); the gauge calls heroTap().
 var heroActFn=null;
@@ -476,7 +462,6 @@ function render(s){
   var hasVin=s.vin&&s.vin!=='UNKNOWN', configured=hasVin&&s.key_present;
   var v=s.vehicle, charging=v&&/charg/i.test(v.status||'');
   var safe=!!(s.sys&&s.sys.safe_mode);
-  var netWarn=false;
 
   // network row. One row, two possible transports: a wired device reports an `eth` object
   // (present ONLY when the wire carries the lease, see logic/status_model.hpp) and no SSID/RSSI,
@@ -497,7 +482,6 @@ function render(s){
     } else {
       // not connected — the bars fill up one after another while the device keeps reconnecting.
       // setHTML keeps the same bar nodes between polls so the fill animation doesn't restart.
-      netWarn=true;
       setRow('wifi','warn','Searching…','Reconnecting',searchBarsHTML());
     }
   }
@@ -652,7 +636,6 @@ function render(s){
     // Link down, next attempt scheduled (or none). Outlined empty bars hold the row's shape.
     setRow('ble','','Disconnected', d.cd==='retries'?'Waiting · '+cdHTML(d.cd):'Idle', emptyBarsHTML());
   }
-  if(d.row==='failed'||d.row==='scanning'||d.row==='discovering'||(d.row==='linked'&&d.stateless)) netWarn=true;
   // Countdown clock from this push, then paint immediately: setHTML may have just replaced the
   // row, leaving a fresh, empty .cd the 1 s ticker wouldn't fill until its next tick.
   cdSync(d.cd,num(ble.phase_s));
@@ -662,24 +645,21 @@ function render(s){
   var mq=s.mqtt||{};
   if(!mq.configured) setRow('mqtt','','<span class="ph">Not configured</span>','Disabled');
   else if(mq.connected) setRow('mqtt','ok',esc(mq.broker||''),'Connected'+(mq.tls?' · secured':''));
-  else { netWarn=true; setRow('mqtt','warn',esc(mq.broker||''),'Disconnected · '+esc(mq.error||'not connected')); }
+  else { setRow('mqtt','warn',esc(mq.broker||''),'Disconnected · '+esc(mq.error||'not connected')); }
 
   // Syslog — UDP diag-log forwarder. Delivery is gated on DNS only (resolved); reachability is an
   // advisory ping hint, so a resolved-but-not-answering host still shows the destination, flagged.
   var sy=s.syslog||{};
   if(!sy.configured) setRow('syslog','','<span class="ph">Not configured</span>','Disabled');
-  else if(sy.error){ netWarn=true; setRow('syslog','warn',esc(sy.host?(sy.host+':'+(sy.port||514)):''),'Error · '+esc(sy.error)); }
+  else if(sy.error){ setRow('syslog','warn',esc(sy.host?(sy.host+':'+(sy.port||514)):''),'Error · '+esc(sy.error)); }
   else if(sy.resolved){
-    if(!sy.reachable) netWarn=true;
     setRow('syslog',sy.reachable?'ok':'warn',esc(sy.host+':'+(sy.port||514)),sy.reachable?'Sending · UDP':'Not answering ping');
   }
-  else { netWarn=true; setRow('syslog','warn','Resolving…','Resolving'); }
+  else { setRow('syslog','warn','Resolving…','Resolving'); }
 
   // header + firmware pane
   renderIpLine();
   renderFwVer();
-  var fvt=$("fwVerText");
-  if(fvt) fvt.textContent=formatVerVerbatim(s.version) || '—';
 
   if(s.ota && typeof s.ota.channel === 'string'){
     var sChan = s.ota.channel === 'dev' ? 'dev' : 'release';
@@ -716,9 +696,6 @@ function render(s){
     setSub("keySub",'No key yet','');
   }
 
-  setBadge('badgeSetup', !configured || !!(s.reauth&&!paired));
-  setBadge('badgeNet', netWarn);
-  setBadge('badgeFw', !!otaAvail || otaBusy);
   if(typeof syncOtaUi === 'function') syncOtaUi();
 }
 function setSub(id,txt,cls){ var e=$(id); if(e){ e.className='rs'+(cls?' '+cls:''); e.textContent=txt; } }
@@ -1216,11 +1193,10 @@ function otaInline(html,cls,pct){
   var bar=$("otaBar"), fill=$("otaFill");
   if(bar&&bar.classList){ bar.classList.toggle('hide',pct==null); bar.classList.toggle('indet',pct==='indet'); }
   if(fill&&fill.style&&pct!=null&&pct!=='indet') fill.style.width=Math.max(0,Math.min(100,pct))+'%';
-  setBadge('badgeFw', !!otaAvail || otaBusy);
 }
 function otaInlineClear(delay){ clearTimeout(otaClearTimer); otaClearTimer=setTimeout(function(){ otaClearTimer=null; otaInline(''); }, delay||3000); }
 function otaBegin(phase,timeout){ clearTimeout(otaClearTimer); otaClearTimer=null; otaPhase=phase; otaDeadline=Date.now()+timeout; otaLastToastMilestone=null; renderVerLink(); }
-function otaReset(){ clearTimeout(otaTimer); clearTimeout(otaClearTimer); otaClearTimer=null; otaBusy=false; otaPhase=null; otaPollState=null; otaDeadline=0; otaExpectedVersion=null; otaLastToastMilestone=null; renderVerLink(); if(typeof syncOtaUi === 'function') syncOtaUi(); }
+function otaReset(){ clearTimeout(otaTimer); clearTimeout(otaClearTimer); otaClearTimer=null; otaBusy=false; otaPhase=null; otaPollState=null; otaDeadline=0; otaExpectedVersion=null; otaLastToastMilestone=null; renderVerLink(); if(typeof syncOtaUi === 'function') syncOtaUi(); fwRefocus(); }
 function otaFail(message){ otaReset(); if(typeof closeOtaModal === 'function') closeOtaModal(false); toast(message, 'err', 'ota'); otaInline('<span>'+esc(message)+'</span>','err'); otaInlineClear(6000); if(typeof syncOtaUi === 'function') syncOtaUi(); }
 function otaSchedule(fn,delay){
   if(!otaDeadline||Date.now()<otaDeadline){ otaTimer=setTimeout(fn,delay); return; }
@@ -1266,6 +1242,7 @@ function selectChannel(chan){
   closeChannelModal();
   if(chan !== 'release' && chan !== 'dev') return Promise.resolve();
   if(chan === getActiveChannel()) return Promise.resolve();
+  fwFocusId = 'verLink';
   return setChannel(chan);
 }
 
@@ -1277,30 +1254,17 @@ function renderChanMenu(){
   if(fs) fs.textContent = chanLabel + ' channel';
   var br = $("chanBadgeRelease"); if(br && br.classList) br.classList.toggle('hide', isDev);
   var bd = $("chanBadgeDev"); if(bd && bd.classList) bd.classList.toggle('hide', !isDev);
-  var or = $("chanOptRelease"); if(or && or.classList) or.classList.toggle('selected', !isDev);
-  var od = $("chanOptDev"); if(od && od.classList) od.classList.toggle('selected', isDev);
+  var or = $("chanOptRelease"); if(or){ if(or.classList) or.classList.toggle('selected', !isDev); or.setAttribute('aria-pressed', isDev ? 'false' : 'true'); }
+  var od = $("chanOptDev"); if(od){ if(od.classList) od.classList.toggle('selected', isDev); od.setAttribute('aria-pressed', isDev ? 'true' : 'false'); }
   var vl = $("verLink");
   if(vl){
     vl.title = 'Current: ' + chanLabel + ' — tap to change channel';
     vl.setAttribute('aria-label', 'Change update channel, current: ' + chanLabel);
   }
-  var sel = $("chanSelect");
-  if(sel && !otaChannelInFlight){
-    sel.value = chan;
-  }
   renderFwVer();
   renderIpLine();
   renderVerLink();
   if(typeof syncOtaUi === 'function') syncOtaUi();
-}
-
-function onChannelChange(chan){
-  if(isOtaBusy()){
-    var sel = $("chanSelect");
-    if(sel) sel.value = otaChannel || 'release';
-    return;
-  }
-  return setChannel(chan);
 }
 
 function setChannel(chan){
@@ -1314,28 +1278,33 @@ function setChannel(chan){
   otaChannelTarget = chan;
   otaChannelInFlight = true;
   otaChannelInitialSet = true;
-  var sel = $("chanSelect");
-  if(sel) sel.value = chan;
   renderChanMenu();
   if(typeof syncOtaUi === 'function') syncOtaUi();
 
-  return requestJson('/set_ota', {
+  return requestJsonResult('/set_ota', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ channel: chan })
-  }).then(function(){
+  }).then(function(res){
+    if(!res.ok){
+      var rj = res.json && res.json.response;
+      var err = new Error('HTTP ' + res.status);
+      err.reason = (rj && typeof rj.reason === 'string') ? rj.reason : '';
+      throw err;
+    }
     otaChannelInFlight = false;
     var label = (chan === 'dev' ? 'Development' : 'Release');
     toast('Update channel set to ' + label, 'ok', 'channel');
     renderChanMenu();
     return otaCheck();
-  }).catch(function(){
+  }).catch(function(err){
     otaChannelInFlight = false;
     otaChannelTarget = null;
     otaChannel = prevChan;
     renderChanMenu();
-    toast('Failed to set update channel', 'err', 'channel');
+    toast('Failed to set update channel' + ((err && err.reason) ? ' — ' + err.reason : ''), 'err', 'channel');
     if(typeof syncOtaUi === 'function') syncOtaUi();
+    fwRefocus();
   });
 }
 
@@ -1372,6 +1341,7 @@ function openFwUpdate(){
       }
     });
   }
+  fwFocusId = 'fwCheckBtn';
   return otaCheck();
 }
 
@@ -1627,11 +1597,6 @@ function waitReboot(expectedVer){
 function syncOtaUi(){
   var busy = isOtaBusy();
   var running = isOtaRunning();
-  var chanSel = $("chanSelect");
-  if(chanSel){
-    chanSel.disabled = busy;
-    if(chanSel.classList) chanSel.classList.toggle('disabled', busy);
-  }
   var verBtn = $("verLink");
   if(verBtn){
     verBtn.disabled = busy;
@@ -1674,6 +1639,18 @@ function syncOtaUi(){
     }
   }
 }
+// Disabling the control that started a check or channel change drops keyboard focus to <body>.
+// Called where a flow ends (otaReset, a refused channel change): with the UI idle and no dialog up,
+// put focus back where the user was.
+function fwRefocus(){
+  var id = fwFocusId;
+  if(!id || isOtaBusy() || isOpen('askModal') || isOpen('otaModal') || isOpen('chanModal')) return;
+  fwFocusId = null;
+  var ae = (typeof document !== 'undefined') ? document.activeElement : null;
+  var lost = !ae || ae === document.body || ae === document.documentElement || ae.disabled || ae.id === id;
+  var el = $(id);
+  if(lost && el && typeof el.focus === 'function') el.focus();
+}
 if(typeof window!=='undefined'){
   window.isOtaRunning = isOtaRunning;
   window.isOtaBusy = isOtaBusy;
@@ -1683,7 +1660,6 @@ if(typeof window!=='undefined'){
   window.closeChannelModal = closeChannelModal;
   window.selectChannel = selectChannel;
   window.setChannel = setChannel;
-  window.onChannelChange = onChannelChange;
   window.startOtaUpdate = startOtaUpdate;
   window.askValidate = askValidate;
   window.askOtaInstall = askOtaInstall;

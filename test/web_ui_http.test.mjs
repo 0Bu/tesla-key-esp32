@@ -5,8 +5,9 @@ import vm from "node:vm";
 
 const appSource = fs.readFileSync(new URL("../main/www/app.js", import.meta.url), "utf8");
 
-function loadUi() {
+function loadUi(opts = {}) {
   const elements = new Map();
+  const listeners = {};
   const element = (id) => {
     if (!elements.has(id)) {
       const classes = new Set();
@@ -23,7 +24,12 @@ function loadUi() {
         textContent: "",
         title: "",
         value: "",
-        disabled: false,
+        get disabled() { return this._disabled === true; },
+        set disabled(v) {
+          this._disabled = !!v;
+          // like a browser: a control that is disabled while it has focus drops focus to <body>
+          if (v && context.document && context.document.activeElement === this) context.document.activeElement = null;
+        },
         style: {},
         setAttribute(name, value) { this[name] = String(value); },
         appendChild(child) { this.children.push(child); child.parentNode = this; },
@@ -62,7 +68,9 @@ function loadUi() {
       activeElement: null,
       getElementById: element,
       querySelector() { return null; },
-      createElement() { return element(`created-${elements.size}`); }
+      createElement() { return element(`created-${elements.size}`); },
+      // opt-in: capture the page's own document-level click/keydown listeners so tests can fire them
+      ...(opts.listeners ? { addEventListener(name, fn) { (listeners[name] ||= []).push(fn); } } : {})
     },
     location: { reload() {} },
     fetch: async () => { throw new Error("fetch not stubbed"); },
@@ -77,7 +85,8 @@ function loadUi() {
   };
   vm.createContext(context);
   vm.runInContext(appSource, context, { filename: "main/www/app.js" });
-  return { context, element };
+  const fire = (name, event) => { for (const fn of listeners[name] || []) fn(event); };
+  return { context, element, fire };
 }
 
 test("requestJson rejects HTTP errors without parsing them as success", async () => {
@@ -339,14 +348,16 @@ test("firmware card exposes update channel modal and update check button", () =>
   assert.match(html, /id="verLink"[\s\S]*?id="fwVer"[\s\S]*?id="fwCheckBtn"/);
 });
 
-test("section tabs switch the visible pane and mark the current tab", () => {
-  const { context, element } = loadUi();
-  context.setTab("fw");
-  assert.equal(element("wrap")["data-tab"], "fw");
-  assert.equal(element("tabFw")["aria-current"], "page");
-  assert.equal(element("paneTitle").textContent, "Firmware");
-  context.setTab("bogus");
-  assert.equal(element("wrap")["data-tab"], "fw");
+test("retired dock/tab and <select> channel code stays out of the page", () => {
+  const css = fs.readFileSync(new URL("../main/www/style.css", import.meta.url), "utf8");
+  const html = fs.readFileSync(new URL("../main/www/index.html", import.meta.url), "utf8");
+  for (const token of ["setTab", "TAB_TITLE", "TAB_BTN", "uiTab", "fwVerText", "onChannelChange", "chanSelect", "setBadge", "netWarn"]) {
+    assert.equal(appSource.includes(token), false, `app.js must not contain ${token}`);
+  }
+  for (const token of ["data-tab", "wide-title", "paneTitle", "chan-select"]) {
+    assert.equal((html + css + appSource).includes(token), false, `page must not contain ${token}`);
+  }
+  assert.doesNotMatch(css, /\.cta\b|\.pane-settings\b|\.grab\b|\.fwhead\b|\.fwver\b/);
 });
 
 test("update channel modal updates channel selection with OTA check", async () => {
@@ -1023,8 +1034,8 @@ test("index.html defines SVG symbols, harmonizes setup rows, and drops dead butt
   assert.doesNotMatch(html, /id="vinBtnTx"/);
   assert.doesNotMatch(html, /id="keyBtnTx"/);
 
-  // Harmonized setup tab
-  assert.match(html, /<section class="pane pane-setup card rows"[^>]*aria-label="Setup"/);
+  // Harmonized settings card
+  assert.match(html, /<section class="pane pane-setup card rows"[^>]*aria-label="Device settings"/);
   assert.match(html, /<div class="row" id="rowVeh">[\s\S]*?id="vehVal"[\s\S]*?id="vinBtn"/);
   assert.match(html, /<div class="row" id="rowKey">[\s\S]*?id="keyVal"[\s\S]*?id="keyBtn"/);
 });
@@ -1470,7 +1481,7 @@ test("openFwUpdate closes modal on check failure", async () => {
 });
 
 
-test("UI disables settings and channel select during active OTA, closes open sheets on start, and prevents tampering", async () => {
+test("UI disables settings and firmware controls during active OTA, closes open sheets on start, and prevents tampering", async () => {
   const { context, element } = loadUi();
   const fetches = [];
   context.fetch = async (url, opts) => {
@@ -1544,7 +1555,6 @@ test("UI disables settings and channel select during active OTA, closes open she
   await context.openFwUpdate();
   await context.openChannelSelect();
   await context.selectChannel("dev");
-  await context.onChannelChange("dev");
   await context.setChannel("dev");
   await context.otaCheck();
   context.bannerAction();
@@ -1578,7 +1588,7 @@ test("firmware card displays version with accessible verLink button and channel 
   assert.equal(element("fwSub").textContent, "Release channel");
 });
 
-test("tapping version link checks for updates; shows toast and no modal when up to date, opens changelog modal only when update available", async () => {
+test("tapping the update check button shows a toast and no modal when up to date, and opens the changelog modal only when an update is available", async () => {
   const { context, element } = loadUi();
   const toasts = [];
   context.toast = (msg, type) => { toasts.push({ msg, type }); };
@@ -1814,30 +1824,23 @@ test("channel selection modal opens, reflects current channel, and allows switch
   assert.equal(element("chanModal").classList.contains("hide"), true, "modal closes after selection");
 });
 
-test("channel modal backdrop click and Escape key dismiss modal", () => {
-  const { context, element } = loadUi();
-  const listeners = {};
-  context.document.addEventListener = (name, fn) => { listeners[name] = fn; };
-  context.document.activeElement = null;
+test("channel modal is dismissed by the page's real backdrop-click and Escape handlers", () => {
+  const { context, element, fire } = loadUi({ listeners: true });
 
-  // Re-run listener wiring in context
-  if (context.wireModalFieldSelection) {
-    // Already wired during script load
-  }
-
-  // Open modal
   context.openChannelSelect();
   assert.equal(element("chanModal").classList.contains("hide"), false);
+  fire("click", { target: element("chanOptDev") });
+  assert.equal(element("chanModal").classList.contains("hide"), false, "a click inside the dialog is not a dismissal");
+  fire("click", { target: element("chanBackdrop") });
+  assert.equal(element("chanModal").classList.contains("hide"), true, "backdrop click closes the dialog");
+  assert.equal(context.document.activeElement, element("verLink"), "focus returns to the control that opened it");
 
-  // Close via backdrop click
-  context.closeChannelModal();
-  assert.equal(element("chanModal").classList.contains("hide"), true);
-
-  // Re-open and close
   context.openChannelSelect();
-  assert.equal(element("chanModal").classList.contains("hide"), false);
-  context.closeChannelModal();
-  assert.equal(element("chanModal").classList.contains("hide"), true);
+  fire("keydown", { key: "Enter" });
+  assert.equal(element("chanModal").classList.contains("hide"), false, "other keys leave it open");
+  fire("keydown", { key: "Escape" });
+  assert.equal(element("chanModal").classList.contains("hide"), true, "Escape closes the dialog");
+  assert.equal(element("wrap").inert, false, "page behind is live again");
 });
 
 test("channel modal has no cancel button and selecting active channel is a clean no-op", async () => {
@@ -1935,4 +1938,94 @@ test("atomic update check locks settings and prevents concurrent checks and othe
   context.openChannelSelect();
   assert.equal(element("chanModal").classList.contains("hide"), false, "chanModal can open now");
   context.closeChannelModal();
+});
+
+function otaFetchStub({ setOta, statusUpdate = false } = {}) {
+  return async (url) => {
+    if (url === "/set_ota") return setOta ? setOta() : { ok: true, status: 200, async json() { return { response: { result: true, command: "set_ota", vin: "", reason: "" } }; } };
+    if (url.startsWith("/ota/check")) return { ok: true, status: 200, async json() { return { started: true }; } };
+    if (url.startsWith("/ota/status")) return { ok: true, status: 200, async json() {
+      return { state: "idle", update_available: statusUpdate, progress: 0, message: "ok", available: "1.6.0", current: "1.6.0" };
+    } };
+    return { ok: true, status: 200, async json() { return {}; } };
+  };
+}
+
+test("focus returns to the control that started a channel change once the UI is idle again", async () => {
+  const { context, element } = loadUi();
+  context.toast = () => {};
+  context.render({ version: "1.6.0", ota: { channel: "release" } });
+  context.fetch = otaFetchStub();
+
+  context.openChannelSelect();
+  await context.selectChannel("dev");
+  assert.equal(context.isOtaBusy(), false);
+  assert.equal(context.document.activeElement, element("verLink"), "focus is not left on <body> after the check settles");
+  assert.equal(element("verLink").disabled, false);
+});
+
+test("focus returns to the update check button after an up-to-date result and after a failed check", async () => {
+  const { context, element } = loadUi();
+  context.toast = () => {};
+  context.render({ version: "1.6.0", ota: { channel: "release" } });
+
+  context.fetch = otaFetchStub();
+  element("fwCheckBtn").focus();
+  await context.openFwUpdate();
+  assert.equal(context.document.activeElement, element("fwCheckBtn"), "up to date");
+
+  context.fetch = async () => { throw new Error("offline"); };
+  await context.openFwUpdate();
+  assert.equal(context.document.activeElement, element("fwCheckBtn"), "failed check");
+});
+
+test("focus is not pulled back when the user has already moved on to another control", async () => {
+  const { context, element } = loadUi();
+  context.toast = () => {};
+  context.render({ version: "1.6.0", ota: { channel: "release" } });
+  context.fetch = otaFetchStub();
+  await context.selectChannel("dev");            // settles with focus restored to #verLink and fwFocusId consumed
+  element("mqttBtn").focus();
+  context.render({ version: "1.6.0", ota: { channel: "dev" } });   // periodic status frames call syncOtaUi()
+  assert.equal(context.document.activeElement, element("mqttBtn"));
+});
+
+test("a refused channel change rolls back and shows the device's reason", async () => {
+  const { context, element } = loadUi();
+  const toasts = [];
+  context.toast = (msg, type) => toasts.push({ msg, type });
+  context.render({ version: "1.6.0", ota: { channel: "release" } });
+
+  context.fetch = otaFetchStub({ setOta: () => ({
+    ok: false, status: 409,
+    async json() { return { response: { result: false, command: "set_ota", vin: "", reason: "an OTA update is in progress" } }; }
+  }) });
+  await context.selectChannel("dev");
+  assert.equal(context.otaChannel, "release", "optimistic switch is rolled back");
+  assert.equal(element("fwSub").textContent, "Release channel");
+  assert.equal(context.isOtaBusy(), false);
+  assert.ok(toasts.some(t => t.type === "err" && t.msg === "Failed to set update channel — an OTA update is in progress"));
+
+  toasts.length = 0;
+  context.fetch = otaFetchStub({ setOta: () => ({ ok: false, status: 502, async json() { throw new Error("not json"); } }) });
+  await context.selectChannel("dev");
+  assert.equal(context.otaChannel, "release");
+  assert.ok(toasts.some(t => t.type === "err" && t.msg === "Failed to set update channel"), "no reason available: generic text");
+});
+
+test("channel options expose their state via aria-pressed and hold no block elements inside buttons", () => {
+  const html = fs.readFileSync(new URL("../main/www/index.html", import.meta.url), "utf8");
+  assert.doesNotMatch(html, /<button[^>]*class="chan-opt"[^>]*>\s*<div/);
+  assert.match(html, /id="chanOptRelease" aria-pressed="true"/);
+  assert.match(html, /id="chanOptDev" aria-pressed="false"/);
+  assert.match(html, /id="chanModal"[^>]*aria-describedby="chanHelp"/);
+  assert.match(html, /id="chanHelp"/);
+
+  const { context, element } = loadUi();
+  context.render({ version: "1.6.0-dev-1", ota: { channel: "dev" } });
+  assert.equal(element("chanOptDev")["aria-pressed"], "true");
+  assert.equal(element("chanOptRelease")["aria-pressed"], "false");
+  context.render({ version: "1.6.0", ota: { channel: "release" } });
+  assert.equal(element("chanOptDev")["aria-pressed"], "false");
+  assert.equal(element("chanOptRelease")["aria-pressed"], "true");
 });

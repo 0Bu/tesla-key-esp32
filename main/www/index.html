@@ -26,13 +26,13 @@
   </defs>
 </svg>
 
-<div class="wrap" id="wrap" data-tab="car">
+<div class="wrap" id="wrap">
 
   <div class="col">
     <header class="top">
       <div class="brand">
         <span class="logo top-logo" aria-hidden="true"><svg viewBox="0 0 24 24"><use href="#ic-bolt"/></svg></span>
-        <div class="ttl"><h1><span id="paneTitle">tesla-key-esp32</span><span class="wide-title">tesla-key-esp32</span></h1><span class="host mono" id="ipline"></span></div>
+        <div class="ttl"><h1>tesla-key-esp32</h1><span class="host mono" id="ipline"></span></div>
       </div>
       <span class="otastat" id="otaStat" aria-hidden="true"></span>
     </header>
@@ -57,7 +57,7 @@
       </section>
 
       <!-- settings card: all settings in one compact card, one row each -->
-      <section class="pane pane-setup card rows" id="paneSettings" aria-label="Setup">
+      <section class="pane pane-setup card rows" id="paneSettings" aria-label="Device settings">
         <div class="row" id="rowVeh">
           <span class="ri"><svg viewBox="0 0 24 24"><use href="#ic-car"/></svg><span class="dot" id="vehDot"></span></span>
           <span class="rb"><span class="rl">Vehicle</span><span class="rv mono" id="vehVal">&mdash;</span><span class="rs" id="vehSub"></span></span>
@@ -126,24 +126,24 @@
   </div>
 </div>
 
-<div class="modal hide" id="chanModal" role="dialog" aria-modal="true" aria-labelledby="chanModalTitle">
+<div class="modal hide" id="chanModal" role="dialog" aria-modal="true" aria-labelledby="chanModalTitle" aria-describedby="chanHelp">
   <div class="modal-backdrop" id="chanBackdrop"></div>
   <div class="sheet modal-card" tabindex="-1">
     <h2 class="sheet-title" id="chanModalTitle">Update channel</h2>
-    <p class="note">Select the firmware update channel.</p>
+    <p class="note" id="chanHelp">Select the firmware update channel.</p>
     <div class="chan-options">
-      <button type="button" class="chan-opt" id="chanOptRelease" onclick="selectChannel('release')">
-        <div class="chan-opt-head">
+      <button type="button" class="chan-opt" id="chanOptRelease" aria-pressed="true" onclick="selectChannel('release')">
+        <span class="chan-opt-head">
           <span class="chan-opt-title">Release</span>
           <span class="chip-badge ok hide" id="chanBadgeRelease">Current</span>
-        </div>
+        </span>
         <span class="chan-opt-desc">Official stable releases. Recommended for normal use.</span>
       </button>
-      <button type="button" class="chan-opt" id="chanOptDev" onclick="selectChannel('dev')">
-        <div class="chan-opt-head">
+      <button type="button" class="chan-opt" id="chanOptDev" aria-pressed="false" onclick="selectChannel('dev')">
+        <span class="chan-opt-head">
           <span class="chan-opt-title">Development</span>
           <span class="chip-badge warn hide" id="chanBadgeDev">Current</span>
-        </div>
+        </span>
         <span class="chan-opt-desc">Bleeding edge builds with new features and testing changes.</span>
       </button>
     </div>
