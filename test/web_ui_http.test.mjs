@@ -18,6 +18,8 @@ function loadUi() {
         innerHTML: "",
         textContent: "",
         title: "",
+        value: "",
+        disabled: false,
         style: {},
         setAttribute(name, value) { this[name] = String(value); },
         appendChild(child) { this.children.push(child); child.parentNode = this; },
@@ -324,12 +326,12 @@ test("setup form enforces the shared WiFi credential contract without optimistic
   assert.doesNotMatch(html, /setTimeout\(function\(\)\{ \$\("form"\)\.classList\.add\('hide'\)/);
 });
 
-test("firmware pane exposes the update channel as an accessible radio group", () => {
+test("firmware card exposes the update channel as an accessible select dropdown", () => {
   const html = fs.readFileSync(new URL("../main/www/index.html", import.meta.url), "utf8");
-  assert.match(html, /role="radiogroup"[^>]+aria-label="Update channel"/);
-  assert.match(html, /id="optRelease"[^>]+role="radio"[^>]+aria-checked="true"/);
-  assert.match(html, /id="optDev"[^>]+role="radio"[^>]+aria-checked="false"/);
-  assert.match(html, /id="fwVer"[\s\S]*?id="verLink"[\s\S]*?id="optRelease"/);
+  assert.match(html, /<select class="chan-select" id="chanSelect" onchange="onChannelChange\(this\.value\)" aria-label="Update channel">/);
+  assert.match(html, /<option value="release">Release<\/option>/);
+  assert.match(html, /<option value="dev">Development<\/option>/);
+  assert.match(html, /id="verLink"[\s\S]*?id="fwVer"[\s\S]*?id="chanSelect"/);
 });
 
 test("section tabs switch the visible pane and mark the current tab", () => {
@@ -342,7 +344,7 @@ test("section tabs switch the visible pane and mark the current tab", () => {
   assert.equal(element("wrap")["data-tab"], "fw");
 });
 
-test("update channel control updates channel selection with OTA check", async () => {
+test("update channel dropdown updates channel selection with OTA check", async () => {
   const { context, element } = loadUi();
   const fetchCalls = [];
   context.fetch = async (url, opts) => {
@@ -366,28 +368,18 @@ test("update channel control updates channel selection with OTA check", async ()
     return { ok: true, status: 200, async json() { return {}; } };
   };
 
-  // Arrow keys move focus between the two options without selecting
-  context.document.activeElement = element("optRelease");
-  context.handleChanKey({ key: "ArrowRight", preventDefault() {} });
-  assert.equal(context.document.activeElement, element("optDev"));
-  context.handleChanKey({ key: "ArrowLeft", preventDefault() {} });
-  assert.equal(context.document.activeElement, element("optRelease"));
-  assert.equal(fetchCalls.length, 0, "focus movement alone never changes the channel");
+  // Re-selecting current channel (release) triggers an OTA check without redundant /set_ota
+  await context.onChannelChange("release");
+  assert.equal(fetchCalls.some(c => c.url === "/set_ota"), false, "no /set_ota call when re-selecting current channel");
+  assert.ok(fetchCalls.some(c => c.url.startsWith("/ota/check")), "otaCheck still runs on re-selection");
 
-  // Re-selecting current channel (release) is a no-op
-  const countBefore = fetchCalls.length;
-  await context.setChannel("release");
-  assert.equal(fetchCalls.length, countBefore, "no network calls when re-selecting current channel");
-
-  // Select dev channel
-  await context.setChannel("dev");
+  // Select dev channel via dropdown onchange
+  fetchCalls.length = 0;
+  await context.onChannelChange("dev");
   assert.equal(context.otaChannel, "dev");
-  assert.match(element("optDev").className, /sel/);
-  assert.equal(element("optDev")["aria-checked"], "true");
-  assert.doesNotMatch(element("optRelease").className, /sel/);
-  assert.equal(element("optRelease")["aria-checked"], "false");
+  assert.equal(element("chanSelect").value, "dev");
 
-  // Check that POST /set_ota and /ota/check?channel=dev were requested
+  // Check that POST /set_ota and /ota/check were requested
   const setOta = fetchCalls.find(c => c.url === "/set_ota");
   assert.ok(setOta, "POST /set_ota called");
   assert.equal(JSON.parse(setOta.opts.body).channel, "dev");
@@ -396,13 +388,12 @@ test("update channel control updates channel selection with OTA check", async ()
   assert.ok(otaCheck, "GET /ota/check called");
   assert.match(otaCheck.url, /\/ota\/check\?ms=\d+/);
 
-  // Switching to release
-  await context.setChannel("release");
+  // Switching back to release
+  fetchCalls.length = 0;
+  await context.onChannelChange("release");
   assert.equal(context.otaChannel, "release");
-  assert.match(element("optRelease").className, /sel/);
-  assert.equal(element("optRelease")["aria-checked"], "true");
-  assert.doesNotMatch(element("optDev").className, /sel/);
-  assert.equal(element("optDev")["aria-checked"], "false");
+  assert.equal(element("chanSelect").value, "release");
+  assert.ok(fetchCalls.some(c => c.url === "/set_ota" && JSON.parse(c.opts.body).channel === "release"));
 });
 
 test("render initializes channel state from running version or status ota channel", () => {
@@ -412,21 +403,19 @@ test("render initializes channel state from running version or status ota channe
   context.render({ version: "1.4.100" });
   assert.equal(context.otaChannel, "release");
   assert.equal(context.otaChannelInitialSet, true);
-  assert.equal(element("optRelease")["aria-checked"], "true");
-  assert.equal(element("optDev")["aria-checked"], "false");
+  assert.equal(element("chanSelect").value, "release");
 
   // New instance for dev version
   const uiDev = loadUi();
   uiDev.context.render({ version: "1.4.100-dev.5" });
   assert.equal(uiDev.context.otaChannel, "dev");
   assert.equal(uiDev.context.otaChannelInitialSet, true);
-  assert.equal(uiDev.element("optDev")["aria-checked"], "true");
-  assert.equal(uiDev.element("optRelease")["aria-checked"], "false");
+  assert.equal(uiDev.element("chanSelect").value, "dev");
 
   // Explicit s.ota.channel takes precedence
   uiDev.context.render({ version: "1.4.100-dev.5", ota: { channel: "release" } });
   assert.equal(uiDev.context.otaChannel, "release");
-  assert.equal(uiDev.element("optRelease")["aria-checked"], "true");
+  assert.equal(uiDev.element("chanSelect").value, "release");
 });
 
 test("hero card remains visible when vehicle link is unreachable or unknown", () => {
@@ -567,53 +556,6 @@ test("editVin, editMqtt, editSyslog render server reason on HTTP 4xx/5xx", async
   assert.equal(messages.at(-1).message, "invalid syslog port");
 });
 
-test("getTargetPr extracts PR number from search query or hash and validates bounds", () => {
-  const { context } = loadUi();
-  assert.equal(context.getTargetPr(), 0);
-
-  context.location.search = "?pr=326";
-  assert.equal(context.getTargetPr(), 326);
-
-  context.location.search = "?foo=bar&pr=42";
-  assert.equal(context.getTargetPr(), 42);
-
-  context.location.search = "?pr=0";
-  assert.equal(context.getTargetPr(), 0);
-
-  context.location.search = "?pr=-5";
-  assert.equal(context.getTargetPr(), 0);
-
-  context.location.search = "?pr=abc";
-  assert.equal(context.getTargetPr(), 0);
-
-  context.location.search = "";
-  context.location.hash = "#326";
-  assert.equal(context.getTargetPr(), 326);
-
-  context.location.hash = "#pr=123";
-  assert.equal(context.getTargetPr(), 123);
-
-  context.location.hash = "#invalid";
-  assert.equal(context.getTargetPr(), 0);
-});
-
-test("a device running a PR build still checks its own channel unless a PR is chosen", async () => {
-  const { context, element } = loadUi();
-  context.render({ ip: "192.0.2.100", version: "1.6.0-PR-337", key_present: false });
-
-  assert.equal(context.getTargetPr(), 0);
-  assert.notEqual(context.getActiveChannel(), "pr");
-  assert.equal(element("optPr").classList.contains("hide"), false, "PR Preview stays offered on a PR build");
-
-  let requestedUrl = null;
-  context.fetch = async (url) => {
-    if (String(url).includes("/ota/check")) requestedUrl = url;
-    return { ok: true, status: 200, async json() { return { started: true }; } };
-  };
-  context.otaCheckPoll = () => {};
-  await context.otaCheck();
-  assert.match(requestedUrl, /\/ota\/check\?ms=\d+$/, "unparameterized check reaches the next release");
-});
 
 test("broker and syslog validation mirror the firmware whitespace set and byte length", async () => {
   const { context, element } = loadUi();
@@ -635,34 +577,6 @@ test("broker and syslog validation mirror the firmware whitespace set and byte l
   assert.equal(await check(() => context.editSyslog(), "192.0.2.30"), "");
 });
 
-test("OTA check and render incorporate target PR when set", async () => {
-  const { context, element } = loadUi();
-  context.location.search = "?pr=326";
-
-  context.render({
-    ip: "192.0.2.100",
-    version: "1.5.4",
-    key_present: false
-  });
-
-  assert.equal(element("fwVer").textContent, "v1.5.4");
-  assert.equal(element("ipline").textContent, "192.0.2.100 · v1.5.4");
-  assert.equal(element("verLink").classList.contains("hide"), false);
-
-  let requestedUrl = null;
-  context.fetch = async (url) => {
-    if (String(url).includes("/ota/check")) requestedUrl = url;
-    return {
-      ok: true,
-      status: 200,
-      async json() { return { started: true }; }
-    };
-  };
-
-  context.otaCheckPoll = () => {};
-  await context.otaCheck();
-  assert.match(requestedUrl, /\/ota\/check\?ms=\d+&pr=326/);
-});
 
 test("loadOtaChangelog fetches /ota/changelog and returns text or empty string on 204", async () => {
   const { context } = loadUi();
@@ -868,114 +782,6 @@ test("VIN change decides on confirmation from the state current after input", as
   assert.equal(fetchCalled, true);
 });
 
-test("firmware pane replaces fwHost with changelog section", () => {
-  const html = fs.readFileSync(new URL("../main/www/index.html", import.meta.url), "utf8");
-  assert.doesNotMatch(html, /id="fwHost"/);
-  assert.match(html, /id="fwChangelog"/);
-  assert.match(html, /id="fwChanges"[^>]+hidden/);
-  assert.match(html, /id="fwNoChanges"[^>]+hidden/);
-  assert.match(html, /id="optRelease"[\s\S]*?id="optDev"[\s\S]*?id="fwChangelog"/);
-});
-
-test("renderInstalledChangelog populates fwChanges and toggles fwNoChanges", () => {
-  const { context, element } = loadUi();
-  const list = element("fwChanges");
-  const noChanges = element("fwNoChanges");
-
-  context.renderInstalledChangelog("• Improved BLE pairing\n• Web UI enhancements");
-  assert.equal(list.hidden, false);
-  assert.equal(noChanges.hidden, true);
-  assert.equal(list.children.length, 2);
-  assert.equal(list.children[0].textContent, "• Improved BLE pairing");
-  assert.equal(list.children[1].textContent, "• Web UI enhancements");
-
-  context.renderInstalledChangelog("");
-  assert.equal(list.hidden, true);
-  assert.equal(noChanges.hidden, false);
-  assert.equal(list.children.length, 0);
-});
-
-test("loadInstalledChangelog fetches remote changelog.json on release channel when matching version", async () => {
-  const { context, element } = loadUi();
-  let requestedUrl = null;
-  context.fetch = async (url) => {
-    requestedUrl = url;
-    if (url === "https://0bu.github.io/tesla-key-esp32/changelog.json") {
-      return {
-        ok: true,
-        status: 200,
-        async json() {
-          return { version: "1.6.0", changelog: "Release feature note" };
-        }
-      };
-    }
-    throw new Error("unexpected URL: " + url);
-  };
-
-  context.state = { version: "1.6.0" };
-  context.otaChannel = "release";
-  const text = await context.loadInstalledChangelog();
-  assert.equal(requestedUrl, "https://0bu.github.io/tesla-key-esp32/changelog.json");
-  assert.equal(text, "Release feature note");
-
-  await context.updateInstalledChangelog(true);
-  const list = element("fwChanges");
-  assert.equal(list.hidden, false);
-  assert.equal(list.children.length, 1);
-  assert.equal(list.children[0].textContent, "Release feature note");
-});
-
-test("loadInstalledChangelog filters dev entries by running version on dev channel", async () => {
-  const { context, element } = loadUi();
-  context.fetch = async (url) => {
-    if (url === "https://0bu.github.io/tesla-key-esp32/dev/changelog.json") {
-      return {
-        ok: true,
-        status: 200,
-        async json() {
-          return {
-            version: "1.5.9-dev.2",
-            changelog: "v1.5.9-dev.1 — Dev note 1\nv1.5.9-dev.2 — Dev note 2"
-          };
-        }
-      };
-    }
-    throw new Error("unexpected URL: " + url);
-  };
-
-  context.state = { version: "1.5.9-dev.1" };
-  context.otaChannel = "dev";
-  const text = await context.loadInstalledChangelog();
-  assert.equal(text, "Dev note 1");
-
-  await context.updateInstalledChangelog(true);
-  const list = element("fwChanges");
-  assert.equal(list.hidden, false);
-  assert.equal(list.children.length, 1);
-  assert.equal(list.children[0].textContent, "Dev note 1");
-});
-
-test("installed changelog shows only notes that exactly match the running version", async () => {
-  const { context } = loadUi();
-  const feed = {};
-  context.fetch = async (url) => ({ ok: true, status: 200, async json() { return feed[url]; } });
-
-  // Dev build absent from the dev feed: nothing, never the whole dev history
-  feed["https://0bu.github.io/tesla-key-esp32/dev/changelog.json"] = {
-    version: "1.5.9-dev.3", changelog: "v1.5.9-dev.2 — Dev note 2\nv1.5.9-dev.3 — Dev note 3"
-  };
-  context.state = { version: "1.5.9-dev.1" };
-  assert.equal(await context.loadInstalledChangelog(), "");
-
-  // Release feed for another version, or without a version: nothing
-  feed["https://0bu.github.io/tesla-key-esp32/changelog.json"] = { version: "1.6.1", changelog: "Newer note" };
-  context.state = { version: "1.6.0" };
-  assert.equal(await context.loadInstalledChangelog(), "");
-  feed["https://0bu.github.io/tesla-key-esp32/changelog.json"] = { changelog: "Unversioned note" };
-  assert.equal(await context.loadInstalledChangelog(), "");
-  feed["https://0bu.github.io/tesla-key-esp32/changelog.json"] = { version: "1.6.0", changelog: "Exact note" };
-  assert.equal(await context.loadInstalledChangelog(), "Exact note");
-});
 
 test("the sticky wake toast resolves from the poll path once the car reports data", async () => {
   const { context, element } = loadUi();
@@ -995,189 +801,6 @@ test("the sticky wake toast resolves from the poll path once the car reports dat
   assert.equal(element("toasts").children.length, 1);
 });
 
-test("getInstalledChangelogUrl targets directory matching running version", () => {
-  const { context } = loadUi();
-  context.state = { version: "1.4.0-PR-42" };
-  assert.equal(context.getInstalledChangelogUrl(), "https://0bu.github.io/tesla-key-esp32/PR/42/changelog.json");
-
-  context.state = { version: "1.5.0-dev.1" };
-  assert.equal(context.getInstalledChangelogUrl(), "https://0bu.github.io/tesla-key-esp32/dev/changelog.json");
-
-  context.state = { version: "1.6.0" };
-  assert.equal(context.getInstalledChangelogUrl(), "https://0bu.github.io/tesla-key-esp32/changelog.json");
-});
-
-test("loadInstalledChangelog does not fall back to /ota/changelog when remote fetch fails", async () => {
-  const { context, element } = loadUi();
-  context.fetch = async (url) => {
-    if (url === "https://0bu.github.io/tesla-key-esp32/changelog.json") {
-      throw new Error("offline");
-    }
-    if (url === "/ota/changelog") {
-      return {
-        ok: true,
-        status: 200,
-        async text() { return "Fallback local note"; }
-      };
-    }
-    throw new Error("unexpected URL: " + url);
-  };
-
-  context.state = { version: "1.6.0" };
-  const text = await context.loadInstalledChangelog();
-  assert.equal(text, "");
-
-  await context.updateInstalledChangelog(true);
-  const list = element("fwChanges");
-  assert.equal(list.hidden, true);
-  assert.equal(element("fwNoChanges").hidden, false);
-});
-
-test("updateInstalledChangelog avoids duplicate fetch when key is unchanged unless forced", async () => {
-  const { context } = loadUi();
-  let fetchCount = 0;
-  context.fetch = async () => {
-    fetchCount++;
-    return { ok: true, status: 200, async json() { return { version: "1.6.0", changelog: "Note" }; } };
-  };
-
-  context.state = { version: "1.6.0" };
-  context.otaChannel = "release";
-
-  await context.updateInstalledChangelog(false);
-  assert.equal(fetchCount, 1);
-
-  await context.updateInstalledChangelog(false);
-  assert.equal(fetchCount, 1, "did not fetch second time because key was unchanged");
-
-  await context.updateInstalledChangelog(true);
-  assert.equal(fetchCount, 2, "fetched when forced");
-});
-
-test("installed changelog is not refetched every poll: no-match is cached, failures back off", async () => {
-  const { context } = loadUi();
-  let fetchCount = 0;
-  let mode = "nomatch";
-  context.fetch = async () => {
-    fetchCount++;
-    if (mode === "offline") throw new TypeError("offline");
-    return { ok: true, status: 200, async json() { return { version: "1.6.1", changelog: "Other build" }; } };
-  };
-
-  // Read fine, but no notes for the running build: cached like a hit
-  context.state = { version: "1.6.0" };
-  assert.equal(await context.updateInstalledChangelog(false), "");
-  await context.updateInstalledChangelog(false);
-  assert.equal(fetchCount, 1);
-
-  // Unreadable feed: one attempt, then quiet until the retry window passes
-  mode = "offline";
-  context.state = { version: "1.6.2" };
-  await context.updateInstalledChangelog(false);
-  await context.updateInstalledChangelog(false);
-  await context.updateInstalledChangelog(false);
-  assert.equal(fetchCount, 2);
-  context.installedChangelogRetryAt = Date.now() - 1;
-  await context.updateInstalledChangelog(false);
-  assert.equal(fetchCount, 3);
-
-  // Concurrent render frames share one in-flight fetch
-  mode = "nomatch";
-  context.state = { version: "1.6.3" };
-  context.installedChangelogRetryAt = 0;
-  const a = context.updateInstalledChangelog(false);
-  const b = context.updateInstalledChangelog(false);
-  await Promise.all([a, b]);
-  assert.equal(fetchCount, 4);
-});
-
-test("render triggers updateInstalledChangelog and populates fwChanges", async () => {
-  const { context, element } = loadUi();
-  context.fetch = async (url) => {
-    return {
-      ok: true,
-      status: 200,
-      async json() {
-        return { version: "1.6.0", changelog: "Line A\nLine B" };
-      }
-    };
-  };
-
-  context.render({
-    version: "1.6.0",
-    ota: { channel: "release" }
-  });
-
-  await new Promise(resolve => setTimeout(resolve, 10));
-
-  const list = element("fwChanges");
-  assert.equal(list.hidden, false);
-  assert.equal(list.children.length, 2);
-  assert.equal(list.children[0].textContent, "Line A");
-  assert.equal(list.children[1].textContent, "Line B");
-  assert.equal(element("fwNoChanges").hidden, true);
-});
-
-test("loadInstalledChangelog handles 204 and network errors gracefully", async () => {
-  const { context, element } = loadUi();
-  context.fetch = async () => ({ ok: true, status: 204, async text() { return ""; } });
-
-  context.state = { version: "1.6.0" };
-  context.otaChannel = "release";
-  await context.updateInstalledChangelog(true);
-
-  const list = element("fwChanges");
-  const noChanges = element("fwNoChanges");
-  assert.equal(list.hidden, true);
-  assert.equal(noChanges.hidden, false);
-
-  // Network error path
-  context.fetch = async () => { throw new Error("network down"); };
-  await context.updateInstalledChangelog(true);
-  assert.equal(list.hidden, true);
-  assert.equal(noChanges.hidden, false);
-
-  // Proves F8: failure is not cached forever; once the retry window has passed the next render retries
-  context.fetch = async () => ({
-    ok: true,
-    status: 200,
-    async json() { return { version: "1.6.0", changelog: "Recovered changelog note" }; }
-  });
-  await context.updateInstalledChangelog(false);
-  assert.equal(list.hidden, true, "no immediate refetch inside the retry window");
-  context.installedChangelogRetryAt = Date.now() - 1;
-  await context.updateInstalledChangelog(false);
-  assert.equal(list.hidden, false);
-  assert.equal(list.children.length, 1);
-  assert.equal(list.children[0].textContent, "Recovered changelog note");
-});
-
-test("setChannel preserves installed changelog and does not reload on channel change", async () => {
-  const { context, element } = loadUi();
-  let changelogFetchCount = 0;
-  context.fetch = async (url) => {
-    if (url.includes("changelog.json")) {
-      changelogFetchCount++;
-      return { ok: true, status: 200, async json() { return { version: "1.6.0", changelog: "Installed note" }; } };
-    }
-    if (url === "/set_ota") {
-      return { ok: true, status: 200, async json() { return { result: true }; } };
-    }
-    return { ok: true, status: 200, async json() { return {}; } };
-  };
-  context.otaCheck = () => Promise.resolve();
-
-  context.state = { version: "1.6.0" };
-  await context.updateInstalledChangelog(true);
-  assert.equal(changelogFetchCount, 1);
-
-  await context.setChannel("dev");
-  assert.equal(context.otaChannel, "dev");
-  assert.equal(changelogFetchCount, 1, "did not refetch changelog on channel change to dev");
-
-  await context.setChannel("pr");
-  assert.equal(changelogFetchCount, 1, "did not refetch changelog on channel change to pr");
-});
 
 test("toast enforces single popup policy, load spinner icon, in-place transition, and cleans up timers and keys", () => {
   const { context, element } = loadUi();
@@ -1397,7 +1020,7 @@ test("index.html defines SVG symbols, harmonizes setup rows, and drops dead butt
   assert.doesNotMatch(html, /id="keyBtnTx"/);
 
   // Harmonized setup tab
-  assert.match(html, /<section class="pane pane-setup card rows" aria-label="Setup">/);
+  assert.match(html, /<section class="pane pane-setup card rows"[^>]*aria-label="Setup"/);
   assert.match(html, /<div class="row" id="rowVeh">[\s\S]*?id="vehVal"[\s\S]*?id="vinBtn"/);
   assert.match(html, /<div class="row" id="rowKey">[\s\S]*?id="keyVal"[\s\S]*?id="keyBtn"/);
 });
@@ -1498,7 +1121,7 @@ test("firmware version formatting and header ipline display", () => {
   assert.equal(element("fwVer").textContent, "v1.6.0");
 });
 
-test("PR preview FW is only offered when matching PRs exist, and inline list installs PR FW", async () => {
+test("channel dropdown onchange triggers /set_ota and otaCheck, immediately reflected in UI", async () => {
   const { context, element } = loadUi();
   const fetchCalls = [];
   context.fetch = async (url, opts) => {
@@ -1511,264 +1134,59 @@ test("PR preview FW is only offered when matching PRs exist, and inline list ins
       async json() {
         return {
           state: "idle",
-          update_available: context.activePr === 337,
+          update_available: false,
           progress: 0,
-          message: context.activePr === 337 ? "update available" : "up to date",
-          available: context.activePr === 337 ? "1.6.0-PR-337" : "1.6.0",
+          message: "up to date",
+          available: "1.6.0",
           current: "1.6.0"
         };
       }
     };
-    if (url === "https://0bu.github.io/tesla-key-esp32/PR/337/manifest.json") return { ok: true, status: 200, async json() { return { version: "1.6.0-PR-337" }; } };
-    if (url === "https://0bu.github.io/tesla-key-esp32/PR/337/changelog.json") return { ok: true, status: 200, async text() { return "PR 337 changes"; } };
-    if (url.startsWith("/ota/update")) return { ok: true, status: 200, async json() { return { result: true }; } };
     return { ok: true, status: 200, async json() { return {}; } };
   };
 
-  // Initially, no PRs in prList and running release firmware: PR Preview is NOT offered
-  context.prList = [];
-  context.renderChanMenu();
-  assert.equal(element("optPr").classList.contains("hide"), true, "optPr is hidden when no PRs exist");
-  assert.equal(element("prListWrap").classList.contains("hide"), true);
+  // Initially on release channel
+  context.render({ version: "1.6.0", ota: { channel: "release" } });
+  assert.equal(element("chanSelect").value, "release");
+  assert.equal(context.getActiveChannel(), "release");
 
-  // Keyboard navigation only cycles through visible options (Release <-> Development)
-  context.document.activeElement = element("optRelease");
-  context.handleChanKey({ key: "ArrowRight", preventDefault() {} });
-  assert.equal(context.document.activeElement, element("optDev"));
-  context.handleChanKey({ key: "ArrowRight", preventDefault() {} });
-  assert.equal(context.document.activeElement, element("optRelease"), "ArrowRight skips hidden optPr");
+  // User changes dropdown to Development
+  await context.onChannelChange("dev");
+  assert.equal(context.getActiveChannel(), "dev");
+  assert.equal(element("chanSelect").value, "dev");
 
-  // When matching PRs with preview builds exist, optPr is offered
-  context.prList = [
-    { number: 337, title: "Feature PR 337", ready: true }
-  ];
-  context.renderChanMenu();
-  assert.equal(element("optPr").classList.contains("hide"), false, "optPr is visible when matching PR exists");
+  const setOtaCall = fetchCalls.find(c => c.url === "/set_ota");
+  assert.ok(setOtaCall, "POST /set_ota was called");
+  assert.equal(JSON.parse(setOtaCall.opts.body).channel, "dev");
 
-  // Keyboard navigation now cycles through all 3 options
-  context.document.activeElement = element("optDev");
-  context.handleChanKey({ key: "ArrowRight", preventDefault() {} });
-  assert.equal(context.document.activeElement, element("optPr"));
-  context.handleChanKey({ key: "ArrowRight", preventDefault() {} });
-  assert.equal(context.document.activeElement, element("optRelease"));
+  const otaCheckCall = fetchCalls.find(c => c.url.startsWith("/ota/check"));
+  assert.ok(otaCheckCall, "otaCheck was called on channel change");
 
-  // Selecting PR Preview channel reveals inline list and keeps verLink visible
-  await context.setChannel("pr");
-  assert.equal(context.getActiveChannel(), "pr");
-  assert.equal(element("optPr")["aria-checked"], "true");
-  assert.match(element("optPr").className, /sel/);
-  assert.equal(element("prListWrap").classList.contains("hide"), false);
-  assert.equal(element("verLink").classList.contains("hide"), false, "verLink is visible in PR mode");
-
-  // PR rows rendered with install button
-  const rows = element("prRows").children;
-  assert.equal(rows.length, 1);
-  const row = rows[0];
-  assert.equal(row.children[0].textContent, "#337");
-  assert.equal(row.children[1].textContent, "Feature PR 337");
-  const installBtn = row.children[2];
-  assert.equal(installBtn.textContent, "Install");
-  assert.equal(!installBtn.disabled, true);
-
-  // Modal dialog #prModal is completely absent from DOM
-  const indexHtml = fs.readFileSync(new URL("../main/www/index.html", import.meta.url), "utf8");
-  assert.equal(indexHtml.includes('id="prModal"'), false, "prModal dialog has been removed from index.html");
-
-  // Clicking Install triggers askOtaInstall modal
-  context.state = { version: "1.6.0" };
-  let installPromise = context.installPr(337);
-  // Wait microtask
-  await new Promise(r => setTimeout(r, 10));
-  assert.equal(element("otaModal").classList.contains("hide"), false);
-  assert.match(element("otaModalTitle").textContent, /PR #337/);
-  assert.equal(element("otaVersionLine").textContent, "v1.6.0 → v1.6.0-PR-337");
-
-  // Confirming OTA install kicks off POST /ota/update?pr=337 and waitReboot
-  let rebootArgs = null;
-  context.waitReboot = (expected) => { rebootArgs = { expected }; };
-  context.closeOtaModal(true);
-  await installPromise;
-  const otaUpdateCall = fetchCalls.find(c => c.url.includes("/ota/update?pr=337"));
-  assert.ok(otaUpdateCall, "POST /ota/update?pr=337 was called");
-  assert.equal(context.otaExpectedVersion, "1.6.0-PR-337");
-  assert.deepEqual(rebootArgs, { expected: "1.6.0-PR-337" });
-
-  // Switching back to release clears activePr, hides prListWrap, restores verLink, and POSTs /set_ota
+  // Switching back to release
   fetchCalls.length = 0;
-  await context.setChannel("release");
-  assert.equal(context.activePr, 0);
+  await context.onChannelChange("release");
   assert.equal(context.getActiveChannel(), "release");
-  assert.equal(element("optRelease")["aria-checked"], "true");
-  assert.equal(element("prListWrap").classList.contains("hide"), true);
-  assert.equal(element("verLink").classList.contains("hide"), false);
-  const setOtaRelease = fetchCalls.find(c => c.url === "/set_ota");
-  assert.ok(setOtaRelease, "POST /set_ota requested on channel switch");
+  assert.equal(element("chanSelect").value, "release");
+  assert.ok(fetchCalls.some(c => c.url === "/set_ota" && JSON.parse(c.opts.body).channel === "release"));
 });
 
-test("state preservation across periodic /status polls in PR preview mode", async () => {
-  const { context, element } = loadUi();
-  context.prList = [{ number: 337, title: "PR 337", ready: true }];
-  context.activePr = 337;
-
-  // Simulate periodic status poll reporting release channel from device
-  context.render({
-    ip: "192.0.2.1",
-    version: "1.6.0",
-    ota: { channel: "release" },
-    key_present: true
-  });
-
-  // PR preview channel state remains decoupled and preserved
-  assert.equal(context.getActiveChannel(), "pr");
-  assert.equal(element("optPr")["aria-checked"], "true");
-  assert.match(element("optPr").className, /sel/);
-  assert.equal(element("optRelease")["aria-checked"], "false");
-  assert.equal(element("fwVer").textContent, "v1.6.0");
-  assert.equal(element("ipline").textContent, "192.0.2.1 · v1.6.0");
-
-  // Now simulate page loaded with query param ?pr=42, user switching to release, and subsequent status poll
-  context.location.search = "?pr=42";
-  context.fetch = async () => ({ ok: true, status: 200, async json() { return { ok: true }; } });
-  await context.setChannel("release");
-  assert.equal(context.activePr, 0);
-  assert.equal(context.getActiveChannel(), "release");
-
-  // Subsequent background poll must NOT resurrect activePr=42 from location.search
-  context.render({
-    ip: "192.0.2.1",
-    version: "1.6.0",
-    ota: { channel: "release" },
-    key_present: true
-  });
-  assert.equal(context.activePr, 0);
-  assert.equal(context.getActiveChannel(), "release");
-  assert.equal(element("optRelease")["aria-checked"], "true");
-  assert.equal(element("optPr")["aria-checked"], "false");
-});
-
-test("adaptive action button #verLink and #fwBadge display based on otaAvail and activePr", () => {
+test("adaptive action button #verLink displays title and aria-label based on otaAvail", () => {
   const { context, element } = loadUi();
   const vl = element("verLink");
-  const tx = element("verLinkText");
-  const fb = element("fwBadge");
 
-  // Idle state without PR
+  // Idle state without update
   context.otaAvail = null;
-  context.activePr = 0;
   context.renderVerLink();
-  assert.equal(tx.textContent, "Check for updates");
-  assert.equal(fb.textContent, "Up to date");
+  assert.equal(vl.title, "Tap to check for updates");
+  assert.equal(vl["aria-label"], "Check for firmware updates");
   assert.doesNotMatch(vl.className, /avail/);
 
-  // Idle state with PR 337
-  context.activePr = 337;
-  context.renderVerLink();
-  assert.equal(tx.textContent, "Check PR Updates");
-  assert.equal(fb.textContent, "Up to date");
-  assert.doesNotMatch(vl.className, /avail/);
-
-  // Checking phase
-  context.otaBusy = true;
-  context.renderVerLink();
-  assert.equal(fb.textContent, "Checking…");
-  assert.equal(fb.className, "fw-badge busy");
-
-  // Update available without PR
-  context.otaBusy = false;
-  context.activePr = 0;
+  // Update available
   context.otaAvail = "1.7.0";
   context.renderVerLink();
-  assert.equal(tx.textContent, "Install v1.7.0");
+  assert.equal(vl.title, "Update 1.7.0 available — tap to install");
+  assert.equal(vl["aria-label"], "Install firmware update 1.7.0");
   assert.match(vl.className, /avail/);
-  assert.equal(fb.textContent, "Update available");
-  assert.equal(fb.className, "fw-badge avail");
-
-  // Update available with PR 337
-  context.activePr = 337;
-  context.renderVerLink();
-  assert.equal(tx.textContent, "Install PR #337");
-  assert.match(vl.className, /avail/);
-  assert.equal(fb.textContent, "Update available");
-
-  // Live lifecycle transitions update badge directly without manual renderVerLink
-  context.otaAvail = null;
-  context.otaBegin("check", 10000);
-  assert.equal(fb.textContent, "Checking…");
-  assert.equal(fb.className, "fw-badge busy");
-
-  context.otaBegin("update", 10000);
-  assert.equal(fb.textContent, "Updating…");
-  assert.equal(fb.className, "fw-badge busy");
-
-  context.otaReset();
-  assert.equal(fb.textContent, "Up to date");
-  assert.equal(fb.className, "fw-badge ok");
-});
-
-test("PR discovery loads from GitHub API, caches in sessionStorage, and probes readiness", async () => {
-  const { context, element } = loadUi();
-  const storage = new Map();
-  context.sessionStorage = {
-    getItem(k) { return storage.get(k) ?? null; },
-    setItem(k, v) { storage.set(k, String(v)); },
-    removeItem(k) { storage.delete(k); },
-    clear() { storage.clear(); }
-  };
-
-  const requested = [];
-  context.fetch = async (url, opts) => {
-    requested.push(url);
-    let origin = "";
-    try { origin = new URL(url).origin; } catch {}
-    if (origin === "https://api.github.com") {
-      return {
-        ok: true,
-        status: 200,
-        async json() {
-          return [
-            { number: 101, title: "Feature A", updated_at: "2026-09-20T10:00:00Z", user: { login: "dev1" } },
-            { number: 102, title: "Feature B", updated_at: "2026-09-21T10:00:00Z", user: { login: "dev2" } }
-          ];
-        }
-      };
-    }
-    if (url === "https://0bu.github.io/tesla-key-esp32/PR/101/manifest.json") {
-      return { ok: true, status: 200 };
-    }
-    if (url === "https://0bu.github.io/tesla-key-esp32/PR/102/manifest.json") {
-      return { ok: false, status: 404 };
-    }
-    return { ok: false, status: 500 };
-  };
-
-  const list = await context.loadPrList(true);
-  // Only PR 101 with ready preview build is offered; PR 102 (no build) is filtered out
-  assert.equal(list.length, 1);
-  assert.equal(list[0].number, 101);
-  assert.equal(list[0].ready, true);
-
-  // Cached in sessionStorage
-  assert.ok(storage.has("tk_pr_cache"));
-  // One API request plus one HEAD per listed PR; no request for an index CI never publishes
-  assert.equal(requested.length, 3);
-  assert.equal(requested.some((u) => u.endsWith("/PR/index.json")), false);
-
-  // A plain 403 (forbidden, not a quota) is an error, not the rate-limit banner
-  const headers = (remaining) => ({ get(k) { return k.toLowerCase() === "x-ratelimit-remaining" ? remaining : null; } });
-  context.fetch = async () => ({ ok: false, status: 403, headers: headers("12") });
-  await context.loadPrList(true);
-  assert.equal(element("prRateLimitBanner").classList.contains("hide"), true);
-
-  // Primary rate limit: 403 with an exhausted quota
-  context.fetch = async () => ({ ok: false, status: 403, headers: headers("0") });
-  await context.loadPrList(true);
-  assert.equal(element("prRateLimitBanner").classList.contains("hide"), false);
-
-  // Secondary rate limit: 429
-  element("prRateLimitBanner").classList.add("hide");
-  context.fetch = async () => ({ ok: false, status: 429, headers: headers(null) });
-  await context.loadPrList(true);
-  assert.equal(element("prRateLimitBanner").classList.contains("hide"), false);
 });
 
 test("channel switching is responsive and immune to intermediate polling race conditions", async () => {
@@ -1776,10 +1194,9 @@ test("channel switching is responsive and immune to intermediate polling race co
   // Device starts on dev channel
   context.render({ version: "1.6.0-dev-1", ota: { channel: "dev" } });
   assert.equal(context.otaChannel, "dev");
-  assert.equal(element("optDev")["aria-checked"], "true");
-  assert.equal(element("optRelease")["aria-checked"], "false");
+  assert.equal(element("chanSelect").value, "dev");
 
-  // User taps Release: setChannel initiated
+  // User selects Release via dropdown: setChannel initiated
   let resolvePost;
   context.fetch = async (url) => {
     if (url === "/set_ota") {
@@ -1796,21 +1213,19 @@ test("channel switching is responsive and immune to intermediate polling race co
     return { ok: true, status: 200, async json() { return {}; } };
   };
 
-  const channelPromise = context.setChannel("release");
+  const channelPromise = context.onChannelChange("release");
 
   // Immediately, UI reflects release
   assert.equal(context.otaChannel, "release");
   assert.equal(context.otaChannelInFlight, true);
-  assert.equal(element("optRelease")["aria-checked"], "true");
-  assert.equal(element("optDev")["aria-checked"], "false");
+  assert.equal(element("chanSelect").value, "release");
 
   // Concurrent /status poll arrives from device still reporting dev
   context.render({ version: "1.6.0-dev-1", ota: { channel: "dev" } });
 
   // UI MUST NOT revert back to dev
   assert.equal(context.otaChannel, "release");
-  assert.equal(element("optRelease")["aria-checked"], "true");
-  assert.equal(element("optDev")["aria-checked"], "false");
+  assert.equal(element("chanSelect").value, "release");
 
   // POST /set_ota finishes
   resolvePost();
@@ -1823,7 +1238,7 @@ test("channel switching is responsive and immune to intermediate polling race co
   context.render({ version: "1.6.0-dev-1", ota: { channel: "release" } });
   assert.equal(context.otaChannel, "release");
   assert.equal(context.otaChannelTarget, null);
-  assert.equal(element("optRelease")["aria-checked"], "true");
+  assert.equal(element("chanSelect").value, "release");
 });
 
 test("askModal live validation enforces valid input, shows errors, and blocks save", async () => {
@@ -1924,4 +1339,419 @@ test("askModal live validation enforces valid input, shows errors, and blocks sa
 
   context.askClose(null);
   await syslogPromise;
+});
+
+
+test("hero action is triggered by tapping the gauge button directly", () => {
+  const { context, element } = loadUi();
+  let wakeTriggered = false;
+  context.wakeCar = () => { wakeTriggered = true; };
+
+  const state = {
+    paired: true,
+    vin: "5YJ3E1EA1JF000001",
+    key_present: true,
+    link: "asleep",
+    last_seen: { soc: 80 }
+  };
+  context.render(state);
+
+  assert.match(element("hlabel").innerHTML, /Vehicle asleep/);
+  assert.equal(element("hsub").textContent, "Tap the icon to wake the car.");
+
+  const hicon = element("hicon");
+  assert.match(hicon.innerHTML, /class="gbtn"/);
+  assert.match(hicon.innerHTML, /onclick="heroTap\(\)"/);
+
+  context.heroTap();
+  assert.equal(wakeTriggered, true, "tapping the gauge executed wakeCar");
+});
+
+test("openFwUpdate checks for updates, closes modal and toasts if up to date", async () => {
+  const { context, element } = loadUi();
+  element("otaModal").classList.add("hide");
+
+  const toasts = [];
+  context.toast = (msg, type) => { toasts.push({ msg, type }); };
+
+  context.fetch = async (url) => {
+    if (url.startsWith("/ota/check")) {
+      return { ok: true, status: 200, async json() { return { started: true }; } };
+    }
+    if (url.startsWith("/ota/status")) {
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return {
+            state: "idle",
+            update_available: false,
+            progress: 0,
+            message: "up to date",
+            available: "1.4.0",
+            current: "1.4.0"
+          };
+        }
+      };
+    }
+    return { ok: true, status: 200, async json() { return {}; } };
+  };
+
+  const promise = context.openFwUpdate();
+  await promise;
+
+  // After check finds up to date, modal is closed and toast is shown
+  assert.equal(element("otaModal").classList.contains("hide"), true);
+  assert.equal(toasts.length > 0, true);
+  assert.ok(toasts.some(t => /up to date/.test(t.msg)), "toast matches up to date");
+});
+
+test("openFwUpdate with update available allows installing through startOtaUpdate", async () => {
+  const { context, element } = loadUi();
+  element("otaModal").classList.add("hide");
+
+  const postCalls = [];
+  context.fetch = async (url, opts) => {
+    if (opts && opts.method === "POST") postCalls.push(url);
+    if (url.startsWith("/ota/changelog")) {
+      return { ok: true, status: 200, async text() { return "- Fix things"; } };
+    }
+    if (url.startsWith("/ota/status")) {
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return {
+            state: "idle",
+            update_available: true,
+            progress: 0,
+            message: "update available",
+            available: "1.5.0",
+            current: "1.4.0"
+          };
+        }
+      };
+    }
+    if (url.startsWith("/ota/update")) {
+      return { ok: true, status: 200, async json() { return { result: true }; } };
+    }
+    return { ok: true, status: 200, async json() { return {}; } };
+  };
+
+  context.state = { version: "1.4.0" };
+  context.otaAvail = "1.5.0";
+
+  // Simulate user confirming install: closeOtaModal(true)
+  setTimeout(() => {
+    context.closeOtaModal(true);
+  }, 10);
+
+  await context.openFwUpdate();
+  assert.ok(postCalls.some(u => u.startsWith("/ota/update")), "POST /ota/update called");
+});
+
+test("openFwUpdate closes modal on check failure", async () => {
+  const { context, element } = loadUi();
+  element("otaModal").classList.add("hide");
+
+  context.fetch = async () => ({
+    ok: false,
+    status: 500,
+    async json() { return { reason: "server error" }; }
+  });
+
+  await context.openFwUpdate();
+  assert.equal(element("otaModal").classList.contains("hide"), true, "modal is closed on failure");
+  assert.equal(context.otaBusy, false);
+});
+
+
+test("UI disables settings and channel select during active OTA, closes open sheets on start, and prevents tampering", async () => {
+  const { context, element } = loadUi();
+  const fetches = [];
+  context.fetch = async (url, opts) => {
+    fetches.push({ url, opts });
+    if (url.includes("/ota/status")) {
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return {
+            state: "downloading",
+            update_available: false,
+            progress: 42,
+            message: "downloading firmware…",
+            available: "1.6.0",
+            current: "1.6.0",
+            channel: "release"
+          };
+        }
+      };
+    }
+    if (url.includes("/ota/update")) {
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return { result: true, reason: "update started" };
+        }
+      };
+    }
+    return { ok: true, status: 200, async json() { return {}; } };
+  };
+
+  context.render({ version: "1.6.0" });
+  assert.equal(context.isOtaRunning(), false);
+  assert.equal(element("chanSelect").disabled, false);
+  assert.equal(element("verLink").disabled, false);
+  assert.equal(element("paneSettings").classList.contains("ota-busy"), false);
+
+  // Trigger OTA update
+  await context.startOtaUpdate("1.6.0");
+
+  // Upon starting update:
+  // 1. Modals/sheets are closed
+  assert.equal(element("otaModal").classList.contains("hide"), true);
+  assert.equal(element("askModal").classList.contains("hide"), true);
+
+  // 2. isOtaRunning() is true
+  assert.equal(context.isOtaRunning(), true);
+
+  // 3. Channel select is disabled
+  assert.equal(element("chanSelect").disabled, true);
+
+  // 4. Version link is disabled
+  assert.equal(element("verLink").disabled, true);
+  assert.equal(element("verLink").classList.contains("disabled"), true);
+
+  // 5. Pane settings is marked ota-busy, modal actions and setting buttons disabled
+  assert.equal(element("paneSettings").classList.contains("ota-busy"), true);
+  assert.equal(element("otaInstall").disabled, true);
+  assert.equal(element("vinBtn").disabled, true);
+  assert.equal(element("keyBtn").disabled, true);
+  assert.equal(element("mqttBtn").disabled, true);
+  assert.equal(element("syslogBtn").disabled, true);
+
+  // 6. Attempting to click settings, manipulate channels, or open modals does nothing
+  fetches.length = 0;
+  await context.editVin();
+  await context.genKey();
+  await context.editMqtt();
+  await context.editSyslog();
+  await context.openFwUpdate();
+  await context.onChannelChange("dev");
+  await context.setChannel("dev");
+  await context.otaCheck();
+  context.bannerAction();
+  assert.equal(fetches.length, 0, "no network calls made while OTA is running");
+  assert.equal(element("otaModal").classList.contains("hide"), true);
+  assert.equal(element("askModal").classList.contains("hide"), true);
+
+  // 7. When OTA resets/finishes, UI returns to normal
+  context.otaReset();
+  assert.equal(context.isOtaRunning(), false);
+  assert.equal(element("chanSelect").disabled, false);
+  assert.equal(element("verLink").disabled, false);
+  assert.equal(element("paneSettings").classList.contains("ota-busy"), false);
+  assert.equal(element("vinBtn").disabled, false);
+  assert.equal(element("keyBtn").disabled, false);
+  assert.equal(element("mqttBtn").disabled, false);
+  assert.equal(element("syslogBtn").disabled, false);
+});
+
+test("firmware card displays version with accessible verLink button and channel select dropdown", () => {
+  const html = fs.readFileSync(new URL("../main/www/index.html", import.meta.url), "utf8");
+  assert.match(html, /<div class="row row-fw" id="rowFw">[\s\S]*?id="verLink"[\s\S]*?id="chanSelect"/);
+  assert.doesNotMatch(html, /id="chanBtn"/);
+  assert.doesNotMatch(html, /id="fwSub"/);
+  assert.match(html, /<button type="button" class="ver-btn" id="verLink" onclick="openFwUpdate\(\)"/);
+
+  const { context, element } = loadUi();
+  context.render({ version: "1.4.0", ota: { channel: "release" } });
+  assert.equal(element("fwVer").textContent, "v1.4.0");
+  assert.equal(element("chanSelect").value, "release");
+});
+
+test("tapping version link checks for updates; shows toast and no modal when up to date, opens changelog modal only when update available", async () => {
+  const { context, element } = loadUi();
+  const toasts = [];
+  context.toast = (msg, type) => { toasts.push({ msg, type }); };
+  context.state = { version: "1.4.0" };
+  element("otaModal").classList.add("hide");
+
+  let statusResponse = {
+    state: "idle",
+    update_available: false,
+    progress: 0,
+    message: "up to date",
+    available: "1.4.0",
+    current: "1.4.0"
+  };
+
+  context.fetch = async (url) => {
+    if (url.startsWith("/ota/check")) {
+      return { ok: true, status: 200, async json() { return { started: true }; } };
+    }
+    if (url.startsWith("/ota/status")) {
+      return { ok: true, status: 200, async json() { return statusResponse; } };
+    }
+    if (url.startsWith("/ota/changelog")) {
+      return { ok: true, status: 200, async text() { return "• Performance improvements\n• BLE fixes"; } };
+    }
+    return { ok: true, status: 200, async json() { return {}; } };
+  };
+
+  // Case 1: Tapping version link when firmware is up to date
+  await context.openFwUpdate();
+  assert.equal(element("otaModal").classList.contains("hide"), true, "otaModal must remain closed when up to date");
+  assert.ok(toasts.some(t => /Checking for updates/.test(t.msg)), "showed checking toast");
+  assert.ok(toasts.some(t => /Firmware is up to date/.test(t.msg)), "showed up to date toast");
+  assert.equal(context.otaAvail, null);
+
+  // Case 2: Tapping version link when a new version is available
+  toasts.length = 0;
+  statusResponse = {
+    state: "idle",
+    update_available: true,
+    progress: 0,
+    message: "update available",
+    available: "1.5.0",
+    current: "1.4.0"
+  };
+
+  let installPromise = context.openFwUpdate();
+  await new Promise(r => setTimeout(r, 20));
+
+  // Modal must now be open with changelog and version info
+  assert.equal(element("otaModal").classList.contains("hide"), false, "otaModal opens when update is available");
+  assert.equal(element("otaVersionLine").textContent, "v1.4.0 → v1.5.0");
+  assert.equal(element("otaChanges").hidden, false);
+  assert.equal(element("otaChanges").children.length, 2);
+  assert.equal(element("otaChanges").children[0].textContent, "• Performance improvements");
+  assert.equal(element("otaInstall").classList.contains("hide"), false);
+
+  // User cancels modal
+  context.closeOtaModal(false);
+  await installPromise;
+  assert.equal(element("otaModal").classList.contains("hide"), true);
+
+  // Case 3: When otaAvail is already set, tapping version link immediately opens otaModal
+  context.otaAvail = "1.5.0";
+  installPromise = context.openFwUpdate();
+  await new Promise(r => setTimeout(r, 20));
+  assert.equal(element("otaModal").classList.contains("hide"), false, "otaModal opens immediately when otaAvail is known");
+  context.closeOtaModal(false);
+  await installPromise;
+});
+
+test("askOtaInstall unhides install button and resolves confirmation", async () => {
+  const { context, element } = loadUi();
+  element("otaInstall").classList.add("hide");
+
+  const installPromise = context.askOtaInstall(
+    { current: "1.4.0", available: "1.5.0" },
+    "Improve BLE responsiveness\nFix OTA modal"
+  );
+
+  assert.equal(element("otaInstall").classList.contains("hide"), false);
+  assert.equal(element("otaChanges").hidden, false);
+  assert.equal(element("otaChanges").children.length, 2);
+  assert.equal(element("otaNoChanges").hidden, true);
+
+  context.closeOtaModal(true);
+  const decision = await installPromise;
+  assert.equal(decision, true);
+});
+
+
+test("mutation endpoints handle HTTP 409 Conflict gracefully with error toast", async () => {
+  const { context } = loadUi();
+  const toasts = [];
+  context.toast = (msg, kind, scope) => toasts.push({ msg, kind, scope });
+  context.state = { vin: "5YJ3E1EA1JF000001", key_present: false, vehicle: { status: "Stopped" } };
+  context.askConfirm = async () => true;
+
+  context.fetch = async (url) => {
+    if (url === "/gen_keys") {
+      return {
+        ok: false,
+        status: 409,
+        async json() { return { result: false, reason: "mutation locked by active session" }; }
+      };
+    }
+    return { ok: true, status: 200, async json() { return {}; } };
+  };
+
+  await context.genKey();
+  const errToast = toasts.find(t => t.kind === "err" && t.scope === "key");
+  assert.ok(errToast, "Error toast displayed on 409 Conflict");
+  assert.match(errToast.msg, /mutation locked/);
+});
+
+test("Update confirmation dialog survives periodic background polls and does not self-dismiss", async () => {
+  const { context, element } = loadUi();
+  context.state = { version: "1.4.0", vin: "5YJ3E1EA1JF000001", key_present: true };
+
+  context.fetch = async (url) => {
+    if (url.startsWith("/ota/check")) {
+      return { ok: true, status: 200, async json() { return { started: true }; } };
+    }
+    if (url.startsWith("/ota/status")) {
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return {
+            state: "idle",
+            update_available: true,
+            progress: 0,
+            message: "update available",
+            available: "1.5.0",
+            current: "1.4.0",
+            channel: "release"
+          };
+        }
+      };
+    }
+    if (url.startsWith("/ota/changelog")) {
+      return { ok: true, status: 200, async text() { return "v1.5.0 changelog notes"; } };
+    }
+    if (url.startsWith("/ota/update")) {
+      return { ok: true, status: 200, async json() { return { result: true }; } };
+    }
+    return { ok: true, status: 200, async json() { return {}; } };
+  };
+
+  // Launch update check which finds v1.5.0 available and opens askOtaInstall
+  const checkPromise = context.openFwUpdate();
+
+  // Yield to allow fetch/askOtaInstall to open the modal
+  await new Promise(resolve => setTimeout(resolve, 30));
+
+  // Verify dialog is open and waiting for confirmation
+  assert.equal(element("otaModal").classList.contains("hide"), false, "otaModal must be visible");
+  assert.ok(context.otaDecisionResolve !== null, "otaDecisionResolve must be pending");
+  assert.equal(context.isOtaRunning(), false, "isOtaRunning must be false while waiting for user decision");
+
+  // Verify runtime settings configuration buttons are NOT disabled during idle check/prompt
+  assert.equal(element("vinBtn").disabled, false, "vinBtn must not be locked during update prompt");
+  assert.equal(element("keyBtn").disabled, false, "keyBtn must not be locked during update prompt");
+  assert.equal(element("mqttBtn").disabled, false, "mqttBtn must not be locked during update prompt");
+
+  // Simulate multiple periodic background /status poll frames arriving while dialog is open
+  for (let i = 0; i < 5; i++) {
+    context.render({ version: "1.4.0", vehicle: { status: "Stopped" } });
+    context.syncOtaUi();
+    assert.equal(element("otaModal").classList.contains("hide"), false, `otaModal must stay open after poll frame ${i + 1}`);
+    assert.ok(context.otaDecisionResolve !== null, `otaDecisionResolve must remain pending after poll frame ${i + 1}`);
+    assert.equal(context.otaAvail, "1.5.0", "otaAvail must remain preserved");
+  }
+
+  // Confirm installation: user taps Install / confirms
+  context.closeOtaModal(true);
+  await checkPromise;
+
+  // Once installation starts, isOtaRunning() becomes true
+  assert.equal(context.isOtaRunning(), true, "isOtaRunning becomes true after user confirms install");
+  assert.equal(element("otaModal").classList.contains("hide"), true, "otaModal closes once update starts");
 });

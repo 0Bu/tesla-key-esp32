@@ -65,6 +65,10 @@ bool ota_get_changelog(char* out, size_t max_len, size_t& out_len);
 // allocates nothing, so it is safe from any task at any heap level.
 bool ota_is_busy();
 
+// Is an active OTA download or flash-write installation running right now?
+// Returns true strictly during an active firmware download/installation task, not during idle checks.
+bool ota_is_updating();
+
 // Safety gate for VIN/private-key mutations. A rollback-capable image may not write recovery
 // journals that the previous slot might interpret differently after an automatic rollback, and
 // an OTA worker must not be allowed to reboot during a half-committed identity transaction.

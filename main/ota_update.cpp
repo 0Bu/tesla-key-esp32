@@ -239,6 +239,7 @@ static OtaStatusPod initial_status() noexcept {
 static std::atomic<SemaphoreHandle_t> s_lock{nullptr};
 static OtaStatusPod                   s_status = initial_status();
 static std::atomic<bool>              s_running{false};    // a check or download task is active
+static std::atomic<bool>              s_updating{false};   // an active download/flash-write update task is running
 static std::atomic<unsigned>          s_target_pr{0};      // target PR for current check/update session
 
 static SemaphoreHandle_t ensure_lock() {
@@ -306,6 +307,10 @@ bool ota_is_busy() {
     return s_running.load(std::memory_order_acquire) ||
            s_operation_gate.state() ==
                tk::OtaIdentityGateState::Ota;
+}
+
+bool ota_is_updating() {
+    return s_updating.load(std::memory_order_acquire);
 }
 
 static constexpr size_t kOtaChangelogCapacity = 1024;
@@ -784,11 +789,13 @@ static void ota_task(void*) {
             ESP_LOGE(TAG, "OTA task unknown exception");
             try { set_state(OtaState::Error, 0, "update failed unexpectedly"); } catch (...) {}
         }
+        s_updating.store(false, std::memory_order_release);
         s_running.store(false, std::memory_order_release);
         finish_operation(tk::OtaIdentityGateState::Ota);
         vTaskDelete(nullptr);
     } catch (...) {
         ESP_LOGE(TAG, "OTA task boundary cleanup threw; stopping task");
+        s_updating.store(false, std::memory_order_release);
         s_running.store(false, std::memory_order_release);
         finish_operation(tk::OtaIdentityGateState::Ota);
         vTaskDelete(nullptr);
@@ -805,12 +812,14 @@ bool ota_start(unsigned pr_number) {
         finish_operation(tk::OtaIdentityGateState::Ota);
         return false;
     }
+    s_updating.store(true, std::memory_order_release);
     if (pr_number > 0) {
         s_target_pr.store(pr_number, std::memory_order_release);
     }
     try {
         set_state(OtaState::Downloading, 0, "starting download");
     } catch (...) {
+        s_updating.store(false, std::memory_order_release);
         s_running.store(false, std::memory_order_release);
         finish_operation(tk::OtaIdentityGateState::Ota);
         return false;
@@ -818,6 +827,7 @@ bool ota_start(unsigned pr_number) {
 
     // A generous stack: mbedTLS record processing + esp_https_ota run here.
     if (xTaskCreate(ota_task, "ota", 8192, nullptr, tk::kPrioOta, nullptr) != pdPASS) {
+        s_updating.store(false, std::memory_order_release);
         s_running.store(false, std::memory_order_release);
         finish_operation(tk::OtaIdentityGateState::Ota);
         try { set_state(OtaState::Error, 0, "could not start OTA task"); } catch (...) {}

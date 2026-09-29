@@ -389,7 +389,8 @@ GET  /heap                 { dt, b0, b_boot, unit:"KiB", scale:10, free[], large
 POST /gen_keys[?force=1]   Generate ECDSA P-256 key (refuses overwrite without force).
                              Identity mutation is Stable-only: PendingVerify, unknown OTA state
                              or an active OTA/update returns 503 before any key is changed
-POST /send_key             Manually trigger pairing (charging_manager only; normally automatic)
+POST /send_key             Manually trigger pairing (charging_manager only; normally automatic;
+                              returns 409 if an active OTA update is running)
 POST /set_vin              Persist VIN, regenerate security key, clear paired BLE MAC/session, and reboot.
                               Identity mutation is Stable-only: PendingVerify, unknown OTA state
                               or an active OTA/update returns 503 before the VIN journal starts
@@ -398,10 +399,10 @@ POST /set_mqtt             Verify the MQTT broker, then persist it and reboot
                              A changed, non-empty broker is CONNECTED to before it is saved:
                              400 = the broker refused us (credentials), 502 = unreachable or
                              no answer, 503 = too little contiguous memory to run the check.
-                             In every failing case nothing is written and nothing reboots
+                             In every failing case nothing is written and nothing reboots; returns 409 if an active OTA update is running
 POST /set_syslog           Persist the UDP Syslog server for the diag log and reboot
                              ({"server":"host:port"}; a bare host defaults to port 514;
-                             "" disables Syslog)
+                             "" disables Syslog; returns 409 if an active OTA update is running)
 POST /set_wifi             Change the WiFi credentials over the LAN and reboot
                              ({"ssid":"…","pass":"…"}; an empty pass means an open network;
                              otherwise 8–63 UTF-8 bytes or exactly 64 ASCII hex for a raw PSK).
@@ -412,8 +413,11 @@ POST /set_wifi             Change the WiFi credentials over the LAN and reboot
                              /status.wifi.rolled_back. An SSID that is merely ABSENT (a router
                              still rebooting) is given 180 s before that happens — only a
                              sustained authentication refusal is treated as evidence against
-                             the credentials. No web-UI control yet; this is a curl route
-POST /set_time             Set the wall clock from the browser ({"ms":<epoch>}) — NTP fallback
+                             the credentials; returns 409 if an active OTA update is running. No web-UI control yet; this is a curl route
+POST /set_time             Set the wall clock from the browser ({"ms":<epoch>}) — NTP fallback;
+                             returns 409 if an active OTA update is running
+POST /set_ota              Switch update channel ({"channel":"release"|"dev"}). Returns 409 if
+                             an active OTA update is running
 GET  /ota/check[?ms=<epoch>]   Start a background update check (then poll /ota/status)
 POST /ota/update           Start the background self-update (downloads, then reboots)
 GET  /ota/status           Poll OTA progress { state, progress, message, available,
