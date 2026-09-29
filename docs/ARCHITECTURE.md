@@ -583,6 +583,11 @@ preserves the `PR/` tree). Constraints:
     currently offered update (or HTTP 204 if none). When an update is available, `ota_check` fetches the
     sibling `changelog.json` relative to the manifest, decodes the text, and filters the notes to the range
     applicable between the running and offered candidate versions using `tk::ota_changelog_select_range()`.
+  - **Mutation conflict guard (HTTP 409).** While an active firmware update download or flash installation is
+    running (`ota_is_updating()`), mutating endpoints (`POST /send_key`, `/set_time`, `/set_mqtt`, `/set_syslog`,
+    `/set_wifi`, `/set_ota`) reject incoming requests with `409 Conflict` (`{"ok":false,"result":false,"reason":"an OTA update is in progress"}`)
+    to protect the flashing process from concurrent NVS mutations or reboots. Idle update checks (`GET /ota/check`)
+    do not block configuration mutations.
 - **Toolchain pin isolation in PR preview rebuilds.** The `trusted-rebuild` job in
   `.github/workflows/signed-pr-preview.yml` checks out the PR head commit before reading
   `esp-idf-toolchain.txt`, ensuring PRs that update the ESP-IDF toolchain pin are rebuilt with
@@ -1381,6 +1386,13 @@ the MQTT companion does the same for retained discovery/state payloads and broke
 tests prove ownership and response policy behind deterministic transport/publish seams. Only the
 pinned IDF build compiles the real HTTP/NVS/FreeRTOS integration, so host success is not reported as
 on-device runtime evidence.
+
+**Active OTA conflict guard (HTTP 409).** When an active firmware download or installation task is running
+(`ota_is_updating()`), configuration mutation endpoints (`POST /send_key`, `/set_time`, `/set_mqtt`,
+`/set_syslog`, `/set_wifi`, `/set_ota`) reject requests immediately with `409 Conflict`
+(`{"ok":false,"result":false,"reason":"an OTA update is in progress"}`) before reading body payloads,
+preventing concurrent NVS operations or reboots while the flash partition is being written. Idle update
+checks do not block configuration changes.
 
 ## MCP endpoint (/mcp)
 

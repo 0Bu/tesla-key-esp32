@@ -187,6 +187,7 @@ esp_err_t handle_send_key(GuardedReq rq) {
     httpd_req_t* req = rq.req;
     if (ota_is_updating()) {
         tk::JsonBuilder json;
+        json.boolean(json.root(), "ok", false);
         json.boolean(json.root(), "result", false);
         json.string(json.root(), "reason", "an OTA update is in progress");
         return send_json(req, 409, json.release());

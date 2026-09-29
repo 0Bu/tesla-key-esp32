@@ -1598,7 +1598,7 @@ function handleChanKey(e){
   if(target && typeof target.focus === 'function') target.focus();
 }
 
-function setChannel(chan){
+function setChannel(chan, hadPr){
   if(chan === 'pr'){
     prMode = true;
     activePrExplicitlyCleared = false;
@@ -1608,7 +1608,7 @@ function setChannel(chan){
     renderChanMenu();
     return loadPrList(false);
   }
-  var hadPr = (activePr > 0) || prMode;
+  var hadPrMode = (hadPr !== undefined) ? hadPr : ((activePr > 0) || prMode);
   prMode = false;
   activePr = 0;
   activePrExplicitlyCleared = true;
@@ -1630,7 +1630,7 @@ function setChannel(chan){
     } catch(e){}
   }
   var prevChan = otaChannel;
-  var changed = (otaChannel !== chan) || hadPr;
+  var changed = (otaChannel !== chan) || hadPrMode;
   if(chan!=='release'&&chan!=='dev') return Promise.resolve();
   if(!changed) return Promise.resolve();
 
@@ -1687,6 +1687,8 @@ function editChannel(){
   if(m && m.classList) m.classList.remove('hide');
   syncModal();
   updateChanModalUi();
+  loadPrList(false);
+  loadChanChangelog(selectedChan);
   var btn = $("optRelease");
   if(selectedChan === 'dev') btn = $("optDev");
   else if(selectedChan === 'pr') btn = $("optPr");
@@ -1703,6 +1705,7 @@ function selectChannel(chan){
     loadPrList(false);
   }
   updateChanModalUi();
+  loadChanChangelog(chan);
 }
 
 function updateChanModalUi(){
@@ -1732,8 +1735,73 @@ function updateChanModalUi(){
   }
   if(c === 'pr'){
     renderPrRows();
+  } else {
+    loadChanChangelog(c);
   }
   updateChanSaveBtn();
+}
+
+function loadChanChangelog(chan){
+  var wrap = $("fwChangelog");
+  if(chan === 'pr'){
+    if(wrap && wrap.classList) wrap.classList.add('hide');
+    return Promise.resolve('');
+  }
+  if(wrap && wrap.classList) wrap.classList.remove('hide');
+  if(chan !== 'release' && chan !== 'dev') return Promise.resolve('');
+
+  if(chanChangelogCache[chan] !== undefined){
+    renderChanChangelog(chanChangelogCache[chan]);
+    return Promise.resolve(chanChangelogCache[chan]);
+  }
+
+  var loading = $("chanChangelogLoading");
+  var box = $("chanChangelogBox");
+  var empty = $("chanChangelogEmpty");
+  if(loading && loading.classList) loading.classList.remove('hide');
+  if(box && box.classList) box.classList.add('hide');
+  if(empty && empty.classList) empty.classList.add('hide');
+
+  if(chanChangelogAbort && typeof chanChangelogAbort.abort === 'function'){
+    try { chanChangelogAbort.abort(); } catch(e){}
+  }
+  chanChangelogAbort = typeof AbortController !== 'undefined' ? new AbortController() : null;
+
+  var url = (chan === 'dev')
+    ? 'https://0bu.github.io/tesla-key-esp32/dev/changelog.json'
+    : 'https://0bu.github.io/tesla-key-esp32/changelog.json';
+
+  return fetch(url, {
+    cache: 'no-store',
+    signal: chanChangelogAbort ? chanChangelogAbort.signal : undefined
+  })
+    .then(function(r){
+      if(!r.ok) throw new Error('HTTP ' + r.status);
+      return r.json();
+    })
+    .then(function(data){
+      var text = (data && typeof data.changelog === 'string') ? data.changelog : '';
+      chanChangelogCache[chan] = text;
+      if(selectedChan === chan) renderChanChangelog(text);
+      return text;
+    })
+    .catch(function(err){
+      if(err && err.name === 'AbortError') return '';
+      if(chan === otaChannel){
+        return loadOtaChangelog().then(function(notes){
+          chanChangelogCache[chan] = notes || '';
+          if(selectedChan === chan) renderChanChangelog(notes || '');
+          return notes || '';
+        }).catch(function(){
+          chanChangelogCache[chan] = '';
+          if(selectedChan === chan) renderChanChangelog('');
+          return '';
+        });
+      }
+      chanChangelogCache[chan] = '';
+      if(selectedChan === chan) renderChanChangelog('');
+      return '';
+    });
 }
 
 function renderChanChangelog(text){
@@ -1751,6 +1819,7 @@ function renderChanChangelog(text){
   } else {
     if(empty && empty.classList) empty.classList.add('hide');
     if(list){
+      if(list.classList) list.classList.remove('hide');
       var rendered = (list.dataset && list.dataset.renderedText) || '';
       if(rendered !== text){
         if(list.dataset) list.dataset.renderedText = text;
@@ -1794,13 +1863,14 @@ function saveChannel(){
     selectedPr = target;
     prMode = true;
     activePrExplicitlyCleared = false;
+    closeChanModal();
+    if(state) render(state);
     if(target === instPr){
-      closeChanModal();
-      if(state) render(state);
       return otaCheck();
     }
     return installPr(target);
   }
+  var hadPr = (activePr > 0) || prMode || (parseTargetPr() > 0) || (typeof location !== 'undefined' && location.search && location.search.indexOf('pr=') >= 0);
   activePr = 0;
   prMode = false;
   activePrExplicitlyCleared = true;
@@ -1822,7 +1892,11 @@ function saveChannel(){
     } catch(e){}
   }
   closeChanModal();
-  return setChannel(c);
+  if(state) render(state);
+  if(c === otaChannel && !hadPr){
+    return otaCheck();
+  }
+  return setChannel(c, hadPr);
 }
 
 var otaDecisionResolve = null;
@@ -1833,9 +1907,9 @@ function closeOtaModal(decision){
   if(!open && !otaDecisionResolve) return;
   if(m && m.classList) m.classList.add('hide');
   syncModal();
-  var vl = $("verLink");
-  if(vl && typeof vl.getClientRects === 'function' && !vl.getClientRects().length) vl = $(TAB_BTN[uiTab]);
-  if(vl && typeof vl.focus === 'function' && !isOpen('askModal') && !(chanModalOpen && isOpen('chanModal')) && !(typeof isOtaRunning === 'function' && isOtaRunning())) vl.focus();
+  var btn = $("verLink") || $("chanBtn");
+  if(btn && typeof btn.getClientRects === 'function' && !btn.getClientRects().length) btn = $(TAB_BTN[uiTab]);
+  if(btn && typeof btn.focus === 'function' && !isOpen('askModal') && !(chanModalOpen && isOpen('chanModal')) && !(typeof isOtaRunning === 'function' && isOtaRunning())) btn.focus();
   if(otaDecisionResolve){
     var r = otaDecisionResolve;
     otaDecisionResolve = null;
@@ -1933,13 +2007,18 @@ function getInstalledChangelogUrl(){
 function parseInstalledChangelog(data, curVer, isDev){
   if(!data || typeof data.changelog !== 'string' || !data.changelog.trim()) return '';
   var text = data.changelog.trim();
-  if(isDev && curVer){
+  var rawCur = String(curVer || '').trim();
+  var cleanCur = rawCur.replace(/^v/i, '').toLowerCase();
+  var cleanData = String(data.version || '').replace(/^v/i, '').toLowerCase();
+
+  if(isDev && cleanCur){
     var lines = text.split(/\r?\n/);
-    var prefix = 'v' + curVer + ' — ';
+    var prefix = 'v' + cleanCur + ' — ';
     var matched = [];
     for(var i = 0; i < lines.length; i++){
       var l = lines[i].trim();
-      if(l.indexOf(prefix) === 0){
+      var lLower = l.toLowerCase();
+      if(lLower.indexOf(prefix) === 0){
         matched.push(l.substring(prefix.length).trim());
       }
     }
@@ -1947,7 +2026,7 @@ function parseInstalledChangelog(data, curVer, isDev){
   }
   // Only notes that provably belong to the running build: an exact version match, never a
   // neighbouring release's or the whole history.
-  return (curVer && data.version === curVer) ? text : '';
+  return (cleanCur && cleanData === cleanCur) ? text : '';
 }
 
 // {ok, text}: ok=false only when the feed could not be read (network, HTTP error, bad JSON), so the
@@ -2054,11 +2133,18 @@ function askOtaInstall(status, changelog){
     list.hidden = (count === 0);
   }
   var noChanges = $("otaNoChanges");
-  if(noChanges) noChanges.hidden = (count > 0);
+  if(noChanges){
+    noChanges.textContent = 'No changelog was supplied for this update.';
+    noChanges.hidden = (count > 0);
+  }
+  var installBtn = $("otaInstall");
+  if(installBtn){
+    installBtn.classList.remove('hide');
+    installBtn.disabled = false;
+  }
   var m = $("otaModal");
   if(m && m.classList) m.classList.remove('hide');
   syncModal();
-  var installBtn = $("otaInstall");
   if(installBtn && typeof installBtn.focus === 'function' && !isOpen('askModal')) installBtn.focus();
   return new Promise(function(resolve){
     otaDecisionResolve = resolve;
@@ -2151,7 +2237,7 @@ function otaCheckPoll(){
       otaAvail=null; if(state)render(state); otaReset();
       var prChecked=getTargetPr();
       if(typeof closeOtaModal === 'function') closeOtaModal(false);
-    var upMsg = prChecked>0 ? ('PR #' + prChecked + ' up to date') : 'Firmware is up to date';
+      var upMsg = prChecked>0 ? ('PR #' + prChecked + ' up to date') : 'Firmware is up to date';
       toast(upMsg, 'ok', 'ota');
       otaInline(prChecked>0?'<span>PR #'+prChecked+' up to date</span>':'<span>up to date</span>'); otaInlineClear(3500);
     }
@@ -2237,8 +2323,7 @@ function waitReboot(expectedVer){
 function isOtaRunning(){
   if(otaPhase === 'update' || otaPhase === 'reboot') return true;
   var o = otaPollState;
-  if(o && (o.state === 'downloading' || o.state === 'flashing' || o.state === 'verifying' || o.state === 'done')) return true;
-  if(state && state.ota && (state.ota.state === 'downloading' || state.ota.state === 'flashing' || state.ota.state === 'verifying' || state.ota.state === 'done')) return true;
+  if(o && (o.state === 'downloading' || o.state === 'done')) return true;
   return false;
 }
 
@@ -2302,6 +2387,7 @@ if(typeof window!=='undefined'){
   window.updateChanModalUi = updateChanModalUi;
   window.updateChanSaveBtn = updateChanSaveBtn;
   window.renderChanChangelog = renderChanChangelog;
+  window.loadChanChangelog = loadChanChangelog;
   window.askValidate = askValidate;
 }
 
@@ -2318,6 +2404,6 @@ function boot(){
   // still making claims about a device we are no longer hearing from.
   setInterval(function(){ if(feedOk) paintCd(); },1000);
   resumeOta();
-  if(uiTab==='fw'||getTargetPr()>0) loadPrList(false);
+  loadPrList(false);
 }
 if(!(typeof window!=='undefined'&&window.__TESLA_UI_NO_BOOT__)) boot();

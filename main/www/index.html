@@ -91,15 +91,11 @@
           <span class="ri"><svg viewBox="0 0 24 24"><use href="#ic-chip"/></svg><span class="dot ok" id="fwDot"></span></span>
           <span class="rb">
             <span class="rl">Firmware</span>
-            <span id="fwVer" style="display:none"></span>
-            <button type="button" class="ver-btn" id="verLink" onclick="openFwUpdate()" aria-label="Check for firmware updates" title="Check for firmware updates">
-              <span class="rv mono" id="fwVerText">&mdash;</span>
-              <span id="verLinkText" style="display:none"></span>
-              <span class="chip-badge hide" id="fwBadge"></span>
-            </button>
+            <span class="rv mono" id="fwVer">&mdash;</span>
             <span class="rs" id="fwSub"></span>
           </span>
           <button type="button" class="ib" id="chanBtn" onclick="editChannel()" aria-label="Select update channel" title="Update channel"><svg viewBox="0 0 24 24"><use href="#ic-pencil"/></svg></button>
+          <button type="button" class="ver-btn" id="verLink" style="display:none" onclick="openFwUpdate()" aria-label="Check for firmware updates" title="Check for firmware updates"><span class="rv mono" id="fwVerText">&mdash;</span><span id="verLinkText"></span><span class="chip-badge hide" id="fwBadge"></span></button>
           <div class="otabar hide" id="otaBar"><div class="otafill" id="otaFill"></div></div>
         </div>
       </section>
@@ -140,12 +136,12 @@
     </div>
     <div class="chan-changelog-wrap" id="fwChangelog">
       <div class="chan-changelog-loading hide" id="chanChangelogLoading">Loading changelog…</div>
-      <div class="chan-changelog-box" id="chanChangelogBox">
+      <div class="chan-changelog-box hide" id="chanChangelogBox">
+        <ul class="chan-changelog-list" id="chanChangelogList"></ul>
         <ul class="chan-changelog-list fw-changes" id="fwChanges" hidden></ul>
-        <ul class="chan-changelog-list hide" id="chanChangelogList"></ul>
       </div>
-      <p class="note hide" id="chanChangelogEmpty">No changelog was supplied for this build.</p>
-      <p class="note" id="fwNoChanges" hidden>No changelog was supplied for this build.</p>
+      <p class="note hide" id="chanChangelogEmpty">No changelog available.</p>
+      <p class="note" id="fwNoChanges" hidden>No changelog available.</p>
     </div>
     <div class="pr-list-wrap hide" id="prListWrap">
       <div class="pr-loading hide" id="prLoading">Loading pull requests…</div>

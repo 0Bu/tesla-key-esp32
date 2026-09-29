@@ -2277,3 +2277,116 @@ test("UI disables settings and hides channel button during active OTA, closes op
   assert.equal(element("mqttBtn").disabled, false);
   assert.equal(element("syslogBtn").disabled, false);
 });
+
+test("firmware card displays version with pencil icon button and no wide pill button", () => {
+  const html = fs.readFileSync(new URL("../main/www/index.html", import.meta.url), "utf8");
+  assert.match(html, /<div class="row row-fw" id="rowFw">[\s\S]*?id="fwVer"[\s\S]*?id="chanBtn"/);
+  assert.match(html, /<button type="button" class="ib" id="chanBtn" onclick="editChannel\(\)"/);
+  assert.doesNotMatch(html, /<button[^>]*class="[^"]*wide-btn[^"]*"[^>]*id="verLink"[^>]*style="display:\s*none"/);
+
+  const { context, element } = loadUi();
+  context.render({ version: "1.4.0", ota: { channel: "release" } });
+  assert.equal(element("fwVer").textContent, "v1.4.0");
+  assert.equal(element("fwSub").textContent, "Release channel");
+  assert.equal(element("chanBtn").classList.contains("hide"), false);
+});
+
+test("channel switching from PR mode to release/dev triggers /set_ota and otaCheck, while saving unchanged channel checks for updates", async () => {
+  const { context, element } = loadUi();
+  const fetchCalls = [];
+  context.fetch = async (url, opts) => {
+    fetchCalls.push({ url, opts });
+    if (url === "/set_ota") return { ok: true, status: 200, async json() { return { ok: true }; } };
+    if (url.startsWith("/ota/check")) return { ok: true, status: 200, async json() { return { started: true }; } };
+    if (url.startsWith("/ota/status")) {
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return {
+            state: "idle",
+            update_available: false,
+            progress: 0,
+            message: "up to date",
+            available: "1.4.0",
+            current: "1.4.0"
+          };
+        }
+      };
+    }
+    return { ok: true, status: 200, async json() { return {}; } };
+  };
+
+  // Device starts on dev channel with PR mode active
+  context.otaChannel = "dev";
+  context.activePr = 340;
+  context.prMode = true;
+
+  // 1. Switch to release channel
+  context.editChannel();
+  assert.equal(element("chanModal").classList.contains("hide"), false);
+  context.selectChannel("release");
+  await context.saveChannel();
+
+  assert.equal(context.activePr, 0);
+  assert.equal(context.prMode, false);
+  assert.equal(context.otaChannel, "release");
+  assert.ok(fetchCalls.some(c => c.url === "/set_ota" && JSON.parse(c.opts.body).channel === "release"));
+  assert.ok(fetchCalls.some(c => c.url.startsWith("/ota/check")));
+
+  // 2. Saving an unchanged channel triggers an OTA check without redundant /set_ota
+  fetchCalls.length = 0;
+  context.editChannel();
+  await context.saveChannel();
+  assert.equal(fetchCalls.some(c => c.url === "/set_ota"), false);
+  assert.ok(fetchCalls.some(c => c.url.startsWith("/ota/check")));
+});
+
+test("channel changelog loads remote changelog and renders changelog list", async () => {
+  const { context, element } = loadUi();
+  context.fetch = async (url) => {
+    if (url === "https://0bu.github.io/tesla-key-esp32/changelog.json") {
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return { changelog: "Added vertical cards\nFixed OTA channel switching" };
+        }
+      };
+    }
+    return { ok: false, status: 404 };
+  };
+
+  const text = await context.loadChanChangelog("release");
+  assert.equal(text, "Added vertical cards\nFixed OTA channel switching");
+
+  context.renderChanChangelog(text);
+  assert.equal(element("chanChangelogBox").classList.contains("hide"), false);
+  assert.equal(element("chanChangelogList").classList.contains("hide"), false);
+  assert.equal(element("chanChangelogList").children.length, 2);
+  assert.equal(element("chanChangelogEmpty").classList.contains("hide"), true);
+
+  // Empty changelog shows empty message and hides changelog box
+  context.renderChanChangelog("");
+  assert.equal(element("chanChangelogBox").classList.contains("hide"), true);
+  assert.equal(element("chanChangelogEmpty").classList.contains("hide"), false);
+});
+
+test("askOtaInstall unhides install button and resolves confirmation", async () => {
+  const { context, element } = loadUi();
+  element("otaInstall").classList.add("hide");
+
+  const installPromise = context.askOtaInstall(
+    { current: "1.4.0", available: "1.5.0" },
+    "Improve BLE responsiveness\nFix OTA modal"
+  );
+
+  assert.equal(element("otaInstall").classList.contains("hide"), false);
+  assert.equal(element("otaChanges").hidden, false);
+  assert.equal(element("otaChanges").children.length, 2);
+  assert.equal(element("otaNoChanges").hidden, true);
+
+  context.closeOtaModal(true);
+  const decision = await installPromise;
+  assert.equal(decision, true);
+});

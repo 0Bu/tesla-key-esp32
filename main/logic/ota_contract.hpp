@@ -326,9 +326,6 @@ inline OtaVersionOrder compare_ota_versions(std::string_view candidate,
         const OtaVersionOrder order = compare_ota_versions(candidate, current);
         if (order == OtaVersionOrder::Invalid || order == OtaVersionOrder::Older) return false;
 
-        // 3. Candidate must differ from currently running firmware
-        if (candidate == current) return false;
-
         return true;
     }
 
