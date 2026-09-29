@@ -117,6 +117,7 @@ Before committing or pushing, verify workspace cleanliness, code style, unit tes
    ```bash
    gh pr checks "$PR" --watch
    ```
+   *(Alternatively, invoke `$ci-heal` via `scripts/ci-heal.sh --pr "$PR"` to autonomously monitor CI, triage failures, apply local fixes, and stamp gates.)*
 2. **Audit & Stamp PR Gates**:
    Run the respective audit skills (`$project-review`, `$feature-docs`, `$vehicle-command-audit`) against the current HEAD.
    Once each audit passes cleanly, stamp the verified gates on the PR using confirmation tokens naming the audit results and SHA:
