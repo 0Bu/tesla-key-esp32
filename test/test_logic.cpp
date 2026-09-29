@@ -894,6 +894,7 @@ static void test_ota_contract() {
     // Targeted PR channel (target_pr == 326)
     CHECK(tk::is_ota_update_available("1.5.4-PR-326", "1.5.4", 326));
     CHECK(tk::is_ota_update_available("1.5.4-PR-326", "1.5.4-PR-326", 326));
+    CHECK(tk::is_ota_update_available("1.5.5-PR-326", "1.5.4-PR-326", 326));
     CHECK(tk::is_ota_update_available("1.5.5-PR-326", "1.5.4", 326));
     // Wrong PR candidate rejected
     CHECK(!tk::is_ota_update_available("1.5.4-PR-227", "1.5.4", 326));
@@ -1087,6 +1088,8 @@ static void test_ota_channel() {
     CHECK(tk::is_ota_update_available("1.2.3-PR-331", "1.2.3", 331));
     CHECK(!tk::is_ota_update_available("1.2.3-PR-332", "1.2.3", 331)); // mismatched PR
     CHECK(!tk::is_ota_update_available("1.2.2-PR-331", "1.2.3", 331)); // older core
+    CHECK(tk::is_ota_update_available("1.2.3-PR-331", "1.2.3-PR-331", 331)); // same PR version accepted for new pushes
+    CHECK(tk::is_ota_update_available("1.2.4-PR-331", "1.2.3-PR-331", 331)); // newer core on same PR
 }
 
 // ─── OTA changelog parsing and range selection ──────────────────────────────
@@ -4222,6 +4225,77 @@ static void test_http_route() {
     }};
     for (HttpRoute route : recovery) CHECK(!tk::http_route_requires_vehicle_runtime(route));
     CHECK(!tk::http_route_requires_vehicle_runtime(HttpRoute::Index));
+
+    // ── Route conflict matrix during active OTA update ─────────────────────────────
+    // Exact documented behavior from docs/README.md and docs/FEATURES.md:
+    // - Six runtime/config mutation endpoints return 409 Conflict with reason "an OTA update is in progress"
+    // - Two identity mutation endpoints (/gen_keys, /set_vin) return 503 via OtaIdentityMutationGuard
+    // - All other routes return None (0) and are not rejected by the update conflict guard
+    CHECK(tk::kOtaUpdateInProgressReason == "an OTA update is in progress");
+
+    constexpr std::array<HttpRoute, 6> ota_conflicts_409{{
+        HttpRoute::SendKey,
+        HttpRoute::SetTime,
+        HttpRoute::SetMqtt,
+        HttpRoute::SetSyslog,
+        HttpRoute::SetWifi,
+        HttpRoute::SetOta,
+    }};
+    for (HttpRoute route : ota_conflicts_409) {
+        CHECK(tk::http_route_ota_conflict(route) == tk::HttpRouteOtaConflict::Reject409);
+        CHECK(tk::http_route_blocks_during_ota_update_409(route));
+        CHECK(static_cast<int>(tk::http_route_ota_conflict(route)) == 409);
+    }
+
+    constexpr std::array<HttpRoute, 2> ota_identity_503{{
+        HttpRoute::GenKeys,
+        HttpRoute::SetVin,
+    }};
+    for (HttpRoute route : ota_identity_503) {
+        CHECK(tk::http_route_ota_conflict(route) == tk::HttpRouteOtaConflict::Reject503);
+        CHECK(!tk::http_route_blocks_during_ota_update_409(route));
+        CHECK(static_cast<int>(tk::http_route_ota_conflict(route)) == 503);
+    }
+
+    constexpr std::array<HttpRoute, 18> ota_allowed{{
+        HttpRoute::NotFound,
+        HttpRoute::Command,
+        HttpRoute::VehicleData,
+        HttpRoute::BodyController,
+        HttpRoute::OtaCheck,
+        HttpRoute::OtaUpdate,
+        HttpRoute::OtaStatus,
+        HttpRoute::OtaChangelog,
+        HttpRoute::Scan,
+        HttpRoute::Coredump,
+        HttpRoute::CrashDismiss,
+        HttpRoute::Heap,
+        HttpRoute::McpPost,
+        HttpRoute::McpGet,
+        HttpRoute::Version,
+        HttpRoute::Status,
+        HttpRoute::Diag,
+        HttpRoute::Index,
+    }};
+    for (HttpRoute route : ota_allowed) {
+        CHECK(tk::http_route_ota_conflict(route) == tk::HttpRouteOtaConflict::None);
+        CHECK(!tk::http_route_blocks_during_ota_update_409(route));
+        CHECK(static_cast<int>(tk::http_route_ota_conflict(route)) == 0);
+    }
+
+    // Verify fixed URL path resolution and corresponding OTA conflict mapping
+    CHECK(tk::http_route_ota_conflict(tk::classify_http_route(HttpVerb::Post, "/send_key")) == tk::HttpRouteOtaConflict::Reject409);
+    CHECK(tk::http_route_ota_conflict(tk::classify_http_route(HttpVerb::Post, "/set_time")) == tk::HttpRouteOtaConflict::Reject409);
+    CHECK(tk::http_route_ota_conflict(tk::classify_http_route(HttpVerb::Post, "/set_mqtt")) == tk::HttpRouteOtaConflict::Reject409);
+    CHECK(tk::http_route_ota_conflict(tk::classify_http_route(HttpVerb::Post, "/set_syslog")) == tk::HttpRouteOtaConflict::Reject409);
+    CHECK(tk::http_route_ota_conflict(tk::classify_http_route(HttpVerb::Post, "/set_wifi")) == tk::HttpRouteOtaConflict::Reject409);
+    CHECK(tk::http_route_ota_conflict(tk::classify_http_route(HttpVerb::Post, "/set_ota")) == tk::HttpRouteOtaConflict::Reject409);
+    CHECK(tk::http_route_ota_conflict(tk::classify_http_route(HttpVerb::Post, "/gen_keys")) == tk::HttpRouteOtaConflict::Reject503);
+    CHECK(tk::http_route_ota_conflict(tk::classify_http_route(HttpVerb::Post, "/set_vin")) == tk::HttpRouteOtaConflict::Reject503);
+    CHECK(tk::http_route_ota_conflict(tk::classify_http_route(HttpVerb::Get, "/status")) == tk::HttpRouteOtaConflict::None);
+    CHECK(tk::http_route_ota_conflict(tk::classify_http_route(HttpVerb::Get, "/diag")) == tk::HttpRouteOtaConflict::None);
+    CHECK(tk::http_route_ota_conflict(tk::classify_http_route(HttpVerb::Get, "/heap")) == tk::HttpRouteOtaConflict::None);
+    CHECK(tk::http_route_ota_conflict(tk::classify_http_route(HttpVerb::Get, "/ota/status")) == tk::HttpRouteOtaConflict::None);
 }
 
 // ─── Heap trend ring ──────────────────────────────────────────────────────────

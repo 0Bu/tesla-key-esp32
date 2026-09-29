@@ -12,6 +12,7 @@
 #include "mqtt_probe_owner.hpp"
 #include "config_blob.hpp"
 #include "logic/config_request.hpp"
+#include "logic/http_route.hpp"
 #include "logic/json_syntax.hpp"
 #include "logic/syslog_policy.hpp"
 #include "logic/mqtt_uri.hpp"
@@ -185,6 +186,13 @@ esp_err_t handle_gen_keys(GuardedReq rq) {
 
 esp_err_t handle_send_key(GuardedReq rq) {
     httpd_req_t* req = rq.req;
+    if (ota_is_updating()) {
+        tk::JsonBuilder json;
+        json.boolean(json.root(), "ok", false);
+        json.boolean(json.root(), "result", false);
+        json.string(json.root(), "reason", tk::kOtaUpdateInProgressReason.data());
+        return send_json(req, static_cast<int>(tk::HttpRouteOtaConflict::Reject409), json.release());
+    }
     if (validate_query_string(req) != ESP_OK) {
         return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid query string");
     }
@@ -220,6 +228,10 @@ esp_err_t handle_send_key(GuardedReq rq) {
 // applied fallback time is persisted so a later offline reboot starts plausibly.
 esp_err_t handle_set_time(GuardedReq rq) {
     httpd_req_t* req = rq.req;
+    if (ota_is_updating()) {
+        return send_json(req, static_cast<int>(tk::HttpRouteOtaConflict::Reject409),
+                         make_response(false, "set_time", "", tk::kOtaUpdateInProgressReason.data()));
+    }
     ParsedJsonBody parsed = parse_json_object_body_(req);
     if (!parsed) return send_config_body_error_(req, "set_time", parsed);
 
@@ -520,6 +532,10 @@ static tk::MqttProbeResult mqtt_probe_broker(const std::string& uri) {
 
 esp_err_t handle_set_mqtt(GuardedReq rq) {
     httpd_req_t* req = rq.req;
+    if (ota_is_updating()) {
+        return send_json(req, static_cast<int>(tk::HttpRouteOtaConflict::Reject409),
+                         make_response(false, "set_mqtt", "", tk::kOtaUpdateInProgressReason.data()));
+    }
     const tk::ConfigStringSubmission submitted = parse_string_submission_(req, "broker");
     tk::ConfigBlob cfg;
     return tk::apply_config_string(
@@ -574,6 +590,10 @@ esp_err_t handle_set_mqtt(GuardedReq rq) {
 
 esp_err_t handle_set_syslog(GuardedReq rq) {
     httpd_req_t* req = rq.req;
+    if (ota_is_updating()) {
+        return send_json(req, static_cast<int>(tk::HttpRouteOtaConflict::Reject409),
+                         make_response(false, "set_syslog", "", tk::kOtaUpdateInProgressReason.data()));
+    }
     const tk::ConfigStringSubmission submitted = parse_string_submission_(req, "server");
     tk::ConfigBlob cfg;
     return tk::apply_config_string(
@@ -630,6 +650,10 @@ esp_err_t handle_set_syslog(GuardedReq rq) {
 // its refusal spends them, while an absent SSID (a router still rebooting) is given minutes.
 esp_err_t handle_set_wifi(GuardedReq rq) {
     httpd_req_t* req = rq.req;
+    if (ota_is_updating()) {
+        return send_json(req, static_cast<int>(tk::HttpRouteOtaConflict::Reject409),
+                         make_response(false, "set_wifi", "", tk::kOtaUpdateInProgressReason.data()));
+    }
     ParsedJsonBody parsed = parse_json_object_body_(req);
     if (!parsed) return send_config_body_error_(req, "set_wifi", parsed);
 
@@ -700,6 +724,10 @@ esp_err_t handle_set_wifi(GuardedReq rq) {
 // Persists the channel selection in NVS (ConfigBlob v2) and updates the active channel.
 esp_err_t handle_set_ota(GuardedReq rq) {
     httpd_req_t* req = rq.req;
+    if (ota_is_updating()) {
+        return send_json(req, static_cast<int>(tk::HttpRouteOtaConflict::Reject409),
+                         make_response(false, "set_ota", "", tk::kOtaUpdateInProgressReason.data()));
+    }
     const tk::ConfigStringSubmission submitted = parse_string_submission_(req, "channel");
     if (submitted.status != tk::ConfigSubmissionStatus::Ready) {
         return send_json(req, tk::config_submission_http_status(submitted.status),

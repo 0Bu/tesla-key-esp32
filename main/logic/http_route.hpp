@@ -153,4 +153,37 @@ inline constexpr bool http_route_requires_vehicle_runtime(HttpRoute route) noexc
     return true;
 }
 
+inline constexpr std::string_view kOtaUpdateInProgressReason = "an OTA update is in progress";
+
+enum class HttpRouteOtaConflict {
+    None = 0,
+    Reject409 = 409,
+    Reject503 = 503,
+};
+
+// Routes that conflict with an active OTA update. The six runtime/config mutation routes
+// return 409 Conflict ("an OTA update is in progress"); the two identity mutations return
+// 503 Service Unavailable ("... blocked during OTA verification/update") via OtaIdentityMutationGuard.
+// Read-only endpoints and status/diagnostics remain available during update.
+inline constexpr HttpRouteOtaConflict http_route_ota_conflict(HttpRoute route) noexcept {
+    switch (route) {
+        case HttpRoute::SendKey:
+        case HttpRoute::SetTime:
+        case HttpRoute::SetMqtt:
+        case HttpRoute::SetSyslog:
+        case HttpRoute::SetWifi:
+        case HttpRoute::SetOta:
+            return HttpRouteOtaConflict::Reject409;
+        case HttpRoute::GenKeys:
+        case HttpRoute::SetVin:
+            return HttpRouteOtaConflict::Reject503;
+        default:
+            return HttpRouteOtaConflict::None;
+    }
+}
+
+inline constexpr bool http_route_blocks_during_ota_update_409(HttpRoute route) noexcept {
+    return http_route_ota_conflict(route) == HttpRouteOtaConflict::Reject409;
+}
+
 }  // namespace tk
