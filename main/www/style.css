@@ -7,6 +7,7 @@
   --warn-base:#f59e0b; --warn-lite:#fdba74;
   --scrim:rgba(16,20,28,.4);
   --shadow:0 1px 2px rgba(16,20,28,.04),0 6px 20px rgba(16,20,28,.06);
+  --shadow-cta:0 6px 20px rgba(232,33,39,.35);
   --r-card:18px; --r-tile:14px;
   --ease:cubic-bezier(.2,.7,.3,1);
   --sans:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
@@ -21,6 +22,7 @@
     --scrim:rgba(0,0,0,.65);
     --shadow:0 1px 2px rgba(0,0,0,.3),0 8px 24px rgba(0,0,0,.35);
   }
+  .chan-select{background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23a3aab4' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E")}
 }
 *{box-sizing:border-box}
 html,body{margin:0}
@@ -74,7 +76,7 @@ svg{display:block}
 .ph{color:var(--muted)}
 
 .ti{position:relative; width:24px; height:24px}
-.ti svg,.ri svg,.ib svg,.pill svg,.bi svg,.warnic svg{width:100%; height:100%; fill:none; stroke:currentColor;
+.ti svg,.ri svg,.ib svg,.pill svg,.cta .ci svg,.bi svg,.warnic svg{width:100%; height:100%; fill:none; stroke:currentColor;
   stroke-width:2; stroke-linecap:round; stroke-linejoin:round}
 .badge{position:absolute; top:-3px; right:-6px; width:10px; height:10px; border-radius:50%; border:2px solid var(--card)}
 .badge.acc{background:var(--accent)} .badge.warn{background:var(--warn)} .badge.info{background:var(--info)}
@@ -97,7 +99,7 @@ svg{display:block}
 .pill.danger{color:var(--accent-text); border-color:color-mix(in srgb,var(--accent) 45%,var(--border))}
 .pill.sm{font-size:14px; padding:0 14px; background:var(--card)}
 .pill.wide-btn{align-self:stretch; min-height:46px}
-.pill:active,.btn:active{transform:scale(.985)}
+.pill:active,.btn:active,.cta:active{transform:scale(.985)}
 .ib{width:44px; height:44px; flex:none; border:0; border-radius:12px; background:none; color:var(--muted); display:grid; place-items:center}
 .ib:hover{background:var(--soft)}
 .ib.danger{color:var(--accent-text)}
@@ -187,11 +189,13 @@ svg{display:block}
 /* no measurable progress yet (checking, starting): a sliding sliver, never a static fill that reads as 15 % */
 .otabar.indet .otafill{width:30%!important; animation:otaslide 1.2s ease-in-out infinite alternate}
 @keyframes otaslide{from{transform:translateX(-20%)}to{transform:translateX(253%)}}
-.chan{display:flex; flex-direction:column; gap:6px}
-.row-actions{display:flex; align-items:center; gap:2px; flex:none}
-.seg{display:flex; padding:3px; border-radius:12px; background:var(--soft); gap:2px}
-.seg-opt{flex:1 1 0; min-height:44px; border:0; border-radius:10px; background:transparent; font-size:13.5px; font-weight:650; display:grid; place-items:center}
-.seg-opt.sel{background:var(--card); box-shadow:0 1px 3px rgba(0,0,0,.12)}
+.chan-select{height:36px; padding:0 28px 0 12px; border-radius:10px; border:1px solid var(--border); background:var(--soft);
+  color:var(--fg); font:inherit; font-size:13.5px; font-weight:600; cursor:pointer; outline:none; appearance:none; -webkit-appearance:none;
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%235b626b' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat:no-repeat; background-position:right 8px center; flex:none}
+.chan-select:hover{background-color:color-mix(in srgb,var(--fg) 6%,var(--soft))}
+.chan-select:focus-visible{border-color:var(--focus); outline:2px solid var(--focus); outline-offset:1px}
+.chan-select:disabled,.chan-select.disabled{cursor:default; pointer-events:none; opacity:.45}
 .row-fw{position:relative}
 .row-fw .otabar{position:absolute; bottom:0; left:0; right:0; height:3px; border-radius:0}
 .ver-btn{background:none; border:0; padding:2px 6px; margin:-2px -6px; font:inherit; color:inherit; text-align:left; cursor:pointer; width:fit-content; border-radius:6px; display:inline-flex; align-items:center; gap:8px; -webkit-tap-highlight-color:transparent; transition:background .15s ease}
@@ -201,28 +205,13 @@ svg{display:block}
 .ver-btn:active{transform:scale(.98); background:var(--soft)}
 .ver-btn:disabled,.ver-btn.disabled{cursor:default; pointer-events:none}
 .ver-btn:disabled .rv,.ver-btn.disabled .rv{text-decoration:none; color:var(--muted)}
-.pane-settings.ota-busy .row:not(.row-fw) button,#paneSettings.ota-busy .row:not(.row-fw) button{pointer-events:none; opacity:.45; cursor:default}
-.chan-changelog-wrap{display:flex; flex-direction:column; gap:6px}
-.chan-changelog-box{max-height:220px; overflow-y:auto; overscroll-behavior:contain; -webkit-overflow-scrolling:touch;
-  background:var(--soft); border:1px solid var(--border); border-radius:12px; padding:10px 14px; font-size:13px; line-height:1.45; box-sizing:border-box}
-.chan-changelog-list{margin:0; padding-left:18px; display:flex; flex-direction:column; gap:4px}
-.chan-changelog-list li{overflow-wrap:anywhere}
-.chan-changelog-loading{padding:10px; text-align:center; font-size:12.5px; color:var(--muted)}
-.pr-list-wrap{display:flex; flex-direction:column; gap:8px}
-.pr-rows{display:flex; flex-direction:column; gap:6px; max-height:240px; overflow-y:auto; overscroll-behavior:contain; -webkit-overflow-scrolling:touch}
-.pr-row{display:flex; align-items:center; gap:10px; padding:10px 14px; border-radius:12px; min-height:48px; box-sizing:border-box; background:var(--soft); font-size:13px; line-height:1.25; cursor:pointer; user-select:none; border:1px solid transparent; transition:background .15s, border-color .15s}
-.pr-row:hover{background:color-mix(in srgb,var(--fg) 6%,var(--soft))}
-.pr-row:focus-visible{outline:2px solid var(--accent); outline-offset:1px}
-.pr-row.sel{background:color-mix(in srgb,var(--accent) 10%,var(--card)); border-color:color-mix(in srgb,var(--accent) 40%,transparent)}
-.pr-row-num{font-size:12.5px; font-weight:700; flex:none; min-width:42px; color:var(--muted)}
-.pr-row.sel .pr-row-num{color:var(--accent-text)}
-.pr-row-title{flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-weight:550}
-.pr-loading{padding:12px; text-align:center; font-size:12.5px; color:var(--muted)}
+.pane-settings.ota-busy .row:not(.row-fw) button,#paneSettings.ota-busy .row:not(.row-fw) button,
+.pane-settings.ota-busy .chan-select,#paneSettings.ota-busy .chan-select{pointer-events:none; opacity:.45; cursor:default}
 .meta{font-size:12.5px; color:var(--muted); overflow-wrap:anywhere}
 
 /* sheets / dialogs: vertically and horizontally centered on all devices (mobile, tablet, desktop) */
 .modal{position:fixed; inset:0; z-index:20; display:flex; align-items:center; justify-content:center; padding:16px; box-sizing:border-box}
-#askModal,#chanModal{z-index:21} /* sheets sit above the OTA dialog, see syncModal() */
+#askModal{z-index:21} /* sheets sit above the OTA dialog, see syncModal() */
 .modal-backdrop{position:absolute; inset:0; background:var(--scrim); animation:fade .15s ease}
 .sheet{position:relative; width:100%; max-width:460px; max-height:calc(100vh - 32px); overflow:auto; background:var(--card);
   border-radius:20px; box-shadow:0 20px 60px rgba(0,0,0,.3); padding:20px;

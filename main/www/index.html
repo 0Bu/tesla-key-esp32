@@ -92,9 +92,11 @@
           <span class="rb">
             <span class="rl">Firmware</span>
             <button type="button" class="ver-btn" id="verLink" onclick="openFwUpdate()" aria-label="Check for firmware updates" title="Check for firmware updates"><span class="rv mono" id="fwVer">&mdash;</span><span class="chip-badge hide" id="fwBadge"></span></button>
-            <span class="rs" id="fwSub"></span>
           </span>
-          <button type="button" class="ib" id="chanBtn" onclick="editChannel()" aria-label="Select update channel" title="Update channel"><svg viewBox="0 0 24 24"><use href="#ic-pencil"/></svg></button>
+          <select class="chan-select" id="chanSelect" onchange="onChannelChange(this.value)" aria-label="Update channel">
+            <option value="release">Release</option>
+            <option value="dev">Development</option>
+          </select>
           <div class="otabar hide" id="otaBar"><div class="otafill" id="otaFill"></div></div>
         </div>
       </section>
@@ -123,41 +125,6 @@
   </div>
 </div>
 
-<div class="modal hide" id="chanModal" role="dialog" aria-modal="true" aria-labelledby="chanModalTitle">
-  <div class="modal-backdrop" id="chanBackdrop" onclick="closeChanModal()"></div>
-  <div class="sheet modal-card" tabindex="-1">
-    <h2 class="sheet-title" id="chanModalTitle">Update channel</h2>
-    <p class="note">Select the firmware channel to receive updates from.</p>
-    <div class="seg" role="radiogroup" aria-label="Update channel" onkeydown="handleChanKey(event)">
-      <button type="button" class="seg-opt sel" id="optRelease" role="radio" aria-checked="true" onclick="selectChannel('release')">Release</button>
-      <button type="button" class="seg-opt" id="optDev" role="radio" aria-checked="false" onclick="selectChannel('dev')">Development</button>
-      <button type="button" class="seg-opt hide" id="optPr" role="radio" aria-checked="false" onclick="selectChannel('pr')">PR Preview</button>
-    </div>
-    <div class="chan-changelog-wrap" id="fwChangelog">
-      <div class="chan-changelog-loading hide" id="chanChangelogLoading">Loading changelog…</div>
-      <div class="chan-changelog-box hide" id="chanChangelogBox">
-        <ul class="chan-changelog-list" id="chanChangelogList"></ul>
-        <ul class="chan-changelog-list fw-changes" id="fwChanges" hidden></ul>
-      </div>
-      <p class="note hide" id="chanChangelogEmpty">No changelog available.</p>
-      <p class="note" id="fwNoChanges" hidden>No changelog available.</p>
-    </div>
-    <div class="pr-list-wrap hide" id="prListWrap">
-      <div class="pr-loading hide" id="prLoading">Loading pull requests…</div>
-      <div class="banner hide" id="prRateLimitBanner">
-        <span class="bi" aria-hidden="true"><svg viewBox="0 0 24 24"><use href="#ic-warn"/></svg></span>
-        <span class="bt">GitHub API rate limit reached.</span>
-      </div>
-      <div class="pr-rows" id="prRows"></div>
-      <p class="note hide" id="prEmpty">No pull requests with preview firmware available.</p>
-      <p class="note" id="prNote">Installs a one-off test build. The device stays subscribed to its Release or Development channel.</p>
-    </div>
-    <div class="actions">
-      <button type="button" class="btn secondary" id="chanCancel" onclick="closeChanModal()">Cancel</button>
-      <button type="button" class="btn primary" id="chanSave" onclick="saveChannel()">Save</button>
-    </div>
-  </div>
-</div>
 
 <div class="modal hide" id="otaModal" role="dialog" aria-modal="true" aria-labelledby="otaModalTitle" aria-describedby="otaHelp">
   <div class="modal-backdrop" id="otaBackdrop"></div>
