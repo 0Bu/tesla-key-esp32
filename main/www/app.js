@@ -738,38 +738,15 @@ function renderFwVer(){
 
 function renderVerLink(){
   var vl = $("verLink");
-  var tx = $("verLinkText");
   if(!vl) return;
   var isAvail = !!otaAvail;
   vl.className = 'ver-btn' + (isAvail ? ' avail' : '');
   if(isAvail){
-    if(tx) tx.textContent = 'Install v' + otaAvail;
     vl.title = 'Update ' + otaAvail + ' available — tap to install';
     vl.setAttribute('aria-label', 'Install firmware update ' + otaAvail);
   } else {
-    if(tx) tx.textContent = 'Check for updates';
     vl.title = 'Tap to check for updates';
     vl.setAttribute('aria-label', 'Check for firmware updates');
-  }
-  var fb = $("fwBadge");
-  if(fb){
-    if(isAvail){
-      fb.textContent = 'Update available';
-      fb.className = 'chip-badge avail';
-      if(fb.classList) fb.classList.remove('hide');
-    } else if(otaPhase === 'update'){
-      fb.textContent = 'Updating…';
-      fb.className = 'chip-badge busy';
-      if(fb.classList) fb.classList.remove('hide');
-    } else if(otaBusy || otaPhase === 'check'){
-      fb.textContent = 'Checking…';
-      fb.className = 'chip-badge busy';
-      if(fb.classList) fb.classList.remove('hide');
-    } else {
-      fb.textContent = 'Up to date';
-      fb.className = 'chip-badge hide';
-      if(fb.classList) fb.classList.add('hide');
-    }
   }
 }
 
@@ -1419,7 +1396,8 @@ function askOtaInstall(status, changelog){
   var m = $("otaModal");
   if(m && m.classList) m.classList.remove('hide');
   syncModal();
-  if(installBtn && typeof installBtn.focus === 'function' && !isOpen('askModal')) installBtn.focus();
+  var card = m && m.querySelector ? m.querySelector('.modal-card') : null;
+  if(card && typeof card.focus === 'function' && !isOpen('askModal')) card.focus();
   return new Promise(function(resolve){
     otaDecisionResolve = resolve;
   });

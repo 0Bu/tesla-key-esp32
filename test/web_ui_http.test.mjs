@@ -1170,47 +1170,23 @@ test("channel dropdown onchange triggers /set_ota and otaCheck, immediately refl
   assert.ok(fetchCalls.some(c => c.url === "/set_ota" && JSON.parse(c.opts.body).channel === "release"));
 });
 
-test("adaptive action button #verLink and #fwBadge display based on otaAvail", () => {
+test("adaptive action button #verLink displays title and aria-label based on otaAvail", () => {
   const { context, element } = loadUi();
   const vl = element("verLink");
-  const tx = element("verLinkText");
-  const fb = element("fwBadge");
 
   // Idle state without update
   context.otaAvail = null;
   context.renderVerLink();
-  assert.equal(tx.textContent, "Check for updates");
-  assert.equal(fb.textContent, "Up to date");
+  assert.equal(vl.title, "Tap to check for updates");
+  assert.equal(vl["aria-label"], "Check for firmware updates");
   assert.doesNotMatch(vl.className, /avail/);
 
-  // Checking phase
-  context.otaBusy = true;
-  context.renderVerLink();
-  assert.equal(fb.textContent, "Checking…");
-  assert.equal(fb.className, "chip-badge busy");
-
   // Update available
-  context.otaBusy = false;
   context.otaAvail = "1.7.0";
   context.renderVerLink();
-  assert.equal(tx.textContent, "Install v1.7.0");
+  assert.equal(vl.title, "Update 1.7.0 available — tap to install");
+  assert.equal(vl["aria-label"], "Install firmware update 1.7.0");
   assert.match(vl.className, /avail/);
-  assert.equal(fb.textContent, "Update available");
-  assert.equal(fb.className, "chip-badge avail");
-
-  // Live lifecycle transitions update badge directly without manual renderVerLink
-  context.otaAvail = null;
-  context.otaBegin("check", 10000);
-  assert.equal(fb.textContent, "Checking…");
-  assert.equal(fb.className, "chip-badge busy");
-
-  context.otaBegin("update", 10000);
-  assert.equal(fb.textContent, "Updating…");
-  assert.equal(fb.className, "chip-badge busy");
-
-  context.otaReset();
-  assert.equal(fb.textContent, "Up to date");
-  assert.equal(fb.className, "chip-badge hide");
 });
 
 test("channel switching is responsive and immune to intermediate polling race conditions", async () => {
