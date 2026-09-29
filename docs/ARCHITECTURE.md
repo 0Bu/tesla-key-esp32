@@ -35,15 +35,15 @@ does not imply commit, push, merge, release, hardware, or vehicle authorization.
 
 ## Web UI layout
 
-The device page (`main/www/`, inlined into one gzipped document at build time) is a four-section
-**dock** layout: **Car** (battery gauge, status, detail chips and the one primary action),
-**Setup** (VIN and security key), **Network** (Wi-Fi/Ethernet, Bluetooth, MQTT, Syslog rows) and
-**Firmware** (version, update check, Release/Development channel). Phones show one section at a
-time with a bottom tab dock and a floating primary-action pill; from 900 px a left rail keeps the
-Car pane in the left column and shows the selected section beside it. Switching is pure CSS keyed
-off `.wrap[data-tab]` (`setTab()`); nothing is re-fetched. Text entry and destructive confirmations
-use the page's own sheet (`askText()` / `askConfirm()`, Promise-based) instead of the native
-`prompt()`/`confirm()`, with the same validation, confirmation and fail-closed save handling.
+The device page (`main/www/`, inlined into one gzipped document at build time) arranges
+settings cards vertically: the **Car** hero card (battery gauge, status, detail chips, and direct
+gauge tap action) sits alongside all settings rows in **Setup** (VIN and security key), **Network**
+(Wi-Fi/Ethernet, Bluetooth, MQTT, Syslog rows), and **Firmware** (version display, update check
+button `#verLink`, and update channel selector). On desktop screens, settings rows flow in a clean
+vertical column to the right of the hero card; mobile and tablet viewports stack them in a single
+responsive vertical flow. Text entry, confirmations, and channel selection use centered modal sheets
+(`askText()`, `askConfirm()`, `editChannel()`, Promise-based) with input validation and fail-closed
+save handling.
 
 ## Web UI live feed (`GET /status`)
 
@@ -585,7 +585,9 @@ preserves the `PR/` tree). Constraints:
     applicable between the running and offered candidate versions using `tk::ota_changelog_select_range()`.
   - **Mutation conflict guard (HTTP 409).** While an active firmware update download or flash installation is
     running (`ota_is_updating()`), mutating endpoints (`POST /send_key`, `/set_time`, `/set_mqtt`, `/set_syslog`,
-    `/set_wifi`, `/set_ota`) reject incoming requests with `409 Conflict` (`{"ok":false,"result":false,"reason":"an OTA update is in progress"}`)
+    `/set_wifi`, `/set_ota`) reject incoming requests with `409 Conflict` (standard command response
+    `{"response":{"result":false,"command":"<name>","vin":"","reason":"an OTA update is in progress"}}`, or flat
+    `{"ok":false,"result":false,"reason":"an OTA update is in progress"}` for `POST /send_key`)
     to protect the flashing process from concurrent NVS mutations or reboots. Idle update checks (`GET /ota/check`)
     do not block configuration mutations.
 - **Toolchain pin isolation in PR preview rebuilds.** The `trusted-rebuild` job in
@@ -1390,7 +1392,8 @@ on-device runtime evidence.
 **Active OTA conflict guard (HTTP 409).** When an active firmware download or installation task is running
 (`ota_is_updating()`), configuration mutation endpoints (`POST /send_key`, `/set_time`, `/set_mqtt`,
 `/set_syslog`, `/set_wifi`, `/set_ota`) reject requests immediately with `409 Conflict`
-(`{"ok":false,"result":false,"reason":"an OTA update is in progress"}`) before reading body payloads,
+(standard command response `{"response":{"result":false,"command":"<name>","vin":"","reason":"an OTA update is in progress"}}`,
+or flat `{"ok":false,"result":false,"reason":"an OTA update is in progress"}` for `POST /send_key`) before reading body payloads,
 preventing concurrent NVS operations or reboots while the flash partition is being written. Idle update
 checks do not block configuration changes.
 

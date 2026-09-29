@@ -88,7 +88,7 @@ beyond what the open REST routes already allow). This is acceptable only because
 - the enrolled key is **Charging Manager only** — it cannot unlock or drive the car, just
   control charging and wake (see the role restriction in `vehicle_pairing.cpp`); and
 - the device is meant to live on a **trusted home LAN**, never exposed to the internet; and
-- mutating configuration endpoints (`POST /send_key`, `/set_time`, `/set_mqtt`, `/set_syslog`, `/set_wifi`, `/set_ota`) enforce an active-update conflict guard, returning `409 Conflict` during firmware flashing to eliminate TOCTOU windows between concurrent configuration writes, NVS operations, and flash restarts.
+- mutating configuration endpoints (`POST /send_key`, `/set_time`, `/set_mqtt`, `/set_syslog`, `/set_wifi`, `/set_ota`) enforce an active-update conflict guard, returning `409 Conflict` during firmware flashing to mitigate race conditions and prevent concurrent configuration writes, NVS operations, and flash restarts.
 
 If you need access control, put the device behind a reverse proxy with TLS + auth, or
 segment it onto a trusted VLAN. A proxy must send a device-owned upstream `Host` (the current

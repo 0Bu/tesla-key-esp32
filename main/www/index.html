@@ -91,11 +91,10 @@
           <span class="ri"><svg viewBox="0 0 24 24"><use href="#ic-chip"/></svg><span class="dot ok" id="fwDot"></span></span>
           <span class="rb">
             <span class="rl">Firmware</span>
-            <span class="rv mono" id="fwVer">&mdash;</span>
+            <button type="button" class="ver-btn" id="verLink" onclick="openFwUpdate()" aria-label="Check for firmware updates" title="Check for firmware updates"><span class="rv mono" id="fwVer">&mdash;</span><span class="chip-badge hide" id="fwBadge"></span></button>
             <span class="rs" id="fwSub"></span>
           </span>
           <button type="button" class="ib" id="chanBtn" onclick="editChannel()" aria-label="Select update channel" title="Update channel"><svg viewBox="0 0 24 24"><use href="#ic-pencil"/></svg></button>
-          <button type="button" class="ver-btn" id="verLink" style="display:none" onclick="openFwUpdate()" aria-label="Check for firmware updates" title="Check for firmware updates"><span class="rv mono" id="fwVerText">&mdash;</span><span id="verLinkText"></span><span class="chip-badge hide" id="fwBadge"></span></button>
           <div class="otabar hide" id="otaBar"><div class="otafill" id="otaFill"></div></div>
         </div>
       </section>
@@ -112,8 +111,8 @@
     <p class="hide" id="askText"></p>
     <div class="field hide" id="askField">
       <div class="field-top"><label for="askInput" id="askLabel"></label><span class="field-hint" id="askHint"></span></div>
-      <input id="askInput" autocomplete="off" autocapitalize="off" spellcheck="false">
-      <span class="field-err hide" id="askErr"></span>
+      <input id="askInput" autocomplete="off" autocapitalize="off" spellcheck="false" aria-describedby="askErr">
+      <span class="field-err hide" id="askErr" role="alert"></span>
     </div>
     <div class="detail mono hide" id="askDetail"></div>
     <p class="note" id="askNote"></p>

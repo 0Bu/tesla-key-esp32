@@ -417,33 +417,35 @@ function fmtAgo(sec){
 var uiTab='car';
 var TAB_TITLE={car:'tesla-key-esp32', setup:'Setup', net:'Network', fw:'Firmware'};
 var TAB_BTN={car:'tabCar', setup:'tabSetup', net:'tabNet', fw:'tabFw'};
+function scrollToKey(){
+  var el = $("rowKey") || $("paneSettings");
+  if(el && typeof el.scrollIntoView === 'function'){
+    try { el.scrollIntoView({ behavior: 'smooth' }); } catch(e){ el.scrollIntoView(); }
+  }
+  var btn = $("keyBtn");
+  if(btn && typeof btn.focus === 'function') btn.focus();
+}
+
 function setTab(t){
   if(!TAB_TITLE[t]) return;
   uiTab=t;
   var w=$("wrap"); if(w) w.setAttribute('data-tab',t);
   for(var k in TAB_BTN){ var b=$(TAB_BTN[k]); if(!b) continue; if(k===t) b.setAttribute('aria-current','page'); else if(b.removeAttribute) b.removeAttribute('aria-current'); }
   var pt=$("paneTitle"); if(pt) pt.textContent=TAB_TITLE[t];
-  if(t==='fw') loadPrList(false);
+  if(t==='setup') scrollToKey();
+  else if(t==='net'){ var n = $('rowWifi'); if(n && typeof n.scrollIntoView === 'function') try { n.scrollIntoView({ behavior: 'smooth' }); } catch(e){ n.scrollIntoView(); } }
+  else if(t==='fw'){ var f = $('rowFw'); if(f && typeof f.scrollIntoView === 'function') try { f.scrollIntoView({ behavior: 'smooth' }); } catch(e){ f.scrollIntoView(); } loadPrList(false); }
 }
 function setBadge(id,on){ var b=$(id); if(b&&b.classList) b.classList.toggle('hide',!on); }
 
-// The hero's one primary action, picked by render(); the gauge and the pill both call heroTap().
+// The hero's one primary action, picked by render(); the gauge calls heroTap().
 var heroActFn=null;
 function heroTap(){ if(heroActFn) return heroActFn(); }
 function setHeroAct(label,icon,fn,busyText){
-  var b=$("heroAct"), w=$("wrap");
   heroActFn=busyText?null:fn;
-  if(!b) return;
-  var show=!!(fn||busyText);
-  b.classList.toggle('hide',!show);
-  b.classList.toggle('busy',!!busyText);
-  b.disabled=!!busyText;
-  if(w&&w.classList) w.classList.toggle('has-cta',show);
-  var tx=$("heroActTx"); if(tx) tx.textContent=busyText||label||'';
-  var ic=$("heroActIc"); if(ic){ setHTML(ic,busyText?'':iconSVG(icon)); ic.style.display=busyText?'none':''; }
 }
 var bannerFn=null;
-function bannerAction(){ if(typeof isOtaRunning === 'function' && isOtaRunning()) return; if(bannerFn) return bannerFn(); }
+function bannerAction(){ if(isOtaRunning()) return; if(bannerFn) return bannerFn(); }
 
 /* ---------- render ---------- */
 // Connection row: tone ('ok' | 'warn' | '') colours the icon dot, status line and signal glyph.
@@ -496,7 +498,7 @@ function render(s){
   if(s.reauth && !paired){
     rb.classList.add('show');
     setHTML(rb.querySelector('.bt'),'<b>Key was reset</b> — The vehicle removed this device’s key, so a fresh one was generated automatically. Approve the new pairing on your Tesla’s touchscreen.');
-    if(ba) ba.textContent='Open setup'; bannerFn=function(){ setTab('setup'); };
+    if(ba) ba.textContent='Open setup'; bannerFn=function(){ scrollToKey(); };
   } else if(safe){
     rb.classList.add('show');
     setHTML(rb.querySelector('.bt'),'<b>Safe Mode active</b> — Vehicle Bluetooth, commands, and telemetry are stopped. Use this recovery dashboard to inspect diagnostics or update firmware.');
@@ -754,16 +756,14 @@ function renderVerLink(){
   var vl = $("verLink");
   var tx = $("verLinkText");
   if(!vl) return;
-  var act = getActiveChannel();
   var pr = getTargetPr();
   var isAvail = !!otaAvail;
+  vl.className = 'ver-btn' + (isAvail ? ' avail' : '');
   if(isAvail){
-    vl.className = 'pill primary wide-btn avail';
     if(tx) tx.textContent = pr > 0 ? ('Install PR #' + pr) : ('Install v' + otaAvail);
     vl.title = pr > 0 ? ('PR #' + pr + ' update ' + otaAvail + ' available — tap to install') : ('Update ' + otaAvail + ' available — tap to install');
     vl.setAttribute('aria-label', pr > 0 ? ('Install PR #' + pr + ' firmware update ' + otaAvail) : ('Install firmware update ' + otaAvail));
   } else {
-    vl.className = 'pill soft wide-btn';
     if(tx) tx.textContent = pr > 0 ? 'Check PR Updates' : 'Check for updates';
     vl.title = pr > 0 ? ('Tap to check for PR #' + pr + ' updates') : 'Tap to check for updates';
     vl.setAttribute('aria-label', pr > 0 ? ('Check for PR #' + pr + ' firmware updates') : 'Check for firmware updates');
@@ -772,16 +772,20 @@ function renderVerLink(){
   if(fb){
     if(isAvail){
       fb.textContent = 'Update available';
-      fb.className = 'fw-badge avail';
+      fb.className = 'chip-badge avail';
+      if(fb.classList) fb.classList.remove('hide');
     } else if(otaPhase === 'update'){
       fb.textContent = 'Updating…';
-      fb.className = 'fw-badge busy';
+      fb.className = 'chip-badge busy';
+      if(fb.classList) fb.classList.remove('hide');
     } else if(otaBusy || otaPhase === 'check'){
       fb.textContent = 'Checking…';
-      fb.className = 'fw-badge busy';
+      fb.className = 'chip-badge busy';
+      if(fb.classList) fb.classList.remove('hide');
     } else {
       fb.textContent = 'Up to date';
-      fb.className = 'fw-badge ok';
+      fb.className = 'chip-badge hide';
+      if(fb.classList) fb.classList.add('hide');
     }
   }
 }
@@ -876,7 +880,7 @@ function askValidate(){
   return !bad;
 }
 function askOpen(o,cancelValue){
-  if(typeof isOtaRunning === 'function' && isOtaRunning()) return Promise.resolve(cancelValue);
+  if(isOtaRunning()) return Promise.resolve(cancelValue);
   if(askResolve) askClose(askCancelValue);
   askReturnFocus=(typeof document!=='undefined')?document.activeElement:null;
   askCancelValue=cancelValue;
@@ -1006,7 +1010,7 @@ function utf8Len(v){
 }
 function vinValid(v){return /^[A-HJ-NPR-Z0-9]{17}$/i.test(v)}
 function editVin(){
-  if(typeof isOtaRunning === 'function' && isOtaRunning()) return Promise.resolve();
+  if(isOtaRunning()) return Promise.resolve();
   var cur=(state&&state.vin&&state.vin!=='UNKNOWN')?state.vin:'';
   var hasKey=!(state&&state.key_present===false);
   var v;
@@ -1057,7 +1061,7 @@ function editVin(){
   });
 }
 function editMqtt(){
-  if(typeof isOtaRunning === 'function' && isOtaRunning()) return Promise.resolve();
+  if(isOtaRunning()) return Promise.resolve();
   var cur=(state&&state.mqtt&&state.mqtt.broker)?state.mqtt.broker:'';
   return askText({
     title:'MQTT broker', label:'Broker (IP:PORT or URI)', value:cur, placeholder:'192.0.2.20:1883', mono:true,
@@ -1101,7 +1105,7 @@ function editMqtt(){
   });
 }
 function editSyslog(){
-  if(typeof isOtaRunning === 'function' && isOtaRunning()) return Promise.resolve();
+  if(isOtaRunning()) return Promise.resolve();
   var sy=state&&state.syslog, cur=(sy&&sy.host)?(sy.host+':'+(sy.port||514)):'';
   return askText({
     title:'Syslog server', label:'Server (IP:PORT)', value:cur, placeholder:'192.0.2.30:514', mono:true,
@@ -1176,7 +1180,7 @@ function wakeCar(){
     .catch(function(){ wakeStop(); toast('Wake failed — is the car in range?', 'err', 'wake'); poll(); });
 }
 function genKey(){
-  if(typeof isOtaRunning === 'function' && isOtaRunning()) return Promise.resolve();
+  if(isOtaRunning()) return Promise.resolve();
   var keyKnown = state && typeof state.key_present === 'boolean';
   var hasKey = keyKnown ? state.key_present : true;
   var ask = hasKey ? askConfirm({
@@ -1238,7 +1242,10 @@ function otaInline(html,cls,pct){
 }
 function otaInlineClear(delay){ clearTimeout(otaClearTimer); otaClearTimer=setTimeout(function(){ otaClearTimer=null; otaInline(''); }, delay||3000); }
 function otaBegin(phase,timeout){ clearTimeout(otaClearTimer); otaClearTimer=null; otaPhase=phase; otaDeadline=Date.now()+timeout; otaLastToastMilestone=null; renderVerLink(); }
-function otaReset(){ clearTimeout(otaTimer); clearTimeout(otaClearTimer); otaClearTimer=null; otaBusy=false; otaAvail=null; otaPhase=null; otaPollState=null; otaDeadline=0; otaExpectedVersion=null; otaLastToastMilestone=null; renderVerLink(); if(typeof syncOtaUi === 'function') syncOtaUi(); }
+function isOtaRunning(){
+  return !!(otaBusy || otaPhase === 'update' || (typeof otaPollState === 'string' && (otaPollState === 'downloading' || otaPollState === 'done')));
+}
+function otaReset(){ clearTimeout(otaTimer); clearTimeout(otaClearTimer); otaClearTimer=null; otaBusy=false; otaPhase=null; otaPollState=null; otaDeadline=0; otaExpectedVersion=null; otaLastToastMilestone=null; renderVerLink(); if(typeof syncOtaUi === 'function') syncOtaUi(); }
 function otaFail(message){ otaReset(); if(typeof closeOtaModal === 'function') closeOtaModal(false); toast(message, 'err', 'ota'); otaInline('<span>'+esc(message)+'</span>','err'); otaInlineClear(6000); if(typeof syncOtaUi === 'function') syncOtaUi(); }
 function otaSchedule(fn,delay){
   if(!otaDeadline||Date.now()<otaDeadline){ otaTimer=setTimeout(fn,delay); return; }
@@ -1300,20 +1307,40 @@ function renderPrRows(){
   var container = $("prRows");
   var emptyNote = $("prEmpty");
   if(!container) return;
-  if(typeof container.replaceChildren === 'function'){
-    container.replaceChildren();
-  } else {
-    container.textContent = '';
-    if(Array.isArray(container.children)) container.children.length = 0;
-    while(container.firstChild) container.removeChild(container.firstChild);
-  }
   var loading = $("prLoading");
   var isLoading = loading && !loading.classList.contains('hide');
   if(emptyNote){
     emptyNote.classList.toggle('hide', prList.length > 0 || isLoading);
   }
-  for(var i = 0; i < prList.length; i++){
-    container.appendChild(createPrRow(prList[i]));
+  var currentRows = container.children || [];
+  var matches = (currentRows.length === prList.length);
+  if(matches){
+    for(var k = 0; k < prList.length; k++){
+      if(!currentRows[k].dataset || currentRows[k].dataset.prNum !== String(prList[k].number)){
+        matches = false;
+        break;
+      }
+    }
+  }
+  if(!matches){
+    if(typeof container.replaceChildren === 'function'){
+      container.replaceChildren();
+    } else {
+      container.textContent = '';
+      if(Array.isArray(container.children)) container.children.length = 0;
+      while(container.firstChild) container.removeChild(container.firstChild);
+    }
+    for(var i = 0; i < prList.length; i++){
+      container.appendChild(createPrRow(prList[i]));
+    }
+  } else {
+    for(var j = 0; j < currentRows.length; j++){
+      var r = currentRows[j];
+      var pr = prList[j];
+      var isSel = (pr.number === selectedPr);
+      if(r.classList) r.classList.toggle('sel', isSel);
+      r.setAttribute('aria-checked', isSel ? 'true' : 'false');
+    }
   }
 }
 
@@ -1323,7 +1350,7 @@ var chanChangelogAbort = null;
 var chanChangelogCache = {};
 
 function selectPr(num){
-  if(otaBusy || (typeof isOtaRunning === 'function' && isOtaRunning())) return;
+  if(isOtaRunning()) return;
   var n = parseInt(num, 10);
   if(!n || n <= 0) return;
   selectedPr = n;
@@ -1343,17 +1370,24 @@ function selectPr(num){
 function updateChanSaveBtn(){
   var saveBtn = $("chanSave");
   if(!saveBtn) return;
-  var c = selectedChan || (getTargetPr() > 0 ? 'pr' : (otaChannel || 'release'));
+  var c = selectedChan || getActiveChannel() || 'release';
   if(c === 'pr'){
     var instPr = getInstalledPr();
-    if(!selectedPr && prList && prList.length > 0){
-      selectedPr = instPr || activePr || prList[0].number;
+    var prNum = selectedPr || instPr || activePr;
+    var selObj = null;
+    if(prList && prList.length > 0){
+      for(var k = 0; k < prList.length; k++){
+        if(prList[k].number === prNum){ selObj = prList[k]; break; }
+      }
     }
-    if(selectedPr > 0 && selectedPr === instPr){
+    if(prNum > 0 && prNum === instPr){
       saveBtn.textContent = 'Check for updates';
       saveBtn.disabled = false;
-    } else if(selectedPr > 0){
-      saveBtn.textContent = 'Install PR #' + selectedPr;
+    } else if(selObj && selObj.ready === false){
+      saveBtn.textContent = 'No build';
+      saveBtn.disabled = true;
+    } else if(prNum > 0){
+      saveBtn.textContent = 'Install PR #' + prNum;
       saveBtn.disabled = false;
     } else {
       saveBtn.textContent = 'Select a PR';
@@ -1396,28 +1430,17 @@ function createPrRow(pr){
   title.title = '#' + pr.number + ': ' + (pr.title || '');
   row.appendChild(title);
 
-  var btn = document.createElement('button');
-  btn.type = 'button';
-  btn.className = 'btn small pr-row-btn ' + (pr.ready ? 'primary' : 'secondary');
   if(isInstalled){
-    btn.textContent = 'Installed';
-    btn.className = 'chip-badge';
-  } else if(pr.ready){
-    btn.textContent = 'Install';
-    btn.setAttribute('aria-label', 'Install PR #' + pr.number);
-    btn.title = 'Install PR #' + pr.number;
-    btn.onclick = function(e){
-      if(e && e.stopPropagation) e.stopPropagation();
-      selectPr(pr.number);
-      installPr(pr.number);
-    };
-  } else {
-    btn.textContent = 'No build';
-    btn.disabled = true;
-    btn.setAttribute('aria-label', 'No preview build available for PR #' + pr.number);
-    btn.title = 'No preview build available for PR #' + pr.number;
+    var badge = document.createElement('span');
+    badge.className = 'chip-badge';
+    badge.textContent = 'Installed';
+    row.appendChild(badge);
+  } else if(!pr.ready){
+    var badge = document.createElement('span');
+    badge.className = 'chip-badge warn';
+    badge.textContent = 'No build';
+    row.appendChild(badge);
   }
-  row.appendChild(btn);
 
   return row;
 }
@@ -1537,7 +1560,6 @@ function otaStatus(){
 function renderChanMenu(){
   renderFwSub();
   if(chanModalOpen){
-    updateChanModalUi();
     if(typeof syncOtaUi === 'function') syncOtaUi();
     return;
   }
@@ -1659,7 +1681,7 @@ function setChannel(chan, hadPr){
 }
 
 function installPr(num){
-  if(otaBusy || (typeof isOtaRunning === 'function' && isOtaRunning())) return Promise.resolve();
+  if(isOtaRunning()) return Promise.resolve();
   var n = parseInt(num, 10);
   if(!n || n <= 0 || n > 2147483647) return Promise.resolve();
   activePr = n;
@@ -1678,7 +1700,7 @@ function installPr(num){
 }
 
 function editChannel(){
-  if(otaBusy || (typeof isOtaRunning === 'function' && isOtaRunning())) return Promise.resolve();
+  if(isOtaRunning()) return Promise.resolve();
   var pr = getTargetPr();
   selectedChan = (pr > 0) ? 'pr' : (otaChannel || 'release');
   selectedPr = pr || getInstalledPr() || 0;
@@ -1688,7 +1710,6 @@ function editChannel(){
   syncModal();
   updateChanModalUi();
   loadPrList(false);
-  loadChanChangelog(selectedChan);
   var btn = $("optRelease");
   if(selectedChan === 'dev') btn = $("optDev");
   else if(selectedChan === 'pr') btn = $("optPr");
@@ -1696,7 +1717,7 @@ function editChannel(){
 }
 
 function selectChannel(chan){
-  if(otaBusy || (typeof isOtaRunning === 'function' && isOtaRunning())) return;
+  if(isOtaRunning()) return;
   selectedChan = chan;
   if(chan === 'pr'){
     if(!selectedPr){
@@ -1705,11 +1726,10 @@ function selectChannel(chan){
     loadPrList(false);
   }
   updateChanModalUi();
-  loadChanChangelog(chan);
 }
 
 function updateChanModalUi(){
-  var c = selectedChan || (getTargetPr() > 0 ? 'pr' : (otaChannel || 'release'));
+  var c = selectedChan || getActiveChannel() || 'release';
   var r = $("optRelease"), d = $("optDev"), p = $("optPr");
   if(r){
     r.className = 'seg-opt' + (c === 'release' ? ' sel' : '');
@@ -1741,6 +1761,8 @@ function updateChanModalUi(){
   updateChanSaveBtn();
 }
 
+var chanChangelogInFlight = null;
+
 function loadChanChangelog(chan){
   var wrap = $("fwChangelog");
   if(chan === 'pr'){
@@ -1750,10 +1772,15 @@ function loadChanChangelog(chan){
   if(wrap && wrap.classList) wrap.classList.remove('hide');
   if(chan !== 'release' && chan !== 'dev') return Promise.resolve('');
 
-  if(chanChangelogCache[chan] !== undefined){
+  if(chanChangelogCache[chan] !== undefined && chanChangelogCache[chan] !== ''){
     renderChanChangelog(chanChangelogCache[chan]);
     return Promise.resolve(chanChangelogCache[chan]);
   }
+
+  if(chanChangelogInFlight === chan){
+    return Promise.resolve('');
+  }
+  chanChangelogInFlight = chan;
 
   var loading = $("chanChangelogLoading");
   var box = $("chanChangelogBox");
@@ -1766,6 +1793,8 @@ function loadChanChangelog(chan){
     try { chanChangelogAbort.abort(); } catch(e){}
   }
   chanChangelogAbort = typeof AbortController !== 'undefined' ? new AbortController() : null;
+  var ctl = chanChangelogAbort;
+  var timer = setTimeout(function(){ if(ctl) ctl.abort(); }, OTA_HTTP_TIMEOUT_MS);
 
   var url = (chan === 'dev')
     ? 'https://0bu.github.io/tesla-key-esp32/dev/changelog.json'
@@ -1773,32 +1802,34 @@ function loadChanChangelog(chan){
 
   return fetch(url, {
     cache: 'no-store',
-    signal: chanChangelogAbort ? chanChangelogAbort.signal : undefined
+    signal: ctl ? ctl.signal : undefined
   })
     .then(function(r){
+      clearTimeout(timer);
       if(!r.ok) throw new Error('HTTP ' + r.status);
       return r.json();
     })
     .then(function(data){
+      chanChangelogInFlight = null;
       var text = (data && typeof data.changelog === 'string') ? data.changelog : '';
-      chanChangelogCache[chan] = text;
+      if(text) chanChangelogCache[chan] = text;
       if(selectedChan === chan) renderChanChangelog(text);
       return text;
     })
     .catch(function(err){
+      clearTimeout(timer);
+      chanChangelogInFlight = null;
       if(err && err.name === 'AbortError') return '';
       if(chan === otaChannel){
         return loadOtaChangelog().then(function(notes){
-          chanChangelogCache[chan] = notes || '';
+          if(notes) chanChangelogCache[chan] = notes;
           if(selectedChan === chan) renderChanChangelog(notes || '');
           return notes || '';
         }).catch(function(){
-          chanChangelogCache[chan] = '';
           if(selectedChan === chan) renderChanChangelog('');
           return '';
         });
       }
-      chanChangelogCache[chan] = '';
       if(selectedChan === chan) renderChanChangelog('');
       return '';
     });
@@ -1849,11 +1880,11 @@ function closeChanModal(){
   syncModal();
   if(open) renderChanMenu();
   var btn = $("chanBtn");
-  if(btn && typeof btn.focus === 'function' && !(typeof isOtaRunning === 'function' && isOtaRunning())) btn.focus();
+  if(btn && typeof btn.focus === 'function' && !isOtaRunning()) btn.focus();
 }
 
 function saveChannel(){
-  if(otaBusy || (typeof isOtaRunning === 'function' && isOtaRunning())) return Promise.resolve();
+  if(isOtaRunning()) return Promise.resolve();
   var c = selectedChan || 'release';
   if(c === 'pr'){
     var target = selectedPr || getTargetPr();
@@ -1909,7 +1940,7 @@ function closeOtaModal(decision){
   syncModal();
   var btn = $("verLink") || $("chanBtn");
   if(btn && typeof btn.getClientRects === 'function' && !btn.getClientRects().length) btn = $(TAB_BTN[uiTab]);
-  if(btn && typeof btn.focus === 'function' && !isOpen('askModal') && !(chanModalOpen && isOpen('chanModal')) && !(typeof isOtaRunning === 'function' && isOtaRunning())) btn.focus();
+  if(btn && typeof btn.focus === 'function' && !isOpen('askModal') && !(chanModalOpen && isOpen('chanModal')) && !isOtaRunning()) btn.focus();
   if(otaDecisionResolve){
     var r = otaDecisionResolve;
     otaDecisionResolve = null;
@@ -1918,7 +1949,7 @@ function closeOtaModal(decision){
 }
 
 function openFwUpdate(){
-  if(otaBusy || (typeof isOtaRunning === 'function' && isOtaRunning())) return Promise.resolve();
+  if(isOtaRunning()) return Promise.resolve();
   var curVer = (state && state.version) || '?';
   if(otaAvail){
     return loadOtaChangelog().then(function(notes){
@@ -2198,7 +2229,7 @@ if(typeof document!=='undefined' && typeof document.addEventListener==='function
 }
 
 function otaCheck(){
-  if(otaBusy || (typeof isOtaRunning === 'function' && isOtaRunning())) return Promise.resolve();              // a check/update is already running
+  if(isOtaRunning()) return Promise.resolve();              // a check/update is already running
   otaBusy=true;
   otaBegin('check',OTA_CHECK_TIMEOUT_MS);
   toast('Checking for updates…', 'load', 'ota');
@@ -2320,15 +2351,8 @@ function waitReboot(expectedVer){
 }
 
 
-function isOtaRunning(){
-  if(otaPhase === 'update' || otaPhase === 'reboot') return true;
-  var o = otaPollState;
-  if(o && (o.state === 'downloading' || o.state === 'done')) return true;
-  return false;
-}
-
 function syncOtaUi(){
-  var running = (typeof isOtaRunning === 'function') && isOtaRunning();
+  var running = isOtaRunning();
   var chanBtn = $("chanBtn");
   if(chanBtn && chanBtn.classList) chanBtn.classList.toggle('hide', running);
   var verBtn = $("verLink");
@@ -2404,6 +2428,8 @@ function boot(){
   // still making claims about a device we are no longer hearing from.
   setInterval(function(){ if(feedOk) paintCd(); },1000);
   resumeOta();
-  loadPrList(false);
+  if(getTargetPr() > 0 || getInstalledPr() > 0){
+    loadPrList(false);
+  }
 }
 if(!(typeof window!=='undefined'&&window.__TESLA_UI_NO_BOOT__)) boot();

@@ -329,7 +329,7 @@ test("firmware pane exposes the update channel as an accessible radio group", ()
   assert.match(html, /role="radiogroup"[^>]+aria-label="Update channel"/);
   assert.match(html, /id="optRelease"[^>]+role="radio"[^>]+aria-checked="true"/);
   assert.match(html, /id="optDev"[^>]+role="radio"[^>]+aria-checked="false"/);
-  assert.match(html, /id="fwVer"[\s\S]*?id="verLink"[\s\S]*?id="optRelease"/);
+  assert.match(html, /id="verLink"[\s\S]*?id="fwVer"[\s\S]*?id="optRelease"/);
 });
 
 test("section tabs switch the visible pane and mark the current tab", () => {
@@ -1560,15 +1560,20 @@ test("PR preview FW is only offered when matching PRs exist, and inline list ins
   assert.equal(element("prListWrap").classList.contains("hide"), false);
   assert.equal(element("verLink").classList.contains("hide"), false, "verLink is visible in PR mode");
 
-  // PR rows rendered with install button
+  // PR rows rendered as accessible radio cards without nested buttons
   const rows = element("prRows").children;
   assert.equal(rows.length, 1);
   const row = rows[0];
+  assert.equal(row.role, "radio");
   assert.equal(row.children[0].textContent, "#337");
   assert.equal(row.children[1].textContent, "Feature PR 337");
-  const installBtn = row.children[2];
-  assert.equal(installBtn.textContent, "Install");
-  assert.equal(!installBtn.disabled, true);
+  assert.equal(row.children.length, 2, "PR row has only num and title children, no nested button");
+
+  // Selecting the PR row updates aria-checked and the modal action button
+  context.selectPr(337);
+  assert.equal(row["aria-checked"], "true");
+  assert.equal(element("chanSave").textContent, "Install PR #337");
+  assert.equal(element("chanSave").disabled, false);
 
   // Modal dialog #prModal is completely absent from DOM
   const indexHtml = fs.readFileSync(new URL("../main/www/index.html", import.meta.url), "utf8");
@@ -1671,7 +1676,7 @@ test("adaptive action button #verLink and #fwBadge display based on otaAvail and
   context.otaBusy = true;
   context.renderVerLink();
   assert.equal(fb.textContent, "Checking…");
-  assert.equal(fb.className, "fw-badge busy");
+  assert.equal(fb.className, "chip-badge busy");
 
   // Update available without PR
   context.otaBusy = false;
@@ -1681,7 +1686,7 @@ test("adaptive action button #verLink and #fwBadge display based on otaAvail and
   assert.equal(tx.textContent, "Install v1.7.0");
   assert.match(vl.className, /avail/);
   assert.equal(fb.textContent, "Update available");
-  assert.equal(fb.className, "fw-badge avail");
+  assert.equal(fb.className, "chip-badge avail");
 
   // Update available with PR 337
   context.activePr = 337;
@@ -1694,15 +1699,15 @@ test("adaptive action button #verLink and #fwBadge display based on otaAvail and
   context.otaAvail = null;
   context.otaBegin("check", 10000);
   assert.equal(fb.textContent, "Checking…");
-  assert.equal(fb.className, "fw-badge busy");
+  assert.equal(fb.className, "chip-badge busy");
 
   context.otaBegin("update", 10000);
   assert.equal(fb.textContent, "Updating…");
-  assert.equal(fb.className, "fw-badge busy");
+  assert.equal(fb.className, "chip-badge busy");
 
   context.otaReset();
   assert.equal(fb.textContent, "Up to date");
-  assert.equal(fb.className, "fw-badge ok");
+  assert.equal(fb.className, "chip-badge hide");
 });
 
 test("PR discovery loads from GitHub API, caches in sessionStorage, and probes readiness", async () => {
@@ -2278,11 +2283,13 @@ test("UI disables settings and hides channel button during active OTA, closes op
   assert.equal(element("syslogBtn").disabled, false);
 });
 
-test("firmware card displays version with pencil icon button and no wide pill button", () => {
+test("firmware card displays version with pencil icon button and accessible verLink button", () => {
   const html = fs.readFileSync(new URL("../main/www/index.html", import.meta.url), "utf8");
-  assert.match(html, /<div class="row row-fw" id="rowFw">[\s\S]*?id="fwVer"[\s\S]*?id="chanBtn"/);
+  assert.match(html, /<div class="row row-fw" id="rowFw">[\s\S]*?id="verLink"[\s\S]*?id="chanBtn"/);
   assert.match(html, /<button type="button" class="ib" id="chanBtn" onclick="editChannel\(\)"/);
-  assert.doesNotMatch(html, /<button[^>]*class="[^"]*wide-btn[^"]*"[^>]*id="verLink"[^>]*style="display:\s*none"/);
+  assert.match(html, /<button type="button" class="ver-btn" id="verLink" onclick="openFwUpdate\(\)"/);
+  assert.doesNotMatch(html, /id="verLink"[^>]*style="[^"]*display:\s*none/);
+  assert.doesNotMatch(html, /class="[^"]*wide-btn[^"]*"/);
 
   const { context, element } = loadUi();
   context.render({ version: "1.4.0", ota: { channel: "release" } });
@@ -2389,4 +2396,62 @@ test("askOtaInstall unhides install button and resolves confirmation", async () 
   context.closeOtaModal(true);
   const decision = await installPromise;
   assert.equal(decision, true);
+});
+
+test("renderPrRows preserves DOM elements and focus across periodic polls when prList is unchanged", () => {
+  const { context, element } = loadUi();
+  context.prList = [
+    { number: 101, title: "PR 101", ready: true },
+    { number: 102, title: "PR 102", ready: true }
+  ];
+  context.selectedPr = 101;
+  context.renderPrRows();
+
+  const container = element("prRows");
+  assert.equal(container.children.length, 2);
+  const row0 = container.children[0];
+  const row1 = container.children[1];
+
+  // Simulate focusing the first row
+  row0.focus();
+  assert.equal(context.document.activeElement, row0);
+
+  // Background poll triggers renderPrRows with unchanged prList
+  context.renderPrRows();
+
+  // The exact same DOM nodes are preserved
+  assert.equal(container.children[0], row0);
+  assert.equal(container.children[1], row1);
+  assert.equal(context.document.activeElement, row0, "Focus is retained on the PR row");
+
+  // Selection change updates aria-checked in place without DOM reconstruction
+  context.selectPr(102);
+  assert.equal(container.children[0], row0);
+  assert.equal(container.children[1], row1);
+  assert.equal(row0["aria-checked"], "false");
+  assert.equal(row1["aria-checked"], "true");
+});
+
+test("mutation endpoints handle HTTP 409 Conflict gracefully with error toast", async () => {
+  const { context } = loadUi();
+  const toasts = [];
+  context.toast = (msg, kind, scope) => toasts.push({ msg, kind, scope });
+  context.state = { vin: "5YJ3E1EA1JF000001", key_present: false, vehicle: { status: "Stopped" } };
+  context.askConfirm = async () => true;
+
+  context.fetch = async (url) => {
+    if (url === "/gen_keys") {
+      return {
+        ok: false,
+        status: 409,
+        async json() { return { result: false, reason: "mutation locked by active session" }; }
+      };
+    }
+    return { ok: true, status: 200, async json() { return {}; } };
+  };
+
+  await context.genKey();
+  const errToast = toasts.find(t => t.kind === "err" && t.scope === "key");
+  assert.ok(errToast, "Error toast displayed on 409 Conflict");
+  assert.match(errToast.msg, /mutation locked/);
 });
