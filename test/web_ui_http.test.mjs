@@ -34,7 +34,7 @@ function loadUi(opts = {}) {
         setAttribute(name, value) { this[name] = String(value); },
         appendChild(child) { this.children.push(child); child.parentNode = this; },
         removeChild(child) { this.children.splice(this.children.indexOf(child), 1); },
-        focus() { if (context.document) context.document.activeElement = this; },
+        focus() { if (!this.disabled && context.document) context.document.activeElement = this; },
         contains(other) {
           if (!other) return false;
           if (other === this) return true;
@@ -357,7 +357,7 @@ test("retired dock/tab and <select> channel code stays out of the page", () => {
   for (const token of ["data-tab", "wide-title", "paneTitle", "chan-select"]) {
     assert.equal((html + css + appSource).includes(token), false, `page must not contain ${token}`);
   }
-  assert.doesNotMatch(css, /\.cta\b|\.pane-settings\b|\.grab\b|\.fwhead\b|\.fwver\b/);
+  assert.doesNotMatch(css, /\.cta\b|\.pane-settings\b|\.grab\b|\.fwhead\b|\.fwver\b|\.ti\b|\.badge\b|--shadow-cta/);
 });
 
 test("update channel modal updates channel selection with OTA check", async () => {
@@ -1979,15 +1979,54 @@ test("focus returns to the update check button after an up-to-date result and af
   assert.equal(context.document.activeElement, element("fwCheckBtn"), "failed check");
 });
 
-test("focus is not pulled back when the user has already moved on to another control", async () => {
+test("fwRefocus hands focus back only when it was lost, and only once the UI is idle", () => {
   const { context, element } = loadUi();
-  context.toast = () => {};
   context.render({ version: "1.6.0", ota: { channel: "release" } });
-  context.fetch = otaFetchStub();
-  await context.selectChannel("dev");            // settles with focus restored to #verLink and fwFocusId consumed
+
+  // the user already moved on to another control: focus stays, the pending target is consumed
   element("mqttBtn").focus();
-  context.render({ version: "1.6.0", ota: { channel: "dev" } });   // periodic status frames call syncOtaUi()
+  context.fwFocusId = "verLink";
+  context.fwRefocus();
   assert.equal(context.document.activeElement, element("mqttBtn"));
+  assert.equal(context.fwFocusId, null);
+
+  // focus was dropped (control disabled while focused): it goes back, without scrolling the page
+  let focusArgs;
+  const verLink = element("verLink");
+  verLink.focus = function (opts) { focusArgs = opts; context.document.activeElement = this; };
+  context.document.activeElement = null;
+  context.fwFocusId = "verLink";
+  context.fwRefocus();
+  assert.equal(context.document.activeElement, verLink);
+  assert.equal(focusArgs && focusArgs.preventScroll, true);
+
+  // still busy: the target is kept for the moment the flow ends
+  context.document.activeElement = null;
+  context.fwFocusId = "verLink";
+  context.otaBusy = true;
+  context.fwRefocus();
+  assert.equal(context.document.activeElement, null);
+  assert.equal(context.fwFocusId, "verLink");
+  context.otaBusy = false;
+  context.fwRefocus();
+  assert.equal(context.document.activeElement, verLink);
+  assert.equal(context.fwFocusId, null);
+});
+
+test("a /set_ota request that never settles times out, rolls back and unlocks the UI", async () => {
+  const { context, element } = loadUi();
+  const toasts = [];
+  context.toast = (msg, type) => toasts.push({ msg, type });
+  context.render({ version: "1.6.0", ota: { channel: "release" } });
+  context.fetch = () => new Promise(() => {});
+  context.setTimeout = (callback) => { queueMicrotask(callback); return 1; };
+
+  await context.selectChannel("dev");
+  assert.equal(context.otaChannel, "release", "optimistic switch is rolled back");
+  assert.equal(element("fwSub").textContent, "Release channel");
+  assert.equal(context.isOtaBusy(), false, "a hung request must not leave the page locked");
+  assert.equal(element("verLink").disabled, false);
+  assert.ok(toasts.some(t => t.type === "err" && t.msg === "Failed to set update channel"));
 });
 
 test("a refused channel change rolls back and shows the device's reason", async () => {
@@ -2005,6 +2044,7 @@ test("a refused channel change rolls back and shows the device's reason", async 
   assert.equal(element("fwSub").textContent, "Release channel");
   assert.equal(context.isOtaBusy(), false);
   assert.ok(toasts.some(t => t.type === "err" && t.msg === "Failed to set update channel — an OTA update is in progress"));
+  assert.equal(context.document.activeElement, element("verLink"), "focus is handed back after the refusal");
 
   toasts.length = 0;
   context.fetch = otaFetchStub({ setOta: () => ({ ok: false, status: 502, async json() { throw new Error("not json"); } }) });

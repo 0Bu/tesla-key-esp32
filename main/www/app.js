@@ -40,7 +40,9 @@ function requestJsonResult(url,options){
     });
   });
 }
-function requestJsonWithTimeout(url,options,timeoutMs){
+// send is requestJson or requestJsonResult; either way a request that never settles is aborted
+// and rejected after timeoutMs, so a hung device cannot leave the UI waiting forever.
+function timedRequest(send,url,options,timeoutMs){
   var ctl=typeof AbortController!=='undefined'?new AbortController():null;
   var opts=Object.assign({},options||{}); if(ctl)opts.signal=ctl.signal;
   return new Promise(function(resolve,reject){
@@ -48,13 +50,15 @@ function requestJsonWithTimeout(url,options,timeoutMs){
     var timer=setTimeout(function(){
       if(settled)return; settled=true; if(ctl)ctl.abort(); reject(new Error('request timed out'));
     },timeoutMs);
-    requestJson(url,opts).then(function(value){
+    send(url,opts).then(function(value){
       if(settled)return; settled=true; clearTimeout(timer); resolve(value);
     },function(error){
       if(settled)return; settled=true; clearTimeout(timer); reject(error);
     });
   });
 }
+function requestJsonWithTimeout(url,options,timeoutMs){ return timedRequest(requestJson,url,options,timeoutMs); }
+function requestJsonResultWithTimeout(url,options,timeoutMs){ return timedRequest(requestJsonResult,url,options,timeoutMs); }
 function commandResponse(j){
   var o=j&&j.response;
   if(!o||typeof o.result!=='boolean'||typeof o.reason!=='string') throw new Error('invalid command response');
@@ -797,8 +801,8 @@ function chargeFailMsg(reason,isCharging){
    another settles the first as cancelled. */
 var askResolve=null, askCancelValue=null, askReturnFocus=null, askHintFn=null, askValidateFn=null;
 // While a sheet or the OTA dialog is open the page behind it is inert: aria-modal alone neither
-// stops Tab from walking into the dock and panes nor keeps screen readers inside the dialog.
-// Derived from both dialogs, so closing one while the other is still up keeps the page locked.
+// stops Tab from walking into the rest of the page nor keeps screen readers inside the dialog.
+// Derived from all three dialogs, so closing one while another is still up keeps the page locked.
 // Call it after showing/hiding a dialog and before moving focus back: an inert node can't take it.
 // Both can be open at once (an OTA check finishing while a sheet is up). The sheet is always the
 // top layer (CSS z-index), so Escape closes it first, and the OTA dialog never takes its focus.
@@ -1166,7 +1170,6 @@ function genKey(){
 /* ---------- OTA ---------- */
 // Status shows inline in the header (progress ring + text) and mirrors into the Firmware pane's
 // bar — no bottom popup. A tiny ring sized for the header's status line.
-var otaBusy=false;
 var OTA_CHECK_TIMEOUT_MS=60000, OTA_UPDATE_TIMEOUT_MS=480000, OTA_HTTP_TIMEOUT_MS=5000;
 var otaClearTimer=null;
 var otaLastToastMilestone=null;
@@ -1256,11 +1259,6 @@ function renderChanMenu(){
   var bd = $("chanBadgeDev"); if(bd && bd.classList) bd.classList.toggle('hide', !isDev);
   var or = $("chanOptRelease"); if(or){ if(or.classList) or.classList.toggle('selected', !isDev); or.setAttribute('aria-pressed', isDev ? 'false' : 'true'); }
   var od = $("chanOptDev"); if(od){ if(od.classList) od.classList.toggle('selected', isDev); od.setAttribute('aria-pressed', isDev ? 'true' : 'false'); }
-  var vl = $("verLink");
-  if(vl){
-    vl.title = 'Current: ' + chanLabel + ' — tap to change channel';
-    vl.setAttribute('aria-label', 'Change update channel, current: ' + chanLabel);
-  }
   renderFwVer();
   renderIpLine();
   renderVerLink();
@@ -1281,11 +1279,11 @@ function setChannel(chan){
   renderChanMenu();
   if(typeof syncOtaUi === 'function') syncOtaUi();
 
-  return requestJsonResult('/set_ota', {
+  return requestJsonResultWithTimeout('/set_ota', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ channel: chan })
-  }).then(function(res){
+  }, OTA_HTTP_TIMEOUT_MS).then(function(res){
     if(!res.ok){
       var rj = res.json && res.json.response;
       var err = new Error('HTTP ' + res.status);
@@ -1649,7 +1647,7 @@ function fwRefocus(){
   var ae = (typeof document !== 'undefined') ? document.activeElement : null;
   var lost = !ae || ae === document.body || ae === document.documentElement || ae.disabled || ae.id === id;
   var el = $(id);
-  if(lost && el && typeof el.focus === 'function') el.focus();
+  if(lost && el && typeof el.focus === 'function') el.focus({ preventScroll: true });
 }
 if(typeof window!=='undefined'){
   window.isOtaRunning = isOtaRunning;

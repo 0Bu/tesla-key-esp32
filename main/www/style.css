@@ -7,7 +7,6 @@
   --warn-base:#f59e0b; --warn-lite:#fdba74;
   --scrim:rgba(16,20,28,.4);
   --shadow:0 1px 2px rgba(16,20,28,.04),0 6px 20px rgba(16,20,28,.06);
-  --shadow-cta:0 6px 20px rgba(232,33,39,.35);
   --r-card:18px; --r-tile:14px;
   --ease:cubic-bezier(.2,.7,.3,1);
   --sans:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
@@ -74,11 +73,8 @@ svg{display:block}
 .sub.ok{color:var(--ok-text)} .sub.warn{color:var(--warn-text)}
 .ph{color:var(--muted)}
 
-.ti{position:relative; width:24px; height:24px}
-.ti svg,.ri svg,.ib svg,.pill svg,.bi svg,.warnic svg{width:100%; height:100%; fill:none; stroke:currentColor;
+.ri svg,.ib svg,.pill svg,.bi svg,.warnic svg{width:100%; height:100%; fill:none; stroke:currentColor;
   stroke-width:2; stroke-linecap:round; stroke-linejoin:round}
-.badge{position:absolute; top:-3px; right:-6px; width:10px; height:10px; border-radius:50%; border:2px solid var(--card)}
-.badge.acc{background:var(--accent)} .badge.warn{background:var(--warn)} .badge.info{background:var(--info)}
 
 /* banner */
 .banner{display:none; grid-column:1/-1; flex-wrap:wrap; align-items:center; gap:10px 12px; padding:12px 14px;

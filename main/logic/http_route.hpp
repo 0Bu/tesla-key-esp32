@@ -166,7 +166,7 @@ enum class HttpRouteOtaConflict {
 // 503 Service Unavailable ("... blocked during OTA verification/update") via OtaIdentityMutationGuard;
 // that gate is held by an update check as well, the 409 guard only by an active download/flash.
 // Every other route is not gated: the read-only endpoints and status/diagnostics, vehicle commands,
-// MCP, and also POST /crash_dismiss and GET /coredump?clear=1, which erase the core-dump partition.
+// MCP, and also POST /crash/dismiss and GET /coredump?clear=1, which erase the core-dump partition.
 inline constexpr HttpRouteOtaConflict http_route_ota_conflict(HttpRoute route) noexcept {
     switch (route) {
         case HttpRoute::SendKey:

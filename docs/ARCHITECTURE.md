@@ -193,7 +193,7 @@ esp32/esp32s3/esp32c3/esp32c6, picked at compile time by `TESLA_OTA_IMG_SUFFIX` 
 `CONFIG_IDF_TARGET_*`) via `esp_https_ota` into the inactive OTA slot, then reboots.
 `esp_https_ota` verifies the image chip-id, so a wrong-target image is refused (never
 flashed); one manifest `version` covers all targets (CI builds them from one commit).
-Triggered from the web UI by **Check for updates** in the **Firmware** tab (or the Safe Mode banner).
+Triggered from the web UI by the update-check icon button on the **Firmware** row (or the Safe Mode banner).
 Implemented in `main/ota_update.cpp`.
 
 **Manifest intake is a bounded, exact protocol.** The HTTPS body is capped at 8192 bytes. A
@@ -598,7 +598,7 @@ preserves the `PR/` tree). Constraints:
     are different: a check holds the same OTA gate as an update, so they answer `503` (`OtaIdentityMutationGuard`)
     for the duration of a check as well. The `ota_is_updating()` test is a snapshot taken when the handler starts,
     not an atomic exclusion, so a request that passed it can still overlap an update that starts right afterwards.
-    `POST /crash_dismiss` and `GET /coredump?clear=1` (core-dump erase) are not covered by the guard.
+    `POST /crash/dismiss` and `GET /coredump?clear=1` (core-dump erase) are not covered by the guard.
 - **Toolchain pin isolation in PR preview rebuilds.** The `trusted-rebuild` job in
   `.github/workflows/signed-pr-preview.yml` checks out the PR head commit before reading
   `esp-idf-toolchain.txt`, ensuring PRs that update the ESP-IDF toolchain pin are rebuilt with
@@ -628,7 +628,7 @@ using HA's MQTT-Discovery convention, so every entity auto-appears in Home Assis
 grouped under one device. **Read-only by design** — no command topics are subscribed
 (the car is never controlled or woken from HA). Independent of evcc/BLE/pairing.
 
-- **Config:** broker URI from NVS `mqtt_uri` (web UI: Network tab → MQTT row, stores `host:port`)
+- **Config:** broker URI from NVS `mqtt_uri` (web UI: **MQTT** row, stores `host:port`)
   overriding `CONFIG_TESLA_MQTT_BROKER_URI`; empty = disabled (bridge is a no-op).
   Optional `CONFIG_TESLA_MQTT_USERNAME`/`PASSWORD`, `CONFIG_TESLA_MQTT_DISCOVERY_PREFIX`
   (default `homeassistant`), `CONFIG_TESLA_MQTT_BASE_TOPIC` (default `tesla-key`),
@@ -730,8 +730,8 @@ independently redacted fragments.
 
 - **Config:** one NVS string, `syslog_uri` (`tesla_cfg` namespace) — a bare `"host:port"`, no
   scheme (a bare host defaults to port 514); `""` disables forwarding. Falls back to
-  `CONFIG_TESLA_SYSLOG_SERVER` (Kconfig, default empty). Set from the web UI (Network tab →
-  Syslog row, pencil icon → `POST /set_syslog`, `{"server":"host:port"}`) or NVS/Kconfig
+  `CONFIG_TESLA_SYSLOG_SERVER` (Kconfig, default empty). Set from the web UI (**Syslog**
+  row, pencil icon → `POST /set_syslog`, `{"server":"host:port"}`) or NVS/Kconfig
   directly. Resolved **once**, at `syslog_start()` (called early in `app_main`, before WiFi) —
   like the MQTT bridge, a config change persists then reboots to apply, so there is nothing to
   re-read at runtime.
@@ -766,7 +766,7 @@ independently redacted fragments.
   own "send failed" diagnostics would themselves be queued for (failing) delivery, feeding the
   exact storm the paragraph above avoids.
 - **Status:** `syslog_status()` → `/status.syslog` (`configured`/`resolved`/`reachable`/`host`/
-  `port`/`error`), read by the web UI's Network tab exactly like the MQTT row.
+  `port`/`error`), read by the web UI's Syslog row exactly like the MQTT row.
 
 ## Heap-exhaustion watchdog (the last-resort escalation)
 
