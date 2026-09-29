@@ -1243,7 +1243,9 @@ function otaInline(html,cls,pct){
 function otaInlineClear(delay){ clearTimeout(otaClearTimer); otaClearTimer=setTimeout(function(){ otaClearTimer=null; otaInline(''); }, delay||3000); }
 function otaBegin(phase,timeout){ clearTimeout(otaClearTimer); otaClearTimer=null; otaPhase=phase; otaDeadline=Date.now()+timeout; otaLastToastMilestone=null; renderVerLink(); }
 function isOtaRunning(){
-  return !!(otaBusy || otaPhase === 'update' || (typeof otaPollState === 'string' && (otaPollState === 'downloading' || otaPollState === 'done')));
+  if(otaPhase === 'update' || otaPhase === 'reboot') return true;
+  var st = (typeof otaPollState === 'string') ? otaPollState : (otaPollState && otaPollState.state);
+  return st === 'downloading' || st === 'done';
 }
 function otaReset(){ clearTimeout(otaTimer); clearTimeout(otaClearTimer); otaClearTimer=null; otaBusy=false; otaPhase=null; otaPollState=null; otaDeadline=0; otaExpectedVersion=null; otaLastToastMilestone=null; renderVerLink(); if(typeof syncOtaUi === 'function') syncOtaUi(); }
 function otaFail(message){ otaReset(); if(typeof closeOtaModal === 'function') closeOtaModal(false); toast(message, 'err', 'ota'); otaInline('<span>'+esc(message)+'</span>','err'); otaInlineClear(6000); if(typeof syncOtaUi === 'function') syncOtaUi(); }
@@ -1485,6 +1487,7 @@ function loadPrList(force){
         if(parsed && parsed.timestamp && (Date.now() - parsed.timestamp < PR_CACHE_TTL_MS) && Array.isArray(parsed.prs)){
           prList = parsed.prs.slice(0, 10);
           renderChanMenu();
+          if(chanModalOpen) updateChanModalUi();
           return Promise.resolve(prList);
         }
       }
@@ -1531,11 +1534,13 @@ function loadPrList(force){
     }
     if(loading) loading.classList.add('hide');
     renderChanMenu();
+    if(chanModalOpen) updateChanModalUi();
     prLoadPromise = null;
     return prList;
   }).catch(function(err){
     if(loading) loading.classList.add('hide');
     renderChanMenu();
+    if(chanModalOpen) updateChanModalUi();
     if(err && err.message !== 'rate_limited' && (force || getActiveChannel() === 'pr')){
       toast('Failed to load pull requests', 'err', 'pr');
     }
@@ -1794,7 +1799,11 @@ function loadChanChangelog(chan){
   }
   chanChangelogAbort = typeof AbortController !== 'undefined' ? new AbortController() : null;
   var ctl = chanChangelogAbort;
-  var timer = setTimeout(function(){ if(ctl) ctl.abort(); }, OTA_HTTP_TIMEOUT_MS);
+  var didTimeout = false;
+  var timer = setTimeout(function(){
+    didTimeout = true;
+    if(ctl) ctl.abort();
+  }, OTA_HTTP_TIMEOUT_MS);
 
   var url = (chan === 'dev')
     ? 'https://0bu.github.io/tesla-key-esp32/dev/changelog.json'
@@ -1819,7 +1828,10 @@ function loadChanChangelog(chan){
     .catch(function(err){
       clearTimeout(timer);
       chanChangelogInFlight = null;
-      if(err && err.name === 'AbortError') return '';
+      var isAbort = err && err.name === 'AbortError';
+      if(isAbort && !didTimeout){
+        return '';
+      }
       if(chan === otaChannel){
         return loadOtaChangelog().then(function(notes){
           if(notes) chanChangelogCache[chan] = notes;
@@ -1939,7 +1951,6 @@ function closeOtaModal(decision){
   if(m && m.classList) m.classList.add('hide');
   syncModal();
   var btn = $("verLink") || $("chanBtn");
-  if(btn && typeof btn.getClientRects === 'function' && !btn.getClientRects().length) btn = $(TAB_BTN[uiTab]);
   if(btn && typeof btn.focus === 'function' && !isOpen('askModal') && !(chanModalOpen && isOpen('chanModal')) && !isOtaRunning()) btn.focus();
   if(otaDecisionResolve){
     var r = otaDecisionResolve;
@@ -1992,6 +2003,7 @@ function startOtaUpdate(availVer){
   syncModal();
   var ver = availVer || otaAvail;
   otaExpectedVersion = ver || null;
+  otaBusy = true;
   otaBegin('update', OTA_UPDATE_TIMEOUT_MS);
   toast('Starting update…', 'load', 'ota');
   otaInline(otaMiniRing(0, true, 'currentColor') + '<span>starting…</span>', '', 'indet');
@@ -2229,7 +2241,7 @@ if(typeof document!=='undefined' && typeof document.addEventListener==='function
 }
 
 function otaCheck(){
-  if(isOtaRunning()) return Promise.resolve();              // a check/update is already running
+  if(otaBusy || isOtaRunning()) return Promise.resolve();              // a check/update is already running
   otaBusy=true;
   otaBegin('check',OTA_CHECK_TIMEOUT_MS);
   toast('Checking for updates…', 'load', 'ota');
@@ -2251,6 +2263,7 @@ function otaCheckPoll(){
     if(o.state==='error'){ otaFail('check failed'+(o.message?' — '+o.message:'')); return; }
     if(o.state!=='idle'){ otaFail('invalid check state'); return; }
     if(o.update_available){
+      otaBusy=false;
       otaAvail=o.available||''; if(state)render(state); renderFwSub(); otaInline('');         // clear while the dialog is up
       toast('Update available: v' + o.available, 'ok', 'ota');
       var pr=getTargetPr();

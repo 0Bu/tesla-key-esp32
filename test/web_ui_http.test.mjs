@@ -2455,3 +2455,148 @@ test("mutation endpoints handle HTTP 409 Conflict gracefully with error toast", 
   assert.ok(errToast, "Error toast displayed on 409 Conflict");
   assert.match(errToast.msg, /mutation locked/);
 });
+
+test("Update confirmation dialog survives periodic background polls and does not self-dismiss", async () => {
+  const { context, element } = loadUi();
+  context.state = { version: "1.4.0", vin: "5YJ3E1EA1JF000001", key_present: true };
+
+  context.fetch = async (url) => {
+    if (url.startsWith("/ota/check")) {
+      return { ok: true, status: 200, async json() { return { started: true }; } };
+    }
+    if (url.startsWith("/ota/status")) {
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return {
+            state: "idle",
+            update_available: true,
+            progress: 0,
+            message: "update available",
+            available: "1.5.0",
+            current: "1.4.0",
+            channel: "release"
+          };
+        }
+      };
+    }
+    if (url.startsWith("/ota/changelog")) {
+      return { ok: true, status: 200, async text() { return "v1.5.0 changelog notes"; } };
+    }
+    if (url.startsWith("/ota/update")) {
+      return { ok: true, status: 200, async json() { return { result: true }; } };
+    }
+    return { ok: true, status: 200, async json() { return {}; } };
+  };
+
+  // Launch update check which finds v1.5.0 available and opens askOtaInstall
+  const checkPromise = context.openFwUpdate();
+
+  // Yield to allow fetch/askOtaInstall to open the modal
+  await new Promise(resolve => setTimeout(resolve, 30));
+
+  // Verify dialog is open and waiting for confirmation
+  assert.equal(element("otaModal").classList.contains("hide"), false, "otaModal must be visible");
+  assert.ok(context.otaDecisionResolve !== null, "otaDecisionResolve must be pending");
+  assert.equal(context.isOtaRunning(), false, "isOtaRunning must be false while waiting for user decision");
+
+  // Verify runtime settings configuration buttons are NOT disabled during idle check/prompt
+  assert.equal(element("vinBtn").disabled, false, "vinBtn must not be locked during update prompt");
+  assert.equal(element("keyBtn").disabled, false, "keyBtn must not be locked during update prompt");
+  assert.equal(element("mqttBtn").disabled, false, "mqttBtn must not be locked during update prompt");
+
+  // Simulate multiple periodic background /status poll frames arriving while dialog is open
+  for (let i = 0; i < 5; i++) {
+    context.render({ version: "1.4.0", vehicle: { status: "Stopped" } });
+    context.syncOtaUi();
+    assert.equal(element("otaModal").classList.contains("hide"), false, `otaModal must stay open after poll frame ${i + 1}`);
+    assert.ok(context.otaDecisionResolve !== null, `otaDecisionResolve must remain pending after poll frame ${i + 1}`);
+    assert.equal(context.otaAvail, "1.5.0", "otaAvail must remain preserved");
+  }
+
+  // Confirm installation: user taps Install / confirms
+  context.closeOtaModal(true);
+  await checkPromise;
+
+  // Once installation starts, isOtaRunning() becomes true
+  assert.equal(context.isOtaRunning(), true, "isOtaRunning becomes true after user confirms install");
+  assert.equal(element("otaModal").classList.contains("hide"), true, "otaModal closes once update starts");
+});
+
+test("PR preview tab optPr appears immediately when loadPrList resolves with channel modal open", async () => {
+  const { context, element } = loadUi();
+  context.prList = [];
+
+  context.fetch = async (url) => {
+    if (url.includes("api.github.com/repos/0Bu/tesla-key-esp32/pulls")) {
+      return {
+        ok: true,
+        status: 200,
+        headers: { get: () => "60" },
+        async json() {
+          return [{
+            number: 340,
+            title: "Test PR 340",
+            updated_at: "2026-09-29T10:00:00Z",
+            user: { login: "tester" }
+          }];
+        }
+      };
+    }
+    if (url.includes("0bu.github.io/tesla-key-esp32/pr-340/manifest.json")) {
+      return { ok: true, status: 200, async json() { return {}; } };
+    }
+    return { ok: true, status: 200, async json() { return {}; } };
+  };
+
+  // Open channel modal with empty PR list
+  context.editChannel();
+  assert.equal(element("chanModal").classList.contains("hide"), false, "chanModal is open");
+
+  // Await the prLoadPromise initiated by editChannel()
+  await context.prLoadPromise;
+
+  // optPr must immediately become visible in the open modal
+  assert.equal(element("optPr").classList.contains("hide"), false, "optPr must be unhidden when PRs finish loading");
+});
+
+test("Changelog timeout does not hang on Loading indicator and renders empty/fallback state", async () => {
+  const { context, element } = loadUi();
+  context.selectedChan = "dev";
+
+  let timerCb = null;
+  context.setTimeout = (cb, delay) => {
+    if (delay === 5000) {
+      timerCb = cb;
+    }
+    return 1;
+  };
+
+  context.fetch = async (url, opts) => {
+    return new Promise((_, reject) => {
+      if (opts && opts.signal) {
+        opts.signal.addEventListener("abort", () => {
+          const err = new Error("The operation was aborted");
+          err.name = "AbortError";
+          reject(err);
+        });
+      }
+    });
+  };
+
+  element("chanChangelogLoading").classList.remove("hide");
+  element("chanChangelogEmpty").classList.add("hide");
+
+  const changelogPromise = context.loadChanChangelog("dev");
+
+  // Trigger timeout callback
+  assert.ok(timerCb, "Changelog timer callback must be registered");
+  timerCb();
+
+  await changelogPromise;
+
+  // After timeout, loading indicator must be hidden and empty state visible
+  assert.equal(element("chanChangelogLoading").classList.contains("hide"), true, "loading indicator must be hidden after timeout");
+  assert.equal(element("chanChangelogEmpty").classList.contains("hide"), false, "empty notice must be shown after timeout");
+});
