@@ -738,15 +738,24 @@ function renderFwVer(){
 
 function renderVerLink(){
   var vl = $("verLink");
-  if(!vl) return;
-  var isAvail = !!otaAvail;
-  vl.className = 'ver-btn' + (isAvail ? ' avail' : '');
-  if(isAvail){
-    vl.title = 'Update ' + otaAvail + ' available — tap to install';
-    vl.setAttribute('aria-label', 'Install firmware update ' + otaAvail);
-  } else {
-    vl.title = 'Tap to check for updates';
-    vl.setAttribute('aria-label', 'Check for firmware updates');
+  if(vl){
+    var chan = otaChannel || 'release';
+    var isDev = (chan === 'dev');
+    var chanLabel = isDev ? 'Development' : 'Release';
+    vl.title = 'Current: ' + chanLabel + ' — tap to change channel';
+    vl.setAttribute('aria-label', 'Change update channel, current: ' + chanLabel);
+  }
+  var cb = $("fwCheckBtn");
+  if(cb){
+    var isAvail = !!otaAvail;
+    cb.className = 'ib' + (isAvail ? ' avail' : '');
+    if(isAvail){
+      cb.title = 'Update ' + otaAvail + ' available — tap to install';
+      cb.setAttribute('aria-label', 'Install firmware update ' + otaAvail);
+    } else {
+      cb.title = 'Check for firmware updates';
+      cb.setAttribute('aria-label', 'Check for firmware updates');
+    }
   }
 }
 
@@ -811,9 +820,8 @@ function isOpen(id){
   var m=$(id);
   return !!(m && m.classList && !m.classList.contains('hide'));
 }
-var chanModalOpen = false;
 function syncModal(){
-  var chanOpen = chanModalOpen && isOpen('chanModal');
+  var chanOpen = isOpen('chanModal');
   var open = isOpen('askModal') || isOpen('otaModal') || chanOpen;
   if(typeof document!=='undefined'){
     if(document.documentElement&&document.documentElement.classList) document.documentElement.classList.toggle('modal-open',open);
@@ -822,6 +830,7 @@ function syncModal(){
   var w=$("wrap"); if(w) w.inert=open;
   // The OTA dialog sits under an open sheet: keep Tab from reaching its buttons.
   var om=$("otaModal"); if(om) om.inert=isOpen('askModal') || chanOpen;
+  var cm=$("chanModal"); if(cm) cm.inert=isOpen('askModal');
 }
 function askValidate(){
   var inp=$("askInput"), ok=$("askOk"), err=$("askErr");
@@ -1227,15 +1236,52 @@ function otaStatus(){
   });
 }
 
-/* ---------- update channel (dropdown selector in the Firmware row) ---------- */
+/* ---------- update channel (modal selector and Firmware row status) ---------- */
 function getActiveChannel(){
   return otaChannel || 'release';
 }
 
+function openChannelSelect(){
+  if(isOtaRunning()) return;
+  var m = $("chanModal");
+  if(m && m.classList) m.classList.remove('hide');
+  syncModal();
+  var card = m ? (m.querySelector ? m.querySelector('.modal-card') : null) : null;
+  if(card && typeof card.focus === 'function') card.focus();
+}
+
+function closeChannelModal(){
+  var m = $("chanModal");
+  if(m && m.classList) m.classList.add('hide');
+  syncModal();
+  var vl = $("verLink");
+  if(vl && typeof vl.focus === 'function' && !isOpen('askModal') && !isOpen('otaModal')) vl.focus();
+}
+
+function selectChannel(chan){
+  closeChannelModal();
+  if(chan !== 'release' && chan !== 'dev') return Promise.resolve();
+  return setChannel(chan);
+}
+
 function renderChanMenu(){
+  var chan = otaChannel || 'release';
+  var isDev = (chan === 'dev');
+  var chanLabel = isDev ? 'Development' : 'Release';
+  var fs = $("fwSub");
+  if(fs) fs.textContent = chanLabel + ' channel';
+  var br = $("chanBadgeRelease"); if(br && br.classList) br.classList.toggle('hide', isDev);
+  var bd = $("chanBadgeDev"); if(bd && bd.classList) bd.classList.toggle('hide', !isDev);
+  var or = $("chanOptRelease"); if(or && or.classList) or.classList.toggle('selected', !isDev);
+  var od = $("chanOptDev"); if(od && od.classList) od.classList.toggle('selected', isDev);
+  var vl = $("verLink");
+  if(vl){
+    vl.title = 'Current: ' + chanLabel + ' — tap to change channel';
+    vl.setAttribute('aria-label', 'Change update channel, current: ' + chanLabel);
+  }
   var sel = $("chanSelect");
   if(sel && !otaChannelInFlight){
-    sel.value = otaChannel || 'release';
+    sel.value = chan;
   }
   renderFwVer();
   renderIpLine();
@@ -1294,8 +1340,8 @@ function closeOtaModal(decision){
   if(!open && !otaDecisionResolve) return;
   if(m && m.classList) m.classList.add('hide');
   syncModal();
-  var btn = $("verLink");
-  if(btn && typeof btn.focus === 'function' && !isOpen('askModal') && !isOtaRunning()) btn.focus();
+  var btn = $("fwCheckBtn") || $("verLink");
+  if(btn && typeof btn.focus === 'function' && !isOpen('askModal') && !isOpen('chanModal') && !isOtaRunning()) btn.focus();
   if(otaDecisionResolve){
     var r = otaDecisionResolve;
     otaDecisionResolve = null;
@@ -1410,6 +1456,10 @@ if(typeof document!=='undefined' && typeof document.addEventListener==='function
     if(modalBackdrop && e.target === modalBackdrop){
       closeOtaModal(false);
     }
+    var chanBackdrop = $("chanBackdrop");
+    if(chanBackdrop && e.target === chanBackdrop){
+      closeChannelModal();
+    }
     var askBackdrop = $("askBackdrop");
     if(askBackdrop && e.target === askBackdrop){
       askClose(askCancelValue);
@@ -1418,8 +1468,11 @@ if(typeof document!=='undefined' && typeof document.addEventListener==='function
   document.addEventListener('keydown', function(e){
     var am = $("askModal");
     var askOpenNow = am && am.classList && typeof am.classList.contains==='function' && !am.classList.contains('hide');
+    var cm = $("chanModal");
+    var chanOpenNow = cm && cm.classList && typeof cm.classList.contains==='function' && !cm.classList.contains('hide');
     if(e.key==='Escape'){
       if(askOpenNow){ askClose(askCancelValue); return; }
+      if(chanOpenNow){ closeChannelModal(); return; }
       var modal = $("otaModal");
       if(modal && modal.classList && typeof modal.classList.contains==='function' && !modal.classList.contains('hide')){
         closeOtaModal(false);
@@ -1573,6 +1626,11 @@ function syncOtaUi(){
     verBtn.disabled = running;
     if(verBtn.classList) verBtn.classList.toggle('disabled', running);
   }
+  var fwBtn = $("fwCheckBtn");
+  if(fwBtn){
+    fwBtn.disabled = running;
+    if(fwBtn.classList) fwBtn.classList.toggle('disabled', running);
+  }
   var paneSettings = $("paneSettings");
   if(paneSettings && paneSettings.classList) paneSettings.classList.toggle('ota-busy', running);
   var instBtn = $("otaInstall"); if(instBtn && running) instBtn.disabled = true;
@@ -1581,10 +1639,13 @@ function syncOtaUi(){
   var mb = $("mqttBtn"); if(mb) mb.disabled = running;
   var sb = $("syslogBtn"); if(sb) sb.disabled = running;
   if(paneSettings && typeof paneSettings.querySelectorAll === 'function'){
-    var rowBtns = paneSettings.querySelectorAll('.row:not(.row-fw) button');
+    var rowBtns = paneSettings.querySelectorAll('.row button');
     for(var i = 0; i < rowBtns.length; i++) rowBtns[i].disabled = running;
   }
   if(running){
+    if(typeof isOpen === 'function' && isOpen('chanModal')){
+      closeChannelModal();
+    }
     if(typeof isOpen === 'function' && isOpen('otaModal')){
       var om = $("otaModal");
       if(om && om.classList) om.classList.add('hide');
@@ -1604,6 +1665,9 @@ if(typeof window!=='undefined'){
   window.isOtaRunning = isOtaRunning;
   window.syncOtaUi = syncOtaUi;
   window.openFwUpdate = openFwUpdate;
+  window.openChannelSelect = openChannelSelect;
+  window.closeChannelModal = closeChannelModal;
+  window.selectChannel = selectChannel;
   window.setChannel = setChannel;
   window.onChannelChange = onChannelChange;
   window.startOtaUpdate = startOtaUpdate;

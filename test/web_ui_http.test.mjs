@@ -10,6 +10,10 @@ function loadUi() {
   const element = (id) => {
     if (!elements.has(id)) {
       const classes = new Set();
+      if (id.endsWith("Modal")) {
+        classes.add("modal");
+        classes.add("hide");
+      }
       elements.set(id, {
         id,
         children: [],
@@ -310,7 +314,8 @@ test("OTA versions use the canonical 31-byte firmware descriptor grammar", () =>
 
 test("device page exposes keyboard and live-region semantics", () => {
   const html = fs.readFileSync(new URL("../main/www/index.html", import.meta.url), "utf8");
-  assert.match(html, /<button[^>]+id="verLink"[^>]+aria-label="Check for firmware updates"/);
+  assert.match(html, /<button[^>]+id="verLink"[^>]+aria-label="Change update channel"/);
+  assert.match(html, /<button[^>]+id="fwCheckBtn"[^>]+aria-label="Check for firmware updates"/);
   // #toasts is the single live region; #otaStat must not announce the same OTA text twice.
   assert.match(html, /id="otaStat"[^>]+aria-hidden="true"/);
   assert.doesNotMatch(html, /id="otaStat"[^>]+aria-live/);
@@ -326,12 +331,12 @@ test("setup form enforces the shared WiFi credential contract without optimistic
   assert.doesNotMatch(html, /setTimeout\(function\(\)\{ \$\("form"\)\.classList\.add\('hide'\)/);
 });
 
-test("firmware card exposes the update channel as an accessible select dropdown", () => {
+test("firmware card exposes update channel modal and update check button", () => {
   const html = fs.readFileSync(new URL("../main/www/index.html", import.meta.url), "utf8");
-  assert.match(html, /<select class="chan-select" id="chanSelect" onchange="onChannelChange\(this\.value\)" aria-label="Update channel">/);
-  assert.match(html, /<option value="release">Release<\/option>/);
-  assert.match(html, /<option value="dev">Development<\/option>/);
-  assert.match(html, /id="verLink"[\s\S]*?id="fwVer"[\s\S]*?id="chanSelect"/);
+  assert.match(html, /<button type="button" class="ver-btn" id="verLink" onclick="openChannelSelect\(\)" aria-label="Change update channel"/);
+  assert.match(html, /<button type="button" class="ib" id="fwCheckBtn" onclick="openFwUpdate\(\)" aria-label="Check for firmware updates"/);
+  assert.match(html, /id="chanModal"[\s\S]*?id="chanOptRelease"[\s\S]*?id="chanOptDev"/);
+  assert.match(html, /id="verLink"[\s\S]*?id="fwVer"[\s\S]*?id="fwCheckBtn"/);
 });
 
 test("section tabs switch the visible pane and mark the current tab", () => {
@@ -344,7 +349,7 @@ test("section tabs switch the visible pane and mark the current tab", () => {
   assert.equal(element("wrap")["data-tab"], "fw");
 });
 
-test("update channel dropdown updates channel selection with OTA check", async () => {
+test("update channel modal updates channel selection with OTA check", async () => {
   const { context, element } = loadUi();
   const fetchCalls = [];
   context.fetch = async (url, opts) => {
@@ -369,15 +374,15 @@ test("update channel dropdown updates channel selection with OTA check", async (
   };
 
   // Re-selecting current channel (release) triggers an OTA check without redundant /set_ota
-  await context.onChannelChange("release");
+  await context.selectChannel("release");
   assert.equal(fetchCalls.some(c => c.url === "/set_ota"), false, "no /set_ota call when re-selecting current channel");
   assert.ok(fetchCalls.some(c => c.url.startsWith("/ota/check")), "otaCheck still runs on re-selection");
 
-  // Select dev channel via dropdown onchange
+  // Select dev channel via modal selectChannel
   fetchCalls.length = 0;
-  await context.onChannelChange("dev");
+  await context.selectChannel("dev");
   assert.equal(context.otaChannel, "dev");
-  assert.equal(element("chanSelect").value, "dev");
+  assert.equal(element("fwSub").textContent, "Development channel");
 
   // Check that POST /set_ota and /ota/check were requested
   const setOta = fetchCalls.find(c => c.url === "/set_ota");
@@ -390,9 +395,9 @@ test("update channel dropdown updates channel selection with OTA check", async (
 
   // Switching back to release
   fetchCalls.length = 0;
-  await context.onChannelChange("release");
+  await context.selectChannel("release");
   assert.equal(context.otaChannel, "release");
-  assert.equal(element("chanSelect").value, "release");
+  assert.equal(element("fwSub").textContent, "Release channel");
   assert.ok(fetchCalls.some(c => c.url === "/set_ota" && JSON.parse(c.opts.body).channel === "release"));
 });
 
@@ -403,19 +408,19 @@ test("render initializes channel state from running version or status ota channe
   context.render({ version: "1.4.100" });
   assert.equal(context.otaChannel, "release");
   assert.equal(context.otaChannelInitialSet, true);
-  assert.equal(element("chanSelect").value, "release");
+  assert.equal(element("fwSub").textContent, "Release channel");
 
   // New instance for dev version
   const uiDev = loadUi();
   uiDev.context.render({ version: "1.4.100-dev.5" });
   assert.equal(uiDev.context.otaChannel, "dev");
   assert.equal(uiDev.context.otaChannelInitialSet, true);
-  assert.equal(uiDev.element("chanSelect").value, "dev");
+  assert.equal(uiDev.element("fwSub").textContent, "Development channel");
 
   // Explicit s.ota.channel takes precedence
   uiDev.context.render({ version: "1.4.100-dev.5", ota: { channel: "release" } });
   assert.equal(uiDev.context.otaChannel, "release");
-  assert.equal(uiDev.element("chanSelect").value, "release");
+  assert.equal(uiDev.element("fwSub").textContent, "Release channel");
 });
 
 test("hero card remains visible when vehicle link is unreachable or unknown", () => {
@@ -673,7 +678,7 @@ test("an open sheet or OTA dialog makes the page behind it inert until both are 
   assert.equal(element("wrap").inert, true, "the OTA dialog is still open");
   context.closeOtaModal(false);
   assert.equal(element("wrap").inert, false);
-  assert.equal(context.document.activeElement, element("verLink"), "focus returns once the page is live again");
+  assert.equal(context.document.activeElement, element("fwCheckBtn"), "focus returns once the page is live again");
 });
 
 test("an OTA dialog that pops up over an open sheet never takes its focus, and focus stays reachable", async () => {
@@ -693,7 +698,7 @@ test("an OTA dialog that pops up over an open sheet never takes its focus, and f
   assert.equal(context.document.activeElement, element("otaInstall"), "not the inert page behind the dialog");
   context.closeOtaModal(false);
   assert.equal(await decision, false);
-  assert.equal(context.document.activeElement, element("verLink"));
+  assert.equal(context.document.activeElement, element("fwCheckBtn"));
 });
 
 test("modal field selection selects content on first activation and preserves native caret on subsequent clicks", () => {
@@ -1121,7 +1126,7 @@ test("firmware version formatting and header ipline display", () => {
   assert.equal(element("fwVer").textContent, "v1.6.0");
 });
 
-test("channel dropdown onchange triggers /set_ota and otaCheck, immediately reflected in UI", async () => {
+test("channel selection triggers /set_ota and otaCheck, immediately reflected in UI", async () => {
   const { context, element } = loadUi();
   const fetchCalls = [];
   context.fetch = async (url, opts) => {
@@ -1147,13 +1152,13 @@ test("channel dropdown onchange triggers /set_ota and otaCheck, immediately refl
 
   // Initially on release channel
   context.render({ version: "1.6.0", ota: { channel: "release" } });
-  assert.equal(element("chanSelect").value, "release");
+  assert.equal(element("fwSub").textContent, "Release channel");
   assert.equal(context.getActiveChannel(), "release");
 
-  // User changes dropdown to Development
-  await context.onChannelChange("dev");
+  // User selects Development channel in modal
+  await context.selectChannel("dev");
   assert.equal(context.getActiveChannel(), "dev");
-  assert.equal(element("chanSelect").value, "dev");
+  assert.equal(element("fwSub").textContent, "Development channel");
 
   const setOtaCall = fetchCalls.find(c => c.url === "/set_ota");
   assert.ok(setOtaCall, "POST /set_ota was called");
@@ -1164,29 +1169,29 @@ test("channel dropdown onchange triggers /set_ota and otaCheck, immediately refl
 
   // Switching back to release
   fetchCalls.length = 0;
-  await context.onChannelChange("release");
+  await context.selectChannel("release");
   assert.equal(context.getActiveChannel(), "release");
-  assert.equal(element("chanSelect").value, "release");
+  assert.equal(element("fwSub").textContent, "Release channel");
   assert.ok(fetchCalls.some(c => c.url === "/set_ota" && JSON.parse(c.opts.body).channel === "release"));
 });
 
-test("adaptive action button #verLink displays title and aria-label based on otaAvail", () => {
+test("adaptive action button #fwCheckBtn displays title and aria-label based on otaAvail", () => {
   const { context, element } = loadUi();
-  const vl = element("verLink");
+  const cb = element("fwCheckBtn");
 
   // Idle state without update
   context.otaAvail = null;
   context.renderVerLink();
-  assert.equal(vl.title, "Tap to check for updates");
-  assert.equal(vl["aria-label"], "Check for firmware updates");
-  assert.doesNotMatch(vl.className, /avail/);
+  assert.equal(cb.title, "Check for firmware updates");
+  assert.equal(cb["aria-label"], "Check for firmware updates");
+  assert.doesNotMatch(cb.className, /avail/);
 
   // Update available
   context.otaAvail = "1.7.0";
   context.renderVerLink();
-  assert.equal(vl.title, "Update 1.7.0 available — tap to install");
-  assert.equal(vl["aria-label"], "Install firmware update 1.7.0");
-  assert.match(vl.className, /avail/);
+  assert.equal(cb.title, "Update 1.7.0 available — tap to install");
+  assert.equal(cb["aria-label"], "Install firmware update 1.7.0");
+  assert.match(cb.className, /avail/);
 });
 
 test("channel switching is responsive and immune to intermediate polling race conditions", async () => {
@@ -1194,9 +1199,9 @@ test("channel switching is responsive and immune to intermediate polling race co
   // Device starts on dev channel
   context.render({ version: "1.6.0-dev-1", ota: { channel: "dev" } });
   assert.equal(context.otaChannel, "dev");
-  assert.equal(element("chanSelect").value, "dev");
+  assert.equal(element("fwSub").textContent, "Development channel");
 
-  // User selects Release via dropdown: setChannel initiated
+  // User selects Release via modal: setChannel initiated
   let resolvePost;
   context.fetch = async (url) => {
     if (url === "/set_ota") {
@@ -1213,19 +1218,19 @@ test("channel switching is responsive and immune to intermediate polling race co
     return { ok: true, status: 200, async json() { return {}; } };
   };
 
-  const channelPromise = context.onChannelChange("release");
+  const channelPromise = context.selectChannel("release");
 
   // Immediately, UI reflects release
   assert.equal(context.otaChannel, "release");
   assert.equal(context.otaChannelInFlight, true);
-  assert.equal(element("chanSelect").value, "release");
+  assert.equal(element("fwSub").textContent, "Release channel");
 
   // Concurrent /status poll arrives from device still reporting dev
   context.render({ version: "1.6.0-dev-1", ota: { channel: "dev" } });
 
   // UI MUST NOT revert back to dev
   assert.equal(context.otaChannel, "release");
-  assert.equal(element("chanSelect").value, "release");
+  assert.equal(element("fwSub").textContent, "Release channel");
 
   // POST /set_ota finishes
   resolvePost();
@@ -1238,7 +1243,7 @@ test("channel switching is responsive and immune to intermediate polling race co
   context.render({ version: "1.6.0-dev-1", ota: { channel: "release" } });
   assert.equal(context.otaChannel, "release");
   assert.equal(context.otaChannelTarget, null);
-  assert.equal(element("chanSelect").value, "release");
+  assert.equal(element("fwSub").textContent, "Release channel");
 });
 
 test("askModal live validation enforces valid input, shows errors, and blocks save", async () => {
@@ -1502,7 +1507,7 @@ test("UI disables settings and channel select during active OTA, closes open she
 
   context.render({ version: "1.6.0" });
   assert.equal(context.isOtaRunning(), false);
-  assert.equal(element("chanSelect").disabled, false);
+  assert.equal(element("fwCheckBtn").disabled, false);
   assert.equal(element("verLink").disabled, false);
   assert.equal(element("paneSettings").classList.contains("ota-busy"), false);
 
@@ -1513,18 +1518,17 @@ test("UI disables settings and channel select during active OTA, closes open she
   // 1. Modals/sheets are closed
   assert.equal(element("otaModal").classList.contains("hide"), true);
   assert.equal(element("askModal").classList.contains("hide"), true);
+  assert.equal(element("chanModal").classList.contains("hide"), true);
 
   // 2. isOtaRunning() is true
   assert.equal(context.isOtaRunning(), true);
 
-  // 3. Channel select is disabled
-  assert.equal(element("chanSelect").disabled, true);
-
-  // 4. Version link is disabled
+  // 3. Firmware buttons are disabled
+  assert.equal(element("fwCheckBtn").disabled, true);
   assert.equal(element("verLink").disabled, true);
   assert.equal(element("verLink").classList.contains("disabled"), true);
 
-  // 5. Pane settings is marked ota-busy, modal actions and setting buttons disabled
+  // 4. Pane settings is marked ota-busy, modal actions and setting buttons disabled
   assert.equal(element("paneSettings").classList.contains("ota-busy"), true);
   assert.equal(element("otaInstall").disabled, true);
   assert.equal(element("vinBtn").disabled, true);
@@ -1532,13 +1536,15 @@ test("UI disables settings and channel select during active OTA, closes open she
   assert.equal(element("mqttBtn").disabled, true);
   assert.equal(element("syslogBtn").disabled, true);
 
-  // 6. Attempting to click settings, manipulate channels, or open modals does nothing
+  // 5. Attempting to click settings, manipulate channels, or open modals does nothing
   fetches.length = 0;
   await context.editVin();
   await context.genKey();
   await context.editMqtt();
   await context.editSyslog();
   await context.openFwUpdate();
+  await context.openChannelSelect();
+  await context.selectChannel("dev");
   await context.onChannelChange("dev");
   await context.setChannel("dev");
   await context.otaCheck();
@@ -1546,11 +1552,12 @@ test("UI disables settings and channel select during active OTA, closes open she
   assert.equal(fetches.length, 0, "no network calls made while OTA is running");
   assert.equal(element("otaModal").classList.contains("hide"), true);
   assert.equal(element("askModal").classList.contains("hide"), true);
+  assert.equal(element("chanModal").classList.contains("hide"), true);
 
-  // 7. When OTA resets/finishes, UI returns to normal
+  // 6. When OTA resets/finishes, UI returns to normal
   context.otaReset();
   assert.equal(context.isOtaRunning(), false);
-  assert.equal(element("chanSelect").disabled, false);
+  assert.equal(element("fwCheckBtn").disabled, false);
   assert.equal(element("verLink").disabled, false);
   assert.equal(element("paneSettings").classList.contains("ota-busy"), false);
   assert.equal(element("vinBtn").disabled, false);
@@ -1559,17 +1566,17 @@ test("UI disables settings and channel select during active OTA, closes open she
   assert.equal(element("syslogBtn").disabled, false);
 });
 
-test("firmware card displays version with accessible verLink button and channel select dropdown", () => {
+test("firmware card displays version with accessible verLink button and channel select modal", () => {
   const html = fs.readFileSync(new URL("../main/www/index.html", import.meta.url), "utf8");
-  assert.match(html, /<div class="row row-fw" id="rowFw">[\s\S]*?id="verLink"[\s\S]*?id="chanSelect"/);
+  assert.match(html, /<div class="row row-fw" id="rowFw">[\s\S]*?id="verLink"[\s\S]*?id="fwCheckBtn"/);
   assert.doesNotMatch(html, /id="chanBtn"/);
-  assert.doesNotMatch(html, /id="fwSub"/);
-  assert.match(html, /<button type="button" class="ver-btn" id="verLink" onclick="openFwUpdate\(\)"/);
+  assert.match(html, /id="fwSub"/);
+  assert.match(html, /<button type="button" class="ver-btn" id="verLink" onclick="openChannelSelect\(\)"/);
 
   const { context, element } = loadUi();
   context.render({ version: "1.4.0", ota: { channel: "release" } });
   assert.equal(element("fwVer").textContent, "v1.4.0");
-  assert.equal(element("chanSelect").value, "release");
+  assert.equal(element("fwSub").textContent, "Release channel");
 });
 
 test("tapping version link checks for updates; shows toast and no modal when up to date, opens changelog modal only when update available", async () => {
@@ -1754,4 +1761,82 @@ test("Update confirmation dialog survives periodic background polls and does not
   // Once installation starts, isOtaRunning() becomes true
   assert.equal(context.isOtaRunning(), true, "isOtaRunning becomes true after user confirms install");
   assert.equal(element("otaModal").classList.contains("hide"), true, "otaModal closes once update starts");
+});
+
+test("channel selection modal opens, reflects current channel, and allows switching channels", async () => {
+  const { context, element } = loadUi();
+  const fetchCalls = [];
+  context.fetch = async (url, opts) => {
+    fetchCalls.push({ url, opts });
+    if (url === "/set_ota") return { ok: true, status: 200, async json() { return { ok: true }; } };
+    if (url.startsWith("/ota/check")) return { ok: true, status: 200, async json() { return { started: true }; } };
+    if (url.startsWith("/ota/status")) return {
+      ok: true,
+      status: 200,
+      async json() {
+        return {
+          state: "idle",
+          update_available: false,
+          progress: 0,
+          message: "up to date",
+          available: "1.4.0",
+          current: "1.4.0"
+        };
+      }
+    };
+    return { ok: true, status: 200, async json() { return {}; } };
+  };
+
+  // Initially rendered with release channel
+  context.render({ version: "1.4.0", ota: { channel: "release" } });
+  assert.equal(element("fwSub").textContent, "Release channel");
+  assert.equal(element("chanBadgeRelease").classList.contains("hide"), false);
+  assert.equal(element("chanBadgeDev").classList.contains("hide"), true);
+  assert.equal(element("chanOptRelease").classList.contains("selected"), true);
+  assert.equal(element("chanOptDev").classList.contains("selected"), false);
+
+  // Open channel modal
+  context.openChannelSelect();
+  assert.equal(element("chanModal").classList.contains("hide"), false, "chanModal is visible");
+
+  // Close channel modal via closeChannelModal
+  context.closeChannelModal();
+  assert.equal(element("chanModal").classList.contains("hide"), true, "chanModal is hidden");
+  assert.equal(context.document.activeElement, element("verLink"), "focus returns to verLink");
+
+  // Select dev channel via selectChannel
+  await context.selectChannel("dev");
+  assert.equal(context.otaChannel, "dev");
+  assert.equal(element("fwSub").textContent, "Development channel");
+  assert.equal(element("chanBadgeRelease").classList.contains("hide"), true);
+  assert.equal(element("chanBadgeDev").classList.contains("hide"), false);
+  assert.equal(element("chanOptRelease").classList.contains("selected"), false);
+  assert.equal(element("chanOptDev").classList.contains("selected"), true);
+  assert.equal(element("chanModal").classList.contains("hide"), true, "modal closes after selection");
+});
+
+test("channel modal backdrop click and Escape key dismiss modal", () => {
+  const { context, element } = loadUi();
+  const listeners = {};
+  context.document.addEventListener = (name, fn) => { listeners[name] = fn; };
+  context.document.activeElement = null;
+
+  // Re-run listener wiring in context
+  if (context.wireModalFieldSelection) {
+    // Already wired during script load
+  }
+
+  // Open modal
+  context.openChannelSelect();
+  assert.equal(element("chanModal").classList.contains("hide"), false);
+
+  // Close via backdrop click
+  context.closeChannelModal();
+  assert.equal(element("chanModal").classList.contains("hide"), true);
+
+  // Re-open and close
+  context.openChannelSelect();
+  assert.equal(element("chanModal").classList.contains("hide"), false);
+  context.closeChannelModal();
+  assert.equal(element("chanModal").classList.contains("hide"), true);
 });

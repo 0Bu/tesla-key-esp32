@@ -199,20 +199,36 @@ svg{display:block}
 .chan-select:disabled,.chan-select.disabled{cursor:default; pointer-events:none; opacity:.45}
 .row-fw{position:relative}
 .row-fw .otabar{position:absolute; bottom:0; left:0; right:0; height:3px; border-radius:0}
-.ver-btn{background:none; border:0; padding:2px 6px; margin:-2px -6px; font:inherit; color:inherit; text-align:left; cursor:pointer; width:fit-content; border-radius:6px; display:inline-flex; align-items:center; gap:8px; -webkit-tap-highlight-color:transparent; transition:background .15s ease}
+.ver-btn{background:none; border:0; padding:2px 6px; margin:-2px -6px; font:inherit; color:inherit; text-align:left; cursor:pointer; width:fit-content; border-radius:6px; display:inline-flex; flex-direction:column; align-items:flex-start; gap:2px; -webkit-tap-highlight-color:transparent; transition:background .15s ease}
 .ver-btn .rv{text-decoration:underline dotted var(--muted); text-underline-offset:3px}
 .ver-btn:hover{background:var(--soft)}
 .ver-btn:hover .rv{color:var(--fg); text-decoration-style:solid; text-decoration-color:var(--fg)}
+.ver-btn:hover .rs{color:var(--fg)}
 .ver-btn:active{transform:scale(.98); background:var(--soft)}
 .ver-btn:disabled,.ver-btn.disabled{cursor:default; pointer-events:none}
 .ver-btn:disabled .rv,.ver-btn.disabled .rv{text-decoration:none; color:var(--muted)}
+.ib.avail{color:var(--ok); background:color-mix(in srgb,var(--ok) 12%,var(--soft))}
+.ib.avail:hover{background:color-mix(in srgb,var(--ok) 20%,var(--soft))}
+.chan-options{display:flex; flex-direction:column; gap:10px}
+.chan-opt{width:100%; border:1px solid var(--border); border-radius:14px; background:var(--soft); padding:14px 16px;
+  text-align:left; cursor:pointer; display:flex; flex-direction:column; gap:4px; color:var(--fg); font:inherit;
+  transition:border-color .15s ease,background .15s ease; outline:none; -webkit-tap-highlight-color:transparent}
+.chan-opt:hover{background:color-mix(in srgb,var(--fg) 5%,var(--soft)); border-color:var(--focus)}
+.chan-opt:focus-visible{border-color:var(--focus); outline:2px solid var(--focus); outline-offset:1px}
+.chan-opt:active{transform:scale(.99)}
+.chan-opt.selected{border-color:var(--ok); background:color-mix(in srgb,var(--ok) 8%,var(--soft))}
+.chan-opt-head{display:flex; align-items:center; justify-content:space-between; gap:8px}
+.chan-opt-title{font-size:16px; font-weight:650}
+.chan-opt-desc{font-size:13px; color:var(--muted); line-height:1.35}
+.chip-badge.ok{color:var(--ok-text); background:color-mix(in srgb,var(--ok) 16%,var(--card))}
+.pane-settings.ota-busy button,#paneSettings.ota-busy button,
 .pane-settings.ota-busy .row:not(.row-fw) button,#paneSettings.ota-busy .row:not(.row-fw) button,
 .pane-settings.ota-busy .chan-select,#paneSettings.ota-busy .chan-select{pointer-events:none; opacity:.45; cursor:default}
 .meta{font-size:12.5px; color:var(--muted); overflow-wrap:anywhere}
 
 /* sheets / dialogs: vertically and horizontally centered on all devices (mobile, tablet, desktop) */
 .modal{position:fixed; inset:0; z-index:20; display:flex; align-items:center; justify-content:center; padding:16px; box-sizing:border-box}
-#askModal{z-index:21} /* sheets sit above the OTA dialog, see syncModal() */
+#askModal,#chanModal{z-index:21} /* sheets sit above the OTA dialog, see syncModal() */
 .modal-backdrop{position:absolute; inset:0; background:var(--scrim); animation:fade .15s ease}
 .sheet{position:relative; width:100%; max-width:460px; max-height:calc(100vh - 32px); overflow:auto; background:var(--card);
   border-radius:20px; box-shadow:0 20px 60px rgba(0,0,0,.3); padding:20px;
