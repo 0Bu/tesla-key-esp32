@@ -7,8 +7,17 @@ var $=function(id){return document.getElementById(id)};
 // the write when nothing changed keeps the same nodes alive so the animation runs on.
 function setHTML(el,html){ if(el && el.__h!==html){ el.__h=html; el.innerHTML=html; } }
 var state=null, otaTimer=null, otaAvail=null, waking=false, wakeTimeout=null, chgBusy=false, feedOk=false;
-var otaPhase=null, otaPollState=null, otaDeadline=0, otaExpectedVersion=null, otaChannel='release', otaChannelInitialSet=false;
+var otaBusy=false, otaPhase=null, otaPollState=null, otaDeadline=0, otaExpectedVersion=null, otaChannel='release', otaChannelInitialSet=false;
 var otaChannelInFlight=false, otaChannelTarget=null;
+
+function isOtaRunning(){
+  if(otaPhase === 'update' || otaPhase === 'reboot') return true;
+  var st = (typeof otaPollState === 'string') ? otaPollState : (otaPollState && otaPollState.state);
+  return st === 'downloading' || st === 'done';
+}
+function isOtaBusy(){
+  return !!(otaBusy || isOtaRunning() || otaChannelInFlight || otaPhase === 'check' || otaPhase === 'update' || otaPhase === 'reboot');
+}
 
 // Quotes are escaped too so esc() is safe in attribute values (title="…"), not just element content.
 function esc(s){return String(s).replace(/[&<>"']/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]})}
@@ -440,12 +449,12 @@ function setBadge(id,on){ var b=$(id); if(b&&b.classList) b.classList.toggle('hi
 
 // The hero's one primary action, picked by render(); the gauge calls heroTap().
 var heroActFn=null;
-function heroTap(){ if(heroActFn) return heroActFn(); }
+function heroTap(){ if(isOtaBusy()) return; if(heroActFn) return heroActFn(); }
 function setHeroAct(label,icon,fn,busyText){
   heroActFn=busyText?null:fn;
 }
 var bannerFn=null;
-function bannerAction(){ if(isOtaRunning()) return; if(bannerFn) return bannerFn(); }
+function bannerAction(){ if(isOtaBusy()) return; if(bannerFn) return bannerFn(); }
 
 /* ---------- render ---------- */
 // Connection row: tone ('ok' | 'warn' | '') colours the icon dot, status line and signal glyph.
@@ -849,7 +858,7 @@ function askValidate(){
   return !bad;
 }
 function askOpen(o,cancelValue){
-  if(isOtaRunning()) return Promise.resolve(cancelValue);
+  if(isOtaBusy()) return Promise.resolve(cancelValue);
   if(askResolve) askClose(askCancelValue);
   askReturnFocus=(typeof document!=='undefined')?document.activeElement:null;
   askCancelValue=cancelValue;
@@ -979,7 +988,7 @@ function utf8Len(v){
 }
 function vinValid(v){return /^[A-HJ-NPR-Z0-9]{17}$/i.test(v)}
 function editVin(){
-  if(isOtaRunning()) return Promise.resolve();
+  if(isOtaBusy()) return Promise.resolve();
   var cur=(state&&state.vin&&state.vin!=='UNKNOWN')?state.vin:'';
   var hasKey=!(state&&state.key_present===false);
   var v;
@@ -1030,7 +1039,7 @@ function editVin(){
   });
 }
 function editMqtt(){
-  if(isOtaRunning()) return Promise.resolve();
+  if(isOtaBusy()) return Promise.resolve();
   var cur=(state&&state.mqtt&&state.mqtt.broker)?state.mqtt.broker:'';
   return askText({
     title:'MQTT broker', label:'Broker (IP:PORT or URI)', value:cur, placeholder:'192.0.2.20:1883', mono:true,
@@ -1074,7 +1083,7 @@ function editMqtt(){
   });
 }
 function editSyslog(){
-  if(isOtaRunning()) return Promise.resolve();
+  if(isOtaBusy()) return Promise.resolve();
   var sy=state&&state.syslog, cur=(sy&&sy.host)?(sy.host+':'+(sy.port||514)):'';
   return askText({
     title:'Syslog server', label:'Server (IP:PORT)', value:cur, placeholder:'192.0.2.30:514', mono:true,
@@ -1149,7 +1158,7 @@ function wakeCar(){
     .catch(function(){ wakeStop(); toast('Wake failed — is the car in range?', 'err', 'wake'); poll(); });
 }
 function genKey(){
-  if(isOtaRunning()) return Promise.resolve();
+  if(isOtaBusy()) return Promise.resolve();
   var keyKnown = state && typeof state.key_present === 'boolean';
   var hasKey = keyKnown ? state.key_present : true;
   var ask = hasKey ? askConfirm({
@@ -1211,11 +1220,6 @@ function otaInline(html,cls,pct){
 }
 function otaInlineClear(delay){ clearTimeout(otaClearTimer); otaClearTimer=setTimeout(function(){ otaClearTimer=null; otaInline(''); }, delay||3000); }
 function otaBegin(phase,timeout){ clearTimeout(otaClearTimer); otaClearTimer=null; otaPhase=phase; otaDeadline=Date.now()+timeout; otaLastToastMilestone=null; renderVerLink(); }
-function isOtaRunning(){
-  if(otaPhase === 'update' || otaPhase === 'reboot') return true;
-  var st = (typeof otaPollState === 'string') ? otaPollState : (otaPollState && otaPollState.state);
-  return st === 'downloading' || st === 'done';
-}
 function otaReset(){ clearTimeout(otaTimer); clearTimeout(otaClearTimer); otaClearTimer=null; otaBusy=false; otaPhase=null; otaPollState=null; otaDeadline=0; otaExpectedVersion=null; otaLastToastMilestone=null; renderVerLink(); if(typeof syncOtaUi === 'function') syncOtaUi(); }
 function otaFail(message){ otaReset(); if(typeof closeOtaModal === 'function') closeOtaModal(false); toast(message, 'err', 'ota'); otaInline('<span>'+esc(message)+'</span>','err'); otaInlineClear(6000); if(typeof syncOtaUi === 'function') syncOtaUi(); }
 function otaSchedule(fn,delay){
@@ -1242,7 +1246,7 @@ function getActiveChannel(){
 }
 
 function openChannelSelect(){
-  if(isOtaRunning()) return;
+  if(isOtaBusy()) return;
   var m = $("chanModal");
   if(m && m.classList) m.classList.remove('hide');
   syncModal();
@@ -1261,6 +1265,7 @@ function closeChannelModal(){
 function selectChannel(chan){
   closeChannelModal();
   if(chan !== 'release' && chan !== 'dev') return Promise.resolve();
+  if(chan === getActiveChannel()) return Promise.resolve();
   return setChannel(chan);
 }
 
@@ -1290,7 +1295,7 @@ function renderChanMenu(){
 }
 
 function onChannelChange(chan){
-  if(isOtaRunning()){
+  if(isOtaBusy()){
     var sel = $("chanSelect");
     if(sel) sel.value = otaChannel || 'release';
     return;
@@ -1299,11 +1304,11 @@ function onChannelChange(chan){
 }
 
 function setChannel(chan){
-  if(isOtaRunning()) return Promise.resolve();
+  if(isOtaBusy()) return Promise.resolve();
   if(chan!=='release'&&chan!=='dev') return Promise.resolve();
   var prevChan = otaChannel;
   var changed = (otaChannel !== chan);
-  if(!changed) return otaCheck();
+  if(!changed) return Promise.resolve();
 
   otaChannel = chan;
   otaChannelTarget = chan;
@@ -1312,6 +1317,7 @@ function setChannel(chan){
   var sel = $("chanSelect");
   if(sel) sel.value = chan;
   renderChanMenu();
+  if(typeof syncOtaUi === 'function') syncOtaUi();
 
   return requestJson('/set_ota', {
     method: 'POST',
@@ -1329,6 +1335,7 @@ function setChannel(chan){
     otaChannel = prevChan;
     renderChanMenu();
     toast('Failed to set update channel', 'err', 'channel');
+    if(typeof syncOtaUi === 'function') syncOtaUi();
   });
 }
 
@@ -1341,7 +1348,7 @@ function closeOtaModal(decision){
   if(m && m.classList) m.classList.add('hide');
   syncModal();
   var btn = $("fwCheckBtn") || $("verLink");
-  if(btn && typeof btn.focus === 'function' && !isOpen('askModal') && !isOpen('chanModal') && !isOtaRunning()) btn.focus();
+  if(btn && typeof btn.focus === 'function' && !isOpen('askModal') && !isOpen('chanModal') && !isOtaBusy()) btn.focus();
   if(otaDecisionResolve){
     var r = otaDecisionResolve;
     otaDecisionResolve = null;
@@ -1350,7 +1357,7 @@ function closeOtaModal(decision){
 }
 
 function openFwUpdate(){
-  if(isOtaRunning()) return Promise.resolve();
+  if(isOtaBusy()) return Promise.resolve();
   var curVer = (state && state.version) || '?';
   if(otaAvail){
     return loadOtaChangelog().then(function(notes){
@@ -1495,9 +1502,10 @@ if(typeof document!=='undefined' && typeof document.addEventListener==='function
 }
 
 function otaCheck(){
-  if(otaBusy || isOtaRunning()) return Promise.resolve();              // a check/update is already running
+  if(isOtaBusy()) return Promise.resolve();              // a check/update is already running
   otaBusy=true;
   otaBegin('check',OTA_CHECK_TIMEOUT_MS);
+  if(typeof syncOtaUi === 'function') syncOtaUi();
   toast('Checking for updates…', 'load', 'ota');
   otaInline(otaMiniRing(0,true,'currentColor'),'','indet');   // checking — spinning ring only, no label
   var checkUrl='/ota/check?ms='+Date.now();
@@ -1517,6 +1525,8 @@ function otaCheckPoll(){
     if(o.state!=='idle'){ otaFail('invalid check state'); return; }
     if(o.update_available){
       otaBusy=false;
+      otaPhase=null;
+      if(typeof syncOtaUi === 'function') syncOtaUi();
       otaAvail=o.available||''; if(state)render(state); otaInline('');         // clear while the dialog is up
       toast('Update available: v' + o.available, 'ok', 'ota');
       return loadOtaChangelog().then(function(notes){
@@ -1615,54 +1625,58 @@ function waitReboot(expectedVer){
 
 
 function syncOtaUi(){
+  var busy = isOtaBusy();
   var running = isOtaRunning();
   var chanSel = $("chanSelect");
   if(chanSel){
-    chanSel.disabled = running;
-    if(chanSel.classList) chanSel.classList.toggle('disabled', running);
+    chanSel.disabled = busy;
+    if(chanSel.classList) chanSel.classList.toggle('disabled', busy);
   }
   var verBtn = $("verLink");
   if(verBtn){
-    verBtn.disabled = running;
-    if(verBtn.classList) verBtn.classList.toggle('disabled', running);
+    verBtn.disabled = busy;
+    if(verBtn.classList) verBtn.classList.toggle('disabled', busy);
   }
   var fwBtn = $("fwCheckBtn");
   if(fwBtn){
-    fwBtn.disabled = running;
-    if(fwBtn.classList) fwBtn.classList.toggle('disabled', running);
+    fwBtn.disabled = busy;
+    if(fwBtn.classList) fwBtn.classList.toggle('disabled', busy);
   }
   var paneSettings = $("paneSettings");
-  if(paneSettings && paneSettings.classList) paneSettings.classList.toggle('ota-busy', running);
+  if(paneSettings && paneSettings.classList) paneSettings.classList.toggle('ota-busy', busy);
   var instBtn = $("otaInstall"); if(instBtn && running) instBtn.disabled = true;
-  var vb = $("vinBtn"); if(vb) vb.disabled = running;
-  var kb = $("keyBtn"); if(kb) kb.disabled = running;
-  var mb = $("mqttBtn"); if(mb) mb.disabled = running;
-  var sb = $("syslogBtn"); if(sb) sb.disabled = running;
+  var vb = $("vinBtn"); if(vb) vb.disabled = busy;
+  var kb = $("keyBtn"); if(kb) kb.disabled = busy;
+  var mb = $("mqttBtn"); if(mb) mb.disabled = busy;
+  var sb = $("syslogBtn"); if(sb) sb.disabled = busy;
   if(paneSettings && typeof paneSettings.querySelectorAll === 'function'){
     var rowBtns = paneSettings.querySelectorAll('.row button');
-    for(var i = 0; i < rowBtns.length; i++) rowBtns[i].disabled = running;
+    for(var i = 0; i < rowBtns.length; i++) rowBtns[i].disabled = busy;
   }
-  if(running){
+  if(busy){
     if(typeof isOpen === 'function' && isOpen('chanModal')){
       closeChannelModal();
     }
-    if(typeof isOpen === 'function' && isOpen('otaModal')){
-      var om = $("otaModal");
-      if(om && om.classList) om.classList.add('hide');
-      syncModal();
-      if(otaDecisionResolve){
-        var r = otaDecisionResolve;
-        otaDecisionResolve = null;
-        r(false);
+    if(running){
+      if(typeof isOpen === 'function' && isOpen('otaModal')){
+        var om = $("otaModal");
+        if(om && om.classList) om.classList.add('hide');
+        syncModal();
+        if(otaDecisionResolve){
+          var r = otaDecisionResolve;
+          otaDecisionResolve = null;
+          r(false);
+        }
       }
-    }
-    if(typeof isOpen === 'function' && isOpen('askModal')){
-      if(typeof askClose === 'function' && askResolve) askClose(null);
+      if(typeof isOpen === 'function' && isOpen('askModal')){
+        if(typeof askClose === 'function' && askResolve) askClose(null);
+      }
     }
   }
 }
 if(typeof window!=='undefined'){
   window.isOtaRunning = isOtaRunning;
+  window.isOtaBusy = isOtaBusy;
   window.syncOtaUi = syncOtaUi;
   window.openFwUpdate = openFwUpdate;
   window.openChannelSelect = openChannelSelect;

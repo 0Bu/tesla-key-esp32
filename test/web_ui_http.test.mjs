@@ -373,10 +373,9 @@ test("update channel modal updates channel selection with OTA check", async () =
     return { ok: true, status: 200, async json() { return {}; } };
   };
 
-  // Re-selecting current channel (release) triggers an OTA check without redundant /set_ota
+  // Re-selecting current channel (release) closes modal without /set_ota or otaCheck
   await context.selectChannel("release");
-  assert.equal(fetchCalls.some(c => c.url === "/set_ota"), false, "no /set_ota call when re-selecting current channel");
-  assert.ok(fetchCalls.some(c => c.url.startsWith("/ota/check")), "otaCheck still runs on re-selection");
+  assert.equal(fetchCalls.length, 0, "no network calls or OTA check when re-selecting current channel");
 
   // Select dev channel via modal selectChannel
   fetchCalls.length = 0;
@@ -1839,4 +1838,101 @@ test("channel modal backdrop click and Escape key dismiss modal", () => {
   assert.equal(element("chanModal").classList.contains("hide"), false);
   context.closeChannelModal();
   assert.equal(element("chanModal").classList.contains("hide"), true);
+});
+
+test("channel modal has no cancel button and selecting active channel is a clean no-op", async () => {
+  const html = fs.readFileSync(new URL("../main/www/index.html", import.meta.url), "utf8");
+  assert.doesNotMatch(html, /id="chanCancel"/, "chanModal must not have a cancel button");
+
+  const { context, element } = loadUi();
+
+  const fetches = [];
+  context.fetch = async (url) => {
+    fetches.push(url);
+    return { ok: true, status: 200, async json() { return {}; } };
+  };
+
+  // Open modal
+  context.openChannelSelect();
+  assert.equal(element("chanModal").classList.contains("hide"), false);
+
+  // Select active channel (release)
+  await context.selectChannel("release");
+  assert.equal(element("chanModal").classList.contains("hide"), true, "modal must close");
+  assert.equal(fetches.length, 0, "no network calls or update checks initiated on active channel re-selection");
+});
+
+test("atomic update check locks settings and prevents concurrent checks and other popups", async () => {
+  const { context, element } = loadUi();
+  context.state = { version: "1.4.0", vin: "5YJ3E1EA1JF000001", key_present: true };
+
+  let resolveCheck;
+  let checkCalls = 0;
+  context.fetch = async (url) => {
+    if (url.startsWith("/ota/check")) {
+      checkCalls++;
+      return new Promise((resolve) => {
+        resolveCheck = () => resolve({ ok: true, status: 200, async json() { return { started: true }; } });
+      });
+    }
+    if (url.startsWith("/ota/status")) {
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return {
+            state: "idle",
+            update_available: false,
+            progress: 0,
+            message: "up to date",
+            available: "1.4.0",
+            current: "1.4.0"
+          };
+        }
+      };
+    }
+    return { ok: true, status: 200, async json() { return {}; } };
+  };
+
+  // Trigger update check via openFwUpdate
+  const checkPromise = context.openFwUpdate();
+
+  // Check is in-flight
+  assert.equal(context.isOtaBusy(), true, "isOtaBusy must be true during check");
+  assert.equal(element("fwCheckBtn").disabled, true, "fwCheckBtn must be disabled");
+  assert.equal(element("verLink").disabled, true, "verLink must be disabled");
+  assert.equal(element("vinBtn").disabled, true, "vinBtn must be disabled");
+  assert.equal(element("paneSettings").classList.contains("ota-busy"), true, "paneSettings must have ota-busy class");
+
+  // Attempting concurrent openFwUpdate while busy must be ignored
+  await context.openFwUpdate();
+  assert.equal(checkCalls, 1, "concurrent openFwUpdate must not start a second check");
+
+  // Attempting to open channel select while busy must be blocked
+  context.openChannelSelect();
+  assert.equal(element("chanModal").classList.contains("hide"), true, "chanModal must stay hidden while busy");
+
+  // Attempting to open editVin while busy must be blocked
+  await context.editVin();
+  assert.equal(element("askModal").classList.contains("hide"), true, "askModal must stay hidden while busy");
+
+  // Attempting to open genKey while busy must be blocked
+  await context.genKey();
+  assert.equal(element("askModal").classList.contains("hide"), true, "genKey must stay hidden while busy");
+
+  // Resolve check
+  resolveCheck();
+  await checkPromise;
+
+  // After completion (up-to-date), busy is cleared and UI is unlocked
+  assert.equal(context.isOtaBusy(), false, "isOtaBusy must be false after check completes");
+  assert.equal(element("fwCheckBtn").disabled, false, "fwCheckBtn must be enabled");
+  assert.equal(element("verLink").disabled, false, "verLink must be enabled");
+  assert.equal(element("vinBtn").disabled, false, "vinBtn must be enabled");
+  assert.equal(element("paneSettings").classList.contains("ota-busy"), false, "paneSettings must not have ota-busy class");
+
+  // Popups work normally again
+  context.openChannelSelect();
+  assert.equal(element("chanModal").classList.contains("hide"), false, "chanModal can open now");
+  context.closeChannelModal();
 });
