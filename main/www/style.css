@@ -7,7 +7,6 @@
   --warn-base:#f59e0b; --warn-lite:#fdba74;
   --scrim:rgba(16,20,28,.4);
   --shadow:0 1px 2px rgba(16,20,28,.04),0 6px 20px rgba(16,20,28,.06);
-  --shadow-cta:0 6px 20px rgba(232,33,39,.35);
   --r-card:18px; --r-tile:14px;
   --ease:cubic-bezier(.2,.7,.3,1);
   --sans:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
@@ -75,7 +74,7 @@ svg{display:block}
 .ph{color:var(--muted)}
 
 .ti{position:relative; width:24px; height:24px}
-.ti svg,.ri svg,.ib svg,.pill svg,.cta .ci svg,.bi svg,.warnic svg{width:100%; height:100%; fill:none; stroke:currentColor;
+.ti svg,.ri svg,.ib svg,.pill svg,.bi svg,.warnic svg{width:100%; height:100%; fill:none; stroke:currentColor;
   stroke-width:2; stroke-linecap:round; stroke-linejoin:round}
 .badge{position:absolute; top:-3px; right:-6px; width:10px; height:10px; border-radius:50%; border:2px solid var(--card)}
 .badge.acc{background:var(--accent)} .badge.warn{background:var(--warn)} .badge.info{background:var(--info)}
@@ -98,7 +97,7 @@ svg{display:block}
 .pill.danger{color:var(--accent-text); border-color:color-mix(in srgb,var(--accent) 45%,var(--border))}
 .pill.sm{font-size:14px; padding:0 14px; background:var(--card)}
 .pill.wide-btn{align-self:stretch; min-height:46px}
-.pill:active,.btn:active,.cta:active{transform:scale(.985)}
+.pill:active,.btn:active{transform:scale(.985)}
 .ib{width:44px; height:44px; flex:none; border:0; border-radius:12px; background:none; color:var(--muted); display:grid; place-items:center}
 .ib:hover{background:var(--soft)}
 .ib.danger{color:var(--accent-text)}
@@ -195,11 +194,13 @@ svg{display:block}
 .seg-opt.sel{background:var(--card); box-shadow:0 1px 3px rgba(0,0,0,.12)}
 .row-fw{position:relative}
 .row-fw .otabar{position:absolute; bottom:0; left:0; right:0; height:3px; border-radius:0}
-.ver-btn{background:none; border:0; padding:0; font:inherit; color:inherit; text-align:left; cursor:pointer; width:fit-content; border-radius:4px; display:inline-flex; align-items:center; gap:8px}
-.ver-btn:hover .rv{color:var(--fg); text-decoration:underline; text-decoration-color:var(--muted)}
-.ver-btn:active{transform:scale(.98)}
+.ver-btn{background:none; border:0; padding:2px 6px; margin:-2px -6px; font:inherit; color:inherit; text-align:left; cursor:pointer; width:fit-content; border-radius:6px; display:inline-flex; align-items:center; gap:8px; -webkit-tap-highlight-color:transparent; transition:background .15s ease}
+.ver-btn .rv{text-decoration:underline dotted var(--muted); text-underline-offset:3px}
+.ver-btn:hover{background:var(--soft)}
+.ver-btn:hover .rv{color:var(--fg); text-decoration-style:solid; text-decoration-color:var(--fg)}
+.ver-btn:active{transform:scale(.98); background:var(--soft)}
 .ver-btn:disabled,.ver-btn.disabled{cursor:default; pointer-events:none}
-.ver-btn:disabled:hover .rv,.ver-btn.disabled:hover .rv{text-decoration:none; color:var(--muted)}
+.ver-btn:disabled .rv,.ver-btn.disabled .rv{text-decoration:none; color:var(--muted)}
 .pane-settings.ota-busy .row:not(.row-fw) button,#paneSettings.ota-busy .row:not(.row-fw) button{pointer-events:none; opacity:.45; cursor:default}
 .chan-changelog-wrap{display:flex; flex-direction:column; gap:6px}
 .chan-changelog-box{max-height:220px; overflow-y:auto; overscroll-behavior:contain; -webkit-overflow-scrolling:touch;

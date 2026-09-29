@@ -413,10 +413,6 @@ function fmtAgo(sec){
   return Math.floor(h/24)+' d';
 }
 
-/* ---------- sections: car | setup | net | fw, shown by CSS keyed off .wrap[data-tab] ---------- */
-var uiTab='car';
-var TAB_TITLE={car:'tesla-key-esp32', setup:'Setup', net:'Network', fw:'Firmware'};
-var TAB_BTN={car:'tabCar', setup:'tabSetup', net:'tabNet', fw:'tabFw'};
 function scrollToKey(){
   var el = $("rowKey") || $("paneSettings");
   if(el && typeof el.scrollIntoView === 'function'){
@@ -424,17 +420,6 @@ function scrollToKey(){
   }
   var btn = $("keyBtn");
   if(btn && typeof btn.focus === 'function') btn.focus();
-}
-
-function setTab(t){
-  if(!TAB_TITLE[t]) return;
-  uiTab=t;
-  var w=$("wrap"); if(w) w.setAttribute('data-tab',t);
-  for(var k in TAB_BTN){ var b=$(TAB_BTN[k]); if(!b) continue; if(k===t) b.setAttribute('aria-current','page'); else if(b.removeAttribute) b.removeAttribute('aria-current'); }
-  var pt=$("paneTitle"); if(pt) pt.textContent=TAB_TITLE[t];
-  if(t==='setup') scrollToKey();
-  else if(t==='net'){ var n = $('rowWifi'); if(n && typeof n.scrollIntoView === 'function') try { n.scrollIntoView({ behavior: 'smooth' }); } catch(e){ n.scrollIntoView(); } }
-  else if(t==='fw'){ var f = $('rowFw'); if(f && typeof f.scrollIntoView === 'function') try { f.scrollIntoView({ behavior: 'smooth' }); } catch(e){ f.scrollIntoView(); } loadPrList(false); }
 }
 function setBadge(id,on){ var b=$(id); if(b&&b.classList) b.classList.toggle('hide',!on); }
 
@@ -671,8 +656,6 @@ function render(s){
   if(!activePr && prTarget > 0 && !activePrExplicitlyCleared) activePr = prTarget;
   renderIpLine();
   renderFwVer();
-  var fvt=$("fwVerText");
-  if(fvt) fvt.textContent=formatVerVerbatim(s.version) || '—';
 
   if(s.ota && typeof s.ota.channel === 'string'){
     var sChan = s.ota.channel === 'dev' ? 'dev' : 'release';
@@ -754,17 +737,14 @@ function renderFwSub(){
 }
 function renderVerLink(){
   var vl = $("verLink");
-  var tx = $("verLinkText");
   if(!vl) return;
   var pr = getTargetPr();
   var isAvail = !!otaAvail;
   vl.className = 'ver-btn' + (isAvail ? ' avail' : '');
   if(isAvail){
-    if(tx) tx.textContent = pr > 0 ? ('Install PR #' + pr) : ('Install v' + otaAvail);
     vl.title = pr > 0 ? ('PR #' + pr + ' update ' + otaAvail + ' available — tap to install') : ('Update ' + otaAvail + ' available — tap to install');
     vl.setAttribute('aria-label', pr > 0 ? ('Install PR #' + pr + ' firmware update ' + otaAvail) : ('Install firmware update ' + otaAvail));
   } else {
-    if(tx) tx.textContent = pr > 0 ? 'Check PR Updates' : 'Check for updates';
     vl.title = pr > 0 ? ('Tap to check for PR #' + pr + ' updates') : 'Tap to check for updates';
     vl.setAttribute('aria-label', pr > 0 ? ('Check for PR #' + pr + ' firmware updates') : 'Check for firmware updates');
   }
@@ -1819,7 +1799,7 @@ function loadChanChangelog(chan){
       return r.json();
     })
     .then(function(data){
-      chanChangelogInFlight = null;
+      if(chanChangelogInFlight === chan) chanChangelogInFlight = null;
       var text = (data && typeof data.changelog === 'string') ? data.changelog : '';
       if(text) chanChangelogCache[chan] = text;
       if(selectedChan === chan) renderChanChangelog(text);
@@ -1827,7 +1807,7 @@ function loadChanChangelog(chan){
     })
     .catch(function(err){
       clearTimeout(timer);
-      chanChangelogInFlight = null;
+      if(chanChangelogInFlight === chan) chanChangelogInFlight = null;
       var isAbort = err && err.name === 'AbortError';
       if(isAbort && !didTimeout){
         return '';

@@ -332,16 +332,6 @@ test("firmware pane exposes the update channel as an accessible radio group", ()
   assert.match(html, /id="verLink"[\s\S]*?id="fwVer"[\s\S]*?id="optRelease"/);
 });
 
-test("section tabs switch the visible pane and mark the current tab", () => {
-  const { context, element } = loadUi();
-  context.setTab("fw");
-  assert.equal(element("wrap")["data-tab"], "fw");
-  assert.equal(element("tabFw")["aria-current"], "page");
-  assert.equal(element("paneTitle").textContent, "Firmware");
-  context.setTab("bogus");
-  assert.equal(element("wrap")["data-tab"], "fw");
-});
-
 test("update channel control updates channel selection with OTA check", async () => {
   const { context, element } = loadUi();
   const fetchCalls = [];
@@ -1654,21 +1644,22 @@ test("state preservation across periodic /status polls in PR preview mode", asyn
 test("adaptive action button #verLink and #fwBadge display based on otaAvail and activePr", () => {
   const { context, element } = loadUi();
   const vl = element("verLink");
-  const tx = element("verLinkText");
   const fb = element("fwBadge");
 
   // Idle state without PR
   context.otaAvail = null;
   context.activePr = 0;
   context.renderVerLink();
-  assert.equal(tx.textContent, "Check for updates");
+  assert.equal(vl["aria-label"], "Check for firmware updates");
+  assert.equal(vl.title, "Tap to check for updates");
   assert.equal(fb.textContent, "Up to date");
   assert.doesNotMatch(vl.className, /avail/);
 
   // Idle state with PR 337
   context.activePr = 337;
   context.renderVerLink();
-  assert.equal(tx.textContent, "Check PR Updates");
+  assert.equal(vl["aria-label"], "Check for PR #337 firmware updates");
+  assert.equal(vl.title, "Tap to check for PR #337 updates");
   assert.equal(fb.textContent, "Up to date");
   assert.doesNotMatch(vl.className, /avail/);
 
@@ -1683,7 +1674,8 @@ test("adaptive action button #verLink and #fwBadge display based on otaAvail and
   context.activePr = 0;
   context.otaAvail = "1.7.0";
   context.renderVerLink();
-  assert.equal(tx.textContent, "Install v1.7.0");
+  assert.equal(vl["aria-label"], "Install firmware update 1.7.0");
+  assert.equal(vl.title, "Update 1.7.0 available — tap to install");
   assert.match(vl.className, /avail/);
   assert.equal(fb.textContent, "Update available");
   assert.equal(fb.className, "chip-badge avail");
@@ -1691,7 +1683,8 @@ test("adaptive action button #verLink and #fwBadge display based on otaAvail and
   // Update available with PR 337
   context.activePr = 337;
   context.renderVerLink();
-  assert.equal(tx.textContent, "Install PR #337");
+  assert.equal(vl["aria-label"], "Install PR #337 firmware update 1.7.0");
+  assert.equal(vl.title, "PR #337 update 1.7.0 available — tap to install");
   assert.match(vl.className, /avail/);
   assert.equal(fb.textContent, "Update available");
 
@@ -2599,4 +2592,56 @@ test("Changelog timeout does not hang on Loading indicator and renders empty/fal
   // After timeout, loading indicator must be hidden and empty state visible
   assert.equal(element("chanChangelogLoading").classList.contains("hide"), true, "loading indicator must be hidden after timeout");
   assert.equal(element("chanChangelogEmpty").classList.contains("hide"), false, "empty notice must be shown after timeout");
+});
+
+test("superseded changelog fetch abort does not clear newer in-flight changelog state", async () => {
+  const { context } = loadUi();
+  let resolveRelease = null;
+
+  context.fetch = async (url, opts) => {
+    if (url.includes("/dev/changelog.json")) {
+      return new Promise((_, reject) => {
+        if (opts && opts.signal) {
+          opts.signal.addEventListener("abort", () => {
+            const err = new Error("The operation was aborted");
+            err.name = "AbortError";
+            reject(err);
+          });
+        }
+      });
+    }
+    if (url.includes("/changelog.json")) {
+      return new Promise((resolve) => {
+        resolveRelease = () => resolve({
+          ok: true,
+          status: 200,
+          async json() { return { changelog: "Release changelog notes" }; }
+        });
+      });
+    }
+    return { ok: true, status: 200, async json() { return {}; } };
+  };
+
+  // Start dev changelog fetch
+  const pDev = context.loadChanChangelog("dev");
+  assert.equal(context.chanChangelogInFlight, "dev");
+
+  // Supersede with release changelog fetch (aborts dev fetch and starts release fetch)
+  const pRelease = context.loadChanChangelog("release");
+  assert.equal(context.chanChangelogInFlight, "release");
+
+  // Wait for dev abort to settle
+  await pDev;
+
+  // Crucial invariant: dev abort must NOT have reset chanChangelogInFlight to null while release is still running!
+  assert.equal(context.chanChangelogInFlight, "release");
+
+  // Resolve release fetch
+  assert.ok(resolveRelease, "Release resolver should be set");
+  resolveRelease();
+  await pRelease;
+
+  // Once release completes, chanChangelogInFlight is cleanly null and cache is populated
+  assert.equal(context.chanChangelogInFlight, null);
+  assert.equal(context.chanChangelogCache["release"], "Release changelog notes");
 });
