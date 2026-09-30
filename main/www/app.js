@@ -322,9 +322,13 @@ function gaugeHTML(o){
     s+='<circle class="garc'+pc+'" cx="'+c+'" cy="'+c+'" r="'+r.toFixed(1)+'" fill="none" stroke="'+col+'" stroke-width="'+sw+'" stroke-linecap="round"'+
        ' stroke-dasharray="'+C.toFixed(1)+'" stroke-dashoffset="'+(C*(1-pct/100)).toFixed(1)+'"/>';
     if(mode==='charging'&&pct>6){
-      var seg=sw*2.2;
+      // Highlight pass: fades in at the arc start, glides to the arc end at a constant ~140 units/s
+      // (the first 72 % of the cycle, see @keyframes flow) and fades out before it gets there; the
+      // rest of the cycle is a pause, so the wrap back to 12 o'clock is never visible. The cycle
+      // length follows the arc length so a short and a long arc glide at the same calm speed.
+      var seg=sw*2.2, dist=Math.max(0,C*pct/100-seg), dur=Math.max(3,Math.min(8,dist/140/.72));
       s+='<circle class="gflow" cx="'+c+'" cy="'+c+'" r="'+r.toFixed(1)+'" fill="none" stroke="rgba(255,255,255,.75)" stroke-width="'+(sw-3)+'" stroke-linecap="round"'+
-         ' stroke-dasharray="'+seg.toFixed(1)+' '+(C*2).toFixed(1)+'" style="--flow-end:'+(-(C*pct/100-seg)).toFixed(1)+'px"/>';
+         ' stroke-dasharray="'+seg.toFixed(1)+' '+(C*2).toFixed(1)+'" style="--flow-end:'+(-dist).toFixed(1)+'px;--flow-dur:'+dur.toFixed(1)+'s"/>';
     }
   }
   if(o.limit!=null&&(mode==='soc'||mode==='charging'||mode==='complete')){
