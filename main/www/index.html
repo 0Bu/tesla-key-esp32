@@ -22,16 +22,17 @@
     <symbol id="ic-bt" viewBox="0 0 24 24"><path d="m7 7 10 10-5 5V2l5 5L7 17"/></symbol>
     <symbol id="ic-chip" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6" rx="1"/><path d="M9 1v3M15 1v3M9 20v3M15 20v3M20 9h3M20 14h3M1 9h3M1 14h3"/></symbol>
     <symbol id="ic-refresh" viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-2.6-6.4L21 8"/><path d="M21 3v5h-5"/></symbol>
+    <symbol id="ic-download" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/></symbol>
   </defs>
 </svg>
 
-<div class="wrap" id="wrap" data-tab="car">
+<div class="wrap" id="wrap">
 
   <div class="col">
     <header class="top">
       <div class="brand">
         <span class="logo top-logo" aria-hidden="true"><svg viewBox="0 0 24 24"><use href="#ic-bolt"/></svg></span>
-        <div class="ttl"><h1><span id="paneTitle">tesla-key-esp32</span><span class="wide-title">tesla-key-esp32</span></h1><span class="host mono" id="ipline"></span></div>
+        <div class="ttl"><h1>tesla-key-esp32</h1><span class="host mono" id="ipline"></span></div>
       </div>
       <span class="otastat" id="otaStat" aria-hidden="true"></span>
     </header>
@@ -56,7 +57,7 @@
       </section>
 
       <!-- settings card: all settings in one compact card, one row each -->
-      <section class="pane pane-setup card rows" id="paneSettings" aria-label="Setup">
+      <section class="pane pane-setup card rows" id="paneSettings" aria-label="Device settings">
         <div class="row" id="rowVeh">
           <span class="ri"><svg viewBox="0 0 24 24"><use href="#ic-car"/></svg><span class="dot" id="vehDot"></span></span>
           <span class="rb"><span class="rl">Vehicle</span><span class="rv mono" id="vehVal">&mdash;</span><span class="rs" id="vehSub"></span></span>
@@ -91,12 +92,12 @@
           <span class="ri"><svg viewBox="0 0 24 24"><use href="#ic-chip"/></svg><span class="dot ok" id="fwDot"></span></span>
           <span class="rb">
             <span class="rl">Firmware</span>
-            <button type="button" class="ver-btn" id="verLink" onclick="openFwUpdate()" aria-label="Check for firmware updates" title="Check for firmware updates"><span class="rv mono" id="fwVer">&mdash;</span></button>
+            <button type="button" class="ver-btn" id="verLink" onclick="openChannelSelect()" title="Change update channel">
+              <span class="rv mono" id="fwVer">&mdash;</span>
+              <span class="rs" id="fwSub">Release channel</span>
+            </button>
           </span>
-          <select class="chan-select" id="chanSelect" onchange="onChannelChange(this.value)" aria-label="Update channel">
-            <option value="release">Release</option>
-            <option value="dev">Development</option>
-          </select>
+          <button type="button" class="ib" id="fwCheckBtn" onclick="openFwUpdate()" aria-label="Check for firmware updates" title="Check for firmware updates"><svg viewBox="0 0 24 24"><use href="#ic-download"/></svg></button>
           <div class="otabar hide" id="otaBar"><div class="otafill" id="otaFill"></div></div>
         </div>
       </section>
@@ -125,6 +126,29 @@
   </div>
 </div>
 
+<div class="modal hide" id="chanModal" role="dialog" aria-modal="true" aria-labelledby="chanModalTitle" aria-describedby="chanHelp">
+  <div class="modal-backdrop" id="chanBackdrop"></div>
+  <div class="sheet modal-card" tabindex="-1">
+    <h2 class="sheet-title" id="chanModalTitle">Update channel</h2>
+    <p class="note" id="chanHelp">Select the firmware update channel.</p>
+    <div class="chan-options">
+      <button type="button" class="chan-opt" id="chanOptRelease" aria-pressed="true" onclick="selectChannel('release')">
+        <span class="chan-opt-head">
+          <span class="chan-opt-title">Release</span>
+          <span class="chip-badge ok hide" id="chanBadgeRelease">Current</span>
+        </span>
+        <span class="chan-opt-desc">Official stable releases. Recommended for normal use.</span>
+      </button>
+      <button type="button" class="chan-opt" id="chanOptDev" aria-pressed="false" onclick="selectChannel('dev')">
+        <span class="chan-opt-head">
+          <span class="chan-opt-title">Development</span>
+          <span class="chip-badge warn hide" id="chanBadgeDev">Current</span>
+        </span>
+        <span class="chan-opt-desc">Bleeding edge builds with new features and testing changes.</span>
+      </button>
+    </div>
+  </div>
+</div>
 
 <div class="modal hide" id="otaModal" role="dialog" aria-modal="true" aria-labelledby="otaModalTitle" aria-describedby="otaHelp">
   <div class="modal-backdrop" id="otaBackdrop"></div>
