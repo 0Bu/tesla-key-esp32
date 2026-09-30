@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Git pre-push hook for tesla-key-esp32.
-# Enforces PR branch policy, checklist evidence, and firmware size validation before pushing to remote.
+# Enforces PR branch policy, checklist evidence, and the firmware size and stack-usage baselines
+# (all four targets) before pushing to remote. CI re-runs the same gates, but only after several
+# minutes of compilation, so anything caught here saves a whole push/wait/fix cycle.
 set -euo pipefail
 
 root="$(git rev-parse --show-toplevel)"
@@ -154,24 +156,32 @@ if [[ "$has_vehicle_changes" -eq 1 ]]; then
   echo "✅ Pre-push vehicle command sync check passed."
 fi
 
-# 4. Validate firmware size if firmware-relevant changes are detected
+# 4. Validate the firmware size and stack-usage baselines if firmware-relevant changes are detected.
+#    These are CI's most common late failure (24 of the 25 build-target failures over 24 days) and
+#    18 of those tripped ONLY on esp32/esp32s3/esp32c3, so checking a single target is not enough.
+#    scripts/precheck-firmware.sh builds all four incrementally: the first run per checkout compiles
+#    each target cold (a few minutes each), later runs only rebuild what the push touched.
+#    PRE_PUSH_TARGETS="esp32s3 esp32c3" narrows it for a deliberate, targeted push.
 if [[ "$has_firmware_changes" -eq 1 ]]; then
   echo "🔍 Firmware-relevant changes detected in push."
-  echo "   Running pre-push firmware size validation..."
+  echo "   Running incremental firmware size/stack baseline pre-check (all targets)..."
 
-  target_args=(--target esp32c6)
-  if [[ "${PRE_PUSH_ALL_TARGETS:-0}" == "1" ]]; then
-    target_args=(--all)
-  fi
+  target_args=()
+  for pre_push_target in ${PRE_PUSH_TARGETS:-}; do
+    target_args+=(--target "$pre_push_target")
+  done
 
-  if ! "$root/scripts/check-firmware-size.sh" "${target_args[@]}"; then
+  if ! "$root/scripts/precheck-firmware.sh" ${target_args[@]+"${target_args[@]}"}; then
     echo "" >&2
-    echo "❌ Push rejected: firmware size exceeds policy limit or reviewed baseline!" >&2
-    echo "   Run './scripts/check-firmware-size.sh --target esp32c6' to inspect." >&2
-    echo "   If this growth was intentional and reviewed, run with '--update-baseline' and commit." >&2
+    echo "❌ Push rejected: firmware size or stack usage exceeds the reviewed baseline!" >&2
+    echo "   Run './scripts/precheck-firmware.sh' to reproduce (same gates CI enforces)." >&2
+    echo "   If this growth was intentional and reviewed, regenerate the baselines and commit them:" >&2
+    echo "     size:  ./scripts/check-firmware-size.sh --all --update-baseline" >&2
+    echo "     stack: python3 scripts/check-stack-usage.py --observed-dir dist \\" >&2
+    echo "              --write-baseline scripts/firmware-stack-baseline.json" >&2
     exit 1
   fi
-  echo "✅ Pre-push firmware size check passed."
+  echo "✅ Pre-push firmware size/stack check passed."
 fi
 
 exit 0
