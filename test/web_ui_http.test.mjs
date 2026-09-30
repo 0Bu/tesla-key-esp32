@@ -32,6 +32,7 @@ function loadUi(opts = {}) {
         },
         style: {},
         setAttribute(name, value) { this[name] = String(value); },
+        removeAttribute(name) { delete this[name]; },
         appendChild(child) { this.children.push(child); child.parentNode = this; },
         removeChild(child) { this.children.splice(this.children.indexOf(child), 1); },
         focus() { if (!this.disabled && context.document) context.document.activeElement = this; },
@@ -2236,4 +2237,70 @@ test("desktop and mobile layout styles maintain 1/3-2/3 proportions and heroCard
   context.window.innerWidth = 1024;
   context.heroCardTap({ target: {} });
   assert.equal(heroCalls, 1, "tapping hero card on desktop does not trigger action");
+});
+
+test("Concept 3 Tesla automotive pill elements and states render properly", () => {
+  const css = fs.readFileSync(new URL("../main/www/style.css", import.meta.url), "utf8");
+  assert.match(css, /\.hero-top\s*\{/);
+  assert.match(css, /\.hero-dot/);
+  assert.match(css, /\.hero-pill/);
+  assert.match(css, /\.hlabel-soc/);
+
+  const { context, element } = loadUi();
+  let wakeTriggered = false;
+  context.wakeCar = () => { wakeTriggered = true; };
+
+  // Asleep state
+  context.render({
+    paired: true,
+    link: "asleep",
+    last: { soc: 99 },
+    last_seen_s: 3600
+  });
+
+  assert.equal(element("heroDot").className.includes("muted"), true);
+  assert.match(element("heroTag").innerHTML, /VEHICLE ASLEEP/);
+  assert.equal(element("heroSoc").textContent, "99%");
+  assert.equal(element("heroBatFill").style.width, "99%");
+  assert.match(element("hlabel").innerHTML, /99%/);
+  assert.match(element("hlabel").innerHTML, /Vehicle asleep/);
+  assert.equal(element("heroPill").classList.contains("hide"), false);
+  assert.equal(element("heroPillLbl").textContent, "Wake the car");
+
+  // Tapping hero pill triggers action
+  context.heroTap();
+  assert.equal(wakeTriggered, true);
+
+  // Charging state
+  let chargeTriggered = false;
+  context.toggleCharge = () => { chargeTriggered = true; };
+  context.render({
+    paired: true,
+    vehicle: { soc: 68, status: "Charging", power: 11, amps: 32 }
+  });
+
+  assert.equal(element("heroDot").className.includes("ok"), true);
+  assert.match(element("heroTag").innerHTML, /CHARGING · 11 KW/);
+  assert.equal(element("heroSoc").textContent, "68%");
+  assert.match(element("hlabel").innerHTML, /68%/);
+  assert.match(element("hlabel").innerHTML, /Charging/);
+  assert.match(element("hsub").textContent, /32 A · 11 kW/);
+  assert.equal(element("heroPill").classList.contains("hide"), false);
+  assert.equal(element("heroPillLbl").textContent, "Stop charging");
+
+  context.heroTap();
+  assert.equal(chargeTriggered, true);
+
+  // Connection failed state
+  context.render({
+    paired: true,
+    link: "unknown",
+    ble: { connected: false, connect_fail: 3, car_connectable: false }
+  });
+
+  assert.equal(element("heroDot").className.includes("err"), true);
+  assert.match(element("heroTag").innerHTML, /CONNECTION FAILED/);
+  assert.equal(element("heroOff").classList.contains("hide"), false);
+  assert.match(element("hlabel").innerHTML, /Connection failed/);
+  assert.equal(element("heroPill").classList.contains("hide"), true);
 });

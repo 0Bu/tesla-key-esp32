@@ -105,13 +105,38 @@ svg{display:block}
 .btn.primary:hover{filter:brightness(1.05)}
 
 /* hero */
-.hero{flex-direction:column; align-items:center; justify-content:center; gap:12px; padding:20px 16px;
-  text-align:center; min-width:0; background:var(--card); border:1px solid var(--border);
+.hero{display:flex; flex-direction:column; gap:14px; padding:16px; text-align:left; align-items:stretch;
+  justify-content:flex-start; min-width:0; background:var(--card); border:1px solid var(--border);
   border-radius:var(--r-card); box-shadow:var(--shadow); transition:transform .12s ease}
 .hero.has-act{cursor:pointer}
 .hero.has-act:active{transform:scale(.99)}
-.hbody{display:contents}
-.gauge{position:relative; width:var(--gs); height:var(--gs); flex:none; overflow:visible}
+
+/* hero top status bar (Concept 3) */
+.hero-top{display:flex; width:100%; align-items:center; justify-content:space-between; gap:10px}
+.hero-status{display:flex; align-items:center; gap:8px; min-width:0}
+.hero-dot{width:8px; height:8px; border-radius:50%; background:var(--muted); flex:none; transition:background .3s ease}
+.hero-dot.ok{background:var(--ok)}
+.hero-dot.warn{background:var(--warn)}
+.hero-dot.err{background:var(--accent)}
+.hero-dot.info{background:var(--info)}
+.hero-tag{font-size:11px; font-weight:700; letter-spacing:.5px; text-transform:uppercase; color:var(--muted); white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+.hero-bat{display:flex; align-items:center; gap:6px; flex:none}
+.hero-soc{font-size:13px; font-weight:700; font-variant-numeric:tabular-nums}
+.hero-batic{width:24px; height:12px; border:1.5px solid var(--muted); border-radius:3px; padding:1px; position:relative; display:flex; align-items:center; box-sizing:border-box}
+.hero-batic::after{content:""; position:absolute; right:-3.5px; top:2px; width:2px; height:5px; background:var(--muted); border-radius:0 1px 1px 0}
+.hero-batfill{height:100%; border-radius:1px; background:var(--fg); transition:width .4s ease,background .4s ease}
+.hero-off{font-size:11px; font-weight:600; color:var(--accent-text)}
+
+/* hero action pill button (Concept 3) */
+.hero-pill{display:flex; align-items:center; justify-content:center; gap:8px; width:100%; min-height:44px; padding:0 16px; border-radius:12px; background:var(--soft); border:1px solid var(--border); font-size:13px; font-weight:650; color:var(--fg); cursor:pointer; -webkit-tap-highlight-color:transparent; transition:background .15s ease,transform .1s ease}
+.hero-pill:hover{background:color-mix(in srgb,var(--fg) 8%,var(--soft))}
+.hero-pill:active{transform:scale(.985)}
+.hero-pill:disabled{opacity:.6; cursor:default; pointer-events:none}
+.hero-pill-ic{width:16px; height:16px; display:inline-flex; align-items:center; justify-content:center; flex:none}
+.hero-pill-ic svg{width:16px; height:16px; fill:currentColor}
+
+.hbody{display:flex; flex-direction:column; gap:4px; width:100%}
+.gauge{display:none!important; position:relative; width:var(--gs); height:var(--gs); flex:none; overflow:visible}
 .gauge>svg,.gauge .gbtn>svg{position:absolute; inset:0; width:100%; height:100%}
 .gauge .gbtn{position:absolute; inset:0; padding:0; border:0; border-radius:50%; background:none; -webkit-tap-highlight-color:transparent;
   transition:transform .12s ease; outline:none}
@@ -134,11 +159,12 @@ svg{display:block}
 .pulse.slow{animation-duration:4.5s}
 .pulse.fast{animation-duration:1.1s}
 .gflow{opacity:0; animation:flow var(--flow-dur,5s) linear infinite}
-.htext{display:flex; flex-direction:column; gap:4px; align-items:center; margin:0}
-.hlabel{margin:0; font-size:20px; font-weight:650; letter-spacing:-.5px; line-height:1.2; text-align:center}
-.hsub{margin:0; font-size:13px; font-weight:550; color:var(--muted); max-width:32ch; text-align:center; white-space:normal; overflow-wrap:break-word}
-.hstats{display:flex; gap:10px; width:100%; max-width:340px; margin-top:4px}
-.hstats:empty{display:none}
+.htext{display:flex; flex-direction:column; gap:3px; align-items:flex-start; text-align:left; margin:0}
+.hlabel{margin:0; font-size:20px; font-weight:700; letter-spacing:-.4px; line-height:1.25; text-align:left}
+.hlabel-soc{display:inline}
+.hlabel-soc:not(:empty)::after{content:" · "}
+.hsub{margin:0; font-size:12.5px; font-weight:500; color:var(--muted); max-width:none; text-align:left; white-space:normal; overflow-wrap:break-word; line-height:1.35}
+.hstats{display:none!important}
 .stat{flex:1 1 0; min-width:0; background:var(--card); border:1px solid var(--border); border-radius:var(--r-tile);
   padding:8px 10px; display:flex; flex-direction:column; gap:2px; text-align:left}
 .stat .k{display:flex; align-items:center; gap:6px; font-size:10px; font-weight:650; letter-spacing:.5px; text-transform:uppercase; color:var(--muted)}
@@ -290,22 +316,35 @@ svg{display:block}
   .hero{
     grid-column:1;
     height:100%;
+    align-items:center;
+    justify-content:center;
+    text-align:center;
     gap:16px;
     padding:24px 20px 22px;
     cursor:default;
   }
   .hero.has-act{cursor:default}
   .hero.has-act:active{transform:none}
+  .hero-top{display:none!important}
+  .gauge{display:block!important}
+  .hbody{display:contents}
+  .htext{display:flex; flex-direction:column; gap:4px; align-items:center; text-align:center; margin:0}
   .hlabel{
     font-size:24px;
+    text-align:center;
   }
+  .hlabel-soc{display:none!important}
   .hsub{
     font-size:14.5px;
+    text-align:center;
+    max-width:32ch;
   }
   .hstats{
+    display:flex!important;
     max-width:100%;
     margin-top:auto;
   }
+  .hero-pill{display:none!important}
   .stat{
     padding:10px 12px;
   }

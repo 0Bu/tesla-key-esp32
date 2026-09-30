@@ -535,6 +535,13 @@ function render(s){
     g={mode:charging?'charging':(complete?'complete':'soc'), pct:soc, busy:chgBusy, limit:num(v.charge_limit)};
     head=complete?'Charge complete':(v.status||'Idle');
     chips=chargeStats(v,charging)+copChip(s)+defrostChip(s);
+    if(charging){
+      var chgParts=[];
+      if(v.amps>0) chgParts.push(Math.round(v.amps)+' A');
+      if(v.power>0) chgParts.push(Math.round(v.power)+' kW');
+      if(v.time_to_full>0) chgParts.push(Math.round(v.time_to_full*60)+' min');
+      if(chgParts.length) sub=chgParts.join(' · ');
+    }
     if(chgBusy) busyText='Sending command…';
     else if(!complete){ act=toggleCharge; actLabel=charging?'Stop charging':'Start charging'; }
   } else if(paired){
@@ -601,15 +608,109 @@ function render(s){
   }
   // Safe Mode stops Bluetooth and commands, so it never offers a vehicle action.
   if(safe){ act=null; busyText=null; }
+  // Concept 3 status bar (tag + tone)
+  var tag = head.toUpperCase(), tone = '';
+  if(charging){
+    tone = 'ok';
+    var pwr = (v && (v.power != null ? v.power : v.charger_power));
+    tag = (pwr > 0) ? 'CHARGING · ' + Math.round(pwr) + ' KW' : 'CHARGING';
+  } else if(complete){
+    tone = 'ok';
+    tag = 'CHARGE COMPLETE';
+  } else if(waking){
+    tone = 'warn';
+    tag = 'WAKING UP…';
+  } else if(head === 'Vehicle asleep'){
+    tone = 'muted';
+    tag = 'VEHICLE ASLEEP';
+  } else if(head === 'Parked'){
+    tone = 'muted';
+    tag = 'PARKED';
+  } else if(head === 'Online / Drive' || (paired && v)){
+    tone = 'info';
+    tag = (v && v.status) ? v.status.toUpperCase() : 'ONLINE';
+  } else if(head === 'Connection failed'){
+    tone = 'err';
+    tag = 'CONNECTION FAILED';
+  } else if(head === 'Vehicle unreachable'){
+    tone = 'warn';
+    tag = 'UNREACHABLE';
+  } else if(head === 'Set up needed'){
+    tone = 'warn';
+    tag = 'SETUP NEEDED';
+  } else if(head === 'Pairing'){
+    tone = 'info';
+    tag = 'PAIRING';
+  }
+
+  var hdot = $("heroDot"), htag = $("heroTag");
+  if(hdot) hdot.className = 'hero-dot ' + (tone || '');
+  if(htag) setHTML(htag, esc(tag));
+
+  var bPct = (g.pct != null) ? Math.round(g.pct) : null;
+  var hsoc = $("heroSoc"), hbfill = $("heroBatFill"), hbic = $("heroBatIc"), hoff = $("heroOff");
+  if(bPct != null){
+    if(hsoc){ hsoc.textContent = bPct + '%'; hsoc.classList.remove('hide'); }
+    if(hbfill){
+      hbfill.style.width = Math.max(0, Math.min(100, bPct)) + '%';
+      hbfill.style.background = charging ? 'var(--ok)' : (bPct <= 10 ? 'var(--accent)' : (bPct <= 20 ? 'var(--warn)' : 'var(--fg)'));
+    }
+    if(hbic) hbic.classList.remove('hide');
+    if(hoff) hoff.classList.add('hide');
+  } else {
+    if(hsoc) hsoc.classList.add('hide');
+    if(hbic) hbic.classList.add('hide');
+    if(paired){
+      if(hoff){
+        hoff.classList.remove('hide');
+        hoff.textContent = (s.link === 'unreachable' || s.link === 'unknown') ? 'Offline' : 'BLE Offline';
+      }
+    } else {
+      if(hoff) hoff.classList.add('hide');
+    }
+  }
+
   // The gauge button's label replaces its content for screen readers, so it carries the level.
   var gm=gaugeHTML(g), lvl=(g.pct!=null)?' · battery '+Math.round(g.pct)+' %':'';
   setHTML(hic, act ? '<button type="button" class="gbtn" onclick="heroTap()" aria-label="'+esc(actLabel+lvl)+'" title="'+esc(actLabel)+'">'+gm+'</button>'
                    : (busyText ? '<button type="button" class="gbtn" disabled aria-label="'+esc(busyText+lvl)+'">'+gm+'</button>' : gm));
-  setHTML(hl,'<span>'+esc(head)+'</span>');
+  var socPrefix = (bPct != null) ? '<span class="hlabel-soc">' + bPct + '%</span>' : '';
+  setHTML(hl, socPrefix + '<span id="hlabelTxt">' + esc(head) + '</span>');
   hs.textContent=sub;
   hs.style.display=sub?'':'none';
   setHTML(hst,chips);
   setHeroAct(actLabel,actIcon,act,busyText);
+
+  // Concept 3 Action Pill button
+  var hpill = $("heroPill"), hpillLbl = $("heroPillLbl"), hpillIc = $("heroPillIc");
+  if(hpill){
+    if(act && actLabel && !safe){
+      hpill.classList.remove('hide');
+      hpill.disabled = !!busyText;
+      var pLbl = busyText || actLabel;
+      hpill.setAttribute('aria-label', pLbl);
+      hpill.setAttribute('title', pLbl);
+      if(hpillLbl) hpillLbl.textContent = pLbl;
+      if(hpillIc){
+        var pIcon = (charging || actIcon === 'zap')
+          ? '<svg viewBox="0 0 24 24"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>'
+          : '<svg viewBox="0 0 24 24"><use href="#ic-' + (actIcon === 'alarm' ? 'bolt' : actIcon) + '"/></svg>';
+        setHTML(hpillIc, pIcon);
+      }
+    } else if(busyText){
+      hpill.classList.remove('hide');
+      hpill.disabled = true;
+      hpill.setAttribute('aria-label', busyText);
+      hpill.setAttribute('title', busyText);
+      if(hpillLbl) hpillLbl.textContent = busyText;
+      if(hpillIc) setHTML(hpillIc, '<svg viewBox="0 0 24 24" class="spin"><circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" stroke-width="3" stroke-dasharray="30 60"/></svg>');
+    } else {
+      hpill.classList.add('hide');
+      hpill.setAttribute('aria-label', 'Vehicle action');
+      hpill.title = '';
+      if(hpill.removeAttribute) hpill.removeAttribute('title');
+    }
+  }
 
   // setup tiles ----------------------------------------------------
   $("vehVal").innerHTML=hasVin?esc(s.vin):'<span class="ph">Not set</span>';

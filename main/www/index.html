@@ -48,14 +48,31 @@
       <!-- vehicle hero. Starts hidden: the first /status frame reveals it, so the empty
            skeleton never flashes on load. -->
       <section class="pane pane-car hero hide" id="hero" aria-label="Vehicle status" onclick="heroCardTap(event)">
+        <div class="hero-top" id="heroTop">
+          <div class="hero-status">
+            <span class="hero-dot" id="heroDot"></span>
+            <span class="hero-tag" id="heroTag">&mdash;</span>
+          </div>
+          <div class="hero-bat" id="heroBat">
+            <span class="hero-soc mono" id="heroSoc"></span>
+            <div class="hero-batic" id="heroBatIc" aria-hidden="true">
+              <div class="hero-batfill" id="heroBatFill"></div>
+            </div>
+            <span class="hero-off hide" id="heroOff">BLE Offline</span>
+          </div>
+        </div>
         <div class="gauge" id="hicon"></div>
         <div class="hbody">
           <div class="htext" id="htext">
-            <h2 class="hlabel" id="hlabel">&mdash;</h2>
+            <h2 class="hlabel" id="hlabel"><span class="hlabel-soc" id="hlabelSoc"></span><span id="hlabelTxt">&mdash;</span></h2>
             <p class="hsub" id="hsub"></p>
           </div>
           <div class="hstats" id="hstats"></div>
         </div>
+        <button type="button" class="hero-pill hide" id="heroPill" onclick="heroTap()" aria-label="Vehicle action">
+          <span class="hero-pill-ic" id="heroPillIc"></span>
+          <span id="heroPillLbl"></span>
+        </button>
       </section>
 
       <!-- settings card: all settings in one compact card, one row each -->
