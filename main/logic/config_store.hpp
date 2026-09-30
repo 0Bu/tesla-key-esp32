@@ -122,6 +122,21 @@ struct ConfigBlob {
     bool has_ota = false;
 };
 
+// Commit credentials typed into the recovery setup form. They replace the live pair and, by
+// design, leave nothing to go back to, so the previous one-shot rollback state (armed bit, backup
+// pair, last verdict) is retired with them. Carrying it forward would let a later failure of the
+// FRESH credentials restore an unrelated older network, and would report an old rollback verdict
+// against the new attempt.
+inline void config_apply_setup_wifi(ConfigBlob& cfg, const std::string& ssid,
+                                    const std::string& pass) {
+    cfg.wifi_ssid = ssid;
+    cfg.wifi_pass = pass;
+    cfg.wifi_ssid_backup.clear();
+    cfg.wifi_pass_backup.clear();
+    cfg.wifi_rollback_active = false;
+    cfg.wifi_rolled_back = false;
+}
+
 // The NVS key inside the `tesla_cfg` namespace is owned by the exact persistence registry.
 inline constexpr const char* kConfigBlobKey = nvs_contract::kConfigBlob;
 

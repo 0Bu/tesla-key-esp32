@@ -191,6 +191,11 @@ tk::JsonOwner build_vehicle_full() {
     return tk::mqtt::build_vehicle_payload("ASLEEP");
 }
 
+// The retained-state clearing object (an invalid cache must not leave old readings on the broker).
+tk::JsonOwner build_empty_full() {
+    return tk::mqtt::build_empty_payload();
+}
+
 tk::mqtt::DevicePayload device_full_input() {
     tk::mqtt::DevicePayload in;
     in.has_wifi_rssi = true; in.wifi_rssi = -61;
@@ -245,7 +250,7 @@ struct PayloadFactoryCase {
 // Static runtime policy parses this exact inventory and requires a one-to-one match with every
 // build_*_payload definition in mqtt_payloads.hpp and every production call in mqtt_ha.cpp. Each
 // case is driven through a successful retained publish plus every cJSON build/print failpoint.
-static const std::array<PayloadFactoryCase, 8> kProductionPayloadFactoryCases{{
+static const std::array<PayloadFactoryCase, 9> kProductionPayloadFactoryCases{{
     {"build_discovery_payload", build_discovery_sensor_full},
     {"build_charge_payload", build_charge_full},
     {"build_climate_payload", build_climate_full},
@@ -253,6 +258,7 @@ static const std::array<PayloadFactoryCase, 8> kProductionPayloadFactoryCases{{
     {"build_tires_payload", build_tires_full},
     {"build_closures_payload", build_closures_full},
     {"build_vehicle_payload", build_vehicle_full},
+    {"build_empty_payload", build_empty_full},
     {"build_device_payload", build_device_full},
 }};
 
@@ -374,8 +380,14 @@ void test_discovery_registry() {
             CHECK(value_template.find("value_json." + std::string(entry.field)) !=
                   std::string::npos);
             CHECK(value_template.find(" is defined ") != std::string::npos);
+            CHECK(value_template.find("{% else %}None{% endif %}") != std::string::npos);
         } else {
-            CHECK(value_template == "{{ value_json." + std::string(entry.field) + " }}");
+            // Present values render unchanged; an absent (or null) field renders `None` so HA goes
+            // to unknown instead of ignoring an empty rendering and keeping the previous reading.
+            CHECK(value_template ==
+                  "{% if value_json." + std::string(entry.field) + " is defined and value_json." +
+                      std::string(entry.field) + " is not none %}{{ value_json." +
+                      std::string(entry.field) + " }}{% else %}None{% endif %}");
         }
 
         const std::string unique_id =
@@ -438,8 +450,8 @@ void test_discovery_registry() {
     const auto& locked = discovery_entry("locked");
     CHECK(locked.invert && locked.device_class == "lock");
     CHECK(tk::mqtt::discovery_value_template(locked) ==
-          "{% if value_json.locked is defined %}{{ 'OFF' if value_json.locked else 'ON' }}"
-          "{% endif %}");
+          "{% if value_json.locked is defined and value_json.locked is not none %}"
+          "{{ 'OFF' if value_json.locked else 'ON' }}{% else %}None{% endif %}");
 
     static constexpr std::array<std::string_view, tk::mqtt::kStateDomainCount>
         expected_topic_suffixes{{
@@ -570,7 +582,8 @@ void test_exact_payload_branches() {
         "{\"name\":\"Battery\",\"uniq_id\":\"teslakey_fixture_soc\","
         "\"stat_t\":\"tesla-key/teslakey_fixture/charge\","
         "\"avty_t\":\"tesla-key/teslakey_fixture/availability\","
-        "\"val_tpl\":\"{{ value_json.soc }}\",\"dev_cla\":\"battery\","
+        "\"val_tpl\":\"{% if value_json.soc is defined and value_json.soc is not none %}"
+        "{{ value_json.soc }}{% else %}None{% endif %}\",\"dev_cla\":\"battery\","
         "\"unit_of_meas\":\"%\",\"stat_cla\":\"measurement\","
         "\"ent_cat\":\"diagnostic\","
         "\"o\":{\"name\":\"tesla-key-esp32\",\"sw\":\"0.0.0-test\","
@@ -583,8 +596,8 @@ void test_exact_payload_branches() {
         "{\"name\":\"Doors\",\"uniq_id\":\"teslakey_fixture_door_open\","
         "\"stat_t\":\"tesla-key/teslakey_fixture/closures\","
         "\"avty_t\":\"tesla-key/teslakey_fixture/availability\","
-        "\"val_tpl\":\"{% if value_json.door is defined %}{{ 'ON' if value_json.door "
-        "else 'OFF' }}{% endif %}\",\"pl_on\":\"ON\",\"pl_off\":\"OFF\","
+        "\"val_tpl\":\"{% if value_json.door is defined and value_json.door is not none %}"
+        "{{ 'ON' if value_json.door else 'OFF' }}{% else %}None{% endif %}\",\"pl_on\":\"ON\",\"pl_off\":\"OFF\","
         "\"dev_cla\":\"door\","
         "\"o\":{\"name\":\"tesla-key-esp32\",\"sw\":\"0.0.0-test\","
         "\"url\":\"https://github.com/0Bu/tesla-key-esp32\"},"
@@ -617,6 +630,7 @@ void test_exact_payload_branches() {
         build_closures_minimal,
         "{\"door\":false,\"frunk\":false,\"trunk\":false,\"window\":false}");
     check_exact_retained(build_vehicle_full, "{\"sleep_status\":\"ASLEEP\"}");
+    check_exact_retained(build_empty_full, "{}");
     check_exact_retained(
         build_device_full,
         "{\"wifi_rssi\":-61,\"ble_connected\":true,\"ble_rssi\":-72,\"paired\":true,"

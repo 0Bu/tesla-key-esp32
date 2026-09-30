@@ -64,6 +64,18 @@ bool cfg_load(NvsStorageAdapter& cfg, ConfigBlob& out) {
     return false;
 }
 
+bool cfg_load_for_update(NvsStorageAdapter& cfg, ConfigBlob& out) {
+    ConfigBlob loaded;
+    const ConfigLoadState state = cfg_load_state(cfg, loaded);
+    if (state == ConfigLoadState::Error) {
+        ESP_LOGE(TAG, "config blob unreadable — refusing to build a configuration change on "
+                      "legacy mirrors");
+        return false;
+    }
+    out = std::move(loaded);
+    return true;
+}
+
 bool cfg_save(NvsStorageAdapter& cfg, const ConfigBlob& in) {
     ConfigBlobBuffer buf{};
     const size_t n = config_blob_encode(in, buf.data(), buf.size());

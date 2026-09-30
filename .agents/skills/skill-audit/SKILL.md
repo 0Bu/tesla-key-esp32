@@ -91,7 +91,8 @@ the authority for the per-sibling drift check; `$project-review` defers the mech
   exact and source-SHA-bound; every USB write must use a verified signed app and preserve NVS.
 - **`$ship`** — the merge→CI→signed-artifact→flash pipeline. Verify against
   `.github/workflows/build.yml` (unsigned `firmware-unsigned` build artifact, protected main-only
-  artifact `tesla-key-esp32-<version>-<full-source-SHA>`, the firmware-change-gated release step) and
+  artifact `tesla-key-esp32-<version>-<full-source-SHA>`, Dev-channel publication on a firmware-relevant
+  `main` push, and the stable Release produced only by a manual `workflow_dispatch` with `release: true`) and
   `.github/workflows/signed-pr-preview.yml` (separate
   `tesla-key-esp32-pr<N>-<full-head-SHA>` path).
   `scripts/ci-build-all.sh` owns the four unsigned trees + projected-signed size gate;
@@ -109,7 +110,13 @@ the authority for the per-sibling drift check; `$project-review` defers the mech
   device uptime is insufficient and hidden reboots or an unconfirmed rollback cancellation must
   fail closed.
   USB gets only a short bounded boot/reachability retry, never that OTA probation wait.
-- **`$deploy`** — end-to-end delivery lifecycle (commit, push, PR creation, gate verification, canonical squash merge, GitHub Release monitoring, OTA update, and 3-tiered verification). Verify against canonical PR gate rules, standalone merge syntax, RFC 5737 doc IP addresses, and fail-closed gate verification via `scripts/stamp-pr-gates.sh`.
+- **`$deploy`** — end-to-end delivery lifecycle (commit, push, PR creation, gate verification, canonical squash merge, GitHub Release monitoring, OTA update, and 3-tiered verification). Verify against canonical PR gate rules, standalone merge syntax, RFC 5737 doc IP addresses, fail-closed gate verification via `scripts/stamp-pr-gates.sh`, channel-bound provenance (the exact `MERGE_SHA` run and artifact, never the newest GitHub Release), and the same wall-clock-bound OTA probation monitor as `$ship`.
+- **`$ci-heal`** — post-push CI monitor and merge-readiness gate (`scripts/ci-heal.sh`). Verify that
+  it never commits, writes a gate record only from an explicit `--attest <gate>=<evidence>`, and
+  requires green CI on the PR head, local `HEAD` equal to it, `MERGEABLE`, an unchanged head before
+  the body edit, and the shared relevance predicates fed on stdin from the GitHub changed-file list
+  before stamping, `READY FOR MERGE` or `--auto-merge`; its `--self-test` must exercise the real
+  red and green flows.
 - **`$vehicle-command-audit`** — compares the firmware against upstream `teslamotors/vehicle-command`,
   gated by what `yoziru/tesla-ble` can do. Verify the tesla-ble **pin** in its source map
   (`v5.2.0`) still matches `main/idf_component.yml`, every repository-owned patch under
@@ -129,14 +136,15 @@ the authority for the per-sibling drift check; `$project-review` defers the mech
 - **`$pr-hygiene`** — screens the PR title/body, commit messages and touched documentation for
   personal/private information (`PRIVACY-LEAK`: LAN IPs, MAC addresses, VINs, WiFi network names,
   hostnames, emails) and content not written in English (`LANGUAGE`). Verify it against
-  `tools/agent-hooks/require-pr-gates.sh` — it is the **fourth** PR gate, and the strictest: it
+  `tools/agent-hooks/require-pr-gates.sh` — it is the strictest of the five PR gates: it
   fires at PR creation, every push, **and** merge, unlike `$skill-audit` (create/push only) or
   `$project-review`/`$feature-docs` (merge only). Unlike `$skill-audit ⊂ $project-review`, a clean
   `$project-review` or `$skill-audit` run does **not** establish `$pr-hygiene` readiness —
   confidentiality/language is a separate axis from coherence.
 - **`$feature-docs`** — keeps `docs/FEATURES.md` in sync when a platform feature lands or changes.
-  Verify the gate it defers to, `tools/agent-hooks/require-pr-gates.sh` — the **fourth** PR gate
-  beside this one, `$project-review` and `$pr-hygiene`, and the only *conditional* one — and above
+  Verify the gate it defers to, `tools/agent-hooks/require-pr-gates.sh` — a *conditional* PR gate
+  (with `$vehicle-command-audit`) beside the unconditional `$skill-audit`, `$project-review` and
+  `$pr-hygiene` — and above
   all its **relevance filter**: the paths that arm it must still match the hook's own regex, currently
   `main/` / `test/` / `sdkconfig.defaults*` / `partitions.csv` /
   `AGENTS.md` / `.agents/` / `.github/PULL_REQUEST_TEMPLATE.md` /
@@ -146,7 +154,7 @@ the authority for the per-sibling drift check; `$project-review` defers the mech
   `.github/workflows/{build,signed-pr-preview,pr-preview-cleanup,pr-policy,bench-acceptance}.yml` /
   `scripts/release-relevance.sh` (the shared
   `gate_feature_docs_relevant` predicate). A path that drifts out of that list stops gating
-  silently. All four gates must block when the shared library is missing, truncated or lacks a
+  silently. All five gates must block when the shared library is missing, truncated or lacks a
   required function; `scripts/test-pr-gates.sh` pins those negative cases.
 - **`$skill-audit`** (this skill) — verify its own numbers/paths, report-only boundary, neutral hook
   references, PR-record mechanism, sibling list, command count `15`, and tesla-ble pin. Report any
@@ -186,8 +194,9 @@ the authority for the per-sibling drift check; `$project-review` defers the mech
   four ordered per-part offsets (bootloader per-target, partition-table `32768`, app `131072`,
   otadata `61440` last) in `scripts/build-pages.sh`, the suffix map across
   `ota_update.cpp`/`logic/target.hpp`/`ci-sign-artifacts.sh`/`build-pages.sh`, the `version.txt`
-  floor vs CI-stamped version, the build/test-only `workflow_dispatch` boundary (it must never
-  sign/release/republish Pages), same-SHA reuse only for the newest valid tag, current-main/tag and
+  floor vs CI-stamped version, the `workflow_dispatch` boundary (without `release: true` it is test-only
+  and never signs, releases or republishes Pages; only an explicit `release: true` run on current
+  `main` may cut the stable Release and root Pages), same-SHA reuse only for the newest valid tag, current-main/tag and
   latest-Release/`immutable: true`/digest-asset selection and end-of-run race rechecks before
   signing/Release/Pages mutation and deploy, and the `/ota/*` +
   `/api/proxy/1/version` endpoints. Read-only;
@@ -196,7 +205,7 @@ the authority for the per-sibling drift check; `$project-review` defers the mech
   Verify the partition map against `partitions.csv` (app `@0x20000`, `otadata@0xf000/0x2000` erased,
   `nvs@0x9000/0x6000` never touched, `ota_1@0x210000`), per-target bootloader offset, the
   signed-image requirement (`CONFIG_SECURE_BOOT_BUILD_SIGNED_BINARIES=n`), exact Release-byte ↔
-  source-SHA-bound main-artifact match or exact signed main artifact (never Pages), the `-merged.bin`
+  the source-SHA-bound signed artifact of the `release: true` dispatch run, or exact signed main artifact (never Pages), the `-merged.bin`
   NVS-wipe warning, explicit unambiguous port / no-auto-reset / ROM-node handling, the read-only
   bootloader check that refuses an app built by an older ESP-IDF than the bootloader that stays, and
   bounded post-reset verification of exact version/platform plus `paired:true`.

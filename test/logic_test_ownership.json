@@ -36,6 +36,7 @@
     "link_state.hpp": {"test": "test/test_logic.cpp", "evidence": "test_link_state("},
     "mcp.hpp": {"test": "test/test_logic.cpp", "evidence": "test_mcp("},
     "mqtt_discovery_registry.hpp": {"test": "test/test_mqtt_json_publish.cpp", "evidence": "test_discovery_registry("},
+    "mqtt_state_lifecycle.hpp": {"test": "test/test_logic.cpp", "evidence": "test_mqtt_state_lifecycle("},
     "mqtt_uri.hpp": {"test": "test/test_logic.cpp", "evidence": "test_mqtt_uri("},
     "net_link.hpp": {"test": "test/test_logic.cpp", "evidence": "test_net_link("},
     "nimble_start_gate.hpp": {"test": "test/test_logic.cpp", "evidence": "test_nimble_start_gate("},

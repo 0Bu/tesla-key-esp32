@@ -874,6 +874,17 @@ jobs:
             --source-sha "$SOURCE_SHA" \
             --attempts 6 --interval 10 --timeout 15
 
+      # The dev channel is mutated in place, so an old run must never overwrite a newer one: a re-run
+      # of only this job (long after the publish job's own main check) would otherwise write
+      # correctly signed but superseded bytes over the current channel, and the acceptance step
+      # below would still pass because it verifies the artifact it was handed. Refetch main
+      # immediately before the branch mutation and refuse when this run's SHA is no longer current.
+      - name: Revalidate current main immediately before dev deployment
+        if: needs.build.outputs.mode == 'dev'
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+        run: ./scripts/select-release-version.sh --require-current-main "$SOURCE_SHA"
+
       - name: Deploy dev site to gh-pages
         if: needs.build.outputs.mode == 'dev'
         env:

@@ -549,6 +549,9 @@ private:
     // The new key is durable, but session/cache erasure was incomplete. Auto-pair retries only
     // that idempotent cleanup; it must not generate a different key on every retry.
     std::atomic<bool> pairing_cleanup_pending_{false};
+    // The stored key_created date belongs to a previous key and could not be replaced or erased
+    // when the key rotated; key_created_at() reports 0 (unknown) while this is set.
+    std::atomic<bool> key_created_untrusted_{false};
     // Set before /set_vin stages its cross-namespace journal and held until the mandatory reboot.
     // It closes the otherwise small unlock→HTTP-rollback/reboot window in which auto-pair or a
     // telemetry task could sign/re-key using a request whose persisted VIN is still in flight.
@@ -589,6 +592,11 @@ private:
     // could never finish its idle→sleep transition. See loop_task_fn_.)
     std::atomic<uint32_t> last_cmd_ticks_{0};  // ticks of the last real command (0 = never)
     static constexpr uint32_t kActiveWindowMs = 300000;  // 5 min command-recency window
+    // The ONE active-window decision (command recency OR charging with FRESH contact, see
+    // logic/active_window.hpp). The background poll and get_charge_state() must both use it: if the
+    // getter kept a window open that the poll had already closed, it would demand a fresh
+    // ChargeState nothing refreshes any more and answer evcc with a permanent 503.
+    bool active_window_now_(uint32_t now_ticks, bool charging_state) const;
 
     // Set when an unexpected error occurs during BLE rx framing or processing.
     // Exceptions are caught at our boundary and set this; loop_task then drops the BLE link once to

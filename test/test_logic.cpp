@@ -68,6 +68,7 @@
 #include "logic/boot_guard.hpp"
 #include "logic/heap_history.hpp"
 #include "logic/health_gate.hpp"
+#include "logic/mqtt_state_lifecycle.hpp"
 #include "logic/mqtt_uri.hpp"
 #include "logic/http_origin.hpp"
 #include "logic/ble_chunk.hpp"
@@ -3117,18 +3118,78 @@ static void test_config_request_gate() {
     CHECK(s.response_status == 500 && !s.response_ok && s.response_reason == "save failed");
 }
 
-// ── HA MQTT-discovery binary value_template (logic/ha_templates.hpp) — the phantom-OFF fix ─────
+// ── HA MQTT-discovery value templates (logic/ha_templates.hpp) — absent field ⇒ unknown ─────────
 static void test_ha_templates() {
-    // Every binary template MUST guard on `is defined` so an unreported optional field renders empty
-    // (HA → unknown) instead of a phantom OFF — the whole point of the fix.
+    // HA ignores an EMPTY rendering (the entity keeps its previous state) and keeps the previous
+    // state on a template error; only the literal `None` moves an entity to unknown. So every
+    // template must render an absent — or JSON-null — field as `None`, and must also guard the
+    // truthiness test so an unreported optional never becomes a phantom OFF.
     std::string door = tk::ha_binary_value_template("door", false);
-    CHECK(door == "{% if value_json.door is defined %}{{ 'ON' if value_json.door else 'OFF' }}{% endif %}");
+    CHECK(door == "{% if value_json.door is defined and value_json.door is not none %}"
+                  "{{ 'ON' if value_json.door else 'OFF' }}{% else %}None{% endif %}");
     CHECK(door.find("is defined") != std::string::npos);
+    CHECK(door.find("is not none") != std::string::npos);
+    CHECK(door.find("{% else %}None{% endif %}") != std::string::npos);
 
     // The inverted `lock` class emits OFF-when-true so a locked car reads "Locked", still guarded.
     std::string locked = tk::ha_binary_value_template("locked", true);
-    CHECK(locked == "{% if value_json.locked is defined %}{{ 'OFF' if value_json.locked else 'ON' }}{% endif %}");
-    CHECK(locked.find("is defined") != std::string::npos);
+    CHECK(locked == "{% if value_json.locked is defined and value_json.locked is not none %}"
+                    "{{ 'OFF' if value_json.locked else 'ON' }}{% else %}None{% endif %}");
+    CHECK(locked.find("{% else %}None{% endif %}") != std::string::npos);
+
+    // Numeric and text sensors: a present value is rendered unchanged, an absent one is `None`
+    // instead of an empty string that HA would ignore (leaving the old reading on screen).
+    std::string soc = tk::ha_value_template("battery_level");
+    CHECK(soc == "{% if value_json.battery_level is defined and value_json.battery_level is not none %}"
+                 "{{ value_json.battery_level }}{% else %}None{% endif %}");
+    CHECK(soc.find("{% else %}None{% endif %}") != std::string::npos);
+}
+
+// ── Retained MQTT state lifecycle (logic/mqtt_state_lifecycle.hpp) — stale broker values ───────
+static void test_mqtt_state_lifecycle() {
+    using tk::mqtt::DomainPublishAction;
+    using tk::mqtt::DomainPublishState;
+    using tk::mqtt::decide_domain_publish;
+
+    // A valid cache always publishes, whatever was published before.
+    for (const DomainPublishState prev : {DomainPublishState::Unknown, DomainPublishState::Published,
+                                          DomainPublishState::Cleared}) {
+        const auto d = decide_domain_publish(true, prev);
+        CHECK(d.action == DomainPublishAction::Publish);
+        CHECK(d.next == DomainPublishState::Published);
+    }
+
+    // After a reboot nothing has been published yet, but the broker still holds the retained
+    // pre-reboot values: an invalid cache must clear them exactly once.
+    {
+        const auto d = decide_domain_publish(false, DomainPublishState::Unknown);
+        CHECK(d.action == DomainPublishAction::PublishClear);
+        CHECK(d.next == DomainPublishState::Cleared);
+    }
+    // A cache that becomes invalid after being published (pairing reset, invalidation) clears too.
+    {
+        const auto d = decide_domain_publish(false, DomainPublishState::Published);
+        CHECK(d.action == DomainPublishAction::PublishClear);
+        CHECK(d.next == DomainPublishState::Cleared);
+    }
+    // Once cleared, later cycles stay quiet instead of re-publishing the empty object every 15 s.
+    {
+        const auto d = decide_domain_publish(false, DomainPublishState::Cleared);
+        CHECK(d.action == DomainPublishAction::Skip);
+        CHECK(d.next == DomainPublishState::Cleared);
+    }
+
+    // Full lifecycle across cache transitions: valid, invalid, invalid, valid, invalid.
+    DomainPublishState state = DomainPublishState::Unknown;
+    int clears = 0, publishes = 0, skips = 0;
+    for (const bool valid : {true, false, false, true, false, false}) {
+        const auto d = decide_domain_publish(valid, state);
+        if (d.action == DomainPublishAction::Publish) ++publishes;
+        else if (d.action == DomainPublishAction::PublishClear) ++clears;
+        else ++skips;
+        state = d.next;
+    }
+    CHECK(publishes == 2 && clears == 2 && skips == 2);
 }
 
 // ── Active-window gate (logic/active_window.hpp) — the stale-charging-window fix ───────────────
@@ -3154,6 +3215,21 @@ static void test_active_window() {
     // Not charging and no recent command → closed, whatever the contact age.
     CHECK(active_window_open({false, false, true, 0}) == false);
     CHECK(active_window_open({false, false, false, 0}) == false);
+
+    // The cached-charge read (get_charge_state) asks the SAME window decision as the poll. A car
+    // cached as "Charging" whose contact went stale has a closed window, so the last-known reading
+    // is served whatever its age instead of being rejected as stale (which nothing would refresh
+    // any more — the permanent evcc 503). With fresh contact the window is open and the 30 s
+    // freshness bound applies.
+    {
+        const bool stale_window = active_window_open({false, true, true, kAwakeMaxAgeS + 60});
+        CHECK(!stale_window);
+        CHECK(charge_cache_usable(true, stale_window, true, 3600));
+        const bool fresh_window = active_window_open({false, true, true, 5});
+        CHECK(fresh_window);
+        CHECK(charge_cache_usable(true, fresh_window, true, kActiveChargeStateMaxAgeS));
+        CHECK(!charge_cache_usable(true, fresh_window, true, kActiveChargeStateMaxAgeS + 1));
+    }
 }
 
 // ── Wake-edge one-shot charge poll (logic/wake_poll.hpp) — the stale-SOC-after-plug-in fix ──
@@ -4665,6 +4741,33 @@ static void test_http_origin() {
     CHECK(!tk::mutation_origin_allowed("192.0.2.99",
                                        "http://192.0.2.99", "same-origin", "192.0.2.42"));
 
+    // Dual lease: after an Ethernet takeover the page opened through the still-valid WiFi address
+    // keeps working, because every address the board holds is device-owned — and only those.
+    {
+        const std::string_view owned[] = {"192.0.2.42", "192.0.2.77"};
+        CHECK(tk::mutation_origin_allowed("192.0.2.77", "http://192.0.2.77", "same-origin", owned, 2));
+        CHECK(tk::mutation_origin_allowed("192.0.2.42:80", "http://192.0.2.42", "same-origin", owned, 2));
+        CHECK(tk::mutation_origin_allowed("192.0.2.77", "", "same-origin", owned, 2));
+        CHECK(tk::mutation_origin_allowed("tesla-key-esp32.local", "http://tesla-key-esp32.local",
+                                          "same-origin", owned, 2));
+        // An empty entry (interface without a lease) never matches an empty or absent host.
+        const std::string_view partly_empty[] = {"", "192.0.2.77"};
+        CHECK(tk::mutation_origin_allowed("192.0.2.77", "http://192.0.2.77", "same-origin",
+                                          partly_empty, 2));
+        CHECK(!tk::mutation_origin_allowed("", "http://192.0.2.77", "same-origin", partly_empty, 2));
+        // Foreign hosts, DHCP FQDNs, cross-site and mismatched Origin stay rejected.
+        CHECK(!tk::mutation_origin_allowed("192.0.2.99", "http://192.0.2.99", "same-origin", owned, 2));
+        CHECK(!tk::mutation_origin_allowed("attacker.example", "http://attacker.example",
+                                           "same-origin", owned, 2));
+        CHECK(!tk::mutation_origin_allowed("192.0.2.77", "http://192.0.2.42", "same-origin", owned, 2));
+        CHECK(!tk::mutation_origin_allowed("192.0.2.77", "http://192.0.2.77", "cross-site", owned, 2));
+        // Headerless evcc/curl clients keep the documented compatibility.
+        CHECK(tk::mutation_origin_allowed("", "", "", owned, 2));
+        CHECK(tk::mutation_origin_allowed("", "", "", static_cast<const std::string_view*>(nullptr), 0));
+        CHECK(!tk::mutation_origin_allowed("192.0.2.77", "http://192.0.2.77", "same-origin",
+                                           static_cast<const std::string_view*>(nullptr), 0));
+    }
+
     CHECK(tk::mutation_origin_required(true, "/status"));
     CHECK(tk::mutation_origin_required(false, "/ota/check"));
     CHECK(tk::mutation_origin_required(false, "/ota/check?ms=123"));
@@ -5311,6 +5414,43 @@ static void test_config_store() {
     v2_syn[dev_sz - 1] = static_cast<uint8_t>((v2_crc >> 24) & 0xFF);
     tk::ConfigBlob v2_out;
     CHECK(!tk::config_blob_decode(v2_syn.data(), dev_sz, v2_out));
+
+    // Recovery-setup commit: fresh credentials retire the whole previous one-shot rollback state
+    // (armed bit, backup pair and the last verdict), and leave every unrelated field alone.
+    {
+        tk::ConfigBlob armed;
+        armed.wifi_ssid = "trial-net"; armed.wifi_pass = "trial-pass";
+        armed.wifi_ssid_backup = "old-net"; armed.wifi_pass_backup = "old-pass";
+        armed.wifi_rollback_active = true;
+        armed.wifi_rolled_back = true;
+        armed.vin = "5YJ3E1EA7KF000316";
+        armed.mqtt_uri = "broker.example:1883";
+        armed.syslog_uri = "logs.example:514";
+        armed.has_ota = true;
+        armed.ota_channel = 1;
+
+        tk::config_apply_setup_wifi(armed, "fresh-net", "fresh-pass");
+        CHECK_STR(armed.wifi_ssid.c_str(), "fresh-net");
+        CHECK_STR(armed.wifi_pass.c_str(), "fresh-pass");
+        CHECK(armed.wifi_ssid_backup.empty());
+        CHECK(armed.wifi_pass_backup.empty());
+        CHECK(!armed.wifi_rollback_active);
+        CHECK(!armed.wifi_rolled_back);
+        CHECK_STR(armed.vin.c_str(), "5YJ3E1EA7KF000316");
+        CHECK_STR(armed.mqtt_uri.c_str(), "broker.example:1883");
+        CHECK_STR(armed.syslog_uri.c_str(), "logs.example:514");
+        CHECK(armed.has_ota && armed.ota_channel == 1);
+
+        // The committed blob round-trips with no rollback state, so a later failure of the fresh
+        // credentials cannot restore the older network.
+        tk::ConfigBlobBuffer setup_buf{};
+        const size_t setup_n = tk::config_blob_encode(armed, setup_buf.data(), setup_buf.size());
+        CHECK(setup_n > 0);
+        tk::ConfigBlob setup_out;
+        CHECK(tk::config_blob_decode(setup_buf.data(), setup_n, setup_out));
+        CHECK(!setup_out.wifi_rollback_active && !setup_out.wifi_rolled_back);
+        CHECK(setup_out.wifi_ssid_backup.empty() && setup_out.wifi_pass_backup.empty());
+    }
 }
 
 // ─── /status: the sys block, the crash block and redaction ────────────────────
@@ -6062,6 +6202,24 @@ static void test_session_state() {
         const std::array<uint8_t, 16> empty_epoch{};
         CHECK(session.epoch() == empty_epoch);
     }
+}
+
+// ── VCSEC VehicleSleepStatus_E is three-valued: UNKNOWN must not read as AWAKE (ADR-0005 R1) ──
+static void test_vcsec_sleep_three_valued() {
+    using tk::SleepState;
+    CHECK(tk::sleep_state_from_vcsec(true, false)  == SleepState::Awake);
+    CHECK(tk::sleep_state_from_vcsec(false, true)  == SleepState::Asleep);
+    // UNKNOWN(0): neither flag set — the frame proves nothing.
+    CHECK(tk::sleep_state_from_vcsec(false, false) == SleepState::Unknown);
+
+    // Wake confirmation needs an explicit AWAKE or the closureStatuses signal.
+    CHECK(tk::vcsec_status_confirms_wake(SleepState::Awake, false));
+    CHECK(tk::vcsec_status_confirms_wake(SleepState::Awake, true));
+    CHECK(tk::vcsec_status_confirms_wake(SleepState::Asleep, true));
+    CHECK(tk::vcsec_status_confirms_wake(SleepState::Unknown, true));
+    CHECK(!tk::vcsec_status_confirms_wake(SleepState::Asleep, false));
+    // The regression: an UNKNOWN frame without closures used to release a waiting command.
+    CHECK(!tk::vcsec_status_confirms_wake(SleepState::Unknown, false));
 }
 
 static void test_command_runner() {
@@ -7424,6 +7582,7 @@ int main() {
     test_syslog_policy();
     test_connect_outcome();
     test_ha_templates();
+    test_mqtt_state_lifecycle();
     test_units();
     test_link_state();
     test_link_state_strings();
@@ -7449,6 +7608,7 @@ int main() {
     test_heap_watchdog();
     test_charge_control();
     test_active_window();
+    test_vcsec_sleep_three_valued();
     test_wake_poll();
     test_ble_readiness();
     test_ble_phase();

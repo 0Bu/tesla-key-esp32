@@ -282,10 +282,7 @@ inline std::string discovery_value_template(const DiscoveryEntry& entry) {
     if (discovery_is_binary(entry)) {
         return ha_binary_value_template(entry.field.data(), entry.invert);
     }
-    std::string result = "{{ value_json.";
-    result.append(entry.field.data(), entry.field.size());
-    result.append(" }}");
-    return result;
+    return ha_value_template(std::string(entry.field).c_str());
 }
 
 }  // namespace tk::mqtt

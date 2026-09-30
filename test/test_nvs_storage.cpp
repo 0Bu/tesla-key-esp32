@@ -1070,6 +1070,67 @@ int main() {
         check_script_consumed();
     }
 
+    // Read-modify-save loads: only an authoritative blob, or a blob proven absent (legacy
+    // migration), may prepare a write. A present-but-invalid blob and any probe/read fault refuse
+    // BEFORE any legacy read, and leave the caller's snapshot untouched, so a channel-only, VIN,
+    // WiFi, service or setup change can never persist stale legacy mirrors.
+    {
+        tk::ConfigBlob out;
+        script_blob_reads({{ESP_OK, encoded_len, {}},
+                           {ESP_OK, encoded_len, encoded_bytes}});
+        script_string_reads({});
+        CHECK(tk::cfg_load_for_update(storage, out));
+        CHECK(out.vin == encoded.vin);
+        CHECK(out.wifi_ssid == encoded.wifi_ssid);
+        check_blob_script_consumed();
+        check_script_consumed();
+    }
+    {
+        std::vector<uint8_t> corrupt = encoded_bytes;
+        corrupt.back() ^= 0x01;
+        tk::ConfigBlob out;
+        out.vin = "untouched";
+        out.wifi_ssid = "untouched-ssid";
+        script_blob_reads({{ESP_OK, corrupt.size(), {}},
+                           {ESP_OK, corrupt.size(), corrupt}});
+        script_string_reads({});   // legacy mirrors must not even be read
+        CHECK(!tk::cfg_load_for_update(storage, out));
+        CHECK(out.vin == "untouched");
+        CHECK(out.wifi_ssid == "untouched-ssid");
+        check_blob_script_consumed();
+        check_script_consumed();
+    }
+    for (const std::initializer_list<BlobRead> reads : {
+             std::initializer_list<BlobRead>{{ESP_FAIL, 0, {}}},
+             std::initializer_list<BlobRead>{{ESP_OK, encoded_len, {}},
+                                             {ESP_FAIL, encoded_len, {}}}}) {
+        tk::ConfigBlob out;
+        out.vin = "untouched";
+        script_blob_reads(reads);
+        script_string_reads({});
+        CHECK(!tk::cfg_load_for_update(storage, out));
+        CHECK(out.vin == "untouched");
+        check_blob_script_consumed();
+        check_script_consumed();
+    }
+    {
+        // Exact NOT_FOUND is the migration path: the per-key values are the only truth.
+        const std::string legacy_vin = "5YJ3E1EA7KF000316";
+        const size_t legacy_vin_len = legacy_vin.size() + 1;
+        tk::ConfigBlob out;
+        script_blob_reads({{ESP_ERR_NVS_NOT_FOUND, 0, {}}});
+        script_string_reads({{ESP_ERR_NVS_NOT_FOUND, 0, {}},
+                             {ESP_ERR_NVS_NOT_FOUND, 0, {}},
+                             {ESP_OK, legacy_vin_len, {}},
+                             {ESP_OK, legacy_vin_len, legacy_vin},
+                             {ESP_ERR_NVS_NOT_FOUND, 0, {}},
+                             {ESP_ERR_NVS_NOT_FOUND, 0, {}}});
+        CHECK(tk::cfg_load_for_update(storage, out));
+        CHECK(out.vin == legacy_vin);
+        check_blob_script_consumed();
+        check_script_consumed();
+    }
+
     // The one and only Missing mapping is an exact first-probe NOT_FOUND.
     {
         std::string out = "stale";

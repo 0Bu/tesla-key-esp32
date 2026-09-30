@@ -175,7 +175,7 @@ SIGNING_ENVIRONMENT_JOBS = {
 # checks below keep failures explanatory; this final digest closes gaps in the narrow scanner.
 EXPECTED_PRIVILEGED_JOB_SHA256 = {
     ("build.yml", "publish"): "7282303dac6098fa7fc04f44c6abb115d838f69dd3aea9c58f4aa1de22ec2a1f",
-    ("build.yml", "deploy"): "b1f098f9a5298e1142872a67119baf2c8f5a620aa512bacb5a8918c23a42bb2b",
+    ("build.yml", "deploy"): "c66b1776211c94815fe96bcb821e0e18fcbcfed56143cd0dc6a7ebfa5ef75be8",
     ("signed-pr-preview.yml", "sign-preview"): "18d34f6a9aae2add8b5af9cb69c3af3c391205cb2b795e45f62a150674cce4a7",
 }
 TRUSTED_DEFAULT_ENV = "TRUSTED_DEFAULT_SHA: ${{ github.sha }}"
@@ -742,6 +742,15 @@ def validate(root: Path) -> None:
         and "python3 scripts/check-dev-pages.py" in deploy,
         "build.yml:deploy must include dev branch publication",
     )
+    dev_revalidation = "- name: Revalidate current main immediately before dev deployment"
+    require(
+        dev_revalidation in deploy
+        and deploy.index(dev_revalidation) < deploy.index("- name: Deploy dev site to gh-pages")
+        and "./scripts/select-release-version.sh --require-current-main \"$SOURCE_SHA\""
+        in deploy[deploy.index(dev_revalidation):deploy.index("- name: Deploy dev site to gh-pages")],
+        "build.yml:deploy must refetch current main immediately before the in-place dev channel write "
+        "(a re-run of a superseded deploy job must not overwrite a newer dev channel)",
+    )
     require("contents: write" not in build["logic-test"] and "contents: write" not in build["build"],
             "build.yml: untrusted build jobs must not write repository contents")
     require(
@@ -1255,6 +1264,17 @@ def self_test(root: Path) -> None:
          "            --expect-state draft", "order drifted"),
         ("release-final-state", "build.yml", "--expect-state published-immutable",
          "--expect-state draft", "draft bind/publish/immutable acceptance order drifted"),
+        ("dev-deploy-revalidation-removed", "build.yml",
+         "      - name: Revalidate current main immediately before dev deployment\n"
+         "        if: needs.build.outputs.mode == 'dev'\n"
+         "        env:\n          SOURCE_SHA: ${{ github.sha }}\n"
+         "        run: ./scripts/select-release-version.sh --require-current-main \"$SOURCE_SHA\"\n\n",
+         "", "refetch current main immediately before the in-place dev channel write"),
+        ("dev-deploy-revalidation-after-write", "build.yml",
+         "./scripts/select-release-version.sh --require-current-main \"$SOURCE_SHA\"\n\n"
+         "      - name: Deploy dev site to gh-pages",
+         "true\n\n      - name: Deploy dev site to gh-pages",
+         "refetch current main immediately before the in-place dev channel write"),
         ("privileged-extra-step", "build.yml",
          "      - name: Provision OTA signing key\n",
          "      - name: Unexpected privileged run\n"

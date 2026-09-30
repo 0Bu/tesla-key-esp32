@@ -201,7 +201,17 @@ static esp_err_t save_post_impl(httpd_req_t* req) {
     }
 
     tk::ConfigBlob cfg;
-    tk::cfg_load(*g_cfg, cfg);
+    if (!tk::cfg_load_for_update(*g_cfg, cfg)) {
+        // The legacy mirrors cannot vouch for the stored VIN or service settings, and the
+        // portal must not rewrite an identity from them. Leave the stored data alone.
+        httpd_resp_set_status(req, "503 Service Unavailable");
+        httpd_resp_set_type(req, "text/html");
+        httpd_resp_sendstr(req,
+            "<p>The stored configuration is unreadable, so nothing was changed. The device must "
+            "be recovered over USB instead of being overwritten from stale data. "
+            "<a href=/>Back</a>.</p>");
+        return ESP_OK;
+    }
     // The captive portal runs before VehicleController exists, so it cannot transactionally
     // rotate the private key and sessions. It may set the first VIN or retain the current one,
     // but changing an established vehicle identity here would bind the old key/session to a new
@@ -223,8 +233,10 @@ static esp_err_t save_post_impl(httpd_req_t* req) {
     // between two of them reports nothing at all: the device then comes up with a new SSID beside
     // the old password, joins nothing, and can only be fixed over USB. One CRC-checked blob is
     // all-or-nothing across both failure modes (logic/config_store.hpp).
-    cfg.wifi_ssid = ssid;
-    cfg.wifi_pass = pass;
+    // Commit the typed credentials AND retire any rollback state left over from an earlier
+    // /set_wifi attempt: a stale armed backup would otherwise let a later failure of THESE fresh
+    // credentials restore an unrelated older network (logic/config_store.hpp).
+    tk::config_apply_setup_wifi(cfg, ssid, pass);
     if (!vin.empty()) cfg.vin = vin;
     // No rollback backup from HERE: the setup portal is the path taken when there is nothing that
     // works to fall back to, and arming it would mean a failed first attempt "restores" an empty

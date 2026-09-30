@@ -148,11 +148,13 @@ the only acceptable `manifest.sourceSha`. A merely well-formed but different SHA
 unreconciled channel state and fails closed. `version.txt` = `1.4.0` here is only the **floor** —
 do not expect it to equal the live version; CI stamps the real one uncommitted.
 
-`build.yml` keeps this invariant structurally: only a firmware-relevant `main` push may enter the
-sign/release/Pages jobs, and the Release tag is targeted explicitly at that push SHA. A manual
-`workflow_dispatch` is an unprivileged build/test only and cannot replace Pages. Therefore a
-different live `sourceSha` is actual stale/unreconciled channel state, not a supported republish
-mode. The publish jobs refetch and compare `origin/main` immediately before signing, signed-artifact
+`build.yml` keeps this invariant structurally: a firmware-relevant `main` push enters the
+sign/deploy jobs in `dev` mode and publishes only `gh-pages:/dev/`, while the stable Release and
+root Pages are produced only by an explicitly dispatched `workflow_dispatch` run with
+`release: true` on current `main`; the Release tag is targeted explicitly at that run's SHA. A
+`workflow_dispatch` without `release: true` runs in `test` mode, an unprivileged build/test that
+cannot sign or replace Pages. Therefore a different live root `sourceSha` is actual
+stale/unreconciled channel state, not a supported republish mode. The publish jobs refetch and compare `origin/main` immediately before signing, signed-artifact
 upload and Release/Pages mutation, and require the exact source-bound tag to remain newest;
 Pages steps additionally require the matching latest GitHub Release object to report
 `immutable: true` and expose four unique,

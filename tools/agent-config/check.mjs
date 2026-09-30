@@ -114,19 +114,19 @@ const usbOtaNotStateChanging = /GET \/ota\/check[^.!?]*(?:is not|isn't|not) stat
 const usbAbsentApprovalProceeds = /(?:(?:approval|authorization)[^.!?]*(?:absent|missing|not obtained)|without (?:separate )?(?:approval|authorization))[^.!?]*(?:continue|proceed|run|contact|send|request)/i;
 const reviewedSkillSha256 = new Map([
   ["add-logic-test", "5bc6af893a1f95a5b4b1d2302da43c1e5e8de11d5e65e1c62d342e0dbfe6a327"],
-  ["ci-heal", "fa3ceb548b3cfb3d236bc11c493da779af41137c6e6b95419f8eeb8b8c1554b0"],
-  ["deploy", "53d1a8d588ae94dd8d937315714d2abd3ac728dd2624898806f09d67e8a249bc"],
+  ["ci-heal", "05562364b790f359aaf42a080ab6db2b71afcaa37eedb3dab829d7b15168b123"],
+  ["deploy", "3fffd3eccf94450a6b585e36f46b90c83fe7aba19f26daf70bd387c468f5a8e9"],
   ["device-diag", "90f25ac161c7fc81e52dacc2ccce8949474cd91d6422e6bacf596b748817f40c"],
   ["display-preview", "4bff95d0314d50ce29d67beac7ef4f9db1ebcbb2fa609335e560e162f5a1ed46"],
   ["feature-docs", "0255c6c85753efb851833a20e8da9519c8a61c58d4bb52f9f061cfe609d6e20a"],
   ["flash-esp32", "a4611de5f352615f1bf437d992e48e10bfbd8f188eed89ff1cc2a82378cdf78a"],
   ["mock-test", "8cfaaa7d4d7fdbda24375ca743f9954ee39c6db053684000fac1bf1bce00ac0f"],
-  ["ota-release-verify", "1504ad6c0d781bbfef36c3eca75813faff6e4a5896a5f1bac04507a4e77456e8"],
-  ["pr-hygiene", "0b73adc70cb8185d19fe868a2aa8dc195e1d2eec792ae7b498672f2bb6e99459"],
-  ["project-review", "ec34e35fb3286f8c4de71d4cccf7c875b6b028befe2df19cf032aa90820bbd7e"],
-  ["ship", "47f0e4d2408af37cb127404638e5c1294b335745c249f751d6acc3f3a8210d46"],
-  ["skill-audit", "239363be451af1cd8ca5619908398ad61b25f6fb0916ae2e6d4758cb4fb3f6f2"],
-  ["usb-recovery", "6694f24ac6b7c3330bbfb100339c9646865b771f9201e9eba127cb8108ab8bb5"],
+  ["ota-release-verify", "eb9a08aae32fb919374c97ae481e12da021e927bb5ebdbf1d78e03a011e9e16d"],
+  ["pr-hygiene", "e034d42384a8b356e9f94ca1e81a7849a22bdba63763714d8932bd019d1ccb7d"],
+  ["project-review", "bca9b8c51c11a265f1cd8a725dc636eff46635d1271a9cc0afdccdf67f31e98e"],
+  ["ship", "2084961049b949b28d604e2b3ffc97f5fb97c6602aef18549178be4e1bfc9269"],
+  ["skill-audit", "b92674c9478884cfff7c07ba9835fe1bb0c603b31a877add2b03f9d3c2c686af"],
+  ["usb-recovery", "29e9b2413255c1bf3c0770f1e1548ede4b7da81664f1eef27f11cf91619c9be2"],
   ["vehicle-command-audit", "fb6840d7987a6febc8cc4432d58e4d94d904bb87971500c9e8eeb879b62cbf3b"],
 ]);
 const featureDocsScopeTokens = [

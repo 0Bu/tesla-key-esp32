@@ -135,9 +135,9 @@ if [ "${MQTT_JSON_SANITIZE:-0}" = 1 ]; then
     sanitize_flags=(-fsanitize=address,undefined,leak -fno-sanitize-recover=all)
 fi
 
-"$cc" -std=c11 -Wall -Wextra -Werror "${sanitize_flags[@]}" -I"$cjson_dir" \
+"$cc" -std=c11 -Wall -Wextra -Werror ${sanitize_flags[@]+"${sanitize_flags[@]}"} -I"$cjson_dir" \
     -c "$cjson_source" -o "$work/cJSON.o"
-"$cxx" -std=c++17 -Wall -Wextra -Werror "${sanitize_flags[@]}" \
+"$cxx" -std=c++17 -Wall -Wextra -Werror ${sanitize_flags[@]+"${sanitize_flags[@]}"} \
     -I"$repo_root/main" -I"$cjson_dir" \
     "$repo_root/test/test_mqtt_json_publish.cpp" "$work/cJSON.o" -lm \
     -o "$work/test_mqtt_json_publish"

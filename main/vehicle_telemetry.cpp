@@ -962,14 +962,22 @@ void VehicleController::handle_vcsec_frame_(const UniversalMessage_RoutableMessa
             }
             case VCSEC_FromVCSECMessage_vehicleStatus_tag: {
                 const auto& vs = vcsec_msg.sub_message.vehicleStatus;
-                const bool is_asleep = (vs.vehicleSleepStatus == VCSEC_VehicleSleepStatus_E_VEHICLE_SLEEP_STATUS_ASLEEP);
+                // Three-valued, like the direct status read below: an UNKNOWN frame is neither
+                // AWAKE nor ASLEEP (tk::sleep_state_from_vcsec).
+                const tk::SleepState reported = tk::sleep_state_from_vcsec(
+                    vs.vehicleSleepStatus == VCSEC_VehicleSleepStatus_E_VEHICLE_SLEEP_STATUS_AWAKE,
+                    vs.vehicleSleepStatus == VCSEC_VehicleSleepStatus_E_VEHICLE_SLEEP_STATUS_ASLEEP);
                 ESP_LOGD(TAG, "VCSEC VehicleStatus: sleep_status=%d, has_closureStatuses=%d",
                          static_cast<int>(vs.vehicleSleepStatus), static_cast<int>(vs.has_closureStatuses));
-                vcsec_sleep_state_.store(static_cast<int>(is_asleep ? tk::SleepState::Asleep : tk::SleepState::Awake));
-                note_vcsec_sleep_(is_asleep);
-                // R1: Upstream v5.2.0 uses has_closureStatuses only as a wake-progress signal to advance
-                // a command waiting for a wake, preserving the raw reported sleep state in vcsec_sleep_state_.
-                if (!is_asleep || vs.has_closureStatuses) {
+                vcsec_sleep_state_.store(static_cast<int>(reported));
+                // Only an explicit reading folds into the ASLEEP debounce clock; UNKNOWN leaves a real
+                // ASLEEP run untouched (see note_vcsec_sleep_).
+                if (reported == tk::SleepState::Asleep) note_vcsec_sleep_(true);
+                else if (reported == tk::SleepState::Awake) note_vcsec_sleep_(false);
+                // R1: an explicit AWAKE, or has_closureStatuses (upstream v5.2.0's wake-progress
+                // signal), advances a command waiting for a wake. UNKNOWN confirms nothing, and the
+                // raw reported sleep state stays in vcsec_sleep_state_.
+                if (tk::vcsec_status_confirms_wake(reported, vs.has_closureStatuses)) {
                     command_runner_.notify_vehicle_awake(true);
                 }
                 if (vehicle_status_callback_) {
@@ -1522,16 +1530,13 @@ void VehicleController::loop_task_fn_(void* arg) {
         // The auto-pair VCSEC health poll keeps running (it never wakes the MCU) as the
         // revocation canary. Idle evcc reads may use the last cache value; during this
         // active window get_charge_state requires a recent ChargeState instead.
-        uint32_t lc = self->last_cmd_ticks_.load();
-        bool recent_cmd = (lc != 0) && ((now_ticks - lc) < pdMS_TO_TICKS(kActiveWindowMs));
         // Gate the charging arm on FRESH contact: charging_state is a RAM cache never invalidated on
         // a link drop, so a car that unplugged and left (or dropped BLE) while cached "Charging"
         // would otherwise hold the window open forever → perpetual scanning. A charging, reachable
         // car answers the ~10 s charge poll, so its contact stays fresh (< kAwakeMaxAgeS). Decision +
-        // boundary are host-tested in logic/active_window.hpp.
-        uint32_t contact_age = 0;
-        bool have_contact = self->seconds_since_contact(contact_age);
-        bool window = tk::active_window_open({recent_cmd, charging_state, have_contact, contact_age});
+        // boundary are host-tested in logic/active_window.hpp; get_charge_state() asks the SAME
+        // member so the poll and the cached read can never disagree about the window.
+        bool window = self->active_window_now_(now_ticks, charging_state);
 
         // Falling edge: window just closed → drop the link once so the car can sleep.
         if (paired && prev_window && !window && self->ble_connected()) {
@@ -1643,6 +1648,14 @@ void VehicleController::loop_task_fn_(void* arg) {
 
 // ─── Data queries ─────────────────────────────────────────────────────────────
 
+bool VehicleController::active_window_now_(uint32_t now_ticks, bool charging_state) const {
+    const uint32_t lc = last_cmd_ticks_.load();
+    const bool recent_cmd = (lc != 0) && ((now_ticks - lc) < pdMS_TO_TICKS(kActiveWindowMs));
+    uint32_t contact_age = 0;
+    const bool have_contact = seconds_since_contact(contact_age);
+    return tk::active_window_open({recent_cmd, charging_state, have_contact, contact_age});
+}
+
 bool VehicleController::get_charge_state(ChargeStateResult& out, int /*timeout_ms*/) {
     // Serve the cached reading instantly and never block. evcc polls vehicle_data
     // frequently and times out quickly, so an on-demand connect + poll here would risk a
@@ -1666,11 +1679,12 @@ bool VehicleController::get_charge_state(ChargeStateResult& out, int /*timeout_m
     if (!cached.valid) return false;
 
     uint32_t now = xTaskGetTickCount();
-    uint32_t cmd = last_cmd_ticks_.load();
-    bool recent_cmd = cmd != 0 && (now - cmd) < pdMS_TO_TICKS(kActiveWindowMs);
-    bool charging = cached.charging_state == "Charging" ||
-                    cached.charging_state == "Starting";
-    bool active_window = recent_cmd || charging;
+    // Same decision as the background poll (including the fresh-contact requirement on the charging
+    // arm). A cached "Charging" whose contact went stale has already closed the poll's window, so
+    // the cached value is served as the last-known reading instead of being rejected as stale.
+    const bool charging = cached.charging_state == "Charging" ||
+                          cached.charging_state == "Starting";
+    const bool active_window = active_window_now_(now, charging);
 
     // generation is the "have sample" bit so a legitimate callback at FreeRTOS tick 0
     // is not mistaken for "never received".

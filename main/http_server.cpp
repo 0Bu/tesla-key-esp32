@@ -11,6 +11,8 @@
 #include "stack_watch.hpp"
 #include "logic/http_origin.hpp"
 #include <esp_log.h>
+#include <lwip/inet.h>
+#include <lwip/sockets.h>
 #include <cstring>
 #include <exception>
 
@@ -41,6 +43,32 @@ static bool read_header_bounded(httpd_req_t* req, const char* name, char* out, s
     return httpd_req_get_hdr_value_str(req, name, out, capacity) == ESP_OK;
 }
 
+// Every IPv4 address this board owns right now: the active transport's lease AND the address this
+// very connection terminated on. WiFi and Ethernet keep their leases side by side, so a page opened
+// through the WiFi address is still served by this board after an Ethernet takeover; the socket's
+// local address is by construction an address the board holds. Host must still equal one of them
+// (or the canonical name), so a rebinding page cannot borrow this.
+//
+// Kept out of line on purpose: the per-frame stack budget of browser_mutation_allowed() (three
+// header buffers) is a reviewed maximum, and this lookup needs its own scratch space.
+__attribute__((noinline)) static bool origin_allowed_for_owned_addresses(
+    httpd_req_t* req, const char* host, const char* origin, const char* fetch_site,
+    const char* active_netif_ip) {
+    char socket_ip[16] = {};
+    const int fd = httpd_req_to_sockfd(req);
+    if (fd >= 0) {
+        struct sockaddr_in local{};
+        socklen_t local_len = sizeof(local);
+        if (getsockname(fd, reinterpret_cast<struct sockaddr*>(&local), &local_len) == 0 &&
+            local.sin_family == AF_INET) {
+            inet_ntop(AF_INET, &local.sin_addr, socket_ip, sizeof(socket_ip));
+        }
+    }
+    const std::string_view device_ips[] = {active_netif_ip, socket_ip};
+    return tk::mutation_origin_allowed(host, origin, fetch_site, device_ips,
+                                       sizeof(device_ips) / sizeof(device_ips[0]));
+}
+
 // Preserve the documented headerless trusted-LAN API used by evcc/curl, but do not let a foreign
 // browser origin borrow the user's LAN reachability for a mutating request. Host is first bound to
 // the device's own name/IP so a DNS-rebinding page cannot make attacker-controlled Host and Origin
@@ -63,7 +91,7 @@ static bool browser_mutation_allowed(httpd_req_t* req) {
     if (netif && esp_netif_get_ip_info(netif, &ip) == ESP_OK) {
         esp_ip4addr_ntoa(&ip.ip, device_ip, sizeof(device_ip));
     }
-    return tk::mutation_origin_allowed(host, origin, fetch_site, device_ip);
+    return origin_allowed_for_owned_addresses(req, host, origin, fetch_site, device_ip);
 }
 
 static esp_err_t reject_cross_origin_mutation(httpd_req_t* req) {

@@ -2237,3 +2237,111 @@ test("desktop and mobile layout styles maintain 1/3-2/3 proportions and heroCard
   context.heroCardTap({ target: {} });
   assert.equal(heroCalls, 1, "tapping hero card on desktop does not trigger action");
 });
+
+test("num() keeps absent readings absent instead of turning them into 0", () => {
+  const { context } = loadUi();
+  assert.equal(context.num(null), null);
+  assert.equal(context.num(undefined), null);
+  assert.equal(context.num(""), null);
+  assert.equal(context.num("abc"), null);
+  assert.equal(context.num(NaN), null);
+  assert.equal(context.num(0), 0, "a genuine zero reading is still a reading");
+  assert.equal(context.num("-72"), -72);
+  assert.equal(context.num(80), 80);
+});
+
+test("a paired vehicle without a reported battery level shows no 0 % gauge", () => {
+  const { context, element } = loadUi();
+  context.render({ paired: true, key_present: true, vin: "5YJ3E1EB8NF123456",
+                   vehicle: { status: "Idle" } });
+  const gauge = element("hicon").innerHTML;
+  assert.doesNotMatch(gauge, /<b>0<small>%/, "an unknown level must not read as an empty battery");
+  assert.doesNotMatch(gauge, /battery 0 %/);
+  assert.doesNotMatch(gauge, /garc/, "no arc is drawn for an unknown level");
+  assert.match(gauge, /gglyph/, "an unknown-level glyph is shown instead of a number");
+  assert.match(element("hsub").textContent, /not reported/);
+  // A real level, including a genuine 0 %, is still rendered.
+  context.render({ paired: true, key_present: true, vin: "5YJ3E1EB8NF123456",
+                   vehicle: { status: "Idle", soc: 0 } });
+  assert.match(element("hicon").innerHTML, /<b>0<small>%/);
+  context.render({ paired: true, key_present: true, vin: "5YJ3E1EB8NF123456",
+                   vehicle: { status: "Idle", soc: 64 } });
+  assert.match(element("hicon").innerHTML, /<b>64<small>%/);
+});
+
+test("a failed BLE link without any RSSI shows no 0 dBm reading", () => {
+  const { context, element } = loadUi();
+  context.render({ paired: true, key_present: true, vin: "5YJ3E1EB8NF123456",
+                   ble: { connected: false, connect_fail: 9, devices: [] } });
+  const row = JSON.stringify([element("bleVal").innerHTML, element("bleSub").innerHTML,
+                              element("bleBars") && element("bleBars").innerHTML]);
+  assert.doesNotMatch(row, /0 dBm/, "an unknown signal must not read as a perfect 0 dBm link");
+});
+
+test("the OTA changelog request has one deadline that also covers a stalled body", async () => {
+  const { context } = loadUi();
+  let aborted = false;
+  context.AbortController = class { constructor() { this.signal = { aborted: false }; }
+                                    abort() { aborted = true; this.signal.aborted = true; } };
+  // Headers arrive, the body never does: the pre-fix code cleared its timer at the headers.
+  context.fetch = async () => ({ ok: true, status: 200, text() { return new Promise(() => {}); } });
+  context.setTimeout = (callback) => { queueMicrotask(callback); return 1; };
+  const outcome = await Promise.race([
+    context.loadOtaChangelog(),
+    new Promise((resolve) => setImmediate(() => resolve("hung")))
+  ]);
+  assert.equal(outcome, "", "a stalled body ends the optional notes instead of hanging the dialog");
+  assert.equal(aborted, true, "the stalled exchange is aborted");
+
+  // Normal paths are unchanged.
+  const { context: ok } = loadUi();
+  ok.fetch = async () => ({ ok: true, status: 200, async text() { return "- fixed things"; } });
+  assert.equal(await ok.loadOtaChangelog(), "- fixed things");
+  ok.fetch = async () => ({ ok: true, status: 204, async text() { return "ignored"; } });
+  assert.equal(await ok.loadOtaChangelog(), "");
+  ok.fetch = async () => { throw new Error("offline"); };
+  assert.equal(await ok.loadOtaChangelog(), "");
+});
+
+test("?pr=<N> on the page selects the PR preview for check and update, strictly", async () => {
+  const cases = [
+    ["?pr=42", "42"], ["?x=1&pr=7", "7"], ["?pr=1234567", "1234567"],
+    ["", ""], ["?pr=", ""], ["?pr=042", ""], ["?pr=0", ""], ["?pr=abc", ""], ["?pr=12345678", ""],
+    ["?pr=42x", ""], ["?pr=-1", ""], ["?xpr=42", ""], ["?pr", ""],
+    ["?pr=abc&pr=42", ""],   // only the FIRST pr key counts, like the device
+  ];
+  for (const [search, want] of cases) {
+    const { context } = loadUi();
+    context.location.search = search;
+    assert.equal(context.otaPrSelection(), want, `search ${JSON.stringify(search)}`);
+  }
+
+  const { context } = loadUi();
+  context.location.search = "?pr=42";
+  const urls = [];
+  context.fetch = async (url, options) => {
+    urls.push({ url, method: (options && options.method) || "GET" });
+    if (url.startsWith("/ota/check")) return { ok: true, status: 200, async json() { return { started: true }; } };
+    if (url.startsWith("/ota/status")) return { ok: true, status: 200, async json() {
+      return { state: "idle", update_available: false, message: "idle", available: "1.6.0", current: "1.6.0" }; } };
+    return { ok: true, status: 200, async json() { return { result: true }; } };
+  };
+  await context.otaCheck();
+  const check = urls.find((u) => u.url.startsWith("/ota/check"));
+  assert.match(check.url, /^\/ota\/check\?pr=42&ms=\d+$/);
+
+  context.otaAvail = "1.6.0-PR-42";
+  await context.startOtaUpdate("1.6.0-PR-42");
+  const update = urls.find((u) => u.url.startsWith("/ota/update"));
+  assert.equal(update.url, "/ota/update?pr=42");
+  assert.equal(update.method, "POST");
+
+  // Without a valid selection the regular channel requests are unchanged.
+  const plain = loadUi();
+  plain.context.location.search = "?pr=abc";
+  const plainUrls = [];
+  plain.context.fetch = async (url) => { plainUrls.push(url);
+    return { ok: true, status: 200, async json() { return { started: false }; } }; };
+  await plain.context.otaCheck();
+  assert.match(plainUrls[0], /^\/ota\/check\?ms=\d+$/);
+});

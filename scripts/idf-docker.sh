@@ -18,6 +18,7 @@
 #   scripts/idf-docker.sh daemon start
 #   scripts/idf-docker.sh daemon stop
 #   scripts/idf-docker.sh daemon status
+#   scripts/idf-docker.sh --self-test        # offline check of the daemon-reuse contract
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -47,6 +48,70 @@ fi
 repo_hash="$(printf '%s' "$repo_root" | shasum 2>/dev/null | cut -c1-8 || md5 -qs "$repo_root" 2>/dev/null | cut -c1-8 || echo "default")"
 daemon_name="idf-daemon-${repo_hash}"
 build_vol_name="idf-build-${repo_hash}"
+
+# The daemon name depends only on the checkout path, so a daemon created before esp-idf-toolchain.txt
+# moved would keep serving builds from the PREVIOUS toolchain while this wrapper prints the new pin.
+# A running daemon is therefore reusable only if it was created from exactly the current image
+# reference (tag AND immutable digest) with the reviewed resource ceiling; anything else is recreated.
+IDF_DAEMON_NANO_CPUS=1500000000       # --cpus 1.5
+IDF_DAEMON_MEMORY_BYTES=1887436800    # --memory 1800m
+
+daemon_matches_contract() {
+  local daemon_image nano_cpus memory
+  daemon_image="$(docker inspect -f '{{.Config.Image}}' "$daemon_name" 2>/dev/null)" || return 1
+  nano_cpus="$(docker inspect -f '{{.HostConfig.NanoCpus}}' "$daemon_name" 2>/dev/null)" || return 1
+  memory="$(docker inspect -f '{{.HostConfig.Memory}}' "$daemon_name" 2>/dev/null)" || return 1
+  [ "$daemon_image" = "$image" ] \
+    && [ "$nano_cpus" = "$IDF_DAEMON_NANO_CPUS" ] \
+    && [ "$memory" = "$IDF_DAEMON_MEMORY_BYTES" ]
+}
+
+idf_docker_self_test() {
+  local fake_image="espressif/idf:v0.0@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+  local stale_image="espressif/idf:v0.0@sha256:1111111111111111111111111111111111111111111111111111111111111111"
+  local fake_state
+  image="$fake_image"
+  daemon_name="idf-daemon-selftest"
+  # Shadow the docker CLI with a deterministic inspect; nothing here can reach a real daemon.
+  docker() {
+    [ "$1" = inspect ] && [ "$2" = -f ] && [ "$4" = "$daemon_name" ] || return 1
+    case "$fake_state:$3" in
+      absent:*) return 1 ;;
+      *:'{{.Config.Image}}') printf '%s\n' "${fake_image_value}" ;;
+      *:'{{.HostConfig.NanoCpus}}') printf '%s\n' "${fake_cpus_value}" ;;
+      *:'{{.HostConfig.Memory}}') printf '%s\n' "${fake_memory_value}" ;;
+      *) return 1 ;;
+    esac
+  }
+  local fake_image_value fake_cpus_value fake_memory_value
+  expect() {
+    local want="$1" label="$2" rc=0
+    daemon_matches_contract || rc=$?
+    if { [ "$want" = match ] && [ "$rc" -ne 0 ]; } || { [ "$want" = reject ] && [ "$rc" -eq 0 ]; }; then
+      echo "idf-docker self-test FAIL: $label" >&2
+      exit 1
+    fi
+  }
+  fake_state=present
+  fake_image_value="$fake_image"; fake_cpus_value="$IDF_DAEMON_NANO_CPUS"; fake_memory_value="$IDF_DAEMON_MEMORY_BYTES"
+  expect match "a daemon created from the current pin with the reviewed limits must be reused"
+  fake_image_value="$stale_image"
+  expect reject "a daemon created from the previous toolchain digest must not be reused"
+  fake_image_value="${fake_image%%@*}"
+  expect reject "a tag-only daemon without the immutable digest must not be reused"
+  fake_image_value="$fake_image"; fake_cpus_value=4000000000
+  expect reject "a daemon with a raised CPU ceiling must not be reused"
+  fake_cpus_value="$IDF_DAEMON_NANO_CPUS"; fake_memory_value=0
+  expect reject "a daemon without the memory ceiling must not be reused"
+  fake_memory_value="$IDF_DAEMON_MEMORY_BYTES"; fake_state=absent
+  expect reject "a missing daemon must not count as matching"
+  echo "idf-docker self-test: PASS"
+}
+
+if [ "${1:-}" = "--self-test" ]; then
+  idf_docker_self_test
+  exit 0
+fi
 
 mkdir -p "$repo_root/.ccache"
 mount_flags+=(-v "$repo_root/.ccache":/project/.ccache)
@@ -98,8 +163,11 @@ if [ "${1:-}" = "daemon" ]; then
   case "$subcmd" in
     start)
       if docker inspect -f '{{.State.Running}}' "$daemon_name" 2>/dev/null | grep -q true; then
-        echo "idf-docker: daemon is already running ($daemon_name)"
-        exit 0
+        if daemon_matches_contract; then
+          echo "idf-docker: daemon is already running ($daemon_name)"
+          exit 0
+        fi
+        echo "idf-docker: running daemon ($daemon_name) does not match the current toolchain pin or resource limits — recreating it" >&2
       fi
       docker rm -f "$daemon_name" >/dev/null 2>&1 || true
       echo "idf-docker: starting background daemon ($daemon_name)..."
@@ -130,6 +198,9 @@ if [ "${1:-}" = "daemon" ]; then
       ;;
     status)
       st="$(docker inspect -f '{{.State.Status}}' "$daemon_name" 2>/dev/null || echo 'not running')"
+      if [ "$st" = running ] && ! daemon_matches_contract; then
+        st="running, STALE (differs from the current toolchain pin or resource limits; the next command recreates it)"
+      fi
       echo "idf-docker: daemon ($daemon_name) status: $st"
       exit 0
       ;;
@@ -157,6 +228,13 @@ fi
 
 # Check if daemon is active or requested (authoritative gate builds always use an ephemeral container)
 is_daemon_running="$(docker inspect -f '{{.State.Running}}' "$daemon_name" 2>/dev/null || echo false)"
+if [ "$is_authoritative_gate" -eq 0 ] && [ "$is_daemon_running" = "true" ] && ! daemon_matches_contract; then
+  # Never run a build on a daemon from another toolchain pin. Drop it; with IDF_DOCKER_DAEMON=1 the
+  # block below starts a fresh one, otherwise this command runs in an ordinary ephemeral container.
+  echo "idf-docker: daemon ($daemon_name) does not match the current toolchain pin or resource limits — recreating it" >&2
+  docker rm -f "$daemon_name" >/dev/null 2>&1 || true
+  is_daemon_running=false
+fi
 if [ "$is_authoritative_gate" -eq 0 ] && ([ "${IDF_DOCKER_DAEMON:-0}" = "1" ] || [ "$is_daemon_running" = "true" ]); then
   if [ "$is_daemon_running" != "true" ]; then
     echo "idf-docker: auto-starting daemon ($daemon_name)..." >&2

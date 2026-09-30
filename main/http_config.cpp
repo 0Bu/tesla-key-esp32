@@ -107,6 +107,16 @@ tk::ConfigStringSubmission parse_string_submission_(httpd_req_t* req, const char
     return {tk::ConfigSubmissionStatus::Ready, value};
 }
 
+// Every route below is a read-modify-save of the whole ConfigBlob. When the stored blob exists but
+// cannot be read or decoded, the legacy per-key mirrors are only best-effort copies that a later
+// committed blob save deliberately leaves stale, so building a change on them would silently write
+// an old VIN, WiFi pair or service setting back. Refuse before persisting anything.
+esp_err_t send_config_unreadable_(httpd_req_t* req, const char* command, const char* vin = "") {
+    return send_json(req, 503,
+                     make_response(false, command, vin,
+                                   "stored configuration is unreadable; nothing was changed"));
+}
+
 }  // namespace
 
 // ─── POST /gen_keys ───────────────────────────────────────────────────────────
@@ -285,7 +295,9 @@ esp_err_t handle_set_vin(GuardedReq rq) {
     for (char& c : vin) c = (char)std::toupper((unsigned char)c);
 
     tk::ConfigBlob current;
-    tk::cfg_load(*g_config, current);
+    if (!tk::cfg_load_for_update(*g_config, current)) {
+        return send_config_unreadable_(req, "set_vin", vin.c_str());
+    }
 
     // Unchanged → nothing to apply: skip the NVS write and the reboot entirely.
     if (vin == current.vin) {
@@ -536,15 +548,13 @@ esp_err_t handle_set_mqtt(GuardedReq rq) {
         return send_json(req, static_cast<int>(tk::HttpRouteOtaConflict::Reject409),
                          make_response(false, "set_mqtt", "", tk::kOtaUpdateInProgressReason.data()));
     }
-    const tk::ConfigStringSubmission submitted = parse_string_submission_(req, "broker");
     tk::ConfigBlob cfg;
+    if (!tk::cfg_load_for_update(*g_config, cfg)) return send_config_unreadable_(req, "set_mqtt");
+    const tk::ConfigStringSubmission submitted = parse_string_submission_(req, "broker");
     return tk::apply_config_string(
         submitted,
         [](const std::string& value) { return tk::mqtt_trim(value); },
-        [&]() {
-            tk::cfg_load(*g_config, cfg);
-            return cfg.mqtt_uri;
-        },
+        [&]() { return cfg.mqtt_uri; },
         [](const std::string& value) { return tk::mqtt_broker_is_plausible(value); },
         [&](const std::string& broker) {
             // Only a non-empty broker is probed — an empty value explicitly disables the bridge.
@@ -594,8 +604,9 @@ esp_err_t handle_set_syslog(GuardedReq rq) {
         return send_json(req, static_cast<int>(tk::HttpRouteOtaConflict::Reject409),
                          make_response(false, "set_syslog", "", tk::kOtaUpdateInProgressReason.data()));
     }
-    const tk::ConfigStringSubmission submitted = parse_string_submission_(req, "server");
     tk::ConfigBlob cfg;
+    if (!tk::cfg_load_for_update(*g_config, cfg)) return send_config_unreadable_(req, "set_syslog");
+    const tk::ConfigStringSubmission submitted = parse_string_submission_(req, "server");
     return tk::apply_config_string(
         submitted,
         [](const std::string& value) {
@@ -604,10 +615,7 @@ esp_err_t handle_set_syslog(GuardedReq rq) {
             return start == std::string::npos ? std::string{}
                                               : value.substr(start, end - start + 1);
         },
-        [&]() {
-            tk::cfg_load(*g_config, cfg);
-            return cfg.syslog_uri;
-        },
+        [&]() { return cfg.syslog_uri; },
         [](const std::string& value) { return tk::syslog_target_is_plausible(value); },
         [](const std::string&) {
             return tk::ConfigProbeVerdict{};
@@ -680,7 +688,7 @@ esp_err_t handle_set_wifi(GuardedReq rq) {
     }
 
     tk::ConfigBlob cfg;
-    tk::cfg_load(*g_config, cfg);
+    if (!tk::cfg_load_for_update(*g_config, cfg)) return send_config_unreadable_(req, "set_wifi");
 
     if (cfg.wifi_ssid == ssid && cfg.wifi_pass == pass) {
         return send_json(req, 200, make_response(true, "set_wifi", "",
@@ -741,7 +749,7 @@ esp_err_t handle_set_ota(GuardedReq rq) {
     }
 
     tk::ConfigBlob cfg;
-    tk::cfg_load(*g_config, cfg);
+    if (!tk::cfg_load_for_update(*g_config, cfg)) return send_config_unreadable_(req, "set_ota");
     const tk::OtaChannel want = tk::ota_channel_parse(channel);
     if (cfg.has_ota && tk::ota_channel_from_int(cfg.ota_channel) == want) {
         ota_set_channel(want);

@@ -1,6 +1,6 @@
 ---
 name: deploy
-description: Orchestrates the full delivery lifecycle for tesla-key-esp32 from local workspace analysis and fix loops, commit, push, and PR creation, gate verification and CI monitoring, canonical squash merge and main release tracking, to OTA flashing on tesla-key-esp32.local, 3-tiered testing (targeted, comprehensive, e2e), and workspace cleanup. Requires explicit user authorization before execution.
+description: Orchestrates the full delivery lifecycle for tesla-key-esp32 from local workspace analysis and fix loops, commit, push, and PR creation, gate verification and CI monitoring, canonical squash merge and channel-bound main-run tracking, to OTA flashing on tesla-key-esp32.local, 3-tiered testing (targeted, comprehensive, e2e), and workspace cleanup. Requires explicit user authorization before execution.
 ---
 
 > **Canonical runner-neutral skill.** Read [`AGENTS.md`](../../../AGENTS.md) before acting.
@@ -12,13 +12,14 @@ description: Orchestrates the full delivery lifecycle for tesla-key-esp32 from l
 
 This skill orchestrates the complete, fail-closed delivery pipeline for `tesla-key-esp32`. It takes
 working tree changes through local verification, PR creation, CI monitoring, canonical squash merge,
-post-merge GitHub Release verification, OTA update on the bench/target board (`tesla-key-esp32.local`),
+post-merge main-run and channel verification, OTA update on the bench/target board (`tesla-key-esp32.local`),
 multi-tier testing (targeted, comprehensive, and cluster evcc E2E), and branch cleanup.
 
 > **Authorization boundary.** Invoking this skill requires explicit user authorization for the entire
 > delivery lifecycle: local fix loops, commit, push, PR creation, canonical squash merge, the
-> firmware-release/signing publication side effect of the main build, OTA deployment to the identified
-> device, and post-deployment live verification. If unrecoverable errors occur at any gate, stop and
+> signing/publication side effect of the main build (the Dev channel), OTA deployment to the identified
+> device, and post-deployment live verification. A stable Release additionally needs its own explicit
+> authorization for a manual `workflow_dispatch` run with `release: true`; this skill never starts it. If unrecoverable errors occur at any gate, stop and
 > report immediately (fail-closed).
 
 ---
@@ -117,18 +118,20 @@ Before committing or pushing, verify workspace cleanliness, code style, unit tes
    ```bash
    gh pr checks "$PR" --watch
    ```
-   *(Alternatively, invoke `$ci-heal` via `scripts/ci-heal.sh --pr "$PR"` to autonomously monitor CI, triage failures, apply local fixes, and stamp gates.)*
+   *(Alternatively, invoke `$ci-heal` via `scripts/ci-heal.sh --pr "$PR"` to monitor CI and reproduce failures locally. It never commits and stamps a gate only from an explicit `--attest <gate>=<evidence>` for a completed independent review of the exact head.)*
 2. **Audit & Stamp PR Gates**:
    Run the respective audit skills (`$project-review`, `$feature-docs`, `$vehicle-command-audit`) against the current HEAD.
-   Once each audit passes cleanly, stamp the verified gates on the PR using confirmation tokens naming the audit results and SHA:
+   Once each audit passes cleanly, stamp the verified gates on the PR. The evidence token names the
+   completed review (report reference and finding count), never a mere syntax check: a passing
+   `tools/agent-config/check.mjs` or a green CI run is not a `$skill-audit` or `$project-review`.
    ```bash
    HEAD=$(git rev-parse HEAD)
-   ./scripts/stamp-pr-gates.sh --update-pr "$PR" \
-     --gate skill-audit="tools/agent-config/check.mjs @ $HEAD" \
-     --gate pr-hygiene="clean @ $HEAD" \
-     --gate project-review="0 findings @ $HEAD" \
-     --gate feature-docs="docs/FEATURES.md @ $HEAD" \
-     --gate vehicle-command-audit="scripts/test-tesla-ble-harness.sh @ $HEAD"
+   ./scripts/stamp-pr-gates.sh --update-pr "$PR" --head "$HEAD" \
+     --gate skill-audit="<report reference>, 0 findings @ $HEAD" \
+     --gate pr-hygiene="<report reference>, clean @ $HEAD" \
+     --gate project-review="<report reference>, 0 findings @ $HEAD" \
+     --gate feature-docs="<report reference>, docs/FEATURES.md synced @ $HEAD" \
+     --gate vehicle-command-audit="<report reference>, harness clean @ $HEAD"
    ```
    (Only include conditional gates `--gate feature-docs=...` or `--gate vehicle-command-audit=...` if relevant to the changed paths.)
 3. **Fix & Re-Check Loop**:
@@ -148,8 +151,8 @@ Before committing or pushing, verify workspace cleanliness, code style, unit tes
      Run `$skill-audit` and `$pr-hygiene` locally to verify they pass cleanly (do not stamp without running). The pre-push hook requires current `$skill-audit` and `$pr-hygiene` records on the PR before allowing a push to an open PR. Stamp them first:
      ```bash
      ./scripts/stamp-pr-gates.sh --update-pr "$PR" --head "$NEW_HEAD" \
-       --gate skill-audit="tools/agent-config/check.mjs @ $NEW_HEAD" \
-       --gate pr-hygiene="clean @ $NEW_HEAD"
+       --gate skill-audit="<report reference>, 0 findings @ $NEW_HEAD" \
+       --gate pr-hygiene="<report reference>, clean @ $NEW_HEAD"
      ```
    - Push the fix:
      ```bash
@@ -159,9 +162,9 @@ Before committing or pushing, verify workspace cleanliness, code style, unit tes
      Re-run the relevant audit skills (`$skill-audit`, `$pr-hygiene`, `$project-review`, plus any applicable conditional audit skills `$feature-docs` or `$vehicle-command-audit`) against `$NEW_HEAD`. Only after each audit passes cleanly, re-stamp all gates on the PR:
      ```bash
      ./scripts/stamp-pr-gates.sh --update-pr "$PR" --head "$NEW_HEAD" \
-       --gate skill-audit="tools/agent-config/check.mjs @ $NEW_HEAD" \
-       --gate pr-hygiene="clean @ $NEW_HEAD" \
-       --gate project-review="0 findings @ $NEW_HEAD"
+       --gate skill-audit="<report reference>, 0 findings @ $NEW_HEAD" \
+       --gate pr-hygiene="<report reference>, clean @ $NEW_HEAD" \
+       --gate project-review="<report reference>, 0 findings @ $NEW_HEAD"
      ```
      (Include conditional `--gate feature-docs=...` or `--gate vehicle-command-audit=...` if relevant.)
    - Repeat until all PR checks are green and all gates are satisfied.
@@ -192,9 +195,16 @@ MERGE_SHA=$(gh pr view <numeric_pr> --json mergeCommit -q .mergeCommit.oid)
 Watch the CI build run triggered by the merge commit on `main`:
 ```bash
 set -euo pipefail
-RUN_IDS=$(gh run list --workflow build --branch main --commit "$MERGE_SHA" --event push --limit 20 \
+# A merge publishes the Dev channel from the main PUSH run. A stable Release exists for this commit
+# only if a separately authorized manual `workflow_dispatch` run of `build` with `release: true`
+# was made for it; select that run explicitly with CHANNEL_RUN=workflow_dispatch.
+CHANNEL_RUN="${CHANNEL_RUN:-push}"
+[[ "$CHANNEL_RUN" =~ ^(push|workflow_dispatch)$ ]] || {
+  echo "REFUSING: CHANNEL_RUN must be push or workflow_dispatch" >&2; exit 1;
+}
+RUN_IDS=$(gh run list --workflow build --branch main --commit "$MERGE_SHA" --event "$CHANNEL_RUN" --limit 20 \
   --json databaseId,headSha,event \
-  --jq ".[] | select(.headSha == \"$MERGE_SHA\" and .event == \"push\") | .databaseId")
+  --jq ".[] | select(.headSha == \"$MERGE_SHA\" and .event == \"$CHANNEL_RUN\") | .databaseId")
 [ "$(printf '%s\n' "$RUN_IDS" | awk 'NF {n++} END {print n+0}')" -eq 1 ] || {
   echo "REFUSING: expected exactly one build run for merge SHA $MERGE_SHA" >&2; exit 1;
 }
@@ -202,11 +212,49 @@ MAIN_RUN_ID=$(printf '%s\n' "$RUN_IDS" | awk 'NF {print}')
 gh run watch "$MAIN_RUN_ID" --exit-status
 ```
 
-If the changes are firmware-relevant, the CI run tags and publishes a new GitHub Release. Retrieve the published version:
+A merge publishes the **Dev channel** (`gh-pages:/dev/`, a `X.Y.Z-dev.N` version) from the push run.
+Bind the delivery to this exact run and its signed artifact — never to the newest GitHub Release,
+which belongs to another commit. If the merge produced no signed artifact there is no firmware to
+deploy; stop.
+
 ```bash
-LATEST_TAG=$(gh release view --json tagName -q .tagName)
-RELEASE_VERSION="${LATEST_TAG#v}"
-echo "Published Release: $LATEST_TAG (version: $RELEASE_VERSION)"
+set -euo pipefail
+RUN_SHA=$(gh run view "$MAIN_RUN_ID" --json headSha --jq .headSha)
+[ "$RUN_SHA" = "$MERGE_SHA" ] || { echo "REFUSING: selected run is not the merged commit" >&2; exit 1; }
+ARTS=$(gh api "repos/:owner/:repo/actions/runs/$MAIN_RUN_ID/artifacts" \
+  --jq '.artifacts[] | select(.expired == false) | .name' \
+  | grep -E "^tesla-key-esp32-(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?-${RUN_SHA}$" || true)
+[ "$(printf '%s\n' "$ARTS" | awk 'NF {n++} END {print n+0}')" -eq 1 ] || {
+  echo "REFUSING: expected exactly one unexpired signed main artifact (no firmware to deploy?)" >&2; exit 1;
+}
+ART=$(printf '%s\n' "$ARTS" | awk 'NF {print}')
+VERIFY_DIR=$(mktemp -d "${TMPDIR:-/tmp}/tesla-deploy-artifact.XXXXXX")
+gh run download "$MAIN_RUN_ID" -n "$ART" -D "$VERIFY_DIR"
+META="$VERIFY_DIR/dist/build-metadata.txt"
+[ -f "$META" ] && [ ! -L "$META" ] \
+  && [ "$(grep -c '^head_sha=' "$META")" -eq 1 ] \
+  && [ "$(sed -n 's/^head_sha=//p' "$META")" = "$RUN_SHA" ] \
+  && [ "$(grep -c '^display_version=' "$META")" -eq 1 ] || {
+  echo "REFUSING: signed artifact metadata does not match the main run SHA" >&2; exit 1;
+}
+RELEASE_VERSION=$(sed -n 's/^display_version=//p' "$META")
+[[ "$RELEASE_VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$ ]] \
+  && (( ${#RELEASE_VERSION} <= 31 )) \
+  && [ "$ART" = "tesla-key-esp32-$RELEASE_VERSION-$RUN_SHA" ] || {
+  echo "REFUSING: signed artifact name is not bound to metadata version and run SHA" >&2; exit 1;
+}
+if [[ "$RELEASE_VERSION" == *-* ]]; then CHANNEL=dev; else CHANNEL=release; fi
+{ [ "$CHANNEL_RUN" = push ] && [ "$CHANNEL" = dev ]; } \
+  || { [ "$CHANNEL_RUN" = workflow_dispatch ] && [ "$CHANNEL" = release ]; } || {
+  echo "REFUSING: run event $CHANNEL_RUN does not match version channel $CHANNEL" >&2; exit 1;
+}
+if [ "$CHANNEL" = release ]; then
+  git fetch --tags -q
+  [ "$(git rev-parse "v$RELEASE_VERSION^{commit}")" = "$RUN_SHA" ] || {
+    echo "REFUSING: release tag v$RELEASE_VERSION does not resolve to the merged commit" >&2; exit 1;
+  }
+fi
+echo "Deploying $CHANNEL channel version $RELEASE_VERSION (run $MAIN_RUN_ID @ $RUN_SHA)"
 ```
 
 ### 3. OTA Update on Target Board
@@ -214,6 +262,10 @@ Target device address defaults to `tesla-key-esp32.local` (with optional `DEVICE
 ```bash
 set -euo pipefail
 TARGET_HOST="${DEVICE_IP:-tesla-key-esp32.local}"
+: "${TARGET:?set TARGET to the board chip target: esp32 | esp32s3 | esp32c3 | esp32c6}"
+: "${CHANNEL:?run the artifact-binding block first}"
+case "$TARGET" in esp32) FAMILY=ESP32 ;; esp32s3) FAMILY=ESP32-S3 ;; esp32c3) FAMILY=ESP32-C3 ;;
+  esp32c6) FAMILY=ESP32-C6 ;; *) echo "REFUSING: unsupported TARGET" >&2; exit 1 ;; esac
 
 # Step A: Initiate background OTA check
 CHECK_JSON=$(curl --connect-timeout 5 --max-time 10 -fsS \
@@ -235,9 +287,9 @@ while (( SECONDS < CHECK_DEADLINE )); do
       echo "REFUSING: OTA check failed: $(printf '%s' "$OTA_JSON" | jq -r .message)" >&2
       exit 1 ;;
     idle)
-      printf '%s' "$OTA_JSON" | jq -e --arg v "$RELEASE_VERSION" \
-        '.update_available == true and .available == $v' >/dev/null || {
-        echo "REFUSING: OTA manifest version does not match release $RELEASE_VERSION" >&2
+      printf '%s' "$OTA_JSON" | jq -e --arg v "$RELEASE_VERSION" --arg c "$CHANNEL" \
+        '.update_available == true and .available == $v and .channel == $c' >/dev/null || {
+        echo "REFUSING: OTA manifest is not an available $CHANNEL-channel update for $RELEASE_VERSION" >&2
         exit 1
       }
       OTA_READY=1
@@ -254,43 +306,87 @@ printf '%s' "$UPDATE_JSON" | jq -e '.result == true' >/dev/null || {
   echo "REFUSING: OTA update failed to start" >&2; exit 1;
 }
 
-# Step D: Wait for reboot and verify new active version
+# Steps D-F: the same fully bound monitor as $ship. A hidden reboot must not pass, so every sample
+# has to show the exact version/platform, monotonic uptime and an uptime delta that tracks wall time.
+live_matches_artifact() {
+  LIVE_REACHABLE=0
+  LIVE_STATUS_JSON=$(curl --connect-timeout 3 --max-time 5 -fsS \
+    "http://$TARGET_HOST/status") || return 1
+  LIVE_STATUS_WALL=$SECONDS
+  LIVE_VERSION_JSON=$(curl --connect-timeout 3 --max-time 5 -fsS \
+    "http://$TARGET_HOST/api/proxy/1/version") || return 1
+  LIVE_REACHABLE=1
+  printf '%s' "$LIVE_STATUS_JSON" | jq -e --arg v "$RELEASE_VERSION" '.version == $v' >/dev/null \
+    && printf '%s' "$LIVE_VERSION_JSON" | jq -e --arg v "$RELEASE_VERSION" --arg p "$FAMILY" \
+         '.version == ($v + "-esp32") and .platform == $p' >/dev/null
+}
+
+# Step D: bounded download/reboot window; a reported OTA error is terminal.
 VERIFIED=0
 UPDATE_DEADLINE=$((SECONDS + 600))
 while (( SECONDS < UPDATE_DEADLINE )); do
-  if STATUS_JSON=$(curl --connect-timeout 3 --max-time 5 -fsS "http://$TARGET_HOST/status" 2>/dev/null); then
-    if printf '%s' "$STATUS_JSON" | jq -e --arg v "$RELEASE_VERSION" '.version == $v' >/dev/null; then
-      VERIFIED=1
-      break
+  if live_matches_artifact; then VERIFIED=1; break; fi
+  if OTA_JSON=$(curl --connect-timeout 3 --max-time 5 -fsS "http://$TARGET_HOST/ota/status"); then
+    if [ "$(printf '%s' "$OTA_JSON" | jq -r '.state // empty')" = error ]; then
+      echo "DEPLOYMENT INCOMPLETE: OTA failed: $(printf '%s' "$OTA_JSON" | jq -r .message)" >&2
+      exit 1
     fi
   fi
-  sleep 3
+  sleep 2
 done
-[ "$VERIFIED" -eq 1 ] || { echo "DEPLOYMENT INCOMPLETE: device did not boot $RELEASE_VERSION" >&2; exit 1; }
+[ "$VERIFIED" -eq 1 ] || {
+  echo "DEPLOYMENT INCOMPLETE: OTA did not boot exact $RELEASE_VERSION/$FAMILY within 600 seconds" >&2
+  exit 1
+}
 
-# Step E: 90-100s Rollback Probation Verification
-PROBATION_BASELINE_UPTIME=$(printf '%s' "$STATUS_JSON" | jq -er '.sys.uptime_s | floor')
-PROBATION_START=$SECONDS
-PROBATION_DEADLINE=$((SECONDS + 180))
+# Step E: rollback probation. Bind the baseline to the FIRST exact post-OTA observation, then
+# require every later sample to keep the exact identity, never lower the uptime, and advance
+# uptime and wall clock together (within 5 s) until both have covered 100 s.
+PROBATION_BASELINE_UPTIME=$(printf '%s' "$LIVE_STATUS_JSON" \
+  | jq -er '.sys.uptime_s | select(type == "number" and . >= 0) | floor') || {
+  echo "DEPLOYMENT INCOMPLETE: live status lacks numeric sys.uptime_s" >&2; exit 1;
+}
+PROBATION_BASELINE_WALL=$LIVE_STATUS_WALL
+LAST_UPTIME=$PROBATION_BASELINE_UPTIME
 PROBATION_OK=0
+PROBATION_DEADLINE=$((PROBATION_BASELINE_WALL + 180))
 while (( SECONDS < PROBATION_DEADLINE )); do
-  sleep 3
-  CURRENT_STATUS=$(curl --connect-timeout 3 --max-time 5 -fsS "http://$TARGET_HOST/status") || continue
-  CUR_UPTIME=$(printf '%s' "$CURRENT_STATUS" | jq -er '.sys.uptime_s | floor')
-  if (( CUR_UPTIME < PROBATION_BASELINE_UPTIME )); then
-    echo "DEPLOYMENT INCOMPLETE: device rebooted during OTA probation" >&2
+  if live_matches_artifact; then
+    CUR_UPTIME=$(printf '%s' "$LIVE_STATUS_JSON" \
+      | jq -er '.sys.uptime_s | select(type == "number" and . >= 0) | floor') || {
+      echo "DEPLOYMENT INCOMPLETE: live status lacks numeric sys.uptime_s" >&2; exit 1;
+    }
+    if (( CUR_UPTIME < LAST_UPTIME )); then
+      echo "DEPLOYMENT INCOMPLETE: device rebooted during OTA probation" >&2
+      exit 1
+    fi
+    LAST_UPTIME=$CUR_UPTIME
+    OBSERVED_WALL=$((LIVE_STATUS_WALL - PROBATION_BASELINE_WALL))
+    OBSERVED_UPTIME=$((CUR_UPTIME - PROBATION_BASELINE_UPTIME))
+    CLOCK_SKEW=$((OBSERVED_UPTIME - OBSERVED_WALL))
+    if (( CLOCK_SKEW < -5 || CLOCK_SKEW > 5 )); then
+      echo "DEPLOYMENT INCOMPLETE: uptime/wall-clock drift suggests a hidden reboot" >&2
+      exit 1
+    fi
+    if (( OBSERVED_WALL >= 100 && OBSERVED_UPTIME >= 100 )); then
+      PROBATION_OK=1
+      break
+    fi
+  elif [ "${LIVE_REACHABLE:-0}" -eq 1 ]; then
+    echo "DEPLOYMENT INCOMPLETE: device changed version/platform during OTA probation" >&2
     exit 1
   fi
-  ELAPSED=$((SECONDS - PROBATION_START))
-  if (( ELAPSED >= 100 && (CUR_UPTIME - PROBATION_BASELINE_UPTIME) >= 100 )); then
-    PROBATION_OK=1
-    break
-  fi
+  sleep 2
 done
-[ "$PROBATION_OK" -eq 1 ] || { echo "DEPLOYMENT INCOMPLETE: probation failed" >&2; exit 1; }
+[ "$PROBATION_OK" -eq 1 ] || {
+  echo "DEPLOYMENT INCOMPLETE: exact image was not stable for 100 seconds after first live observation" >&2
+  exit 1
+}
 
-# Step F: Confirm rollback cancellation via /diag?redact=1
-OTA_DIAG=$(curl --connect-timeout 3 --max-time 5 -fsS "http://$TARGET_HOST/diag?redact=1")
+# Step F: confirm rollback cancellation via /diag?redact=1 (boot-local mark-valid evidence)
+OTA_DIAG=$(curl --connect-timeout 3 --max-time 5 -fsS "http://$TARGET_HOST/diag?redact=1") || {
+  echo "DEPLOYMENT INCOMPLETE: cannot verify OTA mark-valid result" >&2; exit 1;
+}
 printf '%s' "$OTA_DIAG" | grep -F 'OTA image healthy after ' \
   | grep -F 'marked valid (rollback cancelled' >/dev/null || {
   echo "DEPLOYMENT INCOMPLETE: firmware did not confirm rollback cancellation" >&2

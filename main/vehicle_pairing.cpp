@@ -477,15 +477,39 @@ tk::KeyRotationResult VehicleController::generate_key_locked_() {
     // paired_at() stamp; see main/time_sync.hpp. Leaving it unstamped is the better failure:
     // status_model.hpp omits key_created below its plausibility floor, so the UI shows nothing
     // rather than a confident wrong date, and the next rotation under a real clock stamps it.
+    //
+    // The date describes THIS key. When it cannot be stamped (no authoritative clock, or the write
+    // failed) the previous key's date must not survive beside the new fingerprint, or the UI would
+    // present the old key's age as the new key's: retire it, and if even that fails distrust the
+    // stored value until the next successful stamp.
+    bool key_created_stamped = false;
     if (storage_ && clock_is_authoritative()) {
         try {
             time_t now = time(nullptr);
-            if (!storage_->save_str(tk::nvs_contract::kKeyCreated,
-                                    std::to_string((long long)now))) {
+            key_created_stamped = storage_->save_str(tk::nvs_contract::kKeyCreated,
+                                                     std::to_string((long long)now));
+            if (!key_created_stamped) {
                 ESP_LOGW(TAG, "key generated but its creation date was not persisted");
             }
         } catch (...) {
             ESP_LOGW(TAG, "key generated but creation-date metadata allocation failed");
+        }
+    }
+    if (storage_) {
+        if (key_created_stamped) {
+            key_created_untrusted_.store(false);
+        } else {
+            bool retired = false;
+            try {
+                retired = storage_->remove(tk::nvs_contract::kKeyCreated);
+            } catch (...) {
+                ESP_LOGW(TAG, "previous key creation date could not be retired (allocation failed)");
+            }
+            if (!retired) {
+                key_created_untrusted_.store(true);
+                ESP_LOGW(TAG, "previous key creation date could not be erased — hiding it until "
+                              "the next successful stamp");
+            }
         }
     }
     // A new key invalidates any existing pairing: the stored session belonged to the
@@ -764,6 +788,9 @@ bool VehicleController::health_probe_(int timeout_ms) {
 
 time_t VehicleController::key_created_at() {
     if (!storage_) return 0;
+    // A rotation could neither stamp nor erase the previous key's date: it belongs to a key that
+    // no longer exists, so report "unknown" rather than a confident wrong date.
+    if (key_created_untrusted_.load()) return 0;
     std::string s;
     if (!storage_->load_str(tk::nvs_contract::kKeyCreated, s)) return 0;
     return (time_t)atoll(s.c_str());
