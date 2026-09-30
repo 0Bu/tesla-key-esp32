@@ -302,6 +302,12 @@ perl -0pi -e 's/build -> independent-rebuild -> publish ->/build -> publish ->/'
 expect_failure "multi-target publication DAG" "$fixture" \
   "multi-target reviewer is missing the independent-rebuild/publication DAG contract"
 
+fixture="$WORK/multi-target-independent-legs"; make_fixture "$fixture"
+perl -0pi -e 's/independent-rebuild needs build and every independent-rebuild-target leg/independent-rebuild needs build/' \
+  "$fixture/.agents/subagents.json"
+expect_failure "multi-target independent-leg dependency" "$fixture" \
+  "multi-target reviewer is missing the independent-rebuild/publication DAG contract"
+
 fixture="$WORK/multi-target-host-gate"; make_fixture "$fixture"
 perl -0pi -e 's/build needs prepare, logic-test and build-target/build needs prepare and build-target/' \
   "$fixture/.agents/subagents.json"
