@@ -8,7 +8,7 @@ var $=function(id){return document.getElementById(id)};
 function setHTML(el,html){ if(el && el.__h!==html){ el.__h=html; el.innerHTML=html; } }
 var state=null, otaTimer=null, otaAvail=null, waking=false, wakeTimeout=null, chgBusy=false, feedOk=false;
 var otaBusy=false, otaPhase=null, otaPollState=null, otaDeadline=0, otaExpectedVersion=null, otaChannel='release', otaChannelInitialSet=false;
-var otaChannelInFlight=false, otaChannelTarget=null;
+var otaChannelInFlight=false, otaChannelTarget=null, otaPrompting=false;
 var fwFocusId=null;   // control that started the running check/channel change; refocused once the UI is idle again
 
 function isOtaRunning(){
@@ -17,8 +17,14 @@ function isOtaRunning(){
   return st === 'downloading' || st === 'done';
 }
 function isOtaBusy(){
-  return !!(otaBusy || isOtaRunning() || otaChannelInFlight || otaPhase === 'check' || otaPhase === 'update' || otaPhase === 'reboot');
+  return !!(otaBusy || isOtaRunning() || otaChannelInFlight || otaPhase === 'check');
 }
+// Entry points of the firmware flows (check, channel change, update prompt). otaPrompting spans "an
+// update was found" until the install dialog is answered, changelog fetch included, so a second tap
+// cannot start a second flow; the controls stay enabled (so a dismissed dialog can hand focus back to
+// them) and the entry points simply ignore the tap. The other settings stay usable as well: an open
+// sheet and the update dialog may coexist by design (see syncModal).
+function isOtaFlowBusy(){ return isOtaBusy() || otaPrompting; }
 
 // Quotes are escaped too so esc() is safe in attribute values (title="…"), not just element content.
 function esc(s){return String(s).replace(/[&<>"']/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]})}
@@ -439,12 +445,12 @@ function scrollToKey(){
 
 // The hero's one primary action, picked by render(); the gauge calls heroTap().
 var heroActFn=null;
-function heroTap(){ if(isOtaBusy()) return; if(heroActFn) return heroActFn(); }
+function heroTap(){ if(heroActFn) return heroActFn(); }
 function setHeroAct(label,icon,fn,busyText){
   heroActFn=busyText?null:fn;
 }
 var bannerFn=null;
-function bannerAction(){ if(isOtaBusy()) return; if(bannerFn) return bannerFn(); }
+function bannerAction(){ if(isOtaRunning()) return; if(bannerFn) return bannerFn(); }
 
 /* ---------- render ---------- */
 // Connection row: tone ('ok' | 'warn' | '') colours the icon dot, status line and signal glyph.
@@ -732,8 +738,7 @@ function renderVerLink(){
     var chan = otaChannel || 'release';
     var isDev = (chan === 'dev');
     var chanLabel = isDev ? 'Development' : 'Release';
-    vl.title = 'Current: ' + chanLabel + ' — tap to change channel';
-    vl.setAttribute('aria-label', 'Change update channel, current: ' + chanLabel);
+    vl.title = 'Change update channel (current: ' + chanLabel + ')';
   }
   var cb = $("fwCheckBtn");
   if(cb){
@@ -1199,7 +1204,7 @@ function otaInline(html,cls,pct){
 }
 function otaInlineClear(delay){ clearTimeout(otaClearTimer); otaClearTimer=setTimeout(function(){ otaClearTimer=null; otaInline(''); }, delay||3000); }
 function otaBegin(phase,timeout){ clearTimeout(otaClearTimer); otaClearTimer=null; otaPhase=phase; otaDeadline=Date.now()+timeout; otaLastToastMilestone=null; renderVerLink(); }
-function otaReset(){ clearTimeout(otaTimer); clearTimeout(otaClearTimer); otaClearTimer=null; otaBusy=false; otaPhase=null; otaPollState=null; otaDeadline=0; otaExpectedVersion=null; otaLastToastMilestone=null; renderVerLink(); if(typeof syncOtaUi === 'function') syncOtaUi(); fwRefocus(); }
+function otaReset(){ clearTimeout(otaTimer); clearTimeout(otaClearTimer); otaClearTimer=null; otaBusy=false; otaPrompting=false; otaPhase=null; otaPollState=null; otaDeadline=0; otaExpectedVersion=null; otaLastToastMilestone=null; renderVerLink(); if(typeof syncOtaUi === 'function') syncOtaUi(); fwRefocus(); }
 function otaFail(message){ otaReset(); if(typeof closeOtaModal === 'function') closeOtaModal(false); toast(message, 'err', 'ota'); otaInline('<span>'+esc(message)+'</span>','err'); otaInlineClear(6000); if(typeof syncOtaUi === 'function') syncOtaUi(); }
 function otaSchedule(fn,delay){
   if(!otaDeadline||Date.now()<otaDeadline){ otaTimer=setTimeout(fn,delay); return; }
@@ -1225,7 +1230,7 @@ function getActiveChannel(){
 }
 
 function openChannelSelect(){
-  if(isOtaBusy()) return;
+  if(isOtaFlowBusy()) return;
   var m = $("chanModal");
   if(m && m.classList) m.classList.remove('hide');
   syncModal();
@@ -1238,7 +1243,7 @@ function closeChannelModal(){
   if(m && m.classList) m.classList.add('hide');
   syncModal();
   var vl = $("verLink");
-  if(vl && typeof vl.focus === 'function' && !isOpen('askModal') && !isOpen('otaModal')) vl.focus();
+  if(vl && typeof vl.focus === 'function' && !isOpen('askModal') && !isOpen('otaModal')) vl.focus({ preventScroll: true });
 }
 
 function selectChannel(chan){
@@ -1266,7 +1271,7 @@ function renderChanMenu(){
 }
 
 function setChannel(chan){
-  if(isOtaBusy()) return Promise.resolve();
+  if(isOtaFlowBusy()) return Promise.resolve();
   if(chan!=='release'&&chan!=='dev') return Promise.resolve();
   var prevChan = otaChannel;
   var changed = (otaChannel !== chan);
@@ -1277,7 +1282,6 @@ function setChannel(chan){
   otaChannelInFlight = true;
   otaChannelInitialSet = true;
   renderChanMenu();
-  if(typeof syncOtaUi === 'function') syncOtaUi();
 
   return requestJsonResultWithTimeout('/set_ota', {
     method: 'POST',
@@ -1287,6 +1291,7 @@ function setChannel(chan){
     if(!res.ok){
       var rj = res.json && res.json.response;
       var err = new Error('HTTP ' + res.status);
+      err.http = true;   // the device answered and refused
       err.reason = (rj && typeof rj.reason === 'string') ? rj.reason : '';
       throw err;
     }
@@ -1300,8 +1305,13 @@ function setChannel(chan){
     otaChannelTarget = null;
     otaChannel = prevChan;
     renderChanMenu();
-    toast('Failed to set update channel' + ((err && err.reason) ? ' — ' + err.reason : ''), 'err', 'channel');
-    if(typeof syncOtaUi === 'function') syncOtaUi();
+    if(err && err.http){
+      toast('Failed to set update channel' + (err.reason ? ' — ' + err.reason : ''), 'err', 'channel');
+    } else {
+      // timeout or transport error: the device may or may not have stored the channel, so take its answer
+      toast('Update channel change not confirmed — refreshing status', 'err', 'channel');
+      poll();
+    }
     fwRefocus();
   });
 }
@@ -1315,7 +1325,7 @@ function closeOtaModal(decision){
   if(m && m.classList) m.classList.add('hide');
   syncModal();
   var btn = $("fwCheckBtn") || $("verLink");
-  if(btn && typeof btn.focus === 'function' && !isOpen('askModal') && !isOpen('chanModal') && !isOtaBusy()) btn.focus();
+  if(btn && typeof btn.focus === 'function' && !isOpen('askModal') && !isOpen('chanModal') && !isOtaBusy()) btn.focus({ preventScroll: true });
   if(otaDecisionResolve){
     var r = otaDecisionResolve;
     otaDecisionResolve = null;
@@ -1324,26 +1334,29 @@ function closeOtaModal(decision){
 }
 
 function openFwUpdate(){
-  if(isOtaBusy()) return Promise.resolve();
+  if(isOtaFlowBusy()) return Promise.resolve();
   var curVer = (state && state.version) || '?';
   if(otaAvail){
+    var ver = otaAvail;                 // the prompt outlives any later change of the global
+    otaPrompting = true; fwFocusId = 'fwCheckBtn';
+    if(typeof syncOtaUi === 'function') syncOtaUi();
     return loadOtaChangelog().then(function(notes){
-      return askOtaInstall({ current: curVer, available: otaAvail }, notes);
+      return askOtaInstall({ current: curVer, available: ver }, notes);
     }).then(function(installed){
       if(installed){
-        return startOtaUpdate(otaAvail);
+        return startOtaUpdate(ver);
       } else {
         otaAvail = null;
         if(state) render(state);
         otaReset();
       }
-    });
+    }).catch(function(){ otaReset(); });
   }
-  fwFocusId = 'fwCheckBtn';
   return otaCheck();
 }
 
 function startOtaUpdate(availVer){
+  otaPrompting = false;
   var om = $("otaModal"); if(om && om.classList) om.classList.add('hide');
   var am = $("askModal"); if(am && am.classList) am.classList.add('hide');
   if(typeof askClose === 'function' && askResolve) askClose(null);
@@ -1470,7 +1483,8 @@ if(typeof document!=='undefined' && typeof document.addEventListener==='function
 }
 
 function otaCheck(){
-  if(isOtaBusy()) return Promise.resolve();              // a check/update is already running
+  if(isOtaFlowBusy()) return Promise.resolve();          // a check/update/prompt is already running
+  if(!fwFocusId) fwFocusId = 'fwCheckBtn';
   otaBusy=true;
   otaBegin('check',OTA_CHECK_TIMEOUT_MS);
   if(typeof syncOtaUi === 'function') syncOtaUi();
@@ -1494,6 +1508,7 @@ function otaCheckPoll(){
     if(o.update_available){
       otaBusy=false;
       otaPhase=null;
+      otaPrompting=true;          // stay locked while the changelog loads and the dialog is open
       if(typeof syncOtaUi === 'function') syncOtaUi();
       otaAvail=o.available||''; if(state)render(state); otaInline('');         // clear while the dialog is up
       toast('Update available: v' + o.available, 'ok', 'ota');
@@ -1642,7 +1657,7 @@ function syncOtaUi(){
 // put focus back where the user was.
 function fwRefocus(){
   var id = fwFocusId;
-  if(!id || isOtaBusy() || isOpen('askModal') || isOpen('otaModal') || isOpen('chanModal')) return;
+  if(!id || isOtaFlowBusy() || isOpen('askModal') || isOpen('otaModal') || isOpen('chanModal')) return;
   fwFocusId = null;
   var ae = (typeof document !== 'undefined') ? document.activeElement : null;
   var lost = !ae || ae === document.body || ae === document.documentElement || ae.disabled || ae.id === id;

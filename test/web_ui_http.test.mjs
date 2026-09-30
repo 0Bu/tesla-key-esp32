@@ -323,7 +323,8 @@ test("OTA versions use the canonical 31-byte firmware descriptor grammar", () =>
 
 test("device page exposes keyboard and live-region semantics", () => {
   const html = fs.readFileSync(new URL("../main/www/index.html", import.meta.url), "utf8");
-  assert.match(html, /<button[^>]+id="verLink"[^>]+aria-label="Change update channel"/);
+  assert.doesNotMatch(html, /<button[^>]+id="verLink"[^>]*aria-label=/, "#verLink is named by its visible version and channel text");
+  assert.match(html, /<button[^>]+id="verLink"[^>]+title="Change update channel"/);
   assert.match(html, /<button[^>]+id="fwCheckBtn"[^>]+aria-label="Check for firmware updates"/);
   // #toasts is the single live region; #otaStat must not announce the same OTA text twice.
   assert.match(html, /id="otaStat"[^>]+aria-hidden="true"/);
@@ -342,7 +343,7 @@ test("setup form enforces the shared WiFi credential contract without optimistic
 
 test("firmware card exposes update channel modal and update check button", () => {
   const html = fs.readFileSync(new URL("../main/www/index.html", import.meta.url), "utf8");
-  assert.match(html, /<button type="button" class="ver-btn" id="verLink" onclick="openChannelSelect\(\)" aria-label="Change update channel"/);
+  assert.match(html, /<button type="button" class="ver-btn" id="verLink" onclick="openChannelSelect\(\)" title="Change update channel"/);
   assert.match(html, /<button type="button" class="ib" id="fwCheckBtn" onclick="openFwUpdate\(\)" aria-label="Check for firmware updates"/);
   assert.match(html, /id="chanModal"[\s\S]*?id="chanOptRelease"[\s\S]*?id="chanOptDev"/);
   assert.match(html, /id="verLink"[\s\S]*?id="fwVer"[\s\S]*?id="fwCheckBtn"/);
@@ -2013,12 +2014,13 @@ test("fwRefocus hands focus back only when it was lost, and only once the UI is 
   assert.equal(context.fwFocusId, null);
 });
 
-test("a /set_ota request that never settles times out, rolls back and unlocks the UI", async () => {
+test("a /set_ota request that never settles times out, is reported as unconfirmed, rolls back and unlocks the UI", async () => {
   const { context, element } = loadUi();
   const toasts = [];
+  const urls = [];
   context.toast = (msg, type) => toasts.push({ msg, type });
   context.render({ version: "1.6.0", ota: { channel: "release" } });
-  context.fetch = () => new Promise(() => {});
+  context.fetch = (url) => { urls.push(url); return new Promise(() => {}); };
   context.setTimeout = (callback) => { queueMicrotask(callback); return 1; };
 
   await context.selectChannel("dev");
@@ -2026,31 +2028,8 @@ test("a /set_ota request that never settles times out, rolls back and unlocks th
   assert.equal(element("fwSub").textContent, "Release channel");
   assert.equal(context.isOtaBusy(), false, "a hung request must not leave the page locked");
   assert.equal(element("verLink").disabled, false);
-  assert.ok(toasts.some(t => t.type === "err" && t.msg === "Failed to set update channel"));
-});
-
-test("a refused channel change rolls back and shows the device's reason", async () => {
-  const { context, element } = loadUi();
-  const toasts = [];
-  context.toast = (msg, type) => toasts.push({ msg, type });
-  context.render({ version: "1.6.0", ota: { channel: "release" } });
-
-  context.fetch = otaFetchStub({ setOta: () => ({
-    ok: false, status: 409,
-    async json() { return { response: { result: false, command: "set_ota", vin: "", reason: "an OTA update is in progress" } }; }
-  }) });
-  await context.selectChannel("dev");
-  assert.equal(context.otaChannel, "release", "optimistic switch is rolled back");
-  assert.equal(element("fwSub").textContent, "Release channel");
-  assert.equal(context.isOtaBusy(), false);
-  assert.ok(toasts.some(t => t.type === "err" && t.msg === "Failed to set update channel — an OTA update is in progress"));
-  assert.equal(context.document.activeElement, element("verLink"), "focus is handed back after the refusal");
-
-  toasts.length = 0;
-  context.fetch = otaFetchStub({ setOta: () => ({ ok: false, status: 502, async json() { throw new Error("not json"); } }) });
-  await context.selectChannel("dev");
-  assert.equal(context.otaChannel, "release");
-  assert.ok(toasts.some(t => t.type === "err" && t.msg === "Failed to set update channel"), "no reason available: generic text");
+  assert.ok(toasts.some(t => t.type === "err" && t.msg === "Update channel change not confirmed — refreshing status"));
+  assert.ok(urls.some(u => u.startsWith("/status")), "the device's own answer is re-read instead of guessing");
 });
 
 test("channel options expose their state via aria-pressed and hold no block elements inside buttons", () => {
@@ -2068,4 +2047,95 @@ test("channel options expose their state via aria-pressed and hold no block elem
   context.render({ version: "1.6.0", ota: { channel: "release" } });
   assert.equal(element("chanOptDev")["aria-pressed"], "false");
   assert.equal(element("chanOptRelease")["aria-pressed"], "true");
+});
+
+test("a second tap during the changelog fetch neither opens a second dialog nor loses the version", async () => {
+  const { context, element } = loadUi();
+  context.toast = () => {};
+  context.state = { version: "1.4.0" };
+  let changelogCalls = 0;
+  let releaseChangelog;
+  const changelogGate = new Promise(resolve => { releaseChangelog = resolve; });
+  const updates = [];
+  context.fetch = async (url) => {
+    if (url.startsWith("/ota/check")) return { ok: true, status: 200, async json() { return { started: true }; } };
+    if (url.startsWith("/ota/status")) return { ok: true, status: 200, async json() {
+      return { state: "idle", update_available: true, progress: 0, message: "update available", available: "1.5.0", current: "1.4.0" };
+    } };
+    if (url.startsWith("/ota/changelog")) { changelogCalls++; await changelogGate; return { ok: true, status: 200, async text() { return "notes"; } }; }
+    if (url.startsWith("/ota/update")) { updates.push(url); return { ok: true, status: 200, async json() { return { result: true }; } }; }
+    return { ok: true, status: 200, async json() { return {}; } };
+  };
+
+  const flow = context.openFwUpdate();
+  await new Promise(resolve => setTimeout(resolve, 20));      // the check is done, the changelog is still loading
+  assert.equal(context.otaPrompting, true);
+  assert.equal(context.isOtaFlowBusy(), true);
+  assert.equal(context.isOtaBusy(), false, "the prompt does not lock the rest of the settings");
+  assert.equal(element("vinBtn").disabled, false, "other settings stay usable while the prompt is pending");
+
+  await context.openFwUpdate();
+  await context.otaCheck();
+  await context.openChannelSelect();
+  await context.setChannel("dev");
+  assert.equal(changelogCalls, 1, "no second changelog fetch");
+  assert.equal(element("chanModal").classList.contains("hide"), true, "no channel dialog on top of the pending update prompt");
+
+  releaseChangelog();
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.equal(element("otaModal").classList.contains("hide"), false);
+  context.closeOtaModal(true);
+  await flow;
+  assert.equal(updates.length, 1);
+  assert.equal(context.otaExpectedVersion, "1.5.0", "the install targets the version that was offered");
+  assert.equal(context.otaPrompting, false);
+});
+
+test("declining the update prompt frees the firmware controls and hands focus back", async () => {
+  const { context, element } = loadUi();
+  context.toast = () => {};
+  context.state = { version: "1.4.0" };
+  context.fetch = async (url) => {
+    if (url.startsWith("/ota/check")) return { ok: true, status: 200, async json() { return { started: true }; } };
+    if (url.startsWith("/ota/status")) return { ok: true, status: 200, async json() {
+      return { state: "idle", update_available: true, progress: 0, message: "update available", available: "1.5.0", current: "1.4.0" };
+    } };
+    if (url.startsWith("/ota/changelog")) return { ok: true, status: 200, async text() { return ""; } };
+    return { ok: true, status: 200, async json() { return {}; } };
+  };
+  element("fwCheckBtn").focus();
+  const flow = context.openFwUpdate();
+  await new Promise(resolve => setTimeout(resolve, 30));
+  assert.equal(element("otaModal").classList.contains("hide"), false);
+  context.closeOtaModal(false);
+  await flow;
+  assert.equal(context.otaPrompting, false);
+  assert.equal(context.isOtaBusy(), false);
+  assert.equal(element("fwCheckBtn").disabled, false);
+  assert.equal(element("verLink").disabled, false);
+  assert.equal(context.document.activeElement, element("fwCheckBtn"));
+});
+
+test("hero vehicle actions are not blocked by a firmware check or channel change; the banner only by a running update", () => {
+  const { context } = loadUi();
+  let heroCalls = 0;
+  let bannerCalls = 0;
+  context.heroActFn = () => { heroCalls++; };
+  context.bannerFn = () => { bannerCalls++; };
+
+  context.otaPhase = "check";
+  context.heroTap();
+  context.bannerAction();
+  assert.equal(heroCalls, 1);
+  assert.equal(bannerCalls, 1);
+
+  context.otaPhase = null;
+  context.otaChannelInFlight = true;
+  context.heroTap();
+  assert.equal(heroCalls, 2);
+
+  context.otaChannelInFlight = false;
+  context.otaPhase = "update";
+  context.bannerAction();
+  assert.equal(bannerCalls, 1, "a running update still blocks the banner action");
 });

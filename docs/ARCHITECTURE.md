@@ -594,9 +594,12 @@ preserves the `PR/` tree). Constraints:
     `{"response":{"result":false,"command":"<name>","vin":"","reason":"an OTA update is in progress"}}`, or flat
     `{"ok":false,"result":false,"reason":"an OTA update is in progress"}` for `POST /send_key`)
     to keep concurrent NVS mutations and reboots away from the flashing process. A running update *check* does
-    not trip this guard, so those six routes stay available during a check. `POST /gen_keys` and `POST /set_vin`
-    are different: a check holds the same OTA gate as an update, so they answer `503` (`OtaIdentityMutationGuard`)
-    for the duration of a check as well. The `ota_is_updating()` test is a snapshot taken when the handler starts,
+    not trip this guard, so those six routes stay available during a check, with one difference: `/set_mqtt`,
+    `/set_syslog` and `/set_wifi` restart the device only if they can take the OTA gate
+    (`ota_config_restart_begin()`), which a check holds. During a check they save the configuration, log
+    `reboot postponed` and still answer with their normal success text; the change applies at the next
+    restart. `POST /gen_keys` and `POST /set_vin` are different: a check holds the same OTA gate as an
+    update, so they answer `503` (`OtaIdentityMutationGuard`) for the duration of a check as well. The `ota_is_updating()` test is a snapshot taken when the handler starts,
     not an atomic exclusion, so a request that passed it can still overlap an update that starts right afterwards.
     `POST /crash/dismiss` and `GET /coredump?clear=1` (core-dump erase) are not covered by the guard.
 - **Toolchain pin isolation in PR preview rebuilds.** The `trusted-rebuild` job in
@@ -1405,8 +1408,8 @@ on-device runtime evidence.
 or flat `{"ok":false,"result":false,"reason":"an OTA update is in progress"}` for `POST /send_key`) before reading body payloads,
 keeping concurrent NVS operations and reboots away from the flash partition while it is being written. The
 check is a best-effort snapshot, not an atomic exclusion (see the OTA section above). Idle update checks do
-not block these six routes; `POST /gen_keys` and `POST /set_vin` are gated for the whole check as well and
-answer `503`.
+not block these six routes (`/set_mqtt`, `/set_syslog` and `/set_wifi` then save but postpone their reboot);
+`POST /gen_keys` and `POST /set_vin` are gated for the whole check as well and answer `503`.
 
 ## MCP endpoint (/mcp)
 
