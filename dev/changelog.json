@@ -1,1 +1,1 @@
-{"version":"1.6.2-dev.1","changelog":"v1.6.2-dev.1 — Close all 22 findings of the 2026-09-30 project review"}
+{"version":"1.6.2-dev.2","changelog":"v1.6.2-dev.1 — Close all 22 findings of the 2026-09-30 project review\nv1.6.2-dev.2 — Faster semantics gate and an all-target incremental pre-push size/stack check"}
