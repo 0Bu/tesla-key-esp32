@@ -457,6 +457,17 @@ def validate(root: Path) -> None:
         idf_docker.count("docker run --rm --cpus 1.5 --memory 1800m") == 1,
         "idf-docker.sh: build containers must retain the explicit 1.5 CPU / 1800 MiB limits",
     )
+    # F06: a running daemon is reusable only when it was created from the CURRENT pin with the
+    # reviewed limits. The check must guard daemon start, status and the build-time reuse path.
+    require(
+        idf_docker.count("daemon_matches_contract") >= 5
+        and "[ \"$daemon_image\" = \"$image\" ]" in idf_docker
+        and "IDF_DAEMON_NANO_CPUS=1500000000" in idf_docker
+        and "IDF_DAEMON_MEMORY_BYTES=1887436800" in idf_docker
+        and "if [ \"$is_authoritative_gate\" -eq 0 ] && [ \"$is_daemon_running\" = \"true\" ] && ! daemon_matches_contract; then"
+        in idf_docker,
+        "idf-docker.sh: daemon reuse must be bound to the current toolchain image and resource limits",
+    )
 
     for text, label in (
         (build_all, "ci-build-all.sh"),
@@ -1026,6 +1037,26 @@ def validate(root: Path) -> None:
          'python3 scripts/check-release-assets.py "$release_json" ./_deploy-input',
          root_publish, "Accept branch-served Pages against immutable Release bytes"),
     )
+    # F04: the dev channel is written in place, so the deploy job must refetch main immediately
+    # before that mutation. A re-run of only this job must not overwrite a newer dev channel.
+    require_order(
+        deploy_section,
+        "build.yml dev deploy artifact -> current-main revalidation -> dev branch push -> acceptance",
+        ("Download exact signed Release and Pages candidate",
+         "python3 scripts/check-pages-manifest.py ./_deploy-input/_site",
+         "- name: Revalidate current main immediately before dev deployment",
+         "./scripts/select-release-version.sh --require-current-main",
+         "- name: Deploy dev site to gh-pages",
+         "./scripts/publish-pages-branch.sh dev ./_deploy-input/_site",
+         "- name: Accept branch-served Pages against dev build artifacts"),
+    )
+    require(
+        "        run: ./scripts/select-release-version.sh --require-current-main \"$SOURCE_SHA\"\n\n"
+        "      - name: Deploy dev site to gh-pages" in deploy_section
+        and "        if: needs.build.outputs.mode == 'dev'\n        env:\n          SOURCE_SHA: ${{ github.sha }}"
+        in deploy_section,
+        "build.yml deploy dev channel mutation must be adjacent to the dev-only current-main revalidation",
+    )
     final_release_position = deploy_section.rfind(FINAL_RELEASE_API)
     require(
         final_release_position > deploy_section.find(root_publish)
@@ -1159,6 +1190,13 @@ def self_test(root: Path) -> None:
         ("idf-docker-resource-limits", "scripts/idf-docker.sh",
          "docker run --rm --cpus 1.5 --memory 1800m",
          "docker run --rm --cpus 4 --memory 8g", "explicit 1.5 CPU / 1800 MiB limits"),
+        ("idf-docker-daemon-image-binding", "scripts/idf-docker.sh",
+         '[ "$daemon_image" = "$image" ] \\', '[ -n "$daemon_image" ] \\',
+         "daemon reuse must be bound to the current toolchain image"),
+        ("idf-docker-daemon-reuse-guard", "scripts/idf-docker.sh",
+         'if [ "$is_authoritative_gate" -eq 0 ] && [ "$is_daemon_running" = "true" ] && ! daemon_matches_contract; then',
+         'if false; then',
+         "daemon reuse must be bound to the current toolchain image"),
         ("build-target", "scripts/ci-build-all.sh",
          'TARGETS="esp32 esp32s3 esp32c3 esp32c6"',
          'TARGETS="esp32 esp32s3 esp32c3"', "ci-build-all.sh: target set/order"),

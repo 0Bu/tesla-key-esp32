@@ -109,8 +109,9 @@ esac
 ```
 
 **Option A — exact GitHub Release asset, cross-checked against its signed main artifact.** Require
-an explicit release tag; bind it to the one successful main push build, select exactly the
-versioned target asset, verify GitHub's recorded length/SHA-256, then require byte identity with
+an explicit release tag; bind it to the successful main `workflow_dispatch` build (`release: true`)
+that produced that stable Release — a main push run only publishes the Dev channel and never
+carries the stable `X.Y.Z` artifact — select exactly the versioned target asset, verify GitHub's recorded length/SHA-256, then require byte identity with
 the source-SHA-bound signed Actions artifact. Both create and verified reuse runs produce that
 artifact; reuse performs no signing or Release mutation/re-upload and accepts only RSA-PSS-valid
 apps matching the production-authority pin. A mutable Release asset alone is not provenance:
@@ -133,13 +134,24 @@ SOURCE_SHA=$(git rev-parse "$RELEASE_TAG^{commit}")
 [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] || {
   echo "REFUSING: release source SHA is unavailable" >&2; exit 1;
 }
-RUN_IDS=$(gh run list --workflow build --branch main --commit "$SOURCE_SHA" --limit 20 \
+SIGNED_ART="tesla-key-esp32-$VERSION-$SOURCE_SHA"
+RUN_IDS=$(gh run list --workflow build --branch main --commit "$SOURCE_SHA" --event workflow_dispatch --limit 20 \
   --json databaseId,headSha,event,conclusion \
-  --jq ".[] | select(.headSha == \"$SOURCE_SHA\" and .event == \"push\" and .conclusion == \"success\") | .databaseId")
-[ "$(printf '%s\n' "$RUN_IDS" | awk 'NF {n++} END {print n+0}')" -eq 1 ] || {
-  echo "REFUSING: release tag does not resolve to exactly one successful main push build" >&2; exit 1;
+  --jq ".[] | select(.headSha == \"$SOURCE_SHA\" and .event == \"workflow_dispatch\" and .conclusion == \"success\") | .databaseId")
+# A same-SHA retry that reused the immutable Release also uploads this recovery artifact, so more
+# than one successful dispatch run can qualify; take the newest one that still holds exactly one
+# unexpired artifact of the exact name. The byte comparison below binds the Release asset to it.
+RUNID=""
+for CANDIDATE in $RUN_IDS; do
+  CANDIDATE_ROWS=$(gh api "repos/:owner/:repo/actions/runs/$CANDIDATE/artifacts" \
+    --jq ".artifacts[] | select(.expired == false and .name == \"$SIGNED_ART\") | .name")
+  if [ "$(printf '%s\n' "$CANDIDATE_ROWS" | awk 'NF {n++} END {print n+0}')" -eq 1 ]; then
+    RUNID=$CANDIDATE; break
+  fi
+done
+[ -n "$RUNID" ] || {
+  echo "REFUSING: release tag has no successful release-dispatch build with an unexpired signed artifact" >&2; exit 1;
 }
-RUNID=$(printf '%s\n' "$RUN_IDS" | awk 'NF {print}')
 RUN_SHA="$SOURCE_SHA"
 RELEASE_JSON=$(gh api "repos/:owner/:repo/releases/tags/$RELEASE_TAG")
 [ "$(printf '%s' "$RELEASE_JSON" | jq -r .tag_name)" = "$RELEASE_TAG" ] \
@@ -175,7 +187,6 @@ else ACTUAL_DIGEST=sha256:$(shasum -a 256 "$APP" | awk '{print $1}'); fi
 # A Release asset can be replaced. Bind these bytes to the unique build run and its metadata by
 # comparing them with the exact signed artifact produced by that run. Expiry is a hard stop; a
 # durable standalone Release path needs a future signed provenance manifest published with it.
-SIGNED_ART="tesla-key-esp32-$VERSION-$SOURCE_SHA"
 SIGNED_ROWS=$(gh api "repos/:owner/:repo/actions/runs/$RUNID/artifacts" \
   --jq ".artifacts[] | select(.expired == false and .name == \"$SIGNED_ART\") | .name")
 [ "$(printf '%s\n' "$SIGNED_ROWS" | awk 'NF {n++} END {print n+0}')" -eq 1 ] || {

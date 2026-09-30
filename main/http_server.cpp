@@ -11,6 +11,8 @@
 #include "stack_watch.hpp"
 #include "logic/http_origin.hpp"
 #include <esp_log.h>
+#include <lwip/inet.h>
+#include <lwip/sockets.h>
 #include <cstring>
 #include <exception>
 
@@ -57,13 +59,30 @@ static bool browser_mutation_allowed(httpd_req_t* req) {
 
     char host[128];
     if (!read_header_bounded(req, "Host", host, sizeof(host))) return false;
+    // The addresses this board owns right now: the active transport's lease AND the address this
+    // very connection terminated on. WiFi and Ethernet keep their leases side by side, so a page
+    // opened through the WiFi address is still served by this board after an Ethernet takeover;
+    // the socket's local address is by construction an address the board holds. Host must still
+    // equal one of them (or the canonical name), so a rebinding page cannot borrow this.
     char device_ip[16] = {};
     esp_netif_t* netif = tk::net_active_netif();
     esp_netif_ip_info_t ip{};
     if (netif && esp_netif_get_ip_info(netif, &ip) == ESP_OK) {
         esp_ip4addr_ntoa(&ip.ip, device_ip, sizeof(device_ip));
     }
-    return tk::mutation_origin_allowed(host, origin, fetch_site, device_ip);
+    char socket_ip[16] = {};
+    const int fd = httpd_req_to_sockfd(req);
+    if (fd >= 0) {
+        struct sockaddr_in local{};
+        socklen_t local_len = sizeof(local);
+        if (getsockname(fd, reinterpret_cast<struct sockaddr*>(&local), &local_len) == 0 &&
+            local.sin_family == AF_INET) {
+            inet_ntop(AF_INET, &local.sin_addr, socket_ip, sizeof(socket_ip));
+        }
+    }
+    const std::string_view device_ips[] = {device_ip, socket_ip};
+    return tk::mutation_origin_allowed(host, origin, fetch_site, device_ips,
+                                       sizeof(device_ips) / sizeof(device_ips[0]));
 }
 
 static esp_err_t reject_cross_origin_mutation(httpd_req_t* req) {

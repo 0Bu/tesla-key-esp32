@@ -31,7 +31,7 @@ function esc(s){return String(s).replace(/[&<>"']/g,function(c){return{'&':'&amp
 // Numeric fields from the /status JSON are coerced before they touch any HTML string —
 // a finite number in, the number out; anything else null. Keeps radio-sourced JSON
 // (RSSI, SOC, progress) from ever reaching innerHTML as text.
-function num(x){ x=+x; return isFinite(x)?x:null; }
+function num(x){ if(x==null||x==='') return null; x=+x; return isFinite(x)?x:null; }   // absent/null/'' stay absent (+null is 0)
 
 function requestJson(url,options){
   return fetch(url,options).then(function(r){
@@ -528,12 +528,13 @@ function render(s){
   $("hero").classList.remove('hide');
   if(paired&&v){
     if(waking){ waking=false; clearTimeout(wakeTimeout); }   // car is awake & reporting — stop the spinner
-    var soc=(v.usable_soc!=null?num(v.usable_soc):num(v.soc))||0;
+    var soc=(v.usable_soc!=null?num(v.usable_soc):num(v.soc));   // null = the car has not reported a level (never 0 %)
     // "Charge complete" = battery reached its target and not charging; the start tap is gated
     // (the car would only reject a charge_start here as "complete"). See chargeComplete().
     var complete=chargeComplete(v,charging);
-    g={mode:charging?'charging':(complete?'complete':'soc'), pct:soc, busy:chgBusy, limit:num(v.charge_limit)};
+    g={mode:charging?'charging':(complete?'complete':'soc'), pct:soc, busy:chgBusy, limit:num(v.charge_limit), glyph:(soc==null?'car':null)};
     head=complete?'Charge complete':(v.status||'Idle');
+    if(soc==null) sub='Battery level not reported yet';
     chips=chargeStats(v,charging)+copChip(s)+defrostChip(s);
     if(chgBusy) busyText='Sending command…';
     else if(!complete){ act=toggleCharge; actLabel=charging?'Stop charging':'Start charging'; }
@@ -1379,7 +1380,8 @@ function startOtaUpdate(availVer){
   toast('Starting update…', 'load', 'ota');
   otaInline(otaMiniRing(0, true, 'currentColor') + '<span>starting…</span>', '', 'indet');
   if(typeof syncOtaUi === 'function') syncOtaUi();
-  return requestJsonWithTimeout('/ota/update', { method: 'POST' }, OTA_HTTP_TIMEOUT_MS).then(function(j){
+  var updatePr=otaPrSelection();
+  return requestJsonWithTimeout('/ota/update'+(updatePr?'?pr='+updatePr:''), { method: 'POST' }, OTA_HTTP_TIMEOUT_MS).then(function(j){
     if(!j || j.result !== true){
       var reason = (j && j.reason) || 'update did not start';
       throw new Error(reason);
@@ -1391,18 +1393,15 @@ function startOtaUpdate(availVer){
 }
 
 function loadOtaChangelog(){
-  var ctl = typeof AbortController !== 'undefined' ? new AbortController() : null;
-  var timer = setTimeout(function(){ if(ctl) ctl.abort(); }, OTA_HTTP_TIMEOUT_MS);
-  return fetch('/ota/changelog', {cache: 'no-store', signal: ctl ? ctl.signal : undefined})
-    .then(function(r){
-      clearTimeout(timer);
+  // The notes are optional, but the OTA dialog stays locked (otaPrompting) until this settles. So the
+  // deadline must cover the WHOLE exchange — headers AND body: a device that sends the headers and
+  // then stalls would otherwise keep the flow locked until a network error or a page reload.
+  return timedRequest(function(url,opts){
+    return fetch(url,opts).then(function(r){
       if(!r || !r.ok || r.status === 204) return '';
       return r.text();
-    })
-    .catch(function(){
-      clearTimeout(timer);
-      return '';
     });
+  }, '/ota/changelog', {cache: 'no-store'}, OTA_HTTP_TIMEOUT_MS).catch(function(){ return ''; });
 }
 
 function askOtaInstall(status, changelog){
@@ -1413,7 +1412,8 @@ function askOtaInstall(status, changelog){
   if(verLine) verLine.textContent = 'v' + (status.current || '?') + ' → v' + (status.available || '?');
   var chanEl = $("otaChannel");
   if(chanEl){
-    chanEl.textContent = (status.channel === 'dev' || otaChannel === 'dev') ? 'Development' : 'Release';
+    chanEl.textContent = (status.pr > 0) ? 'PR preview #' + status.pr
+      : (status.channel === 'dev' || otaChannel === 'dev') ? 'Development' : 'Release';
   }
   var list = $("otaChanges");
   var count = 0;
@@ -1493,6 +1493,20 @@ if(typeof document!=='undefined' && typeof document.addEventListener==='function
   if(askIn) askIn.oninput = askValidate;
 }
 
+// The documented `?pr=<N>` page entry point selects a PR preview build for the check and the
+// update. The grammar is the device's own (tk::parse_pr_query): 1-7 digits, no leading zero, and
+// only the FIRST `pr` key counts. Anything else selects the regular channel. Read per call so a
+// navigation is never served from a stale value.
+function otaPrSelection(){
+  var q=(typeof location!=='undefined'&&typeof location.search==='string')?location.search:'';
+  var parts=q.replace(/^\?/,'').split('&');
+  for(var i=0;i<parts.length;i++){
+    var eq=parts[i].indexOf('=');
+    var key=eq<0?parts[i]:parts[i].slice(0,eq);
+    if(key==='pr') return /^[1-9][0-9]{0,6}$/.test(eq<0?'':parts[i].slice(eq+1))?parts[i].slice(eq+1):'';
+  }
+  return '';
+}
 function otaCheck(){
   if(isOtaFlowBusy()) return Promise.resolve();          // a check/update/prompt is already running
   if(!fwFocusId) fwFocusId = 'fwCheckBtn';
@@ -1501,7 +1515,8 @@ function otaCheck(){
   if(typeof syncOtaUi === 'function') syncOtaUi();
   toast('Checking for updates…', 'load', 'ota');
   otaInline(otaMiniRing(0,true,'currentColor'),'','indet');   // checking — spinning ring only, no label
-  var checkUrl='/ota/check?ms='+Date.now();
+  var prSel=otaPrSelection();
+  var checkUrl='/ota/check?'+(prSel?'pr='+prSel+'&':'')+'ms='+Date.now();
   return requestJsonWithTimeout(checkUrl,{},OTA_HTTP_TIMEOUT_MS).then(function(j){
     if(!j||j.started!==true) throw new Error((j&&j.reason)||'check did not start');
     return otaCheckPoll();
