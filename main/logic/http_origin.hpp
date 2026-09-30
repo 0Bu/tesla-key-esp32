@@ -51,12 +51,26 @@ inline std::string_view host_without_port(std::string_view host) {
 // Never use the request's Host header itself as the trust anchor: a DNS-rebinding page controls
 // both Host and Origin and could otherwise make two attacker-owned strings compare equal while the
 // browser connects to this board. Bind browser requests to names the device owns instead.
-inline bool device_host_allowed(std::string_view host, std::string_view device_ipv4) {
+//
+// The device can hold several IPv4 addresses at once: WiFi and Ethernet keep their leases side by
+// side, so after an Ethernet takeover a page that was opened through the still-valid WiFi address
+// is being served by this very board and must keep working. Every non-empty entry of
+// `device_ipv4s` counts as device-owned; an address the board does not hold never does.
+inline bool device_host_allowed(std::string_view host, const std::string_view* device_ipv4s,
+                                size_t device_ipv4_count) {
     const std::string_view name = host_without_port(host);
     if (name.empty()) return false;
-    return ascii_iequal(name, "tesla-key-esp32.local") ||
-           ascii_iequal(name, "tesla-key-esp32") ||
-           (!device_ipv4.empty() && ascii_iequal(name, device_ipv4));
+    if (ascii_iequal(name, "tesla-key-esp32.local") || ascii_iequal(name, "tesla-key-esp32")) {
+        return true;
+    }
+    for (size_t i = 0; i < device_ipv4_count; ++i) {
+        if (!device_ipv4s[i].empty() && ascii_iequal(name, device_ipv4s[i])) return true;
+    }
+    return false;
+}
+
+inline bool device_host_allowed(std::string_view host, std::string_view device_ipv4) {
+    return device_host_allowed(host, &device_ipv4, 1);
 }
 
 // The device API remains intentionally unauthenticated for evcc and other trusted-LAN clients.
@@ -66,13 +80,14 @@ inline bool device_host_allowed(std::string_view host, std::string_view device_i
 // Router-expanded DHCP FQDNs are not device-owned and therefore cannot be allowlisted safely.
 inline bool mutation_origin_allowed(std::string_view host, std::string_view origin,
                                     std::string_view fetch_site,
-                                    std::string_view device_ipv4) {
+                                    const std::string_view* device_ipv4s,
+                                    size_t device_ipv4_count) {
     if (ascii_iequal(fetch_site, "cross-site")) return false;
     // Preserve compatibility only for genuinely headerless clients. Once either browser header
     // is present, Host must be device-owned even though same-origin GETs commonly omit Origin.
     // Otherwise a rebound attacker hostname with Sec-Fetch-Site: same-origin bypasses the gate.
     if (origin.empty() && fetch_site.empty()) return true;
-    if (!device_host_allowed(host, device_ipv4)) return false;
+    if (!device_host_allowed(host, device_ipv4s, device_ipv4_count)) return false;
     if (origin.empty()) return true;
     if (ascii_iequal(origin, "null")) return false;
 
@@ -93,6 +108,12 @@ inline bool mutation_origin_allowed(std::string_view host, std::string_view orig
         return false;
     }
     return authority_matches_host(authority, host, default_port);
+}
+
+inline bool mutation_origin_allowed(std::string_view host, std::string_view origin,
+                                    std::string_view fetch_site,
+                                    std::string_view device_ipv4) {
+    return mutation_origin_allowed(host, origin, fetch_site, &device_ipv4, 1);
 }
 
 inline std::string_view request_path(std::string_view uri) {

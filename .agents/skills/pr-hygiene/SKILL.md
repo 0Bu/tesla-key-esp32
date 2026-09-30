@@ -97,7 +97,8 @@ against the new head.
 by the project hook configuration, refuses to open a PR, push to one, or merge one until its
 `$pr-hygiene` record is uniquely present and stamped with the exact commit being published — the **strictest**
 of the PR gates, since it fires at every one of those checkpoints rather than only create/push
-(`$skill-audit`) or only merge (`$project-review`, conditionally `$feature-docs`). There is no
+(`$skill-audit`) or only merge (`$project-review`, conditionally `$feature-docs` and
+`$vehicle-command-audit`). There is no
 file marker; pass state lives only in the PR body and is parsed by the neutral core, using the
 same CommonMark task-list record mechanism as the other gates (see `$skill-audit`'s *The PR gate*
 section for the exact recognized/rejected command shapes — duplicate, dynamic, hidden, fenced,

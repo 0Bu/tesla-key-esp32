@@ -7,6 +7,7 @@
 #include "platform.hpp"
 #include "logic/ha_identity.hpp"
 #include "logic/mqtt_discovery_registry.hpp"
+#include "logic/mqtt_state_lifecycle.hpp"
 #include "logic/units.hpp"
 #include "logic/link_state.hpp"
 #include "task_config.hpp"
@@ -81,6 +82,11 @@ static const std::string& state_topic(tk::mqtt::StateDomain domain) {
     return s_topic[tk::mqtt::state_domain_index(domain)];
 }
 
+// What the broker currently holds for each retained state topic. Only the mqtt_pub task reads or
+// writes it (publish_state() is its sole user), so it needs no lock. Value-initialised to
+// Unknown: right after a boot the broker may still hold pre-reboot readings.
+static std::array<tk::mqtt::DomainPublishState, tk::mqtt::kStateDomainCount> s_domain_state{};
+
 // ─── Publish helpers ──────────────────────────────────────────────────────────
 static bool pub(const char* topic, const char* payload, bool retain = true) {
     if (!s_client || !topic || !payload) return false;
@@ -102,6 +108,27 @@ static bool pub_json(const std::string& topic, tk::JsonOwner root) {
         [](const char* publish_topic, const char* payload, bool retain) {
             return pub(publish_topic, payload, retain);
         });
+}
+
+// Retained state topics keep their last message until something replaces it. A domain whose cache
+// is not valid must therefore overwrite it once with an empty object (every template renders an
+// absent field as `None`, i.e. unknown) instead of silently going quiet — otherwise Home Assistant
+// presents the last readings as current again after each reconnect while /status already says
+// unknown. The lifecycle decision is host-tested in logic/mqtt_state_lifecycle.hpp.
+static bool clear_state_domain(tk::mqtt::StateDomain domain) {
+    return pub_json(state_topic(domain), tk::mqtt::build_empty_payload());
+}
+
+static tk::mqtt::DomainPublishDecision plan_domain(tk::mqtt::StateDomain domain, bool cache_valid) {
+    return tk::mqtt::decide_domain_publish(cache_valid,
+                                           s_domain_state[tk::mqtt::state_domain_index(domain)]);
+}
+
+// Adopt the planned state only after the publish (or the deliberate skip) succeeded, so a failed
+// enqueue is retried on the next cycle.
+static void commit_domain(tk::mqtt::StateDomain domain,
+                          const tk::mqtt::DomainPublishDecision& step) {
+    s_domain_state[tk::mqtt::state_domain_index(domain)] = step.next;
 }
 
 // ─── HA discovery ─────────────────────────────────────────────────────────────
@@ -145,14 +172,18 @@ static bool publish_discovery() {
 // ─── State publish ────────────────────────────────────────────────────────────
 // Each domain is published only when its cache is valid, and each numeric field
 // only when the car actually reported it (proto3-optional presence flags) — so a
-// value the car never sent stays "unknown" in HA rather than reading a phantom 0.
+// value the car never sent stays "unknown" in HA rather than reading a phantom 0. A domain whose
+// cache is (or becomes) invalid is cleared once with an empty object so the retained readings on
+// the broker cannot outlive the RAM cache they came from.
 static bool publish_state() {
     if (!s_vehicle) return false;
 
     // Charge
     {
         ChargeStateResult cs = s_vehicle->get_cached_charge();
-        if (cs.valid) {
+        const tk::mqtt::DomainPublishDecision step =
+            plan_domain(tk::mqtt::StateDomain::Charge, cs.valid);
+        if (step.action == tk::mqtt::DomainPublishAction::Publish) {
             tk::mqtt::ChargePayload payload;
             payload.has_battery_level = cs.has_battery_level;
             payload.battery_level = cs.battery_level;
@@ -191,12 +222,17 @@ static bool publish_state() {
             if (!pub_json(state_topic(tk::mqtt::StateDomain::Charge),
                           tk::mqtt::build_charge_payload(payload)))
                 return false;
+        } else if (step.action == tk::mqtt::DomainPublishAction::PublishClear) {
+            if (!clear_state_domain(tk::mqtt::StateDomain::Charge)) return false;
         }
+        commit_domain(tk::mqtt::StateDomain::Charge, step);
     }
     // Climate
     {
         ClimateStateResult cl = s_vehicle->get_cached_climate();
-        if (cl.valid) {
+        const tk::mqtt::DomainPublishDecision step =
+            plan_domain(tk::mqtt::StateDomain::Climate, cl.valid);
+        if (step.action == tk::mqtt::DomainPublishAction::Publish) {
             tk::mqtt::ClimatePayload payload;
             payload.has_inside = cl.has_inside;
             payload.inside = cl.inside_temp;
@@ -225,12 +261,17 @@ static bool publish_state() {
             if (!pub_json(state_topic(tk::mqtt::StateDomain::Climate),
                           tk::mqtt::build_climate_payload(payload)))
                 return false;
+        } else if (step.action == tk::mqtt::DomainPublishAction::PublishClear) {
+            if (!clear_state_domain(tk::mqtt::StateDomain::Climate)) return false;
         }
+        commit_domain(tk::mqtt::StateDomain::Climate, step);
     }
     // Drive
     {
         DriveStateResult dr = s_vehicle->get_cached_drive();
-        if (dr.valid) {
+        const tk::mqtt::DomainPublishDecision step =
+            plan_domain(tk::mqtt::StateDomain::Drive, dr.valid);
+        if (step.action == tk::mqtt::DomainPublishAction::Publish) {
             const tk::mqtt::DrivePayload payload{
                 dr.shift_state.empty() ? nullptr : dr.shift_state.c_str(),
                 dr.has_odometer,
@@ -239,12 +280,17 @@ static bool publish_state() {
             if (!pub_json(state_topic(tk::mqtt::StateDomain::Drive),
                           tk::mqtt::build_drive_payload(payload)))
                 return false;
+        } else if (step.action == tk::mqtt::DomainPublishAction::PublishClear) {
+            if (!clear_state_domain(tk::mqtt::StateDomain::Drive)) return false;
         }
+        commit_domain(tk::mqtt::StateDomain::Drive, step);
     }
     // Tires
     {
         TirePressureResult tp = s_vehicle->get_cached_tires();
-        if (tp.valid) {
+        const tk::mqtt::DomainPublishDecision step =
+            plan_domain(tk::mqtt::StateDomain::Tires, tp.valid);
+        if (step.action == tk::mqtt::DomainPublishAction::Publish) {
             const tk::mqtt::TiresPayload payload{
                 tp.has_fl, tp.fl,
                 tp.has_fr, tp.fr,
@@ -255,12 +301,17 @@ static bool publish_state() {
             if (!pub_json(state_topic(tk::mqtt::StateDomain::Tires),
                           tk::mqtt::build_tires_payload(payload)))
                 return false;
+        } else if (step.action == tk::mqtt::DomainPublishAction::PublishClear) {
+            if (!clear_state_domain(tk::mqtt::StateDomain::Tires)) return false;
         }
+        commit_domain(tk::mqtt::StateDomain::Tires, step);
     }
     // Closures
     {
         ClosuresStateResult cz = s_vehicle->get_cached_closures();
-        if (cz.valid) {
+        const tk::mqtt::DomainPublishDecision step =
+            plan_domain(tk::mqtt::StateDomain::Closures, cz.valid);
+        if (step.action == tk::mqtt::DomainPublishAction::Publish) {
             const tk::mqtt::ClosuresPayload payload{
                 cz.has_locked,
                 cz.locked,
@@ -274,7 +325,10 @@ static bool publish_state() {
             if (!pub_json(state_topic(tk::mqtt::StateDomain::Closures),
                           tk::mqtt::build_closures_payload(payload)))
                 return false;
+        } else if (step.action == tk::mqtt::DomainPublishAction::PublishClear) {
+            if (!clear_state_domain(tk::mqtt::StateDomain::Closures)) return false;
         }
+        commit_domain(tk::mqtt::StateDomain::Closures, step);
     }
     // Vehicle reachability / sleep state — taken straight from VehicleController::link_state(),
     // the same source the web UI uses, so the two never drift. AWAKE = fresh live telemetry;
@@ -282,15 +336,22 @@ static bool publish_state() {
     // proven (debounced past the COP flap); IDLE = reachable but not provably asleep yet (we
     // stopped polling to let the car sleep and the flag hasn't confirmed) — published as a
     // distinct value, never a phantom "ASLEEP"; UNREACHABLE = the car answers nothing over BLE
-    // (driven off / out of range / deep sleep). Nothing heard since boot/re-pair ⇒ omit (HA
+    // (driven off / out of range / deep sleep). Nothing heard since boot/re-pair ⇒ cleared (HA
     // shows "unknown").
     {
         // Same mapping the web UI uses, from logic/link_state.hpp (host-tested) so the two
-        // never drift. nullptr (Unknown) ⇒ omit the field (HA shows "unknown").
+        // never drift. nullptr (Unknown) ⇒ the domain is cleared once (HA shows "unknown").
         const char* ss = tk::link_state_mqtt_str(s_vehicle->link_state());
-        if (ss && !pub_json(state_topic(tk::mqtt::StateDomain::Vehicle),
-                            tk::mqtt::build_vehicle_payload(ss)))
-            return false;
+        const tk::mqtt::DomainPublishDecision step =
+            plan_domain(tk::mqtt::StateDomain::Vehicle, ss != nullptr);
+        if (step.action == tk::mqtt::DomainPublishAction::Publish) {
+            if (!pub_json(state_topic(tk::mqtt::StateDomain::Vehicle),
+                          tk::mqtt::build_vehicle_payload(ss)))
+                return false;
+        } else if (step.action == tk::mqtt::DomainPublishAction::PublishClear) {
+            if (!clear_state_domain(tk::mqtt::StateDomain::Vehicle)) return false;
+        }
+        commit_domain(tk::mqtt::StateDomain::Vehicle, step);
     }
     // Device diagnostics
     {

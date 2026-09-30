@@ -914,6 +914,7 @@ def require_mqtt_production_seams(source: str) -> None:
         "tk::mqtt::build_tires_payload",
         "tk::mqtt::build_closures_payload",
         "tk::mqtt::build_vehicle_payload",
+        "tk::mqtt::build_empty_payload",
         "tk::mqtt::build_device_payload",
     )
     for token in required:
@@ -986,6 +987,7 @@ def require_mqtt_factory_inventory(payloads: str, production: str, tests: str) -
         "pub_json(state_topic(tk::mqtt::StateDomain::Tires),tk::mqtt::build_tires_payload(payload))",
         "pub_json(state_topic(tk::mqtt::StateDomain::Closures),tk::mqtt::build_closures_payload(payload))",
         "pub_json(state_topic(tk::mqtt::StateDomain::Vehicle),tk::mqtt::build_vehicle_payload(ss))",
+        "pub_json(state_topic(domain),tk::mqtt::build_empty_payload())",
         "pub_json(state_topic(tk::mqtt::StateDomain::Device),tk::mqtt::build_device_payload(payload))",
     )
     for call in expected_pub_json:
@@ -2172,18 +2174,30 @@ def require_ping_probe_contract(header: str, generation_header: str,
 
     gateway = function_body_in(net_source, "gateway_reachable")
     for token in (
-        "const bool ok = result == PingProbeResult::Reply;",
-        "if (ok) gw_baseline(s_kind.load()).store(true);",
-        "return result == PingProbeResult::NoReply ? false : true;",
+        "if (result == PingProbeResult::Reply) gw_baseline(kind).store(true);",
+        "out.reachable = result != PingProbeResult::NoReply;",
+        # Transport-attribution seams (F12): the probe is bound to the sampled netif, and a verdict
+        # is discarded when the default route moved while the blocking echo was in flight.
+        "cfg.interface   = static_cast<uint32_t>(esp_netif_get_netif_impl_index(netif));",
+        "if (kind == NetLink::None || s_kind.load() != kind || net_active_netif() != netif) return out;",
+        "if (s_kind.load() != kind || net_active_netif() != netif) return out;",
     ):
         if token not in gateway:
             raise AssertionError(f"gateway unknown-vs-failure policy missing {token!r}")
-    require_before("gateway reply establishes baseline", gateway,
-                   "const bool ok = result == PingProbeResult::Reply;",
-                   "if (ok) gw_baseline(s_kind.load()).store(true);")
-    require_before("gateway baseline before reset verdict", gateway,
-                   "if (ok) gw_baseline(s_kind.load()).store(true);",
-                   "return result == PingProbeResult::NoReply ? false : true;")
+    require_before("gateway reply establishes baseline for the probed transport", gateway,
+                   "const PingProbeResult result = ping_probe_run(",
+                   "if (result == PingProbeResult::Reply) gw_baseline(kind).store(true);")
+    require_before("gateway baseline before transport-change discard", gateway,
+                   "if (result == PingProbeResult::Reply) gw_baseline(kind).store(true);",
+                   "if (s_kind.load() != kind || net_active_netif() != netif) return out;")
+    require_before("gateway transport-change discard before reset verdict", gateway,
+                   "if (s_kind.load() != kind || net_active_netif() != netif) return out;",
+                   "out.reachable = result != PingProbeResult::NoReply;")
+    if "gw_baseline(s_kind.load())" in net_source or "gw_baseline(net_kind())" in net_source:
+        raise AssertionError("gateway baseline must be indexed by the PROBED transport, not the current one")
+    recover = function_body_in(net_source, "net_recover")
+    if "if (s_kind.load() != sampled_kind) {" not in recover or "switch (sampled_kind)" not in recover:
+        raise AssertionError("net_recover must act only on the transport that was probed")
 
 
 def require_ota_fetch_contract(ota_source: str, ota_logic: str,
@@ -4311,6 +4325,7 @@ def self_test_canaries(tasks: set[str], callbacks: set[str]) -> None:
         "tk::mqtt::build_tires_payload",
         "tk::mqtt::build_closures_payload",
         "tk::mqtt::build_vehicle_payload",
+        "tk::mqtt::build_empty_payload",
         "tk::mqtt::build_device_payload",
     ):
         mutated_mqtt = mqtt_source.replace(token, "fixture_mqtt_bypass", 1)
@@ -4914,8 +4929,38 @@ def self_test_canaries(tasks: set[str], callbacks: set[str]) -> None:
             "gateway unknown treated as failure",
             ping_header, ping_generation,
             net_source.replace(
-                "return result == PingProbeResult::NoReply ? false : true;",
-                "return result == PingProbeResult::Reply;",
+                "out.reachable = result != PingProbeResult::NoReply;",
+                "out.reachable = result == PingProbeResult::Reply;",
+                1,
+            ),
+            syslog_source,
+        ),
+        (
+            "gateway baseline credited to the current transport",
+            ping_header, ping_generation,
+            net_source.replace(
+                "if (result == PingProbeResult::Reply) gw_baseline(kind).store(true);",
+                "if (result == PingProbeResult::Reply) gw_baseline(s_kind.load()).store(true);",
+                1,
+            ),
+            syslog_source,
+        ),
+        (
+            "gateway probe not bound to the sampled netif",
+            ping_header, ping_generation,
+            net_source.replace(
+                "cfg.interface   = static_cast<uint32_t>(esp_netif_get_netif_impl_index(netif));",
+                "",
+                1,
+            ),
+            syslog_source,
+        ),
+        (
+            "gateway verdict kept after a transport change",
+            ping_header, ping_generation,
+            net_source.replace(
+                "    if (s_kind.load() != kind || net_active_netif() != netif) return out;\n    out.usable = true;",
+                "    out.usable = true;",
                 1,
             ),
             syslog_source,

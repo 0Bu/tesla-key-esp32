@@ -48,6 +48,23 @@ enum class SleepState : uint8_t {
     Awake = 2,
 };
 
+// VCSEC VehicleSleepStatus_E is three-valued: UNKNOWN(0), AWAKE(1), ASLEEP(2). A frame reporting
+// UNKNOWN proves neither state, so it must not be folded into Awake (upstream tesla-ble v5.2.0
+// treats every value except ASLEEP as awake; ADR-0005 R1 requires an explicit AWAKE).
+inline constexpr SleepState sleep_state_from_vcsec(bool reported_awake,
+                                                   bool reported_asleep) noexcept {
+    return reported_asleep ? SleepState::Asleep
+                           : (reported_awake ? SleepState::Awake : SleepState::Unknown);
+}
+
+// Does a VCSEC VehicleStatus confirm the wake a queued command is waiting for? Only an explicit
+// AWAKE, or a status carrying closureStatuses (upstream's wake-progress signal), does. An UNKNOWN
+// frame must not release the wait early.
+inline constexpr bool vcsec_status_confirms_wake(SleepState reported,
+                                                 bool has_closure_statuses) noexcept {
+    return reported == SleepState::Awake || has_closure_statuses;
+}
+
 enum class CommandState : uint8_t {
     Idle = 0,
     EnsuringVcsec,

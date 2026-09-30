@@ -6,8 +6,8 @@
     "esp32": {
       "memoryModel": "split",
       "staticCapacity": 124580,
-      "maxStaticUsed": 79168,
-      "maxBss": 55080,
+      "maxStaticUsed": 79176,
+      "maxBss": 55088,
       "iramCapacity": 131072,
       "maxIramUsed": 115559,
       "maxUnsignedApp": 1638400,
@@ -17,8 +17,8 @@
     "esp32s3": {
       "memoryModel": "unified",
       "staticCapacity": 341760,
-      "maxStaticUsed": 167207,
-      "maxBss": 51128,
+      "maxStaticUsed": 167215,
+      "maxBss": 51136,
       "iramCapacity": 16384,
       "maxIramUsed": 16384,
       "maxUnsignedApp": 1703936,
@@ -28,8 +28,8 @@
     "esp32c3": {
       "memoryModel": "unified",
       "staticCapacity": 321296,
-      "maxStaticUsed": 159340,
-      "maxBss": 52304,
+      "maxStaticUsed": 159348,
+      "maxBss": 52312,
       "iramCapacity": 0,
       "maxIramUsed": 0,
       "maxUnsignedApp": 1769472,
@@ -39,8 +39,8 @@
     "esp32c6": {
       "memoryModel": "unified",
       "staticCapacity": 452112,
-      "maxStaticUsed": 195134,
-      "maxBss": 56416,
+      "maxStaticUsed": 195142,
+      "maxBss": 56424,
       "iramCapacity": 0,
       "maxIramUsed": 0,
       "maxUnsignedApp": 1966080,

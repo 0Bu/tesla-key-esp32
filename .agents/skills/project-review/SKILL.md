@@ -556,7 +556,7 @@ what each must stay true to:
 - **`$pr-hygiene`** screens the PR title/body, commit messages and touched documentation for
   personal/private information (LAN IPs, MAC addresses, VINs, WiFi network names, hostnames,
   emails) and for content not written in English. Re-verify it against
-  `tools/agent-hooks/require-pr-gates.sh`: it is the **fourth** PR gate and the strictest — it
+  `tools/agent-hooks/require-pr-gates.sh`: it is the strictest of the five PR gates — it
   fires at PR creation, every push, **and** merge, unlike `$skill-audit` (create/push only) or
   `$project-review`/`$feature-docs` (merge only) — and, unlike `$skill-audit ⊂ $project-review`,
   neither this review nor `$skill-audit` establishes its readiness on their own; confidentiality
@@ -570,8 +570,9 @@ what each must stay true to:
   `serial-port-release.mjs`, `web-installer.mjs`, `docs/vendor/`), and
   `.github/workflows/{build,signed-pr-preview,pr-preview-cleanup,pr-policy,bench-acceptance}.yml`, plus the cumulative
   Release/Pages classifier `scripts/release-relevance.sh`.
-  Confirm all four gates fail closed when `pr-gate-lib.sh` is missing or incomplete. Keep its
-  gate mechanics aligned with the
+  Confirm all five gates (the unconditional `$skill-audit`, `$project-review` and `$pr-hygiene`
+  plus the conditional `$feature-docs` and `$vehicle-command-audit`) fail closed when
+  `pr-gate-lib.sh` is missing or incomplete. Keep its gate mechanics aligned with the
   three unconditional PR gates and with `$skill-audit`'s corresponding sibling entry. Bash matching
   is centralized in `gate_bash_actions`: wrappers/path-qualified commands and compound actions
   must be recognised, while every create/push/merge must be standalone so no earlier segment can
@@ -589,6 +590,14 @@ what each must stay true to:
   `--git-dir`, `GIT_DIR`, `GIT_CONFIG_*`, env cwd, etc.), path-qualified executables and
   foreign/multiple refspecs before trusting the stamp. Confirm PR-create checks only the one exact
   body/body-file (never title/other args), and that the sibling/agent list still matches the tree.
+- **`$ci-heal`** monitors post-push CI and reports merge readiness (`scripts/ci-heal.sh`). Re-verify
+  that it never commits, that it writes a gate record only from an explicit
+  `--attest <gate>=<evidence>` for an independent review of the exact head (a syntax check is not a
+  `$skill-audit`), that stamping, `READY FOR MERGE` and `--auto-merge` require green CI on the PR
+  head, local `HEAD` equal to it, `MERGEABLE`, an unchanged head immediately before the body edit
+  and the same stdin relevance predicates and GitHub changed-file list as
+  `tools/agent-hooks/require-pr-gates.sh`, and that `scripts/ci-heal.sh --self-test` drives the real
+  red and green flows rather than only argument parsing.
 - **`$device-diag`** is the read-only, cache-only live-board triage lens (`/status` + `/diag` →
   symptom→cause table); it diagnoses and hands off, never flashes or commands the car. Re-verify the
   `/status` keys it reads against the field contract in `main/logic/status_model.hpp` (the key
@@ -613,9 +622,11 @@ what each must stay true to:
   manifest/firmware-base URLs (`main/Kconfig.projbuild`), the 4-chipFamily set + per-part offsets
   (`scripts/build-pages.sh`/`scripts/check-release-pages-bytes.py`), the suffix map
   (`ota_update.cpp`/`logic/target.hpp`/`ci-sign-artifacts.sh`/`build-pages.sh`), and the `/ota/*` +
-  `/api/proxy/1/version` endpoints. Confirm `workflow_dispatch` remains build/test-only and cannot
-  sign, release or republish Pages, old runs fail once main or the newest valid tag advances, and
-  eligibility is rechecked immediately before external mutations. Complementary to `$ship`
+  `/api/proxy/1/version` endpoints. Confirm a `workflow_dispatch` without `release: true` remains build/test-only
+  (test mode), a `main` push publishes only the Dev channel (`gh-pages:/dev/`), only an explicit
+  `release: true` dispatch on current `main` can sign the stable Release and republish root Pages,
+  old runs (including a re-run of an already superseded Dev deploy job) fail once main or the
+  newest valid tag advances, and eligibility is rechecked immediately before external mutations. Complementary to `$ship`
   (cut/flash a release), not overlapping.
 - **`$usb-recovery`** is the no-build emergency reflash and requires explicit user authorization:
   USB-write only an exact signed Release asset byte-matched to its source-SHA-bound main artifact,

@@ -978,48 +978,87 @@ static std::atomic<bool>& gw_baseline(NetLink k) {
     return s_gw_ever_reachable[static_cast<int>(k)];
 }
 
-// Blocking ICMP echo to the current default gateway. True if ≥1 reply came back. Returns true
-// (no false alarm) when the probe can't even be set up — the watchdog must act only on a
-// PROVEN failure to reach a gateway that DOES answer ICMP, never on its own inability to
-// measure. The per-cycle esp_ping session is a deliberate, accepted minor cost (a transient
-// ~2.5 KB ping task ~1.5 s out of every 30 s; same-size alloc/free, no monotonic growth).
-static bool gateway_reachable() {
-    if (!s_wd.done) return true;  // watchdog not fully initialised yet
+// One probe verdict together with the transport it measured. The blocking echo takes seconds and a
+// WiFi→Ethernet takeover can happen inside it, so every verdict — reply baseline, failure count and
+// the recovery action — must be attributed to the transport whose gateway was actually pinged, never
+// to whichever transport is current when the probe returns.
+struct GatewaySample {
+    NetLink kind{NetLink::None};  // the transport this sample belongs to
+    bool    usable{false};        // false: no evidence either way (not measurable, or the transport changed mid-probe)
+    bool    reachable{true};      // meaningful only when usable; false is a PROVEN failure to reach the gateway
+};
 
+// Blocking ICMP echo to the default gateway of the ACTIVE transport, sent out of that transport's
+// netif. `reachable` is true if ≥1 reply came back, and also when the probe can't even be set up —
+// the watchdog must act only on a PROVEN failure to reach a gateway that DOES answer ICMP, never
+// on its own inability to measure. The per-cycle esp_ping session is a deliberate, accepted minor
+// cost (a transient ~2.5 KB ping task ~1.5 s out of every 30 s; same-size alloc/free, no monotonic
+// growth).
+static GatewaySample gateway_reachable() {
+    GatewaySample out;
+    if (!s_wd.done) return out;  // watchdog not fully initialised yet
+
+    // Coherent snapshot of (transport, netif). recompute_link() stores the netif before the kind,
+    // so a kind that is stable across the netif read pairs with that netif; anything else means a
+    // takeover is in progress and this cycle proves nothing.
+    const NetLink kind = s_kind.load();
     esp_netif_t* netif = net_active_netif();
+    if (kind == NetLink::None || s_kind.load() != kind || net_active_netif() != netif) return out;
+    out.kind = kind;
+
     esp_netif_ip_info_t ip{};
-    if (!netif || esp_netif_get_ip_info(netif, &ip) != ESP_OK || ip.gw.addr == 0)
-        return false;  // no gateway/lease → not reachable
+    if (!netif || esp_netif_get_ip_info(netif, &ip) != ESP_OK || ip.gw.addr == 0) {
+        out.usable = true;
+        out.reachable = false;  // no gateway/lease → not reachable
+        return out;
+    }
 
     char gw[16];
     esp_ip4addr_ntoa(&ip.gw, gw, sizeof(gw));
     ip_addr_t target{};
-    if (!ipaddr_aton(gw, &target))
-        return true;  // unparseable → don't false-alarm
+    if (!ipaddr_aton(gw, &target)) {
+        out.usable = true;  // unparseable → don't false-alarm
+        return out;
+    }
 
     esp_ping_config_t cfg = ESP_PING_DEFAULT_CONFIG();
     cfg.target_addr = target;
     cfg.count       = kWdPingCount;
     cfg.timeout_ms  = kWdPingTimeoutMs;
     cfg.interval_ms = 250;
+    // Send from the netif whose gateway was read above. Without this lwIP routes by the CURRENT
+    // default route, so a takeover mid-probe would ping the other transport's network while the
+    // result is credited to this one.
+    cfg.interface   = static_cast<uint32_t>(esp_netif_get_netif_impl_index(netif));
 
     const PingProbeResult result = ping_probe_run(
         s_wd, cfg,
         pdMS_TO_TICKS(kWdPingCount * (kWdPingTimeoutMs + 250) + 2000),
         pdMS_TO_TICKS(2000));
+    // A reply proves THIS transport's gateway answers ICMP, whatever happened afterwards.
+    if (result == PingProbeResult::Reply) gw_baseline(kind).store(true);
+    // A verdict about a transport that lost the default route during the probe is not evidence
+    // about the transport that holds it now (e.g. Ethernet must not be judged on WiFi's gateway).
+    if (s_kind.load() != kind || net_active_netif() != netif) return out;
+    out.usable = true;
     // Only an exact completed generation with zero replies is evidence of failure. Setup failure
     // or a quarantined late callback remains "unknown", so the watchdog cannot false-alarm.
-    const bool ok = result == PingProbeResult::Reply;
-    if (ok) gw_baseline(s_kind.load()).store(true);
-    return result == PingProbeResult::NoReply ? false : true;
+    out.reachable = result != PingProbeResult::NoReply;
+    return out;
 }
 
 // Force the ACTIVE transport to re-establish its link. WiFi drops the ghost association and
 // the event handler reconnects with the known-good credentials (s_ever_up is true by
 // definition here, so we must not call esp_wifi_connect() ourselves — that would race the
 // handler into a double-connect).
-static void net_recover() {
-    switch (s_kind.load()) {
+static void net_recover(NetLink sampled_kind) {
+    // The verdict belongs to the transport that was probed. If the default route moved since, the
+    // current transport has produced no evidence and must not be reset for the old one's failure.
+    if (s_kind.load() != sampled_kind) {
+        ESP_LOGW(TAG, "watchdog: transport changed since the failed probe — not recovering");
+        return;
+    }
+    switch (sampled_kind) {
         case NetLink::Wifi:
             ESP_LOGW(TAG, "watchdog: ghost association — forcing WiFi re-association");
             esp_wifi_disconnect();
@@ -1049,6 +1088,7 @@ static void net_recover() {
 static void net_watchdog_task(void*) {
     try {
       tk::LinkWatch watch{};
+      NetLink watched_kind = NetLink::None;
       for (;;) {
         vTaskDelay(pdMS_TO_TICKS(kWdPeriodS * 1000));
 
@@ -1056,10 +1096,25 @@ static void net_watchdog_task(void*) {
         // recovery — there is nothing to detect (the ghost case is link=up by definition) and
         // logging every period would fill the 16 KB /diag ring across a long router outage.
         const bool up = net_is_up();
-        const bool gw = up && gateway_reachable();
+        GatewaySample sample;
+        if (up) sample = gateway_reachable();
+        if (up && !sample.usable) {
+            // Not measurable, or the transport changed during the probe: neither a reply nor a
+            // failure. Drop the failure streak — it described a transport that may be gone.
+            watch = tk::LinkWatch{};
+            watched_kind = NetLink::None;
+            continue;
+        }
+        // A failure streak belongs to one transport generation; a switch starts a new streak.
+        if (sample.kind != watched_kind) {
+            watch = tk::LinkWatch{};
+            watched_kind = sample.kind;
+        }
+        const bool gw = up && sample.reachable;
 
-        // The baseline belongs to the transport being probed, not to the boot.
-        const bool gw_ever = gw_baseline(net_kind()).load();
+        // The baseline belongs to the transport that was probed, not to the boot and not to
+        // whichever transport is current now.
+        const bool gw_ever = gw_baseline(sample.kind).load();
 
         switch (tk::watch_step(watch, up, gw, gw_ever)) {
             case tk::WatchAction::Idle:
@@ -1073,7 +1128,7 @@ static void net_watchdog_task(void*) {
                               "re-establish");
                 break;
             case tk::WatchAction::Recover:
-                net_recover();
+                net_recover(sample.kind);
                 break;
         }
       }
