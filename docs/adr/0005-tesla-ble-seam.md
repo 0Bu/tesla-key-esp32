@@ -93,7 +93,7 @@ The native BLE orchestration layer is implemented across:
 - `main/logic/command_result.hpp`: Normative `is_nominal_already_set()` outcome evaluation.
 - `main/vehicle_ctrl.{hpp,cpp}`, `main/vehicle_commands.cpp`, `main/vehicle_telemetry.cpp`, `main/vehicle_pairing.cpp`: Direct integration with `TeslaBLE::Client`.
 - Native transactional key generation: `tk::regenerate_private_key()` in `main/logic/key_rotation.hpp` (2048 B PEM export, fail-closed rollback), called by `regenerate_key_native_()` in `main/vehicle_pairing.cpp`.
-- `test/test_tesla_ble_harness.cpp` (`scripts/test-tesla-ble-harness.sh`, run in the CI `logic-harness` job) exercises the TX framing helpers, `tk::regenerate_private_key()` and the protocol-vector known answers (V1) against the real patched tesla-ble v5.2.0, Nanopb and the exact Mbed TLS 4.1 / TF-PSA-Crypto commit that ESP-IDF v6.1 pins.
+- `test/test_tesla_ble_harness.cpp` (`scripts/test-tesla-ble-harness.sh`, run in the CI `logic-test` job) exercises the TX framing helpers, `tk::regenerate_private_key()` and the protocol-vector known answers (V1) against the real patched tesla-ble v5.2.0, Nanopb and the exact Mbed TLS 4.1 / TF-PSA-Crypto commit that ESP-IDF v6.1 pins.
 
 With this architecture in place, patches 0001, 0002, 0003, and the `vehicle.cpp` portion of 0005 were retired. The active patch series in `patches/tesla-ble/` consists strictly of:
 1. `0004-drop-unused-parental-controls-actions.patch` (trim unused Nanopb message descriptors for target size budget)
