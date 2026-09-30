@@ -159,8 +159,13 @@ changed_since_release() {
 # Print a source SHA only when ALL dev authorities agree:
 #   * gh-pages dev/manifest.json identity (layout/version/sourceSha),
 #   * the same identity from the live URL returned by the repository Pages API (/dev/manifest.json),
-#   * and ancestry of that source SHA in the current main snapshot.
-# Any missing, stale or unreadable authority fails so the caller can fall back to the Release baseline.
+#   * ancestry of that source SHA in the current main snapshot,
+#   * and every one of the 16 served firmware parts byte-identical to the size/SHA-256 the live
+#     manifest declares (scripts/check-dev-pages.py --verify-live).
+# A missing, stale or unreadable authority returns 2 so the caller can fall back to the Release
+# baseline. Return 3 is different: the identities AGREE but the served bytes do not match their own
+# manifest (an old or damaged binary behind a current manifest). That channel is a known-broken
+# state, not merely an unknown one, so the caller must keep the reconciliation open (fail closed).
 find_published_dev_baseline() {
   local repo_root="$1" current_sha="$2" repository manifest identity source_sha version
   local pages_json live_base live_url live_manifest live_identity live_source live_version
@@ -207,6 +212,12 @@ find_published_dev_baseline() {
   live_version="${live_identity#*$'\t'}"
   [[ "$live_source" == "$source_sha" && "$live_version" == "$version" ]] || return 2
 
+  # Identity alone proves only that the manifest was published, not that the binaries behind it
+  # are. Compare every served part with what the manifest declares.
+  "$python_cmd" "$contract_root/scripts/check-dev-pages.py" --verify-live \
+    --pages-base-url "${live_base%/}" --version "$version" --source-sha "$source_sha" \
+    --attempts 1 --interval 0 --timeout 20 >/dev/null || return 3
+
   printf '%s\n' "$source_sha"
 }
 
@@ -216,7 +227,14 @@ changed_since_dev() {
     echo "invalid current source SHA: $current_sha" >&2
     return 2
   }
-  if ! baseline="$(find_published_dev_baseline "$repo_root" "$current_sha")"; then
+  local baseline_rc=0
+  baseline="$(find_published_dev_baseline "$repo_root" "$current_sha")" || baseline_rc=$?
+  if [[ "$baseline_rc" -eq 3 ]]; then
+    echo "dev channel serves bytes that do not match its manifest; reconciliation stays open" >&2
+    printf 'yes\n'
+    return 0
+  fi
+  if [[ "$baseline_rc" -ne 0 ]]; then
     echo "no authoritative dev/Pages baseline; falling back to Release/Pages baseline" >&2
     changed_since_release "$repo_root" "$current_sha"
     return $?
@@ -344,6 +362,13 @@ self_test() {
 #!/usr/bin/env bash
 set -eu
 case "${1:-}" in
+  */check-dev-pages.py)
+    # Same wiring fixture for the dev channel: the validator owns the byte-level mutations.
+    if [[ "${GH_FAKE_DEV_BYTES_STALE:-0}" == 1 ]]; then
+      exit 1
+    fi
+    exit 0
+    ;;
   */check-published-release.py)
     # The validator owns byte-level mutation tests. This wiring fixture makes a partial live
     # snapshot observable without opening a real HTTPS listener in the shell self-test.
@@ -622,6 +647,20 @@ PYTHON_WRAPPER
     GH_FAKE_LIVE="$fake_live" GH_FAKE_LIVE_DEV="$fake_live_dev" changed_since_dev "$tmp" "$sha_d")"
   [[ "$got" == no ]] || {
     echo "docs-only D against published dev baseline expected no, got: $got" >&2; return 1;
+  }
+
+  # A dev channel whose manifest identity is current but whose served bytes do not match that
+  # manifest is a known-broken publication: a docs-only push must NOT count it as a baseline and
+  # skip the repair. It must not silently fall back to the Release baseline either, which would
+  # only happen to say yes here; the answer has to be yes because of the broken channel itself.
+  got="$(PATH="$fakebin:$PATH" GITHUB_REPOSITORY=owner/repo GH_FAKE_RELEASE="$fake_release" \
+    GH_FAKE_LIVE="$fake_live" GH_FAKE_LIVE_DEV="$fake_live_dev" GH_FAKE_DEV_BYTES_STALE=1 \
+    changed_since_dev "$tmp" "$sha_d" 2>"$tmp/dev-stale.err")"
+  [[ "$got" == yes ]] || {
+    echo "dev channel with stale served bytes was accepted as a baseline: $got" >&2; return 1;
+  }
+  grep -q "reconciliation stays open" "$tmp/dev-stale.err" || {
+    echo "stale dev bytes fell back to the Release baseline instead of failing closed" >&2; return 1;
   }
 
   # 3. New firmware commit E on main should be relevant for dev

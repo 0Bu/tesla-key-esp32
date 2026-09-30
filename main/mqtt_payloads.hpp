@@ -223,6 +223,14 @@ inline JsonOwner build_closures_payload(const ClosuresPayload& in) noexcept {
     return json.finish();
 }
 
+// The empty state object. Published over a retained state topic whose cache is no longer valid:
+// every presence-aware template (logic/ha_templates.hpp) renders an absent field as `None`, so HA
+// moves the whole domain to unknown instead of keeping the last retained readings.
+inline JsonOwner build_empty_payload() noexcept {
+    JsonBuilder json;
+    return json.finish();
+}
+
 inline JsonOwner build_vehicle_payload(const char* sleep_status) noexcept {
     if (!sleep_status) return {};
     JsonBuilder json;

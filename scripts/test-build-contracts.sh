@@ -24,6 +24,7 @@ python3 "$repo_root/scripts/check-dev-pages.py" --self-test
 python3 "$repo_root/scripts/generate-ota-changelog.py" --self-test
 python3 "$repo_root/scripts/check-stack-usage.py" --self-test
 python3 "$repo_root/scripts/check-build-gate-contract.py" --self-test
+bash "$repo_root/scripts/idf-docker.sh" --self-test 2>/dev/null
 temp="$(mktemp -d)"
 trap 'rm -rf "$temp"' EXIT
 stage="$temp/fw"

@@ -1,6 +1,6 @@
 ---
 name: ship
-description: Coordinate an explicitly authorized PR merge, release-producing main run, and one explicitly chosen delivery path (USB flash or OTA) for tesla-key-esp32. Never infer merge, release, flash, OTA, push, or PR-edit authority from a review, approval, or another step; confirm each mutation scope separately and use only provenance-bound signed artifacts while preserving NVS.
+description: Coordinate an explicitly authorized PR merge, the resulting main build run (Dev channel, or a separately authorized manual stable-Release run), and one explicitly chosen delivery path (USB flash or OTA) for tesla-key-esp32. Never infer merge, release, flash, OTA, push, or PR-edit authority from a review, approval, or another step; confirm each mutation scope separately and use only provenance-bound signed artifacts while preserving NVS.
 ---
 
 > **Canonical runner-neutral skill.** Read [`AGENTS.md`](../../../AGENTS.md) before acting.
@@ -16,8 +16,9 @@ This skill can coordinate several independently authorized stages. It deploys th
 CI-stamped release version), so the device's OTA trust anchor stays intact.
 
 > **Hard authorization boundary.** Before acting, obtain explicit user approval for every requested
-> mutation: (1) merge of the exact numeric PR/head, (2) the firmware-release/signing publication
-> side effect when the diff is release-relevant, (3) exactly one delivery path—USB flash to an
+> mutation: (1) merge of the exact numeric PR/head, (2) the protected signing/publication
+> side effect of the main build (Dev-channel publication on a firmware-relevant push; the stable
+> Release only through a separately authorized manual `workflow_dispatch` run with `release: true`), (3) exactly one delivery path—USB flash to an
 > identified board or OTA to an identified device—and (4) any live verification. Approval for
 > review, CI observation, commit, push, PR approval, or one delivery method grants none of the
 > others. This skill never commits, pushes, edits/stamps a PR body, creates a release directly,
@@ -79,9 +80,16 @@ echo "Merged commit: $MERGE_SHA"
 set -euo pipefail
 # Select by the exact merge SHA. Absence or multiple matching runs is not permission to guess;
 # wait for Actions to enqueue the run, or set an explicitly reviewed run id and repeat the checks.
-RUN_IDS=$(gh run list --workflow build --branch main --commit "$MERGE_SHA" --event push --limit 20 \
+# A merge publishes the Dev channel from the main PUSH run. A stable Release exists for this commit
+# only if a separately authorized manual `workflow_dispatch` run of `build` with `release: true`
+# was made for it; select that run explicitly with CHANNEL_RUN=workflow_dispatch.
+CHANNEL_RUN="${CHANNEL_RUN:-push}"
+[[ "$CHANNEL_RUN" =~ ^(push|workflow_dispatch)$ ]] || {
+  echo "REFUSING: CHANNEL_RUN must be push or workflow_dispatch" >&2; exit 1;
+}
+RUN_IDS=$(gh run list --workflow build --branch main --commit "$MERGE_SHA" --event "$CHANNEL_RUN" --limit 20 \
   --json databaseId,headSha,event \
-  --jq ".[] | select(.headSha == \"$MERGE_SHA\" and .event == \"push\") | .databaseId")
+  --jq ".[] | select(.headSha == \"$MERGE_SHA\" and .event == \"$CHANNEL_RUN\") | .databaseId")
 [ "$(printf '%s\n' "$RUN_IDS" | awk 'NF {n++} END {print n+0}')" -eq 1 ] || {
   echo "REFUSING: expected exactly one build run for merge SHA $MERGE_SHA" >&2; exit 1;
 }
@@ -91,9 +99,13 @@ gh run watch "$run_id" --exit-status    # blocks until done, fails on a red run 
 
 A red run: stop, report the failing job (`gh run view "$run_id" --log-failed | tail -40`).
 
-**Release is conditional:** CI cuts a release/new version only when firmware-relevant files
-changed (`Detect firmware-relevant changes` step). A docs/config-only merge may still rebuild a
-signed artifact at the existing version, but it does not create new firmware to deploy; say so
+**Publication is conditional and channel-specific.** Only a firmware-relevant push (the `firmware`
+output of the `build` job) signs and publishes anything, and a push run does so in `dev` mode: the
+signed build goes to `gh-pages:/dev/` with a `X.Y.Z-dev.N` version, and no GitHub Release or root
+Pages change is produced. The stable Release and root Pages come exclusively from a manually
+dispatched `build` run with `release: true` on current `main`; that needs its own explicit user
+authorization and is never started by this skill (select it here with
+`CHANNEL_RUN=workflow_dispatch`). A docs/config-only merge produces no firmware to deploy; say so
 and stop instead of flashing an unchanged rebuild.
 
 ## 3. Download the signed image
@@ -139,6 +151,20 @@ VERSION=$(sed -n 's/^display_version=//p' "$META")
   && [ "$ART" = "tesla-key-esp32-$VERSION-$RUN_SHA" ] || {
   echo "REFUSING: signed artifact name is not bound to metadata version and run SHA" >&2; exit 1;
 }
+# The channel follows from the selected run and version: a push run is the Dev channel
+# (X.Y.Z-dev.N); the stable channel is valid only for the manual release run that tagged exactly
+# this commit. A newest-Release lookup is never a substitute for this binding.
+if [[ "$VERSION" == *-* ]]; then CHANNEL=dev; else CHANNEL=release; fi
+{ [ "$CHANNEL_RUN" = push ] && [ "$CHANNEL" = dev ]; } \
+  || { [ "$CHANNEL_RUN" = workflow_dispatch ] && [ "$CHANNEL" = release ]; } || {
+  echo "REFUSING: run event $CHANNEL_RUN does not match version channel $CHANNEL" >&2; exit 1;
+}
+if [ "$CHANNEL" = release ]; then
+  git fetch --tags -q
+  [ "$(git rev-parse "v$VERSION^{commit}")" = "$RUN_SHA" ] || {
+    echo "REFUSING: release tag v$VERSION does not resolve to the merged commit" >&2; exit 1;
+  }
+fi
 ```
 
 Per target use `tesla-key-esp32<sfx>.bin` — suffix `""` (esp32) / `-s3` / `-c3` / `-c6`.
@@ -207,10 +233,13 @@ board with no auto-reset needs BOOT held + `--before no-reset`. Port selection: 
 ### Explicitly selected OTA delivery
 
 Do not choose OTA as a fallback or infer it from release/merge approval. Only run this branch after
-the user explicitly authorizes OTA to the identified device. The same CI run publishes the manifest
-through the sole branch-backed `gh-pages:/` authority and accepts the live bytes against the
-immutable Release. The check is asynchronous, so bind its completed
-status to the artifact's exact `VERSION` before authorizing the POST. A stale/different manifest,
+the user explicitly authorizes OTA to the identified device. The selected run publishes the manifest
+through the sole branch-backed Pages authority — `gh-pages:/dev/` for the Dev channel, or
+`gh-pages:/` accepted against the immutable Release for the stable channel — and the device sees it
+only while its configured OTA channel matches (`/ota/status` reports `channel` as `dev` or
+`release`). Changing the device's channel is a separate configuration change that needs its own
+approval. The check is asynchronous, so bind its completed status to the artifact's exact `VERSION`
+and `CHANNEL` before authorizing the POST. A stale/different manifest,
 an error, an unexpected state or a timeout is a hard stop:
 
 ```bash
@@ -240,9 +269,9 @@ while (( SECONDS < CHECK_DEADLINE )); do
       echo "REFUSING: OTA check failed: $(printf '%s' "$OTA_JSON" | jq -r .message)" >&2
       exit 1 ;;
     idle)
-      printf '%s' "$OTA_JSON" | jq -e --arg v "$VERSION" \
-        '.update_available == true and .available == $v' >/dev/null || {
-        echo "REFUSING: OTA manifest is not an available update for exact version $VERSION" >&2
+      printf '%s' "$OTA_JSON" | jq -e --arg v "$VERSION" --arg c "$CHANNEL" \
+        '.update_available == true and .available == $v and .channel == $c' >/dev/null || {
+        echo "REFUSING: OTA manifest is not an available $CHANNEL-channel update for exact version $VERSION" >&2
         exit 1
       }
       OTA_READY=1
@@ -384,7 +413,7 @@ else
 fi
 ```
 
-Report: merged PR, release version, target(s) flashed, device-confirmed version and — for OTA —
+Report: merged PR, channel and version, target(s) flashed, device-confirmed version and — for OTA —
 the exact version/platform observed for at least 100 seconds from the first post-OTA live
 baseline, with monotonic uptime advancing by the same minimum and tracking wall-clock time
 within five seconds, plus the boot-local `/diag?redact=1` confirmation that ESP-IDF accepted
