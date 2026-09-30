@@ -175,10 +175,8 @@ if [[ "$has_firmware_changes" -eq 1 ]]; then
     echo "" >&2
     echo "❌ Push rejected: firmware size or stack usage exceeds the reviewed baseline!" >&2
     echo "   Run './scripts/precheck-firmware.sh' to reproduce (same gates CI enforces)." >&2
-    echo "   If this growth was intentional and reviewed, regenerate the baselines and commit them:" >&2
-    echo "     size:  ./scripts/check-firmware-size.sh --all --update-baseline" >&2
-    echo "     stack: python3 scripts/check-stack-usage.py --observed-dir dist \\" >&2
-    echo "              --write-baseline scripts/firmware-stack-baseline.json" >&2
+    echo "   If this growth was intentional and reviewed, follow the baseline-regeneration steps the" >&2
+    echo "   precheck printed above (stack baseline first, then size) and commit the result." >&2
     exit 1
   fi
   echo "✅ Pre-push firmware size/stack check passed."

@@ -92,8 +92,11 @@ config_stamp() {
       fi
     done
     if [[ -d patches ]]; then
-      find patches -type f -print0 | sort -z | xargs -0 sha256sum
+      find patches -type f -print0 | sort -z | xargs -0 -r sha256sum
     fi
+    # Kconfig defaults only apply to symbols the cached sdkconfig does not yet hold, so a changed
+    # default would be silently ignored by an incremental build while CI's fresh configure uses it.
+    find main -maxdepth 1 -type f -name 'Kconfig*' -print0 | sort -z | xargs -0 -r sha256sum
     printf 'idf=%s\n' "${IDF_PATH:-unset}"
   } | sha256sum | cut -d' ' -f1
 }
@@ -199,10 +202,13 @@ run_inner() {
     echo "" >&2
     echo "precheck-firmware: FAILED for: ${failed[*]}" >&2
     echo "These are the same gates CI enforces after its full build. If the growth is intentional and" >&2
-    echo "reviewed, regenerate the baselines from an authoritative build and commit them:" >&2
-    echo "  size:  scripts/check-firmware-size.sh --all --update-baseline" >&2
-    echo "  stack: python3 scripts/check-stack-usage.py --observed-dir dist \\" >&2
+    echo "reviewed, regenerate the failing baseline from authoritative builds and commit it. Do the" >&2
+    echo "stack baseline first: ci-build-all.sh aborts at the stack check before a size update can run." >&2
+    echo "  stack: scripts/idf-docker.sh ./scripts/ci-build-all.sh --no-enforce-budget local local" >&2
+    echo "         (all four targets are built before it exits non-zero at the stack check), then" >&2
+    echo "         python3 scripts/check-stack-usage.py --observed-dir dist \\" >&2
     echo "           --write-baseline scripts/firmware-stack-baseline.json" >&2
+    echo "  size:  scripts/check-firmware-size.sh --target <target> --update-baseline" >&2
     return 1
   fi
   echo "precheck-firmware: all targets within the reviewed size and stack baselines (${targets[*]})"
