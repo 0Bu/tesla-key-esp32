@@ -331,7 +331,7 @@ for (const name of canonicalSkills) {
 for (const [relative, contracts] of new Map([
   ["AGENTS.md", ["`$pr-hygiene` is required at PR creation, every push, and every merge"]],
   [".github/PULL_REQUEST_TEMPLATE.md", [
-    "These four boxes ARE the publish/merge gates",
+    "These boxes ARE the publish/merge gates",
     "`$pr-hygiene` clean — content gate @ <full-40-hex-sha>",
   ]],
   ["docs/FEATURES.md", [

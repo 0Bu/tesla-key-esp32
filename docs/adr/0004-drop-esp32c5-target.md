@@ -3,7 +3,7 @@
 **Status:** accepted
 **Date:** 2026-08-01
 **Supersedes:** [`0001-esp32c5-target-upstreaming.md`](0001-esp32c5-target-upstreaming.md)
-**Relates to:** [`../ARCHITECTURE.md`](../ARCHITECTURE.md) §"Pinned tesla-ble with one build-time patch"
+**Relates to:** [`../ARCHITECTURE.md`](../ARCHITECTURE.md#pinned-tesla-ble-and-native-orchestration)
 
 ## Context
 

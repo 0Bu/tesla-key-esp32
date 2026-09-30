@@ -5,7 +5,8 @@ Turns an ESP32 into a Bluetooth key for a Tesla, so charging software such as
 over the local network. No cloud, no Tesla API, no fees. It can also stream all vehicle
 telemetry to [Home Assistant over MQTT](#step-6--home-assistant-optional).
 
-Build from source, full API and security model: [docs/README.md](docs/README.md).
+Reference: [build, HTTP API, MQTT](docs/README.md) · [internals](docs/ARCHITECTURE.md) ·
+[security model](docs/SECURITY.md) · [MCP](docs/MCP.md) · [feature catalog](docs/FEATURES.md).
 
 ---
 
@@ -118,24 +119,23 @@ past a reboot.
 - The first command after idle takes a few seconds (Bluetooth reconnect); later ones are fast.
   evcc reads (state of charge) are always served instantly from cache, but a charge-current
   change sent in that cold window may only take effect on evcc's next retry once the link is warm.
-- **Updates are over-the-air:** open `http://tesla-key-esp32.local`, tap the download icon on the **Firmware**
-  row (*Check for updates*), confirm, and the device updates itself and reboots —
-  WiFi, VIN and key are preserved.
-- The [web installer](https://0bu.github.io/tesla-key-esp32/) is only needed for the very first
-  install (or to recover a device). It does a full erase, so WiFi/VIN/key are reset and you
-  re-pair once; after that, use OTA.
+- **Updates are over-the-air:** open `http://tesla-key-esp32.local`, tap the download icon on the
+  **Firmware** row (*Check for updates*), confirm, and the device updates itself and reboots — WiFi,
+  VIN and key are preserved. Tap the version number to switch between the **Release** channel
+  (default, official releases) and the **Dev** channel (every `main` build).
+- The [web installer](https://0bu.github.io/tesla-key-esp32/) is only needed for the first install
+  or to recover a device. A first install erases everything, so WiFi/VIN/key are reset and you
+  re-pair once; on a device that already runs a recent firmware, choose *Keep configuration* to
+  preserve them. Otherwise use OTA.
 - **Try a reviewed PR before merge:** a maintainer may add the `signed-preview` label to a
-  same-repository PR; after its unprivileged build and protected signing-Environment approval it
-  publishes a signed build you can browser-flash like the release — open its own installer page at
-  `https://0bu.github.io/tesla-key-esp32/PR/<PR-number>/` (e.g. `…/PR/157/`). The main installer
-  page always flashes `main`. A PR preview reports version `<latest>-PR-<N>` and still checks for
-  OTA updates from `main`, so a later release moves the device forward. The preview is removed on
-  close, force-push or label removal; a daily/manual reconciliation cleans up any missed event.
-- **MCP endpoint:** AI agents (Claude Desktop/Code, VS Code, …) can talk to the device
-  directly via the [Model Context Protocol](https://modelcontextprotocol.io/) at
-  `http://<ESP32-IP>/mcp` (Streamable HTTP). The exposed tools mirror the charging command
-  set plus a read-only state tool that never wakes the car — same trusted-LAN-only caveat
-  as the rest of the API ([integration guide](docs/MCP.md)).
+  same-repository PR; after its build and signing approval it publishes a signed build you can
+  browser-flash from `https://0bu.github.io/tesla-key-esp32/PR/<PR-number>/`. The preview reports
+  version `<latest>-PR-<N>`, still updates from the selected channel (so a later release moves the
+  device forward), and is removed when the PR closes, is force-pushed or loses the label.
+- **MCP endpoint:** AI agents (Claude Desktop/Code, VS Code, …) can use the
+  [Model Context Protocol](https://modelcontextprotocol.io/) at `http://<ESP32-IP>/mcp`: the charging
+  commands plus a read-only state tool that never wakes the car, with the same trusted-LAN-only
+  caveat as the rest of the API ([guide](docs/MCP.md)).
 
 ---
 
@@ -149,7 +149,7 @@ past a reboot.
 | No pairing prompt on the car | Place a Tesla NFC keycard on the center-console reader — the dialog only appears while a card is present; also bring the device closer, car must be awake, wait for *connecting…* in the web UI. |
 | evcc shows no battery / current | Set `port: 80`; car must be in Bluetooth range. |
 
-Full reference: [docs/README.md](docs/README.md).
+More causes and log lines: [docs/README.md](docs/README.md#troubleshooting).
 
 ---
 
