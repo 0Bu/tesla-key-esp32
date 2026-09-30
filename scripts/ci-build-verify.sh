@@ -1,10 +1,18 @@
 #!/usr/bin/env bash
 # Complete CI contract: unsigned four-target build, disposable-key release path, then one clean
 # reproducibility rebuild for all four targets. The real signing key is never available here.
+#
+# --skip-repro (only with --target) omits the in-job reproducibility rebuild. CI passes it because the
+# reproduction is built by a separate, parallel job (check-reproducible-build.sh --emit) and compared
+# in the build job. It is an argument and not an environment variable on purpose: the GitHub
+# container action does not forward step-level environment to the container, so the former
+# CI_SKIP_REPRO=1 never reached this script and the rebuild ran on main too. CI_SKIP_REPRO stays
+# honoured for local use.
 set -euo pipefail
 
 target_override=""
 verify_only=0
+skip_repro=0
 if [[ "${1:-}" == --target ]]; then
   shift
   target_override="${1:?usage: ci-build-verify.sh [--target <target>|--verify-only] <display-version> <source-sha>}"
@@ -13,6 +21,10 @@ if [[ "${1:-}" == --target ]]; then
     esp32|esp32s3|esp32c3|esp32c6) ;;
     *) echo "unsupported target: $target_override" >&2; exit 2 ;;
   esac
+  if [[ "${1:-}" == --skip-repro ]]; then
+    shift
+    skip_repro=1
+  fi
 elif [[ "${1:-}" == --verify-only ]]; then
   shift
   verify_only=1
@@ -60,7 +72,7 @@ if [[ -z "$target_override" ]]; then
   ./scripts/test-release-contract.sh "$version" "$source_sha" _unsigned
 fi
 
-if [[ "$verify_only" -eq 1 || "${CI_SKIP_REPRO:-0}" == 1 ]]; then
+if [[ "$verify_only" -eq 1 || "$skip_repro" -eq 1 || "${CI_SKIP_REPRO:-0}" == 1 ]]; then
   exit 0
 fi
 

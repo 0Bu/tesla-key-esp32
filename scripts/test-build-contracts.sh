@@ -6,6 +6,7 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 "$repo_root/scripts/release-relevance.sh" --self-test
 "$repo_root/scripts/select-release-version.sh" --self-test
 "$repo_root/scripts/check-reproducible-build.sh" --self-test
+python3 "$repo_root/scripts/check-reproducible-artifacts.py" --self-test
 python3 "$repo_root/scripts/check-dependency-contract.py" --self-test
 python3 "$repo_root/scripts/check-otadata-contract.py" --self-test
 python3 "$repo_root/scripts/check-partition-contract.py" --self-test

@@ -107,10 +107,13 @@ EXPECTED_ACTIONS = {
     ("build.yml", "build-target"): (
         "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
         "espressif/esp-idf-ci-action@e6f5c74232b1ccd4c97ed641f1e48553853f1fd5",
+        "espressif/esp-idf-ci-action@e6f5c74232b1ccd4c97ed641f1e48553853f1fd5",
+        "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
         "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
     ),
     ("build.yml", "build"): (
         "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+        "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c",
         "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c",
         "espressif/esp-idf-ci-action@e6f5c74232b1ccd4c97ed641f1e48553853f1fd5",
         "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
@@ -437,6 +440,29 @@ def validate(root: Path) -> None:
         and "cache-hash" not in build["build-target"]
         and "cache-scope" not in build["build-target"],
         "build.yml:build-target provenance must bind ci-build-verify to the exact PR head",
+    )
+    # Reproducibility is built by a parallel matrix leg off main and compared in `build`. The skip of
+    # the in-job rebuild must be an ARGUMENT: the container action never forwarded the former
+    # CI_SKIP_REPRO environment variable, so the rebuild ran regardless.
+    require(
+        "leg: ${{ fromJSON(github.ref == 'refs/heads/main' && '[\"primary\"]' "
+        "|| '[\"primary\",\"reproduction\"]') }}" in build["build-target"]
+        and "matrix.leg == 'primary'" in build["build-target"]
+        and "matrix.leg == 'reproduction'" in build["build-target"]
+        and "--emit _repro" in build["build-target"]
+        and "./scripts/check-reproducible-build.sh" in build["build-target"]
+        and "name: firmware-repro-${{ matrix.target }}" in build["build-target"]
+        and "--skip-repro" in build["build-target"]
+        and "CI_SKIP_REPRO" not in build["build-target"],
+        "build.yml:build-target must build a parallel reproduction leg off main and skip the "
+        "in-job rebuild by argument",
+    )
+    require(
+        "pattern: firmware-repro-*" in build["build"]
+        and "run: python3 scripts/check-reproducible-artifacts.py --artifact-root . "
+        "--repro-dir _repro" in build["build"]
+        and build["build"].count("github.ref != 'refs/heads/main'") == 2,
+        "build.yml:build must compare the reproduction copies with the primary builds off main",
     )
     build_refs = re.findall(r"^\s+ref:\s*([^\n#]+?)\s*$", build["build"], re.MULTILINE)
     require(build_refs == ["${{ github.event.pull_request.head.sha || github.sha }}"],
@@ -1188,6 +1214,18 @@ def self_test(root: Path) -> None:
          "    needs: [prepare, build-target]\n", "build must need logic-test"),
         ("build-run-mode", "build.yml", "    needs: [prepare, logic-test, build-target]\n",
          "    needs: [logic-test, build-target]\n", "build must need prepare"),
+        ("repro-leg-dropped", "build.yml", "|| '[\"primary\",\"reproduction\"]'", "|| '[\"primary\"]'",
+         "parallel reproduction leg"),
+        ("repro-skip-dropped", "build.yml", "            --skip-repro\n", "",
+         "skip the in-job rebuild by argument"),
+        ("repro-compare-dropped", "build.yml",
+         "        run: python3 scripts/check-reproducible-artifacts.py --artifact-root . --repro-dir _repro\n",
+         "        run: \"true\"\n", "must compare the reproduction copies"),
+        ("repro-compare-on-main", "build.yml",
+         "      - name: Compare reproduction copies with the primary builds\n"
+         "        if: steps.changes.outputs.firmware == 'yes' && github.ref != 'refs/heads/main'\n",
+         "      - name: Compare reproduction copies with the primary builds\n"
+         "        if: steps.changes.outputs.firmware == 'yes'\n", "must compare the reproduction copies"),
         ("independent-dag", "build.yml", "    needs: [build, independent-rebuild]\n",
          "    needs: build\n", "both producer and independent rebuild"),
         ("deploy-dag", "build.yml", "    needs: [build, publish]\n",

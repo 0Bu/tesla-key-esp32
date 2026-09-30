@@ -160,6 +160,11 @@ jobs:
       fail-fast: false
       matrix:
         target: [esp32, esp32s3, esp32c3, esp32c6]
+        # Off main, every target is built twice in parallel: the primary build and a second, fresh,
+        # isolated copy whose bytes the `build` job compares with the primary. A back-to-back rebuild
+        # inside one job added ~100 s to the critical path. On main the independent rebuild is the
+        # reproducibility authority, so only the primary leg exists there.
+        leg: ${{ fromJSON(github.ref == 'refs/heads/main' && '["primary"]' || '["primary","reproduction"]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -215,22 +220,36 @@ jobs:
           echo "disp=$disp" >> "$GITHUB_OUTPUT"
           echo "stamped firmware version: $disp"
 
-      - name: Build target and exercise reproducibility
-        if: steps.changes.outputs.firmware == 'yes'
+      # The in-job reproducibility rebuild is skipped with an ARGUMENT: the container action does not
+      # forward step-level environment variables, so the former environment-variable skip never reached
+      # the script and the rebuild ran regardless (also on main).
+      - name: Build target
+        if: steps.changes.outputs.firmware == 'yes' && matrix.leg == 'primary'
         uses: espressif/esp-idf-ci-action@e6f5c74232b1ccd4c97ed641f1e48553853f1fd5 # v1.2.0
-        env:
-          CI_SKIP_REPRO: ${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main' && '1' || '0' }}
         with:
           esp_idf_version: ${{ steps.toolchain.outputs.image-version }}
           target: esp32
           command: >-
             ./scripts/ci-build-verify.sh
             --target "${{ matrix.target }}"
+            --skip-repro
             "${{ steps.stamp.outputs.disp }}"
             "${{ github.event.pull_request.head.sha || github.sha }}"
 
+      - name: Build an isolated copy for the reproducibility comparison
+        if: steps.changes.outputs.firmware == 'yes' && matrix.leg == 'reproduction'
+        uses: espressif/esp-idf-ci-action@e6f5c74232b1ccd4c97ed641f1e48553853f1fd5 # v1.2.0
+        with:
+          esp_idf_version: ${{ steps.toolchain.outputs.image-version }}
+          target: esp32
+          command: >-
+            ./scripts/check-reproducible-build.sh
+            --emit _repro
+            "${{ matrix.target }}"
+            "${{ steps.stamp.outputs.disp }}"
+
       - name: Upload target build artifacts
-        if: steps.changes.outputs.firmware == 'yes'
+        if: steps.changes.outputs.firmware == 'yes' && matrix.leg == 'primary'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: firmware-target-${{ matrix.target }}
@@ -239,6 +258,15 @@ jobs:
           path: |
             _unsigned/${{ matrix.target }}/
             dist/${{ matrix.target }}/
+
+      - name: Upload reproduction copy
+        if: steps.changes.outputs.firmware == 'yes' && matrix.leg == 'reproduction'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: firmware-repro-${{ matrix.target }}
+          if-no-files-found: error
+          retention-days: 1
+          path: _repro/
 
   build:
     needs: [prepare, logic-test, build-target]
@@ -322,6 +350,20 @@ jobs:
           pattern: firmware-target-*
           merge-multiple: true
           path: .
+
+      # Off main each target's isolated reproduction copy was built by a parallel job; it must be
+      # byte-identical to the primary build. Both sides are downloaded artifacts and are read as data.
+      - name: Download reproduction copies
+        if: steps.changes.outputs.firmware == 'yes' && github.ref != 'refs/heads/main'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: firmware-repro-*
+          merge-multiple: true
+          path: _repro
+
+      - name: Compare reproduction copies with the primary builds
+        if: steps.changes.outputs.firmware == 'yes' && github.ref != 'refs/heads/main'
+        run: python3 scripts/check-reproducible-artifacts.py --artifact-root . --repro-dir _repro
 
       # Full SHA pins both the action implementation and the digest-pinned ESP-IDF image it starts.
       # This job has neither the OTA key nor a write-capable GITHUB_TOKEN.
