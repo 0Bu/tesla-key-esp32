@@ -378,7 +378,8 @@ for (const subagent of subagentsDoc.subagents) {
 const multiTargetReviewerObj = subagentsDoc.subagents.find((s) => s.TypeName === "multi_target_build_reviewer");
 const multiTargetReviewer = normalizeProse(multiTargetReviewerObj?.Prompt || "");
 const multiTargetPublicationContracts = [
-  "logic-test -> build-target -> build -> independent-rebuild -> publish -> deploy",
+  "prepare -> logic-test + build-target (concurrent) -> build -> independent-rebuild -> publish -> deploy",
+  "build needs prepare, logic-test and build-target",
   "SHA/version-bound Actions artifact",
   "deploy consumes only that named artifact",
   "without a signing Environment, OTA key or OIDC",

@@ -297,9 +297,15 @@ PY
 expect_failure "missing safety invariant" "$fixture" "missing-canary"
 
 fixture="$WORK/multi-target-publication-dag"; make_fixture "$fixture"
-perl -0pi -e 's/logic-test -> build-target -> build -> independent-rebuild -> publish ->/logic-test -> build-target -> build -> publish ->/' \
+perl -0pi -e 's/build -> independent-rebuild -> publish ->/build -> publish ->/' \
   "$fixture/.agents/subagents.json"
 expect_failure "multi-target publication DAG" "$fixture" \
+  "multi-target reviewer is missing the independent-rebuild/publication DAG contract"
+
+fixture="$WORK/multi-target-host-gate"; make_fixture "$fixture"
+perl -0pi -e 's/build needs prepare, logic-test and build-target/build needs prepare and build-target/' \
+  "$fixture/.agents/subagents.json"
+expect_failure "multi-target host-gate dependency" "$fixture" \
   "multi-target reviewer is missing the independent-rebuild/publication DAG contract"
 
 fixture="$WORK/stale-pin"; make_fixture "$fixture"

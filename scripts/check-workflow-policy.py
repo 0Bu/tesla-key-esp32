@@ -24,6 +24,7 @@ ACTION = re.compile(r"^\s+(?:-\s+)?uses:\s*([^\s#]+)", re.MULTILINE)
 PINNED_ACTION = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+@[0-9a-f]{40}$")
 JOB = re.compile(r"^  ([A-Za-z0-9_-]+):\s*$", re.MULTILINE)
 UNPRIVILEGED_PERMISSIONS = {
+    ("build.yml", "prepare"): {"contents": "read"},
     ("build.yml", "logic-test"): {"contents": "read"},
     ("build.yml", "build-target"): {"contents": "read", "pages": "read"},
     ("build.yml", "build"): {"contents": "read", "pages": "read"},
@@ -40,7 +41,8 @@ UNPRIVILEGED_PERMISSIONS = {
 EXPECTED_WORKFLOW_JOBS = {
     "bench-acceptance.yml": {"ingest-report"},
     "build.yml": {
-        "logic-test", "build-target", "build", "independent-rebuild", "publish", "deploy",
+        "prepare", "logic-test", "build-target", "build", "independent-rebuild", "publish",
+        "deploy",
     },
     "pr-policy.yml": {"current-head-records"},
     "pr-preview-cleanup.yml": {"cleanup-event", "discover-stale", "reconcile-stale"},
@@ -59,6 +61,7 @@ EXPECTED_TOP_LEVEL_PERMISSIONS = {
 
 EXPECTED_JOB_PERMISSIONS = {
     ("bench-acceptance.yml", "ingest-report"): {"contents": "read"},
+    ("build.yml", "prepare"): {"contents": "read"},
     ("build.yml", "logic-test"): {"contents": "read"},
     ("build.yml", "build-target"): {"contents": "read", "pages": "read"},
     ("build.yml", "build"): {"contents": "read", "pages": "read"},
@@ -94,6 +97,9 @@ EXPECTED_ACTIONS = {
     ("bench-acceptance.yml", "ingest-report"): (
         "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
         "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
+    ),
+    ("build.yml", "prepare"): (
+        "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
     ),
     ("build.yml", "logic-test"): (
         "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
@@ -389,11 +395,15 @@ def validate(root: Path) -> None:
     build = jobs_by_file.get("build.yml")
     require(build is not None, "build.yml is missing")
     for name in (
-        "logic-test", "build-target", "build", "independent-rebuild", "publish", "deploy",
+        "prepare", "logic-test", "build-target", "build", "independent-rebuild", "publish",
+        "deploy",
     ):
         require(name in build, f"build.yml:{name} job is missing")
-    require(job_has_need(build["build-target"], "logic-test"),
-            "build.yml:build-target must need logic-test")
+    # build-target no longer waits for the host tests (only for the run mode / version), so a red
+    # host gate must be enforced where the jobs converge: `build` needs all three producers.
+    require(job_has_need(build["build-target"], "prepare"),
+            "build.yml:build-target must need prepare")
+    require(job_has_need(build["build"], "prepare"), "build.yml:build must need prepare")
     require(job_has_need(build["build"], "logic-test"), "build.yml:build must need logic-test")
     require(job_has_need(build["build"], "build-target"),
             "build.yml:build must need build-target")
@@ -751,7 +761,9 @@ def validate(root: Path) -> None:
         "build.yml:deploy must refetch current main immediately before the in-place dev channel write "
         "(a re-run of a superseded deploy job must not overwrite a newer dev channel)",
     )
-    require("contents: write" not in build["logic-test"] and "contents: write" not in build["build"],
+    require("contents: write" not in build["prepare"]
+            and "contents: write" not in build["logic-test"]
+            and "contents: write" not in build["build"],
             "build.yml: untrusted build jobs must not write repository contents")
     require(
         build["logic-test"].count("fetch-depth: 0") == 1,
@@ -1171,7 +1183,11 @@ def self_test(root: Path) -> None:
         ("top-level-write", "build.yml", "permissions:\n  contents: read\n",
          "permissions:\n  contents: read\n  issues: write\n",
          "top-level permissions must be exact"),
-        ("build-dag", "build.yml", "    needs: logic-test\n", "", "must need logic-test"),
+        ("build-dag", "build.yml", "    needs: prepare\n", "", "must need prepare"),
+        ("build-host-gate", "build.yml", "    needs: [prepare, logic-test, build-target]\n",
+         "    needs: [prepare, build-target]\n", "build must need logic-test"),
+        ("build-run-mode", "build.yml", "    needs: [prepare, logic-test, build-target]\n",
+         "    needs: [logic-test, build-target]\n", "build must need prepare"),
         ("independent-dag", "build.yml", "    needs: [build, independent-rebuild]\n",
          "    needs: build\n", "both producer and independent rebuild"),
         ("deploy-dag", "build.yml", "    needs: [build, publish]\n",
