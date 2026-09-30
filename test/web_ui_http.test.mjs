@@ -1383,6 +1383,39 @@ test("hero action is triggered by tapping the gauge button directly", () => {
   assert.equal(wakeTriggered, true, "tapping the gauge executed wakeCar");
 });
 
+test("charging highlight never snaps back visibly at 12 o'clock and glides at a calm speed", () => {
+  const { context } = loadUi();
+  const css = fs.readFileSync(new URL("../main/www/style.css", import.meta.url), "utf8");
+
+  // Keyframes: invisible at both ends of the trip, so the loop's wrap to the arc start is hidden.
+  const kf = css.match(/@keyframes flow\{([^@]*?)\n\}/)[1];
+  const frames = new Map();
+  for (const m of kf.matchAll(/([\d%,\s]+)\{([^}]*)\}/g)) {
+    for (const stop of m[1].split(",").map(s => s.trim())) frames.set(stop, { ...(frames.get(stop) || {}), decl: m[2] });
+  }
+  assert.match(frames.get("0%").decl, /opacity:\s*0/, "starts invisible");
+  assert.match(frames.get("100%").decl, /opacity:\s*0/, "ends invisible, right before the wrap");
+  assert.match(frames.get("72%").decl, /stroke-dashoffset:\s*var\(--flow-end\)/);
+  assert.match(css, /\.gflow\{[^}]*opacity:\s*0[^}]*animation:\s*flow var\(--flow-dur,\s*[\d.]+s\) linear infinite/,
+    "constant speed (no ease-in-out stall at the ends), invisible when animations are disabled");
+
+  // Markup: cycle length follows the arc so short and long arcs move at a similar speed, clamped.
+  const flow = (pct) => {
+    const html = context.gaugeHTML({ mode: "charging", pct, limit: 100 });
+    const end = Number(/--flow-end:(-?[\d.]+)px/.exec(html)[1]);
+    const dur = Number(/--flow-dur:([\d.]+)s/.exec(html)[1]);
+    return { end, dur, speed: -end / (dur * 0.72) };
+  };
+  const full = flow(99);
+  assert.ok(full.dur > 5 && full.dur <= 8, `99 % cycle is slow enough to be calm (${full.dur}s)`);
+  assert.ok(full.speed > 100 && full.speed < 180, `glide speed ${full.speed.toFixed(0)} units/s`);
+  for (const pct of [7, 25, 60, 100]) {
+    const f = flow(pct);
+    assert.ok(f.dur >= 3 && f.dur <= 8, `${pct} % cycle ${f.dur}s stays within [3, 8]`);
+  }
+  assert.doesNotMatch(context.gaugeHTML({ mode: "soc", pct: 60, limit: 100 }), /gflow/, "only charging animates");
+});
+
 test("openFwUpdate checks for updates, closes modal and toasts if up to date", async () => {
   const { context, element } = loadUi();
   element("otaModal").classList.add("hide");

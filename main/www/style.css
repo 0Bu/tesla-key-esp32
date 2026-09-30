@@ -129,7 +129,7 @@ svg{display:block}
 .pulse{animation:pulse 3.2s ease-in-out infinite}
 .pulse.slow{animation-duration:4.5s}
 .pulse.fast{animation-duration:1.1s}
-.gflow{animation:flow 2.4s cubic-bezier(.4,0,.6,1) infinite}
+.gflow{opacity:0; animation:flow var(--flow-dur,5s) linear infinite}
 .htext{display:flex; flex-direction:column; gap:4px; align-items:center}
 .hlabel{margin:0; font-size:24px; font-weight:650; letter-spacing:-.5px; line-height:1.15; text-wrap:balance}
 .hsub{margin:0; font-size:14.5px; color:var(--muted); max-width:32ch; text-wrap:pretty}
@@ -252,7 +252,13 @@ svg{display:block}
 @keyframes spin{to{transform:rotate(360deg)}}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
 @keyframes tremble{0%,100%{transform:rotate(0)}20%{transform:rotate(-9deg)}40%{transform:rotate(9deg)}60%{transform:rotate(-6deg)}80%{transform:rotate(6deg)}}
-@keyframes flow{from{stroke-dashoffset:0}to{stroke-dashoffset:var(--flow-end)}}
+/* charging highlight: travels 0→72 % of the cycle, invisible at both ends of the trip, then rests
+   (72–100 %) — the snap back to the arc start at 100 % happens at opacity 0, so it never shows */
+@keyframes flow{
+  0%{stroke-dashoffset:0; opacity:0}
+  12%,60%{opacity:1}
+  72%,100%{stroke-dashoffset:var(--flow-end); opacity:0}
+}
 @keyframes tin{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:none}}
 @keyframes fade{from{opacity:0}to{opacity:1}}
 @keyframes sheet{from{transform:scale(.96);opacity:0}to{transform:none;opacity:1}}
