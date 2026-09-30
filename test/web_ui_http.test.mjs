@@ -2203,3 +2203,37 @@ test("hero vehicle actions are not blocked by a firmware check or channel change
   context.bannerAction();
   assert.equal(bannerCalls, 1, "a running update still blocks the banner action");
 });
+
+test("desktop and mobile layout styles maintain 1/3-2/3 proportions and heroCardTap behavior", () => {
+  const css = fs.readFileSync(new URL("../main/www/style.css", import.meta.url), "utf8");
+  // Proportions: 1/3 to 2/3 desktop grid with stretch align and height 100%
+  assert.match(css, /grid-template-columns:\s*380px\s+minmax\(0,\s*1fr\)/);
+  assert.match(css, /align-items:\s*stretch/);
+  assert.match(css, /#paneSettings\s*\{[^}]*height:\s*100%/);
+  // Scaled header and logo
+  assert.match(css, /clamp\(22px,\s*5\.5vw,\s*28px\)/);
+  assert.match(css, /\.logo\s*\{[^}]*width:\s*46px;\s*height:\s*46px;/);
+  // Full text wrapping without ellipsis in hero subtext
+  assert.match(css, /\.hsub\s*\{[^}]*white-space:\s*normal;\s*overflow-wrap:\s*break-word/);
+
+  // heroCardTap behavior on mobile vs desktop
+  const { context } = loadUi();
+  let heroCalls = 0;
+  context.heroActFn = () => { heroCalls++; };
+  context.window.innerWidth = 400;
+
+  // Click on card directly
+  context.heroCardTap({ target: {} });
+  assert.equal(heroCalls, 1, "tapping hero card on mobile triggers hero action");
+
+  // Click on inner button should be ignored by heroCardTap (handled by button onclick)
+  context.heroCardTap({
+    target: { closest: (sel) => sel.includes("button") ? {} : null }
+  });
+  assert.equal(heroCalls, 1, "tapping inner button in card does not double-trigger action");
+
+  // Desktop (> 860px) should not trigger action from card body tap
+  context.window.innerWidth = 1024;
+  context.heroCardTap({ target: {} });
+  assert.equal(heroCalls, 1, "tapping hero card on desktop does not trigger action");
+});

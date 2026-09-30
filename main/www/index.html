@@ -47,13 +47,15 @@
 
       <!-- vehicle hero. Starts hidden: the first /status frame reveals it, so the empty
            skeleton never flashes on load. -->
-      <section class="pane pane-car hero hide" id="hero" aria-label="Vehicle status">
+      <section class="pane pane-car hero hide" id="hero" aria-label="Vehicle status" onclick="heroCardTap(event)">
         <div class="gauge" id="hicon"></div>
-        <div class="htext">
-          <h2 class="hlabel" id="hlabel">&mdash;</h2>
-          <p class="hsub" id="hsub"></p>
+        <div class="hbody">
+          <div class="htext" id="htext">
+            <h2 class="hlabel" id="hlabel">&mdash;</h2>
+            <p class="hsub" id="hsub"></p>
+          </div>
+          <div class="hstats" id="hstats"></div>
         </div>
-        <div class="hstats" id="hstats"></div>
       </section>
 
       <!-- settings card: all settings in one compact card, one row each -->
