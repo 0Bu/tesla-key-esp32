@@ -35,15 +35,20 @@ does not imply commit, push, merge, release, hardware, or vehicle authorization.
 
 ## Web UI layout
 
-The device page (`main/www/`, inlined into one gzipped document at build time) arranges
-settings cards vertically: the **Car** hero card (battery gauge, status, detail chips, and direct
-gauge tap action) sits alongside all settings rows in **Setup** (VIN and security key), **Network**
-(Wi-Fi/Ethernet, Bluetooth, MQTT, Syslog rows), and **Firmware** (version display, update check
-button `#verLink`, and update channel selector). On desktop screens, settings rows flow in a clean
-vertical column to the right of the hero card; mobile and tablet viewports stack them in a single
-responsive vertical flow. Text entry, confirmations, and channel selection use centered modal sheets
-(`askText()`, `askConfirm()`, `editChannel()`, Promise-based) with input validation and fail-closed
-save handling.
+The device page (`main/www/`, inlined into one gzipped document at build time) is a single page
+with two blocks: the **Car** hero card (battery gauge, status, detail chips, gauge tap action) and
+one settings card (`#paneSettings`) whose rows cover **Vehicle** (VIN), **Security key**,
+**Network** (Wi-Fi/Ethernet, Bluetooth, MQTT, Syslog) and **Firmware**. From 860 px the hero card
+is sticky in the left column and the settings card fills the right column; below that both stack in
+one column. The Firmware row shows the running version and the selected channel. Tapping the
+version (`#verLink`) opens the centered channel dialog (`#chanModal`; `openChannelSelect()`,
+`selectChannel()`, `setChannel()`), and the download icon button (`#fwCheckBtn`, `openFwUpdate()`)
+runs an on-demand update check that opens the update dialog (`#otaModal`) only when a newer
+version exists. While a check, a channel change or an update is running (`isOtaBusy()`), every
+settings control is disabled and no further dialog can open; when the flow ends, keyboard focus
+returns to the control that started it. Text entry and confirmations (`askText()`, `askConfirm()`,
+Promise-based) use the same centered modal sheets, with input validation and fail-closed save
+handling.
 
 ## Web UI live feed (`GET /status`)
 
@@ -188,7 +193,7 @@ esp32/esp32s3/esp32c3/esp32c6, picked at compile time by `TESLA_OTA_IMG_SUFFIX` 
 `CONFIG_IDF_TARGET_*`) via `esp_https_ota` into the inactive OTA slot, then reboots.
 `esp_https_ota` verifies the image chip-id, so a wrong-target image is refused (never
 flashed); one manifest `version` covers all targets (CI builds them from one commit).
-Triggered from the web UI by **Check for updates** in the **Firmware** tab (or the Safe Mode banner).
+Triggered from the web UI by the update-check icon button on the **Firmware** row (or the Safe Mode banner).
 Implemented in `main/ota_update.cpp`.
 
 **Manifest intake is a bounded, exact protocol.** The HTTPS body is capped at 8192 bytes. A
@@ -588,8 +593,16 @@ preserves the `PR/` tree). Constraints:
     `/set_wifi`, `/set_ota`) reject incoming requests with `409 Conflict` (standard command response
     `{"response":{"result":false,"command":"<name>","vin":"","reason":"an OTA update is in progress"}}`, or flat
     `{"ok":false,"result":false,"reason":"an OTA update is in progress"}` for `POST /send_key`)
-    to protect the flashing process from concurrent NVS mutations or reboots. Idle update checks (`GET /ota/check`)
-    do not block configuration mutations.
+    to keep concurrent NVS mutations and reboots away from the flashing process. A running update *check* does
+    not trip this guard, so those six routes stay available during a check, with one difference: `/set_mqtt`,
+    `/set_syslog` and `/set_wifi` restart the device only if they can take the OTA gate
+    (`ota_config_restart_begin()`), which a check holds. During a check they save the configuration, log
+    `reboot postponed` and still answer with their normal success text; the change applies at the next
+    restart. `POST /gen_keys` and `POST /set_vin` are different: a check holds the same OTA gate as an
+    update, so they answer `503` (`OtaIdentityMutationGuard`) for the duration of a check as well. The
+    `ota_is_updating()` test is a snapshot taken when the handler starts, not an atomic exclusion, so a
+    request that passed it can still overlap an update that starts right afterwards.
+    `POST /crash/dismiss` and `GET /coredump?clear=1` (core-dump erase) are not covered by the guard.
 - **Toolchain pin isolation in PR preview rebuilds.** The `trusted-rebuild` job in
   `.github/workflows/signed-pr-preview.yml` checks out the PR head commit before reading
   `esp-idf-toolchain.txt`, ensuring PRs that update the ESP-IDF toolchain pin are rebuilt with
@@ -619,7 +632,7 @@ using HA's MQTT-Discovery convention, so every entity auto-appears in Home Assis
 grouped under one device. **Read-only by design** — no command topics are subscribed
 (the car is never controlled or woken from HA). Independent of evcc/BLE/pairing.
 
-- **Config:** broker URI from NVS `mqtt_uri` (web UI: Network tab → MQTT row, stores `host:port`)
+- **Config:** broker URI from NVS `mqtt_uri` (web UI: **MQTT** row, stores `host:port`)
   overriding `CONFIG_TESLA_MQTT_BROKER_URI`; empty = disabled (bridge is a no-op).
   Optional `CONFIG_TESLA_MQTT_USERNAME`/`PASSWORD`, `CONFIG_TESLA_MQTT_DISCOVERY_PREFIX`
   (default `homeassistant`), `CONFIG_TESLA_MQTT_BASE_TOPIC` (default `tesla-key`),
@@ -721,8 +734,8 @@ independently redacted fragments.
 
 - **Config:** one NVS string, `syslog_uri` (`tesla_cfg` namespace) — a bare `"host:port"`, no
   scheme (a bare host defaults to port 514); `""` disables forwarding. Falls back to
-  `CONFIG_TESLA_SYSLOG_SERVER` (Kconfig, default empty). Set from the web UI (Network tab →
-  Syslog row, pencil icon → `POST /set_syslog`, `{"server":"host:port"}`) or NVS/Kconfig
+  `CONFIG_TESLA_SYSLOG_SERVER` (Kconfig, default empty). Set from the web UI (**Syslog**
+  row, pencil icon → `POST /set_syslog`, `{"server":"host:port"}`) or NVS/Kconfig
   directly. Resolved **once**, at `syslog_start()` (called early in `app_main`, before WiFi) —
   like the MQTT bridge, a config change persists then reboots to apply, so there is nothing to
   re-read at runtime.
@@ -757,7 +770,7 @@ independently redacted fragments.
   own "send failed" diagnostics would themselves be queued for (failing) delivery, feeding the
   exact storm the paragraph above avoids.
 - **Status:** `syslog_status()` → `/status.syslog` (`configured`/`resolved`/`reachable`/`host`/
-  `port`/`error`), read by the web UI's Network tab exactly like the MQTT row.
+  `port`/`error`), read by the web UI's Syslog row exactly like the MQTT row.
 
 ## Heap-exhaustion watchdog (the last-resort escalation)
 
@@ -1394,8 +1407,10 @@ on-device runtime evidence.
 `/set_syslog`, `/set_wifi`, `/set_ota`) reject requests immediately with `409 Conflict`
 (standard command response `{"response":{"result":false,"command":"<name>","vin":"","reason":"an OTA update is in progress"}}`,
 or flat `{"ok":false,"result":false,"reason":"an OTA update is in progress"}` for `POST /send_key`) before reading body payloads,
-preventing concurrent NVS operations or reboots while the flash partition is being written. Idle update
-checks do not block configuration changes.
+keeping concurrent NVS operations and reboots away from the flash partition while it is being written. The
+check is a best-effort snapshot, not an atomic exclusion (see the OTA section above). Idle update checks do
+not block these six routes (`/set_mqtt`, `/set_syslog` and `/set_wifi` then save but postpone their reboot);
+`POST /gen_keys` and `POST /set_vin` are gated for the whole check as well and answer `503`.
 
 ## MCP endpoint (/mcp)
 
