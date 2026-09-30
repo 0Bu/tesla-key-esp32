@@ -35,9 +35,11 @@ g++ -std=c++17 -Wall -Wextra -Werror -Imain -o build_mock/logic_tests test/test_
 
 The binaries are dependency-free (no gtest) and exit non-zero on the first failed check.
 
-CI runs this as the `logic-test` job, a **fast gate the per-target firmware build depends on**
-(`.github/workflows/build.yml`), so a logic regression fails in seconds instead of after four ESP-IDF
-builds. The same job runs `tools/agent-config/selftest.sh` (runner-neutral agent config, skill
+CI runs this as the `logic-test` job (`.github/workflows/build.yml`), a **gate the final `build` check
+depends on**. It runs concurrently with the four per-target firmware compiles, which only wait for the
+~20 s `prepare` job (run mode and release version), so the pipeline takes as long as the slower of the
+two instead of their sum. A logic regression still fails the `build` check, and shows up after the host
+tests finish rather than after the whole matrix. The same job runs `tools/agent-config/selftest.sh` (runner-neutral agent config, skill
 frontmatter, reviewer sandboxes, hook wiring, Context7 pin), repository/workflow lint, sanitizer
 tripwires, deterministic fuzzing, protocol vectors and a real Chrome/Chromium page gate.
 

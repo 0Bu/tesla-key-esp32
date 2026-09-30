@@ -34,7 +34,12 @@ permissions:
   contents: read
 
 jobs:
-  logic-test:
+  prepare:
+    # The run mode and release version, computed once for every downstream job. They used to be the
+    # last steps of logic-test, which forced the four firmware builds to wait for the whole ~3 minute
+    # host-test job. The builds only need these two answers, so they now depend on this ~20 s job and
+    # run concurrently with logic-test; `build` still needs logic-test, so a failing host gate still
+    # fails the build check.
     runs-on: ubuntu-26.04
     timeout-minutes: 10
     permissions:
@@ -48,39 +53,8 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          # repo-lint checks the checked-out commit itself; PR merge refs need both parents present.
+          # select-release-version.sh reads tag ancestry, so it needs the full history.
           fetch-depth: 0
-      - name: Validate runner-neutral agent configuration
-        run: ./tools/agent-config/selftest.sh
-      - name: Validate repository syntax, links and workflow policy
-        run: ./scripts/repo-lint.sh
-      - name: Run host-side logic tests
-        run: ./scripts/run-mock-tests.sh --require-all
-      - name: Run tesla-ble integration harness
-        run: ./scripts/test-tesla-ble-harness.sh --require-all
-      - name: Prove and run Linux memory-safety instrumentation
-        run: |
-          ./scripts/run-sanitizer-tests.sh --self-test
-          ./scripts/run-sanitizer-tests.sh
-      - name: Test ESP-IDF build contracts
-        run: |
-          ./scripts/ci-build-all.sh --self-test
-          ./scripts/select-release-version.sh --self-test
-          python3 scripts/check-sdkconfig-defaults.py --self-test
-          python3 scripts/report-firmware-size.py --self-test
-          python3 scripts/check-dev-pages.py --self-test
-          python3 scripts/generate-ota-changelog.py --self-test
-          python3 scripts/check-build-gate-contract.py --self-test
-          python3 tools/agent-hooks/agent_hook.py build-efficiency --self-test
-          test "$(./scripts/idf-version.sh)" = v6.1
-
-      # The PR-gate command matcher (tools/agent-hooks/pr-gate-lib.sh). Cheap, offline, and it
-      # guards a hole that is invisible in review: an unmatched command is not a lenient
-      # verdict, it is NO verdict — the hook exits 0 having checked nothing, so a regression
-      # here silently disarms the merge gate rather than failing loudly.
-      - name: Test the PR-gate command matcher
-        run: ./scripts/test-pr-gates.sh
-
       - name: Decide the run mode
         id: mode
         env:
@@ -134,8 +108,49 @@ jobs:
           echo "version=$release" >> "$GITHUB_OUTPUT"
           echo "latest=$latest" >> "$GITHUB_OUTPUT"
 
+  logic-test:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # repo-lint checks the checked-out commit itself; PR merge refs need both parents present.
+          fetch-depth: 0
+      - name: Validate runner-neutral agent configuration
+        run: ./tools/agent-config/selftest.sh
+      - name: Validate repository syntax, links and workflow policy
+        run: ./scripts/repo-lint.sh
+      - name: Run host-side logic tests
+        run: ./scripts/run-mock-tests.sh --require-all
+      - name: Run tesla-ble integration harness
+        run: ./scripts/test-tesla-ble-harness.sh --require-all
+      - name: Prove and run Linux memory-safety instrumentation
+        run: |
+          ./scripts/run-sanitizer-tests.sh --self-test
+          ./scripts/run-sanitizer-tests.sh
+      - name: Test ESP-IDF build contracts
+        run: |
+          ./scripts/ci-build-all.sh --self-test
+          ./scripts/select-release-version.sh --self-test
+          python3 scripts/check-sdkconfig-defaults.py --self-test
+          python3 scripts/report-firmware-size.py --self-test
+          python3 scripts/check-dev-pages.py --self-test
+          python3 scripts/generate-ota-changelog.py --self-test
+          python3 scripts/check-build-gate-contract.py --self-test
+          python3 tools/agent-hooks/agent_hook.py build-efficiency --self-test
+          test "$(./scripts/idf-version.sh)" = v6.1
+
+      # The PR-gate command matcher (tools/agent-hooks/pr-gate-lib.sh). Cheap, offline, and it
+      # guards a hole that is invisible in review: an unmatched command is not a lenient
+      # verdict, it is NO verdict — the hook exits 0 having checked nothing, so a regression
+      # here silently disarms the merge gate rather than failing loudly.
+      - name: Test the PR-gate command matcher
+        run: ./scripts/test-pr-gates.sh
+
   build-target:
-    needs: logic-test
+    needs: prepare
     runs-on: ubuntu-26.04
     timeout-minutes: 30
     permissions:
@@ -190,11 +205,11 @@ jobs:
         id: stamp
         run: |
           if [ "${{ github.event_name }}" = pull_request ]; then
-            base="${{ needs.logic-test.outputs.latest-published-stable }}"
-            [ -n "$base" ] || base="${{ needs.logic-test.outputs.release-version }}"
+            base="${{ needs.prepare.outputs.latest-published-stable }}"
+            [ -n "$base" ] || base="${{ needs.prepare.outputs.release-version }}"
             disp="${base}-PR-${{ github.event.pull_request.number }}"
           else
-            disp="${{ needs.logic-test.outputs.release-version }}"
+            disp="${{ needs.prepare.outputs.release-version }}"
           fi
           echo "$disp" > version.txt
           echo "disp=$disp" >> "$GITHUB_OUTPUT"
@@ -226,7 +241,7 @@ jobs:
             dist/${{ matrix.target }}/
 
   build:
-    needs: [logic-test, build-target]
+    needs: [prepare, logic-test, build-target]
     runs-on: ubuntu-26.04
     timeout-minutes: 20
     permissions:
@@ -236,11 +251,11 @@ jobs:
       pages: read
     outputs:
       display-version: ${{ steps.stamp.outputs.disp }}
-      release-version: ${{ needs.logic-test.outputs.release-version }}
+      release-version: ${{ needs.prepare.outputs.release-version }}
       firmware: ${{ steps.changes.outputs.firmware }}
-      mode: ${{ needs.logic-test.outputs.mode }}
-      bump: ${{ needs.logic-test.outputs.bump }}
-      exact-version: ${{ needs.logic-test.outputs.exact-version }}
+      mode: ${{ needs.prepare.outputs.mode }}
+      bump: ${{ needs.prepare.outputs.bump }}
+      exact-version: ${{ needs.prepare.outputs.exact-version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -287,14 +302,14 @@ jobs:
         id: stamp
         run: |
           if [ "${{ github.event_name }}" = pull_request ]; then
-            base="${{ needs.logic-test.outputs.latest-published-stable }}"
-            [ -n "$base" ] || base="${{ needs.logic-test.outputs.release-version }}"
+            base="${{ needs.prepare.outputs.latest-published-stable }}"
+            [ -n "$base" ] || base="${{ needs.prepare.outputs.release-version }}"
             disp="${base}-PR-${{ github.event.pull_request.number }}"
           elif [ "${{ steps.changes.outputs.firmware }}" = yes ]; then
-            disp="${{ needs.logic-test.outputs.release-version }}"
+            disp="${{ needs.prepare.outputs.release-version }}"
           else
-            disp="${{ needs.logic-test.outputs.latest-published-stable }}"
-            [ -n "$disp" ] || disp="${{ needs.logic-test.outputs.release-version }}"
+            disp="${{ needs.prepare.outputs.latest-published-stable }}"
+            [ -n "$disp" ] || disp="${{ needs.prepare.outputs.release-version }}"
           fi
           echo "$disp" > version.txt
           echo "disp=$disp" >> "$GITHUB_OUTPUT"
