@@ -496,7 +496,7 @@ bool VehicleController::apply_ble_link_state_(bool connected) {
         if (!connected) {
             command_runner_.notify_link_lost("connection lost");
             command_runner_.dispatcher().reset();
-            vcsec_sleep_state_.store(static_cast<int>(tk::SleepState::Unknown));
+            mark_vcsec_unknown_();
             if (client_) {
                 if (auto* p = client_->get_peer(UniversalMessage_Domain_DOMAIN_VEHICLE_SECURITY)) p->reset();
                 if (auto* p = client_->get_peer(UniversalMessage_Domain_DOMAIN_INFOTAINMENT)) p->reset();
@@ -512,7 +512,7 @@ bool VehicleController::apply_ble_link_state_(bool connected) {
         ESP_LOGE(TAG, "deferred apply_ble_link_state_(%d) threw (unknown) — dropping link",
                  static_cast<int>(connected));
     }
-    vcsec_sleep_state_.store(static_cast<int>(tk::SleepState::Unknown));
+    mark_vcsec_unknown_();
     return false;
 }
 
@@ -970,10 +970,9 @@ void VehicleController::handle_vcsec_frame_(const UniversalMessage_RoutableMessa
                 ESP_LOGD(TAG, "VCSEC VehicleStatus: sleep_status=%d, has_closureStatuses=%d",
                          static_cast<int>(vs.vehicleSleepStatus), static_cast<int>(vs.has_closureStatuses));
                 vcsec_sleep_state_.store(static_cast<int>(reported));
-                // Only an explicit reading folds into the ASLEEP debounce clock; UNKNOWN leaves a real
-                // ASLEEP run untouched (see note_vcsec_sleep_).
+                // Only uninterrupted explicit ASLEEP readings prove sleep; UNKNOWN breaks the run.
                 if (reported == tk::SleepState::Asleep) note_vcsec_sleep_(true);
-                else if (reported == tk::SleepState::Awake) note_vcsec_sleep_(false);
+                else note_vcsec_sleep_(false);
                 // R1: an explicit AWAKE, or has_closureStatuses (upstream v5.2.0's wake-progress
                 // signal), advances a command waiting for a wake. UNKNOWN confirms nothing, and the
                 // raw reported sleep state stays in vcsec_sleep_state_.
@@ -1286,13 +1285,11 @@ void VehicleController::loop_task_fn_(void* arg) {
                 if (self->command_identity_ready_()) self->drive_command_runner_();
             } catch (const std::exception& e) {
                 ESP_LOGE(TAG, "drive_command_runner_ threw (%s) — resetting BLE link", e.what());
-                self->vcsec_sleep_state_.store(
-                    static_cast<int>(tk::SleepState::Unknown));
+                self->mark_vcsec_unknown_();
                 self->ble_fault_.store(true);
             } catch (...) {
                 ESP_LOGE(TAG, "drive_command_runner_ threw (unknown) — resetting BLE link");
-                self->vcsec_sleep_state_.store(
-                    static_cast<int>(tk::SleepState::Unknown));
+                self->mark_vcsec_unknown_();
                 self->ble_fault_.store(true);
             }
         }
@@ -1466,7 +1463,7 @@ void VehicleController::loop_task_fn_(void* arg) {
         // The RX path updates vcsec_sleep_state_ from the car's vehicleSleepStatus on
         // every VCSEC poll, including auto_pair_task's idle health probe — the only BLE
         // traffic while parked. Sample that atomic state here and fold it into the debounce clock so link_state() can require a
-        // STABLE ASLEEP run before showing "Vehicle asleep". UNKNOWN leaves the clock alone.
+        // STABLE ASLEEP run before showing "Vehicle asleep". UNKNOWN breaks the run.
         // Log only on a transition so the serial console reveals what the car actually reports
         // (e.g. whether VCSEC ever asserts ASLEEP, or just flaps for COP) without spamming.
         uint32_t now_ticks = xTaskGetTickCount();
@@ -1489,9 +1486,9 @@ void VehicleController::loop_task_fn_(void* arg) {
             if (st == tk::SleepState::Asleep) {
                 self->note_vcsec_sleep_(true);
                 sample = tk::WakeSample::Asleep;
-            } else if (st == tk::SleepState::Awake) {
+            } else {
                 self->note_vcsec_sleep_(false);
-                sample = tk::WakeSample::Awake;
+                if (st == tk::SleepState::Awake) sample = tk::WakeSample::Awake;
             }
 
             // Dual-trigger one-shot charge poll (issue #264, #300, #301):

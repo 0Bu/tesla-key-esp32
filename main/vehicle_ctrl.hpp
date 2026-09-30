@@ -665,7 +665,8 @@ private:
     // here the START tick of an uninterrupted ASLEEP run (0 = not currently ASLEEP). The flag
     // can flap AWAKE↔ASLEEP (~60 s) while Cabin-Overheat-Protection cycles the A/C, so a
     // single ASLEEP reading is NOT proof of sleep; link_state() only treats it as asleep once
-    // the run has held for kAsleepDebounceS, which filters those blips. Cleared on a pairing
+    // the run has held for kAsleepDebounceS, which filters those blips. UNKNOWN also breaks proof.
+    // Cleared on a pairing
     // reset (clear_session_and_cache_).
     std::atomic<uint32_t> vcsec_asleep_since_ticks_{0};
     // vcsec_sleep_state_ is updated from incoming VCSEC frames under vehicle_mutex_; status
@@ -681,14 +682,19 @@ private:
     // Reusable single-allocation buffer for command transmission (builder wire format without double length)
     std::vector<uint8_t> tx_buffer_{};
     // Fold one sampled VCSEC sleep reading into the debounce clock. ASLEEP starts/continues
-    // the run (keeping its original start tick); AWAKE breaks it. UNKNOWN is not passed here
-    // (the caller leaves the clock untouched so a transient unknown can't reset a real run).
+    // the run (keeping its original start tick); AWAKE or UNKNOWN breaks it.
     void note_vcsec_sleep_(bool asleep) {
         if (asleep) { uint32_t z = 0; vcsec_asleep_since_ticks_.compare_exchange_strong(z, xTaskGetTickCount()); }
         else        { vcsec_asleep_since_ticks_.store(0); }
     }
+    void mark_vcsec_unknown_() {
+        vcsec_sleep_state_.store(static_cast<int>(tk::SleepState::Unknown));
+        note_vcsec_sleep_(false);
+    }
     // True once the VCSEC ASLEEP run has held uninterrupted for at least debounce_s seconds.
     bool vcsec_stably_asleep_(uint32_t debounce_s) const {
+        if (static_cast<tk::SleepState>(vcsec_sleep_state_.load()) != tk::SleepState::Asleep)
+            return false;
         uint32_t t = vcsec_asleep_since_ticks_.load();
         if (t == 0) return false;
         return ((xTaskGetTickCount() - t) / configTICK_RATE_HZ) >= debounce_s;

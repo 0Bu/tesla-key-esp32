@@ -123,6 +123,13 @@ static std::atomic<bool> s_ever_up{false};
 // "searching", MQTT dropped the RSSI) while a perfectly healthy WiFi lease was still in hand.
 static std::atomic<bool> s_wifi_lease{false};
 static std::atomic<bool> s_eth_lease{false};
+static std::atomic<uint32_t> s_lease_generation[3] = {};
+static_assert(static_cast<int>(NetLink::None) == 0 && static_cast<int>(NetLink::Wifi) == 1 &&
+              static_cast<int>(NetLink::Eth) == 2,
+              "lease generations are indexed by NetLink");
+static uint32_t lease_generation(NetLink kind) {
+    return s_lease_generation[static_cast<int>(kind)].load();
+}
 
 // Each backend owns its netif handle; these let recompute_link() sit above both without
 // reordering the file. Both return nullptr until their transport has been started.
@@ -148,6 +155,7 @@ static void recompute_link() {
 // disagree with s_kind — the exact class of drift the old five-`extern` arrangement invited.
 static void link_up(NetLink kind) {
     const bool was_up = (s_kind.load() != NetLink::None);
+    s_lease_generation[static_cast<int>(kind)].fetch_add(1);
     if (kind == NetLink::Eth) s_eth_lease.store(true); else s_wifi_lease.store(true);
     recompute_link();
     // Count a RE-establishment, not a transport switch: going from one live transport to the
@@ -159,6 +167,7 @@ static void link_up(NetLink kind) {
 }
 
 static void link_down(NetLink kind) {
+    s_lease_generation[static_cast<int>(kind)].fetch_add(1);
     if (kind == NetLink::Eth) s_eth_lease.store(false); else s_wifi_lease.store(false);
     recompute_link();
 }
@@ -964,28 +973,15 @@ static const int kWdPingCount     = 3;    // echoes per check; healthy if ≥1 r
 // later probe while the old ping task is still alive.
 static PingProbeControl s_wd{};
 
-// Set true the first time THIS TRANSPORT's gateway answers ICMP — the baseline watch_step()
-// requires before it will act. Indexed by NetLink, and that indexing is the point: a single
-// global flag let a freshly plugged-in Ethernet segment inherit "this gateway has answered
-// before" from the WiFi gateway, which is exactly the false evidence the latch exists to
-// refuse. The guard has to be per transport or it evaporates at the moment it is needed.
-static std::atomic<bool> s_gw_ever_reachable[3] = {};
-static_assert(static_cast<int>(NetLink::None) == 0 && static_cast<int>(NetLink::Wifi) == 1 &&
-              static_cast<int>(NetLink::Eth)  == 2,
-              "s_gw_ever_reachable is indexed by NetLink — keep the enum contiguous from 0");
-
-static std::atomic<bool>& gw_baseline(NetLink k) {
-    return s_gw_ever_reachable[static_cast<int>(k)];
-}
-
 // One probe verdict together with the transport it measured. The blocking echo takes seconds and a
 // WiFi→Ethernet takeover can happen inside it, so every verdict — reply baseline, failure count and
 // the recovery action — must be attributed to the transport whose gateway was actually pinged, never
 // to whichever transport is current when the probe returns.
 struct GatewaySample {
-    NetLink kind{NetLink::None};  // the transport this sample belongs to
+    tk::GatewayIdentity identity{}; // sampled transport, lease generation and gateway IPv4 address
     bool    usable{false};        // false: no evidence either way (not measurable, or the transport changed mid-probe)
     bool    reachable{true};      // meaningful only when usable; false is a PROVEN failure to reach the gateway
+    bool    replied{false};       // only an actual ICMP reply establishes a baseline
 };
 
 // Blocking ICMP echo to the default gateway of the ACTIVE transport, sent out of that transport's
@@ -1004,14 +1000,18 @@ static GatewaySample gateway_reachable() {
     const NetLink kind = s_kind.load();
     esp_netif_t* netif = net_active_netif();
     if (kind == NetLink::None || s_kind.load() != kind || net_active_netif() != netif) return out;
-    out.kind = kind;
+    out.identity.transport = kind;
+    out.identity.lease_generation = lease_generation(kind);
 
     esp_netif_ip_info_t ip{};
-    if (!netif || esp_netif_get_ip_info(netif, &ip) != ESP_OK || ip.gw.addr == 0) {
+    if (!netif || esp_netif_get_ip_info(netif, &ip) != ESP_OK) return out;
+    if (ip.gw.addr == 0) {
         out.usable = true;
         out.reachable = false;  // no gateway/lease → not reachable
         return out;
     }
+    out.identity.address = ip.gw.addr;
+    if (lease_generation(kind) != out.identity.lease_generation) return out;
 
     char gw[16];
     esp_ip4addr_ntoa(&ip.gw, gw, sizeof(gw));
@@ -1035,15 +1035,17 @@ static GatewaySample gateway_reachable() {
         s_wd, cfg,
         pdMS_TO_TICKS(kWdPingCount * (kWdPingTimeoutMs + 250) + 2000),
         pdMS_TO_TICKS(2000));
-    // A reply proves THIS transport's gateway answers ICMP, whatever happened afterwards.
-    if (result == PingProbeResult::Reply) gw_baseline(kind).store(true);
-    // A verdict about a transport that lost the default route during the probe is not evidence
-    // about the transport that holds it now (e.g. Ethernet must not be judged on WiFi's gateway).
-    if (s_kind.load() != kind || net_active_netif() != netif) return out;
+    // A verdict about a changed route or lease is not evidence for the current gateway.
+    if (s_kind.load() != kind || net_active_netif() != netif ||
+        lease_generation(kind) != out.identity.lease_generation) return out;
+    esp_netif_ip_info_t current_ip{};
+    if (esp_netif_get_ip_info(netif, &current_ip) != ESP_OK ||
+        current_ip.gw.addr != out.identity.address) return out;
     out.usable = true;
     // Only an exact completed generation with zero replies is evidence of failure. Setup failure
     // or a quarantined late callback remains "unknown", so the watchdog cannot false-alarm.
     out.reachable = result != PingProbeResult::NoReply;
+    out.replied = result == PingProbeResult::Reply;
     return out;
 }
 
@@ -1051,14 +1053,20 @@ static GatewaySample gateway_reachable() {
 // the event handler reconnects with the known-good credentials (s_ever_up is true by
 // definition here, so we must not call esp_wifi_connect() ourselves — that would race the
 // handler into a double-connect).
-static void net_recover(NetLink sampled_kind) {
+static void net_recover(tk::GatewayIdentity sampled) {
     // The verdict belongs to the transport that was probed. If the default route moved since, the
     // current transport has produced no evidence and must not be reset for the old one's failure.
-    if (s_kind.load() != sampled_kind) {
-        ESP_LOGW(TAG, "watchdog: transport changed since the failed probe — not recovering");
+    esp_netif_t* netif = net_active_netif();
+    esp_netif_ip_info_t current_ip{};
+    if (s_kind.load() != sampled.transport ||
+        lease_generation(sampled.transport) != sampled.lease_generation || !netif ||
+        esp_netif_get_ip_info(netif, &current_ip) != ESP_OK ||
+        current_ip.gw.addr != sampled.address ||
+        lease_generation(sampled.transport) != sampled.lease_generation) {
+        ESP_LOGW(TAG, "watchdog: transport or lease changed since the failed probe — not recovering");
         return;
     }
-    switch (sampled_kind) {
+    switch (sampled.transport) {
         case NetLink::Wifi:
             ESP_LOGW(TAG, "watchdog: ghost association — forcing WiFi re-association");
             esp_wifi_disconnect();
@@ -1088,7 +1096,8 @@ static void net_recover(NetLink sampled_kind) {
 static void net_watchdog_task(void*) {
     try {
       tk::LinkWatch watch{};
-      NetLink watched_kind = NetLink::None;
+      tk::GatewayIdentity watched_identity{};
+      tk::GatewayBaseline baselines[3]{};
       for (;;) {
         vTaskDelay(pdMS_TO_TICKS(kWdPeriodS * 1000));
 
@@ -1102,19 +1111,19 @@ static void net_watchdog_task(void*) {
             // Not measurable, or the transport changed during the probe: neither a reply nor a
             // failure. Drop the failure streak — it described a transport that may be gone.
             watch = tk::LinkWatch{};
-            watched_kind = NetLink::None;
+            watched_identity = {};
             continue;
         }
         // A failure streak belongs to one transport generation; a switch starts a new streak.
-        if (sample.kind != watched_kind) {
+        if (sample.identity != watched_identity) {
             watch = tk::LinkWatch{};
-            watched_kind = sample.kind;
+            watched_identity = sample.identity;
         }
         const bool gw = up && sample.reachable;
 
-        // The baseline belongs to the transport that was probed, not to the boot and not to
-        // whichever transport is current now.
-        const bool gw_ever = gw_baseline(sample.kind).load();
+        // The watchdog task owns baselines: a new lease or gateway starts cold.
+        const bool gw_ever = baselines[static_cast<int>(sample.identity.transport)].observe(
+            sample.identity, sample.replied);
 
         switch (tk::watch_step(watch, up, gw, gw_ever)) {
             case tk::WatchAction::Idle:
@@ -1128,7 +1137,7 @@ static void net_watchdog_task(void*) {
                               "re-establish");
                 break;
             case tk::WatchAction::Recover:
-                net_recover(sample.kind);
+                net_recover(sample.identity);
                 break;
         }
       }

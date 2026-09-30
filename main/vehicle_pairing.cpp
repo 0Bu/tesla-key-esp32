@@ -507,8 +507,8 @@ tk::KeyRotationResult VehicleController::generate_key_locked_() {
             }
             if (!retired) {
                 key_created_untrusted_.store(true);
-                ESP_LOGW(TAG, "previous key creation date could not be erased — hiding it until "
-                              "the next successful stamp");
+                ESP_LOGW(TAG, "previous key creation date could not be erased — rotation journal "
+                              "remains armed until the date can be retired");
             }
         }
     }
@@ -565,6 +565,14 @@ bool VehicleController::regenerate_key_native_() {
 
 bool VehicleController::finish_key_rotation_cleanup_() {
     if (!clear_session_and_cache_()) return false;
+    // Do not retire the durable journal while an old key's date can reappear after reboot.
+    if (key_created_untrusted_.load()) {
+        if (!storage_ || !storage_->remove(tk::nvs_contract::kKeyCreated)) {
+            ESP_LOGE(TAG, "key-rotation date cleanup still pending");
+            return false;
+        }
+        key_created_untrusted_.store(false);
+    }
     // The marker is removed LAST. If this commit fails, pairing_cleanup_pending_ keeps every
     // signer gated and the supervisor/next boot repeats the idempotent erases.
     if (!storage_ || !storage_->remove(tk::kKeyRotationMarker)) {
@@ -669,8 +677,7 @@ bool VehicleController::clear_session_and_cache_() {
         charge_state_generation_.store(0);
         charge_cache_stale_reported_.store(false);
         last_reachable_ticks_.store(0);  // and no proven reachability → link_state() back to Unknown
-        vcsec_asleep_since_ticks_.store(0);  // forget any debounced sleep run from the old pairing
-        vcsec_sleep_state_.store(static_cast<int>(tk::SleepState::Unknown));
+        mark_vcsec_unknown_();  // forget the old pairing's debounced sleep run
     }
     ESP_LOGI(TAG, "pairing/session cleanup %s", cleanup_ok ? "complete" : "incomplete");
     return cleanup_ok;

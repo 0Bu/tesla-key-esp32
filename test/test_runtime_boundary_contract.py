@@ -2173,31 +2173,38 @@ def require_ping_probe_contract(header: str, generation_header: str,
             raise AssertionError(f"executable ping lifecycle matrix missing {token!r}")
 
     gateway = function_body_in(net_source, "gateway_reachable")
+    if net_source.count("s_lease_generation[static_cast<int>(kind)].fetch_add(1);") != 2:
+        raise AssertionError("every link-up and link-down must advance the lease generation")
     for token in (
-        "if (result == PingProbeResult::Reply) gw_baseline(kind).store(true);",
+        "out.identity.address = ip.gw.addr;",
+        "out.identity.lease_generation = lease_generation(kind);",
         "out.reachable = result != PingProbeResult::NoReply;",
+        "out.replied = result == PingProbeResult::Reply;",
         # Transport-attribution seams (F12): the probe is bound to the sampled netif, and a verdict
         # is discarded when the default route moved while the blocking echo was in flight.
         "cfg.interface   = static_cast<uint32_t>(esp_netif_get_netif_impl_index(netif));",
         "if (kind == NetLink::None || s_kind.load() != kind || net_active_netif() != netif) return out;",
-        "if (s_kind.load() != kind || net_active_netif() != netif) return out;",
+        "lease_generation(kind) != out.identity.lease_generation) return out;",
+        "current_ip.gw.addr != out.identity.address) return out;",
     ):
         if token not in gateway:
             raise AssertionError(f"gateway unknown-vs-failure policy missing {token!r}")
-    require_before("gateway reply establishes baseline for the probed transport", gateway,
-                   "const PingProbeResult result = ping_probe_run(",
-                   "if (result == PingProbeResult::Reply) gw_baseline(kind).store(true);")
-    require_before("gateway baseline before transport-change discard", gateway,
-                   "if (result == PingProbeResult::Reply) gw_baseline(kind).store(true);",
-                   "if (s_kind.load() != kind || net_active_netif() != netif) return out;")
+    require_before("gateway route validation before reply attribution", gateway,
+                   "current_ip.gw.addr != out.identity.address) return out;",
+                   "out.replied = result == PingProbeResult::Reply;")
     require_before("gateway transport-change discard before reset verdict", gateway,
-                   "if (s_kind.load() != kind || net_active_netif() != netif) return out;",
+                   "if (s_kind.load() != kind || net_active_netif() != netif ||",
                    "out.reachable = result != PingProbeResult::NoReply;")
-    if "gw_baseline(s_kind.load())" in net_source or "gw_baseline(net_kind())" in net_source:
-        raise AssertionError("gateway baseline must be indexed by the PROBED transport, not the current one")
+    watchdog = function_body_in(net_source, "net_watchdog_task")
+    for token in ("sample.identity != watched_identity", "sample.identity, sample.replied",
+                  "net_recover(sample.identity)"):
+        if token not in watchdog:
+            raise AssertionError(f"gateway identity baseline missing {token!r}")
     recover = function_body_in(net_source, "net_recover")
-    if "if (s_kind.load() != sampled_kind) {" not in recover or "switch (sampled_kind)" not in recover:
-        raise AssertionError("net_recover must act only on the transport that was probed")
+    if "current_ip.gw.addr != sampled.address" not in recover or \
+       "lease_generation(sampled.transport) != sampled.lease_generation" not in recover or \
+       "switch (sampled.transport)" not in recover:
+        raise AssertionError("net_recover must act only on the gateway that was probed")
 
 
 def require_ota_fetch_contract(ota_source: str, ota_logic: str,
@@ -4936,11 +4943,11 @@ def self_test_canaries(tasks: set[str], callbacks: set[str]) -> None:
             syslog_source,
         ),
         (
-            "gateway baseline credited to the current transport",
+            "gateway reply attributed without same-lease check",
             ping_header, ping_generation,
             net_source.replace(
-                "if (result == PingProbeResult::Reply) gw_baseline(kind).store(true);",
-                "if (result == PingProbeResult::Reply) gw_baseline(s_kind.load()).store(true);",
+                "current_ip.gw.addr != out.identity.address) return out;",
+                "current_ip.gw.addr == out.identity.address) return out;",
                 1,
             ),
             syslog_source,
@@ -4959,8 +4966,18 @@ def self_test_canaries(tasks: set[str], callbacks: set[str]) -> None:
             "gateway verdict kept after a transport change",
             ping_header, ping_generation,
             net_source.replace(
-                "    if (s_kind.load() != kind || net_active_netif() != netif) return out;\n    out.usable = true;",
-                "    out.usable = true;",
+                "    if (s_kind.load() != kind || net_active_netif() != netif ||\n        lease_generation(kind) != out.identity.lease_generation) return out;\n    esp_netif_ip_info_t current_ip{};",
+                "    esp_netif_ip_info_t current_ip{};",
+                1,
+            ),
+            syslog_source,
+        ),
+        (
+            "gateway verdict kept after a same-IP lease change",
+            ping_header, ping_generation,
+            net_source.replace(
+                "    if (s_kind.load() != kind || net_active_netif() != netif ||\n        lease_generation(kind) != out.identity.lease_generation) return out;",
+                "    if (s_kind.load() != kind || net_active_netif() != netif) return out;",
                 1,
             ),
             syslog_source,
@@ -5823,6 +5840,20 @@ def main() -> int:
     callbacks = callback_inventory(ALL_CODE)
     check_contract(tasks, callbacks)
     self_test_canaries(tasks, callbacks)
+    pairing = SOURCES["vehicle_pairing.cpp"]
+    boot = SOURCES["vehicle_ctrl.cpp"]
+    telemetry = SOURCES["vehicle_telemetry.cpp"]
+    finish = function_body_in(pairing, "finish_key_rotation_cleanup_")
+    recovery = function_body_in(boot, "recover_pending_key_rotation_at_boot_")
+    receiver = function_body_in(telemetry, "process_vcsec_message_") if "process_vcsec_message_(" in telemetry else telemetry
+    require_before("untrusted key date retired before journal", finish,
+                   "storage_->remove(tk::nvs_contract::kKeyCreated)",
+                   "storage_->remove(tk::kKeyRotationMarker)")
+    require_before("boot key date retired before journal", recovery,
+                   "storage_->remove(tk::nvs_contract::kKeyCreated)",
+                   "storage_->remove(tk::kKeyRotationMarker)")
+    if "else note_vcsec_sleep_(false);" not in receiver or "self->note_vcsec_sleep_(false);" not in telemetry:
+        raise AssertionError("VCSEC UNKNOWN must break the ASLEEP debounce in RX and loop sampling")
     print(f"OK runtime C-boundary inventory ({len(tasks)} tasks, {len(callbacks)} callbacks)")
     return 0
 

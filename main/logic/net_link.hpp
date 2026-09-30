@@ -30,6 +30,32 @@ namespace tk {
 // exist only for the former), and /status has to name the transport for a remote triage.
 enum class NetLink : uint8_t { None = 0, Wifi = 1, Eth = 2 };
 
+// An ICMP reply only establishes a baseline for the lease and gateway actually sampled. Even
+// the same IPv4 address may name a different router after reconnecting to another network.
+struct GatewayIdentity {
+    NetLink transport{NetLink::None};
+    uint32_t address{0};
+    uint32_t lease_generation{0};
+    constexpr bool operator==(const GatewayIdentity& other) const {
+        return transport == other.transport && address == other.address &&
+               lease_generation == other.lease_generation;
+    }
+    constexpr bool operator!=(const GatewayIdentity& other) const { return !(*this == other); }
+};
+
+struct GatewayBaseline {
+    GatewayIdentity identity{};
+    bool ever_replied{false};
+    bool observe(GatewayIdentity current, bool replied) {
+        if (identity != current) {
+            identity = current;
+            ever_replied = false;
+        }
+        if (current.address != 0 && replied) ever_replied = true;
+        return ever_replied;
+    }
+};
+
 inline const char* net_link_str(NetLink k) {
     switch (k) {
         case NetLink::Wifi: return "wifi";

@@ -111,7 +111,10 @@ bool VehicleController::recover_pending_key_rotation_at_boot_() {
     const bool vcsec_removed = storage_->remove(tk::nvs_contract::kSessionVcsec);
     const bool info_removed = storage_->remove(tk::nvs_contract::kSessionInfotainment);
     const bool paired_removed = storage_->remove(tk::nvs_contract::kPairedAt);
-    const bool cleanup_ok = vcsec_removed && info_removed && paired_removed;
+    // An interrupted rotation cannot prove whether key_created names the old or new key.
+    // Retire it before the journal, even if a new date was already stamped before power loss.
+    const bool date_removed = storage_->remove(tk::nvs_contract::kKeyCreated);
+    const bool cleanup_ok = vcsec_removed && info_removed && paired_removed && date_removed;
     // Short-circuit deliberately: the journal is the retry authority and must remain durable
     // after any failed peer erase. Each remove commits independently, so power loss at every
     // boundary simply re-enters this idempotent branch on the next boot.

@@ -778,6 +778,42 @@ static void test_vin_transition_cleanup_ordering(NvsStorageAdapter& config, NvsS
     CHECK(erased_marker);
 }
 
+static void test_key_rotation_date_cleanup_ordering(NvsStorageAdapter& tesla) {
+    namespace NC = tk::nvs_contract;
+    // Model the boot retry: every erase is idempotent, but the durable marker must be last.
+    // The runtime source contract pins the same ordering in recover_pending_key_rotation_at_boot_().
+    auto finish_recovery = [&]() {
+        const bool vcsec = tesla.remove(NC::kSessionVcsec);
+        const bool info = tesla.remove(NC::kSessionInfotainment);
+        const bool paired = tesla.remove(NC::kPairedAt);
+        const bool date = tesla.remove(NC::kKeyCreated);
+        return vcsec && info && paired && date && tesla.remove(NC::kKeyRotation);
+    };
+    fail_erase_key = NC::kKeyCreated;
+    clear_call_log();
+    CHECK(!finish_recovery());
+    for (const auto& call : nvs_call_log) CHECK(call.key != NC::kKeyRotation);
+    fail_erase_key.clear();
+
+    // A failed NVS commit is equally non-authoritative. On the next boot/retry, retiring the
+    // date succeeds before the marker can be cleared, so no old key age can reappear.
+    next_commit_error = ESP_FAIL;
+    clear_call_log();
+    CHECK(!finish_recovery());
+    for (const auto& call : nvs_call_log) CHECK(call.key != NC::kKeyRotation);
+    clear_call_log();
+    CHECK(finish_recovery());
+    size_t date_index = nvs_call_log.size();
+    size_t marker_index = nvs_call_log.size();
+    for (size_t i = 0; i < nvs_call_log.size(); ++i) {
+        if (nvs_call_log[i].api == "erase_key" && nvs_call_log[i].key == NC::kKeyCreated)
+            date_index = i;
+        if (nvs_call_log[i].api == "erase_key" && nvs_call_log[i].key == NC::kKeyRotation)
+            marker_index = i;
+    }
+    CHECK(date_index < marker_index);
+}
+
 static void test_nvs_blob_load() {
     using B = tk::NvsBlobLoadState;
     namespace NC = tk::nvs_contract;
@@ -897,6 +933,7 @@ int main() {
     test_raw_blob_write_paths(storage);
     test_remove_paths(storage, tesla_storage);
     test_vin_transition_cleanup_ordering(storage, tesla_storage);
+    test_key_rotation_date_cleanup_ordering(tesla_storage);
 
     {
         const size_t before = nvs_calls;
@@ -1031,6 +1068,47 @@ int main() {
                              {ESP_ERR_NVS_NOT_FOUND, 0, {}}});
         CHECK(!tk::cfg_load(storage, out));
         CHECK(out.vin == legacy_vin);
+        check_blob_script_consumed();
+        check_script_consumed();
+    }
+
+    // Exact blob NOT_FOUND does not authorize migration when any legacy probe or second read
+    // fails. The output snapshot must remain untouched, including its VIN and credentials.
+    {
+        tk::ConfigBlob out;
+        out.vin = "untouched";
+        out.wifi_ssid = "untouched-ssid";
+        script_blob_reads({{ESP_ERR_NVS_NOT_FOUND, 0, {}}});
+        script_string_reads({{ESP_ERR_NVS_NOT_FOUND, 0, {}},
+                             {ESP_ERR_NVS_NOT_FOUND, 0, {}},
+                             {ESP_FAIL, 0, {}}});
+        CHECK(!tk::cfg_load_for_update(storage, out));
+        CHECK(out.vin == "untouched");
+        CHECK(out.wifi_ssid == "untouched-ssid");
+        check_blob_script_consumed();
+        check_script_consumed();
+    }
+    {
+        tk::ConfigBlob out;
+        out.vin = "untouched";
+        script_blob_reads({{ESP_ERR_NVS_NOT_FOUND, 0, {}}});
+        script_string_reads({{ESP_OK, 5, {}}, {ESP_FAIL, 5, {}}});
+        CHECK(!tk::cfg_load_for_update(storage, out));
+        CHECK(out.vin == "untouched");
+        check_blob_script_consumed();
+        check_script_consumed();
+    }
+    {
+        tk::ConfigBlob out;
+        out.mqtt_uri = "previous";
+        script_blob_reads({{ESP_ERR_NVS_NOT_FOUND, 0, {}}});
+        script_string_reads({{ESP_ERR_NVS_NOT_FOUND, 0, {}},
+                             {ESP_ERR_NVS_NOT_FOUND, 0, {}},
+                             {ESP_ERR_NVS_NOT_FOUND, 0, {}},
+                             {ESP_OK, 1, {}}, {ESP_OK, 1, ""},
+                             {ESP_ERR_NVS_NOT_FOUND, 0, {}}});
+        CHECK(tk::cfg_load_for_update(storage, out));
+        CHECK(out.mqtt_uri.empty());
         check_blob_script_consumed();
         check_script_consumed();
     }

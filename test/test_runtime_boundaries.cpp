@@ -313,7 +313,7 @@ bool NvsStorageAdapter::load_str(const char*, std::string& out) {
     out = stored_count;
     return true;
 }
-tk::NvsStringLoadState NvsStorageAdapter::load_str_state(const char*, std::string& out) {
+tk::NvsStringLoadState NvsStorageAdapter::load_str_state(const char*, std::string& out, bool) {
     if (throw_on_load) throw std::bad_alloc();
     if (throw_other_on_load) throw std::runtime_error("load fixture");
     if (!load_ok) {

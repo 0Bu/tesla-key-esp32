@@ -404,6 +404,11 @@ static void test_nvs_string_load() {
     CHECK(tk::classify_nvs_string_load(P::Ok, 8, true, 7, true) == S::Error);
     CHECK(tk::classify_nvs_string_load(P::Ok, 8, true, 9, true) == S::Error);
     CHECK(tk::classify_nvs_string_load(P::Ok, 8, true, 8, true) == S::Present);
+    // Legacy config may explicitly store an empty WiFi/MQTT/Syslog value. This exception must
+    // still reject probe/read failures and must not relax the nonempty VIN journal default.
+    CHECK(tk::classify_nvs_string_load(P::Ok, 1, true, 1, true, true) == S::Present);
+    CHECK(tk::classify_nvs_string_load(P::Ok, 1, false, 1, true, true) == S::Error);
+    CHECK(tk::classify_nvs_string_load(P::Ok, 1, true, 2, true, true) == S::Error);
 }
 
 // ─── Home Assistant vehicle identity ─────────────────────────────────────────
@@ -4880,6 +4885,20 @@ static void test_wifi_rollback() {
 
 // ─── Network transport seam (logic/net_link.hpp) ──────────────────────────────
 static void test_net_link() {
+    tk::GatewayBaseline wifi_baseline{};
+    const tk::GatewayIdentity wifi_a{tk::NetLink::Wifi, 0x01020304, 1};
+    const tk::GatewayIdentity wifi_b{tk::NetLink::Wifi, 0x05060708, 2};
+    const tk::GatewayIdentity wifi_new_lease{tk::NetLink::Wifi, 0x01020304, 3};
+    CHECK(!wifi_baseline.observe(wifi_a, false));
+    CHECK(wifi_baseline.observe(wifi_a, true));
+    CHECK(wifi_baseline.observe(wifi_a, false));
+    CHECK(!wifi_baseline.observe(wifi_b, false));  // new DHCP gateway cannot inherit A
+    CHECK(wifi_baseline.observe(wifi_b, true));
+    CHECK(!wifi_baseline.observe(wifi_a, false));  // returning to A is conservative
+    CHECK(!wifi_baseline.observe(wifi_new_lease, false)); // same IP, new lease is unproven
+    CHECK(!wifi_baseline.observe({tk::NetLink::Wifi, 0, 3}, true));
+    tk::GatewayBaseline eth_baseline{};
+    CHECK(!eth_baseline.observe({tk::NetLink::Eth, wifi_a.address, 1}, false));
     // The transport identity is what the presenters branch on; the strings are what /status
     // and the logs print, so pin both.
     CHECK(std::string(tk::net_link_str(tk::NetLink::None)) == "none");
