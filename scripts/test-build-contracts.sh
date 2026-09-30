@@ -14,6 +14,7 @@ python3 "$repo_root/scripts/check-firmware-artifacts.py" --self-test
 python3 "$repo_root/scripts/check-build-semantics.py" --self-test
 python3 "$repo_root/scripts/check-build-artifact-inventory.py" --self-test --source-root "$repo_root"
 python3 "$repo_root/scripts/report-firmware-size.py" --self-test
+"$repo_root/scripts/precheck-firmware.sh" --self-test
 python3 "$repo_root/scripts/check-release-assets.py" --self-test
 python3 "$repo_root/scripts/check-signed-root-inventory.py" --self-test
 python3 "$repo_root/scripts/prepare-reused-release.py" --self-test
