@@ -139,6 +139,9 @@ def parse_ninja_dependencies(
     records: dict[str, tuple[Path, ...]] = {}
     lines = text.splitlines()
     position = 0
+    # Every object lists ~10^2 headers and the same headers recur across hundreds of objects, so
+    # resolve each distinct path once per parse (a local cache: no state leaks between calls).
+    resolved_paths: dict[str, Path] = {}
     header = re.compile(
         r"^(?P<output>[^\r\n]+): #deps (?P<count>\d+), deps mtime \d+ \((?P<state>[A-Z]+)\)$"
     )
@@ -164,7 +167,11 @@ def parse_ninja_dependencies(
             line = lines[position]
             if not line.startswith("    ") or not line.strip():
                 raise SemanticsError(f"malformed Ninja dependency path for {output}: {line!r}")
-            dependencies.append(Path(line.strip()).resolve(strict=False))
+            raw_path = line.strip()
+            resolved_path = resolved_paths.get(raw_path)
+            if resolved_path is None:
+                resolved_path = resolved_paths[raw_path] = Path(raw_path).resolve(strict=False)
+            dependencies.append(resolved_path)
             position += 1
         if len(dependencies) != int(match.group("count")):
             raise SemanticsError(
@@ -207,6 +214,55 @@ def load_ninja_dependencies(
     return parse_ninja_dependencies(completed.stdout, outputs)
 
 
+def load_ninja_commands_batch(
+    ninja: Path, build_root: Path, outputs: tuple[str, ...]
+) -> dict[str, tuple[str, ...]] | None:
+    """Read every object's command with ONE `ninja -t commands -s` call instead of one per object.
+
+    A ~1000-object build spent ~30 s in per-object subprocess start-up alone. For distinct
+    single-output edges, `-s` prints exactly one command per requested target, in argument order.
+    The result is accepted only when it is unambiguous: a clean exit, no stderr, one non-empty line
+    per output, parseable quoting, and each line's own `-o` token names the output it was mapped to.
+    Anything else returns None so the caller re-derives the answer -- and every diagnostic -- with the
+    original strict per-output queries; the batch path can therefore never accept what the per-output
+    path would reject.
+    """
+    if not outputs or len(set(outputs)) != len(outputs):
+        return None
+    try:
+        completed = subprocess.run(
+            [str(ninja), "-t", "commands", "-s", *outputs],
+            cwd=build_root,
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=60,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if completed.returncode != 0 or completed.stderr.strip():
+        return None
+    lines = completed.stdout.splitlines()
+    if len(lines) != len(outputs) or any(not line.strip() for line in lines):
+        return None
+    records: dict[str, tuple[str, ...]] = {}
+    for output, line in zip(outputs, lines, strict=True):
+        try:
+            tokens = tuple(shlex.split(line, posix=True))
+        except ValueError:
+            return None
+        output_positions = [index for index, token in enumerate(tokens) if token == "-o"]
+        if (
+            len(output_positions) != 1
+            or output_positions[0] + 1 >= len(tokens)
+            or tokens[output_positions[0] + 1] != output
+        ):
+            return None
+        records[output] = tokens
+    return records
+
+
 def load_ninja_commands(
     build_root: Path, outputs: tuple[str, ...]
 ) -> dict[str, tuple[str, ...]]:
@@ -218,6 +274,9 @@ def load_ninja_commands(
     if ninja != Path("/usr/bin/ninja"):
         raise SemanticsError(f"Ninja command reader is outside the pinned toolchain: {ninja}")
     records: dict[str, tuple[str, ...]] = {}
+    batch = load_ninja_commands_batch(ninja, build_root, outputs)
+    if batch is not None:
+        return batch
     for output in outputs:
         try:
             completed = subprocess.run(
@@ -499,60 +558,90 @@ def validate_firmware_dependencies(
     managed_root = (source_root / "managed_components").resolve(strict=False)
     build_root = build_root.resolve(strict=False)
     tool_root = Path("/opt/esp/tools").resolve(strict=False)
+    idf_components = (
+        (idf_root / "components").resolve(strict=False) if idf_root is not None else None
+    )
     reviewed_suffixes = reviewed_runtime_code_suffixes(source_root)
     seen_generated: set[str] = set()
+    # The same headers appear in the dependency record of hundreds of objects. Canonicalising and
+    # classifying a path is a pure function of that path, so do it once per distinct path. Only
+    # successes are cached: a rejected path raises on first sight, exactly as before.
+    canonical_paths: dict[Path, Path] = {}
+    classified: dict[Path, tuple[str, str]] = {}
+    digest_verified: set[str] = set()
+
+    def classify(dependency: Path) -> tuple[str, str]:
+        build_relative = relative_to_resolved(dependency, build_root)
+        if build_relative is not None:
+            return ("build", build_relative.as_posix())
+        local_relative = relative_to_resolved(dependency, source_root)
+        if local_relative is not None:
+            if relative_to_resolved(dependency, main_root) is not None:
+                return ("main", local_relative.as_posix())
+            managed_relative = relative_to_resolved(dependency, managed_root)
+            if (
+                managed_relative is not None
+                and managed_relative.parts
+                and managed_relative.parts[0] in MANAGED_COMPONENTS
+            ):
+                return ("managed", local_relative.as_posix())
+            return ("local", local_relative.as_posix())
+        if idf_components is not None and relative_to_resolved(dependency, idf_components) is not None:
+            return ("trusted", "")
+        if relative_to_resolved(dependency, tool_root) is not None:
+            return ("trusted", "")
+        return ("external", "")
+
     for output, source in outputs.items():
         canonical_source = canonical_regular_file(source, f"source of {output}")
-        source_in_main = relative_to(canonical_source, main_root) is not None
-        source_in_managed = relative_to(canonical_source, managed_root) is not None
+        source_in_main = relative_to_resolved(canonical_source, main_root) is not None
+        source_in_managed = relative_to_resolved(canonical_source, managed_root) is not None
         dependencies = records.get(output)
         if dependencies is None:
             raise SemanticsError(f"missing dependency record for firmware object: {output}")
         if canonical_source not in dependencies:
             raise SemanticsError(f"firmware object dependency record omits its source: {output}")
-        for dependency in dependencies:
-            dependency = canonical_regular_file(dependency, f"dependency of {output}")
+        for raw_dependency in dependencies:
+            dependency = canonical_paths.get(raw_dependency)
+            if dependency is None:
+                dependency = canonical_paths[raw_dependency] = canonical_regular_file(
+                    raw_dependency, f"dependency of {output}"
+                )
             if dependency == canonical_source:
                 continue
-            build_relative = relative_to(dependency, build_root)
-            if build_relative is not None:
-                relative_name = build_relative.as_posix()
-                expected_digest = ALLOWED_GENERATED_MAIN_HEADERS.get(relative_name, "missing")
+            kind_and_name = classified.get(dependency)
+            if kind_and_name is None:
+                kind_and_name = classified[dependency] = classify(dependency)
+            kind, name = kind_and_name
+            if kind == "build":
+                expected_digest = ALLOWED_GENERATED_MAIN_HEADERS.get(name, "missing")
                 if expected_digest == "missing":
                     raise SemanticsError(
-                        f"firmware object uses unreviewed build-generated header: {relative_name}"
+                        f"firmware object uses unreviewed build-generated header: {name}"
                     )
-                if expected_digest is not None:
+                if expected_digest is not None and name not in digest_verified:
                     actual = hashlib.sha256(dependency.read_bytes()).hexdigest()
                     if actual != expected_digest:
                         raise SemanticsError(
-                            f"pinned generated header digest drifted: {relative_name}"
+                            f"pinned generated header digest drifted: {name}"
                         )
-                seen_generated.add(relative_name)
+                    digest_verified.add(name)
+                seen_generated.add(name)
                 continue
-            local_relative = relative_to(dependency, source_root)
-            if local_relative is not None:
-                if relative_to(dependency, main_root) is not None:
-                    if source_in_main and dependency.suffix.lower() in reviewed_suffixes:
-                        continue
-                    raise SemanticsError(
-                        "firmware object uses a local main dependency outside the runtime boundary "
-                        f"inventory: {local_relative.as_posix()}"
-                    )
-                managed_relative = relative_to(dependency, managed_root)
-                if (
-                    managed_relative is not None
-                    and managed_relative.parts
-                    and managed_relative.parts[0] in MANAGED_COMPONENTS
-                    and (source_in_main or source_in_managed)
-                ):
+            if kind == "main":
+                if source_in_main and dependency.suffix.lower() in reviewed_suffixes:
                     continue
                 raise SemanticsError(
-                    f"firmware object uses unreviewed repository header: {local_relative.as_posix()}"
+                    "firmware object uses a local main dependency outside the runtime boundary "
+                    f"inventory: {name}"
                 )
-            if idf_root is not None and relative_to(dependency, idf_root / "components") is not None:
+            if kind == "managed" and (source_in_main or source_in_managed):
                 continue
-            if relative_to(dependency, tool_root) is not None:
+            if kind in {"managed", "local"}:
+                raise SemanticsError(
+                    f"firmware object uses unreviewed repository header: {name}"
+                )
+            if kind == "trusted":
                 continue
             raise SemanticsError(f"firmware object uses untrusted external header: {dependency}")
     if "config/sdkconfig.h" not in seen_generated:
@@ -628,6 +717,19 @@ def is_main_component_output(output: str) -> bool:
 def relative_to(path: Path, root: Path) -> Path | None:
     try:
         return path.relative_to(root.resolve(strict=False))
+    except ValueError:
+        return None
+
+
+def relative_to_resolved(path: Path, resolved_root: Path) -> Path | None:
+    """`relative_to` for a root the caller already resolved once.
+
+    The gate walks ~10^5 header/include paths per build; re-resolving the same handful of roots for
+    every one of them dominated its runtime. Hoisting the resolve changes no verdict because the
+    filesystem is not mutated while the gate runs.
+    """
+    try:
+        return path.relative_to(resolved_root)
     except ValueError:
         return None
 
@@ -771,10 +873,17 @@ def validate_compile_include_paths(
     build_root: Path,
     idf_root: Path | None,
     target: str,
+    *,
+    accepted_paths: set[tuple[str, str]] | None = None,
 ) -> None:
     # A repository-local include search path must be exactly main/, the current build tree, or one
     # allowlisted dependency-manager component subtree.  Accepting a main/ subdirectory would let
     # an angled include resolve a fragment that the lexical include resolver cannot see.
+    #
+    # `accepted_paths` memoises ACCEPTED (directory, include path) pairs for one gate run: a build
+    # repeats the same few hundred include directories across ~10^3 compile commands, and the verdict
+    # is a pure function of that pair. Rejections are never cached, so the first bad path raises
+    # exactly as before.
     include_paths: list[str] = []
     index = 0
     while index < len(tokens):
@@ -797,27 +906,42 @@ def validate_compile_include_paths(
     source_root_resolved = source_root.resolve(strict=False)
     main_root = (source_root / "main").resolve(strict=False)
     managed_root = (source_root / "managed_components").resolve(strict=False)
+    build_root_resolved = build_root.resolve(strict=False)
+    idf_components = (
+        (idf_root / "components").resolve(strict=False) if idf_root is not None else None
+    )
     for include_path in include_paths:
+        pair = (str(directory), include_path)
+        if accepted_paths is not None and pair in accepted_paths:
+            continue
         resolved = Path(include_path)
         if not resolved.is_absolute():
             resolved = directory / resolved
         resolved = resolved.resolve(strict=False)
-        if relative_to(resolved, source_root_resolved) is not None:
-            if resolved == main_root or relative_to(resolved, build_root) is not None:
+        if relative_to_resolved(resolved, source_root_resolved) is not None:
+            if resolved == main_root or relative_to_resolved(resolved, build_root_resolved) is not None:
+                if accepted_paths is not None:
+                    accepted_paths.add(pair)
                 continue
-            managed_relative = relative_to(resolved, managed_root)
+            managed_relative = relative_to_resolved(resolved, managed_root)
             if (
                 managed_relative is not None
                 and managed_relative.parts
                 and managed_relative.parts[0] in MANAGED_COMPONENTS
             ):
+                if accepted_paths is not None:
+                    accepted_paths.add(pair)
                 continue
             raise SemanticsError(
                 f"{file_name} has repository-local include path outside reviewed roots: {include_path}"
             )
-        if relative_to(resolved, build_root) is not None:
+        if relative_to_resolved(resolved, build_root_resolved) is not None:
+            if accepted_paths is not None:
+                accepted_paths.add(pair)
             continue
-        if idf_root is not None and relative_to(resolved, idf_root / "components") is not None:
+        if idf_components is not None and relative_to_resolved(resolved, idf_components) is not None:
+            if accepted_paths is not None:
+                accepted_paths.add(pair)
             continue
         raise SemanticsError(
             f"{file_name} has untrusted external include path: {include_path}"
@@ -1754,6 +1878,7 @@ def validate(
     firmware_compile_commands: dict[str, tuple[str, ...]] = {}
     idf_path_text = os.environ.get("IDF_PATH")
     idf_root = Path(idf_path_text).resolve(strict=False) if idf_path_text else None
+    accepted_include_paths: set[tuple[str, str]] = set()
     checked = 0
     for entry in database:
         if not isinstance(entry, dict):
@@ -1821,7 +1946,8 @@ def validate(
         if allowed_specs is not None and allowed_specs in tokens:
             specs_compilers.add(Path(tokens[0]))
         validate_compile_include_paths(
-            file_name, tokens, Path(directory_text), source_root, build_root, idf_root, target
+            file_name, tokens, Path(directory_text), source_root, build_root, idf_root, target,
+            accepted_paths=accepted_include_paths,
         )
         firmware_outputs[output] = source
         firmware_compile_commands[output] = tuple(raw_tokens)
@@ -2403,6 +2529,100 @@ def self_test_build_graph_contract(repository_root: Path) -> None:
                 producer, build_root, idf_root,
             ),
         )
+
+
+def self_test_fast_paths() -> None:
+    """Canaries for the batching/memoisation added to keep this gate fast.
+
+    Speed must never widen what the gate accepts: the batch Ninja reader may only answer when the
+    result is unambiguous (otherwise it defers to the strict per-output queries), and rejected
+    include paths must never enter the accepted-path memo.
+    """
+    with tempfile.TemporaryDirectory() as directory:
+        work = Path(directory)
+        fake = work / "fake-ninja"
+        fake.write_text(
+            "#!/bin/sh\n"
+            'cat "$0.out"\n'
+            '[ -f "$0.err" ] && cat "$0.err" >&2\n'
+            'exit "$(cat "$0.rc" 2>/dev/null || echo 0)"\n',
+            encoding="utf-8",
+        )
+        fake.chmod(0o755)
+
+        def batch(outputs: tuple[str, ...], lines: list[str], *, err: str = "", rc: int = 0):
+            Path(f"{fake}.out").write_text("".join(f"{line}\n" for line in lines), encoding="utf-8")
+            Path(f"{fake}.rc").write_text(f"{rc}\n", encoding="utf-8")
+            error_file = Path(f"{fake}.err")
+            if err:
+                error_file.write_text(err, encoding="utf-8")
+            elif error_file.exists():
+                error_file.unlink()
+            return load_ninja_commands_batch(fake, work, outputs)
+
+        first, second = "a/one.obj", "a/two.obj"
+        good = [f"cc -c one.c -o {first}", f"cc -c two.c -o {second}"]
+        accepted = batch((first, second), good)
+        if accepted != {
+            first: ("cc", "-c", "one.c", "-o", first),
+            second: ("cc", "-c", "two.c", "-o", second),
+        }:
+            raise AssertionError("batch Ninja reader rejected an unambiguous answer")
+        anomalies = {
+            "swapped commands": lambda: batch((first, second), good[::-1]),
+            "missing command": lambda: batch((first, second), good[:1]),
+            "extra command": lambda: batch((first, second), [*good, good[0]]),
+            "blank line": lambda: batch((first, second), [good[0], ""]),
+            "command without -o": lambda: batch((first, second), [good[0], "cc -c two.c"]),
+            "stderr output": lambda: batch((first, second), good, err="warning\n"),
+            "non-zero exit": lambda: batch((first, second), good, rc=1),
+            "unterminated quote": lambda: batch((first, second), [good[0], 'cc "x -o ' + second]),
+            # Both lines are individually valid for `first`, so only the duplicate guard rejects this.
+            "duplicate outputs": lambda: batch((first, first), [good[0], good[0]]),
+            "no outputs": lambda: batch((), []),
+        }
+        for label, run in anomalies.items():
+            if run() is not None:
+                raise AssertionError(f"batch Ninja reader accepted an ambiguous answer: {label}")
+
+        source_root = work / "src"
+        build_root = source_root / "build"
+        (source_root / "main").mkdir(parents=True)
+        build_root.mkdir()
+        memo: set[tuple[str, str]] = set()
+
+        def check_includes(*paths: str) -> None:
+            validate_compile_include_paths(
+                "sample.cpp",
+                ["cc", *(f"-I{path}" for path in paths)],
+                build_root,
+                source_root,
+                build_root,
+                None,
+                "esp32",
+                accepted_paths=memo,
+            )
+
+        check_includes(str(source_root / "main"), str(build_root))
+        if len(memo) != 2:
+            raise AssertionError("accepted include paths were not memoised")
+        for _ in range(2):  # a rejected path must raise every time and must never be cached
+            try:
+                check_includes(str(source_root / "main"), str(work / "elsewhere"))
+            except SemanticsError:
+                pass
+            else:
+                raise AssertionError("untrusted include path was accepted after memoisation")
+        if any(str(work / "elsewhere") in pair for pair in memo):
+            raise AssertionError("a rejected include path entered the accepted-path memo")
+
+        record = "out.obj: #deps 2, deps mtime 1 (VALID)\n    /tmp/dep/a.h\n    /tmp/dep/a.h\n"
+        try:
+            parse_ninja_dependencies(record, ("out.obj",))
+        except SemanticsError:
+            pass
+        else:
+            raise AssertionError("duplicate header dependency was accepted after path caching")
 
 
 def self_test() -> None:
@@ -3176,6 +3396,7 @@ def self_test() -> None:
             pass
         else:
             raise AssertionError("wrong effective target was accepted")
+    self_test_fast_paths()
     print("effective build semantics self-test: PASS")
 
 
