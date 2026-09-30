@@ -447,11 +447,18 @@ function scrollToKey(){
   if(btn && typeof btn.focus === 'function') btn.focus();
 }
 
-// The hero's one primary action, picked by render(); the gauge calls heroTap().
+// The hero's one primary action, picked by render(); the gauge calls heroTap(),
+// and mobile taps on the card body also trigger the action when active.
 var heroActFn=null;
 function heroTap(){ if(heroActFn) return heroActFn(); }
+function heroCardTap(e){
+  if(e && e.target && e.target.closest && e.target.closest('button, a')) return;
+  if(typeof window !== 'undefined' && window.innerWidth <= 860 && heroActFn) return heroActFn();
+}
 function setHeroAct(label,icon,fn,busyText){
   heroActFn=busyText?null:fn;
+  var hero=$("hero");
+  if(hero) hero.classList.toggle('has-act',!!heroActFn);
 }
 var bannerFn=null;
 function bannerAction(){ if(isOtaRunning()) return; if(bannerFn) return bannerFn(); }
