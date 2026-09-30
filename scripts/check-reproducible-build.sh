@@ -3,6 +3,14 @@
 # unstripped ELF bytes. When a baseline pair is supplied, it is the first build; otherwise two
 # distinct fresh directories are built. Run inside the pinned ESP-IDF container; signing is
 # intentionally outside this contract.
+#
+#   check-reproducible-build.sh <target> <display-version> [baseline-app baseline-elf]
+#   check-reproducible-build.sh --emit <outdir> <target> <display-version>
+#
+# --emit builds ONE fresh, isolated copy and leaves its unsigned app + ELF in <outdir> (a relative
+# path under the repository root) as app-<target>.bin / app-<target>.elf instead of comparing. CI runs
+# it as a separate, parallel job and a later step compares those bytes with the primary build
+# (scripts/check-reproducible-artifacts.py), so the two builds no longer run back to back in one job.
 set -euo pipefail
 
 # Reproducibility is evidence only when it uses the same closed compiler-input boundary as the
@@ -44,8 +52,36 @@ if [[ "${1:-}" == --self-test ]]; then
     echo "reproducible-build compiler boundary self-test failed" >&2
     exit 1
   }
+  # The --emit argument contract is exercised without starting a build: every malformed form must be
+  # refused with the usage exit status before any temporary workspace or toolchain call.
+  for bad_usage in "--emit" "--emit out esp32" "--emit /abs esp32 1.0.0" "--emit ../out esp32 1.0.0" \
+      "--emit out esp32c2 1.0.0" "--emit out esp32 not-a-version"; do
+    set +e
+    # shellcheck disable=SC2086
+    "${BASH_SOURCE[0]}" $bad_usage >/dev/null 2>&1
+    usage_status=$?
+    set -e
+    [[ "$usage_status" -eq 2 ]] || {
+      echo "reproducible-build --emit usage self-test failed: '$bad_usage' exited $usage_status" >&2
+      exit 1
+    }
+  done
   echo "reproducible-build compiler boundary self-test: PASS"
   exit 0
+fi
+
+emit_dir=""
+if [[ "${1:-}" == --emit ]]; then
+  [[ $# -eq 4 ]] || {
+    echo "usage: check-reproducible-build.sh --emit <outdir> <target> <display-version>" >&2
+    exit 2
+  }
+  emit_dir="$2"
+  [[ -n "$emit_dir" && "$emit_dir" != /* && "$emit_dir" != *..* ]] || {
+    echo "--emit directory must be a relative path under the repository root: $emit_dir" >&2
+    exit 2
+  }
+  shift 2
 fi
 
 target="${1:?usage: check-reproducible-build.sh <target> <display-version> [baseline-app baseline-elf]}"
@@ -108,6 +144,17 @@ build_once() {
   cp "$build_dir/tesla-key-esp32.bin" "$work_root/app-$pass.bin"
   cp "$build_dir/tesla-key-esp32.elf" "$work_root/app-$pass.elf"
 }
+
+if [[ -n "$emit_dir" ]]; then
+  build_once b
+  [[ ! -L "$emit_dir" ]] || { echo "refusing a symlinked --emit directory: $emit_dir" >&2; exit 1; }
+  mkdir -p "$emit_dir"
+  cp "$work_root/app-b.bin" "$emit_dir/app-$target.bin"
+  cp "$work_root/app-b.elf" "$emit_dir/app-$target.elf"
+  sha256sum "$emit_dir/app-$target.bin" "$emit_dir/app-$target.elf"
+  echo "reproducible-build $target: EMITTED isolated copy in $emit_dir (compared by a separate step)"
+  exit 0
+fi
 
 if [[ -n "$baseline_app" ]]; then
   cp "$baseline_app" "$work_root/app-a.bin"
