@@ -245,7 +245,8 @@ target: bootloader, partition table, signed app, `ota_data_initial`).
    manifest path means a PR cannot silently break reproducibility or release assembly.
 2. **Protected `publish` on `main`.** Enters the `firmware-signing` Environment (secret
    `OTA_SIGNING_KEY`, an unencrypted RSA-3072 PEM; required reviewers must be configured in the
-   repository settings). A second, cache-free runner independently rebuilds the exact commit, and
+   repository settings). Separate, cache-free runners (one per target, concurrent with the producer builds) independently
+   rebuild the exact commit and a secret-free join job binds them into one evidence artifact, and
    the job compares both inventories (53 payloads + manifest) byte-for-byte **before** it
    provisions the key. `scripts/ci-sign-artifacts.sh` repeats the comparison, opens files with
    `O_NOFOLLOW`, copies single-link regular files into a private stage and rehashes them before
