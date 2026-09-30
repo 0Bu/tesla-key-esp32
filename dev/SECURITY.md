@@ -1,678 +1,396 @@
 # Security & Hardening
 
+Owns: threat model, API exposure, key material, OTA signing and the CI/release trust boundaries.
+Runtime OTA/rollback mechanics live in [`ARCHITECTURE.md`](ARCHITECTURE.md#ota-self-update); the
+feature catalog with per-mechanism evidence is [`FEATURES.md`](FEATURES.md).
+
 ## Threat model
 
-The crown jewel is the **ECDSA P-256 private key** in NVS — it *is* a valid Tesla BLE
-key. This firmware enrolls it as **Charging Manager only** (charging + wake), so a
-compromised key cannot unlock/drive the car, but it can still control charging and the
-WiFi password + VIN are also in NVS.
+The crown jewel is the **ECDSA P-256 private key** in NVS — it *is* a valid Tesla BLE key. The
+firmware enrolls it as **Charging Manager only** (charging + wake), so a leaked key cannot unlock
+or drive the car, but it can still control charging. WiFi password and VIN are in NVS too.
 
-Relevant attackers:
+| Attacker | Exposure and mitigation |
+|---|---|
+| Physical USB/serial | Can dump flash and, without Secure Boot, replace firmware (see [hardening](#enabling-flash-encryption--secure-boot-recommended-irreversible)). |
+| LAN peer | HTTP API is plaintext on port 80 without auth (see [exposure](#http-api-exposure)). |
+| BLE/RF range | Pairing and commands; mitigated by Tesla's session crypto. |
+| Supply chain | OTA images are RSA-3072 signed and verified on every update, so integrity does not rest on TLS alone. |
 
-- **Physical USB/serial access** — can dump flash and (without Secure Boot) replace firmware.
-- **LAN peer** — the HTTP API is plaintext on port 80 with no TLS.
-- **BLE/RF range** — pairing/commands; mitigated by the Tesla session crypto.
-- **Supply chain** — OTA images are **signed** (RSA-3072, Secure Boot v2 scheme) and the
-  signature is verified on every update, so integrity no longer rests on TLS alone (see
-  [OTA self-update](#ota-self-update) and [Signed OTA](#signed-ota-images)).
+**First-boot key entropy.** The P-256 key is generated under `bootloader_random_enable()` (SAR-ADC
+hardware entropy) *before* WiFi/BLE start. On ESP-IDF 6 the PSA RNG has no DRBG of its own
+(`MBEDTLS_PSA_CRYPTO_EXTERNAL_RNG`), so every draw reads the hardware RNG. Devices first-keyed
+before that fix should re-key and re-pair (`/gen_keys?force=1`).
 
-**First-boot key entropy:** the P-256 key is generated under `bootloader_random_enable()`
-(SAR-ADC hardware entropy) *before* WiFi/BLE start, so it draws from a true entropy source
-rather than the RF-off pseudo-random RNG. On ESP-IDF 6 the PSA RNG has no DRBG of its own
-(`MBEDTLS_PSA_CRYPTO_EXTERNAL_RNG`): every draw reads the hardware RNG at call time, so key
-generation consumes that entropy directly. Devices first-keyed before the entropy fix should
-re-key + re-pair (`/gen_keys?force=1`, then re-enrol).
+**Fail-closed key rotation.** `tk::regenerate_private_key()` (`main/logic/key_rotation.hpp`)
+reports generation and NVS persistence failures and restores the previous in-memory key when the
+replacement cannot be committed. Signing, pairing, polling and background commands stay blocked
+while the runtime key identity is ambiguous; they resume only after the durable key is verified
+and old sessions are cleared. VIN changes use a persistent transition journal
+(`tesla_cfg/vin_txn`), so an interrupted cross-namespace update is completed or rolled back on the
+next boot.
 
-**Fail-closed key rotation:** the tesla-ble patch series reports key-generation and NVS
-persistence failures and restores the previous in-memory key when the replacement cannot be
-committed. The controller blocks signing, pairing, status polling, and background commands while
-the runtime key identity is ambiguous; it only enables them after the durable key is verified and
-the previous sessions are cleared. VIN changes use a persistent transition journal so interrupted
-cross-namespace updates are completed or rolled back on the next boot.
+**Exact NVS surface.** `main/logic/nvs_contract.hpp` declares all 19 records (namespace,
+logical/stored name, storage API, owner, retention, secrecy). `NvsStorageAdapter` rejects unknown
+namespaces, wrong APIs, name collisions and stored keys over 15 bytes instead of truncating. The
+operator-facing retention table is in [`README.md`](README.md#upgrading).
 
-**Exact NVS surface:** `main/logic/nvs_contract.hpp` declares all 19 records with namespace,
-logical/stored name, storage API, owner, retention and secrecy. `NvsStorageAdapter` resolves every
-access through it and rejects unknown namespaces, wrong APIs, name collisions and >15-byte stored
-keys; it no longer truncates an unknown key. This includes the pinned tesla-ble mappings
-`session_vcsec`→`sess_vcsec` and `session_infotainment`→`sess_info`. The host gate inventories direct
-NVS calls in every shipped source/header/inline fragment and the operator-facing retention mirror is
-in `docs/README.md`.
+**BLE anti-replay and framing.** Native orchestration (`logic/rx_framing.hpp`,
+`ble_dispatcher.hpp`, `command_runner.hpp`) uses strict 2-byte big-endian length framing, routes
+every CarServer response by request UUID, and drops replayed counters and foreign UUIDs
+fail-closed. A charging-current write additionally needs a fresh exact `ChargeState` readback; an
+ACK alone is not success. Known-answer protocol vectors are in
+`test/tesla_protocol_vectors.test.mjs` (public test keys only) and
+`test/test_tesla_ble_harness.cpp`; design rationale is in
+[ADR-0005](adr/0005-tesla-ble-seam.md).
 
-**BLE response anti-replay and deterministic framing:** The native orchestration layer
-(`main/logic/ble_dispatcher.hpp`, `main/logic/rx_framing.hpp`, `main/logic/command_runner.hpp`)
-implements deterministic 2-byte BE length prefix framing without heuristic recovery loops,
-and routes every CarServer response strictly by Request UUID before delivering telemetry callbacks.
-Responses with replayed counters or foreign UUIDs are dropped fail-closed.
-Charging-current writes additionally require a fresh exact `ChargeState` readback;
-an action acknowledgement alone is not reported as success.
-`test/tesla_protocol_vectors.test.mjs` independently pins the public VIN-advertisement vector,
-P-256 ECDH byte order, `SHA1(shared-secret)[:16]`, the `session info` HMAC label, AES-GCM
-metadata/AAD/nonce/tag layout and local patch invariants, including signer.go session-counter
-replay alignment. It uses public test keys only and never reads device or vehicle identity material.
+## Unencrypted-flash reality (factory devices)
 
-## Current device state (factory ESP32-S3)
-
-`espefuse summary` on the connected unit (read-only check, 2026-06-16):
-
-| eFuse | Value | Meaning |
-|---|---|---|
-| `SPI_BOOT_CRYPT_CNT` | `Disable` | **Flash Encryption OFF** |
-| `SECURE_BOOT_EN` | `False` | **Secure Boot OFF** |
-| `DIS_DOWNLOAD_MODE` | `False` | UART/USB download open |
-| `ENABLE_SECURITY_DOWNLOAD` | `False` | no secure download |
-| `DIS_USB_JTAG` / `DIS_PAD_JTAG` | `False` | JTAG enabled |
-
-⇒ Anyone with USB access can read the whole flash in plaintext, including the private
-key. Verify yourself (read-only, safe):
+A factory ESP32 ships with Flash Encryption and Secure Boot **off**, ROM download mode open and
+JTAG enabled. Anyone with USB access can therefore read the whole flash — including the key — in
+plaintext. Check a unit yourself (read-only):
 
 ```bash
 pip install esptool
-espefuse --port /dev/cu.usbmodemXXXX summary
-# The nvs partition (offset 0x9000, size 0x6000) — contains the key while unencrypted:
+espefuse --port /dev/cu.usbmodemXXXX summary     # SPI_BOOT_CRYPT_CNT, SECURE_BOOT_EN, DIS_*
+# the nvs partition (0x9000, size 0x6000) holds the key while unencrypted:
 esptool --port /dev/cu.usbmodemXXXX read_flash 0x9000 0x6000 nvs_dump.bin
 ```
 
+Treat any such dump as secret material; never attach it to an issue.
+
 ## HTTP API exposure
 
-The HTTP API has **no authentication and no TLS** — by design. The primary consumer is
-evcc, which talks to the device over plain HTTP and cannot send credentials, so locking
-the API would break the main use case. Anyone on the LAN can therefore call **every**
-endpoint — including ones that go beyond charging: wake, charging control, key
-regeneration (`/gen_keys`) and pairing (`/send_key`), BLE scan (`/scan`), VIN change
-(`/set_vin`, un-pairs + reboots), MQTT broker change (`/set_mqtt`, reboots), **WiFi
-credential change (`/set_wifi`, reboots onto another network)**, crash-report deletion
-(`/crash/dismiss`), the OTA self-update / reboot trigger (`/ota/update`, see below) and the
-MCP endpoint (`/mcp`, which exposes the same charging command set to AI agents — nothing
-beyond what the open REST routes already allow). This is acceptable only because:
+The HTTP API has **no authentication and no TLS** — by design. Its primary consumer, evcc, speaks
+plain HTTP and cannot send credentials. Anyone on the LAN can call **every** endpoint: wake,
+charging, key regeneration (`/gen_keys`), pairing (`/send_key`), BLE scan, VIN change (`/set_vin`,
+un-pairs + reboots), MQTT/Syslog/WiFi/OTA-channel configuration (reboots), crash-report deletion,
+OTA update/reboot trigger (`/ota/update`) and `/mcp` (the same charging command set for AI agents).
+This is acceptable only because the enrolled key is Charging Manager only and the device lives on
+a **trusted home LAN**, never exposed to the internet. For access control, use a TLS/auth reverse
+proxy or a VLAN.
 
-- the enrolled key is **Charging Manager only** — it cannot unlock or drive the car, just
-  control charging and wake (see the role restriction in `vehicle_pairing.cpp`); and
-- the device is meant to live on a **trusted home LAN**, never exposed to the internet; and
-- mutating configuration endpoints (`POST /send_key`, `/set_time`, `/set_mqtt`, `/set_syslog`, `/set_wifi`, `/set_ota`) enforce an active-update conflict guard, returning `409 Conflict` during firmware flashing to mitigate race conditions and prevent concurrent configuration writes, NVS operations, and flash restarts.
+Reverse-proxy rules: send a device-owned upstream `Host` (device IP or `.local` name) and either
+remove `Origin` or rewrite it to that authority. A proxy that forwards its public hostname is
+rejected by the browser gate below. Likewise, open the configuration UI via
+`http://tesla-key-esp32.local` or the current IP; a router-expanded DHCP FQDN may work for
+read-only clients but gets `403` on browser mutations.
 
-If you need access control, put the device behind a reverse proxy with TLS + auth, or
-segment it onto a trusted VLAN. A proxy must send a device-owned upstream `Host` (the current
-device IP or its `.local` name) and either remove `Origin` or rewrite its authority to that same
-device authority. Forwarding the proxy's public hostname unchanged is intentionally rejected by
-the browser-mutation gate described below.
+Hardening that remains (none of it is authentication):
 
-The firmware does reject a narrower browser threat: a mutating request carrying an `Origin`
-whose authority differs from `Host`, whose `Host` is neither the device name nor its current IP,
-or whose `Sec-Fetch-Site` is `cross-site`, receives `403` before route dispatch. Binding `Host` to
-a device-owned authority also closes the usual DNS-rebinding bypass where attacker-controlled
-`Host` and `Origin` match. The gate covers every POST plus the legacy state-changing GET forms
-`/ota/check`, `/diag?clear=1`, `/diag?verbose=0|1` and `/coredump?clear=1`. Those query **keys are
-matched case-insensitively**, because `esp_http_server` matches them that way when the handler
-reads them: `?CLEAR=1` is the same request as `?clear=1` and is gated identically. The **values**
-stay exact — ESP-IDF copies them verbatim, with no percent-decoding — so `?clear=%31` is not
-`?clear=1` on either side. Same-origin UI requests
-continue to work, and headerless clients such as evcc and curl remain compatible. If either
-`Origin` or `Sec-Fetch-Site` is present, the device-owned `Host` check applies; this covers
-same-origin browser GETs that legitimately omit `Origin`. This is **not authentication**: a raw
-LAN peer can omit both browser headers and still call every endpoint, and an old/non-conforming
-browser that sends neither header is indistinguishable from such a client. The trusted-LAN
-boundary therefore remains mandatory.
+- **Browser-origin gate.** A mutating request whose `Origin` authority differs from `Host`, whose
+  `Host` is neither the device name nor its current IP, or whose `Sec-Fetch-Site` is `cross-site`,
+  gets `403` before dispatch. Binding `Host` to a device-owned authority also closes DNS
+  rebinding. It covers every POST plus the legacy state-changing GET forms `/ota/check`,
+  `/diag?clear=1`, `/diag?verbose=0|1` and `/coredump?clear=1`; query **keys match
+  case-insensitively** (as `esp_http_server` does) while **values stay exact and undecoded**.
+  Headerless clients (evcc, curl) stay compatible, and so does a raw LAN peer that omits both
+  headers — the trusted-LAN boundary remains mandatory.
+- **Identity guards.** `/gen_keys` and `/set_vin` answer `503` unless the running image is
+  `Stable` and no OTA/identity work owns the gate. Once stable, `/gen_keys` still refuses to
+  replace an existing key without `force=1` (`409`).
+- **Active-update guard (`409`)** on the mutating config routes during a firmware flash — details in
+  [ARCHITECTURE](ARCHITECTURE.md#http-request-body-and-allocator-failure-contract).
+- **Bounded, typed intake.** 2 KiB body cap, allocation-free JSON syntax gate (16 levels, strict
+  UTF-8, no U+0000), sticky response builders and exact request-ID rules; no rejected request
+  reaches a command, NVS save, probe or restart. Contract and status mapping:
+  [ARCHITECTURE](ARCHITECTURE.md#http-request-body-and-allocator-failure-contract).
 
-Open the configuration UI through `http://tesla-key-esp32.local` or the current device IP when
-you need to mutate settings. A router-expanded DHCP name such as
-`tesla-key-esp32.router.example` may resolve for read-only/headerless clients, but is deliberately
-not a device-owned browser authority and receives `403` on mutations.
-
-`POST /set_wifi` deserves naming explicitly, because it is the one open route whose worst
-case is *losing the device* rather than mis-charging the car: a LAN peer can point it at a
-network you do not control, and the board reboots onto it. Two things bound that. The
-credentials are only reachable from the LAN the device is already on, so this grants no
-capability an attacker with that foothold lacks (they could equally re-flash it over the
-same open API). And a change that does not work **undoes itself**: the previous SSID and
-password are stashed as a one-shot backup inside the same atomic config entry, and the boot
-that follows restores them unless the new network actually hands out a lease
-(`logic/wifi_rollback.hpp`). What that does *not* protect against is a change to a network
-the attacker genuinely controls — that association succeeds, so nothing rolls back. The
-mitigation there is the same as for every other route on this list: a trusted LAN.
-
-Three non-auth hardening measures remain in place:
-
-- **Browser-origin gate** — rejects cross-site/DNS-rebound browser mutations (including the
-  state-changing legacy GET forms) while retaining headerless evcc/curl compatibility; it does
-  not restrict a raw LAN caller.
-- **`/gen_keys` identity and overwrite guards** — refuses every key mutation while the running
-  image is PendingVerify, its verification state is unknown, or an OTA/update owns the identity
-  gate (returns `503` without changing a key). Once Stable, it still refuses to regenerate an
-  existing key without `force=1` (returns `409`); regeneration un-pairs the vehicle.
-- **Body size cap** — POST bodies over 2 KB are rejected (bounds the receive buffer).
-- **Typed body/JSON failures** — empty, oversized, allocation-failed and receive-failed requests
-  remain distinct. Syntactically valid JSON whose cJSON materialization fails is treated as OOM;
-  malformed input stays a client error. The allocation-free syntax gate admits at most 16 nested
-  arrays/objects and validates every raw UTF-8 string byte as a shortest-form Unicode scalar;
-  invalid leads/continuations, truncation, overlong forms, UTF-16-surrogate encodings and values
-  above U+10FFFF never reach cJSON. Deeper but otherwise valid JSON is a separate client-limit
-  failure. The gate likewise rejects escaped U+0000 before materialization because cJSON exposes
-  strings through a NUL-terminated API; otherwise an ID such as `a\u0000b` would be echoed as `a`.
-  No rejected body reaches a command, NVS save, probe or
-  restart, and body/parse owners are released before blocking work or input-independent large
-  response construction. Response/MQTT builders use sticky ownership, so one failed cJSON
-  Create/Add/print publishes no partial JSON. REST/MCP set 503 before their single fixed fallback
-  send. Before notification detection or dispatch, MCP requires `jsonrpc` as the exact string
-  `"2.0"` and rejects duplicate object keys recursively, including escaped-equivalent names.
-  Numeric request IDs are accepted only when their original token is a canonical decimal integer
-  in `[-9007199254740991, 9007199254740991]`; the raw token and cJSON value must agree, so exponent
-  underflow, fractional values rounded by `double`, negative zero and values at `±2^53` cannot be
-  mis-correlated. Accepted numbers use an internally generated exact decimal emitter. String IDs
-  are copied into at most 64 bytes of fixed storage before the input tree is released; explicit
-  null, booleans, arrays/objects, embedded NUL and oversized strings are rejected. Every allocation stage,
-  including large-response print growth, is exercised against the exact pinned cJSON source with
-  sanitizer runs.
+`POST /set_wifi` deserves a name because it is the one open route whose worst case is *losing the
+device* rather than mis-charging: a LAN peer can point it at a network you do not control. Two
+things bound that. It grants nothing an attacker already on the LAN lacks (they could equally
+re-flash via the open API), and a change that does not work **undoes itself** — the previous
+credentials are a one-shot backup in the same atomic config entry, restored on the next boot
+unless the new network hands out a lease (`logic/wifi_rollback.hpp`). It does *not* protect
+against a network the attacker genuinely controls, since that association succeeds.
 
 ## Syslog and diagnostic export
 
-The optional syslog forwarder (`main/syslog.cpp`, configured via `POST /set_syslog` or NVS `syslog_uri`) forwards unredacted logs over **cleartext UDP (RFC 5424)** on a configurable port (default 514) without encryption or authentication.
-- Anyone with packet-capture capabilities on the LAN path between the ESP32 and the syslog server can read operational logs.
-- Syslog forwards unredacted logs: runtime redaction rules from `/diag?redact=1` do not apply to Syslog. It includes the VIN on every REST command; VIN, vehicle BLE MAC and board MAC at boot; the WiFi SSID on connect. While raw private keys and WiFi passwords are never deliberately logged, operational metadata and identifiers are transmitted in the clear.
-- Recommend forwarding only to trusted collectors on a secure/isolated VLAN; leave syslog disabled on untrusted or shared networks.
+The optional Syslog forwarder (`main/syslog.cpp`, `POST /set_syslog` or NVS `syslog_uri`) sends
+**unredacted** logs over **cleartext UDP (RFC 5424)** without authentication. The `?redact=1` rules
+of `/diag` do not apply. Logs carry the VIN on every REST command; VIN, vehicle BLE MAC and board
+MAC at boot; the WiFi SSID on connect. Raw private keys and WiFi passwords are never deliberately
+logged. Forward only to trusted collectors on an isolated VLAN; leave Syslog off on shared networks.
 
-## Core dump privacy invariant
-
-Crash dumps are enabled to flash (`CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y`, `CONFIG_ESP_COREDUMP_DATA_FORMAT_ELF=y`) in the `coredump` partition and exposed via `GET /coredump`.
-- `CONFIG_ESP_COREDUMP_CAPTURE_DRAM` is kept disabled (`=n`) to avoid dumping the general heap.
-- Task stacks live at crash time are included and can contain transient secrets/key contexts in memory at crash time (e.g., intermediate key exchange values, session state, or decrypted buffers on the stack).
-- Core dumps are served unauthenticated over LAN via `GET /coredump` and must never be attached to public issue trackers or shared publicly. Access should be restricted via network segmentation or reverse proxy authentication.
+**Core dumps** go to the `coredump` partition (`CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH`, ELF format)
+and are served unauthenticated by `GET /coredump`. `CONFIG_ESP_COREDUMP_CAPTURE_DRAM` stays off so
+the general heap is not dumped, but task stacks live at crash time can hold transient secrets
+(key-exchange values, session state, decrypted buffers). Never attach a dump to a public issue.
 
 ## OTA self-update
 
-The device can update itself **pull-based**: it fetches `manifest.json` and its per-target
-app image from **fixed, compile-time HTTPS URLs** (`CONFIG_TESLA_OTA_MANIFEST_URL` and
-`CONFIG_TESLA_OTA_FIRMWARE_BASE_URL` + `tesla-key-esp32<suffix>.bin`, where `<suffix>` is the
-chip's short tag — `""`/`-s3`/`-c3`/`-c6` — so "esp32" appears once, default GitHub
-Pages), compares the manifest `version` to the running firmware, and on confirmation flashes
-the inactive OTA slot via `esp_https_ota`, then reboots. `esp_https_ota` verifies the image
-chip-id, so a wrong-target image is refused. Implemented in `main/ota_update.cpp`.
+The device pulls `manifest.json` and its per-target app image from **fixed compile-time HTTPS
+URLs** (`CONFIG_TESLA_OTA_MANIFEST_URL`, `CONFIG_TESLA_OTA_FIRMWARE_BASE_URL`; default GitHub
+Pages), compares versions and flashes the inactive slot via `esp_https_ota`, which also refuses a
+wrong-target image. Runtime mechanics: [ARCHITECTURE](ARCHITECTURE.md#ota-self-update).
 
-Trust model:
+- **Transport and image are both verified.** TLS certificates are checked against the bundled CA
+  roots, *and* the image carries an RSA-3072 application signature the running firmware verifies
+  (`CONFIG_SECURE_SIGNED_ON_UPDATE_NO_SECURE_BOOT`) before accepting it. Whoever controls the
+  update host cannot serve arbitrary firmware.
+- **The trigger is unauthenticated.** `POST /ota/update` and `GET /ota/check` are open like the
+  rest of the API. Because the URL is compile-time fixed *and* the image must be signed, a LAN peer
+  cannot point the device at attacker firmware, but it can force a fetch + reboot (a nuisance; each
+  reboot re-opens the BLE polling window so a parked car stops sleeping).
+- **Downgrade is blocked in software.** A signature proves authenticity, not freshness. Before
+  flashing, `ota_task` reads the version from the downloaded image's own app descriptor and refuses
+  anything not strictly newer — which also defeats a host that advertises a new manifest version
+  but serves an old binary. No eFuse anti-rollback is burned.
+- **Rollback is armed** (`CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE`) behind a health gate: proven
+  network link, non-critical INTERNAL largest heap block and ≈ 90 s uptime, with VIN/key/recovery
+  reboots never counted as health evidence. An image that never reaches the LAN is reverted on the
+  next reboot rather than committed. A fatal essential-component failure on a still-unverified
+  image marks it invalid and reboots into the previous slot; on an already-valid image it halts
+  instead of looping.
 
-- **Transport AND image are verified.** TLS server certificates are checked against the
-  bundled CA roots (`esp_crt_bundle_attach`), so the connection to the configured host is
-  authenticated — and, in addition, the downloaded image carries an **RSA-3072 application
-  signature** that the running firmware verifies before accepting the update
-  (`CONFIG_SECURE_SIGNED_ON_UPDATE_NO_SECURE_BOOT`, see [Signed OTA](#signed-ota-images)).
-  Whoever controls the update host can therefore no longer serve arbitrary firmware: an
-  unsigned or wrongly-signed image is rejected at `esp_https_ota_finish()`.
-- **The trigger is unauthenticated.** `POST /ota/update` (and `GET /ota/check`) are open on
-  the LAN like the rest of the API. Because the download URL is **compile-time fixed** *and*
-  the image must be signed, a LAN peer cannot point the device at attacker-controlled
-  firmware — but it *can* force a fetch + reboot (a nuisance/DoS, and each reboot re-opens
-  the BLE polling window so a parked car stops sleeping). Restricting who can reach
-  `/ota/update` needs the same reverse-proxy / VLAN segmentation as the rest of the API.
-- **Downgrade is blocked in software.** A signature proves authenticity, not freshness, so a
-  hostile (or compromised) update host could otherwise serve an *old, legitimately-signed*
-  image that re-introduces a patched vulnerability. Before flashing, `ota_task` reads the
-  version from the downloaded image's app descriptor (`esp_https_ota_get_img_desc`) and refuses
-  anything not strictly newer than what is running. Checking the image itself (not the
-  manifest) also defeats a host that advertises a new version but serves an old binary. No
-  eFuse anti-rollback is burned (by design), so this is the downgrade defense.
-
-The **USB Web Serial installer** has a separate, explicit data contract. `manifest.json` schema
-`layoutVersion:2` binds the site to one 40-hex `sourceSha`, exactly four chip families and, for each
-family, bootloader/partition/app/otadata in fixed roles and offsets. Every part carries its expected
-byte length and SHA-256; the browser downloads and verifies all four before erasing/writing, writes
-the first three immutable parts, and writes `ota_data_initial@0xf000` last as the activation step.
-This detects partial/mixed Pages deployments and corrupted downloads. It does not turn a compromised
-Pages origin into a trust anchor — an explicit USB install still trusts the site selected by the
-operator — while OTA app authenticity remains protected independently by RSA verification.
-
-The installer executes no runtime CDN code. The official npm `esptool-js@0.6.1` native-ESM bundle
-and Apache-2.0 license are stored under `docs/vendor/`; `scripts/verify-vendored-esptool-js.sh` pins
-the npm tarball SRI and both extracted SHA-256 values. Pages uses `script-src 'self'` and serves that
-reviewed copy same-origin.
-- **Rollback is enabled** (`CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE`); `main.cpp` defers
-  `esp_ota_mark_app_valid_cancel_rollback()` to a health gate (`logic/health_gate.hpp`) that keeps
-  rollback armed until a freshly-flashed image has run ≈ 90 s, **proven it still has a network
-  link and retained a non-critical largest contiguous INTERNAL heap block**. An image that boots
-  but then crashes/OOM-reboots under load is reverted on the
-  next boot — the old startup-time mark would have committed it before it proved itself — and so is
-  an image that boots cleanly but never reaches the LAN, which is the one no later OTA could fix,
-  because the fix would have to arrive over the link it broke. After ≈ 600 s without a link the
-  image is simply left `PENDING_VERIFY` for the next reboot to roll back; it does not restart
-  itself, which would let a long network outage silently downgrade a good build. Only a
-  successfully persisted rebooting `/set_mqtt`, `/set_syslog`, `/set_wifi` or setup-portal save
-  may confirm early. Timed and explicit confirmation both acquire the shared `HealthCommit` owner
-  against OTA, identity and persisted `FaultRestart`, then re-check the INTERNAL largest block;
-  admission or heap failure leaves rollback armed. `/set_vin` is different:
-  `OtaIdentityMutationGuard` permits it only in the
-  already-`Stable` state and while no OTA/update owns the mutation gate; `PENDING_VERIFY`, unknown
-  verification state or an active OTA returns HTTP `503` before VIN/key mutation. VIN/recovery
-  reboots are therefore never accepted as health evidence. A fatal essential-component failure during startup
-  does not wait for another reset: while the image is still `PENDING_VERIFY`, `boot_fatal()`
-  explicitly marks it invalid and reboots into the previous slot. The same failure on an
-  already-valid image halts instead of entering an automatic reboot loop.
-
-Signed OTA closes the *unsigned-artifact* gap without burning any eFuses. It does **not**
-protect against a physical attacker reflashing over USB (no boot-time enforcement) — that
-still requires full hardware Secure Boot v2 + Flash Encryption (below), which reuses the
-**same signing key**.
+**USB Web Serial installer.** `manifest.json` (`layoutVersion:2`) binds the site to one 40-hex
+`sourceSha`, exactly four chip families and, per family, bootloader/partition/app/otadata in fixed
+roles and offsets with byte length and SHA-256. The browser downloads and verifies all four before
+erasing or writing, writes the first three, and writes `ota_data_initial@0xf000` **last** as the
+activation step. That detects partial/mixed Pages deployments and corrupt downloads; it does not
+make a compromised Pages origin a trust anchor — a USB install trusts the site the operator chose,
+while OTA authenticity remains protected independently by RSA verification. The page runs no CDN
+code: the official `esptool-js@0.6.1` ESM bundle and license live in `docs/vendor/`,
+`scripts/verify-vendored-esptool-js.sh` pins the tarball SRI and both extracted hashes, and Pages
+serves it under `script-src 'self'`.
 
 ## Signed OTA images
 
-The firmware is built with the **Secure Boot v2 signature scheme but WITHOUT hardware
-Secure Boot** (`CONFIG_SECURE_SIGNED_APPS_NO_SECURE_BOOT` + `..._RSA_SCHEME` +
-`CONFIG_SECURE_SIGNED_ON_UPDATE_NO_SECURE_BOOT`, in `sdkconfig.defaults`). Every OTA image
-must carry a valid **RSA-3072** signature, which the running app verifies before installing.
-No eFuses are burned, so this is **reversible, cannot brick the device, and the web installer
-keeps working** (with the RSA scheme the bootloader does not verify on boot — only the OTA
-path does). `CONFIG_SECURE_BOOT_BUILD_SIGNED_BINARIES=n`, so the build emits an *unsigned*
-binary and CI signs it in a separate step — the private key never has to be present at
-compile time.
+The firmware uses the **Secure Boot v2 signature scheme without hardware Secure Boot**
+(`CONFIG_SECURE_SIGNED_APPS_NO_SECURE_BOOT`, `..._RSA_SCHEME`,
+`CONFIG_SECURE_SIGNED_ON_UPDATE_NO_SECURE_BOOT`). No eFuses are burned, so this is reversible, cannot
+brick a device and keeps the web installer working (with the RSA scheme only the OTA path verifies).
+`CONFIG_SECURE_BOOT_BUILD_SIGNED_BINARIES=n`: the build emits an *unsigned* binary and CI signs it
+in a separate step, so the key is never present at compile time.
 
-> ⚠️ **A locally-built binary is unsigned and will _not_ boot.** The signature is also
-> enforced *at runtime*: the running app calls `esp_secure_boot_init_checks()` at startup
-> (`check_signature_on_update_check` in `bootloader_support`), which `abort()`s in a **reboot
-> loop** whenever the app carries no signature block. This fires very early — before `app_main`,
-> on every target — so a plain `idf.py build` image (unsigned by `..._BUILD_SIGNED_BINARIES=n`)
-> **cannot be USB-flashed as-is**; it just crash-loops. To flash a development build, either use
-> the **signed CI artifact**, or sign the local image first with the offline key
-> (`espsecure.py sign_data --version 2 --keyfile <key> --output app.bin.signed app.bin` — the
-> same step CI runs) and flash the signed copy. This has been true since the signed-OTA config
-> landed — see the `flash-esp32` skill for the dev-flashing workflow.
+> ⚠️ **A locally built binary is unsigned and will _not_ boot.** The running app calls
+> `esp_secure_boot_init_checks()` at startup, which `abort()`s in a **reboot loop** whenever the app
+> has no signature block — before `app_main`, on every target. A plain `idf.py build` image cannot
+> be USB-flashed as-is. Use the signed CI artifact, or sign the local image with the offline key
+> (`espsecure.py sign_data --version 2 --keyfile <key> --output app.bin.signed app.bin`, the same
+> step CI runs). See the `flash-esp32` skill for the dev-flash workflow.
 
 ### Trust anchor (trust-on-first-use)
 
-With no eFuse digest, the trusted public key is taken from the **signature block of the
-currently running app** (`esp_secure_boot_get_signature_blocks_for_running_app`). Practical
-consequences:
+With no eFuse digest, the trusted public key is taken from the **signature block of the currently
+running app**. Consequences:
 
-- The **first** signed image is accepted by a device still on the *old, unsigned* firmware
-  (firmware built **before** this signing config existed, so it performs no verification — a
-  *current* build left unsigned won't boot at all, see the warning above), or can be
-  USB-flashed. From then on, that device only accepts OTA images signed with the **same key**.
-- This is a deliberate **one-way transition**: once a device runs a signed build it will
-  **refuse an unsigned (or differently-signed) OTA**. A bad signed image still auto-rolls
-  back via `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE`; a downgrade to unsigned firmware needs a
-  USB reflash.
-- **Classic ESP32 requires chip rev v3.0+ (ECO3)** for the V2 RSA scheme — enforced by
-  `CONFIG_ESP32_REV_MIN_3` in `sdkconfig.defaults.esp32`. ECO3 has been standard since ~2020.
-  On pre-ECO3 ESP32 silicon the image's min-rev is checked during OTA validation, so the
-  update is **rejected cleanly** (`esp_https_ota_finish` → "downloaded image is invalid") and
-  the device keeps running its current firmware — it does not boot-loop, but it also can no
-  longer OTA forward (a USB reflash with a rev-compatible image is the only path). This is a
-  deliberate trade-off to keep one signing scheme + one key across all four targets;
-  `esp32s3`/`c3`/`c6` support V2 RSA at their default min revision and need no such override.
+- The first signed image is accepted by a device still on old *unsigned* firmware (built before the
+  signing config existed) or is USB-flashed; from then on the device only accepts OTA images signed
+  with the **same key**. This is a one-way transition: a signed device refuses unsigned or
+  differently-signed OTA, and a downgrade to unsigned firmware needs a USB reflash. A bad signed
+  image still auto-rolls back.
+- **Classic ESP32 needs chip revision v3.0+ (ECO3)** for the V2 RSA scheme
+  (`CONFIG_ESP32_REV_MIN_3` in `sdkconfig.defaults.esp32`). On older silicon an OTA is rejected
+  cleanly ("downloaded image is invalid") and the device keeps running, but it can no longer OTA
+  forward — only a USB reflash helps. This keeps one signing scheme and key across all four
+  targets; `esp32s3`/`c3`/`c6` need no such override.
+- **Production authority pin.** `scripts/ota-signing-public-key.sha256` pins the Secure Boot v2
+  public-key-block digest observed in all four apps of the immutable Release
+  [`v1.4.84`](https://github.com/0Bu/tesla-key-esp32/releases/tag/v1.4.84). After signing, and
+  again at draft publication and immutable-Release reuse, every app must pass a full
+  RSA-PSS/SHA-256 verification against it. It is not a second device trust mechanism; it stops a
+  changed CI secret or substituted signed asset from silently replacing the production authority.
+  Updating the pin is a reviewed security migration, never routine rotation.
+- The flash, ship and USB-recovery procedures repeat the same app-only parse, RSA-PSS check and pin
+  check on every downloaded app before a physical write. Size, version, chip metadata or byte
+  identity with another artifact never substitute for signer authentication.
 
-The protected release pipeline has a separate, source-controlled authority check:
-`scripts/ota-signing-public-key.sha256` pins the Secure Boot v2 public-key-block digest observed in
-all four apps of the immutable production Release
-[`v1.4.84`](https://github.com/0Bu/tesla-key-esp32/releases/tag/v1.4.84). After protected release or
-PR-preview signing, and again for draft publication or immutable Release reuse, every app must pass
-a full RSA-PSS/SHA-256 verification against that digest. This is
-not a second device trust mechanism; it prevents a changed CI secret or substituted already-signed
-asset from silently replacing the production authority. Updating the pin is therefore a reviewed
-security migration, never a routine secret rotation.
+### Create the signing key
 
-The project flash, ship and USB-recovery procedures re-run the same app-only parser, exact
-RSA-PSS/SHA-256 verification and production-authority pin check on every downloaded app before a
-physical write. Size, version, chip metadata or byte identity with another downloaded artifact are
-not substitutes for signer authentication.
-
-### Create the signing key (if you don't have one yet)
-
-Generate a **dedicated** key **offline**, on a trusted machine — do **not** reuse the GPG key
-that signs git commits (wrong format/algorithm, and it conflates two separate trust domains),
-and do **not** generate it in CI.
-
-**1. Get the tooling** (`espsecure.py` ships with ESP-IDF; standalone it comes with esptool):
+Generate a **dedicated** key **offline** on a trusted machine. Do not reuse your git-commit GPG key
+(wrong format, conflates trust domains) and do not generate it in CI.
 
 ```bash
-pip install esptool          # provides espsecure.py
-```
-
-**2. Generate the key** — RSA-3072, Secure Boot v2 scheme, the exact type CI expects:
-
-```bash
+pip install esptool                                   # provides espsecure.py
 espsecure.py generate_signing_key --version 2 --scheme rsa3072 ota_signing_key.pem
+# equivalent plain OpenSSL (key is a standard RSA-3072 pair; nothing ESP-specific lives in it):
+openssl genrsa -out ota_signing_key.pem 3072
 ```
 
-This writes an **unencrypted** PEM private key. (`--version 2 --scheme rsa3072` is mandatory:
-a v1/ECDSA or EC key, an encrypted PEM, or a different RSA size is rejected by `sign_data`
-with `Could not deserialize key data … unsupported key type`.)
-
-**Alternative — plain OpenSSL.** The key is just a standard RSA-3072 keypair (nothing
-ESP-specific lives in the key — only the *signature block* written later by `sign_data` is),
-so OpenSSL produces an equivalent key if you'd rather not install esptool just for this:
+Requirements for Secure Boot v2: **exactly 3072 bits**, **public exponent 65537**, **unencrypted**
+PEM (CI loads it non-interactively; PKCS#1 and PKCS#8 both work). A v1/ECDSA/EC key, an encrypted
+PEM or another RSA size fails in `sign_data` with `unsupported key type`. Verify locally exactly
+as CI does:
 
 ```bash
-openssl genrsa -out ota_signing_key.pem 3072       # PKCS#1 PEM; or use genpkey for PKCS#8:
-# openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 -out ota_signing_key.pem
-```
-
-Constraints for Secure Boot v2 compatibility (all satisfied by the commands above):
-**exactly 3072 bits**, **public exponent 65537** (OpenSSL's default), and **unencrypted** (do
-**not** add `-aes256`/`-des3` — CI loads the key non-interactively and cannot supply a
-passphrase). `espsecure.py sign_data` reads both PKCS#1 (`BEGIN RSA PRIVATE KEY`) and PKCS#8
-(`BEGIN PRIVATE KEY`) unencrypted PEMs, so either form works. Verify it with step 3 below.
-
-**3. Verify it before trusting it** — the same two checks CI does, run locally:
-
-```bash
-# (a) valid, UNENCRYPTED RSA-3072 key? expect "Private-Key: (3072 bit, 2 primes)", no prompt
-openssl rsa -in ota_signing_key.pem -noout -text | head -1
-
-# (b) does espsecure accept it exactly like CI? sign a throwaway file (expect "Signed … bytes")
+openssl rsa -in ota_signing_key.pem -noout -text | head -1     # "Private-Key: (3072 bit, 2 primes)"
 head -c 4096 /dev/zero > /tmp/dummy.bin
 espsecure.py sign_data --version 2 --keyfile ota_signing_key.pem --output /tmp/dummy.signed /tmp/dummy.bin
 ```
 
-**4. Store & protect it:**
+**Protect it.** Losing it means no more OTA updates (USB reflash for every device); leaking it makes
+signed OTA worthless. Keep it offline (password manager, hardware token or air-gapped) with ≥ 2
+backups. The repository gitignores `*.pem`, but never commit it. The same key can later double as
+the hardware Secure Boot v2 key, so enabling full Secure Boot needs no key migration.
 
-- **Losing it ⇒ no more OTA updates** (devices must be USB-reflashed). **Leaking it ⇒ signed
-  OTA is worthless.** Treat it like a root key: keep it offline (password manager / hardware
-  token / air-gapped), backed up in **≥2 separate locations**.
-- Add it to CI as described under [Signing in CI](#signing-in-ci) below (the `OTA_SIGNING_KEY`
-  secret). The repo already gitignores `*.pem` / `ota_signing_key.pem`, but never commit it.
-- The same key later doubles as the hardware **Secure Boot v2** signing key (next section),
-  so enabling full Secure Boot needs no key migration.
+### Release pipeline and trust boundaries
 
-### Signing in CI
+Compilation and signing are separate trust domains. The counts below are the ones the
+`check-*` scripts enforce: **53** allowlisted payload files per build inventory, **12** root
+release files (4 unversioned apps + 4 versioned apps + 4 versioned merged images), **28**
+diagnostics (7 per target), **40** Release assets (12 + 28) and **16** manifest parts (4 per
+target: bootloader, partition table, signed app, `ota_data_initial`).
 
-Compilation and signing are separate trust domains:
+1. **Unprivileged `build`.** Runs PR source and the compiler with neither the signing key nor a
+   write token; for a PR it checks out the exact `pull_request.head.sha`. It uploads only unsigned
+   app/flash inputs plus ELF, map, sdkconfig, lock and size/provenance data. Its inventory is a
+   **claim, not a trusted attestation**: 53 payload files plus a manifest, bound to the commit and
+   a content/mode fingerprint of all tracked and non-ignored source. Inside the pinned container it
+   rebuilds **all four targets** in fresh directories and compares unsigned app and ELF
+   byte-for-byte, and it enforces the projected-signed OTA-slot limit (64 KiB alignment + one 4 KiB
+   signature sector), the size/stack baselines and the effective-build closure described in
+   [FEATURES](FEATURES.md#6-build-test-and-ci). ccache is disabled, and caller compiler/include/
+   `CCACHE_*` environment is rejected. A disposable-key run of the real signer and four-target
+   manifest path means a PR cannot silently break reproducibility or release assembly.
+2. **Protected `publish` on `main`.** Enters the `firmware-signing` Environment (secret
+   `OTA_SIGNING_KEY`, an unencrypted RSA-3072 PEM; required reviewers must be configured in the
+   repository settings). A second, cache-free runner independently rebuilds the exact commit, and
+   the job compares both inventories (53 payloads + manifest) byte-for-byte **before** it
+   provisions the key. `scripts/ci-sign-artifacts.sh` repeats the comparison, opens files with
+   `O_NOFOLLOW`, copies single-link regular files into a private stage and rehashes them before
+   reading the key; it signs, runs `espsecure.py verify_signature`, requires the exact minimal size
+   projection, re-validates image identity and verifies RSA-PSS against the authority pin. Two
+   closed modes:
+   - **`create`** proves the tag/Release are still absent immediately before key use, uploads exactly
+     40 files into a **draft**, and binds every byte, alias, ELF checksum and full merged layout
+     (signer-owned bootloader/partition/erased otadata/signed app, all erased gaps including NVS,
+     exact EOF). The draft API read uses the upload action's numeric Release ID (drafts are not
+     reachable by tag), so a protected retry safely rebinds the existing draft. The candidate is
+     re-checked in the same step immediately before `PATCH draft=false`; only a fresh
+     `immutable: true` response becomes authority.
+   - **`reuse`** (same-SHA retry) accepts only that exact current immutable 40-asset Release. It
+     reads each download once through a directory-relative `O_NOFOLLOW` descriptor, binds API
+     size/digest to the resulting byte snapshot and uses only that snapshot for every later check
+     (a path-swap canary proves later replacement cannot alter staged bytes). It compares the 28
+     diagnostics and four signed/merged images with the independent build, **never signs,
+     re-uploads or mutates** the Release, and uploads one new SHA-bound Actions **recovery
+     artifact** with the twelve verified files so USB recovery stays available.
 
-1. Store the PEM as the **`OTA_SIGNING_KEY`** secret of a protected GitHub Environment named
-   **`firmware-signing`**. Paste the full, unencrypted RSA-3072 PEM — `BEGIN/END` lines included,
-   with real newlines. Configure required reviewers on that Environment; the workflow alone
-   cannot create this repository setting.
-2. The ordinary `build` job is deliberately **unprivileged**. For a PR it checks out the exact
-   `pull_request.head.sha` (the separate fast logic job may still exercise GitHub's synthetic merge
-   ref), so the uploaded firmware bytes and `sourceSha` name the same source. It can execute PR
-   source and the compiler, but has neither the signing key nor a write-capable token. It uploads
-   only unsigned app/flash inputs plus ELF, map, generated sdkconfig, dependency lock and
-   size/provenance data. That producer's metadata and self-authored inventory are **claims, not a
-   trusted source attestation**. The canonical inventory covers exactly 53 allowlisted payload files
-   plus its manifest and records the exact commit plus a content/mode fingerprint of all tracked and
-   non-ignored source files (only the workflow-generated `version.txt` is excluded and separately
-   bound). The validated display-version argument is also passed explicitly as CMake `PROJECT_VER`
-   to every authoritative and independent configuration invocation; a stale repository-floor
-   `version.txt` therefore cannot stamp different app-descriptor bytes in the documented local gate.
-   `scripts/ci-build-all.sh` also projects the **minimal** 64 KiB alignment padding plus exactly one
-   4 KiB signature sector, so an image cannot pass compilation and then unexpectedly overflow its
-   OTA slot when signed. Main
-   and PR authoritative builds disable ccache, so no PR-populated or caller-wrapped compiler object
-   can feed a build that will be signed and published. Inside the pinned container it additionally rebuilds
-   **all four targets** in fresh, independent build/SDKCONFIG directories and compares them
-   byte-for-byte (both unsigned app and unstripped ELF), validates the effective
-   target/optimisation/stack-usage flags, exact source/generated partition geometry, ESP image
-   checksum/hash/chip/app descriptors and firmware-size baseline schema v2: reviewed per-target
-   maxima for the raw unsigned app, ELF total, flash code plus rodata, static memory, `.bss` and
-   IRAM. These growth maxima do not replace the independent projected-signed/OTA-slot hard gate.
-   Stack baseline schema v2 inventories every compiler `.su` frame on every target, review-baselines each
-   target/function frame at or above 256 bytes, rejects any frame above 4096 bytes and rejects
-   unbounded dynamic frames. It is a per-frame gate and makes no call-depth claim. CI then exercises
-   the actual current Ninja/GCC dependency record for every `__idf_main` object, not only the
-   compile database. Repository-local dependencies must be the literal source or use one of the
-   recursively reviewed local-code suffixes `.def`, `.h`, `.hh`, `.hpp`, `.hxx`, `.inc`, `.inl`,
-   `.ipp` and `.tpp`; alternate repository include subroots and unreviewed suffixes fail closed.
-   The presence—even with an empty value—of `CPATH`, `CPLUS_INCLUDE_PATH`, `C_INCLUDE_PATH`,
-   `OBJC_INCLUDE_PATH`, `DEPENDENCIES_OUTPUT`, `SUNPRO_DEPENDENCIES`, `GCC_EXEC_PREFIX` or
-   `COMPILER_PATH` is rejected before compilation, and caller `EXTRA_CFLAGS`/`EXTRA_CXXFLAGS`
-   cannot be inherited around the reviewed sole `-fstack-usage` addition. Every caller
-   `CCACHE_*` variable is likewise rejected by presence—including empty and future names. The
-   pinned official IDF image's expected `IDF_CCACHE_ENABLE=1` default is unconditionally
-   overwritten with exactly `0` before even the build-script self-test. The final
-   `ninja -t commands -s` rule for each main object must also be token-identical to the
-   compile-database command and start with the pinned compiler, so the authoritative compile has
-   no invisible ccache launcher or external config path. CI then exercises
-   the real signer + four-target manifest path with a disposable RSA-3072 key. A PR can therefore
-   break neither reproducibility nor release assembly unnoticed; the production key remains absent.
-   The effective configuration must also remain TLS-client-only: OTA and MQTTS retain certificate
-   verification, while the unused TLS-server state machine stays out of the plain-HTTP firmware.
-3. On `main`, a second, cache-free runner independently rebuilds the exact commit. The protected
-   `publish` job enters `firmware-signing`, checks both complete inventories against its exact source
-   checkout and compares all 53 payloads plus the canonical manifest byte-for-byte **before** it
-   provisions the key. `scripts/ci-sign-artifacts.sh` repeats that comparison, opens roots,
-   ancestors and leaves with `O_NOFOLLOW`, copies each single-link regular file into a private
-   signer-owned stage, then rehashes the copy before reading the key. It signs those staged app bytes,
-   immediately runs `espsecure.py verify_signature --version 2 --keyfile` on every output, requires
-   actual size to equal the exact minimal projection, revalidates semantic image identity, and then
-   independently verifies RSA-PSS/SHA-256 against `scripts/ota-signing-public-key.sha256`.
-   Main revalidates the exact source as current main and the exact version as its Release candidate
-   immediately before uploading the signed firmware Actions artifact. Before that upload in either
-   closed mode, the job builds the local root Pages candidate and byte-binds all 16 manifest parts
-   to the four complete merged images. The root is an exact inventory of twelve regular,
-   single-link, non-empty files: four unversioned apps, four versioned apps and four versioned merged
-   images. The same fail-closed inventory gate runs immediately before both the Actions upload and
-   the draft-Release upload; all twelve names are explicitly listed, never selected by a wildcard.
-   `create` proves the tag/Release is still absent immediately
-   before key provisioning,
-   uploads exactly 40 files into a **draft**, binds every byte, app alias, ELF checksum and every
-   complete merged layout (signer-owned bootloader/partition/erased otadata/signed app, all erased
-   gaps including NVS, and exact EOF). Drafts are not discoverable through GitHub's release-by-tag
-   endpoint, so the upload action's numeric Release ID is validated and used for the draft API read;
-   the response must carry the same ID. This also makes a protected retry safely reuse and rebind
-   the existing draft instead of creating a second candidate. The job reruns the candidate check in
-   the same shell step
-   immediately before `PATCH draft=false`. All four apps must verify cryptographically against the
-   production pin. A fresh API read must report the same stable Release with `immutable: true`.
-   `reuse` accepts only that exact current immutable 40-file Release. It reads every download once
-   through a directory-relative `O_NOFOLLOW` descriptor, checks API size/digest against the resulting
-   immutable byte snapshot, and uses only those bytes for all signature, alias, merged-layout,
-   diagnostic, root and staging decisions. A deterministic post-validation path-swap canary proves
-   path replacement cannot substitute the staged bytes. It compares all 28 diagnostics and four
-   signed/merged images to the current independent build, repeats the production-pin and full-layout
-   checks, and stages Pages without provisioning
-   the key, signing, re-uploading or mutating a Release. It still uploads one new SHA-bound Actions
-   recovery artifact with the twelve verified app/merged aliases, the exact sixteen signer-owned
-   per-target layout inputs and the already bound `_site/` for that successful reuse run. The
-   protected `publish` job stops after a fresh API read reports
-   the same stable Release with `immutable: true`; it never receives or exercises the branch deploy
-   step.
-
-   Every display-version consumer at the build, signer, Pages, manifest, Release and bench boundaries
-   uses the same canonical grammar, rejects leading-zero core components such as `01.2.3`, and limits
-   the value to the 31-byte ESP application descriptor.
-
-   A separate main-push-only `deploy` job needs successful `build` and `publish`, but has no signing
-   Environment, OTA key or OIDC permission. It checks out the exact SHA without persisted
-   credentials, downloads only the exact SHA/version-bound Actions artifact, rechecks the twelve
-   root files, the exact sixteen layout inputs, the site manifest and all 16 local Pages/merged byte
-   relationships. Immediately before `gh-pages`, a fresh Release response binds all 40 remote asset
-   metadata/digests to those root/layout inputs plus the 28 downloaded diagnostics while current
-   immutable-Release and branch-backed Pages authority are also revalidated. Bounded cache-busted acceptance checks the live manifest plus all 16 parts
-   byte-for-byte afterwards. A missing key in create mode or any build/sign/Release/deploy/live-
-   channel mismatch fails closed.
-4. A signed pre-merge hardware image is **opt-in**, not automatic. Add the `signed-preview` label
-   to a same-repository PR after reviewing it. After its unprivileged build succeeds,
-   `.github/workflows/signed-pr-preview.yml` runs from the default branch via `workflow_run`,
-   verifies that the PR head is current, then launches a distinct default-branch-defined rebuild of
-   that exact SHA. This rebuild may execute PR code, but has exact read-only permissions, no
-   repository/Environment secret, Environment, identity token, restored cache or access to the
-   primary artifact (its ephemeral `github.token` is read-scoped). Only data artifacts from that
-   rebuild and the original secret-free build cross into the protected job. After the Environment
-   approval wait, that job repeats the head/repository/state/label checks and independently derives
-   the exact `<latest-complete-immutable-stable>-PR-<N>` version. It never checks out the PR: doing so
-   in a write/key-capable `workflow_run` would create an untrusted-checkout TOCTOU path even if the
-   intended use were read-only. Instead, the default-owned DAG binds both producing jobs to the same
-   exact current PR head, and the trusted default-branch validator requires their canonical manifests
-   and all 53 payload files to be byte-identical, structurally bounded and source-SHA/version-bound
-   before provisioning the key; a different but regex-valid stable base fails too. No file from
-   either artifact is executed in the protected job.
-   Immediately before key provisioning, signed artifact upload and Pages publication, the protected
-   job refetches the repository's current default-branch head and requires it to remain exactly the
-   trusted `workflow_run` `github.sha`. A main advance therefore retires a queued old policy run
-   instead of letting it sign or publish after a long Environment wait; a fresh build/run is needed.
-   After signing, all four apps are independently RSA-PSS-verified against the source-controlled
-   production-authority pin before either the hardware-test artifact or preview site can be
-   published; verification only against the supplied Environment key is insufficient.
-   PR state is checked again immediately before artifact upload and Pages publication. Fork PRs are
-   ineligible. Without this labelled approval, every PR remains compile-only and unsigned. Preview
-   signing and cleanup share one per-PR concurrency group, so close/force-push/label-removal cancels
-   an in-flight publisher. PR-event cleanup runs only from the trusted `pull_request_target`
-   definition and checks out the exact base SHA before executing the Pages validator or deletion
-   script; PR workflow/code is never executed with the branch-write token. A daily and manually
-   dispatchable reconciliation removes any gh-pages
-   preview whose PR is no longer open, same-repository, labelled and at the manifest's `sourceSha`.
-
-Pages has exactly one serving authority: GitHub's branch-backed legacy mode with source
-`gh-pages:/`, holding root (Release channel), `dev/` (Dev channel), and `PR/<N>/` (PR previews).
-The workflows do not upload or deploy a Pages Actions artifact. `scripts/check-pages-source.py`
-validates the Pages API mode/source and HTTPS URL before protected signing, in the separate main deploy
-job and preview paths immediately before every branch publication/deletion, and again when deriving the
-live URL for acceptance. A repository switched to Actions mode or another branch/path therefore fails
-before key use or branch mutation instead of silently creating a second publication model.
-
-**Dev-feed and manual release trust model:** Automated pushes to `main` produce development channel
-builds (`mode=dev`) signed by the protected key and deployed to `/dev/` Pages. Official tagged production
-releases are cut manually via `workflow_dispatch` with `release: true` (with optional `bump: patch|minor|major`
-or `release_version: x.y.z`), creating the tagged immutable Release and deploying to root Pages. The deploy
-job validates the served `/dev/` files against local staged artifacts via `scripts/check-dev-pages.py`.
-Unlike immutable tagged Releases which reuse byte-identical release binaries on retry without key access, dev
-builds on `main` push do not produce GitHub Release assets and deploy directly to `/dev/` on the Pages branch;
-a re-run of a `main` push executes randomized RSA-PSS signing under the protected key and publishes fresh
-signed bytes to `/dev/`.
-Furthermore, unprivileged manual `workflow_dispatch` runs without `release: true` execute in test mode
-(`mode == 'test'`), which never enters the protected signing or publishing jobs, preventing unauthorized
-dev or release artifact generation.
+   In both modes the local root site is assembled and byte-bound (16/16 manifest parts against the
+   four merged images) *before* any artifact upload or Release mutation, and the root must contain
+   exactly the twelve regular, single-link, non-empty files, listed by name and never by glob. The
+   artifact also carries the sixteen signer-owned per-target layout inputs. `publish` never writes
+   `gh-pages`. Every display version uses one canonical grammar (no leading-zero core component,
+   ≤ 31 bytes for the ESP app descriptor) at every boundary.
+3. **`deploy` (main push only).** No signing Environment, key or OIDC. Checks out the exact SHA
+   without persisted credentials, downloads only the named artifact, re-verifies the twelve-file
+   root, sixteen layout inputs, site manifest and 16 local byte relationships, then binds them plus
+   the 28 diagnostics to fresh metadata for all 40 immutable Release assets. It revalidates Release
+   and Pages authority immediately before writing the branch, then reads the live manifest and all
+   16 parts back (bounded, cache-busted) and compares them byte-for-byte to the immutable merged
+   assets.
+4. **Signed PR preview (opt-in).** A maintainer adds the `signed-preview` label to a same-repository
+   PR. After its unprivileged build, `signed-pr-preview.yml` runs from the default branch via
+   `workflow_run`, verifies the head is current and launches a separate default-branch-defined
+   rebuild of that exact SHA. That rebuild may execute PR code but has read-only permissions and
+   no secret, Environment, identity token, restored cache or access to the primary artifact. The
+   protected signer **never checks out the PR** (that would create an untrusted-checkout TOCTOU in
+   a key-capable job); it treats both artifacts only as bounded data, requires their 53 payloads
+   and manifests to be byte-identical and source/version-bound, and derives the
+   `<latest-complete-immutable-stable>-PR-<N>` version itself after the approval wait. Before key
+   provisioning, artifact upload and Pages publication it refetches the default-branch head and
+   requires it to equal the trusted workflow's `github.sha`, so a main advance retires a stale
+   queued run. Every signed app must pass the authority-pin RSA-PSS check. Fork PRs are ineligible;
+   unlabelled PRs stay unsigned compile checks. Signing and cleanup share a per-PR concurrency
+   group: close, force-push or label removal deletes the preview and cancels a running publisher
+   (cleanup is a trusted-base `pull_request_target` job that checks out the exact base SHA). A daily
+   reconciliation removes any preview whose PR is not open, same-repository, labelled and at the
+   manifest's `sourceSha`. The `trusted-rebuild` job reads `esp-idf-toolchain.txt` from the PR head
+   so a toolchain-bump PR builds with its own digest.
+5. **One Pages authority.** GitHub's branch-backed legacy mode, source `gh-pages:/`, holds root
+   (**Release** channel), `dev/` (**Dev** channel) and `PR/<N>/` previews. No Pages Actions artifact
+   is used. `scripts/check-pages-source.py` validates the API mode/source and HTTPS URL before
+   signing, again right before each branch write or deletion, and when deriving the live URL for
+   acceptance, so a repository switched to Actions mode or another branch fails before key use.
+6. **Dev feed and manual releases.** A push to `main` builds a **Dev** build (`mode=dev`), signed by
+   the protected key and deployed to `/dev/`; it creates no GitHub Release, and re-running a `main`
+   push signs fresh bytes (RSA-PSS is randomized). Official Releases are cut manually with
+   `workflow_dispatch` `release: true` (optional `bump: patch|minor|major` or
+   `release_version: x.y.z`), creating the immutable tagged Release and deploying to root Pages. A
+   `workflow_dispatch` without `release: true` runs in `test` mode and never reaches protected
+   signing or publishing.
 
 These gates prove a closed, deterministic source-to-artifact relationship under the pinned build
-contract; they do not prove that reviewed source is safe, that GitHub-hosted runners are trustworthy,
-or that a signed image works on hardware. Code review, protected Environment approval and separate
-bench/device acceptance remain distinct evidence boundaries.
-
-The signer uses the immutable digest-pinned ESP-IDF image from `esp-idf-toolchain.txt`; rotating
-that digest is therefore a security-sensitive review. For higher assurance, keep the key fully
-offline and sign on a trusted machine / KMS instead of in CI (no device-workflow change is needed).
+contract. They do not prove that reviewed source is safe, that GitHub-hosted runners are
+trustworthy or that a signed image works on hardware; code review, Environment approval and bench
+acceptance remain separate evidence boundaries. The signer runs in the digest-pinned image from
+`esp-idf-toolchain.txt`, so rotating that digest is a security-sensitive review. For higher
+assurance, keep the key fully offline and sign on a trusted machine or KMS instead of in CI.
 
 ### Key rotation
 
-This project's `CONFIG_SECURE_SIGNED_ON_UPDATE_NO_SECURE_BOOT` mode deliberately supports exactly
-one valid signature block in position zero. ESP-IDF (v5.5, and unchanged in v6.1) uses only that
-first running-app key to verify the next OTA image; appending old and new signatures therefore
-**does not provide an OTA key rotation path**. The validator rejects additional blocks so CI cannot imply otherwise.
-
-Changing `OTA_SIGNING_KEY` or `scripts/ota-signing-public-key.sha256` alone would strand every
-device anchored to the old key. A rotation requires a separately reviewed fleet migration: retain
-the old key and recovery artifacts, prepare and verify the new key plus pin as one change, then
-USB-flash a new-key-signed app on each explicitly authorized device while preserving NVS. Verify
-each device on the new authority before retiring the old key. Rollback across authorities is also
-USB-only. A future multi-key design requires a separate migration to hardware Secure Boot or a
-reviewed ESP-IDF/protocol change; it is not part of this software-only TOFU contract.
+`CONFIG_SECURE_SIGNED_ON_UPDATE_NO_SECURE_BOOT` supports exactly one valid signature block in
+position zero; ESP-IDF (v5.5, unchanged in v6.1) verifies the next OTA image only against the first
+running-app key. Appending old and new signatures therefore **is not an OTA rotation path**, and the
+validator rejects extra blocks. Changing `OTA_SIGNING_KEY` or the pin alone would strand every
+device anchored to the old key. A rotation is a separately reviewed fleet migration: keep the old
+key and recovery artifacts, prepare key and pin as one verified change, USB-flash a new-key-signed
+app on each authorized device **preserving NVS**, verify each device on the new authority, and only
+then retire the old key. Rollback across authorities is USB-only. A multi-key design would need a
+migration to hardware Secure Boot or a reviewed ESP-IDF change.
 
 ## Enabling Flash Encryption + Secure Boot (recommended, IRREVERSIBLE)
 
-This is the real fix for key-at-rest security and firmware tampering. **Burning these
-eFuses is permanent and can lock you out of the device** — do it deliberately, per unit,
-after testing the firmware. Read the Espressif guides first:
-- <https://docs.espressif.com/projects/esp-idf/en/latest/esp32s3/security/flash-encryption.html>
-- <https://docs.espressif.com/projects/esp-idf/en/latest/esp32s3/security/secure-boot-v2.html>
+This is the real fix for key-at-rest and firmware tampering. **Burning these eFuses is permanent
+and can lock you out** — do it deliberately, per unit, after testing. Read the Espressif guides for
+[flash encryption](https://docs.espressif.com/projects/esp-idf/en/latest/esp32s3/security/flash-encryption.html)
+and [Secure Boot v2](https://docs.espressif.com/projects/esp-idf/en/latest/esp32s3/security/secure-boot-v2.html)
+first.
 
-### 1. Secure Boot signing key (keep OFFLINE, back it up)
+1. **Signing key.** Reuse the OTA signing key (RSA-3072, v2): hardware Secure Boot just also burns
+   its public-key digest into eFuse, so no re-signing of the release stream is needed.
+2. **menuconfig** → *Security features*: enable flash encryption (**Release** mode; Development mode
+   is not secure), hardware Secure Boot v2 with `ota_signing_key.pem`, and NVS encryption.
+3. **`nvs_keys` partition** (required for NVS encryption) in `partitions.csv`, leaving `nvs` at
+   `0x9000` so existing data stays in place:
+   `nvs_key, data, nvs_keys, , 0x1000, encrypted,`
+4. **First encrypted flash:** `idf.py build && idf.py flash` (the device encrypts flash and burns
+   eFuses on first boot), then `espefuse --port <PORT> summary` to confirm `SPI_BOOT_CRYPT_CNT` /
+   `SECURE_BOOT_EN`.
+5. **Optional lockdown:** `espefuse --port <PORT> burn_efuse DIS_DOWNLOAD_MODE` (block read-back
+   over the ROM downloader) or `ENABLE_SECURITY_DOWNLOAD` (secure variant only).
 
-**Reuse the OTA signing key** from [Signed OTA](#signed-ota-images) — it is already the right
-type (RSA-3072, v2). Hardware Secure Boot just additionally burns its public-key digest into
-eFuse, so no second key and no re-signing of the existing release stream is needed. If you do
-not have one yet:
-
-```bash
-espsecure.py generate_signing_key --version 2 --scheme rsa3072 ota_signing_key.pem
-```
-
-Losing this key means you can never sign an update again; leaking it defeats Secure Boot.
-
-### 2. menuconfig
-
-```
-Security features →
-  [*] Enable flash encryption on boot
-        Flash encryption mode = Release        # Development mode is NOT secure
-  [*] Enable hardware Secure Boot in bootloader (v2)
-        Secure boot private signing key = ota_signing_key.pem   # the same key as Signed OTA
-  [*] Enable NVS Encryption
-```
-
-### 3. Add an `nvs_keys` partition (required for NVS encryption)
-
-In `partitions.csv`, add a key partition (the nvs XTS keys live here, itself protected
-by flash encryption):
-
-```
-nvs_key,  data, nvs_keys, ,        0x1000, encrypted,
-```
-
-Make sure offsets still leave the `nvs` partition where it is (`0x9000`) so existing
-data layout is unchanged.
-
-### 4. Build and flash (first encrypted flash)
-
-```bash
-idf.py build
-idf.py flash          # Release mode: device encrypts flash + burns eFuses on first boot
-espefuse --port <PORT> summary   # confirm SPI_BOOT_CRYPT_CNT / SECURE_BOOT_EN now set
-```
-
-### 5. Optional lockdown
-
-```bash
-# Block read-back of flash over the ROM downloader (after you no longer need it):
-espefuse --port <PORT> burn_efuse DIS_DOWNLOAD_MODE
-# or keep download but force the secure variant:
-espefuse --port <PORT> burn_efuse ENABLE_SECURITY_DOWNLOAD
-```
-
-### ⚠️ Consequence for the web installer
-
-With flash encryption in Release mode the device only accepts **signed, and effectively
-encrypted** images. The browser web-installer (esptool-js over Web Serial) writes *plaintext* parts
-and can no longer update such a device. After hardening, deliver updates via **signed
-OTA** or `idf.py flash` from a trusted machine. Plan the update path before burning.
+⚠️ **Consequence for the web installer:** with flash encryption in Release mode the device accepts
+only signed, effectively encrypted images; the browser installer writes plaintext parts and can no
+longer update it. Deliver updates via signed OTA or `idf.py flash` from a trusted machine, and plan
+that path before burning anything.
 
 ## Development tooling trust boundary
 
-[`AGENTS.md`](../AGENTS.md) is the canonical authorization policy. Analysis, review, diagnosis,
-and triage are read-only by default, and an implementation request does not authorize commit,
-push, merge, release, USB, flash, OTA, NVS, or live vehicle operations. The project agent config
-does not grant those mutations automatically; specialist reviewers in `.agents/subagents.json` run
-with `SandboxMode = "read-only"`, no model pin, and no approval escalation.
+[`AGENTS.md`](../AGENTS.md) is the canonical authorization policy: analysis, review and diagnosis
+are read-only by default, and an implementation request does not authorize commit, push, merge,
+release, USB, flash, OTA, NVS or live-vehicle operations. Specialist reviewers in
+`.agents/subagents.json` run with `SandboxMode = "read-only"`, no model pin and no approval
+escalation. The runner-neutral hook core under [`tools/agent-hooks/`](../tools/agent-hooks/) checks
+secrets, partitions and PR gates lexically — defense in depth, not a substitute for sandboxing,
+explicit authorization, branch protection, CI trust separation or human review. No PR or agent gate
+receives `OTA_SIGNING_KEY`; through agent tools the only permitted key use is an explicitly
+authorized, unchained `espsecure.py sign_data` call that passes the key as a keyfile path. Never
+print, copy, redirect, archive, upload or pass private-key, NVS, BLE-session, credential or
+environment-dump material through an agent tool.
 
-The project configuration calls the runner-neutral core under
-[`tools/agent-hooks/`](../tools/agent-hooks/). Its secret, partition, and PR-gate checks are lexical
-defense in depth: they do not replace sandboxing, explicit authorization, branch protection, CI
-trust separation, or human review. In particular, no PR or agent-configuration gate receives
-`OTA_SIGNING_KEY`; through agent tools, the only permitted signing-key use remains
-an explicitly authorized, unchained `espsecure.py sign_data`/`sign-data` invocation that supplies
-the key only as a keyfile path. Never print, copy, redirect, archive, upload, or pass private-key,
-NVS, BLE-session, credential, or environment-dump material through an agent tool.
+CI actions are pinned by full commit SHA, firmware tooling runs in the tag-plus-digest image from
+`esp-idf-toolchain.txt`, and every workflow has least-privilege permissions and a job timeout. The
+GitHub-hosted runner OS, orchestration and GitHub itself remain part of the trust boundary. The
+read-only `pull_request_target` PR-policy workflow checks out the trusted base SHA, evaluates
+server-side current-head records and never executes PR code; it blocks merges only once repository
+rules require `pr-policy / current-head-records`, a setting the repository cannot self-install. The
+manual bench-acceptance workflow ingests one closed-schema report and records its digests; those
+cover the report, not the firmware, and all physical observations remain operator declarations
+([FEATURES §6](FEATURES.md#6-build-test-and-ci)).
 
-Repository CI actions are referenced by full commit SHA, and the firmware compiler/signing tools
-run in the tag-plus-manifest-digest image from `esp-idf-toolchain.txt`. The GitHub-hosted runner OS
-is still a managed external service, so only the digest-pinned container is the firmware-toolchain
-identity; orchestration, host tests and GitHub itself remain part of the CI trust boundary.
-Every workflow has explicit least-privilege permissions and a bounded job timeout. The read-only
-`pull_request_target` PR-policy workflow checks out the exact trusted base SHA and evaluates only
-server-side current-head records; it never checks out or executes PR code. It blocks merges only
-after repository rules require `pr-policy / current-head-records`—a server setting the repository
-cannot self-install. The manual bench workflow ingests one closed-schema `report-json` input,
-checks its plausibility and exact equality to separately entered source/artifact/profile/target
-values, fingerprints the validated JSON, then uploads that exact file with no intervening step and
-records its SHA-256 plus GitHub's artifact ID/archive digest. Those digests cover the report, not
-the firmware bytes. Report schema v2 requires recovery to start/end with
-`initialBootFailCount`/`finalBootFailCount` zero, reach the safe-mode latch through at least four
-fault resets, and use a separate non-fault reboot (at least five planned reboots total). Every
-normal/final snapshot, including recovery's post-clear reboot, must report `httpd`, `vehicle` and
-`mqtt` minimum-free-stack values at or above the reviewed one-eighth-stack policy floors
-(1024/1024/768 B); optional `auto_pair` must retain 1024 B when present. These are schema acceptance
-margins derived from configured stack sizes, not hardware-proven universal alarm thresholds. Source and
-firmware-hash identity, signature verification, NVS preservation and every physical observation
-remain operator declarations; the workflow does not collect evidence, contact a board/vehicle, or
-receive a signing key.
-
-The project MCP configuration invokes exact `@upstash/context7-mcp@4.0.2`, not a floating npm tag.
-That prevents an unnoticed `latest` upgrade, but it is not a privacy sandbox or an npm integrity
-lock: first use can download executable package code, and any prompt/code explicitly sent to the
-external Context7 service crosses the local-agent boundary. Never send signing keys, credential
-files, NVS dumps, unredacted VIN/BLE captures or CI secrets through it. Disable the project MCP
-server locally when policy forbids that external service; neither firmware builds nor CI depend on
-it.
+The project MCP config pins `@upstash/context7-mcp@4.0.2` instead of a floating tag. That avoids
+unnoticed upgrades but is not a privacy sandbox or npm integrity lock: first use downloads
+executable code, and anything sent to the Context7 service leaves the local boundary. Never send
+signing keys, credentials, NVS dumps, unredacted VIN/BLE captures or CI secrets through it; disable
+it locally if policy forbids it. Neither firmware builds nor CI depend on it.
 
 ## Other notes
 
-- **Setup AP is open** (`WIFI_AUTH_OPEN`) and the WiFi password is submitted over plain
-  HTTP during provisioning. Keep the setup window short; consider WPA2 on the AP.
+- **The setup AP is open** (`WIFI_AUTH_OPEN`) and the WiFi password is submitted over plain HTTP
+  during provisioning. Keep the setup window short.
 - **Do not expose the device to the internet.** Home LAN only.
-- The private key is **never logged**; VIN/MAC/SSID appear in serial logs (physical access).
-- mDNS advertises firmware version but not the VIN; enumerating `_http._tcp` must not multicast a
-  vehicle identifier before a trusted client explicitly queries the open LAN API.
+- The private key is never logged; VIN/MAC/SSID appear in serial logs (physical access).
+- mDNS advertises the firmware version but not the VIN, so enumerating `_http._tcp` never multicasts
+  a vehicle identifier.
