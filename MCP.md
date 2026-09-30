@@ -126,7 +126,7 @@ curl -s http://tesla-key-esp32.local/mcp \
 {"jsonrpc":"2.0","id":1,"result":{
   "protocolVersion":"2025-06-18",
   "capabilities":{"tools":{}},
-  "serverInfo":{"name":"tesla-key-esp32","version":"1.4.25"},
+  "serverInfo":{"name":"tesla-key-esp32","version":"1.5.0"},
   "instructions":"BLE-to-HTTP bridge for one Tesla, paired as Charging Manager: charging commands and cached read-only state only. get_vehicle_state never wakes the car; commands block for the BLE round-trip — typically 3-5s after idle, up to 20s when the car is unreachable."}}
 ```
 
@@ -221,21 +221,6 @@ curl -s http://tesla-key-esp32.local/mcp -H 'Content-Type: application/json' \
 curl -s http://tesla-key-esp32.local/mcp -H 'Content-Type: application/json' -d 'not json'
 # {"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"parse error"}}
 
-# Missing/non-string/non-"2.0" jsonrpc → -32600; a separate valid id is correlated
-# {"jsonrpc":"2.0","id":7,"error":{"code":-32600,"message":"jsonrpc must be \"2.0\""}}
-
-# Duplicate keys at any nesting level → -32600 before tool or vehicle dispatch
-# A duplicate id is ambiguous and therefore returns id:null.
-
-# Body over 2 KB → HTTP 413 plus -32600
-# {"jsonrpc":"2.0","id":null,"error":{"code":-32600,"message":"request body too large"}}
-
-# Otherwise valid JSON nested beyond 16 arrays/objects → HTTP 200 plus -32600
-# {"jsonrpc":"2.0","id":null,"error":{"code":-32600,"message":"JSON nesting too deep"}}
-
-# Escaped U+0000 anywhere in JSON → HTTP 200 plus -32600
-# {"jsonrpc":"2.0","id":null,"error":{"code":-32600,"message":"JSON NUL escape not supported"}}
-
 # Batch → -32600 (single messages only)
 curl -s http://tesla-key-esp32.local/mcp -H 'Content-Type: application/json' -d '[]'
 # {"jsonrpc":"2.0","id":null,"error":{"code":-32600,"message":"batching not supported"}}
@@ -249,11 +234,11 @@ curl -si http://tesla-key-esp32.local/mcp | head -1
 
 | Code | Meaning here |
 |------|--------------|
-| `-32700` | Body is not valid JSON (including malformed raw UTF-8 or invalid string escapes), empty, or could not be received |
-| `-32600` | Body exceeds the 2 KB cap (HTTP 413), exceeds the 16-container nesting limit, contains escaped U+0000, is a batch array or non-object body, omits `jsonrpc` or does not carry it as the exact string `"2.0"`, has duplicate object keys at any depth, has no `method`, carries an invalid request `id` (not a canonical safe integer or a string of at most 64 bytes), or is a `notifications/*` message that wrongly carries an `id` |
-| `-32601` | Method not implemented (`resources/*`, `prompts/*`, …) |
-| `-32602` | `tools/call` with an unknown tool name, an absent required argument (`missing required argument: <key>`), or a present-but-unparseable argument (`invalid argument: <key>`) |
-| `-32603` | HTTP `503`: receive-buffer, cJSON materialization, response-build or response-print allocation failure |
+| `-32700` | Body is not valid JSON (including malformed raw UTF-8 or invalid string escapes), empty, or could not be received. |
+| `-32600` | Invalid request: body over the 2 KB cap (HTTP `413`, message `request body too large`); nesting beyond 16 arrays/objects (`JSON nesting too deep`); escaped U+0000 anywhere (`JSON NUL escape not supported`); a batch array or non-object body; `jsonrpc` missing or not the exact string `"2.0"` (a separate valid `id` is still correlated); duplicate object keys at any depth (a duplicate `id` is ambiguous, so `id:null`); no `method`; an invalid `id`; or a `notifications/*` message that carries an `id`. |
+| `-32601` | Method not implemented (`resources/*`, `prompts/*`, …). |
+| `-32602` | `tools/call` with an unknown tool, an absent required argument (`missing required argument: <key>`) or a present-but-unparseable one (`invalid argument: <key>`). |
+| `-32603` | HTTP `503`: receive-buffer, cJSON materialization, response-build or response-print allocation failure. |
 
 ---
 
@@ -343,7 +328,7 @@ through a VPN/tunnel that you control — do **not** expose the device itself):
 
 ```python
 client.beta.messages.create(
-    model="claude-opus-4-8", max_tokens=1024,
+    model="<claude-model-id>", max_tokens=1024,
     betas=["mcp-client-2025-11-20"],
     mcp_servers=[{"type": "url", "url": "https://<your-tunnel>/mcp", "name": "tesla-key"}],
     tools=[{"type": "mcp_toolset", "mcp_server_name": "tesla-key"}],
@@ -361,11 +346,8 @@ agent process on the same network).
 - **One request at a time.** The httpd serves requests sequentially and commands hold the
   handler for the BLE round-trip; concurrent MCP calls (or an MCP call racing an evcc
   command) simply queue. Keep client timeouts ≥ 30 s.
-- **MCP body cap 2 KiB.** This is the normal API server's per-request bound and therefore applies
-  to `POST /mcp`; all real MCP requests are far smaller, and an oversized MCP body gets HTTP `413`
-  with `-32600`. It is not a device-wide POST constant: the setup AP's separate provisioning
-  `POST /save` path uses a fixed 1024-byte form buffer and returns HTTP `400` for an empty or
-  oversized body.
+- **2 KiB body cap.** The normal API server's per-request bound applies to `POST /mcp`; real MCP
+  requests are far smaller, and an oversized body gets HTTP `413` with `-32600`.
 - **Don't poll commands — poll state.** `get_vehicle_state` is free (cache-only, no BLE);
   `wake_up`/commands cost a BLE connect and, repeated needlessly, keep the car from
   sleeping. A well-behaved agent checks `link` first and only wakes when it must.
