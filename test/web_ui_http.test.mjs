@@ -2032,6 +2032,37 @@ test("a /set_ota request that never settles times out, is reported as unconfirme
   assert.ok(urls.some(u => u.startsWith("/status")), "the device's own answer is re-read instead of guessing");
 });
 
+test("a refused channel change rolls back, shows the device's reason and hands focus back", async () => {
+  const { context, element } = loadUi();
+  const toasts = [];
+  const urls = [];
+  context.toast = (msg, type) => toasts.push({ msg, type });
+  context.render({ version: "1.6.0", ota: { channel: "release" } });
+
+  context.fetch = async (url, opts) => {
+    urls.push(url);
+    return otaFetchStub({ setOta: () => ({
+      ok: false, status: 409,
+      async json() { return { response: { result: false, command: "set_ota", vin: "", reason: "an OTA update is in progress" } }; }
+    }) })(url, opts);
+  };
+  await context.selectChannel("dev");
+  assert.equal(context.otaChannel, "release", "optimistic switch is rolled back");
+  assert.equal(element("fwSub").textContent, "Release channel");
+  assert.equal(context.isOtaBusy(), false);
+  assert.ok(toasts.some(t => t.type === "err" && t.msg === "Failed to set update channel — an OTA update is in progress"));
+  assert.equal(context.document.activeElement, element("verLink"), "focus is handed back after the refusal");
+  assert.equal(urls.some(u => u.startsWith("/status")), false, "a definite refusal needs no status refresh");
+  assert.equal(urls.some(u => u.startsWith("/ota/check")), false, "no update check after a refused change");
+
+  // the device answered but gave no readable reason: still a refusal, generic text
+  toasts.length = 0;
+  context.fetch = otaFetchStub({ setOta: () => ({ ok: false, status: 502, async json() { throw new Error("not json"); } }) });
+  await context.selectChannel("dev");
+  assert.equal(context.otaChannel, "release");
+  assert.ok(toasts.some(t => t.type === "err" && t.msg === "Failed to set update channel"));
+});
+
 test("channel options expose their state via aria-pressed and hold no block elements inside buttons", () => {
   const html = fs.readFileSync(new URL("../main/www/index.html", import.meta.url), "utf8");
   assert.doesNotMatch(html, /<button[^>]*class="chan-opt"[^>]*>\s*<div/);

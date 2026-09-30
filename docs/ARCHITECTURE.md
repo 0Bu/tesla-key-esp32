@@ -599,8 +599,9 @@ preserves the `PR/` tree). Constraints:
     (`ota_config_restart_begin()`), which a check holds. During a check they save the configuration, log
     `reboot postponed` and still answer with their normal success text; the change applies at the next
     restart. `POST /gen_keys` and `POST /set_vin` are different: a check holds the same OTA gate as an
-    update, so they answer `503` (`OtaIdentityMutationGuard`) for the duration of a check as well. The `ota_is_updating()` test is a snapshot taken when the handler starts,
-    not an atomic exclusion, so a request that passed it can still overlap an update that starts right afterwards.
+    update, so they answer `503` (`OtaIdentityMutationGuard`) for the duration of a check as well. The
+    `ota_is_updating()` test is a snapshot taken when the handler starts, not an atomic exclusion, so a
+    request that passed it can still overlap an update that starts right afterwards.
     `POST /crash/dismiss` and `GET /coredump?clear=1` (core-dump erase) are not covered by the guard.
 - **Toolchain pin isolation in PR preview rebuilds.** The `trusted-rebuild` job in
   `.github/workflows/signed-pr-preview.yml` checks out the PR head commit before reading
