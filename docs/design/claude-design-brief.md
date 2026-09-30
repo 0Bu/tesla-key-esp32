@@ -1,5 +1,10 @@
 # Claude Design brief — web UI redesign (four variants)
 
+> **Status: historical.** This brief drove the redesign that landed in #335 (Variant G "Dock") and has
+> been superseded by later UI work (#337, #340). The live layout is described in
+> [`ARCHITECTURE.md`](../ARCHITECTURE.md#web-ui). Keep it only as input for a future redesign
+> exploration; the inventory below is not kept in sync with `main/www/`.
+
 This is a self-contained brief for **Claude Design**. It asks for **four distinct, modern and
 functional design variants** of the on-device web UI served by `tesla-key-esp32`. Paste the
 [prompt](#prompt-to-paste-into-claude-design) section into Claude Design; the remaining sections

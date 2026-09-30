@@ -32,7 +32,7 @@ cannot build or USB-flash — see AGENTS.md).
 ## Gates
 
 <!--
-These four boxes ARE the publish/merge gates — they replace the old on-disk markers. The
+These boxes ARE the publish/merge gates — they replace the old on-disk markers. The
 runner-neutral gate under tools/agent-hooks/ reads them straight from this PR body, each matching
 its OWN box. After a CLEAN run, tick the box and replace <full-40-hex-sha> with the exact reviewed
 commit (`git rev-parse HEAD`). Prefixes are rejected. A later commit changes the SHA and re-stales the gate, forcing

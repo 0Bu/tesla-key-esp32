@@ -3,7 +3,7 @@
 **Status:** accepted
 **Date:** 2026-09-20
 **Supersedes:** [`0003-reject-replayed-tesla-responses.md`](0003-reject-replayed-tesla-responses.md)
-**Relates to:** [`0002-idf6-mbedtls4-crypto-seam.md`](0002-idf6-mbedtls4-crypto-seam.md), Issue [#306](https://github.com/0Bu/tesla-key-esp32/issues/306), Issue [#61](https://github.com/0Bu/tesla-key-esp32/issues/61), Issue [#65](https://github.com/0Bu/tesla-key-esp32/issues/65), [`../ARCHITECTURE.md`](../ARCHITECTURE.md) §"Pinned tesla-ble with an ordered build-time patch series"
+**Relates to:** [`0002-idf6-mbedtls4-crypto-seam.md`](0002-idf6-mbedtls4-crypto-seam.md), Issue [#306](https://github.com/0Bu/tesla-key-esp32/issues/306), Issue [#61](https://github.com/0Bu/tesla-key-esp32/issues/61), Issue [#65](https://github.com/0Bu/tesla-key-esp32/issues/65), [`../ARCHITECTURE.md`](../ARCHITECTURE.md#pinned-tesla-ble-and-native-orchestration)
 
 ## Context
 
