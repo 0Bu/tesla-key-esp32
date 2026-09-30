@@ -124,6 +124,19 @@ jobs:
         run: ./scripts/repo-lint.sh
       - name: Run host-side logic tests
         run: ./scripts/run-mock-tests.sh --require-all
+
+  logic-harness:
+    # The remaining host gates, split out of logic-test so the two run concurrently: the tesla-ble
+    # harness, the sanitizer tripwires, the build/PR-gate contract self-tests and the gate matcher.
+    # `build` needs both jobs, so a red gate in either still fails the required build check.
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
       - name: Run tesla-ble integration harness
         run: ./scripts/test-tesla-ble-harness.sh --require-all
       - name: Prove and run Linux memory-safety instrumentation
@@ -269,7 +282,7 @@ jobs:
           path: _repro/
 
   build:
-    needs: [prepare, logic-test, build-target]
+    needs: [prepare, logic-test, logic-harness, build-target]
     runs-on: ubuntu-26.04
     timeout-minutes: 20
     permissions:
@@ -397,18 +410,102 @@ jobs:
             _unsigned/
             dist/
 
+  independent-rebuild-target:
+    # On main, distinct runners rebuild the exact source without secrets, write permissions, signing
+    # environment or a cache restored from the producer. Each target is its own leg, and the legs only
+    # wait for `prepare` (not for `build`), so the four independent rebuilds run concurrently with the
+    # producer builds instead of serially after them. The display version is the same release version
+    # the producer stamps; any divergence changes the bytes and fails the publish-time comparison.
+    needs: prepare
+    if: >-
+      github.ref == 'refs/heads/main'
+      && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+      && needs.prepare.outputs.mode != 'test'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      # release-relevance.sh reads the configured live Pages URL, exactly as in build and build-target.
+      pages: read
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [esp32, esp32s3, esp32c3, esp32c6]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Detect firmware-relevant changes
+        id: changes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          if [ "${{ github.event_name }}" = push ] && [ "${{ github.ref }}" = refs/heads/main ]; then
+            if ! changed="$(./scripts/release-relevance.sh --changed-dev "$SOURCE_SHA")"; then
+              echo "release relevance check failed; scheduling publication reconciliation" >&2
+              changed=yes
+            fi
+          else
+            changed=yes
+          fi
+          case "$changed" in
+            yes|no) ;;
+            *) echo "invalid release relevance result: $changed" >&2; exit 1 ;;
+          esac
+          echo "firmware=$changed" >> "$GITHUB_OUTPUT"
+          echo "firmware-relevant: $changed"
+
+      - name: Read pinned ESP-IDF toolchain
+        if: steps.changes.outputs.firmware == 'yes'
+        id: toolchain
+        run: |
+          echo "image-version=$(./scripts/idf-version.sh --image-version)" >> "$GITHUB_OUTPUT"
+          echo "ESP-IDF image: $(./scripts/idf-version.sh --image)"
+      - name: Apply the release display-version stamp
+        if: steps.changes.outputs.firmware == 'yes'
+        env:
+          DISPLAY_VERSION: ${{ needs.prepare.outputs.release-version }}
+        run: printf '%s\n' "$DISPLAY_VERSION" > version.txt
+      - name: Independently rebuild the target
+        if: steps.changes.outputs.firmware == 'yes'
+        uses: espressif/esp-idf-ci-action@e6f5c74232b1ccd4c97ed641f1e48553853f1fd5 # v1.2.0
+        with:
+          esp_idf_version: ${{ steps.toolchain.outputs.image-version }}
+          target: esp32
+          command: >-
+            ./scripts/ci-build-all.sh
+            --target "${{ matrix.target }}"
+            "${{ needs.prepare.outputs.release-version }}"
+            "${{ github.sha }}"
+      - name: Upload independent target rebuild
+        if: steps.changes.outputs.firmware == 'yes'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: firmware-independent-target-${{ matrix.target }}
+          if-no-files-found: error
+          retention-days: 1
+          path: |
+            _unsigned/${{ matrix.target }}/
+            dist/${{ matrix.target }}/
+
   independent-rebuild:
-    # On main, a distinct runner rebuilds the exact source without secrets, write permissions,
-    # signing environment or a cache restored from the producer. PR preview trust does not use
-    # this PR-controlled workflow definition; signed-pr-preview.yml owns its workflow_run rebuild.
-    needs: build
+    # Joins the four independent legs into the single evidence artifact the signer consumes. Only
+    # this job needs the producer's display version, so it alone waits for `build`. It runs no build
+    # and holds no secret: it downloads the legs as data, binds them to the exact source commit and
+    # writes the same metadata and byte inventory a single full rebuild used to write.
+    needs: [build, independent-rebuild-target]
     if: >-
       github.ref == 'refs/heads/main'
       && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
       && needs.build.outputs.mode != 'test'
       && needs.build.outputs.firmware == 'yes'
     runs-on: ubuntu-26.04
-    timeout-minutes: 60
+    timeout-minutes: 20
     permissions:
       contents: read
     steps:
@@ -417,24 +514,29 @@ jobs:
           ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
-      - name: Read pinned ESP-IDF toolchain
-        id: toolchain
-        run: |
-          echo "image-version=$(./scripts/idf-version.sh --image-version)" >> "$GITHUB_OUTPUT"
-          echo "ESP-IDF image: $(./scripts/idf-version.sh --image)"
+      - name: Download independent target rebuilds
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: firmware-independent-target-*
+          merge-multiple: true
+          path: .
       - name: Apply the producer's exact display-version stamp
         env:
           DISPLAY_VERSION: ${{ needs.build.outputs.display-version }}
         run: printf '%s\n' "$DISPLAY_VERSION" > version.txt
-      - name: Independently rebuild all four targets
-        uses: espressif/esp-idf-ci-action@e6f5c74232b1ccd4c97ed641f1e48553853f1fd5 # v1.2.0
-        with:
-          esp_idf_version: ${{ steps.toolchain.outputs.image-version }}
-          target: esp32
-          command: >-
-            ./scripts/ci-build-all.sh
-            "${{ needs.build.outputs.display-version }}"
-            "${{ github.sha }}"
+      - name: Bind the independent rebuild to the exact source and version
+        env:
+          DISPLAY_VERSION: ${{ needs.build.outputs.display-version }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          {
+            printf 'head_sha=%s\n' "$SOURCE_SHA"
+            printf 'display_version=%s\n' "$DISPLAY_VERSION"
+          } > dist/build-metadata.txt
+          python3 scripts/check-build-artifact-inventory.py \
+            --write --artifact-root . --source-root . \
+            --expected-source-sha "$SOURCE_SHA" --version "$DISPLAY_VERSION"
       - name: Upload independent rebuild evidence
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:

@@ -974,7 +974,9 @@ def validate(root: Path) -> None:
         and "github.ref == 'refs/heads/main'" in build_workflow
         and "ref: ${{ github.sha }}" in build_workflow
         and "name: firmware-independent-rebuild" in build_workflow
-        and "Independently rebuild all four targets" in build_workflow
+        and "  independent-rebuild-target:" in build_workflow
+        and "Independently rebuild the target" in build_workflow
+        and "pattern: firmware-independent-target-*" in build_workflow
         and "./scripts/ci-build-all.sh" in build_workflow
         and "--compare-to _ci-independent" in build_workflow,
         "build.yml: logic/build/rebuild/publish/deploy chain or independent byte comparison drifted",
@@ -1181,7 +1183,7 @@ def validate(root: Path) -> None:
     require_order(
         build_workflow,
         "build.yml protected inventory verification",
-        ("Validate build provenance", "check-build-artifact-inventory.py",
+        ("Validate build provenance", "--verify --artifact-root . --compare-to _ci-independent",
          "Provision OTA signing key", "./scripts/ci-sign-artifacts.sh"),
     )
 
@@ -1448,6 +1450,9 @@ def self_test(root: Path) -> None:
          "ref: ${{ github.sha }}", "exact head SHA"),
         ("independent-rebuild", ".github/workflows/build.yml",
          "  independent-rebuild:", "  skipped-rebuild:",
+         "logic/build/rebuild/publish/deploy chain"),
+        ("independent-legs", ".github/workflows/build.yml",
+         "  independent-rebuild-target:", "  independent-rebuild-targets:",
          "logic/build/rebuild/publish/deploy chain"),
         ("independent-compare", ".github/workflows/build.yml",
          "--compare-to _ci-independent", "--compare-to .",
