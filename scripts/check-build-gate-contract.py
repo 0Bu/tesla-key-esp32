@@ -127,6 +127,7 @@ REQUIRED_FILES = (
     "scripts/prepare-reused-release.py",
     "scripts/check-release-pages-bytes.py",
     "scripts/check-reproducible-build.sh",
+    "scripts/check-reproducible-artifacts.py",
     "scripts/idf-docker.sh",
     "scripts/ci-build-all.sh",
     "scripts/ci-build-verify.sh",
@@ -295,6 +296,7 @@ def validate(root: Path) -> None:
     verify = read(root, "scripts/ci-build-verify.sh")
     release_test = read(root, "scripts/test-release-contract.sh")
     reproducible = read(root, "scripts/check-reproducible-build.sh")
+    repro_artifacts = read(root, "scripts/check-reproducible-artifacts.py")
     release_assets = read(root, "scripts/check-release-assets.py")
     signed_root_inventory = read(root, "scripts/check-signed-root-inventory.py")
     firmware_artifacts = read(root, "scripts/check-firmware-artifacts.py")
@@ -836,6 +838,21 @@ def validate(root: Path) -> None:
     require("temporary workspace cleanup failed" in reproducible and
             'rm -rf -- "$work_root"' in reproducible,
             "check-reproducible-build.sh: temporary cleanup must fail closed")
+    # Off main, reproducibility is built by a parallel workflow leg (--emit) and compared by a separate
+    # step. The emit path must build exactly one fresh pass and never compare or ignore failures; the
+    # comparison must cover exactly the four targets and the exact eight-file reproduction directory.
+    require('if [[ -n "$emit_dir" ]]; then\n  build_once b\n' in reproducible and
+            'cp "$work_root/app-b.bin" "$emit_dir/app-$target.bin"' in reproducible and
+            'cp "$work_root/app-b.elf" "$emit_dir/app-$target.elf"' in reproducible and
+            reproducible.count("build_once b") == 2,
+            "check-reproducible-build.sh: --emit must build exactly one fresh pass and emit its bytes")
+    require('TARGETS = ("esp32", "esp32s3", "esp32c3", "esp32c6")' in repro_artifacts and
+            "if present != expected_names:" in repro_artifacts and
+            "first_difference(primary, repro)" in repro_artifacts and
+            "stat.S_ISREG(info.st_mode)" in repro_artifacts,
+            "check-reproducible-artifacts.py: four-target, exact-file, byte-compare contract drifted")
+    require('"$skip_repro" -eq 1' in verify and "--skip-repro" in verify,
+            "ci-build-verify.sh: --skip-repro must skip the in-job reproducibility rebuild")
 
     require(release_assets.count('release.get("immutable") is not True') == 1 and
             '(("false", False), ("missing", None))' in release_assets,
@@ -1373,6 +1390,17 @@ def self_test(root: Path) -> None:
         ("primary-version-binding", "scripts/ci-build-all.sh",
          '-D "PROJECT_VER=$version" set-target', 'set-target',
          "display version must bind"),
+        ("repro-artifacts-target", "scripts/check-reproducible-artifacts.py",
+         'TARGETS = ("esp32", "esp32s3", "esp32c3", "esp32c6")',
+         'TARGETS = ("esp32", "esp32s3", "esp32c3")', "four-target, exact-file, byte-compare"),
+        ("repro-artifacts-exact-files", "scripts/check-reproducible-artifacts.py",
+         "    if present != expected_names:", "    if False:", "four-target, exact-file, byte-compare"),
+        ("repro-emit-compares", "scripts/check-reproducible-build.sh",
+         '  build_once b\n  [[ ! -L "$emit_dir" ]]', '  build_once a\n  build_once b\n  [[ ! -L "$emit_dir" ]]',
+         "--emit must build exactly one fresh pass"),
+        ("repro-skip-ignored", "scripts/ci-build-verify.sh",
+         '"$verify_only" -eq 1 || "$skip_repro" -eq 1 || ', '"$verify_only" -eq 1 || ',
+         "--skip-repro must skip"),
         ("repro-version-binding", "scripts/check-reproducible-build.sh",
          '-D "PROJECT_VER=$version" set-target', 'set-target',
          "display version must bind"),

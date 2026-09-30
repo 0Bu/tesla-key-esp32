@@ -65,3 +65,5 @@ ota_signing_key.pem
 /dist/
 # Second-runner artifacts are downloaded as inert comparison data in protected signer jobs.
 /_ci-independent/
+# Isolated reproduction copies emitted by check-reproducible-build.sh --emit and compared in CI.
+/_repro/
