@@ -378,8 +378,8 @@ for (const subagent of subagentsDoc.subagents) {
 const multiTargetReviewerObj = subagentsDoc.subagents.find((s) => s.TypeName === "multi_target_build_reviewer");
 const multiTargetReviewer = normalizeProse(multiTargetReviewerObj?.Prompt || "");
 const multiTargetPublicationContracts = [
-  "prepare -> logic-test + build-target + independent-rebuild-target (concurrent) -> build -> independent-rebuild -> publish -> deploy",
-  "build needs prepare, logic-test and build-target",
+  "prepare -> logic-test + logic-harness + build-target + independent-rebuild-target (concurrent) -> build -> independent-rebuild -> publish -> deploy",
+  "build needs prepare, logic-test, logic-harness and build-target",
   "independent-rebuild needs build and every independent-rebuild-target leg",
   "SHA/version-bound Actions artifact",
   "deploy consumes only that named artifact",

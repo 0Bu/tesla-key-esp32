@@ -124,6 +124,19 @@ jobs:
         run: ./scripts/repo-lint.sh
       - name: Run host-side logic tests
         run: ./scripts/run-mock-tests.sh --require-all
+
+  logic-harness:
+    # The remaining host gates, split out of logic-test so the two run concurrently: the tesla-ble
+    # harness, the sanitizer tripwires, the build/PR-gate contract self-tests and the gate matcher.
+    # `build` needs both jobs, so a red gate in either still fails the required build check.
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
       - name: Run tesla-ble integration harness
         run: ./scripts/test-tesla-ble-harness.sh --require-all
       - name: Prove and run Linux memory-safety instrumentation
@@ -269,7 +282,7 @@ jobs:
           path: _repro/
 
   build:
-    needs: [prepare, logic-test, build-target]
+    needs: [prepare, logic-test, logic-harness, build-target]
     runs-on: ubuntu-26.04
     timeout-minutes: 20
     permissions:

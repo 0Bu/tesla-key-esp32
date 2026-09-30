@@ -26,6 +26,7 @@ JOB = re.compile(r"^  ([A-Za-z0-9_-]+):\s*$", re.MULTILINE)
 UNPRIVILEGED_PERMISSIONS = {
     ("build.yml", "prepare"): {"contents": "read"},
     ("build.yml", "logic-test"): {"contents": "read"},
+    ("build.yml", "logic-harness"): {"contents": "read"},
     ("build.yml", "build-target"): {"contents": "read", "pages": "read"},
     ("build.yml", "build"): {"contents": "read", "pages": "read"},
     ("build.yml", "independent-rebuild-target"): {"contents": "read", "pages": "read"},
@@ -42,8 +43,8 @@ UNPRIVILEGED_PERMISSIONS = {
 EXPECTED_WORKFLOW_JOBS = {
     "bench-acceptance.yml": {"ingest-report"},
     "build.yml": {
-        "prepare", "logic-test", "build-target", "build", "independent-rebuild-target",
-        "independent-rebuild", "publish", "deploy",
+        "prepare", "logic-test", "logic-harness", "build-target", "build",
+        "independent-rebuild-target", "independent-rebuild", "publish", "deploy",
     },
     "pr-policy.yml": {"current-head-records"},
     "pr-preview-cleanup.yml": {"cleanup-event", "discover-stale", "reconcile-stale"},
@@ -64,6 +65,7 @@ EXPECTED_JOB_PERMISSIONS = {
     ("bench-acceptance.yml", "ingest-report"): {"contents": "read"},
     ("build.yml", "prepare"): {"contents": "read"},
     ("build.yml", "logic-test"): {"contents": "read"},
+    ("build.yml", "logic-harness"): {"contents": "read"},
     ("build.yml", "build-target"): {"contents": "read", "pages": "read"},
     ("build.yml", "build"): {"contents": "read", "pages": "read"},
     ("build.yml", "independent-rebuild-target"): {"contents": "read", "pages": "read"},
@@ -104,6 +106,9 @@ EXPECTED_ACTIONS = {
         "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
     ),
     ("build.yml", "logic-test"): (
+        "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+    ),
+    ("build.yml", "logic-harness"): (
         "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
     ),
     ("build.yml", "build-target"): (
@@ -405,8 +410,8 @@ def validate(root: Path) -> None:
     build = jobs_by_file.get("build.yml")
     require(build is not None, "build.yml is missing")
     for name in (
-        "prepare", "logic-test", "build-target", "build", "independent-rebuild-target",
-        "independent-rebuild", "publish", "deploy",
+        "prepare", "logic-test", "logic-harness", "build-target", "build",
+        "independent-rebuild-target", "independent-rebuild", "publish", "deploy",
     ):
         require(name in build, f"build.yml:{name} job is missing")
     # build-target no longer waits for the host tests (only for the run mode / version), so a red
@@ -415,6 +420,8 @@ def validate(root: Path) -> None:
             "build.yml:build-target must need prepare")
     require(job_has_need(build["build"], "prepare"), "build.yml:build must need prepare")
     require(job_has_need(build["build"], "logic-test"), "build.yml:build must need logic-test")
+    require(job_has_need(build["build"], "logic-harness"),
+            "build.yml:build must need logic-harness")
     require(job_has_need(build["build"], "build-target"),
             "build.yml:build must need build-target")
     # The four independent legs only need the run mode/version (prepare), so they run concurrently
@@ -436,10 +443,10 @@ def validate(root: Path) -> None:
             "build.yml:logic-test must run the fail-closed host gate")
     require("./scripts/repo-lint.sh" in build["logic-test"],
             "build.yml:logic-test must run offline repository lint")
-    require("./scripts/run-sanitizer-tests.sh --self-test" in build["logic-test"] and
-            "./scripts/run-sanitizer-tests.sh" in build["logic-test"],
+    require("./scripts/run-sanitizer-tests.sh --self-test" in build["logic-harness"] and
+            "./scripts/run-sanitizer-tests.sh" in build["logic-harness"],
             "build.yml:logic-test must prove and run ASan/UBSan/LSan")
-    require("python3 scripts/check-build-gate-contract.py --self-test" in build["logic-test"],
+    require("python3 scripts/check-build-gate-contract.py --self-test" in build["logic-harness"],
             "build.yml:logic-test must run the mutation-tested four-target build contract")
     build_target_refs = re.findall(
         r"^\s+ref:\s*([^\n#]+?)\s*$", build["build-target"], re.MULTILINE
@@ -822,6 +829,7 @@ def validate(root: Path) -> None:
     )
     require("contents: write" not in build["prepare"]
             and "contents: write" not in build["logic-test"]
+            and "contents: write" not in build["logic-harness"]
             and "contents: write" not in build["build"],
             "build.yml: untrusted build jobs must not write repository contents")
     require(
@@ -1243,10 +1251,15 @@ def self_test(root: Path) -> None:
          "permissions:\n  contents: read\n  issues: write\n",
          "top-level permissions must be exact"),
         ("build-dag", "build.yml", "    needs: prepare\n", "", "must need prepare"),
-        ("build-host-gate", "build.yml", "    needs: [prepare, logic-test, build-target]\n",
-         "    needs: [prepare, build-target]\n", "build must need logic-test"),
-        ("build-run-mode", "build.yml", "    needs: [prepare, logic-test, build-target]\n",
-         "    needs: [logic-test, build-target]\n", "build must need prepare"),
+        ("build-host-gate", "build.yml",
+         "    needs: [prepare, logic-test, logic-harness, build-target]\n",
+         "    needs: [prepare, logic-harness, build-target]\n", "build must need logic-test"),
+        ("build-run-mode", "build.yml",
+         "    needs: [prepare, logic-test, logic-harness, build-target]\n",
+         "    needs: [logic-test, logic-harness, build-target]\n", "build must need prepare"),
+        ("build-host-harness", "build.yml",
+         "    needs: [prepare, logic-test, logic-harness, build-target]\n",
+         "    needs: [prepare, logic-test, build-target]\n", "build must need logic-harness"),
         ("repro-leg-dropped", "build.yml", "|| '[\"primary\",\"reproduction\"]'", "|| '[\"primary\"]'",
          "parallel reproduction leg"),
         ("repro-skip-dropped", "build.yml", "            --skip-repro\n", "",
