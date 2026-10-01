@@ -61,9 +61,11 @@ bool cfg_load(NvsStorageAdapter& cfg, ConfigBlob& out);
 // Load the configuration for a read-modify-save. Returns true only when `out` is authoritative: a
 // decoded blob, or a blob proven ABSENT (the legacy migration path, where the per-key values are
 // the only truth). Returns false — leaving `out` untouched — when a blob cannot be read/decoded or
-// any legacy key cannot be read during migration. The caller must refuse the mutation and persist nothing: the legacy mirrors
-// may be arbitrarily stale, and an identity/credential change built on them is not the change the
-// user asked for.
+// any legacy key cannot be read during migration. The caller must refuse the mutation and persist
+// nothing: the legacy mirrors may be arbitrarily stale, and an identity/credential change built
+// on them is not the change the user asked for. The granularity is deliberately all-or-nothing:
+// a partially read legacy snapshot is not a coherent identity, so ONE unreadable key refuses the
+// whole update.
 bool cfg_load_for_update(NvsStorageAdapter& cfg, ConfigBlob& out);
 
 // Persist the whole configuration atomically. Returns false without publishing anything on a failed

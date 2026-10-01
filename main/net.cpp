@@ -1063,8 +1063,9 @@ static void net_recover(tk::GatewayIdentity sampled) {
     // current transport has produced no evidence and must not be reset for the old one's failure.
     esp_netif_t* netif = net_active_netif();
     esp_netif_ip_info_t current_ip{};
-    if (s_kind.load() != sampled.transport ||
-        lease_generation(sampled.transport) != sampled.lease_generation || !netif ||
+    // The generation is compared LAST, after the gateway was re-read: a lease that turned over
+    // while the address was being fetched must still be caught.
+    if (s_kind.load() != sampled.transport || !netif ||
         esp_netif_get_ip_info(netif, &current_ip) != ESP_OK ||
         current_ip.gw.addr != sampled.address ||
         lease_generation(sampled.transport) != sampled.lease_generation) {
@@ -1127,7 +1128,10 @@ static void net_watchdog_task(void*) {
         const bool gw = up && sample.reachable;
 
         // Keep proof for each leased transport across route failover; a new lease or gateway
-        // starts cold when that transport becomes active again.
+        // starts cold when that transport becomes active again. That includes the lease this
+        // watchdog ends itself: net_recover() re-associates, so the next lease must answer ICMP
+        // once before another recovery is allowed (docs/ARCHITECTURE.md, "State is per
+        // transport and lease").
         const auto baseline_index = sample.identity.transport == NetLink::Eth ? 1 : 0;
         const bool gw_ever = baselines[baseline_index].observe(sample.identity, sample.replied);
 

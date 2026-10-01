@@ -970,9 +970,9 @@ void VehicleController::handle_vcsec_frame_(const UniversalMessage_RoutableMessa
                 ESP_LOGD(TAG, "VCSEC VehicleStatus: sleep_status=%d, has_closureStatuses=%d",
                          static_cast<int>(vs.vehicleSleepStatus), static_cast<int>(vs.has_closureStatuses));
                 vcsec_sleep_state_.store(static_cast<int>(reported));
-                // Only uninterrupted explicit ASLEEP readings prove sleep; UNKNOWN breaks the run.
-                if (reported == tk::SleepState::Asleep) note_vcsec_sleep_(true);
-                else note_vcsec_sleep_(false);
+                // Only uninterrupted explicit ASLEEP readings prove sleep; the clock decides, and
+                // AWAKE and UNKNOWN both end the run (tk::next_asleep_since).
+                note_vcsec_sleep_(reported);
                 // R1: an explicit AWAKE, or has_closureStatuses (upstream v5.2.0's wake-progress
                 // signal), advances a command waiting for a wake. UNKNOWN confirms nothing, and the
                 // raw reported sleep state stays in vcsec_sleep_state_.
@@ -1482,14 +1482,10 @@ void VehicleController::loop_task_fn_(void* arg) {
                 prev_sleep = st;
             }
 
+            self->note_vcsec_sleep_(st);
             tk::WakeSample sample = tk::WakeSample::Unknown;
-            if (st == tk::SleepState::Asleep) {
-                self->note_vcsec_sleep_(true);
-                sample = tk::WakeSample::Asleep;
-            } else {
-                self->note_vcsec_sleep_(false);
-                if (st == tk::SleepState::Awake) sample = tk::WakeSample::Awake;
-            }
+            if (st == tk::SleepState::Asleep) sample = tk::WakeSample::Asleep;
+            else if (st == tk::SleepState::Awake) sample = tk::WakeSample::Awake;
 
             // Dual-trigger one-shot charge poll (issue #264, #300, #301):
             //   1. Wake edge on ASLEEP→AWAKE after debounced asleep run

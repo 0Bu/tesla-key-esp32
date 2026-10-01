@@ -299,7 +299,9 @@ Since [ADR-0005](adr/0005-tesla-ble-seam.md) the firmware bypasses the monolithi
   failure. `tesla_ble/key_rotate` stays armed across power loss and blocks construction/signing until
   cleanup is durable (an NVS probe error blocks too). An interrupted rotation also retires
   `key_created` before clearing the journal: its timestamp cannot be proven to belong to the
-  current key, even if the new date may already have been stamped. `tesla_cfg/vin_txn` journals VIN transitions,
+  current key, even if the new date may already have been stamped. Both erase sequences are host-tested
+  against the real NVS adapter (`tk::run_key_rotation_boot_cleanup`, `tk::retire_key_rotation_journal`
+  in `logic/key_rotation.hpp`). `tesla_cfg/vin_txn` journals VIN transitions,
   with the recovery decision in `logic/vin_transition.hpp`, so power loss cannot combine a new VIN
   with the old key/session.
 - **Command FIFO and runner** (`command_runner.hpp`): bounded (8 slots) arbitration of VCSEC auth →
@@ -638,7 +640,11 @@ boot-with-cable path, where WiFi never starts and no second netif exists.
 to the sampled lease generation and gateway IPv4 address. Every link-down and new-IP event advances
 the generation, so even a different router using the same IPv4 address starts without a baseline.
 The failure streak is reset when this identity changes, and an in-flight probe is discarded if its
-lease or gateway changes before the verdict. Both
+lease or gateway changes before the verdict. The lease the watchdog ends itself counts too:
+`net_recover()` re-associates (link-down, then link-up), so after a recovery the new lease must
+answer ICMP once before another recovery is allowed. That is the price of never inheriting proof
+across leases: a ghost association that re-forms before its first reply is not recovered a second
+time (the watchdog keeps logging that the gateway never answered). Both
 transports can hold a lease at once (WiFi fallback plus a later cable), so `tk::net_kind()` is
 *derived* from two lease flags by the host-tested `tk::net_link_active()` (Ethernet outranks WiFi:
 it costs the BLE radio nothing and is what lwIP puts first) rather than written by the last event.
@@ -693,7 +699,7 @@ and MQTT (`sleep_status`), so they never drift. Four published values:
 | Value | Meaning |
 |---|---|
 | `AWAKE` | Fresh live infotainment telemetry, < `kAwakeMaxAgeS` = 60 s. |
-| `ASLEEP` | No live data **and proven, debounced** sleep: the car's own VCSEC sleep flag (`vcsec_sleep_state_`, sampled in `loop_task`) held uninterrupted `ASLEEP` ≥ `kAsleepDebounceS` ≈ 120 s while still reachable within `kReachableMaxAgeS`. `AWAKE` and `UNKNOWN` break the run, so a Cabin-Overheat-Protection flap or an unknown interval cannot accumulate into sleep proof. |
+| `ASLEEP` | No live data **and proven, debounced** sleep: the car's own VCSEC sleep flag (`vcsec_sleep_state_`, sampled in `loop_task`) held uninterrupted `ASLEEP` ≥ `kAsleepDebounceS` ≈ 120 s while still reachable within `kReachableMaxAgeS`. `AWAKE` and `UNKNOWN` break the run, so a Cabin-Overheat-Protection flap or an unknown interval cannot accumulate into sleep proof. The clock is fed the reported `SleepState` itself (`tk::next_asleep_since`, `tk::vcsec_asleep_proven`, host-tested), so no call site can skip `UNKNOWN`. |
 | `IDLE` | Reachable over BLE within `kReachableMaxAgeS` = 150 s but **not provably asleep** — infotainment polling was paused to let the car sleep and VCSEC has not confirmed; we never claim sleep. |
 | `UNREACHABLE` | No signed BLE round-trip for ≥ 150 s (two ~30 s health-probe cycles plus headroom), or the car answers nothing: driven off, out of range or in deep sleep. |
 

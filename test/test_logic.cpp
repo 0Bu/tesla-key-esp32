@@ -320,6 +320,100 @@ static void test_key_rotation() {
     CHECK(tk::decide_key_rotation_boot(true, true, true, false) == B::Blocked);
     CHECK(tk::decide_key_rotation_boot(true, true, true, true) == B::Ready);
 
+    // The erase sequences the firmware runs, driven through a fault-injecting storage that logs
+    // every remove() in order. test_nvs_storage.cpp runs the same templates against the real
+    // NvsStorageAdapter; this fake keeps the ordering contract in the logic suite.
+    namespace NC = tk::nvs_contract;
+    struct FakeStorage {
+        std::vector<std::string> failing;
+        std::vector<std::string> calls;
+        bool remove(const std::string& key) {
+            calls.push_back(key);
+            return std::find(failing.begin(), failing.end(), key) == failing.end();
+        }
+        bool attempted(const std::string& key) const {
+            return std::find(calls.begin(), calls.end(), key) != calls.end();
+        }
+    };
+    const std::string marker = tk::kKeyRotationMarker;
+    const std::vector<std::string> peers = {NC::kSessionVcsec, NC::kSessionInfotainment,
+                                            NC::kPairedAt, NC::kKeyCreated};
+
+    {   // Healthy boot recovery: every peer record incl. key_created, journal strictly LAST.
+        FakeStorage s;
+        const tk::KeyRotationBootCleanup c = tk::run_key_rotation_boot_cleanup(s);
+        CHECK(c.date_removed && c.peers_erased() && c.marker_removed);
+        CHECK(c.state() == B::Ready);
+        CHECK((s.calls == std::vector<std::string>{NC::kSessionVcsec, NC::kSessionInfotainment,
+                                                   NC::kPairedAt, NC::kKeyCreated, marker}));
+    }
+    for (const std::string& failing_key : peers) {
+        // Any single failed peer erase blocks boot, never touches the journal, and does NOT
+        // stop the remaining erases (each commits on its own and is idempotent on retry).
+        FakeStorage s;
+        s.failing = {failing_key};
+        const tk::KeyRotationBootCleanup c = tk::run_key_rotation_boot_cleanup(s);
+        CHECK(!c.peers_erased());
+        CHECK(!c.marker_removed);
+        CHECK(c.state() == B::Blocked);
+        CHECK(!s.attempted(marker));
+        CHECK(s.calls == peers);
+    }
+    {   // A failed erase of key_created is a failure in its own right: the old key's date must
+        // not be allowed to outlive its key beside the new fingerprint after a reboot.
+        FakeStorage s;
+        s.failing = {NC::kKeyCreated};
+        const tk::KeyRotationBootCleanup c = tk::run_key_rotation_boot_cleanup(s);
+        CHECK(c.vcsec_removed && c.info_removed && c.paired_removed);
+        CHECK(!c.date_removed);
+        CHECK(c.state() == B::Blocked);
+    }
+    {   // Everything erased but the journal itself: still blocked, and the retry is the same
+        // idempotent sequence.
+        FakeStorage s;
+        s.failing = {marker};
+        const tk::KeyRotationBootCleanup c = tk::run_key_rotation_boot_cleanup(s);
+        CHECK(c.peers_erased() && !c.marker_removed);
+        CHECK(c.state() == B::Blocked);
+        CHECK(s.calls.back() == marker);
+    }
+
+    using J = tk::KeyRotationJournalRetire;
+    {   // Trusted date: key_created is left alone, only the journal is removed.
+        FakeStorage s;
+        bool untrusted = false;
+        CHECK(tk::retire_key_rotation_journal(s, untrusted) == J::Retired);
+        CHECK(!untrusted);
+        CHECK((s.calls == std::vector<std::string>{marker}));
+    }
+    {   // Untrusted date: erased FIRST, the flag is cleared, then the journal.
+        FakeStorage s;
+        bool untrusted = true;
+        CHECK(tk::retire_key_rotation_journal(s, untrusted) == J::Retired);
+        CHECK(!untrusted);
+        CHECK((s.calls == std::vector<std::string>{NC::kKeyCreated, marker}));
+    }
+    {   // Untrusted date that cannot be erased: the journal stays armed (never attempted) and the
+        // date stays distrusted, so the supervisor/next boot retries.
+        FakeStorage s;
+        s.failing = {NC::kKeyCreated};
+        bool untrusted = true;
+        CHECK(tk::retire_key_rotation_journal(s, untrusted) == J::DatePending);
+        CHECK(untrusted);
+        CHECK(!s.attempted(marker));
+    }
+    {   // Date retired but the journal erase failed: the date erase is durable, so the flag is
+        // cleared and the retry only has the journal left.
+        FakeStorage s;
+        s.failing = {marker};
+        bool untrusted = true;
+        CHECK(tk::retire_key_rotation_journal(s, untrusted) == J::JournalPending);
+        CHECK(!untrusted);
+        FakeStorage retry;
+        CHECK(tk::retire_key_rotation_journal(retry, untrusted) == J::Retired);
+        CHECK((retry.calls == std::vector<std::string>{marker}));
+    }
+
     CHECK(!tk::key_rotation_committed(R::NotCommitted));
     CHECK(!tk::key_rotation_committed(R::CommitUnknown));
     CHECK(tk::key_rotation_committed(R::CleanupPending));
@@ -6257,6 +6351,70 @@ static void test_vcsec_sleep_three_valued() {
     CHECK(!tk::vcsec_status_confirms_wake(SleepState::Unknown, false));
 }
 
+// ── ASLEEP debounce clock: only an UNINTERRUPTED run of explicit ASLEEP reports proves sleep ──
+// These are the exact functions VehicleController::note_vcsec_sleep_() and vcsec_stably_asleep_()
+// call, so UNKNOWN-breaks-the-run is pinned here rather than by a source grep.
+static void test_vcsec_sleep_clock() {
+    using tk::SleepState;
+    using S = SleepState;
+
+    // Start, continue (keeping the ORIGINAL start tick), and the two ways a run ends.
+    CHECK(tk::next_asleep_since(0, S::Asleep, 100) == 100);
+    CHECK(tk::next_asleep_since(100, S::Asleep, 200) == 100);
+    CHECK(tk::next_asleep_since(100, S::Awake, 200) == 0);
+    CHECK(tk::next_asleep_since(100, S::Unknown, 200) == 0);
+    CHECK(tk::next_asleep_since(0, S::Awake, 200) == 0);
+    CHECK(tk::next_asleep_since(0, S::Unknown, 200) == 0);
+
+    // Exhaustive: no report other than ASLEEP can leave a run alive, whatever the prior clock.
+    for (const S reported : {S::Unknown, S::Awake}) {
+        for (const uint32_t since : {0u, 1u, 100u, 0xffffffffu}) {
+            CHECK(tk::next_asleep_since(since, reported, 5000) == 0);
+        }
+    }
+
+    // A run is only as long as its last unbroken stretch. ASLEEP, then an UNKNOWN interval, then
+    // ASLEEP again must NOT accumulate: the second stretch restarts from zero, however long the
+    // car was really asleep through the gap.
+    constexpr uint32_t kHz = 100;
+    constexpr uint32_t kDebounceTicks = tk::kAsleepDebounceS * kHz;
+    uint32_t since = 0;
+    since = tk::next_asleep_since(since, S::Asleep, 1000);
+    CHECK(since == 1000);
+    since = tk::next_asleep_since(since, S::Asleep, 1000 + kDebounceTicks - 1);
+    CHECK(!tk::vcsec_asleep_proven(S::Asleep, since, 1000 + kDebounceTicks - 1, kHz,
+                                    tk::kAsleepDebounceS));
+    since = tk::next_asleep_since(since, S::Asleep, 1000 + kDebounceTicks);
+    CHECK(tk::vcsec_asleep_proven(S::Asleep, since, 1000 + kDebounceTicks, kHz,
+                                   tk::kAsleepDebounceS));
+    // One UNKNOWN sample right after proof was reached: the proof is gone at once...
+    const uint32_t t_unknown = 1000 + kDebounceTicks + 10;
+    since = tk::next_asleep_since(since, S::Unknown, t_unknown);
+    CHECK(since == 0);
+    CHECK(!tk::vcsec_asleep_proven(S::Unknown, since, t_unknown, kHz, tk::kAsleepDebounceS));
+    // ...and the next ASLEEP starts a fresh run that has to earn the full debounce again.
+    const uint32_t t_restart = t_unknown + 10;
+    since = tk::next_asleep_since(since, S::Asleep, t_restart);
+    CHECK(since == t_restart);
+    CHECK(!tk::vcsec_asleep_proven(S::Asleep, since, t_restart + kDebounceTicks - 1, kHz,
+                                    tk::kAsleepDebounceS));
+    CHECK(tk::vcsec_asleep_proven(S::Asleep, since, t_restart + kDebounceTicks, kHz,
+                                   tk::kAsleepDebounceS));
+
+    // The proof also needs the car's CURRENT raw report to be ASLEEP. A stale run (clock still
+    // set) beside an UNKNOWN or AWAKE report is not evidence of sleep.
+    CHECK(!tk::vcsec_asleep_proven(S::Unknown, 1, 1 + 10 * kDebounceTicks, kHz, tk::kAsleepDebounceS));
+    CHECK(!tk::vcsec_asleep_proven(S::Awake, 1, 1 + 10 * kDebounceTicks, kHz, tk::kAsleepDebounceS));
+    CHECK(tk::vcsec_asleep_proven(S::Asleep, 1, 1 + 10 * kDebounceTicks, kHz, tk::kAsleepDebounceS));
+    // No run (clock 0) is never proof, and a zero tick rate must not divide by zero.
+    CHECK(!tk::vcsec_asleep_proven(S::Asleep, 0, 0xffffffffu, kHz, tk::kAsleepDebounceS));
+    CHECK(!tk::vcsec_asleep_proven(S::Asleep, 1, 0xffffffffu, 0, tk::kAsleepDebounceS));
+
+    // The FreeRTOS tick counter is 32-bit and wraps; the elapsed time stays correct across it.
+    CHECK(tk::vcsec_asleep_proven(S::Asleep, 0xffffff00u, 0x00000100u, 1, 512));
+    CHECK(!tk::vcsec_asleep_proven(S::Asleep, 0xffffff00u, 0x000000ffu, 1, 512));
+}
+
 static void test_command_runner() {
     using namespace tk;
 
@@ -7644,6 +7802,7 @@ int main() {
     test_charge_control();
     test_active_window();
     test_vcsec_sleep_three_valued();
+    test_vcsec_sleep_clock();
     test_wake_poll();
     test_ble_readiness();
     test_ble_phase();

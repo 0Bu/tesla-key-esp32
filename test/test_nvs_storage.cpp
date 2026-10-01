@@ -1,5 +1,6 @@
 #include "nvs_storage.hpp"
 #include "config_blob.hpp"
+#include "logic/key_rotation.hpp"
 #include "logic/vin_transition.hpp"
 
 #include <algorithm>
@@ -780,38 +781,86 @@ static void test_vin_transition_cleanup_ordering(NvsStorageAdapter& config, NvsS
 
 static void test_key_rotation_date_cleanup_ordering(NvsStorageAdapter& tesla) {
     namespace NC = tk::nvs_contract;
-    // Model the boot retry: every erase is idempotent, but the durable marker must be last.
-    // The runtime source contract pins the same ordering in recover_pending_key_rotation_at_boot_().
-    auto finish_recovery = [&]() {
-        const bool vcsec = tesla.remove(NC::kSessionVcsec);
-        const bool info = tesla.remove(NC::kSessionInfotainment);
-        const bool paired = tesla.remove(NC::kPairedAt);
-        const bool date = tesla.remove(NC::kKeyCreated);
-        return vcsec && info && paired && date && tesla.remove(NC::kKeyRotation);
+    using B = tk::KeyRotationBootState;
+    using J = tk::KeyRotationJournalRetire;
+    // These run the PRODUCTION templates (logic/key_rotation.hpp) that
+    // VehicleController::recover_pending_key_rotation_at_boot_() and
+    // finish_key_rotation_cleanup_() call, against the real NvsStorageAdapter and its NVS fault
+    // injection: no copy of the sequence lives in the test.
+    auto erase_index = [](const char* key) {
+        for (size_t i = 0; i < nvs_call_log.size(); ++i) {
+            if (nvs_call_log[i].api == "erase_key" && nvs_call_log[i].key == key) return i;
+        }
+        return nvs_call_log.size();
     };
+    auto journal_touched = [] {
+        for (const auto& call : nvs_call_log) {
+            if (call.key == NC::kKeyRotation) return true;
+        }
+        return false;
+    };
+
+    // --- boot recovery: a failed key_created erase blocks the journal, the rest still run -----
     fail_erase_key = NC::kKeyCreated;
     clear_call_log();
-    CHECK(!finish_recovery());
-    for (const auto& call : nvs_call_log) CHECK(call.key != NC::kKeyRotation);
+    tk::KeyRotationBootCleanup boot = tk::run_key_rotation_boot_cleanup(tesla);
+    CHECK(boot.vcsec_removed && boot.info_removed && boot.paired_removed);
+    CHECK(!boot.date_removed && !boot.marker_removed);
+    CHECK(boot.state() == B::Blocked);
+    CHECK(!journal_touched());
     fail_erase_key.clear();
 
-    // A failed NVS commit is equally non-authoritative. On the next boot/retry, retiring the
-    // date succeeds before the marker can be cleared, so no old key age can reappear.
+    // A failed NVS commit is equally non-authoritative: the first erase reports failure, the
+    // journal is never reached, and the next boot repeats the whole idempotent sequence.
     next_commit_error = ESP_FAIL;
     clear_call_log();
-    CHECK(!finish_recovery());
-    for (const auto& call : nvs_call_log) CHECK(call.key != NC::kKeyRotation);
+    boot = tk::run_key_rotation_boot_cleanup(tesla);
+    CHECK(!boot.peers_erased() && !boot.marker_removed);
+    CHECK(boot.state() == B::Blocked);
+    CHECK(!journal_touched());
     clear_call_log();
-    CHECK(finish_recovery());
-    size_t date_index = nvs_call_log.size();
-    size_t marker_index = nvs_call_log.size();
-    for (size_t i = 0; i < nvs_call_log.size(); ++i) {
-        if (nvs_call_log[i].api == "erase_key" && nvs_call_log[i].key == NC::kKeyCreated)
-            date_index = i;
-        if (nvs_call_log[i].api == "erase_key" && nvs_call_log[i].key == NC::kKeyRotation)
-            marker_index = i;
-    }
-    CHECK(date_index < marker_index);
+    boot = tk::run_key_rotation_boot_cleanup(tesla);
+    CHECK(boot.state() == B::Ready);
+    CHECK(erase_index(NC::kKeyCreated) < erase_index(NC::kKeyRotation));
+    CHECK(erase_index(NC::kKeyRotation) < nvs_call_log.size());
+
+    // --- runtime rotation: an untrusted date is retired before the journal -------------------
+    bool untrusted = true;
+    fail_erase_key = NC::kKeyCreated;
+    clear_call_log();
+    CHECK(tk::retire_key_rotation_journal(tesla, untrusted) == J::DatePending);
+    CHECK(untrusted);          // still distrusted: the stored date is still the old key's
+    CHECK(!journal_touched()); // the journal stays armed
+    fail_erase_key.clear();
+
+    next_commit_error = ESP_FAIL;
+    clear_call_log();
+    CHECK(tk::retire_key_rotation_journal(tesla, untrusted) == J::DatePending);
+    CHECK(untrusted && !journal_touched());
+
+    clear_call_log();
+    CHECK(tk::retire_key_rotation_journal(tesla, untrusted) == J::Retired);
+    CHECK(!untrusted);
+    CHECK(erase_index(NC::kKeyCreated) < erase_index(NC::kKeyRotation));
+    CHECK(erase_index(NC::kKeyRotation) < nvs_call_log.size());
+
+    // A date that is already trusted is not touched: only the journal goes.
+    untrusted = false;
+    clear_call_log();
+    CHECK(tk::retire_key_rotation_journal(tesla, untrusted) == J::Retired);
+    CHECK(erase_index(NC::kKeyCreated) == nvs_call_log.size());
+    CHECK(erase_index(NC::kKeyRotation) < nvs_call_log.size());
+
+    // Date erased, journal erase failed: JournalPending, and the retry has only the journal left.
+    untrusted = true;
+    fail_erase_key = NC::kKeyRotation;
+    clear_call_log();
+    CHECK(tk::retire_key_rotation_journal(tesla, untrusted) == J::JournalPending);
+    CHECK(!untrusted);
+    fail_erase_key.clear();
+    clear_call_log();
+    CHECK(tk::retire_key_rotation_journal(tesla, untrusted) == J::Retired);
+    CHECK(erase_index(NC::kKeyCreated) == nvs_call_log.size());
 }
 
 static void test_nvs_blob_load() {
@@ -1109,6 +1158,26 @@ int main() {
                              {ESP_ERR_NVS_NOT_FOUND, 0, {}}});
         CHECK(tk::cfg_load_for_update(storage, out));
         CHECK(out.mqtt_uri.empty());
+        check_blob_script_consumed();
+        check_script_consumed();
+    }
+    {
+        // cfg_load() is the read-only/boot compatibility path and must hold the same line: when a
+        // legacy key cannot be read it returns false and leaves `out` exactly as the caller had
+        // it, never a half-read snapshot. It reads the legacy layout once more after the failed
+        // tri-state load (that second attempt serves the blob-present-but-invalid fallback), so
+        // both attempts are scripted.
+        tk::ConfigBlob out;
+        out.vin = "untouched";
+        out.mqtt_uri = "previous";
+        script_blob_reads({{ESP_ERR_NVS_NOT_FOUND, 0, {}}});
+        script_string_reads({{ESP_ERR_NVS_NOT_FOUND, 0, {}}, {ESP_ERR_NVS_NOT_FOUND, 0, {}},
+                             {ESP_FAIL, 0, {}},
+                             {ESP_ERR_NVS_NOT_FOUND, 0, {}}, {ESP_ERR_NVS_NOT_FOUND, 0, {}},
+                             {ESP_FAIL, 0, {}}});
+        CHECK(!tk::cfg_load(storage, out));
+        CHECK(out.vin == "untouched");
+        CHECK(out.mqtt_uri == "previous");
         check_blob_script_consumed();
         check_script_consumed();
     }

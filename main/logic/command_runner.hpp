@@ -65,6 +65,26 @@ inline constexpr bool vcsec_status_confirms_wake(SleepState reported,
     return reported == SleepState::Awake || has_closure_statuses;
 }
 
+// ASLEEP debounce clock. `since` is the tick at which the CURRENT uninterrupted run of explicit
+// ASLEEP reports began (0 = no run). Only an explicit ASLEEP starts or continues a run (keeping its
+// original start tick); AWAKE and UNKNOWN both end it, because an unknown interval is not evidence
+// that the car stayed asleep through it. The clock is fed the reported SleepState itself, never a
+// pre-reduced bool, so a call site has no way to skip UNKNOWN and let a run silently span a gap.
+inline constexpr uint32_t next_asleep_since(uint32_t since, SleepState reported,
+                                            uint32_t now) noexcept {
+    if (reported != SleepState::Asleep) return 0;
+    return since != 0 ? since : now;
+}
+
+// Is sleep PROVEN? Both halves are required: the car's CURRENT raw report must still be ASLEEP
+// (a run left over from before an UNKNOWN/AWAKE flip is not proof) and that run must have held for
+// `debounce_s`. `now - since` is unsigned, so a tick-counter wrap between the two stays correct.
+inline constexpr bool vcsec_asleep_proven(SleepState current, uint32_t since, uint32_t now,
+                                          uint32_t tick_hz, uint32_t debounce_s) noexcept {
+    if (current != SleepState::Asleep || since == 0 || tick_hz == 0) return false;
+    return (now - since) / tick_hz >= debounce_s;
+}
+
 enum class CommandState : uint8_t {
     Idle = 0,
     EnsuringVcsec,
