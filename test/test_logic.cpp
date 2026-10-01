@@ -4899,6 +4899,12 @@ static void test_net_link() {
     CHECK(!wifi_baseline.observe({tk::NetLink::Wifi, 0, 3}, true));
     tk::GatewayBaseline eth_baseline{};
     CHECK(!eth_baseline.observe({tk::NetLink::Eth, wifi_a.address, 1}, false));
+    // A route switch does not discard proof for a still-held WiFi lease. If Ethernet then
+    // disappears, the watchdog must be able to recover a WiFi ghost association.
+    tk::GatewayBaseline failover_baselines[2]{};
+    CHECK(failover_baselines[0].observe(wifi_a, true));
+    CHECK(!failover_baselines[1].observe({tk::NetLink::Eth, wifi_a.address, 1}, false));
+    CHECK(failover_baselines[0].observe(wifi_a, false));
     // The transport identity is what the presenters branch on; the strings are what /status
     // and the logs print, so pin both.
     CHECK(std::string(tk::net_link_str(tk::NetLink::None)) == "none");

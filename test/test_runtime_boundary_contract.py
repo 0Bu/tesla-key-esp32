@@ -2173,7 +2173,7 @@ def require_ping_probe_contract(header: str, generation_header: str,
             raise AssertionError(f"executable ping lifecycle matrix missing {token!r}")
 
     gateway = function_body_in(net_source, "gateway_reachable")
-    if net_source.count("s_lease_generation[static_cast<int>(kind)].fetch_add(1);") != 2:
+    if net_source.count("lease_counter(kind).fetch_add(1);") != 2:
         raise AssertionError("every link-up and link-down must advance the lease generation")
     for token in (
         "out.identity.address = ip.gw.addr;",
@@ -2196,7 +2196,8 @@ def require_ping_probe_contract(header: str, generation_header: str,
                    "if (s_kind.load() != kind || net_active_netif() != netif ||",
                    "out.reachable = result != PingProbeResult::NoReply;")
     watchdog = function_body_in(net_source, "net_watchdog_task")
-    for token in ("sample.identity != watched_identity", "sample.identity, sample.replied",
+    for token in ("sample.identity != watched_identity", "tk::GatewayBaseline baselines[2]{};",
+                  "baselines[baseline_index].observe(sample.identity, sample.replied)",
                   "net_recover(sample.identity)"):
         if token not in watchdog:
             raise AssertionError(f"gateway identity baseline missing {token!r}")

@@ -123,12 +123,14 @@ static std::atomic<bool> s_ever_up{false};
 // "searching", MQTT dropped the RSSI) while a perfectly healthy WiFi lease was still in hand.
 static std::atomic<bool> s_wifi_lease{false};
 static std::atomic<bool> s_eth_lease{false};
-static std::atomic<uint32_t> s_lease_generation[3] = {};
-static_assert(static_cast<int>(NetLink::None) == 0 && static_cast<int>(NetLink::Wifi) == 1 &&
-              static_cast<int>(NetLink::Eth) == 2,
-              "lease generations are indexed by NetLink");
-static uint32_t lease_generation(NetLink kind) {
-    return s_lease_generation[static_cast<int>(kind)].load();
+// One generation per transport invalidates old ICMP proof when that transport changes lease.
+// A wrap could alias previous proof only after 65,536 link events without an effective sample.
+static std::atomic<uint16_t> s_lease_generation[2] = {};
+static std::atomic<uint16_t>& lease_counter(NetLink kind) {
+    return s_lease_generation[kind == NetLink::Eth ? 1 : 0];
+}
+static uint16_t lease_generation(NetLink kind) {
+    return lease_counter(kind).load();
 }
 
 // Each backend owns its netif handle; these let recompute_link() sit above both without
@@ -155,7 +157,7 @@ static void recompute_link() {
 // disagree with s_kind — the exact class of drift the old five-`extern` arrangement invited.
 static void link_up(NetLink kind) {
     const bool was_up = (s_kind.load() != NetLink::None);
-    s_lease_generation[static_cast<int>(kind)].fetch_add(1);
+    lease_counter(kind).fetch_add(1);
     if (kind == NetLink::Eth) s_eth_lease.store(true); else s_wifi_lease.store(true);
     recompute_link();
     // Count a RE-establishment, not a transport switch: going from one live transport to the
@@ -167,7 +169,7 @@ static void link_up(NetLink kind) {
 }
 
 static void link_down(NetLink kind) {
-    s_lease_generation[static_cast<int>(kind)].fetch_add(1);
+    lease_counter(kind).fetch_add(1);
     if (kind == NetLink::Eth) s_eth_lease.store(false); else s_wifi_lease.store(false);
     recompute_link();
 }
@@ -1097,7 +1099,7 @@ static void net_watchdog_task(void*) {
     try {
       tk::LinkWatch watch{};
       tk::GatewayIdentity watched_identity{};
-      tk::GatewayBaseline baselines[3]{};
+      tk::GatewayBaseline baselines[2]{};
       for (;;) {
         vTaskDelay(pdMS_TO_TICKS(kWdPeriodS * 1000));
 
@@ -1107,7 +1109,7 @@ static void net_watchdog_task(void*) {
         const bool up = net_is_up();
         GatewaySample sample;
         if (up) sample = gateway_reachable();
-        if (up && !sample.usable) {
+        if (!up || !sample.usable) {
             // Not measurable, or the transport changed during the probe: neither a reply nor a
             // failure. Drop the failure streak — it described a transport that may be gone.
             watch = tk::LinkWatch{};
@@ -1121,9 +1123,10 @@ static void net_watchdog_task(void*) {
         }
         const bool gw = up && sample.reachable;
 
-        // The watchdog task owns baselines: a new lease or gateway starts cold.
-        const bool gw_ever = baselines[static_cast<int>(sample.identity.transport)].observe(
-            sample.identity, sample.replied);
+        // Keep proof for each leased transport across route failover; a new lease or gateway
+        // starts cold when that transport becomes active again.
+        const auto baseline_index = sample.identity.transport == NetLink::Eth ? 1 : 0;
+        const bool gw_ever = baselines[baseline_index].observe(sample.identity, sample.replied);
 
         switch (tk::watch_step(watch, up, gw, gw_ever)) {
             case tk::WatchAction::Idle:

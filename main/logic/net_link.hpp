@@ -35,7 +35,7 @@ enum class NetLink : uint8_t { None = 0, Wifi = 1, Eth = 2 };
 struct GatewayIdentity {
     NetLink transport{NetLink::None};
     uint32_t address{0};
-    uint32_t lease_generation{0};
+    uint16_t lease_generation{0};
     constexpr bool operator==(const GatewayIdentity& other) const {
         return transport == other.transport && address == other.address &&
                lease_generation == other.lease_generation;
