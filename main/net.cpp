@@ -123,14 +123,17 @@ static std::atomic<bool> s_ever_up{false};
 // "searching", MQTT dropped the RSSI) while a perfectly healthy WiFi lease was still in hand.
 static std::atomic<bool> s_wifi_lease{false};
 static std::atomic<bool> s_eth_lease{false};
-// One generation per transport invalidates old ICMP proof when that transport changes lease.
+// Two 16-bit generations share one lock-free 32-bit atomic. Narrow atomic fetch_add can pull
+// in a runtime helper and consume static RAM on C3; the lane update avoids cross-lane carry.
 // A wrap could alias previous proof only after 65,536 link events without an effective sample.
-static std::atomic<uint16_t> s_lease_generation[2] = {};
-static std::atomic<uint16_t>& lease_counter(NetLink kind) {
-    return s_lease_generation[kind == NetLink::Eth ? 1 : 0];
-}
+static std::atomic<uint32_t> s_lease_generations{0};
 static uint16_t lease_generation(NetLink kind) {
-    return lease_counter(kind).load();
+    return tk::lease_generation_from_word(s_lease_generations.load(), kind);
+}
+static void advance_lease_generation(NetLink kind) {
+    uint32_t old = s_lease_generations.load();
+    while (!s_lease_generations.compare_exchange_weak(
+        old, tk::advance_lease_generation_word(old, kind))) {}
 }
 
 // Each backend owns its netif handle; these let recompute_link() sit above both without
@@ -157,7 +160,7 @@ static void recompute_link() {
 // disagree with s_kind — the exact class of drift the old five-`extern` arrangement invited.
 static void link_up(NetLink kind) {
     const bool was_up = (s_kind.load() != NetLink::None);
-    lease_counter(kind).fetch_add(1);
+    advance_lease_generation(kind);
     if (kind == NetLink::Eth) s_eth_lease.store(true); else s_wifi_lease.store(true);
     recompute_link();
     // Count a RE-establishment, not a transport switch: going from one live transport to the
@@ -169,7 +172,7 @@ static void link_up(NetLink kind) {
 }
 
 static void link_down(NetLink kind) {
-    lease_counter(kind).fetch_add(1);
+    advance_lease_generation(kind);
     if (kind == NetLink::Eth) s_eth_lease.store(false); else s_wifi_lease.store(false);
     recompute_link();
 }

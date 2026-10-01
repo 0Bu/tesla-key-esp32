@@ -414,7 +414,7 @@ that describe it. When reviewing a change (or the repo as a whole), check these 
   probe is gated on the cached detector before it drives any candidate pin.
 - **WiFi/LAN reconnect or watchdog change** → the STA→LAN reconnect policy lives ONLY in
   `main/net.cpp` (`MAX_RETRY`, `s_ever_up`, `kWdPeriodS`/`kWdPingCount`, the
-  per-transport `GatewayBaseline` and `s_lease_generation` counters) with the watchdog's DECISION —
+  per-transport `GatewayBaseline` and packed `s_lease_generations` counter) with the watchdog's DECISION —
   the consecutive-failure count `kWatchFailsToRecover` and the never-answered-ICMP guard — in the host-tested
   `main/logic/net_link.hpp` (`watch_step()`, cases in `test/test_logic.cpp`) **and** mirrored in
   the **"WiFi / LAN connectivity"** section of

@@ -2173,7 +2173,8 @@ def require_ping_probe_contract(header: str, generation_header: str,
             raise AssertionError(f"executable ping lifecycle matrix missing {token!r}")
 
     gateway = function_body_in(net_source, "gateway_reachable")
-    if net_source.count("lease_counter(kind).fetch_add(1);") != 2:
+    if net_source.count("advance_lease_generation(kind);") != 2 or \
+       "s_lease_generations.compare_exchange_weak(" not in net_source:
         raise AssertionError("every link-up and link-down must advance the lease generation")
     for token in (
         "out.identity.address = ip.gw.addr;",

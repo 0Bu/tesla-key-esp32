@@ -4885,6 +4885,16 @@ static void test_wifi_rollback() {
 
 // ─── Network transport seam (logic/net_link.hpp) ──────────────────────────────
 static void test_net_link() {
+    uint32_t generations = 0;
+    generations = tk::advance_lease_generation_word(generations, tk::NetLink::Wifi);
+    CHECK(tk::lease_generation_from_word(generations, tk::NetLink::Wifi) == 1);
+    CHECK(tk::lease_generation_from_word(generations, tk::NetLink::Eth) == 0);
+    generations = tk::advance_lease_generation_word(generations, tk::NetLink::Eth);
+    CHECK(tk::lease_generation_from_word(generations, tk::NetLink::Wifi) == 1);
+    CHECK(tk::lease_generation_from_word(generations, tk::NetLink::Eth) == 1);
+    CHECK(tk::advance_lease_generation_word(0x0001ffffu, tk::NetLink::Wifi) == 0x00010000u);
+    CHECK(tk::advance_lease_generation_word(0xffff0001u, tk::NetLink::Eth) == 0x00000001u);
+
     tk::GatewayBaseline wifi_baseline{};
     const tk::GatewayIdentity wifi_a{tk::NetLink::Wifi, 0x01020304, 1};
     const tk::GatewayIdentity wifi_b{tk::NetLink::Wifi, 0x05060708, 2};

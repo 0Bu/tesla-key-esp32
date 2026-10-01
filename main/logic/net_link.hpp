@@ -56,6 +56,20 @@ struct GatewayBaseline {
     }
 };
 
+// The two lease generations share one 32-bit atomic word in the integration shell. Updating a
+// lane this way avoids carry into the other transport when its 16-bit generation wraps.
+inline uint16_t lease_generation_from_word(uint32_t word, NetLink kind) {
+    return static_cast<uint16_t>(word >> (kind == NetLink::Eth ? 16 : 0));
+}
+
+inline uint32_t advance_lease_generation_word(uint32_t word, NetLink kind) {
+    const uint32_t shift = kind == NetLink::Eth ? 16 : 0;
+    const uint32_t mask = 0xffffu << shift;
+    const uint32_t next = (static_cast<uint32_t>(lease_generation_from_word(word, kind)) + 1u)
+                          & 0xffffu;
+    return (word & ~mask) | (next << shift);
+}
+
 inline const char* net_link_str(NetLink k) {
     switch (k) {
         case NetLink::Wifi: return "wifi";
