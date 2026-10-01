@@ -665,8 +665,10 @@ private:
     // here the START tick of an uninterrupted ASLEEP run (0 = not currently ASLEEP). The flag
     // can flap AWAKE↔ASLEEP (~60 s) while Cabin-Overheat-Protection cycles the A/C, so a
     // single ASLEEP reading is NOT proof of sleep; link_state() only treats it as asleep once
-    // the run has held for kAsleepDebounceS, which filters those blips. Cleared on a pairing
-    // reset (clear_session_and_cache_).
+    // the run has held for kAsleepDebounceS, which filters those blips. UNKNOWN also breaks
+    // proof. Cleared on a pairing reset (clear_session_and_cache_). The clock rules live in
+    // tk::next_asleep_since() / tk::vcsec_asleep_proven() (logic/command_runner.hpp), which
+    // the host tests cover; the members below only hold the atomics those functions read.
     std::atomic<uint32_t> vcsec_asleep_since_ticks_{0};
     // vcsec_sleep_state_ is updated from incoming VCSEC frames under vehicle_mutex_; status
     // and HTTP tasks read this atomic mirror so there is no data race.
@@ -680,18 +682,27 @@ private:
 
     // Reusable single-allocation buffer for command transmission (builder wire format without double length)
     std::vector<uint8_t> tx_buffer_{};
-    // Fold one sampled VCSEC sleep reading into the debounce clock. ASLEEP starts/continues
-    // the run (keeping its original start tick); AWAKE breaks it. UNKNOWN is not passed here
-    // (the caller leaves the clock untouched so a transient unknown can't reset a real run).
-    void note_vcsec_sleep_(bool asleep) {
-        if (asleep) { uint32_t z = 0; vcsec_asleep_since_ticks_.compare_exchange_strong(z, xTaskGetTickCount()); }
-        else        { vcsec_asleep_since_ticks_.store(0); }
+    // Fold one VCSEC sleep reading into the debounce clock. Takes the SleepState itself, never a
+    // pre-reduced bool, so no call site can skip UNKNOWN: tk::next_asleep_since() ends the run on
+    // AWAKE and UNKNOWN alike. Lock-free read-modify-write on one 32-bit atomic, like
+    // net.cpp's lease generations (a narrow atomic would pull in a runtime helper on C3).
+    void note_vcsec_sleep_(tk::SleepState reported) {
+        const uint32_t now = xTaskGetTickCount();
+        uint32_t since = vcsec_asleep_since_ticks_.load();
+        while (!vcsec_asleep_since_ticks_.compare_exchange_weak(
+            since, tk::next_asleep_since(since, reported, now))) {}
     }
-    // True once the VCSEC ASLEEP run has held uninterrupted for at least debounce_s seconds.
+    void mark_vcsec_unknown_() {
+        vcsec_sleep_state_.store(static_cast<int>(tk::SleepState::Unknown));
+        note_vcsec_sleep_(tk::SleepState::Unknown);
+    }
+    // True once the car's current report is still ASLEEP and that run has held uninterrupted for
+    // at least debounce_s seconds (tk::vcsec_asleep_proven).
     bool vcsec_stably_asleep_(uint32_t debounce_s) const {
-        uint32_t t = vcsec_asleep_since_ticks_.load();
-        if (t == 0) return false;
-        return ((xTaskGetTickCount() - t) / configTICK_RATE_HZ) >= debounce_s;
+        return tk::vcsec_asleep_proven(
+            static_cast<tk::SleepState>(vcsec_sleep_state_.load()),
+            vcsec_asleep_since_ticks_.load(), xTaskGetTickCount(), configTICK_RATE_HZ,
+            debounce_s);
     }
 
     // Cached results for non-blocking UI access

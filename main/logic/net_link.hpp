@@ -30,6 +30,46 @@ namespace tk {
 // exist only for the former), and /status has to name the transport for a remote triage.
 enum class NetLink : uint8_t { None = 0, Wifi = 1, Eth = 2 };
 
+// An ICMP reply only establishes a baseline for the lease and gateway actually sampled. Even
+// the same IPv4 address may name a different router after reconnecting to another network.
+struct GatewayIdentity {
+    NetLink transport{NetLink::None};
+    uint32_t address{0};
+    uint16_t lease_generation{0};
+    constexpr bool operator==(const GatewayIdentity& other) const {
+        return transport == other.transport && address == other.address &&
+               lease_generation == other.lease_generation;
+    }
+    constexpr bool operator!=(const GatewayIdentity& other) const { return !(*this == other); }
+};
+
+struct GatewayBaseline {
+    GatewayIdentity identity{};
+    bool ever_replied{false};
+    bool observe(GatewayIdentity current, bool replied) {
+        if (identity != current) {
+            identity = current;
+            ever_replied = false;
+        }
+        if (current.address != 0 && replied) ever_replied = true;
+        return ever_replied;
+    }
+};
+
+// The two lease generations share one 32-bit atomic word in the integration shell. Updating a
+// lane this way avoids carry into the other transport when its 16-bit generation wraps.
+inline uint16_t lease_generation_from_word(uint32_t word, NetLink kind) {
+    return static_cast<uint16_t>(word >> (kind == NetLink::Eth ? 16 : 0));
+}
+
+inline uint32_t advance_lease_generation_word(uint32_t word, NetLink kind) {
+    const uint32_t shift = kind == NetLink::Eth ? 16 : 0;
+    const uint32_t mask = 0xffffu << shift;
+    const uint32_t next = (static_cast<uint32_t>(lease_generation_from_word(word, kind)) + 1u)
+                          & 0xffffu;
+    return (word & ~mask) | (next << shift);
+}
+
 inline const char* net_link_str(NetLink k) {
     switch (k) {
         case NetLink::Wifi: return "wifi";

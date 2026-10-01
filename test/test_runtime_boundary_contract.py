@@ -2173,31 +2173,40 @@ def require_ping_probe_contract(header: str, generation_header: str,
             raise AssertionError(f"executable ping lifecycle matrix missing {token!r}")
 
     gateway = function_body_in(net_source, "gateway_reachable")
+    if net_source.count("advance_lease_generation(kind);") != 2 or \
+       "s_lease_generations.compare_exchange_weak(" not in net_source:
+        raise AssertionError("every link-up and link-down must advance the lease generation")
     for token in (
-        "if (result == PingProbeResult::Reply) gw_baseline(kind).store(true);",
+        "out.identity.address = ip.gw.addr;",
+        "out.identity.lease_generation = lease_generation(kind);",
         "out.reachable = result != PingProbeResult::NoReply;",
+        "out.replied = result == PingProbeResult::Reply;",
         # Transport-attribution seams (F12): the probe is bound to the sampled netif, and a verdict
         # is discarded when the default route moved while the blocking echo was in flight.
         "cfg.interface   = static_cast<uint32_t>(esp_netif_get_netif_impl_index(netif));",
         "if (kind == NetLink::None || s_kind.load() != kind || net_active_netif() != netif) return out;",
-        "if (s_kind.load() != kind || net_active_netif() != netif) return out;",
+        "lease_generation(kind) != out.identity.lease_generation) return out;",
+        "current_ip.gw.addr != out.identity.address) return out;",
     ):
         if token not in gateway:
             raise AssertionError(f"gateway unknown-vs-failure policy missing {token!r}")
-    require_before("gateway reply establishes baseline for the probed transport", gateway,
-                   "const PingProbeResult result = ping_probe_run(",
-                   "if (result == PingProbeResult::Reply) gw_baseline(kind).store(true);")
-    require_before("gateway baseline before transport-change discard", gateway,
-                   "if (result == PingProbeResult::Reply) gw_baseline(kind).store(true);",
-                   "if (s_kind.load() != kind || net_active_netif() != netif) return out;")
+    require_before("gateway route validation before reply attribution", gateway,
+                   "current_ip.gw.addr != out.identity.address) return out;",
+                   "out.replied = result == PingProbeResult::Reply;")
     require_before("gateway transport-change discard before reset verdict", gateway,
-                   "if (s_kind.load() != kind || net_active_netif() != netif) return out;",
+                   "if (s_kind.load() != kind || net_active_netif() != netif ||",
                    "out.reachable = result != PingProbeResult::NoReply;")
-    if "gw_baseline(s_kind.load())" in net_source or "gw_baseline(net_kind())" in net_source:
-        raise AssertionError("gateway baseline must be indexed by the PROBED transport, not the current one")
+    watchdog = function_body_in(net_source, "net_watchdog_task")
+    for token in ("sample.identity != watched_identity", "tk::GatewayBaseline baselines[2]{};",
+                  "baselines[baseline_index].observe(sample.identity, sample.replied)",
+                  "net_recover(sample.identity)"):
+        if token not in watchdog:
+            raise AssertionError(f"gateway identity baseline missing {token!r}")
     recover = function_body_in(net_source, "net_recover")
-    if "if (s_kind.load() != sampled_kind) {" not in recover or "switch (sampled_kind)" not in recover:
-        raise AssertionError("net_recover must act only on the transport that was probed")
+    if "current_ip.gw.addr != sampled.address" not in recover or \
+       "lease_generation(sampled.transport) != sampled.lease_generation" not in recover or \
+       "switch (sampled.transport)" not in recover:
+        raise AssertionError("net_recover must act only on the gateway that was probed")
 
 
 def require_ota_fetch_contract(ota_source: str, ota_logic: str,
@@ -4936,11 +4945,11 @@ def self_test_canaries(tasks: set[str], callbacks: set[str]) -> None:
             syslog_source,
         ),
         (
-            "gateway baseline credited to the current transport",
+            "gateway reply attributed without same-lease check",
             ping_header, ping_generation,
             net_source.replace(
-                "if (result == PingProbeResult::Reply) gw_baseline(kind).store(true);",
-                "if (result == PingProbeResult::Reply) gw_baseline(s_kind.load()).store(true);",
+                "current_ip.gw.addr != out.identity.address) return out;",
+                "current_ip.gw.addr == out.identity.address) return out;",
                 1,
             ),
             syslog_source,
@@ -4959,8 +4968,18 @@ def self_test_canaries(tasks: set[str], callbacks: set[str]) -> None:
             "gateway verdict kept after a transport change",
             ping_header, ping_generation,
             net_source.replace(
-                "    if (s_kind.load() != kind || net_active_netif() != netif) return out;\n    out.usable = true;",
-                "    out.usable = true;",
+                "    if (s_kind.load() != kind || net_active_netif() != netif ||\n        lease_generation(kind) != out.identity.lease_generation) return out;\n    esp_netif_ip_info_t current_ip{};",
+                "    esp_netif_ip_info_t current_ip{};",
+                1,
+            ),
+            syslog_source,
+        ),
+        (
+            "gateway verdict kept after a same-IP lease change",
+            ping_header, ping_generation,
+            net_source.replace(
+                "    if (s_kind.load() != kind || net_active_netif() != netif ||\n        lease_generation(kind) != out.identity.lease_generation) return out;",
+                "    if (s_kind.load() != kind || net_active_netif() != netif) return out;",
                 1,
             ),
             syslog_source,
@@ -5818,11 +5837,161 @@ def self_test_canaries(tasks: set[str], callbacks: set[str]) -> None:
     )
 
 
+def require_unconditional_statement(label: str, body: str, statement: str) -> None:
+    """The statement must stand alone on its own line and run unconditionally.
+
+    A call site that wraps it in an if/else, or in braces, can skip a case: that is exactly how an
+    UNKNOWN VCSEC report used to leave the ASLEEP clock running. The previous significant line must
+    therefore end a statement (';') or a block ('}'), never open or continue a condition.
+    """
+    lines = body.splitlines()
+    for index, line in enumerate(lines):
+        if line.strip() != statement:
+            continue
+        for previous in reversed(lines[:index]):
+            stripped = previous.strip()
+            if not stripped or stripped.startswith("//"):
+                continue
+            if stripped.endswith((";", "}")):
+                return
+            break
+    raise AssertionError(f"{label}: {statement!r} must be an unconditional statement")
+
+
+def require_vehicle_recovery_contract(pairing: str, boot: str, telemetry: str,
+                                      ctrl_header: str) -> None:
+    """Wiring of the VCSEC sleep clock and the key-rotation cleanup onto their host-tested logic.
+
+    The behaviour (an UNKNOWN report ends the ASLEEP run, key_created is erased before the journal,
+    a failed erase keeps the journal armed, ...) is proven by test_logic.cpp and
+    test_nvs_storage.cpp, which run tk::next_asleep_since, tk::vcsec_asleep_proven,
+    tk::run_key_rotation_boot_cleanup and tk::retire_key_rotation_journal themselves. What is left
+    for a source contract is that the firmware shell still calls exactly those functions,
+    unconditionally, and does not grow a second, untested copy of the sequence.
+    """
+    recovery = function_body_in(boot, "recover_pending_key_rotation_at_boot_")
+    for token in ("tk::run_key_rotation_boot_cleanup(*storage_)",
+                  "cleanup.state() != tk::KeyRotationBootState::Ready"):
+        if token not in recovery:
+            raise AssertionError(f"boot key-rotation recovery lost its tested cleanup: {token!r}")
+    if "->remove(" in recovery:
+        raise AssertionError("boot key-rotation recovery must erase only through "
+                             "tk::run_key_rotation_boot_cleanup")
+
+    finish = function_body_in(pairing, "finish_key_rotation_cleanup_")
+    for token in ("tk::retire_key_rotation_journal(*storage_, date_untrusted)",
+                  "tk::KeyRotationJournalRetire::DatePending",
+                  "tk::KeyRotationJournalRetire::JournalPending"):
+        if token not in finish:
+            raise AssertionError(f"key-rotation journal retirement lost its tested step: {token!r}")
+    if "->remove(" in finish:
+        raise AssertionError("key-rotation journal retirement must erase only through "
+                             "tk::retire_key_rotation_journal")
+    require_before("session cleanup before journal retirement", finish,
+                   "clear_session_and_cache_()", "tk::retire_key_rotation_journal(")
+    require_before("journal retired before the cleanup flags clear", finish,
+                   "tk::retire_key_rotation_journal(", "pairing_cleanup_pending_.store(false)")
+    for outcome in ("DatePending", "JournalPending"):
+        if not re.search(
+            rf"==\s*tk::KeyRotationJournalRetire::{outcome}\s*\)\s*\{{[^}}]*return false;", finish
+        ):
+            raise AssertionError(f"a {outcome} journal retirement must refuse completion")
+
+    clock = function_body_in(ctrl_header, "note_vcsec_sleep_")
+    if "tk::next_asleep_since(" not in clock or "compare_exchange_weak(" not in clock:
+        raise AssertionError("note_vcsec_sleep_ must fold the report through tk::next_asleep_since")
+    proven = function_body_in(ctrl_header, "vcsec_stably_asleep_")
+    if "tk::vcsec_asleep_proven(" not in proven or "vcsec_sleep_state_.load()" not in proven:
+        raise AssertionError("vcsec_stably_asleep_ must decide through tk::vcsec_asleep_proven "
+                             "on the CURRENT raw state")
+    unknown = function_body_in(ctrl_header, "mark_vcsec_unknown_")
+    require_before("raw state published Unknown before the clock is cut", unknown,
+                   "vcsec_sleep_state_.store(static_cast<int>(tk::SleepState::Unknown))",
+                   "note_vcsec_sleep_(tk::SleepState::Unknown)")
+    for name, text in (("vehicle_ctrl.hpp", ctrl_header), ("vehicle_telemetry.cpp", telemetry),
+                       ("vehicle_ctrl.cpp", boot), ("vehicle_pairing.cpp", pairing)):
+        if re.search(r"note_vcsec_sleep_\(\s*(?:true|false)\s*\)", text):
+            raise AssertionError(f"{name}: the sleep clock takes a SleepState, never a bool")
+    require_unconditional_statement(
+        "VCSEC RX path feeds the sleep clock", function_body_in(telemetry, "handle_vcsec_frame_"),
+        "note_vcsec_sleep_(reported);")
+    require_unconditional_statement(
+        "vehicle loop sampler feeds the sleep clock", function_body_in(telemetry, "loop_task_fn_"),
+        "self->note_vcsec_sleep_(st);")
+
+
+def self_test_vehicle_recovery_canaries(sources: dict[str, str]) -> None:
+    def mutate(key: str, old: str, new: str) -> dict[str, str]:
+        if sources[key].count(old) != 1:
+            raise AssertionError(f"recovery canary anchor missing or ambiguous: {old!r}")
+        return {**sources, key: sources[key].replace(old, new, 1)}
+
+    cases = (
+        ("RX path feeds the clock only on ASLEEP",
+         mutate("telemetry", "note_vcsec_sleep_(reported);",
+                "if (reported == tk::SleepState::Asleep) note_vcsec_sleep_(reported);")),
+        ("RX path reduces the report to a bool",
+         mutate("telemetry", "note_vcsec_sleep_(reported);",
+                "note_vcsec_sleep_(reported == tk::SleepState::Asleep);")),
+        ("RX path hard-codes a bool",
+         mutate("telemetry", "note_vcsec_sleep_(reported);", "note_vcsec_sleep_(false);")),
+        ("sampler feeds the clock only on ASLEEP (same line)",
+         mutate("telemetry", "self->note_vcsec_sleep_(st);",
+                "if (st == tk::SleepState::Asleep) self->note_vcsec_sleep_(st);")),
+        ("sampler feeds the clock only on ASLEEP (next line)",
+         mutate("telemetry", "self->note_vcsec_sleep_(st);",
+                "if (st == tk::SleepState::Asleep)\n                self->note_vcsec_sleep_(st);")),
+        ("sampler skips UNKNOWN in a braced block",
+         mutate("telemetry", "self->note_vcsec_sleep_(st);",
+                "if (st != tk::SleepState::Unknown) {\n                self->note_vcsec_sleep_(st);\n            }")),
+        ("clock stops folding through the tested rule",
+         mutate("ctrl_header", "tk::next_asleep_since(since, reported, now)",
+                "(reported == tk::SleepState::Asleep ? now : 0u)")),
+        ("proof stops deciding through the tested rule",
+         mutate("ctrl_header", "return tk::vcsec_asleep_proven(",
+                "return fixture_vcsec_asleep_proven(")),
+        ("Unknown no longer cuts the clock",
+         mutate("ctrl_header", "        note_vcsec_sleep_(tk::SleepState::Unknown);\n", "")),
+        ("boot recovery stops using the tested cleanup",
+         mutate("boot", "tk::run_key_rotation_boot_cleanup(*storage_)", "fixture_cleanup(*storage_)")),
+        ("boot recovery ignores the cleanup verdict",
+         mutate("boot", "cleanup.state() != tk::KeyRotationBootState::Ready", "false")),
+        ("boot recovery grows its own erase",
+         mutate("boot", "if (cleanup.state() != tk::KeyRotationBootState::Ready) {",
+                "storage_->remove(tk::nvs_contract::kKeyCreated);\n"
+                "    if (cleanup.state() != tk::KeyRotationBootState::Ready) {")),
+        ("journal retirement grows its own erase",
+         mutate("pairing", "const bool was_untrusted = key_created_untrusted_.load();",
+                "storage_->remove(tk::kKeyRotationMarker);\n"
+                "    const bool was_untrusted = key_created_untrusted_.load();")),
+        ("a pending date erase no longer refuses completion",
+         mutate("pairing",
+                "ESP_LOGE(TAG, \"key-rotation date cleanup still pending\");\n        return false;",
+                "ESP_LOGE(TAG, \"key-rotation date cleanup still pending\");")),
+        ("a pending journal erase no longer refuses completion",
+         mutate("pairing", "if (retired == tk::KeyRotationJournalRetire::JournalPending) {",
+                "if (retired == tk::KeyRotationJournalRetire::JournalPending && false) {")),
+    )
+    for label, mutated in cases:
+        require_mutation_rejected(
+            f"vehicle recovery wiring: {label}",
+            lambda mutated=mutated: require_vehicle_recovery_contract(**mutated),
+        )
+
+
 def main() -> int:
     tasks = task_inventory(ALL_CODE)
     callbacks = callback_inventory(ALL_CODE)
     check_contract(tasks, callbacks)
     self_test_canaries(tasks, callbacks)
+    recovery_sources = {
+        "pairing": SOURCES["vehicle_pairing.cpp"],
+        "boot": SOURCES["vehicle_ctrl.cpp"],
+        "telemetry": SOURCES["vehicle_telemetry.cpp"],
+        "ctrl_header": (MAIN / "vehicle_ctrl.hpp").read_text(encoding="utf-8"),
+    }
+    require_vehicle_recovery_contract(**recovery_sources)
+    self_test_vehicle_recovery_canaries(recovery_sources)
     print(f"OK runtime C-boundary inventory ({len(tasks)} tasks, {len(callbacks)} callbacks)")
     return 0
 
