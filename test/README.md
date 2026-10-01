@@ -35,15 +35,17 @@ g++ -std=c++17 -Wall -Wextra -Werror -Imain -o build_mock/logic_tests test/test_
 
 The binaries are dependency-free (no gtest) and exit non-zero on the first failed check.
 
-CI runs this as the `logic-test` job (`.github/workflows/build.yml`), a **gate the final `build` check
-depends on**. It runs concurrently with the four per-target firmware compiles, which only wait for the
-~20 s `prepare` job (run mode and release version), so the pipeline takes as long as the slower of the
-two instead of their sum. A logic regression still fails the `build` check, and shows up after the host
-tests finish rather than after the whole matrix. The same job runs `tools/agent-config/selftest.sh` (runner-neutral agent config, skill
-frontmatter, reviewer sandboxes, hook wiring, Context7 pin), repository/workflow lint, sanitizer
-tripwires, deterministic fuzzing, protocol vectors and a real Chrome/Chromium page gate.
+CI runs this as the `logic-test` job (`.github/workflows/build.yml`) next to its sibling `logic-harness`
+job; the final `build` check depends on **both**. They run concurrently with each other and with the
+four per-target firmware compiles, which only wait for the ~20 s `prepare` job (run mode and release
+version), so the pipeline takes as long as the slowest of them instead of their sum. A logic
+regression still fails the `build` check. The `logic-test` job also runs `tools/agent-config/selftest.sh`
+(runner-neutral agent config, skill frontmatter, reviewer sandboxes, hook wiring, Context7 pin),
+repository/workflow lint, deterministic fuzzing, protocol vectors and a real Chrome/Chromium page gate;
+`logic-harness` runs the tesla-ble harness, the sanitizer tripwires, the build and PR-gate contract
+self-tests.
 
-`scripts/test-tesla-ble-harness.sh --require-all` (same job) builds the real `yoziru/tesla-ble` v5.2.0
+`scripts/test-tesla-ble-harness.sh --require-all` (`logic-harness` job) builds the real `yoziru/tesla-ble` v5.2.0
 with the repository patch series, Nanopb and the exact Mbed TLS 4 / TF-PSA-Crypto commit of the pinned
 IDF image (`MBEDTLS_REF`) on the host and runs `test/test_tesla_ble_harness.cpp`. It calls the
 production helpers themselves — `tk::build_ble_tx_frame` / `tk::is_well_formed_ble_frame` (the
