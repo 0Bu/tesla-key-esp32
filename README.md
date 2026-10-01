@@ -89,6 +89,11 @@ IDF_FAST_BUILD=1 ./scripts/idf-docker.sh idf.py build         # container-native
 ./scripts/idf-docker.sh daemon start                          # warm container (~0.12 s latency); `daemon stop` when done
 
 ./scripts/idf-docker.sh idf.py menuconfig                     # optional: WiFi/VIN/MQTT defaults
+
+# Before pushing firmware changes: the size and stack-usage baselines CI enforces after its full build,
+# for all four targets, incrementally (the `pre-push` hook runs exactly this; first run per checkout
+# compiles each target cold, ~3 min at the default 1.5-CPU cap, later runs take seconds):
+./scripts/precheck-firmware.sh                                # or --target esp32s3 ...; --clean drops the cache
 ```
 
 **Stop after the build:** `build/tesla-key-esp32.bin` and `@flash_args` are unsigned. For USB delivery
