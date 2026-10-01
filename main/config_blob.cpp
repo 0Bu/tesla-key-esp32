@@ -14,7 +14,7 @@ static const char* TAG = "config_blob";
 
 namespace tk {
 
-static void load_legacy(NvsStorageAdapter& cfg, ConfigBlob& out) {
+static bool load_legacy(NvsStorageAdapter& cfg, ConfigBlob& out) {
     // Legacy per-key layout: a fresh device, or one that has not saved anything since upgrading to
     // the blob. Start from the build defaults and let an existing legacy key override them,
     // including an explicitly stored empty string. Centralising this matters: callers used to seed
@@ -26,12 +26,22 @@ static void load_legacy(NvsStorageAdapter& cfg, ConfigBlob& out) {
     legacy.vin       = CONFIG_TESLA_VIN;
     legacy.mqtt_uri  = CONFIG_TESLA_MQTT_BROKER_URI;
     legacy.syslog_uri = CONFIG_TESLA_SYSLOG_SERVER;
-    cfg.load_str(nvs_contract::kLegacyWifiSsid, legacy.wifi_ssid);
-    cfg.load_str(nvs_contract::kLegacyWifiPass, legacy.wifi_pass);
-    cfg.load_str(nvs_contract::kLegacyVin, legacy.vin);
-    cfg.load_str(nvs_contract::kLegacyMqttUri, legacy.mqtt_uri);
-    cfg.load_str(nvs_contract::kLegacySyslogUri, legacy.syslog_uri);
+    const auto read = [&cfg](const char* key, std::string& field) {
+        std::string value;
+        const NvsStringLoadState state = cfg.load_str_state(key, value, /*allow_empty=*/true);
+        if (state == NvsStringLoadState::Present) field.swap(value);
+        return state != NvsStringLoadState::Error;
+    };
+    if (!read(nvs_contract::kLegacyWifiSsid, legacy.wifi_ssid) ||
+        !read(nvs_contract::kLegacyWifiPass, legacy.wifi_pass) ||
+        !read(nvs_contract::kLegacyVin, legacy.vin) ||
+        !read(nvs_contract::kLegacyMqttUri, legacy.mqtt_uri) ||
+        !read(nvs_contract::kLegacySyslogUri, legacy.syslog_uri)) {
+        ESP_LOGE(TAG, "legacy configuration read failed — refusing migration");
+        return false;
+    }
     out = std::move(legacy);
+    return true;
 }
 
 ConfigLoadState cfg_load_state(NvsStorageAdapter& cfg, ConfigBlob& out) {
@@ -42,7 +52,7 @@ ConfigLoadState cfg_load_state(NvsStorageAdapter& cfg, ConfigBlob& out) {
         return ConfigLoadState::Error;
     }
     if (raw_state == NvsBlobLoadState::Missing) {
-        load_legacy(cfg, out);
+        if (!load_legacy(cfg, out)) return ConfigLoadState::Error;
         return ConfigLoadState::Legacy;
     }
     if (!config_blob_decode(raw.data(), raw.size(), out)) {
@@ -59,7 +69,7 @@ bool cfg_load(NvsStorageAdapter& cfg, ConfigBlob& out) {
         // Compatibility path for ordinary, unjournaled boots/callers. Recovery code must use the
         // tri-state API above and fail closed instead of reaching this legacy fallback.
         ESP_LOGW(TAG, "config blob unavailable/invalid — falling back to legacy per-key values");
-        load_legacy(cfg, out);
+        (void)load_legacy(cfg, out);
     }
     return false;
 }

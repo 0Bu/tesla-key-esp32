@@ -507,8 +507,8 @@ tk::KeyRotationResult VehicleController::generate_key_locked_() {
             }
             if (!retired) {
                 key_created_untrusted_.store(true);
-                ESP_LOGW(TAG, "previous key creation date could not be erased — hiding it until "
-                              "the next successful stamp");
+                ESP_LOGW(TAG, "previous key creation date could not be erased — rotation journal "
+                              "remains armed until the date can be retired");
             }
         }
     }
@@ -565,9 +565,24 @@ bool VehicleController::regenerate_key_native_() {
 
 bool VehicleController::finish_key_rotation_cleanup_() {
     if (!clear_session_and_cache_()) return false;
-    // The marker is removed LAST. If this commit fails, pairing_cleanup_pending_ keeps every
+    if (!storage_) {
+        ESP_LOGE(TAG, "pairing sessions erased, but key-rotation journal is still pending");
+        return false;
+    }
+    // An old key's date must not be able to reappear after a reboot, so an untrusted key_created
+    // is erased before the durable journal, and the marker LAST (tk::retire_key_rotation_journal,
+    // covered by the host tests). If either erase fails, pairing_cleanup_pending_ keeps every
     // signer gated and the supervisor/next boot repeats the idempotent erases.
-    if (!storage_ || !storage_->remove(tk::kKeyRotationMarker)) {
+    const bool was_untrusted = key_created_untrusted_.load();
+    bool date_untrusted = was_untrusted;
+    const tk::KeyRotationJournalRetire retired =
+        tk::retire_key_rotation_journal(*storage_, date_untrusted);
+    if (was_untrusted && !date_untrusted) key_created_untrusted_.store(false);
+    if (retired == tk::KeyRotationJournalRetire::DatePending) {
+        ESP_LOGE(TAG, "key-rotation date cleanup still pending");
+        return false;
+    }
+    if (retired == tk::KeyRotationJournalRetire::JournalPending) {
         ESP_LOGE(TAG, "pairing sessions erased, but key-rotation journal is still pending");
         return false;
     }
@@ -669,8 +684,7 @@ bool VehicleController::clear_session_and_cache_() {
         charge_state_generation_.store(0);
         charge_cache_stale_reported_.store(false);
         last_reachable_ticks_.store(0);  // and no proven reachability → link_state() back to Unknown
-        vcsec_asleep_since_ticks_.store(0);  // forget any debounced sleep run from the old pairing
-        vcsec_sleep_state_.store(static_cast<int>(tk::SleepState::Unknown));
+        mark_vcsec_unknown_();  // forget the old pairing's debounced sleep run
     }
     ESP_LOGI(TAG, "pairing/session cleanup %s", cleanup_ok ? "complete" : "incomplete");
     return cleanup_ok;
