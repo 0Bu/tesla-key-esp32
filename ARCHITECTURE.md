@@ -180,12 +180,18 @@ dies while `PENDING_VERIFY` and the bootloader reverts; so does one that boots f
 on the network, the case a later OTA could not repair because the fix would have to arrive over the
 broken link. Past `kHealthGateCapS` (600 s) with a route but no lease the image is judged broken
 and left `PENDING_VERIFY` for the next reboot to roll back; it deliberately does **not** restart
-itself, which would turn a long router outage into a silent downgrade. A device with neither
-credentials nor a wire is legitimately offline (setup mode) and counts as healthy.
+itself, which would turn a long router outage into a silent downgrade. The decision function
+treats a device with neither credentials nor a wire as legitimately offline (`link_expected` false),
+but the gate is only armed once `app_main` reaches its essential services: the setup portal never
+returns, so an image that boots into setup mode is neither confirmed nor judged, and stays
+`PENDING_VERIFY` for the next reboot (see *Early confirmation* below).
 
 - *Early confirmation:* only a successfully persisted, user-requested rebooting save (`/set_mqtt`,
-  `/set_syslog`, `/set_wifi`, setup-portal save) may confirm inside the window, through
-  `ota_confirm_pending_image(SuccessfulUserConfigCommit)`.
+  `/set_syslog`, `/set_wifi`) may confirm inside the window, through
+  `ota_confirm_pending_image(SuccessfulUserConfigCommit)`. The setup-portal save calls the same
+  function, but every portal entry point runs before runtime admission and never reaches Ready, so
+  the confirmation is always refused there and the reboot keeps rollback armed: a saved setup form
+  is not evidence that a pending image is accepted.
 - *Shared owner:* timed and explicit confirmation both acquire the `HealthCommit` owner against OTA,
   identity work and `FaultRestart`, then re-sample the INTERNAL largest block; a busy owner or
   critical sample leaves rollback armed.
@@ -378,7 +384,13 @@ evcc, BLE and pairing. Config, topics and payload fields:
   is NTP-synced.
 - **Publishing.** The `mqtt_pub` task reads the thread-safe caches; on every (re)connect it resends
   discovery, `online` and a snapshot, then republishes every interval. The source polls' active-window
-  gating still lets the car sleep, so MQTT keeps serving the last-known retained values. Every
+  gating still lets the car sleep, so MQTT keeps serving the last-known retained values while a
+  domain's cache is valid. When a domain's cache is not valid (pairing reset, invalidation, nothing
+  heard since boot) the task overwrites its retained topic once with the empty object `{}` and then
+  stays quiet (`logic/mqtt_state_lifecycle.hpp`), so stale readings cannot resurface in HA after a
+  reconnect. Every discovery `value_template` renders an absent or null field as the literal `None`
+  (`logic/ha_templates.hpp`): HA ignores an empty rendering and keeps the previous state, and only
+  `None` moves an entity to unknown, so `{}` drives the whole domain to unknown. Every
   payload is built by the `mqtt_payloads.hpp` emitters that the pinned-cJSON host matrix executes and
   is completed through the sticky owner before the publish seam runs, so a build/print failure
   publishes nothing and cannot replace a good retained document with a partial one. Discovery →

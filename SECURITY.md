@@ -79,7 +79,7 @@ read-only clients but gets `403` on browser mutations.
 Hardening that remains (none of it is authentication):
 
 - **Browser-origin gate.** A mutating request whose `Origin` authority differs from `Host`, whose
-  `Host` is neither the device name nor its current IP, or whose `Sec-Fetch-Site` is `cross-site`,
+  `Host` is neither the device name nor an IPv4 address the board holds right now (the active transport's lease or the address the request itself arrived on — WiFi and Ethernet keep their leases side by side, so a page opened through the WiFi address keeps working after an Ethernet takeover), or whose `Sec-Fetch-Site` is `cross-site`,
   gets `403` before dispatch. Binding `Host` to a device-owned authority also closes DNS
   rebinding. It covers every POST plus the legacy state-changing GET forms `/ota/check`,
   `/diag?clear=1`, `/diag?verbose=0|1` and `/coredump?clear=1`; query **keys match
@@ -245,7 +245,8 @@ target: bootloader, partition table, signed app, `ota_data_initial`).
    manifest path means a PR cannot silently break reproducibility or release assembly.
 2. **Protected `publish` on `main`.** Enters the `firmware-signing` Environment (secret
    `OTA_SIGNING_KEY`, an unencrypted RSA-3072 PEM; required reviewers must be configured in the
-   repository settings). A second, cache-free runner independently rebuilds the exact commit, and
+   repository settings). Separate, cache-free runners (one per target, concurrent with the producer builds) independently
+   rebuild the exact commit and a secret-free join job binds them into one evidence artifact, and
    the job compares both inventories (53 payloads + manifest) byte-for-byte **before** it
    provisions the key. `scripts/ci-sign-artifacts.sh` repeats the comparison, opens files with
    `O_NOFOLLOW`, copies single-link regular files into a private stage and rehashes them before
