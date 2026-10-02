@@ -496,6 +496,8 @@ def dynamic_word(token):
     # Parameter/command expansion and command-position globbing are evaluated only after the
     # hook. They can turn a token that was not git/gh/push into one, so exact target binding is
     # impossible at PreToolUse time.
+    if token in {"[", "]", "[[", "]]"}:
+        return False
     return any(char in token for char in ("$", "`", "*", "?", "[", "]", "{", "}"))
 
 def gh_api_is_write(argv):

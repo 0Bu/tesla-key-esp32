@@ -1740,6 +1740,7 @@ bool VehicleController::get_vehicle_status(VehicleStatusResult& out, tk::Connect
         std::atomic<bool> completed{false};
         std::atomic<bool> success{false};
         std::string error{};
+        uint32_t cmd_id{0};
         int32_t lock_state{0};
         int32_t sleep_status{0};
         int32_t user_presence{0};
@@ -1778,14 +1779,14 @@ bool VehicleController::get_vehicle_status(VehicleStatusResult& out, tk::Connect
                 xSemaphoreGive(completion->sem);
             }
         };
-        const uint32_t cmd_id = command_runner_.enqueue(
+        completion->cmd_id = command_runner_.enqueue(
             "VCSEC Status Poll", tk::BleDomain::VehicleSecurity, tk::WakePolicy::NoWakeSkip,
             timeout_ms, now_ms, {}, std::move(on_complete));
-        if (cmd_id == 0) {
+        if (completion->cmd_id == 0) {
             vehicle_status_callback_ = nullptr;
             return false;
         }
-        command_builders_[cmd_id % tk::CommandRunner::kMaxQueueSize] =
+        command_builders_[completion->cmd_id % tk::CommandRunner::kMaxQueueSize] =
             [](TeslaBLE::Client* client, uint8_t* buff, size_t* len) {
                 return client->build_vcsec_information_request_message(
                     VCSEC_InformationRequestType_INFORMATION_REQUEST_TYPE_GET_STATUS, buff, len);
@@ -1829,8 +1830,8 @@ bool VehicleController::get_vehicle_status(VehicleStatusResult& out, tk::Connect
         tk::SemGuard g(vehicle_mutex_);
         vehicle_status_callback_ = nullptr;
         auto* cmd = command_runner_.current_command();
-        if (cmd && cmd->name == "VCSEC Status Poll") {
-            command_builders_[cmd->id % tk::CommandRunner::kMaxQueueSize] = nullptr;
+        if (cmd && cmd->id == completion->cmd_id) {
+            command_builders_[completion->cmd_id % tk::CommandRunner::kMaxQueueSize] = nullptr;
             command_runner_.pop_current();
         }
     }

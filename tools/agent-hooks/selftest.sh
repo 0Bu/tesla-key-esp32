@@ -519,6 +519,22 @@ PY
 printf '%s' "$ag_status" >"$tmp/ag-status.json"
 expect_rc 0 'Antigravity run_command normal command allowed' "$gate" --project-dir "$root" --payload-file "$tmp/ag-status.json"
 
+ag_bracket="$(python3 - "$root" <<'PY'
+import json,sys
+print(json.dumps({"conversationId":"test","workspacePaths":[sys.argv[1]],"toolCall":{"name":"run_command","args":{"CommandLine":"[ -f file ]","Cwd":sys.argv[1]}}}))
+PY
+)"
+printf '%s' "$ag_bracket" >"$tmp/ag-bracket.json"
+expect_rc 0 'Antigravity run_command bracket test allowed' "$gate" --project-dir "$root" --payload-file "$tmp/ag-bracket.json"
+
+ag_glob_push="$(python3 - "$root" <<'PY'
+import json,sys
+print(json.dumps({"conversationId":"test","workspacePaths":[sys.argv[1]],"toolCall":{"name":"run_command","args":{"CommandLine":"g[i]t push","Cwd":sys.argv[1]}}}))
+PY
+)"
+printf '%s' "$ag_glob_push" >"$tmp/ag-glob-push.json"
+expect_rc 2 'Antigravity run_command globbed git push blocked' "$gate" --project-dir "$root" --payload-file "$tmp/ag-glob-push.json"
+
 mkdir -p "$worktree_tmp" "$worktree_test_tmp"
 printf '%s\n' '- [x] $skill-audit clean — PR create/push gate @ '"$sha" '- [x] $pr-hygiene clean — content gate @ '"$sha" >"$worktree_tmp/body.md"
 printf '%s\n' '- [ ] $skill-audit clean — PR create/push gate @ '"$sha" >"$worktree_test_tmp/body.md"

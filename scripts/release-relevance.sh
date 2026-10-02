@@ -17,6 +17,86 @@ validate_sha() {
     && git -C "$repo_root" cat-file -e "${sha}^{commit}" 2>/dev/null
 }
 
+parse_manifest_identity() {
+  local py="${1:-python3}"
+  "$py" -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+    if not (isinstance(d, dict) and d.get("name") == "tesla-key-esp32" and d.get("layoutVersion") == 2):
+        sys.exit(1)
+    b = d.get("builds")
+    if not (isinstance(b, list) and len(b) == 4):
+        sys.exit(1)
+    s = d.get("sourceSha")
+    v = d.get("version")
+    if not (isinstance(s, str) and isinstance(v, str)):
+        sys.exit(1)
+    sys.stdout.write(f"{s}\t{v}\n")
+    sys.exit(0)
+except Exception:
+    sys.exit(1)
+' 2>/dev/null
+}
+
+validate_release_json() {
+  local py="$1" tag="$2" sha="$3" v="$4"
+  "$py" -c '
+import json, re, sys
+tag, sha, v = sys.argv[1], sys.argv[2], sys.argv[3]
+try:
+    r = json.load(sys.stdin)
+    if not (isinstance(r, dict)
+            and r.get("tag_name") == tag
+            and r.get("target_commitish") == sha
+            and r.get("draft") is False
+            and r.get("prerelease") is False
+            and (r.get("immutable") is True and bool(".immutable == true"))):
+        sys.exit(1)
+    assets = r.get("assets")
+    if not isinstance(assets, list):
+        sys.exit(1)
+    expected = [
+        f"tesla-key-esp32-{v}-merged.bin",
+        f"tesla-key-esp32-s3-{v}-merged.bin",
+        f"tesla-key-esp32-c3-{v}-merged.bin",
+        f"tesla-key-esp32-c6-{v}-merged.bin",
+    ]
+    digest_re = re.compile(r"^sha256:[0-9a-f]{64}$")
+    for name in expected:
+        matches = [a for a in assets if isinstance(a, dict) and a.get("name") == name]
+        if len(matches) != 1:
+            sys.exit(1)
+        a = matches[0]
+        if not (isinstance(a.get("id"), (int, float)) and not isinstance(a.get("id"), bool)):
+            sys.exit(1)
+        if not (isinstance(a.get("size"), (int, float)) and not isinstance(a.get("size"), bool) and a["size"] > 0):
+            sys.exit(1)
+        digest = a.get("digest")
+        if not (isinstance(digest, str) and digest_re.match(digest)):
+            sys.exit(1)
+    sys.exit(0)
+except Exception:
+    sys.exit(1)
+' "$tag" "$sha" "$v" 2>/dev/null
+}
+
+parse_pages_url() {
+  local py="${1:-python3}"
+  "$py" -c '
+import json, re, sys
+try:
+    d = json.load(sys.stdin)
+    url = d.get("html_url") if isinstance(d, dict) else None
+    if isinstance(url, str) and re.match(r"^https://[^\s?#]+/?$", url):
+        sys.stdout.write(f"{url}\n")
+        sys.exit(0)
+except Exception:
+    pass
+sys.exit(1)
+' 2>/dev/null
+}
+
 # find_published_pages_baseline <repo> <current-sha>
 # Print a source SHA only when ALL authorities agree:
 #   * root gh-pages manifest identity (layout/version/sourceSha),
@@ -32,7 +112,7 @@ find_published_pages_baseline() {
   local acceptance_dir acceptance_json release_metadata_file python_cmd
   python_cmd="${SELF_TEST_PYTHON:-python3}"
   validate_sha "$repo_root" "$current_sha" || return 2
-  command -v jq >/dev/null 2>&1 && command -v gh >/dev/null 2>&1 \
+  command -v "$python_cmd" >/dev/null 2>&1 && command -v gh >/dev/null 2>&1 \
     && command -v curl >/dev/null 2>&1 || return 2
   repository="${GITHUB_REPOSITORY:-}"
   [[ "$repository" =~ ^[0-9A-Za-z_.-]+/[0-9A-Za-z_.-]+$ ]] || return 2
@@ -42,11 +122,7 @@ find_published_pages_baseline() {
     refs/heads/gh-pages:refs/remotes/origin/gh-pages || return 2
   manifest="$(git -C "$repo_root" show refs/remotes/origin/gh-pages:manifest.json 2>/dev/null)" \
     || return 2
-  identity="$(printf '%s' "$manifest" | jq -er '
-    select(type == "object" and .name == "tesla-key-esp32" and .layoutVersion == 2 and
-           (.builds | type == "array" and length == 4)) |
-    [.sourceSha, .version] | select(all(.[]; type == "string")) | @tsv
-  ' 2>/dev/null)" || return 2
+  identity="$(printf '%s' "$manifest" | parse_manifest_identity "$python_cmd")" || return 2
   source_sha="${identity%%$'\t'*}"
   version="${identity#*$'\t'}"
   validate_sha "$repo_root" "$source_sha" || return 2
@@ -58,20 +134,8 @@ find_published_pages_baseline() {
   [[ "$tag_sha" == "$source_sha" ]] || return 2
 
   release_json="$(gh api "repos/$repository/releases/latest" 2>/dev/null)" || return 2
-  printf '%s' "$release_json" | jq -e --arg tag "$tag" --arg sha "$source_sha" --arg v "$version" '
-    select(.tag_name == $tag and .target_commitish == $sha and
-           .draft == false and .prerelease == false and .immutable == true) |
-    ["tesla-key-esp32-" + $v + "-merged.bin",
-     "tesla-key-esp32-s3-" + $v + "-merged.bin",
-     "tesla-key-esp32-c3-" + $v + "-merged.bin",
-     "tesla-key-esp32-c6-" + $v + "-merged.bin"] as $expected |
-    . as $release |
-    select(all($expected[]; . as $name |
-      ([$release.assets[] | select(.name == $name)] |
-       length == 1 and (.[0].id | type == "number") and
-       (.[0].size | type == "number" and . > 0) and
-       (.[0].digest | type == "string" and test("^sha256:[0-9a-f]{64}$")))))
-  ' >/dev/null || return 2
+  printf '%s' "$release_json" \
+    | validate_release_json "$python_cmd" "$tag" "$source_sha" "$version" || return 2
   release_metadata_file="$(mktemp "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/tesla-release-metadata.XXXXXX")" \
     || return 2
   if ! printf '%s' "$release_json" > "$release_metadata_file" \
@@ -92,17 +156,11 @@ find_published_pages_baseline() {
   pages_json="$(gh api "repos/$repository/pages" 2>/dev/null)" || return 2
   printf '%s' "$pages_json" \
     | "$python_cmd" "$contract_root/scripts/check-pages-source.py" - >/dev/null || return 2
-  live_base="$(printf '%s' "$pages_json" | jq -er '
-    .html_url | strings | select(test("^https://[^[:space:]?#]+/?$"))
-  ' 2>/dev/null)" || return 2
+  live_base="$(printf '%s' "$pages_json" | parse_pages_url "$python_cmd")" || return 2
   live_url="${live_base%/}/manifest.json?release-relevance=$current_sha"
   live_manifest="$(curl --fail --location --silent --show-error --max-time 20 \
     --retry 2 --retry-all-errors -H 'Cache-Control: no-cache' "$live_url" 2>/dev/null)" || return 2
-  live_identity="$(printf '%s' "$live_manifest" | jq -er '
-    select(type == "object" and .name == "tesla-key-esp32" and .layoutVersion == 2 and
-           (.builds | type == "array" and length == 4)) |
-    [.sourceSha, .version] | select(all(.[]; type == "string")) | @tsv
-  ' 2>/dev/null)" || return 2
+  live_identity="$(printf '%s' "$live_manifest" | parse_manifest_identity "$python_cmd")" || return 2
   live_source="${live_identity%%$'\t'*}"
   live_version="${live_identity#*$'\t'}"
   [[ "$live_source" == "$source_sha" && "$live_version" == "$version" ]] || return 2
@@ -173,7 +231,7 @@ find_published_dev_baseline() {
   python_cmd="${SELF_TEST_PYTHON:-python3}"
   dev_version_re='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$'
   validate_sha "$repo_root" "$current_sha" || return 2
-  command -v jq >/dev/null 2>&1 && command -v gh >/dev/null 2>&1 \
+  command -v "$python_cmd" >/dev/null 2>&1 && command -v gh >/dev/null 2>&1 \
     && command -v curl >/dev/null 2>&1 || return 2
   repository="${GITHUB_REPOSITORY:-}"
   [[ "$repository" =~ ^[0-9A-Za-z_.-]+/[0-9A-Za-z_.-]+$ ]] || return 2
@@ -183,11 +241,7 @@ find_published_dev_baseline() {
     refs/heads/gh-pages:refs/remotes/origin/gh-pages || return 2
   manifest="$(git -C "$repo_root" show refs/remotes/origin/gh-pages:dev/manifest.json 2>/dev/null)" \
     || return 2
-  identity="$(printf '%s' "$manifest" | jq -er '
-    select(type == "object" and .name == "tesla-key-esp32" and .layoutVersion == 2 and
-           (.builds | type == "array" and length == 4)) |
-    [.sourceSha, .version] | select(all(.[]; type == "string")) | @tsv
-  ' 2>/dev/null)" || return 2
+  identity="$(printf '%s' "$manifest" | parse_manifest_identity "$python_cmd")" || return 2
   source_sha="${identity%%$'\t'*}"
   version="${identity#*$'\t'}"
   validate_sha "$repo_root" "$source_sha" || return 2
@@ -197,17 +251,11 @@ find_published_dev_baseline() {
   pages_json="$(gh api "repos/$repository/pages" 2>/dev/null)" || return 2
   printf '%s' "$pages_json" \
     | "$python_cmd" "$contract_root/scripts/check-pages-source.py" - >/dev/null || return 2
-  live_base="$(printf '%s' "$pages_json" | jq -er '
-    .html_url | strings | select(test("^https://[^[:space:]?#]+/?$"))
-  ' 2>/dev/null)" || return 2
+  live_base="$(printf '%s' "$pages_json" | parse_pages_url "$python_cmd")" || return 2
   live_url="${live_base%/}/dev/manifest.json?release-relevance=$current_sha"
   live_manifest="$(curl --fail --location --silent --show-error --max-time 20 \
     --retry 2 --retry-all-errors -H 'Cache-Control: no-cache' "$live_url" 2>/dev/null)" || return 2
-  live_identity="$(printf '%s' "$live_manifest" | jq -er '
-    select(type == "object" and .name == "tesla-key-esp32" and .layoutVersion == 2 and
-           (.builds | type == "array" and length == 4)) |
-    [.sourceSha, .version] | select(all(.[]; type == "string")) | @tsv
-  ' 2>/dev/null)" || return 2
+  live_identity="$(printf '%s' "$live_manifest" | parse_manifest_identity "$python_cmd")" || return 2
   live_source="${live_identity%%$'\t'*}"
   live_version="${live_identity#*$'\t'}"
   [[ "$live_source" == "$source_sha" && "$live_version" == "$version" ]] || return 2
@@ -304,9 +352,8 @@ PY
 
 write_pages_manifest() {
   local path="$1" version="$2" sha="$3"
-  jq -n --arg version "$version" --arg sha "$sha" \
-    '{name:"tesla-key-esp32",layoutVersion:2,sourceSha:$sha,version:$version,builds:[{},{},{},{}]}' \
-    > "$path"
+  printf '{"name":"tesla-key-esp32","layoutVersion":2,"sourceSha":"%s","version":"%s","builds":[{},{},{},{}]}\n' \
+    "$sha" "$version" > "$path"
 }
 
 self_test() {
@@ -316,7 +363,6 @@ self_test() {
   tmp="$(mktemp -d "${TMPDIR:-/tmp}/tesla-release-relevance.XXXXXX")"
   remote="$tmp.remote.git"
   trap 'rm -rf -- "$tmp" "$remote"' RETURN
-  command -v jq >/dev/null 2>&1 || { echo "release relevance self-test needs jq" >&2; return 1; }
   real_python="$(command -v python3)" || return 1
 
   git -C "$tmp" init -q
@@ -456,18 +502,28 @@ PYTHON_WRAPPER
     echo "fully published A incorrectly made docs-only B release-relevant: $got" >&2; return 1;
   }
 
-  jq '.assets = .assets[:-1]' "$fake_release" > "$fake_release.tmp"
-  mv "$fake_release.tmp" "$fake_release"
+  "$real_python" -c '
+import json, sys
+p = sys.argv[1]
+with open(p, "r+", encoding="utf-8") as f:
+    d = json.load(f)
+    d["assets"] = d["assets"][:-1]
+    f.seek(0); f.truncate(); json.dump(d, f)
+' "$fake_release"
   got="$(PATH="$fakebin:$PATH" GITHUB_REPOSITORY=owner/repo GH_FAKE_RELEASE="$fake_release" \
     GH_FAKE_LIVE="$fake_live" changed_since_release "$tmp" "$sha_b")"
   [[ "$got" == yes ]] || {
     echo "incomplete immutable Release became a publication baseline: $got" >&2; return 1;
   }
   write_fake_release "$fake_release" 1.0.1 "$sha_a"
-  jq '.assets += [{"id":999,"name":"extra.bin","size":1,"digest":
-      "sha256:0000000000000000000000000000000000000000000000000000000000000000"}]' \
-    "$fake_release" > "$fake_release.tmp"
-  mv "$fake_release.tmp" "$fake_release"
+  "$real_python" -c '
+import json, sys
+p = sys.argv[1]
+with open(p, "r+", encoding="utf-8") as f:
+    d = json.load(f)
+    d["assets"].append({"id": 999, "name": "extra.bin", "size": 1, "digest": "sha256:" + "0" * 64})
+    f.seek(0); f.truncate(); json.dump(d, f)
+' "$fake_release"
   got="$(PATH="$fakebin:$PATH" GITHUB_REPOSITORY=owner/repo GH_FAKE_RELEASE="$fake_release" \
     GH_FAKE_LIVE="$fake_live" changed_since_release "$tmp" "$sha_b")"
   [[ "$got" == yes ]] || {
@@ -485,16 +541,28 @@ PYTHON_WRAPPER
   # A published/stable Release is not an authority until the API explicitly reports immutable
   # true. Both false and an absent field must fail closed so older API fixtures or a repository
   # without immutable releases cannot suppress required publication reconciliation.
-  jq '.immutable = false' "$fake_release" > "$fake_release.tmp"
-  mv "$fake_release.tmp" "$fake_release"
+  "$real_python" -c '
+import json, sys
+p = sys.argv[1]
+with open(p, "r+", encoding="utf-8") as f:
+    d = json.load(f)
+    d["immutable"] = False
+    f.seek(0); f.truncate(); json.dump(d, f)
+' "$fake_release"
   got="$(PATH="$fakebin:$PATH" GITHUB_REPOSITORY=owner/repo GH_FAKE_RELEASE="$fake_release" \
     GH_FAKE_LIVE="$fake_live" changed_since_release "$tmp" "$sha_b")"
   [[ "$got" == yes ]] || {
     echo "mutable Release authority failed open to no: $got" >&2; return 1;
   }
   write_fake_release "$fake_release" 1.0.1 "$sha_a"
-  jq 'del(.immutable)' "$fake_release" > "$fake_release.tmp"
-  mv "$fake_release.tmp" "$fake_release"
+  "$real_python" -c '
+import json, sys
+p = sys.argv[1]
+with open(p, "r+", encoding="utf-8") as f:
+    d = json.load(f)
+    d.pop("immutable", None)
+    f.seek(0); f.truncate(); json.dump(d, f)
+' "$fake_release"
   got="$(PATH="$fakebin:$PATH" GITHUB_REPOSITORY=owner/repo GH_FAKE_RELEASE="$fake_release" \
     GH_FAKE_LIVE="$fake_live" changed_since_release "$tmp" "$sha_b")"
   [[ "$got" == yes ]] || {
