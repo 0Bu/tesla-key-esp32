@@ -314,8 +314,9 @@ Treat a violation of any of these as a real finding.
   feedback path.
 - `set_charging_amps` requires an integer body, serializes action ACK + explicit ChargeState
   readback, and succeeds only on a fresh exact amp match. Missing/mismatching readback and Tesla
-  rejection are HTTP 502. Replayed CarServer counters must return before callbacks/FIFO completion
-  via the pinned patch in `patches/tesla-ble/`.
+  rejection are HTTP 502. Replayed CarServer responses return before callbacks/FIFO completion
+  through native `Peer::validate_response_counter()` and `tk::BleDispatcher` checks in
+  `main/vehicle_telemetry.cpp`; patch 0005 aligns SessionInfo counter advancement only.
 - `charge_start` accepts the JSON scalar `true` and `charge_stop` accepts `false` because evcc's
   generic boolean setter emits those bodies. The matching command/value pairs are the only
   scalar-body exception; mismatched booleans and other non-object bodies are HTTP 400.
