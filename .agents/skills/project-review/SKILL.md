@@ -322,8 +322,10 @@ Treat a violation of any of these as a real finding.
 - **No HTTP auth / TLS by design** (evcc can't send credentials) — trusted LAN only. Mutating
   browser requests add a narrower device-Host + same-Origin/`Sec-Fetch-Site` gate (including
   state-changing GET forms) while headerless POST clients (evcc, curl) remain allowed; mutating
-  GET requests require an explicit custom header (e.g. `X-Requested-With`) or must use the POST route
-  alias (`POST /ota/check`, `POST /diag`); do not mistake that CSRF mitigation for LAN-client
+  GET clients without accepted browser provenance must add an explicit custom header (e.g.
+  `X-Requested-With`) or use the POST route alias (`POST /ota/check`, `POST /diag`). Matching
+  Origin/Referer or accepted `Sec-Fetch-Site` provenance also permits the GET; genuinely headerless
+  mutating GETs fail. Do not mistake that CSRF mitigation for LAN-client
   authentication. Document any deviation in `docs/SECURITY.md`.
 
 ### Pairing
@@ -535,13 +537,14 @@ what each must stay true to:
   reboot or unconfirmed mark-valid result must fail closed. USB gets only a short bounded boot/WiFi
   reachability retry and must not inherit the probation wait.
   Re-verify against `.github/workflows/build.yml` (artifact naming, the
-  firmware-change-gated release), `scripts/ci-build-all.sh` (unsigned four-target producer),
+  firmware-change-gated Dev main build and separately authorized manual stable Release),
+  `scripts/ci-build-all.sh` (unsigned four-target producer),
   `scripts/ci-sign-artifacts.sh` (suffix map, signing, merged copies), `partitions.csv` offsets,
   and the `/ota/*` endpoints. Complementary to `$flash-esp32`
   (local-tree build+flash, no merge); it defers the merge gate to `require-pr-gates.sh`, including
   current `$project-review` and independent `$pr-hygiene` records plus `$feature-docs` when the
   diff is feature-relevant.
-- **`$deploy`** orchestrates the full delivery lifecycle: local analysis and fix loops, commit, push, PR creation, gate verification and CI monitoring, canonical squash merge, post-merge GitHub Release verification, OTA deployment on `tesla-key-esp32.local`, 3-tiered verification, and branch cleanup. Requires explicit user authorization before execution.
+- **`$deploy`** orchestrates the full delivery lifecycle: local analysis and fix loops, commit, push, PR creation, gate verification and CI monitoring, canonical squash merge, post-merge channel-bound main-run and signed-artifact verification (Dev by default; a stable Release only through a separately authorized manual dispatch), OTA deployment on `tesla-key-esp32.local`, 3-tiered verification, and branch cleanup. Requires explicit user authorization before execution.
 - **`$vehicle-command-audit`** compares the firmware against upstream `teslamotors/vehicle-command`,
   gated by what `yoziru/tesla-ble` (pin in `main/idf_component.yml`) can actually do. Re-verify the
   tesla-ble **pin** in its source map (`v5.2.0`) still matches `idf_component.yml`, that its upstream

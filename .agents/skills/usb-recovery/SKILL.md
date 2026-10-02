@@ -24,8 +24,8 @@ VIN and WiFi survive (no NFC re-enrol).
 > sessions and is secret material. Bootloader/partition-table recovery is a broader destructive
 > scope requiring a second explicit approval after evidence that those regions are damaged.
 > The USB-write approval does not authorize live verification.
-> Before any HTTP request, obtain separate explicit user approval for the exact recovered device/IP and the named GET endpoints.
-> `GET /ota/check` is state-changing and must be named explicitly in that live approval.
+> Before any HTTP request, obtain separate explicit user approval for the exact recovered device/IP and the named HTTP methods and endpoints.
+> `POST /ota/check` is state-changing and must be named explicitly in that live approval.
 
 Two failure modes dominate:
 
@@ -490,9 +490,9 @@ fi
 
 > **Separate live-device boundary.**
 > Do not run this section merely because the USB recovery was approved.
-> First obtain explicit user approval to contact the exact recovered device/IP and list the intended GET endpoints.
+> First obtain explicit user approval to contact the exact recovered device/IP and list the intended HTTP methods and endpoints: GET reads of `/api/proxy/1/version`, `/status` and `/ota/status`, plus `POST /ota/check`.
 > If that approval is absent, stop after the verified USB write and report that live recovery acceptance remains pending.
-> `GET /ota/check` is state-changing and must be named explicitly in that live approval.
+> `POST /ota/check` is state-changing and must be named explicitly in that live approval.
 
 After that separate approval, and after the board reboots and rejoins WiFi:
 

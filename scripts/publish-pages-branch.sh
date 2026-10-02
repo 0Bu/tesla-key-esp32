@@ -280,6 +280,9 @@ EOF
   ) || exit 1
   rm -f "$fake_git"
 
+  # Exercise filesystem and orphan-checkout failures with isolated local remotes.
+  python3 "$(dirname "$0")/../test/test_pages_publish.py" || return 1
+
   trap - EXIT
   rm -rf "$tmp"
   echo "publish-pages-branch self-test: PASS"
@@ -321,22 +324,27 @@ apply_changes() {
       rsync -a --delete --exclude='.git/' --exclude='PR/' --exclude='dev/' "$src"/ "$work"/ || return 1
       ;;
     dev)
-      mkdir -p "$work/dev"
+      mkdir -p "$work/dev" || return 1
       rsync -a --delete --exclude='.git/' "$src"/ "$work/dev"/ || return 1
       ;;
     pr)
       local stage_pr="$work/PR/$num.tmp"
-      rm -rf "$stage_pr"
-      mkdir -p "$stage_pr"
+      rm -rf "$stage_pr" || return 1
+      mkdir -p "$stage_pr" || return 1
       if ! rsync -a --delete --exclude='.git/' "$src"/ "$stage_pr"/; then
-        rm -rf "$stage_pr"
+        rm -rf "$stage_pr" || return 1
         return 1
       fi
-      rm -rf "${work:?}/PR/$num"
-      mv "$stage_pr" "$work/PR/$num"
+      rm -rf "${work:?}/PR/$num" || return 1
+      # mv would nest the stage inside an unexpectedly retained destination.
+      if [ -e "$work/PR/$num" ] || [ -L "$work/PR/$num" ]; then
+        echo "ERROR: preview destination still exists after removal" >&2
+        return 1
+      fi
+      mv "$stage_pr" "$work/PR/$num" || return 1
       ;;
     rm)
-      rm -rf "${work:?}/PR/$num"
+      rm -rf "${work:?}/PR/$num" || return 1
       ;;
   esac
 }
@@ -354,12 +362,28 @@ for attempt in 1 2 3 4 5; do
   work="$(mktemp -d)"
   # Clone gh-pages if it exists, else start it as an orphan (first-ever publish).
   if git clone --quiet --depth 1 --branch gh-pages "$remote" "$work" 2>/dev/null; then :; else
-    git clone --quiet --depth 1 "$remote" "$work" 2>/dev/null || {
-      git init --quiet "$work"
-      git -C "$work" remote add origin "$remote" 2>/dev/null || true
-    }
-    git -C "$work" checkout --orphan gh-pages 2>/dev/null || true
-    git -C "$work" rm -rfq . >/dev/null 2>&1 || true
+    # An empty reachable remote can be cloned. Two failed clones do not prove
+    # that Pages is absent; never manufacture an orphan from unreadable state.
+    if ! git clone --quiet --depth 1 "$remote" "$work" 2>/dev/null; then
+      echo "ERROR: cannot clone Pages or the default branch" >&2
+      rm -rf "$work"
+      exit 1
+    fi
+    if ! git -C "$work" checkout --orphan gh-pages 2>/dev/null; then
+      echo "ERROR: cannot create the Pages orphan checkout" >&2
+      rm -rf "$work"
+      exit 1
+    fi
+    if ! tracked="$(git -C "$work" ls-files)"; then
+      echo "ERROR: cannot inspect the fallback checkout" >&2
+      rm -rf "$work"
+      exit 1
+    fi
+    if [ -n "$tracked" ] && ! git -C "$work" rm -rfq . >/dev/null 2>&1; then
+      echo "ERROR: cannot remove tracked default-branch files" >&2
+      rm -rf "$work"
+      exit 1
+    fi
   fi
   git -C "$work" config user.name  "github-actions[bot]"
   git -C "$work" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -375,11 +399,18 @@ for attempt in 1 2 3 4 5; do
     rm -rf "$work"
     exit 1
   fi
-  if git -C "$work" diff --cached --quiet; then
+  diff_rc=0
+  git -C "$work" diff --cached --quiet || diff_rc=$?
+  if [ "$diff_rc" -eq 0 ]; then
     echo "gh-pages: nothing to change ($(commit_msg))"
     rm -rf "$work"
     trigger_pages_build || exit 1
     exit 0
+  fi
+  if [ "$diff_rc" -ne 1 ]; then
+    echo "ERROR: cannot inspect staged Pages changes" >&2
+    rm -rf "$work"
+    exit 1
   fi
   if ! git -C "$work" commit --quiet -m "$(commit_msg)"; then
     echo "ERROR: git commit failed" >&2

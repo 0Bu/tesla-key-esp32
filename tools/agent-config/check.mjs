@@ -109,8 +109,8 @@ const ownerContracts = new Map([
 ]);
 const deepOwnerTerms = /(?:HTTP|\bAPI\b|(?<![-/])\bcommands?\b|\bMCP\b|\bNVS\b|\bMQTT\b|link-state|pairing)/i;
 const usbPositiveAuthorization = /USB-write approval[^.!?]*(?:also\s+)?(?:authorizes|allows|permits|covers|includes|is sufficient for)[^.!?]*(?:live verification|HTTP|GET)/i;
-const usbNoApprovalNeeded = /(?:live verification|HTTP requests?|GET endpoints?)[^.!?]*(?:without (?:separate )?(?:approval|authorization)|requires? no (?:approval|authorization)|need not (?:be )?(?:approved|authorized))/i;
-const usbOtaNotStateChanging = /GET \/ota\/check[^.!?]*(?:is not|isn't|not) state-changing/i;
+const usbNoApprovalNeeded = /(?:live verification|HTTP requests?|(?:GET|POST|HTTP) endpoints?)[^.!?]*(?:without (?:separate )?(?:approval|authorization)|requires? no (?:approval|authorization)|need not (?:be )?(?:approved|authorized))/i;
+const usbOtaNotStateChanging = /(?:GET|POST) \/ota\/check[^.!?]*(?:is not|isn't|not) state-changing/i;
 const usbAbsentApprovalProceeds = /(?:(?:approval|authorization)[^.!?]*(?:absent|missing|not obtained)|without (?:separate )?(?:approval|authorization))[^.!?]*(?:continue|proceed|run|contact|send|request)/i;
 const reviewedSkillSha256 = new Map([
   ["add-logic-test", "5bc6af893a1f95a5b4b1d2302da43c1e5e8de11d5e65e1c62d342e0dbfe6a327"],
@@ -121,12 +121,12 @@ const reviewedSkillSha256 = new Map([
   ["feature-docs", "0255c6c85753efb851833a20e8da9519c8a61c58d4bb52f9f061cfe609d6e20a"],
   ["flash-esp32", "a4611de5f352615f1bf437d992e48e10bfbd8f188eed89ff1cc2a82378cdf78a"],
   ["mock-test", "8cfaaa7d4d7fdbda24375ca743f9954ee39c6db053684000fac1bf1bce00ac0f"],
-  ["ota-release-verify", "6d79ee17d1c93a5303e2d176348c5cefb0ae9cb93df15c8ccfd9960d458a3be5"],
+  ["ota-release-verify", "81cbb96dac983c5fddb9fda8027f0a3c5d508de1b22c23d50cfb844c10d639d4"],
   ["pr-hygiene", "e034d42384a8b356e9f94ca1e81a7849a22bdba63763714d8932bd019d1ccb7d"],
-  ["project-review", "5ac3f7e42483c1c23646af58fa9e7b8886aa5cc605a03afdc9baf0f4ef8dfb07"],
+  ["project-review", "13092f11b48ba3e27a74f2bfb4f10febdeb90609c7c8d49a5d5d7105db0158ea"],
   ["ship", "679046f77e77307aa8fe46f0554a47e9247221fc0963a41bd79d080b57ba5c5d"],
-  ["skill-audit", "efad01427fa45a130847582c37d88398cca9aad12eb3b172f9ec4741661740b4"],
-  ["usb-recovery", "0a448a6dd4c4c5cc86345e3ca024a49892f2a149320a48009f9d7f7e59b8c1a5"],
+  ["skill-audit", "17348735c68fc464a7b8420fde46c5da8eaefeda58f30ed5e1d4d3a083e5c00c"],
+  ["usb-recovery", "ac61681a758160c90e51ac6bd18b2ea644bfa891d47c665a68fc4b1d50f9c998"],
   ["vehicle-command-audit", "281444c46b306e6e8117888051fb1f752a0a41476f25e0f43abb3cf2adaee97d"],
 ]);
 const featureDocsScopeTokens = [
@@ -206,8 +206,8 @@ for (const name of canonicalSkills) {
   if (name === "usb-recovery") {
     const liveContracts = [
       "The USB-write approval does not authorize live verification.",
-      "Before any HTTP request, obtain separate explicit user approval for the exact recovered device/IP and the named GET endpoints.",
-      "`GET /ota/check` is state-changing and must be named explicitly in that live approval.",
+      "Before any HTTP request, obtain separate explicit user approval for the exact recovered device/IP and the named HTTP methods and endpoints.",
+      "`POST /ota/check` is state-changing and must be named explicitly in that live approval.",
     ];
     const normalized = normalizeProse(canonical.text);
     if (liveContracts.some((required) => !normalized.includes(required))) {

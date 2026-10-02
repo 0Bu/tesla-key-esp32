@@ -1,6 +1,6 @@
 ---
 name: ota-release-verify
-description: "Read-only verification of the already-published OTA channel against the latest GitHub Release: bind manifest.sourceSha to the Release tag commit, hash-check all 16 manifest parts, and verify every app's embedded version and chip family without publishing, releasing, flashing, OTA, or local ref mutation. Optional live-board GETs require separate explicit user approval."
+description: "Read-only verification of the already-published OTA channel against the latest GitHub Release: bind manifest.sourceSha to the Release tag commit, hash-check all 16 manifest parts, and verify every app's embedded version and chip family without publishing, releasing, flashing, OTA, or local ref mutation. Optional live-board HTTP requests require separate explicit user approval, including the state-changing POST /ota/check."
 ---
 
 > **Canonical runner-neutral skill.** Read [`AGENTS.md`](../../../AGENTS.md) before acting.
@@ -30,7 +30,8 @@ This subsystem has broken in three distinct ways, each of which this check catch
 
 > **Read-only by default.** Steps 1–3 use `git`, `gh`, `curl`, Python and `esptool image-info`
 > against public Release/Pages bytes; they do not update Git refs, publish, sign, flash, start OTA,
-> or touch a device. Step 4 contains optional live-board GETs and runs only after explicit approval.
+> or touch a device. Step 4 contains optional live-board GET reads and a state-changing
+> `POST /ota/check`; run them only after explicit approval for those methods and endpoints.
 > It never sends `POST /ota/update`.
 
 ## Scope boundary — what this skill does NOT do
@@ -325,7 +326,7 @@ the corresponding versioned merged asset attached to the bound GitHub Release.
 ### 4. (Optional — live board) confirm a real device agrees
 
 Only with explicit user approval to contact a device on the trusted LAN (no auth). `IP` = the
-board's address or `tesla-key-esp32.local`. `GET /ota/check` starts a channel check and changes the
+board's address or `tesla-key-esp32.local`. `POST /ota/check` starts a channel check and changes the
 reported OTA-check state, so it is outside the default public-channel read and still never
 authorizes `POST /ota/update`.
 

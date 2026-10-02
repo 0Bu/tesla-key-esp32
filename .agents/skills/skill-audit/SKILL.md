@@ -110,7 +110,7 @@ the authority for the per-sibling drift check; `$project-review` defers the mech
   device uptime is insufficient and hidden reboots or an unconfirmed rollback cancellation must
   fail closed.
   USB gets only a short bounded boot/reachability retry, never that OTA probation wait.
-- **`$deploy`** — end-to-end delivery lifecycle (commit, push, PR creation, gate verification, canonical squash merge, GitHub Release monitoring, OTA update, and 3-tiered verification). Verify against canonical PR gate rules, standalone merge syntax, RFC 5737 doc IP addresses, fail-closed gate verification via `scripts/stamp-pr-gates.sh`, channel-bound provenance (the exact `MERGE_SHA` run and artifact, never the newest GitHub Release), and the same wall-clock-bound OTA probation monitor as `$ship`.
+- **`$deploy`** — end-to-end delivery lifecycle (commit, push, PR creation, gate verification, canonical squash merge, channel-bound main-run tracking, OTA update, and 3-tiered verification). Dev is the default main-push channel; a stable Release requires a separately authorized manual dispatch. Verify against canonical PR gate rules, standalone merge syntax, RFC 5737 doc IP addresses, fail-closed gate verification via `scripts/stamp-pr-gates.sh`, channel-bound provenance (the exact `MERGE_SHA` run and artifact, never the newest GitHub Release), and the same wall-clock-bound OTA probation monitor as `$ship`.
 - **`$ci-heal`** — post-push CI monitor and merge-readiness gate (`scripts/ci-heal.sh`). Verify that
   it never commits, writes a gate record only from an explicit `--attest <gate>=<evidence>`, and
   requires green CI on the PR head, local `HEAD` equal to it, `MERGEABLE`, an unchanged head before

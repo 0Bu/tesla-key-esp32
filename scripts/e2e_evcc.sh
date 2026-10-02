@@ -11,7 +11,8 @@
 #   scripts/e2e_evcc.sh                 # read-only: status, /api/proxy/1/version, vehicle_data,
 #                                       #   body_controller (safe)
 #   RUN_COMMANDS=1 scripts/e2e_evcc.sh  # + wake_up, set_charging_amps, set_charge_limit (save/restore),
-#                                       #   door_lock/door_unlock (negative role test — MUST be refused)
+#                                       #   door_lock/door_unlock (negative role test — requires an
+#                                       #   explicit refusal; ambiguous authentication failures fail)
 #   ALLOW_CHARGE_TOGGLE=1 RUN_COMMANDS=1 scripts/e2e_evcc.sh   # + charge_start/charge_stop (physical!)
 #   RUN_ALL_COMMANDS=1 RUN_COMMANDS=1 scripts/e2e_evcc.sh      # + every remaining firmware command
 #                                       #   (charge_port, flash_lights, honk_horn, climate, sentry,
@@ -72,8 +73,19 @@ if not raw or not code:
         print(f"FAIL|{name} failed/timed out (no response)")
     sys.exit(0)
 
+def unique_object(pairs):
+    obj = {}
+    for key, value in pairs:
+        if key in obj:
+            raise ValueError("duplicate response key")
+        obj[key] = value
+    return obj
+
+def reject_constant(value):
+    raise ValueError("non-JSON numeric constant")
+
 try:
-    data = json.loads(raw)
+    data = json.loads(raw, object_pairs_hook=unique_object, parse_constant=reject_constant)
 except Exception:
     if mode == "reject":
         print(f"FAIL|{name}: invalid rejection format (malformed JSON): {raw}")
@@ -83,12 +95,13 @@ except Exception:
         print(f"FAIL|{name} failed (malformed JSON, HTTP {code}): {raw}")
     sys.exit(0)
 
-if isinstance(data, dict) and isinstance(data.get("response"), dict):
-    res_obj = data["response"]
-elif isinstance(data, dict):
-    res_obj = data
-else:
-    res_obj = None
+res_obj = None
+if isinstance(data, dict):
+    if "response" in data:
+        if isinstance(data["response"], dict) and not any(key in data for key in ["result", "reason"]):
+            res_obj = data["response"]
+    else:
+        res_obj = data
 
 if not res_obj or "result" not in res_obj or not isinstance(res_obj["result"], bool):
     if mode == "reject":
@@ -100,10 +113,6 @@ if not res_obj or "result" not in res_obj or not isinstance(res_obj["result"], b
     sys.exit(0)
 
 result = res_obj["result"]
-raw_reason = res_obj.get("reason")
-if raw_reason is None and isinstance(data, dict):
-    raw_reason = data.get("reason")
-reason = str(raw_reason) if raw_reason is not None else ""
 
 if result is True:
     if mode == "reject":
@@ -115,14 +124,26 @@ if result is True:
     sys.exit(0)
 
 # result is False:
+reason = res_obj.get("reason")
+if not isinstance(reason, str) or not reason.strip():
+    print(f"FAIL|{name}: invalid failure reason (expected a nonempty string): {raw}")
+    sys.exit(0)
+reason_l = reason.strip().lower()
+
+# The firmware also emits this text before sending the command, for missing,
+# empty or invalid SessionInfo HMACs. It cannot prove a vehicle role refusal.
+if "authentication failed" in reason_l:
+    print(f"FAIL|{name}: unverified authentication outcome — cannot confirm vehicle refusal: {raw}")
+    sys.exit(0)
+
+role_refusals = {"not authorized", "unauthorized", "denied"}
 if mode == "reject":
     if code != "502":
         print(f"FAIL|{name}: HTTP {code} (expected 502 from vehicle rejection) — cannot confirm role boundary")
         sys.exit(0)
-    reason_l = reason.lower()
     if any(sub in reason_l for sub in ["not reachable", "unreachable", "timed out", "timeout", "vehicle asleep"]):
         print(f"FAIL|{name}: car unreachable (not actually refused) — cannot confirm role boundary; re-run with the car awake")
-    elif any(sub in reason_l for sub in ["not authorized", "unauthorized", "denied", "authentication failed"]):
+    elif reason_l in role_refusals:
         print(f"PASS|{name} correctly refused by the car (Charging-Manager role boundary holds)")
     else:
         print(f"FAIL|{name}: rejection reason not authenticated vehicle refusal: {raw}")
@@ -132,7 +153,6 @@ if mode == "soft":
     if code != "502":
         print(f"FAIL|{name} failed locally (HTTP {code}): {raw}")
         sys.exit(0)
-    reason_l = reason.lower()
     local_or_transport = [
         "not reachable",
         "unreachable",
@@ -154,13 +174,11 @@ if mode == "soft":
         "connection lost",
         "payload build failed",
     ]
-    vehicle_responses = [
-        "authentication failed",
-        "whitelist",
-        "rejected",
-        "action failed",
-        "failed with error status",
-        "vcsec command failed",
+    vehicle_responses = {
+        "key not on whitelist - pairing required",
+        "command rejected by vehicle",
+        "vcsec command failed with error status",
+        "infotainment action failed",
         "already_closed",
         "already_open",
         "already_set",
@@ -173,10 +191,15 @@ if mode == "soft":
         "charging",
         "is_charging",
         "charging_port_closed",
-    ]
+    }
+    action_reason = reason_l
+    for prefix in ["infotainment action failed: ", "action failed: "]:
+        if reason_l.startswith(prefix):
+            action_reason = reason_l[len(prefix):]
+            break
     if any(sub in reason_l for sub in local_or_transport):
         print(f"FAIL|{name}: proxy or reachability error: {raw}")
-    elif any(sub in reason_l for sub in vehicle_responses):
+    elif action_reason in vehicle_responses:
         print(f"NOTE|{name} returned false (HTTP {code}) — car-side rejection (depends on live state), not a proxy fault")
     else:
         print(f"FAIL|{name}: unverified failure outcome (HTTP {code}): {raw}")
@@ -217,9 +240,14 @@ self_test() {
   expect_pass() {
     local test_mode="$1" test_name="$2"
     local prev_fail=$fail
+    local prev_pass=$pass
     cmd "$test_name" "dummy" "{}" "$test_mode" >/dev/null 2>&1 || true
     if [ "$fail" -ne "$prev_fail" ]; then
       echo "self_test FAILED: expected pass for $test_name ($test_mode), but fail count increased" >&2
+      exit 1
+    fi
+    if [ "$test_mode" != soft ] && [ "$pass" -ne $((prev_pass + 1)) ]; then
+      echo "self_test FAILED: expected a counted pass for $test_name ($test_mode)" >&2
       exit 1
     fi
   }
@@ -293,10 +321,52 @@ self_test() {
   mock_code="502"; mock_body='{"response":{"result":false,"reason":null}}'
   expect_fail "soft" "soft HTTP 502 null reason"
 
-  # Reject mode tests:
-  # 6. Reject mode with authenticated vehicle refusal strings
+  # Authentication errors are also emitted locally before a command payload.
   mock_code="502"; mock_body='{"result":false,"reason":"authentication failed"}'
-  expect_pass "reject" "reject HTTP 502 authentication failed"
+  expect_fail "reject" "reject HTTP 502 ambiguous authentication failure"
+  expect_fail "soft" "soft HTTP 502 ambiguous authentication failure"
+
+  mock_code="502"; mock_body='{"response":{"result":false,"reason":"signed message authentication failed"}}'
+  expect_fail "reject" "reject HTTP 502 signed message authentication failure"
+  expect_fail "soft" "soft HTTP 502 signed message authentication failure"
+
+  mock_code="502"; mock_body='{"response":{"result":false,"reason":"VCSEC authentication failed"}}'
+  expect_fail "reject" "reject HTTP 502 VCSEC authentication failure"
+  expect_fail "soft" "soft HTTP 502 VCSEC authentication failure"
+
+  # Schema-invalid and mixed-scope reasons must never certify a vehicle response.
+  for mock_body in \
+    '{"response":{"result":false,"reason":{"authentication failed":true}}}' \
+    '{"response":{"result":false,"reason":["denied"]}}' \
+    '{"response":{"result":false,"reason":null},"reason":"denied"}' \
+    '{"response":{"result":false,"reason":"denied"},"result":true}' \
+    '{"response":null,"result":false,"reason":"denied"}' \
+    '{"result":false,"reason":"denied","reason":"not authorized"}'; do
+    expect_fail "reject" "reject invalid reason schema/scope"
+    expect_fail "soft" "soft invalid reason schema/scope"
+  done
+
+  mock_body='{"result":false,"reason":"authorization denied response was not authenticated"}'
+  expect_fail "reject" "reject unverified refusal substring"
+  expect_fail "soft" "soft unverified refusal substring"
+
+  mock_body='{"result":false,"reason":"local verification failed after charging request"}'
+  expect_fail "soft" "soft local error containing charging"
+
+  mock_body='{"response":{"result":false,"reason":"Infotainment action failed"}}'
+  expect_pass "soft" "soft explicit CarServer error without optional reason"
+  expect_fail "reject" "reject CarServer error without a role reason"
+
+  for constant in NaN Infinity -Infinity; do
+    mock_body="{\"result\":false,\"reason\":\"denied\",\"extra\":$constant}"
+    expect_fail "reject" "reject non-JSON numeric constant"
+    expect_fail "soft" "soft non-JSON numeric constant"
+    mock_code="200"; mock_body="{\"result\":true,\"extra\":$constant}"
+    expect_fail "" "strict non-JSON numeric constant"
+    mock_code="502"
+  done
+
+  # Reject mode needs an explicit refusal rather than a substring match.
 
   mock_code="502"; mock_body='{"result":false,"reason":"not authorized"}'
   expect_pass "reject" "reject HTTP 502 not authorized"
@@ -326,6 +396,9 @@ self_test() {
 
   mock_code="200"; mock_body='{"response":{"result":true,"command":"wake_up","vin":"TESTVIN"}}'
   expect_pass "" "normal HTTP 200 nested response result:true"
+
+  mock_body='{"response":{"result":false,"result":true}}'
+  expect_fail "" "strict HTTP 200 duplicate result"
 
   # Non-200 status with result:true must fail in strict mode
   mock_code="502"; mock_body='{"result":true}'
