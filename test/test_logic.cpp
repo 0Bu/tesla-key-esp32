@@ -4315,7 +4315,7 @@ static void test_http_route() {
     using tk::HttpRoute;
     using tk::HttpVerb;
 
-    static_assert(tk::kFixedHttpRoutes.size() == 23,
+    static_assert(tk::kFixedHttpRoutes.size() == 26,
                   "extend the complete fixed-route matrix when a route is added");
     for (const tk::FixedHttpRoute& fixed : tk::kFixedHttpRoutes) {
         CHECK(tk::classify_http_route(fixed.verb, fixed.path) == fixed.route);
@@ -4905,6 +4905,43 @@ static void test_http_origin() {
     // A key that merely CONTAINS the name is still a different parameter on both sides.
     CHECK(!tk::mutation_origin_required(false, "/diag?XCLEAR=1"));
     CHECK(!tk::mutation_origin_required(false, "/diag?CLEARED=1"));
+
+    // F02: State-changing requests via mutation_request_allowed()
+    // POST with no headers (curl/evcc) is allowed
+    CHECK(tk::mutation_request_allowed(true, "", "", "", "", false, ""));
+    CHECK(tk::mutation_request_allowed(true, "tesla-key-esp32.local", "", "", "", false, ""));
+
+    // Mutating GET with no headers (Chromium plain-HTTP LAN behavior without Referer) is REJECTED
+    CHECK(!tk::mutation_request_allowed(false, "", "", "", "", false, ""));
+    CHECK(!tk::mutation_request_allowed(false, "tesla-key-esp32.local", "", "", "", false, ""));
+    CHECK(!tk::mutation_request_allowed(false, "192.0.2.42", "", "", "", false, "192.0.2.42"));
+
+    // Mutating GET with custom header X-Requested-With is allowed if host is owned
+    CHECK(tk::mutation_request_allowed(false, "tesla-key-esp32.local", "", "", "", true, ""));
+    CHECK(tk::mutation_request_allowed(false, "192.0.2.42", "", "", "", true, "192.0.2.42"));
+    CHECK(!tk::mutation_request_allowed(false, "attacker.example", "", "", "", true, "192.0.2.42"));
+
+    // Mutating GET with same-origin Referer is allowed
+    CHECK(tk::mutation_request_allowed(false, "tesla-key-esp32.local", "", "",
+                                       "http://tesla-key-esp32.local/diag", false, ""));
+    CHECK(tk::mutation_request_allowed(false, "192.0.2.42", "", "",
+                                       "http://192.0.2.42/setup", false, "192.0.2.42"));
+
+    // Mutating GET with foreign/cross-origin Referer is REJECTED
+    CHECK(!tk::mutation_request_allowed(false, "tesla-key-esp32.local", "", "",
+                                        "http://evil.example/page", false, ""));
+    CHECK(!tk::mutation_request_allowed(false, "192.0.2.42", "", "",
+                                        "http://attacker.example/", false, "192.0.2.42"));
+    CHECK(!tk::mutation_request_allowed(false, "tesla-key-esp32.local", "", "",
+                                        "not-a-url", false, ""));
+
+    // Mutating GET with Sec-Fetch-Site
+    CHECK(tk::mutation_request_allowed(false, "tesla-key-esp32.local", "", "same-origin", "", false, ""));
+    CHECK(!tk::mutation_request_allowed(false, "tesla-key-esp32.local", "", "cross-site", "", false, ""));
+
+    // Null origin is rejected for both GET and POST
+    CHECK(!tk::mutation_request_allowed(true, "tesla-key-esp32.local", "null", "same-origin", "", false, ""));
+    CHECK(!tk::mutation_request_allowed(false, "tesla-key-esp32.local", "null", "same-origin", "", false, ""));
 }
 
 // ─── Negotiated ATT payload size (logic/ble_chunk.hpp) ────────────────────────────────────────

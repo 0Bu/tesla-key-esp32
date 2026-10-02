@@ -159,12 +159,12 @@ echo "$BC" | grep -q '"result":true' && ok "body_controller_state ok" || echo " 
 #                This is what stops a sleeping car from false-PASSing.
 cmd() {
   local name="$1" suf="$2" body="${3:-}" mode="${4:-}"
-  local out d r
+  local out d rest code r
   # Use a single nc request so that 5xx/4xx errors are not double-sent (wget -qO- discards
   # non-200 responses and caused unintentional duplicate command execution on failures).
-  out="$(kex "s=\$(date +%s%3N); host=\$(echo '$ESC_BASE' | sed -e 's,^http://,,' -e 's,/.*$,,' -e 's,:.*$,,'); port=\$(echo '$ESC_BASE' | sed -n 's,^http://[^:]*:\([0-9]*\).*,\1,p'); [ -z \"\$port\" ] && port=80; r=\$(printf 'POST /api/1/vehicles/$ESC_VIN/command/$suf HTTP/1.1\r\nHost: %s\r\nContent-Type: application/json\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s' \"\$host\" \"${#body}\" '$body' | nc -w $TIMEOUT \"\$host\" \"\$port\" 2>/dev/null | sed -e '1,/^\r\{0,1\}$/d'); e=\$(date +%s%3N); echo \"\$((e-s))|\$r\"")"
-  d="${out%%|*}"; r="${out#*|}"
-  echo "  ${name}: ${d}ms  ->  $r"
+  out="$(kex "s=\$(date +%s%3N); host=\$(echo '$ESC_BASE' | sed -e 's,^http://,,' -e 's,/.*$,,' -e 's,:.*$,,'); port=\$(echo '$ESC_BASE' | sed -n 's,^http://[^:]*:\([0-9]*\).*,\1,p'); [ -z \"\$port\" ] && port=80; raw=\$(printf 'POST /api/1/vehicles/$ESC_VIN/command/$suf HTTP/1.1\r\nHost: %s\r\nContent-Type: application/json\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s' \"\$host\" \"${#body}\" '$body' | nc -w $TIMEOUT \"\$host\" \"\$port\" 2>/dev/null); code=\$(echo \"\$raw\" | head -n1 | cut -d' ' -f2); b=\$(echo \"\$raw\" | sed -e '1,/^\r\{0,1\}\$/d'); e=\$(date +%s%3N); echo \"\$((e-s))|\$code|\$b\"")"
+  d="${out%%|*}"; rest="${out#*|}"; code="${rest%%|*}"; r="${rest#*|}"
+  echo "  ${name}: ${d}ms (HTTP ${code:-none})  ->  $r"
   if echo "$r" | grep -q '"result":true'; then
     if [ "$mode" = reject ]; then
       bad "$name was ACCEPTED — key has more than Charging-Manager privileges (role-boundary regression!)"
@@ -172,21 +172,32 @@ cmd() {
       ok "$name executed"
     fi
   elif [ "$mode" = reject ]; then
-    # The firmware answers (HTTP 502) even when the car is unreachable, with result:false
-    # reason="vehicle not reachable" (http_api.cpp). So result:false alone is ambiguous:
-    # treat a reachability reason (or an empty body) as "can't confirm" (FAIL), and any other
-    # car-side reason as a genuine refusal (PASS) — so an asleep car can't false-PASS.
-    if ! echo "$r" | grep -q '"result":false'; then
+    # The firmware returns HTTP 502 with result:false on command rejection or reachability error.
+    # Reject-mode must require HTTP 502 AND an authenticated vehicle rejection string
+    # ('not authorized', 'unauthorized', 'denied'), rejecting local proxy 4xx/503 or reachability timeouts.
+    if [ -z "$r" ] || [ -z "$code" ]; then
       bad "$name: no signed reply (transport timeout) — cannot confirm role boundary"
+    elif [ "$code" != "502" ]; then
+      bad "$name: HTTP $code (expected 502 from vehicle rejection) — cannot confirm role boundary"
     elif echo "$r" | grep -qiE 'not reachable|unreachable|timed out'; then
       bad "$name: car unreachable (not actually refused) — cannot confirm role boundary; re-run with the car awake"
-    else
+    elif ! echo "$r" | grep -q '"result":false'; then
+      bad "$name: invalid rejection format: $r"
+    elif echo "$r" | grep -qiE 'not authorized|unauthorized|denied'; then
       ok "$name correctly refused by the car (Charging-Manager role boundary holds)"
+    else
+      bad "$name: rejection reason not authenticated vehicle refusal: $r"
     fi
   elif [ "$mode" = soft ]; then
-    echo "  NOTE  $name returned false — car-side rejection (depends on live state), not a proxy fault"
+    if [ -z "$r" ] || [ -z "$code" ]; then
+      bad "$name failed/timed out (no response)"
+    elif echo "$r" | grep -qiE 'not reachable|unreachable|timed out'; then
+      bad "$name: car unreachable or timed out"
+    else
+      echo "  NOTE  $name returned false (HTTP $code) — car-side rejection (depends on live state), not a proxy fault"
+    fi
   else
-    bad "$name failed/timed out"
+    bad "$name failed/timed out (HTTP ${code:-none}): $r"
   fi
 }
 

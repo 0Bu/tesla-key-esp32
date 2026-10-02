@@ -52,8 +52,13 @@ static bool read_header_bounded(httpd_req_t* req, const char* name, char* out, s
 // Kept out of line on purpose: the per-frame stack budget of browser_mutation_allowed() (three
 // header buffers) is a reviewed maximum, and this lookup needs its own scratch space.
 __attribute__((noinline)) static bool origin_allowed_for_owned_addresses(
-    httpd_req_t* req, const char* host, const char* origin, const char* fetch_site,
+    httpd_req_t* req, bool is_post, const char* host, const char* origin, const char* fetch_site,
+    bool has_custom_header,
     const char* active_netif_ip) {
+    char referer[192];
+    if (!read_header_bounded(req, "Referer", referer, sizeof(referer))) {
+        return false;
+    }
     char socket_ip[16] = {};
     const int fd = httpd_req_to_sockfd(req);
     if (fd >= 0) {
@@ -65,23 +70,25 @@ __attribute__((noinline)) static bool origin_allowed_for_owned_addresses(
         }
     }
     const std::string_view device_ips[] = {active_netif_ip, socket_ip};
-    return tk::mutation_origin_allowed(host, origin, fetch_site, device_ips,
+    return tk::mutation_request_allowed(is_post, host, origin, fetch_site, referer,
+                                       has_custom_header, device_ips,
                                        sizeof(device_ips) / sizeof(device_ips[0]));
 }
 
-// Preserve the documented headerless trusted-LAN API used by evcc/curl, but do not let a foreign
-// browser origin borrow the user's LAN reachability for a mutating request. Host is first bound to
-// the device's own name/IP so a DNS-rebinding page cannot make attacker-controlled Host and Origin
-// compare equal. This is deliberately not authentication: a raw LAN peer can still call every
-// endpoint described in docs/SECURITY.md.
+// Preserve the documented headerless trusted-LAN API used by evcc/curl on POST, but do not let a
+// foreign browser origin borrow the user's LAN reachability for a mutating request. Host is first
+// bound to the device's own name/IP so a DNS-rebinding page cannot make attacker-controlled Host
+// and Origin compare equal. Mutating GETs are guarded against headerless requests (Chromium plain-HTTP
+// LAN behavior) and require a valid Referer, Origin, Sec-Fetch-Site, or custom X-Requested-With header.
 static bool browser_mutation_allowed(httpd_req_t* req) {
+    const bool is_post = req->method == HTTP_POST;
     char origin[192];
     char fetch_site[32];
     if (!read_header_bounded(req, "Origin", origin, sizeof(origin)) ||
         !read_header_bounded(req, "Sec-Fetch-Site", fetch_site, sizeof(fetch_site))) {
         return false;
     }
-    if (origin[0] == '\0' && fetch_site[0] == '\0') return true;
+    const bool has_custom_header = (httpd_req_get_hdr_value_len(req, "X-Requested-With") > 0);
 
     char host[128];
     if (!read_header_bounded(req, "Host", host, sizeof(host))) return false;
@@ -91,7 +98,8 @@ static bool browser_mutation_allowed(httpd_req_t* req) {
     if (netif && esp_netif_get_ip_info(netif, &ip) == ESP_OK) {
         esp_ip4addr_ntoa(&ip.ip, device_ip, sizeof(device_ip));
     }
-    return origin_allowed_for_owned_addresses(req, host, origin, fetch_site, device_ip);
+    return origin_allowed_for_owned_addresses(req, is_post, host, origin, fetch_site,
+                                             has_custom_header, device_ip);
 }
 
 static esp_err_t reject_cross_origin_mutation(httpd_req_t* req) {

@@ -92,7 +92,7 @@ gate_is_renovate_maintenance() {
 #   Reads repo-relative changed paths on stdin and succeeds when vehicle command dispatch,
 #   BLE protocol client, command registry, or pinned tesla-ble dependencies can have moved.
 gate_vehicle_command_relevant() {
-  grep -Eq '^(main/(vehicle_commands\.cpp|vehicle_ctrl\.(cpp|hpp)|vehicle_ctrl_internal\.hpp|vehicle_telemetry\.cpp|vehicle_pairing\.cpp|ble_client\.(cpp|hpp)|logic/(command_registry|command_runner|ble_dispatcher|rx_framing|session_state|command_result|key_rotation|ble_chunk|ble_deferred_event|wake_poll|active_window)\.hpp|idf_component\.yml)|patches/tesla-ble/|\.agents/skills/vehicle-command-audit/|test/test_tesla_ble_harness\.cpp|scripts/test-tesla-ble-harness\.sh|docs/adr/0005-tesla-ble-seam\.md)'
+  grep -Eq '^(main/(command_exec\.cpp|vehicle_commands\.cpp|vehicle_ctrl\.(cpp|hpp)|vehicle_ctrl_internal\.hpp|vehicle_telemetry\.cpp|vehicle_pairing\.cpp|ble_client\.(cpp|hpp)|logic/(command_registry|command_runner|ble_dispatcher|rx_framing|session_state|command_result|key_rotation|ble_chunk|ble_deferred_event|wake_poll|active_window)\.hpp|idf_component\.yml)|patches/tesla-ble/|\.agents/skills/vehicle-command-audit/|test/test_tesla_ble_harness\.cpp|scripts/test-tesla-ble-harness\.sh|docs/adr/0005-tesla-ble-seam\.md)'
 }
 
 # gate_firmware_size_relevant
@@ -1206,6 +1206,46 @@ gate_push_head_sha() {
   fi
 
   printf '%s\n' "$head"
+}
+
+# gate_push_is_branch_delete <arguments-after-git-push>
+#   Return 0 only when this is a standalone deletion of a non-protected branch on origin.
+gate_push_is_branch_delete() {
+  local payload="$1" token remote target_branch idx=0 is_del=0
+  local origin_fetch origin_push
+  local -a words=() positional=()
+  case "$payload" in
+    __GATE_UNSAFE_GIT_GLOBAL_CONTEXT__|__GATE_UNSAFE_SHELL_CONTEXT__) return 2 ;;
+  esac
+  case "$payload" in *[\"\'\\]*) return 2 ;; esac
+  read -r -a words <<< "$payload"
+  ((${#words[@]} >= 2)) || return 2
+
+  while [ "$idx" -lt "${#words[@]}" ]; do
+    token="${words[$idx]}"
+    idx=$((idx + 1))
+    case "$token" in
+      --delete|-d) is_del=1; continue ;;
+      --porcelain|-q|--quiet) continue ;;
+      -*) return 2 ;;
+    esac
+    positional+=("$token")
+  done
+
+  [ "$is_del" -eq 1 ] || return 2
+  ((${#positional[@]} == 2)) || return 2
+  remote="${positional[0]}"
+  target_branch="${positional[1]}"
+  [ "$remote" = origin ] || return 2
+  case "$target_branch" in
+    main|master|gh-pages|HEAD|""|-*) return 2 ;;
+  esac
+  printf '%s' "$target_branch" | grep -Eq '^[0-9A-Za-z._/-]+$' || return 2
+
+  origin_fetch="$(git -C "${GATE_PROJ:-$PWD}" remote get-url --all origin 2>/dev/null)" || return 2
+  origin_push="$(git -C "${GATE_PROJ:-$PWD}" remote get-url --push --all origin 2>/dev/null)" || return 2
+  [ "$origin_fetch" = "$origin_push" ] || return 2
+  return 0
 }
 
 # gate_pr_merge_selector <arguments-after-gh-pr-merge>

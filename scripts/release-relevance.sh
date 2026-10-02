@@ -227,7 +227,7 @@ changed_since_release() {
 find_published_dev_baseline() {
   local repo_root="$1" current_sha="$2" repository manifest identity source_sha version
   local pages_json live_base live_url live_manifest live_identity live_source live_version
-  local python_cmd dev_version_re
+  local python_cmd dev_version_re branch_manifest_sha live_manifest_sha
   python_cmd="${SELF_TEST_PYTHON:-python3}"
   dev_version_re='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$'
   validate_sha "$repo_root" "$current_sha" || return 2
@@ -259,6 +259,10 @@ find_published_dev_baseline() {
   live_source="${live_identity%%$'\t'*}"
   live_version="${live_identity#*$'\t'}"
   [[ "$live_source" == "$source_sha" && "$live_version" == "$version" ]] || return 2
+
+  branch_manifest_sha="$(printf '%s' "$manifest" | "$python_cmd" -c 'import hashlib, sys; sys.stdout.write(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())')"
+  live_manifest_sha="$(printf '%s' "$live_manifest" | "$python_cmd" -c 'import hashlib, sys; sys.stdout.write(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())')"
+  [[ "$branch_manifest_sha" == "$live_manifest_sha" ]] || return 2
 
   # Identity alone proves only that the manifest was published, not that the binaries behind it
   # are. Compare every served part with what the manifest declares.

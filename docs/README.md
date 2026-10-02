@@ -430,16 +430,18 @@ non-connectable or GATT readiness failed. A diagnostic build compiled with maxim
 per-attempt lines are compile-time absent from the normal INFO build so retries cannot flood syslog.
 
 **Command times out** (`'charge_start' timed out`) — car in deep sleep: `wake_up`, wait 5 s, retry. A
-stale session: `esptool --chip <target> -p <port> erase_flash` (this also erases the key; see
-[Upgrading](#upgrading)).
+stale BLE session recovers by power-cycling or rebooting the ESP32 (`POST /reboot`), which forces a clean
+reconnection. Do NOT erase flash for session recovery.
 
 **No pairing prompt** — a VIN must be configured (else `/diag` shows `auto-pair: no VIN configured —
 pairing disabled`); a Tesla NFC keycard must be on the center-console reader; car awake and in range;
 `key_present: true` in `/status` (else `POST /gen_keys?force=1`); watch for `auto-pair: requesting key
 enrolment` in `/diag`; confirm on the touchscreen within ~45 s or `POST /send_key` to retrigger.
 
-**Key rejected** — Tesla app → Security → Keys → delete *"Unknown key"*, erase flash as above, and let
-it re-pair (confirm on screen).
+**Key rejected** — in the Tesla touchscreen / app (Locks/Keys) delete the old key entry. Regenerate
+the keypair via Web UI or `POST /gen_keys?force=1`, then trigger pairing with `POST /send_key` and confirm
+on the touchscreen with the NFC keycard. Only use full chip erase (`esptool --chip <target> -p <port> erase_flash`)
+for an intentional factory reset, as it permanently wipes all WiFi credentials, configuration, and keys.
 
 **Serial permission denied (Linux)** — `sudo usermod -aG dialout $USER && newgrp dialout`.
 

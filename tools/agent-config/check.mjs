@@ -115,19 +115,19 @@ const usbAbsentApprovalProceeds = /(?:(?:approval|authorization)[^.!?]*(?:absent
 const reviewedSkillSha256 = new Map([
   ["add-logic-test", "5bc6af893a1f95a5b4b1d2302da43c1e5e8de11d5e65e1c62d342e0dbfe6a327"],
   ["ci-heal", "05562364b790f359aaf42a080ab6db2b71afcaa37eedb3dab829d7b15168b123"],
-  ["deploy", "3fffd3eccf94450a6b585e36f46b90c83fe7aba19f26daf70bd387c468f5a8e9"],
+  ["deploy", "914f1067b5d8daa903f5f65bdd7fdb73dd7dfc86db843f109eb41f25c196b3a6"],
   ["device-diag", "90f25ac161c7fc81e52dacc2ccce8949474cd91d6422e6bacf596b748817f40c"],
   ["display-preview", "4bff95d0314d50ce29d67beac7ef4f9db1ebcbb2fa609335e560e162f5a1ed46"],
   ["feature-docs", "0255c6c85753efb851833a20e8da9519c8a61c58d4bb52f9f061cfe609d6e20a"],
   ["flash-esp32", "a4611de5f352615f1bf437d992e48e10bfbd8f188eed89ff1cc2a82378cdf78a"],
   ["mock-test", "8cfaaa7d4d7fdbda24375ca743f9954ee39c6db053684000fac1bf1bce00ac0f"],
-  ["ota-release-verify", "eb9a08aae32fb919374c97ae481e12da021e927bb5ebdbf1d78e03a011e9e16d"],
+  ["ota-release-verify", "c9e53a97435001998e8a37fcbb0585e4c297aacc0adfd8302863aab2eb0f134b"],
   ["pr-hygiene", "e034d42384a8b356e9f94ca1e81a7849a22bdba63763714d8932bd019d1ccb7d"],
-  ["project-review", "2734f27cc759b4dbcc7208197d19c58689cbff70e287278b065eeede30ccb7da"],
+  ["project-review", "5adecd745602ebf3177e647e7723cd7383ac235f637028d0d6d259d84e696444"],
   ["ship", "2084961049b949b28d604e2b3ffc97f5fb97c6602aef18549178be4e1bfc9269"],
   ["skill-audit", "b92674c9478884cfff7c07ba9835fe1bb0c603b31a877add2b03f9d3c2c686af"],
   ["usb-recovery", "29e9b2413255c1bf3c0770f1e1548ede4b7da81664f1eef27f11cf91619c9be2"],
-  ["vehicle-command-audit", "fb6840d7987a6febc8cc4432d58e4d94d904bb87971500c9e8eeb879b62cbf3b"],
+  ["vehicle-command-audit", "281444c46b306e6e8117888051fb1f752a0a41476f25e0f43abb3cf2adaee97d"],
 ]);
 const featureDocsScopeTokens = [
   "main/", "test/", "sdkconfig.defaults*", "partitions.csv", "AGENTS.md", ".agents/",

@@ -72,19 +72,19 @@ EXPECTED_JOB_PERMISSIONS = {
     ("build.yml", "independent-rebuild"): {"contents": "read"},
     ("build.yml", "publish"): {"actions": "read", "contents": "write", "pages": "read"},
     ("build.yml", "deploy"): {
-        "actions": "read", "contents": "write", "pages": "read",
+        "actions": "read", "contents": "write", "pages": "write",
     },
     ("pr-policy.yml", "current-head-records"): {
         "contents": "read", "pull-requests": "read",
     },
     ("pr-preview-cleanup.yml", "cleanup-event"): {
-        "contents": "write", "pages": "read",
+        "contents": "write", "pages": "write", "pull-requests": "read",
     },
     ("pr-preview-cleanup.yml", "discover-stale"): {
         "contents": "read", "pull-requests": "read",
     },
     ("pr-preview-cleanup.yml", "reconcile-stale"): {
-        "contents": "write", "pages": "read", "pull-requests": "read",
+        "contents": "write", "pages": "write", "pull-requests": "read",
     },
     ("renovate.yaml", "renovate"): {"contents": "read", "pull-requests": "write"},
     ("signed-pr-preview.yml", "validate"): {
@@ -92,7 +92,7 @@ EXPECTED_JOB_PERMISSIONS = {
     },
     ("signed-pr-preview.yml", "trusted-rebuild"): {"contents": "read"},
     ("signed-pr-preview.yml", "sign-preview"): {
-        "actions": "read", "contents": "write", "pages": "read",
+        "actions": "read", "contents": "write", "pages": "write",
         "pull-requests": "read",
     },
 }
@@ -177,7 +177,7 @@ EXPECTED_ACTIONS = {
 EXPECTED_SECRET_REFERENCES = {
     ("build.yml", "publish"): Counter({"OTA_SIGNING_KEY": 1}),
     ("build.yml", "deploy"): Counter({"GITHUB_TOKEN": 3}),
-    ("pr-preview-cleanup.yml", "cleanup-event"): Counter({"GITHUB_TOKEN": 1}),
+    ("pr-preview-cleanup.yml", "cleanup-event"): Counter({"GITHUB_TOKEN": 2}),
     ("pr-preview-cleanup.yml", "discover-stale"): Counter({"GITHUB_TOKEN": 1}),
     ("pr-preview-cleanup.yml", "reconcile-stale"): Counter({"GITHUB_TOKEN": 2}),
     ("renovate.yaml", "renovate"): Counter({"RENOVATE_TOKEN": 1}),
@@ -196,8 +196,8 @@ SIGNING_ENVIRONMENT_JOBS = {
 # checks below keep failures explanatory; this final digest closes gaps in the narrow scanner.
 EXPECTED_PRIVILEGED_JOB_SHA256 = {
     ("build.yml", "publish"): "7282303dac6098fa7fc04f44c6abb115d838f69dd3aea9c58f4aa1de22ec2a1f",
-    ("build.yml", "deploy"): "c66b1776211c94815fe96bcb821e0e18fcbcfed56143cd0dc6a7ebfa5ef75be8",
-    ("signed-pr-preview.yml", "sign-preview"): "18d34f6a9aae2add8b5af9cb69c3af3c391205cb2b795e45f62a150674cce4a7",
+    ("build.yml", "deploy"): "ab262588fe725ca130c17d667ffdd95a5689616900820ff401e6bd8c69a94c9a",
+    ("signed-pr-preview.yml", "sign-preview"): "c18a38d6ecdfd36e1ee4ef3ae7e09ea137470bab4eba845bedb5156d645e0452",
 }
 TRUSTED_DEFAULT_ENV = "TRUSTED_DEFAULT_SHA: ${{ github.sha }}"
 TRUSTED_DEFAULT_FETCH = "git fetch --no-tags origin"
@@ -552,7 +552,7 @@ def validate(root: Path) -> None:
     )
     require(
         job_permissions(build["deploy"], "build.yml:deploy")
-        == {"actions": "read", "contents": "write", "pages": "read"}
+        == {"actions": "read", "contents": "write", "pages": "write"}
         and "environment:" not in build["deploy"]
         and "OTA_SIGNING_KEY" not in build["deploy"]
         and "id-token" not in build["deploy"],
@@ -876,7 +876,7 @@ def validate(root: Path) -> None:
         == {
             "actions": "read",
             "contents": "write",
-            "pages": "read",
+            "pages": "write",
             "pull-requests": "read",
         },
         "signed-pr-preview.yml protected permissions must be exact for artifact, PR and branch-backed Pages access",
@@ -1027,9 +1027,9 @@ def validate(root: Path) -> None:
             "pr-preview-cleanup.yml reconciliation DAG drifted")
     require(
         job_permissions(cleanup["cleanup-event"], "pr-preview-cleanup.yml:cleanup-event")
-        == {"contents": "write", "pages": "read"}
+        == {"contents": "write", "pages": "write", "pull-requests": "read"}
         and job_permissions(cleanup["reconcile-stale"], "pr-preview-cleanup.yml:reconcile-stale")
-        == {"contents": "write", "pages": "read", "pull-requests": "read"},
+        == {"contents": "write", "pages": "write", "pull-requests": "read"},
         "pr-preview-cleanup.yml mutator permissions must retain exact branch and Pages-read scope",
     )
     cleanup_text = contents["pr-preview-cleanup.yml"]
@@ -1046,7 +1046,7 @@ def validate(root: Path) -> None:
         cleanup["cleanup-event"].count(cleanup_source) == 1
         and cleanup["reconcile-stale"].count(cleanup_source) == 1
         and cleanup["cleanup-event"].index(cleanup_source)
-        < cleanup["cleanup-event"].index("./scripts/publish-pages-branch.sh rm")
+        < cleanup["cleanup-event"].index("./scripts/reconcile-pr-previews.sh remove-if-stale")
         and cleanup["reconcile-stale"].index(cleanup_source)
         < cleanup["reconcile-stale"].index("./scripts/reconcile-pr-previews.sh remove-if-stale"),
         "pr-preview-cleanup.yml must validate branch-backed Pages before every branch mutation",

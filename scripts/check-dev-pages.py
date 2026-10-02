@@ -19,9 +19,26 @@ from typing import Any, Callable
 
 VERSION_RE = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$")
 SOURCE_RE = re.compile(r"^[0-9a-f]{40}$")
+SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 MANIFEST_MAX = 128 * 1024
 PART_MAX = 4 * 1024 * 1024
 Fetcher = Callable[[str, int], bytes]
+
+TARGETS = (
+    ("ESP32", "esp32", "", 0x1000),
+    ("ESP32-S3", "esp32s3", "-s3", 0),
+    ("ESP32-C3", "esp32c3", "-c3", 0),
+    ("ESP32-C6", "esp32c6", "-c6", 0),
+)
+
+
+def expected_build_parts(target: str, suffix: str, boot_offset: int) -> tuple[tuple[str, int, int, int], ...]:
+    return (
+        (f"bootloader-{target}.bin", boot_offset, 1, 0x8000 - boot_offset),
+        (f"partition-table-{target}.bin", 0x8000, 1, 0x1000),
+        (f"tesla-key-esp32{suffix}.bin", 0x20000, 1, 0x1F0000),
+        (f"ota_data_initial-{target}.bin", 0xF000, 0x2000, 0x2000),
+    )
 
 
 class AcceptanceError(RuntimeError):
@@ -78,44 +95,11 @@ def fetch_https(url: str, max_bytes: int, timeout: float) -> bytes:
     return data
 
 
-def parse_dev_manifest(raw: bytes, version: str, source_sha: str) -> list[str]:
-    try:
-        manifest = json.loads(raw)
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise AcceptanceError(f"deployed dev manifest is not valid JSON: {exc}") from exc
-    if not isinstance(manifest, dict):
-        raise AcceptanceError("deployed dev manifest root is not an object")
-    if manifest.get("version") != version or manifest.get("sourceSha") != source_sha:
-        raise AcceptanceError("deployed dev manifest has not reached expected identity")
-    builds = manifest.get("builds")
-    if not isinstance(builds, list) or len(builds) != 4:
-        raise AcceptanceError("deployed dev manifest does not contain exactly four builds")
-    parts: list[str] = []
-    for build in builds:
-        if not isinstance(build, dict):
-            raise AcceptanceError("invalid build entry in dev manifest")
-        build_parts = build.get("parts")
-        if not isinstance(build_parts, list):
-            raise AcceptanceError("invalid parts in dev manifest build")
-        for part in build_parts:
-            if not isinstance(part, dict):
-                raise AcceptanceError("invalid part entry in dev manifest")
-            path = part.get("path")
-            if not isinstance(path, str) or not path or Path(path).name != path:
-                raise AcceptanceError(f"invalid part path in dev manifest: {path!r}")
-            parts.append(path)
-    return parts
-
-
-SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
-
-
 def parse_dev_manifest_parts(raw: bytes, version: str, source_sha: str) -> list[tuple[str, int, str]]:
     """Return (path, size, sha256) for every part of the four builds; the manifest is the contract.
 
-    Stricter than parse_dev_manifest: each build must carry exactly four parts, and every part must
-    declare a positive byte size and a SHA-256, because --verify-live has no local copy to compare
-    against and therefore trusts nothing but these declarations.
+    Enforces exactly the four targets in TARGETS order, each with the four canonical parts in
+    expected_build_parts order, matching paths, offsets, size bounds, and SHA-256.
     """
     try:
         manifest = json.loads(raw)
@@ -126,25 +110,40 @@ def parse_dev_manifest_parts(raw: bytes, version: str, source_sha: str) -> list[
     if manifest.get("version") != version or manifest.get("sourceSha") != source_sha:
         raise AcceptanceError("deployed dev manifest has not reached expected identity")
     builds = manifest.get("builds")
-    if not isinstance(builds, list) or len(builds) != 4:
+    if not isinstance(builds, list) or len(builds) != len(TARGETS):
         raise AcceptanceError("deployed dev manifest does not contain exactly four builds")
     parts: list[tuple[str, int, str]] = []
-    for build in builds:
-        build_parts = build.get("parts") if isinstance(build, dict) else None
+    for build, (chip, target, suffix, boot_offset) in zip(builds, TARGETS, strict=True):
+        if not isinstance(build, dict):
+            raise AcceptanceError("invalid build entry in dev manifest")
+        if build.get("chipFamily") != chip:
+            raise AcceptanceError(f"build order/chipFamily mismatch: expected {chip}, got {build.get('chipFamily')!r}")
+        build_parts = build.get("parts")
         if not isinstance(build_parts, list) or len(build_parts) != 4:
-            raise AcceptanceError("each dev manifest build must carry exactly four parts")
-        for part in build_parts:
+            raise AcceptanceError(f"each dev manifest build must carry exactly four parts for {chip}")
+        expected_parts = expected_build_parts(target, suffix, boot_offset)
+        for part, (expected_name, expected_offset, min_size, max_size) in zip(build_parts, expected_parts, strict=True):
             if not isinstance(part, dict):
-                raise AcceptanceError("invalid part entry in dev manifest")
-            path, size, digest = part.get("path"), part.get("size"), part.get("sha256")
-            if not isinstance(path, str) or not path or Path(path).name != path:
-                raise AcceptanceError(f"invalid part path in dev manifest: {path!r}")
-            if isinstance(size, bool) or not isinstance(size, int) or size <= 0 or size > PART_MAX:
-                raise AcceptanceError(f"invalid part size in dev manifest for {path}: {size!r}")
+                raise AcceptanceError(f"invalid part entry in dev manifest for {chip}")
+            path = part.get("path")
+            offset = part.get("offset")
+            size = part.get("size")
+            digest = part.get("sha256")
+            if path != expected_name or Path(path).name != path:
+                raise AcceptanceError(f"unexpected part path for {chip}: expected {expected_name!r}, got {path!r}")
+            if offset != expected_offset:
+                raise AcceptanceError(f"unexpected offset for {chip}/{path}: expected {expected_offset}, got {offset}")
+            if isinstance(size, bool) or not isinstance(size, int) or size < min_size or size > max_size:
+                raise AcceptanceError(f"invalid part size in dev manifest for {chip}/{path}: {size!r}")
             if not isinstance(digest, str) or not SHA256_RE.match(digest):
-                raise AcceptanceError(f"invalid part sha256 in dev manifest for {path}")
+                raise AcceptanceError(f"invalid part sha256 in dev manifest for {chip}/{path}")
             parts.append((path, size, digest))
     return parts
+
+
+def parse_dev_manifest(raw: bytes, version: str, source_sha: str) -> list[str]:
+    parts = parse_dev_manifest_parts(raw, version, source_sha)
+    return [p[0] for p in parts]
 
 
 def verify_dev_channel_live(
@@ -181,18 +180,18 @@ def verify_dev_channel_live(
                 sleeper(interval)
     if parts is None:
         raise AcceptanceError(f"dev manifest failed to settle after {attempts} attempts: {last_error}")
+    if len(parts) != 16:
+        raise AcceptanceError(f"dev manifest must contain exactly 16 parts, got {len(parts)}")
 
-    declared: dict[str, tuple[int, str]] = {}
+    verified_count = 0
     for path, size, digest in parts:
-        if declared.setdefault(path, (size, digest)) != (size, digest):
-            raise AcceptanceError(f"dev manifest declares conflicting sizes/digests for {path}")
-    for path, (size, digest) in declared.items():
         data = fetcher(exact_url(dev_base, path, source_sha), PART_MAX)
         if len(data) != size:
             raise AcceptanceError(f"dev Pages part {path} is {len(data)} bytes, manifest declares {size}")
         if hashlib.sha256(data).hexdigest() != digest:
             raise AcceptanceError(f"dev Pages part {path} does not match its manifest SHA-256")
-    return len(declared)
+        verified_count += 1
+    return verified_count
 
 
 def verify_dev_pages(
@@ -230,13 +229,11 @@ def verify_dev_pages(
 
     if parts is None:
         raise AcceptanceError(f"dev manifest failed to settle after {attempts} attempts: {last_error}")
+    if len(parts) != 16:
+        raise AcceptanceError(f"dev manifest must contain exactly 16 parts, got {len(parts)}")
 
     verified_count = 0
-    seen_paths: set[str] = set()
     for part_name in parts:
-        if part_name in seen_paths:
-            continue
-        seen_paths.add(part_name)
         local_path = staged_site / part_name
         if local_path.is_symlink() or not local_path.is_file():
             raise AcceptanceError(f"missing local staged part: {local_path}")
@@ -258,31 +255,41 @@ def self_test() -> None:
     pages_base = "https://0bu.github.io/tesla-key-esp32"
     dev_base = pages_base + "/dev"
 
-    manifest_data = {
-        "name": "Tesla BLE Key (ESP32)",
-        "version": version,
-        "sourceSha": source_sha,
-        "builds": [
-            {"chipFamily": "ESP32", "parts": [{"path": "bootloader.bin", "offset": 4096}, {"path": "app.bin", "offset": 131072}]},
-            {"chipFamily": "ESP32-S3", "parts": [{"path": "bootloader-s3.bin", "offset": 0}, {"path": "app-s3.bin", "offset": 131072}]},
-            {"chipFamily": "ESP32-C3", "parts": [{"path": "bootloader-c3.bin", "offset": 0}, {"path": "app-c3.bin", "offset": 131072}]},
-            {"chipFamily": "ESP32-C6", "parts": [{"path": "bootloader-c6.bin", "offset": 0}, {"path": "app-c6.bin", "offset": 131072}]},
-        ],
-    }
+    def build_test_manifest(file_dict: dict[str, bytes], overrides: dict[str, dict[str, Any]] | None = None) -> dict[str, Any]:
+        builds = []
+        for chip, target, suffix, boot_offset in TARGETS:
+            parts = []
+            for name, offset, min_size, max_size in expected_build_parts(target, suffix, boot_offset):
+                content = file_dict[name]
+                part_entry: dict[str, Any] = {
+                    "path": name,
+                    "offset": offset,
+                    "size": len(content),
+                    "sha256": hashlib.sha256(content).hexdigest(),
+                }
+                if overrides and name in overrides:
+                    part_entry.update(overrides[name])
+                parts.append(part_entry)
+            builds.append({"chipFamily": chip, "parts": parts})
+        return {
+            "name": "Tesla BLE Key (ESP32)",
+            "version": version,
+            "sourceSha": source_sha,
+            "builds": builds,
+        }
+
+    # Generate valid files for all 16 parts
+    files: dict[str, bytes] = {}
+    for chip, target, suffix, boot_offset in TARGETS:
+        for name, offset, min_size, max_size in expected_build_parts(target, suffix, boot_offset):
+            size = min_size if min_size > 1 else 64
+            files[name] = ((f"content_of_{name}".encode("utf-8") * 500) + (b"0" * size))[:size]
+
+    manifest_data = build_test_manifest(files)
 
     with tempfile.TemporaryDirectory(prefix="dev-pages-test-") as tmpdir:
         staged = Path(tmpdir)
         (staged / "manifest.json").write_text(json.dumps(manifest_data), encoding="utf-8")
-        files = {
-            "bootloader.bin": b"bl_esp32",
-            "app.bin": b"app_esp32",
-            "bootloader-s3.bin": b"bl_s3",
-            "app-s3.bin": b"app_s3",
-            "bootloader-c3.bin": b"bl_c3",
-            "app-c3.bin": b"app_c3",
-            "bootloader-c6.bin": b"bl_c6",
-            "app-c6.bin": b"app_c6",
-        }
         for name, content in files.items():
             (staged / name).write_bytes(content)
 
@@ -310,9 +317,9 @@ def self_test() -> None:
             interval=0,
             fetcher=fake_fetch,
         )
-        assert count == 8, f"expected 8 verified parts, got {count}"
+        assert count == 16, f"expected 16 verified parts, got {count}"
 
-        # Tampered content
+        # Tampered sourceSha
         manifest_url_path = urllib.parse.urlsplit(exact_url(dev_base, "manifest.json", source_sha)).path
         remote_files[manifest_url_path] = json.dumps({**manifest_data, "sourceSha": "b" * 40}).encode("utf-8")
         try:
@@ -323,21 +330,10 @@ def self_test() -> None:
             raise AssertionError("stale sourceSha dev manifest was accepted")
 
     # --verify-live: the served bytes must match the manifest's own size/SHA-256, all 16 parts.
-    live_files = {f"part-{i:02d}.bin": bytes([i]) * (i + 3) for i in range(16)}
+    live_files = dict(files)
 
-    def live_manifest(overrides: dict[str, tuple[int, str]] | None = None) -> dict[str, Any]:
-        builds = []
-        for b in range(4):
-            parts = []
-            for j in range(4):
-                name = f"part-{b * 4 + j:02d}.bin"
-                size, digest = (overrides or {}).get(
-                    name, (len(live_files[name]), hashlib.sha256(live_files[name]).hexdigest())
-                )
-                parts.append({"path": name, "offset": j, "size": size, "sha256": digest})
-            builds.append({"chipFamily": f"chip{b}", "parts": parts})
-        return {"name": "tesla-key-esp32", "layoutVersion": 2, "version": version,
-                "sourceSha": source_sha, "builds": builds}
+    def live_manifest(overrides: dict[str, dict[str, Any]] | None = None) -> dict[str, Any]:
+        return build_test_manifest(live_files, overrides)
 
     def live_fetcher(manifest: dict[str, Any], served: dict[str, bytes]) -> Fetcher:
         def fetch(url: str, max_bytes: int) -> bytes:
@@ -360,24 +356,36 @@ def self_test() -> None:
             return
         raise AssertionError(f"--verify-live accepted: {label}")
 
+    part_names = list(files.keys())
     stale = dict(live_files)
-    stale["part-07.bin"] = b"old-binary-still-served"
+    stale[part_names[7]] = b"old-binary-still-served" * 10
     must_fail(live_manifest(), stale, "a stale served part behind a current manifest")
+
     flipped = dict(live_files)
-    flipped["part-03.bin"] = bytes([flipped["part-03.bin"][0] ^ 1]) + flipped["part-03.bin"][1:]
+    p3 = part_names[3]
+    flipped[p3] = bytes([flipped[p3][0] ^ 1]) + flipped[p3][1:]
     must_fail(live_manifest(), flipped, "a same-length corrupted part")
+
     missing = dict(live_files)
-    del missing["part-15.bin"]
+    del missing[part_names[15]]
     must_fail(live_manifest(), missing, "a part that is not served")
-    must_fail(live_manifest({"part-00.bin": (len(live_files["part-00.bin"]) + 1,
-                                            hashlib.sha256(live_files["part-00.bin"]).hexdigest())}),
+
+    p0 = part_names[0]
+    must_fail(live_manifest({p0: {"size": len(live_files[p0]) + 1}}),
               live_files, "a manifest size that differs from the served bytes")
+
     short = live_manifest()
     short["builds"][2]["parts"].pop()
     must_fail(short, live_files, "a build with fewer than four parts")
+
     nodigest = live_manifest()
     del nodigest["builds"][1]["parts"][0]["sha256"]
     must_fail(nodigest, live_files, "a part without a SHA-256")
+
+    wrong_family = live_manifest()
+    wrong_family["builds"][1]["chipFamily"] = "ESP32-WRONG"
+    must_fail(wrong_family, live_files, "a build with wrong chipFamily")
+
     wrong_identity = live_manifest()
     wrong_identity["sourceSha"] = "c" * 40
     must_fail(wrong_identity, live_files, "a manifest for another source SHA")

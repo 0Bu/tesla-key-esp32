@@ -272,7 +272,12 @@ Treat a violation of any of these as a real finding.
   downloaded image's own app-descriptor version (`esp_https_ota_get_img_desc`) and refuses
   anything not strictly newer than the running firmware — a signature proves authenticity, not
   freshness. Weakening it re-opens the old-but-validly-signed-image attack.
-- `version.txt` is the committed **version floor**; CI (`scripts/select-release-version.sh` →
+- **Two release channels:** CI (`.github/workflows/build.yml`) structurally splits Dev and Release delivery:
+  a firmware-relevant push to `main` runs in `dev` mode, generating pre-release versions via `scripts/next-version.sh --dev`
+  and publishing continuously only to the Dev channel (`gh-pages:/dev/`); official stable Releases and root Pages updates
+  are triggered manually via `workflow_dispatch` with `release: true` on current `main` (a `workflow_dispatch` without
+  `release: true` runs in `test` mode, unprivileged and unable to sign or publish Pages).
+  `version.txt` is the committed **version floor** (`1.5.0`); CI (`scripts/select-release-version.sh` →
   `scripts/next-version.sh`, see `.github/workflows/build.yml`) computes the actual stable release
   as the maximum of that floor, stable-tag patch increments and prerelease-core promotions, but
   publishes only stable `X.Y.Z` identities and idempotently reuses one stable Release tag already

@@ -43,6 +43,7 @@
         },
         "CMakeFiles/__idf_main.dir/http_server.cpp.su": {
           "/COMPONENT_MAIN_DIR/http_server.cpp :: bool browser_mutation_allowed(httpd_req_t*)": 464,
+          "/COMPONENT_MAIN_DIR/http_server.cpp :: bool origin_allowed_for_owned_addresses(httpd_req_t*, bool, const char*, const char*, const char*, bool, const char*)": 368,
           "/COMPONENT_MAIN_DIR/http_server.cpp :: esp_err_t handle_all_dispatch(httpd_req_t*)": 336
         },
         "CMakeFiles/__idf_main.dir/http_status.cpp.su": {
@@ -150,6 +151,7 @@
         },
         "CMakeFiles/__idf_main.dir/http_server.cpp.su": {
           "/COMPONENT_MAIN_DIR/http_server.cpp :: bool browser_mutation_allowed(httpd_req_t*)": 464,
+          "/COMPONENT_MAIN_DIR/http_server.cpp :: bool origin_allowed_for_owned_addresses(httpd_req_t*, bool, const char*, const char*, const char*, bool, const char*)": 368,
           "/COMPONENT_MAIN_DIR/http_server.cpp :: esp_err_t handle_all_dispatch(httpd_req_t*)": 336
         },
         "CMakeFiles/__idf_main.dir/http_status.cpp.su": {
@@ -257,6 +259,7 @@
         },
         "CMakeFiles/__idf_main.dir/http_server.cpp.su": {
           "/COMPONENT_MAIN_DIR/http_server.cpp :: bool browser_mutation_allowed(httpd_req_t*)": 400,
+          "/COMPONENT_MAIN_DIR/http_server.cpp :: bool origin_allowed_for_owned_addresses(httpd_req_t*, bool, const char*, const char*, const char*, bool, const char*)": 320,
           "/COMPONENT_MAIN_DIR/http_server.cpp :: esp_err_t handle_all_dispatch(httpd_req_t*)": 304
         },
         "CMakeFiles/__idf_main.dir/http_status.cpp.su": {
@@ -360,6 +363,7 @@
         },
         "CMakeFiles/__idf_main.dir/http_server.cpp.su": {
           "/COMPONENT_MAIN_DIR/http_server.cpp :: bool browser_mutation_allowed(httpd_req_t*)": 432,
+          "/COMPONENT_MAIN_DIR/http_server.cpp :: bool origin_allowed_for_owned_addresses(httpd_req_t*, bool, const char*, const char*, const char*, bool, const char*)": 352,
           "/COMPONENT_MAIN_DIR/http_server.cpp :: esp_err_t handle_all_dispatch(httpd_req_t*)": 320
         },
         "CMakeFiles/__idf_main.dir/http_status.cpp.su": {

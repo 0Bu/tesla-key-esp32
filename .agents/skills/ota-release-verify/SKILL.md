@@ -25,7 +25,7 @@ This subsystem has broken in three distinct ways, each of which this check catch
   (`signature bad`), because the signature proves authenticity (TOFU), not that the *channel* is
   wrong.
 - **Floor-vs-stamped version drift** — [`version.txt`](../../../version.txt) is a committed
-  **floor** (`1.4.0`); CI stamps the *real* release version into the binary and the manifest. If
+  **floor** (`1.5.0`); CI stamps the *real* release version into the binary and the manifest. If
   those disagree, devices loop on "update available" or silently no-op.
 
 > **Read-only by default.** Steps 1–3 use `git`, `gh`, `curl`, Python and `esptool image-info`
@@ -145,7 +145,7 @@ printf 'Release %s -> %s\n' "$RELEASE_TAG" "$SOURCE_SHA"
 
 `REL` is the version the manifest and every embedded app descriptor must report; `SOURCE_SHA` is
 the only acceptable `manifest.sourceSha`. A merely well-formed but different SHA is stale or
-unreconciled channel state and fails closed. `version.txt` = `1.4.0` here is only the **floor** —
+unreconciled channel state and fails closed. `version.txt` = `1.5.0` here is only the **floor** —
 do not expect it to equal the live version; CI stamps the real one uncommitted.
 
 `build.yml` keeps this invariant structurally: a firmware-relevant `main` push enters the

@@ -86,9 +86,9 @@ Before committing or pushing, verify workspace cleanliness, code style, unit tes
    git commit -m "feat(<scope>): <concise description in English>"
    ```
 3. **Push Feature Branch**:
+   Push using the literal branch name without quotes or variable expansion (guards reject dynamic/quoted pushes):
    ```bash
-   BRANCH=$(git rev-parse --abbrev-ref HEAD)
-   git push -u origin "$BRANCH"
+   git push -u origin <branch-name>
    ```
 4. **Create PR with Canonical Gate Checkboxes**:
    Determine the current HEAD SHA via `HEAD_SHA=$(git rev-parse HEAD)`.
@@ -106,7 +106,7 @@ Before committing or pushing, verify workspace cleanliness, code style, unit tes
    ```
    Submit the pull request:
    ```bash
-   gh pr create --title "<Title in English>" --body-file <PATH_TO_BODY>
+   gh pr create --body-file <PATH_TO_BODY> --title "<Title in English>"
    PR=$(gh pr view --json number -q .number)
    ```
 
@@ -156,7 +156,7 @@ Before committing or pushing, verify workspace cleanliness, code style, unit tes
      ```
    - Push the fix:
      ```bash
-     git push origin "$BRANCH"
+     git push -u origin <branch-name>
      ```
    - Re-audit and stamp the merge gates for the new HEAD commit:
      Re-run the relevant audit skills (`$skill-audit`, `$pr-hygiene`, `$project-review`, plus any applicable conditional audit skills `$feature-docs` or `$vehicle-command-audit`) against `$NEW_HEAD`. Only after each audit passes cleanly, re-stamp all gates on the PR:
@@ -408,7 +408,7 @@ Run tests tailored specifically to the code changed in the PR:
 ### 5b. Comprehensive Health & Diagnostic Test
 Check overall device stability and telemetry health:
 ```bash
-curl -fsS "http://$TARGET_HOST/status" | jq '{version, paired, connected, heap: .sys.free_heap, min_heap: .sys.min_free_heap, uptime: .sys.uptime_s}'
+curl -fsS "http://$TARGET_HOST/status" | jq '{version, paired, connected: .ble.connected, heap: .sys.free_heap, min_heap: .sys.min_free_heap, largest_block: .sys.largest_block, uptime: .sys.uptime_s}'
 curl -fsS "http://$TARGET_HOST/api/proxy/1/version" | jq .
 curl -fsS "http://$TARGET_HOST/diag?redact=1" | grep -iE 'error|warn|fail|panic' || true
 ```
@@ -439,11 +439,11 @@ Once deployment and all three tiers of verification succeed:
    ```
 2. **Delete Local Feature Branch**:
    ```bash
-   git branch -d "$BRANCH"
+   git branch -d <branch-name>
    ```
 3. **Delete Remote Feature Branch**:
    ```bash
-   git push origin --delete "$BRANCH" || true
+   git push origin --delete <branch-name>
    ```
 4. **Clean Workspace Artifacts**:
    Remove any temporary test files, build staging directories (`_site/`, `_signed/`, `dist/`), or diagnostic captures.

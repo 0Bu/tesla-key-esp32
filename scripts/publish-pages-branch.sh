@@ -99,7 +99,11 @@ for attempt in 1 2 3 4 5; do
 
   if git -C "$work" push --quiet "$remote" HEAD:gh-pages 2>/dev/null; then
     echo "gh-pages: $(commit_msg) — pushed (attempt $attempt)"
-    rm -rf "$work"; exit 0
+    rm -rf "$work"
+    if command -v gh >/dev/null 2>&1; then
+      GH_TOKEN="${GH_TOKEN:-$GITHUB_TOKEN}" gh api --method POST "repos/$GITHUB_REPOSITORY/pages/builds" >/dev/null 2>&1 || true
+    fi
+    exit 0
   fi
   echo "gh-pages: push rejected, retrying with a fresh clone (attempt $attempt)…" >&2
   rm -rf "$work"

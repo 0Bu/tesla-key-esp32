@@ -384,8 +384,9 @@ evcc, BLE and pairing. Config, topics and payload fields:
   semantics. Tesla reports range/rate/odometer imperial and the bridge converts to km, km/h; only the
   Tesla-compatible `/api` path keeps miles (evcc). Task-stack minima and `usable_soc` ride in the
   retained payloads without discovery rows, so they create no entities or duplicate battery sensors.
-  *last boot* is an ISO-8601 `timestamp` (HA renders "x minutes ago"), emitted only after the clock
-  is NTP-synced.
+  *last boot* is an ISO-8601 `timestamp` (HA renders "x minutes ago"), latched once the wall clock
+  is authoritative (NTP sync or explicit browser `/set_time` via `clock_is_authoritative()`; an
+  authoritative NTP sync takes precedence and upgrades an earlier browser-set latch).
 - **Publishing.** The `mqtt_pub` task reads the thread-safe caches; on every (re)connect it resends
   discovery, `online` and a snapshot, then republishes every interval. The source polls' active-window
   gating still lets the car sleep, so MQTT keeps serving the last-known retained values while a
@@ -836,6 +837,15 @@ would *keep* them. `main.cpp` therefore calls `restore_clock_from_nvs()` (the `l
 written on each NTP sync; it needs no network) **before** `VehicleController::init()`, so stale
 sessions from an uninitialised clock are rejected fail-closed. True persistent session reuse across
 reboots would need upstream alignment to track vehicle epoch separately from Unix time.
+
+**Clock authority and durable timestamps.** A restored clock from the NVS `last_time` cache is
+sufficient to reject stale sessions and validate OTA TLS certificates, but is not authoritative
+because it reflects the time of the previous sync. Authoritative clock sources are SNTP
+(`on_time_sync`) and explicit browser synchronization via `POST /set_time` (`apply_browser_clock`),
+tracked by `clock_is_authoritative()`. Every durable wall-clock timestamp (`key_created`,
+`paired_at`, and the MQTT `boot_time` latch in `mqtt_ha.cpp`) requires an authoritative clock;
+an authoritative NTP sync takes precedence and upgrades any earlier browser-synchronized
+`boot_time` latch.
 
 **A configured VIN gates pairing entirely.** The device finds the car by its VIN-derived BLE name
 (`S<hex>C`), so `auto_pair_task` first checks `has_plausible_vin()` (the same 17-char validator as the

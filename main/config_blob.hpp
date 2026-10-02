@@ -49,13 +49,10 @@ ConfigLoadState cfg_load_state(NvsStorageAdapter& cfg, ConfigBlob& out);
 
 // Read the current configuration. Returns true if a blob was decoded, false if the legacy per-key
 // values were used (which is the normal answer on a device that has not saved since upgrading).
-// `out` is populated for a valid blob or a fully read legacy layout; an NVS error may leave it
-// untouched. READ-ONLY / BOOT callers only: after a committed blob save the
-// legacy mirrors are best-effort and may be stale, so a caller that goes on to cfg_save() must use
-// cfg_load_for_update() instead — persisting a fallback snapshot would write those stale values
-// (VIN, WiFi, services) back as if they were current. The legacy path starts from the compiled Kconfig defaults and
-// then applies keys that actually exist; a valid blob remains authoritative, including explicit
-// empty values used to disable a service.
+// `out` is populated for a valid blob or a fully read legacy layout; an NVS error or corrupt blob
+// leaves `out` untouched and returns false without falling back to stale legacy mirrors. READ-ONLY
+// callers only: after a committed blob save the legacy mirrors are best-effort and may be stale, so
+// a caller that goes on to cfg_save() must use cfg_load_for_update() instead.
 bool cfg_load(NvsStorageAdapter& cfg, ConfigBlob& out);
 
 // Load the configuration for a read-modify-save. Returns true only when `out` is authoritative: a

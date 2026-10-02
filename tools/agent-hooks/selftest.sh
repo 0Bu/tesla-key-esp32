@@ -298,7 +298,8 @@ else
   pass_case 'non-renovate and mixed files rejected by gate_is_renovate_maintenance'
 fi
 
-if printf '%s\n' 'main/vehicle_commands.cpp' | gate_vehicle_command_relevant \
+if printf '%s\n' 'main/command_exec.cpp' | gate_vehicle_command_relevant \
+   && printf '%s\n' 'main/vehicle_commands.cpp' | gate_vehicle_command_relevant \
    && printf '%s\n' 'main/logic/command_registry.hpp' | gate_vehicle_command_relevant \
    && printf '%s\n' 'main/logic/command_runner.hpp' | gate_vehicle_command_relevant \
    && printf '%s\n' 'patches/tesla-ble/0001-fix.patch' | gate_vehicle_command_relevant; then
@@ -555,6 +556,15 @@ payload Bash command "git push origin $push_branch" "$root" >"$tmp/push.json"
 expect_rc 0 'git push to open PR accepts current skill-audit and pr-hygiene' env PATH="$tmp/bin:$PATH" TEST_ROOT="$root" TEST_BRANCH="$push_branch" TEST_REAL_GIT="$real_git" TEST_HEAD="$sha" TEST_BODY="$push_body" "$gate" --project-dir "$root" --payload-file "$tmp/push.json"
 no_hygiene_push_body="$(printf '%s\n' '- [x] $skill-audit clean — PR create/push gate @ '"$sha")"
 expect_rc 2 'git push to open PR requires pr-hygiene' env PATH="$tmp/bin:$PATH" TEST_ROOT="$root" TEST_BRANCH="$push_branch" TEST_REAL_GIT="$real_git" TEST_HEAD="$sha" TEST_BODY="$no_hygiene_push_body" "$gate" --project-dir "$root" --payload-file "$tmp/push.json"
+
+payload Bash command "git push origin --delete $push_branch" "$root" >"$tmp/push-del.json"
+expect_rc 0 'git push delete of feature branch on origin accepted' env PATH="$tmp/bin:$PATH" TEST_ROOT="$root" TEST_BRANCH="$push_branch" TEST_REAL_GIT="$real_git" TEST_HEAD="$sha" "$gate" --project-dir "$root" --payload-file "$tmp/push-del.json"
+
+payload Bash command "git push origin --delete main" "$root" >"$tmp/push-del-main.json"
+expect_rc 2 'git push delete of main branch on origin blocked' env PATH="$tmp/bin:$PATH" TEST_ROOT="$root" TEST_BRANCH="$push_branch" TEST_REAL_GIT="$real_git" TEST_HEAD="$sha" "$gate" --project-dir "$root" --payload-file "$tmp/push-del-main.json"
+
+payload Bash command "git push origin --delete $push_branch || true" "$root" >"$tmp/push-del-compound.json"
+expect_rc 2 'git push delete with compound operator blocked' env PATH="$tmp/bin:$PATH" TEST_ROOT="$root" TEST_BRANCH="$push_branch" TEST_REAL_GIT="$real_git" TEST_HEAD="$sha" "$gate" --project-dir "$root" --payload-file "$tmp/push-del-compound.json"
 
 out_dest_main="$(printf 'refs/heads/feature %s refs/heads/main 0000000000000000000000000000000000000000\n' "$sha" | "$root/.githooks/pre-push" origin 2>&1 || true)"
 if printf '%s\n' "$out_dest_main" | grep -q 'BLOCKED by pre-push: direct push to destination main branch is prohibited'; then
