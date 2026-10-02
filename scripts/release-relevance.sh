@@ -239,38 +239,61 @@ find_published_dev_baseline() {
   git -C "$repo_root" fetch --quiet --tags --force --prune --prune-tags origin || return 2
   git -C "$repo_root" fetch --quiet --no-tags --force origin \
     refs/heads/gh-pages:refs/remotes/origin/gh-pages || return 2
-  manifest="$(git -C "$repo_root" show refs/remotes/origin/gh-pages:dev/manifest.json 2>/dev/null)" \
-    || return 2
-  identity="$(printf '%s' "$manifest" | parse_manifest_identity "$python_cmd")" || return 2
+  local tmp_dir
+  tmp_dir="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/tesla-dev-baseline.XXXXXX")" || return 2
+  local branch_manifest_file="$tmp_dir/branch_manifest.json"
+  local live_manifest_file="$tmp_dir/live_manifest.json"
+
+  if ! git -C "$repo_root" show refs/remotes/origin/gh-pages:dev/manifest.json > "$branch_manifest_file" 2>/dev/null; then
+    rm -rf "$tmp_dir"
+    return 2
+  fi
+
+  identity="$(parse_manifest_identity "$python_cmd" < "$branch_manifest_file")" || { rm -rf "$tmp_dir"; return 2; }
   source_sha="${identity%%$'\t'*}"
   version="${identity#*$'\t'}"
-  validate_sha "$repo_root" "$source_sha" || return 2
-  [[ "$version" =~ $dev_version_re ]] || return 2
-  git -C "$repo_root" merge-base --is-ancestor "$source_sha" "$current_sha" || return 2
+  validate_sha "$repo_root" "$source_sha" || { rm -rf "$tmp_dir"; return 2; }
+  [[ "$version" =~ $dev_version_re ]] || { rm -rf "$tmp_dir"; return 2; }
+  git -C "$repo_root" merge-base --is-ancestor "$source_sha" "$current_sha" || { rm -rf "$tmp_dir"; return 2; }
 
-  pages_json="$(gh api "repos/$repository/pages" 2>/dev/null)" || return 2
+  pages_json="$(gh api "repos/$repository/pages" 2>/dev/null)" || { rm -rf "$tmp_dir"; return 2; }
   printf '%s' "$pages_json" \
-    | "$python_cmd" "$contract_root/scripts/check-pages-source.py" - >/dev/null || return 2
-  live_base="$(printf '%s' "$pages_json" | parse_pages_url "$python_cmd")" || return 2
+    | "$python_cmd" "$contract_root/scripts/check-pages-source.py" - >/dev/null || { rm -rf "$tmp_dir"; return 2; }
+  live_base="$(printf '%s' "$pages_json" | parse_pages_url "$python_cmd")" || { rm -rf "$tmp_dir"; return 2; }
   live_url="${live_base%/}/dev/manifest.json?release-relevance=$current_sha"
-  live_manifest="$(curl --fail --location --silent --show-error --max-time 20 \
-    --retry 2 --retry-all-errors -H 'Cache-Control: no-cache' "$live_url" 2>/dev/null)" || return 2
-  live_identity="$(printf '%s' "$live_manifest" | parse_manifest_identity "$python_cmd")" || return 2
+
+  if ! curl --fail --location --silent --show-error --max-time 20 \
+    --retry 2 --retry-all-errors -H 'Cache-Control: no-cache' "$live_url" -o "$live_manifest_file" 2>/dev/null; then
+    rm -rf "$tmp_dir"
+    return 2
+  fi
+
+  live_identity="$(parse_manifest_identity "$python_cmd" < "$live_manifest_file")" || { rm -rf "$tmp_dir"; return 2; }
   live_source="${live_identity%%$'\t'*}"
   live_version="${live_identity#*$'\t'}"
-  [[ "$live_source" == "$source_sha" && "$live_version" == "$version" ]] || return 2
+  if [[ "$live_source" != "$source_sha" || "$live_version" != "$version" ]]; then
+    rm -rf "$tmp_dir"
+    return 2
+  fi
 
-  branch_manifest_sha="$(printf '%s' "$manifest" | "$python_cmd" -c 'import hashlib, sys; sys.stdout.write(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())')"
-  live_manifest_sha="$(printf '%s' "$live_manifest" | "$python_cmd" -c 'import hashlib, sys; sys.stdout.write(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())')"
-  [[ "$branch_manifest_sha" == "$live_manifest_sha" ]] || return 3
+  branch_manifest_sha="$("$python_cmd" -c 'import hashlib, sys; sys.stdout.write(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "$branch_manifest_file")"
+  live_manifest_sha="$("$python_cmd" -c 'import hashlib, sys; sys.stdout.write(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "$live_manifest_file")"
+  if [[ "$branch_manifest_sha" != "$live_manifest_sha" ]]; then
+    rm -rf "$tmp_dir"
+    return 3
+  fi
 
   # Identity alone proves only that the manifest was published, not that the binaries behind it
   # are. Compare every served part with what the manifest declares.
-  "$python_cmd" "$contract_root/scripts/check-dev-pages.py" --verify-live \
+  if ! "$python_cmd" "$contract_root/scripts/check-dev-pages.py" --verify-live \
     --pages-base-url "${live_base%/}" --version "$version" --source-sha "$source_sha" \
     --expected-manifest-sha "$branch_manifest_sha" \
-    --attempts 1 --interval 0 --timeout 20 >/dev/null || return 3
+    --attempts 1 --interval 0 --timeout 20 >/dev/null; then
+    rm -rf "$tmp_dir"
+    return 3
+  fi
 
+  rm -rf "$tmp_dir"
   printf '%s\n' "$source_sha"
 }
 
@@ -405,9 +428,29 @@ self_test() {
     '  *) exit 1 ;;' \
     'esac' > "$fakebin/gh"
   chmod +x "$fakebin/gh"
-  printf '%s\n' '#!/usr/bin/env bash' 'set -eu' \
-    'for arg; do if [[ "$arg" == */dev/manifest.json* ]] && [ -n "${GH_FAKE_LIVE_DEV:-}" ]; then cat "$GH_FAKE_LIVE_DEV"; exit 0; fi; done' \
-    'cat "$GH_FAKE_LIVE"' > "$fakebin/curl"
+  cat > "$fakebin/curl" <<'CURL_WRAPPER'
+#!/usr/bin/env bash
+set -eu
+out=""
+src=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -o) out="$2"; shift 2 ;;
+    *)
+      if [[ "$1" == */dev/manifest.json* ]] && [ -n "${GH_FAKE_LIVE_DEV:-}" ]; then
+        src="$GH_FAKE_LIVE_DEV"
+      fi
+      shift
+      ;;
+  esac
+done
+[ -n "$src" ] || src="$GH_FAKE_LIVE"
+if [ -n "$out" ]; then
+  cat "$src" > "$out"
+else
+  cat "$src"
+fi
+CURL_WRAPPER
   chmod +x "$fakebin/curl"
   cat > "$fakebin/python3" <<'PYTHON_WRAPPER'
 #!/usr/bin/env bash
@@ -418,6 +461,17 @@ case "${1:-}" in
     if [[ "${GH_FAKE_DEV_BYTES_STALE:-0}" == 1 ]]; then
       exit 1
     fi
+    for ((i=1; i<=$#; i++)); do
+      if [[ "${!i}" == "--expected-manifest-sha" ]]; then
+        next=$((i+1))
+        exp_sha="${!next}"
+        actual_sha="$("$GH_FAKE_REAL_PYTHON" -c 'import hashlib, sys; sys.stdout.write(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "${GH_FAKE_LIVE_DEV:-$GH_FAKE_LIVE}")"
+        if [[ "$exp_sha" != "$actual_sha" ]]; then
+          echo "fake check-dev-pages: expected-manifest-sha mismatch: $exp_sha vs $actual_sha" >&2
+          exit 1
+        fi
+      fi
+    done
     exit 0
     ;;
   */check-published-release.py)
@@ -749,6 +803,35 @@ with open(p, "r+", encoding="utf-8") as f:
     echo "mismatched dev manifest SHA fell back to Release baseline instead of keeping reconciliation open" >&2; return 1;
   }
   write_pages_manifest "$fake_live_dev" "1.0.1-dev.1" "$sha_c"
+
+  # Integration control: actual Pages builder output (multi-line JSON with final newline)
+  # must be accepted by dev baseline (reconciled, changed_since_dev == no).
+  local fixture_stage="$tmp/fixture_stage"
+  mkdir -p "$fixture_stage"
+  for tgt in esp32 esp32s3 esp32c3 esp32c6; do
+    mkdir -p "$fixture_stage/$tgt"
+    dd if=/dev/zero of="$fixture_stage/$tgt/bootloader.bin" bs=1 count=1024 status=none
+    dd if=/dev/zero of="$fixture_stage/$tgt/partition-table.bin" bs=1 count=1024 status=none
+    dd if=/dev/zero of="$fixture_stage/$tgt/tesla-key-esp32.bin" bs=1 count=4096 status=none
+    "$GH_FAKE_REAL_PYTHON" -c 'import sys; open(sys.argv[1], "wb").write(b"\xff"*8192)' "$fixture_stage/$tgt/ota_data_initial.bin"
+  done
+  local fixture_site
+  fixture_site="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/tesla-key-pages.XXXXXX")"
+  FIRMWARE_STAGE_DIR="$fixture_stage" "$contract_root/scripts/build-pages.sh" "$fixture_site" "1.0.1-dev.1" "$sha_c" >/dev/null
+  cp "$fixture_site/manifest.json" "$fake_live_dev"
+  git -C "$tmp" checkout -q gh-pages
+  cp "$fixture_site/manifest.json" "$tmp/dev/manifest.json"
+  git -C "$tmp" add dev/manifest.json
+  git -C "$tmp" commit -qm "dev-pages-actual-builder"
+  git -C "$tmp" push -q origin gh-pages
+  git -C "$tmp" checkout -q main
+  rm -rf "$fixture_site"
+
+  got="$(PATH="$fakebin:$PATH" GITHUB_REPOSITORY=owner/repo GH_FAKE_RELEASE="$fake_release" \
+    GH_FAKE_LIVE="$fake_live" GH_FAKE_LIVE_DEV="$fake_live_dev" changed_since_dev "$tmp" "$sha_d")"
+  [[ "$got" == no ]] || {
+    echo "actual generated Pages manifest with trailing newline rejected by dev baseline: $got" >&2; return 1;
+  }
 
   # 3. New firmware commit E on main should be relevant for dev
   mkdir -p "$tmp/main"

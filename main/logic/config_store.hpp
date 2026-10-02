@@ -373,7 +373,7 @@ inline bool config_blob_decode(const uint8_t* in, size_t len, ConfigBlob& out) {
     // Exact per version: a v1 blob must END right here. Accepting a prefix and ignoring the rest
     // would let a TRUNCATED future blob decode as a valid v1 whose newer fields silently take
     // their defaults — a wrong configuration that looks like a successfully loaded one, which is
-    // strictly worse than falling back to the legacy layout.
+    // strictly worse than refusing the invalid configuration blob (failing closed).
     if (p != body_end) return false;
 
     c.wifi_rollback_active = (flags & 1u) != 0;

@@ -56,44 +56,144 @@ cmd() {
   out="$(kex "s=\$(date +%s%3N); host=\$(echo '$ESC_BASE' | sed -e 's,^http://,,' -e 's,/.*$,,' -e 's,:.*$,,'); port=\$(echo '$ESC_BASE' | sed -n 's,^http://[^:]*:\([0-9]*\).*,\1,p'); [ -z \"\$port\" ] && port=80; raw=\$(printf 'POST /api/1/vehicles/$ESC_VIN/command/$suf HTTP/1.1\r\nHost: %s\r\nContent-Type: application/json\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s' \"\$host\" \"${#body}\" '$body' | nc -w $TIMEOUT \"\$host\" \"\$port\" 2>/dev/null); code=\$(echo \"\$raw\" | head -n1 | cut -d' ' -f2); b=\$(echo \"\$raw\" | sed -e '1,/^\r\{0,1\}\$/d'); e=\$(date +%s%3N); echo \"\$((e-s))|\$code|\$b\"")"
   d="${out%%|*}"; rest="${out#*|}"; code="${rest%%|*}"; r="${rest#*|}"
   echo "  ${name}: ${d}ms (HTTP ${code:-none})  ->  $r"
-  if echo "$r" | grep -q '"result":true'; then
-    if [ "$mode" = reject ]; then
-      bad "$name was ACCEPTED — key has more than Charging-Manager privileges (role-boundary regression!)"
-    else
-      ok "$name executed"
-    fi
-  elif [ "$mode" = reject ]; then
-    # The firmware returns HTTP 502 with result:false on command rejection or reachability error.
-    # Reject-mode must require HTTP 502 AND an authenticated vehicle rejection string
-    # ('not authorized', 'unauthorized', 'denied', 'authentication failed'), rejecting local proxy 4xx/503 or reachability timeouts.
-    if [ -z "$r" ] || [ -z "$code" ]; then
-      bad "$name: no signed reply (transport timeout) — cannot confirm role boundary"
-    elif [ "$code" != "502" ]; then
-      bad "$name: HTTP $code (expected 502 from vehicle rejection) — cannot confirm role boundary"
-    elif echo "$r" | grep -qiE 'not reachable|unreachable|timed out'; then
-      bad "$name: car unreachable (not actually refused) — cannot confirm role boundary; re-run with the car awake"
-    elif ! echo "$r" | grep -q '"result":false'; then
-      bad "$name: invalid rejection format: $r"
-    elif echo "$r" | grep -qiE 'not authorized|unauthorized|denied|authentication failed'; then
-      ok "$name correctly refused by the car (Charging-Manager role boundary holds)"
-    else
-      bad "$name: rejection reason not authenticated vehicle refusal: $r"
-    fi
-  elif [ "$mode" = soft ]; then
-    if [ -z "$r" ] || [ -z "$code" ]; then
-      bad "$name failed/timed out (no response)"
-    elif [ "$code" != "502" ]; then
-      bad "$name failed locally (HTTP $code): $r"
-    elif ! echo "$r" | grep -q '"result":false'; then
-      bad "$name: invalid rejection format (HTTP 502 without result:false): $r"
-    elif echo "$r" | grep -qiE 'not reachable|unreachable|timed out|vehicle asleep|service not ready|runtime unavailable|out of memory|invalid URI|vehicle VIN mismatch|unknown command|request body'; then
-      bad "$name: proxy or reachability error: $r"
-    else
-      echo "  NOTE  $name returned false (HTTP $code) — car-side rejection (depends on live state), not a proxy fault"
-    fi
-  else
-    bad "$name failed/timed out (HTTP ${code:-none}): $r"
-  fi
+  local decision status msg
+  decision="$(python3 -c '
+import json, sys
+
+name = sys.argv[1]
+mode = sys.argv[2]
+code = sys.argv[3]
+raw = sys.argv[4]
+
+if not raw or not code:
+    if mode == "reject":
+        print(f"FAIL|{name}: no signed reply (transport timeout) — cannot confirm role boundary")
+    else:
+        print(f"FAIL|{name} failed/timed out (no response)")
+    sys.exit(0)
+
+try:
+    data = json.loads(raw)
+except Exception:
+    if mode == "reject":
+        print(f"FAIL|{name}: invalid rejection format (malformed JSON): {raw}")
+    elif mode == "soft":
+        print(f"FAIL|{name}: malformed JSON response (HTTP {code}): {raw}")
+    else:
+        print(f"FAIL|{name} failed (malformed JSON, HTTP {code}): {raw}")
+    sys.exit(0)
+
+if isinstance(data, dict) and isinstance(data.get("response"), dict):
+    res_obj = data["response"]
+elif isinstance(data, dict):
+    res_obj = data
+else:
+    res_obj = None
+
+if not res_obj or "result" not in res_obj or not isinstance(res_obj["result"], bool):
+    if mode == "reject":
+        print(f"FAIL|{name}: invalid rejection format (missing boolean result): {raw}")
+    elif mode == "soft":
+        print(f"FAIL|{name}: invalid rejection format (HTTP {code} without result:false): {raw}")
+    else:
+        print(f"FAIL|{name} failed/timed out (HTTP {code}): {raw}")
+    sys.exit(0)
+
+result = res_obj["result"]
+raw_reason = res_obj.get("reason")
+if raw_reason is None and isinstance(data, dict):
+    raw_reason = data.get("reason")
+reason = str(raw_reason) if raw_reason is not None else ""
+
+if result is True:
+    if mode == "reject":
+        print(f"FAIL|{name} was ACCEPTED — key has more than Charging-Manager privileges (role-boundary regression!)")
+    elif code != "200":
+        print(f"FAIL|{name} returned HTTP {code} with result:true: {raw}")
+    else:
+        print(f"PASS|{name} executed")
+    sys.exit(0)
+
+# result is False:
+if mode == "reject":
+    if code != "502":
+        print(f"FAIL|{name}: HTTP {code} (expected 502 from vehicle rejection) — cannot confirm role boundary")
+        sys.exit(0)
+    reason_l = reason.lower()
+    if any(sub in reason_l for sub in ["not reachable", "unreachable", "timed out", "timeout", "vehicle asleep"]):
+        print(f"FAIL|{name}: car unreachable (not actually refused) — cannot confirm role boundary; re-run with the car awake")
+    elif any(sub in reason_l for sub in ["not authorized", "unauthorized", "denied", "authentication failed"]):
+        print(f"PASS|{name} correctly refused by the car (Charging-Manager role boundary holds)")
+    else:
+        print(f"FAIL|{name}: rejection reason not authenticated vehicle refusal: {raw}")
+    sys.exit(0)
+
+if mode == "soft":
+    if code != "502":
+        print(f"FAIL|{name} failed locally (HTTP {code}): {raw}")
+        sys.exit(0)
+    reason_l = reason.lower()
+    local_or_transport = [
+        "not reachable",
+        "unreachable",
+        "timed out",
+        "timeout",
+        "vehicle asleep",
+        "service not ready",
+        "runtime unavailable",
+        "runtime key is not verified",
+        "out of memory",
+        "invalid uri",
+        "vin mismatch",
+        "unknown command",
+        "request body",
+        "command queue full",
+        "command enqueue failed",
+        "command completion unavailable",
+        "command deadline exhausted",
+        "connection lost",
+        "payload build failed",
+    ]
+    vehicle_responses = [
+        "authentication failed",
+        "whitelist",
+        "rejected",
+        "action failed",
+        "failed with error status",
+        "vcsec command failed",
+        "already_closed",
+        "already_open",
+        "already_set",
+        "complete",
+        "could_not_reach_service",
+        "not authorized",
+        "unauthorized",
+        "denied",
+        "not_charging",
+        "charging",
+        "is_charging",
+        "charging_port_closed",
+    ]
+    if any(sub in reason_l for sub in local_or_transport):
+        print(f"FAIL|{name}: proxy or reachability error: {raw}")
+    elif any(sub in reason_l for sub in vehicle_responses):
+        print(f"NOTE|{name} returned false (HTTP {code}) — car-side rejection (depends on live state), not a proxy fault")
+    else:
+        print(f"FAIL|{name}: unverified failure outcome (HTTP {code}): {raw}")
+    sys.exit(0)
+
+# strict mode with result=False
+print(f"FAIL|{name} failed/timed out (HTTP {code}): {raw}")
+' "$name" "$mode" "${code:-}" "$r")"
+
+  status="${decision%%|*}"
+  msg="${decision#*|}"
+  case "$status" in
+    PASS) ok "$msg" ;;
+    FAIL) bad "$msg" ;;
+    NOTE) echo "  NOTE  $msg" ;;
+    *) bad "$name: internal error evaluating response ($decision)" ;;
+  esac
 }
 
 self_test() {
@@ -145,6 +245,54 @@ self_test() {
   mock_code="502"; mock_body='{"result":false,"reason":"already_closed"}'
   expect_pass "soft" "soft HTTP 502 harmless vehicle rejection"
 
+  mock_code="502"; mock_body='{"response":{"result":false,"reason":"complete"}}'
+  expect_pass "soft" "soft HTTP 502 vehicle charging complete"
+
+  mock_code="502"; mock_body='{"response":{"result":false,"reason":"command rejected by vehicle"}}'
+  expect_pass "soft" "soft HTTP 502 command rejected by vehicle"
+
+  mock_code="502"; mock_body='{"response":{"result":false,"reason":"action failed: charging_port_closed"}}'
+  expect_pass "soft" "soft HTTP 502 action failed: charging_port_closed"
+
+  mock_code="502"; mock_body='{"response":{"result":false,"reason":"key not on whitelist - pairing required"}}'
+  expect_pass "soft" "soft HTTP 502 key not on whitelist"
+
+  # Actual local producer reasons from vehicle_commands.cpp / http_api.cpp -> must fail!
+  mock_code="502"; mock_body='{"response":{"result":false,"reason":"command queue full"}}'
+  expect_fail "soft" "soft HTTP 502 command queue full"
+
+  mock_code="502"; mock_body='{"response":{"result":false,"reason":"command enqueue failed"}}'
+  expect_fail "soft" "soft HTTP 502 command enqueue failed"
+
+  mock_code="502"; mock_body='{"response":{"result":false,"reason":"command completion unavailable"}}'
+  expect_fail "soft" "soft HTTP 502 command completion unavailable"
+
+  mock_code="502"; mock_body='{"response":{"result":false,"reason":"command deadline exhausted"}}'
+  expect_fail "soft" "soft HTTP 502 command deadline exhausted"
+
+  mock_code="502"; mock_body='{"response":{"result":false,"reason":"command deadline exhausted waiting for another request"}}'
+  expect_fail "soft" "soft HTTP 502 command deadline exhausted waiting for request"
+
+  mock_code="502"; mock_body='{"response":{"result":false,"reason":"runtime key is not verified; reboot or regenerate required"}}'
+  expect_fail "soft" "soft HTTP 502 runtime key not verified"
+
+  # Malformed JSON in soft, reject, and strict modes -> must fail!
+  mock_code="502"; mock_body='{"response":{"result":false'
+  expect_fail "soft" "soft HTTP 502 truncated JSON"
+
+  mock_code="502"; mock_body='{"response":{"result":false'
+  expect_fail "reject" "reject HTTP 502 truncated JSON"
+
+  mock_code="200"; mock_body='{"response":{"result":true'
+  expect_fail "" "strict HTTP 200 truncated JSON"
+
+  # Unknown failure outcome in soft mode -> must fail!
+  mock_code="502"; mock_body='{"result":false,"reason":"mystery failure"}'
+  expect_fail "soft" "soft HTTP 502 unknown failure reason"
+
+  mock_code="502"; mock_body='{"response":{"result":false,"reason":null}}'
+  expect_fail "soft" "soft HTTP 502 null reason"
+
   # Reject mode tests:
   # 6. Reject mode with authenticated vehicle refusal strings
   mock_code="502"; mock_body='{"result":false,"reason":"authentication failed"}'
@@ -169,9 +317,22 @@ self_test() {
   mock_code="502"; mock_body='{"result":false,"reason":"not reachable"}'
   expect_fail "reject" "reject HTTP 502 not reachable"
 
+  mock_code="502"; mock_body='{"result":false,"reason":"vehicle asleep"}'
+  expect_fail "reject" "reject HTTP 502 vehicle asleep"
+
   # 8. Success execution (HTTP 200 with result:true) in default mode -> passes
   mock_code="200"; mock_body='{"result":true}'
   expect_pass "" "normal HTTP 200 result:true"
+
+  mock_code="200"; mock_body='{"response":{"result":true,"command":"wake_up","vin":"TESTVIN"}}'
+  expect_pass "" "normal HTTP 200 nested response result:true"
+
+  # Non-200 status with result:true must fail in strict mode
+  mock_code="502"; mock_body='{"result":true}'
+  expect_fail "" "strict HTTP 502 result:true"
+
+  mock_code="500"; mock_body='{"result":true}'
+  expect_fail "" "strict HTTP 500 result:true"
 
   echo "e2e_evcc self-test: PASS"
   return 0

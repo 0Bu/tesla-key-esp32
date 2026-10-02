@@ -273,6 +273,18 @@ The Web Serial installer's data contract and the full release/Pages pipeline are
 effective-build closure, stack-frame inventory, environment rejection) are catalogued in
 [`FEATURES.md` §6](FEATURES.md#6-build-test-and-ci).
 
+### Flashing & NVS safety
+
+Flash writes and NVS operations operate under strict boundary controls to protect pairing keys, WiFi credentials, and device state:
+
+- **Normal updates:** Standard OTA updates (`/ota/update`) or USB application updates flash only the target application slot (`ota_0` at `0x20000` or `ota_1` at `0x210000`) and the active partition table/otadata. They **never** write, erase, or overwrite the NVS partition at `0x9000` (`0x6000` bytes). All pairing credentials, private keys, vehicle VIN, and network settings remain intact.
+- **Whole-chip erase recovery (`erase_flash`):** Running `esptool erase_flash` completely clears flash memory, destroying the bootloader, partition table, active firmware, otadata, and NVS. Restoring an operable device requires an **initial full flash** containing all four components from an official signed Release:
+  1. `bootloader.bin` at offset `0x1000` (ESP32) or `0x0` (ESP32-S3, ESP32-C3, ESP32-C6)
+  2. `partition-table.bin` at offset `0x8000`
+  3. `ota_data_initial.bin` at offset `0xF000`
+  4. `tesla-key-esp32.bin` (signed app binary) at offset `0x20000` (`ota_0`)
+  These parts can be flashed via the official browser-based Web Serial installer (which validates source provenance and target family before writing), or manually via `esptool` using the 4 parts provided in the GitHub Release assets. Because NVS was erased, the device starts unconfigured: it enters setup AP mode, generates a fresh device keypair, and requires re-pairing with the Tesla vehicle via the keycard on the center console.
+
 ## Pinned tesla-ble and native orchestration
 
 The supported chips are exactly what `yoziru/tesla-ble` declares in its `idf_component.yml`

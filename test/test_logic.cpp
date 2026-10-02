@@ -5481,7 +5481,8 @@ static void test_config_store() {
 
     // A single flipped bit must be REFUSED, not read as a slightly different configuration. That
     // is the whole point of the CRC: a torn or decaying entry has to fail loudly enough for the
-    // caller to fall back to the legacy keys, instead of the device joining a network nobody set.
+    // caller to refuse the invalid blob (failing closed rather than falling back to stale legacy
+    // keys or joining a network nobody set).
     tk::ConfigBlobBuffer bad = buf;
     bad[10] = (uint8_t)(bad[10] ^ 0x01);
     tk::ConfigBlob nope;

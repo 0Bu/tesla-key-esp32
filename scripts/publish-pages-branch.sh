@@ -22,6 +22,8 @@
 # fast-forward push, no binary-merge conflicts.
 #
 # Env (CI): GITHUB_TOKEN (contents:write), GITHUB_REPOSITORY, optionally GITHUB_SERVER_URL.
+set -euo pipefail
+
 trigger_pages_build() {
   if ! command -v gh >/dev/null 2>&1; then
     echo "ERROR: gh CLI is required to trigger GitHub Pages build" >&2
@@ -60,7 +62,7 @@ self_test() {
       echo "self_test: trigger_pages_build unexpectedly succeeded without gh" >&2
       exit 1
     fi
-  )
+  ) || exit 1
 
   # 2. Failing gh fails after 3 attempts
   cat <<'EOF' > "$fake_gh"
@@ -89,7 +91,7 @@ EOF
       echo "self_test: expected 3 attempts, got $calls" >&2
       exit 1
     fi
-  )
+  ) || exit 1
 
   # 3. Successful gh succeeds
   cat <<'EOF' > "$fake_gh"
@@ -118,7 +120,7 @@ EOF
       echo "self_test: expected 1 call, got $calls" >&2
       exit 1
     fi
-  )
+  ) || exit 1
 
   # 4. Full publication and unchanged-byte retry
   local bare_repo="$tmp/remote.git"
@@ -135,7 +137,7 @@ EOF
     export TEST_REMOTE="$bare_repo"
     export TEST_TMP="$tmp"
     "$0" root "$src" >/dev/null 2>&1
-  )
+  ) || exit 1
 
   # Retry with identical bytes and failing gh must fail
   cat <<'EOF' > "$fake_gh"
@@ -157,7 +159,7 @@ EOF
       echo "self_test: unchanged-byte retry unexpectedly succeeded when gh build trigger failed" >&2
       exit 1
     fi
-  )
+  ) || exit 1
 
   # Retry with identical bytes and working gh must succeed
   cat <<'EOF' > "$fake_gh"
@@ -186,7 +188,97 @@ EOF
       echo "self_test: expected 1 build trigger for unchanged bytes, got $calls" >&2
       exit 1
     fi
-  )
+  ) || exit 1
+
+  # 5. Subshell error propagation: verify that subshell failure aborts execution
+  local subshell_rc=0
+  (
+    ( exit 77 ) || exit 77
+    echo "unreachable"
+  ) >/dev/null 2>&1 || subshell_rc=$?
+  if [ "$subshell_rc" -ne 77 ]; then
+    echo "self_test: subshell failure did not propagate (expected 77, got $subshell_rc)" >&2
+    exit 1
+  fi
+
+  # 6. Copy / rsync failure stops publication
+  cat <<'EOF' > "$fake_bin/rsync"
+#!/usr/bin/env bash
+exit 23
+EOF
+  chmod +x "$fake_bin/rsync"
+
+  (
+    export PATH="$fake_bin:$PATH"
+    export GITHUB_REPOSITORY="owner/repo"
+    export GITHUB_TOKEN="dummy"
+    export TEST_REMOTE="$bare_repo"
+    export TEST_TMP="$tmp"
+    if "$0" root "$src" >/dev/null 2>&1; then
+      echo "self_test: root publication unexpectedly succeeded with failing rsync" >&2
+      exit 1
+    fi
+    if "$0" pr "$src" 42 >/dev/null 2>&1; then
+      echo "self_test: pr publication unexpectedly succeeded with failing rsync" >&2
+      exit 1
+    fi
+  ) || exit 1
+  rm -f "$fake_bin/rsync"
+
+  # 7. Git commit failure stops publication before push or build trigger
+  local fake_git="$fake_bin/git"
+  local real_git
+  real_git="$(command -v git)"
+  cat <<EOF > "$fake_git"
+#!/usr/bin/env bash
+for arg; do
+  if [ "\$arg" = "commit" ]; then
+    exit 1
+  fi
+done
+exec "$real_git" "\$@"
+EOF
+  chmod +x "$fake_git"
+
+  echo "modified content" >> "$src/index.html"
+  (
+    export PATH="$fake_bin:$PATH"
+    export GITHUB_REPOSITORY="owner/repo"
+    export GITHUB_TOKEN="dummy"
+    export TEST_REMOTE="$bare_repo"
+    export TEST_TMP="$tmp"
+    if "$0" root "$src" >/dev/null 2>&1; then
+      echo "self_test: root publication unexpectedly succeeded with failing git commit" >&2
+      exit 1
+    fi
+  ) || exit 1
+  rm -f "$fake_git"
+
+  # 8. Git add failure stops publication before commit or push
+  cat <<EOF > "$fake_git"
+#!/usr/bin/env bash
+for arg; do
+  if [ "\$arg" = "add" ]; then
+    exit 1
+  fi
+done
+exec "$real_git" "\$@"
+EOF
+  chmod +x "$fake_git"
+
+  echo "modified content for add test" >> "$src/index.html"
+  (
+    export PATH="$fake_bin:$PATH"
+    export GITHUB_REPOSITORY="owner/repo"
+    export GITHUB_TOKEN="dummy"
+    export TEST_REMOTE="$bare_repo"
+    export TEST_TMP="$tmp"
+    if "$0" root "$src" >/dev/null 2>&1; then
+      echo "self_test: root publication unexpectedly succeeded with failing git add" >&2
+      exit 1
+    fi
+  ) || exit 1
+  rm -f "$fake_git"
 
   trap - EXIT
   rm -rf "$tmp"
@@ -226,16 +318,22 @@ apply_changes() {
   case "$mode" in
     root)
       # Root files only — NEVER delete the PR/ preview tree (PR-owned) or the dev/ channel.
-      rsync -a --delete --exclude='.git/' --exclude='PR/' --exclude='dev/' "$src"/ "$work"/
+      rsync -a --delete --exclude='.git/' --exclude='PR/' --exclude='dev/' "$src"/ "$work"/ || return 1
       ;;
     dev)
       mkdir -p "$work/dev"
-      rsync -a --delete --exclude='.git/' "$src"/ "$work/dev"/
+      rsync -a --delete --exclude='.git/' "$src"/ "$work/dev"/ || return 1
       ;;
     pr)
+      local stage_pr="$work/PR/$num.tmp"
+      rm -rf "$stage_pr"
+      mkdir -p "$stage_pr"
+      if ! rsync -a --delete --exclude='.git/' "$src"/ "$stage_pr"/; then
+        rm -rf "$stage_pr"
+        return 1
+      fi
       rm -rf "${work:?}/PR/$num"
-      mkdir -p "$work/PR/$num"
-      rsync -a --delete --exclude='.git/' "$src"/ "$work/PR/$num"/
+      mv "$stage_pr" "$work/PR/$num"
       ;;
     rm)
       rm -rf "${work:?}/PR/$num"
@@ -256,23 +354,38 @@ for attempt in 1 2 3 4 5; do
   work="$(mktemp -d)"
   # Clone gh-pages if it exists, else start it as an orphan (first-ever publish).
   if git clone --quiet --depth 1 --branch gh-pages "$remote" "$work" 2>/dev/null; then :; else
-    git clone --quiet --depth 1 "$remote" "$work"
-    git -C "$work" checkout --orphan gh-pages
+    git clone --quiet --depth 1 "$remote" "$work" 2>/dev/null || {
+      git init --quiet "$work"
+      git -C "$work" remote add origin "$remote" 2>/dev/null || true
+    }
+    git -C "$work" checkout --orphan gh-pages 2>/dev/null || true
     git -C "$work" rm -rfq . >/dev/null 2>&1 || true
   fi
   git -C "$work" config user.name  "github-actions[bot]"
   git -C "$work" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-  apply_changes "$work"
+  if ! apply_changes "$work"; then
+    echo "ERROR: failed to apply changes" >&2
+    rm -rf "$work"
+    exit 1
+  fi
 
-  git -C "$work" add -A
+  if ! git -C "$work" add -A; then
+    echo "ERROR: git add failed" >&2
+    rm -rf "$work"
+    exit 1
+  fi
   if git -C "$work" diff --cached --quiet; then
     echo "gh-pages: nothing to change ($(commit_msg))"
     rm -rf "$work"
     trigger_pages_build || exit 1
     exit 0
   fi
-  git -C "$work" commit --quiet -m "$(commit_msg)"
+  if ! git -C "$work" commit --quiet -m "$(commit_msg)"; then
+    echo "ERROR: git commit failed" >&2
+    rm -rf "$work"
+    exit 1
+  fi
 
   if git -C "$work" push --quiet "$remote" HEAD:gh-pages 2>/dev/null; then
     echo "gh-pages: $(commit_msg) — pushed (attempt $attempt)"

@@ -1272,8 +1272,6 @@ gate_push_is_branch_delete() {
     branch_exists=1
   elif git -C "${GATE_PROJ:-$PWD}" rev-parse --verify --quiet "refs/remotes/origin/$branch_name" >/dev/null 2>&1; then
     branch_exists=1
-  elif [ -n "${TEST_BRANCH:-}" ] && [ "$TEST_BRANCH" = "$branch_name" ]; then
-    branch_exists=1
   fi
   [ "$branch_exists" -eq 1 ] || return 2
   return 0

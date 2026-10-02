@@ -318,6 +318,7 @@ if printf '%s' "$rename" | gate_extract_changed_pages 2 >/dev/null 2>&1; then fa
 if printf '[]' | gate_extract_changed_pages 3001 >/dev/null 2>&1; then fail_case '3001 files accepted'; else pass_case '3000-file limit fails closed'; fi
 if printf '[[{"filename":"../escape"}]]' | gate_extract_changed_pages 1 >/dev/null 2>&1; then fail_case 'unsafe path accepted'; else pass_case 'unsafe changed path fails closed'; fi
 
+push_branch=ci-selftest
 mkdir -p "$tmp/bin"
 real_git="$(command -v git)"
 cat >"$tmp/bin/git" <<SH
@@ -332,6 +333,9 @@ if [ -n "\${TEST_BRANCH:-}" ]; then
 fi
 if [ "\$#" -ge 3 ] && [ "\$1" = -C ] && [ "\$2" = "$root" ]; then
   case "\${*:3}" in
+    *"rev-parse"*"refs/heads/$push_branch"*|*"rev-parse"*"refs/remotes/origin/$push_branch"*)
+      printf '%s\\n' "$sha"
+      exit 0 ;;
     *"remote get-url"*)
       if out="\$("$real_git" -C "$root" "\${@:3}" 2>/dev/null)" && [ -n "\$out" ]; then
         printf '%s\\n' "\$out"; exit 0
@@ -589,6 +593,9 @@ expect_rc 2 'git push delete of short tag ref v1.5.0 blocked' env PATH="$tmp/bin
 
 payload Bash command "git push origin --delete refs/heads/$push_branch" "$root" >"$tmp/push-del-qualified.json"
 expect_rc 0 'git push delete of qualified feature branch accepted' env PATH="$tmp/bin:$PATH" TEST_ROOT="$root" TEST_BRANCH="$push_branch" TEST_REAL_GIT="$real_git" TEST_HEAD="$sha" "$gate" --project-dir "$root" --payload-file "$tmp/push-del-qualified.json"
+
+payload Bash command "git push origin --delete never-created" "$root" >"$tmp/push-del-never-created.json"
+expect_rc 2 'git push delete of nonexistent branch blocked even with inherited TEST_BRANCH' env PATH="$tmp/bin:$PATH" TEST_ROOT="$root" TEST_BRANCH="never-created" TEST_REAL_GIT="$real_git" TEST_HEAD="$sha" "$gate" --project-dir "$root" --payload-file "$tmp/push-del-never-created.json"
 
 out_dest_main="$(printf 'refs/heads/feature %s refs/heads/main 0000000000000000000000000000000000000000\n' "$sha" | "$root/.githooks/pre-push" origin 2>&1 || true)"
 if printf '%s\n' "$out_dest_main" | grep -q 'BLOCKED by pre-push: direct push to destination main branch is prohibited'; then
