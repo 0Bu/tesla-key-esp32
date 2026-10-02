@@ -4942,6 +4942,17 @@ static void test_http_origin() {
     // Null origin is rejected for both GET and POST
     CHECK(!tk::mutation_request_allowed(true, "tesla-key-esp32.local", "null", "same-origin", "", false, ""));
     CHECK(!tk::mutation_request_allowed(false, "tesla-key-esp32.local", "null", "same-origin", "", false, ""));
+
+    // Foreign origin must NEVER pass on GET or POST, even with same-origin Referer, custom header, or Sec-Fetch-Site
+    CHECK(!tk::mutation_request_allowed(false, "tesla-key-esp32.local", "http://evil.example", "",
+                                        "http://tesla-key-esp32.local/diag", false, ""));
+    CHECK(!tk::mutation_request_allowed(false, "tesla-key-esp32.local", "http://evil.example", "", "", true, ""));
+    CHECK(!tk::mutation_request_allowed(false, "tesla-key-esp32.local", "http://evil.example", "same-origin", "", false, ""));
+    CHECK(!tk::mutation_request_allowed(true, "tesla-key-esp32.local", "http://evil.example", "", "", false, ""));
+
+    // Same-origin Origin passes on both GET and POST
+    CHECK(tk::mutation_request_allowed(false, "tesla-key-esp32.local", "http://tesla-key-esp32.local", "", "", false, ""));
+    CHECK(tk::mutation_request_allowed(true, "tesla-key-esp32.local", "http://tesla-key-esp32.local", "", "", false, ""));
 }
 
 // ─── Negotiated ATT payload size (logic/ble_chunk.hpp) ────────────────────────────────────────

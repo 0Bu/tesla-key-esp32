@@ -77,6 +77,25 @@ inline bool device_host_allowed(std::string_view host, std::string_view device_i
 // This gate addresses a narrower browser threat: a foreign web origin using a LAN user's browser
 // to submit a mutating request. Headerless non-browser clients remain allowed. Same-origin browser
 // requests are accepted only when Host is the canonical device name or its current local IPv4.
+inline bool extract_origin_authority(std::string_view origin,
+                                     std::string_view& authority,
+                                     std::string_view& default_port) {
+    if (origin.size() >= 7 && ascii_iequal(origin.substr(0, 7), "http://")) {
+        origin.remove_prefix(7);
+        default_port = ":80";
+    } else if (origin.size() >= 8 && ascii_iequal(origin.substr(0, 8), "https://")) {
+        origin.remove_prefix(8);
+        default_port = ":443";
+    } else {
+        return false;
+    }
+    authority = origin;
+    if (authority.empty() || authority.find_first_of("/?#@ \t\r\n") != std::string_view::npos) {
+        return false;
+    }
+    return true;
+}
+
 inline bool extract_referer_authority(std::string_view referer,
                                       std::string_view& authority,
                                       std::string_view& default_port) {
@@ -118,12 +137,23 @@ inline bool mutation_request_allowed(bool is_post,
                                      std::string_view referer,
                                      bool has_custom_header,
                                      const std::string_view* device_ipv4s,
-                                     size_t device_ipv4_count) {
+                                      size_t device_ipv4_count) {
     if (ascii_iequal(fetch_site, "cross-site")) return false;
     if (ascii_iequal(origin, "null")) return false;
 
+    // Check Origin if present: foreign or malformed Origin must NEVER pass on any mutating request.
+    const bool has_origin = !origin.empty();
+    if (has_origin) {
+        std::string_view origin_auth;
+        std::string_view origin_port;
+        if (!extract_origin_authority(origin, origin_auth, origin_port)) return false;
+        if (!device_host_allowed(host, device_ipv4s, device_ipv4_count)) return false;
+        if (!authority_matches_host(origin_auth, host, origin_port)) return false;
+    }
+
     // Check Referer if present: foreign Referer must never pass.
-    if (!referer.empty()) {
+    const bool has_referer = !referer.empty();
+    if (has_referer) {
         std::string_view ref_auth;
         std::string_view ref_port;
         if (!extract_referer_authority(referer, ref_auth, ref_port)) return false;
@@ -131,53 +161,24 @@ inline bool mutation_request_allowed(bool is_post,
         if (!authority_matches_host(ref_auth, host, ref_port)) return false;
     }
 
+    // If an authoritative Origin was provided and matched the device host, the request is valid same-origin.
+    if (has_origin) return true;
+
+    // If Referer was provided and matched the device host, the request is valid same-origin.
+    if (has_referer) return true;
+
     if (is_post) {
         // Genuinely headerless client on POST (evcc, curl)
-        if (origin.empty() && fetch_site.empty() && referer.empty()) return true;
-        if (!device_host_allowed(host, device_ipv4s, device_ipv4_count)) return false;
-        if (origin.empty()) return true;
-
-        std::string_view authority;
-        std::string_view default_port;
-        if (origin.size() >= 7 && ascii_iequal(origin.substr(0, 7), "http://")) {
-            authority = origin.substr(7);
-            default_port = ":80";
-        } else if (origin.size() >= 8 && ascii_iequal(origin.substr(0, 8), "https://")) {
-            authority = origin.substr(8);
-            default_port = ":443";
-        } else {
-            return false;
+        if (fetch_site.empty()) return true;
+        if (ascii_iequal(fetch_site, "same-origin") || ascii_iequal(fetch_site, "none")) {
+            return device_host_allowed(host, device_ipv4s, device_ipv4_count);
         }
-        if (authority.empty() || authority.find_first_of("/?#@ \t\r\n") != std::string_view::npos) {
-            return false;
-        }
-        return authority_matches_host(authority, host, default_port);
+        return false;
     }
 
     // State-changing GET:
     if (has_custom_header) {
         return device_host_allowed(host, device_ipv4s, device_ipv4_count);
-    }
-
-    if (!referer.empty()) return true;
-
-    if (!origin.empty() && !ascii_iequal(origin, "null")) {
-        if (!device_host_allowed(host, device_ipv4s, device_ipv4_count)) return false;
-        std::string_view authority;
-        std::string_view default_port;
-        if (origin.size() >= 7 && ascii_iequal(origin.substr(0, 7), "http://")) {
-            authority = origin.substr(7);
-            default_port = ":80";
-        } else if (origin.size() >= 8 && ascii_iequal(origin.substr(0, 8), "https://")) {
-            authority = origin.substr(8);
-            default_port = ":443";
-        } else {
-            return false;
-        }
-        if (authority.empty() || authority.find_first_of("/?#@ \t\r\n") != std::string_view::npos) {
-            return false;
-        }
-        return authority_matches_host(authority, host, default_port);
     }
 
     if (ascii_iequal(fetch_site, "same-origin") || ascii_iequal(fetch_site, "none")) {

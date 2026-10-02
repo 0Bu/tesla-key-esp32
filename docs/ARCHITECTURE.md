@@ -248,7 +248,10 @@ at `0x20000`. The `ci-build-all.sh` **app-size gate** sits at `slot − 32 KB` (
 up to a 64 KB Secure-Boot boundary plus a 4 KB signature. Per-target baselines (schema v2) cap the
 raw app, ELF total, flash code + rodata, static memory, `.bss` and IRAM; that review baseline is
 separate from the projected-signed hard gate, and the generated size report — not a number in this
-prose — is the source for current headroom. Design levers behind the fit:
+prose — is the source for current headroom. In particular, the ESP32-C6 target operates near the 64 KB
+quantization threshold (`C6_64K_CLIFF` at 1,966,080 bytes / `0x1E0000` in `scripts/check-firmware-size.sh`):
+exceeding this cliff by even a single byte triggers a 64 KiB quantization step that immediately violates
+both the `0x1E8000` policy limit and partition boundary, requiring strict review of C6 size deltas. Design levers behind the fit:
 
 - The firmware is a TLS **client** only (OTA, MQTTS); its server is plain LAN HTTP, so
   `CONFIG_MBEDTLS_TLS_CLIENT_ONLY=y` drops the unused TLS-server state machine and keeps C6 below the
