@@ -22,14 +22,189 @@
 # fast-forward push, no binary-merge conflicts.
 #
 # Env (CI): GITHUB_TOKEN (contents:write), GITHUB_REPOSITORY, optionally GITHUB_SERVER_URL.
-set -euo pipefail
+trigger_pages_build() {
+  if ! command -v gh >/dev/null 2>&1; then
+    echo "ERROR: gh CLI is required to trigger GitHub Pages build" >&2
+    return 1
+  fi
+  local token="${GH_TOKEN:-${GITHUB_TOKEN:-}}"
+  local err=""
+  for pages_attempt in 1 2 3; do
+    if err="$(GH_TOKEN="$token" gh api --method POST "repos/$GITHUB_REPOSITORY/pages/builds" 2>&1 >/dev/null)"; then
+      return 0
+    fi
+    echo "gh-pages: failed to trigger pages build (attempt $pages_attempt/3): $err" >&2
+    if [ -z "${TEST_REMOTE:-}" ]; then
+      sleep $((pages_attempt * 2))
+    fi
+  done
+  echo "ERROR: failed to trigger pages build via GitHub API after 3 attempts" >&2
+  return 1
+}
+
+self_test() {
+  local tmp
+  tmp="$(mktemp -d)"
+  trap 'rm -rf "$tmp"' EXIT
+
+  local fake_bin="$tmp/bin"
+  local fake_gh="$fake_bin/gh"
+  mkdir -p "$fake_bin"
+
+  # 1. Missing gh fails
+  (
+    export PATH="$fake_bin"
+    export GITHUB_REPOSITORY="owner/repo"
+    export GITHUB_TOKEN="dummy"
+    if trigger_pages_build 2>/dev/null; then
+      echo "self_test: trigger_pages_build unexpectedly succeeded without gh" >&2
+      exit 1
+    fi
+  )
+
+  # 2. Failing gh fails after 3 attempts
+  cat <<'EOF' > "$fake_gh"
+#!/usr/bin/env bash
+if [ "$1" = "api" ] && [ "$2" = "--method" ] && [ "$3" = "POST" ]; then
+  echo "attempt" >> "$TEST_TMP/gh_calls"
+  exit 1
+fi
+exit 0
+EOF
+  chmod +x "$fake_gh"
+
+  (
+    export PATH="$fake_bin:$PATH"
+    export GITHUB_REPOSITORY="owner/repo"
+    export GITHUB_TOKEN="dummy"
+    export TEST_TMP="$tmp"
+    export TEST_REMOTE="dummy"
+    if trigger_pages_build 2>/dev/null; then
+      echo "self_test: trigger_pages_build unexpectedly succeeded with failing gh" >&2
+      exit 1
+    fi
+    local calls
+    calls="$(wc -l < "$tmp/gh_calls" | tr -d ' ')"
+    if [ "$calls" -ne 3 ]; then
+      echo "self_test: expected 3 attempts, got $calls" >&2
+      exit 1
+    fi
+  )
+
+  # 3. Successful gh succeeds
+  cat <<'EOF' > "$fake_gh"
+#!/usr/bin/env bash
+if [ "$1" = "api" ] && [ "$2" = "--method" ] && [ "$3" = "POST" ]; then
+  echo "ok" >> "$TEST_TMP/gh_ok_calls"
+  exit 0
+fi
+exit 0
+EOF
+  chmod +x "$fake_gh"
+
+  (
+    export PATH="$fake_bin:$PATH"
+    export GITHUB_REPOSITORY="owner/repo"
+    export GITHUB_TOKEN="dummy"
+    export TEST_TMP="$tmp"
+    export TEST_REMOTE="dummy"
+    if ! trigger_pages_build 2>/dev/null; then
+      echo "self_test: trigger_pages_build failed with working gh" >&2
+      exit 1
+    fi
+    local calls
+    calls="$(wc -l < "$tmp/gh_ok_calls" | tr -d ' ')"
+    if [ "$calls" -ne 1 ]; then
+      echo "self_test: expected 1 call, got $calls" >&2
+      exit 1
+    fi
+  )
+
+  # 4. Full publication and unchanged-byte retry
+  local bare_repo="$tmp/remote.git"
+  git init --bare --quiet "$bare_repo"
+  local src="$tmp/site"
+  mkdir -p "$src"
+  echo "hello pages" > "$src/index.html"
+
+  # Initial publish with working gh
+  (
+    export PATH="$fake_bin:$PATH"
+    export GITHUB_REPOSITORY="owner/repo"
+    export GITHUB_TOKEN="dummy"
+    export TEST_REMOTE="$bare_repo"
+    export TEST_TMP="$tmp"
+    "$0" root "$src" >/dev/null 2>&1
+  )
+
+  # Retry with identical bytes and failing gh must fail
+  cat <<'EOF' > "$fake_gh"
+#!/usr/bin/env bash
+if [ "$1" = "api" ] && [ "$2" = "--method" ] && [ "$3" = "POST" ]; then
+  exit 1
+fi
+exit 0
+EOF
+  chmod +x "$fake_gh"
+
+  (
+    export PATH="$fake_bin:$PATH"
+    export GITHUB_REPOSITORY="owner/repo"
+    export GITHUB_TOKEN="dummy"
+    export TEST_REMOTE="$bare_repo"
+    export TEST_TMP="$tmp"
+    if "$0" root "$src" >/dev/null 2>&1; then
+      echo "self_test: unchanged-byte retry unexpectedly succeeded when gh build trigger failed" >&2
+      exit 1
+    fi
+  )
+
+  # Retry with identical bytes and working gh must succeed
+  cat <<'EOF' > "$fake_gh"
+#!/usr/bin/env bash
+if [ "$1" = "api" ] && [ "$2" = "--method" ] && [ "$3" = "POST" ]; then
+  echo "unchanged_ok" >> "$TEST_TMP/unchanged_calls"
+  exit 0
+fi
+exit 0
+EOF
+  chmod +x "$fake_gh"
+
+  (
+    export PATH="$fake_bin:$PATH"
+    export GITHUB_REPOSITORY="owner/repo"
+    export GITHUB_TOKEN="dummy"
+    export TEST_REMOTE="$bare_repo"
+    export TEST_TMP="$tmp"
+    if ! "$0" root "$src" >/dev/null 2>&1; then
+      echo "self_test: unchanged-byte retry failed with working gh" >&2
+      exit 1
+    fi
+    local calls
+    calls="$(wc -l < "$tmp/unchanged_calls" | tr -d ' ')"
+    if [ "$calls" -ne 1 ]; then
+      echo "self_test: expected 1 build trigger for unchanged bytes, got $calls" >&2
+      exit 1
+    fi
+  )
+
+  trap - EXIT
+  rm -rf "$tmp"
+  echo "publish-pages-branch self-test: PASS"
+  return 0
+}
+
+if [ "${1:-}" = "--self-test" ]; then
+  self_test
+  exit 0
+fi
 
 mode="${1:?usage: publish-pages-branch.sh root <srcdir> | dev <srcdir> | pr <srcdir> <N> | rm <N>}"
 : "${GITHUB_TOKEN:?GITHUB_TOKEN required}"
 : "${GITHUB_REPOSITORY:?GITHUB_REPOSITORY required}"
 
 server="${GITHUB_SERVER_URL:-https://github.com}"
-remote="https://x-access-token:${GITHUB_TOKEN}@${server#https://}/${GITHUB_REPOSITORY}.git"
+remote="${TEST_REMOTE:-https://x-access-token:${GITHUB_TOKEN}@${server#https://}/${GITHUB_REPOSITORY}.git}"
 
 # Parse + validate args per mode up front (fail fast, before touching the remote).
 src=""; num=""
@@ -93,16 +268,16 @@ for attempt in 1 2 3 4 5; do
   git -C "$work" add -A
   if git -C "$work" diff --cached --quiet; then
     echo "gh-pages: nothing to change ($(commit_msg))"
-    rm -rf "$work"; exit 0
+    rm -rf "$work"
+    trigger_pages_build || exit 1
+    exit 0
   fi
   git -C "$work" commit --quiet -m "$(commit_msg)"
 
   if git -C "$work" push --quiet "$remote" HEAD:gh-pages 2>/dev/null; then
     echo "gh-pages: $(commit_msg) — pushed (attempt $attempt)"
     rm -rf "$work"
-    if command -v gh >/dev/null 2>&1; then
-      GH_TOKEN="${GH_TOKEN:-$GITHUB_TOKEN}" gh api --method POST "repos/$GITHUB_REPOSITORY/pages/builds" >/dev/null 2>&1 || true
-    fi
+    trigger_pages_build || exit 1
     exit 0
   fi
   echo "gh-pages: push rejected, retrying with a fresh clone (attempt $attempt)…" >&2

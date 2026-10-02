@@ -262,12 +262,13 @@ find_published_dev_baseline() {
 
   branch_manifest_sha="$(printf '%s' "$manifest" | "$python_cmd" -c 'import hashlib, sys; sys.stdout.write(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())')"
   live_manifest_sha="$(printf '%s' "$live_manifest" | "$python_cmd" -c 'import hashlib, sys; sys.stdout.write(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())')"
-  [[ "$branch_manifest_sha" == "$live_manifest_sha" ]] || return 2
+  [[ "$branch_manifest_sha" == "$live_manifest_sha" ]] || return 3
 
   # Identity alone proves only that the manifest was published, not that the binaries behind it
   # are. Compare every served part with what the manifest declares.
   "$python_cmd" "$contract_root/scripts/check-dev-pages.py" --verify-live \
     --pages-base-url "${live_base%/}" --version "$version" --source-sha "$source_sha" \
+    --expected-manifest-sha "$branch_manifest_sha" \
     --attempts 1 --interval 0 --timeout 20 >/dev/null || return 3
 
   printf '%s\n' "$source_sha"
@@ -734,6 +735,20 @@ with open(p, "r+", encoding="utf-8") as f:
   grep -q "reconciliation stays open" "$tmp/dev-stale.err" || {
     echo "stale dev bytes fell back to the Release baseline instead of failing closed" >&2; return 1;
   }
+
+  # A dev channel whose manifest SHA differs from the branch manifest (even if sourceSha/version match)
+  # must keep reconciliation open (return 3 -> yes) instead of falling back to Release baseline.
+  printf ' ' >> "$fake_live_dev"
+  got="$(PATH="$fakebin:$PATH" GITHUB_REPOSITORY=owner/repo GH_FAKE_RELEASE="$fake_release" \
+    GH_FAKE_LIVE="$fake_live" GH_FAKE_LIVE_DEV="$fake_live_dev" \
+    changed_since_dev "$tmp" "$sha_d" 2>"$tmp/dev-manifest-mismatch.err")"
+  [[ "$got" == yes ]] || {
+    echo "dev channel with mismatched manifest SHA was accepted as a baseline: $got" >&2; return 1;
+  }
+  grep -q "reconciliation stays open" "$tmp/dev-manifest-mismatch.err" || {
+    echo "mismatched dev manifest SHA fell back to Release baseline instead of keeping reconciliation open" >&2; return 1;
+  }
+  write_pages_manifest "$fake_live_dev" "1.0.1-dev.1" "$sha_c"
 
   # 3. New firmware commit E on main should be relevant for dev
   mkdir -p "$tmp/main"

@@ -45,12 +45,146 @@ ok()   { echo "  PASS  $*"; pass=$((pass+1)); }
 bad()  { echo "  FAIL  $*"; fail=$((fail+1)); }
 hdr()  { echo; echo "── $* ──────────────────────────────────────────────" | cut -c1-78; }
 
+# kex CMD... — stubbed or pod-executed shell snippet
+kex() { kubectl exec -n "$EVCC_NS" "$POD" -- sh -c "$1"; }
+
+cmd() {
+  local name="$1" suf="$2" body="${3:-}" mode="${4:-}"
+  local out d rest code r
+  # Use a single nc request so that 5xx/4xx errors are not double-sent (wget -qO- discards
+  # non-200 responses and caused unintentional duplicate command execution on failures).
+  out="$(kex "s=\$(date +%s%3N); host=\$(echo '$ESC_BASE' | sed -e 's,^http://,,' -e 's,/.*$,,' -e 's,:.*$,,'); port=\$(echo '$ESC_BASE' | sed -n 's,^http://[^:]*:\([0-9]*\).*,\1,p'); [ -z \"\$port\" ] && port=80; raw=\$(printf 'POST /api/1/vehicles/$ESC_VIN/command/$suf HTTP/1.1\r\nHost: %s\r\nContent-Type: application/json\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s' \"\$host\" \"${#body}\" '$body' | nc -w $TIMEOUT \"\$host\" \"\$port\" 2>/dev/null); code=\$(echo \"\$raw\" | head -n1 | cut -d' ' -f2); b=\$(echo \"\$raw\" | sed -e '1,/^\r\{0,1\}\$/d'); e=\$(date +%s%3N); echo \"\$((e-s))|\$code|\$b\"")"
+  d="${out%%|*}"; rest="${out#*|}"; code="${rest%%|*}"; r="${rest#*|}"
+  echo "  ${name}: ${d}ms (HTTP ${code:-none})  ->  $r"
+  if echo "$r" | grep -q '"result":true'; then
+    if [ "$mode" = reject ]; then
+      bad "$name was ACCEPTED — key has more than Charging-Manager privileges (role-boundary regression!)"
+    else
+      ok "$name executed"
+    fi
+  elif [ "$mode" = reject ]; then
+    # The firmware returns HTTP 502 with result:false on command rejection or reachability error.
+    # Reject-mode must require HTTP 502 AND an authenticated vehicle rejection string
+    # ('not authorized', 'unauthorized', 'denied', 'authentication failed'), rejecting local proxy 4xx/503 or reachability timeouts.
+    if [ -z "$r" ] || [ -z "$code" ]; then
+      bad "$name: no signed reply (transport timeout) — cannot confirm role boundary"
+    elif [ "$code" != "502" ]; then
+      bad "$name: HTTP $code (expected 502 from vehicle rejection) — cannot confirm role boundary"
+    elif echo "$r" | grep -qiE 'not reachable|unreachable|timed out'; then
+      bad "$name: car unreachable (not actually refused) — cannot confirm role boundary; re-run with the car awake"
+    elif ! echo "$r" | grep -q '"result":false'; then
+      bad "$name: invalid rejection format: $r"
+    elif echo "$r" | grep -qiE 'not authorized|unauthorized|denied|authentication failed'; then
+      ok "$name correctly refused by the car (Charging-Manager role boundary holds)"
+    else
+      bad "$name: rejection reason not authenticated vehicle refusal: $r"
+    fi
+  elif [ "$mode" = soft ]; then
+    if [ -z "$r" ] || [ -z "$code" ]; then
+      bad "$name failed/timed out (no response)"
+    elif [ "$code" != "502" ]; then
+      bad "$name failed locally (HTTP $code): $r"
+    elif ! echo "$r" | grep -q '"result":false'; then
+      bad "$name: invalid rejection format (HTTP 502 without result:false): $r"
+    elif echo "$r" | grep -qiE 'not reachable|unreachable|timed out|vehicle asleep|service not ready|runtime unavailable|out of memory|invalid URI|vehicle VIN mismatch|unknown command|request body'; then
+      bad "$name: proxy or reachability error: $r"
+    else
+      echo "  NOTE  $name returned false (HTTP $code) — car-side rejection (depends on live state), not a proxy fault"
+    fi
+  else
+    bad "$name failed/timed out (HTTP ${code:-none}): $r"
+  fi
+}
+
+self_test() {
+  local ESC_BASE="http://127.0.0.1" ESC_VIN="TESTVIN" TIMEOUT=5
+  local mock_code="" mock_body=""
+
+  kex() {
+    echo "10|$mock_code|$mock_body"
+  }
+
+  expect_fail() {
+    local test_mode="$1" test_name="$2"
+    local prev_fail=$fail
+    cmd "$test_name" "dummy" "{}" "$test_mode" >/dev/null 2>&1 || true
+    if [ "$fail" -le "$prev_fail" ]; then
+      echo "self_test FAILED: expected failure for $test_name ($test_mode), but fail count did not increase" >&2
+      exit 1
+    fi
+  }
+
+  expect_pass() {
+    local test_mode="$1" test_name="$2"
+    local prev_fail=$fail
+    cmd "$test_name" "dummy" "{}" "$test_mode" >/dev/null 2>&1 || true
+    if [ "$fail" -ne "$prev_fail" ]; then
+      echo "self_test FAILED: expected pass for $test_name ($test_mode), but fail count increased" >&2
+      exit 1
+    fi
+  }
+
+  # Soft mode tests:
+  # 1. HTTP 400, invalid JSON -> must fail
+  mock_code="400"; mock_body='{"error":"invalid JSON"}'
+  expect_fail "soft" "soft HTTP 400 invalid JSON"
+
+  # 2. HTTP 503, out of memory -> must fail
+  mock_code="503"; mock_body='{"error":"out of memory"}'
+  expect_fail "soft" "soft HTTP 503 out of memory"
+
+  # 3. HTTP 502, vehicle service not ready -> must fail
+  mock_code="502"; mock_body='{"result":false,"reason":"vehicle service not ready"}'
+  expect_fail "soft" "soft HTTP 502 vehicle service not ready"
+
+  # 4. HTTP 502, locally generated vehicle asleep -> must fail
+  mock_code="502"; mock_body='{"result":false,"reason":"vehicle asleep"}'
+  expect_fail "soft" "soft HTTP 502 vehicle asleep"
+
+  # 5. Soft mode with harmless vehicle-side rejection -> passes (softened)
+  mock_code="502"; mock_body='{"result":false,"reason":"already_closed"}'
+  expect_pass "soft" "soft HTTP 502 harmless vehicle rejection"
+
+  # Reject mode tests:
+  # 6. Reject mode with authenticated vehicle refusal strings
+  mock_code="502"; mock_body='{"result":false,"reason":"authentication failed"}'
+  expect_pass "reject" "reject HTTP 502 authentication failed"
+
+  mock_code="502"; mock_body='{"result":false,"reason":"not authorized"}'
+  expect_pass "reject" "reject HTTP 502 not authorized"
+
+  mock_code="502"; mock_body='{"result":false,"reason":"unauthorized"}'
+  expect_pass "reject" "reject HTTP 502 unauthorized"
+
+  mock_code="502"; mock_body='{"result":false,"reason":"denied"}'
+  expect_pass "reject" "reject HTTP 502 denied"
+
+  # 7. Reject mode with local 400, 503, or reachability timeout -> must fail!
+  mock_code="400"; mock_body='{"error":"bad request"}'
+  expect_fail "reject" "reject HTTP 400"
+
+  mock_code="503"; mock_body='{"error":"out of memory"}'
+  expect_fail "reject" "reject HTTP 503"
+
+  mock_code="502"; mock_body='{"result":false,"reason":"not reachable"}'
+  expect_fail "reject" "reject HTTP 502 not reachable"
+
+  # 8. Success execution (HTTP 200 with result:true) in default mode -> passes
+  mock_code="200"; mock_body='{"result":true}'
+  expect_pass "" "normal HTTP 200 result:true"
+
+  echo "e2e_evcc self-test: PASS"
+  return 0
+}
+
+if [ "${1:-}" = "--self-test" ]; then
+  self_test
+  exit 0
+fi
+
 POD="$(kubectl get pod -n "$EVCC_NS" -l app=evcc -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)"
 [ -z "$POD" ] && { echo "FATAL: no evcc pod found in ns/$EVCC_NS"; exit 2; }
 
-# kex CMD... — run a shell snippet inside the evcc pod (defined early so VIN discovery below
-# runs over the same real pod→LAN→ESP32 path the rest of the test uses).
-kex() { kubectl exec -n "$EVCC_NS" "$POD" -- sh -c "$1"; }
 
 # Discover the VIN from the device itself unless the caller pinned one. The firmware is the
 # single source of truth (GET /status → "vin"), so no real vehicle identifier has to be
@@ -157,49 +291,7 @@ echo "$BC" | grep -q '"result":true' && ok "body_controller_state ok" || echo " 
 #                non-reachability reason); result:true is a security regression (FAIL);
 #                a reachability/timeout reason is FAIL "can't confirm — re-run awake".
 #                This is what stops a sleeping car from false-PASSing.
-cmd() {
-  local name="$1" suf="$2" body="${3:-}" mode="${4:-}"
-  local out d rest code r
-  # Use a single nc request so that 5xx/4xx errors are not double-sent (wget -qO- discards
-  # non-200 responses and caused unintentional duplicate command execution on failures).
-  out="$(kex "s=\$(date +%s%3N); host=\$(echo '$ESC_BASE' | sed -e 's,^http://,,' -e 's,/.*$,,' -e 's,:.*$,,'); port=\$(echo '$ESC_BASE' | sed -n 's,^http://[^:]*:\([0-9]*\).*,\1,p'); [ -z \"\$port\" ] && port=80; raw=\$(printf 'POST /api/1/vehicles/$ESC_VIN/command/$suf HTTP/1.1\r\nHost: %s\r\nContent-Type: application/json\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s' \"\$host\" \"${#body}\" '$body' | nc -w $TIMEOUT \"\$host\" \"\$port\" 2>/dev/null); code=\$(echo \"\$raw\" | head -n1 | cut -d' ' -f2); b=\$(echo \"\$raw\" | sed -e '1,/^\r\{0,1\}\$/d'); e=\$(date +%s%3N); echo \"\$((e-s))|\$code|\$b\"")"
-  d="${out%%|*}"; rest="${out#*|}"; code="${rest%%|*}"; r="${rest#*|}"
-  echo "  ${name}: ${d}ms (HTTP ${code:-none})  ->  $r"
-  if echo "$r" | grep -q '"result":true'; then
-    if [ "$mode" = reject ]; then
-      bad "$name was ACCEPTED — key has more than Charging-Manager privileges (role-boundary regression!)"
-    else
-      ok "$name executed"
-    fi
-  elif [ "$mode" = reject ]; then
-    # The firmware returns HTTP 502 with result:false on command rejection or reachability error.
-    # Reject-mode must require HTTP 502 AND an authenticated vehicle rejection string
-    # ('not authorized', 'unauthorized', 'denied'), rejecting local proxy 4xx/503 or reachability timeouts.
-    if [ -z "$r" ] || [ -z "$code" ]; then
-      bad "$name: no signed reply (transport timeout) — cannot confirm role boundary"
-    elif [ "$code" != "502" ]; then
-      bad "$name: HTTP $code (expected 502 from vehicle rejection) — cannot confirm role boundary"
-    elif echo "$r" | grep -qiE 'not reachable|unreachable|timed out'; then
-      bad "$name: car unreachable (not actually refused) — cannot confirm role boundary; re-run with the car awake"
-    elif ! echo "$r" | grep -q '"result":false'; then
-      bad "$name: invalid rejection format: $r"
-    elif echo "$r" | grep -qiE 'not authorized|unauthorized|denied'; then
-      ok "$name correctly refused by the car (Charging-Manager role boundary holds)"
-    else
-      bad "$name: rejection reason not authenticated vehicle refusal: $r"
-    fi
-  elif [ "$mode" = soft ]; then
-    if [ -z "$r" ] || [ -z "$code" ]; then
-      bad "$name failed/timed out (no response)"
-    elif echo "$r" | grep -qiE 'not reachable|unreachable|timed out'; then
-      bad "$name: car unreachable or timed out"
-    else
-      echo "  NOTE  $name returned false (HTTP $code) — car-side rejection (depends on live state), not a proxy fault"
-    fi
-  else
-    bad "$name failed/timed out (HTTP ${code:-none}): $r"
-  fi
-}
+
 
 if [ "$RUN_COMMANDS" = 1 ]; then
   hdr "4. Commands (write path → signed BLE → car)"

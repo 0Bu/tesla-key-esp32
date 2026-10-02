@@ -84,8 +84,9 @@ Hardening that remains (none of it is authentication):
   rebinding. It covers every POST plus the legacy state-changing GET forms `/ota/check`,
   `/diag?clear=1`, `/diag?verbose=0|1` and `/coredump?clear=1`; query **keys match
   case-insensitively** (as `esp_http_server` does) while **values stay exact and undecoded**.
-  Headerless clients (evcc, curl) stay compatible, and so does a raw LAN peer that omits both
-  headers — the trusted-LAN boundary remains mandatory.
+  Headerless POST clients (evcc, curl) stay compatible, and so does a raw LAN peer that sends POST
+  or adds a custom header (e.g. `X-Requested-With`) on mutating GETs — headerless mutating GET
+  requests receive `403` to prevent browser CSRF; the trusted-LAN boundary remains mandatory.
 - **Identity guards.** `/gen_keys` and `/set_vin` answer `503` unless the running image is
   `Stable` and no OTA/identity work owns the gate. Once stable, `/gen_keys` still refuses to
   replace an existing key without `force=1` (`409`).

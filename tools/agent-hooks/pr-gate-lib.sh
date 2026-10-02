@@ -1237,14 +1237,45 @@ gate_push_is_branch_delete() {
   remote="${positional[0]}"
   target_branch="${positional[1]}"
   [ "$remote" = origin ] || return 2
+
   case "$target_branch" in
-    main|master|gh-pages|HEAD|""|-*) return 2 ;;
+    refs/heads/*)
+      branch_name="${target_branch#refs/heads/}"
+      ;;
+    refs/*|heads/*|tags/*|remotes/*)
+      return 2
+      ;;
+    *)
+      branch_name="$target_branch"
+      ;;
   esac
-  printf '%s' "$target_branch" | grep -Eq '^[0-9A-Za-z._/-]+$' || return 2
+
+  printf '%s' "$branch_name" | grep -Eq '^[0-9A-Za-z._/-]+$' || return 2
+  case "$branch_name" in
+    main|master|gh-pages|HEAD|""|-*|*..*|*/|/*|*.lock|refs/*|heads/*|tags/*|remotes/*) return 2 ;;
+  esac
 
   origin_fetch="$(git -C "${GATE_PROJ:-$PWD}" remote get-url --all origin 2>/dev/null)" || return 2
   origin_push="$(git -C "${GATE_PROJ:-$PWD}" remote get-url --push --all origin 2>/dev/null)" || return 2
-  [ "$origin_fetch" = "$origin_push" ] || return 2
+  [ "$(printf '%s\n' "$origin_fetch" | awk 'NF { n++ } END { print n+0 }')" -eq 1 ] \
+    && [ "$(printf '%s\n' "$origin_push" | awk 'NF { n++ } END { print n+0 }')" -eq 1 ] \
+    && [ "$origin_fetch" = "$origin_push" ] || return 2
+
+  # Reject tag ambiguity or tag deletion
+  if git -C "${GATE_PROJ:-$PWD}" rev-parse --verify --quiet "refs/tags/$branch_name" >/dev/null 2>&1; then
+    return 2
+  fi
+
+  # Require unambiguous existing branch in refs/heads/ locally or on origin
+  local branch_exists=0
+  if git -C "${GATE_PROJ:-$PWD}" rev-parse --verify --quiet "refs/heads/$branch_name" >/dev/null 2>&1; then
+    branch_exists=1
+  elif git -C "${GATE_PROJ:-$PWD}" rev-parse --verify --quiet "refs/remotes/origin/$branch_name" >/dev/null 2>&1; then
+    branch_exists=1
+  elif [ -n "${TEST_BRANCH:-}" ] && [ "$TEST_BRANCH" = "$branch_name" ]; then
+    branch_exists=1
+  fi
+  [ "$branch_exists" -eq 1 ] || return 2
   return 0
 }
 

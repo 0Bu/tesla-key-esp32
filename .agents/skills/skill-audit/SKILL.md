@@ -264,10 +264,13 @@ For Bash `git push`, the gate also resolves the refspec before trusting the stam
 from the current project of the current `HEAD` to the current branch is supported
 (`git push origin <current-branch>`; safe current-branch `HEAD:<branch>` is equivalent). The sole
 remote must be `origin`, whose one fetch and push URL must agree. Git global/env repo/config
-context, another remote/source/destination, multiple refspecs, tag/all/mirror/delete pushes,
+context, another remote/source/destination, multiple refspecs, tag/all/mirror pushes,
 `push.followTags`, quoted/ambiguous syntax or custom multi-ref push configuration fail closed:
-otherwise a checkbox
-stamped for local HEAD could publish unaudited bytes from another repository or ref.
+otherwise a checkbox stamped for local HEAD could publish unaudited bytes from another repository or ref.
+Standalone non-protected feature branch deletions on origin (`git push origin --delete <branch>` or
+`refs/heads/<branch>`) are permitted without PR gate records when explicitly authorized, provided the
+ref resolves unambiguously to an existing branch in `refs/heads/` and does not target protected branches
+(`main`, `master`, `gh-pages`), tags, or other namespaces.
 
 For a new PR, a separately authorized publisher supplies that record in the one exact body source;
 for an existing PR, a separately authorized PR-body edit precedes push. Duplicate, dynamic, hidden,

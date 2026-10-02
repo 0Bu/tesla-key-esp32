@@ -337,7 +337,7 @@ curl -s "http://$IP/api/proxy/1/version"           # {"version":"X.Y.Z-esp32","p
 curl -s "http://$IP/status" | jq -r .version       # X.Y.Z  (no "-esp32"; must match the release)
 
 # non-blocking manifest check → poll status (ms = browser-clock NTP fallback for TLS)
-curl -s "http://$IP/ota/check?ms=$(date +%s000)"
+curl -s -X POST "http://$IP/ota/check?ms=$(date +%s000)"
 sleep 3
 curl -s "http://$IP/ota/status" | jq
 #   {state, progress, message, available, update_available, current}

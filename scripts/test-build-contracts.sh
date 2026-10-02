@@ -6,6 +6,7 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 "$repo_root/scripts/release-relevance.sh" --self-test
 "$repo_root/scripts/select-release-version.sh" --self-test
 "$repo_root/scripts/check-reproducible-build.sh" --self-test
+"$repo_root/scripts/publish-pages-branch.sh" --self-test
 python3 "$repo_root/scripts/check-reproducible-artifacts.py" --self-test
 python3 "$repo_root/scripts/check-dependency-contract.py" --self-test
 python3 "$repo_root/scripts/check-otadata-contract.py" --self-test
@@ -25,6 +26,7 @@ python3 "$repo_root/scripts/check-dev-pages.py" --self-test
 python3 "$repo_root/scripts/generate-ota-changelog.py" --self-test
 python3 "$repo_root/scripts/check-stack-usage.py" --self-test
 python3 "$repo_root/scripts/check-build-gate-contract.py" --self-test
+"$repo_root/scripts/e2e_evcc.sh" --self-test
 bash "$repo_root/scripts/idf-docker.sh" --self-test 2>/dev/null
 temp="$(mktemp -d)"
 trap 'rm -rf "$temp"' EXIT

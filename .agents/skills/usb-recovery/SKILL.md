@@ -520,7 +520,7 @@ done
   echo "RECOVERY INCOMPLETE: exact version/platform/paired state not reachable within 60 seconds" >&2
   exit 1
 }
-curl -fsS "http://$DEVICE_IP/ota/check" >/dev/null
+curl -fsS -X POST "http://$DEVICE_IP/ota/check" >/dev/null
 sleep 2
 curl -fsS "http://$DEVICE_IP/ota/status" | jq .
 ```

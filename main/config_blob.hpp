@@ -19,11 +19,12 @@ class NvsStorageAdapter;
 // window in which the backup and the live values disagree.
 //
 // THE LEGACY FALLBACK IS NOT OPTIONAL. Devices already in the field have the per-key layout and no
-// blob. cfg_load() reads the blob first and falls back to the individual keys when it is absent or
-// fails its CRC; without that, this change would strand every existing device's WiFi credentials
-// and VIN on the first OTA. The first successful save migrates a device to the blob; the legacy
-// keys are deliberately left in place rather than deleted, so a downgrade to an older build still
-// finds its configuration.
+// blob. cfg_load() reads the blob first and falls back to the individual keys ONLY when the blob
+// entry is absent (ESP_ERR_NVS_NOT_FOUND); present blobs that suffer read, OOM, schema or CRC errors
+// fail closed as errors rather than falling back to stale legacy keys. Without the absent-blob
+// fallback, this change would strand every existing device's WiFi credentials and VIN on the first OTA.
+// The first successful save migrates a device to the blob; the legacy keys are deliberately left in
+// place rather than deleted, so a downgrade to an older build still finds its configuration.
 //
 // SCOPE. Only durable user configuration whose coherent transaction is owned by the
 // HTTP/provisioning task belongs in this blob. Other `tesla_cfg` records stay separate either

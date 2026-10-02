@@ -563,8 +563,32 @@ expect_rc 0 'git push delete of feature branch on origin accepted' env PATH="$tm
 payload Bash command "git push origin --delete main" "$root" >"$tmp/push-del-main.json"
 expect_rc 2 'git push delete of main branch on origin blocked' env PATH="$tmp/bin:$PATH" TEST_ROOT="$root" TEST_BRANCH="$push_branch" TEST_REAL_GIT="$real_git" TEST_HEAD="$sha" "$gate" --project-dir "$root" --payload-file "$tmp/push-del-main.json"
 
+payload Bash command "git push origin --delete refs/heads/main" "$root" >"$tmp/push-del-refs-main.json"
+expect_rc 2 'git push delete of refs/heads/main on origin blocked' env PATH="$tmp/bin:$PATH" TEST_ROOT="$root" TEST_BRANCH="$push_branch" TEST_REAL_GIT="$real_git" TEST_HEAD="$sha" "$gate" --project-dir "$root" --payload-file "$tmp/push-del-refs-main.json"
+
+payload Bash command "git push origin --delete HEAD" "$root" >"$tmp/push-del-head.json"
+expect_rc 2 'git push delete of HEAD on origin blocked' env PATH="$tmp/bin:$PATH" TEST_ROOT="$root" TEST_BRANCH="$push_branch" TEST_REAL_GIT="$real_git" TEST_HEAD="$sha" "$gate" --project-dir "$root" --payload-file "$tmp/push-del-head.json"
+
+payload Bash command "git push origin --delete refs/heads/HEAD" "$root" >"$tmp/push-del-refs-head.json"
+expect_rc 2 'git push delete of refs/heads/HEAD on origin blocked' env PATH="$tmp/bin:$PATH" TEST_ROOT="$root" TEST_BRANCH="$push_branch" TEST_REAL_GIT="$real_git" TEST_HEAD="$sha" "$gate" --project-dir "$root" --payload-file "$tmp/push-del-refs-head.json"
+
+payload Bash command "git push origin --delete heads/main" "$root" >"$tmp/push-del-heads-main.json"
+expect_rc 2 'git push delete of heads/main on origin blocked' env PATH="$tmp/bin:$PATH" TEST_ROOT="$root" TEST_BRANCH="$push_branch" TEST_REAL_GIT="$real_git" TEST_HEAD="$sha" "$gate" --project-dir "$root" --payload-file "$tmp/push-del-heads-main.json"
+
 payload Bash command "git push origin --delete $push_branch || true" "$root" >"$tmp/push-del-compound.json"
 expect_rc 2 'git push delete with compound operator blocked' env PATH="$tmp/bin:$PATH" TEST_ROOT="$root" TEST_BRANCH="$push_branch" TEST_REAL_GIT="$real_git" TEST_HEAD="$sha" "$gate" --project-dir "$root" --payload-file "$tmp/push-del-compound.json"
+
+payload Bash command "git push origin --delete refs/heads/gh-pages" "$root" >"$tmp/push-del-gh-pages.json"
+expect_rc 2 'git push delete of refs/heads/gh-pages blocked' env PATH="$tmp/bin:$PATH" TEST_ROOT="$root" TEST_BRANCH="$push_branch" TEST_REAL_GIT="$real_git" TEST_HEAD="$sha" "$gate" --project-dir "$root" --payload-file "$tmp/push-del-gh-pages.json"
+
+payload Bash command "git push origin --delete refs/tags/v1.5.0" "$root" >"$tmp/push-del-tag-ref.json"
+expect_rc 2 'git push delete of refs/tags/v1.5.0 blocked' env PATH="$tmp/bin:$PATH" TEST_ROOT="$root" TEST_BRANCH="$push_branch" TEST_REAL_GIT="$real_git" TEST_HEAD="$sha" "$gate" --project-dir "$root" --payload-file "$tmp/push-del-tag-ref.json"
+
+payload Bash command "git push origin --delete v1.5.0" "$root" >"$tmp/push-del-tag-short.json"
+expect_rc 2 'git push delete of short tag ref v1.5.0 blocked' env PATH="$tmp/bin:$PATH" TEST_ROOT="$root" TEST_BRANCH="$push_branch" TEST_REAL_GIT="$real_git" TEST_HEAD="$sha" "$gate" --project-dir "$root" --payload-file "$tmp/push-del-tag-short.json"
+
+payload Bash command "git push origin --delete refs/heads/$push_branch" "$root" >"$tmp/push-del-qualified.json"
+expect_rc 0 'git push delete of qualified feature branch accepted' env PATH="$tmp/bin:$PATH" TEST_ROOT="$root" TEST_BRANCH="$push_branch" TEST_REAL_GIT="$real_git" TEST_HEAD="$sha" "$gate" --project-dir "$root" --payload-file "$tmp/push-del-qualified.json"
 
 out_dest_main="$(printf 'refs/heads/feature %s refs/heads/main 0000000000000000000000000000000000000000\n' "$sha" | "$root/.githooks/pre-push" origin 2>&1 || true)"
 if printf '%s\n' "$out_dest_main" | grep -q 'BLOCKED by pre-push: direct push to destination main branch is prohibited'; then
@@ -573,11 +597,46 @@ else
   fail_case 'pre-push hook blocks push to destination main'
 fi
 
+out_dest_head="$(printf 'refs/heads/feature %s refs/heads/HEAD 0000000000000000000000000000000000000000\n' "$sha" | "$root/.githooks/pre-push" origin 2>&1 || true)"
+if printf '%s\n' "$out_dest_head" | grep -q 'BLOCKED by pre-push: direct push to destination protected branch'; then
+  pass_case 'pre-push hook blocks push to destination HEAD'
+else
+  fail_case 'pre-push hook blocks push to destination HEAD'
+fi
+
+out_dest_pages="$(printf 'refs/heads/feature %s refs/heads/gh-pages 0000000000000000000000000000000000000000\n' "$sha" | "$root/.githooks/pre-push" origin 2>&1 || true)"
+if printf '%s\n' "$out_dest_pages" | grep -q 'BLOCKED by pre-push: direct push to destination protected branch'; then
+  pass_case 'pre-push hook blocks push to destination gh-pages'
+else
+  fail_case 'pre-push hook blocks push to destination gh-pages'
+fi
+
 out_del_main="$(printf 'refs/heads/feature 0000000000000000000000000000000000000000 refs/heads/main 0000000000000000000000000000000000000000\n' | "$root/.githooks/pre-push" origin 2>&1 || true)"
-if printf '%s\n' "$out_del_main" | grep -q 'BLOCKED by pre-push: direct push to destination main branch is prohibited'; then
+if printf '%s\n' "$out_del_main" | grep -q 'BLOCKED by pre-push:'; then
   pass_case 'pre-push hook blocks deletion of main branch'
 else
   fail_case 'pre-push hook blocks deletion of main branch'
+fi
+
+out_del_head="$(printf 'refs/heads/feature 0000000000000000000000000000000000000000 refs/heads/HEAD 0000000000000000000000000000000000000000\n' | "$root/.githooks/pre-push" origin 2>&1 || true)"
+if printf '%s\n' "$out_del_head" | grep -q 'BLOCKED by pre-push: deletion of protected branch'; then
+  pass_case 'pre-push hook blocks deletion of HEAD branch'
+else
+  fail_case 'pre-push hook blocks deletion of HEAD branch'
+fi
+
+out_del_pages="$(printf 'refs/heads/feature 0000000000000000000000000000000000000000 refs/heads/gh-pages 0000000000000000000000000000000000000000\n' | "$root/.githooks/pre-push" origin 2>&1 || true)"
+if printf '%s\n' "$out_del_pages" | grep -q 'BLOCKED by pre-push: deletion of protected branch'; then
+  pass_case 'pre-push hook blocks deletion of gh-pages branch'
+else
+  fail_case 'pre-push hook blocks deletion of gh-pages branch'
+fi
+
+out_del_tag="$(printf 'refs/heads/feature 0000000000000000000000000000000000000000 refs/tags/v1.5.0 0000000000000000000000000000000000000000\n' | "$root/.githooks/pre-push" origin 2>&1 || true)"
+if printf '%s\n' "$out_del_tag" | grep -q 'BLOCKED by pre-push: deletion of non-branch ref'; then
+  pass_case 'pre-push hook blocks deletion of tags'
+else
+  fail_case 'pre-push hook blocks deletion of tags'
 fi
 
 out_foreign="$(printf 'refs/heads/feature %s refs/heads/feature 0000000000000000000000000000000000000000\n' "$sha" | "$root/.githooks/pre-push" foreign 2>&1 || true)"

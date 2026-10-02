@@ -268,7 +268,7 @@ case "$TARGET" in esp32) FAMILY=ESP32 ;; esp32s3) FAMILY=ESP32-S3 ;; esp32c3) FA
   esp32c6) FAMILY=ESP32-C6 ;; *) echo "REFUSING: unsupported TARGET" >&2; exit 1 ;; esac
 
 # Step A: Initiate background OTA check
-CHECK_JSON=$(curl --connect-timeout 5 --max-time 10 -fsS \
+CHECK_JSON=$(curl --connect-timeout 5 --max-time 10 -fsS -X POST \
   "http://$TARGET_HOST/ota/check?ms=$(date +%s000)")
 printf '%s' "$CHECK_JSON" | jq -e '.started == true' >/dev/null || {
   echo "REFUSING: OTA check did not start" >&2; exit 1;

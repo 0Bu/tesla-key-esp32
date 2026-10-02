@@ -195,8 +195,9 @@ Invalidation and re-pair rules: [ARCHITECTURE](ARCHITECTURE.md#pairing-lifecycle
 
 Base `http://<ESP32-IP>`. No auth, no TLS — see [SECURITY](SECURITY.md#http-api-exposure). Mutating
 browser requests from a foreign or DNS-rebound Origin get `403`; Host must be the device name or
-current IP, and state-changing legacy GET forms use the same gate. Headerless evcc/curl clients stay
-compatible, so this is not a substitute for the trusted-LAN boundary.
+current IP, and state-changing legacy GET forms use the same gate. Headerless POST clients (evcc, curl)
+stay compatible, while mutating GET requests require an explicit custom header (e.g. `X-Requested-With`)
+or should use POST aliases (`POST /ota/check`, `POST /diag`); this is not a substitute for the trusted-LAN boundary.
 
 ### Commands
 
@@ -440,8 +441,11 @@ enrolment` in `/diag`; confirm on the touchscreen within ~45 s or `POST /send_ke
 
 **Key rejected** — in the Tesla touchscreen / app (Locks/Keys) delete the old key entry. Regenerate
 the keypair via Web UI or `POST /gen_keys?force=1`, then trigger pairing with `POST /send_key` and confirm
-on the touchscreen with the NFC keycard. Only use full chip erase (`esptool --chip <target> -p <port> erase_flash`)
-for an intentional factory reset, as it permanently wipes all WiFi credentials, configuration, and keys.
+on the touchscreen with the NFC keycard. A full chip erase (`esptool --chip <target> -p <port> erase_flash`)
+is destructive: it permanently wipes the bootloader, partition table, active/standby firmware, WiFi credentials,
+configuration, and vehicle keys. Use it only for an intentional, explicitly authorized factory wipe with an
+attested recovery plan; restoring device function requires a full initial flash (bootloader, partitions, and
+signed app) as described in [ARCHITECTURE.md](ARCHITECTURE.md#flashing--nvs-safety).
 
 **Serial permission denied (Linux)** — `sudo usermod -aG dialout $USER && newgrp dialout`.
 
