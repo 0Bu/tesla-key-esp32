@@ -65,12 +65,8 @@ ConfigLoadState cfg_load_state(NvsStorageAdapter& cfg, ConfigBlob& out) {
 bool cfg_load(NvsStorageAdapter& cfg, ConfigBlob& out) {
     const ConfigLoadState state = cfg_load_state(cfg, out);
     if (state == ConfigLoadState::Blob) return true;
-    if (state == ConfigLoadState::Error) {
-        // Compatibility path for ordinary, unjournaled boots/callers. Recovery code must use the
-        // tri-state API above and fail closed instead of reaching this legacy fallback.
-        ESP_LOGW(TAG, "config blob unavailable/invalid — falling back to legacy per-key values");
-        (void)load_legacy(cfg, out);
-    }
+    if (state == ConfigLoadState::Legacy) return false;
+    // Error state: do NOT fall back to stale legacy mirrors. Leave out untouched.
     return false;
 }
 

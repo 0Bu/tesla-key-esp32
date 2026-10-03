@@ -17,6 +17,86 @@ validate_sha() {
     && git -C "$repo_root" cat-file -e "${sha}^{commit}" 2>/dev/null
 }
 
+parse_manifest_identity() {
+  local py="${1:-python3}"
+  "$py" -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+    if not (isinstance(d, dict) and d.get("name") == "tesla-key-esp32" and d.get("layoutVersion") == 2):
+        sys.exit(1)
+    b = d.get("builds")
+    if not (isinstance(b, list) and len(b) == 4):
+        sys.exit(1)
+    s = d.get("sourceSha")
+    v = d.get("version")
+    if not (isinstance(s, str) and isinstance(v, str)):
+        sys.exit(1)
+    sys.stdout.write(f"{s}\t{v}\n")
+    sys.exit(0)
+except Exception:
+    sys.exit(1)
+' 2>/dev/null
+}
+
+validate_release_json() {
+  local py="$1" tag="$2" sha="$3" v="$4"
+  "$py" -c '
+import json, re, sys
+tag, sha, v = sys.argv[1], sys.argv[2], sys.argv[3]
+try:
+    r = json.load(sys.stdin)
+    if not (isinstance(r, dict)
+            and r.get("tag_name") == tag
+            and r.get("target_commitish") == sha
+            and r.get("draft") is False
+            and r.get("prerelease") is False
+            and (r.get("immutable") is True and bool(".immutable == true"))):
+        sys.exit(1)
+    assets = r.get("assets")
+    if not isinstance(assets, list):
+        sys.exit(1)
+    expected = [
+        f"tesla-key-esp32-{v}-merged.bin",
+        f"tesla-key-esp32-s3-{v}-merged.bin",
+        f"tesla-key-esp32-c3-{v}-merged.bin",
+        f"tesla-key-esp32-c6-{v}-merged.bin",
+    ]
+    digest_re = re.compile(r"^sha256:[0-9a-f]{64}$")
+    for name in expected:
+        matches = [a for a in assets if isinstance(a, dict) and a.get("name") == name]
+        if len(matches) != 1:
+            sys.exit(1)
+        a = matches[0]
+        if not (isinstance(a.get("id"), (int, float)) and not isinstance(a.get("id"), bool)):
+            sys.exit(1)
+        if not (isinstance(a.get("size"), (int, float)) and not isinstance(a.get("size"), bool) and a["size"] > 0):
+            sys.exit(1)
+        digest = a.get("digest")
+        if not (isinstance(digest, str) and digest_re.match(digest)):
+            sys.exit(1)
+    sys.exit(0)
+except Exception:
+    sys.exit(1)
+' "$tag" "$sha" "$v" 2>/dev/null
+}
+
+parse_pages_url() {
+  local py="${1:-python3}"
+  "$py" -c '
+import json, re, sys
+try:
+    d = json.load(sys.stdin)
+    url = d.get("html_url") if isinstance(d, dict) else None
+    if isinstance(url, str) and re.match(r"^https://[^\s?#]+/?$", url):
+        sys.stdout.write(f"{url}\n")
+        sys.exit(0)
+except Exception:
+    pass
+sys.exit(1)
+' 2>/dev/null
+}
+
 # find_published_pages_baseline <repo> <current-sha>
 # Print a source SHA only when ALL authorities agree:
 #   * root gh-pages manifest identity (layout/version/sourceSha),
@@ -32,7 +112,7 @@ find_published_pages_baseline() {
   local acceptance_dir acceptance_json release_metadata_file python_cmd
   python_cmd="${SELF_TEST_PYTHON:-python3}"
   validate_sha "$repo_root" "$current_sha" || return 2
-  command -v jq >/dev/null 2>&1 && command -v gh >/dev/null 2>&1 \
+  command -v "$python_cmd" >/dev/null 2>&1 && command -v gh >/dev/null 2>&1 \
     && command -v curl >/dev/null 2>&1 || return 2
   repository="${GITHUB_REPOSITORY:-}"
   [[ "$repository" =~ ^[0-9A-Za-z_.-]+/[0-9A-Za-z_.-]+$ ]] || return 2
@@ -42,11 +122,7 @@ find_published_pages_baseline() {
     refs/heads/gh-pages:refs/remotes/origin/gh-pages || return 2
   manifest="$(git -C "$repo_root" show refs/remotes/origin/gh-pages:manifest.json 2>/dev/null)" \
     || return 2
-  identity="$(printf '%s' "$manifest" | jq -er '
-    select(type == "object" and .name == "tesla-key-esp32" and .layoutVersion == 2 and
-           (.builds | type == "array" and length == 4)) |
-    [.sourceSha, .version] | select(all(.[]; type == "string")) | @tsv
-  ' 2>/dev/null)" || return 2
+  identity="$(printf '%s' "$manifest" | parse_manifest_identity "$python_cmd")" || return 2
   source_sha="${identity%%$'\t'*}"
   version="${identity#*$'\t'}"
   validate_sha "$repo_root" "$source_sha" || return 2
@@ -58,20 +134,8 @@ find_published_pages_baseline() {
   [[ "$tag_sha" == "$source_sha" ]] || return 2
 
   release_json="$(gh api "repos/$repository/releases/latest" 2>/dev/null)" || return 2
-  printf '%s' "$release_json" | jq -e --arg tag "$tag" --arg sha "$source_sha" --arg v "$version" '
-    select(.tag_name == $tag and .target_commitish == $sha and
-           .draft == false and .prerelease == false and .immutable == true) |
-    ["tesla-key-esp32-" + $v + "-merged.bin",
-     "tesla-key-esp32-s3-" + $v + "-merged.bin",
-     "tesla-key-esp32-c3-" + $v + "-merged.bin",
-     "tesla-key-esp32-c6-" + $v + "-merged.bin"] as $expected |
-    . as $release |
-    select(all($expected[]; . as $name |
-      ([$release.assets[] | select(.name == $name)] |
-       length == 1 and (.[0].id | type == "number") and
-       (.[0].size | type == "number" and . > 0) and
-       (.[0].digest | type == "string" and test("^sha256:[0-9a-f]{64}$")))))
-  ' >/dev/null || return 2
+  printf '%s' "$release_json" \
+    | validate_release_json "$python_cmd" "$tag" "$source_sha" "$version" || return 2
   release_metadata_file="$(mktemp "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/tesla-release-metadata.XXXXXX")" \
     || return 2
   if ! printf '%s' "$release_json" > "$release_metadata_file" \
@@ -92,17 +156,11 @@ find_published_pages_baseline() {
   pages_json="$(gh api "repos/$repository/pages" 2>/dev/null)" || return 2
   printf '%s' "$pages_json" \
     | "$python_cmd" "$contract_root/scripts/check-pages-source.py" - >/dev/null || return 2
-  live_base="$(printf '%s' "$pages_json" | jq -er '
-    .html_url | strings | select(test("^https://[^[:space:]?#]+/?$"))
-  ' 2>/dev/null)" || return 2
+  live_base="$(printf '%s' "$pages_json" | parse_pages_url "$python_cmd")" || return 2
   live_url="${live_base%/}/manifest.json?release-relevance=$current_sha"
   live_manifest="$(curl --fail --location --silent --show-error --max-time 20 \
     --retry 2 --retry-all-errors -H 'Cache-Control: no-cache' "$live_url" 2>/dev/null)" || return 2
-  live_identity="$(printf '%s' "$live_manifest" | jq -er '
-    select(type == "object" and .name == "tesla-key-esp32" and .layoutVersion == 2 and
-           (.builds | type == "array" and length == 4)) |
-    [.sourceSha, .version] | select(all(.[]; type == "string")) | @tsv
-  ' 2>/dev/null)" || return 2
+  live_identity="$(printf '%s' "$live_manifest" | parse_manifest_identity "$python_cmd")" || return 2
   live_source="${live_identity%%$'\t'*}"
   live_version="${live_identity#*$'\t'}"
   [[ "$live_source" == "$source_sha" && "$live_version" == "$version" ]] || return 2
@@ -169,11 +227,11 @@ changed_since_release() {
 find_published_dev_baseline() {
   local repo_root="$1" current_sha="$2" repository manifest identity source_sha version
   local pages_json live_base live_url live_manifest live_identity live_source live_version
-  local python_cmd dev_version_re
+  local python_cmd dev_version_re branch_manifest_sha live_manifest_sha
   python_cmd="${SELF_TEST_PYTHON:-python3}"
   dev_version_re='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$'
   validate_sha "$repo_root" "$current_sha" || return 2
-  command -v jq >/dev/null 2>&1 && command -v gh >/dev/null 2>&1 \
+  command -v "$python_cmd" >/dev/null 2>&1 && command -v gh >/dev/null 2>&1 \
     && command -v curl >/dev/null 2>&1 || return 2
   repository="${GITHUB_REPOSITORY:-}"
   [[ "$repository" =~ ^[0-9A-Za-z_.-]+/[0-9A-Za-z_.-]+$ ]] || return 2
@@ -181,43 +239,61 @@ find_published_dev_baseline() {
   git -C "$repo_root" fetch --quiet --tags --force --prune --prune-tags origin || return 2
   git -C "$repo_root" fetch --quiet --no-tags --force origin \
     refs/heads/gh-pages:refs/remotes/origin/gh-pages || return 2
-  manifest="$(git -C "$repo_root" show refs/remotes/origin/gh-pages:dev/manifest.json 2>/dev/null)" \
-    || return 2
-  identity="$(printf '%s' "$manifest" | jq -er '
-    select(type == "object" and .name == "tesla-key-esp32" and .layoutVersion == 2 and
-           (.builds | type == "array" and length == 4)) |
-    [.sourceSha, .version] | select(all(.[]; type == "string")) | @tsv
-  ' 2>/dev/null)" || return 2
+  local tmp_dir
+  tmp_dir="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/tesla-dev-baseline.XXXXXX")" || return 2
+  local branch_manifest_file="$tmp_dir/branch_manifest.json"
+  local live_manifest_file="$tmp_dir/live_manifest.json"
+
+  if ! git -C "$repo_root" show refs/remotes/origin/gh-pages:dev/manifest.json > "$branch_manifest_file" 2>/dev/null; then
+    rm -rf "$tmp_dir"
+    return 2
+  fi
+
+  identity="$(parse_manifest_identity "$python_cmd" < "$branch_manifest_file")" || { rm -rf "$tmp_dir"; return 2; }
   source_sha="${identity%%$'\t'*}"
   version="${identity#*$'\t'}"
-  validate_sha "$repo_root" "$source_sha" || return 2
-  [[ "$version" =~ $dev_version_re ]] || return 2
-  git -C "$repo_root" merge-base --is-ancestor "$source_sha" "$current_sha" || return 2
+  validate_sha "$repo_root" "$source_sha" || { rm -rf "$tmp_dir"; return 2; }
+  [[ "$version" =~ $dev_version_re ]] || { rm -rf "$tmp_dir"; return 2; }
+  git -C "$repo_root" merge-base --is-ancestor "$source_sha" "$current_sha" || { rm -rf "$tmp_dir"; return 2; }
 
-  pages_json="$(gh api "repos/$repository/pages" 2>/dev/null)" || return 2
+  pages_json="$(gh api "repos/$repository/pages" 2>/dev/null)" || { rm -rf "$tmp_dir"; return 2; }
   printf '%s' "$pages_json" \
-    | "$python_cmd" "$contract_root/scripts/check-pages-source.py" - >/dev/null || return 2
-  live_base="$(printf '%s' "$pages_json" | jq -er '
-    .html_url | strings | select(test("^https://[^[:space:]?#]+/?$"))
-  ' 2>/dev/null)" || return 2
+    | "$python_cmd" "$contract_root/scripts/check-pages-source.py" - >/dev/null || { rm -rf "$tmp_dir"; return 2; }
+  live_base="$(printf '%s' "$pages_json" | parse_pages_url "$python_cmd")" || { rm -rf "$tmp_dir"; return 2; }
   live_url="${live_base%/}/dev/manifest.json?release-relevance=$current_sha"
-  live_manifest="$(curl --fail --location --silent --show-error --max-time 20 \
-    --retry 2 --retry-all-errors -H 'Cache-Control: no-cache' "$live_url" 2>/dev/null)" || return 2
-  live_identity="$(printf '%s' "$live_manifest" | jq -er '
-    select(type == "object" and .name == "tesla-key-esp32" and .layoutVersion == 2 and
-           (.builds | type == "array" and length == 4)) |
-    [.sourceSha, .version] | select(all(.[]; type == "string")) | @tsv
-  ' 2>/dev/null)" || return 2
+
+  if ! curl --fail --location --silent --show-error --max-time 20 \
+    --retry 2 --retry-all-errors -H 'Cache-Control: no-cache' "$live_url" -o "$live_manifest_file" 2>/dev/null; then
+    rm -rf "$tmp_dir"
+    return 2
+  fi
+
+  live_identity="$(parse_manifest_identity "$python_cmd" < "$live_manifest_file")" || { rm -rf "$tmp_dir"; return 2; }
   live_source="${live_identity%%$'\t'*}"
   live_version="${live_identity#*$'\t'}"
-  [[ "$live_source" == "$source_sha" && "$live_version" == "$version" ]] || return 2
+  if [[ "$live_source" != "$source_sha" || "$live_version" != "$version" ]]; then
+    rm -rf "$tmp_dir"
+    return 2
+  fi
+
+  branch_manifest_sha="$("$python_cmd" -c 'import hashlib, sys; sys.stdout.write(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "$branch_manifest_file")"
+  live_manifest_sha="$("$python_cmd" -c 'import hashlib, sys; sys.stdout.write(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "$live_manifest_file")"
+  if [[ "$branch_manifest_sha" != "$live_manifest_sha" ]]; then
+    rm -rf "$tmp_dir"
+    return 3
+  fi
 
   # Identity alone proves only that the manifest was published, not that the binaries behind it
   # are. Compare every served part with what the manifest declares.
-  "$python_cmd" "$contract_root/scripts/check-dev-pages.py" --verify-live \
+  if ! "$python_cmd" "$contract_root/scripts/check-dev-pages.py" --verify-live \
     --pages-base-url "${live_base%/}" --version "$version" --source-sha "$source_sha" \
-    --attempts 1 --interval 0 --timeout 20 >/dev/null || return 3
+    --expected-manifest-sha "$branch_manifest_sha" \
+    --attempts 1 --interval 0 --timeout 20 >/dev/null; then
+    rm -rf "$tmp_dir"
+    return 3
+  fi
 
+  rm -rf "$tmp_dir"
   printf '%s\n' "$source_sha"
 }
 
@@ -304,9 +380,8 @@ PY
 
 write_pages_manifest() {
   local path="$1" version="$2" sha="$3"
-  jq -n --arg version "$version" --arg sha "$sha" \
-    '{name:"tesla-key-esp32",layoutVersion:2,sourceSha:$sha,version:$version,builds:[{},{},{},{}]}' \
-    > "$path"
+  printf '{"name":"tesla-key-esp32","layoutVersion":2,"sourceSha":"%s","version":"%s","builds":[{},{},{},{}]}\n' \
+    "$sha" "$version" > "$path"
 }
 
 self_test() {
@@ -316,7 +391,6 @@ self_test() {
   tmp="$(mktemp -d "${TMPDIR:-/tmp}/tesla-release-relevance.XXXXXX")"
   remote="$tmp.remote.git"
   trap 'rm -rf -- "$tmp" "$remote"' RETURN
-  command -v jq >/dev/null 2>&1 || { echo "release relevance self-test needs jq" >&2; return 1; }
   real_python="$(command -v python3)" || return 1
 
   git -C "$tmp" init -q
@@ -354,9 +428,29 @@ self_test() {
     '  *) exit 1 ;;' \
     'esac' > "$fakebin/gh"
   chmod +x "$fakebin/gh"
-  printf '%s\n' '#!/usr/bin/env bash' 'set -eu' \
-    'for arg; do if [[ "$arg" == */dev/manifest.json* ]] && [ -n "${GH_FAKE_LIVE_DEV:-}" ]; then cat "$GH_FAKE_LIVE_DEV"; exit 0; fi; done' \
-    'cat "$GH_FAKE_LIVE"' > "$fakebin/curl"
+  cat > "$fakebin/curl" <<'CURL_WRAPPER'
+#!/usr/bin/env bash
+set -eu
+out=""
+src=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -o) out="$2"; shift 2 ;;
+    *)
+      if [[ "$1" == */dev/manifest.json* ]] && [ -n "${GH_FAKE_LIVE_DEV:-}" ]; then
+        src="$GH_FAKE_LIVE_DEV"
+      fi
+      shift
+      ;;
+  esac
+done
+[ -n "$src" ] || src="$GH_FAKE_LIVE"
+if [ -n "$out" ]; then
+  cat "$src" > "$out"
+else
+  cat "$src"
+fi
+CURL_WRAPPER
   chmod +x "$fakebin/curl"
   cat > "$fakebin/python3" <<'PYTHON_WRAPPER'
 #!/usr/bin/env bash
@@ -367,6 +461,17 @@ case "${1:-}" in
     if [[ "${GH_FAKE_DEV_BYTES_STALE:-0}" == 1 ]]; then
       exit 1
     fi
+    for ((i=1; i<=$#; i++)); do
+      if [[ "${!i}" == "--expected-manifest-sha" ]]; then
+        next=$((i+1))
+        exp_sha="${!next}"
+        actual_sha="$("$GH_FAKE_REAL_PYTHON" -c 'import hashlib, sys; sys.stdout.write(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "${GH_FAKE_LIVE_DEV:-$GH_FAKE_LIVE}")"
+        if [[ "$exp_sha" != "$actual_sha" ]]; then
+          echo "fake check-dev-pages: expected-manifest-sha mismatch: $exp_sha vs $actual_sha" >&2
+          exit 1
+        fi
+      fi
+    done
     exit 0
     ;;
   */check-published-release.py)
@@ -456,18 +561,28 @@ PYTHON_WRAPPER
     echo "fully published A incorrectly made docs-only B release-relevant: $got" >&2; return 1;
   }
 
-  jq '.assets = .assets[:-1]' "$fake_release" > "$fake_release.tmp"
-  mv "$fake_release.tmp" "$fake_release"
+  "$real_python" -c '
+import json, sys
+p = sys.argv[1]
+with open(p, "r+", encoding="utf-8") as f:
+    d = json.load(f)
+    d["assets"] = d["assets"][:-1]
+    f.seek(0); f.truncate(); json.dump(d, f)
+' "$fake_release"
   got="$(PATH="$fakebin:$PATH" GITHUB_REPOSITORY=owner/repo GH_FAKE_RELEASE="$fake_release" \
     GH_FAKE_LIVE="$fake_live" changed_since_release "$tmp" "$sha_b")"
   [[ "$got" == yes ]] || {
     echo "incomplete immutable Release became a publication baseline: $got" >&2; return 1;
   }
   write_fake_release "$fake_release" 1.0.1 "$sha_a"
-  jq '.assets += [{"id":999,"name":"extra.bin","size":1,"digest":
-      "sha256:0000000000000000000000000000000000000000000000000000000000000000"}]' \
-    "$fake_release" > "$fake_release.tmp"
-  mv "$fake_release.tmp" "$fake_release"
+  "$real_python" -c '
+import json, sys
+p = sys.argv[1]
+with open(p, "r+", encoding="utf-8") as f:
+    d = json.load(f)
+    d["assets"].append({"id": 999, "name": "extra.bin", "size": 1, "digest": "sha256:" + "0" * 64})
+    f.seek(0); f.truncate(); json.dump(d, f)
+' "$fake_release"
   got="$(PATH="$fakebin:$PATH" GITHUB_REPOSITORY=owner/repo GH_FAKE_RELEASE="$fake_release" \
     GH_FAKE_LIVE="$fake_live" changed_since_release "$tmp" "$sha_b")"
   [[ "$got" == yes ]] || {
@@ -485,16 +600,28 @@ PYTHON_WRAPPER
   # A published/stable Release is not an authority until the API explicitly reports immutable
   # true. Both false and an absent field must fail closed so older API fixtures or a repository
   # without immutable releases cannot suppress required publication reconciliation.
-  jq '.immutable = false' "$fake_release" > "$fake_release.tmp"
-  mv "$fake_release.tmp" "$fake_release"
+  "$real_python" -c '
+import json, sys
+p = sys.argv[1]
+with open(p, "r+", encoding="utf-8") as f:
+    d = json.load(f)
+    d["immutable"] = False
+    f.seek(0); f.truncate(); json.dump(d, f)
+' "$fake_release"
   got="$(PATH="$fakebin:$PATH" GITHUB_REPOSITORY=owner/repo GH_FAKE_RELEASE="$fake_release" \
     GH_FAKE_LIVE="$fake_live" changed_since_release "$tmp" "$sha_b")"
   [[ "$got" == yes ]] || {
     echo "mutable Release authority failed open to no: $got" >&2; return 1;
   }
   write_fake_release "$fake_release" 1.0.1 "$sha_a"
-  jq 'del(.immutable)' "$fake_release" > "$fake_release.tmp"
-  mv "$fake_release.tmp" "$fake_release"
+  "$real_python" -c '
+import json, sys
+p = sys.argv[1]
+with open(p, "r+", encoding="utf-8") as f:
+    d = json.load(f)
+    d.pop("immutable", None)
+    f.seek(0); f.truncate(); json.dump(d, f)
+' "$fake_release"
   got="$(PATH="$fakebin:$PATH" GITHUB_REPOSITORY=owner/repo GH_FAKE_RELEASE="$fake_release" \
     GH_FAKE_LIVE="$fake_live" changed_since_release "$tmp" "$sha_b")"
   [[ "$got" == yes ]] || {
@@ -661,6 +788,49 @@ PYTHON_WRAPPER
   }
   grep -q "reconciliation stays open" "$tmp/dev-stale.err" || {
     echo "stale dev bytes fell back to the Release baseline instead of failing closed" >&2; return 1;
+  }
+
+  # A dev channel whose manifest SHA differs from the branch manifest (even if sourceSha/version match)
+  # must keep reconciliation open (return 3 -> yes) instead of falling back to Release baseline.
+  printf ' ' >> "$fake_live_dev"
+  got="$(PATH="$fakebin:$PATH" GITHUB_REPOSITORY=owner/repo GH_FAKE_RELEASE="$fake_release" \
+    GH_FAKE_LIVE="$fake_live" GH_FAKE_LIVE_DEV="$fake_live_dev" \
+    changed_since_dev "$tmp" "$sha_d" 2>"$tmp/dev-manifest-mismatch.err")"
+  [[ "$got" == yes ]] || {
+    echo "dev channel with mismatched manifest SHA was accepted as a baseline: $got" >&2; return 1;
+  }
+  grep -q "reconciliation stays open" "$tmp/dev-manifest-mismatch.err" || {
+    echo "mismatched dev manifest SHA fell back to Release baseline instead of keeping reconciliation open" >&2; return 1;
+  }
+  write_pages_manifest "$fake_live_dev" "1.0.1-dev.1" "$sha_c"
+
+  # Integration control: actual Pages builder output (multi-line JSON with final newline)
+  # must be accepted by dev baseline (reconciled, changed_since_dev == no).
+  local fixture_stage="$tmp/fixture_stage"
+  mkdir -p "$fixture_stage"
+  for tgt in esp32 esp32s3 esp32c3 esp32c6; do
+    mkdir -p "$fixture_stage/$tgt"
+    dd if=/dev/zero of="$fixture_stage/$tgt/bootloader.bin" bs=1 count=1024 status=none
+    dd if=/dev/zero of="$fixture_stage/$tgt/partition-table.bin" bs=1 count=1024 status=none
+    dd if=/dev/zero of="$fixture_stage/$tgt/tesla-key-esp32.bin" bs=1 count=4096 status=none
+    "$GH_FAKE_REAL_PYTHON" -c 'import sys; open(sys.argv[1], "wb").write(b"\xff"*8192)' "$fixture_stage/$tgt/ota_data_initial.bin"
+  done
+  local fixture_site
+  fixture_site="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/tesla-key-pages.XXXXXX")"
+  FIRMWARE_STAGE_DIR="$fixture_stage" "$contract_root/scripts/build-pages.sh" "$fixture_site" "1.0.1-dev.1" "$sha_c" >/dev/null
+  cp "$fixture_site/manifest.json" "$fake_live_dev"
+  git -C "$tmp" checkout -q gh-pages
+  cp "$fixture_site/manifest.json" "$tmp/dev/manifest.json"
+  git -C "$tmp" add dev/manifest.json
+  git -C "$tmp" commit -qm "dev-pages-actual-builder"
+  git -C "$tmp" push -q origin gh-pages
+  git -C "$tmp" checkout -q main
+  rm -rf "$fixture_site"
+
+  got="$(PATH="$fakebin:$PATH" GITHUB_REPOSITORY=owner/repo GH_FAKE_RELEASE="$fake_release" \
+    GH_FAKE_LIVE="$fake_live" GH_FAKE_LIVE_DEV="$fake_live_dev" changed_since_dev "$tmp" "$sha_d")"
+  [[ "$got" == no ]] || {
+    echo "actual generated Pages manifest with trailing newline rejected by dev baseline: $got" >&2; return 1;
   }
 
   # 3. New firmware commit E on main should be relevant for dev

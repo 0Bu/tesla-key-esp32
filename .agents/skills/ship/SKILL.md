@@ -245,7 +245,7 @@ an error, an unexpected state or a timeout is a hard stop:
 ```bash
 set -euo pipefail
 : "${DEVICE_IP:?set DEVICE_IP to the deployed board address}"
-CHECK_JSON=$(curl --connect-timeout 5 --max-time 10 -fsS \
+CHECK_JSON=$(curl --connect-timeout 5 --max-time 10 -fsS -X POST \
   "http://$DEVICE_IP/ota/check?ms=$(date +%s000)")
 printf '%s' "$CHECK_JSON" | jq -e '.started == true' >/dev/null || {
   echo "REFUSING: OTA check did not start" >&2; exit 1;

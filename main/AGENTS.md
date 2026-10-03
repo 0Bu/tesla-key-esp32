@@ -20,7 +20,7 @@ It complements the canonical repository policy in [`../AGENTS.md`](../AGENTS.md)
 
 ## 3. Mutex & Concurrency Hierarchy
 
-- Never allocate memory, perform network or flash I/O, emit log lines (`ESP_LOGx`), or call throwing code while holding a shared mutex.
+- Never perform network or flash I/O, emit log lines (`ESP_LOGx`), or call unbounded throwing code while holding a shared mutex; small, bounded struct/string snapshots under leaf locks (`cache_mutex_`, `result_mutex_`, syslog ring) are permitted when protected by `tk::SemGuard` RAII against `bad_alloc`.
 - Strictly adhere to the documented lock pattern: snapshot state under lock, release the mutex immediately, and execute operations on the local copy.
 - Follow the documented ownership model in [`../docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md).
 

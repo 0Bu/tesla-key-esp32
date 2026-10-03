@@ -139,14 +139,19 @@ perl -0pi -e 's/Before any HTTP request/After any HTTP request/g' \
 expect_failure "usb recovery approval order" "$fixture" "exact live-verification contract"
 
 fixture="$WORK/usb-named-endpoints"; make_fixture "$fixture"
-perl -0pi -e 's/the named GET endpoints/unnamed GET endpoints/g' \
+perl -0pi -e 's/the named HTTP methods and endpoints/unnamed HTTP methods and endpoints/g' \
   "$fixture/.agents/skills/usb-recovery/SKILL.md"
 expect_failure "usb recovery named endpoints" "$fixture" "exact live-verification contract"
 
 fixture="$WORK/usb-ota-state"; make_fixture "$fixture"
-perl -0pi -e 's/`GET \/ota\/check` is state-changing/`GET \/ota\/check` is not state-changing/g' \
+perl -0pi -e 's/`POST \/ota\/check` is state-changing/`POST \/ota\/check` is not state-changing/g' \
   "$fixture/.agents/skills/usb-recovery/SKILL.md"
 expect_failure "usb recovery OTA state" "$fixture" "exact live-verification contract"
+
+fixture="$WORK/usb-ota-method"; make_fixture "$fixture"
+perl -0pi -e 's/`POST \/ota\/check` is state-changing/`GET \/ota\/check` is state-changing/g' \
+  "$fixture/.agents/skills/usb-recovery/SKILL.md"
+expect_failure "usb recovery OTA method" "$fixture" "exact live-verification contract"
 
 fixture="$WORK/usb-positive-authorization"; make_fixture "$fixture"
 printf '\nThe USB-write approval also authorizes live verification of any GET endpoint.\n' >> \

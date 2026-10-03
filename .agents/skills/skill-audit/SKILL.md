@@ -110,7 +110,7 @@ the authority for the per-sibling drift check; `$project-review` defers the mech
   device uptime is insufficient and hidden reboots or an unconfirmed rollback cancellation must
   fail closed.
   USB gets only a short bounded boot/reachability retry, never that OTA probation wait.
-- **`$deploy`** — end-to-end delivery lifecycle (commit, push, PR creation, gate verification, canonical squash merge, GitHub Release monitoring, OTA update, and 3-tiered verification). Verify against canonical PR gate rules, standalone merge syntax, RFC 5737 doc IP addresses, fail-closed gate verification via `scripts/stamp-pr-gates.sh`, channel-bound provenance (the exact `MERGE_SHA` run and artifact, never the newest GitHub Release), and the same wall-clock-bound OTA probation monitor as `$ship`.
+- **`$deploy`** — end-to-end delivery lifecycle (commit, push, PR creation, gate verification, canonical squash merge, channel-bound main-run tracking, OTA update, and 3-tiered verification). Dev is the default main-push channel; a stable Release requires a separately authorized manual dispatch. Verify against canonical PR gate rules, standalone merge syntax, RFC 5737 doc IP addresses, fail-closed gate verification via `scripts/stamp-pr-gates.sh`, channel-bound provenance (the exact `MERGE_SHA` run and artifact, never the newest GitHub Release), and the same wall-clock-bound OTA probation monitor as `$ship`.
 - **`$ci-heal`** — post-push CI monitor and merge-readiness gate (`scripts/ci-heal.sh`). Verify that
   it never commits, writes a gate record only from an explicit `--attest <gate>=<evidence>`, and
   requires green CI on the PR head, local `HEAD` equal to it, `MERGEABLE`, an unchanged head before
@@ -264,10 +264,13 @@ For Bash `git push`, the gate also resolves the refspec before trusting the stam
 from the current project of the current `HEAD` to the current branch is supported
 (`git push origin <current-branch>`; safe current-branch `HEAD:<branch>` is equivalent). The sole
 remote must be `origin`, whose one fetch and push URL must agree. Git global/env repo/config
-context, another remote/source/destination, multiple refspecs, tag/all/mirror/delete pushes,
+context, another remote/source/destination, multiple refspecs, tag/all/mirror pushes,
 `push.followTags`, quoted/ambiguous syntax or custom multi-ref push configuration fail closed:
-otherwise a checkbox
-stamped for local HEAD could publish unaudited bytes from another repository or ref.
+otherwise a checkbox stamped for local HEAD could publish unaudited bytes from another repository or ref.
+Standalone non-protected feature branch deletions on origin (`git push origin --delete <branch>` or
+`refs/heads/<branch>`) are permitted without PR gate records when explicitly authorized, provided the
+ref resolves unambiguously to an existing branch in `refs/heads/` and does not target protected branches
+(`main`, `master`, `gh-pages`), tags, or other namespaces.
 
 For a new PR, a separately authorized publisher supplies that record in the one exact body source;
 for an existing PR, a separately authorized PR-body edit precedes push. Duplicate, dynamic, hidden,

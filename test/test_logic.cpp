@@ -2815,6 +2815,73 @@ static void test_http_body() {
     CHECK(http_body_read(buf, sizeof(buf), 0, [&](char*, size_t) -> BodyChunk { return { BodyRecv::Data, 0 }; }) == -1);
     CHECK(http_body_read(nullptr, 8, 4, [&](char*, size_t) -> BodyChunk { return { BodyRecv::Data, 0 }; }) == -1);
 
+    // Progress cannot renew the total budget, with or without recoverable timeouts.
+    // Exercise the actual reader over the full production body size without real sleeps.
+    for (int timeouts_per_byte : {0, BODY_MAX_IDLE}) {
+        char slow[2049];
+        std::memset(slow, '!', sizeof(slow));
+        uint64_t ms = 0;
+        int pending_timeouts = timeouts_per_byte;
+        int calls = 0;
+        int received = http_body_read(slow, sizeof(slow), sizeof(slow) - 1,
+            [&](char* dst, size_t) -> BodyChunk {
+                ++calls;
+                if (pending_timeouts > 0) {
+                    --pending_timeouts;
+                    ms += BODY_RECV_TIMEOUT_SECONDS * 1000;
+                    return {BodyRecv::Timeout, 0};
+                }
+                ms += 4900;
+                *dst = 'x';
+                pending_timeouts = timeouts_per_byte;
+                return {BodyRecv::Data, 1};
+            }, [&]() -> uint64_t { return ms; });
+        CHECK(received == -1);
+        CHECK(calls == 4);
+        CHECK(ms >= BODY_MAX_DURATION_MS);
+        CHECK(ms < BODY_MAX_DURATION_MS + BODY_RECV_TIMEOUT_SECONDS * 1000);
+        CHECK(slow[sizeof(slow) - 1] == '!');
+    }
+    // The final byte must itself arrive before the deadline; late completeness is failure.
+    for (uint64_t elapsed : {BODY_MAX_DURATION_MS - 1, BODY_MAX_DURATION_MS,
+                             BODY_MAX_DURATION_MS + 1}) {
+        uint64_t ms = UINT64_MAX - 10000;  // unsigned elapsed arithmetic also survives rollover
+        int r = http_body_read(buf, sizeof(buf), 1,
+            [&](char* dst, size_t) -> BodyChunk {
+                ms += elapsed;
+                *dst = 'x';
+                return {BodyRecv::Data, 1};
+            }, [&]() -> uint64_t { return ms; });
+        CHECK(r == (elapsed < BODY_MAX_DURATION_MS ? 1 : -1));
+    }
+    // If time runs out between receives, do not start another blocking socket call.
+    {
+        int clock_calls = 0, recv_calls = 0;
+        int r = http_body_read(buf, sizeof(buf), 2,
+            [&](char* dst, size_t) -> BodyChunk {
+                ++recv_calls; *dst = 'x'; return {BodyRecv::Data, 1};
+            }, [&]() -> uint64_t {
+                return ++clock_calls < 4 ? 0 : BODY_MAX_DURATION_MS;
+            });
+        CHECK(r == -1);
+        CHECK(recv_calls == 1);
+    }
+    // Allocation ownership is unchanged when a complete body arrives too late.
+    {
+        int frees = 0;
+        uint64_t ms = 0;
+        auto r = http_body_receive(4, 8,
+            [](size_t n) -> void* { return std::malloc(n); },
+            [&](void* p) { ++frees; std::free(p); },
+            [&](char* dst, size_t n) -> BodyChunk {
+                std::memset(dst, 'x', n); ms = BODY_MAX_DURATION_MS;
+                return {BodyRecv::Data, n};
+            }, [&]() -> uint64_t { return ms; });
+        CHECK(r.status == BodyReadStatus::ReceiveFailed);
+        CHECK(r.data == nullptr);
+        CHECK(frees == 1);
+    }
+
     // Captive-portal production accepts exactly 1024 wire bytes in fixed storage with a separate
     // terminator byte. The next wire byte is rejected before recv.
     {
@@ -4315,7 +4382,7 @@ static void test_http_route() {
     using tk::HttpRoute;
     using tk::HttpVerb;
 
-    static_assert(tk::kFixedHttpRoutes.size() == 23,
+    static_assert(tk::kFixedHttpRoutes.size() == 26,
                   "extend the complete fixed-route matrix when a route is added");
     for (const tk::FixedHttpRoute& fixed : tk::kFixedHttpRoutes) {
         CHECK(tk::classify_http_route(fixed.verb, fixed.path) == fixed.route);
@@ -4905,6 +4972,54 @@ static void test_http_origin() {
     // A key that merely CONTAINS the name is still a different parameter on both sides.
     CHECK(!tk::mutation_origin_required(false, "/diag?XCLEAR=1"));
     CHECK(!tk::mutation_origin_required(false, "/diag?CLEARED=1"));
+
+    // F02: State-changing requests via mutation_request_allowed()
+    // POST with no headers (curl/evcc) is allowed
+    CHECK(tk::mutation_request_allowed(true, "", "", "", "", false, ""));
+    CHECK(tk::mutation_request_allowed(true, "tesla-key-esp32.local", "", "", "", false, ""));
+
+    // Mutating GET with no headers (Chromium plain-HTTP LAN behavior without Referer) is REJECTED
+    CHECK(!tk::mutation_request_allowed(false, "", "", "", "", false, ""));
+    CHECK(!tk::mutation_request_allowed(false, "tesla-key-esp32.local", "", "", "", false, ""));
+    CHECK(!tk::mutation_request_allowed(false, "192.0.2.42", "", "", "", false, "192.0.2.42"));
+
+    // Mutating GET with custom header X-Requested-With is allowed if host is owned
+    CHECK(tk::mutation_request_allowed(false, "tesla-key-esp32.local", "", "", "", true, ""));
+    CHECK(tk::mutation_request_allowed(false, "192.0.2.42", "", "", "", true, "192.0.2.42"));
+    CHECK(!tk::mutation_request_allowed(false, "attacker.example", "", "", "", true, "192.0.2.42"));
+
+    // Mutating GET with same-origin Referer is allowed
+    CHECK(tk::mutation_request_allowed(false, "tesla-key-esp32.local", "", "",
+                                       "http://tesla-key-esp32.local/diag", false, ""));
+    CHECK(tk::mutation_request_allowed(false, "192.0.2.42", "", "",
+                                       "http://192.0.2.42/setup", false, "192.0.2.42"));
+
+    // Mutating GET with foreign/cross-origin Referer is REJECTED
+    CHECK(!tk::mutation_request_allowed(false, "tesla-key-esp32.local", "", "",
+                                        "http://evil.example/page", false, ""));
+    CHECK(!tk::mutation_request_allowed(false, "192.0.2.42", "", "",
+                                        "http://attacker.example/", false, "192.0.2.42"));
+    CHECK(!tk::mutation_request_allowed(false, "tesla-key-esp32.local", "", "",
+                                        "not-a-url", false, ""));
+
+    // Mutating GET with Sec-Fetch-Site
+    CHECK(tk::mutation_request_allowed(false, "tesla-key-esp32.local", "", "same-origin", "", false, ""));
+    CHECK(!tk::mutation_request_allowed(false, "tesla-key-esp32.local", "", "cross-site", "", false, ""));
+
+    // Null origin is rejected for both GET and POST
+    CHECK(!tk::mutation_request_allowed(true, "tesla-key-esp32.local", "null", "same-origin", "", false, ""));
+    CHECK(!tk::mutation_request_allowed(false, "tesla-key-esp32.local", "null", "same-origin", "", false, ""));
+
+    // Foreign origin must NEVER pass on GET or POST, even with same-origin Referer, custom header, or Sec-Fetch-Site
+    CHECK(!tk::mutation_request_allowed(false, "tesla-key-esp32.local", "http://evil.example", "",
+                                        "http://tesla-key-esp32.local/diag", false, ""));
+    CHECK(!tk::mutation_request_allowed(false, "tesla-key-esp32.local", "http://evil.example", "", "", true, ""));
+    CHECK(!tk::mutation_request_allowed(false, "tesla-key-esp32.local", "http://evil.example", "same-origin", "", false, ""));
+    CHECK(!tk::mutation_request_allowed(true, "tesla-key-esp32.local", "http://evil.example", "", "", false, ""));
+
+    // Same-origin Origin passes on both GET and POST
+    CHECK(tk::mutation_request_allowed(false, "tesla-key-esp32.local", "http://tesla-key-esp32.local", "", "", false, ""));
+    CHECK(tk::mutation_request_allowed(true, "tesla-key-esp32.local", "http://tesla-key-esp32.local", "", "", false, ""));
 }
 
 // ─── Negotiated ATT payload size (logic/ble_chunk.hpp) ────────────────────────────────────────
@@ -5433,7 +5548,8 @@ static void test_config_store() {
 
     // A single flipped bit must be REFUSED, not read as a slightly different configuration. That
     // is the whole point of the CRC: a torn or decaying entry has to fail loudly enough for the
-    // caller to fall back to the legacy keys, instead of the device joining a network nobody set.
+    // caller to refuse the invalid blob (failing closed rather than falling back to stale legacy
+    // keys or joining a network nobody set).
     tk::ConfigBlobBuffer bad = buf;
     bad[10] = (uint8_t)(bad[10] ^ 0x01);
     tk::ConfigBlob nope;
@@ -6019,6 +6135,16 @@ static void test_rx_framing() {
 }
 
 static void test_ble_dispatcher() {
+    for (bool encrypted : {false, true}) {
+        for (bool session_ready : {false, true}) {
+            for (bool has_request_hash : {false, true}) {
+                const auto admission = tk::vcsec_payload_admission(encrypted, session_ready, has_request_hash);
+                if (!encrypted) CHECK(admission == tk::VcsecPayloadAdmission::Plaintext);
+                else if (session_ready && has_request_hash) CHECK(admission == tk::VcsecPayloadAdmission::Decrypt);
+                else CHECK(admission == tk::VcsecPayloadAdmission::Drop);
+            }
+        }
+    }
     using D = tk::BleDomain;
     using R = tk::DispatchDropReason;
 

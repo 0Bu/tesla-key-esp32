@@ -6,8 +6,8 @@
 #
 # Usage: scripts/run-mock-tests.sh [--require-all]
 # Requires: a C++17 host compiler (g++/clang++); cmake is used when present, with a
-# direct-compiler fallback otherwise (see test/CMakeLists.txt, whose targets and flags the
-# fallback mirrors). See test/README.md.
+# direct-compiler fallback otherwise in normal mode (see test/CMakeLists.txt, whose targets
+# and flags the fallback mirrors; --require-all strictly requires cmake). See test/README.md.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."

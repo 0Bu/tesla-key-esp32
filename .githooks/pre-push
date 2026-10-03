@@ -58,21 +58,37 @@ if [ "${#updates[@]}" -gt 0 ]; then
 for update in "${updates[@]}"; do
   read -r local_ref local_sha remote_ref remote_sha <<< "$update"
 
-  # Block any attempt to update destination main branch
+  # Skip non-protected branch deletions for PR policy and firmware diff
+  if [[ "$local_sha" == "$zero_sha" ]]; then
+    if [[ "$remote_ref" != refs/heads/* ]]; then
+      echo "BLOCKED by pre-push: deletion of non-branch ref '$remote_ref' is prohibited." >&2
+      exit 1
+    fi
+    case "$remote_ref" in
+      refs/heads/main|refs/heads/master|refs/heads/gh-pages|refs/heads/HEAD)
+        echo "BLOCKED by pre-push: deletion of protected branch '$remote_ref' is prohibited." >&2
+        exit 1
+        ;;
+    esac
+    continue
+  fi
+
+  # Block any attempt to update destination main or protected branches
   if [[ "$remote_ref" == "refs/heads/main" || "$remote_ref" == "main" ]]; then
     echo "BLOCKED by pre-push: direct push to destination main branch is prohibited; open a pull request instead." >&2
     exit 1
   fi
+  case "$remote_ref" in
+    refs/heads/master|master|refs/heads/gh-pages|gh-pages|refs/heads/HEAD|HEAD)
+      echo "BLOCKED by pre-push: direct push to destination protected branch '$remote_ref' is prohibited; open a pull request instead." >&2
+      exit 1
+      ;;
+  esac
 
   # Block any attempt to push from local main branch
-  if [[ "$local_ref" == "refs/heads/main" || "$local_ref" == "main" ]]; then
+  if [[ "$local_ref" == "refs/heads/main" || "$local_ref" == "main" || "$local_ref" == "refs/heads/HEAD" || "$local_ref" == "HEAD" ]]; then
     echo "BLOCKED by pre-push: direct push to main branch is prohibited; open a pull request instead." >&2
     exit 1
-  fi
-
-  # Skip branch deletions for PR policy and firmware diff
-  if [[ "$local_sha" == "$zero_sha" ]]; then
-    continue
   fi
 
   # Require pushed local commit to match current local HEAD

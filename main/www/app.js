@@ -34,13 +34,17 @@ function esc(s){return String(s).replace(/[&<>"']/g,function(c){return{'&':'&amp
 function num(x){ if(x==null||x==='') return null; x=+x; return isFinite(x)?x:null; }   // absent/null/'' stay absent (+null is 0)
 
 function requestJson(url,options){
-  return fetch(url,options).then(function(r){
+  var opts=Object.assign({},options||{});
+  opts.headers=Object.assign({'X-Requested-With':'XMLHttpRequest'},opts.headers||{});
+  return fetch(url,opts).then(function(r){
     if(!r||!r.ok){ var e=new Error('HTTP '+(r&&r.status!=null?r.status:'error')); e.status=r&&r.status; throw e; }
     return r.json();
   });
 }
 function requestJsonResult(url,options){
-  return fetch(url,options).then(function(r){
+  var opts=Object.assign({},options||{});
+  opts.headers=Object.assign({'X-Requested-With':'XMLHttpRequest'},opts.headers||{});
+  return fetch(url,opts).then(function(r){
     return r.json().catch(function(){ return null; }).then(function(j){
       return {ok:!!(r&&r.ok), status:r?r.status:0, json:j};
     });

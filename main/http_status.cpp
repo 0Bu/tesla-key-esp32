@@ -387,7 +387,7 @@ esp_err_t handle_coredump(GuardedReq rq) {
     }
 
     size_t addr = 0, size = 0;
-    if (esp_core_dump_image_get(&addr, &size) != ESP_OK || size == 0) {
+    if (!tk::diag_crash_coredump_present() || esp_core_dump_image_get(&addr, &size) != ESP_OK || size == 0) {
         tk::JsonBuilder json;
         // 404 with a reason rather than an empty body: on a device flashed before the coredump
         // partition existed this is the PERMANENT answer, and "no coredump partition" is a very

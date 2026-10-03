@@ -11,7 +11,8 @@
 #   scripts/e2e_evcc.sh                 # read-only: status, /api/proxy/1/version, vehicle_data,
 #                                       #   body_controller (safe)
 #   RUN_COMMANDS=1 scripts/e2e_evcc.sh  # + wake_up, set_charging_amps, set_charge_limit (save/restore),
-#                                       #   door_lock/door_unlock (negative role test — MUST be refused)
+#                                       #   door_lock/door_unlock (negative role test — requires an
+#                                       #   explicit refusal; ambiguous authentication failures fail)
 #   ALLOW_CHARGE_TOGGLE=1 RUN_COMMANDS=1 scripts/e2e_evcc.sh   # + charge_start/charge_stop (physical!)
 #   RUN_ALL_COMMANDS=1 RUN_COMMANDS=1 scripts/e2e_evcc.sh      # + every remaining firmware command
 #                                       #   (charge_port, flash_lights, honk_horn, climate, sentry,
@@ -45,12 +46,379 @@ ok()   { echo "  PASS  $*"; pass=$((pass+1)); }
 bad()  { echo "  FAIL  $*"; fail=$((fail+1)); }
 hdr()  { echo; echo "── $* ──────────────────────────────────────────────" | cut -c1-78; }
 
+# kex CMD... — stubbed or pod-executed shell snippet
+kex() { kubectl exec -n "$EVCC_NS" "$POD" -- sh -c "$1"; }
+
+cmd() {
+  local name="$1" suf="$2" body="${3:-}" mode="${4:-}"
+  local out d rest code r
+  # Use a single nc request so that 5xx/4xx errors are not double-sent (wget -qO- discards
+  # non-200 responses and caused unintentional duplicate command execution on failures).
+  out="$(kex "s=\$(date +%s%3N); host=\$(echo '$ESC_BASE' | sed -e 's,^http://,,' -e 's,/.*$,,' -e 's,:.*$,,'); port=\$(echo '$ESC_BASE' | sed -n 's,^http://[^:]*:\([0-9]*\).*,\1,p'); [ -z \"\$port\" ] && port=80; raw=\$(printf 'POST /api/1/vehicles/$ESC_VIN/command/$suf HTTP/1.1\r\nHost: %s\r\nContent-Type: application/json\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s' \"\$host\" \"${#body}\" '$body' | nc -w $TIMEOUT \"\$host\" \"\$port\" 2>/dev/null); code=\$(echo \"\$raw\" | head -n1 | cut -d' ' -f2); b=\$(echo \"\$raw\" | sed -e '1,/^\r\{0,1\}\$/d'); e=\$(date +%s%3N); echo \"\$((e-s))|\$code|\$b\"")"
+  d="${out%%|*}"; rest="${out#*|}"; code="${rest%%|*}"; r="${rest#*|}"
+  echo "  ${name}: ${d}ms (HTTP ${code:-none})  ->  $r"
+  local decision status msg
+  decision="$(python3 -c '
+import json, sys
+
+name = sys.argv[1]
+mode = sys.argv[2]
+code = sys.argv[3]
+raw = sys.argv[4]
+
+if not raw or not code:
+    if mode == "reject":
+        print(f"FAIL|{name}: no signed reply (transport timeout) — cannot confirm role boundary")
+    else:
+        print(f"FAIL|{name} failed/timed out (no response)")
+    sys.exit(0)
+
+def unique_object(pairs):
+    obj = {}
+    for key, value in pairs:
+        if key in obj:
+            raise ValueError("duplicate response key")
+        obj[key] = value
+    return obj
+
+def reject_constant(value):
+    raise ValueError("non-JSON numeric constant")
+
+try:
+    data = json.loads(raw, object_pairs_hook=unique_object, parse_constant=reject_constant)
+except Exception:
+    if mode == "reject":
+        print(f"FAIL|{name}: invalid rejection format (malformed JSON): {raw}")
+    elif mode == "soft":
+        print(f"FAIL|{name}: malformed JSON response (HTTP {code}): {raw}")
+    else:
+        print(f"FAIL|{name} failed (malformed JSON, HTTP {code}): {raw}")
+    sys.exit(0)
+
+res_obj = None
+if isinstance(data, dict):
+    if "response" in data:
+        if isinstance(data["response"], dict) and not any(key in data for key in ["result", "reason"]):
+            res_obj = data["response"]
+    else:
+        res_obj = data
+
+if not res_obj or "result" not in res_obj or not isinstance(res_obj["result"], bool):
+    if mode == "reject":
+        print(f"FAIL|{name}: invalid rejection format (missing boolean result): {raw}")
+    elif mode == "soft":
+        print(f"FAIL|{name}: invalid rejection format (HTTP {code} without result:false): {raw}")
+    else:
+        print(f"FAIL|{name} failed/timed out (HTTP {code}): {raw}")
+    sys.exit(0)
+
+result = res_obj["result"]
+
+if result is True:
+    if mode == "reject":
+        print(f"FAIL|{name} was ACCEPTED — key has more than Charging-Manager privileges (role-boundary regression!)")
+    elif code != "200":
+        print(f"FAIL|{name} returned HTTP {code} with result:true: {raw}")
+    else:
+        print(f"PASS|{name} executed")
+    sys.exit(0)
+
+# result is False:
+reason = res_obj.get("reason")
+if not isinstance(reason, str) or not reason.strip():
+    print(f"FAIL|{name}: invalid failure reason (expected a nonempty string): {raw}")
+    sys.exit(0)
+reason_l = reason.strip().lower()
+
+# The firmware also emits this text before sending the command, for missing,
+# empty or invalid SessionInfo HMACs. It cannot prove a vehicle role refusal.
+if "authentication failed" in reason_l:
+    print(f"FAIL|{name}: unverified authentication outcome — cannot confirm vehicle refusal: {raw}")
+    sys.exit(0)
+
+role_refusals = {"not authorized", "unauthorized", "denied"}
+if mode == "reject":
+    if code != "502":
+        print(f"FAIL|{name}: HTTP {code} (expected 502 from vehicle rejection) — cannot confirm role boundary")
+        sys.exit(0)
+    if any(sub in reason_l for sub in ["not reachable", "unreachable", "timed out", "timeout", "vehicle asleep"]):
+        print(f"FAIL|{name}: car unreachable (not actually refused) — cannot confirm role boundary; re-run with the car awake")
+    elif reason_l in role_refusals:
+        print(f"PASS|{name} correctly refused by the car (Charging-Manager role boundary holds)")
+    else:
+        print(f"FAIL|{name}: rejection reason not authenticated vehicle refusal: {raw}")
+    sys.exit(0)
+
+if mode == "soft":
+    if code != "502":
+        print(f"FAIL|{name} failed locally (HTTP {code}): {raw}")
+        sys.exit(0)
+    local_or_transport = [
+        "not reachable",
+        "unreachable",
+        "timed out",
+        "timeout",
+        "vehicle asleep",
+        "service not ready",
+        "runtime unavailable",
+        "runtime key is not verified",
+        "out of memory",
+        "invalid uri",
+        "vin mismatch",
+        "unknown command",
+        "request body",
+        "command queue full",
+        "command enqueue failed",
+        "command completion unavailable",
+        "command deadline exhausted",
+        "connection lost",
+        "payload build failed",
+    ]
+    vehicle_responses = {
+        "key not on whitelist - pairing required",
+        "command rejected by vehicle",
+        "vcsec command failed with error status",
+        "infotainment action failed",
+        "already_closed",
+        "already_open",
+        "already_set",
+        "complete",
+        "could_not_reach_service",
+        "not authorized",
+        "unauthorized",
+        "denied",
+        "not_charging",
+        "charging",
+        "is_charging",
+        "charging_port_closed",
+    }
+    action_reason = reason_l
+    for prefix in ["infotainment action failed: ", "action failed: "]:
+        if reason_l.startswith(prefix):
+            action_reason = reason_l[len(prefix):]
+            break
+    if any(sub in reason_l for sub in local_or_transport):
+        print(f"FAIL|{name}: proxy or reachability error: {raw}")
+    elif action_reason in vehicle_responses:
+        print(f"NOTE|{name} returned false (HTTP {code}) — car-side rejection (depends on live state), not a proxy fault")
+    else:
+        print(f"FAIL|{name}: unverified failure outcome (HTTP {code}): {raw}")
+    sys.exit(0)
+
+# strict mode with result=False
+print(f"FAIL|{name} failed/timed out (HTTP {code}): {raw}")
+' "$name" "$mode" "${code:-}" "$r")"
+
+  status="${decision%%|*}"
+  msg="${decision#*|}"
+  case "$status" in
+    PASS) ok "$msg" ;;
+    FAIL) bad "$msg" ;;
+    NOTE) echo "  NOTE  $msg" ;;
+    *) bad "$name: internal error evaluating response ($decision)" ;;
+  esac
+}
+
+self_test() {
+  local ESC_BASE="http://127.0.0.1" ESC_VIN="TESTVIN" TIMEOUT=5
+  local mock_code="" mock_body=""
+
+  kex() {
+    echo "10|$mock_code|$mock_body"
+  }
+
+  expect_fail() {
+    local test_mode="$1" test_name="$2"
+    local prev_fail=$fail
+    cmd "$test_name" "dummy" "{}" "$test_mode" >/dev/null 2>&1 || true
+    if [ "$fail" -le "$prev_fail" ]; then
+      echo "self_test FAILED: expected failure for $test_name ($test_mode), but fail count did not increase" >&2
+      exit 1
+    fi
+  }
+
+  expect_pass() {
+    local test_mode="$1" test_name="$2"
+    local prev_fail=$fail
+    local prev_pass=$pass
+    cmd "$test_name" "dummy" "{}" "$test_mode" >/dev/null 2>&1 || true
+    if [ "$fail" -ne "$prev_fail" ]; then
+      echo "self_test FAILED: expected pass for $test_name ($test_mode), but fail count increased" >&2
+      exit 1
+    fi
+    if [ "$test_mode" != soft ] && [ "$pass" -ne $((prev_pass + 1)) ]; then
+      echo "self_test FAILED: expected a counted pass for $test_name ($test_mode)" >&2
+      exit 1
+    fi
+  }
+
+  # Soft mode tests:
+  # 1. HTTP 400, invalid JSON -> must fail
+  mock_code="400"; mock_body='{"error":"invalid JSON"}'
+  expect_fail "soft" "soft HTTP 400 invalid JSON"
+
+  # 2. HTTP 503, out of memory -> must fail
+  mock_code="503"; mock_body='{"error":"out of memory"}'
+  expect_fail "soft" "soft HTTP 503 out of memory"
+
+  # 3. HTTP 502, vehicle service not ready -> must fail
+  mock_code="502"; mock_body='{"result":false,"reason":"vehicle service not ready"}'
+  expect_fail "soft" "soft HTTP 502 vehicle service not ready"
+
+  # 4. HTTP 502, locally generated vehicle asleep -> must fail
+  mock_code="502"; mock_body='{"result":false,"reason":"vehicle asleep"}'
+  expect_fail "soft" "soft HTTP 502 vehicle asleep"
+
+  # 5. Soft mode with harmless vehicle-side rejection -> passes (softened)
+  mock_code="502"; mock_body='{"result":false,"reason":"already_closed"}'
+  expect_pass "soft" "soft HTTP 502 harmless vehicle rejection"
+
+  mock_code="502"; mock_body='{"response":{"result":false,"reason":"complete"}}'
+  expect_pass "soft" "soft HTTP 502 vehicle charging complete"
+
+  mock_code="502"; mock_body='{"response":{"result":false,"reason":"command rejected by vehicle"}}'
+  expect_pass "soft" "soft HTTP 502 command rejected by vehicle"
+
+  mock_code="502"; mock_body='{"response":{"result":false,"reason":"action failed: charging_port_closed"}}'
+  expect_pass "soft" "soft HTTP 502 action failed: charging_port_closed"
+
+  mock_code="502"; mock_body='{"response":{"result":false,"reason":"key not on whitelist - pairing required"}}'
+  expect_pass "soft" "soft HTTP 502 key not on whitelist"
+
+  # Actual local producer reasons from vehicle_commands.cpp / http_api.cpp -> must fail!
+  mock_code="502"; mock_body='{"response":{"result":false,"reason":"command queue full"}}'
+  expect_fail "soft" "soft HTTP 502 command queue full"
+
+  mock_code="502"; mock_body='{"response":{"result":false,"reason":"command enqueue failed"}}'
+  expect_fail "soft" "soft HTTP 502 command enqueue failed"
+
+  mock_code="502"; mock_body='{"response":{"result":false,"reason":"command completion unavailable"}}'
+  expect_fail "soft" "soft HTTP 502 command completion unavailable"
+
+  mock_code="502"; mock_body='{"response":{"result":false,"reason":"command deadline exhausted"}}'
+  expect_fail "soft" "soft HTTP 502 command deadline exhausted"
+
+  mock_code="502"; mock_body='{"response":{"result":false,"reason":"command deadline exhausted waiting for another request"}}'
+  expect_fail "soft" "soft HTTP 502 command deadline exhausted waiting for request"
+
+  mock_code="502"; mock_body='{"response":{"result":false,"reason":"runtime key is not verified; reboot or regenerate required"}}'
+  expect_fail "soft" "soft HTTP 502 runtime key not verified"
+
+  # Malformed JSON in soft, reject, and strict modes -> must fail!
+  mock_code="502"; mock_body='{"response":{"result":false'
+  expect_fail "soft" "soft HTTP 502 truncated JSON"
+
+  mock_code="502"; mock_body='{"response":{"result":false'
+  expect_fail "reject" "reject HTTP 502 truncated JSON"
+
+  mock_code="200"; mock_body='{"response":{"result":true'
+  expect_fail "" "strict HTTP 200 truncated JSON"
+
+  # Unknown failure outcome in soft mode -> must fail!
+  mock_code="502"; mock_body='{"result":false,"reason":"mystery failure"}'
+  expect_fail "soft" "soft HTTP 502 unknown failure reason"
+
+  mock_code="502"; mock_body='{"response":{"result":false,"reason":null}}'
+  expect_fail "soft" "soft HTTP 502 null reason"
+
+  # Authentication errors are also emitted locally before a command payload.
+  mock_code="502"; mock_body='{"result":false,"reason":"authentication failed"}'
+  expect_fail "reject" "reject HTTP 502 ambiguous authentication failure"
+  expect_fail "soft" "soft HTTP 502 ambiguous authentication failure"
+
+  mock_code="502"; mock_body='{"response":{"result":false,"reason":"signed message authentication failed"}}'
+  expect_fail "reject" "reject HTTP 502 signed message authentication failure"
+  expect_fail "soft" "soft HTTP 502 signed message authentication failure"
+
+  mock_code="502"; mock_body='{"response":{"result":false,"reason":"VCSEC authentication failed"}}'
+  expect_fail "reject" "reject HTTP 502 VCSEC authentication failure"
+  expect_fail "soft" "soft HTTP 502 VCSEC authentication failure"
+
+  # Schema-invalid and mixed-scope reasons must never certify a vehicle response.
+  for mock_body in \
+    '{"response":{"result":false,"reason":{"authentication failed":true}}}' \
+    '{"response":{"result":false,"reason":["denied"]}}' \
+    '{"response":{"result":false,"reason":null},"reason":"denied"}' \
+    '{"response":{"result":false,"reason":"denied"},"result":true}' \
+    '{"response":null,"result":false,"reason":"denied"}' \
+    '{"result":false,"reason":"denied","reason":"not authorized"}'; do
+    expect_fail "reject" "reject invalid reason schema/scope"
+    expect_fail "soft" "soft invalid reason schema/scope"
+  done
+
+  mock_body='{"result":false,"reason":"authorization denied response was not authenticated"}'
+  expect_fail "reject" "reject unverified refusal substring"
+  expect_fail "soft" "soft unverified refusal substring"
+
+  mock_body='{"result":false,"reason":"local verification failed after charging request"}'
+  expect_fail "soft" "soft local error containing charging"
+
+  mock_body='{"response":{"result":false,"reason":"Infotainment action failed"}}'
+  expect_pass "soft" "soft explicit CarServer error without optional reason"
+  expect_fail "reject" "reject CarServer error without a role reason"
+
+  for constant in NaN Infinity -Infinity; do
+    mock_body="{\"result\":false,\"reason\":\"denied\",\"extra\":$constant}"
+    expect_fail "reject" "reject non-JSON numeric constant"
+    expect_fail "soft" "soft non-JSON numeric constant"
+    mock_code="200"; mock_body="{\"result\":true,\"extra\":$constant}"
+    expect_fail "" "strict non-JSON numeric constant"
+    mock_code="502"
+  done
+
+  # Reject mode needs an explicit refusal rather than a substring match.
+
+  mock_code="502"; mock_body='{"result":false,"reason":"not authorized"}'
+  expect_pass "reject" "reject HTTP 502 not authorized"
+
+  mock_code="502"; mock_body='{"result":false,"reason":"unauthorized"}'
+  expect_pass "reject" "reject HTTP 502 unauthorized"
+
+  mock_code="502"; mock_body='{"result":false,"reason":"denied"}'
+  expect_pass "reject" "reject HTTP 502 denied"
+
+  # 7. Reject mode with local 400, 503, or reachability timeout -> must fail!
+  mock_code="400"; mock_body='{"error":"bad request"}'
+  expect_fail "reject" "reject HTTP 400"
+
+  mock_code="503"; mock_body='{"error":"out of memory"}'
+  expect_fail "reject" "reject HTTP 503"
+
+  mock_code="502"; mock_body='{"result":false,"reason":"not reachable"}'
+  expect_fail "reject" "reject HTTP 502 not reachable"
+
+  mock_code="502"; mock_body='{"result":false,"reason":"vehicle asleep"}'
+  expect_fail "reject" "reject HTTP 502 vehicle asleep"
+
+  # 8. Success execution (HTTP 200 with result:true) in default mode -> passes
+  mock_code="200"; mock_body='{"result":true}'
+  expect_pass "" "normal HTTP 200 result:true"
+
+  mock_code="200"; mock_body='{"response":{"result":true,"command":"wake_up","vin":"TESTVIN"}}'
+  expect_pass "" "normal HTTP 200 nested response result:true"
+
+  mock_body='{"response":{"result":false,"result":true}}'
+  expect_fail "" "strict HTTP 200 duplicate result"
+
+  # Non-200 status with result:true must fail in strict mode
+  mock_code="502"; mock_body='{"result":true}'
+  expect_fail "" "strict HTTP 502 result:true"
+
+  mock_code="500"; mock_body='{"result":true}'
+  expect_fail "" "strict HTTP 500 result:true"
+
+  echo "e2e_evcc self-test: PASS"
+  return 0
+}
+
+if [ "${1:-}" = "--self-test" ]; then
+  self_test
+  exit 0
+fi
+
 POD="$(kubectl get pod -n "$EVCC_NS" -l app=evcc -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)"
 [ -z "$POD" ] && { echo "FATAL: no evcc pod found in ns/$EVCC_NS"; exit 2; }
 
-# kex CMD... — run a shell snippet inside the evcc pod (defined early so VIN discovery below
-# runs over the same real pod→LAN→ESP32 path the rest of the test uses).
-kex() { kubectl exec -n "$EVCC_NS" "$POD" -- sh -c "$1"; }
 
 # Discover the VIN from the device itself unless the caller pinned one. The firmware is the
 # single source of truth (GET /status → "vin"), so no real vehicle identifier has to be
@@ -157,38 +525,7 @@ echo "$BC" | grep -q '"result":true' && ok "body_controller_state ok" || echo " 
 #                non-reachability reason); result:true is a security regression (FAIL);
 #                a reachability/timeout reason is FAIL "can't confirm — re-run awake".
 #                This is what stops a sleeping car from false-PASSing.
-cmd() {
-  local name="$1" suf="$2" body="${3:-}" mode="${4:-}"
-  local out d r
-  # Use a single nc request so that 5xx/4xx errors are not double-sent (wget -qO- discards
-  # non-200 responses and caused unintentional duplicate command execution on failures).
-  out="$(kex "s=\$(date +%s%3N); host=\$(echo '$ESC_BASE' | sed -e 's,^http://,,' -e 's,/.*$,,' -e 's,:.*$,,'); port=\$(echo '$ESC_BASE' | sed -n 's,^http://[^:]*:\([0-9]*\).*,\1,p'); [ -z \"\$port\" ] && port=80; r=\$(printf 'POST /api/1/vehicles/$ESC_VIN/command/$suf HTTP/1.1\r\nHost: %s\r\nContent-Type: application/json\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s' \"\$host\" \"${#body}\" '$body' | nc -w $TIMEOUT \"\$host\" \"\$port\" 2>/dev/null | sed -e '1,/^\r\{0,1\}$/d'); e=\$(date +%s%3N); echo \"\$((e-s))|\$r\"")"
-  d="${out%%|*}"; r="${out#*|}"
-  echo "  ${name}: ${d}ms  ->  $r"
-  if echo "$r" | grep -q '"result":true'; then
-    if [ "$mode" = reject ]; then
-      bad "$name was ACCEPTED — key has more than Charging-Manager privileges (role-boundary regression!)"
-    else
-      ok "$name executed"
-    fi
-  elif [ "$mode" = reject ]; then
-    # The firmware answers (HTTP 502) even when the car is unreachable, with result:false
-    # reason="vehicle not reachable" (http_api.cpp). So result:false alone is ambiguous:
-    # treat a reachability reason (or an empty body) as "can't confirm" (FAIL), and any other
-    # car-side reason as a genuine refusal (PASS) — so an asleep car can't false-PASS.
-    if ! echo "$r" | grep -q '"result":false'; then
-      bad "$name: no signed reply (transport timeout) — cannot confirm role boundary"
-    elif echo "$r" | grep -qiE 'not reachable|unreachable|timed out'; then
-      bad "$name: car unreachable (not actually refused) — cannot confirm role boundary; re-run with the car awake"
-    else
-      ok "$name correctly refused by the car (Charging-Manager role boundary holds)"
-    fi
-  elif [ "$mode" = soft ]; then
-    echo "  NOTE  $name returned false — car-side rejection (depends on live state), not a proxy fault"
-  else
-    bad "$name failed/timed out"
-  fi
-}
+
 
 if [ "$RUN_COMMANDS" = 1 ]; then
   hdr "4. Commands (write path → signed BLE → car)"

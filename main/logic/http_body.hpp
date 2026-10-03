@@ -20,8 +20,9 @@
 // expires with nothing new — recoverable, worth retrying, but only a BOUNDED number of times.
 // Retrying forever would let one client that opens a POST, announces a Content-Length and then goes
 // quiet park the single httpd task indefinitely, taking the whole web UI (and the OTA route out of a
-// bad config) down with it. A body that cannot finish within a couple of socket timeouts is not one
-// worth waiting for.
+// bad config) down with it. Byte progress must not reset the total budget: a slow peer can otherwise
+// keep the task busy for hours without ever hitting the consecutive-idle limit.
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 
@@ -62,6 +63,15 @@ struct BodyChunk {
 // (CONFIG_HTTPD_REQ_RECV_TMO, 5 s by default), so ~15 s of patience for a body a healthy client
 // sends in one segment.
 inline constexpr int BODY_MAX_IDLE = 2;
+inline constexpr int BODY_RECV_TIMEOUT_SECONDS = 5;
+inline constexpr uint64_t BODY_MAX_DURATION_MS = 15000;
+
+struct BodySteadyClock {
+    uint64_t operator()() const noexcept {
+        return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
+    }
+};
 
 // A fixed receive buffer always reserves its final byte for the terminator. Exact-full is therefore
 // too large, not a successful body with an out-of-bounds NUL. Shared by the firmware preflight and
@@ -82,15 +92,20 @@ inline bool http_body_has_embedded_nul(const char* data, size_t length) noexcept
 
 // Read exactly `total` bytes into `buf` and NUL-terminate. Returns the byte count, or -1 if the body
 // does not fit `cap` (leaving room for the terminator), is empty, or the peer failed to deliver it.
-// `recv(dst, len)` must return a BodyChunk.
-template <typename Recv>
-int http_body_read(char* buf, size_t cap, size_t total, Recv recv) {
+// `recv(dst, len)` must return a BodyChunk; `now()` is monotonic milliseconds.
+// Check before AND after recv, including a final Data chunk. A blocking recv
+// can overrun the total budget by at most its configured socket timeout.
+template <typename Recv, typename Now = BodySteadyClock>
+int http_body_read(char* buf, size_t cap, size_t total, Recv recv, Now now = {}) {
     if (!buf || !http_body_fits_buffer(total, cap)) return -1;
 
     size_t got  = 0;
     int    idle = 0;
+    const uint64_t started = now();
     while (got < total) {
+        if (now() - started >= BODY_MAX_DURATION_MS) return -1;
         const BodyChunk c = recv(buf + got, total - got);
+        if (now() - started >= BODY_MAX_DURATION_MS) return -1;
         if (c.kind == BodyRecv::Timeout) {
             if (++idle > BODY_MAX_IDLE) return -1;
             continue;
@@ -109,16 +124,16 @@ int http_body_read(char* buf, size_t cap, size_t total, Recv recv) {
 // releaser and recv callback are seams rather than hard-coded libc/IDF calls so every failure can
 // be injected deterministically in the host gate.  The firmware adapter in http_common.cpp binds
 // them to malloc/free/httpd_req_recv.
-template <typename Allocate, typename Release, typename Recv>
+template <typename Allocate, typename Release, typename Recv, typename Now = BodySteadyClock>
 BodyReadResult http_body_receive(size_t total, size_t max_body_len,
-                                 Allocate allocate, Release release, Recv recv) {
+                                 Allocate allocate, Release release, Recv recv, Now now = {}) {
     if (total == 0) return {nullptr, BodyReadStatus::Empty};
     if (total > max_body_len) return {nullptr, BodyReadStatus::TooLarge};
 
     char* buf = static_cast<char*>(allocate(total + 1));
     if (!buf) return {nullptr, BodyReadStatus::NoMemory};
 
-    if (http_body_read(buf, total + 1, total, recv) < 0) {
+    if (http_body_read(buf, total + 1, total, recv, now) < 0) {
         release(buf);
         return {nullptr, BodyReadStatus::ReceiveFailed};
     }

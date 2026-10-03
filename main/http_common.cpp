@@ -4,9 +4,11 @@
 #include "http_handlers.hpp"
 #include <esp_log.h>
 #include <esp_app_desc.h>
+#include <esp_timer.h>
 #include <cstring>
 #include <cstdlib>
 #include <sys/time.h>
+#include <lwip/sockets.h>
 
 static const char* TAG = "http_server";
 
@@ -69,7 +71,13 @@ tk::BodyReadResult read_body_result(httpd_req_t* req) {
             if (r == HTTPD_SOCK_ERR_TIMEOUT) return { tk::BodyRecv::Timeout, 0 };
             if (r <= 0)                      return { tk::BodyRecv::Error,   0 };
             return { tk::BodyRecv::Data, static_cast<size_t>(r) };
-        });
+        }, []() -> uint64_t { return static_cast<uint64_t>(esp_timer_get_time()) / 1000ULL; });
+    if (result.status == tk::BodyReadStatus::TooLarge ||
+        result.status == tk::BodyReadStatus::NoMemory ||
+        result.status == tk::BodyReadStatus::ReceiveFailed) {
+        // Also safe outside handle_all: unread-body cleanup must not restart RX.
+        (void)shutdown(httpd_req_to_sockfd(req), SHUT_RD);
+    }
     if (result.status == tk::BodyReadStatus::TooLarge) {
         ESP_LOGW(TAG, "rejecting oversized body: %u bytes", (unsigned)req->content_len);
     } else if (result.status == tk::BodyReadStatus::NoMemory) {

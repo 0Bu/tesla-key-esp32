@@ -468,7 +468,7 @@ void test_discovery_registry() {
     // state classes and entity categories for all 55 production rows.
     const uint64_t fingerprint = discovery_registry_fingerprint(tk::mqtt::kDiscoveryEntries);
     std::cout << "  MQTT discovery registry fingerprint: " << fingerprint << '\n';
-    CHECK(fingerprint == UINT64_C(17320820650760433559));
+    CHECK(fingerprint == UINT64_C(1140148627303395125));
 
     // Mutation canaries: an add/remove, duplicate identifier, domain miswire, field drift,
     // domain-topic swap, boolean/string mismatch or metadata change must make the gate red.

@@ -142,7 +142,7 @@ jobs:
     permissions:
       actions: read
       contents: write
-      pages: read
+      pages: write
       pull-requests: read
     steps:
       # Validation is repeated after the Environment approval wait. A force-push, close or label

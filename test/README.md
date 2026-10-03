@@ -89,7 +89,7 @@ The firmware delegates these decision/conversion cores to IDF-free headers under
 | BLE phase countdown (round-up seconds, 0 is a real answer, wrap-safe) | `ble_phase.hpp` | `vehicle_ctrl.hpp`, `vehicle_commands.cpp`, `vehicle_pairing.cpp`, `http_status.cpp` |
 | HA binary `value_template` builder (presence guard → "unknown", not phantom OFF) | `ha_templates.hpp` | `mqtt_ha.cpp` |
 | Exact 55-row HA discovery registry, topic and `unique_id` construction | `mqtt_discovery_registry.hpp` | `mqtt_ha.cpp`; `test_mqtt_json_publish.cpp` materializes every row against the seven state payloads |
-| POST-body reassembly with typed Empty/TooLarge/OOM/receive-failure outcomes | `http_body.hpp` | `http_common.cpp` `read_body_result` and the config/REST/MCP handlers (2 KiB cap; `POST /save` keeps its own 1024-byte path) |
+| POST-body reassembly with typed Empty/TooLarge/OOM/receive-failure outcomes and a progress-independent 15 s monotonic budget | `http_body.hpp` | `http_common.cpp` `read_body_result` and the config/REST/MCP handlers (2 KiB cap; `POST /save` keeps its own 1024-byte path); fake-clock slow-byte/timeout sequences, final-byte deadline, rollover and release ownership |
 | Browser-origin decision for mutations (Host/Origin binding, rebinding/cross-site/null rejection, state-changing GET classification, headerless compatibility) | `http_origin.hpp` | `http_server.cpp` |
 | Negotiated ATT write payload (20-byte fallback, MTU−3, 244 cap) | `ble_chunk.hpp` | `ble_client.cpp` |
 | Deferred NimBLE LinkUp/LinkDown/RX generation policy | `ble_deferred_event.hpp` | `vehicle_ctrl.cpp`, `vehicle_telemetry.cpp` |
