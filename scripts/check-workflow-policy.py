@@ -196,7 +196,7 @@ SIGNING_ENVIRONMENT_JOBS = {
 # checks below keep failures explanatory; this final digest closes gaps in the narrow scanner.
 EXPECTED_PRIVILEGED_JOB_SHA256 = {
     ("build.yml", "publish"): "7282303dac6098fa7fc04f44c6abb115d838f69dd3aea9c58f4aa1de22ec2a1f",
-    ("build.yml", "deploy"): "ab262588fe725ca130c17d667ffdd95a5689616900820ff401e6bd8c69a94c9a",
+    ("build.yml", "deploy"): "ca78910e478a363560646a64ff747ed773cdb4e590a7fcb1dbd2fcfc295f4f49",
     ("signed-pr-preview.yml", "sign-preview"): "c18a38d6ecdfd36e1ee4ef3ae7e09ea137470bab4eba845bedb5156d645e0452",
 }
 TRUSTED_DEFAULT_ENV = "TRUSTED_DEFAULT_SHA: ${{ github.sha }}"
@@ -819,6 +819,10 @@ def validate(root: Path) -> None:
         "build.yml:deploy must include dev branch publication",
     )
     dev_revalidation = "- name: Revalidate current main immediately before dev deployment"
+    dev_publish = deploy[deploy.index("- name: Deploy dev site to gh-pages"):
+                         deploy.index("- name: Accept branch-served Pages against dev build artifacts")]
+    require("SOURCE_SHA: ${{ github.sha }}" in dev_publish,
+            "build.yml:deploy must bind every dev publisher retry to the exact workflow source SHA")
     require(
         dev_revalidation in deploy
         and deploy.index(dev_revalidation) < deploy.index("- name: Deploy dev site to gh-pages")
@@ -1375,6 +1379,11 @@ def self_test(root: Path) -> None:
          "      - name: Deploy dev site to gh-pages",
          "true\n\n      - name: Deploy dev site to gh-pages",
          "refetch current main immediately before the in-place dev channel write"),
+        ("dev-publisher-source-binding-removed", "build.yml",
+         "          SOURCE_SHA: ${{ github.sha }}\n"
+         "        run: ./scripts/publish-pages-branch.sh dev ./_deploy-input/_site",
+         "        run: ./scripts/publish-pages-branch.sh dev ./_deploy-input/_site",
+         "every dev publisher retry"),
         ("privileged-extra-step", "build.yml",
          "      - name: Provision OTA signing key\n",
          "      - name: Unexpected privileged run\n"

@@ -917,26 +917,31 @@ void VehicleController::handle_vcsec_frame_(const UniversalMessage_RoutableMessa
     UniversalMessage_RoutableMessage_protobuf_message_as_bytes_t decrypt_buffer;
     if (sig_data && sig_data->which_sig_type == Signatures_SignatureData_AES_GCM_Response_data_tag) {
         auto* session = client_->get_peer(UniversalMessage_Domain_DOMAIN_VEHICLE_SECURITY);
-        if (session && session->is_initialized()) {
-            size_t req_hash_len = 0;
-            const pb_byte_t* req_hash = client_->get_last_request_hash(&req_hash_len);
-            if (req_hash && req_hash_len > 0) {
-                size_t dec_len = 0;
-                int ret = session->decrypt_response(
-                    payload->bytes, payload->size,
-                    sig_data->sig_type.AES_GCM_Response_data.nonce,
-                    sig_data->sig_type.AES_GCM_Response_data.tag,
-                    req_hash, req_hash_len, msg.flags, fault,
-                    sig_data->sig_type.AES_GCM_Response_data.counter,  // VCSEC counts its responses
-                    decrypt_buffer.bytes, sizeof(decrypt_buffer.bytes), &dec_len);
-                if (ret == 0) {
-                    decrypt_buffer.size = dec_len;
-                    payload = &decrypt_buffer;
-                } else {
-                    ESP_LOGE(TAG, "Failed to decrypt VCSEC response (%d)", ret);
-                    return;
-                }
+        size_t req_hash_len = 0;
+        const pb_byte_t* req_hash = client_->get_last_request_hash(&req_hash_len);
+        if (tk::vcsec_payload_admission(true, session && session->is_initialized(),
+                                       req_hash && req_hash_len > 0) == tk::VcsecPayloadAdmission::Drop) {
+            ESP_LOGW(TAG, "Dropping encrypted VCSEC response without decryption context");
+            return;
+        }
+        size_t dec_len = 0;
+        int ret = session->decrypt_response(
+            payload->bytes, payload->size,
+            sig_data->sig_type.AES_GCM_Response_data.nonce,
+            sig_data->sig_type.AES_GCM_Response_data.tag,
+            req_hash, req_hash_len, msg.flags, fault,
+            sig_data->sig_type.AES_GCM_Response_data.counter,  // VCSEC counts its responses
+            decrypt_buffer.bytes, sizeof(decrypt_buffer.bytes), &dec_len);
+        if (ret == 0) {
+            if (!session->validate_response_counter(sig_data->sig_type.AES_GCM_Response_data.counter)) {
+                ESP_LOGW(TAG, "Dropping replayed encrypted VCSEC response");
+                return;
             }
+            decrypt_buffer.size = dec_len;
+            payload = &decrypt_buffer;
+        } else {
+            ESP_LOGE(TAG, "Failed to decrypt VCSEC response (%d)", ret);
+            return;
         }
     }
 

@@ -22,6 +22,8 @@
 # fast-forward push, no binary-merge conflicts.
 #
 # Env (CI): GITHUB_TOKEN (contents:write), GITHUB_REPOSITORY, optionally GITHUB_SERVER_URL.
+# Dev publication also requires SOURCE_SHA, bound to the manifest and current remote main
+# immediately before each push (including retries) or unchanged-byte build request.
 set -euo pipefail
 
 trigger_pages_build() {
@@ -315,6 +317,41 @@ if [ -n "$num" ] && ! [[ "$num" =~ ^[0-9]+$ ]]; then
 fi
 [ -n "$src" ] && [ ! -d "$src" ] && { echo "source dir '$src' not found" >&2; exit 1; }
 
+validate_dev_candidate() {
+  [ "$mode" = dev ] || return 0
+  local work="$1" main_row main_sha
+  if ! [[ "${SOURCE_SHA:-}" =~ ^[0-9a-f]{40}$ ]]; then
+    echo "ERROR: dev publication requires an exact SOURCE_SHA" >&2
+    return 1
+  fi
+  if ! python3 - "$work/dev/manifest.json" "$SOURCE_SHA" <<'PY'
+import json, sys
+try:
+    with open(sys.argv[1]) as stream:
+        manifest = json.load(stream)
+    if not isinstance(manifest, dict) or manifest.get('sourceSha') != sys.argv[2]:
+        raise ValueError('source mismatch')
+except (OSError, ValueError):
+    print('ERROR: dev manifest does not match SOURCE_SHA', file=sys.stderr)
+    sys.exit(1)
+PY
+  then
+    return 1
+  fi
+  # Query the same remote as the Pages push; a fresh clone alone only protects
+  # the branch topology, not the age of the candidate being reapplied onto it.
+  main_row="$(git ls-remote --exit-code "$remote" refs/heads/main 2>/dev/null)" || {
+    echo "ERROR: cannot verify current main for dev publication" >&2
+    return 1
+  }
+  main_sha="${main_row%%$'\t'*}"
+  if [ "$main_row" != "$main_sha"$'\t'"refs/heads/main" ] ||
+     [ "$main_sha" != "$SOURCE_SHA" ]; then
+    echo "ERROR: refusing stale dev publication" >&2
+    return 1
+  fi
+}
+
 # Apply the requested change to a fresh gh-pages checkout at $1 (idempotent).
 apply_changes() {
   local work="$1"
@@ -402,6 +439,10 @@ for attempt in 1 2 3 4 5; do
   diff_rc=0
   git -C "$work" diff --cached --quiet || diff_rc=$?
   if [ "$diff_rc" -eq 0 ]; then
+    if ! validate_dev_candidate "$work"; then
+      rm -rf "$work"
+      exit 1
+    fi
     echo "gh-pages: nothing to change ($(commit_msg))"
     rm -rf "$work"
     trigger_pages_build || exit 1
@@ -418,6 +459,10 @@ for attempt in 1 2 3 4 5; do
     exit 1
   fi
 
+  if ! validate_dev_candidate "$work"; then
+    rm -rf "$work"
+    exit 1
+  fi
   if git -C "$work" push --quiet "$remote" HEAD:gh-pages 2>/dev/null; then
     echo "gh-pages: $(commit_msg) — pushed (attempt $attempt)"
     rm -rf "$work"

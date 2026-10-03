@@ -269,9 +269,12 @@ Treat a violation of any of these as a real finding.
   live acceptance. `actions/upload-pages-artifact` / `actions/deploy-pages` or another branch/path
   is a stop finding, not an alternative deployment mode.
 - **Downgrade gate (software anti-rollback):** before the bulk download, `ota_task` reads the
-  downloaded image's own app-descriptor version (`esp_https_ota_get_img_desc`) and refuses
-  anything not strictly newer than the running firmware — a signature proves authenticity, not
-  freshness. Weakening it re-opens the old-but-validly-signed-image attack.
+  downloaded image's own app-descriptor version (`esp_https_ota_get_img_desc`), requires exact
+  manifest/image version identity and applies `logic/ota_contract.hpp`'s channel/PR policy.
+  Ordinary stable updates must be newer. Intentional exceptions permit targeted same-core PR
+  previews, same-core transitions to Dev and return from Dev or PR/pre-release to Release;
+  Dev-to-Release may return to an older stable core. A signature proves authenticity, not freshness.
+  Do not replace this explicit policy with a universal strict-newer claim or weaken its checks.
 - **Two release channels:** CI (`.github/workflows/build.yml`) structurally splits Dev and Release delivery:
   a firmware-relevant push to `main` runs in `dev` mode, generating pre-release versions via `scripts/next-version.sh --dev`
   and publishing continuously only to the Dev channel (`gh-pages:/dev/`); official stable Releases and root Pages updates

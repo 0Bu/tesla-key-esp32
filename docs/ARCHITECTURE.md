@@ -94,7 +94,7 @@ are logged).
    explicit timeout rather than completing whatever sits at the FIFO head.
 2. *Idempotent setpoints* (`logic/command_result.hpp`, `command_runner.hpp`): a setpoint the car
    already holds returns `actionStatus.result != OK` with reason `already_set`;
-   `tk::is_nominal_already_set()` classifies that as success, so web UI, MQTT and MCP setpoint
+   `tk::is_nominal_already_set()` classifies that as success, so web UI, REST/evcc and MCP setpoint
    writes are idempotent.
 
 **Cache freshness.** `GET vehicle_data` stays cache-only and non-blocking. The same ChargeState
@@ -166,10 +166,12 @@ version is validated before copying against the canonical grammar (no leading-ze
 overflow. The body is released before the bounded copies, keeping the peak at body + cJSON.
 
 **Downgrade gate.** Right after `esp_https_ota_begin` — before the bulk download — `ota_task` reads
-the version from the image's own app descriptor (`esp_https_ota_get_img_desc`) and refuses anything
-not strictly newer than the running firmware. A valid signature proves authenticity, not freshness,
-and reading the *image's* version also defeats a host that advertises a new manifest version but
-serves an old binary. No eFuses are burned.
+the version from the image's own app descriptor (`esp_https_ota_get_img_desc`), requires exact
+manifest/image version identity and applies the same channel/PR eligibility policy as the check.
+Ordinary stable updates must be newer; intentional exceptions allow targeted same-core PR previews,
+same-core transitions to Dev, and a return from Dev or PR/pre-release to Release (Dev-to-Release may
+return to an older stable core). A valid signature proves authenticity, not freshness. No eFuses
+are burned. The policy is defined by `logic/ota_contract.hpp`.
 
 **Rollback and health gate.** Rollback is enabled (`CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE`);
 `main.cpp` defers `esp_ota_mark_app_valid_cancel_rollback()` to `ota_health_gate_task`, whose
@@ -209,8 +211,8 @@ classic esp32). Key lifecycle, rotation and the CI signing boundary: [`SECURITY.
 **Channels and PR previews.** Devices follow `Release` (default), `Dev` or a targeted PR preview:
 
 - *Release* reads the root manifest and accepts only official candidates (no prerelease suffix),
-  newer than the running version. Switching from `Dev` to `Release` may downgrade so a device can
-  always return to production firmware.
+  newer than an ordinary stable running version. Switching from `Dev` to `Release` may downgrade;
+  returning from a PR/pre-release may use the same core, so a device can return to production firmware.
 - *Dev* reads `dev/manifest.json` and accepts `x.y.z-dev.N`; on the same core version the dev number
   must increase, and dev→dev downgrades are rejected.
 - *PR previews* (`/ota/check?pr=<N>`, `/ota/update?pr=<N>`, or `?pr=<N>` on the web UI) read
@@ -849,7 +851,7 @@ check `(unix_now - session.clock_time)` (ADR-0005 §2). `session.clock_time` is 
 (hundreds of thousands of seconds), not Unix time, so once the wall clock is real (~1.77 billion s)
 the age far exceeds 3600 s and stored sessions are rejected; a 1970 clock gives a negative age and
 would *keep* them. `main.cpp` therefore calls `restore_clock_from_nvs()` (the `last_time` cache
-written on each NTP sync; it needs no network) **before** `VehicleController::init()`, so stale
+written on the first successful NTP sync of each boot; it needs no network) **before** `VehicleController::init()`, so stale
 sessions from an uninitialised clock are rejected fail-closed. True persistent session reuse across
 reboots would need upstream alignment to track vehicle epoch separately from Unix time.
 
@@ -875,6 +877,18 @@ is kept out of matching). The UI shows "Add the vehicle VIN in Setup to begin."
 
 Every normal REST and MCP body enters through `read_body_result()`, whose typed result keeps empty
 body, body over the 2 KiB cap, allocation failure and receive failure distinct.
+The shared reader applies a 15 s monotonic total receive budget which byte progress cannot reset,
+checked before and after every socket read. Main HTTP and provisioning both use a 5 s receive
+socket timeout; an in-progress read can overrun that budget by up to one socket timeout (about 20 s
+total, excluding scheduler delays). Deadline expiry is a receive failure; incomplete or late bodies
+never reach parsing or persistence. The existing limit of two consecutive recoverable timeouts
+remains an additional bound.
+On receive failure both adapters shut down the socket's read side before replying, keeping the
+error response writable while preventing ESP-IDF's unread-body cleanup from restarting the wait.
+The primary wildcard wrapper also retires every body-bearing connection on exit, including early
+route/Origin/admission rejection and exception replies. It advertises `Connection: close` before
+dispatch; clients reconnect for a later request. Bodyless requests retain their existing connection
+behavior. The captive save handler rejects its unread preflight failures with `ESP_FAIL`.
 
 | Case | REST | MCP |
 |---|---|---|

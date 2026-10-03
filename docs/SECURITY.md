@@ -81,9 +81,10 @@ Hardening that remains (none of it is authentication):
 - **Browser-origin gate.** A mutating request whose `Origin` authority differs from `Host`, whose
   `Host` is neither the device name nor an IPv4 address the board holds right now (the active transport's lease or the address the request itself arrived on — WiFi and Ethernet keep their leases side by side, so a page opened through the WiFi address keeps working after an Ethernet takeover), or whose `Sec-Fetch-Site` is `cross-site`,
   gets `403` before dispatch. Binding `Host` to a device-owned authority also closes DNS
-  rebinding. It covers every POST plus the legacy state-changing GET forms `/ota/check`,
+  rebinding. It covers primary HTTP/MCP POSTs plus the legacy state-changing GET forms `/ota/check`,
   `/diag?clear=1`, `/diag?verbose=0|1` and `/coredump?clear=1`; query **keys match
   case-insensitively** (as `esp_http_server` does) while **values stay exact and undecoded**.
+  The separate open provisioning AP is governed by its physical-range setup boundary.
   Headerless POST clients (evcc, curl) stay compatible, and so does a raw LAN peer that sends POST
   or adds a custom header (e.g. `X-Requested-With`) on mutating GETs — headerless mutating GET
   requests receive `403` to prevent browser CSRF; the trusted-LAN boundary remains mandatory.
@@ -133,10 +134,12 @@ wrong-target image. Runtime mechanics: [ARCHITECTURE](ARCHITECTURE.md#ota-self-u
   rest of the API. Because the URL is compile-time fixed *and* the image must be signed, a LAN peer
   cannot point the device at attacker firmware, but it can force a fetch + reboot (a nuisance; each
   reboot re-opens the BLE polling window so a parked car stops sleeping).
-- **Downgrade is blocked in software.** A signature proves authenticity, not freshness. Before
-  flashing, `ota_task` reads the version from the downloaded image's own app descriptor and refuses
-  anything not strictly newer — which also defeats a host that advertises a new manifest version
-  but serves an old binary. No eFuse anti-rollback is burned.
+- **Version eligibility is enforced in software.** Before flashing, `ota_task` reads the image's
+  app-descriptor version, requires exact manifest/image identity and applies the channel/PR policy.
+  Ordinary stable updates must be newer; intentional exceptions permit targeted same-core PR
+  previews, same-core transitions to Dev and return from Dev or PR/pre-release to Release.
+  Dev-to-Release can return to an older stable core. A signature proves authenticity, not freshness;
+  these explicit return paths are not a universal downgrade barrier. No eFuse anti-rollback is burned.
 - **Rollback is armed** (`CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE`) behind a health gate: proven
   network link, non-critical INTERNAL largest heap block and ≈ 90 s uptime, with VIN/key/recovery
   reboots never counted as health evidence. An image that never reaches the LAN is reverted on the
@@ -252,8 +255,8 @@ target: bootloader, partition table, signed app, `ota_data_initial`).
    provisions the key. `scripts/ci-sign-artifacts.sh` repeats the comparison, opens files with
    `O_NOFOLLOW`, copies single-link regular files into a private stage and rehashes them before
    reading the key; it signs, runs `espsecure.py verify_signature`, requires the exact minimal size
-   projection, re-validates image identity and verifies RSA-PSS against the authority pin. Two
-   closed modes:
+   projection, re-validates image identity and verifies RSA-PSS against the authority pin. The
+   stable Release branch has two closed modes:
    - **`create`** proves the tag/Release are still absent immediately before key use, uploads exactly
      40 files into a **draft**, and binds every byte, alias, ELF checksum and full merged layout
      (signer-owned bootloader/partition/erased otadata/signed app, all erased gaps including NVS,
@@ -275,13 +278,17 @@ target: bootloader, partition table, signed app, `ota_data_initial`).
    artifact also carries the sixteen signer-owned per-target layout inputs. `publish` never writes
    `gh-pages`. Every display version uses one canonical grammar (no leading-zero core component,
    ≤ 31 bytes for the ESP app descriptor) at every boundary.
-3. **`deploy` (main push only).** No signing Environment, key or OIDC. Checks out the exact SHA
+   Dev builds sign and stage SHA-bound artifacts for `dev/` without creating a GitHub Release;
+   the stable `create`/`reuse` asset and immutable Release requirements do not apply to that branch.
+3. **`deploy` (main push or authorized release dispatch).** No signing Environment, key or OIDC. Checks out the exact SHA
    without persisted credentials, downloads only the named artifact, re-verifies the twelve-file
-   root, sixteen layout inputs, site manifest and 16 local byte relationships, then binds them plus
+   root, sixteen layout inputs, site manifest and 16 local byte relationships. For stable Release
+   deployment it binds them plus
    the 28 diagnostics to fresh metadata for all 40 immutable Release assets. It revalidates Release
    and Pages authority immediately before writing the branch, then reads the live manifest and all
    16 parts back (bounded, cache-busted) and compares them byte-for-byte to the immutable merged
-   assets.
+   assets. Dev deployment instead revalidates current main, writes only `dev/` and accepts the live
+   manifest and all 16 parts against the exact staged build snapshot, without Release metadata.
 4. **Signed PR preview (opt-in).** A maintainer adds the `signed-preview` label to a same-repository
    PR. After its unprivileged build, `signed-pr-preview.yml` runs from the default branch via
    `workflow_run`, verifies the head is current and launches a separate default-branch-defined
@@ -307,7 +314,10 @@ target: bootloader, partition table, signed app, `ota_data_initial`).
    acceptance, so a repository switched to Actions mode or another branch fails before key use.
 6. **Dev feed and manual releases.** A push to `main` builds a **Dev** build (`mode=dev`), signed by
    the protected key and deployed to `/dev/`; it creates no GitHub Release, and re-running a `main`
-   push signs fresh bytes (RSA-PSS is randomized). Official Releases are cut manually with
+   push signs fresh bytes (RSA-PSS is randomized). Dev publication requires `SOURCE_SHA`
+   bound to the staged manifest and freshly queried remote `main` before every
+   Dev Pages push attempt or unchanged-byte build request; a conflict retry cannot reapply
+   superseded Dev bytes over a newer publication. Official Releases are cut manually with
    `workflow_dispatch` `release: true` (optional `bump: patch|minor|major` or
    `release_version: x.y.z`), creating the immutable tagged Release and deploying to root Pages. A
    `workflow_dispatch` without `release: true` runs in `test` mode and never reaches protected

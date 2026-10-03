@@ -109,8 +109,11 @@ main Pages manifest carries `steps.stamp.outputs.disp` = the release version.
 
 Device-side **downgrade gate** ([`ota_update.cpp`](../../../main/ota_update.cpp) ~579-624): before
 the bulk download, `ota_task` reads the incoming image's own version via
-`esp_https_ota_get_img_desc` and refuses anything not strictly newer than the running firmware
-(`tk::compare_ota_versions()`, [`ota_contract.hpp`](../../../main/logic/ota_contract.hpp)) — software anti-rollback, no eFuses.
+`esp_https_ota_get_img_desc`, requires exact manifest/image version identity and applies
+`tk::is_ota_update_available()` ([`ota_contract.hpp`](../../../main/logic/ota_contract.hpp)).
+Ordinary stable updates must be newer; explicit exceptions permit targeted same-core PR previews,
+same-core transitions to Dev, and return from Dev or PR/pre-release to Release. Dev-to-Release may
+return to an older stable core. This is channel-aware software eligibility, with no eFuse anti-rollback.
 
 ## The check
 
@@ -360,7 +363,7 @@ table below before retrying. (Endpoints: [`main/http_ota.cpp`](../../../main/htt
 | Pages part differs from its byte range in the Release merged asset | step 2 | same-version/source manifest was regenerated around bytes that were not attached to the bound GitHub Release | do not OTA; republish Pages exclusively from the signed Release staging tree and rerun |
 | an app's embedded target/version differs from its manifest family/Release | step 2/3 | stale or cross-target app was published under the expected basename | do not OTA; rebuild/sign/publish the exact Release and verify all four descriptors |
 | `/ota/status` `message:"downloaded image is invalid"` (serial: `image valid, signature bad`) | step 4, `state:"error"` | **TOFU key mismatch** — the running image's trust anchor ≠ the current `OTA_SIGNING_KEY`; the channel is fine, the *device* can't accept it | USB-reflash the published signed `.bin` to `0x20000` + erase otadata (keeps NVS) — see [`$usb-recovery`](../usb-recovery/SKILL.md) and [`docs/SECURITY.md`](../../../docs/SECURITY.md) "Trust anchor (trust-on-first-use)" |
-| `/ota/status` `message:"no newer version available"` | step 4, `state:"error"` | **downgrade gate** — incoming image is not strictly newer than what's running (expected when already current, or a stale manifest) | benign if the device already runs the release; else the manifest/version stamp is behind → check step 2 |
+| `/ota/status` `message:"no newer version available"` | step 4, `state:"error"` | **version eligibility gate** — the candidate fails the selected channel/PR policy (for ordinary stable updates, an equal or older version; intentional return/preview exceptions still apply) | benign if the device already runs the release; otherwise verify candidate identity and the selected channel/PR → check step 2 |
 | manifest `version` ≠ latest Release tag, or a device loops on "update available" with no version change | step 2 / step 4 `current` vs `available` | **floor-vs-stamped drift** — the published binary/manifest froze at the `version.txt` floor instead of the stamped release | inspect the "Stamp firmware version" step in [`.github/workflows/build.yml`](../../../.github/workflows/build.yml); the manifest must be built with `steps.stamp.outputs.disp` |
 | fewer than 4 builds / wrong chipFamily set / wrong part offset | step 2 | a target failed to stage, or the suffix/offset maps drifted | reconcile `image_suffix()`/`boot_offset()` across `ci-sign-artifacts.sh`, `build-pages.sh`, `ota_update.cpp`, `target.hpp` |
 

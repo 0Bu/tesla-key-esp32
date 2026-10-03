@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Run the actual publisher against local bare Git repositories and fault shims."""
+import json
 import os
 from pathlib import Path
 import shutil
@@ -47,6 +48,9 @@ class PagesPublishTest(unittest.TestCase):
         (self.seed / "SOURCE_ONLY").write_text("must not enter Pages\n")
         self.seed_commit("main fixture")
         self.git_run("-C", str(self.seed), "push", "--quiet", str(self.remote), "HEAD:main")
+        self.source_sha = self.git_run("-C", str(self.seed), "rev-parse", "HEAD").stdout.strip()
+        self.env.update(SOURCE_SHA=self.source_sha, TEST_SEED=str(self.seed),
+                        TEST_CONFLICT_MARKER=str(self.root / "conflict"))
         self.git_run("--git-dir", str(self.remote), "symbolic-ref", "HEAD", "refs/heads/main")
         self.write_shim("git", """
 import os, sys
@@ -54,7 +58,7 @@ args = sys.argv[1:]
 cmd = args[2] if args[:1] == ["-C"] else args[0]
 with open(os.environ["TEST_CALLS"], "a") as log:
     log.write("git " + cmd + "\\n")
-if cmd in ["clone", "push"] and os.environ["TEST_REMOTE"] not in args:
+if cmd in ["clone", "push", "ls-remote"] and os.environ["TEST_REMOTE"] not in args:
     raise SystemExit("refusing non-fixture Git remote")
 fault = os.environ.get("TEST_FAULT", "")
 if (fault, cmd) in [("clone", "clone"), ("checkout", "checkout"),
@@ -62,6 +66,33 @@ if (fault, cmd) in [("clone", "clone"), ("checkout", "checkout"),
     sys.exit(1)
 if fault == "diff" and cmd == "diff":
     sys.exit(2)
+if fault == "main_read" and cmd == "ls-remote":
+    sys.exit(1)
+if fault in ["newer_dev", "pages_conflict"] and cmd == "push":
+    from pathlib import Path
+    import subprocess
+    marker = Path(os.environ["TEST_CONFLICT_MARKER"])
+    if not marker.exists():
+        marker.touch()
+        seed, remote = os.environ["TEST_SEED"], os.environ["TEST_REMOTE"]
+        def git(*a):
+            return subprocess.run([os.environ["TEST_REAL_GIT"], "-C", seed, *a],
+                                  check=True, capture_output=True, text=True).stdout.strip()
+        if fault == "newer_dev":
+            import json
+            git("checkout", "--quiet", "main")
+            (Path(seed) / "SOURCE_ONLY").write_text("newer main\\n")
+            git("add", "-A"); git("commit", "--quiet", "-m", "newer main")
+            sha = git("rev-parse", "HEAD")
+            git("push", "--quiet", remote, "HEAD:main")
+            git("checkout", "--quiet", "gh-pages")
+            (Path(seed) / "dev/index.html").write_text("newer Dev\\n")
+            (Path(seed) / "dev/manifest.json").write_text(json.dumps({'sourceSha': sha}))
+        else:
+            (Path(seed) / "PR/42/index.html").write_text("concurrent preview\\n")
+        git("add", "-A"); git("commit", "--quiet", "-m", "concurrent Pages")
+        git("push", "--quiet", remote, "HEAD:gh-pages")
+        sys.exit(1)
 os.execv(os.environ["TEST_REAL_GIT"], [os.environ["TEST_REAL_GIT"]] + args)
 """)
         for name in ["rm", "mkdir", "mv"]:
@@ -167,6 +198,67 @@ for child in src.iterdir():
     def test_dev_directory_failure(self):
         self.existing_pages()
         self.assert_failure_before_publish("dev", "dev_mkdir")
+
+    def dev_manifest(self, sha=None):
+        (self.site / "manifest.json").write_text(json.dumps(
+            {"sourceSha": self.source_sha if sha is None else sha}))
+
+    def test_dev_requires_matching_candidate_and_readable_main(self):
+        self.existing_pages()
+        self.assert_failure_before_publish("dev", "")  # Missing manifest.
+        self.dev_manifest("0" * 40)
+        self.assert_failure_before_publish("dev", "")
+        (self.site / "manifest.json").write_text("[]")
+        self.assert_failure_before_publish("dev", "")
+        self.dev_manifest()
+        self.assert_failure_before_publish("dev", "main_read")
+        self.env["SOURCE_SHA"] = ""
+        self.assert_failure_before_publish("dev", "")
+
+    def test_current_dev_and_unchanged_retry(self):
+        self.existing_pages()
+        self.dev_manifest()
+        for _ in range(2):
+            self.calls.write_text("")
+            result = self.publish("dev")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("git ls-remote", self.calls.read_text())
+            self.assertEqual(self.calls.read_text().count("pages POST"), 1)
+
+    def test_pages_conflict_retries_when_main_stays_current(self):
+        self.existing_pages()
+        self.dev_manifest()
+        result = self.publish("dev", "pages_conflict")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.calls.read_text().count("git push"), 2)
+        self.assertEqual(self.calls.read_text().count("git ls-remote"), 2)
+        body = self.git_run("--git-dir", str(self.remote), "show",
+                            "gh-pages:PR/42/index.html").stdout
+        self.assertEqual(body, "concurrent preview\n")
+
+    def test_dev_conflict_preserves_newer_publication(self):
+        self.existing_pages()
+        self.dev_manifest()
+        result = self.publish("dev", "newer_dev")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("refusing stale dev publication", result.stderr)
+        self.assertEqual(self.calls.read_text().count("git push"), 1)
+        self.assertEqual(self.calls.read_text().count("git ls-remote"), 2)
+        self.assertNotIn("pages POST", self.calls.read_text())
+        body = self.git_run("--git-dir", str(self.remote), "show",
+                            "gh-pages:dev/index.html").stdout
+        self.assertEqual(body, "newer Dev\n")
+        newer_sha = self.git_run("--git-dir", str(self.remote), "rev-parse", "main").stdout.strip()
+        self.assertNotEqual(newer_sha, self.source_sha)
+        manifest = json.loads(self.git_run("--git-dir", str(self.remote), "show",
+                                         "gh-pages:dev/manifest.json").stdout)
+        self.assertEqual(manifest["sourceSha"], newer_sha)
+        # A stale retry also fails when its bytes already match Pages.
+        (self.site / "index.html").write_text(body)
+        self.dev_manifest(newer_sha)
+        self.env["SOURCE_SHA"] = newer_sha
+        self.git_run("--git-dir", str(self.remote), "update-ref", "refs/heads/main", self.source_sha)
+        self.assert_failure_before_publish("dev", "")
 
     def test_cleanup_removal_failure(self):
         self.existing_pages()

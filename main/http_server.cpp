@@ -184,6 +184,17 @@ static esp_err_t handle_all_dispatch(httpd_req_t* req) {
 // the box.)
 static esp_err_t handle_all(httpd_req_t* req) {
     try {
+        // IDF otherwise purges every unread declared body after an ESP_OK reply.
+        // This also covers origin/route/admission rejections before the reader.
+        // Retire body-bearing connections explicitly; TX remains available for
+        // the response, while cleanup cannot restart a slow peer's RX budget.
+        struct RetireBodyConnection {
+            httpd_req_t* req;
+            ~RetireBodyConnection() noexcept {
+                if (req->content_len > 0) (void)shutdown(httpd_req_to_sockfd(req), SHUT_RD);
+            }
+        } retire_body_connection{req};
+        if (req->content_len > 0) (void)httpd_resp_set_hdr(req, "Connection", "close");
         // Sample on every exit, including the exception fallbacks. The request that came closest to
         // the limit is exactly the one most likely to throw; a destructor also covers every early
         // return without duplicating the measurement at each route. Construct it inside the outer
@@ -212,6 +223,7 @@ bool http_server_start(VehicleController& vehicle, NvsStorageAdapter& config_sto
     g_config  = &config_store;
 
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
+    config.recv_wait_timeout = tk::BODY_RECV_TIMEOUT_SECONDS;
     config.uri_match_fn     = httpd_uri_match_wildcard;
     // Every route goes through the two /* wildcards (GET, POST) — see handle_all above.
     config.max_uri_handlers = 2;

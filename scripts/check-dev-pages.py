@@ -138,7 +138,7 @@ def parse_dev_manifest_parts(raw: bytes, version: str, source_sha: str) -> list[
             digest = part.get("sha256")
             if path != expected_name or Path(path).name != path:
                 raise AcceptanceError(f"unexpected part path for {chip}: expected {expected_name!r}, got {path!r}")
-            if offset != expected_offset:
+            if type(offset) is not int or offset != expected_offset:
                 raise AcceptanceError(f"unexpected offset for {chip}/{path}: expected {expected_offset}, got {offset}")
             if isinstance(size, bool) or not isinstance(size, int) or size < min_size or size > max_size:
                 raise AcceptanceError(f"invalid part size in dev manifest for {chip}/{path}: {size!r}")

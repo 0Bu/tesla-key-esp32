@@ -2815,6 +2815,73 @@ static void test_http_body() {
     CHECK(http_body_read(buf, sizeof(buf), 0, [&](char*, size_t) -> BodyChunk { return { BodyRecv::Data, 0 }; }) == -1);
     CHECK(http_body_read(nullptr, 8, 4, [&](char*, size_t) -> BodyChunk { return { BodyRecv::Data, 0 }; }) == -1);
 
+    // Progress cannot renew the total budget, with or without recoverable timeouts.
+    // Exercise the actual reader over the full production body size without real sleeps.
+    for (int timeouts_per_byte : {0, BODY_MAX_IDLE}) {
+        char slow[2049];
+        std::memset(slow, '!', sizeof(slow));
+        uint64_t ms = 0;
+        int pending_timeouts = timeouts_per_byte;
+        int calls = 0;
+        int received = http_body_read(slow, sizeof(slow), sizeof(slow) - 1,
+            [&](char* dst, size_t) -> BodyChunk {
+                ++calls;
+                if (pending_timeouts > 0) {
+                    --pending_timeouts;
+                    ms += BODY_RECV_TIMEOUT_SECONDS * 1000;
+                    return {BodyRecv::Timeout, 0};
+                }
+                ms += 4900;
+                *dst = 'x';
+                pending_timeouts = timeouts_per_byte;
+                return {BodyRecv::Data, 1};
+            }, [&]() -> uint64_t { return ms; });
+        CHECK(received == -1);
+        CHECK(calls == 4);
+        CHECK(ms >= BODY_MAX_DURATION_MS);
+        CHECK(ms < BODY_MAX_DURATION_MS + BODY_RECV_TIMEOUT_SECONDS * 1000);
+        CHECK(slow[sizeof(slow) - 1] == '!');
+    }
+    // The final byte must itself arrive before the deadline; late completeness is failure.
+    for (uint64_t elapsed : {BODY_MAX_DURATION_MS - 1, BODY_MAX_DURATION_MS,
+                             BODY_MAX_DURATION_MS + 1}) {
+        uint64_t ms = UINT64_MAX - 10000;  // unsigned elapsed arithmetic also survives rollover
+        int r = http_body_read(buf, sizeof(buf), 1,
+            [&](char* dst, size_t) -> BodyChunk {
+                ms += elapsed;
+                *dst = 'x';
+                return {BodyRecv::Data, 1};
+            }, [&]() -> uint64_t { return ms; });
+        CHECK(r == (elapsed < BODY_MAX_DURATION_MS ? 1 : -1));
+    }
+    // If time runs out between receives, do not start another blocking socket call.
+    {
+        int clock_calls = 0, recv_calls = 0;
+        int r = http_body_read(buf, sizeof(buf), 2,
+            [&](char* dst, size_t) -> BodyChunk {
+                ++recv_calls; *dst = 'x'; return {BodyRecv::Data, 1};
+            }, [&]() -> uint64_t {
+                return ++clock_calls < 4 ? 0 : BODY_MAX_DURATION_MS;
+            });
+        CHECK(r == -1);
+        CHECK(recv_calls == 1);
+    }
+    // Allocation ownership is unchanged when a complete body arrives too late.
+    {
+        int frees = 0;
+        uint64_t ms = 0;
+        auto r = http_body_receive(4, 8,
+            [](size_t n) -> void* { return std::malloc(n); },
+            [&](void* p) { ++frees; std::free(p); },
+            [&](char* dst, size_t n) -> BodyChunk {
+                std::memset(dst, 'x', n); ms = BODY_MAX_DURATION_MS;
+                return {BodyRecv::Data, n};
+            }, [&]() -> uint64_t { return ms; });
+        CHECK(r.status == BodyReadStatus::ReceiveFailed);
+        CHECK(r.data == nullptr);
+        CHECK(frees == 1);
+    }
+
     // Captive-portal production accepts exactly 1024 wire bytes in fixed storage with a separate
     // terminator byte. The next wire byte is rejected before recv.
     {
@@ -6068,6 +6135,16 @@ static void test_rx_framing() {
 }
 
 static void test_ble_dispatcher() {
+    for (bool encrypted : {false, true}) {
+        for (bool session_ready : {false, true}) {
+            for (bool has_request_hash : {false, true}) {
+                const auto admission = tk::vcsec_payload_admission(encrypted, session_ready, has_request_hash);
+                if (!encrypted) CHECK(admission == tk::VcsecPayloadAdmission::Plaintext);
+                else if (session_ready && has_request_hash) CHECK(admission == tk::VcsecPayloadAdmission::Decrypt);
+                else CHECK(admission == tk::VcsecPayloadAdmission::Drop);
+            }
+        }
+    }
     using D = tk::BleDomain;
     using R = tk::DispatchDropReason;
 

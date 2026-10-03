@@ -707,7 +707,8 @@ static void ota_task_impl() {
     // not FRESHNESS: an attacker controlling the update host could serve an OLD, legitimately
     // signed image carrying a since-patched vulnerability. Read the version straight from the
     // downloaded image's own app descriptor (esp_https_ota_get_img_desc parses only the header,
-    // before the bulk download) and refuse anything not strictly newer than what is running.
+    // before the bulk download) and enforce the same channel/PR eligibility as the manifest check,
+    // including intentional same-core preview/Dev transitions and returns to stable Release.
     // Checking the image itself — not the manifest — also closes the gap where a hostile host
     // advertises a new version in manifest.json but serves an old .bin under the image URL.
     esp_app_desc_t new_app{};

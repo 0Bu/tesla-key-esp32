@@ -73,7 +73,7 @@ def verify(site: Path, release_dir: Path, version: str) -> int:
         if not isinstance(parts, list) or len(parts) != 4:
             raise ValueError(f"{family} must contain exactly four manifest parts")
         offsets = tuple(part.get("offset") for part in parts if isinstance(part, dict))
-        if offsets != EXPECTED_OFFSETS[family]:
+        if any(type(offset) is not int for offset in offsets) or offsets != EXPECTED_OFFSETS[family]:
             raise ValueError(f"{family} manifest part offsets/order drifted: {offsets!r}")
 
         declared_ranges: list[tuple[int, int, str]] = []
@@ -83,7 +83,7 @@ def verify(site: Path, release_dir: Path, version: str) -> int:
             offset = part.get("offset")
             if not isinstance(name, str) or Path(name).name != name:
                 raise ValueError(f"unsafe Pages part path: {name!r}")
-            if not isinstance(size, int) or size <= 0 or not isinstance(offset, int) or offset < 0:
+            if type(size) is not int or size <= 0 or type(offset) is not int or offset < 0:
                 raise ValueError(f"invalid Pages part range for {name!r}")
             page_bytes = regular_file(site / name, f"Pages part {name}")
             if len(page_bytes) != size:

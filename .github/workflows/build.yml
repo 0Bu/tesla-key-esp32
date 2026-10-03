@@ -1048,6 +1048,7 @@ jobs:
         if: needs.build.outputs.mode == 'dev'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SOURCE_SHA: ${{ github.sha }}
         run: ./scripts/publish-pages-branch.sh dev ./_deploy-input/_site
 
       - name: Accept branch-served Pages against dev build artifacts

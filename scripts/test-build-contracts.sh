@@ -167,6 +167,59 @@ PY
 python3 "$repo_root/scripts/check-release-pages-bytes.py" "$site" "$release" \
   --version 1.2.3 >/dev/null
 
+# All Python acceptance paths must reject boolean offsets just as the shipped
+# installer does, while preserving canonical integer-zero bootloaders.
+python3 - "$repo_root" "$site" "$release" "$sha" <<'PY'
+import importlib.util, json, pathlib, sys
+repo, site, release = map(pathlib.Path, sys.argv[1:4])
+def load(name):
+    spec = importlib.util.spec_from_file_location(name, repo / 'scripts' / (name + '.py'))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+local = load('check-pages-manifest')
+merged = load('check-release-pages-bytes')
+dev = load('check-dev-pages')
+path = site / 'manifest.json'
+original = path.read_bytes()
+try:
+    for chip in [1, 2, 3]:
+        for bad in [False, 0.0]:
+            manifest = json.loads(original)
+            manifest['builds'][chip]['parts'][0]['offset'] = bad
+            raw = json.dumps(manifest).encode()
+            path.write_bytes(raw)
+            checks = [lambda: local.validate(site, sys.argv[4], '1.2.3'),
+                      lambda: merged.verify(site, release, '1.2.3'),
+                      lambda: dev.parse_dev_manifest_parts(raw, '1.2.3', sys.argv[4])]
+            for check in checks:
+                try:
+                    check()
+                except (local.ManifestError, ValueError, dev.AcceptanceError):
+                    pass
+                else:
+                    raise AssertionError(f'non-integer offset accepted: chip={chip}, value={bad!r}')
+finally:
+    path.write_bytes(original)
+local.validate(site, sys.argv[4], '1.2.3')
+merged.verify(site, release, '1.2.3')
+assert len(dev.parse_dev_manifest_parts(original, '1.2.3', sys.argv[4])) == 16
+PY
+node --input-type=module - "$site/manifest.json" "$repo_root/docs/web-installer.mjs" <<'JS'
+import fs from 'node:fs';
+import { pathToFileURL } from 'node:url';
+const { validateManifest } = await import(pathToFileURL(process.argv[3]));
+const original = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
+validateManifest(original, 'https://fixture.invalid/manifest.json');
+for (const chip of [1, 2, 3]) {
+  const manifest = structuredClone(original);
+  manifest.builds[chip].parts[0].offset = false;
+  try { validateManifest(manifest, 'https://fixture.invalid/manifest.json'); }
+  catch (error) { if (error.name === 'InvalidManifestError') continue; throw error; }
+  throw new Error('installer accepted boolean bootloader offset');
+}
+JS
+
 # The merged image contract covers every byte, not only the four declared slices. NVS/gap bytes
 # must remain erased, and the app end is the exact end of the merged asset.
 python3 - "$release/tesla-key-esp32-1.2.3-merged.bin" <<'PY'
