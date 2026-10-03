@@ -195,8 +195,10 @@ Invalidation and re-pair rules: [ARCHITECTURE](ARCHITECTURE.md#pairing-lifecycle
 
 Base `http://<ESP32-IP>`. No auth, no TLS — see [SECURITY](SECURITY.md#http-api-exposure). Mutating
 browser requests from a foreign or DNS-rebound Origin get `403`; Host must be the device name or
-current IP, and state-changing legacy GET forms use the same gate. Headerless evcc/curl clients stay
-compatible, so this is not a substitute for the trusted-LAN boundary.
+current IP, and state-changing legacy GET forms use the same gate. Headerless POST clients (evcc, curl)
+stay compatible. Mutating GETs accept matching Origin/Referer or allowed fetch-site provenance;
+without that browser provenance, send an explicit custom header (e.g. `X-Requested-With`) or use a
+POST alias (`POST /ota/check`, `POST /diag`, `POST /coredump`). This is not a substitute for the trusted-LAN boundary.
 
 ### Commands
 
@@ -278,8 +280,8 @@ GET /api/1/vehicles/{VIN}/body_controller_state
 | `GET /` (`/index.html`) | Web UI (status, pairing, quick commands). |
 | `GET /status[?redact=1]` | Full device/vehicle status (fields below). `redact=1` is the **bug-report form**: `vin`, `ip`, `wifi.ssid`, `ble.addr` (and every scanned neighbour's, plus scanned vehicle names), `mqtt.broker` and `syslog.host` read `"<redacted>"`; every key is kept (dropping one would forge an "older build" signal) and `sys.board_mac` stays visible for hardware triage. |
 | `POST /scan` | Time-limited BLE discovery scan (fills `ble.devices`). |
-| `GET /diag[?verbose=0\|1][&clear=1][&redact=1]` | Plain-text in-memory diag log. `verbose=0` turns raw-RX logging back off (`X-Diag-Verbose` echoes the state for the web UI). `redact=1` (bug-report form) substitutes VIN/SSID/IP/vehicle-BLE-MAC/broker/syslog-host **per line**, keeps the board MAC, discards a wrapped partial first line and emits any logical line over 288 bytes only as `"<redacted>"`; it fails closed on a truncated one. |
-| `GET /coredump[?clear=1]` | Streams the raw crash image (chunked octet-stream; `404` when none, permanently so on a device flashed before the `coredump` partition existed). Decode against the `.elf` of the SAME build (`/status.last_crash.elf_sha256` names it): `esp-coredump info_corefile -c coredump.bin <build>.elf`. `clear=1` erases instead. |
+| `GET` or `POST /diag[?verbose=0\|1][&clear=1][&redact=1]` | Plain-text in-memory diag log. `verbose=0` turns raw-RX logging back off (`X-Diag-Verbose` echoes the state for the web UI). `redact=1` (bug-report form) substitutes VIN/SSID/IP/vehicle-BLE-MAC/broker/syslog-host **per line**, keeps the board MAC, discards a wrapped partial first line and emits any logical line over 288 bytes only as `"<redacted>"`; it fails closed on a truncated one. |
+| `GET` or `POST /coredump[?clear=1]` | Streams the raw crash image (chunked octet-stream; `404` when none, permanently so on a device flashed before the `coredump` partition existed). Decode against the `.elf` of the SAME build (`/status.last_crash.elf_sha256` names it): `esp-coredump info_corefile -c coredump.bin <build>.elf`. `clear=1` erases instead. |
 | `POST /crash/dismiss` | Acknowledge and DELETE this boot's crash report (erase first, mark second). POST because it destroys the artifact a bug report needs, so no link or prefetch may reach it. With no `coredump` partition (every OTA-upgraded board) there is nothing to erase and dismissal still succeeds; any other erase error is `500` and leaves the report standing. |
 | `GET /heap` | `{dt, b0, b_boot, unit:"KiB", scale:10, free[], largest[]}` — the board's 24 h memory trend in tenths of a KiB, oldest first, `null` for an empty bucket. A leak is a slope; fragmentation is `largest[]` sinking toward the 4 KB watchdog floor. The ring survives restarts (it is `.noinit` DRAM, cleared only by a power cut), so the slope that preceded a heap-watchdog reboot is still there; samples before `b_boot` came from an earlier run. |
 | `POST /gen_keys[?force=1]` | Generate the ECDSA P-256 key (refuses overwrite without `force`, `409`). Identity mutation is Stable-only: `PendingVerify`, unknown OTA state or an active OTA/update returns `503` before anything changes. |
@@ -290,7 +292,7 @@ GET /api/1/vehicles/{VIN}/body_controller_state
 | `POST /set_wifi` | `{"ssid":"…","pass":"…"}` and reboot; an empty `pass` means an open network, else 8–63 UTF-8 bytes or 64 ASCII hex. The previous pair is stashed as a **one-shot rollback** in the same atomic config entry: if the new credentials get a lease the backup is dropped, and if the AP keeps refusing them the next boot restores the old network and reboots onto it, reporting `/status.wifi.rolled_back`. A merely ABSENT SSID gets 180 s before that happens; only sustained authentication refusal counts against the credentials. No web-UI control — a curl/`provision.py` route. |
 | `POST /set_time` | `{"ms":<epoch>}` — set the wall clock from the browser (NTP fallback). |
 | `POST /set_ota` | `{"channel":"release"\|"dev"}` — switch the update channel. |
-| `GET /ota/check[?ms=<epoch>][&pr=<N>]` | Start a background update check (then poll `/ota/status`); `pr=<N>` targets that PR's preview build. |
+| `GET` or `POST /ota/check[?ms=<epoch>][&pr=<N>]` | Start a background update check (then poll `/ota/status`); `pr=<N>` targets that PR's preview build. |
 | `POST /ota/update[?pr=<N>]` | Start the background self-update (downloads, then reboots). |
 | `GET /ota/status` | `{state, progress, message, available, update_available, current, channel, pr}` (`pr` only while a PR build is targeted). |
 | `GET /ota/changelog` | Release notes for the offered update: `text/plain`, ≤ 1024 bytes, `no-store`; `204` when none. |
@@ -430,16 +432,21 @@ non-connectable or GATT readiness failed. A diagnostic build compiled with maxim
 per-attempt lines are compile-time absent from the normal INFO build so retries cannot flood syslog.
 
 **Command times out** (`'charge_start' timed out`) — car in deep sleep: `wake_up`, wait 5 s, retry. A
-stale session: `esptool --chip <target> -p <port> erase_flash` (this also erases the key; see
-[Upgrading](#upgrading)).
+stale BLE session recovers by power-cycling or pressing the ESP32's reset button, which forces a clean
+reconnection. Do NOT erase flash for session recovery.
 
 **No pairing prompt** — a VIN must be configured (else `/diag` shows `auto-pair: no VIN configured —
 pairing disabled`); a Tesla NFC keycard must be on the center-console reader; car awake and in range;
 `key_present: true` in `/status` (else `POST /gen_keys?force=1`); watch for `auto-pair: requesting key
 enrolment` in `/diag`; confirm on the touchscreen within ~45 s or `POST /send_key` to retrigger.
 
-**Key rejected** — Tesla app → Security → Keys → delete *"Unknown key"*, erase flash as above, and let
-it re-pair (confirm on screen).
+**Key rejected** — in the Tesla touchscreen / app (Locks/Keys) delete the old key entry. Regenerate
+the keypair via Web UI or `POST /gen_keys?force=1`, then trigger pairing with `POST /send_key` and confirm
+on the touchscreen with the NFC keycard. A full chip erase (`esptool --chip <target> -p <port> erase_flash`)
+is destructive: it permanently wipes the bootloader, partition table, active/standby firmware, WiFi credentials,
+configuration, and vehicle keys. Use it only for an intentional, explicitly authorized factory wipe with an
+attested recovery plan; restoring device function requires a full initial flash (bootloader, partitions, and
+signed app) as described in [ARCHITECTURE.md](ARCHITECTURE.md#flashing--nvs-safety).
 
 **Serial permission denied (Linux)** — `sudo usermod -aG dialout $USER && newgrp dialout`.
 

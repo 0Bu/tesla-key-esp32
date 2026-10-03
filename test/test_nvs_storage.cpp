@@ -1100,23 +1100,16 @@ int main() {
         check_script_consumed();
     }
     {
-        // Ordinary, unjournaled callers retain the migration behavior: an invalid blob may fall
-        // back to legacy. Armed recovery calls cfg_load_state() above and never takes this path.
+        // An invalid/corrupt blob must NOT fall back to legacy mirrors. The configuration remains
+        // untouched and false is returned so caller fails closed.
         std::vector<uint8_t> corrupt = encoded_bytes;
         corrupt.back() ^= 0x01;
-        const std::string legacy_vin = "5YJ3E1EA7KF000316";
-        const size_t legacy_vin_len = legacy_vin.size() + 1;
         tk::ConfigBlob out;
+        out.vin = "untouched-vin";
         script_blob_reads({{ESP_OK, corrupt.size(), {}},
                            {ESP_OK, corrupt.size(), corrupt}});
-        script_string_reads({{ESP_ERR_NVS_NOT_FOUND, 0, {}},
-                             {ESP_ERR_NVS_NOT_FOUND, 0, {}},
-                             {ESP_OK, legacy_vin_len, {}},
-                             {ESP_OK, legacy_vin_len, legacy_vin},
-                             {ESP_ERR_NVS_NOT_FOUND, 0, {}},
-                             {ESP_ERR_NVS_NOT_FOUND, 0, {}}});
         CHECK(!tk::cfg_load(storage, out));
-        CHECK(out.vin == legacy_vin);
+        CHECK(out.vin == "untouched-vin");
         check_blob_script_consumed();
         check_script_consumed();
     }
@@ -1162,18 +1155,14 @@ int main() {
         check_script_consumed();
     }
     {
-        // cfg_load() is the read-only/boot compatibility path and must hold the same line: when a
+        // cfg_load() is the read-only compatibility path and must hold the same line: when a
         // legacy key cannot be read it returns false and leaves `out` exactly as the caller had
-        // it, never a half-read snapshot. It reads the legacy layout once more after the failed
-        // tri-state load (that second attempt serves the blob-present-but-invalid fallback), so
-        // both attempts are scripted.
+        // it, never a half-read snapshot.
         tk::ConfigBlob out;
         out.vin = "untouched";
         out.mqtt_uri = "previous";
         script_blob_reads({{ESP_ERR_NVS_NOT_FOUND, 0, {}}});
         script_string_reads({{ESP_ERR_NVS_NOT_FOUND, 0, {}}, {ESP_ERR_NVS_NOT_FOUND, 0, {}},
-                             {ESP_FAIL, 0, {}},
-                             {ESP_ERR_NVS_NOT_FOUND, 0, {}}, {ESP_ERR_NVS_NOT_FOUND, 0, {}},
                              {ESP_FAIL, 0, {}}});
         CHECK(!tk::cfg_load(storage, out));
         CHECK(out.vin == "untouched");

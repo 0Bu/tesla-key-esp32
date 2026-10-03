@@ -42,8 +42,9 @@ struct FixedHttpRoute {
     HttpRoute route;
 };
 
-inline constexpr std::array<FixedHttpRoute, 23> kFixedHttpRoutes{{
+inline constexpr std::array<FixedHttpRoute, 26> kFixedHttpRoutes{{
     {HttpVerb::Get,  "/ota/check",           HttpRoute::OtaCheck},
+    {HttpVerb::Post, "/ota/check",           HttpRoute::OtaCheck},
     {HttpVerb::Post, "/ota/update",          HttpRoute::OtaUpdate},
     {HttpVerb::Get,  "/ota/status",          HttpRoute::OtaStatus},
     {HttpVerb::Get,  "/ota/changelog",       HttpRoute::OtaChangelog},
@@ -57,6 +58,7 @@ inline constexpr std::array<FixedHttpRoute, 23> kFixedHttpRoutes{{
     {HttpVerb::Post, "/set_ota",             HttpRoute::SetOta},
     {HttpVerb::Post, "/scan",                HttpRoute::Scan},
     {HttpVerb::Get,  "/coredump",            HttpRoute::Coredump},
+    {HttpVerb::Post, "/coredump",            HttpRoute::Coredump},
     {HttpVerb::Post, "/crash/dismiss",       HttpRoute::CrashDismiss},
     {HttpVerb::Get,  "/heap",                HttpRoute::Heap},
     {HttpVerb::Post, "/mcp",                 HttpRoute::McpPost},
@@ -64,8 +66,9 @@ inline constexpr std::array<FixedHttpRoute, 23> kFixedHttpRoutes{{
     {HttpVerb::Get,  "/api/proxy/1/version", HttpRoute::Version},
     {HttpVerb::Get,  "/status",              HttpRoute::Status},
     {HttpVerb::Get,  "/diag",                HttpRoute::Diag},
+    {HttpVerb::Post, "/diag",                HttpRoute::Diag},
     {HttpVerb::Get,  "/",                    HttpRoute::Index},
-    {HttpVerb::Get,  "/index.html",           HttpRoute::Index},
+    {HttpVerb::Get,  "/index.html",          HttpRoute::Index},
 }};
 
 inline constexpr std::string_view kVehicleRoutePrefix = "/api/1/vehicles/";

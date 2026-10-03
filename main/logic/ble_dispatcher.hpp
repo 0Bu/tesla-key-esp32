@@ -31,6 +31,17 @@ enum class BleDomain : uint8_t {
 inline constexpr size_t kBleUuidSize = 16;
 using BleUuid = std::array<uint8_t, kBleUuidSize>;
 
+enum class VcsecPayloadAdmission : uint8_t { Plaintext, Decrypt, Drop };
+
+// A declared encrypted frame must never fall through to plaintext decoding.
+// Passive plaintext VCSEC status broadcasts retain their separate admission path.
+inline constexpr VcsecPayloadAdmission vcsec_payload_admission(
+        bool encrypted, bool session_ready, bool has_request_hash) noexcept {
+    return !encrypted ? VcsecPayloadAdmission::Plaintext
+         : session_ready && has_request_hash ? VcsecPayloadAdmission::Decrypt
+                                             : VcsecPayloadAdmission::Drop;
+}
+
 inline bool is_zero_uuid(const BleUuid& u) noexcept {
     for (uint8_t b : u) {
         if (b != 0) return false;

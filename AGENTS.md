@@ -112,7 +112,9 @@ ESP HTTP, NimBLE, NVS, OTA or FreeRTOS shells.
   C-library allocation failures (for example cJSON returning null) need explicit handling because
   they do not throw. Never let an exception escape the HTTP task or convert malformed/oversized
   input into reboot loops.
-- Do not allocate, log, perform network I/O, or call throwing code while holding a shared mutex.
+- Do not log, perform network I/O, or call unbounded throwing code while holding a shared mutex;
+  small, bounded struct/string snapshots under leaf locks (`cache_mutex_`, `result_mutex_`, syslog ring)
+  are permitted when protected by `tk::SemGuard` RAII against `bad_alloc`.
   Follow the lock hierarchy and snapshot-under-lock/use-after-unlock pattern in
   [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). Review the largest-block effect and all unwind
   paths, not only the happy path or total heap.
@@ -197,7 +199,8 @@ configuration and subagent manifests in `.agents/`.
   `.github/renovate.json` (`gate_is_renovate_maintenance`) are exempt from manual gate records
   at merge/check. `$feature-docs` is conditionally required when the cataloged feature surface
   changes, including the PR-policy and bench-acceptance workflows. `$vehicle-command-audit` is
-  conditionally required when vehicle-command/BLE paths change (`main/vehicle_*`, `main/ble_client.*`,
+  conditionally required when vehicle-command/BLE paths change (`main/command_exec.cpp`,
+  `main/vehicle_*`, `main/ble_client.*`,
   `main/logic/{command_registry,command_runner,ble_dispatcher,rx_framing,session_state,command_result,key_rotation,ble_chunk,ble_deferred_event,wake_poll,active_window}.hpp`,
   `patches/tesla-ble/`, `main/idf_component.yml`, `test/test_tesla_ble_harness.cpp`,
   `scripts/test-tesla-ble-harness.sh`, `docs/adr/0005-tesla-ble-seam.md`,

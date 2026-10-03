@@ -94,7 +94,7 @@ are logged).
    explicit timeout rather than completing whatever sits at the FIFO head.
 2. *Idempotent setpoints* (`logic/command_result.hpp`, `command_runner.hpp`): a setpoint the car
    already holds returns `actionStatus.result != OK` with reason `already_set`;
-   `tk::is_nominal_already_set()` classifies that as success, so web UI, MQTT and MCP setpoint
+   `tk::is_nominal_already_set()` classifies that as success, so web UI, REST/evcc and MCP setpoint
    writes are idempotent.
 
 **Cache freshness.** `GET vehicle_data` stays cache-only and non-blocking. The same ChargeState
@@ -166,10 +166,12 @@ version is validated before copying against the canonical grammar (no leading-ze
 overflow. The body is released before the bounded copies, keeping the peak at body + cJSON.
 
 **Downgrade gate.** Right after `esp_https_ota_begin` — before the bulk download — `ota_task` reads
-the version from the image's own app descriptor (`esp_https_ota_get_img_desc`) and refuses anything
-not strictly newer than the running firmware. A valid signature proves authenticity, not freshness,
-and reading the *image's* version also defeats a host that advertises a new manifest version but
-serves an old binary. No eFuses are burned.
+the version from the image's own app descriptor (`esp_https_ota_get_img_desc`), requires exact
+manifest/image version identity and applies the same channel/PR eligibility policy as the check.
+Ordinary stable updates must be newer; intentional exceptions allow targeted same-core PR previews,
+same-core transitions to Dev, and a return from Dev or PR/pre-release to Release (Dev-to-Release may
+return to an older stable core). A valid signature proves authenticity, not freshness. No eFuses
+are burned. The policy is defined by `logic/ota_contract.hpp`.
 
 **Rollback and health gate.** Rollback is enabled (`CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE`);
 `main.cpp` defers `esp_ota_mark_app_valid_cancel_rollback()` to `ota_health_gate_task`, whose
@@ -209,8 +211,8 @@ classic esp32). Key lifecycle, rotation and the CI signing boundary: [`SECURITY.
 **Channels and PR previews.** Devices follow `Release` (default), `Dev` or a targeted PR preview:
 
 - *Release* reads the root manifest and accepts only official candidates (no prerelease suffix),
-  newer than the running version. Switching from `Dev` to `Release` may downgrade so a device can
-  always return to production firmware.
+  newer than an ordinary stable running version. Switching from `Dev` to `Release` may downgrade;
+  returning from a PR/pre-release may use the same core, so a device can return to production firmware.
 - *Dev* reads `dev/manifest.json` and accepts `x.y.z-dev.N`; on the same core version the dev number
   must increase, and dev→dev downgrades are rejected.
 - *PR previews* (`/ota/check?pr=<N>`, `/ota/update?pr=<N>`, or `?pr=<N>` on the web UI) read
@@ -248,7 +250,10 @@ at `0x20000`. The `ci-build-all.sh` **app-size gate** sits at `slot − 32 KB` (
 up to a 64 KB Secure-Boot boundary plus a 4 KB signature. Per-target baselines (schema v2) cap the
 raw app, ELF total, flash code + rodata, static memory, `.bss` and IRAM; that review baseline is
 separate from the projected-signed hard gate, and the generated size report — not a number in this
-prose — is the source for current headroom. Design levers behind the fit:
+prose — is the source for current headroom. In particular, the ESP32-C6 target operates near the 64 KB
+quantization threshold (`C6_64K_CLIFF` at 1,966,080 bytes / `0x1E0000` in `scripts/check-firmware-size.sh`):
+exceeding this cliff by even a single byte triggers a 64 KiB quantization step that immediately violates
+both the `0x1E8000` policy limit and partition boundary, requiring strict review of C6 size deltas. Design levers behind the fit:
 
 - The firmware is a TLS **client** only (OTA, MQTTS); its server is plain LAN HTTP, so
   `CONFIG_MBEDTLS_TLS_CLIENT_ONLY=y` drops the unused TLS-server state machine and keeps C6 below the
@@ -269,6 +274,18 @@ The Web Serial installer's data contract and the full release/Pages pipeline are
 [`SECURITY.md`](SECURITY.md#ota-self-update); the per-mechanism build gates (reproducibility,
 effective-build closure, stack-frame inventory, environment rejection) are catalogued in
 [`FEATURES.md` §6](FEATURES.md#6-build-test-and-ci).
+
+### Flashing & NVS safety
+
+Flash writes and NVS operations operate under strict boundary controls to protect pairing keys, WiFi credentials, and device state:
+
+- **Normal updates:** OTA (`POST /ota/update`) writes the inactive application slot selected from the installed partition table and updates `otadata`. A verified USB application update writes the signed app to `ota_0` at `0x20000`, then erases `otadata` to activate it. Both preserve the installed bootloader, partition table and NVS at `0x9000` (`0x6000` bytes), including pairing keys, VIN and network settings. Neither path performs a partition migration.
+- **Whole-chip erase recovery (`erase_flash`):** Running `esptool erase_flash` completely clears flash memory, destroying the bootloader, partition table, active firmware, otadata, and NVS. Restoring an operable device requires an **initial full flash** containing all four components from an official signed Release:
+  1. `bootloader.bin` at offset `0x1000` (ESP32) or `0x0` (ESP32-S3, ESP32-C3, ESP32-C6)
+  2. `partition-table.bin` at offset `0x8000`
+  3. `ota_data_initial.bin` at offset `0xF000`
+  4. `tesla-key-esp32.bin` (signed app binary) at offset `0x20000` (`ota_0`)
+  The official browser-based Web Serial installer obtains these four parts from the release-bound Pages manifest and validates provenance, target family and bytes before writing. GitHub Releases publish signed app and merged-image assets, not separate bootloader, partition-table and initial-otadata files. Manual full recovery therefore needs a separately authorized complete write set and a verified source for every part; do not substitute an app-only recovery or unsigned local build. A merged image is an initial-install artifact that can overwrite the NVS range and requires explicit authorization for that loss. After an intentional whole-chip erase, the device starts unconfigured and requires network setup and fresh vehicle-key enrollment. See [SECURITY.md](SECURITY.md#ota-self-update) for the installer and artifact trust contract.
 
 ## Pinned tesla-ble and native orchestration
 
@@ -384,8 +401,9 @@ evcc, BLE and pairing. Config, topics and payload fields:
   semantics. Tesla reports range/rate/odometer imperial and the bridge converts to km, km/h; only the
   Tesla-compatible `/api` path keeps miles (evcc). Task-stack minima and `usable_soc` ride in the
   retained payloads without discovery rows, so they create no entities or duplicate battery sensors.
-  *last boot* is an ISO-8601 `timestamp` (HA renders "x minutes ago"), emitted only after the clock
-  is NTP-synced.
+  *last boot* is an ISO-8601 `timestamp` (HA renders "x minutes ago"), latched once the wall clock
+  is authoritative (NTP sync or explicit browser `/set_time` via `clock_is_authoritative()`; an
+  authoritative NTP sync takes precedence and upgrades an earlier browser-set latch).
 - **Publishing.** The `mqtt_pub` task reads the thread-safe caches; on every (re)connect it resends
   discovery, `online` and a snapshot, then republishes every interval. The source polls' active-window
   gating still lets the car sleep, so MQTT keeps serving the last-known retained values while a
@@ -833,9 +851,18 @@ check `(unix_now - session.clock_time)` (ADR-0005 §2). `session.clock_time` is 
 (hundreds of thousands of seconds), not Unix time, so once the wall clock is real (~1.77 billion s)
 the age far exceeds 3600 s and stored sessions are rejected; a 1970 clock gives a negative age and
 would *keep* them. `main.cpp` therefore calls `restore_clock_from_nvs()` (the `last_time` cache
-written on each NTP sync; it needs no network) **before** `VehicleController::init()`, so stale
+written on the first successful NTP sync of each boot; it needs no network) **before** `VehicleController::init()`, so stale
 sessions from an uninitialised clock are rejected fail-closed. True persistent session reuse across
 reboots would need upstream alignment to track vehicle epoch separately from Unix time.
+
+**Clock authority and durable timestamps.** A restored clock from the NVS `last_time` cache is
+sufficient to reject stale sessions and validate OTA TLS certificates, but is not authoritative
+because it reflects the time of the previous sync. Authoritative clock sources are SNTP
+(`on_time_sync`) and explicit browser synchronization via `POST /set_time` (`apply_browser_clock`),
+tracked by `clock_is_authoritative()`. Every durable wall-clock timestamp (`key_created`,
+`paired_at`, and the MQTT `boot_time` latch in `mqtt_ha.cpp`) requires an authoritative clock;
+an authoritative NTP sync takes precedence and upgrades any earlier browser-synchronized
+`boot_time` latch.
 
 **A configured VIN gates pairing entirely.** The device finds the car by its VIN-derived BLE name
 (`S<hex>C`), so `auto_pair_task` first checks `has_plausible_vin()` (the same 17-char validator as the
@@ -850,6 +877,18 @@ is kept out of matching). The UI shows "Add the vehicle VIN in Setup to begin."
 
 Every normal REST and MCP body enters through `read_body_result()`, whose typed result keeps empty
 body, body over the 2 KiB cap, allocation failure and receive failure distinct.
+The shared reader applies a 15 s monotonic total receive budget which byte progress cannot reset,
+checked before and after every socket read. Main HTTP and provisioning both use a 5 s receive
+socket timeout; an in-progress read can overrun that budget by up to one socket timeout (about 20 s
+total, excluding scheduler delays). Deadline expiry is a receive failure; incomplete or late bodies
+never reach parsing or persistence. The existing limit of two consecutive recoverable timeouts
+remains an additional bound.
+On receive failure both adapters shut down the socket's read side before replying, keeping the
+error response writable while preventing ESP-IDF's unread-body cleanup from restarting the wait.
+The primary wildcard wrapper also retires every body-bearing connection on exit, including early
+route/Origin/admission rejection and exception replies. It advertises `Connection: close` before
+dispatch; clients reconnect for a later request. Bodyless requests retain their existing connection
+behavior. The captive save handler rejects its unread preflight failures with `ESP_FAIL`.
 
 | Case | REST | MCP |
 |---|---|---|

@@ -273,6 +273,19 @@ static void ota_health_gate_task(void*) {
   }
 }
 
+__attribute__((noinline)) static void load_config_blob_verified(NvsStorageAdapter& config_store, tk::ConfigBlob& cfg_blob) {
+    tk::ConfigLoadState cfg_blob_state = tk::ConfigLoadState::Error;
+    for (int retry = 0; retry < 3; ++retry) {
+        cfg_blob_state = tk::cfg_load_state(config_store, cfg_blob);
+        if (cfg_blob_state != tk::ConfigLoadState::Error) break;
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+    if (cfg_blob_state == tk::ConfigLoadState::Error) {
+        ESP_LOGE(TAG, "ConfigBlob is unreadable or invalid — refusing boot with stale or missing configuration");
+        boot_fatal("configuration verification");
+    }
+}
+
 extern "C" void app_main() {
   // Top-level exception boundary (issue #204): app_main runs C++ that allocates (std::string
   // config, make_unique, the component start()s). An uncaught throw would unwind into the C
@@ -362,7 +375,7 @@ extern "C" void app_main() {
             cfg_blob.vin = marker.previous_vin;
         }
     } else {
-        (void)tk::cfg_load(config_store, cfg_blob);
+        load_config_blob_verified(config_store, cfg_blob);
     }
 
     if (cfg_blob.has_ota) {

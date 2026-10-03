@@ -42,6 +42,7 @@ static_assert(kEspErrNotFound == ESP_ERR_NOT_FOUND, "ESP_ERR_NOT_FOUND drift");
 // HTTP writer can never race the string/vector snapshot copied by HTTP or MQTT.
 static CrashInfo s_ci;
 static std::atomic<bool> s_dismissed{false};
+static std::atomic<bool> s_foreign_dump{false};
 
 // Every esp_core_dump_image_* symbol lives in IDF's core_dump_flash.c, which is compiled ONLY
 // when CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH is set — so on a build that disables core dumps these
@@ -50,6 +51,9 @@ static std::atomic<bool> s_dismissed{false};
 // board stays a one-line sdkconfig change instead of a compile error.
 bool diag_crash_coredump_present() {
 #if defined(CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH)
+    if (s_foreign_dump.load(std::memory_order_acquire)) {
+        return false;
+    }
     // EXACTLY what handle_coredump uses to decide it has something to stream — any extra condition
     // here could make /status advertise a download the endpoint refuses, or hide one it would
     // serve, and that disagreement is precisely what this path exists to prevent. An ESP_OK return
@@ -69,7 +73,8 @@ bool diag_crash_coredump_present() {
 CrashInfo diag_crash_info_live() {
     CrashInfo c = s_ci;                            // boot-time reason + parsed summary
     c.dismissed = s_dismissed.load(std::memory_order_acquire);
-    c.coredump  = diag_crash_coredump_present();   // …but the image itself may be gone by now
+    c.foreign_dump = s_foreign_dump.load(std::memory_order_acquire);
+    c.coredump     = diag_crash_coredump_present();   // …but the image itself may be gone by now
     return c;
 }
 
@@ -77,6 +82,7 @@ const CrashInfo& diag_crash_info() { return s_ci; }
 
 void diag_crash_capture() {
     s_dismissed.store(false, std::memory_order_release);
+    s_foreign_dump.store(false, std::memory_order_release);
     crash_set_reset(s_ci, static_cast<int>(esp_reset_reason()));
     s_ci.coredump = diag_crash_coredump_present();
 
@@ -145,6 +151,7 @@ void diag_crash_capture() {
     // comparison length, an actual mismatch), because the erase is destructive and the artifact it
     // would destroy is the only thing a panic left behind.
     if (crash_has_summary(s_ci) && coredump_is_foreign(s_ci.elf_sha256, s_ci.dump_elf_sha256)) {
+        s_foreign_dump.store(true, std::memory_order_release);
         ESP_LOGW(TAG, "stale core dump from build %s (running %s) — erasing",
                  s_ci.dump_elf_sha256.c_str(), s_ci.elf_sha256.c_str());
         esp_err_t err = esp_core_dump_image_erase();
@@ -153,6 +160,7 @@ void diag_crash_capture() {
         // Cleared regardless of the erase result: reporting a dump we KNOW is foreign is worse than
         // reporting none.
         s_ci.coredump = false;
+        s_ci.foreign_dump = true;
         s_ci.task.clear();
         s_ci.pc = 0;
         s_ci.backtrace.clear();
@@ -198,6 +206,9 @@ bool diag_crash_dismiss() {
         return false;
     }
     erased = (err == ESP_OK);
+    if (erased) {
+        s_foreign_dump.store(false, std::memory_order_release);
+    }
     if (!erased)
         ESP_LOGI(TAG, "no coredump partition on this device — dismissing the reset report only");
 #endif

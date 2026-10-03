@@ -114,7 +114,7 @@ links yourself — that's where the value is.
 | Crash forensics | `main/diag_crash.{cpp,hpp}` + `logic/crashinfo.hpp` + `logic/reset_reason.hpp` + `logic/bootlog.hpp` | ONE-SHOT boot capture of why the last run ended: reset reason **always** (needs no partition, so already-deployed devices keep reporting it), plus the core-dump SUMMARY where the `coredump` partition exists. Parsed once at boot, never on a request path; an ORPHAN dump (app-elf-sha ≠ running build) is erased, and declared foreign only on PROOF. Feeds `/status.last_crash`, MQTT, and the once-per-boot syslog replay (`/diag` is RAM and does not survive the reboot it would explain). BACKTRACE is **Xtensa-only** — on RISC-V (c3/c6, half the fleet) the decode is left to `GET /coredump` offline |
 | Boot-loop safe mode | `main/safe_mode.{cpp,hpp}` + `logic/boot_guard.hpp` | counts CRASH-ONLY boots in NVS (`boot_fails`); past the threshold it **latches** → WiFi + web UI + OTA only, BLE/vehicle/MQTT skipped, so a board crashing on the vehicle path stays fixable in a browser. NVS read/write failure or exception enters safe mode; a healthy clear is reported only after a successful write. Complements the heap watchdog, whose cap counts only restarts WE chose — a PANIC loop was uncounted before this. The healthy timer is deliberately NOT armed while latched. Drives `/status.sys.safe_mode` |
 | Heap trend | `main/heap_trend.{cpp,hpp}` + `logic/heap_history.hpp` | the board's own 24-hour free/largest-block ring (`GET /heap`), fed from the SAME two samples `loop_task` hands the heap watchdog, so the chart a human reads and the threshold the firmware acts on cannot disagree. Fixed static storage (~1.2 KB), **never heap** — a diagnostic must not compete for the block it exists to measure. It lives in **`.noinit`**, so it survives every reset that kept power: the heap watchdog's answer to exhaustion IS a restart, and a `.bss` ring was erased by the one event it exists to explain. The retained image must pass a CRC-32 **and** a derived layout fingerprint (`HeapPersist` in `logic/heap_history.hpp`) or the trend starts empty, and a carry offset keeps ONE bucket clock across the reboot — `GET /heap`'s `b_boot` names the bucket this boot began in |
-| Config blob | `main/config_blob.{cpp,hpp}` + `logic/config_store.hpp` + `logic/wifi_rollback.hpp` | the ONE atomic credential/service entry in NVS: WiFi creds + one-shot rollback backup + VIN + `mqtt_uri` + `syslog_uri` as a single CRC-checked `nvs_set_blob`, all-or-nothing across a write failure AND a power cut. READS the legacy per-key layout as fallback (absent/failed CRC) and mirrors back on save, so neither an OTA nor a downgrade strands a deployed device's config. Deliberately EXCLUDES separately owned cache/time/display/reboot records (`ble_mac`, `last_time`, `reboot_why`, `disp_rot`) and different-lifetime journal/safety state (`vin_txn`, `boot_fails`); a config snapshot must neither revert another writer nor erase recovery state. |
+| Config blob | `main/config_blob.{cpp,hpp}` + `logic/config_store.hpp` + `logic/wifi_rollback.hpp` | the ONE atomic credential/service entry in NVS: WiFi creds + one-shot rollback backup + VIN + `mqtt_uri` + `syslog_uri` as a single CRC-checked `nvs_set_blob`, all-or-nothing across a write failure AND a power cut. READS the legacy per-key layout as fallback ONLY when the blob is absent (present blobs with read/CRC errors fail closed) and mirrors back on save, so neither an OTA nor a downgrade strands a deployed device's config. Deliberately EXCLUDES separately owned cache/time/display/reboot records (`ble_mac`, `last_time`, `reboot_why`, `disp_rot`) and different-lifetime journal/safety state (`vin_txn`, `boot_fails`); a config snapshot must neither revert another writer nor erase recovery state. |
 | OTA | `main/ota_update.{cpp,hpp}` + `main/ota_manifest.hpp` | pull-based self-update; dual-slot; bounded manifest parsing rejects ambiguous target entries before download |
 | Provisioning | `main/provisioning.{cpp,hpp}` + `logic/captive.hpp` + `logic/http_body.hpp` | captive setup portal when no WiFi; its `POST /save` is a separate fixed 1024-byte receive path (empty/oversized → 400), not the normal API/MCP 2 KiB body policy |
 | Web UI | `main/www/` (`index.html` markup + `style.css` + `app.js`, spliced by `inline_assets.cmake`) | compiled into the app binary as ONE self-contained page; live-updates by polling `GET /status` every 4 s (cache-busted + `no-store`; a failed poll keeps the last frame and parks the BLE countdown) |
@@ -269,10 +269,18 @@ Treat a violation of any of these as a real finding.
   live acceptance. `actions/upload-pages-artifact` / `actions/deploy-pages` or another branch/path
   is a stop finding, not an alternative deployment mode.
 - **Downgrade gate (software anti-rollback):** before the bulk download, `ota_task` reads the
-  downloaded image's own app-descriptor version (`esp_https_ota_get_img_desc`) and refuses
-  anything not strictly newer than the running firmware — a signature proves authenticity, not
-  freshness. Weakening it re-opens the old-but-validly-signed-image attack.
-- `version.txt` is the committed **version floor**; CI (`scripts/select-release-version.sh` →
+  downloaded image's own app-descriptor version (`esp_https_ota_get_img_desc`), requires exact
+  manifest/image version identity and applies `logic/ota_contract.hpp`'s channel/PR policy.
+  Ordinary stable updates must be newer. Intentional exceptions permit targeted same-core PR
+  previews, same-core transitions to Dev and return from Dev or PR/pre-release to Release;
+  Dev-to-Release may return to an older stable core. A signature proves authenticity, not freshness.
+  Do not replace this explicit policy with a universal strict-newer claim or weaken its checks.
+- **Two release channels:** CI (`.github/workflows/build.yml`) structurally splits Dev and Release delivery:
+  a firmware-relevant push to `main` runs in `dev` mode, generating pre-release versions via `scripts/next-version.sh --dev`
+  and publishing continuously only to the Dev channel (`gh-pages:/dev/`); official stable Releases and root Pages updates
+  are triggered manually via `workflow_dispatch` with `release: true` on current `main` (a `workflow_dispatch` without
+  `release: true` runs in `test` mode, unprivileged and unable to sign or publish Pages).
+  `version.txt` is the committed **version floor** (`1.5.0`); CI (`scripts/select-release-version.sh` →
   `scripts/next-version.sh`, see `.github/workflows/build.yml`) computes the actual stable release
   as the maximum of that floor, stable-tag patch increments and prerelease-core promotions, but
   publishes only stable `X.Y.Z` identities and idempotently reuses one stable Release tag already
@@ -309,15 +317,20 @@ Treat a violation of any of these as a real finding.
   feedback path.
 - `set_charging_amps` requires an integer body, serializes action ACK + explicit ChargeState
   readback, and succeeds only on a fresh exact amp match. Missing/mismatching readback and Tesla
-  rejection are HTTP 502. Replayed CarServer counters must return before callbacks/FIFO completion
-  via the pinned patch in `patches/tesla-ble/`.
+  rejection are HTTP 502. Replayed CarServer responses return before callbacks/FIFO completion
+  through native `Peer::validate_response_counter()` and `tk::BleDispatcher` checks in
+  `main/vehicle_telemetry.cpp`; patch 0005 aligns SessionInfo counter advancement only.
 - `charge_start` accepts the JSON scalar `true` and `charge_stop` accepts `false` because evcc's
   generic boolean setter emits those bodies. The matching command/value pairs are the only
   scalar-body exception; mismatched booleans and other non-object bodies are HTTP 400.
 - **No HTTP auth / TLS by design** (evcc can't send credentials) — trusted LAN only. Mutating
   browser requests add a narrower device-Host + same-Origin/`Sec-Fetch-Site` gate (including
-  state-changing GET forms) while headerless evcc/curl remains allowed; do not mistake that CSRF
-  mitigation for LAN-client authentication. Document any deviation in `docs/SECURITY.md`.
+  state-changing GET forms) while headerless POST clients (evcc, curl) remain allowed; mutating
+  GET clients without accepted browser provenance must add an explicit custom header (e.g.
+  `X-Requested-With`) or use the POST route alias (`POST /ota/check`, `POST /diag`). Matching
+  Origin/Referer or accepted `Sec-Fetch-Site` provenance also permits the GET; genuinely headerless
+  mutating GETs fail. Do not mistake that CSRF mitigation for LAN-client
+  authentication. Document any deviation in `docs/SECURITY.md`.
 
 ### Pairing
 - Keys are enrolled **Charging Manager only**; owner role is intentionally removed
@@ -528,13 +541,14 @@ what each must stay true to:
   reboot or unconfirmed mark-valid result must fail closed. USB gets only a short bounded boot/WiFi
   reachability retry and must not inherit the probation wait.
   Re-verify against `.github/workflows/build.yml` (artifact naming, the
-  firmware-change-gated release), `scripts/ci-build-all.sh` (unsigned four-target producer),
+  firmware-change-gated Dev main build and separately authorized manual stable Release),
+  `scripts/ci-build-all.sh` (unsigned four-target producer),
   `scripts/ci-sign-artifacts.sh` (suffix map, signing, merged copies), `partitions.csv` offsets,
   and the `/ota/*` endpoints. Complementary to `$flash-esp32`
   (local-tree build+flash, no merge); it defers the merge gate to `require-pr-gates.sh`, including
   current `$project-review` and independent `$pr-hygiene` records plus `$feature-docs` when the
   diff is feature-relevant.
-- **`$deploy`** orchestrates the full delivery lifecycle: local analysis and fix loops, commit, push, PR creation, gate verification and CI monitoring, canonical squash merge, post-merge GitHub Release verification, OTA deployment on `tesla-key-esp32.local`, 3-tiered verification, and branch cleanup. Requires explicit user authorization before execution.
+- **`$deploy`** orchestrates the full delivery lifecycle: local analysis and fix loops, commit, push, PR creation, gate verification and CI monitoring, canonical squash merge, post-merge channel-bound main-run and signed-artifact verification (Dev by default; a stable Release only through a separately authorized manual dispatch), OTA deployment on `tesla-key-esp32.local`, 3-tiered verification, and branch cleanup. Requires explicit user authorization before execution.
 - **`$vehicle-command-audit`** compares the firmware against upstream `teslamotors/vehicle-command`,
   gated by what `yoziru/tesla-ble` (pin in `main/idf_component.yml`) can actually do. Re-verify the
   tesla-ble **pin** in its source map (`v5.2.0`) still matches `idf_component.yml`, that its upstream
