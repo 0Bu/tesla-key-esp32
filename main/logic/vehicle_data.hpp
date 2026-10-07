@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <string>
+#include <string_view>
 
 // Vehicle-state result structs — the cached shapes VehicleController hands to every
 // consumer (/status + web UI, /api evcc routes, MQTT/HA bridge, MCP get_vehicle_state,
@@ -37,39 +38,6 @@ struct ChargeStateResult {
     int         minutes_to_full_charge{0}; bool has_minutes_to_full{false};  // min
     std::string charge_limit_reason;       // "" if the car reported none
 };
-
-namespace tk {
-
-// Serialize charge_state for GET /api/1/vehicles/{VIN}/vehicle_data
-// Shape mirrors Tesla Fleet API / TeslaBleHttpProxy: always emits every field so evcc
-// parsing floats/ints never hits a missing key. On failure/omission, cs is zero-initialised
-// and minutes_to_full_charge emits 0 (where evcc's > 0 guard correctly yields "").
-template <typename Emitter>
-void emit_vehicle_charge_state(const ChargeStateResult& cs, Emitter& e) {
-    e.str("charging_state", cs.charging_state.empty() ? "Disconnected" : cs.charging_state.c_str());
-    e.num("battery_level",          cs.battery_level);
-    e.num("usable_battery_level",   cs.has_usable_battery_level ? cs.usable_battery_level : cs.battery_level);
-    e.num("charge_limit_soc",       cs.charge_limit_soc);
-    e.num("charger_power",          cs.charger_power);
-    e.num("charge_rate",            cs.charge_rate);
-    e.num("charge_amps",            cs.charging_amps);
-    e.num("battery_range",          cs.battery_range);
-    e.num("minutes_to_full_charge", cs.minutes_to_full_charge);
-}
-
-// Usable battery level with fallback to nominal battery level when tag 115 is omitted.
-inline float effective_usable_soc(const ChargeStateResult& cs) {
-    return cs.has_usable_battery_level ? cs.usable_battery_level : cs.battery_level;
-}
-
-// Pure decision logic for publishing pending telemetry against an identity epoch.
-// A telemetry snapshot taken before pairing cleanup must not outlive the cleanup and revive
-// stale readings into active caches.
-inline bool telemetry_epoch_matches(uint32_t captured_epoch, uint32_t current_epoch) noexcept {
-    return captured_epoch == current_epoch;
-}
-
-}  // namespace tk
 
 struct VehicleStatusResult {
     bool valid{false};
@@ -132,3 +100,111 @@ struct ClosuresStateResult {
     bool any_window_open{false};
     bool has_user_present{false}; bool user_present{false};
 };
+
+namespace tk {
+
+// Serialize charge_state for GET /api/1/vehicles/{VIN}/vehicle_data
+// Shape mirrors Tesla Fleet API / TeslaBleHttpProxy: always emits every field so evcc
+// parsing floats/ints never hits a missing key. On failure/omission, cs is zero-initialised
+// and minutes_to_full_charge emits 0 (where evcc's > 0 guard correctly yields "").
+template <typename Emitter>
+void emit_vehicle_charge_state(const ChargeStateResult& cs, Emitter& e) {
+    e.str("charging_state", cs.charging_state.empty() ? "Disconnected" : cs.charging_state.c_str());
+    e.num("battery_level",          cs.battery_level);
+    e.num("usable_battery_level",   cs.has_usable_battery_level ? cs.usable_battery_level : cs.battery_level);
+    e.num("charge_limit_soc",       cs.charge_limit_soc);
+    e.num("charger_power",          cs.charger_power);
+    e.num("charge_rate",            cs.charge_rate);
+    e.num("charge_amps",            cs.charging_amps);
+    e.num("charge_energy_added",    cs.charge_energy_added);
+    e.num("battery_range",          cs.battery_range);
+    e.num("minutes_to_full_charge", cs.minutes_to_full_charge);
+}
+
+// Serialize climate_state for GET /api/1/vehicles/{VIN}/vehicle_data?endpoints=climate_state
+// Shape mirrors Tesla Fleet API / TeslaBleHttpProxy: always emits every field so evcc
+// reading .response.response.climate_state.is_preconditioning never hits a missing key or <nil>.
+template <typename Emitter>
+void emit_vehicle_climate_state(const ClimateStateResult& cl, Emitter& e) {
+    e.boolean("is_climate_on",      cl.is_climate_on);
+    e.boolean("is_preconditioning", cl.is_preconditioning);
+    e.num("inside_temp",            cl.inside_temp);
+    e.num("outside_temp",           cl.outside_temp);
+    e.num("driver_temp_setting",    cl.driver_setpoint);
+}
+
+struct VehicleDataEndpoints {
+    bool charge_state{false};
+    bool climate_state{false};
+    bool has_unsupported{false};
+
+    constexpr bool empty() const noexcept {
+        return !charge_state && !climate_state;
+    }
+};
+
+// Parse endpoints for GET /api/1/vehicles/{VIN}/vehicle_data[?endpoints=...]
+// Accepts a full URI, query string, or delimited endpoint list. Delimiters can be ';' or ','.
+// If endpoints is omitted or not present, defaults to both charge_state and climate_state
+// matching TeslaBleHttpProxy behavior.
+inline VehicleDataEndpoints parse_vehicle_data_endpoints(std::string_view input) noexcept {
+    VehicleDataEndpoints res{};
+    if (input.empty()) {
+        res.charge_state = true;
+        res.climate_state = true;
+        return res;
+    }
+
+    const char* val = nullptr;
+    const char* val_end = nullptr;
+
+    const size_t pos = input.find("endpoints=");
+    if (pos != std::string_view::npos) {
+        val = input.data() + pos + 10;
+        const size_t amp = input.find('&', pos + 10);
+        val_end = (amp != std::string_view::npos) ? (input.data() + amp) : (input.data() + input.size());
+    } else if (input.find('/') == std::string_view::npos && input.find('?') == std::string_view::npos && input.find('=') == std::string_view::npos) {
+        val = input.data();
+        val_end = input.data() + input.size();
+    }
+
+    if (!val) {
+        res.charge_state = true;
+        res.climate_state = true;
+        return res;
+    }
+
+    while (val < val_end) {
+        while (val < val_end && (*val == ' ' || *val == '\t')) ++val;
+        const char* t = val;
+        while (t < val_end && *t != ';' && *t != ',' && *t != '&') ++t;
+        const char* next = (t < val_end) ? t + 1 : val_end;
+        while (t > val && (t[-1] == ' ' || t[-1] == '\t')) --t;
+
+        const size_t len = static_cast<size_t>(t - val);
+        if (len == 12 && memcmp(val, "charge_state", 12) == 0) {
+            res.charge_state = true;
+        } else if (len == 13 && memcmp(val, "climate_state", 13) == 0) {
+            res.climate_state = true;
+        } else if (len > 0) {
+            res.has_unsupported = true;
+        }
+        val = next;
+    }
+
+    return res;
+}
+
+// Usable battery level with fallback to nominal battery level when tag 115 is omitted.
+inline float effective_usable_soc(const ChargeStateResult& cs) {
+    return cs.has_usable_battery_level ? cs.usable_battery_level : cs.battery_level;
+}
+
+// Pure decision logic for publishing pending telemetry against an identity epoch.
+// A telemetry snapshot taken before pairing cleanup must not outlive the cleanup and revive
+// stale readings into active caches.
+inline bool telemetry_epoch_matches(uint32_t captured_epoch, uint32_t current_epoch) noexcept {
+    return captured_epoch == current_epoch;
+}
+
+}  // namespace tk

@@ -74,7 +74,7 @@ The firmware delegates these decision/conversion cores to IDF-free headers under
 | OTA version grammar/comparison + exact bounded HTTPS-body state machine | `ota_contract.hpp` | `ota_update.cpp` manifest intake and freshness |
 | MCP core (version negotiation, JSON-RPC routing, strict integer validation) | `mcp.hpp` | `mcp_server.cpp` |
 | Shared command registry (REST + MCP names, kinds, per-surface arg keys with ONE bounds pair, `tools/list` order, evcc boolean-body rule) | `command_registry.hpp` | `http_api.cpp`, `mcp_server.cpp`, `command_exec.cpp` |
-| `/status` field contract (order, keys, presence, shaping; golden emissions for awake+charging / asleep / unreachable+scan / factory-fresh) | `status_model.hpp`, `vehicle_data.hpp` | `http_status.cpp` `handle_status` |
+| `/status` and evcc `/vehicle_data` field contract (order, keys, presence, shaping; golden emissions for awake+charging / asleep / unreachable+scan / factory-fresh / evcc charge_state and climate_state) | `status_model.hpp`, `vehicle_data.hpp` | `http_status.cpp` `handle_status`, `http_api.cpp` `handle_vehicle_data` |
 | Command-outcome text and failure-origin classification behind the soft-desync link backstop | `command_result.hpp` | `http_api.cpp`, `mcp_server.cpp`, `vehicle_commands.cpp` `make_result_cb_` |
 | Display presenter (priority ladder, SoC gradient, RSSI→bars, SSID scroll, `Orient` geometry) on the shared UI snapshot | `display_model.hpp`, `ui_state.hpp` | `display.cpp` via `ui_snapshot()` |
 | Status-LED priority ladder + latched `LedAlerts` | `led_status.hpp`, `ui_state.hpp` | `led_status.cpp` |

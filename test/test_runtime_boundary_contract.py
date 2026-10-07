@@ -1071,7 +1071,8 @@ def require_vehicle_data_production_seams(handler: str) -> None:
     # /status seam above (build_status_object -> StatusJsonEmitter + emit_status). Scrub first
     # so a token that appears only in a comment can never satisfy a production seam.
     code = scrub_cpp(handler)
-    for token in ("tk::StatusJsonEmitter", "tk::emit_vehicle_charge_state", "e.release()"):
+    for token in ("tk::StatusJsonEmitter", "tk::emit_vehicle_charge_state",
+                  "tk::emit_vehicle_climate_state", "e.release()"):
         if token not in code:
             raise AssertionError(f"/vehicle_data handler bypasses tested production seam {token!r}")
 
@@ -4282,7 +4283,8 @@ def self_test_canaries(tasks: set[str], callbacks: set[str]) -> None:
             raise AssertionError(f"/status seam-removal mutation passed unexpectedly: {token}")
 
     vehicle_data_handler = function_body("handle_vehicle_data")
-    for token in ("tk::StatusJsonEmitter", "tk::emit_vehicle_charge_state", "e.release()"):
+    for token in ("tk::StatusJsonEmitter", "tk::emit_vehicle_charge_state",
+                  "tk::emit_vehicle_climate_state", "e.release()"):
         # Replace every occurrence (the handler comment names the seams too): the canary must
         # remove the real production callsite, not just a comment mention, to prove the guard bites.
         mutated_vd = vehicle_data_handler.replace(token, "fixture_vehicle_data_bypass")

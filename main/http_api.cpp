@@ -282,22 +282,35 @@ esp_err_t handle_vehicle_data(GuardedReq rq) {
         return send_json(req, 400, make_response(false, "vehicle_data", "?", "invalid URI"));
     if (!request_vin_matches(vin))
         return send_json(req, 404, make_response(false, "vehicle_data", vin, "vehicle VIN mismatch"));
+    const auto endpoints = tk::parse_vehicle_data_endpoints(req->uri);
+    if (validate_query_string(req) != ESP_OK || endpoints.empty())
+        return send_json(req, 400, make_response(false, "vehicle_data", vin, "invalid query or endpoint"));
 
     ChargeStateResult cs{};
-    bool ok = g_vehicle->get_charge_state(cs);
+    const bool cs_ok = endpoints.charge_state && g_vehicle->get_charge_state(cs);
+
+    ClimateStateResult cl{};
+    bool cl_ok = false;
+    if (endpoints.climate_state) {
+        cl = g_vehicle->get_cached_climate();
+        cl_ok = cl.valid;
+    }
+
+    const bool ok = cs_ok || cl_ok;
 
     // Shape MUST match the Tesla Fleet API as proxied by TeslaBleHttpProxy:
-    //   { "response": { "response": { "charge_state": { ... } } } }
-    // evcc reads e.g. .response.response.charge_state.battery_level and
-    // .response.response.charge_state.charge_amps — note the doubled "response"
+    //   { "response": { "response": { "charge_state": { ... }, "climate_state": { ... } } } }
+    // evcc reads e.g. .response.response.charge_state.battery_level,
+    // .response.response.charge_state.charge_amps, and
+    // .response.response.climate_state.is_preconditioning — note the doubled "response"
     // and the field name "charge_amps" (not "charging_amps").
     //
-    // charge_state is emitted by tk::emit_vehicle_charge_state() — the SAME seam
-    // test/test_logic.cpp::test_vehicle_data() drives on the host — so the evcc field
-    // contract (names, order, and the always-emit-every-field rule that keeps evcc from
-    // parsing a missing key as "<nil>") is guarded by the mock build rather than being
-    // re-hand-rolled here. StatusJsonEmitter mirrors build_status_object()'s seam. On
-    // failure cs is zero-initialised, which still yields valid numbers (and
+    // charge_state and climate_state are emitted by tk::emit_vehicle_charge_state() and
+    // tk::emit_vehicle_climate_state() — the SAME seams test/test_logic.cpp::test_vehicle_data()
+    // drives on the host — so the evcc field contract (names, order, and the always-emit-every-field
+    // rule that keeps evcc from parsing a missing key as "<nil>") is guarded by the mock build rather
+    // than being re-hand-rolled here. StatusJsonEmitter mirrors build_status_object()'s seam. On
+    // failure cs/cl are zero-initialised, which still yields valid numbers/booleans (and
     // get_charge_state already falls back to the cache).
     tk::JsonBuilder json;
     tk::StatusJsonEmitter e(json);
@@ -305,9 +318,16 @@ esp_err_t handle_vehicle_data(GuardedReq rq) {
     e.boolean("result", ok);
     e.str("vin", vin);
     e.obj_begin("response");
-    e.obj_begin("charge_state");
-    tk::emit_vehicle_charge_state(cs, e);
-    e.obj_end();
+    if (endpoints.charge_state) {
+        e.obj_begin("charge_state");
+        tk::emit_vehicle_charge_state(cs, e);
+        e.obj_end();
+    }
+    if (endpoints.climate_state) {
+        e.obj_begin("climate_state");
+        tk::emit_vehicle_climate_state(cl, e);
+        e.obj_end();
+    }
     e.obj_end();
     e.str("reason", ok ? "success" : "stale or unavailable");
     e.obj_end();

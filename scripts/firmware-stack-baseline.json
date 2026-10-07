@@ -27,7 +27,7 @@
         "CMakeFiles/__idf_main.dir/heap_trend.cpp.su": {},
         "CMakeFiles/__idf_main.dir/http_api.cpp.su": {
           "/COMPONENT_MAIN_DIR/http_api.cpp :: esp_err_t handle_command(GuardedReq)": 336,
-          "/COMPONENT_MAIN_DIR/http_api.cpp :: esp_err_t handle_vehicle_data(GuardedReq)": 304
+          "/COMPONENT_MAIN_DIR/http_api.cpp :: esp_err_t handle_vehicle_data(GuardedReq)": 608
         },
         "CMakeFiles/__idf_main.dir/http_common.cpp.su": {},
         "CMakeFiles/__idf_main.dir/http_config.cpp.su": {
@@ -42,7 +42,7 @@
           "/COMPONENT_MAIN_DIR/http_ota.cpp :: esp_err_t handle_ota_changelog(GuardedReq)": 1072
         },
         "CMakeFiles/__idf_main.dir/http_server.cpp.su": {
-          "/COMPONENT_MAIN_DIR/http_server.cpp :: bool browser_mutation_allowed(httpd_req_t*)": 464,
+          "/COMPONENT_MAIN_DIR/http_server.cpp :: bool browser_mutation_allowed(httpd_req_t*)": 432,
           "/COMPONENT_MAIN_DIR/http_server.cpp :: bool origin_allowed_for_owned_addresses(httpd_req_t*, bool, const char*, const char*, const char*, bool, const char*)": 368,
           "/COMPONENT_MAIN_DIR/http_server.cpp :: esp_err_t handle_all_dispatch(httpd_req_t*)": 336
         },
@@ -103,7 +103,7 @@
         "CMakeFiles/__idf_main.dir/vehicle_telemetry.cpp.su": {
           "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: VehicleController::load_nvs_sessions_()::<lambda(UniversalMessage_Domain, const char*, tk::BleDomain)>": 336,
           "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: bool VehicleController::get_vehicle_status(VehicleStatusResult&, tk::ConnectOrigin, int)": 256,
-          "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: static void VehicleController::loop_task_fn_(void*)": 592,
+          "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: static void VehicleController::loop_task_fn_(void*)": 576,
           "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: void VehicleController::handle_carserver_frame_(const UniversalMessage_RoutableMessage&)": 2048,
           "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: void VehicleController::handle_session_info_frame_(const UniversalMessage_RoutableMessage&)": 304,
           "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: void VehicleController::handle_vcsec_frame_(const UniversalMessage_RoutableMessage&)": 816,
@@ -135,7 +135,7 @@
         "CMakeFiles/__idf_main.dir/heap_trend.cpp.su": {},
         "CMakeFiles/__idf_main.dir/http_api.cpp.su": {
           "/COMPONENT_MAIN_DIR/http_api.cpp :: esp_err_t handle_command(GuardedReq)": 336,
-          "/COMPONENT_MAIN_DIR/http_api.cpp :: esp_err_t handle_vehicle_data(GuardedReq)": 304
+          "/COMPONENT_MAIN_DIR/http_api.cpp :: esp_err_t handle_vehicle_data(GuardedReq)": 608
         },
         "CMakeFiles/__idf_main.dir/http_common.cpp.su": {},
         "CMakeFiles/__idf_main.dir/http_config.cpp.su": {
@@ -150,7 +150,7 @@
           "/COMPONENT_MAIN_DIR/http_ota.cpp :: esp_err_t handle_ota_changelog(GuardedReq)": 1072
         },
         "CMakeFiles/__idf_main.dir/http_server.cpp.su": {
-          "/COMPONENT_MAIN_DIR/http_server.cpp :: bool browser_mutation_allowed(httpd_req_t*)": 464,
+          "/COMPONENT_MAIN_DIR/http_server.cpp :: bool browser_mutation_allowed(httpd_req_t*)": 432,
           "/COMPONENT_MAIN_DIR/http_server.cpp :: bool origin_allowed_for_owned_addresses(httpd_req_t*, bool, const char*, const char*, const char*, bool, const char*)": 368,
           "/COMPONENT_MAIN_DIR/http_server.cpp :: esp_err_t handle_all_dispatch(httpd_req_t*)": 336
         },
@@ -212,7 +212,7 @@
         "CMakeFiles/__idf_main.dir/vehicle_telemetry.cpp.su": {
           "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: VehicleController::load_nvs_sessions_()::<lambda(UniversalMessage_Domain, const char*, tk::BleDomain)>": 336,
           "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: bool VehicleController::get_vehicle_status(VehicleStatusResult&, tk::ConnectOrigin, int)": 256,
-          "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: static void VehicleController::loop_task_fn_(void*)": 592,
+          "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: static void VehicleController::loop_task_fn_(void*)": 576,
           "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: void VehicleController::handle_carserver_frame_(const UniversalMessage_RoutableMessage&)": 2048,
           "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: void VehicleController::handle_session_info_frame_(const UniversalMessage_RoutableMessage&)": 304,
           "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: void VehicleController::handle_vcsec_frame_(const UniversalMessage_RoutableMessage&)": 816,
@@ -243,7 +243,7 @@
         "CMakeFiles/__idf_main.dir/heap_trend.cpp.su": {},
         "CMakeFiles/__idf_main.dir/http_api.cpp.su": {
           "/COMPONENT_MAIN_DIR/http_api.cpp :: esp_err_t handle_command(GuardedReq)": 320,
-          "/COMPONENT_MAIN_DIR/http_api.cpp :: esp_err_t handle_vehicle_data(GuardedReq)": 304
+          "/COMPONENT_MAIN_DIR/http_api.cpp :: esp_err_t handle_vehicle_data(GuardedReq)": 592
         },
         "CMakeFiles/__idf_main.dir/http_common.cpp.su": {},
         "CMakeFiles/__idf_main.dir/http_config.cpp.su": {
@@ -316,7 +316,7 @@
         },
         "CMakeFiles/__idf_main.dir/vehicle_telemetry.cpp.su": {
           "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: VehicleController::load_nvs_sessions_()::<lambda(UniversalMessage_Domain, const char*, tk::BleDomain)>": 304,
-          "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: static void VehicleController::loop_task_fn_(void*)": 576,
+          "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: static void VehicleController::loop_task_fn_(void*)": 560,
           "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: void VehicleController::handle_carserver_frame_(const UniversalMessage_RoutableMessage&)": 2048,
           "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: void VehicleController::handle_session_info_frame_(const UniversalMessage_RoutableMessage&)": 272,
           "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: void VehicleController::handle_vcsec_frame_(const UniversalMessage_RoutableMessage&)": 816,
@@ -347,7 +347,7 @@
         "CMakeFiles/__idf_main.dir/heap_trend.cpp.su": {},
         "CMakeFiles/__idf_main.dir/http_api.cpp.su": {
           "/COMPONENT_MAIN_DIR/http_api.cpp :: esp_err_t handle_command(GuardedReq)": 320,
-          "/COMPONENT_MAIN_DIR/http_api.cpp :: esp_err_t handle_vehicle_data(GuardedReq)": 304
+          "/COMPONENT_MAIN_DIR/http_api.cpp :: esp_err_t handle_vehicle_data(GuardedReq)": 608
         },
         "CMakeFiles/__idf_main.dir/http_common.cpp.su": {},
         "CMakeFiles/__idf_main.dir/http_config.cpp.su": {
@@ -362,7 +362,7 @@
           "/COMPONENT_MAIN_DIR/http_ota.cpp :: esp_err_t handle_ota_changelog(GuardedReq)": 1056
         },
         "CMakeFiles/__idf_main.dir/http_server.cpp.su": {
-          "/COMPONENT_MAIN_DIR/http_server.cpp :: bool browser_mutation_allowed(httpd_req_t*)": 432,
+          "/COMPONENT_MAIN_DIR/http_server.cpp :: bool browser_mutation_allowed(httpd_req_t*)": 400,
           "/COMPONENT_MAIN_DIR/http_server.cpp :: bool origin_allowed_for_owned_addresses(httpd_req_t*, bool, const char*, const char*, const char*, bool, const char*)": 352,
           "/COMPONENT_MAIN_DIR/http_server.cpp :: esp_err_t handle_all_dispatch(httpd_req_t*)": 320
         },
@@ -422,7 +422,7 @@
         "CMakeFiles/__idf_main.dir/vehicle_telemetry.cpp.su": {
           "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: VehicleController::load_nvs_sessions_()::<lambda(UniversalMessage_Domain, const char*, tk::BleDomain)>": 304,
           "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: bool VehicleController::get_vehicle_status(VehicleStatusResult&, tk::ConnectOrigin, int)": 256,
-          "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: static void VehicleController::loop_task_fn_(void*)": 576,
+          "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: static void VehicleController::loop_task_fn_(void*)": 560,
           "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: void VehicleController::handle_carserver_frame_(const UniversalMessage_RoutableMessage&)": 2048,
           "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: void VehicleController::handle_session_info_frame_(const UniversalMessage_RoutableMessage&)": 272,
           "/COMPONENT_MAIN_DIR/vehicle_telemetry.cpp :: void VehicleController::handle_vcsec_frame_(const UniversalMessage_RoutableMessage&)": 816,

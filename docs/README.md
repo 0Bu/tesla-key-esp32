@@ -252,12 +252,14 @@ GET /api/1/vehicles/{VIN}/vehicle_data
   "response": {
   "charge_state": { "charging_state": "Charging", "battery_level": 72,
     "usable_battery_level": 72, "charge_limit_soc": 80, "charger_power": 11,
-    "charge_rate": 58.3, "charge_amps": 16, "battery_range": 280.5,
-    "minutes_to_full_charge": 45 } } } }
+    "charge_rate": 58.3, "charge_amps": 16, "charge_energy_added": 12.5,
+    "battery_range": 280.5, "minutes_to_full_charge": 45 } } } }
 ```
 
 The doubled `response` and `charge_amps` are intentional — they match the Fleet API /
-TeslaBleHttpProxy shape evcc parses. `battery_level` is the nominal pack SOC, `usable_battery_level`
+TeslaBleHttpProxy shape evcc parses. Optional `?endpoints=charge_state` or `?endpoints=climate_state`
+selects individual endpoints (`endpoints=climate_state` returns `.climate_state.is_preconditioning`),
+while omitting `endpoints` returns both. `battery_level` is the nominal pack SOC, `usable_battery_level`
 the usable SOC matching the Tesla app. While the car is idle the cache may stay available so polling
 does not wake it; while charging, or within five minutes of a command, a `ChargeState` older than 30 s
 returns HTTP `503` with reason `"stale or unavailable"` instead of posing as live telemetry.
@@ -340,9 +342,10 @@ url: http://tesla-key-esp32.local   # or http://<ESP32-IP>
 port: 80                            # device serves on 80 (template default 8080)
 ```
 
-evcc calls `GET …/vehicle_data?endpoints=charge_state` and
-`POST …/command/{charge_start,charge_stop,set_charging_amps,wake_up}`, reading SOC from
-`.response.response.charge_state.battery_level` and current from `…charge_amps`.
+evcc calls `GET …/vehicle_data?endpoints=charge_state` and `GET …/vehicle_data?endpoints=climate_state`,
+as well as `POST …/command/{charge_start,charge_stop,set_charging_amps,wake_up}`, reading SOC from
+`.response.response.charge_state.battery_level`, current from `…charge_amps`, charged energy from
+`…charge_energy_added`, and preconditioning status from `.response.response.climate_state.is_preconditioning`.
 
 ## Home Assistant (MQTT)
 
