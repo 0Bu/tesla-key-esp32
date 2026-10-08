@@ -116,7 +116,7 @@ const reviewedSkillSha256 = new Map([
   ["add-logic-test", "5bc6af893a1f95a5b4b1d2302da43c1e5e8de11d5e65e1c62d342e0dbfe6a327"],
   ["ci-heal", "05562364b790f359aaf42a080ab6db2b71afcaa37eedb3dab829d7b15168b123"],
   ["deploy", "d3247607041b2b573ff4c121221706815a7103430c414c19901ed34d4e2cc10f"],
-  ["device-diag", "4eef19786d9ed8b0ed21ad6d19d676deb348dea0617799437477a0a95a2aa386"],
+  ["device-diag", "474e1fb4b794edf48919c017e93a6fcf2f4af9e382cf6d1a3fea1469a0c1ffe9"],
   ["display-preview", "4bff95d0314d50ce29d67beac7ef4f9db1ebcbb2fa609335e560e162f5a1ed46"],
   ["feature-docs", "0255c6c85753efb851833a20e8da9519c8a61c58d4bb52f9f061cfe609d6e20a"],
   ["flash-esp32", "a4611de5f352615f1bf437d992e48e10bfbd8f188eed89ff1cc2a82378cdf78a"],
@@ -127,7 +127,7 @@ const reviewedSkillSha256 = new Map([
   ["ship", "679046f77e77307aa8fe46f0554a47e9247221fc0963a41bd79d080b57ba5c5d"],
   ["skill-audit", "17348735c68fc464a7b8420fde46c5da8eaefeda58f30ed5e1d4d3a083e5c00c"],
   ["usb-recovery", "ac61681a758160c90e51ac6bd18b2ea644bfa891d47c665a68fc4b1d50f9c998"],
-  ["vehicle-command-audit", "69823af038764769e8d7aea03f9c43d561f15b0113ac219e3fc3d7f0785853b4"],
+  ["vehicle-command-audit", "ada86931e66466d95ad51c4c06512f9166d7893af64d281d77754af4192c83db"],
 ]);
 const featureDocsScopeTokens = [
   "main/", "test/", "sdkconfig.defaults*", "partitions.csv", "AGENTS.md", ".agents/",

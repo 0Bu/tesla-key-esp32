@@ -146,7 +146,8 @@ sees no reason to start the charge that would open the window. `WakePollState` t
 When the wake/bootstrap one-shot fires (any fire that is not the 10 s in-window cadence;
 `tk::wake_poll_refreshes_drive(poll_cadence)` is the predicate), the loop also enqueues one
 `NO_WAKE_SKIP` "Drive State Poll" right after the charge poll, so the odometer served to evcc is
-refreshed in the same episode. The cadence does not, because the in-window rotation polls drive
+normally refreshed in the same episode (best effort: background polls expire 10 s after enqueue,
+so a slow charge-poll round trip can drop it; the odometer then stays last-known). The cadence does not, because the in-window rotation polls drive
 itself. Climate is refreshed only by the in-window rotation, not by the one-shot, so
 `climate_state` answers 503 after a reboot until that rotation reaches an awake car: the
 boot-seeded window (not seeded after a heap-watchdog restart) normally fills it, while a car

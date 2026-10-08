@@ -196,13 +196,19 @@ alone. Grep these in order — the countdown lines are the proof the shortage wa
 than a spike, and their absence before a reboot means something *else* restarted the device:
 
 - `HEAP CRITICAL: … watchdog ARMED, restarting in 300 s unless it recovers` — the run opened.
-- `HEAP CRITICAL for <n> s … restarting in <m> s unless it recovers` — one per 30 s sample.
+- `HEAP CRITICAL for <n> s (largest <b> B < 4096 B) — restart in <m> s unless recovered` — one per
+  30 s sample.
 - `HEAP recovered after <n> s critical … watchdog disarmed` — it healed; no restart happened.
-- `HEAP critical run (<n> s) cleared: an OTA is in flight …` — excused, *not* healed.
-- `HEAP EXHAUSTED for <n> s … RESTARTING DELIBERATELY (watchdog restart <k>/5,
-  reboot_why=heap:<k>; …)` — the restart itself, with the state that caused it.
-- `HEAP EXHAUSTED … but <n> consecutive watchdog restarts have not fixed it — NOT restarting
-  again` — the cap held; the device is up but degraded, and this is logged once per run.
+- `HEAP critical run (<n> s) cleared: OTA in flight holds large allocations` — excused, *not*
+  healed.
+- `HEAP EXHAUSTED for <n> s (largest <b> B < 4096 B, free <f> B) — RESTARTING (restart <k>/5,
+  reboot_why=heap:<k>)` — the restart itself, with the state that caused it.
+- `HEAP EXHAUSTED for <n> s: <k> watchdog restarts failed — staying degraded` — the cap held; the
+  device is up but degraded. Logged once, not on every sample.
+- `HEAP EXHAUSTED for <n> s: OTA/identity in flight — postponing restart` — degraded, no restart
+  yet; retried on later samples.
+- `HEAP EXHAUSTED for <n> s: reboot_why write failed — staying degraded` — degraded, no restart;
+  retried on later samples.
 - `BOOT this boot was caused by the firmware itself: reason=heap:<k>` — on the *next* boot,
   matching `/status.last_reboot`.
 

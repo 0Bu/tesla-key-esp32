@@ -267,8 +267,12 @@ conversion, and `minutes_to_full_charge` stays in minutes. Optional `?endpoints=
 `climate_state` (the TeslaBleHttpProxy default). Combined selectors accept `;` or `,`, including
 `%3B` and `%2C`. The exact query key is required; empty, unsupported, duplicate or malformed
 selectors and query strings of 128 bytes or more return HTTP `400`. This is a deliberate departure
-from TeslaBleHttpProxy, which answers an unsupported endpoint with `503` / `result:false`; the
-firmware treats a malformed request as a client error (evcc reports both as errors).
+from TeslaBleHttpProxy, which answers an unsupported endpoint with `503` / `result:false`, falls
+back to its default for an empty `endpoints=` value and accepts duplicate selectors, while this
+firmware returns `400` for all three (a malformed request is a client error; evcc never sends
+them). The firmware also accepts `,` besides `;`, and a selected `drive_state` without a reported
+odometer answers `503` with `odometer: 0`, where the proxy answers `200` with 0 (evcc rejects
+`<= 0` either way).
 
 Each selected cache must be available for HTTP `200` / `result:true`; failure of any selected
 domain returns HTTP `503`, `result:false`, and reason `"stale or unavailable"`. Idle charge cache
