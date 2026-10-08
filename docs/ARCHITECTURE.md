@@ -66,8 +66,11 @@ socket that `lru_purge_enable` reclaims.
 
 A rotating background poll in `loop_task_fn_` (one domain per ~30 s: climate → drive → tires →
 closures, full set ~120 s) refreshes per-domain caches through the native `on_*_state_` handlers in
-`vehicle_telemetry.cpp`. All polls are `NO_WAKE_SKIP` (never wake the car) and feed MQTT/HA; evcc
-and pairing are unaffected. tesla-ble callbacks run synchronously under `vehicle_mutex_`, so hooks
+`vehicle_telemetry.cpp`. All polls are `NO_WAKE_SKIP` (never wake the car). The rotation feeds
+MQTT/HA and the web UI; the climate cache also backs evcc's `vehicle_data` `climate_state`
+(freshness-bounded inside the active window, below) and the drive cache backs `drive_state`, while
+tires and closures are UI/MQTT only. Pairing is unaffected. The window's rising edge restarts the
+rotation at climate. tesla-ble callbacks run synchronously under `vehicle_mutex_`, so hooks
 copy only trivially-copyable nanopb state into fixed latest-value slots under a short `portMUX`;
 `vehicle_loop` parses strings and publishes the public caches under `cache_mutex_` *after*
 releasing `vehicle_mutex_`. No heap operation or nested cache lock runs in a library callback.
@@ -98,17 +101,23 @@ are logged).
    writes are idempotent.
 
 **Cache freshness.** `GET vehicle_data` stays cache-only and non-blocking. Exact `endpoints`
-selection supports charge, climate, or both; omission selects both. Charge data includes the
+selection supports charge, climate and drive (`drive_state`) in any combination; omission selects
+charge and climate (the TeslaBleHttpProxy default). Charge data includes the
 always-present `charge_energy_added` number (session kWh). The same ChargeState callback stamps
 `last_charge_ticks_`. Idle values may be old so reads never wake a sleeping car. The active window
 is a command in the last five minutes, or cached Charging/Starting with live infotainment contact
 less than 60 s old. Within that window, charge data older than 30 s returns HTTP 503. Once charging
 contact expires and no recent command remains, a valid last-known cache may be served again.
-Climate requests use only `get_cached_vehicle_climate()`, copying a fixed POD under the cache
-mutex and emitting after unlock; unrelated strings are never copied. An invalid cache or an unreported
-`is_preconditioning` returns 503; reported false succeeds. The other four optional climate fields
-retain typed zero/false fallbacks. Climate uses last-known semantics, without the charge-specific
-age window or a BLE poll. Every selected domain must be available for 200 / `result:true`.
+Climate requests use only `get_vehicle_climate()`, copying a fixed POD with its tick stamp and
+generation under the cache mutex; the active-window decision and `tk::climate_cache_usable` run
+after unlock, and unrelated strings are never copied. An invalid cache returns 503; inside the
+active window a climate cache older than `tk::kActiveClimateStateMaxAgeS` (300 s) also returns 503,
+because evcc uses `is_preconditioning` to hold charging at minimum current. Outside the window the
+last-known cache is served without an age limit or a BLE poll. An unreported `is_preconditioning`
+is emitted as false (TeslaBleHttpProxy `GetIsPreconditioning` semantics); the other four optional climate fields
+retain typed zero/false fallbacks. Drive requests use `get_cached_vehicle_drive()`: a valid cache
+with a reported odometer is served last-known (the odometer only grows) as `drive_state.odometer` in
+miles. Every selected domain must be available for 200 / `result:true`.
 Unsupported, duplicate, empty or malformed selectors return 400; the allocation-free parser accepts
 raw `;`/`,` and `%3B`/`%2C` delimiters and shares the 128-byte query bound with the HTTP shell.
 
@@ -133,6 +142,15 @@ sees no reason to start the charge that would open the window. `WakePollState` t
 - *Quiescence:* once a fresh cache is held in an awake episode (issue #308), `episode_fresh` keeps
   the system quiet even after the cache ages past `kChargeCacheFreshS`, so an idle parked car is not
   polled every 60 s and can sleep. It resets on stable sleep or BLE disconnect.
+
+When the wake/bootstrap one-shot fires (any fire that is not the 10 s in-window cadence;
+`tk::wake_poll_refreshes_drive(poll_cadence)` is the predicate), the loop also enqueues one
+`NO_WAKE_SKIP` "Drive State Poll" right after the charge poll, so the odometer served to evcc is
+refreshed in the same episode. The cadence does not, because the in-window rotation polls drive
+itself. Climate is refreshed only by the in-window rotation, not by the one-shot, so
+`climate_state` answers 503 after a reboot until that rotation reaches an awake car: the
+boot-seeded window (not seeded after a heap-watchdog restart) normally fills it, while a car
+asleep through it stays 503 until the next command or charging window.
 
 The decision is pure and host-tested; the loop only samples the flag mirror, cache age and
 connection state.

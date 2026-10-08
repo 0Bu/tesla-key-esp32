@@ -23,8 +23,11 @@ command**. `/status`, `/diag` and `/api/proxy/1/version` are all served from RAM
 request). Idle ChargeState cache may be old so diagnostics do not wake the car. Within five
 minutes of a command, or while cached Charging/Starting has live contact <60 s old, `vehicle_data`
 rejects charge data older than 30 s with HTTP 503. Once charging contact expires without a recent
-command, valid last-known charge cache may be served; climate uses separate last-known presence
-semantics. It **diagnoses and hands off**: when the fix is "reflash", it points at the flash /
+command, valid last-known charge cache may be served; climate needs a valid cache and, inside the
+active window, one no older than 300 s (refreshed only by the in-window rotation: 503 after a
+reboot until the boot-seeded window, not seeded after a heap-watchdog restart, reaches an awake
+car); drive needs a valid cache with a reported odometer and is then served last-known. It
+**diagnoses and hands off**: when the fix is "reflash", it points at the flash /
 recovery skills — it does not flash or command the car itself.
 
 Prefer already-collected logs/status evidence. Contact a live board only after the user explicitly

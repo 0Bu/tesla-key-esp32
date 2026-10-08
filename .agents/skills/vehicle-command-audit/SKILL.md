@@ -160,7 +160,9 @@ re-confirm it against the *current* tree and catch anything that drifted since. 
 9. **evcc / TeslaBleHttpProxy HTTP shape** — `/api/.../command/{name}` names, `vehicle_data` =
    `.response.response.charge_state.*` with **`charge_amps`** (not `charging_amps`), doubled
    `response`, **miles/mph on the `/api` path** (metric is MQTT-only), `charging_state` strings
-   `Charging/Disconnected/Complete/Stopped/NoPower/Starting`. *Baseline: full match.*
+   `Charging/Disconnected/Complete/Stopped/NoPower/Starting`. *Baseline: full match.* Added after
+   the recorded baseline (re-baseline in the next audit run): `charge_energy_added`,
+   `climate_state.is_preconditioning` and `drive_state.odometer` (miles).
 9a. **Response-counter anti-replay and patch series** — response-counter anti-replay and Request-UUID routing
     are enforced natively by `main/logic/ble_dispatcher.hpp` and `Peer::validate_response_counter()`, superseding
     patch 0001 and ADR-0003. Verify the current 3 repository patches under `patches/tesla-ble/` (0004 parental
