@@ -37,7 +37,7 @@ const char* TAG = "heap_trend";
 // makes that true here; HeapPersist is standard-layout and trivially destructible (asserted in
 // logic/heap_history.hpp) so reading the bytes back through it is well-defined in practice and the
 // object is never destroyed. If this ever grows a constructor again, the syslog line in
-// adopt_or_reset() below turns into a permanent "starting empty" — that is the symptom to look for.
+// log_adoption() below turns into a permanent "starting empty" — that is the symptom to look for.
 __NOINIT_ATTR alignas(HeapPersist) uint8_t s_persist_raw[sizeof(HeapPersist)];
 
 inline HeapPersist& persist() { return *reinterpret_cast<HeapPersist*>(s_persist_raw); }
@@ -57,34 +57,30 @@ void seal() {
     persist().crc         = heap_persist_crc(persist());
 }
 
-// Adopt the retained ring, or start empty. Runs once, from the first record().
-void adopt_or_reset() {
-    if (heap_persist_valid(persist())) {
+enum class Adoption { None, Retained, Empty };
+
+// Decide under the trend mutex; log only the fixed outcome after it is released.
+Adoption adopt_or_reset() {
+    if (s_ready) return Adoption::None;
+    const bool retained = heap_persist_valid(persist());
+    if (retained) {
         s_carry_s = heap_persist_next_carry(persist().ring);
-        ESP_LOGI(TAG, "adopted the retained memory trend: %u samples, continuing at bucket %u",
-                 (unsigned) persist().ring.count(), (unsigned) (s_carry_s / kHeapHistoryDtS));
     } else {
-        // A power-on (the section holds noise), a first boot, or an OTA that changed the ring's
-        // geometry. All three are the same instruction: begin an empty, correctly-shaped trend
-        // rather than draw a chart out of bytes we cannot vouch for.
-        //
-        // Logged, not silent: this line is the only external evidence that retention works at all.
-        // Seeing it after a plain restart — rather than the "adopted" line above — is the symptom
-        // of the retained storage having been zeroed before app_main ran.
-        ESP_LOGI(TAG, "no usable retained memory trend (power-on, first boot, or a changed ring "
-                      "layout) — starting empty");
         persist().ring.reset();
         s_carry_s = 0;
     }
     seal();
     s_ready = true;
+    return retained ? Adoption::Retained : Adoption::Empty;
 }
 
-// Created on first use rather than in an initializer, because this file has no init hook and the
-// first caller (loop_task) runs long after the scheduler starts. The double-check is not a race
-// worth guarding beyond this: heap_trend_record() has exactly one caller task, and it necessarily
-// runs before any HTTP request can ask for a snapshot (loop_task starts inside
-// VehicleController::init, the HTTP server after it).
+void log_adoption(Adoption adopted) {
+    if (adopted == Adoption::None) return;
+    ESP_LOGI(TAG, "memory trend: %s", adopted == Adoption::Retained ? "retained" : "starting empty");
+}
+
+// Function-local static initialization serializes first use between the recorder and readers.
+// Either may arrive first; both validate retained storage under the same mutex.
 SemaphoreHandle_t mutex() {
     static SemaphoreHandle_t m = xSemaphoreCreateMutex();
     return m;
@@ -95,12 +91,15 @@ SemaphoreHandle_t mutex() {
 void heap_trend_record(uint32_t monotonic_s, uint32_t free_bytes, uint32_t largest_bytes) {
     SemaphoreHandle_t m = mutex();
     if (!m) return;   // no mutex, no trend — a diagnostic must never be the reason a boot fails
-    SemGuard g(m);
-    if (!s_ready) adopt_or_reset();
-    // The caller passes plain uptime and knows nothing about retention. The carry turns that into
-    // the ONE continuous timeline the retained ring is already on.
-    persist().ring.record(monotonic_s + s_carry_s, free_bytes, largest_bytes);
-    seal();
+    Adoption adopted{};
+    {
+        SemGuard g(m);
+        adopted = adopt_or_reset();
+        // The carry places this boot's uptime on the retained timeline.
+        persist().ring.record(monotonic_s + s_carry_s, free_bytes, largest_bytes);
+        seal();
+    }
+    log_adoption(adopted);
 }
 
 size_t heap_trend_snapshot(HeapTrendSample* free_out, HeapTrendSample* largest_out, size_t max,
@@ -108,21 +107,19 @@ size_t heap_trend_snapshot(HeapTrendSample* free_out, HeapTrendSample* largest_o
     if (!free_out || !largest_out || max == 0) return 0;
     SemaphoreHandle_t m = mutex();
     if (!m) return 0;
-    SemGuard g(m);
-    // Adopt here too, not only in record(). Before this existed the ring was .bss and an early
-    // reader simply saw an empty one; now an unadopted read would serve the RETAINED bytes, which
-    // on a power-on boot are noise — a diagnostic reporting a fabricated 24 hours of memory. The
-    // ordering that makes this unreachable (loop_task starts before the HTTP server) is a fact
-    // about other files, and this is the file that pays if it changes.
-    if (!s_ready) adopt_or_reset();
-    // Both copies happen under ONE lock so the two series describe the same instant. Taking the
-    // lock twice would let a record() land between them and shift one line by a bucket relative to
-    // the other — which, on a chart whose entire purpose is the GAP between the two lines, would
-    // manufacture exactly the fragmentation signal a reader is looking for.
-    const size_t n = persist().ring.snapshot_free(free_out, max);
-    (void)persist().ring.snapshot_largest(largest_out, max);
-    if (out_bucket0)     *out_bucket0     = persist().ring.bucket0();
-    if (out_boot_bucket) *out_boot_bucket = s_carry_s / kHeapHistoryDtS;
+    Adoption adopted{};
+    size_t n = 0;
+    {
+        SemGuard g(m);
+        // An early reader must never serve unvalidated retained bytes after power-on.
+        adopted = adopt_or_reset();
+        // Both series must describe one instant under the same lock.
+        n = persist().ring.snapshot_free(free_out, max);
+        (void)persist().ring.snapshot_largest(largest_out, max);
+        if (out_bucket0)     *out_bucket0     = persist().ring.bucket0();
+        if (out_boot_bucket) *out_boot_bucket = s_carry_s / kHeapHistoryDtS;
+    }
+    log_adoption(adopted);
     return n;
 }
 

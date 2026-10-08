@@ -87,6 +87,11 @@ public:
     ChargeStateResult   get_cached_charge()   { return copy_locked_(last_known_charge_); }
     VehicleStatusResult get_cached_status()   { return copy_locked_(last_known_status_); }
     ClimateStateResult  get_cached_climate()  { return copy_locked_(last_known_climate_); }
+    tk::VehicleClimateData get_cached_vehicle_climate() {
+        tk::SemGuard g(cache_mutex_);
+        if (!g) return {};
+        return tk::vehicle_climate_data(last_known_climate_);
+    }
     DriveStateResult    get_cached_drive()    { return copy_locked_(last_known_drive_); }
     TirePressureResult  get_cached_tires()    { return copy_locked_(last_known_tires_); }
     ClosuresStateResult get_cached_closures() { return copy_locked_(last_known_closures_); }
