@@ -275,6 +275,13 @@ esp_err_t handle_command(GuardedReq rq) {
 
 // ─── GET /api/1/vehicles/{VIN}/vehicle_data ───────────────────────────────────
 
+// Emit a fixed cache snapshot without copying unrelated climate strings.
+static bool emit_cached_vehicle_climate(tk::StatusJsonEmitter& e) {
+    const tk::VehicleClimateData climate = g_vehicle->get_cached_vehicle_climate();
+    tk::emit_vehicle_climate_state(climate, e);
+    return tk::vehicle_climate_available(climate);
+}
+
 esp_err_t handle_vehicle_data(GuardedReq rq) {
     httpd_req_t* req = rq.req;
     char vin[64] = {0};
@@ -282,33 +289,36 @@ esp_err_t handle_vehicle_data(GuardedReq rq) {
         return send_json(req, 400, make_response(false, "vehicle_data", "?", "invalid URI"));
     if (!request_vin_matches(vin))
         return send_json(req, 404, make_response(false, "vehicle_data", vin, "vehicle VIN mismatch"));
+    const char* query = strchr(req->uri, '?');
+    const auto endpoints = tk::parse_vehicle_data_endpoints(query ? query + 1 : "");
+    static_assert(kQueryBufBytes == 128, "vehicle-data parser and HTTP query bound must agree");
+    if (endpoints.empty() || endpoints.has_unsupported)
+        return send_json(req, 400, make_response(false, "vehicle_data", vin, "invalid query or endpoint"));
 
     ChargeStateResult cs{};
-    bool ok = g_vehicle->get_charge_state(cs);
+    const bool cs_ok = endpoints.charge_state && g_vehicle->get_charge_state(cs);
+    bool cl_ok = false;
 
-    // Shape MUST match the Tesla Fleet API as proxied by TeslaBleHttpProxy:
-    //   { "response": { "response": { "charge_state": { ... } } } }
-    // evcc reads e.g. .response.response.charge_state.battery_level and
-    // .response.response.charge_state.charge_amps — note the doubled "response"
-    // and the field name "charge_amps" (not "charging_amps").
-    //
-    // charge_state is emitted by tk::emit_vehicle_charge_state() — the SAME seam
-    // test/test_logic.cpp::test_vehicle_data() drives on the host — so the evcc field
-    // contract (names, order, and the always-emit-every-field rule that keeps evcc from
-    // parsing a missing key as "<nil>") is guarded by the mock build rather than being
-    // re-hand-rolled here. StatusJsonEmitter mirrors build_status_object()'s seam. On
-    // failure cs is zero-initialised, which still yields valid numbers (and
-    // get_charge_state already falls back to the cache).
+    // Fleet API / TeslaBleHttpProxy envelope and the shared, host-tested emitters.
+    // Cache failures still produce typed fields, but never a successful HTTP response.
     tk::JsonBuilder json;
     tk::StatusJsonEmitter e(json);
     e.obj_begin("response");
-    e.boolean("result", ok);
     e.str("vin", vin);
     e.obj_begin("response");
-    e.obj_begin("charge_state");
-    tk::emit_vehicle_charge_state(cs, e);
+    if (endpoints.charge_state) {
+        e.obj_begin("charge_state");
+        tk::emit_vehicle_charge_state(cs, e);
+        e.obj_end();
+    }
+    if (endpoints.climate_state) {
+        e.obj_begin("climate_state");
+        cl_ok = emit_cached_vehicle_climate(e);
+        e.obj_end();
+    }
     e.obj_end();
-    e.obj_end();
+    const bool ok = tk::vehicle_data_available(endpoints, cs_ok, cl_ok);
+    e.boolean("result", ok);
     e.str("reason", ok ? "success" : "stale or unavailable");
     e.obj_end();
 

@@ -72,7 +72,7 @@ The high-value paths (verified to exist):
 
 | Dimension | Upstream file(s) |
 |---|---|
-| BLE transport (UUIDs, name, framing, MTU, max-conns) | `pkg/connector/ble/ble.go`, `pkg/connector/ble/errors.go` |
+| BLE transport (UUIDs, name, framing, MTU, max-conns) | `pkg/connector/ble/ble.go` |
 | Session / signing / anti-replay / clock | `pkg/protocol/protocol.md`, `internal/authentication/signer.go`, `pkg/protocol/protobuf/signatures.proto` |
 | Roles | `pkg/protocol/protobuf/keys.proto` (Role enum), `pkg/protocol/protocol.md` (role *scope* prose) |
 | Wake / sleep / body controller | `pkg/vehicle/vcsec.go`, `pkg/vehicle/state.go`, `pkg/vehicle/vehicle.go`, `pkg/protocol/protobuf/vcsec.proto` |

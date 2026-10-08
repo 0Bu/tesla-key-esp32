@@ -18,7 +18,7 @@
 // Pure, hardware-free Command FIFO & Request Runner shared by firmware and the host mock build.
 // Single source of truth for BLE request orchestration according to normative reference:
 // - teslamotors/vehicle-command internal/dispatcher/dispatcher.go
-// - teslamotors/vehicle-command pkg/protocol/signer.go
+// - teslamotors/vehicle-command internal/authentication/signer.go
 // - docs/adr/0005-tesla-ble-seam.md
 //
 // Key Characteristics:

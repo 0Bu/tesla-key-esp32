@@ -1282,21 +1282,22 @@ void VehicleController::loop_task_fn_(void* arg) {
             vTaskDelay(pdMS_TO_TICKS(50));
             continue;
         }
+        bool runner_failed = false;
         {
             // RAII give — drive_command_runner_() releases vehicle_mutex_ on unwind
             // so it can't wedge every later command.
             tk::SemGuard g(self->vehicle_mutex_);
             try {
                 if (self->command_identity_ready_()) self->drive_command_runner_();
-            } catch (const std::exception& e) {
-                ESP_LOGE(TAG, "drive_command_runner_ threw (%s) — resetting BLE link", e.what());
-                self->mark_vcsec_unknown_();
-                self->ble_fault_.store(true);
             } catch (...) {
-                ESP_LOGE(TAG, "drive_command_runner_ threw (unknown) — resetting BLE link");
+                runner_failed = true;
                 self->mark_vcsec_unknown_();
                 self->ble_fault_.store(true);
             }
+        }
+
+        if (runner_failed) {
+            ESP_LOGE(TAG, "drive_command_runner_ threw — resetting BLE link");
         }
 
         // Incoming state callbacks only copied nanopb POD into the latest-value mailbox.

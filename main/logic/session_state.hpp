@@ -8,7 +8,7 @@
 
 // Pure, hardware-free BLE session tracker mirror.
 // Reflects authenticated session presence and counter progression for Tesla BLE sessions.
-// Normative reference: teslamotors/vehicle-command pkg/protocol/signer.go (monotonic counter).
+// Normative reference: teslamotors/vehicle-command internal/authentication/signer.go (monotonic counter).
 //
 // Key Invariants:
 // - Crypto, session derivation, and Nanopb protos stay upstream in yoziru/tesla-ble.

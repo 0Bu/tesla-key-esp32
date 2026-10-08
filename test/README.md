@@ -74,7 +74,7 @@ The firmware delegates these decision/conversion cores to IDF-free headers under
 | OTA version grammar/comparison + exact bounded HTTPS-body state machine | `ota_contract.hpp` | `ota_update.cpp` manifest intake and freshness |
 | MCP core (version negotiation, JSON-RPC routing, strict integer validation) | `mcp.hpp` | `mcp_server.cpp` |
 | Shared command registry (REST + MCP names, kinds, per-surface arg keys with ONE bounds pair, `tools/list` order, evcc boolean-body rule) | `command_registry.hpp` | `http_api.cpp`, `mcp_server.cpp`, `command_exec.cpp` |
-| `/status` field contract (order, keys, presence, shaping; golden emissions for awake+charging / asleep / unreachable+scan / factory-fresh) | `status_model.hpp`, `vehicle_data.hpp` | `http_status.cpp` `handle_status` |
+| `/status` and evcc `/vehicle_data` field contract (order, keys, presence, shaping; golden emissions for awake+charging / asleep / unreachable+scan / factory-fresh; evcc charge/climate, exact bounded selectors and all-selected availability) | `status_model.hpp`, `vehicle_data.hpp` | `http_status.cpp` `handle_status`, `http_api.cpp` `handle_vehicle_data` |
 | Command-outcome text and failure-origin classification behind the soft-desync link backstop | `command_result.hpp` | `http_api.cpp`, `mcp_server.cpp`, `vehicle_commands.cpp` `make_result_cb_` |
 | Display presenter (priority ladder, SoC gradient, RSSI→bars, SSID scroll, `Orient` geometry) on the shared UI snapshot | `display_model.hpp`, `ui_state.hpp` | `display.cpp` via `ui_snapshot()` |
 | Status-LED priority ladder + latched `LedAlerts` | `led_status.hpp`, `ui_state.hpp` | `led_status.cpp` |
@@ -146,7 +146,8 @@ The suite also has gates outside the single pure-logic translation unit:
   locking, post-Vehicle-lock telemetry parsing, fixed command/status completion records, coherent
   charging-current feedback, atomic crash dismissal, whole-snapshot manifest publication, post-unlock
   OTA string materialization, sticky response construction, early owner release, partial-handle
-  cleanup, persist-before-restart ordering, the real `/status` emitter, the production MQTT
+  cleanup, persist-before-restart ordering, the real `/status` and selected `/vehicle_data` emitters,
+  cache-only climate presence, post-unlock heap-adoption/runner-exception diagnostics, the production MQTT
   publish/sequencer and all seven state builders, the default-closed runtime-admission facade, the
   dual vehicle-task handshake (no external delete, TWDT unwind) and both users of the ping helper.
   The OTA check pins bounded body-read ordering, allocation-free syntax/cJSON full-consume/duplicate-
@@ -162,7 +163,7 @@ The suite also has gates outside the single pure-logic translation unit:
 - **`test/run-cjson-oom-tests.sh`** compiles the exact cJSON the firmware links (the
   `espressif/cjson` registry release all four lockfiles pin, re-hashed against the locked component
   hash each run) and injects every n-th allocation failure through the production `/status` emitter,
-  representative REST/MCP envelopes, the real `tools/list` and vehicle-state producers, the shared
+  full charge/climate/combined REST and representative MCP envelopes, the real `tools/list` and vehicle-state producers, the shared
   print/send seam and the parser. It proves bounded emitter depth/finalization, exact safe-integer id
   echo, `jsonrpc:"2.0"` validation, recursive duplicate-key rejection, pre-cJSON UTF-8 rejection,
   status-before-send, exactly one 503 fallback, zero retained input bytes after id capture for a

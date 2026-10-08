@@ -20,9 +20,11 @@ once. This skill encodes that triage so a fresh session doesn't re-derive it fro
 reads state the firmware already holds — it **never wakes the car** and **never sends a
 command**. `/status`, `/diag` and `/api/proxy/1/version` are all served from RAM caches (the
 `vehicle_data`/telemetry caches are refreshed out-of-band by the background poll, never on
-request). Idle ChargeState cache may be old so diagnostics do not wake the car; while charging
-or after a command, `vehicle_data` rejects data older than 30 s with HTTP 503. It **diagnoses
-and hands off**: when the fix is "reflash", it points at the flash /
+request). Idle ChargeState cache may be old so diagnostics do not wake the car. Within five
+minutes of a command, or while cached Charging/Starting has live contact <60 s old, `vehicle_data`
+rejects charge data older than 30 s with HTTP 503. Once charging contact expires without a recent
+command, valid last-known charge cache may be served; climate uses separate last-known presence
+semantics. It **diagnoses and hands off**: when the fix is "reflash", it points at the flash /
 recovery skills — it does not flash or command the car itself.
 
 Prefer already-collected logs/status evidence. Contact a live board only after the user explicitly
