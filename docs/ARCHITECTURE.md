@@ -274,10 +274,13 @@ both the `0x1E8000` policy limit and partition boundary, requiring strict review
   Without SM, NimBLE's in-RAM store can never hold link keys, so the firmware keeps no BLE bonds.
   If a peer ever sends an SMP Security Request, ESP-IDF 6.1 NimBLE without SM drops it, logs one
   ERROR line (`ble_sm_rx rc=6`) and sends no reply, whereas the previous build would have started
-  Just Works pairing without storing a bond. This applies to all four targets. The controller boot
-  line `BLE_INIT ... SMP:1` on S3/C3 reports the controller's link-layer security feature
-  (`CONFIG_BT_CTRL_BLE_SECURITY_ENABLE`, unchanged), not the host Security Manager, so it still
-  prints 1. The change saves flash (measured against the pre-change CI build, code + rodata):
+  Just Works pairing without persisting a bond (NVS persistence was off; a Secure Connections bond
+  could have stayed in NimBLE's RAM store until reboot). `rc=6` is `BLE_HS_ENOMEM` numerically but
+  means "SMP not supported" here, not heap exhaustion. This applies to all four targets. The
+  controller boot line `BLE_INIT ... SMP:1` on S3/C3 reports the controller's link-layer security
+  feature (`CONFIG_BT_CTRL_BLE_SECURITY_ENABLE`, unchanged), not the host Security Manager, so it
+  still prints 1. The change saves flash (the flash code + rodata delta that
+  `scripts/report-firmware-size.py` reports between the c6f2b06 CI build and this change):
   esp32 28,464 B, esp32s3 27,984 B, esp32c3 32,918 B, esp32c6 34,262 B. On esp32c6 that keeps the
   image below the next 64 KiB signing boundary.
 - Every target builds at `-Og` (`-Os` hard-freezes under load and was rejected), with one
