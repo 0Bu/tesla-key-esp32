@@ -1064,17 +1064,81 @@ def require_status_production_seams(producer: str, handler: str) -> None:
             raise AssertionError(f"/status handler bypasses tested production seam {token!r}")
 
 
+VEHICLE_DATA_SEAMS = (
+    "tk::StatusJsonEmitter", "tk::emit_vehicle_charge_state", "e.release()",
+    "strchr(req->uri, '?')", 'tk::parse_vehicle_data_endpoints(query ? query + 1 : "")',
+    "endpoints.empty() || endpoints.has_unsupported", "static_assert(kQueryBufBytes == 128",
+    "endpoints.charge_state && g_vehicle->get_charge_state(cs)",
+    "if (endpoints.charge_state)", "if (endpoints.climate_state)",
+    "cl_ok = emit_cached_vehicle_climate(e)",
+    "const bool ok = tk::vehicle_data_available(endpoints, cs_ok, cl_ok)",
+    'e.boolean("result", ok)', "return send_json(req, ok ? 200 : 503, e.release())",
+)
+CLIMATE_CACHE_SEAMS = (
+    "g_vehicle->get_cached_vehicle_climate()", "tk::emit_vehicle_climate_state(climate, e)",
+    "return tk::vehicle_climate_available(climate)",
+)
+
+
 def require_vehicle_data_production_seams(handler: str) -> None:
-    # /vehicle_data must serialize charge_state through the SAME emitter the host test
-    # (test_logic.cpp::test_vehicle_data) drives, so the evcc field contract is guarded by
-    # the mock build instead of a hand-rolled JSON copy that can silently drift. Mirrors the
-    # /status seam above (build_status_object -> StatusJsonEmitter + emit_status). Scrub first
-    # so a token that appears only in a comment can never satisfy a production seam.
-    code = scrub_cpp(handler)
-    for token in ("tk::StatusJsonEmitter", "tk::emit_vehicle_charge_state",
-                  "tk::emit_vehicle_climate_state", "e.release()"):
-        if token not in code:
+    # Real cache selection, availability and status must delegate to the host-tested seams.
+    code = scrub_cpp_preserving_layout(handler)
+    for token in VEHICLE_DATA_SEAMS:
+        if scrub_cpp_preserving_layout(token) not in code:
             raise AssertionError(f"/vehicle_data handler bypasses tested production seam {token!r}")
+
+
+def require_vehicle_climate_cache_seam(helper: str) -> None:
+    code = scrub_cpp_preserving_layout(helper)
+    for token in CLIMATE_CACHE_SEAMS:
+        if token not in code:
+            raise AssertionError(f"climate cache helper bypasses tested production seam {token!r}")
+    if "get_charge_state" in code or "charge_state_poll" in code or "WakePolicy" in code:
+        raise AssertionError("climate cache helper added a vehicle-active read")
+
+
+CLIMATE_GETTER_SEAMS = (
+    "tk::SemGuard g(cache_mutex_);", "if (!g) return {};",
+    "return tk::vehicle_climate_data(last_known_climate_);",
+)
+
+
+def require_vehicle_climate_getter_seam(source: str) -> None:
+    code = scrub_cpp(function_body_in(source, "get_cached_vehicle_climate"))
+    for token in CLIMATE_GETTER_SEAMS:
+        if token not in code:
+            raise AssertionError(f"fixed climate getter lost ownership/projection: {token}")
+    for token in ("ESP_LOG", "charge_state_poll", "vehicle_mutex_", "std::string", "ble_", "client_"):
+        if token in code:
+            raise AssertionError(f"fixed climate getter added a non-cache operation: {token}")
+
+
+def require_unlocked_diagnostic_logging(heap: str, telemetry: str) -> None:
+    adoption = scrub_cpp(function_body_in(heap, "adopt_or_reset"))
+    if "ESP_LOG" in adoption:
+        raise AssertionError("heap adoption logs while its caller holds the trend mutex")
+    # Locate the lexical scope owning each guard, including nested try/catch blocks.
+    for source, name, marker in ((heap, "heap_trend_record", "SemGuard g(m);"),
+                                 (heap, "heap_trend_snapshot", "SemGuard g(m);"),
+                                 (telemetry, "loop_task_fn_", "tk::SemGuard g(self->vehicle_mutex_);")):
+        body = scrub_cpp_preserving_layout(function_body_in(source, name))
+        at = body.index(marker)
+        scopes = []
+        for pos, char in enumerate(body[:at]):
+            if char == "{": scopes.append(pos)
+            elif char == "}": scopes.pop()
+        start = scopes[-1]
+        depth = 0
+        for pos in range(start, len(body)):
+            if body[pos] == "{": depth += 1
+            elif body[pos] == "}": depth -= 1
+            if depth == 0:
+                locked = body[start:pos + 1]
+                if "ESP_LOG" in locked:
+                    raise AssertionError(f"{name}: diagnostic logging under shared mutex")
+                if name.startswith("heap_trend") and "log_adoption(adopted);" not in body[pos + 1:]:
+                    raise AssertionError(f"{name}: adoption log must follow unlock")
+                break
 
 
 def require_diag_dump_completion_contract(handler: str, diag_header: str,
@@ -3551,6 +3615,9 @@ def require_runtime_source_contracts() -> None:
         function_body("build_status_object"), function_body("handle_status")
     )
     require_vehicle_data_production_seams(function_body("handle_vehicle_data"))
+    require_vehicle_climate_cache_seam(function_body("emit_cached_vehicle_climate"))
+    require_vehicle_climate_getter_seam((MAIN / "vehicle_ctrl.hpp").read_text())
+    require_unlocked_diagnostic_logging(SOURCES["heap_trend.cpp"], SOURCES["vehicle_telemetry.cpp"])
     require_diag_dump_completion_contract(
         function_body("handle_diag"),
         (MAIN / "diag_log.hpp").read_text(encoding="utf-8"),
@@ -4283,10 +4350,7 @@ def self_test_canaries(tasks: set[str], callbacks: set[str]) -> None:
             raise AssertionError(f"/status seam-removal mutation passed unexpectedly: {token}")
 
     vehicle_data_handler = function_body("handle_vehicle_data")
-    for token in ("tk::StatusJsonEmitter", "tk::emit_vehicle_charge_state",
-                  "tk::emit_vehicle_climate_state", "e.release()"):
-        # Replace every occurrence (the handler comment names the seams too): the canary must
-        # remove the real production callsite, not just a comment mention, to prove the guard bites.
+    for token in VEHICLE_DATA_SEAMS:
         mutated_vd = vehicle_data_handler.replace(token, "fixture_vehicle_data_bypass")
         try:
             require_vehicle_data_production_seams(mutated_vd)
@@ -4294,6 +4358,39 @@ def self_test_canaries(tasks: set[str], callbacks: set[str]) -> None:
             pass
         else:
             raise AssertionError(f"/vehicle_data seam-removal mutation passed unexpectedly: {token}")
+    climate_helper = function_body("emit_cached_vehicle_climate")
+    for token in CLIMATE_CACHE_SEAMS:
+        try:
+            require_vehicle_climate_cache_seam(climate_helper.replace(token, "fixture_climate_bypass"))
+        except AssertionError:
+            pass
+        else:
+            raise AssertionError(f"climate cache seam-removal mutation passed unexpectedly: {token}")
+    getter_source = (MAIN / "vehicle_ctrl.hpp").read_text()
+    for token in CLIMATE_GETTER_SEAMS:
+        try:
+            require_vehicle_climate_getter_seam(getter_source.replace(token, "fixture_getter_bypass", 1))
+        except AssertionError:
+            pass
+        else:
+            raise AssertionError(f"fixed climate getter mutation passed unexpectedly: {token}")
+    heap = SOURCES["heap_trend.cpp"]
+    telemetry = SOURCES["vehicle_telemetry.cpp"]
+    for source, replacement, is_heap in (
+        (heap, heap.replace("SemGuard g(m);", 'SemGuard g(m); ESP_LOGW(TAG, "canary");', 1), True),
+        (heap, heap.replace("if (s_ready) return Adoption::None;",
+           'ESP_LOGW(TAG, "canary"); if (s_ready) return Adoption::None;', 1), True),
+        (telemetry, telemetry.replace("tk::SemGuard g(self->vehicle_mutex_);",
+           'tk::SemGuard g(self->vehicle_mutex_); ESP_LOGW(TAG, "canary");', 1), False),
+    ):
+        assert source != replacement
+        try:
+            require_unlocked_diagnostic_logging(replacement if is_heap else heap,
+                                                 telemetry if is_heap else replacement)
+        except AssertionError:
+            pass
+        else:
+            raise AssertionError("logging-under-mutex mutation passed unexpectedly")
 
     route_dispatch = function_body("handle_all_dispatch")
     route_mutations = (

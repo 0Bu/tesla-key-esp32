@@ -258,17 +258,136 @@ void test_status_emitter_structure_guards() {
     CHECK(live_allocations == 0);
 }
 
-tk::JsonOwner build_rest_fixture() {
+tk::JsonOwner build_vehicle_data_fixture(std::string_view endpoints, bool preconditioning = true,
+                                         bool charge_ok = true, bool climate_present = true,
+                                         float energy = 12.5f) {
+    const auto selected = endpoints.empty() ? tk::parse_vehicle_data_endpoints({}) : tk::parse_vehicle_data_endpoint_list(endpoints);
+    ChargeStateResult charge{};
+    charge.valid = true;
+    charge.charging_state = "Charging";
+    charge.battery_level = 63;
+    charge.charge_limit_soc = 80;
+    charge.charging_amps = 16;
+    charge.battery_range = 280.5f;
+    charge.minutes_to_full_charge = 45;
+    charge.charge_energy_added = energy;
+    charge.has_energy_added = true;
+    ClimateStateResult climate{};
+    climate.valid = true;
+    climate.has_preconditioning = climate_present;
+    climate.is_preconditioning = preconditioning;
     tk::JsonBuilder json;
-    cJSON* outer = json.object(json.root(), "response");
-    json.boolean(outer, "result", true);
-    json.string(outer, "vin", "5YJ00000000000000");
-    cJSON* response = json.object(outer, "response");
-    cJSON* charge = json.object(response, "charge_state");
-    json.string(charge, "charging_state", "Charging");
-    json.number(charge, "battery_level", 63);
-    json.number(charge, "charge_amps", 16);
-    return json.finish();
+    tk::StatusJsonEmitter e(json);
+    e.obj_begin("response");
+    e.str("vin", "<VIN>");
+    e.obj_begin("response");
+    if (selected.charge_state) {
+        e.obj_begin("charge_state");
+        tk::emit_vehicle_charge_state(charge, e);
+        e.obj_end();
+    }
+    if (selected.climate_state) {
+        e.obj_begin("climate_state");
+        tk::emit_vehicle_climate_state(climate, e);
+        e.obj_end();
+    }
+    e.obj_end();
+    const bool ok = tk::vehicle_data_available(selected, charge_ok, tk::vehicle_climate_available(climate));
+    e.boolean("result", ok);
+    e.str("reason", ok ? "success" : "stale or unavailable");
+    e.obj_end();
+    return e.finish();
+}
+
+tk::JsonOwner build_rest_fixture() { return build_vehicle_data_fixture("charge_state"); }
+tk::JsonOwner build_climate_fixture() { return build_vehicle_data_fixture("climate_state"); }
+tk::JsonOwner build_combined_fixture() {
+    return build_vehicle_data_fixture("charge_state;climate_state");
+}
+
+void test_evcc_vehicle_data_fields() {
+    for (const char* endpoints : {"", "charge_state", "climate_state",
+                                  "charge_state;climate_state", "climate_state%3Bcharge_state"}) {
+        for (bool preconditioning : {false, true}) {
+            reset_allocator(0);
+            {
+                tk::JsonOwner root = build_vehicle_data_fixture(endpoints, preconditioning);
+                CHECK(root != nullptr);
+                const cJSON* outer = cJSON_GetObjectItemCaseSensitive(root.get(), "response");
+                const cJSON* response = cJSON_GetObjectItemCaseSensitive(outer, "response");
+                CHECK(cJSON_IsObject(response));
+                CHECK(cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(outer, "result")));
+                const cJSON* charge = cJSON_GetObjectItemCaseSensitive(response, "charge_state");
+                const cJSON* climate = cJSON_GetObjectItemCaseSensitive(response, "climate_state");
+                // These are the actual jq paths consumed by the standard evcc template.
+                if (std::strcmp(endpoints, "climate_state") != 0) {
+                    for (const char* field : {"battery_level", "charge_amps", "charge_limit_soc",
+                                               "battery_range", "minutes_to_full_charge"}) {
+                        CHECK(cJSON_IsNumber(cJSON_GetObjectItemCaseSensitive(charge, field)));
+                    }
+                    const cJSON* status = cJSON_GetObjectItemCaseSensitive(charge, "charging_state");
+                    CHECK(cJSON_IsString(status));
+                    CHECK(std::strcmp(status->valuestring, "Charging") == 0);
+                    const cJSON* energy = cJSON_GetObjectItemCaseSensitive(charge, "charge_energy_added");
+                    CHECK(cJSON_IsNumber(energy));
+                    CHECK(energy->valuedouble == 12.5);
+                } else {
+                    CHECK(charge == nullptr);
+                }
+                if (std::strcmp(endpoints, "charge_state") != 0) {
+                    const cJSON* value = cJSON_GetObjectItemCaseSensitive(climate, "is_preconditioning");
+                    CHECK(cJSON_IsBool(value));
+                    CHECK(static_cast<bool>(cJSON_IsTrue(value)) == preconditioning);
+                    CHECK(cJSON_IsBool(cJSON_GetObjectItemCaseSensitive(climate, "is_climate_on")));
+                    for (const char* field : {"inside_temp", "outside_temp", "driver_temp_setting"}) {
+                        CHECK(cJSON_IsNumber(cJSON_GetObjectItemCaseSensitive(climate, field)));
+                    }
+                } else {
+                    CHECK(climate == nullptr);
+                }
+            }
+            CHECK(live_allocations == 0);
+        }
+    }
+}
+
+void test_evcc_energy_zero() {
+    reset_allocator(0);
+    {
+        tk::JsonOwner root = build_vehicle_data_fixture("charge_state", false, true, true, 0);
+        const cJSON* outer = cJSON_GetObjectItemCaseSensitive(root.get(), "response");
+        const cJSON* response = cJSON_GetObjectItemCaseSensitive(outer, "response");
+        const cJSON* charge = cJSON_GetObjectItemCaseSensitive(response, "charge_state");
+        const cJSON* energy = cJSON_GetObjectItemCaseSensitive(charge, "charge_energy_added");
+        CHECK(cJSON_IsNumber(energy));
+        CHECK(energy->valuedouble == 0);
+        CHECK(cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(outer, "result")));
+    }
+    CHECK(live_allocations == 0);
+}
+
+void test_evcc_vehicle_data_failure_matrix() {
+    for (const char* endpoints : {"charge_state", "climate_state", "charge_state;climate_state"}) {
+        for (bool charge_ok : {false, true}) {
+            for (bool climate_present : {false, true}) {
+                reset_allocator(0);
+                {
+                    tk::JsonOwner root = build_vehicle_data_fixture(endpoints, false, charge_ok, climate_present);
+                    const auto selected = tk::parse_vehicle_data_endpoint_list(endpoints);
+                    const bool expected = (!selected.charge_state || charge_ok) &&
+                                          (!selected.climate_state || climate_present);
+                    const cJSON* outer = cJSON_GetObjectItemCaseSensitive(root.get(), "response");
+                    const cJSON* result = cJSON_GetObjectItemCaseSensitive(outer, "result");
+                    CHECK(cJSON_IsBool(result));
+                    CHECK(static_cast<bool>(cJSON_IsTrue(result)) == expected);
+                    const cJSON* reason = cJSON_GetObjectItemCaseSensitive(outer, "reason");
+                    CHECK(cJSON_IsString(reason));
+                    CHECK(std::strcmp(reason->valuestring, expected ? "success" : "stale or unavailable") == 0);
+                }
+                CHECK(live_allocations == 0);
+            }
+        }
+    }
 }
 
 tk::JsonOwner build_mcp_result_fixture() {
@@ -797,7 +916,12 @@ int main() {
         "{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":"
         "{\"code\":-32603,\"message\":\"out of memory\"}}";
     exhaust_build_and_print("full /status production emitter", build_status_fixture, rest_oom);
-    exhaust_build_and_print("REST production reply", build_rest_fixture, rest_oom);
+    exhaust_build_and_print("evcc charge production reply", build_rest_fixture, rest_oom);
+    exhaust_build_and_print("evcc climate production reply", build_climate_fixture, rest_oom);
+    exhaust_build_and_print("evcc combined production reply", build_combined_fixture, rest_oom);
+    test_evcc_vehicle_data_fields();
+    test_evcc_vehicle_data_failure_matrix();
+    test_evcc_energy_zero();
     exhaust_build_and_print("MCP result production reply", build_mcp_result_fixture, mcp_oom);
     exhaust_build_and_print(
         "MCP max-safe-id exact reply", build_mcp_max_safe_id_fixture, mcp_oom);

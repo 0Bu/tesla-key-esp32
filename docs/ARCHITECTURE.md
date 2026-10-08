@@ -97,16 +97,25 @@ are logged).
    `tk::is_nominal_already_set()` classifies that as success, so web UI, REST/evcc and MCP setpoint
    writes are idempotent.
 
-**Cache freshness.** `GET vehicle_data` stays cache-only and non-blocking. The same ChargeState
-callback stamps `last_charge_ticks_`. Idle values may be old so read-only polling never wakes a
-sleeping car; during the active window (charging, or a command in the last five minutes) data older
-than 30 s returns HTTP 503, so a BLE parser/retry storm is visible to evcc instead of hiding behind
-a valid-looking 200.
+**Cache freshness.** `GET vehicle_data` stays cache-only and non-blocking. Exact `endpoints`
+selection supports charge, climate, or both; omission selects both. Charge data includes the
+always-present `charge_energy_added` number (session kWh). The same ChargeState callback stamps
+`last_charge_ticks_`. Idle values may be old so reads never wake a sleeping car. The active window
+is a command in the last five minutes, or cached Charging/Starting with live infotainment contact
+less than 60 s old. Within that window, charge data older than 30 s returns HTTP 503. Once charging
+contact expires and no recent command remains, a valid last-known cache may be served again.
+Climate requests use only `get_cached_vehicle_climate()`, copying a fixed POD under the cache
+mutex and emitting after unlock; unrelated strings are never copied. An invalid cache or an unreported
+`is_preconditioning` returns 503; reported false succeeds. The other four optional climate fields
+retain typed zero/false fallbacks. Climate uses last-known semantics, without the charge-specific
+age window or a BLE poll. Every selected domain must be available for 200 / `result:true`.
+Unsupported, duplicate, empty or malformed selectors return 400; the allocation-free parser accepts
+raw `;`/`,` and `%3B`/`%2C` delimiters and shares the 128-byte query bound with the HTTP shell.
 
 **One-shot charge poll on wake and stale-cache bootstrap** (`logic/wake_poll.hpp`, fired from
 `loop_task_fn_`). A parked car that wakes *itself* — typically when the charge cable is plugged in —
 would never refresh its cached SOC: the active window opens only on a recent command or cached
-charging, so evcc keeps serving the stale pre-plug reading, and if that SOC sits above `minSoc` it
+Charging/Starting with live contact less than 60 s old, so evcc keeps serving the stale pre-plug reading, and if that SOC sits above `minSoc` it
 sees no reason to start the charge that would open the window. `WakePollState` therefore fires
 **exactly one** `charge_state_poll(NO_WAKE_SKIP)` per wake episode:
 

@@ -253,16 +253,26 @@ GET /api/1/vehicles/{VIN}/vehicle_data
   "charge_state": { "charging_state": "Charging", "battery_level": 72,
     "usable_battery_level": 72, "charge_limit_soc": 80, "charger_power": 11,
     "charge_rate": 58.3, "charge_amps": 16, "charge_energy_added": 12.5,
-    "battery_range": 280.5, "minutes_to_full_charge": 45 } } } }
+    "battery_range": 280.5, "minutes_to_full_charge": 45 },
+  "climate_state": { "is_climate_on": true, "is_preconditioning": true,
+    "inside_temp": 21.5, "outside_temp": 5, "driver_temp_setting": 22 } } } }
 ```
 
-The doubled `response` and `charge_amps` are intentional — they match the Fleet API /
-TeslaBleHttpProxy shape evcc parses. Optional `?endpoints=charge_state` or `?endpoints=climate_state`
-selects individual endpoints (`endpoints=climate_state` returns `.climate_state.is_preconditioning`),
-while omitting `endpoints` returns both. `battery_level` is the nominal pack SOC, `usable_battery_level`
-the usable SOC matching the Tesla app. While the car is idle the cache may stay available so polling
-does not wake it; while charging, or within five minutes of a command, a `ChargeState` older than 30 s
-returns HTTP `503` with reason `"stale or unavailable"` instead of posing as live telemetry.
+The doubled `response` and `charge_amps` match the Fleet API / TeslaBleHttpProxy shape evcc
+parses. `charge_energy_added` is session energy in kWh; `battery_range` stays in miles for evcc's
+conversion, and `minutes_to_full_charge` stays in minutes. Optional `?endpoints=charge_state` or
+`?endpoints=climate_state` selects one domain; omission selects both. Combined selectors accept
+`;` or `,`, including `%3B` and `%2C`. The exact query key is required; empty, unsupported,
+duplicate or malformed selectors and query strings of 128 bytes or more return HTTP `400`.
+
+Each selected cache must be available for HTTP `200` / `result:true`; failure of either selected
+domain returns HTTP `503`, `result:false`, and reason `"stale or unavailable"`. Idle charge cache
+may be old so reads do not wake the car. Within five minutes of a command, or while cached
+Charging/Starting has live infotainment contact less than 60 s old, charge cache older than 30 s
+is unavailable. After that contact expires without a recent command, valid last-known charge
+cache may be served again. Climate uses last-known cache: both `valid` and `has_preconditioning`
+are required. A reported `false` succeeds; an unreported field does not imply false. The other
+optional climate fields keep typed zero/false fallbacks. These reads never poll or wake the car.
 
 ### Body controller state (no wake)
 

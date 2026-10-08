@@ -2471,6 +2471,17 @@ static void test_vehicle_data() {
         "outside_temp=5\n"
         "driver_temp_setting=22\n"));
 
+    cl1.has_preconditioning = true;
+    const auto climate_data = tk::vehicle_climate_data(cl1);
+    CHECK(climate_data.valid && climate_data.has_preconditioning);
+    CHECK(climate_data.is_climate_on && climate_data.is_preconditioning);
+    CHECK_NEAR(climate_data.inside_temp, 21.5);
+    CHECK_NEAR(climate_data.outside_temp, 5.0);
+    CHECK_NEAR(climate_data.driver_setpoint, 22.0);
+    CollectEmitter projected;
+    tk::emit_vehicle_climate_state(climate_data, projected);
+    CHECK(projected.out == ec1.out);
+
     // Scenario 4 — zero-initialized climate_state: every field must still be emitted so JSON parsers
     // never hit a missing key or <nil>
     ClimateStateResult cl2{};
@@ -2483,10 +2494,39 @@ static void test_vehicle_data() {
         "outside_temp=0\n"
         "driver_temp_setting=0\n"));
 
+    // A reported false is available; temperatures alone and invalid snapshots are not.
+    CHECK(!tk::vehicle_climate_available(cl2));
+    cl2.valid = true;
+    cl2.has_inside = true;
+    CHECK(!tk::vehicle_climate_available(cl2));
+    cl2.has_preconditioning = true;
+    CHECK(tk::vehicle_climate_available(cl2));
+    cl2.is_preconditioning = true;
+    CHECK(tk::vehicle_climate_available(cl2));
+    cl2.valid = false;
+    CHECK(!tk::vehicle_climate_available(cl2));
+    for (bool charge_selected : {false, true}) {
+        for (bool climate_selected : {false, true}) {
+            for (bool charge_ok : {false, true}) {
+                for (bool climate_ok : {false, true}) {
+                    tk::VehicleDataEndpoints ep{charge_selected, climate_selected, false};
+                    const bool expected = (charge_selected || climate_selected) &&
+                        (!charge_selected || charge_ok) && (!climate_selected || climate_ok);
+                    CHECK(tk::vehicle_data_available(ep, charge_ok, climate_ok) == expected);
+                    ep.has_unsupported = true;
+                    CHECK(!tk::vehicle_data_available(ep, charge_ok, climate_ok));
+                }
+            }
+        }
+    }
+    CHECK(tk::parse_vehicle_data_endpoints("cached=" + std::string(120, 'x')).has_unsupported == false);
+    CHECK(tk::parse_vehicle_data_endpoints("cached=" + std::string(121, 'x')).has_unsupported);
+    CHECK(tk::parse_vehicle_data_endpoint_list({}).has_unsupported);
+
     // Scenario 5 — endpoints query parsing
     {
-        // No query in URI -> both charge_state and climate_state
-        auto ep = tk::parse_vehicle_data_endpoints("/api/1/vehicles/5YJ3E1EA7KF000316/vehicle_data");
+        // No endpoints query -> both charge_state and climate_state
+        auto ep = tk::parse_vehicle_data_endpoints("");
         CHECK(ep.charge_state && ep.climate_state && !ep.has_unsupported && !ep.empty());
 
         // Bare empty query -> both
@@ -2494,27 +2534,27 @@ static void test_vehicle_data() {
         CHECK(ep.charge_state && ep.climate_state && !ep.has_unsupported && !ep.empty());
 
         // Other query parameter without endpoints -> both
-        ep = tk::parse_vehicle_data_endpoints("/api/1/vehicles/5YJ3E1EA7KF000316/vehicle_data?cached=1");
+        ep = tk::parse_vehicle_data_endpoints("cached=1");
         CHECK(ep.charge_state && ep.climate_state && !ep.has_unsupported && !ep.empty());
 
         // Explicit endpoints=charge_state (evcc standard poll)
-        ep = tk::parse_vehicle_data_endpoints("/api/1/vehicles/5YJ3E1EA7KF000316/vehicle_data?endpoints=charge_state");
+        ep = tk::parse_vehicle_data_endpoints("endpoints=charge_state");
         CHECK(ep.charge_state && !ep.climate_state && !ep.has_unsupported && !ep.empty());
 
         // Raw endpoints=charge_state
         ep = tk::parse_vehicle_data_endpoints("endpoints=charge_state");
         CHECK(ep.charge_state && !ep.climate_state && !ep.has_unsupported && !ep.empty());
 
-        // Bare name without endpoints= prefix
-        ep = tk::parse_vehicle_data_endpoints("charge_state");
+        // Selector-list parser used by the query parser
+        ep = tk::parse_vehicle_data_endpoint_list("charge_state");
         CHECK(ep.charge_state && !ep.climate_state && !ep.has_unsupported && !ep.empty());
 
         // Explicit endpoints=climate_state (evcc preconditioning poll)
-        ep = tk::parse_vehicle_data_endpoints("/api/1/vehicles/5YJ3E1EA7KF000316/vehicle_data?endpoints=climate_state");
+        ep = tk::parse_vehicle_data_endpoints("endpoints=climate_state");
         CHECK(!ep.charge_state && ep.climate_state && !ep.has_unsupported && !ep.empty());
 
         // Semicolon delimited (Tesla Fleet API standard)
-        ep = tk::parse_vehicle_data_endpoints("/api/1/vehicles/5YJ3E1EA7KF000316/vehicle_data?endpoints=charge_state;climate_state");
+        ep = tk::parse_vehicle_data_endpoints("endpoints=charge_state;climate_state");
         CHECK(ep.charge_state && ep.climate_state && !ep.has_unsupported && !ep.empty());
 
         // Comma delimited
@@ -2526,8 +2566,29 @@ static void test_vehicle_data() {
         CHECK(ep.charge_state && ep.climate_state && !ep.has_unsupported && !ep.empty());
 
         // Multi-query parameters
-        ep = tk::parse_vehicle_data_endpoints("/api/1/vehicles/VIN/vehicle_data?foo=1&endpoints=climate_state&bar=2");
+        ep = tk::parse_vehicle_data_endpoints("foo=1&endpoints=climate_state&bar=2");
         CHECK(!ep.charge_state && ep.climate_state && !ep.has_unsupported && !ep.empty());
+
+        // Exact query keys: a suffix or a value containing endpoints= is unrelated.
+        ep = tk::parse_vehicle_data_endpoints("not_endpoints=climate_state&endpoints=charge_state");
+        CHECK(ep.charge_state && !ep.climate_state && !ep.has_unsupported);
+        ep = tk::parse_vehicle_data_endpoints("other=endpoints=climate_state");
+        CHECK(ep.charge_state && ep.climate_state && !ep.has_unsupported);
+        for (const char* encoded : {"charge_state%3Bclimate_state", "climate_state%3bcharge_state",
+                                    "charge_state%2Cclimate_state", "climate_state%2ccharge_state"}) {
+            ep = tk::parse_vehicle_data_endpoint_list(encoded);
+            CHECK(ep.charge_state && ep.climate_state && !ep.has_unsupported);
+        }
+        for (const char* invalid : {"endpoints=", "endpoints", "endpoints=charge_state&endpoints=climate_state"}) {
+            ep = tk::parse_vehicle_data_endpoints(invalid);
+            CHECK(ep.has_unsupported);
+        }
+        for (const char* invalid : {"charge_state;charge_state", "charge_state;", ";climate_state",
+                                    "charge_state,,climate_state", "charge_state%3", "charge_state%ZZ",
+                                    "charge_state%00climate_state", "charge_state%3Bunknown_state"}) {
+            ep = tk::parse_vehicle_data_endpoint_list(invalid);
+            CHECK(ep.has_unsupported);
+        }
 
         // Unsupported endpoint
         ep = tk::parse_vehicle_data_endpoints("endpoints=location_data");
@@ -2535,7 +2596,7 @@ static void test_vehicle_data() {
 
         // Mixed supported and unsupported
         ep = tk::parse_vehicle_data_endpoints("endpoints=charge_state;unknown_state");
-        CHECK(ep.charge_state && !ep.climate_state && ep.has_unsupported && !ep.empty());
+        CHECK(ep.has_unsupported && ep.empty());
     }
 }
 

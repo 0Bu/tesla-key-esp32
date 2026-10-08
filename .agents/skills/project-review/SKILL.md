@@ -135,13 +135,14 @@ Treat a violation of any of these as a real finding.
   (`sleep_state_ == ASLEEP`). After a boot/disconnect `sleep_state_` resets to **UNKNOWN**,
   so a poll then **proceeds** and opens an infotainment session (which rouses the MCU). Only
   `WAKE_IF_NEEDED` sends an explicit wake (`RKE_ACTION_WAKE_VEHICLE`).
-- **Active-window sleep gating** (`loop_task_fn_`): background infotainment polls run only
-  while `window = recent command (last 5 min) OR charging`. `init()` seeds the window at
+- **Active-window sleep gating** (`loop_task_fn_`): periodic background infotainment polls run only
+  while `window = recent command (last 5 min) OR (cached Charging/Starting AND live contact <60 s)`. `init()` seeds the window at
   boot **except after a heap-watchdog restart** (`boot_heap_restarts() != 0`) — re-seeding on
   every boot is exactly what would make a restart loop keep a parked car awake. **Never** gate on "car observed awake" — that is self-perpetuating (our polling keeps
   the MCU awake → window never closes → the car can never sleep). A parked, idle car must be
   left to reach sleep. Anything that re-opens the window on a loop (e.g. a reboot loop) is a
-  bug because it defeats this.
+  bug because it defeats this. The wake/bootstrap one-shot ChargeState poll may run outside the
+  window with `NO_WAKE_SKIP`; it does not create a recurring polling window.
 
 ### Link state (single source of truth)
 - `VehicleController::link_state()` is the **single source of truth**, shared by the web UI
@@ -235,13 +236,14 @@ Treat a violation of any of these as a real finding.
   commit and which no later OTA could repair. Past `kHealthGateCapS` = 600 s an unhealthy image
   is LEFT pending (it must NOT self-restart — that would silently downgrade a good build over a
   router outage). Only successfully persisted rebooting `/set_mqtt`, `/set_syslog`, `/set_wifi`
-  and setup-portal saves may confirm early. Both mark-valid paths must acquire the shared
+  may confirm early only after Ready/NimBLE-stable admission. Setup-portal saves remain pending
+  because the portal never reaches that runtime state. Both mark-valid paths must acquire the shared
   `HealthCommit` owner against OTA/identity/`FaultRestart` and re-check INTERNAL largest block after
   admission; any failure leaves rollback armed. `/set_vin` and `/gen_keys[?force=1]` are admitted by
   `OtaIdentityMutationGuard` only in Stable state with the OTA/identity gate idle;
   PendingVerify/unknown/active-OTA returns 503 before mutation. VIN/recovery reboots are not health
-  evidence and must leave rollback armed. A credential-less, wireless device is in setup mode and
-  counts as healthy.
+  evidence and must leave rollback armed. A credential-less, wireless device remains in setup
+  mode with rollback armed; setup alone is not health evidence.
   Re-introducing a mark-valid at startup, or a bare timer, is the regression to flag.
 - **OTA images are signed** (Secure Boot v2 RSA-3072 scheme *without* hardware Secure Boot, no
   eFuses): `CONFIG_SECURE_SIGNED_APPS_NO_SECURE_BOOT` + `..._RSA_SCHEME` +
@@ -310,11 +312,17 @@ Treat a violation of any of these as a real finding.
 
 ### evcc / HTTP contract
 - Response shape must match TeslaBleHttpProxy: `.response.response.charge_state.*`, the field
-  is **`charge_amps`** (not `charging_amps`), and `charge_state` is **always fully populated**
+  is **`charge_amps`** (not `charging_amps`), and selected `charge_state` is **always fully populated**
   (a missing numeric field makes evcc parse `<nil>` and fail). `vehicle_data` is served from
-  **cache** and never blocks. Idle cache may be old so reads do not wake the car; while charging
-  or for five minutes after a command it must be ≤30 s old, otherwise HTTP 503 exposes a broken
-  feedback path.
+  **cache** and never blocks. Idle cache may be old so reads do not wake the car. Within five
+  minutes of a command, or while cached Charging/Starting has live contact <60 s old, charge cache
+  must be ≤30 s old or return HTTP 503. After charging contact expires with no recent command,
+  valid last-known cache may be served again. Selected climate data uses last-known cached
+  preconditioning presence (`valid && has_preconditioning`); reported false is available.
+  All five climate fields remain typed, with zero/false fallbacks for optional HVAC/temperature
+  fields. Omission of `endpoints` selects both domains; each selected domain must be available for
+  success. Unsupported, duplicate, empty or malformed selectors return 400. Reads never poll or
+  wake the car.
 - `set_charging_amps` requires an integer body, serializes action ACK + explicit ChargeState
   readback, and succeeds only on a fresh exact amp match. Missing/mismatching readback and Tesla
   rejection are HTTP 502. Replayed CarServer responses return before callbacks/FIFO completion

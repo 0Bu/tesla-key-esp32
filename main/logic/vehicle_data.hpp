@@ -4,6 +4,7 @@
 #include <cstring>
 #include <string>
 #include <string_view>
+#include <type_traits>
 
 // Vehicle-state result structs — the cached shapes VehicleController hands to every
 // consumer (/status + web UI, /api evcc routes, MQTT/HA bridge, MCP get_vehicle_state,
@@ -122,11 +123,27 @@ void emit_vehicle_charge_state(const ChargeStateResult& cs, Emitter& e) {
     e.num("minutes_to_full_charge", cs.minutes_to_full_charge);
 }
 
-// Serialize climate_state for GET /api/1/vehicles/{VIN}/vehicle_data?endpoints=climate_state
-// Shape mirrors Tesla Fleet API / TeslaBleHttpProxy: always emits every field so evcc
-// reading .response.response.climate_state.is_preconditioning never hits a missing key or <nil>.
+// Fixed snapshot for the five evcc climate fields; the API never copies unrelated cache strings.
+struct VehicleClimateData {
+    bool valid{false};
+    bool has_preconditioning{false};
+    bool is_climate_on{false};
+    bool is_preconditioning{false};
+    float inside_temp{0};
+    float outside_temp{0};
+    float driver_setpoint{0};
+};
+static_assert(std::is_trivially_copyable_v<VehicleClimateData> && sizeof(VehicleClimateData) <= 32);
+
+inline VehicleClimateData vehicle_climate_data(const ClimateStateResult& climate) noexcept {
+    return {climate.valid, climate.has_preconditioning, climate.is_climate_on,
+            climate.is_preconditioning, climate.inside_temp, climate.outside_temp,
+            climate.driver_setpoint};
+}
+
+// Always emit typed climate fields; availability is checked separately before HTTP success.
 template <typename Emitter>
-void emit_vehicle_climate_state(const ClimateStateResult& cl, Emitter& e) {
+void emit_vehicle_climate_state(const VehicleClimateData& cl, Emitter& e) {
     e.boolean("is_climate_on",      cl.is_climate_on);
     e.boolean("is_preconditioning", cl.is_preconditioning);
     e.num("inside_temp",            cl.inside_temp);
@@ -134,66 +151,95 @@ void emit_vehicle_climate_state(const ClimateStateResult& cl, Emitter& e) {
     e.num("driver_temp_setting",    cl.driver_setpoint);
 }
 
+template <typename Emitter>
+void emit_vehicle_climate_state(const ClimateStateResult& cl, Emitter& e) {
+    emit_vehicle_climate_state(vehicle_climate_data(cl), e);
+}
+
 struct VehicleDataEndpoints {
-    bool charge_state{false};
-    bool climate_state{false};
-    bool has_unsupported{false};
+    // Internal selection flags stay in one byte; no binary/wire representation is exposed.
+    bool charge_state : 1;
+    bool climate_state : 1;
+    bool has_unsupported : 1;
+
+    constexpr VehicleDataEndpoints(bool charge = false, bool climate = false, bool unsupported = false)
+        : charge_state(charge), climate_state(climate), has_unsupported(unsupported) {}
 
     constexpr bool empty() const noexcept {
         return !charge_state && !climate_state;
     }
 };
 
-// Parse endpoints for GET /api/1/vehicles/{VIN}/vehicle_data[?endpoints=...]
-// Accepts a full URI, query string, or delimited endpoint list. Delimiters can be ';' or ','.
-// If endpoints is omitted or not present, defaults to both charge_state and climate_state
-// matching TeslaBleHttpProxy behavior.
-inline VehicleDataEndpoints parse_vehicle_data_endpoints(std::string_view input) noexcept {
-    VehicleDataEndpoints res{};
-    if (input.empty()) {
-        res.charge_state = true;
-        res.climate_state = true;
-        return res;
-    }
-
-    const char* val = nullptr;
-    const char* val_end = nullptr;
-
-    const size_t pos = input.find("endpoints=");
-    if (pos != std::string_view::npos) {
-        val = input.data() + pos + 10;
-        const size_t amp = input.find('&', pos + 10);
-        val_end = (amp != std::string_view::npos) ? (input.data() + amp) : (input.data() + input.size());
-    } else if (input.find('/') == std::string_view::npos && input.find('?') == std::string_view::npos && input.find('=') == std::string_view::npos) {
-        val = input.data();
-        val_end = input.data() + input.size();
-    }
-
-    if (!val) {
-        res.charge_state = true;
-        res.climate_state = true;
-        return res;
-    }
-
-    while (val < val_end) {
-        while (val < val_end && (*val == ' ' || *val == '\t')) ++val;
-        const char* t = val;
-        while (t < val_end && *t != ';' && *t != ',' && *t != '&') ++t;
-        const char* next = (t < val_end) ? t + 1 : val_end;
-        while (t > val && (t[-1] == ' ' || t[-1] == '\t')) --t;
-
-        const size_t len = static_cast<size_t>(t - val);
-        if (len == 12 && memcmp(val, "charge_state", 12) == 0) {
-            res.charge_state = true;
-        } else if (len == 13 && memcmp(val, "climate_state", 13) == 0) {
-            res.climate_state = true;
-        } else if (len > 0) {
-            res.has_unsupported = true;
+// Decode one bounded selector list. Raw ';'/',' and URL-encoded delimiters are accepted.
+// Unsupported, duplicate or incomplete selectors fail closed; this does not parse a URI.
+inline VehicleDataEndpoints parse_vehicle_data_endpoint_list(std::string_view value) noexcept {
+    if (value.size() >= 128) return {false, false, true};
+    // Avoid pointer arithmetic on a default string_view's null data pointer.
+    if (value.empty()) return {false, false, true};
+    const char* value_end = value.data() + value.size();
+    const char* cursor = value.data();
+    unsigned selected = 0;
+    while (true) {
+        while (cursor < value_end && (*cursor == ' ' || *cursor == '\t')) ++cursor;
+        const char* end = cursor;
+        unsigned delimiter = 0;
+        while (end < value_end) {
+            if (*end == ';' || *end == ',') { delimiter = 1; break; }
+            if (*end == '%' && value_end - end >= 3 &&
+                ((end[1] == '3' && (end[2] | 0x20) == 'b') ||
+                 (end[1] == '2' && (end[2] | 0x20) == 'c'))) {
+                delimiter = 3;
+                break;
+            }
+            ++end;
         }
-        val = next;
+        const char* trimmed = end;
+        while (trimmed > cursor && (trimmed[-1] == ' ' || trimmed[-1] == '\t')) --trimmed;
+        const size_t length = trimmed - cursor;
+        unsigned domain = 0;
+        if (length == 12 && memcmp(cursor, "charge_state", 12) == 0) domain = 1;
+        else if (length == 13 && memcmp(cursor, "climate_state", 13) == 0) domain = 2;
+        if (!domain || (selected & domain)) return {false, false, true};
+        selected |= domain;
+        if (!delimiter) return {(selected & 1) != 0, (selected & 2) != 0, false};
+        cursor = end + delimiter;
     }
+}
 
-    return res;
+// Parse the query string only, with exact key boundaries and no allocation. Omission selects both.
+inline VehicleDataEndpoints parse_vehicle_data_endpoints(std::string_view query) noexcept {
+    if (query.size() >= 128) return {false, false, true};
+    if (query.empty()) return {true, true, false};
+    const char* value = nullptr;
+    const char* value_end = nullptr;
+    const char* query_end = query.data() + query.size();
+    for (const char* item = query.data(); item < query_end;) {
+        const char* end = item;
+        while (end < query_end && *end != '&') ++end;
+        const char* eq = item;
+        while (eq < end && *eq != '=') ++eq;
+        if (eq - item == 9 && memcmp(item, "endpoints", 9) == 0) {
+            if (value || eq == end) return {false, false, true};
+            value = eq + 1;
+            value_end = end;
+        }
+        item = end < query_end ? end + 1 : query_end;
+    }
+    return value ? parse_vehicle_data_endpoint_list({value, static_cast<size_t>(value_end - value)})
+                 : VehicleDataEndpoints{true, true, false};
+}
+
+// evcc consumes is_preconditioning: an omitted proto field cannot mean known false.
+template <typename Climate>
+inline bool vehicle_climate_available(const Climate& climate) noexcept {
+    return climate.valid && climate.has_preconditioning;
+}
+
+// Success requires every selected domain; one valid cache must not mask another's failure.
+inline bool vehicle_data_available(const VehicleDataEndpoints& endpoints,
+                                   bool charge_ok, bool climate_ok) noexcept {
+    return !endpoints.empty() && !endpoints.has_unsupported &&
+           (!endpoints.charge_state || charge_ok) && (!endpoints.climate_state || climate_ok);
 }
 
 // Usable battery level with fallback to nominal battery level when tag 115 is omitted.
