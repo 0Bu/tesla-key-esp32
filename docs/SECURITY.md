@@ -14,7 +14,7 @@ or drive the car, but it can still control charging. WiFi password and VIN are i
 |---|---|
 | Physical USB/serial | Can dump flash and, without Secure Boot, replace firmware (see [hardening](#enabling-flash-encryption--secure-boot-recommended-irreversible)). |
 | LAN peer | HTTP API is plaintext on port 80 without auth (see [exposure](#http-api-exposure)). |
-| BLE/RF range | Pairing and commands; mitigated by Tesla's session crypto. |
+| BLE/RF range | Pairing and commands; mitigated by Tesla's app-layer session crypto. The firmware compiles no BLE link-layer pairing/bonding (NimBLE SMP is off, `CONFIG_BT_NIMBLE_SECURITY_ENABLE=n`) and keeps no BLE bonds (without SM, NimBLE's in-RAM store can never hold link keys). An SMP Security Request from a peer is dropped with one logged error and no reply, where the previous build would have started Just Works pairing without storing a bond. This applies to all four targets. |
 | Supply chain | OTA images are RSA-3072 signed and verified on every update, so integrity does not rest on TLS alone. |
 
 **First-boot key entropy.** The P-256 key is generated under `bootloader_random_enable()` (SAR-ADC

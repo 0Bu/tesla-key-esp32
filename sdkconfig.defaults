@@ -53,10 +53,22 @@ CONFIG_BT_NIMBLE_ROLE_PERIPHERAL=n
 CONFIG_BT_NIMBLE_ROLE_BROADCASTER=n
 CONFIG_BT_NIMBLE_ROLE_OBSERVER=y
 CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1
-# No NimBLE bond persistence: authentication is app-layer (tesla-ble session keys live in
-# our own `tesla_ble` NVS namespace via nvs_storage.cpp), and we never use the BLE Security
-# Manager / SMP bonding — so the bond-NVS store is dead weight. Off saves ~2.8 KB flash.
-CONFIG_BT_NIMBLE_NVS_PERSIST=n
+# Do not compile the NimBLE Security Manager (SMP: link-layer pairing, bonding, encryption
+# negotiation). The firmware never calls ble_gap_security_initiate()/ble_sm_*()/ble_store_*(),
+# registers no passkey or encryption-change handling, and sets only sync_cb/reset_cb in
+# ble_hs_cfg. Tesla's protection is app-layer session crypto (P-256 ECDH session keys +
+# AES-GCM in tesla-ble, session state in our own `tesla_ble` NVS namespace via nvs_storage.cpp),
+# the firmware never requests link encryption, and keys are enrolled through the NFC keycard +
+# VCSEC whitelist, never through BLE link pairing. One behaviour change: if a peer ever sends an
+# SMP Security Request, ESP-IDF 6.1 NimBLE without SM drops it, logs one ERROR line
+# (ble_sm_rx rc=6) and sends no reply (ble_sm_cmd_get() returns NULL), whereas the previous
+# build would have started Just Works pairing without storing a bond. Tesla's reference client
+# (vehicle-command on Linux via go-ble) has no SMP at all. Applies to all four targets; off
+# saves ~34 KB flash on esp32c6 (34,262 B measured; esp32 28,464, esp32s3 27,984, esp32c3
+# 32,918 B) and keeps esp32c6 below the 0x1E0000 Secure-Boot 64 KiB padding boundary. The
+# bond-NVS store (CONFIG_BT_NIMBLE_NVS_PERSIST, previously set to n) depends on the Security
+# Manager, so its symbol no longer exists and is not set here.
+CONFIG_BT_NIMBLE_SECURITY_ENABLE=n
 
 # BLE MTU - request larger MTU for fewer fragments
 CONFIG_BT_NIMBLE_ATT_PREFERRED_MTU=247
