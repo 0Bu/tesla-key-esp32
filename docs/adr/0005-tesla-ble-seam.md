@@ -62,6 +62,18 @@ The reference is written in Go, relying on goroutines, runtime-managed channels,
 - **Response authentication enforced, bound to the response counter (patch 0006)**: Upstream computes the AES-GCM tag of an encrypted response (`mbedtls_gcm_finish`) but never compares it, so any response tag was accepted. On PSA, `psa_aead_verify` compares it, and 0006 keeps that: a response that fails authentication is refused and its plaintext wiped, as `vehicle-command`'s `Signer.Decrypt` (`internal/authentication/signer.go`) does. The unchecked tag had hidden a second departure: tesla-ble put its own *request* counter into the response metadata, while protocol.md ("Response metadata") and `Signer.Decrypt` use the counter the response carries in `AES_GCM_Response_data.counter`. The vehicle counts responses per request (`Verifier.Encrypt`; VCSEC sends up to three), so the two need not match. 0006 follows the reference: `Peer::decrypt_response` takes the response's counter, `Peer::construct_response_ad_buffer` builds the response metadata, and `Peer::construct_ad_buffer` refuses the response type. All three call sites (tesla-ble `client.cpp` and `vehicle.cpp`, and `VehicleController::handle_vcsec_frame_()` in `main/vehicle_telemetry.cpp`) pass the response counter. V1 pins it with a response sealed under independently serialized protocol.md metadata whose counter differs from the request counter; an AAD built from the request counter is refused.
 - **Serialized command execution**: Protected by `command_mutex_` to prevent BLE radio contention and preserve FreeRTOS task high-water mark.
 - **Encrypted VCSEC admission**: An AES-GCM-declared response requires an initialized VCSEC peer and a non-empty request hash before decryption. Missing context, a failed tag check or a repeated response-carried counter (including zero) drops it before protobuf decoding, sleep updates or status callbacks; it cannot fall through as plaintext. `Peer::validate_response_counter()` supplies the per-request window reset by `Client` when signing a new request, following `vehicle-command`'s decryption-context and counter handling. Intentional passive plaintext `VehicleStatus` broadcasts remain accepted by the separate status path.
+- **SMP channel (NimBLE Security Manager compiled out)**: The reference client (`vehicle-command` on
+  Linux, which pins go-ble `8c5522f54333`) has no SMP implementation. Its stub `handleSMP` reads
+  `p[0]` of the whole L2CAP PDU, which is the low byte of the L2CAP length and not the SMP opcode
+  (`linux/hci/smp.go:44`, `conn.go:259/288`), so it replies only to PDUs whose L2CAP length byte is
+  0x01-0x0E (this includes a 2-byte Security Request). The reply is Pairing Failed (opcode 0x05)
+  with reason 0x05 "Pairing Not Supported", and its frame declares 6 payload bytes but carries 2
+  (`smp.go:28`). This firmware builds ESP-IDF 6.1 NimBLE with `CONFIG_BT_NIMBLE_SECURITY_ENABLE=n`,
+  so `ble_sm_cmd_get()` returns NULL, it sends no reply and logs one `ble_sm_rx` ERROR with `rc=6`
+  (numerically `BLE_HS_ENOMEM`, although no allocation failed). Neither side pairs, and Tesla does
+  not require link-layer security on the VCSEC/infotainment characteristics (`protocol.md` lists no
+  link-security requirement). Evidence status: static source reading plus a bench boot/scan on an
+  S3; the link-level hold test with the car still open is pending.
 
 ### 2.1 Framing Edge Cases and Protocol Deviations (F8)
 

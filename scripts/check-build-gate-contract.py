@@ -456,6 +456,10 @@ def validate(root: Path) -> None:
         "sdkconfig.defaults: unreachable enterprise/SAE-PK/setup-AP SAE surfaces must stay disabled",
     )
     require(
+        len(re.findall(r"^CONFIG_BT_NIMBLE_SECURITY_ENABLE=n$", sdkconfig_defaults, re.M)) == 1,
+        "sdkconfig.defaults: the unused NimBLE Security Manager (SMP) must stay disabled",
+    )
+    require(
         idf_docker.count("docker run --rm --cpus 1.5 --memory 1800m") == 1,
         "idf-docker.sh: build containers must retain the explicit 1.5 CPU / 1800 MiB limits",
     )
@@ -1366,6 +1370,12 @@ def self_test(root: Path) -> None:
         ("wifi-softap-sae-disabled", "sdkconfig.defaults",
          "CONFIG_ESP_WIFI_SOFTAP_SAE_SUPPORT=n", "CONFIG_ESP_WIFI_SOFTAP_SAE_SUPPORT=y",
          "unreachable enterprise/SAE-PK/setup-AP SAE surfaces"),
+        ("ble-security-manager-disabled", "sdkconfig.defaults",
+         "CONFIG_BT_NIMBLE_SECURITY_ENABLE=n", "CONFIG_BT_NIMBLE_SECURITY_ENABLE=y",
+         "the unused NimBLE Security Manager (SMP) must stay disabled"),
+        ("ble-security-manager-commented-out", "sdkconfig.defaults",
+         "CONFIG_BT_NIMBLE_SECURITY_ENABLE=n", "# CONFIG_BT_NIMBLE_SECURITY_ENABLE=n",
+         "the unused NimBLE Security Manager (SMP) must stay disabled"),
         ("boundary-build-ignore", ".gitignore", "/build_boundary_*/", "/build_boundary_removed/",
          "boundary-build trees must stay outside the source fingerprint"),
         ("manifest-layout", "scripts/check-pages-manifest.py",
