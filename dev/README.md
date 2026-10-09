@@ -258,21 +258,39 @@ GET /api/1/vehicles/{VIN}/vehicle_data
     "inside_temp": 21.5, "outside_temp": 5, "driver_temp_setting": 22 } } } }
 ```
 
+`?endpoints=drive_state` returns `"drive_state": { "odometer": 12345.6 }` (miles).
+
 The doubled `response` and `charge_amps` match the Fleet API / TeslaBleHttpProxy shape evcc
 parses. `charge_energy_added` is session energy in kWh; `battery_range` stays in miles for evcc's
-conversion, and `minutes_to_full_charge` stays in minutes. Optional `?endpoints=charge_state` or
-`?endpoints=climate_state` selects one domain; omission selects both. Combined selectors accept
-`;` or `,`, including `%3B` and `%2C`. The exact query key is required; empty, unsupported,
-duplicate or malformed selectors and query strings of 128 bytes or more return HTTP `400`.
+conversion, and `minutes_to_full_charge` stays in minutes. Optional `?endpoints=` selects
+`charge_state`, `climate_state` and/or `drive_state`; omission selects `charge_state` and
+`climate_state` (the TeslaBleHttpProxy default). Combined selectors accept `;` or `,`, including
+`%3B` and `%2C`. The exact query key is required; empty, unsupported, duplicate or malformed
+selectors and query strings of 128 bytes or more return HTTP `400`. This is a deliberate departure
+from TeslaBleHttpProxy, which answers an unsupported endpoint with `503` / `result:false`, falls
+back to its default for an empty `endpoints=` value and accepts duplicate selectors, while this
+firmware returns `400` for all three (a malformed request is a client error; evcc never sends
+them). The firmware also accepts `,` besides `;`, and a selected `drive_state` without a reported
+odometer answers `503` with `odometer: 0`, where the proxy answers `200` with 0 (evcc rejects
+`<= 0` either way).
 
-Each selected cache must be available for HTTP `200` / `result:true`; failure of either selected
+Each selected cache must be available for HTTP `200` / `result:true`; failure of any selected
 domain returns HTTP `503`, `result:false`, and reason `"stale or unavailable"`. Idle charge cache
 may be old so reads do not wake the car. Within five minutes of a command, or while cached
 Charging/Starting has live infotainment contact less than 60 s old, charge cache older than 30 s
 is unavailable. After that contact expires without a recent command, valid last-known charge
-cache may be served again. Climate uses last-known cache: both `valid` and `has_preconditioning`
-are required. A reported `false` succeeds; an unreported field does not imply false. The other
-optional climate fields keep typed zero/false fallbacks. These reads never poll or wake the car.
+cache may be served again. Climate needs a valid cache; inside the active window a climate cache
+older than 300 s is unavailable (evcc uses `is_preconditioning` to keep charging at minimum
+current, so a stale in-window value is refused), outside it the last-known cache is served. An
+unreported `is_preconditioning` is emitted as `false` (TeslaBleHttpProxy semantics); the other
+optional climate fields keep typed zero/false fallbacks. When the window opens, the telemetry
+rotation restarts at climate; it is refreshed only by that rotation, so `climate_state` answers
+`503` after a reboot until an in-window rotation reaches an awake car: the boot-seeded window (not
+seeded after a heap-watchdog restart) normally fills it, while a car asleep through it stays `503`
+until the next command or charging window. Drive data needs a valid cache with a reported
+odometer; the last-known value is served because the odometer only grows. It is refreshed by the
+in-window telemetry rotation and by the wake/bootstrap one-shot, which also enqueues one
+`NO_WAKE_SKIP` drive-state poll. These reads never poll or wake the car.
 
 ### Body controller state (no wake)
 
@@ -352,7 +370,9 @@ url: http://tesla-key-esp32.local   # or http://<ESP32-IP>
 port: 80                            # device serves on 80 (template default 8080)
 ```
 
-evcc calls `GET …/vehicle_data?endpoints=charge_state` and `GET …/vehicle_data?endpoints=climate_state`,
+evcc calls `GET …/vehicle_data?endpoints=charge_state` and
+`GET …/vehicle_data?endpoints=climate_state` (newer templates also read the odometer via
+`?endpoints=drive_state`, in miles, scaled to km by evcc),
 as well as `POST …/command/{charge_start,charge_stop,set_charging_amps,wake_up}`, reading SOC from
 `.response.response.charge_state.battery_level`, current from `…charge_amps`, charged energy from
 `…charge_energy_added`, and preconditioning status from `.response.response.climate_state.is_preconditioning`.
@@ -467,7 +487,7 @@ signed app) as described in [ARCHITECTURE.md](ARCHITECTURE.md#flashing--nvs-safe
 `ble.connected: true`). Verify the shape (must print a number; `null` → firmware too old, reflash):
 
 ```bash
-curl .../api/1/vehicles/<VIN>/vehicle_data | jq '.response.response.charge_state.battery_level'
+curl ".../api/1/vehicles/<VIN>/vehicle_data?endpoints=charge_state" | jq '.response.response.charge_state.battery_level'
 ```
 
 ## Security
