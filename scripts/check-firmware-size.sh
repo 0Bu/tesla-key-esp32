@@ -230,7 +230,6 @@ PY
       --enforce-budget; then
     echo "❌ ERROR: $target violated reviewed firmware size baseline!" >&2
     echo "   If this growth is intentional and reviewed, rerun with --update-baseline." >&2
-    echo "   To lock in a reviewed size reduction instead, use --tighten-baseline." >&2
     overall_failed=1
   else
     echo "✅ $target firmware size is within reviewed baseline and policy limits."
