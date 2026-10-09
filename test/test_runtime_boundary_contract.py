@@ -1193,14 +1193,19 @@ def require_vehicle_climate_getter_seam(source: str) -> None:
 
 # get_charge_state() is the cache-only, freshness-bounded read behind evcc's charge_state poll. The
 # snapshot is taken under the leaf cache_mutex_; the window/age decision runs after the unlock.
-# Tokens are matched on whitespace-normalized code, so a statement may wrap across lines.
-CHARGE_GETTER_SEAMS = (
-    "tk::MutexGuard g(cache_mutex_);", "cached = last_known_charge_;",
+# Tokens are matched on whitespace-normalized code, so a statement may wrap across lines (the lock
+# statement itself is located on the raw layout and must stay on one line).
+CHARGE_GETTER_SNAPSHOT = (
+    "cached = last_known_charge_;",
     "sample = last_charge_ticks_.load();", "generation = charge_state_generation_.load();",
+)
+CHARGE_GETTER_SEAMS = (
+    "tk::MutexGuard g(cache_mutex_);", *CHARGE_GETTER_SNAPSHOT,
     # Exact statements: the window must see the cached charging arm, "have a sample" must come from
     # the generation bit, the age must be derived from the stamped tick and the shared verdict must
     # gate the response (a forced-closed window, have_sample_age = true, a dropped charging arm or an
     # age of 0 would each let a dead feedback path pose as fresh data inside the active window).
+    "uint32_t now = xTaskGetTickCount();",
     "const bool active_window = active_window_now_(now, charging);",
     "bool have_sample_age = generation != 0;",
     "uint32_t sample_age_s = have_sample_age ? (now - sample) / configTICK_RATE_HZ : 0;",
@@ -1212,6 +1217,47 @@ CHARGE_GETTER_CHARGING_ARM = (
     'const bool charging = cached.charging_state == "Charging" || '
     'cached.charging_state == "Starting";'
 )
+# Every freshness input is written exactly this often (the pinned statements plus the zero
+# initializers of sample/generation), so a later reassignment cannot bypass the pinned values.
+CHARGE_GETTER_WRITES = {
+    "cached": 1, "sample": 2, "generation": 2, "now": 1, "charging": 1, "active_window": 1,
+    "have_sample_age": 1, "sample_age_s": 1,
+}
+# (injected spelling, forbidden-pattern) pairs: the read serves the cache and never polls, connects,
+# wakes or takes the vehicle lock. Logging stays allowed: the stale branch reports once.
+CHARGE_GETTER_FORBIDDEN = (
+    ("charge_state_poll();", r"charge_state_poll"),
+    ("tk::SemGuard v(vehicle_mutex_);", r"vehicle_mutex_"),
+    ("enqueue_background_poll_();", r"enqueue_background_poll_"),
+    ("(void)ensure_connected_until_(0, tk::ConnectOrigin::Foreground);", r"ensure_connected_until_"),
+    ("wake_up();", r"\bwake_up\b"),
+    ("ble_->connect(\"\");", r"\bble_"),
+    ("client_->x();", r"\bclient_"),
+)
+# active_window_now_() is the window both cache getters and the background poll share; dropping
+# its command or charging arm would silently disable in-window freshness everywhere.
+ACTIVE_WINDOW_SEAMS = (
+    "const uint32_t lc = last_cmd_ticks_.load();",
+    "const bool recent_cmd = (lc != 0) && ((now_ticks - lc) < pdMS_TO_TICKS(kActiveWindowMs));",
+    "const bool have_contact = seconds_since_contact(contact_age);",
+    "return tk::active_window_open({recent_cmd, charging_state, have_contact, contact_age});",
+)
+
+
+def cpp_writes(code: str, name: str) -> int:
+    """Count assignments, compound assignments and increments of the plain identifier `name`."""
+    ident = rf"(?<![\w.>:]){re.escape(name)}\b"
+    return len(re.findall(
+        rf"{ident}\s*(?:<<|>>|[-+*/%&|^])?=(?!=)|{ident}\s*(?:\+\+|--)|(?:\+\+|--)\s*{ident}", code))
+
+
+def require_active_window_seam(source: str) -> None:
+    code = " ".join(scrub_cpp(function_body_in(source, "active_window_now_")).split())
+    for token in ACTIVE_WINDOW_SEAMS:
+        if token not in code:
+            raise AssertionError(f"active window lost its command/charging/contact input: {token}")
+    if len(re.findall(r"\breturn\b", code)) != 1:
+        raise AssertionError("active window must have exactly one return (the shared decision)")
 
 
 def strip_cpp_comments(text: str) -> str:
@@ -1227,17 +1273,32 @@ def require_charge_state_getter_seam(source: str) -> None:
             raise AssertionError(f"charge getter lost ownership/freshness: {token}")
     if CHARGE_GETTER_CHARGING_ARM not in " ".join(strip_cpp_comments(raw).split()):
         raise AssertionError("charge getter window lost the cached Charging/Starting arm")
-    # The freshness decision must follow the unlock, never run under cache_mutex_.
+    for name, expected in CHARGE_GETTER_WRITES.items():
+        if cpp_writes(code, name) != expected:
+            raise AssertionError(f"charge getter writes {name} {cpp_writes(code, name)}x, expected {expected}")
+    for _, pattern in CHARGE_GETTER_FORBIDDEN:
+        if re.search(pattern, code):
+            raise AssertionError(f"charge getter added a non-cache operation: {pattern}")
+    # The snapshot is copied inside the locked scope; the freshness decision follows the unlock.
     layout = scrub_cpp_preserving_layout(raw)
-    _, locked_end = scope_around(layout, "tk::MutexGuard g(cache_mutex_);")
+    locked_start, locked_end = scope_around(layout, "tk::MutexGuard g(cache_mutex_);")
+    locked = " ".join(layout[locked_start:locked_end].split())
+    for token in CHARGE_GETTER_SNAPSHOT:
+        if token not in locked:
+            raise AssertionError(f"charge getter copies {token} outside cache_mutex_")
     for token in ("active_window_now_(", "tk::charge_cache_usable("):
         if layout.find(token) < locked_end:
             raise AssertionError(f"charge getter evaluates {token} under cache_mutex_")
-    # A stale verdict must refuse the response instead of falling through to serve the cache.
+    # A stale verdict must refuse the response instead of falling through to serve the cache, and
+    # the cache may only be served after that verdict: one success return, one output write.
     opening = layout.find("{", layout.find("tk::charge_cache_usable("))
     closing = balanced_end(layout, opening, "{", "}", "charge getter stale branch")
     if not re.search(r"return\s+false;\s*$", layout[opening + 1:closing]):
         raise AssertionError("charge getter stale verdict no longer returns false")
+    for token, label in ((r"\breturn\s+true\s*;", "success return"), (r"\bout\s*=(?!=)", "output write")):
+        hits = [match.start() for match in re.finditer(token, layout)]
+        if len(hits) != 1 or hits[0] < closing:
+            raise AssertionError(f"charge getter {label} must occur once, after the freshness verdict")
 
 
 def require_climate_publication_stamp(telemetry_source: str) -> None:
@@ -3823,6 +3884,7 @@ def require_runtime_source_contracts() -> None:
     require_vehicle_drive_getter_seam((MAIN / "vehicle_ctrl.hpp").read_text())
     require_vehicle_climate_getter_seam(SOURCES["vehicle_telemetry.cpp"])
     require_charge_state_getter_seam(SOURCES["vehicle_telemetry.cpp"])
+    require_active_window_seam(SOURCES["vehicle_telemetry.cpp"])
     require_climate_publication_stamp(SOURCES["vehicle_telemetry.cpp"])
     require_wake_companion_drive_poll(function_body_in(SOURCES["vehicle_telemetry.cpp"], "loop_task_fn_"))
     require_drive_poll_builder(SOURCES["vehicle_telemetry.cpp"])
@@ -4711,11 +4773,66 @@ def self_test_canaries(tasks: set[str], callbacks: set[str]) -> None:
         ("stale verdict still serves the cache",
          "        return false;\n    }\n\n    out = std::move(cached);",
          "        return true;\n    }\n\n    out = std::move(cached);"),
+        ("stale branch falls through to serve the cache",
+         "        return false;\n    }\n\n    out = std::move(cached);",
+         "    }\n\n    out = std::move(cached);"),
+        ("tick read from the sample stamp",
+         "uint32_t now = xTaskGetTickCount();", "uint32_t now = sample;"),
+        ("age reset before the verdict",
+         "    if (!tk::charge_cache_usable(", "    sample_age_s = 0;\n    if (!tk::charge_cache_usable("),
+        ("have-sample bit forced after it was derived",
+         "    if (!tk::charge_cache_usable(", "    have_sample_age = true;\n    if (!tk::charge_cache_usable("),
+        ("charging window bypasses the verdict",
+         "    if (!tk::charge_cache_usable(",
+         "    if (charging) { out = std::move(cached); return true; }\n    if (!tk::charge_cache_usable("),
+        ("invalid cache reported as success",
+         "if (!cached.valid) return false;", "if (!cached.valid) return true;"),
     ):
         require_mutation_rejected(
             f"charge getter {label}",
             lambda old=old, new=new: require_charge_state_getter_seam(
                 charge_getter_mutated(old, new)),
+        )
+    # Move (not delete) the snapshot copy behind the lock scope, so every pinned token survives.
+    snapshot_line = "        cached = last_known_charge_;\n"
+    validity_line = "    if (!cached.valid) return false;"
+    if snapshot_line not in charge_getter or validity_line not in charge_getter:
+        raise AssertionError("charge getter snapshot-move mutation did not apply")
+    moved_snapshot = charge_getter.replace(snapshot_line, "", 1).replace(
+        validity_line, "    cached = last_known_charge_;\n" + validity_line, 1)
+    require_mutation_rejected(
+        "charge getter snapshot copied after the unlock",
+        lambda: require_charge_state_getter_seam(climate_telemetry.replace(charge_getter, moved_snapshot, 1)),
+    )
+    for injected, _ in CHARGE_GETTER_FORBIDDEN:
+        require_mutation_rejected(
+            f"charge getter non-cache operation {injected!r}",
+            lambda injected=injected: require_charge_state_getter_seam(
+                climate_telemetry.replace(charge_getter, charge_getter.replace("{", "{ " + injected, 1), 1)),
+        )
+
+    window_body = function_body_in(climate_telemetry, "active_window_now_")
+    for token in ACTIVE_WINDOW_SEAMS:
+        pattern = r"\s+".join(re.escape(part) for part in token.split(" "))
+        mutated_window, applied = re.subn(pattern, "fixture_window_bypass", window_body, count=1)
+        if applied != 1:
+            raise AssertionError(f"active window mutation did not apply: {token}")
+        require_mutation_rejected(
+            f"active window seam removed {token!r}",
+            lambda mutated_window=mutated_window: require_active_window_seam(
+                climate_telemetry.replace(window_body, mutated_window, 1)),
+        )
+    for label, old, new in (
+        ("forced closed", "    const uint32_t lc", "    return false;\n    const uint32_t lc"),
+        ("charging arm dropped", "{recent_cmd, charging_state,", "{recent_cmd, false,"),
+        ("command arm dropped", "{recent_cmd, charging_state,", "{false, charging_state,"),
+    ):
+        if old not in window_body:
+            raise AssertionError(f"active window semantic mutation did not apply: {old}")
+        require_mutation_rejected(
+            f"active window {label}",
+            lambda old=old, new=new: require_active_window_seam(
+                climate_telemetry.replace(window_body, window_body.replace(old, new, 1), 1)),
         )
 
     stamp_lines = ("                last_climate_ticks_.store(xTaskGetTickCount());\n"
