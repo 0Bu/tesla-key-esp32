@@ -4,9 +4,16 @@
 # hard partition limits and scripts/firmware-size-baseline.json.
 #
 # Usage:
-#   scripts/check-firmware-size.sh [--target <target>] [--update-baseline]
-#   scripts/check-firmware-size.sh --all [--update-baseline]
+#   scripts/check-firmware-size.sh [--target <target>] [--update-baseline | --tighten-baseline]
+#   scripts/check-firmware-size.sh --all [--update-baseline | --tighten-baseline]
 #   scripts/check-firmware-size.sh --self-test
+#
+# Reviewed baseline updates (mutually exclusive; include the updated baseline in the same commit):
+#   --update-baseline   Intentional, reviewed growth: raise each maximum to max(old, measured).
+#                       Never lowers a maximum.
+#   --tighten-baseline  Lock in a reviewed size reduction: set every maximum of the checked
+#                       target(s) to the measured value. The build runs with budget enforcement
+#                       and the update refuses if any metric grew or a capacity changed.
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
@@ -19,6 +26,7 @@ C6_64K_CLIFF=$((1966080))      # 0x1e0000 boundary for Secure Boot v2 projection
 
 target_list=()
 update_baseline=0
+tighten_baseline=0
 self_test=0
 
 while [[ $# -gt 0 ]]; do
@@ -37,6 +45,10 @@ while [[ $# -gt 0 ]]; do
       update_baseline=1
       shift
       ;;
+    --tighten-baseline)
+      tighten_baseline=1
+      shift
+      ;;
     --self-test)
       self_test=1
       shift
@@ -48,7 +60,11 @@ Usage: $(basename "$0") [options]
 Options:
   --target <chip>    Target chip (esp32, esp32s3, esp32c3, esp32c6). Default: esp32c6
   --all              Check all four supported targets
-  --update-baseline  Update scripts/firmware-size-baseline.json if build passes policy
+  --update-baseline  Raise reviewed maxima in scripts/firmware-size-baseline.json to the measured
+                     values if the build passes policy (reviewed growth; never lowers a maximum)
+  --tighten-baseline Lock in a reviewed size reduction: set every maximum of the checked target(s)
+                     to the measured actual; refuses if any metric grew or a capacity changed
+                     (mutually exclusive with --update-baseline)
   --self-test        Run argument and self-validation tests
   -h, --help         Show this help message
 HELP
@@ -60,6 +76,17 @@ HELP
       ;;
   esac
 done
+
+if [[ "$update_baseline" -eq 1 && "$tighten_baseline" -eq 1 ]]; then
+  echo "ERROR: --update-baseline (raise) and --tighten-baseline (lower) are mutually exclusive" >&2
+  exit 2
+fi
+baseline_mode=""
+if [[ "$update_baseline" -eq 1 ]]; then
+  baseline_mode="raise"
+elif [[ "$tighten_baseline" -eq 1 ]]; then
+  baseline_mode="tighten"
+fi
 
 if [[ "$self_test" -eq 1 ]]; then
   echo "check-firmware-size: running self-test..."
@@ -91,7 +118,9 @@ for target in "${target_list[@]}"; do
   echo ""
   echo "--- Building and measuring $target ---"
   build_flags=(--target "$target")
-  if [[ "$update_baseline" -eq 1 ]]; then
+  if [[ "$baseline_mode" == "raise" ]]; then
+    # Reviewed growth must be measurable, so the budget gate is not enforced during this build.
+    # --tighten-baseline builds WITH enforcement: a reduction has to pass the current baseline.
     build_flags+=(--no-enforce-budget)
   fi
   ./scripts/idf-docker.sh ./scripts/ci-build-all.sh "${build_flags[@]}" local local
@@ -124,15 +153,16 @@ for target in "${target_list[@]}"; do
     overall_failed=1
   fi
 
-  # Run size reporter
-  if [[ "$update_baseline" -eq 1 ]]; then
-    python3 - "$target" "$size_json" "$unsigned_size" "$repo_root/scripts/firmware-size-baseline.json" \
-        "$repo_root/scripts/report-firmware-size.py" <<'PY'
-import importlib.util, json, sys
+  # Update the reviewed baseline (raise or tighten) from the measured build.
+  if [[ -n "$baseline_mode" ]]; then
+    if ! python3 - "$target" "$size_json" "$unsigned_size" "$repo_root/scripts/firmware-size-baseline.json" \
+        "$repo_root/scripts/report-firmware-size.py" "$baseline_mode" <<'PY'
+import importlib.util, json, os, pathlib, sys
 target = sys.argv[1]
 size_json = sys.argv[2]
 unsigned_size = int(sys.argv[3])
 baseline_path = sys.argv[4]
+mode = sys.argv[6]
 
 # Measure with the reporter's own esp-idf-size json2 region binding, so the update and the budget
 # check read identical numbers and a renamed/missing region fails closed instead of reading zero.
@@ -149,20 +179,44 @@ image = reporter.image_usage(observed, target, unsigned_size)
 with open(baseline_path, "r", encoding="utf-8") as f:
     baseline = json.load(f)
 
-tgt_budget = baseline["targets"][target]
-tgt_budget["maxUnsignedApp"] = max(tgt_budget["maxUnsignedApp"], image.unsigned_app)
-tgt_budget["maxElfTotal"] = max(tgt_budget["maxElfTotal"], image.elf_total)
-tgt_budget["maxFlashCodeAndRodata"] = max(tgt_budget["maxFlashCodeAndRodata"], image.flash_code_rodata)
-tgt_budget["maxStaticUsed"] = max(tgt_budget["maxStaticUsed"], memory.static_used)
-tgt_budget["maxBss"] = max(tgt_budget["maxBss"], memory.bss)
-tgt_budget["maxIramUsed"] = max(tgt_budget["maxIramUsed"], memory.iram_used)
+# The decision (raise = max(old, measured), tighten = measured, refused on growth or a changed
+# capacity) lives in the host-tested reporter, not in this script.
+old_budget = baseline["targets"][target]
+try:
+    new_budget = reporter.updated_budget(old_budget, memory, image, mode, target=target)
+except ValueError as exc:
+    print(f"ERROR: {exc}", file=sys.stderr)
+    sys.exit(1)
+baseline["targets"][target] = new_budget
 
-with open(baseline_path, "w", encoding="utf-8") as f:
-    json.dump(baseline, f, indent=2)
-    f.write("\n")
+# Validate the whole candidate baseline with load_budget before it replaces the reviewed file.
+candidate = baseline_path + ".new"
+try:
+    with open(candidate, "w", encoding="utf-8") as f:
+        json.dump(baseline, f, indent=2)
+        f.write("\n")
+    for checked_target in reporter.TARGETS:
+        reporter.load_budget(pathlib.Path(candidate), checked_target)
+    os.replace(candidate, baseline_path)
+except ValueError as exc:
+    print(f"ERROR: updated baseline is invalid: {exc}", file=sys.stderr)
+    sys.exit(1)
+finally:
+    if os.path.exists(candidate):
+        os.unlink(candidate)
 
-print(f"Updated baseline for {target}: maxElfTotal={tgt_budget['maxElfTotal']} maxFlashCodeAndRodata={tgt_budget['maxFlashCodeAndRodata']}")
+changed = [key for key in reporter.BASELINE_MAXIMA if old_budget[key] != new_budget[key]]
+summary = f"{len(changed)} maximum(s) changed" if changed else "no maximum changed"
+print(f"Baseline {mode} for {target}: {summary}")
+for key in changed:
+    delta = new_budget[key] - old_budget[key]
+    print(f"  {key}: {old_budget[key]} -> {new_budget[key]} ({delta:+d})")
 PY
+    then
+      echo "❌ ERROR: baseline $baseline_mode failed for $target; its baseline entry is unchanged." >&2
+      overall_failed=1
+      continue
+    fi
   fi
 
   # Check budget against baseline
@@ -176,6 +230,7 @@ PY
       --enforce-budget; then
     echo "❌ ERROR: $target violated reviewed firmware size baseline!" >&2
     echo "   If this growth is intentional and reviewed, rerun with --update-baseline." >&2
+    echo "   To lock in a reviewed size reduction instead, use --tighten-baseline." >&2
     overall_failed=1
   else
     echo "✅ $target firmware size is within reviewed baseline and policy limits."

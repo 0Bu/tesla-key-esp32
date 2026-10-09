@@ -188,7 +188,8 @@ The suite also has gates outside the single pure-logic translation unit:
 - **`scripts/report-firmware-size.py`**, **`check-stack-usage.py`**, **`check-bench-acceptance.py`**,
   **`check-dependency-contract.py`**, **`check-otadata-contract.py`**,
   **`prepare-reused-release.py`** and **`check-workflow-policy.py`** / **`check-build-gate-contract.py`**
-  each carry a `--self-test` that mutation-tests their schema, baseline, recovery or DAG contract
+  each carry a `--self-test` that mutation-tests their schema, baseline (the size reporter's
+  raise and tighten baseline-update modes included), recovery or DAG contract
   (what they protect: [feature catalog §6](../docs/FEATURES.md#6-build-test-and-ci) and
   [SECURITY](../docs/SECURITY.md#release-pipeline-and-trust-boundaries)).
 - **`scripts/run-fuzz-smoke.sh`** runs a fixed-seed 20,000-case property corpus over the bounded
