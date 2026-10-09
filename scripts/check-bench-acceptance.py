@@ -24,7 +24,8 @@ from typing import Any
 TARGETS = {"esp32", "esp32s3", "esp32c3", "esp32c6"}
 # Runtime high-water marks must retain a deliberate reserve rather than merely be
 # non-zero.  These floors are one eighth of the task stacks configured in the
-# firmware (httpd/vehicle/auto_pair: 8192 bytes; mqtt: 6144 bytes).  They are an
+# firmware (httpd/auto_pair: 8192 bytes; vehicle: 10240 bytes, floor kept at 1024;
+# mqtt: 6144 bytes).  They are an
 # acceptance-policy margin, not a claim that hardware has proved a universal alarm
 # threshold.  A stack-size change therefore needs this policy reviewed with it.
 STACK_MINIMUM_FREE_BYTES = {
