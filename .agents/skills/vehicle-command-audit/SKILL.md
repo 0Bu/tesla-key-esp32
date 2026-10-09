@@ -72,7 +72,7 @@ The high-value paths (verified to exist):
 
 | Dimension | Upstream file(s) |
 |---|---|
-| BLE transport (UUIDs, name, framing, MTU, max-conns) | `pkg/connector/ble/ble.go` |
+| BLE transport (UUIDs, name, framing, MTU, max-conns, ATT write/subscription type) | `pkg/connector/ble/ble.go`, `pkg/protocol/protocol.md` (characteristics, "write with response"), go-ble at the version pinned in `go.mod` (`linux/gatt/client.go`, `linux/att/client.go`) |
 | Session / signing / anti-replay / clock | `pkg/protocol/protocol.md`, `internal/authentication/signer.go`, `pkg/protocol/protobuf/signatures.proto` |
 | Roles | `pkg/protocol/protobuf/keys.proto` (Role enum), `pkg/protocol/protocol.md` (role *scope* prose) |
 | Wake / sleep / body controller | `pkg/vehicle/vcsec.go`, `pkg/vehicle/state.go`, `pkg/vehicle/vehicle.go`, `pkg/protocol/protobuf/vcsec.proto` |
@@ -119,8 +119,12 @@ re-confirm it against the *current* tree and catch anything that drifted since. 
 1. **BLE transport** — service `00000211…`, write `…0212`, notify `…0213`; VIN→name `S%02xC` over
    the **first 8 bytes** of `sha1(VIN)` (⇒ `S` + 16 hex + `C`); 2-byte big-endian length prefix;
    block `min(txMtu,maxBLEMessageSize)-3`; `ErrMaxConnectionsExceeded` keyed off the advert
-   **`Connectable`** flag (not the connect error). *Baseline: matches.* (Writes use a 20-byte
-   fallback until MTU negotiation, then `min(MTU-3, 244)` like the pinned library limit.)
+   **`Connectable`** flag (not the connect error). *Baseline: matches, except four documented
+   ATT-transport departures (ADR-0005 §2): TX chunks are Write Commands instead of "write with
+   response", RX uses notifications instead of indications, the firmware neither starts nor
+   accepts an MTU exchange, and it answers no inbound ATT request (no GATT server,
+   `CONFIG_BT_NIMBLE_ROLE_PERIPHERAL=n`).* (The ATT MTU is therefore 23 and every write uses the
+   20-byte payload; the `min(MTU-3, 244)` path in `ble_chunk.hpp` is unreachable in this build.)
 2. **Roles / Charging-Manager scope** — charging commands + wake only; everything else
    (lights/horn/sentry/**climate**/locks) is role-rejected. *Baseline: code and current docs match;
    the worked table retains the former drift only as a labelled historical example.*
