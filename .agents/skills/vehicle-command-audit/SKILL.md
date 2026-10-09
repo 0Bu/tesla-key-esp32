@@ -72,7 +72,7 @@ The high-value paths (verified to exist):
 
 | Dimension | Upstream file(s) |
 |---|---|
-| BLE transport (UUIDs, name, framing, MTU, max-conns) | `pkg/connector/ble/ble.go` |
+| BLE transport (UUIDs, name, framing, MTU, max-conns, ATT write/subscription type) | `pkg/connector/ble/ble.go`, `pkg/protocol/protocol.md` (characteristics, "write with response"), go-ble at the version pinned in `go.mod` (`linux/gatt/client.go`, `linux/att/client.go`) |
 | Session / signing / anti-replay / clock | `pkg/protocol/protocol.md`, `internal/authentication/signer.go`, `pkg/protocol/protobuf/signatures.proto` |
 | Roles | `pkg/protocol/protobuf/keys.proto` (Role enum), `pkg/protocol/protocol.md` (role *scope* prose) |
 | Wake / sleep / body controller | `pkg/vehicle/vcsec.go`, `pkg/vehicle/state.go`, `pkg/vehicle/vehicle.go`, `pkg/protocol/protobuf/vcsec.proto` |
@@ -122,8 +122,8 @@ re-confirm it against the *current* tree and catch anything that drifted since. 
    **`Connectable`** flag (not the connect error). *Baseline: matches, except three documented
    ATT-transport departures (ADR-0005 §2): TX chunks are Write Commands instead of "write with
    response", RX uses notifications instead of indications, and the firmware never initiates the MTU
-   exchange.* (Writes use a 20-byte fallback until the vehicle negotiates the MTU, then
-   `min(MTU-3, 244)` like the pinned library limit.)
+   exchange.* (Writes use a 20-byte fallback until the vehicle negotiates the MTU, which it was
+   not observed to do, then `min(MTU-3, 244)` like the pinned library limit.)
 2. **Roles / Charging-Manager scope** — charging commands + wake only; everything else
    (lights/horn/sentry/**climate**/locks) is role-rejected. *Baseline: code and current docs match;
    the worked table retains the former drift only as a labelled historical example.*

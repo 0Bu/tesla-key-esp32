@@ -42,7 +42,7 @@ The architecture is implemented according to the reference specifications:
 
 ### 2. Platform-Forced Departures and Reference Deviations
 
-The reference is written in Go, relying on goroutines, runtime-managed channels, garbage collection, and dynamic heap allocation. On ESP32 with FreeRTOS and tight memory constraints (10240 B `vehicle_loop` stack), the following deliberate adaptations and departures from `vehicle-command` are made:
+The reference is written in Go, relying on goroutines, runtime-managed channels, garbage collection, and dynamic heap allocation. On ESP32 with FreeRTOS and tight memory constraints (10240 B `vehicle_loop` stack), the following deliberate or inherited adaptations and departures from `vehicle-command` are made:
 - **No goroutines / channels**: Replaced by deterministic FreeRTOS queues (`ble_event_queue_`) and the single `vehicle_loop` execution thread.
 - **Bounded vector buffers**: `tk::RxFramer` uses a `std::vector<uint8_t>` capped strictly to `kMaxFrameLength = 2048` (+2 length header bytes), avoiding unbounded heap allocation while preserving stack budget.
 - **Max frame length (2048 vs 1024 B)**: `ble.go:21` defines `maxBLEMessageSize = 1024`. tesla-ble's own reassembly used `Vehicle::MAX_MESSAGE_SIZE = 2048` (in the `Vehicle` class this firmware no longer calls), while a `UniversalMessage_RoutableMessage` is at most 741 B. `kMaxFrameLength = 2048` keeps that historical tesla-ble limit.
@@ -92,13 +92,16 @@ The reference is written in Go, relying on goroutines, runtime-managed channels,
   hardware validation: NimBLE does not serialize client requests, so each chunk would wait for its
   Write Response through a bounded, generation-keyed completion, adding about one connection
   interval per chunk. No test pins the write type. Evidence status: static source reading of the
-  firmware, the pinned NimBLE, `vehicle-command` at `a4b43c1` and go-ble `8c5522f54333`.
+  firmware, the pinned NimBLE, `vehicle-command` at `a4b43c1` and go-ble `8c5522f54333`, plus field
+  operation (the firmware has commanded the vehicle with Write Commands since its initial
+  implementation).
 - **RX subscription type (notifications instead of indications)**: `protocol.md` names the `0x213`
   characteristic without prescribing notifications or indications. `ble.go:345` subscribes with
   `ind = true`. On Linux, go-ble then writes `0x0002` to the CCCD without consulting the
-  characteristic's properties (`linux/gatt/client.go:290-302`), confirms each indication before its
-  handler runs (`linux/att/client.go:560-569`) and drops notifications for that subscription
-  (`client.go:379-395`); on macOS it ignores the flag and lets CoreBluetooth choose. This firmware
+  characteristic's properties (`linux/gatt/client.go:290-302`), confirms each indication without
+  waiting for its handler (`linux/att/client.go:560-569`) and drops notifications for that
+  subscription (`linux/gatt/client.go:379-395`); on macOS it ignores the flag and lets
+  CoreBluetooth choose. This firmware
   discovers the CCCD and writes `0x0001` (notifications) with a Write Request
   (`BleClient::on_dsc_disc()`); readiness requires that write to succeed (`on_subscribe_write()`).
   The `BLE_GAP_EVENT_NOTIFY_RX` handler accepts notifications and indications alike, and NimBLE
@@ -115,17 +118,21 @@ The reference is written in Go, relying on goroutines, runtime-managed channels,
 - **No client-initiated MTU exchange**: After subscribing, `ble.go:349` calls `ExchangeMTU` and
   sizes its blocks from the result, falling back to the default MTU on error. This firmware only
   sets the preferred MTU (`ble_att_set_preferred_mtu(247)` in `main/ble_client.cpp`,
-  `CONFIG_BT_NIMBLE_ATT_PREFERRED_MTU=247`) and never calls `ble_gattc_exchange_mtu`. The ESP-IDF
-  6.1 NimBLE host does not start the exchange by itself; only NimBLE's sample apps and tests call
-  it. The write payload therefore stays at the 20-byte default (`tk::kBleDefaultWritePayload`)
-  unless the vehicle starts the exchange, in which case `BLE_GAP_EVENT_MTU` raises it to
-  `min(MTU - 3, 244)` (`tk::ble_write_payload_for_mtu`). Whether the vehicle starts it has not been
-  measured, because the MTU log line is DEBUG-only. Consequence if it does not: a 741 B
-  `RoutableMessage` plus its length prefix needs 38 chunks instead of 4, so TX takes longer and
-  occupies more of the link; correctness is unaffected because the frame is length-prefixed.
-  Status: inherited, unchanged by this record; initiating the exchange is a separate wire change.
-  Evidence status: static source reading of the firmware and of the pinned NimBLE in the ESP-IDF
-  6.1 image.
+  `CONFIG_BT_NIMBLE_ATT_PREFERRED_MTU=247`) and never calls `ble_gattc_exchange_mtu`. Nothing
+  linked into this firmware starts the exchange: in the ESP-IDF 6.1 NimBLE tree only sample apps and
+  tests call it. The Exchange MTU Request is a client-role PDU, so only the vehicle, acting as an ATT
+  client towards this firmware, could start it instead; `BLE_GAP_EVENT_MTU` would then raise the
+  write payload to `min(MTU - 3, 244)` (`tk::ble_write_payload_for_mtu`). Measured on a paired
+  ESP32-S3 at 1.6.3-dev.7 with verbose RX logging (`/diag?verbose=1`, about 15 minutes of VCSEC
+  traffic while the vehicle slept): every notification was 4 or 20 bytes and longer frames arrived
+  as runs of 20-byte chunks, so the ATT MTU stayed at the 23-byte default and the vehicle did not
+  start the exchange. Consequence: the write payload stays at the 20-byte default
+  (`tk::kBleDefaultWritePayload`), so a 741 B `RoutableMessage` plus its length prefix needs 38
+  chunks, 10 ms apart, instead of 4. TX takes longer and occupies more of the link; correctness is
+  unaffected because the frame is length-prefixed. Status: inherited, unchanged by this record;
+  initiating the exchange is a separate wire change that needs hardware validation. Evidence
+  status: static source reading of the firmware and of the pinned NimBLE in the ESP-IDF 6.1 image,
+  plus that field measurement (one vehicle, infotainment asleep).
 
 ### 2.1 Framing Edge Cases and Protocol Deviations (F8)
 
