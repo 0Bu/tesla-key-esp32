@@ -125,8 +125,9 @@ The reference is written in Go, relying on goroutines, runtime-managed channels,
   neither starts nor accepts the exchange. It only sets the preferred MTU
   (`ble_att_set_preferred_mtu(247)` in `main/ble_client.cpp`, `CONFIG_BT_NIMBLE_ATT_PREFERRED_MTU=247`)
   and never calls `ble_gattc_exchange_mtu`; nothing linked into it does (in the ESP-IDF 6.1 NimBLE
-  tree only sample apps and tests call it, and the link map discards it). A vehicle-initiated
-  exchange cannot take effect either: `CONFIG_BT_NIMBLE_ROLE_PERIPHERAL=n` disables the NimBLE GATT
+  tree only sample apps and tests call it, and the link map discards it). Since the ESP-IDF 5.5
+  update, a vehicle-initiated exchange cannot take effect either: `CONFIG_BT_NIMBLE_ROLE_PERIPHERAL=n`
+  disables the NimBLE GATT
   server (`BT_NIMBLE_GATT_SERVER` depends on it, so `MYNEWT_VAL(BLE_GATTS)` is 0), and the
   `BLE_ATT_OP_MTU_REQ` handler is compiled only with `BLE_GATTS` (`ble_att.c`), so such a request
   is dropped (see the next entry). The ATT MTU is therefore 23 by construction, and the
@@ -142,17 +143,22 @@ The reference is written in Go, relying on goroutines, runtime-managed channels,
   separate wire change that needs hardware validation. Evidence status: static source reading of
   the firmware, its effective configuration and the pinned NimBLE in the ESP-IDF 6.1 image, plus
   the field log above.
-- **No ATT server (inbound ATT requests unanswered)**: go-ble answers an ATT request it does not
-  serve with an Error Response "Request Not Supported" (`linux/att/client.go:490-497`, `:585`). This
-  firmware is built without the NimBLE GATT server (`CONFIG_BT_NIMBLE_ROLE_PERIPHERAL=n`). For an
+- **No ATT server (inbound ATT requests unanswered)**: go-ble answers a peer's Exchange MTU Request
+  directly (`linux/att/client.go:542-551`); any other inbound request goes to its unbuffered
+  response channel (`:553-556`) and is answered with "Request Not Supported" once go-ble's own next
+  request is pending (`:490-497`), while its RX loop blocks until then. This firmware is built
+  without the NimBLE GATT server (`CONFIG_BT_NIMBLE_ROLE_PERIPHERAL=n`). For an
   inbound request without a handler, NimBLE logs "ATT handler not found" at INFO (hidden by the WARN
   level of the NimBLE log tag) and, without `BLE_GATTS`, frees the PDU without any Error Response
   (`ble_att_rx_handle_unknown_request()` in `ble_att.c`). Consequence: a vehicle request (for
   example an Exchange MTU Request) would time out on the vehicle side after the 30 s ATT
   transaction timeout, after which a strictly compliant peer sends no further ATT PDUs on that
   bearer, notifications included, so the link would look connected but stay silent. This has not
-  been observed: the field log above shows notifications arriving continuously. Status: inherited
-  from the initial implementation, unchanged by this record. Evidence status: static source reading
+  been observed: the field log above shows notifications arriving continuously. Status: inherited,
+  unchanged by this record. `CONFIG_BT_NIMBLE_ROLE_PERIPHERAL=n` dates from the initial
+  implementation, but the gating of the server-side request handlers on `BLE_GATTS` arrived with
+  the ESP-IDF 5.5 update (`707eb35`); the NimBLE of the earlier ESP-IDF 5.3 toolchain still
+  dispatched the MTU request. Evidence status: static source reading
   of the effective configuration and the pinned NimBLE; whether the vehicle ever sends an ATT
   request to this firmware has not been measured.
 
