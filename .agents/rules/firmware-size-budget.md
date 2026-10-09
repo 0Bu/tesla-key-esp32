@@ -13,7 +13,12 @@ It complements the canonical repository policy in [`../../AGENTS.md`](../../AGEN
 
 ## 2. Strict Reviewed Maxima Baselines
 
-- [`scripts/firmware-size-baseline.json`](../../scripts/firmware-size-baseline.json) records byte-exact reviewed maxima (`maxElfTotal`, `maxFlashCodeAndRodata`, `maxStaticUsed`, `maxBss`, `maxIramUsed`) for all four targets (`esp32`, `esp32s3`, `esp32c3`, `esp32c6`).
+- [`scripts/firmware-size-baseline.json`](../../scripts/firmware-size-baseline.json) records
+  byte-exact reviewed maxima for all four targets (`esp32`, `esp32s3`, `esp32c3`, `esp32c6`):
+  the six maxima `maxUnsignedApp`, `maxElfTotal`, `maxFlashCodeAndRodata`, `maxStaticUsed`,
+  `maxBss` and `maxIramUsed`. A measured value above its maximum fails.
+- `memoryModel`, `staticCapacity` and `iramCapacity` are exact identity fields, not maxima: any
+  change, up or down, fails.
 - CI enforces this budget fail-closed via `scripts/report-firmware-size.py --enforce-budget`.
 - Any PR adding firmware code must verify that the footprint stays within reviewed limits.
 
@@ -21,6 +26,14 @@ It complements the canonical repository policy in [`../../AGENTS.md`](../../AGEN
 
 - Before committing or pushing changes touching `main/`, `CMakeLists.txt`, `sdkconfig*`, or `partitions.csv`:
   Run `./scripts/check-firmware-size.sh` to measure the footprint locally inside the pinned ESP-IDF Docker container.
-- If intentional code growth exceeds the existing baseline while remaining safely within partition headroom:
-  Run `./scripts/check-firmware-size.sh --update-baseline` to refresh `scripts/firmware-size-baseline.json` and include the updated baseline in the same commit.
+- Two explicit, mutually exclusive ratchet directions update the baseline from an authoritative
+  build. Include the updated `scripts/firmware-size-baseline.json` in the same commit as the change
+  that moved the footprint:
+  - Intentional, reviewed growth that stays safely within partition headroom: run
+    `./scripts/check-firmware-size.sh --update-baseline`. It only raises (each maximum becomes
+    `max(old, measured)`) and never lowers a maximum.
+  - A reviewed size reduction: run `./scripts/check-firmware-size.sh --tighten-baseline` to lock
+    it in. It sets every maximum of the checked target to the measured actual, and refuses if any
+    metric grew or `memoryModel`, `staticCapacity` or `iramCapacity` changed (the build runs with
+    budget enforcement, so the old baseline must pass first).
 - Never commit or push a change where `esp32c6` unsigned size exceeds 1,966,080 Bytes.
