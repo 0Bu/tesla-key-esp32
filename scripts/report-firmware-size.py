@@ -4,10 +4,13 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import dataclasses
 import json
 import pathlib
 import sys
 import tempfile
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from typing import Any
 
@@ -165,38 +168,24 @@ def image_usage(data: dict[str, Any], target: str, unsigned_size: int) -> ImageU
     return ImageUsage(unsigned_size, total, flash_code_rodata)
 
 
-def load_budget(path: pathlib.Path, target: str) -> dict[str, Any]:
-    root = json.loads(path.read_text(encoding="utf-8"))
-    expected_top = {"schemaVersion", "baselineKind", "toolchain", "targets"}
-    if not isinstance(root, dict) or set(root) != expected_top:
-        raise ValueError(f"firmware size baseline fields must be exactly {sorted(expected_top)}")
-    if root.get("schemaVersion") != 2 or root.get("baselineKind") != "reviewed-maxima":
-        raise ValueError("firmware size baseline must be schemaVersion 2 reviewed-maxima")
-    if root.get("toolchain") != "ESP-IDF v6.1":
-        raise ValueError("firmware size baseline must be bound to ESP-IDF v6.1")
-    targets = root.get("targets")
-    if not isinstance(targets, dict) or set(targets) != set(TARGETS):
-        raise ValueError("firmware size baseline must contain exactly the four supported targets")
-    budget = targets.get(target)
-    expected = {
-        "memoryModel",
-        "staticCapacity",
-        "maxStaticUsed",
-        "maxBss",
-        "iramCapacity",
-        "maxIramUsed",
-        "maxUnsignedApp",
-        "maxElfTotal",
-        "maxFlashCodeAndRodata",
-    }
-    if not isinstance(budget, dict) or set(budget) != expected:
-        raise ValueError(f"firmware size baseline for {target} has invalid fields")
-    if budget["memoryModel"] not in {"split", "unified"}:
-        raise ValueError(f"firmware size baseline for {target} has invalid memoryModel")
-    for key in expected - {"memoryModel"}:
-        value = budget[key]
-        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-            raise ValueError(f"firmware size baseline {target}.{key} must be a non-negative integer")
+# Reviewed maxima in scripts/firmware-size-baseline.json, with the label budget_failures() reports
+# for each. The other baseline fields are exact identities: any change fails the check.
+MAXIMUM_LABELS = {
+    "maxUnsignedApp": "unsigned app binary",
+    "maxElfTotal": "ELF image footprint",
+    "maxFlashCodeAndRodata": "flash code + rodata",
+    "maxStaticUsed": "static RAM used",
+    "maxBss": "static .bss",
+    "maxIramUsed": "IRAM used",
+}
+BASELINE_MAXIMA = tuple(MAXIMUM_LABELS)
+BASELINE_IDENTITY = ("memoryModel", "staticCapacity", "iramCapacity")
+BASELINE_FIELDS = frozenset(BASELINE_IDENTITY) | frozenset(BASELINE_MAXIMA)
+UPDATE_MODES = ("raise", "tighten")
+
+
+def require_budget_invariants(budget: dict[str, Any], target: str) -> None:
+    """Ordering invariants of one baseline entry, shared by load_budget and updated_budget."""
     if not 0 <= budget["maxBss"] <= budget["maxStaticUsed"] <= budget["staticCapacity"]:
         raise ValueError(
             f"firmware size baseline {target} must satisfy maxBss <= maxStaticUsed <= staticCapacity"
@@ -215,14 +204,49 @@ def load_budget(path: pathlib.Path, target: str) -> dict[str, Any]:
             f"firmware size baseline {target} must satisfy "
             "0 < maxFlashCodeAndRodata <= maxElfTotal <= maxUnsignedApp"
         )
+
+
+def load_budget(path: pathlib.Path, target: str) -> dict[str, Any]:
+    root = json.loads(path.read_text(encoding="utf-8"))
+    expected_top = {"schemaVersion", "baselineKind", "toolchain", "targets"}
+    if not isinstance(root, dict) or set(root) != expected_top:
+        raise ValueError(f"firmware size baseline fields must be exactly {sorted(expected_top)}")
+    if root.get("schemaVersion") != 2 or root.get("baselineKind") != "reviewed-maxima":
+        raise ValueError("firmware size baseline must be schemaVersion 2 reviewed-maxima")
+    if root.get("toolchain") != "ESP-IDF v6.1":
+        raise ValueError("firmware size baseline must be bound to ESP-IDF v6.1")
+    targets = root.get("targets")
+    if not isinstance(targets, dict) or set(targets) != set(TARGETS):
+        raise ValueError("firmware size baseline must contain exactly the four supported targets")
+    budget = targets.get(target)
+    expected = BASELINE_FIELDS
+    if not isinstance(budget, dict) or set(budget) != expected:
+        raise ValueError(f"firmware size baseline for {target} has invalid fields")
+    if budget["memoryModel"] not in {"split", "unified"}:
+        raise ValueError(f"firmware size baseline for {target} has invalid memoryModel")
+    for key in expected - {"memoryModel"}:
+        value = budget[key]
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError(f"firmware size baseline {target}.{key} must be a non-negative integer")
+    require_budget_invariants(budget, target)
     return budget
 
 
-def budget_failures(
-    data: dict[str, Any], target: str, unsigned_size: int, budget: dict[str, Any]
+def measured_maxima(memory: MemoryUsage, image: ImageUsage) -> dict[str, int]:
+    """The measured value behind each reviewed maximum."""
+    return {
+        "maxUnsignedApp": image.unsigned_app,
+        "maxElfTotal": image.elf_total,
+        "maxFlashCodeAndRodata": image.flash_code_rodata,
+        "maxStaticUsed": memory.static_used,
+        "maxBss": memory.bss,
+        "maxIramUsed": memory.iram_used,
+    }
+
+
+def baseline_failures(
+    memory: MemoryUsage, image: ImageUsage, budget: dict[str, Any]
 ) -> list[str]:
-    memory = memory_usage(data, target)
-    image = image_usage(data, target, unsigned_size)
     failures: list[str] = []
     if memory.model != budget["memoryModel"]:
         failures.append(f"memory model changed from {budget['memoryModel']} to {memory.model}")
@@ -232,17 +256,57 @@ def budget_failures(
     ):
         if actual != budget[key]:
             failures.append(f"{label} changed: baseline={budget[key]} actual={actual}")
-    for label, actual, key in (
-        ("unsigned app binary", image.unsigned_app, "maxUnsignedApp"),
-        ("ELF image footprint", image.elf_total, "maxElfTotal"),
-        ("flash code + rodata", image.flash_code_rodata, "maxFlashCodeAndRodata"),
-        ("static RAM used", memory.static_used, "maxStaticUsed"),
-        ("static .bss", memory.bss, "maxBss"),
-        ("IRAM used", memory.iram_used, "maxIramUsed"),
-    ):
-        if actual > budget[key]:
-            failures.append(f"{label} grew beyond reviewed baseline: max={budget[key]} actual={actual}")
+    measured = measured_maxima(memory, image)
+    for key in BASELINE_MAXIMA:
+        if measured[key] > budget[key]:
+            failures.append(
+                f"{MAXIMUM_LABELS[key]} grew beyond reviewed baseline: "
+                f"max={budget[key]} actual={measured[key]}"
+            )
     return failures
+
+
+def budget_failures(
+    data: dict[str, Any], target: str, unsigned_size: int, budget: dict[str, Any]
+) -> list[str]:
+    memory = memory_usage(data, target)
+    image = image_usage(data, target, unsigned_size)
+    return baseline_failures(memory, image, budget)
+
+
+def updated_budget(
+    budget: dict[str, Any],
+    memory: MemoryUsage,
+    image: ImageUsage,
+    mode: str,
+    *,
+    target: str = "<target>",
+) -> dict[str, Any]:
+    """Return a new baseline entry after a reviewed size change; never mutates `budget`.
+
+    raise:   every maximum becomes max(old, measured), so a baseline can only grow.
+    tighten: every maximum becomes the measured value, but only for a build that passes the
+             current baseline, so a reduction is locked in and growth or a changed capacity or
+             memory model is refused.
+    The identity fields (memoryModel, staticCapacity, iramCapacity) are copied unchanged.
+    """
+    if mode not in UPDATE_MODES:
+        raise ValueError(f"baseline update mode must be one of {UPDATE_MODES}, got {mode!r}")
+    if not isinstance(budget, dict) or set(budget) != BASELINE_FIELDS:
+        raise ValueError(f"firmware size baseline for {target} has invalid fields")
+    measured = measured_maxima(memory, image)
+    if mode == "tighten":
+        failures = baseline_failures(memory, image, budget)
+        if failures:
+            raise ValueError(
+                f"refusing to tighten firmware size baseline for {target}: " + "; ".join(failures)
+            )
+        maxima = measured
+    else:
+        maxima = {key: max(budget[key], measured[key]) for key in BASELINE_MAXIMA}
+    updated = {key: maxima.get(key, budget[key]) for key in budget}
+    require_budget_invariants(updated, target)
+    return updated
 
 
 def render(
@@ -361,6 +425,258 @@ def with_region(data: dict[str, Any], name: str, **changes: Any) -> dict[str, An
     raise AssertionError(f"self-test fixture has no {name} region")
 
 
+# Where each reviewed maximum's measured value lives, for the baseline-update self-test.
+MEASURED_ATTRIBUTES = {
+    "maxUnsignedApp": ("image", "unsigned_app"),
+    "maxElfTotal": ("image", "elf_total"),
+    "maxFlashCodeAndRodata": ("image", "flash_code_rodata"),
+    "maxStaticUsed": ("memory", "static_used"),
+    "maxBss": ("memory", "bss"),
+    "maxIramUsed": ("memory", "iram_used"),
+}
+
+
+def with_measured(
+    memory: MemoryUsage, image: ImageUsage, **values: int
+) -> tuple[MemoryUsage, ImageUsage]:
+    """Copy a measured build with the measured value behind some maxima replaced."""
+    changes: dict[str, dict[str, int]] = {"memory": {}, "image": {}}
+    for key, value in values.items():
+        owner, attribute = MEASURED_ATTRIBUTES[key]
+        changes[owner][attribute] = value
+    return (
+        dataclasses.replace(memory, **changes["memory"]),
+        dataclasses.replace(image, **changes["image"]),
+    )
+
+
+def check_baseline_update(
+    update: Callable[..., dict[str, Any]],
+    memory: MemoryUsage,
+    image: ImageUsage,
+    exact: dict[str, Any],
+) -> None:
+    """Assert the raise/tighten contract of one `updated_budget` implementation.
+
+    `exact` is a baseline whose maxima equal the measured build. Raises AssertionError on any
+    deviation, so the same block proves the real implementation and rejects deliberately wrong
+    ones (see baseline_update_self_test).
+    """
+
+    def snapshot(value: dict[str, Any]) -> dict[str, Any]:
+        return json.loads(json.dumps(value))
+
+    def refusal(call: Callable[[], Any]) -> str:
+        try:
+            call()
+        except ValueError as exc:
+            return str(exc)
+        raise AssertionError("update was not refused")
+
+    assert measured_maxima(memory, image) == {key: exact[key] for key in BASELINE_MAXIMA}, (
+        "self-test fixture must sit exactly on its baseline"
+    )
+    # Distinct headroom per maximum, so swapped or skipped keys cannot cancel out.
+    roomy = dict(exact)
+    for index, key in enumerate(BASELINE_MAXIMA):
+        roomy[key] = exact[key] + 100 * (len(BASELINE_MAXIMA) - index)
+    roomy_before = snapshot(roomy)
+
+    # raise: a smaller build leaves every maximum alone.
+    result = update(roomy, memory, image, "raise")
+    assert roomy == roomy_before, "raise mutated its input budget"
+    assert result is not roomy, "raise returned its input budget instead of a new one"
+    assert result == roomy, "raise changed or lowered a maximum for a smaller build"
+    # raise: exactly one grown metric raises exactly that maximum.
+    for key in BASELINE_MAXIMA:
+        grown_memory, grown_image = with_measured(memory, image, **{key: roomy[key] + 1})
+        result = update(roomy, grown_memory, grown_image, "raise")
+        assert roomy == roomy_before, f"raise mutated its input budget while growing {key}"
+        assert result == {**roomy, key: roomy[key] + 1}, f"raise did not raise exactly {key}"
+        assert list(result) == list(roomy), "raise reordered the baseline fields"
+
+    # tighten: a smaller build locks in every maximum, each key on its own.
+    for key in BASELINE_MAXIMA:
+        loose = {**exact, key: exact[key] + 500}
+        loose_before = snapshot(loose)
+        result = update(loose, memory, image, "tighten")
+        assert loose == loose_before, f"tighten mutated its input budget while tightening {key}"
+        assert result == exact, f"tighten did not set {key} to the measured value"
+    result = update(roomy, memory, image, "tighten")
+    assert roomy == roomy_before, "tighten mutated its input budget"
+    assert result is not roomy, "tighten returned its input budget instead of a new one"
+    assert result == exact, "tighten did not set every maximum to the measured value"
+    assert list(result) == list(roomy), "tighten reordered the baseline fields"
+    for key in BASELINE_IDENTITY:
+        assert result[key] == roomy[key], f"tighten changed the exact identity field {key}"
+    require_budget_invariants(result, "esp32")
+    assert update(exact, memory, image, "tighten") == exact, (
+        "tighten refused a build that sits exactly on the baseline"
+    )
+
+    # tighten: growth of any one metric is refused and names exactly that metric.
+    for key in BASELINE_MAXIMA:
+        grown_memory, grown_image = with_measured(memory, image, **{key: roomy[key] + 1})
+        message = refusal(lambda: update(roomy, grown_memory, grown_image, "tighten"))
+        assert roomy == roomy_before, f"refused tighten mutated its input budget ({key})"
+        assert MAXIMUM_LABELS[key] in message, f"tighten refusal does not name {key}: {message}"
+        assert message.count("grew beyond") == 1, f"tighten refusal names extra metrics: {message}"
+    # ... and a build that grew every metric names all of them.
+    everything = {key: exact[key] + 1 for key in BASELINE_MAXIMA}
+    all_grown_memory, all_grown_image = with_measured(memory, image, **everything)
+    message = refusal(lambda: update(exact, all_grown_memory, all_grown_image, "tighten"))
+    for key in BASELINE_MAXIMA:
+        assert MAXIMUM_LABELS[key] in message, f"tighten refusal omits {key}: {message}"
+    # ... and so is a changed memory model or capacity, even for an otherwise smaller build.
+    for changed, expected_message in (
+        (dataclasses.replace(memory, model="unified"), "memory model changed"),
+        (
+            dataclasses.replace(memory, static_capacity=memory.static_capacity + 1),
+            "static RAM capacity changed",
+        ),
+        (
+            dataclasses.replace(memory, iram_capacity=memory.iram_capacity + 1),
+            "IRAM capacity changed",
+        ),
+    ):
+        message = refusal(lambda: update(roomy, changed, image, "tighten"))
+        assert expected_message in message, f"tighten accepted an identity change: {message}"
+        assert roomy == roomy_before, "refused tighten mutated its input budget (identity)"
+
+    # Any other mode is an error, never a silent raise or tighten.
+    for invalid_mode in ("shrink", "", "RAISE", None):
+        refusal(lambda: update(roomy, memory, image, invalid_mode))
+    # A result that would break the baseline invariants is an error in both modes.
+    no_flash = dataclasses.replace(image, flash_code_rodata=0)
+    for mode in UPDATE_MODES:
+        message = refusal(
+            lambda: update({**exact, "maxFlashCodeAndRodata": 0}, memory, no_flash, mode)
+        )
+        assert "0 < maxFlashCodeAndRodata" in message, message
+    overfull = dataclasses.replace(memory, static_used=exact["staticCapacity"] + 1)
+    message = refusal(lambda: update(exact, overfull, image, "raise"))
+    assert "maxStaticUsed <= staticCapacity" in message, message
+    # Unknown or missing baseline fields are rejected before anything is computed.
+    for malformed in (
+        {key: value for key, value in exact.items() if key != "maxBss"},
+        {**exact, "sourceSha": "0" * 40},
+    ):
+        refusal(lambda: update(malformed, memory, image, "raise"))
+
+
+@contextlib.contextmanager
+def patched(name: str, replacement: Callable[..., Any]) -> Iterator[None]:
+    """Swap one module-level function for the duration of a canary."""
+    original = globals()[name]
+    globals()[name] = replacement
+    try:
+        yield
+    finally:
+        globals()[name] = original
+
+
+def baseline_update_self_test(
+    memory: MemoryUsage, image: ImageUsage, exact: dict[str, Any]
+) -> None:
+    check_baseline_update(updated_budget, memory, image, exact)
+
+    # Mutation canaries: each deliberately wrong implementation must be rejected by the very
+    # assertions that prove the real one, otherwise the baseline-update checks prove nothing.
+    def unchecked(budget: dict[str, Any], mem: MemoryUsage, img: ImageUsage) -> dict[str, Any]:
+        return {**budget, **measured_maxima(mem, img)}
+
+    def tighten_as_raise(budget, mem, img, mode):
+        return updated_budget(budget, mem, img, "raise" if mode == "tighten" else mode)
+
+    def raise_that_lowers(budget, mem, img, mode):
+        if mode == "raise":
+            return unchecked(budget, mem, img)
+        return updated_budget(budget, mem, img, mode)
+
+    def tighten_without_refusal(budget, mem, img, mode):
+        if mode == "tighten":
+            return unchecked(budget, mem, img)
+        return updated_budget(budget, mem, img, mode)
+
+    def tighten_ignores_identity(budget, mem, img, mode):
+        masked = dataclasses.replace(
+            mem,
+            model=budget["memoryModel"],
+            static_capacity=budget["staticCapacity"],
+            iram_capacity=budget["iramCapacity"],
+        )
+        return updated_budget(budget, masked, img, mode)
+
+    def tighten_names_first_only(budget, mem, img, mode):
+        try:
+            return updated_budget(budget, mem, img, mode)
+        except ValueError as exc:
+            raise ValueError(str(exc).split("; ")[0]) from None
+
+    def mutates_input(budget, mem, img, mode):
+        result = updated_budget(budget, mem, img, mode)
+        budget.update(result)
+        return budget
+
+    def unknown_mode_is_raise(budget, mem, img, mode):
+        return updated_budget(budget, mem, img, mode if mode in UPDATE_MODES else "raise")
+
+    def rewrites_identity_field(budget, mem, img, mode):
+        result = updated_budget(budget, mem, img, mode)
+        return {**result, "staticCapacity": result["staticCapacity"] + 1}
+
+    canaries: dict[str, Callable[..., dict[str, Any]]] = {
+        "tighten behaves like raise": tighten_as_raise,
+        "raise lowers maxima": raise_that_lowers,
+        "tighten skips the growth refusal": tighten_without_refusal,
+        "tighten ignores a capacity or memory model change": tighten_ignores_identity,
+        "tighten refusal names only the first metric": tighten_names_first_only,
+        "update mutates and returns its input budget": mutates_input,
+        "unknown mode is treated as raise": unknown_mode_is_raise,
+        "update rewrites an identity field": rewrites_identity_field,
+    }
+    for key in BASELINE_MAXIMA:
+        for skipped_mode in UPDATE_MODES:
+
+            def leaves_key_unchanged(budget, mem, img, mode, key=key, skipped_mode=skipped_mode):
+                result = updated_budget(budget, mem, img, mode)
+                if mode == skipped_mode:
+                    result[key] = budget[key]
+                return result
+
+            canaries[f"{skipped_mode} leaves {key} unchanged"] = leaves_key_unchanged
+
+    escaped = []
+    for name, broken in canaries.items():
+        try:
+            check_baseline_update(broken, memory, image, exact)
+        except (AssertionError, ValueError):
+            continue
+        escaped.append(name)
+
+    # Mutations of the helpers the real implementation reuses.
+    def compare_inclusively(mem, img, budget):
+        measured = measured_maxima(mem, img)
+        return [f"{key} at its limit" for key in BASELINE_MAXIMA if measured[key] >= budget[key]]
+
+    for name, helper, replacement in (
+        ("tighten never refuses", "baseline_failures", lambda mem, img, budget: []),
+        (
+            "tighten refuses a build exactly on the baseline",
+            "baseline_failures",
+            compare_inclusively,
+        ),
+        ("result invariants are not checked", "require_budget_invariants", lambda b, t: None),
+    ):
+        with patched(helper, replacement):
+            try:
+                check_baseline_update(updated_budget, memory, image, exact)
+            except (AssertionError, ValueError):
+                continue
+        escaped.append(name)
+    assert not escaped, f"baseline update canaries escaped: {escaped}"
+
+
 def self_test() -> None:
     # esp32-shaped split report: code in IRAM, data/bss in DRAM, two flash regions.
     fixture = size_report(
@@ -465,6 +781,11 @@ def self_test() -> None:
             f"growth mutation escaped reviewed baseline: {expected_message}"
         )
 
+    # Reviewed baseline updates (check-firmware-size.sh --update-baseline / --tighten-baseline).
+    baseline_update_self_test(
+        memory_usage(fixture, "esp32"), image_usage(fixture, "esp32", 180000), budget
+    )
+
     # Every raw json2 number must be a non-negative integer before it reaches a baseline.
     for name in ("Flash Code", "IRAM", "DRAM"):
         for key in ("total", "used", "free"):
@@ -558,18 +879,63 @@ def self_test() -> None:
         assert image_usage(json.loads(path.read_text(encoding="utf-8")), "esp32", 180000).elf_total == 173000
         baseline = pathlib.Path(temp_dir) / "baseline.json"
         targets = {target: dict(budget) for target in TARGETS}
-        baseline.write_text(
-            json.dumps(
-                {
-                    "schemaVersion": 2,
-                    "baselineKind": "reviewed-maxima",
-                    "toolchain": "ESP-IDF v6.1",
-                    "targets": targets,
-                }
-            ),
-            encoding="utf-8",
-        )
+
+        def write_baseline(entry: dict[str, Any]) -> None:
+            baseline.write_text(
+                json.dumps(
+                    {
+                        "schemaVersion": 2,
+                        "baselineKind": "reviewed-maxima",
+                        "toolchain": "ESP-IDF v6.1",
+                        "targets": {**targets, "esp32": entry},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+        write_baseline(budget)
         assert load_budget(baseline, "esp32") == budget
+        # An updated entry is a complete baseline entry: it round-trips through the file format.
+        loose = {**budget, "maxBss": budget["maxBss"] + 100}
+        loose["maxIramUsed"] = budget["maxIramUsed"] + 100
+        locked = updated_budget(
+            loose,
+            memory_usage(fixture, "esp32"),
+            image_usage(fixture, "esp32", 180000),
+            "tighten",
+            target="esp32",
+        )
+        write_baseline(locked)
+        assert load_budget(baseline, "esp32") == budget
+        # load_budget and updated_budget share one set of ordering invariants.
+        for broken, expected_message in (
+            (
+                {**budget, "maxBss": budget["maxStaticUsed"] + 1},
+                "maxBss <= maxStaticUsed <= staticCapacity",
+            ),
+            (
+                {**budget, "maxIramUsed": budget["iramCapacity"] + 1},
+                "maxIramUsed <= iramCapacity",
+            ),
+            (
+                {**budget, "maxFlashCodeAndRodata": 0},
+                "0 < maxFlashCodeAndRodata <= maxElfTotal",
+            ),
+            (
+                {**budget, "maxElfTotal": budget["maxUnsignedApp"] + 1},
+                "maxElfTotal <= maxUnsignedApp",
+            ),
+        ):
+            write_baseline(broken)
+            try:
+                load_budget(baseline, "esp32")
+            except ValueError as exc:
+                assert expected_message in str(exc), exc
+            else:
+                raise AssertionError(
+                    f"baseline breaking an invariant was accepted: {expected_message}"
+                )
+        write_baseline(budget)
         wrong_toolchain = json.loads(baseline.read_text(encoding="utf-8"))
         wrong_toolchain["toolchain"] = "ESP-IDF v5.5.5"
         baseline.write_text(json.dumps(wrong_toolchain), encoding="utf-8")
