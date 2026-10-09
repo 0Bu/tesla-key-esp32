@@ -34,7 +34,7 @@ The architecture is implemented according to the reference specifications:
 
 | Component | Reference Implementation | Firmware Implementation | Key Characteristics |
 |---|---|---|---|
-| **RX/TX Framing** | `pkg/connector/ble/ble.go:67-127` | `main/logic/rx_framing.hpp` (`tk::RxFramer`, `tk::build_ble_tx_frame`, `tk::is_well_formed_ble_frame`) | Deterministic 2-byte big-endian length prefix. RX discards the buffer on inter-chunk timeout (3000 ms as configured by `tk::CommandRunner`; see departures) or invalid length (0 or > 2048). No heuristic scanning or speculative probe loops. TX writes the tesla-ble builder output unchanged and refuses a structurally malformed frame. |
+| **RX/TX Framing** | `pkg/connector/ble/ble.go:67-127` | `main/logic/rx_framing.hpp` (`tk::RxFramer`, `tk::build_ble_tx_frame`, `tk::is_well_formed_ble_frame`) | Deterministic 2-byte big-endian length prefix. RX discards the buffer on inter-chunk timeout (3000 ms as configured by `tk::CommandRunner`; see departures) or invalid length (0 or > 2048). No heuristic scanning or speculative probe loops. TX writes the tesla-ble builder output unchanged and refuses a structurally malformed frame. The ATT transport underneath departs from the reference: TX chunks are Write Commands, RX uses notifications, and the firmware never initiates the MTU exchange (see §2). |
 | **Message Dispatch** | `internal/dispatcher/dispatcher.go` | `main/logic/ble_dispatcher.hpp` (`tk::BleDispatcher`), `main/vehicle_telemetry.cpp` | Route response to matching outstanding request keyed by UUID and domain. For command responses, unauthenticated/orphan responses are dropped fail-closed before telemetry callbacks. Passive telemetry frames (VCSEC `VehicleStatus`) update sleep and status caches before command routing. VCSEC responses are exempt from UUID matching only when request UUID is empty. |
 | **Anti-Replay Window** | `internal/dispatcher/dispatcher.go:245-315` | `main/logic/ble_dispatcher.hpp`, `main/vehicle_telemetry.cpp` | Monotonic counter tracking per outstanding request and via upstream `Peer::validate_response_counter()`. Plaintext CarServer responses with foreign UUIDs are dropped before telemetry processing. |
 | **Session & Auth State** | `internal/authentication/signer.go` | `main/logic/session_state.hpp` (`tk::SessionTracker`), `main/vehicle_commands.cpp` | Counter progression follows `max(local, reported)`. Zero in-house crypto (P-256 ECDH, HMAC and AES-GCM remain upstream in `TeslaBLE::Client`/`Peer`). Durable NVS format and keys are strictly preserved. |
@@ -74,6 +74,58 @@ The reference is written in Go, relying on goroutines, runtime-managed channels,
   not require link-layer security on the VCSEC/infotainment characteristics (`protocol.md` lists no
   link-security requirement). Evidence status: static source reading plus a bench boot/scan on an
   S3; the link-level hold test with the car still open is pending.
+- **TX ATT write type (Write Command instead of "write with response")**: `protocol.md` tells
+  clients to use the BLE library's "write with response" API for the `0x212` characteristic, and
+  `ble.go:121` (`WriteCharacteristic(..., false)`; go-ble `linux/gatt/client.go:249-252`) sends
+  every block as an ATT Write Request, so a vehicle ATT Error Response reaches the caller. This
+  firmware sends each chunk as an ATT Write Command (`ble_gattc_write_no_rsp_flat` in
+  `BleClient::write_chunk_()`, `main/ble_client.cpp`), 10 ms apart (`BleClient::write()`). The
+  choice dates from the initial implementation and has no recorded rationale. Neither tesla-ble
+  (`BleAdapter::write` only reports "enqueued") nor NimBLE (`ble_gattc_write_flat` already writes
+  the CCCD) forces it. Consequence: a successful `write()` only means NimBLE queued the PDUs. A
+  chunk the vehicle's ATT layer discards (for example with Insufficient Authentication 0x05 or
+  Insufficient Encryption 0x0F) raises no error. The command then fails only through
+  `tk::CommandRunner`'s 7 s response or 5 s step timeout and its retries, which looks the same as
+  radio loss, and the transmit-completed `Wake` (N1) carries no vehicle-side acceptance at all. The
+  vehicle accepts Write Commands in field operation, but Tesla documents no support for them.
+  Status: inherited, unchanged by this record. Aligning is a separate wire change that needs
+  hardware validation: NimBLE does not serialize client requests, so each chunk would wait for its
+  Write Response through a bounded, generation-keyed completion, adding about one connection
+  interval per chunk. No test pins the write type. Evidence status: static source reading of the
+  firmware, the pinned NimBLE, `vehicle-command` at `a4b43c1` and go-ble `8c5522f54333`.
+- **RX subscription type (notifications instead of indications)**: `protocol.md` names the `0x213`
+  characteristic without prescribing notifications or indications. `ble.go:345` subscribes with
+  `ind = true`. On Linux, go-ble then writes `0x0002` to the CCCD without consulting the
+  characteristic's properties (`linux/gatt/client.go:290-302`), confirms each indication before its
+  handler runs (`linux/att/client.go:560-569`) and drops notifications for that subscription
+  (`client.go:379-395`); on macOS it ignores the flag and lets CoreBluetooth choose. This firmware
+  discovers the CCCD and writes `0x0001` (notifications) with a Write Request
+  (`BleClient::on_dsc_disc()`); readiness requires that write to succeed (`on_subscribe_write()`).
+  The `BLE_GAP_EVENT_NOTIFY_RX` handler accepts notifications and indications alike, and NimBLE
+  confirms an indication itself. Rationale: the vehicle delivers notifications under `0x0001`, and
+  integrity rests on the application layer rather than on ATT confirmation: the length-prefix
+  framer with its 3 s inter-chunk timeout, AES-GCM tags, request-UUID matching, and response
+  timeouts with retries. An overflow of the fixed RX slot or of the deferred queue drops the link
+  fail-closed. Indications would allow one PDU per confirmation round trip and would still not be
+  end-to-end, because both go-ble and NimBLE confirm before the application consumes the data.
+  Consequence: an RX PDU lost inside the host is recovered only through the framer and command
+  timeouts. Pinned only incidentally, by the `on_dsc_disc` program fingerprint in
+  `test/test_runtime_boundary_contract.py`. Evidence status: static source reading plus field
+  operation; the vehicle's advertised properties for `0x212`/`0x213` have not been read on hardware.
+- **No client-initiated MTU exchange**: After subscribing, `ble.go:349` calls `ExchangeMTU` and
+  sizes its blocks from the result, falling back to the default MTU on error. This firmware only
+  sets the preferred MTU (`ble_att_set_preferred_mtu(247)` in `main/ble_client.cpp`,
+  `CONFIG_BT_NIMBLE_ATT_PREFERRED_MTU=247`) and never calls `ble_gattc_exchange_mtu`. The ESP-IDF
+  6.1 NimBLE host does not start the exchange by itself; only NimBLE's sample apps and tests call
+  it. The write payload therefore stays at the 20-byte default (`tk::kBleDefaultWritePayload`)
+  unless the vehicle starts the exchange, in which case `BLE_GAP_EVENT_MTU` raises it to
+  `min(MTU - 3, 244)` (`tk::ble_write_payload_for_mtu`). Whether the vehicle starts it has not been
+  measured, because the MTU log line is DEBUG-only. Consequence if it does not: a 741 B
+  `RoutableMessage` plus its length prefix needs 38 chunks instead of 4, so TX takes longer and
+  occupies more of the link; correctness is unaffected because the frame is length-prefixed.
+  Status: inherited, unchanged by this record; initiating the exchange is a separate wire change.
+  Evidence status: static source reading of the firmware and of the pinned NimBLE in the ESP-IDF
+  6.1 image.
 
 ### 2.1 Framing Edge Cases and Protocol Deviations (F8)
 
