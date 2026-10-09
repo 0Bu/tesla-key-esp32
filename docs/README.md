@@ -513,7 +513,7 @@ Full threat model, Flash Encryption / Secure Boot: [SECURITY.md](SECURITY.md).
 | Signing | ECDSA P-256 (key in NVS) |
 | BLE library | [yoziru/tesla-ble](https://github.com/yoziru/tesla-ble) v5.2.0 + ordered repository patch series |
 | BLE stack | NimBLE |
-| Fragment size | Negotiated ATT MTU − 3 (20-byte default until the vehicle starts an MTU exchange; the firmware does not initiate one and the vehicle was not observed to, see ADR-0005; max 244) |
+| Fragment size | 20 bytes: the firmware neither starts nor accepts an MTU exchange, so the ATT MTU stays at 23 ([ADR-0005 §2](adr/0005-tesla-ble-seam.md#2-platform-forced-departures-and-reference-deviations)); the negotiated-MTU path (MTU − 3, max 244) is unreachable in this build |
 | HTTP server | `esp_http_server` :80 |
 
 ## License

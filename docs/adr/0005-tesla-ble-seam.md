@@ -34,7 +34,7 @@ The architecture is implemented according to the reference specifications:
 
 | Component | Reference Implementation | Firmware Implementation | Key Characteristics |
 |---|---|---|---|
-| **RX/TX Framing** | `pkg/connector/ble/ble.go:67-127` | `main/logic/rx_framing.hpp` (`tk::RxFramer`, `tk::build_ble_tx_frame`, `tk::is_well_formed_ble_frame`) | Deterministic 2-byte big-endian length prefix. RX discards the buffer on inter-chunk timeout (3000 ms as configured by `tk::CommandRunner`; see departures) or invalid length (0 or > 2048). No heuristic scanning or speculative probe loops. TX writes the tesla-ble builder output unchanged and refuses a structurally malformed frame. The ATT transport underneath departs from the reference: TX chunks are Write Commands, RX uses notifications, and the firmware never initiates the MTU exchange (see §2). |
+| **RX/TX Framing** | `pkg/connector/ble/ble.go:67-127` | `main/logic/rx_framing.hpp` (`tk::RxFramer`, `tk::build_ble_tx_frame`, `tk::is_well_formed_ble_frame`) | Deterministic 2-byte big-endian length prefix. RX discards the buffer on inter-chunk timeout (3000 ms as configured by `tk::CommandRunner`; see departures) or invalid length (0 or > 2048). No heuristic scanning or speculative probe loops. TX writes the tesla-ble builder output unchanged and refuses a structurally malformed frame. The ATT transport underneath departs from the reference: TX chunks are Write Commands, RX uses notifications, the ATT MTU stays at 23 because the firmware neither starts nor accepts an MTU exchange, and inbound ATT requests go unanswered (see §2). |
 | **Message Dispatch** | `internal/dispatcher/dispatcher.go` | `main/logic/ble_dispatcher.hpp` (`tk::BleDispatcher`), `main/vehicle_telemetry.cpp` | Route response to matching outstanding request keyed by UUID and domain. For command responses, unauthenticated/orphan responses are dropped fail-closed before telemetry callbacks. Passive telemetry frames (VCSEC `VehicleStatus`) update sleep and status caches before command routing. VCSEC responses are exempt from UUID matching only when request UUID is empty. |
 | **Anti-Replay Window** | `internal/dispatcher/dispatcher.go:245-315` | `main/logic/ble_dispatcher.hpp`, `main/vehicle_telemetry.cpp` | Monotonic counter tracking per outstanding request and via upstream `Peer::validate_response_counter()`. Plaintext CarServer responses with foreign UUIDs are dropped before telemetry processing. |
 | **Session & Auth State** | `internal/authentication/signer.go` | `main/logic/session_state.hpp` (`tk::SessionTracker`), `main/vehicle_commands.cpp` | Counter progression follows `max(local, reported)`. Zero in-house crypto (P-256 ECDH, HMAC and AES-GCM remain upstream in `TeslaBLE::Client`/`Peer`). Durable NVS format and keys are strictly preserved. |
@@ -89,50 +89,72 @@ The reference is written in Go, relying on goroutines, runtime-managed channels,
   radio loss, and the transmit-completed `Wake` (N1) carries no vehicle-side acceptance at all. The
   vehicle accepts Write Commands in field operation, but Tesla documents no support for them.
   Status: inherited, unchanged by this record. Aligning is a separate wire change that needs
-  hardware validation: NimBLE does not serialize client requests, so each chunk would wait for its
-  Write Response through a bounded, generation-keyed completion, adding about one connection
-  interval per chunk. No test pins the write type. Evidence status: static source reading of the
+  hardware validation: NimBLE queues ATT requests while one is outstanding (`client_att_busy` in
+  `ble_att_cmd.c`), but each Write Request is a GATT procedure bounded by
+  `CONFIG_BT_NIMBLE_GATT_MAX_PROCS`, so each chunk would wait for its Write Response through a
+  bounded, generation-keyed completion, adding about one connection interval per chunk. No test
+  pins the write type. Evidence status: static source reading of the
   firmware, the pinned NimBLE, `vehicle-command` at `a4b43c1` and go-ble `8c5522f54333`, plus field
   operation (the firmware has commanded the vehicle with Write Commands since its initial
   implementation).
 - **RX subscription type (notifications instead of indications)**: `protocol.md` names the `0x213`
   characteristic without prescribing notifications or indications. `ble.go:345` subscribes with
   `ind = true`. On Linux, go-ble then writes `0x0002` to the CCCD without consulting the
-  characteristic's properties (`linux/gatt/client.go:290-302`), confirms each indication without
-  waiting for its handler (`linux/att/client.go:560-569`) and drops notifications for that
-  subscription (`linux/gatt/client.go:379-395`); on macOS it ignores the flag and lets
-  CoreBluetooth choose. This firmware
-  discovers the CCCD and writes `0x0001` (notifications) with a Write Request
+  characteristic's properties (`linux/gatt/client.go:290-302`, written in `setHandlers` at
+  `:318-342`), confirms each indication without waiting for its handler
+  (`linux/att/client.go:560-569`) and drops notifications for that subscription
+  (`linux/gatt/client.go:379-395`); on macOS it ignores the flag and lets CoreBluetooth choose. This
+  firmware discovers the CCCD and writes `0x0001` (notifications) with a Write Request
   (`BleClient::on_dsc_disc()`); readiness requires that write to succeed (`on_subscribe_write()`).
   The `BLE_GAP_EVENT_NOTIFY_RX` handler accepts notifications and indications alike, and NimBLE
-  confirms an indication itself. Rationale: the vehicle delivers notifications under `0x0001`, and
-  integrity rests on the application layer rather than on ATT confirmation: the length-prefix
-  framer with its 3 s inter-chunk timeout, AES-GCM tags, request-UUID matching, and response
-  timeouts with retries. An overflow of the fixed RX slot or of the deferred queue drops the link
-  fail-closed. Indications would allow one PDU per confirmation round trip and would still not be
-  end-to-end, because both go-ble and NimBLE confirm before the application consumes the data.
+  confirms an indication itself once that synchronous callback returns. Rationale: the vehicle
+  delivers notifications under `0x0001`, and integrity rests on the application layer rather than
+  on ATT confirmation: the length-prefix framer with its 3 s inter-chunk timeout, AES-GCM tags,
+  request-UUID matching, and response timeouts with retries. An overflow of the fixed RX slot or of
+  the deferred queue drops the link fail-closed. Indications would allow one PDU per confirmation
+  round trip and would still not be end-to-end: go-ble confirms without waiting for its handler,
+  and this firmware's callback only copies the PDU into the deferred queue that `vehicle_loop`
+  parses later.
   Consequence: an RX PDU lost inside the host is recovered only through the framer and command
   timeouts. Pinned only incidentally, by the `on_dsc_disc` program fingerprint in
   `test/test_runtime_boundary_contract.py`. Evidence status: static source reading plus field
   operation; the vehicle's advertised properties for `0x212`/`0x213` have not been read on hardware.
-- **No client-initiated MTU exchange**: After subscribing, `ble.go:349` calls `ExchangeMTU` and
-  sizes its blocks from the result, falling back to the default MTU on error. This firmware only
-  sets the preferred MTU (`ble_att_set_preferred_mtu(247)` in `main/ble_client.cpp`,
-  `CONFIG_BT_NIMBLE_ATT_PREFERRED_MTU=247`) and never calls `ble_gattc_exchange_mtu`. Nothing
-  linked into this firmware starts the exchange: in the ESP-IDF 6.1 NimBLE tree only sample apps and
-  tests call it. The Exchange MTU Request is a client-role PDU, so only the vehicle, acting as an ATT
-  client towards this firmware, could start it instead; `BLE_GAP_EVENT_MTU` would then raise the
-  write payload to `min(MTU - 3, 244)` (`tk::ble_write_payload_for_mtu`). Measured on a paired
-  ESP32-S3 at 1.6.3-dev.7 with verbose RX logging (`/diag?verbose=1`, about 15 minutes of VCSEC
-  traffic while the vehicle slept): every notification was 4 or 20 bytes and longer frames arrived
-  as runs of 20-byte chunks, so the ATT MTU stayed at the 23-byte default and the vehicle did not
-  start the exchange. Consequence: the write payload stays at the 20-byte default
-  (`tk::kBleDefaultWritePayload`), so a 741 B `RoutableMessage` plus its length prefix needs 38
-  chunks, 10 ms apart, instead of 4. TX takes longer and occupies more of the link; correctness is
-  unaffected because the frame is length-prefixed. Status: inherited, unchanged by this record;
-  initiating the exchange is a separate wire change that needs hardware validation. Evidence
-  status: static source reading of the firmware and of the pinned NimBLE in the ESP-IDF 6.1 image,
-  plus that field measurement (one vehicle, infotainment asleep).
+- **No MTU exchange (ATT MTU fixed at 23)**: After subscribing, `ble.go:349` calls `ExchangeMTU`
+  and sizes its blocks from the result, falling back to the default MTU on error; go-ble also
+  answers a peer's Exchange MTU Request (`linux/att/client.go:542-551`, `:574-591`). This firmware
+  neither starts nor accepts the exchange. It only sets the preferred MTU
+  (`ble_att_set_preferred_mtu(247)` in `main/ble_client.cpp`, `CONFIG_BT_NIMBLE_ATT_PREFERRED_MTU=247`)
+  and never calls `ble_gattc_exchange_mtu`; nothing linked into it does (in the ESP-IDF 6.1 NimBLE
+  tree only sample apps and tests call it, and the link map discards it). A vehicle-initiated
+  exchange cannot take effect either: `CONFIG_BT_NIMBLE_ROLE_PERIPHERAL=n` disables the NimBLE GATT
+  server (`BT_NIMBLE_GATT_SERVER` depends on it, so `MYNEWT_VAL(BLE_GATTS)` is 0), and the
+  `BLE_ATT_OP_MTU_REQ` handler is compiled only with `BLE_GATTS` (`ble_att.c`), so such a request
+  is dropped (see the next entry). The ATT MTU is therefore 23 by construction, and the
+  `BLE_GAP_EVENT_MTU` path that would raise the write payload to `min(MTU - 3, 244)`
+  (`tk::ble_write_payload_for_mtu`) is unreachable in this build. A field log is consistent with
+  that: on a paired ESP32-S3 at 1.6.3-dev.7, verbose RX logging (`/diag?verbose=1`, about
+  15 minutes of VCSEC traffic while the vehicle slept) showed only 4- and 20-byte notifications,
+  with longer frames arriving as runs of 20-byte chunks. Consequence: every write uses the 20-byte
+  payload (`tk::kBleDefaultWritePayload`), so a 741 B `RoutableMessage` plus its length prefix
+  needs 38 chunks, 10 ms apart, instead of 4. TX takes longer and occupies more of the link;
+  correctness is unaffected because the frame is length-prefixed. Status: inherited, unchanged by
+  this record; having the firmware start the exchange (its GATT client side is compiled) is a
+  separate wire change that needs hardware validation. Evidence status: static source reading of
+  the firmware, its effective configuration and the pinned NimBLE in the ESP-IDF 6.1 image, plus
+  the field log above.
+- **No ATT server (inbound ATT requests unanswered)**: go-ble answers an ATT request it does not
+  serve with an Error Response "Request Not Supported" (`linux/att/client.go:490-497`, `:585`). This
+  firmware is built without the NimBLE GATT server (`CONFIG_BT_NIMBLE_ROLE_PERIPHERAL=n`). For an
+  inbound request without a handler, NimBLE logs "ATT handler not found" at INFO (hidden by the WARN
+  level of the NimBLE log tag) and, without `BLE_GATTS`, frees the PDU without any Error Response
+  (`ble_att_rx_handle_unknown_request()` in `ble_att.c`). Consequence: a vehicle request (for
+  example an Exchange MTU Request) would time out on the vehicle side after the 30 s ATT
+  transaction timeout, after which a strictly compliant peer sends no further ATT PDUs on that
+  bearer, notifications included, so the link would look connected but stay silent. This has not
+  been observed: the field log above shows notifications arriving continuously. Status: inherited
+  from the initial implementation, unchanged by this record. Evidence status: static source reading
+  of the effective configuration and the pinned NimBLE; whether the vehicle ever sends an ATT
+  request to this firmware has not been measured.
 
 ### 2.1 Framing Edge Cases and Protocol Deviations (F8)
 
