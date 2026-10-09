@@ -147,10 +147,12 @@ The suite also has gates outside the single pure-logic translation unit:
   charging-current feedback, atomic crash dismissal, whole-snapshot manifest publication, post-unlock
   OTA string materialization, sticky response construction, early owner release, partial-handle
   cleanup, persist-before-restart ordering, the real `/status` and selected `/vehicle_data` emitters,
-  cache-only climate and drive getters (the climate freshness stamp written inside the guarded
-  epoch branch, the exact `get_vehicle_climate` decision inputs and its lock-failure clear-out-and-
-  return-false path, the pairing reset of all four freshness values: charge and climate tick plus
-  generation), the drive companion poll gated by `wake_poll_refreshes_drive` and ordered after the
+  cache-only charge, climate and drive getters (the climate freshness stamp written inside the
+  guarded epoch branch, the exact `get_vehicle_climate` decision inputs and its lock-failure
+  clear-out-and-return-false path, the `get_charge_state` snapshot inside `cache_mutex_`, its exact
+  single-write window/age inputs, post-unlock verdict, stale return-false branch and single success
+  return, the shared `active_window_now_` inputs, the pairing reset of all four freshness values:
+  charge and climate tick plus generation), the drive companion poll gated by `wake_poll_refreshes_drive` and ordered after the
   charge poll, the rising-edge `tele_idx` reset, the shared `build_drive_state_poll`, post-unlock
   heap-adoption/runner-exception diagnostics, the production MQTT
   publish/sequencer and all seven state builders, the default-closed runtime-admission facade, the
