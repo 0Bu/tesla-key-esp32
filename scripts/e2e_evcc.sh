@@ -8,8 +8,9 @@
 # return well-formed data with NO timeouts.
 #
 # Usage:
-#   scripts/e2e_evcc.sh                 # read-only: status, /api/proxy/1/version, vehicle_data,
-#                                       #   body_controller (safe)
+#   scripts/e2e_evcc.sh                 # read-only: status, /api/proxy/1/version, vehicle_data
+#                                       #   (charge_state burst, climate_state + drive_state
+#                                       #   cache-only), body_controller (safe)
 #   RUN_COMMANDS=1 scripts/e2e_evcc.sh  # + wake_up, set_charging_amps, set_charge_limit (save/restore),
 #                                       #   door_lock/door_unlock (negative role test — requires an
 #                                       #   explicit refusal; ambiguous authentication failures fail)
@@ -499,8 +500,53 @@ echo "  latency: avg=${AVGMS}ms max=${MAXMS}ms   transport failures: ${FAILS}/${
 [ "${FAILS:-1}" = 0 ] && ok "0 timeouts/transport failures over ${ITER} polls" || bad "${FAILS} timeout(s)/transport failure(s)"
 [ "${STALE:-0}" != 0 ] && echo "  NOTE  ${STALE}/${ITER} returned result:false (stale cache — car asleep); well-formed & ~0ms, evcc-safe (it reads charge_state, not result)"
 # evcc parses these fields; all must be present and numeric (battery_range as float)
-for fld in charging_state battery_level charge_limit_soc charger_power charge_rate charge_amps battery_range; do
+for fld in charging_state battery_level charge_limit_soc charger_power charge_rate charge_amps battery_range charge_energy_added minutes_to_full_charge; do
   echo "$SAMPLE" | grep -q "\"$fld\"" && ok "field present: $fld" || bad "field MISSING: $fld"
+done
+
+# ── 2b. climate_state + drive_state — cache-only domain selectors ───────────
+# evcc reads climate_state.is_preconditioning and drive_state.odometer. Both are served from the
+# firmware cache (no BLE round-trip, no wake). Outside the active window a valid last-known climate
+# cache is served with 200, and a valid drive cache with an odometer is always 200. HTTP 503 (or
+# "result":false) means the cache was never filled since boot/pairing, an in-window climate is
+# older than 300 s, or no odometer was reported; evcc logs an error and treats climate as inactive
+# (odometer as unavailable).
+hdr "2b. GET vehicle_data?endpoints=climate_state / drive_state  (cache-only, no wake)"
+for dom in climate_state drive_state; do
+  case "$dom" in
+    climate_state) pat='"is_preconditioning":\(true\|false\)'; fld="is_preconditioning" ;;
+    *)             pat='"odometer":[0-9]'; fld="odometer" ;;
+  esac
+  DRES="$(kex '
+VIN='"$ESC_VIN"'; BASE='"$ESC_BASE"'; TO='"$TIMEOUT"'; DOM='"$dom"'
+host=$(echo "$BASE" | sed -e "s,^http://,," -e "s,/.*$,," -e "s,:.*$,,"); port=$(echo "$BASE" | sed -n "s,^http://[^:]*:\([0-9]*\).*,\1,p"); [ -z "$port" ] && port=80
+raw=$(printf "GET /api/1/vehicles/%s/vehicle_data?endpoints=%s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n" "$VIN" "$DOM" "$host" | nc -w $TO "$host" "$port" 2>/dev/null)
+code=$(echo "$raw" | head -n1 | cut -d" " -f2)
+b=$(echo "$raw" | sed -e "1,/^\r\{0,1\}$/d")
+echo "CODE=$code"
+echo "BODY=$b"
+')"
+  DCODE=$(echo "$DRES" | sed -n 's/^CODE=//p' | head -n1)
+  DBODY=$(echo "$DRES" | sed -n 's/^BODY=//p' | head -n1)
+  echo "  $dom: HTTP ${DCODE:-none}  ->  $DBODY"
+  if [ -z "$DCODE" ] || [ -z "$DBODY" ]; then
+    bad "$dom: transport failure or empty body"
+  elif [ "$DCODE" = "400" ]; then
+    bad "$dom: HTTP 400 — firmware lacks the $dom selector"
+  elif [ "$DCODE" != "200" ] && [ "$DCODE" != "503" ]; then
+    bad "$dom: unexpected HTTP $DCODE"
+  elif echo "$DBODY" | grep -q "\"$dom\"" && echo "$DBODY" | grep -q "$pat"; then
+    ok "$dom: $fld present (HTTP $DCODE)"
+    if [ "$DCODE" = "503" ] || ! echo "$DBODY" | grep -q '"result":true'; then
+      case "$dom" in
+        climate_state) eff="climate inactive" ;;
+        *)             eff="odometer unavailable" ;;
+      esac
+      echo "  NOTE  $dom: cache unfilled/stale/unavailable (car idle or asleep); evcc logs an error ($eff)"
+    fi
+  else
+    bad "$dom: body lacks the $dom object or the $fld field (HTTP $DCODE)"
+  fi
 done
 
 # ── 3. body_controller_state — live BLE read ──────────────────────────

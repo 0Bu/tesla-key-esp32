@@ -12,6 +12,9 @@ inline constexpr double kMilesToKm = 1.609344;
 // Distance miles -> km (e.g. battery range).
 inline constexpr double mi_to_km(double miles) { return miles * kMilesToKm; }
 
+// Distance km -> miles (the /api evcc odometer stays in miles).
+inline constexpr double km_to_mi(double km) { return km / kMilesToKm; }
+
 // Speed mph -> km/h (e.g. charge rate). Same factor; named for call-site clarity.
 inline constexpr double mph_to_kmh(double mph) { return mph * kMilesToKm; }
 

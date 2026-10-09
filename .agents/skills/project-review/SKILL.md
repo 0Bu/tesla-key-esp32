@@ -141,8 +141,9 @@ Treat a violation of any of these as a real finding.
   every boot is exactly what would make a restart loop keep a parked car awake. **Never** gate on "car observed awake" — that is self-perpetuating (our polling keeps
   the MCU awake → window never closes → the car can never sleep). A parked, idle car must be
   left to reach sleep. Anything that re-opens the window on a loop (e.g. a reboot loop) is a
-  bug because it defeats this. The wake/bootstrap one-shot ChargeState poll may run outside the
-  window with `NO_WAKE_SKIP`; it does not create a recurring polling window.
+  bug because it defeats this. The wake/bootstrap one-shot (one ChargeState poll plus one
+  companion DriveState poll, both `NO_WAKE_SKIP`) may run outside the window; it does not create
+  a recurring polling window.
 
 ### Link state (single source of truth)
 - `VehicleController::link_state()` is the **single source of truth**, shared by the web UI
@@ -317,12 +318,15 @@ Treat a violation of any of these as a real finding.
   **cache** and never blocks. Idle cache may be old so reads do not wake the car. Within five
   minutes of a command, or while cached Charging/Starting has live contact <60 s old, charge cache
   must be ≤30 s old or return HTTP 503. After charging contact expires with no recent command,
-  valid last-known cache may be served again. Selected climate data uses last-known cached
-  preconditioning presence (`valid && has_preconditioning`); reported false is available.
-  All five climate fields remain typed, with zero/false fallbacks for optional HVAC/temperature
-  fields. Omission of `endpoints` selects both domains; each selected domain must be available for
-  success. Unsupported, duplicate, empty or malformed selectors return 400. Reads never poll or
-  wake the car.
+  valid last-known cache may be served again. Selected climate data needs a valid cache, and inside
+  the active window one no older than 300 s (`tk::kActiveClimateStateMaxAgeS`), because evcc uses
+  `is_preconditioning` to hold minimum current; outside the window last-known is served. An
+  unreported `is_preconditioning` is emitted as false (TeslaBleHttpProxy semantics). All five
+  climate fields remain typed, with zero/false fallbacks for optional HVAC/temperature fields.
+  Selected `drive_state` needs a valid cache with a reported odometer, served last-known in miles.
+  Omission of `endpoints` selects charge and climate (not drive); each selected domain must be
+  available for success. Unsupported, duplicate, empty or malformed selectors return 400. Reads
+  never poll or wake the car.
 - `set_charging_amps` requires an integer body, serializes action ACK + explicit ChargeState
   readback, and succeeds only on a fresh exact amp match. Missing/mismatching readback and Tesla
   rejection are HTTP 502. Replayed CarServer responses return before callbacks/FIFO completion

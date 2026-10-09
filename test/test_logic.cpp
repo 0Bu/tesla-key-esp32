@@ -819,6 +819,12 @@ static void test_units() {
     // Odometer arrives in hundredths of a mile: 1,234,567 -> 12,345.67 mi -> km.
     CHECK_NEAR(tk::odo_hundredths_mi_to_km(1234567.0), 12345.67 * 1.609344);
     CHECK_NEAR(tk::odo_hundredths_mi_to_km(0.0), 0.0);
+
+    // km -> miles (the /api evcc odometer stays in miles).
+    CHECK_NEAR(tk::km_to_mi(0.0), 0.0);
+    CHECK(tk::km_to_mi(tk::kMilesToKm) == 1.0);
+    CHECK_NEAR(tk::km_to_mi(160.9344), 100.0);
+    for (double mi : {0.0, 1.0, 12345.67, 250000.0}) CHECK_NEAR(tk::km_to_mi(tk::mi_to_km(mi)), mi);
 }
 
 // Build a LinkInputs snapshot tersely.
@@ -2455,6 +2461,7 @@ static void test_vehicle_data() {
     ClimateStateResult cl1{};
     cl1.valid = true;
     cl1.is_climate_on = true;
+    cl1.has_preconditioning = true;
     cl1.is_preconditioning = true;
     cl1.inside_temp = 21.5f;
     cl1.outside_temp = 5.0f;
@@ -2471,7 +2478,6 @@ static void test_vehicle_data() {
         "outside_temp=5\n"
         "driver_temp_setting=22\n"));
 
-    cl1.has_preconditioning = true;
     const auto climate_data = tk::vehicle_climate_data(cl1);
     CHECK(climate_data.valid && climate_data.has_preconditioning);
     CHECK(climate_data.is_climate_on && climate_data.is_preconditioning);
@@ -2494,31 +2500,98 @@ static void test_vehicle_data() {
         "outside_temp=0\n"
         "driver_temp_setting=0\n"));
 
-    // A reported false is available; temperatures alone and invalid snapshots are not.
-    CHECK(!tk::vehicle_climate_available(cl2));
-    cl2.valid = true;
-    cl2.has_inside = true;
-    CHECK(!tk::vehicle_climate_available(cl2));
-    cl2.has_preconditioning = true;
-    CHECK(tk::vehicle_climate_available(cl2));
-    cl2.is_preconditioning = true;
-    CHECK(tk::vehicle_climate_available(cl2));
-    cl2.valid = false;
-    CHECK(!tk::vehicle_climate_available(cl2));
-    for (bool charge_selected : {false, true}) {
-        for (bool climate_selected : {false, true}) {
-            for (bool charge_ok : {false, true}) {
-                for (bool climate_ok : {false, true}) {
-                    tk::VehicleDataEndpoints ep{charge_selected, climate_selected, false};
-                    const bool expected = (charge_selected || climate_selected) &&
-                        (!charge_selected || charge_ok) && (!climate_selected || climate_ok);
-                    CHECK(tk::vehicle_data_available(ep, charge_ok, climate_ok) == expected);
-                    ep.has_unsupported = true;
-                    CHECK(!tk::vehicle_data_available(ep, charge_ok, climate_ok));
-                }
-            }
+    // An unreported is_preconditioning emits false (TeslaBleHttpProxy GetIsPreconditioning());
+    // only a present-AND-true field emits true.
+    {
+        tk::VehicleClimateData absent{};
+        absent.valid = true;
+        absent.is_preconditioning = true;   // stale value behind an absent presence flag
+        CollectEmitter ea;
+        tk::emit_vehicle_climate_state(absent, ea);
+        CHECK(ea.out.find("is_preconditioning=false\n") != std::string::npos);
+        absent.has_preconditioning = true;
+        CollectEmitter er;
+        tk::emit_vehicle_climate_state(absent, er);
+        CHECK(er.out.find("is_preconditioning=true\n") != std::string::npos);
+        absent.is_preconditioning = false;
+        CollectEmitter ef;
+        tk::emit_vehicle_climate_state(absent, ef);
+        CHECK(ef.out.find("is_preconditioning=false\n") != std::string::npos);
+    }
+
+    // Climate freshness: invalid never usable; outside the window last-known at any age;
+    // inside it a sample must exist and be <= kActiveClimateStateMaxAgeS.
+    CHECK(tk::kActiveClimateStateMaxAgeS == 300);
+    CHECK(!tk::climate_cache_usable(false, false, false, 0));
+    CHECK(!tk::climate_cache_usable(false, true, true, 0));
+    CHECK(tk::climate_cache_usable(true, false, false, 0));
+    CHECK(tk::climate_cache_usable(true, false, true, 86400));
+    CHECK(!tk::climate_cache_usable(true, true, false, 0));
+    CHECK(tk::climate_cache_usable(true, true, true, 0));
+    CHECK(tk::climate_cache_usable(true, true, true, 300));
+    CHECK(!tk::climate_cache_usable(true, true, true, 301));
+    CHECK(tk::climate_cache_usable(true, true, true, tk::kActiveClimateStateMaxAgeS));
+    CHECK(!tk::climate_cache_usable(true, true, true, tk::kActiveClimateStateMaxAgeS + 1));
+
+    // drive_state: odometer in MILES, 0 when absent; projection never copies shift_state.
+    {
+        DriveStateResult dr{};
+        dr.valid = true;
+        dr.shift_state = "D";
+        dr.has_odometer = true;
+        dr.odometer_km = 1609.344f;   // 1000 mi
+        const auto dd = tk::vehicle_drive_data(dr);
+        CHECK(dd.valid && dd.has_odometer);
+        CHECK(dd.odometer_km == 1609.344f);
+        CollectEmitter ed;
+        tk::emit_vehicle_drive_state(dd, ed);
+        CHECK(golden_eq(ed.out, "odometer=1000\n"));
+        CHECK(tk::vehicle_drive_available(dd));
+
+        CollectEmitter ed2;
+        tk::emit_vehicle_drive_state(tk::VehicleDriveData{}, ed2);
+        CHECK(golden_eq(ed2.out, "odometer=0\n"));
+        // Absent odometer emits 0 even if a stale km value is left in the struct.
+        tk::VehicleDriveData stale{true, false, 1609.344f};
+        CollectEmitter ed3;
+        tk::emit_vehicle_drive_state(stale, ed3);
+        CHECK(golden_eq(ed3.out, "odometer=0\n"));
+
+        CHECK(!tk::vehicle_drive_available(tk::VehicleDriveData{}));
+        CHECK(!tk::vehicle_drive_available(stale));
+        CHECK(!tk::vehicle_drive_available(tk::VehicleDriveData{false, true, 1609.344f}));
+        CHECK(tk::vehicle_drive_available(tk::VehicleDriveData{true, true, 1609.344f}));
+    }
+
+    // Endpoint selection factories.
+    {
+        CHECK(tk::VehicleDataEndpoints{}.empty() && !tk::VehicleDataEndpoints{}.has_unsupported);
+        CHECK(tk::VehicleDataEndpoints::of(0).empty());
+        const auto all = tk::VehicleDataEndpoints::of(
+            tk::kVehicleDataCharge | tk::kVehicleDataClimate | tk::kVehicleDataDrive);
+        CHECK(all.charge_state && all.climate_state && all.drive_state && !all.has_unsupported && !all.empty());
+        const auto drive_only = tk::VehicleDataEndpoints::of(tk::kVehicleDataDrive);
+        CHECK(!drive_only.charge_state && !drive_only.climate_state && drive_only.drive_state && !drive_only.empty());
+        const auto bad = tk::VehicleDataEndpoints::unsupported();
+        CHECK(bad.empty() && bad.has_unsupported);
+        CHECK(sizeof(tk::VehicleDataEndpoints) == 1);
+    }
+
+    // vehicle_data_available: every selected domain must be ok; empty/unsupported never.
+    for (unsigned mask = 0; mask < 8; ++mask) {
+        for (unsigned oks = 0; oks < 8; ++oks) {
+            const bool charge_ok = oks & 1, climate_ok = oks & 2, drive_ok = oks & 4;
+            auto ep = tk::VehicleDataEndpoints::of(mask);
+            const bool expected = mask != 0 &&
+                (!(mask & tk::kVehicleDataCharge) || charge_ok) &&
+                (!(mask & tk::kVehicleDataClimate) || climate_ok) &&
+                (!(mask & tk::kVehicleDataDrive) || drive_ok);
+            CHECK(tk::vehicle_data_available(ep, charge_ok, climate_ok, drive_ok) == expected);
+            ep.has_unsupported = true;
+            CHECK(!tk::vehicle_data_available(ep, charge_ok, climate_ok, drive_ok));
         }
     }
+    CHECK(!tk::vehicle_data_available(tk::VehicleDataEndpoints::unsupported(), true, true, true));
     CHECK(tk::parse_vehicle_data_endpoints("cached=" + std::string(120, 'x')).has_unsupported == false);
     CHECK(tk::parse_vehicle_data_endpoints("cached=" + std::string(121, 'x')).has_unsupported);
     CHECK(tk::parse_vehicle_data_endpoint_list({}).has_unsupported);
@@ -2529,21 +2602,23 @@ static void test_vehicle_data() {
         auto ep = tk::parse_vehicle_data_endpoints("");
         CHECK(ep.charge_state && ep.climate_state && !ep.has_unsupported && !ep.empty());
 
-        // Bare empty query -> both
-        ep = tk::parse_vehicle_data_endpoints("");
-        CHECK(ep.charge_state && ep.climate_state && !ep.has_unsupported && !ep.empty());
+        // Empty pairs around an unrelated parameter -> default (charge + climate, not drive)
+        ep = tk::parse_vehicle_data_endpoints("&&");
+        CHECK(ep.charge_state && ep.climate_state && !ep.drive_state && !ep.has_unsupported && !ep.empty());
 
-        // Other query parameter without endpoints -> both
+        // Other query parameter without endpoints -> charge + climate, never drive
         ep = tk::parse_vehicle_data_endpoints("cached=1");
-        CHECK(ep.charge_state && ep.climate_state && !ep.has_unsupported && !ep.empty());
+        CHECK(ep.charge_state && ep.climate_state && !ep.drive_state && !ep.has_unsupported && !ep.empty());
+        ep = tk::parse_vehicle_data_endpoints("cached=1&");
+        CHECK(ep.charge_state && ep.climate_state && !ep.drive_state && !ep.has_unsupported && !ep.empty());
 
         // Explicit endpoints=charge_state (evcc standard poll)
         ep = tk::parse_vehicle_data_endpoints("endpoints=charge_state");
         CHECK(ep.charge_state && !ep.climate_state && !ep.has_unsupported && !ep.empty());
 
-        // Raw endpoints=charge_state
-        ep = tk::parse_vehicle_data_endpoints("endpoints=charge_state");
-        CHECK(ep.charge_state && !ep.climate_state && !ep.has_unsupported && !ep.empty());
+        // endpoints=charge_state with a trailing unrelated parameter -> charge only
+        ep = tk::parse_vehicle_data_endpoints("endpoints=charge_state&cached=1");
+        CHECK(ep.charge_state && !ep.climate_state && !ep.drive_state && !ep.has_unsupported && !ep.empty());
 
         // Selector-list parser used by the query parser
         ep = tk::parse_vehicle_data_endpoint_list("charge_state");
@@ -2590,9 +2665,28 @@ static void test_vehicle_data() {
             CHECK(ep.has_unsupported);
         }
 
+        // drive_state (evcc odometer): alone, in every delimiter form, and fail-closed variants
+        ep = tk::parse_vehicle_data_endpoints("endpoints=drive_state");
+        CHECK(!ep.charge_state && !ep.climate_state && ep.drive_state && !ep.has_unsupported && !ep.empty());
+        for (const char* all3 : {"charge_state;climate_state;drive_state", "drive_state,climate_state,charge_state",
+                                 "charge_state%3Bclimate_state%3Bdrive_state",
+                                 "drive_state%2cclimate_state%2ccharge_state",
+                                 " drive_state ; charge_state , climate_state "}) {
+            ep = tk::parse_vehicle_data_endpoint_list(all3);
+            CHECK(ep.charge_state && ep.climate_state && ep.drive_state && !ep.has_unsupported);
+        }
+        ep = tk::parse_vehicle_data_endpoints("endpoints=charge_state;drive_state");
+        CHECK(ep.charge_state && !ep.climate_state && ep.drive_state && !ep.has_unsupported);
+        for (const char* invalid : {"drive_state;drive_state", "drive_stat", "drive_state;", ";drive_state",
+                                    "drive_states", "Drive_State", "drive_state%3", "drive_state;unknown_state",
+                                    "charge_state;climate_state;drive_state%3B"}) {
+            ep = tk::parse_vehicle_data_endpoint_list(invalid);
+            CHECK(ep.has_unsupported && ep.empty());
+        }
+
         // Unsupported endpoint
         ep = tk::parse_vehicle_data_endpoints("endpoints=location_data");
-        CHECK(!ep.charge_state && !ep.climate_state && ep.has_unsupported && ep.empty());
+        CHECK(!ep.charge_state && !ep.climate_state && !ep.drive_state && ep.has_unsupported && ep.empty());
 
         // Mixed supported and unsupported
         ep = tk::parse_vehicle_data_endpoints("endpoints=charge_state;unknown_state");
@@ -3662,6 +3756,17 @@ static void test_wake_poll() {
         st.pending = true;
         CHECK(charge_poll_should_fire({true, true /* poll_cadence */, true, false}, st) == true);
         CHECK(st.pending == false);
+    }
+
+    // Drive-cache refresh rides only on the wake/bootstrap one-shot, never on the in-window cadence.
+    CHECK(wake_poll_refreshes_drive(false) == true);
+    CHECK(wake_poll_refreshes_drive(true) == false);
+    {
+        WakePollState st{};
+        st.pending = true;
+        const ChargePollGateInputs one_shot{true, false /* poll_cadence */, true, false};
+        CHECK(charge_poll_should_fire(one_shot, st) == true);
+        CHECK(wake_poll_refreshes_drive(one_shot.poll_cadence) == true);
     }
 
     // Unpaired device: gate prevents firing.

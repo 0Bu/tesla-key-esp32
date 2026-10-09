@@ -277,9 +277,17 @@ esp_err_t handle_command(GuardedReq rq) {
 
 // Emit a fixed cache snapshot without copying unrelated climate strings.
 static bool emit_cached_vehicle_climate(tk::StatusJsonEmitter& e) {
-    const tk::VehicleClimateData climate = g_vehicle->get_cached_vehicle_climate();
+    tk::VehicleClimateData climate{};
+    const bool ok = g_vehicle->get_vehicle_climate(climate);
     tk::emit_vehicle_climate_state(climate, e);
-    return tk::vehicle_climate_available(climate);
+    return ok;
+}
+
+// Same for the drive snapshot: only the odometer is emitted, never shift_state or other strings.
+static bool emit_cached_vehicle_drive(tk::StatusJsonEmitter& e) {
+    const tk::VehicleDriveData drive = g_vehicle->get_cached_vehicle_drive();
+    tk::emit_vehicle_drive_state(drive, e);
+    return tk::vehicle_drive_available(drive);
 }
 
 esp_err_t handle_vehicle_data(GuardedReq rq) {
@@ -298,6 +306,7 @@ esp_err_t handle_vehicle_data(GuardedReq rq) {
     ChargeStateResult cs{};
     const bool cs_ok = endpoints.charge_state && g_vehicle->get_charge_state(cs);
     bool cl_ok = false;
+    bool dr_ok = false;
 
     // Fleet API / TeslaBleHttpProxy envelope and the shared, host-tested emitters.
     // Cache failures still produce typed fields, but never a successful HTTP response.
@@ -316,8 +325,13 @@ esp_err_t handle_vehicle_data(GuardedReq rq) {
         cl_ok = emit_cached_vehicle_climate(e);
         e.obj_end();
     }
+    if (endpoints.drive_state) {
+        e.obj_begin("drive_state");
+        dr_ok = emit_cached_vehicle_drive(e);
+        e.obj_end();
+    }
     e.obj_end();
-    const bool ok = tk::vehicle_data_available(endpoints, cs_ok, cl_ok);
+    const bool ok = tk::vehicle_data_available(endpoints, cs_ok, cl_ok, dr_ok);
     e.boolean("result", ok);
     e.str("reason", ok ? "success" : "stale or unavailable");
     e.obj_end();

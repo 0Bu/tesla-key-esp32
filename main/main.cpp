@@ -260,7 +260,7 @@ static void ota_health_gate_task(void*) {
                           "it valid; the "
                           "next reboot rolls back to the previous firmware. Save a network or "
                           "logging setting that durably commits and reboots (POST /set_wifi, "
-                          "/set_mqtt, /set_syslog or the setup portal) to keep this image instead.",
+                          "/set_mqtt or /set_syslog) to keep this image instead.",
                      (unsigned) tk::kHealthGateCapS);
         }
         break;

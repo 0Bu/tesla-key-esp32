@@ -129,8 +129,9 @@ private:
 
 // If the running image is still ESP_OTA_IMG_PENDING_VERIFY (a fresh OTA the ~90 s health gate in
 // main.cpp hasn't confirmed yet), mark it valid NOW so it can't be rolled back. Call this before
-// a SuccessfulUserConfigCommit reboot after /set_wifi, /set_mqtt, /set_syslog or a setup-portal
-// save: the successful durable commit plus a healthy internal contiguous-heap sample proves the
+// a SuccessfulUserConfigCommit reboot after /set_wifi, /set_mqtt or /set_syslog (the setup-portal
+// save also calls it but is always refused: the portal never reaches Ready admission). The
+// successful durable commit plus a healthy internal contiguous-heap sample proves the
 // image runs, so that intentional restart inside the health window normally must not look like a
 // failed boot and revert the update. Identity mutations (/set_vin and /gen_keys) never call this
 // path and remain Stable-only. If the shared owner is busy or heap is already critical,

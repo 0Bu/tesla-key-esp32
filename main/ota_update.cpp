@@ -123,11 +123,13 @@ bool ota_config_restart_begin() {
     return s_operation_gate.try_begin(tk::OtaIdentityGateState::ConfigRestart);
 }
 
-// Confirm a still-unverified OTA image before a successful network/logging/setup commit reboot —
-// see the header. Mirrors the mark-valid path in main.cpp's ota_health_gate_task, but fires once the
-// durable commit AND the post-admission heap sample prove the runtime healthy. Identity mutations
-// deliberately never reach this path. A qualifying restart inside the health window must not
-// trigger a rollback unless the image is already critically heap-starved.
+// Confirm a still-unverified OTA image before a successful network/logging commit reboot (the
+// setup-portal save also calls it, but is always refused: the portal never reaches Ready
+// admission) — see the header. Mirrors the mark-valid path in main.cpp's ota_health_gate_task,
+// but fires once the durable commit AND the post-admission heap sample prove the runtime
+// healthy. Identity mutations deliberately never reach this path. A qualifying restart inside
+// the health window must not trigger a rollback unless the image is already critically
+// heap-starved.
 void ota_confirm_pending_image(tk::OtaRebootClass reboot_class) {
     if (!tk::ota_reboot_confirms_pending_image(reboot_class)) {
         ESP_LOGE(TAG, "refusing OTA confirmation for non-user recovery reboot class %d",

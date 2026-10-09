@@ -1069,14 +1069,19 @@ VEHICLE_DATA_SEAMS = (
     "strchr(req->uri, '?')", 'tk::parse_vehicle_data_endpoints(query ? query + 1 : "")',
     "endpoints.empty() || endpoints.has_unsupported", "static_assert(kQueryBufBytes == 128",
     "endpoints.charge_state && g_vehicle->get_charge_state(cs)",
-    "if (endpoints.charge_state)", "if (endpoints.climate_state)",
-    "cl_ok = emit_cached_vehicle_climate(e)",
-    "const bool ok = tk::vehicle_data_available(endpoints, cs_ok, cl_ok)",
+    "if (endpoints.charge_state)", "if (endpoints.climate_state)", "if (endpoints.drive_state)",
+    "bool dr_ok = false;",
+    "cl_ok = emit_cached_vehicle_climate(e)", "dr_ok = emit_cached_vehicle_drive(e)",
+    "const bool ok = tk::vehicle_data_available(endpoints, cs_ok, cl_ok, dr_ok)",
     'e.boolean("result", ok)', "return send_json(req, ok ? 200 : 503, e.release())",
 )
 CLIMATE_CACHE_SEAMS = (
-    "g_vehicle->get_cached_vehicle_climate()", "tk::emit_vehicle_climate_state(climate, e)",
-    "return tk::vehicle_climate_available(climate)",
+    "g_vehicle->get_vehicle_climate(climate)", "tk::emit_vehicle_climate_state(climate, e)",
+    "return ok;",
+)
+DRIVE_CACHE_SEAMS = (
+    "g_vehicle->get_cached_vehicle_drive()", "tk::emit_vehicle_drive_state(drive, e)",
+    "return tk::vehicle_drive_available(drive)",
 )
 
 
@@ -1097,20 +1102,159 @@ def require_vehicle_climate_cache_seam(helper: str) -> None:
         raise AssertionError("climate cache helper added a vehicle-active read")
 
 
-CLIMATE_GETTER_SEAMS = (
+def require_vehicle_drive_cache_seam(helper: str) -> None:
+    code = scrub_cpp_preserving_layout(helper)
+    for token in DRIVE_CACHE_SEAMS:
+        if token not in code:
+            raise AssertionError(f"drive cache helper bypasses tested production seam {token!r}")
+    if "get_charge_state" in code or "charge_state_poll" in code or "WakePolicy" in code:
+        raise AssertionError("drive cache helper added a vehicle-active read")
+
+
+DRIVE_GETTER_SEAMS = (
     "tk::SemGuard g(cache_mutex_);", "if (!g) return {};",
-    "return tk::vehicle_climate_data(last_known_climate_);",
+    "return tk::vehicle_drive_data(last_known_drive_);",
 )
 
 
-def require_vehicle_climate_getter_seam(source: str) -> None:
-    code = scrub_cpp(function_body_in(source, "get_cached_vehicle_climate"))
-    for token in CLIMATE_GETTER_SEAMS:
+def require_vehicle_drive_getter_seam(source: str) -> None:
+    code = scrub_cpp(function_body_in(source, "get_cached_vehicle_drive"))
+    for token in DRIVE_GETTER_SEAMS:
         if token not in code:
-            raise AssertionError(f"fixed climate getter lost ownership/projection: {token}")
+            raise AssertionError(f"fixed drive getter lost ownership/projection: {token}")
     for token in ("ESP_LOG", "charge_state_poll", "vehicle_mutex_", "std::string", "ble_", "client_"):
         if token in code:
-            raise AssertionError(f"fixed climate getter added a non-cache operation: {token}")
+            raise AssertionError(f"fixed drive getter added a non-cache operation: {token}")
+
+
+# get_vehicle_climate() is the cache-only freshness-bounded read for evcc's climater. Snapshots are
+# taken under the leaf cache_mutex_; the window/age decision runs after the unlock.
+CLIMATE_GETTER_SEAMS = (
+    "tk::SemGuard g(cache_mutex_);", "if (!g)",
+    "tk::vehicle_climate_data(last_known_climate_)",
+    "last_climate_ticks_.load()", "climate_state_generation_.load()",
+    "last_known_charge_.valid", "active_window_now_(", "tk::climate_cache_usable(",
+    # Exact statements: the verdict must stay the shared window/age decision, the window must see
+    # the charging arm, "have a sample" must come from the generation bit and the age must be
+    # derived from the stamped tick (a forced-closed window, have_age = true, a dropped charging
+    # arm or age_s = 0 would each let a dead feedback path pose as fresh data).
+    "return tk::climate_cache_usable(snapshot.valid, active_window, have_age, age_s);",
+    "active_window_now_(now, charging)",
+    "have_age = generation != 0;",
+    "(now - sample) / configTICK_RATE_HZ",
+)
+# A failed cache lock must clear the output and report failure, never serve a stale snapshot.
+CLIMATE_GETTER_LOCK_FAILURE = re.compile(r"if\s*\(\s*!g\s*\)\s*\{\s*out\s*=\s*\{\};\s*return\s+false;\s*\}")
+# (injected spelling, forbidden-pattern) pairs: a cache-only read must not poll, connect or copy.
+CLIMATE_GETTER_FORBIDDEN = (
+    ('ESP_LOGW(TAG, "x");', r"ESP_LOG"),
+    ("charge_state_poll();", r"charge_state_poll"),
+    ("tk::SemGuard v(vehicle_mutex_);", r"vehicle_mutex_"),
+    ("enqueue_background_poll_();", r"enqueue_background_poll_"),
+    ("std::string s;", r"std::string"),
+    ("ble_->connect(\"\");", r"\bble_"),
+    ("client_->x();", r"\bclient_"),
+    ("ChargeStateResult c = last_known_charge_;", r"\bChargeStateResult\b"),
+    ("auto c = copy_locked_(last_known_charge_);", r"copy_locked_"),
+)
+
+
+def scope_around(code: str, marker: str) -> tuple[int, int]:
+    """Return (start, end) of the lexical brace scope that owns the first `marker` in `code`."""
+    at = code.index(marker)
+    scopes: list[int] = []
+    for pos, char in enumerate(code[:at]):
+        if char == "{": scopes.append(pos)
+        elif char == "}": scopes.pop()
+    start = scopes[-1]
+    return start, balanced_end(code, start, "{", "}", "scope")
+
+
+def require_vehicle_climate_getter_seam(source: str) -> None:
+    raw = function_body_in(source, "get_vehicle_climate")
+    code = scrub_cpp(raw)
+    for token in CLIMATE_GETTER_SEAMS:
+        if token not in code:
+            raise AssertionError(f"climate getter lost ownership/projection/freshness: {token}")
+    if not re.search(r"last_known_charge_\.charging_state\s*==", code):
+        raise AssertionError("climate getter lost the in-place charging_state comparison")
+    if not CLIMATE_GETTER_LOCK_FAILURE.search(code):
+        raise AssertionError("climate getter lock failure no longer clears out and returns false")
+    for _, pattern in CLIMATE_GETTER_FORBIDDEN:
+        if re.search(pattern, code):
+            raise AssertionError(f"climate getter added a non-cache operation: {pattern}")
+    # The freshness decision must follow the unlock, never run under cache_mutex_.
+    layout = scrub_cpp_preserving_layout(raw)
+    _, locked_end = scope_around(layout, "tk::SemGuard g(cache_mutex_);")
+    for token in ("active_window_now_(", "tk::climate_cache_usable("):
+        if layout.find(token) < locked_end:
+            raise AssertionError(f"climate getter evaluates {token} under cache_mutex_")
+
+
+def require_climate_publication_stamp(telemetry_source: str) -> None:
+    """The climate cache publication stamps its age and generation inside the guarded epoch branch."""
+    body = scrub_cpp_preserving_layout(function_body_in(telemetry_source, "process_pending_telemetry_"))
+    processing = body.find("portEXIT_CRITICAL(&telemetry_pending_mux_);")
+    start = body.find("pending & PendingClimate", max(processing, 0))
+    end = body.find("pending & PendingDrive", start)
+    if processing < 0 or start < 0 or end < 0:
+        raise AssertionError("process_pending_telemetry_ climate publication block missing")
+    block = body[start:end]
+    guard = re.search(r"tk::MutexGuard\s+\w+\(cache_mutex_\);", block)
+    if not guard:
+        raise AssertionError("climate publication lost its cache_mutex_ guard")
+    _, guard_end = scope_around(block, guard.group(0))
+    epoch = block.find("tk::telemetry_epoch_matches(climate_epoch", guard.end())
+    for token in ("last_climate_ticks_.store(xTaskGetTickCount());",
+                  "climate_state_generation_.fetch_add(1);"):
+        at = block.find(token)
+        if at < 0:
+            raise AssertionError(f"climate publication does not stamp freshness: {token}")
+        if not guard.end() < epoch < at < guard_end:
+            raise AssertionError(f"climate freshness stamp {token} outside the guarded epoch branch")
+
+
+def require_wake_companion_drive_poll(loop_source: str) -> None:
+    """Wake/bootstrap one-shot refreshes drive only under the seam; rising edge restarts rotation."""
+    layout = scrub_cpp_preserving_layout(loop_source)   # offsets match loop_source
+    fire = layout.find("tk::charge_poll_should_fire(")
+    if fire < 0:
+        raise AssertionError("charge_poll_should_fire block missing from the telemetry loop")
+    open_brace = layout.find("{", layout.index("wake_poll)", fire))
+    block_end = balanced_end(layout, open_brace, "{", "}", "charge poll block")
+    block = loop_source[open_brace:block_end + 1]
+    code = layout[open_brace:block_end + 1]
+    guard = "if (tk::wake_poll_refreshes_drive(poll_cadence)) {"
+    if guard not in code:
+        raise AssertionError("drive companion poll is not gated by tk::wake_poll_refreshes_drive")
+    inner_open = code.index("{", code.index(guard))
+    inner_end = balanced_end(code, inner_open, "{", "}", "drive companion block")
+    if block.count('"Drive State Poll"') != 1 or not (
+        inner_open < block.index('"Drive State Poll"') < inner_end
+    ):
+        raise AssertionError("Drive State Poll must be enqueued only inside the wake_poll_refreshes_drive gate")
+    if "enqueue_background_poll_" not in code[inner_open:inner_end]:
+        raise AssertionError("drive companion gate does not enqueue a background poll")
+    require_before("charge poll before its drive companion", block,
+                   '"Charge State Poll"', '"Drive State Poll"')
+    shared = re.findall(
+        r'"Drive State Poll",\s*tk::BleDomain::Infotainment,\s*build_drive_state_poll\)', loop_source)
+    if len(shared) != 2:
+        raise AssertionError("rotation and wake one-shot must share build_drive_state_poll")
+
+    edge = layout.find("if (paired && !prev_window && window) {")
+    if edge < 0:
+        raise AssertionError("window rising-edge block missing")
+    edge_open = layout.index("{", edge)
+    edge_body = layout[edge_open:balanced_end(layout, edge_open, "{", "}", "rising edge") + 1]
+    if "tele_idx = 0;" not in edge_body:
+        raise AssertionError("window rising edge must restart the telemetry rotation at climate")
+
+
+def require_drive_poll_builder(telemetry_source: str) -> None:
+    builder = scrub_cpp(function_body_in(telemetry_source, "build_drive_state_poll"))
+    if "CarServer_GetVehicleData_getDriveState_tag" not in builder:
+        raise AssertionError("build_drive_state_poll no longer requests DriveState")
 
 
 def require_unlocked_diagnostic_logging(heap: str, telemetry: str) -> None:
@@ -1784,6 +1928,16 @@ def require_pairing_cleanup_epoch_contract(pairing_source: str) -> None:
             "cache_mutex_",
             field,
         )
+    # The freshness stamps live beside the caches they date: a pairing reset that kept them would
+    # let the next pairing's first read see the old sample as fresh (charge and climate alike).
+    for statement in (
+        "last_charge_ticks_.store(0);",
+        "charge_state_generation_.store(0);",
+        "last_climate_ticks_.store(0);",
+        "climate_state_generation_.store(0);",
+    ):
+        if statement not in scrub_cpp(cache_block):
+            raise AssertionError(f"clear_session_and_cache_ missing freshness reset {statement}")
 
 
 def require_runtime_admission_contract(logic_header: str, facade_header: str,
@@ -3616,7 +3770,12 @@ def require_runtime_source_contracts() -> None:
     )
     require_vehicle_data_production_seams(function_body("handle_vehicle_data"))
     require_vehicle_climate_cache_seam(function_body("emit_cached_vehicle_climate"))
-    require_vehicle_climate_getter_seam((MAIN / "vehicle_ctrl.hpp").read_text())
+    require_vehicle_drive_cache_seam(function_body("emit_cached_vehicle_drive"))
+    require_vehicle_drive_getter_seam((MAIN / "vehicle_ctrl.hpp").read_text())
+    require_vehicle_climate_getter_seam(SOURCES["vehicle_telemetry.cpp"])
+    require_climate_publication_stamp(SOURCES["vehicle_telemetry.cpp"])
+    require_wake_companion_drive_poll(function_body_in(SOURCES["vehicle_telemetry.cpp"], "loop_task_fn_"))
+    require_drive_poll_builder(SOURCES["vehicle_telemetry.cpp"])
     require_unlocked_diagnostic_logging(SOURCES["heap_trend.cpp"], SOURCES["vehicle_telemetry.cpp"])
     require_diag_dump_completion_contract(
         function_body("handle_diag"),
@@ -4366,14 +4525,152 @@ def self_test_canaries(tasks: set[str], callbacks: set[str]) -> None:
             pass
         else:
             raise AssertionError(f"climate cache seam-removal mutation passed unexpectedly: {token}")
-    getter_source = (MAIN / "vehicle_ctrl.hpp").read_text()
-    for token in CLIMATE_GETTER_SEAMS:
+    drive_helper = function_body("emit_cached_vehicle_drive")
+    for token in DRIVE_CACHE_SEAMS:
         try:
-            require_vehicle_climate_getter_seam(getter_source.replace(token, "fixture_getter_bypass", 1))
+            require_vehicle_drive_cache_seam(drive_helper.replace(token, "fixture_drive_bypass"))
         except AssertionError:
             pass
         else:
-            raise AssertionError(f"fixed climate getter mutation passed unexpectedly: {token}")
+            raise AssertionError(f"drive cache seam-removal mutation passed unexpectedly: {token}")
+    for injected in ("get_charge_state(cs);", "charge_state_poll();", "WakePolicy p;"):
+        require_mutation_rejected(
+            f"drive cache helper vehicle-active read {injected!r}",
+            lambda injected=injected: require_vehicle_drive_cache_seam(
+                drive_helper.replace("{", "{ " + injected, 1)),
+        )
+    getter_source = (MAIN / "vehicle_ctrl.hpp").read_text()
+    drive_getter = function_body_in(getter_source, "get_cached_vehicle_drive")
+    for token in DRIVE_GETTER_SEAMS:
+        try:
+            require_vehicle_drive_getter_seam(
+                getter_source.replace(drive_getter, drive_getter.replace(token, "fixture_getter_bypass", 1), 1))
+        except AssertionError:
+            pass
+        else:
+            raise AssertionError(f"fixed drive getter mutation passed unexpectedly: {token}")
+    for injected in ('ESP_LOGW(TAG, "x");', "tk::SemGuard v(vehicle_mutex_);", "std::string s;",
+                     'ble_->connect("");', "client_->x();"):
+        require_mutation_rejected(
+            f"fixed drive getter non-cache operation {injected!r}",
+            lambda injected=injected: require_vehicle_drive_getter_seam(
+                getter_source.replace(drive_getter, drive_getter.replace("{", "{ " + injected, 1), 1)),
+        )
+
+    climate_telemetry = SOURCES["vehicle_telemetry.cpp"]
+    climate_getter = function_body_in(climate_telemetry, "get_vehicle_climate")
+    for token in CLIMATE_GETTER_SEAMS:
+        mutated_getter = climate_getter.replace(token, "fixture_getter_bypass")
+        if mutated_getter == climate_getter:
+            raise AssertionError(f"climate getter mutation did not apply: {token}")
+        try:
+            require_vehicle_climate_getter_seam(climate_telemetry.replace(climate_getter, mutated_getter, 1))
+        except AssertionError:
+            pass
+        else:
+            raise AssertionError(f"climate getter seam-removal mutation passed unexpectedly: {token}")
+    for injected, _ in CLIMATE_GETTER_FORBIDDEN:
+        require_mutation_rejected(
+            f"climate getter non-cache operation {injected!r}",
+            lambda injected=injected: require_vehicle_climate_getter_seam(
+                climate_telemetry.replace(climate_getter, climate_getter.replace("{", "{ " + injected, 1), 1)),
+        )
+    no_in_place_charging = climate_getter.replace(
+        "last_known_charge_.charging_state", "charging_state_copy")
+    require_mutation_rejected(
+        "climate getter charging_state comparison removed",
+        lambda: require_vehicle_climate_getter_seam(
+            climate_telemetry.replace(climate_getter, no_in_place_charging, 1)),
+    )
+    unlock_marker = "tk::SemGuard g(cache_mutex_);"
+    early_decision = climate_getter.replace(
+        unlock_marker, unlock_marker + " const bool early = tk::climate_cache_usable(true, true, true, 0);", 1)
+    require_mutation_rejected(
+        "climate getter freshness decision under cache_mutex_",
+        lambda: require_vehicle_climate_getter_seam(climate_telemetry.replace(climate_getter, early_decision, 1)),
+    )
+    # Semantic mutations of the freshness verdict: each keeps the getter compiling and cache-only
+    # but would let a dead feedback path pose as live climate data.
+    def climate_getter_mutated(old: str, new: str) -> str:
+        if old not in climate_getter:
+            raise AssertionError(f"climate getter semantic mutation did not apply: {old}")
+        return climate_telemetry.replace(climate_getter, climate_getter.replace(old, new, 1), 1)
+
+    for label, old, new in (
+        ("window forced closed",
+         "active_window_now_(now, charging)", "false"),
+        ("charging arm dropped from the window",
+         "active_window_now_(now, charging)", "active_window_now_(now, false)"),
+        ("have_age forced true",
+         "have_age = generation != 0;", "have_age = true;"),
+        ("age forced to zero",
+         "(now - sample) / configTICK_RATE_HZ", "0"),
+        ("verdict bypassed",
+         "return tk::climate_cache_usable(snapshot.valid, active_window, have_age, age_s);",
+         "return snapshot.valid;"),
+        ("lock failure returns true",
+         "out = {};\n            return false;", "out = {};\n            return true;"),
+        ("lock failure keeps the stale output",
+         "out = {};\n            return false;", "return false;"),
+    ):
+        require_mutation_rejected(
+            f"climate getter {label}",
+            lambda old=old, new=new: require_vehicle_climate_getter_seam(
+                climate_getter_mutated(old, new)),
+        )
+
+    stamp_lines = ("                last_climate_ticks_.store(xTaskGetTickCount());\n"
+                   "                climate_state_generation_.fetch_add(1);\n")
+    if stamp_lines not in climate_telemetry:
+        raise AssertionError("climate publication stamp lines not found for mutation")
+    for label, mutated in (
+        ("tick stamp removed", climate_telemetry.replace(
+            "                last_climate_ticks_.store(xTaskGetTickCount());\n", "", 1)),
+        ("generation bump removed", climate_telemetry.replace(
+            "                climate_state_generation_.fetch_add(1);\n", "", 1)),
+        ("stamps moved outside the guarded epoch branch", climate_telemetry.replace(stamp_lines, "", 1).replace(
+            "    if (pending & PendingDrive) {", stamp_lines + "    if (pending & PendingDrive) {", 1)),
+    ):
+        if mutated == climate_telemetry:
+            raise AssertionError(f"climate publication mutation did not apply: {label}")
+        require_mutation_rejected(
+            f"climate publication {label}",
+            lambda mutated=mutated: require_climate_publication_stamp(mutated),
+        )
+
+    wake_loop = function_body_in(climate_telemetry, "loop_task_fn_")
+    wake_guard = "if (tk::wake_poll_refreshes_drive(poll_cadence)) {"
+    ungated_drive = wake_loop.replace(wake_guard, "if (true) {", 1)
+    no_drive_enqueue = wake_loop.replace(
+        '"Drive State Poll", tk::BleDomain::Infotainment, build_drive_state_poll);\n            }\n        }\n\n        // Background telemetry',
+        '"Charge State Poll", tk::BleDomain::Infotainment, build_drive_state_poll);\n            }\n        }\n\n        // Background telemetry', 1)
+    drive_outside_gate = wake_loop.replace(
+        "            if (poll_cadence) last_poll_ticks = now_ticks;\n",
+        "            if (poll_cadence) last_poll_ticks = now_ticks;\n"
+        '            self->enqueue_background_poll_("Drive State Poll", tk::BleDomain::Infotainment, build_drive_state_poll);\n', 1)
+    no_edge_reset = wake_loop.replace("            tele_idx = 0;\n", "", 1)
+    lambda_rotation = wake_loop.replace(
+        '"Drive State Poll", tk::BleDomain::Infotainment, build_drive_state_poll);\n                        break;',
+        '"Drive State Poll", tk::BleDomain::Infotainment, [](TeslaBLE::Client*, uint8_t*, size_t*) { return 0; });\n                        break;', 1)
+    for label, mutated in (
+        ("wake gate removed", ungated_drive),
+        ("drive enqueue replaced", no_drive_enqueue),
+        ("drive enqueue outside the gate", drive_outside_gate),
+        ("rising-edge tele_idx reset removed", no_edge_reset),
+        ("rotation stops sharing the builder", lambda_rotation),
+    ):
+        if mutated == wake_loop:
+            raise AssertionError(f"wake companion mutation did not apply: {label}")
+        require_mutation_rejected(
+            f"wake companion {label}",
+            lambda mutated=mutated: require_wake_companion_drive_poll(mutated),
+        )
+    require_mutation_rejected(
+        "drive poll builder no longer requests DriveState",
+        lambda: require_drive_poll_builder(climate_telemetry.replace(
+            "CarServer_GetVehicleData_getDriveState_tag);\n}", "CarServer_GetVehicleData_getChargeState_tag);\n}", 1)),
+    )
+
     heap = SOURCES["heap_trend.cpp"]
     telemetry = SOURCES["vehicle_telemetry.cpp"]
     for source, replacement, is_heap in (
@@ -5934,6 +6231,21 @@ def self_test_canaries(tasks: set[str], callbacks: set[str]) -> None:
         "pairing cleanup missing cache field reset",
         lambda: require_pairing_cleanup_epoch_contract(pairing_missing_cache_reset),
     )
+
+    for freshness_reset in (
+        "        last_charge_ticks_.store(0);\n",
+        "        charge_state_generation_.store(0);\n",
+        "        last_climate_ticks_.store(0);\n",
+        "        climate_state_generation_.store(0);\n",
+    ):
+        pairing_missing_freshness_reset = pairing_source.replace(freshness_reset, "", 1)
+        if pairing_missing_freshness_reset == pairing_source:
+            raise AssertionError(f"pairing freshness reset mutation did not apply: {freshness_reset}")
+        require_mutation_rejected(
+            f"pairing cleanup missing freshness reset {freshness_reset.strip()}",
+            lambda mutated=pairing_missing_freshness_reset: require_pairing_cleanup_epoch_contract(
+                mutated),
+        )
 
 
 def require_unconditional_statement(label: str, body: str, statement: str) -> None:

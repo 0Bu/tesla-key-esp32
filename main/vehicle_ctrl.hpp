@@ -77,6 +77,12 @@ public:
     bool set_scheduled_charging(bool enable, int start_minutes, int timeout_ms = 20000);
 
     bool get_charge_state(ChargeStateResult& out, int timeout_ms = 20000);
+    // Cache-only climate snapshot for evcc's climater: never polls, connects or wakes. Inside the
+    // active window the climate must be at most tk::kActiveClimateStateMaxAgeS old. Outside it
+    // (including after the charging arm lapses about 60 s after the last live contact, when no
+    // command was sent in the last 5 min) the last-known snapshot is served, mirroring the
+    // charge semantics.
+    bool get_vehicle_climate(tk::VehicleClimateData& out);
     // Origin is mandatory: HTTP/manual callers pass Foreground; the auto-pair supervisor
     // passes Background so an absent car cannot turn unattended probes into an error stream.
     bool get_vehicle_status(VehicleStatusResult& out, tk::ConnectOrigin origin,
@@ -87,12 +93,12 @@ public:
     ChargeStateResult   get_cached_charge()   { return copy_locked_(last_known_charge_); }
     VehicleStatusResult get_cached_status()   { return copy_locked_(last_known_status_); }
     ClimateStateResult  get_cached_climate()  { return copy_locked_(last_known_climate_); }
-    tk::VehicleClimateData get_cached_vehicle_climate() {
+    DriveStateResult    get_cached_drive()    { return copy_locked_(last_known_drive_); }
+    tk::VehicleDriveData get_cached_vehicle_drive() {
         tk::SemGuard g(cache_mutex_);
         if (!g) return {};
-        return tk::vehicle_climate_data(last_known_climate_);
+        return tk::vehicle_drive_data(last_known_drive_);
     }
-    DriveStateResult    get_cached_drive()    { return copy_locked_(last_known_drive_); }
     TirePressureResult  get_cached_tires()    { return copy_locked_(last_known_tires_); }
     ClosuresStateResult get_cached_closures() { return copy_locked_(last_known_closures_); }
 
@@ -651,6 +657,11 @@ private:
     // completion cannot outrun deferred string-cache publication.
     std::atomic<uint32_t> last_charge_ticks_{0};
     std::atomic<uint32_t> charge_state_generation_{0};
+    // ClimateState freshness stamp + generation (same pattern as the charge pair): bound the age of
+    // the climate cache that evcc's climater reads inside the active window. Generation != 0 is the
+    // "have sample" bit; both are cleared on a pairing reset.
+    std::atomic<uint32_t> last_climate_ticks_{0};
+    std::atomic<uint32_t> climate_state_generation_{0};
     std::atomic<bool>     charge_cache_stale_reported_{false};
     // Uptime tick of the last time the car was confirmed REACHABLE over BLE — any successful
     // signed round-trip, including the idle VCSEC health poll that keeps answering while the
