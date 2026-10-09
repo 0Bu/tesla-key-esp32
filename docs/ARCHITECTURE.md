@@ -1096,7 +1096,7 @@ sites with their sizing rationale.
 
 | Task | Priority | Stack | Created in | Purpose |
 |---|---|---|---|---|
-| `vehicle_loop` | `kPrioVehicleLoop` = 5 | 8192 | `vehicle_ctrl.cpp` (fn: `vehicle_telemetry.cpp`) | drain fixed NimBLE Link/RX events, drive `drive_command_runner_()`, parse deferred telemetry after unlock, rotating NO_WAKE poll, sleep gating, BLE-fault link reset |
+| `vehicle_loop` | `kPrioVehicleLoop` = 5 | 10240 | `vehicle_ctrl.cpp` (fn: `vehicle_telemetry.cpp`) | drain fixed NimBLE Link/RX events, drive `drive_command_runner_()`, parse deferred telemetry after unlock, rotating NO_WAKE poll, sleep gating, BLE-fault link reset |
 | `captive_dns` | `kPrioCaptiveDns` = 5 | 4096 | `provisioning.cpp` | captive-portal DNS (setup-AP mode only; vehicle stack not running) |
 | `ota` | `kPrioOta` = 5 | 8192 | `ota_update.cpp` | OTA download + flash (transient) |
 | `ota_chk` | `kPrioOtaCheck` = 5 | 8192 | `ota_update.cpp` | OTA manifest check (transient) |
@@ -1138,9 +1138,11 @@ already retrospective, so a sample after a deep call still contains its minimum.
 `/status.sys.stack_min_free_bytes` and the MQTT device payload expose the same cached values; a task
 not started yet (or absent in safe mode) is omitted, and a genuine zero stays visible. These are
 measurements, not universal alarm thresholds — sizes and call paths differ per target. The manual
-bench-report gate uses one-eighth-of-stack policy floors (`httpd` and `vehicle` ≥ 1024 B, `mqtt` ≥
-768 B, optional `auto_pair` ≥ 1024 B when present; derived from the 8192/8192/6144/8192-byte stacks),
-described with the bench workflow in [`FEATURES.md` §6](FEATURES.md#6-build-test-and-ci).
+bench-report gate uses fixed policy floors (`httpd` and `vehicle` ≥ 1024 B, `mqtt` ≥
+768 B, optional `auto_pair` ≥ 1024 B when present). They were set at one eighth of the stacks at
+the time (8192 B, 6144 B for `mqtt`); when `vehicle_loop` grew to 10240 B its floor was kept at
+1024 B, so the larger stack adds reserve instead of raising the bar. The floors are described with
+the bench workflow in [`FEATURES.md` §6](FEATURES.md#6-build-test-and-ci).
 
 ### Atomics doctrine
 
