@@ -8,6 +8,7 @@
 
 #include <cJSON.h>
 
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
@@ -258,10 +259,30 @@ void test_status_emitter_structure_guards() {
     CHECK(live_allocations == 0);
 }
 
-tk::JsonOwner build_vehicle_data_fixture(std::string_view endpoints, bool preconditioning = true,
-                                         bool charge_ok = true, bool climate_present = true,
-                                         float energy = 12.5f) {
-    const auto selected = endpoints.empty() ? tk::parse_vehicle_data_endpoints({}) : tk::parse_vehicle_data_endpoint_list(endpoints);
+// Inputs of one /vehicle_data reply. Mirrors the handler's cache reads: the charge result, the
+// climate snapshot plus its window/age inputs (tk::climate_cache_usable), and the drive snapshot.
+struct VehicleDataFixture {
+    bool preconditioning = true;
+    bool has_preconditioning = true;
+    bool charge_ok = true;
+    bool climate_valid = true;
+    bool active_window = false;
+    bool have_climate_age = true;
+    uint32_t climate_age_s = 0;
+    bool drive_valid = true;
+    bool has_odometer = true;
+    float odometer_km = 1609.344f;   // 1000 mi
+    float energy = 12.5f;
+};
+
+tk::VehicleDataEndpoints select_endpoints(std::string_view endpoints) {
+    return endpoints.empty() ? tk::parse_vehicle_data_endpoints({})
+                             : tk::parse_vehicle_data_endpoint_list(endpoints);
+}
+
+tk::JsonOwner build_vehicle_data_fixture(std::string_view endpoints,
+                                         const VehicleDataFixture& in = {}) {
+    const auto selected = select_endpoints(endpoints);
     ChargeStateResult charge{};
     charge.valid = true;
     charge.charging_state = "Charging";
@@ -270,12 +291,16 @@ tk::JsonOwner build_vehicle_data_fixture(std::string_view endpoints, bool precon
     charge.charging_amps = 16;
     charge.battery_range = 280.5f;
     charge.minutes_to_full_charge = 45;
-    charge.charge_energy_added = energy;
+    charge.charge_energy_added = in.energy;
     charge.has_energy_added = true;
     ClimateStateResult climate{};
-    climate.valid = true;
-    climate.has_preconditioning = climate_present;
-    climate.is_preconditioning = preconditioning;
+    climate.valid = in.climate_valid;
+    climate.has_preconditioning = in.has_preconditioning;
+    climate.is_preconditioning = in.preconditioning;
+    DriveStateResult drive{};
+    drive.valid = in.drive_valid;
+    drive.has_odometer = in.has_odometer;
+    drive.odometer_km = in.odometer_km;
     tk::JsonBuilder json;
     tk::StatusJsonEmitter e(json);
     e.obj_begin("response");
@@ -286,13 +311,24 @@ tk::JsonOwner build_vehicle_data_fixture(std::string_view endpoints, bool precon
         tk::emit_vehicle_charge_state(charge, e);
         e.obj_end();
     }
+    bool climate_ok = false;
     if (selected.climate_state) {
         e.obj_begin("climate_state");
         tk::emit_vehicle_climate_state(climate, e);
+        climate_ok = tk::climate_cache_usable(climate.valid, in.active_window, in.have_climate_age,
+                                              in.climate_age_s);
+        e.obj_end();
+    }
+    bool drive_ok = false;
+    if (selected.drive_state) {
+        e.obj_begin("drive_state");
+        const tk::VehicleDriveData snapshot = tk::vehicle_drive_data(drive);
+        tk::emit_vehicle_drive_state(snapshot, e);
+        drive_ok = tk::vehicle_drive_available(snapshot);
         e.obj_end();
     }
     e.obj_end();
-    const bool ok = tk::vehicle_data_available(selected, charge_ok, tk::vehicle_climate_available(climate));
+    const bool ok = tk::vehicle_data_available(selected, in.charge_ok, climate_ok, drive_ok);
     e.boolean("result", ok);
     e.str("reason", ok ? "success" : "stale or unavailable");
     e.obj_end();
@@ -301,17 +337,27 @@ tk::JsonOwner build_vehicle_data_fixture(std::string_view endpoints, bool precon
 
 tk::JsonOwner build_rest_fixture() { return build_vehicle_data_fixture("charge_state"); }
 tk::JsonOwner build_climate_fixture() { return build_vehicle_data_fixture("climate_state"); }
+tk::JsonOwner build_drive_fixture() { return build_vehicle_data_fixture("drive_state"); }
 tk::JsonOwner build_combined_fixture() {
     return build_vehicle_data_fixture("charge_state;climate_state");
 }
+tk::JsonOwner build_all_domains_fixture() {
+    return build_vehicle_data_fixture("charge_state;climate_state;drive_state");
+}
 
 void test_evcc_vehicle_data_fields() {
-    for (const char* endpoints : {"", "charge_state", "climate_state",
-                                  "charge_state;climate_state", "climate_state%3Bcharge_state"}) {
+    for (const char* endpoints : {"", "charge_state", "climate_state", "drive_state",
+                                  "charge_state;climate_state", "climate_state%3Bcharge_state",
+                                  "charge_state;drive_state", "climate_state;drive_state",
+                                  "charge_state;climate_state;drive_state",
+                                  "drive_state%3Bclimate_state%3Bcharge_state"}) {
+        const auto selected = select_endpoints(endpoints);
         for (bool preconditioning : {false, true}) {
             reset_allocator(0);
             {
-                tk::JsonOwner root = build_vehicle_data_fixture(endpoints, preconditioning);
+                VehicleDataFixture in;
+                in.preconditioning = preconditioning;
+                tk::JsonOwner root = build_vehicle_data_fixture(endpoints, in);
                 CHECK(root != nullptr);
                 const cJSON* outer = cJSON_GetObjectItemCaseSensitive(root.get(), "response");
                 const cJSON* response = cJSON_GetObjectItemCaseSensitive(outer, "response");
@@ -319,8 +365,9 @@ void test_evcc_vehicle_data_fields() {
                 CHECK(cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(outer, "result")));
                 const cJSON* charge = cJSON_GetObjectItemCaseSensitive(response, "charge_state");
                 const cJSON* climate = cJSON_GetObjectItemCaseSensitive(response, "climate_state");
+                const cJSON* drive = cJSON_GetObjectItemCaseSensitive(response, "drive_state");
                 // These are the actual jq paths consumed by the standard evcc template.
-                if (std::strcmp(endpoints, "climate_state") != 0) {
+                if (selected.charge_state) {
                     for (const char* field : {"battery_level", "charge_amps", "charge_limit_soc",
                                                "battery_range", "minutes_to_full_charge"}) {
                         CHECK(cJSON_IsNumber(cJSON_GetObjectItemCaseSensitive(charge, field)));
@@ -334,7 +381,7 @@ void test_evcc_vehicle_data_fields() {
                 } else {
                     CHECK(charge == nullptr);
                 }
-                if (std::strcmp(endpoints, "charge_state") != 0) {
+                if (selected.climate_state) {
                     const cJSON* value = cJSON_GetObjectItemCaseSensitive(climate, "is_preconditioning");
                     CHECK(cJSON_IsBool(value));
                     CHECK(static_cast<bool>(cJSON_IsTrue(value)) == preconditioning);
@@ -345,16 +392,42 @@ void test_evcc_vehicle_data_fields() {
                 } else {
                     CHECK(climate == nullptr);
                 }
+                if (selected.drive_state) {
+                    // evcc scales the odometer by 1.60934, so it must be miles (1609.344 km = 1000 mi).
+                    const cJSON* odometer = cJSON_GetObjectItemCaseSensitive(drive, "odometer");
+                    CHECK(cJSON_IsNumber(odometer));
+                    CHECK(odometer->valuedouble > 999.9 && odometer->valuedouble < 1000.1);
+                    CHECK(cJSON_GetObjectItemCaseSensitive(drive, "shift_state") == nullptr);
+                } else {
+                    CHECK(drive == nullptr);
+                }
             }
             CHECK(live_allocations == 0);
         }
     }
 }
 
+// The default selection stays charge_state + climate_state; drive_state is opt-in.
+void test_evcc_default_selection_excludes_drive() {
+    reset_allocator(0);
+    {
+        tk::JsonOwner root = build_vehicle_data_fixture("");
+        const cJSON* outer = cJSON_GetObjectItemCaseSensitive(root.get(), "response");
+        const cJSON* response = cJSON_GetObjectItemCaseSensitive(outer, "response");
+        CHECK(cJSON_IsObject(cJSON_GetObjectItemCaseSensitive(response, "charge_state")));
+        CHECK(cJSON_IsObject(cJSON_GetObjectItemCaseSensitive(response, "climate_state")));
+        CHECK(cJSON_GetObjectItemCaseSensitive(response, "drive_state") == nullptr);
+    }
+    CHECK(live_allocations == 0);
+}
+
 void test_evcc_energy_zero() {
     reset_allocator(0);
     {
-        tk::JsonOwner root = build_vehicle_data_fixture("charge_state", false, true, true, 0);
+        VehicleDataFixture in;
+        in.preconditioning = false;
+        in.energy = 0;
+        tk::JsonOwner root = build_vehicle_data_fixture("charge_state", in);
         const cJSON* outer = cJSON_GetObjectItemCaseSensitive(root.get(), "response");
         const cJSON* response = cJSON_GetObjectItemCaseSensitive(outer, "response");
         const cJSON* charge = cJSON_GetObjectItemCaseSensitive(response, "charge_state");
@@ -366,25 +439,128 @@ void test_evcc_energy_zero() {
     CHECK(live_allocations == 0);
 }
 
+// An unreported is_preconditioning is false (TeslaBleHttpProxy parity), not a failed read.
+void test_evcc_absent_preconditioning_is_false_success() {
+    for (const char* endpoints : {"climate_state", "charge_state;climate_state", ""}) {
+        reset_allocator(0);
+        {
+            VehicleDataFixture in;
+            in.has_preconditioning = false;
+            in.preconditioning = true;   // a stale value must not leak through an absent field
+            tk::JsonOwner root = build_vehicle_data_fixture(endpoints, in);
+            const cJSON* outer = cJSON_GetObjectItemCaseSensitive(root.get(), "response");
+            const cJSON* response = cJSON_GetObjectItemCaseSensitive(outer, "response");
+            const cJSON* climate = cJSON_GetObjectItemCaseSensitive(response, "climate_state");
+            const cJSON* value = cJSON_GetObjectItemCaseSensitive(climate, "is_preconditioning");
+            CHECK(cJSON_IsBool(value));
+            CHECK(cJSON_IsFalse(value));
+            CHECK(cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(outer, "result")));
+        }
+        CHECK(live_allocations == 0);
+    }
+}
+
+// Inside the active window an old climate sample is not live: result false, 503 upstream.
+void test_evcc_stale_in_window_climate_fails() {
+    constexpr uint32_t limit = tk::kActiveClimateStateMaxAgeS;
+    struct Case { bool window; bool have_age; uint32_t age; bool usable; };
+    for (const Case c : {Case{true, true, 0, true}, Case{true, true, limit, true},
+                         Case{true, true, limit + 1, false}, Case{true, false, 0, false},
+                         // Outside the window the last-known value stays usable.
+                         Case{false, true, limit + 1, true}, Case{false, false, 0, true}}) {
+        for (const char* endpoints : {"climate_state", "charge_state;climate_state",
+                                      "charge_state;climate_state;drive_state"}) {
+            reset_allocator(0);
+            {
+                VehicleDataFixture in;
+                in.active_window = c.window;
+                in.have_climate_age = c.have_age;
+                in.climate_age_s = c.age;
+                tk::JsonOwner root = build_vehicle_data_fixture(endpoints, in);
+                const cJSON* outer = cJSON_GetObjectItemCaseSensitive(root.get(), "response");
+                const cJSON* result = cJSON_GetObjectItemCaseSensitive(outer, "result");
+                CHECK(cJSON_IsBool(result));
+                CHECK(static_cast<bool>(cJSON_IsTrue(result)) == c.usable);
+                // The typed climate fields are still emitted; only availability decides the status.
+                const cJSON* response = cJSON_GetObjectItemCaseSensitive(outer, "response");
+                CHECK(cJSON_IsObject(cJSON_GetObjectItemCaseSensitive(response, "climate_state")));
+            }
+            CHECK(live_allocations == 0);
+        }
+        // A stale climate sample never fails a read that did not select climate.
+        reset_allocator(0);
+        {
+            VehicleDataFixture in;
+            in.active_window = c.window;
+            in.have_climate_age = c.have_age;
+            in.climate_age_s = c.age;
+            tk::JsonOwner root = build_vehicle_data_fixture("charge_state;drive_state", in);
+            const cJSON* outer = cJSON_GetObjectItemCaseSensitive(root.get(), "response");
+            CHECK(cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(outer, "result")));
+        }
+        CHECK(live_allocations == 0);
+    }
+}
+
 void test_evcc_vehicle_data_failure_matrix() {
-    for (const char* endpoints : {"charge_state", "climate_state", "charge_state;climate_state"}) {
+    constexpr uint32_t limit = tk::kActiveClimateStateMaxAgeS;
+    for (const char* endpoints : {"charge_state", "climate_state", "drive_state",
+                                  "charge_state;climate_state", "charge_state;drive_state",
+                                  "climate_state;drive_state",
+                                  "charge_state;climate_state;drive_state"}) {
+        const auto selected = tk::parse_vehicle_data_endpoint_list(endpoints);
         for (bool charge_ok : {false, true}) {
-            for (bool climate_present : {false, true}) {
-                reset_allocator(0);
-                {
-                    tk::JsonOwner root = build_vehicle_data_fixture(endpoints, false, charge_ok, climate_present);
-                    const auto selected = tk::parse_vehicle_data_endpoint_list(endpoints);
-                    const bool expected = (!selected.charge_state || charge_ok) &&
-                                          (!selected.climate_state || climate_present);
-                    const cJSON* outer = cJSON_GetObjectItemCaseSensitive(root.get(), "response");
-                    const cJSON* result = cJSON_GetObjectItemCaseSensitive(outer, "result");
-                    CHECK(cJSON_IsBool(result));
-                    CHECK(static_cast<bool>(cJSON_IsTrue(result)) == expected);
-                    const cJSON* reason = cJSON_GetObjectItemCaseSensitive(outer, "reason");
-                    CHECK(cJSON_IsString(reason));
-                    CHECK(std::strcmp(reason->valuestring, expected ? "success" : "stale or unavailable") == 0);
+            for (bool climate_valid : {false, true}) {
+                for (bool active_window : {false, true}) {
+                    for (uint32_t age : {uint32_t{0}, limit, limit + 1}) {
+                        for (bool drive_valid : {false, true}) {
+                            for (bool has_odometer : {false, true}) {
+                                reset_allocator(0);
+                                {
+                                    VehicleDataFixture in;
+                                    in.preconditioning = false;
+                                    in.charge_ok = charge_ok;
+                                    in.climate_valid = climate_valid;
+                                    in.active_window = active_window;
+                                    in.climate_age_s = age;
+                                    in.drive_valid = drive_valid;
+                                    in.has_odometer = has_odometer;
+                                    tk::JsonOwner root = build_vehicle_data_fixture(endpoints, in);
+                                    // Spelled out independently of tk::climate_cache_usable().
+                                    const bool climate_usable =
+                                        climate_valid && (!active_window || age <= limit);
+                                    const bool expected =
+                                        (!selected.charge_state || charge_ok) &&
+                                        (!selected.climate_state || climate_usable) &&
+                                        (!selected.drive_state || (drive_valid && has_odometer));
+                                    const cJSON* outer =
+                                        cJSON_GetObjectItemCaseSensitive(root.get(), "response");
+                                    const cJSON* result =
+                                        cJSON_GetObjectItemCaseSensitive(outer, "result");
+                                    CHECK(cJSON_IsBool(result));
+                                    CHECK(static_cast<bool>(cJSON_IsTrue(result)) == expected);
+                                    const cJSON* reason =
+                                        cJSON_GetObjectItemCaseSensitive(outer, "reason");
+                                    CHECK(cJSON_IsString(reason));
+                                    CHECK(std::strcmp(reason->valuestring,
+                                                      expected ? "success" : "stale or unavailable") == 0);
+                                    if (selected.drive_state && !has_odometer) {
+                                        // evcc rejects <= 0, so an absent odometer must read 0.
+                                        const cJSON* response =
+                                            cJSON_GetObjectItemCaseSensitive(outer, "response");
+                                        const cJSON* drive =
+                                            cJSON_GetObjectItemCaseSensitive(response, "drive_state");
+                                        const cJSON* odometer =
+                                            cJSON_GetObjectItemCaseSensitive(drive, "odometer");
+                                        CHECK(cJSON_IsNumber(odometer));
+                                        CHECK(odometer->valuedouble == 0);
+                                    }
+                                }
+                                CHECK(live_allocations == 0);
+                            }
+                        }
+                    }
                 }
-                CHECK(live_allocations == 0);
             }
         }
     }
@@ -918,8 +1094,13 @@ int main() {
     exhaust_build_and_print("full /status production emitter", build_status_fixture, rest_oom);
     exhaust_build_and_print("evcc charge production reply", build_rest_fixture, rest_oom);
     exhaust_build_and_print("evcc climate production reply", build_climate_fixture, rest_oom);
+    exhaust_build_and_print("evcc drive production reply", build_drive_fixture, rest_oom);
     exhaust_build_and_print("evcc combined production reply", build_combined_fixture, rest_oom);
+    exhaust_build_and_print("evcc all-domains production reply", build_all_domains_fixture, rest_oom);
     test_evcc_vehicle_data_fields();
+    test_evcc_default_selection_excludes_drive();
+    test_evcc_absent_preconditioning_is_false_success();
+    test_evcc_stale_in_window_climate_fails();
     test_evcc_vehicle_data_failure_matrix();
     test_evcc_energy_zero();
     exhaust_build_and_print("MCP result production reply", build_mcp_result_fixture, mcp_oom);

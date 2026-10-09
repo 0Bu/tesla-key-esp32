@@ -59,24 +59,42 @@ void seal() {
 
 enum class Adoption { None, Retained, Empty };
 
-// Decide under the trend mutex; log only the fixed outcome after it is released.
-Adoption adopt_or_reset() {
+// Plain values captured under the trend mutex so the detail survives to the log call after unlock.
+struct AdoptionLog {
+    Adoption kind    = Adoption::None;
+    uint32_t samples = 0;   // retained ring sample count (Retained only)
+    uint32_t bucket  = 0;   // bucket the boot continues at (Retained only)
+    AdoptionLog() = default;
+    AdoptionLog(Adoption k) : kind(k) {}   // keeps `return Adoption::None;` the early-out spelling
+};
+
+// Decide under the trend mutex; log only the captured outcome after it is released.
+AdoptionLog adopt_or_reset() {
     if (s_ready) return Adoption::None;
     const bool retained = heap_persist_valid(persist());
+    AdoptionLog out(retained ? Adoption::Retained : Adoption::Empty);
     if (retained) {
         s_carry_s = heap_persist_next_carry(persist().ring);
+        out.samples = static_cast<uint32_t>(persist().ring.count());
+        out.bucket  = s_carry_s / kHeapHistoryDtS;
     } else {
         persist().ring.reset();
         s_carry_s = 0;
     }
     seal();
     s_ready = true;
-    return retained ? Adoption::Retained : Adoption::Empty;
+    return out;
 }
 
-void log_adoption(Adoption adopted) {
-    if (adopted == Adoption::None) return;
-    ESP_LOGI(TAG, "memory trend: %s", adopted == Adoption::Retained ? "retained" : "starting empty");
+void log_adoption(const AdoptionLog& adopted) {
+    if (adopted.kind == Adoption::None) return;
+    if (adopted.kind == Adoption::Retained) {
+        ESP_LOGI(TAG, "adopted the retained memory trend: %u samples, continuing at bucket %u",
+                 static_cast<unsigned>(adopted.samples), static_cast<unsigned>(adopted.bucket));
+    } else {
+        ESP_LOGI(TAG, "no usable retained memory trend (power-on, first boot, or a changed ring layout) "
+                      "— starting empty");
+    }
 }
 
 // Function-local static initialization serializes first use between the recorder and readers.
@@ -91,7 +109,7 @@ SemaphoreHandle_t mutex() {
 void heap_trend_record(uint32_t monotonic_s, uint32_t free_bytes, uint32_t largest_bytes) {
     SemaphoreHandle_t m = mutex();
     if (!m) return;   // no mutex, no trend — a diagnostic must never be the reason a boot fails
-    Adoption adopted{};
+    AdoptionLog adopted{};
     {
         SemGuard g(m);
         adopted = adopt_or_reset();
@@ -107,7 +125,7 @@ size_t heap_trend_snapshot(HeapTrendSample* free_out, HeapTrendSample* largest_o
     if (!free_out || !largest_out || max == 0) return 0;
     SemaphoreHandle_t m = mutex();
     if (!m) return 0;
-    Adoption adopted{};
+    AdoptionLog adopted{};
     size_t n = 0;
     {
         SemGuard g(m);
