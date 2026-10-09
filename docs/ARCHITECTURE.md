@@ -1138,9 +1138,11 @@ already retrospective, so a sample after a deep call still contains its minimum.
 `/status.sys.stack_min_free_bytes` and the MQTT device payload expose the same cached values; a task
 not started yet (or absent in safe mode) is omitted, and a genuine zero stays visible. These are
 measurements, not universal alarm thresholds — sizes and call paths differ per target. The manual
-bench-report gate uses one-eighth-of-stack policy floors (`httpd` and `vehicle` ≥ 1024 B, `mqtt` ≥
-768 B, optional `auto_pair` ≥ 1024 B when present; derived from the 8192/10240/6144/8192-byte stacks; the `vehicle` floor stays 1024 B),
-described with the bench workflow in [`FEATURES.md` §6](FEATURES.md#6-build-test-and-ci).
+bench-report gate uses fixed policy floors (`httpd` and `vehicle` ≥ 1024 B, `mqtt` ≥
+768 B, optional `auto_pair` ≥ 1024 B when present). They were set at one eighth of the stacks at
+the time (8192 B, 6144 B for `mqtt`); when `vehicle_loop` grew to 10240 B its floor was kept at
+1024 B, so the larger stack adds reserve instead of raising the bar. The floors are described with
+the bench workflow in [`FEATURES.md` §6](FEATURES.md#6-build-test-and-ci).
 
 ### Atomics doctrine
 

@@ -299,8 +299,8 @@ bool VehicleController::start_tasks() {
     }
 
     TaskHandle_t loop_task = nullptr;
-    // 10240 B: a paired ESP32-S3 at 1.6.3-dev.4 measured 444 B minimum free of the former 8192 B
-    // (CarServer/VCSEC path); the loop_task_fn_ root frame grew by 112 B in #375. This leaves ~2.3 KB.
+    // 10240 B: a paired ESP32-S3 at 1.6.3-dev.4 reported 444 B minimum free of the former 8192 B;
+    // #375 grew the loop_task_fn_ root frame by 112 B. Projected (not yet measured) reserve ~2.3 KB.
     if (xTaskCreate(loop_task_fn_, "vehicle_loop", 10240, this,
                     tk::kPrioVehicleLoop, &loop_task) != pdPASS) {
         ESP_LOGE(TAG, "vehicle_loop task creation failed");
