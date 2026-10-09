@@ -42,7 +42,7 @@ The architecture is implemented according to the reference specifications:
 
 ### 2. Platform-Forced Departures and Reference Deviations
 
-The reference is written in Go, relying on goroutines, runtime-managed channels, garbage collection, and dynamic heap allocation. On ESP32 with FreeRTOS and tight memory constraints (8192 B `vehicle_loop` stack), the following deliberate adaptations and departures from `vehicle-command` are made:
+The reference is written in Go, relying on goroutines, runtime-managed channels, garbage collection, and dynamic heap allocation. On ESP32 with FreeRTOS and tight memory constraints (10240 B `vehicle_loop` stack), the following deliberate adaptations and departures from `vehicle-command` are made:
 - **No goroutines / channels**: Replaced by deterministic FreeRTOS queues (`ble_event_queue_`) and the single `vehicle_loop` execution thread.
 - **Bounded vector buffers**: `tk::RxFramer` uses a `std::vector<uint8_t>` capped strictly to `kMaxFrameLength = 2048` (+2 length header bytes), avoiding unbounded heap allocation while preserving stack budget.
 - **Max frame length (2048 vs 1024 B)**: `ble.go:21` defines `maxBLEMessageSize = 1024`. tesla-ble's own reassembly used `Vehicle::MAX_MESSAGE_SIZE = 2048` (in the `Vehicle` class this firmware no longer calls), while a `UniversalMessage_RoutableMessage` is at most 741 B. `kMaxFrameLength = 2048` keeps that historical tesla-ble limit.

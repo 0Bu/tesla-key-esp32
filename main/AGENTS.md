@@ -13,7 +13,7 @@ It complements the canonical repository policy in [`../AGENTS.md`](../AGENTS.md)
 
 ## 2. FreeRTOS Task Stacks
 
-- FreeRTOS tasks have small, fixed stack allocations (2.5–8 KiB; see the task inventory in [`../docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md#task-inventory)).
+- FreeRTOS tasks have small, fixed stack allocations (2.5–10 KiB; see the task inventory in [`../docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md#task-inventory)).
 - Never place large buffers, arrays, or bulky C++ objects as local variables on the task stack.
 - Use static allocations or dedicated bounded pools for large buffers.
 - Keep task stack usage verifiable and within the reviewed baseline limits (`scripts/firmware-stack-baseline.json`).
