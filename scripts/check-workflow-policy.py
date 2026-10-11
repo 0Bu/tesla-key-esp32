@@ -26,8 +26,10 @@ JOB = re.compile(r"^  ([A-Za-z0-9_-]+):\s*$", re.MULTILINE)
 UNPRIVILEGED_PERMISSIONS = {
     ("build.yml", "prepare"): {"contents": "read"},
     ("build.yml", "logic-test"): {"contents": "read"},
+    ("build.yml", "logic-harness"): {"contents": "read"},
     ("build.yml", "build-target"): {"contents": "read", "pages": "read"},
     ("build.yml", "build"): {"contents": "read", "pages": "read"},
+    ("build.yml", "independent-rebuild-target"): {"contents": "read", "pages": "read"},
     ("build.yml", "independent-rebuild"): {"contents": "read"},
     ("signed-pr-preview.yml", "validate"): {
         "actions": "read",
@@ -41,8 +43,8 @@ UNPRIVILEGED_PERMISSIONS = {
 EXPECTED_WORKFLOW_JOBS = {
     "bench-acceptance.yml": {"ingest-report"},
     "build.yml": {
-        "prepare", "logic-test", "build-target", "build", "independent-rebuild", "publish",
-        "deploy",
+        "prepare", "logic-test", "logic-harness", "build-target", "build",
+        "independent-rebuild-target", "independent-rebuild", "publish", "deploy",
     },
     "pr-policy.yml": {"current-head-records"},
     "pr-preview-cleanup.yml": {"cleanup-event", "discover-stale", "reconcile-stale"},
@@ -63,24 +65,26 @@ EXPECTED_JOB_PERMISSIONS = {
     ("bench-acceptance.yml", "ingest-report"): {"contents": "read"},
     ("build.yml", "prepare"): {"contents": "read"},
     ("build.yml", "logic-test"): {"contents": "read"},
+    ("build.yml", "logic-harness"): {"contents": "read"},
     ("build.yml", "build-target"): {"contents": "read", "pages": "read"},
     ("build.yml", "build"): {"contents": "read", "pages": "read"},
+    ("build.yml", "independent-rebuild-target"): {"contents": "read", "pages": "read"},
     ("build.yml", "independent-rebuild"): {"contents": "read"},
     ("build.yml", "publish"): {"actions": "read", "contents": "write", "pages": "read"},
     ("build.yml", "deploy"): {
-        "actions": "read", "contents": "write", "pages": "read",
+        "actions": "read", "contents": "write", "pages": "write",
     },
     ("pr-policy.yml", "current-head-records"): {
         "contents": "read", "pull-requests": "read",
     },
     ("pr-preview-cleanup.yml", "cleanup-event"): {
-        "contents": "write", "pages": "read",
+        "contents": "write", "pages": "write", "pull-requests": "read",
     },
     ("pr-preview-cleanup.yml", "discover-stale"): {
         "contents": "read", "pull-requests": "read",
     },
     ("pr-preview-cleanup.yml", "reconcile-stale"): {
-        "contents": "write", "pages": "read", "pull-requests": "read",
+        "contents": "write", "pages": "write", "pull-requests": "read",
     },
     ("renovate.yaml", "renovate"): {"contents": "read", "pull-requests": "write"},
     ("signed-pr-preview.yml", "validate"): {
@@ -88,7 +92,7 @@ EXPECTED_JOB_PERMISSIONS = {
     },
     ("signed-pr-preview.yml", "trusted-rebuild"): {"contents": "read"},
     ("signed-pr-preview.yml", "sign-preview"): {
-        "actions": "read", "contents": "write", "pages": "read",
+        "actions": "read", "contents": "write", "pages": "write",
         "pull-requests": "read",
     },
 }
@@ -102,6 +106,9 @@ EXPECTED_ACTIONS = {
         "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
     ),
     ("build.yml", "logic-test"): (
+        "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+    ),
+    ("build.yml", "logic-harness"): (
         "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
     ),
     ("build.yml", "build-target"): (
@@ -118,9 +125,14 @@ EXPECTED_ACTIONS = {
         "espressif/esp-idf-ci-action@e6f5c74232b1ccd4c97ed641f1e48553853f1fd5",
         "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
     ),
-    ("build.yml", "independent-rebuild"): (
+    ("build.yml", "independent-rebuild-target"): (
         "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
         "espressif/esp-idf-ci-action@e6f5c74232b1ccd4c97ed641f1e48553853f1fd5",
+        "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
+    ),
+    ("build.yml", "independent-rebuild"): (
+        "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+        "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c",
         "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
     ),
     ("build.yml", "publish"): (
@@ -165,7 +177,7 @@ EXPECTED_ACTIONS = {
 EXPECTED_SECRET_REFERENCES = {
     ("build.yml", "publish"): Counter({"OTA_SIGNING_KEY": 1}),
     ("build.yml", "deploy"): Counter({"GITHUB_TOKEN": 3}),
-    ("pr-preview-cleanup.yml", "cleanup-event"): Counter({"GITHUB_TOKEN": 1}),
+    ("pr-preview-cleanup.yml", "cleanup-event"): Counter({"GITHUB_TOKEN": 2}),
     ("pr-preview-cleanup.yml", "discover-stale"): Counter({"GITHUB_TOKEN": 1}),
     ("pr-preview-cleanup.yml", "reconcile-stale"): Counter({"GITHUB_TOKEN": 2}),
     ("renovate.yaml", "renovate"): Counter({"RENOVATE_TOKEN": 1}),
@@ -184,8 +196,8 @@ SIGNING_ENVIRONMENT_JOBS = {
 # checks below keep failures explanatory; this final digest closes gaps in the narrow scanner.
 EXPECTED_PRIVILEGED_JOB_SHA256 = {
     ("build.yml", "publish"): "7282303dac6098fa7fc04f44c6abb115d838f69dd3aea9c58f4aa1de22ec2a1f",
-    ("build.yml", "deploy"): "c66b1776211c94815fe96bcb821e0e18fcbcfed56143cd0dc6a7ebfa5ef75be8",
-    ("signed-pr-preview.yml", "sign-preview"): "18d34f6a9aae2add8b5af9cb69c3af3c391205cb2b795e45f62a150674cce4a7",
+    ("build.yml", "deploy"): "ca78910e478a363560646a64ff747ed773cdb4e590a7fcb1dbd2fcfc295f4f49",
+    ("signed-pr-preview.yml", "sign-preview"): "c18a38d6ecdfd36e1ee4ef3ae7e09ea137470bab4eba845bedb5156d645e0452",
 }
 TRUSTED_DEFAULT_ENV = "TRUSTED_DEFAULT_SHA: ${{ github.sha }}"
 TRUSTED_DEFAULT_FETCH = "git fetch --no-tags origin"
@@ -398,8 +410,8 @@ def validate(root: Path) -> None:
     build = jobs_by_file.get("build.yml")
     require(build is not None, "build.yml is missing")
     for name in (
-        "prepare", "logic-test", "build-target", "build", "independent-rebuild", "publish",
-        "deploy",
+        "prepare", "logic-test", "logic-harness", "build-target", "build",
+        "independent-rebuild-target", "independent-rebuild", "publish", "deploy",
     ):
         require(name in build, f"build.yml:{name} job is missing")
     # build-target no longer waits for the host tests (only for the run mode / version), so a red
@@ -408,10 +420,18 @@ def validate(root: Path) -> None:
             "build.yml:build-target must need prepare")
     require(job_has_need(build["build"], "prepare"), "build.yml:build must need prepare")
     require(job_has_need(build["build"], "logic-test"), "build.yml:build must need logic-test")
+    require(job_has_need(build["build"], "logic-harness"),
+            "build.yml:build must need logic-harness")
     require(job_has_need(build["build"], "build-target"),
             "build.yml:build must need build-target")
+    # The four independent legs only need the run mode/version (prepare), so they run concurrently
+    # with the producer builds; the join needs both the producer's display version and every leg.
+    require(job_has_need(build["independent-rebuild-target"], "prepare"),
+            "build.yml:independent-rebuild-target must need prepare")
     require(job_has_need(build["independent-rebuild"], "build"),
             "build.yml:independent-rebuild must need build")
+    require(job_has_need(build["independent-rebuild"], "independent-rebuild-target"),
+            "build.yml:independent-rebuild must need independent-rebuild-target")
     require(job_has_need(build["publish"], "build") and
             job_has_need(build["publish"], "independent-rebuild"),
             "build.yml:publish must need both producer and independent rebuild")
@@ -423,10 +443,10 @@ def validate(root: Path) -> None:
             "build.yml:logic-test must run the fail-closed host gate")
     require("./scripts/repo-lint.sh" in build["logic-test"],
             "build.yml:logic-test must run offline repository lint")
-    require("./scripts/run-sanitizer-tests.sh --self-test" in build["logic-test"] and
-            "./scripts/run-sanitizer-tests.sh" in build["logic-test"],
+    require("./scripts/run-sanitizer-tests.sh --self-test" in build["logic-harness"] and
+            "./scripts/run-sanitizer-tests.sh" in build["logic-harness"],
             "build.yml:logic-test must prove and run ASan/UBSan/LSan")
-    require("python3 scripts/check-build-gate-contract.py --self-test" in build["logic-test"],
+    require("python3 scripts/check-build-gate-contract.py --self-test" in build["logic-harness"],
             "build.yml:logic-test must run the mutation-tested four-target build contract")
     build_target_refs = re.findall(
         r"^\s+ref:\s*([^\n#]+?)\s*$", build["build-target"], re.MULTILINE
@@ -475,22 +495,42 @@ def validate(root: Path) -> None:
         and "cache-scope" not in build["build"],
         "build.yml:build provenance must bind ci-build-verify to the exact PR head",
     )
-    rebuild_refs = re.findall(
-        r"^\s+ref:\s*([^\n#]+?)\s*$", build["independent-rebuild"], re.MULTILINE
+    leg = build["independent-rebuild-target"]
+    join = build["independent-rebuild"]
+    for label, job in (("independent-rebuild-target", leg), ("independent-rebuild", join)):
+        job_refs = re.findall(r"^\s+ref:\s*([^\n#]+?)\s*$", job, re.MULTILINE)
+        require(
+            job_refs == ["${{ github.sha }}"]
+            and "persist-credentials: false" in job
+            and "(github.event_name == 'push' || github.event_name == 'workflow_dispatch')" in job
+            and "github.ref == 'refs/heads/main'" in job
+            and "environment:" not in job
+            and "contents: write" not in job
+            and "actions/cache@" not in job,
+            f"build.yml:{label} must be exact-head, key/write/environment/cache-free",
+        )
+    require(
+        "./scripts/ci-build-all.sh" in leg
+        and '--target "${{ matrix.target }}"' in leg
+        and '"${{ github.sha }}"' in leg
+        and '"${{ needs.prepare.outputs.release-version }}"' in leg
+        and "printf '%s\\n' \"$DISPLAY_VERSION\" > version.txt" in leg
+        and "needs.prepare.outputs.mode != 'test'" in leg
+        and "name: firmware-independent-target-${{ matrix.target }}" in leg,
+        "build.yml:independent-rebuild-target must rebuild one target from the exact source and "
+        "release version",
     )
     require(
-        rebuild_refs == ["${{ github.sha }}"]
-        and "./scripts/ci-build-all.sh" in build["independent-rebuild"]
-        and "printf '%s\\n' \"$DISPLAY_VERSION\" > version.txt" in build["independent-rebuild"]
-        and '"${{ github.sha }}"' in build["independent-rebuild"]
-        and "name: firmware-independent-rebuild" in build["independent-rebuild"]
-        and "(github.event_name == 'push' || github.event_name == 'workflow_dispatch')"
-        in build["independent-rebuild"]
-        and "github.ref == 'refs/heads/main'" in build["independent-rebuild"]
-        and "environment:" not in build["independent-rebuild"]
-        and "contents: write" not in build["independent-rebuild"]
-        and "actions/cache@" not in build["independent-rebuild"],
-        "build.yml:independent-rebuild must be exact-head, key/write/environment/cache-free",
+        "printf '%s\\n' \"$DISPLAY_VERSION\" > version.txt" in join
+        and "pattern: firmware-independent-target-*" in join
+        and "python3 scripts/check-build-artifact-inventory.py" in join
+        and "--write --artifact-root . --source-root ." in join
+        and '--expected-source-sha "$SOURCE_SHA" --version "$DISPLAY_VERSION"' in join
+        and "needs.build.outputs.mode != 'test'" in join
+        and "needs.build.outputs.firmware == 'yes'" in join
+        and "name: firmware-independent-rebuild" in join,
+        "build.yml:independent-rebuild must bind the independent legs to the exact source and "
+        "producer version",
     )
     require("environment: firmware-signing" in build["publish"],
             "build.yml:publish must retain the signing environment")
@@ -512,7 +552,7 @@ def validate(root: Path) -> None:
     )
     require(
         job_permissions(build["deploy"], "build.yml:deploy")
-        == {"actions": "read", "contents": "write", "pages": "read"}
+        == {"actions": "read", "contents": "write", "pages": "write"}
         and "environment:" not in build["deploy"]
         and "OTA_SIGNING_KEY" not in build["deploy"]
         and "id-token" not in build["deploy"],
@@ -779,6 +819,10 @@ def validate(root: Path) -> None:
         "build.yml:deploy must include dev branch publication",
     )
     dev_revalidation = "- name: Revalidate current main immediately before dev deployment"
+    dev_publish = deploy[deploy.index("- name: Deploy dev site to gh-pages"):
+                         deploy.index("- name: Accept branch-served Pages against dev build artifacts")]
+    require("SOURCE_SHA: ${{ github.sha }}" in dev_publish,
+            "build.yml:deploy must bind every dev publisher retry to the exact workflow source SHA")
     require(
         dev_revalidation in deploy
         and deploy.index(dev_revalidation) < deploy.index("- name: Deploy dev site to gh-pages")
@@ -789,6 +833,7 @@ def validate(root: Path) -> None:
     )
     require("contents: write" not in build["prepare"]
             and "contents: write" not in build["logic-test"]
+            and "contents: write" not in build["logic-harness"]
             and "contents: write" not in build["build"],
             "build.yml: untrusted build jobs must not write repository contents")
     require(
@@ -835,7 +880,7 @@ def validate(root: Path) -> None:
         == {
             "actions": "read",
             "contents": "write",
-            "pages": "read",
+            "pages": "write",
             "pull-requests": "read",
         },
         "signed-pr-preview.yml protected permissions must be exact for artifact, PR and branch-backed Pages access",
@@ -986,9 +1031,9 @@ def validate(root: Path) -> None:
             "pr-preview-cleanup.yml reconciliation DAG drifted")
     require(
         job_permissions(cleanup["cleanup-event"], "pr-preview-cleanup.yml:cleanup-event")
-        == {"contents": "write", "pages": "read"}
+        == {"contents": "write", "pages": "write", "pull-requests": "read"}
         and job_permissions(cleanup["reconcile-stale"], "pr-preview-cleanup.yml:reconcile-stale")
-        == {"contents": "write", "pages": "read", "pull-requests": "read"},
+        == {"contents": "write", "pages": "write", "pull-requests": "read"},
         "pr-preview-cleanup.yml mutator permissions must retain exact branch and Pages-read scope",
     )
     cleanup_text = contents["pr-preview-cleanup.yml"]
@@ -1005,7 +1050,7 @@ def validate(root: Path) -> None:
         cleanup["cleanup-event"].count(cleanup_source) == 1
         and cleanup["reconcile-stale"].count(cleanup_source) == 1
         and cleanup["cleanup-event"].index(cleanup_source)
-        < cleanup["cleanup-event"].index("./scripts/publish-pages-branch.sh rm")
+        < cleanup["cleanup-event"].index("./scripts/reconcile-pr-previews.sh remove-if-stale")
         and cleanup["reconcile-stale"].index(cleanup_source)
         < cleanup["reconcile-stale"].index("./scripts/reconcile-pr-previews.sh remove-if-stale"),
         "pr-preview-cleanup.yml must validate branch-backed Pages before every branch mutation",
@@ -1210,10 +1255,15 @@ def self_test(root: Path) -> None:
          "permissions:\n  contents: read\n  issues: write\n",
          "top-level permissions must be exact"),
         ("build-dag", "build.yml", "    needs: prepare\n", "", "must need prepare"),
-        ("build-host-gate", "build.yml", "    needs: [prepare, logic-test, build-target]\n",
-         "    needs: [prepare, build-target]\n", "build must need logic-test"),
-        ("build-run-mode", "build.yml", "    needs: [prepare, logic-test, build-target]\n",
-         "    needs: [logic-test, build-target]\n", "build must need prepare"),
+        ("build-host-gate", "build.yml",
+         "    needs: [prepare, logic-test, logic-harness, build-target]\n",
+         "    needs: [prepare, logic-harness, build-target]\n", "build must need logic-test"),
+        ("build-run-mode", "build.yml",
+         "    needs: [prepare, logic-test, logic-harness, build-target]\n",
+         "    needs: [logic-test, logic-harness, build-target]\n", "build must need prepare"),
+        ("build-host-harness", "build.yml",
+         "    needs: [prepare, logic-test, logic-harness, build-target]\n",
+         "    needs: [prepare, logic-test, build-target]\n", "build must need logic-harness"),
         ("repro-leg-dropped", "build.yml", "|| '[\"primary\",\"reproduction\"]'", "|| '[\"primary\"]'",
          "parallel reproduction leg"),
         ("repro-skip-dropped", "build.yml", "            --skip-repro\n", "",
@@ -1329,6 +1379,11 @@ def self_test(root: Path) -> None:
          "      - name: Deploy dev site to gh-pages",
          "true\n\n      - name: Deploy dev site to gh-pages",
          "refetch current main immediately before the in-place dev channel write"),
+        ("dev-publisher-source-binding-removed", "build.yml",
+         "          SOURCE_SHA: ${{ github.sha }}\n"
+         "        run: ./scripts/publish-pages-branch.sh dev ./_deploy-input/_site",
+         "        run: ./scripts/publish-pages-branch.sh dev ./_deploy-input/_site",
+         "every dev publisher retry"),
         ("privileged-extra-step", "build.yml",
          "      - name: Provision OTA signing key\n",
          "      - name: Unexpected privileged run\n"
@@ -1426,8 +1481,28 @@ def self_test(root: Path) -> None:
         ("preview-privileged-run-id", "signed-pr-preview.yml",
          "          run-id: ${{ github.event.workflow_run.id }}\n",
          "          run-id: ${{ github.run_id }}\n", "exact privileged job schema drift"),
-        ("protected-inventory", "build.yml", "check-build-artifact-inventory.py",
-         "missing-build-artifact-inventory.py", "compare independent bytes"),
+        ("protected-inventory", "build.yml",
+         "check-build-artifact-inventory.py \\\n            --verify --artifact-root . --compare-to _ci-independent",
+         "missing-build-artifact-inventory.py \\\n            --verify --artifact-root . --compare-to _ci-independent",
+         "compare independent bytes"),
+        ("independent-inventory-dropped", "build.yml",
+         "            --write --artifact-root . --source-root . \\\n",
+         "            --verify --artifact-root . --source-root . \\\n",
+         "must bind the independent legs"),
+        ("independent-join-legs", "build.yml",
+         "    needs: [build, independent-rebuild-target]\n", "    needs: build\n",
+         "must need independent-rebuild-target"),
+        ("independent-legs-need-prepare", "build.yml",
+         "    needs: prepare\n    if: >-\n      github.ref == 'refs/heads/main'\n",
+         "    needs: build\n    if: >-\n      github.ref == 'refs/heads/main'\n",
+         "independent-rebuild-target must need prepare"),
+        ("independent-legs-main-only", "build.yml",
+         "    if: >-\n      github.ref == 'refs/heads/main'\n"
+         "      && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')\n"
+         "      && needs.prepare.outputs.mode != 'test'\n",
+         "    if: >-\n      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')\n"
+         "      && needs.prepare.outputs.mode != 'test'\n",
+         "exact-head, key/write/environment/cache-free"),
         ("protected-independent-compare", "build.yml", "--compare-to _ci-independent",
          "--compare-to .", "compare independent bytes"),
         ("final-release-metadata", "build.yml", '--release-json "$release_json"',

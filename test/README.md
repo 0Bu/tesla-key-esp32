@@ -12,6 +12,7 @@ scripts/run-mock-tests.sh --require-all # fail closed: CI/Stop prerequisites are
 ```
 
 Normal mode needs a C++17 compiler, using CMake when present or equivalent direct compilation.
+The separate real v5.3.0 tesla-ble/PSA harness requires C++20; pure firmware logic remains C++17.
 Strict mode requires Git, Python, Node, CMake, compiler and every gate file, with bounded subprocesses.
 Missing tooling is failure, not reduced coverage reported green. Binaries stop on a failed CHECK.
 
@@ -23,7 +24,9 @@ cmake --build build_mock
 ctest --test-dir build_mock --output-on-failure
 ```
 
-CI runs the host gate alongside per-target compiles; final `build` requires both. Linux sanitizer
+CI splits host evidence into `logic-test` and `logic-harness`; both run alongside producer and
+independent per-target compiles, and final `build` requires both host jobs. Python gates use
+`scripts/with-host-python.sh` (Python ≥3.11). Linux sanitizer
 checks use ASan, UBSan and LSan, with deliberate tripwires proving the detectors work, plus a fixed-seed
 20,000-case fuzz corpus. Local host evidence is distinct from remote CI.
 
@@ -42,6 +45,8 @@ behavior claims. Mirrored C++/Python/JS presenters need parity checks, not merel
 | Public protocol vectors | `tesla_protocol_vectors.test.mjs`: VIN, ECDH/HMAC/AES-GCM and patch contracts, public test keys only |
 | External JSON contract | Golden status output, command registry/bounds, MQTT registry/fields/presence and exact MCP IDs |
 
+The v5.3.0 real-library harness also checks fresh/forced/established/cleared-secret peer admission,
+monotonic session counters, domain request-hash isolation and invalid-domain lookup.
 The crypto harness checks official client/session derivation, HMAC/tag, AES-GCM, response-counter
 AAD (different from request counter), tampered-tag refusal, PEM compatibility and invalid keys.
 Firmware key fingerprint uses a host mirror because the IDF function is not compiled on the host.
@@ -57,7 +62,7 @@ Presenter parity likewise proves decisions, not physical pixels.
 | `run-mqtt-json-publish-tests.sh` | Every production discovery/state factory, full/minimal branches and all registry rows; build/print/publish faults cannot replace retained data and rearm discovery |
 | `scripts/check-nvs-contract.py` | Exact registered namespace/key/API/owner/retention/secrecy surface, session aliases and direct NVS calls; wrong-name/API/collision/missing-record mutations |
 | `scripts/repo-lint.sh` | Syntax/local links, workflow-policy and host-gate mutation canaries, logic ownership and protocol wiring |
-| `tools/agent-config/selftest.sh` | Canonical skills/reviewers/hooks, read-only scopes, owner contracts, exact content and approval/artifact canaries |
+| `tools/agent-config/selftest.sh` / `test_codex_setup.py` | Canonical skills/reviewers/hooks, native adapter parity/trust boundaries, read-only scopes, owner contracts, exact content and approval/artifact canaries |
 | `scripts/test-build-contracts.sh` | Targets, pins, partitions, generated artifacts, size/stack/effective-build and publication contracts; no real signing key |
 | `scripts/test-pr-gates.sh` | Exact-head review records, relevance and canonical Git command boundaries using fixtures |
 | `web_ui_browser_gate.py` | Actual assembled page in Chrome/Chromium: console/request failures, degraded poller, escaping, keyboard/accessibility and desktop/mobile layout |

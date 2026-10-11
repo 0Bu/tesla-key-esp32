@@ -6,9 +6,12 @@
 #
 # Usage: scripts/run-mock-tests.sh [--require-all]
 # Requires: a C++17 host compiler (g++/clang++); cmake is used when present, with a
-# direct-compiler fallback otherwise (see test/CMakeLists.txt, whose targets and flags the
-# fallback mirrors). See test/README.md.
+# direct-compiler fallback otherwise in normal mode (see test/CMakeLists.txt, whose targets
+# and flags the fallback mirrors; --require-all strictly requires cmake). See test/README.md.
 set -euo pipefail
+if ! python3 -c 'import sys; raise SystemExit(sys.version_info < (3, 11))' >/dev/null 2>&1; then
+    exec bash "$(cd "$(dirname "$0")" && pwd)/with-host-python.sh" bash "$0" "$@"
+fi
 
 cd "$(dirname "$0")/.."
 
@@ -67,6 +70,7 @@ if [ "$REQUIRE_ALL" = 1 ]; then
         test/test_capture_wake.py \
         test/test_log_origin_contract.py \
         test/test_runtime_boundary_contract.py \
+        test/test_codex_setup.py \
         scripts/test-build-contracts.sh \
         scripts/check-dependency-contract.py \
         scripts/check-otadata-contract.py \
@@ -131,6 +135,7 @@ if command -v python3 >/dev/null 2>&1; then
     run_gate "capture wake tests" 120 python3 test/test_capture_wake.py
     run_gate "log origin contract" 120 python3 test/test_log_origin_contract.py
     run_gate "runtime C-boundary inventory" 120 python3 test/test_runtime_boundary_contract.py
+    run_gate "native Codex hook payload contract" 120 python3 test/test_codex_setup.py
     run_gate "build contract tests" 120 scripts/test-build-contracts.sh
     run_gate "exact pinned dependency contract" 120 \
         python3 scripts/check-dependency-contract.py --self-test

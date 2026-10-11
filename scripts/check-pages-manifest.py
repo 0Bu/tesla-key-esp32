@@ -108,7 +108,7 @@ def validate(site: pathlib.Path, expected_source: str | None, expected_version: 
                 raise ManifestError(f"{chip}/{name}: invalid part fields")
             if part["path"] != name or pathlib.PurePosixPath(name).name != name:
                 raise ManifestError(f"{chip}: unexpected/non-local part path {part['path']!r}")
-            if part["offset"] != offset:
+            if type(part["offset"]) is not int or part["offset"] != offset:
                 raise ManifestError(f"{chip}/{name}: expected offset {offset}, got {part['offset']}")
             size = part["size"]
             if not isinstance(size, int) or isinstance(size, bool) or not min_size <= size <= max_size:

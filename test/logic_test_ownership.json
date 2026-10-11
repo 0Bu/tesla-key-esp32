@@ -59,7 +59,7 @@
     "task_start_gate.hpp": {"test": "test/test_logic.cpp", "evidence": "test_task_start_gate("},
     "ui_state.hpp": {"test": "test/test_logic.cpp", "evidence": "test_display_helpers("},
     "units.hpp": {"test": "test/test_logic.cpp", "evidence": "test_units("},
-    "vehicle_data.hpp": {"test": "test/test_logic.cpp", "evidence": "test_status_model("},
+    "vehicle_data.hpp": {"test": "test/test_logic.cpp", "evidence": "test_vehicle_data("},
     "vin.hpp": {"test": "test/test_logic.cpp", "evidence": "test_vin("},
     "vin_transition.hpp": {"test": "test/test_logic.cpp", "evidence": "test_vin_transition("},
     "wake_poll.hpp": {"test": "test/test_logic.cpp", "evidence": "test_wake_poll("},

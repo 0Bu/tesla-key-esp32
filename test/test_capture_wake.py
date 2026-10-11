@@ -4,6 +4,7 @@ import stat
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "scripts"))
 import capture_wake  # noqa: E402
@@ -57,6 +58,34 @@ class CaptureWakePrivacyTests(unittest.TestCase):
         with self.assertRaisesRegex(OSError, "wake-capture"):
             capture_wake.open_private_log(unsafe)
         self.assertFalse(unsafe.exists())
+
+
+class CaptureWakeClientContractTests(unittest.TestCase):
+    @unittest.mock.patch("urllib.request.urlopen")
+    def test_http_get_sets_custom_header(self, mock_urlopen):
+        mock_resp = unittest.mock.MagicMock()
+        mock_resp.read.return_value = b'{"status":"ok"}'
+        mock_urlopen.return_value.__enter__.return_value = mock_resp
+
+        result = capture_wake.http_get("http://127.0.0.1/status")
+        self.assertEqual(result, '{"status":"ok"}')
+        self.assertTrue(mock_urlopen.called)
+        req = mock_urlopen.call_args[0][0]
+        self.assertEqual(req.get_method(), "GET")
+        self.assertEqual(req.get_header("X-requested-with"), "capture_wake")
+
+    @unittest.mock.patch("urllib.request.urlopen")
+    def test_http_post_sets_custom_header(self, mock_urlopen):
+        mock_resp = unittest.mock.MagicMock()
+        mock_resp.read.return_value = b'{"status":"ok"}'
+        mock_urlopen.return_value.__enter__.return_value = mock_resp
+
+        result = capture_wake.http_post("http://127.0.0.1/diag?clear=1&verbose=1")
+        self.assertEqual(result, '{"status":"ok"}')
+        self.assertTrue(mock_urlopen.called)
+        req = mock_urlopen.call_args[0][0]
+        self.assertEqual(req.get_method(), "POST")
+        self.assertEqual(req.get_header("X-requested-with"), "capture_wake")
 
 
 if __name__ == "__main__":

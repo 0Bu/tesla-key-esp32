@@ -36,8 +36,8 @@ upstream. The evaluation recorded in #61 found no reason for a fork:
   `mbedtls_pk` remains only for SEC1 PEM import/export, so stored keys and pairings survive. The
   firmware's key-fingerprint helper moved to the same public PK→PSA path. A failed RNG read for a
   GCM nonce now fails `encrypt` instead of encrypting under an unfilled nonce.
-- **Response authentication — the one behaviour change.** Upstream computes the AES-GCM tag of an
-  encrypted response (`mbedtls_gcm_finish`) and never compares it, so the ESP-IDF 5 firmware
+- **Response authentication — the one behaviour change in September.** Upstream v5.2.0 computed the AES-GCM tag of an
+  encrypted response (`mbedtls_gcm_finish`) and never compared it, so the ESP-IDF 5 firmware
   accepted any response tag. `psa_aead_verify` compares it, and 0006 keeps that, as
   vehicle-command's `Signer.Decrypt` does. Verifying the tag exposed an upstream departure the
   unchecked tag had hidden: tesla-ble built the response metadata from its own request counter,
@@ -112,6 +112,17 @@ upstream. The evaluation recorded in #61 found no reason for a fork:
   `CONFIG_ESP_HTTP_CLIENT_STRICT_HEADER_BUFFER` and `CONFIG_ESP_HTTPS_OTA_VERIFY_SPI_MODE` are on.
   Assertions stay enabled in silent mode, so `CONFIG_COMPILER_ASSERT_NDEBUG_EVALUATE=n` has no
   effect, and `CONFIG_FREERTOS_ISR_STACKSIZE` stays 2096 because the core dump is enabled.
+
+## Rebase onto v5.3.0 (2026-10-11)
+
+The new release fixes response-tag verification and response-counter metadata upstream, but still
+uses the Mbed TLS 3 crypto API. Patch 0006 remains necessary and is rebased onto v5.3.0. Its
+legacy caller edits in `client.cpp` and `vehicle.cpp` are retired because upstream now passes the
+response counter itself. The PSA implementation preserves authenticated decryption, failure
+wiping, wire bytes and PEM/NVS key reuse; the separate response-AAD helper remains an explicit
+API departure in ADR-0005. New upstream peer-validity logic is retained: session metadata without
+a shared secret cannot initialize a fresh peer. The V1 vectors and real-library session/hash
+regressions are the migration contract; build results alone do not prove vehicle acceptance.
 
 ## Consequences
 

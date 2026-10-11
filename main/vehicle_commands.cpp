@@ -156,7 +156,7 @@ void VehicleController::invalidate_and_flush_(uint32_t generation) {
             command_builders_.fill(nullptr);
             request_framer_reset_();
             command_runner_.dispatcher().reset();
-            vcsec_sleep_state_.store(static_cast<int>(tk::SleepState::Unknown));
+            mark_vcsec_unknown_();
         } catch (const std::exception& e) {
             ESP_LOGE(TAG, "command FIFO flush threw (%s) — forcing BLE reset", e.what());
             ble_fault_.store(true);

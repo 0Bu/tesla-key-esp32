@@ -320,6 +320,100 @@ static void test_key_rotation() {
     CHECK(tk::decide_key_rotation_boot(true, true, true, false) == B::Blocked);
     CHECK(tk::decide_key_rotation_boot(true, true, true, true) == B::Ready);
 
+    // The erase sequences the firmware runs, driven through a fault-injecting storage that logs
+    // every remove() in order. test_nvs_storage.cpp runs the same templates against the real
+    // NvsStorageAdapter; this fake keeps the ordering contract in the logic suite.
+    namespace NC = tk::nvs_contract;
+    struct FakeStorage {
+        std::vector<std::string> failing;
+        std::vector<std::string> calls;
+        bool remove(const std::string& key) {
+            calls.push_back(key);
+            return std::find(failing.begin(), failing.end(), key) == failing.end();
+        }
+        bool attempted(const std::string& key) const {
+            return std::find(calls.begin(), calls.end(), key) != calls.end();
+        }
+    };
+    const std::string marker = tk::kKeyRotationMarker;
+    const std::vector<std::string> peers = {NC::kSessionVcsec, NC::kSessionInfotainment,
+                                            NC::kPairedAt, NC::kKeyCreated};
+
+    {   // Healthy boot recovery: every peer record incl. key_created, journal strictly LAST.
+        FakeStorage s;
+        const tk::KeyRotationBootCleanup c = tk::run_key_rotation_boot_cleanup(s);
+        CHECK(c.date_removed && c.peers_erased() && c.marker_removed);
+        CHECK(c.state() == B::Ready);
+        CHECK((s.calls == std::vector<std::string>{NC::kSessionVcsec, NC::kSessionInfotainment,
+                                                   NC::kPairedAt, NC::kKeyCreated, marker}));
+    }
+    for (const std::string& failing_key : peers) {
+        // Any single failed peer erase blocks boot, never touches the journal, and does NOT
+        // stop the remaining erases (each commits on its own and is idempotent on retry).
+        FakeStorage s;
+        s.failing = {failing_key};
+        const tk::KeyRotationBootCleanup c = tk::run_key_rotation_boot_cleanup(s);
+        CHECK(!c.peers_erased());
+        CHECK(!c.marker_removed);
+        CHECK(c.state() == B::Blocked);
+        CHECK(!s.attempted(marker));
+        CHECK(s.calls == peers);
+    }
+    {   // A failed erase of key_created is a failure in its own right: the old key's date must
+        // not be allowed to outlive its key beside the new fingerprint after a reboot.
+        FakeStorage s;
+        s.failing = {NC::kKeyCreated};
+        const tk::KeyRotationBootCleanup c = tk::run_key_rotation_boot_cleanup(s);
+        CHECK(c.vcsec_removed && c.info_removed && c.paired_removed);
+        CHECK(!c.date_removed);
+        CHECK(c.state() == B::Blocked);
+    }
+    {   // Everything erased but the journal itself: still blocked, and the retry is the same
+        // idempotent sequence.
+        FakeStorage s;
+        s.failing = {marker};
+        const tk::KeyRotationBootCleanup c = tk::run_key_rotation_boot_cleanup(s);
+        CHECK(c.peers_erased() && !c.marker_removed);
+        CHECK(c.state() == B::Blocked);
+        CHECK(s.calls.back() == marker);
+    }
+
+    using J = tk::KeyRotationJournalRetire;
+    {   // Trusted date: key_created is left alone, only the journal is removed.
+        FakeStorage s;
+        bool untrusted = false;
+        CHECK(tk::retire_key_rotation_journal(s, untrusted) == J::Retired);
+        CHECK(!untrusted);
+        CHECK((s.calls == std::vector<std::string>{marker}));
+    }
+    {   // Untrusted date: erased FIRST, the flag is cleared, then the journal.
+        FakeStorage s;
+        bool untrusted = true;
+        CHECK(tk::retire_key_rotation_journal(s, untrusted) == J::Retired);
+        CHECK(!untrusted);
+        CHECK((s.calls == std::vector<std::string>{NC::kKeyCreated, marker}));
+    }
+    {   // Untrusted date that cannot be erased: the journal stays armed (never attempted) and the
+        // date stays distrusted, so the supervisor/next boot retries.
+        FakeStorage s;
+        s.failing = {NC::kKeyCreated};
+        bool untrusted = true;
+        CHECK(tk::retire_key_rotation_journal(s, untrusted) == J::DatePending);
+        CHECK(untrusted);
+        CHECK(!s.attempted(marker));
+    }
+    {   // Date retired but the journal erase failed: the date erase is durable, so the flag is
+        // cleared and the retry only has the journal left.
+        FakeStorage s;
+        s.failing = {marker};
+        bool untrusted = true;
+        CHECK(tk::retire_key_rotation_journal(s, untrusted) == J::JournalPending);
+        CHECK(!untrusted);
+        FakeStorage retry;
+        CHECK(tk::retire_key_rotation_journal(retry, untrusted) == J::Retired);
+        CHECK((retry.calls == std::vector<std::string>{marker}));
+    }
+
     CHECK(!tk::key_rotation_committed(R::NotCommitted));
     CHECK(!tk::key_rotation_committed(R::CommitUnknown));
     CHECK(tk::key_rotation_committed(R::CleanupPending));
@@ -404,6 +498,11 @@ static void test_nvs_string_load() {
     CHECK(tk::classify_nvs_string_load(P::Ok, 8, true, 7, true) == S::Error);
     CHECK(tk::classify_nvs_string_load(P::Ok, 8, true, 9, true) == S::Error);
     CHECK(tk::classify_nvs_string_load(P::Ok, 8, true, 8, true) == S::Present);
+    // Legacy config may explicitly store an empty WiFi/MQTT/Syslog value. This exception must
+    // still reject probe/read failures and must not relax the nonempty VIN journal default.
+    CHECK(tk::classify_nvs_string_load(P::Ok, 1, true, 1, true, true) == S::Present);
+    CHECK(tk::classify_nvs_string_load(P::Ok, 1, false, 1, true, true) == S::Error);
+    CHECK(tk::classify_nvs_string_load(P::Ok, 1, true, 2, true, true) == S::Error);
 }
 
 // ─── Home Assistant vehicle identity ─────────────────────────────────────────
@@ -720,6 +819,12 @@ static void test_units() {
     // Odometer arrives in hundredths of a mile: 1,234,567 -> 12,345.67 mi -> km.
     CHECK_NEAR(tk::odo_hundredths_mi_to_km(1234567.0), 12345.67 * 1.609344);
     CHECK_NEAR(tk::odo_hundredths_mi_to_km(0.0), 0.0);
+
+    // km -> miles (the /api evcc odometer stays in miles).
+    CHECK_NEAR(tk::km_to_mi(0.0), 0.0);
+    CHECK(tk::km_to_mi(tk::kMilesToKm) == 1.0);
+    CHECK_NEAR(tk::km_to_mi(160.9344), 100.0);
+    for (double mi : {0.0, 1.0, 12345.67, 250000.0}) CHECK_NEAR(tk::km_to_mi(tk::mi_to_km(mi)), mi);
 }
 
 // Build a LinkInputs snapshot tersely.
@@ -2316,6 +2421,7 @@ static void test_vehicle_data() {
     cs1.charger_power = 11;
     cs1.charge_rate = 58.25f;
     cs1.charging_amps = 16;
+    cs1.charge_energy_added = 12.5f;
     cs1.battery_range = 280.5f;
     cs1.minutes_to_full_charge = 45;
 
@@ -2329,6 +2435,7 @@ static void test_vehicle_data() {
         "charger_power=11\n"
         "charge_rate=58.25\n"
         "charge_amps=16\n"
+        "charge_energy_added=12.5\n"
         "battery_range=280.5\n"
         "minutes_to_full_charge=45\n"));
 
@@ -2346,8 +2453,245 @@ static void test_vehicle_data() {
         "charger_power=0\n"
         "charge_rate=0\n"
         "charge_amps=0\n"
+        "charge_energy_added=0\n"
         "battery_range=0\n"
         "minutes_to_full_charge=0\n"));
+
+    // Scenario 3 — climate_state actively conditioning & defroster on (evcc climater / .is_preconditioning)
+    ClimateStateResult cl1{};
+    cl1.valid = true;
+    cl1.is_climate_on = true;
+    cl1.has_preconditioning = true;
+    cl1.is_preconditioning = true;
+    cl1.inside_temp = 21.5f;
+    cl1.outside_temp = 5.0f;
+    cl1.driver_setpoint = 22.0f;
+    cl1.front_defrost = true;
+    cl1.rear_defrost = false;
+    cl1.defrost_mode = "Normal";
+    CollectEmitter ec1;
+    tk::emit_vehicle_climate_state(cl1, ec1);
+    CHECK(golden_eq(ec1.out,
+        "is_climate_on=true\n"
+        "is_preconditioning=true\n"
+        "inside_temp=21.5\n"
+        "outside_temp=5\n"
+        "driver_temp_setting=22\n"));
+
+    const auto climate_data = tk::vehicle_climate_data(cl1);
+    CHECK(climate_data.valid && climate_data.has_preconditioning);
+    CHECK(climate_data.is_climate_on && climate_data.is_preconditioning);
+    CHECK_NEAR(climate_data.inside_temp, 21.5);
+    CHECK_NEAR(climate_data.outside_temp, 5.0);
+    CHECK_NEAR(climate_data.driver_setpoint, 22.0);
+    CollectEmitter projected;
+    tk::emit_vehicle_climate_state(climate_data, projected);
+    CHECK(projected.out == ec1.out);
+
+    // Scenario 4 — zero-initialized climate_state: every field must still be emitted so JSON parsers
+    // never hit a missing key or <nil>
+    ClimateStateResult cl2{};
+    CollectEmitter ec2;
+    tk::emit_vehicle_climate_state(cl2, ec2);
+    CHECK(golden_eq(ec2.out,
+        "is_climate_on=false\n"
+        "is_preconditioning=false\n"
+        "inside_temp=0\n"
+        "outside_temp=0\n"
+        "driver_temp_setting=0\n"));
+
+    // An unreported is_preconditioning emits false (TeslaBleHttpProxy GetIsPreconditioning());
+    // only a present-AND-true field emits true.
+    {
+        tk::VehicleClimateData absent{};
+        absent.valid = true;
+        absent.is_preconditioning = true;   // stale value behind an absent presence flag
+        CollectEmitter ea;
+        tk::emit_vehicle_climate_state(absent, ea);
+        CHECK(ea.out.find("is_preconditioning=false\n") != std::string::npos);
+        absent.has_preconditioning = true;
+        CollectEmitter er;
+        tk::emit_vehicle_climate_state(absent, er);
+        CHECK(er.out.find("is_preconditioning=true\n") != std::string::npos);
+        absent.is_preconditioning = false;
+        CollectEmitter ef;
+        tk::emit_vehicle_climate_state(absent, ef);
+        CHECK(ef.out.find("is_preconditioning=false\n") != std::string::npos);
+    }
+
+    // Climate freshness: invalid never usable; outside the window last-known at any age;
+    // inside it a sample must exist and be <= kActiveClimateStateMaxAgeS.
+    CHECK(tk::kActiveClimateStateMaxAgeS == 300);
+    CHECK(!tk::climate_cache_usable(false, false, false, 0));
+    CHECK(!tk::climate_cache_usable(false, true, true, 0));
+    CHECK(tk::climate_cache_usable(true, false, false, 0));
+    CHECK(tk::climate_cache_usable(true, false, true, 86400));
+    CHECK(!tk::climate_cache_usable(true, true, false, 0));
+    CHECK(tk::climate_cache_usable(true, true, true, 0));
+    CHECK(tk::climate_cache_usable(true, true, true, 300));
+    CHECK(!tk::climate_cache_usable(true, true, true, 301));
+    CHECK(tk::climate_cache_usable(true, true, true, tk::kActiveClimateStateMaxAgeS));
+    CHECK(!tk::climate_cache_usable(true, true, true, tk::kActiveClimateStateMaxAgeS + 1));
+
+    // drive_state: odometer in MILES, 0 when absent; projection never copies shift_state.
+    {
+        DriveStateResult dr{};
+        dr.valid = true;
+        dr.shift_state = "D";
+        dr.has_odometer = true;
+        dr.odometer_km = 1609.344f;   // 1000 mi
+        const auto dd = tk::vehicle_drive_data(dr);
+        CHECK(dd.valid && dd.has_odometer);
+        CHECK(dd.odometer_km == 1609.344f);
+        CollectEmitter ed;
+        tk::emit_vehicle_drive_state(dd, ed);
+        CHECK(golden_eq(ed.out, "odometer=1000\n"));
+        CHECK(tk::vehicle_drive_available(dd));
+
+        CollectEmitter ed2;
+        tk::emit_vehicle_drive_state(tk::VehicleDriveData{}, ed2);
+        CHECK(golden_eq(ed2.out, "odometer=0\n"));
+        // Absent odometer emits 0 even if a stale km value is left in the struct.
+        tk::VehicleDriveData stale{true, false, 1609.344f};
+        CollectEmitter ed3;
+        tk::emit_vehicle_drive_state(stale, ed3);
+        CHECK(golden_eq(ed3.out, "odometer=0\n"));
+
+        CHECK(!tk::vehicle_drive_available(tk::VehicleDriveData{}));
+        CHECK(!tk::vehicle_drive_available(stale));
+        CHECK(!tk::vehicle_drive_available(tk::VehicleDriveData{false, true, 1609.344f}));
+        CHECK(tk::vehicle_drive_available(tk::VehicleDriveData{true, true, 1609.344f}));
+    }
+
+    // Endpoint selection factories.
+    {
+        CHECK(tk::VehicleDataEndpoints{}.empty() && !tk::VehicleDataEndpoints{}.has_unsupported);
+        CHECK(tk::VehicleDataEndpoints::of(0).empty());
+        const auto all = tk::VehicleDataEndpoints::of(
+            tk::kVehicleDataCharge | tk::kVehicleDataClimate | tk::kVehicleDataDrive);
+        CHECK(all.charge_state && all.climate_state && all.drive_state && !all.has_unsupported && !all.empty());
+        const auto drive_only = tk::VehicleDataEndpoints::of(tk::kVehicleDataDrive);
+        CHECK(!drive_only.charge_state && !drive_only.climate_state && drive_only.drive_state && !drive_only.empty());
+        const auto bad = tk::VehicleDataEndpoints::unsupported();
+        CHECK(bad.empty() && bad.has_unsupported);
+        CHECK(sizeof(tk::VehicleDataEndpoints) == 1);
+    }
+
+    // vehicle_data_available: every selected domain must be ok; empty/unsupported never.
+    for (unsigned mask = 0; mask < 8; ++mask) {
+        for (unsigned oks = 0; oks < 8; ++oks) {
+            const bool charge_ok = oks & 1, climate_ok = oks & 2, drive_ok = oks & 4;
+            auto ep = tk::VehicleDataEndpoints::of(mask);
+            const bool expected = mask != 0 &&
+                (!(mask & tk::kVehicleDataCharge) || charge_ok) &&
+                (!(mask & tk::kVehicleDataClimate) || climate_ok) &&
+                (!(mask & tk::kVehicleDataDrive) || drive_ok);
+            CHECK(tk::vehicle_data_available(ep, charge_ok, climate_ok, drive_ok) == expected);
+            ep.has_unsupported = true;
+            CHECK(!tk::vehicle_data_available(ep, charge_ok, climate_ok, drive_ok));
+        }
+    }
+    CHECK(!tk::vehicle_data_available(tk::VehicleDataEndpoints::unsupported(), true, true, true));
+    CHECK(tk::parse_vehicle_data_endpoints("cached=" + std::string(120, 'x')).has_unsupported == false);
+    CHECK(tk::parse_vehicle_data_endpoints("cached=" + std::string(121, 'x')).has_unsupported);
+    CHECK(tk::parse_vehicle_data_endpoint_list({}).has_unsupported);
+
+    // Scenario 5 — endpoints query parsing
+    {
+        // No endpoints query -> both charge_state and climate_state
+        auto ep = tk::parse_vehicle_data_endpoints("");
+        CHECK(ep.charge_state && ep.climate_state && !ep.has_unsupported && !ep.empty());
+
+        // Empty pairs around an unrelated parameter -> default (charge + climate, not drive)
+        ep = tk::parse_vehicle_data_endpoints("&&");
+        CHECK(ep.charge_state && ep.climate_state && !ep.drive_state && !ep.has_unsupported && !ep.empty());
+
+        // Other query parameter without endpoints -> charge + climate, never drive
+        ep = tk::parse_vehicle_data_endpoints("cached=1");
+        CHECK(ep.charge_state && ep.climate_state && !ep.drive_state && !ep.has_unsupported && !ep.empty());
+        ep = tk::parse_vehicle_data_endpoints("cached=1&");
+        CHECK(ep.charge_state && ep.climate_state && !ep.drive_state && !ep.has_unsupported && !ep.empty());
+
+        // Explicit endpoints=charge_state (evcc standard poll)
+        ep = tk::parse_vehicle_data_endpoints("endpoints=charge_state");
+        CHECK(ep.charge_state && !ep.climate_state && !ep.has_unsupported && !ep.empty());
+
+        // endpoints=charge_state with a trailing unrelated parameter -> charge only
+        ep = tk::parse_vehicle_data_endpoints("endpoints=charge_state&cached=1");
+        CHECK(ep.charge_state && !ep.climate_state && !ep.drive_state && !ep.has_unsupported && !ep.empty());
+
+        // Selector-list parser used by the query parser
+        ep = tk::parse_vehicle_data_endpoint_list("charge_state");
+        CHECK(ep.charge_state && !ep.climate_state && !ep.has_unsupported && !ep.empty());
+
+        // Explicit endpoints=climate_state (evcc preconditioning poll)
+        ep = tk::parse_vehicle_data_endpoints("endpoints=climate_state");
+        CHECK(!ep.charge_state && ep.climate_state && !ep.has_unsupported && !ep.empty());
+
+        // Semicolon delimited (Tesla Fleet API standard)
+        ep = tk::parse_vehicle_data_endpoints("endpoints=charge_state;climate_state");
+        CHECK(ep.charge_state && ep.climate_state && !ep.has_unsupported && !ep.empty());
+
+        // Comma delimited
+        ep = tk::parse_vehicle_data_endpoints("endpoints=climate_state,charge_state");
+        CHECK(ep.charge_state && ep.climate_state && !ep.has_unsupported && !ep.empty());
+
+        // Delimited with whitespace
+        ep = tk::parse_vehicle_data_endpoints("endpoints= charge_state ; climate_state ");
+        CHECK(ep.charge_state && ep.climate_state && !ep.has_unsupported && !ep.empty());
+
+        // Multi-query parameters
+        ep = tk::parse_vehicle_data_endpoints("foo=1&endpoints=climate_state&bar=2");
+        CHECK(!ep.charge_state && ep.climate_state && !ep.has_unsupported && !ep.empty());
+
+        // Exact query keys: a suffix or a value containing endpoints= is unrelated.
+        ep = tk::parse_vehicle_data_endpoints("not_endpoints=climate_state&endpoints=charge_state");
+        CHECK(ep.charge_state && !ep.climate_state && !ep.has_unsupported);
+        ep = tk::parse_vehicle_data_endpoints("other=endpoints=climate_state");
+        CHECK(ep.charge_state && ep.climate_state && !ep.has_unsupported);
+        for (const char* encoded : {"charge_state%3Bclimate_state", "climate_state%3bcharge_state",
+                                    "charge_state%2Cclimate_state", "climate_state%2ccharge_state"}) {
+            ep = tk::parse_vehicle_data_endpoint_list(encoded);
+            CHECK(ep.charge_state && ep.climate_state && !ep.has_unsupported);
+        }
+        for (const char* invalid : {"endpoints=", "endpoints", "endpoints=charge_state&endpoints=climate_state"}) {
+            ep = tk::parse_vehicle_data_endpoints(invalid);
+            CHECK(ep.has_unsupported);
+        }
+        for (const char* invalid : {"charge_state;charge_state", "charge_state;", ";climate_state",
+                                    "charge_state,,climate_state", "charge_state%3", "charge_state%ZZ",
+                                    "charge_state%00climate_state", "charge_state%3Bunknown_state"}) {
+            ep = tk::parse_vehicle_data_endpoint_list(invalid);
+            CHECK(ep.has_unsupported);
+        }
+
+        // drive_state (evcc odometer): alone, in every delimiter form, and fail-closed variants
+        ep = tk::parse_vehicle_data_endpoints("endpoints=drive_state");
+        CHECK(!ep.charge_state && !ep.climate_state && ep.drive_state && !ep.has_unsupported && !ep.empty());
+        for (const char* all3 : {"charge_state;climate_state;drive_state", "drive_state,climate_state,charge_state",
+                                 "charge_state%3Bclimate_state%3Bdrive_state",
+                                 "drive_state%2cclimate_state%2ccharge_state",
+                                 " drive_state ; charge_state , climate_state "}) {
+            ep = tk::parse_vehicle_data_endpoint_list(all3);
+            CHECK(ep.charge_state && ep.climate_state && ep.drive_state && !ep.has_unsupported);
+        }
+        ep = tk::parse_vehicle_data_endpoints("endpoints=charge_state;drive_state");
+        CHECK(ep.charge_state && !ep.climate_state && ep.drive_state && !ep.has_unsupported);
+        for (const char* invalid : {"drive_state;drive_state", "drive_stat", "drive_state;", ";drive_state",
+                                    "drive_states", "Drive_State", "drive_state%3", "drive_state;unknown_state",
+                                    "charge_state;climate_state;drive_state%3B"}) {
+            ep = tk::parse_vehicle_data_endpoint_list(invalid);
+            CHECK(ep.has_unsupported && ep.empty());
+        }
+
+        // Unsupported endpoint
+        ep = tk::parse_vehicle_data_endpoints("endpoints=location_data");
+        CHECK(!ep.charge_state && !ep.climate_state && !ep.drive_state && ep.has_unsupported && ep.empty());
+
+        // Mixed supported and unsupported
+        ep = tk::parse_vehicle_data_endpoints("endpoints=charge_state;unknown_state");
+        CHECK(ep.has_unsupported && ep.empty());
+    }
 }
 
 // ─── on-device display presenter (logic/display_model.hpp <- display.cpp compose()) ──────
@@ -2715,6 +3059,73 @@ static void test_http_body() {
     // Empty / null guards.
     CHECK(http_body_read(buf, sizeof(buf), 0, [&](char*, size_t) -> BodyChunk { return { BodyRecv::Data, 0 }; }) == -1);
     CHECK(http_body_read(nullptr, 8, 4, [&](char*, size_t) -> BodyChunk { return { BodyRecv::Data, 0 }; }) == -1);
+
+    // Progress cannot renew the total budget, with or without recoverable timeouts.
+    // Exercise the actual reader over the full production body size without real sleeps.
+    for (int timeouts_per_byte : {0, BODY_MAX_IDLE}) {
+        char slow[2049];
+        std::memset(slow, '!', sizeof(slow));
+        uint64_t ms = 0;
+        int pending_timeouts = timeouts_per_byte;
+        int calls = 0;
+        int received = http_body_read(slow, sizeof(slow), sizeof(slow) - 1,
+            [&](char* dst, size_t) -> BodyChunk {
+                ++calls;
+                if (pending_timeouts > 0) {
+                    --pending_timeouts;
+                    ms += BODY_RECV_TIMEOUT_SECONDS * 1000;
+                    return {BodyRecv::Timeout, 0};
+                }
+                ms += 4900;
+                *dst = 'x';
+                pending_timeouts = timeouts_per_byte;
+                return {BodyRecv::Data, 1};
+            }, [&]() -> uint64_t { return ms; });
+        CHECK(received == -1);
+        CHECK(calls == 4);
+        CHECK(ms >= BODY_MAX_DURATION_MS);
+        CHECK(ms < BODY_MAX_DURATION_MS + BODY_RECV_TIMEOUT_SECONDS * 1000);
+        CHECK(slow[sizeof(slow) - 1] == '!');
+    }
+    // The final byte must itself arrive before the deadline; late completeness is failure.
+    for (uint64_t elapsed : {BODY_MAX_DURATION_MS - 1, BODY_MAX_DURATION_MS,
+                             BODY_MAX_DURATION_MS + 1}) {
+        uint64_t ms = UINT64_MAX - 10000;  // unsigned elapsed arithmetic also survives rollover
+        int r = http_body_read(buf, sizeof(buf), 1,
+            [&](char* dst, size_t) -> BodyChunk {
+                ms += elapsed;
+                *dst = 'x';
+                return {BodyRecv::Data, 1};
+            }, [&]() -> uint64_t { return ms; });
+        CHECK(r == (elapsed < BODY_MAX_DURATION_MS ? 1 : -1));
+    }
+    // If time runs out between receives, do not start another blocking socket call.
+    {
+        int clock_calls = 0, recv_calls = 0;
+        int r = http_body_read(buf, sizeof(buf), 2,
+            [&](char* dst, size_t) -> BodyChunk {
+                ++recv_calls; *dst = 'x'; return {BodyRecv::Data, 1};
+            }, [&]() -> uint64_t {
+                return ++clock_calls < 4 ? 0 : BODY_MAX_DURATION_MS;
+            });
+        CHECK(r == -1);
+        CHECK(recv_calls == 1);
+    }
+    // Allocation ownership is unchanged when a complete body arrives too late.
+    {
+        int frees = 0;
+        uint64_t ms = 0;
+        auto r = http_body_receive(4, 8,
+            [](size_t n) -> void* { return std::malloc(n); },
+            [&](void* p) { ++frees; std::free(p); },
+            [&](char* dst, size_t n) -> BodyChunk {
+                std::memset(dst, 'x', n); ms = BODY_MAX_DURATION_MS;
+                return {BodyRecv::Data, n};
+            }, [&]() -> uint64_t { return ms; });
+        CHECK(r.status == BodyReadStatus::ReceiveFailed);
+        CHECK(r.data == nullptr);
+        CHECK(frees == 1);
+    }
 
     // Captive-portal production accepts exactly 1024 wire bytes in fixed storage with a separate
     // terminator byte. The next wire byte is rejected before recv.
@@ -3345,6 +3756,17 @@ static void test_wake_poll() {
         st.pending = true;
         CHECK(charge_poll_should_fire({true, true /* poll_cadence */, true, false}, st) == true);
         CHECK(st.pending == false);
+    }
+
+    // Drive-cache refresh rides only on the wake/bootstrap one-shot, never on the in-window cadence.
+    CHECK(wake_poll_refreshes_drive(false) == true);
+    CHECK(wake_poll_refreshes_drive(true) == false);
+    {
+        WakePollState st{};
+        st.pending = true;
+        const ChargePollGateInputs one_shot{true, false /* poll_cadence */, true, false};
+        CHECK(charge_poll_should_fire(one_shot, st) == true);
+        CHECK(wake_poll_refreshes_drive(one_shot.poll_cadence) == true);
     }
 
     // Unpaired device: gate prevents firing.
@@ -4216,7 +4638,7 @@ static void test_http_route() {
     using tk::HttpRoute;
     using tk::HttpVerb;
 
-    static_assert(tk::kFixedHttpRoutes.size() == 23,
+    static_assert(tk::kFixedHttpRoutes.size() == 26,
                   "extend the complete fixed-route matrix when a route is added");
     for (const tk::FixedHttpRoute& fixed : tk::kFixedHttpRoutes) {
         CHECK(tk::classify_http_route(fixed.verb, fixed.path) == fixed.route);
@@ -4806,6 +5228,54 @@ static void test_http_origin() {
     // A key that merely CONTAINS the name is still a different parameter on both sides.
     CHECK(!tk::mutation_origin_required(false, "/diag?XCLEAR=1"));
     CHECK(!tk::mutation_origin_required(false, "/diag?CLEARED=1"));
+
+    // F02: State-changing requests via mutation_request_allowed()
+    // POST with no headers (curl/evcc) is allowed
+    CHECK(tk::mutation_request_allowed(true, "", "", "", "", false, ""));
+    CHECK(tk::mutation_request_allowed(true, "tesla-key-esp32.local", "", "", "", false, ""));
+
+    // Mutating GET with no headers (Chromium plain-HTTP LAN behavior without Referer) is REJECTED
+    CHECK(!tk::mutation_request_allowed(false, "", "", "", "", false, ""));
+    CHECK(!tk::mutation_request_allowed(false, "tesla-key-esp32.local", "", "", "", false, ""));
+    CHECK(!tk::mutation_request_allowed(false, "192.0.2.42", "", "", "", false, "192.0.2.42"));
+
+    // Mutating GET with custom header X-Requested-With is allowed if host is owned
+    CHECK(tk::mutation_request_allowed(false, "tesla-key-esp32.local", "", "", "", true, ""));
+    CHECK(tk::mutation_request_allowed(false, "192.0.2.42", "", "", "", true, "192.0.2.42"));
+    CHECK(!tk::mutation_request_allowed(false, "attacker.example", "", "", "", true, "192.0.2.42"));
+
+    // Mutating GET with same-origin Referer is allowed
+    CHECK(tk::mutation_request_allowed(false, "tesla-key-esp32.local", "", "",
+                                       "http://tesla-key-esp32.local/diag", false, ""));
+    CHECK(tk::mutation_request_allowed(false, "192.0.2.42", "", "",
+                                       "http://192.0.2.42/setup", false, "192.0.2.42"));
+
+    // Mutating GET with foreign/cross-origin Referer is REJECTED
+    CHECK(!tk::mutation_request_allowed(false, "tesla-key-esp32.local", "", "",
+                                        "http://evil.example/page", false, ""));
+    CHECK(!tk::mutation_request_allowed(false, "192.0.2.42", "", "",
+                                        "http://attacker.example/", false, "192.0.2.42"));
+    CHECK(!tk::mutation_request_allowed(false, "tesla-key-esp32.local", "", "",
+                                        "not-a-url", false, ""));
+
+    // Mutating GET with Sec-Fetch-Site
+    CHECK(tk::mutation_request_allowed(false, "tesla-key-esp32.local", "", "same-origin", "", false, ""));
+    CHECK(!tk::mutation_request_allowed(false, "tesla-key-esp32.local", "", "cross-site", "", false, ""));
+
+    // Null origin is rejected for both GET and POST
+    CHECK(!tk::mutation_request_allowed(true, "tesla-key-esp32.local", "null", "same-origin", "", false, ""));
+    CHECK(!tk::mutation_request_allowed(false, "tesla-key-esp32.local", "null", "same-origin", "", false, ""));
+
+    // Foreign origin must NEVER pass on GET or POST, even with same-origin Referer, custom header, or Sec-Fetch-Site
+    CHECK(!tk::mutation_request_allowed(false, "tesla-key-esp32.local", "http://evil.example", "",
+                                        "http://tesla-key-esp32.local/diag", false, ""));
+    CHECK(!tk::mutation_request_allowed(false, "tesla-key-esp32.local", "http://evil.example", "", "", true, ""));
+    CHECK(!tk::mutation_request_allowed(false, "tesla-key-esp32.local", "http://evil.example", "same-origin", "", false, ""));
+    CHECK(!tk::mutation_request_allowed(true, "tesla-key-esp32.local", "http://evil.example", "", "", false, ""));
+
+    // Same-origin Origin passes on both GET and POST
+    CHECK(tk::mutation_request_allowed(false, "tesla-key-esp32.local", "http://tesla-key-esp32.local", "", "", false, ""));
+    CHECK(tk::mutation_request_allowed(true, "tesla-key-esp32.local", "http://tesla-key-esp32.local", "", "", false, ""));
 }
 
 // ─── Negotiated ATT payload size (logic/ble_chunk.hpp) ────────────────────────────────────────
@@ -4880,6 +5350,36 @@ static void test_wifi_rollback() {
 
 // ─── Network transport seam (logic/net_link.hpp) ──────────────────────────────
 static void test_net_link() {
+    uint32_t generations = 0;
+    generations = tk::advance_lease_generation_word(generations, tk::NetLink::Wifi);
+    CHECK(tk::lease_generation_from_word(generations, tk::NetLink::Wifi) == 1);
+    CHECK(tk::lease_generation_from_word(generations, tk::NetLink::Eth) == 0);
+    generations = tk::advance_lease_generation_word(generations, tk::NetLink::Eth);
+    CHECK(tk::lease_generation_from_word(generations, tk::NetLink::Wifi) == 1);
+    CHECK(tk::lease_generation_from_word(generations, tk::NetLink::Eth) == 1);
+    CHECK(tk::advance_lease_generation_word(0x0001ffffu, tk::NetLink::Wifi) == 0x00010000u);
+    CHECK(tk::advance_lease_generation_word(0xffff0001u, tk::NetLink::Eth) == 0x00000001u);
+
+    tk::GatewayBaseline wifi_baseline{};
+    const tk::GatewayIdentity wifi_a{tk::NetLink::Wifi, 0x01020304, 1};
+    const tk::GatewayIdentity wifi_b{tk::NetLink::Wifi, 0x05060708, 2};
+    const tk::GatewayIdentity wifi_new_lease{tk::NetLink::Wifi, 0x01020304, 3};
+    CHECK(!wifi_baseline.observe(wifi_a, false));
+    CHECK(wifi_baseline.observe(wifi_a, true));
+    CHECK(wifi_baseline.observe(wifi_a, false));
+    CHECK(!wifi_baseline.observe(wifi_b, false));  // new DHCP gateway cannot inherit A
+    CHECK(wifi_baseline.observe(wifi_b, true));
+    CHECK(!wifi_baseline.observe(wifi_a, false));  // returning to A is conservative
+    CHECK(!wifi_baseline.observe(wifi_new_lease, false)); // same IP, new lease is unproven
+    CHECK(!wifi_baseline.observe({tk::NetLink::Wifi, 0, 3}, true));
+    tk::GatewayBaseline eth_baseline{};
+    CHECK(!eth_baseline.observe({tk::NetLink::Eth, wifi_a.address, 1}, false));
+    // A route switch does not discard proof for a still-held WiFi lease. If Ethernet then
+    // disappears, the watchdog must be able to recover a WiFi ghost association.
+    tk::GatewayBaseline failover_baselines[2]{};
+    CHECK(failover_baselines[0].observe(wifi_a, true));
+    CHECK(!failover_baselines[1].observe({tk::NetLink::Eth, wifi_a.address, 1}, false));
+    CHECK(failover_baselines[0].observe(wifi_a, false));
     // The transport identity is what the presenters branch on; the strings are what /status
     // and the logs print, so pin both.
     CHECK(std::string(tk::net_link_str(tk::NetLink::None)) == "none");
@@ -5304,7 +5804,8 @@ static void test_config_store() {
 
     // A single flipped bit must be REFUSED, not read as a slightly different configuration. That
     // is the whole point of the CRC: a torn or decaying entry has to fail loudly enough for the
-    // caller to fall back to the legacy keys, instead of the device joining a network nobody set.
+    // caller to refuse the invalid blob (failing closed rather than falling back to stale legacy
+    // keys or joining a network nobody set).
     tk::ConfigBlobBuffer bad = buf;
     bad[10] = (uint8_t)(bad[10] ^ 0x01);
     tk::ConfigBlob nope;
@@ -5890,6 +6391,16 @@ static void test_rx_framing() {
 }
 
 static void test_ble_dispatcher() {
+    for (bool encrypted : {false, true}) {
+        for (bool session_ready : {false, true}) {
+            for (bool has_request_hash : {false, true}) {
+                const auto admission = tk::vcsec_payload_admission(encrypted, session_ready, has_request_hash);
+                if (!encrypted) CHECK(admission == tk::VcsecPayloadAdmission::Plaintext);
+                else if (session_ready && has_request_hash) CHECK(admission == tk::VcsecPayloadAdmission::Decrypt);
+                else CHECK(admission == tk::VcsecPayloadAdmission::Drop);
+            }
+        }
+    }
     using D = tk::BleDomain;
     using R = tk::DispatchDropReason;
 
@@ -6220,6 +6731,70 @@ static void test_vcsec_sleep_three_valued() {
     CHECK(!tk::vcsec_status_confirms_wake(SleepState::Asleep, false));
     // The regression: an UNKNOWN frame without closures used to release a waiting command.
     CHECK(!tk::vcsec_status_confirms_wake(SleepState::Unknown, false));
+}
+
+// ── ASLEEP debounce clock: only an UNINTERRUPTED run of explicit ASLEEP reports proves sleep ──
+// These are the exact functions VehicleController::note_vcsec_sleep_() and vcsec_stably_asleep_()
+// call, so UNKNOWN-breaks-the-run is pinned here rather than by a source grep.
+static void test_vcsec_sleep_clock() {
+    using tk::SleepState;
+    using S = SleepState;
+
+    // Start, continue (keeping the ORIGINAL start tick), and the two ways a run ends.
+    CHECK(tk::next_asleep_since(0, S::Asleep, 100) == 100);
+    CHECK(tk::next_asleep_since(100, S::Asleep, 200) == 100);
+    CHECK(tk::next_asleep_since(100, S::Awake, 200) == 0);
+    CHECK(tk::next_asleep_since(100, S::Unknown, 200) == 0);
+    CHECK(tk::next_asleep_since(0, S::Awake, 200) == 0);
+    CHECK(tk::next_asleep_since(0, S::Unknown, 200) == 0);
+
+    // Exhaustive: no report other than ASLEEP can leave a run alive, whatever the prior clock.
+    for (const S reported : {S::Unknown, S::Awake}) {
+        for (const uint32_t since : {0u, 1u, 100u, 0xffffffffu}) {
+            CHECK(tk::next_asleep_since(since, reported, 5000) == 0);
+        }
+    }
+
+    // A run is only as long as its last unbroken stretch. ASLEEP, then an UNKNOWN interval, then
+    // ASLEEP again must NOT accumulate: the second stretch restarts from zero, however long the
+    // car was really asleep through the gap.
+    constexpr uint32_t kHz = 100;
+    constexpr uint32_t kDebounceTicks = tk::kAsleepDebounceS * kHz;
+    uint32_t since = 0;
+    since = tk::next_asleep_since(since, S::Asleep, 1000);
+    CHECK(since == 1000);
+    since = tk::next_asleep_since(since, S::Asleep, 1000 + kDebounceTicks - 1);
+    CHECK(!tk::vcsec_asleep_proven(S::Asleep, since, 1000 + kDebounceTicks - 1, kHz,
+                                    tk::kAsleepDebounceS));
+    since = tk::next_asleep_since(since, S::Asleep, 1000 + kDebounceTicks);
+    CHECK(tk::vcsec_asleep_proven(S::Asleep, since, 1000 + kDebounceTicks, kHz,
+                                   tk::kAsleepDebounceS));
+    // One UNKNOWN sample right after proof was reached: the proof is gone at once...
+    const uint32_t t_unknown = 1000 + kDebounceTicks + 10;
+    since = tk::next_asleep_since(since, S::Unknown, t_unknown);
+    CHECK(since == 0);
+    CHECK(!tk::vcsec_asleep_proven(S::Unknown, since, t_unknown, kHz, tk::kAsleepDebounceS));
+    // ...and the next ASLEEP starts a fresh run that has to earn the full debounce again.
+    const uint32_t t_restart = t_unknown + 10;
+    since = tk::next_asleep_since(since, S::Asleep, t_restart);
+    CHECK(since == t_restart);
+    CHECK(!tk::vcsec_asleep_proven(S::Asleep, since, t_restart + kDebounceTicks - 1, kHz,
+                                    tk::kAsleepDebounceS));
+    CHECK(tk::vcsec_asleep_proven(S::Asleep, since, t_restart + kDebounceTicks, kHz,
+                                   tk::kAsleepDebounceS));
+
+    // The proof also needs the car's CURRENT raw report to be ASLEEP. A stale run (clock still
+    // set) beside an UNKNOWN or AWAKE report is not evidence of sleep.
+    CHECK(!tk::vcsec_asleep_proven(S::Unknown, 1, 1 + 10 * kDebounceTicks, kHz, tk::kAsleepDebounceS));
+    CHECK(!tk::vcsec_asleep_proven(S::Awake, 1, 1 + 10 * kDebounceTicks, kHz, tk::kAsleepDebounceS));
+    CHECK(tk::vcsec_asleep_proven(S::Asleep, 1, 1 + 10 * kDebounceTicks, kHz, tk::kAsleepDebounceS));
+    // No run (clock 0) is never proof, and a zero tick rate must not divide by zero.
+    CHECK(!tk::vcsec_asleep_proven(S::Asleep, 0, 0xffffffffu, kHz, tk::kAsleepDebounceS));
+    CHECK(!tk::vcsec_asleep_proven(S::Asleep, 1, 0xffffffffu, 0, tk::kAsleepDebounceS));
+
+    // The FreeRTOS tick counter is 32-bit and wraps; the elapsed time stays correct across it.
+    CHECK(tk::vcsec_asleep_proven(S::Asleep, 0xffffff00u, 0x00000100u, 1, 512));
+    CHECK(!tk::vcsec_asleep_proven(S::Asleep, 0xffffff00u, 0x000000ffu, 1, 512));
 }
 
 static void test_command_runner() {
@@ -7609,6 +8184,7 @@ int main() {
     test_charge_control();
     test_active_window();
     test_vcsec_sleep_three_valued();
+    test_vcsec_sleep_clock();
     test_wake_poll();
     test_ble_readiness();
     test_ble_phase();

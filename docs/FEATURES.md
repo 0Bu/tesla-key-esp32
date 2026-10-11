@@ -30,7 +30,7 @@ Details: [storage](SECURITY.md#nvs-retention).
 | Feature | Where | Prevents |
 |---|---|---|
 | Atomic CRC config blob | `logic/config_store.hpp`, `main/config_blob.cpp` | A torn credential state. |
-| Legacy per-key fallback | `main/config_blob.cpp` `cfg_load()`, `cfg_load_for_update()` | Stranding deployed devices' WiFi/VIN on the first OTA that introduces the blob; legacy keys are mirrored on save so a downgrade still finds them. |
+| Legacy per-key fallback | `logic/nvs_string_load.hpp`, `main/nvs_storage.cpp`, `main/config_blob.cpp` `cfg_load()`, `cfg_load_for_update()` | Stale or incomplete legacy snapshots overwriting committed identity/settings; one unreadable key blocks mutation and journal recovery. |
 | `[[nodiscard]]` NVS writes | `main/nvs_storage.hpp` + `-Werror=unused-result` | A silently dropped write of something unrebuildable: the private key, the VIN, the safe-mode counter. |
 | Exact fail-closed NVS registry | `logic/nvs_contract.hpp`, `main/nvs_storage.cpp`, `scripts/check-nvs-contract.py`, `test/test_nvs_storage.cpp` | Unknown or colliding keys, wrong APIs and unreviewed persistence surfaces. |
 | Cached VCSEC session presence | `main/nvs_storage.{cpp,hpp}`, `main/vehicle_pairing.cpp` | The 50 ms vehicle loop probing flash-backed NVS to rediscover a stable bit. |
@@ -57,7 +57,7 @@ Details: [security](SECURITY.md).
 | Deterministic BLE RX/TX framing | `logic/rx_framing.hpp`, `main/vehicle_ctrl.hpp`, `vehicle_telemetry.cpp`, `test/test_tesla_ble_harness.cpp` | Upstream's heuristic recovery loops, offset shifting and log floods on corrupt/split frames, and outgoing frames the car cannot decode (a second length prefix). |
 | Bounded BLE command runner | `logic/command_runner.hpp`, `ble_dispatcher.hpp`, `session_state.hpp`; [security](SECURITY.md) | Command timeouts, unbounded queue growth, blocking during prerequisite setup, lost wake arbitration. |
 | Acknowledged NimBLE host startup | `logic/nimble_start_gate.hpp`, `main/ble_client.{cpp,hpp}`, `main.cpp`, `ota_update.cpp` | Admitting a missing/late host or confirming OTA after a host reset. |
-| Downgrade gate + manifest/image match | `main/ota_update.cpp` | A signed but OLD image carrying a patched flaw (a signature proves authenticity, not freshness), and a host advertising 1.9.0 while serving 1.8.0. |
+| Channel-aware eligibility + manifest/image match | `main/ota_update.cpp` | Manifest/image disagreement or candidates outside the selected channel/PR policy; intentional return-to-Release exceptions remain explicit. |
 | Bounded exact OTA manifest intake | `logic/ota_contract.hpp`, `ota_changelog_range.hpp`, `main/ota_manifest.hpp`; [security](SECURITY.md) | Ambiguous, truncated or oversized input bypassing version validation or exhausting contiguous heap. |
 | Coherent allocation-free OTA status lock | `main/ota_update.cpp`, `test/test_runtime_boundary_contract.py` | A first-use lock allocation failure exposing unprotected status, mixed-generation fields, or `std::string` allocation under the status mutex. |
 | OTA update channel (Release vs Dev) | `logic/ota_contract.hpp`, `main/ota_update.cpp`, `http_ota.cpp`; [security](SECURITY.md) | Installing unstable dev builds on production devices, or being unable to test `main` without manual builds. |
@@ -67,6 +67,7 @@ Details: [security](SECURITY.md).
 | Private wake capture | `scripts/capture_wake.py` | A full VIN and raw authenticated BLE frames landing as a commit-ready 0644 file. |
 | Restricted setup-AP surface | `main/provisioning.cpp` | The open setup AP exposing `/gen_keys`, `/diag`, `/status` or the command API; only provisioning routes exist in AP mode. |
 | Charging-Manager-only key role | `vehicle_pairing.cpp` | Enrolling a key with door/body privilege the integration does not need. |
+| No BLE link-layer pairing or bonding | `sdkconfig.defaults` (`CONFIG_BT_NIMBLE_SECURITY_ENABLE=n`), `scripts/check-build-gate-contract.py`; [ATT/SMP departures](adr/0005-tesla-ble-seam.md#2-platform-forced-departures-and-reference-deviations) | Unauthenticated SMP pairing and unused code crossing the C6 signing boundary. Tesla application crypto remains the protection; peer SMP is dropped with `rc=6`, not answered. |
 
 The device HTTP API has no authentication or TLS; use it only on a trusted LAN
 ([security model](SECURITY.md#http-api-exposure)).
@@ -85,7 +86,7 @@ Details: [network](ARCHITECTURE.md#wifi--lan-connectivity).
 | Generation-owned ICMP probe | `logic/ping_probe.hpp`, `main/ping_probe.hpp`, `net.cpp`, `syslog.cpp` | A timed-out esp_ping worker calling into a dead stack frame, a stopped handle deleted/reused before `on_ping_end`, or a late callback completing a newer probe. |
 | Endless runtime reconnect | `net.cpp` `wifi_event_handler` | Surrendering to the setup portal on a transient outage once credentials are known-good. |
 | mDNS + DHCP hostname, privacy-bounded TXT | `main.cpp` | Having to find the IP, or making the VIN multicast-browseable. |
-| Negotiated-MTU BLE writes | `logic/ble_chunk.hpp`, `main/ble_client.{cpp,hpp}` | Twelve fixed inter-chunk delays for a 244-byte message after MTU 247, while keeping the 20-byte fallback before MTU exchange and across reconnect generations. |
+| Bounded 20-byte BLE writes | `logic/ble_chunk.hpp`, `main/ble_client.{cpp,hpp}` | Invalid chunk sizes or lost framing. MTU is 23 in this build; the negotiated-MTU helper is unreachable. See ADR-0005 for transport departures. |
 | SNTP + browser-clock fallback with authoritative sync gate | `main/main.cpp`, `time_sync.hpp`, `POST /set_time`, `mqtt_ha.cpp` | Invalid OTA certificate dates or HA/key/pairing timestamps derived from a stale restored clock. |
 | UDP Syslog (RFC 5424) | `main/syslog.cpp`, `logic/syslog_policy.hpp` | Losing the log that explains a reboot (`/diag` is RAM). |
 | Commit-gated Syslog queue lifetime | `logic/syslog_start_gate.hpp`, `main/syslog.cpp` | A consumer touching startup-owned resources before creation commits, or the log hook retaining a queue that startup deleted. |
@@ -114,10 +115,11 @@ unresolved material findings prevent a clean verdict.
 
 | Feature | Where | Prevents |
 |---|---|---|
-| Runner-neutral agent policy and five SHA-bound PR gates | `AGENTS.md`, `main/AGENTS.md`, `main/logic/AGENTS.md`; [build and review](DEVELOPMENT.md) | Unsafe authority, stale review records, or publishing personal/private identifiers or non-English PR/docs content. |
+| Runner-neutral agent policy and five SHA-bound PR gates | `AGENTS.md`, `.agents/`, `.codex/`, `scripts/with-host-python.sh`; [build and review](DEVELOPMENT.md) | Unsafe authority, stale review records, or publishing personal/private identifiers or non-English PR/docs content. |
 | Resource-bounded build container | `scripts/idf-docker.sh`, `scripts/check-build-gate-contract.py` | A local ESP-IDF compile starving a shared k3s/Docker node. |
 | Fail-closed host verification | `scripts/run-mock-tests.sh --require-all`, `run-sanitizer-tests.sh`, `run-fuzz-smoke.sh`; [test scope](../test/README.md) | Skipped CI coverage, unsafe runtime boundaries, partial JSON, parser UB or browser-only failures. |
-| Concurrent host gate and firmware builds | `.github/workflows/build.yml` (`prepare`, `logic-test`, `build-target`, `build`), `scripts/check-workflow-policy.py`, `tools/agent-config/check.mjs`, `.agents/subagents.json` | The four firmware compiles waiting for the ~3 minute host-test job (a critical path of their sum instead of the slower of the two) without weakening the host gate. |
+| Split host gates and concurrent target builds | `.github/workflows/build.yml` (`logic-test`, `logic-harness`, `build-target`), `scripts/check-workflow-policy.py` | Serial host/firmware waits or an aggregate build that omits a host gate. |
+| Concurrent independent rebuild | `.github/workflows/build.yml` (`independent-rebuild-target`, `independent-rebuild`); [publication](SECURITY.md#release-pipeline-and-trust-boundaries) | Serial fresh builds or producer claims reaching the signer without a secret-free byte comparison. |
 | Shared-runner browser cold-start budget | `test/web_ui_browser_gate.py`, `scripts/run-mock-tests.sh` | A healthy real-browser gate flaking because a loaded runner needs > 20 s to start Chrome, or a relaxed inner deadline exceeding the outer bound. |
 | Repository/workflow lint with mutation canaries | `scripts/repo-lint.sh`, `check-workflow-policy.py`, `check-host-gate-contract.py`, `check-markdown-links.py` | Malformed or unsafe workflows, broken links, invalid ownership and fail-open Stop hooks. |
 | Fail-closed Web Serial installer + monitor | `docs/index.html`, `installer-bootstrap.mjs`, `web-installer.mjs`; [build and review](DEVELOPMENT.md) | A dialog hiding chip mismatches, mixed deployments or corrupt downloads, or a pre-ECO3 classic ESP32 that writes to 100 % and then fails to boot. |
@@ -129,7 +131,14 @@ unresolved material findings prevent a clean verdict.
 | Presenter parity checks | `scripts/check-display-sim-parity.sh`, `check-ble-row-parity.sh` | The Python display sim and browser JS drifting from the C++ presenters they mirror. |
 | Reproducible toolchain and complete effective-build graph | `esp-idf-toolchain.txt`, `main/idf_component.yml`, `dependencies.lock.*`; [build and review](DEVELOPMENT.md) | Unpinned, hidden or substituted compiler/generated/link inputs escaping the reviewed source graph. |
 | Artifact, partition and memory-budget identity | `scripts/check-build-artifact-inventory.py`, `check-build-gate-contract.py`, `check-partition-contract.py`; [build and review](DEVELOPMENT.md) | Corrupt or substituted artifacts, layout drift and unreviewed physical memory or stack growth. |
+| Reviewed memory-budget ratchets | `scripts/report-firmware-size.py`, `check-firmware-size.sh`; [size rule](../.agents/rules/firmware-size-budget.md) | Size reductions becoming unreviewed future headroom, or changing capacities while ratcheting maxima. |
 | Incremental all-target pre-push baseline check | `scripts/precheck-firmware.sh`, `.githooks/pre-push`, `scripts/test-build-contracts.sh` | Late CI failures from size or stack growth on a target omitted by local checks. |
 | Parallel reproducibility leg | `.github/workflows/build.yml` (`build-target` `leg` matrix, `build`), `scripts/check-reproducible-build.sh --emit`, `scripts/check-reproducible-artifacts.py`, `scripts/ci-build-verify.sh --skip-repro` | Reproducibility costing ~100 s of serial rebuild inside every PR build job. |
 | Four targets, one tree | `sdkconfig.defaults.*`, `scripts/ci-build-all.sh`, `.github/workflows/build.yml`, `scripts/release-relevance.sh` | Per-chip divergence. |
 | Vehicle-free bench report ingest | `.github/workflows/bench-acceptance.yml`, `scripts/check-bench-acceptance.py`, `check-workflow-policy.py` | Treating compilation as hardware acceptance, or ingesting incomplete, private or mismatched physical reports. |
+
+Native Codex registration is generated from canonical reviewers/hooks and checked for parity;
+current hook trust and primary-checkout declarations remain separate runtime conditions. Both host
+jobs are mandatory for the aggregate build, alongside concurrent producer/independent target legs.
+The PSA harness verifies v5.3.0 peer admission, domain hash isolation and encrypted VCSEC denial
+before telemetry. [Runtime contract](ARCHITECTURE.md#pinned-tesla-ble-and-native-orchestration).

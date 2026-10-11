@@ -4,6 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
+import { execFileSync } from "node:child_process";
 
 function die(code, message) {
   console.error(`agent-config: ${message}`);
@@ -111,28 +112,28 @@ const ownerContracts = new Map([
 ]);
 const deepOwnerTerms = /(?:HTTP|\bAPI\b|(?<![-/])\bcommands?\b|\bMCP\b|\bNVS\b|\bMQTT\b|link-state|pairing)/i;
 const usbPositiveAuthorization = /USB-write approval[^.!?]*(?:also\s+)?(?:authorizes|allows|permits|covers|includes|is sufficient for)[^.!?]*(?:live verification|HTTP|GET)/i;
-const usbNoApprovalNeeded = /(?:live verification|HTTP requests?|GET endpoints?)[^.!?]*(?:without (?:separate )?(?:approval|authorization)|requires? no (?:approval|authorization)|need not (?:be )?(?:approved|authorized))/i;
-const usbOtaNotStateChanging = /GET \/ota\/check[^.!?]*(?:is not|isn't|not) state-changing/i;
+const usbNoApprovalNeeded = /(?:live verification|HTTP requests?|(?:GET|POST|HTTP) endpoints?)[^.!?]*(?:without (?:separate )?(?:approval|authorization)|requires? no (?:approval|authorization)|need not (?:be )?(?:approved|authorized))/i;
+const usbOtaNotStateChanging = /(?:GET|POST) \/ota\/check[^.!?]*(?:is not|isn't|not) state-changing/i;
 const usbAbsentApprovalProceeds = /(?:(?:approval|authorization)[^.!?]*(?:absent|missing|not obtained)|without (?:separate )?(?:approval|authorization))[^.!?]*(?:continue|proceed|run|contact|send|request)/i;
 const reviewedSkillSha256 = new Map([
   ["add-logic-test", "565e7fd944695e8f90035a8d0033267af49b50b9e71c26253d2d3af09da6df39"],
   ["ci-heal", "139029e34163650ee31ee8dfe7a299a5e16f3b630fba090e136d81d89d6fd2fa"],
-  ["deploy", "662e8ef41b2dccb04ca51b247d02a75cf57864e82c1f7eed48dbab24dba6e53a"],
-  ["device-diag", "4236f7378fd9d71f8b8a3763a624496f727f8e1130becd35bfdde22d08c195ab"],
+  ["deploy", "0660b9a7f88c7d0e58fedfc10ce9e22cfdaec77c6fa08eda3828122b38686703"],
+  ["device-diag", "7d9d6eb7907195fc61b56a3325e79a03844fd794b64fa7d4a50a81a7d79af170"],
   ["display-preview", "e565dd7bb96f08c69d3ed6ed58c51164e3493f2e246b8a954a89eff39d05d0a4"],
-  ["feature-docs", "8c1654daf181413cc2e296354ae516677437e0d38608d8307ea5c31d5bda300a"],
+  ["feature-docs", "17a486258723b88a5d1257284a33e295529bd52331d3b066335e832b666f1884"],
   ["flash-esp32", "09709dd8b6c8609c22c8a4094ce4e02c54965309b27fe2d4ecab80f5d10de27b"],
   ["mock-test", "a440930b6ade485b1ca206a5cca56798deaa89a6606cc9eaee306b7f93042d9f"],
-  ["ota-release-verify", "5ba2abfe79d853653ed6ce59fb4520f1d02536024788aa40da09a9f79a660af1"],
+  ["ota-release-verify", "be87cac35d352d395bb8af0e22e4b5526c9414c02c6d11fd409192dc808d5e13"],
   ["pr-hygiene", "8491da669686acc5e00741e5e1fcfec6d2caf29abb8ebff0479ca973f20e87f1"],
-  ["project-review", "e0504161f3387dad2038bc3ea1b165400ea5ae6bafd20e3e1a8649d8b574fd74"],
-  ["ship", "5440e4db4c8753be5e3a118a4ceb4ff088313f811e6e5be2d9296eebd4fe3ec4"],
-  ["skill-audit", "c110cc16bfb592f5013a65c0d7ebf6669f90fb89c34e5ee387dba392c62393d4"],
-  ["usb-recovery", "ab83938c2612358bc335c09f1577d537a2b462b33971cd57d52168d18109ed31"],
-  ["vehicle-command-audit", "9fb8ce36b880c7fe409f034682a42d0a62a99397f0e5c3b9c05b92866ec4c242"],
+  ["project-review", "1800d0e4bdb039c52580852180f9c3da50089fcd74e63065df75c39884b6042f"],
+  ["ship", "9f438ea44d8e3cdb2366d76f6763945c0a4aa9e2114842e459528e8bc0cdaf7d"],
+  ["skill-audit", "91e48c09c9fb73ff2231f8a060edc212f37dc708e79ac5c72222e94dc6aab1da"],
+  ["usb-recovery", "4b1204f124f3408f0e1ff7152ba15c33a1e762791c50923ba27e56ddf9b07135"],
+  ["vehicle-command-audit", "40ce4b1aae8056d95b09961987f546bd9220206c8aa4a83353e1bab5a4a735d8"],
 ]);
 const featureDocsScopeTokens = [
-  "main/", "test/", "sdkconfig.defaults*", "partitions.csv", "AGENTS.md", ".agents/",
+  "main/", "test/", "sdkconfig.defaults*", "partitions.csv", "AGENTS.md", ".agents/", ".codex/",
   ".github/PULL_REQUEST_TEMPLATE.md",
   "tools/agent-hooks/", "tools/agent-config/", "docs/index.html", "installer-bootstrap.mjs",
   "serial-port-release.mjs", "web-installer.mjs", "docs/vendor/",
@@ -208,8 +209,8 @@ for (const name of canonicalSkills) {
   if (name === "usb-recovery") {
     const liveContracts = [
       "The USB-write approval does not authorize live verification.",
-      "Before any HTTP request, obtain separate explicit user approval for the exact recovered device/IP and the named GET endpoints.",
-      "`GET /ota/check` is state-changing and must be named explicitly in that live approval.",
+      "Before any HTTP request, obtain separate explicit user approval for the exact recovered device/IP and the named HTTP methods and endpoints.",
+      "`POST /ota/check` is state-changing and must be named explicitly in that live approval.",
     ];
     const normalized = normalizeProse(canonical.text);
     if (liveContracts.some((required) => !normalized.includes(required))) {
@@ -380,8 +381,9 @@ for (const subagent of subagentsDoc.subagents) {
 const multiTargetReviewerObj = subagentsDoc.subagents.find((s) => s.TypeName === "multi_target_build_reviewer");
 const multiTargetReviewer = normalizeProse(multiTargetReviewerObj?.Prompt || "");
 const multiTargetPublicationContracts = [
-  "prepare -> logic-test + build-target (concurrent) -> build -> independent-rebuild -> publish -> deploy",
-  "build needs prepare, logic-test and build-target",
+  "prepare -> logic-test + logic-harness + build-target + independent-rebuild-target (concurrent) -> build -> independent-rebuild -> publish -> deploy",
+  "build needs prepare, logic-test, logic-harness and build-target",
+  "independent-rebuild needs build and every independent-rebuild-target leg",
   "SHA/version-bound Actions artifact",
   "deploy consumes only that named artifact",
   "without a signing Environment, OTA key or OIDC",
@@ -422,5 +424,10 @@ for (const invariant of safety.invariants) {
   }
 }
 
+try {
+  execFileSync(process.execPath, [repoPath("tools/agent-config/sync-codex.mjs"), "--check"], {
+    env: { ...process.env, AGENT_CONFIG_ROOT: root }, stdio: "inherit",
+  });
+} catch { die(1, "native Codex registration check failed"); }
 console.log(`agent-config: ${canonicalSkills.length} canonical skills, ${actualReviewerTypes.length} reviewers and ${invariantIds.size} instruction invariants clean`);
 console.log(`agent-config: AGENTS.md budget ${agentsSize}/${budget} bytes`);

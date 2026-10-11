@@ -53,14 +53,15 @@
 // None is a normal credential/service value. Its distinct owner or transaction lifetime must not
 // be overwritten by publishing an ordinary httpd-owned configuration snapshot.
 //
-// THE READER MUST KEEP THE LEGACY PER-KEY LAYOUT AS A FALLBACK. When the `cfg` entry is absent
-// (a fresh device, or an OTA upgrade from a build that predates this blob) or fails its CRC, the
-// caller has to fall back to reading `wifi_ssid` / `wifi_pass` / `vin` / `mqtt_uri` /
-// `syslog_uri` individually, exactly as today. That fallback is the whole reason an OTA does not
-// strand an existing device: without it the first boot on the new firmware finds no blob, reads
-// nothing, and comes up in the setup AP with its credentials and VIN sitting untouched in flash
-// and simply unread. (The rollback backup has no legacy key by construction — it is new, and its
-// absence on a pre-blob device is the correct state: no rollback pending.)
+// THE READER MUST KEEP THE LEGACY PER-KEY LAYOUT AS A FALLBACK FOR ABSENT BLOBS. When the `cfg`
+// entry is absent (ESP_ERR_NVS_NOT_FOUND, as on a fresh device or an OTA upgrade from a build
+// that predates this blob), the caller falls back to reading `wifi_ssid` / `wifi_pass` / `vin` /
+// `mqtt_uri` / `syslog_uri` individually, exactly as today. That fallback is the whole reason an
+// OTA does not strand an existing device: without it the first boot on the new firmware finds no blob,
+// reads nothing, and comes up in the setup AP with its credentials and VIN sitting untouched in flash
+// and simply unread. If a blob IS present but corrupted or invalid, the load fails closed as an error
+// rather than falling back to stale legacy keys. (The rollback backup has no legacy key by
+// construction — it is new, and its absence on a pre-blob device is the correct state: no rollback pending.)
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -329,8 +330,8 @@ inline size_t config_blob_encode(const ConfigBlob& c, uint8_t* out, size_t cap) 
 
 // Returns true ONLY if the blob is complete, magic-matched, version-known, in-bounds and
 // CRC-valid. On ANY failure `out` is left completely untouched — never a partial decode — and
-// the caller falls back to the legacy per-key layout (see the header block). This is the load
-// side of the same all-or-nothing guarantee the single nvs_set_blob gives the write side.
+// the caller fails closed (the legacy per-key fallback applies only when the blob is absent).
+// This is the load side of the same all-or-nothing guarantee the single nvs_set_blob gives the write side.
 inline bool config_blob_decode(const uint8_t* in, size_t len, ConfigBlob& out) {
     if (in == nullptr || len < detail::kBlobHeaderBytes + detail::kBlobCrcBytes) return false;
     if (in[0] != kConfigBlobMagic0 || in[1] != kConfigBlobMagic1 ||
@@ -372,7 +373,7 @@ inline bool config_blob_decode(const uint8_t* in, size_t len, ConfigBlob& out) {
     // Exact per version: a v1 blob must END right here. Accepting a prefix and ignoring the rest
     // would let a TRUNCATED future blob decode as a valid v1 whose newer fields silently take
     // their defaults — a wrong configuration that looks like a successfully loaded one, which is
-    // strictly worse than falling back to the legacy layout.
+    // strictly worse than refusing the invalid configuration blob (failing closed).
     if (p != body_end) return false;
 
     c.wifi_rollback_active = (flags & 1u) != 0;

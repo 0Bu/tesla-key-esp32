@@ -17,6 +17,7 @@
 #include <esp_heap_caps.h>
 #include <esp_system.h>
 #include <esp_task_wdt.h>
+#include <cstdio>
 #include <exception>
 #include <type_traits>
 #include <utility>
@@ -52,6 +53,13 @@ public:
 private:
     bool active_{false};
 };
+
+// Builder for the DriveState infotainment poll, shared by the telemetry rotation and the
+// wake/bootstrap one-shot so both ask for exactly the same thing.
+int build_drive_state_poll(TeslaBLE::Client* client, uint8_t* buff, size_t* len) {
+    return client->build_car_server_get_vehicle_data_message(
+        buff, len, CarServer_GetVehicleData_getDriveState_tag);
+}
 
 }  // namespace
 
@@ -447,6 +455,8 @@ void VehicleController::process_pending_telemetry_() {
             tk::MutexGuard g(cache_mutex_);
             if (tk::telemetry_epoch_matches(climate_epoch, identity_epoch_.load(std::memory_order_acquire))) {
                 last_known_climate_ = std::move(parsed);
+                last_climate_ticks_.store(xTaskGetTickCount());
+                climate_state_generation_.fetch_add(1);
                 note_contact_();
             }
         }
@@ -496,7 +506,7 @@ bool VehicleController::apply_ble_link_state_(bool connected) {
         if (!connected) {
             command_runner_.notify_link_lost("connection lost");
             command_runner_.dispatcher().reset();
-            vcsec_sleep_state_.store(static_cast<int>(tk::SleepState::Unknown));
+            mark_vcsec_unknown_();
             if (client_) {
                 if (auto* p = client_->get_peer(UniversalMessage_Domain_DOMAIN_VEHICLE_SECURITY)) p->reset();
                 if (auto* p = client_->get_peer(UniversalMessage_Domain_DOMAIN_INFOTAINMENT)) p->reset();
@@ -512,7 +522,7 @@ bool VehicleController::apply_ble_link_state_(bool connected) {
         ESP_LOGE(TAG, "deferred apply_ble_link_state_(%d) threw (unknown) — dropping link",
                  static_cast<int>(connected));
     }
-    vcsec_sleep_state_.store(static_cast<int>(tk::SleepState::Unknown));
+    mark_vcsec_unknown_();
     return false;
 }
 
@@ -709,7 +719,7 @@ bool VehicleController::load_nvs_sessions_() {
         }
 
         auto* peer = client_->get_peer(domain);
-        if (peer && peer->update_session(&session_info) == 0) {
+        if (peer && peer->update_session(&session_info) == 0 && peer->is_initialized()) {
             ESP_LOGI(TAG, "Loaded session from NVS for %s (counter: %lu)", key, (unsigned long)session_info.counter);
             auto& tracker = (tk_domain == tk::BleDomain::VehicleSecurity)
                 ? command_runner_.vcsec_session() : command_runner_.info_session();
@@ -875,7 +885,7 @@ void VehicleController::handle_session_info_frame_(const UniversalMessage_Routab
     }
 
     auto* peer = client_->get_peer(domain);
-    if (peer && peer->update_session(&session_info) == 0) {
+    if (peer && peer->update_session(&session_info) == 0 && peer->is_initialized()) {
         ESP_LOGI(TAG, "Session updated for domain %d", static_cast<int>(domain));
         persist_session_(domain, msg.payload.session_info);
         auto tk_domain = (domain == UniversalMessage_Domain_DOMAIN_VEHICLE_SECURITY)
@@ -917,26 +927,32 @@ void VehicleController::handle_vcsec_frame_(const UniversalMessage_RoutableMessa
     UniversalMessage_RoutableMessage_protobuf_message_as_bytes_t decrypt_buffer;
     if (sig_data && sig_data->which_sig_type == Signatures_SignatureData_AES_GCM_Response_data_tag) {
         auto* session = client_->get_peer(UniversalMessage_Domain_DOMAIN_VEHICLE_SECURITY);
-        if (session && session->is_initialized()) {
-            size_t req_hash_len = 0;
-            const pb_byte_t* req_hash = client_->get_last_request_hash(&req_hash_len);
-            if (req_hash && req_hash_len > 0) {
-                size_t dec_len = 0;
-                int ret = session->decrypt_response(
-                    payload->bytes, payload->size,
-                    sig_data->sig_type.AES_GCM_Response_data.nonce,
-                    sig_data->sig_type.AES_GCM_Response_data.tag,
-                    req_hash, req_hash_len, msg.flags, fault,
-                    sig_data->sig_type.AES_GCM_Response_data.counter,  // VCSEC counts its responses
-                    decrypt_buffer.bytes, sizeof(decrypt_buffer.bytes), &dec_len);
-                if (ret == 0) {
-                    decrypt_buffer.size = dec_len;
-                    payload = &decrypt_buffer;
-                } else {
-                    ESP_LOGE(TAG, "Failed to decrypt VCSEC response (%d)", ret);
-                    return;
-                }
+        size_t req_hash_len = 0;
+        const pb_byte_t* req_hash = client_->get_last_request_hash(
+            UniversalMessage_Domain_DOMAIN_VEHICLE_SECURITY, &req_hash_len);
+        if (tk::vcsec_payload_admission(true, session && session->is_initialized(),
+                                       req_hash && req_hash_len > 0) == tk::VcsecPayloadAdmission::Drop) {
+            ESP_LOGW(TAG, "Dropping encrypted VCSEC response without decryption context");
+            return;
+        }
+        size_t dec_len = 0;
+        int ret = session->decrypt_response(
+            payload->bytes, payload->size,
+            sig_data->sig_type.AES_GCM_Response_data.nonce,
+            sig_data->sig_type.AES_GCM_Response_data.tag,
+            req_hash, req_hash_len, msg.flags, fault,
+            sig_data->sig_type.AES_GCM_Response_data.counter,  // VCSEC counts its responses
+            decrypt_buffer.bytes, sizeof(decrypt_buffer.bytes), &dec_len);
+        if (ret == 0) {
+            if (!session->validate_response_counter(sig_data->sig_type.AES_GCM_Response_data.counter)) {
+                ESP_LOGW(TAG, "Dropping replayed encrypted VCSEC response");
+                return;
             }
+            decrypt_buffer.size = dec_len;
+            payload = &decrypt_buffer;
+        } else {
+            ESP_LOGE(TAG, "Failed to decrypt VCSEC response (%d)", ret);
+            return;
         }
     }
 
@@ -970,10 +986,9 @@ void VehicleController::handle_vcsec_frame_(const UniversalMessage_RoutableMessa
                 ESP_LOGD(TAG, "VCSEC VehicleStatus: sleep_status=%d, has_closureStatuses=%d",
                          static_cast<int>(vs.vehicleSleepStatus), static_cast<int>(vs.has_closureStatuses));
                 vcsec_sleep_state_.store(static_cast<int>(reported));
-                // Only an explicit reading folds into the ASLEEP debounce clock; UNKNOWN leaves a real
-                // ASLEEP run untouched (see note_vcsec_sleep_).
-                if (reported == tk::SleepState::Asleep) note_vcsec_sleep_(true);
-                else if (reported == tk::SleepState::Awake) note_vcsec_sleep_(false);
+                // Only uninterrupted explicit ASLEEP readings prove sleep; the clock decides, and
+                // AWAKE and UNKNOWN both end the run (tk::next_asleep_since).
+                note_vcsec_sleep_(reported);
                 // R1: an explicit AWAKE, or has_closureStatuses (upstream v5.2.0's wake-progress
                 // signal), advances a command waiting for a wake. UNKNOWN confirms nothing, and the
                 // raw reported sleep state stays in vcsec_sleep_state_.
@@ -1278,6 +1293,8 @@ void VehicleController::loop_task_fn_(void* arg) {
             vTaskDelay(pdMS_TO_TICKS(50));
             continue;
         }
+        bool runner_failed = false;
+        char runner_what[64] = {0};   // bounded copy of e.what(); logged only after the unlock
         {
             // RAII give — drive_command_runner_() releases vehicle_mutex_ on unwind
             // so it can't wedge every later command.
@@ -1285,16 +1302,20 @@ void VehicleController::loop_task_fn_(void* arg) {
             try {
                 if (self->command_identity_ready_()) self->drive_command_runner_();
             } catch (const std::exception& e) {
-                ESP_LOGE(TAG, "drive_command_runner_ threw (%s) — resetting BLE link", e.what());
-                self->vcsec_sleep_state_.store(
-                    static_cast<int>(tk::SleepState::Unknown));
+                runner_failed = true;
+                snprintf(runner_what, sizeof(runner_what), "%s", e.what());
+                self->mark_vcsec_unknown_();
                 self->ble_fault_.store(true);
             } catch (...) {
-                ESP_LOGE(TAG, "drive_command_runner_ threw (unknown) — resetting BLE link");
-                self->vcsec_sleep_state_.store(
-                    static_cast<int>(tk::SleepState::Unknown));
+                runner_failed = true;
+                self->mark_vcsec_unknown_();
                 self->ble_fault_.store(true);
             }
+        }
+
+        if (runner_failed) {
+            ESP_LOGE(TAG, "drive_command_runner_ threw (%s) — resetting BLE link",
+                     runner_what[0] ? runner_what : "unknown");
         }
 
         // Incoming state callbacks only copied nanopb POD into the latest-value mailbox.
@@ -1466,7 +1487,7 @@ void VehicleController::loop_task_fn_(void* arg) {
         // The RX path updates vcsec_sleep_state_ from the car's vehicleSleepStatus on
         // every VCSEC poll, including auto_pair_task's idle health probe — the only BLE
         // traffic while parked. Sample that atomic state here and fold it into the debounce clock so link_state() can require a
-        // STABLE ASLEEP run before showing "Vehicle asleep". UNKNOWN leaves the clock alone.
+        // STABLE ASLEEP run before showing "Vehicle asleep". UNKNOWN breaks the run.
         // Log only on a transition so the serial console reveals what the car actually reports
         // (e.g. whether VCSEC ever asserts ASLEEP, or just flaps for COP) without spamming.
         uint32_t now_ticks = xTaskGetTickCount();
@@ -1485,14 +1506,10 @@ void VehicleController::loop_task_fn_(void* arg) {
                 prev_sleep = st;
             }
 
+            self->note_vcsec_sleep_(st);
             tk::WakeSample sample = tk::WakeSample::Unknown;
-            if (st == tk::SleepState::Asleep) {
-                self->note_vcsec_sleep_(true);
-                sample = tk::WakeSample::Asleep;
-            } else if (st == tk::SleepState::Awake) {
-                self->note_vcsec_sleep_(false);
-                sample = tk::WakeSample::Awake;
-            }
+            if (st == tk::SleepState::Asleep) sample = tk::WakeSample::Asleep;
+            else if (st == tk::SleepState::Awake) sample = tk::WakeSample::Awake;
 
             // Dual-trigger one-shot charge poll (issue #264, #300, #301):
             //   1. Wake edge on ASLEEP→AWAKE after debounced asleep run
@@ -1529,7 +1546,9 @@ void VehicleController::loop_task_fn_(void* arg) {
         // window closes we stop polling and drop the link once so the MCU idles into sleep.
         // The auto-pair VCSEC health poll keeps running (it never wakes the MCU) as the
         // revocation canary. Idle evcc reads may use the last cache value; during this
-        // active window get_charge_state requires a recent ChargeState instead.
+        // active window get_charge_state requires a recent ChargeState instead, and
+        // get_vehicle_climate (which also calls active_window_now_) refuses an in-window
+        // climate snapshot older than tk::kActiveClimateStateMaxAgeS.
         // Gate the charging arm on FRESH contact: charging_state is a RAM cache never invalidated on
         // a link drop, so a car that unplugged and left (or dropped BLE) while cached "Charging"
         // would otherwise hold the window open forever → perpetual scanning. A charging, reachable
@@ -1546,6 +1565,9 @@ void VehicleController::loop_task_fn_(void* arg) {
         // Rising edge: window just opened → refresh the cache promptly (reset throttles).
         if (paired && !prev_window && window) {
             last_poll_ticks = last_tele_ticks = last_connect_ticks = 0;
+            // Climate (rotation case 0) goes first: get_vehicle_climate() answers 503 (which evcc
+            // reads) for an in-window climate older than kActiveClimateStateMaxAgeS.
+            tele_idx = 0;
         }
         prev_window = window;
 
@@ -1563,10 +1585,14 @@ void VehicleController::loop_task_fn_(void* arg) {
         //   • a one-shot on the VCSEC wake edge (issue #264) or cache-invalid bootstrap, fired ONCE
         //     outside the window so a self-woken or rebooted-awake car refreshes its stale/empty SOC
         //     without our opening the window — otherwise evcc keeps acting on the stale reading or
-        //     coasts on HTTP 503s. When the window is open the cadence already covers it, so the
-        //     pending request is just consumed.
+        //     coasts on HTTP 503s. While the window is open the 10 s cadence mostly covers it,
+        //     but a pending one-shot can still fire between two cadence ticks; the drive
+        //     companion poll is then enqueued too (a harmless duplicate of the rotation's
+        //     drive slot: NO_WAKE_SKIP, and background items expire after 10 s).
         // Both use the same NO_WAKE_SKIP poll: a car already back asleep is skipped, so we only
-        // ride a wake the car performed itself, and an idle car is still left to sleep.
+        // ride a wake the car performed itself, and an idle car is still left to sleep. The
+        // one-shot also refreshes the drive cache so evcc's odometer is current after a drive;
+        // it is NO_WAKE_SKIP as well, so a sleeping car is skipped.
         const bool poll_cadence = window && (now_ticks - last_poll_ticks > pdMS_TO_TICKS(10000));
         if (tk::charge_poll_should_fire({paired, poll_cadence, self->ble_connected(), self->cmd_in_flight_.load(), now_s}, wake_poll)) {
             if (poll_cadence) last_poll_ticks = now_ticks;
@@ -1578,17 +1604,22 @@ void VehicleController::loop_task_fn_(void* arg) {
                     return client->build_car_server_get_vehicle_data_message(
                         buff, len, CarServer_GetVehicleData_getChargeState_tag);
                 });
+            if (tk::wake_poll_refreshes_drive(poll_cadence)) {
+                self->enqueue_background_poll_(
+                    "Drive State Poll", tk::BleDomain::Infotainment, build_drive_state_poll);
+            }
         }
 
         // Background telemetry refresh (paired + window + connected): one domain per cycle,
         // rotating climate → drive → tires → closures so the full set refreshes every ~120 s
-        // without flooding the command queue. These feed only the web UI / MQTT
-        // (slow-changing: cabin temp, tyre pressure, odometer), so a relaxed 30 s cadence
-        // costs nothing visible while cutting how often the BLE radio is active — each poll
-        // on a weak link can desync into a multi-second retry burst that, via WiFi/BT radio
-        // coexistence, steals airtime from the HTTP server. The evcc-critical charge poll
-        // above stays at 10 s. All NO_WAKE_SKIP; web-UI caches only; evcc and pairing are
-        // unaffected.
+        // without flooding the command queue. These are slow-changing (cabin temp, tyre
+        // pressure, odometer), so a relaxed 30 s cadence costs nothing visible while cutting how
+        // often the BLE radio is active — each poll on a weak link can desync into a multi-second
+        // retry burst that, via WiFi/BT radio coexistence, steals airtime from the HTTP server.
+        // The evcc-critical charge poll above stays at 10 s. Climate also feeds evcc's climater
+        // (/vehicle_data endpoints=climate_state, freshness-bounded inside the window) and drive
+        // feeds evcc's odometer (endpoints=drive_state); tires and closures are web UI / MQTT
+        // only. All NO_WAKE_SKIP.
         if (paired && window && self->ble_connected() && !self->cmd_in_flight_.load()
             && (now_ticks - last_tele_ticks > pdMS_TO_TICKS(30000))) {
             last_tele_ticks = now_ticks;
@@ -1605,11 +1636,7 @@ void VehicleController::loop_task_fn_(void* arg) {
                         break;
                     case 1:
                         self->enqueue_background_poll_(
-                            "Drive State Poll", tk::BleDomain::Infotainment,
-                            [](TeslaBLE::Client* client, uint8_t* buff, size_t* len) {
-                                return client->build_car_server_get_vehicle_data_message(
-                                    buff, len, CarServer_GetVehicleData_getDriveState_tag);
-                            });
+                            "Drive State Poll", tk::BleDomain::Infotainment, build_drive_state_poll);
                         break;
                     case 2:
                         self->enqueue_background_poll_(
@@ -1706,6 +1733,36 @@ bool VehicleController::get_charge_state(ChargeStateResult& out, int /*timeout_m
     return true;
 }
 
+bool VehicleController::get_vehicle_climate(tk::VehicleClimateData& out) {
+    // Cache-only, like get_charge_state(): evcc's climater polls this, and a read must never poll,
+    // connect or wake the car. Only fixed-size snapshots are taken under the lock; the freshness
+    // decision runs after it is released.
+    tk::VehicleClimateData snapshot{};
+    uint32_t sample = 0;
+    uint32_t generation = 0;
+    bool charging = false;
+    {
+        tk::SemGuard g(cache_mutex_);
+        if (!g) {
+            out = {};
+            return false;
+        }
+        snapshot = tk::vehicle_climate_data(last_known_climate_);
+        sample = last_climate_ticks_.load();
+        generation = climate_state_generation_.load();
+        charging = last_known_charge_.valid &&
+                   (last_known_charge_.charging_state == "Charging" ||
+                    last_known_charge_.charging_state == "Starting");
+    }
+    const uint32_t now = xTaskGetTickCount();
+    const bool active_window = active_window_now_(now, charging);
+    // generation is the "have sample" bit so a callback at FreeRTOS tick 0 is not "never received".
+    const bool have_age = generation != 0;
+    const uint32_t age_s = have_age ? (now - sample) / configTICK_RATE_HZ : 0;
+    out = snapshot;
+    return tk::climate_cache_usable(snapshot.valid, active_window, have_age, age_s);
+}
+
 bool VehicleController::get_vehicle_status(VehicleStatusResult& out, tk::ConnectOrigin origin,
                                            int timeout_ms) {
     out = {};
@@ -1747,6 +1804,7 @@ bool VehicleController::get_vehicle_status(VehicleStatusResult& out, tk::Connect
         std::atomic<bool> completed{false};
         std::atomic<bool> success{false};
         std::string error{};
+        uint32_t cmd_id{0};
         int32_t lock_state{0};
         int32_t sleep_status{0};
         int32_t user_presence{0};
@@ -1785,14 +1843,14 @@ bool VehicleController::get_vehicle_status(VehicleStatusResult& out, tk::Connect
                 xSemaphoreGive(completion->sem);
             }
         };
-        const uint32_t cmd_id = command_runner_.enqueue(
+        completion->cmd_id = command_runner_.enqueue(
             "VCSEC Status Poll", tk::BleDomain::VehicleSecurity, tk::WakePolicy::NoWakeSkip,
             timeout_ms, now_ms, {}, std::move(on_complete));
-        if (cmd_id == 0) {
+        if (completion->cmd_id == 0) {
             vehicle_status_callback_ = nullptr;
             return false;
         }
-        command_builders_[cmd_id % tk::CommandRunner::kMaxQueueSize] =
+        command_builders_[completion->cmd_id % tk::CommandRunner::kMaxQueueSize] =
             [](TeslaBLE::Client* client, uint8_t* buff, size_t* len) {
                 return client->build_vcsec_information_request_message(
                     VCSEC_InformationRequestType_INFORMATION_REQUEST_TYPE_GET_STATUS, buff, len);
@@ -1836,8 +1894,8 @@ bool VehicleController::get_vehicle_status(VehicleStatusResult& out, tk::Connect
         tk::SemGuard g(vehicle_mutex_);
         vehicle_status_callback_ = nullptr;
         auto* cmd = command_runner_.current_command();
-        if (cmd && cmd->name == "VCSEC Status Poll") {
-            command_builders_[cmd->id % tk::CommandRunner::kMaxQueueSize] = nullptr;
+        if (cmd && cmd->id == completion->cmd_id) {
+            command_builders_[completion->cmd_id % tk::CommandRunner::kMaxQueueSize] = nullptr;
             command_runner_.pop_current();
         }
     }

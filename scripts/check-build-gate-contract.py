@@ -392,11 +392,11 @@ def validate(root: Path) -> None:
 
     require(literal_assignment(root, "scripts/check-dependency-contract.py", "TARGETS") == TARGETS,
             "check-dependency-contract.py: exact target lock set/order drifted")
-    require(literal_assignment(root, "scripts/check-dependency-contract.py", "TESLA_VERSION") == "v5.2.0" and
+    require(literal_assignment(root, "scripts/check-dependency-contract.py", "TESLA_VERSION") == "v5.3.0" and
             literal_assignment(root, "scripts/check-dependency-contract.py", "TESLA_RESOLVED_COMMIT") ==
-            "07a4ef503a52f736009fdeba953f185aecc863f3" and
+            "9d04eaed21f2e7502252140ddeb12bd0b5d9922f" and
             literal_assignment(root, "scripts/check-dependency-contract.py", "TESLA_COMPONENT_HASH") ==
-            "fb55938820781e8a731fc1557c0c4542bbf6833729062cfdb86a978b07016025",
+            "f6999c987b28af1975657f30da200a182fd9558b4da55b416afa095d67b96f46",
             "check-dependency-contract.py: tesla-ble version/resolution contract drifted")
     require(literal_assignment(root, "scripts/check-otadata-contract.py", "OTADATA_SIZE") == 0x2000 and
             literal_assignment(root, "scripts/check-otadata-contract.py", "ERASED_BYTE") == 0xFF,
@@ -454,6 +454,10 @@ def validate(root: Path) -> None:
         and sdkconfig_defaults.count("CONFIG_ESP_WIFI_ENABLE_SAE_PK=n") == 1
         and sdkconfig_defaults.count("CONFIG_ESP_WIFI_SOFTAP_SAE_SUPPORT=n") == 1,
         "sdkconfig.defaults: unreachable enterprise/SAE-PK/setup-AP SAE surfaces must stay disabled",
+    )
+    require(
+        len(re.findall(r"^CONFIG_BT_NIMBLE_SECURITY_ENABLE=n$", sdkconfig_defaults, re.M)) == 1,
+        "sdkconfig.defaults: the unused NimBLE Security Manager (SMP) must stay disabled",
     )
     require(
         idf_docker.count("docker run --rm --cpus 1.5 --memory 1800m") == 1,
@@ -974,7 +978,9 @@ def validate(root: Path) -> None:
         and "github.ref == 'refs/heads/main'" in build_workflow
         and "ref: ${{ github.sha }}" in build_workflow
         and "name: firmware-independent-rebuild" in build_workflow
-        and "Independently rebuild all four targets" in build_workflow
+        and "  independent-rebuild-target:" in build_workflow
+        and "Independently rebuild the target" in build_workflow
+        and "pattern: firmware-independent-target-*" in build_workflow
         and "./scripts/ci-build-all.sh" in build_workflow
         and "--compare-to _ci-independent" in build_workflow,
         "build.yml: logic/build/rebuild/publish/deploy chain or independent byte comparison drifted",
@@ -1181,7 +1187,7 @@ def validate(root: Path) -> None:
     require_order(
         build_workflow,
         "build.yml protected inventory verification",
-        ("Validate build provenance", "check-build-artifact-inventory.py",
+        ("Validate build provenance", "--verify --artifact-root . --compare-to _ci-independent",
          "Provision OTA signing key", "./scripts/ci-sign-artifacts.sh"),
     )
 
@@ -1364,6 +1370,12 @@ def self_test(root: Path) -> None:
         ("wifi-softap-sae-disabled", "sdkconfig.defaults",
          "CONFIG_ESP_WIFI_SOFTAP_SAE_SUPPORT=n", "CONFIG_ESP_WIFI_SOFTAP_SAE_SUPPORT=y",
          "unreachable enterprise/SAE-PK/setup-AP SAE surfaces"),
+        ("ble-security-manager-disabled", "sdkconfig.defaults",
+         "CONFIG_BT_NIMBLE_SECURITY_ENABLE=n", "CONFIG_BT_NIMBLE_SECURITY_ENABLE=y",
+         "the unused NimBLE Security Manager (SMP) must stay disabled"),
+        ("ble-security-manager-commented-out", "sdkconfig.defaults",
+         "CONFIG_BT_NIMBLE_SECURITY_ENABLE=n", "# CONFIG_BT_NIMBLE_SECURITY_ENABLE=n",
+         "the unused NimBLE Security Manager (SMP) must stay disabled"),
         ("boundary-build-ignore", ".gitignore", "/build_boundary_*/", "/build_boundary_removed/",
          "boundary-build trees must stay outside the source fingerprint"),
         ("manifest-layout", "scripts/check-pages-manifest.py",
@@ -1448,6 +1460,9 @@ def self_test(root: Path) -> None:
          "ref: ${{ github.sha }}", "exact head SHA"),
         ("independent-rebuild", ".github/workflows/build.yml",
          "  independent-rebuild:", "  skipped-rebuild:",
+         "logic/build/rebuild/publish/deploy chain"),
+        ("independent-legs", ".github/workflows/build.yml",
+         "  independent-rebuild-target:", "  independent-rebuild-targets:",
          "logic/build/rebuild/publish/deploy chain"),
         ("independent-compare", ".github/workflows/build.yml",
          "--compare-to _ci-independent", "--compare-to .",

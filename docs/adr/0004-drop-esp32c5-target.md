@@ -14,13 +14,13 @@ which ordinary OTA cannot migrate. A reduced C5 feature fork would violate the s
 
 ## Decision
 
-Support exactly **esp32, esp32s3, esp32c3, esp32c6**, the library's declared targets. Remove C5
+Support exactly **esp32, esp32s3, esp32c3, esp32c6**, all supported by the pinned library. Remove C5
 manifest routing/local clone, defaults, display branches, 5 GHz option, suffix/platform mapping
 and build/installer consumers. Adding an omitted target requires upstream support first.
 
 ## Consequences
 
 Existing C5 installations keep running but receive no new manifest/image; they are not modified.
-T-Dongle-S3 display/LED support stays. Reintroduction requires solving size and upstream support,
-not bypassing target enforcement. Decision-time size figures are historical; current headroom comes
+T-Dongle-S3 display/LED support stays. Upstream v5.3.0 now declares C5, satisfying the library prerequisite only. Reintroduction still
+requires firmware, signed-size/partition and hardware acceptance, not bypassing enforcement. Decision-time size figures are historical; current headroom comes
 from generated size artifacts.

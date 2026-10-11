@@ -46,9 +46,11 @@ public:
     // Config helpers (plain string values). load_str() publishes a complete value atomically and
     // preserves the caller's previous output on every probe/read/length/allocation failure.
     bool load_str(const char* key, std::string& out);
-    // Safety-critical tri-state string read. Only a genuine NOT_FOUND is Missing; wrong type,
-    // corrupt/empty data and either NVS read failure are Error.
-    tk::NvsStringLoadState load_str_state(const char* key, std::string& out);
+    // Safety-critical tri-state string read. Only genuine NOT_FOUND is Missing; wrong type,
+    // corruption and either NVS read failure are Error. An explicit empty value is accepted
+    // only when legacy configuration migration opts in; safety journals remain nonempty.
+    tk::NvsStringLoadState load_str_state(const char* key, std::string& out,
+                                         bool allow_empty = false);
     [[nodiscard]] bool save_str(const char* key, const std::string& value);
 
     // Raw blob helpers for the atomic config store (logic/config_store.hpp): ONE CRC-checked

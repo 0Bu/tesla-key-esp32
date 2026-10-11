@@ -123,11 +123,13 @@ bool ota_config_restart_begin() {
     return s_operation_gate.try_begin(tk::OtaIdentityGateState::ConfigRestart);
 }
 
-// Confirm a still-unverified OTA image before a successful network/logging/setup commit reboot —
-// see the header. Mirrors the mark-valid path in main.cpp's ota_health_gate_task, but fires once the
-// durable commit AND the post-admission heap sample prove the runtime healthy. Identity mutations
-// deliberately never reach this path. A qualifying restart inside the health window must not
-// trigger a rollback unless the image is already critically heap-starved.
+// Confirm a still-unverified OTA image before a successful network/logging commit reboot (the
+// setup-portal save also calls it, but is always refused: the portal never reaches Ready
+// admission) — see the header. Mirrors the mark-valid path in main.cpp's ota_health_gate_task,
+// but fires once the durable commit AND the post-admission heap sample prove the runtime
+// healthy. Identity mutations deliberately never reach this path. A qualifying restart inside
+// the health window must not trigger a rollback unless the image is already critically
+// heap-starved.
 void ota_confirm_pending_image(tk::OtaRebootClass reboot_class) {
     if (!tk::ota_reboot_confirms_pending_image(reboot_class)) {
         ESP_LOGE(TAG, "refusing OTA confirmation for non-user recovery reboot class %d",
@@ -557,13 +559,13 @@ static void set_check_done(const OtaCheckResult& r) {
     }
 }
 
-static void ota_check_task(void*) {
+static void ota_check_task(void* pvParameters) {
     try {
+        const unsigned pr = static_cast<unsigned>(reinterpret_cast<uintptr_t>(pvParameters));
         // A one-shot job: contain any throw (http_get_to_buffer's std::string appends, cJSON, the
         // result std::string ops can all bad_alloc) as a terminal Error state — NEVER let it unwind
         // into the FreeRTOS C trampoline and reboot the device mid-check (issue #204).
         try {
-            const unsigned pr = s_target_pr.load(std::memory_order_acquire);
             OtaCheckResult r = ota_check(pr);   // blocking HTTPS GET, runs off the HTTP task
             set_check_done(r);
         } catch (const std::exception& e) {
@@ -605,7 +607,9 @@ bool ota_check_start(unsigned pr_number) {
     }
 
     // mbedTLS handshake + manifest fetch run here; same generous stack as ota_task.
-    if (xTaskCreate(ota_check_task, "ota_chk", 8192, nullptr, tk::kPrioOtaCheck, nullptr) != pdPASS) {
+    if (xTaskCreate(ota_check_task, "ota_chk", 8192,
+                    reinterpret_cast<void*>(static_cast<uintptr_t>(pr_number)),
+                    tk::kPrioOtaCheck, nullptr) != pdPASS) {
         s_running.store(false, std::memory_order_release);
         finish_operation(tk::OtaIdentityGateState::Ota);
         set_check_error("could not start check task");
@@ -705,7 +709,8 @@ static void ota_task_impl() {
     // not FRESHNESS: an attacker controlling the update host could serve an OLD, legitimately
     // signed image carrying a since-patched vulnerability. Read the version straight from the
     // downloaded image's own app descriptor (esp_https_ota_get_img_desc parses only the header,
-    // before the bulk download) and refuse anything not strictly newer than what is running.
+    // before the bulk download) and enforce the same channel/PR eligibility as the manifest check,
+    // including intentional same-core preview/Dev transitions and returns to stable Release.
     // Checking the image itself — not the manifest — also closes the gap where a hostile host
     // advertises a new version in manifest.json but serves an old .bin under the image URL.
     esp_app_desc_t new_app{};
@@ -778,8 +783,10 @@ static void ota_task_impl() {
     }
 }
 
-static void ota_task(void*) {
+static void ota_task(void* pvParameters) {
     try {
+        const unsigned target_pr = static_cast<unsigned>(reinterpret_cast<uintptr_t>(pvParameters));
+        s_target_pr.store(target_pr, std::memory_order_release);
         try {
             ota_task_impl();
         } catch (const std::exception& e) {
@@ -813,9 +820,7 @@ bool ota_start(unsigned pr_number) {
         return false;
     }
     s_updating.store(true, std::memory_order_release);
-    if (pr_number > 0) {
-        s_target_pr.store(pr_number, std::memory_order_release);
-    }
+    s_target_pr.store(pr_number, std::memory_order_release);
     try {
         set_state(OtaState::Downloading, 0, "starting download");
     } catch (...) {
@@ -826,7 +831,9 @@ bool ota_start(unsigned pr_number) {
     }
 
     // A generous stack: mbedTLS record processing + esp_https_ota run here.
-    if (xTaskCreate(ota_task, "ota", 8192, nullptr, tk::kPrioOta, nullptr) != pdPASS) {
+    if (xTaskCreate(ota_task, "ota", 8192,
+                    reinterpret_cast<void*>(static_cast<uintptr_t>(pr_number)),
+                    tk::kPrioOta, nullptr) != pdPASS) {
         s_updating.store(false, std::memory_order_release);
         s_running.store(false, std::memory_order_release);
         finish_operation(tk::OtaIdentityGateState::Ota);

@@ -19,6 +19,7 @@
 #include "esp_netif.h"
 #include "esp_log.h"
 #include "esp_http_server.h"
+#include "esp_timer.h"
 #include "lwip/sockets.h"
 #include "logic/vin.hpp"
 #include "logic/captive.hpp"
@@ -147,7 +148,7 @@ static esp_err_t save_post_impl(httpd_req_t* req) {
         return ESP_FAIL;
     }
     // Reassemble the whole body: httpd_req_recv may return only the first TCP segment, so a single
-    // recv could persist a truncated ssid/pass/vin. Loop until content_len (bounded timeout retry) —
+    // recv could persist a truncated ssid/pass/vin. Loop until content_len (absolute deadline) —
     // logic/http_body.hpp. The reader writes the terminator only after all `len` bytes arrive.
     int got = tk::http_body_read(body.data(), body.size(), len,
         [req](char* dst, size_t want) -> tk::BodyChunk {
@@ -155,8 +156,10 @@ static esp_err_t save_post_impl(httpd_req_t* req) {
             if (r == HTTPD_SOCK_ERR_TIMEOUT) return { tk::BodyRecv::Timeout, 0 };
             if (r <= 0)                      return { tk::BodyRecv::Error,   0 };
             return { tk::BodyRecv::Data, static_cast<size_t>(r) };
-        });
+        }, []() -> uint64_t { return static_cast<uint64_t>(esp_timer_get_time()) / 1000ULL; });
     if (got < 0 || got != len) {
+        // Prevent IDF's request cleanup from draining a slow residual body.
+        (void)shutdown(httpd_req_to_sockfd(req), SHUT_RD);
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "recv failed");
         return ESP_FAIL;
     }
@@ -397,6 +400,7 @@ void provisioning_run(NvsStorageAdapter& config_store) {
     ESP_LOGI(TAG, "Setup AP up. Join WiFi '%s' and open http://192.168.4.1", AP_SSID);
 
     httpd_config_t hcfg   = HTTPD_DEFAULT_CONFIG();
+    hcfg.recv_wait_timeout = tk::BODY_RECV_TIMEOUT_SECONDS;
     hcfg.uri_match_fn     = httpd_uri_match_wildcard;
     hcfg.max_uri_handlers = 4;
     httpd_handle_t server = nullptr;

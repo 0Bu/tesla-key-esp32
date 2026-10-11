@@ -20,6 +20,11 @@ The targets are exactly esp32, esp32s3, esp32c3 and esp32c6. The component manif
 lockfiles pin the graph. CMake applies the ordered hash-checked tesla-ble patch series; do not edit
 managed checkouts or silently substitute a host IDF. Protocol rationale: [ADR-0005](adr/0005-tesla-ble-seam.md).
 
+Host gates use `scripts/with-host-python.sh` to resolve Python ≥3.11 for tomllib. It re-execs once,
+not a hidden source change. Native Codex adapters are checked/generated with
+`node tools/agent-config/sync-codex.mjs --check` / `--write`; keep reviewed primary-checkout hook
+registration/trust in sync in linked worktrees. Adapter parity does not prove runtime enforcement.
+
 Optional build acceleration: `IDF_FAST_BUILD=1` uses a container-native volume;
 `scripts/idf-docker.sh daemon start` keeps a warm container, and `daemon stop` releases it.
 The same limits and toolchain apply. USB flashing runs on the host, not Docker Desktop.
@@ -70,7 +75,9 @@ Compiler/include/search and `CCACHE_*` overrides are rejected, and ccache is dis
 
 The raw-app policy gate is slot minus 32 KiB (`0x1e8000`). Projected signing separately rounds to
 64 KiB and adds one 4 KiB sector, bounded by the `0x1f0000` slot. Size reports are current evidence;
-historical prose values are not. Stack reports inventory frames, reject unbounded dynamic frames
+historical prose values are not. `--update-baseline` raises maxima only; `--tighten-baseline`
+requires the old baseline to pass, then lowers each checked target to measured values. Memory-model
+and static/IRAM capacities are identity fields, immutable under either ratchet. Stack reports inventory frames, reject unbounded dynamic frames
 and frames over 4096 B; they do not prove call depth or runtime stack margin.
 
 ## Delivery

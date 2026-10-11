@@ -34,7 +34,8 @@ def load_json(relative: str) -> dict[str, Any]:
 def check_handler_list(handlers: Any, commands: list[tuple[str, int]], label: str) -> None:
     if not isinstance(handlers, list) or len(handlers) != len(commands):
         fail(f"{label} command count drifted")
-    for hook, (command, timeout) in zip(handlers, commands, strict=True):
+    # Counts have already been checked; keep this validator usable with macOS Python 3.9.
+    for hook, (command, timeout) in zip(handlers, commands):
         if not isinstance(hook, dict):
             fail(f"{label} command hook must be an object")
         if hook.get("async") is True:

@@ -87,3 +87,14 @@ Report exact evidence/version/target, confirmed versus suspected cause, missing 
 next step. Never execute a table's remedy in this diagnostic scope. `$flash-esp32`/`$usb-recovery`
 handle physical recovery; `$ship` handles authorized delivery; global `$tesla-key-e2e-evcc` handles
 separately authorized cluster-to-car proof. Device health alone does not establish evcc E2E success.
+
+`vehicle_data` is cache-only. Charge/climate/drive availability follows [API](../../../docs/API.md#vehicle-data):
+recent command or live Charging/Starting contact opens the window; charge expires at 30 s and climate
+at 300 s inside it. Missing post-reboot climate is expected until an awake-car rotation; heap-watchdog
+boots seed no window. Reported odometer is required and otherwise last-known. An SMP `rc=6` alone
+means disabled NimBLE Security Manager, not heap exhaustion; confirm context before diagnosing OOM.
+
+Heap logs distinguish excused OTA allocation from recovery, the five-restart cap from success,
+postponed OTA/identity restart from write-failed breadcrumb degradation. Re-derive their exact lines
+in `heap_watchdog.hpp`/`vehicle_telemetry.cpp`; neither postponement nor later healthy heap proves a
+previously blocked gate passed.

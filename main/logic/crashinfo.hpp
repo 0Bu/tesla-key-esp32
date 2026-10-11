@@ -68,6 +68,8 @@ struct CrashInfo {
     // been erased (see coredump_is_foreign) — so it means "there is something the decoder will
     // accept", not merely "the partition is non-blank".
     bool coredump{false};
+    // The coredump in flash was identified as belonging to a different firmware build.
+    bool foreign_dump{false};
     // The unwinder flagged the backtrace as unreliable. Kept rather than dropped: a partial
     // backtrace still names the region, and a reader must be told which one they are holding.
     bool corrupted{false};

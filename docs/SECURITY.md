@@ -12,7 +12,7 @@ charging, but cannot unlock or drive. NVS also holds WiFi credentials, VIN and M
 |---|---|
 | Physical USB/JTAG | Factory flash is readable and firmware replaceable; protection requires separately planned hardware hardening. |
 | LAN/API | Unauthenticated plaintext control; trusted LAN, firewall/VLAN or authenticated reverse proxy. |
-| BLE | Session crypto, authenticated response-counter verification, request binding and replay windows. |
+| BLE | Tesla application crypto, authenticated responses, request binding and replay windows; NimBLE SMP/bonding is compiled out on all targets. |
 | Build/publication | Pinned inputs, independent rebuild, protected signing and byte-bound artifacts. |
 
 First-boot key generation enables hardware entropy before WiFi/BLE. IDF6 PSA draws from the hardware
@@ -65,8 +65,10 @@ window short. mDNS advertises version, not VIN.
 
 Browser mutations require a device-owned Host (name or current lease IP), matching Origin and no
 cross-site fetch. This includes POST and legacy mutating GETs for update check, diagnostic verbosity/
-clear and coredump clear. Query keys are case-insensitive; values stay exact. Headerless evcc/curl
-and raw LAN clients remain compatible. This is CSRF/rebinding protection, not authentication.
+clear and coredump clear. Query keys are case-insensitive; values stay exact. Headerless POST clients remain compatible. Mutating GETs need matching Origin/Referer or allowed
+fetch-site provenance, or a custom header such as X-Requested-With; otherwise they return 403.
+POST aliases exist for ota/check, diag and coredump. The open provisioning AP has its separate
+physical-range boundary. This is CSRF/rebinding protection, not authentication.
 
 An access-control reverse proxy must send the device IP or `.local` name as upstream Host and
 remove or rewrite Origin to match. Browser saves through a router-expanded FQDN can return 403.
@@ -130,13 +132,15 @@ agent tools, logs, repository files or tests. Tests use throwaway keys only.
 
 Counts and file sets are enforced by validators: 53 allowlisted unsigned payloads, 12 root firmware
 files, 28 diagnostics, 40 stable Release assets and 16 manifest parts. Do not use globs to broaden them.
-The main DAG is `prepare → logic-test + build-target → build → independent-rebuild → publish → deploy`;
-`build` depends on prepare, host gate and target builds. Compilation and host checks can overlap.
+The main DAG is prepare → parallel host gates and two per-target build legs → build plus
+independent-rebuild joins → publish → deploy. `build` requires prepare, both host jobs (`logic-test`
+and `logic-harness`) and target builds; the independent join has no key. Producer/independent target
+compiles run concurrently before protected publication.
 
 | Phase | Required proof and authority |
 |---|---|
 | Unprivileged build | Exact source SHA/fingerprint, four target graphs, size/stack/layout/effective-build checks and unsigned inventory; no signing key or write token. PRs build exact head. |
-| Independent rebuild | Fresh cache-free exact-source builds; compare unsigned app/ELF and inventories before provisioning any key. PRs can use parallel independent target legs. |
+| Independent rebuild | Fresh cache-free exact-source target legs run concurrently with producer legs; secret-free join binds the unsigned comparison before any key. |
 | Protected publish | `firmware-signing` Environment; stage regular single-link files with O_NOFOLLOW, rehash, sign, remove key, verify RSA-PSS pin and minimal signed size. Emit only SHA/version-bound artifact. |
 | Deploy | No signing Environment/key/OIDC. Consume only named artifact, revalidate inventory/layout/site bytes and channel authority, then write branch-backed Pages and check live bytes. |
 
@@ -156,8 +160,10 @@ Stable publication has two fail-closed modes:
   Emit a new verified SHA-bound recovery artifact from the snapshot.
 
 Before any upload or mutation, bind all 16 local Pages parts to the four merged images. The artifact
-carries the exact 12 root files plus 16 signer-owned layout inputs. Deploy rechecks these and all
-stable Release assets, then revalidates authority immediately before branch writes. Cumulative
+carries the exact 12 root files plus 16 signer-owned layout inputs. Stable deploy rechecks these and all Release assets, then revalidates authority immediately before
+branch writes. Dev deploy instead binds current main and the exact staged snapshot without Release
+metadata; every push attempt or unchanged-byte build request rechecks staged SOURCE_SHA against
+fresh remote main. Conflict retries cannot restore superseded Dev bytes. Cumulative
 release relevance starts from a branch/live snapshot whose manifest SHA, immutable Release/tag and
 assets agree; a docs-only or stale run must not replace unrepresented firmware.
 
@@ -202,6 +208,13 @@ path. This repository's unchanged partition table and normal build flow do not p
 sandboxing, protected environments or human approval. Actions are full-SHA pinned with limited
 permissions/timeouts; GitHub's runner OS and orchestration remain trusted infrastructure.
 Bench ingest hashes the report, not proof of physical firmware/signature/NVS observations.
+
+Generated `.codex/` adapters must match canonical reviewer/hook sources. The native PreToolUse
+adapter runs the safety core before the PR core synchronously; malformed or oversized payloads and
+bootstrap failures deny execution. Correct configuration alone does not grant hook trust: approve
+project hooks through the runner UI and verify their effective state. Linked worktrees load native
+declarations from the primary checkout. Read-only reviewer defaults can inherit parent runtime
+permission overrides; confirm the effective sandbox before treating a reviewer as independent.
 
 The pinned Context7 package avoids floating updates but is neither an npm integrity lock nor privacy
 sandbox. First use executes downloaded code; service inputs leave the local boundary. Never send

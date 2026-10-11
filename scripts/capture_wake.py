@@ -80,13 +80,21 @@ def _on_signal(_sig, _frame):
 
 
 def http_get(url, timeout=10):
-    req = urllib.request.Request(url, method="GET")
+    req = urllib.request.Request(
+        url,
+        headers={"X-Requested-With": "capture_wake"},
+        method="GET",
+    )
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return r.read().decode("utf-8", "replace")
 
 
 def http_post(url, timeout=20):
-    req = urllib.request.Request(url, method="POST")
+    req = urllib.request.Request(
+        url,
+        headers={"X-Requested-With": "capture_wake"},
+        method="POST",
+    )
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return r.read().decode("utf-8", "replace")
 
@@ -203,7 +211,7 @@ def main():
             # The request can reach the device even if the response is lost.  Record intent first
             # so the finally block always makes a best-effort attempt to turn verbose logging off.
             verbose_requested = True
-            http_get(base + "/diag?clear=1&verbose=1")
+            http_post(base + "/diag?clear=1&verbose=1")
             out(f"[{ts()}] verbose RX enabled, ring cleared — watching. Tap Wake in the UI (or use --wake).")
         except (urllib.error.URLError, OSError) as e:
             out(f"[{ts()}] WARN: could not set verbose/clear — {e}")
@@ -262,7 +270,7 @@ def main():
     finally:
         if verbose_requested:
             try:
-                http_get(base + "/diag?verbose=0")
+                http_post(base + "/diag?verbose=0")
             except (urllib.error.URLError, OSError):
                 pass
         out(f"[{ts()}] stopped. Capture in {log_path}")

@@ -108,20 +108,16 @@ bool VehicleController::recover_pending_key_rotation_at_boot_() {
     pairing_cleanup_pending_.store(true);
     ESP_LOGW(TAG, "interrupted key rotation detected — cleaning persisted peer state before key load");
 
-    const bool vcsec_removed = storage_->remove(tk::nvs_contract::kSessionVcsec);
-    const bool info_removed = storage_->remove(tk::nvs_contract::kSessionInfotainment);
-    const bool paired_removed = storage_->remove(tk::nvs_contract::kPairedAt);
-    const bool cleanup_ok = vcsec_removed && info_removed && paired_removed;
-    // Short-circuit deliberately: the journal is the retry authority and must remain durable
-    // after any failed peer erase. Each remove commits independently, so power loss at every
-    // boundary simply re-enters this idempotent branch on the next boot.
-    const bool marker_removed = cleanup_ok && storage_->remove(tk::kKeyRotationMarker);
-    const tk::KeyRotationBootState final_state =
-        tk::decide_key_rotation_boot(true, true, cleanup_ok, marker_removed);
-    if (final_state != tk::KeyRotationBootState::Ready) {
-        ESP_LOGE(TAG, "key-rotation boot cleanup incomplete (vcsec=%d info=%d paired_at=%d marker=%d)",
-                 static_cast<int>(vcsec_removed), static_cast<int>(info_removed),
-                 static_cast<int>(paired_removed), static_cast<int>(marker_removed));
+    // The erase sequence and its ordering rules (every erase attempted, key_created included,
+    // the journal LAST and only after all of them succeeded) are tk::run_key_rotation_boot_cleanup,
+    // which the host tests run against the real NvsStorageAdapter fault injection.
+    const tk::KeyRotationBootCleanup cleanup = tk::run_key_rotation_boot_cleanup(*storage_);
+    if (cleanup.state() != tk::KeyRotationBootState::Ready) {
+        ESP_LOGE(TAG, "key-rotation boot cleanup incomplete (vcsec=%d info=%d paired_at=%d "
+                      "key_created=%d marker=%d)",
+                 static_cast<int>(cleanup.vcsec_removed), static_cast<int>(cleanup.info_removed),
+                 static_cast<int>(cleanup.paired_removed), static_cast<int>(cleanup.date_removed),
+                 static_cast<int>(cleanup.marker_removed));
         return false;
     }
 
@@ -303,7 +299,9 @@ bool VehicleController::start_tasks() {
     }
 
     TaskHandle_t loop_task = nullptr;
-    if (xTaskCreate(loop_task_fn_, "vehicle_loop", 8192, this,
+    // 10240 B: a paired ESP32-S3 at 1.6.3-dev.4 reported 444 B minimum free of the former 8192 B;
+    // #375 grew the loop_task_fn_ root frame by 112 B. Projected (not yet measured) reserve ~2.3 KB.
+    if (xTaskCreate(loop_task_fn_, "vehicle_loop", 10240, this,
                     tk::kPrioVehicleLoop, &loop_task) != pdPASS) {
         ESP_LOGE(TAG, "vehicle_loop task creation failed");
         task_start_gate_.cancel();

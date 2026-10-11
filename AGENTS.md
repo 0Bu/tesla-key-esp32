@@ -30,7 +30,7 @@ Read task-specific contracts through the [documentation index](docs/README.md).
   `scripts/ci-build-all.sh` is the CI entry point.
 - `esp-idf-toolchain.txt` pins ESP-IDF **v6.1** and its container digest. Use
   `scripts/idf-docker.sh`; preserve its **1.5 CPU / 1800 MiB** limits. Do not substitute host IDF.
-- `main/idf_component.yml` pins `yoziru/tesla-ble` **v5.2.0**. The ordered, hash-checked series in
+- `main/idf_component.yml` pins `yoziru/tesla-ble` **v5.3.0**. The ordered, hash-checked series in
   `patches/tesla-ble/` is fail-closed. Pins, patches, locks, trims, wire behavior and key compatibility
   require a separately authorized dependency migration and protocol-vector review.
 - `teslamotors/vehicle-command` is normative for BLE protocol behavior. Record every departure in
@@ -50,7 +50,7 @@ Follow [main/AGENTS.md](main/AGENTS.md), [main/logic/AGENTS.md](main/logic/AGENT
 The critical memory measure is INTERNAL **largest contiguous free block**, not total free heap. Use bounded responses,
 check allocation failures, and contain all exceptions at HTTP/MCP, C callbacks and task boundaries.
 Follow the [lock/task contract](docs/ARCHITECTURE.md#concurrency-normative-contract): snapshot leaf
-state under lock, use after unlock; no logging, network or storage work while holding shared locks.
+state under lock, use after unlock; no logging, network or storage work under leaf cache/result locks.
 Background status/display/telemetry consume caches and preserve sleep debounce, retry/backoff and
 foreground-command arbitration. Reboot loops are safety failures.
 
@@ -108,7 +108,12 @@ Update the owner with the changed code/configuration. Do not duplicate technical
 
 Skills use `$skill-name` and `.agents/skills/`; legacy `/skill-name` is historical only.
 Hook policy lives in `tools/agent-hooks/`, configuration in `.agents/` and `tools/agent-config/`.
-Hooks are lexical defense in depth, not authorization or sandboxing.
+Native `.codex/` registrations are generated adapters, not a second policy. Check/regenerate with
+`node tools/agent-config/sync-codex.mjs --check` / `--write`. Codex hooks require project and current
+hook trust through `/hooks`; linked worktrees load declarations from the primary checkout. Keep its
+reviewed setup in sync or run gates explicitly. Reviewer read-only/no-escalation defaults do not
+replace inspection of parent runtime permission overrides. `scripts/with-host-python.sh` selects a
+capable host Python for gates. Hooks are lexical defense in depth, not authorization or sandboxing.
 
 ## PR and review
 
@@ -116,7 +121,8 @@ Hooks are lexical defense in depth, not authorization or sandboxing.
   merge and always assesses documentation quality; unresolved material `DOC-QUALITY` findings
   prevent clean. `$pr-hygiene` is required at PR creation, every push, and every merge. It checks
   privacy and English independently of the other reviews.
-- `$feature-docs` is required when its cataloged surface changes. `$vehicle-command-audit` is
+- `$feature-docs` is required when its cataloged surface changes, including native `.codex/` adapters
+  and `scripts/with-host-python.sh`. `$vehicle-command-audit` is
   required when the BLE/command relevance classifier in `tools/agent-hooks/pr-gate-lib.sh` applies.
   Consult those skills for exact scope; no silent relevance exemptions.
 - Strict Renovate maintenance (`gate_is_renovate_maintenance`, only `.github/workflows/renovate.yaml`

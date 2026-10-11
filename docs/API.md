@@ -1,9 +1,10 @@
 # HTTP and MQTT API
 
 Base `http://<ESP32-IP>`. No auth, no TLS — see [SECURITY](SECURITY.md#http-api-exposure). Mutating
-browser requests from a foreign or DNS-rebound Origin get `403`; Host must be the device name or
-current IP, and state-changing legacy GET forms use the same gate. Headerless evcc/curl clients stay
-compatible, so this is not a substitute for the trusted-LAN boundary.
+browser requests require a device-owned Host and matching Origin; foreign/rebound origins get `403`.
+Headerless POST clients stay compatible. Mutating GETs require matching Origin/Referer or allowed
+fetch-site provenance; otherwise send a custom header such as `X-Requested-With` or use the POST
+alias (`/ota/check`, `/diag`, `/coredump`). This does not replace the trusted-LAN boundary.
 
 ## Commands
 
@@ -58,19 +59,37 @@ GET /api/1/vehicles/{VIN}/vehicle_data
   "response": {
   "charge_state": { "charging_state": "Charging", "battery_level": 72,
     "usable_battery_level": 72, "charge_limit_soc": 80, "charger_power": 11,
-    "charge_rate": 58.3, "charge_amps": 16, "battery_range": 280.5,
-    "minutes_to_full_charge": 45 } } } }
+    "charge_rate": 58.3, "charge_amps": 16, "charge_energy_added": 12.5, "battery_range": 280.5,
+    "minutes_to_full_charge": 45 },
+  "climate_state": { "is_climate_on": true, "is_preconditioning": true,
+    "inside_temp": 21.5, "outside_temp": 5, "driver_temp_setting": 22 } } } }
 ```
 
-The evcc response always includes the complete fixed numeric `charge_state` schema; `/status`
-and MQTT may instead omit unreported optional fields. `battery_range`/`charge_rate` here remain
-miles/mph; MQTT uses km/km/h.
+The doubled `response` and `charge_amps` match the Fleet API/TeslaBleHttpProxy shape.
+`battery_level` is nominal SOC; `usable_battery_level` matches the Tesla app. Charge fields form a
+complete fixed numeric schema, including session `charge_energy_added` in kWh. `/status` and MQTT
+may omit unreported fields. Range/rate remain miles/mph here; MQTT uses km/km/h.
 
-The doubled `response` and `charge_amps` are intentional — they match the Fleet API /
-TeslaBleHttpProxy shape evcc parses. `battery_level` is the nominal pack SOC, `usable_battery_level`
-the usable SOC matching the Tesla app. While the car is idle the cache may stay available so polling
-does not wake it; while charging, or within five minutes of a command, a `ChargeState` older than 30 s
-returns HTTP `503` with reason `"stale or unavailable"` instead of posing as live telemetry.
+Optional `?endpoints=` selects `charge_state`, `climate_state` and/or `drive_state`. Omission selects
+charge and climate. Combine selectors with `;`, `,`, `%3B` or `%2C`. The exact query key is required;
+empty, unsupported, duplicate or malformed selectors and queries ≥128 bytes return `400`.
+TeslaBleHttpProxy instead uses its default for empty selectors, accepts duplicates and returns
+`503` for unsupported selectors; this firmware treats them as client errors. Every selected cache
+must be available for `200`/`result:true`; otherwise the response is `503`/`result:false` with
+`"stale or unavailable"`. Reads never poll or wake the car.
+
+| Selected domain | Availability and units |
+|---|---|
+| Charge | Valid idle cache may be old. In the active window, data older than 30 s is unavailable. |
+| Climate | Valid cache required; inside the active window it must be ≤300 s old. Unreported `is_preconditioning` is `false`; other optional fields use typed zero/false fallbacks. |
+| Drive | Valid cache with reported odometer required; last-known odometer is served in miles. Missing odometer returns `503` with `odometer:0`, where the proxy returns `200` with zero; evcc rejects either. |
+
+The active window is a command in the last five minutes, or cached Charging/Starting with live
+Infotainment contact <60 s old. Once that contact expires without a recent command, valid
+last-known charge/climate data can be served again. Climate refreshes only through the in-window
+rotation, restarted at climate on window entry. After reboot it stays unavailable until that
+rotation reaches an awake car; the boot window is not seeded after a heap-watchdog restart.
+Drive refreshes through the rotation and a best-effort `NO_WAKE_SKIP` wake/bootstrap one-shot.
 
 ## Body controller state (no wake)
 
@@ -90,8 +109,8 @@ GET /api/1/vehicles/{VIN}/body_controller_state
 | `GET /` (`/index.html`) | Web UI (status, pairing, quick commands). |
 | `GET /status[?redact=1]` | Full device/vehicle status. Use `redact=1` for sharing; the board MAC remains visible. Export rules below. |
 | `POST /scan` | Time-limited BLE discovery scan (fills `ble.devices`). |
-| `GET /diag[?verbose=0\|1][&clear=1][&redact=1]` | Plain-text in-memory log. `verbose` changes logging; `clear=1` deletes the log. Export rules below. |
-| `GET /coredump[?clear=1]` | Private crash image; `404` when absent. Requires the matching ELF. `clear=1` erases the artifact instead. |
+| `GET` or `POST /diag[?verbose=0\|1][&clear=1][&redact=1]` | Plain-text in-memory log. `verbose` changes logging; `clear=1` deletes the log. Export rules below. |
+| `GET` or `POST /coredump[?clear=1]` | Private crash image; `404` when absent. Requires the matching ELF. `clear=1` erases the artifact instead. |
 | `POST /crash/dismiss` | Deletes this boot's crash report; a failed erase returns `500` and retains the report. |
 | `GET /heap` | `{dt, b0, b_boot, unit:"KiB", scale:10, free[], largest[]}` — 24 h memory trend; interpretation below. |
 | `POST /gen_keys[?force=1]` | Generate the ECDSA P-256 key (refuses overwrite without `force`, `409`). Identity mutation is Stable-only: `PendingVerify`, unknown OTA state or an active OTA/update returns `503` before anything changes. |
@@ -102,7 +121,7 @@ GET /api/1/vehicles/{VIN}/body_controller_state
 | `POST /set_wifi` | `{"ssid":"…","pass":"…"}` and reboot, with one-shot credential rollback. curl/`provision.py` only; validation and rollback below. |
 | `POST /set_time` | `{"ms":<epoch>}` — set the wall clock from the browser (NTP fallback). |
 | `POST /set_ota` | `{"channel":"release"\|"dev"}` — switch the update channel. |
-| `GET /ota/check[?ms=<epoch>][&pr=<N>]` | Start a background update check (then poll `/ota/status`); `pr=<N>` targets that PR's preview build. |
+| `GET` or `POST /ota/check[?ms=<epoch>][&pr=<N>]` | Start a background update check (then poll `/ota/status`); `pr=<N>` targets that PR's preview build. |
 | `POST /ota/update[?pr=<N>]` | Start the background self-update (downloads, then reboots). |
 | `GET /ota/status` | `{state, progress, message, available, update_available, current, channel, pr}` (`pr` only while a PR build is targeted). |
 | `GET /ota/changelog` | Release notes for the offered update: `text/plain`, ≤ 1024 bytes, `no-store`; `204` when none. |

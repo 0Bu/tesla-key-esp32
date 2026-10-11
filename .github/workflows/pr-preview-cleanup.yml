@@ -28,7 +28,8 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: write
-      pages: read
+      pages: write
+      pull-requests: read
     concurrency:
       # Same group as signed-pr-preview: close/synchronize/label removal cancels any signer that could
       # otherwise publish after this deletion.
@@ -50,8 +51,9 @@ jobs:
           python3 scripts/check-pages-source.py "$pages_json"
       - name: Remove ineligible or superseded PR preview
         env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: ./scripts/publish-pages-branch.sh rm "${{ github.event.pull_request.number }}"
+        run: ./scripts/reconcile-pr-previews.sh remove-if-stale "${{ github.event.pull_request.number }}"
 
   discover-stale:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
@@ -88,7 +90,7 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: write
-      pages: read
+      pages: write
       pull-requests: read
     concurrency:
       # Each candidate is revalidated while holding the exact sign/cleanup lock for that PR.

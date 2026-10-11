@@ -26,7 +26,7 @@ other**?"; this skill asks "do they agree with **Tesla's protocol**, and is each
 
 `teslamotors/vehicle-command` is the **truth**, but it is NOT what we run. We run
 **yoziru/tesla-ble** (pinned in [`main/idf_component.yml`](../../../main/idf_component.yml) — **read
-the pin first**, currently `v5.2.0`). The Go SDK exposes commands, builders, fields and enum
+the pin first**, currently `v5.3.0`). The Go SDK exposes commands, builders, fields and enum
 values the pinned C++ port may **not** have. So every comparison is **three-way**, and a
 divergence from upstream does **not** automatically mean "change the code":
 
@@ -62,7 +62,7 @@ Verify these paths at the reviewed upstream revision:
 
 | Dimension | Upstream file(s) |
 |---|---|
-| BLE transport (UUIDs, name, framing, MTU, max-conns) | `pkg/connector/ble/ble.go`, `pkg/connector/ble/errors.go` |
+| BLE transport (UUIDs, name, framing, MTU, max-conns, ATT write/subscription type) | `pkg/connector/ble/ble.go`, `pkg/protocol/protocol.md` (characteristics, "write with response"), go-ble at the version pinned in `go.mod` (`linux/gatt/client.go`, `linux/att/client.go`) |
 | Session / signing / anti-replay / clock | `pkg/protocol/protocol.md`, `internal/authentication/signer.go`, `pkg/protocol/protobuf/signatures.proto` |
 | Roles | `pkg/protocol/protobuf/keys.proto` (Role enum), `pkg/protocol/protocol.md` (role *scope* prose) |
 | Wake / sleep / body controller | `pkg/vehicle/vcsec.go`, `pkg/vehicle/state.go`, `pkg/vehicle/vehicle.go`, `pkg/protocol/protobuf/vcsec.proto` |
@@ -71,11 +71,12 @@ Verify these paths at the reviewed upstream revision:
 
 ### Feasibility — `yoziru/tesla-ble` at the pinned tag
 Fetch raw at the **pin** (base `https://raw.githubusercontent.com/yoziru/tesla-ble/<pin>`; confirm
-`<pin>` from `idf_component.yml`). Layout at v5.2.0:
+`<pin>` from `idf_component.yml`). Layout at v5.3.0:
 `include/{vehicle.h, client.h, command_error.h, message_builders.h, peer.h, vin_utils.h, errors.h, …}`
 and `src/{vehicle.cpp, client.cpp, peer.cpp, message_builders.cpp, message_processor.cpp, crypto_context.cpp, vin_utils.cpp, errors.cpp, …}`.
-- **Does a command builder exist?** → `src/message_builders.cpp` (e.g. `scheduledChargingAction` IS
-  registered; `scheduledDepartureAction` is **not** — that absence is *why* scheduled departure isn't exposed).
+- **Does a command builder exist?** → `src/message_builders.cpp`. v5.3.0 registers both
+  `scheduledChargingAction` and `scheduledDepartureAction`; the firmware deliberately does not
+  expose scheduled departure. Builder availability alone is not implementation, role or hardware acceptance.
 - **Enum / API values** (roles, form factors) → `include/client.h`; firmware-level `SleepState`, `WakePolicy` → `main/logic/command_runner.hpp`.
 - **How a fault becomes a string** the firmware matches → `include/command_error.h`, `main/logic/command_runner.hpp`, `main/vehicle_telemetry.cpp`.
 - **VIN→BLE-name / matching** → `include/vin_utils.h`, `src/vin_utils.cpp` (the firmware delegates here; it does **not** build the name itself).
@@ -83,7 +84,7 @@ and `src/{vehicle.cpp, client.cpp, peer.cpp, message_builders.cpp, message_proce
 ### Local — firmware and owning documents
 Code: `main/ble_client.{cpp,hpp}`, `main/vehicle_ctrl.{cpp,hpp}` (+ `vehicle_commands.cpp`,
 `vehicle_telemetry.cpp`, `vehicle_pairing.cpp`), `main/http_server.cpp` (+ `http_api.cpp`,
-`http_status.cpp`, `http_ota.cpp`, `http_config.cpp`), `main/mqtt_ha.cpp`,
+`http_status.cpp`, `http_ota.cpp`, `http_config.cpp`), `main/command_exec.cpp`, `main/mqtt_ha.cpp`,
 `main/ota_update.cpp`, `main/Kconfig.projbuild`, `partitions.csv`.
 Docs to hold accountable: [`README.md`](../../../README.md) and
 [`docs/SECURITY.md`](../../../docs/SECURITY.md).
@@ -105,8 +106,11 @@ Verify every dimension against the reviewed revisions; previous audit results ar
 1. **BLE transport** — service `00000211…`, write `…0212`, notify `…0213`; VIN→name `S%02xC` over
    the **first 8 bytes** of `sha1(VIN)` (⇒ `S` + 16 hex + `C`); 2-byte big-endian length prefix;
    block `min(txMtu,maxBLEMessageSize)-3`; `ErrMaxConnectionsExceeded` keyed off the advert
-   **`Connectable`** flag (not the connect error). (Writes use a 20-byte
-   fallback until MTU negotiation, then `min(MTU-3, 244)` like the pinned library limit.)
+   **`Connectable`** flag (not the connect error). (Writes use 20-byte
+   chunks: this build starts/accepts no MTU exchange, so MTU is 23.
+   Check ATT Write Command versus reference Write Request, CCCD 0x0001 notifications versus Linux
+   reference indications, no ATT server and disabled SMP against every ADR-0005 departure. The
+   `min(MTU-3, 244)` path is compiled but unreachable; do not call it negotiated field behavior.)
 2. **Roles / Charging-Manager scope** — charging commands + wake only; everything else
    (lights/horn/sentry/**climate**/locks) is role-rejected.
 3. **Session / signing / clock** — `expires_at` = **vehicle's `SessionInfo.ClockTime` + a
@@ -116,9 +120,10 @@ Verify every dimension against the reviewed revisions; previous audit results ar
    replayable. It **does** gate persisted-session loading: `load_nvs_sessions_()` (inheriting
    upstream `vehicle.cpp`'s `system_clock - SessionInfo.ClockTime` check, see ADR-0005 §2). Because
    `SessionInfo.ClockTime` counts seconds in vehicle epoch rather than Unix epoch, restoring the
-   clock to Unix time ensures stored sessions are rejected (> 3600 s) rather than acting as a
-   real-time 1-hour reuse window; restoring NVS clock before controller init prevents an uninitialized
-   1970 clock (negative age) from keeping stale sessions.
+   clock successfully to Unix time rejects stored sessions (> 3600 s), rather than implementing a
+   real-time 1-hour reuse window. Restore is attempted before controller init; absent/unreadable
+   `last_time` or a failed clock set can leave the inherited negative-age acceptance path. Do not
+   claim guaranteed expiry from this restore.
 4. **Pairing / whitelist** — add-key carries role + `KEY_FORM_FACTOR_CLOUD_KEY`, no key name (car
    shows "Unknown key"), requires an **NFC card on the console reader**, verify via a SessionInfo
    probe. (Note: the **"3"** is the simultaneous-BLE-**connection** limit; a
@@ -137,12 +142,14 @@ Verify every dimension against the reviewed revisions; previous audit results ar
    the `"whitelist"` substring (session-info handshake only), and the two-strike `"authentication
    failed"` **gated to the health probe** so a role-denied user command can't destroy a pairing.
 8. **Library-version claims** — every command the firmware calls resolves to a real builder at the
-   pin; doc claims about what's *not* exposed (scheduled departure) match the pin's
-   `message_builders.cpp`.
+   pin; distinguish the firmware registry's no-exposure policy (scheduled departure) from builder
+   availability in `message_builders.cpp` and from role/hardware acceptance.
 9. **evcc / TeslaBleHttpProxy HTTP shape** — `/api/.../command/{name}` names, `vehicle_data` =
    `.response.response.charge_state.*` with **`charge_amps`** (not `charging_amps`), doubled
    `response`, **miles/mph on the `/api` path** (metric is MQTT-only), `charging_state` strings
-   `Charging/Disconnected/Complete/Stopped/NoPower/Starting`.
+   `Charging/Disconnected/Complete/Stopped/NoPower/Starting`. Verify selectors, cache freshness,
+   energy/preconditioning/odometer presence and intentional proxy departures in
+   [API](../../../docs/API.md#vehicle-data) against all emitters and consumers.
 9a. **Response-counter anti-replay and patch series** — response-counter anti-replay and Request-UUID routing
     are enforced natively by `main/logic/ble_dispatcher.hpp` and `Peer::validate_response_counter()`, superseding
     patch 0001 and ADR-0003. Verify the current 3 repository patches under `patches/tesla-ble/` (0004 parental
@@ -150,7 +157,12 @@ Verify every dimension against the reviewed revisions; previous audit results ar
     through root CMake to the managed dependency tree, and are rebased explicitly on every pin bump; 0006 must
     keep the V1 vectors in `test/test_tesla_ble_harness.cpp` byte-identical and keep verifying response tags
     against response metadata bound to the counter the response carries (`Signer.Decrypt`), never the
-    request counter: every `Peer::decrypt_response` call site passes `AES_GCM_Response_data.counter`.
+    request counter (v5.3.0 now verifies/passes it upstream; PSA preserves that behavior): every `Peer::decrypt_response` call site passes `AES_GCM_Response_data.counter`.
+    Encrypted VCSEC additionally requires an initialized peer and non-empty domain request hash;
+    missing context, failed tag or repeated response counter (including zero) drops before decoding,
+    sleep/status updates and callbacks. Plaintext passive status is a separate path. Fresh sessions
+    need a shared secret, request hashes are domain-isolated, and native retries re-sign rather than
+    importing upstream Vehicle's identical-payload retry policy.
 9b. **ADRs and cryptographic / protocol boundary claims** — when an ADR or architecture doc makes
     claims about protocol vulnerabilities, replays, or countermeasures:
     - Cryptographically verify the claims against `teslamotors/vehicle-command` Go reference sources

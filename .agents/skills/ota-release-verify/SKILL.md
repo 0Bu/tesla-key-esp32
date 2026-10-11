@@ -1,6 +1,6 @@
 ---
 name: ota-release-verify
-description: "Read-only verification of the already-published OTA channel against the latest GitHub Release: bind manifest.sourceSha to the Release tag commit, hash-check all 16 manifest parts, and verify every app's embedded version and chip family without publishing, releasing, flashing, OTA, or local ref mutation. Optional live-board GETs require separate explicit user approval."
+description: "Read-only verification of the already-published OTA channel against the latest GitHub Release: bind manifest.sourceSha to the Release tag commit, hash-check all 16 manifest parts, and verify every app's embedded version and chip family without publishing, releasing, flashing, OTA, or local ref mutation. Optional live-board HTTP requests require separate explicit user approval, including the state-changing POST /ota/check."
 ---
 
 Invoke `$ota-release-verify`. Read [AGENTS.md](../../../AGENTS.md) first; this workflow grants no
@@ -18,7 +18,8 @@ Channel validity does not prove a particular device's installed signing authorit
 
 > **Read-only by default.** Steps 1–3 use `git`, `gh`, `curl`, Python and `esptool image-info`
 > against public Release/Pages bytes; they do not update Git refs, publish, sign, flash, start OTA,
-> or touch a device. Step 4 contains optional live-board GETs and runs only after explicit approval.
+> or touch a device. Step 4 contains optional live-board GET reads and a state-changing
+> `POST /ota/check`; run them only after explicit approval for those methods and endpoints.
 > It never sends `POST /ota/update`.
 
 ## Scope boundary — what this skill does NOT do
@@ -76,7 +77,7 @@ printf 'Release %s -> %s\n' "$RELEASE_TAG" "$SOURCE_SHA"
 
 `REL` is the version the manifest and every embedded app descriptor must report; `SOURCE_SHA` is
 the only acceptable `manifest.sourceSha`. A merely well-formed but different SHA is stale or
-unreconciled channel state and fails closed. `version.txt` = `1.4.0` here is only the **floor** —
+unreconciled channel state and fails closed. `version.txt` = `1.5.0` here is only the **floor** —
 do not expect it to equal the live version; CI stamps the real one uncommitted.
 
 `build.yml` keeps this invariant structurally: a firmware-relevant `main` push enters the
@@ -256,7 +257,7 @@ the corresponding versioned merged asset attached to the bound GitHub Release.
 ### 4. (Optional — live board) confirm a real device agrees
 
 Only with explicit user approval to contact a device on the trusted LAN (no auth). `IP` = the
-board's address or `tesla-key-esp32.local`. `GET /ota/check` starts a channel check and changes the
+board's address or `tesla-key-esp32.local`. `POST /ota/check` starts a channel check and changes the
 reported OTA-check state, so it is outside the default public-channel read and still never
 authorizes `POST /ota/update`.
 
@@ -268,7 +269,7 @@ curl -s "http://$IP/api/proxy/1/version"           # {"version":"X.Y.Z-esp32","p
 curl -s "http://$IP/status" | jq -r .version       # X.Y.Z  (no "-esp32"; must match the release)
 
 # non-blocking manifest check → poll status (ms = browser-clock NTP fallback for TLS)
-curl -s "http://$IP/ota/check?ms=$(date +%s000)"
+curl -s -X POST "http://$IP/ota/check?ms=$(date +%s000)"
 sleep 3
 curl -s "http://$IP/ota/status" | jq
 #   {state, progress, message, available, update_available, current}
@@ -290,7 +291,7 @@ table below before retrying. (Endpoints: [`main/http_ota.cpp`](../../../main/htt
 | Pages part differs from its byte range in the Release merged asset | step 2 | same-version/source manifest was regenerated around bytes that were not attached to the bound GitHub Release | do not OTA; republish Pages exclusively from the signed Release staging tree and rerun |
 | an app's embedded target/version differs from its manifest family/Release | step 2/3 | stale or cross-target app was published under the expected basename | do not OTA; rebuild/sign/publish the exact Release and verify all four descriptors |
 | `/ota/status` `message:"downloaded image is invalid"` (serial: `image valid, signature bad`) | step 4, `state:"error"` | **TOFU key mismatch** — the running image's trust anchor ≠ the current `OTA_SIGNING_KEY`; the channel is fine, the *device* can't accept it | USB-reflash the published signed `.bin` to `0x20000` + erase otadata (keeps NVS) — see [`$usb-recovery`](../usb-recovery/SKILL.md) and [`docs/SECURITY.md`](../../../docs/SECURITY.md) "Trust anchor (trust-on-first-use)" |
-| `/ota/status` `message:"no newer version available"` | step 4, `state:"error"` | **downgrade gate** — incoming image is not strictly newer than what's running (expected when already current, or a stale manifest) | benign if the device already runs the release; else the manifest/version stamp is behind → check step 2 |
+| `/ota/status` `message:"no newer version available"` | step 4, `state:"error"` | **version eligibility gate** — the candidate fails the selected channel/PR policy (for ordinary stable updates, an equal or older version; intentional return/preview exceptions still apply) | benign if the device already runs the release; otherwise verify candidate identity and the selected channel/PR → check step 2 |
 | manifest `version` ≠ latest Release tag, or a device loops on "update available" with no version change | step 2 / step 4 `current` vs `available` | **floor-vs-stamped drift** — the published binary/manifest froze at the `version.txt` floor instead of the stamped release | inspect the "Stamp firmware version" step in [`.github/workflows/build.yml`](../../../.github/workflows/build.yml); the manifest must be built with `steps.stamp.outputs.disp` |
 | fewer than 4 builds / wrong chipFamily set / wrong part offset | step 2 | a target failed to stage, or the suffix/offset maps drifted | reconcile `image_suffix()`/`boot_offset()` across `ci-sign-artifacts.sh`, `build-pages.sh`, `ota_update.cpp`, `target.hpp` |
 
@@ -302,3 +303,9 @@ table below before retrying. (Endpoints: [`main/http_ota.cpp`](../../../main/htt
   + otadata erase, the recovery a "signature bad" device needs.
 - [`docs/SECURITY.md`](../../../docs/SECURITY.md) — signing key lifecycle, TOFU trust anchor, and
   the USB-reflash recovery for a device off the current key.
+
+The runtime descriptor must equal the manifest and pass channel-aware eligibility in
+`logic/ota_contract.hpp`: stable advances normally; intentional same-core PR/Dev transitions and
+Dev/PR/pre-release return to Release are exceptions, with older stable cores allowed from Dev.
+This is not a universal downgrade barrier. Source floor is not the CI display version. Optional
+live checks use separately authorized POST /ota/check, plus independently approved cache GETs.

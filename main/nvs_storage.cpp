@@ -207,7 +207,8 @@ bool NvsStorageAdapter::load_str(const char* key, std::string& out) {
     }
 }
 
-tk::NvsStringLoadState NvsStorageAdapter::load_str_state(const char* key, std::string& out) {
+tk::NvsStringLoadState NvsStorageAdapter::load_str_state(const char* key, std::string& out,
+                                                         bool allow_empty) {
     out.clear();
     if (!initialized_) {
         ESP_LOGE(TAG, "safety string read unavailable '%s': NVS namespace is not initialized", key);
@@ -223,7 +224,7 @@ tk::NvsStringLoadState NvsStorageAdapter::load_str_state(const char* key, std::s
                       : err == ESP_ERR_NVS_NOT_FOUND ? tk::NvsStringProbe::NotFound
                                                      : tk::NvsStringProbe::Error;
     if (probe == tk::NvsStringProbe::NotFound) return tk::NvsStringLoadState::Missing;
-    if (probe == tk::NvsStringProbe::Error || len <= 1) {
+    if (probe == tk::NvsStringProbe::Error || len == 0 || (!allow_empty && len == 1)) {
         ESP_LOGE(TAG, "safety string probe failed '%s': %s (len=%u)", nvskey,
                  esp_err_to_name(err), static_cast<unsigned>(len));
         return tk::NvsStringLoadState::Error;
@@ -236,10 +237,10 @@ tk::NvsStringLoadState NvsStorageAdapter::load_str_state(const char* key, std::s
         err = nvs_get_str(handle_, nvskey, buf.data(), &read_len);
         const bool read_ok = err == ESP_OK;
         const bool value_well_formed = read_ok && read_len == probed_len &&
-            buf.front() != '\0' && buf.back() == '\0' &&
+            (allow_empty || buf.front() != '\0') && buf.back() == '\0' &&
             std::memchr(buf.data(), '\0', probed_len - 1) == nullptr;
         const tk::NvsStringLoadState state = tk::classify_nvs_string_load(
-            probe, probed_len, read_ok, read_len, value_well_formed);
+            probe, probed_len, read_ok, read_len, value_well_formed, allow_empty);
         if (state != tk::NvsStringLoadState::Present) {
             ESP_LOGE(TAG, "safety string read failed '%s': %s (probe=%u read=%u)",
                      nvskey, esp_err_to_name(err),

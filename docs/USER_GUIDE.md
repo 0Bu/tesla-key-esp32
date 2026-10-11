@@ -4,16 +4,14 @@ Install and pair using the [quick start](../README.md). This guide covers ongoin
 
 ## Hardware
 
-Exactly the four chips `yoziru/tesla-ble` supports — **esp32, esp32s3, esp32c3, esp32c6** (WiFi
-2.4 GHz + BLE). The ESP-IDF Component Manager enforces that list at dependency resolution, so the
-supported set cannot drift from the crypto library's. Requirements: **≥ 4 MB flash** (dual-OTA
-layout, two ~2 MB app slots), no PSRAM, a USB data cable for the first flash. ESP32-S2 (no
-Bluetooth) and ESP32-H2/P4 (no WiFi) cannot run this firmware. The classic **esp32 must be chip
-revision v3.0 (ECO3) or newer** (standard since ~2020): the signed image requires it
-(`CONFIG_ESP32_REV_MIN_3`), so pre-ECO3 silicon such as the ESP32-PICO-D4 is refused by the web
-installer before flashing ([SECURITY](SECURITY.md#signed-ota-images)); the other targets have no such
-floor. A chip tesla-ble does not declare (esp32c5, esp32c61) would need upstreaming first — a locally
-patched checkout was tried for the C5 and dropped ([ADR-0004](adr/0004-drop-esp32c5-target.md)).
+Supports **esp32, esp32s3, esp32c3 and esp32c6**, with 2.4 GHz WiFi/BLE and at least 4 MB flash
+for dual OTA; PSRAM is not required. First installation needs a USB data cable. Classic esp32
+requires revision v3.0 (ECO3) or newer; pre-ECO3 chips such as ESP32-PICO-D4 are refused before
+flashing. Other targets have no revision floor. ESP32-S2 lacks BLE; H2/P4 lack WiFi.
+
+The pinned library also declares C5, but this firmware does not support it: restoring C5 requires
+separate firmware, signing-size and hardware acceptance. Undeclared chips such as esp32c61 need
+upstream support first. [Target decision](adr/0004-drop-esp32c5-target.md).
 
 ### Wired networking (optional, esp32s3)
 

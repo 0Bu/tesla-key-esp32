@@ -153,6 +153,62 @@ constexpr KeyRotationBootState decide_key_rotation_boot(bool marker_present,
                                                : KeyRotationBootState::Blocked;
 }
 
+// Outcome of the boot-time erase of an interrupted rotation's persisted state.
+struct KeyRotationBootCleanup {
+    bool vcsec_removed = false;
+    bool info_removed = false;
+    bool paired_removed = false;
+    bool date_removed = false;
+    bool marker_removed = false;  // attempted only after every erase above succeeded
+
+    // Every record that could pair the new key with the old key's identity is gone.
+    constexpr bool peers_erased() const {
+        return vcsec_removed && info_removed && paired_removed && date_removed;
+    }
+    constexpr KeyRotationBootState state() const {
+        return decide_key_rotation_boot(true, true, peers_erased(), marker_removed);
+    }
+};
+
+// The production sequence behind VehicleController::recover_pending_key_rotation_at_boot_(),
+// templated on the storage so the host tests drive the real NvsStorageAdapter fault injection
+// through exactly this code rather than a copy of it. Every erase is attempted and commits on its
+// own, so power loss at any boundary re-enters this idempotent sequence on the next boot. The
+// journal is the retry authority and goes LAST: it is cleared only when every erase succeeded.
+// `key_created` is erased unconditionally: an interrupted rotation cannot prove whether the stored
+// date names the old key or an already-stamped new one, and a date that outlives its key is shown
+// beside the wrong fingerprint.
+template <typename Storage>
+KeyRotationBootCleanup run_key_rotation_boot_cleanup(Storage& storage) {
+    KeyRotationBootCleanup cleanup;
+    cleanup.vcsec_removed = storage.remove(nvs_contract::kSessionVcsec);
+    cleanup.info_removed = storage.remove(nvs_contract::kSessionInfotainment);
+    cleanup.paired_removed = storage.remove(nvs_contract::kPairedAt);
+    cleanup.date_removed = storage.remove(nvs_contract::kKeyCreated);
+    if (cleanup.peers_erased()) cleanup.marker_removed = storage.remove(kKeyRotationMarker);
+    return cleanup;
+}
+
+enum class KeyRotationJournalRetire : uint8_t {
+    Retired,        // date (if untrusted) and journal are both durably gone
+    DatePending,    // an untrusted key_created could not be erased; the journal stays armed
+    JournalPending, // the date is fine but the journal erase failed; the journal stays armed
+};
+
+// Last step of a runtime rotation, after the peer sessions were cleared. A key_created that could
+// not be retired or stamped earlier (`date_untrusted`) still holds the PREVIOUS key's date and
+// would reappear beside the new fingerprint after a reboot, so it is erased first and the journal
+// only after it. `date_untrusted` is cleared only once that erase committed.
+template <typename Storage>
+KeyRotationJournalRetire retire_key_rotation_journal(Storage& storage, bool& date_untrusted) {
+    if (date_untrusted) {
+        if (!storage.remove(nvs_contract::kKeyCreated)) return KeyRotationJournalRetire::DatePending;
+        date_untrusted = false;
+    }
+    return storage.remove(kKeyRotationMarker) ? KeyRotationJournalRetire::Retired
+                                              : KeyRotationJournalRetire::JournalPending;
+}
+
 // tesla-ble's Client::get_private_key() exports PEM (mbedtls_pk_write_key_pem): about 228 B for
 // a P-256 SEC1 key including the terminating NUL. Upstream persist_private_key_() uses 2048 B;
 // a smaller export buffer makes every export fail (#314 review, B2).

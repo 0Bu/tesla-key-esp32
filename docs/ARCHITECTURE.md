@@ -18,6 +18,9 @@ concurrency. [API](API.md) owns external fields; [Security](SECURITY.md) owns tr
 [AGENTS.md](../AGENTS.md) owns runner policy. `.agents/skills/` defines workflows;
 `.agents/subagents.json` defines read-only reviewers; `tools/agent-hooks/` contains lexical guards.
 `tools/agent-config/` mutation-tests configuration, ownership and exact reviewed skill content.
+Native `.codex/agents/*.toml`, `.codex/config.toml` and `.codex/hooks.json` are generated adapters;
+`sync-codex.mjs --check` verifies parity. Hook trust and primary-checkout loading are separate from
+adapter correctness; reviewer defaults can inherit parent runtime overrides ([Security](SECURITY.md#development-tooling-trust-boundary)).
 The trusted-base `pr-policy` workflow evaluates current-head records without executing PR code;
 server-side blocking requires repository rules to require its check.
 
@@ -52,14 +55,21 @@ Success requires a newer feedback generation, a present current field and an exa
 match. Clear the previous state before parsing; missing fields cannot inherit old readings.
 Two missing/mismatched readbacks exhaust the budget. An ACK alone never means success.
 
-`vehicle_data` is cache-only and non-blocking. Idle readings may remain old; while charging or within
-five minutes of a command, ChargeState older than 30 s returns `503`. Optional telemetry fields are
-omitted when not reported. `/status.tele` requires a live BLE link; MQTT can retain valid caches.
+`vehicle_data` is cache-only and non-blocking; [API](API.md#vehicle-data) owns selectors, units,
+typed fallbacks and availability. Charge and climate use the active-window decision (recent command
+or live Charging/Starting contact <60 s old); charge expires at 30 s, climate at 300 s inside that
+window. Climate/drive reads copy fixed POD plus generation/ticks under `cache_mutex_`, then evaluate
+after unlock; unrelated strings are never copied. All selected domains must be usable for success.
+`/status.tele` requires a live BLE link; MQTT can retain valid caches.
 
 `logic/wake_poll.hpp` supplies one `NO_WAKE_SKIP` charge poll per self-wake episode. It arms after
 debounced ASLEEP→AWAKE, or paired+connected with a stale/empty cache. Failed polls retry with
 30–300 s exponential backoff. Once fresh, the episode latch prevents repeated idle polls as the
-cache ages. Stable sleep/disconnect resets it; being awake alone never opens the active window.
+cache ages. Stable sleep/disconnect resets it; awake alone never opens the active window.
+A wake/bootstrap fire also enqueues one Drive State Poll; background entries expire after 10 s,
+so a slow charge round trip may leave the odometer last-known. The 10 s in-window charge cadence
+adds no drive poll. Climate is refreshed only by the rotating poll, reset to climate at window entry;
+post-boot cache availability is described in the API.
 
 ## OTA self-update
 
@@ -75,9 +85,10 @@ exactly one string version. Versions use a no-leading-zero numeric core, optiona
 `[0-9A-Za-z.-]+` suffix and ≤31 bytes; numeric cores compare as digit spans without overflow.
 Release body storage before copying version fields.
 
-The downloaded app descriptor is checked before bulk download, so a new manifest cannot smuggle
-old bytes. Normal candidates must be newer; an explicitly selected Dev→Release transition permits
-a return to production. Dev candidates use increasing `x.y.z-dev.N`; previews use the newest complete
+Before bulk download, the app descriptor must equal the manifest version and satisfy
+`logic/ota_contract.hpp` channel/PR eligibility. Ordinary stable updates must be newer; explicit
+exceptions allow targeted same-core PR previews, same-core transitions to Dev and return from Dev
+or PR/pre-release to Release (including an older stable core from Dev). Dev candidates use increasing `x.y.z-dev.N`; previews use the newest complete
 immutable stable Release as `<stable>-PR-<N>`. Preview comparison follows numeric cores, allowing a
 later release to advance it. Unparameterized checks return to the selected channel when its core
 catches up. ConfigBlob v1 reserved bits store explicit channel choice without breaking downgrade
@@ -98,21 +109,57 @@ The app sits at `0x20000` in two `0x1f0000` slots. Layout and projected/actual s
 [build contracts](DEVELOPMENT.md#build-and-evidence-contracts), not independently chosen OTA values.
 Signed previews and the browser installer share the [publication trust boundary](SECURITY.md#release-pipeline-and-trust-boundaries).
 
+### Flashing & NVS safety
+
+Normal OTA writes the installed inactive slot and otadata; verified app-only USB writes the signed
+app at `0x20000`, then erases otadata last. Both preserve bootloader, partitions and secret NVS
+`0x9000/0x6000`; neither migrates the layout.
+
+Whole-chip erase destroys all of them. Recovery needs an explicitly authorized complete verified
+write set, network setup and new key enrollment:
+
+| Part | Offset |
+|---|---|
+| Bootloader | `0x1000` esp32; `0x0` s3/c3/c6 |
+| Partition table | `0x8000` |
+| Erased initial otadata | `0xf000` |
+| Signed app | `0x20000` |
+
+The installer validates all four release-bound manifest parts before writing. Releases publish
+signed apps and merged images, not separate layout parts; manual full recovery must verify every
+part's source. Merged writes can overwrite NVS and require approval for that loss. App-only recovery
+or an unsigned build cannot replace a full write set. [Artifact trust](SECURITY.md#ota-self-update).
+
 ## Pinned tesla-ble and native orchestration
 
-All targets use the manifest-pinned v5.2.0 graph and lexical, hash-checked patch series. The firmware
+NimBLE SMP/link-layer pairing and bonding are compiled out on all four targets
+(`CONFIG_BT_NIMBLE_SECURITY_ENABLE=n`); protection is Tesla application crypto and NFC/VCSEC key
+enrollment. No host link keys exist. A peer SMP request is dropped with no reply and one `rc=6`
+error; that numeric BLE_HS_ENOMEM means unsupported SMP here, not an allocation failure.
+Controller `BLE_INIT ... SMP:1` describes its separate unchanged capability. [ATT/SMP departures](adr/0005-tesla-ble-seam.md#2-platform-forced-departures-and-reference-deviations).
+
+All targets use the manifest-pinned v5.3.0 graph and lexical, hash-checked patch series. The firmware
 uses `TeslaBLE::Client` directly; `main/logic/` owns framing, UUID/session tracking and an eight-slot
 command runner: VCSEC auth → wake → Infotainment auth → payload, with backoff. Strict 2-byte BE
 length framing has bounded buffering and inter-chunk timeout; TX preserves the builder's frame.
 
 Patches 0001–0003 are retired. Current patches trim unused Parental Controls (0004), align session
 counter `max(local, reported)` plus epoch/time with `signer.go` (0005), and port crypto to PSA with
-response-tag verification against the response's counter (0006).
+response-tag verification against the response's counter (0006). v5.3.0 supplies that verification
+and counter upstream; the PSA rebase preserves it, failure wiping and a separate response-AAD helper.
+Peer admission requires an initialized shared secret, including restored sessions. Domain request
+hashes remain isolated. Encrypted VCSEC requires an initialized peer and non-empty request hash;
+missing context, failed tags or repeated carried counters (including zero) drop before protobuf,
+sleep updates or callbacks, never falling through to plaintext. Passive plaintext VehicleStatus
+keeps its separate path. Native retries rebuild/sign new UUID/counter bytes; upstream Vehicle's
+identical-byte retry does not change this policy. Upstream C5 support does not add a firmware target.
 [ADR-0005](adr/0005-tesla-ble-seam.md) records all departures;
 [ADR-0002](adr/0002-idf6-mbedtls4-crypto-seam.md) records wire/key compatibility.
 
 Transactional key rotation exports bounded PEM, rolls back failed persistence and durably journals
-cleanup. An armed `key_rotate` or uncertain probe blocks signing/construction. VIN transitions use
+cleanup. An armed `key_rotate` or uncertain probe blocks signing/construction. Interrupted rotation
+retires `key_created` before clearing its journal because the timestamp cannot be bound to the key.
+VIN transitions use
 `vin_txn` so power loss cannot pair a new VIN with an old key/session.
 
 ## On-device display and status LED
@@ -137,7 +184,8 @@ An explicit scheme is honored. Without one, credentials select `mqtts://`, other
 TLS verifies bundled CA roots and never falls back to cleartext; status exposes credential-free
 broker/error/TLS state. The discovery registry is the sole owner of entity rows and metadata.
 Optional fields remain absent, units convert to metric, and presence-aware templates return literal
-`None` for unknown. Boot timestamps need synchronized time; stack minima create no discovery entities.
+`None` for unknown. Boot timestamps latch only after authoritative SNTP/browser synchronization; later NTP upgrades a
+browser-set latch. Stack minima create no discovery entities.
 
 On reconnect: discovery → online availability → state; periodic snapshots follow. Invalid caches
 publish `{}` once to remove retained stale readings, then stay quiet. Sticky JSON ownership prevents
@@ -193,7 +241,7 @@ failures unwind in reverse order. If uninstall fails, retain resources the drive
 fail boot closed. Active fallback retains the driver for later cable takeover.
 
 No PHY link falls back after 4 s; link-without-lease waits up to three 20 s intervals. A wired
-boot never initializes WiFi and does not consume a trial-credential rollback backup. W5500 polling
+boot that obtains DHCP before fallback never initializes WiFi or consumes a trial-credential backup. W5500 polling
 uses 10 ms, no INT/RST pins; the component is S3-only. Ethernet route priority 128 wins off-subnet
 traffic; on-subnet lwIP uses the first registered matching netif, so hot-plug may still use WiFi.
 Board mappings are owned by [User guide](USER_GUIDE.md#wired-networking-optional-esp32s3).
@@ -210,6 +258,11 @@ Ping state/semaphores are persistent. Each asynchronous session owns a generatio
 stop and waits a second bounded interval; without matching end, quarantine as PendingEnd. No handle
 delete/reuse/new generation until its worker ends; stale callbacks cannot complete a replacement.
 
+Gateway proof is bound to transport, lease generation and gateway IPv4. Link-down/new-IP changes
+reset the failure streak and invalidate in-flight verdicts, even if the next gateway IP is equal.
+A watchdog recovery creates a new lease; it must answer once before another recovery. A new ghost
+association that never answers therefore stays unrecovered rather than inheriting stale proof.
+
 ## Sleep / link-state (the single source of truth)
 
 `VehicleController::link_state()` supplies UI, status and MQTT:
@@ -217,12 +270,13 @@ delete/reuse/new generation until its worker ends; stale callbacks cannot comple
 | State | Proof |
 |---|---|
 | AWAKE | Live Infotainment telemetry younger than 60 s |
-| ASLEEP | No live data; VCSEC ASLEEP held about 120 s and signed reachability younger than 150 s |
+| ASLEEP | No live data; uninterrupted VCSEC ASLEEP held about 120 s and signed reachability younger than 150 s |
 | IDLE | Reachable within 150 s, without proven sleep or fresh Infotainment data |
 | UNREACHABLE | No signed round trip for at least 150 s |
 
 Before first evidence the state is unknown/omitted. Raw VCSEC AWAKE cannot prove AWAKE; raw ASLEEP
-requires debounce. UI labels retained readings as last known; unreachable/unknown offers no action.
+requires debounce; AWAKE and UNKNOWN both reset its run (`next_asleep_since`/`vcsec_asleep_proven`).
+UI labels retained readings as last known; unreachable/unknown offers no action.
 Active-window polling needs recent command or fresh charging contact; stale cached charging cannot
 keep it open. Signed VCSEC health checks outside that window must not open Infotainment or wake.
 
@@ -249,16 +303,38 @@ no-op. Successful NVS existence probes are cached; read errors retry instead of 
 
 NimBLE posts fixed LinkUp only. The vehicle task owns GATT-ready generation, materializes the MAC
 after unlock and persists it once outside shared locks. Startup MAC strings stay startup-only.
-Restore persisted Unix time **before** loading sessions. Upstream compares Unix now against vehicle
-clock/uptime and rejects old sessions; an uninitialized 1970 clock could keep them erroneously.
-True session reuse across reboot needs upstream epoch/Unix alignment, not a local time workaround.
+Attempt Unix-clock restore **before** loading sessions. The inherited Unix-versus-vehicle-epoch
+comparison rejects persisted sessions after successful restore, but an absent/unreadable cache or
+failed clock set can leave negative-age acceptance. It is not a reliable 1-hour reuse window.
+True session reuse across reboot needs epoch/Unix alignment; [ADR-0005](adr/0005-tesla-ble-seam.md)
+records this limitation.
 
 Durable `key_created`, `paired_at` and MQTT `boot_time` require `clock_is_authoritative()`
 (`time_sync.hpp`). Restored `last_time` can reject stale sessions but is not authoritative; SNTP or
 explicit browser time synchronization establishes authority. Do not publish restored cache time as
-a measured event timestamp.
+a measured event timestamp. The first successful NTP sync of each boot checkpoints `last_time`;
+subsequent callbacks do not rewrite it on every sync.
+
+## Configuration durability
+
+`cfg_load_state()` accepts one complete CRC-checked blob. Only exact absence permits legacy
+per-key loading; present unreadable, CRC/schema-invalid or uncertain blobs fail closed. Saves commit
+the blob atomically and mirror legacy keys best-effort for downgrade compatibility.
+
+Every read-modify-save route and provisioning uses `cfg_load_for_update()`. With the blob absent,
+**any** unreadable legacy key rejects the whole snapshot and every mutation; an armed VIN journal
+also blocks boot recovery. Explicitly empty legacy values remain valid. Never replace a committed
+identity/settings snapshot with stale mirrors or a partially read legacy configuration.
 
 ## HTTP request-body and allocator-failure contract
+
+The shared body reader has a 15 s monotonic total receive budget, checked before/after each read;
+progress cannot reset it. A 5 s socket timeout can extend wall duration to about 20 s excluding
+scheduling; two consecutive recoverable timeouts remain an additional bound. Late/incomplete bodies
+never parse or persist. Both adapters shut down read-side on failure while retaining reply writes.
+The wildcard handler advertises Connection: close and retires every body-bearing connection even
+on early route/Origin/admission rejection or exceptions. Bodyless requests keep existing behavior;
+captive preflight failures return ESP_FAIL to reject unread input.
 
 `read_body_result()` distinguishes empty, oversize, OOM and receive failure (normal cap 2 KiB).
 
@@ -331,7 +407,7 @@ Priorities come only from `task_config.hpp`; stacks remain at creation sites.
 
 | Task | Priority | Stack | Created in | Purpose |
 |---|---|---|---|---|
-| `vehicle_loop` | `kPrioVehicleLoop` = 5 | 8192 | `vehicle_ctrl.cpp` (fn: `vehicle_telemetry.cpp`) | drain fixed NimBLE Link/RX events, drive `drive_command_runner_()`, parse deferred telemetry after unlock, rotating NO_WAKE poll, sleep gating, BLE-fault link reset |
+| `vehicle_loop` | `kPrioVehicleLoop` = 5 | 10240 | `vehicle_ctrl.cpp` (fn: `vehicle_telemetry.cpp`) | drain fixed NimBLE Link/RX events, drive `drive_command_runner_()`, parse deferred telemetry after unlock, rotating NO_WAKE poll, sleep gating, BLE-fault link reset |
 | `captive_dns` | `kPrioCaptiveDns` = 5 | 4096 | `provisioning.cpp` | captive-portal DNS (setup-AP mode only; vehicle stack not running) |
 | `ota` | `kPrioOta` = 5 | 8192 | `ota_update.cpp` | OTA download + flash (transient) |
 | `ota_chk` | `kPrioOtaCheck` = 5 | 8192 | `ota_update.cpp` | OTA manifest check (transient) |

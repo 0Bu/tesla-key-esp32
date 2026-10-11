@@ -216,6 +216,15 @@ inline bool charge_poll_should_fire(const ChargePollGateInputs& in, WakePollStat
     return false;
 }
 
+// Called only after charge_poll_should_fire() returned true. A fire that is not the in-window
+// 10 s cadence is the wake/bootstrap one-shot, which also refreshes the drive cache once
+// (NO_WAKE_SKIP) so evcc's odometer is current after a drive. Inside the window the telemetry
+// rotation covers drive_state on its own cadence; a pending fire between two cadence ticks
+// also refreshes drive, a benign duplicate of the rotation's drive slot.
+inline bool wake_poll_refreshes_drive(bool poll_cadence) noexcept {
+    return !poll_cadence;
+}
+
 // Advance the one-shot state machine by one sample; return true iff a charge poll should fire
 // immediately, assuming channel is idle and connected.
 // Composes wake_poll_update and charge_poll_should_fire so test coverage aligns with the

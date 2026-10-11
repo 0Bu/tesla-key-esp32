@@ -17,7 +17,7 @@ if ! . "$here/pr-gate-lib.sh" 2>/dev/null; then
   echo "BLOCKED: runner-neutral PR gate library could not be loaded." >&2
   exit 2
 fi
-for fn in gate_bash_actions gate_pr_create_body gate_push_head_sha gate_fetch_pr \
+for fn in gate_bash_actions gate_pr_create_body gate_push_head_sha gate_push_is_branch_delete gate_fetch_pr \
           gate_pr_changed_files gate_checkbox_status gate_sha_matches gate_full_head_sha \
           gate_branch gate_repo_slug gate_origin_is_github agent_gate_workdir_matches \
           agent_gate_run_bounded gate_is_renovate_maintenance gate_feature_docs_relevant gate_vehicle_command_relevant; do
@@ -282,6 +282,9 @@ case "$kind" in
     }
     ;;
   push)
+    if gate_push_is_branch_delete "$spec"; then
+      exit 0
+    fi
     anchor="$(gate_push_head_sha "$spec")" || {
       echo "BLOCKED: git push must publish only current HEAD to the current branch on origin." >&2
       exit 2

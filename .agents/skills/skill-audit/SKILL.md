@@ -16,10 +16,11 @@ implementation. This workflow establishes only its own gate; whole-project revie
    HEAD equals current main or exact target PR head. **Fail-fast on divergence** or local drift;
    report synchronization limits rather than certifying stale content. **State reviewed SHA in report.**
 1. Discover every canonical `.agents/skills/*/SKILL.md` and reviewer; do not hardcode the inventory.
-   Global host/cluster skills are outside this project audit.
+   Check native `.codex/` generated registrations with `sync-codex.mjs --check`, effective
+   primary-checkout hook trust and parent runtime overrides. Global host/cluster skills are outside this project audit.
 2. Extract claims about paths, numbers, targets, pins, hooks, commands, permissions and evidence.
    Verify against source/config/scripts and owning docs with `rg` and safe host checks. The library
-   pin is v5.2.0 here; always compare to `main/idf_component.yml`, not this remembered value.
+   pin is v5.3.0 here; always compare to `main/idf_component.yml`, not this remembered value.
 3. Name a contradicting fact for every `SKILL-DRIFT` finding. Prose preference alone is not drift;
    whole-document quality is assessed by `$project-review`. Audit its mandatory material
    `DOC-QUALITY` blocker too.
@@ -57,8 +58,8 @@ workflow scripts and [deep document owners](../../../docs/README.md), not histor
 - **`$pr-hygiene`**: independent privacy/English gate on title/body/all commits/touched docs/comments;
   create/push/merge requirement, redacted findings and current-head invalidation.
 - **`$feature-docs`**: verify `gate_feature_docs_relevant` against `main/`, `test/`,
-  `sdkconfig.defaults*`, `partitions.csv`, `AGENTS.md`, `.agents/`,
-  `.github/PULL_REQUEST_TEMPLATE.md`, `tools/agent-hooks/`, `tools/agent-config/`,
+  `sdkconfig.defaults*`, `partitions.csv`, `AGENTS.md`, `.agents/`, `.codex/`,
+  `.github/PULL_REQUEST_TEMPLATE.md`, `tools/agent-hooks/`, `tools/agent-config/`, `scripts/with-host-python.sh`,
   shipped Pages (`docs/index.html`, `installer-bootstrap.mjs`, `serial-port-release.mjs`,
   `web-installer.mjs`, `docs/vendor/`),
   `.github/workflows/{build,signed-pr-preview,pr-preview-cleanup,pr-policy,bench-acceptance}.yml`
@@ -67,7 +68,7 @@ workflow scripts and [deep document owners](../../../docs/README.md), not histor
 - **`$skill-audit`**: discovered inventory, current fact pointers, exact head and report-only gate;
   report self-drift without correcting it.
 - **`$device-diag`**: collected evidence first; separate live-target permission; cache-only GETs with
-  no verbosity/clear changes. Current status keys/units/presence, internal spot/log/trend heap sources,
+  no verbosity/clear changes; state-changing checks use separately authorized POST aliases. Current status keys/units/presence, internal spot/log/trend heap sources,
   classified BLE failures, reset/crash/pairing causes and read-only handoff.
 - **`$display-preview`**: current simulator CLI/output, PNG inspection and presenter parity;
   source-writing `cheader` is outside preview; no hardware claim.
@@ -103,8 +104,10 @@ foreign remotes and ambiguous context fail closed. Do not mutate HEAD/config/PR 
 within the same call. `scripts/test-pr-gates.sh` pins adversarial forms.
 
 Push supports only current HEAD→current branch on sole matching origin fetch/push URL, one refspec.
-Alternate refs/remotes, tags/all/mirror/delete, followTags, custom multiple pushes and ambiguous syntax
-fail closed. A checkbox for local HEAD cannot authorize other bytes.
+Alternate refs/remotes, tag/all/mirror pushes, followTags, custom multiple pushes and ambiguous syntax
+fail closed. A checkbox for local HEAD cannot authorize other bytes. Separately authorized standalone
+origin deletion of an existing unambiguous non-protected feature branch is permitted without gate
+records. main/master/gh-pages, tags and other namespaces remain prohibited.
 
 ## Report
 

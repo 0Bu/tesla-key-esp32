@@ -77,6 +77,12 @@ public:
     bool set_scheduled_charging(bool enable, int start_minutes, int timeout_ms = 20000);
 
     bool get_charge_state(ChargeStateResult& out, int timeout_ms = 20000);
+    // Cache-only climate snapshot for evcc's climater: never polls, connects or wakes. Inside the
+    // active window the climate must be at most tk::kActiveClimateStateMaxAgeS old. Outside it
+    // (including after the charging arm lapses about 60 s after the last live contact, when no
+    // command was sent in the last 5 min) the last-known snapshot is served, mirroring the
+    // charge semantics.
+    bool get_vehicle_climate(tk::VehicleClimateData& out);
     // Origin is mandatory: HTTP/manual callers pass Foreground; the auto-pair supervisor
     // passes Background so an absent car cannot turn unattended probes into an error stream.
     bool get_vehicle_status(VehicleStatusResult& out, tk::ConnectOrigin origin,
@@ -88,6 +94,11 @@ public:
     VehicleStatusResult get_cached_status()   { return copy_locked_(last_known_status_); }
     ClimateStateResult  get_cached_climate()  { return copy_locked_(last_known_climate_); }
     DriveStateResult    get_cached_drive()    { return copy_locked_(last_known_drive_); }
+    tk::VehicleDriveData get_cached_vehicle_drive() {
+        tk::SemGuard g(cache_mutex_);
+        if (!g) return {};
+        return tk::vehicle_drive_data(last_known_drive_);
+    }
     TirePressureResult  get_cached_tires()    { return copy_locked_(last_known_tires_); }
     ClosuresStateResult get_cached_closures() { return copy_locked_(last_known_closures_); }
 
@@ -646,6 +657,11 @@ private:
     // completion cannot outrun deferred string-cache publication.
     std::atomic<uint32_t> last_charge_ticks_{0};
     std::atomic<uint32_t> charge_state_generation_{0};
+    // ClimateState freshness stamp + generation (same pattern as the charge pair): bound the age of
+    // the climate cache that evcc's climater reads inside the active window. Generation != 0 is the
+    // "have sample" bit; both are cleared on a pairing reset.
+    std::atomic<uint32_t> last_climate_ticks_{0};
+    std::atomic<uint32_t> climate_state_generation_{0};
     std::atomic<bool>     charge_cache_stale_reported_{false};
     // Uptime tick of the last time the car was confirmed REACHABLE over BLE — any successful
     // signed round-trip, including the idle VCSEC health poll that keeps answering while the
@@ -665,8 +681,10 @@ private:
     // here the START tick of an uninterrupted ASLEEP run (0 = not currently ASLEEP). The flag
     // can flap AWAKE↔ASLEEP (~60 s) while Cabin-Overheat-Protection cycles the A/C, so a
     // single ASLEEP reading is NOT proof of sleep; link_state() only treats it as asleep once
-    // the run has held for kAsleepDebounceS, which filters those blips. Cleared on a pairing
-    // reset (clear_session_and_cache_).
+    // the run has held for kAsleepDebounceS, which filters those blips. UNKNOWN also breaks
+    // proof. Cleared on a pairing reset (clear_session_and_cache_). The clock rules live in
+    // tk::next_asleep_since() / tk::vcsec_asleep_proven() (logic/command_runner.hpp), which
+    // the host tests cover; the members below only hold the atomics those functions read.
     std::atomic<uint32_t> vcsec_asleep_since_ticks_{0};
     // vcsec_sleep_state_ is updated from incoming VCSEC frames under vehicle_mutex_; status
     // and HTTP tasks read this atomic mirror so there is no data race.
@@ -680,18 +698,27 @@ private:
 
     // Reusable single-allocation buffer for command transmission (builder wire format without double length)
     std::vector<uint8_t> tx_buffer_{};
-    // Fold one sampled VCSEC sleep reading into the debounce clock. ASLEEP starts/continues
-    // the run (keeping its original start tick); AWAKE breaks it. UNKNOWN is not passed here
-    // (the caller leaves the clock untouched so a transient unknown can't reset a real run).
-    void note_vcsec_sleep_(bool asleep) {
-        if (asleep) { uint32_t z = 0; vcsec_asleep_since_ticks_.compare_exchange_strong(z, xTaskGetTickCount()); }
-        else        { vcsec_asleep_since_ticks_.store(0); }
+    // Fold one VCSEC sleep reading into the debounce clock. Takes the SleepState itself, never a
+    // pre-reduced bool, so no call site can skip UNKNOWN: tk::next_asleep_since() ends the run on
+    // AWAKE and UNKNOWN alike. Lock-free read-modify-write on one 32-bit atomic, like
+    // net.cpp's lease generations (a narrow atomic would pull in a runtime helper on C3).
+    void note_vcsec_sleep_(tk::SleepState reported) {
+        const uint32_t now = xTaskGetTickCount();
+        uint32_t since = vcsec_asleep_since_ticks_.load();
+        while (!vcsec_asleep_since_ticks_.compare_exchange_weak(
+            since, tk::next_asleep_since(since, reported, now))) {}
     }
-    // True once the VCSEC ASLEEP run has held uninterrupted for at least debounce_s seconds.
+    void mark_vcsec_unknown_() {
+        vcsec_sleep_state_.store(static_cast<int>(tk::SleepState::Unknown));
+        note_vcsec_sleep_(tk::SleepState::Unknown);
+    }
+    // True once the car's current report is still ASLEEP and that run has held uninterrupted for
+    // at least debounce_s seconds (tk::vcsec_asleep_proven).
     bool vcsec_stably_asleep_(uint32_t debounce_s) const {
-        uint32_t t = vcsec_asleep_since_ticks_.load();
-        if (t == 0) return false;
-        return ((xTaskGetTickCount() - t) / configTICK_RATE_HZ) >= debounce_s;
+        return tk::vcsec_asleep_proven(
+            static_cast<tk::SleepState>(vcsec_sleep_state_.load()),
+            vcsec_asleep_since_ticks_.load(), xTaskGetTickCount(), configTICK_RATE_HZ,
+            debounce_s);
     }
 
     // Cached results for non-blocking UI access

@@ -9,8 +9,9 @@ Apply [repository policy](../AGENTS.md) and the normative
   a failed response must not become a partial success.
 - Keep task stacks within reviewed `scripts/firmware-stack-baseline.json` limits. Compiler frame
   reports and runtime stack minima provide different evidence.
-- Leaf cache/result locks protect snapshots only. Release them before allocation, logging,
-  network/flash I/O or calls out. Serialize library access through the documented Vehicle lock,
+- Leaf cache/result locks allow only small bounded struct/string snapshots with `tk::SemGuard`
+  RAII against allocation failure. Release them before logging, network/flash I/O, unbounded
+  allocation or calls out. Serialize library access through the documented Vehicle lock,
   with RAII unwind; never wait for command completion while holding it. Critical sections copy
   bounded POD only.
 - Contain exceptions/OOM at HTTP/MCP, task and C callback boundaries, including catch-all exits.
