@@ -5,7 +5,7 @@ It complements the canonical repository policy in [`../../AGENTS.md`](../../AGEN
 
 ## 1. Vehicle Sleep & Vampire Drain Prevention
 
-- Never send an unsolicited command, wake request or infotainment session to a sleeping vehicle. The deliberately scheduled signed VCSEC `health_probe_` (session/revocation check) may connect outside the active infotainment window because it does not wake the vehicle; no other background path may open a connection or session (see `docs/ARCHITECTURE.md` sleep/link state and ADR-0005).
+- Never send an unsolicited command, wake request or infotainment session to a sleeping vehicle. The deliberately scheduled signed VCSEC `health_probe_` (session/revocation check) may connect outside the active infotainment window because it does not wake the vehicle; the bounded wake-edge/stale-cache one-shot may also refresh ChargeState and DriveState on an already connected, independently awake car with `NO_WAKE_SKIP`, retry backoff and episode quiescence; no other background path may open a connection or session (see `docs/ARCHITECTURE.md` sleep/link state and ADR-0005).
 - Passive telemetry and status endpoints (`GET /status`, `GET /diag`) must consume cached link and state information from RAM and must not initiate a BLE connection or wake sequence.
 - Vehicle wake operations (`POST /api/1/vehicles/<VIN>/command/wake_up`) require explicit intent and must respect debouncing and backoff limits.
 

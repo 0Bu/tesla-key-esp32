@@ -51,6 +51,16 @@ self_test() {
   tmp="$(mktemp -d)"
   trap 'rm -rf "$tmp"' EXIT
 
+  # Publication fixtures must not inherit the operator's commit signing key or fsmonitor.
+  # This process-local config applies only to the disposable self-test repositories.
+  export GIT_CONFIG_GLOBAL="$tmp/gitconfig"
+  cat > "$GIT_CONFIG_GLOBAL" <<'CONFIG'
+[commit]
+  gpgsign = false
+[core]
+  fsmonitor = false
+CONFIG
+
   local fake_bin="$tmp/bin"
   local fake_gh="$fake_bin/gh"
   mkdir -p "$fake_bin"

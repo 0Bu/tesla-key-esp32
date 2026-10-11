@@ -719,7 +719,7 @@ bool VehicleController::load_nvs_sessions_() {
         }
 
         auto* peer = client_->get_peer(domain);
-        if (peer && peer->update_session(&session_info) == 0) {
+        if (peer && peer->update_session(&session_info) == 0 && peer->is_initialized()) {
             ESP_LOGI(TAG, "Loaded session from NVS for %s (counter: %lu)", key, (unsigned long)session_info.counter);
             auto& tracker = (tk_domain == tk::BleDomain::VehicleSecurity)
                 ? command_runner_.vcsec_session() : command_runner_.info_session();
@@ -885,7 +885,7 @@ void VehicleController::handle_session_info_frame_(const UniversalMessage_Routab
     }
 
     auto* peer = client_->get_peer(domain);
-    if (peer && peer->update_session(&session_info) == 0) {
+    if (peer && peer->update_session(&session_info) == 0 && peer->is_initialized()) {
         ESP_LOGI(TAG, "Session updated for domain %d", static_cast<int>(domain));
         persist_session_(domain, msg.payload.session_info);
         auto tk_domain = (domain == UniversalMessage_Domain_DOMAIN_VEHICLE_SECURITY)
@@ -928,7 +928,8 @@ void VehicleController::handle_vcsec_frame_(const UniversalMessage_RoutableMessa
     if (sig_data && sig_data->which_sig_type == Signatures_SignatureData_AES_GCM_Response_data_tag) {
         auto* session = client_->get_peer(UniversalMessage_Domain_DOMAIN_VEHICLE_SECURITY);
         size_t req_hash_len = 0;
-        const pb_byte_t* req_hash = client_->get_last_request_hash(&req_hash_len);
+        const pb_byte_t* req_hash = client_->get_last_request_hash(
+            UniversalMessage_Domain_DOMAIN_VEHICLE_SECURITY, &req_hash_len);
         if (tk::vcsec_payload_admission(true, session && session->is_initialized(),
                                        req_hash && req_hash_len > 0) == tk::VcsecPayloadAdmission::Drop) {
             ESP_LOGW(TAG, "Dropping encrypted VCSEC response without decryption context");

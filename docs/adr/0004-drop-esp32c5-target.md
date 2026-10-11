@@ -65,3 +65,10 @@ esp32c61) means upstreaming it there first.
   finding the ~32 KB — the display support itself (`display.cpp`, the host-tested presenter, the
   four-orientation BOOT rotation) is shared with the T-Dongle-S3 and stays.
 - The on-device display and status LED remain, on the T-Dongle-S3.
+
+## Upstream update (2026-10-11)
+
+tesla-ble v5.3.0 now declares esp32c5. This removes the historical dependency-support blocker,
+but does not reverse this decision: firmware targets remain esp32, esp32s3, esp32c3 and esp32c6.
+Restoration requires a separate review of image size, signing, installed partition compatibility
+and hardware acceptance; a dependency bump alone supplies none of that evidence.

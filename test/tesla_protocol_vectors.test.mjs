@@ -122,14 +122,14 @@ function replaceExactlyOnce(text, before, after) {
   return text.replace(before, after);
 }
 
-test('all target locks pin the reviewed tesla-ble source and exact target set', () => {
+test('all four firmware locks pin the reviewed source and five upstream-supported targets', () => {
   const targets = ['esp32', 'esp32s3', 'esp32c3', 'esp32c6'];
   for (const target of targets) {
     const lock = readFileSync(`dependencies.lock.${target}`, 'utf8');
-    assert.match(lock, /version: 07a4ef503a52f736009fdeba953f185aecc863f3/);
+    assert.match(lock, /version: 9d04eaed21f2e7502252140ddeb12bd0b5d9922f/);
     assert.match(lock, new RegExp(`^target: ${target}$`, 'm'));
-    const listed = [...lock.matchAll(/^    - (esp32(?:s3|c3|c6)?)$/gm)].map((match) => match[1]);
-    assert.deepEqual(listed, targets);
+    const listed = [...lock.matchAll(/^    - (esp32(?:s3|c3|c6|c5)?)$/gm)].map((match) => match[1]);
+    assert.deepEqual(listed, [...targets, 'esp32c5']);
   }
 });
 

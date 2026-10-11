@@ -1,18 +1,16 @@
 diff --git a/include/client.h b/include/client.h
-index 036f858..61ca4b2 100644
 --- a/include/client.h
 +++ b/include/client.h
-@@ -131,7 +131,7 @@ class Client {
+@@ -155,7 +155,7 @@
    // Key data
    std::array<pb_byte_t, 4> public_key_id_{};
    // NOLINTNEXTLINE(readability-math-missing-parentheses) - macro from external library
 -  std::array<pb_byte_t, MBEDTLS_ECP_MAX_PT_LEN> public_key_{};
-+  std::array<pb_byte_t, PSA_KEY_EXPORT_ECC_PUBLIC_KEY_MAX_SIZE(256)> public_key_{};  // uncompressed P-256 point
++  std::array<pb_byte_t, PSA_KEY_EXPORT_ECC_PUBLIC_KEY_MAX_SIZE(256)> public_key_{};
    size_t public_key_size_ = 0;
  
    // Request tracking for response validation
 diff --git a/include/crypto_context.h b/include/crypto_context.h
-index 5d5a808..0705521 100644
 --- a/include/crypto_context.h
 +++ b/include/crypto_context.h
 @@ -2,18 +2,17 @@
@@ -40,7 +38,7 @@ index 5d5a808..0705521 100644
   */
  class CryptoContext {
   public:
-@@ -29,7 +28,7 @@ class CryptoContext {
+@@ -29,7 +28,7 @@
    CryptoContext &operator=(CryptoContext &&) noexcept;
  
    /**
@@ -49,7 +47,7 @@ index 5d5a808..0705521 100644
     * @return Error code (0 on success)
     */
    TeslaBLE_Status_E initialize();
-@@ -84,7 +83,7 @@ class CryptoContext {
+@@ -84,7 +83,7 @@
    TeslaBLE_Status_E perform_tesla_ecdh(const uint8_t *tesla_public_key, size_t tesla_key_size, uint8_t *session_key);
  
    /**
@@ -58,7 +56,7 @@ index 5d5a808..0705521 100644
     * @param output Output buffer for random bytes
     * @param length Number of bytes to generate
     * @return TeslaBLE_Status_E_OK on success, error code otherwise
-@@ -97,16 +96,9 @@ class CryptoContext {
+@@ -97,16 +96,9 @@
     */
    bool is_private_key_initialized() const;
  
@@ -77,7 +75,7 @@ index 5d5a808..0705521 100644
  
    bool initialized_ = false;
  
-@@ -121,14 +113,12 @@ class CryptoContext {
+@@ -121,14 +113,12 @@
  class CryptoUtils {
   public:
    /**
@@ -95,10 +93,17 @@ index 5d5a808..0705521 100644
    /**
     * @brief Calculate SHA1 hash
 diff --git a/include/peer.h b/include/peer.h
-index 04bcc4a..38077c9 100644
 --- a/include/peer.h
 +++ b/include/peer.h
-@@ -83,7 +83,7 @@ class Peer {
+@@ -5,7 +5,6 @@
+ #include <cstdint>
+ #include <mutex>
+ #include <memory>
+-#include <optional>
+ #include <string>
+ 
+ #include <pb.h>
+@@ -84,7 +83,7 @@
  
    // Session operations
    uint32_t generate_expires_at(int seconds) const;
@@ -107,7 +112,7 @@ index 04bcc4a..38077c9 100644
    int load_tesla_key(const uint8_t *public_key_buffer, size_t public_key_size);
    int update_session(Signatures_SessionInfo *session_info);
  
-@@ -108,11 +108,20 @@ class Peer {
+@@ -109,10 +108,19 @@
    void set_is_valid(bool valid) { is_valid_ = valid; }
  
    // Cryptographic operations
@@ -115,33 +120,33 @@ index 04bcc4a..38077c9 100644
 +  // response metadata carries the counter from the response itself (construct_response_ad_buffer).
    int construct_ad_buffer(Signatures_SignatureType signature_type, const char *vin, uint32_t expires_at,
                            pb_byte_t *output_buffer, size_t *output_length, uint32_t flags = 0,
-                           const pb_byte_t *request_hash = nullptr, size_t request_hash_length = 0,
-                           uint32_t fault = 0) const;
- 
+-                          const pb_byte_t *request_hash = nullptr, size_t request_hash_length = 0, uint32_t fault = 0,
+-                          std::optional<uint32_t> counter = std::nullopt) const;
++                          const pb_byte_t *request_hash = nullptr, size_t request_hash_length = 0,
++                          uint32_t fault = 0) const;
++
 +  // Response metadata (protocol.md "Response metadata"), bound to the counter the response carries in
 +  // AES_GCM_Response_data.counter, as vehicle-command's Signer.Decrypt does. The vehicle keeps a
 +  // response counter per request, so it need not equal the counter of the request it answers.
 +  int construct_response_ad_buffer(uint32_t response_counter, pb_byte_t *output_buffer, size_t *output_length,
 +                                   uint32_t flags, const pb_byte_t *request_hash, size_t request_hash_length,
 +                                   uint32_t fault) const;
-+
+ 
    int encrypt(pb_byte_t *input_buffer, size_t input_buffer_length, pb_byte_t *output_buffer,
                size_t output_buffer_length, size_t *output_length, pb_byte_t *signature_buffer, pb_byte_t *ad_buffer,
-               size_t ad_buffer_length, pb_byte_t nonce[NONCE_SIZE_BYTES]) const;
-@@ -121,9 +130,11 @@ class Peer {
+@@ -122,9 +130,10 @@
    int construct_request_hash(Signatures_SignatureType auth_type, const pb_byte_t *auth_tag, size_t auth_tag_length,
                               pb_byte_t *request_hash, size_t *request_hash_length) const;
  
 +  // counter is the response's AES_GCM_Response_data.counter; the tag is verified against it.
    int decrypt_response(const pb_byte_t *input_buffer, size_t input_length, const pb_byte_t *nonce, const pb_byte_t *tag,
                         const pb_byte_t *request_hash, size_t request_hash_length, uint32_t flags, uint32_t fault,
--                       pb_byte_t *output_buffer, size_t output_buffer_length, size_t *output_length) const;
+-                       uint32_t response_counter, pb_byte_t *output_buffer, size_t output_buffer_length,
 +                       uint32_t counter, pb_byte_t *output_buffer, size_t output_buffer_length,
-+                       size_t *output_length) const;
+                        size_t *output_length) const;
  
    /**
-    * @brief Validate a response counter using sliding window anti-replay
-@@ -146,6 +157,10 @@ class Peer {
+@@ -148,6 +157,10 @@
    void reset();
  
   private:
@@ -152,21 +157,7 @@ index 04bcc4a..38077c9 100644
    static void write_uint32_be(pb_byte_t *buffer, uint32_t value) {
      buffer[0] = (value >> 24) & 0xFF;
      buffer[1] = (value >> 16) & 0xFF;
-diff --git a/src/client.cpp b/src/client.cpp
-index 2c08206..5ffbd19 100644
---- a/src/client.cpp
-+++ b/src/client.cpp
-@@ -347,7 +347,7 @@ int Client::parse_payload_car_server_response(
-         int return_code = session->decrypt_response(
-             input_buffer->bytes, input_buffer->size, signature_data->sig_type.AES_GCM_Response_data.nonce,
-             signature_data->sig_type.AES_GCM_Response_data.tag, last_request_hash_.data(),
--            this->last_request_hash_length_, response_flags, signed_message_fault, decrypt_buffer.bytes,
-+            this->last_request_hash_length_, response_flags, signed_message_fault, counter, decrypt_buffer.bytes,
-             sizeof(decrypt_buffer.bytes), &decrypt_length);
-         if (return_code != 0) {
-           LOG_ERROR("[parse_payload_car_server_response] Failed to decrypt response");
 diff --git a/src/crypto_context.cpp b/src/crypto_context.cpp
-index f2663cb..39412b9 100644
 --- a/src/crypto_context.cpp
 +++ b/src/crypto_context.cpp
 @@ -7,37 +7,47 @@
@@ -176,10 +167,11 @@ index f2663cb..39412b9 100644
 +// Neither header carries its own extern "C" guard.
  extern "C" {
  #include <mbedtls/constant_time.h>
-+#include <mbedtls/psa_util.h>
- }
+-}
 -#include <mbedtls/entropy.h>
 -#include <mbedtls/md.h>
++#include <mbedtls/psa_util.h>
++}
 +#include <mbedtls/pk.h>
  #include <mbedtls/platform_util.h>
 -#include <mbedtls/sha1.h>
@@ -197,6 +189,7 @@ index f2663cb..39412b9 100644
 -  mbedtls_ecdh_init(ecdh_context_.get());
 -  mbedtls_ctr_drbg_init(drbg_context_.get());
 -  mbedtls_entropy_init(entropy_context_.get());
+-}
 +namespace {
 +
 +// Mbed TLS 4.x (TF-PSA-Crypto) dropped the RNG arguments of mbedtls_pk_parse_key(); 3.6 still
@@ -215,12 +208,12 @@ index f2663cb..39412b9 100644
 +void set_client_key_policy(psa_key_attributes_t *attributes) {
 +  psa_set_key_usage_flags(attributes, PSA_KEY_USAGE_DERIVE | PSA_KEY_USAGE_EXPORT);
 +  psa_set_key_algorithm(attributes, PSA_ALG_ECDH);
- }
- 
++}
++
 +}  // namespace
 +
 +CryptoContext::CryptoContext() = default;
-+
+ 
  CryptoContext::~CryptoContext() { cleanup_(); }
  
  CryptoContext::CryptoContext(CryptoContext &&other) noexcept
@@ -234,7 +227,7 @@ index f2663cb..39412b9 100644
    other.initialized_ = false;
  }
  
-@@ -45,35 +55,22 @@ CryptoContext &CryptoContext::operator=(CryptoContext &&other) noexcept {
+@@ -45,35 +55,22 @@
    if (this != &other) {
      cleanup_();
  
@@ -277,7 +270,7 @@ index f2663cb..39412b9 100644
  }
  
  TeslaBLE_Status_E CryptoContext::ensure_initialized_() {
-@@ -88,10 +85,9 @@ TeslaBLE_Status_E CryptoContext::initialize() {
+@@ -88,10 +85,9 @@
      return TeslaBLE_Status_E_OK;
    }
  
@@ -291,7 +284,7 @@ index f2663cb..39412b9 100644
      return TeslaBLE_Status_E_ERROR_INTERNAL;
    }
  
-@@ -107,16 +103,16 @@ TeslaBLE_Status_E CryptoContext::create_private_key() {
+@@ -107,16 +103,16 @@
  
    reset_private_key_();
  
@@ -300,15 +293,16 @@ index f2663cb..39412b9 100644
 -    LOG_ERROR("Failed to setup private key: -0x%04x", (unsigned int) -result);
 -    return TeslaBLE_Status_E_ERROR_INTERNAL;
 -  }
-+  psa_key_attributes_t attributes = PSA_KEY_ATTRIBUTES_INIT;
-+  psa_set_key_type(&attributes, kP256KeyPair);
-+  psa_set_key_bits(&attributes, 256);
-+  set_client_key_policy(&attributes);
- 
+-
 -  result = mbedtls_ecp_gen_key(MBEDTLS_ECP_DP_SECP256R1, mbedtls_pk_ec(*private_key_context_), mbedtls_ctr_drbg_random,
 -                               drbg_context_.get());
 -  if (result != 0) {
 -    LOG_ERROR("Failed to generate private key: -0x%04x", (unsigned int) -result);
++  psa_key_attributes_t attributes = PSA_KEY_ATTRIBUTES_INIT;
++  psa_set_key_type(&attributes, kP256KeyPair);
++  psa_set_key_bits(&attributes, 256);
++  set_client_key_policy(&attributes);
++
 +  psa_status_t result = psa_generate_key(&attributes, &private_key_id_);
 +  psa_reset_key_attributes(&attributes);
 +  if (result != PSA_SUCCESS) {
@@ -317,7 +311,7 @@ index f2663cb..39412b9 100644
      return TeslaBLE_Status_E_ERROR_INTERNAL;
    }
  
-@@ -136,29 +132,34 @@ TeslaBLE_Status_E CryptoContext::load_private_key(const uint8_t *private_key_buf
+@@ -136,29 +132,34 @@
  
    reset_private_key_();
  
@@ -340,6 +334,15 @@ index f2663cb..39412b9 100644
 -  if (!mbedtls_pk_can_do(private_key_context_.get(), MBEDTLS_PK_ECKEY)) {
 -    LOG_ERROR("Private key is not an EC key - Tesla protocol requires ECDSA");
 -    reset_private_key_();
+-    return TeslaBLE_Status_E_ERROR_INVALID_PARAMS;
+-  }
+-
+-  // Tesla protocol validation - verify it's a SECP256R1 (P-256) key
+-  mbedtls_ecp_keypair *ec_key = mbedtls_pk_ec(*private_key_context_);
+-  if (mbedtls_ecp_keypair_get_group_id(ec_key) != MBEDTLS_ECP_DP_SECP256R1) {
+-    LOG_ERROR("Private key is not SECP256R1 (P-256) - Tesla protocol requires this curve");
+-    reset_private_key_();
+-    return TeslaBLE_Status_E_ERROR_INVALID_PARAMS;
 +  // Tesla protocol validation - the key must be a SECP256R1 (P-256) EC key pair usable for ECDH
 +  psa_key_attributes_t attributes = PSA_KEY_ATTRIBUTES_INIT;
 +  result = mbedtls_pk_get_psa_attributes(&pk, PSA_KEY_USAGE_DERIVE, &attributes);
@@ -347,15 +350,9 @@ index f2663cb..39412b9 100644
 +    psa_reset_key_attributes(&attributes);
 +    mbedtls_pk_free(&pk);
 +    LOG_ERROR("Private key is not a SECP256R1 (P-256) EC key - Tesla protocol requires this curve");
-     return TeslaBLE_Status_E_ERROR_INVALID_PARAMS;
-   }
- 
--  // Tesla protocol validation - verify it's a SECP256R1 (P-256) key
--  mbedtls_ecp_keypair *ec_key = mbedtls_pk_ec(*private_key_context_);
--  if (mbedtls_ecp_keypair_get_group_id(ec_key) != MBEDTLS_ECP_DP_SECP256R1) {
--    LOG_ERROR("Private key is not SECP256R1 (P-256) - Tesla protocol requires this curve");
--    reset_private_key_();
--    return TeslaBLE_Status_E_ERROR_INVALID_PARAMS;
++    return TeslaBLE_Status_E_ERROR_INVALID_PARAMS;
++  }
++
 +  set_client_key_policy(&attributes);
 +  result = mbedtls_pk_import_into_psa(&pk, &attributes, &private_key_id_);
 +  psa_reset_key_attributes(&attributes);
@@ -367,7 +364,7 @@ index f2663cb..39412b9 100644
    }
  
    return TeslaBLE_Status_E_OK;
-@@ -175,7 +176,13 @@ TeslaBLE_Status_E CryptoContext::get_private_key(pb_byte_t *output_buffer, size_
+@@ -175,7 +176,13 @@
      return TeslaBLE_Status_E_ERROR_PRIVATE_KEY_NOT_INITIALIZED;
    }
  
@@ -382,7 +379,7 @@ index f2663cb..39412b9 100644
  
    if (write_result != 0) {
      LOG_ERROR("Failed to write private key: -0x%04x", (unsigned int) -write_result);
-@@ -196,33 +203,13 @@ TeslaBLE_Status_E CryptoContext::generate_public_key(pb_byte_t *output_buffer, s
+@@ -196,33 +203,13 @@
      return TeslaBLE_Status_E_ERROR_PRIVATE_KEY_NOT_INITIALIZED;
    }
  
@@ -420,7 +417,7 @@ index f2663cb..39412b9 100644
      return TeslaBLE_Status_E_ERROR_INTERNAL;
    }
  
-@@ -269,96 +256,43 @@ TeslaBLE_Status_E CryptoContext::perform_tesla_ecdh(const uint8_t *tesla_public_
+@@ -269,96 +256,43 @@
  
    LOG_DEBUG("Starting Tesla ECDH key exchange");
  
@@ -435,18 +432,8 @@ index f2663cb..39412b9 100644
 -  if (!our_keypair) {
 -    LOG_ERROR("Failed to get ECP keypair from loaded private key");
 -    return TeslaBLE_Status_E_ERROR_INTERNAL;
-+  // PSA ECDH yields the X coordinate of the shared point, big-endian, 32 bytes for P-256 —
-+  // the same bytes the legacy mbedtls_ecp_mul + mbedtls_mpi_write_binary(X) path produced.
-+  uint8_t shared_secret[32];
-+  size_t shared_secret_length = 0;
-+  psa_status_t result = psa_raw_key_agreement(PSA_ALG_ECDH, private_key_id_, tesla_public_key, tesla_key_size,
-+                                              shared_secret, sizeof(shared_secret), &shared_secret_length);
-+  if (result != PSA_SUCCESS || shared_secret_length != sizeof(shared_secret)) {
-+    mbedtls_platform_zeroize(shared_secret, sizeof(shared_secret));
-+    LOG_ERROR("Failed to compute shared secret: %d", static_cast<int>(result));
-+    return TeslaBLE_Status_E_ERROR_CRYPTO;
-   }
- 
+-  }
+-
 -  LOG_DEBUG("Using loaded private key for ECDH");
 -
 -  TeslaBLE_Status_E ecdh_status = TeslaBLE_Status_E_ERROR_CRYPTO;
@@ -503,13 +490,25 @@ index f2663cb..39412b9 100644
 -      LOG_ERROR("Failed to hash shared secret: -0x%04x", -result);
 -      break;
 -    }
-+  LOG_DEBUG("Computed shared secret (%zu bytes)", sizeof(shared_secret));
- 
+-
 -    // Copy first 16 bytes as session key
 -    std::memcpy(session_key, sha1_hash, 16);
 -
 -    // Zeroize sensitive buffers
--    mbedtls_platform_zeroize(shared_secret, sizeof(shared_secret));
++  // PSA ECDH yields the X coordinate of the shared point, big-endian, 32 bytes for P-256 —
++  // the same bytes the legacy mbedtls_ecp_mul + mbedtls_mpi_write_binary(X) path produced.
++  uint8_t shared_secret[32];
++  size_t shared_secret_length = 0;
++  psa_status_t result = psa_raw_key_agreement(PSA_ALG_ECDH, private_key_id_, tesla_public_key, tesla_key_size,
++                                              shared_secret, sizeof(shared_secret), &shared_secret_length);
++  if (result != PSA_SUCCESS || shared_secret_length != sizeof(shared_secret)) {
+     mbedtls_platform_zeroize(shared_secret, sizeof(shared_secret));
++    LOG_ERROR("Failed to compute shared secret: %d", static_cast<int>(result));
++    return TeslaBLE_Status_E_ERROR_CRYPTO;
++  }
++
++  LOG_DEBUG("Computed shared secret (%zu bytes)", sizeof(shared_secret));
++
 +  // Derive session key: K = SHA1(shared_secret)[:16] (Tesla protocol)
 +  uint8_t sha1_hash[20];
 +  size_t sha1_length = 0;
@@ -518,10 +517,7 @@ index f2663cb..39412b9 100644
 +  mbedtls_platform_zeroize(shared_secret, sizeof(shared_secret));
 +  if (result != PSA_SUCCESS || sha1_length != sizeof(sha1_hash)) {
      mbedtls_platform_zeroize(sha1_hash, sizeof(sha1_hash));
-+    LOG_ERROR("Failed to hash shared secret: %d", static_cast<int>(result));
-+    return TeslaBLE_Status_E_ERROR_CRYPTO;
-+  }
- 
+-
 -    LOG_DEBUG("Tesla ECDH completed successfully");
 -    LOG_VERBOSE("Session key: %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x",
 -                session_key[0], session_key[1], session_key[2], session_key[3], session_key[4], session_key[5],
@@ -531,23 +527,29 @@ index f2663cb..39412b9 100644
 -    ecdh_status = TeslaBLE_Status_E_OK;
 -
 -  } while (false);
+-
+-  // No cleanup needed - we used the loaded keypair, not a temporary one
+-
+-  return ecdh_status;
++    LOG_ERROR("Failed to hash shared secret: %d", static_cast<int>(result));
++    return TeslaBLE_Status_E_ERROR_CRYPTO;
++  }
++
 +  // Copy first 16 bytes as session key
 +  std::memcpy(session_key, sha1_hash, 16);
 +  mbedtls_platform_zeroize(sha1_hash, sizeof(sha1_hash));
- 
--  // No cleanup needed - we used the loaded keypair, not a temporary one
++
 +  LOG_DEBUG("Tesla ECDH completed successfully");
 +  LOG_VERBOSE("Session key: %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x",
 +              session_key[0], session_key[1], session_key[2], session_key[3], session_key[4], session_key[5],
 +              session_key[6], session_key[7], session_key[8], session_key[9], session_key[10], session_key[11],
 +              session_key[12], session_key[13], session_key[14], session_key[15]);
- 
--  return ecdh_status;
++
 +  return TeslaBLE_Status_E_OK;
  }
  
  TeslaBLE_Status_E CryptoContext::generate_random_bytes(uint8_t *output, size_t length) {
-@@ -371,29 +305,29 @@ TeslaBLE_Status_E CryptoContext::generate_random_bytes(uint8_t *output, size_t l
+@@ -371,29 +305,29 @@
      return status;
    }
  
@@ -572,14 +574,17 @@ index f2663cb..39412b9 100644
 -TeslaBLE_Status_E CryptoUtils::generate_random_bytes(pb_byte_t *output, size_t length,
 -                                                     mbedtls_ctr_drbg_context *drbg_context) {
 -  if (!output || !drbg_context || length == 0) {
-+TeslaBLE_Status_E CryptoUtils::generate_random_bytes(pb_byte_t *output, size_t length) {
-+  if (!output || length == 0) {
-     return TeslaBLE_Status_E_ERROR_INVALID_PARAMS;
-   }
- 
+-    return TeslaBLE_Status_E_ERROR_INVALID_PARAMS;
+-  }
+-
 -  int result = mbedtls_ctr_drbg_random(drbg_context, output, length);
 -  if (result != 0) {
 -    LOG_ERROR("Failed to generate random bytes: -0x%04x", (unsigned int) -result);
++TeslaBLE_Status_E CryptoUtils::generate_random_bytes(pb_byte_t *output, size_t length) {
++  if (!output || length == 0) {
++    return TeslaBLE_Status_E_ERROR_INVALID_PARAMS;
++  }
++
 +  psa_status_t result = psa_crypto_init();
 +  if (result == PSA_SUCCESS) {
 +    result = psa_generate_random(output, length);
@@ -589,7 +594,7 @@ index f2663cb..39412b9 100644
      return TeslaBLE_Status_E_ERROR_INTERNAL;
    }
  
-@@ -405,9 +339,13 @@ TeslaBLE_Status_E CryptoUtils::sha1_hash(const pb_byte_t *input, size_t input_le
+@@ -405,9 +339,13 @@
      return TeslaBLE_Status_E_ERROR_INVALID_PARAMS;
    }
  
@@ -606,10 +611,11 @@ index f2663cb..39412b9 100644
      return TeslaBLE_Status_E_ERROR_INTERNAL;
    }
  
-@@ -427,6 +365,39 @@ void CryptoUtils::clear_sensitive_memory(void *memory, size_t length) {
+@@ -426,6 +364,39 @@
+     mbedtls_platform_zeroize(memory, length);
    }
  }
- 
++
 +namespace {
 +
 +// HMAC-SHA256 through a short-lived volatile PSA key; `out` receives 32 bytes.
@@ -642,11 +648,10 @@ index f2663cb..39412b9 100644
 +}
 +
 +}  // namespace
-+
+ 
  // Derive SESSION_INFO_KEY = HMAC-SHA256(K, "session info")
  TeslaBLE_Status_E CryptoUtils::derive_session_info_key(const uint8_t *shared_key, size_t shared_key_len,
-                                                        uint8_t *out_key, size_t out_key_len) {
-@@ -438,15 +409,10 @@ TeslaBLE_Status_E CryptoUtils::derive_session_info_key(const uint8_t *shared_key
+@@ -438,15 +409,10 @@
      return TeslaBLE_Status_E_ERROR_INVALID_PARAMS;
    }
    const char *session_info_str = "session info";
@@ -666,7 +671,7 @@ index f2663cb..39412b9 100644
      mbedtls_platform_zeroize(out_key, out_key_len);
      return TeslaBLE_Status_E_ERROR_CRYPTO;
    }
-@@ -462,14 +428,8 @@ TeslaBLE_Status_E CryptoUtils::hmac_sha256(const uint8_t *key, size_t key_len, c
+@@ -462,14 +428,8 @@
      return TeslaBLE_Status_E_ERROR_INVALID_PARAMS;
    }
  
@@ -684,7 +689,6 @@ index f2663cb..39412b9 100644
      return TeslaBLE_Status_E_ERROR_CRYPTO;
    }
 diff --git a/src/peer.cpp b/src/peer.cpp
-index 67f532d..7059e6d 100644
 --- a/src/peer.cpp
 +++ b/src/peer.cpp
 @@ -20,18 +20,39 @@
@@ -734,7 +738,7 @@ index 67f532d..7059e6d 100644
  Peer::Peer(UniversalMessage_Domain domain, std::shared_ptr<CryptoContext> crypto_context, std::string vin)
      : domain_(domain), vin_(std::move(vin)), crypto_context_(std::move(crypto_context)) {}
  
-@@ -121,16 +142,17 @@ uint32_t Peer::generate_expires_at(int seconds) const {
+@@ -121,16 +142,17 @@
    return clock_time_ + static_cast<uint32_t>(elapsed) + static_cast<uint32_t>(seconds);
  }
  
@@ -754,10 +758,13 @@ index 67f532d..7059e6d 100644
  }
  
  int Peer::load_tesla_key(const uint8_t *public_key_buffer, size_t public_key_size) {
-@@ -306,6 +328,26 @@ int Peer::force_update_session(Signatures_SessionInfo *session_info) {
+@@ -304,8 +326,27 @@
+ 
  int Peer::construct_ad_buffer(Signatures_SignatureType signature_type, const char *vin, uint32_t expires_at,
                                pb_byte_t *output_buffer, size_t *output_length, uint32_t flags,
-                               const pb_byte_t *request_hash, size_t request_hash_length, uint32_t fault) const {
+-                              const pb_byte_t *request_hash, size_t request_hash_length, uint32_t fault,
+-                              std::optional<uint32_t> counter) const {
++                              const pb_byte_t *request_hash, size_t request_hash_length, uint32_t fault) const {
 +  if (signature_type == Signatures_SignatureType_SIGNATURE_TYPE_AES_GCM_RESPONSE) {
 +    LOG_ERROR("Response metadata needs the response's own counter (construct_response_ad_buffer)");
 +    return TeslaBLE_Status_E_ERROR_INVALID_PARAMS;
@@ -781,26 +788,26 @@ index 67f532d..7059e6d 100644
    if (output_buffer == nullptr || output_length == nullptr || vin == nullptr) {
      LOG_ERROR("Invalid parameters for AD buffer construction");
      return TeslaBLE_Status_E_ERROR_INVALID_PARAMS;
-@@ -367,9 +409,9 @@ int Peer::construct_ad_buffer(Signatures_SignatureType signature_type, const cha
+@@ -367,10 +408,9 @@
      }
    }
  
--  // Counter (TLV format)
+-  // Counter (TLV format). A response is authenticated with the counter the
+-  // vehicle sent in it (AES_GCM_ResponseData.counter), not our request counter.
 +  // Counter (TLV format): the request counter, or the counter a response carries
    pb_byte_t counter_bytes[4];
--  write_uint32_be(counter_bytes, counter_);
+-  write_uint32_be(counter_bytes, counter.value_or(counter_));
 +  write_uint32_be(counter_bytes, counter);
    if (!append_tlv(Signatures_Tag_TAG_COUNTER, counter_bytes, sizeof(counter_bytes))) {
      LOG_ERROR("Failed to append counter to AD buffer");
      return TeslaBLE_Status_E_ERROR_INVALID_PARAMS;
-@@ -450,29 +492,28 @@ int Peer::construct_request_hash(Signatures_SignatureType auth_type, const pb_by
+@@ -451,85 +491,80 @@
  
  int Peer::decrypt_response(const pb_byte_t *input_buffer, size_t input_length, const pb_byte_t *nonce,
                             const pb_byte_t *tag, const pb_byte_t *request_hash, size_t request_hash_length,
--                           uint32_t flags, uint32_t fault, pb_byte_t *output_buffer, size_t output_buffer_length,
--                           size_t *output_length) const {
+-                           uint32_t flags, uint32_t fault, uint32_t response_counter, pb_byte_t *output_buffer,
 +                           uint32_t flags, uint32_t fault, uint32_t counter, pb_byte_t *output_buffer,
-+                           size_t output_buffer_length, size_t *output_length) const {
+                            size_t output_buffer_length, size_t *output_length) const {
 +  if (!output_buffer || !output_length || !input_buffer || !nonce || !tag) {
 +    LOG_ERROR("[DecryptResponse] Invalid null pointer parameter");
 +    return TeslaBLE_Status_E_ERROR_INVALID_PARAMS;
@@ -823,6 +830,7 @@ index 67f532d..7059e6d 100644
 -  int return_code = mbedtls_gcm_setkey(&aes_context, MBEDTLS_CIPHER_ID_AES, shared_secret_sha1_.data(), 128);
 -  if (return_code != 0) {
 -    LOG_ERROR("[DecryptResponse] GCM set key error: -0x%04x", (unsigned int) -return_code);
+-    mbedtls_gcm_free(&aes_context);
 -    return TeslaBLE_Status_E_ERROR_DECRYPT;
 -  }
 -
@@ -830,15 +838,18 @@ index 67f532d..7059e6d 100644
 +  // Construct AD buffer for response (max 79 bytes), bound to the response's own counter
    pb_byte_t ad_buffer[80];
    size_t ad_length;
--  return_code = construct_ad_buffer(Signatures_SignatureType_SIGNATURE_TYPE_AES_GCM_RESPONSE, vin_.c_str(),
--                                    0,  // expires_at not used for responses
--                                    ad_buffer, &ad_length, flags, request_hash, request_hash_length, fault);
+-  return_code =
+-      construct_ad_buffer(Signatures_SignatureType_SIGNATURE_TYPE_AES_GCM_RESPONSE, vin_.c_str(),
+-                          0,  // expires_at not used for responses
+-                          ad_buffer, &ad_length, flags, request_hash, request_hash_length, fault, response_counter);
 +  int return_code = construct_response_ad_buffer(counter, ad_buffer, &ad_length, flags, request_hash,
 +                                                 request_hash_length, fault);
  
    if (return_code != 0) {
      LOG_ERROR("[DecryptResponse] Failed to construct AD buffer");
-@@ -481,43 +522,50 @@ int Peer::decrypt_response(const pb_byte_t *input_buffer, size_t input_length, c
+-    mbedtls_gcm_free(&aes_context);
+     return return_code;
+   }
  
    // Hash the AD buffer
    unsigned char ad_hash[32];
@@ -871,7 +882,6 @@ index 67f532d..7059e6d 100644
 -      mbedtls_gcm_update(&aes_context, input_buffer, input_length, output_buffer, output_buffer_length, output_length);
 -  if (return_code != 0) {
 -    LOG_ERROR("[DecryptResponse] Decryption error in gcm_update: -0x%04x", (unsigned int) -return_code);
--    return TeslaBLE_Status_E_ERROR_DECRYPT;
 +  // Decrypt with the 12-byte nonce and the AD hash as AAD, then verify the 16-byte tag
 +  size_t update_length = 0;
 +  size_t verify_length = 0;
@@ -890,19 +900,10 @@ index 67f532d..7059e6d 100644
 +  if (status == PSA_SUCCESS) {
 +    status = psa_aead_verify(&operation, output_buffer + update_length, output_buffer_length - update_length,
 +                             &verify_length, tag, 16);  // tag is always 16 bytes
-   }
++  }
 +  psa_aead_abort(&operation);
 +  psa_destroy_key(key_id);
- 
--  // Finalize and verify the tag
--  size_t finish_length = 0;
--  pb_byte_t finish_buffer[16];
--  pb_byte_t tag_copy[16];
--  std::memcpy(tag_copy, tag, sizeof(tag_copy));
--  return_code = mbedtls_gcm_finish(&aes_context, finish_buffer, sizeof(finish_buffer), &finish_length, tag_copy,
--                                   sizeof(tag_copy));  // tag is always 16 bytes
--  if (return_code != 0) {
--    LOG_ERROR("[DecryptResponse] Authentication failed in gcm_finish: -0x%04x", (unsigned int) -return_code);
++
 +  if (status != PSA_SUCCESS) {
 +    // Never hand out plaintext that failed authentication
 +    mbedtls_platform_zeroize(output_buffer, update_length);
@@ -910,12 +911,32 @@ index 67f532d..7059e6d 100644
      return TeslaBLE_Status_E_ERROR_DECRYPT;
    }
  
+-  // Finalize and authenticate. In decrypt mode mbedtls_gcm_finish() only
+-  // computes the tag; it never compares it with the received one, so the
+-  // comparison is done here (constant-time).
+-  size_t finish_length = 0;
+-  pb_byte_t finish_buffer[16];
+-  pb_byte_t computed_tag[16];
+-  return_code = mbedtls_gcm_finish(&aes_context, finish_buffer, sizeof(finish_buffer), &finish_length, computed_tag,
+-                                   sizeof(computed_tag));  // tag is always 16 bytes
+-  if (return_code != 0) {
+-    LOG_ERROR("[DecryptResponse] Failed to compute tag in gcm_finish: -0x%04x", (unsigned int) -return_code);
+-    mbedtls_gcm_free(&aes_context);
+-    return TeslaBLE_Status_E_ERROR_DECRYPT;
+-  }
+-
+-  if (!CryptoUtils::secure_memory_compare(tag, computed_tag, sizeof(computed_tag))) {
+-    LOG_ERROR("[DecryptResponse] Authentication failed: response tag mismatch");
+-    mbedtls_gcm_free(&aes_context);
+-    return TeslaBLE_Status_E_ERROR_DECRYPT;
+-  }
+-
 -  mbedtls_gcm_free(&aes_context);
 +  *output_length = update_length + verify_length;
    return TeslaBLE_Status_E_OK;
  }
  
-@@ -529,64 +577,63 @@ int Peer::encrypt(pb_byte_t *input_buffer, size_t input_buffer_length, pb_byte_t
+@@ -541,64 +576,63 @@
      return TeslaBLE_Status_E_ERROR_PRIVATE_KEY_NOT_INITIALIZED;
    }
  
@@ -954,21 +975,24 @@ index 67f532d..7059e6d 100644
 +    LOG_ERROR("[Encrypt] AD metadata SHA256 hash error: %d", static_cast<int>(status));
      return TeslaBLE_Status_E_ERROR_ENCRYPT;
    }
- 
--  mbedtls_gcm_update_ad(&aes_context, ad_hash, sizeof(ad_hash));
 -
+-  mbedtls_gcm_update_ad(&aes_context, ad_hash, sizeof(ad_hash));
+ 
    // Validate buffer sizes before encryption
    if (output_buffer_length < input_buffer_length) {
      LOG_ERROR("[Encrypt] Output buffer too small: %zu < %zu", output_buffer_length, input_buffer_length);
 -    mbedtls_gcm_free(&aes_context);
-     return TeslaBLE_Status_E_ERROR_INVALID_PARAMS;
-   }
- 
+-    return TeslaBLE_Status_E_ERROR_INVALID_PARAMS;
+-  }
+-
 -  return_code = mbedtls_gcm_update(&aes_context, input_buffer, input_buffer_length, output_buffer, output_buffer_length,
 -                                   output_length);
 -  if (return_code != 0) {
 -    LOG_ERROR("[Encrypt] Encryption error in gcm_update: -0x%04x", (unsigned int) -return_code);
 -    mbedtls_gcm_free(&aes_context);
++    return TeslaBLE_Status_E_ERROR_INVALID_PARAMS;
++  }
++
 +  // Use 128-bit key as specified in the protocol
 +  mbedtls_svc_key_id_t key_id = MBEDTLS_SVC_KEY_ID_INIT;
 +  status = import_session_key(shared_secret_sha1_.data(), PSA_KEY_USAGE_ENCRYPT, &key_id);
@@ -1017,22 +1041,7 @@ index 67f532d..7059e6d 100644
  
    LOG_VERBOSE("[Encrypt] Nonce: %s, Ciphertext: %s, Tag: %s", format_hex(nonce, 12).c_str(),
                format_hex(output_buffer, *output_length).c_str(), format_hex(signature_buffer, 16).c_str());
-diff --git a/src/vehicle.cpp b/src/vehicle.cpp
-index c933ee5..6323d90 100644
---- a/src/vehicle.cpp
-+++ b/src/vehicle.cpp
-@@ -869,7 +869,8 @@ void TeslaBLE::Vehicle::handle_vcsec_message_(const UniversalMessage_RoutableMes
-     int return_code = session->decrypt_response(
-         payload->bytes, payload->size, sig_data->sig_type.AES_GCM_Response_data.nonce,
-         sig_data->sig_type.AES_GCM_Response_data.tag, request_hash, request_hash_length, msg.flags, fault,
--        decrypt_buffer.bytes, sizeof(decrypt_buffer.bytes), &decrypt_length);
-+        sig_data->sig_type.AES_GCM_Response_data.counter, decrypt_buffer.bytes, sizeof(decrypt_buffer.bytes),
-+        &decrypt_length);
-     if (return_code != 0) {
-       LOG_ERROR("Failed to decrypt VCSEC response: %d", return_code);
-       return;
 diff --git a/src/vin_utils.cpp b/src/vin_utils.cpp
-index 4728a29..d5d22db 100644
 --- a/src/vin_utils.cpp
 +++ b/src/vin_utils.cpp
 @@ -5,7 +5,7 @@
@@ -1044,7 +1053,7 @@ index 4728a29..d5d22db 100644
  
  #include <cctype>
  #include <cstring>
-@@ -19,8 +19,13 @@ std::string get_vin_advertisement_name(const char *vin) {
+@@ -19,8 +19,13 @@
  
    // Calculate SHA1 of the VIN
    unsigned char sha1_hash[20];

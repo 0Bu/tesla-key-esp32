@@ -9,15 +9,16 @@ signing: [SECURITY.md](SECURITY.md); MCP: [MCP.md](MCP.md); feature catalog:
 
 ## Hardware
 
-Exactly the four chips `yoziru/tesla-ble` supports — **esp32, esp32s3, esp32c3, esp32c6** (WiFi
-2.4 GHz + BLE). The ESP-IDF Component Manager enforces that list at dependency resolution, so the
-supported set cannot drift from the crypto library's. Requirements: **≥ 4 MB flash** (dual-OTA
+The four supported firmware chips — **esp32, esp32s3, esp32c3, esp32c6** (WiFi
+2.4 GHz + BLE). All four are supported by the pinned crypto library; repository build and artifact
+contracts enforce the firmware target set. Requirements: **≥ 4 MB flash** (dual-OTA
 layout, two ~2 MB app slots), no PSRAM, a USB data cable for the first flash. ESP32-S2 (no
 Bluetooth) and ESP32-H2/P4 (no WiFi) cannot run this firmware. The classic **esp32 must be chip
 revision v3.0 (ECO3) or newer** (standard since ~2020): the signed image requires it
 (`CONFIG_ESP32_REV_MIN_3`), so pre-ECO3 silicon such as the ESP32-PICO-D4 is refused by the web
 installer before flashing ([SECURITY](SECURITY.md#signed-ota-images)); the other targets have no such
-floor. A chip tesla-ble does not declare (esp32c5, esp32c61) would need upstreaming first — a locally
+floor. Upstream v5.3.0 also declares esp32c5, but restoring it requires separate firmware and
+signing-size acceptance; an undeclared chip such as esp32c61 needs upstreaming first — a locally
 patched checkout was tried for the C5 and dropped ([ADR-0004](adr/0004-drop-esp32c5-target.md)).
 
 ### Wired networking (optional, esp32s3)
@@ -511,7 +512,7 @@ Full threat model, Flash Encryption / Secure Boot: [SECURITY.md](SECURITY.md).
 | Service UUID | `00000211-b2d1-43f0-9b88-960cebf8b91e` |
 | Encryption | ECDH + AES-GCM (Mbed TLS 4 / PSA Crypto) |
 | Signing | ECDSA P-256 (key in NVS) |
-| BLE library | [yoziru/tesla-ble](https://github.com/yoziru/tesla-ble) v5.2.0 + ordered repository patch series |
+| BLE library | [yoziru/tesla-ble](https://github.com/yoziru/tesla-ble) v5.3.0 + ordered repository patch series |
 | BLE stack | NimBLE |
 | Fragment size | 20 bytes: the firmware neither starts nor accepts an MTU exchange, so the ATT MTU stays at 23 ([ADR-0005 §2](adr/0005-tesla-ble-seam.md#2-platform-forced-departures-and-reference-deviations)); the negotiated-MTU path (MTU − 3, max 244) is unreachable in this build |
 | HTTP server | `esp_http_server` :80 |

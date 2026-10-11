@@ -19,7 +19,7 @@
     },
     {
       "id": "tesla-ble-pin",
-      "pattern": "tesla-ble[\\s\\S]{0,40}v?5\\.2\\.0"
+      "pattern": "tesla-ble[\\s\\S]{0,40}v?5\\.3\\.0"
     },
     {
       "id": "nvs-layout-secret",

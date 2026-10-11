@@ -1,4 +1,4 @@
-// Host integration harness against the real yoziru/tesla-ble v5.2.0 (with the repository patch
+// Host integration harness against the real yoziru/tesla-ble v5.3.0 (with the repository patch
 // series, including the PSA port), Nanopb, and the Mbed TLS 4.1 / TF-PSA-Crypto commit that the
 // pinned ESP-IDF v6.1 builds into the firmware.
 //
@@ -499,6 +499,92 @@ int main() {
                    kat::hex(key, sizeof key) == kat::kSessionInfoKey,
                "session-info key matches the official HMAC-SHA256 vector",
                "session-info key does not match the official HMAC-SHA256 vector");
+    }
+    {
+        // v5.3 must not turn metadata-only SessionInfo into an authenticated peer. NVS and
+        // network callers must inspect is_initialized(), even when update_session returns OK.
+        auto context = kat::loaded_client_context();
+        Peer peer(UniversalMessage_Domain_DOMAIN_VEHICLE_SECURITY, context, tc::TEST_VIN);
+        Signatures_SessionInfo info = Signatures_SessionInfo_init_zero;
+        std::memcpy(info.epoch, tc::TEST_EPOCH, sizeof info.epoch);
+        info.clock_time = 1234;
+        info.counter = 7;
+        expect(context && peer.update_session(&info) == TeslaBLE_Status_E_OK &&
+                   !peer.is_valid() && !peer.has_shared_secret() && !peer.is_initialized() &&
+                   !peer.can_send_command(),
+               "metadata-only session update cannot authenticate a peer",
+               "metadata-only session update claims authentication without a shared secret");
+        expect(peer.force_update_session(&info) == TeslaBLE_Status_E_OK &&
+                   !peer.is_valid() && !peer.has_shared_secret() && !peer.is_initialized(),
+               "metadata-only forced update cannot authenticate a peer",
+               "forced update claims authentication without a shared secret");
+        std::memcpy(info.publicKey.bytes, tc::EXPECTED_VEHICLE_PUBLIC_KEY, 65);
+        info.publicKey.size = 65;
+        expect(peer.update_session(&info) == TeslaBLE_Status_E_OK && peer.is_initialized() &&
+                   peer.can_send_command() &&
+                   std::memcmp(peer.get_shared_secret(), tc::EXPECTED_SESSION_KEY, 16) == 0,
+               "official public key establishes a usable session with the known ECDH secret",
+               "official public key did not establish the expected session");
+        info.publicKey.size = 0;
+        info.counter = 3;
+        ++info.clock_time;
+        expect(peer.update_session(&info) == TeslaBLE_Status_E_OK && peer.is_initialized() &&
+                   peer.get_counter() == 7 && peer.get_clock_time() == info.clock_time,
+               "lower reported counter preserves authentication and max(local, reported)",
+               "session-counter alignment or established-session reuse regressed");
+        peer.clear_shared_secret();
+        expect(peer.update_session(&info) == TeslaBLE_Status_E_OK && !peer.is_initialized() &&
+                   !peer.has_shared_secret() && !peer.can_send_command(),
+               "cleared key material cannot be restored by metadata-only SessionInfo",
+               "metadata-only SessionInfo restored a cleared shared secret");
+    }
+    {
+        // vehicle-command binds each response to its own domain's signed request. A later
+        // Infotainment transmission must leave the outstanding VCSEC hash intact, and vice versa.
+        Client scoped;
+        scoped.set_vin(tc::TEST_VIN);
+        bool ready = scoped.load_private_key(reinterpret_cast<const uint8_t*>(tc::CLIENT_PRIVATE_KEY_PEM),
+                                             std::strlen(tc::CLIENT_PRIVATE_KEY_PEM) + 1) == 0;
+        Signatures_SessionInfo info = Signatures_SessionInfo_init_zero;
+        std::memcpy(info.epoch, tc::TEST_EPOCH, sizeof info.epoch);
+        std::memcpy(info.publicKey.bytes, tc::EXPECTED_VEHICLE_PUBLIC_KEY, 65);
+        info.publicKey.size = 65;
+        info.clock_time = 1234;
+        info.counter = 7;
+        for (auto domain : {UniversalMessage_Domain_DOMAIN_VEHICLE_SECURITY,
+                            UniversalMessage_Domain_DOMAIN_INFOTAINMENT}) {
+            auto* peer = scoped.get_peer(domain);
+            ready = ready && peer && peer->update_session(&info) == 0 && peer->is_initialized();
+        }
+        uint8_t payload[] = {0x08, 0x01};
+        uint8_t wire[2048];
+        size_t wire_size = 0;
+        auto send = [&](UniversalMessage_Domain domain) {
+            return ready && scoped.build_universal_message_with_payload(
+                payload, sizeof payload, domain, wire, &wire_size, true) == 0;
+        };
+        auto hash = [&](UniversalMessage_Domain domain) {
+            size_t size = 0;
+            const auto* data = scoped.get_last_request_hash(domain, &size);
+            return data ? std::vector<uint8_t>(data, data + size) : std::vector<uint8_t>{};
+        };
+        ready = send(UniversalMessage_Domain_DOMAIN_VEHICLE_SECURITY);
+        const auto vcsec_hash = hash(UniversalMessage_Domain_DOMAIN_VEHICLE_SECURITY);
+        ready = ready && send(UniversalMessage_Domain_DOMAIN_INFOTAINMENT);
+        const auto info_hash = hash(UniversalMessage_Domain_DOMAIN_INFOTAINMENT);
+        expect(ready && !vcsec_hash.empty() && !info_hash.empty() &&
+                   hash(UniversalMessage_Domain_DOMAIN_VEHICLE_SECURITY) == vcsec_hash,
+               "Infotainment transmission preserves the VCSEC request hash",
+               "Infotainment transmission overwrote the VCSEC response context");
+        expect(send(UniversalMessage_Domain_DOMAIN_VEHICLE_SECURITY) &&
+                   hash(UniversalMessage_Domain_DOMAIN_INFOTAINMENT) == info_hash,
+               "VCSEC transmission preserves the Infotainment request hash",
+               "VCSEC transmission overwrote the Infotainment response context");
+        size_t size = 99;
+        expect(scoped.get_last_request_hash(UniversalMessage_Domain_DOMAIN_BROADCAST, &size) == nullptr &&
+                   size == 0,
+               "unsupported request-hash domain has no decryption context",
+               "unsupported request-hash domain leaked another domain's context");
     }
     const std::vector<uint8_t> metadata = kat::unhex(kat::kMetadata);
     const std::vector<uint8_t> plaintext = kat::unhex(kat::kPlaintext);
