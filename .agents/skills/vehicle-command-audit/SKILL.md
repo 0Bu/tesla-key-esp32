@@ -167,7 +167,7 @@ Verify every dimension against the reviewed revisions; previous audit results ar
     claims about protocol vulnerabilities, replays, or countermeasures:
     - Cryptographically verify the claims against `teslamotors/vehicle-command` Go reference sources
       (`internal/authentication/signer.go`, `internal/dispatcher/dispatcher.go`, `pkg/protocol/protocol.md`).
-    - Distinguish AEAD Associated Data binding (which cryptographically binds the request SHA-1 to
+    - Distinguish AEAD Associated Data binding (which cryptographically binds the request hash to
       authenticated responses, preventing cross-command injection between different requests) from
       link-layer duplicate frame delivery (caused by RX buffer recovery re-emitting the same response)
       and unauthenticated plaintext responses (where `response_counter = 0` requires Request-UUID matching).
