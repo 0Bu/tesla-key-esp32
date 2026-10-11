@@ -1,160 +1,71 @@
 # tesla-key-esp32
 
-Turns an ESP32 into a Bluetooth key for a Tesla, so charging software such as
-[evcc](https://evcc.io) can wake the car, read the battery level and start/stop charging
-over the local network. No cloud, no Tesla API, no fees. It can also stream all vehicle
-telemetry to [Home Assistant over MQTT](#step-6--home-assistant-optional).
-
-Reference: [build, HTTP API, MQTT](docs/README.md) · [internals](docs/ARCHITECTURE.md) ·
-[security model](docs/SECURITY.md) · [MCP](docs/MCP.md) · [feature catalog](docs/FEATURES.md).
-
----
+Use an ESP32 as a Tesla Bluetooth key for local charging control with [evcc](https://evcc.io).
+The firmware provides a web UI, HTTP and MCP APIs, MQTT/Home Assistant telemetry and signed OTA
+updates. It needs no Tesla cloud API. The enrolled key has the **Charging Manager** role: charging,
+wake and read access.
 
 ## Requirements
 
-- An ESP32 board: esp32, esp32s3, esp32c3 or esp32c6
-- A browser with Web Serial support
-- The Tesla's 17-character VIN
+- An esp32, esp32s3, esp32c3 or esp32c6 board with at least 4 MB flash; classic esp32 requires
+  revision v3.0 or newer. [Board details](docs/USER_GUIDE.md#hardware).
+- A USB data cable and desktop browser with Web Serial support for installation.
+- The car's 17-character VIN and an existing Tesla NFC keycard.
+- Permanent power near the parking spot and a trusted LAN. The API has no authentication or TLS;
+  never expose it to the internet. [Security model](docs/SECURITY.md#http-api-exposure).
 
----
+## 1. Install and configure
 
-## Step 1 — Install the firmware
+1. Open the [web installer](https://0bu.github.io/tesla-key-esp32/), click **Install** and select
+   the serial port. First installation erases existing configuration and keys. For an already
+   compatible installation, **Keep configuration** preserves them.
+2. Join `tesla-key-esp32-setup`. Open `http://192.168.4.1` if the setup page does not appear.
+3. Save WiFi credentials and VIN. After the reboot, open `http://tesla-key-esp32.local`, or use
+   the IP shown by your router. The installer itself does not configure WiFi.
 
-- Open the web installer: **https://0bu.github.io/tesla-key-esp32/**
-- Click **Install** and select the serial port.
+An ESP32-S3 with a supported wired board uses DHCP; configure its VIN in the web UI.
 
----
+## 2. Pair with the car
 
-## Step 2 — Connect to WiFi
+The device generates its key and requests enrollment automatically once a VIN is configured.
+There is no Pair button.
 
-The installer flashes firmware only; it does not set WiFi.
+1. Park within Bluetooth range, approximately 10 m, and wait for **connecting…** in the web UI.
+2. Place an existing Tesla NFC keycard on the center-console reader behind the cup holders.
+3. Confirm **Add key** on the car's touchscreen while the card is present. The web UI shows
+   **paired**; the car lists an **Unknown key**.
 
-1. Join the device's `tesla-key-esp32-setup` WiFi network.
-2. The setup page opens automatically (else: `http://192.168.4.1`).
-3. Enter the WiFi credentials and VIN, save. The device reboots and joins the network.
+If pairing fails, check [troubleshooting](docs/USER_GUIDE.md#troubleshooting). Tesla's roughly
+three simultaneous BLE connections are shared with phone keys and fobs.
 
----
+## 3. Connect evcc
 
-## Step 3 — Open the web UI
-
-`http://tesla-key-esp32.local`
-
-Shows WiFi, Bluetooth and pairing status.
-
----
-
-## Step 4 — Pair with the car
-
-One-time. The key is generated automatically, and the device starts sending its enrolment
-request automatically when it is near the car — there is no button to press. The car only
-shows the pairing dialog while a Tesla NFC keycard is lying on the center-console card reader.
-
-1. Park within Bluetooth range (~10 m). The web UI status goes *searching… → connecting…*.
-2. Place an existing Tesla NFC keycard on the center console (the card reader behind the
-   cup holders). Only then does the car's touchscreen show a pairing request
-   (*"Add key"* → *"Confirm"*).
-3. Confirm on the touchscreen. The web UI then shows **paired**.
-
-The new key appears as *"Unknown key"* in the car's key list. It pairs as a Charging Manager
-key only: charging and wake, no door or drive access. A Tesla keeps at most ~3 *simultaneous*
-Bluetooth connections (shared across phone keys and fobs); if pairing fails at that limit,
-disconnect another BLE device or remove an unused key (Tesla app → Security → Keys).
-
----
-
-## Step 5 — Add to evcc
-
-In the evcc UI go to **Settings → Vehicles → Add → Custom device** and paste the
-flat config below (no `vehicles:` wrapper, no list dash — the editor handles that):
+In evcc, open **Settings → Vehicles → Add → Custom device** and enter this flat configuration:
 
 ```yaml
 name: tesla
 type: template
 template: tesla-ble
-title: Tesla Key ESP32              # optional, shown in evcc UI
+title: Tesla Key ESP32
 vin: YOUR-17-CHAR-VIN
-capacity: 60                        # optional, battery kWh
-url: http://tesla-key-esp32.local   # or http://<device-ip>
-port: 80                            # this device uses port 80 (template default is 8080)
+capacity: 60                       # optional battery capacity in kWh
+url: http://tesla-key-esp32.local
+port: 80
 ```
 
-If you edit `evcc.yaml` by hand instead, nest the same fields under `vehicles:`
-as a list item (`  - name: tesla` …). Restart evcc.
+For a hand-edited `evcc.yaml`, put the fields under `vehicles:` as a list item and restart evcc.
+Set `port: 80` explicitly. Reads use cached telemetry; the first command after idle can need a
+Bluetooth reconnect, and a failed charge-current change requires the controller's next retry.
 
----
+## Further use
 
-## Step 6 — Home Assistant (optional)
+- [User guide](docs/USER_GUIDE.md): hardware, MQTT, Syslog, updates and troubleshooting.
+- [Documentation index](docs/README.md): APIs, development, architecture and security.
 
-The device can publish everything it reads — battery, charge, climate, tyre pressures,
-doors/locks, odometer, and its own WiFi/Bluetooth health — straight into Home Assistant
-over MQTT. It's read-only (HA only *sees* the data; it never sends commands or wakes the car).
+Update through the web UI's **Firmware** row. OTA preserves WiFi, VIN and pairing keys; use the
+USB installer for first installation or recovery. Do not erase flash to resolve an ordinary
+connection problem.
 
-1. In the web UI, tap the pencil on the **MQTT** row.
-2. Enter your broker as `IP:PORT` (e.g. `192.0.2.1:1883`) and save. The device reboots.
-3. With the [Home Assistant MQTT integration](https://www.home-assistant.io/integrations/mqtt/)
-   enabled, a **Tesla Key** device appears automatically with all sensors — no YAML needed
-   (Home Assistant MQTT Discovery). Leave the field empty to turn MQTT off again.
-
-If the broker needs a username/password, set them once at build time via
-`scripts/idf-docker.sh idf.py menuconfig` (*Tesla Key Configuration → MQTT*) — the web UI
-only edits the broker address.
-
----
-
-## Step 7 — Syslog (optional)
-
-The device can forward its console log (the same output served at `GET /diag`) to a UDP
-Syslog collector — handy for watching a pairing or reconnect live, or for keeping history
-past a reboot.
-
-1. In the web UI, tap the pencil on the **Syslog** row.
-2. Enter your collector as `IP:PORT` (e.g. `192.0.2.1:514`) and save. The device reboots.
-3. Leave the field empty to turn Syslog off again.
-
----
-
-## Notes
-
-- Keep the device on permanent USB power near the parking spot.
-- The first command after idle takes a few seconds (Bluetooth reconnect); later ones are fast.
-  evcc reads (state of charge) are always served instantly from cache, but a charge-current
-  change sent in that cold window may only take effect on evcc's next retry once the link is warm.
-- **Updates are over-the-air:** open `http://tesla-key-esp32.local`, tap the download icon on the
-  **Firmware** row (*Check for updates*), confirm, and the device updates itself and reboots — WiFi,
-  VIN and key are preserved. Tap the version number to switch between the **Release** channel
-  (default, official releases) and the **Dev** channel (every `main` build).
-- The [web installer](https://0bu.github.io/tesla-key-esp32/) is only needed for the first install
-  or to recover a device. A first install erases everything, so WiFi/VIN/key are reset and you
-  re-pair once; on a device that already runs a recent firmware, choose *Keep configuration* to
-  preserve them. Otherwise use OTA.
-- **Try a reviewed PR before merge:** a maintainer may add the `signed-preview` label to a
-  same-repository PR; after its build and signing approval it publishes a signed build you can
-  browser-flash from `https://0bu.github.io/tesla-key-esp32/PR/<PR-number>/`. The preview reports
-  version `<latest>-PR-<N>`, still updates from the selected channel (so a later release moves the
-  device forward), and is removed when the PR closes, is force-pushed or loses the label.
-- **MCP endpoint:** AI agents (Claude Desktop/Code, VS Code, …) can use the
-  [Model Context Protocol](https://modelcontextprotocol.io/) at `http://<ESP32-IP>/mcp`: the charging
-  commands plus a read-only state tool that never wakes the car, with the same trusted-LAN-only
-  caveat as the rest of the API ([guide](docs/MCP.md)).
-
----
-
-## Troubleshooting
-
-| Symptom | Fix |
-|---------|-----|
-| Installer shows no serial port | Chrome/Edge desktop, data cable, hold **BOOT** while plugging in. |
-| `tesla-key-esp32.local` won't load | Use the device IP from the router. |
-| Need to change WiFi | The `tesla-key-esp32-setup` network reappears whenever no WiFi is configured — rejoin it. |
-| No pairing prompt on the car | Place a Tesla NFC keycard on the center-console reader — the dialog only appears while a card is present; also bring the device closer, car must be awake, wait for *connecting…* in the web UI. |
-| evcc shows no battery / current | Set `port: 80`; car must be in Bluetooth range. |
-
-More causes and log lines: [docs/README.md](docs/README.md#troubleshooting).
-
----
-
-## Notes on scope
-
-- Local network only — keep it on a trusted LAN, never expose it to the internet ([security](docs/SECURITY.md)).
-- Inspired by and API-compatible with [TeslaBleHttpProxy](https://github.com/wimaha/TeslaBleHttpProxy) — evcc talks to either without changes.
-- Licensed under **AGPL-3.0** ([LICENSE](LICENSE)). The firmware statically links the AGPL-3.0 [yoziru/tesla-ble](https://github.com/yoziru/tesla-ble) library, so the combined work is itself AGPL-3.0 — see [docs](docs/README.md#license).
+Inspired by [TeslaBleHttpProxy](https://github.com/wimaha/TeslaBleHttpProxy).
+Licensed under [AGPL-3.0](LICENSE), including the linked tesla-ble library. Network users must have
+access to the corresponding source for the firmware version they use.

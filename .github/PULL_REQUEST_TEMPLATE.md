@@ -24,7 +24,7 @@ cannot build or USB-flash — see AGENTS.md).
 
 ## Checklist
 
-- [ ] Docs kept in sync where behavior changed (`AGENTS.md`, `docs/ARCHITECTURE.md`, `README.md`, `docs/SECURITY.md`, `docs/MCP.md`)
+- [ ] Docs kept in sync where behavior changed (owning document from `docs/README.md`, including `docs/API.md`, `docs/USER_GUIDE.md`, `docs/DEVELOPMENT.md`, architecture/security/MCP; `AGENTS.md` for runner policy)
 - [ ] New hardware-free logic lives in `main/logic/` with a `CHECK` in `test/test_logic.cpp` (see `$add-logic-test`)
 - [ ] Heap safety considered — no new large *contiguous* allocations; HTTP handlers stay under the `handle_all` try/catch (see `AGENTS.md`)
 - [ ] Target-agnostic — still builds for all four chips (esp32 / esp32s3 / esp32c3 / esp32c6)
@@ -42,8 +42,8 @@ $feature-docs only arms when the diff reaches main/, test/, sdkconfig.defaults*,
 the shipped Pages runtime, release-relevance logic, or the build/signed-preview/preview-cleanup/
 PR-policy/bench-acceptance workflows. Because `docs/FEATURES.md` catalogs the runner-neutral policy
 itself, it also arms for
-`AGENTS.md`, `.agents/`, `.github/PULL_REQUEST_TEMPLATE.md`, `tools/agent-hooks/`, and
-`tools/agent-config/` — delete its line only on a docs- or unrelated chore-only PR. A full
+`AGENTS.md`, `.agents/`, `.codex/`, `.github/PULL_REQUEST_TEMPLATE.md`, `tools/agent-hooks/`,
+`tools/agent-config/`, and `scripts/with-host-python.sh` — delete its line only on a docs- or unrelated chore-only PR. A full
 $project-review also clears the
 skill-audit gate, but NOT the feature-docs one, NOR the pr-hygiene one.
 

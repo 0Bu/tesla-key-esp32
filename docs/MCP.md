@@ -244,102 +244,14 @@ curl -si http://tesla-key-esp32.local/mcp | head -1
 
 ## Client integration
 
-### Claude Code
+Configure a local MCP client for **Streamable HTTP** at `http://tesla-key-esp32.local/mcp` or the
+board IP. Initialize, list tools, then call `get_vehicle_state` to confirm cached read access.
+Commands such as `set_charge_limit` require deliberate action and the car may refuse them.
 
-```bash
-claude mcp add --transport http tesla-key http://tesla-key-esp32.local/mcp
-```
-
-Then, in a session: *"What's the state of my Tesla?"* → the model calls
-`get_vehicle_state`; *"Set the charge limit to 90%"* → `set_charge_limit`.
-
-### VS Code (GitHub Copilot agent mode)
-
-`.vscode/mcp.json` in the workspace (or add via **MCP: Add Server**):
-
-```json
-{
-  "servers": {
-    "tesla-key": {
-      "type": "http",
-      "url": "http://tesla-key-esp32.local/mcp"
-    }
-  }
-}
-```
-
-### Claude Desktop (and other stdio-only clients)
-
-Claude Desktop launches local stdio servers, so bridge to the device with
-[`mcp-remote`](https://www.npmjs.com/package/mcp-remote) (needs Node.js). In
-`claude_desktop_config.json`:
-
-```json
-{
-  "mcpServers": {
-    "tesla-key": {
-      "command": "npx",
-      "args": [
-        "mcp-remote",
-        "http://tesla-key-esp32.local/mcp",
-        "--allow-http",
-        "--transport", "http-only"
-      ]
-    }
-  }
-}
-```
-
-`--allow-http` is required because the device is plain HTTP (trusted LAN);
-`--transport http-only` skips the SSE probing this server would answer with `405`.
-
-### Python (official `mcp` SDK)
-
-```python
-# pip install mcp
-import asyncio
-from mcp import ClientSession
-from mcp.client.streamable_http import streamablehttp_client
-
-URL = "http://tesla-key-esp32.local/mcp"
-
-async def main():
-    async with streamablehttp_client(URL) as (read, write, _):
-        async with ClientSession(read, write) as session:
-            await session.initialize()
-
-            tools = await session.list_tools()
-            print([t.name for t in tools.tools])
-
-            state = await session.call_tool("get_vehicle_state", {})
-            print(state.content[0].text)          # JSON text blob
-
-            result = await session.call_tool("set_charge_limit", {"percent": 90})
-            print("failed:" if result.isError else "ok:", result.content[0].text)
-
-asyncio.run(main())
-```
-
-### Claude API (MCP connector)
-
-The Messages API can call the device directly via the MCP connector — but the API servers
-sit outside your LAN, so this only works if the endpoint is reachable from them (e.g.
-through a VPN/tunnel that you control — do **not** expose the device itself):
-
-```python
-client.beta.messages.create(
-    model="<claude-model-id>", max_tokens=1024,
-    betas=["mcp-client-2025-11-20"],
-    mcp_servers=[{"type": "url", "url": "https://<your-tunnel>/mcp", "name": "tesla-key"}],
-    tools=[{"type": "mcp_toolset", "mcp_server_name": "tesla-key"}],
-    messages=[{"role": "user", "content": "Is my car charging?"}],
-)
-```
-
-For LAN-local automation prefer a local client (Claude Code, the Python SDK above, or an
-agent process on the same network).
-
----
+A client must accept JSON-only responses and plain HTTP on your trusted LAN. There is no SSE stream
+or session ID. Use at least a 30 s command timeout. For stdio-only clients, choose a bridge that
+supports this transport and evaluate its local executable/network trust separately. Client-specific
+configuration belongs to that client's documentation; do not expose the board publicly to reach it.
 
 ## Operational notes & limits
 
@@ -364,7 +276,7 @@ agent process on the same network).
 |---------|-------------|
 | Client reports "connection refused / timeout" | Wrong IP, or mDNS not resolving — use the device IP from your router; device and client must be on the same LAN. |
 | Client complains about SSE / `405` on GET | Expected — this server is stateless JSON-only. Configure the client for plain Streamable HTTP (`--transport http-only` for `mcp-remote`). |
-| `tools/call` returns `isError: true`, `"vehicle not reachable"` | Car out of BLE range or link cold — call `wake_up` first, retry after a few seconds. |
+| `tools/call` returns `isError: true`, `"vehicle not reachable"` | Car out of BLE range or link cold — check range and pairing; an intentional wake may be needed before retrying. |
 | `tools/call` returns the car's own refusal text (e.g. `complete`) | Not an error in the chain — the car declined (battery already at limit, etc.). |
 | `get_vehicle_state` has only `vin`/`paired`/`link` | Fresh boot with the car asleep: caches are empty until the first contact. |
 | Commands fail although the car is nearby | Check `paired` in `get_vehicle_state` / the web UI — a lost pairing (key deleted on the car) needs a re-pair. |

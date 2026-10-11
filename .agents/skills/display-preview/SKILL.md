@@ -3,11 +3,8 @@ name: display-preview
 description: Render the on-device ST7735 display simulator to PNG state montages so a human can eyeball "does it look right?" after touching the presenter/renderer. Use when asked to "preview the display", "render the display states", "show the display", generate the display montage/simulator images, check the on-device panel layout, or after editing main/logic/display_model.hpp or main/display.cpp (landscape 160x80 / portrait 80x160, SoC gradient, RSSI bars, SSID scroll, WiFi/BLE search + Pairing animation). Read-only, python3 stdlib only — no board, no ESP-IDF, no Docker. This is the VISUAL check that complements the automated presenter↔sim parity gate.
 ---
 
-> **Canonical runner-neutral skill.** Read [`AGENTS.md`](../../../AGENTS.md) before acting.
-> Project skills are canonical under [`.agents/skills/`](../), and lifecycle/PR policy is
-> enforced by the runner-neutral core under [`tools/agent-hooks/`](../../../tools/agent-hooks/).
-> This skill does not grant permissions beyond the user's explicit request.
-> Invoke this workflow canonically as `$display-preview`.
+Invoke `$display-preview`. Read [AGENTS.md](../../../AGENTS.md) first; this workflow grants no
+additional authorization. Canonical skills live under `.agents/skills/`; hooks enforce local policy.
 
 # display-preview — render the display simulator for a human eyeball pass
 

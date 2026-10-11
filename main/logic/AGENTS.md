@@ -1,16 +1,10 @@
-# Pure Logic & Host Testability Contract (`main/logic/`)
+# Pure logic (`main/logic/`)
 
-This scoped policy governs hardware-independent pure-logic code in `main/logic/`.
-It complements the canonical repository policy in [`../../AGENTS.md`](../../AGENTS.md).
+Apply [repository policy](../../AGENTS.md).
 
-## 1. Hardware & IDF Independence
-
-- All headers and translation units in `main/logic/` must be completely free of ESP-IDF dependencies and hardware-specific abstractions.
-- Use only standard C++17 library components.
-- Do NOT include any ESP-IDF headers (`esp_...`), FreeRTOS headers (`freertos/...`), or NVS headers (`nvs.h`, `nvs_flash.h`).
-
-## 2. Test-First Mandatory Coverage
-
-- Every pure-logic algorithm, state transition, conversion, or formatting decision in `main/logic/` must have an explicit host-test owner in `test/logic_test_ownership.json`.
-- Any addition or modification must be accompanied by corresponding unit tests (`CHECK` assertions) in `test/test_logic.cpp`.
-- The local host test suite (`scripts/run-mock-tests.sh`) is the primary development feedback loop. Ensure all host tests pass before committing.
+- Use standard C++17 only; no ESP-IDF, FreeRTOS, NimBLE, NVS or cJSON dependency.
+- Every header names an explicit host-test owner in `test/logic_test_ownership.json`.
+- Add or adjust `CHECK` coverage in `test/test_logic.cpp` for changed decisions and transitions;
+  the firmware must delegate to the tested unit. Mirrored presenters also need parity evidence.
+- Run `scripts/run-mock-tests.sh` before committing; follow the
+  [test guide](../../test/README.md#adding-to-it) for ownership and integration limits.

@@ -169,7 +169,7 @@ printf '\nLive verification needs no separate approval.\n' >> \
 expect_failure "usb recovery no-approval contradiction" "$fixture" "exact reviewed content contract drifted"
 
 fixture="$WORK/project-review-owner"; make_fixture "$fixture"
-perl -0pi -e 's/\[`docs\/README\.md`\]\(\.\.\/\.\.\/\.\.\/docs\/README\.md\) owns hardware, HTTP API, and commands\./`AGENTS.md` owns hardware, HTTP API, and commands./' \
+perl -0pi -e 's/\[`docs\/API\.md`\]\(\.\.\/\.\.\/\.\.\/docs\/API\.md\) owns HTTP API, commands, and MQTT topics\./`AGENTS.md` owns hardware, HTTP API, and commands./' \
   "$fixture/.agents/skills/project-review/SKILL.md"
 expect_failure "project-review owner contract" "$fixture" "documentation-owner contract"
 
@@ -266,7 +266,7 @@ perl -0pi -e 's/\[`docs\/ARCHITECTURE\.md`\]\(\.\.\/\.\.\/\.\.\/docs\/ARCHITECTU
 expect_failure "device-diag owner contract" "$fixture" "documentation-owner contract"
 
 fixture="$WORK/vehicle-audit-owner"; make_fixture "$fixture"
-perl -0pi -e 's/\[`docs\/README\.md`\]\(\.\.\/\.\.\/\.\.\/docs\/README\.md\) owns the HTTP command catalog\./`AGENTS.md` owns the HTTP command catalog./' \
+perl -0pi -e 's/\[`docs\/API\.md`\]\(\.\.\/\.\.\/\.\.\/docs\/API\.md\) owns the HTTP command catalog\./`AGENTS.md` owns the HTTP command catalog./' \
   "$fixture/.agents/skills/vehicle-command-audit/SKILL.md"
 expect_failure "vehicle audit owner contract" "$fixture" "documentation-owner contract"
 

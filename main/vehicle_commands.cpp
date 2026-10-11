@@ -625,7 +625,7 @@ bool VehicleController::set_charging_amps(int amps, int timeout_ms) {
     // readbacks and the retry gap. No sub-step receives a fresh timeout budget.
     const uint32_t deadline = deadline_in_(static_cast<uint32_t>(timeout_ms));
     // Guard against garbage input. Lower bound 0; upper bound 48 A — the maximum any Tesla
-    // onboard charger accepts (docs/README.md documents the same 0–48 range), so a legitimate
+    // onboard charger accepts (docs/API.md documents the same 0–48 range), so a legitimate
     // high-current request (e.g. a 48 A-capable Model 3/Y) is never capped.
     // The car still enforces its own per-model maximum.
     if (amps < 0)  amps = 0;

@@ -4725,7 +4725,7 @@ static void test_http_route() {
     CHECK(!tk::http_route_requires_vehicle_runtime(HttpRoute::Index));
 
     // ── Route conflict matrix during active OTA update ─────────────────────────────
-    // Exact documented behavior from docs/README.md and docs/FEATURES.md:
+    // Exact documented behavior from docs/API.md and docs/FEATURES.md:
     // - Six runtime/config mutation endpoints return 409 Conflict with reason "an OTA update is in progress"
     // - Two identity mutation endpoints (/gen_keys, /set_vin) return 503 via OtaIdentityMutationGuard
     // - All other routes return None (0) and are not rejected by the update conflict guard

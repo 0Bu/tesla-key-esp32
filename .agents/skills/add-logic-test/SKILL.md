@@ -3,11 +3,8 @@ name: add-logic-test
 description: Scaffold a new hardware-free pure-logic unit in main/logic/ and its CHECK cases in test/test_logic.cpp, so a decision/conversion the firmware makes is verified by the host-side mock build (the local "run it and see" loop that CI gates on). Use when extracting testable logic out of vehicle_ctrl/http_server/mqtt_ha/ota, adding a CHECK to the mock suite, or when asked to "add a logic test", "make this testable", "cover this in the mock build", or "add a pure-logic header".
 ---
 
-> **Canonical runner-neutral skill.** Read [`AGENTS.md`](../../../AGENTS.md) before acting.
-> Project skills are canonical under [`.agents/skills/`](../), and lifecycle/PR policy is
-> enforced by the runner-neutral core under [`tools/agent-hooks/`](../../../tools/agent-hooks/).
-> This skill does not grant permissions beyond the user's explicit request.
-> Invoke this workflow canonically as `$add-logic-test`.
+Invoke `$add-logic-test`. Read [AGENTS.md](../../../AGENTS.md) first; this workflow grants no
+additional authorization. Canonical skills live under `.agents/skills/`; hooks enforce local policy.
 
 # add-logic-test — extract pure logic + cover it in the host mock build
 
