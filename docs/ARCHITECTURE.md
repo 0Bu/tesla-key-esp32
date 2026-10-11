@@ -333,15 +333,14 @@ Flash writes and NVS operations operate under strict boundary controls to protec
 
 ## Pinned tesla-ble and native orchestration
 
-The supported chips are exactly what `yoziru/tesla-ble` declares in its `idf_component.yml`
-`targets:`, and the Component Manager **enforces** that list at dependency resolution. That is the
-definition of "supported": no local checkout of a third-party dependency has to be kept in sync, and
-adding a chip it omits (esp32c5, esp32c61) means upstreaming it first
-([ADR-0004](adr/0004-drop-esp32c5-target.md)). The root `CMakeLists.txt` applies every
+The firmware supports exactly esp32, esp32s3, esp32c3 and esp32c6. All are declared by
+`yoziru/tesla-ble` and checked by the Component Manager at dependency resolution. v5.3.0 also
+adds esp32c5 upstream; it does not reinstate this project's retired C5 build, signing-size,
+partition and hardware contracts ([ADR-0004](adr/0004-drop-esp32c5-target.md)). The root `CMakeLists.txt` applies every
 `patches/tesla-ble/NNNN-*.patch` in lexical order through `scripts/apply-tesla-ble-patches.sh`;
 a per-materialisation hash marker makes repeated CMake passes idempotent and lets a later patch
 be added, while a changed or removed applied patch fails closed. All four images use the same
-tesla-ble revision (v5.2.0) and patch series.
+tesla-ble revision (v5.3.0) and patch series.
 
 Since [ADR-0005](adr/0005-tesla-ble-seam.md) the firmware bypasses the monolithic
 `TeslaBLE::Vehicle` and uses `TeslaBLE::Client` directly, with hardware-free orchestration in
@@ -374,7 +373,7 @@ The remaining series is three patches, hash-checked and fail-closed:
 |---|---|
 | `0004-drop-unused-parental-controls-actions` | Drops the five Parental Controls arms v5.1.2 added to the `CarServer_VehicleAction` oneof, plus their nanopb descriptors. A referenced oneof arm keeps its descriptors out of `--gc-sections`, so they cost flash in every image; removal returns `car_server.pb.c` to the v5.1.1 descriptor size. A size patch, not a correctness one: esp32c6 sits closest to the ceiling and images quantize to 64 KiB. |
 | `0005-align-session-counter-replay-with-signer-go` | In `src/peer.cpp`, on a lower vehicle-reported counter keep `max(local, reported)` and still apply epoch/time (as `signer.go` `UpdateSessionInfo`), instead of hard-rejecting or forcing the lower counter, which would break anti-replay monotonicity. Removing that call site lets `--gc-sections` drop the dead `force_update_session`. |
-| `0006-port-crypto-bindings-to-psa` | Moves the crypto bindings from the Mbed TLS 3 API (removed in ESP-IDF 6's Mbed TLS 4) to PSA: P-256 keys as PSA keys, `psa_raw_key_agreement`, `psa_aead_*`, `psa_hash_compute`, `psa_mac_compute`, `psa_generate_random`; `mbedtls_pk` still parses/writes the NVS PEM. Wire bytes, session derivation and key format are unchanged, proven by the V1 vectors in `test/test_tesla_ble_harness.cpp` ([ADR-0002](adr/0002-idf6-mbedtls4-crypto-seam.md)). One behavior changes: the AES-GCM tag of a vehicle response is now *verified* (upstream computed it and never compared), and response metadata carries the counter the response sends, as `Signer.Decrypt` does. A response failing authentication is dropped (ADR-0005 §2). |
+| `0006-port-crypto-bindings-to-psa` | Moves the crypto bindings from the Mbed TLS 3 API (removed in ESP-IDF 6's Mbed TLS 4) to PSA: P-256 keys as PSA keys, `psa_raw_key_agreement`, `psa_aead_*`, `psa_hash_compute`, `psa_mac_compute`, `psa_generate_random`; `mbedtls_pk` still parses/writes the NVS PEM. Wire bytes, session derivation and key format are unchanged, proven by the V1 vectors in `test/test_tesla_ble_harness.cpp` ([ADR-0002](adr/0002-idf6-mbedtls4-crypto-seam.md)). v5.3.0 verifies response tags and uses the response-carried counter upstream; the PSA rebase preserves both, with plaintext wiping on authentication failure and a separate response-AAD helper, as `Signer.Decrypt` requires. A response failing authentication is dropped (ADR-0005 §2). |
 
 ## On-device display and status LED
 

@@ -35,6 +35,7 @@ def validate(root: Path) -> None:
     for path in (
         "test/tesla_protocol_vectors.test.mjs",
         "test/test_runtime_boundary_contract.py",
+        "test/test_codex_setup.py",
         "scripts/check-bench-acceptance.py",
         "scripts/check-dependency-contract.py",
         "scripts/check-host-gate-contract.py",

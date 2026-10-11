@@ -4,6 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
+import { execFileSync } from "node:child_process";
 
 function die(code, message) {
   console.error(`agent-config: ${message}`);
@@ -118,19 +119,19 @@ const reviewedSkillSha256 = new Map([
   ["deploy", "d3247607041b2b573ff4c121221706815a7103430c414c19901ed34d4e2cc10f"],
   ["device-diag", "474e1fb4b794edf48919c017e93a6fcf2f4af9e382cf6d1a3fea1469a0c1ffe9"],
   ["display-preview", "4bff95d0314d50ce29d67beac7ef4f9db1ebcbb2fa609335e560e162f5a1ed46"],
-  ["feature-docs", "0255c6c85753efb851833a20e8da9519c8a61c58d4bb52f9f061cfe609d6e20a"],
+  ["feature-docs", "095b8220ca746585700264649c9d4f69d6d225e2d758d0d0d355cfe475ffe944"],
   ["flash-esp32", "a4611de5f352615f1bf437d992e48e10bfbd8f188eed89ff1cc2a82378cdf78a"],
   ["mock-test", "8cfaaa7d4d7fdbda24375ca743f9954ee39c6db053684000fac1bf1bce00ac0f"],
   ["ota-release-verify", "c79a16cef060db172b27a85f5c92ee0665332304538919c4025d10b881fd74d3"],
   ["pr-hygiene", "e034d42384a8b356e9f94ca1e81a7849a22bdba63763714d8932bd019d1ccb7d"],
-  ["project-review", "eef31ecefa2564c3953347d837e5158a7ce031adae2593c6fdd3bb23b52347f2"],
+  ["project-review", "01c6c0288a41b1db75e8e1fdddd614032b7aba423540af4cf14e4cdf42ce83bf"],
   ["ship", "679046f77e77307aa8fe46f0554a47e9247221fc0963a41bd79d080b57ba5c5d"],
-  ["skill-audit", "17348735c68fc464a7b8420fde46c5da8eaefeda58f30ed5e1d4d3a083e5c00c"],
+  ["skill-audit", "e621c71cfe0263502298018de00b4c0b50f0b762c5d15b1308ffa07577891a21"],
   ["usb-recovery", "ac61681a758160c90e51ac6bd18b2ea644bfa891d47c665a68fc4b1d50f9c998"],
-  ["vehicle-command-audit", "f42094618a3ebcef677b23d5531f13a6a2078f38082257b6c3808c199509d434"],
+  ["vehicle-command-audit", "ebd7dec2a46a8a37c20bf3cb121f01aa54c1c9fc61ac0734d9ec28b8c9d7ef7d"],
 ]);
 const featureDocsScopeTokens = [
-  "main/", "test/", "sdkconfig.defaults*", "partitions.csv", "AGENTS.md", ".agents/",
+  "main/", "test/", "sdkconfig.defaults*", "partitions.csv", "AGENTS.md", ".agents/", ".codex/",
   ".github/PULL_REQUEST_TEMPLATE.md",
   "tools/agent-hooks/", "tools/agent-config/", "docs/index.html", "installer-bootstrap.mjs",
   "serial-port-release.mjs", "web-installer.mjs", "docs/vendor/",
@@ -421,5 +422,10 @@ for (const invariant of safety.invariants) {
   }
 }
 
+try {
+  execFileSync(process.execPath, [repoPath("tools/agent-config/sync-codex.mjs"), "--check"], {
+    env: { ...process.env, AGENT_CONFIG_ROOT: root }, stdio: "inherit",
+  });
+} catch { die(1, "native Codex registration check failed"); }
 console.log(`agent-config: ${canonicalSkills.length} canonical skills, ${actualReviewerTypes.length} reviewers and ${invariantIds.size} instruction invariants clean`);
 console.log(`agent-config: AGENTS.md budget ${agentsSize}/${budget} bytes`);

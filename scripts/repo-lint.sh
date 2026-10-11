@@ -5,6 +5,9 @@ set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$root"
+if ! python3 -c 'import sys; raise SystemExit(sys.version_info < (3, 11))' >/dev/null 2>&1; then
+    exec bash "$root/scripts/with-host-python.sh" bash "$0" "$@"
+fi
 
 for tool in git bash python3 node ruby; do
     command -v "$tool" >/dev/null 2>&1 || {
