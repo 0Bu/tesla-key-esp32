@@ -92,8 +92,10 @@ const readOnlySkills = new Set([
 ]);
 const ownerContracts = new Map([
   ["project-review", [
-    "[`AGENTS.md`](../../../AGENTS.md) owns runner policy, authorization, safety, evidence, build, and review contracts.",
-    "[`docs/README.md`](../../../docs/README.md) owns hardware, HTTP API, and commands.",
+    "[`AGENTS.md`](../../../AGENTS.md) owns runner policy, authorization, safety, evidence, and review contracts.",
+    "[`docs/USER_GUIDE.md`](../../../docs/USER_GUIDE.md) owns hardware and operation.",
+    "[`docs/API.md`](../../../docs/API.md) owns HTTP API, commands, and MQTT topics.",
+    "[`docs/DEVELOPMENT.md`](../../../docs/DEVELOPMENT.md) owns build contracts.",
     "[`docs/ARCHITECTURE.md`](../../../docs/ARCHITECTURE.md) owns telemetry, MQTT, sleep/link state, pairing, and OTA.",
     "[`docs/MCP.md`](../../../docs/MCP.md) owns MCP tools.",
     "[`docs/SECURITY.md`](../../../docs/SECURITY.md) owns NVS, signing, and exposure.",
@@ -102,7 +104,7 @@ const ownerContracts = new Map([
     "[`docs/ARCHITECTURE.md`](../../../docs/ARCHITECTURE.md) owns pairing lifecycle and invalidation.",
   ]],
   ["vehicle-command-audit", [
-    "[`docs/README.md`](../../../docs/README.md) owns the HTTP command catalog.",
+    "[`docs/API.md`](../../../docs/API.md) owns the HTTP command catalog.",
     "[`docs/ARCHITECTURE.md`](../../../docs/ARCHITECTURE.md) owns link-state and pairing semantics.",
     "[`docs/MCP.md`](../../../docs/MCP.md) owns MCP tools.",
     "`AGENTS.md` owns only runner policy and safety boundaries.",
@@ -114,21 +116,21 @@ const usbNoApprovalNeeded = /(?:live verification|HTTP requests?|(?:GET|POST|HTT
 const usbOtaNotStateChanging = /(?:GET|POST) \/ota\/check[^.!?]*(?:is not|isn't|not) state-changing/i;
 const usbAbsentApprovalProceeds = /(?:(?:approval|authorization)[^.!?]*(?:absent|missing|not obtained)|without (?:separate )?(?:approval|authorization))[^.!?]*(?:continue|proceed|run|contact|send|request)/i;
 const reviewedSkillSha256 = new Map([
-  ["add-logic-test", "5bc6af893a1f95a5b4b1d2302da43c1e5e8de11d5e65e1c62d342e0dbfe6a327"],
-  ["ci-heal", "05562364b790f359aaf42a080ab6db2b71afcaa37eedb3dab829d7b15168b123"],
-  ["deploy", "d3247607041b2b573ff4c121221706815a7103430c414c19901ed34d4e2cc10f"],
-  ["device-diag", "474e1fb4b794edf48919c017e93a6fcf2f4af9e382cf6d1a3fea1469a0c1ffe9"],
-  ["display-preview", "4bff95d0314d50ce29d67beac7ef4f9db1ebcbb2fa609335e560e162f5a1ed46"],
-  ["feature-docs", "095b8220ca746585700264649c9d4f69d6d225e2d758d0d0d355cfe475ffe944"],
-  ["flash-esp32", "a4611de5f352615f1bf437d992e48e10bfbd8f188eed89ff1cc2a82378cdf78a"],
-  ["mock-test", "8cfaaa7d4d7fdbda24375ca743f9954ee39c6db053684000fac1bf1bce00ac0f"],
-  ["ota-release-verify", "c79a16cef060db172b27a85f5c92ee0665332304538919c4025d10b881fd74d3"],
-  ["pr-hygiene", "e034d42384a8b356e9f94ca1e81a7849a22bdba63763714d8932bd019d1ccb7d"],
-  ["project-review", "01c6c0288a41b1db75e8e1fdddd614032b7aba423540af4cf14e4cdf42ce83bf"],
-  ["ship", "679046f77e77307aa8fe46f0554a47e9247221fc0963a41bd79d080b57ba5c5d"],
-  ["skill-audit", "e621c71cfe0263502298018de00b4c0b50f0b762c5d15b1308ffa07577891a21"],
-  ["usb-recovery", "ac61681a758160c90e51ac6bd18b2ea644bfa891d47c665a68fc4b1d50f9c998"],
-  ["vehicle-command-audit", "ebd7dec2a46a8a37c20bf3cb121f01aa54c1c9fc61ac0734d9ec28b8c9d7ef7d"],
+  ["add-logic-test", "565e7fd944695e8f90035a8d0033267af49b50b9e71c26253d2d3af09da6df39"],
+  ["ci-heal", "139029e34163650ee31ee8dfe7a299a5e16f3b630fba090e136d81d89d6fd2fa"],
+  ["deploy", "0660b9a7f88c7d0e58fedfc10ce9e22cfdaec77c6fa08eda3828122b38686703"],
+  ["device-diag", "7d9d6eb7907195fc61b56a3325e79a03844fd794b64fa7d4a50a81a7d79af170"],
+  ["display-preview", "e565dd7bb96f08c69d3ed6ed58c51164e3493f2e246b8a954a89eff39d05d0a4"],
+  ["feature-docs", "17a486258723b88a5d1257284a33e295529bd52331d3b066335e832b666f1884"],
+  ["flash-esp32", "09709dd8b6c8609c22c8a4094ce4e02c54965309b27fe2d4ecab80f5d10de27b"],
+  ["mock-test", "a440930b6ade485b1ca206a5cca56798deaa89a6606cc9eaee306b7f93042d9f"],
+  ["ota-release-verify", "be87cac35d352d395bb8af0e22e4b5526c9414c02c6d11fd409192dc808d5e13"],
+  ["pr-hygiene", "8491da669686acc5e00741e5e1fcfec6d2caf29abb8ebff0479ca973f20e87f1"],
+  ["project-review", "1800d0e4bdb039c52580852180f9c3da50089fcd74e63065df75c39884b6042f"],
+  ["ship", "9f438ea44d8e3cdb2366d76f6763945c0a4aa9e2114842e459528e8bc0cdaf7d"],
+  ["skill-audit", "91e48c09c9fb73ff2231f8a060edc212f37dc708e79ac5c72222e94dc6aab1da"],
+  ["usb-recovery", "4b1204f124f3408f0e1ff7152ba15c33a1e762791c50923ba27e56ddf9b07135"],
+  ["vehicle-command-audit", "5a1535d689eab95c3e2f3fa7d12cd72a68695142139b1b6438a10eb7f4129fe9"],
 ]);
 const featureDocsScopeTokens = [
   "main/", "test/", "sdkconfig.defaults*", "partitions.csv", "AGENTS.md", ".agents/", ".codex/",

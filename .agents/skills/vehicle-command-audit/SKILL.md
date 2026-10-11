@@ -3,11 +3,8 @@ name: vehicle-command-audit
 description: Read-only three-way conformance audit of tesla-key-esp32 against teslamotors/vehicle-command and the capabilities of the pinned yoziru/tesla-ble. Report upstream/local/feasibility findings; do not edit code/docs/dependencies, publish, or contact a vehicle unless the user separately authorizes implementation.
 ---
 
-> **Canonical runner-neutral skill.** Read [`AGENTS.md`](../../../AGENTS.md) before acting.
-> Project skills are canonical under [`.agents/skills/`](../), and lifecycle/PR policy is
-> enforced by the runner-neutral core under [`tools/agent-hooks/`](../../../tools/agent-hooks/).
-> This skill does not grant permissions beyond the user's explicit request.
-> Invoke this workflow canonically as `$vehicle-command-audit`.
+Invoke `$vehicle-command-audit`. Read [AGENTS.md](../../../AGENTS.md) first; this workflow grants no
+additional authorization. Canonical skills live under `.agents/skills/`; hooks enforce local policy.
 
 # vehicle-command-audit — upstream conformance audit against teslamotors/vehicle-command
 
@@ -52,23 +49,16 @@ Decision table:
 key only** (charging + wake). Many commands the firmware *sends* are **rejected by the car** for
 that role. "tesla-ble has the builder" and "upstream lists the command" do **not** mean the
 command *works here*. A doc that implies a role-denied command works is a real finding even when
-the code and the builder are perfectly fine. (Worked example: the `flash_lights`/`honk_horn`/
-`sentry`/`climate` doc drift below.)
+the code and the builder are correct.
 
-**Net effect for this project:** the implementation tracks the protocol *well*. In practice
-almost every real finding lands as **documentation**, and almost every code "fix" you're tempted
-to make is blocked by gate 3 (tesla-ble can't) or gate "role" (car rejects). Recommend a code change only when all three gates clear. **Never hand-edit or commit
-`managed_components/`** — propose
-a pin bump or a guard at our own call boundary. For a confirmed defect inside library dispatch
-with no fixed upstream release, propose a minimal repository patch under `patches/tesla-ble/`,
-to be implemented separately and applied deterministically to the materialised managed-component
-tree, then explicitly rebased on pin bumps.
+Recommend code changes only after upstream, local feasibility and role checks agree.
+Never hand-edit managed components; propose an authorized pin/patch migration instead.
 
 ## Sources — what to read, and how to fetch it
 
 ### Upstream truth — `teslamotors/vehicle-command`
 Fetch **raw** files (base `https://raw.githubusercontent.com/teslamotors/vehicle-command/main`).
-The high-value paths (verified to exist):
+Verify these paths at the reviewed upstream revision:
 
 | Dimension | Upstream file(s) |
 |---|---|
@@ -84,50 +74,45 @@ Fetch raw at the **pin** (base `https://raw.githubusercontent.com/yoziru/tesla-b
 `<pin>` from `idf_component.yml`). Layout at v5.3.0:
 `include/{vehicle.h, client.h, command_error.h, message_builders.h, peer.h, vin_utils.h, errors.h, …}`
 and `src/{vehicle.cpp, client.cpp, peer.cpp, message_builders.cpp, message_processor.cpp, crypto_context.cpp, vin_utils.cpp, errors.cpp, …}`.
-- **Does a command builder exist?** → `src/message_builders.cpp` (e.g. `scheduledChargingAction` IS
-  registered; `scheduledDepartureAction` is **not** — that absence is *why* scheduled departure isn't exposed).
+- **Does a command builder exist?** → `src/message_builders.cpp`. v5.3.0 registers both
+  `scheduledChargingAction` and `scheduledDepartureAction`; the firmware deliberately does not
+  expose scheduled departure. Builder availability alone is not implementation, role or hardware acceptance.
 - **Enum / API values** (roles, form factors) → `include/client.h`; firmware-level `SleepState`, `WakePolicy` → `main/logic/command_runner.hpp`.
 - **How a fault becomes a string** the firmware matches → `include/command_error.h`, `main/logic/command_runner.hpp`, `main/vehicle_telemetry.cpp`.
 - **VIN→BLE-name / matching** → `include/vin_utils.h`, `src/vin_utils.cpp` (the firmware delegates here; it does **not** build the name itself).
 
-### Local — the firmware + its four docs
-Code: `main/command_exec.cpp`, `main/ble_client.{cpp,hpp}`, `main/vehicle_ctrl.{cpp,hpp}` (+ `vehicle_commands.cpp`,
+### Local — firmware and owning documents
+Code: `main/ble_client.{cpp,hpp}`, `main/vehicle_ctrl.{cpp,hpp}` (+ `vehicle_commands.cpp`,
 `vehicle_telemetry.cpp`, `vehicle_pairing.cpp`), `main/http_server.cpp` (+ `http_api.cpp`,
-`http_status.cpp`, `http_ota.cpp`, `http_config.cpp`), `main/mqtt_ha.cpp`,
+`http_status.cpp`, `http_ota.cpp`, `http_config.cpp`), `main/command_exec.cpp`, `main/mqtt_ha.cpp`,
 `main/ota_update.cpp`, `main/Kconfig.projbuild`, `partitions.csv`.
 Docs to hold accountable: [`README.md`](../../../README.md) and
 [`docs/SECURITY.md`](../../../docs/SECURITY.md).
-[`docs/README.md`](../../../docs/README.md) owns the HTTP command catalog.
+[`docs/API.md`](../../../docs/API.md) owns the HTTP command catalog.
 [`docs/ARCHITECTURE.md`](../../../docs/ARCHITECTURE.md) owns link-state and pairing semantics.
 [`docs/MCP.md`](../../../docs/MCP.md) owns MCP tools.
 `AGENTS.md` owns only runner policy and safety boundaries.
 
-### Fetch gotchas (these silently waste a pass if you don't know them)
-- Use **`raw.githubusercontent.com`**, not `github.com/.../blob/...` — the HTML blob view **403s** via a webpage fetcher.
-- **GitHub `issues`/`pulls` and `developer.tesla.com` also 403** via a webpage fetcher → use **web search**, or `gh api` for GitHub.
-- Tesla **role scope is prose, not protobuf** — `keys.proto` lists the Role enum with **no
-  permission comments**. The authority for "what may a Charging Manager run" is
-  `pkg/protocol/protocol.md` ("a Charging Manager can read vehicle data and authorize commands
-  that affect vehicle charging") plus Fleet-API docs — search for those.
+### Source retrieval
 
-## The dimensions to compare (checklist + current baseline)
+Record the upstream commit and local dependency pin; retrieve source at those revisions.
+Use raw source or an authorized GitHub read when an HTML/private endpoint fails. A 403/404 alone
+is not evidence that a protocol feature is absent. Role scope is in protocol prose, not enum names.
 
-Walk all of these. The **baseline verdict** is what a prior full audit established — your job is to
-re-confirm it against the *current* tree and catch anything that drifted since. A baseline of
-"matches" is not a licence to skip; it's the assertion to re-test.
+## Dimensions to compare
+
+Verify every dimension against the reviewed revisions; previous audit results are not evidence.
 
 1. **BLE transport** — service `00000211…`, write `…0212`, notify `…0213`; VIN→name `S%02xC` over
    the **first 8 bytes** of `sha1(VIN)` (⇒ `S` + 16 hex + `C`); 2-byte big-endian length prefix;
    block `min(txMtu,maxBLEMessageSize)-3`; `ErrMaxConnectionsExceeded` keyed off the advert
-   **`Connectable`** flag (not the connect error). *Baseline: matches, except four documented
-   ATT-transport departures (ADR-0005 §2): TX chunks are Write Commands instead of "write with
-   response", RX uses notifications instead of indications, the firmware neither starts nor
-   accepts an MTU exchange, and it answers no inbound ATT request (no GATT server,
-   `CONFIG_BT_NIMBLE_ROLE_PERIPHERAL=n`).* (The ATT MTU is therefore 23 and every write uses the
-   20-byte payload; the `min(MTU-3, 244)` path in `ble_chunk.hpp` is unreachable in this build.)
+   **`Connectable`** flag (not the connect error). (Writes use 20-byte
+   chunks: this build starts/accepts no MTU exchange, so MTU is 23.
+   Check ATT Write Command versus reference Write Request, CCCD 0x0001 notifications versus Linux
+   reference indications, no ATT server and disabled SMP against every ADR-0005 departure. The
+   `min(MTU-3, 244)` path is compiled but unreachable; do not call it negotiated field behavior.)
 2. **Roles / Charging-Manager scope** — charging commands + wake only; everything else
-   (lights/horn/sentry/**climate**/locks) is role-rejected. *Baseline: code and current docs match;
-   the worked table retains the former drift only as a labelled historical example.*
+   (lights/horn/sentry/**climate**/locks) is role-rejected.
 3. **Session / signing / clock** — `expires_at` = **vehicle's `SessionInfo.ClockTime` + a
    monotonic `steady_clock` delta** (`src/peer.cpp` `generate_expires_at`), per-domain counter +
    16-byte epoch, separate VCSEC/Infotainment sessions. **The device wall clock does NOT enter
@@ -135,41 +120,36 @@ re-confirm it against the *current* tree and catch anything that drifted since. 
    replayable. It **does** gate persisted-session loading: `load_nvs_sessions_()` (inheriting
    upstream `vehicle.cpp`'s `system_clock - SessionInfo.ClockTime` check, see ADR-0005 §2). Because
    `SessionInfo.ClockTime` counts seconds in vehicle epoch rather than Unix epoch, restoring the
-   clock to Unix time ensures stored sessions are rejected (> 3600 s) rather than acting as a
-   real-time 1-hour reuse window; restoring NVS clock before controller init prevents an uninitialized
-   1970 clock (negative age) from keeping stale sessions. *Baseline: code and current docs match
-   this split at v5.3.0.*
+   clock successfully to Unix time rejects stored sessions (> 3600 s), rather than implementing a
+   real-time 1-hour reuse window. Restore is attempted before controller init; absent/unreadable
+   `last_time` or a failed clock set can leave the inherited negative-age acceptance path. Do not
+   claim guaranteed expiry from this restore.
 4. **Pairing / whitelist** — add-key carries role + `KEY_FORM_FACTOR_CLOUD_KEY`, no key name (car
    shows "Unknown key"), requires an **NFC card on the console reader**, verify via a SessionInfo
-   probe. *Baseline: matches.* (Note: the **"3"** is the simultaneous-BLE-**connection** limit; a
+   probe. (Note: the **"3"** is the simultaneous-BLE-**connection** limit; a
    car stores up to **19 keys** — don't call it a 3-key cap.)
 5. **Command params / ranges** — amps **0–48** (faithful to real chargers; upstream has no cap),
    charge-limit **50–100**, scheduled-charging `start_minutes` **0–1439** after local midnight.
    REST and MCP reject supplied fractional/out-of-range values rather than silently executing a
-   different value. *Baseline: code and current docs match.*
+   different value.
 6. **Wake / sleep** — wake is a **VCSEC-domain** `RKE_ACTION_WAKE_VEHICLE` (not infotainment);
    `vehicleSleepStatus`/`vehicleLockState`/`userPresence` string values match the upstream enums;
    the "trust debounced VCSEC ASLEEP, never VCSEC AWAKE" asymmetry is a correct reading.
-   *Baseline: matches; one stray "wake … infotainment-only" comment is imprecise.*
 7. **Error / fault taxonomy + revocation heuristic** — `OperationStatus`, `MessageFault`
    (`UNKNOWN_KEY_ID=3`, `INACTIVE_KEY=4`, `INSUFFICIENT_PRIVILEGES=7`, `INVALID_KEY_HANDLE=27`),
    `SESSION_INFO_STATUS_KEY_NOT_ON_WHITELIST`. Confirm the firmware's three detectors stay sound:
    the `set_message_callback` fault match (the path that actually fires on a **cached** session),
    the `"whitelist"` substring (session-info handshake only), and the two-strike `"authentication
    failed"` **gated to the health probe** so a role-denied user command can't destroy a pairing.
-   *Baseline: sound; `docs/ARCHITECTURE.md` describes all three detectors.*
 8. **Library-version claims** — every command the firmware calls resolves to a real builder at the
-   pin; doc claims about what's *not* exposed (scheduled departure) match the pin's
-   `message_builders.cpp`. *Baseline: matches at v5.3.0.*
+   pin; distinguish the firmware registry's no-exposure policy (scheduled departure) from builder
+   availability in `message_builders.cpp` and from role/hardware acceptance.
 9. **evcc / TeslaBleHttpProxy HTTP shape** — `/api/.../command/{name}` names, `vehicle_data` =
    `.response.response.charge_state.*` with **`charge_amps`** (not `charging_amps`), doubled
    `response`, **miles/mph on the `/api` path** (metric is MQTT-only), `charging_state` strings
-   `Charging/Disconnected/Complete/Stopped/NoPower/Starting`. *Baseline: full match (re-verified 2026-10-08).*
-   That audit re-verified `charge_energy_added` (kWh), `climate_state.is_preconditioning` (absent ->
-   false, like TeslaBleHttpProxy `GetIsPreconditioning()`) and `drive_state.odometer` (miles)
-   against evcc master and TeslaBleHttpProxy main. Known, documented HTTP departures: 400 (not 503)
-   for unknown/empty/duplicate selectors, `,` accepted besides `;`, 503 for a selected `drive_state`
-   without odometer, and the 300 s in-window climate bound.
+   `Charging/Disconnected/Complete/Stopped/NoPower/Starting`. Verify selectors, cache freshness,
+   energy/preconditioning/odometer presence and intentional proxy departures in
+   [API](../../../docs/API.md#vehicle-data) against all emitters and consumers.
 9a. **Response-counter anti-replay and patch series** — response-counter anti-replay and Request-UUID routing
     are enforced natively by `main/logic/ble_dispatcher.hpp` and `Peer::validate_response_counter()`, superseding
     patch 0001 and ADR-0003. Verify the current 3 repository patches under `patches/tesla-ble/` (0004 parental
@@ -177,47 +157,29 @@ re-confirm it against the *current* tree and catch anything that drifted since. 
     through root CMake to the managed dependency tree, and are rebased explicitly on every pin bump; 0006 must
     keep the V1 vectors in `test/test_tesla_ble_harness.cpp` byte-identical and keep verifying response tags
     against response metadata bound to the counter the response carries (`Signer.Decrypt`), never the
-    request counter: every `Peer::decrypt_response` call site passes `AES_GCM_Response_data.counter`.
+    request counter (v5.3.0 now verifies/passes it upstream; PSA preserves that behavior): every `Peer::decrypt_response` call site passes `AES_GCM_Response_data.counter`.
+    Encrypted VCSEC additionally requires an initialized peer and non-empty domain request hash;
+    missing context, failed tag or repeated response counter (including zero) drops before decoding,
+    sleep/status updates and callbacks. Plaintext passive status is a separate path. Fresh sessions
+    need a shared secret, request hashes are domain-isolated, and native retries re-sign rather than
+    importing upstream Vehicle's identical-payload retry policy.
 9b. **ADRs and cryptographic / protocol boundary claims** — when an ADR or architecture doc makes
     claims about protocol vulnerabilities, replays, or countermeasures:
     - Cryptographically verify the claims against `teslamotors/vehicle-command` Go reference sources
       (`internal/authentication/signer.go`, `internal/dispatcher/dispatcher.go`, `pkg/protocol/protocol.md`).
-    - Distinguish AEAD Associated Data binding (which cryptographically binds the request SHA-1 to
+    - Distinguish AEAD Associated Data binding (which cryptographically binds the request hash to
       authenticated responses, preventing cross-command injection between different requests) from
       link-layer duplicate frame delivery (caused by RX buffer recovery re-emitting the same response)
       and unauthenticated plaintext responses (where `response_counter = 0` requires Request-UUID matching).
     - Do not assert application-layer replay vulnerability where AEAD authentication already guarantees
       message-to-request integrity.
 10. **Docs internal coherence vs code** — `/status.link` and MQTT `sleep_status` enum value sets,
-    endpoint/CONFIG/partition/version drift across the four docs. *Baseline: current docs and code
-    are coherent; the worked examples retain former omissions as explicitly historical findings.*
-
-## Worked findings from the last full audit (institutional memory)
-
-These were previously confirmed and are institutional examples. Re-verify each against current
-sources; if still present, report it rather than editing. Nearly all are documentation findings.
-
-> **Status (re-verified 2026-08-26): findings 1–9 are FIXED** in the current tree — the
-> docs/comments now state the code facts each row cites, and supplied command integers are rejected
-> when fractional or outside their advertised range. The table stays as institutional memory for
-> the *shape* of findings; re-verify a row against the tree before acting on it.
-
-| # | Cat | Where (doc) | Drift | Fix |
-|---|---|---|---|---|
-| 1 | doc (crux, historical) | `docs/README.md` "Commands" | Formerly claimed only `door_lock/unlock` were role-rejected; current docs name the complete role-refused set. | Re-verify the current command list; do not report this historical example as current drift. |
-| 2 | doc (historical) | `docs/README.md` `/status.link` and MQTT `sleep_status`; `docs/ARCHITECTURE.md` "Sleep / link-state" | Formerly omitted **`idle`/`IDLE`**; current docs list the complete code-emitted values. | Re-verify the enum sets; do not report this historical example as current drift. |
-| 3 | doc (historical) | `docs/README.md` "Commands" | Formerly said `set_charging_amps` was 0–32; current docs and code say **0–48**. | Re-verify the current range; do not report this historical example as current drift. |
-| 4 | doc (historical) | `README.md` "Step 4 — Pair with the car" | Formerly quoted "Add new key"; current text matches the firmware's **"Add key"** prompt. | Re-verify the prompt; do not report this historical example as current drift. |
-| 5 | doc (historical) | `README.md` "Pair with the car"; `docs/README.md` "Pairing" | Formerly called ~3 simultaneous BLE **connections** a three-key cap; current docs distinguish it from the 19 stored keys. | Re-verify the distinction; do not report this historical example as current drift. |
-| 6 | doc/comment (historical) | `Kconfig.projbuild` OTA help | Formerly implied `tesla-key-esp32-<target>.bin`; current help lists the real `""`/`-s3`/`-c3`/`-c6` suffix map. | Re-verify the suffix map; do not report this historical example as current drift. |
-| 7 | doc/comment | old `vehicle_ctrl.hpp` / `main.cpp` / `http_server.cpp` comments | Historical comments said the device made no NTP call and conflated command expiry with wall time. Current contract: SNTP is primary, `/set_time` is fallback; wall time gates TLS/human timestamps **and persisted-session load age**, while command `expires_at` uses vehicle clock + monotonic delta. | Keep that distinction; do not remove the early NVS clock restore as "signing does not use RTC". |
-| 8 | doc (historical) | `docs/ARCHITECTURE.md` "Pairing lifecycle / invalidation" | Formerly described only the `"whitelist"` substring; current docs list `UNKNOWN_KEY_ID` first and all three detectors. | Re-verify all detectors; do not report this historical example as current drift. |
-| 9 | logical (historical) | REST/MCP argument parsing + `main/vehicle_commands.cpp` `set_charge_limit` | Formerly clamped `<50→50` and could report success for a value the caller did not request; current parsers reject fractional/out-of-range input and the controller rejects an invalid direct call. | Re-verify strict rejection; do not report this historical example as current drift. |
+    endpoint/CONFIG/partition/version drift across owning documents.
 
 ## How to run
 
 1. **Confirm the pin** (`idf_component.yml`) — every feasibility check is against *that* tesla-ble
-   version, not "latest". If the pin changed since the table above, re-verify dimension 8 first.
+   version, not "latest". If the pin differs from the listed layout, re-verify dimension 8 first.
 2. **For each dimension:** fetch the upstream truth (raw URL), fetch the tesla-ble capability at the
    pin, read the local code + the doc that describes it. Apply the **three-way gate** + the
    **role gate**. Classify each divergence: `technical` (mis-implements the protocol) /
@@ -238,7 +200,7 @@ sources; if still present, report it rather than editing. Nearly all are documen
 # vehicle-command audit — tesla-key-esp32 (<date>)  ·  tesla-ble pin: <pin>
 
 ## Summary
-<overall conformance; counts by category/severity; the headline (usually: impl faithful, doc drift).>
+<reviewed SHAs/pin, scope, conformance and findings by severity; no presumed favorable verdict.>
 
 ## Findings   (priority order)
 ### [CATEGORY/SEV] <title>
@@ -258,7 +220,7 @@ sources; if still present, report it rather than editing. Nearly all are documen
 1. <must-fix> … 2. <should-fix> … 3. <nice-to-have> …
 
 ## PR gate record
-When clean, stamp the pull request body with:
+When clean, provide this record for a separately authorized PR-body update:
 - [x] `$vehicle-command-audit` clean — merge gate @ <full-40-hex-sha>
 ```
 
