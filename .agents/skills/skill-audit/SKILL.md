@@ -47,7 +47,7 @@ Work in this order—it is a **single read-only pass**: pin baseline → enumera
    local drift — never audit an unpinned or stale baseline. State reviewed SHA in report.
 1. **Enumerate—discover, do not hardcode.** Read every `.agents/skills/*/SKILL.md` and every
    `.agents/subagents.json` reviewer. Inventory `AGENTS.md`, `.agents/hooks.json`, `tools/agent-hooks/`,
-   `scripts/`, `main/`, `partitions.csv`, `main/idf_component.yml`, and `version.txt`. Host/cluster
+   `.codex/` (native adapters; run `node tools/agent-config/sync-codex.mjs --check`), `scripts/`, `main/`, `partitions.csv`, `main/idf_component.yml`, and `version.txt`. Host/cluster
    operational skills such as global `$tesla-key-e2e-evcc` are outside this project audit.
 2. **Extract concrete claims.** List numbers, paths, counts, flags, target sets, script names,
    authorization boundaries, and described hook behavior.
@@ -119,7 +119,7 @@ the authority for the per-sibling drift check; `$project-review` defers the mech
   red and green flows.
 - **`$vehicle-command-audit`** — compares the firmware against upstream `teslamotors/vehicle-command`,
   gated by what `yoziru/tesla-ble` can do. Verify the tesla-ble **pin** in its source map
-  (`v5.2.0`) still matches `main/idf_component.yml`, every repository-owned patch under
+  (`v5.3.0`) still matches `main/idf_component.yml`, every repository-owned patch under
   `patches/tesla-ble/` is applied lexically/idempotently/fail-closed, and the complete patch series
   applies through root CMake to the one materialised managed-component tree; its upstream paths resolve
   (e.g. `pkg/vehicle/charge.go`), and its "worked findings" don't assert drift already fixed.
@@ -147,8 +147,8 @@ the authority for the per-sibling drift check; `$project-review` defers the mech
   `$pr-hygiene` — and above
   all its **relevance filter**: the paths that arm it must still match the hook's own regex, currently
   `main/` / `test/` / `sdkconfig.defaults*` / `partitions.csv` /
-  `AGENTS.md` / `.agents/` / `.github/PULL_REQUEST_TEMPLATE.md` /
-  `tools/agent-hooks/` / `tools/agent-config/` /
+  `AGENTS.md` / `.agents/` / `.codex/` / `.github/PULL_REQUEST_TEMPLATE.md` /
+  `tools/agent-hooks/` / `tools/agent-config/` / `scripts/with-host-python.sh` /
   shipped Pages runtime (`docs/index.html`, `installer-bootstrap.mjs`, `serial-port-release.mjs`,
   `web-installer.mjs`, `docs/vendor/`) /
   `.github/workflows/{build,signed-pr-preview,pr-preview-cleanup,pr-policy,bench-acceptance}.yml` /
@@ -219,7 +219,7 @@ owns and must stay in sync with it:
 - **`heap_safety_reviewer`** — the allocation/throw lens. Its heap rules/numbers must match
   `$project-review`'s *Memory / heap* invariant and `main.cpp`'s heap-attribution log.
 - **`agent_config_reviewer`** — audits runner-neutral configuration, not firmware logic. Confirm
-  its read-only boundary and inventory of `AGENTS.md`, `.agents/`, and
+  its read-only boundary and inventory of `AGENTS.md`, `.agents/`, `.codex/`, and
   `tools/agent-hooks/`.
 - **`multi_target_build_reviewer`** — the per-target build/config divergence lens. Verify its
   facts against the build wiring: the target set (esp32/s3/c3/c6), per-target bootloader

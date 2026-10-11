@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Host-side integration harness test against the real yoziru/tesla-ble v5.2.0 library (with the
+# Host-side integration harness test against the real yoziru/tesla-ble v5.3.0 library (with the
 # repository patch series, including the PSA port), Nanopb, and the exact Espressif Mbed TLS 4.1 /
 # TF-PSA-Crypto commit that the pinned ESP-IDF v6.1 builds into the firmware.
 #
@@ -185,7 +185,7 @@ for f in "$TB_DIR"/src/*.cpp; do
     if [ -f "$f" ] && [ "$(basename "$f")" != "vehicle.cpp" ]; then
         obj="$BUILD_DIR/obj/tb/$(basename "$f" .cpp).o"
         if [ ! -f "$obj" ] || [ "$f" -nt "$obj" ]; then
-            "$CXX" -std=c++17 -O2 -w -c "$f" $INC -o "$obj"
+            "$CXX" -std=c++20 -O2 -w -c "$f" $INC -o "$obj"
         fi
     fi
 done
@@ -194,7 +194,7 @@ ar rcs "$BUILD_DIR/libtb.a" "$BUILD_DIR"/obj/tb/*.o "$BUILD_DIR"/obj/nanopb/*.o
 
 echo "[harness] Compiling test_tesla_ble_harness..."
 # tests/test_constants.h carries the official vehicle-command protocol test keys (never production).
-"$CXX" -std=c++17 -O2 -Wall -Wextra \
+"$CXX" -std=c++20 -O2 -Wall -Wextra \
     "$ROOT_DIR/test/test_tesla_ble_harness.cpp" \
     $INC -I "$TB_DIR/tests" "$BUILD_DIR/libtb.a" "$MBEDTLS_LIB" \
     -o "$BUILD_DIR/test_tesla_ble_harness"

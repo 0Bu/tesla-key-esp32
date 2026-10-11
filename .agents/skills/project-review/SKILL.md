@@ -12,11 +12,11 @@ description: "Read-only whole-project coherence review of tesla-key-esp32 for bu
 # project-review — holistic coherence audit of tesla-key-esp32
 
 This project is an **ESP-IDF 6.x C++ firmware** for the **ESP32 family** — one source tree
-builds for esp32 / esp32s3 / esp32c3 / esp32c6 — exactly the four targets yoziru/tesla-ble
-supports, which the ESP-IDF Component Manager enforces at dependency resolution. All four receive
+builds for esp32 / esp32s3 / esp32c3 / esp32c6 — the four firmware targets, all supported by yoziru/tesla-ble and enforced at dependency
+resolution. Upstream also declares esp32c5; that does not add a firmware target. All four receive
 the complete ordered repository patch series in `patches/tesla-ble/` via root CMake: the
-trim of unused Parental Controls actions, signer.go session-counter replay alignment that
-keeps esp32c6 under the app-size policy, and the PSA Crypto port of the crypto bindings that
+trim of unused Parental Controls actions for the flash budget, signer.go session-counter replay
+alignment, and the PSA Crypto port of the crypto bindings that
 Mbed TLS 4 requires (native orchestration in `main/logic/` handles framing,
 dispatch, monotonic session progression, and transactional key regeneration). The firmware acts as a **BLE↔HTTP proxy for a Tesla
 vehicle**, API-compatible with TeslaBleHttpProxy,
@@ -563,7 +563,7 @@ what each must stay true to:
 - **`$deploy`** orchestrates the full delivery lifecycle: local analysis and fix loops, commit, push, PR creation, gate verification and CI monitoring, canonical squash merge, post-merge channel-bound main-run and signed-artifact verification (Dev by default; a stable Release only through a separately authorized manual dispatch), OTA deployment on `tesla-key-esp32.local`, 3-tiered verification, and branch cleanup. Requires explicit user authorization before execution.
 - **`$vehicle-command-audit`** compares the firmware against upstream `teslamotors/vehicle-command`,
   gated by what `yoziru/tesla-ble` (pin in `main/idf_component.yml`) can actually do. Re-verify the
-  tesla-ble **pin** in its source map (`v5.2.0`) still matches `idf_component.yml`, that its upstream
+  tesla-ble **pin** in its source map (`v5.3.0`) still matches `idf_component.yml`, that its upstream
   file paths still resolve (e.g. `pkg/vehicle/charge.go`), and that its "worked findings" table is
   not asserting drift already fixed in the tree. It is the *upstream-conformance* counterpart to this
   skill — keep the two complementary, not overlapping.
@@ -589,8 +589,8 @@ what each must stay true to:
   and language are a separate axis from coherence.
 - **`$feature-docs`** keeps `docs/FEATURES.md` in sync when a platform feature lands or changes.
   Re-verify its conditional merge gate against `tools/agent-hooks/require-pr-gates.sh`, especially
-  that the policy-path set covers `AGENTS.md`, `.agents/`,
-  `.github/PULL_REQUEST_TEMPLATE.md`, `tools/agent-hooks/`, and `tools/agent-config/`, and that the
+  that the policy-path set covers `AGENTS.md`, `.agents/`, `.codex/`,
+  `.github/PULL_REQUEST_TEMPLATE.md`, `tools/agent-hooks/`, `tools/agent-config/`, and `scripts/with-host-python.sh`, and that the
   firmware/release set still covers `main/`, `test/`, `sdkconfig.defaults*`,
   `partitions.csv`, the shipped Pages runtime (`docs/index.html`, `installer-bootstrap.mjs`,
   `serial-port-release.mjs`, `web-installer.mjs`, `docs/vendor/`), and
@@ -677,7 +677,7 @@ lenses this skill delegates to; keep them complementary, not contradictory):
   the two heap maps must not diverge.
 - **`agent_config_reviewer`** audits runner-neutral agent configuration, skills, hooks, and
   subagents—not firmware logic. Confirm its boundary still points firmware-correctness work back
-  at this skill and its inventory matches `AGENTS.md`, `.agents/`, and
+  at this skill and its inventory matches `AGENTS.md`, `.agents/`, `.codex/`, and
   `tools/agent-hooks/`.
 - **`multi_target_build_reviewer`** is the per-target build/config divergence lens (the four
   targets built from one tree). Re-verify its facts against the *Cross-cutting consistency*

@@ -45,7 +45,11 @@ repository/workflow lint, deterministic fuzzing, protocol vectors and a real Chr
 `logic-harness` runs the tesla-ble harness, the sanitizer tripwires, the build and PR-gate contract
 self-tests.
 
-`scripts/test-tesla-ble-harness.sh --require-all` (`logic-harness` job) builds the real `yoziru/tesla-ble` v5.2.0
+The real-library harness compiles its tesla-ble core and caller with C++20 (required by v5.3.0);
+pure firmware decision headers retain their C++17 host contract. It also covers metadata-only
+session rejection, established-session retention and per-domain request-hash isolation.
+
+`scripts/test-tesla-ble-harness.sh --require-all` (`logic-harness` job) builds the real `yoziru/tesla-ble` v5.3.0
 with the repository patch series, Nanopb and the exact Mbed TLS 4 / TF-PSA-Crypto commit of the pinned
 IDF image (`MBEDTLS_REF`) on the host and runs `test/test_tesla_ble_harness.cpp`. It calls the
 production helpers themselves — `tk::build_ble_tx_frame` / `tk::is_well_formed_ble_frame` (the

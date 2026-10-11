@@ -3,6 +3,9 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+if ! python3 -c 'import sys; raise SystemExit(sys.version_info < (3, 11))' >/dev/null 2>&1; then
+  exec bash "$ROOT/scripts/with-host-python.sh" bash "$0" "$@"
+fi
 WORK="$(mktemp -d 2>/dev/null || true)"
 if [ -z "$WORK" ] || [ ! -d "$WORK" ]; then
   mkdir -p "$ROOT/.tmp"
@@ -23,6 +26,7 @@ make_fixture() {
   cp "$ROOT/.agents/hooks.json" "$dest/.agents/hooks.json"
   cp "$ROOT/.agents/subagents.json" "$dest/.agents/subagents.json"
   cp -R "$ROOT/.agents/skills" "$dest/.agents/skills"
+  cp -R "$ROOT/.codex" "$dest/.codex"
   cp "$ROOT/docs/FEATURES.md" "$dest/docs/FEATURES.md"
   cp -R "$ROOT/tools/agent-config" "$dest/tools/agent-config"
   cp -R "$ROOT/tools/agent-hooks" "$dest/tools/agent-hooks"
@@ -31,8 +35,8 @@ make_fixture() {
 
 run_gate() {
   local fixture="$1"
-  AGENT_CONFIG_ROOT="$fixture" node "$ROOT/tools/agent-config/check.mjs" || return
   AGENT_CONFIG_ROOT="$fixture" python3 "$ROOT/tools/agent-config/check_hooks.py" || return
+  AGENT_CONFIG_ROOT="$fixture" node "$ROOT/tools/agent-config/check.mjs" || return
 }
 
 expect_failure() {
@@ -320,11 +324,35 @@ expect_failure "multi-target host-gate dependency" "$fixture" \
   "multi-target reviewer is missing the independent-rebuild/publication DAG contract"
 
 fixture="$WORK/stale-pin"; make_fixture "$fixture"
-perl -0pi -e 's/version: "v5.2.0"/version: "v5.3.0"/' "$fixture/main/idf_component.yml"
+perl -0pi -e 's/version: "v5.3.0"/version: "v5.4.0"/' "$fixture/main/idf_component.yml"
 expect_failure "stale pin assertion" "$fixture" \
   "pin assertion does not match idf_component.yml pin"
 
 echo "== hook configuration =="
+
+for native in .codex/hooks.json .codex/config.toml .codex/agents/heap_safety_reviewer.toml; do
+  fixture="$WORK/native-missing-${native##*/}"; make_fixture "$fixture"
+  rm "$fixture/$native"
+  expect_failure "missing native $native" "$fixture" "native Codex registration missing or drifted"
+done
+fixture="$WORK/native-writable-reviewer"; make_fixture "$fixture"
+perl -0pi -e 's/sandbox_mode = "read-only"/sandbox_mode = "workspace-write"/' \
+  "$fixture/.codex/agents/heap_safety_reviewer.toml"
+expect_failure "native reviewer sandbox drift" "$fixture" "native Codex registration missing or drifted"
+fixture="$WORK/native-mcp-drift"; make_fixture "$fixture"
+perl -0pi -e 's/context7-mcp\@4.0.2/context7-mcp\@4.0.1/' "$fixture/.codex/config.toml"
+expect_failure "native Context7 pin drift" "$fixture" "native Codex registration missing or drifted"
+fixture="$WORK/native-async-guard"; make_fixture "$fixture"
+python3 - "$fixture/.codex/hooks.json" <<'PY'
+import json,pathlib,sys
+p=pathlib.Path(sys.argv[1]);v=json.loads(p.read_text())
+v['hooks']['PreToolUse'][0]['hooks'][0]['async']=True
+p.write_text(json.dumps(v))
+PY
+expect_failure "native async safety guard" "$fixture" "native Codex registration missing or drifted"
+fixture="$WORK/native-extra-reviewer"; make_fixture "$fixture"
+cp "$fixture/.codex/agents/heap_safety_reviewer.toml" "$fixture/.codex/agents/unreviewed.toml"
+expect_failure "unregistered native reviewer" "$fixture" "native Codex reviewer inventory drifted"
 
 fixture="$WORK/antigravity-hook-description"; make_fixture "$fixture"
 python3 - "$fixture/.agents/hooks.json" <<'PY'
@@ -357,4 +385,5 @@ PY
 expect_failure "Antigravity async blocking hook" "$fixture" "must not be async"
 
 echo
+python3 "$ROOT/test/test_codex_setup.py"
 echo "agent-config selftest: all $passes mutation canaries caught"

@@ -43,7 +43,7 @@ task touches them:
   mDNS are commit-pinned Espressif Git components, while cJSON and MQTT, whose Git trees carry
   submodules, are exact registry releases, all pinned by component hash in the same manifest and
   per-target lockfiles.
-- [`main/idf_component.yml`](main/idf_component.yml) pins `yoziru/tesla-ble` **v5.2.0**.
+- [`main/idf_component.yml`](main/idf_component.yml) pins `yoziru/tesla-ble` **v5.3.0**.
   [`patches/tesla-ble/`](patches/tesla-ble/) is an ordered, hash-checked, fail-closed local series:
   unused Parental Controls trim, signer.go session-counter replay alignment and the PSA Crypto
   port of the crypto bindings for Mbed TLS 4 (earlier patches 0001-0003 are retired in favor of
@@ -186,7 +186,14 @@ skills use `$skill-name` and canonical paths under `.agents/skills/`; `/skill-na
 in historical PR records. Hierarchical scoped rules live under [`main/AGENTS.md`](main/AGENTS.md)
 (C++/heap safety), [`main/logic/AGENTS.md`](main/logic/AGENTS.md) (pure-logic isolation), and
 `.agents/rules/` (protocol and firmware budget invariants). Hook policy lives in `tools/agent-hooks/`, with runner hook
-configuration and subagent manifests in `.agents/`.
+configuration and subagent manifests in `.agents/`. Native Codex registrations in `.codex/`
+are generated adapters to those sources, not a second policy; check or regenerate them with
+`node tools/agent-config/sync-codex.mjs --check` / `--write`. Review and trust new or changed hooks
+through Codex `/hooks` before relying on automatic enforcement. In linked Git worktrees, Codex
+loads hook declarations from the primary checkout; worktree registrations alone do not activate
+them. Keep that checkout's reviewed setup in sync or run the gates explicitly.
+Reviewer files declare read-only
+defaults and no escalation; parent runtime permission overrides still need inspection.
 
 ## PR, review and merge discipline
 
@@ -198,7 +205,7 @@ configuration and subagent manifests in `.agents/`.
   maintenance PRs whose diff is strictly limited to `.github/workflows/renovate.yaml` or
   `.github/renovate.json` (`gate_is_renovate_maintenance`) are exempt from manual gate records
   at merge/check. `$feature-docs` is conditionally required when the cataloged feature surface
-  changes, including the PR-policy and bench-acceptance workflows. `$vehicle-command-audit` is
+  changes, including `scripts/with-host-python.sh`, native `.codex/` adapters, and the PR-policy and bench-acceptance workflows. `$vehicle-command-audit` is
   conditionally required when vehicle-command/BLE paths change (`main/command_exec.cpp`,
   `main/vehicle_*`, `main/ble_client.*`,
   `main/logic/{command_registry,command_runner,ble_dispatcher,rx_framing,session_state,command_result,key_rotation,ble_chunk,ble_deferred_event,wake_poll,active_window}.hpp`,
